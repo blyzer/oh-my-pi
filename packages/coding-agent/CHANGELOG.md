@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed one failed `AgentStorage.close()` poisoning every later close in the process: the throw happened before `instances.clear()`, so the registry kept a dead handle and each subsequent close re-closed it. Each instance now closes inside its own `try` and the registry clear runs in a `finally`.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
