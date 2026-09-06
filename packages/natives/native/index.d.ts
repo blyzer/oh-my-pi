@@ -365,6 +365,79 @@ export declare class Shell {
 }
 
 /**
+ * A driven workflow run. Every method is synchronous and cheap: the engine
+ * decides, it never waits on a model.
+ */
+export declare class TaskRun {
+  /**
+   * Rebuild a run that died mid-flight from its own trace, continuing at the
+   * phase that was in flight with the attempts it had already spent.
+   * Requires `traceDir`; refuses a trace from another workflow or a run that
+   * already finished.
+   */
+  static resume(options: TaskRunOptions): TaskRun
+  constructor(options: TaskRunOptions)
+  /**
+   * What to run next, and the correction to carry if the last attempt was
+   * rejected.
+   */
+  nextStep(): TaskStep
+  /**
+   * Hand back an agent's raw final turn. Output that does not parse is a
+   * correction, not a throw: the same session is asked again.
+   */
+  submitAgentOutput(text: string): TaskOutcome
+  /**
+   * Report a deterministic `Code` or human `Engineer` phase. A red test
+   * suite reaches the next agent as an envelope like any other.
+   */
+  submitCodeResult(ok: boolean, summary: string): TaskOutcome
+  /**
+   * Records one fusion-panel member's answer against the active phase.
+   * `tokens` is what makes two models comparable in the trace.
+   */
+  notePanelOpinion(owner: string, ok: boolean, tokens: number): void
+  /** The last accepted envelope, for building the next phase's prompt. */
+  handoff(): TaskHandoff | null
+  /**
+   * Settles the second question: phases passing is not the same as the
+   * result being acceptable.
+   */
+  finish(accepted: boolean, reason?: string | undefined | null): TaskRunSummary
+  /**
+   * The effective per-phase attempt budget after clamping. A driver bounding
+   * its own loop reads this instead of re-hardcoding the default.
+   */
+  get maxAttempts(): number
+  /** Where this run's binary trace lives, if it is traced. */
+  get traceDir(): string | null
+}
+
+/**
+ * Tails a run's binary trace. Records cross as raw bytes — Rust builds no
+ * per-event object and JS parses no text.
+ */
+export declare class TaskTraceReader {
+  constructor(dir: string)
+  /**
+   * Complete records currently on disk — the exclusive upper bound of the
+   * next `readRaw` cursor.
+   */
+  count(): number
+  /**
+   * Every complete record from `fromSeq` onward, packed at
+   * [`TaskTraceLayout::record_len`] stride. A partially written trailing
+   * record is left for the next call.
+   */
+  readRaw(fromSeq: number): Buffer
+  /**
+   * The interned string table in id order: `strings()[id - 1]`, id 0 means
+   * absent. Call after `readRaw`, which refreshes it.
+   */
+  strings(): Array<string>
+}
+
+/**
  * Dedicated writer thread for one terminal fd.
  *
  * Constructed by the TUI's `ProcessTerminal` around stdout. The fd is
@@ -2709,6 +2782,154 @@ export interface SummarySegment {
  * mapping.
  */
 export declare function supportsLanguage(lang: string): boolean
+
+/**
+ * Gate names this engine can build. The single source of truth for a caller
+ * that validates a workflow file before starting a run.
+ */
+export declare function taskGateNames(): Array<string>
+
+/**
+ * The last accepted envelope — what the next phase's prompt is built from.
+ * Context crosses phases here, in code, not in conversation.
+ */
+export interface TaskHandoff {
+  summary: string
+  artifacts: Array<string>
+  notesForNextAgent: string
+  /**
+   * Phase-specific fields the agent returned alongside the contract
+   * (`changed_files`, `commit_message`, …), as JSON text.
+   */
+  payloadJson: string
+}
+
+export interface TaskOutcome {
+  kind: TaskOutcomeKind
+  phase: string
+  /** The attempt to run next when `kind` is `Retry`. */
+  attempt: number
+  correction?: string
+  /** Why the run halted when `kind` is `Aborted`. */
+  reason?: string
+}
+
+export declare enum TaskOutcomeKind {
+  Advanced = 0,
+  Retry = 1,
+  Aborted = 2
+}
+
+/** Acceptance gates for one phase, named so the workflow stays declarative. */
+export interface TaskPhaseGates {
+  phase: string
+  /** `"artifacts_exist"` · `"files_non_empty"`. */
+  gates: Array<string>
+}
+
+/**
+ * Three lanes: only `Agent` costs tokens; `Code` and `Engineer` are executed
+ * by the caller and reported back through the same door.
+ */
+export declare enum TaskPhaseKind {
+  Engineer = 0,
+  Agent = 1,
+  Code = 2
+}
+
+export interface TaskPhaseResult {
+  name: string
+  kind: TaskPhaseKind
+  owner: string
+  passed: boolean
+  attempts: number
+  summary: string
+  /**
+   * Why the phase was rejected — gate violations plus non-gate ones such as
+   * a self-reported `fail`. Empty when it passed.
+   */
+  violations: Array<string>
+}
+
+/**
+ * One phase of a workflow. `owner` names an agent from the roster or a
+ * subsystem (`git`, `bun`) — never a model id.
+ */
+export interface TaskPhaseSpec {
+  name: string
+  kind: TaskPhaseKind
+  owner: string
+  description?: string
+}
+
+export interface TaskRunOptions {
+  adwId: string
+  /** Repository root that gates resolve claimed paths against. */
+  root: string
+  workflow: string
+  phases: Array<TaskPhaseSpec>
+  /** Directory for `events.bin` / `strings.bin`. Omit to run untraced. */
+  traceDir?: string
+  /** Attempts per phase before the run halts. Default 3, minimum 1. */
+  maxAttempts?: number
+  gates?: Array<TaskPhaseGates>
+}
+
+export interface TaskRunSummary {
+  adwId: string
+  workflow: string
+  accepted: boolean
+  reason: string
+  phases: Array<TaskPhaseResult>
+}
+
+/**
+ * What the caller must do next. `Run` carries the phase and, from attempt 2
+ * on, the correction explaining why the previous attempt was rejected; `Done`
+ * carries the verdict. Reusing the agent's session across attempts is a
+ * driver's choice, not a requirement — but the correction must reach the
+ * retry either way, since it is the only record of what was wrong.
+ */
+export interface TaskStep {
+  kind: TaskStepKind
+  phase?: TaskPhaseSpec
+  /** 1-based; `> 1` means the previous attempt was rejected. */
+  attempt: number
+  correction?: string
+  accepted: boolean
+}
+
+export declare enum TaskStepKind {
+  Run = 0,
+  Done = 1
+}
+
+export declare function taskTraceLayout(): TaskTraceLayout
+
+/**
+ * Byte layout of one trace record. A JS reader indexes [`TaskTraceReader::read_raw`]
+ * with these instead of hardcoding them, so a format bump cannot go unnoticed.
+ */
+export interface TaskTraceLayout {
+  headerLen: number
+  recordLen: number
+  offTs: number
+  offKind: number
+  offFlags: number
+  offAttempt: number
+  offPhase: number
+  offOwner: number
+  offGate: number
+  offDetail: number
+  offValue: number
+  /** Mask of the `ok` bit inside the flags byte. */
+  flagOk: number
+  eventsMagic: number
+  stringsMagic: number
+  formatVersion: number
+  /** Event kind names indexed by the record's kind byte; index 0 is unused. */
+  kindNames: Array<string>
+}
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.

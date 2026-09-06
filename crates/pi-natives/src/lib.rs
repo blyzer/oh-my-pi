@@ -50,6 +50,7 @@ pub mod sixel;
 pub mod snapcompact;
 pub mod spelling;
 pub mod svg;
+pub mod tasks;
 pub mod utok;
 pub mod vcs;
 pub use pi_ast::language;
