@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/adw <workflow> <request>`: run an AI developer workflow declared in `.omp/adw/*.yml` as an ordered list of `agent`, `code` and `fusion` phases, where the Rust phase engine owns sequencing, retries and acceptance. Each `agent` phase must end its final message with a typed JSON envelope; gates (`artifacts_exist`, `files_non_empty`) verify its claimed artifacts against the filesystem, and a rejected attempt returns as a correction into the same subagent session instead of respawning it. A `fusion` phase asks a read-only panel of two or more models the same question, then hands every labelled opinion to one fuser that is the sole writer; a retry re-runs the fuser, not the panel. `isolation: true` runs the whole workflow against a materialised copy of the repo and applies the diff only if the run is accepted, preserving a rejected run's work as a patch. `Esc` cancels a run in flight, `/adw list` shows what the repo defines, and `/adw resume <workflow> <adw-id>` continues a run that died mid-flight by replaying its own binary trace. See [AI developer workflows](../../docs/adw-workflows.md).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

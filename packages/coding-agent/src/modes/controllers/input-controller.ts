@@ -22,6 +22,7 @@ import { buildSkillCommandPrompt, isKnownSkillCommand } from "../../modes/skill-
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { cancelActiveAdwRuns, hasActiveAdwRun } from "../../slash-commands/builtin-adw";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
@@ -368,6 +369,12 @@ export class InputController {
 				return;
 			}
 			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
+				return;
+			}
+			// A workflow spends minutes to hours across several models; Esc is the
+			// only stop the operator reaches for. The run state lives in the
+			// command module, not on ctx, because `/adw` is dispatcher-agnostic.
+			if (hasActiveAdwRun() && cancelActiveAdwRuns()) {
 				return;
 			}
 

@@ -325,6 +325,8 @@ They trigger only in prose, not inside code spans, fenced code blocks, XML/HTML 
 Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
+- `/adw <workflow> <request>` — run an AI developer workflow from `.omp/adw/*.yml`: an ordered list of `agent`, `code` and `fusion` phases where Rust owns sequencing, retries and acceptance. Each `agent` phase must return a typed envelope, gates verify its claims against the filesystem, and a rejected attempt returns as a correction into the same phase instead of restarting the run. A `fusion` phase asks a panel of two or more models the same question read-only, then hands every labelled opinion to one fuser that is the sole writer. `/adw list` shows what the repo defines.
+  Set `isolation: true` and the whole workflow runs against a materialised copy of the repo (APFS clone, reflink, or overlay — whatever the platform offers): the diff reaches your checkout only if the run is accepted, and a rejected run leaves the tree untouched with its work preserved as a patch. Esc cancels a run in flight.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
@@ -663,6 +665,7 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[pi-iso](crates/pi-iso)**                        | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy          |
 | **[pi-voice](crates/pi-voice)**                    | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                           |
 | **[pi-walker](crates/pi-walker)**                  | Parallel ignore-aware filesystem walker with the scan cache shared by grep, glob, and workspace     |
+| **[pi-tasks](crates/pi-tasks)**                    | Deterministic workflow phase engine: typed agent envelopes, acceptance gates, binary event trace    |
 | **[brush-core](crates/vendor/brush-core)**         | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution        |
 | **[pi-builtins](crates/pi-builtins)**              | Bash builtins (cd, echo, test, printf, read, export, …) plus 67 in-process command-line utilities |
 
