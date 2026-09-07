@@ -28,7 +28,7 @@ use pi_tasks::{
 	ArtifactsExist, Envelope, FilesNonEmpty, Gate, GateCtx, GateReport, Outcome, PhaseKind, PhaseParams, PhaseStatus,
 	Run, Step, TraceReader, Tracer, Workflow, trace,
 };
-use pi_vcs::types::{StatusOptions, UntrackedMode};
+use pi_vcs::types::{DiffOptions, StatusOptions, UntrackedMode};
 use serde_json::Value;
 
 /// Every path the working tree changed must be one the envelope declared.
@@ -49,6 +49,14 @@ struct DiffMatchesClaims {
 	/// Compiled once at run construction, so a bad pattern fails before a
 	/// token is spent rather than when the gate first runs.
 	ignore:  GlobSet,
+	/// Commit the working copy was on when the run started.
+	///
+	/// Without it the gate only sees the working tree, and a phase that commits
+	/// its own changes hides them: `git status` goes clean and the gate reports
+	/// that every change was declared. Measured — a phase running
+	/// `git add -A && git commit` passed a gate that rejected the identical
+	/// command without the commit.
+	base:    Option<String>,
 }
 
 impl Gate for DiffMatchesClaims {
@@ -85,6 +93,23 @@ impl Gate for DiffMatchesClaims {
 			},
 		};
 
+		// Untracked files never appear in a diff, and tracked changes stop
+		// appearing in `status` the moment a phase commits them. Neither source
+		// alone sees every change, so the gate reads both.
+		let mut changed: Vec<String> = changed_paths(&porcelain);
+		if let Some(base) = &self.base {
+			let diff = DiffOptions { base: Some(base.clone()), ..DiffOptions::default() };
+			match repo.changed_files(&diff) {
+				Ok(paths) => changed.extend(paths.iter().map(|path| normalize(path))),
+				Err(err) => {
+					report.push(".", false, format!("diff against {base} failed: {err}"));
+					return report;
+				},
+			}
+		}
+		changed.sort_unstable();
+		changed.dedup();
+
 		let Ok(mut allowed) = self.allowed.lock() else {
 			report.push(".", false, "gate state poisoned");
 			return report;
@@ -92,7 +117,7 @@ impl Gate for DiffMatchesClaims {
 		allowed.extend(envelope.artifacts.iter().map(|a| normalize(a)));
 
 		let mut undeclared = 0usize;
-		for path in changed_paths(&porcelain) {
+		for path in changed {
 			if allowed.contains(&path) || self.ignore.is_match(&path) {
 				continue;
 			}
@@ -290,13 +315,20 @@ pub fn task_gate_names() -> Vec<String> {
 /// `allowed` is the run-wide set every `diff_matches_claims` instance shares:
 /// one gate per phase, but a change declared by phase 1 must not be undeclared
 /// for phase 2.
-fn build_gate(name: &str, allowed: &Arc<Mutex<HashSet<String>>>, ignore: &GlobSet) -> Result<Box<dyn Gate>> {
+fn build_gate(
+	name: &str,
+	allowed: &Arc<Mutex<HashSet<String>>>,
+	ignore: &GlobSet,
+	base: Option<&str>,
+) -> Result<Box<dyn Gate>> {
 	match name {
 		"artifacts_exist" => Ok(Box::new(ArtifactsExist)),
 		"files_non_empty" => Ok(Box::new(FilesNonEmpty)),
-		"diff_matches_claims" => {
-			Ok(Box::new(DiffMatchesClaims { allowed: Arc::clone(allowed), ignore: ignore.clone() }))
-		},
+		"diff_matches_claims" => Ok(Box::new(DiffMatchesClaims {
+			allowed: Arc::clone(allowed),
+			ignore:  ignore.clone(),
+			base:    base.map(str::to_owned),
+		})),
 		other => Err(napi::Error::from_reason(format!(
 			"unknown gate {other:?}: expected one of {}",
 			task_gate_names().join(", ")
@@ -338,6 +370,16 @@ fn initial_allowed(root: &str) -> Arc<Mutex<HashSet<String>>> {
 		.map(|text| changed_paths(&text).into_iter().collect::<HashSet<_>>())
 		.unwrap_or_default();
 	Arc::new(Mutex::new(dirty))
+}
+
+/// The commit the working copy is on when the run starts.
+///
+/// This is the fixed point every later comparison is made against, which is
+/// what stops a phase from hiding its work by committing it. `None` when the
+/// tree is not a repository or has no commits yet — the gate then sees only
+/// the working tree and says so through the same report it always writes.
+fn initial_base(root: &str) -> Option<String> {
+	pi_vcs::detect(std::path::Path::new(root)).ok().flatten().and_then(|repo| repo.head_id().ok().flatten())
 }
 
 fn to_napi_step(step: Step) -> TaskStep {
@@ -436,9 +478,11 @@ impl TaskRun {
 		}
 		let allowed = initial_allowed(&options.root);
 		let ignore = compile_ignore(options.undeclared_ignore)?;
+		// Captured once: the fixed point later diffs are made against.
+		let base = initial_base(&options.root);
 		for entry in options.gates.unwrap_or_default() {
 			let gates =
-				entry.gates.iter().map(|name| build_gate(name, &allowed, &ignore)).collect::<Result<Vec<_>>>()?;
+				entry.gates.iter().map(|name| build_gate(name, &allowed, &ignore, base.as_deref())).collect::<Result<Vec<_>>>()?;
 			run.register_gates(&entry.phase, gates);
 		}
 		Ok(Self { inner: run, trace_dir: Some(trace_dir) })
@@ -457,9 +501,11 @@ impl TaskRun {
 		}
 		let allowed = initial_allowed(&options.root);
 		let ignore = compile_ignore(options.undeclared_ignore)?;
+		// Captured once: the fixed point later diffs are made against.
+		let base = initial_base(&options.root);
 		for entry in options.gates.unwrap_or_default() {
 			let gates =
-				entry.gates.iter().map(|name| build_gate(name, &allowed, &ignore)).collect::<Result<Vec<_>>>()?;
+				entry.gates.iter().map(|name| build_gate(name, &allowed, &ignore, base.as_deref())).collect::<Result<Vec<_>>>()?;
 			run.register_gates(&entry.phase, gates);
 		}
 		Ok(Self { inner: run, trace_dir: options.trace_dir })
@@ -686,6 +732,7 @@ mod tests {
 		let gate = DiffMatchesClaims {
 			allowed: Arc::new(Mutex::new(HashSet::new())),
 			ignore:  compile_ignore(None).expect("compiles"),
+			base:    None,
 		};
 		let envelope = Envelope::code(true, "done");
 		let report = gate.run(&envelope, &GateCtx { root: &dir });

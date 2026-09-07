@@ -184,13 +184,17 @@ The first two catch a claim with no file. This catches the opposite — **a file
 The allowed set is cumulative, so no phase is blamed for another's work:
 
 ```text
+changed   = git status (untracked included)
+          ∪ diff from the commit the run started on
 allowed   = dirty before the run started
           ∪ paths declared by earlier phases
           ∪ paths declared by this envelope
-violation = git status (untracked included) − allowed
+violation = changed − allowed
 ```
 
 Whatever was already dirty belongs to the operator, not the agent. Untracked files are listed individually rather than collapsed into their directory, because a brand-new undeclared file is the common case. A rename reports both paths: a file moved out from under a claim is exactly what this gate is for.
+
+**Both sources are needed, and neither alone is enough.** Untracked files never appear in a diff. And tracked changes disappear from `git status` the moment a phase commits them — a phase running `git add -A && git commit` used to pass a gate that rejected the identical command without the commit. The run's starting commit is the fixed point that closes that hole.
 
 Some paths a build legitimately rewrites without any phase claiming them — a lockfile after an install, generated sources. Declare those, and only those:
 
