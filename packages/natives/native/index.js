@@ -32,6 +32,8 @@ export const PowerAssertion = nativeBindings.PowerAssertion;
 export const Process = nativeBindings.Process;
 export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
+export const TaskRun = nativeBindings.TaskRun;
+export const TaskTraceReader = nativeBindings.TaskTraceReader;
 export const TtyWriter = nativeBindings.TtyWriter;
 export const VcsGitRepo = nativeBindings.VcsGitRepo;
 export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace;
@@ -110,6 +112,8 @@ export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChar
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks;
 export const summarizeCode = nativeBindings.summarizeCode;
 export const supportsLanguage = nativeBindings.supportsLanguage;
+export const taskGateNames = nativeBindings.taskGateNames;
+export const taskTraceLayout = nativeBindings.taskTraceLayout;
 export const truncateToWidth = nativeBindings.truncateToWidth;
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir;
 export const vcsDiscover = nativeBindings.vcsDiscover;
@@ -192,5 +196,19 @@ export const MacOSAppearance = {
 export const ProcessStatus = {
 	Running: "running",
 	Exited: "exited",
+};
+export const TaskOutcomeKind = {
+	Advanced: 0,
+	Retry: 1,
+	Aborted: 2,
+};
+export const TaskPhaseKind = {
+	Engineer: 0,
+	Agent: 1,
+	Code: 2,
+};
+export const TaskStepKind = {
+	Run: 0,
+	Done: 1,
 };
 // --- end generated native exports ---

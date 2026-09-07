@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `TaskRun`, the phase engine behind AI developer workflows: a driven state machine that owns phase sequencing, per-phase attempt budgets, acceptance gates and resume, while the caller executes each step. Also exports `taskGateNames()` and `taskTraceLayout()`, which publishes the byte offsets of the binary trace record so a reader in another language uses the layout instead of duplicating it.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

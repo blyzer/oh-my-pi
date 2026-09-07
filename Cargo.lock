@@ -6270,6 +6270,7 @@ dependencies = [
  "pi-edit",
  "pi-iso",
  "pi-shell",
+ "pi-tasks",
  "pi-vcs",
  "pi-voice",
  "pi-walker",
@@ -6329,6 +6330,15 @@ dependencies = [
  "windows-sys 0.61.2",
  "winreg 0.56.0",
  "xxhash-rust",
+]
+
+[[package]]
+name = "pi-tasks"
+version = "18.1.12"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

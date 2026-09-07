@@ -106,6 +106,7 @@ rust_shared_library(
         "//crates/pi-edit",
         "//crates/pi-iso",
         "//crates/pi-shell",
+        "//crates/pi-tasks",
         "//crates/pi-vcs",
         "//crates/pi-voice",
         "//crates/pi-walker",
