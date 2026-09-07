@@ -2872,6 +2872,11 @@ export interface TaskPhaseSpec {
    * which phase can fix a failure.
    */
   rewindTo?: string
+  /**
+   * Phases that must pass before this one runs. The engine sorts on these at
+   * construction, so a resumed run derives the same order it ran.
+   */
+  dependsOn?: Array<string>
 }
 
 export interface TaskRunOptions {

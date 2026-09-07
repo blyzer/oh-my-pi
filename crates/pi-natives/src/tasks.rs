@@ -199,6 +199,9 @@ pub struct TaskPhaseSpec {
 	/// caller resolves it: the engine obeys a name and holds no policy about
 	/// which phase can fix a failure.
 	pub rewind_to:   Option<String>,
+	/// Phases that must pass before this one runs. The engine sorts on these at
+	/// construction, so a resumed run derives the same order it ran.
+	pub depends_on:  Option<Vec<String>>,
 }
 
 /// Acceptance gates for one phase, named so the workflow stays declarative.
@@ -392,6 +395,7 @@ fn to_napi_step(step: Step) -> TaskStep {
 				owner:       phase.owner,
 				description: Some(phase.description).filter(|d| !d.is_empty()),
 				rewind_to:   phase.rewind_to,
+				depends_on:  Some(phase.depends_on).filter(|d| !d.is_empty()),
 			}),
 			attempt,
 			correction,
@@ -449,6 +453,10 @@ fn to_core_phases(specs: Vec<TaskPhaseSpec>) -> Vec<PhaseParams> {
 			let params = match spec.rewind_to {
 				Some(target) => params.rewinding_to(target),
 				None => params,
+			};
+			let params = match spec.depends_on {
+				Some(names) if !names.is_empty() => params.after(names),
+				_ => params,
 			};
 			match spec.description {
 				Some(text) => params.describe(text),

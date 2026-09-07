@@ -626,6 +626,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			description: phase.description,
 			// Resolved here, so the engine is handed a name and holds no policy
 			// about which phase can fix a failure.
+			dependsOn: phase.dependsOn,
 			rewindTo: phase.onFail === "correct" ? rewindTarget(workflow, phase.name) : undefined,
 		})),
 		gates: workflow.phases

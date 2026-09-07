@@ -21,19 +21,51 @@ const ADW_SUBPATH = "adw";
 export class AdwConfigError extends Error {}
 
 /**
- * The phase a failing `code` phase sends its failure back to: the nearest
- * preceding one that has an agent to correct.
+ * The phase a failing `code` phase sends its failure back to.
+ *
+ * With `dependsOn` the answer is explicit: walk this phase's own dependencies,
+ * nearest first, for one that has an agent to correct. That is strictly better
+ * than guessing from position — a phase declared earlier but unrelated has no
+ * business receiving another's failure.
+ *
+ * Without dependencies, fall back to the nearest preceding declared phase,
+ * which is what ordering meant before a graph existed.
  *
  * Resolved here rather than in the engine so no phase-selection policy lives
- * in Rust — it is handed a name and obeys it. A `code` phase is skipped
- * because correcting it would mean re-running a command that already decided.
+ * in Rust — it is handed a name and obeys it. A `code` phase is never a target:
+ * correcting it would mean re-running a command that already decided.
  */
 export function rewindTarget(workflow: AdwWorkflowConfig, phaseName: string): string | undefined {
+	const byName = new Map(workflow.phases.map(phase => [phase.name, phase]));
+	const start = byName.get(phaseName);
+	if (!start) return undefined;
+	const correctable = (name: string) => {
+		const kind = byName.get(name)?.kind;
+		return kind === "agent" || kind === "fusion";
+	};
+
+	if (start.dependsOn?.length) {
+		// Breadth-first: the closest dependency that can act, not the deepest.
+		const queue = [...start.dependsOn];
+		const seen = new Set<string>(queue);
+		while (queue.length > 0) {
+			const name = queue.shift();
+			if (!name) break;
+			if (correctable(name)) return name;
+			for (const next of byName.get(name)?.dependsOn ?? []) {
+				if (!seen.has(next)) {
+					seen.add(next);
+					queue.push(next);
+				}
+			}
+		}
+		return undefined;
+	}
+
 	const index = workflow.phases.findIndex(phase => phase.name === phaseName);
-	if (index < 0) return undefined;
 	for (let i = index - 1; i >= 0; i--) {
 		const candidate = workflow.phases[i];
-		if (candidate && (candidate.kind === "agent" || candidate.kind === "fusion")) return candidate.name;
+		if (candidate && correctable(candidate.name)) return candidate.name;
 	}
 	return undefined;
 }
@@ -95,6 +127,35 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 				fail(`phase "${phase.name}" requests unknown gate "${gate}" (known: ${knownGates.join(", ")})`);
 			}
 		}
+		for (const dependency of phase.dependsOn ?? []) {
+			if (dependency === phase.name) fail(`phase "${phase.name}" depends on itself`);
+			if (!workflow.phases.some(other => other.name === dependency)) {
+				fail(`phase "${phase.name}" depends on unknown phase "${dependency}"`);
+			}
+		}
+	}
+	assertAcyclic(workflow, fail);
+}
+
+/**
+ * A cycle is reported here, with the file it came from, because the engine
+ * cannot: it leaves an unorderable graph in declaration order rather than
+ * inventing one, which would run the workflow in a sequence the author never
+ * wrote. Names the phases still standing, so the operator sees the loop.
+ */
+function assertAcyclic(workflow: AdwWorkflowConfig, fail: (message: string) => void): void {
+	const known = new Set(workflow.phases.map(phase => phase.name));
+	const pending = new Map(
+		workflow.phases.map(phase => [phase.name, new Set((phase.dependsOn ?? []).filter(name => known.has(name)))]),
+	);
+	for (;;) {
+		const ready = [...pending].filter(([, deps]) => deps.size === 0).map(([name]) => name);
+		if (ready.length === 0) break;
+		for (const name of ready) pending.delete(name);
+		for (const deps of pending.values()) for (const name of ready) deps.delete(name);
+	}
+	if (pending.size > 0) {
+		fail(`dependency cycle among phases: ${[...pending.keys()].sort().join(", ")}`);
 	}
 }
 

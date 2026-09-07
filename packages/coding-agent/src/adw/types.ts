@@ -33,6 +33,18 @@ const adwPhaseSchema = type({
 	"description?": "string",
 	/** Post-execution checks run against the envelope's own claims. */
 	"gates?": "string[]",
+
+	/**
+	 * Phases that must pass before this one runs. Execution order becomes
+	 * declaration order plus whatever these force, and the sort is a pure
+	 * function of the file — ties break on declaration order, so two runs of
+	 * the same workflow always execute in the same sequence.
+	 *
+	 * Declared, never inferred: a graph a model proposes changes between runs
+	 * with the same prompt, and then `resume` cannot rebuild a position in a
+	 * plan that no longer exists.
+	 */
+	"dependsOn?": "string[]",
 	/** `agent`: model pattern override (`provider/id[:level]` or a `@role` alias). */
 	"model?": "string",
 	/** `agent`: `off|minimal|low|medium|high|xhigh|max|auto`. */

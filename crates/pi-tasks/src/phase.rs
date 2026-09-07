@@ -34,11 +34,32 @@ pub struct PhaseParams {
 	/// target is, so no phase-selection policy lives in here.
 	#[serde(default)]
 	pub rewind_to: Option<String>,
+	/// Phases that must pass before this one runs.
+	///
+	/// Declared, never inferred. A graph a model proposes changes between runs
+	/// with the same prompt, and then `resume` cannot rebuild a position in a
+	/// plan that no longer exists. This one is written by the author, so the
+	/// execution order is a pure function of the file.
+	#[serde(default)]
+	pub depends_on: Vec<String>,
 }
 
 impl PhaseParams {
 	pub fn new(name: impl Into<String>, kind: PhaseKind, owner: impl Into<String>) -> Self {
-		Self { name: name.into(), kind, owner: owner.into(), description: String::new(), rewind_to: None }
+		Self {
+			name: name.into(),
+			kind,
+			owner: owner.into(),
+			description: String::new(),
+			rewind_to: None,
+			depends_on: Vec::new(),
+		}
+	}
+
+	/// Require `phases` to pass before this one runs.
+	pub fn after(mut self, phases: impl IntoIterator<Item = impl Into<String>>) -> Self {
+		self.depends_on = phases.into_iter().map(Into::into).collect();
+		self
 	}
 
 	/// Send a rejected attempt back to `phase` instead of retrying in place.

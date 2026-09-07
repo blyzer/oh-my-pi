@@ -115,6 +115,7 @@ phases:
 | `prompt`      | `agent`         | Extra instructions appended after the operator's request                   |
 | `command`     | `code` (req.)   | Shell command; exit code `0` is the pass                                   |
 | `timeoutMs`   | `code`          | Per-command deadline. Defaults to 10 minutes; must be `> 0`                |
+| `dependsOn`   | all             | Phases that must pass first; execution order follows the graph              |
 | `onFail`      | `code`          | `retry` (default) re-runs the command; `correct` sends the failure back    |
 | `panel`       | `fusion` (req.) | Two or more read-only seats answering the same question                    |
 | `fuser`       | `fusion` (req.) | The single seat allowed to write                                           |
@@ -135,6 +136,33 @@ Validation also rejects, with the offending phase named: a duplicate phase name,
 `Esc` also cancels a run in flight. A workflow spends minutes to hours across several models, and `Esc` is the key an operator actually reaches for.
 
 `/adw list` reports files that **failed to load** alongside the workflows that parsed. A broken file the operator is about to ask for by name has to explain itself rather than read as absent.
+
+## Dependency order
+
+Phases run in declaration order until `dependsOn` says otherwise:
+
+```yaml
+phases:
+  - { name: docs,   kind: agent, owner: sonic, dependsOn: [api] }
+  - { name: verify, kind: code,  owner: sh, command: "make check", dependsOn: [docs] }
+  - { name: api,    kind: agent, owner: task }
+```
+
+That file runs `api → docs → verify`. The author declares what needs what instead of hand-sorting the list, and a phase moved later cannot silently start running before its input exists.
+
+**The graph is declared, never inferred.** A graph a model proposes changes between runs given the same prompt, and then `resume` cannot rebuild a position in a plan that no longer exists. This one is a pure function of the file: ties break on declaration order, never on hash iteration, so two runs of the same workflow execute in the same sequence and a resumed run derives the order it originally ran.
+
+Sorting happens once, when the workflow is constructed, which is why the rest of the engine stays ignorant of dependencies — the cursor still walks a list and `resume` still matches trace names to positions.
+
+A cycle, a self-dependency, or a name that does not exist **fails the file at load time**, naming every phase in the loop:
+
+```text
+dag.yml: dependency cycle among phases: a, b, c
+```
+
+The engine refuses to guess here: an unorderable graph is left in declaration order rather than reordered into something the author never wrote, so the check has to happen where the file name is known.
+
+`onFail: correct` follows the graph too. A phase with dependencies sends its failure to the nearest **dependency** that has an agent to correct, not to whatever happened to be declared above it — position is the wrong answer once a graph exists.
 
 ## Phase kinds
 

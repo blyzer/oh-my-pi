@@ -288,3 +288,57 @@ describe("shipped example workflows", () => {
 		});
 	}
 });
+
+describe("dependsOn", () => {
+	const yaml = (phases: string) => `name: w\nphases:\n${phases}`;
+	const agent = (name: string, deps?: string) =>
+		`  - { name: ${name}, kind: agent, owner: sonic${deps ? `, dependsOn: [${deps}] }` : " }"}`;
+
+	it("rejects a dependency on a phase that does not exist", () => {
+		expect(() => parseWorkflow("w.yml", yaml(`${agent("api")}\n${agent("docs", "apii")}`))).toThrow(
+			/depends on unknown phase "apii"/,
+		);
+	});
+
+	it("rejects a phase that depends on itself", () => {
+		expect(() => parseWorkflow("w.yml", yaml(agent("api", "api")))).toThrow(/depends on itself/);
+	});
+
+	it("rejects a cycle and names every phase in it", () => {
+		// The engine leaves an unorderable graph in declaration order rather than
+		// inventing one, so this has to be caught here or the workflow silently
+		// runs in a sequence nobody wrote.
+		const error = (() => {
+			try {
+				parseWorkflow("w.yml", yaml(`${agent("a", "c")}\n${agent("b", "a")}\n${agent("c", "b")}`));
+			} catch (err) {
+				return err instanceof Error ? err.message : String(err);
+			}
+			return "no error";
+		})();
+		expect(error).toContain("dependency cycle");
+		for (const name of ["a", "b", "c"]) expect(error).toContain(name);
+	});
+
+	it("sends a failure back to a dependency, not to whatever was declared before", () => {
+		// Position is the wrong answer once a graph exists: `unrelated` runs
+		// earlier but has no business receiving another phase's failure.
+		const workflow = parseWorkflow(
+			"w.yml",
+			yaml(
+				`${agent("unrelated")}\n${agent("api")}\n  - { name: verify, kind: code, owner: sh, command: "true", onFail: correct, dependsOn: [api] }`,
+			),
+		);
+		expect(rewindTarget(workflow, "verify")).toBe("api");
+	});
+
+	it("walks past a code dependency to the nearest phase that can act", () => {
+		const workflow = parseWorkflow(
+			"w.yml",
+			yaml(
+				`${agent("api")}\n  - { name: fmt, kind: code, owner: sh, command: "true", dependsOn: [api] }\n  - { name: verify, kind: code, owner: sh, command: "true", onFail: correct, dependsOn: [fmt] }`,
+			),
+		);
+		expect(rewindTarget(workflow, "verify")).toBe("api");
+	});
+});

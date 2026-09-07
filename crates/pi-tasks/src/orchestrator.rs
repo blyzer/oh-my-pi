@@ -56,9 +56,59 @@ pub struct Workflow {
 }
 
 impl Workflow {
+	/// Phases in the order they will run: declaration order, then whatever
+	/// `depends_on` forces.
+	///
+	/// Sorting here rather than at execution time is what keeps the rest of the
+	/// engine ignorant of dependencies: the cursor still walks a list, and
+	/// `resume` still matches a trace's phase names against positions. The sort
+	/// is a pure function of the workflow, so a resumed run derives the same
+	/// order as the run it continues.
+	///
+	/// Stable by construction: ties break on declaration order, never on hash
+	/// iteration, because an execution order that shuffled between runs would
+	/// make every trace unreplayable.
 	pub fn new(name: impl Into<String>, phases: Vec<PhaseParams>) -> Self {
+		let ordered = topological_order(&phases).unwrap_or_else(|| (0..phases.len()).collect());
+		let mut slots: Vec<Option<PhaseParams>> = phases.into_iter().map(Some).collect();
+		let phases = ordered.into_iter().filter_map(|index| slots[index].take()).collect();
 		Self { name: name.into(), phases }
 	}
+}
+
+/// Indices in dependency order, or `None` when the graph cannot be ordered.
+///
+/// An unorderable graph — a cycle, or a name that does not exist — is left in
+/// declaration order here and reported by the caller's validation, which knows
+/// the file it came from. Failing silently into a *different* order would be
+/// the one unacceptable outcome.
+fn topological_order(phases: &[PhaseParams]) -> Option<Vec<usize>> {
+	let index_of: HashMap<&str, usize> =
+		phases.iter().enumerate().map(|(index, phase)| (phase.name.as_str(), index)).collect();
+	let mut remaining: Vec<usize> = (0..phases.len()).collect();
+	let mut done = vec![false; phases.len()];
+	let mut order = Vec::with_capacity(phases.len());
+
+	while !remaining.is_empty() {
+		// Declaration order among everything currently ready: the tie-break that
+		// makes this deterministic.
+		let ready: Vec<usize> = remaining
+			.iter()
+			.copied()
+			.filter(|&index| {
+				phases[index].depends_on.iter().all(|name| index_of.get(name.as_str()).is_some_and(|&dep| done[dep]))
+			})
+			.collect();
+		if ready.is_empty() {
+			return None;
+		}
+		for index in &ready {
+			done[*index] = true;
+			order.push(*index);
+		}
+		remaining.retain(|index| !ready.contains(index));
+	}
+	Some(order)
 }
 
 /// What the caller must do next.
@@ -688,6 +738,83 @@ mod tests {
 			artifacts: Vec::new(),
 			notes_for_next_agent: String::new(),
 			payload: Value::Object(serde_json::Map::new()),
+		}
+	}
+
+	#[test]
+	fn dependencies_reorder_declaration_order() {
+		// Declared last but needed first: the author should not have to hand-sort.
+		let workflow = Workflow::new(
+			"dag",
+			vec![
+				PhaseParams::new("docs", PhaseKind::Agent, "sonic").after(["api"]),
+				PhaseParams::new("api", PhaseKind::Agent, "task"),
+			],
+		);
+		assert_eq!(workflow.phases.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["api", "docs"]);
+	}
+
+	#[test]
+	fn independent_phases_keep_declaration_order() {
+		// The tie-break. Anything else and two runs of the same file could
+		// execute in different orders, which would make every trace unreplayable.
+		let phases = vec![
+			PhaseParams::new("api", PhaseKind::Agent, "task"),
+			PhaseParams::new("tests", PhaseKind::Agent, "task").after(["api"]),
+			PhaseParams::new("docs", PhaseKind::Agent, "sonic").after(["api"]),
+			PhaseParams::new("changelog", PhaseKind::Agent, "sonic").after(["tests", "docs"]),
+		];
+		let first = Workflow::new("dag", phases.clone());
+		let again = Workflow::new("dag", phases);
+		let names = |w: &Workflow| w.phases.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+		assert_eq!(names(&first), vec!["api", "tests", "docs", "changelog"]);
+		assert_eq!(names(&first), names(&again), "the order must be a pure function of the file");
+	}
+
+	#[test]
+	fn an_unorderable_graph_keeps_declaration_order_instead_of_inventing_one() {
+		// A cycle is a config error the caller reports with its file name. What
+		// this must never do is silently pick some other order.
+		let workflow = Workflow::new(
+			"cycle",
+			vec![
+				PhaseParams::new("a", PhaseKind::Agent, "task").after(["b"]),
+				PhaseParams::new("b", PhaseKind::Agent, "task").after(["a"]),
+			],
+		);
+		assert_eq!(workflow.phases.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+	}
+
+	#[test]
+	fn a_dependency_run_resumes_against_the_same_order_it_ran() {
+		// The sort happens at construction, so a resumed run must derive the
+		// identical order or `resume` would match trace names to wrong positions.
+		let dir = TempDir::new("run-dag-resume");
+		let trace_dir = dir.path().join("trace");
+		let build = || {
+			Workflow::new(
+				"dag",
+				vec![
+					PhaseParams::new("second", PhaseKind::Agent, "task").after(["first"]),
+					PhaseParams::new("first", PhaseKind::Agent, "task"),
+				],
+			)
+		};
+		{
+			let mut run =
+				Run::new("adw-dag", dir.path(), build()).with_tracer(Tracer::create(&trace_dir).expect("tracer"));
+			let step = run.next_step().expect("step");
+			match step {
+				Step::Run { phase, .. } => assert_eq!(phase.name, "first", "dependency order, not declaration order"),
+				other => panic!("{other:?}"),
+			}
+			run.submit_envelope(ok_envelope("first done")).expect("submit");
+		}
+
+		let mut resumed = Run::resume("adw-dag", dir.path(), build(), &trace_dir).expect("resume");
+		match resumed.next_step().expect("step") {
+			Step::Run { phase, .. } => assert_eq!(phase.name, "second"),
+			other => panic!("{other:?}"),
 		}
 	}
 
