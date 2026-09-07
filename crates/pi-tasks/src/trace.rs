@@ -31,7 +31,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const EVENTS_MAGIC: u32 = 0x5049_5452;
 /// `"PIST"`, string table.
 pub const STRINGS_MAGIC: u32 = 0x5049_5354;
-pub const FORMAT_VERSION: u16 = 1;
+/// Bumped to 2 by `PhaseTokens`. `verify_header` requires an exact match, so a
+/// trace written by another version is refused with its path rather than
+/// half-decoded: a resumable run is worth less than a wrong one.
+pub const FORMAT_VERSION: u16 = 2;
 /// Bytes before the first record in either file.
 pub const HEADER_LEN: u64 = 16;
 /// Stride of one event record.
@@ -71,6 +74,12 @@ pub enum EventKind {
 	/// belong to the continuation, so a terminal record is not necessarily the
 	/// end of the story.
 	RunResumed = 9,
+	/// What one attempt of a phase cost, in tokens, reported by the caller —
+	/// only it talks to a model. Its own record because `value` already carries
+	/// the violation count on both rejection paths, and a rejected attempt
+	/// spends tokens too: charging only the accepted one undercounts exactly
+	/// the expensive part of a run.
+	PhaseTokens = 10,
 }
 
 impl EventKind {
@@ -85,6 +94,7 @@ impl EventKind {
 			7 => Some(Self::RunFinished),
 			8 => Some(Self::PanelOpinion),
 			9 => Some(Self::RunResumed),
+			10 => Some(Self::PhaseTokens),
 			_ => None,
 		}
 	}

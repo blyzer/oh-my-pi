@@ -397,6 +397,12 @@ export declare class TaskRun {
    * `tokens` is what makes two models comparable in the trace.
    */
   notePanelOpinion(owner: string, ok: boolean, tokens: number): void
+  /**
+   * Records what the attempt in flight cost. Charged per attempt: a rejected
+   * try spent real tokens, and a phase that needed three of them is the one
+   * a cost report has to show.
+   */
+  notePhaseTokens(owner: string, tokens: number): void
   /** The last accepted envelope, for building the next phase's prompt. */
   handoff(): TaskHandoff | null
   /**

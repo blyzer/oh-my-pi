@@ -385,6 +385,26 @@ impl Run {
 		)
 	}
 
+	/// Records what the attempt in flight cost, reported by the caller — only it
+	/// talks to a model.
+	///
+	/// Charged per attempt, not per phase: a rejected attempt spent real tokens,
+	/// and a phase that needed three tries is the one worth seeing in a cost
+	/// report. Owner is recorded too, so a fusion phase's fuser is separable
+	/// from the panel members already traced by `note_panel_opinion`.
+	pub fn note_phase_tokens(&self, owner: &str, tokens: u32) -> Result<(), RunError> {
+		let phase = self.active_phase().ok_or(RunError::NoActiveStep)?;
+		let phase_id = self.intern(&phase.name)?;
+		let owner_id = self.intern(owner)?;
+		self.trace(
+			EventRecord::new(EventKind::PhaseTokens)
+				.phase(phase_id)
+				.owner(owner_id)
+				.attempt(self.attempts + 1)
+				.value(tokens),
+		)
+	}
+
 	/// Settles the run's second question: phases passing is not the same as the
 	/// result being acceptable.
 	pub fn finish(&mut self, accepted: bool, reason: impl Into<String>) -> Result<RunSummary, RunError> {
@@ -719,6 +739,34 @@ mod tests {
 		// Still one phase to the engine: it settles on the fuser's envelope.
 		assert_eq!(run.records().len(), 1);
 		assert_eq!(events.iter().filter(|e| e.kind == EventKind::PhaseFinished).count(), 1);
+	}
+
+	#[test]
+	fn rejected_attempts_are_charged_for_the_tokens_they_spent() {
+		let dir = TempDir::new("run-tokens");
+		let trace_dir = dir.path().join("trace");
+		let mut run = run_in(&dir).with_tracer(Tracer::create(&trace_dir).expect("tracer"));
+
+		// A phase that needed two tries. The first one still cost money.
+		run.next_step().expect("step");
+		run.note_phase_tokens("task", 900).expect("note");
+		run.submit_agent_output("no envelope here").expect("submit");
+		run.next_step().expect("retry");
+		run.note_phase_tokens("task", 1_500).expect("note");
+		run.submit_envelope(ok_envelope("done")).expect("submit");
+
+		let mut reader = TraceReader::open(&trace_dir).expect("open");
+		let events = reader.read_from(0).expect("read");
+		let charges: Vec<_> = events.iter().filter(|e| e.kind == EventKind::PhaseTokens).collect();
+
+		assert_eq!(charges.len(), 2, "the rejected attempt must be charged, not just the accepted one");
+		assert_eq!(charges[0].value, 900);
+		assert_eq!(charges[0].attempt, 1);
+		assert_eq!(charges[1].value, 1_500);
+		assert_eq!(charges[1].attempt, 2, "charges are per attempt, so a retry is visible as a second cost");
+		assert_eq!(reader.text(charges[0].owner), "task");
+		let total: u32 = charges.iter().map(|e| e.value).sum();
+		assert_eq!(total, 2_400);
 	}
 
 	#[test]

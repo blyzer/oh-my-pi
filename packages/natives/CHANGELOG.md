@@ -5,6 +5,9 @@
 ### Added
 
 - Added `TaskRun`, the phase engine behind AI developer workflows: a driven state machine that owns phase sequencing, per-phase attempt budgets, acceptance gates and resume, while the caller executes each step. Also exports `taskGateNames()` and `taskTraceLayout()`, which publishes the byte offsets of the binary trace record so a reader in another language uses the layout instead of duplicating it.
+- Added `TaskRun.notePhaseTokens(owner, tokens)` and the `phase_tokens` trace record, so a run's cost is charged per attempt rather than per passed phase — a rejected attempt spends real tokens. Its own record because `value` already carries the violation count on both rejection paths.
+- Added the `diff_matches_claims` gate to `taskGateNames()`: it compares `git status` (untracked files listed individually) against the paths phases declared, so a change nobody confessed fails the phase. Implemented here rather than in `pi-tasks` because it needs git, keeping the engine crate free of I/O beyond the filesystem.
+- **Breaking:** the binary trace format is now version 2. `verify_header` requires an exact match, so a v1 trace is refused with its path instead of half-decoded — `/adw resume` of a run recorded before this change fails with a clear message.
 
 ## [18.1.9] - 2026-09-04
 

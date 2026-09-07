@@ -7,6 +7,8 @@ interface PhaseGroup {
 	owner: string;
 	kind: "agent" | "code";
 	attempts: number;
+	/** Summed across attempts, so a phase that needed three tries shows all three. */
+	tokens: number;
 	passed: boolean | null;
 	startedAt: number;
 	endedAt: number;
@@ -31,6 +33,7 @@ function groupPhases(timeline: TraceEvent[]): PhaseGroup[] {
 				// Only `code` phases run a command; everything else spends tokens.
 				kind: "agent",
 				attempts: 0,
+				tokens: 0,
 				passed: null,
 				startedAt: event.ts,
 				endedAt: event.ts,
@@ -41,6 +44,7 @@ function groupPhases(timeline: TraceEvent[]): PhaseGroup[] {
 		if (event.owner) group.owner = event.owner;
 		group.attempts = Math.max(group.attempts, event.attempt);
 		group.endedAt = event.ts;
+		if (event.kind === "phase_tokens" || event.kind === "panel_opinion") group.tokens += event.value;
 		group.events.push(event);
 		if (event.kind === "phase_finished") group.passed = event.ok;
 	}
@@ -53,6 +57,8 @@ function describe(event: TraceEvent): string {
 			return `${event.gate}: ${event.detail}`;
 		case "panel_opinion":
 			return `${event.owner} — ${event.value.toLocaleString()} tokens`;
+		case "phase_tokens":
+			return `${event.owner} — ${event.value.toLocaleString()} tokens${event.attempt > 1 ? ` (attempt ${event.attempt})` : ""}`;
 		case "phase_rejected":
 			return `${event.value} violation${event.value === 1 ? "" : "s"}${event.detail ? ` · ${event.detail}` : ""}`;
 		default:
@@ -83,6 +89,7 @@ function Phase({ group, widest }: { group: PhaseGroup; widest: number }) {
 				    is the first question a waterfall has to answer. */}
 				<div className="bar" style={{ width: `${widest > 0 ? Math.max((ms / widest) * 240, 3) : 3}px` }} />
 				<span className="owner">{(ms / 1000).toFixed(1)}s</span>
+				{group.tokens > 0 && <span className="owner">{group.tokens.toLocaleString()} tok</span>}
 			</div>
 			<div className="rows">
 				{group.events.map(event => (

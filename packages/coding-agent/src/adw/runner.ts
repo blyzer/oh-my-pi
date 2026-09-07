@@ -761,6 +761,9 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 						readOnly: false,
 						followUpMessage: correction,
 					});
+					// Charged before the verdict: a crashed or rejected attempt spent
+					// these tokens too, and only this layer knows what they were.
+					run.notePhaseTokens(fuserSeat.owner, fused.tokens);
 					outcome =
 						fused.exitCode === 0
 							? run.submitAgentOutput(fused.output)
@@ -791,6 +794,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					readOnly: false,
 					followUpMessage: correction,
 				});
+				run.notePhaseTokens(base.name, spawned.tokens);
 				outcome =
 					spawned.exitCode === 0
 						? run.submitAgentOutput(spawned.output)

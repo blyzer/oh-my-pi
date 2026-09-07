@@ -34,6 +34,8 @@ export interface RunSummary {
 	/** `null` while the run is still going — no terminal record yet. */
 	accepted: boolean | null;
 	phases: number;
+	/** Every token charge in the run, retries included. */
+	tokens: number;
 	events: number;
 	resumed: boolean;
 }
@@ -92,6 +94,12 @@ function summarize(adwId: string, events: TraceEvent[]): RunSummary {
 		// are honestly "not settled", never "failed".
 		accepted: finished ? finished.ok : null,
 		phases: events.filter(event => event.kind === "phase_finished").length,
+		// Every charge, not just the accepted attempts: a run whose cost only
+		// counts its successes hides the retries that made it expensive.
+		tokens: events.reduce(
+			(total, event) => total + (event.kind === "phase_tokens" || event.kind === "panel_opinion" ? event.value : 0),
+			0,
+		),
 		events: events.length,
 		resumed: events.some(event => event.kind === "run_resumed"),
 	};

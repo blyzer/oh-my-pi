@@ -18,12 +18,114 @@
 //! from [`task_trace_layout`]. The only strings on the wire are the ones a
 //! model must read — its own turn, and the correction fed back to it.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use napi::{Result, bindgen_prelude::*};
 use napi_derive::napi;
 use pi_tasks::{
-	ArtifactsExist, Envelope, FilesNonEmpty, Gate, Outcome, PhaseKind, PhaseParams, PhaseStatus, Run, Step,
-	TraceReader, Tracer, Workflow, trace,
+	ArtifactsExist, Envelope, FilesNonEmpty, Gate, GateCtx, GateReport, Outcome, PhaseKind, PhaseParams, PhaseStatus,
+	Run, Step, TraceReader, Tracer, Workflow, trace,
 };
+use pi_vcs::types::{StatusOptions, UntrackedMode};
+use serde_json::Value;
+
+/// Every path the working tree changed must be one the envelope declared.
+///
+/// `artifacts_exist` catches a claim with no file. This catches the opposite —
+/// a file with no claim — which is the failure that actually hurts: an agent
+/// that edited three files and confessed one leaves two changes nobody
+/// reviewed. Existence checks cannot see them, because nothing was claimed.
+///
+/// It lives here rather than in `pi_tasks` because it needs git, and the engine
+/// crate stays free of I/O beyond the filesystem.
+struct DiffMatchesClaims {
+	/// Paths that are already accounted for: dirty before the run started, plus
+	/// everything earlier phases claimed. Shared across phases, so phase 2 is
+	/// never blamed for the files phase 1 legitimately wrote.
+	allowed: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Gate for DiffMatchesClaims {
+	fn name(&self) -> &'static str {
+		"diff_matches_claims"
+	}
+
+	fn run(&self, envelope: &Envelope<Value>, ctx: &GateCtx<'_>) -> GateReport {
+		let mut report = GateReport::new(self.name());
+
+		// A gate that cannot gather evidence must not report "passed". Silence
+		// here would read as approval of a diff nobody looked at.
+		let repo = match pi_vcs::detect(ctx.root) {
+			Ok(Some(repo)) => repo,
+			Ok(None) => {
+				report.push(".", false, "not a repository: the working tree cannot be compared");
+				return report;
+			},
+			Err(err) => {
+				report.push(".", false, format!("repository unreadable: {err}"));
+				return report;
+			},
+		};
+
+		// Untracked files individually: a brand-new file nobody declared is the
+		// common case, and `git status` would otherwise collapse it into its
+		// directory.
+		let options = StatusOptions { untracked: UntrackedMode::All, pathspecs: Vec::new(), nul_terminated: true };
+		let porcelain = match repo.status_porcelain(&options) {
+			Ok(text) => text,
+			Err(err) => {
+				report.push(".", false, format!("status failed: {err}"));
+				return report;
+			},
+		};
+
+		let Ok(mut allowed) = self.allowed.lock() else {
+			report.push(".", false, "gate state poisoned");
+			return report;
+		};
+		allowed.extend(envelope.artifacts.iter().map(|a| normalize(a)));
+
+		let mut undeclared = 0usize;
+		for path in changed_paths(&porcelain) {
+			if allowed.contains(&path) {
+				continue;
+			}
+			undeclared += 1;
+			report.push(path, false, "changed but not declared in artifacts");
+		}
+		if undeclared == 0 {
+			// Names what it examined, so a clean gate is evidence and not silence.
+			report.push(".", true, format!("{} declared path(s) cover every change", allowed.len()));
+		}
+		report
+	}
+}
+
+/// Repo-relative paths from `git status --porcelain -z`.
+///
+/// Each record is `XY <path>`; a rename adds a second NUL-separated record
+/// holding the source, which is a real change to a real path and is returned
+/// too — a file moved out from under a claim is exactly what this gate is for.
+fn changed_paths(porcelain: &str) -> Vec<String> {
+	let mut paths = Vec::new();
+	for record in porcelain.split('\0') {
+		if record.is_empty() {
+			continue;
+		}
+		// A rename's source record carries no status prefix.
+		let path = if record.len() > 3 && record.as_bytes()[2] == b' ' { &record[3..] } else { record };
+		if !path.is_empty() {
+			paths.push(normalize(path));
+		}
+	}
+	paths
+}
+
+/// `./docs/x.md` and `docs/x.md` are the same claim.
+fn normalize(path: &str) -> String {
+	path.trim_start_matches("./").trim_end_matches('/').to_owned()
+}
 
 fn fail(err: impl std::fmt::Display) -> napi::Error {
 	napi::Error::from_reason(err.to_string())
@@ -166,17 +268,42 @@ pub struct TaskRunSummary {
 /// that validates a workflow file before starting a run.
 #[napi]
 pub fn task_gate_names() -> Vec<String> {
-	vec!["artifacts_exist".to_owned(), "files_non_empty".to_owned()]
+	vec!["artifacts_exist".to_owned(), "files_non_empty".to_owned(), "diff_matches_claims".to_owned()]
 }
 
-fn build_gate(name: &str) -> Result<Box<dyn Gate>> {
+/// `allowed` is the run-wide set every `diff_matches_claims` instance shares:
+/// one gate per phase, but a change declared by phase 1 must not be undeclared
+/// for phase 2.
+fn build_gate(name: &str, allowed: &Arc<Mutex<HashSet<String>>>) -> Result<Box<dyn Gate>> {
 	match name {
 		"artifacts_exist" => Ok(Box::new(ArtifactsExist)),
 		"files_non_empty" => Ok(Box::new(FilesNonEmpty)),
+		"diff_matches_claims" => Ok(Box::new(DiffMatchesClaims { allowed: Arc::clone(allowed) })),
 		other => Err(napi::Error::from_reason(format!(
-			"unknown gate {other:?}: expected \"artifacts_exist\" or \"files_non_empty\""
+			"unknown gate {other:?}: expected one of {}",
+			task_gate_names().join(", ")
 		))),
 	}
+}
+
+/// The working tree's dirt before the run touches anything.
+///
+/// Whatever is already changed belongs to the operator, not to the agent, and
+/// must not be blamed on whichever phase happens to carry the gate. On resume
+/// this naturally re-admits the work earlier phases already landed.
+///
+/// An unreadable or non-git tree yields an empty set rather than a failure:
+/// the gate reports that condition itself when it runs, where it belongs, so a
+/// workflow without this gate is never blocked by a missing repository.
+fn initial_allowed(root: &str) -> Arc<Mutex<HashSet<String>>> {
+	let options = StatusOptions { untracked: UntrackedMode::All, pathspecs: Vec::new(), nul_terminated: true };
+	let dirty = pi_vcs::detect(std::path::Path::new(root))
+		.ok()
+		.flatten()
+		.and_then(|repo| repo.status_porcelain(&options).ok())
+		.map(|text| changed_paths(&text).into_iter().collect::<HashSet<_>>())
+		.unwrap_or_default();
+	Arc::new(Mutex::new(dirty))
 }
 
 fn to_napi_step(step: Step) -> TaskStep {
@@ -268,8 +395,9 @@ impl TaskRun {
 		if let Some(attempts) = options.max_attempts {
 			run = run.with_max_attempts(attempts);
 		}
+		let allowed = initial_allowed(&options.root);
 		for entry in options.gates.unwrap_or_default() {
-			let gates = entry.gates.iter().map(|name| build_gate(name)).collect::<Result<Vec<_>>>()?;
+			let gates = entry.gates.iter().map(|name| build_gate(name, &allowed)).collect::<Result<Vec<_>>>()?;
 			run.register_gates(&entry.phase, gates);
 		}
 		Ok(Self { inner: run, trace_dir: Some(trace_dir) })
@@ -286,8 +414,9 @@ impl TaskRun {
 		if let Some(attempts) = options.max_attempts {
 			run = run.with_max_attempts(attempts);
 		}
+		let allowed = initial_allowed(&options.root);
 		for entry in options.gates.unwrap_or_default() {
-			let gates = entry.gates.iter().map(|name| build_gate(name)).collect::<Result<Vec<_>>>()?;
+			let gates = entry.gates.iter().map(|name| build_gate(name, &allowed)).collect::<Result<Vec<_>>>()?;
 			run.register_gates(&entry.phase, gates);
 		}
 		Ok(Self { inner: run, trace_dir: options.trace_dir })
@@ -319,6 +448,14 @@ impl TaskRun {
 	#[napi]
 	pub fn note_panel_opinion(&self, owner: String, ok: bool, tokens: u32) -> Result<()> {
 		self.inner.note_panel_opinion(&owner, ok, tokens).map_err(fail)
+	}
+
+	/// Records what the attempt in flight cost. Charged per attempt: a rejected
+	/// try spent real tokens, and a phase that needed three of them is the one
+	/// a cost report has to show.
+	#[napi]
+	pub fn note_phase_tokens(&self, owner: String, tokens: u32) -> Result<()> {
+		self.inner.note_phase_tokens(&owner, tokens).map_err(fail)
 	}
 
 	/// The last accepted envelope, for building the next phase's prompt.
@@ -425,6 +562,7 @@ pub fn task_trace_layout() -> TaskTraceLayout {
 			"run_finished",
 			"panel_opinion",
 			"run_resumed",
+			"phase_tokens",
 		]
 		.map(String::from)
 		.to_vec(),
@@ -465,5 +603,51 @@ impl TaskTraceReader {
 	#[napi]
 	pub fn strings(&self) -> Vec<String> {
 		self.inner.strings().to_vec()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn porcelain_records_yield_repo_relative_paths() {
+		// `-z` output: status prefix, path, NUL. A rename adds a second record
+		// carrying the source with no prefix.
+		let porcelain = " M src/edited.ts\0?? src/brand-new.ts\0R  docs/new.md\0docs/old.md\0";
+		assert_eq!(
+			changed_paths(porcelain),
+			vec!["src/edited.ts", "src/brand-new.ts", "docs/new.md", "docs/old.md"],
+			"an untracked file and a rename's source are both real changes"
+		);
+	}
+
+	#[test]
+	fn trailing_separator_does_not_produce_an_empty_path() {
+		// An empty path would be allowed by any claim set and silently swallow
+		// a real change.
+		assert!(changed_paths("\0\0").is_empty());
+		assert_eq!(changed_paths(" M a.ts\0").len(), 1);
+	}
+
+	#[test]
+	fn a_claim_is_matched_regardless_of_dot_slash_prefix() {
+		assert_eq!(normalize("./docs/x.md"), normalize("docs/x.md"));
+	}
+
+	#[test]
+	fn a_gate_with_no_repository_fails_instead_of_passing_quietly() {
+		let dir = std::env::temp_dir().join(format!("pi-natives-gate-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).expect("temp dir");
+		let gate = DiffMatchesClaims { allowed: Arc::new(Mutex::new(HashSet::new())) };
+		let envelope = Envelope::code(true, "done");
+		let report = gate.run(&envelope, &GateCtx { root: &dir });
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert!(!report.ok(), "a gate that cannot read a diff must not report passed");
+		assert!(
+			report.violations().any(|v| v.contains("not a repository")),
+			"the violation has to name why it could not check, not just fail"
+		);
 	}
 }

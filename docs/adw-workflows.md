@@ -167,12 +167,30 @@ An accepted envelope is persisted to `<traceDir>/envelopes/<phase>.json` and bec
 
 Gates verify claims; they never predict. They run **after** a phase, in Rust, against the filesystem — so a gate reads what the envelope actually declared and checks whether it is true.
 
-| Gate              | Passes when                                                        |
-| ----------------- | ------------------------------------------------------------------ |
-| `artifacts_exist` | every path in `artifacts` exists on disk                           |
-| `files_non_empty` | every path in `artifacts` exists **and** has non-zero size          |
+| Gate                  | Passes when                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------ |
+| `artifacts_exist`     | every path in `artifacts` exists on disk                                             |
+| `files_non_empty`     | every path in `artifacts` exists **and** has non-zero size                            |
+| `diff_matches_claims` | every path the working tree changed is one some phase declared                        |
 
 `passed` is evidence rather than silence: a gate reports what it examined, so a phase that declared no artifacts cannot pass by claiming nothing. Gate names are validated at load time against `taskGateNames()`, the same list the engine builds from — a new gate in Rust needs no matching edit in TypeScript to be accepted.
+
+### `diff_matches_claims`
+
+The first two catch a claim with no file. This catches the opposite — **a file with no claim**. An agent that edited three files and confessed one leaves two changes nobody reviewed, and an existence check cannot see them, because nothing was claimed.
+
+The allowed set is cumulative, so no phase is blamed for another's work:
+
+```text
+allowed   = dirty before the run started
+          ∪ paths declared by earlier phases
+          ∪ paths declared by this envelope
+violation = git status (untracked included) − allowed
+```
+
+Whatever was already dirty belongs to the operator, not the agent. Untracked files are listed individually rather than collapsed into their directory, because a brand-new undeclared file is the common case. A rename reports both paths: a file moved out from under a claim is exactly what this gate is for.
+
+It lives in `crates/pi-natives`, not `pi-tasks`, because it needs git — the engine crate stays free of I/O beyond the filesystem. And a gate that cannot gather evidence **fails**: run it outside a repository and it reports `not a repository`, never a quiet pass.
 
 ## Corrections and retries
 
@@ -243,9 +261,11 @@ A reader seeks event `n` at `HEADER_LEN + n * RECORD_LEN` and tails by byte offs
 
 The encoding is the ABI. `taskTraceLayout()` exports the offsets so a reader in another language uses them directly instead of duplicating the layout; there is no `unsafe` and no transmute, only explicit `to_le_bytes`, so the layout is identical on every target.
 
-Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase_rejected`, `phase_finished`, `run_finished`, `panel_opinion`, `run_resumed`.
+Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase_rejected`, `phase_finished`, `run_finished`, `panel_opinion`, `run_resumed`, `phase_tokens`.
 
 `panel_opinion` exists because the fan-out happens in the caller — only it can spawn a model. Without that record a fusion phase would be one opaque span instead of N comparable answers.
+
+`phase_tokens` is what an attempt cost, reported by the caller for the same reason. It is charged **per attempt, before the verdict**, because a rejected attempt spent real tokens: a run whose cost counted only its successes would hide the retries that made it expensive. In a measured two-attempt run the rejected try cost 25,561 tokens against the accepted one's 26,059 — charging only the winner would have understated the run by half. It needs its own record because `value` already carries the violation count on both rejection paths.
 
 ## Viewing a run
 
