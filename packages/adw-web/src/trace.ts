@@ -36,6 +36,11 @@ export interface RunSummary {
 	phases: number;
 	/** Every token charge in the run, retries included. */
 	tokens: number;
+	/**
+	 * Charges whose provider reported no usage. A model turn cannot cost zero,
+	 * so `tokens` is a floor, not a total, whenever this is above zero.
+	 */
+	unaccountedPhases: number;
 	events: number;
 	resumed: boolean;
 }
@@ -100,6 +105,10 @@ function summarize(adwId: string, events: TraceEvent[]): RunSummary {
 			(total, event) => total + (event.kind === "phase_tokens" || event.kind === "panel_opinion" ? event.value : 0),
 			0,
 		),
+		// `ok` on a charge means accounted for: some providers (omniroute/auto)
+		// return an all-zero usage record, and a total that swallowed those
+		// would be confidently wrong.
+		unaccountedPhases: events.filter(event => event.kind === "phase_tokens" && !event.ok).length,
 		events: events.length,
 		resumed: events.some(event => event.kind === "run_resumed"),
 	};

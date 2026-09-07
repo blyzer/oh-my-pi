@@ -472,7 +472,13 @@ export function createExecutorSeatRunner(ctx: {
 			output: result.output,
 			stderr: result.stderr,
 			exitCode: result.exitCode,
-			tokens: result.tokens,
+			// `result.tokens` excludes cacheRead by design — it is a cumulative
+			// billing-volume counter, and re-reading cached context every turn
+			// would make that sum misleading. For "what did this attempt cost"
+			// that exclusion is wrong: a cache-warm turn reports zero, which
+			// measured as literally 0 for a real run that wrote a file. Prefer
+			// the aggregated total and fall back only when no usage arrived.
+			tokens: result.usage?.totalTokens ?? result.tokens,
 			model: result.resolvedModel ?? patterns[0] ?? seat.agent.model?.[0] ?? "default",
 		});
 

@@ -315,7 +315,11 @@ Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase
 
 `phase_rewound` cannot be skipped by a reader, which is why it forced a format-version bump: it carries the target the run went back to, and position stops being derivable by counting passed phases the moment one of them runs twice.
 
-`phase_tokens` is what an attempt cost, reported by the caller for the same reason. It is charged **per attempt, before the verdict**, because a rejected attempt spent real tokens: a run whose cost counted only its successes would hide the retries that made it expensive. In a measured two-attempt run the rejected try cost 25,561 tokens against the accepted one's 26,059 — charging only the winner would have understated the run by half. It needs its own record because `value` already carries the violation count on both rejection paths.
+`phase_tokens` is what an attempt cost, reported by the caller for the same reason. It is charged **per attempt, before the verdict**, because a rejected attempt spent real tokens: a run whose cost counted only its successes would hide the retries that made it expensive — in a measured two-attempt run the rejected try cost about as much as the accepted one. It needs its own record because `value` already carries the violation count on both rejection paths.
+
+The figure is `usage.totalTokens`, not the subagent's `tokens` counter: that counter deliberately excludes cache reads, which is right for a cumulative billing-volume number and wrong for "what did this attempt cost".
+
+**The `ok` flag on the record means *accounted for*.** Not every provider reports usage — `omniroute/auto` returns an all-zero usage record — and a model turn cannot genuinely cost zero. A zero charge is therefore marked unaccounted, the viewer says `provider reported no usage` rather than `0 tokens`, and a run with any unaccounted phase shows the count beside its total. The total is a floor, never a confident sum over numbers the provider never gave.
 
 ## Viewing a run
 

@@ -410,6 +410,12 @@ impl Run {
 	/// and a phase that needed three tries is the one worth seeing in a cost
 	/// report. Owner is recorded too, so a fusion phase's fuser is separable
 	/// from the panel members already traced by `note_panel_opinion`.
+	///
+	/// The `ok` flag means *accounted for*. A model turn cannot cost zero
+	/// tokens, so a zero is a provider that reported no usage — `omniroute/auto`
+	/// returns an all-zero usage record — and a reader must be able to tell that
+	/// apart from a phase that was genuinely free. Silently summing zeros would
+	/// present a confident total that is wrong.
 	pub fn note_phase_tokens(&self, owner: &str, tokens: u32) -> Result<(), RunError> {
 		let phase = self.active_phase().ok_or(RunError::NoActiveStep)?;
 		let phase_id = self.intern(&phase.name)?;
@@ -419,6 +425,7 @@ impl Run {
 				.phase(phase_id)
 				.owner(owner_id)
 				.attempt(self.attempts + 1)
+				.ok(tokens > 0)
 				.value(tokens),
 		)
 	}
@@ -798,6 +805,25 @@ mod tests {
 			},
 			other => panic!("expected build, got {other:?}"),
 		}
+	}
+
+	#[test]
+	fn a_provider_that_reports_no_usage_is_marked_unaccounted() {
+		let dir = TempDir::new("run-unaccounted");
+		let trace_dir = dir.path().join("trace");
+		let mut run = run_in(&dir).with_tracer(Tracer::create(&trace_dir).expect("tracer"));
+
+		run.next_step().expect("step");
+		// `omniroute/auto` returns an all-zero usage record. A model turn cannot
+		// cost nothing, so this must not read as a free phase.
+		run.note_phase_tokens("sonic", 0).expect("note");
+		run.submit_envelope(ok_envelope("done")).expect("submit");
+
+		let mut reader = TraceReader::open(&trace_dir).expect("open");
+		let events = reader.read_from(0).expect("read");
+		let charge = events.iter().find(|e| e.kind == EventKind::PhaseTokens).expect("a charge record");
+		assert_eq!(charge.value, 0);
+		assert!(!charge.ok, "zero tokens means unaccounted, and a reader has to be able to see that");
 	}
 
 	#[test]

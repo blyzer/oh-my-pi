@@ -58,7 +58,11 @@ function describe(event: TraceEvent): string {
 		case "panel_opinion":
 			return `${event.owner} — ${event.value.toLocaleString()} tokens`;
 		case "phase_tokens":
-			return `${event.owner} — ${event.value.toLocaleString()} tokens${event.attempt > 1 ? ` (attempt ${event.attempt})` : ""}`;
+			// A model turn cannot cost nothing; a zero is a provider that
+			// reported no usage, and saying "0 tokens" would read as free.
+			return event.ok
+				? `${event.owner} — ${event.value.toLocaleString()} tokens${event.attempt > 1 ? ` (attempt ${event.attempt})` : ""}`
+				: `${event.owner} — provider reported no usage`;
 		case "phase_rejected":
 			return `${event.value} violation${event.value === 1 ? "" : "s"}${event.detail ? ` · ${event.detail}` : ""}`;
 		default:
@@ -169,6 +173,11 @@ export function App() {
 						</header>
 						<div className="run-meta">
 							{detail.adwId} · {detail.events} events · {(detail.durationMs / 1000).toFixed(1)}s
+							{detail.tokens > 0 ? ` · ${detail.tokens.toLocaleString()} tok` : null}
+							{/* A floor, not a total: some providers report no usage at all. */}
+							{detail.unaccountedPhases > 0
+								? ` · ${detail.unaccountedPhases} phase${detail.unaccountedPhases === 1 ? "" : "s"} unaccounted`
+								: null}
 						</div>
 						{phases.map(group => (
 							<Phase group={group} widest={widest} key={`${group.name}-${group.startedAt}`} />
