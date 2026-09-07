@@ -1,0 +1,36 @@
+# The smallest workflow worth having: write, then prove it.
+#
+#   cp docs/adw/examples/fix.yml .omp/adw/
+#   /adw fix "the retry helper drops the last attempt"
+#
+# What it teaches: `onFail: correct`. Without it a red test suite re-runs the
+# identical command until the budget is gone, and the agent that wrote the code
+# never learns it broke. With it, the failure goes back to `build` as a
+# correction in that agent's own session — it still remembers what it wrote.
+#
+# Adjust `command` to your project's test runner.
+name: fix
+description: Implement a fix and refuse to call it done until the tests agree
+
+maxAttempts: 3
+
+phases:
+  - name: build
+    kind: agent
+    owner: task
+    prompt: |
+      Fix the reported problem. Reproduce it first so you can tell whether your
+      change actually addresses it, and keep the change as small as the fix
+      allows.
+    # Verifies that every path the envelope claimed really exists and carries
+    # bytes. Catches "done!" with nothing written.
+    gates: [artifacts_exist, files_non_empty]
+
+  - name: verify
+    kind: code
+    owner: bun
+    command: bun test
+    timeoutMs: 600000
+    # The whole point of this file: a red suite returns to `build`, and the
+    # attempt is charged to `build` — the only phase that can change the result.
+    onFail: correct

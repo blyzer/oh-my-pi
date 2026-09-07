@@ -1,0 +1,43 @@
+# Two models read the same code independently, then one writes the review.
+#
+#   cp docs/adw/examples/review.yml .omp/adw/
+#   /adw review "the isolation path in src/task/worktree.ts"
+#
+# What it teaches: the `fusion` phase. Different models is the entire point —
+# one model's blind spot is another's obvious answer. The panel answers
+# read-only and in parallel (`read`, `grep`, `glob`, `yield` only, no write or
+# bash), which is what makes running them at once safe: exactly one seat, the
+# fuser, may write.
+#
+# Opinions reach the fuser labelled and in the order declared here, never
+# anonymised and never merged early — a reviewer who is alone in objecting
+# should still be readable as the dissent. A retry re-runs the fuser only; the
+# panel was not what got rejected, and re-polling N models is the most
+# expensive way to change nothing.
+#
+# Pin `model:` on the seats to force genuinely different models. Left unset,
+# they resolve through the roster and may land on the same one — which would
+# tell the fuser it has two opinions when it has one.
+name: review
+description: An N-way read-only review, merged by a single writer
+
+maxAttempts: 2
+
+phases:
+  - name: read
+    kind: fusion
+    description: Two independent readings, one written verdict
+    # Reaches all three prompts — every panel seat and the fuser.
+    prompt: |
+      Review the code named in the request for correctness first, then for
+      anything that would fail in production but not in a test. Write the
+      merged review to REVIEW.md and declare it in artifacts. Where the panel
+      disagreed, say so and say which reading you took: a suppressed objection
+      is worse than a wrong one.
+    panel:
+      - owner: reviewer
+      - owner: security-reviewer
+    fuser:
+      owner: task
+      thinking: high
+    gates: [artifacts_exist, files_non_empty]

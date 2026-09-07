@@ -41,6 +41,21 @@ Values cross as `#[napi(object)]` structs through V8 accessors, not as JSON stri
 
 Workflows are discovered from `.omp/adw/*.yml`, project directories first (nearest wins), then user-level — the same precedence as agent discovery in `.omp/agents/*.md`. A repo carries its own factory.
 
+Three runnable examples ship in [`docs/adw/examples/`](adw/examples), each teaching one thing. Copy one and go:
+
+```bash
+mkdir -p .omp/adw && cp docs/adw/examples/fix.yml .omp/adw/
+/adw fix "the retry helper drops the last attempt"
+```
+
+| Example | Teaches |
+| --- | --- |
+| [`fix.yml`](adw/examples/fix.yml) | `onFail: correct` — a red suite returns to the agent that wrote the code |
+| [`ship.yml`](adw/examples/ship.yml) | `isolation` and `diff_matches_claims` — nothing lands unless the run is accepted, and nothing changes unconfessed |
+| [`review.yml`](adw/examples/review.yml) | a `fusion` phase — two read-only readings merged by one writer |
+
+A test parses every file in that directory, so a schema change that invalidates an example fails in CI rather than in your first run.
+
 ```yaml
 name: ship
 description: Plan, implement, verify — with a second opinion on the design

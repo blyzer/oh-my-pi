@@ -259,3 +259,32 @@ describe("onFail: correct", () => {
 		expect(rewindTarget(workflow, "t")).toBe("design");
 	});
 });
+
+/**
+ * The examples are copied into real repos, so a schema change that invalidates
+ * one has to fail here rather than in a user's first run. Reading the shipped
+ * directory rather than a fixture is the point: a new example is covered the
+ * moment it lands.
+ */
+describe("shipped example workflows", () => {
+	const dir = path.join(import.meta.dir, "../../../../docs/adw/examples");
+	const files = fs.readdirSync(dir).filter(name => name.endsWith(".yml"));
+
+	it("ships at least one example", () => {
+		// Zero examples was the state this test exists to prevent returning to.
+		expect(files.length).toBeGreaterThan(0);
+	});
+
+	for (const file of files) {
+		it(`parses and validates ${file}`, () => {
+			const workflow = parseWorkflow(file, fs.readFileSync(path.join(dir, file), "utf8"));
+			expect(workflow.name).toBe(file.replace(/\.yml$/, ""));
+			expect(workflow.phases.length).toBeGreaterThan(0);
+			// An example advertising `onFail: correct` must really have a
+			// correctable predecessor, not pass on a technicality.
+			for (const phase of workflow.phases) {
+				if (phase.onFail === "correct") expect(rewindTarget(workflow, phase.name)).toBeTruthy();
+			}
+		});
+	}
+});
