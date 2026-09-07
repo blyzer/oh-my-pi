@@ -127,6 +127,21 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 				fail(`phase "${phase.name}" requests unknown gate "${gate}" (known: ${knownGates.join(", ")})`);
 			}
 		}
+		// A `code` phase reports an envelope with no artifacts by construction,
+		// and an empty claim now fails these gates rather than passing
+		// vacuously — so this combination is a guaranteed runtime failure.
+		// Catching it here costs nothing; catching it mid-run costs a phase.
+		if (phase.kind === "code") {
+			for (const gate of phase.gates ?? []) {
+				if (gate === "artifacts_exist" || gate === "files_non_empty") {
+					fail(
+						`phase "${phase.name}" is a code phase and cannot satisfy gate "${gate}": ` +
+							"a code phase declares no artifacts. Use diff_matches_claims, or move the gate to the " +
+							"agent phase that writes the files.",
+					);
+				}
+			}
+		}
 		for (const dependency of phase.dependsOn ?? []) {
 			if (dependency === phase.name) fail(`phase "${phase.name}" depends on itself`);
 			if (!workflow.phases.some(other => other.name === dependency)) {

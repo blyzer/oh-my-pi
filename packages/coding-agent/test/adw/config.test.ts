@@ -342,3 +342,22 @@ describe("dependsOn", () => {
 		expect(rewindTarget(workflow, "verify")).toBe("api");
 	});
 });
+
+describe("artifact gates on a code phase", () => {
+	const yaml = (gate: string) =>
+		`name: w\nphases:\n  - { name: t, kind: code, owner: sh, command: "true", gates: [${gate}] }`;
+
+	for (const gate of ["artifacts_exist", "files_non_empty"]) {
+		it(`rejects ${gate} on a code phase instead of failing it at run time`, () => {
+			// A code phase declares no artifacts, and an empty claim fails these
+			// gates rather than passing vacuously — so this combination can only
+			// ever fail. Catching it at load costs nothing; catching it mid-run
+			// costs a phase.
+			expect(() => parseWorkflow("w.yml", yaml(gate))).toThrow(/cannot satisfy gate/);
+		});
+	}
+
+	it("still allows diff_matches_claims, which examines the tree rather than a claim", () => {
+		expect(() => parseWorkflow("w.yml", yaml("diff_matches_claims"))).not.toThrow();
+	});
+});

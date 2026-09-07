@@ -244,6 +244,14 @@ Gates verify claims; they never predict. They run **after** a phase, in Rust, ag
 
 `passed` is evidence rather than silence, and that has teeth: **an envelope that declares no artifacts fails both artifact gates** rather than clearing them vacuously. Requesting the gate is an assertion that the phase produces files. This was wrong until a live run proved it — a fuser returned `artifacts: []`, cleared both gates and wrote nothing, while this page already claimed it could not. Gate names are validated at load time against `taskGateNames()`, the same list the engine builds from — a new gate in Rust needs no matching edit in TypeScript to be accepted.
 
+A `code` phase declares no artifacts, so `artifacts_exist` and `files_non_empty` on one could only ever fail. That combination is **rejected at load time**, naming what to use instead:
+
+```text
+bad.yml: phase "check" is a code phase and cannot satisfy gate "artifacts_exist":
+a code phase declares no artifacts. Use diff_matches_claims, or move the gate to
+the agent phase that writes the files.
+```
+
 ### `diff_matches_claims`
 
 The first two catch a claim with no file. This catches the opposite — **a file with no claim**. An agent that edited three files and confessed one leaves two changes nobody reviewed, and an existence check cannot see them, because nothing was claimed.
