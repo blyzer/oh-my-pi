@@ -625,6 +625,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		gates: workflow.phases
 			.filter(phase => (phase.gates?.length ?? 0) > 0)
 			.map(phase => ({ phase: phase.name, gates: phase.gates ?? [] })),
+		undeclaredIgnore: workflow.undeclaredIgnore,
 	};
 	// Resume rebuilds cursor, attempts and handoff from the trace; a fresh run
 	// starts one.

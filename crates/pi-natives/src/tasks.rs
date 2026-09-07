@@ -21,6 +21,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use napi::{Result, bindgen_prelude::*};
 use napi_derive::napi;
 use pi_tasks::{
@@ -44,6 +45,10 @@ struct DiffMatchesClaims {
 	/// everything earlier phases claimed. Shared across phases, so phase 2 is
 	/// never blamed for the files phase 1 legitimately wrote.
 	allowed: Arc<Mutex<HashSet<String>>>,
+	/// Paths a build legitimately rewrites without any phase claiming them.
+	/// Compiled once at run construction, so a bad pattern fails before a
+	/// token is spent rather than when the gate first runs.
+	ignore:  GlobSet,
 }
 
 impl Gate for DiffMatchesClaims {
@@ -88,7 +93,7 @@ impl Gate for DiffMatchesClaims {
 
 		let mut undeclared = 0usize;
 		for path in changed_paths(&porcelain) {
-			if allowed.contains(&path) {
+			if allowed.contains(&path) || self.ignore.is_match(&path) {
 				continue;
 			}
 			undeclared += 1;
@@ -191,6 +196,13 @@ pub struct TaskRunOptions {
 	/// Attempts per phase before the run halts. Default 3, minimum 1.
 	pub max_attempts: Option<u32>,
 	pub gates:        Option<Vec<TaskPhaseGates>>,
+	/// Globs `diff_matches_claims` treats as always accounted for.
+	///
+	/// Empty by default and deliberately so: a wide default makes the gate
+	/// noisy, and an operator who cannot tell which changes it will forgive
+	/// stops trusting it. Declare the paths a build legitimately rewrites
+	/// (`bun.lock`, `*.generated.ts`) and nothing more.
+	pub undeclared_ignore: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,16 +290,34 @@ pub fn task_gate_names() -> Vec<String> {
 /// `allowed` is the run-wide set every `diff_matches_claims` instance shares:
 /// one gate per phase, but a change declared by phase 1 must not be undeclared
 /// for phase 2.
-fn build_gate(name: &str, allowed: &Arc<Mutex<HashSet<String>>>) -> Result<Box<dyn Gate>> {
+fn build_gate(name: &str, allowed: &Arc<Mutex<HashSet<String>>>, ignore: &GlobSet) -> Result<Box<dyn Gate>> {
 	match name {
 		"artifacts_exist" => Ok(Box::new(ArtifactsExist)),
 		"files_non_empty" => Ok(Box::new(FilesNonEmpty)),
-		"diff_matches_claims" => Ok(Box::new(DiffMatchesClaims { allowed: Arc::clone(allowed) })),
+		"diff_matches_claims" => {
+			Ok(Box::new(DiffMatchesClaims { allowed: Arc::clone(allowed), ignore: ignore.clone() }))
+		},
 		other => Err(napi::Error::from_reason(format!(
 			"unknown gate {other:?}: expected one of {}",
 			task_gate_names().join(", ")
 		))),
 	}
+}
+
+/// Compile the ignore globs, naming the pattern that is wrong.
+///
+/// Run construction is the right place to fail: a bad pattern discovered when
+/// the gate first runs would have already spent a phase's tokens, and an
+/// operator who wrote `**.lock` instead of `**/*.lock` must learn it now
+/// rather than watch a gate quietly forgive nothing.
+fn compile_ignore(patterns: Option<Vec<String>>) -> Result<GlobSet> {
+	let mut builder = GlobSetBuilder::new();
+	for pattern in patterns.unwrap_or_default() {
+		let glob = Glob::new(&pattern)
+			.map_err(|err| napi::Error::from_reason(format!("undeclaredIgnore {pattern:?}: {err}")))?;
+		builder.add(glob);
+	}
+	builder.build().map_err(fail)
 }
 
 /// The working tree's dirt before the run touches anything.
@@ -405,8 +435,10 @@ impl TaskRun {
 			run = run.with_max_attempts(attempts);
 		}
 		let allowed = initial_allowed(&options.root);
+		let ignore = compile_ignore(options.undeclared_ignore)?;
 		for entry in options.gates.unwrap_or_default() {
-			let gates = entry.gates.iter().map(|name| build_gate(name, &allowed)).collect::<Result<Vec<_>>>()?;
+			let gates =
+				entry.gates.iter().map(|name| build_gate(name, &allowed, &ignore)).collect::<Result<Vec<_>>>()?;
 			run.register_gates(&entry.phase, gates);
 		}
 		Ok(Self { inner: run, trace_dir: Some(trace_dir) })
@@ -424,8 +456,10 @@ impl TaskRun {
 			run = run.with_max_attempts(attempts);
 		}
 		let allowed = initial_allowed(&options.root);
+		let ignore = compile_ignore(options.undeclared_ignore)?;
 		for entry in options.gates.unwrap_or_default() {
-			let gates = entry.gates.iter().map(|name| build_gate(name, &allowed)).collect::<Result<Vec<_>>>()?;
+			let gates =
+				entry.gates.iter().map(|name| build_gate(name, &allowed, &ignore)).collect::<Result<Vec<_>>>()?;
 			run.register_gates(&entry.phase, gates);
 		}
 		Ok(Self { inner: run, trace_dir: options.trace_dir })
@@ -649,7 +683,10 @@ mod tests {
 	fn a_gate_with_no_repository_fails_instead_of_passing_quietly() {
 		let dir = std::env::temp_dir().join(format!("pi-natives-gate-{}", std::process::id()));
 		std::fs::create_dir_all(&dir).expect("temp dir");
-		let gate = DiffMatchesClaims { allowed: Arc::new(Mutex::new(HashSet::new())) };
+		let gate = DiffMatchesClaims {
+			allowed: Arc::new(Mutex::new(HashSet::new())),
+			ignore:  compile_ignore(None).expect("compiles"),
+		};
 		let envelope = Envelope::code(true, "done");
 		let report = gate.run(&envelope, &GateCtx { root: &dir });
 		let _ = std::fs::remove_dir_all(&dir);
@@ -659,5 +696,28 @@ mod tests {
 			report.violations().any(|v| v.contains("not a repository")),
 			"the violation has to name why it could not check, not just fail"
 		);
+	}
+
+	#[test]
+	fn an_ignored_glob_is_forgiven_but_a_sibling_is_not() {
+		let ignore = compile_ignore(Some(vec!["**/*.lock".to_owned(), "bun.lock".to_owned()])).expect("compiles");
+		assert!(ignore.is_match("bun.lock"));
+		assert!(ignore.is_match("packages/x/pnpm.lock"));
+		// Narrow on purpose: a pattern that forgave src/index.ts would make the
+		// gate worthless, and an operator cannot audit what it silently allows.
+		assert!(!ignore.is_match("src/index.ts"));
+		assert!(!ignore.is_match("lock"));
+	}
+
+	#[test]
+	fn no_patterns_forgives_nothing() {
+		let ignore = compile_ignore(None).expect("compiles");
+		assert!(!ignore.is_match("bun.lock"), "an empty default must not quietly allow anything");
+	}
+
+	#[test]
+	fn a_malformed_glob_fails_at_construction_naming_the_pattern() {
+		let err = compile_ignore(Some(vec!["src/**/[".to_owned()])).expect_err("must refuse");
+		assert!(err.reason.contains("src/**/["), "the operator has to be told which pattern is wrong: {err}");
 	}
 }

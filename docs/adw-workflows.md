@@ -83,6 +83,7 @@ phases:
 | `description` | no       | Shown by `/adw list`                                                    |
 | `maxAttempts` | no       | Attempts per phase before the run halts. Default `3`, minimum `1`       |
 | `isolation`   | no       | Run the whole workflow against a materialised copy of the repo          |
+| `undeclaredIgnore` | no  | Globs `diff_matches_claims` treats as always accounted for              |
 
 ### Phase keys
 
@@ -190,6 +191,20 @@ violation = git status (untracked included) − allowed
 ```
 
 Whatever was already dirty belongs to the operator, not the agent. Untracked files are listed individually rather than collapsed into their directory, because a brand-new undeclared file is the common case. A rename reports both paths: a file moved out from under a claim is exactly what this gate is for.
+
+Some paths a build legitimately rewrites without any phase claiming them — a lockfile after an install, generated sources. Declare those, and only those:
+
+```yaml
+undeclaredIgnore: ["**/*.lock", "**/*.generated.ts"]
+```
+
+The default is **empty**, deliberately. A wide default makes the gate noisy, and an operator who cannot tell which changes it forgives stops trusting it — a gate nobody trusts gets deleted. A malformed pattern fails the run at construction, naming itself:
+
+```text
+undeclaredIgnore "src/**/[": error parsing glob 'src/**/[': unclosed character class; missing ']'
+```
+
+That check runs before a token is spent, because discovering it when the gate first fires means a phase already paid for the mistake.
 
 It lives in `crates/pi-natives`, not `pi-tasks`, because it needs git — the engine crate stays free of I/O beyond the filesystem. And a gate that cannot gather evidence **fails**: run it outside a repository and it reports `not a repository`, never a quiet pass.
 

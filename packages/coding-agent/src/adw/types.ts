@@ -75,6 +75,16 @@ export const adwWorkflowSchema = type({
 	 * half-finished edits in the working tree with no undo.
 	 */
 	"isolation?": "boolean",
+	/**
+	 * Globs `diff_matches_claims` treats as always accounted for, for paths a
+	 * build legitimately rewrites without any phase claiming them (`bun.lock`,
+	 * `**​/*.generated.ts`).
+	 *
+	 * Empty by default and deliberately so: a wide default makes the gate noisy,
+	 * and an operator who cannot tell which changes it forgives stops trusting
+	 * it. A malformed pattern fails the run at construction, naming itself.
+	 */
+	"undeclaredIgnore?": "string[]",
 	phases: adwPhaseSchema.array(),
 })
 	// A misspelled key is not a harmless no-op: `isolaton: true` would run the

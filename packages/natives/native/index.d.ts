@@ -2885,6 +2885,15 @@ export interface TaskRunOptions {
   /** Attempts per phase before the run halts. Default 3, minimum 1. */
   maxAttempts?: number
   gates?: Array<TaskPhaseGates>
+  /**
+   * Globs `diff_matches_claims` treats as always accounted for.
+   *
+   * Empty by default and deliberately so: a wide default makes the gate
+   * noisy, and an operator who cannot tell which changes it will forgive
+   * stops trusting it. Declare the paths a build legitimately rewrites
+   * (`bun.lock`, `*.generated.ts`) and nothing more.
+   */
+  undeclaredIgnore?: Array<string>
 }
 
 export interface TaskRunSummary {
