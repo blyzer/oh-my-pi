@@ -2866,6 +2866,12 @@ export interface TaskPhaseSpec {
   kind: TaskPhaseKind
   owner: string
   description?: string
+  /**
+   * Phase this one's failure returns to, instead of retrying in place. The
+   * caller resolves it: the engine obeys a name and holds no policy about
+   * which phase can fix a failure.
+   */
+  rewindTo?: string
 }
 
 export interface TaskRunOptions {

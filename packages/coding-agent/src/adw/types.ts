@@ -44,6 +44,17 @@ const adwPhaseSchema = type({
 	/** `code`: per-command timeout in ms. Defaults to 10 minutes. */
 	"timeoutMs?": "number",
 	/**
+	 * `code`: what a failure does. `retry` (the default) re-runs the command,
+	 * which is right for a flaky step and useless for a deterministic one — a
+	 * red test suite re-run is red again, so it burns the budget while the
+	 * agent that wrote the code never learns it broke.
+	 *
+	 * `correct` sends the failure back to the nearest preceding `agent` or
+	 * `fusion` phase as a correction in that agent's own session. The attempt
+	 * is charged to that phase, which is what makes the loop finite.
+	 */
+	"onFail?": '"retry" | "correct"',
+	/**
 	 * `fusion`: two or more seats that answer the same prompt independently and
 	 * read-only. Different models is the point — one model's blind spot is
 	 * another's obvious answer.

@@ -21,6 +21,24 @@ const ADW_SUBPATH = "adw";
 export class AdwConfigError extends Error {}
 
 /**
+ * The phase a failing `code` phase sends its failure back to: the nearest
+ * preceding one that has an agent to correct.
+ *
+ * Resolved here rather than in the engine so no phase-selection policy lives
+ * in Rust — it is handed a name and obeys it. A `code` phase is skipped
+ * because correcting it would mean re-running a command that already decided.
+ */
+export function rewindTarget(workflow: AdwWorkflowConfig, phaseName: string): string | undefined {
+	const index = workflow.phases.findIndex(phase => phase.name === phaseName);
+	if (index < 0) return undefined;
+	for (let i = index - 1; i >= 0; i--) {
+		const candidate = workflow.phases[i];
+		if (candidate && (candidate.kind === "agent" || candidate.kind === "fusion")) return candidate.name;
+	}
+	return undefined;
+}
+
+/**
  * Rejects a schema-valid file that cannot run: an `agent` phase with no owner,
  * a `code` phase with no command, an unknown gate, or duplicate phase names
  * (the engine keys gates and trace records by name).
@@ -48,6 +66,15 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 		if (phase.kind === "code" && !phase.command) fail(`phase "${phase.name}" is a code phase but has no command`);
 		if (phase.kind === "code" && (phase.model || phase.thinking || phase.prompt)) {
 			fail(`phase "${phase.name}" is a code phase; model/thinking/prompt do not apply`);
+		}
+		if (phase.onFail && phase.kind !== "code") {
+			fail(`phase "${phase.name}" is a ${phase.kind} phase; onFail only applies to code phases`);
+		}
+		// A target that does not exist is a config error, and the engine would
+		// only discover it mid-run — after a phase already failed, which is the
+		// worst moment to learn the workflow was malformed.
+		if (phase.onFail === "correct" && !rewindTarget(workflow, phase.name)) {
+			fail(`phase "${phase.name}" sets onFail: correct but no agent or fusion phase precedes it`);
 		}
 		if (phase.kind === "fusion") {
 			// One seat is not a panel — it is an `agent` phase with extra syntax.

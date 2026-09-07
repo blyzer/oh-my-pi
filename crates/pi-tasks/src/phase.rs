@@ -23,11 +23,28 @@ pub struct PhaseParams {
 	pub owner: String,
 	#[serde(default)]
 	pub description: String,
+	/// Where a rejected attempt sends the run instead of retrying in place.
+	///
+	/// A `Code` phase has no agent to correct: re-running the same command
+	/// after a red test suite is deterministic, so it burns the budget and the
+	/// agent that wrote the code never learns it broke. Naming an earlier phase
+	/// here rewinds the run to it with the failure as its correction.
+	///
+	/// The engine only obeys the name; the caller decides what the default
+	/// target is, so no phase-selection policy lives in here.
+	#[serde(default)]
+	pub rewind_to: Option<String>,
 }
 
 impl PhaseParams {
 	pub fn new(name: impl Into<String>, kind: PhaseKind, owner: impl Into<String>) -> Self {
-		Self { name: name.into(), kind, owner: owner.into(), description: String::new() }
+		Self { name: name.into(), kind, owner: owner.into(), description: String::new(), rewind_to: None }
+	}
+
+	/// Send a rejected attempt back to `phase` instead of retrying in place.
+	pub fn rewinding_to(mut self, phase: impl Into<String>) -> Self {
+		self.rewind_to = Some(phase.into());
+		self
 	}
 
 	pub fn describe(mut self, description: impl Into<String>) -> Self {

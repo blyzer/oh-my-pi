@@ -224,6 +224,24 @@ impl Run {
 				// there and there is nothing left to resume into.
 				EventKind::PhaseFinished => run.halted = true,
 				EventKind::PhaseRejected => run.attempts = u32::from(event.attempt),
+				// Position stops being "how many phases passed" the moment one of
+				// them runs twice, so it is taken from the record rather than
+				// counted. Without this a resumed run would restart at the wrong
+				// phase with a budget it never spent.
+				EventKind::PhaseRewound => {
+					let name = reader.text(event.phase).to_owned();
+					let Some(index) = run.workflow.phases.iter().position(|phase| phase.name == name) else {
+						return Err(RunError::Mismatch(format!("trace rewound to unknown phase {name:?}")));
+					};
+					run.cursor = index;
+					run.attempts = u32::from(event.attempt);
+					// The tracer does not exist yet during replay, so the envelope
+					// comes from the directory being replayed.
+					run.last_envelope = match index.checked_sub(1).and_then(|i| run.workflow.phases.get(i)) {
+						Some(previous) => load_envelope(dir, &previous.name)?,
+						None => None,
+					};
+				}
 				_ => {}
 			}
 		}
@@ -441,6 +459,14 @@ impl Run {
 		summary: String,
 	) -> Result<Outcome, RunError> {
 		let phase = self.active_phase().cloned().ok_or(RunError::NoActiveStep)?;
+
+		// Checked before the in-place budget: re-running a deterministic command
+		// cannot change its own verdict, so a phase that names a target must not
+		// spend attempts proving that twice.
+		if let Some(target) = phase.rewind_to.clone() {
+			return self.rewind(&phase, &target, violations, reports, summary);
+		}
+
 		self.attempts += 1;
 		let attempts = self.attempts;
 		let phase_id = self.intern(&phase.name)?;
@@ -482,6 +508,97 @@ impl Run {
 		Ok(Outcome::Retry { phase: phase.name, attempt: attempts + 1, correction })
 	}
 
+	/// Send the run back to an earlier phase, carrying this failure as its
+	/// correction.
+	///
+	/// The budget belongs to the **target**, not to the phase that failed: only
+	/// the target can change the outcome, and charging it is what terminates
+	/// the loop. A target that has already spent its attempts halts the run
+	/// exactly like any other exhausted phase.
+	fn rewind(
+		&mut self,
+		from: &PhaseParams,
+		target: &str,
+		violations: Vec<String>,
+		reports: Vec<GateReport>,
+		summary: String,
+	) -> Result<Outcome, RunError> {
+		let Some(index) = self.workflow.phases.iter().position(|phase| phase.name == target) else {
+			return Err(RunError::Mismatch(format!("phase {:?} rewinds to unknown phase {target:?}", from.name)));
+		};
+		if index >= self.cursor {
+			// Forward is not a rewind. Allowing it would let a workflow skip
+			// phases, or loop on itself with no budget to exhaust.
+			return Err(RunError::Mismatch(format!(
+				"phase {:?} rewinds to {target:?}, which has not run yet",
+				from.name
+			)));
+		}
+
+		let spent = self.records.iter().rev().find(|record| record.name == target).map_or(0, |record| record.attempts);
+		let phase_id = self.intern(&from.name)?;
+		let target_id = self.intern(target)?;
+		let summary_id = self.intern(&summary)?;
+		let count = violations.len() as u32;
+
+		// Recorded either way: the run's history has to show what sent it back,
+		// or a report shows a phase running twice for no visible reason.
+		self.records.push(PhaseRecord {
+			name: from.name.clone(),
+			kind: from.kind,
+			owner: from.owner.clone(),
+			status: PhaseStatus::Failed,
+			attempts: self.attempts + 1,
+			summary,
+			gates: reports,
+			violations: violations.clone(),
+		});
+
+		if spent >= self.max_attempts {
+			let reason = violations.join("; ");
+			self.halted = true;
+			self.trace(
+				EventRecord::new(EventKind::PhaseFinished)
+					.phase(phase_id)
+					.attempt(self.attempts + 1)
+					.detail(summary_id)
+					.value(count),
+			)?;
+			return Ok(Outcome::Aborted { phase: from.name.clone(), reason });
+		}
+
+		// `owner` carries the phase that failed: the target alone does not say
+		// why the run came back.
+		self.trace(
+			EventRecord::new(EventKind::PhaseRewound)
+				.phase(target_id)
+				.owner(phase_id)
+				.attempt(spent)
+				.detail(summary_id)
+				.value(count),
+		)?;
+
+		// The target is handed the envelope it originally received, not the one
+		// from the phase that just failed downstream of it.
+		self.last_envelope = self.handoff_before(index)?;
+		self.cursor = index;
+		self.attempts = spent;
+		let correction = rewind_text(&from.name, target, spent + 1, self.max_attempts, &violations);
+		self.pending_correction = Some(correction.clone());
+		Ok(Outcome::Retry { phase: target.to_owned(), attempt: spent + 1, correction })
+	}
+
+	/// The envelope the phase at `index` was given the first time it ran.
+	fn handoff_before(&self, index: usize) -> Result<Option<Envelope<Value>>, RunError> {
+		let Some(previous) = index.checked_sub(1).and_then(|i| self.workflow.phases.get(i)) else {
+			return Ok(None);
+		};
+		match &self.tracer {
+			Some(tracer) => load_envelope(tracer.dir(), &previous.name),
+			None => Ok(None),
+		}
+	}
+
 	fn intern(&self, text: &str) -> Result<u32, RunError> {
 		match &self.tracer {
 			Some(tracer) => Ok(tracer.intern(text)?),
@@ -508,6 +625,28 @@ fn correction_text(phase: &str, next_attempt: u32, max_attempts: u32, violations
 	}
 	text.push_str(
 		"\nFix exactly these and return a corrected final JSON envelope. Your prior work is intact — do not start over.",
+	);
+	text
+}
+
+/// The correction a rewound phase receives.
+///
+/// Names the phase that failed, because the agent being asked to fix it never
+/// saw that phase run: without the attribution the request reads as an
+/// unexplained demand to redo accepted work.
+fn rewind_text(from: &str, target: &str, next_attempt: u32, max_attempts: u32, violations: &[String]) -> String {
+	let mut text = format!(
+		"Phase `{from}` failed after `{target}` was accepted, so the run came back to you (attempt {next_attempt} of {max_attempts}).\n\nWhat `{from}` reported:\n"
+	);
+	for violation in violations {
+		text.push_str("- ");
+		text.push_str(violation);
+		text.push('\n');
+	}
+	text.push_str(
+		"\nYour earlier work is on disk and intact. Change what made `{from}` fail, then return a corrected final JSON envelope."
+			.replace("{from}", from)
+			.as_str(),
 	);
 	text
 }
@@ -542,6 +681,122 @@ mod tests {
 			artifacts: Vec::new(),
 			notes_for_next_agent: String::new(),
 			payload: Value::Object(serde_json::Map::new()),
+		}
+	}
+
+	/// `build` writes, `verify` checks it, and `verify` sends failures back to
+	/// `build` instead of re-running its own command.
+	fn rewinding_workflow() -> Workflow {
+		Workflow::new(
+			"build_verify",
+			vec![
+				PhaseParams::new("build", PhaseKind::Agent, "builder"),
+				PhaseParams::new("verify", PhaseKind::Code, "sh").rewinding_to("build"),
+			],
+		)
+	}
+
+	#[test]
+	fn a_failing_code_phase_returns_to_the_phase_that_can_fix_it() {
+		let dir = TempDir::new("run-rewind");
+		let trace_dir = dir.path().join("trace");
+		let mut run = Run::new("adw-rewind", dir.path(), rewinding_workflow())
+			.with_tracer(Tracer::create(&trace_dir).expect("tracer"));
+
+		run.next_step().expect("build");
+		run.submit_envelope(ok_envelope("built")).expect("build passes");
+		run.next_step().expect("verify");
+		let outcome = run.submit_envelope(Envelope::code(false, "2 tests failed")).expect("verify fails");
+
+		// Not a retry of `verify`: re-running the same command cannot change it.
+		match outcome {
+			Outcome::Retry { phase, attempt, correction } => {
+				assert_eq!(phase, "build", "the run goes back to the phase that can change the outcome");
+				assert_eq!(attempt, 2, "the target pays the attempt, so the loop terminates");
+				assert!(correction.contains("verify"), "the agent never saw `verify` run: {correction}");
+				assert!(correction.contains("2 tests failed"), "the failure itself has to reach it: {correction}");
+			},
+			other => panic!("expected a rewind to build, got {other:?}"),
+		}
+
+		let step = run.next_step().expect("step after rewind");
+		match step {
+			Step::Run { phase, attempt, .. } => {
+				assert_eq!(phase.name, "build");
+				assert_eq!(attempt, 2);
+			},
+			other => panic!("expected build again, got {other:?}"),
+		}
+
+		let mut reader = TraceReader::open(&trace_dir).expect("open");
+		let events = reader.read_from(0).expect("read");
+		let rewound = events.iter().find(|e| e.kind == EventKind::PhaseRewound).expect("a rewind record");
+		assert_eq!(reader.text(rewound.phase), "build", "the record names the target");
+		assert_eq!(reader.text(rewound.owner), "verify", "and the phase that sent it back");
+	}
+
+	#[test]
+	fn a_rewind_loop_halts_on_the_target_budget() {
+		let dir = TempDir::new("run-rewind-budget");
+		let mut run = Run::new("adw-budget", dir.path(), rewinding_workflow()).with_max_attempts(2);
+
+		// `verify` never passes, so the only thing that can stop this is the
+		// budget of the phase being rewound to.
+		let mut rewinds = 0;
+		let outcome = loop {
+			let step = run.next_step().expect("step");
+			if let Step::Done { accepted } = step {
+				panic!("run settled with accepted={accepted} instead of halting");
+			}
+			let phase = match &step {
+				Step::Run { phase, .. } => phase.name.clone(),
+				Step::Done { .. } => unreachable!(),
+			};
+			let outcome = if phase == "build" {
+				run.submit_envelope(ok_envelope("built")).expect("build")
+			} else {
+				run.submit_envelope(Envelope::code(false, "still red")).expect("verify")
+			};
+			if let Outcome::Retry { phase: ref target, .. } = outcome {
+				if target == "build" {
+					rewinds += 1;
+				}
+			}
+			if let Outcome::Aborted { .. } = outcome {
+				break outcome;
+			}
+			assert!(rewinds < 10, "a rewind loop with no budget would never terminate");
+		};
+
+		assert!(matches!(outcome, Outcome::Aborted { .. }), "{outcome:?}");
+		// `build` spent attempt 1 before the first rewind and attempt 2 after it,
+		// so a budget of 2 buys exactly one rewind. The rewind is not free: it
+		// costs the target, which is what makes the loop finite.
+		assert_eq!(rewinds, 1);
+	}
+
+	#[test]
+	fn a_run_resumed_after_a_rewind_continues_at_the_target() {
+		let dir = TempDir::new("run-rewind-resume");
+		let trace_dir = dir.path().join("trace");
+		{
+			let mut run = Run::new("adw-rr", dir.path(), rewinding_workflow())
+				.with_tracer(Tracer::create(&trace_dir).expect("tracer"));
+			run.next_step().expect("build");
+			run.submit_envelope(ok_envelope("built")).expect("build passes");
+			run.next_step().expect("verify");
+			run.submit_envelope(Envelope::code(false, "red")).expect("verify fails");
+			// Process dies here, mid-rewind.
+		}
+
+		let resumed = Run::resume("adw-rr", dir.path(), rewinding_workflow(), &trace_dir).expect("resume");
+		let mut resumed = resumed;
+		match resumed.next_step().expect("step") {
+			Step::Run { phase, attempt, .. } => {
+				assert_eq!(phase.name, "build", "counting passed phases would have resumed at `verify`");
+				assert_eq!(attempt, 2, "and with the budget the target had already spent");
+			},
+			other => panic!("expected build, got {other:?}"),
 		}
 	}
 

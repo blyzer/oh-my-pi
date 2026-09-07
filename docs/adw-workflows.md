@@ -99,6 +99,7 @@ phases:
 | `prompt`      | `agent`         | Extra instructions appended after the operator's request                   |
 | `command`     | `code` (req.)   | Shell command; exit code `0` is the pass                                   |
 | `timeoutMs`   | `code`          | Per-command deadline. Defaults to 10 minutes; must be `> 0`                |
+| `onFail`      | `code`          | `retry` (default) re-runs the command; `correct` sends the failure back    |
 | `panel`       | `fusion` (req.) | Two or more read-only seats answering the same question                    |
 | `fuser`       | `fusion` (req.) | The single seat allowed to write                                           |
 
@@ -204,6 +205,38 @@ Violations name the file: *"docs/x.md was claimed but does not exist"* is action
 
 When a phase exhausts `maxAttempts`, the run halts with `accepted = false`. It is a decided outcome with a trace, not a crash.
 
+### `onFail: correct` — sending a failure back
+
+A `code` phase has no agent to correct, and a retry re-runs the identical command. For a deterministic step that is guaranteed to fail again: a red test suite burns the whole budget while the agent that wrote the code never learns it broke.
+
+```yaml
+- name: build
+  kind: agent
+  owner: task
+- name: verify
+  kind: code
+  owner: bun
+  command: bun test
+  onFail: correct        # default is `retry`
+```
+
+The failure returns to the nearest preceding `agent` or `fusion` phase as a correction in that agent's own session:
+
+```text
+▶ build (task)  attempt 1   → advanced
+▶ verify (bun)  attempt 1   → tests failed
+  retry verify — "Phase `verify` failed after `build` was accepted,
+                  so the run came back to you (attempt 2 of 3)"
+▶ build (task)  attempt 2   → advanced
+▶ verify (bun)  attempt 1   → advanced
+```
+
+**The budget belongs to the target.** `verify` never spends attempts — only the phase that can change the outcome pays, and that is what makes the loop finite. A target that has exhausted `maxAttempts` halts the run like any other exhausted phase.
+
+The engine holds no policy about which phase can fix a failure: the caller resolves the target and Rust obeys a name. `onFail: correct` on a phase with no correctable predecessor **fails the file at load time** — discovering a malformed workflow after something already failed is the worst moment to learn it.
+
+Phase records are a history, not a per-phase slot: a phase that ran twice appears twice, with the failure that sent the run back in between. A rewind writes a `phase_rewound` record naming both the target and the phase that failed, and `resume` reads position from those records rather than counting passed phases — the count stops meaning anything the moment one phase runs twice.
+
 ## Isolation
 
 ![Isolation](../assets/adw/04-isolation.webp)
@@ -261,9 +294,11 @@ A reader seeks event `n` at `HEADER_LEN + n * RECORD_LEN` and tails by byte offs
 
 The encoding is the ABI. `taskTraceLayout()` exports the offsets so a reader in another language uses them directly instead of duplicating the layout; there is no `unsafe` and no transmute, only explicit `to_le_bytes`, so the layout is identical on every target.
 
-Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase_rejected`, `phase_finished`, `run_finished`, `panel_opinion`, `run_resumed`, `phase_tokens`.
+Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase_rejected`, `phase_finished`, `run_finished`, `panel_opinion`, `run_resumed`, `phase_tokens`, `phase_rewound`.
 
 `panel_opinion` exists because the fan-out happens in the caller — only it can spawn a model. Without that record a fusion phase would be one opaque span instead of N comparable answers.
+
+`phase_rewound` cannot be skipped by a reader, which is why it forced a format-version bump: it carries the target the run went back to, and position stops being derivable by counting passed phases the moment one of them runs twice.
 
 `phase_tokens` is what an attempt cost, reported by the caller for the same reason. It is charged **per attempt, before the verdict**, because a rejected attempt spent real tokens: a run whose cost counted only its successes would hide the retries that made it expensive. In a measured two-attempt run the rejected try cost 25,561 tokens against the accepted one's 26,059 — charging only the winner would have understated the run by half. It needs its own record because `value` already carries the violation count on both rejection paths.
 

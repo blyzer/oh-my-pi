@@ -31,10 +31,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const EVENTS_MAGIC: u32 = 0x5049_5452;
 /// `"PIST"`, string table.
 pub const STRINGS_MAGIC: u32 = 0x5049_5354;
-/// Bumped to 2 by `PhaseTokens`. `verify_header` requires an exact match, so a
-/// trace written by another version is refused with its path rather than
-/// half-decoded: a resumable run is worth less than a wrong one.
-pub const FORMAT_VERSION: u16 = 2;
+/// Bumped to 2 by `PhaseTokens`, to 3 by `PhaseRewound`. `verify_header`
+/// requires an exact match, so a trace written by another version is refused
+/// with its path rather than half-decoded: a resumable run is worth less than
+/// a wrong one. A rewind in particular cannot be skipped — a reader that
+/// ignored it would rebuild the wrong cursor.
+pub const FORMAT_VERSION: u16 = 3;
 /// Bytes before the first record in either file.
 pub const HEADER_LEN: u64 = 16;
 /// Stride of one event record.
@@ -80,6 +82,14 @@ pub enum EventKind {
 	/// spends tokens too: charging only the accepted one undercounts exactly
 	/// the expensive part of a run.
 	PhaseTokens = 10,
+	/// The run went backwards: a phase was rejected and sent an earlier phase
+	/// its failure instead of retrying in place. `phase` is the target, and
+	/// `attempt` is the budget that target has now spent.
+	///
+	/// A reader cannot skip this: passed phases stop equalling the cursor the
+	/// moment one of them runs twice, so resume derives position from these
+	/// records rather than by counting finishes.
+	PhaseRewound = 11,
 }
 
 impl EventKind {
@@ -95,6 +105,7 @@ impl EventKind {
 			8 => Some(Self::PanelOpinion),
 			9 => Some(Self::RunResumed),
 			10 => Some(Self::PhaseTokens),
+			11 => Some(Self::PhaseRewound),
 			_ => None,
 		}
 	}

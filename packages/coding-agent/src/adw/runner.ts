@@ -49,6 +49,7 @@ import {
 	parseIsolationBackend,
 } from "../task/worktree";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { rewindTarget } from "./config";
 import { buildFusionPrompt, buildPanelPrompt, buildPhasePrompt, ENVELOPE_CONTRACT, type PanelOpinion } from "./prompt";
 import type { AdwPhaseConfig, AdwPhaseProgress, AdwWorkflowConfig } from "./types";
 
@@ -617,6 +618,9 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			kind: phase.kind === "code" ? TaskPhaseKind.Code : TaskPhaseKind.Agent,
 			owner: phase.kind === "fusion" ? (phase.fuser?.owner ?? "fusion") : (phase.owner ?? phase.kind),
 			description: phase.description,
+			// Resolved here, so the engine is handed a name and holds no policy
+			// about which phase can fix a failure.
+			rewindTo: phase.onFail === "correct" ? rewindTarget(workflow, phase.name) : undefined,
 		})),
 		gates: workflow.phases
 			.filter(phase => (phase.gates?.length ?? 0) > 0)

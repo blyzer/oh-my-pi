@@ -165,6 +165,10 @@ pub struct TaskPhaseSpec {
 	pub kind:        TaskPhaseKind,
 	pub owner:       String,
 	pub description: Option<String>,
+	/// Phase this one's failure returns to, instead of retrying in place. The
+	/// caller resolves it: the engine obeys a name and holds no policy about
+	/// which phase can fix a failure.
+	pub rewind_to:   Option<String>,
 }
 
 /// Acceptance gates for one phase, named so the workflow stays declarative.
@@ -315,6 +319,7 @@ fn to_napi_step(step: Step) -> TaskStep {
 				kind:        to_napi_kind(phase.kind),
 				owner:       phase.owner,
 				description: Some(phase.description).filter(|d| !d.is_empty()),
+				rewind_to:   phase.rewind_to,
 			}),
 			attempt,
 			correction,
@@ -369,6 +374,10 @@ fn to_core_phases(specs: Vec<TaskPhaseSpec>) -> Vec<PhaseParams> {
 		.into_iter()
 		.map(|spec| {
 			let params = PhaseParams::new(spec.name, to_core_kind(spec.kind), spec.owner);
+			let params = match spec.rewind_to {
+				Some(target) => params.rewinding_to(target),
+				None => params,
+			};
 			match spec.description {
 				Some(text) => params.describe(text),
 				None => params,
@@ -563,6 +572,7 @@ pub fn task_trace_layout() -> TaskTraceLayout {
 			"panel_opinion",
 			"run_resumed",
 			"phase_tokens",
+			"phase_rewound",
 		]
 		.map(String::from)
 		.to_vec(),

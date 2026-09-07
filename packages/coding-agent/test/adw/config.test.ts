@@ -2,7 +2,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { AdwConfigError, discoverWorkflows, loadWorkflow, parseWorkflow } from "@oh-my-pi/pi-coding-agent/adw/config";
+import {
+	AdwConfigError,
+	discoverWorkflows,
+	loadWorkflow,
+	parseWorkflow,
+	rewindTarget,
+} from "@oh-my-pi/pi-coding-agent/adw/config";
 
 const VALID = `
 name: ship
@@ -201,5 +207,55 @@ describe("loadWorkflow", () => {
 		expect(found.workflow.name).toBe("ship");
 		expect(found.level).toBe("project");
 		expect(found.path.endsWith("ship.yml")).toBe(true);
+	});
+});
+
+describe("onFail: correct", () => {
+	const yaml = (phases: string) => `name: w\nphases:\n${phases}`;
+
+	it("rejects a code phase whose failure has nobody to correct", () => {
+		// The engine would only discover this after something already failed —
+		// the worst moment to learn the workflow was malformed.
+		expect(() =>
+			parseWorkflow("w.yml", yaml('  - { name: t, kind: code, owner: sh, command: "true", onFail: correct }')),
+		).toThrow(/no agent or fusion phase precedes it/);
+	});
+
+	it("rejects onFail on a phase that is not a code phase", () => {
+		expect(() => parseWorkflow("w.yml", yaml("  - { name: p, kind: agent, owner: sonic, onFail: correct }"))).toThrow(
+			/only applies to code phases/,
+		);
+	});
+
+	it("accepts a code phase preceded by an agent phase", () => {
+		const workflow = parseWorkflow(
+			"w.yml",
+			yaml(
+				'  - { name: build, kind: agent, owner: sonic }\n  - { name: t, kind: code, owner: sh, command: "true", onFail: correct }',
+			),
+		);
+		expect(rewindTarget(workflow, "t")).toBe("build");
+	});
+
+	it("skips code phases when resolving the target", () => {
+		// Correcting a code phase would mean re-running a command that already
+		// decided; only a phase with an agent can change the outcome.
+		const workflow = parseWorkflow(
+			"w.yml",
+			yaml(
+				'  - { name: build, kind: agent, owner: sonic }\n  - { name: fmt, kind: code, owner: sh, command: "true" }\n  - { name: t, kind: code, owner: sh, command: "true", onFail: correct }',
+			),
+		);
+		expect(rewindTarget(workflow, "t")).toBe("build");
+	});
+
+	it("resolves a fusion phase as a target", () => {
+		const workflow = parseWorkflow(
+			"w.yml",
+			yaml(
+				'  - name: design\n    kind: fusion\n    panel: [{ owner: scout }, { owner: reviewer }]\n    fuser: { owner: sonic }\n  - { name: t, kind: code, owner: sh, command: "true", onFail: correct }',
+			),
+		);
+		expect(rewindTarget(workflow, "t")).toBe("design");
 	});
 });
