@@ -361,3 +361,46 @@ describe("artifact gates on a code phase", () => {
 		expect(() => parseWorkflow("w.yml", yaml("diff_matches_claims"))).not.toThrow();
 	});
 });
+
+describe("payload schema", () => {
+	const yaml = (schema: string) =>
+		`name: w\nphases:\n  - name: p\n    kind: agent\n    owner: sonic\n    schema:\n${schema}`;
+
+	it("rejects a conditional omptype would silently drop", () => {
+		// Measured: fromJsonSchema compiles if/then and then validates
+		// {approved: true, blocking: ["x"]} as fine. A conditional that does
+		// nothing reads like a guarantee, which is worse than not having one.
+		expect(() =>
+			parseWorkflow(
+				"w.yml",
+				yaml("      type: object\n      if: { properties: { a: { const: true } } }\n      then: { required: [b] }"),
+			),
+		).toThrow(/does not enforce if, then/);
+	});
+
+	it("rejects a conditional nested deeper in the document", () => {
+		expect(() =>
+			parseWorkflow(
+				"w.yml",
+				yaml("      type: object\n      properties:\n        a: { oneOf: [{ type: string }] }"),
+			),
+		).toThrow(/does not enforce oneOf/);
+	});
+
+	it("accepts the structural keywords that actually run", () => {
+		const workflow = parseWorkflow(
+			"w.yml",
+			yaml("      type: object\n      required: [approved]\n      properties:\n        approved: { type: boolean }"),
+		);
+		expect(workflow.phases[0]?.schema).toBeDefined();
+	});
+
+	it("rejects a schema on a code phase, which has no payload", () => {
+		expect(() =>
+			parseWorkflow(
+				"w.yml",
+				'name: w\nphases:\n  - { name: p, kind: code, owner: sh, command: "true", schema: { type: object } }',
+			),
+		).toThrow(/does not apply/);
+	});
+});

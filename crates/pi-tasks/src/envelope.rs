@@ -68,6 +68,16 @@ impl Envelope<Value> {
 
 /// Last balanced `{…}` span at nesting depth zero, string- and escape-aware so
 /// braces inside JSON strings (or prose quoting them) never split a span.
+/// The envelope text inside an agent's turn: the last complete top-level JSON
+/// object, or `None` when the turn contained none.
+///
+/// Public so a caller that must inspect the payload before submitting — schema
+/// validation, which needs a type system this crate does not have — uses this
+/// rule rather than reimplementing "the last JSON object" and drifting from it.
+pub fn envelope_text(text: &str) -> Option<&str> {
+	last_top_level_object(text)
+}
+
 fn last_top_level_object(text: &str) -> Option<&str> {
 	let mut depth = 0usize;
 	let mut start = None;

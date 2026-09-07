@@ -25,7 +25,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use napi::{Result, bindgen_prelude::*};
 use napi_derive::napi;
 use pi_tasks::{
-	ArtifactsExist, Envelope, FilesNonEmpty, Gate, JsonParses, GateCtx, GateReport, Outcome, PhaseKind, PhaseParams, PhaseStatus,
+	ArtifactsExist, Check, Envelope, FilesNonEmpty, Gate, JsonParses, GateCtx, GateReport, Outcome, PhaseKind, PhaseParams, PhaseStatus,
 	Run, Step, TraceReader, Tracer, Workflow, trace,
 };
 use pi_vcs::types::{DiffOptions, StatusOptions, UntrackedMode};
@@ -299,6 +299,16 @@ pub struct TaskPhaseResult {
 	pub violations: Vec<String>,
 }
 
+/// One finding from a gate the caller ran itself.
+#[napi(object)]
+pub struct TaskGateCheck {
+	/// What was examined — a path, a field name, a symbol. Named, because a
+	/// violation that does not say which thing failed is not actionable.
+	pub item: String,
+	pub ok:   bool,
+	pub note: String,
+}
+
 #[napi(object)]
 pub struct TaskRunSummary {
 	pub adw_id:   String,
@@ -310,6 +320,16 @@ pub struct TaskRunSummary {
 
 /// Gate names this engine can build. The single source of truth for a caller
 /// that validates a workflow file before starting a run.
+/// The envelope text inside an agent turn: the last complete top-level JSON
+/// object, or `null` when there is none.
+///
+/// Exposed so a caller validating the payload before submission uses the
+/// engine's own extraction rule instead of reimplementing it and drifting.
+#[napi]
+pub fn task_envelope_text(turn: String) -> Option<String> {
+	pi_tasks::envelope_text(&turn).map(str::to_owned)
+}
+
 #[napi]
 pub fn task_gate_names() -> Vec<String> {
 	vec![
@@ -559,6 +579,21 @@ impl TaskRun {
 	#[napi]
 	pub fn note_phase_tokens(&self, owner: String, tokens: u32) -> Result<()> {
 		self.inner.note_phase_tokens(&owner, tokens).map_err(fail)
+	}
+
+	/// Record a gate the caller ran itself, judged with the engine's own on the
+	/// next submission.
+	///
+	/// For checks the engine cannot perform — schema validation needs the
+	/// TypeScript type system, and a JSON Schema validator in `pi-tasks` would
+	/// cost that crate its three dependencies. The result is a `gate_check` in
+	/// the trace and blocks acceptance exactly like a native gate.
+	#[napi]
+	pub fn note_gate_report(&mut self, gate: String, checks: Vec<TaskGateCheck>) {
+		self.inner.note_gate_report(
+			gate,
+			checks.into_iter().map(|c| Check { item: c.item, ok: c.ok, note: c.note }).collect(),
+		);
 	}
 
 	/// The last accepted envelope, for building the next phase's prompt.

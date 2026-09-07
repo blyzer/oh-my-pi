@@ -403,6 +403,16 @@ export declare class TaskRun {
    * a cost report has to show.
    */
   notePhaseTokens(owner: string, tokens: number): void
+  /**
+   * Record a gate the caller ran itself, judged with the engine's own on the
+   * next submission.
+   *
+   * For checks the engine cannot perform — schema validation needs the
+   * TypeScript type system, and a JSON Schema validator in `pi-tasks` would
+   * cost that crate its three dependencies. The result is a `gate_check` in
+   * the trace and blocks acceptance exactly like a native gate.
+   */
+  noteGateReport(gate: string, checks: Array<TaskGateCheck>): void
   /** The last accepted envelope, for building the next phase's prompt. */
   handoff(): TaskHandoff | null
   /**
@@ -2792,7 +2802,25 @@ export declare function supportsLanguage(lang: string): boolean
 /**
  * Gate names this engine can build. The single source of truth for a caller
  * that validates a workflow file before starting a run.
+ * The envelope text inside an agent turn: the last complete top-level JSON
+ * object, or `null` when there is none.
+ *
+ * Exposed so a caller validating the payload before submission uses the
+ * engine's own extraction rule instead of reimplementing it and drifting.
  */
+export declare function taskEnvelopeText(turn: string): string | null
+
+/** One finding from a gate the caller ran itself. */
+export interface TaskGateCheck {
+  /**
+   * What was examined — a path, a field name, a symbol. Named, because a
+   * violation that does not say which thing failed is not actionable.
+   */
+  item: string
+  ok: boolean
+  note: string
+}
+
 export declare function taskGateNames(): Array<string>
 
 /**

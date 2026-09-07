@@ -18,6 +18,7 @@ import * as path from "node:path";
 import {
 	IsoBackendKind,
 	type TaskHandoff,
+	type TaskGateCheck,
 	type TaskOutcome,
 	TaskOutcomeKind,
 	TaskPhaseKind,
@@ -50,6 +51,7 @@ import {
 } from "../task/worktree";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { rewindTarget } from "./config";
+import { checkPayload, compilePayloadSchema, PAYLOAD_GATE } from "./schema";
 import { buildFusionPrompt, buildPanelPrompt, buildPhasePrompt, ENVELOPE_CONTRACT, type PanelOpinion } from "./prompt";
 import type { AdwPhaseConfig, AdwPhaseProgress, AdwSeatConfig, AdwWorkflowConfig } from "./types";
 
@@ -611,6 +613,16 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 	const workRoot = isolation?.handle.mergedDir ?? host.cwd;
 
 	const phasesByName = new Map(workflow.phases.map(phase => [phase.name, phase]));
+	// Compiled once per run, not per attempt. A schema that cannot compile was
+	// already rejected at load time, so an unusable one here is unreachable
+	// rather than tolerated.
+	const payloadChecks = new Map<string, (turn: string) => TaskGateCheck[]>();
+	for (const phase of workflow.phases) {
+		if (phase.schema === undefined) continue;
+		const compiled = compilePayloadSchema(phase.schema);
+		if (typeof compiled === "string") throw new Error(`Phase "${phase.name}" has an unusable schema: ${compiled}`);
+		payloadChecks.set(phase.name, turn => checkPayload(turn, compiled.validate));
+	}
 	const engineOptions = {
 		adwId,
 		root: workRoot,
@@ -809,7 +821,14 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					readOnly: false,
 					followUpMessage: correction,
 				});
+				const payloadCheck = payloadChecks.get(phase.name);
 				run.notePhaseTokens(base.name, spawned.tokens);
+				// Reported before the submission that judges it: the engine merges
+				// caller-run gates with its own and drains them per attempt.
+				if (payloadCheck && spawned.exitCode === 0) {
+					const checks = payloadCheck(spawned.output);
+					if (checks.length > 0) run.noteGateReport(PAYLOAD_GATE, checks);
+				}
 				outcome =
 					spawned.exitCode === 0
 						? run.submitAgentOutput(spawned.output)

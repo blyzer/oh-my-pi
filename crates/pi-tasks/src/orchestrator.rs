@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::envelope::{Envelope, EnvelopeError};
-use crate::gate::{Gate, GateCtx, GateReport};
+use crate::gate::{Check, Gate, GateCtx, GateReport};
 use crate::phase::{PhaseParams, PhaseRecord, PhaseStatus};
 use crate::trace::{EventKind, EventRecord, TraceReader, Tracer};
 
@@ -167,6 +167,13 @@ pub struct Run {
 	cursor: usize,
 	attempts: u32,
 	pending_correction: Option<String>,
+	/// Gate results the caller ran itself, awaiting the next submission.
+	///
+	/// Same door `Code` phases already report through: a check the engine
+	/// cannot perform — schema validation needs the TypeScript type system —
+	/// is executed by the caller and handed back, so it lands in the trace as
+	/// a `gate_check` and blocks acceptance like any other.
+	pending_reports: Vec<GateReport>,
 	last_envelope: Option<Envelope<Value>>,
 	records: Vec<PhaseRecord>,
 	halted: bool,
@@ -185,6 +192,7 @@ impl Run {
 			cursor: 0,
 			attempts: 0,
 			pending_correction: None,
+			pending_reports: Vec::new(),
 			last_envelope: None,
 			records: Vec::new(),
 			halted: false,
@@ -365,6 +373,10 @@ impl Run {
 					EnvelopeError::NoJson => "envelope: the turn contained no JSON object".to_owned(),
 					EnvelopeError::Invalid(e) => format!("envelope: {e}"),
 				};
+				// Nothing the caller validated survives an unparseable turn: there
+				// was no payload to check, and carrying a report forward would
+				// fail the next attempt for this one.
+				self.pending_reports.clear();
 				self.reject(vec![violation], Vec::new(), "unparseable envelope".to_owned())
 			}
 		}
@@ -378,13 +390,16 @@ impl Run {
 			return Err(RunError::NoActiveStep);
 		};
 
-		let reports: Vec<GateReport> = {
+		let mut reports: Vec<GateReport> = {
 			let ctx = GateCtx { root: &self.root };
 			self.gates
 				.get(&phase.name)
 				.map(|gates| gates.iter().map(|g| g.run(&envelope, &ctx)).collect())
 				.unwrap_or_default()
 		};
+		// Drained, never carried: a report belongs to the attempt that produced
+		// it, and a stale one would fail the next attempt for the last one's sin.
+		reports.append(&mut self.pending_reports);
 
 		let phase_id = self.intern(&phase.name)?;
 		for report in &reports {
@@ -478,6 +493,20 @@ impl Run {
 				.ok(tokens > 0)
 				.value(tokens),
 		)
+	}
+
+	/// Record a gate the caller ran itself, to be judged with the engine's own
+	/// on the next submission.
+	///
+	/// The escape hatch for a check the engine cannot perform — schema
+	/// validation needs the TypeScript type system, and putting a JSON Schema
+	/// validator in here would cost the crate its three dependencies. Same
+	/// bargain `Code` phases already make: the caller executes, the engine
+	/// judges, and the result is a `gate_check` in the trace like any other.
+	pub fn note_gate_report(&mut self, gate: impl Into<String>, checks: Vec<Check>) {
+		let mut report = GateReport::new(gate);
+		report.checks = checks;
+		self.pending_reports.push(report);
 	}
 
 	/// Settles the run's second question: phases passing is not the same as the
@@ -816,6 +845,51 @@ mod tests {
 			Step::Run { phase, .. } => assert_eq!(phase.name, "second"),
 			other => panic!("{other:?}"),
 		}
+	}
+
+	#[test]
+	fn a_caller_run_gate_blocks_acceptance_and_lands_in_the_trace() {
+		// The escape hatch for checks the engine cannot perform. If the caller's
+		// verdict did not count, the feature would be decoration.
+		let dir = TempDir::new("run-caller-gate");
+		let trace_dir = dir.path().join("trace");
+		let mut run = run_in(&dir).with_tracer(Tracer::create(&trace_dir).expect("tracer"));
+
+		run.next_step().expect("step");
+		run.note_gate_report(
+			"payload_matches_schema",
+			vec![Check { item: "approved".to_owned(), ok: false, note: "expected boolean, got string".to_owned() }],
+		);
+		let outcome = run.submit_envelope(ok_envelope("done")).expect("submit");
+
+		assert!(matches!(outcome, Outcome::Retry { .. }), "a red caller gate must reject: {outcome:?}");
+		let mut reader = TraceReader::open(&trace_dir).expect("open");
+		let events = reader.read_from(0).expect("read");
+		let check = events
+			.iter()
+			.find(|e| e.kind == EventKind::GateCheck && reader.text(e.gate) == "payload_matches_schema")
+			.expect("the caller's gate is traced like any other");
+		assert!(!check.ok);
+		assert_eq!(reader.text(check.detail), "approved", "the failing field has to be named");
+	}
+
+	#[test]
+	fn a_caller_run_gate_is_not_carried_into_the_next_attempt() {
+		// A report belongs to the attempt that produced it. Carrying one would
+		// fail a corrected attempt for the previous one's sin.
+		let dir = TempDir::new("run-caller-gate-drain");
+		let mut run = run_in(&dir);
+
+		run.next_step().expect("step");
+		run.note_gate_report(
+			"payload_matches_schema",
+			vec![Check { item: "approved".to_owned(), ok: false, note: "wrong type".to_owned() }],
+		);
+		run.submit_envelope(ok_envelope("first")).expect("rejected");
+
+		run.next_step().expect("retry");
+		let outcome = run.submit_envelope(ok_envelope("second")).expect("submit");
+		assert!(matches!(outcome, Outcome::Advanced { .. }), "the stale report must not still be judging: {outcome:?}");
 	}
 
 	/// `build` writes, `verify` checks it, and `verify` sends failures back to

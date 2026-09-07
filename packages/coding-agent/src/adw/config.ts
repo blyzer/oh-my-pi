@@ -12,6 +12,7 @@ import { type } from "@oh-my-pi/omptype";
 import { YAML } from "bun";
 import { getConfigDirs } from "../config";
 import { taskGateNames } from "@oh-my-pi/pi-natives";
+import { compilePayloadSchema } from "./schema";
 import { type AdwWorkflowConfig, adwWorkflowSchema, type DiscoveredWorkflow } from "./types";
 
 /** Only the native config root holds workflows; `.claude`/`.codex` are not ours. */
@@ -142,6 +143,15 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 					);
 				}
 			}
+		}
+		if (phase.schema !== undefined) {
+			if (phase.kind === "code") {
+				fail(`phase "${phase.name}" is a code phase; schema describes an envelope payload and does not apply`);
+			}
+			// Compiled here, so a malformed schema fails the file rather than the
+			// first phase that runs against it.
+			const compiled = compilePayloadSchema(phase.schema);
+			if (typeof compiled === "string") fail(`phase "${phase.name}" has an unusable schema: ${compiled}`);
 		}
 		for (const dependency of phase.dependsOn ?? []) {
 			if (dependency === phase.name) fail(`phase "${phase.name}" depends on itself`);

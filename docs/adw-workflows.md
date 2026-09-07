@@ -271,6 +271,36 @@ gate_check   json_parses      ok=true   plan.json
 
 That first pair is the whole point: the file exists, is non-empty, and is still wrong.
 
+### `schema` — checking the payload's shape
+
+An envelope carries whatever fields the phase was asked to report, beyond `status`/`summary`/`artifacts`/`notes_for_next_agent`. A phase can declare their shape:
+
+```yaml
+- name: review
+  kind: agent
+  owner: reviewer
+  schema:
+    type: object
+    required: [approved, blocking]
+    properties:
+      approved: { type: boolean }
+      blocking: { type: array, items: { type: string } }
+```
+
+Violations name the field, because *"expected boolean"* alone makes the agent guess which one — and guessing costs an attempt. Every problem is reported at once for the same reason.
+
+**Structure, not semantics.** `type`, `required`, `properties`, `items`, `enum`, `const` and the numeric/length bounds are enforced. Conditionals — `if`/`then`, `allOf`, `anyOf`, `oneOf`, `not` — are **rejected at load time**:
+
+```text
+w.yml: phase "review" has an unusable schema: omptype does not enforce if, then
+```
+
+That rejection exists because of a measured surprise: omptype compiles `if: {approved: {const: true}}, then: {blocking: {maxItems: 0}}` without complaint and then validates `{approved: true, blocking: ["x"]}` as fine. A conditional that silently does nothing is worse than an absent one — it reads like a guarantee. So a cross-field rule belongs in a `code` phase, where an exit code cannot lie.
+
+**Where this check runs, and why that is not a compromise.** Schema validation needs omptype, and a JSON Schema validator inside `pi-tasks` would cost that crate its three dependencies and its ability to be tested without a JavaScript runtime. So the caller runs it and reports the verdict back through `noteGateReport` — the same bargain `code` phases already make, where the caller executes and the engine judges. The result is a `gate_check` in the trace named `payload_matches_schema` and blocks acceptance exactly like a native gate.
+
+The envelope is located with the engine's own extraction rule, exported as `taskEnvelopeText`, rather than a second implementation of "the last top-level JSON object" that would drift from it.
+
 ### `diff_matches_claims`
 
 The first two catch a claim with no file. This catches the opposite — **a file with no claim**. An agent that edited three files and confessed one leaves two changes nobody reviewed, and an existence check cannot see them, because nothing was claimed.

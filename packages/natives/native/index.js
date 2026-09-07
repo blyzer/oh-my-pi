@@ -112,6 +112,7 @@ export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChar
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks;
 export const summarizeCode = nativeBindings.summarizeCode;
 export const supportsLanguage = nativeBindings.supportsLanguage;
+export const taskEnvelopeText = nativeBindings.taskEnvelopeText;
 export const taskGateNames = nativeBindings.taskGateNames;
 export const taskTraceLayout = nativeBindings.taskTraceLayout;
 export const truncateToWidth = nativeBindings.truncateToWidth;

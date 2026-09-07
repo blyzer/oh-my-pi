@@ -24,7 +24,7 @@ pub mod trace;
 #[cfg(test)]
 mod test_support;
 
-pub use envelope::{Envelope, EnvelopeError, EnvelopeStatus};
+pub use envelope::{Envelope, EnvelopeError, EnvelopeStatus, envelope_text};
 pub use gate::{ArtifactsExist, Check, FilesNonEmpty, Gate, GateCtx, GateReport, JsonParses};
 pub use orchestrator::{Outcome, Run, RunError, RunSummary, Step, Workflow};
 pub use phase::{PhaseKind, PhaseParams, PhaseRecord, PhaseStatus};

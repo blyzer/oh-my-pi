@@ -58,6 +58,37 @@ const adwPhaseSchema = type({
 	"dependsOn?": "string[]",
 	/** `agent`: model pattern override (`provider/id[:level]` or a `@role` alias). */
 	"model?": "string",
+
+	/**
+	 * JSON Schema the envelope's payload must satisfy — the fields beyond
+	 * `status`/`summary`/`artifacts`/`notes_for_next_agent` that this phase is
+	 * asked to report.
+	 *
+	 * ```yaml
+	 * schema:
+	 *   type: object
+	 *   required: [approved, blocking]
+	 *   properties:
+	 *     approved: { type: boolean }
+	 *     blocking: { type: array, items: { type: string } }
+	 * ```
+	 *
+	 * Structure is enforced, not semantics. `type`, `required`, `properties`,
+	 * `items`, `enum`, `const` and the numeric/length bounds work. Conditionals
+	 * — `if`/`then`, `allOf`, `oneOf`, `not` — are **rejected at load time**,
+	 * because omptype compiles them and then ignores them: a schema carrying
+	 * `if: {approved: true}, then: {blocking: {maxItems: 0}}` validated
+	 * `{approved: true, blocking: ["x"]}` as fine. A conditional that silently
+	 * does nothing is worse than an absent one — it reads like a guarantee.
+	 *
+	 * So a cross-field rule ("approved implies nothing blocking") is not
+	 * expressible here; put it in a `code` phase, where an exit code cannot lie.
+	 *
+	 * Validated by the caller, because it needs omptype — a JSON Schema
+	 * validator inside the engine crate would cost it its three dependencies.
+	 * The verdict is reported back and lands in the trace as a `gate_check`.
+	 */
+	"schema?": "unknown",
 	/** `agent`: `off|minimal|low|medium|high|xhigh|max|auto`. */
 	"thinking?": "string",
 	/** `agent`: extra instructions appended after the request. */
