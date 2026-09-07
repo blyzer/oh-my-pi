@@ -15,7 +15,7 @@
 import { type } from "@oh-my-pi/omptype";
 
 /** Gate names the engine knows. Keep in sync with `build_gate` in crates/pi-natives/src/tasks.rs. */
-export const ADW_GATES = ["artifacts_exist", "files_non_empty", "diff_matches_claims"] as const;
+export const ADW_GATES = ["artifacts_exist", "files_non_empty", "json_parses", "diff_matches_claims"] as const;
 
 /** One member of a fusion panel, or the fuser that merges them. */
 const adwSeatSchema = type({

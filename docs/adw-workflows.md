@@ -241,6 +241,7 @@ Gates verify claims; they never predict. They run **after** a phase, in Rust, ag
 | `artifacts_exist`     | every path in `artifacts` exists on disk                                             |
 | `files_non_empty`     | every path in `artifacts` exists **and** has non-zero size                            |
 | `diff_matches_claims` | every path the working tree changed is one some phase declared                        |
+| `json_parses`         | every declared `.json` artifact parses                                                |
 
 `passed` is evidence rather than silence, and that has teeth: **an envelope that declares no artifacts fails both artifact gates** rather than clearing them vacuously. Requesting the gate is an assertion that the phase produces files. This was wrong until a live run proved it — a fuser returned `artifacts: []`, cleared both gates and wrote nothing, while this page already claimed it could not. Gate names are validated at load time against `taskGateNames()`, the same list the engine builds from — a new gate in Rust needs no matching edit in TypeScript to be accepted.
 
@@ -251,6 +252,24 @@ bad.yml: phase "check" is a code phase and cannot satisfy gate "artifacts_exist"
 a code phase declares no artifacts. Use diff_matches_claims, or move the gate to
 the agent phase that writes the files.
 ```
+
+### `json_parses`
+
+**Bytes are not structure.** A phase that hands the next one `plan.json` has produced nothing useful if the file is truncated or holds an apology instead of an object, and `files_non_empty` is happy either way — it counted the bytes in the apology.
+
+Scoped by extension: which artifacts are JSON is already visible in the envelope, so the gate is not told twice. Non-JSON artifacts are left alone.
+
+The violation carries the parse position, because *"it is invalid"* is not actionable and *"expected value at line 1 column 12"* is. Measured end to end — a phase declaring a `plan.json` containing `{"step": 1,}`:
+
+```text
+gate_check   artifacts_exist  ok=true   plan.json
+gate_check   json_parses      ok=false  plan.json
+phase_rejected
+gate_check   artifacts_exist  ok=true   plan.json
+gate_check   json_parses      ok=true   plan.json
+```
+
+That first pair is the whole point: the file exists, is non-empty, and is still wrong.
 
 ### `diff_matches_claims`
 

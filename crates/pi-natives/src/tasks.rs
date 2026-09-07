@@ -25,7 +25,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use napi::{Result, bindgen_prelude::*};
 use napi_derive::napi;
 use pi_tasks::{
-	ArtifactsExist, Envelope, FilesNonEmpty, Gate, GateCtx, GateReport, Outcome, PhaseKind, PhaseParams, PhaseStatus,
+	ArtifactsExist, Envelope, FilesNonEmpty, Gate, JsonParses, GateCtx, GateReport, Outcome, PhaseKind, PhaseParams, PhaseStatus,
 	Run, Step, TraceReader, Tracer, Workflow, trace,
 };
 use pi_vcs::types::{DiffOptions, StatusOptions, UntrackedMode};
@@ -312,7 +312,12 @@ pub struct TaskRunSummary {
 /// that validates a workflow file before starting a run.
 #[napi]
 pub fn task_gate_names() -> Vec<String> {
-	vec!["artifacts_exist".to_owned(), "files_non_empty".to_owned(), "diff_matches_claims".to_owned()]
+	vec![
+		"artifacts_exist".to_owned(),
+		"files_non_empty".to_owned(),
+		"json_parses".to_owned(),
+		"diff_matches_claims".to_owned(),
+	]
 }
 
 /// `allowed` is the run-wide set every `diff_matches_claims` instance shares:
@@ -327,6 +332,7 @@ fn build_gate(
 	match name {
 		"artifacts_exist" => Ok(Box::new(ArtifactsExist)),
 		"files_non_empty" => Ok(Box::new(FilesNonEmpty)),
+		"json_parses" => Ok(Box::new(JsonParses)),
 		"diff_matches_claims" => Ok(Box::new(DiffMatchesClaims {
 			allowed: Arc::clone(allowed),
 			ignore:  ignore.clone(),
