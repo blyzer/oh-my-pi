@@ -9,7 +9,7 @@
  */
 
 import type { TaskHandoff } from "@oh-my-pi/pi-natives";
-import type { AdwPhaseConfig } from "./types";
+import type { AdwPhaseConfig, AdwSeatConfig } from "./types";
 
 /** Appended to the phase agent's own system prompt. */
 export const ENVELOPE_CONTRACT = `# Output contract
@@ -75,20 +75,38 @@ export interface PanelOpinion {
 }
 
 /**
- * A panel seat answers the same question as everyone else, independently and
- * without writing. No envelope contract here: an opinion is prose, and asking
- * for JSON as well only invites a seat to pretend it did the work.
+ * A panel seat answers the phase's question, independently and without
+ * writing. No envelope contract here: an opinion is prose, and asking for JSON
+ * as well only invites a seat to pretend it did the work.
+ *
+ * A seat may carry its own `prompt`, which narrows what it was asked without
+ * making it a different phase. That is the difference between a panel that
+ * exists for a second opinion and one that exists to divide the work: with
+ * per-seat questions, N read-only seats investigate N things at once and one
+ * writer merges them. It is safe for exactly one reason — no seat may write.
  */
-export function buildPanelPrompt(args: { request: string; phase: AdwPhaseConfig; handoff?: TaskHandoff }): string {
-	const { request, phase, handoff } = args;
+export function buildPanelPrompt(args: {
+	request: string;
+	phase: AdwPhaseConfig;
+	seat?: AdwSeatConfig;
+	handoff?: TaskHandoff;
+}): string {
+	const { request, phase, seat, handoff } = args;
 	const heading = phase.description ? `\`${phase.name}\` — ${phase.description}` : `\`${phase.name}\``;
 	const sections = [`# Request\n${request}`, `# Your phase\n${heading}`];
 	if (handoff) sections.push(`# Handoff from the previous phase\n${renderHandoff(handoff)}`);
 	if (phase.prompt) sections.push(`# Phase instructions\n${phase.prompt}`);
-	sections.push(
-		`# You are one opinion of ${(phase.panel?.length ?? 0).toString()}\n` +
+	// After the shared instructions: a seat narrows its own scope, it does not
+	// override what the phase asked for.
+	if (seat?.prompt) sections.push(`# Your part\n${seat.prompt}`);
+	const shared = seat?.prompt
+		? "Answer only your part, independently. You are READ-ONLY: investigate and decide, but change nothing on " +
+			"disk — another agent merges the parts and does the writing."
+		: `You are one opinion of ${(phase.panel?.length ?? 0).toString()}. ` +
 			"Answer independently. You are READ-ONLY: investigate and decide, but change nothing on disk — " +
-			"another agent merges the opinions and does the writing.\n\n" +
+			"another agent merges the opinions and does the writing.";
+	sections.push(
+		`# How to answer\n${shared}\n\n` +
 			"Be concrete and falsifiable: name files, symbols and commands. State the tradeoff you accepted and " +
 			"what would change your mind. Do not hedge across every option — pick one and defend it.",
 	);
@@ -99,6 +117,11 @@ export function buildPanelPrompt(args: { request: string; phase: AdwPhaseConfig;
  * The fuser sees every opinion, labelled by who gave it, and owns the result.
  * Divergence is the payload: agreement is cheap, and the place two strong
  * models disagree is exactly where the decision actually lives.
+ *
+ * The fuser is a seat like any other, so its own `prompt` reaches it here. It
+ * did not, until a live run showed the schema accepting `fuser.prompt` and the
+ * instruction never arriving — an accepted key that does nothing is worse than
+ * a rejected one.
  */
 export function buildFusionPrompt(args: {
 	request: string;
@@ -113,6 +136,7 @@ export function buildFusionPrompt(args: {
 	const sections = [`# Request\n${request}`, `# Your phase\n${heading}`];
 	if (handoff) sections.push(`# Handoff from the previous phase\n${renderHandoff(handoff)}`);
 	if (phase.prompt) sections.push(`# Phase instructions\n${phase.prompt}`);
+	if (phase.fuser?.prompt) sections.push(`# Your part\n${phase.fuser.prompt}`);
 
 	for (const opinion of opinions) {
 		const header = `## ${opinion.owner} (${opinion.model})${opinion.ok ? "" : " — FAILED"}`;

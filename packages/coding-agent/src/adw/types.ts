@@ -23,6 +23,17 @@ const adwSeatSchema = type({
 	/** Model pattern (`provider/id[:level]` or a `@role` alias). */
 	"model?": "string",
 	"thinking?": "string",
+	/**
+	 * What to ask this seat, when the point is division of labour rather than a
+	 * second opinion. Appended after the phase's shared instructions, so a seat
+	 * with one is answering a narrower question — not a different phase.
+	 *
+	 * Left unset, every seat answers the same question, which is what makes
+	 * their answers comparable. Set it and you are buying concurrency instead:
+	 * three read-only seats investigating three subsystems at once, merged by
+	 * one writer. Safe precisely because no seat may write.
+	 */
+	"prompt?": "string",
 }).onUndeclaredKey("reject");
 
 const adwPhaseSchema = type({

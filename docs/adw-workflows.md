@@ -164,6 +164,30 @@ The engine refuses to guess here: an unorderable graph is left in declaration or
 
 `onFail: correct` follows the graph too. A phase with dependencies sends its failure to the nearest **dependency** that has an agent to correct, not to whatever happened to be declared above it — position is the wrong answer once a graph exists.
 
+### Dividing the work instead of asking twice
+
+A `fusion` panel exists for a second opinion: every seat answers the same question, which is what makes the answers comparable. Give a seat its own `prompt` and you are buying something else — **concurrency**:
+
+```yaml
+- name: survey
+  kind: fusion
+  prompt: One sentence. Name the file you read.
+  panel:
+    - { owner: scout, prompt: Read ONLY parser.js. }
+    - { owner: scout, prompt: Read ONLY format.js. }
+    - { owner: scout, prompt: Read ONLY config.js. }
+  fuser:
+    owner: task
+    prompt: Merge the parts into SURVEY.md, one line per file. Declare it.
+  gates: [artifacts_exist, files_non_empty]
+```
+
+Three read-only seats investigate three things at once, and one writer merges them. A seat with its own part is told to answer only that part, instead of being told it is "one opinion of 3" — which would invite it to answer the whole question.
+
+**This is safe for exactly one reason: no panel seat may write.** Parallel *writers* are a different problem and this does not solve it. Two agents writing the same tree lose writes, and `diff_matches_claims` cannot see the race — it reads the result, not the order. That is why writer phases stay serial here, and why `/fh-collaborate` in fusion-harness bounds its own DAG the same way: "parallel where possible, exactly one shared-CWD writer at a time".
+
+The fuser is a seat too, so its `prompt` reaches it — the place to say which file the merge lands in.
+
 ## Phase kinds
 
 ### `agent`
@@ -218,7 +242,7 @@ Gates verify claims; they never predict. They run **after** a phase, in Rust, ag
 | `files_non_empty`     | every path in `artifacts` exists **and** has non-zero size                            |
 | `diff_matches_claims` | every path the working tree changed is one some phase declared                        |
 
-`passed` is evidence rather than silence: a gate reports what it examined, so a phase that declared no artifacts cannot pass by claiming nothing. Gate names are validated at load time against `taskGateNames()`, the same list the engine builds from — a new gate in Rust needs no matching edit in TypeScript to be accepted.
+`passed` is evidence rather than silence, and that has teeth: **an envelope that declares no artifacts fails both artifact gates** rather than clearing them vacuously. Requesting the gate is an assertion that the phase produces files. This was wrong until a live run proved it — a fuser returned `artifacts: []`, cleared both gates and wrote nothing, while this page already claimed it could not. Gate names are validated at load time against `taskGateNames()`, the same list the engine builds from — a new gate in Rust needs no matching edit in TypeScript to be accepted.
 
 ### `diff_matches_claims`
 

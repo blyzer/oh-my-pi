@@ -33,8 +33,10 @@ impl GateReport {
 		self.checks.push(Check { item: item.into(), ok, note: note.into() });
 	}
 
-	/// Vacuously true when a gate had nothing to examine — an envelope that
-	/// claims no artifacts cannot fail `artifacts_exist`.
+	/// True when every check passed. A gate that examined nothing is the gate's
+	/// own problem to report: both artifact gates fail on an empty claim rather
+	/// than passing vacuously, because a phase must not clear a gate by
+	/// declaring nothing.
 	pub fn ok(&self) -> bool {
 		self.checks.iter().all(|c| c.ok)
 	}
@@ -66,6 +68,14 @@ impl Gate for ArtifactsExist {
 
 	fn run(&self, envelope: &Envelope<Value>, ctx: &GateCtx<'_>) -> GateReport {
 		let mut report = GateReport::new(self.name());
+		if envelope.artifacts.is_empty() {
+			// A gate with nothing to examine used to pass, which let a phase
+			// clear it by claiming nothing at all — measured: an envelope with
+			// `artifacts: []` passed both artifact gates. Requesting this gate
+			// is an assertion that the phase produces files.
+			report.push(".", false, "declared no artifacts, so there is nothing to verify");
+			return report;
+		}
 		for artifact in &envelope.artifacts {
 			let path = ctx.root.join(artifact);
 			let exists = path.exists();
@@ -86,6 +96,10 @@ impl Gate for FilesNonEmpty {
 
 	fn run(&self, envelope: &Envelope<Value>, ctx: &GateCtx<'_>) -> GateReport {
 		let mut report = GateReport::new(self.name());
+		if envelope.artifacts.is_empty() {
+			report.push(".", false, "declared no artifacts, so there is nothing to verify");
+			return report;
+		}
 		for artifact in &envelope.artifacts {
 			let path = ctx.root.join(artifact);
 			match std::fs::metadata(&path) {
@@ -143,10 +157,22 @@ mod tests {
 	}
 
 	#[test]
-	fn no_claims_means_nothing_to_verify() {
+	fn claiming_nothing_does_not_clear_the_gate() {
+		// This test previously asserted the opposite — that an empty claim
+		// passes vacuously — and a live run showed what that buys: a fuser
+		// returned `artifacts: []` and cleared both artifact gates while writing
+		// no file. Requesting the gate is an assertion that files are produced.
 		let dir = TempDir::new("gate-none");
-		let report = ArtifactsExist.run(&envelope(&[]), &GateCtx { root: dir.path() });
-		assert!(report.ok());
-		assert!(report.checks.is_empty());
+		for report in [
+			ArtifactsExist.run(&envelope(&[]), &GateCtx { root: dir.path() }),
+			FilesNonEmpty.run(&envelope(&[]), &GateCtx { root: dir.path() }),
+		] {
+			assert!(!report.ok(), "{}: an empty claim must not pass", report.gate);
+			assert!(
+				report.violations().any(|v| v.contains("declared no artifacts")),
+				"{}: the violation has to say why, not just fail",
+				report.gate
+			);
+		}
 	}
 }

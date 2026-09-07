@@ -51,7 +51,7 @@ import {
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { rewindTarget } from "./config";
 import { buildFusionPrompt, buildPanelPrompt, buildPhasePrompt, ENVELOPE_CONTRACT, type PanelOpinion } from "./prompt";
-import type { AdwPhaseConfig, AdwPhaseProgress, AdwWorkflowConfig } from "./types";
+import type { AdwPhaseConfig, AdwPhaseProgress, AdwSeatConfig, AdwWorkflowConfig } from "./types";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60_000;
 /** Command output is quoted into the next agent's correction; keep it useful, not unbounded. */
@@ -692,7 +692,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				// the gates rejected, and re-polling N models to receive the same
 				// answers is the most expensive way to change nothing.
 				const cached = panelCache?.phase === phase.name ? panelCache.opinions : undefined;
-				const panelPrompt = buildPanelPrompt({ request, phase, handoff: handoff ?? undefined });
+				// Built per seat: a seat carrying its own `prompt` is answering a
+				// narrower question, so the prompt cannot be shared across the panel.
+				const panelPromptFor = (seat: AdwSeatConfig) =>
+					buildPanelPrompt({ request, phase, seat, handoff: handoff ?? undefined });
 				const limit = Math.max(1, host.settings?.get("task.maxConcurrency") ?? DEFAULT_MAX_PANEL_CONCURRENCY);
 				const settled = cached
 					? cached.map(opinion => ({ opinion, tokens: 0, cached: true }))
@@ -706,7 +709,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 									model: seat.model,
 									thinking: seat.thinking,
 									agent: derivePanelAgent(base),
-									task: panelPrompt,
+									task: panelPromptFor(seat),
 									id: `${stepId}-panel-${seatIndex}`,
 									index: seatIndex,
 									description: `adw ${workflow.name} · ${phase.name} · ${seat.owner}`,
