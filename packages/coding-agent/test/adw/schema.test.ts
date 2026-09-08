@@ -78,6 +78,7 @@ describe("checkPayload", () => {
 
 describe("compilePayloadSchema", () => {
 	it("refuses a conditional omptype would drop, naming the keywords", () => {
+		// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema if/then/else keyword
 		const result = compilePayloadSchema({ type: "object", if: { const: 1 }, then: { const: 2 } });
 		expect(typeof result).toBe("string");
 		expect(result as string).toContain("if");

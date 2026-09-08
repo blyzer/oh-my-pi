@@ -166,7 +166,7 @@ export const adwWorkflowSchema = type({
 	/**
 	 * Globs `diff_matches_claims` treats as always accounted for, for paths a
 	 * build legitimately rewrites without any phase claiming them (`bun.lock`,
-	 * `**​/*.generated.ts`).
+	 * `generated/**`).
 	 *
 	 * Empty by default and deliberately so: a wide default makes the gate noisy,
 	 * and an operator who cannot tell which changes it forgives stops trusting

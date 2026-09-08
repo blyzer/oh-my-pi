@@ -13,7 +13,7 @@ import { YAML } from "bun";
 import { getConfigDirs } from "../config";
 import { taskGateNames } from "@oh-my-pi/pi-natives";
 import { compilePhaseChecks, VERDICT_GATE } from "./schema";
-import { type AdwPhaseConfig, type AdwWorkflowConfig, adwWorkflowSchema, type DiscoveredWorkflow } from "./types";
+import { type AdwWorkflowConfig, adwWorkflowSchema, type DiscoveredWorkflow } from "./types";
 
 /** Only the native config root holds workflows; `.claude`/`.codex` are not ours. */
 const ADW_CONFIG_SOURCE = ".omp";
@@ -263,7 +263,9 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 		for (const phase of workflow.phases) {
 			if (phase.name === review.name || phase.kind === "code" || phase.writes?.length === 0) continue;
 			if (!dependsTransitively(graph, graph.get(review.name)!, phase.name)) {
-				fail(`final review "${review.name}" must depend on concurrent writer "${phase.name}" to verify combined changes`);
+				fail(
+					`final review "${review.name}" must depend on concurrent writer "${phase.name}" to verify combined changes`,
+				);
 			}
 		}
 	}
