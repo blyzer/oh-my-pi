@@ -7,8 +7,9 @@
 //!
 //! - [`Envelope`] — the typed handoff; context crosses phases in code.
 //! - [`Gate`] — verifies an envelope's claims after the fact.
-//! - [`Run`] — the state machine: [`Run::next_step`] / [`Run::submit_agent_output`].
-//! - [`Tracer`] — 32-byte fixed-stride binary event log with an interned string
+//! - [`Run`] — the state machine: [`Run::next_step`] /
+//!   [`Run::submit_agent_output`].
+//! - [`Tracer`] — 36-byte fixed-stride binary event log with an interned string
 //!   table; [`TraceReader`] tails it from another process by sequence number.
 //!
 //! Text appears in exactly two places, both unavoidable: the model's own turn
@@ -26,6 +27,6 @@ mod test_support;
 
 pub use envelope::{Envelope, EnvelopeError, EnvelopeStatus, envelope_text};
 pub use gate::{ArtifactsExist, Check, FilesNonEmpty, Gate, GateCtx, GateReport, JsonParses};
-pub use orchestrator::{Outcome, Run, RunError, RunSummary, Step, Workflow};
-pub use phase::{PhaseKind, PhaseParams, PhaseRecord, PhaseStatus};
+pub use orchestrator::{Outcome, Run, RunError, RunSummary, SelectedInput, Step, Workflow};
+pub use phase::{PhaseKind, PhaseParams, PhaseRecord, PhaseStatus, ReviewRoute};
 pub use trace::{Event, EventKind, EventRecord, TraceReader, Tracer};

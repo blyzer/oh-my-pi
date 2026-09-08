@@ -121,7 +121,7 @@ phases:
 		expect(() => parseWorkflow("x.yml", yaml)).toThrow("must be greater than zero");
 	});
 
-	it("rejects a fractional maxAttempts — engine and driver would compute different budgets", () => {
+	it("rejects a fractional maxAttempts rather than silently rounding the budget", () => {
 		const yaml = `
 name: x
 maxAttempts: 1.5
@@ -151,12 +151,51 @@ phases:
 		expect(() => parseWorkflow("typo.yml", yaml)).toThrow(/tiemoutMs/);
 	});
 
-	it("accepts the isolation flag", () => {
-		const yaml = `name: t\nisolation: true\nphases:\n  - { name: p, kind: code, owner: sh, command: "true" }`;
-		expect(parseWorkflow("t.yml", yaml).isolation).toBe(true);
-	});
 	it("rejects a YAML document that is not a mapping", () => {
 		expect(() => parseWorkflow("list.yml", "- one\n- two")).toThrow("expected a YAML mapping");
+	});
+});
+
+describe("concurrency", () => {
+	const workflow = (value: string) =>
+		`name: x\nconcurrency: ${value}\nisolation: true\nphases:\n  - { name: p, kind: code, owner: sh, command: "true" }`;
+
+	it.each([["0"], ["1.5"], ["9"]])("rejects %s outside the bounded integer dispatch width", value => {
+		expect(() => parseWorkflow("x.yml", workflow(value))).toThrow(/concurrency must be a whole number from 1 to 8/);
+	});
+
+	it.each([[""], ["isolation: false\n"]])("rejects concurrent execution without isolation: %s", isolation => {
+		expect(() => parseWorkflow("x.yml", workflow("2").replace("isolation: true\n", isolation))).toThrow(
+			/concurrency greater than 1 requires isolation: true/,
+		);
+	});
+
+	it.each([
+		["agent", "kind: agent, owner: task"],
+		["fusion", "kind: fusion, panel: [{ owner: scout }, { owner: reviewer }], fuser: { owner: task }"],
+	])("requires a write declaration on a concurrent %s writer, allowing an explicit deny-write scope", (_kind, writer) => {
+		const yaml = `name: w\nconcurrency: 8\nisolation: true\nphases:
+  - { name: build, ${writer}, writes: [] }
+  - { name: verify, kind: code, command: "bun check", onFail: correct }
+`;
+		expect(rewindTarget(parseWorkflow("w.yml", yaml), "verify")).toBe("build");
+		expect(() => parseWorkflow("w.yml", yaml.replace(", writes: []", ""))).toThrow(/requires explicit writes/);
+	});
+
+	it("requires concurrent review acceptance to cover every contributing writer, directly or through checks", () => {
+		const yaml = `name: w\nconcurrency: 2\nisolation: true\nacceptance: review\nphases:
+  - { name: api, kind: agent, owner: task, writes: ["src/api/**"], dependsOn: [] }
+  - { name: ui, kind: agent, owner: task, writes: ["src/ui/**"], dependsOn: [] }
+  - { name: check, kind: code, command: "bun check", dependsOn: [api, ui] }
+  - { name: review, kind: agent, owner: reviewer, writes: [], gates: [verdict_consistent], onReject: { to: api, maxRevisions: 1 } }
+`;
+		parseWorkflow("w.yml", yaml);
+		expect(() => parseWorkflow("w.yml", yaml.replace("dependsOn: [api, ui]", "dependsOn: [api]"))).toThrow(
+			/must depend on concurrent writer "ui"/,
+		);
+		expect(() => parseWorkflow("w.yml", yaml.replace(", gates: [verdict_consistent], onReject: { to: api, maxRevisions: 1 }", ""))).toThrow(
+			/concurrent review acceptance requires final phase/,
+		);
 	});
 });
 
@@ -292,7 +331,7 @@ describe("shipped example workflows", () => {
 describe("dependsOn", () => {
 	const yaml = (phases: string) => `name: w\nphases:\n${phases}`;
 	const agent = (name: string, deps?: string) =>
-		`  - { name: ${name}, kind: agent, owner: sonic${deps ? `, dependsOn: [${deps}] }` : " }"}`;
+		`  - { name: ${name}, kind: agent, owner: sonic${deps !== undefined ? `, dependsOn: [${deps}] }` : " }"}`;
 
 	it("rejects a dependency on a phase that does not exist", () => {
 		expect(() => parseWorkflow("w.yml", yaml(`${agent("api")}\n${agent("docs", "apii")}`))).toThrow(
@@ -302,6 +341,28 @@ describe("dependsOn", () => {
 
 	it("rejects a phase that depends on itself", () => {
 		expect(() => parseWorkflow("w.yml", yaml(agent("api", "api")))).toThrow(/depends on itself/);
+	});
+
+	it("stops correction traversal at explicit independence rather than rewinding an unrelated predecessor", () => {
+		const yaml = `name: w\nphases:
+  - { name: unrelated, kind: agent, owner: task }
+  - { name: check, kind: code, command: "bun check", dependsOn: [] }
+  - { name: verify, kind: code, command: "bun test", onFail: correct }
+`;
+		expect(() => parseWorkflow("w.yml", yaml)).toThrow(/no agent or fusion phase precedes it/);
+		expect(rewindTarget(parseWorkflow("w.yml", yaml.replace(", dependsOn: []", "")), "verify")).toBe("unrelated");
+	});
+
+	it("rejects a cycle formed by an implicit predecessor edge", () => {
+		expect(() => parseWorkflow("w.yml", yaml(`${agent("a", "b")}\n${agent("b")}`))).toThrow(/dependency cycle/);
+	});
+
+	it("walks implicit edges behind an explicit code dependency when finding a correction target", () => {
+		const workflow = parseWorkflow("w.yml", yaml(
+			`${agent("build")}\n  - { name: check, kind: code, command: "bun check" }\n` +
+			`  - { name: verify, kind: code, command: "bun test", dependsOn: [check], onFail: correct }`,
+		));
+		expect(rewindTarget(workflow, "verify")).toBe("build");
 	});
 
 	it("rejects a cycle and names every phase in it", () => {
@@ -343,6 +404,62 @@ describe("dependsOn", () => {
 	});
 });
 
+describe("inputs", () => {
+	const yaml = (phases: string) => `name: w\nphases:\n${phases}`;
+	const agent = (name: string, extra = "") => `  - { name: ${name}, kind: agent, owner: sonic${extra} }`;
+
+	it("rejects an input naming a phase that does not exist", () => {
+		expect(() => parseWorkflow("w.yml", yaml(`${agent("plan")}\n${agent("build", ", inputs: [plaan]")}`))).toThrow(
+			/phase "build" consumes unknown input "plaan"/,
+		);
+	});
+
+	it("rejects a phase that consumes its own output", () => {
+		expect(() => parseWorkflow("w.yml", yaml(agent("plan", ", inputs: [plan]")))).toThrow(
+			/phase "plan" lists itself as an input/,
+		);
+	});
+
+	it("rejects a duplicated input rather than delivering one envelope twice", () => {
+		expect(() =>
+			parseWorkflow("w.yml", yaml(`${agent("plan")}\n${agent("build", ", inputs: [plan, plan]")}`)),
+		).toThrow(/phase "build" lists input "plan" more than once/);
+	});
+
+	it("rejects an input that executes later — its output cannot exist yet", () => {
+		expect(() => parseWorkflow("w.yml", yaml(`${agent("build", ", inputs: [plan]")}\n${agent("plan")}`))).toThrow(
+			/phase "build" input "plan" is not a transitive dependency/,
+		);
+	});
+
+	it("rejects an input outside the declared dependency closure", () => {
+		// With a graph declared, data flow and ordering must agree: consuming a
+		// phase this one does not depend on races the scheduler.
+		expect(() =>
+			parseWorkflow(
+				"w.yml",
+				yaml(`${agent("plan")}\n${agent("other", ", dependsOn: []")}\n${agent("build", ", dependsOn: [other], inputs: [plan]")}`),
+			),
+		).toThrow(/phase "build" input "plan" is not a transitive dependency/);
+	});
+
+	it("requires data flow to follow implicit edges, not merely declaration order", () => {
+		const workflow = yaml(
+			`${agent("plan")}\n${agent("other", ", dependsOn: []")}\n${agent("build", ", inputs: [plan]")}`,
+		);
+		expect(() => parseWorkflow("w.yml", workflow)).toThrow(/not a transitive dependency/);
+	});
+
+	it("resolves later-declared inputs through transitive graph ordering", () => {
+		const workflow = yaml(
+			`  - { name: verify, kind: code, command: "bun test", dependsOn: [mid], inputs: [plan], onFail: correct }\n` +
+			`  - { name: mid, kind: code, command: "bun check", dependsOn: [plan] }\n` +
+			agent("plan", ", dependsOn: []"),
+		);
+		expect(rewindTarget(parseWorkflow("w.yml", workflow), "verify")).toBe("plan");
+	});
+});
+
 describe("artifact gates on a code phase", () => {
 	const yaml = (gate: string) =>
 		`name: w\nphases:\n  - { name: t, kind: code, owner: sh, command: "true", gates: [${gate}] }`;
@@ -359,6 +476,133 @@ describe("artifact gates on a code phase", () => {
 
 	it("still allows diff_matches_claims, which examines the tree rather than a claim", () => {
 		expect(() => parseWorkflow("w.yml", yaml("diff_matches_claims"))).not.toThrow();
+	});
+});
+
+describe("write scopes", () => {
+	it("rejects writes on a code phase, naming the phase — a command has no guarded writer", () => {
+		const yaml = `name: w\nphases:\n  - { name: t, kind: code, owner: sh, command: "true", writes: ["src/**"] }`;
+		expect(() => parseWorkflow("w.yml", yaml)).toThrow(
+			'phase "t" is a code phase; writes only applies to agent and fusion phases',
+		);
+	});
+
+	it("rejects a blank writes glob — natively it would compile and silently authorize nothing", () => {
+		const yaml = `name: w\nphases:\n  - { name: p, kind: agent, owner: scout, writes: ["src/**", "  "] }`;
+		expect(() => parseWorkflow("w.yml", yaml)).toThrow('phase "p" writes contains an empty glob');
+	});
+
+	it("rejects a duplicate writes glob", () => {
+		const yaml = `name: w\nphases:\n  - { name: p, kind: agent, owner: scout, writes: ["src/**", "src/**"] }`;
+		expect(() => parseWorkflow("w.yml", yaml)).toThrow('phase "p" writes lists "src/**" more than once');
+	});
+
+	it("rejects an empty protected glob at the workflow level", () => {
+		const yaml = `name: w\nprotected: [""]\nphases:\n  - { name: p, kind: agent, owner: scout }`;
+		expect(() => parseWorkflow("w.yml", yaml)).toThrow("protected contains an empty glob");
+	});
+});
+
+describe("review contracts", () => {
+	it("rejects a review gate on a code phase that cannot emit the review contract", () => {
+		expect(() =>
+			parseWorkflow(
+				"w.yml",
+				'name: w\nphases:\n  - { name: test, kind: code, command: "true", gates: [verdict_consistent] }',
+			),
+		).toThrow(/verdict_consistent requires an agent or fusion review envelope/);
+	});
+});
+
+describe("onReject", () => {
+	const yaml = (route: string, source = "kind: agent, owner: reviewer, gates: [verdict_consistent]") =>
+		`name: w\nphases:\n  - { name: build, kind: agent, owner: task }\n  - { name: review, ${source}, onReject: ${route} }`;
+
+	it.each([
+		["missing target", "{ maxRevisions: 1 }", /to/],
+		["missing revision limit", "{ to: build }", /maxRevisions/],
+		["misspelled route key", "{ to: build, maxRevisions: 1, maxRevisons: 2 }", /maxRevisons/],
+		["non-string target", "{ to: 7, maxRevisions: 1 }", /to/],
+		["fractional revision limit", "{ to: build, maxRevisions: 1.5 }", /whole number/],
+		["zero revision limit", "{ to: build, maxRevisions: 0 }", /whole number/],
+		["overflowing revision limit", "{ to: build, maxRevisions: 65536 }", /whole number/],
+		["unknown target", "{ to: absent, maxRevisions: 1 }", /unknown phase "absent"/],
+		["self target", "{ to: review, maxRevisions: 1 }", /targets itself/],
+	] as const)("rejects %s before starting a run", (_label, route, error) => {
+		expect(() => parseWorkflow("w.yml", yaml(route))).toThrow(error);
+	});
+
+	it("requires an explicit verdict gate rather than inferring review intent", () => {
+		expect(() =>
+			parseWorkflow("w.yml", yaml("{ to: build, maxRevisions: 1 }", "kind: agent, owner: reviewer")),
+		).toThrow(/requires the verdict_consistent gate/);
+	});
+
+	it("rejects a code source even when a builder exists", () => {
+		expect(() =>
+			parseWorkflow("w.yml", yaml("{ to: build, maxRevisions: 1 }", 'kind: code, command: "true"')),
+		).toThrow(/onReject requires an agent or fusion review envelope/);
+	});
+
+	it("rejects a code target because reexecuting checks cannot revise the implementation", () => {
+		expect(() =>
+			parseWorkflow(
+				"w.yml",
+				yaml("{ to: build, maxRevisions: 1 }").replace(
+					"name: build, kind: agent, owner: task",
+					'name: build, kind: code, command: "true"',
+				),
+			),
+		).toThrow(/must be an agent or fusion phase/);
+	});
+
+	it("accepts a later-declared transitive builder only when it executes before the review", () => {
+		const workflow = `name: w\nphases:
+  - { name: review, kind: fusion, panel: [{ owner: scout }, { owner: reviewer }], fuser: { owner: task }, gates: [verdict_consistent], dependsOn: [checks], onReject: { to: build, maxRevisions: 65535 } }
+  - { name: checks, kind: code, command: "true", dependsOn: [build] }
+  - { name: build, kind: fusion, panel: [{ owner: scout }, { owner: reviewer }], fuser: { owner: task }, dependsOn: [] }
+`;
+		parseWorkflow("w.yml", workflow);
+		expect(() => parseWorkflow("w.yml", workflow.replace("dependsOn: [checks], ", ""))).toThrow(
+			/not a transitive dependency/,
+		);
+	});
+
+	it("rejects an earlier-declared target whose dependencies delay it until after the review", () => {
+		const workflow = yaml("{ to: build, maxRevisions: 1 }")
+			.replace(
+				"name: build, kind: agent, owner: task",
+				"name: build, kind: agent, owner: task, dependsOn: [prepare]",
+			)
+			.replace("gates: [verdict_consistent]", "gates: [verdict_consistent], dependsOn: []")
+			.concat("\n  - { name: prepare, kind: agent, owner: scout, dependsOn: [] }");
+		expect(() => parseWorkflow("w.yml", workflow)).toThrow(/not a transitive dependency/);
+	});
+
+	it("does not route to an unrelated builder when dependencies are declared, even if empty", () => {
+		for (const deps of ["[other]", "[]"]) {
+			const workflow = yaml(
+				"{ to: build, maxRevisions: 1 }",
+				`kind: agent, owner: reviewer, gates: [verdict_consistent], dependsOn: ${deps}`,
+			).replace("phases:", "phases:\n  - { name: other, kind: agent, owner: scout }");
+			expect(() => parseWorkflow("w.yml", workflow)).toThrow(/not a transitive dependency/);
+		}
+	});
+
+	it("does not revise an unrelated builder across an implicit predecessor edge", () => {
+		const workflow = yaml("{ to: build, maxRevisions: 1 }").replace(
+			"  - { name: review",
+			"  - { name: separate, kind: code, command: \"bun check\", dependsOn: [] }\n  - { name: review",
+		);
+		expect(() => parseWorkflow("w.yml", workflow)).toThrow(/not a transitive dependency/);
+	});
+
+	it("rejects a dependency cycle rather than treating its builder as an earlier revision target", () => {
+		const workflow = yaml(
+			"{ to: build, maxRevisions: 1 }",
+			"kind: agent, owner: reviewer, gates: [verdict_consistent], dependsOn: [build]",
+		).replace("name: build, kind: agent, owner: task", "name: build, kind: agent, owner: task, dependsOn: [review]");
+		expect(() => parseWorkflow("w.yml", workflow)).toThrow(/dependency cycle/);
 	});
 });
 

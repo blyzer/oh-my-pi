@@ -386,23 +386,23 @@ export declare class TaskRun {
    * Hand back an agent's raw final turn. Output that does not parse is a
    * correction, not a throw: the same session is asked again.
    */
-  submitAgentOutput(text: string): TaskOutcome
+  submitAgentOutput(phase: string, text: string): TaskOutcome
   /**
    * Report a deterministic `Code` or human `Engineer` phase. A red test
    * suite reaches the next agent as an envelope like any other.
    */
-  submitCodeResult(ok: boolean, summary: string): TaskOutcome
+  submitCodeResult(phase: string, ok: boolean, summary: string): TaskOutcome
   /**
    * Records one fusion-panel member's answer against the active phase.
    * `tokens` is what makes two models comparable in the trace.
    */
-  notePanelOpinion(owner: string, ok: boolean, tokens: number): void
+  notePanelOpinion(phase: string, owner: string, ok: boolean, tokens: number, model?: string | undefined | null): void
   /**
    * Records what the attempt in flight cost. Charged per attempt: a rejected
    * try spent real tokens, and a phase that needed three of them is the one
    * a cost report has to show.
    */
-  notePhaseTokens(owner: string, tokens: number): void
+  notePhaseTokens(phase: string, owner: string, tokens: number, model?: string | undefined | null): void
   /**
    * Record a gate the caller ran itself, judged with the engine's own on the
    * next submission.
@@ -412,7 +412,14 @@ export declare class TaskRun {
    * cost that crate its three dependencies. The result is a `gate_check` in
    * the trace and blocks acceptance exactly like a native gate.
    */
-  noteGateReport(gate: string, checks: Array<TaskGateCheck>): void
+  noteGateReport(phase: string, gate: string, checks: Array<TaskGateCheck>): void
+  /**
+   * A coherent verdict for the next submission. Gates and envelope status
+   * still run first; this decision is drained even if the attempt fails.
+   */
+  noteReviewDecision(phase: string, approved: boolean, reason: string): void
+  /** Evaluate an active phase's gates in its ephemeral writer workspace. */
+  setPhaseRoot(phase: string, root: string): void
   /** The last accepted envelope, for building the next phase's prompt. */
   handoff(): TaskHandoff | null
   /**
@@ -421,8 +428,8 @@ export declare class TaskRun {
    */
   finish(accepted: boolean, reason?: string | undefined | null): TaskRunSummary
   /**
-   * The effective per-phase attempt budget after clamping. A driver bounding
-   * its own loop reads this instead of re-hardcoding the default.
+   * Base attempt budget after clamping. Review revisions grant individual
+   * targets additional attempts; the engine owns transition bounds.
    */
   get maxAttempts(): number
   /** Where this run's binary trace lives, if it is traced. */
@@ -451,6 +458,43 @@ export declare class TaskTraceReader {
    * absent. Call after `readRaw`, which refreshes it.
    */
   strings(): Array<string>
+}
+
+/**
+ * Attempt-boundary write guard. `create` establishes (or reloads) the durable
+ * run baseline, `begin` snapshots the tree at an attempt boundary, and
+ * `settle` detects, classifies, and rolls back unauthorized changes.
+ */
+export declare class TaskWriteGuard {
+  /**
+   * Captures the durable run baseline — HEAD plus dirty/untracked content
+   * states — or, when `baselineFile` already exists, loads it so a resumed
+   * run keeps the original attribution instead of relabeling interrupted
+   * work as user dirt. Also reloads a persisted `begin()` manifest, so
+   * `settle` after a process crash restores against the real boundary.
+   */
+  static create(options: TaskWriteGuardOptions): TaskWriteGuard
+  /**
+   * Snapshot the tree at an attempt boundary: hash every watched file,
+   * store content not already in the object store, and persist the manifest
+   * so a crashed process can still settle against it.
+   */
+  begin(): void
+  /**
+   * Detect, classify, and roll back. Safe to call after a crash, cancel, or
+   * timeout with no submission — it only needs the persisted `begin()`
+   * state — and idempotent: a second settle over a restored tree finds
+   * nothing left to do.
+   */
+  settle(options: TaskGuardSettleOptions): TaskGuardReport
+  /**
+   * The run baseline's dirty/untracked paths — the user's work, loaded from
+   * the durable baseline on resume. Report-relevant only: an untouched
+   * dirty file never appears in a settle report and is never restored.
+   */
+  get baselineDirt(): Array<string>
+  /** The commit the working copy was on when the run started, if any. */
+  get baselineHead(): string | null
 }
 
 /**
@@ -2823,6 +2867,47 @@ export interface TaskGateCheck {
 
 export declare function taskGateNames(): Array<string>
 
+export interface TaskGuardChange {
+  path: string
+  /** `"modified"` · `"created"` · `"deleted"` · `"retargeted"`. */
+  kind: string
+}
+
+export interface TaskGuardReport {
+  /** Every unauthorized change, whether it was restored or not. */
+  unauthorized: Array<TaskGuardChange>
+  /** Paths restored byte-for-byte to their `begin()` state. */
+  rolledBack: Array<string>
+  /**
+   * Paths that could not be restored safely. The tree is left as-is for
+   * them and the full unauthorized diff is preserved at `patchPath`; the
+   * caller must fail closed.
+   */
+  unrecoverable: Array<string>
+  /** Present exactly when `unrecoverable` is non-empty. */
+  patchPath?: string
+}
+
+export interface TaskGuardSettleOptions {
+  /**
+   * Repo-relative globs the attempt's writer declared. Omitted means
+   * unrestricted except protected paths; an explicit empty list denies
+   * every change.
+   */
+  allowed?: Array<string>
+  /**
+   * Repo-relative globs no attempt may change. `.omp/adw/**` is always
+   * added. A path matching both `allowed` and a protected glob is
+   * unauthorized: protection beats authorization.
+   */
+  protectedGlobs: Array<string>
+  /**
+   * Where the full unauthorized diff is preserved when a restoration
+   * cannot be performed safely.
+   */
+  patchDir: string
+}
+
 /**
  * The last accepted envelope — what the next phase's prompt is built from.
  * Context crosses phases here, in code, not in conversation.
@@ -2846,6 +2931,8 @@ export interface TaskOutcome {
   correction?: string
   /** Why the run halted when `kind` is `Aborted`. */
   reason?: string
+  /** Target and transitive dependents superseded by a rewind or revision. */
+  invalidated: Array<string>
 }
 
 export declare enum TaskOutcomeKind {
@@ -2859,6 +2946,22 @@ export interface TaskPhaseGates {
   phase: string
   /** `"artifacts_exist"` · `"files_non_empty"`. */
   gates: Array<string>
+}
+
+/**
+ * One resolved input on a dispatched step: which producer phase, which
+ * acceptance ordinal (1-based version), and that version's envelope. The
+ * trace's `input_selected` records carry the same version, so the evidence an
+ * attempt saw is auditable after the fact.
+ */
+export interface TaskPhaseInput {
+  phase: string
+  version: number
+  summary: string
+  artifacts: Array<string>
+  notesForNextAgent: string
+  /** Phase-specific fields beyond the contract, as JSON text. */
+  payloadJson: string
 }
 
 /**
@@ -2876,6 +2979,8 @@ export interface TaskPhaseResult {
   kind: TaskPhaseKind
   owner: string
   passed: boolean
+  /** Historical evidence superseded by a code or review rewind. */
+  invalidated: boolean
   attempts: number
   summary: string
   /**
@@ -2900,11 +3005,24 @@ export interface TaskPhaseSpec {
    * which phase can fix a failure.
    */
   rewindTo?: string
+  onReject?: TaskReviewRoute
   /**
    * Phases that must pass before this one runs. The engine sorts on these at
    * construction, so a resumed run derives the same order it ran.
    */
   dependsOn?: Array<string>
+  /**
+   * Accepted outputs this phase consumes, named by producer phase. Resolved
+   * to their current accepted versions at dispatch and returned on the step
+   * as `inputs`; a phase without them keeps the positional handoff.
+   */
+  inputs?: Array<string>
+}
+
+/** Routing for a caller-validated coherent negative review. */
+export interface TaskReviewRoute {
+  to: string
+  maxRevisions: number
 }
 
 export interface TaskRunOptions {
@@ -2927,6 +3045,17 @@ export interface TaskRunOptions {
    * (`bun.lock`, `*.generated.ts`) and nothing more.
    */
   undeclaredIgnore?: Array<string>
+  /**
+   * Where the run-wide `diff_matches_claims` allowed set is persisted.
+   *
+   * Format: a JSON array of normalized repo-relative paths, sorted, written
+   * atomically (`<file>.tmp` + rename). A fresh run writes the initial dirt
+   * capture there and every accepted claim rewrites it; a resume that finds
+   * the file loads it as THE set instead of recapturing dirt, so a crashed
+   * attempt's undeclared edits are not silently admitted as operator dirt.
+   * A resume that does not find it falls back to recapture (legacy traces).
+   */
+  claimsFile?: string
 }
 
 export interface TaskRunSummary {
@@ -2950,19 +3079,27 @@ export interface TaskStep {
   /** 1-based; `> 1` means the previous attempt was rejected. */
   attempt: number
   correction?: string
+  /**
+   * Declared inputs resolved at dispatch, in declaration order. Present only
+   * for a `Run` step whose phase declares `inputs`; a driver building that
+   * phase's prompt uses these, never the positional handoff.
+   */
+  inputs?: Array<TaskPhaseInput>
   accepted: boolean
 }
 
 export declare enum TaskStepKind {
   Run = 0,
-  Done = 1
+  Done = 1,
+  Wait = 2
 }
 
 export declare function taskTraceLayout(): TaskTraceLayout
 
 /**
- * Byte layout of one trace record. A JS reader indexes [`TaskTraceReader::read_raw`]
- * with these instead of hardcoding them, so a format bump cannot go unnoticed.
+ * Byte layout of one trace record. A JS reader indexes
+ * [`TaskTraceReader::read_raw`] with these instead of hardcoding them, so a
+ * format bump cannot go unnoticed.
  */
 export interface TaskTraceLayout {
   headerLen: number
@@ -2983,6 +3120,16 @@ export interface TaskTraceLayout {
   formatVersion: number
   /** Event kind names indexed by the record's kind byte; index 0 is unused. */
   kindNames: Array<string>
+}
+
+export interface TaskWriteGuardOptions {
+  /** Tree the guard watches; every reported path is relative to it. */
+  root: string
+  /**
+   * Durable baseline location, outside `root` (in the run directory). Its
+   * `.objects/` and `.attempt` siblings are managed by the guard.
+   */
+  baselineFile: string
 }
 
 /**

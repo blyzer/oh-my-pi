@@ -18,15 +18,21 @@ import * as path from "node:path";
 import {
 	IsoBackendKind,
 	type TaskHandoff,
-	type TaskGateCheck,
+	type TaskGuardReport,
+	type TaskPhaseInput,
 	type TaskOutcome,
+	type TaskPhaseSpec,
+	type TaskStep,
 	TaskOutcomeKind,
 	TaskPhaseKind,
 	TaskRun,
 	type TaskRunSummary,
 	TaskStepKind,
+	TaskWriteGuard,
+	TaskTraceReader,
+	taskTraceLayout,
 } from "@oh-my-pi/pi-natives";
-import { getAgentDir, logger, ptree, Snowflake } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, logger, ptree, Snowflake } from "@oh-my-pi/pi-utils";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
@@ -41,19 +47,22 @@ import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "..
 import type { AgentDefinition, SingleResult } from "../task/types";
 import { parseConfiguredThinkingLevel } from "../thinking";
 import { type IsolationContext, prepareIsolationContext } from "../task/isolation-runner";
+import { writeIsolationOwner } from "../task/isolation-ownership";
 import {
-	applyNestedPatches,
 	captureDeltaPatch,
+	type DeltaPatchResult,
 	cleanupIsolation,
 	ensureIsolation,
+	getRepoRoot,
 	type IsolationHandle,
 	parseIsolationBackend,
 } from "../task/worktree";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { rewindTarget } from "./config";
-import { checkPayload, compilePayloadSchema, PAYLOAD_GATE } from "./schema";
+import { compilePhaseChecks, type PhaseCheckResult, reviewAcceptance, VERDICT_GATE } from "./schema";
 import { buildFusionPrompt, buildPanelPrompt, buildPhasePrompt, ENVELOPE_CONTRACT, type PanelOpinion } from "./prompt";
 import type { AdwPhaseConfig, AdwPhaseProgress, AdwSeatConfig, AdwWorkflowConfig } from "./types";
+import { integrateAccepted, preserveDelta, recoverIntegration, writeRunState, type IntegrationRecord } from "./integration";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60_000;
 /** Command output is quoted into the next agent's correction; keep it useful, not unbounded. */
@@ -205,9 +214,9 @@ export async function mapWithLimit<T, R>(
  * patch is kept as an artifact and the checkout is never touched, which is the
  * whole reason for running isolated.
  *
- * Nested repositories (submodules, vendored checkouts) carry their own diffs
- * and are applied after the root, and only if the root landed: a nested commit
- * on top of a root that failed to apply would leave the tree inconsistent.
+ * Root and nested patches are preflighted together and applied without staging
+ * or committing. A durable pending record detects an already-applied patch
+ * after interruption; ambiguous partial application fails closed.
  */
 export async function settleIsolation(
 	isolation: { handle: IsolationHandle; context: IsolationContext },
@@ -215,8 +224,34 @@ export async function settleIsolation(
 	runDir: string,
 	adwId: string,
 ): Promise<AdwIsolationOutcome> {
+	// Delivery is a recoverable boundary: once an outcome is recorded, a crash
+	// and resume must return it instead of applying the patch a second time.
+	const markerPath = path.join(runDir, "delivery.json");
+	try {
+		return (await Bun.file(markerPath).json()) as AdwIsolationOutcome;
+	} catch (err) {
+		if (!isEnoent(err)) throw err;
+	}
+	const outcome = await performSettle(isolation, accepted, runDir, adwId);
+	await writeRunState(markerPath, outcome);
+	return outcome;
+}
+
+async function performSettle(
+	isolation: { handle: IsolationHandle; context: IsolationContext },
+	accepted: boolean,
+	runDir: string,
+	adwId: string,
+): Promise<AdwIsolationOutcome> {
 	const { handle, context } = isolation;
-	const delta = await captureDeltaPatch(handle.mergedDir, context.baseline);
+	const pendingPath = path.join(runDir, "delivery.pending.json");
+	let pending: { delta: DeltaPatchResult; next: number } | undefined;
+	try {
+		pending = (await Bun.file(pendingPath).json()) as typeof pending;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	const delta = pending?.delta ?? await captureDeltaPatch(handle.mergedDir, context.baseline);
 	const patch = delta.rootPatch.trim() ? delta.rootPatch : "";
 	const base: AdwIsolationOutcome = {
 		// `handle.backend` is a numeric N-API enum; "isolated (0)" tells nobody
@@ -234,23 +269,35 @@ export async function settleIsolation(
 	// patch artifact is written only when there is a root diff to write.
 	const patchPath = base.hadChanges ? path.join(runDir, `${adwId}.patch`) : undefined;
 	if (patchPath) await Bun.write(patchPath, text);
+	await preserveDelta(path.join(runDir, "delivery"), delta);
 	if (!accepted) return { ...base, patchPath };
-
-	if (base.hadChanges) {
-		const repo = vcs.requireGit(context.repoRoot);
-		if (!(await repo.canApplyPatch(text, {}).catch(() => false))) {
-			return { ...base, patchPath, conflict: "the parent checkout moved under the run; patch preserved" };
+	const patches = [
+		{ relativePath: ".", patch: delta.rootPatch },
+		...delta.nestedPatches,
+	].filter(entry => entry.patch.trim());
+	if (!pending) {
+		for (const entry of patches) {
+			const repo = vcs.requireGit(path.join(context.repoRoot, entry.relativePath));
+			if (!(await repo.canApplyPatch(entry.patch, {}))) {
+				return { ...base, patchPath, conflict: `the checkout moved at ${entry.relativePath}; patch preserved` };
+			}
 		}
-		await repo.applyPatch(text, {});
 	}
-
-	if (delta.nestedPatches.length === 0) return { ...base, applied: true, patchPath };
-	// Non-fatal: the root already landed, and a failed submodule apply must not
-	// retroactively turn an accepted run into a failure. It gets named instead.
-	const nestedWarnings = await applyNestedPatches(context.repoRoot, delta.nestedPatches).catch((err: unknown) => [
-		`nested repository patches failed to apply: ${err instanceof Error ? err.message : String(err)}`,
-	]);
-	return { ...base, applied: true, patchPath, nestedApplied: true, nestedWarnings };
+	for (let index = pending?.next ?? 0; index < patches.length; index++) {
+		const entry = patches[index]!;
+		const repo = vcs.requireGit(path.join(context.repoRoot, entry.relativePath));
+		if (pending && index === pending.next) {
+			const forward = await repo.canApplyPatch(entry.patch, {});
+			const reverse = await repo.canApplyPatch(entry.patch, { reverse: true });
+			if (!forward && reverse) continue;
+			if (!forward || reverse) {
+				return { ...base, patchPath, conflict: `interrupted delivery is ambiguous at ${entry.relativePath}; patch preserved` };
+			}
+		}
+		await writeRunState(pendingPath, { delta, next: index });
+		await repo.applyPatch(entry.patch, {});
+	}
+	return { ...base, applied: true, patchPath, nestedApplied: delta.nestedPatches.length > 0 };
 }
 
 /** The signals a workflow command realistically dies by, named for the report. */
@@ -266,6 +313,8 @@ export async function runCodePhase(
 	phase: AdwPhaseConfig,
 	cwd: string,
 	signal: AbortSignal | undefined,
+	/** Extra variables for this command only, on top of the inherited environment. */
+	env?: Record<string, string>,
 ): Promise<{ ok: boolean; summary: string }> {
 	const command = phase.command ?? "";
 	const timeout = phase.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
@@ -275,7 +324,7 @@ export async function runCodePhase(
 		// exist. Same split as runShellCommand in config/resolve-config-value.ts.
 		if (process.platform === "win32") {
 			let output = "";
-			const result = await executeShell({ command, cwd, timeoutMs: timeout, signal }, (err, chunk) => {
+			const result = await executeShell({ command, cwd, timeoutMs: timeout, signal, env }, (err, chunk) => {
 				if (!err) output += chunk;
 			});
 			if (result.timedOut)
@@ -294,6 +343,8 @@ export async function runCodePhase(
 			allowNonZero: true,
 			allowAbort: true,
 			signal,
+			// Bun replaces the environment wholesale; merge so PATH survives.
+			env: env ? { ...(process.env as Record<string, string>), ...env } : undefined,
 		});
 		const summary = summarizeOutput(result.stdout, result.stderr);
 		// `allowAbort` means a timeout or cancellation returns normally, and the
@@ -351,11 +402,21 @@ export interface SeatRequest {
 	model?: string;
 	thinking?: string;
 	/**
-	 * Set on a retry: the correction to continue the seat's existing session
-	 * with, rather than the full prompt of a fresh spawn.
+	 * Continue an existing seat with a correction or a new assignment after its
+	 * previous result was invalidated. A fresh spawn still receives `task`.
 	 */
 	followUpMessage?: string;
+	/** Working directory override: a concurrent writer runs in its own workspace. */
+	root?: string;
+	/** Cancellation for this dispatch alone, e.g. invalidation by a revision. */
+	signal?: AbortSignal;
 }
+
+/** What one writer attempt produced, before integration and judgment. */
+type WriterExecution =
+	| { kind: "seat"; role: "agent" | "fuser"; seatName: string; result: SeatOutcome }
+	| { kind: "panel-failed"; message: string };
+
 
 /** What a seat produced. Narrower than `SingleResult` — only what the driver reads. */
 export interface SeatOutcome {
@@ -456,6 +517,7 @@ export function createExecutorSeatRunner(ctx: {
 }): SeatRunner {
 	const { host, workRoot, artifactsDir, signal } = ctx;
 	const agentModelOverrides = host.settings?.get("task.agentModelOverrides") ?? {};
+	const seatRoots = new Map<string, string>();
 
 	return async (seat: SeatRequest): Promise<SeatOutcome> => {
 		const { patterns, role } = resolveAgentModelSelection({
@@ -484,7 +546,10 @@ export function createExecutorSeatRunner(ctx: {
 			model: result.resolvedModel ?? patterns[0] ?? seat.agent.model?.[0] ?? "default",
 		});
 
-		if (seat.followUpMessage) {
+		const root = seat.root ?? workRoot;
+		const canContinue = seatRoots.get(seat.id) === root;
+		seatRoots.set(seat.id, root);
+		if (seat.followUpMessage && canContinue) {
 			try {
 				return toOutcome(
 					await runSubagentFollowUpTurn({
@@ -494,7 +559,7 @@ export function createExecutorSeatRunner(ctx: {
 						index: seat.index,
 						description: seat.description,
 						modelRole: role,
-						signal,
+						signal: seat.signal ?? signal,
 						eventBus: host.eventBus,
 						subagentEventBus: host.subagentEventBus,
 						artifactsDir,
@@ -511,30 +576,48 @@ export function createExecutorSeatRunner(ctx: {
 				buildSeatSpawnOptions({
 					seat,
 					host,
-					workRoot,
+					workRoot: seat.root ?? workRoot,
 					artifactsDir,
 					modelPatterns: patterns,
 					modelRole: role,
-					signal,
+					signal: seat.signal ?? signal,
 				}),
 			),
 		);
 	};
 }
+/**
+ * Whether the trace's CURRENT terminal record says the run was accepted.
+ * The last `run_finished` wins: a crash writes a failed terminal too, and a
+ * continuation's verdict supersedes it. Unreadable or terminal-less traces
+ * answer `false` and leave the explaining to the engine's own resume checks.
+ */
+function traceAccepted(traceDir: string): boolean {
+	try {
+		const reader = new TaskTraceReader(traceDir);
+		const raw = reader.readRaw(0);
+		const layout = taskTraceLayout();
+		let accepted: boolean | null = null;
+		for (let at = 0; at + layout.recordLen <= raw.length; at += layout.recordLen) {
+			if (layout.kindNames[raw[at + layout.offKind] as number] !== "run_finished") continue;
+			accepted = ((raw[at + layout.offFlags] as number) & layout.flagOk) !== 0;
+		}
+		return accepted === true;
+	} catch {
+		return false;
+	}
+}
 
 export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 	const { host, workflow, signal, onPhase } = options;
-	const resuming = options.resumeAdwId;
-	if (resuming && workflow.isolation) {
-		// Checked before any I/O: the sandbox was torn down when the run died and
-		// its uncommitted work went with it, so resuming into a fresh sandbox
-		// would silently restart the completed phases from the base commit. This
-		// is knowable from the config alone, so it must not surface as a missing
-		// file from somewhere deeper.
-		throw new Error(
-			`Workflow "${workflow.name}" runs isolated, and an isolated run cannot be resumed — its sandbox is gone. Its diff was preserved as a patch; re-run instead.`,
-		);
+	const concurrency = workflow.concurrency ?? 1;
+	if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
+		throw new Error("workflow concurrency must be an integer from 1 through 8");
 	}
+	if (concurrency > 1 && (!workflow.isolation || workflow.phases.some(p => p.kind !== "code" && !p.writes))) {
+		throw new Error("concurrent workflows require isolation and explicit writes on every writer");
+	}
+	const resuming = options.resumeAdwId;
 	const adwId = resuming ?? `adw-${Snowflake.next()}`;
 
 	// Run state (trace, request, envelopes) lives OUTSIDE the session directory.
@@ -566,6 +649,32 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 	const request = recorded;
 	if (!resuming) await Bun.write(requestPath, request);
 
+	const deliveryPath = path.join(runDir, "delivery.json");
+	const workflowRecordPath = path.join(runDir, "workflow.json");
+	const isolationRecordPath = path.join(runDir, "isolation.json");
+	if (resuming) {
+		// The contract is what the trace's decisions were made against; replaying
+		// them under an edited workflow would silently substitute a different
+		// plan. Legacy runs without the record are tolerated as before.
+		const persisted: unknown = await Bun.file(workflowRecordPath).json().catch((error: unknown) => {
+			if (isEnoent(error) && concurrency === 1) return undefined;
+			throw error;
+		});
+		if (persisted && !Bun.deepEquals(JSON.parse(JSON.stringify(workflow)) as unknown, persisted)) {
+			throw new Error(
+				`The workflow definition changed since run "${adwId}" started; resume replays its decisions against the original contract. ` +
+					`Restore the definition recorded at ${workflowRecordPath}, or start a new run.`,
+			);
+		}
+		if (await Bun.file(deliveryPath).exists()) {
+			throw new Error(
+				`Run "${adwId}" already settled its delivery — resuming would risk applying it twice. The recorded outcome is at ${deliveryPath}.`,
+			);
+		}
+	} else {
+		await writeRunState(workflowRecordPath, workflow);
+	}
+
 	// Resolve the whole cast before spending a token: an unknown owner must fail
 	// the run at step zero, not halfway through a build.
 	const discovery = await discoverAgents(host.cwd);
@@ -589,107 +698,233 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		}
 	}
 
+	// Compile before allocating a sandbox: invalid contracts must never leak one.
+	const phaseChecks = new Map<string, (turn: string) => PhaseCheckResult>();
+	for (const phase of workflow.phases) {
+		if (phase.kind === "code") continue;
+		const compiled = compilePhaseChecks(phase);
+		if (typeof compiled === "string") throw new Error(`Phase "${phase.name}" has an unusable contract: ${compiled}`);
+		phaseChecks.set(phase.name, compiled.check);
+	}
+
 	// One sandbox for the WHOLE workflow, not one per spawn: `plan` writes files
 	// that `build` reads and that gates verify, so per-spawn isolation would
 	// throw away the continuity the phases depend on. Changes reach the real
-	// checkout once, at the end, and only if the run was accepted.
+	// checkout once, at the end, and only if the run is accepted.
 	let isolation: { handle: IsolationHandle; context: IsolationContext } | undefined;
-	if (workflow.isolation && resuming) {
-		// The sandbox was torn down when the run died, and its uncommitted work
-		// went with it. Resuming into a fresh sandbox would silently restart the
-		// completed phases' file changes from the base commit.
-		throw new Error(
-			`Workflow "${workflow.name}" runs isolated, and an isolated run cannot be resumed — its sandbox is gone. Its diff was preserved as a patch; re-run instead.`,
-		);
-	}
-	if (workflow.isolation) {
-		const context = await prepareIsolationContext(host.cwd);
-		const backend = parseIsolationBackend(host.settings?.get("isolation.backend") ?? "auto");
-		const handle = await ensureIsolation(context.repoRoot, adwId, backend);
-		isolation = { handle, context };
-		logger.debug("adw isolated", { adwId, backend: handle.backend, dir: handle.mergedDir });
-	}
-	/** Where phases actually run. The roster is still discovered from the real cwd. */
-	const workRoot = isolation?.handle.mergedDir ?? host.cwd;
-
-	const phasesByName = new Map(workflow.phases.map(phase => [phase.name, phase]));
-	// Compiled once per run, not per attempt. A schema that cannot compile was
-	// already rejected at load time, so an unusable one here is unreachable
-	// rather than tolerated.
-	const payloadChecks = new Map<string, (turn: string) => TaskGateCheck[]>();
-	for (const phase of workflow.phases) {
-		if (phase.schema === undefined) continue;
-		const compiled = compilePayloadSchema(phase.schema);
-		if (typeof compiled === "string") throw new Error(`Phase "${phase.name}" has an unusable schema: ${compiled}`);
-		payloadChecks.set(phase.name, turn => checkPayload(turn, compiled.validate));
-	}
-	const engineOptions = {
-		adwId,
-		root: workRoot,
-		workflow: workflow.name,
-		traceDir,
-		maxAttempts: workflow.maxAttempts,
-		phases: workflow.phases.map(phase => ({
-			// A fusion phase is one phase to the engine: it settles on the fuser's
-			// envelope, and the panel is fan-out inside that single unit.
-			name: phase.name,
-			kind: phase.kind === "code" ? TaskPhaseKind.Code : TaskPhaseKind.Agent,
-			owner: phase.kind === "fusion" ? (phase.fuser?.owner ?? "fusion") : (phase.owner ?? phase.kind),
-			description: phase.description,
-			// Resolved here, so the engine is handed a name and holds no policy
-			// about which phase can fix a failure.
-			dependsOn: phase.dependsOn,
-			rewindTo: phase.onFail === "correct" ? rewindTarget(workflow, phase.name) : undefined,
-		})),
-		gates: workflow.phases
-			.filter(phase => (phase.gates?.length ?? 0) > 0)
-			.map(phase => ({ phase: phase.name, gates: phase.gates ?? [] })),
-		undeclaredIgnore: workflow.undeclaredIgnore,
+	let traceRun: TaskRun | undefined;
+	let completed = false;
+	let guard: TaskWriteGuard | undefined;
+	/** The guarded phase between begin() and settle(), for crash-path recovery. */
+	let guardBoundary: AdwPhaseConfig | null = null;
+	const settleGuard = (phase: AdwPhaseConfig): TaskGuardReport | undefined => {
+		const report = guard?.settle({
+			allowed: phase.writes,
+			protectedGlobs: workflow.protected ?? [],
+			patchDir: runDir,
+		});
+		guardBoundary = null;
+		return report;
 	};
-	// Resume rebuilds cursor, attempts and handoff from the trace; a fresh run
-	// starts one.
-	const run = resuming ? TaskRun.resume(engineOptions) : new TaskRun(engineOptions);
-
-	const artifactsDir = sessionArtifactsDir ?? runDir;
-	const spawnSeat = options.seatRunner ?? createExecutorSeatRunner({ host, workRoot, artifactsDir, signal });
-
-	// The engine halts on its own; this only stops a bug from spinning forever.
-	const maxSteps = workflow.phases.length * run.maxAttempts + 8;
-	let haltReason = "";
-	/** Opinions for the phase currently being attempted; dropped once it settles. */
-	let panelCache: { phase: string; opinions: PanelOpinion[] } | null = null;
-
-	// Every exit path must reach `finish()`: it writes the only terminal record
-	// in events.bin, and without it a reader cannot tell a dead run from a
-	// running one. The catch also hands the caller the trace it already paid for.
+	/** Fail closed: a tree the guard could not restore must never settle as success. */
+	const requireRecovered = (report: TaskGuardReport | undefined) => {
+		if (!report?.unrecoverable.length) return;
+		throw new Error(
+			`write guard could not restore ${report.unrecoverable.join(", ")}; ` +
+				`the unauthorized diff is preserved at ${report.patchPath ?? runDir}`,
+		);
+	};
+	// Include setup in cleanup: even a bad engine config must release its sandbox.
 	try {
-		for (let stepIndex = 0; stepIndex < maxSteps; stepIndex++) {
-			signal?.throwIfAborted();
-			const step = run.nextStep();
-			if (step.kind === TaskStepKind.Done) {
-				const result = run.finish(step.accepted, haltReason);
-				const applied = isolation ? await settleIsolation(isolation, step.accepted, runDir, adwId) : undefined;
-				logger.debug("adw run finished", { adwId, workflow: workflow.name, accepted: step.accepted, traceDir });
-				return { adwId, summary: result, traceDir, isolation: applied };
+		if (workflow.isolation) {
+			if (resuming) {
+				// Reattach the surviving sandbox; NEVER rebuild it from the base —
+				// the completed phases' work exists only inside it, and a fresh
+				// materialisation would silently redo them from the base commit.
+				const record = (await Bun.file(isolationRecordPath)
+					.json()
+					.catch((error: unknown) => {
+						// Missing record = missing sandbox: same refusal below. A
+						// corrupt record must never silently rebuild from base.
+						if (isEnoent(error)) return null;
+						throw new Error(`cannot read isolated run state: ${error}`);
+					})) as
+					{ backend: number; mergedDir: string; context: IsolationContext } | null;
+				const alive = record
+					? await fs.access(record.mergedDir).then(
+							() => true,
+							() => false,
+						)
+					: false;
+				if (!record || !alive) {
+					throw new Error(
+						`Workflow "${workflow.name}" runs isolated and the sandbox for "${adwId}" is gone — ` +
+							`it cannot be rebuilt from the base without silently redoing completed phases. ` +
+							`If the run settled, its diff was preserved as a patch; otherwise re-run.`,
+					);
+				}
+				// Re-claim ownership so a sweeping `omp worktree clear` does not
+				// reap the sandbox out from under the resumed run.
+				await writeIsolationOwner(path.dirname(record.mergedDir), adwId);
+				isolation = {
+					handle: { mergedDir: record.mergedDir, backend: record.backend, fellBack: false, fallbackReason: null },
+					context: record.context,
+				};
+			} else {
+				const context = await prepareIsolationContext(host.cwd);
+				const backend = parseIsolationBackend(host.settings?.get("isolation.backend") ?? "auto");
+				const handle = await ensureIsolation(context.repoRoot, adwId, backend);
+				isolation = { handle, context };
+				await writeRunState(isolationRecordPath, {
+					backend: handle.backend, mergedDir: handle.mergedDir, context,
+				});
 			}
+			logger.debug("adw isolated", {
+				adwId,
+				backend: isolation.handle.backend,
+				dir: isolation.handle.mergedDir,
+				resumed: Boolean(resuming),
+			});
+		}
+		/** Where phases actually run. The roster is still discovered from the real cwd. */
+		const workRoot = isolation?.handle.mergedDir ?? host.cwd;
+		if (resuming && concurrency > 1) await recoverIntegration(workRoot, runDir, traceDir);
 
-			const spec = step.phase;
-			if (!spec) throw new Error(`Engine returned a Run step with no phase for workflow "${workflow.name}"`);
-			const phase = phasesByName.get(spec.name);
-			if (!phase) throw new Error(`Engine returned unknown phase "${spec.name}"`);
+		if (resuming && isolation && traceAccepted(traceDir)) {
+			// The run accepted and then died inside the delivery window. The
+			// decision is already on the trace; only the settlement is owed, and
+			// the marker inside settleIsolation makes it happen exactly once.
+			const applied = await settleIsolation(isolation, true, runDir, adwId);
+			logger.debug("adw recovered delivery", { adwId, applied: applied.applied });
+			return {
+				adwId,
+				summary: {
+					adwId,
+					workflow: workflow.name,
+					accepted: true,
+					reason: "recovered the delivery of an accepted run interrupted during settlement",
+					phases: [],
+				},
+				traceDir,
+				isolation: applied,
+			};
+		}
 
-			onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
-			const handoff: TaskHandoff | null = run.handoff();
+		const phasesByName = new Map(workflow.phases.map(phase => [phase.name, phase]));
+		const engineOptions = {
+			adwId,
+			root: workRoot,
+			workflow: workflow.name,
+			traceDir,
+			maxAttempts: workflow.maxAttempts,
+			phases: workflow.phases.map(phase => ({
+				// A fusion phase is one phase to the engine: it settles on the fuser's
+				// envelope, and the panel is fan-out inside that single unit.
+				name: phase.name,
+				kind: phase.kind === "code" ? TaskPhaseKind.Code : TaskPhaseKind.Agent,
+				owner: phase.kind === "fusion" ? (phase.fuser?.owner ?? "fusion") : (phase.owner ?? phase.kind),
+				description: phase.description,
+				// Resolved here, so the engine is handed a name and holds no policy
+				// about which phase can fix a failure.
+				dependsOn: phase.dependsOn,
+				rewindTo: phase.onFail === "correct" ? rewindTarget(workflow, phase.name) : undefined,
+				onReject: phase.onReject,
+				inputs: phase.inputs,
+			})),
+			gates: workflow.phases
+				.map(phase => ({ phase: phase.name, gates: phase.gates?.filter(gate => gate !== VERDICT_GATE) ?? [] }))
+				.filter(phase => phase.gates.length > 0),
+			undeclaredIgnore: workflow.undeclaredIgnore,
+			claimsFile: path.join(runDir, "claims.json"),
+		};
+		// Resume rebuilds cursor, attempts and handoff from the trace; a fresh run
+		// starts one.
+		const run = resuming ? TaskRun.resume(engineOptions) : new TaskRun(engineOptions);
+		traceRun = run;
+
+		const artifactsDir = sessionArtifactsDir ?? runDir;
+		const executeSeat = options.seatRunner ?? createExecutorSeatRunner({ host, workRoot, artifactsDir, signal });
+		const seenSeats = new Set<string>();
+		const spawnSeat: SeatRunner = seat => {
+			// Revisited checks/reviews are new assignments, not format retries.
+			// Reuse their sessions when possible, but deliver the current prompt.
+			if (seenSeats.has(seat.id) && !seat.followUpMessage) seat.followUpMessage = seat.task;
+			seenSeats.add(seat.id);
+			return executeSeat(seat);
+		};
+
+		// Both writer paths submit through the same checks. Panel opinions never do.
+		const submitWriter = (
+			phaseName: string,
+			execution: WriterExecution,
+			guardReport?: TaskGuardReport,
+			integrationNote?: string,
+		): TaskOutcome => {
+			if (guardReport?.unauthorized.length) {
+				// Already reverted; the report is what turns the revert into a
+				// rejection the writer can act on instead of a silent disappearance.
+				run.noteGateReport(
+					phaseName,
+					"write_scope",
+					guardReport.unauthorized.map(change => ({
+						item: change.path,
+						ok: false,
+						note: `unauthorized ${change.kind} outside this phase's write scope; the change was reverted`,
+					})),
+				);
+			}
+			if (integrationNote) {
+				run.noteGateReport(phaseName, "integration", [{ item: ".", ok: false, note: integrationNote }]);
+			}
+			if (execution.kind === "panel-failed") {
+				return run.submitCodeResult(phaseName, false, execution.message);
+			}
+			const { seatName, role, result } = execution;
+			run.notePhaseTokens(phaseName, seatName, result.tokens, result.model);
+			if (result.exitCode !== 0) {
+				// A crashed spawn has no complete answer; preserve ordinary retry behavior.
+				return run.submitCodeResult(
+					phaseName,
+					false,
+					`${role} ${seatName} exited ${result.exitCode}: ${result.stderr.trim() || "no stderr"}`,
+				);
+			}
+			const checked = phaseChecks.get(phaseName)?.(result.output);
+			for (const report of checked?.reports ?? []) {
+				run.noteGateReport(phaseName, report.gate, report.checks);
+			}
+			if (checked?.review) run.noteReviewDecision(phaseName, checked.review.approved, checked.review.reason);
+			return run.submitAgentOutput(phaseName, result.output);
+		};
+
+		let haltReason = "";
+		/** Opinions per fusion phase, retained across fuser retries only. */
+		const panelCache = new Map<string, PanelOpinion[]>();
+
+		/** Runs one agent or fusion attempt against `root`. No engine submission
+		 * happens here beyond panel-opinion notes — the caller integrates and
+		 * submits, which is what keeps concurrent completions serialized. */
+		const executeWriterPhase = async (args: {
+			phase: AdwPhaseConfig;
+			step: TaskStep;
+			root: string;
+			phaseSignal: AbortSignal | undefined;
+			handoff?: TaskHandoff | null;
+			generation?: string;
+			stepIndex: number;
+		}): Promise<WriterExecution> => {
+			const { phase, step, root, phaseSignal, stepIndex } = args;
+			// A phase that declares `inputs` consumes exactly the outputs the engine
+			// selected (and traced) for this dispatch; the incidental last envelope
+			// is not context for it. Everything else keeps the positional handoff.
+			const selectedInputs: TaskPhaseInput[] | undefined = phase.inputs ? (step.inputs ?? undefined) : undefined;
+			const handoff: TaskHandoff | null = phase.inputs ? null : (args.handoff ?? run.handoff());
 			// Stable across attempts: the seat's session is continued on a retry,
 			// so its id must not carry the attempt number.
-			const stepId = `${adwId}-${phase.name}`;
-			const correction = step.attempt > 1 ? (step.correction ?? undefined) : undefined;
+			const stepId = `${adwId}-${phase.name}${args.generation ? `-${args.generation}` : ""}`;
+			const correction = step.correction ?? undefined;
 
-			let outcome: TaskOutcome;
-			if (phase.kind === "code") {
-				const { ok, summary } = await runCodePhase(phase, workRoot, signal);
-				outcome = run.submitCodeResult(ok, summary);
-			} else if (phase.kind === "fusion") {
+			if (phase.kind === "fusion") {
 				const panel = phase.panel ?? [];
 				const fuserSeat = phase.fuser;
 				if (!fuserSeat)
@@ -703,11 +938,11 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				// A retry re-runs the FUSER, not the panel: the opinions were not what
 				// the gates rejected, and re-polling N models to receive the same
 				// answers is the most expensive way to change nothing.
-				const cached = panelCache?.phase === phase.name ? panelCache.opinions : undefined;
+				const cached = panelCache.get(phase.name);
 				// Built per seat: a seat carrying its own `prompt` is answering a
 				// narrower question, so the prompt cannot be shared across the panel.
 				const panelPromptFor = (seat: AdwSeatConfig) =>
-					buildPanelPrompt({ request, phase, seat, handoff: handoff ?? undefined });
+					buildPanelPrompt({ request, phase, seat, handoff: handoff ?? undefined, inputs: selectedInputs });
 				const limit = Math.max(1, host.settings?.get("task.maxConcurrency") ?? DEFAULT_MAX_PANEL_CONCURRENCY);
 				const settled = cached
 					? cached.map(opinion => ({ opinion, tokens: 0, cached: true }))
@@ -727,6 +962,8 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 									description: `adw ${workflow.name} · ${phase.name} · ${seat.owner}`,
 									assignment: `${workflow.name}/${phase.name}#${seat.owner}`,
 									readOnly: true,
+									root,
+									signal: phaseSignal,
 								});
 								const ok = outcome.exitCode === 0 && outcome.output.trim().length > 0;
 								return {
@@ -752,97 +989,122 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 							}
 						});
 
+				phaseSignal?.throwIfAborted();
 				// A cached opinion was already traced on the attempt that produced it.
 				for (const entry of settled) {
-					if (!("cached" in entry)) run.notePanelOpinion(entry.opinion.owner, entry.opinion.ok, entry.tokens);
+					if (!("cached" in entry)) {
+						run.notePanelOpinion(phase.name, entry.opinion.owner, entry.opinion.ok, entry.tokens, entry.opinion.model);
+					}
 				}
 				const opinions: PanelOpinion[] = settled.map(entry => entry.opinion);
-				panelCache = { phase: phase.name, opinions };
+				panelCache.set(phase.name, opinions);
 
 				if (!opinions.some(opinion => opinion.ok)) {
-					outcome = run.submitCodeResult(
-						false,
-						`every panel seat failed: ${opinions.map(opinion => `${opinion.owner} (${opinion.text.split("\n")[0]})`).join("; ")}`,
-					);
-				} else {
-					const fuserBase = roster.get(fuserSeat.owner);
-					if (!fuserBase)
-						throw new Error(`Fuser "${fuserSeat.owner}" lost its agent between preflight and dispatch`);
-					const fused = await spawnSeat({
-						seat: fuserSeat.owner,
-						model: fuserSeat.model,
-						thinking: fuserSeat.thinking,
-						agent: deriveWriterAgent(fuserBase),
-						task: buildFusionPrompt({
-							request,
-							phase,
-							attempt: step.attempt,
-							opinions,
-							correction: step.correction ?? undefined,
-							handoff: handoff ?? undefined,
-						}),
-						id: `${stepId}-fuser`,
-						index: stepIndex,
-						description: `adw ${workflow.name} · ${phase.name} · fuse`,
-						assignment: `${workflow.name}/${phase.name}`,
-						readOnly: false,
-						followUpMessage: correction,
-					});
-					// Charged before the verdict: a crashed or rejected attempt spent
-					// these tokens too, and only this layer knows what they were.
-					run.notePhaseTokens(fuserSeat.owner, fused.tokens);
-					outcome =
-						fused.exitCode === 0
-							? run.submitAgentOutput(fused.output)
-							: run.submitCodeResult(
-									false,
-									`fuser ${fuserSeat.owner} exited ${fused.exitCode}: ${fused.stderr.trim() || "no stderr"}`,
-								);
+					return {
+						kind: "panel-failed",
+						message: `every panel seat failed: ${opinions.map(opinion => `${opinion.owner} (${opinion.text.split("\n")[0]})`).join("; ")}`,
+					};
 				}
-			} else {
-				const base = roster.get(phase.owner ?? "");
-				if (!base) throw new Error(`Phase "${phase.name}" lost its agent between preflight and dispatch`);
-				const spawned = await spawnSeat({
-					seat: phase.owner ?? "",
-					model: phase.model,
-					thinking: phase.thinking,
-					agent: deriveWriterAgent(base),
-					task: buildPhasePrompt({
+				const fuserBase = roster.get(fuserSeat.owner);
+				if (!fuserBase)
+					throw new Error(`Fuser "${fuserSeat.owner}" lost its agent between preflight and dispatch`);
+				const fused = await spawnSeat({
+					seat: fuserSeat.owner,
+					model: fuserSeat.model,
+					thinking: fuserSeat.thinking,
+					agent: deriveWriterAgent(fuserBase),
+					task: buildFusionPrompt({
 						request,
 						phase,
 						attempt: step.attempt,
+						opinions,
 						correction: step.correction ?? undefined,
 						handoff: handoff ?? undefined,
+						inputs: selectedInputs,
 					}),
-					id: stepId,
+					id: `${stepId}-fuser`,
 					index: stepIndex,
-					description: `adw ${workflow.name} · ${phase.name}`,
+					description: `adw ${workflow.name} · ${phase.name} · fuse`,
 					assignment: `${workflow.name}/${phase.name}`,
 					readOnly: false,
 					followUpMessage: correction,
+					root,
+					signal: phaseSignal,
 				});
-				const payloadCheck = payloadChecks.get(phase.name);
-				run.notePhaseTokens(base.name, spawned.tokens);
-				// Reported before the submission that judges it: the engine merges
-				// caller-run gates with its own and drains them per attempt.
-				if (payloadCheck && spawned.exitCode === 0) {
-					const checks = payloadCheck(spawned.output);
-					if (checks.length > 0) run.noteGateReport(PAYLOAD_GATE, checks);
-				}
-				outcome =
-					spawned.exitCode === 0
-						? run.submitAgentOutput(spawned.output)
-						: // A crashed spawn produced no answer at all. Reporting it as a
-							// failed result keeps the retry path identical to a red gate
-							// instead of feeding the engine a truncated turn to parse.
-							run.submitCodeResult(
-								false,
-								`agent ${base.name} exited ${spawned.exitCode}: ${spawned.stderr.trim() || "no stderr"}`,
-							);
+				return { kind: "seat", role: "fuser", seatName: fuserSeat.owner, result: fused };
 			}
 
+			const base = roster.get(phase.owner ?? "");
+			if (!base) throw new Error(`Phase "${phase.name}" lost its agent between preflight and dispatch`);
+			const spawned = await spawnSeat({
+				seat: phase.owner ?? "",
+				model: phase.model,
+				thinking: phase.thinking,
+				agent: deriveWriterAgent(base),
+				task: buildPhasePrompt({
+					request,
+					phase,
+					attempt: step.attempt,
+					correction: step.correction ?? undefined,
+					handoff: handoff ?? undefined,
+					inputs: selectedInputs,
+				}),
+				id: stepId,
+				index: stepIndex,
+				description: `adw ${workflow.name} · ${phase.name}`,
+				assignment: `${workflow.name}/${phase.name}`,
+				readOnly: false,
+				followUpMessage: correction,
+				root,
+				signal: phaseSignal,
+			});
+			return { kind: "seat", role: "agent", seatName: base.name, result: spawned };
+		};
+
+		/** Structured inputs reach a command as a file, not argv: envelopes can
+		 * exceed environment limits, and the file lives in the run dir so the
+		 * working-tree diff gates never see it. */
+		const buildCodeEnv = async (
+			phase: AdwPhaseConfig,
+			step: TaskStep,
+		): Promise<Record<string, string> | undefined> => {
+			const selectedInputs = phase.inputs ? (step.inputs ?? undefined) : undefined;
+			if (!selectedInputs) return undefined;
+			const inputsPath = path.join(runDir, "inputs", `${workflow.phases.indexOf(phase)}.json`);
+			const byProducer = Object.fromEntries(
+				selectedInputs.map(input => [
+					input.phase,
+					{
+						version: input.version,
+						summary: input.summary,
+						artifacts: input.artifacts,
+						notes_for_next_agent: input.notesForNextAgent,
+						payload: JSON.parse(input.payloadJson) as unknown,
+					},
+				]),
+			);
+			await Bun.write(inputsPath, JSON.stringify(byProducer, null, "\t"));
+			return { ADW_INPUTS: inputsPath };
+		};
+
+		const finishRun = async (step: TaskStep): Promise<AdwRunResult> => {
+			const acceptance = workflow.acceptance === "review" ? reviewAcceptance(run.handoff()) : undefined;
+			let accepted = step.accepted && (acceptance?.accepted ?? true);
+			let reason = step.accepted && acceptance ? acceptance.reason : haltReason;
+			const applied = isolation ? await settleIsolation(isolation, accepted, runDir, adwId) : undefined;
+			if (applied?.conflict) {
+				accepted = false;
+				reason = applied.conflict;
+			}
+			const result = run.finish(accepted, reason);
+			completed = true;
+			logger.debug("adw run finished", { adwId, workflow: workflow.name, accepted, reason, traceDir });
+			return { adwId, summary: result, traceDir, isolation: applied };
+		};
+
+		const reportOutcome = (phase: AdwPhaseConfig, spec: TaskPhaseSpec, step: TaskStep, outcome: TaskOutcome) => {
 			if (outcome.kind === TaskOutcomeKind.Aborted) haltReason = outcome.reason ?? "";
-			if (outcome.kind !== TaskOutcomeKind.Retry) panelCache = null;
+			if (outcome.kind !== TaskOutcomeKind.Retry || outcome.phase !== phase.name) panelCache.delete(phase.name);
 			onPhase?.({
 				phase: phase.name,
 				owner: spec.owner,
@@ -856,19 +1118,280 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 							: "aborted",
 				violations: outcome.correction ? [outcome.correction] : outcome.reason ? [outcome.reason] : undefined,
 			});
+		};
+
+		if (concurrency === 1) {
+			const baselineFile = path.join(runDir, "baseline.json");
+			guard = TaskWriteGuard.create({ root: workRoot, baselineFile });
 		}
-		throw new Error(`Workflow "${workflow.name}" exceeded ${maxSteps} steps without settling`);
+		if (concurrency === 1) {
+			// The serial path: one phase in flight, executed against the run root,
+			// guarded by the run-level write guard exactly as before concurrency
+			// existed. `Wait` cannot occur with a single flight.
+			for (let stepIndex = 0; ; stepIndex++) {
+				signal?.throwIfAborted();
+				const step = run.nextStep();
+				if (step.kind === TaskStepKind.Done) return await finishRun(step);
+				const spec = step.phase;
+				if (!spec) throw new Error(`Engine returned a Run step with no phase for workflow "${workflow.name}"`);
+				const phase = phasesByName.get(spec.name);
+				if (!phase) throw new Error(`Engine returned unknown phase "${spec.name}"`);
+				onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
+
+				let outcome: TaskOutcome;
+				if (phase.kind === "code") {
+					const env = await buildCodeEnv(phase, step);
+					const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
+					outcome = run.submitCodeResult(phase.name, ok, summary);
+				} else {
+					if (resuming && stepIndex === 0 && await Bun.file(path.join(runDir, "baseline.json.attempt")).exists()) {
+						requireRecovered(settleGuard(phase));
+					}
+					guard?.begin();
+					guardBoundary = phase;
+					const execution = await executeWriterPhase({ phase, step, root: workRoot, phaseSignal: signal, stepIndex });
+					const guardReport = guard ? settleGuard(phase) : undefined;
+					requireRecovered(guardReport);
+					outcome = submitWriter(phase.name, execution, guardReport);
+				}
+				reportOutcome(phase, spec, step, outcome);
+			}
+		}
+
+		// Writer turns overlap; cloning, judgment, integration and code barriers
+		// have one owner. Nothing rejected by a gate reaches the integration root.
+		const wsRepoRoot = await getRepoRoot(workRoot);
+		const wsBackend = parseIsolationBackend(host.settings?.get("isolation.backend") ?? "auto");
+		interface WorkspaceRecord {
+			handle: IsolationHandle;
+			context: IsolationContext;
+			generation: string;
+			fromSeq: number;
+			retired?: boolean;
+		}
+		interface Workspace extends WorkspaceRecord {
+			guard: TaskWriteGuard;
+			dir: string;
+			baselineFile: string;
+		}
+		interface Flight {
+			phase: AdwPhaseConfig;
+			spec: TaskPhaseSpec;
+			step: TaskStep;
+			ws: Workspace;
+			controller: AbortController;
+			promise: Promise<WriterExecution | { kind: "crashed"; error: unknown }>;
+		}
+		const inFlight = new Map<string, Flight>();
+		const workspaces = new Map<string, Workspace>();
+		let dispatchHalted = false;
+		const workspaceDir = (phase: AdwPhaseConfig) =>
+			path.join(runDir, "workspaces", String(workflow.phases.indexOf(phase)));
+		const settleWorkspace = (phase: AdwPhaseConfig, ws: Workspace) => {
+			const report = ws.guard.settle({
+				allowed: phase.writes,
+				protectedGlobs: workflow.protected ?? [],
+				patchDir: ws.dir,
+			});
+			requireRecovered(report);
+			return report;
+		};
+		const dropWorkspace = async (name: string) => {
+			const ws = workspaces.get(name);
+			if (!ws) return;
+			await writeRunState(path.join(ws.dir, "workspace.json"), {
+				handle: ws.handle, context: ws.context, generation: ws.generation,
+				fromSeq: ws.fromSeq, retired: true,
+			});
+			await cleanupIsolation(ws.handle);
+			workspaces.delete(name);
+			await fs.rm(path.join(ws.dir, "workspace.json"), { force: true });
+		};
+		const ensureWorkspace = async (phase: AdwPhaseConfig): Promise<Workspace> => {
+			const existing = workspaces.get(phase.name);
+			if (existing) return existing;
+			const dir = workspaceDir(phase);
+			const recordFile = path.join(dir, "workspace.json");
+			let record: WorkspaceRecord | undefined;
+			try {
+				record = (await Bun.file(recordFile).json()) as WorkspaceRecord;
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+			if (record) {
+				const reader = new TaskTraceReader(traceDir);
+				const raw = reader.readRaw(record.fromSeq);
+				const strings = reader.strings();
+				const layout = taskTraceLayout();
+				for (let at = 0; at + layout.recordLen <= raw.length; at += layout.recordLen) {
+					if (strings[raw.readUInt32LE(at + layout.offPhase) - 1] !== phase.name) continue;
+					const kind = layout.kindNames[raw[at + layout.offKind] as number];
+					if ((kind === "phase_invalidated" && raw.readUInt32LE(at + layout.offOwner) !== 0) ||
+						(kind === "phase_finished" && ((raw[at + layout.offFlags] as number) & layout.flagOk) !== 0)) {
+						record.retired = true;
+					}
+				}
+				if (record.retired) {
+					await cleanupIsolation(record.handle);
+					record = undefined;
+				}
+			}
+			if (!record) {
+				const generation = String(Snowflake.next());
+				// Await cloning here, not inside the turn promise: another accepted
+				// patch cannot mutate the source halfway through a snapshot.
+				const handle = await ensureIsolation(wsRepoRoot, `${adwId}-${generation}`, wsBackend);
+				const context = await prepareIsolationContext(handle.mergedDir);
+				record = { handle, context, generation, fromSeq: new TaskTraceReader(traceDir).count() };
+				await writeRunState(recordFile, record);
+			} else {
+				await fs.access(record.handle.mergedDir);
+				await writeIsolationOwner(path.dirname(record.handle.mergedDir), adwId);
+			}
+			const baselineFile = path.join(dir, `${record.generation}.baseline.json`);
+			const ws: Workspace = {
+				...record, dir, baselineFile,
+				guard: TaskWriteGuard.create({ root: record.handle.mergedDir, baselineFile }),
+			};
+			workspaces.set(phase.name, ws);
+			if (await Bun.file(`${baselineFile}.attempt`).exists()) settleWorkspace(phase, ws);
+			return ws;
+		};
+		let pendingCode: { phase: AdwPhaseConfig; spec: TaskPhaseSpec; step: TaskStep } | null = null;
+		const invalidate = async (outcome: TaskOutcome) => {
+			const names = outcome.invalidated ?? [];
+			for (const name of names) {
+				panelCache.delete(name);
+				inFlight.get(name)?.controller.abort(new Error(`phase "${name}" was invalidated`));
+				if (pendingCode?.phase.name === name) pendingCode = null;
+			}
+			// Drain the old generation before either deleting its tree or asking
+			// the engine to dispatch its replacement; late results are evidence,
+			// never submissions against a new Running state of the same name.
+			for (const name of names) {
+				const stale = inFlight.get(name);
+				if (stale) {
+					await stale.promise;
+					settleWorkspace(stale.phase, stale.ws);
+					await preserveDelta(path.join(stale.ws.dir, "invalidated", stale.ws.generation),
+						await captureDeltaPatch(stale.ws.handle.mergedDir, stale.ws.context.baseline));
+					inFlight.delete(name);
+				}
+				await dropWorkspace(name);
+			}
+		};
+		try {
+			for (let stepIndex = 0; ; stepIndex++) {
+				signal?.throwIfAborted();
+				while (!dispatchHalted && !pendingCode && inFlight.size < concurrency) {
+					const step = run.nextStep();
+					if (step.kind === TaskStepKind.Done) {
+						if (inFlight.size === 0) return await finishRun(step);
+						break;
+					}
+					if (step.kind === TaskStepKind.Wait) break;
+					const spec = step.phase;
+					if (!spec) throw new Error("engine returned a Run step without a phase");
+					const phase = phasesByName.get(spec.name);
+					if (!phase) throw new Error(`engine returned unknown phase "${spec.name}"`);
+					if (phase.kind === "code") {
+						pendingCode = { phase, spec, step };
+						break;
+					}
+					const handoff = run.handoff();
+					const ws = await ensureWorkspace(phase);
+					ws.guard.begin();
+					run.setPhaseRoot(phase.name, ws.handle.mergedDir);
+					const controller = new AbortController();
+					const phaseSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+					const promise = executeWriterPhase({
+						phase, step, root: ws.handle.mergedDir, phaseSignal,
+						stepIndex, handoff, generation: ws.generation,
+					}).catch((error: unknown) => ({ kind: "crashed" as const, error }));
+					inFlight.set(spec.name, { phase, spec, step, ws, controller, promise });
+					onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
+				}
+				if (dispatchHalted && inFlight.size === 0) {
+					return await finishRun({ kind: TaskStepKind.Done, accepted: false, attempt: 0 });
+				}
+				if (pendingCode && inFlight.size === 0) {
+					const { phase, spec, step } = pendingCode;
+					pendingCode = null;
+					onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
+					const env = await buildCodeEnv(phase, step);
+					const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
+					const outcome = run.submitCodeResult(phase.name, ok, summary);
+					await invalidate(outcome);
+					reportOutcome(phase, spec, step, outcome);
+					continue;
+				}
+				if (inFlight.size === 0) throw new Error("DAG scheduler is waiting without an active phase");
+				const flight = await Promise.race([...inFlight.values()].map(async active => {
+					await active.promise;
+					return active;
+				}));
+				const execution = await flight.promise;
+				const report = settleWorkspace(flight.phase, flight.ws);
+				const delta = await captureDeltaPatch(flight.ws.handle.mergedDir, flight.ws.context.baseline);
+				const fromSeq = new TaskTraceReader(traceDir).count();
+				await preserveDelta(path.join(flight.ws.dir, "history", String(fromSeq)), delta);
+				const record: IntegrationRecord = {
+					phase: flight.phase.name, fromSeq, delta, status: "prepared",
+				};
+				await writeRunState(path.join(runDir, "integration.json"), record);
+				const outcome = execution.kind === "crashed"
+					? run.submitCodeResult(flight.phase.name, false,
+						execution.error instanceof Error ? execution.error.message : String(execution.error))
+					: submitWriter(flight.phase.name, execution, report);
+				inFlight.delete(flight.phase.name);
+				if (outcome.kind === TaskOutcomeKind.Advanced && !dispatchHalted) {
+					try {
+						await integrateAccepted(workRoot, runDir, record);
+					} catch (error) {
+						dispatchHalted = true;
+						haltReason = error instanceof Error ? error.message : String(error);
+					}
+				} else {
+					record.status = "rejected";
+					await writeRunState(path.join(runDir, "integration.json"), record);
+				}
+				await invalidate(outcome);
+				const retriesHere = outcome.kind === TaskOutcomeKind.Retry && outcome.phase === flight.phase.name;
+				if (!retriesHere) await dropWorkspace(flight.phase.name);
+				reportOutcome(flight.phase, flight.spec, flight.step, outcome);
+			}
+		} finally {
+			for (const flight of inFlight.values()) flight.controller.abort(new Error("the run is stopping"));
+			for (const flight of inFlight.values()) {
+				await flight.promise;
+				settleWorkspace(flight.phase, flight.ws);
+				await preserveDelta(path.join(flight.ws.dir, "interrupted", flight.ws.generation),
+					await captureDeltaPatch(flight.ws.handle.mergedDir, flight.ws.context.baseline));
+			}
+			// A thrown interruption is resumable: keep private trees and manifests.
+			// A decided result has its patches and trace, so release all loaded trees.
+			if (completed) for (const name of workspaces.keys()) await dropWorkspace(name);
+		}
 	} catch (err) {
 		const reason = err instanceof Error ? err.message : String(err);
+		// Restore what the dying attempt was not allowed to change before the
+		// tree state is captured anywhere else; the patch below must reflect it.
+		if (guardBoundary) {
+			try {
+				requireRecovered(settleGuard(guardBoundary));
+			} catch (guardErr) {
+				logger.warn("adw write guard could not settle after failure", { adwId, error: guardErr });
+			}
+		}
 		try {
-			run.finish(false, reason);
+			traceRun?.finish(false, reason);
 		} catch (finishErr) {
 			// The trace write itself failed; the original cause still wins.
 			logger.warn("adw could not close the trace", { adwId, error: finishErr });
 		}
 		// A died run's work is still on disk in the sandbox; preserve it as a
 		// patch before the sandbox goes away in `finally`.
-		if (isolation) {
+		if (isolation && concurrency === 1) {
 			try {
 				await settleIsolation(isolation, false, runDir, adwId);
 			} catch (patchErr) {
@@ -879,6 +1402,6 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 	} finally {
 		// The sandbox is a materialised copy of the repo; leaking one per run
 		// fills the worktree dir with abandoned checkouts.
-		if (isolation) await cleanupIsolation(isolation.handle);
+		if (isolation && (completed || concurrency === 1)) await cleanupIsolation(isolation.handle);
 	}
 }

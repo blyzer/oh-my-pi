@@ -18,17 +18,17 @@ pub enum EnvelopeStatus {
 /// The contract every phase must return. Unknown fields land in `payload`, so
 /// a phase-specific schema (`changed_files`, `commit_message`, …) rides along
 /// without a distinct Rust type per phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Envelope<T = Value> {
-	pub status: EnvelopeStatus,
+	pub status:               EnvelopeStatus,
 	#[serde(default)]
-	pub summary: String,
+	pub summary:              String,
 	#[serde(default)]
-	pub artifacts: Vec<String>,
+	pub artifacts:            Vec<String>,
 	#[serde(default)]
 	pub notes_for_next_agent: String,
 	#[serde(flatten)]
-	pub payload: T,
+	pub payload:              T,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,11 +57,15 @@ impl Envelope<Value> {
 	/// through the same gates as an agent's.
 	pub fn code(ok: bool, summary: impl Into<String>) -> Self {
 		Self {
-			status: if ok { EnvelopeStatus::Success } else { EnvelopeStatus::Fail },
-			summary: summary.into(),
-			artifacts: Vec::new(),
+			status:               if ok {
+				EnvelopeStatus::Success
+			} else {
+				EnvelopeStatus::Fail
+			},
+			summary:              summary.into(),
+			artifacts:            Vec::new(),
 			notes_for_next_agent: String::new(),
-			payload: Value::Object(serde_json::Map::new()),
+			payload:              Value::Object(serde_json::Map::new()),
 		}
 	}
 }
@@ -103,7 +107,7 @@ fn last_top_level_object(text: &str) -> Option<&str> {
 					start = Some(i);
 				}
 				depth += 1;
-			}
+			},
 			b'}' => {
 				if depth > 0 {
 					depth -= 1;
@@ -113,8 +117,8 @@ fn last_top_level_object(text: &str) -> Option<&str> {
 						}
 					}
 				}
-			}
-			_ => {}
+			},
+			_ => {},
 		}
 	}
 	last

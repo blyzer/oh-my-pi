@@ -22,6 +22,7 @@ name: review
 description: An N-way read-only review, merged by a single writer
 
 maxAttempts: 2
+acceptance: review
 
 phases:
   - name: read
@@ -34,10 +35,11 @@ phases:
       merged review to REVIEW.md and declare it in artifacts. Where the panel
       disagreed, say so and say which reading you took: a suppressed objection
       is worse than a wrong one.
+      State the requirements reviewed and the evidence for each finding.
     panel:
       - owner: reviewer
       - owner: security-reviewer
     fuser:
       owner: task
       thinking: high
-    gates: [artifacts_exist, files_non_empty]
+    gates: [artifacts_exist, files_non_empty, verdict_consistent]

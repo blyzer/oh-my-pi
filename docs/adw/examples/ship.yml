@@ -26,7 +26,7 @@ undeclaredIgnore: ["**/*.lock"]
 phases:
   - name: plan
     kind: agent
-    owner: scout
+    owner: task
     prompt: |
       Read the code that has to change and write the plan to PLAN.md: the files
       you will touch, the shape of the change, and what you will check. Do not
@@ -36,6 +36,9 @@ phases:
   - name: build
     kind: agent
     owner: task
+    # Explicit data flow: build consumes the plan's accepted output, not
+    # whatever the previous phase happened to leave as the last envelope.
+    inputs: [plan]
     prompt: |
       Implement PLAN.md. Do not redesign it — if the plan is wrong, say so in
       your summary and report "status": "fail" rather than silently doing

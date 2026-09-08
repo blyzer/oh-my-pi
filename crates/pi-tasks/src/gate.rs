@@ -14,13 +14,13 @@ use crate::envelope::Envelope;
 #[derive(Debug, Clone, Serialize)]
 pub struct Check {
 	pub item: String,
-	pub ok: bool,
+	pub ok:   bool,
 	pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GateReport {
-	pub gate: String,
+	pub gate:   String,
 	pub checks: Vec<Check>,
 }
 
@@ -30,7 +30,9 @@ impl GateReport {
 	}
 
 	pub fn push(&mut self, item: impl Into<String>, ok: bool, note: impl Into<String>) {
-		self.checks.push(Check { item: item.into(), ok, note: note.into() });
+		self
+			.checks
+			.push(Check { item: item.into(), ok, note: note.into() });
 	}
 
 	/// True when every check passed. A gate that examined nothing is the gate's
@@ -42,7 +44,8 @@ impl GateReport {
 	}
 
 	pub fn violations(&self) -> impl Iterator<Item = String> + '_ {
-		self.checks
+		self
+			.checks
 			.iter()
 			.filter(|c| !c.ok)
 			.map(|c| format!("{}: {} — {}", self.gate, c.item, c.note))
@@ -56,6 +59,14 @@ pub struct GateCtx<'a> {
 pub trait Gate: Send + Sync {
 	fn name(&self) -> &'static str;
 	fn run(&self, envelope: &Envelope<Value>, ctx: &GateCtx<'_>) -> GateReport;
+	/// Called once when the attempt this gate just examined is accepted —
+	/// gates green, envelope successful, and any required review decision
+	/// present.
+	///
+	/// Default no-op. A stateful gate stages attempt-scoped evidence during
+	/// [`Gate::run`] and commits it here, so a rejected attempt's declarations
+	/// never leak into later evaluations.
+	fn accept(&self, _envelope: &Envelope<Value>, _ctx: &GateCtx<'_>) {}
 }
 
 /// Every path the envelope claims to have produced must exist on disk.
@@ -103,7 +114,9 @@ impl Gate for FilesNonEmpty {
 		for artifact in &envelope.artifacts {
 			let path = ctx.root.join(artifact);
 			match std::fs::metadata(&path) {
-				Ok(meta) if meta.len() > 0 => report.push(artifact, true, format!("{} bytes", meta.len())),
+				Ok(meta) if meta.len() > 0 => {
+					report.push(artifact, true, format!("{} bytes", meta.len()))
+				},
 				Ok(_) => report.push(artifact, false, "empty file"),
 				Err(err) => report.push(artifact, false, format!("unreadable: {err}")),
 			}
@@ -129,8 +142,11 @@ impl Gate for JsonParses {
 
 	fn run(&self, envelope: &Envelope<Value>, ctx: &GateCtx<'_>) -> GateReport {
 		let mut report = GateReport::new(self.name());
-		let json: Vec<&String> =
-			envelope.artifacts.iter().filter(|path| path.rsplit('.').next() == Some("json")).collect();
+		let json: Vec<&String> = envelope
+			.artifacts
+			.iter()
+			.filter(|path| path.rsplit('.').next() == Some("json"))
+			.collect();
 		if json.is_empty() {
 			// Requesting this gate asserts the phase produces JSON. Passing here
 			// would let a phase clear it by declaring no JSON at all, which is
@@ -157,16 +173,15 @@ impl Gate for JsonParses {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::envelope::EnvelopeStatus;
-	use crate::test_support::TempDir;
+	use crate::{envelope::EnvelopeStatus, test_support::TempDir};
 
 	fn envelope(artifacts: &[&str]) -> Envelope<Value> {
 		Envelope {
-			status: EnvelopeStatus::Success,
-			summary: String::new(),
-			artifacts: artifacts.iter().map(|s| (*s).to_string()).collect(),
+			status:               EnvelopeStatus::Success,
+			summary:              String::new(),
+			artifacts:            artifacts.iter().map(|s| (*s).to_string()).collect(),
 			notes_for_next_agent: String::new(),
-			payload: Value::Object(serde_json::Map::new()),
+			payload:              Value::Object(serde_json::Map::new()),
 		}
 	}
 
@@ -211,7 +226,9 @@ mod tests {
 		] {
 			assert!(!report.ok(), "{}: an empty claim must not pass", report.gate);
 			assert!(
-				report.violations().any(|v| v.contains("declared no artifacts")),
+				report
+					.violations()
+					.any(|v| v.contains("declared no artifacts")),
 				"{}: the violation has to say why, not just fail",
 				report.gate
 			);
@@ -236,7 +253,8 @@ mod tests {
 		std::fs::write(dir.path().join("plan.json"), "{\"a\": 1}").expect("write");
 		// Deliberately unparseable as JSON: this gate must not look at it.
 		std::fs::write(dir.path().join("notes.md"), "# not json").expect("write");
-		let report = JsonParses.run(&envelope(&["plan.json", "notes.md"]), &GateCtx { root: dir.path() });
+		let report =
+			JsonParses.run(&envelope(&["plan.json", "notes.md"]), &GateCtx { root: dir.path() });
 		assert!(report.ok(), "{:?}", report.violations().collect::<Vec<_>>());
 		assert_eq!(report.checks.len(), 1, "only the .json artifact is examined");
 	}
@@ -247,7 +265,10 @@ mod tests {
 		let dir = TempDir::new("gate-json-prose");
 		std::fs::write(dir.path().join("plan.json"), "I could not produce the plan.").expect("write");
 		let ctx = GateCtx { root: dir.path() };
-		assert!(FilesNonEmpty.run(&envelope(&["plan.json"]), &ctx).ok(), "files_non_empty accepts prose");
+		assert!(
+			FilesNonEmpty.run(&envelope(&["plan.json"]), &ctx).ok(),
+			"files_non_empty accepts prose"
+		);
 		assert!(!JsonParses.run(&envelope(&["plan.json"]), &ctx).ok(), "json_parses must not");
 	}
 

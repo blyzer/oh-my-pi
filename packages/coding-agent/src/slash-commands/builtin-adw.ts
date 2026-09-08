@@ -121,9 +121,9 @@ async function runWorkflowCommand(args: string, io: AdwCommandIo): Promise<Slash
 		});
 
 		const lines = result.summary.phases.map(phase => {
-			const mark = phase.passed ? "✓" : "✗";
+			const mark = phase.invalidated ? "-" : phase.passed ? "✓" : "✗";
 			const why = phase.violations.length > 0 ? ` — ${phase.violations.join("; ")}` : "";
-			return `  ${mark} ${phase.name} (${phase.owner}, ${phase.attempts} attempt${phase.attempts === 1 ? "" : "s"})${why}`;
+			return `  ${mark} ${phase.name}${phase.invalidated ? " [invalidated]" : ""} (${phase.owner}, ${phase.attempts} attempt${phase.attempts === 1 ? "" : "s"})${why}`;
 		});
 		const verdict = result.summary.accepted
 			? "accepted"
