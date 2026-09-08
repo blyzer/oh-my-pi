@@ -14,6 +14,8 @@ That is the difference between a workflow and a long prompt. A long prompt asks 
 | `crates/pi-tasks/src/trace.rs`                           | Append-only binary event log plus interned string table                         |
 | `crates/pi-natives/src/tasks.rs`                         | N-API surface — `TaskRun`, `taskGateNames()`, `taskTraceLayout()`               |
 | `packages/coding-agent/src/adw/runner.ts`                | The driver: spawns seats, runs code phases, owns isolation                      |
+| `packages/coding-agent/src/adw/integration.ts`            | The integration owner: applies accepted diffs serially through a durable journal |
+| `packages/coding-agent/src/adw/schema.ts`                 | Caller-owned gates: payload & verdict schema compilation and `REVIEW_RULES`      |
 | `packages/coding-agent/src/adw/config.ts`                | Workflow discovery, parsing and validation                                      |
 | `packages/coding-agent/src/adw/prompt.ts`                | Phase, panel and fusion prompt assembly; `ENVELOPE_CONTRACT`                    |
 | `packages/coding-agent/src/adw/types.ts`                 | The on-disk schema                                                              |
@@ -639,7 +641,7 @@ A reader seeks event `n` at `HEADER_LEN + n * RECORD_LEN` and tails by byte offs
 
 The encoding is the ABI. `taskTraceLayout()` exports the offsets so a reader in another language uses them directly instead of duplicating the layout; there is no `unsafe` and no transmute, only explicit `to_le_bytes`, so the layout is identical on every target.
 
-Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase_rejected`, `phase_finished`, `run_finished`, `panel_opinion`, `run_resumed`, `phase_tokens`, `phase_rewound`, `review_revision`, `review_exhausted`, `input_selected`, `correction_pending`.
+Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase_rejected`, `phase_finished`, `run_finished`, `panel_opinion`, `run_resumed`, `phase_tokens`, `phase_rewound`, `review_revision`, `review_exhausted`, `input_selected`, `correction_pending`, `phase_invalidated`.
 
 `panel_opinion` exists because the fan-out happens in the caller — only it can spawn a model. Without that record a fusion phase would be one opaque span instead of N comparable answers.
 
@@ -650,6 +652,8 @@ Event kinds: `run_started`, `phase_started`, `phase_retry`, `gate_check`, `phase
 `input_selected` records which producer version a consuming phase was handed at dispatch — consumer in `phase`, producer in `owner`, the producer's acceptance version in `value`. It is the record that lets the viewer and a resumed run answer *which results authorized this execution*, and it took the format to version 5 (the layout is unchanged; the kind is new, and a reader that ignored it would explain a consumer's work with outputs it never saw).
 
 `correction_pending` carries an in-place rejection's full correction text (format version 6). `phase_rejected` interns only the summary, which was enough while the correction lived in memory — but a resumed retry that knows only *that* it failed repeats the attempt blind, and counting attempts without restoring the diagnostic is not recovery. Rewinds and revisions already carried theirs; this closes the last gap. As with every bump, older versions are refused by path instead of half-decoded.
+
+`phase_invalidated` closes the loop on retries under the phase state machine: it carries a superseded phase run — target in `phase`, the superseding owner in `owner`, the target's spent attempt budget in `attempt` — where an empty `owner` means a crash reset on resume rather than supersession of prior evidence. It holds the same stride as every other record (format version 6, layout unchanged): a reader that ignored it would keep a stale acceptance as current and explain a consumer's work with output that was already superseded.
 
 A trace can hold **several terminal records**: the driver writes a failed one on a crash so a reader can tell a dead run from a running one, and a continuation writes its own verdict after the `run_resumed` seam. The current state of the run is the LAST terminal record; the viewer reads it that way and keeps the earlier ones in the timeline as history.
 
