@@ -46,11 +46,7 @@ function acceptedSubmission(traceDir: string, record: IntegrationRecord): boolea
  * boundary lets recovery undo an interrupted multi-repository apply before
  * replaying the accepted patch. No staging, commits, or nested-repo stashes.
  */
-export async function integrateAccepted(
-	root: string,
-	runDir: string,
-	record: IntegrationRecord,
-): Promise<void> {
+export async function integrateAccepted(root: string, runDir: string, record: IntegrationRecord): Promise<void> {
 	const journal = path.join(runDir, "integration.json");
 	const guard = TaskWriteGuard.create({
 		root,
@@ -62,10 +58,9 @@ export async function integrateAccepted(
 			throw new Error(`interrupted integration cannot be restored: ${restored.unrecoverable.join(", ")}`);
 		}
 	}
-	const patches = [
-		{ relativePath: ".", patch: record.delta.rootPatch },
-		...record.delta.nestedPatches,
-	].filter(entry => entry.patch.trim());
+	const patches = [{ relativePath: ".", patch: record.delta.rootPatch }, ...record.delta.nestedPatches].filter(entry =>
+		entry.patch.trim(),
+	);
 	for (const entry of patches) {
 		const target = path.resolve(root, entry.relativePath);
 		if (target !== root && !target.startsWith(`${root}${path.sep}`)) {

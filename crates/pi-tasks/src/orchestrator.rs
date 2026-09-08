@@ -92,10 +92,12 @@ impl Workflow {
 		}
 		let ordered = topological_order(&phases).unwrap_or_else(|| (0..phases.len()).collect());
 		let mut slots: Vec<Option<PhaseParams>> = phases.into_iter().map(Some).collect();
-		let phases = ordered.into_iter().filter_map(|index| slots[index].take()).collect();
+		let phases = ordered
+			.into_iter()
+			.filter_map(|index| slots[index].take())
+			.collect();
 		Self { name: name.into(), phases }
 	}
-
 }
 
 /// Indices in dependency order, or `None` when the graph cannot be ordered.
@@ -123,7 +125,9 @@ fn topological_order(phases: &[PhaseParams]) -> Option<Vec<usize>> {
 			.filter(|&index| {
 				phases[index]
 					.depends_on
-					.as_deref().unwrap_or_default().iter()
+					.as_deref()
+					.unwrap_or_default()
+					.iter()
 					.all(|name| index_of.get(name.as_str()).is_some_and(|&dep| done[dep]))
 			})
 			.collect();
@@ -215,38 +219,39 @@ enum DispatchStatus {
 
 #[derive(Default)]
 struct PhaseState {
-	status: DispatchStatus,
-	/// Completed attempts; an interrupted dispatch is retried at the same ordinal.
-	attempts: u32,
+	status:     DispatchStatus,
+	/// Completed attempts; an interrupted dispatch is retried at the same
+	/// ordinal.
+	attempts:   u32,
 	correction: Option<String>,
-	reports: Vec<GateReport>,
-	review: Option<(bool, String)>,
-	root: Option<PathBuf>,
+	reports:    Vec<GateReport>,
+	review:     Option<(bool, String)>,
+	root:       Option<PathBuf>,
 }
 
 pub struct Run {
-	adw_id:             String,
-	root:               PathBuf,
-	workflow:           Workflow,
-	tracer:             Option<Tracer>,
-	max_attempts:       u32,
-	gates:              HashMap<String, Vec<Box<dyn Gate>>>,
-	states:             Vec<PhaseState>,
+	adw_id:         String,
+	root:           PathBuf,
+	workflow:       Workflow,
+	tracer:         Option<Tracer>,
+	max_attempts:   u32,
+	gates:          HashMap<String, Vec<Box<dyn Gate>>>,
+	states:         Vec<PhaseState>,
 	/// Cumulative for the entire run, never reset by another route.
-	revisions:          HashMap<String, u32>,
-	attempt_grants:     HashMap<String, u32>,
+	revisions:      HashMap<String, u32>,
+	attempt_grants: HashMap<String, u32>,
 	/// Total acceptances per phase — the next persisted version is this + 1.
 	/// Never decremented: a superseded version's ordinal is history.
-	accepted:           HashMap<String, u32>,
+	accepted:       HashMap<String, u32>,
 	/// Each phase's standing output: its acceptance ordinal and, when the
 	/// envelope is at hand (always live; on resume only if its file read
 	/// back), the envelope itself. Invalidation removes the entry — the file
 	/// stays on disk, but the version is superseded and never selected again.
-	current:            HashMap<String, (u32, Option<Envelope<Value>>)>,
-	last_envelope:      Option<Envelope<Value>>,
-	records:            Vec<PhaseRecord>,
-	halted:             bool,
-	started:            bool,
+	current:        HashMap<String, (u32, Option<Envelope<Value>>)>,
+	last_envelope:  Option<Envelope<Value>>,
+	records:        Vec<PhaseRecord>,
+	halted:         bool,
+	started:        bool,
 }
 
 impl Run {
@@ -255,7 +260,9 @@ impl Run {
 		Self {
 			adw_id: adw_id.into(),
 			root: root.into(),
-			states: (0..workflow.phases.len()).map(|_| PhaseState::default()).collect(),
+			states: (0..workflow.phases.len())
+				.map(|_| PhaseState::default())
+				.collect(),
 			workflow,
 			tracer: None,
 			max_attempts: DEFAULT_MAX_ATTEMPTS,
@@ -330,19 +337,33 @@ impl Run {
 		run.started = true;
 		let mut rejected = HashMap::new();
 		for event in &events {
-			let named = matches!(event.kind,
-				EventKind::PhaseStarted | EventKind::PhaseRetry | EventKind::PhaseFinished |
-				EventKind::PhaseRejected | EventKind::CorrectionPending | EventKind::GateCheck |
-				EventKind::PhaseRewound | EventKind::ReviewRevision | EventKind::ReviewExhausted |
-				EventKind::PhaseInvalidated | EventKind::InputSelected | EventKind::PhaseTokens |
-				EventKind::PanelOpinion);
-			if !named { continue; }
+			let named = matches!(
+				event.kind,
+				EventKind::PhaseStarted
+					| EventKind::PhaseRetry
+					| EventKind::PhaseFinished
+					| EventKind::PhaseRejected
+					| EventKind::CorrectionPending
+					| EventKind::GateCheck
+					| EventKind::PhaseRewound
+					| EventKind::ReviewRevision
+					| EventKind::ReviewExhausted
+					| EventKind::PhaseInvalidated
+					| EventKind::InputSelected
+					| EventKind::PhaseTokens
+					| EventKind::PanelOpinion
+			);
+			if !named {
+				continue;
+			}
 			let name = reader.text(event.phase).to_owned();
 			let index = run.phase_index(&name)?;
 			match event.kind {
 				EventKind::PhaseStarted | EventKind::PhaseRetry => {
 					if run.states[index].status != DispatchStatus::Pending || event.attempt == 0 {
-						return Err(RunError::Mismatch(format!("duplicate or invalid dispatch of {name:?}")));
+						return Err(RunError::Mismatch(format!(
+							"duplicate or invalid dispatch of {name:?}"
+						)));
 					}
 					run.states[index].status = DispatchStatus::Running;
 					run.states[index].attempts = event.attempt - 1;
@@ -354,45 +375,84 @@ impl Run {
 					let position = reports.iter().position(|report| report.gate == gate);
 					let report = match position {
 						Some(position) => &mut reports[position],
-						None => { reports.push(GateReport::new(gate)); reports.last_mut().unwrap() },
+						None => {
+							reports.push(GateReport::new(gate));
+							reports.last_mut().unwrap()
+						},
 					};
-					report.checks.push(Check { item: reader.text(event.detail).to_owned(), ok: event.ok, note: reader.text(event.owner).to_owned() });
+					report.checks.push(Check {
+						item: reader.text(event.detail).to_owned(),
+						ok:   event.ok,
+						note: reader.text(event.owner).to_owned(),
+					});
 				},
 				EventKind::PhaseFinished => {
 					let phase = &run.workflow.phases[index];
 					let gates = std::mem::take(&mut run.states[index].reports);
 					let summary = reader.text(event.detail).to_owned();
-					let violations = if event.ok { Vec::new() } else {
-						let mut violations: Vec<_> = gates.iter().flat_map(GateReport::violations).collect();
-						if violations.is_empty() { violations.push(summary.clone()); }
+					let violations = if event.ok {
+						Vec::new()
+					} else {
+						let mut violations: Vec<_> =
+							gates.iter().flat_map(GateReport::violations).collect();
+						if violations.is_empty() {
+							violations.push(summary.clone());
+						}
 						violations
 					};
 					run.records.push(PhaseRecord {
-						name: name.clone(), kind: phase.kind, owner: phase.owner.clone(),
-						status: if event.ok { PhaseStatus::Passed } else { PhaseStatus::Failed },
-						invalidated: false, attempts: event.attempt, summary, gates, violations,
+						name: name.clone(),
+						kind: phase.kind,
+						owner: phase.owner.clone(),
+						status: if event.ok {
+							PhaseStatus::Passed
+						} else {
+							PhaseStatus::Failed
+						},
+						invalidated: false,
+						attempts: event.attempt,
+						summary,
+						gates,
+						violations,
 					});
 					run.states[index].attempts = event.attempt;
 					run.states[index].correction = None;
-					run.states[index].status = if event.ok { DispatchStatus::Passed } else { DispatchStatus::Failed };
-					if !event.ok { run.halted = true; continue; }
+					run.states[index].status = if event.ok {
+						DispatchStatus::Passed
+					} else {
+						DispatchStatus::Failed
+					};
+					if !event.ok {
+						run.halted = true;
+						continue;
+					}
 					let version = run.accepted.get(&name).copied().unwrap_or(0) + 1;
 					let envelope = load_envelope(dir, &name, version).map_err(|err| {
 						match run.consumer_of(&name) {
 							Some(consumer) => RunError::Mismatch(format!(
-								"phase {consumer:?} consumes {name:?} version {version}, whose envelope cannot be read: {err}"
+								"phase {consumer:?} consumes {name:?} version {version}, whose envelope \
+								 cannot be read: {err}"
 							)),
 							None => err,
 						}
 					})?;
-					if let Some(env) = &envelope { run.last_envelope = Some(env.clone()); }
+					if let Some(env) = &envelope {
+						run.last_envelope = Some(env.clone());
+					}
 					run.accepted.insert(name.clone(), version);
 					run.current.insert(name, (version, envelope));
 				},
 				EventKind::PhaseRejected => {
 					run.states[index].attempts = event.attempt;
 					run.states[index].status = DispatchStatus::Pending;
-					rejected.insert(name, (event.attempt, reader.text(event.detail).to_owned(), std::mem::take(&mut run.states[index].reports)));
+					rejected.insert(
+						name,
+						(
+							event.attempt,
+							reader.text(event.detail).to_owned(),
+							std::mem::take(&mut run.states[index].reports),
+						),
+					);
 				},
 				EventKind::CorrectionPending => {
 					run.states[index].correction = Some(reader.text(event.detail).to_owned());
@@ -402,7 +462,9 @@ impl Run {
 					if event.owner != crate::trace::NO_STRING {
 						run.current.remove(&name);
 						for record in &mut run.records {
-							if record.name == name { record.invalidated = true; }
+							if record.name == name {
+								record.invalidated = true;
+							}
 						}
 					}
 					run.states[index].status = DispatchStatus::Pending;
@@ -413,24 +475,47 @@ impl Run {
 					let source = reader.text(event.owner).to_owned();
 					let source_index = run.phase_index(&source)?;
 					if !run.depends_transitively(source_index, index) {
-						return Err(RunError::Mismatch(format!("trace routes {source:?} to non-dependency {name:?}")));
+						return Err(RunError::Mismatch(format!(
+							"trace routes {source:?} to non-dependency {name:?}"
+						)));
 					}
 					if event.kind == EventKind::ReviewRevision {
-						let route = run.workflow.phases[source_index].on_reject.as_ref().ok_or_else(|| RunError::Mismatch(format!("review route for {source:?} is missing")))?;
-						if route.to != name || event.value > u32::from(route.max_revisions)
-							|| event.value != run.revisions.get(&source).copied().unwrap_or(0) + 1 {
-							return Err(RunError::Mismatch(format!("review route for {source:?} changed")));
+						let route = run.workflow.phases[source_index]
+							.on_reject
+							.as_ref()
+							.ok_or_else(|| {
+								RunError::Mismatch(format!("review route for {source:?} is missing"))
+							})?;
+						if route.to != name
+							|| event.value > u32::from(route.max_revisions)
+							|| event.value != run.revisions.get(&source).copied().unwrap_or(0) + 1
+						{
+							return Err(RunError::Mismatch(format!(
+								"review route for {source:?} changed"
+							)));
 						}
 						run.grant_attempt(&name)?;
 						run.revisions.insert(source.clone(), event.value);
 					} else {
 						if run.workflow.phases[source_index].rewind_to.as_deref() != Some(name.as_str()) {
-							return Err(RunError::Mismatch(format!("rewind route for {source:?} changed")));
+							return Err(RunError::Mismatch(format!(
+								"rewind route for {source:?} changed"
+							)));
 						}
 						if let Some((attempts, summary, gates)) = rejected.remove(&source) {
 							let phase = &run.workflow.phases[source_index];
 							let violations = gates.iter().flat_map(GateReport::violations).collect();
-							run.records.push(PhaseRecord { name: source.clone(), kind: phase.kind, owner: phase.owner.clone(), status: PhaseStatus::Failed, invalidated: false, attempts, summary, gates, violations });
+							run.records.push(PhaseRecord {
+								name: source.clone(),
+								kind: phase.kind,
+								owner: phase.owner.clone(),
+								status: PhaseStatus::Failed,
+								invalidated: false,
+								attempts,
+								summary,
+								gates,
+								violations,
+							});
 						}
 					}
 					// Also supports v6 serial traces predating explicit invalidation events.
@@ -474,9 +559,11 @@ impl Run {
 		// continuation marker, so another crash cannot duplicate a start.
 		for (index, state) in run.states.iter_mut().enumerate() {
 			if state.status == DispatchStatus::Running {
-				tracer.emit(EventRecord::new(EventKind::PhaseInvalidated)
-					.phase(tracer.intern(&run.workflow.phases[index].name)?)
-					.attempt(state.attempts))?;
+				tracer.emit(
+					EventRecord::new(EventKind::PhaseInvalidated)
+						.phase(tracer.intern(&run.workflow.phases[index].name)?)
+						.attempt(state.attempts),
+				)?;
 				state.status = DispatchStatus::Pending;
 				state.reports.clear();
 			}
@@ -485,7 +572,12 @@ impl Run {
 		tracer.emit(
 			EventRecord::new(EventKind::RunResumed)
 				.detail(workflow_id)
-				.value(run.states.iter().filter(|state| state.status == DispatchStatus::Passed).count() as u32),
+				.value(
+					run.states
+						.iter()
+						.filter(|state| state.status == DispatchStatus::Passed)
+						.count() as u32,
+				),
 		)?;
 		run.tracer = Some(tracer);
 		Ok(run)
@@ -530,23 +622,52 @@ impl Run {
 					.value(self.max_attempts),
 			)?;
 		}
-		let active = self.states.iter().any(|state| state.status == DispatchStatus::Running);
+		let active = self
+			.states
+			.iter()
+			.any(|state| state.status == DispatchStatus::Running);
 		if self.halted {
-			return Ok(if active { Step::Wait } else { Step::Done { accepted: false } });
+			return Ok(if active {
+				Step::Wait
+			} else {
+				Step::Done { accepted: false }
+			});
 		}
-		let ready = self.workflow.phases.iter().enumerate().position(|(index, phase)| {
-			self.states[index].status == DispatchStatus::Pending
-				&& phase.depends_on.as_deref().unwrap_or_default().iter().all(|name| {
-					self.workflow.phases.iter().position(|dep| &dep.name == name)
-						.is_some_and(|dep| self.states[dep].status == DispatchStatus::Passed)
-				})
-		});
+		let ready = self
+			.workflow
+			.phases
+			.iter()
+			.enumerate()
+			.position(|(index, phase)| {
+				self.states[index].status == DispatchStatus::Pending
+					&& phase
+						.depends_on
+						.as_deref()
+						.unwrap_or_default()
+						.iter()
+						.all(|name| {
+							self
+								.workflow
+								.phases
+								.iter()
+								.position(|dep| &dep.name == name)
+								.is_some_and(|dep| self.states[dep].status == DispatchStatus::Passed)
+						})
+			});
 		let Some(index) = ready else {
-			if active { return Ok(Step::Wait); }
-			if self.states.iter().all(|state| state.status == DispatchStatus::Passed) {
+			if active {
+				return Ok(Step::Wait);
+			}
+			if self
+				.states
+				.iter()
+				.all(|state| state.status == DispatchStatus::Passed)
+			{
 				return Ok(Step::Done { accepted: true });
 			}
-			return Err(RunError::Mismatch("pending phases have no satisfied dependency path".to_owned()));
+			return Err(RunError::Mismatch(
+				"pending phases have no satisfied dependency path".to_owned(),
+			));
 		};
 		let phase = self.workflow.phases[index].clone();
 		let attempt = self.next_attempt(index)?;
@@ -604,7 +725,11 @@ impl Run {
 	/// Submit a result directly — deterministic `Code` phases and human
 	/// `Engineer` phases report through the same door, so their failures reach
 	/// the next agent as an envelope like any other.
-	pub fn submit_envelope(&mut self, name: &str, envelope: Envelope<Value>) -> Result<Outcome, RunError> {
+	pub fn submit_envelope(
+		&mut self,
+		name: &str,
+		envelope: Envelope<Value>,
+	) -> Result<Outcome, RunError> {
 		let index = self.running_index(name)?;
 		let phase = self.workflow.phases[index].clone();
 
@@ -712,7 +837,14 @@ impl Run {
 	/// A fusion phase is still ONE phase to the engine — it settles on the
 	/// fuser's envelope — but the members that fed it are real work with real
 	/// cost, and `value` (tokens) is what makes two models comparable.
-	pub fn note_panel_opinion(&self, name: &str, owner: &str, ok: bool, value: u32, model: Option<&str>) -> Result<(), RunError> {
+	pub fn note_panel_opinion(
+		&self,
+		name: &str,
+		owner: &str,
+		ok: bool,
+		value: u32,
+		model: Option<&str>,
+	) -> Result<(), RunError> {
 		let index = self.running_index(name)?;
 		let phase = &self.workflow.phases[index];
 		let phase_id = self.intern(&phase.name)?;
@@ -740,7 +872,13 @@ impl Run {
 	/// returns an all-zero usage record — and a reader must be able to tell that
 	/// apart from a phase that was genuinely free. Silently summing zeros would
 	/// present a confident total that is wrong.
-	pub fn note_phase_tokens(&self, name: &str, owner: &str, tokens: u32, model: Option<&str>) -> Result<(), RunError> {
+	pub fn note_phase_tokens(
+		&self,
+		name: &str,
+		owner: &str,
+		tokens: u32,
+		model: Option<&str>,
+	) -> Result<(), RunError> {
 		let index = self.running_index(name)?;
 		let phase = &self.workflow.phases[index];
 		let phase_id = self.intern(&phase.name)?;
@@ -764,7 +902,12 @@ impl Run {
 	/// validator in here would cost the crate its three dependencies. Same
 	/// bargain `Code` phases already make: the caller executes, the engine
 	/// judges, and the result is a `gate_check` in the trace like any other.
-	pub fn note_gate_report(&mut self, name: &str, gate: impl Into<String>, checks: Vec<Check>) -> Result<(), RunError> {
+	pub fn note_gate_report(
+		&mut self,
+		name: &str,
+		gate: impl Into<String>,
+		checks: Vec<Check>,
+	) -> Result<(), RunError> {
 		let index = self.running_index(name)?;
 		let mut report = GateReport::new(gate);
 		report.checks = checks;
@@ -773,7 +916,12 @@ impl Run {
 	}
 
 	/// Supply a coherent decision for this active attempt, not a gate bypass.
-	pub fn note_review_decision(&mut self, name: &str, approved: bool, reason: impl Into<String>) -> Result<(), RunError> {
+	pub fn note_review_decision(
+		&mut self,
+		name: &str,
+		approved: bool,
+		reason: impl Into<String>,
+	) -> Result<(), RunError> {
 		let index = self.running_index(name)?;
 		self.states[index].review = Some((approved, reason.into()));
 		Ok(())
@@ -794,7 +942,12 @@ impl Run {
 		accepted: bool,
 		reason: impl Into<String>,
 	) -> Result<RunSummary, RunError> {
-		let accepted = accepted && !self.halted && self.states.iter().all(|state| state.status == DispatchStatus::Passed);
+		let accepted = accepted
+			&& !self.halted
+			&& self
+				.states
+				.iter()
+				.all(|state| state.status == DispatchStatus::Passed);
 		let reason = reason.into();
 		let reason_id = self.intern(&reason)?;
 		self.trace(
@@ -927,7 +1080,13 @@ impl Run {
 			}
 			{
 				let mut visited = vec![false; self.workflow.phases.len()];
-				let mut pending: Vec<&str> = phase.depends_on.as_deref().unwrap_or_default().iter().map(String::as_str).collect();
+				let mut pending: Vec<&str> = phase
+					.depends_on
+					.as_deref()
+					.unwrap_or_default()
+					.iter()
+					.map(String::as_str)
+					.collect();
 				while let Some(name) = pending.pop() {
 					if let Some((index, dependency)) = self
 						.workflow
@@ -938,7 +1097,14 @@ impl Run {
 					{
 						if !visited[index] {
 							visited[index] = true;
-							pending.extend(dependency.depends_on.as_deref().unwrap_or_default().iter().map(String::as_str));
+							pending.extend(
+								dependency
+									.depends_on
+									.as_deref()
+									.unwrap_or_default()
+									.iter()
+									.map(String::as_str),
+							);
 						}
 					}
 				}
@@ -962,13 +1128,19 @@ impl Run {
 	}
 
 	fn phase_index(&self, name: &str) -> Result<usize, RunError> {
-		self.workflow.phases.iter().position(|phase| phase.name == name)
+		self
+			.workflow
+			.phases
+			.iter()
+			.position(|phase| phase.name == name)
 			.ok_or_else(|| RunError::Mismatch(format!("unknown phase {name:?}")))
 	}
 
 	fn running_index(&self, name: &str) -> Result<usize, RunError> {
 		let index = self.phase_index(name)?;
-		if self.states[index].status != DispatchStatus::Running { return Err(RunError::NoActiveStep); }
+		if self.states[index].status != DispatchStatus::Running {
+			return Err(RunError::NoActiveStep);
+		}
 		Ok(index)
 	}
 
@@ -976,11 +1148,19 @@ impl Run {
 		let mut seen = vec![false; self.workflow.phases.len()];
 		let mut pending = vec![source];
 		while let Some(index) = pending.pop() {
-			if seen[index] { continue; }
+			if seen[index] {
+				continue;
+			}
 			seen[index] = true;
-			for name in self.workflow.phases[index].depends_on.as_deref().unwrap_or_default() {
+			for name in self.workflow.phases[index]
+				.depends_on
+				.as_deref()
+				.unwrap_or_default()
+			{
 				if let Ok(dependency) = self.phase_index(name) {
-					if dependency == target { return true; }
+					if dependency == target {
+						return true;
+					}
 					pending.push(dependency);
 				}
 			}
@@ -1059,7 +1239,12 @@ impl Run {
 		)?;
 		self.states[index].status = DispatchStatus::Pending;
 		self.states[index].correction = Some(correction.clone());
-		Ok(Outcome::Retry { phase: phase.name, attempt: attempts + 1, correction, invalidated: Vec::new() })
+		Ok(Outcome::Retry {
+			phase: phase.name,
+			attempt: attempts + 1,
+			correction,
+			invalidated: Vec::new(),
+		})
 	}
 
 	/// Send the run back to an earlier phase, carrying this failure as its
@@ -1139,8 +1324,13 @@ impl Run {
 			return Ok(Outcome::Aborted { phase: from.name.clone(), reason });
 		}
 
-		self.trace(EventRecord::new(EventKind::PhaseRejected)
-			.phase(phase_id).attempt(self.states[source].attempts).detail(summary_id).value(count))?;
+		self.trace(
+			EventRecord::new(EventKind::PhaseRejected)
+				.phase(phase_id)
+				.attempt(self.states[source].attempts)
+				.detail(summary_id)
+				.value(count),
+		)?;
 		let correction = rewind_text(&from.name, target, spent + 1, limit, &violations);
 		let correction_id = self.intern(&correction)?;
 		// `owner` carries the phase that failed: the target alone does not say
@@ -1167,25 +1357,42 @@ impl Run {
 
 	fn validate_review_routes(&self) -> Result<(), RunError> {
 		let mut names = std::collections::HashSet::new();
-		if self.workflow.phases.iter().any(|phase| !names.insert(&phase.name)) {
+		if self
+			.workflow
+			.phases
+			.iter()
+			.any(|phase| !names.insert(&phase.name))
+		{
 			return Err(RunError::Mismatch("duplicate phase names".to_owned()));
 		}
 		if topological_order(&self.workflow.phases).is_none() {
-			return Err(RunError::Mismatch("workflow requires an acyclic dependency graph with known phases".to_owned()));
+			return Err(RunError::Mismatch(
+				"workflow requires an acyclic dependency graph with known phases".to_owned(),
+			));
 		}
 		for (source, phase) in self.workflow.phases.iter().enumerate() {
 			if let Some(target) = &phase.rewind_to {
 				let target_index = self.phase_index(target)?;
 				if !self.depends_transitively(source, target_index) {
-					return Err(RunError::Mismatch(format!("rewind target {target:?} is not a dependency of {:?}", phase.name)));
+					return Err(RunError::Mismatch(format!(
+						"rewind target {target:?} is not a dependency of {:?}",
+						phase.name
+					)));
 				}
 			}
-			let Some(route) = &phase.on_reject else { continue; };
+			let Some(route) = &phase.on_reject else {
+				continue;
+			};
 			let target = self.phase_index(&route.to)?;
 			if !self.depends_transitively(source, target)
 				|| self.workflow.phases[target].kind != crate::phase::PhaseKind::Agent
-				|| phase.kind != crate::phase::PhaseKind::Agent || route.max_revisions == 0 {
-				return Err(RunError::Mismatch(format!("invalid review route from {:?} to {:?}", phase.name, route.to)));
+				|| phase.kind != crate::phase::PhaseKind::Agent
+				|| route.max_revisions == 0
+			{
+				return Err(RunError::Mismatch(format!(
+					"invalid review route from {:?} to {:?}",
+					phase.name, route.to
+				)));
 			}
 		}
 		Ok(())
@@ -1194,9 +1401,14 @@ impl Run {
 	fn next_attempt(&self, index: usize) -> Result<u32, RunError> {
 		let phase = &self.workflow.phases[index];
 		if self.states[index].attempts >= self.attempt_limit(&phase.name)? {
-			return Err(RunError::Mismatch(format!("attempt budget exhausted for phase {:?}", phase.name)));
+			return Err(RunError::Mismatch(format!(
+				"attempt budget exhausted for phase {:?}",
+				phase.name
+			)));
 		}
-		self.states[index].attempts.checked_add(1)
+		self.states[index]
+			.attempts
+			.checked_add(1)
 			.ok_or_else(|| RunError::Mismatch("attempt counter overflow".to_owned()))
 	}
 
@@ -1249,20 +1461,31 @@ impl Run {
 		Ok(())
 	}
 
-	fn invalidate_dependents(&mut self, target: usize, source: usize) -> Result<Vec<String>, RunError> {
+	fn invalidate_dependents(
+		&mut self,
+		target: usize,
+		source: usize,
+	) -> Result<Vec<String>, RunError> {
 		let indices: Vec<_> = (0..self.workflow.phases.len())
-			.filter(|&index| index == target || self.depends_transitively(index, target)).collect();
+			.filter(|&index| index == target || self.depends_transitively(index, target))
+			.collect();
 		let source_id = self.intern(&self.workflow.phases[source].name)?;
 		let mut invalidated = Vec::with_capacity(indices.len());
 		for index in indices {
 			let name = self.workflow.phases[index].name.clone();
 			let attempts = self.entry_attempts(index);
-			self.trace(EventRecord::new(EventKind::PhaseInvalidated)
-				.phase(self.intern(&name)?).owner(source_id).attempt(attempts))?;
+			self.trace(
+				EventRecord::new(EventKind::PhaseInvalidated)
+					.phase(self.intern(&name)?)
+					.owner(source_id)
+					.attempt(attempts),
+			)?;
 			self.states[index] = PhaseState { attempts, ..PhaseState::default() };
 			self.current.remove(&name);
 			for record in &mut self.records {
-				if record.name == name { record.invalidated = true; }
+				if record.name == name {
+					record.invalidated = true;
+				}
 			}
 			invalidated.push(name);
 		}
@@ -1497,8 +1720,10 @@ mod tests {
 		assert!(matches!(run.submit_envelope("build", ok_envelope("built")).expect("build"),
 			Outcome::Advanced { phase } if phase == "build"));
 		dispatch_serial(run, "checks");
-		assert!(matches!(run.submit_envelope("checks", Envelope::code(true, "checks passed")).expect("checks"),
-			Outcome::Advanced { phase } if phase == "checks"));
+		assert!(
+			matches!(run.submit_envelope("checks", Envelope::code(true, "checks passed")).expect("checks"),
+			Outcome::Advanced { phase } if phase == "checks")
+		);
 	}
 
 	fn rejected_review() -> Envelope<Value> {
@@ -1515,9 +1740,14 @@ mod tests {
 
 	fn reject_review(run: &mut Run, name: &str) -> Outcome {
 		dispatch_serial(run, name);
-		run.note_review_decision(name, false,
-			"missing authorization: unauthenticated request returned 200").expect("review decision");
-		run.submit_envelope(name, rejected_review()).expect("review")
+		run.note_review_decision(
+			name,
+			false,
+			"missing authorization: unauthenticated request returned 200",
+		)
+		.expect("review decision");
+		run.submit_envelope(name, rejected_review())
+			.expect("review")
 	}
 
 	#[test]
@@ -1529,7 +1759,8 @@ mod tests {
 			reach_review(&mut run);
 			dispatch_serial(&mut run, "review");
 			if failure != "missing" {
-				run.note_review_decision("review", false, "this decision must be drained").expect("decision");
+				run.note_review_decision("review", false, "this decision must be drained")
+					.expect("decision");
 			}
 			let outcome = match failure {
 				"parse" => run.submit_agent_output("review", "not an envelope"),
@@ -1538,12 +1769,14 @@ mod tests {
 						item: "approved".into(),
 						ok:   false,
 						note: "contradictory verdict".into(),
-					}]).expect("gate report");
+					}])
+					.expect("gate report");
 					run.submit_envelope("review", rejected_review())
 				},
-				"status" => {
-					run.submit_envelope("review", Envelope { status: EnvelopeStatus::Fail, ..rejected_review() })
-				},
+				"status" => run.submit_envelope("review", Envelope {
+					status: EnvelopeStatus::Fail,
+					..rejected_review()
+				}),
 				_ => run.submit_envelope("review", rejected_review()),
 			}
 			.expect("submission");
@@ -1554,8 +1787,10 @@ mod tests {
 			assert!(run.records().iter().all(|record| !record.invalidated));
 			// The prior decision must not authorize this attempt.
 			dispatch_serial(&mut run, "review");
-			assert!(matches!(run.submit_envelope("review", ok_envelope("still no decision")).expect("missing"),
-				Outcome::Retry { phase, attempt: 3, .. } if phase == "review"));
+			assert!(
+				matches!(run.submit_envelope("review", ok_envelope("still no decision")).expect("missing"),
+				Outcome::Retry { phase, attempt: 3, .. } if phase == "review")
+			);
 			assert!(matches!(reject_review(&mut run, "review"),
 				Outcome::Retry { phase, attempt: 2, .. } if phase == "build"));
 			let review = run.records().last().expect("review record");
@@ -1572,7 +1807,9 @@ mod tests {
 		workflow.phases[2].on_reject = None;
 		let mut run = Run::new("adw", dir.path(), workflow);
 		reach_review(&mut run);
-		assert!(matches!(reject_review(&mut run, "review"), Outcome::Advanced { phase } if phase == "review"));
+		assert!(
+			matches!(reject_review(&mut run, "review"), Outcome::Advanced { phase } if phase == "review")
+		);
 		let Step::Run { phase, .. } = run.next_step().expect("delivery") else {
 			panic!("delivery")
 		};
@@ -1636,8 +1873,10 @@ mod tests {
 			matches!(reject_review(&mut run, "review"), Outcome::Retry { phase, attempt: 3, .. } if phase == "build")
 		);
 		dispatch_serial(&mut run, "build");
-		assert!(matches!(run.submit_agent_output("build", "malformed revised build").expect("exhaustion"),
-			Outcome::Aborted { phase, .. } if phase == "build"));
+		assert!(
+			matches!(run.submit_agent_output("build", "malformed revised build").expect("exhaustion"),
+			Outcome::Aborted { phase, .. } if phase == "build")
+		);
 		assert_eq!(run.records().last().expect("failed build").attempts, 3);
 		assert_eq!(run.next_step().expect("halt"), Step::Done { accepted: false });
 	}
@@ -1674,7 +1913,9 @@ mod tests {
 			.insert(3, PhaseParams::new("late_checks", PhaseKind::Code, "test").rewinding_to("build"));
 		let mut run = Run::new("adw", dir.path(), workflow).with_max_attempts(2);
 		reach_review(&mut run);
-		dispatch_serial(&mut run, "review");		run.note_review_decision("review", true, "approved").expect("decision");
+		dispatch_serial(&mut run, "review");
+		run.note_review_decision("review", true, "approved")
+			.expect("decision");
 		run.submit_envelope("review", ok_envelope("approved"))
 			.expect("review");
 		dispatch_serial(&mut run, "late_checks");
@@ -1684,7 +1925,8 @@ mod tests {
 		);
 		assert!(run.records().iter().all(|record| record.invalidated));
 		dispatch_serial(&mut run, "build");
-		run.submit_envelope("build", ok_envelope("revised")).expect("build");
+		run.submit_envelope("build", ok_envelope("revised"))
+			.expect("build");
 		dispatch_serial(&mut run, "checks");
 		assert!(matches!(
 			run.submit_envelope("checks", Envelope::code(false, "new regression"))
@@ -1712,7 +1954,9 @@ mod tests {
 		reach_review(&mut run);
 		reject_review(&mut run, "review");
 		reach_review(&mut run);
-		dispatch_serial(&mut run, "review");		run.note_review_decision("review", true, "approved").expect("decision");
+		dispatch_serial(&mut run, "review");
+		run.note_review_decision("review", true, "approved")
+			.expect("decision");
 		run.submit_envelope("review", ok_envelope("approved"))
 			.expect("review");
 		assert!(
@@ -1734,9 +1978,14 @@ mod tests {
 				.with_tracer(Tracer::create(&trace_dir).expect("tracer"));
 			run.next_step().expect("start");
 			reach_review(&mut run);
-			dispatch_serial(&mut run, "review");			run.note_review_decision("review", false, "first review requires authorization").expect("decision");
-			run.submit_envelope("review", Envelope { summary: "first rejection".into(), ..rejected_review() })
-				.expect("review");
+			dispatch_serial(&mut run, "review");
+			run.note_review_decision("review", false, "first review requires authorization")
+				.expect("decision");
+			run.submit_envelope("review", Envelope {
+				summary: "first rejection".into(),
+				..rejected_review()
+			})
+			.expect("review");
 			reach_review(&mut run);
 			let Outcome::Retry { correction: pending, .. } = reject_review(&mut run, "review") else {
 				panic!("revision")
@@ -1783,8 +2032,10 @@ mod tests {
 		let mut resumed =
 			Run::resume("adw", dir.path(), review_workflow(1), &trace_dir).expect("resume");
 		dispatch_serial(&mut resumed, "build");
-		assert!(matches!(resumed.submit_agent_output("build", "malformed revision").expect("exhausted"),
-			Outcome::Aborted { phase, .. } if phase == "build"));
+		assert!(
+			matches!(resumed.submit_agent_output("build", "malformed revision").expect("exhausted"),
+			Outcome::Aborted { phase, .. } if phase == "build")
+		);
 		assert_eq!(resumed.records().last().expect("build").attempts, 2);
 	}
 
@@ -1906,8 +2157,11 @@ mod tests {
 			item: "approved".to_owned(),
 			ok:   false,
 			note: "expected boolean, got string".to_owned(),
-		}]).expect("gate report");
-		let outcome = run.submit_envelope("plan", ok_envelope("done")).expect("submit");
+		}])
+		.expect("gate report");
+		let outcome = run
+			.submit_envelope("plan", ok_envelope("done"))
+			.expect("submit");
 
 		assert!(
 			matches!(outcome, Outcome::Retry { .. }),
@@ -1937,11 +2191,15 @@ mod tests {
 			item: "approved".to_owned(),
 			ok:   false,
 			note: "wrong type".to_owned(),
-		}]).expect("gate report");
-		run.submit_envelope("plan", ok_envelope("first")).expect("rejected");
+		}])
+		.expect("gate report");
+		run.submit_envelope("plan", ok_envelope("first"))
+			.expect("rejected");
 
 		run.next_step().expect("retry");
-		let outcome = run.submit_envelope("plan", ok_envelope("second")).expect("submit");
+		let outcome = run
+			.submit_envelope("plan", ok_envelope("second"))
+			.expect("submit");
 		assert!(
 			matches!(outcome, Outcome::Advanced { .. }),
 			"the stale report must not still be judging: {outcome:?}"
@@ -2029,7 +2287,8 @@ mod tests {
 				Step::Done { .. } | Step::Wait => unreachable!(),
 			};
 			let outcome = if phase == "build" {
-				run.submit_envelope("build", ok_envelope("built")).expect("build")
+				run.submit_envelope("build", ok_envelope("built"))
+					.expect("build")
 			} else {
 				run.submit_envelope("verify", Envelope::code(false, "still red"))
 					.expect("verify")
@@ -2092,8 +2351,10 @@ mod tests {
 		run.next_step().expect("step");
 		// `omniroute/auto` returns an all-zero usage record. A model turn cannot
 		// cost nothing, so this must not read as a free phase.
-		run.note_phase_tokens("plan", "sonic", 0, None).expect("note");
-		run.submit_envelope("plan", ok_envelope("done")).expect("submit");
+		run.note_phase_tokens("plan", "sonic", 0, None)
+			.expect("note");
+		run.submit_envelope("plan", ok_envelope("done"))
+			.expect("submit");
 
 		let mut reader = TraceReader::open(&trace_dir).expect("open");
 		let events = reader.read_from(0).expect("read");
@@ -2117,15 +2378,18 @@ mod tests {
 		assert_eq!(attempt, 1);
 		assert!(correction.is_none());
 
-		assert_eq!(run.submit_envelope("plan", ok_envelope("planned")).expect("submit"), Outcome::Advanced {
-			phase: "plan".into(),
-		});
+		assert_eq!(
+			run.submit_envelope("plan", ok_envelope("planned"))
+				.expect("submit"),
+			Outcome::Advanced { phase: "plan".into() }
+		);
 
 		let Step::Run { phase, .. } = run.next_step().expect("step") else {
 			panic!("expected a step")
 		};
 		assert_eq!(phase.name, "build");
-		run.submit_envelope("build", ok_envelope("built")).expect("submit");
+		run.submit_envelope("build", ok_envelope("built"))
+			.expect("submit");
 
 		assert_eq!(run.next_step().expect("step"), Step::Done { accepted: true });
 		assert_eq!(run.records().len(), 2);
@@ -2329,7 +2593,9 @@ mod tests {
 			run.register_gates("plan", vec![Box::new(ArtifactsExist)]);
 			run.next_step().expect("step");
 			let claim = Envelope { artifacts: vec!["missing.md".into()], ..ok_envelope("planned") };
-			let Outcome::Retry { correction, .. } = run.submit_envelope("plan", claim).expect("submit") else {
+			let Outcome::Retry { correction, .. } =
+				run.submit_envelope("plan", claim).expect("submit")
+			else {
 				panic!("expected a retry");
 			};
 			live_correction = correction;
@@ -2405,9 +2671,11 @@ mod tests {
 		{
 			let mut run = run_in(&dir).with_tracer(Tracer::create(&trace_dir).expect("tracer"));
 			run.next_step().expect("step");
-			run.submit_envelope("plan", ok_envelope("planned")).expect("submit");
+			run.submit_envelope("plan", ok_envelope("planned"))
+				.expect("submit");
 			run.next_step().expect("step");
-			run.submit_envelope("build", ok_envelope("built")).expect("submit");
+			run.submit_envelope("build", ok_envelope("built"))
+				.expect("submit");
 			run.finish(true, "").expect("finish");
 		}
 		let Err(err) = Run::resume("adw-test", dir.path(), workflow(), &trace_dir) else {
@@ -2423,9 +2691,12 @@ mod tests {
 		let mut run = run_in(&dir).with_tracer(Tracer::create(&trace_dir).expect("tracer"));
 
 		run.next_step().expect("step");
-		run.note_panel_opinion("plan", "scout", true, 1_200, None).expect("note");
-		run.note_panel_opinion("plan", "reviewer", false, 0, None).expect("note");
-		run.submit_envelope("plan", ok_envelope("fused")).expect("submit");
+		run.note_panel_opinion("plan", "scout", true, 1_200, None)
+			.expect("note");
+		run.note_panel_opinion("plan", "reviewer", false, 0, None)
+			.expect("note");
+		run.submit_envelope("plan", ok_envelope("fused"))
+			.expect("submit");
 
 		let mut reader = TraceReader::open(&trace_dir).expect("open");
 		let events = reader.read_from(0).expect("read");
@@ -2458,11 +2729,15 @@ mod tests {
 
 		// A phase that needed two tries. The first one still cost money.
 		run.next_step().expect("step");
-		run.note_phase_tokens("plan", "task", 900, None).expect("note");
-		run.submit_agent_output("plan", "no envelope here").expect("submit");
+		run.note_phase_tokens("plan", "task", 900, None)
+			.expect("note");
+		run.submit_agent_output("plan", "no envelope here")
+			.expect("submit");
 		run.next_step().expect("retry");
-		run.note_phase_tokens("plan", "task", 1_500, None).expect("note");
-		run.submit_envelope("plan", ok_envelope("done")).expect("submit");
+		run.note_phase_tokens("plan", "task", 1_500, None)
+			.expect("note");
+		run.submit_envelope("plan", ok_envelope("done"))
+			.expect("submit");
 
 		let mut reader = TraceReader::open(&trace_dir).expect("open");
 		let events = reader.read_from(0).expect("read");
@@ -2521,12 +2796,21 @@ mod tests {
 		let claim = || Envelope { artifacts: vec!["missing.md".into()], ..ok_envelope("planned") };
 
 		run.next_step().expect("step");
-		assert!(matches!(run.submit_envelope("plan", claim()).expect("submit"), Outcome::Retry { .. }));
+		assert!(matches!(
+			run.submit_envelope("plan", claim()).expect("submit"),
+			Outcome::Retry { .. }
+		));
 		run.next_step().expect("step");
-		assert!(matches!(run.submit_envelope("plan", claim()).expect("submit"), Outcome::Aborted { .. }));
+		assert!(matches!(
+			run.submit_envelope("plan", claim()).expect("submit"),
+			Outcome::Aborted { .. }
+		));
 
 		assert_eq!(run.next_step().expect("step"), Step::Done { accepted: false });
-		assert!(matches!(run.submit_envelope("plan", ok_envelope("late")), Err(RunError::NoActiveStep)));
+		assert!(matches!(
+			run.submit_envelope("plan", ok_envelope("late")),
+			Err(RunError::NoActiveStep)
+		));
 		assert_eq!(run.records().last().expect("record").status, PhaseStatus::Failed);
 	}
 
@@ -2694,9 +2978,11 @@ mod tests {
 			]),
 		);
 		run.next_step().expect("api");
-		run.submit_envelope("api", ok_envelope("api done")).expect("api");
+		run.submit_envelope("api", ok_envelope("api done"))
+			.expect("api");
 		run.next_step().expect("docs");
-		run.submit_envelope("docs", ok_envelope("docs done")).expect("docs");
+		run.submit_envelope("docs", ok_envelope("docs done"))
+			.expect("docs");
 
 		let Step::Run { phase, inputs, .. } = run.next_step().expect("release") else {
 			panic!("release step")
@@ -2941,7 +3227,8 @@ mod tests {
 			vec![("a", 1, "a done"), ("b", 1, "b done")],
 			"the join dispatches with both named producers' accepted outputs resolved"
 		);
-		run.submit_envelope("join", ok_envelope("joined")).expect("join");
+		run.submit_envelope("join", ok_envelope("joined"))
+			.expect("join");
 		assert_eq!(run.next_step().expect("settled"), Step::Done { accepted: true });
 	}
 
@@ -2987,8 +3274,10 @@ mod tests {
 		);
 		dispatch_serial(&mut run, "build");
 		dispatch_serial(&mut run, "docs");
-		run.submit_envelope("build", ok_envelope("built")).expect("build");
-		run.submit_envelope("docs", ok_envelope("documented")).expect("docs");
+		run.submit_envelope("build", ok_envelope("built"))
+			.expect("build");
+		run.submit_envelope("docs", ok_envelope("documented"))
+			.expect("docs");
 
 		let Outcome::Retry { phase, invalidated, .. } = reject_review(&mut run, "review") else {
 			panic!("expected a revision")
@@ -3000,11 +3289,9 @@ mod tests {
 			"the outcome names the target and its transitive dependents, nothing else"
 		);
 		assert!(
-			run.records()
-				.iter()
-				.any(|record| record.name == "docs"
-					&& record.status == PhaseStatus::Passed
-					&& !record.invalidated),
+			run.records().iter().any(|record| record.name == "docs"
+				&& record.status == PhaseStatus::Passed
+				&& !record.invalidated),
 			"an unrelated passed branch keeps its record"
 		);
 		assert!(
@@ -3049,14 +3336,9 @@ mod tests {
 		assert_eq!(run.next_step().expect("settled"), Step::Done { accepted: false });
 		let summary = run.finish(true, "driver claims success").expect("finish");
 		assert!(!summary.accepted, "a halted run cannot be accepted");
-		assert!(
-			summary
-				.records
-				.iter()
-				.any(|record| record.name == "a"
-					&& record.status == PhaseStatus::Passed
-					&& !record.invalidated)
-		);
+		assert!(summary.records.iter().any(|record| record.name == "a"
+			&& record.status == PhaseStatus::Passed
+			&& !record.invalidated));
 	}
 
 	#[test]
@@ -3068,7 +3350,8 @@ mod tests {
 				.with_tracer(Tracer::create(&trace_dir).expect("tracer"));
 			dispatch_serial(&mut run, "a");
 			assert!(matches!(
-				run.submit_agent_output("a", "not an envelope").expect("reject"),
+				run.submit_agent_output("a", "not an envelope")
+					.expect("reject"),
 				Outcome::Retry { attempt: 2, .. }
 			));
 			dispatch_serial(&mut run, "a");
@@ -3090,7 +3373,9 @@ mod tests {
 			"the interrupted dispatch keeps its spent budget, not a fresh one"
 		);
 		assert!(
-			correction.as_deref().is_some_and(|c| c.contains("no JSON object")),
+			correction
+				.as_deref()
+				.is_some_and(|c| c.contains("no JSON object")),
 			"the pending correction survives the reset: {correction:?}"
 		);
 		let Step::Run { phase, attempt, .. } = resumed.next_step().expect("second") else {
@@ -3132,7 +3417,8 @@ mod tests {
 			let mut run = Run::new("adw", dir.path(), build())
 				.with_tracer(Tracer::create(&trace_dir).expect("tracer"));
 			dispatch_serial(&mut run, "build");
-			run.submit_envelope("build", ok_envelope("built")).expect("build");
+			run.submit_envelope("build", ok_envelope("built"))
+				.expect("build");
 			run.next_step().expect("review dispatched");
 			// Dies mid-review: an owner-empty crash reset, not a supersession.
 		}
@@ -3171,7 +3457,9 @@ mod tests {
 		};
 		assert_eq!((phase.name.as_str(), attempt), ("build", 2));
 		assert!(
-			correction.as_deref().is_some_and(|c| c.contains("missing authorization")),
+			correction
+				.as_deref()
+				.is_some_and(|c| c.contains("missing authorization")),
 			"the revision correction survives the second crash: {correction:?}"
 		);
 		assert!(resumed.records().iter().all(|record| record.invalidated));

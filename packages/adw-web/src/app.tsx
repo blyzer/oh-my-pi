@@ -22,9 +22,9 @@ function groupPhases(timeline: TraceEvent[], workflow: WorkflowPhase[]): PhaseGr
 	const groups: PhaseGroup[] = [];
 	const current = new Map<string, PhaseGroup>();
 	const byName = new Map(workflow.map(phase => [phase.name, phase]));
-	const graph = new Map(workflow.map((phase, index) => [
-		phase.name, phase.dependsOn ?? (index > 0 ? [workflow[index - 1]!.name] : []),
-	]));
+	const graph = new Map(
+		workflow.map((phase, index) => [phase.name, phase.dependsOn ?? (index > 0 ? [workflow[index - 1]!.name] : [])]),
+	);
 	const explicitInvalidation = timeline.some(event => event.kind === "phase_invalidated");
 	const invalidate = (name: string, event: TraceEvent) => {
 		const group = current.get(name);
@@ -151,32 +151,44 @@ function Phase({ group, origin, end }: { group: PhaseGroup; origin: number; end:
 				<strong>{group.name}</strong>
 				{group.invalidated && <span className="warn">invalidated</span>}
 				<span className="owner">{group.owner}</span>
+				<span className="owner">attempt {group.attempt}</span>
 				<span className="owner">
-					attempt {group.attempt}
+					{(ms / 1000).toFixed(1)}s · +{((group.startedAt - origin) / 1000).toFixed(1)}s from start
 				</span>
-				<span className="owner">{(ms / 1000).toFixed(1)}s · +{((group.startedAt - origin) / 1000).toFixed(1)}s from start</span>
 				{group.tokens > 0 && <span className="owner">{group.tokens.toLocaleString()} tok</span>}
 			</div>
 			<div
 				aria-label={`${group.name}: starts ${group.startedAt - origin}ms into run, duration ${ms}ms`}
 				style={{ position: "relative", height: 14, margin: "8px 14px", background: "var(--line)" }}
 			>
-				<div className={`bar ${group.kind === "code" ? "code" : ""}`} style={{
-					position: "absolute", top: 4,
-					left: `${((group.startedAt - origin) / span) * 100}%`,
-					width: `${(ms / span) * 100}%`,
-					opacity: group.invalidated ? 0.35 : 1,
-				}} />
+				<div
+					className={`bar ${group.kind === "code" ? "code" : ""}`}
+					style={{
+						position: "absolute",
+						top: 4,
+						left: `${((group.startedAt - origin) / span) * 100}%`,
+						width: `${(ms / span) * 100}%`,
+						opacity: group.invalidated ? 0.35 : 1,
+					}}
+				/>
 			</div>
-			{group.inputs.length > 0 ? <div className="rows">
-				<span className="owner">Selected inputs: </span>
-				{group.inputs.map(({ event, producerId }, index) => <span key={event.seq}>
-					{index > 0 ? " · " : ""}
-					{producerId === undefined
-						? `${event.owner} v${event.value}`
-						: <a className="owner" href={`#phase-${producerId}`}>{event.owner} v{event.value}</a>}
-				</span>)}
-			</div> : null}
+			{group.inputs.length > 0 ? (
+				<div className="rows">
+					<span className="owner">Selected inputs: </span>
+					{group.inputs.map(({ event, producerId }, index) => (
+						<span key={event.seq}>
+							{index > 0 ? " · " : ""}
+							{producerId === undefined ? (
+								`${event.owner} v${event.value}`
+							) : (
+								<a className="owner" href={`#phase-${producerId}`}>
+									{event.owner} v{event.value}
+								</a>
+							)}
+						</span>
+					))}
+				</div>
+			) : null}
 			<div className="rows">
 				{group.events.map(event => (
 					<div className="row" key={event.seq}>
@@ -205,7 +217,7 @@ export function App() {
 			try {
 				const response = await fetch("/api/runs", { signal: controller.signal });
 				if (!response.ok) throw new Error(`Run listing failed (${response.status})`);
-				const loaded = await response.json() as RunSummary[];
+				const loaded = (await response.json()) as RunSummary[];
 				if (disposed) return;
 				setRuns(loaded);
 				setSelected(current => current ?? loaded[0]?.adwId ?? null);
@@ -216,7 +228,11 @@ export function App() {
 			}
 		};
 		void refresh();
-		return () => { disposed = true; controller.abort(); window.clearTimeout(timer); };
+		return () => {
+			disposed = true;
+			controller.abort();
+			window.clearTimeout(timer);
+		};
 	}, []);
 
 	useEffect(() => {
@@ -229,7 +245,7 @@ export function App() {
 			try {
 				const response = await fetch(`/api/runs/${encodeURIComponent(selected)}`, { signal: controller.signal });
 				if (!response.ok) throw new Error(`Run detail failed (${response.status})`);
-				const loaded = await response.json() as RunDetail;
+				const loaded = (await response.json()) as RunDetail;
 				if (disposed) return;
 				setDetail(loaded);
 				setError(null);
@@ -240,10 +256,14 @@ export function App() {
 			}
 		};
 		void refresh();
-		return () => { disposed = true; controller.abort(); window.clearTimeout(timer); };
+		return () => {
+			disposed = true;
+			controller.abort();
+			window.clearTimeout(timer);
+		};
 	}, [selected]);
 
-	const phases = useMemo(() => detail ? groupPhases(detail.timeline, detail.workflowPhases) : [], [detail]);
+	const phases = useMemo(() => (detail ? groupPhases(detail.timeline, detail.workflowPhases) : []), [detail]);
 	const origin = detail?.startedAt ?? 0;
 	const end = detail ? Math.max(origin, detail.timeline.at(-1)?.ts ?? origin) : origin;
 
@@ -277,7 +297,11 @@ export function App() {
 				) : null}
 			</nav>
 			<main className="detail">
-				{error ? <p className="bad" role="alert">{error}</p> : null}
+				{error ? (
+					<p className="bad" role="alert">
+						{error}
+					</p>
+				) : null}
 				{detail ? (
 					<>
 						<header>

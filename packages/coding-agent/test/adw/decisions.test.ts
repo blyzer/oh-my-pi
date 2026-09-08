@@ -927,7 +927,6 @@ async function repo(cwd: string, files: Record<string, string>): Promise<void> {
 }
 
 describe("write scope decisions", () => {
-
 	it("reverts a same-size out-of-scope rewrite and accepts the corrected attempt", async () => {
 		const cwd = tempDir("scope-revert");
 		await repo(cwd, { "impl.ts": "original\n" });

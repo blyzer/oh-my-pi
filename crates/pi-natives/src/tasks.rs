@@ -339,13 +339,13 @@ pub enum TaskOutcomeKind {
 
 #[napi(object)]
 pub struct TaskOutcome {
-	pub kind:       TaskOutcomeKind,
-	pub phase:      String,
+	pub kind:        TaskOutcomeKind,
+	pub phase:       String,
 	/// The attempt to run next when `kind` is `Retry`.
-	pub attempt:    u32,
-	pub correction: Option<String>,
+	pub attempt:     u32,
+	pub correction:  Option<String>,
 	/// Why the run halted when `kind` is `Aborted`.
-	pub reason:     Option<String>,
+	pub reason:      Option<String>,
 	/// Target and transitive dependents superseded by a rewind or revision.
 	pub invalidated: Vec<String>,
 }
@@ -564,8 +564,12 @@ fn to_napi_step(step: Step) -> TaskStep {
 			accepted: false,
 		},
 		Step::Wait => TaskStep {
-			kind: TaskStepKind::Wait, phase: None, attempt: 0,
-			correction: None, inputs: None, accepted: false,
+			kind:       TaskStepKind::Wait,
+			phase:      None,
+			attempt:    0,
+			correction: None,
+			inputs:     None,
+			accepted:   false,
 		},
 		Step::Done { accepted } => TaskStep {
 			kind: TaskStepKind::Done,
@@ -789,7 +793,10 @@ impl TaskRun {
 	/// correction, not a throw: the same session is asked again.
 	#[napi]
 	pub fn submit_agent_output(&mut self, phase: String, text: String) -> Result<TaskOutcome> {
-		let outcome = self.inner.submit_agent_output(&phase, &text).map_err(fail)?;
+		let outcome = self
+			.inner
+			.submit_agent_output(&phase, &text)
+			.map_err(fail)?;
 		self.commit_accepted_claims(&outcome)?;
 		Ok(to_napi_outcome(outcome))
 	}
@@ -797,7 +804,12 @@ impl TaskRun {
 	/// Report a deterministic `Code` or human `Engineer` phase. A red test
 	/// suite reaches the next agent as an envelope like any other.
 	#[napi]
-	pub fn submit_code_result(&mut self, phase: String, ok: bool, summary: String) -> Result<TaskOutcome> {
+	pub fn submit_code_result(
+		&mut self,
+		phase: String,
+		ok: bool,
+		summary: String,
+	) -> Result<TaskOutcome> {
 		let outcome = self
 			.inner
 			.submit_envelope(&phase, Envelope::code(ok, summary))
@@ -809,7 +821,14 @@ impl TaskRun {
 	/// Records one fusion-panel member's answer against the active phase.
 	/// `tokens` is what makes two models comparable in the trace.
 	#[napi]
-	pub fn note_panel_opinion(&self, phase: String, owner: String, ok: bool, tokens: u32, model: Option<String>) -> Result<()> {
+	pub fn note_panel_opinion(
+		&self,
+		phase: String,
+		owner: String,
+		ok: bool,
+		tokens: u32,
+		model: Option<String>,
+	) -> Result<()> {
 		self
 			.inner
 			.note_panel_opinion(&phase, &owner, ok, tokens, model.as_deref())
@@ -820,8 +839,17 @@ impl TaskRun {
 	/// try spent real tokens, and a phase that needed three of them is the one
 	/// a cost report has to show.
 	#[napi]
-	pub fn note_phase_tokens(&self, phase: String, owner: String, tokens: u32, model: Option<String>) -> Result<()> {
-		self.inner.note_phase_tokens(&phase, &owner, tokens, model.as_deref()).map_err(fail)
+	pub fn note_phase_tokens(
+		&self,
+		phase: String,
+		owner: String,
+		tokens: u32,
+		model: Option<String>,
+	) -> Result<()> {
+		self
+			.inner
+			.note_phase_tokens(&phase, &owner, tokens, model.as_deref())
+			.map_err(fail)
 	}
 
 	/// Record a gate the caller ran itself, judged with the engine's own on the
@@ -832,22 +860,38 @@ impl TaskRun {
 	/// cost that crate its three dependencies. The result is a `gate_check` in
 	/// the trace and blocks acceptance exactly like a native gate.
 	#[napi]
-	pub fn note_gate_report(&mut self, phase: String, gate: String, checks: Vec<TaskGateCheck>) -> Result<()> {
-		self.inner.note_gate_report(
-			&phase,
-			gate,
-			checks
-				.into_iter()
-				.map(|c| Check { item: c.item, ok: c.ok, note: c.note })
-				.collect(),
-		).map_err(fail)
+	pub fn note_gate_report(
+		&mut self,
+		phase: String,
+		gate: String,
+		checks: Vec<TaskGateCheck>,
+	) -> Result<()> {
+		self
+			.inner
+			.note_gate_report(
+				&phase,
+				gate,
+				checks
+					.into_iter()
+					.map(|c| Check { item: c.item, ok: c.ok, note: c.note })
+					.collect(),
+			)
+			.map_err(fail)
 	}
 
 	/// A coherent verdict for the next submission. Gates and envelope status
 	/// still run first; this decision is drained even if the attempt fails.
 	#[napi]
-	pub fn note_review_decision(&mut self, phase: String, approved: bool, reason: String) -> Result<()> {
-		self.inner.note_review_decision(&phase, approved, reason).map_err(fail)
+	pub fn note_review_decision(
+		&mut self,
+		phase: String,
+		approved: bool,
+		reason: String,
+	) -> Result<()> {
+		self
+			.inner
+			.note_review_decision(&phase, approved, reason)
+			.map_err(fail)
 	}
 
 	/// Evaluate an active phase's gates in its ephemeral writer workspace.
@@ -1220,7 +1264,9 @@ mod tests {
 			..Envelope::code(true, "planned")
 		})
 		.expect("serialize");
-		let outcome = run.submit_agent_output("plan".into(), planned).expect("submit plan");
+		let outcome = run
+			.submit_agent_output("plan".into(), planned)
+			.expect("submit plan");
 		assert_eq!(outcome.kind, TaskOutcomeKind::Advanced, "plan accepts: {:?}", outcome.reason);
 
 		// Build changes only its own file; PLAN.md is already on disk from the
@@ -1232,7 +1278,9 @@ mod tests {
 			..Envelope::code(true, "built")
 		})
 		.expect("serialize");
-		let outcome = run.submit_agent_output("build".into(), built).expect("submit build");
+		let outcome = run
+			.submit_agent_output("build".into(), built)
+			.expect("submit build");
 		let _ = std::fs::remove_dir_all(&dir);
 		assert_eq!(
 			outcome.kind,

@@ -173,14 +173,17 @@ describe("concurrency", () => {
 	it.each([
 		["agent", "kind: agent, owner: task"],
 		["fusion", "kind: fusion, panel: [{ owner: scout }, { owner: reviewer }], fuser: { owner: task }"],
-	])("requires a write declaration on a concurrent %s writer, allowing an explicit deny-write scope", (_kind, writer) => {
-		const yaml = `name: w\nconcurrency: 8\nisolation: true\nphases:
+	])(
+		"requires a write declaration on a concurrent %s writer, allowing an explicit deny-write scope",
+		(_kind, writer) => {
+			const yaml = `name: w\nconcurrency: 8\nisolation: true\nphases:
   - { name: build, ${writer}, writes: [] }
   - { name: verify, kind: code, command: "bun check", onFail: correct }
 `;
-		expect(rewindTarget(parseWorkflow("w.yml", yaml), "verify")).toBe("build");
-		expect(() => parseWorkflow("w.yml", yaml.replace(", writes: []", ""))).toThrow(/requires explicit writes/);
-	});
+			expect(rewindTarget(parseWorkflow("w.yml", yaml), "verify")).toBe("build");
+			expect(() => parseWorkflow("w.yml", yaml.replace(", writes: []", ""))).toThrow(/requires explicit writes/);
+		},
+	);
 
 	it("requires concurrent review acceptance to cover every contributing writer, directly or through checks", () => {
 		const yaml = `name: w\nconcurrency: 2\nisolation: true\nacceptance: review\nphases:
@@ -193,9 +196,12 @@ describe("concurrency", () => {
 		expect(() => parseWorkflow("w.yml", yaml.replace("dependsOn: [api, ui]", "dependsOn: [api]"))).toThrow(
 			/must depend on concurrent writer "ui"/,
 		);
-		expect(() => parseWorkflow("w.yml", yaml.replace(", gates: [verdict_consistent], onReject: { to: api, maxRevisions: 1 }", ""))).toThrow(
-			/concurrent review acceptance requires final phase/,
-		);
+		expect(() =>
+			parseWorkflow(
+				"w.yml",
+				yaml.replace(", gates: [verdict_consistent], onReject: { to: api, maxRevisions: 1 }", ""),
+			),
+		).toThrow(/concurrent review acceptance requires final phase/);
 	});
 });
 
@@ -358,10 +364,13 @@ describe("dependsOn", () => {
 	});
 
 	it("walks implicit edges behind an explicit code dependency when finding a correction target", () => {
-		const workflow = parseWorkflow("w.yml", yaml(
-			`${agent("build")}\n  - { name: check, kind: code, command: "bun check" }\n` +
-			`  - { name: verify, kind: code, command: "bun test", dependsOn: [check], onFail: correct }`,
-		));
+		const workflow = parseWorkflow(
+			"w.yml",
+			yaml(
+				`${agent("build")}\n  - { name: check, kind: code, command: "bun check" }\n` +
+					`  - { name: verify, kind: code, command: "bun test", dependsOn: [check], onFail: correct }`,
+			),
+		);
 		expect(rewindTarget(workflow, "verify")).toBe("build");
 	});
 
@@ -438,7 +447,9 @@ describe("inputs", () => {
 		expect(() =>
 			parseWorkflow(
 				"w.yml",
-				yaml(`${agent("plan")}\n${agent("other", ", dependsOn: []")}\n${agent("build", ", dependsOn: [other], inputs: [plan]")}`),
+				yaml(
+					`${agent("plan")}\n${agent("other", ", dependsOn: []")}\n${agent("build", ", dependsOn: [other], inputs: [plan]")}`,
+				),
 			),
 		).toThrow(/phase "build" input "plan" is not a transitive dependency/);
 	});
@@ -453,8 +464,8 @@ describe("inputs", () => {
 	it("resolves later-declared inputs through transitive graph ordering", () => {
 		const workflow = yaml(
 			`  - { name: verify, kind: code, command: "bun test", dependsOn: [mid], inputs: [plan], onFail: correct }\n` +
-			`  - { name: mid, kind: code, command: "bun check", dependsOn: [plan] }\n` +
-			agent("plan", ", dependsOn: []"),
+				`  - { name: mid, kind: code, command: "bun check", dependsOn: [plan] }\n` +
+				agent("plan", ", dependsOn: []"),
 		);
 		expect(rewindTarget(parseWorkflow("w.yml", workflow), "verify")).toBe("plan");
 	});
@@ -592,7 +603,7 @@ describe("onReject", () => {
 	it("does not revise an unrelated builder across an implicit predecessor edge", () => {
 		const workflow = yaml("{ to: build, maxRevisions: 1 }").replace(
 			"  - { name: review",
-			"  - { name: separate, kind: code, command: \"bun check\", dependsOn: [] }\n  - { name: review",
+			'  - { name: separate, kind: code, command: "bun check", dependsOn: [] }\n  - { name: review',
 		);
 		expect(() => parseWorkflow("w.yml", workflow)).toThrow(/not a transitive dependency/);
 	});

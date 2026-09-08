@@ -62,7 +62,13 @@ import { rewindTarget } from "./config";
 import { compilePhaseChecks, type PhaseCheckResult, reviewAcceptance, VERDICT_GATE } from "./schema";
 import { buildFusionPrompt, buildPanelPrompt, buildPhasePrompt, ENVELOPE_CONTRACT, type PanelOpinion } from "./prompt";
 import type { AdwPhaseConfig, AdwPhaseProgress, AdwSeatConfig, AdwWorkflowConfig } from "./types";
-import { integrateAccepted, preserveDelta, recoverIntegration, writeRunState, type IntegrationRecord } from "./integration";
+import {
+	integrateAccepted,
+	preserveDelta,
+	recoverIntegration,
+	writeRunState,
+	type IntegrationRecord,
+} from "./integration";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60_000;
 /** Command output is quoted into the next agent's correction; keep it useful, not unbounded. */
@@ -251,7 +257,7 @@ async function performSettle(
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
-	const delta = pending?.delta ?? await captureDeltaPatch(handle.mergedDir, context.baseline);
+	const delta = pending?.delta ?? (await captureDeltaPatch(handle.mergedDir, context.baseline));
 	const patch = delta.rootPatch.trim() ? delta.rootPatch : "";
 	const base: AdwIsolationOutcome = {
 		// `handle.backend` is a numeric N-API enum; "isolated (0)" tells nobody
@@ -271,10 +277,9 @@ async function performSettle(
 	if (patchPath) await Bun.write(patchPath, text);
 	await preserveDelta(path.join(runDir, "delivery"), delta);
 	if (!accepted) return { ...base, patchPath };
-	const patches = [
-		{ relativePath: ".", patch: delta.rootPatch },
-		...delta.nestedPatches,
-	].filter(entry => entry.patch.trim());
+	const patches = [{ relativePath: ".", patch: delta.rootPatch }, ...delta.nestedPatches].filter(entry =>
+		entry.patch.trim(),
+	);
 	if (!pending) {
 		for (const entry of patches) {
 			const repo = vcs.requireGit(path.join(context.repoRoot, entry.relativePath));
@@ -291,7 +296,11 @@ async function performSettle(
 			const reverse = await repo.canApplyPatch(entry.patch, { reverse: true });
 			if (!forward && reverse) continue;
 			if (!forward || reverse) {
-				return { ...base, patchPath, conflict: `interrupted delivery is ambiguous at ${entry.relativePath}; patch preserved` };
+				return {
+					...base,
+					patchPath,
+					conflict: `interrupted delivery is ambiguous at ${entry.relativePath}; patch preserved`,
+				};
 			}
 		}
 		await writeRunState(pendingPath, { delta, next: index });
@@ -416,7 +425,6 @@ export interface SeatRequest {
 type WriterExecution =
 	| { kind: "seat"; role: "agent" | "fuser"; seatName: string; result: SeatOutcome }
 	| { kind: "panel-failed"; message: string };
-
 
 /** What a seat produced. Narrower than `SingleResult` — only what the driver reads. */
 export interface SeatOutcome {
@@ -656,10 +664,12 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		// The contract is what the trace's decisions were made against; replaying
 		// them under an edited workflow would silently substitute a different
 		// plan. Legacy runs without the record are tolerated as before.
-		const persisted: unknown = await Bun.file(workflowRecordPath).json().catch((error: unknown) => {
-			if (isEnoent(error) && concurrency === 1) return undefined;
-			throw error;
-		});
+		const persisted: unknown = await Bun.file(workflowRecordPath)
+			.json()
+			.catch((error: unknown) => {
+				if (isEnoent(error) && concurrency === 1) return undefined;
+				throw error;
+			});
 		if (persisted && !Bun.deepEquals(JSON.parse(JSON.stringify(workflow)) as unknown, persisted)) {
 			throw new Error(
 				`The workflow definition changed since run "${adwId}" started; resume replays its decisions against the original contract. ` +
@@ -748,8 +758,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 						// corrupt record must never silently rebuild from base.
 						if (isEnoent(error)) return null;
 						throw new Error(`cannot read isolated run state: ${error}`);
-					})) as
-					{ backend: number; mergedDir: string; context: IsolationContext } | null;
+					})) as { backend: number; mergedDir: string; context: IsolationContext } | null;
 				const alive = record
 					? await fs.access(record.mergedDir).then(
 							() => true,
@@ -776,7 +785,9 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				const handle = await ensureIsolation(context.repoRoot, adwId, backend);
 				isolation = { handle, context };
 				await writeRunState(isolationRecordPath, {
-					backend: handle.backend, mergedDir: handle.mergedDir, context,
+					backend: handle.backend,
+					mergedDir: handle.mergedDir,
+					context,
 				});
 			}
 			logger.debug("adw isolated", {
@@ -993,7 +1004,13 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				// A cached opinion was already traced on the attempt that produced it.
 				for (const entry of settled) {
 					if (!("cached" in entry)) {
-						run.notePanelOpinion(phase.name, entry.opinion.owner, entry.opinion.ok, entry.tokens, entry.opinion.model);
+						run.notePanelOpinion(
+							phase.name,
+							entry.opinion.owner,
+							entry.opinion.ok,
+							entry.tokens,
+							entry.opinion.model,
+						);
 					}
 				}
 				const opinions: PanelOpinion[] = settled.map(entry => entry.opinion);
@@ -1006,8 +1023,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					};
 				}
 				const fuserBase = roster.get(fuserSeat.owner);
-				if (!fuserBase)
-					throw new Error(`Fuser "${fuserSeat.owner}" lost its agent between preflight and dispatch`);
+				if (!fuserBase) throw new Error(`Fuser "${fuserSeat.owner}" lost its agent between preflight and dispatch`);
 				const fused = await spawnSeat({
 					seat: fuserSeat.owner,
 					model: fuserSeat.model,
@@ -1144,12 +1160,22 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
 					outcome = run.submitCodeResult(phase.name, ok, summary);
 				} else {
-					if (resuming && stepIndex === 0 && await Bun.file(path.join(runDir, "baseline.json.attempt")).exists()) {
+					if (
+						resuming &&
+						stepIndex === 0 &&
+						(await Bun.file(path.join(runDir, "baseline.json.attempt")).exists())
+					) {
 						requireRecovered(settleGuard(phase));
 					}
 					guard?.begin();
 					guardBoundary = phase;
-					const execution = await executeWriterPhase({ phase, step, root: workRoot, phaseSignal: signal, stepIndex });
+					const execution = await executeWriterPhase({
+						phase,
+						step,
+						root: workRoot,
+						phaseSignal: signal,
+						stepIndex,
+					});
 					const guardReport = guard ? settleGuard(phase) : undefined;
 					requireRecovered(guardReport);
 					outcome = submitWriter(phase.name, execution, guardReport);
@@ -1200,8 +1226,11 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			const ws = workspaces.get(name);
 			if (!ws) return;
 			await writeRunState(path.join(ws.dir, "workspace.json"), {
-				handle: ws.handle, context: ws.context, generation: ws.generation,
-				fromSeq: ws.fromSeq, retired: true,
+				handle: ws.handle,
+				context: ws.context,
+				generation: ws.generation,
+				fromSeq: ws.fromSeq,
+				retired: true,
 			});
 			await cleanupIsolation(ws.handle);
 			workspaces.delete(name);
@@ -1226,8 +1255,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				for (let at = 0; at + layout.recordLen <= raw.length; at += layout.recordLen) {
 					if (strings[raw.readUInt32LE(at + layout.offPhase) - 1] !== phase.name) continue;
 					const kind = layout.kindNames[raw[at + layout.offKind] as number];
-					if ((kind === "phase_invalidated" && raw.readUInt32LE(at + layout.offOwner) !== 0) ||
-						(kind === "phase_finished" && ((raw[at + layout.offFlags] as number) & layout.flagOk) !== 0)) {
+					if (
+						(kind === "phase_invalidated" && raw.readUInt32LE(at + layout.offOwner) !== 0) ||
+						(kind === "phase_finished" && ((raw[at + layout.offFlags] as number) & layout.flagOk) !== 0)
+					) {
 						record.retired = true;
 					}
 				}
@@ -1250,7 +1281,9 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			}
 			const baselineFile = path.join(dir, `${record.generation}.baseline.json`);
 			const ws: Workspace = {
-				...record, dir, baselineFile,
+				...record,
+				dir,
+				baselineFile,
 				guard: TaskWriteGuard.create({ root: record.handle.mergedDir, baselineFile }),
 			};
 			workspaces.set(phase.name, ws);
@@ -1273,8 +1306,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				if (stale) {
 					await stale.promise;
 					settleWorkspace(stale.phase, stale.ws);
-					await preserveDelta(path.join(stale.ws.dir, "invalidated", stale.ws.generation),
-						await captureDeltaPatch(stale.ws.handle.mergedDir, stale.ws.context.baseline));
+					await preserveDelta(
+						path.join(stale.ws.dir, "invalidated", stale.ws.generation),
+						await captureDeltaPatch(stale.ws.handle.mergedDir, stale.ws.context.baseline),
+					);
 					inFlight.delete(name);
 				}
 				await dropWorkspace(name);
@@ -1305,8 +1340,13 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					const controller = new AbortController();
 					const phaseSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
 					const promise = executeWriterPhase({
-						phase, step, root: ws.handle.mergedDir, phaseSignal,
-						stepIndex, handoff, generation: ws.generation,
+						phase,
+						step,
+						root: ws.handle.mergedDir,
+						phaseSignal,
+						stepIndex,
+						handoff,
+						generation: ws.generation,
 					}).catch((error: unknown) => ({ kind: "crashed" as const, error }));
 					inFlight.set(spec.name, { phase, spec, step, ws, controller, promise });
 					onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
@@ -1326,23 +1366,32 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					continue;
 				}
 				if (inFlight.size === 0) throw new Error("DAG scheduler is waiting without an active phase");
-				const flight = await Promise.race([...inFlight.values()].map(async active => {
-					await active.promise;
-					return active;
-				}));
+				const flight = await Promise.race(
+					[...inFlight.values()].map(async active => {
+						await active.promise;
+						return active;
+					}),
+				);
 				const execution = await flight.promise;
 				const report = settleWorkspace(flight.phase, flight.ws);
 				const delta = await captureDeltaPatch(flight.ws.handle.mergedDir, flight.ws.context.baseline);
 				const fromSeq = new TaskTraceReader(traceDir).count();
 				await preserveDelta(path.join(flight.ws.dir, "history", String(fromSeq)), delta);
 				const record: IntegrationRecord = {
-					phase: flight.phase.name, fromSeq, delta, status: "prepared",
+					phase: flight.phase.name,
+					fromSeq,
+					delta,
+					status: "prepared",
 				};
 				await writeRunState(path.join(runDir, "integration.json"), record);
-				const outcome = execution.kind === "crashed"
-					? run.submitCodeResult(flight.phase.name, false,
-						execution.error instanceof Error ? execution.error.message : String(execution.error))
-					: submitWriter(flight.phase.name, execution, report);
+				const outcome =
+					execution.kind === "crashed"
+						? run.submitCodeResult(
+								flight.phase.name,
+								false,
+								execution.error instanceof Error ? execution.error.message : String(execution.error),
+							)
+						: submitWriter(flight.phase.name, execution, report);
 				inFlight.delete(flight.phase.name);
 				if (outcome.kind === TaskOutcomeKind.Advanced && !dispatchHalted) {
 					try {
@@ -1365,8 +1414,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			for (const flight of inFlight.values()) {
 				await flight.promise;
 				settleWorkspace(flight.phase, flight.ws);
-				await preserveDelta(path.join(flight.ws.dir, "interrupted", flight.ws.generation),
-					await captureDeltaPatch(flight.ws.handle.mergedDir, flight.ws.context.baseline));
+				await preserveDelta(
+					path.join(flight.ws.dir, "interrupted", flight.ws.generation),
+					await captureDeltaPatch(flight.ws.handle.mergedDir, flight.ws.context.baseline),
+				);
 			}
 			// A thrown interruption is resumable: keep private trees and manifests.
 			// A decided result has its patches and trace, so release all loaded trees.

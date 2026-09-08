@@ -151,13 +151,20 @@ export function readRun(adwId: string): RunDetail | null {
 		if (workflow && typeof workflow === "object" && "phases" in workflow && Array.isArray(workflow.phases)) {
 			workflowPhases = workflow.phases.flatMap((phase: unknown) => {
 				if (!phase || typeof phase !== "object" || !("name" in phase) || typeof phase.name !== "string") return [];
-				if (!("kind" in phase) || (phase.kind !== "agent" && phase.kind !== "code" && phase.kind !== "fusion")) return [];
-				if ("dependsOn" in phase && (!Array.isArray(phase.dependsOn) || !phase.dependsOn.every(dep => typeof dep === "string"))) return [];
-				return [{
-					name: phase.name,
-					kind: phase.kind,
-					...("dependsOn" in phase ? { dependsOn: phase.dependsOn as string[] } : {}),
-				}];
+				if (!("kind" in phase) || (phase.kind !== "agent" && phase.kind !== "code" && phase.kind !== "fusion"))
+					return [];
+				if (
+					"dependsOn" in phase &&
+					(!Array.isArray(phase.dependsOn) || !phase.dependsOn.every(dep => typeof dep === "string"))
+				)
+					return [];
+				return [
+					{
+						name: phase.name,
+						kind: phase.kind,
+						...("dependsOn" in phase ? { dependsOn: phase.dependsOn as string[] } : {}),
+					},
+				];
 			});
 		}
 	} catch {
