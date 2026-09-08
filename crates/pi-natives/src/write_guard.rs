@@ -336,9 +336,18 @@ fn assert_within_root(root: &Path, rel: &str) -> std::result::Result<(), String>
 		match std::fs::canonicalize(probe) {
 			Ok(canonical) if canonical.starts_with(&root_canonical) => return Ok(()),
 			Ok(_) => return Err(format!("path escapes workspace root: {rel}")),
-			Err(_) => match probe.parent() {
-				Some(parent) if parent != probe => probe = parent,
-				_ => return Ok(()),
+			// `canonicalize` fails both for a path that does not exist and for a
+			// DANGLING symlink. Only the first may walk up: a dangling link is a
+			// real directory entry, and the restore below would follow it and
+			// write the snapshot at its target, outside the root.
+			Err(_) => {
+				if std::fs::symlink_metadata(probe).is_ok() {
+					return Err(format!("path escapes workspace root: {rel}"));
+				}
+				match probe.parent() {
+					Some(parent) if parent != probe => probe = parent,
+					_ => return Ok(()),
+				}
 			},
 		}
 	}
@@ -1006,10 +1015,9 @@ mod tests {
 		tree.write(".git/guard-marker", "metadata");
 		tree.write("nested/.git", "gitdir: elsewhere\n");
 		let report = guard
-			.settle(tree.settle_opts(
-				&["evaluators/**", ".omp/**", "generated/allowed.txt"],
-				&["evaluators/**"],
-			))
+			.settle(tree.settle_opts(&["evaluators/**", ".omp/**", "generated/allowed.txt"], &[
+				"evaluators/**",
+			]))
 			.expect("settle");
 		assert_eq!(kinds(&report), vec![
 			(".omp/adw/state.json".to_owned(), "modified".to_owned()),
@@ -1031,16 +1039,20 @@ mod tests {
 		tree.write(".gitignore", "evaluators/\n");
 		tree.write("evaluators/check.txt", "user evaluator");
 		drop(tree.guard());
-		std::fs::write(
-			tree.base.join("run/baseline.json.attempt"),
-			br#"{"version":1,"entries":{}}"#,
-		)
-		.expect("legacy manifest");
+		std::fs::write(tree.base.join("run/baseline.json.attempt"), br#"{"version":1,"entries":{}}"#)
+			.expect("legacy manifest");
 		let resumed = TaskWriteGuard::create(TaskWriteGuardOptions {
 			root:          tree.root().to_string_lossy().into_owned(),
-			baseline_file: tree.base.join("run/baseline.json").to_string_lossy().into_owned(),
+			baseline_file: tree
+				.base
+				.join("run/baseline.json")
+				.to_string_lossy()
+				.into_owned(),
 		});
-		assert!(resumed.is_err(), "an incomplete legacy snapshot cannot safely restore ignored paths");
+		assert!(
+			resumed.is_err(),
+			"an incomplete legacy snapshot cannot safely restore ignored paths"
+		);
 		assert_eq!(tree.read("evaluators/check.txt"), "user evaluator");
 	}
 
@@ -1176,7 +1188,10 @@ mod tests {
 		// Restore must not follow the link out of the root: the replaced
 		// directory is reported unrecoverable rather than written through.
 		assert!(
-			report.unrecoverable.iter().any(|p| p == "src" || p == "src/a.txt"),
+			report
+				.unrecoverable
+				.iter()
+				.any(|p| p == "src" || p == "src/a.txt"),
 			"restore must refuse the escape, got unrecoverable: {:?}",
 			report.unrecoverable
 		);
@@ -1188,5 +1203,37 @@ mod tests {
 		// The outside file is whatever the attempt left; the worktree must not
 		// be able to exfiltrate the snapshot object.
 		assert_eq!(std::fs::read_to_string(outside.join("a.txt")).expect("outside"), "changed");
+	}
+	#[cfg(unix)]
+	#[test]
+	fn a_dangling_directory_symlink_escape_is_refused_after_begin() {
+		// Same escape, but the planted link points at a target that does NOT
+		// exist. `canonicalize` fails for a dangling link exactly as it does
+		// for an absent path, so a guard that walks up on any error admits it
+		// — and `restore_file` then creates the target while following it.
+		let tree = Tree::new("dangling");
+		tree.write("src/a.txt", "aaa");
+		let ghost = tree.base.join("ghost");
+		let mut guard = tree.guard();
+		guard.begin().expect("begin");
+		std::fs::remove_dir_all(tree.root().join("src")).expect("remove real src");
+		std::os::unix::fs::symlink(&ghost, tree.root().join("src")).expect("alias");
+		let report = guard
+			.settle(tree.settle_opts(&["src/a.txt"], &[]))
+			.expect("settle");
+		assert!(
+			report
+				.unrecoverable
+				.iter()
+				.any(|p| p == "src" || p == "src/a.txt"),
+			"restore must refuse the dangling escape, got unrecoverable: {:?}",
+			report.unrecoverable
+		);
+		assert!(
+			report.rolled_back.is_empty(),
+			"nothing may be restored through the escape: {:?}",
+			report.rolled_back
+		);
+		assert!(!ghost.exists(), "restore materialised the link target outside the root");
 	}
 }

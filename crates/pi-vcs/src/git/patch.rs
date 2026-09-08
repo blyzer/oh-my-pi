@@ -1570,7 +1570,10 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	// the index, or the objects store, giving the patch author arbitrary
 	// code execution on the host. Checked per-component so `sub/.git/…`
 	// (a nested repository) is rejected just like a leading `.git`.
-	if candidate.components().any(|component| component.as_os_str() == ".git") {
+	if candidate
+		.components()
+		.any(|component| component.as_os_str() == ".git")
+	{
 		return Err(ApplyFailure::Invalid(format!(
 			"patch path must not touch the git store: {path}"
 		)));
@@ -1598,9 +1601,21 @@ fn assert_within_root(root: &Path, rel: &str) -> Result<()> {
 					format!("path escapes workspace root: {rel}"),
 				));
 			},
-			Err(_) => match probe.parent() {
-				Some(parent) if parent != probe => probe = parent,
-				_ => return Ok(()),
+			// `canonicalize` fails both for a path that does not exist and for a
+			// DANGLING symlink. Only the first may walk up: a dangling link is a
+			// real directory entry, and the write below would follow it and land
+			// at its target, outside the root.
+			Err(_) => {
+				if std::fs::symlink_metadata(probe).is_ok() {
+					return Err(Error::backend(
+						"apply worktree path",
+						format!("path escapes workspace root: {rel}"),
+					));
+				}
+				match probe.parent() {
+					Some(parent) if parent != probe => probe = parent,
+					_ => return Ok(()),
+				}
 			},
 		}
 	}
@@ -2144,10 +2159,7 @@ mod tests {
 			"/abs/path",
 			"",
 		] {
-			assert!(
-				validate_repo_path(path).is_err(),
-				"expected {path:?} to be rejected"
-			);
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
 		}
 		// Ordinary relative paths still apply.
 		assert!(validate_repo_path("src/main.rs").is_ok());
@@ -2193,6 +2205,47 @@ mod tests {
 		#[cfg(not(unix))]
 		{
 			let _ = result;
+		}
+	}
+
+	#[test]
+	fn apply_patch_refuses_to_write_through_dangling_symlink_outside_root() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		// The link's target does not exist yet. `canonicalize` fails for a
+		// dangling link exactly as it does for an absent path, so a guard that
+		// walks up on any error admits it — and `create_dir_all` then
+		// materialises the target while following the link.
+		let ghost = outside.path().join("ghost");
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::symlink;
+			symlink(&ghost, temp.path().join("link")).expect("create dangling symlink");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = &outside;
+		}
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"index 0000000..3b18e51\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		let result = repository.apply_patch(patch, &ApplyOptions::default());
+		#[cfg(unix)]
+		{
+			assert!(result.is_err(), "patch must refuse dangling symlink traversal");
+			assert!(!ghost.exists(), "patch materialised the link target outside the root");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = result;
+			let _ = &ghost;
 		}
 	}
 }
