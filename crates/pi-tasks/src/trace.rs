@@ -125,7 +125,7 @@ pub enum EventKind {
 	/// One superseded phase. `owner` names the routing source; empty means
 	/// an interrupted dispatch reset during resume, not a dependency rewind.
 	/// `attempt` is the spent budget retained before redispatch.
-	PhaseInvalidated = 16,
+	PhaseInvalidated  = 16,
 }
 
 impl EventKind {
@@ -292,21 +292,32 @@ fn open_appending(path: &Path, magic: u32, record_len: u16) -> std::io::Result<F
 		file.write_all(&header(magic, record_len))?;
 		file.flush()?;
 	} else {
-		verify_header(path, magic)?;
+		verify_header(path, magic, record_len)?;
 	}
 	Ok(file)
 }
 
-fn verify_header(path: &Path, magic: u32) -> std::io::Result<()> {
+/// Refuse a file this build cannot read. `record_len` is checked alongside the
+/// version because the stride is what every seek computes from: a file whose
+/// header advertises a different one would be indexed at the wrong offsets and
+/// decoded as plausible garbage rather than refused.
+fn verify_header(path: &Path, magic: u32, record_len: u16) -> std::io::Result<()> {
 	let mut file = File::open(path)?;
 	let mut buf = [0u8; 16];
 	file.read_exact(&mut buf)?;
 	let found = u32::from_le_bytes(buf[0..4].try_into().expect("4 bytes"));
 	let version = u16::from_le_bytes(buf[4..6].try_into().expect("2 bytes"));
+	let stride = u16::from_le_bytes(buf[6..8].try_into().expect("2 bytes"));
 	if found != magic || version != FORMAT_VERSION {
 		return Err(std::io::Error::new(
 			std::io::ErrorKind::InvalidData,
 			format!("{}: not a v{FORMAT_VERSION} pi-tasks trace file", path.display()),
+		));
+	}
+	if stride != record_len {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidData,
+			format!("{}: record stride is {stride}, this build reads {record_len}", path.display()),
 		));
 	}
 	Ok(())
@@ -439,7 +450,7 @@ impl TraceReader {
 	pub fn open(dir: impl Into<PathBuf>) -> std::io::Result<Self> {
 		let dir = dir.into();
 		let events_path = dir.join("events.bin");
-		verify_header(&events_path, EVENTS_MAGIC)?;
+		verify_header(&events_path, EVENTS_MAGIC, RECORD_LEN as u16)?;
 		let strings = read_strings(&dir.join("strings.bin"))?;
 		Ok(Self { events: File::open(&events_path)?, dir, strings })
 	}
@@ -679,6 +690,28 @@ mod tests {
 			};
 			assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 		}
+	}
+
+	#[test]
+	fn a_foreign_record_stride_is_refused_by_readers_and_writers() {
+		// Same version, different stride: every seek is `HEADER_LEN + n *
+		// RECORD_LEN`, so a 40-byte-per-record file read at 36 decodes field
+		// boundaries that drift one record further out on each step — plausible
+		// garbage rather than an error. Refuse it at open.
+		let dir = TempDir::new("trace-stride");
+		let mut wrong = header(EVENTS_MAGIC, RECORD_LEN as u16);
+		wrong[6..8].copy_from_slice(&(RECORD_LEN as u16 + 4).to_le_bytes());
+		std::fs::write(dir.path().join("events.bin"), wrong).expect("stride trace");
+		assert_eq!(
+			TraceReader::open(dir.path())
+				.expect_err("foreign stride must be refused")
+				.kind(),
+			std::io::ErrorKind::InvalidData
+		);
+		let Err(error) = Tracer::create(dir.path()) else {
+			panic!("must not append to a foreign stride")
+		};
+		assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 	}
 
 	#[test]
