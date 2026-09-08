@@ -1504,6 +1504,7 @@ fn write_worktree_entry(
 	gix_repo: &gix::Repository,
 ) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+	assert_within_root(repo.root(), path)?;
 	let absolute = repo.root().join(path);
 	if let Some(parent) = absolute.parent() {
 		fs::create_dir_all(parent)?;
@@ -1536,6 +1537,7 @@ fn write_worktree_entry(
 
 fn remove_worktree_path(repo: &GitRepo, path: &str) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+	assert_within_root(repo.root(), path)?;
 	let absolute = repo.root().join(path);
 	match fs::remove_file(&absolute) {
 		Ok(()) => {},
@@ -1564,7 +1566,44 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	{
 		return Err(ApplyFailure::Invalid(format!("unsafe patch path: {path}")));
 	}
+	// A patch must never touch `.git/` — doing so could overwrite hooks,
+	// the index, or the objects store, giving the patch author arbitrary
+	// code execution on the host. Checked per-component so `sub/.git/…`
+	// (a nested repository) is rejected just like a leading `.git`.
+	if candidate.components().any(|component| component.as_os_str() == ".git") {
+		return Err(ApplyFailure::Invalid(format!(
+			"patch path must not touch the git store: {path}"
+		)));
+	}
 	Ok(())
+}
+fn assert_within_root(root: &Path, rel: &str) -> Result<()> {
+	let absolute = root.join(rel);
+	// Resolve the deepest existing ancestor against a canonicalized root so a
+	// symlinked directory (macOS /var -> /private/var, or a hostile symlink
+	// planted inside the root) is resolved consistently — a nonexistent leaf
+	// must not be compared unresolved against a resolved root, which would
+	// false-positive on symlinked prefixes.
+	let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+	let mut probe = absolute.as_path();
+	loop {
+		if probe == root {
+			return Ok(());
+		}
+		match std::fs::canonicalize(probe) {
+			Ok(canonical) if canonical.starts_with(&root_canonical) => return Ok(()),
+			Ok(_) => {
+				return Err(Error::backend(
+					"apply worktree path",
+					format!("path escapes workspace root: {rel}"),
+				));
+			},
+			Err(_) => match probe.parent() {
+				Some(parent) if parent != probe => probe = parent,
+				_ => return Ok(()),
+			},
+		}
+	}
 }
 #[cfg(test)]
 mod tests {
@@ -2093,5 +2132,67 @@ mod tests {
 		assert!(repository.stash_try_pop(false).expect("pop second"));
 		assert_eq!(git(temp.path(), &["rev-parse", "refs/stash"]), first);
 		assert_eq!(fs::read(temp.path().join("file.txt")).expect("second restored"), b"second\n");
+	}
+	#[test]
+	fn validate_repo_path_rejects_git_store_and_escapes() {
+		for path in [
+			".git",
+			".git/config",
+			".git/hooks/pre-commit",
+			"sub/.git/objects",
+			"../outside",
+			"/abs/path",
+			"",
+		] {
+			assert!(
+				validate_repo_path(path).is_err(),
+				"expected {path:?} to be rejected"
+			);
+		}
+		// Ordinary relative paths still apply.
+		assert!(validate_repo_path("src/main.rs").is_ok());
+		assert!(validate_repo_path("a/b/c.txt").is_ok());
+	}
+
+	#[test]
+	fn apply_patch_refuses_to_write_through_symlink_outside_root() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		// A symlinked directory inside the worktree aliases an untracked path
+		// that would otherwise be written into the repo root. The patch must
+		// not follow the link out of the worktree.
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::symlink;
+			symlink(outside.path(), temp.path().join("link")).expect("create symlink");
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = &outside;
+		}
+		let repository = repo(temp.path());
+		// Craft a minimal "new file" patch targeting the symlinked prefix.
+		let patch = concat!(
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"index 0000000..3b18e51\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		let result = repository.apply_patch(patch, &ApplyOptions::default());
+		#[cfg(unix)]
+		{
+			assert!(result.is_err(), "patch must refuse symlink traversal");
+			assert!(
+				!outside.path().join("sneaky.txt").exists(),
+				"file written through symlink escape"
+			);
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = result;
+		}
 	}
 }

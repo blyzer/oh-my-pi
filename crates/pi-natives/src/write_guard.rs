@@ -319,6 +319,31 @@ fn clear_occupant(path: &Path) -> std::result::Result<(), String> {
 	}
 }
 
+/// Reject paths that resolve outside `root` (symlink traversal).
+fn assert_within_root(root: &Path, rel: &str) -> std::result::Result<(), String> {
+	let absolute = root.join(rel);
+	// Resolve the deepest existing ancestor against a canonicalized root so a
+	// symlinked directory (macOS /var -> /private/var, or a hostile symlink
+	// planted inside the root) is resolved consistently — a nonexistent leaf
+	// must not be compared unresolved against a resolved root, which would
+	// false-positive on symlinked prefixes.
+	let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+	let mut probe = absolute.as_path();
+	loop {
+		if probe == root {
+			return Ok(());
+		}
+		match std::fs::canonicalize(probe) {
+			Ok(canonical) if canonical.starts_with(&root_canonical) => return Ok(()),
+			Ok(_) => return Err(format!("path escapes workspace root: {rel}")),
+			Err(_) => match probe.parent() {
+				Some(parent) if parent != probe => probe = parent,
+				_ => return Ok(()),
+			},
+		}
+	}
+}
+
 fn restore_file(
 	root: &Path,
 	objects: &Path,
@@ -331,6 +356,7 @@ fn restore_file(
 	if !src.is_file() {
 		return Err("attempt snapshot object is missing".to_owned());
 	}
+	assert_within_root(root, rel)?;
 	let dst = root.join(rel);
 	clear_occupant(&dst)?;
 	if let Some(parent) = dst.parent() {
@@ -349,6 +375,7 @@ fn restore_file(
 }
 
 fn restore_symlink(root: &Path, rel: &str, target: &str) -> std::result::Result<(), String> {
+	assert_within_root(root, rel)?;
 	let dst = root.join(rel);
 	clear_occupant(&dst)?;
 	if let Some(parent) = dst.parent() {
@@ -373,6 +400,7 @@ fn remove_created(
 	rel: &str,
 	begin_dirs: &HashSet<String>,
 ) -> std::result::Result<(), String> {
+	assert_within_root(root, rel)?;
 	clear_occupant(&root.join(rel))?;
 	let mut dir = rel;
 	while let Some(cut) = dir.rfind('/') {
@@ -1125,5 +1153,40 @@ mod tests {
 		assert_eq!(kinds(&report), vec![("link".to_owned(), "retargeted".to_owned())]);
 		let target = std::fs::read_link(tree.root().join("link")).expect("target");
 		assert_eq!(target, Path::new("a.txt"));
+	}
+	#[cfg(unix)]
+	#[test]
+	fn a_replaced_directory_symlink_escape_is_refused_after_begin() {
+		// The agent deletes the real `src` directory and replaces it with a
+		// symlink pointing outside the worktree, then writes an allowed path
+		// through it. Restore must not follow the link out of the root — it
+		// refuses rather than writing the snapshot object outside the repo.
+		let tree = Tree::new("escape");
+		tree.write("src/a.txt", "aaa");
+		let outside = tree.base.join("outside");
+		std::fs::create_dir_all(&outside).expect("outside dir");
+		let mut guard = tree.guard();
+		guard.begin().expect("begin");
+		std::fs::remove_dir_all(tree.root().join("src")).expect("remove real src");
+		std::os::unix::fs::symlink(&outside, tree.root().join("src")).expect("alias");
+		std::fs::write(outside.join("a.txt"), b"changed").expect("write through link");
+		let report = guard
+			.settle(tree.settle_opts(&["src/a.txt"], &[]))
+			.expect("settle");
+		// Restore must not follow the link out of the root: the replaced
+		// directory is reported unrecoverable rather than written through.
+		assert!(
+			report.unrecoverable.iter().any(|p| p == "src" || p == "src/a.txt"),
+			"restore must refuse the escape, got unrecoverable: {:?}",
+			report.unrecoverable
+		);
+		assert!(
+			report.rolled_back.is_empty(),
+			"nothing may be restored through the escape: {:?}",
+			report.rolled_back
+		);
+		// The outside file is whatever the attempt left; the worktree must not
+		// be able to exfiltrate the snapshot object.
+		assert_eq!(std::fs::read_to_string(outside.join("a.txt")).expect("outside"), "changed");
 	}
 }
