@@ -35,6 +35,8 @@ use std::{
 pub const EVENTS_MAGIC: u32 = 0x5049_5452;
 /// `"PIST"`, string table.
 pub const STRINGS_MAGIC: u32 = 0x5049_5354;
+/// Trace ABI version; readers and writers must match it exactly.
+///
 /// Version 6 adds correction-pending records; version 5 added input
 /// selections; version 4 added review transitions and widened attempts to
 /// u32. Exact header matching deliberately refuses older traces: replaying a

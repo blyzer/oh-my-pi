@@ -143,11 +143,13 @@ fn topological_order(phases: &[PhaseParams]) -> Option<Vec<usize>> {
 	Some(order)
 }
 
-/// One resolved input on a dispatch: which producer, which acceptance ordinal,
-/// and the envelope that version holds. The version is what makes the step
-/// auditable — the trace records the same number, so "which evidence did this
-/// attempt see" has exactly one answer.
-#[derive(Debug, Clone, PartialEq)]
+/// One resolved input on a dispatch.
+///
+/// Which producer, which acceptance ordinal, and the envelope that version
+/// holds. The version is what makes the step auditable — the trace records the
+/// same number, so "which evidence did this attempt see" has exactly one
+/// answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedInput {
 	pub phase:    String,
 	/// 1-based acceptance ordinal of the producer's envelope.
@@ -156,7 +158,14 @@ pub struct SelectedInput {
 }
 
 /// What the caller must do next.
-#[derive(Debug, Clone, PartialEq)]
+// `Run` dwarfs `Wait`/`Done`, but it is the variant nearly every `next_step`
+// returns. Boxing it would trade a cheap stack move for a heap allocation on
+// the hot dispatch path, and `Step` is public API the N-API layer destructures.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "Run is the hot variant; boxing it adds an allocation per dispatch"
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
 	Run {
 		phase:      PhaseParams,
@@ -373,12 +382,11 @@ impl Run {
 					let gate = reader.text(event.gate);
 					let reports = &mut run.states[index].reports;
 					let position = reports.iter().position(|report| report.gate == gate);
-					let report = match position {
-						Some(position) => &mut reports[position],
-						None => {
-							reports.push(GateReport::new(gate));
-							reports.last_mut().unwrap()
-						},
+					let report = if let Some(position) = position {
+						&mut reports[position]
+					} else {
+						reports.push(GateReport::new(gate));
+						reports.last_mut().unwrap()
 					};
 					report.checks.push(Check {
 						item: reader.text(event.detail).to_owned(),
@@ -522,7 +530,7 @@ impl Run {
 					run.invalidate_dependents(index, source_index)?;
 					run.states[index].attempts = event.attempt;
 					run.states[index].correction = Some(reader.text(event.detail).to_owned());
-					run.last_envelope = run.handoff_before(index)?;
+					run.last_envelope = run.handoff_before(index);
 				},
 				EventKind::ReviewExhausted => {
 					run.halted = true;
@@ -539,14 +547,14 @@ impl Run {
 		// selected again, so pruning them costs nothing.
 		for consumer in &run.workflow.phases {
 			for producer in &consumer.inputs {
-				if let Some((version, envelope)) = run.current.get(producer) {
-					if envelope.is_none() {
-						return Err(RunError::Mismatch(format!(
-							"phase {:?} consumes {producer:?} version {version}, but its envelope file \
-							 is missing",
-							consumer.name
-						)));
-					}
+				if let Some((version, envelope)) = run.current.get(producer)
+					&& envelope.is_none()
+				{
+					return Err(RunError::Mismatch(format!(
+						"phase {:?} consumes {producer:?} version {version}, but its envelope file is \
+						 missing",
+						consumer.name
+					)));
 				}
 			}
 		}
@@ -606,7 +614,7 @@ impl Run {
 
 	/// The last accepted envelope — the handoff the next phase's prompt is
 	/// built from. Context crosses phases here, in code, not in conversation.
-	pub fn previous_envelope(&self) -> Option<&Envelope<Value>> {
+	pub const fn previous_envelope(&self) -> Option<&Envelope<Value>> {
 		self.last_envelope.as_ref()
 	}
 
@@ -1094,18 +1102,17 @@ impl Run {
 						.iter()
 						.enumerate()
 						.find(|(_, candidate)| candidate.name == name)
+						&& !visited[index]
 					{
-						if !visited[index] {
-							visited[index] = true;
-							pending.extend(
-								dependency
-									.depends_on
-									.as_deref()
-									.unwrap_or_default()
-									.iter()
-									.map(String::as_str),
-							);
-						}
+						visited[index] = true;
+						pending.extend(
+							dependency
+								.depends_on
+								.as_deref()
+								.unwrap_or_default()
+								.iter()
+								.map(String::as_str),
+						);
 					}
 				}
 				for input in &phase.inputs {
@@ -1180,10 +1187,10 @@ impl Run {
 		// Checked before the in-place budget: re-running a deterministic command
 		// cannot change its own verdict, so a phase that names a target must not
 		// spend attempts proving that twice.
-		if phase.on_reject.is_none() {
-			if let Some(target) = phase.rewind_to.clone() {
-				return self.rewind(&phase, &target, violations, reports, summary);
-			}
+		if phase.on_reject.is_none()
+			&& let Some(target) = phase.rewind_to.clone()
+		{
+			return self.rewind(&phase, &target, violations, reports, summary);
 		}
 
 		let attempts = self.next_attempt(index)?;
@@ -1348,7 +1355,7 @@ impl Run {
 
 		// The target is handed the envelope it originally received, not the one
 		// from the phase that just failed downstream of it.
-		self.last_envelope = self.handoff_before(index)?;
+		self.last_envelope = self.handoff_before(index);
 		self.states[index].attempts = spent;
 		// Spent target attempts survive every route; only review grants add budget.
 		self.states[index].correction = Some(correction.clone());
@@ -1557,7 +1564,7 @@ impl Run {
 		)?;
 		let invalidated = self.invalidate_dependents(index, source)?;
 		self.revisions.insert(from.name.clone(), revision);
-		self.last_envelope = self.handoff_before(index)?;
+		self.last_envelope = self.handoff_before(index);
 		self.states[index].attempts = spent;
 		self.states[index].correction = Some(correction.clone());
 		Ok(Outcome::Retry { phase: route.to.clone(), attempt: spent + 1, correction, invalidated })
@@ -1588,17 +1595,14 @@ impl Run {
 	/// predecessor's standing version, straight from the store. Versioned files
 	/// are never overwritten, so this cannot read a later phase's output the
 	/// way rereading a shared file could.
-	fn handoff_before(&self, index: usize) -> Result<Option<Envelope<Value>>, RunError> {
-		let Some(previous) = index
+	fn handoff_before(&self, index: usize) -> Option<Envelope<Value>> {
+		let previous = index
 			.checked_sub(1)
-			.and_then(|i| self.workflow.phases.get(i))
-		else {
-			return Ok(None);
-		};
-		Ok(self
+			.and_then(|i| self.workflow.phases.get(i))?;
+		self
 			.current
 			.get(&previous.name)
-			.and_then(|(_, envelope)| envelope.clone()))
+			.and_then(|(_, envelope)| envelope.clone())
 	}
 
 	fn intern(&self, text: &str) -> Result<u32, RunError> {
@@ -1659,12 +1663,9 @@ fn rewind_text(
 		text.push_str(violation);
 		text.push('\n');
 	}
-	text.push_str(
-		"\nYour earlier work is on disk and intact. Change what made `{from}` fail, then return a \
-		 corrected final JSON envelope."
-			.replace("{from}", from)
-			.as_str(),
-	);
+	text.push_str("\nYour earlier work is on disk and intact. Change what made `");
+	text.push_str(from);
+	text.push_str("` fail, then return a corrected final JSON envelope.");
 	text
 }
 

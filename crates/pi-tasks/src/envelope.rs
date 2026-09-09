@@ -18,7 +18,7 @@ pub enum EnvelopeStatus {
 /// The contract every phase must return. Unknown fields land in `payload`, so
 /// a phase-specific schema (`changed_files`, `commit_message`, …) rides along
 /// without a distinct Rust type per phase.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope<T = Value> {
 	pub status:               EnvelopeStatus,
 	#[serde(default)]
@@ -70,10 +70,12 @@ impl Envelope<Value> {
 	}
 }
 
-/// Last balanced `{…}` span at nesting depth zero, string- and escape-aware so
-/// braces inside JSON strings (or prose quoting them) never split a span.
-/// The envelope text inside an agent's turn: the last complete top-level JSON
-/// object, or `None` when the turn contained none.
+/// The envelope text inside an agent's turn.
+///
+/// The last complete top-level JSON object, or `None` when the turn contained
+/// none. Spans are the last balanced `{…}` at nesting depth zero, string- and
+/// escape-aware so braces inside JSON strings (or prose quoting them) never
+/// split one.
 ///
 /// Public so a caller that must inspect the payload before submitting — schema
 /// validation, which needs a type system this crate does not have — uses this
@@ -108,14 +110,12 @@ fn last_top_level_object(text: &str) -> Option<&str> {
 				}
 				depth += 1;
 			},
-			b'}' => {
-				if depth > 0 {
-					depth -= 1;
-					if depth == 0 {
-						if let Some(s) = start.take() {
-							last = Some(&text[s..=i]);
-						}
-					}
+			b'}' if depth > 0 => {
+				depth -= 1;
+				if depth == 0
+					&& let Some(s) = start.take()
+				{
+					last = Some(&text[s..=i]);
 				}
 			},
 			_ => {},

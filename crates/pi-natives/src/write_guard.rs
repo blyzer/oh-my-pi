@@ -55,6 +55,7 @@
 
 use std::{
 	collections::{BTreeMap, HashSet},
+	fmt::Write as _,
 	io::Read,
 	path::{Path, PathBuf},
 };
@@ -161,7 +162,9 @@ fn guard_fail(err: impl std::fmt::Display) -> napi::Error {
 fn hash_file(path: &Path) -> std::io::Result<(u64, u64)> {
 	let mut file = std::fs::File::open(path)?;
 	let mut hasher = Xxh64::new(0);
-	let mut buf = [0u8; 64 * 1024];
+	// Heap, not stack: 64 KiB keeps large-file throughput without parking a
+	// buffer that size on every frame of a recursive tree walk.
+	let mut buf = vec![0u8; 64 * 1024];
 	let mut len = 0u64;
 	loop {
 		let read = file.read(&mut buf)?;
@@ -299,7 +302,7 @@ fn compile_globs(label: &str, patterns: &[String]) -> Result<GlobSet> {
 	builder.build().map_err(guard_fail)
 }
 
-fn change_kind(begin: Option<&EntryState>, now: Option<&EntryState>) -> &'static str {
+const fn change_kind(begin: Option<&EntryState>, now: Option<&EntryState>) -> &'static str {
 	match (begin, now) {
 		(None, Some(_)) => "created",
 		(Some(_), None) => "deleted",
@@ -437,26 +440,22 @@ fn push_unified(
 	old_exists: bool,
 	new_exists: bool,
 ) {
-	out.push_str(&format!("diff --git a/{path} b/{path}\n"));
-	out.push_str(&if old_exists {
-		format!("--- a/{path}\n")
+	let _ = writeln!(out, "diff --git a/{path} b/{path}");
+	if old_exists {
+		let _ = writeln!(out, "--- a/{path}");
 	} else {
-		"--- /dev/null\n".to_owned()
-	});
-	out.push_str(&if new_exists {
-		format!("+++ b/{path}\n")
+		out.push_str("--- /dev/null\n");
+	}
+	if new_exists {
+		let _ = writeln!(out, "+++ b/{path}");
 	} else {
-		"+++ /dev/null\n".to_owned()
-	});
+		out.push_str("+++ /dev/null\n");
+	}
 	let old_lines: Vec<&str> = old.split_inclusive('\n').collect();
 	let new_lines: Vec<&str> = new.split_inclusive('\n').collect();
-	let old_start = if old_lines.is_empty() { 0 } else { 1 };
-	let new_start = if new_lines.is_empty() { 0 } else { 1 };
-	out.push_str(&format!(
-		"@@ -{old_start},{} +{new_start},{} @@\n",
-		old_lines.len(),
-		new_lines.len()
-	));
+	let old_start = i32::from(!old_lines.is_empty());
+	let new_start = i32::from(!new_lines.is_empty());
+	let _ = writeln!(out, "@@ -{old_start},{} +{new_start},{} @@", old_lines.len(), new_lines.len());
 	for (sign, lines) in [('-', &old_lines), ('+', &new_lines)] {
 		for line in lines {
 			out.push(sign);
@@ -486,7 +485,7 @@ fn render_patch(
 			Some(EntryState::Symlink { target }) => format!("symlink -> {target}\n").into_bytes(),
 			Some(EntryState::File { len, hash, .. }) => {
 				std::fs::read(objects.join(object_name(*len, *hash))).unwrap_or_else(|_| {
-					text.push_str(&format!("# begin snapshot missing for {rel}\n"));
+					let _ = writeln!(text, "# begin snapshot missing for {rel}");
 					Vec::new()
 				})
 			},
@@ -508,19 +507,22 @@ fn render_patch(
 				now.is_some(),
 			);
 		} else {
-			text.push_str(&format!(
+			let _ = writeln!(
+				text,
 				"diff --git a/{rel} b/{rel}\nBinary files a/{rel} and b/{rel} differ (current bytes \
-				 preserved at blobs/{rel})\n"
-			));
+				 preserved at blobs/{rel})"
+			);
 			blobs.push((rel.clone(), new_bytes));
 		}
 	}
 	(text, blobs)
 }
 
-/// Attempt-boundary write guard. `create` establishes (or reloads) the durable
-/// run baseline, `begin` snapshots the tree at an attempt boundary, and
-/// `settle` detects, classifies, and rolls back unauthorized changes.
+/// Attempt-boundary write guard.
+///
+/// `create` establishes (or reloads) the durable run baseline, `begin`
+/// snapshots the tree at an attempt boundary, and `settle` detects,
+/// classifies, and rolls back unauthorized changes.
 #[napi]
 pub struct TaskWriteGuard {
 	root:         PathBuf,
@@ -782,7 +784,7 @@ impl TaskWriteGuard {
 			let patch_path = patch_dir.join(format!("unauthorized-{millis}.patch"));
 			let mut full = String::new();
 			for (rel, reason) in &failures {
-				full.push_str(&format!("# unrecoverable {rel}: {reason}\n"));
+				let _ = writeln!(full, "# unrecoverable {rel}: {reason}");
 			}
 			full.push_str(&patch_text);
 			write_atomic(&patch_path, full.as_bytes()).map_err(|err| {

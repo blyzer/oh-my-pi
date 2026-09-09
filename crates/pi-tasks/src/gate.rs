@@ -115,7 +115,7 @@ impl Gate for FilesNonEmpty {
 			let path = ctx.root.join(artifact);
 			match std::fs::metadata(&path) {
 				Ok(meta) if meta.len() > 0 => {
-					report.push(artifact, true, format!("{} bytes", meta.len()))
+					report.push(artifact, true, format!("{} bytes", meta.len()));
 				},
 				Ok(_) => report.push(artifact, false, "empty file"),
 				Err(err) => report.push(artifact, false, format!("unreadable: {err}")),
