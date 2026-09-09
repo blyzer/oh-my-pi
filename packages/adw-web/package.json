@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/adw-web",
-	"version": "18.1.13",
+	"version": "18.1.15",
 	"private": true,
 	"description": "Trace viewer for omp AI developer workflows: decodes the binary phase log into a waterfall",
 	"homepage": "https://omp.sh",

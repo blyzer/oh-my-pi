@@ -14,6 +14,11 @@
 - Added `dependsOn` on `TaskPhaseSpec`: `Workflow::new` now sorts phases topologically at construction, so the cursor and resume stay ignorant of dependencies while execution follows the graph. Deterministic by construction — ties break on declaration order, never on hash iteration, because an order that shuffled between runs would make every trace unreplayable. An unorderable graph is left in declaration order for the caller to reject with its file name, rather than reordered into something nobody wrote.
 - Added `rewindTo` on `TaskPhaseSpec` and the `phase_rewound` trace record: a rejected phase can send its failure to an earlier phase instead of retrying in place, charged against the target's attempt budget. The caller resolves the target, so the engine holds no phase-selection policy. `TaskRun.resume` now derives position from these records — counting passed phases stops working the moment one of them runs twice.
 - **Breaking:** the binary trace format is now version 3 (2 added `phase_tokens`, 3 added `phase_rewound`). `verify_header` requires an exact match, so an older trace is refused with its path instead of half-decoded — `/adw resume` of a run recorded before this change fails with a clear message. A rewind record in particular cannot be skipped: a reader that ignored it would rebuild the wrong cursor.
+## [18.1.15] - 2026-09-08
+
+### Fixed
+
+- Fixed C++ language inference excluding CUDA header (`.cuh`) files ([#10782](https://github.com/can1357/oh-my-pi/pull/10782) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.1.9] - 2026-09-04
 
