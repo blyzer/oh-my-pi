@@ -2804,6 +2804,15 @@ mod tests {
 		assert_eq!(named_status.expect("named wait").code(), Some(42));
 	}
 
+	/// Deadlock guard for the process-orchestration tests below — not a latency
+	/// budget. A correct pipeline stops in milliseconds; this only bounds a hang
+	/// so the suite reports a failure instead of wedging. Sized for a loaded CI
+	/// runner: under bazel's sandbox, with sixteen test targets sharing four
+	/// vCPUs, spawning two `sh` processes and observing them self-suspend
+	/// intermittently overran the previous five seconds and reported a real
+	/// pipeline as stuck.
+	const PIPELINE_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn kill_builtin_signals_every_process_in_a_jobspec_pipeline() {
@@ -2841,13 +2850,13 @@ mod tests {
 		let source_info = SourceInfo::from("pi-natives:test");
 
 		time::timeout(
-			Duration::from_secs(5),
+			PIPELINE_SETTLE_TIMEOUT,
 			session.shell.run_string(command, &source_info, &params),
 		)
 		.await
 		.expect("pipeline did not stop")
 		.expect("stopped pipeline");
-		time::timeout(Duration::from_secs(5), async {
+		time::timeout(PIPELINE_SETTLE_TIMEOUT, async {
 			while !first_ready.exists() || !second_ready.exists() {
 				time::sleep(Duration::from_millis(10)).await;
 			}
