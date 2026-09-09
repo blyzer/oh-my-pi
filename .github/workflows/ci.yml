@@ -187,12 +187,13 @@ jobs:
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
-         - name: Rust tests
-           # The ulimit guard runs in the step that launches the bazel server
-           # (limits are per-process and the server persists across steps).
-           run: |
-              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test //crates/...
+         # Lints run BEFORE the test sweep. They are independent of it, and a
+         # single wedged test used to skip all four of them: //crates/pi-shell's
+         # kill/jobspec test intermittently never settles under bazel's
+         # linux-sandbox, and every lint gate went with it. That is how a clippy
+         # backlog reached a 39-file PR unnoticed. A red test still fails the
+         # job — it just no longer hides the lints.
+         #
          # Clippy scope mirrors `cargo clippy --workspace` (libraries only, no
          # test targets) plus the strict/default split: crates with
          # `[lints] workspace = true` get the workspace policy, except
@@ -201,7 +202,10 @@ jobs:
          # brush/uutils/jaq code) but is still held to zero rustc warnings;
          # Cargo honors that via `[lints]`, Bazel via the clippy-ported config.
          - name: Clippy (workspace lint policy on opted-in crates)
+           # The ulimit guard runs in the step that launches the bazel server
+           # (limits are per-process and the server persists across steps).
            run: |
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-strict --
          - name: Clippy (default lints elsewhere)
@@ -214,6 +218,8 @@ jobs:
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-ported --
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
+         - name: Rust tests
+           run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test //crates/...
 
    # Provides the native addons every downstream TS job installs. PRs never
    # build: they fetch the latest release's Linux x64 pair from the
