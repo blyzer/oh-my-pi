@@ -5,6 +5,11 @@
 ### Added
 
 - Added `TaskRun`, the phase engine behind AI developer workflows: a driven state machine that owns phase sequencing, per-phase attempt budgets, acceptance gates and resume, while the caller executes each step. Also exports `taskGateNames()` and `taskTraceLayout()`, which publishes the byte offsets of the binary trace record so a reader in another language uses the layout instead of duplicating it.
+## [18.1.15] - 2026-09-08
+
+### Fixed
+
+- Fixed C++ language inference excluding CUDA header (`.cuh`) files ([#10782](https://github.com/can1357/oh-my-pi/pull/10782) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.1.9] - 2026-09-04
 
