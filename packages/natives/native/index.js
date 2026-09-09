@@ -34,6 +34,7 @@ export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
 export const TaskRun = nativeBindings.TaskRun;
 export const TaskTraceReader = nativeBindings.TaskTraceReader;
+export const TaskWriteGuard = nativeBindings.TaskWriteGuard;
 export const TtyWriter = nativeBindings.TtyWriter;
 export const VcsGitRepo = nativeBindings.VcsGitRepo;
 export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace;
@@ -112,6 +113,7 @@ export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChar
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks;
 export const summarizeCode = nativeBindings.summarizeCode;
 export const supportsLanguage = nativeBindings.supportsLanguage;
+export const taskEnvelopeText = nativeBindings.taskEnvelopeText;
 export const taskGateNames = nativeBindings.taskGateNames;
 export const taskTraceLayout = nativeBindings.taskTraceLayout;
 export const truncateToWidth = nativeBindings.truncateToWidth;
@@ -210,5 +212,6 @@ export const TaskPhaseKind = {
 export const TaskStepKind = {
 	Run: 0,
 	Done: 1,
+	Wait: 2,
 };
 // --- end generated native exports ---

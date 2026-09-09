@@ -22,7 +22,7 @@
     },
     "packages/adw-web": {
       "name": "@oh-my-pi/adw-web",
-      "version": "18.1.9",
+      "version": "18.1.15",
       "dependencies": {
         "@oh-my-pi/pi-natives": "catalog:",
         "react": "catalog:",

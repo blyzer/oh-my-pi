@@ -18,17 +18,17 @@ pub enum EnvelopeStatus {
 /// The contract every phase must return. Unknown fields land in `payload`, so
 /// a phase-specific schema (`changed_files`, `commit_message`, …) rides along
 /// without a distinct Rust type per phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope<T = Value> {
-	pub status: EnvelopeStatus,
+	pub status:               EnvelopeStatus,
 	#[serde(default)]
-	pub summary: String,
+	pub summary:              String,
 	#[serde(default)]
-	pub artifacts: Vec<String>,
+	pub artifacts:            Vec<String>,
 	#[serde(default)]
 	pub notes_for_next_agent: String,
 	#[serde(flatten)]
-	pub payload: T,
+	pub payload:              T,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,17 +57,33 @@ impl Envelope<Value> {
 	/// through the same gates as an agent's.
 	pub fn code(ok: bool, summary: impl Into<String>) -> Self {
 		Self {
-			status: if ok { EnvelopeStatus::Success } else { EnvelopeStatus::Fail },
-			summary: summary.into(),
-			artifacts: Vec::new(),
+			status:               if ok {
+				EnvelopeStatus::Success
+			} else {
+				EnvelopeStatus::Fail
+			},
+			summary:              summary.into(),
+			artifacts:            Vec::new(),
 			notes_for_next_agent: String::new(),
-			payload: Value::Object(serde_json::Map::new()),
+			payload:              Value::Object(serde_json::Map::new()),
 		}
 	}
 }
 
-/// Last balanced `{…}` span at nesting depth zero, string- and escape-aware so
-/// braces inside JSON strings (or prose quoting them) never split a span.
+/// The envelope text inside an agent's turn.
+///
+/// The last complete top-level JSON object, or `None` when the turn contained
+/// none. Spans are the last balanced `{…}` at nesting depth zero, string- and
+/// escape-aware so braces inside JSON strings (or prose quoting them) never
+/// split one.
+///
+/// Public so a caller that must inspect the payload before submitting — schema
+/// validation, which needs a type system this crate does not have — uses this
+/// rule rather than reimplementing "the last JSON object" and drifting from it.
+pub fn envelope_text(text: &str) -> Option<&str> {
+	last_top_level_object(text)
+}
+
 fn last_top_level_object(text: &str) -> Option<&str> {
 	let mut depth = 0usize;
 	let mut start = None;
@@ -93,18 +109,16 @@ fn last_top_level_object(text: &str) -> Option<&str> {
 					start = Some(i);
 				}
 				depth += 1;
-			}
-			b'}' => {
-				if depth > 0 {
-					depth -= 1;
-					if depth == 0 {
-						if let Some(s) = start.take() {
-							last = Some(&text[s..=i]);
-						}
-					}
+			},
+			b'}' if depth > 0 => {
+				depth -= 1;
+				if depth == 0
+					&& let Some(s) = start.take()
+				{
+					last = Some(&text[s..=i]);
 				}
-			}
-			_ => {}
+			},
+			_ => {},
 		}
 	}
 	last

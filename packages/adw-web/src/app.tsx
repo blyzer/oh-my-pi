@@ -1,48 +1,102 @@
-import { useEffect, useState } from "react";
-import type { RunDetail, RunSummary, TraceEvent } from "./trace";
+import { useEffect, useMemo, useState } from "react";
+import type { RunDetail, RunSummary, TraceEvent, WorkflowPhase } from "./trace";
 
 /** Events grouped into the phase they belong to, in trace order. */
 interface PhaseGroup {
+	id: number;
 	name: string;
 	owner: string;
-	kind: "agent" | "code";
-	attempts: number;
+	kind: WorkflowPhase["kind"];
+	attempt: number;
+	tokens: number;
 	passed: boolean | null;
+	invalidated: boolean;
 	startedAt: number;
 	endedAt: number;
+	inputs: { event: TraceEvent; producerId?: number }[];
 	events: TraceEvent[];
 }
 
-/**
- * The trace is a flat event stream; a phase is whatever happened between its
- * `phase_started` and its `phase_finished`. Grouping here rather than in the
- * engine keeps the record format numeric and lets a reader decide what a
- * "phase" means for display.
- */
-function groupPhases(timeline: TraceEvent[]): PhaseGroup[] {
+/** Name-addressed instances keep interleaved events and revisions causal. */
+function groupPhases(timeline: TraceEvent[], workflow: WorkflowPhase[]): PhaseGroup[] {
 	const groups: PhaseGroup[] = [];
+	const current = new Map<string, PhaseGroup>();
+	const byName = new Map(workflow.map(phase => [phase.name, phase]));
+	const graph = new Map(
+		workflow.map((phase, index) => [phase.name, phase.dependsOn ?? (index > 0 ? [workflow[index - 1]!.name] : [])]),
+	);
+	const explicitInvalidation = timeline.some(event => event.kind === "phase_invalidated");
+	const invalidate = (name: string, event: TraceEvent) => {
+		const group = current.get(name);
+		if (!group) return;
+		group.invalidated = true;
+		if (group.passed === null) group.endedAt = event.ts;
+	};
 	for (const event of timeline) {
 		if (!event.phase) continue;
-		let group = groups.at(-1);
-		if (!group || group.name !== event.phase || group.passed !== null) {
+		if (event.kind === "phase_invalidated") {
+			invalidate(event.phase, event);
+			current.get(event.phase)?.events.push(event);
+			continue;
+		}
+		if (event.kind === "review_revision" || event.kind === "phase_rewound") {
+			if (!explicitInvalidation) {
+				// Legacy traces lack per-name invalidation. Reconstruct the actual
+				// closure from the saved declaration graph, never a timeline suffix.
+				const invalidated = new Set([event.phase]);
+				let changed = true;
+				while (changed) {
+					changed = false;
+					for (const [name, deps] of graph) {
+						if (!invalidated.has(name) && deps.some(dep => invalidated.has(dep))) {
+							invalidated.add(name);
+							changed = true;
+						}
+					}
+				}
+				for (const name of invalidated) invalidate(name, event);
+			}
+			const source = current.get(event.owner);
+			if (source) {
+				source.events.push(event);
+				source.endedAt = event.ts;
+				if (event.kind === "phase_rewound") source.passed = false;
+			}
+			continue;
+		}
+		let group = current.get(event.phase);
+		const starts = event.kind === "phase_started" || event.kind === "phase_retry";
+		if (starts) {
 			group = {
+				id: event.seq,
 				name: event.phase,
 				owner: event.owner,
-				// Only `code` phases run a command; everything else spends tokens.
-				kind: "agent",
-				attempts: 0,
+				kind: byName.get(event.phase)?.kind ?? "agent",
+				attempt: event.attempt,
+				tokens: 0,
 				passed: null,
+				invalidated: false,
 				startedAt: event.ts,
 				endedAt: event.ts,
+				inputs: [],
 				events: [],
 			};
 			groups.push(group);
+			current.set(event.phase, group);
 		}
-		if (event.owner) group.owner = event.owner;
-		group.attempts = Math.max(group.attempts, event.attempt);
-		group.endedAt = event.ts;
+		if (!group) continue;
+		// Input producers and panel seats are not this phase's writer.
+		if (event.kind === "input_selected") {
+			const producer = current.get(event.owner);
+			group.inputs.push({ event, producerId: producer?.passed && !producer.invalidated ? producer.id : undefined });
+		}
+		if (group.passed === null && !group.invalidated) group.endedAt = event.ts;
+		if (event.kind === "phase_tokens" || event.kind === "panel_opinion") group.tokens += event.value;
 		group.events.push(event);
-		if (event.kind === "phase_finished") group.passed = event.ok;
+		if (event.kind === "phase_finished" || event.kind === "phase_rejected") {
+			group.passed = event.kind === "phase_finished" && event.ok;
+			group.endedAt = event.ts;
+		}
 	}
 	return groups;
 }
@@ -52,9 +106,25 @@ function describe(event: TraceEvent): string {
 		case "gate_check":
 			return `${event.gate}: ${event.detail}`;
 		case "panel_opinion":
-			return `${event.owner} — ${event.value.toLocaleString()} tokens`;
+			return `${event.owner}${event.detail ? ` (${event.detail})` : ""} — ${event.value > 0 ? `${event.value.toLocaleString()} tokens` : "usage unavailable"}`;
+		case "phase_tokens":
+			// A model turn cannot cost nothing; a zero is a provider that
+			// reported no usage, and saying "0 tokens" would read as free.
+			return event.ok
+				? `${event.owner}${event.detail ? ` (${event.detail})` : ""} — ${event.value.toLocaleString()} tokens${event.attempt > 1 ? ` (attempt ${event.attempt})` : ""}`
+				: `${event.owner}${event.detail ? ` (${event.detail})` : ""} — provider reported no usage`;
 		case "phase_rejected":
 			return `${event.value} violation${event.value === 1 ? "" : "s"}${event.detail ? ` · ${event.detail}` : ""}`;
+		case "input_selected":
+			return `consumes ${event.owner} v${event.value}`;
+		case "review_revision":
+			return `Revision ${event.value}: ${event.owner} → ${event.phase}`;
+		case "phase_rewound":
+			return `${event.owner} → ${event.phase}${event.detail ? ` · ${event.detail}` : ""}`;
+		case "phase_invalidated":
+			return event.owner ? `superseded by ${event.owner}` : "interrupted attempt reset on resume";
+		case "review_exhausted":
+			return event.detail;
 		default:
 			return event.detail;
 	}
@@ -63,27 +133,62 @@ function describe(event: TraceEvent): string {
 function toneOf(event: TraceEvent): string {
 	if (event.kind === "gate_check" || event.kind === "phase_finished") return event.ok ? "ok" : "bad";
 	if (event.kind === "phase_rejected" || event.kind === "phase_retry") return "warn";
+	if (event.kind === "review_revision" || event.kind === "phase_rewound") return "warn";
+	if (event.kind === "review_exhausted") return "bad";
 	return "";
 }
 
-function Phase({ group, widest }: { group: PhaseGroup; widest: number }) {
-	const ms = Math.max(group.endedAt - group.startedAt, 0);
-	const mark = group.passed === null ? "◌" : group.passed ? "✓" : "✗";
-	const tone = group.passed === null ? "warn" : group.passed ? "ok" : "bad";
+function Phase({ group, origin, end }: { group: PhaseGroup; origin: number; end: number }) {
+	const endedAt = group.passed === null && !group.invalidated ? end : group.endedAt;
+	const ms = Math.max(endedAt - group.startedAt, 0);
+	const span = Math.max(end - origin, 1);
+	const mark = group.invalidated ? "—" : group.passed === null ? "◌" : group.passed ? "✓" : "✗";
+	const tone = group.invalidated || group.passed === null ? "warn" : group.passed ? "ok" : "bad";
 	return (
-		<section className="phase">
+		<section className="phase" id={`phase-${group.id}`}>
 			<div className="phase-head">
 				<span className={tone}>{mark}</span>
 				<strong>{group.name}</strong>
+				{group.invalidated && <span className="warn">invalidated</span>}
 				<span className="owner">{group.owner}</span>
+				<span className="owner">attempt {group.attempt}</span>
 				<span className="owner">
-					{group.attempts} attempt{group.attempts === 1 ? "" : "s"}
+					{(ms / 1000).toFixed(1)}s · +{((group.startedAt - origin) / 1000).toFixed(1)}s from start
 				</span>
-				{/* Width is relative to the longest phase: which phase ate the run
-				    is the first question a waterfall has to answer. */}
-				<div className="bar" style={{ width: `${widest > 0 ? Math.max((ms / widest) * 240, 3) : 3}px` }} />
-				<span className="owner">{(ms / 1000).toFixed(1)}s</span>
+				{group.tokens > 0 && <span className="owner">{group.tokens.toLocaleString()} tok</span>}
 			</div>
+			<div
+				aria-label={`${group.name}: starts ${group.startedAt - origin}ms into run, duration ${ms}ms`}
+				style={{ position: "relative", height: 14, margin: "8px 14px", background: "var(--line)" }}
+			>
+				<div
+					className={`bar ${group.kind === "code" ? "code" : ""}`}
+					style={{
+						position: "absolute",
+						top: 4,
+						left: `${((group.startedAt - origin) / span) * 100}%`,
+						width: `${(ms / span) * 100}%`,
+						opacity: group.invalidated ? 0.35 : 1,
+					}}
+				/>
+			</div>
+			{group.inputs.length > 0 ? (
+				<div className="rows">
+					<span className="owner">Selected inputs: </span>
+					{group.inputs.map(({ event, producerId }, index) => (
+						<span key={event.seq}>
+							{index > 0 ? " · " : ""}
+							{producerId === undefined ? (
+								`${event.owner} v${event.value}`
+							) : (
+								<a className="owner" href={`#phase-${producerId}`}>
+									{event.owner} v{event.value}
+								</a>
+							)}
+						</span>
+					))}
+				</div>
+			) : null}
 			<div className="rows">
 				{group.events.map(event => (
 					<div className="row" key={event.seq}>
@@ -102,24 +207,65 @@ export function App() {
 	const [selected, setSelected] = useState<string | null>(null);
 	const [detail, setDetail] = useState<RunDetail | null>(null);
 
+	const [error, setError] = useState<string | null>(null);
+
 	useEffect(() => {
-		void fetch("/api/runs")
-			.then(async response => (await response.json()) as RunSummary[])
-			.then(loaded => {
+		let disposed = false;
+		let timer: number | undefined;
+		const controller = new AbortController();
+		const refresh = async () => {
+			try {
+				const response = await fetch("/api/runs", { signal: controller.signal });
+				if (!response.ok) throw new Error(`Run listing failed (${response.status})`);
+				const loaded = (await response.json()) as RunSummary[];
+				if (disposed) return;
 				setRuns(loaded);
 				setSelected(current => current ?? loaded[0]?.adwId ?? null);
-			});
+			} catch (err) {
+				if (!disposed) setError(String(err));
+			} finally {
+				if (!disposed) timer = window.setTimeout(refresh, 2000);
+			}
+		};
+		void refresh();
+		return () => {
+			disposed = true;
+			controller.abort();
+			window.clearTimeout(timer);
+		};
 	}, []);
 
 	useEffect(() => {
+		setDetail(null);
 		if (!selected) return;
-		void fetch(`/api/runs/${selected}`)
-			.then(async response => (await response.json()) as RunDetail)
-			.then(setDetail);
+		let disposed = false;
+		let timer: number | undefined;
+		const controller = new AbortController();
+		const refresh = async () => {
+			try {
+				const response = await fetch(`/api/runs/${encodeURIComponent(selected)}`, { signal: controller.signal });
+				if (!response.ok) throw new Error(`Run detail failed (${response.status})`);
+				const loaded = (await response.json()) as RunDetail;
+				if (disposed) return;
+				setDetail(loaded);
+				setError(null);
+			} catch (err) {
+				if (!disposed) setError(String(err));
+			} finally {
+				if (!disposed) timer = window.setTimeout(refresh, 2000);
+			}
+		};
+		void refresh();
+		return () => {
+			disposed = true;
+			controller.abort();
+			window.clearTimeout(timer);
+		};
 	}, [selected]);
 
-	const phases = detail ? groupPhases(detail.timeline) : [];
-	const widest = Math.max(1, ...phases.map(group => group.endedAt - group.startedAt));
+	const phases = useMemo(() => (detail ? groupPhases(detail.timeline, detail.workflowPhases) : []), [detail]);
+	const origin = detail?.startedAt ?? 0;
+	const end = detail ? Math.max(origin, detail.timeline.at(-1)?.ts ?? origin) : origin;
 
 	return (
 		<div className="shell">
@@ -151,6 +297,11 @@ export function App() {
 				) : null}
 			</nav>
 			<main className="detail">
+				{error ? (
+					<p className="bad" role="alert">
+						{error}
+					</p>
+				) : null}
 				{detail ? (
 					<>
 						<header>
@@ -162,9 +313,14 @@ export function App() {
 						</header>
 						<div className="run-meta">
 							{detail.adwId} · {detail.events} events · {(detail.durationMs / 1000).toFixed(1)}s
+							{detail.tokens > 0 ? ` · ${detail.tokens.toLocaleString()} tok` : null}
+							{/* A floor, not a total: some providers report no usage at all. */}
+							{detail.unaccountedPhases > 0
+								? ` · ${detail.unaccountedPhases} phase${detail.unaccountedPhases === 1 ? "" : "s"} unaccounted`
+								: null}
 						</div>
 						{phases.map(group => (
-							<Phase group={group} widest={widest} key={`${group.name}-${group.startedAt}`} />
+							<Phase group={group} origin={origin} end={end} key={group.id} />
 						))}
 					</>
 				) : (
