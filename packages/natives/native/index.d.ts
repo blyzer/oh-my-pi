@@ -461,9 +461,11 @@ export declare class TaskTraceReader {
 }
 
 /**
- * Attempt-boundary write guard. `create` establishes (or reloads) the durable
- * run baseline, `begin` snapshots the tree at an attempt boundary, and
- * `settle` detects, classifies, and rolls back unauthorized changes.
+ * Attempt-boundary write guard.
+ *
+ * `create` establishes (or reloads) the durable run baseline, `begin`
+ * snapshots the tree at an attempt boundary, and `settle` detects,
+ * classifies, and rolls back unauthorized changes.
  */
 export declare class TaskWriteGuard {
   /**
@@ -2844,10 +2846,9 @@ export interface SummarySegment {
 export declare function supportsLanguage(lang: string): boolean
 
 /**
- * Gate names this engine can build. The single source of truth for a caller
- * that validates a workflow file before starting a run.
- * The envelope text inside an agent turn: the last complete top-level JSON
- * object, or `null` when there is none.
+ * The envelope text inside an agent turn.
+ *
+ * The last complete top-level JSON object, or `null` when there is none.
  *
  * Exposed so a caller validating the payload before submission uses the
  * engine's own extraction rule instead of reimplementing it and drifting.
@@ -2865,6 +2866,12 @@ export interface TaskGateCheck {
   note: string
 }
 
+/**
+ * Gate names this engine can build.
+ *
+ * The single source of truth for a caller that validates a workflow file
+ * before starting a run.
+ */
 export declare function taskGateNames(): Array<string>
 
 export interface TaskGuardChange {
@@ -2949,10 +2956,11 @@ export interface TaskPhaseGates {
 }
 
 /**
- * One resolved input on a dispatched step: which producer phase, which
- * acceptance ordinal (1-based version), and that version's envelope. The
- * trace's `input_selected` records carry the same version, so the evidence an
- * attempt saw is auditable after the fact.
+ * One resolved input on a dispatched step.
+ *
+ * Which producer phase, which acceptance ordinal (1-based version), and that
+ * version's envelope. The trace's `input_selected` records carry the same
+ * version, so the evidence an attempt saw is auditable after the fact.
  */
 export interface TaskPhaseInput {
   phase: string
@@ -3067,11 +3075,13 @@ export interface TaskRunSummary {
 }
 
 /**
- * What the caller must do next. `Run` carries the phase and, from attempt 2
- * on, the correction explaining why the previous attempt was rejected; `Done`
- * carries the verdict. Reusing the agent's session across attempts is a
- * driver's choice, not a requirement — but the correction must reach the
- * retry either way, since it is the only record of what was wrong.
+ * What the caller must do next.
+ *
+ * `Run` carries the phase and, from attempt 2 on, the correction explaining
+ * why the previous attempt was rejected; `Done` carries the verdict. Reusing
+ * the agent's session across attempts is a driver's choice, not a requirement
+ * — but the correction must reach the retry either way, since it is the only
+ * record of what was wrong.
  */
 export interface TaskStep {
   kind: TaskStepKind
