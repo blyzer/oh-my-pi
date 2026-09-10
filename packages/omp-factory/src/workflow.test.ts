@@ -159,4 +159,25 @@ describe("runWorkflow", () => {
 		});
 		expect(result.status).toBe("accepted");
 	});
+
+	it("lands a terminal ledger when the producer throws", async () => {
+		await makeDirs();
+		const result = await runWorkflow({
+			workflowId: "wf-1",
+			phase: "build",
+			runDir,
+			workspace: root,
+			scope: ["**"],
+			assertions: [],
+			maxAttempts: 2,
+			produce: async () => {
+				throw new Error("spawn unavailable");
+			},
+		});
+		expect(result.status).toBe("rejected");
+		expect(result.evidence[0]).toContain("producer threw: spawn unavailable");
+		const { projection } = await replay(runDir);
+		expect(projection.status).toBe("failed");
+		expect(projection.phases.build?.status).toBe("failed");
+	});
 });
