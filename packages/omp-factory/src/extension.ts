@@ -13,6 +13,7 @@ import type { AgentDefinition, AgentSource, ExtensionAPI, ExtensionCommandContex
 import { captureBaselineState, captureTouchedSince } from "./capture";
 import { parseEnvelope } from "./envelope";
 import { runGraph } from "./graph";
+import { nativeWriteGuard } from "./write-guard";
 
 const BUILDER_SYSTEM_PROMPT = [
 	"You are a factory builder.",
@@ -52,6 +53,9 @@ export default function factoryExtension(pi: ExtensionAPI): void {
 			// earlier attempt's writes.
 			const state = await captureBaselineState(ctx.cwd);
 			const result = await runGraph({
+				// `/factory` writes straight into the operator's checkout, so a
+				// rejected attempt must be undone rather than merely refused.
+				writeGuard: nativeWriteGuard(),
 				workflowId,
 				runDir,
 				workspace: ctx.cwd,

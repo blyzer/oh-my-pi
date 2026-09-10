@@ -35,6 +35,7 @@ describe("runGraph", () => {
 	it("runs a diamond in dependency order and accepts every phase", async () => {
 		await makeDirs();
 		const result = await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf",
 			runDir,
 			workspace: root,
@@ -53,6 +54,7 @@ describe("runGraph", () => {
 		await makeDirs();
 		const ran: string[] = [];
 		const result = await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf",
 			runDir,
 			workspace: root,
@@ -95,6 +97,7 @@ describe("runGraph", () => {
 		await makeDirs();
 		const seen: Array<{ phase: string; version: number }> = [];
 		const result = await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf",
 			runDir,
 			workspace: root,
@@ -127,6 +130,7 @@ describe("runGraph", () => {
 	it("records every phase attempt in one shared ledger", async () => {
 		await makeDirs();
 		await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf",
 			runDir,
 			workspace: root,
@@ -201,6 +205,7 @@ describe("runGraph", () => {
 			return { changedFiles: [], label: "writer", exitCode: 0 };
 		};
 		const readers = await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf",
 			runDir,
 			workspace: root,
@@ -211,6 +216,7 @@ describe("runGraph", () => {
 
 		inFlight = 0;
 		const writers = await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf2",
 			runDir,
 			workspace: root,
@@ -230,6 +236,7 @@ describe("runGraph", () => {
 		let planRuns = 0;
 		let reviewRuns = 0;
 		const result = await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf",
 			runDir,
 			workspace: root,
@@ -277,6 +284,7 @@ describe("runGraph", () => {
 		await makeDirs();
 		let planRuns = 0;
 		const result = await runGraph({
+			allowUnguardedWrites: true,
 			workflowId: "wf",
 			runDir,
 			workspace: root,

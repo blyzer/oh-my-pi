@@ -14,6 +14,7 @@ import { captureBaselineState, captureTouchedSince } from "../src/capture";
 import { parseEnvelope } from "../src/envelope";
 import { runGraph } from "../src/graph";
 import { copyIsolation } from "../src/isolation";
+import { nativeWriteGuard } from "../src/write-guard";
 import { replay } from "../src/ledger";
 import { loadWorkflowConfig } from "../src/workflow-config";
 
@@ -123,6 +124,9 @@ try {
 		phases: workflow.phases,
 		protectedGlobs: workflow.protectedGlobs,
 		isolation: workflow.isolation ? copyIsolation() : undefined,
+		// Un-isolated writers write into the real tree: a rejected attempt has
+		// to be rolled back, not just refused.
+		writeGuard: workflow.isolation ? undefined : nativeWriteGuard(),
 		integrate: workflow.isolation ? { journalDir, base: workflowId } : undefined,
 	});
 

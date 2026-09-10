@@ -5,7 +5,7 @@
  * descendants blocked while unrelated branches still finish.
  *
  * Readers in a wave run concurrently. Writers never overlap — this runner
- * shares one workspace, so a single writer token is the only safe contract
+ * takes one token at a time on a shared tree, which is the strongest safety
  * short of one isolated worktree per writer.
  */
 import { buildWaves, type PhaseDeps, VersionStore } from "./dag";
@@ -14,6 +14,7 @@ import type { Candidate } from "./loop";
 import { appendEvent } from "./ledger";
 import type { ReviewVerdict } from "./review";
 import { runWorkflow, type WorkflowRequest } from "./workflow";
+import type { WriteGuardProvider } from "./write-guard";
 
 /** One resolved input handed to a consumer: which producer, which version. */
 export interface SelectedInput {
@@ -91,6 +92,19 @@ export interface GraphRequest {
 	 * serialized on the shared tree — the only other safe option.
 	 */
 	isolation?: IsolationProvider;
+	/**
+	 * Rolls back what a rejected attempt wrote on the shared workspace.
+	 * Costly on a large tree — see `write-guard.ts` — so it is injected, not
+	 * assumed.
+	 */
+	writeGuard?: WriteGuardProvider;
+	/**
+	 * Run un-isolated writers with no guard: a rejected attempt's files stay
+	 * on disk and the next attempt inherits them. Explicit because it is a
+	 * weaker contract than either alternative, and silence is how a safety
+	 * property gets lost.
+	 */
+	allowUnguardedWrites?: boolean;
 }
 
 export interface PhaseOutcome {
@@ -185,6 +199,18 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 	const deps = validate(request.phases);
 	const waves = buildWaves(Object.keys(deps), deps);
 	const byName = new Map(request.phases.map(phase => [phase.name, phase]));
+	// A writer on the shared tree needs something that can undo a rejected
+	// attempt. Isolation keeps the writes off the tree; the guard restores
+	// them. Neither is a real configuration, so it has to be asked for.
+	if (!request.isolation && !request.writeGuard && !request.allowUnguardedWrites) {
+		const writers = request.phases.filter(phase => phase.writes === true).map(phase => phase.name);
+		if (writers.length > 0) {
+			throw new Error(
+				`writer phases on a shared workspace need isolation or a writeGuard: ${writers.join(", ")}. ` +
+					"Pass allowUnguardedWrites to accept that a rejected attempt's files stay on disk.",
+			);
+		}
+	}
 	const store = new VersionStore();
 	await appendEvent(request.runDir, request.workflowId, "WorkflowStarted", {});
 	const accepted = new Set<string>();
@@ -247,6 +273,10 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				sandbox = await request.isolation.start(`${request.workflowId}-${name}`, request.workspace);
 			}
 			const workspace = sandbox?.dir ?? request.workspace;
+			// An isolated writer's sandbox is discarded whole, so nothing it
+			// wrote can outlive a rejection; the guard is for the shared tree.
+			const guard =
+				!isolate && phase.writes === true ? request.writeGuard?.open(name, workspace, request.runDir) : undefined;
 			// The mark is taken with the copy: everything landed after this
 			// point is invisible to what this writer is about to produce.
 			const baseMark = landingSeq;
@@ -273,6 +303,7 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 					}
 				: undefined;
 			const result = await runWorkflow({
+				guard,
 				workflowId: request.workflowId,
 				phase: name,
 				runDir: request.runDir,

@@ -9,6 +9,7 @@ import { appendEvent } from "./ledger";
 import { type Candidate, runAttemptLoop } from "./loop";
 import { combineGateAndReview, type ReviewVerdict } from "./review";
 import { matchesScopeGlob, verifyScope } from "./scope";
+import type { PhaseGuard } from "./write-guard";
 
 export interface WorkflowRequest {
 	workflowId: string;
@@ -69,6 +70,12 @@ export interface WorkflowRequest {
 			record: (files: string[]) => void;
 		};
 	};
+	/**
+	 * Rolls back what an attempt wrote outside its scope. `begin` runs before
+	 * the producer, `settle` once it returns: refusing a candidate leaves the
+	 * bytes on disk, and the next attempt would inherit them.
+	 */
+	guard?: PhaseGuard;
 	produce: (attempt: number, evidence: string | undefined) => Promise<Candidate>;
 	review?: (candidate: Candidate) => Promise<ReviewVerdict>;
 }
@@ -132,9 +139,32 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 			produce: async (attempt, evidence) => {
 				await appendEvent(runDir, workflowId, "AttemptStarted", { phase, attempt });
 				startedAttempts += 1;
+				// The boundary is taken before the producer writes anything, so
+				// a restore returns the tree to what this attempt inherited.
+				request.guard?.begin();
 				return request.produce(attempt, evidence);
 			},
 			verify: async candidate => {
+				// Settle first: the guard is the authority on what changed and
+				// the only thing that can undo it. Every later check reads a
+				// tree it has already restored.
+				if (request.guard) {
+					const report = request.guard.settle(request.scope, request.protectedGlobs ?? []);
+					if (report.unrecoverable.length > 0) {
+						return {
+							accepted: false as const,
+							evidence:
+								`unauthorized changes could not be restored: ${report.unrecoverable.join(", ")}` +
+								(report.patchPath ? ` (diff preserved at ${report.patchPath})` : ""),
+						};
+					}
+					if (report.unauthorized.length > 0) {
+						return {
+							accepted: false as const,
+							evidence: `scope violation: ${report.unauthorized.join(", ")} (rolled back)`,
+						};
+					}
+				}
 				if (candidate.exitCode !== undefined && candidate.exitCode !== 0) {
 					return {
 						accepted: false as const,

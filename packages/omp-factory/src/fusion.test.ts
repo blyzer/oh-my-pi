@@ -56,7 +56,13 @@ describe("fusion phases", () => {
 				} satisfies Candidate;
 			},
 		});
-		const result = await runGraph({ workflowId: "wf", runDir, workspace: root, phases: workflow.phases });
+		const result = await runGraph({
+			allowUnguardedWrites: true,
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			phases: workflow.phases,
+		});
 
 		expect(result.status).toBe("accepted");
 		// Two panel seats plus the fuser.
@@ -95,7 +101,13 @@ describe("fusion phases", () => {
 				return { changedFiles: [], label: context.owner, exitCode: 0, output: "opinion" };
 			},
 		});
-		await runGraph({ workflowId: "wf", runDir, workspace: root, phases: workflow.phases });
+		await runGraph({
+			allowUnguardedWrites: true,
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			phases: workflow.phases,
+		});
 
 		// Distinct seats reach distinct models: a panel resolving to one model
 		// would report two opinions while holding one.
@@ -126,7 +138,13 @@ describe("fusion phases", () => {
 				};
 			},
 		});
-		const result = await runGraph({ workflowId: "wf", runDir, workspace: root, phases: workflow.phases });
+		const result = await runGraph({
+			allowUnguardedWrites: true,
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			phases: workflow.phases,
+		});
 
 		expect(result.status).toBe("accepted");
 		expect(result.phases[0]?.attempts).toBe(2);
@@ -153,7 +171,13 @@ describe("fusion phases", () => {
 				return { changedFiles: [], label: context.owner, exitCode: 0, output: "opinion" };
 			},
 		});
-		await runGraph({ workflowId: "wf", runDir, workspace: root, phases: workflow.phases });
+		await runGraph({
+			allowUnguardedWrites: true,
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			phases: workflow.phases,
+		});
 
 		expect(fuserOpinions).toEqual([
 			{ owner: "reviewer", failed: false },

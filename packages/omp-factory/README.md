@@ -92,14 +92,14 @@ acceptance:
 | Write to `.omp/adw/**` | refused | refused — `scope violation: .omp/adw/fix.yml (protected)` |
 | Second attempt after the protected write | refused | refused — the entry-state baseline still sees it |
 | Terminal state | nothing accepted | nothing accepted, `verify` blocked |
-| Rejected write left in the tree | reverted | **left in place** |
+| Rejected write left in the tree | reverted | reverted — `TaskWriteGuard`, wired since |
 
-The last row is a real divergence, not a rounding error. On a shared
-workspace the frozen engine restores what a rejected attempt wrote; this
-driver rejects the attempt and leaves the bytes. With `isolation: true` the
-writes never reach the tree at all, which is why the shipped examples that
-care set it — but the un-isolated path is weaker here than in the oracle,
-and no test or claim should suggest otherwise.
+That last row was a real divergence when the run was made, and closing it is
+what `src/write-guard.ts` exists for: core's `TaskWriteGuard` snapshots the
+tree at each attempt boundary and restores what the attempt wrote outside
+its scope. `src/rollback.test.ts` pins both halves — guarded, the protected
+write is undone and the clean retry stands; unguarded, the entry-state
+baseline still refuses it and the file stays on disk.
 
 `src/workflow-config.ts` loads the prototype's own `.omp/adw/*.yml` format —
 `dependsOn` (including the implicit declaration edge), `inputs` as transitive
@@ -126,10 +126,13 @@ Open gaps, unproven rather than absent:
   checkout the published `@oh-my-pi/pi-natives` resolves ahead of the built
   workspace addon, so that path is unverified here.
 - No rewind targets beyond the single `onReject` route.
-- A rejected attempt's writes are not rolled back on a shared workspace.
-  The frozen engine restores them; this driver only refuses to accept them.
-  Closing it needs a write guard with per-attempt restore, which OMP core
-  owns in Rust (`TaskWriteGuard`) and this package does not wire up.
+- Rolling back a rejected attempt costs a whole-tree scan, so the guard is
+  injected rather than assumed. The scan deliberately covers ignored files
+  (an ignore rule must not hide a protected path): a clean 7k-file worktree
+  costs ~8s to snapshot and ~1s to settle, the same checkout carrying
+  `target/` and `node_modules` costs ~220s and 32GB of stored objects. A
+  caller that cannot pay that isolates instead; one that does neither must
+  pass `allowUnguardedWrites` and say so.
 - The run-for-run comparison covers `fix.yml` green and red only. The
   fusion, concurrent and resume families are pinned by the oracle suite and
   by live runs here, but not yet by a side-by-side against the old engine.
