@@ -26,7 +26,9 @@ pub mod trace;
 mod test_support;
 
 pub use envelope::{Envelope, EnvelopeError, EnvelopeStatus, envelope_text};
-pub use gate::{ArtifactsExist, Check, FilesNonEmpty, Gate, GateCtx, GateReport, JsonParses};
+pub use gate::{
+	ArtifactsExist, Check, FileContains, FilesNonEmpty, Gate, GateCtx, GateReport, JsonParses,
+};
 pub use orchestrator::{Outcome, Run, RunError, RunSummary, SelectedInput, Step, Workflow};
 pub use phase::{PhaseKind, PhaseParams, PhaseRecord, PhaseStatus, ReviewRoute};
 pub use trace::{Event, EventKind, EventRecord, TraceReader, Tracer};

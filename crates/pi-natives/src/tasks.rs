@@ -28,8 +28,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use napi::{Result, bindgen_prelude::*};
 use napi_derive::napi;
 use pi_tasks::{
-	ArtifactsExist, Check, Envelope, FilesNonEmpty, Gate, GateCtx, GateReport, JsonParses, Outcome,
-	PhaseKind, PhaseParams, PhaseStatus, Run, Step, TraceReader, Tracer, Workflow, trace,
+	ArtifactsExist, Check, Envelope, FileContains, FilesNonEmpty, Gate, GateCtx, GateReport,
+	JsonParses, Outcome, PhaseKind, PhaseParams, PhaseStatus, Run, Step, TraceReader, Tracer,
+	Workflow, trace,
 };
 use pi_vcs::types::{DiffOptions, StatusOptions, UntrackedMode};
 use serde_json::Value;
@@ -421,6 +422,10 @@ pub fn task_gate_names() -> Vec<String> {
 		"files_non_empty".to_owned(),
 		"json_parses".to_owned(),
 		"diff_matches_claims".to_owned(),
+		// Parameterised: the caller appends `:<path>:<marker>`. Listed in the
+		// bare form so a validator can recognise the family without guessing.
+		"file_contains".to_owned(),
+		"file_not_contains".to_owned(),
 	]
 }
 
@@ -433,6 +438,29 @@ fn build_gate(
 	ignore: &GlobSet,
 	base: Option<&str>,
 ) -> Result<Box<dyn Gate>> {
+	// `file_contains:<path>:<marker>` — parameterised, because a content
+	// assertion needs a file and a marker and the workflow schema carries
+	// gates as bare strings. The marker keeps any colons it contains: only
+	// the first two separators are structural.
+	if let Some(rest) = name
+		.strip_prefix("file_contains:")
+		.or_else(|| name.strip_prefix("file_not_contains:"))
+	{
+		let negated = name.starts_with("file_not_contains:");
+		let (file, marker) = rest
+			.split_once(':')
+			.ok_or_else(|| napi::Error::from_reason(format!("gate {name:?} needs <path>:<marker>")))?;
+		if file.is_empty() || marker.is_empty() {
+			return Err(napi::Error::from_reason(format!(
+				"gate {name:?} needs a non-empty path and marker"
+			)));
+		}
+		return Ok(Box::new(FileContains {
+			file: file.to_owned(),
+			marker: marker.to_owned(),
+			negated,
+		}));
+	}
 	match name {
 		"artifacts_exist" => Ok(Box::new(ArtifactsExist)),
 		"files_non_empty" => Ok(Box::new(FilesNonEmpty)),
