@@ -20,8 +20,7 @@ function no(evidence: string): ScenarioOutcome {
 	return { passed: false, evidence };
 }
 
-const SUCCESS = (artifacts: string[]): string =>
-	JSON.stringify({ status: "success", summary: "done", artifacts });
+const SUCCESS = (artifacts: string[]): string => JSON.stringify({ status: "success", summary: "done", artifacts });
 
 export const FAIL_CLOSED_001 = defineScenario({
 	id: "FB-FAILCLOSED-001",
