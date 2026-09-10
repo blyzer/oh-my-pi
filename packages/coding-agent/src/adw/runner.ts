@@ -822,6 +822,44 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		}
 
 		const phasesByName = new Map(workflow.phases.map(phase => [phase.name, phase]));
+		/**
+		 * The code phase that judges a writer's delivery: a `code` phase
+		 * depending on it whose OTHER dependencies have already landed.
+		 *
+		 * The qualifier is the whole difficulty. A join gate like
+		 * `left && right` is not a verdict on `left` alone — running it when
+		 * only `left` has landed fails for a reason that is not a fault, and
+		 * rejects work that was correct. Only the landing that completes the
+		 * gate's inputs can be judged by it.
+		 *
+		 * No such phase means the workflow declared no deterministic check
+		 * this landing completes, and there is nothing to re-run.
+		 */
+		const deliveredCheckFor = (
+			writer: AdwPhaseConfig,
+			landed: ReadonlySet<string>,
+		): ((deliveredRoot: string) => Promise<{ ok: true } | { ok: false; evidence: string }>) | undefined => {
+			const judge = workflow.phases.find(candidate => {
+				if (candidate.kind !== "code") return false;
+				// A gate reading `ADW_INPUTS` is judging the envelopes its
+				// dispatch selected, not the tree. Those versions do not exist
+				// at landing time, so re-running it here would fail for want
+				// of context rather than for a fault in the delivery.
+				if (candidate.inputs?.length) return false;
+				const deps = candidate.dependsOn ?? [];
+				if (!deps.includes(writer.name)) return false;
+				return deps.every(dep => dep === writer.name || landed.has(dep));
+			});
+			if (!judge) return undefined;
+			return async deliveredRoot => {
+				const verdict = await runCodePhase(judge, deliveredRoot, signal);
+				return verdict.ok
+					? { ok: true as const }
+					: { ok: false as const, evidence: `delivered tree failed ${judge.name}: ${verdict.summary}` };
+			};
+		};
+		/** Writers whose change-sets are already on the shared root. */
+		const landedPhases = new Set<string>();
 		const engineOptions = {
 			adwId,
 			root: workRoot,
@@ -1395,7 +1433,13 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				inFlight.delete(flight.phase.name);
 				if (outcome.kind === TaskOutcomeKind.Advanced && !dispatchHalted) {
 					try {
-						await integrateAccepted(workRoot, runDir, record);
+						// The candidate was verified inside the writer's own
+						// workspace; this landing goes to the shared root.
+						// Re-run the guard phase there, so a change-set that is
+						// valid alone and broken in company is caught before it
+						// is called delivered.
+						await integrateAccepted(workRoot, runDir, record, deliveredCheckFor(flight.phase, landedPhases));
+						landedPhases.add(flight.phase.name);
 					} catch (error) {
 						dispatchHalted = true;
 						haltReason = error instanceof Error ? error.message : String(error);

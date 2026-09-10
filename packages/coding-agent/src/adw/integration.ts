@@ -45,8 +45,20 @@ function acceptedSubmission(traceDir: string, record: IntegrationRecord): boolea
  * Only the driver mutates the private integration root. A persisted guard
  * boundary lets recovery undo an interrupted multi-repository apply before
  * replaying the accepted patch. No staging, commits, or nested-repo stashes.
+ *
+ * `verifyDelivered` closes the gap between a verified CANDIDATE and a
+ * verified DELIVERY. The patch was checked in the workspace it was produced
+ * in; it lands somewhere else, and two change-sets can each be valid alone
+ * and broken together. When the delivered tree fails, the same guard
+ * boundary that would undo an interrupted apply undoes this one — so an
+ * unverifiable delivery is never left behind.
  */
-export async function integrateAccepted(root: string, runDir: string, record: IntegrationRecord): Promise<void> {
+export async function integrateAccepted(
+	root: string,
+	runDir: string,
+	record: IntegrationRecord,
+	verifyDelivered?: (root: string) => Promise<{ ok: true } | { ok: false; evidence: string }>,
+): Promise<void> {
 	const journal = path.join(runDir, "integration.json");
 	const guard = TaskWriteGuard.create({
 		root,
@@ -79,6 +91,22 @@ export async function integrateAccepted(root: string, runDir: string, record: In
 	const settled = guard.settle({ protectedGlobs: [], patchDir: runDir });
 	if (settled.unauthorized.length || settled.unrecoverable.length) {
 		throw new Error("integration attempted to change protected workflow state; delivery refused");
+	}
+	if (verifyDelivered) {
+		const delivered = await verifyDelivered(root);
+		if (!delivered.ok) {
+			// Denying every path reverts the whole apply: the boundary taken
+			// above is still live, and the driver is the only writer here, so
+			// nothing else can be caught in the rollback.
+			const undo = guard.settle({ allowed: [], protectedGlobs: [], patchDir: runDir });
+			record.status = "rejected";
+			await writeRunState(journal, record);
+			throw new Error(
+				undo.unrecoverable.length
+					? `${delivered.evidence}; revert incomplete, still applied: ${undo.unrecoverable.join(", ")}`
+					: `${delivered.evidence}; landing reverted`,
+			);
+		}
 	}
 	record.status = "integrated";
 	await writeRunState(journal, record);
