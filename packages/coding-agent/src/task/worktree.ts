@@ -297,7 +297,7 @@ function parseDiffGitLinePaths(line: string): string[] {
 	return [...new Set(paths)];
 }
 
-function patchTouchedFiles(patch: string): string[] {
+export function patchTouchedFiles(patch: string): string[] {
 	const files = new Set<string>();
 	for (const line of patch.split("\n")) {
 		for (const file of parseDiffGitLinePaths(line)) files.add(file);

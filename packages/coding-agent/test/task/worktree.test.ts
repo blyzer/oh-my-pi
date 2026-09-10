@@ -15,6 +15,7 @@ import {
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
 	parseIsolationBackend,
+	patchTouchedFiles,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -1362,5 +1363,45 @@ describe("commitToBranch preserves agent commits", () => {
 			expect(branchDiff).toContain("+WIP header");
 			expect(branchDiff).toContain("+agent-edit");
 		});
+	});
+});
+
+describe("patchTouchedFiles", () => {
+	// Consumer contract for workflow scope verification: the file set derived
+	// from a captured delta must name every staged, unstaged, and untracked
+	// change relative to the baseline — and nothing untouched.
+	it("lists staged, unstaged, and untracked changes from a baseline delta", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await fs.writeFile(path.join(repo, "staged-base.txt"), "base\n");
+		await runGit(repo, ["add", "."]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+
+		const baseline = await captureBaseline(repo);
+
+		await fs.writeFile(path.join(repo, "tracked.txt"), "unstaged edit\n");
+		await fs.writeFile(path.join(repo, "staged.txt"), "staged edit\n");
+		await runGit(repo, ["add", "staged.txt"]);
+		await fs.writeFile(path.join(repo, "untracked.txt"), "new file\n");
+
+		const delta = await captureDeltaPatch(repo, baseline);
+		expect(patchTouchedFiles(delta.rootPatch).sort()).toEqual(
+			["staged.txt", "tracked.txt", "untracked.txt"].sort(),
+		);
+	});
+
+	it("returns an empty set for a clean tree", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "."]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+
+		const baseline = await captureBaseline(repo);
+		const delta = await captureDeltaPatch(repo, baseline);
+		expect(patchTouchedFiles(delta.rootPatch)).toEqual([]);
 	});
 });
