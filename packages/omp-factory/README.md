@@ -137,6 +137,18 @@ an exclusive claim, so a stale approval cannot authorize a later attempt and
 two racing resolvers cannot both spend one. `src/human.test.ts` pins it;
 neutralising the gate accepts a run nobody authorized.
 
+FactoryBench (`src/bench.ts`) is a named scenario registry, not a second
+runner: `bench.test.ts` drives it through Bun like everything else. Five
+scenarios are registered today -- FB-FAILCLOSED-001 (canonical, held out of
+any tuning loop), FB-SCOPE-001, FB-DAG-001, FB-ISOLATION-001,
+FB-PROVENANCE-001 -- and each drives the real engine rather than a mock.
+The registry's point is `uncoveredFamilies()`: it names what is NOT proven.
+Today that is FB-GATE, FB-CORRECTION, FB-RECOVERY, FB-INTEGRATION,
+FB-HANDOFF, FB-HUMAN and FB-RESOURCE. Those behaviours are covered by
+ordinary tests elsewhere in the suite; what they lack is a named, auditable
+scenario, and a benchmark that reported only its passes would describe its
+author's attention rather than the system's safety.
+
 Open gaps, unproven rather than absent:
 
 - `copyIsolation` copies the tree. OMP core owns copy-on-write backends

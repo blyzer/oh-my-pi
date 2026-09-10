@@ -10,7 +10,7 @@ import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type ExecutorOptions, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import { captureBaselineState, captureTouchedSince } from "../src/capture";
+import { captureTouchedSince } from "../src/capture";
 import { parseEnvelope } from "../src/envelope";
 import { runGraph } from "../src/graph";
 import { copyIsolation } from "../src/isolation";
