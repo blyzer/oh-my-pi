@@ -57,6 +57,16 @@ export function reduceEvents(workflowId: string, events: WorkflowEvent[]): Workf
 				projection.phases[phase] = current;
 				break;
 			}
+			// A phase records that it was accepted; the graph records which
+			// version that acceptance produced. Splitting them keeps the
+			// ordinal out of the hands of the only caller that cannot know it.
+			case "PhaseAccepted": {
+				if (!phase) throw new Error("PhaseAccepted without phase");
+				const current = projection.phases[phase] ?? freshPhase();
+				current.status = "accepted";
+				projection.phases[phase] = current;
+				break;
+			}
 			case "VersionAccepted": {
 				if (!phase) throw new Error("VersionAccepted without phase");
 				const version = event.payload.version;

@@ -8,7 +8,7 @@ import { applyIntegration, commitIntegration, prepareIntegration } from "./integ
 import { appendEvent } from "./ledger";
 import { type Candidate, runAttemptLoop } from "./loop";
 import { combineGateAndReview, type ReviewVerdict } from "./review";
-import { verifyScope } from "./scope";
+import { matchesScopeGlob, verifyScope } from "./scope";
 
 export interface WorkflowRequest {
 	workflowId: string;
@@ -20,6 +20,16 @@ export interface WorkflowRequest {
 	scope: string[];
 	assertions: FileAssertion[];
 	gateCommand?: string[];
+	/** Bounds the gate command. Absent falls back to the gate runner's default. */
+	gateTimeoutMs?: number;
+	/**
+	 * Compare declared artifacts against the captured change-set. Off unless
+	 * the phase declared `diff_matches_claims`: holding a phase to a gate it
+	 * never asked for rejects honest builders.
+	 */
+	matchClaims?: boolean;
+	/** Paths exempt from that comparison — lockfiles a build rewrites unbidden. */
+	undeclaredIgnore?: string[];
 	/**
 	 * This phase asserts it produces files. An envelope declaring none clears
 	 * no gate vacuously — claiming nothing is a rejection, not a pass.
@@ -47,6 +57,17 @@ export interface WorkflowRequest {
 		base: string;
 		root?: string;
 		serialize?: <T>(landing: () => Promise<T>) => Promise<T>;
+		/**
+		 * Refuses a landing whose base moved. An isolated writer's copy is
+		 * taken before it produces; if a sibling lands one of the same files
+		 * in the meantime, this writer's content derives from a tree that no
+		 * longer exists and applying it would erase an accepted change.
+		 * Checked and recorded inside `serialize`, so the pair is atomic.
+		 */
+		guard?: {
+			assert: (files: string[]) => string | null;
+			record: (files: string[]) => void;
+		};
 	};
 	produce: (attempt: number, evidence: string | undefined) => Promise<Candidate>;
 	review?: (candidate: Candidate) => Promise<ReviewVerdict>;
@@ -79,12 +100,15 @@ async function integrateCandidate(
 		}
 	}
 	const land = async (): Promise<void> => {
+		const moved = spec.guard?.assert(candidate.changedFiles);
+		if (moved) throw new Error(moved);
 		const journal = await prepareIntegration(root, spec.base, content);
 		await appendEvent(runDir, workflowId, "IntegrationPrepared", { phase, digest: journal.patchDigest });
 		await appendEvent(runDir, workflowId, "IntegrationApplying", { phase, digest: journal.patchDigest });
 		const applied = await applyIntegration(root, spec.journalDir, journal);
 		await appendEvent(runDir, workflowId, "IntegrationApplied", { phase, digest: journal.patchDigest });
 		await commitIntegration(spec.journalDir, applied);
+		spec.guard?.record(candidate.changedFiles);
 		await appendEvent(runDir, workflowId, "IntegrationCommitted", { phase, digest: journal.patchDigest });
 	};
 	try {
@@ -100,7 +124,6 @@ async function integrateCandidate(
 export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowResult> {
 	const { workflowId, phase, runDir } = request;
 	await appendEvent(runDir, workflowId, "PhaseStarted", { phase });
-	let version = 0;
 	let startedAttempts = 0;
 	let result: WorkflowResult;
 	try {
@@ -151,9 +174,13 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 						return { accepted: false as const, evidence: report.failures.join("; ") };
 					}
 				}
-				if (candidate.declaredArtifacts !== undefined) {
+				if (request.matchClaims && candidate.declaredArtifacts !== undefined) {
+					const ignore = request.undeclaredIgnore ?? [];
+					const exempt = (file: string): boolean => ignore.some(glob => matchesScopeGlob(glob, file));
 					const actual = new Set(candidate.changedFiles);
-					const undeclared = candidate.changedFiles.filter(file => !candidate.declaredArtifacts?.includes(file));
+					const undeclared = candidate.changedFiles.filter(
+						file => !candidate.declaredArtifacts?.includes(file) && !exempt(file),
+					);
 					const missing = candidate.declaredArtifacts.filter(file => !actual.has(file));
 					if (undeclared.length > 0 || missing.length > 0) {
 						const parts: string[] = [];
@@ -167,7 +194,7 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 					return { accepted: false as const, evidence: assertions.failures.join("; ") };
 				}
 				if (request.gateCommand) {
-					const gate = await runGateCommand(request.gateCommand, request.workspace);
+					const gate = await runGateCommand(request.gateCommand, request.workspace, request.gateTimeoutMs);
 					if (gate.exitCode !== 0) {
 						return {
 							accepted: false as const,
@@ -183,8 +210,10 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 					const landed = await integrateCandidate(request, candidate);
 					if (!landed.ok) return { accepted: false as const, evidence: landed.evidence };
 				}
-				version += 1;
-				await appendEvent(runDir, workflowId, "VersionAccepted", { phase, version });
+				// The version ordinal is the graph's: it owns the store that
+				// knows what this phase produced before. A per-call counter
+				// here reported 1 for every acceptance, including revisions.
+				await appendEvent(runDir, workflowId, "PhaseAccepted", { phase });
 				return { accepted: true as const };
 			},
 		});

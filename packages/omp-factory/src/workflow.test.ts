@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 describe("runWorkflow", () => {
-	it("accepts a clean candidate and records version 1 in the ledger", async () => {
+	it("accepts a clean candidate without claiming a version ordinal", async () => {
 		await makeDirs();
 		await Bun.write(path.join(root, "out.txt"), "DONE");
 		const result = await runWorkflow({
@@ -38,7 +38,11 @@ describe("runWorkflow", () => {
 		const { projection } = await replay(runDir);
 		// A bare phase run does not decide the workflow; the graph does.
 		expect(projection.status).toBe("running");
-		expect(projection.phases.build).toMatchObject({ status: "accepted", attempts: 1, acceptedVersion: 1 });
+		// The version belongs to the graph: only it knows what this phase
+		// produced before, so a bare phase run records acceptance, not an
+		// ordinal it would have to invent.
+		expect(projection.phases.build).toMatchObject({ status: "accepted", attempts: 1 });
+		expect(projection.phases.build?.acceptedVersion).toBeNull();
 	});
 
 	it("corrects a scope violation with the next attempt", async () => {
@@ -109,6 +113,7 @@ describe("runWorkflow", () => {
 			scope: ["**"],
 			assertions: [],
 			maxAttempts: 1,
+			matchClaims: true,
 			produce: async () => ({
 				changedFiles: ["src/a.ts", "src/sneaky.ts"],
 				declaredArtifacts: ["src/a.ts"],
@@ -130,6 +135,7 @@ describe("runWorkflow", () => {
 			scope: ["**"],
 			assertions: [],
 			maxAttempts: 1,
+			matchClaims: true,
 			produce: async () => ({
 				changedFiles: ["src/a.ts"],
 				declaredArtifacts: ["src/a.ts", "src/phantom.ts"],

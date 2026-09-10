@@ -1,16 +1,27 @@
 /**
- * Serialized exactly-once-ish integration (WP-07): content-addressed journal.
- * A crash in APPLYING reconciles forward when the intended content is already
- * present exactly, and refuses otherwise — never blind re-apply.
+ * Serialized exactly-once integration (WP-07): a content-addressed journal.
+ *
+ * Reconciliation compares CONTENT, not a digest. A 64-bit non-cryptographic
+ * hash decided "already applied" here before; the content it hashes is
+ * written by an agent, so a collision was reachable by something with an
+ * interest in reaching it, and the cost of a collision was a divergent file
+ * silently skipped. The bytes are already in memory to hash them, so the
+ * comparison that cannot be fooled is also the cheaper one.
+ *
+ * A crash in APPLYING reconciles forward when the intended content is
+ * already present exactly, and refuses otherwise — never a blind re-apply.
  */
+import { mkdir, rename } from "node:fs/promises";
+import path from "node:path";
 
 export type IntegrationStatus = "prepared" | "applying" | "applied" | "committed";
 
 export interface FileChange {
 	path: string;
-	beforeHash: string | null;
-	afterContent: string;
-	afterHash: string;
+	/** Content at prepare time; `null` when the file did not exist. */
+	before: string | null;
+	/** Content this landing intends to leave behind. */
+	after: string;
 }
 
 export interface IntegrationJournal {
@@ -20,13 +31,14 @@ export interface IntegrationJournal {
 	changes: FileChange[];
 }
 
-function hash(content: string): string {
-	return Bun.hash(content).toString(16);
+/** Provenance, not an equality test — equality is decided on content. */
+function digest(value: string): string {
+	return new Bun.CryptoHasher("sha256").update(value).digest("hex").slice(0, 32);
 }
 
-async function fileHash(root: string, rel: string): Promise<string | null> {
+async function readFile(root: string, rel: string): Promise<string | null> {
 	try {
-		return hash(await Bun.file(`${root}/${rel}`).text());
+		return await Bun.file(path.join(root, rel)).text();
 	} catch {
 		return null;
 	}
@@ -39,17 +51,15 @@ export async function prepareIntegration(
 	candidate: Record<string, string>,
 ): Promise<IntegrationJournal> {
 	const changes: FileChange[] = [];
-	for (const [rel, afterContent] of Object.entries(candidate)) {
-		const beforeHash = await fileHash(root, rel);
-		changes.push({ path: rel, beforeHash, afterContent, afterHash: hash(afterContent) });
+	for (const [rel, after] of Object.entries(candidate)) {
+		changes.push({ path: rel, before: await readFile(root, rel), after });
 	}
-	const patchDigest = hash(JSON.stringify(changes.map(c => [c.path, c.beforeHash, c.afterHash])));
+	const patchDigest = digest(JSON.stringify(changes.map(change => [change.path, change.after])));
 	return { base, patchDigest, status: "prepared", changes };
 }
 
 async function persistJournal(dir: string, journal: IntegrationJournal): Promise<void> {
 	await Bun.write(`${dir}/integration.json.tmp`, JSON.stringify(journal));
-	const { rename } = await import("node:fs/promises");
 	await rename(`${dir}/integration.json.tmp`, `${dir}/integration.json`);
 }
 
@@ -59,6 +69,20 @@ export async function loadJournal(dir: string): Promise<IntegrationJournal | nul
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Replace one file atomically. An in-place write truncates first, so a crash
+ * inside it leaves content matching neither before nor after — a state
+ * reconciliation cannot resolve, which wedges every future recovery. Writing
+ * beside the target and renaming leaves the file at exactly one of the two.
+ */
+async function writeAtomic(target: string, content: string): Promise<void> {
+	const dir = path.dirname(target);
+	await mkdir(dir, { recursive: true });
+	const tmp = path.join(dir, `.${path.basename(target)}.omp-${Bun.randomUUIDv7()}`);
+	await Bun.write(tmp, content);
+	await rename(tmp, target);
 }
 
 /**
@@ -77,14 +101,14 @@ export async function applyIntegration(
 	const applying: IntegrationJournal = { ...journal, status: "applying" };
 	await persistJournal(journalDir, applying);
 	for (const change of applying.changes) {
-		const current = await fileHash(root, change.path);
-		if (current === change.afterHash) continue;
-		if (current !== change.beforeHash) {
+		const current = await readFile(root, change.path);
+		if (current === change.after) continue;
+		if (current !== change.before) {
 			throw new Error(`refusing to integrate ${change.path}: tree diverged from prepared base`);
 		}
-		await Bun.write(`${root}/${change.path}`, change.afterContent);
-		const written = await fileHash(root, change.path);
-		if (written !== change.afterHash) {
+		await writeAtomic(path.join(root, change.path), change.after);
+		const written = await readFile(root, change.path);
+		if (written !== change.after) {
 			throw new Error(`integration of ${change.path} did not land exactly`);
 		}
 	}

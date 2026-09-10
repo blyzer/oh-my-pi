@@ -109,6 +109,49 @@ describe("isolated parallel writers", () => {
 		expect(await Bun.file(path.join(root, "beta.txt")).text()).toBe("beta wrote this\n");
 	});
 
+	it("refuses the second landing when both writers touch the same file", async () => {
+		await makeDirs();
+		await Bun.write(path.join(root, "shared.txt"), "original\n");
+		// Both sandboxes are copied from the same root, so the loser's content
+		// derives from a tree that no longer exists. Landing it anyway would
+		// erase an already-accepted change with no error and no event.
+		const enteredBoth = Promise.withResolvers<void>();
+		let entered = 0;
+		const overlapping = (name: string): GraphPhase =>
+			writer(name, "shared.txt", {
+				produce: async ({ workspace }) => {
+					entered += 1;
+					if (entered === 2) enteredBoth.resolve();
+					await enteredBoth.promise;
+					await Bun.write(path.join(workspace, "shared.txt"), `${name} wrote this\n`);
+					return {
+						changedFiles: ["shared.txt"],
+						declaredArtifacts: ["shared.txt"],
+						label: name,
+						exitCode: 0,
+					};
+				},
+			});
+		const result = await runGraph({
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			isolation: copyIsolation(),
+			integrate: { journalDir, base: "iso-base" },
+			phases: [overlapping("alpha"), overlapping("beta")],
+		});
+
+		expect(result.status).toBe("failed");
+		const landed = result.phases.filter(outcome => outcome.status === "accepted");
+		const refused = result.phases.filter(outcome => outcome.status === "rejected");
+		expect(landed).toHaveLength(1);
+		expect(refused).toHaveLength(1);
+		expect(refused[0]?.evidence.join(" ")).toContain("base moved under this writer");
+		// The survivor's content is intact: the refusal protected it.
+		const winner = landed[0]?.phase;
+		expect(await Bun.file(path.join(root, "shared.txt")).text()).toBe(`${winner} wrote this\n`);
+	});
+
 	it("keeps an unaccepted writer's work out of the shared root", async () => {
 		await makeDirs();
 		const result = await runGraph({

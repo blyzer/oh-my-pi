@@ -46,6 +46,11 @@ export default function factoryExtension(pi: ExtensionAPI): void {
 			// One writer phase today. The command and the engine share this one
 			// path, so a multi-phase workflow is a longer `phases` list, never a
 			// second acceptance implementation.
+			//
+			// The phase's entry state is taken before anything is dispatched: a
+			// baseline captured inside an attempt measures the tree after an
+			// earlier attempt's writes.
+			const state = await captureBaselineState(ctx.cwd);
 			const result = await runGraph({
 				workflowId,
 				runDir,
@@ -58,7 +63,6 @@ export default function factoryExtension(pi: ExtensionAPI): void {
 						maxAttempts: 1,
 						writes: true,
 						produce: async () => {
-							const state = await captureBaselineState(ctx.cwd);
 							const spawned = await pi.pi.runSubprocess({
 								cwd: ctx.cwd,
 								agent: builderAgent(),

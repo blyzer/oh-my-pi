@@ -6,6 +6,7 @@
  * refused at load time rather than silently dropped — a workflow that parses
  * must mean what it says.
  */
+import { type BaselineState, captureBaselineState } from "./capture";
 import type { GraphPhase, SelectedInput } from "./graph";
 import type { Candidate } from "./loop";
 import type { ReviewVerdict } from "./review";
@@ -30,6 +31,16 @@ export interface AgentRunContext {
 	correction: string | undefined;
 	inputs: SelectedInput[];
 	workspace: string;
+	/**
+	 * The tree as the phase entered it, resolved on first use and pinned for
+	 * the rest of the dispatch. Capturing per attempt instead lets a rejected
+	 * attempt launder its own violations: attempt 2's change-set would be
+	 * measured after attempt 1's writes, so the protected file attempt 1 was
+	 * rejected for is invisible to the check that would catch it. Lazy
+	 * because change capture needs a git repo and a caller that does its own
+	 * accounting should not be made to have one.
+	 */
+	entryState: () => Promise<BaselineState>;
 	/**
 	 * Panel seats investigate and never write; the caller must restrict the
 	 * seat's tools accordingly. Exactly one seat per fusion phase — the
@@ -73,6 +84,9 @@ interface RawPhase {
 	name?: unknown;
 	kind?: unknown;
 	owner?: unknown;
+	model?: unknown;
+	thinking?: unknown;
+	description?: unknown;
 	prompt?: unknown;
 	command?: unknown;
 	gates?: unknown;
@@ -93,7 +107,51 @@ interface RawWorkflow {
 	acceptance?: unknown;
 	isolation?: unknown;
 	protected?: unknown;
+	undeclaredIgnore?: unknown;
 	phases?: unknown;
+}
+
+const WORKFLOW_KEYS = new Set<string>([
+	"name",
+	"description",
+	"maxAttempts",
+	"acceptance",
+	"isolation",
+	"protected",
+	"undeclaredIgnore",
+	"phases",
+]);
+const PHASE_KEYS = new Set<string>([
+	"name",
+	"kind",
+	"owner",
+	"model",
+	"thinking",
+	"description",
+	"prompt",
+	"command",
+	"gates",
+	"dependsOn",
+	"inputs",
+	"writes",
+	"onFail",
+	"onReject",
+	"timeoutMs",
+	"panel",
+	"fuser",
+]);
+const SEAT_KEYS = new Set<string>(["owner", "model", "thinking"]);
+
+/**
+ * A misspelled key is not a harmless no-op: `isolaton: true` would run the
+ * whole workflow against the real checkout while the operator believes it is
+ * sandboxed. Anything this runner does not implement is named and refused.
+ */
+function assertKnownKeys(value: object, known: Set<string>, label: string): void {
+	const surplus = Object.keys(value).filter(key => !known.has(key));
+	if (surplus.length > 0) {
+		throw new Error(`${label} has keys this runner does not implement: ${surplus.join(", ")}`);
+	}
 }
 
 function stringList(value: unknown, label: string): string[] {
@@ -117,6 +175,7 @@ interface RawSeat {
  * holds one.
  */
 function readSeat(seat: RawSeat, label: string): { owner: string; model?: string; thinking?: string } {
+	assertKnownKeys(seat, SEAT_KEYS, label);
 	if (seat.owner !== undefined && typeof seat.owner !== "string") throw new Error(`${label} has a non-string owner`);
 	if (seat.model !== undefined && typeof seat.model !== "string") throw new Error(`${label} has a non-string model`);
 	if (seat.thinking !== undefined && typeof seat.thinking !== "string") {
@@ -129,20 +188,20 @@ function readSeat(seat: RawSeat, label: string): { owner: string; model?: string
 	};
 }
 
-/** Nearest ancestor that owns an agent — the only phase that can act on a correction. */
-function nearestAgentAncestor(
-	order: string[],
-	kinds: Map<string, string>,
-	deps: Map<string, string[]>,
-	from: string,
-): string | null {
+/**
+ * Nearest ancestor that owns a writer — the only phase that can act on a
+ * correction. `fusion` counts: it writes, so a workflow whose only writer is
+ * a panel can still be corrected.
+ */
+function nearestWriterAncestor(kinds: Map<string, string>, deps: Map<string, string[]>, from: string): string | null {
 	const queue = [...(deps.get(from) ?? [])];
 	const seen = new Set<string>();
 	while (queue.length > 0) {
 		const current = queue.shift();
 		if (current === undefined || seen.has(current)) continue;
 		seen.add(current);
-		if (kinds.get(current) === "agent") return current;
+		const kind = kinds.get(current);
+		if (kind === "agent" || kind === "fusion") return current;
 		queue.push(...(deps.get(current) ?? []));
 	}
 	return null;
@@ -151,6 +210,7 @@ function nearestAgentAncestor(
 export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions): LoadedWorkflow {
 	const raw = Bun.YAML.parse(text) as RawWorkflow | null;
 	if (!raw || typeof raw !== "object") throw new Error("workflow must be a YAML mapping");
+	assertKnownKeys(raw, WORKFLOW_KEYS, "workflow");
 	if (typeof raw.name !== "string" || raw.name.trim().length === 0) throw new Error("workflow requires a name");
 	if (!Array.isArray(raw.phases) || raw.phases.length === 0) throw new Error("workflow requires at least one phase");
 
@@ -167,6 +227,7 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 	const kinds = new Map<string, string>();
 	for (const phase of rawPhases) {
 		if (typeof phase.name !== "string" || phase.name.trim().length === 0) throw new Error("every phase needs a name");
+		assertKnownKeys(phase, PHASE_KEYS, `phase "${phase.name}"`);
 		if (kinds.has(phase.name)) throw new Error(`duplicate phase name: ${phase.name}`);
 		const kind = phase.kind === undefined ? "agent" : phase.kind;
 		if (kind !== "agent" && kind !== "code" && kind !== "fusion") {
@@ -187,6 +248,8 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 		deps.set(name, stringList(phase.dependsOn, `phase "${name}" dependsOn`));
 	});
 
+	// Paths a build legitimately rewrites without any phase claiming them.
+	const undeclaredIgnore = stringList(raw.undeclaredIgnore, "undeclaredIgnore");
 	const phases: GraphPhase[] = rawPhases.map(rawPhase => {
 		const name = rawPhase.name as string;
 		const kind = kinds.get(name);
@@ -213,6 +276,15 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 			}
 		}
 
+		if (rawPhase.onFail !== undefined && kind !== "code") {
+			throw new Error(`phase "${name}" is a ${kind} phase; onFail only applies to code phases`);
+		}
+		if (rawPhase.onReject !== undefined && kind === "code") {
+			throw new Error(`phase "${name}" is a code phase; onReject applies to phases with a review verdict`);
+		}
+		if (rawPhase.timeoutMs !== undefined && kind !== "code") {
+			throw new Error(`phase "${name}" is a ${kind} phase; timeoutMs bounds a code phase's command`);
+		}
 		let onReject: GraphPhase["onReject"];
 		if (rawPhase.onReject !== undefined) {
 			const route = rawPhase.onReject as { to?: unknown; maxRevisions?: unknown };
@@ -224,8 +296,8 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 			onReject = { to: route.to, maxRevisions: budget as number };
 		} else if (rawPhase.onFail === "correct") {
 			// A red command returns to the nearest dependency that can fix it.
-			const target = nearestAgentAncestor(order, kinds, deps, name);
-			if (!target) throw new Error(`phase "${name}" declares onFail: correct with no agent dependency to correct`);
+			const target = nearestWriterAncestor(kinds, deps, name);
+			if (!target) throw new Error(`phase "${name}" declares onFail: correct with no writer dependency to correct`);
 			onReject = { to: target, maxRevisions: maxAttempts as number };
 		} else if (rawPhase.onFail !== undefined && rawPhase.onFail !== "retry") {
 			throw new Error(`phase "${name}": unsupported onFail "${String(rawPhase.onFail)}"`);
@@ -237,6 +309,16 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 			jsonParses: gates.includes("json_parses"),
 		};
 		const wantsReview = gates.includes("verdict_consistent");
+		// `diff_matches_claims` is a gate a phase opts into, not a house rule:
+		// running it unasked rejects honest builders in workflows that never
+		// declared it.
+		const matchClaims = gates.includes("diff_matches_claims");
+		if (wantsReview && !options.review) {
+			throw new Error(
+				`phase "${name}" declares the verdict_consistent gate but no review implementation was supplied; ` +
+					"a declared gate that cannot run is a silent acceptance.",
+			);
+		}
 
 		if (kind === "code") {
 			if (typeof rawPhase.command !== "string" || rawPhase.command.trim().length === 0) {
@@ -248,6 +330,13 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 						"Use diff_matches_claims, or move the gate to the agent phase that writes the files.",
 				);
 			}
+			// The prototype's default is ten minutes. Falling back to the gate
+			// runner's own 60s would SIGTERM an honest test suite and charge
+			// the phantom failure to a builder whose code was never red.
+			const timeoutMs = rawPhase.timeoutMs === undefined ? 600_000 : rawPhase.timeoutMs;
+			if (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1) {
+				throw new Error(`phase "${name}" timeoutMs must be a positive integer`);
+			}
 			const command = rawPhase.command;
 			return {
 				name,
@@ -256,6 +345,7 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 				scope: [],
 				assertions: [],
 				gateCommand: ["sh", "-c", command],
+				gateTimeoutMs: timeoutMs as number,
 				// `onFail: correct` means the failure belongs to the corrector, not
 				// to another run of the same command: re-running an unchanged
 				// command spends the budget without changing the input.
@@ -284,6 +374,8 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 			// only, and re-polling N models is the most expensive way to
 			// change nothing.
 			let cachedOpinions: PanelOpinion[] | undefined;
+			// Resolved once per dispatch, not per attempt: see AgentRunContext.
+			let entry: Promise<BaselineState> | undefined;
 			return {
 				name,
 				dependsOn,
@@ -291,11 +383,21 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 				scope: writesGlobs ?? ["**"],
 				assertions: [],
 				artifactChecks,
+				matchClaims,
+				undeclaredIgnore,
 				requireArtifacts: artifactChecks.exist || artifactChecks.nonEmpty,
 				writes: true,
 				maxAttempts: maxAttempts as number,
 				onReject,
 				produce: async ({ attempt, correction, inputs: selected, workspace }) => {
+					// A fresh dispatch — the first attempt after a revision —
+					// must re-poll: opinions about a tree that no longer exists
+					// are stale evidence wearing a current label.
+					if (attempt === 1) {
+						cachedOpinions = undefined;
+						entry = undefined;
+					}
+					const entryState = (): Promise<BaselineState> => (entry ??= captureBaselineState(workspace));
 					if (!cachedOpinions) {
 						// Read-only seats answering the same question, so running
 						// them at once is safe; order follows the declaration.
@@ -311,6 +413,7 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 									correction: undefined,
 									inputs: selected,
 									workspace,
+									entryState,
 									readOnly: true,
 								}),
 							),
@@ -332,6 +435,7 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 						correction,
 						inputs: selected,
 						workspace,
+						entryState,
 						readOnly: false,
 						opinions: cachedOpinions,
 					});
@@ -341,6 +445,8 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 		}
 
 		const readOnly = writesGlobs !== null && writesGlobs.length === 0;
+		// Resolved once per dispatch, not per attempt: see AgentRunContext.
+		let agentEntry: Promise<BaselineState> | undefined;
 		return {
 			name,
 			dependsOn,
@@ -348,14 +454,20 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 			scope: writesGlobs ?? ["**"],
 			assertions: [],
 			artifactChecks,
+			matchClaims,
+			undeclaredIgnore,
 			requireArtifacts: artifactChecks.exist || artifactChecks.nonEmpty,
 			writes: !readOnly,
 			maxAttempts: maxAttempts as number,
 			onReject,
-			produce: async ({ attempt, correction, inputs: selected, workspace }) =>
-				options.runAgent({
+			produce: async ({ attempt, correction, inputs: selected, workspace }) => {
+				if (attempt === 1) agentEntry = undefined;
+				const entryState = (): Promise<BaselineState> => (agentEntry ??= captureBaselineState(workspace));
+				return options.runAgent({
 					phase: name,
 					owner: typeof rawPhase.owner === "string" ? rawPhase.owner : "task",
+					model: typeof rawPhase.model === "string" ? rawPhase.model : undefined,
+					thinking: typeof rawPhase.thinking === "string" ? rawPhase.thinking : undefined,
 					prompt: [typeof rawPhase.prompt === "string" ? rawPhase.prompt : "", options.request ?? ""]
 						.filter(part => part.trim().length > 0)
 						.join("\n\n"),
@@ -363,8 +475,10 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 					correction,
 					inputs: selected,
 					workspace,
+					entryState,
 					readOnly,
-				}),
+				});
+			},
 			review: wantsReview && options.review ? async candidate => options.review!(name, candidate) : undefined,
 		};
 	});

@@ -10,7 +10,7 @@ export interface ScopeVerdict {
  * `*` wildcard inside a segment, and exact paths — the shapes the workflow
  * files actually use.
  */
-function matchesScopeGlob(pattern: string, changed: string): boolean {
+export function matchesScopeGlob(pattern: string, changed: string): boolean {
 	const scope = pattern.replace(/\/+$/, "");
 	if (scope === "**" || scope === "") return true;
 	if (scope.endsWith("/**")) {

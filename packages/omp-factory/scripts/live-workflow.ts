@@ -40,7 +40,6 @@ let spawnCount = 0;
 
 try {
 	const workflow = loadWorkflowConfig(await Bun.file(configPath).text(), {
-		request,
 		runAgent: async ({
 			phase,
 			owner,
@@ -50,10 +49,11 @@ try {
 			correction,
 			inputs,
 			workspace: dir,
+			entryState,
 			readOnly,
 			opinions,
 		}) => {
-			const state = await captureBaselineState(dir);
+			const state = await entryState();
 			const task = [
 				prompt,
 				inputs.length > 0

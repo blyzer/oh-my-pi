@@ -31,6 +31,16 @@ export interface GraphPhase {
 	scope: string[];
 	assertions: FileAssertion[];
 	gateCommand?: string[];
+	/** Bounds the gate command; the workflow's `timeoutMs`. */
+	gateTimeoutMs?: number;
+	/**
+	 * Compare the envelope's declared artifacts against the captured
+	 * change-set — the workflow's `diff_matches_claims`. A phase that never
+	 * declared the gate is not held to it.
+	 */
+	matchClaims?: boolean;
+	/** Paths exempt from the claims comparison; the workflow's `undeclaredIgnore`. */
+	undeclaredIgnore?: string[];
 	requireArtifacts?: boolean;
 	/** Gates evaluated against the envelope's declared artifacts. */
 	artifactChecks?: { exist?: boolean; nonEmpty?: boolean; jsonParses?: boolean };
@@ -44,7 +54,8 @@ export interface GraphPhase {
 	/**
 	 * A coherent rejection revisits an earlier writer instead of refusing
 	 * outright. The target must be a transitive dependency; `maxRevisions`
-	 * bounds the loop and never replenishes the target's own attempts.
+	 * bounds the loop. Each revision re-enters the target with a fresh
+	 * attempt budget, so the effective producer bound is the product.
 	 */
 	onReject?: { to: string; maxRevisions: number };
 	maxAttempts: number;
@@ -180,8 +191,15 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 	const outcomes = new Map<string, PhaseOutcome>();
 	const order: string[] = [];
 	const revisionsUsed = new Map<string, number>();
+	// A rejection's reason, waiting for the phase the route sends it to.
+	const corrections = new Map<string, string>();
 	let writersInFlight = 0;
 	let peakConcurrentWriters = 0;
+	// Which landing last wrote each file. A writer records the counter when
+	// its workspace is taken; a landing whose files moved past that mark is
+	// derived from a tree that no longer exists.
+	const landedAt = new Map<string, number>();
+	let landingSeq = 0;
 	// One landing at a time on the shared root, whatever runs in parallel above it.
 	let landingChain: Promise<unknown> = Promise.resolve();
 	const landingLock = <T>(landing: () => Promise<T>): Promise<T> => {
@@ -229,11 +247,30 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				sandbox = await request.isolation.start(`${request.workflowId}-${name}`, request.workspace);
 			}
 			const workspace = sandbox?.dir ?? request.workspace;
+			// The mark is taken with the copy: everything landed after this
+			// point is invisible to what this writer is about to produce.
+			const baseMark = landingSeq;
 			// An isolated writer verifies inside its own copy and lands in the
 			// shared root; landings take the integration lock so two accepted
 			// diffs never interleave on that root.
 			const integrate = request.integrate
-				? { ...request.integrate, root: request.integrate.root ?? request.workspace, serialize: landingLock }
+				? {
+						...request.integrate,
+						root: request.integrate.root ?? request.workspace,
+						serialize: landingLock,
+						guard: {
+							assert: (files: string[]): string | null => {
+								const moved = files.filter(file => (landedAt.get(file) ?? -1) > baseMark);
+								return moved.length === 0
+									? null
+									: `base moved under this writer: ${moved.join(", ")} landed after this workspace was taken`;
+							},
+							record: (files: string[]): void => {
+								landingSeq += 1;
+								for (const file of files) landedAt.set(file, landingSeq);
+							},
+						},
+					}
 				: undefined;
 			const result = await runWorkflow({
 				workflowId: request.workflowId,
@@ -245,36 +282,54 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				artifactChecks: phase.artifactChecks,
 				protectedGlobs: request.protectedGlobs,
 				gateCommand: phase.gateCommand,
+				gateTimeoutMs: phase.gateTimeoutMs,
+				matchClaims: phase.matchClaims,
+				undeclaredIgnore: phase.undeclaredIgnore,
 				requireArtifacts: phase.requireArtifacts,
 				maxAttempts: phase.maxAttempts,
 				integrate,
 				produce: async (attempt, correction) => {
-					lastCandidate = await phase.produce({ attempt, correction, inputs, workspace });
+					// Attempt 1 of a revised phase carries the rejection that
+					// re-opened it; later attempts carry their own last failure.
+					const handed = correction ?? (attempt === 1 ? corrections.get(name) : undefined);
+					if (attempt === 1) corrections.delete(name);
+					lastCandidate = await phase.produce({ attempt, correction: handed, inputs, workspace });
 					return lastCandidate;
 				},
 				review: phase.review,
 			});
+			let acceptedVersion: number | undefined;
 			if (result.status === "accepted" && lastCandidate) {
 				accepted.add(name);
 				const history = store.select(name);
+				acceptedVersion = (history?.version ?? 0) + 1;
 				store.accept({
 					phase: name,
-					version: (history?.version ?? 0) + 1,
+					version: acceptedVersion,
 					digest: digestOf(lastCandidate),
 					artifacts: lastCandidate.declaredArtifacts ?? lastCandidate.changedFiles,
+				});
+				await appendEvent(request.runDir, request.workflowId, "VersionAccepted", {
+					phase: name,
+					version: acceptedVersion,
 				});
 			}
 			return { phase: name, status: result.status, attempts: result.attempts, evidence: result.evidence, inputs };
 		} finally {
 			if (phase.writes) writersInFlight -= 1;
-			await sandbox?.stop();
+			// Cleanup failure is evidence, not a verdict: an accepted phase
+			// that already landed must not be undone by a failed `rm`.
+			await sandbox?.stop().catch(() => undefined);
 		}
 	};
 
 	/**
 	 * A rejection with a usable route re-opens its target's closure: the
 	 * revised producer and every dependent lose their acceptance so the next
-	 * pass re-runs them against the new version.
+	 * pass re-runs them against the new version. The rejecting phase's
+	 * evidence travels with the route — a corrector told only that it failed,
+	 * without being told what failed, reproduces the same output and spends
+	 * the budget learning nothing.
 	 */
 	const takeRevision = (name: string): string | null => {
 		const route = byName.get(name)?.onReject;
@@ -282,10 +337,14 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 		const used = revisionsUsed.get(name) ?? 0;
 		if (used >= route.maxRevisions) return null;
 		revisionsUsed.set(name, used + 1);
+		// Read before the closure is cleared: the rejecting phase is itself a
+		// descendant of the target, so its outcome is about to be deleted.
+		const reason = outcomes.get(name)?.evidence.at(-1);
 		for (const affected of closure(deps, route.to)) {
 			accepted.delete(affected);
 			outcomes.delete(affected);
 		}
+		corrections.set(route.to, `Phase "${name}" rejected the work that depends on you${reason ? `: ${reason}` : "."}`);
 		return route.to;
 	};
 
@@ -307,8 +366,11 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				const outcome = await runPhase(name);
 				outcomes.set(outcome.phase, outcome);
 			}
-			const rejected = pending.find(name => outcomes.get(name)?.status === "rejected");
-			if (rejected && takeRevision(rejected) !== null) {
+			// Every rejected phase in the wave is offered its route, not just
+			// whichever one sorts first: a sibling's exhausted budget must not
+			// consume another phase's.
+			const rejected = pending.filter(name => outcomes.get(name)?.status === "rejected");
+			if (rejected.some(name => takeRevision(name) !== null)) {
 				revising = true;
 				break;
 			}

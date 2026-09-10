@@ -24,6 +24,9 @@ async function frozenExample(name: string): Promise<string> {
 
 const options = {
 	runAgent: async () => ({ changedFiles: [], label: "agent", exitCode: 0 }),
+	// `verdict_consistent` is refused at load without one, so the examples
+	// that declare it need a reviewer present to be loadable at all.
+	review: async () => ({ approved: true, blockers: [], findings: [] }),
 };
 
 function waveNames(phases: Array<{ name: string; dependsOn?: string[] }>): string[][] {
@@ -128,8 +131,26 @@ describe("loadWorkflowConfig refusals", () => {
 		expect(() => loadWorkflowConfig(text, options)).toThrow('consumes "a" without depending on it');
 	});
 
-	it("rejects onFail: correct with no agent to correct", () => {
+	it("rejects onFail: correct with no writer to correct", () => {
 		const text = `name: w\nphases:\n  - name: a\n    kind: code\n    command: "true"\n    onFail: correct\n`;
-		expect(() => loadWorkflowConfig(text, options)).toThrow("no agent dependency to correct");
+		expect(() => loadWorkflowConfig(text, options)).toThrow("no writer dependency to correct");
+	});
+
+	it("routes onFail: correct to a fusion writer, which the prototype allows", () => {
+		const text = [
+			"name: w",
+			"phases:",
+			"  - name: panel",
+			"    kind: fusion",
+			"    panel: [{ owner: scout }, { owner: task }]",
+			"    fuser: { owner: task }",
+			"  - name: check",
+			"    kind: code",
+			'    command: "true"',
+			"    onFail: correct",
+			"",
+		].join("\n");
+		const workflow = loadWorkflowConfig(text, options);
+		expect(workflow.phases.find(phase => phase.name === "check")?.onReject?.to).toBe("panel");
 	});
 });
