@@ -21,6 +21,10 @@ export interface PanelOpinion {
 export interface AgentRunContext {
 	phase: string;
 	owner: string;
+	/** Seat-pinned model pattern, when the workflow named one. */
+	model?: string;
+	/** Seat-pinned thinking level, when the workflow named one. */
+	thinking?: string;
 	prompt: string;
 	attempt: number;
 	correction: string | undefined;
@@ -99,6 +103,30 @@ function stringList(value: unknown, label: string): string[] {
 		if (typeof entry !== "string" || entry.trim().length === 0) throw new Error(`${label} entries must be strings`);
 		return entry;
 	});
+}
+
+interface RawSeat {
+	owner?: unknown;
+	model?: unknown;
+	thinking?: unknown;
+}
+
+/**
+ * Read one seat's identity. `model`/`thinking` are pinned per seat because a
+ * panel whose seats resolve to the same model reports two opinions when it
+ * holds one.
+ */
+function readSeat(seat: RawSeat, label: string): { owner: string; model?: string; thinking?: string } {
+	if (seat.owner !== undefined && typeof seat.owner !== "string") throw new Error(`${label} has a non-string owner`);
+	if (seat.model !== undefined && typeof seat.model !== "string") throw new Error(`${label} has a non-string model`);
+	if (seat.thinking !== undefined && typeof seat.thinking !== "string") {
+		throw new Error(`${label} has a non-string thinking level`);
+	}
+	return {
+		owner: typeof seat.owner === "string" ? seat.owner : "task",
+		model: typeof seat.model === "string" ? seat.model : undefined,
+		thinking: typeof seat.thinking === "string" ? seat.thinking : undefined,
+	};
 }
 
 /** Nearest ancestor that owns an agent — the only phase that can act on a correction. */
@@ -235,18 +263,17 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 		}
 
 		if (kind === "fusion") {
-			const panel = Array.isArray(rawPhase.panel) ? (rawPhase.panel as Array<{ owner?: unknown }>) : [];
+			const panel = Array.isArray(rawPhase.panel) ? (rawPhase.panel as RawSeat[]) : [];
 			if (panel.length < 2) throw new Error(`phase "${name}" is a fusion phase and needs at least two panel seats`);
-			const fuser = rawPhase.fuser as { owner?: unknown } | undefined;
+			const fuser = rawPhase.fuser as RawSeat | undefined;
 			if (!fuser || typeof fuser.owner !== "string") {
 				throw new Error(`phase "${name}" is a fusion phase and needs a fuser`);
 			}
-			const seats = panel.map((seat, index) => {
-				if (seat.owner !== undefined && typeof seat.owner !== "string") {
-					throw new Error(`phase "${name}" panel seat ${index + 1} has a non-string owner`);
-				}
-				return { seat: `${name}#${index + 1}`, owner: typeof seat.owner === "string" ? seat.owner : "task" };
-			});
+			const seats = panel.map((seat, index) => ({
+				seat: `${name}#${index + 1}`,
+				...readSeat(seat, `phase "${name}" panel seat ${index + 1}`),
+			}));
+			const fuserSeat = readSeat(fuser, `phase "${name}" fuser`);
 			const sharedPrompt = [typeof rawPhase.prompt === "string" ? rawPhase.prompt : "", options.request ?? ""]
 				.filter(part => part.trim().length > 0)
 				.join("\n\n");
@@ -274,6 +301,8 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 								options.runAgent({
 									phase: name,
 									owner: seat.owner,
+									model: seat.model,
+									thinking: seat.thinking,
 									prompt: sharedPrompt,
 									attempt,
 									correction: undefined,
@@ -292,7 +321,9 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 					}
 					return options.runAgent({
 						phase: name,
-						owner: fuser.owner as string,
+						owner: fuserSeat.owner,
+						model: fuserSeat.model,
+						thinking: fuserSeat.thinking,
 						prompt: sharedPrompt,
 						attempt,
 						correction,

@@ -9,7 +9,7 @@ import * as path from "node:path";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { type ExecutorOptions, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { captureBaselineState, captureTouchedSince } from "../src/capture";
 import { parseEnvelope } from "../src/envelope";
 import { runGraph } from "../src/graph";
@@ -40,7 +40,18 @@ const settings = Settings.isolated();
 try {
 	const workflow = loadWorkflowConfig(await Bun.file(configPath).text(), {
 		request,
-		runAgent: async ({ phase, owner, prompt, correction, inputs, workspace: dir, readOnly, opinions }) => {
+		runAgent: async ({
+			phase,
+			owner,
+			model,
+			thinking,
+			prompt,
+			correction,
+			inputs,
+			workspace: dir,
+			readOnly,
+			opinions,
+		}) => {
 			const state = await captureBaselineState(dir);
 			const task = [
 				prompt,
@@ -72,6 +83,8 @@ try {
 				task,
 				index: 0,
 				id: `${workflowId}-${phase}-${owner}`,
+				modelOverride: model,
+				thinkingLevel: thinking as ExecutorOptions["thinkingLevel"],
 				modelRegistry,
 				settings,
 			});

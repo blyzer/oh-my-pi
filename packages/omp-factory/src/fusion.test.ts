@@ -71,6 +71,41 @@ describe("fusion phases", () => {
 		expect(fuserCall?.opinions?.[0]?.text).toBe("reviewer says so");
 	});
 
+	it("pins each seat to its declared model and thinking level", async () => {
+		await makeDirs();
+		const seen: Array<{ owner: string; model?: string; thinking?: string }> = [];
+		const pinned = [
+			"name: review",
+			"phases:",
+			"  - name: read",
+			"    kind: fusion",
+			"    panel:",
+			"      - owner: reviewer",
+			"        model: anthropic/claude-opus-4-5",
+			"      - owner: scout",
+			"        model: openai/gpt-5.5",
+			"    fuser:",
+			"      owner: task",
+			"      thinking: high",
+			"",
+		].join("\n");
+		const workflow = loadWorkflowConfig(pinned, {
+			runAgent: async context => {
+				seen.push({ owner: context.owner, model: context.model, thinking: context.thinking });
+				return { changedFiles: [], label: context.owner, exitCode: 0, output: "opinion" };
+			},
+		});
+		await runGraph({ workflowId: "wf", runDir, workspace: root, phases: workflow.phases });
+
+		// Distinct seats reach distinct models: a panel resolving to one model
+		// would report two opinions while holding one.
+		expect(seen).toEqual([
+			{ owner: "reviewer", model: "anthropic/claude-opus-4-5", thinking: undefined },
+			{ owner: "scout", model: "openai/gpt-5.5", thinking: undefined },
+			{ owner: "task", model: undefined, thinking: "high" },
+		]);
+	});
+
 	it("re-runs only the fuser on a retry", async () => {
 		await makeDirs();
 		const owners: string[] = [];
