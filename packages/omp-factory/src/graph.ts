@@ -9,7 +9,7 @@
  * short of one isolated worktree per writer.
  */
 import { buildWaves, type PhaseDeps, VersionStore } from "./dag";
-import type { FileAssertion } from "./gates";
+import { type FileAssertion, runGateCommand } from "./gates";
 import type { Candidate } from "./loop";
 import { appendEvent } from "./ledger";
 import type { ReviewVerdict } from "./review";
@@ -319,6 +319,23 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				requireArtifacts: phase.requireArtifacts,
 				maxAttempts: phase.maxAttempts,
 				integrate,
+				// The phase's own deterministic gate, re-run against the tree
+				// the landing produced. Two change-sets can each pass alone in
+				// their own sandbox and fail together on the shared root, and
+				// only this sees that.
+				verifyDelivered: phase.gateCommand
+					? async deliveredRoot => {
+							const command = phase.gateCommand;
+							if (!command) return { ok: true as const };
+							const gate = await runGateCommand(command, deliveredRoot, phase.gateTimeoutMs);
+							return gate.exitCode === 0
+								? { ok: true as const }
+								: {
+										ok: false as const,
+										evidence: `delivered tree failed the gate: exit ${gate.exitCode}: ${gate.output.slice(0, 500)}`,
+									};
+						}
+					: undefined,
 				produce: async (attempt, correction) => {
 					// Attempt 1 of a revised phase carries the rejection that
 					// re-opened it; later attempts carry their own last failure.

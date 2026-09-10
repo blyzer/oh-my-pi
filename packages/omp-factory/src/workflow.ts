@@ -4,7 +4,7 @@
  * The producer is injectable; production wires it to runSubprocess/follow-up.
  */
 import { evaluateFileAssertions, type FileAssertion, runGateCommand } from "./gates";
-import { applyIntegration, commitIntegration, prepareIntegration } from "./integrate";
+import { applyIntegration, commitIntegration, prepareIntegration, revertIntegration } from "./integrate";
 import { appendEvent } from "./ledger";
 import { type Candidate, runAttemptLoop } from "./loop";
 import { combineGateAndReview, type ReviewVerdict } from "./review";
@@ -76,6 +76,15 @@ export interface WorkflowRequest {
 	 * bytes on disk, and the next attempt would inherit them.
 	 */
 	guard?: PhaseGuard;
+	/**
+	 * Verify the tree the landing produced, not the one it was built in.
+	 *
+	 * Runs after APPLIED and before COMMITTED, and only when the landing root
+	 * differs from the workspace: verifying the same tree twice buys nothing.
+	 * A failure reverts the landing, so an unverifiable delivered tree is
+	 * never left behind.
+	 */
+	verifyDelivered?: (root: string) => Promise<{ ok: true } | { ok: false; evidence: string }>;
 	produce: (attempt: number, evidence: string | undefined) => Promise<Candidate>;
 	review?: (candidate: Candidate) => Promise<ReviewVerdict>;
 }
@@ -114,6 +123,27 @@ async function integrateCandidate(
 		await appendEvent(runDir, workflowId, "IntegrationApplying", { phase, digest: journal.patchDigest });
 		const applied = await applyIntegration(root, spec.journalDir, journal);
 		await appendEvent(runDir, workflowId, "IntegrationApplied", { phase, digest: journal.patchDigest });
+		// The candidate was verified in the workspace it was produced in. When
+		// that is not the tree the change landed on, nothing has yet checked
+		// the tree the operator actually receives: two landings can each be
+		// valid alone and broken together. Re-run the deterministic gate
+		// against the delivered root before committing.
+		if (request.verifyDelivered && root !== workspace) {
+			const delivered = await request.verifyDelivered(root);
+			if (!delivered.ok) {
+				const undo = await revertIntegration(root, spec.journalDir, applied);
+				await appendEvent(runDir, workflowId, "IntegrationReverted", {
+					phase,
+					digest: journal.patchDigest,
+					evidence: [delivered.evidence, `reverted: ${undo.reverted.join(", ") || "nothing"}`],
+				});
+				throw new Error(
+					undo.skipped.length > 0
+						? `${delivered.evidence}; revert incomplete, still applied: ${undo.skipped.join(", ")}`
+						: delivered.evidence,
+				);
+			}
+		}
 		await commitIntegration(spec.journalDir, applied);
 		spec.guard?.record(candidate.changedFiles);
 		await appendEvent(runDir, workflowId, "IntegrationCommitted", { phase, digest: journal.patchDigest });

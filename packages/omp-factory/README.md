@@ -119,6 +119,14 @@ recursive-copy sandbox. A coherent rejection with
 `onReject: { to, maxRevisions }` re-opens the target's dependent closure and
 re-runs it against the new accepted version, bounded by the declared budget.
 
+Delivered-tree verification (I14) runs between APPLIED and COMMITTED: the
+phase's own gate is re-run against the landing root whenever that differs
+from the workspace the candidate was built in, and a failure reverts the
+landing from the journal's `before` content rather than leaving an
+unverifiable tree behind. `src/delivered.test.ts` pins it with two writers
+whose change-sets each pass alone in their own sandbox and break only once
+both are on the shared root -- neutralising the check accepts that run.
+
 Open gaps, unproven rather than absent:
 
 - `copyIsolation` copies the tree. OMP core owns copy-on-write backends

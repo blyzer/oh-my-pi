@@ -11,10 +11,12 @@
  * A crash in APPLYING reconciles forward when the intended content is
  * already present exactly, and refuses otherwise — never a blind re-apply.
  */
-import { mkdir, rename } from "node:fs/promises";
+import { mkdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
-export type IntegrationStatus = "prepared" | "applying" | "applied" | "committed";
+// `reverted` is terminal and distinct from `prepared`: the landing happened
+// and was undone, which a resume must not mistake for one that never ran.
+export type IntegrationStatus = "prepared" | "applying" | "applied" | "committed" | "reverted";
 
 export interface FileChange {
 	path: string;
@@ -124,6 +126,42 @@ export async function commitIntegration(journalDir: string, journal: Integration
 	const committed: IntegrationJournal = { ...journal, status: "committed" };
 	await persistJournal(journalDir, committed);
 	return committed;
+}
+
+/**
+ * Undo an applied-but-unverified landing.
+ *
+ * Reachable only between APPLIED and COMMITTED, where the journal still
+ * holds each file's `before` content, so the restore is exact rather than a
+ * guess. A file that no longer matches what this landing wrote is left
+ * alone and reported: something else owns it now, and overwriting would
+ * destroy that instead of repairing this.
+ */
+export async function revertIntegration(
+	root: string,
+	journalDir: string,
+	journal: IntegrationJournal,
+): Promise<{ reverted: string[]; skipped: string[] }> {
+	if (journal.status !== "applied") {
+		throw new Error(`cannot revert integration in status ${journal.status}`);
+	}
+	const reverted: string[] = [];
+	const skipped: string[] = [];
+	for (const change of journal.changes) {
+		const current = await readFile(root, change.path);
+		if (current !== change.after) {
+			skipped.push(change.path);
+			continue;
+		}
+		if (change.before === null) {
+			await rm(path.join(root, change.path), { force: true });
+		} else {
+			await writeAtomic(path.join(root, change.path), change.before);
+		}
+		reverted.push(change.path);
+	}
+	await persistJournal(journalDir, { ...journal, status: "reverted" });
+	return { reverted, skipped };
 }
 
 /** Recover after a crash: only APPLYING reconciles; anything else is returned as-is. */
