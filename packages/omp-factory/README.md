@@ -62,6 +62,24 @@ The WI-0024 drill runs the builder in a sandbox on purpose: without one, a
 rejected builder's writes stay in the shared tree, so "nothing landed" would
 only be true of the integration journal.
 
+### Run-for-run against the frozen engine
+
+The frozen ADW engine (tag `adw-prototype-reference`, driven through `runAdw`
+directly — `/adw` is a TUI slash command that print mode never dispatches)
+and this driver ran the same `fix.yml` on byte-identical scratch repos:
+
+| Workflow | Frozen engine | This driver |
+| --- | --- | --- |
+| `fix.yml`, green gate | `build` → `verify`, one attempt each, accepted, `subtract` landed | same order, same attempt counts, accepted, same file |
+| `fix.yml`, `command: exit 1` | terminal refusal, nothing accepted | terminal refusal, `verify` blocked without an accepted producer |
+
+The red run is where the comparison earned its cost: it found two defects no
+deterministic test caught. A code phase with `onFail: correct` was re-running
+its own unchanged command before correcting, spending the budget on an input
+that could not change; and every spawn on a revision reused the first spawn's
+registry id, so a corrector died on a duplicate id and the failure was
+misreported as a builder exit. Both are fixed here.
+
 `src/workflow-config.ts` loads the prototype's own `.omp/adw/*.yml` format —
 `dependsOn` (including the implicit declaration edge), `inputs` as transitive
 dependencies, `writes` as scope, `protected`, `gates`, `onFail: correct`
@@ -86,11 +104,10 @@ Open gaps, unproven rather than absent:
   (`ensureIsolation`), which the public barrel does not expose; in this
   checkout the published `@oh-my-pi/pi-natives` resolves ahead of the built
   workspace addon, so that path is unverified here.
-- No rewind targets beyond the single `onReject` route, and no per-seat
-  `model`/`thinking` pinning, so a panel may land two seats on one model.
-- The old engine has not been run side by side with this one. The frozen
-  workflows run here and the oracle suite pins the semantics, but no
-  run-for-run comparison exists, so cutover remains unjustified.
+- No rewind targets beyond the single `onReject` route.
+- The run-for-run comparison covers `fix.yml` green and red only. The
+  fusion, concurrent and resume families are pinned by the oracle suite and
+  by live runs here, but not yet by a side-by-side against the old engine.
 
 `/factory` runs through `runGraph` with one writer phase, so the command and
 the engine share a single acceptance path; a multi-phase workflow is a longer

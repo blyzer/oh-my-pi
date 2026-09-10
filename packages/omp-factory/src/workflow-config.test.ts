@@ -39,6 +39,9 @@ describe("loadWorkflowConfig against the frozen examples", () => {
 		// `onFail: correct` must reach the phase that can change the result.
 		expect(verify?.onReject).toEqual({ to: "build", maxRevisions: 3 });
 		expect(verify?.gateCommand?.[2]).toBe("bun test");
+		// Re-running an unchanged command spends the budget without changing
+		// its input: the failure belongs to the corrector, not to a retry.
+		expect(verify?.maxAttempts).toBe(1);
 		const build = workflow.phases.find(phase => phase.name === "build");
 		expect(build?.requireArtifacts).toBeTrue();
 		expect(build?.artifactChecks).toEqual({ exist: true, nonEmpty: true, jsonParses: false });

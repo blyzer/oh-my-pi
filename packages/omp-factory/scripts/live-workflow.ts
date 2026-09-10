@@ -36,6 +36,7 @@ const workflowId = `live-${Date.now()}`;
 const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
 const settings = Settings.isolated();
+let spawnCount = 0;
 
 try {
 	const workflow = loadWorkflowConfig(await Bun.file(configPath).text(), {
@@ -82,7 +83,9 @@ try {
 				},
 				task,
 				index: 0,
-				id: `${workflowId}-${phase}-${owner}`,
+				// Every spawn needs its own registry id: a revision re-runs the
+				// same phase and owner, and a duplicate id fails the spawn.
+				id: `${workflowId}-${phase}-${owner}-${(spawnCount += 1)}`,
 				modelOverride: model,
 				thinkingLevel: thinking as ExecutorOptions["thinkingLevel"],
 				modelRegistry,

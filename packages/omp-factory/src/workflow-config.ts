@@ -256,7 +256,10 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 				scope: [],
 				assertions: [],
 				gateCommand: ["sh", "-c", command],
-				maxAttempts: maxAttempts as number,
+				// `onFail: correct` means the failure belongs to the corrector, not
+				// to another run of the same command: re-running an unchanged
+				// command spends the budget without changing the input.
+				maxAttempts: rawPhase.onFail === "correct" ? 1 : (maxAttempts as number),
 				onReject,
 				produce: async () => ({ changedFiles: [], label: name, exitCode: 0 }),
 			};
