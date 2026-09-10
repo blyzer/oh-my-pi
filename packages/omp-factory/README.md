@@ -127,6 +127,16 @@ unverifiable tree behind. `src/delivered.test.ts` pins it with two writers
 whose change-sets each pass alone in their own sandbox and break only once
 both are on the shared root -- neutralising the check accepts that run.
 
+Human gates (I11) are a durable pause, not a prompt. A phase marked
+`requiresHuman` does not dispatch until an injected gate answers; a pending
+answer halts the run with `awaiting-human` -- distinct from `failed`, since
+an operator reading "failed" would think their work died rather than that it
+is waiting for them -- and carries the nonce a later process resolves by.
+Decisions bind workflow+phase+attempt and are consumed exactly once through
+an exclusive claim, so a stale approval cannot authorize a later attempt and
+two racing resolvers cannot both spend one. `src/human.test.ts` pins it;
+neutralising the gate accepts a run nobody authorized.
+
 Open gaps, unproven rather than absent:
 
 - `copyIsolation` copies the tree. OMP core owns copy-on-write backends

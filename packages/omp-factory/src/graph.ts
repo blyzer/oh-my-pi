@@ -53,6 +53,12 @@ export interface GraphPhase {
 	 */
 	writes?: boolean;
 	/**
+	 * This phase may not dispatch without human authorization. Reserved for
+	 * what cannot be delegated reliably: irreversible, security-sensitive,
+	 * legally binding, or externally visible.
+	 */
+	requiresHuman?: boolean;
+	/**
 	 * A coherent rejection revisits an earlier writer instead of refusing
 	 * outright. The target must be a transitive dependency; `maxRevisions`
 	 * bounds the loop. Each revision re-enters the target with a fresh
@@ -78,6 +84,15 @@ export interface GraphPhase {
 export interface IsolationProvider {
 	start(id: string, baseCwd: string): Promise<{ dir: string; stop: () => Promise<void> }>;
 }
+
+/**
+ * A human gate's answer. `pending` carries the nonce a later run resolves
+ * by, so the wait survives the process that started it.
+ */
+export type HumanGateVerdict =
+	| { decision: "approved" }
+	| { decision: "denied"; reason: string }
+	| { decision: "pending"; nonce: string; question: string };
 
 export interface GraphRequest {
 	workflowId: string;
@@ -105,11 +120,26 @@ export interface GraphRequest {
 	 * property gets lost.
 	 */
 	allowUnguardedWrites?: boolean;
+	/**
+	 * Asks a human to authorize a phase before it dispatches. Returning a
+	 * pending decision halts the run: the phase is neither accepted nor
+	 * rejected, and a later run resolves it by nonce.
+	 *
+	 * A human gate is for what cannot be delegated reliably — irreversible,
+	 * security-sensitive, legally binding. Using it for ordinary review turns
+	 * the operator back into the orchestrator this exists to replace.
+	 */
+	humanGate?: (phase: string, attempt: number) => Promise<HumanGateVerdict>;
 }
 
 export interface PhaseOutcome {
 	phase: string;
-	status: "accepted" | "rejected" | "blocked";
+	/**
+	 * `awaiting-human` is not a failure and not a pass: the phase never
+	 * dispatched, so nothing about it is known yet. Treating it as either
+	 * would answer a question the operator has not answered.
+	 */
+	status: "accepted" | "rejected" | "blocked" | "awaiting-human";
 	attempts: number;
 	evidence: string[];
 	/** Exact producer versions this phase consumed; recorded for provenance. */
@@ -117,11 +147,19 @@ export interface PhaseOutcome {
 }
 
 export interface GraphResult {
-	status: "accepted" | "failed";
+	/**
+	 * `awaiting-human` is terminal for THIS process and resumable by the
+	 * next: reporting it as `failed` would tell an operator their run is
+	 * dead when it is waiting for them.
+	 */
+	status: "accepted" | "failed" | "awaiting-human";
 	/** Dispatch order; a revision appends the re-run phases again. */
 	order: string[];
 	phases: PhaseOutcome[];
-	/** Peak number of writer phases in flight; the single-writer invariant pins this at 1. */
+	/**
+	 * Peak writer phases in flight: 1 on a shared workspace, up to the wave's
+	 * writer count when each holds its own tree.
+	 */
 	peakConcurrentWriters: number;
 }
 
@@ -246,6 +284,36 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				evidence: [`blocked: dependencies without an accepted version: ${unmet.join(", ")}`],
 				inputs: [],
 			};
+		}
+		// Asked before inputs are selected and before anything is dispatched:
+		// a phase awaiting authorization must not consume a producer version
+		// or leave a half-started attempt behind.
+		if (request.humanGate && phase.requiresHuman === true) {
+			const verdict = await request.humanGate(name, 1);
+			if (verdict.decision === "denied") {
+				await appendEvent(request.runDir, request.workflowId, "HumanDenied", { phase: name });
+				return {
+					phase: name,
+					status: "rejected",
+					attempts: 0,
+					evidence: [`human denied: ${verdict.reason}`],
+					inputs: [],
+				};
+			}
+			if (verdict.decision === "pending") {
+				await appendEvent(request.runDir, request.workflowId, "HumanPending", {
+					phase: name,
+					nonce: verdict.nonce,
+				});
+				return {
+					phase: name,
+					status: "awaiting-human",
+					attempts: 0,
+					evidence: [`awaiting human decision ${verdict.nonce}: ${verdict.question}`],
+					inputs: [],
+				};
+			}
+			await appendEvent(request.runDir, request.workflowId, "HumanApproved", { phase: name });
 		}
 		// Selection happens at dispatch and is recorded: "which evidence did
 		// this attempt see" has exactly one answer.
@@ -414,6 +482,14 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				const outcome = await runPhase(name);
 				outcomes.set(outcome.phase, outcome);
 			}
+			// A pending decision stops the whole run, not just its wave: later
+			// waves depend on a phase whose verdict nobody has given, and
+			// dispatching them would spend budget on work the operator may
+			// still deny.
+			if (pending.some(name => outcomes.get(name)?.status === "awaiting-human")) {
+				revising = false;
+				break;
+			}
 			// Every rejected phase in the wave is offered its route, not just
 			// whichever one sorts first: a sibling's exhausted budget must not
 			// consume another phase's.
@@ -426,12 +502,23 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 	}
 
 	const phases = [...outcomes.values()];
-	const status = phases.every(outcome => outcome.status === "accepted") ? "accepted" : "failed";
-	// One verdict per run: the graph decides the workflow, phases decide themselves.
+	const awaiting = phases.some(outcome => outcome.status === "awaiting-human");
+	const status = awaiting
+		? ("awaiting-human" as const)
+		: phases.every(outcome => outcome.status === "accepted")
+			? ("accepted" as const)
+			: ("failed" as const);
+	// One verdict per run: the graph decides the workflow, phases decide
+	// themselves. A run waiting on a human has no verdict yet, so it records
+	// the wait rather than inventing one.
 	await appendEvent(
 		request.runDir,
 		request.workflowId,
-		status === "accepted" ? "WorkflowAccepted" : "WorkflowFailed",
+		status === "accepted"
+			? "WorkflowAccepted"
+			: status === "awaiting-human"
+				? "WorkflowAwaitingHuman"
+				: "WorkflowFailed",
 		{ phases: phases.map(outcome => `${outcome.phase}:${outcome.status}`) },
 	);
 	return { status, order, phases, peakConcurrentWriters };

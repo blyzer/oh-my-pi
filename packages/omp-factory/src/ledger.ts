@@ -13,7 +13,7 @@ export interface WorkflowEvent {
 }
 
 export interface PhaseProjection {
-	status: "pending" | "ready" | "dispatched" | "accepted" | "failed";
+	status: "pending" | "ready" | "dispatched" | "accepted" | "failed" | "awaiting-human";
 	attempts: number;
 	acceptedVersion: number | null;
 	integration: "prepared" | "applying" | "applied" | "committed" | null;
@@ -21,7 +21,7 @@ export interface PhaseProjection {
 
 export interface WorkflowProjection {
 	workflowId: string;
-	status: "running" | "accepted" | "failed";
+	status: "running" | "accepted" | "failed" | "awaiting-human";
 	phases: Record<string, PhaseProjection>;
 	lastSeq: number;
 }
@@ -67,6 +67,23 @@ export function reduceEvents(workflowId: string, events: WorkflowEvent[]): Workf
 				projection.phases[phase] = current;
 				break;
 			}
+			// A phase held at the human boundary: neither passed nor failed,
+			// and the projection must not round it to either.
+			case "HumanPending": {
+				if (!phase) throw new Error("HumanPending without phase");
+				const current = projection.phases[phase] ?? freshPhase();
+				current.status = "awaiting-human";
+				projection.phases[phase] = current;
+				break;
+			}
+			case "HumanApproved":
+			case "HumanDenied": {
+				if (!phase) throw new Error(`${event.type} without phase`);
+				const current = projection.phases[phase] ?? freshPhase();
+				if (event.type === "HumanDenied") current.status = "failed";
+				projection.phases[phase] = current;
+				break;
+			}
 			case "VersionAccepted": {
 				if (!phase) throw new Error("VersionAccepted without phase");
 				const version = event.payload.version;
@@ -105,6 +122,9 @@ export function reduceEvents(workflowId: string, events: WorkflowEvent[]): Workf
 			}
 			case "WorkflowAccepted":
 				projection.status = "accepted";
+				break;
+			case "WorkflowAwaitingHuman":
+				projection.status = "awaiting-human";
 				break;
 			case "WorkflowFailed":
 				projection.status = "failed";
