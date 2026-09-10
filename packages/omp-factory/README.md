@@ -9,7 +9,9 @@ Status: early scaffold. The `/factory` command runs one managed builder through 
 ```text
 packages/omp-factory/
   src/extension.ts   /factory command (thin: spawn + report)
-  src/workflow.ts    acceptance owner (attempt loop + ledger)
+  src/workflow.ts    acceptance owner for one phase (attempt loop + ledger)
+  src/graph.ts       multi-phase runner over accepted versions
+  src/envelope.ts    builder envelope contract
   src/loop.ts        bounded correction loop
   src/scope.ts       declared-scope verification
   src/capture.ts     baseline/delta capture via @oh-my-pi/pi-coding-agent
@@ -45,11 +47,12 @@ byte-exact committed tree.
 
 Open gaps, unproven rather than absent:
 
-- The driver runs one phase. `src/dag.ts` and `VersionStore` are tested in
-  isolation; no multi-phase run drives them yet.
-- No `json_parses` assertion; malformed JSON currently fails closed as an
-  unknown assertion type instead of reporting a parse position.
+- `src/graph.ts` sequences waves; independent phases in one wave still run
+  one at a time, and isolated parallel writers are not wired yet.
 - No fusion panels, `onReject` revision routing, rewind targets, or budgets
   spanning revisions.
 - No end-to-end run of the old workflows against the new driver — that needs
   live models, so cutover remains unjustified.
+
+`/factory` still drives a single builder; the graph runner is exercised by
+`src/graph.test.ts` rather than by the command.

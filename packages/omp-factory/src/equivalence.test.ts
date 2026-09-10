@@ -74,7 +74,7 @@ describe("FB-GATE — claiming nothing does not clear the gate", () => {
 });
 
 describe("FB-GATE — bytes are not structure / empty file passes existence but fails non-empty", () => {
-	it("separates existence, emptiness and JSON structure", async () => {
+	it("separates existence, emptiness and JSON structure with a parse position", async () => {
 		await makeDirs();
 		await Bun.write(path.join(root, "plan.json"), "");
 		const empty = await evaluateFileAssertions([{ type: "file_contains", file: "plan.json", marker: "{" }], root);
@@ -82,7 +82,10 @@ describe("FB-GATE — bytes are not structure / empty file passes existence but 
 		await Bun.write(path.join(root, "plan.json"), '{"step": 1,}');
 		const malformed = await evaluateFileAssertions([{ type: "json_parses", file: "plan.json" }], root);
 		expect(malformed.passed).toBeFalse();
-		expect(malformed.failures[0]).toContain("unknown assertion type");
+		expect(malformed.failures[0]).toContain("plan.json is not valid JSON");
+		await Bun.write(path.join(root, "plan.json"), '{"step": 1}');
+		const valid = await evaluateFileAssertions([{ type: "json_parses", file: "plan.json" }], root);
+		expect(valid.passed).toBeTrue();
 	});
 });
 

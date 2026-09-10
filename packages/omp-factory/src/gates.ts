@@ -3,7 +3,10 @@
 export type FileAssertion =
 	| { type: "file_contains"; file: string; marker: string }
 	| { type: "file_not_contains"; file: string; marker: string }
+	| { type: "json_parses"; file: string }
 	| { type: string; file?: string; marker?: string };
+
+const KNOWN_TYPES = new Set(["file_contains", "file_not_contains", "json_parses"]);
 
 export interface AssertionReport {
 	passed: boolean;
@@ -14,11 +17,16 @@ export interface AssertionReport {
 export async function evaluateFileAssertions(assertions: FileAssertion[], root: string): Promise<AssertionReport> {
 	const failures: string[] = [];
 	for (const assertion of assertions) {
-		if (assertion.type !== "file_contains" && assertion.type !== "file_not_contains") {
+		if (!KNOWN_TYPES.has(assertion.type)) {
 			failures.push(`unknown assertion type: ${assertion.type}`);
 			continue;
 		}
-		if (!assertion.file || assertion.marker === undefined) {
+		if (!assertion.file) {
+			failures.push(`malformed assertion: ${JSON.stringify(assertion)}`);
+			continue;
+		}
+		const marker = "marker" in assertion ? assertion.marker : undefined;
+		if (assertion.type !== "json_parses" && marker === undefined) {
 			failures.push(`malformed assertion: ${JSON.stringify(assertion)}`);
 			continue;
 		}
@@ -29,12 +37,23 @@ export async function evaluateFileAssertions(assertions: FileAssertion[], root: 
 			failures.push(`missing artifact: ${assertion.file}`);
 			continue;
 		}
-		const contains = content.includes(assertion.marker);
+		if (assertion.type === "json_parses") {
+			// Bytes are not structure: a truncated plan.json or an apology in
+			// place of an object satisfies existence and non-emptiness alike.
+			// The parse position is what makes the failure actionable.
+			try {
+				JSON.parse(content);
+			} catch (error) {
+				failures.push(`${assertion.file} is not valid JSON: ${(error as Error).message}`);
+			}
+			continue;
+		}
+		const contains = marker !== undefined && content.includes(marker);
 		if (assertion.type === "file_contains" && !contains) {
-			failures.push(`${assertion.file} must contain ${JSON.stringify(assertion.marker)}`);
+			failures.push(`${assertion.file} must contain ${JSON.stringify(marker)}`);
 		}
 		if (assertion.type === "file_not_contains" && contains) {
-			failures.push(`${assertion.file} must not contain ${JSON.stringify(assertion.marker)}`);
+			failures.push(`${assertion.file} must not contain ${JSON.stringify(marker)}`);
 		}
 	}
 	return { passed: failures.length === 0, failures };
