@@ -19,7 +19,12 @@ export interface CopyIsolationOptions {
 	exclude?: string[];
 }
 
-const DEFAULT_EXCLUDE = ["node_modules", ".git"];
+/**
+ * `.git` is deliberately NOT excluded: change capture and any git-aware tool
+ * inside the sandbox need the repository. Only bulk that no verifier reads is
+ * skipped by default.
+ */
+const DEFAULT_EXCLUDE = ["node_modules"];
 
 /** Sandbox id characters that are safe in a directory name. */
 function safeSegment(id: string): string {

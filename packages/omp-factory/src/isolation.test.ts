@@ -25,6 +25,34 @@ afterEach(async () => {
 	journalDir = "";
 });
 
+describe("copyIsolation", () => {
+	// A sandbox without `.git` breaks change capture, and the failure reads as
+	// a producer error rather than a verification verdict — a false green.
+	it("carries the repository into the sandbox", async () => {
+		await makeDirs();
+		const proc = Bun.spawn(["git", "init", "-q", "-b", "main"], { cwd: root, stdout: "pipe", stderr: "pipe" });
+		await proc.exited;
+		const sandbox = await copyIsolation().start("with-git", root);
+		try {
+			await expect(fs.stat(path.join(sandbox.dir, ".git"))).resolves.toBeDefined();
+		} finally {
+			await sandbox.stop();
+		}
+	});
+
+	it("skips bulk no verifier reads", async () => {
+		await makeDirs();
+		await Bun.write(path.join(root, "node_modules", "dep", "index.js"), "bulk\n");
+		const sandbox = await copyIsolation().start("no-bulk", root);
+		try {
+			await expect(fs.stat(path.join(sandbox.dir, "node_modules"))).rejects.toThrow();
+			await expect(fs.stat(path.join(sandbox.dir, "base.txt"))).resolves.toBeDefined();
+		} finally {
+			await sandbox.stop();
+		}
+	});
+});
+
 function writer(name: string, file: string, extra: Partial<GraphPhase> = {}): GraphPhase {
 	return {
 		name,

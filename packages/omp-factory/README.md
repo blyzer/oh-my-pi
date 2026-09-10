@@ -46,6 +46,21 @@ acceptance. Crash safety is proved separately by `scripts/crash-drill.ts`,
 which SIGKILLs a real applier mid-apply over 8000 files and reconciles to a
 byte-exact committed tree.
 
+### Live evidence
+
+Three runs against real models in a scratch git repo, through the same
+`/factory` → `runGraph` path:
+
+| Run | Outcome |
+| --- | --- |
+| Builder writes and declares `src/greeting.txt` | ledger `WorkflowAccepted`, version 1, file present |
+| Builder answers in prose, no JSON | rejected on `envelope violation`, nothing accepted |
+| `scripts/live-wi0024.ts` — contradictory `file_contains` + `file_not_contains` | rejected on the contradiction, `acceptedVersion=null`, root untouched, no journal |
+
+The WI-0024 drill runs the builder in a sandbox on purpose: without one, a
+rejected builder's writes stay in the shared tree, so "nothing landed" would
+only be true of the integration journal.
+
 Concurrency: readers in a wave overlap, and writers overlap too **when an
 isolation provider gives each one its own tree** — accepted diffs then land on
 the shared root one at a time through the integration lock. Without a
