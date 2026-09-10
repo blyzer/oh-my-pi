@@ -80,6 +80,27 @@ that could not change; and every spawn on a revision reused the first spawn's
 registry id, so a corrector died on a duplicate id and the failure was
 misreported as a builder exit. Both are fixed here.
 
+A third run made the red gate adversarial: the same `exit 1` gate, and a
+builder that reached for the workflow file to make the gate pass. Both
+engines refuse it, and the refusals now line up on everything that decides
+acceptance:
+
+| Observation | Frozen engine | This driver |
+| --- | --- | --- |
+| Gate re-run before correcting | no | no |
+| Correction carries the gate's failure | yes | yes — `Phase "verify" rejected …: gate exit 1` |
+| Write to `.omp/adw/**` | refused | refused — `scope violation: .omp/adw/fix.yml (protected)` |
+| Second attempt after the protected write | refused | refused — the entry-state baseline still sees it |
+| Terminal state | nothing accepted | nothing accepted, `verify` blocked |
+| Rejected write left in the tree | reverted | **left in place** |
+
+The last row is a real divergence, not a rounding error. On a shared
+workspace the frozen engine restores what a rejected attempt wrote; this
+driver rejects the attempt and leaves the bytes. With `isolation: true` the
+writes never reach the tree at all, which is why the shipped examples that
+care set it — but the un-isolated path is weaker here than in the oracle,
+and no test or claim should suggest otherwise.
+
 `src/workflow-config.ts` loads the prototype's own `.omp/adw/*.yml` format —
 `dependsOn` (including the implicit declaration edge), `inputs` as transitive
 dependencies, `writes` as scope, `protected`, `gates`, `onFail: correct`
@@ -105,6 +126,10 @@ Open gaps, unproven rather than absent:
   checkout the published `@oh-my-pi/pi-natives` resolves ahead of the built
   workspace addon, so that path is unverified here.
 - No rewind targets beyond the single `onReject` route.
+- A rejected attempt's writes are not rolled back on a shared workspace.
+  The frozen engine restores them; this driver only refuses to accept them.
+  Closing it needs a write guard with per-attempt restore, which OMP core
+  owns in Rust (`TaskWriteGuard`) and this package does not wire up.
 - The run-for-run comparison covers `fix.yml` green and red only. The
   fusion, concurrent and resume families are pinned by the oracle suite and
   by live runs here, but not yet by a side-by-side against the old engine.

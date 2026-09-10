@@ -54,6 +54,7 @@ try {
 			opinions,
 		}) => {
 			const state = await entryState();
+			if (correction) console.log(`correction -> ${phase}: ${correction.slice(0, 160)}`);
 			const task = [
 				prompt,
 				inputs.length > 0
