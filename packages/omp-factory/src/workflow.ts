@@ -20,6 +20,11 @@ export interface WorkflowRequest {
 	scope: string[];
 	assertions: FileAssertion[];
 	gateCommand?: string[];
+	/**
+	 * This phase asserts it produces files. An envelope declaring none clears
+	 * no gate vacuously — claiming nothing is a rejection, not a pass.
+	 */
+	requireArtifacts?: boolean;
 	maxAttempts: number;
 	/**
 	 * Journal accepted change-sets through the integration owner. Absent means
@@ -100,6 +105,12 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 					return {
 						accepted: false as const,
 						evidence: `builder reported failure: ${candidate.summary ?? "no summary"}`,
+					};
+				}
+				if (request.requireArtifacts && (candidate.declaredArtifacts?.length ?? 0) === 0) {
+					return {
+						accepted: false as const,
+						evidence: "phase requires artifacts but the envelope declared none",
 					};
 				}
 				const scope = verifyScope(candidate.changedFiles, request.scope);
