@@ -51,9 +51,11 @@ describe("/factory probe command", () => {
 			registerCommand: (name: string, def: never) => {
 				registrations.set(name, def as never);
 			},
-			runSubprocess: async (options: Record<string, unknown>) => {
-				spawnOptions.push(options);
-				return { exitCode: 0, output: "FACTORY-PROBE-OK" };
+			pi: {
+				runSubprocess: async (options: Record<string, unknown>) => {
+					spawnOptions.push(options);
+					return { exitCode: 0, output: "FACTORY-PROBE-OK" };
+				},
 			},
 		};
 		const repo = await makeGitRepo();
@@ -67,7 +69,7 @@ describe("/factory probe command", () => {
 			},
 		};
 
-		factoryExtension(pi);
+		factoryExtension(pi as never);
 		const command = registrations.get("factory");
 		if (!command) throw new Error("/factory was not registered");
 		await command.handler("do the thing", ctx as never);
@@ -92,7 +94,9 @@ describe("/factory probe command", () => {
 			registerCommand: (name: string, def: never) => {
 				registrations.set(name, def as never);
 			},
-			runSubprocess: async () => ({ exitCode: 1, output: "", error: "boom" }),
+			pi: {
+				runSubprocess: async () => ({ exitCode: 1, output: "", error: "boom" }),
+			},
 		};
 		const repo = await makeGitRepo();
 		const ctx = {
@@ -105,7 +109,7 @@ describe("/factory probe command", () => {
 			},
 		};
 
-		factoryExtension(pi);
+		factoryExtension(pi as never);
 		const command = registrations.get("factory");
 		if (!command) throw new Error("/factory was not registered");
 		await command.handler("", ctx as never);
