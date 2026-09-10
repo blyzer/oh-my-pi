@@ -71,11 +71,41 @@ describe("loadWorkflowConfig against the frozen examples", () => {
 			maxRevisions: 3,
 		});
 	});
+	it("loads review.yml as one fusion phase with a sole writer", async () => {
+		const workflow = loadWorkflowConfig(await frozenExample("review"), options);
+		expect(workflow.acceptance).toBe("review");
+		const read = workflow.phases.find(phase => phase.name === "read");
+		expect(read?.writes).toBeTrue();
+		expect(read?.requireArtifacts).toBeTrue();
+	});
 
-	it("refuses review.yml instead of pretending fusion ran", async () => {
-		await expect(frozenExample("review").then(text => loadWorkflowConfig(text, options))).rejects.toThrow(
-			'kind "fusion" is not supported',
-		);
+	it("refuses a fusion phase with fewer than two panel seats", () => {
+		const text = [
+			"name: w",
+			"phases:",
+			"  - name: read",
+			"    kind: fusion",
+			"    panel:",
+			"      - owner: reviewer",
+			"    fuser:",
+			"      owner: task",
+			"",
+		].join("\n");
+		expect(() => loadWorkflowConfig(text, options)).toThrow("at least two panel seats");
+	});
+
+	it("refuses a fusion phase with no fuser", () => {
+		const text = [
+			"name: w",
+			"phases:",
+			"  - name: read",
+			"    kind: fusion",
+			"    panel:",
+			"      - owner: reviewer",
+			"      - owner: scout",
+			"",
+		].join("\n");
+		expect(() => loadWorkflowConfig(text, options)).toThrow("needs a fuser");
 	});
 });
 

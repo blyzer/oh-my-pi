@@ -10,6 +10,14 @@ import type { GraphPhase, SelectedInput } from "./graph";
 import type { Candidate } from "./loop";
 import type { ReviewVerdict } from "./review";
 
+/** One panel opinion, labelled by the seat that produced it. */
+export interface PanelOpinion {
+	seat: string;
+	owner: string;
+	text: string;
+	failed: boolean;
+}
+
 export interface AgentRunContext {
 	phase: string;
 	owner: string;
@@ -18,6 +26,14 @@ export interface AgentRunContext {
 	correction: string | undefined;
 	inputs: SelectedInput[];
 	workspace: string;
+	/**
+	 * Panel seats investigate and never write; the caller must restrict the
+	 * seat's tools accordingly. Exactly one seat per fusion phase — the
+	 * fuser — receives `readOnly: false`.
+	 */
+	readOnly: boolean;
+	/** Panel opinions handed to a fuser, labelled and in declared order. */
+	opinions?: PanelOpinion[];
 }
 
 export interface WorkflowConfigOptions {
@@ -62,6 +78,8 @@ interface RawPhase {
 	onFail?: unknown;
 	onReject?: unknown;
 	timeoutMs?: unknown;
+	panel?: unknown;
+	fuser?: unknown;
 }
 
 interface RawWorkflow {
@@ -123,7 +141,7 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 		if (typeof phase.name !== "string" || phase.name.trim().length === 0) throw new Error("every phase needs a name");
 		if (kinds.has(phase.name)) throw new Error(`duplicate phase name: ${phase.name}`);
 		const kind = phase.kind === undefined ? "agent" : phase.kind;
-		if (kind !== "agent" && kind !== "code") {
+		if (kind !== "agent" && kind !== "code" && kind !== "fusion") {
 			throw new Error(`phase "${phase.name}": kind "${String(kind)}" is not supported by this runner`);
 		}
 		order.push(phase.name);
@@ -216,6 +234,78 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 			};
 		}
 
+		if (kind === "fusion") {
+			const panel = Array.isArray(rawPhase.panel) ? (rawPhase.panel as Array<{ owner?: unknown }>) : [];
+			if (panel.length < 2) throw new Error(`phase "${name}" is a fusion phase and needs at least two panel seats`);
+			const fuser = rawPhase.fuser as { owner?: unknown } | undefined;
+			if (!fuser || typeof fuser.owner !== "string") {
+				throw new Error(`phase "${name}" is a fusion phase and needs a fuser`);
+			}
+			const seats = panel.map((seat, index) => {
+				if (seat.owner !== undefined && typeof seat.owner !== "string") {
+					throw new Error(`phase "${name}" panel seat ${index + 1} has a non-string owner`);
+				}
+				return { seat: `${name}#${index + 1}`, owner: typeof seat.owner === "string" ? seat.owner : "task" };
+			});
+			const sharedPrompt = [typeof rawPhase.prompt === "string" ? rawPhase.prompt : "", options.request ?? ""]
+				.filter(part => part.trim().length > 0)
+				.join("\n\n");
+			// The panel is not what got rejected: a retry re-runs the fuser
+			// only, and re-polling N models is the most expensive way to
+			// change nothing.
+			let cachedOpinions: PanelOpinion[] | undefined;
+			return {
+				name,
+				dependsOn,
+				inputs,
+				scope: writesGlobs ?? ["**"],
+				assertions: [],
+				artifactChecks,
+				requireArtifacts: artifactChecks.exist || artifactChecks.nonEmpty,
+				writes: true,
+				maxAttempts: maxAttempts as number,
+				onReject,
+				produce: async ({ attempt, correction, inputs: selected, workspace }) => {
+					if (!cachedOpinions) {
+						// Read-only seats answering the same question, so running
+						// them at once is safe; order follows the declaration.
+						const answers = await Promise.all(
+							seats.map(seat =>
+								options.runAgent({
+									phase: name,
+									owner: seat.owner,
+									prompt: sharedPrompt,
+									attempt,
+									correction: undefined,
+									inputs: selected,
+									workspace,
+									readOnly: true,
+								}),
+							),
+						);
+						cachedOpinions = answers.map((answer, index) => ({
+							seat: seats[index]?.seat ?? `${name}#${index + 1}`,
+							owner: seats[index]?.owner ?? "task",
+							text: answer.output ?? "",
+							failed: (answer.exitCode ?? 0) !== 0,
+						}));
+					}
+					return options.runAgent({
+						phase: name,
+						owner: fuser.owner as string,
+						prompt: sharedPrompt,
+						attempt,
+						correction,
+						inputs: selected,
+						workspace,
+						readOnly: false,
+						opinions: cachedOpinions,
+					});
+				},
+				review: wantsReview && options.review ? async candidate => options.review!(name, candidate) : undefined,
+			};
+		}
+
 		const readOnly = writesGlobs !== null && writesGlobs.length === 0;
 		return {
 			name,
@@ -239,6 +329,7 @@ export function loadWorkflowConfig(text: string, options: WorkflowConfigOptions)
 					correction,
 					inputs: selected,
 					workspace,
+					readOnly,
 				}),
 			review: wantsReview && options.review ? async candidate => options.review!(name, candidate) : undefined,
 		};

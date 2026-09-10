@@ -40,12 +40,17 @@ const settings = Settings.isolated();
 try {
 	const workflow = loadWorkflowConfig(await Bun.file(configPath).text(), {
 		request,
-		runAgent: async ({ phase, owner, prompt, correction, inputs, workspace: dir }) => {
+		runAgent: async ({ phase, owner, prompt, correction, inputs, workspace: dir, readOnly, opinions }) => {
 			const state = await captureBaselineState(dir);
 			const task = [
 				prompt,
 				inputs.length > 0
 					? `Accepted inputs: ${inputs.map(input => `${input.phase} v${input.version} (${input.artifacts.join(", ")})`).join("; ")}`
+					: "",
+				opinions && opinions.length > 0
+					? `Panel opinions, in declared order:\n${opinions
+							.map(op => `--- ${op.owner}${op.failed ? " (seat failed)" : ""} ---\n${op.text}`)
+							.join("\n\n")}`
 					: "",
 				correction ? `Previous attempt was rejected: ${correction}` : "",
 			]
@@ -56,15 +61,29 @@ try {
 				agent: {
 					name: owner,
 					description: `Factory ${phase} phase`,
-					systemPrompt: `You are the ${phase} phase of a software factory.\n\n${ENVELOPE_RULE}`,
+					// A panel seat owes an opinion, not a result: no write, no
+					// edit, no bash. That is what makes running them at once safe.
+					tools: readOnly ? ["read", "grep", "glob", "yield"] : undefined,
+					systemPrompt: readOnly
+						? `You are a read-only panel seat in the ${phase} phase. Answer the question; change nothing on disk.`
+						: `You are the ${phase} phase of a software factory.\n\n${ENVELOPE_RULE}`,
 					source: "project",
 				},
 				task,
 				index: 0,
-				id: `${workflowId}-${phase}`,
+				id: `${workflowId}-${phase}-${owner}`,
 				modelRegistry,
 				settings,
 			});
+			if (readOnly) {
+				// A seat's answer is evidence for the fuser, not a candidate.
+				return {
+					changedFiles: [],
+					label: `${phase}-seat-${owner}`,
+					exitCode: spawned.exitCode,
+					output: spawned.output,
+				};
+			}
 			const envelope = parseEnvelope(spawned.output ?? "");
 			return {
 				changedFiles: await captureTouchedSince(state),

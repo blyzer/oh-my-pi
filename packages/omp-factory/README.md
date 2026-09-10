@@ -56,6 +56,7 @@ Runs against real models in scratch git repos:
 | Builder answers in prose, no JSON | rejected on `envelope violation` |
 | `scripts/live-wi0024.ts` — contradictory `file_contains` + `file_not_contains` | rejected on the contradiction, root untouched, no journal |
 | `scripts/live-workflow.ts` with the frozen `ship.yml` (only its `command` retargeted) | `plan → build → verify` all accepted, `PLAN.md` and the edit landed through the journal |
+| `scripts/live-workflow.ts` with the frozen `review.yml`, unmodified | two read-only seats in parallel, one fuser wrote `REVIEW.md` naming both panellists |
 
 The WI-0024 drill runs the builder in a sandbox on purpose: without one, a
 rejected builder's writes stay in the shared tree, so "nothing landed" would
@@ -64,9 +65,11 @@ only be true of the integration journal.
 `src/workflow-config.ts` loads the prototype's own `.omp/adw/*.yml` format —
 `dependsOn` (including the implicit declaration edge), `inputs` as transitive
 dependencies, `writes` as scope, `protected`, `gates`, `onFail: correct`
-routed to the nearest agent ancestor, and `onReject`. Unsupported constructs
-(`kind: fusion`, unknown gates, artifact gates on a code phase) are refused at
-load time rather than dropped.
+routed to the nearest agent ancestor, `onReject`, and `kind: fusion` (a
+read-only panel in parallel, one fuser writing; a retry re-runs the fuser
+only, since the panel was not what got rejected). All four frozen examples
+load; unknown gates, artifact gates on a code phase, a panel under two seats
+and a missing fuser are refused at load time rather than dropped.
 
 Concurrency: readers in a wave overlap, and writers overlap too **when an
 isolation provider gives each one its own tree** — accepted diffs then land on
@@ -83,9 +86,11 @@ Open gaps, unproven rather than absent:
   (`ensureIsolation`), which the public barrel does not expose; in this
   checkout the published `@oh-my-pi/pi-natives` resolves ahead of the built
   workspace addon, so that path is unverified here.
-- No fusion panels and no rewind targets beyond the single `onReject` route.
-- No end-to-end run of the old workflows against the new driver — that needs
-  live models, so cutover remains unjustified.
+- No rewind targets beyond the single `onReject` route, and no per-seat
+  `model`/`thinking` pinning, so a panel may land two seats on one model.
+- The old engine has not been run side by side with this one. The frozen
+  workflows run here and the oracle suite pins the semantics, but no
+  run-for-run comparison exists, so cutover remains unjustified.
 
 `/factory` runs through `runGraph` with one writer phase, so the command and
 the engine share a single acceptance path; a multi-phase workflow is a longer
