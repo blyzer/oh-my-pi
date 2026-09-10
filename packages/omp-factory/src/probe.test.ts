@@ -54,7 +54,10 @@ describe("/factory probe command", () => {
 			pi: {
 				runSubprocess: async (options: Record<string, unknown>) => {
 					spawnOptions.push(options);
-					return { exitCode: 0, output: "FACTORY-PROBE-OK" };
+					return {
+						exitCode: 0,
+						output: `done\n${JSON.stringify({ status: "success", summary: "probe ok", artifacts: [] })}`,
+					};
 				},
 			},
 		};
@@ -117,6 +120,39 @@ describe("/factory probe command", () => {
 		expect(notices[0]?.kind).toBe("error");
 		expect(notices[0]?.message).toContain("rejected");
 		expect(notices[0]?.message).toContain("exit 1");
+		const ledger = await ledgerDirOf(notices);
+		if (ledger) await fs.rm(ledger, { recursive: true, force: true });
+	});
+
+	it("rejects a builder that returns prose instead of an envelope", async () => {
+		const registrations = new Map<string, { handler: (args: string, ctx: never) => Promise<void> }>();
+		const notices: Array<{ message: string; kind: string }> = [];
+		const pi = {
+			registerCommand: (name: string, def: never) => {
+				registrations.set(name, def as never);
+			},
+			pi: {
+				runSubprocess: async () => ({ exitCode: 0, output: "I finished, trust me." }),
+			},
+		};
+		const repo = await makeGitRepo();
+		const ctx = {
+			cwd: repo,
+			modelRegistry: {},
+			ui: {
+				notify: (message: string, kind: string) => {
+					notices.push({ message, kind });
+				},
+			},
+		};
+
+		factoryExtension(pi as never);
+		const command = registrations.get("factory");
+		if (!command) throw new Error("/factory was not registered");
+		await command.handler("", ctx as never);
+
+		expect(notices[0]?.kind).toBe("error");
+		expect(notices[0]?.message).toContain("envelope violation");
 		const ledger = await ledgerDirOf(notices);
 		if (ledger) await fs.rm(ledger, { recursive: true, force: true });
 	});

@@ -11,12 +11,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDefinition, AgentSource, ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { captureBaselineState, captureTouchedSince } from "./capture";
+import { parseEnvelope } from "./envelope";
 import { runWorkflow } from "./workflow";
 
 const BUILDER_SYSTEM_PROMPT = [
 	"You are a factory builder.",
 	"Follow the assignment exactly.",
-	"Reply concisely with what you did.",
+	"End your final message with one JSON object:",
+	'{"status":"success"|"fail","summary":"one line","artifacts":["repo-relative/path/you/wrote"]}',
+	"Declare every file you changed. Undeclared writes are rejected.",
 ].join("\n");
 
 export function buildProbeAssignment(args: string): string {
@@ -58,11 +61,16 @@ export default function factoryExtension(pi: ExtensionAPI): void {
 						id: workflowId,
 						modelRegistry: ctx.modelRegistry,
 					});
+					const envelope = parseEnvelope(spawned.output ?? "");
 					return {
 						changedFiles: await captureTouchedSince(state),
 						label: workflowId,
 						exitCode: spawned.exitCode,
 						output: spawned.output,
+						envelopeViolation: envelope.ok ? undefined : envelope.violation,
+						selfReportedStatus: envelope.ok ? envelope.envelope.status : undefined,
+						summary: envelope.ok ? envelope.envelope.summary : undefined,
+						declaredArtifacts: envelope.ok ? envelope.envelope.artifacts : undefined,
 					};
 				},
 			});

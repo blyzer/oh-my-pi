@@ -93,6 +93,15 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 						evidence: `builder failed with exit ${candidate.exitCode}: ${(candidate.output ?? "").slice(0, 500)}`,
 					};
 				}
+				if (candidate.envelopeViolation) {
+					return { accepted: false as const, evidence: `envelope violation: ${candidate.envelopeViolation}` };
+				}
+				if (candidate.selfReportedStatus === "fail") {
+					return {
+						accepted: false as const,
+						evidence: `builder reported failure: ${candidate.summary ?? "no summary"}`,
+					};
+				}
 				const scope = verifyScope(candidate.changedFiles, request.scope);
 				if (!scope.ok) {
 					return { accepted: false as const, evidence: `scope violation: ${scope.violations.join(", ")}` };

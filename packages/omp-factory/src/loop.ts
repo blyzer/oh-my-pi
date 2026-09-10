@@ -15,6 +15,12 @@ export interface Candidate {
 	 * change-set when present; absent means "no claim to check".
 	 */
 	declaredArtifacts?: string[];
+	/** Envelope contract violation; present means the builder owed a parseable answer and did not give one. */
+	envelopeViolation?: string;
+	/** The builder's own verdict. `fail` never accepts, however green the gates. */
+	selfReportedStatus?: "success" | "fail";
+	/** Builder's one-line account, quoted into rejection evidence. */
+	summary?: string;
 }
 export type VerifyOutcome = { accepted: true } | { accepted: false; evidence: string };
 

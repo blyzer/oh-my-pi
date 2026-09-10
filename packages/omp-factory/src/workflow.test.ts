@@ -230,4 +230,28 @@ describe("runWorkflow", () => {
 			await fs.rm(journalDir, { recursive: true, force: true });
 		}
 	});
+
+	it("rejects a self-reported failure even when every gate is green", async () => {
+		await makeDirs();
+		await Bun.write(path.join(root, "out.txt"), "DONE");
+		const result = await runWorkflow({
+			workflowId: "wf-1",
+			phase: "build",
+			runDir,
+			workspace: root,
+			scope: ["**"],
+			assertions: [{ type: "file_contains", file: "out.txt", marker: "DONE" }],
+			maxAttempts: 1,
+			produce: async () => ({
+				changedFiles: [],
+				label: "c1",
+				exitCode: 0,
+				selfReportedStatus: "fail" as const,
+				summary: "tests still red",
+			}),
+			review: async () => ({ approved: true, blockers: [], findings: [] }),
+		});
+		expect(result.status).toBe("rejected");
+		expect(result.evidence[0]).toContain("builder reported failure: tests still red");
+	});
 });
