@@ -48,18 +48,25 @@ byte-exact committed tree.
 
 ### Live evidence
 
-Three runs against real models in a scratch git repo, through the same
-`/factory` → `runGraph` path:
+Runs against real models in scratch git repos:
 
 | Run | Outcome |
 | --- | --- |
-| Builder writes and declares `src/greeting.txt` | ledger `WorkflowAccepted`, version 1, file present |
-| Builder answers in prose, no JSON | rejected on `envelope violation`, nothing accepted |
-| `scripts/live-wi0024.ts` — contradictory `file_contains` + `file_not_contains` | rejected on the contradiction, `acceptedVersion=null`, root untouched, no journal |
+| Builder writes and declares `src/greeting.txt` | accepted, version 1, file present |
+| Builder answers in prose, no JSON | rejected on `envelope violation` |
+| `scripts/live-wi0024.ts` — contradictory `file_contains` + `file_not_contains` | rejected on the contradiction, root untouched, no journal |
+| `scripts/live-workflow.ts` with the frozen `ship.yml` (only its `command` retargeted) | `plan → build → verify` all accepted, `PLAN.md` and the edit landed through the journal |
 
 The WI-0024 drill runs the builder in a sandbox on purpose: without one, a
 rejected builder's writes stay in the shared tree, so "nothing landed" would
 only be true of the integration journal.
+
+`src/workflow-config.ts` loads the prototype's own `.omp/adw/*.yml` format —
+`dependsOn` (including the implicit declaration edge), `inputs` as transitive
+dependencies, `writes` as scope, `protected`, `gates`, `onFail: correct`
+routed to the nearest agent ancestor, and `onReject`. Unsupported constructs
+(`kind: fusion`, unknown gates, artifact gates on a code phase) are refused at
+load time rather than dropped.
 
 Concurrency: readers in a wave overlap, and writers overlap too **when an
 isolation provider gives each one its own tree** — accepted diffs then land on

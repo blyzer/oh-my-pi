@@ -3,10 +3,13 @@
 export type FileAssertion =
 	| { type: "file_contains"; file: string; marker: string }
 	| { type: "file_not_contains"; file: string; marker: string }
+	| { type: "file_exists"; file: string }
+	| { type: "file_non_empty"; file: string }
 	| { type: "json_parses"; file: string }
 	| { type: string; file?: string; marker?: string };
 
-const KNOWN_TYPES = new Set(["file_contains", "file_not_contains", "json_parses"]);
+const KNOWN_TYPES = new Set(["file_contains", "file_not_contains", "file_exists", "file_non_empty", "json_parses"]);
+const MARKERLESS = new Set(["file_exists", "file_non_empty", "json_parses"]);
 
 export interface AssertionReport {
 	passed: boolean;
@@ -26,7 +29,7 @@ export async function evaluateFileAssertions(assertions: FileAssertion[], root: 
 			continue;
 		}
 		const marker = "marker" in assertion ? assertion.marker : undefined;
-		if (assertion.type !== "json_parses" && marker === undefined) {
+		if (!MARKERLESS.has(assertion.type) && marker === undefined) {
 			failures.push(`malformed assertion: ${JSON.stringify(assertion)}`);
 			continue;
 		}
@@ -35,6 +38,13 @@ export async function evaluateFileAssertions(assertions: FileAssertion[], root: 
 			content = await Bun.file(`${root}/${assertion.file}`).text();
 		} catch {
 			failures.push(`missing artifact: ${assertion.file}`);
+			continue;
+		}
+		if (assertion.type === "file_exists") continue;
+		if (assertion.type === "file_non_empty") {
+			// Existence is not content: `touch`-and-declare passes the first
+			// gate and fails this one.
+			if (content.length === 0) failures.push(`${assertion.file} is empty`);
 			continue;
 		}
 		if (assertion.type === "json_parses") {
