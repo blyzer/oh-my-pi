@@ -180,4 +180,54 @@ describe("runWorkflow", () => {
 		expect(projection.status).toBe("failed");
 		expect(projection.phases.build?.status).toBe("failed");
 	});
+
+	it("journals an accepted candidate through to committed", async () => {
+		await makeDirs();
+		const journalDir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-wf-journal-"));
+		try {
+			await Bun.write(path.join(root, "out.txt"), "DONE");
+			const result = await runWorkflow({
+				workflowId: "wf-1",
+				phase: "build",
+				runDir,
+				workspace: root,
+				scope: ["**"],
+				assertions: [],
+				maxAttempts: 1,
+				integrate: { journalDir, base: "base-1" },
+				produce: async () => ({ changedFiles: ["out.txt"], label: "c1", exitCode: 0 }),
+			});
+			expect(result.status).toBe("accepted");
+			const stored = (await Bun.file(path.join(journalDir, "integration.json")).json()) as {
+				status: string;
+			};
+			expect(stored.status).toBe("committed");
+			const { projection } = await replay(runDir);
+			expect(projection.phases.build?.integration).toBe("committed");
+		} finally {
+			await fs.rm(journalDir, { recursive: true, force: true });
+		}
+	});
+
+	it("fails closed when the candidate deletes files", async () => {
+		await makeDirs();
+		const journalDir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-wf-journal-"));
+		try {
+			const result = await runWorkflow({
+				workflowId: "wf-1",
+				phase: "build",
+				runDir,
+				workspace: root,
+				scope: ["**"],
+				assertions: [],
+				maxAttempts: 1,
+				integrate: { journalDir, base: "base-1" },
+				produce: async () => ({ changedFiles: ["gone.txt"], label: "c1", exitCode: 0 }),
+			});
+			expect(result.status).toBe("rejected");
+			expect(result.evidence[0]).toContain("deleted files unsupported");
+		} finally {
+			await fs.rm(journalDir, { recursive: true, force: true });
+		}
+	});
 });

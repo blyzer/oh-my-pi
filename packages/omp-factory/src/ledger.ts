@@ -15,6 +15,7 @@ export interface PhaseProjection {
 	status: "pending" | "ready" | "dispatched" | "accepted" | "failed";
 	attempts: number;
 	acceptedVersion: number | null;
+	integration: "prepared" | "applying" | "applied" | "committed" | null;
 }
 
 export interface WorkflowProjection {
@@ -26,9 +27,8 @@ export interface WorkflowProjection {
 
 const LOG_FILE = "events.jsonl";
 const CHECKPOINT_FILE = "checkpoint.json";
-
 function freshPhase(): PhaseProjection {
-	return { status: "pending", attempts: 0, acceptedVersion: null };
+	return { status: "pending", attempts: 0, acceptedVersion: null, integration: null };
 }
 
 /** Pure reducer: replay must reconstruct the same logical state every time. */
@@ -67,6 +67,23 @@ export function reduceEvents(workflowId: string, events: WorkflowEvent[]): Workf
 				if (!phase) throw new Error("PhaseFailed without phase");
 				const current = projection.phases[phase] ?? freshPhase();
 				current.status = "failed";
+				projection.phases[phase] = current;
+				break;
+			}
+			case "IntegrationPrepared":
+			case "IntegrationApplying":
+			case "IntegrationApplied":
+			case "IntegrationCommitted": {
+				if (!phase) throw new Error(`${event.type} without phase`);
+				const current = projection.phases[phase] ?? freshPhase();
+				current.integration =
+					event.type === "IntegrationPrepared"
+						? "prepared"
+						: event.type === "IntegrationApplying"
+							? "applying"
+							: event.type === "IntegrationApplied"
+								? "applied"
+								: "committed";
 				projection.phases[phase] = current;
 				break;
 			}
