@@ -73,4 +73,21 @@ describe("ledger replay", () => {
 		await appendEvent(root, "wf-1", "TimeTravel", {});
 		await expect(replay(root)).rejects.toThrow("unknown event type");
 	});
+
+	// Regression: appends used to read the whole log and rewrite it, so two
+	// concurrent phases sharing a run directory truncated each other's line
+	// and replay refused the torn record.
+	it("keeps a gapless log under concurrent appends", async () => {
+		const root = await makeDir();
+		await Promise.all(
+			Array.from({ length: 24 }, (_unused, index) =>
+				appendEvent(root, "wf-1", "AttemptStarted", { phase: `p${index}`, attempt: 1 }),
+			),
+		);
+		const text = await Bun.file(path.join(root, "events.jsonl")).text();
+		const lines = text.split("\n").filter(line => line.trim().length > 0);
+		expect(lines).toHaveLength(24);
+		const seqs = lines.map(line => (JSON.parse(line) as { seq: number }).seq).sort((a, b) => a - b);
+		expect(seqs).toEqual(Array.from({ length: 24 }, (_unused, index) => index + 1));
+	});
 });

@@ -3,6 +3,7 @@
  * `checkpoint.json` is a reconstructable projection. Deleting the projection
  * never destroys truth; a corrupt log fails loudly, never as "new workflow".
  */
+import * as fs from "node:fs/promises";
 
 export interface WorkflowEvent {
 	seq: number;
@@ -43,6 +44,11 @@ export function reduceEvents(workflowId: string, events: WorkflowEvent[]): Workf
 		switch (event.type) {
 			case "WorkflowStarted":
 				break;
+			case "PhaseStarted": {
+				if (!phase) throw new Error("PhaseStarted without phase");
+				projection.phases[phase] ??= freshPhase();
+				break;
+			}
 			case "AttemptStarted": {
 				if (!phase) throw new Error("AttemptStarted without phase");
 				const current = projection.phases[phase] ?? freshPhase();
@@ -135,19 +141,50 @@ async function readLog(dir: string): Promise<{ workflowId: string; events: Workf
 	return { workflowId, events };
 }
 
+/**
+ * Appends are serialized per run directory and land as real appends.
+ * Read-modify-writing the whole log looked fine until concurrent phases
+ * shared one ledger: two writers each read the same prefix and the later
+ * `write` truncated the other's line, leaving a torn record that replay
+ * correctly refused to parse.
+ */
+const appendChains = new Map<string, Promise<unknown>>();
+const nextSeq = new Map<string, number>();
+
+async function appendOnce(
+	dir: string,
+	workflowId: string,
+	type: string,
+	payload: Record<string, unknown>,
+): Promise<WorkflowEvent> {
+	let seq = nextSeq.get(dir);
+	if (seq === undefined) {
+		const existing = await readLog(dir);
+		seq = existing ? existing.events.length : 0;
+	}
+	seq += 1;
+	const event: WorkflowEvent = { seq, type, at: Date.now(), payload: { workflowId, ...payload } };
+	await fs.appendFile(`${dir}/${LOG_FILE}`, `${JSON.stringify(event)}\n`);
+	nextSeq.set(dir, seq);
+	return event;
+}
+
 export async function appendEvent(
 	dir: string,
 	workflowId: string,
 	type: string,
 	payload: Record<string, unknown>,
 ): Promise<WorkflowEvent> {
-	const existing = await readLog(dir);
-	const seq = existing ? existing.events.length + 1 : 1;
-	const event: WorkflowEvent = { seq, type, at: Date.now(), payload: { workflowId, ...payload } };
-	const file = Bun.file(`${dir}/${LOG_FILE}`);
-	const handle = (await file.exists()) ? await file.text() : "";
-	await Bun.write(`${dir}/${LOG_FILE}`, `${handle}${JSON.stringify(event)}\n`);
-	return event;
+	const previous = appendChains.get(dir) ?? Promise.resolve();
+	const next = previous.then(
+		() => appendOnce(dir, workflowId, type, payload),
+		() => appendOnce(dir, workflowId, type, payload),
+	);
+	appendChains.set(
+		dir,
+		next.catch(() => undefined),
+	);
+	return next;
 }
 
 /** Atomic checkpoint write (tmp + rename): a torn write never parses as truth. */

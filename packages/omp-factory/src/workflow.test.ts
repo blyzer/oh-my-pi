@@ -36,7 +36,8 @@ describe("runWorkflow", () => {
 		});
 		expect(result.status).toBe("accepted");
 		const { projection } = await replay(runDir);
-		expect(projection.status).toBe("accepted");
+		// A bare phase run does not decide the workflow; the graph does.
+		expect(projection.status).toBe("running");
 		expect(projection.phases.build).toMatchObject({ status: "accepted", attempts: 1, acceptedVersion: 1 });
 	});
 
@@ -77,7 +78,7 @@ describe("runWorkflow", () => {
 		});
 		expect(result.status).toBe("rejected");
 		const { projection } = await replay(runDir);
-		expect(projection.status).toBe("failed");
+		expect(projection.status).toBe("running");
 		expect(projection.phases.build?.status).toBe("failed");
 	});
 
@@ -177,7 +178,7 @@ describe("runWorkflow", () => {
 		expect(result.status).toBe("rejected");
 		expect(result.evidence[0]).toContain("producer threw: spawn unavailable");
 		const { projection } = await replay(runDir);
-		expect(projection.status).toBe("failed");
+		expect(projection.status).toBe("running");
 		expect(projection.phases.build?.status).toBe("failed");
 	});
 

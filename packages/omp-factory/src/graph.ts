@@ -11,6 +11,7 @@
 import { buildWaves, type PhaseDeps, VersionStore } from "./dag";
 import type { FileAssertion } from "./gates";
 import type { Candidate } from "./loop";
+import { appendEvent } from "./ledger";
 import type { ReviewVerdict } from "./review";
 import { runWorkflow, type WorkflowRequest } from "./workflow";
 
@@ -31,6 +32,8 @@ export interface GraphPhase {
 	assertions: FileAssertion[];
 	gateCommand?: string[];
 	requireArtifacts?: boolean;
+	/** Gates evaluated against the envelope's declared artifacts. */
+	artifactChecks?: { exist?: boolean; nonEmpty?: boolean; jsonParses?: boolean };
 	/**
 	 * This phase mutates the shared workspace. Writers never overlap: readers
 	 * in a wave run concurrently, writers take a single token in wave order.
@@ -70,6 +73,8 @@ export interface GraphRequest {
 	workspace: string;
 	phases: GraphPhase[];
 	integrate?: WorkflowRequest["integrate"];
+	/** Paths no phase may change, whatever its own scope allows. */
+	protectedGlobs?: string[];
 	/**
 	 * Give each writer its own copy of the workspace. Without it writers are
 	 * serialized on the shared tree — the only other safe option.
@@ -138,15 +143,20 @@ function validate(phases: GraphPhase[]): PhaseDeps {
 		for (const dep of phase.dependsOn ?? []) {
 			if (!names.has(dep)) throw new Error(`phase "${phase.name}" depends on unknown phase "${dep}"`);
 		}
-		for (const input of phase.inputs ?? []) {
-			if (!(phase.dependsOn ?? []).includes(input)) {
-				throw new Error(`phase "${phase.name}" consumes "${input}" without depending on it`);
-			}
-		}
 		deps[phase.name] = [...(phase.dependsOn ?? [])];
 	}
 	// Throws on cycles, naming every phase in the loop.
 	buildWaves(Object.keys(deps), deps);
+	for (const phase of phases) {
+		// An input must be a transitive dependency: that is what proves the
+		// consumed version exists before the consumer dispatches.
+		const reachable = ancestors(deps, phase.name);
+		for (const input of phase.inputs ?? []) {
+			if (!reachable.has(input)) {
+				throw new Error(`phase "${phase.name}" consumes "${input}" without depending on it`);
+			}
+		}
+	}
 	for (const phase of phases) {
 		const route = phase.onReject;
 		if (!route) continue;
@@ -165,6 +175,7 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 	const waves = buildWaves(Object.keys(deps), deps);
 	const byName = new Map(request.phases.map(phase => [phase.name, phase]));
 	const store = new VersionStore();
+	await appendEvent(request.runDir, request.workflowId, "WorkflowStarted", {});
 	const accepted = new Set<string>();
 	const outcomes = new Map<string, PhaseOutcome>();
 	const order: string[] = [];
@@ -231,6 +242,8 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				workspace,
 				scope: phase.scope,
 				assertions: phase.assertions,
+				artifactChecks: phase.artifactChecks,
+				protectedGlobs: request.protectedGlobs,
 				gateCommand: phase.gateCommand,
 				requireArtifacts: phase.requireArtifacts,
 				maxAttempts: phase.maxAttempts,
@@ -303,10 +316,13 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 	}
 
 	const phases = [...outcomes.values()];
-	return {
-		status: phases.every(outcome => outcome.status === "accepted") ? "accepted" : "failed",
-		order,
-		phases,
-		peakConcurrentWriters,
-	};
+	const status = phases.every(outcome => outcome.status === "accepted") ? "accepted" : "failed";
+	// One verdict per run: the graph decides the workflow, phases decide themselves.
+	await appendEvent(
+		request.runDir,
+		request.workflowId,
+		status === "accepted" ? "WorkflowAccepted" : "WorkflowFailed",
+		{ phases: phases.map(outcome => `${outcome.phase}:${outcome.status}`) },
+	);
+	return { status, order, phases, peakConcurrentWriters };
 }

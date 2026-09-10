@@ -216,7 +216,7 @@ describe("FB-RECOVERY — an in-flight attempt replays as dispatched, never as a
 			},
 		});
 		const { projection } = await replay(runDir);
-		expect(projection.status).toBe("failed");
+		expect(projection.status).toBe("running");
 		expect(projection.phases.build?.acceptedVersion).toBeNull();
 	});
 });

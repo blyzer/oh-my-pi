@@ -25,6 +25,14 @@ export interface WorkflowRequest {
 	 * no gate vacuously — claiming nothing is a rejection, not a pass.
 	 */
 	requireArtifacts?: boolean;
+	/**
+	 * Gates evaluated against the envelope's declared artifacts rather than a
+	 * static file list — the workflow's `artifacts_exist`, `files_non_empty`
+	 * and `json_parses`.
+	 */
+	artifactChecks?: { exist?: boolean; nonEmpty?: boolean; jsonParses?: boolean };
+	/** Paths no phase may change, whatever its scope allows. */
+	protectedGlobs?: string[];
 	maxAttempts: number;
 	/**
 	 * Journal accepted change-sets through the integration owner. Absent means
@@ -91,7 +99,7 @@ async function integrateCandidate(
 }
 export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowResult> {
 	const { workflowId, phase, runDir } = request;
-	await appendEvent(runDir, workflowId, "WorkflowStarted", {});
+	await appendEvent(runDir, workflowId, "PhaseStarted", { phase });
 	let version = 0;
 	let startedAttempts = 0;
 	let result: WorkflowResult;
@@ -125,9 +133,23 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 						evidence: "phase requires artifacts but the envelope declared none",
 					};
 				}
-				const scope = verifyScope(candidate.changedFiles, request.scope);
+				const scope = verifyScope(candidate.changedFiles, request.scope, request.protectedGlobs ?? []);
 				if (!scope.ok) {
 					return { accepted: false as const, evidence: `scope violation: ${scope.violations.join(", ")}` };
+				}
+				const artifactChecks = request.artifactChecks;
+				if (artifactChecks) {
+					const declared = candidate.declaredArtifacts ?? [];
+					const checks: FileAssertion[] = [];
+					for (const file of declared) {
+						if (artifactChecks.exist || artifactChecks.nonEmpty) checks.push({ type: "file_exists", file });
+						if (artifactChecks.nonEmpty) checks.push({ type: "file_non_empty", file });
+						if (artifactChecks.jsonParses && file.endsWith(".json")) checks.push({ type: "json_parses", file });
+					}
+					const report = await evaluateFileAssertions(checks, request.workspace);
+					if (!report.passed) {
+						return { accepted: false as const, evidence: report.failures.join("; ") };
+					}
 				}
 				if (candidate.declaredArtifacts !== undefined) {
 					const actual = new Set(candidate.changedFiles);
@@ -169,14 +191,12 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 	} catch (error) {
 		const evidence = [`producer threw: ${error instanceof Error ? error.message : String(error)}`];
 		await appendEvent(runDir, workflowId, "PhaseFailed", { phase, evidence });
-		await appendEvent(runDir, workflowId, "WorkflowFailed", { phase, evidence });
 		return { status: "rejected", attempts: startedAttempts, evidence };
 	}
-	if (result.status === "accepted") {
-		await appendEvent(runDir, workflowId, "WorkflowAccepted", { phase, version });
-	} else {
+	// Only phase-scoped events belong here. Whether the WORKFLOW is accepted is
+	// the graph's call: one phase passing decides nothing about its siblings.
+	if (result.status !== "accepted") {
 		await appendEvent(runDir, workflowId, "PhaseFailed", { phase, evidence: result.evidence });
-		await appendEvent(runDir, workflowId, "WorkflowFailed", { phase, evidence: result.evidence });
 	}
 	return result;
 }
