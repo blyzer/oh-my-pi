@@ -148,6 +148,15 @@ export class Semaphore {
 	}
 
 	/**
+	 * Permits currently held. Admission control needs it: refusing a start
+	 * when nothing is running would stall forever rather than wait for
+	 * capacity that only a running holder can free.
+	 */
+	get inFlight(): number {
+		return this.#current;
+	}
+
+	/**
 	 * Resolves when a slot is available. Pass an `AbortSignal` so callers that
 	 * stop waiting (parent task cancelled, wall-clock budget elapsed) also stop
 	 * occupying a queue slot — otherwise a later `release()` would resolve the

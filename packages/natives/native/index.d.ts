@@ -1955,6 +1955,55 @@ export interface HighlightColors {
 }
 
 /**
+ * Sample host capacity now.
+ *
+ * `disk_path` selects the filesystem to measure; the workspace root is the
+ * meaningful choice, since that is where a sandbox copy or an object store
+ * will land. Every field is best-effort: a metric the platform does not
+ * report is `null`, never a fabricated default, so a caller can fail closed
+ * on the distinction.
+ */
+export declare function hostCapacity(diskPath?: string | undefined | null): HostCapacity
+
+/** A point-in-time reading of host capacity. */
+export interface HostCapacity {
+  /** Physical RAM in bytes, or 0 when the platform does not report it. */
+  totalMemory: number
+  /**
+   * Memory that can be handed out without swapping, in bytes.
+   *
+   * Linux reads `MemAvailable` (the kernel's own estimate, which accounts
+   * for reclaimable page cache). macOS derives it from
+   * `kern.memorystatus_level`, the percentage the memory-pressure
+   * subsystem itself acts on. `null` when unavailable — callers MUST fail
+   * closed rather than assume capacity.
+   */
+  availableMemory?: number
+  /**
+   * Schedulable CPUs, honouring cgroup/affinity limits where the platform
+   * reports them.
+   */
+  cpus: number
+  /**
+   * 1-minute load average, or `null` on platforms without one.
+   *
+   * Compare against `cpus`: a load of 8 is idle on 16 CPUs and a queue on
+   * 4.
+   */
+  loadAverage?: number
+  /** Free bytes on the filesystem holding the queried path. */
+  availableDisk?: number
+  /**
+   * True when the kernel reports memory pressure right now.
+   *
+   * A distinct signal from a low `available_memory`: pressure means the
+   * kernel is already reclaiming, so new work will contend rather than
+   * simply consume.
+   */
+  underMemoryPressure: boolean
+}
+
+/**
  * Convert HTML source to Markdown with optional preprocessing.
  *
  * # Errors

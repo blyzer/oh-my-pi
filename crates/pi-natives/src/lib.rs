@@ -38,6 +38,7 @@ pub mod glob;
 pub mod glob_util;
 pub mod grep;
 pub mod highlight;
+pub mod host;
 pub mod html;
 pub mod iofs;
 pub mod js;
