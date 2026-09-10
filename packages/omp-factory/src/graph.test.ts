@@ -81,7 +81,10 @@ describe("runGraph", () => {
 			],
 		});
 		expect(result.status).toBe("failed");
-		expect(ran).toEqual(["architect", "backend", "frontend"]);
+		// architect gates the wave; backend and frontend are concurrent readers,
+		// so membership is the contract and their finish order is not.
+		expect(ran[0]).toBe("architect");
+		expect([...ran].sort()).toEqual(["architect", "backend", "frontend"]);
 		const reviewer = result.phases.find(outcome => outcome.phase === "reviewer");
 		expect(reviewer?.status).toBe("blocked");
 		expect(reviewer?.evidence[0]).toContain("backend");
@@ -165,5 +168,132 @@ describe("runGraph", () => {
 				phases: [phase("plan"), phase("build", { inputs: ["plan"] })],
 			}),
 		).rejects.toThrow('consumes "plan" without depending on it');
+	});
+
+	it("overlaps readers in a wave but never two writers", async () => {
+		await makeDirs();
+		let inFlight = 0;
+		let peakReaders = 0;
+		let peakWriters = 0;
+		const body = (writes: boolean) => async () => {
+			inFlight += 1;
+			if (writes) peakWriters = Math.max(peakWriters, inFlight);
+			else peakReaders = Math.max(peakReaders, inFlight);
+			await Bun.sleep(40);
+			inFlight -= 1;
+			return { changedFiles: [], label: "x", exitCode: 0 };
+		};
+		const readers = await runGraph({
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			phases: [phase("scoutA", { produce: body(false) }), phase("scoutB", { produce: body(false) })],
+		});
+		expect(readers.status).toBe("accepted");
+		expect(peakReaders).toBe(2);
+
+		inFlight = 0;
+		const writers = await runGraph({
+			workflowId: "wf2",
+			runDir,
+			workspace: root,
+			phases: [
+				phase("buildA", { writes: true, produce: body(true) }),
+				phase("buildB", { writes: true, produce: body(true) }),
+			],
+		});
+		expect(writers.status).toBe("accepted");
+		expect(peakWriters).toBe(1);
+		expect(writers.peakConcurrentWriters).toBe(1);
+	});
+
+	it("routes a coherent rejection back to the named producer and re-runs its closure", async () => {
+		await makeDirs();
+		const dispatched: string[] = [];
+		let planRuns = 0;
+		let reviewRuns = 0;
+		const result = await runGraph({
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			phases: [
+				phase("plan", {
+					writes: true,
+					produce: async () => {
+						planRuns += 1;
+						dispatched.push("plan");
+						return { changedFiles: [], label: `plan-${planRuns}`, exitCode: 0, summary: `v${planRuns}` };
+					},
+				}),
+				phase("build", {
+					dependsOn: ["plan"],
+					inputs: ["plan"],
+					writes: true,
+					produce: async () => {
+						dispatched.push("build");
+						return { changedFiles: [], label: "build", exitCode: 0 };
+					},
+				}),
+				phase("review", {
+					dependsOn: ["build"],
+					onReject: { to: "plan", maxRevisions: 1 },
+					produce: async () => {
+						reviewRuns += 1;
+						dispatched.push("review");
+						return { changedFiles: [], label: "review", exitCode: 0 };
+					},
+					review: async () => ({
+						approved: reviewRuns > 1,
+						blockers: reviewRuns > 1 ? [] : ["plan is wrong"],
+						findings: [],
+					}),
+				}),
+			],
+		});
+		expect(result.status).toBe("accepted");
+		expect(planRuns).toBe(2);
+		expect(dispatched).toEqual(["plan", "build", "review", "plan", "build", "review"]);
+		expect(result.phases.find(outcome => outcome.phase === "review")?.status).toBe("accepted");
+	});
+
+	it("stops revising at the declared budget", async () => {
+		await makeDirs();
+		let planRuns = 0;
+		const result = await runGraph({
+			workflowId: "wf",
+			runDir,
+			workspace: root,
+			phases: [
+				phase("plan", {
+					produce: async () => {
+						planRuns += 1;
+						return { changedFiles: [], label: "plan", exitCode: 0 };
+					},
+				}),
+				phase("review", {
+					dependsOn: ["plan"],
+					onReject: { to: "plan", maxRevisions: 2 },
+					review: async () => ({ approved: false, blockers: ["never happy"], findings: [] }),
+				}),
+			],
+		});
+		expect(result.status).toBe("failed");
+		expect(planRuns).toBe(3);
+	});
+
+	it("refuses a revision route that is not a transitive dependency", async () => {
+		await makeDirs();
+		await expect(
+			runGraph({
+				workflowId: "wf",
+				runDir,
+				workspace: root,
+				phases: [
+					phase("plan"),
+					phase("aside"),
+					phase("review", { dependsOn: ["plan"], onReject: { to: "aside", maxRevisions: 1 } }),
+				],
+			}),
+		).rejects.toThrow('cannot revise "aside": not a transitive dependency');
 	});
 });

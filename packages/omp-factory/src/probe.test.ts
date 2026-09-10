@@ -118,7 +118,7 @@ describe("/factory probe command", () => {
 		await command.handler("", ctx as never);
 
 		expect(notices[0]?.kind).toBe("error");
-		expect(notices[0]?.message).toContain("rejected");
+		expect(notices[0]?.message).toContain("failed");
 		expect(notices[0]?.message).toContain("exit 1");
 		const ledger = await ledgerDirOf(notices);
 		if (ledger) await fs.rm(ledger, { recursive: true, force: true });

@@ -45,14 +45,22 @@ acceptance. Crash safety is proved separately by `scripts/crash-drill.ts`,
 which SIGKILLs a real applier mid-apply over 8000 files and reconciles to a
 byte-exact committed tree.
 
+Concurrency: readers in a wave overlap; writer phases (`writes: true`) take a
+single token, so two writers never share the workspace. A coherent rejection
+with `onReject: { to, maxRevisions }` re-opens the target's dependent closure
+and re-runs it against the new accepted version, bounded by the declared
+budget.
+
 Open gaps, unproven rather than absent:
 
-- `src/graph.ts` sequences waves; independent phases in one wave still run
-  one at a time, and isolated parallel writers are not wired yet.
-- No fusion panels, `onReject` revision routing, rewind targets, or budgets
-  spanning revisions.
+- Parallel *writers* need one isolated worktree each. Core owns that
+  lifecycle (`ensureIsolation`/`cleanupIsolation`), which the public barrel
+  does not expose yet; until it does, writers stay serialized rather than
+  isolated.
+- No fusion panels and no rewind targets beyond the single `onReject` route.
 - No end-to-end run of the old workflows against the new driver — that needs
   live models, so cutover remains unjustified.
 
-`/factory` still drives a single builder; the graph runner is exercised by
-`src/graph.test.ts` rather than by the command.
+`/factory` runs through `runGraph` with one writer phase, so the command and
+the engine share a single acceptance path; a multi-phase workflow is a longer
+`phases` list, never a second implementation.
