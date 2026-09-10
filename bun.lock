@@ -20,6 +20,20 @@
         "typescript": "catalog:",
       },
     },
+    "packages/adw-web": {
+      "name": "@oh-my-pi/adw-web",
+      "version": "18.1.15",
+      "dependencies": {
+        "@oh-my-pi/pi-natives": "catalog:",
+        "react": "catalog:",
+        "react-dom": "catalog:",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "@types/react": "catalog:",
+        "@types/react-dom": "catalog:",
+      },
+    },
     "packages/agent": {
       "name": "@oh-my-pi/pi-agent-core",
       "version": "18.1.15",
@@ -696,6 +710,8 @@
     "@octokit/rest": ["@octokit/rest@22.0.1", "", { "dependencies": { "@octokit/core": "^7.0.6", "@octokit/plugin-paginate-rest": "^14.0.0", "@octokit/plugin-request-log": "^6.0.0", "@octokit/plugin-rest-endpoint-methods": "^17.0.0" } }, "sha512-Jzbhzl3CEexhnivb1iQ0KJ7s5vvjMWcmRtq5aUsKmKDrRW6z3r84ngmiFKFvpZjpiU/9/S6ITPFRpn5s/3uQJw=="],
 
     "@octokit/types": ["@octokit/types@18.0.0", "", { "dependencies": { "@octokit/openapi-types": "^29.0.1" } }, "sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA=="],
+
+    "@oh-my-pi/adw-web": ["@oh-my-pi/adw-web@workspace:packages/adw-web"],
 
     "@oh-my-pi/browser-relay": ["@oh-my-pi/browser-relay@workspace:packages/browser-relay"],
 

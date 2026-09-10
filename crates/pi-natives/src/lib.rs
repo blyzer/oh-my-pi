@@ -50,6 +50,7 @@ pub mod sixel;
 pub mod snapcompact;
 pub mod spelling;
 pub mod svg;
+pub mod tasks;
 pub mod utok;
 pub mod vcs;
 pub use pi_ast::language;
@@ -71,6 +72,7 @@ pub mod tty_writer;
 pub(crate) mod utils;
 pub mod vectors;
 pub mod workspace;
+pub mod write_guard;
 
 #[cfg(target_os = "windows")]
 use std::sync::{

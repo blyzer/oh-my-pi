@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { YAML } from "bun";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
@@ -520,8 +521,16 @@ export function loadConfig(cwd: string): LspConfig {
 	return { servers, idleTimeoutMs };
 }
 
-// Cache config per cwd to avoid repeated file I/O
-export const configCache = new Map<string, LspConfig>();
+/**
+ * Cache config per cwd to avoid repeated file I/O.
+ *
+ * Bounded because the key space is not the session's own cwd: every LSP client
+ * contributes one, and a concurrent ADW run mints a fresh workspace root per
+ * phase, then deletes it. An unbounded map would retain a parsed server table
+ * for every sandbox a long session ever cloned.
+ */
+const CONFIG_CACHE_MAX = 64;
+export const configCache = new LRUCache<string, LspConfig>({ max: CONFIG_CACHE_MAX });
 
 export function getConfig(cwd: string): LspConfig {
 	let config = configCache.get(cwd);

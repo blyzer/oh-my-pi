@@ -1,0 +1,53 @@
+# A change you can leave running: nothing reaches your checkout unless the
+# whole run is accepted.
+#
+#   cp docs/adw/examples/ship.yml .omp/adw/
+#   /adw ship "add a --json flag to the export command"
+#
+# What it teaches: the two safety features. `isolation: true` runs every phase
+# against a materialised copy of the repo, so a rejected run leaves your tree
+# untouched with its work preserved as a patch. `diff_matches_claims` catches
+# the opposite failure from the other gates — not a claim with no file, but a
+# file with no claim: the agent that edited three files and confessed one.
+name: ship
+description: Plan, implement and verify against a copy, landing only on success
+
+maxAttempts: 3
+
+# The diff reaches your checkout only if the run is accepted, and only after
+# git confirms it applies cleanly.
+isolation: true
+
+# Paths a build legitimately rewrites without any phase claiming them. Keep
+# this list as short as the truth allows: every entry is a change nobody has
+# to confess, and a list you cannot audit makes the gate worthless.
+undeclaredIgnore: ["**/*.lock"]
+
+phases:
+  - name: plan
+    kind: agent
+    owner: task
+    prompt: |
+      Read the code that has to change and write the plan to PLAN.md: the files
+      you will touch, the shape of the change, and what you will check. Do not
+      implement anything in this phase.
+    gates: [artifacts_exist, files_non_empty]
+
+  - name: build
+    kind: agent
+    owner: task
+    # Explicit data flow: build consumes the plan's accepted output, not
+    # whatever the previous phase happened to leave as the last envelope.
+    inputs: [plan]
+    prompt: |
+      Implement PLAN.md. Do not redesign it — if the plan is wrong, say so in
+      your summary and report "status": "fail" rather than silently doing
+      something else.
+    gates: [artifacts_exist, diff_matches_claims]
+
+  - name: verify
+    kind: code
+    owner: bun
+    command: bun run check && bun test
+    timeoutMs: 900000
+    onFail: correct

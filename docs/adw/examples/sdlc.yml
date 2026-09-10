@@ -1,0 +1,101 @@
+# The complete loop: plan, build, document, verify, review — deliver only on
+# approval.
+#
+#   cp docs/adw/examples/sdlc.yml .omp/adw/
+#   $EDITOR .omp/adw/sdlc.yml     # ADAPT THE verify COMMAND — see below
+#   /adw sdlc "add a --json flag to the export command"
+#
+# What it teaches: composing every mechanism into one factory run.
+#
+# - `inputs` carries the plan to the builder and the reviewer explicitly; the
+#   verify phase's exit summary never displaces it.
+# - `writes`/`protected` bound each writer: the planner cannot touch
+#   implementation, the reviewer cannot touch anything, and nobody edits the
+#   evaluator command or the workflow itself.
+# - `onFail: correct` sends a red verify back to the builder as a correction;
+#   `onReject` sends a coherent reviewer rejection back as a revision. Both
+#   re-run everything downstream — no green result from before an edit can
+#   authorize delivery.
+# - `acceptance: review` + `isolation: true` is the delivery contract: the
+#   whole run works against a materialised copy, and the accepted diff is
+#   applied to your checkout only when the final review approves. A rejected
+#   or exhausted run leaves your tree untouched, with the work preserved as
+#   `~/.omp/agent/adw/<adwId>/<adwId>.patch`. Nothing is committed, staged or
+#   pushed: landing, committing and any remote action stay your explicit call.
+#
+# ADAPTATION IS NOT OPTIONAL. The `verify` command below is a deliberate
+# failure: replace it with your repository's real test/lint/typecheck entry
+# points (`bun test`, `cargo nextest run`, `pytest`, `npm run check`…). A
+# placeholder that exits 0 would let every run deliver unverified code, so
+# this file ships one that exits 1 and says why.
+name: sdlc
+description: Plan, build, document, verify and review — land only on approval
+
+maxAttempts: 3
+acceptance: review
+isolation: true
+
+# The evaluator itself is out of every writer's reach. Add your CI scripts
+# and lockfiles here; `.omp/adw/**` is always protected.
+protected: ["package.json"]
+
+phases:
+  - name: plan
+    kind: agent
+    owner: task
+    writes: [PLAN.md]
+    gates: [artifacts_exist, files_non_empty]
+    prompt: |
+      Read the code the request touches and write PLAN.md: the files you will
+      change, the shape of the change, the requirements the reviewer must
+      check, and what verify must prove. Do not implement anything.
+
+  - name: build
+    kind: agent
+    owner: task
+    inputs: [plan]
+    writes: ["src/**", "test/**"]
+    gates: [artifacts_exist, diff_matches_claims]
+    dependsOn: [plan]
+    prompt: |
+      Implement PLAN.md. Do not redesign it — if the plan is wrong, report
+      "status": "fail" and say why rather than silently doing something else.
+
+  - name: docs
+    kind: agent
+    owner: task
+    inputs: [plan, build]
+    writes: ["docs/**", CHANGELOG.md, README.md]
+    dependsOn: [build]
+    gates: [artifacts_exist, diff_matches_claims]
+    prompt: |
+      Document what build actually did — the changed behavior, not the plan's
+      aspirations. Update the changelog and any usage documentation the
+      change affects.
+
+  - name: verify
+    kind: code
+    owner: sh
+    dependsOn: [build, docs]
+    command: >-
+      echo "sdlc.yml: replace the verify command with this repository's real
+      test/lint/typecheck entry points before running." >&2; exit 1
+    timeoutMs: 900000
+    onFail: correct
+
+  - name: review
+    kind: agent
+    owner: reviewer
+    inputs: [plan, build, docs]
+    writes: []
+    dependsOn: [verify]
+    gates: [verdict_consistent]
+    onReject: { to: build, maxRevisions: 2 }
+    prompt: |
+      Review the implementation and documentation against the requirements
+      PLAN.md declared. Read the current tree; the envelopes you were handed
+      are claims, not evidence. Report your findings in your envelope. Reject
+      with the unmet requirements named when the work falls short — a coherent
+      rejection sends the run back to the builder with your report; do not
+      approve to make the workflow pass. You change nothing on disk: your
+      write scope is empty on purpose.
