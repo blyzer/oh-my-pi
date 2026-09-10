@@ -114,6 +114,18 @@ export interface AdwHost {
 	/** Registers seats as children of the spawning session rather than orphans. */
 	agentId?: string;
 	eventBus?: EventBus;
+	/**
+	 * Answers a `human` phase. The run holds until this resolves, so a host
+	 * that cannot ask — a headless CI job, a detached run — should refuse
+	 * rather than approve: an unanswerable question is not an approval.
+	 *
+	 * Omitted entirely, a `human` phase fails closed with that as its reason.
+	 */
+	decideHuman?: (request: {
+		phase: string;
+		attempt: number;
+		question: string;
+	}) => Promise<{ approved: boolean; reason: string }>;
 	subagentEventBus?: EventBus;
 }
 
@@ -711,7 +723,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 	// Compile before allocating a sandbox: invalid contracts must never leak one.
 	const phaseChecks = new Map<string, (turn: string) => PhaseCheckResult>();
 	for (const phase of workflow.phases) {
-		if (phase.kind === "code") continue;
+		if (phase.kind === "code" || phase.kind === "human") continue;
 		const compiled = compilePhaseChecks(phase);
 		if (typeof compiled === "string") throw new Error(`Phase "${phase.name}" has an unusable contract: ${compiled}`);
 		phaseChecks.set(phase.name, compiled.check);
@@ -870,7 +882,14 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				// A fusion phase is one phase to the engine: it settles on the fuser's
 				// envelope, and the panel is fan-out inside that single unit.
 				name: phase.name,
-				kind: phase.kind === "code" ? TaskPhaseKind.Code : TaskPhaseKind.Agent,
+				kind:
+					phase.kind === "code"
+						? TaskPhaseKind.Code
+						: phase.kind === "human"
+							? // The engine's own lane for work the caller performs and
+								// reports back. Nothing here costs tokens.
+								TaskPhaseKind.Engineer
+							: TaskPhaseKind.Agent,
 				owner: phase.kind === "fusion" ? (phase.fuser?.owner ?? "fusion") : (phase.owner ?? phase.kind),
 				description: phase.description,
 				// Resolved here, so the engine is handed a name and holds no policy
@@ -1141,6 +1160,28 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			return { ADW_INPUTS: inputsPath };
 		};
 
+		/**
+		 * The two lanes the caller executes and reports back: a deterministic
+		 * command, and a human answering. Shared so the serial and concurrent
+		 * schedulers cannot drift on what a `human` phase means — running one
+		 * down the code path would execute a command it does not have.
+		 */
+		const runCallerPhase = async (phase: AdwPhaseConfig, step: TaskStep): Promise<TaskOutcome> => {
+			if (phase.kind === "human") {
+				const question = phase.description?.trim() || `Authorize phase "${phase.name}"?`;
+				const answer = host.decideHuman
+					? await host.decideHuman({ phase: phase.name, attempt: step.attempt, question })
+					: // Fail closed: a host with no way to ask has not been told
+						// yes, and inferring approval from silence is exactly what
+						// a human gate exists to prevent.
+						{ approved: false, reason: "no human decision channel is available to answer this phase" };
+				return run.submitCodeResult(phase.name, answer.approved, answer.reason);
+			}
+			const env = await buildCodeEnv(phase, step);
+			const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
+			return run.submitCodeResult(phase.name, ok, summary);
+		};
+
 		const finishRun = async (step: TaskStep): Promise<AdwRunResult> => {
 			const acceptance = workflow.acceptance === "review" ? reviewAcceptance(run.handoff()) : undefined;
 			let accepted = step.accepted && (acceptance?.accepted ?? true);
@@ -1193,10 +1234,8 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
 
 				let outcome: TaskOutcome;
-				if (phase.kind === "code") {
-					const env = await buildCodeEnv(phase, step);
-					const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
-					outcome = run.submitCodeResult(phase.name, ok, summary);
+				if (phase.kind === "human" || phase.kind === "code") {
+					outcome = await runCallerPhase(phase, step);
 				} else {
 					if (
 						resuming &&
@@ -1367,7 +1406,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					if (!spec) throw new Error("engine returned a Run step without a phase");
 					const phase = phasesByName.get(spec.name);
 					if (!phase) throw new Error(`engine returned unknown phase "${spec.name}"`);
-					if (phase.kind === "code") {
+					if (phase.kind === "code" || phase.kind === "human") {
 						pendingCode = { phase, spec, step };
 						break;
 					}
@@ -1396,9 +1435,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					const { phase, spec, step } = pendingCode;
 					pendingCode = null;
 					onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
-					const env = await buildCodeEnv(phase, step);
-					const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
-					const outcome = run.submitCodeResult(phase.name, ok, summary);
+					const outcome = await runCallerPhase(phase, step);
 					await invalidate(outcome);
 					reportOutcome(phase, spec, step, outcome);
 					continue;
