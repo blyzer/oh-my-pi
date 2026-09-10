@@ -130,6 +130,12 @@ export interface GraphRequest {
 	 * the operator back into the orchestrator this exists to replace.
 	 */
 	humanGate?: (phase: string, attempt: number) => Promise<HumanGateVerdict>;
+	/**
+	 * Separates a host failure from one a producer could fix. Without it every
+	 * failure is treated as semantic, so an out-of-memory kill spends the
+	 * whole correction budget re-asking an agent to fix code that never ran.
+	 */
+	classifyFailure?: (text: string) => "semantic" | "resource";
 }
 
 export interface PhaseOutcome {
@@ -387,6 +393,7 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 				requireArtifacts: phase.requireArtifacts,
 				maxAttempts: phase.maxAttempts,
 				integrate,
+				classifyFailure: request.classifyFailure,
 				// The phase's own deterministic gate, re-run against the tree
 				// the landing produced. Two change-sets can each pass alone in
 				// their own sandbox and fail together on the shared root, and

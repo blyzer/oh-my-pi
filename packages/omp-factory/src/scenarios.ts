@@ -9,6 +9,7 @@
  */
 import * as fs from "node:fs/promises";
 import path from "node:path";
+import { classifyFailure } from "@oh-my-pi/pi-coding-agent/task/admission";
 import { defineScenario, type ScenarioOutcome } from "./bench";
 import { type GraphPhase, runGraph } from "./graph";
 import { copyIsolation } from "./isolation";
@@ -278,5 +279,55 @@ export const PROVENANCE_001 = defineScenario({
 		if (consumed.version !== 1) return no(`consumed version was ${consumed.version}, expected 1`);
 		if (!consumed.digest) return no("consumed input carried no digest");
 		return ok(`build consumed plan v${consumed.version} (${consumed.digest})`);
+	},
+});
+
+export const RESOURCE_001 = defineScenario({
+	id: "FB-RESOURCE-001",
+	family: "FB-RESOURCE",
+	asserts:
+		"A host failure ends the phase without spending the correction budget, while an ordinary " +
+		"semantic failure still gets every attempt it was granted.",
+	run: async workdir => {
+		const root = path.join(workdir, "tree");
+		await fs.mkdir(root, { recursive: true });
+
+		// Same workflow, same budget, same producer shape. The only variable
+		// is what the failure says, which is exactly the distinction under
+		// test: who failed, the work or the machine.
+		const attemptsFor = async (output: string, label: string): Promise<number> => {
+			const runDir = path.join(workdir, `run-${label}`);
+			await fs.mkdir(runDir, { recursive: true });
+			let dispatched = 0;
+			await runGraph({
+				workflowId: `fb-resource-001-${label}`,
+				runDir,
+				workspace: root,
+				allowUnguardedWrites: true,
+				classifyFailure,
+				phases: [
+					{
+						name: "build",
+						scope: ["**"],
+						assertions: [],
+						maxAttempts: 3,
+						produce: async () => {
+							dispatched += 1;
+							return { changedFiles: [], label: "build", exitCode: 1, output };
+						},
+					},
+				],
+			});
+			return dispatched;
+		};
+
+		const semantic = await attemptsFor("expected 3 to equal 4", "semantic");
+		if (semantic !== 3) return no(`a semantic failure used ${semantic} attempts, expected the full budget of 3`);
+
+		const resource = await attemptsFor("fatal error: out of memory", "resource");
+		if (resource !== 1) {
+			return no(`an out-of-memory failure used ${resource} attempts; the budget was spent on an exhausted host`);
+		}
+		return ok(`semantic used ${semantic}/3 attempts, resource stopped after ${resource}`);
 	},
 });

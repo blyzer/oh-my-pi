@@ -85,6 +85,13 @@ export interface WorkflowRequest {
 	 * never left behind.
 	 */
 	verifyDelivered?: (root: string) => Promise<{ ok: true } | { ok: false; evidence: string }>;
+	/**
+	 * Separates a host failure from one the producer could fix, so an
+	 * exhausted machine does not consume the correction budget. Injected:
+	 * the taxonomy lives in the harness (`task/admission`), which already
+	 * knows a provider rate limit from a bad tool schema.
+	 */
+	classifyFailure?: (text: string) => "semantic" | "resource";
 	produce: (attempt: number, evidence: string | undefined) => Promise<Candidate>;
 	review?: (candidate: Candidate) => Promise<ReviewVerdict>;
 }
@@ -166,6 +173,7 @@ export async function runWorkflow(request: WorkflowRequest): Promise<WorkflowRes
 	try {
 		result = await runAttemptLoop({
 			maxAttempts: request.maxAttempts,
+			classify: request.classifyFailure,
 			produce: async (attempt, evidence) => {
 				await appendEvent(runDir, workflowId, "AttemptStarted", { phase, attempt });
 				startedAttempts += 1;

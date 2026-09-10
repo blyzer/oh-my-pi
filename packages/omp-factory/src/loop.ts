@@ -28,14 +28,28 @@ export interface LoopResult {
 	status: "accepted" | "rejected";
 	attempts: number;
 	evidence: string[];
+	/**
+	 * Set when the loop stopped short of its budget. `resource` means the
+	 * host failed, not the work: the remaining attempts were left unspent
+	 * on purpose and a retry is a scheduling decision, not a correction.
+	 */
+	halted?: "resource";
 }
 
 export async function runAttemptLoop(options: {
 	maxAttempts: number;
 	produce: (attempt: number, evidence: string | undefined) => Promise<Candidate>;
 	verify: (candidate: Candidate) => Promise<VerifyOutcome>;
+	/**
+	 * Tells a host failure from one an agent could fix. A run killed by the
+	 * machine did not fail semantically, and asking an agent to correct code
+	 * that never executed spends the budget on a question nobody asked.
+	 * Absent means every failure is treated as semantic — the safe default,
+	 * since a misread semantic failure would skip a correction that was owed.
+	 */
+	classify?: (text: string) => "semantic" | "resource";
 }): Promise<LoopResult> {
-	const { maxAttempts, produce, verify } = options;
+	const { maxAttempts, produce, verify, classify } = options;
 	if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
 		return { status: "rejected", attempts: 0, evidence: ["maxAttempts must be an integer >= 1"] };
 	}
@@ -47,6 +61,13 @@ export async function runAttemptLoop(options: {
 			return { status: "accepted", attempts: attempt, evidence };
 		}
 		evidence.push(`attempt ${attempt} (${candidate.label}): ${outcome.evidence}`);
+		// A resource failure ends the loop instead of consuming the rest of
+		// the budget: the next attempt would meet the same exhausted host,
+		// and the correction it carries would describe a fault the producer
+		// cannot address.
+		if (classify?.(outcome.evidence) === "resource") {
+			return { status: "rejected", attempts: attempt, evidence, halted: "resource" };
+		}
 	}
 	return { status: "rejected", attempts: maxAttempts, evidence };
 }
