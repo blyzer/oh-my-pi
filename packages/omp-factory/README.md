@@ -11,6 +11,7 @@ packages/omp-factory/
   src/extension.ts   /factory command (thin: spawn + report)
   src/workflow.ts    acceptance owner for one phase (attempt loop + ledger)
   src/graph.ts       multi-phase runner over accepted versions
+  src/isolation.ts   per-writer workspace sandboxes
   src/envelope.ts    builder envelope contract
   src/loop.ts        bounded correction loop
   src/scope.ts       declared-scope verification
@@ -45,18 +46,21 @@ acceptance. Crash safety is proved separately by `scripts/crash-drill.ts`,
 which SIGKILLs a real applier mid-apply over 8000 files and reconciles to a
 byte-exact committed tree.
 
-Concurrency: readers in a wave overlap; writer phases (`writes: true`) take a
-single token, so two writers never share the workspace. A coherent rejection
-with `onReject: { to, maxRevisions }` re-opens the target's dependent closure
-and re-runs it against the new accepted version, bounded by the declared
-budget.
+Concurrency: readers in a wave overlap, and writers overlap too **when an
+isolation provider gives each one its own tree** — accepted diffs then land on
+the shared root one at a time through the integration lock. Without a
+provider, writers take a single token on the shared workspace, which is the
+only other safe option. `src/isolation.ts` ships `copyIsolation()`, a portable
+recursive-copy sandbox. A coherent rejection with
+`onReject: { to, maxRevisions }` re-opens the target's dependent closure and
+re-runs it against the new accepted version, bounded by the declared budget.
 
 Open gaps, unproven rather than absent:
 
-- Parallel *writers* need one isolated worktree each. Core owns that
-  lifecycle (`ensureIsolation`/`cleanupIsolation`), which the public barrel
-  does not expose yet; until it does, writers stay serialized rather than
-  isolated.
+- `copyIsolation` copies the tree. OMP core owns copy-on-write backends
+  (`ensureIsolation`), which the public barrel does not expose; in this
+  checkout the published `@oh-my-pi/pi-natives` resolves ahead of the built
+  workspace addon, so that path is unverified here.
 - No fusion panels and no rewind targets beyond the single `onReject` route.
 - No end-to-end run of the old workflows against the new driver — that needs
   live models, so cutover remains unjustified.

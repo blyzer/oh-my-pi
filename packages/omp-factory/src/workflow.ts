@@ -29,9 +29,17 @@ export interface WorkflowRequest {
 	/**
 	 * Journal accepted change-sets through the integration owner. Absent means
 	 * "verify only": acceptance without landing. Deletions fail closed until
-	 * the journal expresses them.
+	 * the journal expresses them. `root` defaults to `workspace`; an isolated
+	 * writer verifies in its own copy and lands in the shared root.
+	 * `serialize` wraps the whole prepare/apply/commit so concurrent writers
+	 * never interleave on that root.
 	 */
-	integrate?: { journalDir: string; base: string };
+	integrate?: {
+		journalDir: string;
+		base: string;
+		root?: string;
+		serialize?: <T>(landing: () => Promise<T>) => Promise<T>;
+	};
 	produce: (attempt: number, evidence: string | undefined) => Promise<Candidate>;
 	review?: (candidate: Candidate) => Promise<ReviewVerdict>;
 }
@@ -53,6 +61,7 @@ async function integrateCandidate(
 	const spec = request.integrate;
 	if (!spec) return { ok: true };
 	const { workflowId, phase, runDir, workspace } = request;
+	const root = spec.root ?? workspace;
 	const content: Record<string, string> = {};
 	for (const file of candidate.changedFiles) {
 		try {
@@ -61,14 +70,17 @@ async function integrateCandidate(
 			return { ok: false, evidence: `deleted files unsupported by integration journal: ${file}` };
 		}
 	}
-	try {
-		const journal = await prepareIntegration(workspace, spec.base, content);
+	const land = async (): Promise<void> => {
+		const journal = await prepareIntegration(root, spec.base, content);
 		await appendEvent(runDir, workflowId, "IntegrationPrepared", { phase, digest: journal.patchDigest });
 		await appendEvent(runDir, workflowId, "IntegrationApplying", { phase, digest: journal.patchDigest });
-		const applied = await applyIntegration(workspace, spec.journalDir, journal);
+		const applied = await applyIntegration(root, spec.journalDir, journal);
 		await appendEvent(runDir, workflowId, "IntegrationApplied", { phase, digest: journal.patchDigest });
 		await commitIntegration(spec.journalDir, applied);
 		await appendEvent(runDir, workflowId, "IntegrationCommitted", { phase, digest: journal.patchDigest });
+	};
+	try {
+		await (spec.serialize ? spec.serialize(land) : land());
 		return { ok: true };
 	} catch (error) {
 		return {

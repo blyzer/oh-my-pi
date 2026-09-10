@@ -175,19 +175,36 @@ describe("runGraph", () => {
 		let inFlight = 0;
 		let peakReaders = 0;
 		let peakWriters = 0;
-		const body = (writes: boolean) => async () => {
+		// A barrier, not a sleep: readers only proceed once both have entered,
+		// so overlap is observed rather than raced for under load.
+		let release: () => void = () => {};
+		const bothEntered = new Promise<void>(resolve => {
+			let entered = 0;
+			release = () => {
+				entered += 1;
+				if (entered === 2) resolve();
+			};
+		});
+		const readerBody = async () => {
 			inFlight += 1;
-			if (writes) peakWriters = Math.max(peakWriters, inFlight);
-			else peakReaders = Math.max(peakReaders, inFlight);
-			await Bun.sleep(40);
+			peakReaders = Math.max(peakReaders, inFlight);
+			release();
+			await bothEntered;
 			inFlight -= 1;
-			return { changedFiles: [], label: "x", exitCode: 0 };
+			return { changedFiles: [], label: "reader", exitCode: 0 };
+		};
+		const writerBody = async () => {
+			inFlight += 1;
+			peakWriters = Math.max(peakWriters, inFlight);
+			await Bun.sleep(10);
+			inFlight -= 1;
+			return { changedFiles: [], label: "writer", exitCode: 0 };
 		};
 		const readers = await runGraph({
 			workflowId: "wf",
 			runDir,
 			workspace: root,
-			phases: [phase("scoutA", { produce: body(false) }), phase("scoutB", { produce: body(false) })],
+			phases: [phase("scoutA", { produce: readerBody }), phase("scoutB", { produce: readerBody })],
 		});
 		expect(readers.status).toBe("accepted");
 		expect(peakReaders).toBe(2);
@@ -198,8 +215,8 @@ describe("runGraph", () => {
 			runDir,
 			workspace: root,
 			phases: [
-				phase("buildA", { writes: true, produce: body(true) }),
-				phase("buildB", { writes: true, produce: body(true) }),
+				phase("buildA", { writes: true, produce: writerBody }),
+				phase("buildB", { writes: true, produce: writerBody }),
 			],
 		});
 		expect(writers.status).toBe("accepted");

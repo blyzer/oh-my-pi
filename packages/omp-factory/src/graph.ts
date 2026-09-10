@@ -49,8 +49,19 @@ export interface GraphPhase {
 		attempt: number;
 		correction: string | undefined;
 		inputs: SelectedInput[];
+		/** Where this attempt must write: the isolated copy when isolation is on. */
+		workspace: string;
 	}) => Promise<Candidate>;
 	review?: (candidate: Candidate) => Promise<ReviewVerdict>;
+}
+
+/**
+ * Materialises a private copy of the workspace for one writer. Injected so
+ * the runner's contract is testable without a filesystem backend; production
+ * passes the adapter over OMP's own isolation lifecycle.
+ */
+export interface IsolationProvider {
+	start(id: string, baseCwd: string): Promise<{ dir: string; stop: () => Promise<void> }>;
 }
 
 export interface GraphRequest {
@@ -59,6 +70,11 @@ export interface GraphRequest {
 	workspace: string;
 	phases: GraphPhase[];
 	integrate?: WorkflowRequest["integrate"];
+	/**
+	 * Give each writer its own copy of the workspace. Without it writers are
+	 * serialized on the shared tree — the only other safe option.
+	 */
+	isolation?: IsolationProvider;
 }
 
 export interface PhaseOutcome {
@@ -155,7 +171,13 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 	const revisionsUsed = new Map<string, number>();
 	let writersInFlight = 0;
 	let peakConcurrentWriters = 0;
-
+	// One landing at a time on the shared root, whatever runs in parallel above it.
+	let landingChain: Promise<unknown> = Promise.resolve();
+	const landingLock = <T>(landing: () => Promise<T>): Promise<T> => {
+		const next = landingChain.then(landing, landing);
+		landingChain = next.catch(() => undefined);
+		return next;
+	};
 	/** Run one phase to a terminal outcome; blocked phases never dispatch. */
 	const runPhase = async (name: string): Promise<PhaseOutcome> => {
 		const phase = byName.get(name);
@@ -184,25 +206,37 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 			});
 		}
 		order.push(name);
+		const isolate = phase.writes === true && request.isolation !== undefined;
 		if (phase.writes) {
 			writersInFlight += 1;
 			peakConcurrentWriters = Math.max(peakConcurrentWriters, writersInFlight);
 		}
 		let lastCandidate: Candidate | undefined;
+		let sandbox: { dir: string; stop: () => Promise<void> } | undefined;
 		try {
+			if (isolate && request.isolation) {
+				sandbox = await request.isolation.start(`${request.workflowId}-${name}`, request.workspace);
+			}
+			const workspace = sandbox?.dir ?? request.workspace;
+			// An isolated writer verifies inside its own copy and lands in the
+			// shared root; landings take the integration lock so two accepted
+			// diffs never interleave on that root.
+			const integrate = request.integrate
+				? { ...request.integrate, root: request.integrate.root ?? request.workspace, serialize: landingLock }
+				: undefined;
 			const result = await runWorkflow({
 				workflowId: request.workflowId,
 				phase: name,
 				runDir: request.runDir,
-				workspace: request.workspace,
+				workspace,
 				scope: phase.scope,
 				assertions: phase.assertions,
 				gateCommand: phase.gateCommand,
 				requireArtifacts: phase.requireArtifacts,
 				maxAttempts: phase.maxAttempts,
-				integrate: request.integrate,
+				integrate,
 				produce: async (attempt, correction) => {
-					lastCandidate = await phase.produce({ attempt, correction, inputs });
+					lastCandidate = await phase.produce({ attempt, correction, inputs, workspace });
 					return lastCandidate;
 				},
 				review: phase.review,
@@ -220,6 +254,7 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 			return { phase: name, status: result.status, attempts: result.attempts, evidence: result.evidence, inputs };
 		} finally {
 			if (phase.writes) writersInFlight -= 1;
+			await sandbox?.stop();
 		}
 	};
 
@@ -249,9 +284,13 @@ export async function runGraph(request: GraphRequest): Promise<GraphResult> {
 			if (pending.length === 0) continue;
 			const readers = pending.filter(name => byName.get(name)?.writes !== true);
 			const writers = pending.filter(name => byName.get(name)?.writes === true);
-			const results = await Promise.all(readers.map(name => runPhase(name)));
+			// Concurrent writers are safe only when each holds its own tree;
+			// on a shared workspace they take the token one at a time.
+			const concurrent = request.isolation ? [...readers, ...writers] : readers;
+			const serialized = request.isolation ? [] : writers;
+			const results = await Promise.all(concurrent.map(name => runPhase(name)));
 			for (const outcome of results) outcomes.set(outcome.phase, outcome);
-			for (const name of writers) {
+			for (const name of serialized) {
 				const outcome = await runPhase(name);
 				outcomes.set(outcome.phase, outcome);
 			}
