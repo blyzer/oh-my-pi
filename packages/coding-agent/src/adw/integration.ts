@@ -64,6 +64,16 @@ export async function integrateAccepted(
 		root,
 		baselineFile: path.join(runDir, `integration-${record.fromSeq}.baseline.json`),
 	});
+	// I10: a record that already landed must not land again. `git apply` is
+	// not idempotent — re-applying an accepted patch appends its additions a
+	// second time, silently doubling them in the delivered tree. Measured:
+	// a one-line addition became two identical lines.
+	if (record.status === "integrated") {
+		throw new Error(`integration for phase "${record.phase}" already landed; refusing to apply it twice`);
+	}
+	if (record.status === "rejected") {
+		throw new Error(`integration for phase "${record.phase}" was rejected; it cannot be replayed`);
+	}
 	if (record.status === "applying") {
 		const restored = guard.settle({ allowed: [], protectedGlobs: [], patchDir: runDir });
 		if (restored.unrecoverable.length) {

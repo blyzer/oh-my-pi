@@ -11,7 +11,9 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { TaskOutcomeKind, TaskPhaseKind, TaskRun, TaskStepKind, TaskWriteGuard } from "@oh-my-pi/pi-natives";
 import { classifyFailure } from "../task/admission";
+import { captureBaseline, captureDeltaPatch } from "../task/worktree";
 import { defineScenario, type ScenarioOutcome } from "./bench";
+import { integrateAccepted, type IntegrationRecord, writeRunState } from "./integration";
 
 function ok(evidence: string): ScenarioOutcome {
 	return { passed: true, evidence };
@@ -301,5 +303,58 @@ export const RECOVERY_001 = defineScenario({
 			return no("a file created by the interrupted apply survived recovery");
 		}
 		return ok(`${originals.size} files byte-exact, mid-apply creation removed`);
+	},
+});
+
+export const INTEGRATION_001 = defineScenario({
+	id: "FB-INTEGRATION-001",
+	family: "FB-INTEGRATION",
+	asserts:
+		"An accepted change-set lands exactly once: replaying a landed record is refused rather " +
+		"than applied a second time, and the delivered tree is unchanged by the attempt.",
+	run: async workdir => {
+		const root = path.join(workdir, "tree");
+		const runDir = path.join(workdir, "run");
+		await fs.mkdir(root, { recursive: true });
+		await fs.mkdir(runDir, { recursive: true });
+
+		const git = async (...args: string[]): Promise<void> => {
+			await Bun.spawn(["git", ...args], { cwd: root, stdout: "ignore", stderr: "ignore" }).exited;
+		};
+		await git("init", "-q", "-b", "main");
+		await git("config", "user.email", "bench@example.com");
+		await git("config", "user.name", "Bench");
+		await git("config", "maintenance.auto", "false");
+		await Bun.write(path.join(root, "log.txt"), "line1\n");
+		await git("add", "-A");
+		await git("commit", "-qm", "base");
+
+		// Capture a one-line addition as a patch, then put the tree back: the
+		// record now describes a change that has not been applied.
+		const baseline = await captureBaseline(root);
+		await Bun.write(path.join(root, "log.txt"), "line1\nline2\n");
+		const delta = await captureDeltaPatch(root, baseline);
+		await git("checkout", "-q", "--", ".");
+
+		const record: IntegrationRecord = { phase: "build", fromSeq: 0, delta, status: "prepared" };
+		await writeRunState(path.join(runDir, "integration.json"), record);
+
+		await integrateAccepted(root, runDir, record);
+		const landed = await Bun.file(path.join(root, "log.txt")).text();
+		if (landed !== "line1\nline2\n") return no(`first landing produced ${JSON.stringify(landed)}`);
+
+		// `git apply` is not idempotent: without a guard on the record's own
+		// status, this appends the addition a second time and the delivered
+		// tree silently doubles it.
+		let refused = false;
+		try {
+			await integrateAccepted(root, runDir, record);
+		} catch {
+			refused = true;
+		}
+		const after = await Bun.file(path.join(root, "log.txt")).text();
+		if (!refused) return no(`a landed record was replayed; tree is now ${JSON.stringify(after)}`);
+		if (after !== landed) return no(`the refused replay still changed the tree: ${JSON.stringify(after)}`);
+		return ok("second landing refused, delivered tree unchanged");
 	},
 });
