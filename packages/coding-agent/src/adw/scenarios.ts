@@ -531,3 +531,85 @@ export const SCOPE_001 = defineScenario({
 		);
 	},
 });
+
+export const HANDOFF_001 = defineScenario({
+	id: "FB-HANDOFF-001",
+	family: "FB-HANDOFF",
+	asserts:
+		"A consumer receives the producer's accepted content, not a pointer to it: a revision " +
+		"produces a new version and re-dispatches the consumer against it, rather than mutating " +
+		"what was already consumed.",
+	run: async workdir => {
+		const root = path.join(workdir, "tree");
+		const traceDir = path.join(workdir, "trace");
+		await fs.mkdir(root, { recursive: true });
+		await fs.mkdir(traceDir, { recursive: true });
+
+		const task = new TaskRun({
+			adwId: `fb-handoff-${Bun.randomUUIDv7().slice(0, 8)}`,
+			workflow: "fb-handoff",
+			root,
+			traceDir,
+			maxAttempts: 3,
+			phases: [
+				{ name: "plan", kind: TaskPhaseKind.Agent, owner: "task", dependsOn: [] },
+				{ name: "build", kind: TaskPhaseKind.Agent, owner: "task", dependsOn: ["plan"], inputs: ["plan"] },
+				{
+					name: "review",
+					kind: TaskPhaseKind.Agent,
+					owner: "task",
+					dependsOn: ["build"],
+					onReject: { to: "plan", maxRevisions: 1 },
+				},
+			],
+		});
+		const envelope = (summary: string, notes: string): string =>
+			JSON.stringify({ status: "success", summary, artifacts: [], notes_for_next_agent: notes });
+
+		task.nextStep();
+		task.submitAgentOutput("plan", envelope("plan v1", "use approach A"));
+
+		// The handoff must carry content. A consumer handed only a version
+		// number would have to re-read the producer's work from somewhere,
+		// and "somewhere" is how a stale read gets in.
+		const first = task.nextStep();
+		const consumed = first.inputs?.find(input => input.phase === "plan");
+		if (!consumed) return no("build was dispatched with no recorded input");
+		if (consumed.version !== 1) return no(`first dispatch consumed version ${consumed.version}, expected 1`);
+		if (consumed.summary !== "plan v1" || consumed.notesForNextAgent !== "use approach A") {
+			return no(`input carried ${JSON.stringify(consumed.summary)} / ${JSON.stringify(consumed.notesForNextAgent)}`);
+		}
+
+		task.submitAgentOutput("build", envelope("built against plan v1", ""));
+
+		// A coherent negative review routes back to the producer. The route
+		// only fires on a verdict -- a crashed reviewer retries in place.
+		task.nextStep();
+		task.noteReviewDecision("review", false, "the plan was wrong");
+		const rejected = task.submitAgentOutput("review", envelope("reviewed", ""));
+		if (rejected.kind !== TaskOutcomeKind.Retry) return no(`review rejection gave outcome kind ${rejected.kind}`);
+		// Everything downstream of the revised producer loses its acceptance:
+		// build consumed a version that no longer represents the plan.
+		for (const phase of ["plan", "build", "review"]) {
+			if (!rejected.invalidated.includes(phase)) {
+				return no(`revision did not invalidate ${phase}: ${JSON.stringify(rejected.invalidated)}`);
+			}
+		}
+
+		const replan = task.nextStep();
+		if (replan.phase?.name !== "plan") return no(`expected plan to re-dispatch, got ${replan.phase?.name}`);
+		task.submitAgentOutput("plan", envelope("plan v2", "use approach B"));
+
+		// The decisive assertion: build is re-dispatched against a NEW
+		// version carrying the new content. A handoff that updated v1 under
+		// the consumer would show version 1 with approach B.
+		const second = task.nextStep();
+		const reconsumed = second.inputs?.find(input => input.phase === "plan");
+		if (!reconsumed) return no("re-dispatched build recorded no input");
+		if (reconsumed.version !== 2) return no(`re-dispatch consumed version ${reconsumed.version}, expected 2`);
+		if (reconsumed.notesForNextAgent !== "use approach B") {
+			return no(`v2 carried stale notes: ${JSON.stringify(reconsumed.notesForNextAgent)}`);
+		}
+		return ok("v1 carried content, revision invalidated the closure, v2 re-dispatched with new content");
+	},
+});
