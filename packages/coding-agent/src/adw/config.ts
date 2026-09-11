@@ -8,12 +8,13 @@
  */
 
 import * as path from "node:path";
+import type { AdwPhaseConfig } from "./types";
 import { type } from "@oh-my-pi/omptype";
 import { YAML } from "bun";
 import { getConfigDirs } from "../config";
 import { taskGateNames } from "@oh-my-pi/pi-natives";
 import { compilePhaseChecks, VERDICT_GATE } from "./schema";
-import { type AdwWorkflowConfig, adwWorkflowSchema, type DiscoveredWorkflow } from "./types";
+import { type AdwWorkflowConfig, adwWorkflowSchema, type DiscoveredWorkflow, plainArgv } from "./types";
 
 /** Only the native config root holds workflows; `.claude`/`.codex` are not ours. */
 const ADW_CONFIG_SOURCE = ".omp";
@@ -126,6 +127,24 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 
 		if (phase.kind === "agent" && !phase.owner) fail(`phase "${phase.name}" is an agent phase but names no owner`);
 		if (phase.kind === "code" && !phase.command) fail(`phase "${phase.name}" is a code phase but has no command`);
+		if (phase.expect !== undefined && phase.kind !== "code") {
+			// `expect` judges an exit code, and only a code phase has one.
+			fail(`phase "${phase.name}" is a ${phase.kind} phase; expect only applies to code phases`);
+		}
+		if (phase.expect === "fail" && phase.command && !plainArgv(phase.command)) {
+			// `expect: fail` promises that a typo cannot pass for a
+			// reproduction. That promise rests on launching the command
+			// directly, so the kernel reports a failed exec rather than the
+			// shell translating it into 127 -- a status indistinguishable
+			// from a real failure. A command the shell must interpret has no
+			// single executable to launch, so refuse it here rather than
+			// document an exception nobody reads.
+			fail(
+				`phase "${phase.name}" sets expect: fail but its command is not a plain command: ` +
+					"a pipeline, redirect or chain is resolved by the shell, where a missing command and a " +
+					"failing one are the same exit status. Put the shell parts in a script and name that instead",
+			);
+		}
 		if (phase.kind === "human") {
 			// A human phase is answered, not executed. A command would be a
 			// second answer to the same question, and the run would take the
@@ -244,6 +263,60 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 	assertAcyclic(workflow, fail);
 	const byName = new Map(workflow.phases.map(phase => [phase.name, phase]));
 	const graph = dependencyGraph(workflow);
+
+	for (const phase of workflow.phases) {
+		if (phase.kind !== "code" || phase.expect !== "fail") continue;
+		// A RED reproducer shows the command fails — not that it fails for
+		// the reported reason; a broken assertion satisfies it too. It proves
+		// nothing at all about the
+		// fix unless the SAME command runs again afterwards and passes --
+		// otherwise a workflow could demand a failing test, implement
+		// anything, and never look again.
+		//
+		// "Afterwards" is causal, not positional: the green counterpart has
+		// to depend on this phase, through the implicit predecessor edge like
+		// any other dependency. Declared the other way round, the
+		// implementation would land before the bug was ever demonstrated.
+		const green = workflow.phases.find(
+			candidate =>
+				candidate !== phase &&
+				candidate.kind === "code" &&
+				candidate.command === phase.command &&
+				(candidate.expect ?? "pass") === "pass" &&
+				dependsTransitively(graph, graph.get(candidate.name) ?? [], phase.name),
+		);
+		if (!green) {
+			fail(
+				`phase "${phase.name}" expects failure but nothing that depends on it re-runs ` +
+					`${JSON.stringify(phase.command)} expecting it to pass: a red reproducer with no green ` +
+					"counterpart proves the bug, never the fix",
+			);
+			continue;
+		}
+		// Something has to change between red and green, or the pair asserts
+		// that one command both fails and passes on an unchanged tree --
+		// which is a flaky test, not a fix.
+		const writerBetween = workflow.phases.some(
+			candidate =>
+				// Must be able to CHANGE the tree. `human` answers a question
+				// and `writes: []` denies every path, so neither can be what
+				// turns the red run green.
+				(candidate.kind === "agent" || candidate.kind === "fusion") &&
+				(candidate.writes === undefined || candidate.writes.length > 0) &&
+				dependsTransitively(graph, graph.get(candidate.name) ?? [], phase.name) &&
+				dependsTransitively(graph, graph.get(green.name) ?? [], candidate.name),
+		);
+		// Both halves must launch the same way: `expect: fail` runs direct
+		// argv so a failed exec is distinguishable, and a green counterpart
+		// going through the shell would not be repeating the same test.
+		green.directLaunch = true;
+		if (!writerBetween) {
+			fail(
+				`phases "${phase.name}" and "${green.name}" run ${JSON.stringify(phase.command)} with nothing ` +
+					"between them that could change the result: a pair with no fix asserts a flaky test, not a repair",
+			);
+		}
+	}
 	for (const phase of workflow.phases) {
 		if (!phase.onReject) continue;
 		const target = byName.get(phase.onReject.to);

@@ -222,11 +222,15 @@ describe("settleIsolation nested repositories", () => {
 describe("runCodePhase signal reporting", () => {
 	it("names the signal instead of leaving the shell's 128+N code raw", async () => {
 		// A host shutting down sends SIGTERM; `sh` reports its dead child as 143.
-		// Left raw it reads to the next agent as a failing build.
+		// Left unexplained it reads to the next agent as a failing build.
 		const result = await runCodePhase(code(`sh -c 'kill -TERM $$'`), tempDir("sigterm"), undefined);
 		expect(result.ok).toBe(false);
 		expect(result.summary).toContain("SIGTERM");
-		expect(result.summary).not.toContain("exited 143");
+		// The status itself stays in the summary. It is what the shell
+		// reported, and `exit 143` is a status a command may legitimately
+		// choose -- so the wording explains the convention rather than
+		// asserting which of the two happened.
+		expect(result.summary).toContain("143");
 	});
 
 	it("names SIGKILL too", async () => {

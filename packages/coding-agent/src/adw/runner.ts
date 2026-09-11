@@ -35,6 +35,7 @@ import {
 import { getAgentDir, isEnoent, logger, ptree, Snowflake } from "@oh-my-pi/pi-utils";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+import { plainArgv } from "./types";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { ArtifactManager } from "../session/artifacts";
 import type { EventBus } from "../utils/event-bus";
@@ -322,14 +323,85 @@ async function performSettle(
 	return { ...base, applied: true, patchPath, nestedApplied: delta.nestedPatches.length > 0 };
 }
 
-/** The signals a workflow command realistically dies by, named for the report. */
+/**
+ * How a code phase ended, keeping apart the two things `ok: false` used to
+ * collapse.
+ *
+ * `ran` means the command executed and the shell reported its own exit code.
+ * `infrastructure` means it never got to render a verdict: a timeout, a
+ * cancellation, a signal, a spawn that failed. Both are failures, but only
+ * the first is evidence about the WORK — and `expect: fail` is unsound
+ * without the distinction, since a reproducer that never ran would otherwise
+ * count as "failed as required".
+ */
+/**
+ * Signal names for the `128 + N` convention, used to word an exit status --
+ * never to classify one.
+ */
 const SIGNAL_NAMES: Record<number, string> = {
 	1: "SIGHUP",
 	2: "SIGINT",
+	3: "SIGQUIT",
+	6: "SIGABRT",
 	9: "SIGKILL",
+	11: "SIGSEGV",
 	13: "SIGPIPE",
 	15: "SIGTERM",
 };
+
+/**
+ * Word an exit status for a human reader.
+ *
+ * `sh` reports a child killed by signal N as `128 + N`, and a raw "exited
+ * 143" tells the next agent its build failed when the host was shutting
+ * down -- it then spends its attempts fixing nothing.
+ *
+ * This only phrases the summary. The verdict stays exactly what the status
+ * says, because `exit 143` is a status a command may legitimately choose
+ * and nothing here can tell the two apart.
+ *
+ * @param exitCode - Exit status the shell reported
+ * @returns A human phrase describing the status
+ */
+function describeExit(exitCode: number): string {
+	if (exitCode > 128) {
+		const name = SIGNAL_NAMES[exitCode - 128];
+		if (name) return `exited ${exitCode} (the status sh reports for a child killed by ${name})`;
+	}
+	return `exited ${exitCode}`;
+}
+
+/**
+ * Judge a command against what the workflow expected of it.
+ *
+ * The default is the ordinary gate: green passes. `fail` inverts it, and
+ * exists for the one thing a green suite cannot express — a bug reproducer
+ * must be RED before the fix, or nothing proves it exercises the fault. A
+ * workflow that only ever demands green accepts a fix whose test never
+ * reproduced the bug.
+ *
+ * Inversion applies ONLY to a command that ran and chose its exit code. A
+ * timeout, a cancellation, a signal or a failed spawn never rendered a
+ * verdict, so counting them as "failed as required" would accept a
+ * reproducer that never executed — the exact hole `expect: fail` is meant to
+ * close, reopened from the other side.
+ */
+export function judgeExpectation(phase: AdwPhaseConfig, result: CodePhaseResult): [accepted: boolean, summary: string] {
+	if ((phase.expect ?? "pass") !== "fail") return [result.ok, result.summary];
+	if (result.kind === "infrastructure") {
+		return [false, `expected ${phase.name} to fail, but it never ran: ${result.summary}`];
+	}
+	return result.ok
+		? [
+				false,
+				`expected ${phase.name} to fail, but it passed — the reproducer does not exercise the fault: ${result.summary}`,
+			]
+		: [true, `expected to fail and did (exit ${result.exitCode}): ${result.summary}`];
+}
+
+export type CodePhaseResult =
+	| { kind: "ran"; ok: boolean; exitCode: number; summary: string }
+	| { kind: "infrastructure"; ok: false; summary: string };
 
 export async function runCodePhase(
 	phase: AdwPhaseConfig,
@@ -337,9 +409,63 @@ export async function runCodePhase(
 	signal: AbortSignal | undefined,
 	/** Extra variables for this command only, on top of the inherited environment. */
 	env?: Record<string, string>,
-): Promise<{ ok: boolean; summary: string }> {
+): Promise<CodePhaseResult> {
 	const command = phase.command ?? "";
 	const timeout = phase.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+	// A phase that inverts its criterion is the one case where "the command
+	// did not run" and "the command failed" must not collapse: a typo would
+	// otherwise satisfy MUST_FAIL and the workflow would accept a fix no
+	// test ever exercised.
+	//
+	// No status can settle it -- 127 is a convention any command may return,
+	// and stderr is the command's own output -- so launch plain argv
+	// directly and let the kernel answer. A failed exec raises ENOENT or
+	// EACCES before any process exists; anything that starts renders a
+	// verdict. One execution either way: probing the filesystem first would
+	// still miss a script whose shebang interpreter is gone, and spawning
+	// twice would repeat a side effect.
+	//
+	// The paired green phase takes this path too. A pair only repeats the
+	// same test if both halves run it the same way -- the loader marks the
+	// counterpart so quoting and word splitting cannot differ between them.
+	const directArgv = phase.expect === "fail" || phase.directLaunch ? plainArgv(command) : null;
+	if (directArgv) {
+		try {
+			const result = await ptree.exec(directArgv, {
+				cwd,
+				timeout,
+				allowNonZero: true,
+				allowAbort: true,
+				signal,
+				env: env ? { ...(process.env as Record<string, string>), ...env } : undefined,
+			});
+			const summary = summarizeOutput(result.stdout, result.stderr);
+			if (result.exitError?.aborted) {
+				const why = signal?.aborted ? "was cancelled" : `was killed after ${timeout}ms`;
+				return { kind: "infrastructure", ok: false, summary: `${command} ${why}\n${summary}` };
+			}
+			if (result.exitCode === null) {
+				return { kind: "infrastructure", ok: false, summary: `${command} ended without an exit code\n${summary}` };
+			}
+			return {
+				kind: "ran",
+				ok: result.exitCode === 0,
+				exitCode: result.exitCode,
+				summary:
+					result.exitCode === 0
+						? summary || `${command} exited 0`
+						: `${command} ${describeExit(result.exitCode)}\n${summary}`,
+			};
+		} catch (error) {
+			if (isEnoent(error)) {
+				return { kind: "infrastructure", ok: false, summary: `${command} could not be found to run` };
+			}
+			if (error && typeof error === "object" && "code" in error && error.code === "EACCES") {
+				return { kind: "infrastructure", ok: false, summary: `${command} could not be executed` };
+			}
+			throw error;
+		}
+	}
 	try {
 		// Absolute shell on POSIX (a launcher may hand omp a minimal tool-only
 		// PATH); the vendored Brush shell on Windows, where /bin/sh does not
@@ -349,11 +475,23 @@ export async function runCodePhase(
 			const result = await executeShell({ command, cwd, timeoutMs: timeout, signal, env }, (err, chunk) => {
 				if (!err) output += chunk;
 			});
-			if (result.timedOut)
-				return { ok: false, summary: `${command} timed out after ${timeout}ms\n${output.trim()}` };
+			// Three ways to end without a verdict, and `exitCode` is optional
+			// precisely because of them. Defaulting it to a number would
+			// manufacture a verdict the shell never rendered, and MUST_FAIL
+			// would read a cancelled command as "failed as required".
+			if (result.timedOut || result.cancelled || result.exitCode === undefined) {
+				const why = result.timedOut
+					? `timed out after ${timeout}ms`
+					: result.cancelled
+						? "was cancelled"
+						: "ended without an exit code";
+				return { kind: "infrastructure", ok: false, summary: `${command} ${why}\n${output.trim()}` };
+			}
 			const ok = result.exitCode === 0;
 			return {
+				kind: "ran",
 				ok,
+				exitCode: result.exitCode,
 				summary: ok
 					? output.trim() || `${command} exited 0`
 					: `${command} exited ${result.exitCode}\n${output.trim()}`,
@@ -377,25 +515,41 @@ export async function runCodePhase(
 			// Only one of these is a deadline. Telling an agent its build "timed
 			// out" when the operator pressed Esc sends it hunting a slow test.
 			const why = signal?.aborted ? "was cancelled" : `was killed after ${timeout}ms`;
-			return { ok: false, summary: `${command} ${why}\n${summary}` };
+			return { kind: "infrastructure", ok: false, summary: `${command} ${why}\n${summary}` };
 		}
-		if (result.exitCode !== null && result.exitCode > 128) {
-			// `sh` reports a child that died by signal N as `128 + N`. Left raw, a
-			// host shutting down (SIGTERM ⇒ 143) reads to the next agent as a
-			// failing build, and it spends its attempts fixing nothing.
-			const signalNumber = result.exitCode - 128;
-			const name = SIGNAL_NAMES[signalNumber] ?? `signal ${signalNumber}`;
-			return { ok: false, summary: `${command} was killed by ${name}\n${summary}` };
+		// Everything below this point RAN. A shell exit status cannot say
+		// otherwise: `exit 143` looks like SIGTERM, `exit 127` like a missing
+		// command, and a test that prints "command not found" and exits 127
+		// looks like both -- yet all three are verdicts the command chose.
+		//
+		// `ptree` reports the two endings it can actually attest to, and they
+		// are handled above: `exitError.aborted` for a timeout or a
+		// cancellation, and a missing exit code for a process that never
+		// produced one. It exposes no signal or spawn-failure field, so any
+		// further classification here would be a guess about the command's
+		// own output -- and guessing wrong reclassifies a legitimate red run
+		// as a broken environment, which is exactly what `expect: fail`
+		// depends on not happening.
+		if (result.exitCode === null) {
+			// Same reasoning as the Windows branch: no exit code means no
+			// verdict, whatever else the runner reported.
+			return { kind: "infrastructure", ok: false, summary: `${command} ended without an exit code\n${summary}` };
 		}
 		return {
+			kind: "ran",
 			ok: result.exitCode === 0,
+			exitCode: result.exitCode,
 			summary:
 				result.exitCode === 0
 					? summary || `${command} exited 0`
-					: `${command} exited ${result.exitCode}\n${summary}`,
+					: `${command} ${describeExit(result.exitCode)}\n${summary}`,
 		};
 	} catch (err) {
-		return { ok: false, summary: `${command} could not run: ${err instanceof Error ? err.message : String(err)}` };
+		return {
+			kind: "infrastructure",
+			ok: false,
+			summary: `${command} could not run: ${err instanceof Error ? err.message : String(err)}`,
+		};
 	}
 }
 
@@ -1192,8 +1346,8 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				return run.submitCodeResult(phase.name, answer.approved, answer.reason);
 			}
 			const env = await buildCodeEnv(phase, step);
-			const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
-			return run.submitCodeResult(phase.name, ok, summary);
+			const result = await runCodePhase(phase, workRoot, signal, env);
+			return run.submitCodeResult(phase.name, ...judgeExpectation(phase, result));
 		};
 
 		const finishRun = async (step: TaskStep): Promise<AdwRunResult> => {

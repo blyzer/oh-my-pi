@@ -1,0 +1,86 @@
+# Bugfix by reproduction: prove the bug, then prove the repair.
+#
+# What it teaches: `expect: fail`. A workflow that only ever demands green
+# accepts a "fix" whose test never exercised the fault — the test passes
+# before and after, and nobody notices it was never about the bug.
+#
+# The shape is a pair. `reproduce` writes a failing test, `red` requires it
+# to FAIL, `fix` changes the source, and `green` re-runs the SAME command
+# requiring it to PASS. The loader enforces all of that: a red phase with no
+# green counterpart is refused, so is a green that does not depend on the
+# red, and so is a pair with no writer between them — that last one would
+# assert that one command both fails and passes on an unchanged tree, which
+# is a flaky test rather than a repair.
+#
+# What this does NOT prove. A nonzero exit says the command failed, not
+# that it failed for the reported reason: a broken assertion, a compile
+# error, or an unrelated red test all satisfy RED and can all go green
+# afterwards without the defect ever being covered. That is why the
+# reproducer is scoped to one file and both commands name it — running the
+# whole suite would let any pre-existing failure stand in for the bug. The
+# pairing raises the floor; it does not make the test correct.
+#
+# Try it:  cp docs/adw/examples/tdd.yml .omp/adw/
+#          /adw tdd "Fix: parse() drops the last field when input has no trailing newline"
+
+name: tdd
+description: Reproduce a bug with a failing test, fix it, prove the test now passes.
+maxAttempts: 3
+isolation: true
+protected:
+  - "package.json"
+  - "bun.lock"
+
+phases:
+  # Writes the reproducer and nothing else. Scoped to tests so a builder
+  # cannot "fix" the bug here and leave the reproducer proving nothing.
+  - name: reproduce
+    kind: agent
+    owner: task
+    writes: ["test/adw-repro.test.ts"]
+    gates: ["artifacts_exist", "files_non_empty"]
+    prompt: |
+      Write a MINIMAL failing test at exactly `test/adw-repro.test.ts`
+      that reproduces the reported bug. That path is your entire write
+      scope: anything else is rejected and rolled back.
+
+      Do not touch source code. The test must fail against the current
+      implementation; if it passes, it is not reproducing the bug and the
+      run refuses it.
+
+  # The proof that the bug is real. Red here is success.
+  - name: red
+    kind: code
+    owner: bun
+    command: "bun test test/adw-repro.test.ts"
+    expect: fail
+    timeoutMs: 600000
+    # A green reproducer is a failure HERE: it did not reproduce anything.
+    # Without this the default retries the same deterministic command three
+    # times and aborts; `correct` sends "it passes, so it is not covering
+    # the bug" back to `reproduce`, the only phase that can rewrite it.
+    onFail: correct
+
+  # Now the repair. Scoped away from tests: editing the reproducer to make
+  # it pass is the failure mode this workflow exists to prevent.
+  - name: fix
+    kind: agent
+    owner: task
+    writes: ["src/**"]
+    prompt: |
+      Make the failing test pass by fixing the source. Do not modify any
+      test: your write scope excludes them, and an attempt to widen it is
+      rejected and rolled back.
+
+  # The same command, now required to pass. Same command is not a
+  # convention — the loader pairs red and green by exact command text.
+  #
+  # `onFail: correct` sends a red result back to `fix`, which is the phase
+  # that can act on it. No `onReject` here: that routes a REVIEW verdict,
+  # and this is a deterministic gate.
+  - name: green
+    kind: code
+    owner: bun
+    command: "bun test test/adw-repro.test.ts"
+    timeoutMs: 600000
+    onFail: correct
