@@ -171,11 +171,16 @@ fn available_disk_bytes(path: &str) -> Option<u64> {
 	// `f_bavail` excludes root-reserved blocks: what an unprivileged writer
 	// can actually use, which is what an admission decision needs.
 	//
-	// Its width is platform-dependent -- u64 on Linux, u32 on macOS -- so
-	// `From` converts where a widening is real and compiles to nothing
-	// where the types already agree. A cast would be dead code on Linux
-	// under `-D clippy::unnecessary_cast`, and an `allow` would silence
-	// the lint on every platform rather than just the one that needs it.
+	// Its width is platform-dependent: u64 on Linux, u32 on macOS. Every
+	// conversion is therefore wrong somewhere -- `as u64`, `u64::from`,
+	// `.into()` and `try_from` are each rejected on Linux, where the types
+	// already agree, and each required on macOS, where they do not. The
+	// conversion is real; only its necessity varies, so the allow names the
+	// platform that does not need it rather than deleting one that does.
+	#[allow(
+		clippy::useless_conversion,
+		reason = "statvfs::f_bavail is u64 on Linux and u32 on macOS; the conversion is required on the latter"
+	)]
 	Some(stat.f_frsize.saturating_mul(u64::from(stat.f_bavail)))
 }
 
