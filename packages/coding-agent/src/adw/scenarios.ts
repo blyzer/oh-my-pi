@@ -358,3 +358,94 @@ export const INTEGRATION_001 = defineScenario({
 		return ok("second landing refused, delivered tree unchanged");
 	},
 });
+
+export const ISOLATION_001 = defineScenario({
+	id: "FB-ISOLATION-001",
+	family: "FB-ISOLATION",
+	asserts:
+		"Two writers sharing a base cannot silently collide: a conflicting landing is refused, a " +
+		"textually-mergeable one is still judged on the combined tree, and the first writer's " +
+		"accepted work survives either way.",
+	run: async workdir => {
+		const git = async (cwd: string, ...args: string[]): Promise<void> => {
+			await Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "ignore" }).exited;
+		};
+
+		/**
+		 * Land `alpha`, then try to land `beta`. Both patches are captured
+		 * against the same baseline and neither writer has seen the other —
+		 * which is exactly what isolation produces.
+		 */
+		const race = async (
+			label: string,
+			seed: string,
+			alpha: string,
+			beta: string,
+			verify?: (root: string) => Promise<{ ok: true } | { ok: false; evidence: string }>,
+		): Promise<{ applied: boolean; final: string }> => {
+			const root = path.join(workdir, `tree-${label}`);
+			const runA = path.join(workdir, `run-a-${label}`);
+			const runB = path.join(workdir, `run-b-${label}`);
+			for (const dir of [root, runA, runB]) await fs.mkdir(dir, { recursive: true });
+			await git(root, "init", "-q", "-b", "main");
+			await git(root, "config", "user.email", "bench@example.com");
+			await git(root, "config", "user.name", "Bench");
+			await git(root, "config", "maintenance.auto", "false");
+			await Bun.write(path.join(root, "shared.txt"), seed);
+			await git(root, "add", "-A");
+			await git(root, "commit", "-qm", "base");
+
+			const baseline = await captureBaseline(root);
+			await Bun.write(path.join(root, "shared.txt"), alpha);
+			const deltaA = await captureDeltaPatch(root, baseline);
+			await git(root, "checkout", "-q", "--", ".");
+			await Bun.write(path.join(root, "shared.txt"), beta);
+			const deltaB = await captureDeltaPatch(root, baseline);
+			await git(root, "checkout", "-q", "--", ".");
+
+			const recA: IntegrationRecord = { phase: "alpha", fromSeq: 0, delta: deltaA, status: "prepared" };
+			const recB: IntegrationRecord = { phase: "beta", fromSeq: 1, delta: deltaB, status: "prepared" };
+			await writeRunState(path.join(runA, "integration.json"), recA);
+			await writeRunState(path.join(runB, "integration.json"), recB);
+
+			await integrateAccepted(root, runA, recA);
+			let applied = true;
+			try {
+				await integrateAccepted(root, runB, recB, verify);
+			} catch {
+				applied = false;
+			}
+			return { applied, final: await Bun.file(path.join(root, "shared.txt")).text() };
+		};
+
+		// Both rewrite the same region. `git apply` itself refuses a patch
+		// whose context moved -- probed: it throws and leaves the tree
+		// untouched -- so the pre-flight `canApplyPatch` is a courtesy that
+		// buys a better message, not the defense. The property holds either
+		// way, which is why this half stays green when the pre-check is
+		// neutralised and goes red only if the apply stops being atomic.
+		const collision = await race("collision", "base\n", "alpha wrote this\n", "beta wrote this\n");
+		if (collision.applied) return no(`a conflicting landing was applied; tree is ${JSON.stringify(collision.final)}`);
+		if (collision.final !== "alpha wrote this\n") {
+			return no(`the refused landing disturbed accepted work: ${JSON.stringify(collision.final)}`);
+		}
+
+		// Disjoint regions of one file: git merges these textually, so nothing
+		// conflicts -- but the combined tree is a state NEITHER writer
+		// verified, which is what the delivered-tree check exists for.
+		const seed = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+		const merged = await race("merge", seed, `${seed}alpha\n`, `beta\n${seed}`, async deliveredRoot => {
+			const text = await Bun.file(path.join(deliveredRoot, "shared.txt")).text();
+			const lines = text.trimEnd().split("\n").length;
+			// True for either writer alone, false once both have landed.
+			return lines <= 11
+				? { ok: true as const }
+				: { ok: false as const, evidence: `combined tree has ${lines} lines` };
+		});
+		if (merged.applied) return no("a mergeable landing bypassed the delivered-tree check");
+		if (merged.final !== `${seed}alpha\n`) {
+			return no(`the reverted merge did not restore alpha's landing: ${JSON.stringify(merged.final)}`);
+		}
+		return ok("conflict refused, textual merge caught by the delivered check, alpha intact in both");
+	},
+});
