@@ -449,3 +449,85 @@ export const ISOLATION_001 = defineScenario({
 		return ok("conflict refused, textual merge caught by the delivered check, alpha intact in both");
 	},
 });
+
+export const SCOPE_001 = defineScenario({
+	id: "FB-SCOPE-001",
+	family: "FB-SCOPE",
+	asserts:
+		"Write scope is decided by the actual change-set and enforced by rollback: an out-of-scope " +
+		"write is undone, a protected path beats an explicit allow of it, and in-scope work stands.",
+	run: async workdir => {
+		const git = async (cwd: string, ...args: string[]): Promise<void> => {
+			await Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "ignore" }).exited;
+		};
+
+		/** Write one path under a declared scope, then settle and report. */
+		const attempt = async (
+			label: string,
+			allowed: string[] | undefined,
+			protectedGlobs: string[],
+			write: string,
+		): Promise<{ unauthorized: number; survived: boolean }> => {
+			const root = path.join(workdir, `tree-${label}`);
+			const runDir = path.join(workdir, `run-${label}`);
+			await fs.mkdir(path.join(root, "src"), { recursive: true });
+			await fs.mkdir(runDir, { recursive: true });
+			await git(root, "init", "-q", "-b", "main");
+			await git(root, "config", "user.email", "bench@example.com");
+			await git(root, "config", "user.name", "Bench");
+			await git(root, "config", "maintenance.auto", "false");
+			await Bun.write(path.join(root, "src", "keep.ts"), "export const keep = 1;\n");
+			await git(root, "add", "-A");
+			await git(root, "commit", "-qm", "base");
+
+			const guard = TaskWriteGuard.create({ root, baselineFile: path.join(runDir, "baseline.json") });
+			guard.begin();
+			await fs.mkdir(path.dirname(path.join(root, write)), { recursive: true });
+			await Bun.write(path.join(root, write), "written by the phase\n");
+			const report = guard.settle({ allowed, protectedGlobs, patchDir: runDir });
+			return { unauthorized: report.unauthorized.length, survived: await fs.exists(path.join(root, write)) };
+		};
+
+		// In scope: the phase did what it declared, and the work stands.
+		const inScope = await attempt("in-scope", ["src/**"], [], "src/feature.ts");
+		if (inScope.unauthorized !== 0 || !inScope.survived) return no("an in-scope write was refused or rolled back");
+
+		// Out of scope: refusing is not enough — the bytes must be gone, or
+		// the next attempt inherits them and the operator keeps them.
+		const outOfScope = await attempt("out-of-scope", ["src/**"], [], "outside.ts");
+		if (outOfScope.unauthorized === 0) return no("a write outside the declared scope was authorized");
+		if (outOfScope.survived) return no("an unauthorized write was reported but left on disk");
+
+		// An explicit empty scope denies everything: the shape a read-only
+		// phase produces, and it must not read as "unrestricted".
+		const readOnly = await attempt("read-only", [], [], "src/anything.ts");
+		if (readOnly.unauthorized === 0 || readOnly.survived) {
+			return no("an explicitly empty scope behaved as unrestricted");
+		}
+
+		// Protection beats authorization: a writer allowed `**` still may not
+		// touch a protected path.
+		//
+		// Deliberately NOT `.omp/adw/**`: the guard protects that itself,
+		// always, so asserting on it passes even when the workflow's own
+		// protected list is dropped — measured, after a first draft of this
+		// scenario stayed green with the argument neutralised. A workflow
+		// path exercises the argument and nothing else.
+		const protectedPath = await attempt("protected", ["**"], ["secrets/**"], "secrets/key.txt");
+		if (protectedPath.unauthorized === 0 || protectedPath.survived) {
+			return no("a workflow-protected path was writable by a phase allowed everything");
+		}
+
+		// The always-protected set is a separate promise and worth its own
+		// check: the workflow that judges a phase is off limits whether or
+		// not the workflow remembered to say so.
+		const alwaysProtected = await attempt("always", ["**"], [], ".omp/adw/w.yml");
+		if (alwaysProtected.unauthorized === 0 || alwaysProtected.survived) {
+			return no("the workflow file was writable by the phase it judges");
+		}
+
+		return ok(
+			"in-scope stands; out-of-scope, empty-scope, workflow-protected and always-protected writes rolled back",
+		);
+	},
+});
