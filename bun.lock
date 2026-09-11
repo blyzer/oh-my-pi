@@ -219,16 +219,6 @@
         "wrap-ansi": "10.0.0",
       },
     },
-    "packages/omp-factory": {
-      "name": "@oh-my-pi/omp-factory",
-      "version": "0.1.0",
-      "dependencies": {
-        "@oh-my-pi/pi-coding-agent": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/bun": "catalog:",
-      },
-    },
     "packages/omptype": {
       "name": "@oh-my-pi/omptype",
       "version": "18.1.15",
@@ -726,8 +716,6 @@
     "@oh-my-pi/browser-relay": ["@oh-my-pi/browser-relay@workspace:packages/browser-relay"],
 
     "@oh-my-pi/collab-web": ["@oh-my-pi/collab-web@workspace:packages/collab-web"],
-
-    "@oh-my-pi/omp-factory": ["@oh-my-pi/omp-factory@workspace:packages/omp-factory"],
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@workspace:packages/stats"],
 

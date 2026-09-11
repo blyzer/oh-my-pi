@@ -9,7 +9,8 @@
  */
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { TaskOutcomeKind, TaskPhaseKind, TaskRun, TaskStepKind } from "@oh-my-pi/pi-natives";
+import { TaskOutcomeKind, TaskPhaseKind, TaskRun, TaskStepKind, TaskWriteGuard } from "@oh-my-pi/pi-natives";
+import { classifyFailure } from "../task/admission";
 import { defineScenario, type ScenarioOutcome } from "./bench";
 
 function ok(evidence: string): ScenarioOutcome {
@@ -216,5 +217,89 @@ export const CORRECTION_001 = defineScenario({
 		const second = task.submitAgentOutput("build", SUCCESS(["missing.txt"]));
 		if (second.kind !== TaskOutcomeKind.Advanced) return no("a satisfied retry did not advance");
 		return ok(`corrected within budget: ${first.correction.slice(0, 60)}`);
+	},
+});
+
+export const RESOURCE_001 = defineScenario({
+	id: "FB-RESOURCE-001",
+	family: "FB-RESOURCE",
+	asserts:
+		"A host failure is attributed to the host, not to the work — so a correction is never spent " +
+		"asking a seat to fix code that never ran.",
+	run: async () => {
+		// The taxonomy itself, exercised at the boundary the runner uses. A
+		// misread resource failure wastes an attempt; a misread semantic one
+		// would skip a correction that was owed, so it fails toward semantic.
+		const cases: Array<[string, "semantic" | "resource"]> = [
+			["fatal error: out of memory", "resource"],
+			["ENOSPC: no space left on device", "resource"],
+			["killed by signal 9", "resource"],
+			["expected 3 to equal 4", "semantic"],
+			["TypeError: x is not a function", "semantic"],
+		];
+		for (const [text, expected] of cases) {
+			const actual = classifyFailure(text);
+			if (actual !== expected) return no(`classified ${JSON.stringify(text)} as ${actual}, expected ${expected}`);
+		}
+		// The provider layer owns its own errors: a 429 must not be re-derived
+		// from message text here and drift from the taxonomy that already
+		// knows it.
+		if (classifyFailure("request failed", { status: 429 }) !== "resource") {
+			return no("a provider rate limit was not attributed to the host");
+		}
+		if (classifyFailure("request failed", { status: 400 }) !== "semantic") {
+			return no("a bad request was attributed to the host");
+		}
+		return ok(`${cases.length} signatures plus provider status classified correctly`);
+	},
+});
+
+export const RECOVERY_001 = defineScenario({
+	id: "FB-RECOVERY-001",
+	family: "FB-RECOVERY",
+	asserts:
+		"An integration interrupted mid-apply is restored to its pre-apply state rather than left " +
+		"half-landed, and the recovered tree is byte-exact.",
+	run: async workdir => {
+		const root = path.join(workdir, "tree");
+		const runDir = path.join(workdir, "run");
+		await fs.mkdir(root, { recursive: true });
+		await fs.mkdir(runDir, { recursive: true });
+
+		// Enough files that a partial apply is a real state rather than a
+		// theoretical one: a single-file landing can never straddle a crash.
+		const originals = new Map<string, string>();
+		for (let index = 0; index < 200; index++) {
+			const name = `file-${index}.txt`;
+			const content = `original ${index}\n`;
+			originals.set(name, content);
+			await Bun.write(path.join(root, name), content);
+		}
+
+		const guard = TaskWriteGuard.create({ root, baselineFile: path.join(runDir, "recovery.json") });
+		guard.begin();
+
+		// A half-finished apply: some files rewritten, one created, the rest
+		// untouched — what a SIGKILL mid-loop leaves behind.
+		for (let index = 0; index < 80; index++) {
+			await Bun.write(path.join(root, `file-${index}.txt`), `landed ${index}\n`);
+		}
+		await Bun.write(path.join(root, "appeared.txt"), "created mid-apply\n");
+
+		// Recovery denies everything: the interrupted attempt authorized
+		// nothing, so every trace of it must go.
+		const restored = guard.settle({ allowed: [], protectedGlobs: [], patchDir: runDir });
+		if (restored.unrecoverable.length > 0) {
+			return no(`recovery could not restore: ${restored.unrecoverable.join(", ")}`);
+		}
+
+		for (const [name, content] of originals) {
+			const actual = await Bun.file(path.join(root, name)).text();
+			if (actual !== content) return no(`${name} recovered to ${JSON.stringify(actual)}, expected the original`);
+		}
+		if (await Bun.file(path.join(root, "appeared.txt")).exists()) {
+			return no("a file created by the interrupted apply survived recovery");
+		}
+		return ok(`${originals.size} files byte-exact, mid-apply creation removed`);
 	},
 });

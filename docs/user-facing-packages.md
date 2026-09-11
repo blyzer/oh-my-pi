@@ -116,12 +116,3 @@ Sources: [`packages/mnemopi/README.md`](../packages/mnemopi/README.md), [`packag
 - Integration: `mcp` starts the package's MCP server. The standalone CLI operates directly on Mnemopi storage; select `memory.backend: mnemopi` instead when integrating memory into OMP sessions, as described in the backend guide.
 - Discovery and errors: `mnemopi --help` lists primary command forms. Unknown commands and invalid arguments print a concise error and return a nonzero exit code.
 
-### `packages/omp-factory` — deterministic workflow controller (early scaffold)
-
-Sources: [`packages/omp-factory/README.md`](../packages/omp-factory/README.md), [`packages/omp-factory/package.json`](../packages/omp-factory/package.json), [`packages/omp-factory/src/extension.ts`](../packages/omp-factory/src/extension.ts).
-
-- Package: `@oh-my-pi/omp-factory`; extension entry `./src/extension.ts` (load via `-e packages/omp-factory` or the `extensions` setting).
-- Feature: external workflow-truth owner over managed OMP subagents — attempt budgets, deterministic gates, write-scope verification against the captured change-set, durable JSONL ledger with replay, serialized integration journal, accepted-version DAG readiness. OMP core keeps owning agent execution.
-- Command: `/factory <request>` runs one managed builder through the public `runSubprocess` path and accepts the candidate only through the deterministic driver.
-- Change capture reuses core `captureBaseline`/`captureDeltaPatch`/`patchTouchedFiles` from `@oh-my-pi/pi-coding-agent`; no forked worktree logic lives here.
-- Status: scaffold under active development; the fork-local ADW prototype remains the behavioral reference until equivalence is proven.

@@ -42,6 +42,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { AuthStorage } from "../session/auth-storage";
+import { classifyFailure } from "../task/admission";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import type { AgentDefinition, SingleResult } from "../task/types";
@@ -950,11 +951,24 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			const { seatName, role, result } = execution;
 			run.notePhaseTokens(phaseName, seatName, result.tokens, result.model);
 			if (result.exitCode !== 0) {
+				const detail = result.stderr.trim() || "no stderr";
+				// Whose failure was it? An out-of-memory kill or a provider rate
+				// limit did not fail semantically, and spending a correction
+				// attempt asking a seat to fix code that never ran is the
+				// specific waste this distinction prevents. The budget is still
+				// bounded either way — this only changes what the next attempt
+				// is told, and whether it is worth making.
+				const attribution = classifyFailure(detail);
+				if (attribution === "resource") {
+					run.noteGateReport(phaseName, "resource", [
+						{ item: seatName, ok: false, note: `host failure, not a fault in the work: ${detail}` },
+					]);
+				}
 				// A crashed spawn has no complete answer; preserve ordinary retry behavior.
 				return run.submitCodeResult(
 					phaseName,
 					false,
-					`${role} ${seatName} exited ${result.exitCode}: ${result.stderr.trim() || "no stderr"}`,
+					`${role} ${seatName} exited ${result.exitCode} (${attribution}): ${detail}`,
 				);
 			}
 			const checked = phaseChecks.get(phaseName)?.(result.output);
