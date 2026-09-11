@@ -170,7 +170,13 @@ fn available_disk_bytes(path: &str) -> Option<u64> {
 	let stat = unsafe { stat.assume_init() };
 	// `f_bavail` excludes root-reserved blocks: what an unprivileged writer
 	// can actually use, which is what an admission decision needs.
-	Some(stat.f_frsize.saturating_mul(stat.f_bavail as u64))
+	//
+	// Its width is platform-dependent -- u64 on Linux, u32 on macOS -- so
+	// `From` converts where a widening is real and compiles to nothing
+	// where the types already agree. A cast would be dead code on Linux
+	// under `-D clippy::unnecessary_cast`, and an `allow` would silence
+	// the lint on every platform rather than just the one that needs it.
+	Some(stat.f_frsize.saturating_mul(u64::from(stat.f_bavail)))
 }
 
 #[cfg(not(unix))]
