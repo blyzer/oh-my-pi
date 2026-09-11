@@ -35,14 +35,22 @@ export interface AdmissionPolicy {
  * second-guess a healthy machine: the memory floor sits just above the
  * kernel's own 15% pressure threshold.
  *
- * The load ceiling is high because load average is not comparable across
- * platforms. Linux counts uninterruptible-sleep tasks, so a host blocked on
- * I/O reports a large number while its CPUs idle; macOS reports figures well
- * above `cpus` under ordinary interactive use — measured here at 79 on 10
- * CPUs while the machine stayed responsive. A ceiling tuned to the textbook
- * "1.0 per CPU is saturated" would refuse nearly every start on a developer
- * laptop, which is why memory and disk carry the real signal and load only
- * catches the extreme.
+ * The load ceiling is high because load average means different things per
+ * platform, measured on both rather than assumed:
+ *
+ * - Linux (6.18, 6 cpus, containerised): idle 0.33; fully CPU-bound 2.17
+ *   (0.36/cpu, since the average lags); 40 concurrent direct-I/O writers
+ *   6.11 (1.02/cpu). Uninterruptible-sleep tasks count, so an I/O-blocked
+ *   host reports a crowd while its CPUs idle.
+ * - macOS (10 cpus): 45.75 on an ordinary interactive session, 4.57/cpu,
+ *   with the machine responsive throughout. Peaks near 79 were observed
+ *   under a build.
+ *
+ * So a textbook "1.0 per cpu is saturated" ceiling would refuse almost every
+ * start on macOS while barely registering Linux I/O pressure — the metric is
+ * not comparable and cannot carry the decision. Memory and disk do; load
+ * only catches the extreme, and 24/cpu is roughly five times the worst
+ * steady-state figure seen on either platform.
  */
 export const DEFAULT_ADMISSION_POLICY: AdmissionPolicy = {
 	minAvailableMemoryRatio: 0.15,

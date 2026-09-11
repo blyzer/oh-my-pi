@@ -11,7 +11,9 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { TaskOutcomeKind, TaskPhaseKind, TaskRun, TaskStepKind, TaskWriteGuard } from "@oh-my-pi/pi-natives";
 import { classifyFailure } from "../task/admission";
+import { captureBaseline, captureDeltaPatch } from "../task/worktree";
 import { defineScenario, type ScenarioOutcome } from "./bench";
+import { integrateAccepted, type IntegrationRecord, writeRunState } from "./integration";
 
 function ok(evidence: string): ScenarioOutcome {
 	return { passed: true, evidence };
@@ -301,5 +303,313 @@ export const RECOVERY_001 = defineScenario({
 			return no("a file created by the interrupted apply survived recovery");
 		}
 		return ok(`${originals.size} files byte-exact, mid-apply creation removed`);
+	},
+});
+
+export const INTEGRATION_001 = defineScenario({
+	id: "FB-INTEGRATION-001",
+	family: "FB-INTEGRATION",
+	asserts:
+		"An accepted change-set lands exactly once: replaying a landed record is refused rather " +
+		"than applied a second time, and the delivered tree is unchanged by the attempt.",
+	run: async workdir => {
+		const root = path.join(workdir, "tree");
+		const runDir = path.join(workdir, "run");
+		await fs.mkdir(root, { recursive: true });
+		await fs.mkdir(runDir, { recursive: true });
+
+		const git = async (...args: string[]): Promise<void> => {
+			await Bun.spawn(["git", ...args], { cwd: root, stdout: "ignore", stderr: "ignore" }).exited;
+		};
+		await git("init", "-q", "-b", "main");
+		await git("config", "user.email", "bench@example.com");
+		await git("config", "user.name", "Bench");
+		await git("config", "maintenance.auto", "false");
+		await Bun.write(path.join(root, "log.txt"), "line1\n");
+		await git("add", "-A");
+		await git("commit", "-qm", "base");
+
+		// Capture a one-line addition as a patch, then put the tree back: the
+		// record now describes a change that has not been applied.
+		const baseline = await captureBaseline(root);
+		await Bun.write(path.join(root, "log.txt"), "line1\nline2\n");
+		const delta = await captureDeltaPatch(root, baseline);
+		await git("checkout", "-q", "--", ".");
+
+		const record: IntegrationRecord = { phase: "build", fromSeq: 0, delta, status: "prepared" };
+		await writeRunState(path.join(runDir, "integration.json"), record);
+
+		await integrateAccepted(root, runDir, record);
+		const landed = await Bun.file(path.join(root, "log.txt")).text();
+		if (landed !== "line1\nline2\n") return no(`first landing produced ${JSON.stringify(landed)}`);
+
+		// `git apply` is not idempotent: without a guard on the record's own
+		// status, this appends the addition a second time and the delivered
+		// tree silently doubles it.
+		let refused = false;
+		try {
+			await integrateAccepted(root, runDir, record);
+		} catch {
+			refused = true;
+		}
+		const after = await Bun.file(path.join(root, "log.txt")).text();
+		if (!refused) return no(`a landed record was replayed; tree is now ${JSON.stringify(after)}`);
+		if (after !== landed) return no(`the refused replay still changed the tree: ${JSON.stringify(after)}`);
+		return ok("second landing refused, delivered tree unchanged");
+	},
+});
+
+export const ISOLATION_001 = defineScenario({
+	id: "FB-ISOLATION-001",
+	family: "FB-ISOLATION",
+	asserts:
+		"Two writers sharing a base cannot silently collide: a conflicting landing is refused, a " +
+		"textually-mergeable one is still judged on the combined tree, and the first writer's " +
+		"accepted work survives either way.",
+	run: async workdir => {
+		const git = async (cwd: string, ...args: string[]): Promise<void> => {
+			await Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "ignore" }).exited;
+		};
+
+		/**
+		 * Land `alpha`, then try to land `beta`. Both patches are captured
+		 * against the same baseline and neither writer has seen the other —
+		 * which is exactly what isolation produces.
+		 */
+		const race = async (
+			label: string,
+			seed: string,
+			alpha: string,
+			beta: string,
+			verify?: (root: string) => Promise<{ ok: true } | { ok: false; evidence: string }>,
+		): Promise<{ applied: boolean; final: string }> => {
+			const root = path.join(workdir, `tree-${label}`);
+			const runA = path.join(workdir, `run-a-${label}`);
+			const runB = path.join(workdir, `run-b-${label}`);
+			for (const dir of [root, runA, runB]) await fs.mkdir(dir, { recursive: true });
+			await git(root, "init", "-q", "-b", "main");
+			await git(root, "config", "user.email", "bench@example.com");
+			await git(root, "config", "user.name", "Bench");
+			await git(root, "config", "maintenance.auto", "false");
+			await Bun.write(path.join(root, "shared.txt"), seed);
+			await git(root, "add", "-A");
+			await git(root, "commit", "-qm", "base");
+
+			const baseline = await captureBaseline(root);
+			await Bun.write(path.join(root, "shared.txt"), alpha);
+			const deltaA = await captureDeltaPatch(root, baseline);
+			await git(root, "checkout", "-q", "--", ".");
+			await Bun.write(path.join(root, "shared.txt"), beta);
+			const deltaB = await captureDeltaPatch(root, baseline);
+			await git(root, "checkout", "-q", "--", ".");
+
+			const recA: IntegrationRecord = { phase: "alpha", fromSeq: 0, delta: deltaA, status: "prepared" };
+			const recB: IntegrationRecord = { phase: "beta", fromSeq: 1, delta: deltaB, status: "prepared" };
+			await writeRunState(path.join(runA, "integration.json"), recA);
+			await writeRunState(path.join(runB, "integration.json"), recB);
+
+			await integrateAccepted(root, runA, recA);
+			let applied = true;
+			try {
+				await integrateAccepted(root, runB, recB, verify);
+			} catch {
+				applied = false;
+			}
+			return { applied, final: await Bun.file(path.join(root, "shared.txt")).text() };
+		};
+
+		// Both rewrite the same region. `git apply` itself refuses a patch
+		// whose context moved -- probed: it throws and leaves the tree
+		// untouched -- so the pre-flight `canApplyPatch` is a courtesy that
+		// buys a better message, not the defense. The property holds either
+		// way, which is why this half stays green when the pre-check is
+		// neutralised and goes red only if the apply stops being atomic.
+		const collision = await race("collision", "base\n", "alpha wrote this\n", "beta wrote this\n");
+		if (collision.applied) return no(`a conflicting landing was applied; tree is ${JSON.stringify(collision.final)}`);
+		if (collision.final !== "alpha wrote this\n") {
+			return no(`the refused landing disturbed accepted work: ${JSON.stringify(collision.final)}`);
+		}
+
+		// Disjoint regions of one file: git merges these textually, so nothing
+		// conflicts -- but the combined tree is a state NEITHER writer
+		// verified, which is what the delivered-tree check exists for.
+		const seed = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+		const merged = await race("merge", seed, `${seed}alpha\n`, `beta\n${seed}`, async deliveredRoot => {
+			const text = await Bun.file(path.join(deliveredRoot, "shared.txt")).text();
+			const lines = text.trimEnd().split("\n").length;
+			// True for either writer alone, false once both have landed.
+			return lines <= 11
+				? { ok: true as const }
+				: { ok: false as const, evidence: `combined tree has ${lines} lines` };
+		});
+		if (merged.applied) return no("a mergeable landing bypassed the delivered-tree check");
+		if (merged.final !== `${seed}alpha\n`) {
+			return no(`the reverted merge did not restore alpha's landing: ${JSON.stringify(merged.final)}`);
+		}
+		return ok("conflict refused, textual merge caught by the delivered check, alpha intact in both");
+	},
+});
+
+export const SCOPE_001 = defineScenario({
+	id: "FB-SCOPE-001",
+	family: "FB-SCOPE",
+	asserts:
+		"Write scope is decided by the actual change-set and enforced by rollback: an out-of-scope " +
+		"write is undone, a protected path beats an explicit allow of it, and in-scope work stands.",
+	run: async workdir => {
+		const git = async (cwd: string, ...args: string[]): Promise<void> => {
+			await Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "ignore" }).exited;
+		};
+
+		/** Write one path under a declared scope, then settle and report. */
+		const attempt = async (
+			label: string,
+			allowed: string[] | undefined,
+			protectedGlobs: string[],
+			write: string,
+		): Promise<{ unauthorized: number; survived: boolean }> => {
+			const root = path.join(workdir, `tree-${label}`);
+			const runDir = path.join(workdir, `run-${label}`);
+			await fs.mkdir(path.join(root, "src"), { recursive: true });
+			await fs.mkdir(runDir, { recursive: true });
+			await git(root, "init", "-q", "-b", "main");
+			await git(root, "config", "user.email", "bench@example.com");
+			await git(root, "config", "user.name", "Bench");
+			await git(root, "config", "maintenance.auto", "false");
+			await Bun.write(path.join(root, "src", "keep.ts"), "export const keep = 1;\n");
+			await git(root, "add", "-A");
+			await git(root, "commit", "-qm", "base");
+
+			const guard = TaskWriteGuard.create({ root, baselineFile: path.join(runDir, "baseline.json") });
+			guard.begin();
+			await fs.mkdir(path.dirname(path.join(root, write)), { recursive: true });
+			await Bun.write(path.join(root, write), "written by the phase\n");
+			const report = guard.settle({ allowed, protectedGlobs, patchDir: runDir });
+			return { unauthorized: report.unauthorized.length, survived: await fs.exists(path.join(root, write)) };
+		};
+
+		// In scope: the phase did what it declared, and the work stands.
+		const inScope = await attempt("in-scope", ["src/**"], [], "src/feature.ts");
+		if (inScope.unauthorized !== 0 || !inScope.survived) return no("an in-scope write was refused or rolled back");
+
+		// Out of scope: refusing is not enough — the bytes must be gone, or
+		// the next attempt inherits them and the operator keeps them.
+		const outOfScope = await attempt("out-of-scope", ["src/**"], [], "outside.ts");
+		if (outOfScope.unauthorized === 0) return no("a write outside the declared scope was authorized");
+		if (outOfScope.survived) return no("an unauthorized write was reported but left on disk");
+
+		// An explicit empty scope denies everything: the shape a read-only
+		// phase produces, and it must not read as "unrestricted".
+		const readOnly = await attempt("read-only", [], [], "src/anything.ts");
+		if (readOnly.unauthorized === 0 || readOnly.survived) {
+			return no("an explicitly empty scope behaved as unrestricted");
+		}
+
+		// Protection beats authorization: a writer allowed `**` still may not
+		// touch a protected path.
+		//
+		// Deliberately NOT `.omp/adw/**`: the guard protects that itself,
+		// always, so asserting on it passes even when the workflow's own
+		// protected list is dropped — measured, after a first draft of this
+		// scenario stayed green with the argument neutralised. A workflow
+		// path exercises the argument and nothing else.
+		const protectedPath = await attempt("protected", ["**"], ["secrets/**"], "secrets/key.txt");
+		if (protectedPath.unauthorized === 0 || protectedPath.survived) {
+			return no("a workflow-protected path was writable by a phase allowed everything");
+		}
+
+		// The always-protected set is a separate promise and worth its own
+		// check: the workflow that judges a phase is off limits whether or
+		// not the workflow remembered to say so.
+		const alwaysProtected = await attempt("always", ["**"], [], ".omp/adw/w.yml");
+		if (alwaysProtected.unauthorized === 0 || alwaysProtected.survived) {
+			return no("the workflow file was writable by the phase it judges");
+		}
+
+		return ok(
+			"in-scope stands; out-of-scope, empty-scope, workflow-protected and always-protected writes rolled back",
+		);
+	},
+});
+
+export const HANDOFF_001 = defineScenario({
+	id: "FB-HANDOFF-001",
+	family: "FB-HANDOFF",
+	asserts:
+		"A consumer receives the producer's accepted content, not a pointer to it: a revision " +
+		"produces a new version and re-dispatches the consumer against it, rather than mutating " +
+		"what was already consumed.",
+	run: async workdir => {
+		const root = path.join(workdir, "tree");
+		const traceDir = path.join(workdir, "trace");
+		await fs.mkdir(root, { recursive: true });
+		await fs.mkdir(traceDir, { recursive: true });
+
+		const task = new TaskRun({
+			adwId: `fb-handoff-${Bun.randomUUIDv7().slice(0, 8)}`,
+			workflow: "fb-handoff",
+			root,
+			traceDir,
+			maxAttempts: 3,
+			phases: [
+				{ name: "plan", kind: TaskPhaseKind.Agent, owner: "task", dependsOn: [] },
+				{ name: "build", kind: TaskPhaseKind.Agent, owner: "task", dependsOn: ["plan"], inputs: ["plan"] },
+				{
+					name: "review",
+					kind: TaskPhaseKind.Agent,
+					owner: "task",
+					dependsOn: ["build"],
+					onReject: { to: "plan", maxRevisions: 1 },
+				},
+			],
+		});
+		const envelope = (summary: string, notes: string): string =>
+			JSON.stringify({ status: "success", summary, artifacts: [], notes_for_next_agent: notes });
+
+		task.nextStep();
+		task.submitAgentOutput("plan", envelope("plan v1", "use approach A"));
+
+		// The handoff must carry content. A consumer handed only a version
+		// number would have to re-read the producer's work from somewhere,
+		// and "somewhere" is how a stale read gets in.
+		const first = task.nextStep();
+		const consumed = first.inputs?.find(input => input.phase === "plan");
+		if (!consumed) return no("build was dispatched with no recorded input");
+		if (consumed.version !== 1) return no(`first dispatch consumed version ${consumed.version}, expected 1`);
+		if (consumed.summary !== "plan v1" || consumed.notesForNextAgent !== "use approach A") {
+			return no(`input carried ${JSON.stringify(consumed.summary)} / ${JSON.stringify(consumed.notesForNextAgent)}`);
+		}
+
+		task.submitAgentOutput("build", envelope("built against plan v1", ""));
+
+		// A coherent negative review routes back to the producer. The route
+		// only fires on a verdict -- a crashed reviewer retries in place.
+		task.nextStep();
+		task.noteReviewDecision("review", false, "the plan was wrong");
+		const rejected = task.submitAgentOutput("review", envelope("reviewed", ""));
+		if (rejected.kind !== TaskOutcomeKind.Retry) return no(`review rejection gave outcome kind ${rejected.kind}`);
+		// Everything downstream of the revised producer loses its acceptance:
+		// build consumed a version that no longer represents the plan.
+		for (const phase of ["plan", "build", "review"]) {
+			if (!rejected.invalidated.includes(phase)) {
+				return no(`revision did not invalidate ${phase}: ${JSON.stringify(rejected.invalidated)}`);
+			}
+		}
+
+		const replan = task.nextStep();
+		if (replan.phase?.name !== "plan") return no(`expected plan to re-dispatch, got ${replan.phase?.name}`);
+		task.submitAgentOutput("plan", envelope("plan v2", "use approach B"));
+
+		// The decisive assertion: build is re-dispatched against a NEW
+		// version carrying the new content. A handoff that updated v1 under
+		// the consumer would show version 1 with approach B.
+		const second = task.nextStep();
+		const reconsumed = second.inputs?.find(input => input.phase === "plan");
+		if (!reconsumed) return no("re-dispatched build recorded no input");
+		if (reconsumed.version !== 2) return no(`re-dispatch consumed version ${reconsumed.version}, expected 2`);
+		if (reconsumed.notesForNextAgent !== "use approach B") {
+			return no(`v2 carried stale notes: ${JSON.stringify(reconsumed.notesForNextAgent)}`);
+		}
+		return ok("v1 carried content, revision invalidated the closure, v2 re-dispatched with new content");
 	},
 });
