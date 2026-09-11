@@ -5100,6 +5100,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.admission.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Wait for Host Capacity",
+			description:
+				"Delay a subagent start while the host is out of memory, disk, or CPU. The concurrency limit bounds how many run; this bounds when the next one starts.",
+		},
+	},
+
 	"task.enableLsp": {
 		type: "boolean",
 		default: false,

@@ -79,6 +79,7 @@ export const hashlineFormatNumberedLines = nativeBindings.hashlineFormatNumbered
 export const hashlineStripPrefixes = nativeBindings.hashlineStripPrefixes;
 export const hasMatch = nativeBindings.hasMatch;
 export const highlightCode = nativeBindings.highlightCode;
+export const hostCapacity = nativeBindings.hostCapacity;
 export const htmlToMarkdown = nativeBindings.htmlToMarkdown;
 export const invalidateFsScanCache = nativeBindings.invalidateFsScanCache;
 export const isoBackend = nativeBindings.isoBackend;

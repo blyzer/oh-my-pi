@@ -42,6 +42,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { AuthStorage } from "../session/auth-storage";
+import { classifyFailure } from "../task/admission";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import type { AgentDefinition, SingleResult } from "../task/types";
@@ -114,6 +115,18 @@ export interface AdwHost {
 	/** Registers seats as children of the spawning session rather than orphans. */
 	agentId?: string;
 	eventBus?: EventBus;
+	/**
+	 * Answers a `human` phase. The run holds until this resolves, so a host
+	 * that cannot ask — a headless CI job, a detached run — should refuse
+	 * rather than approve: an unanswerable question is not an approval.
+	 *
+	 * Omitted entirely, a `human` phase fails closed with that as its reason.
+	 */
+	decideHuman?: (request: {
+		phase: string;
+		attempt: number;
+		question: string;
+	}) => Promise<{ approved: boolean; reason: string }>;
 	subagentEventBus?: EventBus;
 }
 
@@ -711,7 +724,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 	// Compile before allocating a sandbox: invalid contracts must never leak one.
 	const phaseChecks = new Map<string, (turn: string) => PhaseCheckResult>();
 	for (const phase of workflow.phases) {
-		if (phase.kind === "code") continue;
+		if (phase.kind === "code" || phase.kind === "human") continue;
 		const compiled = compilePhaseChecks(phase);
 		if (typeof compiled === "string") throw new Error(`Phase "${phase.name}" has an unusable contract: ${compiled}`);
 		phaseChecks.set(phase.name, compiled.check);
@@ -822,6 +835,44 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		}
 
 		const phasesByName = new Map(workflow.phases.map(phase => [phase.name, phase]));
+		/**
+		 * The code phase that judges a writer's delivery: a `code` phase
+		 * depending on it whose OTHER dependencies have already landed.
+		 *
+		 * The qualifier is the whole difficulty. A join gate like
+		 * `left && right` is not a verdict on `left` alone — running it when
+		 * only `left` has landed fails for a reason that is not a fault, and
+		 * rejects work that was correct. Only the landing that completes the
+		 * gate's inputs can be judged by it.
+		 *
+		 * No such phase means the workflow declared no deterministic check
+		 * this landing completes, and there is nothing to re-run.
+		 */
+		const deliveredCheckFor = (
+			writer: AdwPhaseConfig,
+			landed: ReadonlySet<string>,
+		): ((deliveredRoot: string) => Promise<{ ok: true } | { ok: false; evidence: string }>) | undefined => {
+			const judge = workflow.phases.find(candidate => {
+				if (candidate.kind !== "code") return false;
+				// A gate reading `ADW_INPUTS` is judging the envelopes its
+				// dispatch selected, not the tree. Those versions do not exist
+				// at landing time, so re-running it here would fail for want
+				// of context rather than for a fault in the delivery.
+				if (candidate.inputs?.length) return false;
+				const deps = candidate.dependsOn ?? [];
+				if (!deps.includes(writer.name)) return false;
+				return deps.every(dep => dep === writer.name || landed.has(dep));
+			});
+			if (!judge) return undefined;
+			return async deliveredRoot => {
+				const verdict = await runCodePhase(judge, deliveredRoot, signal);
+				return verdict.ok
+					? { ok: true as const }
+					: { ok: false as const, evidence: `delivered tree failed ${judge.name}: ${verdict.summary}` };
+			};
+		};
+		/** Writers whose change-sets are already on the shared root. */
+		const landedPhases = new Set<string>();
 		const engineOptions = {
 			adwId,
 			root: workRoot,
@@ -832,7 +883,14 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				// A fusion phase is one phase to the engine: it settles on the fuser's
 				// envelope, and the panel is fan-out inside that single unit.
 				name: phase.name,
-				kind: phase.kind === "code" ? TaskPhaseKind.Code : TaskPhaseKind.Agent,
+				kind:
+					phase.kind === "code"
+						? TaskPhaseKind.Code
+						: phase.kind === "human"
+							? // The engine's own lane for work the caller performs and
+								// reports back. Nothing here costs tokens.
+								TaskPhaseKind.Engineer
+							: TaskPhaseKind.Agent,
 				owner: phase.kind === "fusion" ? (phase.fuser?.owner ?? "fusion") : (phase.owner ?? phase.kind),
 				description: phase.description,
 				// Resolved here, so the engine is handed a name and holds no policy
@@ -893,11 +951,24 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			const { seatName, role, result } = execution;
 			run.notePhaseTokens(phaseName, seatName, result.tokens, result.model);
 			if (result.exitCode !== 0) {
+				const detail = result.stderr.trim() || "no stderr";
+				// Whose failure was it? An out-of-memory kill or a provider rate
+				// limit did not fail semantically, and spending a correction
+				// attempt asking a seat to fix code that never ran is the
+				// specific waste this distinction prevents. The budget is still
+				// bounded either way — this only changes what the next attempt
+				// is told, and whether it is worth making.
+				const attribution = classifyFailure(detail);
+				if (attribution === "resource") {
+					run.noteGateReport(phaseName, "resource", [
+						{ item: seatName, ok: false, note: `host failure, not a fault in the work: ${detail}` },
+					]);
+				}
 				// A crashed spawn has no complete answer; preserve ordinary retry behavior.
 				return run.submitCodeResult(
 					phaseName,
 					false,
-					`${role} ${seatName} exited ${result.exitCode}: ${result.stderr.trim() || "no stderr"}`,
+					`${role} ${seatName} exited ${result.exitCode} (${attribution}): ${detail}`,
 				);
 			}
 			const checked = phaseChecks.get(phaseName)?.(result.output);
@@ -1103,6 +1174,28 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			return { ADW_INPUTS: inputsPath };
 		};
 
+		/**
+		 * The two lanes the caller executes and reports back: a deterministic
+		 * command, and a human answering. Shared so the serial and concurrent
+		 * schedulers cannot drift on what a `human` phase means — running one
+		 * down the code path would execute a command it does not have.
+		 */
+		const runCallerPhase = async (phase: AdwPhaseConfig, step: TaskStep): Promise<TaskOutcome> => {
+			if (phase.kind === "human") {
+				const question = phase.description?.trim() || `Authorize phase "${phase.name}"?`;
+				const answer = host.decideHuman
+					? await host.decideHuman({ phase: phase.name, attempt: step.attempt, question })
+					: // Fail closed: a host with no way to ask has not been told
+						// yes, and inferring approval from silence is exactly what
+						// a human gate exists to prevent.
+						{ approved: false, reason: "no human decision channel is available to answer this phase" };
+				return run.submitCodeResult(phase.name, answer.approved, answer.reason);
+			}
+			const env = await buildCodeEnv(phase, step);
+			const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
+			return run.submitCodeResult(phase.name, ok, summary);
+		};
+
 		const finishRun = async (step: TaskStep): Promise<AdwRunResult> => {
 			const acceptance = workflow.acceptance === "review" ? reviewAcceptance(run.handoff()) : undefined;
 			let accepted = step.accepted && (acceptance?.accepted ?? true);
@@ -1155,10 +1248,8 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
 
 				let outcome: TaskOutcome;
-				if (phase.kind === "code") {
-					const env = await buildCodeEnv(phase, step);
-					const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
-					outcome = run.submitCodeResult(phase.name, ok, summary);
+				if (phase.kind === "human" || phase.kind === "code") {
+					outcome = await runCallerPhase(phase, step);
 				} else {
 					if (
 						resuming &&
@@ -1329,7 +1420,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					if (!spec) throw new Error("engine returned a Run step without a phase");
 					const phase = phasesByName.get(spec.name);
 					if (!phase) throw new Error(`engine returned unknown phase "${spec.name}"`);
-					if (phase.kind === "code") {
+					if (phase.kind === "code" || phase.kind === "human") {
 						pendingCode = { phase, spec, step };
 						break;
 					}
@@ -1358,9 +1449,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					const { phase, spec, step } = pendingCode;
 					pendingCode = null;
 					onPhase?.({ phase: phase.name, owner: spec.owner, kind: phase.kind, attempt: step.attempt });
-					const env = await buildCodeEnv(phase, step);
-					const { ok, summary } = await runCodePhase(phase, workRoot, signal, env);
-					const outcome = run.submitCodeResult(phase.name, ok, summary);
+					const outcome = await runCallerPhase(phase, step);
 					await invalidate(outcome);
 					reportOutcome(phase, spec, step, outcome);
 					continue;
@@ -1395,7 +1484,13 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				inFlight.delete(flight.phase.name);
 				if (outcome.kind === TaskOutcomeKind.Advanced && !dispatchHalted) {
 					try {
-						await integrateAccepted(workRoot, runDir, record);
+						// The candidate was verified inside the writer's own
+						// workspace; this landing goes to the shared root.
+						// Re-run the guard phase there, so a change-set that is
+						// valid alone and broken in company is caught before it
+						// is called delivered.
+						await integrateAccepted(workRoot, runDir, record, deliveredCheckFor(flight.phase, landedPhases));
+						landedPhases.add(flight.phase.name);
 					} catch (error) {
 						dispatchHalted = true;
 						haltReason = error instanceof Error ? error.message : String(error);

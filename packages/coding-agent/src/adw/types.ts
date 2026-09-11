@@ -35,7 +35,14 @@ const adwSeatSchema = type({
 
 const adwPhaseSchema = type({
 	name: "string",
-	kind: '"agent" | "code" | "fusion"',
+	/**
+	 * `human` is the engine's `Engineer` lane: the caller answers and reports
+	 * back, so the run holds rather than guessing. Reserved for what cannot
+	 * be delegated reliably — irreversible, security-sensitive, legally
+	 * binding, externally visible. Used for ordinary review it turns the
+	 * operator back into the orchestrator the workflow exists to replace.
+	 */
+	kind: '"agent" | "code" | "fusion" | "human"',
 	/** Agent name for `agent` phases; a subsystem label (`git`, `bun`) for `code`. */
 	"owner?": "string",
 	"description?": "string",

@@ -170,6 +170,58 @@ impl Gate for JsonParses {
 	}
 }
 
+/// A named file must contain a marker, or must not.
+///
+/// The artifact gates ask whether a phase produced files; this asks what is
+/// IN one, which is the only way a workflow can state a requirement about
+/// content rather than existence. It is also what makes a contradictory pair
+/// — the same marker required present and absent — expressible, and
+/// therefore refusable: `file_contains` and `file_not_contains` on one file
+/// can never both pass, whatever the producer writes.
+///
+/// Scoped to a declared path rather than to the envelope's artifact list: a
+/// workflow asserting something about `README.md` must not be satisfied by a
+/// phase that simply declines to declare it.
+pub struct FileContains {
+	pub file:    String,
+	pub marker:  String,
+	/// `true` inverts the assertion: the marker must be absent.
+	pub negated: bool,
+}
+
+impl Gate for FileContains {
+	fn name(&self) -> &'static str {
+		if self.negated {
+			"file_not_contains"
+		} else {
+			"file_contains"
+		}
+	}
+
+	fn run(&self, _envelope: &Envelope<Value>, ctx: &GateCtx<'_>) -> GateReport {
+		let mut report = GateReport::new(self.name());
+		let path = ctx.root.join(&self.file);
+		match std::fs::read_to_string(&path) {
+			Ok(text) => {
+				let found = text.contains(&self.marker);
+				let ok = found != self.negated;
+				let note = match (found, self.negated) {
+					(true, false) => "marker present".to_owned(),
+					(false, true) => "marker absent".to_owned(),
+					(true, true) => format!("marker {:?} present but must not be", self.marker),
+					(false, false) => format!("marker {:?} absent", self.marker),
+				};
+				report.push(&self.file, ok, note);
+			},
+			// An unreadable file fails either form. A missing file does not
+			// "not contain" the marker in any useful sense: the assertion was
+			// about a file that was supposed to be there.
+			Err(err) => report.push(&self.file, false, format!("unreadable: {err}")),
+		}
+		report
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -279,5 +331,39 @@ mod tests {
 		let report = JsonParses.run(&envelope(&["notes.md"]), &GateCtx { root: dir.path() });
 		assert!(!report.ok(), "requesting the gate asserts the phase produces JSON");
 		assert!(report.violations().any(|v| v.contains("no .json artifact")));
+	}
+
+	#[test]
+	fn contradictory_content_assertions_can_never_both_pass() {
+		// WI-0024: the canonical fail-closed case. Whatever the producer
+		// writes, one of the pair must be red — the property has to hold for
+		// every possible content, not just the two obvious ones.
+		let dir = TempDir::new("gate-contradiction");
+		let marker = "__FACTORY_FAIL_CLOSED_CONTRADICTION_0024__";
+		let env = envelope(&["marker.txt"]);
+		let ctx = GateCtx { root: dir.path() };
+		let present = FileContains {
+			file:    "marker.txt".to_owned(),
+			marker:  marker.to_owned(),
+			negated: false,
+		};
+		let absent = FileContains {
+			file:    "marker.txt".to_owned(),
+			marker:  marker.to_owned(),
+			negated: true,
+		};
+
+		for content in [format!("prefix {marker} suffix"), "nothing here".to_owned(), String::new()] {
+			dir.write("marker.txt", &content);
+			let both_green = present.run(&env, &ctx).ok() && absent.run(&env, &ctx).ok();
+			assert!(!both_green, "both assertions passed for content {content:?}");
+		}
+
+		// A missing file fails BOTH: the assertion was about a file that was
+		// supposed to exist, so its absence is not a way to satisfy the
+		// negative form.
+		std::fs::remove_file(dir.path().join("marker.txt")).expect("remove");
+		assert!(!present.run(&env, &ctx).ok());
+		assert!(!absent.run(&env, &ctx).ok());
 	}
 }

@@ -25,6 +25,7 @@ import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "tex
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
+import { awaitAdmission } from "./admission";
 import { isIrcEnabled } from "../tools/hub";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
@@ -105,6 +106,8 @@ export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
+export { captureBaseline, captureDeltaPatch, getRepoRoot, patchTouchedFiles } from "./worktree";
+export type { DeltaPatchResult, NestedRepoPatch, RepoBaseline, WorktreeBaseline } from "./worktree";
 export type {
 	AgentDefinition,
 	AgentProgress,
@@ -644,6 +647,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	/**
+	 * Hold a spawn that already owns a permit until the host can afford it.
+	 *
+	 * The semaphore answers "are fewer than N running?"; it cannot answer
+	 * "can this machine afford one more?". Both matter, and they differ
+	 * exactly when an isolated writer is copying a tree on a loaded host.
+	 * Waiting after the permit keeps the queue order and bounds the delay.
+	 */
+	async #awaitHostCapacity(semaphore: Semaphore, signal?: AbortSignal): Promise<void> {
+		if (!this.session.settings.get("task.admission.enabled")) return;
+		await awaitAdmission({
+			workspace: this.session.cwd,
+			inFlight: () => semaphore.inFlight,
+			signal,
+			onWait: reason => logger.debug("task spawn waiting on host capacity", { reason }),
+		});
+	}
+
+	/**
 	 * Resolve the shared policy before detached work exists. The resulting
 	 * policy intentionally stays local: executor dispatch resolves again from
 	 * normalized task params rather than smuggling internal policy over the
@@ -1125,6 +1146,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				};
 				try {
 					await semaphore.acquire(runSignal);
+					await this.#awaitHostCapacity(semaphore, runSignal);
 					semaphoreHeld = true;
 				} catch {
 					// Fall through so an acquire-time abort goes through the same
@@ -1288,6 +1310,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const semaphore = this.#getSpawnSemaphore();
 			const invokedAt = Date.now();
 			await semaphore.acquire(signal);
+			await this.#awaitHostCapacity(semaphore, signal);
 			const acquiredAt = Date.now();
 			try {
 				return await this.#executeSync(
@@ -1375,6 +1398,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				try {
 					await semaphore.acquire(workerSignal);
 					semaphoreHeld = true;
+					await this.#awaitHostCapacity(semaphore, workerSignal);
 				} catch (error) {
 					if (workerSignal.aborted) return undefined;
 					throw error;

@@ -15,6 +15,7 @@ import {
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
 	parseIsolationBackend,
+	patchTouchedFiles,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -45,6 +46,17 @@ async function createGitRepo(): Promise<string> {
 	tempDirs.push(repo);
 	await runGit(repo, ["init", "-q", "-b", "main"]);
 	return repo;
+}
+
+/**
+ * `git commit` fires a detached `git maintenance run --auto` that creates and
+ * deletes `.git/objects/maintenance.lock` after the command returns. Fixtures
+ * copied wholesale by `fs.cp` fail with ENOENT when that lock vanishes
+ * mid-walk, so every copied fixture opts out of background maintenance.
+ */
+async function disableBackgroundMaintenance(repo: string): Promise<void> {
+	await runGit(repo, ["config", "maintenance.auto", "false"]);
+	await runGit(repo, ["config", "gc.auto", "0"]);
 }
 
 afterEach(async () => {
@@ -877,6 +889,7 @@ describe("applyNestedPatches", () => {
 		await runGit(fixtureParent, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureParent, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureParent, ["config", "user.name", "Test User"]);
+		await disableBackgroundMaintenance(fixtureParent);
 		await fs.writeFile(path.join(fixtureParent, ".gitignore"), "sub/\n");
 		await runGit(fixtureParent, ["add", "."]);
 		await runGit(fixtureParent, ["commit", "-q", "-m", "parent-init"]);
@@ -886,6 +899,7 @@ describe("applyNestedPatches", () => {
 		await runGit(fixtureNested, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureNested, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureNested, ["config", "user.name", "Test User"]);
+		await disableBackgroundMaintenance(fixtureNested);
 		await fs.writeFile(path.join(fixtureNested, "file.txt"), "v1\n");
 		await runGit(fixtureNested, ["add", "."]);
 		await runGit(fixtureNested, ["commit", "-q", "-m", "nested-init"]);
@@ -1000,6 +1014,7 @@ describe("commitToBranch preserves agent commits", () => {
 		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
+		await disableBackgroundMaintenance(fixtureRepo);
 		await fs.writeFile(
 			path.join(fixtureRepo, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
@@ -1362,5 +1377,43 @@ describe("commitToBranch preserves agent commits", () => {
 			expect(branchDiff).toContain("+WIP header");
 			expect(branchDiff).toContain("+agent-edit");
 		});
+	});
+});
+
+describe("patchTouchedFiles", () => {
+	// Consumer contract for workflow scope verification: the file set derived
+	// from a captured delta must name every staged, unstaged, and untracked
+	// change relative to the baseline — and nothing untouched.
+	it("lists staged, unstaged, and untracked changes from a baseline delta", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await fs.writeFile(path.join(repo, "staged-base.txt"), "base\n");
+		await runGit(repo, ["add", "."]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+
+		const baseline = await captureBaseline(repo);
+
+		await fs.writeFile(path.join(repo, "tracked.txt"), "unstaged edit\n");
+		await fs.writeFile(path.join(repo, "staged.txt"), "staged edit\n");
+		await runGit(repo, ["add", "staged.txt"]);
+		await fs.writeFile(path.join(repo, "untracked.txt"), "new file\n");
+
+		const delta = await captureDeltaPatch(repo, baseline);
+		expect(patchTouchedFiles(delta.rootPatch).sort()).toEqual(["staged.txt", "tracked.txt", "untracked.txt"].sort());
+	});
+
+	it("returns an empty set for a clean tree", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "."]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+
+		const baseline = await captureBaseline(repo);
+		const delta = await captureDeltaPatch(repo, baseline);
+		expect(patchTouchedFiles(delta.rootPatch)).toEqual([]);
 	});
 });

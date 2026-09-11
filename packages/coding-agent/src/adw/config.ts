@@ -126,6 +126,18 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 
 		if (phase.kind === "agent" && !phase.owner) fail(`phase "${phase.name}" is an agent phase but names no owner`);
 		if (phase.kind === "code" && !phase.command) fail(`phase "${phase.name}" is a code phase but has no command`);
+		if (phase.kind === "human") {
+			// A human phase is answered, not executed. A command would be a
+			// second answer to the same question, and the run would take the
+			// machine's — which is the failure the gate exists to prevent.
+			if (phase.command) fail(`phase "${phase.name}" is a human phase; it is answered, not executed`);
+			if (phase.model || phase.thinking || phase.prompt) {
+				fail(`phase "${phase.name}" is a human phase; model/thinking/prompt do not apply`);
+			}
+			if (!phase.description?.trim()) {
+				fail(`phase "${phase.name}" is a human phase and needs a description: it is the question asked`);
+			}
+		}
 		if (phase.kind === "code" && (phase.model || phase.thinking || phase.prompt)) {
 			fail(`phase "${phase.name}" is a code phase; model/thinking/prompt do not apply`);
 		}
