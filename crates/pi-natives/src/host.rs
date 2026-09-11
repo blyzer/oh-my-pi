@@ -179,7 +179,8 @@ fn available_disk_bytes(path: &str) -> Option<u64> {
 	// platform that does not need it rather than deleting one that does.
 	#[allow(
 		clippy::useless_conversion,
-		reason = "statvfs::f_bavail is u64 on Linux and u32 on macOS; the conversion is required on the latter"
+		reason = "statvfs::f_bavail is u64 on Linux and u32 on macOS; the conversion is required on \
+		          the latter"
 	)]
 	Some(stat.f_frsize.saturating_mul(u64::from(stat.f_bavail)))
 }
