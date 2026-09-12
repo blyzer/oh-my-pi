@@ -894,9 +894,9 @@ dependencies = [
 
 [[package]]
 name = "bytemuck_derive"
-version = "1.12.0"
+version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0e56a716f1e132ff6bf4bdac1c944a3fcdc1cae65f70a4a2a1ac3b401d2d1f"
+checksum = "6a1f896587b6f2c069c73d2f0913e2d590c3990285cd2f0b6aa02b786b4c679c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3781,9 +3781,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.12.3"
+version = "3.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92a0c610a5780d769f7e2e0c3e7e36003582f688d5648ea8263d11161561f461"
+checksum = "b23a554b38b32ad84fb055c794ca2e36824a15a43efda8e549766e3a99c80a9b"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -4742,9 +4742,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.23"
+version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed"
+checksum = "6480ccc157a1389bb2e4891b24751b0f798ba640d22386f23143fbcc89da195a"
 dependencies = [
  "libc",
 ]
@@ -6135,7 +6135,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6205,7 +6205,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6290,11 +6290,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.1.19"
+version = "18.1.20"
 
 [[package]]
 name = "pi-edit"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6313,7 +6313,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "async-trait",
  "libc",
@@ -6325,7 +6325,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6409,7 +6409,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6437,7 +6437,7 @@ dependencies = [
 
 [[package]]
 name = "pi-tasks"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "serde",
  "serde_json",
@@ -6446,7 +6446,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6461,7 +6461,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6476,7 +6476,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.19"
+version = "18.1.20"
 dependencies = [
  "dashmap",
  "globset",
