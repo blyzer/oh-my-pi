@@ -9,8 +9,16 @@ set -e
 #   --binary       Always install prebuilt binary
 #   --ref <ref>    Install specific tag/commit/branch
 #   -r <ref>       Shorthand for --ref
+#
+# Environment:
+#   PI_REPO        owner/name to install from; defaults to upstream.
+#                  A fork publishes its own releases, and its binaries are the
+#                  only ones carrying its own native code — upstream's cannot
+#                  contain a function the fork added. Without this the script
+#                  silently installs upstream over a fork's build.
+#   PI_INSTALL_DIR where to put the binary (default ~/.local/bin)
 
-REPO="can1357/oh-my-pi"
+REPO="${PI_REPO:-can1357/oh-my-pi}"
 PACKAGE="@oh-my-pi/pi-coding-agent"
 INSTALL_DIR="${PI_INSTALL_DIR:-$HOME/.local/bin}"
 MIN_BUN_VERSION="1.3.14"
