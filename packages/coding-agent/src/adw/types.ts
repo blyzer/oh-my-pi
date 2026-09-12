@@ -48,6 +48,46 @@ const adwPhaseSchema = type({
 	"description?": "string",
 	/** Post-execution checks run against the envelope's own claims. */
 	"gates?": "string[]",
+	/**
+	 * What this command's exit code has to mean for the phase to pass.
+	 *
+	 * `pass` (default) is the ordinary gate: green is good. `fail` inverts
+	 * it, and exists for the one case a green suite cannot express — a bug
+	 * reproducer must FAIL before the fix, or nothing proves it reproduces
+	 * the bug. A workflow that only ever demands green accepts a "fix" whose
+	 * test never exercised the fault.
+	 *
+	 * Inversion covers only a command that RAN: a timeout, cancellation,
+	 * failed spawn, or a command that was not found never rendered a
+	 * verdict, and counting those as "failed as required" would accept a
+	 * reproducer that never executed.
+	 *
+	 * A command that never launched is refused rather than counted as red,
+	 * so a typo cannot satisfy this. The check works by running the command
+	 * directly, so the kernel reports a failed exec instead of the shell
+	 * translating it into 127 -- a status indistinguishable from a real
+	 * failure. A command the shell must interpret has no single executable
+	 * to launch, so the loader refuses one here: put the shell parts in a
+	 * script and name the script.
+	 *
+	 * What this does NOT prove. A nonzero exit says the command failed, not
+	 * that it failed for the reported reason — a broken assertion, a compile
+	 * error or an unrelated red test all satisfy `fail` and can all go green
+	 * later without covering the defect. Scope the command to the reproducer
+	 * rather than a whole suite, or any pre-existing failure stands in for
+	 * the bug. This raises the floor; it does not make the test correct.
+	 */
+	"expect?": '"pass" | "fail"',
+
+	/**
+	 * Run this command as direct argv rather than through the shell.
+	 *
+	 * Set by the loader on the green counterpart of an `expect: fail` phase:
+	 * a pair only repeats the same test if both halves launch it the same
+	 * way, since quoting and word splitting could otherwise differ. Not
+	 * written by hand.
+	 */
+	"directLaunch?": "boolean",
 
 	/**
 	 * Phases that must pass before this one runs. Omitted: the declaration
@@ -213,4 +253,70 @@ export interface AdwPhaseProgress {
 	outcome?: "advanced" | "retry" | "aborted";
 	/** Why it was rejected, when `outcome` is `retry` or `aborted`. */
 	violations?: string[];
+}
+
+/**
+ * Shell builtins, which the shell executes itself rather than resolving to a
+ * file. Probing PATH for these would report every one of them missing.
+ */
+const SHELL_BUILTINS = new Set([
+	".",
+	":",
+	"[",
+	"alias",
+	"bg",
+	"break",
+	"cd",
+	"command",
+	"continue",
+	"echo",
+	"eval",
+	"exec",
+	"exit",
+	"export",
+	"false",
+	"fg",
+	"getopts",
+	"hash",
+	"jobs",
+	"kill",
+	"let",
+	"local",
+	"printf",
+	"pwd",
+	"read",
+	"readonly",
+	"return",
+	"set",
+	"shift",
+	"source",
+	"test",
+	"times",
+	"trap",
+	"true",
+	"type",
+	"ulimit",
+	"umask",
+	"unalias",
+	"unset",
+	"wait",
+]);
+
+/**
+ * Is this command a plain argv the kernel can launch directly?
+ *
+ * A command the shell must interpret -- pipes, redirects, chaining,
+ * expansion -- has no single executable to resolve, so its first word
+ * cannot answer whether anything ran.
+ *
+ * @param command - Shell command text as written in the workflow
+ * @returns The argv when it is plain, else null
+ */
+export function plainArgv(command: string): string[] | null {
+	if (/[|&;<>$`(){}[\]*?~!#\n\\'"]/.test(command)) return null;
+	const argv = command.trim().split(/\s+/);
+	if (argv.length === 0 || !argv[0]) return null;
+	// A builtin has no file to launch; the shell runs it itself.
+	if (SHELL_BUILTINS.has(argv[0])) return null;
+	return argv;
 }
