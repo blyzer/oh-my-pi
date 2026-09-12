@@ -85,6 +85,13 @@ concurrency:
 
 env:
    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+   # Selects the remote cache backend in `bazel-cache`. Absent — which is the
+   # case for any fork that has not configured one — every job keeps the disk
+   # cache and behaves exactly as before. A fork with its own BuildBuddy gets
+   # a cache its hosted runners can actually reach, unlike upstream's
+   # in-cluster endpoint.
+   BB_API_KEY: ${{ secrets.BB_API_KEY }}
+   BB_REMOTE_HOST: ${{ vars.BB_REMOTE_HOST }}
 
 permissions:
    contents: read
