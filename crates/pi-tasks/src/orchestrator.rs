@@ -1591,6 +1591,47 @@ impl Run {
 		Ok(Outcome::Aborted { phase: phase.to_owned(), reason })
 	}
 
+	/// Halt a phase because the HOST failed, not the work.
+	///
+	/// An out-of-memory kill, a full disk, a provider refusing service: the
+	/// producer never got to be wrong, so charging it an attempt spends the
+	/// correction budget on a question nobody asked, and the next attempt
+	/// meets the same exhausted machine. Measured before this existed: a
+	/// resource failure consumed all three declared attempts.
+	///
+	/// The attempt ordinal is deliberately left alone. Whether to retry is a
+	/// scheduling decision for the caller — which knows about capacity, and
+	/// is the only party that can wait for it — so the run halts with the
+	/// budget intact rather than pretending the work was judged.
+	pub fn halt_resource(&mut self, phase: &str, reason: String) -> Result<Outcome, RunError> {
+		let index = self.running_index(phase)?;
+		let phase_id = self.intern(phase)?;
+		let detail = self.intern(&reason)?;
+		let attempts = self.states[index].attempts;
+		self.records.push(PhaseRecord {
+			name: phase.to_owned(),
+			kind: self.workflow.phases[index].kind,
+			owner: self.workflow.phases[index].owner.clone(),
+			status: PhaseStatus::Failed,
+			invalidated: false,
+			attempts,
+			summary: reason.clone(),
+			gates: Vec::new(),
+			violations: vec![reason.clone()],
+		});
+		self.trace(
+			EventRecord::new(EventKind::PhaseFinished)
+				.phase(phase_id)
+				.attempt(attempts)
+				.detail(detail)
+				.value(0),
+		)?;
+		self.halted = true;
+		self.states[index].status = DispatchStatus::Failed;
+		self.states[index].correction = None;
+		Ok(Outcome::Aborted { phase: phase.to_owned(), reason })
+	}
+
 	/// The envelope the phase at `index` was most recently handed — its
 	/// predecessor's standing version, straight from the store. Versioned files
 	/// are never overwritten, so this cannot read a later phase's output the
@@ -1966,6 +2007,61 @@ mod tests {
 		reach_review(&mut run);
 		assert!(matches!(reject_review(&mut run, "review"), Outcome::Aborted { phase, reason }
 			if phase == "review" && reason.contains("budget exhausted (1/1)")));
+	}
+
+	#[test]
+	fn a_host_failure_halts_without_spending_the_correction_budget() {
+		// An out-of-memory kill is not a verdict on the work: the producer
+		// never got to be wrong. Charging it an attempt spends the budget on
+		// a question nobody asked, and the next attempt meets the same
+		// exhausted machine.
+		let dir = TempDir::new("halt-resource");
+		let mut run = run_in(&dir);
+		dispatch_serial(&mut run, "plan");
+
+		let outcome = run
+			.halt_resource("plan", "fatal error: out of memory".to_owned())
+			.expect("halt");
+		assert!(matches!(&outcome, Outcome::Aborted { phase, .. } if phase == "plan"));
+
+		// The budget is intact: nothing was judged, so nothing was spent.
+		let record = run
+			.records
+			.iter()
+			.find(|record| record.name == "plan")
+			.expect("record");
+		// Zero, not one: the counter advances when an attempt is JUDGED, and
+		// this one never was. The phase could be re-dispatched at attempt 1
+		// once the host recovers.
+		assert_eq!(record.attempts, 0, "a host failure consumed an attempt");
+		assert_eq!(record.status, PhaseStatus::Failed);
+
+		// And the run is halted rather than left dispatchable: retrying is a
+		// scheduling decision for the caller, which is the only party that
+		// can wait for capacity.
+		assert!(matches!(run.next_step().expect("step"), Step::Done { accepted, .. } if !accepted));
+	}
+
+	#[test]
+	fn a_rejected_attempt_still_spends_its_attempt() {
+		// The contrast that gives the previous test meaning: an ordinary
+		// failure is a verdict on the work and must cost what it always did,
+		// or `halt_resource` would just be a cheaper way to fail.
+		let dir = TempDir::new("halt-resource-contrast");
+		let mut run = run_in(&dir);
+		dispatch_serial(&mut run, "plan");
+		let failed = Envelope {
+			status:               EnvelopeStatus::Fail,
+			summary:              "tests are red".to_owned(),
+			artifacts:            Vec::new(),
+			notes_for_next_agent: String::new(),
+			payload:              Value::Object(serde_json::Map::new()),
+		};
+		assert!(matches!(
+			run.submit_envelope("plan", failed).expect("submit"),
+			Outcome::Retry { .. }
+		));
+		assert_eq!(run.states[0].attempts, 1, "an ordinary rejection did not advance the attempt");
 	}
 
 	#[test]

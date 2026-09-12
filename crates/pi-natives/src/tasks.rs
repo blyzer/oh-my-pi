@@ -852,6 +852,22 @@ impl TaskRun {
 		Ok(to_napi_outcome(outcome))
 	}
 
+	/// Halt a phase because the HOST failed, not the work.
+	///
+	/// An out-of-memory kill, a full disk, a provider refusing service: the
+	/// producer never got to be wrong, so this leaves the attempt budget
+	/// untouched instead of charging a correction for a fault no agent can
+	/// fix. The caller decides whether to retry — it is the only party that
+	/// knows about capacity and can wait for it.
+	///
+	/// Use `submitCodeResult(phase, false, …)` for an ordinary failure: that
+	/// is a verdict on the work and must cost an attempt.
+	#[napi]
+	pub fn halt_resource(&mut self, phase: String, reason: String) -> Result<TaskOutcome> {
+		let outcome = self.inner.halt_resource(&phase, reason).map_err(fail)?;
+		Ok(to_napi_outcome(outcome))
+	}
+
 	/// Records one fusion-panel member's answer against the active phase.
 	/// `tokens` is what makes two models comparable in the trace.
 	#[napi]

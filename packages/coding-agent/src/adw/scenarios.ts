@@ -228,7 +228,7 @@ export const RESOURCE_001 = defineScenario({
 	asserts:
 		"A host failure is attributed to the host, not to the work — so a correction is never spent " +
 		"asking a seat to fix code that never ran.",
-	run: async () => {
+	run: async workdir => {
 		// The taxonomy itself, exercised at the boundary the runner uses. A
 		// misread resource failure wastes an attempt; a misread semantic one
 		// would skip a correction that was owed, so it fails toward semantic.
@@ -252,7 +252,39 @@ export const RESOURCE_001 = defineScenario({
 		if (classifyFailure("request failed", { status: 400 }) !== "semantic") {
 			return no("a bad request was attributed to the host");
 		}
-		return ok(`${cases.length} signatures plus provider status classified correctly`);
+		// Classification is only half of it: the point is what the budget
+		// does. A host failure must halt with its attempts intact, while an
+		// ordinary failure still costs one -- otherwise `haltResource` would
+		// just be a cheaper way to fail.
+		const root = path.join(workdir, "tree");
+		await fs.mkdir(root, { recursive: true });
+		const build = (): TaskRun =>
+			new TaskRun({
+				adwId: `fb-resource-${Bun.randomUUIDv7().slice(0, 8)}`,
+				workflow: "fb-resource",
+				root,
+				maxAttempts: 3,
+				phases: [{ name: "build", kind: TaskPhaseKind.Agent, owner: "task" }],
+			});
+
+		const hostFailure = build();
+		hostFailure.nextStep();
+		const halted = hostFailure.haltResource("build", "fatal error: out of memory");
+		if (halted.kind !== TaskOutcomeKind.Aborted) return no(`a host failure gave outcome kind ${halted.kind}`);
+		const haltedPhase = hostFailure.finish(false, "host").phases.find(phase => phase.name === "build");
+		if (haltedPhase?.attempts !== 0) return no(`a host failure spent ${haltedPhase?.attempts} attempts`);
+
+		// The contrast: an ordinary failure advances the attempt ordinal, so
+		// the re-dispatch arrives as attempt 2. Read from the step rather
+		// than from `finish`, which omits a phase still in flight.
+		const semantic = build();
+		semantic.nextStep();
+		semantic.submitCodeResult("build", false, "expected 3 to equal 4");
+		const retry = semantic.nextStep();
+		if (retry.kind !== TaskStepKind.Run) return no(`an ordinary failure did not re-dispatch (kind ${retry.kind})`);
+		if (retry.attempt !== 2) return no(`re-dispatch arrived as attempt ${retry.attempt}, expected 2`);
+
+		return ok(`${cases.length} signatures classified; host failure spent 0 attempts, semantic advanced to 2`);
 	},
 });
 

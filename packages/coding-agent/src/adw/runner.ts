@@ -1107,23 +1107,18 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			if (result.exitCode !== 0) {
 				const detail = result.stderr.trim() || "no stderr";
 				// Whose failure was it? An out-of-memory kill or a provider rate
-				// limit did not fail semantically, and spending a correction
-				// attempt asking a seat to fix code that never ran is the
-				// specific waste this distinction prevents. The budget is still
-				// bounded either way — this only changes what the next attempt
-				// is told, and whether it is worth making.
-				const attribution = classifyFailure(detail);
-				if (attribution === "resource") {
+				// limit did not fail semantically, and the producer never got to
+				// be wrong. Charging it a correction spends the budget on a
+				// question nobody asked, and the next attempt would meet the
+				// same exhausted machine.
+				if (classifyFailure(detail) === "resource") {
 					run.noteGateReport(phaseName, "resource", [
 						{ item: seatName, ok: false, note: `host failure, not a fault in the work: ${detail}` },
 					]);
+					return run.haltResource(phaseName, `${role} ${seatName} could not run: ${detail}`);
 				}
 				// A crashed spawn has no complete answer; preserve ordinary retry behavior.
-				return run.submitCodeResult(
-					phaseName,
-					false,
-					`${role} ${seatName} exited ${result.exitCode} (${attribution}): ${detail}`,
-				);
+				return run.submitCodeResult(phaseName, false, `${role} ${seatName} exited ${result.exitCode}: ${detail}`);
 			}
 			const checked = phaseChecks.get(phaseName)?.(result.output);
 			for (const report of checked?.reports ?? []) {
