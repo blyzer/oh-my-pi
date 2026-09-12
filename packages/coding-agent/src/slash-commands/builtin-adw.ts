@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { classifyWorkflow, ClassifierUnavailableError, type WorkflowChoice } from "../adw/classify";
 import { AdwConfigError, discoverWorkflows, loadWorkflow } from "../adw/config";
 import { type AdwHost, AdwRunError, runAdw } from "../adw/runner";
 import { formatModelString } from "../config/model-resolver";
@@ -29,6 +30,22 @@ export function cancelActiveAdwRuns(): boolean {
 		active.delete(key);
 	}
 	return true;
+}
+
+/**
+ * Is `name` a workflow defined in this repository?
+ *
+ * Separates "named a recipe and forgot the request" from "described the work
+ * in one word", which need different answers: a usage line and a routing
+ * decision respectively.
+ *
+ * @param cwd - Directory whose workflows to search
+ * @param name - First word of the command
+ * @returns True when a workflow goes by that name
+ */
+async function knownWorkflow(cwd: string, name: string): Promise<boolean> {
+	const { workflows } = await discoverWorkflows(cwd);
+	return workflows.has(name);
 }
 
 /** The host surface a slash-command runtime can supply, plus its output sink. */
@@ -78,9 +95,51 @@ async function runWorkflowCommand(args: string, io: AdwCommandIo): Promise<Slash
 		workflowName = target;
 		resumeAdwId = id;
 		phaseRequest = "";
-	} else if (!request) {
+	} else if (!request && (await knownWorkflow(host.cwd, name))) {
+		// A real workflow name with nothing after it is a missing request. One
+		// bare word that is NOT a workflow is a description too short to route,
+		// which the classifier answers better than a usage line.
 		await output(`Usage: /adw ${name} <request>`);
 		return commandConsumed();
+	}
+
+	// `/adw <prose>` with no workflow of that name: the operator described the
+	// work instead of naming a recipe. Routing it is the step between "here is
+	// what I want" and a run -- without it they must already know which
+	// workflows exist and which one fits.
+	//
+	// Only when the first word is not a workflow. A real name always wins, so
+	// naming one never costs a model call or risks being second-guessed.
+	if (!resumeAdwId) {
+		const { workflows } = await discoverWorkflows(host.cwd);
+		if (!workflows.has(workflowName)) {
+			let choice: WorkflowChoice;
+			try {
+				choice = await classifyWorkflow(args.trim(), [...workflows.values()], { host, signal: undefined });
+			} catch (err) {
+				// The classifier never ran, so nothing was decided. Say so and
+				// name the workflows: the operator can pick one themselves,
+				// which is the whole job routing was saving them.
+				if (err instanceof ClassifierUnavailableError) {
+					await output(`${err.message}\nPick one yourself: ${[...workflows.keys()].join(", ") || "none defined"}`);
+					return commandConsumed();
+				}
+				throw err;
+			}
+			if (!choice.workflow) {
+				await output(
+					`No workflow fits this request: ${choice.reason}\n` +
+						`Available: ${[...workflows.keys()].join(", ") || "none"}\n` +
+						"Name one explicitly with /adw <name> <request>, or define one at .omp/adw/<name>.yml",
+				);
+				return commandConsumed();
+			}
+			// The whole line is the request: the operator never named a phase,
+			// so nothing in it was a workflow name to strip.
+			workflowName = choice.workflow.workflow.name;
+			phaseRequest = args.trim();
+			await output(`Routing to "${workflowName}" — ${choice.reason}`);
+		}
 	}
 
 	const found = await loadWorkflow(host.cwd, workflowName);
