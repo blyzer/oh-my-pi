@@ -89,8 +89,11 @@ env:
 permissions:
    contents: read
    # `native_addons` reads the last green main run's artifacts on the PR path,
-   # which the default token cannot list without this.
-   actions: read
+   # and prunes this platform's superseded bazel archives before saving a new
+   # one. Listing another run's artifacts needs read; deleting a cache entry
+   # needs write, and without it the prune is a no-op that lets one platform
+   # evict every other by LRU.
+   actions: write
 
 jobs:
    # scripts/release.ts pushes the version-bump commit and its `v*` tag
