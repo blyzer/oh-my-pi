@@ -17,7 +17,26 @@ export const VERDICT_GATE = "verdict_consistent";
 const reviewShape = type({
 	approved: "boolean",
 	blocking: "string[]",
-	findings: type({ requirement: "string", met: "boolean", "evidence?": "string" }).array(),
+	findings: type({
+		requirement: "string",
+		met: "boolean",
+		"evidence?": "string",
+		/**
+		 * How this finding was established.
+		 *
+		 * `verified` is reserved for something the reviewer ran and read the
+		 * result of — a command, a file it opened, a diff hunk it can quote.
+		 * `judged` is the reviewer's reading of the work. Absent means judged:
+		 * a finding that does not claim to be verified is not.
+		 *
+		 * The distinction is the point. Downstream, a failing deterministic
+		 * check and a model's disapproval look identical once both are
+		 * `met: false`, and only one of them is authority. Recording which is
+		 * which is what keeps a model's opinion from being read later as a
+		 * test result.
+		 */
+		"basis?": "'verified' | 'judged'",
+	}).array(),
 });
 
 /** Predicates are not represented in JSON Schema; publish the structural shape only. */
@@ -29,6 +48,8 @@ export const REVIEW_RULES = [
 	"A rejected review must name at least one blocking entry or an unmet requirement.",
 	"A coherent rejection is a valid review, but delivery acceptance requires approved=true.",
 	"Use status=success when the review completed, even when approved=false; status=fail means the review could not be completed.",
+	"Mark a finding basis=verified only when you ran something and read the result, and cite it in evidence; everything else is basis=judged.",
+	"A verified finding without evidence is rejected: a claim to have checked something must say what was checked.",
 	"These checks establish internal consistency, not the truth or completeness of the review.",
 ].join("\n");
 
@@ -57,6 +78,19 @@ const reviewSchema = reviewShape.narrow((review, ctx) => {
 			expected: "supported by a blocking entry or a finding with met=false",
 			relativePath: ["approved"],
 			actual: review.approved,
+		});
+		consistent = false;
+	}
+	// A claim to have checked something must say what was checked. Left
+	// unenforced, `basis` degrades into a label a reviewer applies to make its
+	// opinion carry more weight, which is the opposite of why it exists.
+	for (const [index, finding] of review.findings.entries()) {
+		if (finding.basis !== "verified") continue;
+		if (finding.evidence?.trim()) continue;
+		ctx.error({
+			expected: `evidence naming what was run or read (requirement: ${finding.requirement})`,
+			relativePath: ["findings", index, "evidence"],
+			actual: finding.evidence === undefined ? "undefined" : JSON.stringify(finding.evidence),
 		});
 		consistent = false;
 	}

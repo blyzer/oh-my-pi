@@ -315,6 +315,45 @@ describe("reviewAcceptance", () => {
 		return { summary: "Review", artifacts: [], notesForNextAgent: "", payloadJson: JSON.stringify(payload) };
 	}
 
+	it("refuses a finding that claims verification without naming what was checked", () => {
+		// `basis` exists to keep a model's reading from being read later as a
+		// test result. Unenforced it becomes a label a reviewer applies to make
+		// its opinion carry more weight, which inverts the point.
+		expect(
+			reviewAcceptance(
+				handoff({
+					approved: true,
+					blocking: [],
+					findings: [{ requirement: "tests pass", met: true, basis: "verified" }],
+				}),
+			).accepted,
+		).toBe(false);
+	});
+
+	it("accepts a verified finding that cites its evidence", () => {
+		expect(
+			reviewAcceptance(
+				handoff({
+					approved: true,
+					blocking: [],
+					findings: [{ requirement: "tests pass", met: true, basis: "verified", evidence: "bun test: 252 pass" }],
+				}),
+			).accepted,
+		).toBe(true);
+	});
+
+	it("treats a judged finding, and an unmarked one, as opinion needing no evidence", () => {
+		// Absent basis means judged: a finding that does not claim to be
+		// verified is not, and asking opinion to cite a command it never ran
+		// would only teach reviewers to invent one.
+		for (const findings of [
+			[{ requirement: "readable", met: true, basis: "judged" }],
+			[{ requirement: "readable", met: true }],
+		]) {
+			expect(reviewAcceptance(handoff({ approved: true, blocking: [], findings })).accepted).toBe(true);
+		}
+	});
+
 	it("accepts a coherent positive final report after handoff serialization", () => {
 		const restored: TaskHandoff = JSON.parse(
 			JSON.stringify(
