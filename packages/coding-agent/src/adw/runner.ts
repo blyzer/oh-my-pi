@@ -62,7 +62,14 @@ import {
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { rewindTarget } from "./config";
 import { compilePhaseChecks, type PhaseCheckResult, reviewAcceptance, VERDICT_GATE } from "./schema";
-import { buildFusionPrompt, buildPanelPrompt, buildPhasePrompt, ENVELOPE_CONTRACT, type PanelOpinion } from "./prompt";
+import {
+	buildFusionPrompt,
+	buildPanelPrompt,
+	buildPhasePrompt,
+	ENVELOPE_CONTRACT,
+	type PanelOpinion,
+	type ReviewDiff,
+} from "./prompt";
 import type { AdwPhaseConfig, AdwPhaseProgress, AdwSeatConfig, AdwWorkflowConfig } from "./types";
 import {
 	integrateAccepted,
@@ -761,6 +768,60 @@ export function createExecutorSeatRunner(ctx: {
 		);
 	};
 }
+/** Bound the diff a reviewer carries: enough to judge, not enough to blow a context window. */
+const REVIEW_DIFF_MAX_CHARS = 60_000;
+
+/**
+ * The change-set a review phase is judging, read from the working tree.
+ *
+ * A reviewer that sees only the writer's envelope can check that the account
+ * is coherent, never that it is true — the two are different questions, and
+ * only the second is a review. `diff_matches_claims` already proves every
+ * changed path was declared; this supplies what was written to them.
+ *
+ * Returns undefined when the tree is not a repository or git fails: a review
+ * without the diff is weaker, but refusing to run it would turn a missing
+ * tool into a failed acceptance.
+ *
+ * @param root - Working tree the phase ran against
+ * @param signal - Cancellation from the owning phase
+ * @returns The change-set, or undefined when it cannot be read
+ */
+export async function collectReviewDiff(root: string, signal?: AbortSignal): Promise<ReviewDiff | undefined> {
+	try {
+		const names = await ptree.exec(["git", "status", "--porcelain=v1", "-z"], {
+			cwd: root,
+			allowNonZero: true,
+			signal,
+			timeout: 15_000,
+		});
+		if (names.exitCode !== 0) return undefined;
+		const paths = names.stdout
+			.split("\0")
+			.filter(Boolean)
+			// Porcelain v1 prefixes two status columns and a space.
+			.map(entry => entry.slice(3))
+			.filter(Boolean)
+			.sort();
+		if (paths.length === 0) return { paths: [], patch: "", truncated: false };
+
+		// `HEAD` covers staged and unstaged alike; untracked files have no blob
+		// to diff, so they are named above and their content is not shown.
+		const patch = await ptree.exec(["git", "diff", "HEAD", "--"], {
+			cwd: root,
+			allowNonZero: true,
+			signal,
+			timeout: 30_000,
+		});
+		if (patch.exitCode !== 0) return { paths, patch: "", truncated: true };
+		const full = patch.stdout;
+		const truncated = full.length > REVIEW_DIFF_MAX_CHARS;
+		return { paths, patch: truncated ? full.slice(0, REVIEW_DIFF_MAX_CHARS) : full, truncated };
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Whether the trace's CURRENT terminal record says the run was accepted.
  * The last `run_finished` wins: a crash writes a failed terminal too, and a
@@ -1284,6 +1345,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					correction: step.correction ?? undefined,
 					handoff: handoff ?? undefined,
 					inputs: selectedInputs,
+					// Only a phase gated on a verdict is judging a change-set.
+					// Handing the diff to a builder would just be telling it
+					// what it already wrote.
+					reviewDiff: phase.gates?.includes(VERDICT_GATE) ? await collectReviewDiff(root, phaseSignal) : undefined,
 				}),
 				id: stepId,
 				index: stepIndex,

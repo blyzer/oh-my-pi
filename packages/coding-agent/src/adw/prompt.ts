@@ -63,6 +63,40 @@ export interface PhaseInput {
 function renderInput(input: PhaseInput): string {
 	return `# Input from phase \`${input.phase}\` (version ${input.version})\n${renderHandoff(input)}`;
 }
+/**
+ * The change-set a reviewer is judging, as the working tree actually has it.
+ *
+ * A review phase otherwise sees only what the writer *said* it did: summary,
+ * notes, declared artifacts. That is the writer's own account, and a reviewer
+ * given only the account can confirm it is coherent, never that it is true.
+ * `diff_matches_claims` already proves every changed path was declared; this
+ * shows what was actually written to those paths.
+ */
+export interface ReviewDiff {
+	/** Repo-relative paths the run changed, sorted. */
+	paths: string[];
+	/** Unified diff, truncated to a bound the prompt can carry. */
+	patch: string;
+	/** True when `patch` was cut short, so the reviewer knows not to treat it as complete. */
+	truncated: boolean;
+}
+
+function renderReviewDiff(diff: ReviewDiff): string {
+	if (diff.paths.length === 0) {
+		// A review of nothing is a review that cannot reject: say so rather
+		// than render an empty section the model will read as "all clear".
+		return "# Change-set under review\nThe working tree has no changes. There is nothing to approve.";
+	}
+	const header = [
+		"# Change-set under review",
+		`${diff.paths.length} changed ${diff.paths.length === 1 ? "path" : "paths"}: ${diff.paths.join(", ")}`,
+		"",
+		diff.truncated
+			? "The diff below is TRUNCATED. Judge only what you can see, and treat anything cut off as unreviewed — say so in `blocking` rather than approving what you did not read."
+			: "This is the complete diff.",
+	].join("\n");
+	return `${header}\n\n\`\`\`diff\n${diff.patch}\n\`\`\``;
+}
 
 /** The writer sees the same declared constraints that the caller checks. */
 function outputContract(phase: AdwPhaseConfig): string {
@@ -108,8 +142,9 @@ export function buildPhasePrompt(args: {
 	correction?: string;
 	handoff?: TaskHandoff;
 	inputs?: PhaseInput[];
+	reviewDiff?: ReviewDiff;
 }): string {
-	const { request, phase, attempt, correction, handoff, inputs } = args;
+	const { request, phase, attempt, correction, handoff, inputs, reviewDiff } = args;
 	const sections = [`# Request\n${request}`];
 
 	const heading = phase.description ? `\`${phase.name}\` — ${phase.description}` : `\`${phase.name}\``;
@@ -117,6 +152,9 @@ export function buildPhasePrompt(args: {
 
 	if (inputs) for (const input of inputs) sections.push(renderInput(input));
 	else if (handoff) sections.push(`# Handoff from the previous phase\n${renderHandoff(handoff)}`);
+	// After the producers' accounts and before the instructions: the reviewer
+	// reads what was claimed, then what was actually written.
+	if (reviewDiff) sections.push(renderReviewDiff(reviewDiff));
 	if (phase.prompt) sections.push(`# Phase instructions\n${phase.prompt}`);
 	const scope = writeScope(phase);
 	if (scope) sections.push(scope);
