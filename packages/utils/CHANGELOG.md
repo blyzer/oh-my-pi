@@ -2,12 +2,17 @@
 
 ## [Unreleased]
 
+## [18.1.16] - 2026-09-12
+
+### Fixed
+
+- Fixed `checkpointWal` throwing on an already-closed database handle. Every caller runs it from a `close()` path, where a closed handle has nothing left to flush — SQLite checkpoints on close — but Bun >=1.4 raises `Database has closed` from `db.run()` after `close()` where earlier versions tolerated it. Added `isClosedDatabaseError` beside the existing busy and corruption classifiers; real statement errors still propagate.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed
 
 - Fixed `filterChildShellEnv` applying the omp process's own launch-environment provenance (the pre-dotenv `NODE_ENV` and launcher-owned names read from `/proc/self/environ`) to caller-supplied environment objects; launch provenance now only applies when filtering the live `process.env`/`Bun.env`, and an explicit env resolves its dotenv mode from its own `NODE_ENV`.
-- Fixed `checkpointWal` throwing on an already-closed database handle. Every caller runs it from a `close()` path, where a closed handle has nothing left to flush — SQLite checkpoints on close — but Bun >=1.4 raises `Database has closed` from `db.run()` after `close()` where earlier versions tolerated it. Added `isClosedDatabaseError` beside the existing busy and corruption classifiers; real statement errors still propagate.
 
 ## [18.1.11] - 2026-09-05
 
