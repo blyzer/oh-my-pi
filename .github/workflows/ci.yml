@@ -88,6 +88,9 @@ env:
 
 permissions:
    contents: read
+   # `native_addons` reads the last green main run's artifacts on the PR path,
+   # which the default token cannot list without this.
+   actions: read
 
 jobs:
    # scripts/release.ts pushes the version-bump commit and its `v*` tag
@@ -235,18 +238,44 @@ jobs:
       steps:
          - uses: actions/checkout@v4
 
-         # ---- PR path: latest release addons from npm ----
-         - name: Fetch release native addons (npm)
+         # ---- PR path: native addons from this fork's last green main ----
+         #
+         # FORK DIVERGENCE: upstream pulls `@oh-my-pi/pi-natives-linux-x64` from
+         # npm, but that scope belongs to upstream and publishes upstream's
+         # sources. A fork's own native changes are therefore invisible to its
+         # PRs: every test that calls a function this fork added fails with
+         # "not a function" until upstream happens to ship it, which for
+         # fork-only code is never.
+         #
+         # So take the addons this repository built: `native-addons` from the
+         # most recent successful main run, whose layout already matches what
+         # the test shards expect. Falls back to npm when no such run exists
+         # (a fresh fork, or main red since its first build).
+         - name: Fetch release native addons
            if: github.event_name == 'pull_request'
            shell: bash
+           env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
            run: |
               set -euo pipefail
-              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
-              echo "Fetching $tarball"
-              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
-              mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" bazel-bin/natives-linux-x64-modern/
+              run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --branch main --workflow ci.yml \
+                 --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+              if [ -n "$run_id" ] && gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+                    --name native-addons --dir "$RUNNER_TEMP/addons" 2>/dev/null; then
+                 echo "Using native-addons from main run $run_id"
+                 mkdir -p bazel-bin
+                 cp -R "$RUNNER_TEMP/addons/." bazel-bin/
+              else
+                 # No green main build to borrow from: upstream's npm addons are
+                 # the only option, and fork-only natives will be missing.
+                 echo "::notice title=No fork addons::Falling back to upstream npm addons; fork-only native functions will be absent"
+                 tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+                 echo "Fetching $tarball"
+                 curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+                 mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
+                 cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
+                 cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" bazel-bin/natives-linux-x64-modern/
+              fi
          # A corrupt download must fail here, not as a confusing dlopen error
          # in every downstream test shard.
          - name: Smoke release addons
