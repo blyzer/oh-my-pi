@@ -17,7 +17,44 @@ export const VERDICT_GATE = "verdict_consistent";
 const reviewShape = type({
 	approved: "boolean",
 	blocking: "string[]",
-	findings: type({ requirement: "string", met: "boolean", "evidence?": "string" }).array(),
+	findings: type({
+		requirement: "string",
+		met: "boolean",
+		"evidence?": "string",
+		/**
+		 * How this finding was established.
+		 *
+		 * `verified` is reserved for something the reviewer ran and read the
+		 * result of — a command, a file it opened, a diff hunk it can quote.
+		 * `judged` is the reviewer's reading of the work. Absent means judged:
+		 * a finding that does not claim to be verified is not.
+		 *
+		 * The distinction is the point. Downstream, a failing deterministic
+		 * check and a model's disapproval look identical once both are
+		 * `met: false`, and only one of them is authority. Recording which is
+		 * which is what keeps a model's opinion from being read later as a
+		 * test result.
+		 */
+		"basis?": "'verified' | 'judged'",
+		/**
+		 * Whether an unmet finding blocks acceptance.
+		 *
+		 * `required` is the default and the meaning findings have always had:
+		 * unmet means the review cannot approve. `informational` is a concern
+		 * the reviewer wants recorded without holding delivery — a smell, a
+		 * follow-up, a risk it judged real but not disqualifying.
+		 *
+		 * Absent means required. A reviewer that forgets the field gets the
+		 * stricter reading, so the mistake costs an argument rather than a
+		 * silent pass; and a model cannot downgrade its own objection by
+		 * omission.
+		 *
+		 * This is not a softer `met: false`. An informational finding still
+		 * says the requirement was not met — it says the run may continue
+		 * anyway, which is a judgement about scope, not about truth.
+		 */
+		"criticality?": "'required' | 'informational'",
+	}).array(),
 });
 
 /** Predicates are not represented in JSON Schema; publish the structural shape only. */
@@ -25,10 +62,13 @@ export const REVIEW_JSON_SCHEMA = reviewShape.toJsonSchema();
 
 export const REVIEW_RULES = [
 	"An approved review must have no blocking entries.",
-	"An approved review must have no findings with met=false.",
-	"A rejected review must name at least one blocking entry or an unmet requirement.",
+	"An approved review must have no unmet findings unless they are criticality=informational.",
+	"Use criticality=informational for a concern worth recording that does not hold delivery; omitting the field means required, which blocks.",
+	"A rejection must rest on a blocking entry or an unmet required finding: an informational concern cannot carry a rejection.",
 	"A coherent rejection is a valid review, but delivery acceptance requires approved=true.",
 	"Use status=success when the review completed, even when approved=false; status=fail means the review could not be completed.",
+	"Mark a finding basis=verified only when you ran something and read the result, and cite it in evidence; everything else is basis=judged.",
+	"A verified finding without evidence is rejected: a claim to have checked something must say what was checked.",
 	"These checks establish internal consistency, not the truth or completeness of the review.",
 ].join("\n");
 
@@ -45,18 +85,43 @@ const reviewSchema = reviewShape.narrow((review, ctx) => {
 		}
 		for (const [index, finding] of review.findings.entries()) {
 			if (finding.met) continue;
+			// An informational finding is a recorded concern, not a veto: it
+			// says the requirement was not met AND that the run may continue.
+			// Without this an approval could carry no reservations at all, so
+			// a reviewer with a real but non-blocking worry had to either
+			// invent a blocking one or drop it.
+			if (finding.criticality === "informational") continue;
 			ctx.error({
-				expected: `true when approved is true (requirement: ${finding.requirement})`,
+				expected: `true when approved is true, or criticality=informational (requirement: ${finding.requirement})`,
 				relativePath: ["findings", index, "met"],
 				actual: finding.met,
 			});
 			consistent = false;
 		}
-	} else if (review.blocking.length === 0 && review.findings.every(finding => finding.met)) {
+	} else if (
+		review.blocking.length === 0 &&
+		// A rejection must rest on something that blocks. Informational
+		// findings cannot supply that support: allowing them to would let a
+		// reviewer reject on a concern it had already called non-blocking.
+		review.findings.every(finding => finding.met || finding.criticality === "informational")
+	) {
 		ctx.error({
-			expected: "supported by a blocking entry or a finding with met=false",
+			expected: "supported by a blocking entry or an unmet required finding",
 			relativePath: ["approved"],
 			actual: review.approved,
+		});
+		consistent = false;
+	}
+	// A claim to have checked something must say what was checked. Left
+	// unenforced, `basis` degrades into a label a reviewer applies to make its
+	// opinion carry more weight, which is the opposite of why it exists.
+	for (const [index, finding] of review.findings.entries()) {
+		if (finding.basis !== "verified") continue;
+		if (finding.evidence?.trim()) continue;
+		ctx.error({
+			expected: `evidence naming what was run or read (requirement: ${finding.requirement})`,
+			relativePath: ["findings", index, "evidence"],
+			actual: finding.evidence === undefined ? "undefined" : JSON.stringify(finding.evidence),
 		});
 		consistent = false;
 	}

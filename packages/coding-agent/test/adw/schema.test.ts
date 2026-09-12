@@ -315,6 +315,79 @@ describe("reviewAcceptance", () => {
 		return { summary: "Review", artifacts: [], notesForNextAgent: "", payloadJson: JSON.stringify(payload) };
 	}
 
+	it("refuses a finding that claims verification without naming what was checked", () => {
+		// `basis` exists to keep a model's reading from being read later as a
+		// test result. Unenforced it becomes a label a reviewer applies to make
+		// its opinion carry more weight, which inverts the point.
+		expect(
+			reviewAcceptance(
+				handoff({
+					approved: true,
+					blocking: [],
+					findings: [{ requirement: "tests pass", met: true, basis: "verified" }],
+				}),
+			).accepted,
+		).toBe(false);
+	});
+
+	it("accepts a verified finding that cites its evidence", () => {
+		expect(
+			reviewAcceptance(
+				handoff({
+					approved: true,
+					blocking: [],
+					findings: [{ requirement: "tests pass", met: true, basis: "verified", evidence: "bun test: 252 pass" }],
+				}),
+			).accepted,
+		).toBe(true);
+	});
+
+	it("treats a judged finding, and an unmarked one, as opinion needing no evidence", () => {
+		// Absent basis means judged: a finding that does not claim to be
+		// verified is not, and asking opinion to cite a command it never ran
+		// would only teach reviewers to invent one.
+		for (const findings of [
+			[{ requirement: "readable", met: true, basis: "judged" }],
+			[{ requirement: "readable", met: true }],
+		]) {
+			expect(reviewAcceptance(handoff({ approved: true, blocking: [], findings })).accepted).toBe(true);
+		}
+	});
+
+	it("approves with an unmet informational finding, but not an unmet required one", () => {
+		// A reviewer with a real but non-blocking concern previously had to
+		// invent a blocking one or drop it. Neither is a review.
+		const finding = (criticality?: string) => ({
+			requirement: "coverage",
+			met: false,
+			...(criticality ? { criticality } : {}),
+		});
+		expect(
+			reviewAcceptance(handoff({ approved: true, blocking: [], findings: [finding("informational")] })).accepted,
+		).toBe(true);
+		expect(
+			reviewAcceptance(handoff({ approved: true, blocking: [], findings: [finding("required")] })).accepted,
+		).toBe(false);
+		// Omitted means required: a model cannot downgrade its own objection
+		// by leaving the field out.
+		expect(reviewAcceptance(handoff({ approved: true, blocking: [], findings: [finding()] })).accepted).toBe(false);
+	});
+
+	it("refuses a rejection that rests only on an informational concern", () => {
+		// Rejecting on something already called non-blocking is incoherent,
+		// and must read as a malformed review rather than a clean rejection —
+		// the two route differently.
+		const result = reviewAcceptance(
+			handoff({
+				approved: false,
+				blocking: [],
+				findings: [{ requirement: "coverage", met: false, criticality: "informational" }],
+			}),
+		);
+		expect(result.accepted).toBe(false);
+		expect(result.reason).toContain("Invalid final review");
+	});
+
 	it("accepts a coherent positive final report after handoff serialization", () => {
 		const restored: TaskHandoff = JSON.parse(
 			JSON.stringify(
