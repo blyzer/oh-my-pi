@@ -39,6 +39,36 @@ runs:
            if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
            read -r -a targets <<< "$NATIVE_TARGETS"
            bun scripts/bazel-natives.ts "${targets[@]}" --dest "$NATIVE_DEST"
+      # A new SOURCE_HASH means a new ~1.8 GB entry every push, and Actions
+      # caps a repository at 10 GB regardless of visibility. Left alone, a few
+      # pushes on one platform evict every other platform's archive by LRU —
+      # observed here as six darwin entries totalling 10.85 GB with no Linux
+      # entry at all, so the hour-long Linux build started cold every time.
+      #
+      # Drop this platform's older generations before adding one, keeping the
+      # newest few for the prefix fallbacks the restore step relies on. Best
+      # effort: a pruning failure must not fail a build that already succeeded.
+      - name: Prune superseded bazel caches
+        if: steps.cache.outputs.save-needed == 'true'
+        shell: bash
+        continue-on-error: true
+        env:
+           GH_TOKEN: ${{ github.token }}
+           BARE_PREFIX: ${{ steps.cache.outputs.cache-bare-prefix }}
+           KEEP: "2"
+        run: |
+           set -uo pipefail
+           [ -n "${BARE_PREFIX:-}" ] || exit 0
+           # Newest first; skip the ones the restore step would still match.
+           gh cache list --repo "$GITHUB_REPOSITORY" --limit 100 \
+              --json id,key,createdAt --jq \
+              "[.[] | select(.key | startswith(\"$BARE_PREFIX\"))] | sort_by(.createdAt) | reverse | .[$KEEP:] | .[].id" \
+              2>/dev/null | while read -r id; do
+              [ -n "$id" ] || continue
+              gh cache delete "$id" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+                 && echo "pruned superseded cache $id" \
+                 || echo "could not prune cache $id"
+           done
       - name: Save bazel disk cache
         if: steps.cache.outputs.save-needed == 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
