@@ -9,11 +9,12 @@
  */
 
 import type { TaskHandoff } from "@oh-my-pi/pi-natives";
+import { loadPrompt } from "./prompt-store";
 import { REVIEW_JSON_SCHEMA, REVIEW_RULES, VERDICT_GATE } from "./schema";
 import type { AdwPhaseConfig, AdwSeatConfig } from "./types";
 
-/** Appended to the phase agent's own system prompt. */
-export const ENVELOPE_CONTRACT = `# Output contract
+/** The text compiled into this build. An operator override replaces it; see {@link loadPrompt}. */
+export const ENVELOPE_CONTRACT_BUNDLED = `# Output contract
 
 End your final message with a single JSON object — nothing after it. It is parsed
 by the workflow engine, not read by a human:
@@ -34,6 +35,21 @@ Rules:
   answer and it reaches the next attempt with your summary attached. Do not
   claim success you cannot back.
 - Prose before the object is fine. A missing object is not.`;
+
+/**
+ * Appended to the phase agent's own system prompt.
+ *
+ * Resolves an override from `.omp/adw/prompts/envelope-contract.md` when the
+ * operator supplies one: this is the text that decides whether a phase's
+ * output can be parsed at all, so being able to try a wording without a
+ * rebuild is worth more here than anywhere else.
+ *
+ * @param cwd - Workspace root to look for an override under
+ * @returns The contract text to append
+ */
+export function envelopeContract(cwd: string): string {
+	return loadPrompt("envelope-contract", ENVELOPE_CONTRACT_BUNDLED, cwd).text;
+}
 
 function renderHandoff(handoff: TaskHandoff): string {
 	const lines = [`summary: ${handoff.summary}`];

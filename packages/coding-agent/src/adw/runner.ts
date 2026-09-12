@@ -66,10 +66,12 @@ import {
 	buildFusionPrompt,
 	buildPanelPrompt,
 	buildPhasePrompt,
-	ENVELOPE_CONTRACT,
+	ENVELOPE_CONTRACT_BUNDLED,
+	envelopeContract,
 	type PanelOpinion,
 	type ReviewDiff,
 } from "./prompt";
+import { describePromptOrigin, loadPrompt } from "./prompt-store";
 import type { AdwPhaseConfig, AdwPhaseProgress, AdwSeatConfig, AdwWorkflowConfig } from "./types";
 import {
 	integrateAccepted,
@@ -560,9 +562,13 @@ export async function runCodePhase(
 	}
 }
 
-/** A writer seat: the agent's own prompt plus the envelope contract it must satisfy. */
-function deriveWriterAgent(base: AgentDefinition): AgentDefinition {
-	return { ...base, systemPrompt: `${base.systemPrompt}\n\n${ENVELOPE_CONTRACT}` };
+/**
+ * A writer seat: the agent's own prompt plus the envelope contract it must
+ * satisfy. The contract is resolved against `cwd` so an operator override
+ * reaches the seat that has to honour it.
+ */
+function deriveWriterAgent(base: AgentDefinition, cwd: string): AgentDefinition {
+	return { ...base, systemPrompt: `${base.systemPrompt}\n\n${envelopeContract(cwd)}` };
 }
 
 /** A panel seat: same agent, read-only, and no envelope contract — it owes an opinion, not a result. */
@@ -1211,6 +1217,18 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			// is not context for it. Everything else keeps the positional handoff.
 			const selectedInputs: TaskPhaseInput[] | undefined = phase.inputs ? (step.inputs ?? undefined) : undefined;
 			const handoff: TaskHandoff | null = phase.inputs ? null : (args.handoff ?? run.handoff());
+			// Record which instructions this attempt ran under, before it runs.
+			// Prompts are files now, so two attempts of one phase can execute
+			// under different text while the trace shows them as identical
+			// dispatches — which makes the trace unable to answer the first
+			// question asked of a behaviour change. The digest is enough to
+			// compare attempts; git holds the text it names.
+			if (phase.kind === "agent" || phase.kind === "fusion") {
+				const contract = loadPrompt("envelope-contract", ENVELOPE_CONTRACT_BUNDLED, host.cwd);
+				run.noteGateReport(phase.name, "prompt", [
+					{ item: "envelope-contract", ok: true, note: describePromptOrigin("envelope-contract", contract) },
+				]);
+			}
 			// Stable across attempts: the seat's session is continued on a retry,
 			// so its id must not carry the attempt number.
 			const stepId = `${adwId}-${phase.name}${args.generation ? `-${args.generation}` : ""}`;
@@ -1309,7 +1327,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 					seat: fuserSeat.owner,
 					model: fuserSeat.model,
 					thinking: fuserSeat.thinking,
-					agent: deriveWriterAgent(fuserBase),
+					agent: deriveWriterAgent(fuserBase, host.cwd),
 					task: buildFusionPrompt({
 						request,
 						phase,
@@ -1337,7 +1355,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				seat: phase.owner ?? "",
 				model: phase.model,
 				thinking: phase.thinking,
-				agent: deriveWriterAgent(base),
+				agent: deriveWriterAgent(base, host.cwd),
 				task: buildPhasePrompt({
 					request,
 					phase,

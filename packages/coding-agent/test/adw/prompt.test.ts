@@ -12,7 +12,7 @@ import {
 	buildFusionPrompt,
 	buildPanelPrompt,
 	buildPhasePrompt,
-	ENVELOPE_CONTRACT,
+	ENVELOPE_CONTRACT_BUNDLED,
 	type PanelOpinion,
 	type PhaseInput,
 } from "@oh-my-pi/pi-coding-agent/adw/prompt";
@@ -105,7 +105,7 @@ describe("buildPanelPrompt", () => {
 	it("never hands a panel seat the envelope contract — an opinion is prose", () => {
 		// A seat asked for JSON as well is invited to claim it did the work.
 		const prompt = buildPanelPrompt({ request: "r", phase: FUSION_PHASE });
-		expect(prompt).not.toContain(ENVELOPE_CONTRACT);
+		expect(prompt).not.toContain(ENVELOPE_CONTRACT_BUNDLED);
 		expect(prompt).not.toContain('"status"');
 	});
 

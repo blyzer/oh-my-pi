@@ -13,6 +13,7 @@
  */
 
 import { runSubprocess } from "../task/executor";
+import { loadPrompt } from "./prompt-store";
 import type { AgentDefinition } from "../task/types";
 import type { AdwHost } from "./runner";
 import type { DiscoveredWorkflow } from "./types";
@@ -84,7 +85,7 @@ function describeCatalogue(workflows: readonly DiscoveredWorkflow[]): string {
 		.join("\n\n");
 }
 
-const SYSTEM_PROMPT = `You route an engineering request to one of the workflows already defined in this repository.
+const SYSTEM_PROMPT_BUNDLED = `You route an engineering request to one of the workflows already defined in this repository.
 
 Answer with a single JSON object and nothing else:
   {"workflow": "<name>", "reason": "<one sentence>"}
@@ -98,6 +99,20 @@ Rules:
 - Answer null when nothing fits. An ill-fitting workflow runs the wrong
   gates and reports success for work nobody asked for, which is worse for
   the operator than being told to write one.`;
+
+/**
+ * The routing instructions, with an operator override applied.
+ *
+ * Routing is the judgement most sensitive to a repository's own vocabulary —
+ * what "ship" or "review" means here is local knowledge — so this is the
+ * prompt an operator is most likely to want to adjust without a rebuild.
+ *
+ * @param cwd - Workspace root to look for an override under
+ * @returns The system prompt for the classifier
+ */
+function classifierPrompt(cwd: string): string {
+	return loadPrompt("classifier", SYSTEM_PROMPT_BUNDLED, cwd).text;
+}
 
 /**
  * Choose a workflow for a request.
@@ -133,13 +148,13 @@ export async function classifyWorkflow(
 	const agent: AgentDefinition = {
 		name: "adw-classifier",
 		description: "Routes a request to one of this repository's workflows",
-		systemPrompt: SYSTEM_PROMPT,
+		systemPrompt: classifierPrompt(ctx.host.cwd),
 		tools: [],
 		source: "bundled",
 	};
 	const task = `Catalogue:\n\n${describeCatalogue(workflows)}\n\nRequest:\n${request}`;
 	const result = ctx.ask
-		? await ctx.ask(task, SYSTEM_PROMPT)
+		? await ctx.ask(task, classifierPrompt(ctx.host.cwd))
 		: await runSubprocess({
 				cwd: ctx.host.cwd,
 				agent,

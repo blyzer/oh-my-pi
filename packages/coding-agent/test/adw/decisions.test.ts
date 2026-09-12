@@ -12,7 +12,7 @@ import {
 	type SeatRequest,
 	settleIsolation,
 } from "@oh-my-pi/pi-coding-agent/adw/runner";
-import { ENVELOPE_CONTRACT } from "@oh-my-pi/pi-coding-agent/adw/prompt";
+import { ENVELOPE_CONTRACT_BUNDLED } from "@oh-my-pi/pi-coding-agent/adw/prompt";
 import type { AdwWorkflowConfig } from "@oh-my-pi/pi-coding-agent/adw/types";
 import { REVIEW_JSON_SCHEMA, VERDICT_GATE } from "@oh-my-pi/pi-coding-agent/adw/schema";
 import { TaskTraceReader, taskTraceLayout } from "@oh-my-pi/pi-natives";
@@ -340,7 +340,7 @@ describe("seat agent derivation", () => {
 			// hand-built definitions do not get it appended for them.
 			expect(seat.agent.tools).toContain("yield");
 			// An opinion is prose: asking for JSON too invites a claim of work done.
-			expect(seat.agent.systemPrompt).not.toContain(ENVELOPE_CONTRACT);
+			expect(seat.agent.systemPrompt).not.toContain(ENVELOPE_CONTRACT_BUNDLED);
 			// No fanning out further from inside a panel seat.
 			expect(seat.agent.spawns).toBeUndefined();
 		}
@@ -348,7 +348,7 @@ describe("seat agent derivation", () => {
 
 	it("gives the fuser the envelope contract and leaves its tools alone", async () => {
 		const { fuser } = await seatAgents(tempDir("derive-fuser"));
-		expect(fuser?.agent.systemPrompt).toContain(ENVELOPE_CONTRACT);
+		expect(fuser?.agent.systemPrompt).toContain(ENVELOPE_CONTRACT_BUNDLED);
 		// Untouched: the roster decides what the writer may do.
 		expect(fuser?.agent.tools).toBe(AGENT.tools);
 	});
