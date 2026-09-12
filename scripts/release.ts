@@ -218,6 +218,25 @@ export function bumpCanaryVersion(current: string): string {
 	return `${major}.${minor}.${patch + 1}-canary.1`;
 }
 
+/**
+ * The version the working tree already claims.
+ *
+ * Tags and manifests can disagree: a merge that resolves a version conflict in
+ * favour of the incoming side moves the manifests without creating a tag. The
+ * release then has to bump from the higher of the two, or it writes a version
+ * the tree has already passed.
+ *
+ * @returns The version in the coding-agent manifest
+ */
+async function currentManifestVersion(): Promise<string> {
+	const manifest = await Bun.file("packages/coding-agent/package.json").json();
+	const version: unknown = manifest?.version;
+	if (typeof version !== "string" || !version.trim()) {
+		throw new Error("packages/coding-agent/package.json declares no version");
+	}
+	return version.trim();
+}
+
 async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
 	// Validate explicit versions before any compare: the shared compareVersions
@@ -263,17 +282,28 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
 
 	const latestTag = (await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).text()).trim();
+	// Bump from whichever is higher: the last tag, or what the manifests
+	// already say. A merge can move the manifests ahead of the tags — taking
+	// upstream's version during a conflict does exactly that — and bumping
+	// from the tag alone then writes a LOWER version over the tree, which the
+	// `> latestTag` guard below happily accepts because it only compares
+	// against tags.
+	const manifestVersion = await currentManifestVersion();
+	const base = compareVersions(manifestVersion, latestTag) > 0 ? manifestVersion : latestTag;
 	let version = versionOrBump;
 	if (version === "major" || version === "minor" || version === "patch") {
-		version = bumpVersion(latestTag, version);
-		console.log(`Bumping ${versionOrBump} version from ${latestTag} -> ${version}`);
+		version = bumpVersion(base, version);
+		console.log(`Bumping ${versionOrBump} version from ${base} -> ${version}`);
 	} else if (version === "canary") {
-		version = bumpCanaryVersion(latestTag);
-		console.log(`Bumping canary version from ${latestTag} -> ${version}`);
+		version = bumpCanaryVersion(base);
+		console.log(`Bumping canary version from ${base} -> ${version}`);
 	}
 
-	if (compareVersions(version, latestTag) <= 0) {
-		console.error(`Error: Version ${version} must be greater than latest tag ${latestTag}`);
+	// Compare against the base, not the tag: a version that merely beats the
+	// last tag can still be behind the manifests, which is the regression this
+	// whole block exists to prevent.
+	if (compareVersions(version, base) <= 0) {
+		console.error(`Error: Version ${version} must be greater than ${base}`);
 		process.exit(1);
 	}
 	console.log(`  Version ${version} > ${latestTag}\n`);
