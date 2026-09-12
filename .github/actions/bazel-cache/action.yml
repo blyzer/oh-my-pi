@@ -36,6 +36,9 @@ outputs:
    cache-key:
       description: Exact GitHub cache key for a later explicit save
       value: ${{ steps.backend.outputs.cache-key }}
+   backend:
+      description: "Which cache backend was selected: disk, buildbuddy or bazel-remote."
+      value: ${{ steps.backend.outputs.backend }}
    save-needed:
       description: Whether a disk-cache build can save a new exact-key archive
       value: ${{ steps.compose.outputs.save-needed }}
@@ -55,18 +58,29 @@ runs:
         run: |
            set -euo pipefail
            remote=false
-           if [ -n "${BAZEL_REMOTE_USER:-}" ] || [ -n "${BAZEL_REMOTE_PASSWORD:-}" ]; then
+           backend=disk
+           # BuildBuddy authenticates with a single API key, not a user/password
+           # pair, and its endpoint is reachable from anywhere — unlike the
+           # upstream cache, whose `svc.cluster.local` address only resolves
+           # inside that cluster. A fork with a key gets a real remote cache;
+           # without one it keeps the disk cache and nothing changes.
+           if [ -n "${BB_API_KEY:-}" ]; then
+             remote=true
+             backend=buildbuddy
+           elif [ -n "${BAZEL_REMOTE_USER:-}" ] || [ -n "${BAZEL_REMOTE_PASSWORD:-}" ]; then
              if [ -z "${BAZEL_REMOTE_USER:-}" ] || [ -z "${BAZEL_REMOTE_PASSWORD:-}" ]; then
                echo "::error::BAZEL_REMOTE_USER and BAZEL_REMOTE_PASSWORD must both be set"
                exit 1
              fi
              remote=true
+             backend=bazel-remote
            fi
            key="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-$SOURCE_HASH"
            prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-"
            bare_prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-"
            {
              echo "remote=$remote"
+             echo "backend=$backend"
              echo "cache-key=$key"
              echo "cache-prefix=$prefix"
              echo "cache-bare-prefix=$bare_prefix"
@@ -100,6 +114,7 @@ runs:
         shell: bash
         env:
            REMOTE: ${{ steps.backend.outputs.remote }}
+           BACKEND: ${{ steps.backend.outputs.backend }}
            RESTORE_HIT: ${{ steps.restore.outputs.cache-hit }}
         run: |
            set -euo pipefail
@@ -109,7 +124,27 @@ runs:
            fi
 
            rc="$RUNNER_TEMP/bazel-cache.rc"
-           if [ "$REMOTE" = "true" ]; then
+           if [ "$BACKEND" = "buildbuddy" ]; then
+             # A public endpoint over TLS: no CA to ship and no in-cluster DNS,
+             # which is what makes it usable from a fork's hosted runners at
+             # all. The key is masked before the rc is written, because
+             # config=ci turns on --announce_rc and that prints headers
+             # verbatim.
+             echo "::add-mask::$BB_API_KEY"
+             {
+               echo "startup --output_user_root=$RUNNER_TEMP/bazel-root"
+               echo "common --config=ci"
+               echo "common --config=cache-rw"
+               echo "common --remote_cache=grpcs://${BB_REMOTE_HOST:-remote.buildbuddy.io}"
+               echo "common --remote_header=x-buildbuddy-api-key=${BB_API_KEY}"
+               echo "common --remote_download_toplevel"
+               # Build Event Stream: the run shows up in BuildBuddy's UI with
+               # per-target timings, which is the whole reason to prefer a
+               # hosted cache over a bucket.
+               echo "common --bes_backend=grpcs://${BB_REMOTE_HOST:-remote.buildbuddy.io}"
+               echo "common --bes_results_url=https://app.buildbuddy.io/invocation/"
+             } > "$rc"
+           elif [ "$REMOTE" = "true" ]; then
              # Mask the derived credential BEFORE writing the rc: config=ci
              # enables --announce_rc, which prints --remote_header verbatim.
              # Mask lines inside the redirected block below would land in the
