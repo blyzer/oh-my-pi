@@ -7,6 +7,11 @@
 ### Fixed
 
 - Fixed `checkpointWal` throwing on an already-closed database handle. Every caller runs it from a `close()` path, where a closed handle has nothing left to flush — SQLite checkpoints on close — but Bun >=1.4 raises `Database has closed` from `db.run()` after `close()` where earlier versions tolerated it. Added `isClosedDatabaseError` beside the existing busy and corruption classifiers; real statement errors still propagate.
+## [18.1.16] - 2026-09-09
+
+### Fixed
+
+- Fixed `$which` capturing `Bun.which` at import on Linux and Windows, so `Bun.which` stubs installed later (e.g. per-test spies) are honoured and PATH-only language servers no longer leak into test results.
 
 ## [18.1.13] - 2026-09-07
 

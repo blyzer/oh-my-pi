@@ -538,13 +538,13 @@ export class SelectorController {
 				}
 				break;
 			case "steeringMode":
-				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time", true);
 				break;
 			case "followUpMode":
-				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time", true);
 				break;
 			case "interruptMode":
-				this.ctx.session.setInterruptMode(value as "immediate" | "wait");
+				this.ctx.session.setInterruptMode(value as "immediate" | "wait", true);
 				break;
 			case "thinkingLevel":
 			case "defaultThinkingLevel":
@@ -572,6 +572,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply external thinking: ${err}`);
 				});
 				break;
+			case "compaction.idleEnabled":
+			case "compaction.idleThresholdTokens":
+			case "compaction.idleTimeoutSeconds":
+				this.ctx.eventController.refreshIdleCompactionTimer();
+				break;
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
@@ -581,6 +586,14 @@ export class SelectorController {
 			case "spelling.autocorrect":
 				this.ctx.syncEditorSpelling();
 				this.ctx.ui.requestRender();
+				break;
+
+			case "tui.vimMode":
+			case "tui.vimModeDisplay":
+				this.ctx.applyVimModeSetting();
+				break;
+			case "display.pinnedAgents":
+				this.ctx.applyPinnedAgentsSetting();
 				break;
 
 			// Settings with UI side effects
@@ -1814,6 +1827,9 @@ export class SelectorController {
 				historyMatcher,
 				loadAllSessions: () => SessionManager.listAll(),
 				pinnedIds,
+				// Live getter so detach/newSession stays accurate; tolerant of partial
+				// contexts and in-memory sessions (undefined file means no marker).
+				currentSessionPath: () => this.ctx.sessionManager.getSessionFile?.() ?? undefined,
 			};
 		}
 
