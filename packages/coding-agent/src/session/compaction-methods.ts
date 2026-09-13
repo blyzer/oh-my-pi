@@ -40,12 +40,28 @@ export const COMPACTION_METHOD_CHOICES = [
 /** One selectable automatic context-maintenance method. */
 export type CompactionMethod = (typeof COMPACTION_METHOD_CHOICES)[number]["value"];
 
-/** Default fallback order: server-native first, portable summary last. */
+/**
+ * Default fallback order: local methods first, then server-native.
+ *
+ * Compaction is the largest single body of text a session ever transmits —
+ * the whole conversation, not one tool result. Ordering `remote` first meant
+ * the default path shipped raw history to a provider and received a summary,
+ * while two methods that compress on this machine sat below it unused.
+ *
+ * `snapcompact` rasterizes locally through the Rust encoder: no network call,
+ * no API key, and the frames it produces are bounded before they are sent.
+ * `shake` elides recoverable heavy content with no model at all and offloads
+ * it to a local artifact. Both are tried before anything leaves.
+ *
+ * `remote` keeps its place as the first non-local method rather than being
+ * removed: it is the only one that survives a transcript the local encoders
+ * cannot represent, and falling back to it is better than failing a turn.
+ */
 export const DEFAULT_COMPACTION_METHOD_ORDER: CompactionMethod[] = [
-	"remote",
 	"snapcompact",
-	"handoff",
 	"shake",
+	"remote",
+	"handoff",
 	"soft",
 ];
 

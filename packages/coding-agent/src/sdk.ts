@@ -1272,6 +1272,21 @@ export function createAutoLearnCaptureRunner(
 	};
 }
 /**
+ * Extension events a restricted session still delivers.
+ *
+ * Restriction stops a read-only seat from running arbitrary extension code.
+ * It should not stop a content policy from seeing what that seat SENDS: those
+ * are different risks, and collapsing them left the most tightly scoped seats
+ * — ADW panel seats, the workflow classifier — as the only consumers no
+ * outbound handler could inspect.
+ *
+ * Deliberately narrow. `before_provider_request` is the one event that sees a
+ * complete outbound request and can refuse it; anything wider would reopen the
+ * hole restriction exists to close.
+ */
+const RESTRICTED_SESSION_EVENTS = new Set(["before_provider_request"]);
+
+/**
  * Create an AgentSession with the specified options.
  *
  * @example
@@ -2155,10 +2170,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
 		if (restrictToolNames) {
-			// Allocate a session runtime without evaluating caller-provided extension
-			// instances, paths, or factories.
+			// A restricted seat evaluates no caller-provided extension instances,
+			// paths or factories — that is the point of the restriction, and a
+			// read-only panel seat has no business running arbitrary third-party
+			// module graphs.
+			//
+			// But `before_provider_request` is the only place a content policy
+			// can see a complete outbound request, and a restricted seat still
+			// talks to a provider. Dropping every handler here meant the seats
+			// most tightly scoped in what they may WRITE were the least covered
+			// in what they may SEND — ADW panel seats and the workflow
+			// classifier among them. So discovery still runs, and the result is
+			// then narrowed to handlers that gate the outbound path.
 			extensionPaths = [];
-			extensionsResult = await loadExtensions([], cwd, eventBus);
+			const discovered = await loadExtensions([], cwd, eventBus);
+			extensionsResult = {
+				...discovered,
+				extensions: discovered.extensions
+					.map(ext => ({
+						...ext,
+						handlers: new Map([...ext.handlers].filter(([event]) => RESTRICTED_SESSION_EVENTS.has(event))),
+					}))
+					.filter(ext => ext.handlers.size > 0),
+			};
 		} else if (options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,

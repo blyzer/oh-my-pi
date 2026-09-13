@@ -736,7 +736,12 @@ describe("ExtensionRunner", () => {
 			expect(payload).toEqual({ chain: ["base", "ext1", "ext2"] });
 		});
 
-		it("keeps chaining after handler errors", async () => {
+		it("abandons the request when a handler fails, rather than shipping it unchecked", async () => {
+			// This is the last point where anything sees the complete outbound
+			// request. A handler that throws has not approved the payload, and
+			// letting the next handler's edit sail past its failure would read
+			// a swallowed error as consent — the one outcome a redaction or
+			// privacy handler must never produce.
 			const extCode1 = `
 				export default function(pi) {
 					pi.on("before_provider_request", async () => {
@@ -763,16 +768,8 @@ describe("ExtensionRunner", () => {
 				sessionManager,
 				modelRegistry,
 			);
-			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
-			runner.onError(err => {
-				errors.push(err);
-			});
 
-			const payload = await runner.emitBeforeProviderRequest({ original: true });
-			expect(payload).toEqual({ original: true, preserved: true });
-			expect(errors).toHaveLength(1);
-			expect(errors[0]?.event).toBe("before_provider_request");
-			expect(errors[0]?.error).toContain("payload failed");
+			await expect(runner.emitBeforeProviderRequest({ original: true })).rejects.toThrow(/refused the payload/);
 		});
 	});
 

@@ -1661,7 +1661,24 @@ export class ExtensionRunner {
 		return currentMessages;
 	}
 
-	/** Runs request payload hooks with the model used for that provider request. */
+	/**
+	 * Runs request payload hooks with the model used for that provider request.
+	 *
+	 * This is the last point where an extension sees the complete outbound
+	 * request, which makes it the only place a content policy could live. A
+	 * handler that throws or hangs here is therefore refusing to vouch for the
+	 * payload — not consenting to it.
+	 *
+	 * On failure: **fail-closed**, same policy as {@link emitToolCall}. The
+	 * request is abandoned rather than sent unchecked. Previously a throw was
+	 * swallowed and the unexamined payload shipped, which is the one outcome a
+	 * privacy or redaction handler must never produce: silence read as consent.
+	 *
+	 * @param payload - Provider-native request body, already built
+	 * @param model - Model this request targets, so policy can differ per model
+	 * @returns The payload as handlers left it
+	 * @throws When a handler fails or times out
+	 */
 	async emitBeforeProviderRequest(payload: unknown, model?: Model): Promise<BeforeProviderRequestEventResult> {
 		const ctx = this.createContext(model);
 		let currentPayload = payload;
@@ -1675,13 +1692,27 @@ export class ExtensionRunner {
 					type: "before_provider_request",
 					payload: currentPayload,
 				};
+				let failure: string | undefined;
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
 					event,
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
+					(kind, message) => {
+						failure =
+							kind === "timeout"
+								? `Extension ${ext.path} timed out after ${extensionHandlerTimeoutMs}ms`
+								: `Extension ${ext.path} failed: ${message}`;
+						return undefined;
+					},
 				);
+				if (failure) {
+					// Abandon the request. A handler that could not run has not
+					// approved this payload, and the caller must not be able to
+					// mistake a swallowed error for a clean pass.
+					throw new Error(`before_provider_request refused the payload: ${failure}`);
+				}
 				if (handlerResult !== undefined) {
 					currentPayload = handlerResult;
 				}
