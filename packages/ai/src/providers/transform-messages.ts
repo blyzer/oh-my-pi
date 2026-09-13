@@ -414,11 +414,44 @@ function normalizeAnthropicTargetToolCallId<TApi extends Api>(
  * execution) instead of the irreversible `[*_token_redacted]` rewrite below —
  * an irreversible placeholder echoed back in edit-tool `old_string` can never
  * match the real bytes on disk.
+ *
+ * FORK DIVERGENCE: upstream covers six vendor prefixes only. This fork adds
+ * AWS access key ids (`AKIA`/`ASIA`) and JWTs here, plus
+ * {@link PRIVATE_KEY_BLOCK_RE} below for PEM and OpenSSH keys. Keep the
+ * additions through an upstream merge; without them a credentials file, an SSH
+ * key or a bearer token in a log reaches the provider intact even with
+ * redaction switched on. See docs/audit/README.md §10.
+ *
+ * Note the missing `i` flag: `AKIA`/`ASIA` are uppercase by definition, and
+ * case-insensitivity would match prose.
  */
 export const SENSITIVE_TOKEN_RE =
-	/(?<![a-zA-Z0-9_*-])(gh[opusr]_[a-zA-Z0-9_*]{36,}|github_pat_[a-zA-Z0-9_*]{36,}|glpat-[a-zA-Z0-9_*-]{20,}|sk-proj-[a-zA-Z0-9_*-]{36,}|sk-ant-[a-zA-Z0-9_*-]{36,}|sk-[a-zA-Z0-9_*-]{48,})(?![a-zA-Z0-9_*-])/gi;
+	/(?<![a-zA-Z0-9_*-])(gh[opusr]_[a-zA-Z0-9_*]{36,}|github_pat_[a-zA-Z0-9_*]{36,}|glpat-[a-zA-Z0-9_*-]{20,}|sk-proj-[a-zA-Z0-9_*-]{36,}|sk-ant-[a-zA-Z0-9_*-]{36,}|sk-[a-zA-Z0-9_*-]{48,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})(?![a-zA-Z0-9_*-])/g;
+
+/**
+ * Private key blocks, matched whole rather than by token shape.
+ *
+ * A key is not a token: it spans lines, carries no vendor prefix, and its body
+ * is base64 with no entropy signal a per-token heuristic could use. The only
+ * reliable marker is its PEM/OpenSSH armour, so the armour is what this
+ * matches — header to footer, contents included.
+ *
+ * These are the files an agent reads without friction (`~/.ssh/id_rsa`,
+ * `server.pem`) and the ones whose disclosure is least recoverable: a leaked
+ * API token is rotated in a minute, a host key is not.
+ */
+export const PRIVATE_KEY_BLOCK_RE =
+	/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----/g;
 
 function hasPlausibleCredentialEntropy(token: string): boolean {
+	// Shapes with a fixed, unambiguous format carry their own proof: an AWS key
+	// id is `AKIA` plus exactly 16 upper-alphanumerics, a JWT is three base64url
+	// segments. Applying a mixed-character heuristic to them would reject real
+	// credentials — `AKIAIOSFODNN7EXAMPLE` has no lowercase and no digits in
+	// some regions — which is the one error this function must not make.
+	if (/^(?:AKIA|ASIA)[0-9A-Z]{16}$/.test(token)) return true;
+	if (token.startsWith("eyJ")) return true;
+
 	const lower = token.toLowerCase();
 	const prefixLength = lower.startsWith("github_pat_")
 		? "github_pat_".length
@@ -455,8 +488,18 @@ export function configureCredentialRedaction(enabled: boolean): void {
 
 export function redactSensitiveCredentials(text: string): string {
 	if (!credentialRedactionEnabled) return text;
-	return text.replace(SENSITIVE_TOKEN_RE, match => {
+	// Key blocks first: their base64 body can contain runs that look like a
+	// token, and replacing the whole armoured block avoids leaving a redaction
+	// marker embedded inside a key that is otherwise still intact.
+	const withoutKeys = text.replace(PRIVATE_KEY_BLOCK_RE, "[private_key_redacted]");
+	return withoutKeys.replace(SENSITIVE_TOKEN_RE, match => {
 		if (!hasPlausibleCredentialEntropy(match)) return match;
+		if (match.startsWith("AKIA") || match.startsWith("ASIA")) {
+			return "[aws_access_key_redacted]";
+		}
+		if (match.startsWith("eyJ")) {
+			return "[jwt_redacted]";
+		}
 		const lower = match.toLowerCase();
 		if (lower.startsWith("gh")) {
 			return "[github_token_redacted]";
