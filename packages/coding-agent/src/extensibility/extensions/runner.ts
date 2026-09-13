@@ -1669,10 +1669,14 @@ export class ExtensionRunner {
 	 * handler that throws or hangs here is therefore refusing to vouch for the
 	 * payload — not consenting to it.
 	 *
-	 * On failure: **fail-closed**, same policy as {@link emitToolCall}. The
-	 * request is abandoned rather than sent unchecked. Previously a throw was
-	 * swallowed and the unexamined payload shipped, which is the one outcome a
-	 * privacy or redaction handler must never produce: silence read as consent.
+	 * FORK DIVERGENCE: upstream swallows a handler error here and ships the
+	 * unexamined payload. This fork fails closed, same policy as
+	 * {@link emitToolCall} in this file. Keep it through an upstream merge —
+	 * see docs/audit/README.md §12.
+	 *
+	 * A throw that is swallowed means silence read as consent, which is the one
+	 * outcome a privacy or redaction handler must never produce. The request is
+	 * abandoned rather than sent unchecked.
 	 *
 	 * @param payload - Provider-native request body, already built
 	 * @param model - Model this request targets, so policy can differ per model

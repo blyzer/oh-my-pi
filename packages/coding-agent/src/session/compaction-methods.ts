@@ -43,7 +43,11 @@ export type CompactionMethod = (typeof COMPACTION_METHOD_CHOICES)[number]["value
 /**
  * Default fallback order: local methods first, then server-native.
  *
- * Compaction is the largest single body of text a session ever transmits —
+ * FORK DIVERGENCE: upstream orders this `[remote, snapcompact, handoff, shake,
+ * soft]`. Keep this ordering through an upstream merge — the reasoning is
+ * below and the evidence is in docs/audit/README.md §9.
+ *
+ * Compaction moves the largest single body of text a session ever transmits:
  * the whole conversation, not one tool result. Ordering `remote` first meant
  * the default path shipped raw history to a provider and received a summary,
  * while two methods that compress on this machine sat below it unused.

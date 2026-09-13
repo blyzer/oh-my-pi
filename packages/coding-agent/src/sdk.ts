@@ -1271,8 +1271,16 @@ export function createAutoLearnCaptureRunner(
 		}
 	};
 }
+
 /**
  * Extension events a restricted session still delivers.
+ *
+ * FORK DIVERGENCE: upstream loads NO extensions in a restricted session, so a
+ * read-only seat's provider requests pass through no handler at all. This fork
+ * keeps the outbound hook. Preserve it through an upstream merge — ADW panel
+ * seats and the workflow classifier are exactly the seats this covers, and
+ * without it they are the least protected consumers in the tree.
+ * See docs/audit/README.md §14.
  *
  * Restriction stops a read-only seat from running arbitrary extension code.
  * It should not stop a content policy from seeing what that seat SENDS: those
