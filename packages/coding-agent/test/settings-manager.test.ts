@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { DEFAULT_COMPACTION_METHOD_ORDER } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
@@ -1720,14 +1721,12 @@ describe("Settings", () => {
 	});
 
 	describe("compaction method migration", () => {
-		it("defaults to server, snapcompact, handoff, shake, then soft compaction", () => {
-			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([
-				"remote",
-				"snapcompact",
-				"handoff",
-				"shake",
-				"soft",
-			]);
+		it("defaults to the local-first compaction order", () => {
+			// References the constant rather than restating it: what this pins is
+			// that an unconfigured install inherits the default, not what that
+			// default currently contains. A copy here turned a deliberate
+			// reorder into a settings-migration failure.
+			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([...DEFAULT_COMPACTION_METHOD_ORDER]);
 		});
 
 		it("migrates a local-only legacy strategy to soft compaction", async () => {
