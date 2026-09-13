@@ -15,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { DEFAULT_COMPACTION_METHOD_ORDER } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -965,13 +966,11 @@ describe("AgentSession handoff", () => {
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.methodOrder")).toEqual([
-			"remote",
-			"snapcompact",
-			"handoff",
-			"shake",
-			"soft",
-		]);
+		// Reference the constant rather than restating it: the behaviour under
+		// test is "an empty order is restored to the default", not what that
+		// default happens to contain today. A copy here made reordering the
+		// defaults look like a regression in handoff.
+		expect(session.settings.get("compaction.methodOrder")).toEqual([...DEFAULT_COMPACTION_METHOD_ORDER]);
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 	it("completes threshold-triggered auto-handoff while the original prompt is still unwinding", async () => {

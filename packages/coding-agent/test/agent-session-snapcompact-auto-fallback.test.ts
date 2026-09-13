@@ -166,10 +166,44 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		expect(harness.sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(true);
 	});
 
-	it("uses OpenAI server compaction before local fallback methods by default", async () => {
+	it("tries local snapcompact before any server compaction by default", async () => {
+		// Compaction moves the whole conversation, not one tool result. The
+		// default order therefore exhausts the encoders that run on this
+		// machine before handing that text to a provider; `remote` remains a
+		// fallback for transcripts the local encoders cannot represent.
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "openai", id: "gpt-5" },
 			methodOrder: null,
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+
+		expect(result).toEqual({ action: "snapcompact", errorMessage: undefined });
+		expect(compactionModule.compact).not.toHaveBeenCalled();
+	});
+
+	it("falls through from an unrepresentable transcript to server compaction", async () => {
+		// The fallback direction reversed with the default order: local is
+		// tried first now, so `remote` is what catches a transcript the local
+		// encoder cannot represent. That fallback has to keep working, or a
+		// local failure would end the turn instead of degrading to the
+		// provider.
+		//
+		// Unrenderable glyphs are how this file already makes snapcompact
+		// refuse, so the refusal comes from the real preflight rather than a
+		// mocked rejection that could drift from it.
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "openai", id: "gpt-5" },
+			methodOrder: ["snapcompact", "remote"],
+			seedMessages: [
+				{
+					role: "user",
+					content: UNRENDERABLE_SNAPCOMPACT_TEXT.repeat(10),
+					timestamp: Date.now(),
+				},
+			],
 		});
 		session = harness.session;
 		harness.triggerThreshold();
@@ -177,21 +211,6 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		const result = await harness.awaitCompactionEnd();
 
 		expect(result).toEqual({ action: "remote", errorMessage: undefined });
-		expect(compactionModule.compact).toHaveBeenCalledTimes(1);
-	});
-
-	it("falls through from a failed OpenAI server compaction to snapcompact", async () => {
-		const harness = await createHarness(modelRegistry, {
-			activeModel: { provider: "openai", id: "gpt-5" },
-			methodOrder: null,
-		});
-		session = harness.session;
-		vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("server compaction unavailable"));
-		harness.triggerThreshold();
-
-		const result = await harness.awaitCompactionEnd();
-
-		expect(result).toEqual({ action: "snapcompact", errorMessage: undefined });
 		expect(compactionModule.compact).toHaveBeenCalledTimes(1);
 	});
 	it("downgrades to context-full when unsupported glyphs make snapcompact unsafe", async () => {
