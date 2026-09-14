@@ -16,6 +16,7 @@
  * itself stays credential-free.
  */
 import * as os from "node:os";
+import { redactSensitiveCredentialsInMessages } from "./transform-messages";
 import { getAppName, getInstallId, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
@@ -181,9 +182,14 @@ export function streamPiNative<TApi extends Api>(
 				model as Model<Api>,
 				typeof options?.apiKey === "string" ? options.apiKey : undefined,
 			);
+			// This gateway forwards the Context verbatim rather than encoding
+			// per-provider, so it never reaches transformMessages — the point
+			// where every other provider redacts. Applying it here keeps the
+			// one wire format that ships raw messages from being the hole in
+			// an otherwise covered path.
 			const body = JSON.stringify({
 				modelId: `${model.provider}/${model.id}`,
-				context,
+				context: { ...context, messages: redactSensitiveCredentialsInMessages(context.messages) },
 				options: buildWireOptions(options),
 				stream: true,
 			});
