@@ -27,8 +27,58 @@ const DAEMON_SCOPE_KEY = /^[0-9a-f]{16}$/;
  */
 const DAEMON_RUNTIME_STALE_GRACE_MS = 5 * 60_000;
 
+/**
+ * What one omp process publishes about itself in a project daemon scope.
+ *
+ * `pid`, `id` and `projectDir` have always been written and are required. The
+ * rest are OPTIONAL on purpose: an older omp writes a three-field record, and a
+ * reader that treats the newer fields as mandatory would decide those sessions
+ * do not exist. Absent means "this process does not offer that", never "this
+ * record is malformed".
+ */
+export interface DaemonPresenceRecord {
+	pid: number;
+	id: string;
+	projectDir: string;
+	/** Session the process currently has open. Changes on `/resume` and branch. */
+	sessionId?: string;
+	/** Absolute transcript path, which is what a peer matches a session on. */
+	sessionFile?: string;
+	/**
+	 * Unix socket a local collab room is listening on, when one is running.
+	 * Presence is the only place this is discoverable — `CollabHost` otherwise
+	 * holds its endpoint purely in memory.
+	 */
+	collabSocket?: string;
+	/**
+	 * Bumped every time the process rebinds identity (session switch, room
+	 * restart). A peer that cached `(pid, generation)` can tell "same process,
+	 * different session" from "same session, still mine" without racing.
+	 */
+	generation?: number;
+	/** ISO timestamp of registration, for ordering and staleness display. */
+	startedAt?: string;
+}
+
+/** Fields a live process may rewrite about itself after registering. */
+export type DaemonPresenceUpdate = Partial<
+	Pick<DaemonPresenceRecord, "sessionId" | "sessionFile" | "collabSocket">
+>;
+
 /** Handle keeping one omp process registered in a project daemon scope. */
 export interface DaemonProjectPresence {
+	/**
+	 * Rewrite this process's own record. Bumps `generation` on every call.
+	 *
+	 * Failure is reported, never thrown: presence is an optimisation for peers,
+	 * and a session must not die because a directory entry could not be
+	 * refreshed. Returns whether the write landed, so a caller that cares can
+	 * retry — and it SHOULD retry rather than latch off, because the failures
+	 * that reach here (EACCES/EMFILE while the runtime dir is recreated, a
+	 * concurrent sweep) are transient, and giving up permanently drops a live
+	 * session out of the directory for the rest of the process lifetime.
+	 */
+	update(fields: DaemonPresenceUpdate): Promise<boolean>;
 	close(): Promise<void>;
 }
 
@@ -43,9 +93,28 @@ export async function registerDaemonProjectPresence(
 	await fs.mkdir(clientsDir, { recursive: true, mode: 0o700 });
 	const id = `${process.pid}-${crypto.randomUUID()}`;
 	const presencePath = path.join(clientsDir, `${id}.json`);
-	await Bun.write(presencePath, JSON.stringify({ pid: process.pid, id, projectDir: canonical }));
-	await fs.chmod(presencePath, 0o600);
+	let record: DaemonPresenceRecord = {
+		pid: process.pid,
+		id,
+		projectDir: canonical,
+		generation: 0,
+		startedAt: new Date().toISOString(),
+	};
+	await writePresenceRecord(presencePath, record);
 	let closed = false;
+	const update = async (fields: DaemonPresenceUpdate): Promise<boolean> => {
+		if (closed) return false;
+		const next: DaemonPresenceRecord = { ...record, ...fields, generation: (record.generation ?? 0) + 1 };
+		try {
+			await writePresenceRecord(presencePath, next);
+		} catch (error) {
+			// Transient by assumption — see the doc comment on the interface.
+			logger.debug("presence: update failed", { id, error: String(error) });
+			return false;
+		}
+		record = next;
+		return true;
+	};
 	const close = async (): Promise<void> => {
 		if (closed) return;
 		closed = true;
@@ -53,7 +122,21 @@ export async function registerDaemonProjectPresence(
 		await fs.rm(presencePath, { force: true });
 	};
 	const cancelCleanup = postmortem.register(`daemon-presence:${id}`, () => close());
-	return { close };
+	return { update, close };
+}
+
+/**
+ * Write the record so a concurrent reader sees the old bytes or the new ones,
+ * never a prefix. A peer polls this directory, and the original single `write`
+ * was safe only because the record never changed after registration; now that
+ * it does, a torn read would look like a malformed record and get the entry
+ * swept by {@link hasLiveDaemonProjectPresence}.
+ */
+async function writePresenceRecord(presencePath: string, record: DaemonPresenceRecord): Promise<void> {
+	const tempPath = `${presencePath}.${process.pid}.tmp`;
+	await Bun.write(tempPath, JSON.stringify(record));
+	await fs.chmod(tempPath, 0o600);
+	await fs.rename(tempPath, presencePath);
 }
 
 /** Return whether a registered omp process in this runtime directory is still alive. */
@@ -91,6 +174,52 @@ export async function hasLiveDaemonProjectPresence(runtimeDir: string): Promise<
 		}
 	}
 	return live;
+}
+
+/**
+ * Live omp processes in a project scope that are offering a local collab room.
+ *
+ * This is the discovery half of the attach story: `CollabHost` holds its
+ * endpoint in memory, so without a published record a sibling process has no
+ * way to learn that a live session is reachable. Every field the caller filters
+ * on is optional in the record, so an older omp — or a newer one with no room
+ * open — is simply not a candidate rather than an error.
+ *
+ * Read-only by design. Unlike {@link hasLiveDaemonProjectPresence} this never
+ * deletes anything: a reader that prunes is a reader that can delete a record
+ * some other process is mid-rewrite on, and pruning already has an owner.
+ */
+export async function findLiveCollabSessions(runtimeDir: string): Promise<DaemonPresenceRecord[]> {
+	const clientsDir = path.join(runtimeDir, CLIENTS_DIR);
+	let entries: string[];
+	try {
+		entries = await fs.readdir(clientsDir);
+	} catch (error) {
+		if (isEnoent(error)) return [];
+		throw error;
+	}
+	const found: DaemonPresenceRecord[] = [];
+	for (const entry of entries) {
+		let decoded: unknown;
+		try {
+			decoded = await Bun.file(path.join(clientsDir, entry)).json();
+		} catch {
+			continue;
+		}
+		if (typeof decoded !== "object" || decoded === null) continue;
+		const record = decoded as DaemonPresenceRecord;
+		if (typeof record.pid !== "number" || typeof record.collabSocket !== "string") continue;
+		// A record outlives a crash, so the pid probe is what separates an
+		// attachable session from a leftover. Cheap, and the only liveness
+		// signal that does not require connecting.
+		try {
+			process.kill(record.pid, 0);
+		} catch {
+			continue;
+		}
+		found.push(record);
+	}
+	return found;
 }
 
 /** PID recorded in the runtime dir's broker lease when that broker process is still alive; undefined otherwise. */

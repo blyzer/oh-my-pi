@@ -9,6 +9,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { open, seal } from "./crypto";
 import type { CollabFrame, RelayControlMessage } from "./protocol";
 import { packEnvelope, unpackEnvelope } from "./protocol";
+import type { CollabTransport } from "./transport";
 
 const FATAL_CLOSE_REASONS: Record<number, string> = {
 	4001: "room closed",
@@ -32,7 +33,7 @@ export interface CollabSocketOptions {
 	key: CryptoKey;
 }
 
-export class CollabSocket {
+export class CollabSocket implements CollabTransport {
 	/** Fires after every successful (re)connect. */
 	onOpen?: () => void;
 	onFrame?: (frame: CollabFrame, fromPeer: number) => void;
