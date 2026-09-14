@@ -209,8 +209,22 @@ function validate(workflow: AdwWorkflowConfig, source: string): void {
 			fail(`phase "${phase.name}" has timeoutMs ${phase.timeoutMs}; it must be greater than zero`);
 		}
 		for (const gate of phase.gates ?? []) {
-			if (!knownGates.includes(gate)) {
-				fail(`phase "${phase.name}" requests unknown gate "${gate}" (known: ${knownGates.join(", ")})`);
+			// Parameterised gates carry their argument in the name:
+			// `file_contains:<path>:<marker>` is how the engine receives a path
+			// and the text it must find. Comparing the whole string against the
+			// bare names rejected every parameterised form, so the two gates
+			// that take arguments were unusable from a workflow file — the
+			// native side has always accepted them.
+			//
+			// Split once: the head is the gate, the rest is its argument. A
+			// marker containing `:` therefore survives intact.
+			const separator = gate.indexOf(":");
+			const name = separator === -1 ? gate : gate.slice(0, separator);
+			if (!knownGates.includes(name)) {
+				fail(`phase "${phase.name}" requests unknown gate "${name}" (known: ${knownGates.join(", ")})`);
+			}
+			if (separator !== -1 && !gate.slice(separator + 1).trim()) {
+				fail(`phase "${phase.name}" gate "${name}" was given an empty argument`);
 			}
 		}
 		// A `code` phase reports an envelope with no artifacts by construction,

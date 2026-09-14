@@ -112,6 +112,35 @@ phases:
 		expect(() => parseWorkflow("x.yml", yaml)).toThrow(/unknown gate "nope".*artifacts_exist/s);
 	});
 
+	it("accepts a gate that carries an argument, and still names the gate on error", () => {
+		// `file_contains:<path>:<marker>` is how the engine receives a path and
+		// the text to find. Comparing the whole string against the bare gate
+		// names rejected every parameterised form, which made the two gates
+		// that take arguments unusable from a workflow file — the native side
+		// has always accepted them.
+		const withGate = (gate: string) => `
+name: x
+phases:
+  - { name: p, kind: agent, owner: scout, writes: ["out.md"], gates: ["${gate}"] }
+`;
+		expect(() => parseWorkflow("x.yml", withGate("file_contains:docs/x.md:MISSING"))).not.toThrow();
+		// A marker may itself contain a colon: the split takes only the first.
+		expect(() => parseWorkflow("x.yml", withGate("file_contains:docs/x.md:verdict: YES"))).not.toThrow();
+		// An unknown gate is still rejected by its head, not by the whole string.
+		expect(() => parseWorkflow("x.yml", withGate("nope:docs/x.md:y"))).toThrow(/unknown gate "nope"/);
+	});
+
+	it("rejects a parameterised gate with nothing after the colon", () => {
+		// The engine would receive an empty path and fail the phase at runtime;
+		// catching it at load costs nothing and mid-run costs an attempt.
+		const yaml = `
+name: x
+phases:
+  - { name: p, kind: agent, owner: scout, writes: ["out.md"], gates: ["file_contains:"] }
+`;
+		expect(() => parseWorkflow("x.yml", yaml)).toThrow(/empty argument/);
+	});
+
 	it("rejects timeoutMs <= 0 — ptree attaches no deadline at all for that", () => {
 		const yaml = `
 name: x
