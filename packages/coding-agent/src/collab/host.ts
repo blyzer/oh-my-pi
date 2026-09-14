@@ -142,6 +142,8 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	/** Set while a local room's endpoint is announced in presence; cleared on teardown. */
+	#publishedSocketPath: string | null = null;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -240,10 +242,21 @@ export class CollabHost {
 	 * There are no links to render, so `link`/`webLink`/`viewLink` stay empty
 	 * and the status segment reports a local room instead.
 	 */
-	async startLocal(transport: CollabTransport): Promise<Uint8Array> {
+	async startLocal(transport: CollabTransport, socketPath?: string): Promise<Uint8Array> {
 		const writeToken = generateWriteToken();
 		this.#writeToken = writeToken;
 		await this.#attach(transport);
+		// Announce the endpoint only after the transport is listening and the
+		// taps are installed, so a peer that reads the record and connects
+		// immediately finds a room that can already answer.
+		if (socketPath) {
+			this.#publishedSocketPath = socketPath;
+			await this.#ctx.daemonPresence?.update({
+				collabSocket: socketPath,
+				sessionId: this.#sessionId,
+				sessionFile: this.#ctx.sessionManager.getSessionFile() ?? undefined,
+			});
+		}
 		return writeToken;
 	}
 
@@ -326,6 +339,13 @@ export class CollabHost {
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		// Retract before dropping the taps. A record advertising a socket that no
+		// longer listens sends every future peer into a connect that cannot
+		// succeed, which is strictly worse than no record at all.
+		if (this.#publishedSocketPath) {
+			this.#publishedSocketPath = null;
+			await this.#ctx.daemonPresence?.update({ collabSocket: undefined });
+		}
 		this.#ctx.sessionManager.onEntryAppended = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
