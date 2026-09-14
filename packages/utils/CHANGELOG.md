@@ -7,6 +7,27 @@
 ### Fixed
 
 - Fixed `checkpointWal` throwing on an already-closed database handle. Every caller runs it from a `close()` path, where a closed handle has nothing left to flush — SQLite checkpoints on close — but Bun >=1.4 raises `Database has closed` from `db.run()` after `close()` where earlier versions tolerated it. Added `isClosedDatabaseError` beside the existing busy and corruption classifiers; real statement errors still propagate.
+## [18.1.21] - 2026-09-14
+
+### Added
+
+- Added `getBrowserProfilesDir()` (`~/.omp/browser-profiles`; XDG: `$XDG_STATE_HOME/omp/browser-profiles`) for profiles of Chromium browsers spawned by the browser tool.
+
+### Fixed
+
+- Timed out stalled Chrome-for-Testing metadata requests after 30 seconds when looking up download metadata
+- Concurrent browser installations share one download without replacing a running browser, and stalled downloads time out with partial files cleaned up for retry.
+
+## [18.1.19] - 2026-09-12
+
+### Added
+
+- Added public `acquireFileLock()` and `FileLockHandle` APIs for holding and explicitly releasing exclusive OS-backed file locks.
+
+### Fixed
+
+- Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed
