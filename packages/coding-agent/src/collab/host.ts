@@ -45,6 +45,7 @@ import {
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
 import { shrinkForReplication } from "./replication-shrink";
+import type { CollabTransport } from "./transport";
 
 /** Events that change the footer state guests render. */
 const STATE_TRIGGER_EVENTS: Record<string, true> = {
@@ -123,7 +124,7 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
 
 export class CollabHost {
 	#ctx: InteractiveModeContext;
-	#socket: CollabSocket | null = null;
+	#socket: CollabTransport | null = null;
 	#link = "";
 	#webLink = "";
 	#viewLink = "";
@@ -215,10 +216,41 @@ export class CollabHost {
 		if ("error" in parsed) throw new Error(parsed.error);
 		const key = await importRoomKey(rawKey);
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
+		await this.#attach(new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key }));
+	}
+
+	/**
+	 * Share this session over a transport that is already confined to one
+	 * machine — a unix socket, a pipe, an in-process pair.
+	 *
+	 * Deliberately NOT a branch inside {@link start}: every line start() runs
+	 * before the socket exists is relay-shaped. `formatCollabLink` renders a
+	 * `wss://…/r/<room>.<key>` URL and `parseCollabLink` reads it straight back,
+	 * and `normalizeRelayOrigin` rejects any scheme that is not ws/wss/http/https,
+	 * so a socket path cannot make the round trip. The room key is equally
+	 * relay-shaped: it exists to keep the relay operator out of the plaintext,
+	 * and there is no operator in the middle of a unix socket whose permissions
+	 * already bound who may connect.
+	 *
+	 * What a local room still needs is the CAPABILITY split, so a caller can be
+	 * handed observation without control. That is the write token, and it is
+	 * minted here exactly as the relay path mints it — `#verifyWriteToken`
+	 * cannot tell the two paths apart, which is the point.
+	 *
+	 * There are no links to render, so `link`/`webLink`/`viewLink` stay empty
+	 * and the status segment reports a local room instead.
+	 */
+	async startLocal(transport: CollabTransport): Promise<Uint8Array> {
+		const writeToken = generateWriteToken();
+		this.#writeToken = writeToken;
+		await this.#attach(transport);
+		return writeToken;
+	}
+
+	/** Wire a connected-or-connecting transport to this session and install the taps. */
+	async #attach(socket: CollabTransport): Promise<void> {
 		this.#socket = socket;
 		this.#sessionId = this.#ctx.sessionManager.getSessionId();
-
 		const firstOpen = Promise.withResolvers<void>();
 		let opened = false;
 		socket.onOpen = () => {
@@ -238,7 +270,7 @@ export class CollabHost {
 				return;
 			}
 			if (willReconnect) {
-				this.#ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
+				this.#ctx.showStatus(`Collab connection lost (${reason}), reconnecting…`, { dim: true });
 			} else {
 				void this.#teardown();
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
@@ -246,10 +278,7 @@ export class CollabHost {
 		};
 		socket.connect();
 
-		const timeout = setTimeout(
-			() => firstOpen.reject(new Error("timed out connecting to relay")),
-			CONNECT_TIMEOUT_MS,
-		);
+		const timeout = setTimeout(() => firstOpen.reject(new Error("timed out connecting")), CONNECT_TIMEOUT_MS);
 		try {
 			await firstOpen.promise;
 		} catch (err) {

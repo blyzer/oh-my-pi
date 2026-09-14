@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Collab can now share a live session over a transport other than the relay. `CollabHost` took a `CollabSocket` it constructed itself, so the only way to reach a running TUI's `AgentSession` from outside the process was the round trip through a WebSocket relay. The socket surface it actually consumes is seven members, so that is now an interface (`CollabTransport`) the class receives, `CollabSocket` implements it unchanged, and `CollabHost.startLocal(transport)` shares the session over anything that satisfies it. Sealing, envelope packing and peer-id assignment stay below the seam where they always were. `startLocal` is a sibling of `start` rather than a flag on it, because every line `start` runs before the socket exists is relay-shaped — it mints a room key, formats four `wss://` links, parses one back, and imports the CryptoKey the relay client seals with, and `normalizeRelayOrigin` rejects any scheme that is not ws/wss/http/https, so a socket path cannot make that round trip. What a local room keeps is the part that matters for safety: the write token is minted and verified identically, so a caller handed the socket without the token is read-only exactly as a relay viewer is.
+- Added `CollabLocalServer`, a `CollabTransport` over a unix socket for supervisors on the same machine. It deliberately drops three things the relay client needs and a local socket does not: AES-GCM (the room key exists to keep a relay operator out of the plaintext, and 0600 on a socket under the per-user runtime root is the boundary instead), reconnect (a closed connection to a process on this machine means it exited, and retrying would keep a dead peer's id alive in the host's table), and the binary envelope (frames are newline-delimited JSON, and the server assigns peer ids on accept because it knows which connection each frame arrived on). A departing peer emits the same `peer-left` control the relay does, so the host prunes its peer table through the path it already had.
+
 ## [18.1.19] - 2026-09-12
 
 ### Added
