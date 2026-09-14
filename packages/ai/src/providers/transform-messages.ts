@@ -545,7 +545,13 @@ export function redactSensitiveInObject(val: unknown): { result: unknown; change
 	return { result: val, changed: false };
 }
 
-function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
+/**
+ * Redact credential-shaped tokens across a message list.
+ *
+ * Exported for the one provider that forwards a Context verbatim instead of
+ * encoding per-provider, and so never reaches {@link transformMessages}.
+ */
+export function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 	if (!credentialRedactionEnabled) return messages;
 	return messages.map((msg): Message => {
 		if (msg.role === "user" || msg.role === "developer") {

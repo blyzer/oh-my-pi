@@ -1437,12 +1437,88 @@ function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOpti
 	return { ...options, sessionId: crypto.randomUUID() };
 }
 
+/**
+ * A stream whose source is resolved asynchronously.
+ *
+ * `streamSimple` is synchronous by contract — callers get a stream back and
+ * iterate it. A context transform may be async, so the work is deferred: the
+ * stream returned here is live immediately and forwards events once the real
+ * one exists.
+ *
+ * A transform that throws must surface as a stream error rather than an
+ * unhandled rejection, or a caller awaiting the final result would hang.
+ *
+ * @param open - Produces the underlying stream
+ * @returns A stream that mirrors it
+ */
+function deferredStream<TApi extends Api>(
+	model: Model<TApi>,
+	open: () => Promise<AssistantMessageEventStream>,
+): AssistantMessageEventStream {
+	const out = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			const inner = await open();
+			for await (const event of inner) out.push(event);
+		} catch (error) {
+			// The event's `error` field carries an AssistantMessage, not an
+			// exception: downstream treats a failed turn as a message with a
+			// stop reason, so a thrown transform has to be shaped into one.
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [],
+				stopReason: "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+				timestamp: Date.now(),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			out.push({ type: "error", reason: "error", error: message });
+		}
+	})();
+	return out;
+}
+
 export function streamSimple<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
+	// Applied here rather than only in the agent loop: background callers —
+	// title generation, commit messages, auto-repair, image questions — reach a
+	// provider through this function without passing through that loop, so a
+	// transform installed there alone never sees their requests. This is the
+	// narrowest point every request does cross.
+	//
+	// A transform that returns a promise makes the stream lazy, which callers
+	// of a synchronous signature must not notice; the deferred wrapper below
+	// keeps the returned stream eager in shape while awaiting the transform.
+	if (sessionOptions.transformProviderContext) {
+		const transform = sessionOptions.transformProviderContext;
+		const { transformProviderContext: _omitted, ...rest } = sessionOptions;
+		return deferredStream(model, async () => {
+			const transformed = await transform(context, model);
+			return streamSimpleTransformed(model, transformed, rest);
+		});
+	}
+	return streamSimpleTransformed(model, context, sessionOptions);
+}
+
+function streamSimpleTransformed<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	sessionOptions: SimpleStreamOptions,
+): AssistantMessageEventStream {
 	if (!model.requiresGlyphTokenization) {
 		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
 	}

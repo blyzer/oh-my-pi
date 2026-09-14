@@ -550,6 +550,21 @@ export interface StreamOptions {
 	 */
 	onPayload?: (payload: unknown, model?: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
 	/**
+	 * Optional transform applied to the context before it is encoded for the
+	 * provider. Returns the context to send.
+	 *
+	 * The agent loop has always had a hook of this name and applies it to every
+	 * conversational turn. Background callers — title generation, commit
+	 * messages, auto-repair, image questions — reach the provider through
+	 * `streamSimple`/`completeSimple` without going through that loop, so a
+	 * host that redacts in the loop alone leaves those requests untouched.
+	 *
+	 * Declaring it here lets a host attach the same transform once, at the
+	 * layer every request passes through, rather than at each call site it
+	 * remembers to.
+	 */
+	transformProviderContext?: (context: Context, model: Model<Api>) => Context | Promise<Context>;
+	/**
 	 * Optional callback for provider response metadata after headers are received.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>) => void | Promise<void>;
