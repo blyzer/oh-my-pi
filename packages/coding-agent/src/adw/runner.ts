@@ -36,6 +36,7 @@ import { getAgentDir, isEnoent, logger, ptree, Snowflake } from "@oh-my-pi/pi-ut
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { plainArgv } from "./types";
+import { CommandCache, phaseIsCacheable, writeCacheReport } from "./command-cache";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { ArtifactManager } from "../session/artifacts";
 import type { EventBus } from "../utils/event-bus";
@@ -411,6 +412,43 @@ export function judgeExpectation(phase: AdwPhaseConfig, result: CodePhaseResult)
 export type CodePhaseResult =
 	| { kind: "ran"; ok: boolean; exitCode: number; summary: string }
 	| { kind: "infrastructure"; ok: false; summary: string };
+
+/**
+ * Run a code phase, serving an identical prior run from the memo when the
+ * phase opted in and the worktree is byte-identical.
+ *
+ * Wraps rather than threads through `runCodePhase`: the execution semantics
+ * below are load-bearing for `expect: fail`, and a memo that reached inside
+ * them would have to re-justify every one of those decisions. Outside, the
+ * contract is just "same inputs, same verdict" -- and any doubt is a miss.
+ *
+ * Only a `kind: "ran"` result is stored. An infrastructure failure describes
+ * the machine, not the code: a missing interpreter or a killed process must
+ * be re-attempted, never replayed.
+ */
+export async function runCodePhaseCached(
+	phase: AdwPhaseConfig,
+	cwd: string,
+	signal: AbortSignal | undefined,
+	env: Record<string, string> | undefined,
+	cache: CommandCache | undefined,
+): Promise<CodePhaseResult> {
+	const command = phase.command ?? "";
+	if (!cache || !phaseIsCacheable(phase)) return await runCodePhase(phase, cwd, signal, env);
+
+	const lookup = await cache.lookup(command, cwd, env, signal);
+	if (lookup.hit) {
+		const { exitCode, summary } = lookup.run;
+		return { kind: "ran", ok: exitCode === 0, exitCode, summary };
+	}
+
+	const started = Date.now();
+	const result = await runCodePhase(phase, cwd, signal, env);
+	if (result.kind === "ran") {
+		cache.store(lookup.key, { exitCode: result.exitCode, summary: result.summary, elapsedMs: Date.now() - started });
+	}
+	return result;
+}
 
 export async function runCodePhase(
 	phase: AdwPhaseConfig,
@@ -1034,6 +1072,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		/** Where phases actually run. The roster is still discovered from the real cwd. */
 		const workRoot = isolation?.handle.mergedDir ?? host.cwd;
 		if (resuming && concurrency > 1) await recoverIntegration(workRoot, runDir, traceDir);
+		// Run-scoped, so a toolchain upgrade or a changed environment between
+		// runs can never serve a stale verdict: within one run those are fixed,
+		// and the fingerprint covers everything else the command can read.
+		const commandCache = new CommandCache(workflow.phases.some(phase => phaseIsCacheable(phase)));
 
 		if (resuming && isolation && traceAccepted(traceDir)) {
 			// The run accepted and then died inside the delivery window. The
@@ -1424,7 +1466,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				return run.submitCodeResult(phase.name, answer.approved, answer.reason);
 			}
 			const env = await buildCodeEnv(phase, step);
-			const result = await runCodePhase(phase, workRoot, signal, env);
+			const result = await runCodePhaseCached(phase, workRoot, signal, env, commandCache);
 			return run.submitCodeResult(phase.name, ...judgeExpectation(phase, result));
 		};
 
@@ -1439,6 +1481,9 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 			}
 			const result = run.finish(accepted, reason);
 			completed = true;
+			// Evidence, not decoration: a run that accepted partly on memoized
+			// verdicts should say so where the rest of its evidence lives.
+			await writeCacheReport(runDir, commandCache);
 			logger.debug("adw run finished", { adwId, workflow: workflow.name, accepted, reason, traceDir });
 			return { adwId, summary: result, traceDir, isolation: applied };
 		};
