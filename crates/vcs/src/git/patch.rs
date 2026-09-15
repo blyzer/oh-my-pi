@@ -87,14 +87,19 @@ enum BinaryKind {
 enum ApplyFailure {
 	Context(String),
 	Invalid(String),
+	/// A path naming the git store, carried as a field so callers can classify
+	/// and redact the refusal rather than parsing a rendered message.
+	GitStore {
+		path: String,
+	},
 }
 
 impl ApplyFailure {
 	fn into_error(self) -> Error {
-		let message = match self {
-			Self::Context(message) | Self::Invalid(message) => message,
-		};
-		Error::PatchFailed { message }
+		match self {
+			Self::Context(message) | Self::Invalid(message) => Error::PatchFailed { message },
+			Self::GitStore { path } => Error::PathInGitStore { path },
+		}
 	}
 }
 
@@ -359,6 +364,17 @@ impl GitRepo {
 				untracked_commit.id().detach(),
 			])
 			.map_err(|err| Error::backend("git stash commit", err))?;
+		// Refuse before `refs/stash` moves. Discovering an escaping path during
+		// the writes below would install a stash and its reflog while leaving
+		// the dirty worktree and index in place — the caller sees an error and
+		// a stash it did not ask for. Same ordering `cherry_pick` uses.
+		let gix_repo = repo.clone();
+		assert_worktree_map_contained(self, &gix_repo, &tracked_worktree, &head_map)?;
+		for path in untracked.keys() {
+			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			assert_prefix_within_root(self.root(), path)?;
+			assert_outside_git_store(self, &gix_repo, path)?;
+		}
 		update_stash_ref(
 			&repo,
 			stash_commit.id().detach(),
@@ -443,6 +459,22 @@ impl GitRepo {
 			if self.root().join(path).symlink_metadata().is_ok() {
 				return Ok(false);
 			}
+		}
+		// The collision probe above answers "is something already there", which
+		// an outbound symlink in the PREFIX makes falsely negative: the external
+		// target is absent, so the leaf looks free. Containment is a separate
+		// question and must be settled for every destination — tracked and
+		// untracked alike — before the first write, or a refusal lands after the
+		// tracked half has been restored and the stash is still present.
+		assert_worktree_map_contained(self, &repo, &current_worktree, &merged_worktree)?;
+		for (path, entry) in &untracked {
+			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			if entry.mode == Mode::SYMLINK {
+				assert_prefix_within_root(self.root(), path)?;
+			} else {
+				assert_within_root(self.root(), path)?;
+			}
+			assert_outside_git_store(self, &repo, path)?;
 		}
 		write_worktree_map(self, &current_worktree, &merged_worktree)?;
 		for (path, entry) in &untracked {
@@ -1623,9 +1655,7 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 		.components()
 		.any(|component| is_git_store_alias(component.as_os_str()))
 	{
-		return Err(ApplyFailure::Invalid(format!(
-			"patch path must not touch the git store: {path}"
-		)));
+		return Err(ApplyFailure::GitStore { path: path.to_owned() });
 	}
 	Ok(())
 }
@@ -1644,7 +1674,7 @@ fn assert_patch_paths_contained(
 ) -> Result<()> {
 	let gix_repo = repo.gix()?;
 	for patch in patches {
-		let (source, target, ..) = patch_sides(patch, reverse);
+		let (source, target, _, target_mode) = patch_sides(patch, reverse);
 		if let Some(source) = source
 			&& target != Some(source)
 		{
@@ -1654,7 +1684,16 @@ fn assert_patch_paths_contained(
 		}
 		if let Some(target) = target {
 			validate_repo_path(target).map_err(ApplyFailure::into_error)?;
-			assert_within_root(repo.root(), target)?;
+			// The patch declares the mode it will write. A `120000` target is
+			// unlinked and recreated by `write_worktree_entry`, never opened
+			// through, so resolving its current destination would reject a
+			// valid patch that merely repoints an outbound symlink. Mirror the
+			// write site exactly: full guard for content, prefix for links.
+			if target_mode == Some(Mode::SYMLINK) {
+				assert_prefix_within_root(repo.root(), target)?;
+			} else {
+				assert_within_root(repo.root(), target)?;
+			}
 			assert_outside_git_store(repo, &gix_repo, target)?;
 		}
 	}
@@ -1694,10 +1733,7 @@ fn assert_outside_git_store(repo: &GitRepo, gix_repo: &gix::Repository, rel: &st
 	for store in [gix_repo.git_dir(), gix_repo.common_dir()] {
 		let store = std::fs::canonicalize(&store).unwrap_or(store.to_path_buf());
 		if resolved.starts_with(&store) {
-			return Err(Error::backend(
-				"apply worktree path",
-				format!("patch path must not touch the git store: {rel}"),
-			));
+			return Err(Error::PathInGitStore { path: rel.to_owned() });
 		}
 	}
 	Ok(())
@@ -1725,6 +1761,13 @@ fn assert_worktree_map_contained(
 		}
 	}
 	for (path, entry) in next {
+		// Exactly the predicate the write loop uses. Validating entries it will
+		// never touch would fail a cherry-pick of one file because some
+		// unrelated, unchanged path had locally been replaced by a symlink —
+		// a path this call is not going to write to at all.
+		if previous.get(path) == Some(entry) && repo.root().join(path).exists() {
+			continue;
+		}
 		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 		// A symlink entry is written by unlinking whatever is there and calling
 		// `symlink` — neither follows the old leaf, and the new one is created,
@@ -1755,11 +1798,21 @@ fn is_git_store_alias(component: &std::ffi::OsStr) -> bool {
 		// below, and `validate_repo_path` has already rejected traversal.
 		return false;
 	};
-	// HFS+ treats a set of zero-width and formatting codepoints as invisible
-	// when comparing names, so `.\u{200c}git` opens the real `.git`. Git refuses
-	// the same set under `core.protectHFS`; drop them before any comparison so
-	// every rule below sees the name the filesystem will actually resolve.
-	let folded: String = name.chars().filter(|c| !is_hfs_ignorable(*c)).collect();
+	// HFS+ treats formatting codepoints as invisible when comparing names, so
+	// `.\u{200c}git` opens the real `.git`; git refuses the same spellings under
+	// `core.protectHFS`. Classification comes from `xutf`, which owns Unicode
+	// semantics here, rather than a local scalar table that would drift from
+	// the Unicode version the rest of the tree agrees on.
+	//
+	// `Cf` is a strict superset of git's list — 170 codepoints against its 16 —
+	// and that is the safe direction: folding more can only make MORE spellings
+	// resolve to `.git` and be refused, never fewer. A legitimate name keeps
+	// passing, because stripping its formatting characters does not spell
+	// `.git` unless it was an attack already.
+	let folded: String = name
+		.chars()
+		.filter(|c| xutf::general_category(*c as u32) != xutf::GeneralCategory::Format)
+		.collect();
 	let name = folded.as_str();
 	if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case("git~1") {
 		return true;
@@ -1768,22 +1821,6 @@ fn is_git_store_alias(component: &std::ffi::OsStr) -> bool {
 	// `.git.` and `.git ` reach the store too. Strip them before comparing.
 	let trimmed = name.trim_end_matches(['.', ' ']);
 	trimmed.eq_ignore_ascii_case(".git")
-}
-
-/// Whether HFS+ ignores this codepoint when comparing filenames.
-///
-/// The set git itself folds away under `core.protectHFS` (see `is_hfs_dotgit`
-/// in `path.c`): zero-width joiners and non-joiners, directional and
-/// deprecated formatting marks, the zero-width no-break space, and the
-/// interlinear annotation and object-replacement characters.
-const fn is_hfs_ignorable(c: char) -> bool {
-	matches!(
-		c,
-		'\u{200c}' | '\u{200d}' | '\u{200e}' | '\u{200f}'
-			| '\u{202a}'..='\u{202e}'
-			| '\u{206a}'..='\u{206f}'
-			| '\u{feff}'
-	)
 }
 
 /// Refuse a path that would leave the worktree once symlinks are resolved.
@@ -1830,8 +1867,7 @@ fn assert_contained(root: &Path, rel: &str, probe: &Path) -> Result<()> {
 	// must not be compared unresolved against a resolved root, which would
 	// false-positive on symlinked prefixes.
 	let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-	let escaped =
-		|| Error::backend("apply worktree path", format!("path escapes workspace root: {rel}"));
+	let escaped = || Error::PathEscapesRoot { path: rel.to_owned() };
 	let mut probe = probe;
 	loop {
 		if probe == root {
@@ -2795,5 +2831,137 @@ mod tests {
 			.find_map(|line| line.strip_prefix("count: "))
 			.and_then(|count| count.trim().parse().ok())
 			.expect("count-objects reports a count")
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_repoints_a_tracked_symlink_that_targets_outside_the_root() {
+		use std::os::unix::fs::symlink;
+
+		// A patch whose target mode is 120000 is unlinked and recreated, never
+		// opened through. Resolving its CURRENT destination would reject a
+		// valid patch that merely repoints an outbound link.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let first = outside.path().join("one");
+		let second = outside.path().join("two");
+		fs::write(&first, b"one\n").expect("first target");
+		fs::write(&second, b"two\n").expect("second target");
+		symlink(&first, temp.path().join("outbound")).expect("create symlink");
+		git(temp.path(), &["add", "outbound"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+
+		let repository = repo(temp.path());
+		let blob = git(temp.path(), &["rev-parse", "HEAD:outbound"]);
+		let patch = format!(
+			concat!(
+				"diff --git a/outbound b/outbound\n",
+				"index {}..1111111 120000\n",
+				"--- a/outbound\n",
+				"+++ b/outbound\n",
+				"@@ -1 +1 @@\n",
+				"-{}\n",
+				"\\ No newline at end of file\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+			),
+			&blob.trim()[..7],
+			first.display(),
+			second.display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("repointing an outbound symlink is a valid patch");
+		assert_eq!(
+			fs::read_link(temp.path().join("outbound")).expect("still a symlink"),
+			second,
+			"symlink was not repointed"
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_ignores_an_unchanged_path_the_write_loop_would_not_touch() {
+		use std::os::unix::fs::symlink;
+
+		// The map preflight must validate exactly what the write loop writes.
+		// An unrelated, unchanged tracked path that has locally become an
+		// outbound symlink is never written, so it must not fail the pick.
+		let temp = init(&[("keep.txt", b"base\n"), ("untouched.txt", b"stable\n")]);
+		git(temp.path(), &["checkout", "-q", "-b", "side"]);
+		fs::write(temp.path().join("keep.txt"), b"edited\n").expect("edit");
+		git(temp.path(), &["commit", "-aqm", "edit keep"]);
+		let side = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
+		git(temp.path(), &["checkout", "-q", "-"]);
+
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let target = outside.path().join("elsewhere");
+		fs::write(&target, b"stable\n").expect("outside target");
+		fs::remove_file(temp.path().join("untouched.txt")).expect("drop real file");
+		symlink(&target, temp.path().join("untouched.txt")).expect("shadow with symlink");
+
+		let repository = repo(temp.path());
+		repository
+			.cherry_pick(&side)
+			.expect("unrelated unchanged path must not block the pick");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("keep.txt"), b"edited\n");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_push_refuses_before_installing_a_stash() {
+		use std::os::unix::fs::symlink;
+
+		// `update_stash_ref` runs before the worktree is rewritten, so a
+		// refusal discovered during the write would leave a stash the caller
+		// never asked for alongside the still-dirty tree.
+		let temp = init(&[("keep.txt", b"base\n"), ("nested/tracked.txt", b"one\n")]);
+		fs::write(temp.path().join("nested/tracked.txt"), b"two\n").expect("dirty the tree");
+
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		fs::remove_file(temp.path().join("nested/tracked.txt")).expect("drop file");
+		fs::remove_dir(temp.path().join("nested")).expect("drop dir");
+		symlink(outside.path(), temp.path().join("nested")).expect("shadow the prefix");
+
+		let repository = repo(temp.path());
+		// `git()` panics on a non-zero status, and `--verify --quiet` exits 1
+		// when no stash exists — which is exactly the state under test.
+		let stash_ref = |cwd: &Path| -> Option<String> {
+			let output = Command::new("git")
+				.current_dir(cwd)
+				.args(["rev-parse", "--verify", "--quiet", "refs/stash"])
+				.output()
+				.expect("run git");
+			output
+				.status
+				.success()
+				.then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+		};
+		let before = stash_ref(temp.path());
+		assert!(repository.stash_push(Some("wip")).is_err(), "stash must refuse the escaping path");
+		assert_eq!(stash_ref(temp.path()), before, "a stash was installed despite the refusal");
+	}
+
+	#[test]
+	fn containment_refusals_carry_the_path_as_a_typed_field() {
+		// The refusal must be classifiable and the path redactable without
+		// parsing a rendered message.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/.git/hooks/pre-commit b/.git/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/.git/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		match repository.apply_patch(patch, &ApplyOptions::default()) {
+			Err(Error::PathInGitStore { path }) => {
+				assert_eq!(path, ".git/hooks/pre-commit");
+				assert_eq!(Error::PathInGitStore { path }.kind(), "PathInGitStore");
+			},
+			other => panic!("expected a typed git-store refusal, got {other:?}"),
+		}
 	}
 }

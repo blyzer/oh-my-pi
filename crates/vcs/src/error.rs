@@ -19,6 +19,20 @@ pub enum Error {
 		path: PathBuf,
 	},
 
+	/// A patch path resolves outside the worktree once symlinks are followed.
+	#[error("path escapes workspace root: {path}")]
+	PathEscapesRoot {
+		/// The path as the patch named it, relative to the worktree root.
+		path: String,
+	},
+
+	/// A patch path lands inside the repository's git store.
+	#[error("patch path must not touch the git store: {path}")]
+	PathInGitStore {
+		/// The path as the patch named it, relative to the worktree root.
+		path: String,
+	},
+
 	/// A named ref (branch, tag, `refs/...`) does not exist.
 	#[error("reference not found: {name}")]
 	RefNotFound {
@@ -123,6 +137,8 @@ impl Error {
 	pub const fn kind(&self) -> &'static str {
 		match self {
 			Self::NotARepository { .. } => "NotARepository",
+			Self::PathEscapesRoot { .. } => "PathEscapesRoot",
+			Self::PathInGitStore { .. } => "PathInGitStore",
 			Self::RefNotFound { .. } => "RefNotFound",
 			Self::ObjectNotFound { .. } => "ObjectNotFound",
 			Self::EmptyCherryPick { .. } => "EmptyCherryPick",
