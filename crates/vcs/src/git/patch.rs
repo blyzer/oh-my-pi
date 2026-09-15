@@ -7,10 +7,13 @@
 //! preflighted so a rejected restore leaves no trace (issue #4175).
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, BTreeSet},
 	fs,
 	path::{Component, Path, PathBuf},
-	sync::{Arc, LazyLock, Mutex},
+	sync::{
+		Arc, LazyLock,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
 use gix::{
@@ -20,6 +23,7 @@ use gix::{
 	objs::tree::EntryKind,
 	refs::transaction::PreviousValue,
 };
+use parking_lot::Mutex;
 
 use super::{GitRepo, mutate::update_reference};
 use crate::{
@@ -107,6 +111,7 @@ impl ApplyFailure {
 impl GitRepo {
 	/// Apply a git-format patch to the worktree or index.
 	pub fn apply_patch(&self, patch_text: &str, options: &ApplyOptions) -> Result<()> {
+		begin_operation();
 		if patch_text.trim().is_empty() {
 			return Ok(());
 		}
@@ -148,6 +153,7 @@ impl GitRepo {
 
 	/// Check whether a patch applies without changing the index or worktree.
 	pub fn can_apply_patch(&self, patch_text: &str, options: &ApplyOptions) -> Result<bool> {
+		begin_operation();
 		if patch_text.trim().is_empty() {
 			return Ok(true);
 		}
@@ -245,6 +251,7 @@ impl GitRepo {
 
 	/// Cherry-pick one commit with a fail-clean three-way tree merge.
 	pub fn cherry_pick(&self, rev: &str) -> Result<()> {
+		begin_operation();
 		let repo = self.gix()?;
 		let picked_id = repo
 			.rev_parse_single(rev)
@@ -332,6 +339,7 @@ impl GitRepo {
 
 	/// Stash index, tracked worktree changes, and untracked files.
 	pub fn stash_push(&self, message: Option<&str>) -> Result<bool> {
+		begin_operation();
 		let repo = self.gix()?;
 		let head = repo
 			.head_commit()
@@ -343,6 +351,14 @@ impl GitRepo {
 			.detach();
 		let head_map = tree_map(&repo, head_tree)?;
 		let index = index_map(&repo)?;
+		// Before READING. `tracked_worktree_map` opens every indexed path to
+		// build the map, so an indexed `dir/file` shadowed by an outbound `dir`
+		// symlink is slurped from outside the worktree and written into a loose
+		// blob before any later check can refuse it — and a large enough file
+		// exhausts memory or disk on the way. Only prefixes are judged: the
+		// leaf is the file being read, and whether it is itself a link is the
+		// write-side question.
+		assert_indexed_prefixes_contained(self, &repo, &index)?;
 		let tracked_worktree = tracked_worktree_map(self, &repo, &index)?;
 		let untracked = untracked_worktree_map(self, &repo, &index)?;
 		if index == head_map && tracked_worktree == index && untracked.is_empty() {
@@ -393,6 +409,7 @@ impl GitRepo {
 
 	/// Try to pop the top stash without leaving partial conflict state.
 	pub fn stash_try_pop(&self, reinstate_index: bool) -> Result<bool> {
+		begin_operation();
 		let repo = self.gix()?;
 		let Some(stash_ref) = repo
 			.try_find_reference("refs/stash")
@@ -401,6 +418,12 @@ impl GitRepo {
 			return Ok(false);
 		};
 		let stash_id = stash_ref.id().detach();
+		// Same ordering hazard as `stash_push`: the maps below read indexed
+		// paths off disk before anything validates them.
+		{
+			let index = index_map(&repo)?;
+			assert_indexed_prefixes_contained(self, &repo, &index)?;
+		}
 		let stash_log = fs::read(self.info().common_dir.join("logs/refs/stash")).ok();
 		let stash = repo
 			.find_commit(stash_id)
@@ -468,9 +491,27 @@ impl GitRepo {
 		// untracked alike — before the first write, or a refusal lands after the
 		// tracked half has been restored and the stash is still present.
 		assert_worktree_map_contained(self, &repo, &current_worktree, &merged_worktree)?;
+		// The tracked half already models the post-removal topology; this loop
+		// must share it. A stash that deletes an outbound `dir` and restores an
+		// untracked `dir/u` in its place removes the link before writing the
+		// child, so resolving through the current link rejects a valid pop.
+		let removed_by_tracked: BTreeSet<&str> = current_worktree
+			.keys()
+			.filter(|path| !merged_worktree.contains_key(*path))
+			.map(String::as_str)
+			.collect();
 		for (path, entry) in &untracked {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-			if entry.mode == Mode::SYMLINK {
+			let mut ancestor_removed = false;
+			let mut prefix = path.as_str();
+			while let Some(cut) = prefix.rfind('/') {
+				prefix = &prefix[..cut];
+				if removed_by_tracked.contains(prefix) {
+					ancestor_removed = true;
+					break;
+				}
+			}
+			if ancestor_removed || entry.mode == Mode::SYMLINK {
 				assert_prefix_within_root(self.root(), path)?;
 				assert_prefix_outside_git_store(self, &repo, path)?;
 			} else {
@@ -1776,7 +1817,17 @@ fn assert_patch_paths_contained(
 		}
 	}
 	for patch in patches {
-		let (source, target, _, target_mode) = patch_sides(patch, reverse);
+		let (source, target, _, declared_mode) = patch_sides(patch, reverse);
+		// Same inference the minted-link scan uses: a mode-less patch updating a
+		// tracked symlink arrives with `None`, and application inherits SYMLINK
+		// from the source entry. Reading the declared field alone would resolve
+		// the existing leaf and reject a safe unlink-and-recreate.
+		let target_mode = match declared_mode {
+			Some(mode) => Some(mode),
+			None => source
+				.and_then(|source| worktree_entry_mode(repo, source))
+				.or_else(|| target.and_then(|target| worktree_entry_mode(repo, target))),
+		};
 		if let Some(source) = source
 			&& target != Some(source)
 		{
@@ -1899,37 +1950,54 @@ fn assert_store_containment(
 	Ok(())
 }
 
-/// Every nested repository store under `repo`'s root, discovered once.
+/// Every nested repository store under `repo`'s root.
 ///
-/// Discovery is a directory walk, and the containment guards run per affected
-/// path — a thousand-file change would otherwise repeat the same traversal a
-/// thousand times, making the operation scale as paths times directories.
-/// Memoized per root: a store appearing mid-operation is not a case this guard
-/// can serve anyway, since the check is already not atomic with the write.
+/// Discovery is a directory walk and the containment guards run per affected
+/// path, so a thousand-file change would otherwise repeat the same traversal a
+/// thousand times. It is therefore cached — but only for the CURRENT
+/// operation: a process-global cache in a long-lived agent would never see a
+/// nested repository created after its first scan, and an untrusted patch
+/// could then reach that store's hooks. [`begin_operation`] invalidates it.
 fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
-	static CACHE: LazyLock<Mutex<HashMap<PathBuf, Arc<Vec<PathBuf>>>>> =
-		LazyLock::new(|| Mutex::new(HashMap::new()));
+	static CACHE: LazyLock<Mutex<Option<(u64, PathBuf, Arc<Vec<PathBuf>>)>>> =
+		LazyLock::new(|| Mutex::new(None));
 
 	let root = repo.root().to_path_buf();
-	if let Ok(cache) = CACHE.lock()
-		&& let Some(found) = cache.get(&root)
+	let generation = OPERATION.load(Ordering::Acquire);
 	{
-		return Arc::clone(found);
+		let cache = CACHE.lock();
+		if let Some((stamp, cached_root, found)) = cache.as_ref()
+			&& *stamp == generation
+			&& *cached_root == root
+		{
+			return Arc::clone(found);
+		}
 	}
 	let mut found = Vec::new();
-	collect_nested_stores(&root, &mut found, 3);
+	collect_nested_stores(&root, &mut found);
 	let found = Arc::new(found);
-	if let Ok(mut cache) = CACHE.lock() {
-		cache.insert(root, Arc::clone(&found));
-	}
+	*CACHE.lock() = Some((generation, root, Arc::clone(&found)));
 	found
 }
 
+/// Monotonic operation stamp; bumping it invalidates [`nested_stores`].
+static OPERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Open a new operation, so store discovery is redone rather than reused.
+///
+/// Called by every entry point that applies or restores changes. Discovery
+/// within one operation is still a single walk; across operations it is never
+/// stale, which is what a long-lived agent needs.
+fn begin_operation() {
+	OPERATION.fetch_add(1, Ordering::AcqRel);
+}
+
 /// Walk `dir` for nested stores, recording every directory git treats as one.
-fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>, depth: u32) {
-	if depth == 0 {
-		return;
-	}
+///
+/// Unbounded by depth: a cap is a hole, since `a/b/c/sub/.git` pointing at
+/// `deep-meta` is as live a store as one at the root. The cost is paid once per
+/// operation — see [`nested_stores`] — not once per path.
+fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) {
 	let Ok(entries) = std::fs::read_dir(dir) else {
 		return;
 	};
@@ -1966,7 +2034,7 @@ fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>, depth: u32) {
 		}
 		// Do not descend through links: a nested store does not live behind one,
 		// and following it would leave the worktree.
-		collect_nested_stores(&path, found, depth - 1);
+		collect_nested_stores(&path, found);
 	}
 }
 
@@ -1978,6 +2046,25 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 /// produces, which carries no `.git` pointer to find it by.
 fn is_bare_store(dir: &Path) -> bool {
 	dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
+}
+
+/// Refuse any indexed path whose PREFIX leaves the worktree, before a caller
+/// reads those paths off disk.
+///
+/// The leaf is deliberately not resolved: it is the file about to be read, and
+/// whether it is itself an outbound link is the write-side question. What this
+/// stops is reading THROUGH an escaping directory prefix.
+fn assert_indexed_prefixes_contained(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	index: &BTreeMap<String, FileEntry>,
+) -> Result<()> {
+	for path in index.keys() {
+		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+		assert_prefix_within_root(repo.root(), path)?;
+		assert_prefix_outside_git_store(repo, gix_repo, path)?;
+	}
+	Ok(())
 }
 
 /// Validate every path a worktree-map write would remove or create.
@@ -2039,7 +2126,12 @@ fn assert_worktree_map_contained(
 			}
 		}
 		if ancestor_removed {
-			assert_outside_git_store(repo, gix_repo, path)?;
+			// Root containment already models the post-removal topology; the
+			// store check must too, or `dir -> .git` replaced by `dir/file`
+			// resolves through the link that is about to be unlinked and the
+			// safe operation is rejected as touching the store. Judge the
+			// prefix, which is what survives into the write.
+			assert_prefix_outside_git_store(repo, gix_repo, path)?;
 			continue;
 		}
 		// A symlink entry is written by unlinking whatever is there and calling
@@ -3642,5 +3734,69 @@ mod tests {
 			"patch installed a hook into a nested bare repository"
 		);
 		assert!(!temp.path().join("inner.git/hooks/pre-receive").exists(), "hook was written");
+	}
+
+	#[test]
+	fn nested_store_discovery_sees_repositories_created_after_an_earlier_operation() {
+		// A process-global cache in a long-lived agent would never see a store
+		// created after its first scan, and an untrusted patch could then reach
+		// that store's hooks.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let benign = concat!(
+			"diff --git a/keep.txt b/keep.txt\n",
+			"--- a/keep.txt\n",
+			"+++ b/keep.txt\n",
+			"@@ -1 +1 @@\n",
+			"-base\n",
+			"+edited\n",
+		);
+		repository
+			.apply_patch(benign, &ApplyOptions::default())
+			.expect("first operation");
+
+		// Only now does the nested store exist.
+		git(temp.path(), &["init", "-q", "--bare", "later.git"]);
+		let attack = concat!(
+			"diff --git a/later.git/hooks/pre-receive b/later.git/hooks/pre-receive\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/later.git/hooks/pre-receive\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(attack, &ApplyOptions::default())
+				.is_err(),
+			"a store created after the first scan was not discovered"
+		);
+		assert!(!temp.path().join("later.git/hooks/pre-receive").exists(), "hook was written");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_push_refuses_before_reading_through_an_escaping_prefix() {
+		use std::os::unix::fs::symlink;
+
+		// `tracked_worktree_map` opens every indexed path, so an indexed
+		// `dir/file` shadowed by an outbound `dir` is slurped from outside the
+		// worktree and hashed into a loose blob before any later check refuses
+		// it. A large enough file exhausts memory or disk on the way.
+		let temp = init(&[("keep.txt", b"base\n"), ("dir/file.txt", b"tracked\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		fs::write(outside.path().join("file.txt"), b"classified\n").expect("external file");
+		fs::remove_file(temp.path().join("dir/file.txt")).expect("drop file");
+		fs::remove_dir(temp.path().join("dir")).expect("drop dir");
+		symlink(outside.path(), temp.path().join("dir")).expect("shadow the prefix");
+
+		let repository = repo(temp.path());
+		let objects_before = loose_object_count(temp.path());
+		assert!(repository.stash_push(Some("wip")).is_err(), "stash must refuse the escaping prefix");
+		assert_eq!(
+			loose_object_count(temp.path()),
+			objects_before,
+			"external content was read into the object store before the refusal"
+		);
 	}
 }
