@@ -15,8 +15,20 @@
 mod tests {
 	use std::{fs, path::Path};
 
-	/// Prefix `insta` derives for this crate: the package name with `-` → `_`.
-	const EXPECTED_PREFIX: &str = "omp_shell__";
+	/// Prefix `insta` derives for this crate, computed the way `insta` does it:
+	/// the crate segment of `module_path!()` followed by `__`.
+	///
+	/// Deliberately NOT a literal. A literal would have to be updated in the
+	/// same rename that orphans the snapshots, which is exactly the edit this
+	/// test exists to catch being forgotten — spelling it out would let the
+	/// guard pass while every snapshot goes unreachable again.
+	fn expected_prefix() -> String {
+		let crate_name = module_path!()
+			.split("::")
+			.next()
+			.expect("module_path! always starts with the crate name");
+		format!("{crate_name}__")
+	}
 
 	fn snapshot_dirs() -> Vec<std::path::PathBuf> {
 		let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -43,6 +55,7 @@ mod tests {
 
 	#[test]
 	fn every_snapshot_is_named_for_the_current_crate() {
+		let expected_prefix = expected_prefix();
 		let mut orphans = Vec::new();
 		let mut total = 0usize;
 		for dir in snapshot_dirs() {
@@ -55,7 +68,7 @@ mod tests {
 					continue;
 				}
 				total += 1;
-				if !name.starts_with(EXPECTED_PREFIX) {
+				if !name.starts_with(&expected_prefix) {
 					orphans.push(name);
 				}
 			}
@@ -67,7 +80,7 @@ mod tests {
 		let sample: Vec<_> = orphans.iter().take(3).cloned().collect();
 		assert!(
 			orphans.is_empty(),
-			"{} of {total} snapshots are not named `{EXPECTED_PREFIX}…` and are therefore \
+			"{} of {total} snapshots are not named `{expected_prefix}…` and are therefore \
 			 unreachable by insta.\n\nThis is what a crate rename looks like: the files are still \
 			 tracked and still valid, but insta derives the filename from the CURRENT crate name and \
 			 will never find them. Each affected assertion reports a `+new` side with no `-old` to \
