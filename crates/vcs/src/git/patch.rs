@@ -1856,6 +1856,16 @@ fn assert_worktree_map_contained(
 			assert_prefix_outside_git_store(repo, gix_repo, path)?;
 		}
 	}
+	// Entries the removal pass takes out before anything is written. A tracked
+	// outbound symlink `dir` that `next` replaces with `dir/file` is gone by
+	// the time the child is created, so judging the child against the CURRENT
+	// filesystem would reject a safe operation — the escaping ancestor is
+	// itself scheduled for removal.
+	let removed: BTreeSet<&str> = previous
+		.keys()
+		.filter(|path| !next.contains_key(*path))
+		.map(String::as_str)
+		.collect();
 	for (path, entry) in next {
 		// Exactly the predicate the write loop uses. Validating entries it will
 		// never touch would fail a cherry-pick of one file because some
@@ -1865,6 +1875,21 @@ fn assert_worktree_map_contained(
 			continue;
 		}
 		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+		// Skip containment when a proper ancestor is being removed first: the
+		// path the guard would resolve does not survive into the write pass.
+		let mut ancestor_removed = false;
+		let mut prefix = path.as_str();
+		while let Some(cut) = prefix.rfind('/') {
+			prefix = &prefix[..cut];
+			if removed.contains(prefix) {
+				ancestor_removed = true;
+				break;
+			}
+		}
+		if ancestor_removed {
+			assert_outside_git_store(repo, gix_repo, path)?;
+			continue;
+		}
 		// A symlink entry is written by unlinking whatever is there and calling
 		// `symlink` — neither follows the old leaf, and the new one is created,
 		// not opened. Resolving it would reject every operation on a repository
@@ -3221,5 +3246,37 @@ mod tests {
 		);
 		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the renamed link");
 		assert!(temp.path().join("old").symlink_metadata().is_ok(), "the rename was applied anyway");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_replaces_a_tracked_outbound_symlink_with_a_directory() {
+		use std::os::unix::fs::symlink;
+
+		// The removal pass takes `dir` out before the creation pass writes
+		// `dir/file`, so judging the child against the pre-removal filesystem
+		// would reject a safe operation: the escaping ancestor does not survive
+		// into the write.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("dir")).expect("create symlink");
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+
+		git(temp.path(), &["checkout", "-q", "-b", "side"]);
+		git(temp.path(), &["rm", "-q", "dir"]);
+		fs::create_dir_all(temp.path().join("dir")).expect("mkdir");
+		fs::write(temp.path().join("dir/file.txt"), b"real file\n").expect("write");
+		git(temp.path(), &["add", "dir/file.txt"]);
+		git(temp.path(), &["commit", "-m", "replace link with a directory"]);
+		let side = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
+		git(temp.path(), &["checkout", "-q", "-"]);
+
+		let repository = repo(temp.path());
+		repository
+			.cherry_pick(&side)
+			.expect("replacing a removed symlink ancestor is safe");
+		assert_eq!(fs::read(temp.path().join("dir/file.txt")).expect("dir/file.txt"), b"real file\n");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the old link");
 	}
 }
