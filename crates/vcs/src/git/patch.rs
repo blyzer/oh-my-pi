@@ -498,27 +498,30 @@ impl GitRepo {
 			}
 		}
 		assert_worktree_map_contained(self, &repo, &current_worktree, &merged_worktree)?;
-		// The tracked half already models the post-removal topology; this loop
-		// must share it. A stash that deletes an outbound `dir` and restores an
-		// untracked `dir/u` in its place removes the link before writing the
-		// child, so resolving through the current link rejects a valid pop.
-		let removed_by_tracked: BTreeSet<&str> = current_worktree
+		// The untracked half is written AFTER the tracked map, so its topology
+		// is the tracked map's RESULT, not the filesystem of today. Two things
+		// follow. A tracked outbound `dir` the pop deletes is gone before an
+		// untracked `dir/u` is restored, so resolving `dir/u` through the
+		// current link would reject a valid pop. And a tracked outbound link
+		// the pop CREATES exists by the time an untracked descendant is
+		// written, so an untracked `é/u` (spelled NFD, say) beneath a restored
+		// NFC `é` link is a write through that link — and the current
+		// filesystem, where the link is still absent, cannot show it. Both
+		// sets are keyed by `normalize_repo_path` for exactly that reason.
+		let removed_by_tracked: BTreeSet<String> = current_worktree
 			.keys()
 			.filter(|path| !merged_worktree.contains_key(*path))
-			.map(String::as_str)
+			.map(|path| normalize_repo_path(path))
+			.collect();
+		let restored_links: BTreeSet<String> = merged_worktree
+			.iter()
+			.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
+			.map(|(path, _)| normalize_repo_path(path))
 			.collect();
 		for (path, entry) in &untracked {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-			let mut ancestor_removed = false;
-			let mut prefix = path.as_str();
-			while let Some(cut) = prefix.rfind('/') {
-				prefix = &prefix[..cut];
-				if removed_by_tracked.contains(prefix) {
-					ancestor_removed = true;
-					break;
-				}
-			}
-			if ancestor_removed || entry.mode == Mode::SYMLINK {
+			assert_no_symlink_ancestor(path, &restored_links)?;
+			if has_normalized_ancestor_in(path, &removed_by_tracked) || entry.mode == Mode::SYMLINK {
 				assert_prefix_within_root(self.root(), path)?;
 				assert_prefix_outside_git_store(self, &repo, path)?;
 			} else {
@@ -1760,18 +1763,32 @@ fn normalize_repo_path(rel: &str) -> String {
 /// Refuse proper descendants of links in the resulting topology, not the links
 /// themselves. Normalized names are comparison keys, never filesystem paths.
 fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()> {
-	if links.is_empty() {
-		return Ok(());
+	if has_normalized_ancestor_in(path, links) {
+		return Err(Error::PathEscapesRoot { path: path.to_owned() });
+	}
+	Ok(())
+}
+
+/// Whether any PROPER ancestor of `path` is in `set`, comparing by the same
+/// filesystem-normalized key [`normalize_repo_path`] produces.
+///
+/// Every set consulted for topology — links a write will create, entries a
+/// write will remove first — must be built with that key too, or an NFD
+/// spelling in one map and an NFC spelling in the other name the same
+/// directory and never match.
+fn has_normalized_ancestor_in(path: &str, set: &BTreeSet<String>) -> bool {
+	if set.is_empty() {
+		return false;
 	}
 	let normalized = normalize_repo_path(path);
 	let mut prefix = normalized.as_str();
 	while let Some(cut) = prefix.rfind('/') {
 		prefix = &prefix[..cut];
-		if links.contains(prefix) {
-			return Err(Error::PathEscapesRoot { path: path.to_owned() });
+		if set.contains(prefix) {
+			return true;
 		}
 	}
-	Ok(())
+	false
 }
 
 /// Mode of `rel` as it exists in the worktree today, if it exists at all.
@@ -1972,25 +1989,35 @@ fn assert_store_containment(
 /// operation: a process-global cache in a long-lived agent would never see a
 /// nested repository created after its first scan, and an untrusted patch
 /// could then reach that store's hooks. [`begin_operation`] invalidates it.
+///
+/// Keyed by root, one slot per repository. Mutations on different
+/// repositories are allowed to interleave — the envd lock serializes by
+/// `common_dir`, not globally — and a single shared slot would be evicted by
+/// the other root on every path check, recreating the per-path rescan the
+/// cache exists to remove. Entries from earlier operations are dropped on the
+/// next insert, so the map never outgrows the set of live roots.
 fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
-	static CACHE: LazyLock<Mutex<Option<(u64, PathBuf, Arc<Vec<PathBuf>>)>>> =
-		LazyLock::new(|| Mutex::new(None));
+	/// Per-root discovery result, stamped with the operation it was scanned in.
+	type StoreScan = (u64, Arc<Vec<PathBuf>>);
+	static CACHE: LazyLock<Mutex<BTreeMap<PathBuf, StoreScan>>> =
+		LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
-	let root = repo.root().to_path_buf();
+	let root = repo.root();
 	let generation = OPERATION.load(Ordering::Acquire);
 	{
 		let cache = CACHE.lock();
-		if let Some((stamp, cached_root, found)) = cache.as_ref()
+		if let Some((stamp, found)) = cache.get(root)
 			&& *stamp == generation
-			&& *cached_root == root
 		{
 			return Arc::clone(found);
 		}
 	}
 	let mut found = Vec::new();
-	collect_nested_stores(&root, &mut found);
+	collect_nested_stores(root, &mut found);
 	let found = Arc::new(found);
-	*CACHE.lock() = Some((generation, root, Arc::clone(&found)));
+	let mut cache = CACHE.lock();
+	cache.retain(|_, (stamp, _)| *stamp == generation);
+	cache.insert(root.to_path_buf(), (generation, Arc::clone(&found)));
 	found
 }
 
@@ -2167,11 +2194,13 @@ fn assert_worktree_map_contained(
 	// outbound symlink `dir` that `next` replaces with `dir/file` is gone by
 	// the time the child is created, so judging the child against the CURRENT
 	// filesystem would reject a safe operation — the escaping ancestor is
-	// itself scheduled for removal.
-	let removed: BTreeSet<&str> = previous
+	// itself scheduled for removal. Keyed like `links` above: `previous` may
+	// spell the link NFC and `next` its child NFD, and on a normalizing
+	// filesystem those are one hierarchy.
+	let removed: BTreeSet<String> = previous
 		.keys()
 		.filter(|path| !next.contains_key(*path))
-		.map(String::as_str)
+		.map(|path| normalize_repo_path(path))
 		.collect();
 	for (path, entry) in next {
 		// Exactly the predicate the write loop uses. Validating entries it will
@@ -2191,15 +2220,7 @@ fn assert_worktree_map_contained(
 		}
 		// Skip containment when a proper ancestor is being removed first: the
 		// path the guard would resolve does not survive into the write pass.
-		let mut ancestor_removed = false;
-		let mut prefix = path.as_str();
-		while let Some(cut) = prefix.rfind('/') {
-			prefix = &prefix[..cut];
-			if removed.contains(prefix) {
-				ancestor_removed = true;
-				break;
-			}
-		}
+		let ancestor_removed = has_normalized_ancestor_in(path, &removed);
 		if ancestor_removed {
 			// Root containment already models the post-removal topology; the
 			// store check must too, or `dir -> .git` replaced by `dir/file`
@@ -4140,5 +4161,138 @@ mod tests {
 		fs::create_dir_all(fake.join("refs")).expect("refs dir");
 		fs::write(fake.join("HEAD"), b"nonsense\n").expect("HEAD");
 		assert!(!is_bare_store(&fake), "garbage HEAD was accepted as a store");
+	}
+
+	/// A stash whose tracked half restores an outbound symlink named
+	/// `link_name`, and whose untracked half restores `untracked_path`. Built
+	/// directly, not via `stash_push`, because the interesting stashes are the
+	/// ones authored on a filesystem with different rules than the one popping.
+	#[cfg(unix)]
+	fn stash_with_symlink_and_untracked(
+		temp: &TempDir,
+		outside: &Path,
+		link_name: &str,
+		untracked_path: &str,
+	) -> gix::ObjectId {
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_id = head.id().detach();
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let link = gix_repo
+			.write_blob(outside.as_os_str().as_encoded_bytes())
+			.expect("link blob")
+			.detach();
+		let mut tracked = tree_map(&gix_repo, head_tree).expect("base map");
+		tracked.insert(link_name.to_owned(), FileEntry::new(link, Mode::SYMLINK));
+		let tracked_tree = write_tree_map(&gix_repo, &tracked).expect("tracked tree");
+		let index_commit = gix_repo
+			.new_commit("index", head_tree, [head_id])
+			.expect("index commit")
+			.id()
+			.detach();
+		let file = gix_repo
+			.write_blob(b"pwned\n")
+			.expect("untracked blob")
+			.detach();
+		let mut untracked = BTreeMap::new();
+		untracked.insert(untracked_path.to_owned(), FileEntry::new(file, Mode::FILE));
+		let untracked_tree = write_tree_map(&gix_repo, &untracked).expect("untracked tree");
+		let untracked_commit = gix_repo
+			.new_commit("untracked", untracked_tree, std::iter::empty::<gix::ObjectId>())
+			.expect("untracked commit")
+			.id()
+			.detach();
+		let stash = gix_repo
+			.new_commit("stash", tracked_tree, [head_id, index_commit, untracked_commit])
+			.expect("stash commit")
+			.id()
+			.detach();
+		update_stash_ref(&gix_repo, stash, PreviousValue::Any, "stash".to_owned(), true)
+			.expect("stash ref");
+		stash
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_pop_refuses_an_untracked_descendant_of_a_restored_link_before_writing() {
+		// The tracked half restores an outbound `é` (NFC) link; the untracked
+		// half restores `e◌́/u` (NFD). On a normalizing filesystem that is a
+		// write THROUGH the link — but the link does not exist yet when the
+		// untracked loop consults the filesystem, so both halves used to pass
+		// and the refusal landed after the tracked half was written.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let stash =
+			stash_with_symlink_and_untracked(&temp, outside.path(), "\u{e9}", "e\u{301}/u.txt");
+		let repository = repo(temp.path());
+
+		assert!(
+			repository.stash_try_pop(false).is_err(),
+			"descendant of restored link must be refused"
+		);
+		assert!(temp.path().join("\u{e9}").symlink_metadata().is_err(), "tracked link was restored");
+		assert!(!outside.path().join("u.txt").exists(), "wrote through the restored link");
+		assert_eq!(git(temp.path(), &["rev-parse", "refs/stash"]).trim(), stash.to_string());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_accepts_a_child_replacing_a_removed_link_under_another_spelling() {
+		use std::os::unix::fs::symlink;
+
+		// HEAD tracks an outbound `é` (NFC) link; the pick replaces it with a
+		// regular `e◌́/file.txt` (NFD). The write pass removes the link before
+		// creating the child, so the operation is safe — but a removal set
+		// keyed on raw strings never matches the NFD child's ancestor, and the
+		// preflight resolves through the still-present link and refuses.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("\u{e9}")).expect("track a link");
+		git(temp.path(), &["add", "-A"]);
+		git(temp.path(), &["commit", "-qm", "link"]);
+
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let mut map = tree_map(&gix_repo, head.tree_id().expect("tree").detach()).expect("map");
+		map.remove("\u{e9}").expect("link tracked");
+		let file = gix_repo.write_blob(b"child\n").expect("blob").detach();
+		map.insert("e\u{301}/file.txt".to_owned(), FileEntry::new(file, Mode::FILE));
+		let tree = write_tree_map(&gix_repo, &map).expect("tree");
+		let picked = gix_repo
+			.new_commit("replace", tree, [head.id().detach()])
+			.expect("commit")
+			.id()
+			.to_string();
+
+		repo(temp.path())
+			.cherry_pick(&picked)
+			.expect("replacing a removed link under another spelling is safe");
+		assert!(temp.path().join("e\u{301}/file.txt").is_file(), "child was not written");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the old link");
+	}
+
+	#[test]
+	fn nested_store_cache_keeps_one_slot_per_root_within_an_operation() {
+		// Two repositories interleaving path checks inside one operation must
+		// not evict each other: a single shared slot would rescan the whole
+		// worktree on every alternation. Same operation, alternating roots,
+		// and the SAME `Arc` must come back for each — a rescan allocates a
+		// fresh one.
+		let a = init(&[("a.txt", b"a\n")]);
+		let b = init(&[("b.txt", b"b\n")]);
+		let (repo_a, repo_b) = (repo(a.path()), repo(b.path()));
+		begin_operation();
+		let first_a = nested_stores(&repo_a);
+		let first_b = nested_stores(&repo_b);
+		let second_a = nested_stores(&repo_a);
+		let second_b = nested_stores(&repo_b);
+		assert!(Arc::ptr_eq(&first_a, &second_a), "root A was rescanned after root B was checked");
+		assert!(Arc::ptr_eq(&first_b, &second_b), "root B was rescanned after root A was checked");
+		// And a new operation still invalidates both.
+		begin_operation();
+		assert!(
+			!Arc::ptr_eq(&first_a, &nested_stores(&repo_a)),
+			"stale scan survived a new operation"
+		);
 	}
 }
