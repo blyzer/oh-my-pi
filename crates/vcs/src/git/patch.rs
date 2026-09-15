@@ -490,6 +490,13 @@ impl GitRepo {
 		// question and must be settled for every destination — tracked and
 		// untracked alike — before the first write, or a refusal lands after the
 		// tracked half has been restored and the stash is still present.
+		if let Some(index) = &merged_index {
+			// Index-only entries can be absent from the restored worktree. Reject
+			// them before any files change, not later in `write_index_map`.
+			for path in index.keys() {
+				validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			}
+		}
 		assert_worktree_map_contained(self, &repo, &current_worktree, &merged_worktree)?;
 		// The tracked half already models the post-removal topology; this loop
 		// must share it. A stash that deletes an outbound `dir` and restores an
@@ -1725,26 +1732,46 @@ const fn is_hfs_ignorable(c: char) -> bool {
 /// `validate_repo_path` has already refused `..`, absolute paths and prefixes,
 /// so this only has to fold the harmless-looking forms — `./link/file` names
 /// exactly the hierarchy `link/file` does.
+///
+/// The result is a COMPARISON KEY, never a filesystem path. It folds what the
+/// filesystems a portable patch may land on fold: case (macOS and Windows
+/// defaults) and canonical equivalence (macOS normalizes names, so a minted
+/// `é` and a later `e◌́/file` are one entry). Over-folding can only refuse
+/// MORE descendants of a minted link, never fewer.
+///
+/// NFC first, then case: composing before folding is what makes the two
+/// spellings of `é` land on one key. `str::to_lowercase` is the full Unicode
+/// mapping; `xutf` deliberately offers ASCII-only folding, which would let
+/// `É/file` slip past a minted `é`.
 fn normalize_repo_path(rel: &str) -> String {
-	rel.split(['/', '\\'])
+	let mut normalized = String::with_capacity(rel.len());
+	for segment in rel
+		.split(['/', '\\'])
 		.filter(|segment| !segment.is_empty() && *segment != ".")
-		.map(|segment| {
-			// Folded for COMPARISON only — the returned string never reaches
-			// the filesystem, it only decides whether two spellings name the
-			// same hierarchy. The alternatives are worse: comparing raw lets
-			// `Link` and `link` diverge on the case-insensitive filesystems
-			// macOS and Windows default to, and case-folding at the point of
-			// use would have to be repeated at every call site.
-			//
-			// Lowercase unconditionally rather than probing the filesystem:
-			// a patch is portable, and a tree authored on a case-sensitive
-			// mount may be applied on an insensitive one. Over-folding can
-			// only make MORE paths look like descendants of a minted link and
-			// be refused, never fewer.
-			segment.to_lowercase()
-		})
-		.collect::<Vec<_>>()
-		.join("/")
+	{
+		if !normalized.is_empty() {
+			normalized.push('/');
+		}
+		normalized.push_str(segment);
+	}
+	xutf::IntoUnicodeNormalized::into_nfc(normalized).to_lowercase()
+}
+
+/// Refuse proper descendants of links in the resulting topology, not the links
+/// themselves. Normalized names are comparison keys, never filesystem paths.
+fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()> {
+	if links.is_empty() {
+		return Ok(());
+	}
+	let normalized = normalize_repo_path(path);
+	let mut prefix = normalized.as_str();
+	while let Some(cut) = prefix.rfind('/') {
+		prefix = &prefix[..cut];
+		if links.contains(prefix) {
+			return Err(Error::PathEscapesRoot { path: path.to_owned() });
+		}
+	}
+	Ok(())
 }
 
 /// Mode of `rel` as it exists in the worktree today, if it exists at all.
@@ -1780,8 +1807,6 @@ fn assert_patch_paths_contained(
 	for patch in patches {
 		let (source, target, _, target_mode) = patch_sides(patch, reverse);
 		let Some(target) = target else { continue };
-		let target = normalize_repo_path(target);
-		let target = target.as_str();
 		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
 		// symlink arrives with `target_mode == None` and application inherits
 		// the mode from the source entry. Infer it the same way here, or the
@@ -1794,25 +1819,14 @@ fn assert_patch_paths_contained(
 				.or_else(|| worktree_entry_mode(repo, target)),
 		};
 		if mode == Some(Mode::SYMLINK) {
-			minted_links.insert(target.to_owned());
+			minted_links.insert(normalize_repo_path(target));
 		}
 	}
 	if !minted_links.is_empty() {
 		for patch in patches {
 			let (source, target, ..) = patch_sides(patch, reverse);
 			for path in [source, target].into_iter().flatten() {
-				// A path is refused when any PROPER ancestor is a link this
-				// patch mints. The link itself is fine: it is created, not
-				// traversed. Compare normalized spellings, or `./link/file`
-				// slips past a minted `link` that names the same hierarchy.
-				let normalized = normalize_repo_path(path);
-				let mut prefix = normalized.as_str();
-				while let Some(cut) = prefix.rfind('/') {
-					prefix = &prefix[..cut];
-					if minted_links.contains(prefix) {
-						return Err(Error::PathEscapesRoot { path: path.to_owned() });
-					}
-				}
+				assert_no_symlink_ancestor(path, &minted_links)?;
 			}
 		}
 	}
@@ -2003,31 +2017,38 @@ fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) {
 	};
 	for entry in entries.flatten() {
 		let path = entry.path();
-		let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+		let Ok(kind) = entry.file_type() else {
+			continue;
+		};
 
 		// A `.git` FILE points at a store. For a LINKED worktree it points at
 		// `…/worktrees/<name>`, which is only half the story: git reads
 		// `commondir` from there and uses the parent as its common store, so
 		// `meta/hooks/pre-commit` is live even though the pointer never names
 		// `meta`. Record both.
-		if !is_dir && path.file_name().is_some_and(|name| name == ".git") {
-			if let Ok(text) = std::fs::read_to_string(&path)
-				&& let Some(rest) = text.trim().strip_prefix("gitdir:")
+		if kind.is_file() && path.file_name().is_some_and(|name| name == ".git") {
+			if let Some(bytes) = read_store_metadata(&path)
+				&& let Ok(target) = gix::discover::parse::gitdir(&bytes)
 			{
-				let store = canonical_or_self(&dir.join(rest.trim()));
-				if let Ok(common) = std::fs::read_to_string(store.join("commondir")) {
-					found.push(canonical_or_self(&store.join(common.trim())));
+				let store = canonical_or_self(&dir.join(target));
+				if let Some(common) = read_store_metadata(&store.join("commondir")) {
+					let common = common.trim_end();
+					if !common.is_empty()
+						&& let Ok(common) = gix::path::try_from_bstr(common.as_bstr())
+					{
+						found.push(canonical_or_self(&store.join(common)));
+					}
 				}
 				found.push(store);
 			}
 			continue;
 		}
-		if !is_dir {
+		if !kind.is_dir() {
 			continue;
 		}
 		// A BARE repository has no `.git` file at all — `git init --bare bare`
 		// leaves the store itself on disk, hooks included, under an arbitrary
-		// name. Recognize it by shape.
+		// name. Require a parseable HEAD, not merely familiar directory names.
 		if is_bare_store(&path) {
 			found.push(canonical_or_self(&path));
 			continue;
@@ -2042,10 +2063,54 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 	std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Whether `dir` looks like a bare repository: the shape `git init --bare`
-/// produces, which carries no `.git` pointer to find it by.
+/// Recognize a store by Git's directory layout and a valid loose HEAD, without
+/// opening a repository (which would read arbitrary configuration/includes).
 fn is_bare_store(dir: &Path) -> bool {
-	dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
+	if !dir.join("objects").is_dir() || !dir.join("refs").is_dir() {
+		return false;
+	}
+	let Some(head) = read_store_metadata(&dir.join("HEAD")) else {
+		return false;
+	};
+	let Ok(name) = gix::refs::FullName::try_from("HEAD") else {
+		return false;
+	};
+	let hex_len = head
+		.iter()
+		.take_while(|byte| byte.is_ascii_hexdigit())
+		.count();
+	let Some(hash) = gix::hash::Kind::from_hex_len(hex_len) else {
+		return false;
+	};
+	gix::refs::file::loose::Reference::try_from_path(name, &head, hash).is_ok()
+}
+
+/// Metadata discovered in a worktree is untrusted: never follow a metadata
+/// symlink, open a special file, or read an unlimited directive/reference.
+fn read_store_metadata(path: &Path) -> Option<Vec<u8>> {
+	use std::io::Read as _;
+
+	const LIMIT: u64 = 64 * 1024;
+	let metadata = fs::symlink_metadata(path).ok()?;
+	if !metadata.is_file() || metadata.len() > LIMIT {
+		return None;
+	}
+	let mut options = fs::OpenOptions::new();
+	options.read(true);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::OpenOptionsExt as _;
+		// Also prevent a swapped symlink/FIFO from following or blocking at open.
+		options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+	}
+	let file = options.open(path).ok()?;
+	let metadata = file.metadata().ok()?;
+	if !metadata.is_file() || metadata.len() > LIMIT {
+		return None;
+	}
+	let mut bytes = Vec::new();
+	file.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+	(bytes.len() as u64 <= LIMIT).then_some(bytes)
 }
 
 /// Refuse any indexed path whose PREFIX leaves the worktree, before a caller
@@ -2081,6 +2146,16 @@ fn assert_worktree_map_contained(
 	previous: &BTreeMap<String, FileEntry>,
 	next: &BTreeMap<String, FileEntry>,
 ) -> Result<()> {
+	// Current filesystem checks cannot see links this map will create. Judge
+	// the resulting tree before removals, writes, or the caller's HEAD update.
+	let links: BTreeSet<String> = next
+		.iter()
+		.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
+		.map(|(path, _)| normalize_repo_path(path))
+		.collect();
+	for path in next.keys() {
+		assert_no_symlink_ancestor(path, &links)?;
+	}
 	for path in previous.keys() {
 		if !next.contains_key(path) {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
@@ -3798,5 +3873,272 @@ mod tests {
 			objects_before,
 			"external content was read into the object store before the refusal"
 		);
+	}
+
+	#[test]
+	fn stash_index_refusal_preserves_worktree_index_and_stash() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let gix_repo = repository.gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_id = head.id().detach();
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let blob = gix_repo
+			.write_blob(b"staged\n")
+			.expect("staged blob")
+			.detach();
+		let child = gix_repo
+			.write_object(&gix::objs::Tree {
+				entries: vec![gix::objs::tree::Entry {
+					mode:     EntryKind::Blob.into(),
+					filename: "file".into(),
+					oid:      blob,
+				}],
+			})
+			.expect("child tree")
+			.detach();
+		let mut index_tree = gix_repo
+			.find_tree(head_tree)
+			.expect("base tree")
+			.decode()
+			.expect("decode tree")
+			.to_owned();
+		index_tree.entries.push(gix::objs::tree::Entry {
+			mode:     EntryKind::Tree.into(),
+			// A spelling gix's tree validation ACCEPTS (it applies HFS folding
+			// and NTFS trailing-dot trimming separately) but our per-component
+			// policy refuses (it composes them): `.git` + U+200C + `.` reaches
+			// the store on a mount that both ignores the joiner and trims the
+			// dot. It has to be one gix will write into a tree, or the merge
+			// rejects it first and this test proves nothing about the guard.
+			filename: ".git\u{200c}.".into(),
+			oid:      child,
+		});
+		index_tree.entries.sort();
+		let index_tree = gix_repo
+			.write_object(&index_tree)
+			.expect("legacy index tree")
+			.detach();
+		let index_commit = gix_repo
+			.new_commit("legacy index", index_tree, [head_id])
+			.expect("index commit")
+			.id()
+			.detach();
+		let mut restored = tree_map(&gix_repo, head_tree).expect("base map");
+		restored.get_mut("keep.txt").expect("tracked file").id = blob;
+		let restored_tree = write_tree_map(&gix_repo, &restored).expect("restored tree");
+		let stash = gix_repo
+			.new_commit("legacy stash", restored_tree, [head_id, index_commit])
+			.expect("stash commit")
+			.id()
+			.detach();
+		update_stash_ref(&gix_repo, stash, PreviousValue::Any, "legacy stash".to_owned(), true)
+			.expect("stash ref");
+		let index_before = fs::read(gix_repo.git_dir().join("index")).expect("index before");
+		let log_before = fs::read(gix_repo.common_dir().join("logs/refs/stash")).expect("stash log");
+
+		assert!(repository.stash_try_pop(true).is_err(), "unsafe index must be refused");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("tracked file"), b"base\n");
+		assert_eq!(fs::read(gix_repo.git_dir().join("index")).expect("index"), index_before);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), head_id.to_string());
+		assert_eq!(git(temp.path(), &["rev-parse", "refs/stash"]).trim(), stash.to_string());
+		assert_eq!(
+			fs::read(gix_repo.common_dir().join("logs/refs/stash")).expect("stash log"),
+			log_before
+		);
+		assert!(
+			repository
+				.stash_try_pop(false)
+				.expect("pop without reinstating index")
+		);
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("restored file"), b"staged\n");
+	}
+
+	/// Commit a tree that pairs an outbound symlink with a regular file whose
+	/// path is a case-alias descendant of it — the shape a Linux-authored tree
+	/// takes when checked out on the case-insensitive macOS default.
+	#[cfg(unix)]
+	fn commit_case_aliased_symlink_tree(temp: &TempDir, outside: &Path) -> String {
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let mut map = tree_map(&gix_repo, head_tree).expect("base map");
+		let link = gix_repo
+			.write_blob(outside.as_os_str().as_encoded_bytes())
+			.expect("link blob")
+			.detach();
+		let file = gix_repo.write_blob(b"pwned\n").expect("file blob").detach();
+		map.insert("Link".to_owned(), FileEntry::new(link, Mode::SYMLINK));
+		map.insert("link/file.txt".to_owned(), FileEntry::new(file, Mode::FILE));
+		let tree = write_tree_map(&gix_repo, &map).expect("aliased tree");
+		gix_repo
+			.new_commit("aliased", tree, [head.id().detach()])
+			.expect("aliased commit")
+			.id()
+			.to_string()
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_refuses_a_case_aliased_symlink_descendant_before_moving_head() {
+		// `Link` and `link/file.txt` are distinct on the filesystem that
+		// authored them and one hierarchy on the one applying them. Judging
+		// each against the CURRENT filesystem misses the relationship: the
+		// write pass creates the link first and refuses the child afterwards,
+		// by which point HEAD has already advanced.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let picked = commit_case_aliased_symlink_tree(&temp, outside.path());
+		let head_before = git(temp.path(), &["rev-parse", "HEAD"]);
+		let repository = repo(temp.path());
+
+		assert!(repository.cherry_pick(&picked).is_err(), "aliased descendant must be refused");
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
+		assert!(temp.path().join("Link").symlink_metadata().is_err(), "the link was minted");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_folds_canonical_equivalence_when_matching_a_minted_symlink() {
+		// macOS normalizes names, so a minted `é` (U+00E9) and a later target
+		// under `e` + U+0301 are one directory entry. Scalar lowercasing leaves
+		// them byte-distinct and the descendant slips past the preflight.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let patch = format!(
+			concat!(
+				"diff --git a/\u{e9} b/\u{e9}\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/\u{e9}\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+				"diff --git a/e\u{301}/sneaky.txt b/e\u{301}/sneaky.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/e\u{301}/sneaky.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+pwned\n",
+			),
+			outside.path().display(),
+		);
+		assert!(
+			repository
+				.apply_patch(&patch, &ApplyOptions::default())
+				.is_err(),
+			"a decomposed spelling must not slip past the composed minted link"
+		);
+		assert!(
+			temp.path().join("\u{e9}").symlink_metadata().is_err(),
+			"the link was created before the descendant was refused"
+		);
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	fn normalize_repo_path_folds_canonical_equivalence_and_case_together() {
+		assert_eq!(normalize_repo_path("e\u{301}/File"), normalize_repo_path("\u{e9}/file"));
+		assert_eq!(normalize_repo_path("\u{c9}/x"), normalize_repo_path("\u{e9}/x"));
+		assert_ne!(normalize_repo_path("e/x"), normalize_repo_path("\u{e9}/x"));
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn nested_store_discovery_does_not_open_a_fifo_named_dot_git() {
+		// A FIFO named `.git` is not a gitfile, but `is_dir()` is false for it
+		// too, and a plain `read_to_string` blocks every apply, cherry-pick and
+		// stash preflight until something writes to the pipe.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let dir = temp.path().join("sub");
+		fs::create_dir(&dir).expect("nested dir");
+		let fifo = std::ffi::CString::new(dir.join(".git").as_os_str().as_encoded_bytes())
+			.expect("fifo path");
+		// SAFETY: `fifo` is a valid NUL-terminated path for the duration of the
+		// call and `mkfifo` does not retain it.
+		assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/keep.txt b/keep.txt\n",
+			"--- a/keep.txt\n",
+			"+++ b/keep.txt\n",
+			"@@ -1 +1 @@\n",
+			"-base\n",
+			"+edited\n",
+		);
+		// Would hang forever before the fix; a bounded, non-following read
+		// simply skips the entry and the unrelated patch applies.
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("discovery must not block on a FIFO");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("edited"), b"edited\n");
+	}
+
+	#[test]
+	fn store_metadata_reads_are_bounded_and_never_follow_links() {
+		// Metadata found in a worktree is untrusted. A `.git` FILE holds one
+		// short `gitdir:` line; anything larger is not a gitfile and must not
+		// be slurped into memory, and a symlink named `.git` must not be
+		// followed to wherever it points.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let mut huge = b"gitdir: ../elsewhere".to_vec();
+		huge.resize(1024 * 1024, b'x');
+		fs::write(temp.path().join("huge"), huge).expect("oversized metadata");
+		assert!(read_store_metadata(&temp.path().join("huge")).is_none(), "oversized file was read");
+
+		let small = temp.path().join("small");
+		fs::write(&small, b"gitdir: meta\n").expect("small metadata");
+		assert_eq!(read_store_metadata(&small).as_deref(), Some(&b"gitdir: meta\n"[..]));
+
+		#[cfg(unix)]
+		{
+			let link = temp.path().join("link");
+			std::os::unix::fs::symlink(&small, &link).expect("metadata symlink");
+			assert!(read_store_metadata(&link).is_none(), "symlinked metadata was followed");
+		}
+	}
+
+	#[test]
+	fn ordinary_directory_with_head_objects_and_refs_is_not_a_store() {
+		// `HEAD`, `objects/` and `refs/` are not exotic names. A project that
+		// happens to use all three is not a bare repository, and refusing
+		// every write beneath it would break that project for no reason.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let dir = temp.path().join("lookalike");
+		fs::create_dir_all(dir.join("objects")).expect("objects dir");
+		fs::create_dir_all(dir.join("refs")).expect("refs dir");
+		fs::write(dir.join("HEAD"), b"this is a header file, not a git ref\n").expect("HEAD");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/lookalike/objects/note.txt b/lookalike/objects/note.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/lookalike/objects/note.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+not a git object\n",
+		);
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("a look-alike directory must stay writable");
+		assert!(temp.path().join("lookalike/objects/note.txt").is_file(), "patch was refused");
+	}
+
+	#[test]
+	fn bare_store_recognition_requires_a_valid_head() {
+		// Positive: what `git init --bare` produces. Negative: the same layout
+		// with a HEAD that is neither a symbolic ref nor an object id.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--bare", "real.git"]);
+		assert!(is_bare_store(&temp.path().join("real.git")), "real bare store not recognized");
+
+		let fake = temp.path().join("fake");
+		fs::create_dir_all(fake.join("objects")).expect("objects dir");
+		fs::create_dir_all(fake.join("refs")).expect("refs dir");
+		fs::write(fake.join("HEAD"), b"nonsense\n").expect("HEAD");
+		assert!(!is_bare_store(&fake), "garbage HEAD was accepted as a store");
 	}
 }
