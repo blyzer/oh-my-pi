@@ -7,9 +7,10 @@
 //! preflighted so a rejected restore leaves no trace (issue #4175).
 
 use std::{
-	collections::{BTreeMap, BTreeSet},
+	collections::{BTreeMap, BTreeSet, HashMap},
 	fs,
 	path::{Component, Path, PathBuf},
+	sync::{Arc, LazyLock, Mutex},
 };
 
 use gix::{
@@ -1662,6 +1663,21 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	Ok(())
 }
 
+/// Whether HFS+ folds this codepoint away when comparing filenames.
+///
+/// Git's exact `core.protectHFS` set (`is_hfs_dotgit` in `utf8.c`), not the
+/// `Cf` general category: `Cf` is far wider, and rejecting a path git accepts
+/// breaks every later operation that rewrites an index containing it.
+const fn is_hfs_ignorable(c: char) -> bool {
+	matches!(
+		c,
+		'\u{200c}' | '\u{200d}' | '\u{200e}' | '\u{200f}'
+			| '\u{202a}'..='\u{202e}'
+			| '\u{206a}'..='\u{206f}'
+			| '\u{feff}'
+	)
+}
+
 /// Collapse `.` components and duplicate separators so two spellings of the
 /// same repository path compare equal.
 ///
@@ -1669,8 +1685,23 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 /// so this only has to fold the harmless-looking forms — `./link/file` names
 /// exactly the hierarchy `link/file` does.
 fn normalize_repo_path(rel: &str) -> String {
-	rel.split('/')
+	rel.split(['/', '\\'])
 		.filter(|segment| !segment.is_empty() && *segment != ".")
+		.map(|segment| {
+			// Folded for COMPARISON only — the returned string never reaches
+			// the filesystem, it only decides whether two spellings name the
+			// same hierarchy. The alternatives are worse: comparing raw lets
+			// `Link` and `link` diverge on the case-insensitive filesystems
+			// macOS and Windows default to, and case-folding at the point of
+			// use would have to be repeated at every call site.
+			//
+			// Lowercase unconditionally rather than probing the filesystem:
+			// a patch is portable, and a tree authored on a case-sensitive
+			// mount may be applied on an insensitive one. Over-folding can
+			// only make MORE paths look like descendants of a minted link and
+			// be refused, never fewer.
+			segment.to_lowercase()
+		})
 		.collect::<Vec<_>>()
 		.join("/")
 }
@@ -1859,44 +1890,94 @@ fn assert_store_containment(
 	// Bounded to the immediate children of the root plus their own children:
 	// deeper nesting is rare enough that a full-tree walk on every path check
 	// would cost more than it protects.
-	if nested_store_contains(repo.root(), &resolved, 3) {
+	if nested_stores(repo)
+		.iter()
+		.any(|store| resolved.starts_with(store))
+	{
 		return Err(Error::PathInGitStore { path: rel.to_owned() });
 	}
 	Ok(())
 }
 
-/// Whether any nested repository's store, reachable within `depth` levels of
-/// `dir`, contains `resolved`.
-fn nested_store_contains(dir: &Path, resolved: &Path, depth: u32) -> bool {
+/// Every nested repository store under `repo`'s root, discovered once.
+///
+/// Discovery is a directory walk, and the containment guards run per affected
+/// path — a thousand-file change would otherwise repeat the same traversal a
+/// thousand times, making the operation scale as paths times directories.
+/// Memoized per root: a store appearing mid-operation is not a case this guard
+/// can serve anyway, since the check is already not atomic with the write.
+fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
+	static CACHE: LazyLock<Mutex<HashMap<PathBuf, Arc<Vec<PathBuf>>>>> =
+		LazyLock::new(|| Mutex::new(HashMap::new()));
+
+	let root = repo.root().to_path_buf();
+	if let Ok(cache) = CACHE.lock()
+		&& let Some(found) = cache.get(&root)
+	{
+		return Arc::clone(found);
+	}
+	let mut found = Vec::new();
+	collect_nested_stores(&root, &mut found, 3);
+	let found = Arc::new(found);
+	if let Ok(mut cache) = CACHE.lock() {
+		cache.insert(root, Arc::clone(&found));
+	}
+	found
+}
+
+/// Walk `dir` for nested stores, recording every directory git treats as one.
+fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>, depth: u32) {
 	if depth == 0 {
-		return false;
+		return;
 	}
 	let Ok(entries) = std::fs::read_dir(dir) else {
-		return false;
+		return;
 	};
 	for entry in entries.flatten() {
 		let path = entry.path();
-		if path.file_name().is_some_and(|name| name == ".git") && path.is_file() {
+		let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+
+		// A `.git` FILE points at a store. For a LINKED worktree it points at
+		// `…/worktrees/<name>`, which is only half the story: git reads
+		// `commondir` from there and uses the parent as its common store, so
+		// `meta/hooks/pre-commit` is live even though the pointer never names
+		// `meta`. Record both.
+		if !is_dir && path.file_name().is_some_and(|name| name == ".git") {
 			if let Ok(text) = std::fs::read_to_string(&path)
 				&& let Some(rest) = text.trim().strip_prefix("gitdir:")
 			{
-				let store = dir.join(rest.trim());
-				let store = std::fs::canonicalize(&store).unwrap_or(store);
-				if resolved.starts_with(&store) {
-					return true;
+				let store = canonical_or_self(&dir.join(rest.trim()));
+				if let Ok(common) = std::fs::read_to_string(store.join("commondir")) {
+					found.push(canonical_or_self(&store.join(common.trim())));
 				}
+				found.push(store);
 			}
 			continue;
 		}
-		// Do not descend through links: a symlinked directory is not where a
-		// nested store lives, and following one would leave the worktree.
-		if entry.file_type().is_ok_and(|kind| kind.is_dir())
-			&& nested_store_contains(&path, resolved, depth - 1)
-		{
-			return true;
+		if !is_dir {
+			continue;
 		}
+		// A BARE repository has no `.git` file at all — `git init --bare bare`
+		// leaves the store itself on disk, hooks included, under an arbitrary
+		// name. Recognize it by shape.
+		if is_bare_store(&path) {
+			found.push(canonical_or_self(&path));
+			continue;
+		}
+		// Do not descend through links: a nested store does not live behind one,
+		// and following it would leave the worktree.
+		collect_nested_stores(&path, found, depth - 1);
 	}
-	false
+}
+
+fn canonical_or_self(path: &Path) -> PathBuf {
+	std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether `dir` looks like a bare repository: the shape `git init --bare`
+/// produces, which carries no `.git` pointer to find it by.
+fn is_bare_store(dir: &Path) -> bool {
+	dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
 }
 
 /// Validate every path a worktree-map write would remove or create.
@@ -1991,21 +2072,17 @@ fn is_git_store_alias(component: &std::ffi::OsStr) -> bool {
 		// below, and `validate_repo_path` has already rejected traversal.
 		return false;
 	};
-	// HFS+ treats formatting codepoints as invisible when comparing names, so
-	// `.\u{200c}git` opens the real `.git`; git refuses the same spellings under
-	// `core.protectHFS`. Classification comes from `xutf`, which owns Unicode
-	// semantics here, rather than a local scalar table that would drift from
-	// the Unicode version the rest of the tree agrees on.
+	// HFS+ treats a specific set of codepoints as invisible when comparing
+	// names, so `.\u{200c}git` opens the real `.git`; git refuses those
+	// spellings under `core.protectHFS`.
 	//
-	// `Cf` is a strict superset of git's list — 170 codepoints against its 16 —
-	// and that is the safe direction: folding more can only make MORE spellings
-	// resolve to `.git` and be refused, never fewer. A legitimate name keeps
-	// passing, because stripping its formatting characters does not spell
-	// `.git` unless it was an attack already.
-	let folded: String = name
-		.chars()
-		.filter(|c| xutf::general_category(*c as u32) != xutf::GeneralCategory::Format)
-		.collect();
+	// It must be git's EXACT set, not the whole `Cf` general category. Folding
+	// more is not the safe direction it looks like: `.g\u{2060}it/file` is a
+	// path git accepts, and refusing it fails every later operation that
+	// rewrites an index containing it — an unrelated cherry-pick included.
+	// Verified against `git update-index`: U+200C and U+206F are rejected by
+	// git, U+2060 is accepted.
+	let folded: String = name.chars().filter(|c| !is_hfs_ignorable(*c)).collect();
 	let name = folded.as_str();
 	// NTFS reaches a directory through its alternate-stream syntax, so
 	// `.git::$INDEX_ALLOCATION` and `.git:x` open the same store. Cut at the
@@ -3421,5 +3498,149 @@ mod tests {
 		const CANCELED: &str = Error::Canceled.kind();
 		assert_eq!(CANCELED, "Canceled");
 		assert_eq!(Error::PathInGitStore { path: "a".to_owned() }.kind(), "PathInGitStore");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_folds_case_and_separators_when_matching_a_minted_symlink() {
+		// `Link` and `link` are the same directory on the case-insensitive
+		// filesystems macOS and Windows default to, and `link\\file` is a path
+		// on Windows. An exact comparison misses both, so the descendant is
+		// refused only after the link has been created.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+
+		for descendant in ["link/sneaky.txt", "Link/sneaky.txt", "link\\sneaky.txt"] {
+			let patch = format!(
+				concat!(
+					"diff --git a/Link b/Link\n",
+					"new file mode 120000\n",
+					"--- /dev/null\n",
+					"+++ b/Link\n",
+					"@@ -0,0 +1 @@\n",
+					"+{}\n",
+					"\\ No newline at end of file\n",
+					"diff --git a/{} b/{}\n",
+					"new file mode 100644\n",
+					"--- /dev/null\n",
+					"+++ b/{}\n",
+					"@@ -0,0 +1 @@\n",
+					"+pwned\n",
+				),
+				outside.path().display(),
+				descendant,
+				descendant,
+				descendant,
+			);
+			assert!(
+				repository
+					.apply_patch(&patch, &ApplyOptions::default())
+					.is_err(),
+				"spelling {descendant:?} slipped past the minted link"
+			);
+			assert!(
+				!temp.path().join("Link").symlink_metadata().is_ok(),
+				"the link was created before {descendant:?} was refused"
+			);
+			assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+		}
+	}
+
+	#[test]
+	fn normalize_repo_path_folds_case_dots_and_both_separators() {
+		assert_eq!(normalize_repo_path("./Link/File.txt"), "link/file.txt");
+		assert_eq!(normalize_repo_path("link\\file.txt"), "link/file.txt");
+		assert_eq!(normalize_repo_path("LINK//./file.txt"), "link/file.txt");
+		// Distinct hierarchies stay distinct.
+		assert_ne!(normalize_repo_path("linkx/file.txt"), normalize_repo_path("link/file.txt"));
+	}
+
+	#[test]
+	fn validate_repo_path_keeps_format_characters_git_does_not_fold() {
+		// Folding the whole `Cf` category rejects paths git accepts, and then
+		// every later operation that rewrites an index containing one fails —
+		// an unrelated cherry-pick included. Verified against `git
+		// update-index`: U+2060 is accepted by git even under protectHFS.
+		assert!(validate_repo_path(".g\u{2060}it/file").is_ok());
+		assert!(validate_repo_path("a\u{00ad}b/notes.txt").is_ok());
+		// The set git DOES fold stays refused.
+		assert!(validate_repo_path(".g\u{200c}it/file").is_err());
+		assert!(validate_repo_path(".g\u{206f}it/file").is_err());
+	}
+
+	#[test]
+	fn apply_patch_refuses_a_linked_worktrees_common_store() {
+		// A linked worktree's `.git` points at `meta/worktrees/<name>`, and git
+		// reads `commondir` from there to find `meta` — where the hooks live.
+		// The worktree is created OUTSIDE the outer root and only its checkout
+		// moved in, so the only pointer the scanner can see is the linked one.
+		//
+		// What this pins is the OUTCOME, not one guard: `meta` is also
+		// bare-shaped, so `is_bare_store` catches it first and the commondir
+		// resolution is defence in depth behind it. Removing either alone
+		// leaves the patch refused; removing both lets it through, which is
+		// what this test fails on.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let host = tempfile::tempdir().expect("host tempdir");
+		git(host.path(), &["init", "-q", "--separate-git-dir=meta", "inner"]);
+		let inner = host.path().join("inner");
+		git(&inner, &["config", "user.email", "test@example.com"]);
+		git(&inner, &["config", "user.name", "Test"]);
+		fs::write(inner.join("f.txt"), b"x\n").expect("seed inner");
+		git(&inner, &["add", "f.txt"]);
+		git(&inner, &["commit", "-m", "seed"]);
+		git(&inner, &["worktree", "add", "-q", "../wt"]);
+
+		// Move only the linked checkout into the worktree under test, and put
+		// the common store where the patch will aim.
+		std::fs::rename(host.path().join("wt"), temp.path().join("wt")).expect("move worktree");
+		std::fs::rename(host.path().join("meta"), temp.path().join("meta")).expect("move store");
+		let pointer = temp.path().join("wt/.git");
+		fs::write(&pointer, format!("gitdir: {}\n", temp.path().join("meta/worktrees/wt").display()))
+			.expect("repoint");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/meta/hooks/pre-commit b/meta/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/meta/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch installed a hook into a linked worktree's common store"
+		);
+		assert!(!temp.path().join("meta/hooks/pre-commit").exists(), "hook was written");
+	}
+
+	#[test]
+	fn apply_patch_refuses_a_nested_bare_repository() {
+		// `git init --bare bare` leaves the store itself on disk under an
+		// arbitrary name, with no `.git` file to discover it by. Its hooks run
+		// when the repository receives a push.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--bare", "inner.git"]);
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/inner.git/hooks/pre-receive b/inner.git/hooks/pre-receive\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/inner.git/hooks/pre-receive\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch installed a hook into a nested bare repository"
+		);
+		assert!(!temp.path().join("inner.git/hooks/pre-receive").exists(), "hook was written");
 	}
 }
