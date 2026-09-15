@@ -1661,6 +1661,16 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	}
 	Ok(())
 }
+
+/// Mode of `rel` as it exists in the worktree today, if it exists at all.
+///
+/// Used to infer a mode the patch does not state — a 100% rename omits the
+/// mode headers entirely, and application resolves it from the source entry.
+fn worktree_entry_mode(repo: &GitRepo, rel: &str) -> Option<Mode> {
+	let metadata = std::fs::symlink_metadata(repo.root().join(rel)).ok()?;
+	metadata.file_type().is_symlink().then_some(Mode::SYMLINK)
+}
+
 /// Validate every path a patch would touch, before any of them is touched.
 ///
 /// Mirrors exactly what [`write_patch_worktree`] will do per side: a source
@@ -1683,10 +1693,20 @@ fn assert_patch_paths_contained(
 	// produces has to be judged before the first entry is written.
 	let mut minted_links: BTreeSet<&str> = BTreeSet::new();
 	for patch in patches {
-		let (_, target, _, target_mode) = patch_sides(patch, reverse);
-		if let Some(target) = target
-			&& target_mode == Some(Mode::SYMLINK)
-		{
+		let (source, target, _, target_mode) = patch_sides(patch, reverse);
+		let Some(target) = target else { continue };
+		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
+		// symlink arrives with `target_mode == None` and application inherits
+		// the mode from the source entry. Infer it the same way here, or the
+		// scan misses a link this patch is about to mint and the descendant is
+		// refused only after the link exists.
+		let mode = match target_mode {
+			Some(mode) => Some(mode),
+			None => source
+				.and_then(|source| worktree_entry_mode(repo, source))
+				.or_else(|| worktree_entry_mode(repo, target)),
+		};
+		if mode == Some(Mode::SYMLINK) {
 			minted_links.insert(target);
 		}
 	}
@@ -1891,11 +1911,17 @@ fn is_git_store_alias(component: &std::ffi::OsStr) -> bool {
 		.filter(|c| xutf::general_category(*c as u32) != xutf::GeneralCategory::Format)
 		.collect();
 	let name = folded.as_str();
-	// NTFS and HFS+ ignore trailing dots and spaces when opening a file, so
-	// `.git.`, `.git ` and `git~1.` all reach the store. Trim once and compare
-	// against BOTH protected spellings: trimming and then checking only `.git`
-	// lets `sub/git~1./hooks/pre-commit` through, and a nested store is
-	// invisible to `assert_outside_git_store`, which only knows the outer one.
+	// NTFS reaches a directory through its alternate-stream syntax, so
+	// `.git::$INDEX_ALLOCATION` and `.git:x` open the same store. Cut at the
+	// first colon before anything else: the stream suffix survives the
+	// dot/space trim below and would otherwise carry the name past every
+	// comparison.
+	let name = name.split(':').next().unwrap_or(name);
+	// NTFS and HFS+ then ignore trailing dots and spaces, so `.git.`, `.git `
+	// and `git~1.` all reach the store too. Compare the trimmed spelling
+	// against BOTH protected names: checking only `.git` lets
+	// `sub/git~1./hooks/pre-commit` through, and a nested store is invisible to
+	// `assert_outside_git_store`, which only knows the outer one.
 	let trimmed = name.trim_end_matches(['.', ' ']);
 	trimmed.eq_ignore_ascii_case(".git") || trimmed.eq_ignore_ascii_case("git~1")
 }
@@ -3140,5 +3166,60 @@ mod tests {
 		assert_eq!(Error::PathInGitStore { path: "a".to_owned() }.kind(), "PathInGitStore");
 		assert_eq!(Error::Canceled.kind(), "Canceled");
 		assert_eq!(Error::PatchFailed { message: "x".to_owned() }.kind(), "PatchFailed");
+	}
+
+	#[test]
+	fn validate_repo_path_rejects_ntfs_alternate_stream_aliases() {
+		// NTFS opens a directory through its stream syntax, and the suffix
+		// survives the dot/space trim, so it would otherwise carry the name
+		// past every comparison.
+		for path in [
+			".git::$INDEX_ALLOCATION/hooks/pre-commit",
+			"git~1::$INDEX_ALLOCATION/config",
+			"sub/.git::$INDEX_ALLOCATION/hooks/pre-commit",
+			".git:x/config",
+			".GIT::$INDEX_ALLOCATION/config",
+		] {
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
+		}
+		// A colon elsewhere in a name is not a store alias.
+		assert!(validate_repo_path("notes:draft.txt").is_ok());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_refuses_a_path_under_a_renamed_symlink_with_no_mode_header() {
+		use std::os::unix::fs::symlink;
+
+		// A 100% rename carries no mode headers, so `target_mode` is None and
+		// application inherits SYMLINK from the source entry. The topology scan
+		// has to infer it the same way, or it misses the minted link.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("old")).expect("create symlink");
+		git(temp.path(), &["add", "old"]);
+		git(temp.path(), &["commit", "-m", "track symlink"]);
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/old b/link\n",
+			"similarity index 100%\n",
+			"rename from old\n",
+			"rename to link\n",
+			"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/link/sneaky.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+pwned\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch must refuse a path under a symlink it renames into place"
+		);
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the renamed link");
+		assert!(temp.path().join("old").symlink_metadata().is_ok(), "the rename was applied anyway");
 	}
 }
