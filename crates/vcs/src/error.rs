@@ -10,7 +10,7 @@ use std::path::PathBuf;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Unified error for all VCS operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, strum::IntoStaticStr)]
 pub enum Error {
 	/// The directory is not inside a git repository / jj workspace.
 	#[error("not a repository: {path}")]
@@ -134,23 +134,12 @@ impl Error {
 	}
 
 	/// Stable machine-readable discriminant for this failure.
-	pub const fn kind(&self) -> &'static str {
-		match self {
-			Self::NotARepository { .. } => "NotARepository",
-			Self::PathEscapesRoot { .. } => "PathEscapesRoot",
-			Self::PathInGitStore { .. } => "PathInGitStore",
-			Self::RefNotFound { .. } => "RefNotFound",
-			Self::ObjectNotFound { .. } => "ObjectNotFound",
-			Self::EmptyCherryPick { .. } => "EmptyCherryPick",
-			Self::Conflict { .. } => "Conflict",
-			Self::PatchFailed { .. } => "PatchFailed",
-			Self::Cli { .. } => "Cli",
-			Self::CliTimeout { .. } => "CliTimeout",
-			Self::Io(_) => "Io",
-			Self::Backend { .. } => "Backend",
-			Self::Canceled => "Canceled",
-			Self::Unsupported { .. } => "Unsupported",
-		}
+	///
+	/// Derived, so a new variant cannot drift from its reported kind: the
+	/// variant name IS the discriminant.
+	#[must_use]
+	pub fn kind(&self) -> &'static str {
+		self.into()
 	}
 }
 

@@ -15,6 +15,7 @@ workspace = true
 gix.workspace = true
 jj-lib.workspace = true
 thiserror.workspace = true
+strum.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 xutf.workspace = true

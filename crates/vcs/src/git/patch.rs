@@ -373,7 +373,7 @@ impl GitRepo {
 		for path in untracked.keys() {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			assert_prefix_within_root(self.root(), path)?;
-			assert_outside_git_store(self, &gix_repo, path)?;
+			assert_prefix_outside_git_store(self, &gix_repo, path)?;
 		}
 		update_stash_ref(
 			&repo,
@@ -471,10 +471,11 @@ impl GitRepo {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			if entry.mode == Mode::SYMLINK {
 				assert_prefix_within_root(self.root(), path)?;
+				assert_prefix_outside_git_store(self, &repo, path)?;
 			} else {
 				assert_within_root(self.root(), path)?;
+				assert_outside_git_store(self, &repo, path)?;
 			}
-			assert_outside_git_store(self, &repo, path)?;
 		}
 		write_worktree_map(self, &current_worktree, &merged_worktree)?;
 		for (path, entry) in &untracked {
@@ -1619,6 +1620,7 @@ fn remove_worktree_path(repo: &GitRepo, path: &str) -> Result<()> {
 	// without following it, so a tracked symlink pointing outside the worktree
 	// is safe to delete and must stay deletable.
 	assert_prefix_within_root(repo.root(), path)?;
+	assert_prefix_outside_git_store(repo, &repo.gix()?, path)?;
 	let absolute = repo.root().join(path);
 	match fs::remove_file(&absolute) {
 		Ok(()) => {},
@@ -1673,6 +1675,38 @@ fn assert_patch_paths_contained(
 	reverse: bool,
 ) -> Result<()> {
 	let gix_repo = repo.gix()?;
+	// Paths this patch will itself turn into symlinks. The per-path guards
+	// below interrogate the CURRENT filesystem, where none of them exist yet,
+	// so a patch that creates `link` as 120000 and then writes `link/file`
+	// passes both checks and is only refused once `write_patch_worktree` has
+	// already created the link — a partial application. The topology the patch
+	// produces has to be judged before the first entry is written.
+	let mut minted_links: BTreeSet<&str> = BTreeSet::new();
+	for patch in patches {
+		let (_, target, _, target_mode) = patch_sides(patch, reverse);
+		if let Some(target) = target
+			&& target_mode == Some(Mode::SYMLINK)
+		{
+			minted_links.insert(target);
+		}
+	}
+	if !minted_links.is_empty() {
+		for patch in patches {
+			let (source, target, ..) = patch_sides(patch, reverse);
+			for path in [source, target].into_iter().flatten() {
+				// A path is refused when any PROPER ancestor is a link this
+				// patch mints. The link itself is fine: it is created, not
+				// traversed.
+				let mut prefix = path;
+				while let Some(cut) = prefix.rfind('/') {
+					prefix = &prefix[..cut];
+					if minted_links.contains(prefix) {
+						return Err(Error::PathEscapesRoot { path: path.to_owned() });
+					}
+				}
+			}
+		}
+	}
 	for patch in patches {
 		let (source, target, _, target_mode) = patch_sides(patch, reverse);
 		if let Some(source) = source
@@ -1680,7 +1714,7 @@ fn assert_patch_paths_contained(
 		{
 			validate_repo_path(source).map_err(ApplyFailure::into_error)?;
 			assert_prefix_within_root(repo.root(), source)?;
-			assert_outside_git_store(repo, &gix_repo, source)?;
+			assert_prefix_outside_git_store(repo, &gix_repo, source)?;
 		}
 		if let Some(target) = target {
 			validate_repo_path(target).map_err(ApplyFailure::into_error)?;
@@ -1691,10 +1725,11 @@ fn assert_patch_paths_contained(
 			// write site exactly: full guard for content, prefix for links.
 			if target_mode == Some(Mode::SYMLINK) {
 				assert_prefix_within_root(repo.root(), target)?;
+				assert_prefix_outside_git_store(repo, &gix_repo, target)?;
 			} else {
 				assert_within_root(repo.root(), target)?;
+				assert_outside_git_store(repo, &gix_repo, target)?;
 			}
-			assert_outside_git_store(repo, &gix_repo, target)?;
 		}
 	}
 	Ok(())
@@ -1714,7 +1749,48 @@ fn assert_patch_paths_contained(
 /// So the store is refused by LOCATION as well as by name — canonicalized, so
 /// a symlinked or relative spelling cannot dodge the comparison.
 fn assert_outside_git_store(repo: &GitRepo, gix_repo: &gix::Repository, rel: &str) -> Result<()> {
-	let candidate = repo.root().join(rel);
+	assert_store_containment(repo, gix_repo, rel, LeafPolicy::Resolve)
+}
+
+/// Whether the leaf itself is opened, or only unlinked and recreated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeafPolicy {
+	/// The leaf is opened through: resolve it.
+	Resolve,
+	/// The leaf is unlinked or recreated, never followed: judge its prefix.
+	Prefix,
+}
+
+/// Refuse a path whose PREFIX lands in the git store, leaving the leaf alone.
+///
+/// Deleting an entry, or replacing a symlink, cannot reach through the leaf —
+/// `remove_file` unlinks the directory entry and `symlink` creates a new one.
+/// Resolving it would refuse a tracked symlink that happens to point into the
+/// store, which is a link the repository is entitled to delete.
+fn assert_prefix_outside_git_store(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	rel: &str,
+) -> Result<()> {
+	assert_store_containment(repo, gix_repo, rel, LeafPolicy::Prefix)
+}
+
+fn assert_store_containment(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	rel: &str,
+	leaf: LeafPolicy,
+) -> Result<()> {
+	let joined = repo.root().join(rel);
+	let candidate = if leaf == LeafPolicy::Prefix {
+		match joined.parent() {
+			Some(parent) => parent.to_path_buf(),
+			// No parent means the join produced the root, which is not a store.
+			None => return Ok(()),
+		}
+	} else {
+		joined
+	};
 	// The candidate usually does not exist yet, so resolve the deepest existing
 	// ancestor: a store lives in directories that do exist.
 	let mut probe = candidate.as_path();
@@ -1757,7 +1833,7 @@ fn assert_worktree_map_contained(
 		if !next.contains_key(path) {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			assert_prefix_within_root(repo.root(), path)?;
-			assert_outside_git_store(repo, gix_repo, path)?;
+			assert_prefix_outside_git_store(repo, gix_repo, path)?;
 		}
 	}
 	for (path, entry) in next {
@@ -1778,10 +1854,11 @@ fn assert_worktree_map_contained(
 		// would be refused. Only the prefix has to stay inside the root.
 		if entry.mode == Mode::SYMLINK {
 			assert_prefix_within_root(repo.root(), path)?;
+			assert_prefix_outside_git_store(repo, gix_repo, path)?;
 		} else {
 			assert_within_root(repo.root(), path)?;
+			assert_outside_git_store(repo, gix_repo, path)?;
 		}
-		assert_outside_git_store(repo, gix_repo, path)?;
 	}
 	Ok(())
 }
@@ -1814,13 +1891,13 @@ fn is_git_store_alias(component: &std::ffi::OsStr) -> bool {
 		.filter(|c| xutf::general_category(*c as u32) != xutf::GeneralCategory::Format)
 		.collect();
 	let name = folded.as_str();
-	if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case("git~1") {
-		return true;
-	}
-	// NTFS and HFS+ ignore a trailing dot or space when opening a file, so
-	// `.git.` and `.git ` reach the store too. Strip them before comparing.
+	// NTFS and HFS+ ignore trailing dots and spaces when opening a file, so
+	// `.git.`, `.git ` and `git~1.` all reach the store. Trim once and compare
+	// against BOTH protected spellings: trimming and then checking only `.git`
+	// lets `sub/git~1./hooks/pre-commit` through, and a nested store is
+	// invisible to `assert_outside_git_store`, which only knows the outer one.
 	let trimmed = name.trim_end_matches(['.', ' ']);
-	trimmed.eq_ignore_ascii_case(".git")
+	trimmed.eq_ignore_ascii_case(".git") || trimmed.eq_ignore_ascii_case("git~1")
 }
 
 /// Refuse a path that would leave the worktree once symlinks are resolved.
@@ -2963,5 +3040,105 @@ mod tests {
 			},
 			other => panic!("expected a typed git-store refusal, got {other:?}"),
 		}
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_refuses_a_path_under_a_symlink_the_same_patch_creates() {
+		// The per-path guards interrogate the CURRENT filesystem, where the
+		// link does not exist yet, so both paths pass and the refusal would
+		// land only after `write_patch_worktree` created the link.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let patch = format!(
+			concat!(
+				"diff --git a/link b/link\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/link\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+				"diff --git a/link/sneaky.txt b/link/sneaky.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/link/sneaky.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+pwned\n",
+			),
+			outside.path().display(),
+		);
+		assert!(
+			repository
+				.apply_patch(&patch, &ApplyOptions::default())
+				.is_err(),
+			"patch must refuse a path under a symlink it mints itself"
+		);
+		assert!(!temp.path().join("link").symlink_metadata().is_ok(), "the link was created anyway");
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	fn validate_repo_path_rejects_the_trimmed_dos_alias() {
+		// Windows ignores trailing dots and spaces before lookup, so trimming
+		// and then comparing only against `.git` lets the DOS alias through.
+		for path in [
+			"git~1./hooks/pre-commit",
+			"git~1 /config",
+			"sub/git~1./hooks/pre-commit",
+			"GIT~1.//config",
+		] {
+			assert!(validate_repo_path(path).is_err(), "expected {path:?} to be rejected");
+		}
+		// Names that merely resemble it stay valid.
+		assert!(validate_repo_path("git~10/notes.txt").is_ok());
+		assert!(validate_repo_path("sub/gitlab/config").is_ok());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_deletes_a_tracked_symlink_pointing_into_the_git_store() {
+		use std::os::unix::fs::symlink;
+
+		// Unlinking cannot modify the link's target, so a repository that
+		// tracks a link into its own store is entitled to delete it. Resolving
+		// the leaf would refuse an operation that touches nothing.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let link = temp.path().join("storelink");
+		symlink(temp.path().join(".git/config"), &link).expect("create symlink");
+		git(temp.path(), &["add", "-f", "storelink"]);
+		git(temp.path(), &["commit", "-m", "track store symlink"]);
+
+		let repository = repo(temp.path());
+		let blob = git(temp.path(), &["rev-parse", "HEAD:storelink"]);
+		let patch = format!(
+			concat!(
+				"diff --git a/storelink b/storelink\n",
+				"deleted file mode 120000\n",
+				"index {}..0000000\n",
+				"--- a/storelink\n",
+				"+++ /dev/null\n",
+				"@@ -1 +0,0 @@\n",
+				"-{}\n",
+				"\\ No newline at end of file\n",
+			),
+			&blob.trim()[..7],
+			temp.path().join(".git/config").display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("deleting the link is safe");
+		assert!(link.symlink_metadata().is_err(), "tracked store symlink was not deleted");
+		assert!(temp.path().join(".git/config").exists(), "the link target was disturbed");
+	}
+
+	#[test]
+	fn error_kind_is_derived_from_the_variant_name() {
+		// Derived, so a new variant cannot drift from its reported kind.
+		assert_eq!(Error::PathEscapesRoot { path: "a".to_owned() }.kind(), "PathEscapesRoot");
+		assert_eq!(Error::PathInGitStore { path: "a".to_owned() }.kind(), "PathInGitStore");
+		assert_eq!(Error::Canceled.kind(), "Canceled");
+		assert_eq!(Error::PatchFailed { message: "x".to_owned() }.kind(), "PatchFailed");
 	}
 }
