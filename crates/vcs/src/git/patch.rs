@@ -1662,6 +1662,19 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	Ok(())
 }
 
+/// Collapse `.` components and duplicate separators so two spellings of the
+/// same repository path compare equal.
+///
+/// `validate_repo_path` has already refused `..`, absolute paths and prefixes,
+/// so this only has to fold the harmless-looking forms — `./link/file` names
+/// exactly the hierarchy `link/file` does.
+fn normalize_repo_path(rel: &str) -> String {
+	rel.split('/')
+		.filter(|segment| !segment.is_empty() && *segment != ".")
+		.collect::<Vec<_>>()
+		.join("/")
+}
+
 /// Mode of `rel` as it exists in the worktree today, if it exists at all.
 ///
 /// Used to infer a mode the patch does not state — a 100% rename omits the
@@ -1691,10 +1704,12 @@ fn assert_patch_paths_contained(
 	// passes both checks and is only refused once `write_patch_worktree` has
 	// already created the link — a partial application. The topology the patch
 	// produces has to be judged before the first entry is written.
-	let mut minted_links: BTreeSet<&str> = BTreeSet::new();
+	let mut minted_links: BTreeSet<String> = BTreeSet::new();
 	for patch in patches {
 		let (source, target, _, target_mode) = patch_sides(patch, reverse);
 		let Some(target) = target else { continue };
+		let target = normalize_repo_path(target);
+		let target = target.as_str();
 		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
 		// symlink arrives with `target_mode == None` and application inherits
 		// the mode from the source entry. Infer it the same way here, or the
@@ -1707,7 +1722,7 @@ fn assert_patch_paths_contained(
 				.or_else(|| worktree_entry_mode(repo, target)),
 		};
 		if mode == Some(Mode::SYMLINK) {
-			minted_links.insert(target);
+			minted_links.insert(target.to_owned());
 		}
 	}
 	if !minted_links.is_empty() {
@@ -1716,8 +1731,10 @@ fn assert_patch_paths_contained(
 			for path in [source, target].into_iter().flatten() {
 				// A path is refused when any PROPER ancestor is a link this
 				// patch mints. The link itself is fine: it is created, not
-				// traversed.
-				let mut prefix = path;
+				// traversed. Compare normalized spellings, or `./link/file`
+				// slips past a minted `link` that names the same hierarchy.
+				let normalized = normalize_repo_path(path);
+				let mut prefix = normalized.as_str();
 				while let Some(cut) = prefix.rfind('/') {
 					prefix = &prefix[..cut];
 					if minted_links.contains(prefix) {
@@ -1832,7 +1849,54 @@ fn assert_store_containment(
 			return Err(Error::PathInGitStore { path: rel.to_owned() });
 		}
 	}
+	// A NESTED repository may keep its store anywhere — `git init
+	// --separate-git-dir=nested-meta sub` leaves a live store with no `.git`
+	// component, and it is a SIBLING of `sub` rather than a descendant, so
+	// walking the candidate's ancestors never finds it. Every `.git` FILE under
+	// the root names one; each is followed and the candidate compared against
+	// its target.
+	//
+	// Bounded to the immediate children of the root plus their own children:
+	// deeper nesting is rare enough that a full-tree walk on every path check
+	// would cost more than it protects.
+	if nested_store_contains(repo.root(), &resolved, 3) {
+		return Err(Error::PathInGitStore { path: rel.to_owned() });
+	}
 	Ok(())
+}
+
+/// Whether any nested repository's store, reachable within `depth` levels of
+/// `dir`, contains `resolved`.
+fn nested_store_contains(dir: &Path, resolved: &Path, depth: u32) -> bool {
+	if depth == 0 {
+		return false;
+	}
+	let Ok(entries) = std::fs::read_dir(dir) else {
+		return false;
+	};
+	for entry in entries.flatten() {
+		let path = entry.path();
+		if path.file_name().is_some_and(|name| name == ".git") && path.is_file() {
+			if let Ok(text) = std::fs::read_to_string(&path)
+				&& let Some(rest) = text.trim().strip_prefix("gitdir:")
+			{
+				let store = dir.join(rest.trim());
+				let store = std::fs::canonicalize(&store).unwrap_or(store);
+				if resolved.starts_with(&store) {
+					return true;
+				}
+			}
+			continue;
+		}
+		// Do not descend through links: a symlinked directory is not where a
+		// nested store lives, and following one would leave the worktree.
+		if entry.file_type().is_ok_and(|kind| kind.is_dir())
+			&& nested_store_contains(&path, resolved, depth - 1)
+		{
+			return true;
+		}
+	}
+	false
 }
 
 /// Validate every path a worktree-map write would remove or create.
@@ -1871,10 +1935,17 @@ fn assert_worktree_map_contained(
 		// never touch would fail a cherry-pick of one file because some
 		// unrelated, unchanged path had locally been replaced by a symlink —
 		// a path this call is not going to write to at all.
+		// Shape is validated for EVERY entry, changed or not. `write_index_map`
+		// calls `validate_repo_path` unconditionally further downstream, and by
+		// then `cherry_pick` has already advanced HEAD — so an untouched path
+		// that an older index accepted but this policy refuses would fail the
+		// operation after the commit. Containment is the part that may be
+		// skipped below: that one asks what the path resolves through, which
+		// only matters for a path being written.
+		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 		if previous.get(path) == Some(entry) && repo.root().join(path).exists() {
 			continue;
 		}
-		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 		// Skip containment when a proper ancestor is being removed first: the
 		// path the guard would resolve does not survive into the write pass.
 		let mut ancestor_removed = false;
@@ -3278,5 +3349,77 @@ mod tests {
 			.expect("replacing a removed symlink ancestor is safe");
 		assert_eq!(fs::read(temp.path().join("dir/file.txt")).expect("dir/file.txt"), b"real file\n");
 		assert!(!outside.path().join("file.txt").exists(), "wrote through the old link");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_normalizes_spellings_before_matching_a_minted_symlink() {
+		// `./link/file` and `link/file` name the same hierarchy, so a raw
+		// prefix comparison misses the link this patch mints.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let patch = format!(
+			concat!(
+				"diff --git a/link b/link\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/link\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+				"diff --git a/./link/sneaky.txt b/./link/sneaky.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/./link/sneaky.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+pwned\n",
+			),
+			outside.path().display(),
+		);
+		assert!(
+			repository
+				.apply_patch(&patch, &ApplyOptions::default())
+				.is_err(),
+			"a dot-prefixed spelling must not slip past the minted link"
+		);
+		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the minted link");
+	}
+
+	#[test]
+	fn apply_patch_refuses_a_nested_repositorys_separate_git_dir() {
+		// `git init --separate-git-dir=… sub` leaves a live store with no
+		// `.git` component, outside the outer repository's own directories.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--separate-git-dir=nested-meta", "sub"]);
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/nested-meta/hooks/pre-commit b/nested-meta/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/nested-meta/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"patch installed a hook into a nested repository's store"
+		);
+		assert!(
+			!temp.path().join("nested-meta/hooks/pre-commit").exists(),
+			"hook was written into the nested store"
+		);
+	}
+
+	#[test]
+	fn error_kind_stays_usable_in_a_const_context() {
+		// Downstream code classifies in const/static initializers; narrowing
+		// the API would break it silently.
+		const CANCELED: &str = Error::Canceled.kind();
+		assert_eq!(CANCELED, "Canceled");
+		assert_eq!(Error::PathInGitStore { path: "a".to_owned() }.kind(), "PathInGitStore");
 	}
 }

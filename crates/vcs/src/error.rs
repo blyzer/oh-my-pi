@@ -11,6 +11,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Unified error for all VCS operations.
 #[derive(Debug, thiserror::Error, strum::IntoStaticStr)]
+#[strum(const_into_str)]
 pub enum Error {
 	/// The directory is not inside a git repository / jj workspace.
 	#[error("not a repository: {path}")]
@@ -138,8 +139,11 @@ impl Error {
 	/// Derived, so a new variant cannot drift from its reported kind: the
 	/// variant name IS the discriminant.
 	#[must_use]
-	pub fn kind(&self) -> &'static str {
-		self.into()
+	pub const fn kind(&self) -> &'static str {
+		// `const_into_str` emits a const `into_str`; keeping `kind` const
+		// preserves the public API for callers classifying in a const or
+		// static initializer.
+		self.into_str()
 	}
 }
 
