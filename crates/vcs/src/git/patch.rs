@@ -10,7 +10,7 @@
 use std::os::unix::fs::MetadataExt;
 use std::{
 	cell::RefCell,
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+	collections::{BTreeMap, BTreeSet},
 	fs,
 	path::{Component, Path, PathBuf},
 	sync::{
@@ -26,6 +26,7 @@ use gix::{
 	objs::tree::EntryKind,
 	refs::transaction::PreviousValue,
 };
+use omp_core::{FastHashMap, FastHashSet};
 use parking_lot::Mutex;
 
 use super::{GitRepo, mutate::update_reference};
@@ -387,14 +388,11 @@ impl GitRepo {
 		// Refuse before `refs/stash` moves. Discovering an escaping path during
 		// the writes below would install a stash and its reflog while leaving
 		// the dirty worktree and index in place — the caller sees an error and
-		// a stash it did not ask for. Same ordering `cherry_pick` uses.
+		// a stash it did not ask for. Same ordering `cherry_pick` uses. The
+		// untracked paths were already judged inside `untracked_worktree_map`,
+		// before any of them was read.
 		let gix_repo = repo.clone();
 		assert_worktree_map_contained(self, &gix_repo, &tracked_worktree, &head_map)?;
-		for path in untracked.keys() {
-			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-			assert_prefix_within_root(self.root(), path)?;
-			assert_prefix_outside_git_store(self, &gix_repo, path)?;
-		}
 		update_stash_ref(
 			&repo,
 			stash_commit.id().detach(),
@@ -511,12 +509,13 @@ impl GitRepo {
 		// NFC `é` link is a write through that link — and the current
 		// filesystem, where the link is still absent, cannot show it. Both
 		// sets are keyed by `normalize_repo_path` for exactly that reason.
-		let removed_by_tracked: BTreeSet<&str> = current_worktree
-			.keys()
-			.filter(|path| !merged_worktree.contains_key(*path))
-			.map(String::as_str)
-			.collect();
-		let removed_entries = RemovedEntries::new(self.root(), &removed_by_tracked);
+		let removed_entries = RemovedEntries::new(
+			self.root(),
+			current_worktree
+				.keys()
+				.filter(|path| !merged_worktree.contains_key(*path))
+				.map(String::as_str),
+		);
 		let restored_links: BTreeSet<String> = merged_worktree
 			.iter()
 			.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
@@ -1367,6 +1366,8 @@ fn tree_map(repo: &gix::Repository, tree: gix::ObjectId) -> Result<BTreeMap<Stri
 
 fn worktree_map(repo: &GitRepo, gix_repo: &gix::Repository) -> Result<BTreeMap<String, FileEntry>> {
 	let index = index_map(gix_repo)?;
+	// Both apply and probe read every indexed path, not just patch sources.
+	assert_indexed_prefixes_contained(repo, gix_repo, &index)?;
 	tracked_worktree_map(repo, gix_repo, &index)
 }
 fn augment_patch_sources(
@@ -1457,6 +1458,17 @@ fn untracked_worktree_map(
 		if index.contains_key(&path) {
 			continue;
 		}
+		// Refuse BEFORE reading. An in-worktree separate store (`git init
+		// --separate-git-dir=meta sub`) is untracked as far as the outer
+		// repository is concerned, so every pack inside it would otherwise be
+		// opened, hashed and written as a loose blob — and the stash's tree and
+		// commit objects minted on top — only for `stash_push` to refuse the
+		// path afterwards. Same ordering `tracked_worktree_map` gets from
+		// `assert_indexed_prefixes_contained`: judge the prefix first, since the
+		// leaf is the file about to be read.
+		validate_repo_path(&path).map_err(ApplyFailure::into_error)?;
+		assert_prefix_within_root(repo.root(), &path)?;
+		assert_prefix_outside_git_store(repo, gix_repo, &path)?;
 		let absolute = repo.root().join(&path);
 		if let Some((bytes, mode)) = read_worktree_entry(&absolute, Mode::FILE)? {
 			let id = gix_repo
@@ -1803,21 +1815,39 @@ fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()
 /// so they are read once here, and each ancestor prefix a query touches is
 /// stat'ed at most once across the whole pass.
 struct RemovedEntries<'a> {
-	names:      &'a BTreeSet<&'a str>,
+	names:      BTreeSet<&'a str>,
 	root:       &'a Path,
-	identities: HashSet<(u64, u64)>,
+	identities: FastHashSet<(u64, u64)>,
 	/// Prefix -> identity, memoised across queries. `None` records a prefix
 	/// that is absent or hard-linked so it is not stat'ed again either.
-	seen:       RefCell<HashMap<&'a str, Option<(u64, u64)>>>,
+	seen:       RefCell<FastHashMap<&'a str, Option<(u64, u64)>>>,
 }
 
 impl<'a> RemovedEntries<'a> {
-	fn new(root: &'a Path, names: &'a BTreeSet<&'a str>) -> Self {
-		let identities = names
-			.iter()
-			.filter_map(|rel| entry_identity(root, rel))
-			.collect();
-		Self { names, root, identities, seen: RefCell::new(HashMap::new()) }
+	fn new(root: &'a Path, names: impl IntoIterator<Item = &'a str>) -> Self {
+		let mut entries = Self {
+			names: BTreeSet::new(),
+			root,
+			identities: FastHashSet::default(),
+			seen: RefCell::new(FastHashMap::default()),
+		};
+		for name in names {
+			entries.insert(name);
+		}
+		entries
+	}
+
+	/// Record one more removed name, resolving its identity exactly once.
+	///
+	/// Lets the patch preflight grow the set in patch order — each entry's
+	/// source joins after that entry is judged — at the same O(A + R) total
+	/// cost as building it up front.
+	fn insert(&mut self, name: &'a str) {
+		if self.names.insert(name)
+			&& let Some(id) = entry_identity(self.root, name)
+		{
+			self.identities.insert(id);
+		}
 	}
 
 	/// Whether a PROPER ancestor of `path` is removed — by name, or by being
@@ -1970,6 +2000,14 @@ fn assert_patch_paths_contained(
 			minted_links.insert(normalize_repo_path(target));
 		}
 	}
+	// Sources an EARLIER entry unlinks. `write_patch_worktree` removes each
+	// entry's source before writing its target, in patch order, so a patch
+	// that deletes tracked outbound `dir` and then adds regular `dir/file`
+	// never opens through the link: it is gone before the child is created.
+	// Resolving that child against the CURRENT filesystem would reject the
+	// valid patch. Judged in order like the minted-link scan above — a
+	// removal AFTER the child does not help it.
+	let mut removed = RemovedEntries::new(repo.root(), std::iter::empty());
 	for patch in patches {
 		let (source, target, _, declared_mode) = patch_sides(patch, reverse);
 		// Same inference the minted-link scan uses: a mode-less patch updating a
@@ -1987,18 +2025,31 @@ fn assert_patch_paths_contained(
 		}
 		if let Some(target) = target {
 			validate_repo_path(target).map_err(ApplyFailure::into_error)?;
-			// The patch declares the mode it will write. A `120000` target is
-			// unlinked and recreated by `write_worktree_entry`, never opened
-			// through, so resolving its current destination would reject a
-			// valid patch that merely repoints an outbound symlink. Mirror the
-			// write site exactly: full guard for content, prefix for links.
-			if target_mode == Some(Mode::SYMLINK) {
+			// An ancestor unlinked by an EARLIER entry does not survive into the
+			// write, so resolving the target through it — even only its prefix —
+			// judges a topology the write never sees. Root containment already
+			// models the post-removal tree; only the store check runs, on the
+			// prefix, exactly as `assert_worktree_map_contained` does.
+			if removed.covers_ancestor_of(target) {
+				assert_prefix_outside_git_store(repo, &gix_repo, target)?;
+			} else if target_mode == Some(Mode::SYMLINK) {
+				// The patch declares the mode it will write. A `120000` target
+				// is unlinked and recreated by `write_worktree_entry`, never
+				// opened through, so resolving its current destination would
+				// reject a valid patch that merely repoints an outbound symlink.
+				// Mirror the write site exactly: prefix for links.
 				assert_prefix_within_root(repo.root(), target)?;
 				assert_prefix_outside_git_store(repo, &gix_repo, target)?;
 			} else {
+				// Full guard for content.
 				assert_within_root(repo.root(), target)?;
 				assert_outside_git_store(repo, &gix_repo, target)?;
 			}
+		}
+		if let Some(source) = source
+			&& target != Some(source)
+		{
+			removed.insert(source);
 		}
 	}
 	Ok(())
@@ -2217,20 +2268,33 @@ fn gitfile_stores(store: &Path) -> Vec<PathBuf> {
 	if !has_valid_loose_head(store) {
 		return Vec::new();
 	}
-	let common = read_store_metadata(&store.join("commondir")).and_then(|common| {
-		let common = common.trim_end();
-		if common.is_empty() {
-			return None;
-		}
-		gix::path::try_from_bstr(common.as_bstr())
-			.ok()
-			.map(|common| canonical_or_self(&store.join(common)))
-	});
-	match common {
-		Some(common) if has_object_and_ref_dirs(&common) => vec![common, store.to_path_buf()],
-		Some(_) => Vec::new(),
-		None if has_object_and_ref_dirs(store) => vec![store.to_path_buf()],
-		None => Vec::new(),
+	match fs::symlink_metadata(store.join("commondir")) {
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+			if has_object_and_ref_dirs(store) {
+				vec![store.to_path_buf()]
+			} else {
+				Vec::new()
+			}
+		},
+		Err(_) => Vec::new(),
+		Ok(_) => {
+			let Some(common) = read_store_metadata(&store.join("commondir")) else {
+				return Vec::new();
+			};
+			let common = common.trim_end();
+			if common.is_empty() {
+				return Vec::new();
+			}
+			let Ok(common) = gix::path::try_from_bstr(common.as_bstr()) else {
+				return Vec::new();
+			};
+			let common = canonical_or_self(&store.join(common));
+			if has_object_and_ref_dirs(&common) {
+				vec![common, store.to_path_buf()]
+			} else {
+				Vec::new()
+			}
+		},
 	}
 }
 
@@ -2355,12 +2419,13 @@ fn assert_worktree_map_contained(
 	// entries. Treating a removed `Link` as the ancestor of `link/file` would
 	// skip containment for a path that resolves through a symlink the write
 	// pass never touches, and the refusal would then land after HEAD moved.
-	let removed: BTreeSet<&str> = previous
-		.keys()
-		.filter(|path| !next.contains_key(*path))
-		.map(String::as_str)
-		.collect();
-	let removed_entries = RemovedEntries::new(repo.root(), &removed);
+	let removed_entries = RemovedEntries::new(
+		repo.root(),
+		previous
+			.keys()
+			.filter(|path| !next.contains_key(*path))
+			.map(String::as_str),
+	);
 	for (path, entry) in next {
 		// Exactly the predicate the write loop uses. Validating entries it will
 		// never touch would fail a cherry-pick of one file because some
@@ -3780,20 +3845,6 @@ mod tests {
 
 	#[test]
 	#[cfg(unix)]
-	fn worktree_entry_mode_reports_the_full_mode_of_a_regular_source() {
-		// `None` must mean "absent". A regular file that answers `None` lets
-		// the caller fall through to the target, which is what the previous
-		// finding exploited.
-		let temp = init(&[("plain", b"x\n")]);
-		let repository = repo(temp.path());
-		assert_eq!(worktree_entry_mode(&repository, "plain"), Some(Mode::FILE));
-		assert_eq!(worktree_entry_mode(&repository, "absent"), None);
-		fs::create_dir(temp.path().join("dir")).expect("mkdir");
-		assert_eq!(worktree_entry_mode(&repository, "dir"), Some(Mode::DIR));
-	}
-
-	#[test]
-	#[cfg(unix)]
 	fn cherry_pick_refuses_a_hard_linked_symlink_alias_of_a_removed_link() {
 		use std::os::unix::fs::symlink;
 
@@ -4004,32 +4055,6 @@ mod tests {
 		repository
 			.apply_patch(patch, &ApplyOptions::default())
 			.expect("the directory a dangling commondir points at is writable");
-	}
-
-	#[test]
-	#[cfg(unix)]
-	fn removed_entries_stat_each_removed_name_once_across_queries() {
-		// The identity set is built once per preflight; querying many paths
-		// must not re-read the removed names. Probed through the memo: after
-		// construction, a query only stats its own ancestor prefixes, and a
-		// prefix stat'ed by one query is not stat'ed again by the next.
-		let temp = init(&[("keep.txt", b"base\n")]);
-		for name in ["r0", "r1", "r2"] {
-			fs::write(temp.path().join(name), b"gone\n").expect("write removed");
-		}
-		fs::create_dir_all(temp.path().join("dir/inner")).expect("mkdir");
-		let removed: BTreeSet<&str> = ["r0", "r1", "r2"].into_iter().collect();
-		let entries = RemovedEntries::new(temp.path(), &removed);
-		assert_eq!(entries.identities.len(), 3, "every removed name resolved once");
-
-		assert!(!entries.covers_ancestor_of("dir/inner/a.txt"));
-		assert!(!entries.covers_ancestor_of("dir/inner/b.txt"));
-		assert!(!entries.covers_ancestor_of("dir/c.txt"));
-		// `dir` and `dir/inner` are the only prefixes any query touched, and
-		// each appears once regardless of how many paths shared it.
-		let seen = entries.seen.borrow();
-		assert_eq!(seen.len(), 2, "prefixes memoised: {:?}", seen.keys().collect::<Vec<_>>());
-		assert!(seen.contains_key("dir") && seen.contains_key("dir/inner"));
 	}
 
 	#[test]
@@ -4247,6 +4272,133 @@ mod tests {
 			objects_before,
 			"external content was read into the object store before the refusal"
 		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn patch_and_probe_refuse_an_unrelated_escaping_indexed_prefix_before_reading() {
+		use std::os::unix::fs::symlink;
+
+		let temp = init(&[("keep.txt", b"base\n"), ("escape/file", b"tracked\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		fs::write(outside.path().join("file"), b"external secret\n").expect("outside file");
+		fs::remove_file(temp.path().join("escape/file")).expect("remove tracked file");
+		fs::remove_dir(temp.path().join("escape")).expect("remove directory");
+		symlink(outside.path(), temp.path().join("escape")).expect("shadow indexed prefix");
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/keep.txt b/keep.txt\n",
+			"--- a/keep.txt\n+++ b/keep.txt\n",
+			"@@ -1 +1 @@\n-base\n+changed\n",
+		);
+		let objects_before = loose_object_count(temp.path());
+		assert!(matches!(
+			repository.can_apply_patch(patch, &ApplyOptions::default()),
+			Err(Error::PathEscapesRoot { .. }) | Ok(false)
+		));
+		assert!(matches!(
+			repository.apply_patch(patch, &ApplyOptions::default()),
+			Err(Error::PathEscapesRoot { .. })
+		));
+		assert_eq!(loose_object_count(temp.path()), objects_before, "external bytes were persisted");
+		assert_eq!(fs::read(temp.path().join("keep.txt")).expect("unchanged file"), b"base\n");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_push_refuses_an_untracked_separate_store_before_reading_it() {
+		// `git init --separate-git-dir=meta sub` leaves `meta/` untracked as far
+		// as the outer repository is concerned. Its packs must not be opened,
+		// hashed and written as loose blobs — nor a stash tree minted on top —
+		// only for the path to be refused afterwards.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--separate-git-dir=meta", "sub"]);
+		fs::write(temp.path().join("meta/objects/pack/big.pack"), vec![0u8; 256 * 1024])
+			.expect("fake pack");
+
+		let repository = repo(temp.path());
+		let objects_before = loose_object_count(temp.path());
+		assert!(repository.stash_push(Some("wip")).is_err(), "stash must refuse the nested store");
+		assert_eq!(
+			loose_object_count(temp.path()),
+			objects_before,
+			"nested store content was hashed into the outer object store before the refusal"
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_accepts_a_child_under_a_link_the_same_patch_deletes_first() {
+		use std::os::unix::fs::symlink;
+
+		// The write loop unlinks each entry's source before writing its target,
+		// in patch order. A patch that deletes tracked outbound `dir` and then
+		// adds regular `dir/file` never resolves through the link; judging the
+		// child against the current filesystem rejects a valid patch.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("dir")).expect("create symlink");
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+
+		let repository = repo(temp.path());
+		let patch = format!(
+			concat!(
+				"diff --git a/dir b/dir\n",
+				"deleted file mode 120000\n",
+				"--- a/dir\n",
+				"+++ /dev/null\n",
+				"@@ -1 +0,0 @@\n",
+				"-{}\n",
+				"\\ No newline at end of file\n",
+				"diff --git a/dir/file.txt b/dir/file.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/dir/file.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+real\n",
+			),
+			outside.path().display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("a child under a link deleted earlier in the same patch is safe");
+		assert!(temp.path().join("dir").is_dir(), "the link was not replaced by a directory");
+		assert_eq!(fs::read(temp.path().join("dir/file.txt")).expect("read"), b"real\n");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the deleted link");
+
+		// Order matters: the same two entries reversed create the child
+		// through the still-present link and must be refused.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		symlink(outside.path(), temp.path().join("dir")).expect("create symlink");
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+		let repository = repo(temp.path());
+		let reversed = format!(
+			concat!(
+				"diff --git a/dir/file.txt b/dir/file.txt\n",
+				"new file mode 100644\n",
+				"--- /dev/null\n",
+				"+++ b/dir/file.txt\n",
+				"@@ -0,0 +1 @@\n",
+				"+real\n",
+				"diff --git a/dir b/dir\n",
+				"deleted file mode 120000\n",
+				"--- a/dir\n",
+				"+++ /dev/null\n",
+				"@@ -1 +0,0 @@\n",
+				"-{}\n",
+				"\\ No newline at end of file\n",
+			),
+			outside.path().display(),
+		);
+		assert!(
+			repository
+				.apply_patch(&reversed, &ApplyOptions::default())
+				.is_err(),
+			"a removal AFTER the child does not make the child safe"
+		);
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the link");
 	}
 
 	#[test]

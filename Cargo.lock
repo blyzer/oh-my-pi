@@ -8900,6 +8900,7 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "omp-core",
  "parking_lot",
  "strum",
  "tempfile",

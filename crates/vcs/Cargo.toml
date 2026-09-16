@@ -12,6 +12,7 @@ description = "In-process version control: gitoxide-backed git and jj-lib-backed
 workspace = true
 
 [dependencies]
+omp-core.workspace = true
 gix.workspace = true
 jj-lib.workspace = true
 thiserror.workspace = true
