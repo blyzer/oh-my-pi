@@ -135,7 +135,15 @@ impl GitRepo {
 		//
 		// Rejecting up front keeps application all-or-nothing with respect to
 		// path validity.
-		if !options.cached {
+		if options.cached {
+			// The index never resolves a path, so the worktree preflight does
+			// not apply — but `write_index_map_at` only validates `.git` by
+			// NAME. A live store under another name (`git init
+			// --separate-git-dir=meta .`) would take `meta/hooks/pre-commit`
+			// into the index, and a later checkout materializes it over the
+			// live hook. Judge the store LOCATION for every staged target.
+			assert_cached_targets_outside_store(self, &repo, &patches, options.reverse)?;
+		} else {
 			assert_patch_paths_contained(self, &patches, options.reverse)?;
 		}
 		let mut state = if options.cached {
@@ -171,7 +179,12 @@ impl GitRepo {
 		// apply. Without this the predicate answers `true` for a patch
 		// `apply_patch` then refuses, and a caller that gates on it would treat
 		// an attack as a viable change.
-		if !options.cached && assert_patch_paths_contained(self, &patches, options.reverse).is_err() {
+		let contained = if options.cached {
+			assert_cached_targets_outside_store(self, &repo, &patches, options.reverse).is_ok()
+		} else {
+			assert_patch_paths_contained(self, &patches, options.reverse).is_ok()
+		};
+		if !contained {
 			return Ok(false);
 		}
 		let mut state = if options.cached {
@@ -516,11 +529,12 @@ impl GitRepo {
 				.filter(|path| !merged_worktree.contains_key(*path))
 				.map(String::as_str),
 		);
-		let mut restored_links: BTreeSet<String> = merged_worktree
-			.iter()
-			.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
-			.map(|(path, _)| normalize_repo_path(path))
-			.collect();
+		let mut restored_links: FastHashSet<String> = FastHashSet::default();
+		for (path, entry) in &merged_worktree {
+			if entry.mode == Mode::SYMLINK {
+				claim_link_key(path, &mut restored_links)?;
+			}
+		}
 		// The untracked half restores in this same iteration order, so a link
 		// it creates is present for every LATER untracked entry. A stash
 		// authored on a case-sensitive filesystem can hold outbound `A -> .git`
@@ -532,8 +546,16 @@ impl GitRepo {
 		for (path, entry) in &untracked {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			let is_link = entry.mode == Mode::SYMLINK;
-			assert_no_symlink_ancestor(path, &restored_links, is_link)?;
-			if removed_entries.covers_ancestor_of(path) || is_link {
+			assert_key_free(path, &restored_links, is_link)?;
+			// An ancestor the tracked map deletes does not survive into the
+			// untracked write: `write_worktree_map` removes `dir` before
+			// `dir/u` is created, so resolving the CURRENT `dir` — even only
+			// as a prefix — judges a topology the restore never sees. Root
+			// containment already models the post-removal tree; only the store
+			// check runs, exactly as the map preflight does.
+			if removed_entries.covers_ancestor_of(path) {
+				assert_prefix_outside_git_store(self, &repo, path)?;
+			} else if is_link {
 				assert_prefix_within_root(self.root(), path)?;
 				assert_prefix_outside_git_store(self, &repo, path)?;
 			} else {
@@ -541,7 +563,7 @@ impl GitRepo {
 				assert_outside_git_store(self, &repo, path)?;
 			}
 			if is_link {
-				restored_links.insert(normalize_repo_path(path));
+				claim_link_key(path, &mut restored_links)?;
 			}
 		}
 		write_worktree_map(self, &current_worktree, &merged_worktree)?;
@@ -1796,21 +1818,36 @@ fn normalize_repo_path(rel: &str) -> String {
 	xutf::IntoUnicodeNormalized::into_nfc(folded)
 }
 
-/// Refuse proper descendants of links in the resulting topology, and aliases
-/// of the links themselves. Normalized names are comparison keys, never
-/// filesystem paths.
+/// Refuse proper descendants of links in the resulting topology, and every
+/// entry that collides with a link's key. Normalized names are comparison
+/// keys, never filesystem paths.
 ///
 /// The key equality case is not redundant with the ancestor walk. A tree
 /// authored on a case-sensitive filesystem may hold outbound symlink `Link`
 /// and regular file `link`; they are two entries there and ONE entry on a
 /// case-insensitive target, where the writer creates the link first and the
-/// regular write then follows it. Only the entry that IS the link may carry
-/// its own key — `is_link` says so — and every other entry sharing that key
-/// is refused before the first write.
-fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>, is_link: bool) -> Result<()> {
+/// regular write then follows it.
+///
+/// Exactly one entry may carry a key: the one that OWNS it, meaning the link
+/// whose insertion created it. Exempting links as a class instead would admit
+/// `Link -> x` alongside `link -> y`, where the second write replaces the
+/// first filesystem entry while HEAD and the index still name both — a
+/// cherry-pick that reports success against a worktree that does not match.
+fn assert_key_free(path: &str, links: &FastHashSet<String>, owns_key: bool) -> Result<()> {
 	if has_normalized_ancestor_in(path, links)
-		|| (!is_link && links.contains(&normalize_repo_path(path)))
+		|| (!owns_key && links.contains(&normalize_repo_path(path)))
 	{
+		return Err(Error::PathEscapesRoot { path: path.to_owned() });
+	}
+	Ok(())
+}
+
+/// Claim `path`'s key for a link, refusing a second entry that wants it.
+///
+/// Ownership is established by INSERTION: the first link to claim a key keeps
+/// it, and any later entry — link or not — collides.
+fn claim_link_key(path: &str, links: &mut FastHashSet<String>) -> Result<()> {
+	if !links.insert(normalize_repo_path(path)) {
 		return Err(Error::PathEscapesRoot { path: path.to_owned() });
 	}
 	Ok(())
@@ -1924,7 +1961,7 @@ fn entry_identity(root: &Path, rel: &str) -> Option<(u64, u64)> {
 /// write will remove first — must be built with that key too, or an NFD
 /// spelling in one map and an NFC spelling in the other name the same
 /// directory and never match.
-fn has_normalized_ancestor_in(path: &str, set: &BTreeSet<String>) -> bool {
+fn has_normalized_ancestor_in(path: &str, set: &FastHashSet<String>) -> bool {
 	if set.is_empty() {
 		return false;
 	}
@@ -1984,6 +2021,33 @@ fn inferred_target_mode(
 	}
 }
 
+/// Refuse a staged path that lands in a live Git store, by LOCATION.
+///
+/// `--cached` writes only the index, so nothing is resolved through a symlink
+/// and the worktree preflight does not apply. What still applies is the store:
+/// `write_index_map_at` validates `.git` by NAME only, so after
+/// `git init --separate-git-dir=meta .` a patch staging `meta/hooks/pre-commit`
+/// is accepted, and the next checkout or reset materializes that entry over
+/// the live hook. Both sides are judged — a staged deletion of a store path is
+/// equally a store mutation.
+fn assert_cached_targets_outside_store(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	patches: &[FilePatch],
+	reverse: bool,
+) -> Result<()> {
+	for patch in patches {
+		let (source, target, ..) = patch_sides(patch, reverse);
+		for path in [source, target].into_iter().flatten() {
+			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+			// The leaf is never opened — only an index entry is written — so
+			// the prefix policy is the one that matches the operation.
+			assert_prefix_outside_git_store(repo, gix_repo, path)?;
+		}
+	}
+	Ok(())
+}
+
 /// Validate every path a patch would touch, before any of them is touched.
 ///
 /// Mirrors exactly what [`write_patch_worktree`] will do per side: a source
@@ -2012,7 +2076,7 @@ fn assert_patch_paths_contained(
 	// its empty directory are gone before the link exists — and git accepts
 	// the same reordering. Checking the deletion against the final set would
 	// reject it.
-	let mut minted_links: BTreeSet<String> = BTreeSet::new();
+	let mut minted_links: FastHashSet<String> = FastHashSet::default();
 	for patch in patches {
 		let (source, target, _, target_mode) = patch_sides(patch, reverse);
 		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
@@ -2025,13 +2089,13 @@ fn assert_patch_paths_contained(
 		// target may be the link this entry itself mints; a source never is,
 		// since it is unlinked rather than created.
 		if let Some(source) = source {
-			assert_no_symlink_ancestor(source, &minted_links, false)?;
+			assert_key_free(source, &minted_links, false)?;
 		}
 		let Some(target) = target else { continue };
 		let mints_link = mode == Some(Some(Mode::SYMLINK));
-		assert_no_symlink_ancestor(target, &minted_links, mints_link)?;
+		assert_key_free(target, &minted_links, mints_link)?;
 		if mints_link {
-			minted_links.insert(normalize_repo_path(target));
+			claim_link_key(target, &mut minted_links)?;
 		}
 	}
 	// The writer removes each entry's source before creating its target.
@@ -2446,13 +2510,17 @@ fn assert_worktree_map_contained(
 ) -> Result<()> {
 	// Current filesystem checks cannot see links this map will create. Judge
 	// the resulting tree before removals, writes, or the caller's HEAD update.
-	let links: BTreeSet<String> = next
-		.iter()
-		.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
-		.map(|(path, _)| normalize_repo_path(path))
-		.collect();
+	// Claimed incrementally rather than collected: two links whose keys
+	// collide are a conflict, and `collect` would silently keep one.
+	let mut links: FastHashSet<String> = FastHashSet::default();
 	for (path, entry) in next {
-		assert_no_symlink_ancestor(path, &links, entry.mode == Mode::SYMLINK)?;
+		if entry.mode == Mode::SYMLINK {
+			claim_link_key(path, &mut links)?;
+		}
+	}
+	for (path, entry) in next {
+		let owns_key = entry.mode == Mode::SYMLINK;
+		assert_key_free(path, &links, owns_key)?;
 	}
 	for path in previous.keys() {
 		if !next.contains_key(path) {
@@ -4968,6 +5036,146 @@ mod tests {
 			.apply_patch(&patch, &ApplyOptions::default())
 			.expect("repointing a tracked outbound symlink is valid");
 		assert_eq!(fs::read_link(temp.path().join("link")).expect("link"), newer.path());
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_refuses_two_distinct_symlinks_sharing_one_normalized_key() {
+		// `Link -> x` and `link -> y` are two entries where they were authored
+		// and ONE on a case-insensitive target: the second write replaces the
+		// first while HEAD and the index still name both, so the pick would
+		// report success against a worktree that does not match.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let first = tempfile::tempdir().expect("first target");
+		let second = tempfile::tempdir().expect("second target");
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let mut map = tree_map(&gix_repo, head_tree).expect("base map");
+		let upper = gix_repo
+			.write_blob(first.path().as_os_str().as_encoded_bytes())
+			.expect("first blob")
+			.detach();
+		let lower = gix_repo
+			.write_blob(second.path().as_os_str().as_encoded_bytes())
+			.expect("second blob")
+			.detach();
+		map.insert("Link".to_owned(), FileEntry::new(upper, Mode::SYMLINK));
+		map.insert("link".to_owned(), FileEntry::new(lower, Mode::SYMLINK));
+		let tree = write_tree_map(&gix_repo, &map).expect("colliding tree");
+		let picked = gix_repo
+			.new_commit("colliding links", tree, [head.id().detach()])
+			.expect("commit")
+			.id()
+			.to_string();
+		let head_before = git(temp.path(), &["rev-parse", "HEAD"]);
+
+		assert!(
+			repo(temp.path()).cherry_pick(&picked).is_err(),
+			"two symlinks sharing one normalized key must be refused"
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
+		assert!(fs::symlink_metadata(temp.path().join("Link")).is_err(), "a link was created");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_pop_restores_an_untracked_child_under_a_link_the_tracked_half_deletes() {
+		use std::os::unix::fs::symlink;
+
+		// `dir` is a tracked outbound symlink, PRESENT on disk at pop time.
+		// The stash's tracked half deletes it and its untracked half restores
+		// `dir/u`. `write_worktree_map` unlinks `dir` before the untracked
+		// entry is created, so resolving the current `dir` judges a topology
+		// the restore never sees and rejects a safe pop.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("dir")).expect("create symlink");
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-m", "track outbound link"]);
+
+		let repository = repo(temp.path());
+		let gix_repo = repository.gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_id = head.id().detach();
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		// Tracked half: HEAD without `dir`, so the pop deletes it.
+		let mut tracked = tree_map(&gix_repo, head_tree).expect("base map");
+		tracked.remove("dir");
+		let tracked_tree = write_tree_map(&gix_repo, &tracked).expect("tracked tree");
+		// Untracked half: a regular child beneath the doomed link.
+		let child = gix_repo
+			.write_blob(b"child\n")
+			.expect("child blob")
+			.detach();
+		let mut untracked = BTreeMap::new();
+		untracked.insert("dir/u".to_owned(), FileEntry::new(child, Mode::FILE));
+		let untracked_tree = write_tree_map(&gix_repo, &untracked).expect("untracked tree");
+		let index_commit = gix_repo
+			.new_commit("index on HEAD: wip", tracked_tree, [head_id])
+			.expect("index commit");
+		let untracked_commit = gix_repo
+			.new_commit("untracked files on HEAD", untracked_tree, std::iter::empty::<gix::ObjectId>())
+			.expect("untracked commit");
+		let stash = gix_repo
+			.new_commit("wip", tracked_tree, [
+				head_id,
+				index_commit.id().detach(),
+				untracked_commit.id().detach(),
+			])
+			.expect("stash commit");
+		update_stash_ref(
+			&gix_repo,
+			stash.id().detach(),
+			PreviousValue::Any,
+			"On HEAD: wip".to_owned(),
+			true,
+		)
+		.expect("install stash");
+		assert!(
+			temp.path().join("dir").symlink_metadata().is_ok(),
+			"the doomed link must be present at pop time"
+		);
+
+		assert!(repository.stash_try_pop(false).expect("pop"), "pop refused a safe restore");
+		assert_eq!(
+			fs::read(temp.path().join("dir/u")).expect("restored child"),
+			b"child\n",
+			"the untracked child was not restored"
+		);
+		assert!(temp.path().join("dir").is_dir(), "the link was not replaced by a directory");
+		assert!(!outside.path().join("u").exists(), "wrote through the deleted link");
+	}
+
+	#[test]
+	fn cached_patch_refuses_a_hook_in_a_separate_git_dir() {
+		// `--cached` writes only the index, so the worktree preflight does not
+		// run — but `meta/` is a live store, and a later checkout would
+		// materialize a staged hook over the real one.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--separate-git-dir=meta", "sub"]);
+		let patch = concat!(
+			"diff --git a/meta/hooks/pre-commit b/meta/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/meta/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		let repository = repo(temp.path());
+		let options = ApplyOptions { cached: true, ..ApplyOptions::default() };
+		assert!(
+			repository.apply_patch(patch, &options).is_err(),
+			"a staged path inside a live store must be refused"
+		);
+		assert!(
+			!repository.can_apply_patch(patch, &options).expect("probe"),
+			"the probe must agree with the applier"
+		);
+		assert!(
+			!git(temp.path(), &["ls-files"]).contains("meta/hooks"),
+			"the hook was staged into the index"
+		);
 	}
 
 	#[test]
