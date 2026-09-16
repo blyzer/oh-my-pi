@@ -562,7 +562,7 @@ impl GitRepo {
 			// containment already models the post-removal tree; only the store
 			// check runs, exactly as the map preflight does.
 			if removed_entries.covers_ancestor_of(path) {
-				assert_prefix_outside_git_store(self, &repo, path)?;
+				assert_spelling_outside_git_store(self, &repo, path)?;
 			} else if is_link {
 				assert_prefix_within_root(self.root(), path)?;
 				assert_prefix_outside_git_store(self, &repo, path)?;
@@ -2144,7 +2144,7 @@ fn assert_patch_paths_contained(
 			// models the post-removal tree; only the store check runs, on the
 			// prefix, exactly as `assert_worktree_map_contained` does.
 			if removed.covers_ancestor_of(target) {
-				assert_prefix_outside_git_store(repo, &gix_repo, target)?;
+				assert_spelling_outside_git_store(repo, &gix_repo, target)?;
 			} else if target_mode == Some(Mode::SYMLINK) {
 				// The patch declares the mode it will write. A `120000` target
 				// is unlinked and recreated by `write_worktree_entry`, never
@@ -2187,6 +2187,25 @@ enum LeafPolicy {
 	Resolve,
 	/// The leaf is unlinked or recreated, never followed: judge its prefix.
 	Prefix,
+	/// An ancestor is already scheduled for unlink, so the prefix as it stands
+	/// today does not survive into the write: judge the SPELLING only.
+	Spelling,
+}
+
+/// Refuse a path whose spelling lands in the git store, resolving nothing.
+///
+/// For a target under an ancestor an earlier entry unlinks. Resolving that
+/// ancestor asks about a topology the write never sees: a doomed
+/// `dir -> .git` would make a safe `dir/file` look like a write into the
+/// store, and both apply and probe would refuse an operation git accepts.
+/// The spelling still has to be judged, or a patch could delete `meta` and
+/// write `meta/hooks/pre-commit` beneath the store it just unlinked.
+fn assert_spelling_outside_git_store(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	rel: &str,
+) -> Result<()> {
+	assert_store_containment(repo, gix_repo, rel, LeafPolicy::Spelling)
 }
 
 /// Refuse a path whose PREFIX lands in the git store, leaving the leaf alone.
@@ -2230,22 +2249,28 @@ fn assert_store_containment(
 	let unresolved = candidate
 		.strip_prefix(repo.root())
 		.map_or_else(|_| candidate.clone(), |tail| root_canonical.join(tail));
-	// The candidate usually does not exist yet, so resolve the deepest existing
-	// ancestor: a store lives in directories that do exist. Resolution catches
-	// the other direction — an alias that leads INTO a store under a name that
-	// does not spell it.
-	let mut probe = candidate.as_path();
-	let resolved = loop {
-		if let Ok(canonical) = std::fs::canonicalize(probe) {
-			// Re-attach the unresolved tail so `meta/hooks/pre-commit` is still
-			// compared as a path under `meta`, not just as `meta`.
-			let tail = candidate.strip_prefix(probe).unwrap_or(Path::new(""));
-			break canonical.join(tail);
-		}
-		match probe.parent() {
-			Some(parent) if parent != probe => probe = parent,
-			// Nothing along the path exists, so only the spelling can be judged.
-			_ => break unresolved.clone(),
+	// Resolution catches the other direction — an alias that leads INTO a store
+	// under a name that does not spell it. It is skipped for `Spelling`, where
+	// an ancestor is already scheduled for unlink: resolving it would judge a
+	// topology the write never sees and refuse a safe operation.
+	let resolved = if leaf == LeafPolicy::Spelling {
+		unresolved.clone()
+	} else {
+		// The candidate usually does not exist yet, so resolve the deepest
+		// existing ancestor: a store lives in directories that do exist.
+		let mut probe = candidate.as_path();
+		loop {
+			if let Ok(canonical) = std::fs::canonicalize(probe) {
+				// Re-attach the unresolved tail so `meta/hooks/pre-commit` is
+				// still compared as a path under `meta`, not just as `meta`.
+				let tail = candidate.strip_prefix(probe).unwrap_or(Path::new(""));
+				break canonical.join(tail);
+			}
+			match probe.parent() {
+				Some(parent) if parent != probe => probe = parent,
+				// Nothing along the path exists: only the spelling can be judged.
+				_ => break unresolved.clone(),
+			}
 		}
 	};
 	let inside = |store: &Path| unresolved.starts_with(store) || resolved.starts_with(store);
@@ -2624,8 +2649,9 @@ fn assert_worktree_map_contained(
 			// store check must too, or `dir -> .git` replaced by `dir/file`
 			// resolves through the link that is about to be unlinked and the
 			// safe operation is rejected as touching the store. Judge the
-			// prefix, which is what survives into the write.
-			assert_prefix_outside_git_store(repo, gix_repo, path)?;
+			// SPELLING, which is what survives into the write — resolving the
+			// doomed ancestor is exactly what rejected it.
+			assert_spelling_outside_git_store(repo, gix_repo, path)?;
 			continue;
 		}
 		// A symlink entry is written by unlinking whatever is there and calling
@@ -5226,6 +5252,79 @@ mod tests {
 			!git(temp.path(), &["ls-files"]).contains("meta/hooks"),
 			"the hook was staged into the index"
 		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_replaces_a_doomed_store_link_with_a_directory() {
+		use std::os::unix::fs::symlink;
+
+		// `dir -> .git` is tracked and deleted by this patch before `dir/file`
+		// is created, so the write never reaches the store. Resolving the
+		// doomed ancestor makes the safe child look like a write into `.git`.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		symlink(".git", temp.path().join("dir")).expect("link into the store");
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-m", "track store link"]);
+		let config = fs::read(temp.path().join(".git/config")).expect("config");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/dir b/dir\n",
+			"deleted file mode 120000\n",
+			"--- a/dir\n",
+			"+++ /dev/null\n",
+			"@@ -1 +0,0 @@\n",
+			"-.git\n",
+			"\\ No newline at end of file\n",
+			"diff --git a/dir/file.txt b/dir/file.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/dir/file.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+real\n",
+		);
+		assert!(
+			repository
+				.can_apply_patch(patch, &ApplyOptions::default())
+				.expect("probe"),
+			"the probe refused a patch the writer applies safely"
+		);
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("deleting a store link before writing its child is safe");
+		assert!(temp.path().join("dir").is_dir(), "the link was not replaced by a directory");
+		assert_eq!(fs::read(temp.path().join("dir/file.txt")).expect("child"), b"real\n");
+		assert_eq!(
+			fs::read(temp.path().join(".git/config")).expect("config"),
+			config,
+			"the child was written through the store link"
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_still_refuses_a_child_of_a_deleted_store_directory() {
+		// The spelling is judged even when an ancestor is doomed: deleting the
+		// gitfile and writing beneath the store it names is not made safe by
+		// the removal.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--separate-git-dir=meta", "sub"]);
+		let patch = concat!(
+			"diff --git a/meta/hooks/pre-commit b/meta/hooks/pre-commit\n",
+			"new file mode 100755\n",
+			"--- /dev/null\n",
+			"+++ b/meta/hooks/pre-commit\n",
+			"@@ -0,0 +1 @@\n",
+			"+#!/bin/sh\n",
+		);
+		assert!(
+			repo(temp.path())
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"a hook inside a live store must stay refused"
+		);
+		assert!(!temp.path().join("meta/hooks/pre-commit").exists(), "the hook was written");
 	}
 
 	#[test]
