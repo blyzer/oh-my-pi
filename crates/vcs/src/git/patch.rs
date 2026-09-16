@@ -1758,10 +1758,11 @@ const fn is_hfs_ignorable(c: char) -> bool {
 /// `é` and a later `e◌́/file` are one entry). Over-folding can only refuse
 /// MORE descendants of a minted link, never fewer.
 ///
-/// NFC first, then case: composing before folding is what makes the two
-/// spellings of `é` land on one key. `str::to_lowercase` is the full Unicode
-/// mapping; `xutf` deliberately offers ASCII-only folding, which would let
-/// `É/file` slip past a minted `é`.
+/// xutf has normalization but only ASCII case folding. Decompose first, then
+/// use scalar lower/upper/lower mappings to merge Unicode case variants and
+/// expansions (including final sigma and sharp S), and compose the key again.
+/// This deliberately over-folds some names; it is only used to refuse unsafe
+/// topology, never to authorize removal or to open a filesystem path.
 fn normalize_repo_path(rel: &str) -> String {
 	let mut normalized = String::with_capacity(rel.len());
 	for segment in rel
@@ -1773,7 +1774,14 @@ fn normalize_repo_path(rel: &str) -> String {
 		}
 		normalized.push_str(segment);
 	}
-	xutf::IntoUnicodeNormalized::into_nfc(normalized).to_lowercase()
+	let decomposed = xutf::IntoUnicodeNormalized::into_nfd(normalized);
+	let folded: String = decomposed
+		.chars()
+		.flat_map(char::to_lowercase)
+		.flat_map(char::to_uppercase)
+		.flat_map(char::to_lowercase)
+		.collect();
+	xutf::IntoUnicodeNormalized::into_nfc(folded)
 }
 
 /// Refuse proper descendants of links in the resulting topology, not the links
@@ -1839,9 +1847,8 @@ impl<'a> RemovedEntries<'a> {
 
 	/// Record one more removed name, resolving its identity exactly once.
 	///
-	/// Lets the patch preflight grow the set in patch order — each entry's
-	/// source joins after that entry is judged — at the same O(A + R) total
-	/// cost as building it up front.
+	/// Lets the patch preflight grow the set in write order: each source joins
+	/// after its removal is validated and before its target is checked.
 	fn insert(&mut self, name: &'a str) {
 		if self.names.insert(name)
 			&& let Some(id) = entry_identity(self.root, name)
@@ -2000,13 +2007,9 @@ fn assert_patch_paths_contained(
 			minted_links.insert(normalize_repo_path(target));
 		}
 	}
-	// Sources an EARLIER entry unlinks. `write_patch_worktree` removes each
-	// entry's source before writing its target, in patch order, so a patch
-	// that deletes tracked outbound `dir` and then adds regular `dir/file`
-	// never opens through the link: it is gone before the child is created.
-	// Resolving that child against the CURRENT filesystem would reject the
-	// valid patch. Judged in order like the minted-link scan above — a
-	// removal AFTER the child does not help it.
+	// The writer removes each entry's source before creating its target.
+	// Record that removal after validating the source, before judging the
+	// target. Earlier removals persist for subsequent entries as well.
 	let mut removed = RemovedEntries::new(repo.root(), std::iter::empty());
 	for patch in patches {
 		let (source, target, _, declared_mode) = patch_sides(patch, reverse);
@@ -2022,10 +2025,11 @@ fn assert_patch_paths_contained(
 			validate_repo_path(source).map_err(ApplyFailure::into_error)?;
 			assert_prefix_within_root(repo.root(), source)?;
 			assert_prefix_outside_git_store(repo, &gix_repo, source)?;
+			removed.insert(source);
 		}
 		if let Some(target) = target {
 			validate_repo_path(target).map_err(ApplyFailure::into_error)?;
-			// An ancestor unlinked by an EARLIER entry does not survive into the
+			// An ancestor already scheduled for unlink does not survive into the
 			// write, so resolving the target through it — even only its prefix —
 			// judges a topology the write never sees. Root containment already
 			// models the post-removal tree; only the store check runs, on the
@@ -2045,11 +2049,6 @@ fn assert_patch_paths_contained(
 				assert_within_root(repo.root(), target)?;
 				assert_outside_git_store(repo, &gix_repo, target)?;
 			}
-		}
-		if let Some(source) = source
-			&& target != Some(source)
-		{
-			removed.insert(source);
 		}
 	}
 	Ok(())
@@ -2151,6 +2150,8 @@ fn assert_store_containment(
 	Ok(())
 }
 
+type StoreScan = (u64, Arc<Vec<PathBuf>>);
+
 /// Every nested repository store under `repo`'s root.
 ///
 /// Discovery is a directory walk and the containment guards run per affected
@@ -2167,8 +2168,7 @@ fn assert_store_containment(
 /// cache exists to remove. Entries from earlier operations are dropped on the
 /// next insert, so the map never outgrows the set of live roots.
 fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
-	/// Per-root discovery result, stamped with the operation it was scanned in.
-	type StoreScan = (u64, Arc<Vec<PathBuf>>);
+	// Per-root discovery results stamped with their scan generation.
 	static CACHE: LazyLock<Mutex<BTreeMap<PathBuf, StoreScan>>> =
 		LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -2186,9 +2186,24 @@ fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
 	collect_nested_stores(root, &mut found);
 	let found = Arc::new(found);
 	let mut cache = CACHE.lock();
-	cache.retain(|_, (stamp, _)| *stamp == generation);
-	cache.insert(root.to_path_buf(), (generation, Arc::clone(&found)));
+	publish_store_scan(&mut cache, root, generation, OPERATION.load(Ordering::Acquire), &found);
 	found
+}
+
+/// Called under the cache lock, after sampling the current operation stamp.
+fn publish_store_scan(
+	cache: &mut BTreeMap<PathBuf, StoreScan>,
+	root: &Path,
+	generation: u64,
+	current: u64,
+	found: &Arc<Vec<PathBuf>>,
+) {
+	// A later operation may have published while this scan ran unlocked.
+	if current != generation {
+		return;
+	}
+	cache.retain(|_, (stamp, _)| *stamp == generation);
+	cache.insert(root.to_path_buf(), (generation, Arc::clone(found)));
 }
 
 /// Monotonic operation stamp; bumping it invalidates [`nested_stores`].
@@ -4573,6 +4588,54 @@ mod tests {
 
 	#[test]
 	#[cfg(unix)]
+	fn patch_refuses_casefold_aliases_of_a_minted_store_link() {
+		for (link, alias) in [("Σ", "ς"), ("ß", "ss"), ("ᾀ", "ἀι")] {
+			let temp = init(&[("keep.txt", b"base\n")]);
+			let config = fs::read(temp.path().join(".git/config")).expect("config");
+			let patch = format!(
+				"diff --git a/{link} b/{link}\nnew file mode 120000\n--- /dev/null\n+++ b/{link}\n@@ \
+				 -0,0 +1 @@\n+.git\n\\ No newline at end of file\ndiff --git a/{alias}/config \
+				 b/{alias}/config\nnew file mode 100644\n--- /dev/null\n+++ b/{alias}/config\n@@ -0,0 \
+				 +1 @@\n+payload\n"
+			);
+			assert!(
+				repo(temp.path())
+					.apply_patch(&patch, &ApplyOptions::default())
+					.is_err()
+			);
+			assert_eq!(fs::read(temp.path().join(".git/config")).expect("config"), config);
+			assert!(fs::symlink_metadata(temp.path().join(link)).is_err(), "partial application");
+		}
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn patch_rename_can_replace_its_source_link_with_a_directory() {
+		use std::os::unix::fs::symlink;
+
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside");
+		symlink(outside.path(), temp.path().join("dir")).expect("link");
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-m", "track link"]);
+		let patch = "diff --git a/dir b/dir/file\nsimilarity index 100%\nrename from dir\nrename to \
+		             dir/file\n";
+		let repository = repo(temp.path());
+		assert!(
+			repository
+				.can_apply_patch(patch, &ApplyOptions::default())
+				.expect("probe")
+		);
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("rename");
+		assert!(temp.path().join("dir").is_dir());
+		assert_eq!(fs::read_link(temp.path().join("dir/file")).expect("moved link"), outside.path());
+		assert!(!outside.path().join("file").exists());
+	}
+
+	#[test]
+	#[cfg(unix)]
 	fn nested_store_discovery_does_not_open_a_fifo_named_dot_git() {
 		// A FIFO named `.git` is not a gitfile, but `is_dir()` is false for it
 		// too, and a plain `read_to_string` blocks every apply, cherry-pick and
@@ -4774,6 +4837,21 @@ mod tests {
 			.expect("replacing a removed link under another spelling is safe");
 		assert!(temp.path().join("e\u{301}/file.txt").is_file(), "child was not written");
 		assert!(!outside.path().join("file.txt").exists(), "wrote through the old link");
+	}
+
+	#[test]
+	fn stale_store_scan_preserves_newer_results_for_all_roots() {
+		let mut cache = BTreeMap::new();
+		let old = Arc::new(vec![PathBuf::from("old-store")]);
+		let new = Arc::new(vec![PathBuf::from("new-store")]);
+		let other = Arc::new(vec![PathBuf::from("other-store")]);
+		publish_store_scan(&mut cache, Path::new("a"), 2, 2, &new);
+		publish_store_scan(&mut cache, Path::new("b"), 2, 2, &other);
+		// Operation 1 finishes after operation 2 has populated both roots.
+		publish_store_scan(&mut cache, Path::new("a"), 1, 2, &old);
+		assert_eq!(*cache[Path::new("a")].1, *new);
+		assert_eq!(*cache[Path::new("b")].1, *other);
+		assert_eq!(cache[Path::new("a")].0, 2);
 	}
 
 	#[test]
