@@ -6,6 +6,8 @@
 //! markers or unmerged entries in the checkout. Stash pop is likewise
 //! preflighted so a rejected restore leaves no trace (issue #4175).
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	fs,
@@ -508,10 +510,10 @@ impl GitRepo {
 		// NFC `é` link is a write through that link — and the current
 		// filesystem, where the link is still absent, cannot show it. Both
 		// sets are keyed by `normalize_repo_path` for exactly that reason.
-		let removed_by_tracked: BTreeSet<String> = current_worktree
+		let removed_by_tracked: BTreeSet<&str> = current_worktree
 			.keys()
 			.filter(|path| !merged_worktree.contains_key(*path))
-			.map(|path| normalize_repo_path(path))
+			.map(String::as_str)
 			.collect();
 		let restored_links: BTreeSet<String> = merged_worktree
 			.iter()
@@ -521,7 +523,9 @@ impl GitRepo {
 		for (path, entry) in &untracked {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			assert_no_symlink_ancestor(path, &restored_links)?;
-			if has_normalized_ancestor_in(path, &removed_by_tracked) || entry.mode == Mode::SYMLINK {
+			if has_removed_ancestor(self.root(), path, &removed_by_tracked)
+				|| entry.mode == Mode::SYMLINK
+			{
 				assert_prefix_within_root(self.root(), path)?;
 				assert_prefix_outside_git_store(self, &repo, path)?;
 			} else {
@@ -1769,6 +1773,45 @@ fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()
 	Ok(())
 }
 
+/// Whether a proper ancestor of `path` names the same filesystem entry as
+/// something in `removed` — judged by the FILESYSTEM, not by string rules.
+///
+/// Neither string strategy is right on its own. Folding case and Unicode form
+/// says `Link` covers `link` and NFC `é` covers NFD `é`, which is true on the
+/// default macOS filesystem and false on a case-sensitive Linux one: there,
+/// removing `Link` leaves an untracked outbound `link` in place, and skipping
+/// containment lets the child resolve through it after HEAD has moved. Exact
+/// comparison says the opposite and refuses a safe macOS pick. The only
+/// authority on whether two spellings are one entry is the filesystem itself,
+/// so each candidate ancestor is compared against the removed entries by
+/// identity — same device and inode — rather than by name.
+fn has_removed_ancestor(root: &Path, path: &str, removed: &BTreeSet<&str>) -> bool {
+	if removed.is_empty() {
+		return false;
+	}
+	let identity = |rel: &str| -> Option<(u64, u64)> {
+		let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
+		Some((meta.dev(), meta.ino()))
+	};
+	let removed_ids: Vec<(u64, u64)> = removed.iter().filter_map(|rel| identity(rel)).collect();
+	let mut prefix = path;
+	while let Some(cut) = prefix.rfind('/') {
+		prefix = &prefix[..cut];
+		// A textual match is sufficient: the entry is named for removal as-is.
+		if removed.contains(prefix) {
+			return true;
+		}
+		// Otherwise the spelling differs; only the filesystem can say whether
+		// it is still the same entry.
+		if let Some(id) = identity(prefix)
+			&& removed_ids.contains(&id)
+		{
+			return true;
+		}
+	}
+	false
+}
+
 /// Whether any PROPER ancestor of `path` is in `set`, comparing by the same
 /// filesystem-normalized key [`normalize_repo_path`] produces.
 ///
@@ -1820,9 +1863,21 @@ fn assert_patch_paths_contained(
 	// passes both checks and is only refused once `write_patch_worktree` has
 	// already created the link — a partial application. The topology the patch
 	// produces has to be judged before the first entry is written.
+	//
+	// Judged IN PATCH ORDER, not against the final set. `write_patch_worktree`
+	// applies entries sequentially, so a path is only under a minted link if
+	// that link was minted by an EARLIER entry. A patch that deletes
+	// `link/file` and then creates symlink `link` is valid — the child and
+	// its empty directory are gone before the link exists — and git accepts
+	// the same reordering. Checking the deletion against the final set would
+	// reject it.
 	let mut minted_links: BTreeSet<String> = BTreeSet::new();
 	for patch in patches {
 		let (source, target, _, target_mode) = patch_sides(patch, reverse);
+		// Both sides of THIS entry are judged against links minted so far.
+		for path in [source, target].into_iter().flatten() {
+			assert_no_symlink_ancestor(path, &minted_links)?;
+		}
 		let Some(target) = target else { continue };
 		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
 		// symlink arrives with `target_mode == None` and application inherits
@@ -1837,14 +1892,6 @@ fn assert_patch_paths_contained(
 		};
 		if mode == Some(Mode::SYMLINK) {
 			minted_links.insert(normalize_repo_path(target));
-		}
-	}
-	if !minted_links.is_empty() {
-		for patch in patches {
-			let (source, target, ..) = patch_sides(patch, reverse);
-			for path in [source, target].into_iter().flatten() {
-				assert_no_symlink_ancestor(path, &minted_links)?;
-			}
 		}
 	}
 	for patch in patches {
@@ -2197,10 +2244,17 @@ fn assert_worktree_map_contained(
 	// itself scheduled for removal. Keyed like `links` above: `previous` may
 	// spell the link NFC and `next` its child NFD, and on a normalizing
 	// filesystem those are one hierarchy.
-	let removed: BTreeSet<String> = previous
+	// EXACT names here, deliberately not folded. Folding serves the minted-link
+	// scan, where the question is "does this spelling denote the same
+	// hierarchy" — but this question is "will the actual filesystem entry be
+	// gone", and on a case-sensitive worktree `Link` and `link` are two
+	// entries. Treating a removed `Link` as the ancestor of `link/file` would
+	// skip containment for a path that resolves through a symlink the write
+	// pass never touches, and the refusal would then land after HEAD moved.
+	let removed: BTreeSet<&str> = previous
 		.keys()
 		.filter(|path| !next.contains_key(*path))
-		.map(|path| normalize_repo_path(path))
+		.map(String::as_str)
 		.collect();
 	for (path, entry) in next {
 		// Exactly the predicate the write loop uses. Validating entries it will
@@ -2220,7 +2274,7 @@ fn assert_worktree_map_contained(
 		}
 		// Skip containment when a proper ancestor is being removed first: the
 		// path the guard would resolve does not survive into the write pass.
-		let ancestor_removed = has_normalized_ancestor_in(path, &removed);
+		let ancestor_removed = has_removed_ancestor(repo.root(), path, &removed);
 		if ancestor_removed {
 			// Root containment already models the post-removal topology; the
 			// store check must too, or `dir -> .git` replaced by `dir/file`
@@ -4293,6 +4347,92 @@ mod tests {
 		assert!(
 			!Arc::ptr_eq(&first_a, &nested_stores(&repo_a)),
 			"stale scan survived a new operation"
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_accepts_deleting_a_child_before_minting_its_parent_as_a_link() {
+		// Valid ordering: `link/file` is deleted and its empty directory removed
+		// BEFORE symlink `link` is created, so the deletion never traverses the
+		// link. Judging the source against the final set of minted links would
+		// reject a patch git itself accepts.
+		let temp = init(&[("keep.txt", b"base\n"), ("link/file.txt", b"child\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let repository = repo(temp.path());
+		let blob = git(temp.path(), &["rev-parse", "HEAD:link/file.txt"]);
+		let patch = format!(
+			concat!(
+				"diff --git a/link/file.txt b/link/file.txt\n",
+				"deleted file mode 100644\n",
+				"index {}..0000000\n",
+				"--- a/link/file.txt\n",
+				"+++ /dev/null\n",
+				"@@ -1 +0,0 @@\n",
+				"-child\n",
+				"diff --git a/link b/link\n",
+				"new file mode 120000\n",
+				"--- /dev/null\n",
+				"+++ b/link\n",
+				"@@ -0,0 +1 @@\n",
+				"+{}\n",
+				"\\ No newline at end of file\n",
+			),
+			&blob.trim()[..7],
+			outside.path().display(),
+		);
+		repository
+			.apply_patch(&patch, &ApplyOptions::default())
+			.expect("delete-then-mint is a valid ordering");
+		assert!(
+			temp
+				.path()
+				.join("link")
+				.symlink_metadata()
+				.is_ok_and(|m| m.file_type().is_symlink())
+		);
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn map_preflight_does_not_treat_a_differently_named_entry_as_the_removed_ancestor() {
+		// On a case-sensitive filesystem `Link` and `link` are two entries.
+		// Removing tracked `Link` must not be taken as removing untracked
+		// outbound `link`, or `link/file` skips containment and resolves
+		// through a symlink the write pass never touches. Where the filesystem
+		// folds case, the two ARE one entry and the skip is correct — so the
+		// check asks the filesystem rather than a string rule.
+		use std::os::unix::fs::symlink;
+		let temp = init(&[("keep.txt", b"base\n"), ("Link", b"tracked\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		let folds = {
+			fs::write(temp.path().join("PROBE"), b"").expect("probe");
+			let same = temp.path().join("probe").exists();
+			fs::remove_file(temp.path().join("PROBE")).expect("cleanup");
+			same
+		};
+		if folds {
+			// Cannot construct two distinct entries here; the NFC/NFD test
+			// covers the folding side of this behaviour.
+			return;
+		}
+		symlink(outside.path(), temp.path().join("link")).expect("untracked outbound link");
+
+		let mut previous = BTreeMap::new();
+		let gix_repo = repo(temp.path()).gix().expect("open");
+		let id = gix_repo.write_blob(b"tracked\n").expect("blob").detach();
+		previous.insert("Link".to_owned(), FileEntry { id, mode: Mode::FILE, intent_to_add: false });
+		let mut next = BTreeMap::new();
+		next.insert("link/file.txt".to_owned(), FileEntry {
+			id,
+			mode: Mode::FILE,
+			intent_to_add: false,
+		});
+
+		let repository = repo(temp.path());
+		assert!(
+			assert_worktree_map_contained(&repository, &gix_repo, &previous, &next).is_err(),
+			"removing `Link` was taken as removing `link`, skipping containment"
 		);
 	}
 }
