@@ -1785,13 +1785,22 @@ fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()
 /// authority on whether two spellings are one entry is the filesystem itself,
 /// so each candidate ancestor is compared against the removed entries by
 /// identity — same device and inode — rather than by name.
+///
+/// Identity is necessary, not sufficient. Unix permits hard links to symlinks
+/// (`ln -P Link link`), and then two DISTINCT directory entries share one
+/// inode while unlinking either leaves the other in place. So a match also
+/// requires the inode to have exactly one name: with `nlink > 1` the removed
+/// spelling and the candidate ancestor may be separate entries, the removal
+/// cannot be assumed to take the ancestor with it, and the caller falls back
+/// to judging the ancestor as it stands. That is the conservative side —
+/// a hard-linked entry that IS the same spelling still matches textually.
 fn has_removed_ancestor(root: &Path, path: &str, removed: &BTreeSet<&str>) -> bool {
 	if removed.is_empty() {
 		return false;
 	}
 	let identity = |rel: &str| -> Option<(u64, u64)> {
 		let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
-		Some((meta.dev(), meta.ino()))
+		(meta.nlink() == 1).then_some((meta.dev(), meta.ino()))
 	};
 	let removed_ids: Vec<(u64, u64)> = removed.iter().filter_map(|rel| identity(rel)).collect();
 	let mut prefix = path;
@@ -1802,7 +1811,7 @@ fn has_removed_ancestor(root: &Path, path: &str, removed: &BTreeSet<&str>) -> bo
 			return true;
 		}
 		// Otherwise the spelling differs; only the filesystem can say whether
-		// it is still the same entry.
+		// it is still the same entry — and only when that entry has one name.
 		if let Some(id) = identity(prefix)
 			&& removed_ids.contains(&id)
 		{
@@ -1838,9 +1847,45 @@ fn has_normalized_ancestor_in(path: &str, set: &BTreeSet<String>) -> bool {
 ///
 /// Used to infer a mode the patch does not state — a 100% rename omits the
 /// mode headers entirely, and application resolves it from the source entry.
+///
+/// The answer is the COMPLETE mode, not merely "symlink or not". A regular
+/// source is `Some(FILE)`, and that is what stops the caller from consulting
+/// the target: `worktree_entry_mode(a) == None` must mean `a` is absent, or a
+/// tracked regular `a` renamed onto an untracked `b -> .git/config` would be
+/// judged by the symlink at `b` and pass with a prefix check while the write
+/// follows `b` into the store.
 fn worktree_entry_mode(repo: &GitRepo, rel: &str) -> Option<Mode> {
 	let metadata = std::fs::symlink_metadata(repo.root().join(rel)).ok()?;
-	metadata.file_type().is_symlink().then_some(Mode::SYMLINK)
+	let file_type = metadata.file_type();
+	if file_type.is_symlink() {
+		Some(Mode::SYMLINK)
+	} else if file_type.is_dir() {
+		Some(Mode::DIR)
+	} else {
+		Some(worktree_file_mode(&metadata, Mode::FILE))
+	}
+}
+
+/// Mode a mode-less patch entry will be written with.
+///
+/// Mirrors [`apply_patches_to_map`]: the declared mode wins, then the SOURCE
+/// entry's mode. The target is consulted only when there is no source at all
+/// (a mode-less update of an existing entry), never as a fallback for a source
+/// that exists — the source decides what the write does, and the target is
+/// exactly what an attacker controls.
+fn inferred_target_mode(
+	repo: &GitRepo,
+	declared: Option<Mode>,
+	source: Option<&str>,
+	target: &str,
+) -> Option<Mode> {
+	if let Some(mode) = declared {
+		return Some(mode);
+	}
+	match source {
+		Some(source) => worktree_entry_mode(repo, source),
+		None => worktree_entry_mode(repo, target),
+	}
 }
 
 /// Validate every path a patch would touch, before any of them is touched.
@@ -1884,12 +1929,7 @@ fn assert_patch_paths_contained(
 		// the mode from the source entry. Infer it the same way here, or the
 		// scan misses a link this patch is about to mint and the descendant is
 		// refused only after the link exists.
-		let mode = match target_mode {
-			Some(mode) => Some(mode),
-			None => source
-				.and_then(|source| worktree_entry_mode(repo, source))
-				.or_else(|| worktree_entry_mode(repo, target)),
-		};
+		let mode = inferred_target_mode(repo, target_mode, source, target);
 		if mode == Some(Mode::SYMLINK) {
 			minted_links.insert(normalize_repo_path(target));
 		}
@@ -1900,12 +1940,8 @@ fn assert_patch_paths_contained(
 		// tracked symlink arrives with `None`, and application inherits SYMLINK
 		// from the source entry. Reading the declared field alone would resolve
 		// the existing leaf and reject a safe unlink-and-recreate.
-		let target_mode = match declared_mode {
-			Some(mode) => Some(mode),
-			None => source
-				.and_then(|source| worktree_entry_mode(repo, source))
-				.or_else(|| target.and_then(|target| worktree_entry_mode(repo, target))),
-		};
+		let target_mode =
+			target.and_then(|target| inferred_target_mode(repo, declared_mode, source, target));
 		if let Some(source) = source
 			&& target != Some(source)
 		{
@@ -3636,6 +3672,117 @@ mod tests {
 		);
 		assert!(!outside.path().join("sneaky.txt").exists(), "wrote through the renamed link");
 		assert!(temp.path().join("old").symlink_metadata().is_ok(), "the rename was applied anyway");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_refuses_a_mode_less_rename_of_a_regular_file_onto_a_store_symlink() {
+		use std::os::unix::fs::symlink;
+
+		// The source is a tracked REGULAR file, so the write follows whatever
+		// sits at the target. An untracked `b -> .git/config` there is the
+		// attacker's leaf. Inferring the mode from the target instead of the
+		// source calls the entry a symlink, runs the prefix check only, and
+		// the write then overwrites Git's own configuration.
+		let temp = init(&[("a", b"payload\n")]);
+		symlink(".git/config", temp.path().join("b")).expect("create symlink");
+		let config_before = fs::read(temp.path().join(".git/config")).expect("read config");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/a b/b\n",
+			"similarity index 100%\n",
+			"rename from a\n",
+			"rename to b\n",
+		);
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"a regular file renamed onto a symlink into the store must be refused"
+		);
+		assert_eq!(
+			fs::read(temp.path().join(".git/config")).expect("read config"),
+			config_before,
+			"the rename wrote through the target symlink into the git store"
+		);
+		assert!(temp.path().join("a").is_file(), "the source was removed anyway");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn worktree_entry_mode_reports_the_full_mode_of_a_regular_source() {
+		// `None` must mean "absent". A regular file that answers `None` lets
+		// the caller fall through to the target, which is what the previous
+		// finding exploited.
+		let temp = init(&[("plain", b"x\n")]);
+		let repository = repo(temp.path());
+		assert_eq!(worktree_entry_mode(&repository, "plain"), Some(Mode::FILE));
+		assert_eq!(worktree_entry_mode(&repository, "absent"), None);
+		fs::create_dir(temp.path().join("dir")).expect("mkdir");
+		assert_eq!(worktree_entry_mode(&repository, "dir"), Some(Mode::DIR));
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_refuses_a_hard_linked_symlink_alias_of_a_removed_link() {
+		use std::os::unix::fs::symlink;
+
+		// `Link` is tracked and outbound. `link` is an untracked HARD link to
+		// that symlink: same inode, separate directory entry. A pick that
+		// deletes `Link` and adds `link/file.txt` removes one name and leaves
+		// the other, so `link/file.txt` still resolves through the outbound
+		// link. Inode equality alone calls the ancestor "removed" and skips
+		// containment; after HEAD advances the child write escapes the root.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let outside = tempfile::tempdir().expect("outside tempdir");
+		symlink(outside.path(), temp.path().join("Link")).expect("create symlink");
+		git(temp.path(), &["add", "Link"]);
+		git(temp.path(), &["commit", "-m", "track outbound symlink"]);
+		let linked = std::process::Command::new("ln")
+			.args(["-P", "Link", "link"])
+			.current_dir(temp.path())
+			.status()
+			.expect("run ln");
+		if !linked.success() {
+			// The filesystem refuses hard links to symlinks; the alias cannot
+			// be constructed and the case does not arise here.
+			return;
+		}
+		let alias = temp
+			.path()
+			.join("link")
+			.symlink_metadata()
+			.expect("alias metadata");
+		assert!(alias.file_type().is_symlink(), "ln -P did not produce a symlink entry");
+		assert_eq!(alias.nlink(), 2, "alias is not a second name for the same inode");
+
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let mut map = tree_map(&gix_repo, head_tree).expect("base map");
+		map.remove("Link");
+		let file = gix_repo.write_blob(b"pwned\n").expect("file blob").detach();
+		map.insert("link/file.txt".to_owned(), FileEntry::new(file, Mode::FILE));
+		let tree = write_tree_map(&gix_repo, &map).expect("picked tree");
+		let picked = gix_repo
+			.new_commit("replace link", tree, [head.id().detach()])
+			.expect("picked commit")
+			.id()
+			.to_string();
+		let head_before = git(temp.path(), &["rev-parse", "HEAD"]);
+
+		let repository = repo(temp.path());
+		assert!(
+			repository.cherry_pick(&picked).is_err(),
+			"child under a surviving hard-linked alias must be refused"
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
+		assert!(!outside.path().join("file.txt").exists(), "wrote through the surviving alias");
+		assert!(
+			temp.path().join("Link").symlink_metadata().is_ok(),
+			"the removal was applied anyway"
+		);
 	}
 
 	#[test]
