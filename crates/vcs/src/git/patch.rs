@@ -507,8 +507,16 @@ impl GitRepo {
 		if let Some(index) = &merged_index {
 			// Index-only entries can be absent from the restored worktree. Reject
 			// them before any files change, not later in `write_index_map`.
+			//
+			// The store is judged by LOCATION as well as by name. An older or
+			// hand-made stash can carry an index-only `meta/hooks/pre-commit`
+			// from before `meta` became an in-worktree separate store; the pop
+			// would accept it — `write_index_map` validates `.git` by name
+			// alone — and a later checkout materializes it over the live hook.
+			// Same rule the cached-patch preflight applies.
 			for path in index.keys() {
 				validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+				assert_prefix_outside_git_store(self, &repo, path)?;
 			}
 		}
 		assert_worktree_map_contained(self, &repo, &current_worktree, &merged_worktree)?;
@@ -532,7 +540,7 @@ impl GitRepo {
 		let mut restored_links: FastHashSet<String> = FastHashSet::default();
 		for (path, entry) in &merged_worktree {
 			if entry.mode == Mode::SYMLINK {
-				claim_link_key(path, &mut restored_links)?;
+				claim_key(path, &mut restored_links)?;
 			}
 		}
 		// The untracked half restores in this same iteration order, so a link
@@ -563,7 +571,7 @@ impl GitRepo {
 				assert_outside_git_store(self, &repo, path)?;
 			}
 			if is_link {
-				claim_link_key(path, &mut restored_links)?;
+				claim_key(path, &mut restored_links)?;
 			}
 		}
 		write_worktree_map(self, &current_worktree, &merged_worktree)?;
@@ -1797,6 +1805,13 @@ const fn is_hfs_ignorable(c: char) -> bool {
 /// expansions (including final sigma and sharp S), and compose the key again.
 /// This deliberately over-folds some names; it is only used to refuse unsafe
 /// topology, never to authorize removal or to open a filesystem path.
+///
+/// HFS-ignorable codepoints drop out entirely. [`is_hfs_ignorable`] already
+/// names the set HFS+ folds away when comparing filenames, and
+/// [`validate_repo_path`] uses it to catch `.gi\u{200c}t`. The same set has to
+/// leave the comparison key, or `link -> .git` and a later
+/// `l\u{200c}ink/config` are one entry on disk and two distinct keys here —
+/// the link is written first and the content write follows it into the store.
 fn normalize_repo_path(rel: &str) -> String {
 	let mut normalized = String::with_capacity(rel.len());
 	for segment in rel
@@ -1811,6 +1826,7 @@ fn normalize_repo_path(rel: &str) -> String {
 	let decomposed = xutf::IntoUnicodeNormalized::into_nfd(normalized);
 	let folded: String = decomposed
 		.chars()
+		.filter(|c| !is_hfs_ignorable(*c))
 		.flat_map(char::to_lowercase)
 		.flat_map(char::to_uppercase)
 		.flat_map(char::to_lowercase)
@@ -1842,12 +1858,14 @@ fn assert_key_free(path: &str, links: &FastHashSet<String>, owns_key: bool) -> R
 	Ok(())
 }
 
-/// Claim `path`'s key for a link, refusing a second entry that wants it.
+/// Claim `path`'s normalized key, refusing a second entry that wants it.
 ///
-/// Ownership is established by INSERTION: the first link to claim a key keeps
-/// it, and any later entry — link or not — collides.
-fn claim_link_key(path: &str, links: &mut FastHashSet<String>) -> Result<()> {
-	if !links.insert(normalize_repo_path(path)) {
+/// Ownership is established by INSERTION: the first entry to claim a key keeps
+/// it, and any later entry collides. Used both for link keys during the patch
+/// preflight and for whole-tree uniqueness in the worktree-map preflight,
+/// where two regular names folding together are equally a lossy write.
+fn claim_key(path: &str, keys: &mut FastHashSet<String>) -> Result<()> {
+	if !keys.insert(normalize_repo_path(path)) {
 		return Err(Error::PathEscapesRoot { path: path.to_owned() });
 	}
 	Ok(())
@@ -2095,7 +2113,7 @@ fn assert_patch_paths_contained(
 		let mints_link = mode == Some(Some(Mode::SYMLINK));
 		assert_key_free(target, &minted_links, mints_link)?;
 		if mints_link {
-			claim_link_key(target, &mut minted_links)?;
+			claim_key(target, &mut minted_links)?;
 		}
 	}
 	// The writer removes each entry's source before creating its target.
@@ -2243,17 +2261,29 @@ fn assert_store_containment(
 	// walking the candidate's ancestors never finds it. Every `.git` FILE under
 	// the root names one; each is followed and the candidate compared against
 	// its target.
-	//
-	// Bounded to the immediate children of the root plus their own children:
-	// deeper nesting is rare enough that a full-tree walk on every path check
-	// would cost more than it protects.
-	if nested_stores(repo).iter().any(|store| inside(store)) {
+	let scan = nested_stores(repo);
+	if scan.stores.iter().any(|store| inside(store)) {
+		return Err(Error::PathInGitStore { path: rel.to_owned() });
+	}
+	// An incomplete scan is not an empty one. A traversable but unlistable
+	// directory hides every store beneath it while leaving a known path inside
+	// it writable, so the set above is only a lower bound and this path cannot
+	// be cleared. Fail closed rather than admit an unexamined hierarchy.
+	if !scan.complete {
 		return Err(Error::PathInGitStore { path: rel.to_owned() });
 	}
 	Ok(())
 }
 
-type StoreScan = (u64, Arc<Vec<PathBuf>>);
+/// Discovered stores plus whether the scan that produced them was complete.
+type StoreScan = (u64, Arc<StoreSet>);
+
+/// A scan result. `complete` is false when some directory could not be listed,
+/// which makes the store set a LOWER BOUND rather than the full picture.
+struct StoreSet {
+	stores:   Vec<PathBuf>,
+	complete: bool,
+}
 
 /// Every nested repository store under `repo`'s root.
 ///
@@ -2270,7 +2300,7 @@ type StoreScan = (u64, Arc<Vec<PathBuf>>);
 /// the other root on every path check, recreating the per-path rescan the
 /// cache exists to remove. Entries from earlier operations are dropped on the
 /// next insert, so the map never outgrows the set of live roots.
-fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
+fn nested_stores(repo: &GitRepo) -> Arc<StoreSet> {
 	// Per-root discovery results stamped with their scan generation. Lookup,
 	// retention and insertion only — no ordering — so this is the mandated
 	// discretionary-cache map, not a tree.
@@ -2287,9 +2317,9 @@ fn nested_stores(repo: &GitRepo) -> Arc<Vec<PathBuf>> {
 			return Arc::clone(found);
 		}
 	}
-	let mut found = Vec::new();
-	collect_nested_stores(root, &mut found);
-	let found = Arc::new(found);
+	let mut stores = Vec::new();
+	let complete = collect_nested_stores(root, &mut stores);
+	let found = Arc::new(StoreSet { stores, complete });
 	let mut cache = CACHE.lock();
 	publish_store_scan(&mut cache, root, generation, OPERATION.load(Ordering::Acquire), &found);
 	found
@@ -2301,7 +2331,7 @@ fn publish_store_scan(
 	root: &Path,
 	generation: u64,
 	current: u64,
-	found: &Arc<Vec<PathBuf>>,
+	found: &Arc<StoreSet>,
 ) {
 	// A later operation may have published while this scan ran unlocked.
 	if current != generation {
@@ -2328,13 +2358,21 @@ fn begin_operation() {
 /// Unbounded by depth: a cap is a hole, since `a/b/c/sub/.git` pointing at
 /// `deep-meta` is as live a store as one at the root. The cost is paid once per
 /// operation — see [`nested_stores`] — not once per path.
-fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) {
+///
+/// Returns `false` when any directory could not be listed. A traversable but
+/// unlistable directory (mode `0300`) hides every store beneath it while a
+/// known path like `secret/meta/hooks/pre-commit` stays writable, so an
+/// incomplete scan must not be mistaken for an empty one — the caller turns
+/// that into a refusal rather than admitting the path.
+fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) -> bool {
 	let Ok(entries) = std::fs::read_dir(dir) else {
-		return;
+		return false;
 	};
+	let mut complete = true;
 	for entry in entries.flatten() {
 		let path = entry.path();
 		let Ok(kind) = entry.file_type() else {
+			complete = false;
 			continue;
 		};
 
@@ -2364,8 +2402,11 @@ fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) {
 		}
 		// Do not descend through links: a nested store does not live behind one,
 		// and following it would leave the worktree.
-		collect_nested_stores(&path, found);
+		if !collect_nested_stores(&path, found) {
+			complete = false;
+		}
 	}
+	complete
 }
 
 fn canonical_or_self(path: &Path) -> PathBuf {
@@ -2508,19 +2549,28 @@ fn assert_worktree_map_contained(
 	previous: &BTreeMap<String, FileEntry>,
 	next: &BTreeMap<String, FileEntry>,
 ) -> Result<()> {
-	// Current filesystem checks cannot see links this map will create. Judge
-	// the resulting tree before removals, writes, or the caller's HEAD update.
-	// Claimed incrementally rather than collected: two links whose keys
-	// collide are a conflict, and `collect` would silently keep one.
+	// Two passes over the resulting tree, judged before removals, writes, or
+	// the caller's HEAD update, because the current filesystem cannot show a
+	// topology this map has yet to create.
+	//
+	// First: EVERY entry must own a distinct key, not just the symlinks. A
+	// Linux-authored tree may hold regular `A` and `a`; on a case-insensitive
+	// worktree `write_worktree_map` writes both to one filesystem entry after
+	// `cherry_pick` has advanced HEAD, while the index keeps two — a
+	// successful but lossy checkout. Claimed incrementally: `collect` would
+	// silently keep one of the two.
+	let mut keys: FastHashSet<String> = FastHashSet::default();
 	let mut links: FastHashSet<String> = FastHashSet::default();
 	for (path, entry) in next {
+		claim_key(path, &mut keys)?;
 		if entry.mode == Mode::SYMLINK {
-			claim_link_key(path, &mut links)?;
+			links.insert(normalize_repo_path(path));
 		}
 	}
-	for (path, entry) in next {
-		let owns_key = entry.mode == Mode::SYMLINK;
-		assert_key_free(path, &links, owns_key)?;
+	// Second: no entry may sit UNDER a link the same map creates. Layered on
+	// top of uniqueness, so a link's own key is already accounted for.
+	for path in next.keys() {
+		assert_key_free(path, &links, true)?;
 	}
 	for path in previous.keys() {
 		if !next.contains_key(path) {
@@ -4951,15 +5001,15 @@ mod tests {
 	#[test]
 	fn stale_store_scan_preserves_newer_results_for_all_roots() {
 		let mut cache = FastHashMap::default();
-		let old = Arc::new(vec![PathBuf::from("old-store")]);
-		let new = Arc::new(vec![PathBuf::from("new-store")]);
-		let other = Arc::new(vec![PathBuf::from("other-store")]);
+		let store =
+			|name: &str| Arc::new(StoreSet { stores: vec![PathBuf::from(name)], complete: true });
+		let (old, new, other) = (store("old-store"), store("new-store"), store("other-store"));
 		publish_store_scan(&mut cache, Path::new("a"), 2, 2, &new);
 		publish_store_scan(&mut cache, Path::new("b"), 2, 2, &other);
 		// Operation 1 finishes after operation 2 has populated both roots.
 		publish_store_scan(&mut cache, Path::new("a"), 1, 2, &old);
-		assert_eq!(*cache[Path::new("a")].1, *new);
-		assert_eq!(*cache[Path::new("b")].1, *other);
+		assert_eq!(cache[Path::new("a")].1.stores, new.stores);
+		assert_eq!(cache[Path::new("b")].1.stores, other.stores);
 		assert_eq!(cache[Path::new("a")].0, 2);
 	}
 
@@ -5171,6 +5221,179 @@ mod tests {
 		assert!(
 			!repository.can_apply_patch(patch, &options).expect("probe"),
 			"the probe must agree with the applier"
+		);
+		assert!(
+			!git(temp.path(), &["ls-files"]).contains("meta/hooks"),
+			"the hook was staged into the index"
+		);
+	}
+
+	#[test]
+	fn normalize_repo_path_drops_hfs_ignorable_codepoints() {
+		// `is_hfs_ignorable` names what HFS+ folds away when comparing names,
+		// so the comparison key must drop the same set or `link` and
+		// `l\u{200c}ink` are one entry on disk and two keys here.
+		assert_eq!(normalize_repo_path("l\u{200c}ink/config"), normalize_repo_path("link/config"));
+		assert_eq!(normalize_repo_path("\u{feff}Link"), normalize_repo_path("link"));
+		assert_eq!(normalize_repo_path("li\u{202e}nk"), normalize_repo_path("LINK"));
+		// A format character git does NOT fold stays distinct.
+		assert_ne!(normalize_repo_path("li\u{2060}nk"), normalize_repo_path("link"));
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn patch_refuses_an_hfs_ignorable_alias_of_a_minted_store_link() {
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let config = fs::read(temp.path().join(".git/config")).expect("config");
+		let patch = concat!(
+			"diff --git a/link b/link\n",
+			"new file mode 120000\n",
+			"--- /dev/null\n",
+			"+++ b/link\n",
+			"@@ -0,0 +1 @@\n",
+			"+.git\n",
+			"\\ No newline at end of file\n",
+			"diff --git a/l\u{200c}ink/config b/l\u{200c}ink/config\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/l\u{200c}ink/config\n",
+			"@@ -0,0 +1 @@\n",
+			"+payload\n",
+		);
+		assert!(
+			repo(temp.path())
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"an HFS-ignorable alias of a minted link must be refused"
+		);
+		assert_eq!(
+			fs::read(temp.path().join(".git/config")).expect("config"),
+			config,
+			"the write followed the minted link into the store"
+		);
+		assert!(fs::symlink_metadata(temp.path().join("link")).is_err(), "the link was created");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_refuses_two_regular_entries_sharing_one_normalized_key() {
+		// Regular `A` and `a` collide on a case-insensitive worktree: one
+		// filesystem entry, two index entries, after HEAD has advanced.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let mut map = tree_map(&gix_repo, head_tree).expect("base map");
+		let upper = gix_repo
+			.write_blob(b"upper\n")
+			.expect("upper blob")
+			.detach();
+		let lower = gix_repo
+			.write_blob(b"lower\n")
+			.expect("lower blob")
+			.detach();
+		map.insert("A".to_owned(), FileEntry::new(upper, Mode::FILE));
+		map.insert("a".to_owned(), FileEntry::new(lower, Mode::FILE));
+		let tree = write_tree_map(&gix_repo, &map).expect("colliding tree");
+		let picked = gix_repo
+			.new_commit("colliding names", tree, [head.id().detach()])
+			.expect("commit")
+			.id()
+			.to_string();
+		let head_before = git(temp.path(), &["rev-parse", "HEAD"]);
+
+		assert!(
+			repo(temp.path()).cherry_pick(&picked).is_err(),
+			"two regular entries sharing one normalized key must be refused"
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn patch_refuses_a_path_when_store_discovery_cannot_list_a_directory() {
+		use std::os::unix::fs::PermissionsExt;
+
+		// A traversable but unlistable directory hides every store beneath it
+		// while leaving a known path inside it writable. An incomplete scan is
+		// not an empty one.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let secret = temp.path().join("secret");
+		fs::create_dir(&secret).expect("mkdir secret");
+		git(temp.path(), &["init", "-q", "--separate-git-dir=secret/meta", "secret/sub"]);
+		fs::set_permissions(&secret, fs::Permissions::from_mode(0o300)).expect("chmod 0300");
+
+		let patch = concat!(
+			"diff --git a/other.txt b/other.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/other.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+x\n",
+		);
+		let refused = repo(temp.path())
+			.apply_patch(patch, &ApplyOptions::default())
+			.is_err();
+		// Restore permissions before asserting so a failure cannot leave an
+		// undeletable tempdir behind.
+		fs::set_permissions(&secret, fs::Permissions::from_mode(0o700)).expect("restore mode");
+		assert!(refused, "an unlistable directory must not be treated as free of stores");
+		assert!(!temp.path().join("other.txt").exists(), "wrote despite an incomplete scan");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_pop_refuses_a_reinstated_index_entry_inside_a_live_store() {
+		// An index-only `meta/hooks/pre-commit` predating `meta` becoming a
+		// separate store: the pop would stage it and a later checkout
+		// materializes it over the live hook.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let gix_repo = repository.gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_id = head.id().detach();
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let base = tree_map(&gix_repo, head_tree).expect("base map");
+		let hook = gix_repo
+			.write_blob(b"#!/bin/sh\nevil\n")
+			.expect("hook blob")
+			.detach();
+		let mut staged = base.clone();
+		staged
+			.insert("meta/hooks/pre-commit".to_owned(), FileEntry::new(hook, Mode::FILE_EXECUTABLE));
+		let index_tree = write_tree_map(&gix_repo, &staged).expect("index tree");
+		let worktree_tree = write_tree_map(&gix_repo, &base).expect("worktree tree");
+		let index_commit = gix_repo
+			.new_commit("index on HEAD: wip", index_tree, [head_id])
+			.expect("index commit");
+		// Empty untracked half: a non-empty one whose paths already exist on
+		// disk makes the collision probe bail out with `Ok(false)` before the
+		// index is ever judged.
+		let empty_tree = write_tree_map(&gix_repo, &BTreeMap::new()).expect("empty tree");
+		let untracked_commit = gix_repo
+			.new_commit("untracked files on HEAD", empty_tree, std::iter::empty::<gix::ObjectId>())
+			.expect("untracked commit");
+		let stash = gix_repo
+			.new_commit("wip", worktree_tree, [
+				head_id,
+				index_commit.id().detach(),
+				untracked_commit.id().detach(),
+			])
+			.expect("stash commit");
+		update_stash_ref(
+			&gix_repo,
+			stash.id().detach(),
+			PreviousValue::Any,
+			"On HEAD: wip".to_owned(),
+			true,
+		)
+		.expect("install stash");
+		// `meta` only becomes a store after the stash was authored.
+		git(temp.path(), &["init", "-q", "--separate-git-dir=meta", "sub"]);
+
+		assert!(
+			repository.stash_try_pop(true).is_err(),
+			"a reinstated index entry inside a live store must be refused"
 		);
 		assert!(
 			!git(temp.path(), &["ls-files"]).contains("meta/hooks"),
