@@ -9,7 +9,8 @@
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{
-	collections::{BTreeMap, BTreeSet},
+	cell::RefCell,
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	fs,
 	path::{Component, Path, PathBuf},
 	sync::{
@@ -515,6 +516,7 @@ impl GitRepo {
 			.filter(|path| !merged_worktree.contains_key(*path))
 			.map(String::as_str)
 			.collect();
+		let removed_entries = RemovedEntries::new(self.root(), &removed_by_tracked);
 		let restored_links: BTreeSet<String> = merged_worktree
 			.iter()
 			.filter(|(_, entry)| entry.mode == Mode::SYMLINK)
@@ -523,9 +525,7 @@ impl GitRepo {
 		for (path, entry) in &untracked {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			assert_no_symlink_ancestor(path, &restored_links)?;
-			if has_removed_ancestor(self.root(), path, &removed_by_tracked)
-				|| entry.mode == Mode::SYMLINK
-			{
+			if removed_entries.covers_ancestor_of(path) || entry.mode == Mode::SYMLINK {
 				assert_prefix_within_root(self.root(), path)?;
 				assert_prefix_outside_git_store(self, &repo, path)?;
 			} else {
@@ -1773,11 +1773,13 @@ fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()
 	Ok(())
 }
 
-/// Whether a proper ancestor of `path` names the same filesystem entry as
-/// something in `removed` — judged by the FILESYSTEM, not by string rules.
+/// Entries the removal pass will take out before anything is written, with
+/// their filesystem identities resolved ONCE.
 ///
-/// Neither string strategy is right on its own. Folding case and Unicode form
-/// says `Link` covers `link` and NFC `é` covers NFD `é`, which is true on the
+/// Whether a proper ancestor of a path names the same filesystem entry as a
+/// removed one is judged by the FILESYSTEM, not by string rules. Neither
+/// string strategy is right on its own. Folding case and Unicode form says
+/// `Link` covers `link` and NFC `é` covers NFD `é`, which is true on the
 /// default macOS filesystem and false on a case-sensitive Linux one: there,
 /// removing `Link` leaves an untracked outbound `link` in place, and skipping
 /// containment lets the child resolve through it after HEAD has moved. Exact
@@ -1794,31 +1796,65 @@ fn assert_no_symlink_ancestor(path: &str, links: &BTreeSet<String>) -> Result<()
 /// cannot be assumed to take the ancestor with it, and the caller falls back
 /// to judging the ancestor as it stands. That is the conservative side —
 /// a hard-linked entry that IS the same spelling still matches textually.
-fn has_removed_ancestor(root: &Path, path: &str, removed: &BTreeSet<&str>) -> bool {
-	if removed.is_empty() {
-		return false;
+///
+/// Built once per preflight. Resolving the removed set inside the per-path
+/// query made a transition with A additions and R removals cost O(A×R)
+/// metadata calls; the identities are fixed for the duration of the check,
+/// so they are read once here, and each ancestor prefix a query touches is
+/// stat'ed at most once across the whole pass.
+struct RemovedEntries<'a> {
+	names:      &'a BTreeSet<&'a str>,
+	root:       &'a Path,
+	identities: HashSet<(u64, u64)>,
+	/// Prefix -> identity, memoised across queries. `None` records a prefix
+	/// that is absent or hard-linked so it is not stat'ed again either.
+	seen:       RefCell<HashMap<&'a str, Option<(u64, u64)>>>,
+}
+
+impl<'a> RemovedEntries<'a> {
+	fn new(root: &'a Path, names: &'a BTreeSet<&'a str>) -> Self {
+		let identities = names
+			.iter()
+			.filter_map(|rel| entry_identity(root, rel))
+			.collect();
+		Self { names, root, identities, seen: RefCell::new(HashMap::new()) }
 	}
-	let identity = |rel: &str| -> Option<(u64, u64)> {
-		let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
-		(meta.nlink() == 1).then_some((meta.dev(), meta.ino()))
-	};
-	let removed_ids: Vec<(u64, u64)> = removed.iter().filter_map(|rel| identity(rel)).collect();
-	let mut prefix = path;
-	while let Some(cut) = prefix.rfind('/') {
-		prefix = &prefix[..cut];
-		// A textual match is sufficient: the entry is named for removal as-is.
-		if removed.contains(prefix) {
-			return true;
+
+	/// Whether a PROPER ancestor of `path` is removed — by name, or by being
+	/// the same single-named filesystem entry as a removed name.
+	fn covers_ancestor_of(&self, path: &'a str) -> bool {
+		if self.names.is_empty() {
+			return false;
 		}
-		// Otherwise the spelling differs; only the filesystem can say whether
-		// it is still the same entry — and only when that entry has one name.
-		if let Some(id) = identity(prefix)
-			&& removed_ids.contains(&id)
-		{
-			return true;
+		let mut prefix = path;
+		while let Some(cut) = prefix.rfind('/') {
+			prefix = &prefix[..cut];
+			// A textual match is sufficient: the entry is named for removal as-is.
+			if self.names.contains(prefix) {
+				return true;
+			}
+			if self.identities.is_empty() {
+				continue;
+			}
+			// Otherwise the spelling differs; only the filesystem can say whether
+			// it is still the same entry — and only when that entry has one name.
+			let id = *self
+				.seen
+				.borrow_mut()
+				.entry(prefix)
+				.or_insert_with(|| entry_identity(self.root, prefix));
+			if id.is_some_and(|id| self.identities.contains(&id)) {
+				return true;
+			}
 		}
+		false
 	}
-	false
+}
+
+/// `(dev, ino)` of `rel` when it exists and has exactly one directory entry.
+fn entry_identity(root: &Path, rel: &str) -> Option<(u64, u64)> {
+	let meta = std::fs::symlink_metadata(root.join(rel)).ok()?;
+	(meta.nlink() == 1).then_some((meta.dev(), meta.ino()))
 }
 
 /// Whether any PROPER ancestor of `path` is in `set`, comparing by the same
@@ -2135,21 +2171,13 @@ fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) {
 		// `…/worktrees/<name>`, which is only half the story: git reads
 		// `commondir` from there and uses the parent as its common store, so
 		// `meta/hooks/pre-commit` is live even though the pointer never names
-		// `meta`. Record both.
+		// `meta`. Record both — but only once the target has proved to BE a
+		// store, see [`gitfile_stores`].
 		if kind.is_file() && path.file_name().is_some_and(|name| name == ".git") {
 			if let Some(bytes) = read_store_metadata(&path)
 				&& let Ok(target) = gix::discover::parse::gitdir(&bytes)
 			{
-				let store = canonical_or_self(&dir.join(target));
-				if let Some(common) = read_store_metadata(&store.join("commondir")) {
-					let common = common.trim_end();
-					if !common.is_empty()
-						&& let Ok(common) = gix::path::try_from_bstr(common.as_bstr())
-					{
-						found.push(canonical_or_self(&store.join(common)));
-					}
-				}
-				found.push(store);
+				found.extend(gitfile_stores(&canonical_or_self(&dir.join(target))));
 			}
 			continue;
 		}
@@ -2173,12 +2201,52 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 	std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The store(s) a gitfile target stands for, or nothing when the target is
+/// not a Git directory at all.
+///
+/// The directive is untrusted worktree content. A stale or ordinary `sub/.git`
+/// reading `gitdir: ../docs` must not turn `docs/` into a protected store that
+/// every later patch, cherry-pick and stash write refuses with
+/// `PathInGitStore` — git itself cannot open `sub` as a repository through
+/// it. So the target is admitted only with the layout git requires to open
+/// it: a valid loose `HEAD`, and `objects/` + `refs/` either in the target
+/// (a separate or bare store) or in the `commondir` it names (a linked
+/// worktree). When `commondir` is present it is validated too; a gitdir whose
+/// common store is missing is not one git would open either.
+fn gitfile_stores(store: &Path) -> Vec<PathBuf> {
+	if !has_valid_loose_head(store) {
+		return Vec::new();
+	}
+	let common = read_store_metadata(&store.join("commondir")).and_then(|common| {
+		let common = common.trim_end();
+		if common.is_empty() {
+			return None;
+		}
+		gix::path::try_from_bstr(common.as_bstr())
+			.ok()
+			.map(|common| canonical_or_self(&store.join(common)))
+	});
+	match common {
+		Some(common) if has_object_and_ref_dirs(&common) => vec![common, store.to_path_buf()],
+		Some(_) => Vec::new(),
+		None if has_object_and_ref_dirs(store) => vec![store.to_path_buf()],
+		None => Vec::new(),
+	}
+}
+
 /// Recognize a store by Git's directory layout and a valid loose HEAD, without
 /// opening a repository (which would read arbitrary configuration/includes).
 fn is_bare_store(dir: &Path) -> bool {
-	if !dir.join("objects").is_dir() || !dir.join("refs").is_dir() {
-		return false;
-	}
+	has_object_and_ref_dirs(dir) && has_valid_loose_head(dir)
+}
+
+fn has_object_and_ref_dirs(dir: &Path) -> bool {
+	dir.join("objects").is_dir() && dir.join("refs").is_dir()
+}
+
+/// Whether `dir/HEAD` parses as a loose reference — the one file every Git
+/// directory, bare, separate or per-worktree, must carry.
+fn has_valid_loose_head(dir: &Path) -> bool {
 	let Some(head) = read_store_metadata(&dir.join("HEAD")) else {
 		return false;
 	};
@@ -2292,6 +2360,7 @@ fn assert_worktree_map_contained(
 		.filter(|path| !next.contains_key(*path))
 		.map(String::as_str)
 		.collect();
+	let removed_entries = RemovedEntries::new(repo.root(), &removed);
 	for (path, entry) in next {
 		// Exactly the predicate the write loop uses. Validating entries it will
 		// never touch would fail a cherry-pick of one file because some
@@ -2310,7 +2379,7 @@ fn assert_worktree_map_contained(
 		}
 		// Skip containment when a proper ancestor is being removed first: the
 		// path the guard would resolve does not survive into the write pass.
-		let ancestor_removed = has_removed_ancestor(repo.root(), path, &removed);
+		let ancestor_removed = removed_entries.covers_ancestor_of(path);
 		if ancestor_removed {
 			// Root containment already models the post-removal topology; the
 			// store check must too, or `dir -> .git` replaced by `dir/file`
@@ -3878,6 +3947,89 @@ mod tests {
 			!temp.path().join("nested-meta/hooks/pre-commit").exists(),
 			"hook was written into the nested store"
 		);
+	}
+
+	#[test]
+	fn apply_patch_does_not_protect_the_target_of_a_stale_gitfile() {
+		// `sub/.git` reads `gitdir: ../docs`, but `docs/` is an ordinary
+		// directory: git cannot open `sub` as a repository through it. Treating
+		// every parseable directive as a store would refuse every later write
+		// under `docs/` with `PathInGitStore` for as long as the stale file
+		// sits in the tree.
+		let temp = init(&[("keep.txt", b"base\n"), ("docs/readme.md", b"docs\n")]);
+		fs::create_dir(temp.path().join("sub")).expect("mkdir sub");
+		fs::write(temp.path().join("sub/.git"), b"gitdir: ../docs\n").expect("write stale gitfile");
+
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/docs/guide.md b/docs/guide.md\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/docs/guide.md\n",
+			"@@ -0,0 +1 @@\n",
+			"+guide\n",
+		);
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("an ordinary directory named by a stale gitfile is not a store");
+		assert_eq!(fs::read(temp.path().join("docs/guide.md")).expect("read"), b"guide\n");
+	}
+
+	#[test]
+	fn gitfile_target_with_a_missing_commondir_is_not_protected() {
+		// A gitdir that names a `commondir` git cannot find is not one git
+		// would open; protecting it — or worse, protecting whatever the dangling
+		// commondir resolves to — would refuse writes for no live store.
+		let temp = init(&[("keep.txt", b"base\n"), ("data/x.txt", b"x\n")]);
+		let fake = temp.path().join("fake-gitdir");
+		fs::create_dir(&fake).expect("mkdir fake gitdir");
+		fs::write(fake.join("HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
+		fs::write(fake.join("commondir"), b"../data\n").expect("write commondir");
+		fs::create_dir(temp.path().join("sub")).expect("mkdir sub");
+		fs::write(temp.path().join("sub/.git"), b"gitdir: ../fake-gitdir\n").expect("write gitfile");
+
+		assert!(
+			gitfile_stores(&fake).is_empty(),
+			"a gitdir whose commondir lacks objects/ and refs/ is not a store"
+		);
+		let repository = repo(temp.path());
+		let patch = concat!(
+			"diff --git a/data/y.txt b/data/y.txt\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/data/y.txt\n",
+			"@@ -0,0 +1 @@\n",
+			"+y\n",
+		);
+		repository
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("the directory a dangling commondir points at is writable");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn removed_entries_stat_each_removed_name_once_across_queries() {
+		// The identity set is built once per preflight; querying many paths
+		// must not re-read the removed names. Probed through the memo: after
+		// construction, a query only stats its own ancestor prefixes, and a
+		// prefix stat'ed by one query is not stat'ed again by the next.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		for name in ["r0", "r1", "r2"] {
+			fs::write(temp.path().join(name), b"gone\n").expect("write removed");
+		}
+		fs::create_dir_all(temp.path().join("dir/inner")).expect("mkdir");
+		let removed: BTreeSet<&str> = ["r0", "r1", "r2"].into_iter().collect();
+		let entries = RemovedEntries::new(temp.path(), &removed);
+		assert_eq!(entries.identities.len(), 3, "every removed name resolved once");
+
+		assert!(!entries.covers_ancestor_of("dir/inner/a.txt"));
+		assert!(!entries.covers_ancestor_of("dir/inner/b.txt"));
+		assert!(!entries.covers_ancestor_of("dir/c.txt"));
+		// `dir` and `dir/inner` are the only prefixes any query touched, and
+		// each appears once regardless of how many paths shared it.
+		let seen = entries.seen.borrow();
+		assert_eq!(seen.len(), 2, "prefixes memoised: {:?}", seen.keys().collect::<Vec<_>>());
+		assert!(seen.contains_key("dir") && seen.contains_key("dir/inner"));
 	}
 
 	#[test]
