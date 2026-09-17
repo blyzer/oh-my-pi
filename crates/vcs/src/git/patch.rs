@@ -537,10 +537,17 @@ impl GitRepo {
 				.filter(|path| !merged_worktree.contains_key(*path))
 				.map(String::as_str),
 		);
+		// Keys of everything the pop restores. Every entry claims one, not just
+		// the links: `A` and `a` in the untracked half — or tracked `A` plus
+		// untracked `a` — are two entries where the stash was authored and one
+		// on a case-insensitive target, where the second write silently
+		// replaces the first and the stash is then dropped.
+		let mut restored_keys: FastHashSet<String> = FastHashSet::default();
 		let mut restored_links: FastHashSet<String> = FastHashSet::default();
 		for (path, entry) in &merged_worktree {
+			claim_key(path, &mut restored_keys)?;
 			if entry.mode == Mode::SYMLINK {
-				claim_key(path, &mut restored_links)?;
+				restored_links.insert(normalize_repo_path(path));
 			}
 		}
 		// The untracked half restores in this same iteration order, so a link
@@ -554,6 +561,7 @@ impl GitRepo {
 		for (path, entry) in &untracked {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 			let is_link = entry.mode == Mode::SYMLINK;
+			claim_key(path, &mut restored_keys)?;
 			assert_key_free(path, &restored_links, is_link)?;
 			// An ancestor the tracked map deletes does not survive into the
 			// untracked write: `write_worktree_map` removes `dir` before
@@ -571,7 +579,7 @@ impl GitRepo {
 				assert_outside_git_store(self, &repo, path)?;
 			}
 			if is_link {
-				claim_key(path, &mut restored_links)?;
+				restored_links.insert(normalize_repo_path(path));
 			}
 		}
 		write_worktree_map(self, &current_worktree, &merged_worktree)?;
@@ -1901,7 +1909,7 @@ fn claim_key(path: &str, keys: &mut FastHashSet<String>) -> Result<()> {
 /// so they are read once here, and each ancestor prefix a query touches is
 /// stat'ed at most once across the whole pass.
 struct RemovedEntries<'a> {
-	names:      BTreeSet<&'a str>,
+	names:      FastHashSet<&'a str>,
 	root:       &'a Path,
 	identities: FastHashSet<(u64, u64)>,
 	/// Prefix -> identity, memoised across queries. `None` records a prefix
@@ -1912,7 +1920,7 @@ struct RemovedEntries<'a> {
 impl<'a> RemovedEntries<'a> {
 	fn new(root: &'a Path, names: impl IntoIterator<Item = &'a str>) -> Self {
 		let mut entries = Self {
-			names: BTreeSet::new(),
+			names: FastHashSet::default(),
 			root,
 			identities: FastHashSet::default(),
 			seen: RefCell::new(FastHashMap::default()),
@@ -2061,6 +2069,12 @@ fn assert_cached_targets_outside_store(
 			// The leaf is never opened — only an index entry is written — so
 			// the prefix policy is the one that matches the operation.
 			assert_prefix_outside_git_store(repo, gix_repo, path)?;
+			// But the leaf can BE the store. With the git directory at exactly
+			// `meta`, staging a blob at `meta` compares only its parent — the
+			// worktree root — and passes, and a later checkout or
+			// `reset --hard` tries to materialize that blob over the store.
+			// The spelling settles it without resolving an alias.
+			assert_spelling_outside_git_store(repo, gix_repo, path)?;
 		}
 	}
 	Ok(())
@@ -2094,7 +2108,14 @@ fn assert_patch_paths_contained(
 	// its empty directory are gone before the link exists — and git accepts
 	// the same reordering. Checking the deletion against the final set would
 	// reject it.
+	// Keys claimed by every entry this patch CREATES, not only the links. Two
+	// regular targets `A` and `a` fold to one filesystem entry on a
+	// case-insensitive worktree, so `write_patch_worktree` writes both
+	// contents to one file and reports success against a lossy worktree.
+	// `apply_patch` never runs the worktree-map preflight, so the rule has to
+	// hold here too.
 	let mut minted_links: FastHashSet<String> = FastHashSet::default();
+	let mut claimed: FastHashSet<String> = FastHashSet::default();
 	for patch in patches {
 		let (source, target, _, target_mode) = patch_sides(patch, reverse);
 		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
@@ -2108,12 +2129,19 @@ fn assert_patch_paths_contained(
 		// since it is unlinked rather than created.
 		if let Some(source) = source {
 			assert_key_free(source, &minted_links, false)?;
+			// The writer unlinks this source before the target is created, so
+			// its key is free again for a later entry to claim — a rename onto
+			// a case-folded spelling of its own source is not a collision.
+			if target != Some(source) {
+				claimed.remove(&normalize_repo_path(source));
+			}
 		}
 		let Some(target) = target else { continue };
 		let mints_link = mode == Some(Some(Mode::SYMLINK));
 		assert_key_free(target, &minted_links, mints_link)?;
+		claim_key(target, &mut claimed)?;
 		if mints_link {
-			claim_key(target, &mut minted_links)?;
+			minted_links.insert(normalize_repo_path(target));
 		}
 	}
 	// The writer removes each entry's source before creating its target.
@@ -5461,6 +5489,135 @@ mod tests {
 		);
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
 		assert!(!temp.path().join("A").exists(), "the parent entry was written");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_refuses_two_regular_targets_sharing_one_key() {
+		// `apply_patch` never runs the worktree-map preflight, so all-entry key
+		// ownership has to hold in the patch preflight too: on a
+		// case-insensitive worktree both contents land in one file and the
+		// apply reports success against a lossy result.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let patch = concat!(
+			"diff --git a/A b/A\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/A\n",
+			"@@ -0,0 +1 @@\n",
+			"+upper\n",
+			"diff --git a/a b/a\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/a\n",
+			"@@ -0,0 +1 @@\n",
+			"+lower\n",
+		);
+		let repository = repo(temp.path());
+		assert!(
+			repository
+				.apply_patch(patch, &ApplyOptions::default())
+				.is_err(),
+			"two regular targets folding to one key must be refused"
+		);
+		assert!(!temp.path().join("A").exists(), "a target was written before the refusal");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn apply_patch_accepts_a_rename_onto_a_case_folded_spelling_of_its_source() {
+		// The writer unlinks the source before creating the target, so a rename
+		// from `Name` to `name` is not a key collision with itself.
+		let temp = init(&[("Name", b"body\n")]);
+		let patch = concat!(
+			"diff --git a/Name b/name\n",
+			"similarity index 100%\n",
+			"rename from Name\n",
+			"rename to name\n",
+		);
+		repo(temp.path())
+			.apply_patch(patch, &ApplyOptions::default())
+			.expect("a rename releasing its own key is valid");
+		assert_eq!(fs::read(temp.path().join("name")).expect("renamed"), b"body\n");
+	}
+
+	#[test]
+	fn cached_patch_refuses_a_leaf_equal_to_the_live_store() {
+		// The git directory is exactly `meta`, so staging a blob AT `meta`
+		// compares only its parent — the worktree root — and would pass.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		git(temp.path(), &["init", "-q", "--separate-git-dir=meta", "sub"]);
+		let patch = concat!(
+			"diff --git a/meta b/meta\n",
+			"new file mode 100644\n",
+			"--- /dev/null\n",
+			"+++ b/meta\n",
+			"@@ -0,0 +1 @@\n",
+			"+payload\n",
+		);
+		let repository = repo(temp.path());
+		let options = ApplyOptions { cached: true, ..ApplyOptions::default() };
+		assert!(
+			repository.apply_patch(patch, &options).is_err(),
+			"a staged leaf equal to the live store must be refused"
+		);
+		assert!(!repository.can_apply_patch(patch, &options).expect("probe"), "probe disagreed");
+		assert!(temp.path().join("meta").is_dir(), "the store was replaced");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn stash_pop_refuses_two_untracked_entries_sharing_one_key() {
+		// `A` and `a` in the untracked half are two entries where the stash was
+		// authored and one on a case-insensitive target: the second write
+		// replaces the first and the stash is then dropped, losing a file.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let repository = repo(temp.path());
+		let gix_repo = repository.gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_id = head.id().detach();
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let base = tree_map(&gix_repo, head_tree).expect("base map");
+		let upper = gix_repo.write_blob(b"upper\n").expect("upper").detach();
+		let lower = gix_repo.write_blob(b"lower\n").expect("lower").detach();
+		let mut untracked = BTreeMap::new();
+		untracked.insert("A".to_owned(), FileEntry::new(upper, Mode::FILE));
+		untracked.insert("a".to_owned(), FileEntry::new(lower, Mode::FILE));
+		let untracked_tree = write_tree_map(&gix_repo, &untracked).expect("untracked tree");
+		let index_tree = write_tree_map(&gix_repo, &base).expect("index tree");
+		let index_commit = gix_repo
+			.new_commit("index on HEAD: wip", index_tree, [head_id])
+			.expect("index commit");
+		let untracked_commit = gix_repo
+			.new_commit("untracked files on HEAD", untracked_tree, std::iter::empty::<gix::ObjectId>())
+			.expect("untracked commit");
+		let stash = gix_repo
+			.new_commit("wip", index_tree, [
+				head_id,
+				index_commit.id().detach(),
+				untracked_commit.id().detach(),
+			])
+			.expect("stash commit");
+		update_stash_ref(
+			&gix_repo,
+			stash.id().detach(),
+			PreviousValue::Any,
+			"On HEAD: wip".to_owned(),
+			true,
+		)
+		.expect("install stash");
+
+		assert!(
+			repository.stash_try_pop(false).is_err(),
+			"two untracked entries folding to one key must be refused"
+		);
+		assert!(
+			gix_repo
+				.try_find_reference("refs/stash")
+				.expect("lookup")
+				.is_some(),
+			"the stash was dropped despite the refusal"
+		);
 	}
 
 	#[test]
