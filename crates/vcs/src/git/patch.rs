@@ -521,67 +521,19 @@ impl GitRepo {
 		}
 		assert_worktree_map_contained(self, &repo, &current_worktree, &merged_worktree)?;
 		// The untracked half is written AFTER the tracked map, so its topology
-		// is the tracked map's RESULT, not the filesystem of today. Two things
-		// follow. A tracked outbound `dir` the pop deletes is gone before an
-		// untracked `dir/u` is restored, so resolving `dir/u` through the
-		// current link would reject a valid pop. And a tracked outbound link
-		// the pop CREATES exists by the time an untracked descendant is
-		// written, so an untracked `é/u` (spelled NFD, say) beneath a restored
-		// NFC `é` link is a write through that link — and the current
-		// filesystem, where the link is still absent, cannot show it. Both
-		// sets are keyed by `normalize_repo_path` for exactly that reason.
-		let removed_entries = RemovedEntries::new(
-			self.root(),
-			current_worktree
-				.keys()
-				.filter(|path| !merged_worktree.contains_key(*path))
-				.map(String::as_str),
+		// is the tracked map's RESULT, not the filesystem of today: a tracked
+		// outbound `dir` the pop deletes is gone before an untracked `dir/u` is
+		// restored, and a link the pop CREATES exists by the time an untracked
+		// descendant is written. One plan expresses both — the tracked map's
+		// steps, then the untracked writes, in the order `write_worktree_map`
+		// and the loop below execute them.
+		let mut plan = map_plan(self, &current_worktree, &merged_worktree);
+		plan.extend(
+			untracked
+				.iter()
+				.map(|(path, entry)| PlanStep::Write { path, mode: entry.mode }),
 		);
-		// Keys of everything the pop restores. Every entry claims one, not just
-		// the links: `A` and `a` in the untracked half — or tracked `A` plus
-		// untracked `a` — are two entries where the stash was authored and one
-		// on a case-insensitive target, where the second write silently
-		// replaces the first and the stash is then dropped.
-		let mut restored_keys: FastHashSet<String> = FastHashSet::default();
-		let mut restored_links: FastHashSet<String> = FastHashSet::default();
-		for (path, entry) in &merged_worktree {
-			claim_key(path, &mut restored_keys)?;
-			if entry.mode == Mode::SYMLINK {
-				restored_links.insert(normalize_repo_path(path));
-			}
-		}
-		// The untracked half restores in this same iteration order, so a link
-		// it creates is present for every LATER untracked entry. A stash
-		// authored on a case-sensitive filesystem can hold outbound `A -> .git`
-		// and regular `a/config`: two entries there, one hierarchy on a
-		// case-insensitive target, where `A` is created first and `a/config`
-		// then follows it into the store. Judging every untracked path against
-		// only the TRACKED links misses that entirely, so each link joins the
-		// set as it is judged.
-		for (path, entry) in &untracked {
-			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-			let is_link = entry.mode == Mode::SYMLINK;
-			claim_key(path, &mut restored_keys)?;
-			assert_key_free(path, &restored_links, is_link)?;
-			// An ancestor the tracked map deletes does not survive into the
-			// untracked write: `write_worktree_map` removes `dir` before
-			// `dir/u` is created, so resolving the CURRENT `dir` — even only
-			// as a prefix — judges a topology the restore never sees. Root
-			// containment already models the post-removal tree; only the store
-			// check runs, exactly as the map preflight does.
-			if removed_entries.covers_ancestor_of(path) {
-				assert_spelling_outside_git_store(self, &repo, path)?;
-			} else if is_link {
-				assert_prefix_within_root(self.root(), path)?;
-				assert_prefix_outside_git_store(self, &repo, path)?;
-			} else {
-				assert_within_root(self.root(), path)?;
-				assert_outside_git_store(self, &repo, path)?;
-			}
-			if is_link {
-				restored_links.insert(normalize_repo_path(path));
-			}
-		}
+		assert_plan_contained(self, &repo, plan)?;
 		write_worktree_map(self, &current_worktree, &merged_worktree)?;
 		for (path, entry) in &untracked {
 			write_worktree_entry(self, path, entry, &repo)?;
@@ -2094,101 +2046,7 @@ fn assert_patch_paths_contained(
 	reverse: bool,
 ) -> Result<()> {
 	let gix_repo = repo.gix()?;
-	// Paths this patch will itself turn into symlinks. The per-path guards
-	// below interrogate the CURRENT filesystem, where none of them exist yet,
-	// so a patch that creates `link` as 120000 and then writes `link/file`
-	// passes both checks and is only refused once `write_patch_worktree` has
-	// already created the link — a partial application. The topology the patch
-	// produces has to be judged before the first entry is written.
-	//
-	// Judged IN PATCH ORDER, not against the final set. `write_patch_worktree`
-	// applies entries sequentially, so a path is only under a minted link if
-	// that link was minted by an EARLIER entry. A patch that deletes
-	// `link/file` and then creates symlink `link` is valid — the child and
-	// its empty directory are gone before the link exists — and git accepts
-	// the same reordering. Checking the deletion against the final set would
-	// reject it.
-	// Keys claimed by every entry this patch CREATES, not only the links. Two
-	// regular targets `A` and `a` fold to one filesystem entry on a
-	// case-insensitive worktree, so `write_patch_worktree` writes both
-	// contents to one file and reports success against a lossy worktree.
-	// `apply_patch` never runs the worktree-map preflight, so the rule has to
-	// hold here too.
-	let mut minted_links: FastHashSet<String> = FastHashSet::default();
-	let mut claimed: FastHashSet<String> = FastHashSet::default();
-	for patch in patches {
-		let (source, target, _, target_mode) = patch_sides(patch, reverse);
-		// A 100% rename carries no `old mode`/`new mode` header, so a renamed
-		// symlink arrives with `target_mode == None` and application inherits
-		// the mode from the source entry. Infer it the same way here, or the
-		// scan misses a link this patch is about to mint and the descendant is
-		// refused only after the link exists.
-		let mode = target.map(|target| inferred_target_mode(repo, target_mode, source, target));
-		// Both sides of THIS entry are judged against links minted so far. The
-		// target may be the link this entry itself mints; a source never is,
-		// since it is unlinked rather than created.
-		if let Some(source) = source {
-			assert_key_free(source, &minted_links, false)?;
-			// The writer unlinks this source before the target is created, so
-			// its key is free again for a later entry to claim — a rename onto
-			// a case-folded spelling of its own source is not a collision.
-			if target != Some(source) {
-				claimed.remove(&normalize_repo_path(source));
-			}
-		}
-		let Some(target) = target else { continue };
-		let mints_link = mode == Some(Some(Mode::SYMLINK));
-		assert_key_free(target, &minted_links, mints_link)?;
-		claim_key(target, &mut claimed)?;
-		if mints_link {
-			minted_links.insert(normalize_repo_path(target));
-		}
-	}
-	// The writer removes each entry's source before creating its target.
-	// Record that removal after validating the source, before judging the
-	// target. Earlier removals persist for subsequent entries as well.
-	let mut removed = RemovedEntries::new(repo.root(), std::iter::empty());
-	for patch in patches {
-		let (source, target, _, declared_mode) = patch_sides(patch, reverse);
-		// Same inference the minted-link scan uses: a mode-less patch updating a
-		// tracked symlink arrives with `None`, and application inherits SYMLINK
-		// from the source entry. Reading the declared field alone would resolve
-		// the existing leaf and reject a safe unlink-and-recreate.
-		let target_mode =
-			target.and_then(|target| inferred_target_mode(repo, declared_mode, source, target));
-		if let Some(source) = source
-			&& target != Some(source)
-		{
-			validate_repo_path(source).map_err(ApplyFailure::into_error)?;
-			assert_prefix_within_root(repo.root(), source)?;
-			assert_prefix_outside_git_store(repo, &gix_repo, source)?;
-			removed.insert(source);
-		}
-		if let Some(target) = target {
-			validate_repo_path(target).map_err(ApplyFailure::into_error)?;
-			// An ancestor already scheduled for unlink does not survive into the
-			// write, so resolving the target through it — even only its prefix —
-			// judges a topology the write never sees. Root containment already
-			// models the post-removal tree; only the store check runs, on the
-			// prefix, exactly as `assert_worktree_map_contained` does.
-			if removed.covers_ancestor_of(target) {
-				assert_spelling_outside_git_store(repo, &gix_repo, target)?;
-			} else if target_mode == Some(Mode::SYMLINK) {
-				// The patch declares the mode it will write. A `120000` target
-				// is unlinked and recreated by `write_worktree_entry`, never
-				// opened through, so resolving its current destination would
-				// reject a valid patch that merely repoints an outbound symlink.
-				// Mirror the write site exactly: prefix for links.
-				assert_prefix_within_root(repo.root(), target)?;
-				assert_prefix_outside_git_store(repo, &gix_repo, target)?;
-			} else {
-				// Full guard for content.
-				assert_within_root(repo.root(), target)?;
-				assert_outside_git_store(repo, &gix_repo, target)?;
-			}
-		}
-	}
-	Ok(())
+	assert_plan_contained(repo, &gix_repo, patch_plan(repo, patches, reverse))
 }
 
 /// Refuse a path that lands inside the repository's ACTUAL Git store.
@@ -2620,104 +2478,161 @@ fn assert_worktree_map_contained(
 	previous: &BTreeMap<String, FileEntry>,
 	next: &BTreeMap<String, FileEntry>,
 ) -> Result<()> {
-	// One pass to claim keys, one to judge ancestry, both before removals,
-	// writes, or the caller's HEAD update — the current filesystem cannot show
-	// a topology this map has yet to create.
-	//
-	// First: EVERY entry must own a distinct key, not just the symlinks. A
-	// Linux-authored tree may hold regular `A` and `a`; on a case-insensitive
-	// worktree `write_worktree_map` writes both to one filesystem entry after
-	// `cherry_pick` has advanced HEAD, while the index keeps two — a
-	// successful but lossy checkout. Claimed incrementally: `collect` would
-	// silently keep one of the two.
+	// Whole-tree key uniqueness FIRST, over every entry in the result — not
+	// only the ones the plan writes. An unchanged entry already on disk is
+	// never written, so it is absent from the plan, but it still occupies its
+	// key: regular `A` unchanged plus a new `a` collide on a case-insensitive
+	// worktree exactly as two new entries would, and `cherry_pick` has already
+	// advanced HEAD by then. A git tree holds files, symlinks and submodules
+	// but never directories, so an entry whose key is the proper ancestor of
+	// another is equally a conflict — `A` with `a/file` fails partway through
+	// the checkout.
 	let mut keys: FastHashSet<String> = FastHashSet::default();
 	for path in next.keys() {
+		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 		claim_key(path, &mut keys)?;
 	}
-	// Second: no entry may sit under ANOTHER ENTRY. A git tree holds files,
-	// symlinks and submodules — never directories — so an entry whose key is
-	// the proper ancestor of another must be a directory for that other to
-	// exist, and cannot be. Blob `A` with tree entry `a/file` has distinct
-	// keys and passes uniqueness, then fails partway through the checkout
-	// after HEAD has moved. Judging every entry rather than only the symlinks
-	// covers the minted-link case too: a link is just the ancestor that is
-	// also followed.
 	for path in next.keys() {
 		assert_key_free(path, &keys, true)?;
 	}
-	for path in previous.keys() {
-		if !next.contains_key(path) {
-			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-			assert_prefix_within_root(repo.root(), path)?;
-			assert_prefix_outside_git_store(repo, gix_repo, path)?;
+	// Then the ordered plan: removals, then the writes that actually happen.
+	assert_plan_contained(repo, gix_repo, map_plan(repo, previous, next))
+}
+
+/// One filesystem step a write pass will take, in the order it takes it.
+///
+/// The three writers — [`write_patch_worktree`], [`write_worktree_map`] and
+/// the untracked half of `stash_try_pop` — reduce to exactly two primitives:
+/// [`remove_worktree_path`] and [`write_worktree_entry`]. Naming that sequence
+/// is what lets one validator judge all three: before this existed, each
+/// preflight re-simulated its writer by hand, and every divergence between the
+/// two models was a bug. Three quarters of the review findings on this branch
+/// came from that duplication, including rules that landed in one preflight
+/// and were missed in the other two.
+#[derive(Clone, Copy)]
+enum PlanStep<'a> {
+	/// `remove_worktree_path`: unlinks the entry, never follows the leaf.
+	Remove { path: &'a str },
+	/// `write_worktree_entry`: creates the leaf, opening through it unless the
+	/// entry is a symlink, which is unlinked and recreated instead.
+	Write { path: &'a str, mode: Mode },
+}
+
+impl<'a> PlanStep<'a> {
+	const fn path(self) -> &'a str {
+		match self {
+			Self::Remove { path } | Self::Write { path, .. } => path,
 		}
 	}
-	// Entries the removal pass takes out before anything is written. A tracked
-	// outbound symlink `dir` that `next` replaces with `dir/file` is gone by
-	// the time the child is created, so judging the child against the CURRENT
-	// filesystem would reject a safe operation — the escaping ancestor is
-	// itself scheduled for removal. Keyed like `links` above: `previous` may
-	// spell the link NFC and `next` its child NFD, and on a normalizing
-	// filesystem those are one hierarchy.
-	// EXACT names here, deliberately not folded. Folding serves the minted-link
-	// scan, where the question is "does this spelling denote the same
-	// hierarchy" — but this question is "will the actual filesystem entry be
-	// gone", and on a case-sensitive worktree `Link` and `link` are two
-	// entries. Treating a removed `Link` as the ancestor of `link/file` would
-	// skip containment for a path that resolves through a symlink the write
-	// pass never touches, and the refusal would then land after HEAD moved.
-	let removed_entries = RemovedEntries::new(
-		repo.root(),
-		previous
-			.keys()
-			.filter(|path| !next.contains_key(*path))
-			.map(String::as_str),
-	);
-	for (path, entry) in next {
-		// Exactly the predicate the write loop uses. Validating entries it will
-		// never touch would fail a cherry-pick of one file because some
-		// unrelated, unchanged path had locally been replaced by a symlink —
-		// a path this call is not going to write to at all.
-		// Shape is validated for EVERY entry, changed or not. `write_index_map`
-		// calls `validate_repo_path` unconditionally further downstream, and by
-		// then `cherry_pick` has already advanced HEAD — so an untouched path
-		// that an older index accepted but this policy refuses would fail the
-		// operation after the commit. Containment is the part that may be
-		// skipped below: that one asks what the path resolves through, which
-		// only matters for a path being written.
+}
+
+/// Judge an ordered write plan before its first step runs.
+///
+/// Every rule the preflights used to carry separately, applied once:
+///
+/// - **Shape.** Every path is validated, removals included.
+/// - **Key ownership.** Each written path claims its normalized key; a removed
+///   path releases the key it held. Two entries folding onto one filesystem
+///   entry is a lossy write, whether both are regular files or one is a link.
+/// - **Minted links.** A path written as a symlink shadows everything under
+///   its key for every LATER step, which the current filesystem cannot show.
+/// - **Doomed ancestors.** A path under something an EARLIER step unlinks is
+///   judged by spelling: resolving it asks about a topology the write never
+///   sees.
+/// - **Leaf policy.** A removal and a symlink write never follow the leaf; a
+///   content write does. Mirrors the write site exactly.
+fn assert_plan_contained<'a>(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	plan: impl IntoIterator<Item = PlanStep<'a>>,
+) -> Result<()> {
+	let mut minted_links: FastHashSet<String> = FastHashSet::default();
+	let mut claimed: FastHashSet<String> = FastHashSet::default();
+	let mut removed = RemovedEntries::new(repo.root(), std::iter::empty());
+	for step in plan {
+		let path = step.path();
 		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-		if previous.get(path) == Some(entry) && repo.root().join(path).exists() {
-			continue;
-		}
-		// Skip containment when a proper ancestor is being removed first: the
-		// path the guard would resolve does not survive into the write pass.
-		let ancestor_removed = removed_entries.covers_ancestor_of(path);
-		if ancestor_removed {
-			// Root containment already models the post-removal topology; the
-			// store check must too, or `dir -> .git` replaced by `dir/file`
-			// resolves through the link that is about to be unlinked and the
-			// safe operation is rejected as touching the store. Judge the
-			// SPELLING, which is what survives into the write — resolving the
-			// doomed ancestor is exactly what rejected it.
-			assert_spelling_outside_git_store(repo, gix_repo, path)?;
-			continue;
-		}
-		// A symlink entry is written by unlinking whatever is there and calling
-		// `symlink` — neither follows the old leaf, and the new one is created,
-		// not opened. Resolving it would reject every operation on a repository
-		// that legitimately tracks a link pointing outside the worktree:
-		// `stash_push`, `stash_try_pop` and `cherry_pick` would all fail even
-		// when the link is untouched, and a patch updating the link itself
-		// would be refused. Only the prefix has to stay inside the root.
-		if entry.mode == Mode::SYMLINK {
-			assert_prefix_within_root(repo.root(), path)?;
-			assert_prefix_outside_git_store(repo, gix_repo, path)?;
-		} else {
-			assert_within_root(repo.root(), path)?;
-			assert_outside_git_store(repo, gix_repo, path)?;
+		match step {
+			PlanStep::Remove { path } => {
+				assert_key_free(path, &minted_links, false)?;
+				// The entry is gone after this step: its key is free for a
+				// later write, and its subtree no longer resolves through it.
+				claimed.remove(&normalize_repo_path(path));
+				assert_prefix_within_root(repo.root(), path)?;
+				assert_prefix_outside_git_store(repo, gix_repo, path)?;
+				removed.insert(path);
+			},
+			PlanStep::Write { path, mode } => {
+				let is_link = mode == Mode::SYMLINK;
+				assert_key_free(path, &minted_links, is_link)?;
+				claim_key(path, &mut claimed)?;
+				if removed.covers_ancestor_of(path) {
+					assert_spelling_outside_git_store(repo, gix_repo, path)?;
+				} else if is_link {
+					assert_prefix_within_root(repo.root(), path)?;
+					assert_prefix_outside_git_store(repo, gix_repo, path)?;
+				} else {
+					assert_within_root(repo.root(), path)?;
+					assert_outside_git_store(repo, gix_repo, path)?;
+				}
+				if is_link {
+					minted_links.insert(normalize_repo_path(path));
+				}
+			},
 		}
 	}
 	Ok(())
+}
+
+/// The plan [`write_patch_worktree`] will execute: each entry's source is
+/// unlinked, then its target written, in patch order.
+fn patch_plan<'a>(
+	repo: &GitRepo,
+	patches: &'a [FilePatch],
+	reverse: bool,
+) -> Vec<PlanStep<'a>> {
+	let mut plan = Vec::new();
+	for patch in patches {
+		let (source, target, _, declared_mode) = patch_sides(patch, reverse);
+		if let Some(source) = source
+			&& target != Some(source)
+		{
+			plan.push(PlanStep::Remove { path: source });
+		}
+		if let Some(target) = target {
+			// A 100% rename carries no mode header and application inherits
+			// the source's mode, so the plan has to infer it the same way or
+			// it misses a link this patch is about to mint.
+			let mode = inferred_target_mode(repo, declared_mode, source, target)
+				.unwrap_or(Mode::FILE);
+			plan.push(PlanStep::Write { path: target, mode });
+		}
+	}
+	plan
+}
+
+/// The plan [`write_worktree_map`] will execute: every entry `previous` holds
+/// and `next` does not is unlinked, then every changed entry is written.
+fn map_plan<'a>(
+	repo: &GitRepo,
+	previous: &'a BTreeMap<String, FileEntry>,
+	next: &'a BTreeMap<String, FileEntry>,
+) -> Vec<PlanStep<'a>> {
+	let mut plan = Vec::new();
+	for path in previous.keys() {
+		if !next.contains_key(path) {
+			plan.push(PlanStep::Remove { path });
+		}
+	}
+	for (path, entry) in next {
+		// Exactly the predicate the write loop uses: an unchanged path that is
+		// already on disk is never touched, so validating what it resolves
+		// through would fail an operation for a path it will not write.
+		if previous.get(path) != Some(entry) || !repo.root().join(path).exists() {
+			plan.push(PlanStep::Write { path, mode: entry.mode });
+		}
+	}
+	plan
 }
 
 /// Whether a single path component names the Git store under any spelling a
