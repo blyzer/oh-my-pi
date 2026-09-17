@@ -2394,7 +2394,15 @@ fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) -> bool {
 		return false;
 	};
 	let mut complete = true;
-	for entry in entries.flatten() {
+	for entry in entries.map(scan_item) {
+		// `ReadDir` opens fine and then fails mid-walk on a FUSE or NFS
+		// worktree. Dropping that item — what `flatten()` did — hides every
+		// store below it while leaving `complete` true, so a containment check
+		// would clear a path against a set that silently lost entries.
+		let Some(entry) = entry else {
+			complete = false;
+			continue;
+		};
 		let path = entry.path();
 		let Ok(kind) = entry.file_type() else {
 			complete = false;
@@ -2434,6 +2442,16 @@ fn collect_nested_stores(dir: &Path, found: &mut Vec<PathBuf>) -> bool {
 	complete
 }
 
+/// One `ReadDir` item, or `None` when the walk could not produce it.
+///
+/// Split out because the failure is the interesting half and it cannot be
+/// provoked through permissions on every filesystem: a directory that cannot
+/// be read usually fails at `read_dir`, while FUSE and NFS surface EIO on the
+/// ITEM. `None` means the scan has lost an entry and is no longer a complete
+/// picture of the tree — never that the directory held nothing there.
+fn scan_item(entry: std::io::Result<fs::DirEntry>) -> Option<fs::DirEntry> {
+	entry.ok()
+}
 fn canonical_or_self(path: &Path) -> PathBuf {
 	std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -2574,9 +2592,9 @@ fn assert_worktree_map_contained(
 	previous: &BTreeMap<String, FileEntry>,
 	next: &BTreeMap<String, FileEntry>,
 ) -> Result<()> {
-	// Two passes over the resulting tree, judged before removals, writes, or
-	// the caller's HEAD update, because the current filesystem cannot show a
-	// topology this map has yet to create.
+	// One pass to claim keys, one to judge ancestry, both before removals,
+	// writes, or the caller's HEAD update — the current filesystem cannot show
+	// a topology this map has yet to create.
 	//
 	// First: EVERY entry must own a distinct key, not just the symlinks. A
 	// Linux-authored tree may hold regular `A` and `a`; on a case-insensitive
@@ -2585,17 +2603,19 @@ fn assert_worktree_map_contained(
 	// successful but lossy checkout. Claimed incrementally: `collect` would
 	// silently keep one of the two.
 	let mut keys: FastHashSet<String> = FastHashSet::default();
-	let mut links: FastHashSet<String> = FastHashSet::default();
-	for (path, entry) in next {
-		claim_key(path, &mut keys)?;
-		if entry.mode == Mode::SYMLINK {
-			links.insert(normalize_repo_path(path));
-		}
-	}
-	// Second: no entry may sit UNDER a link the same map creates. Layered on
-	// top of uniqueness, so a link's own key is already accounted for.
 	for path in next.keys() {
-		assert_key_free(path, &links, true)?;
+		claim_key(path, &mut keys)?;
+	}
+	// Second: no entry may sit under ANOTHER ENTRY. A git tree holds files,
+	// symlinks and submodules — never directories — so an entry whose key is
+	// the proper ancestor of another must be a directory for that other to
+	// exist, and cannot be. Blob `A` with tree entry `a/file` has distinct
+	// keys and passes uniqueness, then fails partway through the checkout
+	// after HEAD has moved. Judging every entry rather than only the symlinks
+	// covers the minted-link case too: a link is just the ancestor that is
+	// also followed.
+	for path in next.keys() {
+		assert_key_free(path, &keys, true)?;
 	}
 	for path in previous.keys() {
 		if !next.contains_key(path) {
@@ -5406,6 +5426,64 @@ mod tests {
 			"two regular entries sharing one normalized key must be refused"
 		);
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn cherry_pick_refuses_an_entry_under_another_entrys_key() {
+		// Blob `A` and tree entry `a/file` have DISTINCT keys, so uniqueness
+		// alone passes. On a case-insensitive worktree `A` is written first and
+		// creating directory `a` then fails, leaving a partial checkout after
+		// HEAD has already moved.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let gix_repo = repo(temp.path()).gix().expect("open repository");
+		let head = gix_repo.head_commit().expect("HEAD");
+		let head_tree = head.tree_id().expect("HEAD tree").detach();
+		let mut map = tree_map(&gix_repo, head_tree).expect("base map");
+		let blob = gix_repo.write_blob(b"file\n").expect("blob").detach();
+		let child = gix_repo
+			.write_blob(b"child\n")
+			.expect("child blob")
+			.detach();
+		map.insert("A".to_owned(), FileEntry::new(blob, Mode::FILE));
+		map.insert("a/file".to_owned(), FileEntry::new(child, Mode::FILE));
+		let tree = write_tree_map(&gix_repo, &map).expect("colliding tree");
+		let picked = gix_repo
+			.new_commit("file and descendant", tree, [head.id().detach()])
+			.expect("commit")
+			.id()
+			.to_string();
+		let head_before = git(temp.path(), &["rev-parse", "HEAD"]);
+
+		assert!(
+			repo(temp.path()).cherry_pick(&picked).is_err(),
+			"an entry under another entry's key must be refused"
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head_before, "HEAD moved");
+		assert!(!temp.path().join("A").exists(), "the parent entry was written");
+	}
+
+	#[test]
+	fn a_failed_scan_item_is_not_an_absent_entry() {
+		// The item error is the interesting half and cannot be provoked through
+		// permissions on APFS — an unreadable directory fails at `read_dir`,
+		// while FUSE and NFS surface EIO on the item. Pinned directly: an `Err`
+		// classifies as `None`, which the walk turns into `complete = false`
+		// rather than silently dropping the entry.
+		let failed = scan_item(Err(std::io::Error::from_raw_os_error(libc::EIO)));
+		assert!(failed.is_none(), "an item error must not look like an absent entry");
+
+		// And the walk reports a directory it could not open at all.
+		let temp = init(&[("keep.txt", b"base\n")]);
+		let mut found = Vec::new();
+		assert!(
+			collect_nested_stores(temp.path(), &mut found),
+			"a readable tree must report a complete scan"
+		);
+		assert!(
+			!collect_nested_stores(&temp.path().join("absent"), &mut found),
+			"an unopenable directory must report an incomplete scan"
+		);
 	}
 
 	#[test]
