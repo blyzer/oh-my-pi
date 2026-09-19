@@ -31,6 +31,9 @@ pub async fn run(args: &ModelsArgs, extensions: &LaunchExtensions) -> miette::Re
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let catalog = composed_catalog(&data_dir, extensions).await?;
 	match args.command.as_ref() {
+		None if args.filter.is_none() && !args.json && args.role.is_none() => {
+			print_summary(catalog.as_ref())
+		},
 		None => print_rows(&select(catalog.as_ref(), args.filter.as_deref(), args.role), args.json),
 		Some(ModelsCommand::List { filter, json, role }) => {
 			print_rows(&select(catalog.as_ref(), filter.as_deref(), *role), *json)
@@ -287,6 +290,16 @@ fn select<'a>(
 	rows
 }
 
+fn print_summary(catalog: &Catalog) -> miette::Result<()> {
+	let models = catalog.models().len();
+	let providers = catalog.providers().len();
+	println!(
+		"{models} catalog model(s) across {providers} provider(s). Use `omp models list`, `omp \
+		 models find <text>`, or `omp models --role <role>`."
+	);
+	Ok(())
+}
+
 fn print_rows(rows: &[&ModelSpec], json: bool) -> miette::Result<()> {
 	if json {
 		println!("{}", serde_json::to_string_pretty(rows).into_diagnostic()?);
@@ -320,5 +333,11 @@ mod tests {
 		let first = catalog.models().first().expect("embedded model");
 		let prefix = &first.key.as_str()[..3.min(first.key.as_str().len())];
 		assert!(select(catalog, Some(&prefix.to_ascii_uppercase()), None).contains(&first));
+	}
+
+	#[test]
+	fn bare_models_command_summarizes_instead_of_dumping_catalog() {
+		let catalog = Catalog::embedded();
+		assert!(print_summary(catalog).is_ok());
 	}
 }

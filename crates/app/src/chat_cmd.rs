@@ -403,7 +403,8 @@ impl Launch {
 				Some(remembered.map_or_else(|| first.key.clone(), |key| Str::new(key.as_str())))
 			})
 			.or_else(|| roles.primary.as_ref().map(|value| Str::new(value.as_str())))
-			.ok_or_else(|| miette!("launch requires a configured default model role"))?;
+			.or_else(|| roles::fallback_model_selector(catalog.as_ref(), &scoped))
+			.ok_or_else(|| miette!("launch could not select a catalog model"))?;
 		if api_key.is_some() && !model_override && models.is_none() {
 			return Err(miette!("--api-key requires a model to be specified via --model or --models"));
 		}
@@ -1645,6 +1646,24 @@ mod tests {
 			Str::new_static("openai/gpt-5"),
 			Some(Str::new_static("minimal"))
 		)]);
+	}
+
+	#[tokio::test]
+	async fn launch_without_configured_default_uses_catalog_fallback() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut args = ChatArgs::default_interactive();
+		args.project = dir.path().to_path_buf();
+		let launch = Launch::prepare(args, Arc::new(omp_con::Ctx::new()), test_env(dir.path()))
+			.await
+			.unwrap();
+		assert!(
+			embedded()
+				.model(&omp_catalog::ModelKey::from(launch.model.as_str()))
+				.is_some(),
+			"fallback must be a catalog model, got {}",
+			launch.model
+		);
+		assert!(!launch.options.model_override);
 	}
 
 	#[tokio::test]

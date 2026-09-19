@@ -23,7 +23,9 @@ mod tests {
 		let mut found = Vec::new();
 		let mut stack = vec![root];
 		while let Some(dir) = stack.pop() {
-			let Ok(entries) = fs::read_dir(&dir) else { continue };
+			let Ok(entries) = fs::read_dir(&dir) else {
+				continue;
+			};
 			for entry in entries.flatten() {
 				let path = entry.path();
 				if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -44,7 +46,9 @@ mod tests {
 		let mut orphans = Vec::new();
 		let mut total = 0usize;
 		for dir in snapshot_dirs() {
-			let Ok(entries) = fs::read_dir(&dir) else { continue };
+			let Ok(entries) = fs::read_dir(&dir) else {
+				continue;
+			};
 			for entry in entries.flatten() {
 				let name = entry.file_name().to_string_lossy().into_owned();
 				if !name.ends_with(".snap") {
@@ -64,12 +68,12 @@ mod tests {
 		assert!(
 			orphans.is_empty(),
 			"{} of {total} snapshots are not named `{EXPECTED_PREFIX}…` and are therefore \
-			 unreachable by insta.\n\nThis is what a crate rename looks like: the files are \
-			 still tracked and still valid, but insta derives the filename from the CURRENT \
-			 crate name and will never find them. Each affected assertion reports a `+new` \
-			 side with no `-old` to diff against and writes a `.snap.new`.\n\nDo NOT run \
-			 `cargo insta accept` — that discards whatever the tracked originals asserted. \
-			 Prove the bodies match, then `git mv`.\n\nFirst offenders: {sample:?}",
+			 unreachable by insta.\n\nThis is what a crate rename looks like: the files are still \
+			 tracked and still valid, but insta derives the filename from the CURRENT crate name and \
+			 will never find them. Each affected assertion reports a `+new` side with no `-old` to \
+			 diff against and writes a `.snap.new`.\n\nDo NOT run `cargo insta accept` — that \
+			 discards whatever the tracked originals asserted. Prove the bodies match, then `git \
+			 mv`.\n\nFirst offenders: {sample:?}",
 			orphans.len()
 		);
 	}

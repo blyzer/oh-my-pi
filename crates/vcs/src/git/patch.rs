@@ -2534,8 +2534,8 @@ impl<'a> PlanStep<'a> {
 /// - **Key ownership.** Each written path claims its normalized key; a removed
 ///   path releases the key it held. Two entries folding onto one filesystem
 ///   entry is a lossy write, whether both are regular files or one is a link.
-/// - **Minted links.** A path written as a symlink shadows everything under
-///   its key for every LATER step, which the current filesystem cannot show.
+/// - **Minted links.** A path written as a symlink shadows everything under its
+///   key for every LATER step, which the current filesystem cannot show.
 /// - **Doomed ancestors.** A path under something an EARLIER step unlinks is
 ///   judged by spelling: resolving it asks about a topology the write never
 ///   sees.
@@ -2586,11 +2586,7 @@ fn assert_plan_contained<'a>(
 
 /// The plan [`write_patch_worktree`] will execute: each entry's source is
 /// unlinked, then its target written, in patch order.
-fn patch_plan<'a>(
-	repo: &GitRepo,
-	patches: &'a [FilePatch],
-	reverse: bool,
-) -> Vec<PlanStep<'a>> {
+fn patch_plan<'a>(repo: &GitRepo, patches: &'a [FilePatch], reverse: bool) -> Vec<PlanStep<'a>> {
 	let mut plan = Vec::new();
 	for patch in patches {
 		let (source, target, _, declared_mode) = patch_sides(patch, reverse);
@@ -2603,8 +2599,7 @@ fn patch_plan<'a>(
 			// A 100% rename carries no mode header and application inherits
 			// the source's mode, so the plan has to infer it the same way or
 			// it misses a link this patch is about to mint.
-			let mode = inferred_target_mode(repo, declared_mode, source, target)
-				.unwrap_or(Mode::FILE);
+			let mode = inferred_target_mode(repo, declared_mode, source, target).unwrap_or(Mode::FILE);
 			plan.push(PlanStep::Write { path: target, mode });
 		}
 	}
