@@ -483,7 +483,14 @@ fn summary_request(
 		messages:          messages.into(),
 		tools:             Arc::from([]),
 		hosted_tools:      Arc::from([]),
-		tool_choice:       Setting::Require(ToolChoice::Disabled),
+		// The summariser declares no tools, so disabling tool choice asks the
+		// route for nothing. Requiring it made `chat.tools.choice` a hard
+		// planning requirement, which a route carrying no tool-choice evidence
+		// fails outright — compaction would then break the session on exactly
+		// the routes whose context it exists to reclaim. Preferring it lowers
+		// to the identical wire value while leaving unknown evidence
+		// admissible.
+		tool_choice:       Setting::Prefer(ToolChoice::Disabled),
 		output:            Setting::Unset,
 		reasoning:         Setting::Unset,
 		verbosity:         Setting::Unset,
