@@ -150,10 +150,7 @@ pub fn compile(
 	Ok(plan)
 }
 
-pub fn prepare(
-	spec: &SandboxSpec,
-	prepared: &mut PreparedSandbox,
-) -> Result<(), SandboxError> {
+pub fn prepare(spec: &SandboxSpec, prepared: &mut PreparedSandbox) -> Result<(), SandboxError> {
 	#[cfg(not(target_os = "linux"))]
 	{
 		let _ = (spec, prepared);

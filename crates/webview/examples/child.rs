@@ -78,10 +78,12 @@ mod macos {
 				for event in view.events().try_iter() {
 					println!("event: {event:?}");
 					if matches!(event, omp_webview::WebViewEvent::LoadFinished(_)) {
-						let _ =
-							view.eval_with("`${document.title} @ ${innerWidth}x${innerHeight}`", |result| {
+						let _ = view.eval_with(
+							"`${document.title} @ ${innerWidth}x${innerHeight}`",
+							|result| {
 								println!("eval: {result}");
-							});
+							},
+						);
 					}
 				}
 			}
@@ -107,8 +109,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(target_os = "macos"))]
 fn main() {
 	eprintln!(
-		"the `child` example embeds the platform webview, which omp-webview provides only on \
-		 macOS; use the `frames`, `ipc`, or `window` examples on this target"
+		"the `child` example embeds the platform webview, which omp-webview provides only on macOS; \
+		 use the `frames`, `ipc`, or `window` examples on this target"
 	);
 	std::process::exit(1);
 }
