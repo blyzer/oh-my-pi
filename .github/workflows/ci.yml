@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, omp2]
     paths:
       - ".cargo/**"
       - ".github/workflows/ci.yml"
@@ -22,7 +22,7 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
   pull_request:
-    branches: [main]
+    branches: [main, omp2]
     paths:
       - ".cargo/**"
       - ".github/workflows/ci.yml"
