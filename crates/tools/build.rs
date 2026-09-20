@@ -49,7 +49,25 @@ fn main() {
 			println!("cargo::rustc-link-arg=--ld-path={}", shim.display());
 		}
 	}
-	println!("cargo::rustc-link-arg=-Wl,-export_dynamic");
+	// omp-py's final link needs the interpreter's own symbols exported. The
+	// flag's spelling is per-linker: ld64 takes `-export_dynamic`, while GNU
+	// ld and LLD parse that same string as `-e xport_dynamic` and silently
+	// produce a binary with no valid entry point, which segfaults in the
+	// dynamic loader before `main`. See crates/py/build.rs, which selects the
+	// same way for the library link.
+	let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
+	let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
+	let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+	let link_arg = if target_vendor == "apple" {
+		Some("-Wl,-export_dynamic")
+	} else if target_os != "aix" && target_family.split(',').any(|family| family == "unix") {
+		Some("-Wl,--export-dynamic")
+	} else {
+		None
+	};
+	if let Some(link_arg) = link_arg {
+		println!("cargo::rustc-link-arg={link_arg}");
+	}
 }
 
 fn generate_docs_manifest(manifest: &Path) -> io::Result<()> {
