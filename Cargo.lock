@@ -7570,7 +7570,7 @@ dependencies = [
 
 [[package]]
 name = "omp-adw"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "omp-core",
  "serde",
@@ -7581,7 +7581,7 @@ dependencies = [
 
 [[package]]
 name = "omp-agent"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "async-stream",
  "bytes",
@@ -7615,7 +7615,7 @@ dependencies = [
 
 [[package]]
 name = "omp-ai"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -7684,7 +7684,7 @@ dependencies = [
 
 [[package]]
 name = "omp-app"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -7706,6 +7706,7 @@ dependencies = [
  "miette",
  "nix 0.31.3",
  "objc2 0.6.4",
+ "omp-adw",
  "omp-agent",
  "omp-ai",
  "omp-ar",
@@ -7772,7 +7773,7 @@ dependencies = [
 
 [[package]]
 name = "omp-ar"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "cap-std",
  "crc32fast",
@@ -7792,7 +7793,7 @@ dependencies = [
 
 [[package]]
 name = "omp-ast"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "ast-grep-core",
  "ignore",
@@ -7864,7 +7865,7 @@ dependencies = [
 
 [[package]]
 name = "omp-audio"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "block2 0.6.2",
  "flume",
@@ -7882,7 +7883,7 @@ dependencies = [
 
 [[package]]
 name = "omp-cache"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "omp-core",
@@ -7902,7 +7903,7 @@ dependencies = [
 
 [[package]]
 name = "omp-catalog"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "arc-swap",
  "globset",
@@ -7924,7 +7925,7 @@ dependencies = [
 
 [[package]]
 name = "omp-chat"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "flume",
@@ -7964,7 +7965,7 @@ dependencies = [
 
 [[package]]
 name = "omp-collab"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "flume",
@@ -7988,7 +7989,7 @@ dependencies = [
 
 [[package]]
 name = "omp-con"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "flume",
  "linkme",
@@ -8004,7 +8005,7 @@ dependencies = [
 
 [[package]]
 name = "omp-core"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "bytes-utils",
@@ -8033,7 +8034,7 @@ dependencies = [
 
 [[package]]
 name = "omp-desktop"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "ashpd",
  "atspi",
@@ -8065,7 +8066,7 @@ dependencies = [
 
 [[package]]
 name = "omp-dom"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "flume",
  "omp-core",
@@ -8082,7 +8083,7 @@ dependencies = [
 
 [[package]]
 name = "omp-driver"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -8100,6 +8101,7 @@ dependencies = [
  "jiff",
  "libc",
  "notify",
+ "omp-adw",
  "omp-agent",
  "omp-ai",
  "omp-ar",
@@ -8155,7 +8157,7 @@ dependencies = [
 
 [[package]]
 name = "omp-e2e"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -8205,7 +8207,7 @@ dependencies = [
 
 [[package]]
 name = "omp-edit"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "omp-ast",
  "omp-core",
@@ -8224,7 +8226,7 @@ dependencies = [
 
 [[package]]
 name = "omp-env"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "flume",
@@ -8246,7 +8248,7 @@ dependencies = [
 
 [[package]]
 name = "omp-envd"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "arboard",
  "async-stream",
@@ -8337,7 +8339,7 @@ dependencies = [
 
 [[package]]
 name = "omp-ext"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "blake3",
  "futures",
@@ -8358,7 +8360,7 @@ dependencies = [
 
 [[package]]
 name = "omp-gui"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytemuck",
  "etagere",
@@ -8386,7 +8388,7 @@ dependencies = [
 
 [[package]]
 name = "omp-http"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "reqwest 0.13.4",
  "rustls",
@@ -8395,7 +8397,7 @@ dependencies = [
 
 [[package]]
 name = "omp-journal"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "cap-std",
@@ -8412,7 +8414,7 @@ dependencies = [
 
 [[package]]
 name = "omp-macros"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "omp-core",
  "omp-vocab",
@@ -8424,7 +8426,7 @@ dependencies = [
 
 [[package]]
 name = "omp-memory"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "fastembed",
  "flume",
@@ -8443,7 +8445,7 @@ dependencies = [
 
 [[package]]
 name = "omp-oauth"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "flume",
@@ -8469,7 +8471,7 @@ dependencies = [
 
 [[package]]
 name = "omp-observability"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "flume",
  "jiff",
@@ -8496,7 +8498,7 @@ dependencies = [
 
 [[package]]
 name = "omp-proto"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "omp-core",
@@ -8514,7 +8516,7 @@ dependencies = [
 
 [[package]]
 name = "omp-py"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "omp-core",
  "omp-env",
@@ -8532,7 +8534,7 @@ dependencies = [
 
 [[package]]
 name = "omp-rpc"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "flume",
@@ -8554,7 +8556,7 @@ dependencies = [
 
 [[package]]
 name = "omp-sandbox"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "globset",
  "landlock",
@@ -8575,7 +8577,7 @@ dependencies = [
 
 [[package]]
 name = "omp-scribe"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "im",
  "omp-core",
@@ -8588,7 +8590,7 @@ dependencies = [
 
 [[package]]
 name = "omp-sdk"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "flume",
  "futures",
@@ -8607,7 +8609,7 @@ dependencies = [
 
 [[package]]
 name = "omp-secrets"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "hmac 0.12.1",
  "omp-cache",
@@ -8625,7 +8627,7 @@ dependencies = [
 
 [[package]]
 name = "omp-serve"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "async-stream",
  "bytes",
@@ -8650,7 +8652,7 @@ dependencies = [
 
 [[package]]
 name = "omp-session"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "flume",
@@ -8670,7 +8672,7 @@ dependencies = [
 
 [[package]]
 name = "omp-shell"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -8706,7 +8708,7 @@ dependencies = [
 
 [[package]]
 name = "omp-shell-builtins"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "argmax",
  "bigdecimal",
@@ -8777,7 +8779,7 @@ dependencies = [
 
 [[package]]
 name = "omp-snapcompact"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "fontdue",
  "png 0.18.1",
@@ -8787,7 +8789,7 @@ dependencies = [
 
 [[package]]
 name = "omp-tool"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "async-stream",
  "bytes",
@@ -8810,7 +8812,7 @@ dependencies = [
 
 [[package]]
 name = "omp-tools"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "anydoc",
  "async-stream",
@@ -8867,7 +8869,7 @@ dependencies = [
 
 [[package]]
 name = "omp-tui"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "arboard",
  "bytes",
@@ -8906,7 +8908,7 @@ dependencies = [
 
 [[package]]
 name = "omp-vcs"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "gix",
  "jj-lib",
@@ -8923,7 +8925,7 @@ dependencies = [
 
 [[package]]
 name = "omp-vocab"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "omp-core",
  "serde",
@@ -8932,7 +8934,7 @@ dependencies = [
 
 [[package]]
 name = "omp-walker"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "dashmap",
  "globset",
@@ -8947,7 +8949,7 @@ dependencies = [
 
 [[package]]
 name = "omp-webview"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "block2 0.6.2",
  "bytes",
