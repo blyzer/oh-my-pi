@@ -1,6 +1,10 @@
 //! Bubblewrap plan, preparation, and live confinement contracts.
 
-use std::{fs, path::Path};
+use std::{
+	fs,
+	path::{Path, PathBuf},
+	sync::LazyLock,
+};
 
 use omp_sandbox::{
 	Backend, Capability, DegradationPolicy, FilesystemVirtualizationKind, NetworkMode,
@@ -703,13 +707,24 @@ fn mount_source<'a>(argv: &'a [std::ffi::OsString], option: &str, target: &Path)
 		.expect("mount target")
 }
 
+/// The probe binary, canonicalized the way `SandboxSpec` canonicalizes the
+/// program path.
+///
+/// usr-merged distributions make `/bin` a symlink to `/usr/bin`, so the
+/// compiled plan carries `/usr/bin/true` while a literal `/bin/true` does not
+/// match it. Canonicalizing here keeps the expectation equal to whatever the
+/// host actually resolves, on merged and unmerged layouts alike.
 fn executable() -> &'static Path {
-	#[cfg(target_os = "linux")]
-	return Path::new("/bin/true");
-	#[cfg(target_os = "macos")]
-	return Path::new("/usr/bin/true");
-	#[cfg(windows)]
-	return Path::new(r"C:\Windows\System32\cmd.exe");
-	#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-	return Path::new("/bin/true");
+	static PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+		#[cfg(target_os = "macos")]
+		let literal = Path::new("/usr/bin/true");
+		#[cfg(windows)]
+		let literal = Path::new(r"C:\Windows\System32\cmd.exe");
+		#[cfg(not(any(target_os = "macos", windows)))]
+		let literal = Path::new("/bin/true");
+		literal
+			.canonicalize()
+			.unwrap_or_else(|_| literal.to_path_buf())
+	});
+	&PATH
 }
