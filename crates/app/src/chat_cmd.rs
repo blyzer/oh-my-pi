@@ -362,13 +362,13 @@ impl Launch {
 		let templates =
 			PromptTemplates::discover(&project, &config_root, &prompt_template, !no_prompt_templates);
 		for warning in &templates.warnings {
-			eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+			tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 		}
 		let active_skills = Arc::new(
 			omp_driver::discovery::skills::ActiveSkills::discover(&ctx, &project).into_diagnostic()?,
 		);
 		for warning in &active_skills.warnings {
-			eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+			tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 		}
 		let (theme, light_theme, theme_catalog) =
 			resolve_theme(&ctx, &theme, &config_root, &project)?;
@@ -439,7 +439,7 @@ impl Launch {
 			match handoff(selector) {
 				Ok(target) => Some(target),
 				Err(source) => {
-					eprintln!("warning: prewalk disabled: {selector} did not resolve: {source}");
+					tracing::warn!(selector, %source, "prewalk disabled: selector did not resolve");
 					omp_ai::settings::AI_PREWALK_ENABLED
 						.set(&ctx, false)
 						.into_diagnostic()?;
@@ -635,7 +635,7 @@ fn resolve_theme(
 	])
 	.into_diagnostic()?;
 	for warning in &catalog.warnings {
-		eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+		tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 	}
 	let (dark, light) = if automatic && explicit.is_empty() {
 		(
@@ -663,7 +663,7 @@ fn resolve_named_theme(
 		Some(theme) => Some(theme),
 		None => {
 			if !name.is_empty() && name != STOCK_THEME && name != stock_name {
-				eprintln!("warning: theme `{name}` not found; using the stock palette");
+				tracing::warn!(theme = name, "theme not found; using the stock palette");
 			}
 			None
 		},
@@ -937,11 +937,11 @@ pub(crate) async fn run(
 		skills:    Arc::clone(&launch.skills),
 	});
 	for reserved in omp_chat::commands::prompts::register(ctx, interactive_prompts.clone()) {
-		eprintln!("warning: prompt template `{reserved}` shadows a built-in command; skipped");
+		tracing::warn!(template = %reserved, "prompt template shadows a built-in command; skipped");
 	}
 	if omp_driver::settings::SV_SKILLS_ENABLE_SKILL_COMMANDS.get(ctx) {
 		for reserved in omp_chat::commands::prompts::register_skills(ctx, interactive_prompts) {
-			eprintln!("warning: skill command `{reserved}` shadows a built-in command; skipped");
+			tracing::warn!(command = %reserved, "skill command shadows a built-in command; skipped");
 		}
 	}
 	let launch_inputs = launch_input::prepare(&launch, None, Vec::new())?;
