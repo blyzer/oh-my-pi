@@ -563,7 +563,7 @@ impl RouteComposer for ProductionRouteComposer {
 				(
 					local_codec_binding(route, backend.codec.clone())?,
 					backend.wire.clone(),
-					backend.framework_timeout,
+					Some(backend.framework_timeout),
 				)
 			},
 			TransportKind::Http | TransportKind::AwsEventStream | TransportKind::Connect => (
@@ -580,7 +580,7 @@ impl RouteComposer for ProductionRouteComposer {
 					http:      self.dependencies.http.clone(),
 					websocket: self.dependencies.websocket.clone(),
 				}),
-				self.dependencies.transport_timeout,
+				None,
 			),
 			TransportKind::Websocket => (
 				codec_binding(
@@ -596,7 +596,7 @@ impl RouteComposer for ProductionRouteComposer {
 					http:      self.dependencies.http.clone(),
 					websocket: self.dependencies.websocket.clone(),
 				}),
-				self.dependencies.transport_timeout,
+				None,
 			),
 			TransportKind::Webrtc => return Err(unavailable(route, "transport-not-implemented")),
 		};
@@ -773,8 +773,8 @@ impl RouteComposer for ProductionRouteComposer {
 			transport_timeout: configured_transport_timeout(
 				self.dependencies.transport_timeout,
 				self.dependencies.settings.providers.timeout_seconds,
-			)
-			.min(framework_timeout),
+				framework_timeout,
+			),
 		};
 		let admission = self
 			.dependencies
@@ -1345,11 +1345,22 @@ struct RouteEncoder {
 /// the ambient default rather than being `min`-ed against it, so an operator
 /// can raise the ceiling as well as lower it. Zero means unset and keeps the
 /// ambient default.
-fn configured_transport_timeout(ambient: Duration, configured_seconds: u64) -> Duration {
-	if configured_seconds == 0 {
-		return ambient;
-	}
-	Duration::from_secs(configured_seconds)
+///
+/// `framework` is a real ceiling imposed by a runtime that cannot be asked to
+/// wait longer — only local backends have one. Network transports pass `None`:
+/// echoing the ambient default back as a "framework" bound is what previously
+/// pinned every attempt at 60s regardless of the setting.
+fn configured_transport_timeout(
+	ambient: Duration,
+	configured_seconds: u64,
+	framework: Option<Duration>,
+) -> Duration {
+	let configured = if configured_seconds == 0 {
+		ambient
+	} else {
+		Duration::from_secs(configured_seconds)
+	};
+	framework.map_or(configured, |ceiling| configured.min(ceiling))
 }
 
 const fn forced_choice_penalty(penalty: NativeToolChoicePenalty) -> Penalty {
@@ -2680,17 +2691,25 @@ mod tests {
 	fn configured_provider_timeout_outranks_the_ambient_default() {
 		let ambient = Duration::from_secs(60);
 		// Unset keeps the ambient default.
-		assert_eq!(configured_transport_timeout(ambient, 0), ambient);
-		// A configured ceiling above the ambient default must win: `min`-ing
-		// here silently capped every attempt at the ambient 60s, so a slow
-		// first token failed as `stream.first-event` regardless of the setting.
+		assert_eq!(configured_transport_timeout(ambient, 0, None), ambient);
+		// A configured ceiling above the ambient default must win. Network
+		// transports pass `framework: None`; passing the ambient default back
+		// as a framework bound is what pinned every attempt at 60s, so a slow
+		// first token failed as `stream.first-event` whatever the setting said.
 		assert_eq!(
-			configured_transport_timeout(ambient, 300),
+			configured_transport_timeout(ambient, 300, None),
 			Duration::from_secs(300),
 			"a configured ceiling above the ambient default must raise it",
 		);
 		// Lowering still works.
-		assert_eq!(configured_transport_timeout(ambient, 15), Duration::from_secs(15));
+		assert_eq!(configured_transport_timeout(ambient, 15, None), Duration::from_secs(15));
+		// A real framework ceiling (local backends) still binds, since waiting
+		// past it cannot succeed.
+		assert_eq!(
+			configured_transport_timeout(ambient, 300, Some(Duration::from_secs(20))),
+			Duration::from_secs(20),
+			"a genuine framework ceiling still caps the configured value",
+		);
 	}
 	struct BeforeRequestObserver {
 		subscribed: bool,
