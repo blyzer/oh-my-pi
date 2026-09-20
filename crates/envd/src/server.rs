@@ -364,15 +364,18 @@ pub enum EnvdError {
 	/// The embedded document authority exited before accepting a verified hello.
 	#[error("embedded document authority exited before its hello handshake")]
 	DocserverExited,
-	/// Another process still holds this project's document authority.
+	/// Another live process still holds this project's document authority.
+	///
+	/// The holder is reachable only through its listening socket, which
+	/// carries no owner identity, so the message names the recovery action
+	/// instead of an identifier this process cannot observe.
 	#[error(
-		"project document authority for {path:?} is held by another process (holder pid: {holder:?})"
+		"project document authority for {path:?} is already held by another live omp process; close \
+		 that session, or run this command from a different project root"
 	)]
 	DocumentAuthorityHeldBy {
 		/// Canonical project path whose authority is held.
-		path:   PathBuf,
-		/// Best-effort owner process identifier, when available.
-		holder: Option<u32>,
+		path: PathBuf,
 	},
 }
 
@@ -12119,7 +12122,7 @@ fn document_daemon_authority_held(error: &daemon::Error) -> bool {
 }
 
 fn document_authority_held(path: &Path) -> EnvdError {
-	EnvdError::DocumentAuthorityHeldBy { path: path.to_path_buf(), holder: None }
+	EnvdError::DocumentAuthorityHeldBy { path: path.to_path_buf() }
 }
 
 #[cfg(windows)]
@@ -13540,7 +13543,7 @@ mod tests {
 		assert!(
 			matches!(
 				ensure_document_socket_free(root.path(), &socket).await,
-				Err(EnvdError::DocumentAuthorityHeldBy { path, holder: None })
+				Err(EnvdError::DocumentAuthorityHeldBy { path })
 					if path == root.path()
 			),
 			"live authority must refuse a second daemon"
