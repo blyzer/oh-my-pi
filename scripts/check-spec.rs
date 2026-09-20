@@ -24,8 +24,14 @@ use omp_tool::{
 use serde_json::{Value as JsonValue, json};
 use toml::Value as TomlValue;
 
-const AGENT_ALLOWED_WORLD_EDGES: &[&str] = &["omp-env", "omp-storage"];
-const AGENT_DENIED_DIRECT_EDGES: &[&str] = &["omp-docserver", "omp-shell", "omp-walker"];
+// Mirrors `[workspace.metadata.omp.dependency-lints.omp-agent]`. The previous
+// values named `omp-storage` and `omp-docserver`, neither of which exists in
+// this workspace any more: the document server became the environment host
+// `omp-envd`, and storage folded into the journal. The manifest's list is the
+// stricter of the two — one allowed world edge rather than two — so this is a
+// rename catching up, not a policy being relaxed.
+const AGENT_ALLOWED_WORLD_EDGES: &[&str] = &["omp-env"];
+const AGENT_DENIED_DIRECT_EDGES: &[&str] = &["omp-envd", "omp-shell", "omp-walker"];
 // Pre-existing Python operations awaiting Part 1 rows. This fixed debt baseline
 // may shrink; newly frozen CONTROL operations cannot be added without a row.
 const PYTHON_SPEC_BASELINE: &[&str] = &[
@@ -140,7 +146,7 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 		}
 	}
 
-	let server = fs::read_to_string(root.join("crates/app/src/envd/server.rs"))
+	let server = fs::read_to_string(root.join("crates/envd/src/server.rs"))
 		.expect("environment dispatch source is unreadable");
 	for operation in server.split('"').filter(|token| {
 		token.starts_with("omp.env.")
@@ -183,7 +189,7 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 	{
 		failures.push("runtime.interrupt_grace setting default, key, or type drifted".into());
 	}
-	let telemetry = fs::read_to_string(root.join("crates/telemetry/src/attrs.rs"))
+	let telemetry = fs::read_to_string(root.join("crates/observability/src/attrs.rs"))
 		.expect("telemetry attribute vocabulary is unreadable");
 	if !telemetry.contains(interrupt_metadata.telemetry_ns)
 		|| !telemetry.contains(interrupt_metadata.telemetry_unit)
@@ -361,7 +367,11 @@ fn check_policy_list(
 fn parse_toml(path: &Path) -> TomlValue {
 	let text = fs::read_to_string(path)
 		.unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-	text.parse()
+	// `toml` 1.x parses a bare `str::parse::<Value>()` as a single TOML *value*,
+	// so a manifest opening with `[workspace]` is read as an array literal and
+	// everything after it is "unexpected content". `from_str` is the document
+	// entry point.
+	toml::from_str(&text)
 		.unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
 }
 
