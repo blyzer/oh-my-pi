@@ -686,12 +686,14 @@ async fn manual_compaction_carries_focus_and_ignores_threshold() {
 	let summary_request = inference.requests.first().expect("summary request");
 	assert!(summary_request.tools.is_empty());
 	assert!(summary_request.hosted_tools.is_empty());
-	// The summariser ships no tools, so its tool-choice must stay a preference:
-	// as a requirement it becomes a hard `chat.tools.choice` planning demand and
-	// compaction fails closed on any route lacking tool-choice evidence.
+	// The summariser ships no tools, so it must state no tool-choice intent at
+	// all: any Setting other than `Unset` emits a `chat.tools.choice`
+	// requirement, and a route carrying no tool-choice evidence then fails
+	// compaction closed — on exactly the long-context sessions it exists to
+	// serve.
 	assert!(
-		matches!(summary_request.tool_choice, omp_ai::Setting::Prefer(omp_ai::ToolChoice::Disabled)),
-		"summary tool_choice must be preferred, got {:?}",
+		matches!(summary_request.tool_choice, omp_ai::Setting::Unset),
+		"summary tool_choice must be unset, got {:?}",
 		summary_request.tool_choice,
 	);
 	assert!(message_text(&summary_request.messages[0]).contains("database migration"));
