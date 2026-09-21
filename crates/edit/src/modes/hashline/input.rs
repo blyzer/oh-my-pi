@@ -17,6 +17,7 @@ use super::{
 		json_quote,
 	},
 	parser::parse_patch,
+	prefixes::is_read_metadata_line,
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
@@ -253,6 +254,12 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 fn parse_header_line(line: &str, cwd: Option<&Path>) -> Result<Option<RawSection>, EditError> {
 	let trimmed = unbracket_envelope_markers(line.trim_end());
 	if !trimmed.starts_with('[') {
+		return Ok(None);
+	}
+	// A `read` elision banner is bracketed too, so without this it recovers as
+	// a hashless header and resolves a path built from the banner text. Report
+	// it as body instead: the parser skips it and warns once.
+	if is_read_metadata_line(trimmed) {
 		return Ok(None);
 	}
 	let tokenizer = Tokenizer::new();
