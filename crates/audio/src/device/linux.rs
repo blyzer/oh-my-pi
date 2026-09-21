@@ -5,7 +5,7 @@ use std::{
 	ffi::{CStr, CString, c_char, c_int, c_long, c_uint, c_void},
 	mem, ptr,
 	sync::{
-		Arc, LazyLock, Mutex, OnceLock,
+		Arc, LazyLock, OnceLock,
 		atomic::{AtomicBool, Ordering},
 		mpsc::{self, Receiver},
 	},
@@ -14,6 +14,7 @@ use std::{
 };
 
 use omp_core::Str;
+use parking_lot::Mutex;
 
 use super::{
 	AudioDevice, CaptureSink, DeviceConfig, DeviceSnapshot, MicrophonePermission, PlaybackFill,
@@ -577,9 +578,7 @@ fn drain_periods_for_latency(period_ms: u32, latency_ms: u32) -> u32 {
 }
 
 fn remember_error(slot: &Mutex<Option<String>>, error: String) {
-	if let Ok(mut stored) = slot.lock() {
-		*stored = Some(error);
-	}
+	*slot.lock() = Some(error);
 }
 
 fn fill_if_armed(gate: &DeliveryGate, fill: &mut PlaybackFill, buffer: &mut [f32]) -> bool {
@@ -891,12 +890,7 @@ fn finish(
 			drop(handle);
 		}
 	}
-	device
-		.error
-		.lock()
-		.map_err(|_| "audio worker error state was poisoned".to_owned())?
-		.take()
-		.map_or(Ok(()), Err)
+	device.error.lock().take().map_or(Ok(()), Err)
 }
 
 /// Running `PulseAudio` or ALSA playback worker for a selected or default

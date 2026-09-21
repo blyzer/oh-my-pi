@@ -214,6 +214,66 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # The workspace lint runs on macOS, so until this job existed no
+  # `#[cfg(target_os = "linux")]` code had ever been linted by anything: the
+  # Linux job next door runs one proof and no clippy. Every Linux-only path —
+  # the ALSA/PulseAudio device backend, landlock, the envd host's fd handling —
+  # was outside the gate that the rest of the tree is held to. Lint the same
+  # workspace from the other side so a policy violation cannot hide behind a
+  # target gate.
+  lint_linux:
+    name: Lint workspace (Linux)
+    needs: format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = x86_64
+          rustup show active-toolchain
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pipx zstd
+          command -v uv >/dev/null || pipx install uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache embedded Python
+        id: python-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vendor/python
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+
+      - name: Prepare embedded Python
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        run: crates/py/scripts/fetch-python.sh
+
+      - name: Verify embedded Python toolchain
+        run: test -f vendor/python/pyo3-config.txt
+
+      - name: Cache Cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
+            cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-
+
+      # `--keep-going` so one crate's violation does not mask the rest: the
+      # queue this job exists to drain is only visible if cargo reports every
+      # failing crate in a single run rather than stopping at the first.
+      - name: Lint workspace
+        run: cargo clippy --workspace --locked --keep-going
+
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
     needs: format

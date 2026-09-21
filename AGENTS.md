@@ -76,9 +76,16 @@ all recipes.
 - E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-baseline`).
 - `just ci` ≈ CI format+rust jobs locally.
 
-CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format on
-Linux; lint/tests/P1-P8/baseline on `macos-15` arm64 (CPython bundle
-`aarch64-apple-darwin`-only).
+CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format,
+licences, runtime-symbol contracts and a second workspace lint on Linux;
+tests/P1-P8/baseline on arm64 macOS, plus P7 again on a Linux PTY. The macOS
+job reads `vars.MACOS_RUNNER` and falls back to `macos-15`, so a self-hosted
+Apple-silicon runner takes it when one is registered. Lint runs on BOTH
+platforms deliberately: clippy on one target never sees the other's
+`#[cfg(target_os = ...)]` code, and the Linux-only paths went unlinted until
+`lint_linux` existed. Embedded CPython bundles exist for
+`aarch64-apple-darwin` (debug + release) and `x86_64`/`aarch64-unknown-linux-gnu`
+(debug); `crates/py/scripts/fetch-python.sh` errors on any other host.
 
 ## Conventions
 
