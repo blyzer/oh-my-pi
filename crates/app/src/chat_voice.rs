@@ -1156,14 +1156,15 @@ enum CodexSignalingError {
 
 struct CodexSignalingClient {
 	auth: AuthManager,
-	http: reqwest::Client,
+	http: omp_http::Client,
 }
 
 impl CodexSignalingClient {
 	fn new(auth: AuthManager) -> Result<Self, CodexSignalingError> {
-		let http = reqwest::Client::builder()
+		let http = omp_http::client_builder()
 			.no_proxy()
 			.build()
+			.map(omp_http::Client::from)
 			.map_err(|source| CodexSignalingError::Proxy { source })?;
 		Ok(Self { auth, http })
 	}
@@ -1184,10 +1185,11 @@ impl LiveSignalingClient for CodexSignalingClient {
 				if let Some(authorization) = proxy.authorization() {
 					configured = configured.custom_http_auth(authorization.clone());
 				}
-				reqwest::Client::builder()
+				omp_http::client_builder()
 					.no_proxy()
 					.proxy(configured)
 					.build()
+					.map(omp_http::Client::from)
 					.map_err(|source| CodexSignalingError::Proxy { source })?
 			} else {
 				self.http.clone()
