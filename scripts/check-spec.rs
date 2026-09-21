@@ -159,14 +159,25 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 		}
 	}
 
+	// `mcp_operation`'s `None =>` arm labels an McpOp that carries no op at all.
+	// It names the absence of an operation, so having no row is exactly how a
+	// malformed request gets refused Unsupported — not a gap to be filled.
+	const DISPATCH_SENTINELS: &[&str] = &["omp.env.mcp.invalid"];
+
 	let server = fs::read_to_string(root.join("crates/envd/src/server.rs"))
 		.expect("environment dispatch source is unreadable");
+	let mut reported = BTreeSet::new();
 	for operation in server.split('"').filter(|token| {
 		token.starts_with("omp.env.")
 			&& !token.ends_with('.')
-			&& token.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+			// `-` belongs in this set: omp.env.mcp.live-header is dispatched like
+			// its siblings, and excluding the byte hid its missing row completely.
+			&& token
+				.bytes()
+				.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+			&& !DISPATCH_SENTINELS.contains(token)
 	}) {
-		if operation_spec(operation).is_none() {
+		if operation_spec(operation).is_none() && reported.insert(operation) {
 			failures.push(format!("DATA dispatch operation {operation} is missing from the runtime spec"));
 		}
 	}
@@ -265,6 +276,10 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 }
 
 fn check_python_surface_specs(root: &Path, failures: &mut Vec<String>) {
+	// One finding per operation. A wire op legitimately has several call sites —
+	// omp.provider.models backs both ProviderHandle.models() and the module-level
+	// models() — and reporting each occurrence made one operation look like two.
+	let mut found = BTreeSet::new();
 	let package = root.join("crates/py/python/omp");
 	let mut pending = vec![package];
 	while let Some(path) = pending.pop() {
@@ -302,7 +317,7 @@ fn check_python_surface_specs(root: &Path, failures: &mut Vec<String>) {
 					&& operation_spec(operation).is_none()
 				{
 					let relative = path.strip_prefix(root).unwrap_or(&path);
-					failures.push(format!(
+					found.insert(format!(
 						"Python CONTROL operation {operation} in {} has no generated spec row",
 						relative.display()
 					));
@@ -311,6 +326,7 @@ fn check_python_surface_specs(root: &Path, failures: &mut Vec<String>) {
 			}
 		}
 	}
+	failures.extend(found);
 }
 
 

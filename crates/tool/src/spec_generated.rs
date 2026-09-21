@@ -843,6 +843,14 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 	),
 	symbol!(
 		"docs/py/01-devices.md",
+		"omp.env.mcp.live_header",
+		"(request: McpLiveHeaderRequest) -> McpLiveHeader",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_live_header(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
 		"omp.env.mcp.resource",
 		"(request: McpResourceRequest) -> McpResourceResult",
 		CallbackAbi::None,

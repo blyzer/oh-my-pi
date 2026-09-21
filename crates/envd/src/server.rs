@@ -10090,7 +10090,7 @@ const fn mcp_operation(request: &pb::McpOp) -> &'static str {
 		Some(Op::Status(_)) => "omp.env.mcp.status",
 		Some(Op::Subscribe(_)) => "omp.env.mcp.subscribe",
 		Some(Op::Reset(_)) => "omp.env.mcp.reset",
-		Some(Op::LiveHeader(_)) => "omp.env.mcp.live-header",
+		Some(Op::LiveHeader(_)) => "omp.env.mcp.live_header",
 		Some(Op::Resource(_)) => "omp.env.mcp.resource",
 		Some(Op::Prompt(_)) => "omp.env.mcp.prompt",
 		Some(Op::Invoke(_)) => "omp.env.mcp.invoke",
