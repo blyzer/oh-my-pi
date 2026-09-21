@@ -37,7 +37,7 @@ use nix::{
 use omp_ai::{
 	Answer, Error as InferenceError, Registry,
 	answer::{AnswerBody, ChatStream},
-	call::{Call, OpaqueJson},
+	call::{Call, OpaqueJson, OperationCall},
 	event::{BlockKind, ChatEvent, Completion, FinishReason, ToolCall, WorkflowResponse},
 	id::ToolCallId,
 	layer::{LayerCall, stack::RouteProviderService},
@@ -77,22 +77,43 @@ struct GatedRoute {
 	preview_release: Receiver<()>,
 }
 
+/// Shortens one rendered value so a panic stays readable.
+fn clipped(text: &str, limit: usize) -> String {
+	match text.char_indices().nth(limit) {
+		Some((cut, _)) => format!("{}…", &text[..cut]),
+		None => text.to_owned(),
+	}
+}
+
 /// One bounded line identifying a provider call.
 ///
-/// The turn id discriminates: a call repeating the previous turn is a
-/// continuation or retry within it, a new one means another turn began. The
-/// whole `Call` is not printed — it carries the conversation and would bury
-/// the distinguishing fields.
+/// `Call::session` is empty at this layer, so the thread itself is what
+/// discriminates: the role sequence shows the shape of the conversation the
+/// call carries, and the final message shows what prompted it. An extra call
+/// whose thread ends in a tool result is a continuation of the turn that
+/// issued that tool; one ending in a user or assistant message began a new
+/// turn. The whole `Call` is not printed — it would bury both.
 fn describe_call(call: &Call) -> String {
-	call.session.as_ref().map_or_else(
-		|| format!("id={:?} <no session>", call.id),
-		|session| {
+	match &call.operation {
+		OperationCall::Chat(chat) => {
+			let roles = chat
+				.messages
+				.iter()
+				.map(|message| format!("{:?}", message.role))
+				.collect::<Vec<_>>()
+				.join(",");
+			let last = chat
+				.messages
+				.last()
+				.map_or_else(|| "<none>".to_owned(), |message| clipped(&format!("{message:?}"), 240));
 			format!(
-				"id={:?} turn={:?} revision={:?} append_only={}",
-				call.id, session.turn, session.revision, session.append_only
+				"id={:?} Chat messages={} roles=[{roles}] last={last}",
+				call.id,
+				chat.messages.len()
 			)
 		},
-	)
+		other => format!("id={:?} {}", call.id, clipped(&format!("{other:?}"), 160)),
+	}
 }
 
 impl Service<LayerCall<Call>> for GatedRoute {
