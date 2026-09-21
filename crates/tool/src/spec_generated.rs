@@ -786,6 +786,94 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		"await omp.agents.pending_messages()"
 	),
 	symbol!(
+		"docs/py/11-env.md",
+		"omp.env.fs.privileged_mutation",
+		"(request: PrivilegedMutationIntent) -> PrivilegedMutationResult",
+		CallbackAbi::None,
+		ENV_WRITE,
+		"await env.privileged_mutation(request)"
+	),
+	symbol!(
+		"docs/py/11-env.md",
+		"omp.env.worktree",
+		"() -> WorktreeInfo | None",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await omp.env.worktree()"
+	),
+	symbol!(
+		"docs/py/11-env.md",
+		"omp.env.Process.info",
+		"() -> ProcessInfo",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await process.info()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.env.workspace.list",
+		"(*, limit=50) -> list[WorkspaceSnapshot]",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await omp.env.workspace.list()"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.status",
+		"(request: McpStatusRequest) -> McpStatusResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_status(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.subscribe",
+		"(request: McpSubscribeRequest) -> McpSubscription",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_subscribe(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.reset",
+		"(request: McpResetRequest) -> McpResetResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_reset(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.resource",
+		"(request: McpResourceRequest) -> McpResourceResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_resource(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.prompt",
+		"(request: McpPromptRequest) -> McpPromptResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_prompt(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.invoke",
+		"(request: McpInvokeRequest) -> McpInvokeResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_invoke(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.config",
+		"(request: McpConfigRequest) -> McpConfigResult",
+		CallbackAbi::None,
+		ENV_WRITE,
+		"await env.mcp_config(request)"
+	),
+	symbol!(
 		"docs/py/12-agents.md",
 		"omp.env.workspace.snapshot",
 		"(*, root=None) -> WorkspaceSnapshot",
@@ -1152,6 +1240,14 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		CORE_EFFECT,
 		"await ui.ask_user([])"
+	),
+	symbol!(
+		"docs/py/07-ui.md",
+		"omp.ui.dynamic_mount",
+		"(*specs: CommandMountSpec) -> tuple[str, ...]",
+		CallbackAbi::None,
+		OPEN_LOCAL,
+		"await omp.ui.dynamic_mount(spec)"
 	),
 	symbol!(
 		"docs/py/07-ui.md",
