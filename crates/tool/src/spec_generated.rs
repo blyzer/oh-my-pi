@@ -739,14 +739,6 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 	),
 	symbol!(
 		"docs/py/12-agents.md",
-		"omp.env.workspace.snapshot",
-		"(*, root=None) -> WorkspaceSnapshot",
-		CallbackAbi::None,
-		ENV_WRITE,
-		"await omp.env.workspace.snapshot()"
-	),
-	symbol!(
-		"docs/py/12-agents.md",
 		"omp.agents.abort",
 		"() -> None",
 		CallbackAbi::None,
