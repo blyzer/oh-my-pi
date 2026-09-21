@@ -16,7 +16,7 @@ use std::{
 	path::Path,
 	process::{self, Child, Command, Stdio},
 	sync::{
-		Arc,
+		Arc, LazyLock,
 		atomic::{AtomicBool, Ordering},
 	},
 	task::{Context, Poll},
@@ -77,6 +77,24 @@ struct GatedRoute {
 	preview_release: Receiver<()>,
 }
 
+/// Origin for every timeline mark, so the scenario thread and the provider
+/// layer report against one clock.
+static TIMELINE: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Records one ordered step of the interrupt scenario on stderr.
+///
+/// These exist to separate two explanations of a detached job appearing where
+/// a cancellation belongs. A long-running tool detaches once it outlives
+/// `DispatchPolicy::blocking_limit`, 30s by default, and this scenario sleeps
+/// for exactly that long — so the keypress and the blocking limit race. A
+/// `ctrl+c` marked well before the sixth provider call means the interrupt was
+/// delivered and did not stop the tool, which is a defect in the interrupt
+/// path. One marked at or after it means the scenario simply lost the race,
+/// which is a defect in the scenario.
+fn mark(step: &str) {
+	eprintln!("[t+{:>6}ms] {step}", TIMELINE.elapsed().as_millis());
+}
+
 /// Shortens one rendered value so a panic stays readable.
 fn clipped(text: &str, limit: usize) -> String {
 	match text.char_indices().nth(limit) {
@@ -127,6 +145,7 @@ impl Service<LayerCall<Call>> for GatedRoute {
 	}
 
 	fn call(&mut self, request: LayerCall<Call>) -> Self::Future {
+		mark(&format!("provider call #{}", self.captures.lock().len()));
 		let gate = self.gates.lock().pop_front().unwrap_or_else(|| {
 			let captures = self.captures.lock();
 			let scripted = captures
@@ -1008,6 +1027,7 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	assert_surface(&summary, "tool summary");
 
 	debug.keys("'interrupt the next tool' enter");
+	mark("released the interruptible bash script");
 	gateway.release(4);
 	// `shell::Update` carries `terminal`, but the dispatcher blanks its `data`
 	// and `project_update` drops that shape so the bounded output stream stays
@@ -1021,6 +1041,7 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 			&& tool_call_id(&text, "slow-shell").is_some_and(|call| records_non_terminal(&text, call))
 	});
 	assert_surface(&running, "interruptible bash");
+	mark("bash is live and journalled");
 	let live_journal = journal(&session_path);
 	let call = tool_call_id(&live_journal, "slow-shell").expect("the interruptible bash tool call");
 	assert!(
@@ -1028,6 +1049,7 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 		"the interruptible bash call must record a non-pty execution\n{live_journal}"
 	);
 
+	mark("sending resize");
 	process.resize(32, 92);
 	debug
 		.op("resize")
@@ -1047,8 +1069,11 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	});
 	assert_eq!(info.get("rows").and_then(Value::as_u64), Some(32), "resize rows: {info}");
 	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(92), "resize cols: {info}");
+	mark("resize settled");
 
+	mark("sending ctrl+c");
 	debug.keys("ctrl+c");
+	mark("ctrl+c sent");
 	let interrupted =
 		wait_snapshot(&mut debug, &raw_capture, "turn interrupted and responsive", |snapshot| {
 			let surface = snapshot.combined();
