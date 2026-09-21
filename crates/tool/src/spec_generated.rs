@@ -1263,6 +1263,72 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		"await ui.ask_user([])"
 	),
 	symbol!(
+		"docs/py/01-devices.md",
+		"omp.DynamicDeviceParent.mount_many",
+		"(*specs: MountSpec) -> tuple[str, ...]",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"paths = await parent.mount_many(spec)",
+		&["omp.devices.dynamic_mount"]
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.devices.set_availability",
+		"(*deltas: AvailabilityDelta) -> None",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"await omp.devices.set_availability(omp.AvailabilityDelta(\"jira\", False))"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.devices.refresh",
+		"() -> tuple[DeviceInfo, ...]",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"rows = await omp.devices.refresh()"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.devices.invoke",
+		"(path: str, args: Mapping[str, object], *, deadline: Duration | None = None) -> object",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"result = await omp.devices.invoke(\"jira/create\", {\"title\": \"x\"})"
+	),
+	symbol!(
+		"docs/py/05-hooks.md",
+		"omp.hooks.dispatch_hook",
+		"(event: str, payload: object = None) -> HookDecision",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"decision = await omp.hooks.dispatch_hook(\"tool_call\", payload)",
+		&["omp.hooks.dispatch"]
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.mount",
+		"(spec: McpMount) -> tuple[Device, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"devices = await omp.mcp.mount(spec)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.unmount",
+		"(server: str) -> None",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"await omp.mcp.unmount(\"github\")"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.servers",
+		"() -> tuple[McpServer, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"rows = await omp.mcp.servers()"
+	),
+	symbol!(
 		"docs/py/18-convars.md",
 		"omp.convars.declare",
 		"(key: str, *, kind: str, default, description=None, values=(), ui=None) -> Snapshot",
