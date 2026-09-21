@@ -32,9 +32,12 @@ pub struct RuntimeSymbolSpec {
 	pub public_name:  &'static str,
 	/// Canonical public signature.
 	pub signature:    &'static str,
-	/// Internal dispatch key when transport vocabulary differs from the public
-	/// API name.
-	pub dispatch_key: Option<&'static str>,
+	/// Internal dispatch keys for transport vocabulary that differs from the
+	/// public API name. A handle method can answer to several: the public
+	/// symbol `omp.telemetry.span` is driven by the wire verbs
+	/// `omp.telemetry.span.open` and `omp.telemetry.span.close`, so one row
+	/// carries both. Empty when the public name is the only lookup key.
+	pub dispatch_key: &'static [&'static str],
 	/// Runtime callback argument ordering, when this is a callback surface.
 	pub callback_abi: CallbackAbi,
 	/// Phase, durability, cost, and enforcing authority.
@@ -116,7 +119,7 @@ macro_rules! symbol {
 		$operation:expr,
 		$example:literal
 	) => {
-		symbol!($owner, $name, $signature, $abi, $operation, $example, None)
+		symbol!($owner, $name, $signature, $abi, $operation, $example, &[])
 	};
 	(
 		$owner:literal,
@@ -182,7 +185,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		owner:        "docs/py/03-params.md",
 		public_name:  "omp.params.interrupt_grace",
 		signature:    "Duration",
-		dispatch_key: None,
+		dispatch_key: &[],
 		callback_abi: CallbackAbi::None,
 		operation:    OPEN_LOCAL,
 		timeout:      None,
@@ -347,7 +350,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await doc.close()",
-		Some("omp.env.docs.close")
+		&["omp.env.docs.close"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -356,7 +359,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await doc.read(lines=[(1, 40)])",
-		Some("omp.env.docs.read")
+		&["omp.env.docs.read"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -365,7 +368,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await doc.summary()",
-		Some("omp.env.docs.summarize")
+		&["omp.env.docs.summarize"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -374,7 +377,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await transaction.commit()",
-		Some("omp.env.docs.commit_transaction")
+		&["omp.env.docs.commit_transaction"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -399,7 +402,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.fs.list_dir(path)",
-		Some("omp.env.fs.list_directory")
+		&["omp.env.fs.list_directory"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -408,7 +411,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.mkdir(path, parents=True)",
-		Some("omp.env.fs.create_directory")
+		&["omp.env.fs.create_directory"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -449,7 +452,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.symlink(target, link)",
-		Some("omp.env.fs.create_symlink")
+		&["omp.env.fs.create_symlink"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -458,7 +461,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.hard_link(target, link)",
-		Some("omp.env.fs.create_hard_link")
+		&["omp.env.fs.create_hard_link"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -467,7 +470,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.chmod(path, permissions)",
-		Some("omp.env.fs.set_permissions")
+		&["omp.env.fs.set_permissions"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -476,7 +479,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.lsp.bindings(path)",
-		Some("omp.env.lsp.get_bindings")
+		&["omp.env.lsp.get_bindings"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -501,7 +504,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.lsp.notify(server, \"initialized\", {})",
-		Some("omp.env.lsp.notification")
+		&["omp.env.lsp.notification"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -543,7 +546,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.find.grep(\"OperationSpec\")",
-		Some("omp.env.find.search")
+		&["omp.env.find.search"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -552,7 +555,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.sh.session()",
-		Some("omp.env.sh.open_session")
+		&["omp.env.sh.open_session"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -561,7 +564,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await session.close()",
-		Some("omp.env.sh.close_session")
+		&["omp.env.sh.close_session"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -570,7 +573,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await session.run(\"git status --short\")",
-		Some("omp.env.sh.exec")
+		&["omp.env.sh.exec"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -579,7 +582,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await run.stdin(data)",
-		Some("omp.env.sh.stdin")
+		&["omp.env.sh.stdin"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -588,7 +591,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await run.signal(\"TERM\")",
-		Some("omp.env.sh.signal")
+		&["omp.env.sh.signal"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -597,7 +600,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await run.resize(40, 120)",
-		Some("omp.env.sh.resize")
+		&["omp.env.sh.resize"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -606,7 +609,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await run.detach(\"build\")",
-		Some("omp.env.sh.detach")
+		&["omp.env.sh.detach"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -615,7 +618,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.http_get(\"https://example.test\")",
-		Some("omp.env.http.get")
+		&["omp.env.http.get"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -624,7 +627,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.http_post(\"https://example.test\", body=b\"{}\")",
-		Some("omp.env.http.post")
+		&["omp.env.http.post"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -633,7 +636,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.http_put(\"https://example.test\", body=b\"{}\")",
-		Some("omp.env.http.put")
+		&["omp.env.http.put"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -658,7 +661,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.proc.adopt(\"web\")",
-		Some("omp.env.proc.attach")
+		&["omp.env.proc.attach"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -667,7 +670,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await process.send(data)",
-		Some("omp.env.proc.send_input")
+		&["omp.env.proc.send_input"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -676,7 +679,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await process.signal(\"TERM\")",
-		Some("omp.env.proc.signal")
+		&["omp.env.proc.signal"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -685,7 +688,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await process.stop()",
-		Some("omp.env.proc.stop")
+		&["omp.env.proc.stop"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -694,7 +697,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await process.restart()",
-		Some("omp.env.proc.restart")
+		&["omp.env.proc.restart"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -727,7 +730,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await writer.commit()",
-		Some("omp.env.blobs.commit_put")
+		&["omp.env.blobs.commit_put"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -1323,7 +1326,9 @@ pub const fn runtime_duration_metadata() -> &'static [RuntimeDurationMetadata] {
 pub fn operation_spec(symbol_name: &str) -> Option<&'static OperationSpec> {
 	RUNTIME_SYMBOLS
 		.iter()
-		.find(|symbol| symbol.public_name == symbol_name || symbol.dispatch_key == Some(symbol_name))
+		.find(|symbol| {
+			symbol.public_name == symbol_name || symbol.dispatch_key.contains(&symbol_name)
+		})
 		.map(|symbol| &symbol.operation)
 }
 

@@ -97,7 +97,7 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 				symbol.public_name, symbol.owner
 			));
 		}
-		for key in std::iter::once(symbol.public_name).chain(symbol.dispatch_key) {
+		for key in std::iter::once(symbol.public_name).chain(symbol.dispatch_key.iter().copied()) {
 			if let Some(previous) = lookup_keys.insert(key, symbol.public_name) {
 				failures.push(format!(
 					"duplicate operation lookup key {key} ({previous} and {})",
