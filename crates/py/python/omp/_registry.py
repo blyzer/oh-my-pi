@@ -2845,9 +2845,14 @@ def _bind_tool_arguments(
     body declares ``**kwargs``.
     """
     if context is not None:
-        from ._host import dispatch_update_sink
+        from ._host import live_dispatch_update_sink
 
-        context = replace(context, _update_sink=dispatch_update_sink())
+        # Same rule as the non-ergonomic path: the correlated sink exists
+        # only while a dispatch is live. Bound directly, ``ctx`` stays the
+        # caller's own object and keeps whatever update surface it has.
+        sink = live_dispatch_update_sink()
+        if sink is not None:
+            context = replace(context, _update_sink=sink)
     signature = inspect.signature(body)
     positional: list[object] = []
     keywords: dict[str, object] = {}
@@ -2883,28 +2888,45 @@ def _bind_tool_arguments(
 async def _consume_worker_result(result: object) -> object:
     """Emit every yielded update before lowering one terminal device result."""
 
-    from ._host import emit_dispatch_update
+    from ._host import live_dispatch_update_sink
     from ._verdicts import Done, Update
+
+    # A live dispatch owns a correlated stream, so updates travel on it and
+    # the completion carries only the terminal result. Invoked directly there
+    # is no stream, so they ride back with the result instead of being lost.
+    sink = live_dispatch_update_sink()
+    streamed: list[object] | None = None
+
+    def emit(item: object) -> None:
+        payload = item.payload if isinstance(item, Update) else item
+        if sink is not None:
+            sink(payload)
+        elif streamed is not None:
+            streamed.append(payload)
 
     if inspect.isawaitable(result):
         result = await result
     if inspect.isasyncgen(result):
+        if sink is None:
+            streamed = []
         terminal: object = None
         async for item in result:
             if isinstance(item, Done):
                 terminal = item.result
                 break
-            emit_dispatch_update(item.payload if isinstance(item, Update) else item)
+            emit(item)
         result = terminal
     elif inspect.isgenerator(result):
+        if sink is None:
+            streamed = []
         terminal = None
         for item in result:
             if isinstance(item, Done):
                 terminal = item.result
                 break
-            emit_dispatch_update(item.payload if isinstance(item, Update) else item)
+            emit(item)
         result = terminal
-    return _lower_worker_result(result)
+    return _lower_worker_result(result, streamed)
 
 
 def _worker_handler(
@@ -2917,9 +2939,15 @@ def _worker_handler(
         if not isinstance(params, Mapping):
             raise TypeError("worker tool arguments must decode to an object")
         if context is not None and not ergonomic:
-            from ._host import dispatch_update_sink
+            from ._host import live_dispatch_update_sink
 
-            context = replace(context, _update_sink=dispatch_update_sink())
+            # Only a live dispatch owns a correlated sink. Invoked directly,
+            # the caller's context is already whatever it means to be, so it
+            # passes through untouched rather than being rebuilt around a
+            # sink that does not exist.
+            sink = live_dispatch_update_sink()
+            if sink is not None:
+                context = replace(context, _update_sink=sink)
         if ergonomic:
             positional, keywords = _bind_tool_arguments(body, params, context)
             result = body(*positional, **keywords)

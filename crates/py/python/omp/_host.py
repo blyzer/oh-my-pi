@@ -906,10 +906,16 @@ class Host:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def live_dispatch_update_sink() -> Callable[[object], None] | None:
+    """Return the correlated update sink, or ``None`` outside a dispatch."""
+
+    return _dispatch_progress.get()
+
+
 def dispatch_update_sink() -> Callable[[object], None]:
     """Return the live correlated update sink for the current device dispatch."""
 
-    sink = _dispatch_progress.get()
+    sink = live_dispatch_update_sink()
     if sink is None:
         raise RuntimeError("no live CONTROL device update sink")
     return sink
