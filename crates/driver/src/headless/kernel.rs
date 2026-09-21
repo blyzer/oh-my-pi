@@ -2375,8 +2375,9 @@ fn route_facts(
 		// penalty-free named-choice fact skips ADR 0019's soft escalation.
 		forced_choice_free: catalog
 			.wire_policy(&model.wire_policy)
-			.and_then(|policy| policy.tool.named_choice)
-			.unwrap_or(false),
+			.is_some_and(|policy| {
+				policy.tool.named_choice == Some(true) && policy.tool.forced_choice_penalty.is_none()
+			}),
 		context_window:     model.limits.context_window.unwrap_or(0),
 		strict_schema:      model
 			.capabilities
