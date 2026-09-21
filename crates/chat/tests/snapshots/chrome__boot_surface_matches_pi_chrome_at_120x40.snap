@@ -1,6 +1,6 @@
 ---
 source: crates/chat/tests/chrome.rs
-expression: "rows.join(\"\\n\")"
+expression: "version_normalized(rows.join(\"\\n\"))"
 ---
 
 ╭─── omp v[VERSION] ───────────────────────────────────────────────────────────────────────────────────╮
