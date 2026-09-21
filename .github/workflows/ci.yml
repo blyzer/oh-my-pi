@@ -96,7 +96,15 @@ jobs:
   rust:
     name: Rust workspace and acceptance proofs
     needs: [format, runtime_spec, licenses]
-    runs-on: macos-15
+    # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
+    # somewhere else. Set it to a JSON label array to send this job to a
+    # self-hosted Apple silicon machine, which is the only way to give it more
+    # than a hosted runner's disk — every test binary statically links the
+    # ~650 MB CPython, so a full link is large:
+    #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
+    # Unset, and the expression falls back, so a repository with no runner
+    # registered keeps the hosted behaviour rather than queueing forever.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
