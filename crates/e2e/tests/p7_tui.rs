@@ -86,8 +86,8 @@ static TIMELINE: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// These exist to separate two explanations of a detached job appearing where
 /// a cancellation belongs. A long-running tool detaches once it outlives
 /// `DispatchPolicy::blocking_limit`, 30s by default, and this scenario sleeps
-/// for exactly that long — so the keypress and the blocking limit race. A
-/// `ctrl+c` marked well before the sixth provider call means the interrupt was
+/// for exactly that long — so the keypress and the blocking limit race. An
+/// `escape` marked well before the sixth provider call means the interrupt was
 /// delivered and did not stop the tool, which is a defect in the interrupt
 /// path. One marked at or after it means the scenario simply lost the race,
 /// which is a defect in the scenario.
@@ -1071,9 +1071,14 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(92), "resize cols: {info}");
 	mark("resize settled");
 
-	mark("sending ctrl+c");
-	debug.keys("ctrl+c");
-	mark("ctrl+c sent");
+	// Escape, not `ctrl+c`: `omp_chat::ctrl_c_action` resolves a first `C-c`
+	// press to `Clear` and only a repeat within 500ms to `Quit`, so it never
+	// reaches the turn. Escape is the interrupt rung the chat host routes to
+	// `HostCommand::Interrupt`, which is the path ADR 0011 makes this scenario
+	// prove.
+	mark("sending escape");
+	debug.keys("escape");
+	mark("escape sent");
 	let interrupted =
 		wait_snapshot(&mut debug, &raw_capture, "turn interrupted and responsive", |snapshot| {
 			let surface = snapshot.combined();
@@ -1089,7 +1094,8 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	assert!(interrupted_journal.contains("event: msg.assistant.end@1"));
 	assert_journal_chain(&interrupted_journal);
 
-	debug.keys("ctrl+c");
+	// One `C-c` only arms exit; the repeat inside the 500ms window quits.
+	debug.keys("ctrl+c ctrl+c");
 	drop(debug);
 	let before = process.before.clone();
 	let (status, raw, stdout, stderr, after) = process.wait(READY_TIMEOUT);
