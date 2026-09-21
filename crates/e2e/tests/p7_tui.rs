@@ -738,28 +738,34 @@ fn frame_field<'f>(frame: &'f str, prefix: &str) -> Option<&'f str> {
 	frame.lines().find_map(|line| line.strip_prefix(prefix))
 }
 
-/// Returns the owning tool call of the first journalled shell update that
-/// records a non-pty execution.
+/// Returns the journal entry id of the tool call the script issued under
+/// `call_id`.
 ///
-/// `Session::call_update` writes these, so a match is evidence the execution
-/// reached the journal through the production lifecycle rather than that the
-/// scenario asserted it. The returned `by:` is the `tool.call@1` the update
-/// belongs to, which is what ties the record to one execution.
-fn non_terminal_update(text: &str) -> Option<&str> {
-	journal_frames(text)
-		.filter(|frame| frame.contains("event: tool.update@1"))
-		.find(|frame| {
-			frame_field(frame, "data: ").is_some_and(|data| data.contains("\"terminal\":false"))
-		})
-		.and_then(|frame| frame_field(frame, "by: "))
-}
-
-/// Returns the entry id of the most recent journalled tool call.
-fn last_tool_call(text: &str) -> Option<&str> {
+/// Every scripted call carries its own id, so anchoring on it names one
+/// execution outright — no dependence on journal ordering, and no risk of
+/// matching a sibling call of the same tool.
+fn tool_call_id<'j>(text: &'j str, call_id: &str) -> Option<&'j str> {
+	let scripted = format!("\"call_id\":\"{call_id}\"");
 	journal_frames(text)
 		.filter(|frame| frame.contains("event: tool.call@1"))
-		.last()
+		.find(|frame| frame_field(frame, "data: ").is_some_and(|data| data.contains(&scripted)))
 		.and_then(|frame| frame_field(frame, "id: "))
+}
+
+/// Returns whether the journal records a non-pty execution for `call`.
+///
+/// `Session::call_update` writes these updates parented to their tool call, so
+/// a match is evidence the execution reached the journal through the
+/// production lifecycle. Scoping by `by:` is what ties the record to one
+/// execution: every bash call emits `terminal`, so an unscoped search answers
+/// for whichever ran first.
+fn records_non_terminal(text: &str, call: &str) -> bool {
+	journal_frames(text)
+		.filter(|frame| frame.contains("event: tool.update@1"))
+		.filter(|frame| frame_field(frame, "by: ") == Some(call))
+		.any(|frame| {
+			frame_field(frame, "data: ").is_some_and(|data| data.contains("\"terminal\":false"))
+		})
 }
 
 fn assert_journal_chain(text: &str) {
@@ -956,17 +962,16 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	// is still asserted on the card, and the non-pty guarantee now reads the
 	// record production actually writes, tied to the execution that made it.
 	let running = wait_snapshot(&mut debug, &raw_capture, "interruptible bash live", |snapshot| {
+		let text = journal(&session_path);
 		snapshot.combined().contains("bash running")
-			&& non_terminal_update(&journal(&session_path)).is_some()
+			&& tool_call_id(&text, "slow-shell").is_some_and(|call| records_non_terminal(&text, call))
 	});
 	assert_surface(&running, "interruptible bash");
 	let live_journal = journal(&session_path);
-	let recording = non_terminal_update(&live_journal)
-		.expect("a journalled shell update records terminal: false");
-	let call = last_tool_call(&live_journal).expect("a journalled bash tool call");
-	assert_eq!(
-		recording, call,
-		"the non-pty update must belong to the interruptible bash call\n{live_journal}"
+	let call = tool_call_id(&live_journal, "slow-shell").expect("the interruptible bash tool call");
+	assert!(
+		records_non_terminal(&live_journal, call),
+		"the interruptible bash call must record a non-pty execution\n{live_journal}"
 	);
 
 	process.resize(32, 92);
