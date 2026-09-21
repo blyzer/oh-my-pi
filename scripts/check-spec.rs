@@ -119,13 +119,26 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 		{
 			failures.push(format!("{} has no concrete example", symbol.public_name));
 		}
-		if symbol.callback_abi == CallbackAbi::PayloadContext
-			&& !symbol.signature.trim_start().starts_with("(payload, ctx)")
-		{
-			failures.push(format!(
-				"{} violates the (payload, ctx) callback ABI",
-				symbol.public_name
-			));
+		// A registration decorator publishes the *factory's* signature — `(kind)`,
+		// `(trigger)`, `(chord, ...)` — because that is its public API and what the
+		// owner doc's heading shows. The `(payload, ctx)` ABI constrains the
+		// function it decorates, which the row demonstrates in its example.
+		// docs/py/00-overview.md spells the payload with its domain name (`event`,
+		// `args`, `invocation`), so a literal prefix test cannot express the rule
+		// for these rows; only `omp.extension_activate`, a plain host-called
+		// function, has a signature that is its own callback signature.
+		if symbol.callback_abi == CallbackAbi::PayloadContext {
+			let honours_abi = if symbol.signature.trim_end().ends_with("-> Decorator") {
+				symbol.examples.iter().any(|example| example.contains(", ctx)"))
+			} else {
+				symbol.signature.trim_start().starts_with("(payload, ctx)")
+			};
+			if !honours_abi {
+				failures.push(format!(
+					"{} violates the (payload, ctx) callback ABI",
+					symbol.public_name
+				));
+			}
 		}
 		if symbol.operation.minimum_phase == InvocationPhase::Settled {
 			failures.push(format!(
@@ -181,8 +194,12 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 	{
 		failures.push("interrupt-grace configuration or telemetry metadata drifted".into());
 	}
-	let settings = fs::read_to_string(root.join("crates/app/src/settings.rs"))
-		.expect("runtime settings source is unreadable");
+	// Interrupt grace is environment-host policy (TERM -> grace -> KILL), so its
+	// settings block lives in omp-envd; AGENTS.md keeps host internals out of
+	// crates/app. The previous path named a file that has never held this
+	// setting in any revision of the repository.
+	let settings = fs::read_to_string(root.join("crates/envd/src/host_settings.rs"))
+		.expect("environment-host runtime settings source is unreadable");
 	if !settings.contains("omp_tool::DEFAULT_INTERRUPT_GRACE")
 		|| !settings.contains("pub runtime:")
 		|| !settings.contains("pub interrupt_grace: Duration")
