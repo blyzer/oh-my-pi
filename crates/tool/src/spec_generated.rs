@@ -97,6 +97,16 @@ const CORE_DURABLE: OperationSpec = OperationSpec {
 	cost:          CostClass::Metered,
 	authority:     Authority::Core,
 };
+/// Durable, yet legal from `Open`. `docs/py/08-context.md` is the contract for
+/// its namespace and states that nothing there authorizes a DATA effect, so no
+/// symbol in it ever waits on `EFFECTS_AUTHORIZED` — even the durable ones.
+/// Identical to `CORE_DURABLE` apart from that phase.
+const OPEN_DURABLE: OperationSpec = OperationSpec {
+	minimum_phase: InvocationPhase::Open,
+	durability:    Durability::Durable,
+	cost:          CostClass::Metered,
+	authority:     Authority::Core,
+};
 const ENV_EPHEMERAL: OperationSpec = OperationSpec {
 	minimum_phase: InvocationPhase::EffectsAuthorized,
 	durability:    Durability::Ephemeral,
@@ -1251,6 +1261,81 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		CORE_EFFECT,
 		"await ui.ask_user([])"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.view",
+		"() -> ContextView",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"view = await omp.context.view()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.usage",
+		"() -> ContextUsage",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"usage = await omp.context.usage()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.epoch",
+		"() -> int",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"epoch = await omp.context.epoch()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.pin",
+		"(ids: Iterable[str], *, reason: str) -> int",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"await omp.context.pin(ids, reason=\"carrying the repro\")"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.unpin",
+		"(ids: Iterable[str]) -> int",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"await omp.context.unpin(ids)"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.compact",
+		"(*, tier: CompactionTier | None = None, focus: str = \"\") -> CompactionOutcome",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"outcome = await omp.context.compact()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.MessageRef.parts",
+		"() -> list[Part]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"parts = await message.parts()",
+		&["omp.context.message.parts"]
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.MessageRef.verdict",
+		"() -> Payload | Fault",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"verdict = await message.verdict()",
+		&["omp.context.message.verdict"]
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.MessageRef.raw_args",
+		"() -> bytes | None",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"raw = await message.raw_args()",
+		&["omp.context.message.raw_args"]
 	),
 	symbol!(
 		"docs/py/07-ui.md",
