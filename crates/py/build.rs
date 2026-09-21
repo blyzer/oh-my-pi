@@ -94,58 +94,7 @@ fn main() {
 		}
 	}
 
-	// The release vendored archive contains LLVM-22 LTO bitcode, which Xcode's
-	// ld64 cannot read; scripts/ld64.lld routes the link through a matching
-	// Homebrew lld. Dev trees (freethreaded+debug) use native machine code and
-	// skip the shim entirely. Gated by the `needs-lld` marker dropped by
-	// fetch-python.sh.
-	// A missing marker is deliberately NOT tracked: cargo treats a missing
-	// `rerun-if-changed` path as always changed, which would rebuild omp-py
-	// (and relink every dependent binary) on each invocation. Marker
-	// appearance is covered by the tracked PYTHON.json, which fetch-python.sh
-	// rewrites whenever it regenerates the vendor tree.
-	let needs_lld = vendor.join("needs-lld").is_file();
-	if needs_lld {
-		println!("cargo::rerun-if-changed={}", vendor.join("needs-lld").display());
-		let shim = manifest.join("scripts/ld64.lld");
-		assert!(
-			shim.is_file(),
-			"this Python tree requires omp-py's ld64.lld shim at {}; restore \
-			 crates/py/scripts/ld64.lld",
-			shim.display()
-		);
-		println!("cargo::rustc-link-arg=--ld-path={}", shim.display());
-	}
-
-	// Wheels' native extensions resolve the CPython C-API from this executable
-	// at dlopen, so those globals (code AND data, PyExc_* included) must reach
-	// the dynamic symbol table and survive dead-strip. Export exactly them, via
-	// the list in crates/py/link: a blanket `--export-dynamic` also publishes
-	// every Rust monomorphization, which measured 1,292,605 dynamic symbols and
-	// 275 MiB of `.dynstr` per debug binary — 23% of the file, for symbols no
-	// extension can name. The mechanism is per-linker: ld64 takes
-	// `-exported_symbols_list` with Mach-O's leading underscore, ELF linkers
-	// take `--dynamic-list`. Other object formats have no compatible flag.
-	let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
-	let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
-	let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-	let link_dir = manifest.join("link");
-	let exports = if target_vendor == "apple" {
-		Some(("-Wl,-exported_symbols_list,", link_dir.join("cpython.macho-list")))
-	} else if target_os != "aix" && target_family.split(',').any(|family| family == "unix") {
-		Some(("-Wl,--dynamic-list=", link_dir.join("cpython.dynamic-list")))
-	} else {
-		None
-	};
-	if let Some((flag, list)) = exports {
-		assert!(
-			list.is_file(),
-			"omp-py needs its CPython export list at {}; restore crates/py/link/",
-			list.display()
-		);
-		println!("cargo::rerun-if-changed={}", list.display());
-		println!("cargo::rustc-link-arg={flag}{}", list.display());
-	}
+	omp_py_link::emit();
 
 	// Static archives propagate transitively: they bundle into this crate's
 	// rlib and reach any downstream binary. Unreferenced members cost

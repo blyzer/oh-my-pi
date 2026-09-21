@@ -1,0 +1,12 @@
+[package]
+name = "omp-py-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Final-link arguments every binary embedding omp-py's static CPython must replicate in its own build script"
+
+[lints]
+workspace = true

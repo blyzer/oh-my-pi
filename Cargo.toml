@@ -147,6 +147,7 @@ omp-oauth = { path = "crates/oauth", version = "2.0.0" }
 omp-macros = { path = "crates/macros", version = "2.0.0" }
 omp-proto = { path = "crates/proto", version = "2.0.0", features = ["tonic"] }
 omp-py = { path = "crates/py", version = "2.0.0" }
+omp-py-link = { path = "crates/py-link", version = "2.0.0" }
 omp-rpc = { path = "crates/rpc", version = "2.0.0" }
 omp-collab = { path = "crates/collab", version = "2.0.0" }
 omp-sdk = { path = "crates/sdk", version = "2.0.0" }

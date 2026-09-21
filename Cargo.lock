@@ -7730,6 +7730,7 @@ dependencies = [
  "omp-observability",
  "omp-proto",
  "omp-py",
+ "omp-py-link",
  "omp-rpc",
  "omp-sandbox",
  "omp-scribe",
@@ -8181,6 +8182,7 @@ dependencies = [
  "omp-journal",
  "omp-observability",
  "omp-proto",
+ "omp-py-link",
  "omp-rpc",
  "omp-scribe",
  "omp-serve",
@@ -8520,6 +8522,7 @@ version = "2.0.0"
 dependencies = [
  "omp-core",
  "omp-env",
+ "omp-py-link",
  "omp-scribe",
  "omp-tool",
  "parking_lot",
@@ -8531,6 +8534,10 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "omp-py-link"
+version = "2.0.0"
 
 [[package]]
 name = "omp-rpc"
@@ -8840,6 +8847,7 @@ dependencies = [
  "omp-memory",
  "omp-proto",
  "omp-py",
+ "omp-py-link",
  "omp-shell",
  "omp-shell-builtins",
  "omp-tool",

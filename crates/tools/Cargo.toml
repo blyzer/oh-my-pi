@@ -65,6 +65,7 @@ xutf.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
+omp-py-link.workspace = true
 
 [dev-dependencies]
 omp-ai.workspace = true
