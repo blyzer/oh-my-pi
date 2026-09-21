@@ -552,9 +552,11 @@ generated inputs.
 - Frozen pure-Python packages (e.g. cloudpickle): pinned
   `crates/py/requirements.txt`; fetch script resolves via `uv` → gitignored
   `vendor/python/bundled/` (skipped while stamp matches manifest) +
-  regenerates tracked `crates/py/THIRD-PARTY-NOTICES.txt`
-  (= `omp_py::THIRD_PARTY_LICENSES`) — rerun after manifest edits, commit the
-  notices. Build script only validates stamp + packs; native wheels rejected
+  regenerates the tracked per-target
+  `crates/py/notices/THIRD-PARTY-NOTICES.<target>.txt`
+  (= `omp_py::THIRD_PARTY_LICENSES`, selected by cfg) — rerun after manifest
+  edits, commit the notices. Per target because the statically linked
+  component set differs; each host regenerates only its own file. Build script only validates stamp + packs; native wheels rejected
   at fetch — those go into site-packages.
 - pyo3 via `PYO3_CONFIG_FILE` in `.cargo/config.toml` (default
   `vendor/python/pyo3-config.txt`, fast dev links). Release links

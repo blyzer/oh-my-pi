@@ -76,8 +76,30 @@ pub const fn frozen_distributions() -> &'static [(&'static str, &'static str)] {
 /// BSD-style terms require reproducing them in shipped materials. This
 /// unreferenced constant is not linked into consumer binaries, so
 /// redistributors must surface it explicitly (for example, with a `--licenses`
-/// flag) or ship `THIRD-PARTY-NOTICES.txt` beside the artifact.
-pub const THIRD_PARTY_LICENSES: &str = include_str!("../THIRD-PARTY-NOTICES.txt");
+/// flag) or ship the notices beside the artifact.
+///
+/// The set of statically linked native components differs per target — the
+/// Linux release links zlib, ncurses, libedit, bdb and the X libraries that
+/// macOS supplies dynamically — so the notices are generated and tracked per
+/// target rather than shared. A single file would describe whichever host last
+/// ran `just setup-python`, and ship the wrong list everywhere else.
+#[cfg(target_os = "macos")]
+pub const THIRD_PARTY_LICENSES: &str =
+	include_str!("../notices/THIRD-PARTY-NOTICES.aarch64-apple-darwin.txt");
+
+/// Third-party notices for the components linked into this target's binary.
+///
+/// See the macOS definition above for why these are per-target.
+#[cfg(target_os = "linux")]
+pub const THIRD_PARTY_LICENSES: &str =
+	include_str!("../notices/THIRD-PARTY-NOTICES.x86_64-unknown-linux-gnu.txt");
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!(
+	"omp-py has no embedded Python release for this target; scripts/fetch-python.sh builds \
+	 aarch64-apple-darwin and x86_64-unknown-linux-gnu only, and the third-party notices are \
+	 generated per target from that release"
+);
 
 /// One-shot guard: `CPython` supports a single runtime per process.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);

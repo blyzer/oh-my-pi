@@ -161,11 +161,33 @@ def generate(vendor: Path) -> tuple[str, int, int]:
         lines.extend(f"  Authoritative release license reference: {path}" for path in paths)
     section(chunks, "Bundled CPython and static native components", "\n".join(lines))
 
+    # A component may list several candidate license files and ship only the one
+    # it was actually built against: the zlib extension names both
+    # LICENSE.zlib-ng.txt and LICENSE.zlib.txt, and the release carries whichever
+    # implementation it linked. A listed file the release omits is therefore not
+    # automatically a gap in the notices — it is a gap only when nothing else
+    # documents that component. Where a sibling does document it, the omitted
+    # path is recorded below rather than substituted for, because inventing a
+    # provenance line is worse than naming the absence.
+    owners_of: dict[str, set[str]] = {}
+    for component, component_paths in references.items():
+        for candidate in component_paths:
+            owners_of.setdefault(candidate, set()).add(component)
+    documented = {
+        component: any((vendor / candidate).is_file() for candidate in component_paths)
+        for component, component_paths in references.items()
+    }
+
+    unshipped: list[tuple[str, tuple[str, ...]]] = []
     for relative, path in corpus.items():
         if path.is_file():
             title = f"python-build-standalone license corpus: {relative}"
             license_path = path
         else:
+            owners = owners_of.get(relative, set())
+            if owners and all(documented.get(owner) for owner in owners):
+                unshipped.append((relative, tuple(sorted(owners))))
+                continue
             fallback = AUDITED_LICENSE_FALLBACKS.get(relative)
             if fallback is None:
                 fail(f"release metadata references absent license file {relative}")
@@ -174,6 +196,18 @@ def generate(vendor: Path) -> tuple[str, int, int]:
                 fail(f"audited fallback for {relative} is absent: {license_path}")
             title = f"audited fallback for {relative} ({source})"
         section(chunks, title, license_path.read_text(encoding="utf-8"))
+
+    if unshipped:
+        lines = [
+            "The release metadata lists these license files for components that are",
+            "documented by another license file it does ship. They are named here so",
+            "the omission is visible rather than silent.",
+            "",
+        ]
+        lines.extend(
+            f"  {relative} (listed for: {', '.join(owners)})" for relative, owners in unshipped
+        )
+        section(chunks, "Listed but not shipped by the release", "\n".join(lines))
 
     for name, package_version, files in wheels:
         for path in files:
