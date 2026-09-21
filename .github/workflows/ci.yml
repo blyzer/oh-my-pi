@@ -211,6 +211,11 @@ jobs:
           command -v uv >/dev/null || pipx install uv
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # This job runs the proof through `cargo nextest`, same as the macOS
+      # workspace job, so it needs the same provisioning step.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Cache embedded Python
         id: python-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
