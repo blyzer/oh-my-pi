@@ -1263,6 +1263,30 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		"await ui.ask_user([])"
 	),
 	symbol!(
+		"docs/py/18-convars.md",
+		"omp.convars.declare",
+		"(key: str, *, kind: str, default, description=None, values=(), ui=None) -> Snapshot",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"setting = await omp.convars.declare(\"verbosity\", kind=\"string\", default=\"normal\")"
+	),
+	symbol!(
+		"docs/py/18-convars.md",
+		"omp.convars.get",
+		"(name: str) -> Snapshot",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"snapshot = await omp.convars.get(\"sv_interrupt_grace\")"
+	),
+	symbol!(
+		"docs/py/18-convars.md",
+		"omp.convars.observe",
+		"(name: str) -> Observation",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"async for snapshot in omp.convars.observe(name): pass"
+	),
+	symbol!(
 		"docs/py/08-context.md",
 		"omp.context.view",
 		"() -> ContextView",

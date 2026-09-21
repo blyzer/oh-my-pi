@@ -22,6 +22,7 @@ omp's Python extension surface, from the process outward.
 | [15-regimes.md](15-regimes.md) | `@omp.regime`, fixed loop events, transactional `ctx` / `next_` handlers, durable state, exclusive resources, and modes |
 | [16-prelude.md](16-prelude.md) | `@omp.prelude`, extension-declared eval-namespace helpers, declaration and manifest identity, generated sync stubs, JSON call boundary, lifecycle, and failure semantics |
 | [17-scribe.md](17-scribe.md) | `omp.scribe`: `Template`, `render`, `canonicalize`, `TemplateError` — deterministic prompt templating, the props value model, the template grammar, and the builtin helper set |
+| [18-convars.md](18-convars.md) | `omp.convars`: `declare`, `get`, `observe`, `Snapshot`, `Observation` — extension-declared settings on the shared control plane |
 
 Rule of the set: the owner defines, everyone else links. This file names sibling symbols but never redefines them. The rule is machine-enforced, not merely stated: the generated spec (*The generated spec*, build section) fails CI on a duplicate public symbol owner, because the review caught the rule being violated by the most central symbols in the set.
 
