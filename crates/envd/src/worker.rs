@@ -3745,11 +3745,15 @@ async fn run_control_supervisor(
 						"pty_denied": false,
 					})
 				});
+				// Two connections may commit the same external invocation id, so
+				// the CONTROL scope key is the supervisor's own dispatch identity.
+				// `call` still carries the caller's id for everything user-facing.
+				let control_invocation = sf!("{}#{id}", invocation.call.invocation_id);
 				let dispatch = ControlDispatch {
 					operation: sf!("omp.devices.call"),
 					arguments,
 					authority: ControlInvocationAuthority {
-						invocation: invocation.call.invocation_id.clone(),
+						invocation: control_invocation.clone(),
 						phase: InvocationPhase::EffectsAuthorized,
 						session: session_id.clone(),
 						turn: None,
@@ -3771,9 +3775,7 @@ async fn run_control_supervisor(
 					policy: invocation.callback_policy,
 					deadline: EventDeadline { at: Instant::now() + invocation.call.deadline },
 				};
-				in_flight
-					.lock()
-					.insert(id, invocation.call.invocation_id.clone());
+				in_flight.lock().insert(id, control_invocation);
 				let control = activation.control.clone();
 				let store = result_store.clone();
 				let result_session = session_id.clone();
@@ -3804,13 +3806,17 @@ async fn run_control_supervisor(
 					});
 					let result = control.dispatch_with_progress(dispatch, progress_tx).await;
 					let _ = progress.await;
+					// A dispatch withdrawn from the queue never entered Python,
+					// so its effects are known to be none.
+					let withdrawn =
+						matches!(result, Err(ControlRuntimeError::Dispatch(DispatchError::Cancelled)));
 					let was_cancelled = task_cancelled.lock().remove(&id);
 					if was_cancelled {
 						let _ = invocation.events.send(ExtHostEvent::Aborted(ExtHostAbort {
 							call_id:         invocation.call.invocation_id,
 							kind:            ExtHostAbortKind::Cancelled,
 							reason:          sf!("extension invocation cancelled"),
-							effects_unknown: true,
+							effects_unknown: !withdrawn,
 						}));
 					} else {
 						match result {
@@ -3883,7 +3889,9 @@ async fn run_control_supervisor(
 							},
 							Ok(CancellationOutcome::Disabled(_)) | Err(_) => break,
 							Ok(
-								CancellationOutcome::DispatchCancel | CancellationOutcome::InterruptThread,
+								CancellationOutcome::Withdrawn
+								| CancellationOutcome::DispatchCancel
+								| CancellationOutcome::InterruptThread,
 							) => {},
 						}
 					}

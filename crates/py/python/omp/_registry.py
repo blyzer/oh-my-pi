@@ -821,6 +821,11 @@ class DeclarationRegistry:
         )
         self.register_tool(name, family, rev, handler)
         self._legacy_worker_tools[key] = projected
+        # A legacy row carries no availability predicate, so it is mounted for
+        # as long as it is registered.  FREEZE publishes one availability row
+        # per mountable tool, and the manifest projects a declared legacy row
+        # to a soft or hard executable, so the row has to exist here too.
+        self._device_states[key] = (True, None)
         return projected
 
     def _control_tool_key(self, key: _ToolKey) -> _ToolKey:

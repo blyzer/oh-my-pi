@@ -2752,6 +2752,19 @@ pub enum ControlRuntimeError {
 	Remote(ControlProtocolError),
 }
 
+/// Fails every outstanding dispatch and child request once the CONTROL
+/// descriptor is gone, so no dispatch waiter outlives its child.
+fn disconnect_control(shared: &ControlShared) {
+	shared.router.lock().disconnect();
+	shared.invocations.lock().clear();
+	shared.dispatch_by_id.lock().clear();
+	shared.dispatch_progress.lock().clear();
+	shared.dispatch_chunks.lock().clear();
+	for (_, request) in mem::take(&mut *shared.child_requests.lock()) {
+		request.abort();
+	}
+}
+
 impl ControlRuntime {
 	/// Binds one authenticated child descriptor and returns its dispatch handle.
 	pub fn new(
@@ -2777,18 +2790,18 @@ impl ControlRuntime {
 		(Self { reader, shared: Arc::clone(&shared) }, ControlHandle { shared })
 	}
 
-	/// Runs the sole reader until EOF or a connection-level protocol failure.
-	pub async fn serve(mut self) -> Result<(), ControlRuntimeError> {
+	/// Runs the sole reader until EOF or a connection-level protocol failure,
+	/// failing every outstanding dispatch on either exit.
+	pub async fn serve(self) -> Result<(), ControlRuntimeError> {
+		let shared = Arc::clone(&self.shared);
+		let result = self.read_frames().await;
+		disconnect_control(&shared);
+		result
+	}
+
+	async fn read_frames(mut self) -> Result<(), ControlRuntimeError> {
 		loop {
 			let Some(frame) = read_json_control_frame(&mut self.reader).await? else {
-				self.shared.router.lock().disconnect();
-				self.shared.invocations.lock().clear();
-				self.shared.dispatch_by_id.lock().clear();
-				self.shared.dispatch_progress.lock().clear();
-				self.shared.dispatch_chunks.lock().clear();
-				for (_, request) in mem::take(&mut *self.shared.child_requests.lock()) {
-					request.abort();
-				}
 				return Ok(());
 			};
 			match frame.kind.as_str() {
@@ -3186,6 +3199,45 @@ impl ControlEffectKind {
 }
 
 impl ControlHandle {
+	/// Withdraws a dispatch the child has not received yet.
+	///
+	/// Returns whether the dispatch was still queued. A withdrawn dispatch
+	/// never entered Python, so the invocation leaves no unknown effects and
+	/// the cancellation ladder must not escalate to the process group.
+	pub fn cancel_queued(&self, invocation: &str) -> bool {
+		let Some(id) = self
+			.shared
+			.dispatch_by_id
+			.lock()
+			.iter()
+			.find_map(|(id, live)| (live.as_str() == invocation).then_some(*id))
+		else {
+			return false;
+		};
+		let withdrawn = self
+			.shared
+			.router
+			.lock()
+			.cancel_queued(self.shared.identity.extension.as_str(), id)
+			.unwrap_or(false);
+		if withdrawn {
+			self.shared.invocations.lock().remove(invocation);
+			self.shared.dispatch_by_id.lock().remove(&id);
+			self.shared.dispatch_progress.lock().remove(&id);
+			self.shared.dispatch_chunks.lock().remove(&id);
+		}
+		withdrawn
+	}
+
+	/// Fails every outstanding dispatch because the child is gone.
+	///
+	/// A forced process-group kill aborts the CONTROL reader before it can
+	/// observe EOF, so the owner of the child calls this to release the
+	/// dispatch waiters the reader would otherwise have failed.
+	pub fn disconnect(&self) {
+		disconnect_control(&self.shared);
+	}
+
 	/// Installs a Core-issued synchronous authority snapshot in the child.
 	///
 	/// The child rejects any snapshot whose host or session generation differs

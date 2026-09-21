@@ -1,0 +1,15 @@
+{
+	"hooks": {
+		"SessionStart": [
+			{
+				"matcher": "compact",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "cat .claude/context-after-compact.md"
+					}
+				]
+			}
+		]
+	}
+}

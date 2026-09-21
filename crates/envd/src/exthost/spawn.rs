@@ -290,6 +290,9 @@ impl RunningHost {
 		invocation: &str,
 	) -> Result<CancellationOutcome, RunningHostError> {
 		let last_frame = self.control.last_frame(invocation).unwrap_or(0);
+		if self.control.cancel_queued(invocation) {
+			return Ok(self.cancellation.withdraw());
+		}
 		self.control.cancel(invocation).await?;
 		CancellationLadder::grace_timer().await;
 		if !self.control.is_live(invocation) {
@@ -311,6 +314,7 @@ impl RunningHost {
 
 	async fn terminate(&mut self) {
 		self.pump.abort();
+		self.control.disconnect();
 		if let Some(pid) = self.child.id() {
 			#[cfg(unix)]
 			{

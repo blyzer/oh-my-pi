@@ -39,6 +39,8 @@ pub struct CancellationJournal {
 /// Result of escalating one cancellation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CancellationOutcome {
+	/// The dispatch was still queued and was withdrawn before the child saw it.
+	Withdrawn,
 	/// Courtesy cancellation frame should be sent now.
 	DispatchCancel,
 	/// Async thread interruption should be sent after the first grace.
@@ -67,6 +69,11 @@ pub struct CancellationLadder {
 }
 
 impl CancellationLadder {
+	/// Withdraws a dispatch the child never received.
+	pub const fn withdraw(&self) -> CancellationOutcome {
+		CancellationOutcome::Withdrawn
+	}
+
 	/// Begins cancellation by sending `CancelDispatch` to the Python task scope.
 	pub const fn begin(&self) -> CancellationOutcome {
 		CancellationOutcome::DispatchCancel
