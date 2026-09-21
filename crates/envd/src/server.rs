@@ -9536,20 +9536,25 @@ fn spawn_worker_invocation(
 					break;
 				},
 				Some(ExtHostEvent::Complete(complete)) => {
-					let (json, details_blob, is_error) =
-						match projected_worker_completion_json(&blobs, &complete, output_request) {
-							Ok(completion) => completion,
-							Err(reason) => {
-								send_abort_verdict(
-									&responses,
-									request_id,
-									&invocation_id,
-									omp_tool::Abort::EffectsUnknown { reason },
-								)
-								.await;
-								break;
-							},
-						};
+					let (json, details_blob, is_error) = match projected_worker_completion_json(
+						&blobs,
+						&complete,
+						output_request,
+						retention_session.as_deref(),
+						&invocation_id,
+					) {
+						Ok(completion) => completion,
+						Err(reason) => {
+							send_abort_verdict(
+								&responses,
+								request_id,
+								&invocation_id,
+								omp_tool::Abort::EffectsUnknown { reason },
+							)
+							.await;
+							break;
+						},
+					};
 					if let Some(details) = details_blob.as_ref() {
 						let hash: [u8; 32] = match details.hash.as_ref().try_into() {
 							Ok(hash) => hash,
@@ -10873,8 +10878,10 @@ fn projected_worker_completion_json(
 	blobs: &BlobHost,
 	complete: &ExtHostCompletion,
 	request: omp_tool::OutputRequest,
+	retention_session: Option<&str>,
+	invocation_id: &str,
 ) -> Result<(Bytes, Option<thread_pb::Blob>, bool), Str> {
-	let (mut json, details_blob, is_error) = worker_completion_json(complete)?;
+	let (mut json, mut details_blob, is_error) = worker_completion_json(complete)?;
 	let inline_limit = match request {
 		omp_tool::OutputRequest::Bounded => DEFAULT_RESULT_PROJECTION_BYTES,
 		omp_tool::OutputRequest::Complete => COMPLETE_RESULT_PROJECTION_BYTES,
@@ -10885,6 +10892,25 @@ fn projected_worker_completion_json(
 			.is_some_and(|details| details.size <= u64::try_from(inline_limit).unwrap_or(u64::MAX))
 	{
 		json = materialize_worker_outcome(blobs, complete)?;
+	}
+	// A worker small enough to answer inline sends no artifact of its own, but
+	// the verdict is still canonical content the caller may fetch by address,
+	// so it is retained here exactly as the native path retains its own. The
+	// store is content-addressed, so an identical verdict costs no new bytes.
+	// Size does not decide: only a verdict with no body has nothing to retain.
+	if details_blob.is_none() && !json.is_empty() {
+		details_blob = Some(
+			blobs
+				.put_verdict_bytes(retention_session, invocation_id, &json)
+				.map_err(|error| {
+					tracing::error!(
+						%error,
+						invocation_id = %invocation_id,
+						"could not retain worker verdict before publication"
+					);
+					sf!("worker verdict could not be retained")
+				})?,
+		);
 	}
 	Ok((json, details_blob, is_error))
 }
