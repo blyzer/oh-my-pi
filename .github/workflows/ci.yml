@@ -95,7 +95,14 @@ jobs:
 
   rust:
     name: Rust workspace and acceptance proofs
-    needs: [format, runtime_spec, licenses]
+    # Deliberately NOT gated on runtime_spec. That check is cheap and reports
+    # in two minutes; this one is the expensive proof and the only place the
+    # suite, P1-P8 and the baseline ever run. Chaining them meant a red spec
+    # gate skipped the suite entirely, so the branch could not learn whether
+    # it passed. They are independent questions and now answer in parallel.
+    # This does not weaken the gate: runtime_spec still reports its own
+    # conclusion and can still be a required check in branch protection.
+    needs: [format, licenses]
     # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
     # somewhere else. Set it to a JSON label array to send this job to a
     # self-hosted Apple silicon machine, which is the only way to give it more
@@ -121,6 +128,10 @@ jobs:
 
       - name: Cache embedded Python
         id: python-cache
+        # A self-hosted runner keeps its workspace between runs, so target/
+        # is already warm. Uploading it would mean tarring tens of GB against
+        # a 10 GB repository cache limit on every job.
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -138,6 +149,10 @@ jobs:
           crates/py/scripts/ld64.lld --version
 
       - name: Cache Cargo
+        # A self-hosted runner keeps its workspace between runs, so target/
+        # is already warm. Uploading it would mean tarring tens of GB against
+        # a 10 GB repository cache limit on every job.
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
