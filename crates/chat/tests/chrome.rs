@@ -16,6 +16,23 @@ use omp_session::{ComponentRegistry, Session};
 use omp_tui::{Charset, Icon, Size, Ui, UiContext, frame_text};
 use tempfile::tempdir;
 
+/// Snapshots a rendered surface with the crate version normalized out.
+///
+/// The chrome's top border carries `env!("CARGO_PKG_VERSION")`, so a stored
+/// snapshot that pins the digits turns every version bump into a failure in
+/// tests that exist to check *layout* — which is exactly how these two broke
+/// on the bump to 2.0.0. The title's shape is still asserted next to each
+/// snapshot (`starts_with("╭─── omp v")`), and `welcome.rs` covers the
+/// rendering itself with a version it passes in, so nothing here is lost.
+macro_rules! assert_surface_snapshot {
+	($rows:expr) => {
+		insta::with_settings!(
+			{ filters => vec![(r"omp v\d+\.\d+\.\d+", "omp v[VERSION]")] },
+			{ insta::assert_snapshot!($rows) }
+		);
+	};
+}
+
 /// The recorded band row at the given geometry, for exact-byte
 /// comparison of the static content.
 fn reference_band(name: &str, row: usize) -> String {
@@ -141,7 +158,7 @@ fn expected_band(group: &str, width: u16, threshold: u16) -> String {
 fn boot_surface_matches_pi_chrome_at_120x40() {
 	let (rows, cursor) = surface(120, 40);
 	assert_eq!(rows.len(), 40);
-	insta::assert_snapshot!(rows.join("\n"));
+	assert_surface_snapshot!(rows.join("\n"));
 	// The same row anchors as the reference capture: box rows 1..=20, tip on
 	// 21, two blank rows, status on 24, composer on 25.
 	assert!(rows[1].starts_with("╭─── omp v"), "{}", rows[1]);
@@ -161,7 +178,7 @@ fn boot_surface_matches_pi_chrome_at_120x40() {
 fn boot_surface_keeps_the_composer_reachable_at_80x24() {
 	let (rows, cursor) = surface(80, 24);
 	assert_eq!(rows.len(), 24);
-	insta::assert_snapshot!(rows.join("\n"));
+	assert_surface_snapshot!(rows.join("\n"));
 	let prompt = rows
 		.iter()
 		.position(|row| row.starts_with("╰─ Ask anything"))
@@ -205,7 +222,7 @@ fn working_surface_swaps_the_brand_for_spinner_and_timer() {
 		.user("hello world", Vec::new())
 		.expect("user message");
 	let (rows, _) = surface_of(&mut session, 120, 40);
-	insta::assert_snapshot!(rows.join("\n"));
+	assert_surface_snapshot!(rows.join("\n"));
 	let band = rows
 		.iter()
 		.find(|row| row.contains("Fable 5 >"))
