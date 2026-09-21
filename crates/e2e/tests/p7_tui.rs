@@ -728,6 +728,40 @@ fn journal(path: &Path) -> String {
 	fs::read_to_string(path).expect("read session journal")
 }
 
+/// Yields each SSE frame in a session journal.
+fn journal_frames(text: &str) -> impl Iterator<Item = &str> {
+	text.split("\n\n").filter(|frame| frame.contains("event: "))
+}
+
+/// Returns one frame's field value, if the frame carries it.
+fn frame_field<'f>(frame: &'f str, prefix: &str) -> Option<&'f str> {
+	frame.lines().find_map(|line| line.strip_prefix(prefix))
+}
+
+/// Returns the owning tool call of the first journalled shell update that
+/// records a non-pty execution.
+///
+/// `Session::call_update` writes these, so a match is evidence the execution
+/// reached the journal through the production lifecycle rather than that the
+/// scenario asserted it. The returned `by:` is the `tool.call@1` the update
+/// belongs to, which is what ties the record to one execution.
+fn non_terminal_update(text: &str) -> Option<&str> {
+	journal_frames(text)
+		.filter(|frame| frame.contains("event: tool.update@1"))
+		.find(|frame| {
+			frame_field(frame, "data: ").is_some_and(|data| data.contains("\"terminal\":false"))
+		})
+		.and_then(|frame| frame_field(frame, "by: "))
+}
+
+/// Returns the entry id of the most recent journalled tool call.
+fn last_tool_call(text: &str) -> Option<&str> {
+	journal_frames(text)
+		.filter(|frame| frame.contains("event: tool.call@1"))
+		.last()
+		.and_then(|frame| frame_field(frame, "id: "))
+}
+
 fn assert_journal_chain(text: &str) {
 	let frames = text
 		.split("\n\n")
@@ -915,11 +949,25 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 
 	debug.keys("'interrupt the next tool' enter");
 	gateway.release(4);
+	// `shell::Update` carries `terminal`, but the dispatcher blanks its `data`
+	// and `project_update` drops that shape so the bounded output stream stays
+	// the single authority for ordered bytes. The field therefore never reaches
+	// a rendered surface; the journal is where production records it. Liveness
+	// is still asserted on the card, and the non-pty guarantee now reads the
+	// record production actually writes, tied to the execution that made it.
 	let running = wait_snapshot(&mut debug, &raw_capture, "interruptible bash live", |snapshot| {
-		let surface = snapshot.combined();
-		surface.contains("bash running") && surface.contains("\"terminal\":false")
+		snapshot.combined().contains("bash running")
+			&& non_terminal_update(&journal(&session_path)).is_some()
 	});
 	assert_surface(&running, "interruptible bash");
+	let live_journal = journal(&session_path);
+	let recording = non_terminal_update(&live_journal)
+		.expect("a journalled shell update records terminal: false");
+	let call = last_tool_call(&live_journal).expect("a journalled bash tool call");
+	assert_eq!(
+		recording, call,
+		"the non-pty update must belong to the interruptible bash call\n{live_journal}"
+	);
 
 	process.resize(32, 92);
 	debug
