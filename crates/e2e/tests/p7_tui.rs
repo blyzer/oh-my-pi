@@ -77,6 +77,24 @@ struct GatedRoute {
 	preview_release: Receiver<()>,
 }
 
+/// One bounded line identifying a provider call.
+///
+/// The turn id discriminates: a call repeating the previous turn is a
+/// continuation or retry within it, a new one means another turn began. The
+/// whole `Call` is not printed — it carries the conversation and would bury
+/// the distinguishing fields.
+fn describe_call(call: &Call) -> String {
+	call.session.as_ref().map_or_else(
+		|| format!("id={:?} <no session>", call.id),
+		|session| {
+			format!(
+				"id={:?} turn={:?} revision={:?} append_only={}",
+				call.id, session.turn, session.revision, session.append_only
+			)
+		},
+	)
+}
+
 impl Service<LayerCall<Call>> for GatedRoute {
 	type Error = InferenceError;
 	type Response = Answer;
@@ -88,11 +106,26 @@ impl Service<LayerCall<Call>> for GatedRoute {
 	}
 
 	fn call(&mut self, request: LayerCall<Call>) -> Self::Future {
-		let gate = self
-			.gates
-			.lock()
-			.pop_front()
-			.expect("every scripted provider call has a gate");
+		let gate = self.gates.lock().pop_front().unwrap_or_else(|| {
+			let captures = self.captures.lock();
+			let scripted = captures
+				.iter()
+				.enumerate()
+				.map(|(index, call)| format!("  {index}: {}", describe_call(call)))
+				.collect::<Vec<_>>()
+				.join("\n");
+			panic!(
+				"the provider was called {} times but the scenario scripts {}.\n\nScripts stand in \
+				 for nondeterministic provider output only, so an extra call means production issued \
+				 a turn this scenario does not describe. Compare the turn ids: one that repeats the \
+				 previous turn is a continuation or retry inside it, while a new turn id means \
+				 another turn began.\n\nscripted:\n{scripted}\nunscripted:\n  {}: {}",
+				captures.len() + 1,
+				captures.len(),
+				captures.len(),
+				describe_call(&request.payload),
+			)
+		});
 		let call_index = {
 			let mut captures = self.captures.lock();
 			let index = captures.len();
