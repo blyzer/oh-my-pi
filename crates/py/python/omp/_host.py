@@ -585,8 +585,17 @@ class Host:
                 if not isinstance(row, dict) or not isinstance(row.get("tier"), str):
                     raise HostDisconnected("invalid CONTROL tier snapshot row")
                 kind = row.get("kind")
+                # `identifying` is the subset that must be non-empty. Every
+                # component must still be a string, but a device's `family` is
+                # an optional discriminator rather than part of its name: the
+                # host defaults it to "" when a declaration carries no family
+                # property, and `omp.tool` falls back to "" when no extension
+                # id is configured. Requiring it non-empty rejected snapshots
+                # the host legitimately sends, and because this runs during
+                # CONTROL configure the whole extension died before FREEZE.
                 if kind == "core":
                     key = ("core", row.get("name"), row.get("rev"))
+                    identifying = key[1:]
                 elif kind == "device":
                     key = (
                         "device",
@@ -594,11 +603,15 @@ class Host:
                         row.get("family"),
                         row.get("rev"),
                     )
+                    identifying = (key[1], key[3])
                 elif kind == "mcp":
                     key = ("mcp", row.get("server"), row.get("tool"))
+                    identifying = key[1:]
                 else:
                     raise HostDisconnected("invalid CONTROL tier snapshot target")
-                if any(not isinstance(item, str) or not item for item in key[1:]):
+                if any(not isinstance(item, str) for item in key[1:]) or any(
+                    not item for item in identifying
+                ):
                     raise HostDisconnected("invalid CONTROL tier snapshot identity")
                 if key in snapshot:
                     raise HostDisconnected("duplicate CONTROL tier snapshot identity")
