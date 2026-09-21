@@ -22,10 +22,13 @@
 //! engine.attach(|py| py.run(greet, None, None)).unwrap();
 //! ```
 //!
-//! Embedding contract: binaries that should support native wheels must link
-//! with `-Wl,-export_dynamic` so extension modules can resolve the `CPython`
-//! C-API from the executable at dlopen. This crate's build script applies it
-//! to its own binaries; downstream crates need it in their own build script.
+//! Embedding contract: binaries that should support native wheels must export
+//! the `CPython` C-API from the executable so extension modules resolve it at
+//! dlopen. The export set is the list in `crates/py/link`, applied with
+//! `--dynamic-list` (ELF) or `-exported_symbols_list` (ld64) — not a blanket
+//! `--export-dynamic`, which publishes every Rust symbol besides. This crate's
+//! build script applies it to its own binaries; downstream crates need it in
+//! their own build script.
 
 mod bindings;
 mod env_types;

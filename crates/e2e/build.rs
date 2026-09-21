@@ -41,23 +41,33 @@ fn main() {
 			println!("cargo::rustc-link-arg=--ld-path={}", shim.display());
 		}
 	}
-	// omp-py's final link needs the interpreter's own symbols exported. The
-	// flag's spelling is per-linker: ld64 takes `-export_dynamic`, while GNU
-	// ld and LLD parse that same string as `-e xport_dynamic` and silently
-	// produce a binary with no valid entry point, which segfaults in the
-	// dynamic loader before `main`. See crates/py/build.rs, which selects the
-	// same way for the library link.
+	// Wheels' native extensions resolve the CPython C-API from this executable
+	// at dlopen, so those globals (code AND data, PyExc_* included) must reach
+	// the dynamic symbol table and survive dead-strip. Export exactly them, via
+	// the list in crates/py/link: a blanket `--export-dynamic` also publishes
+	// every Rust monomorphization, which measured 1,292,605 dynamic symbols and
+	// 275 MiB of `.dynstr` per debug binary — 23% of the file, for symbols no
+	// extension can name. The mechanism is per-linker: ld64 takes
+	// `-exported_symbols_list` with Mach-O's leading underscore, ELF linkers
+	// take `--dynamic-list`. Other object formats have no compatible flag.
 	let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
 	let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
 	let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-	let link_arg = if target_vendor == "apple" {
-		Some("-Wl,-export_dynamic")
+	let link_dir = manifest.join("../py/link");
+	let exports = if target_vendor == "apple" {
+		Some(("-Wl,-exported_symbols_list,", link_dir.join("cpython.macho-list")))
 	} else if target_os != "aix" && target_family.split(',').any(|family| family == "unix") {
-		Some("-Wl,--export-dynamic")
+		Some(("-Wl,--dynamic-list=", link_dir.join("cpython.dynamic-list")))
 	} else {
 		None
 	};
-	if let Some(link_arg) = link_arg {
-		println!("cargo::rustc-link-arg={link_arg}");
+	if let Some((flag, list)) = exports {
+		assert!(
+			list.is_file(),
+			"omp-e2e needs omp-py's CPython export list at {}; restore crates/py/link/",
+			list.display()
+		);
+		println!("cargo::rerun-if-changed={}", list.display());
+		println!("cargo::rustc-link-arg={flag}{}", list.display());
 	}
 }
