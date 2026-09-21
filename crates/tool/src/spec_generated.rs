@@ -107,6 +107,17 @@ const OPEN_DURABLE: OperationSpec = OperationSpec {
 	cost:          CostClass::Metered,
 	authority:     Authority::Core,
 };
+/// Spends a paid upstream resource. `docs/py/13-inference.md` states the rule
+/// this encodes: inference-triggering operations are durable Requests with
+/// `minimum_phase=EFFECTS_AUTHORIZED`, so a device body can trigger paid
+/// inference only once its own invocation holds an effect token and a
+/// speculative fragment can never spend money.
+const CORE_PAID: OperationSpec = OperationSpec {
+	minimum_phase: InvocationPhase::EffectsAuthorized,
+	durability:    Durability::Durable,
+	cost:          CostClass::Paid,
+	authority:     Authority::Core,
+};
 const ENV_EPHEMERAL: OperationSpec = OperationSpec {
 	minimum_phase: InvocationPhase::EffectsAuthorized,
 	durability:    Durability::Ephemeral,
@@ -1303,6 +1314,115 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CORE_EFFECT,
 		"decision = await omp.hooks.dispatch_hook(\"tool_call\", payload)",
 		&["omp.hooks.dispatch"]
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.invoke",
+		"(server: str, tool: str, arguments: dict) -> object",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"result = await device(query=\"rust\")"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.prompts.invalidate",
+		"(slot: str) -> int",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"generation = await omp.prompts.invalidate(\"project_rules\")"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.request",
+		"(operation: Operation, request: ImageRequest | SpeechRequest | TranscriptionRequest | \
+		 RealtimeRequest) -> ImageResult | SpeechResult | TranscriptionResult | RealtimeSession",
+		CallbackAbi::None,
+		CORE_PAID,
+		"result = await handle.request(omp.Operation.GENERATE_IMAGE, request)"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.replace",
+		"(spec: ProviderSpec) -> None",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"await handle.replace(spec)"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.retract",
+		"() -> None",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"await handle.retract()"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.models",
+		"() -> tuple[ModelCard, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"cards = await omp.provider.models()"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.is_authenticated",
+		"() -> bool",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"ready = await handle.is_authenticated()"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.watch_models",
+		"(since: Cursor | None = None) -> WatchModels",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"async for event in omp.provider.watch_models(): pass"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.flush",
+		"(*, timeout: Duration = Duration(\"10s\")) -> bool",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"flushed = await omp.telemetry.flush()"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.query",
+		"(q: Query) -> QueryResult",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"result = await omp.telemetry.query(q)"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.rev_metrics",
+		"(tool: str, *, family: str | None = None, since: datetime | timedelta | None = None, \
+		 scope: Scope = Scope.PROJECT) -> tuple[RevMetrics, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"rows = await omp.telemetry.rev_metrics(\"read\")"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.span",
+		"(name: str, /, **attrs: str | int | float | bool) -> Span",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"async with omp.telemetry.span(\"index\"): pass",
+		&["omp.telemetry.span.open", "omp.telemetry.span.close"]
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.export",
+		"(target: ExportTarget, *, kinds: Sequence[Kind | str] = (), sample: float = 1.0) -> \
+		 ExportHandle",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"handle = omp.telemetry.export(omp.telemetry.OtlpTarget(endpoint))",
+		&["omp.telemetry.export.stop", "omp.telemetry.export.stats"]
 	),
 	symbol!(
 		"docs/py/01-devices.md",

@@ -1,0 +1,5117 @@
+{
+  "schema_version": 1,
+  "invocation_phases": [
+    "OPEN",
+    "ARGS_FINALIZED",
+    "ADMISSION",
+    "ADMITTED",
+    "ASSISTANT_ITEM_COMMITTED",
+    "EFFECTS_AUTHORIZED",
+    "SETTLED"
+  ],
+  "symbols": [
+    {
+      "owner": "docs/py/00-overview.md",
+      "public_name": "omp.operation_spec",
+      "dispatch_key": [],
+      "signature": "(symbol: str) -> OperationSpec",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.operation_spec(\"omp.journal.append\")"
+      ]
+    },
+    {
+      "owner": "docs/py/00-overview.md",
+      "public_name": "omp.resources",
+      "dispatch_key": [],
+      "signature": "() -> ResourceReceipt",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.resources()"
+      ]
+    },
+    {
+      "owner": "docs/py/00-overview.md",
+      "public_name": "omp.services.connect",
+      "dispatch_key": [],
+      "signature": "(name: str, *, rev: int) -> ServiceClient",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.services.connect(\"dev.example.index\", rev=1)"
+      ]
+    },
+    {
+      "owner": "docs/py/00-overview.md",
+      "public_name": "omp.extension_activate",
+      "dispatch_key": [],
+      "signature": "(payload, ctx) -> None",
+      "callback_abi": "(payload, ctx)",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "async def extension_activate(event, ctx): pass"
+      ]
+    },
+    {
+      "owner": "docs/py/03-params.md",
+      "public_name": "omp.params.interrupt_grace",
+      "dispatch_key": [],
+      "signature": "Duration",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "grace = omp.params.interrupt_grace"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.journal.append",
+      "dispatch_key": [],
+      "signature": "(entry, *, display=None, idempotency_key=None) -> EntryId",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.journal.append(entry)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.journal.entries",
+      "dispatch_key": [],
+      "signature": "(kind=None, *, rev=None, since=None, limit=None, live=True) -> Sequence[JournalEntry]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.journal.entries(\"dev.example.turn\")"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.journal.latest",
+      "dispatch_key": [],
+      "signature": "(kind) -> JournalEntry | None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.journal.latest(\"dev.example.turn\")"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.journal.fold",
+      "dispatch_key": [],
+      "signature": "(kind, reducer, initial, *, since=None) -> tuple[T, EntryId | None]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.journal.fold(\"dev.example.turn\", reducer, initial)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.journal.label",
+      "dispatch_key": [],
+      "signature": "(target, label) -> EntryId",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.journal.label(target, \"accepted\")"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.journal.decode",
+      "dispatch_key": [],
+      "signature": "(raw) -> Any",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.journal.decode(entry.raw)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.state.append",
+      "dispatch_key": [],
+      "signature": "(entry, *, scope, idempotency_key=None) -> StateEntryId",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.state.append(entry, scope=omp.StateScope.SESSION)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.state.entries",
+      "dispatch_key": [],
+      "signature": "(kind, *, scope, since=None, limit=None) -> Sequence[StateEntry]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.state.entries(\"dev.example.pref\", scope=omp.StateScope.WORKSPACE)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.state.latest",
+      "dispatch_key": [],
+      "signature": "(kind, *, scope) -> StateEntry | None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.state.latest(\"dev.example.pref\", scope=omp.StateScope.WORKSPACE)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.state.fold",
+      "dispatch_key": [],
+      "signature": "(kind, reducer, initial, *, scope, since=None) -> tuple[T, StateEntryId | None]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.state.fold(\"dev.example.pref\", reducer, initial, scope=omp.StateScope.WORKSPACE)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.sessions.current",
+      "dispatch_key": [],
+      "signature": "() -> SessionInfo",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.sessions.current()"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.sessions.SessionSetup",
+      "dispatch_key": [],
+      "signature": "(title=None, parent=None, entries=(), initial_prompt=None)",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.SessionSetup(title=\"Handoff\", initial_prompt=\"Continue here\")"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.sessions.create",
+      "dispatch_key": [],
+      "signature": "(setup=SessionSetup()) -> SessionInfo",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.sessions.create(omp.SessionSetup(title=\"Handoff\"))"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.sessions.list",
+      "dispatch_key": [],
+      "signature": "(filter=None, *, cursor=None, limit=50) -> SessionPage",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.sessions.list(limit=10)"
+      ]
+    },
+    {
+      "owner": "docs/py/09-journal.md",
+      "public_name": "omp.sessions.usage",
+      "dispatch_key": [],
+      "signature": "(query) -> UsageReport",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.sessions.usage(omp.UsageQuery())"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.info",
+      "dispatch_key": [],
+      "signature": "() -> EnvInfo",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.env.info()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.has",
+      "dispatch_key": [],
+      "signature": "(*caps: Capability) -> bool",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.env.has(omp.Capability.ENV_DOC_READ)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.require",
+      "dispatch_key": [],
+      "signature": "(*caps: Capability) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "omp.env.require(omp.Capability.ENV_DOC_READ)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.docs.open",
+      "dispatch_key": [],
+      "signature": "(path, *, language=None, create=False) -> Doc",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.docs.open(omp.EnvPath(\"src/lib.rs\"))"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Doc.close",
+      "dispatch_key": [
+        "omp.env.docs.close"
+      ],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await doc.close()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Doc.read",
+      "dispatch_key": [
+        "omp.env.docs.read"
+      ],
+      "signature": "(*, lines=None, byte_ranges=None) -> str",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await doc.read(lines=[(1, 40)])"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Doc.summary",
+      "dispatch_key": [
+        "omp.env.docs.summarize"
+      ],
+      "signature": "(options=None) -> Summary | SummaryUnavailable",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await doc.summary()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Txn.commit",
+      "dispatch_key": [
+        "omp.env.docs.commit_transaction"
+      ],
+      "signature": "() -> TransactionOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await transaction.commit()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.canonicalize",
+      "dispatch_key": [],
+      "signature": "(path) -> EnvPath",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.canonicalize(path)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.stat",
+      "dispatch_key": [],
+      "signature": "(path, *, follow=False) -> PathMeta",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.stat(path)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.list_dir",
+      "dispatch_key": [
+        "omp.env.fs.list_directory"
+      ],
+      "signature": "(path, *, follow=False) -> list[DirEntry]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.list_dir(path)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.mkdir",
+      "dispatch_key": [
+        "omp.env.fs.create_directory"
+      ],
+      "signature": "(path, *, parents=False, exist_ok=False) -> PathMeta",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.mkdir(path, parents=True)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.remove",
+      "dispatch_key": [],
+      "signature": "(path, *, recursive=False, missing_ok=False) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.remove(path)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.rename",
+      "dispatch_key": [],
+      "signature": "(source, destination, *, overwrite=Overwrite.FAIL) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.rename(source, destination)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.copy",
+      "dispatch_key": [],
+      "signature": "(source, destination, *, overwrite=Overwrite.FAIL) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.copy(source, destination)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.read_link",
+      "dispatch_key": [],
+      "signature": "(path) -> SymlinkTarget",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.read_link(path)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.symlink",
+      "dispatch_key": [
+        "omp.env.fs.create_symlink"
+      ],
+      "signature": "(target, link) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.symlink(target, link)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.hard_link",
+      "dispatch_key": [
+        "omp.env.fs.create_hard_link"
+      ],
+      "signature": "(target, link) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.hard_link(target, link)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.chmod",
+      "dispatch_key": [
+        "omp.env.fs.set_permissions"
+      ],
+      "signature": "(path, permissions) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.fs.chmod(path, permissions)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.lsp.bindings",
+      "dispatch_key": [
+        "omp.env.lsp.get_bindings"
+      ],
+      "signature": "(path) -> list[LspBinding]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.lsp.bindings(path)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.lsp.status",
+      "dispatch_key": [],
+      "signature": "(reload=False) -> list[LspServerStatus]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.lsp.status()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.lsp.request",
+      "dispatch_key": [],
+      "signature": "(server, method, params, *, doc=None, on_stale=None, timeout=None) -> Any",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.lsp.request(server, \"textDocument/hover\", params)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.lsp.notify",
+      "dispatch_key": [
+        "omp.env.lsp.notification"
+      ],
+      "signature": "(server, method, params) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.lsp.notify(server, \"initialized\", {})"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.dap.launch",
+      "dispatch_key": [],
+      "signature": "(request: DapLaunchRequest) -> DapStream",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.dap_launch(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.dap.attach",
+      "dispatch_key": [],
+      "signature": "(request: DapAttachRequest) -> DapStream",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.dap_attach(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.dap.action",
+      "dispatch_key": [],
+      "signature": "(request: DapActionRequest) -> DapStream",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.dap_action(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.find.walk",
+      "dispatch_key": [],
+      "signature": "(**kwargs) -> AsyncIterator[Entry]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "async for entry in omp.env.find.walk(): pass"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.find.grep",
+      "dispatch_key": [
+        "omp.env.find.search"
+      ],
+      "signature": "(pattern, *, regex=True, case=True, glob=None, root=None, hidden=False, gitignore=True, limit=None, context=0) -> list[Match]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.find.grep(\"OperationSpec\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.sh.session",
+      "dispatch_key": [
+        "omp.env.sh.open_session"
+      ],
+      "signature": "(*, cwd=None, env=None, pty=None, ttl=None) -> Session",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.sh.session()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Session.close",
+      "dispatch_key": [
+        "omp.env.sh.close_session"
+      ],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await session.close()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Session.run",
+      "dispatch_key": [
+        "omp.env.sh.exec"
+      ],
+      "signature": "(script, *, timeout=None) -> Run",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await session.run(\"git status --short\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Run.stdin",
+      "dispatch_key": [
+        "omp.env.sh.stdin"
+      ],
+      "signature": "(data) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await run.stdin(data)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Run.signal",
+      "dispatch_key": [
+        "omp.env.sh.signal"
+      ],
+      "signature": "(signal) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await run.signal(\"TERM\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Run.resize",
+      "dispatch_key": [
+        "omp.env.sh.resize"
+      ],
+      "signature": "(rows: int, columns: int) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await run.resize(40, 120)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Run.detach",
+      "dispatch_key": [
+        "omp.env.sh.detach"
+      ],
+      "signature": "(name) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await run.detach(\"build\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.http_get",
+      "dispatch_key": [
+        "omp.env.http.get"
+      ],
+      "signature": "(url, *, timeout=None, headers=...) -> HttpResponse",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.http_get(\"https://example.test\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.http_post",
+      "dispatch_key": [
+        "omp.env.http.post"
+      ],
+      "signature": "(url, *, body=b\"\", headers=..., timeout=None) -> HttpResponse",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.http_post(\"https://example.test\", body=b\"{}\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.http_put",
+      "dispatch_key": [
+        "omp.env.http.put"
+      ],
+      "signature": "(url, *, body=b\"\", headers=..., timeout=None) -> HttpResponse",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.http_put(\"https://example.test\", body=b\"{}\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.proc.start",
+      "dispatch_key": [],
+      "signature": "(name, script, *, cwd=None, env=None, pty=None, restart=None, ready=None) -> Process",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.proc.start(\"web\", \"cargo run\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.proc.list",
+      "dispatch_key": [],
+      "signature": "() -> list[ProcessInfo]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.proc.list()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.proc.adopt",
+      "dispatch_key": [
+        "omp.env.proc.attach"
+      ],
+      "signature": "(name) -> Process | None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.proc.adopt(\"web\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Process.send",
+      "dispatch_key": [
+        "omp.env.proc.send_input"
+      ],
+      "signature": "(data) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await process.send(data)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Process.signal",
+      "dispatch_key": [
+        "omp.env.proc.signal"
+      ],
+      "signature": "(signal) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await process.signal(\"TERM\")"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Process.stop",
+      "dispatch_key": [
+        "omp.env.proc.stop"
+      ],
+      "signature": "() -> ProcessInfo",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await process.stop()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Process.restart",
+      "dispatch_key": [
+        "omp.env.proc.restart"
+      ],
+      "signature": "() -> Process",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await process.restart()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.blobs.stat",
+      "dispatch_key": [],
+      "signature": "(ref) -> BlobStat",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.blobs.stat(blob)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.blobs.get",
+      "dispatch_key": [],
+      "signature": "(ref, *, offset=0, length=None) -> bytes",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.blobs.get(blob)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.blobs.put",
+      "dispatch_key": [],
+      "signature": "(chunk) -> BlobWriter",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "writer = omp.env.blobs.writer()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.BlobWriter.commit",
+      "dispatch_key": [
+        "omp.env.blobs.commit_put"
+      ],
+      "signature": "() -> BlobRef",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await writer.commit()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.blobs.delete",
+      "dispatch_key": [],
+      "signature": "(ref) -> bool",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.blobs.delete(blob)"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.agents.abort",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.agents.abort()"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.agents.shutdown",
+      "dispatch_key": [],
+      "signature": "(reason='') -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.agents.shutdown()"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.agents.reload_extensions",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.agents.reload_extensions()"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.agents.is_idle",
+      "dispatch_key": [],
+      "signature": "() -> bool",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.agents.is_idle()"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.agents.wait_for_idle",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.agents.wait_for_idle()"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.agents.pending_messages",
+      "dispatch_key": [],
+      "signature": "() -> int",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.agents.pending_messages()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.fs.privileged_mutation",
+      "dispatch_key": [],
+      "signature": "(request: PrivilegedMutationIntent) -> PrivilegedMutationResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.privileged_mutation(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.worktree",
+      "dispatch_key": [],
+      "signature": "() -> WorktreeInfo | None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worktree()"
+      ]
+    },
+    {
+      "owner": "docs/py/11-env.md",
+      "public_name": "omp.env.Process.info",
+      "dispatch_key": [],
+      "signature": "() -> ProcessInfo",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await process.info()"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.env.workspace.list",
+      "dispatch_key": [],
+      "signature": "(*, limit=50) -> list[WorkspaceSnapshot]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.workspace.list()"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.status",
+      "dispatch_key": [],
+      "signature": "(request: McpStatusRequest) -> McpStatusResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_status(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.subscribe",
+      "dispatch_key": [],
+      "signature": "(request: McpSubscribeRequest) -> McpSubscription",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_subscribe(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.reset",
+      "dispatch_key": [],
+      "signature": "(request: McpResetRequest) -> McpResetResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_reset(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.live_header",
+      "dispatch_key": [],
+      "signature": "(request: McpLiveHeaderRequest) -> McpLiveHeader",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_live_header(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.resource",
+      "dispatch_key": [],
+      "signature": "(request: McpResourceRequest) -> McpResourceResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_resource(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.prompt",
+      "dispatch_key": [],
+      "signature": "(request: McpPromptRequest) -> McpPromptResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_prompt(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.invoke",
+      "dispatch_key": [],
+      "signature": "(request: McpInvokeRequest) -> McpInvokeResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_invoke(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.env.mcp.config",
+      "dispatch_key": [],
+      "signature": "(request: McpConfigRequest) -> McpConfigResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await env.mcp_config(request)"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.env.workspace.snapshot",
+      "dispatch_key": [],
+      "signature": "(*, root=None) -> WorkspaceSnapshot",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.workspace.snapshot()"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.env.workspace.restore",
+      "dispatch_key": [],
+      "signature": "(snapshot, *, dry_run=False) -> RestoreOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.workspace.restore(snapshot)"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.env.worktree.create",
+      "dispatch_key": [],
+      "signature": "(name, *, base=None) -> Worktree",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worktree.create(\"review\")"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.env.worktree.destroy",
+      "dispatch_key": [],
+      "signature": "(worktree) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worktree.destroy(worktree)"
+      ]
+    },
+    {
+      "owner": "docs/py/12-agents.md",
+      "public_name": "omp.env.worktree.merge",
+      "dispatch_key": [],
+      "signature": "(worktree, *, target=None) -> MergeOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worktree.merge(worktree)"
+      ]
+    },
+    {
+      "owner": "docs/py/04-placement.md",
+      "public_name": "omp.env.worker.open",
+      "dispatch_key": [],
+      "signature": "(spec) -> Worker",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worker.open(spec)"
+      ]
+    },
+    {
+      "owner": "docs/py/04-placement.md",
+      "public_name": "omp.env.worker.close",
+      "dispatch_key": [],
+      "signature": "(name, generation) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worker.close(name, generation)"
+      ]
+    },
+    {
+      "owner": "docs/py/04-placement.md",
+      "public_name": "omp.env.worker.data",
+      "dispatch_key": [],
+      "signature": "(name, generation, channel, data) -> bytes",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worker.data(name, generation, channel, data)"
+      ]
+    },
+    {
+      "owner": "docs/py/04-placement.md",
+      "public_name": "omp.env.worker.info",
+      "dispatch_key": [],
+      "signature": "(name) -> WorkerInfo",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worker.info(name)"
+      ]
+    },
+    {
+      "owner": "docs/py/04-placement.md",
+      "public_name": "omp.env.worker.list",
+      "dispatch_key": [],
+      "signature": "() -> list[WorkerInfo]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.worker.list()"
+      ]
+    },
+    {
+      "owner": "docs/py/14-deploy.md",
+      "public_name": "omp.env.site.materialize",
+      "dispatch_key": [],
+      "signature": "(site: SiteManifest, /) -> SiteTree",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "environment"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.env.site.materialize(site)"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.tml",
+      "dispatch_key": [],
+      "signature": "(template: str, /, **fields: object) -> Tml",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.tml(\"<text>{value}</text>\", value=\"safe\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.text",
+      "dispatch_key": [],
+      "signature": "(value: object) -> Tml",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.text(value)"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.md",
+      "dispatch_key": [],
+      "signature": "(source: object) -> Tml",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.md(\"# heading\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.join",
+      "dispatch_key": [],
+      "signature": "(parts, sep='') -> Tml",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.join(parts)"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.icon",
+      "dispatch_key": [],
+      "signature": "(name: str, *, fg=None) -> Tml",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.icon(\"check\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.mount",
+      "dispatch_key": [],
+      "signature": "(placement, content, options=None, *, key=None) -> SlotHandle",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.mount(ui.Slot.HEADER, ui.text(\"ready\"))"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.handle",
+      "dispatch_key": [],
+      "signature": "(key: str) -> SlotHandle",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.handle(\"status\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.unmount",
+      "dispatch_key": [],
+      "signature": "(key: str) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.unmount(\"status\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.unmount_all",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.unmount_all()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.focus_slot",
+      "dispatch_key": [],
+      "signature": "(key: str) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.focus_slot(\"rail\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.blur_slot",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.blur_slot()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.set_status",
+      "dispatch_key": [],
+      "signature": "(key, content, *, order=100, side=Slot.STATUS_RIGHT) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.set_status(\"git\", ui.text(\"main\"))"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.set_working_message",
+      "dispatch_key": [],
+      "signature": "(content) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.set_working_message(ui.text(\"working\"))"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.set_title",
+      "dispatch_key": [],
+      "signature": "(title) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.set_title(\"omp\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.set_progress",
+      "dispatch_key": [],
+      "signature": "(state) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.set_progress(ui.Progress.indeterminate())"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.bell",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.bell()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.set_ghost",
+      "dispatch_key": [],
+      "signature": "(ghost) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.set_ghost(ui.Ghost(\"next\"))"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.clear_ghost",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.clear_ghost()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.set_editor_text",
+      "dispatch_key": [],
+      "signature": "(text: str) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.set_editor_text(\"draft\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.paste_to_editor",
+      "dispatch_key": [],
+      "signature": "(content) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.paste_to_editor(\"draft\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.presentation",
+      "dispatch_key": [],
+      "signature": "() -> Presentation",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.presentation()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.icons",
+      "dispatch_key": [],
+      "signature": "(prefix='') -> tuple[str, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.icons()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.editor_text",
+      "dispatch_key": [],
+      "signature": "() -> str",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.editor_text()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.notify",
+      "dispatch_key": [],
+      "signature": "(message, *, level=Level.INFO, ...) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.notify(\"done\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.open_url",
+      "dispatch_key": [],
+      "signature": "(url: str) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.open_url(\"https://omp.dev\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.submit",
+      "dispatch_key": [],
+      "signature": "(text=None) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.submit()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.image",
+      "dispatch_key": [],
+      "signature": "(source, *, w=None, h=None, trim=False) -> Tml",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ui.image(blob)"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.overlay",
+      "dispatch_key": [],
+      "signature": "(content, options=None, *, watch=()) -> OverlayHandle",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.overlay(ui.text(\"details\"))"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.confirm",
+      "dispatch_key": [],
+      "signature": "(title, message='', *, options=None) -> DialogOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.confirm(\"Continue?\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.select",
+      "dispatch_key": [],
+      "signature": "(title, items, *, options=None) -> DialogOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.select(\"Pick\", [\"one\"])"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.multi_select",
+      "dispatch_key": [],
+      "signature": "(title, items, *, checked=(), options=None) -> DialogOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.multi_select(\"Pick\", [\"one\"])"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.input",
+      "dispatch_key": [],
+      "signature": "(title, *, placeholder='', prefill='', ...) -> DialogOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.input(\"Name\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.editor",
+      "dispatch_key": [],
+      "signature": "(title, *, prefill='', syntax=None, options=None) -> DialogOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.editor(\"Edit\")"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.form",
+      "dispatch_key": [],
+      "signature": "(title, fields, *, options=None) -> DialogOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.form(\"Edit\", [])"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.ask_user",
+      "dispatch_key": [],
+      "signature": "(questions, *, options=None) -> DialogOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await ui.ask_user([])"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.DynamicDeviceParent.mount_many",
+      "dispatch_key": [
+        "omp.devices.dynamic_mount"
+      ],
+      "signature": "(*specs: MountSpec) -> tuple[str, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "paths = await parent.mount_many(spec)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.devices.set_availability",
+      "dispatch_key": [],
+      "signature": "(*deltas: AvailabilityDelta) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.devices.set_availability(omp.AvailabilityDelta(\"jira\", False))"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.devices.refresh",
+      "dispatch_key": [],
+      "signature": "() -> tuple[DeviceInfo, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "rows = await omp.devices.refresh()"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.devices.invoke",
+      "dispatch_key": [],
+      "signature": "(path: str, args: Mapping[str, object], *, deadline: Duration | None = None) -> object",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "result = await omp.devices.invoke(\"jira/create\", {\"title\": \"x\"})"
+      ]
+    },
+    {
+      "owner": "docs/py/05-hooks.md",
+      "public_name": "omp.hooks.dispatch_hook",
+      "dispatch_key": [
+        "omp.hooks.dispatch"
+      ],
+      "signature": "(event: str, payload: object = None) -> HookDecision",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "decision = await omp.hooks.dispatch_hook(\"tool_call\", payload)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.mcp.invoke",
+      "dispatch_key": [],
+      "signature": "(server: str, tool: str, arguments: dict) -> object",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "result = await device(query=\"rust\")"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.prompts.invalidate",
+      "dispatch_key": [],
+      "signature": "(slot: str) -> int",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "generation = await omp.prompts.invalidate(\"project_rules\")"
+      ]
+    },
+    {
+      "owner": "docs/py/13-inference.md",
+      "public_name": "omp.provider.request",
+      "dispatch_key": [],
+      "signature": "(operation: Operation, request: ImageRequest | SpeechRequest | TranscriptionRequest | RealtimeRequest) -> ImageResult | SpeechResult | TranscriptionResult | RealtimeSession",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "durable",
+        "cost": "paid",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "result = await handle.request(omp.Operation.GENERATE_IMAGE, request)"
+      ]
+    },
+    {
+      "owner": "docs/py/13-inference.md",
+      "public_name": "omp.provider.replace",
+      "dispatch_key": [],
+      "signature": "(spec: ProviderSpec) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await handle.replace(spec)"
+      ]
+    },
+    {
+      "owner": "docs/py/13-inference.md",
+      "public_name": "omp.provider.retract",
+      "dispatch_key": [],
+      "signature": "() -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "EFFECTS_AUTHORIZED",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await handle.retract()"
+      ]
+    },
+    {
+      "owner": "docs/py/13-inference.md",
+      "public_name": "omp.provider.models",
+      "dispatch_key": [],
+      "signature": "() -> tuple[ModelCard, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "cards = await omp.provider.models()"
+      ]
+    },
+    {
+      "owner": "docs/py/13-inference.md",
+      "public_name": "omp.provider.is_authenticated",
+      "dispatch_key": [],
+      "signature": "() -> bool",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "ready = await handle.is_authenticated()"
+      ]
+    },
+    {
+      "owner": "docs/py/13-inference.md",
+      "public_name": "omp.provider.watch_models",
+      "dispatch_key": [],
+      "signature": "(since: Cursor | None = None) -> WatchModels",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "async for event in omp.provider.watch_models(): pass"
+      ]
+    },
+    {
+      "owner": "docs/py/10-telemetry.md",
+      "public_name": "omp.telemetry.flush",
+      "dispatch_key": [],
+      "signature": "(*, timeout: Duration = Duration(\"10s\")) -> bool",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "flushed = await omp.telemetry.flush()"
+      ]
+    },
+    {
+      "owner": "docs/py/10-telemetry.md",
+      "public_name": "omp.telemetry.query",
+      "dispatch_key": [],
+      "signature": "(q: Query) -> QueryResult",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "result = await omp.telemetry.query(q)"
+      ]
+    },
+    {
+      "owner": "docs/py/10-telemetry.md",
+      "public_name": "omp.telemetry.rev_metrics",
+      "dispatch_key": [],
+      "signature": "(tool: str, *, family: str | None = None, since: datetime | timedelta | None = None, scope: Scope = Scope.PROJECT) -> tuple[RevMetrics, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "rows = await omp.telemetry.rev_metrics(\"read\")"
+      ]
+    },
+    {
+      "owner": "docs/py/10-telemetry.md",
+      "public_name": "omp.telemetry.span",
+      "dispatch_key": [
+        "omp.telemetry.span.open",
+        "omp.telemetry.span.close"
+      ],
+      "signature": "(name: str, /, **attrs: str | int | float | bool) -> Span",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "async with omp.telemetry.span(\"index\"): pass"
+      ]
+    },
+    {
+      "owner": "docs/py/10-telemetry.md",
+      "public_name": "omp.telemetry.export",
+      "dispatch_key": [
+        "omp.telemetry.export.stop",
+        "omp.telemetry.export.stats"
+      ],
+      "signature": "(target: ExportTarget, *, kinds: Sequence[Kind | str] = (), sample: float = 1.0) -> ExportHandle",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "handle = omp.telemetry.export(omp.telemetry.OtlpTarget(endpoint))"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.mcp.mount",
+      "dispatch_key": [],
+      "signature": "(spec: McpMount) -> tuple[Device, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "devices = await omp.mcp.mount(spec)"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.mcp.unmount",
+      "dispatch_key": [],
+      "signature": "(server: str) -> None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.mcp.unmount(\"github\")"
+      ]
+    },
+    {
+      "owner": "docs/py/01-devices.md",
+      "public_name": "omp.mcp.servers",
+      "dispatch_key": [],
+      "signature": "() -> tuple[McpServer, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "rows = await omp.mcp.servers()"
+      ]
+    },
+    {
+      "owner": "docs/py/18-convars.md",
+      "public_name": "omp.convars.declare",
+      "dispatch_key": [],
+      "signature": "(key: str, *, kind: str, default, description=None, values=(), ui=None) -> Snapshot",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "setting = await omp.convars.declare(\"verbosity\", kind=\"string\", default=\"normal\")"
+      ]
+    },
+    {
+      "owner": "docs/py/18-convars.md",
+      "public_name": "omp.convars.get",
+      "dispatch_key": [],
+      "signature": "(name: str) -> Snapshot",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "snapshot = await omp.convars.get(\"sv_interrupt_grace\")"
+      ]
+    },
+    {
+      "owner": "docs/py/18-convars.md",
+      "public_name": "omp.convars.observe",
+      "dispatch_key": [],
+      "signature": "(name: str) -> Observation",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "async for snapshot in omp.convars.observe(name): pass"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.context.view",
+      "dispatch_key": [],
+      "signature": "() -> ContextView",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "view = await omp.context.view()"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.context.usage",
+      "dispatch_key": [],
+      "signature": "() -> ContextUsage",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "usage = await omp.context.usage()"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.context.epoch",
+      "dispatch_key": [],
+      "signature": "() -> int",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "epoch = await omp.context.epoch()"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.context.pin",
+      "dispatch_key": [],
+      "signature": "(ids: Iterable[str], *, reason: str) -> int",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.context.pin(ids, reason=\"carrying the repro\")"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.context.unpin",
+      "dispatch_key": [],
+      "signature": "(ids: Iterable[str]) -> int",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.context.unpin(ids)"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.context.compact",
+      "dispatch_key": [],
+      "signature": "(*, tier: CompactionTier | None = None, focus: str = \"\") -> CompactionOutcome",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "durable",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "outcome = await omp.context.compact()"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.MessageRef.parts",
+      "dispatch_key": [
+        "omp.context.message.parts"
+      ],
+      "signature": "() -> list[Part]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "parts = await message.parts()"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.MessageRef.verdict",
+      "dispatch_key": [
+        "omp.context.message.verdict"
+      ],
+      "signature": "() -> Payload | Fault",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "verdict = await message.verdict()"
+      ]
+    },
+    {
+      "owner": "docs/py/08-context.md",
+      "public_name": "omp.MessageRef.raw_args",
+      "dispatch_key": [
+        "omp.context.message.raw_args"
+      ],
+      "signature": "() -> bytes | None",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "metered",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "raw = await message.raw_args()"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.dynamic_mount",
+      "dispatch_key": [],
+      "signature": "(*specs: CommandMountSpec) -> tuple[str, ...]",
+      "callback_abi": "none",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "await omp.ui.dynamic_mount(spec)"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.message_renderer",
+      "dispatch_key": [],
+      "signature": "(kind: str) -> Decorator",
+      "callback_abi": "(payload, ctx)",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "@ui.message_renderer(\"notice\")\ndef render(message, ctx): return None"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.completion",
+      "dispatch_key": [],
+      "signature": "(trigger: Trigger) -> Decorator",
+      "callback_abi": "(payload, ctx)",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "@ui.completion(ui.Trigger(\"@\"))\nasync def complete(query, ctx): return []"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.shortcut",
+      "dispatch_key": [],
+      "signature": "(chord: str, *, action_id=None, ...) -> Decorator",
+      "callback_abi": "(payload, ctx)",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "@ui.shortcut(\"ctrl+alt+h\")\nasync def action(payload, ctx): pass"
+      ]
+    },
+    {
+      "owner": "docs/py/07-ui.md",
+      "public_name": "omp.ui.command",
+      "dispatch_key": [],
+      "signature": "(name: str, *, aliases=(), ...) -> Decorator",
+      "callback_abi": "(payload, ctx)",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "@ui.command(\"hello\")\nasync def command(payload, ctx): return None"
+      ]
+    },
+    {
+      "owner": "docs/py/02-verdicts.md",
+      "public_name": "omp.renderer",
+      "dispatch_key": [],
+      "signature": "(name, *, family=None, rev=None, reduce=None, decorates=False) -> Decorator",
+      "callback_abi": "(payload, ctx)",
+      "operation_spec": {
+        "minimum_phase": "OPEN",
+        "durability": "ephemeral",
+        "cost": "none",
+        "authority": "core"
+      },
+      "timeout": null,
+      "examples": [
+        "@omp.renderer(\"tool\")\ndef render(view, ctx): return None"
+      ]
+    }
+  ],
+  "runtime_durations": [
+    {
+      "public_name": "omp.params.interrupt_grace",
+      "configuration_key": "runtime.interrupt_grace",
+      "default": {
+        "value": 150,
+        "unit": "ms"
+      },
+      "telemetry_ns": "omp.runtime.interrupt_grace.ns",
+      "telemetry_unit": "omp.runtime.interrupt_grace.unit"
+    }
+  ],
+  "phase_legality": [
+    {
+      "public_name": "omp.operation_spec",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.resources",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.services.connect",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.extension_activate",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.params.interrupt_grace",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.journal.append",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.journal.entries",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.journal.latest",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.journal.fold",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.journal.label",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.journal.decode",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.state.append",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.state.entries",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.state.latest",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.state.fold",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.sessions.current",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.sessions.SessionSetup",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.sessions.create",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.sessions.list",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.sessions.usage",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.info",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.has",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.require",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.docs.open",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Doc.close",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Doc.read",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Doc.summary",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Txn.commit",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.canonicalize",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.stat",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.list_dir",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.mkdir",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.remove",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.rename",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.copy",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.read_link",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.symlink",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.hard_link",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.chmod",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.lsp.bindings",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.lsp.status",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.lsp.request",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.lsp.notify",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.dap.launch",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.dap.attach",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.dap.action",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.find.walk",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.find.grep",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.sh.session",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Session.close",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Session.run",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Run.stdin",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Run.signal",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Run.resize",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Run.detach",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.http_get",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.http_post",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.http_put",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.proc.start",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.proc.list",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.proc.adopt",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Process.send",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Process.signal",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Process.stop",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Process.restart",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.blobs.stat",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.blobs.get",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.blobs.put",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.BlobWriter.commit",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.blobs.delete",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.agents.abort",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.agents.shutdown",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.agents.reload_extensions",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.agents.is_idle",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.agents.wait_for_idle",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.agents.pending_messages",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.fs.privileged_mutation",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worktree",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.Process.info",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.workspace.list",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.status",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.subscribe",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.reset",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.live_header",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.resource",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.prompt",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.invoke",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.mcp.config",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.workspace.snapshot",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.workspace.restore",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worktree.create",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worktree.destroy",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worktree.merge",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worker.open",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worker.close",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worker.data",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worker.info",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.worker.list",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.env.site.materialize",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.tml",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.text",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.md",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.join",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.icon",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.mount",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.handle",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.unmount",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.unmount_all",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.focus_slot",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.blur_slot",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.set_status",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.set_working_message",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.set_title",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.set_progress",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.bell",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.set_ghost",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.clear_ghost",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.set_editor_text",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.paste_to_editor",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.presentation",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.icons",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.editor_text",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.notify",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.open_url",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.submit",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.image",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.overlay",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.confirm",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.select",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.multi_select",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.input",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.editor",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.form",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.ask_user",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.DynamicDeviceParent.mount_many",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.devices.set_availability",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.devices.refresh",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.devices.invoke",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.hooks.dispatch_hook",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.mcp.invoke",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.prompts.invalidate",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.provider.request",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.provider.replace",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.provider.retract",
+      "legal": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.provider.models",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.provider.is_authenticated",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.provider.watch_models",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.telemetry.flush",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.telemetry.query",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.telemetry.rev_metrics",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.telemetry.span",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.telemetry.export",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.mcp.mount",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.mcp.unmount",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.mcp.servers",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.convars.declare",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.convars.get",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.convars.observe",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.context.view",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.context.usage",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.context.epoch",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.context.pin",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.context.unpin",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.context.compact",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.MessageRef.parts",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.MessageRef.verdict",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.MessageRef.raw_args",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.dynamic_mount",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.message_renderer",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.completion",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.shortcut",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.ui.command",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "public_name": "omp.renderer",
+      "legal": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    }
+  ]
+}
