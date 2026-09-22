@@ -11,9 +11,10 @@ use std::{
 
 use omp_agent::Up;
 use omp_chat::{
-	HostAction, HostCommand, HostOptions, NativeEffect, NativeHost,
+	BlockKind, HostAction, HostCommand, HostMailbox, HostOptions, NativeEffect, NativeHost,
 	actions::{EscapeHook, EscapeRung, SttUiEvent},
 	composer::{SPACE_HOLD_RELEASE, SpaceHold, SpaceHoldEvent},
+	notices::update::UpdateAvailable,
 	overlays::{
 		NoServices, Panel, PanelAction, PanelAnchor, PanelCall, PanelEvent, PanelOpener,
 		live::LiveControl,
@@ -507,6 +508,87 @@ fn first_ctrl_c_with_an_empty_active_composer_is_non_destructive_then_repeat_qui
 			.any(|command| matches!(command, HostCommand::Interrupt)),
 		"the first Ctrl+C clears; it does not interrupt solely because a turn is active"
 	);
+	assert_eq!(h.host.key(Key::Ctrl('c')).expect("second ctrl+c"), NativeEffect::Quit);
+}
+
+/// The shipped `ctrl+c` program (`crates/app/src/keybindings/default.cfg`):
+/// several actions, of which the first with an effect wins.
+const SHIPPED_CTRL_C: &str = r#"bind ctrl+c "cl_clear; cl_interrupt; ed_copy""#;
+
+/// Queues an action the way app-side background work does (the startup
+/// update check), without the event loop having picked it up yet.
+fn post_pending(h: &Harness, action: HostAction) {
+	h.con
+		.user::<HostMailbox>()
+		.expect("host mailbox")
+		.post(action);
+}
+
+fn pending_update() -> HostAction {
+	HostAction::UpdateAvailable(UpdateAvailable::new("99.0.0", "stable").expect("valid update"))
+}
+
+fn update_cards(host: &NativeHost) -> usize {
+	host
+		.blocks()
+		.iter()
+		.filter(|block| block.kind == BlockKind::Notice && block.text.starts_with("Update Available"))
+		.count()
+}
+
+fn interrupts(commands: &flume::Receiver<HostCommand>) -> usize {
+	commands
+		.try_iter()
+		.filter(|command| matches!(command, HostCommand::Interrupt))
+		.count()
+}
+
+#[test]
+fn ctrl_c_semantics_are_unchanged_without_a_pending_action() {
+	let mut session = idle_session();
+	open_turn(&mut session);
+	let mut h = harness(session);
+	h.con.run(SHIPPED_CTRL_C).expect("shipped bind");
+	type_text(&mut h.host, "draft");
+	assert_ne!(h.host.key(Key::Ctrl('c')).expect("first ctrl+c"), NativeEffect::Quit);
+	assert_eq!(h.host.composer_text(), "", "the first effective action, cl_clear, ran");
+	assert_eq!(interrupts(&h.commands), 0, "later actions of the same press stay unapplied");
+	assert_eq!(h.host.key(Key::Ctrl('c')).expect("second ctrl+c"), NativeEffect::Quit);
+}
+
+#[test]
+fn a_pending_background_action_does_not_swallow_the_first_ctrl_c() {
+	let mut h = harness(idle_session());
+	h.con.run(SHIPPED_CTRL_C).expect("shipped bind");
+	type_text(&mut h.host, "draft");
+	post_pending(&h, pending_update());
+	assert_ne!(h.host.key(Key::Ctrl('c')).expect("first ctrl+c"), NativeEffect::Quit);
+	assert_eq!(h.host.composer_text(), "", "the press's cl_clear survived the queued update");
+	assert_eq!(update_cards(&h.host), 1, "the queued update was applied, once");
+	assert_eq!(
+		h.host.key(Key::Ctrl('c')).expect("second ctrl+c"),
+		NativeEffect::Quit,
+		"the first press opened the double-press window"
+	);
+}
+
+#[test]
+fn a_pending_action_applies_before_the_press_and_outside_its_first_effect_rule() {
+	let mut session = idle_session();
+	open_turn(&mut session);
+	let mut h = harness(session);
+	h.con.run(SHIPPED_CTRL_C).expect("shipped bind");
+	type_text(&mut h.host, "draft");
+	// Queued before the press: it must land first, and it must not stand in
+	// for the press's own first effect.
+	post_pending(&h, HostAction::Editor(Key::Char('x')));
+	assert_ne!(h.host.key(Key::Ctrl('c')).expect("first ctrl+c"), NativeEffect::Quit);
+	assert_eq!(
+		h.host.composer_text(),
+		"",
+		"the queued keystroke landed, then the press cleared the whole draft"
+	);
+	assert_eq!(interrupts(&h.commands), 0, "the press still stops at its first effect");
 	assert_eq!(h.host.key(Key::Ctrl('c')).expect("second ctrl+c"), NativeEffect::Quit);
 }
 
