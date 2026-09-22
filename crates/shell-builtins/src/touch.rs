@@ -1077,8 +1077,11 @@ mod tests {
 
 	use clap::Parser;
 
+	#[cfg(unix)]
+	use super::try_futimens_via_write_fd;
 	use super::{
-		ChangeTimes, FileTime, Touch, Utility, determine_atime_mtime_change, set_file_times, uu_app,
+		ChangeTimes, FileTime, Touch, Utility, determine_atime_mtime_change, set_file_times,
+		set_path_times, uu_app,
 	};
 	use crate::host::{Capture, Host, run_util};
 
@@ -1127,6 +1130,32 @@ mod tests {
 		assert!(!root.join("missing.txt").exists());
 	}
 
+	/// `touch` reaches the filesystem through three distinct calls, and the
+	/// end-state assertions cannot say which one ran. Exercising each on its own
+	/// means a failure names the call that dropped a stamp instead of the test
+	/// that happened to notice downstream.
+	#[cfg(unix)]
+	#[test]
+	fn each_time_setting_syscall_applies_both_stamps() {
+		let (_dir, root) = canonical_tempdir();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		let check = |name: &str, file: &str, apply: &dyn Fn(&Path) -> std::io::Result<()>| {
+			let path = root.join(file);
+			fs::write(&path, b"x").unwrap();
+			apply(&path).unwrap_or_else(|error| panic!("{name} failed: {error}"));
+			let (got_atime, got_mtime) = times_of(&path);
+			assert_eq!(got_atime, atime, "{name} did not apply the access stamp");
+			assert_eq!(got_mtime, mtime, "{name} did not apply the modification stamp");
+		};
+
+		check("utimensat", "follow", &|path| set_path_times(path, atime, mtime, true));
+		check("utimensat(SYMLINK_NOFOLLOW)", "nofollow", &|path| {
+			set_path_times(path, atime, mtime, false)
+		});
+		check("futimens(write fd)", "fd", &|path| try_futimens_via_write_fd(path, atime, mtime));
+	}
+
 	#[test]
 	fn reference_copies_times_from_relative_reference() {
 		let (_dir, root) = canonical_tempdir();
@@ -1134,6 +1163,11 @@ mod tests {
 		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
 		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
 		set_file_times(root.join("ref"), ref_atime, ref_mtime).unwrap();
+		assert_eq!(
+			times_of(&root.join("ref")),
+			(ref_atime, ref_mtime),
+			"the reference's own stamps must survive set_file_times before -r reads them"
+		);
 
 		let (code, capture) = run_util::<Touch>(&["-r", "ref", "new"], "", &root);
 		assert_eq!(code, 0);
@@ -1160,6 +1194,11 @@ mod tests {
 		let old_atime = FileTime::from_unix_time(1_111, 0);
 		let old_mtime = FileTime::from_unix_time(2_222, 0);
 		set_file_times(root.join("f"), old_atime, old_mtime).unwrap();
+		assert_eq!(
+			times_of(&root.join("f")),
+			(old_atime, old_mtime),
+			"the baseline stamps must survive set_file_times before -m reads the access time"
+		);
 
 		let (code, capture) = run_util::<Touch>(&["-m", "-d", "@981173106", "f"], "", &root);
 		assert_eq!(code, 0);
