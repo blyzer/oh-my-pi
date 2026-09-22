@@ -31,7 +31,7 @@ use nix::{
 	errno::Errno,
 	fcntl::{FcntlArg, OFlag, fcntl},
 	pty::{Winsize, openpty},
-	sys::termios::{Termios, cfgetispeed, cfgetospeed, tcgetattr},
+	sys::termios::{LocalFlags, Termios, cfgetispeed, cfgetospeed, tcgetattr},
 	unistd::ttyname,
 };
 use omp_ai::{
@@ -897,7 +897,15 @@ fn assert_restored(raw: &[u8], before: &Termios, after: &Termios, diagnostics: &
 		after.control_flags, before.control_flags,
 		"control flags not restored\n{diagnostics}"
 	);
-	assert_eq!(after.local_flags, before.local_flags, "local flags not restored\n{diagnostics}");
+	// PENDIN is tty state, not a mode: XNU sets it whenever tcsetattr turns
+	// ICANON back on, keeps it across every later tcsetattr, and clears it
+	// only on the next read, input byte or flush. A chat that restores the
+	// original termios exactly still reads back PENDIN on macOS.
+	assert_eq!(
+		after.local_flags - LocalFlags::PENDIN,
+		before.local_flags - LocalFlags::PENDIN,
+		"local flags not restored\n{diagnostics}"
+	);
 	assert_eq!(
 		after.control_chars, before.control_chars,
 		"control characters not restored\n{diagnostics}"
