@@ -1080,8 +1080,8 @@ mod tests {
 	#[cfg(unix)]
 	use super::try_futimens_via_write_fd;
 	use super::{
-		ChangeTimes, FileTime, Touch, Utility, determine_atime_mtime_change, set_file_times,
-		set_path_times, uu_app,
+		ChangeTimes, FileTime, Options, Source, Touch, Utility, determine_atime_mtime_change,
+		set_file_times, set_path_times, update_times, uu_app,
 	};
 	use crate::host::{Capture, Host, run_util};
 
@@ -1154,6 +1154,47 @@ mod tests {
 			set_path_times(path, atime, mtime, false)
 		});
 		check("futimens(write fd)", "fd", &|path| try_futimens_via_write_fd(path, atime, mtime));
+	}
+
+	/// The syscalls each apply both stamps, and the baselines survive, yet the
+	/// flag-level proofs still lose the access stamp on macOS. That leaves two
+	/// suspects either side of `update_times`: its own read-and-apply, or the
+	/// CLI layer above it that resolves the path and parses the date. Driving
+	/// `update_times` directly separates them — a failure here is inside it, and
+	/// a pass puts the fault above it.
+	#[test]
+	fn update_times_applies_requested_stamps_without_the_cli_layer() {
+		let (_dir, root) = canonical_tempdir();
+		let opts = |change_times: ChangeTimes| Options {
+			no_create: false,
+			no_deref: false,
+			source: Source::Now,
+			date: None,
+			change_times,
+			strict: false,
+		};
+
+		let both = root.join("both");
+		fs::write(&both, b"x").unwrap();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		update_times(&both, &both, false, &opts(ChangeTimes::Both), atime, mtime).unwrap();
+		assert_eq!(times_of(&both), (atime, mtime), "Both must apply the pair it was handed");
+
+		// The `-m` shape: `update_times` re-reads the access stamp itself and is
+		// expected to write it back unchanged beside the new modification stamp.
+		let kept = root.join("kept");
+		fs::write(&kept, b"x").unwrap();
+		let old_atime = FileTime::from_unix_time(1_111, 0);
+		set_file_times(&kept, old_atime, FileTime::from_unix_time(2_222, 0)).unwrap();
+		assert_eq!(times_of(&kept).0, old_atime, "baseline access stamp is in place");
+
+		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
+		update_times(&kept, &kept, false, &opts(ChangeTimes::MtimeOnly), new_mtime, new_mtime)
+			.unwrap();
+		let (got_atime, got_mtime) = times_of(&kept);
+		assert_eq!(got_mtime, new_mtime, "MtimeOnly must apply the modification stamp");
+		assert_eq!(got_atime, old_atime, "MtimeOnly must write back the access stamp it read");
 	}
 
 	#[test]
