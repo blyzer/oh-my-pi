@@ -1229,11 +1229,13 @@ mod tests {
 		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
 		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
 		let never_copied = FileTime::from_unix_time(3_000_000, 0);
-		fs::write(root.join("ref"), b"x").unwrap();
-		set_file_times(root.join("ref"), ref_atime, ref_mtime).unwrap();
+		// Stamped before both the reference and the target, so a control that
+		// survived vouches for either of them having survived too.
 		let control = root.join("control");
 		fs::write(&control, b"x").unwrap();
 		set_file_times(&control, ref_atime, ref_mtime).unwrap();
+		fs::write(root.join("ref"), b"x").unwrap();
+		set_file_times(root.join("ref"), ref_atime, ref_mtime).unwrap();
 		let existing = root.join("existing");
 		fs::write(&existing, b"x").unwrap();
 		set_file_times(&existing, never_copied, never_copied).unwrap();
@@ -1300,7 +1302,11 @@ mod tests {
 		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
 		let subject = root.join("f");
 		let control = root.join("control");
-		for path in [&subject, &control] {
+		// The control is stamped first so its exposure to the volume covers the
+		// subject's: if the control survived, the subject cannot have decayed.
+		// Stamping it afterwards would put its own file work inside the window
+		// the baseline read is meant to close.
+		for path in [&control, &subject] {
 			fs::write(path, b"x").unwrap();
 			set_file_times(path, old_atime, old_mtime).unwrap();
 		}
