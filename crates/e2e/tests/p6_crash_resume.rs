@@ -8,16 +8,22 @@ use std::{
 	future::Future,
 	io::{BufRead as _, BufReader, Write as _},
 	os::{fd, unix::net::UnixStream},
-	path::Path,
+	path::{Path, PathBuf},
 	pin::Pin,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	task::{Context, Poll},
+	thread,
 	time::{Duration, Instant},
 };
 
 use flume::{Receiver, Sender};
 use futures::StreamExt as _;
 use nix::{
+	errno::Errno,
+	fcntl::{FcntlArg, FdFlag, OFlag, fcntl},
 	pty::{Winsize, openpty},
 	sys::signal,
 	unistd::{Pid, ttyname},
@@ -189,10 +195,77 @@ impl CrashGateway {
 	}
 }
 
+/// PTY a chat renders into, with its master drained continuously.
+///
+/// Nothing in P6 reads the rendered output, but the host needs a consumer: an
+/// unread PTY fills, the renderer blocks in `write()`, and the single-threaded
+/// host stops painting, answering debug queries, and handling input. The
+/// drainer discards bytes without interpreting them.
+///
+/// Both ends are close-on-exec. The chat reopens the slave by path through
+/// `OMP_TTY`, so it needs neither descriptor; an inherited master would keep
+/// the terminal from hanging up after this test lets go of it.
+struct ChatTerminal {
+	master:  fd::OwnedFd,
+	slave:   fd::OwnedFd,
+	device:  PathBuf,
+	stop:    Arc<AtomicBool>,
+	drainer: Option<thread::JoinHandle<Result<(), Errno>>>,
+}
+
+impl ChatTerminal {
+	fn open() -> Self {
+		let window = Winsize { ws_row: 40, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+		let pty = openpty(Some(&window), None).expect("open chat PTY");
+		for descriptor in [&pty.master, &pty.slave] {
+			fcntl(descriptor, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+				.expect("close-on-exec chat PTY descriptor");
+		}
+		let device = ttyname(&pty.slave).expect("PTY slave path");
+		fcntl(&pty.master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).expect("nonblocking PTY master");
+		// `try_clone` duplicates with `F_DUPFD_CLOEXEC`.
+		let reader = pty.master.try_clone().expect("clone PTY master");
+		let stop = Arc::new(AtomicBool::new(false));
+		let stopped = stop.clone();
+		let drainer = thread::Builder::new()
+			.name("p6-pty-drain".into())
+			.spawn(move || {
+				let mut sink = [0_u8; 16 * 1024];
+				while !stopped.load(Ordering::Acquire) {
+					match nix::unistd::read(&reader, &mut sink) {
+						Ok(0) | Err(Errno::EAGAIN) => thread::sleep(Duration::from_millis(5)),
+						Ok(_) | Err(Errno::EINTR) => {},
+						Err(Errno::EIO) => return Ok(()),
+						Err(error) => return Err(error),
+					}
+				}
+				Ok(())
+			})
+			.expect("spawn PTY drainer");
+		Self { master: pty.master, slave: pty.slave, device, stop, drainer: Some(drainer) }
+	}
+}
+
+impl Drop for ChatTerminal {
+	fn drop(&mut self) {
+		self.stop.store(true, Ordering::Release);
+		let Some(drainer) = self.drainer.take() else {
+			return;
+		};
+		let outcome = drainer.join();
+		if !thread::panicking() {
+			outcome
+				.expect("PTY drainer thread")
+				.expect("PTY drainer reads the master");
+		}
+	}
+}
+
 struct ChatProcess {
-	process: OwnedProcess,
-	_master: fd::OwnedFd,
-	_slave:  fd::OwnedFd,
+	// Declared first so the owned process group is killed before the terminal
+	// stops draining.
+	process:   OwnedProcess,
+	_terminal: ChatTerminal,
 }
 
 fn spawn_chat(
@@ -206,9 +279,7 @@ fn spawn_chat(
 	debug: &Path,
 	resume: bool,
 ) -> ChatProcess {
-	let window = Winsize { ws_row: 40, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
-	let pty = openpty(Some(&window), None).expect("open chat PTY");
-	let device = ttyname(&pty.slave).expect("PTY slave path");
+	let terminal = ChatTerminal::open();
 	let mut command = Command::new(binary);
 	command
 		.arg("chat")
@@ -241,10 +312,10 @@ fn spawn_chat(
 		.env("OMP_DATA_DIR", home.join("data"))
 		.env("OMP_STATE_DIR", home.join("state"))
 		.env("OMP_CACHE_DIR", home.join("cache"))
-		.env("OMP_TTY", &device)
+		.env("OMP_TTY", &terminal.device)
 		.env("OMP_TUI_DEBUG", debug);
 	let process = OwnedProcess::spawn(command).expect("spawn real OMP chat");
-	ChatProcess { process, _master: pty.master, _slave: pty.slave }
+	ChatProcess { process, _terminal: terminal }
 }
 
 fn debug_request(path: &Path, request: &Value) -> Result<Value, String> {
@@ -293,8 +364,22 @@ fn wait_for_resumed_frame(path: &Path) -> String {
 			Err(error) => problem = error,
 		}
 		assert!(Instant::now() < deadline, "resumed chat never became ready: {problem}");
-		std::thread::sleep(Duration::from_millis(20));
+		thread::sleep(Duration::from_millis(20));
 	}
+}
+
+#[test]
+fn p6_chat_terminal_is_not_inherited_and_its_drainer_stops() {
+	let terminal = ChatTerminal::open();
+	for (end, descriptor) in [("master", &terminal.master), ("slave", &terminal.slave)] {
+		let flags = fcntl(descriptor, FcntlArg::F_GETFD).expect("PTY descriptor flags");
+		assert!(
+			FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC),
+			"chat PTY {end} would be inherited by the spawned chat"
+		);
+	}
+	// Dropping stops and joins the drainer; a failed read panics here.
+	drop(terminal);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
