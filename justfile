@@ -158,10 +158,11 @@ test-pkg pkg:
 e2e-build:
     cargo nextest run -p omp-e2e --tests --no-run --locked
 
-# Run proofs P1-P6: doc race, cancel matrix, detached jobs, schema isolation, prefix stability, crash/resume.
+# Run harness unit tests and proofs P1-P6: doc race, cancel matrix, detached jobs, schema isolation, prefix stability, crash/resume.
 [group('e2e')]
 e2e-core:
     cargo nextest run -p omp-e2e --locked \
+        --lib \
         --test p1_doc_race \
         --test p2_cancel_matrix \
         --test p3_detached_jobs \

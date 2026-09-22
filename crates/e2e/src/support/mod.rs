@@ -9,6 +9,8 @@ mod envd;
 mod extension;
 #[cfg(unix)]
 mod gateway;
+#[cfg(unix)]
+mod owned_groups;
 mod process;
 mod scratch;
 mod scripted;
