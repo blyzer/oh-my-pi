@@ -3388,23 +3388,39 @@ mod tests {
 		assert_eq!(project_rules(&rules), 1);
 	}
 
+	/// `forced_choice_free` is a statement about cost, not capability, so the
+	/// penalty is what the selection has to turn on. Both models here declare
+	/// named choice; only the declared penalty separates them, which is the
+	/// whole of the fact ADR 0019's soft escalation reads.
 	#[test]
 	fn forced_choice_capability_does_not_claim_penalty_free_routing() {
 		let catalog = Catalog::embedded();
-		let paid = catalog
-			.models()
-			.iter()
-			.find(|model| {
+		let claude_with_penalty = |declares_penalty: bool| {
+			catalog.models().iter().find(move |model| {
 				model.key.as_str().contains("claude")
 					&& catalog
 						.wire_policy(&model.wire_policy)
 						.is_some_and(|policy| {
 							policy.tool.forced_choice == Some(true)
-								&& policy.tool.named_choice != Some(true)
+								&& policy.tool.named_choice == Some(true)
+								&& policy.tool.forced_choice_penalty.is_some() == declares_penalty
 						})
 			})
-			.expect("embedded Anthropic model has paid forced choice");
-		assert!(!route_facts(catalog, paid).forced_choice_free);
+		};
+
+		let paid = claude_with_penalty(true)
+			.expect("embedded Anthropic model whose forced choice declares a penalty");
+		assert!(
+			!route_facts(catalog, paid).forced_choice_free,
+			"a declared penalty is not penalty-free routing, named choice notwithstanding"
+		);
+
+		let unpriced = claude_with_penalty(false)
+			.expect("embedded Anthropic model whose forced choice declares no penalty");
+		assert!(
+			route_facts(catalog, unpriced).forced_choice_free,
+			"named choice with no declared penalty is the one route that skips escalation"
+		);
 	}
 
 	#[test]
