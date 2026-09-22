@@ -1071,7 +1071,9 @@ pub(crate) fn touch_builtin<SE: ShellExtensions>() -> Registration<SE> {
 #[cfg(test)]
 mod tests {
 	use std::{
-		env, fs, iter,
+		env, fs,
+		fs::File,
+		iter,
 		path::{Path, PathBuf},
 	};
 
@@ -1080,8 +1082,9 @@ mod tests {
 	#[cfg(unix)]
 	use super::try_futimens_via_write_fd;
 	use super::{
-		ChangeTimes, FileTime, Options, Source, Touch, Utility, determine_atime_mtime_change,
-		set_file_times, set_path_times, update_times, uu_app,
+		ChangeTimes, FileTime, InputFile, Options, Source, Touch, Utility,
+		determine_atime_mtime_change, host_time_zone, set_file_times, set_path_times, touch,
+		update_times, uu_app,
 	};
 	use crate::host::{Capture, Host, run_util};
 
@@ -1195,6 +1198,152 @@ mod tests {
 		let (got_atime, got_mtime) = times_of(&kept);
 		assert_eq!(got_mtime, new_mtime, "MtimeOnly must apply the modification stamp");
 		assert_eq!(got_atime, old_atime, "MtimeOnly must write back the access stamp it read");
+	}
+
+	/// Records a path's stamps at a labelled point, tolerating a file that does
+	/// not exist yet, so a trace can span a creation.
+	fn mark(log: &mut Vec<String>, label: &str, path: &Path) {
+		let seen = fs::metadata(path).map_or_else(
+			|_| "absent".to_owned(),
+			|meta| {
+				format!(
+					"atime={} mtime={}",
+					FileTime::from_last_access_time(&meta).unix_seconds(),
+					FileTime::from_last_modification_time(&meta).unix_seconds()
+				)
+			},
+		);
+		log.push(format!("  {label}: {seen}"));
+	}
+
+	/// `update_times` is already known correct in isolation, and the stamps are
+	/// intact entering the utility, so the `-m` loss happens somewhere between.
+	/// This walks `touch_file`'s steps one at a time and then calls `touch`
+	/// itself, so a failure carries the point at which the access stamp moved
+	/// rather than only the end state. The replay is a faithful re-enactment of
+	/// those steps, not an in-situ trace: production is untouched.
+	#[test]
+	fn touch_flow_trace_for_modification_only() {
+		let (_dir, root) = canonical_tempdir();
+		let old_atime = FileTime::from_unix_time(1_111, 0);
+		let old_mtime = FileTime::from_unix_time(2_222, 0);
+		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
+		let mut log = vec!["replaying touch_file's steps:".to_owned()];
+
+		let replay = root.join("replay");
+		fs::write(&replay, b"x").unwrap();
+		set_file_times(&replay, old_atime, old_mtime).unwrap();
+		mark(&mut log, "after the baseline set_file_times", &replay);
+		replay
+			.metadata()
+			.expect("the existence check sees the file");
+		mark(&mut log, "after the existence check", &replay);
+		let replay_opts = Options {
+			no_create:    false,
+			no_deref:     false,
+			source:       Source::Timestamp(new_mtime),
+			date:         None,
+			change_times: ChangeTimes::MtimeOnly,
+			strict:       false,
+		};
+		update_times(&replay, &replay, false, &replay_opts, new_mtime, new_mtime).unwrap();
+		mark(&mut log, "after update_times", &replay);
+
+		// The real entry point, with clap and the run_util harness out of the
+		// picture, built exactly as the CLI builds it for `-m -d @981173106`.
+		log.push("calling touch() directly:".to_owned());
+		let direct = root.join("direct");
+		fs::write(&direct, b"x").unwrap();
+		set_file_times(&direct, old_atime, old_mtime).unwrap();
+		mark(&mut log, "before touch()", &direct);
+		let (mut host, _capture) = Host::for_test("touch", Vec::new(), &root);
+		let zone = host_time_zone(&host);
+		let opts = Options {
+			no_create:    false,
+			no_deref:     false,
+			source:       Source::Now,
+			date:         Some("@981173106".to_owned()),
+			change_times: ChangeTimes::MtimeOnly,
+			strict:       false,
+		};
+		touch(&[InputFile::Path(direct.clone())], &opts, &mut host, &zone).unwrap();
+		mark(&mut log, "after touch() returned", &direct);
+
+		let trace = log.join("\n");
+		assert_eq!(
+			times_of(&replay).0,
+			old_atime,
+			"the replayed steps lost the access stamp\n{trace}"
+		);
+		assert_eq!(times_of(&direct).1, new_mtime, "touch() applied the modification stamp\n{trace}");
+		assert_eq!(times_of(&direct).0, old_atime, "touch() lost the access stamp\n{trace}");
+	}
+
+	/// The same walk for `-r`, where the target is created rather than updated,
+	/// so the creation sits between the reference read and the write. Traces the
+	/// reference too: if its own stamps move, the pair `touch` reads is already
+	/// wrong before any target is written.
+	#[test]
+	fn touch_flow_trace_for_relative_reference() {
+		let (_dir, root) = canonical_tempdir();
+		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
+		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
+		let reference = root.join("ref");
+		fs::write(&reference, b"x").unwrap();
+		set_file_times(&reference, ref_atime, ref_mtime).unwrap();
+		let mut log = vec!["replaying touch_file's create path:".to_owned()];
+
+		let replay = root.join("replay");
+		mark(&mut log, "target before creation", &replay);
+		assert!(replay.metadata().is_err(), "the existence check finds nothing");
+		mark(&mut log, "after the existence check", &replay);
+		File::create(&replay).expect("create the missing target");
+		mark(&mut log, "after File::create", &replay);
+		let replay_opts = Options {
+			no_create:    false,
+			no_deref:     false,
+			source:       Source::Timestamp(ref_mtime),
+			date:         None,
+			change_times: ChangeTimes::Both,
+			strict:       false,
+		};
+		update_times(&replay, &replay, false, &replay_opts, ref_atime, ref_mtime).unwrap();
+		mark(&mut log, "after update_times", &replay);
+
+		log.push("calling touch() directly:".to_owned());
+		let target = root.join("new");
+		mark(&mut log, "reference before touch()", &reference);
+		mark(&mut log, "target before touch()", &target);
+		let (mut host, _capture) = Host::for_test("touch", Vec::new(), &root);
+		let zone = host_time_zone(&host);
+		let opts = Options {
+			no_create:    false,
+			no_deref:     false,
+			source:       Source::Reference(PathBuf::from("ref")),
+			date:         None,
+			change_times: ChangeTimes::Both,
+			strict:       false,
+		};
+		touch(&[InputFile::Path(PathBuf::from("new"))], &opts, &mut host, &zone).unwrap();
+		mark(&mut log, "reference after touch()", &reference);
+		mark(&mut log, "target after touch() returned", &target);
+
+		let trace = log.join("\n");
+		assert_eq!(
+			times_of(&replay),
+			(ref_atime, ref_mtime),
+			"the replayed create path lost a stamp\n{trace}"
+		);
+		assert_eq!(
+			times_of(&reference),
+			(ref_atime, ref_mtime),
+			"the reference's own stamps moved while touch() read them\n{trace}"
+		);
+		assert_eq!(
+			times_of(&target),
+			(ref_atime, ref_mtime),
+			"touch() did not copy the reference pair onto the target\n{trace}"
+		);
 	}
 
 	#[test]
