@@ -1075,8 +1075,9 @@ mod tests {
 		fs::File,
 		iter,
 		path::{Path, PathBuf},
+		process::Command,
 		thread,
-		time::Duration,
+		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
 
 	use clap::Parser;
@@ -1403,6 +1404,129 @@ mod tests {
 			(atime, mtime),
 			"a stamp must survive a pause with no filesystem work\n{trace}"
 		);
+	}
+
+	/// Seconds since the epoch, for telling a stamp that reverted to some
+	/// earlier value apart from one that tracks the moment it is read.
+	fn wall_clock() -> i64 {
+		SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.map_or(0, |since| since.as_secs() as i64)
+	}
+
+	/// Records a stamp beside the wall clock at the instant it was read.
+	fn stamp(log: &mut Vec<String>, label: &str, path: &Path) -> (FileTime, FileTime) {
+		let seen = times_of(path);
+		log.push(format!(
+			"  {label}: atime={} mtime={} (clock now {})",
+			seen.0.unix_seconds(),
+			seen.1.unix_seconds(),
+			wall_clock()
+		));
+		seen
+	}
+
+	/// Runs a host utility purely to describe the volume in a failure report.
+	fn describe(command: &str, args: &[&str]) -> String {
+		match Command::new(command).args(args).output() {
+			Ok(out) => format!(
+				"$ {command} {}\n{}{}",
+				args.join(" "),
+				String::from_utf8_lossy(&out.stdout),
+				String::from_utf8_lossy(&out.stderr)
+			),
+			Err(error) => format!("$ {command} {}: unavailable ({error})\n", args.join(" ")),
+		}
+	}
+
+	/// What the volume under `target` is, and exactly how these stamps are read.
+	fn volume_report(target: &Path) -> String {
+		let target = target.to_string_lossy().into_owned();
+		let mut report = String::from(
+			"\nstamps are read through std::fs::metadata, i.e. stat(2); the access stamp is st_atime \
+			 via filetime::FileTime::from_last_access_time\n",
+		);
+		report.push_str(&describe("df", &[&target]));
+		report.push_str(&describe("diskutil", &["info", &target]));
+		report.push_str(&describe("diskutil", &["info", "/System/Volumes/Data"]));
+		report.push_str(&describe("mount", &[]));
+		report
+	}
+
+	/// A pause and nothing else. The only operations this test performs on the
+	/// target are the two reads that bracket the pause.
+	///
+	/// It cannot promise the volume is idle: nextest runs the workspace in
+	/// parallel processes, so other tests are touching the same filesystem
+	/// throughout. What it does promise is that *this* test does nothing to the
+	/// target in between.
+	#[test]
+	fn access_stamp_after_a_pause_alone() {
+		let (_dir, root) = canonical_tempdir();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		let path = root.join("paused");
+		let mut log = vec![format!("clock before the file is written: {}", wall_clock())];
+		fs::write(&path, b"x").unwrap();
+		set_file_times(&path, atime, mtime).unwrap();
+
+		let first = stamp(&mut log, "A, straight after set_file_times", &path);
+		thread::sleep(Duration::from_millis(50));
+		let second = stamp(&mut log, "B, after a 50ms pause and nothing else", &path);
+
+		let trace = format!("{}{}", log.join("\n"), volume_report(&root));
+		assert_eq!(first, (atime, mtime), "A must be the pair that was set\n{trace}");
+		assert_eq!(second, first, "B must equal A across a pause alone\n{trace}");
+	}
+
+	/// The same shape, with work on an unrelated file in place of the pause, so
+	/// a decay that needs activity separates from one that needs only time.
+	#[test]
+	fn access_stamp_after_unrelated_file_work() {
+		let (_dir, root) = canonical_tempdir();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		let path = root.join("worked");
+		let mut log = vec![format!("clock before the file is written: {}", wall_clock())];
+		fs::write(&path, b"x").unwrap();
+		set_file_times(&path, atime, mtime).unwrap();
+
+		let first = stamp(&mut log, "A, straight after set_file_times", &path);
+		let scratch = root.join("scratch");
+		File::create(&scratch).unwrap();
+		set_file_times(&scratch, atime, mtime).unwrap();
+		fs::write(&scratch, b"yy").unwrap();
+		fs::remove_file(&scratch).unwrap();
+		let second = stamp(&mut log, "B, after work on an unrelated file", &path);
+
+		let trace = format!("{}{}", log.join("\n"), volume_report(&root));
+		assert_eq!(first, (atime, mtime), "A must be the pair that was set\n{trace}");
+		assert_eq!(second, first, "B must equal A across unrelated file work\n{trace}");
+	}
+
+	/// Neither read above can be ruled out as the thing that disturbs the
+	/// stamp, since `stat` is itself an observation of the inode. This one is
+	/// read exactly once, at the end.
+	#[test]
+	fn access_stamp_of_a_file_read_only_once_at_the_end() {
+		let (_dir, root) = canonical_tempdir();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		let path = root.join("unread");
+		let mut log = vec![format!("clock before the file is written: {}", wall_clock())];
+		fs::write(&path, b"x").unwrap();
+		set_file_times(&path, atime, mtime).unwrap();
+		log.push(format!("  clock after set_file_times: {}", wall_clock()));
+
+		let scratch = root.join("scratch");
+		File::create(&scratch).unwrap();
+		fs::write(&scratch, b"yy").unwrap();
+		fs::remove_file(&scratch).unwrap();
+		thread::sleep(Duration::from_millis(50));
+
+		let only = stamp(&mut log, "the one and only read", &path);
+		let trace = format!("{}{}", log.join("\n"), volume_report(&root));
+		assert_eq!(only, (atime, mtime), "a file read once must still hold its pair\n{trace}");
 	}
 
 	#[test]
