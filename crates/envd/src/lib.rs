@@ -2572,7 +2572,11 @@ mod tests {
 		fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
 			.expect("mark script executable");
 
-		let error = spawn_with(&script, 300)
+		// The deadline is the only thing that stops the script, so it must leave
+		// room for the script to start its descendant and record it; the first
+		// exec of a freshly written script can take hundreds of milliseconds on
+		// macOS.
+		let error = spawn_with(&script, 5_000)
 			.await
 			.expect_err("unready daemon must time out");
 		let EnvdError::Io(error) = &error else {
@@ -2581,7 +2585,7 @@ mod tests {
 		assert_eq!(error.kind(), io::ErrorKind::TimedOut);
 
 		let child_pid = fs::read_to_string(child_pid_path)
-			.expect("daemon descendant pid")
+			.expect("the daemon recorded its descendant before the startup deadline")
 			.parse::<i32>()
 			.expect("numeric daemon descendant pid");
 		let child = Pid::from_raw(child_pid);
