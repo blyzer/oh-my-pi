@@ -298,6 +298,14 @@ impl RunningHost {
 		if !self.control.is_live(invocation) {
 			return Ok(self.cancellation.begin());
 		}
+		// A grace has passed since the cancel, and the child announces entry
+		// before it runs a handler over an ordered stream, so a dispatch with
+		// no announcement by now never entered its body. Fail it in place:
+		// escalating to the process group would kill a worker over an
+		// invocation with no effects, taking its live siblings with it.
+		if self.control.cancel_unstarted(invocation).await {
+			return Ok(self.cancellation.withdraw());
+		}
 		CancellationLadder::grace_timer().await;
 		if !self.control.is_live(invocation) {
 			return Ok(self.cancellation.interrupt_after_grace());

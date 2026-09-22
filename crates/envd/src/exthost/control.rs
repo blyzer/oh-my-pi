@@ -2622,6 +2622,7 @@ struct ControlShared {
 	dispatch_by_id:    Mutex<BTreeMap<u64, Str>>,
 	dispatch_progress: Mutex<BTreeMap<u64, DispatchProgressState>>,
 	dispatch_chunks:   Mutex<BTreeMap<u64, DispatchChunkState>>,
+	dispatch_started:  Mutex<BTreeSet<u64>>,
 	child_requests:    Mutex<BTreeMap<u64, AbortHandle>>,
 	next_dispatch_id:  AtomicU64,
 }
@@ -2666,6 +2667,7 @@ impl Drop for LiveDispatchGuard {
 			self.shared.dispatch_by_id.lock().remove(&self.id);
 			self.shared.dispatch_progress.lock().remove(&self.id);
 			self.shared.dispatch_chunks.lock().remove(&self.id);
+			self.shared.dispatch_started.lock().remove(&self.id);
 			return;
 		}
 		if let Ok(runtime) = runtime::Handle::try_current() {
@@ -2784,6 +2786,7 @@ impl ControlRuntime {
 			dispatch_by_id: Mutex::new(BTreeMap::new()),
 			dispatch_progress: Mutex::new(BTreeMap::new()),
 			dispatch_chunks: Mutex::new(BTreeMap::new()),
+			dispatch_started: Mutex::new(BTreeSet::new()),
 			child_requests: Mutex::new(BTreeMap::new()),
 			next_dispatch_id: AtomicU64::new(1),
 		});
@@ -2807,6 +2810,7 @@ impl ControlRuntime {
 			match frame.kind.as_str() {
 				"Request" => self.accept_request(frame).await?,
 				"CancelRequest" => self.accept_request_cancel(frame)?,
+				"DispatchStarted" => self.accept_dispatch_started(frame)?,
 				"DispatchProgress" => self.accept_dispatch_progress(frame)?,
 				"DispatchResultChunk" => self.accept_dispatch_result_chunk(frame)?,
 				"DispatchResponse" => self.accept_dispatch_response(frame).await?,
@@ -2950,6 +2954,19 @@ impl ControlRuntime {
 			));
 		}
 		Ok(expected)
+	}
+
+	/// Records that one dispatch entered its handler in the child.
+	///
+	/// The child writes this before running the body, so a dispatch without
+	/// it provably never ran and its cancellation leaves no unknown effects.
+	fn accept_dispatch_started(&self, frame: JsonControlFrame) -> Result<(), ControlRuntimeError> {
+		let Some(correlation) = frame.correlation.filter(|id| *id != 0) else {
+			return Err(ControlProtocolError::malformed("dispatch start has no correlation").into());
+		};
+		self.dispatch_frame_invocation(correlation, &frame.body)?;
+		self.shared.dispatch_started.lock().insert(correlation);
+		Ok(())
 	}
 
 	fn accept_dispatch_progress(
@@ -3161,6 +3178,7 @@ impl ControlRuntime {
 			frame.body
 		};
 		self.shared.dispatch_progress.lock().remove(&correlation);
+		self.shared.dispatch_started.lock().remove(&correlation);
 		let payload = serde_json::to_vec(&Value::Object(body))?;
 		let extension = self.shared.identity.extension.clone();
 		let next = self.shared.router.lock().complete(
@@ -3225,8 +3243,53 @@ impl ControlHandle {
 			self.shared.dispatch_by_id.lock().remove(&id);
 			self.shared.dispatch_progress.lock().remove(&id);
 			self.shared.dispatch_chunks.lock().remove(&id);
+			self.shared.dispatch_started.lock().remove(&id);
 		}
 		withdrawn
+	}
+
+	/// Fails a dispatch the child accepted but never entered.
+	///
+	/// The child announces entry before running a handler and the stream is
+	/// ordered, so an unannounced dispatch provably left no effects. Failing
+	/// it here releases its actor slot and admits the next queued callback,
+	/// which is what completion would have done. Returns whether it applied;
+	/// a dispatch that already announced entry is left to the ladder.
+	pub async fn cancel_unstarted(&self, invocation: &str) -> bool {
+		let Some(id) = self
+			.shared
+			.dispatch_by_id
+			.lock()
+			.iter()
+			.find_map(|(id, live)| (live.as_str() == invocation).then_some(*id))
+		else {
+			return false;
+		};
+		if self.shared.dispatch_started.lock().contains(&id) {
+			return false;
+		}
+		let extension = self.shared.identity.extension.clone();
+		let next = {
+			let mut router = self.shared.router.lock();
+			router.complete(
+				extension.as_str(),
+				id,
+				self.shared.identity.host_generation,
+				Err(DispatchError::Cancelled),
+			)
+		};
+		let Ok(next) = next else {
+			return false;
+		};
+		self.shared.invocations.lock().remove(invocation);
+		self.shared.dispatch_by_id.lock().remove(&id);
+		self.shared.dispatch_progress.lock().remove(&id);
+		self.shared.dispatch_chunks.lock().remove(&id);
+		self.shared.dispatch_started.lock().remove(&id);
+		if let Some(next) = next {
+			let _ = write_dispatch_request(&self.shared, next).await;
+		}
+		true
 	}
 
 	/// Fails every outstanding dispatch because the child is gone.
@@ -3426,6 +3489,7 @@ impl ControlHandle {
 				self.shared.dispatch_by_id.lock().remove(&id);
 				self.shared.dispatch_progress.lock().remove(&id);
 				self.shared.dispatch_chunks.lock().remove(&id);
+				self.shared.dispatch_started.lock().remove(&id);
 				guard.disarm();
 				let _ = self.shared.router.lock().complete(
 					self.shared.identity.extension.as_str(),
@@ -3445,6 +3509,7 @@ impl ControlHandle {
 				self.shared.dispatch_by_id.lock().remove(&id);
 				self.shared.dispatch_progress.lock().remove(&id);
 				self.shared.dispatch_chunks.lock().remove(&id);
+				self.shared.dispatch_started.lock().remove(&id);
 				return Err(error.into());
 			},
 		};

@@ -331,6 +331,19 @@ class Host:
 
         return emit
 
+    def _write_dispatch_started(self, correlation: int, invocation: str) -> None:
+        """Announce that one dispatch is about to enter its handler."""
+        try:
+            self._write(
+                {
+                    "kind": "DispatchStarted",
+                    "correlation": correlation,
+                    "body": {"authority": self._dispatch_authority(invocation)},
+                }
+            )
+        except HostDisconnected:
+            pass
+
     def _write_dispatch_response(
         self,
         correlation: int,
@@ -745,6 +758,11 @@ class Host:
                     "unhandled_operation", f"unhandled host dispatch operation: {operation}"
                 )
             decoded_arguments = _from_json(arguments)
+            # Announce entry before the body runs. The stream is ordered, so
+            # a handler that began is always preceded by this frame; its
+            # absence is what lets the host tell an untouched dispatch from
+            # one whose effects it cannot know.
+            self._write_dispatch_started(correlation, invocation)
             if inspect.iscoroutinefunction(handler):
                 result = await handler(**decoded_arguments)
             else:
