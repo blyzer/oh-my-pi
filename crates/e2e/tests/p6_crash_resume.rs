@@ -51,13 +51,18 @@ use omp_core::{Str, sf};
 use omp_e2e::support::{
 	OwnedProcess, create_session, install_omp_binary_env, omp_binary, reopen_session, within,
 };
+use omp_env::project_state;
+use omp_envd::process_identity::ProcessIdentity;
 use omp_tool::Registry as ToolRegistry;
 use serde_json::{Value, json};
-use tokio::{process::Command, time};
+use tokio::{net, process::Command, time};
 use tower::Service;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+/// Observation deadline for the chats' project daemon to idle-exit once no
+/// chat is connected. The chats set a 2 s idle timeout; the rest is margin.
+const DAEMON_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const PREFIX: &str = "durable streamed prefix";
 const LOST_SUFFIX: &str = " suffix that must not appear";
 /// Isolated user configuration that keeps both chats off the network: the
@@ -375,6 +380,89 @@ fn wait_for_resumed_frame(path: &Path) -> String {
 	}
 }
 
+/// Identifies the project daemon serving `chat` by the process listening on
+/// its owner socket.
+///
+/// The chat starts that daemon detached, in its own process group, and
+/// neither the chat nor this harness reaps it, so it cannot hold an
+/// `OwnedProcess` lease. The proof pins its start generation instead, which
+/// a reused PID cannot match.
+async fn project_daemon(
+	binary: &Path,
+	home: &Path,
+	project: &Path,
+	chat: &OwnedProcess,
+) -> ProcessIdentity {
+	let state = project_state::directory(&home.join("data"), project).expect("project state");
+	let deadline = Instant::now() + READY_TIMEOUT;
+	let mut problem;
+	let pid = loop {
+		// The owner socket's name is keyed by the daemon executable's build,
+		// which this test binary cannot compute; it shares the document
+		// socket's prefix. That prefix hashes the canonical state directory,
+		// so it is only final once the chat has created the directory.
+		let documents = project_state::document_socket(&state);
+		let directory = documents.parent().expect("socket directory");
+		let prefix = documents
+			.file_name()
+			.and_then(|name| name.to_str())
+			.and_then(|name| name.strip_suffix("doc.sock"))
+			.expect("document socket name");
+		let owners = fs::read_dir(directory)
+			.expect("list socket directory")
+			.filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+			.filter(|name| name.starts_with(prefix) && name.ends_with("-env.sock"))
+			.collect::<Vec<_>>();
+		match owners.as_slice() {
+			[owner] => match net::UnixStream::connect(directory.join(owner)).await {
+				Ok(stream) => {
+					break stream
+						.peer_cred()
+						.expect("owner socket peer credentials")
+						.pid()
+						.expect("the platform reports the listener's PID");
+				},
+				Err(error) => problem = format!("{owner}: {error}"),
+			},
+			owners => problem = format!("owner sockets for this project: {owners:?}"),
+		}
+		assert!(Instant::now() < deadline, "the chat's project daemon never listened: {problem}");
+		time::sleep(Duration::from_millis(20)).await;
+	};
+	let pid = u32::try_from(pid).expect("positive daemon PID");
+	assert_ne!(Some(pid), chat.id(), "the chat served its own owner socket");
+	let daemon = ProcessIdentity::capture(pid).expect("identify the live project daemon");
+	assert_eq!(
+		daemon.executable,
+		fs::canonicalize(binary).expect("canonical OMP binary"),
+		"the owner socket is not served by an OMP project daemon"
+	);
+	daemon
+}
+
+/// Polls until every daemon in `daemons` has exited, failing at
+/// [`DAEMON_EXIT_TIMEOUT`]. Only a confirmed absence counts as exited; a
+/// process the OS cannot inspect is reported, not assumed gone.
+async fn wait_for_daemon_exit(daemons: &[ProcessIdentity]) {
+	let deadline = Instant::now() + DAEMON_EXIT_TIMEOUT;
+	loop {
+		let remaining = daemons
+			.iter()
+			.map(|daemon| (daemon.pid, daemon.verify()))
+			.filter(|(_, alive)| !matches!(alive, Ok(false)))
+			.collect::<Vec<_>>();
+		if remaining.is_empty() {
+			return;
+		}
+		assert!(
+			Instant::now() < deadline,
+			"project daemons still running {DAEMON_EXIT_TIMEOUT:?} after the last chat exited: \
+			 {remaining:?}"
+		);
+		time::sleep(Duration::from_millis(50)).await;
+	}
+}
+
 #[test]
 fn p6_chat_terminal_is_not_inherited_and_its_drainer_stops() {
 	let terminal = ChatTerminal::open();
@@ -434,6 +522,7 @@ async fn p6_killed_real_streaming_omp_resumes_durable_prefix_through_cli() {
 	})
 	.await
 	.expect("journal prefix timeout");
+	let mut daemons = vec![project_daemon(&binary, &home, &project, &crashed.process).await];
 	let group = crashed.process.process_group().expect("OMP process group");
 	signal::killpg(Pid::from_raw(group), Some(signal::Signal::SIGKILL))
 		.expect("crash OMP process group");
@@ -469,6 +558,10 @@ async fn p6_killed_real_streaming_omp_resumes_durable_prefix_through_cli() {
 	);
 	let frame = wait_for_resumed_frame(&resume_debug);
 	assert!(!frame.contains(LOST_SUFFIX), "resumed host displayed an uncommitted suffix\n{frame}");
+	let daemon = project_daemon(&binary, &home, &project, &resumed.process).await;
+	if !daemons.contains(&daemon) {
+		daemons.push(daemon);
+	}
 	debug_request(&resume_debug, &json!({ "op": "keys", "keys": "ctrl+c ctrl+c" }))
 		.expect("quit resumed chat through its real input path");
 	let status = resumed
@@ -477,6 +570,9 @@ async fn p6_killed_real_streaming_omp_resumes_durable_prefix_through_cli() {
 		.await
 		.expect("resumed OMP exits");
 	assert!(status.success(), "resumed OMP did not exit cleanly: {status}");
+	// With no chat connected, the daemons the chats started must idle-exit
+	// on their own; nothing in this harness would ever stop them.
+	wait_for_daemon_exit(&daemons).await;
 	// The checker creates its cache directory before any request.
 	assert!(!home.join("cache/updates").exists(), "a P6 chat ran the startup update check");
 }
