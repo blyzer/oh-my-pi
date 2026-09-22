@@ -1075,6 +1075,8 @@ mod tests {
 		fs::File,
 		iter,
 		path::{Path, PathBuf},
+		thread,
+		time::Duration,
 	};
 
 	use clap::Parser;
@@ -1343,6 +1345,63 @@ mod tests {
 			times_of(&target),
 			(ref_atime, ref_mtime),
 			"touch() did not copy the reference pair onto the target\n{trace}"
+		);
+	}
+
+	/// Every probe that passed so far read the stamp immediately after setting
+	/// it; every assertion that failed read one after intervening work. The
+	/// `-r` trace made that concrete: the reference's access stamp was already
+	/// the current time before `touch` ran, although nothing had touched that
+	/// file since it was set. So the question is not which operation overwrites
+	/// the stamp but whether the stamp persists at all.
+	///
+	/// `busy` is read once straight away, to show the write lands, then again
+	/// after unrelated work on another file. `quiet` is never read until after
+	/// a pause, so nothing this test does can disturb it — separating a decay
+	/// that needs filesystem activity from one that only needs time.
+	#[test]
+	fn access_stamps_survive_a_pause_and_unrelated_filesystem_work() {
+		let (_dir, root) = canonical_tempdir();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		let quiet = root.join("quiet");
+		let busy = root.join("busy");
+		for path in [&quiet, &busy] {
+			fs::write(path, b"x").unwrap();
+			set_file_times(path, atime, mtime).unwrap();
+		}
+
+		let mut log = Vec::new();
+		mark(&mut log, "busy immediately after set_file_times", &busy);
+		assert_eq!(
+			times_of(&busy),
+			(atime, mtime),
+			"the write lands: a stamp read at once is the one that was set\n{}",
+			log.join("\n")
+		);
+
+		// Unrelated work on a different file: the shape of activity that sat
+		// between setting a stamp and observing it in the failing traces.
+		let scratch = root.join("scratch");
+		File::create(&scratch).unwrap();
+		set_file_times(&scratch, atime, mtime).unwrap();
+		fs::write(&scratch, b"yy").unwrap();
+		fs::remove_file(&scratch).unwrap();
+		mark(&mut log, "busy after unrelated file work", &busy);
+
+		thread::sleep(Duration::from_millis(50));
+		mark(&mut log, "quiet after a 50ms pause, never read before now", &quiet);
+
+		let trace = log.join("\n");
+		assert_eq!(
+			times_of(&busy),
+			(atime, mtime),
+			"a stamp must survive unrelated filesystem work\n{trace}"
+		);
+		assert_eq!(
+			times_of(&quiet),
+			(atime, mtime),
+			"a stamp must survive a pause with no filesystem work\n{trace}"
 		);
 	}
 
