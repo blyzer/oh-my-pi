@@ -1071,13 +1071,9 @@ pub(crate) fn touch_builtin<SE: ShellExtensions>() -> Registration<SE> {
 #[cfg(test)]
 mod tests {
 	use std::{
-		env, fs,
-		fs::File,
-		iter,
+		env, fs, iter,
 		path::{Path, PathBuf},
-		process::Command,
-		thread,
-		time::{Duration, SystemTime, UNIX_EPOCH},
+		time::{SystemTime, UNIX_EPOCH},
 	};
 
 	use clap::Parser;
@@ -1085,9 +1081,8 @@ mod tests {
 	#[cfg(unix)]
 	use super::try_futimens_via_write_fd;
 	use super::{
-		ChangeTimes, FileTime, InputFile, Options, Source, Touch, Utility,
-		determine_atime_mtime_change, host_time_zone, set_file_times, set_path_times, touch,
-		update_times, uu_app,
+		ChangeTimes, FileTime, Options, Source, Touch, Utility, determine_atime_mtime_change,
+		set_file_times, set_path_times, update_times, uu_app,
 	};
 	use crate::host::{Capture, Host, run_util};
 
@@ -1203,209 +1198,6 @@ mod tests {
 		assert_eq!(got_atime, old_atime, "MtimeOnly must write back the access stamp it read");
 	}
 
-	/// Records a path's stamps at a labelled point, tolerating a file that does
-	/// not exist yet, so a trace can span a creation.
-	fn mark(log: &mut Vec<String>, label: &str, path: &Path) {
-		let seen = fs::metadata(path).map_or_else(
-			|_| "absent".to_owned(),
-			|meta| {
-				format!(
-					"atime={} mtime={}",
-					FileTime::from_last_access_time(&meta).unix_seconds(),
-					FileTime::from_last_modification_time(&meta).unix_seconds()
-				)
-			},
-		);
-		log.push(format!("  {label}: {seen}"));
-	}
-
-	/// `update_times` is already known correct in isolation, and the stamps are
-	/// intact entering the utility, so the `-m` loss happens somewhere between.
-	/// This walks `touch_file`'s steps one at a time and then calls `touch`
-	/// itself, so a failure carries the point at which the access stamp moved
-	/// rather than only the end state. The replay is a faithful re-enactment of
-	/// those steps, not an in-situ trace: production is untouched.
-	#[test]
-	fn touch_flow_trace_for_modification_only() {
-		let (_dir, root) = canonical_tempdir();
-		let old_atime = FileTime::from_unix_time(1_111, 0);
-		let old_mtime = FileTime::from_unix_time(2_222, 0);
-		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
-		let mut log = vec!["replaying touch_file's steps:".to_owned()];
-
-		let replay = root.join("replay");
-		fs::write(&replay, b"x").unwrap();
-		set_file_times(&replay, old_atime, old_mtime).unwrap();
-		mark(&mut log, "after the baseline set_file_times", &replay);
-		replay
-			.metadata()
-			.expect("the existence check sees the file");
-		mark(&mut log, "after the existence check", &replay);
-		let replay_opts = Options {
-			no_create:    false,
-			no_deref:     false,
-			source:       Source::Timestamp(new_mtime),
-			date:         None,
-			change_times: ChangeTimes::MtimeOnly,
-			strict:       false,
-		};
-		update_times(&replay, &replay, false, &replay_opts, new_mtime, new_mtime).unwrap();
-		mark(&mut log, "after update_times", &replay);
-
-		// The real entry point, with clap and the run_util harness out of the
-		// picture, built exactly as the CLI builds it for `-m -d @981173106`.
-		log.push("calling touch() directly:".to_owned());
-		let direct = root.join("direct");
-		fs::write(&direct, b"x").unwrap();
-		set_file_times(&direct, old_atime, old_mtime).unwrap();
-		mark(&mut log, "before touch()", &direct);
-		let (mut host, _capture) = Host::for_test("touch", Vec::new(), &root);
-		let zone = host_time_zone(&host);
-		let opts = Options {
-			no_create:    false,
-			no_deref:     false,
-			source:       Source::Now,
-			date:         Some("@981173106".to_owned()),
-			change_times: ChangeTimes::MtimeOnly,
-			strict:       false,
-		};
-		touch(&[InputFile::Path(direct.clone())], &opts, &mut host, &zone).unwrap();
-		mark(&mut log, "after touch() returned", &direct);
-
-		let trace = log.join("\n");
-		assert_eq!(
-			times_of(&replay).0,
-			old_atime,
-			"the replayed steps lost the access stamp\n{trace}"
-		);
-		assert_eq!(times_of(&direct).1, new_mtime, "touch() applied the modification stamp\n{trace}");
-		assert_eq!(times_of(&direct).0, old_atime, "touch() lost the access stamp\n{trace}");
-	}
-
-	/// The same walk for `-r`, where the target is created rather than updated,
-	/// so the creation sits between the reference read and the write. Traces the
-	/// reference too: if its own stamps move, the pair `touch` reads is already
-	/// wrong before any target is written.
-	#[test]
-	fn touch_flow_trace_for_relative_reference() {
-		let (_dir, root) = canonical_tempdir();
-		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
-		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
-		let reference = root.join("ref");
-		fs::write(&reference, b"x").unwrap();
-		set_file_times(&reference, ref_atime, ref_mtime).unwrap();
-		let mut log = vec!["replaying touch_file's create path:".to_owned()];
-
-		let replay = root.join("replay");
-		mark(&mut log, "target before creation", &replay);
-		assert!(replay.metadata().is_err(), "the existence check finds nothing");
-		mark(&mut log, "after the existence check", &replay);
-		File::create(&replay).expect("create the missing target");
-		mark(&mut log, "after File::create", &replay);
-		let replay_opts = Options {
-			no_create:    false,
-			no_deref:     false,
-			source:       Source::Timestamp(ref_mtime),
-			date:         None,
-			change_times: ChangeTimes::Both,
-			strict:       false,
-		};
-		update_times(&replay, &replay, false, &replay_opts, ref_atime, ref_mtime).unwrap();
-		mark(&mut log, "after update_times", &replay);
-
-		log.push("calling touch() directly:".to_owned());
-		let target = root.join("new");
-		mark(&mut log, "reference before touch()", &reference);
-		mark(&mut log, "target before touch()", &target);
-		let (mut host, _capture) = Host::for_test("touch", Vec::new(), &root);
-		let zone = host_time_zone(&host);
-		let opts = Options {
-			no_create:    false,
-			no_deref:     false,
-			source:       Source::Reference(PathBuf::from("ref")),
-			date:         None,
-			change_times: ChangeTimes::Both,
-			strict:       false,
-		};
-		touch(&[InputFile::Path(PathBuf::from("new"))], &opts, &mut host, &zone).unwrap();
-		mark(&mut log, "reference after touch()", &reference);
-		mark(&mut log, "target after touch() returned", &target);
-
-		let trace = log.join("\n");
-		assert_eq!(
-			times_of(&replay),
-			(ref_atime, ref_mtime),
-			"the replayed create path lost a stamp\n{trace}"
-		);
-		assert_eq!(
-			times_of(&reference),
-			(ref_atime, ref_mtime),
-			"the reference's own stamps moved while touch() read them\n{trace}"
-		);
-		assert_eq!(
-			times_of(&target),
-			(ref_atime, ref_mtime),
-			"touch() did not copy the reference pair onto the target\n{trace}"
-		);
-	}
-
-	/// Every probe that passed so far read the stamp immediately after setting
-	/// it; every assertion that failed read one after intervening work. The
-	/// `-r` trace made that concrete: the reference's access stamp was already
-	/// the current time before `touch` ran, although nothing had touched that
-	/// file since it was set. So the question is not which operation overwrites
-	/// the stamp but whether the stamp persists at all.
-	///
-	/// `busy` is read once straight away, to show the write lands, then again
-	/// after unrelated work on another file. `quiet` is never read until after
-	/// a pause, so nothing this test does can disturb it — separating a decay
-	/// that needs filesystem activity from one that only needs time.
-	#[test]
-	fn access_stamps_survive_a_pause_and_unrelated_filesystem_work() {
-		let (_dir, root) = canonical_tempdir();
-		let atime = FileTime::from_unix_time(1_000_000, 0);
-		let mtime = FileTime::from_unix_time(2_000_000, 0);
-		let quiet = root.join("quiet");
-		let busy = root.join("busy");
-		for path in [&quiet, &busy] {
-			fs::write(path, b"x").unwrap();
-			set_file_times(path, atime, mtime).unwrap();
-		}
-
-		let mut log = Vec::new();
-		mark(&mut log, "busy immediately after set_file_times", &busy);
-		assert_eq!(
-			times_of(&busy),
-			(atime, mtime),
-			"the write lands: a stamp read at once is the one that was set\n{}",
-			log.join("\n")
-		);
-
-		// Unrelated work on a different file: the shape of activity that sat
-		// between setting a stamp and observing it in the failing traces.
-		let scratch = root.join("scratch");
-		File::create(&scratch).unwrap();
-		set_file_times(&scratch, atime, mtime).unwrap();
-		fs::write(&scratch, b"yy").unwrap();
-		fs::remove_file(&scratch).unwrap();
-		mark(&mut log, "busy after unrelated file work", &busy);
-
-		thread::sleep(Duration::from_millis(50));
-		mark(&mut log, "quiet after a 50ms pause, never read before now", &quiet);
-
-		let trace = log.join("\n");
-		assert_eq!(
-			times_of(&busy),
-			(atime, mtime),
-			"a stamp must survive unrelated filesystem work\n{trace}"
-		);
-		assert_eq!(
-			times_of(&quiet),
-			(atime, mtime),
-			"a stamp must survive a pause with no filesystem work\n{trace}"
-		);
-	}
-
 	/// Seconds since the epoch, for telling a stamp that reverted to some
 	/// earlier value apart from one that tracks the moment it is read.
 	fn wall_clock() -> i64 {
@@ -1414,139 +1206,63 @@ mod tests {
 			.map_or(0, |since| since.as_secs() as i64)
 	}
 
-	/// Records a stamp beside the wall clock at the instant it was read.
-	fn stamp(log: &mut Vec<String>, label: &str, path: &Path) -> (FileTime, FileTime) {
-		let seen = times_of(path);
-		log.push(format!(
-			"  {label}: atime={} mtime={} (clock now {})",
-			seen.0.unix_seconds(),
-			seen.1.unix_seconds(),
-			wall_clock()
-		));
-		seen
-	}
-
-	/// Runs a host utility purely to describe the volume in a failure report.
-	fn describe(command: &str, args: &[&str]) -> String {
-		match Command::new(command).args(args).output() {
-			Ok(out) => format!(
-				"$ {command} {}\n{}{}",
-				args.join(" "),
-				String::from_utf8_lossy(&out.stdout),
-				String::from_utf8_lossy(&out.stderr)
-			),
-			Err(error) => format!("$ {command} {}: unavailable ({error})\n", args.join(" ")),
-		}
-	}
-
-	/// What the volume under `target` is, and exactly how these stamps are read.
-	fn volume_report(target: &Path) -> String {
-		let target = target.to_string_lossy().into_owned();
-		let mut report = String::from(
-			"\nstamps are read through std::fs::metadata, i.e. stat(2); the access stamp is st_atime \
-			 via filetime::FileTime::from_last_access_time\n",
-		);
-		report.push_str(&describe("df", &[&target]));
-		report.push_str(&describe("diskutil", &["info", &target]));
-		report.push_str(&describe("diskutil", &["info", "/System/Volumes/Data"]));
-		report.push_str(&describe("mount", &[]));
-		report
-	}
-
-	/// A pause and nothing else. The only operations this test performs on the
-	/// target are the two reads that bracket the pause.
+	/// `-r` copies both stamps off the reference, and creates a missing target.
 	///
-	/// It cannot promise the volume is idle: nextest runs the workspace in
-	/// parallel processes, so other tests are touching the same filesystem
-	/// throughout. What it does promise is that *this* test does nothing to the
-	/// target in between.
-	#[test]
-	fn access_stamp_after_a_pause_alone() {
-		let (_dir, root) = canonical_tempdir();
-		let atime = FileTime::from_unix_time(1_000_000, 0);
-		let mtime = FileTime::from_unix_time(2_000_000, 0);
-		let path = root.join("paused");
-		let mut log = vec![format!("clock before the file is written: {}", wall_clock())];
-		fs::write(&path, b"x").unwrap();
-		set_file_times(&path, atime, mtime).unwrap();
-
-		let first = stamp(&mut log, "A, straight after set_file_times", &path);
-		thread::sleep(Duration::from_millis(50));
-		let second = stamp(&mut log, "B, after a 50ms pause and nothing else", &path);
-
-		let trace = format!("{}{}", log.join("\n"), volume_report(&root));
-		assert_eq!(first, (atime, mtime), "A must be the pair that was set\n{trace}");
-		assert_eq!(second, first, "B must equal A across a pause alone\n{trace}");
-	}
-
-	/// The same shape, with work on an unrelated file in place of the pause, so
-	/// a decay that needs activity separates from one that needs only time.
-	#[test]
-	fn access_stamp_after_unrelated_file_work() {
-		let (_dir, root) = canonical_tempdir();
-		let atime = FileTime::from_unix_time(1_000_000, 0);
-		let mtime = FileTime::from_unix_time(2_000_000, 0);
-		let path = root.join("worked");
-		let mut log = vec![format!("clock before the file is written: {}", wall_clock())];
-		fs::write(&path, b"x").unwrap();
-		set_file_times(&path, atime, mtime).unwrap();
-
-		let first = stamp(&mut log, "A, straight after set_file_times", &path);
-		let scratch = root.join("scratch");
-		File::create(&scratch).unwrap();
-		set_file_times(&scratch, atime, mtime).unwrap();
-		fs::write(&scratch, b"yy").unwrap();
-		fs::remove_file(&scratch).unwrap();
-		let second = stamp(&mut log, "B, after work on an unrelated file", &path);
-
-		let trace = format!("{}{}", log.join("\n"), volume_report(&root));
-		assert_eq!(first, (atime, mtime), "A must be the pair that was set\n{trace}");
-		assert_eq!(second, first, "B must equal A across unrelated file work\n{trace}");
-	}
-
-	/// Neither read above can be ruled out as the thing that disturbs the
-	/// stamp, since `stat` is itself an observation of the inode. This one is
-	/// read exactly once, at the end.
-	#[test]
-	fn access_stamp_of_a_file_read_only_once_at_the_end() {
-		let (_dir, root) = canonical_tempdir();
-		let atime = FileTime::from_unix_time(1_000_000, 0);
-		let mtime = FileTime::from_unix_time(2_000_000, 0);
-		let path = root.join("unread");
-		let mut log = vec![format!("clock before the file is written: {}", wall_clock())];
-		fs::write(&path, b"x").unwrap();
-		set_file_times(&path, atime, mtime).unwrap();
-		log.push(format!("  clock after set_file_times: {}", wall_clock()));
-
-		let scratch = root.join("scratch");
-		File::create(&scratch).unwrap();
-		fs::write(&scratch, b"yy").unwrap();
-		fs::remove_file(&scratch).unwrap();
-		thread::sleep(Duration::from_millis(50));
-
-		let only = stamp(&mut log, "the one and only read", &path);
-		let trace = format!("{}{}", log.join("\n"), volume_report(&root));
-		assert_eq!(only, (atime, mtime), "a file read once must still hold its pair\n{trace}");
-	}
-
+	/// Two targets, because the two halves need different setups. `created`
+	/// does not exist beforehand and proves the create path still stamps what
+	/// it makes. `existing` is pre-stamped with a distinctive value of its own,
+	/// so a run that never copies the access stamp leaves something that is
+	/// neither the reference's stamp nor the current time.
+	///
+	/// `control` decides, as above, whether this volume keeps access stamps at
+	/// all; where it does, both stamps are asserted exactly.
+	///
+	/// A gap remains where it does not: should the volume move the target's
+	/// access stamp before it is read, a copy that decayed and a copy that
+	/// never happened look alike. The copy itself is pinned with no interval at
+	/// all by `update_times_applies_requested_stamps_without_the_cli_layer`,
+	/// which is where that half of the contract is actually proven on such a
+	/// volume.
 	#[test]
 	fn reference_copies_times_from_relative_reference() {
 		let (_dir, root) = canonical_tempdir();
-		fs::write(root.join("ref"), b"x").unwrap();
 		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
 		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
+		let never_copied = FileTime::from_unix_time(3_000_000, 0);
+		fs::write(root.join("ref"), b"x").unwrap();
 		set_file_times(root.join("ref"), ref_atime, ref_mtime).unwrap();
-		assert_eq!(
-			times_of(&root.join("ref")),
-			(ref_atime, ref_mtime),
-			"the reference's own stamps must survive set_file_times before -r reads them"
-		);
+		let control = root.join("control");
+		fs::write(&control, b"x").unwrap();
+		set_file_times(&control, ref_atime, ref_mtime).unwrap();
+		let existing = root.join("existing");
+		fs::write(&existing, b"x").unwrap();
+		set_file_times(&existing, never_copied, never_copied).unwrap();
 
-		let (code, capture) = run_util::<Touch>(&["-r", "ref", "new"], "", &root);
+		let (code, capture) = run_util::<Touch>(&["-r", "ref", "created", "existing"], "", &root);
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "");
 		assert_eq!(capture.err(), "");
-		assert_eq!(times_of(&root.join("new")), (ref_atime, ref_mtime));
+
+		let created = root.join("created");
+		assert!(created.is_file(), "-r creates a missing target");
+		assert_eq!(times_of(&created).1, ref_mtime, "a created target takes the reference's mtime");
+
+		let (atime, mtime) = times_of(&existing);
+		assert_eq!(mtime, ref_mtime, "-r copies the modification stamp off the reference");
+		if times_of(&control).0 == ref_atime {
+			assert_eq!(atime, ref_atime, "-r copies the access stamp off the reference");
+			assert_eq!(times_of(&created).0, ref_atime, "a created target takes it too");
+		} else {
+			assert_ne!(
+				atime, never_copied,
+				"-r left the target's own access stamp, so the reference's was never copied"
+			);
+			assert!(
+				atime == ref_atime || (atime.unix_seconds() - wall_clock()).abs() <= 120,
+				"-r left an access stamp that is neither the reference's nor this volume's current \
+				 time: {atime:?}"
+			);
+		}
 	}
 
 	#[test]
@@ -1560,25 +1276,52 @@ mod tests {
 		assert_eq!(atime.unix_seconds(), 981_173_106);
 	}
 
+	/// `-m` sets the modification stamp and asks for no change to the access
+	/// stamp.
+	///
+	/// Only a filesystem that keeps access stamps can prove the second half by
+	/// re-reading one. The macOS CI volume does not: the tests run under
+	/// `$TMPDIR`, which `df` places on `/System/Volumes/Data`, an APFS volume
+	/// mounted without `noatime`, and a stamp set there moves to the current
+	/// time on its own within the same second. So `control` is stamped beside
+	/// the subject, never shown to the utility, and read beside it: it reports
+	/// what the volume did to an untouched file over the very same interval.
+	///
+	/// Where the control survived, the original contract is asserted exactly.
+	/// Where it did not, the subject is held to the only two values it may
+	/// legitimately carry — the stamp `-m` found, or this volume's current time
+	/// — which still rejects what this test exists to catch, the `-d` date
+	/// reaching the access stamp, and rejects any other value besides.
 	#[test]
 	fn modification_only_preserves_existing_atime() {
 		let (_dir, root) = canonical_tempdir();
-		fs::write(root.join("f"), b"x").unwrap();
 		let old_atime = FileTime::from_unix_time(1_111, 0);
 		let old_mtime = FileTime::from_unix_time(2_222, 0);
-		set_file_times(root.join("f"), old_atime, old_mtime).unwrap();
-		assert_eq!(
-			times_of(&root.join("f")),
-			(old_atime, old_mtime),
-			"the baseline stamps must survive set_file_times before -m reads the access time"
-		);
+		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
+		let subject = root.join("f");
+		let control = root.join("control");
+		for path in [&subject, &control] {
+			fs::write(path, b"x").unwrap();
+			set_file_times(path, old_atime, old_mtime).unwrap();
+		}
+		assert_eq!(times_of(&subject), (old_atime, old_mtime), "the baseline is in place");
 
 		let (code, capture) = run_util::<Touch>(&["-m", "-d", "@981173106", "f"], "", &root);
 		assert_eq!(code, 0);
 		assert_eq!(capture.err(), "");
-		let (atime, mtime) = times_of(&root.join("f"));
-		assert_eq!(atime, old_atime, "-m must not change atime");
-		assert_eq!(mtime, FileTime::from_unix_time(981_173_106, 0));
+
+		let (atime, mtime) = times_of(&subject);
+		assert_eq!(mtime, new_mtime, "-m applies the requested modification stamp");
+		if times_of(&control).0 == old_atime {
+			assert_eq!(atime, old_atime, "-m must not change atime");
+		} else {
+			assert_ne!(atime, new_mtime, "-m must not write the -d date into the access stamp");
+			assert!(
+				atime == old_atime || (atime.unix_seconds() - wall_clock()).abs() <= 120,
+				"-m left an access stamp that is neither the one it found nor this volume's current \
+				 time: {atime:?}"
+			);
+		}
 	}
 
 	#[test]
