@@ -598,6 +598,11 @@ async fn stale_tag_and_transaction_conflict_messages_are_projected_verbatim() {
 	);
 }
 
+/// Malformed and headerless input is rejected with the parser's own diagnostic
+/// and never reaches a commit. Recoverable leniencies are the opposite
+/// contract and are owned by the hashline fixtures, not this table: `PUT N.=:`
+/// is a dangling range separator the parser recovers as a single-line range, so
+/// it applies and commits (`hashline/patcher.json`, `parity_leniency.json`).
 #[tokio::test]
 async fn malformed_and_headerless_input_never_commit_and_preserve_parser_diagnostics() {
 	let fake = Fake::with_files(&[("a.txt", b"one\n")]);
@@ -609,11 +614,7 @@ async fn malformed_and_headerless_input_never_commit_and_preserve_parser_diagnos
 			"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. File sections \
 			 start with `[path#HASH]`; use `replace`, `delete`, or `insert` ops.",
 		),
-		(
-			"[a.txt#1A2B]\nPUT 1.=:\n+x",
-			"line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT \
-			 <N:`/`PUT >N:` above the body. Got \"PUT 1.=:\".",
-		),
+		("[a.txt#1A2B]\n+x", "line 1: payload line has no preceding hunk header. Got \"+x\"."),
 		(
 			"[a.txt#1A2B]\nPUT 1.=2:\n+X\nPUT 2.=3:\n+Y",
 			"line 3: anchor line 2 is already targeted by another hunk on line 1. Issue ONE hunk per \
