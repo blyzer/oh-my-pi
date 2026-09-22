@@ -60,6 +60,13 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const PREFIX: &str = "durable streamed prefix";
 const LOST_SUFFIX: &str = " suffix that must not appear";
+/// Isolated user configuration that keeps both chats off the network: the
+/// startup update check would fetch the official release manifest and post
+/// its notice into the host at a timing the proof does not control. It must
+/// be `config.cfg`, which loads before the check is scheduled; launch overlays
+/// (`OMP_CONFIG_FILES`) apply too late to stop the request. The config loads
+/// leniently, so the proof also asserts the check never ran.
+const HERMETIC_CONFIG: &str = "cl_startup_check_update 0\n";
 
 #[derive(Clone)]
 struct CrashRoute {
@@ -391,6 +398,8 @@ async fn p6_killed_real_streaming_omp_resumes_durable_prefix_through_cli() {
 	let sessions = scratch.path().join("sessions");
 	fs::create_dir_all(&project).expect("project directory");
 	fs::create_dir_all(&home).expect("isolated home");
+	fs::create_dir_all(home.join("config")).expect("isolated config directory");
+	fs::write(home.join("config/config.cfg"), HERMETIC_CONFIG).expect("hermetic config");
 	fs::create_dir_all(&sessions).expect("session directory");
 	let project = fs::canonicalize(project).expect("canonical project");
 	let session = sessions.join("crash.oms");
@@ -468,6 +477,8 @@ async fn p6_killed_real_streaming_omp_resumes_durable_prefix_through_cli() {
 		.await
 		.expect("resumed OMP exits");
 	assert!(status.success(), "resumed OMP did not exit cleanly: {status}");
+	// The checker creates its cache directory before any request.
+	assert!(!home.join("cache/updates").exists(), "a P6 chat ran the startup update check");
 }
 
 #[test]
