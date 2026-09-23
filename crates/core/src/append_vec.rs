@@ -1353,12 +1353,18 @@ mod tests {
 	#[should_panic(expected = "ExactSizeIterator length overflowed the AppendVec capacity")]
 	fn test_extend_lying_len_usize_max_panics_before_reserving() {
 		// The overflow check runs before the reservation CAS, so the counter
-		// is never touched. No in-test catch: `catch_unwind` landing pads are
-		// not emitted by the cranelift dev backend, so the catch never
-		// engages and the panic reaches the harness anyway.
+		// is never touched.
 		let vec = AppendVec::<u32>::new();
 		vec.push(1);
-		vec.extend(LyingLen::new(vec![2, 3], usize::MAX));
+		let panic = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+			vec.extend(LyingLen::new(vec![2, 3], usize::MAX));
+		}))
+		.expect_err("an overflowing reported length must panic");
+
+		assert_eq!(vec.len(), 1);
+		assert_eq!(vec.iter().copied().collect::<Vec<_>>(), vec![1]);
+
+		panic::resume_unwind(panic);
 	}
 
 	#[test]

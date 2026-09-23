@@ -1642,3 +1642,43 @@ use std::{borrow, ffi, fmt, fmt::Display, process, thread};
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
 pub(crate) use testing::{Capture, ScopedPathPolicy, run_util, run_util_with_policy};
 use tokio::task;
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use super::{Host, Utility, panic_scope_active, run_caught};
+
+	#[derive(clap::Parser)]
+	#[command(name = "boom")]
+	struct Boom;
+
+	impl Utility for Boom {
+		const NAME: &'static str = "boom";
+
+		fn run(self, _host: &mut Host) -> i32 {
+			panic!("boom builtin panicked");
+		}
+	}
+
+	#[test]
+	fn run_caught_contains_a_panicking_builtin() {
+		let (mut host, capture) = Host::for_test("boom", "", "/");
+		assert_eq!(run_caught(Boom, &mut host), 1);
+		assert_eq!(capture.err(), "boom: internal error\n");
+		assert!(!panic_scope_active(), "the panic scope unwinds with the builtin");
+	}
+
+	/// The production shape: the builtin body runs on a blocking thread and a
+	/// panic there must still resolve the awaited task.
+	#[tokio::test]
+	async fn a_panicking_builtin_on_a_blocking_thread_resolves_its_task() {
+		let (mut host, _capture) = Host::for_test("boom", "", "/");
+		let task = tokio::task::spawn_blocking(move || run_caught(Boom, &mut host));
+		let code = tokio::time::timeout(Duration::from_secs(10), task)
+			.await
+			.expect("the blocking task resolves")
+			.expect("the panic is contained inside the task");
+		assert_eq!(code, 1);
+	}
+}

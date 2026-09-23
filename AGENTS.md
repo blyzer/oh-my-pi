@@ -539,6 +539,13 @@ generated inputs.
   `crates/shell`, `omp_core::slopjson`). Adding a nextest call without the
   doctest half silently drops that coverage. Prefer `just test` /
   `just test-pkg <crate>`, which already run both.
+- Backends: `cargo build`/`cargo run` compile workspace members with
+  cranelift (`[profile.dev]`); every test build is homogeneous LLVM
+  (`[profile.test]`), because cranelift emits no landing pads (skipped `Drop`,
+  dead `catch_unwind`/panic `JoinError`, aborting threads). NEVER add a
+  per-crate backend override for a test crate: mixing backends at that
+  boundary crashed P6 with SIGSEGV. Evidence:
+  `docs/audits/cranelift-panic-cleanup.md`.
 - Protobuf: `protox`; no system `protoc`.
 - Workspace env vars `OMP_*` only: `OMP_TUI_DEBUG`, `OMP_TTY`, `OMP_PY_SITE`.
 - User configuration lives in `~/.o2` (owner decision; `OMP_CONFIG_DIR` overrides): `config.cfg`,

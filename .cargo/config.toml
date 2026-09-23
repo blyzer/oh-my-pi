@@ -93,6 +93,17 @@ codegen-backend = "llvm"
 codegen-backend = "llvm"
 [profile.dev.build-override]
 codegen-backend = "llvm"
+# Test builds (cargo test / nextest, every unit including dependencies of test
+# binaries) use LLVM throughout. Tests rely on Drop, catch_unwind and panic
+# JoinErrors during a panic, and cranelift emits no landing pads: destructors
+# are skipped, catch_unwind instantiated in a cranelift crate never catches, a
+# panicking std thread or tokio worker aborts the process, and a panicking
+# spawn_blocking hangs its awaiter. The backend stays homogeneous: overriding
+# a single test crate to LLVM crashed P6 with SIGSEGV at the LLVM/cranelift
+# boundary. `cargo build`/`cargo run` keep cranelift ([profile.dev]).
+# Evidence: docs/audits/cranelift-panic-cleanup.md.
+[profile.test]
+codegen-backend = "llvm"
 [profile.release]
 debug = false
 split-debuginfo = "off"

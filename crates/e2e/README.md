@@ -6,7 +6,7 @@
 
 Scenario bodies live in `tests/`. `src/support` owns bounded waits, RAII process and daemon lifetimes, scratch roots, production document/environment connections, canonical scripted inference, and `.oms` session reopening. Scripts replace only nondeterministic provider output. The journal, DOM fold, dispatcher, document authority, environment authority, and terminal event path remain production implementations.
 
-Every wait is bounded. Every process, task, socket, and temporary root has an RAII owner. Dev builds compile this crate with Cranelift, which emits no landing pads, so a failing proof's panic skips those destructors; owned process groups are therefore also leased in a registry that a panic hook kills from, scoped to the panicking thread (`src/support/owned_groups.rs`). P7 drives the Cargo-built application on a real PTY through the debug protocol. P8 records measurements and locks their schema and arithmetic, but timing values are deliberately non-gating.
+Every wait is bounded. Every process, task, socket, and temporary root has an RAII owner. Test builds compile with LLVM (`[profile.test]`), so a failing proof's panic runs those destructors; owned process groups are also leased in a registry that a panic hook kills from, scoped to the panicking thread, for panics that cannot unwind (`src/support/owned_groups.rs`). P7 drives the Cargo-built application on a real PTY through the debug protocol. P8 records measurements and locks their schema and arithmetic, but timing values are deliberately non-gating.
 
 ## Proofs
 
