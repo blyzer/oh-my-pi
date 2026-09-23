@@ -211,13 +211,13 @@ def summarize(rows: list[dict], meta: dict, reps: int, smoke: bool) -> str:
 		lines.append(
 			f"| {scenario} | {c[0]:.1f} ± {c[1]:.1f} s | {l[0]:.1f} ± {l[1]:.1f} s | {delta:+.1f}% | {c[2]} / {l[2]} |"
 		)
+	lines.append("")
 	for variant in VARIANTS:
 		loop = [
 			sum(r["seconds"] for r in rows if r["variant"] == variant and r["rep"] == rep and r["scenario"] in ("loop-dev", "loop-test"))
 			for rep in range(1, reps + 1)
 		]
 		sizes = [r["bytes"] for r in rows if r["variant"] == variant and r["scenario"] == "target-dir"]
-		lines.append("")
 		lines.append(
 			f"- {variant}: edit, build and test loop {statistics.mean(loop):.1f} s per turn; "
 			f"target dir {statistics.mean(sizes) / 1e9:.1f} GB after all scenarios"
