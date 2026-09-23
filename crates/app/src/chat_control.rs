@@ -4444,6 +4444,12 @@ mod tests {
 	/// A pause received during a turn is journaled immediately and holds the
 	/// next runtime safe point until resume; the completed hold duration
 	/// survives replay.
+	///
+	/// The hold clock starts when the controller journals the pause, after it
+	/// has handled the queued submit, which the test cannot observe. A loaded
+	/// runner can delay that by an unbounded amount, so no wall-clock lower
+	/// bound holds; the replayed duration must be a completed, non-zero hold no
+	/// longer than the span the test itself observed around it.
 	#[tokio::test]
 	async fn pause_holds_a_running_turn_at_a_safe_point_and_replays_duration() {
 		let harness = harness(Duration::from_millis(40));
@@ -4451,6 +4457,7 @@ mod tests {
 			.commands
 			.send(HostCommand::Submit(Str::new_static("hello")))
 			.expect("submit");
+		let pause_sent = std::time::Instant::now();
 		harness
 			.commands
 			.send(HostCommand::Pause { active: true })
@@ -4471,12 +4478,19 @@ mod tests {
 			matches!(event, KernelEvent::TurnEnded { stop: TurnStop::Completed })
 		})
 		.await;
+		let observed = pause_sent.elapsed();
 		let (journal, _directory) = harness.quit().await;
 		let replayed = Session::open(&journal, omp_session::ComponentRegistry::standard())
 			.expect("replay paused session");
 		let pause = omp_agent::pause_state(replayed.dom());
 		assert!(!pause.active);
-		assert!(pause.duration_ms >= 100, "completed hold duration is durable");
+		assert!(pause.duration_ms > 0, "completed hold duration is durable");
+		assert!(
+			u128::from(pause.duration_ms) <= observed.as_millis() + 1,
+			"hold of {} ms exceeds the {} ms the test observed",
+			pause.duration_ms,
+			observed.as_millis()
+		);
 	}
 
 	#[tokio::test]
