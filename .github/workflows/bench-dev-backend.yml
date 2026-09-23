@@ -1,0 +1,93 @@
+name: Dev backend benchmark
+
+# Manual only. Measures Cranelift against all-LLVM dev builds on the macOS
+# runner, the open decision in docs/audits/cranelift-panic-cleanup.md §7. See
+# scripts/bench-dev-backend.py for the scenarios and method. It occupies the
+# runner for an hour or more at the default three repetitions, so CI queues
+# behind it; start it when nothing else needs the machine, on AC power.
+#
+# GitHub only dispatches workflows whose file exists on the default branch
+# (`main`), which this one does not. Until it does, start a run by pushing the
+# commit to measure to the bench/dev-backend branch:
+#     git push -f origin HEAD:bench/dev-backend
+# The repository variable BENCH_REPS overrides the repetition count there.
+on:
+  push:
+    branches: [bench/dev-backend]
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: Repetitions per variant (each is a cold build plus five rebuilds)
+        required: true
+        default: "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-dev-backend
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  bench:
+    name: Cranelift vs LLVM dev builds
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+
+      - name: Install native build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install lld uv zstd ninja
+      - name: Install cargo-nextest
+        if: runner.environment == 'github-hosted'
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+        with:
+          tool: nextest@0.9.146
+      - name: Check provisioned cargo-nextest
+        if: runner.environment != 'github-hosted'
+        run: cargo nextest show-config version
+
+      # Outside the checkout and behind vendor/ symlinks, as in ci.yml, so the
+      # fetch leaves the tracked tree untouched and meta.json reports it clean.
+      # Untimed: the benchmark only measures cargo.
+      - name: Prepare embedded Python
+        run: |
+          crates/py/scripts/fetch-python.sh "$RUNNER_TEMP/python"
+          mkdir -p vendor
+          ln -sfn "$RUNNER_TEMP/python/python" vendor/python
+          ln -sfn "$RUNNER_TEMP/python/python-release" vendor/python-release
+          test -f vendor/python/pyo3-config.txt
+
+      - name: Run benchmark
+        env:
+          REPS: ${{ inputs.reps || vars.BENCH_REPS || '3' }}
+        run: python3 scripts/bench-dev-backend.py --reps "$REPS" --out "$RUNNER_TEMP/bench"
+
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/bench/summary.md" ]; then
+            cat "$RUNNER_TEMP/bench/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-dev-backend
+          path: |
+            ${{ runner.temp }}/bench/meta.json
+            ${{ runner.temp }}/bench/results.jsonl
+            ${{ runner.temp }}/bench/summary.md
+          if-no-files-found: warn
+          retention-days: 90

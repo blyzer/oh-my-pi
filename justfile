@@ -114,6 +114,12 @@ check-pkg pkg:
 build:
     cargo build -p omp-app --bin omp --locked
 
+# Compare Cranelift and all-LLVM dev builds (cold, incremental, dev-then-test
+# loop); writes target/bench-dev-backend/summary.md. Takes an hour or more.
+[group('build & check')]
+bench-dev-backend reps="3":
+    python3 scripts/bench-dev-backend.py --reps {{ reps }}
+
 # Build the `omp` CLI/daemon binary (release profile; macOS needs vendored release Python + Homebrew LLD, see AGENTS.md "Embedded Python").
 [group('build & check')]
 build-release:
