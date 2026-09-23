@@ -1,0 +1,100 @@
+name: sccache benchmark
+
+# Experimental and manual only. Measures whether a shared local sccache helps
+# the cases a persistent target dir does not: a fresh target, a second
+# worktree, and switching between changes. See scripts/bench-sccache.py for
+# the arms, steps and method. Uses omp2's dev profile unchanged, and installs
+# sccache only into the job's temp dir: nothing is added to the runner's PATH
+# or left behind. It occupies the macOS runner for one to three hours, so CI
+# queues behind it; start it when the machine is otherwise idle, on AC power.
+#
+# GitHub only dispatches workflows whose file exists on the default branch
+# (`main`), which this one does not. Start a run by pushing the commit to
+# measure to the bench/sccache branch:
+#     git push -f origin HEAD:bench/sccache
+# The repository variable BENCH_REPS overrides the repetition count.
+on:
+  push:
+    branches: [bench/sccache]
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: Repetitions (each runs every arm's five steps)
+        required: true
+        default: "2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-sccache
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  SCCACHE_VERSION: "0.18.0"
+  # Pinned here rather than fetched next to the archive.
+  SCCACHE_SHA256: 308184519b646f5125289e8515b36f6ca65a13a041923994aebe702348674e8e
+
+jobs:
+  bench:
+    name: sccache across targets and worktrees
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+
+      - name: Install native build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install lld uv zstd ninja
+
+      - name: Download sccache into the job's temp dir
+        run: |
+          name="sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin"
+          curl -sSfL -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/$name.tar.gz"
+          echo "$SCCACHE_SHA256  $RUNNER_TEMP/$name.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          echo "SCCACHE_BIN=$RUNNER_TEMP/$name/sccache" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/$name/sccache" --version
+
+      # As in ci.yml: outside the checkout, behind vendor/ symlinks. Untimed.
+      - name: Prepare embedded Python
+        run: |
+          crates/py/scripts/fetch-python.sh "$RUNNER_TEMP/python"
+          mkdir -p vendor
+          ln -sfn "$RUNNER_TEMP/python/python" vendor/python
+          ln -sfn "$RUNNER_TEMP/python/python-release" vendor/python-release
+          test -f vendor/python/pyo3-config.txt
+
+      - name: Run benchmark
+        env:
+          REPS: ${{ inputs.reps || vars.BENCH_REPS || '2' }}
+        run: |
+          python3 scripts/bench-sccache.py --sccache "$SCCACHE_BIN" --reps "$REPS" \
+            --out "$RUNNER_TEMP/bench" --scratch "$RUNNER_TEMP/bench-scratch"
+
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/bench/summary.md" ]; then
+            cat "$RUNNER_TEMP/bench/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-sccache
+          path: |
+            ${{ runner.temp }}/bench/meta.json
+            ${{ runner.temp }}/bench/results.jsonl
+            ${{ runner.temp }}/bench/summary.md
+          if-no-files-found: warn
+          retention-days: 90
