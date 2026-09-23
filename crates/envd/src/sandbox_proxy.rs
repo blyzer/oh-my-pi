@@ -24,6 +24,7 @@ use url::Url;
 use crate::exec_settings::SandboxSettings;
 
 const MAX_CONNECTIONS: usize = 32;
+const MAX_LINGERING_REJECTIONS: usize = MAX_CONNECTIONS;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -163,6 +164,7 @@ trait ClientStream: Read + Write + Send + 'static + Sized {
 	fn set_idle_timeout(&self) -> io::Result<()>;
 	fn close(&self) -> io::Result<()>;
 	fn shutdown_write(&self) -> io::Result<()>;
+	fn set_blocking(&self) -> io::Result<()>;
 	fn set_drain_timeout(&self, timeout: Duration) -> io::Result<()>;
 }
 
@@ -182,6 +184,10 @@ impl ClientStream for TcpStream {
 
 	fn shutdown_write(&self) -> io::Result<()> {
 		self.shutdown(std::net::Shutdown::Write)
+	}
+
+	fn set_blocking(&self) -> io::Result<()> {
+		self.set_nonblocking(false)
 	}
 
 	fn set_drain_timeout(&self, timeout: Duration) -> io::Result<()> {
@@ -206,6 +212,10 @@ impl ClientStream for UnixStream {
 
 	fn shutdown_write(&self) -> io::Result<()> {
 		self.shutdown(std::net::Shutdown::Write)
+	}
+
+	fn set_blocking(&self) -> io::Result<()> {
+		self.set_nonblocking(false)
 	}
 
 	fn set_drain_timeout(&self, timeout: Duration) -> io::Result<()> {
@@ -246,12 +256,13 @@ where
 	L: BrokerListener,
 {
 	thread::Builder::new().name(name.into()).spawn(move || {
+		let rejecting = Arc::new(AtomicUsize::new(0));
 		while !shutdown.load(Ordering::Acquire) {
 			match listener.accept() {
 				Ok(_stream) if shutdown.load(Ordering::Acquire) => break,
 				Ok(stream) if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS => {
 					live.fetch_sub(1, Ordering::AcqRel);
-					let _ = http_deny(stream);
+					reject_over_limit(stream, &rejecting);
 				},
 				Ok(stream) => {
 					let policy = policy.clone();
@@ -275,6 +286,38 @@ where
 			}
 		}
 	})
+}
+
+/// Refuses a connection past [`MAX_CONNECTIONS`] without stalling `accept`: a
+/// rejecter thread, capped separately from the workers, delivers the denial
+/// with a clean close. Past that cap the denial is written inline and the
+/// stream dropped, which may reset a client that is still sending.
+fn reject_over_limit<S: ClientStream>(stream: S, rejecting: &Arc<AtomicUsize>) {
+	if rejecting.fetch_add(1, Ordering::AcqRel) >= MAX_LINGERING_REJECTIONS {
+		rejecting.fetch_sub(1, Ordering::AcqRel);
+		let _ = http_deny(stream);
+		return;
+	}
+	let worker_rejecting = Arc::clone(rejecting);
+	if thread::Builder::new()
+		.name("omp-scoped-proxy-reject".into())
+		.spawn(move || {
+			let _ = reject(stream);
+			worker_rejecting.fetch_sub(1, Ordering::AcqRel);
+		})
+		.is_err()
+	{
+		rejecting.fetch_sub(1, Ordering::AcqRel);
+	}
+}
+
+fn reject<S: ClientStream>(client: S) -> io::Result<()> {
+	// BSD accept() hands out sockets that inherit the listener's O_NONBLOCK, and
+	// the drain needs blocking reads bounded by its timeout.
+	client.set_blocking()?;
+	client.set_idle_timeout()?;
+	let mut reader = BufReader::new(client.duplicate()?);
+	http_reject(client, &mut reader, |client| http_deny(client))
 }
 
 #[derive(Clone)]
@@ -1600,6 +1643,82 @@ mod tests {
 			.expect("denial is delivered before a clean close");
 		assert!(response.starts_with("HTTP/1.1 403"));
 		proxy.join().expect("denial proxy");
+	}
+
+	#[test]
+	fn over_limit_denial_survives_unread_request_bytes() {
+		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
+		listener
+			.set_nonblocking(true)
+			.expect("nonblocking listener");
+		let mut client =
+			TcpStream::connect(listener.local_addr().expect("proxy address")).expect("connect proxy");
+		// The whole request is queued before the broker accepts, so closing right
+		// after the denial would close over unread input and reset.
+		let mut request = b"GET http://127.0.0.1:80/ HTTP/1.1\r\n\r\n".to_vec();
+		request.resize(request.len() + 32 * 1024, b'x');
+		client.write_all(&request).expect("request");
+		client
+			.shutdown(std::net::Shutdown::Write)
+			.expect("request end");
+		let shutdown = Arc::new(AtomicBool::new(false));
+		let saturated = Arc::new(AtomicUsize::new(MAX_CONNECTIONS));
+		let broker = spawn_listener(
+			"omp-scoped-proxy-test",
+			listener,
+			policy(80),
+			saturated,
+			Arc::clone(&shutdown),
+		)
+		.expect("broker");
+		let mut response = String::new();
+		client
+			.read_to_string(&mut response)
+			.expect("over-limit denial is delivered before a clean close");
+		assert!(response.starts_with("HTTP/1.1 403"));
+		shutdown.store(true, Ordering::Release);
+		broker.join().expect("broker");
+	}
+
+	#[test]
+	fn over_limit_rejections_never_stall_accept() {
+		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
+		listener
+			.set_nonblocking(true)
+			.expect("nonblocking listener");
+		let address = listener.local_addr().expect("proxy address");
+		let shutdown = Arc::new(AtomicBool::new(false));
+		let saturated = Arc::new(AtomicUsize::new(MAX_CONNECTIONS));
+		let broker = spawn_listener(
+			"omp-scoped-proxy-test",
+			listener,
+			policy(80),
+			saturated,
+			Arc::clone(&shutdown),
+		)
+		.expect("broker");
+		// Silent clients never end their input, so every lingering rejection holds
+		// its drain open; clients past the rejection cap must still be answered.
+		let started = Instant::now();
+		let mut clients = Vec::new();
+		for _ in 0..MAX_LINGERING_REJECTIONS + 8 {
+			let mut client = TcpStream::connect(address).expect("connect proxy");
+			client
+				.set_read_timeout(Some(Duration::from_secs(5)))
+				.expect("read timeout");
+			let mut response = Vec::new();
+			let mut byte = [0_u8; 1];
+			while !response.ends_with(b"\r\n\r\n") {
+				client.read_exact(&mut byte).expect("over-limit denial");
+				response.push(byte[0]);
+			}
+			assert!(response.starts_with(b"HTTP/1.1 403"));
+			clients.push(client);
+		}
+		assert!(started.elapsed() < DENIAL_DRAIN_TIMEOUT, "accept waited on a lingering rejection");
+		drop(clients);
+		shutdown.store(true, Ordering::Release);
+		broker.join().expect("broker");
 	}
 
 	#[test]
