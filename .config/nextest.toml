@@ -8,6 +8,14 @@
 # crates/core and crates/shell-*, so dropping that step silently deletes real
 # coverage.
 
+# The oldest nextest this repository is verified against: the self-hosted macOS
+# runner runs the whole workspace suite and P1-P8 on 0.9.143. nextest enforces
+# this itself, so every `cargo nextest` invocation older than it fails with an
+# upgrade hint (`cargo nextest show-config version` checks it alone). Raise it
+# when this file starts using a newer feature; CI installs a pinned version on
+# hosted runners and checks this floor on self-hosted ones.
+nextest-version = { required = "0.9.143" }
+
 [profile.default]
 # Print each failure when it happens and again in the final summary — a run
 # that fails early in a long workspace sweep should not need scrollback.
