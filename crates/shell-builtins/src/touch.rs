@@ -1135,19 +1135,60 @@ mod tests {
 	/// end-state assertions cannot say which one ran. Exercising each on its own
 	/// means a failure names the call that dropped a stamp instead of the test
 	/// that happened to notice downstream.
+	///
+	/// Reading the access stamp straight back is not enough on the macOS CI
+	/// volume, even with no interval. Something outside the test (Spotlight or
+	/// the endpoint scanner on that machine) reads a freshly written file within
+	/// milliseconds of its close, and that volume, lacking `strictatime`,
+	/// refreshes the access stamp on a read whenever it is not later than the
+	/// modification stamp, as this one is. Measured there over 400 files a run:
+	/// about 1 in 100 lose the stamp between the call and a `stat` issued at
+	/// once, and an `fstat` through a descriptor held across the call fares no
+	/// better; after 5 ms nearly all have lost it, and every lost stamp reads as
+	/// a moment inside that interval, never as the file's creation time. Files
+	/// left 5 s before stamping, or never written, lost none.
+	///
+	/// So a read that misses the requested access stamp is not by itself a
+	/// failure, but it is held to the one thing the volume may have written
+	/// there: a moment later than the stamp the file carried going in, and no
+	/// later than the read. A call that ignored the stamp leaves the old one and
+	/// fails on the spot; one that wrote the wrong value fails likewise. The
+	/// requested stamp is still required outright, from at least one of a few
+	/// fresh attempts: nothing but the call can have put that value there, so
+	/// one exact read proves it was applied, however briefly it lasted.
 	#[cfg(unix)]
 	#[test]
 	fn each_time_setting_syscall_applies_both_stamps() {
+		const ATTEMPTS: usize = 5;
 		let (_dir, root) = canonical_tempdir();
 		let atime = FileTime::from_unix_time(1_000_000, 0);
 		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		let now = || FileTime::from_system_time(SystemTime::now());
 		let check = |name: &str, file: &str, apply: &dyn Fn(&Path) -> std::io::Result<()>| {
-			let path = root.join(file);
-			fs::write(&path, b"x").unwrap();
-			apply(&path).unwrap_or_else(|error| panic!("{name} failed: {error}"));
-			let (got_atime, got_mtime) = times_of(&path);
-			assert_eq!(got_atime, atime, "{name} did not apply the access stamp");
-			assert_eq!(got_mtime, mtime, "{name} did not apply the modification stamp");
+			let mut refreshed = Vec::new();
+			for attempt in 0..ATTEMPTS {
+				let path = root.join(format!("{file}-{attempt}"));
+				fs::write(&path, b"x").unwrap();
+				let (going_in, _) = times_of(&path);
+				apply(&path).unwrap_or_else(|error| panic!("{name} failed: {error}"));
+				let (got_atime, got_mtime) = times_of(&path);
+				let read_by = now();
+				assert_eq!(got_mtime, mtime, "{name} did not apply the modification stamp");
+				if got_atime == atime {
+					return;
+				}
+				assert!(
+					got_atime > going_in && got_atime <= read_by,
+					"{name} did not apply the access stamp: it reads {got_atime:?}, which is neither \
+					 the requested {atime:?} nor a later access (after {going_in:?}, the stamp the \
+					 file carried going in, and by {read_by:?}, when it was read)"
+				);
+				refreshed.push(got_atime);
+			}
+			panic!(
+				"{name} never read back the requested access stamp {atime:?} in {ATTEMPTS} fresh \
+				 attempts; each time it read as a later access instead: {refreshed:?}"
+			);
 		};
 
 		check("utimensat", "follow", &|path| set_path_times(path, atime, mtime, true));
