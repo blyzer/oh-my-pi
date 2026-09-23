@@ -1331,6 +1331,7 @@ mod tests {
 	use smallvec::smallvec;
 
 	use super::*;
+	use crate::test_support::ScratchSession;
 
 	const FENCE: &str = "fn main() {\n    println!(\"hi\");\n}";
 
@@ -1349,10 +1350,8 @@ mod tests {
 			.unwrap_or_else(|| panic!("text point `{needle}` missing from:\n{text}"))
 	}
 
-	fn session(with_bash: bool) -> Session {
-		let directory = tempfile::tempdir().expect("temp directory");
-		let path = directory.keep().join("copy.oms");
-		let mut session = Session::create(path, ComponentRegistry::standard()).expect("session");
+	fn session(with_bash: bool) -> ScratchSession {
+		let mut session = ScratchSession::create("copy.oms");
 		session.begin_turn().expect("turn");
 		session.user("show me main", Vec::new()).expect("user");
 		session

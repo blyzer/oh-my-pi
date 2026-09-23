@@ -446,11 +446,11 @@ pub fn retry_hint_row(key_label: &str) -> Component {
 #[cfg(test)]
 mod tests {
 	use omp_dom::{NodeSpec, Op, Txn, Value};
-	use omp_session::{ComponentRegistry, Session};
+	use omp_session::Session;
 	use omp_tui::{Ui, frame_text};
-	use tempfile::tempdir;
 
 	use super::*;
+	use crate::test_support::ScratchSession;
 
 	fn numbered(count: usize) -> String {
 		(1..=count)
@@ -467,11 +467,8 @@ mod tests {
 			.collect()
 	}
 
-	fn session() -> Session {
-		let directory = tempdir().expect("temp directory");
-		let path = directory.keep().join("notices.oms");
-		let mut session =
-			Session::create(path, ComponentRegistry::standard()).expect("create session");
+	fn session() -> ScratchSession {
+		let mut session = ScratchSession::create("notices.oms");
 		session.begin_turn().expect("begin turn");
 		session.user("hello", Vec::new()).expect("user");
 		session
@@ -617,11 +614,12 @@ mod tests {
 		append_notice(&mut session, "warn", "Interrupted");
 		assert!(aborted_tool_tail(session.dom()), "interrupt notice after a running tool");
 
+		let cause = session.head().expect("head");
 		session
 			.patch(Txn {
-				cause: session.head().expect("head"),
+				cause,
 				label: None,
-				ops:   vec![Op::Set {
+				ops: vec![Op::Set {
 					h:     tool,
 					prop:  PropId::Status.into(),
 					value: Value::Str(Str::new_static("cancelled")),
@@ -630,11 +628,12 @@ mod tests {
 			.expect("cancel");
 		assert!(aborted_tool_tail(session.dom()));
 
+		let cause = session.head().expect("head");
 		session
 			.patch(Txn {
-				cause: session.head().expect("head"),
+				cause,
 				label: None,
-				ops:   vec![Op::Set {
+				ops: vec![Op::Set {
 					h:     tool,
 					prop:  PropId::Status.into(),
 					value: Value::Str(Str::new_static("ok")),

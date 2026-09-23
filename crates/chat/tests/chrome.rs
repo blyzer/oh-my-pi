@@ -3,6 +3,9 @@
 //! `scripts/qa/fixtures/gallery/surfaces/chrome-*.txt` band rows (idle,
 //! working, resized).
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::time::Duration;
 
 use omp_chat::{
@@ -12,9 +15,9 @@ use omp_chat::{
 };
 use omp_core::Str;
 use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropKey, Txn, Value};
-use omp_session::{ComponentRegistry, Session};
+use omp_session::Session;
 use omp_tui::{Charset, Icon, Size, Ui, UiContext, frame_text};
-use tempfile::tempdir;
+use test_support::ScratchSession;
 
 /// The rendered surface with this crate's version replaced by a fixed token.
 ///
@@ -41,10 +44,8 @@ fn reference_band(name: &str, row: usize) -> String {
 	text.lines().nth(row).expect("band row").to_owned()
 }
 
-fn boot_session() -> Session {
-	let directory = tempdir().expect("temp directory");
-	let path = directory.keep().join("boot.oms");
-	let mut session = Session::create(path, ComponentRegistry::standard()).expect("create session");
+fn boot_session() -> ScratchSession {
+	let mut session = ScratchSession::create("boot.oms");
 	let cause = session.head().expect("genesis");
 	let meta = session.dom().meta();
 	let facts = serde_json::json!({

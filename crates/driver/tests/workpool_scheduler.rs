@@ -153,13 +153,16 @@ struct Harness {
 	launcher:    Arc<Launcher>,
 	producers:   Arc<WorkpoolRegistry>,
 	owner_actor: tokio::task::JoinHandle<()>,
+	/// Holds the owner's journal; outlives replay when released.
+	scratch:     tempfile::TempDir,
 }
 
 impl Harness {
 	/// Closes every owner mailbox and joins the sole session actor before
-	/// replay.
-	async fn release_session_owner(self) -> std::path::PathBuf {
-		let Self { registry, parent, jobs, launcher, producers, owner_actor } = self;
+	/// replay. The returned directory holds the journal; keep it alive while
+	/// reopening the returned path.
+	async fn release_session_owner(self) -> (tempfile::TempDir, std::path::PathBuf) {
+		let Self { registry, parent, jobs, launcher, producers, owner_actor, scratch } = self;
 		registry.release_owner();
 		launcher.sessions.remove(&SessionId::new(sf!("owner")));
 		drop(registry);
@@ -171,13 +174,13 @@ impl Harness {
 		owner_actor
 			.await
 			.expect("owner actor stops after its mailbox closes");
-		path
+		(scratch, path)
 	}
 }
 
 fn harness(limit: usize, fresh: bool, die_once: bool) -> Harness {
-	let temp = tempfile::tempdir().expect("temporary directory");
-	let path = temp.keep().join("owner.oms");
+	let scratch = tempfile::tempdir().expect("temporary directory");
+	let path = scratch.path().join("owner.oms");
 	let parent = Session::create(path, ComponentRegistry::standard()).expect("parent session");
 	let spill = parent.blobs().clone();
 	let snapshot = Arc::new(RwLock::new(parent.dom().snapshot()));
@@ -224,7 +227,7 @@ fn harness(limit: usize, fresh: bool, die_once: bool) -> Harness {
 		Arc::new(Policy { limit, fresh }),
 		omp_tools::eval::EvalSessionControl::default(),
 	));
-	Harness { registry, parent, jobs, launcher, producers, owner_actor }
+	Harness { registry, parent, jobs, launcher, producers, owner_actor, scratch }
 }
 
 async fn wait_pending(pool: &omp_driver::subagent::workpool_scheduler::Workpool, expected: usize) {
@@ -413,7 +416,7 @@ async fn persistent_workers_batch_queue_and_aggregate_delivery_stays_atomic() {
 		parent.journal_path().to_path_buf()
 	};
 	drop(pool);
-	let released_path = harness.release_session_owner().await;
+	let (_scratch, released_path) = harness.release_session_owner().await;
 	assert_eq!(released_path, path);
 	let replayed = Session::open(path, ComponentRegistry::standard()).expect("replay pool state");
 	let durable = omp_driver::subagent::workpool_scheduler::replayed_state(&replayed, "audit")
@@ -446,7 +449,7 @@ async fn restart_adopts_durable_drained_pool_before_settlement_patch() {
 		"simulate a crash before JobBoard poll commits settlement"
 	);
 	drop(pool);
-	let released_path = harness.release_session_owner().await;
+	let (_scratch, released_path) = harness.release_session_owner().await;
 	assert_eq!(released_path, path);
 
 	let mut replayed = Session::open(path, ComponentRegistry::standard()).expect("restart parent");

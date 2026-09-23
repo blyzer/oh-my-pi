@@ -382,14 +382,13 @@ fn prop_u64(node: &omp_dom::Node, prop: PropId) -> u64 {
 mod tests {
 	use omp_dom::{Handle, NodeSpec, Op, Txn};
 	use omp_journal::data::{ReceiptIdentity, ReceiptRole, TurnReceipt};
-	use omp_session::{ComponentRegistry, Session};
+	use omp_session::Session;
 
 	use super::*;
+	use crate::test_support::ScratchSession;
 
-	fn session() -> Session {
-		let directory = tempfile::tempdir().expect("temp directory");
-		Session::create(directory.keep().join("status.oms"), ComponentRegistry::standard())
-			.expect("session")
+	fn session() -> ScratchSession {
+		ScratchSession::create("status.oms")
 	}
 
 	fn set(session: &mut Session, handle: Handle, prop: PropId, value: Value) {
@@ -407,7 +406,7 @@ mod tests {
 		director_mode(with_director(family, status, state).dom())
 	}
 
-	fn with_director(family: &str, status: &str, state: &[(&str, Value)]) -> omp_session::Session {
+	fn with_director(family: &str, status: &str, state: &[(&str, Value)]) -> ScratchSession {
 		let mut session = session();
 		let meta = session.dom().meta();
 		let directors = session
@@ -429,16 +428,9 @@ mod tests {
 			node = node.with_prop(PropKey::Custom(Str::new(*key)), value.clone());
 		}
 		let cause = session.head().expect("head");
+		let after = session.dom().children(directors).last().copied();
 		session
-			.patch(Txn {
-				cause,
-				label: None,
-				ops: vec![Op::Ins {
-					parent: directors,
-					after: session.dom().children(directors).last().copied(),
-					node,
-				}],
-			})
+			.patch(Txn { cause, label: None, ops: vec![Op::Ins { parent: directors, after, node }] })
 			.expect("director");
 		session
 	}

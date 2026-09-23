@@ -1,6 +1,9 @@
 //! Key semantics of the interactive actor: Escape ladder, Ctrl+C,
 //! dequeue, clipboard chords, panel routing, gestures, and Esc hooks.
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{
 	sync::{
 		Arc,
@@ -22,7 +25,7 @@ use omp_chat::{
 };
 use omp_core::Str;
 use omp_dom::{KnownTag, NodeSpec, Op, PropId, Tag, Txn, Value};
-use omp_session::{ComponentRegistry, Session};
+use omp_session::Session;
 use omp_tui::{
 	Chord, Frame, InputDecoder, InputEvent, Key, KeyEvent, Mods, Mouse, MouseButton, MouseReport,
 	Size, UiContext,
@@ -30,6 +33,7 @@ use omp_tui::{
 	slots::ResizePolicy,
 };
 use tempfile::tempdir;
+use test_support::ScratchSession;
 
 const BINDS: &str = r#"
 bind escape cl_interrupt
@@ -58,14 +62,12 @@ struct Harness {
 	host:     NativeHost,
 	commands: flume::Receiver<HostCommand>,
 	up:       flume::Receiver<Up>,
-	session:  Session,
+	session:  ScratchSession,
 	con:      Arc<omp_con::Ctx>,
 }
 
-fn idle_session() -> Session {
-	let directory = tempdir().expect("temp directory");
-	let path = directory.keep().join("keys.oms");
-	let mut session = Session::create(path, ComponentRegistry::standard()).expect("create session");
+fn idle_session() -> ScratchSession {
+	let mut session = ScratchSession::create("keys.oms");
 	session.begin_turn().expect("begin turn");
 	session.user("earlier prompt", Vec::new()).expect("user");
 	session
@@ -78,7 +80,7 @@ fn idle_session() -> Session {
 	session
 }
 
-fn harness(mut session: Session) -> Harness {
+fn harness(mut session: ScratchSession) -> Harness {
 	let (snapshot, dom_events) = session.subscribe();
 	let (_, kernel_events) = flume::unbounded();
 	let (commands, command_rx) = flume::unbounded();

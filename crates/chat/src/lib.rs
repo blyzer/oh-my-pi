@@ -51,6 +51,8 @@ pub mod settings;
 pub mod status_band;
 /// DOM-derived status values.
 pub mod status_line;
+#[cfg(test)]
+mod test_support;
 /// Reasoning text prepared for display (prose-only filter).
 pub mod thinking;
 /// Retained transcript ledger and observer-local transcript facts.

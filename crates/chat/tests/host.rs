@@ -1,5 +1,8 @@
 //! Session-DOM projection laws for the interactive chat actor.
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::sync::Arc;
 
 use omp_agent::{ApprovalBook, ApprovalScope, ApprovalSpec, Up};
@@ -16,11 +19,10 @@ use omp_dom::{Dom, Event, KnownTag, PropId, Tag};
 use omp_session::{ComponentRegistry, Session};
 use omp_tui::{Key, Mods, Mouse, MouseButton, MouseReport, Size, UiContext, slots::ResizePolicy};
 use tempfile::tempdir;
+use test_support::ScratchSession;
 
-fn fixture() -> (Session, omp_journal::EntryId) {
-	let directory = tempdir().expect("temp directory");
-	let path = directory.keep().join("fixture.oms");
-	let mut session = Session::create(path, ComponentRegistry::standard()).expect("create session");
+fn fixture() -> (ScratchSession, omp_journal::EntryId) {
+	let mut session = ScratchSession::create("fixture.oms");
 	let genesis = session.head().expect("genesis");
 	session.begin_turn().expect("begin turn");
 	session.user("hello", Vec::new()).expect("user");
@@ -252,7 +254,7 @@ fn bound_host(models: Vec<omp_chat::ModelRow>) -> (NativeHost, flume::Receiver<H
 
 fn bound_host_with_session(
 	models: Vec<omp_chat::ModelRow>,
-) -> (NativeHost, flume::Receiver<HostCommand>, Session) {
+) -> (NativeHost, flume::Receiver<HostCommand>, ScratchSession) {
 	let (mut session, _) = fixture();
 	let (snapshot, dom_events) = session.subscribe();
 	let (_, kernel_events) = flume::unbounded();
@@ -318,14 +320,15 @@ fn ctrl_c_behavior_is_independent_of_turn_activity_from_the_tree() {
 		.last()
 		.expect("turn");
 	let cause = session.head().expect("head");
+	let after = session.dom().children(turn).last().copied();
 	session
 		.patch(Txn {
 			cause,
 			label: None,
 			ops: vec![Op::Ins {
 				parent: turn,
-				after:  session.dom().children(turn).last().copied(),
-				node:   NodeSpec::new(KnownTag::Notice)
+				after,
+				node: NodeSpec::new(KnownTag::Notice)
 					.with_prop(PropId::Kind, Value::Str(omp_core::Str::new_static("info")))
 					.with_content(omp_core::Str::new_static("still working")),
 			}],
@@ -352,14 +355,15 @@ fn ctrl_c_behavior_is_independent_of_turn_activity_from_the_tree() {
 		.last()
 		.expect("turn");
 	let cause = session.head().expect("head");
+	let after = session.dom().children(turn).last().copied();
 	session
 		.patch(Txn {
 			cause,
 			label: None,
 			ops: vec![Op::Ins {
 				parent: turn,
-				after:  session.dom().children(turn).last().copied(),
-				node:   NodeSpec::new(KnownTag::Notice)
+				after,
+				node: NodeSpec::new(KnownTag::Notice)
 					.with_prop(PropId::Kind, Value::Str(omp_core::Str::new_static("warn")))
 					.with_content(omp_core::Str::new_static("Turn interrupted")),
 			}],
@@ -935,7 +939,8 @@ fn thinking_toggle_changes_projection_without_touching_dom() {
 /// A host over a fresh fixture session with a live kernel-event feed and
 /// default retry/interrupt binds.
 fn kernel_host()
--> (NativeHost, flume::Receiver<HostCommand>, flume::Sender<omp_agent::KernelEvent>, Session) {
+-> (NativeHost, flume::Receiver<HostCommand>, flume::Sender<omp_agent::KernelEvent>, ScratchSession)
+{
 	let (mut session, _) = fixture();
 	let (snapshot, dom_events) = session.subscribe();
 	let (kernel_tx, kernel_events) = flume::unbounded();
@@ -986,14 +991,15 @@ fn append_notice(session: &mut Session, kind: &'static str, text: &'static str) 
 	use omp_dom::{NodeSpec, Op, Txn, Value};
 	let turn = last_turn(session);
 	let cause = session.head().expect("head");
+	let after = session.dom().children(turn).last().copied();
 	session
 		.patch(Txn {
 			cause,
 			label: None,
 			ops: vec![Op::Ins {
 				parent: turn,
-				after:  session.dom().children(turn).last().copied(),
-				node:   NodeSpec::new(KnownTag::Notice)
+				after,
+				node: NodeSpec::new(KnownTag::Notice)
 					.with_prop(PropId::Kind, Value::Str(omp_core::Str::new_static(kind)))
 					.with_content(omp_core::Str::new_static(text)),
 			}],
@@ -1208,14 +1214,15 @@ fn append_named_notice(session: &mut Session, kind: &'static str, name: &'static
 	use omp_dom::{NodeSpec, Op, Txn, Value};
 	let turn = last_turn(session);
 	let cause = session.head().expect("head");
+	let after = session.dom().children(turn).last().copied();
 	session
 		.patch(Txn {
 			cause,
 			label: None,
 			ops: vec![Op::Ins {
 				parent: turn,
-				after:  session.dom().children(turn).last().copied(),
-				node:   NodeSpec::new(KnownTag::Notice)
+				after,
+				node: NodeSpec::new(KnownTag::Notice)
 					.with_prop(PropId::Kind, Value::Str(omp_core::Str::new_static(kind)))
 					.with_prop(PropId::Name, Value::Str(omp_core::Str::new_static(name)))
 					.with_content(omp_core::Str::new(body)),
@@ -1305,7 +1312,7 @@ fn ask_call_waiting_on_the_user_earns_one_toast() {
 
 /// Journals a running `ask` call with two questions and returns the host
 /// showing its dialog.
-fn ask_host() -> (NativeHost, flume::Receiver<HostCommand>, Session) {
+fn ask_host() -> (NativeHost, flume::Receiver<HostCommand>, ScratchSession) {
 	let (mut host, commands, _kernel, mut session) = kernel_host();
 	session.begin_turn().expect("begin turn");
 	session.user("pick", Vec::new()).expect("user");
