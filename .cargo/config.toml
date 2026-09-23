@@ -93,6 +93,17 @@ codegen-backend = "llvm"
 codegen-backend = "llvm"
 [profile.dev.build-override]
 codegen-backend = "llvm"
+# Test builds are homogeneously LLVM. Tests rely on unwinding: Drop during a
+# panic, catch_unwind, JoinError::is_panic and thread join errors. Cranelift
+# emits no landing pads, so in a Cranelift test build none of that runs: a
+# failing test leaks its children and temp dirs, catch sites stop catching, and
+# a panicking worker thread aborts the whole binary. `cargo build`/`cargo run`
+# keep the dev backend above; only `cargo test`/`nextest` build this profile,
+# dependencies included. Never move a single crate's backend for tests instead:
+# a per-crate override for omp-e2e crashed deterministically (SIGSEGV) at the
+# LLVM/Cranelift boundary. Evidence: docs/audits/cranelift-panic-cleanup.md.
+[profile.test]
+codegen-backend = "llvm"
 [profile.release]
 debug = false
 split-debuginfo = "off"

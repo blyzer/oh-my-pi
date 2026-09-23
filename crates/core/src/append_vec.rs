@@ -1334,31 +1334,39 @@ mod tests {
 		vec.extend(LyingLen::new(vec![1, 2], 3));
 	}
 
-	#[test]
-	#[should_panic(expected = "ExactSizeIterator over-yielded relative to its reported length")]
-	fn test_extend_publishes_reported_prefix_before_over_yield_panic() {
-		let vec = AppendVec::<u32>::new();
-		let panic = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-			vec.extend(LyingLen::new(vec![10, 20, 30, 40], 2));
-		}))
-		.expect_err("over-yielding ExactSizeIterator must panic");
-
-		assert_eq!(vec.len(), 2);
-		assert_eq!(vec.iter().copied().collect::<Vec<_>>(), vec![10, 20]);
-
-		panic::resume_unwind(panic);
+	/// Runs `f`, which must panic, and returns its panic message.
+	fn panic_message<R>(f: impl FnOnce() -> R) -> String {
+		let Err(payload) = panic::catch_unwind(panic::AssertUnwindSafe(f)) else {
+			panic!("must panic");
+		};
+		match payload.downcast::<String>() {
+			Ok(message) => *message,
+			Err(payload) => (*payload.downcast::<&str>().expect("string panic payload")).to_owned(),
+		}
 	}
 
 	#[test]
-	#[should_panic(expected = "ExactSizeIterator length overflowed the AppendVec capacity")]
+	fn test_extend_publishes_reported_prefix_before_over_yield_panic() {
+		let vec = AppendVec::<u32>::new();
+		let message = panic_message(|| vec.extend(LyingLen::new(vec![10, 20, 30, 40], 2)));
+
+		assert_eq!(message, "ExactSizeIterator over-yielded relative to its reported length");
+		assert_eq!(vec.len(), 2);
+		assert_eq!(vec.iter().copied().collect::<Vec<_>>(), vec![10, 20]);
+	}
+
+	#[test]
 	fn test_extend_lying_len_usize_max_panics_before_reserving() {
 		// The overflow check runs before the reservation CAS, so the counter
-		// is never touched. No in-test catch: `catch_unwind` landing pads are
-		// not emitted by the cranelift dev backend, so the catch never
-		// engages and the panic reaches the harness anyway.
+		// is never touched: the next push lands at index 1.
 		let vec = AppendVec::<u32>::new();
 		vec.push(1);
-		vec.extend(LyingLen::new(vec![2, 3], usize::MAX));
+		let message = panic_message(|| vec.extend(LyingLen::new(vec![2, 3], usize::MAX)));
+
+		assert_eq!(message, "ExactSizeIterator length overflowed the AppendVec capacity");
+		assert_eq!(vec.len(), 1);
+		vec.push(4);
+		assert_eq!(vec.iter().copied().collect::<Vec<_>>(), vec![1, 4]);
 	}
 
 	#[test]
