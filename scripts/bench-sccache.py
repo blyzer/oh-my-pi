@@ -145,14 +145,19 @@ class Cache:
 
 
 def build(tree: Path, target: Path, cache: Cache | None, command: list[str]) -> tuple[float, int]:
-	env = {**os.environ, "CARGO_TARGET_DIR": str(target), "CARGO_TERM_COLOR": "never"}
+	# The target dir goes on the command line, not in CARGO_TARGET_DIR: sccache
+	# hashes CARGO_* variables verbatim, while SCCACHE_BASEDIRS only normalizes
+	# arguments and sources, so an absolute path in the environment would
+	# defeat it.
+	env = {**os.environ, "CARGO_TERM_COLOR": "never"}
+	env.pop("CARGO_TARGET_DIR", None)
 	env.pop("RUSTC_WRAPPER", None)
 	env.pop("CARGO_BUILD_RUSTC_WRAPPER", None)
 	if cache is not None:
 		env.update({k: v for k, v in cache.env.items() if k.startswith("SCCACHE_")})
 		env["RUSTC_WRAPPER"] = cache.binary
 	started = time.monotonic()
-	result = subprocess.run(command, cwd=tree, env=env, capture_output=True, text=True, check=False)
+	result = subprocess.run(command + ["--target-dir", str(target)], cwd=tree, env=env, capture_output=True, text=True, check=False)
 	elapsed = time.monotonic() - started
 	if result.returncode != 0:
 		sys.stderr.write(result.stderr[-8000:])
