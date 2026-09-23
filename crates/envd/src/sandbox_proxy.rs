@@ -12,7 +12,7 @@ use std::{
 		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	thread::{self, JoinHandle},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 use omp_core::{FastHashMap, Str, Ulid, encoding::base64};
@@ -31,6 +31,8 @@ const MAX_HEADER_COUNT: usize = 128;
 const MAX_TLS_CLIENT_HELLO_BYTES: usize = 64 * 1024;
 const MAX_TLS_RECORD_BYTES: usize = 16 * 1024;
 const MAX_ATTEMPTS: usize = 64;
+const DENIAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_DENIAL_DRAIN_BYTES: usize = 1024 * 1024;
 
 /// A session-owned scoped egress broker. It exposes a loopback listener on
 /// macOS and an owned Unix socket on Linux, so an untrusted command can reach
@@ -160,6 +162,8 @@ trait ClientStream: Read + Write + Send + 'static + Sized {
 	fn duplicate(&self) -> io::Result<Self>;
 	fn set_idle_timeout(&self) -> io::Result<()>;
 	fn close(&self) -> io::Result<()>;
+	fn shutdown_write(&self) -> io::Result<()>;
+	fn set_drain_timeout(&self, timeout: Duration) -> io::Result<()>;
 }
 
 impl ClientStream for TcpStream {
@@ -174,6 +178,14 @@ impl ClientStream for TcpStream {
 
 	fn close(&self) -> io::Result<()> {
 		self.shutdown(std::net::Shutdown::Both)
+	}
+
+	fn shutdown_write(&self) -> io::Result<()> {
+		self.shutdown(std::net::Shutdown::Write)
+	}
+
+	fn set_drain_timeout(&self, timeout: Duration) -> io::Result<()> {
+		self.set_read_timeout(Some(timeout))
 	}
 }
 
@@ -190,6 +202,14 @@ impl ClientStream for UnixStream {
 
 	fn close(&self) -> io::Result<()> {
 		self.shutdown(std::net::Shutdown::Both)
+	}
+
+	fn shutdown_write(&self) -> io::Result<()> {
+		self.shutdown(std::net::Shutdown::Write)
+	}
+
+	fn set_drain_timeout(&self, timeout: Duration) -> io::Result<()> {
+		self.set_read_timeout(Some(timeout))
 	}
 }
 
@@ -433,7 +453,7 @@ fn http<S: ClientStream>(
 	let target = words.next().ok_or_else(policy_blocked)?;
 	let version = words.next().ok_or_else(policy_blocked)?;
 	if words.next().is_some() || !version.starts_with("HTTP/") {
-		return http_deny(client);
+		return http_reject(client, reader, |client| http_deny(client));
 	}
 
 	let (host, port, origin) = if method.eq_ignore_ascii_case("CONNECT") {
@@ -469,11 +489,11 @@ fn http<S: ClientStream>(
 			break;
 		}
 		if headers.len() >= MAX_HEADER_COUNT {
-			return http_deny(client);
+			return http_reject(client, reader, |client| http_deny(client));
 		}
 		let line = std::str::from_utf8(&line).map_err(invalid_data)?;
 		let Some((name, value)) = line.trim_end().split_once(':') else {
-			return http_deny(client);
+			return http_reject(client, reader, |client| http_deny(client));
 		};
 		if name.eq_ignore_ascii_case("Connection") {
 			connection_tokens.extend(value.split(',').map(str::trim).map(str::to_ascii_lowercase));
@@ -482,7 +502,7 @@ fn http<S: ClientStream>(
 			content_length = Some(value.trim().parse::<usize>().map_err(invalid_data)?);
 		}
 		if name.eq_ignore_ascii_case("Transfer-Encoding") {
-			return http_deny(client);
+			return http_reject(client, reader, |client| http_deny(client));
 		}
 		headers.push((name.to_owned(), value.trim().to_owned()));
 	}
@@ -492,12 +512,14 @@ fn http<S: ClientStream>(
 		.and_then(|(_, value)| http_token(value))
 		.filter(|token| policy.attempt_is_active(token))
 	else {
-		return http_deny(client);
+		return http_reject(client, reader, |client| http_deny(client));
 	};
 
 	let mut upstream = match connect(policy, &token, &host, port) {
 		Ok(stream) => stream,
-		Err(_) => return http_policy_deny(client, &host, port),
+		Err(_) => {
+			return http_reject(client, reader, |client| http_policy_deny(client, &host, port));
+		},
 	};
 	if origin.is_none() {
 		client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
@@ -526,6 +548,46 @@ fn http<S: ClientStream>(
 		relay(client, upstream)?;
 	}
 	Ok(())
+}
+
+/// Delivers a denial issued before the request was fully read. Closing a socket
+/// with unread input resets the connection, which can discard the response
+/// before the client reads it; half-closing and draining a bounded tail of the
+/// request first makes the close a FIN.
+fn http_reject<S: ClientStream>(
+	mut client: S,
+	reader: &mut BufReader<S>,
+	deny: impl FnOnce(&mut S) -> io::Result<()>,
+) -> io::Result<()> {
+	deny(&mut client)?;
+	client.shutdown_write()?;
+	drain(&client, reader, MAX_DENIAL_DRAIN_BYTES, DENIAL_DRAIN_TIMEOUT);
+	Ok(())
+}
+
+/// Discards client input until end of stream, `limit` bytes, or `timeout`,
+/// whichever comes first; hostile input can never hold the worker longer.
+fn drain<S: ClientStream>(client: &S, reader: &mut impl Read, mut limit: usize, timeout: Duration) {
+	let deadline = Instant::now() + timeout;
+	let mut buffer = [0_u8; 16 * 1024];
+	while limit != 0 {
+		let Some(wait) = deadline
+			.checked_duration_since(Instant::now())
+			.filter(|wait| !wait.is_zero())
+		else {
+			return;
+		};
+		if client.set_drain_timeout(wait).is_err() {
+			return;
+		}
+		let chunk = limit.min(buffer.len());
+		match reader.read(&mut buffer[..chunk]) {
+			Ok(0) => return,
+			Ok(read) => limit -= read,
+			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+			Err(_) => return,
+		}
+	}
 }
 
 fn authority(target: &str, default_port: u16) -> Option<(String, u16)> {
@@ -1513,6 +1575,56 @@ mod tests {
 		assert!(response.starts_with("HTTP/1.1 403"));
 		drop(client);
 		proxy.join().expect("header count proxy");
+	}
+
+	#[test]
+	fn early_denial_survives_unread_request_bytes() {
+		// The denial fires while request bytes beyond the proxy's read buffer are
+		// still queued; closing over them would reset the connection instead.
+		let (mut client, proxy) = serve_once(policy(80));
+		let mut request = b"GET http://127.0.0.1:80/ HTTP/1.1\r\n".to_vec();
+		for index in 0..=MAX_HEADER_COUNT {
+			write!(request, "X-{index}: value\r\n").expect("header");
+		}
+		request.extend_from_slice(b"\r\n");
+		request.resize(request.len() + 32 * 1024, b'x');
+		client
+			.write_all(&request)
+			.expect("request past the header limit");
+		client
+			.shutdown(std::net::Shutdown::Write)
+			.expect("request end");
+		let mut response = String::new();
+		client
+			.read_to_string(&mut response)
+			.expect("denial is delivered before a clean close");
+		assert!(response.starts_with("HTTP/1.1 403"));
+		proxy.join().expect("denial proxy");
+	}
+
+	#[test]
+	fn denial_drain_is_bounded_by_time_and_bytes() {
+		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
+		let mut peer = TcpStream::connect(listener.local_addr().expect("address")).expect("connect");
+		let (client, _) = listener.accept().expect("accept");
+		let mut reader = client.try_clone().expect("reader");
+
+		let started = Instant::now();
+		drain(&client, &mut reader, MAX_DENIAL_DRAIN_BYTES, Duration::from_millis(100));
+		assert!(
+			started.elapsed() < Duration::from_secs(5),
+			"drain outlived its timeout on a silent peer"
+		);
+
+		peer.write_all(&[0; 64]).expect("tail");
+		drain(&client, &mut reader, 16, Duration::from_secs(30));
+		client
+			.set_read_timeout(Some(Duration::from_secs(5)))
+			.expect("read timeout");
+		let mut rest = [0_u8; 48];
+		reader.read_exact(&mut rest).expect("undrained tail");
+		drop(peer);
+		assert_eq!(reader.read(&mut rest).expect("end of stream"), 0);
 	}
 
 	#[test]
