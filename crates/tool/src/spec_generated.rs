@@ -32,9 +32,12 @@ pub struct RuntimeSymbolSpec {
 	pub public_name:  &'static str,
 	/// Canonical public signature.
 	pub signature:    &'static str,
-	/// Internal dispatch key when transport vocabulary differs from the public
-	/// API name.
-	pub dispatch_key: Option<&'static str>,
+	/// Internal dispatch keys for transport vocabulary that differs from the
+	/// public API name. A handle method can answer to several: the public
+	/// symbol `omp.telemetry.span` is driven by the wire verbs
+	/// `omp.telemetry.span.open` and `omp.telemetry.span.close`, so one row
+	/// carries both. Empty when the public name is the only lookup key.
+	pub dispatch_key: &'static [&'static str],
 	/// Runtime callback argument ordering, when this is a callback surface.
 	pub callback_abi: CallbackAbi,
 	/// Phase, durability, cost, and enforcing authority.
@@ -94,6 +97,27 @@ const CORE_DURABLE: OperationSpec = OperationSpec {
 	cost:          CostClass::Metered,
 	authority:     Authority::Core,
 };
+/// Durable, yet legal from `Open`. `docs/py/08-context.md` is the contract for
+/// its namespace and states that nothing there authorizes a DATA effect, so no
+/// symbol in it ever waits on `EFFECTS_AUTHORIZED` — even the durable ones.
+/// Identical to `CORE_DURABLE` apart from that phase.
+const OPEN_DURABLE: OperationSpec = OperationSpec {
+	minimum_phase: InvocationPhase::Open,
+	durability:    Durability::Durable,
+	cost:          CostClass::Metered,
+	authority:     Authority::Core,
+};
+/// Spends a paid upstream resource. `docs/py/13-inference.md` states the rule
+/// this encodes: inference-triggering operations are durable Requests with
+/// `minimum_phase=EFFECTS_AUTHORIZED`, so a device body can trigger paid
+/// inference only once its own invocation holds an effect token and a
+/// speculative fragment can never spend money.
+const CORE_PAID: OperationSpec = OperationSpec {
+	minimum_phase: InvocationPhase::EffectsAuthorized,
+	durability:    Durability::Durable,
+	cost:          CostClass::Paid,
+	authority:     Authority::Core,
+};
 const ENV_EPHEMERAL: OperationSpec = OperationSpec {
 	minimum_phase: InvocationPhase::EffectsAuthorized,
 	durability:    Durability::Ephemeral,
@@ -116,7 +140,7 @@ macro_rules! symbol {
 		$operation:expr,
 		$example:literal
 	) => {
-		symbol!($owner, $name, $signature, $abi, $operation, $example, None)
+		symbol!($owner, $name, $signature, $abi, $operation, $example, &[])
 	};
 	(
 		$owner:literal,
@@ -182,7 +206,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		owner:        "docs/py/03-params.md",
 		public_name:  "omp.params.interrupt_grace",
 		signature:    "Duration",
-		dispatch_key: None,
+		dispatch_key: &[],
 		callback_abi: CallbackAbi::None,
 		operation:    OPEN_LOCAL,
 		timeout:      None,
@@ -347,7 +371,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await doc.close()",
-		Some("omp.env.docs.close")
+		&["omp.env.docs.close"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -356,7 +380,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await doc.read(lines=[(1, 40)])",
-		Some("omp.env.docs.read")
+		&["omp.env.docs.read"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -365,7 +389,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await doc.summary()",
-		Some("omp.env.docs.summarize")
+		&["omp.env.docs.summarize"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -374,7 +398,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await transaction.commit()",
-		Some("omp.env.docs.commit_transaction")
+		&["omp.env.docs.commit_transaction"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -399,7 +423,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.fs.list_dir(path)",
-		Some("omp.env.fs.list_directory")
+		&["omp.env.fs.list_directory"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -408,7 +432,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.mkdir(path, parents=True)",
-		Some("omp.env.fs.create_directory")
+		&["omp.env.fs.create_directory"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -449,7 +473,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.symlink(target, link)",
-		Some("omp.env.fs.create_symlink")
+		&["omp.env.fs.create_symlink"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -458,7 +482,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.hard_link(target, link)",
-		Some("omp.env.fs.create_hard_link")
+		&["omp.env.fs.create_hard_link"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -467,7 +491,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.fs.chmod(path, permissions)",
-		Some("omp.env.fs.set_permissions")
+		&["omp.env.fs.set_permissions"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -476,7 +500,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.lsp.bindings(path)",
-		Some("omp.env.lsp.get_bindings")
+		&["omp.env.lsp.get_bindings"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -501,7 +525,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.lsp.notify(server, \"initialized\", {})",
-		Some("omp.env.lsp.notification")
+		&["omp.env.lsp.notification"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -543,7 +567,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.find.grep(\"OperationSpec\")",
-		Some("omp.env.find.search")
+		&["omp.env.find.search"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -552,7 +576,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.sh.session()",
-		Some("omp.env.sh.open_session")
+		&["omp.env.sh.open_session"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -561,7 +585,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await session.close()",
-		Some("omp.env.sh.close_session")
+		&["omp.env.sh.close_session"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -570,7 +594,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await session.run(\"git status --short\")",
-		Some("omp.env.sh.exec")
+		&["omp.env.sh.exec"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -579,7 +603,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await run.stdin(data)",
-		Some("omp.env.sh.stdin")
+		&["omp.env.sh.stdin"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -588,7 +612,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await run.signal(\"TERM\")",
-		Some("omp.env.sh.signal")
+		&["omp.env.sh.signal"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -597,7 +621,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await run.resize(40, 120)",
-		Some("omp.env.sh.resize")
+		&["omp.env.sh.resize"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -606,7 +630,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await run.detach(\"build\")",
-		Some("omp.env.sh.detach")
+		&["omp.env.sh.detach"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -615,7 +639,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.http_get(\"https://example.test\")",
-		Some("omp.env.http.get")
+		&["omp.env.http.get"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -624,7 +648,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.http_post(\"https://example.test\", body=b\"{}\")",
-		Some("omp.env.http.post")
+		&["omp.env.http.post"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -633,7 +657,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.http_put(\"https://example.test\", body=b\"{}\")",
-		Some("omp.env.http.put")
+		&["omp.env.http.put"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -658,7 +682,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await omp.env.proc.adopt(\"web\")",
-		Some("omp.env.proc.attach")
+		&["omp.env.proc.attach"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -667,7 +691,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await process.send(data)",
-		Some("omp.env.proc.send_input")
+		&["omp.env.proc.send_input"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -676,7 +700,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_EPHEMERAL,
 		"await process.signal(\"TERM\")",
-		Some("omp.env.proc.signal")
+		&["omp.env.proc.signal"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -685,7 +709,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await process.stop()",
-		Some("omp.env.proc.stop")
+		&["omp.env.proc.stop"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -694,7 +718,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await process.restart()",
-		Some("omp.env.proc.restart")
+		&["omp.env.proc.restart"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -727,7 +751,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await writer.commit()",
-		Some("omp.env.blobs.commit_put")
+		&["omp.env.blobs.commit_put"]
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -736,14 +760,6 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.blobs.delete(blob)"
-	),
-	symbol!(
-		"docs/py/12-agents.md",
-		"omp.env.workspace.snapshot",
-		"(*, root=None) -> WorkspaceSnapshot",
-		CallbackAbi::None,
-		ENV_WRITE,
-		"await omp.env.workspace.snapshot()"
 	),
 	symbol!(
 		"docs/py/12-agents.md",
@@ -792,6 +808,102 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		OPEN_METERED,
 		"await omp.agents.pending_messages()"
+	),
+	symbol!(
+		"docs/py/11-env.md",
+		"omp.env.fs.privileged_mutation",
+		"(request: PrivilegedMutationIntent) -> PrivilegedMutationResult",
+		CallbackAbi::None,
+		ENV_WRITE,
+		"await env.privileged_mutation(request)"
+	),
+	symbol!(
+		"docs/py/11-env.md",
+		"omp.env.worktree",
+		"() -> WorktreeInfo | None",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await omp.env.worktree()"
+	),
+	symbol!(
+		"docs/py/11-env.md",
+		"omp.env.Process.info",
+		"() -> ProcessInfo",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await process.info()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.env.workspace.list",
+		"(*, limit=50) -> list[WorkspaceSnapshot]",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await omp.env.workspace.list()"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.status",
+		"(request: McpStatusRequest) -> McpStatusResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_status(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.subscribe",
+		"(request: McpSubscribeRequest) -> McpSubscription",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_subscribe(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.reset",
+		"(request: McpResetRequest) -> McpResetResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_reset(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.live_header",
+		"(request: McpLiveHeaderRequest) -> McpLiveHeader",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_live_header(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.resource",
+		"(request: McpResourceRequest) -> McpResourceResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_resource(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.prompt",
+		"(request: McpPromptRequest) -> McpPromptResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_prompt(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.invoke",
+		"(request: McpInvokeRequest) -> McpInvokeResult",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await env.mcp_invoke(request)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.env.mcp.config",
+		"(request: McpConfigRequest) -> McpConfigResult",
+		CallbackAbi::None,
+		ENV_WRITE,
+		"await env.mcp_config(request)"
 	),
 	symbol!(
 		"docs/py/12-agents.md",
@@ -1162,6 +1274,288 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		"await ui.ask_user([])"
 	),
 	symbol!(
+		"docs/py/01-devices.md",
+		"omp.DynamicDeviceParent.mount_many",
+		"(*specs: MountSpec) -> tuple[str, ...]",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"paths = await parent.mount_many(spec)",
+		&["omp.devices.dynamic_mount"]
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.devices.set_availability",
+		"(*deltas: AvailabilityDelta) -> None",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"await omp.devices.set_availability(omp.AvailabilityDelta(\"jira\", False))"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.devices.refresh",
+		"() -> tuple[DeviceInfo, ...]",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"rows = await omp.devices.refresh()"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.devices.invoke",
+		"(path: str, args: Mapping[str, object], *, deadline: Duration | None = None) -> object",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"result = await omp.devices.invoke(\"jira/create\", {\"title\": \"x\"})"
+	),
+	symbol!(
+		"docs/py/05-hooks.md",
+		"omp.hooks.dispatch_hook",
+		"(event: str, payload: object = None) -> HookDecision",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"decision = await omp.hooks.dispatch_hook(\"tool_call\", payload)",
+		&["omp.hooks.dispatch"]
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.invoke",
+		"(server: str, tool: str, arguments: dict) -> object",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"result = await device(query=\"rust\")"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.prompts.invalidate",
+		"(slot: str) -> int",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"generation = await omp.prompts.invalidate(\"project_rules\")"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.request",
+		"(operation: Operation, request: ImageRequest | SpeechRequest | TranscriptionRequest | \
+		 RealtimeRequest) -> ImageResult | SpeechResult | TranscriptionResult | RealtimeSession",
+		CallbackAbi::None,
+		CORE_PAID,
+		"result = await handle.request(omp.Operation.GENERATE_IMAGE, request)"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.replace",
+		"(spec: ProviderSpec) -> None",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"await handle.replace(spec)"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.retract",
+		"() -> None",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"await handle.retract()"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.models",
+		"() -> tuple[ModelCard, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"cards = await omp.provider.models()"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.is_authenticated",
+		"() -> bool",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"ready = await handle.is_authenticated()"
+	),
+	symbol!(
+		"docs/py/13-inference.md",
+		"omp.provider.watch_models",
+		"(since: Cursor | None = None) -> WatchModels",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"async for event in omp.provider.watch_models(): pass"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.flush",
+		"(*, timeout: Duration = Duration(\"10s\")) -> bool",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"flushed = await omp.telemetry.flush()"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.query",
+		"(q: Query) -> QueryResult",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"result = await omp.telemetry.query(q)"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.rev_metrics",
+		"(tool: str, *, family: str | None = None, since: datetime | timedelta | None = None, \
+		 scope: Scope = Scope.PROJECT) -> tuple[RevMetrics, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"rows = await omp.telemetry.rev_metrics(\"read\")"
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.span",
+		"(name: str, /, **attrs: str | int | float | bool) -> Span",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"async with omp.telemetry.span(\"index\"): pass",
+		&["omp.telemetry.span.open", "omp.telemetry.span.close"]
+	),
+	symbol!(
+		"docs/py/10-telemetry.md",
+		"omp.telemetry.export",
+		"(target: ExportTarget, *, kinds: Sequence[Kind | str] = (), sample: float = 1.0) -> \
+		 ExportHandle",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"handle = omp.telemetry.export(omp.telemetry.OtlpTarget(endpoint))",
+		&["omp.telemetry.export.stop", "omp.telemetry.export.stats"]
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.mount",
+		"(spec: McpMount) -> tuple[Device, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"devices = await omp.mcp.mount(spec)"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.unmount",
+		"(server: str) -> None",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"await omp.mcp.unmount(\"github\")"
+	),
+	symbol!(
+		"docs/py/01-devices.md",
+		"omp.mcp.servers",
+		"() -> tuple[McpServer, ...]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"rows = await omp.mcp.servers()"
+	),
+	symbol!(
+		"docs/py/18-convars.md",
+		"omp.convars.declare",
+		"(key: str, *, kind: str, default, description=None, values=(), ui=None) -> Snapshot",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"setting = await omp.convars.declare(\"verbosity\", kind=\"string\", default=\"normal\")"
+	),
+	symbol!(
+		"docs/py/18-convars.md",
+		"omp.convars.get",
+		"(name: str) -> Snapshot",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"snapshot = await omp.convars.get(\"sv_interrupt_grace\")"
+	),
+	symbol!(
+		"docs/py/18-convars.md",
+		"omp.convars.observe",
+		"(name: str) -> Observation",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"async for snapshot in omp.convars.observe(name): pass"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.view",
+		"() -> ContextView",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"view = await omp.context.view()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.usage",
+		"() -> ContextUsage",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"usage = await omp.context.usage()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.epoch",
+		"() -> int",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"epoch = await omp.context.epoch()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.pin",
+		"(ids: Iterable[str], *, reason: str) -> int",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"await omp.context.pin(ids, reason=\"carrying the repro\")"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.unpin",
+		"(ids: Iterable[str]) -> int",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"await omp.context.unpin(ids)"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.context.compact",
+		"(*, tier: CompactionTier | None = None, focus: str = \"\") -> CompactionOutcome",
+		CallbackAbi::None,
+		OPEN_DURABLE,
+		"outcome = await omp.context.compact()"
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.MessageRef.parts",
+		"() -> list[Part]",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"parts = await message.parts()",
+		&["omp.context.message.parts"]
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.MessageRef.verdict",
+		"() -> Payload | Fault",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"verdict = await message.verdict()",
+		&["omp.context.message.verdict"]
+	),
+	symbol!(
+		"docs/py/08-context.md",
+		"omp.MessageRef.raw_args",
+		"() -> bytes | None",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"raw = await message.raw_args()",
+		&["omp.context.message.raw_args"]
+	),
+	symbol!(
+		"docs/py/07-ui.md",
+		"omp.ui.dynamic_mount",
+		"(*specs: CommandMountSpec) -> tuple[str, ...]",
+		CallbackAbi::None,
+		OPEN_LOCAL,
+		"await omp.ui.dynamic_mount(spec)"
+	),
+	symbol!(
 		"docs/py/07-ui.md",
 		"omp.ui.message_renderer",
 		"(kind: str) -> Decorator",
@@ -1227,7 +1621,9 @@ pub const fn runtime_duration_metadata() -> &'static [RuntimeDurationMetadata] {
 pub fn operation_spec(symbol_name: &str) -> Option<&'static OperationSpec> {
 	RUNTIME_SYMBOLS
 		.iter()
-		.find(|symbol| symbol.public_name == symbol_name || symbol.dispatch_key == Some(symbol_name))
+		.find(|symbol| {
+			symbol.public_name == symbol_name || symbol.dispatch_key.contains(&symbol_name)
+		})
 		.map(|symbol| &symbol.operation)
 }
 

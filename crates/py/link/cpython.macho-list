@@ -1,0 +1,10 @@
+# Dynamic export list for binaries that embed the static CPython (ld64).
+# Consumed as `-Wl,-exported_symbols_list,<this file>`.
+#
+# Mach-O prefixes C symbols with an underscore, so these are the same three
+# patterns as cpython.dynamic-list with that prefix applied: `Py*` -> `_Py*`,
+# `_Py*` -> `__Py*`, `PY_*` -> `_PY_*`. Keep the two files in step; the
+# rationale for the symbol set lives in cpython.dynamic-list.
+_Py*
+__Py*
+_PY_*

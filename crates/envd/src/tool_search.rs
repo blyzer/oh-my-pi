@@ -1891,6 +1891,21 @@ mod tests {
 		fs::create_dir(fixture.path().join("two")).expect("second root");
 		fs::write(fixture.path().join("one/a.rs"), "").expect("first match");
 		fs::write(fixture.path().join("two/b.rs"), "").expect("second match");
+		// Pin both mtimes. `glob_blocking` sorts newest-first and only falls
+		// back to the path when the stamps tie, so leaving these to the clock
+		// made the expected order an accident of whether two consecutive
+		// writes landed in the same millisecond — which is how this failed on
+		// a slower host. Fixing the stamps makes the assertion below exercise
+		// the documented ordering instead of depending on a tie, and nothing
+		// else in this module covers it.
+		for (path, epoch_secs) in [("one/a.rs", 2_000_000), ("two/b.rs", 1_000_000)] {
+			fs::File::options()
+				.write(true)
+				.open(fixture.path().join(path))
+				.expect("reopen match")
+				.set_modified(UNIX_EPOCH + Duration::from_secs(epoch_secs))
+				.expect("pin mtime");
+		}
 		let host = WorkspaceHost::open(fixture.path()).expect("workspace host");
 
 		let result = glob_blocking(

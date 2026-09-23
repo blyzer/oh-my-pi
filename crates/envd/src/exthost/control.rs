@@ -2596,10 +2596,7 @@ fn append_dispatch_result_chunk(
 	if state.invocation.as_str() != invocation.as_str() || state.next_index != index {
 		return Err(ControlProtocolError::new(
 			"result_chunk_order",
-			format!(
-				"dispatch result chunk index {index} does not follow {}",
-				state.next_index
-			),
+			format!("dispatch result chunk index {index} does not follow {}", state.next_index),
 		));
 	}
 	let length = state.body.len().checked_add(data.len()).ok_or_else(|| {
@@ -2625,6 +2622,7 @@ struct ControlShared {
 	dispatch_by_id:    Mutex<BTreeMap<u64, Str>>,
 	dispatch_progress: Mutex<BTreeMap<u64, DispatchProgressState>>,
 	dispatch_chunks:   Mutex<BTreeMap<u64, DispatchChunkState>>,
+	dispatch_started:  Mutex<BTreeSet<u64>>,
 	child_requests:    Mutex<BTreeMap<u64, AbortHandle>>,
 	next_dispatch_id:  AtomicU64,
 }
@@ -2669,6 +2667,7 @@ impl Drop for LiveDispatchGuard {
 			self.shared.dispatch_by_id.lock().remove(&self.id);
 			self.shared.dispatch_progress.lock().remove(&self.id);
 			self.shared.dispatch_chunks.lock().remove(&self.id);
+			self.shared.dispatch_started.lock().remove(&self.id);
 			return;
 		}
 		if let Ok(runtime) = runtime::Handle::try_current() {
@@ -2755,6 +2754,19 @@ pub enum ControlRuntimeError {
 	Remote(ControlProtocolError),
 }
 
+/// Fails every outstanding dispatch and child request once the CONTROL
+/// descriptor is gone, so no dispatch waiter outlives its child.
+fn disconnect_control(shared: &ControlShared) {
+	shared.router.lock().disconnect();
+	shared.invocations.lock().clear();
+	shared.dispatch_by_id.lock().clear();
+	shared.dispatch_progress.lock().clear();
+	shared.dispatch_chunks.lock().clear();
+	for (_, request) in mem::take(&mut *shared.child_requests.lock()) {
+		request.abort();
+	}
+}
+
 impl ControlRuntime {
 	/// Binds one authenticated child descriptor and returns its dispatch handle.
 	pub fn new(
@@ -2774,29 +2786,31 @@ impl ControlRuntime {
 			dispatch_by_id: Mutex::new(BTreeMap::new()),
 			dispatch_progress: Mutex::new(BTreeMap::new()),
 			dispatch_chunks: Mutex::new(BTreeMap::new()),
+			dispatch_started: Mutex::new(BTreeSet::new()),
 			child_requests: Mutex::new(BTreeMap::new()),
 			next_dispatch_id: AtomicU64::new(1),
 		});
 		(Self { reader, shared: Arc::clone(&shared) }, ControlHandle { shared })
 	}
 
-	/// Runs the sole reader until EOF or a connection-level protocol failure.
-	pub async fn serve(mut self) -> Result<(), ControlRuntimeError> {
+	/// Runs the sole reader until EOF or a connection-level protocol failure,
+	/// failing every outstanding dispatch on either exit.
+	pub async fn serve(self) -> Result<(), ControlRuntimeError> {
+		let shared = Arc::clone(&self.shared);
+		let result = self.read_frames().await;
+		disconnect_control(&shared);
+		result
+	}
+
+	async fn read_frames(mut self) -> Result<(), ControlRuntimeError> {
 		loop {
 			let Some(frame) = read_json_control_frame(&mut self.reader).await? else {
-				self.shared.router.lock().disconnect();
-				self.shared.invocations.lock().clear();
-				self.shared.dispatch_by_id.lock().clear();
-				self.shared.dispatch_progress.lock().clear();
-				self.shared.dispatch_chunks.lock().clear();
-				for (_, request) in mem::take(&mut *self.shared.child_requests.lock()) {
-					request.abort();
-				}
 				return Ok(());
 			};
 			match frame.kind.as_str() {
 				"Request" => self.accept_request(frame).await?,
 				"CancelRequest" => self.accept_request_cancel(frame)?,
+				"DispatchStarted" => self.accept_dispatch_started(frame)?,
 				"DispatchProgress" => self.accept_dispatch_progress(frame)?,
 				"DispatchResultChunk" => self.accept_dispatch_result_chunk(frame)?,
 				"DispatchResponse" => self.accept_dispatch_response(frame).await?,
@@ -2918,8 +2932,7 @@ impl ControlRuntime {
 			.get("authority")
 			.and_then(Value::as_object)
 			.ok_or_else(|| ControlProtocolError::malformed("dispatch frame authority is missing"))?;
-		let invocation =
-			dispatch_frame_invocation_for_identity(&self.shared.identity, authority)?;
+		let invocation = dispatch_frame_invocation_for_identity(&self.shared.identity, authority)?;
 		let expected = self
 			.shared
 			.dispatch_by_id
@@ -2943,7 +2956,23 @@ impl ControlRuntime {
 		Ok(expected)
 	}
 
-	fn accept_dispatch_progress(&self, mut frame: JsonControlFrame) -> Result<(), ControlRuntimeError> {
+	/// Records that one dispatch entered its handler in the child.
+	///
+	/// The child writes this before running the body, so a dispatch without
+	/// it provably never ran and its cancellation leaves no unknown effects.
+	fn accept_dispatch_started(&self, frame: JsonControlFrame) -> Result<(), ControlRuntimeError> {
+		let Some(correlation) = frame.correlation.filter(|id| *id != 0) else {
+			return Err(ControlProtocolError::malformed("dispatch start has no correlation").into());
+		};
+		self.dispatch_frame_invocation(correlation, &frame.body)?;
+		self.shared.dispatch_started.lock().insert(correlation);
+		Ok(())
+	}
+
+	fn accept_dispatch_progress(
+		&self,
+		mut frame: JsonControlFrame,
+	) -> Result<(), ControlRuntimeError> {
 		let Some(correlation) = frame.correlation.filter(|id| *id != 0) else {
 			return Err(
 				ControlProtocolError::malformed("dispatch progress has no correlation").into(),
@@ -2980,11 +3009,13 @@ impl ControlRuntime {
 			)
 		})?;
 		if state.invocation != invocation {
-			return Err(ControlProtocolError::new(
-				"stale_invocation",
-				"dispatch progress state belongs to another invocation",
-			)
-			.into());
+			return Err(
+				ControlProtocolError::new(
+					"stale_invocation",
+					"dispatch progress state belongs to another invocation",
+				)
+				.into(),
+			);
 		}
 		let bytes = checked_progress_bytes(state, encoded.len())?;
 		let sender = state.sender.as_ref().ok_or_else(|| {
@@ -3056,8 +3087,7 @@ impl ControlRuntime {
 				ControlProtocolError::new(
 					"result_chunk_too_large",
 					format!(
-						"dispatch result chunk is {} bytes; limit is \
-						 {MAX_DISPATCH_RESULT_CHUNK_BYTES}",
+						"dispatch result chunk is {} bytes; limit is {MAX_DISPATCH_RESULT_CHUNK_BYTES}",
 						data.len()
 					),
 				)
@@ -3065,11 +3095,13 @@ impl ControlRuntime {
 			);
 		}
 		let mut chunks = self.shared.dispatch_chunks.lock();
-		let state = chunks.entry(correlation).or_insert_with(|| DispatchChunkState {
-			invocation: invocation.clone(),
-			next_index: 0,
-			body: Vec::new(),
-		});
+		let state = chunks
+			.entry(correlation)
+			.or_insert_with(|| DispatchChunkState {
+				invocation: invocation.clone(),
+				next_index: 0,
+				body:       Vec::new(),
+			});
 		append_dispatch_result_chunk(state, &invocation, index, &data)?;
 		Ok(())
 	}
@@ -3097,10 +3129,8 @@ impl ControlRuntime {
 		let body = if let Some(chunked) = frame.body.remove("chunked") {
 			if !frame.body.is_empty() {
 				return Err(
-					ControlProtocolError::malformed(
-						"chunked dispatch response has unexpected fields",
-					)
-					.into(),
+					ControlProtocolError::malformed("chunked dispatch response has unexpected fields")
+						.into(),
 				);
 			}
 			let chunked = chunked.as_object().ok_or_else(|| {
@@ -3130,7 +3160,13 @@ impl ControlRuntime {
 			}
 			serde_json::from_slice::<serde_json::Map<String, Value>>(&state.body)?
 		} else {
-			if self.shared.dispatch_chunks.lock().remove(&correlation).is_some() {
+			if self
+				.shared
+				.dispatch_chunks
+				.lock()
+				.remove(&correlation)
+				.is_some()
+			{
 				return Err(
 					ControlProtocolError::new(
 						"result_chunk_incomplete",
@@ -3142,6 +3178,7 @@ impl ControlRuntime {
 			frame.body
 		};
 		self.shared.dispatch_progress.lock().remove(&correlation);
+		self.shared.dispatch_started.lock().remove(&correlation);
 		let payload = serde_json::to_vec(&Value::Object(body))?;
 		let extension = self.shared.identity.extension.clone();
 		let next = self.shared.router.lock().complete(
@@ -3180,6 +3217,90 @@ impl ControlEffectKind {
 }
 
 impl ControlHandle {
+	/// Withdraws a dispatch the child has not received yet.
+	///
+	/// Returns whether the dispatch was still queued. A withdrawn dispatch
+	/// never entered Python, so the invocation leaves no unknown effects and
+	/// the cancellation ladder must not escalate to the process group.
+	pub fn cancel_queued(&self, invocation: &str) -> bool {
+		let Some(id) = self
+			.shared
+			.dispatch_by_id
+			.lock()
+			.iter()
+			.find_map(|(id, live)| (live.as_str() == invocation).then_some(*id))
+		else {
+			return false;
+		};
+		let withdrawn = self
+			.shared
+			.router
+			.lock()
+			.cancel_queued(self.shared.identity.extension.as_str(), id)
+			.unwrap_or(false);
+		if withdrawn {
+			self.shared.invocations.lock().remove(invocation);
+			self.shared.dispatch_by_id.lock().remove(&id);
+			self.shared.dispatch_progress.lock().remove(&id);
+			self.shared.dispatch_chunks.lock().remove(&id);
+			self.shared.dispatch_started.lock().remove(&id);
+		}
+		withdrawn
+	}
+
+	/// Fails a dispatch the child accepted but never entered.
+	///
+	/// The child announces entry before running a handler and the stream is
+	/// ordered, so an unannounced dispatch provably left no effects. Failing
+	/// it here releases its actor slot and admits the next queued callback,
+	/// which is what completion would have done. Returns whether it applied;
+	/// a dispatch that already announced entry is left to the ladder.
+	pub async fn cancel_unstarted(&self, invocation: &str) -> bool {
+		let Some(id) = self
+			.shared
+			.dispatch_by_id
+			.lock()
+			.iter()
+			.find_map(|(id, live)| (live.as_str() == invocation).then_some(*id))
+		else {
+			return false;
+		};
+		if self.shared.dispatch_started.lock().contains(&id) {
+			return false;
+		}
+		let extension = self.shared.identity.extension.clone();
+		let next = {
+			let mut router = self.shared.router.lock();
+			router.complete(
+				extension.as_str(),
+				id,
+				self.shared.identity.host_generation,
+				Err(DispatchError::Cancelled),
+			)
+		};
+		let Ok(next) = next else {
+			return false;
+		};
+		self.shared.invocations.lock().remove(invocation);
+		self.shared.dispatch_by_id.lock().remove(&id);
+		self.shared.dispatch_progress.lock().remove(&id);
+		self.shared.dispatch_chunks.lock().remove(&id);
+		self.shared.dispatch_started.lock().remove(&id);
+		if let Some(next) = next {
+			let _ = write_dispatch_request(&self.shared, next).await;
+		}
+		true
+	}
+
+	/// Fails every outstanding dispatch because the child is gone.
+	///
+	/// A forced process-group kill aborts the CONTROL reader before it can
+	/// observe EOF, so the owner of the child calls this to release the
+	/// dispatch waiters the reader would otherwise have failed.
+	pub fn disconnect(&self) {
+		disconnect_control(&self.shared);
+	}
+
 	/// Installs a Core-issued synchronous authority snapshot in the child.
 	///
 	/// The child rejects any snapshot whose host or session generation differs
@@ -3346,12 +3467,16 @@ impl ControlHandle {
 			.dispatch_by_id
 			.lock()
 			.insert(id, invocation.clone());
-		self.shared.dispatch_progress.lock().insert(id, DispatchProgressState {
-			invocation: invocation.clone(),
-			sender: progress,
-			events: 0,
-			bytes: 0,
-		});
+		self
+			.shared
+			.dispatch_progress
+			.lock()
+			.insert(id, DispatchProgressState {
+				invocation: invocation.clone(),
+				sender:     progress,
+				events:     0,
+				bytes:      0,
+			});
 		let mut guard = LiveDispatchGuard {
 			shared: Arc::clone(&self.shared),
 			id,
@@ -3364,6 +3489,7 @@ impl ControlHandle {
 				self.shared.dispatch_by_id.lock().remove(&id);
 				self.shared.dispatch_progress.lock().remove(&id);
 				self.shared.dispatch_chunks.lock().remove(&id);
+				self.shared.dispatch_started.lock().remove(&id);
 				guard.disarm();
 				let _ = self.shared.router.lock().complete(
 					self.shared.identity.extension.as_str(),
@@ -3383,6 +3509,7 @@ impl ControlHandle {
 				self.shared.dispatch_by_id.lock().remove(&id);
 				self.shared.dispatch_progress.lock().remove(&id);
 				self.shared.dispatch_chunks.lock().remove(&id);
+				self.shared.dispatch_started.lock().remove(&id);
 				return Err(error.into());
 			},
 		};
@@ -3690,14 +3817,12 @@ mod convar_tests {
 
 	use super::{
 		CompositeControlAuthority, ControlAuthority, ControlAuthorityFactory,
-		ControlConnectionIdentity, ControlRequestContext, ConvarControlFactory,
-		DispatchChunkState, DispatchProgressState, MAX_DISPATCH_PROGRESS_BYTES,
-		MAX_DISPATCH_PROGRESS_EVENTS, append_dispatch_result_chunk, checked_progress_bytes,
-		dispatch_frame_invocation_for_identity, quota_protocol_error,
+		ControlConnectionIdentity, ControlRequestContext, ConvarControlFactory, DispatchChunkState,
+		DispatchProgressState, MAX_DISPATCH_PROGRESS_BYTES, MAX_DISPATCH_PROGRESS_EVENTS,
+		append_dispatch_result_chunk, checked_progress_bytes, dispatch_frame_invocation_for_identity,
+		quota_protocol_error,
 	};
-	use crate::exthost::{
-		QuotaError, QuotaExceeded, QuotaScope, QuotaStatus, ResourceReceipt,
-	};
+	use crate::exthost::{QuotaError, QuotaExceeded, QuotaScope, QuotaStatus, ResourceReceipt};
 
 	fn identity() -> Arc<ControlConnectionIdentity> {
 		Arc::new(ControlConnectionIdentity {
@@ -3733,26 +3858,24 @@ mod convar_tests {
 			"session_generation": 1,
 			"invocation": "call",
 		});
-		let error = dispatch_frame_invocation_for_identity(
-			&identity,
-			stale.as_object().expect("authority"),
-		)
-		.expect_err("stale generation");
+		let error =
+			dispatch_frame_invocation_for_identity(&identity, stale.as_object().expect("authority"))
+				.expect_err("stale generation");
 		assert_eq!(error.code.as_str(), "StaleGeneration");
 
 		let state = DispatchProgressState {
 			invocation: sf!("call"),
-			sender: None,
-			events: MAX_DISPATCH_PROGRESS_EVENTS,
-			bytes: 0,
+			sender:     None,
+			events:     MAX_DISPATCH_PROGRESS_EVENTS,
+			bytes:      0,
 		};
 		let error = checked_progress_bytes(&state, 1).expect_err("progress count overflow");
 		assert_eq!(error.code.as_str(), "progress_overflow");
 		let oversized = DispatchProgressState {
 			invocation: sf!("call"),
-			sender: None,
-			events: 0,
-			bytes: MAX_DISPATCH_PROGRESS_BYTES,
+			sender:     None,
+			events:     0,
+			bytes:      MAX_DISPATCH_PROGRESS_BYTES,
 		};
 		let error = checked_progress_bytes(&oversized, 1).expect_err("progress byte overflow");
 		assert_eq!(error.code.as_str(), "progress_overflow");
@@ -3764,10 +3887,9 @@ mod convar_tests {
 		let mut state = DispatchChunkState {
 			invocation: invocation.clone(),
 			next_index: 0,
-			body: Vec::new(),
+			body:       Vec::new(),
 		};
-		append_dispatch_result_chunk(&mut state, &invocation, 0, b"one")
-			.expect("first result chunk");
+		append_dispatch_result_chunk(&mut state, &invocation, 0, b"one").expect("first result chunk");
 		let error = append_dispatch_result_chunk(&mut state, &invocation, 2, b"three")
 			.expect_err("out-of-order result chunk");
 		assert_eq!(error.code.as_str(), "result_chunk_order");
@@ -3777,10 +3899,11 @@ mod convar_tests {
 	#[test]
 	fn hard_quota_error_carries_the_current_receipt() {
 		let receipt = ResourceReceipt {
-			quotas: BTreeMap::from([(
-				sf!("ui.updates"),
-				QuotaStatus { limit: 3, used: 3, window: None },
-			)]),
+			quotas:  BTreeMap::from([(sf!("ui.updates"), QuotaStatus {
+				limit:  3,
+				used:   3,
+				window: None,
+			})]),
 			dropped: BTreeMap::from([(sf!("ui.updates"), 1)]),
 		};
 		let error = quota_protocol_error(QuotaError::Exceeded(QuotaExceeded {

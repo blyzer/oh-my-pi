@@ -1,6 +1,9 @@
 //! Landlock fallback plan and honest-degradation contracts.
 
-use std::path::Path;
+use std::{
+	path::{Path, PathBuf},
+	sync::LazyLock,
+};
 
 use omp_sandbox::{
 	Backend, Capability, DegradationPolicy, NetworkMode, Runner, SandboxError, SandboxSpec,
@@ -105,10 +108,23 @@ fn abi_probe_is_absent_off_linux() {
 	assert!(!omp_sandbox::backend_status(Backend::Landlock).is_available());
 }
 
+/// The probe binary, canonicalized the way `SandboxSpec` canonicalizes the
+/// program path.
+///
+/// usr-merged distributions make `/bin` a symlink to `/usr/bin`, so the
+/// compiled plan carries `/usr/bin/echo` while a literal `/bin/echo` does not
+/// match it. Canonicalizing here keeps the expectation equal to whatever the
+/// host actually resolves, on merged and unmerged layouts alike.
 fn executable() -> &'static Path {
-	if cfg!(windows) {
-		Path::new("C:\\Windows\\System32\\cmd.exe")
-	} else {
-		Path::new("/bin/echo")
-	}
+	static PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+		let literal = if cfg!(windows) {
+			Path::new("C:\\Windows\\System32\\cmd.exe")
+		} else {
+			Path::new("/bin/echo")
+		};
+		literal
+			.canonicalize()
+			.unwrap_or_else(|_| literal.to_path_buf())
+	});
+	&PATH
 }

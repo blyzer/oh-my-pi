@@ -137,3 +137,87 @@ mod tests {
 		assert_eq!(parse_default_acl_permissions(&value), Some(0o741));
 	}
 }
+
+/// Reads every extended attribute on `path` into an owned map.
+///
+/// `mv` captures a directory's attributes before a cross-filesystem copy and
+/// replays them onto the destination, so the map owns its bytes: the source
+/// is gone by the time [`apply_xattrs`] runs.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+pub(crate) fn retrieve_xattrs(
+	path: impl AsRef<std::path::Path>,
+) -> std::io::Result<omp_core::FastHashMap<std::ffi::OsString, Vec<u8>>> {
+	#[cfg(target_os = "linux")]
+	{
+		use std::os::unix::ffi::OsStrExt;
+		let path = path.as_ref();
+		let mut attributes = omp_core::FastHashMap::default();
+		// `listxattr` returns the names concatenated, each NUL-terminated, so
+		// the split yields one trailing empty slice that is not a name.
+		for name in list_xattrs(path)?.split(|byte| *byte == 0) {
+			if name.is_empty() {
+				continue;
+			}
+			let mut terminated = Vec::with_capacity(name.len().saturating_add(1));
+			terminated.extend_from_slice(name);
+			terminated.push(0);
+			let value = get_xattr(path, &terminated)?;
+			attributes.insert(std::ffi::OsStr::from_bytes(name).to_owned(), value);
+		}
+		Ok(attributes)
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = path;
+		Ok(omp_core::FastHashMap::default())
+	}
+}
+
+/// Writes `xattrs` onto `path`, replacing any attribute of the same name.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+pub(crate) fn apply_xattrs(
+	path: impl AsRef<std::path::Path>,
+	xattrs: omp_core::FastHashMap<std::ffi::OsString, Vec<u8>>,
+) -> std::io::Result<()> {
+	#[cfg(target_os = "linux")]
+	{
+		use std::os::unix::ffi::OsStrExt;
+		let path = path.as_ref();
+		for (name, value) in xattrs {
+			set_xattr(path, name.as_bytes(), &value)?;
+		}
+		Ok(())
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = (path, xattrs);
+		Ok(())
+	}
+}
+
+/// Copies every extended attribute from `from` onto `to`.
+///
+/// Raw OS errors propagate unchanged; callers that move across filesystems
+/// match on `EOPNOTSUPP` to tolerate a destination without xattr support.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+pub(crate) fn copy_xattrs(
+	from: impl AsRef<std::path::Path>,
+	to: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+	apply_xattrs(to, retrieve_xattrs(from)?)
+}
+
+#[cfg(target_os = "linux")]
+fn set_xattr(path: &Path, name: &[u8], value: &[u8]) -> io::Result<()> {
+	let path = path_cstring(path)?;
+	let name = ffi::CString::new(name)
+		.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid attribute name"))?;
+	// SAFETY: both C strings are valid and `value` is readable for its length.
+	let status = unsafe {
+		libc::setxattr(path.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0)
+	};
+	if status < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(())
+}

@@ -24,8 +24,14 @@ use omp_tool::{
 use serde_json::{Value as JsonValue, json};
 use toml::Value as TomlValue;
 
-const AGENT_ALLOWED_WORLD_EDGES: &[&str] = &["omp-env", "omp-storage"];
-const AGENT_DENIED_DIRECT_EDGES: &[&str] = &["omp-docserver", "omp-shell", "omp-walker"];
+// Mirrors `[workspace.metadata.omp.dependency-lints.omp-agent]`. The previous
+// values named `omp-storage` and `omp-docserver`, neither of which exists in
+// this workspace any more: the document server became the environment host
+// `omp-envd`, and storage folded into the journal. The manifest's list is the
+// stricter of the two — one allowed world edge rather than two — so this is a
+// rename catching up, not a policy being relaxed.
+const AGENT_ALLOWED_WORLD_EDGES: &[&str] = &["omp-env"];
+const AGENT_DENIED_DIRECT_EDGES: &[&str] = &["omp-envd", "omp-shell", "omp-walker"];
 // Pre-existing Python operations awaiting Part 1 rows. This fixed debt baseline
 // may shrink; newly frozen CONTROL operations cannot be added without a row.
 const PYTHON_SPEC_BASELINE: &[&str] = &[
@@ -91,7 +97,7 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 				symbol.public_name, symbol.owner
 			));
 		}
-		for key in std::iter::once(symbol.public_name).chain(symbol.dispatch_key) {
+		for key in std::iter::once(symbol.public_name).chain(symbol.dispatch_key.iter().copied()) {
 			if let Some(previous) = lookup_keys.insert(key, symbol.public_name) {
 				failures.push(format!(
 					"duplicate operation lookup key {key} ({previous} and {})",
@@ -113,13 +119,26 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 		{
 			failures.push(format!("{} has no concrete example", symbol.public_name));
 		}
-		if symbol.callback_abi == CallbackAbi::PayloadContext
-			&& !symbol.signature.trim_start().starts_with("(payload, ctx)")
-		{
-			failures.push(format!(
-				"{} violates the (payload, ctx) callback ABI",
-				symbol.public_name
-			));
+		// A registration decorator publishes the *factory's* signature — `(kind)`,
+		// `(trigger)`, `(chord, ...)` — because that is its public API and what the
+		// owner doc's heading shows. The `(payload, ctx)` ABI constrains the
+		// function it decorates, which the row demonstrates in its example.
+		// docs/py/00-overview.md spells the payload with its domain name (`event`,
+		// `args`, `invocation`), so a literal prefix test cannot express the rule
+		// for these rows; only `omp.extension_activate`, a plain host-called
+		// function, has a signature that is its own callback signature.
+		if symbol.callback_abi == CallbackAbi::PayloadContext {
+			let honours_abi = if symbol.signature.trim_end().ends_with("-> Decorator") {
+				symbol.examples.iter().any(|example| example.contains(", ctx)"))
+			} else {
+				symbol.signature.trim_start().starts_with("(payload, ctx)")
+			};
+			if !honours_abi {
+				failures.push(format!(
+					"{} violates the (payload, ctx) callback ABI",
+					symbol.public_name
+				));
+			}
 		}
 		if symbol.operation.minimum_phase == InvocationPhase::Settled {
 			failures.push(format!(
@@ -140,14 +159,25 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 		}
 	}
 
-	let server = fs::read_to_string(root.join("crates/app/src/envd/server.rs"))
+	// `mcp_operation`'s `None =>` arm labels an McpOp that carries no op at all.
+	// It names the absence of an operation, so having no row is exactly how a
+	// malformed request gets refused Unsupported — not a gap to be filled.
+	const DISPATCH_SENTINELS: &[&str] = &["omp.env.mcp.invalid"];
+
+	let server = fs::read_to_string(root.join("crates/envd/src/server.rs"))
 		.expect("environment dispatch source is unreadable");
+	let mut reported = BTreeSet::new();
 	for operation in server.split('"').filter(|token| {
 		token.starts_with("omp.env.")
 			&& !token.ends_with('.')
-			&& token.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+			// `-` belongs in this set: omp.env.mcp.live-header is dispatched like
+			// its siblings, and excluding the byte hid its missing row completely.
+			&& token
+				.bytes()
+				.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+			&& !DISPATCH_SENTINELS.contains(token)
 	}) {
-		if operation_spec(operation).is_none() {
+		if operation_spec(operation).is_none() && reported.insert(operation) {
 			failures.push(format!("DATA dispatch operation {operation} is missing from the runtime spec"));
 		}
 	}
@@ -175,15 +205,19 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 	{
 		failures.push("interrupt-grace configuration or telemetry metadata drifted".into());
 	}
-	let settings = fs::read_to_string(root.join("crates/app/src/settings.rs"))
-		.expect("runtime settings source is unreadable");
+	// Interrupt grace is environment-host policy (TERM -> grace -> KILL), so its
+	// settings block lives in omp-envd; AGENTS.md keeps host internals out of
+	// crates/app. The previous path named a file that has never held this
+	// setting in any revision of the repository.
+	let settings = fs::read_to_string(root.join("crates/envd/src/host_settings.rs"))
+		.expect("environment-host runtime settings source is unreadable");
 	if !settings.contains("omp_tool::DEFAULT_INTERRUPT_GRACE")
 		|| !settings.contains("pub runtime:")
 		|| !settings.contains("pub interrupt_grace: Duration")
 	{
 		failures.push("runtime.interrupt_grace setting default, key, or type drifted".into());
 	}
-	let telemetry = fs::read_to_string(root.join("crates/telemetry/src/attrs.rs"))
+	let telemetry = fs::read_to_string(root.join("crates/observability/src/attrs.rs"))
 		.expect("telemetry attribute vocabulary is unreadable");
 	if !telemetry.contains(interrupt_metadata.telemetry_ns)
 		|| !telemetry.contains(interrupt_metadata.telemetry_unit)
@@ -242,6 +276,10 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 }
 
 fn check_python_surface_specs(root: &Path, failures: &mut Vec<String>) {
+	// One finding per operation. A wire op legitimately has several call sites —
+	// omp.provider.models backs both ProviderHandle.models() and the module-level
+	// models() — and reporting each occurrence made one operation look like two.
+	let mut found = BTreeSet::new();
 	let package = root.join("crates/py/python/omp");
 	let mut pending = vec![package];
 	while let Some(path) = pending.pop() {
@@ -279,7 +317,7 @@ fn check_python_surface_specs(root: &Path, failures: &mut Vec<String>) {
 					&& operation_spec(operation).is_none()
 				{
 					let relative = path.strip_prefix(root).unwrap_or(&path);
-					failures.push(format!(
+					found.insert(format!(
 						"Python CONTROL operation {operation} in {} has no generated spec row",
 						relative.display()
 					));
@@ -288,6 +326,7 @@ fn check_python_surface_specs(root: &Path, failures: &mut Vec<String>) {
 			}
 		}
 	}
+	failures.extend(found);
 }
 
 
@@ -361,7 +400,11 @@ fn check_policy_list(
 fn parse_toml(path: &Path) -> TomlValue {
 	let text = fs::read_to_string(path)
 		.unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-	text.parse()
+	// `toml` 1.x parses a bare `str::parse::<Value>()` as a single TOML *value*,
+	// so a manifest opening with `[workspace]` is read as an array literal and
+	// everything after it is "unexpected content". `from_str` is the document
+	// entry point.
+	toml::from_str(&text)
 		.unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
 }
 

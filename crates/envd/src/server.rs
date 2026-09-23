@@ -364,15 +364,18 @@ pub enum EnvdError {
 	/// The embedded document authority exited before accepting a verified hello.
 	#[error("embedded document authority exited before its hello handshake")]
 	DocserverExited,
-	/// Another process still holds this project's document authority.
+	/// Another live process still holds this project's document authority.
+	///
+	/// The holder is reachable only through its listening socket, which
+	/// carries no owner identity, so the message names the recovery action
+	/// instead of an identifier this process cannot observe.
 	#[error(
-		"project document authority for {path:?} is held by another process (holder pid: {holder:?})"
+		"project document authority for {path:?} is already held by another live omp process; close \
+		 that session, or run this command from a different project root"
 	)]
 	DocumentAuthorityHeldBy {
 		/// Canonical project path whose authority is held.
-		path:   PathBuf,
-		/// Best-effort owner process identifier, when available.
-		holder: Option<u32>,
+		path: PathBuf,
 	},
 }
 
@@ -1778,8 +1781,8 @@ fn bind_live_session_authority_snapshot(
 			.lookup(parent.as_str())
 			.and_then(|parent| parent.topology.parent_id);
 	}
-	let root = Url::from_file_path(root)
-		.map_or_else(|_| String::from("file:///"), |root| root.to_string());
+	let root =
+		Url::from_file_path(root).map_or_else(|_| String::from("file:///"), |root| root.to_string());
 	let started_at_ms = config
 		.session_started_at
 		.duration_since(UNIX_EPOCH)
@@ -1913,9 +1916,8 @@ fn production_control_authorities(
 		owners: vec![Arc::clone(&envd), parameters, workers, direct_filesystem, convars]
 			.into_boxed_slice(),
 	});
-	let artifacts: Arc<dyn ControlAuthorityFactory> = Arc::new(
-		FixedControlAuthorityFactory::new(Arc::new(UndeclaredControlAuthority)),
-	);
+	let artifacts: Arc<dyn ControlAuthorityFactory> =
+		Arc::new(FixedControlAuthorityFactory::new(Arc::new(UndeclaredControlAuthority)));
 	let persistence = PersistenceControlAuthorities::new(sessions, artifacts, credentials);
 	let policy = PolicyControlAuthorities::new(policy_owner, prompts);
 	let presentation = PresentationControlAuthorities::new(ui, telemetry_owner, jobs);
@@ -9534,20 +9536,25 @@ fn spawn_worker_invocation(
 					break;
 				},
 				Some(ExtHostEvent::Complete(complete)) => {
-					let (json, details_blob, is_error) =
-						match projected_worker_completion_json(&blobs, &complete, output_request) {
-							Ok(completion) => completion,
-							Err(reason) => {
-								send_abort_verdict(
-									&responses,
-									request_id,
-									&invocation_id,
-									omp_tool::Abort::EffectsUnknown { reason },
-								)
-								.await;
-								break;
-							},
-						};
+					let (json, details_blob, is_error) = match projected_worker_completion_json(
+						&blobs,
+						&complete,
+						output_request,
+						retention_session.as_deref(),
+						&invocation_id,
+					) {
+						Ok(completion) => completion,
+						Err(reason) => {
+							send_abort_verdict(
+								&responses,
+								request_id,
+								&invocation_id,
+								omp_tool::Abort::EffectsUnknown { reason },
+							)
+							.await;
+							break;
+						},
+					};
 					if let Some(details) = details_blob.as_ref() {
 						let hash: [u8; 32] = match details.hash.as_ref().try_into() {
 							Ok(hash) => hash,
@@ -10088,7 +10095,7 @@ const fn mcp_operation(request: &pb::McpOp) -> &'static str {
 		Some(Op::Status(_)) => "omp.env.mcp.status",
 		Some(Op::Subscribe(_)) => "omp.env.mcp.subscribe",
 		Some(Op::Reset(_)) => "omp.env.mcp.reset",
-		Some(Op::LiveHeader(_)) => "omp.env.mcp.live-header",
+		Some(Op::LiveHeader(_)) => "omp.env.mcp.live_header",
 		Some(Op::Resource(_)) => "omp.env.mcp.resource",
 		Some(Op::Prompt(_)) => "omp.env.mcp.prompt",
 		Some(Op::Invoke(_)) => "omp.env.mcp.invoke",
@@ -10871,8 +10878,10 @@ fn projected_worker_completion_json(
 	blobs: &BlobHost,
 	complete: &ExtHostCompletion,
 	request: omp_tool::OutputRequest,
+	retention_session: Option<&str>,
+	invocation_id: &str,
 ) -> Result<(Bytes, Option<thread_pb::Blob>, bool), Str> {
-	let (mut json, details_blob, is_error) = worker_completion_json(complete)?;
+	let (mut json, mut details_blob, is_error) = worker_completion_json(complete)?;
 	let inline_limit = match request {
 		omp_tool::OutputRequest::Bounded => DEFAULT_RESULT_PROJECTION_BYTES,
 		omp_tool::OutputRequest::Complete => COMPLETE_RESULT_PROJECTION_BYTES,
@@ -10883,6 +10892,25 @@ fn projected_worker_completion_json(
 			.is_some_and(|details| details.size <= u64::try_from(inline_limit).unwrap_or(u64::MAX))
 	{
 		json = materialize_worker_outcome(blobs, complete)?;
+	}
+	// A worker small enough to answer inline sends no artifact of its own, but
+	// the verdict is still canonical content the caller may fetch by address,
+	// so it is retained here exactly as the native path retains its own. The
+	// store is content-addressed, so an identical verdict costs no new bytes.
+	// Size does not decide: only a verdict with no body has nothing to retain.
+	if details_blob.is_none() && !json.is_empty() {
+		details_blob = Some(
+			blobs
+				.put_verdict_bytes(retention_session, invocation_id, &json)
+				.map_err(|error| {
+					tracing::error!(
+						%error,
+						invocation_id = %invocation_id,
+						"could not retain worker verdict before publication"
+					);
+					sf!("worker verdict could not be retained")
+				})?,
+		);
 	}
 	Ok((json, details_blob, is_error))
 }
@@ -12120,7 +12148,7 @@ fn document_daemon_authority_held(error: &daemon::Error) -> bool {
 }
 
 fn document_authority_held(path: &Path) -> EnvdError {
-	EnvdError::DocumentAuthorityHeldBy { path: path.to_path_buf(), holder: None }
+	EnvdError::DocumentAuthorityHeldBy { path: path.to_path_buf() }
 }
 
 #[cfg(windows)]
@@ -12568,8 +12596,7 @@ mod tests {
 		let hello = documents.hello().clone();
 		let exec = ExecHost::new();
 		let blobs = BlobHost::open(state.path().join("blobs")).expect("blob host");
-		let schedules =
-			DurableScheduleActor::spawn(state.path()).expect("durable schedule actor");
+		let schedules = DurableScheduleActor::spawn(state.path()).expect("durable schedule actor");
 		let workspace_ops = WorkspaceOperations::open(
 			workspace.clone(),
 			documents.clone(),
@@ -13542,7 +13569,7 @@ mod tests {
 		assert!(
 			matches!(
 				ensure_document_socket_free(root.path(), &socket).await,
-				Err(EnvdError::DocumentAuthorityHeldBy { path, holder: None })
+				Err(EnvdError::DocumentAuthorityHeldBy { path })
 					if path == root.path()
 			),
 			"live authority must refuse a second daemon"

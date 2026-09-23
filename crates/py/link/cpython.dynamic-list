@@ -1,0 +1,20 @@
+# Dynamic export list for binaries that embed the static CPython (ELF linkers:
+# GNU ld, LLD). Consumed as `-Wl,--dynamic-list=<this file>`.
+#
+# Native wheels resolve the CPython C-API from the host executable at dlopen,
+# so those symbols must reach the dynamic symbol table. The blanket
+# `--export-dynamic` this replaces put EVERY global there instead: 1,292,605
+# symbols and 275 MiB of `.dynstr` in a debug `omp`, 23% of the binary, almost
+# all of it Rust monomorphizations no extension can name.
+#
+# The three patterns below are the measured surface, not a guess. Across the
+# nine extension modules CPython itself ships in `lib-dynload`, 1018 distinct
+# undefined symbols resolve as: 804 matching these patterns, 67 Tcl/Tk (bound
+# through DT_NEEDED on libtcl9.0.so, never the host), and the remainder libc,
+# libm, and loader stubs. Nothing outside these patterns is sought from the
+# executable.
+{
+	Py*;
+	_Py*;
+	PY_*;
+};

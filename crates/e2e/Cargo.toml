@@ -74,3 +74,6 @@ xutf.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+omp-py-link.workspace = true

@@ -207,6 +207,28 @@ pub fn replace_tool_with_observer<D: EditDocuments>(
 	}
 }
 
+/// Diagnostic for a replacement whose search text matched nothing.
+///
+/// A miss is a failed edit, never a successful no-op: answering `Ok` for an
+/// operation that changed nothing because it found nothing leaves the caller
+/// believing the replacement landed. When the call asked for fuzzy matching
+/// and the host policy refused it, the refusal is named so the caller does
+/// not simply reissue the same request.
+fn replace_miss_diagnostic(path: &str, fuzzy_denied: bool) -> String {
+	if fuzzy_denied {
+		format!(
+			"No replacement was made in {path}: `old` did not match exactly and this host denies \
+			 fuzzy matching, so the `allow_fuzzy` request on this operation was refused. Re-read the \
+			 document and author `old` to match the current bytes exactly."
+		)
+	} else {
+		format!(
+			"No replacement was made in {path}: `old` does not appear in the document. Re-read the \
+			 document and author `old` to match the current bytes exactly."
+		)
+	}
+}
+
 /// Constructs the historical replacement revision for durable replay.
 pub fn legacy_replace_tool_with_observer<D: EditDocuments>(
 	documents: D,
@@ -331,6 +353,13 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 					Ok(result) => result,
 					Err(error) => { yield done_fault(Fault::invalid(error.to_string())); return; },
 				};
+				if result.count == 0 {
+					yield done_fault(Fault::invalid(replace_miss_diagnostic(
+						work.prepared.display_path(),
+						work.op.allow_fuzzy && !self.allow_fuzzy,
+					)));
+					return;
+				}
 				let resolved = span_edits(&authored.text, &result.content)
 					.into_iter()
 					.map(|edit| ResolvedEdit {

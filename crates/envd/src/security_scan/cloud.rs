@@ -8,7 +8,7 @@ use bytes::Bytes;
 use omp_ai::auth::HeaderPlacement;
 use omp_core::{Hash32, Str, Ulid};
 use omp_tools::security_scan::{Fault, LookbackDays, TargetKind, ValidationStatus};
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -27,7 +27,7 @@ const MAX_CLOUD_ITEMS: usize = 20_000;
 
 #[derive(Clone)]
 pub(super) struct CloudClient {
-	client:        Client,
+	client:        omp_http::Client,
 	base:          Str,
 	access_token:  Option<Arc<Zeroizing<String>>>,
 	account_id:    Option<Str>,
@@ -51,6 +51,7 @@ impl CloudClient {
 		let client = omp_http::client_builder()
 			.timeout(Duration::from_secs(120))
 			.build()
+			.map(omp_http::Client::from)
 			.ok()?;
 		Some(Self {
 			client,
@@ -64,10 +65,12 @@ impl CloudClient {
 
 	#[cfg(test)]
 	pub fn fixed(base: &str, token: &str, credential_id: u64) -> Self {
-		let client = omp_http::client_builder()
-			.timeout(Duration::from_secs(120))
-			.build()
-			.expect("test client");
+		let client = omp_http::Client::from(
+			omp_http::client_builder()
+				.timeout(Duration::from_secs(120))
+				.build()
+				.expect("test client"),
+		);
 		Self {
 			client,
 			base: Str::new(base.trim_end_matches('/')),
@@ -82,6 +85,7 @@ impl CloudClient {
 		let client = omp_http::client_builder()
 			.timeout(Duration::from_secs(120))
 			.build()
+			.map(omp_http::Client::from)
 			.ok()?;
 		let base =
 			std::env::var("OMP_CODEX_SECURITY_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.to_owned());

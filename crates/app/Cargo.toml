@@ -58,6 +58,7 @@ libc.workspace = true
 md-5.workspace = true
 indicatif.workspace = true
 miette.workspace = true
+omp-adw.workspace = true
 omp-agent.workspace = true
 omp-ar.workspace = true
 omp-chat.workspace = true
@@ -134,3 +135,6 @@ tempfile.workspace = true
 tokio.workspace = true
 tonic-health.workspace = true
 tower.workspace = true
+
+[build-dependencies]
+omp-py-link.workspace = true

@@ -9,6 +9,31 @@
 - `proc_match` and `proc_snapshot` provide shared process discovery and matching support; `ProcInfo` and `ProcessStatus` are part of the crate's public API.
 - Command modules implement individual filesystem, text-processing, checksum, system-information, and process-control builtins. `cksum` contains shared checksum machinery used by the digest commands.
 
+## Filesystem assumptions in tests
+
+Timestamp tests distinguish what a filesystem stores from what it keeps. A
+modification stamp written by `touch` stays put, so it is asserted exactly
+everywhere. An access stamp need not: on a volume mounted with access-time
+updates enabled, something outside the test — an indexer, a scanner — can read
+the file and move the stamp to the current time, and mere seconds are enough.
+
+The CI runner is such a volume. Its tests run under `$TMPDIR`, which resolves to
+`/System/Volumes/Data`, an APFS volume mounted without `noatime`, unlike
+`/System/Volumes/VM` and the simulator volumes beside it. A stamp set there was
+observed reverting to the current time within the same second, with no operation
+performed on the file in between, while its modification stamp survived intact.
+
+So `touch`'s access-stamp tests carry a control file: stamped beside the
+subject, never passed to the utility, and read beside it. It reports what the
+volume did to an untouched file over the same interval. Where the control kept
+its stamp, the contract is asserted exactly; where it did not, the subject is
+held to the values it may legitimately carry, which still rejects a wrong stamp
+the utility could write. This keeps the strict assertion wherever a filesystem
+can support it rather than lowering it everywhere, and keeps Darwin covered
+rather than skipped. Where a contract cannot be proven end to end on such a
+volume, it is pinned instead at the seam that applies the stamps, read back with
+no interval.
+
 ## Philosophy
 
 Builtins run inside the shell so pipelines, redirections, the shell working directory, exported variables, and cancellation remain scoped to each command rather than relying on process-global state. General utilities and process-control commands stay independently selectable because embedders may choose different registration policies, including withholding destructive utilities.

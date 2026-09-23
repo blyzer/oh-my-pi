@@ -1551,11 +1551,30 @@ async fn ordinary_conflict_warning_requires_a_complete_emitted_marker_block() {
 	let sources = Sources::default();
 	sources.file("window.txt", SOURCE);
 
-	let hidden = text(sources.clone(), r#"{"path":"window.txt:10"}"#).await;
-	assert!(!hidden.contains("unresolved conflict"), "{hidden}");
+	// The window around line 10 stops at "after", so no marker block is emitted
+	// whole and the ordinary read stays silent.
+	let (hidden, hidden_diags) =
+		text_with_diags(sources.clone(), r#"{"path":"window.txt:10"}"#).await;
+	assert!(!hidden.contains("<<<<<<< HEAD"), "{hidden}");
+	assert!(
+		!hidden_diags
+			.iter()
+			.any(|diag| diag.native_kind() == Some(DiagKind::Conflicts)),
+		"{hidden_diags:?}"
+	);
 
-	let visible = text(sources, r#"{"path":"window.txt:3-7"}"#).await;
-	assert!(visible.contains("\n⚠ 1 unresolved conflict detected"), "{visible}");
+	// Requesting 3-7 expands to a window that does carry the whole block, so the
+	// warning rides the diagnostic channel — the glyph belongs to `:conflicts`.
+	let (visible, visible_diags) = text_with_diags(sources, r#"{"path":"window.txt:3-7"}"#).await;
+	assert!(visible.contains("2:<<<<<<< HEAD"), "{visible}");
+	assert!(visible.contains("8:>>>>>>> feature"), "{visible}");
+	let [diag] = visible_diags.as_slice() else {
+		panic!("windowed read emits one conflict diagnostic: {visible_diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Conflicts));
+	assert_eq!(diag.severity, Severity::Warn);
+	assert_eq!(diag.text.as_str(), "1 unresolved conflict detected.");
+	assert_eq!(diag.continuation.as_deref(), Some("window.txt:conflicts"));
 }
 
 const fn png_fixture() -> Bytes {

@@ -341,6 +341,80 @@ fn overlaps_excluded(start: usize, end: usize, ranges: &[ExcludedRange]) -> bool
 		.any(|range| start < range.end_index && end > range.start_index)
 }
 
+/// Whether a character is an invisible mark that normalization erases.
+const fn is_invisible_mark(ch: char) -> bool {
+	matches!(ch, '\u{200B}'..='\u{200D}' | '\u{FEFF}')
+}
+
+/// Locate a window that differs from the target only in Unicode punctuation.
+///
+/// `find_match` otherwise drops straight from a byte-exact search into
+/// similarity scoring, where a typographic quote or a leading byte-order mark
+/// costs enough per line to fall under the threshold. The sibling sequence
+/// ladder already carries this rung, so the same normalization is applied
+/// here, ahead of scoring and independent of `allow_fuzzy`: folding `"` to `"`
+/// is a transcription difference, not a guess about intent.
+///
+/// Only an unambiguous single window is accepted; anything else falls through
+/// so the scored path keeps its own ambiguity reporting.
+fn find_unicode_match(
+	content: &str,
+	target: &str,
+	excluded_ranges: &[ExcludedRange],
+) -> Option<MatchOutcome> {
+	let content_lines: Vec<&str> = content.split('\n').collect();
+	let target_lines: Vec<&str> = target.split('\n').collect();
+	if target_lines.len() > content_lines.len() {
+		return None;
+	}
+	let offsets = line_offsets(&content_lines);
+	let target_normalized = target_lines
+		.iter()
+		.map(|line| normalize_unicode(line))
+		.collect::<Vec<_>>();
+	let mut found = None;
+	for start in 0..=content_lines.len() - target_lines.len() {
+		let window = &content_lines[start..start + target_lines.len()];
+		if !window
+			.iter()
+			.zip(&target_normalized)
+			.all(|(line, expected)| normalize_unicode(line) == *expected)
+		{
+			continue;
+		}
+		let start_index = offsets[start];
+		let end_line = start + target_lines.len() - 1;
+		let end_index = (offsets[end_line] + content_lines[end_line].len()).max(start_index + 1);
+		if overlaps_excluded(start_index, end_index, excluded_ranges) {
+			continue;
+		}
+		if found.is_some() {
+			return None;
+		}
+		// The comparison ignores invisible marks, so the span handed back for
+		// splicing must exclude the ones at its edges: a leading byte-order
+		// mark belongs to the file, not to the text being replaced, and
+		// swallowing it would silently strip it.
+		let text = window.join("\n");
+		let body = text
+			.trim_start_matches(is_invisible_mark)
+			.trim_end_matches(is_invisible_mark);
+		let lead = text.len() - text.trim_start_matches(is_invisible_mark).len();
+		found = Some(FuzzyMatch {
+			actual_text: body.to_owned(),
+			start_index: start_index + lead,
+			start_line:  start as u32 + 1,
+			confidence:  0.97,
+		});
+	}
+	let matched = found?;
+	Some(MatchOutcome {
+		matched: Some(matched.clone()),
+		closest: Some(matched),
+		..MatchOutcome::default()
+	})
+}
+
 fn find_exact_match_outcome(
 	content: &str,
 	target: &str,
@@ -571,6 +645,9 @@ pub fn find_match(content: &str, target: &str, options: &FindMatchOptions<'_>) -
 	}
 	if let Some(exact) = find_exact_match_outcome(content, target, options.excluded_ranges) {
 		return exact;
+	}
+	if let Some(unicode) = find_unicode_match(content, target, options.excluded_ranges) {
+		return unicode;
 	}
 	let threshold = options.threshold.unwrap_or(DEFAULT_FUZZY_THRESHOLD);
 	let result = best_fuzzy_match(content, target, threshold, options.excluded_ranges);

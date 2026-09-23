@@ -38,4 +38,5 @@ tokio.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
+omp-py-link.workspace = true
 serde_json.workspace = true

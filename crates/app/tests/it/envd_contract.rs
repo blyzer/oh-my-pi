@@ -1031,7 +1031,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		.description
 		.as_deref()
 		.expect("read description");
-	assert!(read_description.contains("Summary footer names elided ranges?"));
+	assert!(read_description.contains("Summary diagnostic names elided ranges?"));
 	assert!(read_description.contains("NEVER guess `..`/`…` content."));
 	assert_eq!(
 		definition("grep").definition.description.as_deref(),
@@ -1968,10 +1968,7 @@ async fn opt_in_py_eval_is_environment_routed_and_uses_a_fresh_namespace() {
 		json!({"code":"globals().get('sentinel', 'fresh')"}),
 	)
 	.await;
-	assert_eq!(
-		ok_builtin_payload(fresh, "py_eval fresh namespace"),
-		json!({"result": "fresh"})
-	);
+	assert_eq!(ok_builtin_payload(fresh, "py_eval fresh namespace"), json!({"result": "fresh"}));
 	drop(eval_parent_lease);
 }
 #[tokio::test]

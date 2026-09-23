@@ -22,6 +22,7 @@ omp's Python extension surface, from the process outward.
 | [15-regimes.md](15-regimes.md) | `@omp.regime`, fixed loop events, transactional `ctx` / `next_` handlers, durable state, exclusive resources, and modes |
 | [16-prelude.md](16-prelude.md) | `@omp.prelude`, extension-declared eval-namespace helpers, declaration and manifest identity, generated sync stubs, JSON call boundary, lifecycle, and failure semantics |
 | [17-scribe.md](17-scribe.md) | `omp.scribe`: `Template`, `render`, `canonicalize`, `TemplateError` — deterministic prompt templating, the props value model, the template grammar, and the builtin helper set |
+| [18-convars.md](18-convars.md) | `omp.convars`: `declare`, `get`, `observe`, `Snapshot`, `Observation` — extension-declared settings on the shared control plane |
 
 Rule of the set: the owner defines, everyone else links. This file names sibling symbols but never redefines them. The rule is machine-enforced, not merely stated: the generated spec (*The generated spec*, build section) fails CI on a duplicate public symbol owner, because the review caught the rule being violated by the most central symbols in the set.
 
@@ -182,6 +183,8 @@ OperationSpec(
 ```
 
 **Core enforces `minimum_phase` for CONTROL operations; the Environment enforces it for DATA operations.** An extension author never memorizes which namespace happens to require a preceding gate — a call either is legal in the current `omp.InvocationPhase` ([03-params.md](03-params.md)) or raises `omp.EffectsNotAuthorized` from the enforcing side. Concretely: `journal.append` is durable, so its `minimum_phase` is `EFFECTS_AUTHORIZED`; the same holds for subagent spawn, inference requests, provider mutation, and schedule creation. Non-durable UI pushes may be legal earlier — and the matrix, not folklore, says exactly which and when, per symbol.
+
+Durability implies `EFFECTS_AUTHORIZED` only where the durable act is itself an effect. A namespace document may state a narrower contract for its own symbols, and where it does, it governs them: `omp.context.pin`, `omp.context.unpin` and `omp.context.compact` are durable and legal from `Open`, because [08-context.md](08-context.md) establishes that nothing in that namespace authorizes a DATA effect — the durability is a recorded decision about the session's own working copy, not a write the Environment must first authorize. They carry the idempotency key and generation fence every durable request carries; only the phase differs, through the `OPEN_DURABLE` specification. This document owns the matrix contract, so an exception lives here as well as in the namespace that claims it.
 
 The whole table is published as one generated **phase legality matrix**: one row per public symbol, one column per `InvocationPhase`, produced from the machine-readable spec (*The generated spec*, build section) rather than maintained by hand. This document owns the matrix contract; sibling documents own their symbols' rows.
 

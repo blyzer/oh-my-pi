@@ -8,8 +8,9 @@
 - `build.rs` links the vendored interpreter's native dependencies and packs project modules and bundled packages into frozen-module blobs without network access.
 - `python/` contains repository-provided Python modules, including `omp_remote`; `requirements.txt` pins bundled pure-Python packages.
 - `scripts/fetch-python.sh` fetches python-build-standalone archives (dev `python/` + release `python-release/`) and generates derived build inputs (`stdlib.bin`, `pyo3-config.txt`, bundled packages); `scripts/pack-pymodules.py` and `scripts/ld64.lld` support the build.
+- `link/` holds the CPython export lists — `cpython.dynamic-list` for ELF linkers, `cpython.macho-list` for ld64 — naming the C-API symbols a host executable must publish so native wheels resolve them at `dlopen`. `omp-py-link` applies them, and the shim, to every binary that embeds this interpreter.
 - `src/bin/demo.rs` is the crate's `omp-demo` binary.
-- `THIRD-PARTY-NOTICES.txt` records notices for bundled Python packages and is also exposed through `THIRD_PARTY_LICENSES`.
+- `notices/THIRD-PARTY-NOTICES.<target>.txt` records notices for the statically linked native components and bundled Python packages, and is exposed through `THIRD_PARTY_LICENSES`. The set is per target — the Linux release statically links zlib, ncurses, libedit, bdb and the X libraries that macOS supplies dynamically — so each host regenerates only its own file.
 
 ## Philosophy
 

@@ -582,6 +582,22 @@ pub fn reset(state: &ServiceState, target: &str) -> ServiceResult<Str> {
 	let on_worker = tokio::runtime::Handle::try_current()
 		.is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
 	let outcome = if on_worker {
+		// The ban exists to stop a worker being hijacked silently. Here the
+		// hijack is the point and it is declared: `reset` is synchronous by
+		// contract — every arm of the mutation dispatch in
+		// `chat_services/mod.rs` returns `Ok(ready(..))` — so the wait cannot
+		// be awaited away without restructuring the service layer. Of the two
+		// remedies the ban names, "hand off to a dedicated thread" is the
+		// `else` arm below, correct only off a worker: on one it parks a
+		// runtime thread on `recv` with nothing told to take over its tasks.
+		// `block_in_place` is the primitive that tells the runtime to move
+		// them, which is what makes this arm the safe one rather than the
+		// shortcut.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "sync-by-contract actor call; the alternative parks a worker without relocating \
+			          its tasks"
+		)]
 		tokio::task::block_in_place(|| runtime.block_on(usage_cmd::reset_usage(&data_dir, &target)))
 	} else {
 		let (tx, rx) = flume::bounded(1);

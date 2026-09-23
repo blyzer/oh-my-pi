@@ -1,12 +1,18 @@
 use std::{env, io, path::PathBuf, process, process::Stdio, sync::Once, time::Duration};
 
 #[cfg(unix)]
-use nix::{errno::Errno, sys::signal, unistd::Pid};
+use nix::{
+	errno::Errno,
+	sys::signal::{self, Signal},
+	unistd::Pid,
+};
 use tokio::{
 	process::{Child, Command},
 	time,
 };
 
+#[cfg(unix)]
+use super::owned_groups::GroupLease;
 use super::within;
 use crate::{Context as _, Result};
 
@@ -65,12 +71,21 @@ pub fn omp_binary() -> io::Result<PathBuf> {
 	}
 }
 
-/// Child process placed in its own process group and killed as a tree on drop.
+/// Poll interval while reaping an owned child. The reap runs as a non-blocking
+/// `try_wait` under the group registry lock, so the leader is never reaped
+/// while its group is still registered.
+const REAP_POLL: Duration = Duration::from_millis(5);
+
+/// Child process placed in its own process group and killed as a tree on drop
+/// or when its spawning thread panics.
 #[derive(Debug)]
 #[must_use]
 pub struct OwnedProcess {
+	// Declared before `child`: the lease must leave the registry before the
+	// child handle's own drop can reap the leader.
+	#[cfg(unix)]
+	lease:  GroupLease,
 	child:  Child,
-	group:  Option<i32>,
 	exited: bool,
 }
 
@@ -84,8 +99,20 @@ impl OwnedProcess {
 			command.as_std_mut().process_group(0);
 		}
 		let child = command.spawn()?;
-		let group = child.id().and_then(|pid| i32::try_from(pid).ok());
-		Ok(Self { child, group, exited: false })
+		#[cfg(unix)]
+		let lease = {
+			let group = child
+				.id()
+				.and_then(|pid| i32::try_from(pid).ok())
+				.ok_or_else(|| io::Error::other("spawned child has no usable process id"))?;
+			GroupLease::acquire(group)
+		};
+		Ok(Self {
+			#[cfg(unix)]
+			lease,
+			child,
+			exited: false,
+		})
 	}
 
 	/// Returns the operating-system child identifier while it is known.
@@ -95,14 +122,15 @@ impl OwnedProcess {
 
 	/// Returns the dedicated Unix process-group identifier.
 	pub const fn process_group(&self) -> Option<i32> {
-		self.group
+		#[cfg(unix)]
+		return Some(self.lease.group());
+		#[cfg(not(unix))]
+		None
 	}
 
 	/// Waits for normal process exit within `limit`.
 	pub async fn wait(&mut self, limit: Duration) -> Result<process::ExitStatus> {
-		let status = within("owned child exit", limit, self.child.wait()).await??;
-		self.exited = true;
-		Ok(status)
+		Ok(within("owned child exit", limit, self.reap()).await??)
 	}
 
 	/// Requests TERM, then escalates to KILL after `grace`, always targeting the
@@ -111,42 +139,41 @@ impl OwnedProcess {
 		if self.exited {
 			return Ok(());
 		}
-		self.signal_group_terminate();
-		if time::timeout(grace, self.child.wait()).await.is_err() {
-			self.signal_group_kill();
-			self
-				.child
-				.wait()
-				.await
-				.context("waiting for killed child")?;
+		#[cfg(unix)]
+		self.lease.signal(Signal::SIGTERM);
+		#[cfg(not(unix))]
+		let _ = self.child.start_kill();
+		if time::timeout(grace, self.reap()).await.is_err() {
+			#[cfg(unix)]
+			self.lease.signal(Signal::SIGKILL);
+			#[cfg(not(unix))]
+			let _ = self.child.start_kill();
+			self.reap().await.context("waiting for killed child")?;
 		}
-		self.exited = true;
 		Ok(())
 	}
 
-	fn signal_group_terminate(&mut self) {
-		#[cfg(unix)]
-		if let Some(group) = self.group {
-			let _ = signal::killpg(Pid::from_raw(group), Some(signal::Signal::SIGTERM));
-			return;
+	async fn reap(&mut self) -> io::Result<process::ExitStatus> {
+		loop {
+			#[cfg(unix)]
+			let status = self.lease.reap(|| self.child.try_wait())?;
+			#[cfg(not(unix))]
+			let status = self.child.try_wait()?;
+			if let Some(status) = status {
+				self.exited = true;
+				return Ok(status);
+			}
+			time::sleep(REAP_POLL).await;
 		}
-		let _ = self.child.start_kill();
-	}
-
-	fn signal_group_kill(&mut self) {
-		#[cfg(unix)]
-		if let Some(group) = self.group {
-			let _ = signal::killpg(Pid::from_raw(group), Some(signal::Signal::SIGKILL));
-			return;
-		}
-		let _ = self.child.start_kill();
 	}
 }
 
+// On Unix the lease's own drop kills a still-registered group.
+#[cfg(not(unix))]
 impl Drop for OwnedProcess {
 	fn drop(&mut self) {
 		if !self.exited {
-			self.signal_group_kill();
+			let _ = self.child.start_kill();
 		}
 	}
 }

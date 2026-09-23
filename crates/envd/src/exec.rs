@@ -2267,7 +2267,8 @@ async fn session_loop(mut shell: Shell, commands: Receiver<SessionCommand>) {
 						RunTerminal::Cancelled,
 						Duration::ZERO,
 						shell.working_dir(),
-					);
+					)
+					.await;
 					cancellation_deadline = Some(Instant::now() + CANCEL_GRACE);
 					continue;
 				},
@@ -2289,7 +2290,8 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 				RunTerminal::Cancelled,
 				started_at.elapsed(),
 				shell.working_dir(),
-			);
+			)
+			.await;
 			return true;
 		},
 		Err(flume::TryRecvError::Empty) => {},
@@ -2311,7 +2313,8 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 			RunTerminal::Failed,
 			started_at.elapsed(),
 			shell.working_dir(),
-		);
+		)
+		.await;
 		return false;
 	};
 	if let Some(sandbox) = command.sandbox.as_ref()
@@ -2353,7 +2356,8 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 				RunTerminal::Failed,
 				started_at.elapsed(),
 				shell.working_dir(),
-			);
+			)
+			.await;
 			return false;
 		}
 	}
@@ -2446,17 +2450,18 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 			let approval = host.approve_sandbox_amendment(&command.source, &denial.fact, &scope);
 			tokio::pin!(approval);
 			let approved = tokio::select! {
-				approved = &mut approval => approved,
-				_ = command.cancel_rx.recv_async() => {
-					finish_session_command(
-						&command,
-						RunTerminal::Cancelled,
-						started_at.elapsed(),
-						shell.working_dir(),
-					);
-					return true;
-				},
-			};
+							approved = &mut approval => approved,
+							_ = command.cancel_rx.recv_async() => {
+								finish_session_command(
+									&command,
+									RunTerminal::Cancelled,
+									started_at.elapsed(),
+									shell.working_dir(),
+								)
+			.await;
+								return true;
+							},
+						};
 			if approved {
 				let network_amendment = matches!(&amendment, ApprovedSandboxAmendment::Network(_));
 				let amended = match &amendment {
@@ -2481,14 +2486,15 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 			RunTerminal::Denied { exit_code: denial.exit_code, fact: denial.fact },
 			started_at.elapsed(),
 			shell.working_dir(),
-		);
+		)
+		.await;
 		return cancelled;
 	}
-	finish_session_command(&command, result, started_at.elapsed(), shell.working_dir());
+	finish_session_command(&command, result, started_at.elapsed(), shell.working_dir()).await;
 	cancelled
 }
 
-fn finish_session_command(
+async fn finish_session_command(
 	command: &SessionCommand,
 	mut result: RunTerminal,
 	elapsed: Duration,
@@ -2545,7 +2551,12 @@ fn finish_session_command(
 		final_cwd_revision,
 		props: Default::default(),
 	});
-	let _ = command.events.send(event);
+	// `send_async`, never `send`: the host queue is bounded, and an output
+	// burst that fills it leaves the blocking send parking the runtime thread
+	// that the only consumer needs in order to drain. On a current-thread
+	// runtime that is an outright deadlock, and on a multi-thread one it wedges
+	// a worker and stalls the session actor.
+	let _ = command.events.send_async(event).await;
 }
 
 #[derive(Clone, Eq, PartialEq)]

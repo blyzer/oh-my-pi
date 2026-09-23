@@ -2593,10 +2593,16 @@ impl Presenter {
 	/// Default scripts list contextual fallbacks from narrowest to broadest
 	/// (panel, editor, app). Once one posted action consumes the edge, later
 	/// fallbacks from that same script are discarded.
+	///
+	/// Actions already queued before the edge (background results such as
+	/// the startup update notice) belong to no script: they apply in full
+	/// first, so they can neither take the edge's first-effect slot nor
+	/// discard its fallbacks.
 	fn run_bound_key(&mut self, chord: &str, pressed: bool) -> Result<Routed, HostError> {
+		let pending = self.drain_mailbox()?;
 		let before = self.projection_inputs();
 		let failure = self.con.key(chord, pressed).err();
-		let mut routed = if before == self.projection_inputs() {
+		let mut routed = pending.max(if before == self.projection_inputs() {
 			if pressed {
 				Routed::Repaint
 			} else {
@@ -2604,7 +2610,7 @@ impl Presenter {
 			}
 		} else {
 			Routed::RebuildProjection
-		};
+		});
 		let actions = self.mailbox.drain().collect::<Vec<_>>();
 		for action in actions {
 			let effect = self.act(action)?;

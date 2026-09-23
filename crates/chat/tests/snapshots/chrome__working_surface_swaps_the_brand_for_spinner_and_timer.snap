@@ -1,9 +1,9 @@
 ---
 source: crates/chat/tests/chrome.rs
-expression: "rows.join(\"\\n\")"
+expression: "version_normalized(rows.join(\"\\n\"))"
 ---
 
-╭─── omp v0.1.0 ───────────────────────────────────────────────────────────────────────────────────╮
+╭─── omp v[VERSION] ───────────────────────────────────────────────────────────────────────────────────╮
 │                          │ Tips                                                                  │
 │      Welcome back!       │ # for prompt actions                                                  │
 │                          │ / for commands                                                        │

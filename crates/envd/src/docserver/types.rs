@@ -606,6 +606,46 @@ impl Drop for AuthorityLock {
 	}
 }
 
+/// Returns a descriptor for the authority root that can carry a lock.
+///
+/// `cap-std` opens directories with `O_PATH` on Linux. An `O_PATH` descriptor
+/// only names a file — it carries no open file description, so `flock` on one
+/// fails with `EBADF` and the authority can never be taken. macOS has no
+/// `O_PATH`, which is why the capability handle locks directly there and why
+/// this never surfaced until the acceptance proofs first ran on Linux.
+///
+/// Reopening through `/proc/self/fd` returns a normal descriptor for the very
+/// inode the capability already holds, so no user-controllable path component
+/// is resolved a second time; `cap-primitives` reaches for the same procfs
+/// idiom where an `O_PATH` descriptor cannot perform an operation.
+///
+/// There is deliberately no fall back to reopening the root by path. The
+/// authority is held on the open directory, not on its name —
+/// `authority_follows_the_open_directory_across_rename` pins that — and a path
+/// reopen would resolve the name again and hand back a lock with quieter
+/// guarantees than the one callers rely on. Without procfs this fails, which is
+/// the honest outcome.
+#[cfg(target_os = "linux")]
+fn lockable_handle(handle: fs::File, root: &Path) -> Result<fs::File> {
+	use std::os::fd::AsRawFd as _;
+
+	let reopened = fs::File::open(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+	drop(handle);
+	reopened.map_err(|source| Error::Io {
+		operation: sf!("reopen Environment authority handle for locking"),
+		path: root.to_path_buf(),
+		source,
+	})
+}
+
+/// Returns a descriptor for the authority root that can carry a lock.
+///
+/// Only Linux needs the reopen; see the Linux definition for why.
+#[cfg(not(target_os = "linux"))]
+fn lockable_handle(handle: fs::File, _root: &Path) -> Result<fs::File> {
+	Ok(handle)
+}
+
 impl ServerConfig {
 	/// Canonicalizes and validates an Environment filesystem root.
 	pub fn new(environment_root: impl AsRef<Path>) -> Result<Self> {
@@ -694,7 +734,7 @@ impl ServerConfig {
 			});
 		}
 		let result = (|| {
-			let root = self
+			let handle = self
 				.root
 				.try_clone()
 				.map(fs::Dir::into_std_file)
@@ -703,6 +743,7 @@ impl ServerConfig {
 					path: self.environment_root.clone(),
 					source,
 				})?;
+			let root = lockable_handle(handle, &self.environment_root)?;
 			root.try_lock().map_err(|source| Error::Io {
 				operation: sf!("lock Environment authority"),
 				path:      self.environment_root.clone(),

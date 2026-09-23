@@ -331,6 +331,19 @@ class Host:
 
         return emit
 
+    def _write_dispatch_started(self, correlation: int, invocation: str) -> None:
+        """Announce that one dispatch is about to enter its handler."""
+        try:
+            self._write(
+                {
+                    "kind": "DispatchStarted",
+                    "correlation": correlation,
+                    "body": {"authority": self._dispatch_authority(invocation)},
+                }
+            )
+        except HostDisconnected:
+            pass
+
     def _write_dispatch_response(
         self,
         correlation: int,
@@ -585,8 +598,17 @@ class Host:
                 if not isinstance(row, dict) or not isinstance(row.get("tier"), str):
                     raise HostDisconnected("invalid CONTROL tier snapshot row")
                 kind = row.get("kind")
+                # `identifying` is the subset that must be non-empty. Every
+                # component must still be a string, but a device's `family` is
+                # an optional discriminator rather than part of its name: the
+                # host defaults it to "" when a declaration carries no family
+                # property, and `omp.tool` falls back to "" when no extension
+                # id is configured. Requiring it non-empty rejected snapshots
+                # the host legitimately sends, and because this runs during
+                # CONTROL configure the whole extension died before FREEZE.
                 if kind == "core":
                     key = ("core", row.get("name"), row.get("rev"))
+                    identifying = key[1:]
                 elif kind == "device":
                     key = (
                         "device",
@@ -594,11 +616,15 @@ class Host:
                         row.get("family"),
                         row.get("rev"),
                     )
+                    identifying = (key[1], key[3])
                 elif kind == "mcp":
                     key = ("mcp", row.get("server"), row.get("tool"))
+                    identifying = key[1:]
                 else:
                     raise HostDisconnected("invalid CONTROL tier snapshot target")
-                if any(not isinstance(item, str) or not item for item in key[1:]):
+                if any(not isinstance(item, str) for item in key[1:]) or any(
+                    not item for item in identifying
+                ):
                     raise HostDisconnected("invalid CONTROL tier snapshot identity")
                 if key in snapshot:
                     raise HostDisconnected("duplicate CONTROL tier snapshot identity")
@@ -732,6 +758,11 @@ class Host:
                     "unhandled_operation", f"unhandled host dispatch operation: {operation}"
                 )
             decoded_arguments = _from_json(arguments)
+            # Announce entry before the body runs. The stream is ordered, so
+            # a handler that began is always preceded by this frame; its
+            # absence is what lets the host tell an untouched dispatch from
+            # one whose effects it cannot know.
+            self._write_dispatch_started(correlation, invocation)
             if inspect.iscoroutinefunction(handler):
                 result = await handler(**decoded_arguments)
             else:
@@ -893,10 +924,16 @@ class Host:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def live_dispatch_update_sink() -> Callable[[object], None] | None:
+    """Return the correlated update sink, or ``None`` outside a dispatch."""
+
+    return _dispatch_progress.get()
+
+
 def dispatch_update_sink() -> Callable[[object], None]:
     """Return the live correlated update sink for the current device dispatch."""
 
-    sink = _dispatch_progress.get()
+    sink = live_dispatch_update_sink()
     if sink is None:
         raise RuntimeError("no live CONTROL device update sink")
     return sink

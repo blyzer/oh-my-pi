@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, omp2]
     paths:
       - ".cargo/**"
       - ".github/workflows/ci.yml"
@@ -22,7 +22,7 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
   pull_request:
-    branches: [main]
+    branches: [main, omp2]
     paths:
       - ".cargo/**"
       - ".github/workflows/ci.yml"
@@ -95,8 +95,23 @@ jobs:
 
   rust:
     name: Rust workspace and acceptance proofs
-    needs: [format, runtime_spec, licenses]
-    runs-on: macos-15
+    # Deliberately NOT gated on runtime_spec. That check is cheap and reports
+    # in two minutes; this one is the expensive proof and the only place the
+    # suite, P1-P8 and the baseline ever run. Chaining them meant a red spec
+    # gate skipped the suite entirely, so the branch could not learn whether
+    # it passed. They are independent questions and now answer in parallel.
+    # This does not weaken the gate: runtime_spec still reports its own
+    # conclusion and can still be a required check in branch protection.
+    needs: [format, licenses]
+    # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
+    # somewhere else. Set it to a JSON label array to send this job to a
+    # self-hosted Apple silicon machine, which is the only way to give it more
+    # than a hosted runner's disk — every test binary statically links the
+    # ~650 MB CPython, so a full link is large:
+    #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
+    # Unset, and the expression falls back, so a repository with no runner
+    # registered keeps the hosted behaviour rather than queueing forever.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -113,6 +128,10 @@ jobs:
 
       - name: Cache embedded Python
         id: python-cache
+        # A self-hosted runner keeps its workspace between runs, so target/
+        # is already warm. Uploading it would mean tarring tens of GB against
+        # a 10 GB repository cache limit on every job.
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -130,6 +149,10 @@ jobs:
           crates/py/scripts/ld64.lld --version
 
       - name: Cache Cargo
+        # A self-hosted runner keeps its workspace between runs, so target/
+        # is already warm. Uploading it would mean tarring tens of GB against
+        # a 10 GB repository cache limit on every job.
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -158,9 +181,10 @@ jobs:
       - name: Compile acceptance proofs
         run: cargo nextest run -p omp-e2e --tests --no-run --locked
 
-      - name: Run acceptance proofs P1-P6
+      - name: Run harness unit tests and acceptance proofs P1-P6
         run: |
           cargo nextest run --profile ci -p omp-e2e --locked \
+            --lib \
             --test p1_doc_race \
             --test p2_cancel_matrix \
             --test p3_detached_jobs \
@@ -191,6 +215,66 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # The workspace lint runs on macOS, so until this job existed no
+  # `#[cfg(target_os = "linux")]` code had ever been linted by anything: the
+  # Linux job next door runs one proof and no clippy. Every Linux-only path —
+  # the ALSA/PulseAudio device backend, landlock, the envd host's fd handling —
+  # was outside the gate that the rest of the tree is held to. Lint the same
+  # workspace from the other side so a policy violation cannot hide behind a
+  # target gate.
+  lint_linux:
+    name: Lint workspace (Linux)
+    needs: format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = x86_64
+          rustup show active-toolchain
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pipx zstd
+          command -v uv >/dev/null || pipx install uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache embedded Python
+        id: python-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vendor/python
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+
+      - name: Prepare embedded Python
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        run: crates/py/scripts/fetch-python.sh
+
+      - name: Verify embedded Python toolchain
+        run: test -f vendor/python/pyo3-config.txt
+
+      - name: Cache Cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
+            cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-
+
+      # `--keep-going` so one crate's violation does not mask the rest: the
+      # queue this job exists to drain is only visible if cargo reports every
+      # failing crate in a single run rather than stopping at the first.
+      - name: Lint workspace
+        run: cargo clippy --workspace --locked --keep-going
+
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
     needs: format
@@ -210,6 +294,11 @@ jobs:
           sudo apt-get install --no-install-recommends -y pipx zstd
           command -v uv >/dev/null || pipx install uv
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # This job runs the proof through `cargo nextest`, same as the macOS
+      # workspace job, so it needs the same provisioning step.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Cache embedded Python
         id: python-cache

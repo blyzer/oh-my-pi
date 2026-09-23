@@ -94,48 +94,7 @@ fn main() {
 		}
 	}
 
-	// The release vendored archive contains LLVM-22 LTO bitcode, which Xcode's
-	// ld64 cannot read; scripts/ld64.lld routes the link through a matching
-	// Homebrew lld. Dev trees (freethreaded+debug) use native machine code and
-	// skip the shim entirely. Gated by the `needs-lld` marker dropped by
-	// fetch-python.sh.
-	// A missing marker is deliberately NOT tracked: cargo treats a missing
-	// `rerun-if-changed` path as always changed, which would rebuild omp-py
-	// (and relink every dependent binary) on each invocation. Marker
-	// appearance is covered by the tracked PYTHON.json, which fetch-python.sh
-	// rewrites whenever it regenerates the vendor tree.
-	let needs_lld = vendor.join("needs-lld").is_file();
-	if needs_lld {
-		println!("cargo::rerun-if-changed={}", vendor.join("needs-lld").display());
-		let shim = manifest.join("scripts/ld64.lld");
-		assert!(
-			shim.is_file(),
-			"this Python tree requires omp-py's ld64.lld shim at {}; restore \
-			 crates/py/scripts/ld64.lld",
-			shim.display()
-		);
-		println!("cargo::rustc-link-arg=--ld-path={}", shim.display());
-	}
-
-	// Wheels' native extensions resolve CPython symbols from this executable
-	// at dlopen; keep every global (code AND data like PyExc_*) through
-	// dead-strip so the full C-API surface stays exported. ld64 and ELF linkers
-	// spell this flag differently; passing ld64's spelling to an ELF linker is
-	// parsed as `-e xport_dynamic`, producing no valid entry point. Other object
-	// formats have no compatible flag.
-	let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
-	let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
-	let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-	let link_arg = if target_vendor == "apple" {
-		Some("-Wl,-export_dynamic")
-	} else if target_os != "aix" && target_family.split(',').any(|family| family == "unix") {
-		Some("-Wl,--export-dynamic")
-	} else {
-		None
-	};
-	if let Some(link_arg) = link_arg {
-		println!("cargo::rustc-link-arg={link_arg}");
-	}
+	omp_py_link::emit();
 
 	// Static archives propagate transitively: they bundle into this crate's
 	// rlib and reach any downstream binary. Unreferenced members cost

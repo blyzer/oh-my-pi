@@ -16,7 +16,7 @@ use std::{
 	path::Path,
 	process::{self, Child, Command, Stdio},
 	sync::{
-		Arc,
+		Arc, LazyLock,
 		atomic::{AtomicBool, Ordering},
 	},
 	task::{Context, Poll},
@@ -31,13 +31,13 @@ use nix::{
 	errno::Errno,
 	fcntl::{FcntlArg, OFlag, fcntl},
 	pty::{Winsize, openpty},
-	sys::termios::{Termios, cfgetispeed, cfgetospeed, tcgetattr},
+	sys::termios::{LocalFlags, Termios, cfgetispeed, cfgetospeed, tcgetattr},
 	unistd::ttyname,
 };
 use omp_ai::{
 	Answer, Error as InferenceError, Registry,
 	answer::{AnswerBody, ChatStream},
-	call::{Call, OpaqueJson},
+	call::{Call, OpaqueJson, OperationCall},
 	event::{BlockKind, ChatEvent, Completion, FinishReason, ToolCall, WorkflowResponse},
 	id::ToolCallId,
 	layer::{LayerCall, stack::RouteProviderService},
@@ -77,6 +77,63 @@ struct GatedRoute {
 	preview_release: Receiver<()>,
 }
 
+/// Origin for every timeline mark, so the scenario thread and the provider
+/// layer report against one clock.
+static TIMELINE: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Records one ordered step of the interrupt scenario on stderr.
+///
+/// These exist to separate two explanations of a detached job appearing where
+/// a cancellation belongs. A long-running tool detaches once it outlives
+/// `DispatchPolicy::blocking_limit`, 30s by default, and this scenario sleeps
+/// for exactly that long — so the keypress and the blocking limit race. An
+/// `escape` marked well before the sixth provider call means the interrupt was
+/// delivered and did not stop the tool, which is a defect in the interrupt
+/// path. One marked at or after it means the scenario simply lost the race,
+/// which is a defect in the scenario.
+fn mark(step: &str) {
+	eprintln!("[t+{:>6}ms] {step}", TIMELINE.elapsed().as_millis());
+}
+
+/// Shortens one rendered value so a panic stays readable.
+fn clipped(text: &str, limit: usize) -> String {
+	match text.char_indices().nth(limit) {
+		Some((cut, _)) => format!("{}…", &text[..cut]),
+		None => text.to_owned(),
+	}
+}
+
+/// One bounded line identifying a provider call.
+///
+/// `Call::session` is empty at this layer, so the thread itself is what
+/// discriminates: the role sequence shows the shape of the conversation the
+/// call carries, and the final message shows what prompted it. An extra call
+/// whose thread ends in a tool result is a continuation of the turn that
+/// issued that tool; one ending in a user or assistant message began a new
+/// turn. The whole `Call` is not printed — it would bury both.
+fn describe_call(call: &Call) -> String {
+	match &call.operation {
+		OperationCall::Chat(chat) => {
+			let roles = chat
+				.messages
+				.iter()
+				.map(|message| format!("{:?}", message.role))
+				.collect::<Vec<_>>()
+				.join(",");
+			let last = chat
+				.messages
+				.last()
+				.map_or_else(|| "<none>".to_owned(), |message| clipped(&format!("{message:?}"), 240));
+			format!(
+				"id={:?} Chat messages={} roles=[{roles}] last={last}",
+				call.id,
+				chat.messages.len()
+			)
+		},
+		other => format!("id={:?} {}", call.id, clipped(&format!("{other:?}"), 160)),
+	}
+}
+
 impl Service<LayerCall<Call>> for GatedRoute {
 	type Error = InferenceError;
 	type Response = Answer;
@@ -88,11 +145,27 @@ impl Service<LayerCall<Call>> for GatedRoute {
 	}
 
 	fn call(&mut self, request: LayerCall<Call>) -> Self::Future {
-		let gate = self
-			.gates
-			.lock()
-			.pop_front()
-			.expect("every scripted provider call has a gate");
+		mark(&format!("provider call #{}", self.captures.lock().len()));
+		let gate = self.gates.lock().pop_front().unwrap_or_else(|| {
+			let captures = self.captures.lock();
+			let scripted = captures
+				.iter()
+				.enumerate()
+				.map(|(index, call)| format!("  {index}: {}", describe_call(call)))
+				.collect::<Vec<_>>()
+				.join("\n");
+			panic!(
+				"the provider was called {} times but the scenario scripts {}.\n\nScripts stand in \
+				 for nondeterministic provider output only, so an extra call means production issued \
+				 a turn this scenario does not describe. Compare the turn ids: one that repeats the \
+				 previous turn is a continuation or retry inside it, while a new turn id means \
+				 another turn began.\n\nscripted:\n{scripted}\nunscripted:\n  {}: {}",
+				captures.len() + 1,
+				captures.len(),
+				captures.len(),
+				describe_call(&request.payload),
+			)
+		});
 		let call_index = {
 			let mut captures = self.captures.lock();
 			let index = captures.len();
@@ -728,6 +801,46 @@ fn journal(path: &Path) -> String {
 	fs::read_to_string(path).expect("read session journal")
 }
 
+/// Yields each SSE frame in a session journal.
+fn journal_frames(text: &str) -> impl Iterator<Item = &str> {
+	text.split("\n\n").filter(|frame| frame.contains("event: "))
+}
+
+/// Returns one frame's field value, if the frame carries it.
+fn frame_field<'f>(frame: &'f str, prefix: &str) -> Option<&'f str> {
+	frame.lines().find_map(|line| line.strip_prefix(prefix))
+}
+
+/// Returns the journal entry id of the tool call the script issued under
+/// `call_id`.
+///
+/// Every scripted call carries its own id, so anchoring on it names one
+/// execution outright — no dependence on journal ordering, and no risk of
+/// matching a sibling call of the same tool.
+fn tool_call_id<'j>(text: &'j str, call_id: &str) -> Option<&'j str> {
+	let scripted = format!("\"call_id\":\"{call_id}\"");
+	journal_frames(text)
+		.filter(|frame| frame.contains("event: tool.call@1"))
+		.find(|frame| frame_field(frame, "data: ").is_some_and(|data| data.contains(&scripted)))
+		.and_then(|frame| frame_field(frame, "id: "))
+}
+
+/// Returns whether the journal records a non-pty execution for `call`.
+///
+/// `Session::call_update` writes these updates parented to their tool call, so
+/// a match is evidence the execution reached the journal through the
+/// production lifecycle. Scoping by `by:` is what ties the record to one
+/// execution: every bash call emits `terminal`, so an unscoped search answers
+/// for whichever ran first.
+fn records_non_terminal(text: &str, call: &str) -> bool {
+	journal_frames(text)
+		.filter(|frame| frame.contains("event: tool.update@1"))
+		.filter(|frame| frame_field(frame, "by: ") == Some(call))
+		.any(|frame| {
+			frame_field(frame, "data: ").is_some_and(|data| data.contains("\"terminal\":false"))
+		})
+}
+
 fn assert_journal_chain(text: &str) {
 	let frames = text
 		.split("\n\n")
@@ -784,7 +897,15 @@ fn assert_restored(raw: &[u8], before: &Termios, after: &Termios, diagnostics: &
 		after.control_flags, before.control_flags,
 		"control flags not restored\n{diagnostics}"
 	);
-	assert_eq!(after.local_flags, before.local_flags, "local flags not restored\n{diagnostics}");
+	// PENDIN is tty state, not a mode: XNU sets it whenever tcsetattr turns
+	// ICANON back on, keeps it across every later tcsetattr, and clears it
+	// only on the next read, input byte or flush. A chat that restores the
+	// original termios exactly still reads back PENDIN on macOS.
+	assert_eq!(
+		after.local_flags - LocalFlags::PENDIN,
+		before.local_flags - LocalFlags::PENDIN,
+		"local flags not restored\n{diagnostics}"
+	);
 	assert_eq!(
 		after.control_chars, before.control_chars,
 		"control characters not restored\n{diagnostics}"
@@ -914,13 +1035,29 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	assert_surface(&summary, "tool summary");
 
 	debug.keys("'interrupt the next tool' enter");
+	mark("released the interruptible bash script");
 	gateway.release(4);
+	// `shell::Update` carries `terminal`, but the dispatcher blanks its `data`
+	// and `project_update` drops that shape so the bounded output stream stays
+	// the single authority for ordered bytes. The field therefore never reaches
+	// a rendered surface; the journal is where production records it. Liveness
+	// is still asserted on the card, and the non-pty guarantee now reads the
+	// record production actually writes, tied to the execution that made it.
 	let running = wait_snapshot(&mut debug, &raw_capture, "interruptible bash live", |snapshot| {
-		let surface = snapshot.combined();
-		surface.contains("bash running") && surface.contains("\"terminal\":false")
+		let text = journal(&session_path);
+		snapshot.combined().contains("bash running")
+			&& tool_call_id(&text, "slow-shell").is_some_and(|call| records_non_terminal(&text, call))
 	});
 	assert_surface(&running, "interruptible bash");
+	mark("bash is live and journalled");
+	let live_journal = journal(&session_path);
+	let call = tool_call_id(&live_journal, "slow-shell").expect("the interruptible bash tool call");
+	assert!(
+		records_non_terminal(&live_journal, call),
+		"the interruptible bash call must record a non-pty execution\n{live_journal}"
+	);
 
+	mark("sending resize");
 	process.resize(32, 92);
 	debug
 		.op("resize")
@@ -940,8 +1077,16 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	});
 	assert_eq!(info.get("rows").and_then(Value::as_u64), Some(32), "resize rows: {info}");
 	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(92), "resize cols: {info}");
+	mark("resize settled");
 
-	debug.keys("ctrl+c");
+	// Escape, not `ctrl+c`: `omp_chat::ctrl_c_action` resolves a first `C-c`
+	// press to `Clear` and only a repeat within 500ms to `Quit`, so it never
+	// reaches the turn. Escape is the interrupt rung the chat host routes to
+	// `HostCommand::Interrupt`, which is the path ADR 0011 makes this scenario
+	// prove.
+	mark("sending escape");
+	debug.keys("escape");
+	mark("escape sent");
 	let interrupted =
 		wait_snapshot(&mut debug, &raw_capture, "turn interrupted and responsive", |snapshot| {
 			let surface = snapshot.combined();
@@ -957,7 +1102,8 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 	assert!(interrupted_journal.contains("event: msg.assistant.end@1"));
 	assert_journal_chain(&interrupted_journal);
 
-	debug.keys("ctrl+c");
+	// One `C-c` only arms exit; the repeat inside the 500ms window quits.
+	debug.keys("ctrl+c ctrl+c");
 	drop(debug);
 	let before = process.before.clone();
 	let (status, raw, stdout, stderr, after) = process.wait(READY_TIMEOUT);

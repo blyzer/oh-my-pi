@@ -7,6 +7,7 @@ use super::{
 		HL_MOVE_KEYWORD, HL_PUT_KEYWORD, HL_REM_KEYWORD, describe_anchor_examples,
 	},
 	messages::{ABORT_MARKER, BEGIN_PATCH_MARKER, END_PATCH_MARKER, json_quote},
+	prefixes::is_read_metadata_line,
 	types::{Anchor, Cursor},
 };
 use crate::error::EditError;
@@ -661,6 +662,12 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 		.strip_prefix(HL_FILE_PREFIX)?
 		.strip_suffix(HL_FILE_SUFFIX)?;
 	if body.is_empty() {
+		return None;
+	}
+	// A `read` elision banner is bracketed and carries no `#`, so the hashless
+	// arm below would take it for a header and silently swallow the row. Let it
+	// classify as raw text, where the parser skips it and warns once.
+	if is_read_metadata_line(line) {
 		return None;
 	}
 	if let Some((path, hash)) = body.rsplit_once(HL_FILE_HASH_SEP) {

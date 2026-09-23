@@ -3,8 +3,9 @@
 # stdlib) and generates the build inputs omp-py derives from it:
 #   <dest>/python/stdlib.bin       in-memory stdlib blob embedded by omp-py
 #   <dest>/python/pyo3-config.txt  static-link config consumed via PYO3_CONFIG_FILE
-#   crates/py/THIRD-PARTY-NOTICES.txt (checkout mode) from PYTHON.json,
-#                                      its license corpus, and frozen wheels
+#   crates/py/notices/THIRD-PARTY-NOTICES.<target>.txt (checkout mode) from
+#                                      PYTHON.json, its license corpus, and
+#                                      frozen wheels
 #
 # Usage: fetch-python.sh [dest-dir]
 #   dest-dir  directory that receives the `python/` tree; defaults to the
@@ -143,11 +144,17 @@ EOF
 
 case "$(uname -s):$(uname -m)" in
 	Darwin:arm64)
+		HOST_TRIPLE="aarch64-apple-darwin"
 		prepare_tree "aarch64-apple-darwin" "freethreaded+debug" "python" "0"
 		prepare_tree "aarch64-apple-darwin" "freethreaded+pgo+lto" "python-release" "1"
 		;;
 	Linux:x86_64)
+		HOST_TRIPLE="x86_64-unknown-linux-gnu"
 		prepare_tree "x86_64-unknown-linux-gnu" "freethreaded+debug" "python" "0"
+		;;
+	Linux:aarch64)
+		HOST_TRIPLE="aarch64-unknown-linux-gnu"
+		prepare_tree "aarch64-unknown-linux-gnu" "freethreaded+debug" "python" "0"
 		;;
 	*)
 		echo "error: no embedded Python archive configured for $(uname -s) $(uname -m)" >&2
@@ -158,5 +165,10 @@ esac
 if [ -n "$REPO_MODE" ]; then
 	DEV_EXE="$DEST/python/install/bin/python3.14td"
 	[ -x "$DEV_EXE" ] || DEV_EXE="$DEST/python/install/bin/python3.14t"
-	"$DEV_EXE" "$SCRIPT_DIR/gen-py-notices.py" "$DEST/python" "$CRATE_DIR/THIRD-PARTY-NOTICES.txt"
+	# Per target: the statically linked component set differs between releases,
+	# so one shared file would be overwritten with the wrong list by whichever
+	# host ran this script last. omp_py::THIRD_PARTY_LICENSES selects by cfg.
+	mkdir -p "$CRATE_DIR/notices"
+	"$DEV_EXE" "$SCRIPT_DIR/gen-py-notices.py" "$DEST/python" \
+		"$CRATE_DIR/notices/THIRD-PARTY-NOTICES.${HOST_TRIPLE}.txt"
 fi

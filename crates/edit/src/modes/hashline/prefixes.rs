@@ -19,7 +19,30 @@ static READ_SINGLE_ELISION_RE: LazyLock<Regex> =
 
 /// Whether a row is display-only elision metadata emitted by `read`.
 pub fn is_read_metadata_line(line: &str) -> bool {
-	READ_RANGE_ELISION_RE.is_match(line) || READ_SINGLE_ELISION_RE.is_match(line)
+	READ_RANGE_ELISION_RE.is_match(line)
+		|| READ_SINGLE_ELISION_RE.is_match(line)
+		|| is_read_elision_banner(line)
+}
+
+/// Whether a row is a bracketed `read` banner rather than source text.
+///
+/// `read` announces skipped content with rows such as
+/// `[…8ln elided; re-read needed ranges with |, e.g. a.txt:10-17]`, which a
+/// model copying its output back into an edit body carries along. The row
+/// opens with `[`, so leaving it unrecognized here lets section splitting
+/// mistake it for a `[path#HASH]` header and resolve a path that cannot
+/// exist. Both halves are required so an ordinary bracketed source line is
+/// never swallowed.
+fn is_read_elision_banner(line: &str) -> bool {
+	let Some(inner) = line
+		.trim()
+		.strip_prefix('[')
+		.and_then(|inner| inner.strip_suffix(']'))
+	else {
+		return false;
+	};
+	(inner.starts_with("Showing lines ") || inner.contains("ln elided;"))
+		&& (inner.contains("Use :") || inner.contains("re-read needed ranges"))
 }
 
 fn strip_leading_hashline_prefixes(line: &str) -> String {

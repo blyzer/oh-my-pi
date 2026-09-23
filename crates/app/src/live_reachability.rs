@@ -257,7 +257,7 @@ async fn probe_tcp(addresses: &[SocketAddr]) -> ProbeStatus {
 }
 
 async fn probe_tls(destination: &Url, proxy: Option<&LiveProxy>) -> ProbeStatus {
-	let mut builder = reqwest::Client::builder()
+	let mut builder = omp_http::client_builder()
 		.no_proxy()
 		.redirect(reqwest::redirect::Policy::none())
 		.connect_timeout(TCP_TIMEOUT)

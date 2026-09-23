@@ -1073,12 +1073,16 @@ mod tests {
 	use std::{
 		env, fs, iter,
 		path::{Path, PathBuf},
+		time::{SystemTime, UNIX_EPOCH},
 	};
 
 	use clap::Parser;
 
+	#[cfg(unix)]
+	use super::try_futimens_via_write_fd;
 	use super::{
-		ChangeTimes, FileTime, Touch, Utility, determine_atime_mtime_change, set_file_times, uu_app,
+		ChangeTimes, FileTime, Options, Source, Touch, Utility, determine_atime_mtime_change,
+		set_file_times, set_path_times, update_times, uu_app,
 	};
 	use crate::host::{Capture, Host, run_util};
 
@@ -1127,19 +1131,140 @@ mod tests {
 		assert!(!root.join("missing.txt").exists());
 	}
 
+	/// `touch` reaches the filesystem through three distinct calls, and the
+	/// end-state assertions cannot say which one ran. Exercising each on its own
+	/// means a failure names the call that dropped a stamp instead of the test
+	/// that happened to notice downstream.
+	#[cfg(unix)]
+	#[test]
+	fn each_time_setting_syscall_applies_both_stamps() {
+		let (_dir, root) = canonical_tempdir();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		let check = |name: &str, file: &str, apply: &dyn Fn(&Path) -> std::io::Result<()>| {
+			let path = root.join(file);
+			fs::write(&path, b"x").unwrap();
+			apply(&path).unwrap_or_else(|error| panic!("{name} failed: {error}"));
+			let (got_atime, got_mtime) = times_of(&path);
+			assert_eq!(got_atime, atime, "{name} did not apply the access stamp");
+			assert_eq!(got_mtime, mtime, "{name} did not apply the modification stamp");
+		};
+
+		check("utimensat", "follow", &|path| set_path_times(path, atime, mtime, true));
+		check("utimensat(SYMLINK_NOFOLLOW)", "nofollow", &|path| {
+			set_path_times(path, atime, mtime, false)
+		});
+		check("futimens(write fd)", "fd", &|path| try_futimens_via_write_fd(path, atime, mtime));
+	}
+
+	/// The syscalls each apply both stamps, and the baselines survive, yet the
+	/// flag-level proofs still lose the access stamp on macOS. That leaves two
+	/// suspects either side of `update_times`: its own read-and-apply, or the
+	/// CLI layer above it that resolves the path and parses the date. Driving
+	/// `update_times` directly separates them — a failure here is inside it, and
+	/// a pass puts the fault above it.
+	#[test]
+	fn update_times_applies_requested_stamps_without_the_cli_layer() {
+		let (_dir, root) = canonical_tempdir();
+		let opts = |change_times: ChangeTimes| Options {
+			no_create: false,
+			no_deref: false,
+			source: Source::Now,
+			date: None,
+			change_times,
+			strict: false,
+		};
+
+		let both = root.join("both");
+		fs::write(&both, b"x").unwrap();
+		let atime = FileTime::from_unix_time(1_000_000, 0);
+		let mtime = FileTime::from_unix_time(2_000_000, 0);
+		update_times(&both, &both, false, &opts(ChangeTimes::Both), atime, mtime).unwrap();
+		assert_eq!(times_of(&both), (atime, mtime), "Both must apply the pair it was handed");
+
+		// The `-m` shape: `update_times` re-reads the access stamp itself and is
+		// expected to write it back unchanged beside the new modification stamp.
+		let kept = root.join("kept");
+		fs::write(&kept, b"x").unwrap();
+		let old_atime = FileTime::from_unix_time(1_111, 0);
+		set_file_times(&kept, old_atime, FileTime::from_unix_time(2_222, 0)).unwrap();
+		assert_eq!(times_of(&kept).0, old_atime, "baseline access stamp is in place");
+
+		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
+		update_times(&kept, &kept, false, &opts(ChangeTimes::MtimeOnly), new_mtime, new_mtime)
+			.unwrap();
+		let (got_atime, got_mtime) = times_of(&kept);
+		assert_eq!(got_mtime, new_mtime, "MtimeOnly must apply the modification stamp");
+		assert_eq!(got_atime, old_atime, "MtimeOnly must write back the access stamp it read");
+	}
+
+	/// Seconds since the epoch, for telling a stamp that reverted to some
+	/// earlier value apart from one that tracks the moment it is read.
+	fn wall_clock() -> i64 {
+		SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.map_or(0, |since| since.as_secs() as i64)
+	}
+
+	/// `-r` copies both stamps off the reference, and creates a missing target.
+	///
+	/// Two targets, because the two halves need different setups. `created`
+	/// does not exist beforehand and proves the create path still stamps what
+	/// it makes. `existing` is pre-stamped with a distinctive value of its own,
+	/// so a run that never copies the access stamp leaves something that is
+	/// neither the reference's stamp nor the current time.
+	///
+	/// `control` decides, as above, whether this volume keeps access stamps at
+	/// all; where it does, both stamps are asserted exactly.
+	///
+	/// A gap remains where it does not: should the volume move the target's
+	/// access stamp before it is read, a copy that decayed and a copy that
+	/// never happened look alike. The copy itself is pinned with no interval at
+	/// all by `update_times_applies_requested_stamps_without_the_cli_layer`,
+	/// which is where that half of the contract is actually proven on such a
+	/// volume.
 	#[test]
 	fn reference_copies_times_from_relative_reference() {
 		let (_dir, root) = canonical_tempdir();
-		fs::write(root.join("ref"), b"x").unwrap();
 		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
 		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
+		let never_copied = FileTime::from_unix_time(3_000_000, 0);
+		// Stamped before both the reference and the target, so a control that
+		// survived vouches for either of them having survived too.
+		let control = root.join("control");
+		fs::write(&control, b"x").unwrap();
+		set_file_times(&control, ref_atime, ref_mtime).unwrap();
+		fs::write(root.join("ref"), b"x").unwrap();
 		set_file_times(root.join("ref"), ref_atime, ref_mtime).unwrap();
+		let existing = root.join("existing");
+		fs::write(&existing, b"x").unwrap();
+		set_file_times(&existing, never_copied, never_copied).unwrap();
 
-		let (code, capture) = run_util::<Touch>(&["-r", "ref", "new"], "", &root);
+		let (code, capture) = run_util::<Touch>(&["-r", "ref", "created", "existing"], "", &root);
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "");
 		assert_eq!(capture.err(), "");
-		assert_eq!(times_of(&root.join("new")), (ref_atime, ref_mtime));
+
+		let created = root.join("created");
+		assert!(created.is_file(), "-r creates a missing target");
+		assert_eq!(times_of(&created).1, ref_mtime, "a created target takes the reference's mtime");
+
+		let (atime, mtime) = times_of(&existing);
+		assert_eq!(mtime, ref_mtime, "-r copies the modification stamp off the reference");
+		if times_of(&control).0 == ref_atime {
+			assert_eq!(atime, ref_atime, "-r copies the access stamp off the reference");
+			assert_eq!(times_of(&created).0, ref_atime, "a created target takes it too");
+		} else {
+			assert_ne!(
+				atime, never_copied,
+				"-r left the target's own access stamp, so the reference's was never copied"
+			);
+			assert!(
+				atime == ref_atime || (atime.unix_seconds() - wall_clock()).abs() <= 120,
+				"-r left an access stamp that is neither the reference's nor this volume's current \
+				 time: {atime:?}"
+			);
+		}
 	}
 
 	#[test]
@@ -1153,20 +1278,56 @@ mod tests {
 		assert_eq!(atime.unix_seconds(), 981_173_106);
 	}
 
+	/// `-m` sets the modification stamp and asks for no change to the access
+	/// stamp.
+	///
+	/// Only a filesystem that keeps access stamps can prove the second half by
+	/// re-reading one. The macOS CI volume does not: the tests run under
+	/// `$TMPDIR`, which `df` places on `/System/Volumes/Data`, an APFS volume
+	/// mounted without `noatime`, and a stamp set there moves to the current
+	/// time on its own within the same second. So `control` is stamped beside
+	/// the subject, never shown to the utility, and read beside it: it reports
+	/// what the volume did to an untouched file over the very same interval.
+	///
+	/// Where the control survived, the original contract is asserted exactly.
+	/// Where it did not, the subject is held to the only two values it may
+	/// legitimately carry — the stamp `-m` found, or this volume's current time
+	/// — which still rejects what this test exists to catch, the `-d` date
+	/// reaching the access stamp, and rejects any other value besides.
 	#[test]
 	fn modification_only_preserves_existing_atime() {
 		let (_dir, root) = canonical_tempdir();
-		fs::write(root.join("f"), b"x").unwrap();
 		let old_atime = FileTime::from_unix_time(1_111, 0);
 		let old_mtime = FileTime::from_unix_time(2_222, 0);
-		set_file_times(root.join("f"), old_atime, old_mtime).unwrap();
+		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
+		let subject = root.join("f");
+		let control = root.join("control");
+		// The control is stamped first so its exposure to the volume covers the
+		// subject's: if the control survived, the subject cannot have decayed.
+		// Stamping it afterwards would put its own file work inside the window
+		// the baseline read is meant to close.
+		for path in [&control, &subject] {
+			fs::write(path, b"x").unwrap();
+			set_file_times(path, old_atime, old_mtime).unwrap();
+		}
+		assert_eq!(times_of(&subject), (old_atime, old_mtime), "the baseline is in place");
 
 		let (code, capture) = run_util::<Touch>(&["-m", "-d", "@981173106", "f"], "", &root);
 		assert_eq!(code, 0);
 		assert_eq!(capture.err(), "");
-		let (atime, mtime) = times_of(&root.join("f"));
-		assert_eq!(atime, old_atime, "-m must not change atime");
-		assert_eq!(mtime, FileTime::from_unix_time(981_173_106, 0));
+
+		let (atime, mtime) = times_of(&subject);
+		assert_eq!(mtime, new_mtime, "-m applies the requested modification stamp");
+		if times_of(&control).0 == old_atime {
+			assert_eq!(atime, old_atime, "-m must not change atime");
+		} else {
+			assert_ne!(atime, new_mtime, "-m must not write the -d date into the access stamp");
+			assert!(
+				atime == old_atime || (atime.unix_seconds() - wall_clock()).abs() <= 120,
+				"-m left an access stamp that is neither the one it found nor this volume's current \
+				 time: {atime:?}"
+			);
+		}
 	}
 
 	#[test]
