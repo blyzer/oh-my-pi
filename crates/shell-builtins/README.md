@@ -15,24 +15,38 @@ Timestamp tests distinguish what a filesystem stores from what it keeps. A
 modification stamp written by `touch` stays put, so it is asserted exactly
 everywhere. An access stamp need not: on a volume mounted with access-time
 updates enabled, something outside the test — an indexer, a scanner — can read
-the file and move the stamp to the current time, and mere seconds are enough.
+the file and move the stamp to the current time, and milliseconds are enough.
 
 The CI runner is such a volume. Its tests run under `$TMPDIR`, which resolves to
 `/System/Volumes/Data`, an APFS volume mounted without `noatime`, unlike
 `/System/Volumes/VM` and the simulator volumes beside it. A stamp set there was
 observed reverting to the current time within the same second, with no operation
 performed on the file in between, while its modification stamp survived intact.
+Measured there, the cause is a read from outside the test, which Spotlight and an
+endpoint scanner on that machine both have reason to make, arriving within
+milliseconds of a freshly written file's close. Without `strictatime` the volume
+refreshes the access stamp on such a read only when it is not later than the
+modification stamp. So a stamp can be lost even between a time-setting call and
+a `stat` issued at once, or an `fstat` through a descriptor held across the call,
+roughly once in a hundred.
 
-So `touch`'s access-stamp tests carry a control file: stamped beside the
-subject, never passed to the utility, and read beside it. It reports what the
+So `touch`'s access-stamp tests never take one read as the whole answer. Most
+go through `assert_stamps_read_back`, which requires the expected access stamp
+to read back exactly on at least one of a few fresh attempts, since nothing but
+the code under test can have written that value, and holds every miss to the
+only value the volume may leave: an access later than the stamp the file carried
+going in, and no later than the read. That still rejects a wrong stamp the
+utility could write, on the first attempt, and keeps Darwin covered rather than
+skipped. Where a test spans a whole CLI run, its access stamp is chosen later
+than the modification stamps, which that volume was never seen to refresh, so
+the exact read lands there too.
+
+The `-r` test instead carries a control file: stamped beside the reference,
+never passed to the utility, and read beside the target. It reports what the
 volume did to an untouched file over the same interval. Where the control kept
-its stamp, the contract is asserted exactly; where it did not, the subject is
-held to the values it may legitimately carry, which still rejects a wrong stamp
-the utility could write. This keeps the strict assertion wherever a filesystem
-can support it rather than lowering it everywhere, and keeps Darwin covered
-rather than skipped. Where a contract cannot be proven end to end on such a
-volume, it is pinned instead at the seam that applies the stamps, read back with
-no interval.
+its stamp, the copy is asserted exactly; where it did not, the target is held to
+the values it may legitimately carry. The copy itself is proven at the seam that
+applies the stamps, through the same helper.
 
 ## Philosophy
 

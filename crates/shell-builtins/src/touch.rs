@@ -1071,7 +1071,9 @@ pub(crate) fn touch_builtin<SE: ShellExtensions>() -> Registration<SE> {
 #[cfg(test)]
 mod tests {
 	use std::{
-		env, fs, iter,
+		env,
+		fmt::Display,
+		fs, io, iter,
 		path::{Path, PathBuf},
 		time::{SystemTime, UNIX_EPOCH},
 	};
@@ -1131,6 +1133,69 @@ mod tests {
 		assert!(!root.join("missing.txt").exists());
 	}
 
+	/// How many fresh files a stamp gets to read back exactly before losing it
+	/// counts against the code under test.
+	const ATTEMPTS: usize = 5;
+
+	/// Proves `apply` leaves the stamps `want` on a freshly written file, on a
+	/// volume that may move an access stamp before it can be read.
+	///
+	/// Reading the access stamp straight back is not enough on the macOS CI
+	/// volume, even with no interval. Something outside the test (Spotlight or
+	/// the endpoint scanner on that machine) reads a freshly written file within
+	/// milliseconds of its close, and that volume, lacking `strictatime`,
+	/// refreshes the access stamp on a read whenever it is not later than the
+	/// modification stamp. Measured there over 400 files a run: about 1 in 100
+	/// lose such a stamp between the call and a `stat` issued at once, and an
+	/// `fstat` through a descriptor held across the call fares no better; after
+	/// 5 ms nearly all have lost it, and every lost stamp reads as a moment
+	/// inside that interval, never as the file's creation time. Files left 5 s
+	/// before stamping, and access stamps later than the modification stamp,
+	/// lost none.
+	///
+	/// So a read that misses the expected access stamp is not by itself a
+	/// failure, but it is held to the one thing the volume may have written
+	/// there: a moment later than the stamp the file carried going in, and no
+	/// later than the read. Code that ignored the stamp leaves the old one and
+	/// fails on the spot; code that wrote the wrong value fails likewise. The
+	/// expected stamp is still required outright, from at least one of a few
+	/// fresh attempts: nothing but the code under test can have put that value
+	/// there, so one exact read proves it did, however briefly the stamp lasted.
+	/// The modification stamp is asserted exactly on every attempt.
+	fn assert_stamps_read_back<E: Display>(
+		name: &str,
+		root: &Path,
+		file: &str,
+		want: (FileTime, FileTime),
+		apply: impl Fn(&Path) -> Result<(), E>,
+	) {
+		let (atime, mtime) = want;
+		let mut refreshed = Vec::new();
+		for attempt in 0..ATTEMPTS {
+			let path = root.join(format!("{file}-{attempt}"));
+			fs::write(&path, b"x").unwrap();
+			let (going_in, _) = times_of(&path);
+			apply(&path).unwrap_or_else(|error| panic!("{name} failed: {error}"));
+			let (got_atime, got_mtime) = times_of(&path);
+			let read_by = FileTime::from_system_time(SystemTime::now());
+			assert_eq!(got_mtime, mtime, "{name} did not leave the expected modification stamp");
+			if got_atime == atime {
+				return;
+			}
+			assert!(
+				got_atime > going_in && got_atime <= read_by,
+				"{name} left the access stamp at {got_atime:?}, which is neither the expected \
+				 {atime:?} nor a later access (after {going_in:?}, the stamp the file carried going \
+				 in, and by {read_by:?}, when it was read)"
+			);
+			refreshed.push(got_atime);
+		}
+		panic!(
+			"{name} never read back the expected access stamp {atime:?} in {ATTEMPTS} fresh \
+			 attempts; each time it read as a later access instead: {refreshed:?}"
+		);
+	}
+
 	/// `touch` reaches the filesystem through three distinct calls, and the
 	/// end-state assertions cannot say which one ran. Exercising each on its own
 	/// means a failure names the call that dropped a stamp instead of the test
@@ -1141,28 +1206,25 @@ mod tests {
 		let (_dir, root) = canonical_tempdir();
 		let atime = FileTime::from_unix_time(1_000_000, 0);
 		let mtime = FileTime::from_unix_time(2_000_000, 0);
-		let check = |name: &str, file: &str, apply: &dyn Fn(&Path) -> std::io::Result<()>| {
-			let path = root.join(file);
-			fs::write(&path, b"x").unwrap();
-			apply(&path).unwrap_or_else(|error| panic!("{name} failed: {error}"));
-			let (got_atime, got_mtime) = times_of(&path);
-			assert_eq!(got_atime, atime, "{name} did not apply the access stamp");
-			assert_eq!(got_mtime, mtime, "{name} did not apply the modification stamp");
-		};
 
-		check("utimensat", "follow", &|path| set_path_times(path, atime, mtime, true));
-		check("utimensat(SYMLINK_NOFOLLOW)", "nofollow", &|path| {
-			set_path_times(path, atime, mtime, false)
+		assert_stamps_read_back("utimensat", &root, "follow", (atime, mtime), |path| {
+			set_path_times(path, atime, mtime, true)
 		});
-		check("futimens(write fd)", "fd", &|path| try_futimens_via_write_fd(path, atime, mtime));
+		assert_stamps_read_back(
+			"utimensat(SYMLINK_NOFOLLOW)",
+			&root,
+			"nofollow",
+			(atime, mtime),
+			|path| set_path_times(path, atime, mtime, false),
+		);
+		assert_stamps_read_back("futimens(write fd)", &root, "fd", (atime, mtime), |path| {
+			try_futimens_via_write_fd(path, atime, mtime)
+		});
 	}
 
-	/// The syscalls each apply both stamps, and the baselines survive, yet the
-	/// flag-level proofs still lose the access stamp on macOS. That leaves two
-	/// suspects either side of `update_times`: its own read-and-apply, or the
-	/// CLI layer above it that resolves the path and parses the date. Driving
-	/// `update_times` directly separates them — a failure here is inside it, and
-	/// a pass puts the fault above it.
+	/// `update_times` driven directly, without the CLI layer above it that
+	/// resolves the path and parses the date: a failure here is inside it, and a
+	/// pass puts a flag-level failure above it.
 	#[test]
 	fn update_times_applies_requested_stamps_without_the_cli_layer() {
 		let (_dir, root) = canonical_tempdir();
@@ -1175,27 +1237,30 @@ mod tests {
 			strict: false,
 		};
 
-		let both = root.join("both");
-		fs::write(&both, b"x").unwrap();
 		let atime = FileTime::from_unix_time(1_000_000, 0);
 		let mtime = FileTime::from_unix_time(2_000_000, 0);
-		update_times(&both, &both, false, &opts(ChangeTimes::Both), atime, mtime).unwrap();
-		assert_eq!(times_of(&both), (atime, mtime), "Both must apply the pair it was handed");
+		assert_stamps_read_back("update_times(Both)", &root, "both", (atime, mtime), |path| {
+			update_times(path, path, false, &opts(ChangeTimes::Both), atime, mtime)
+		});
 
 		// The `-m` shape: `update_times` re-reads the access stamp itself and is
 		// expected to write it back unchanged beside the new modification stamp.
-		let kept = root.join("kept");
-		fs::write(&kept, b"x").unwrap();
-		let old_atime = FileTime::from_unix_time(1_111, 0);
-		set_file_times(&kept, old_atime, FileTime::from_unix_time(2_222, 0)).unwrap();
-		assert_eq!(times_of(&kept).0, old_atime, "baseline access stamp is in place");
-
+		// The access stamp stays later than either modification stamp, which keeps
+		// it out of the macOS volume's refresh rule between the baseline and the
+		// re-read; the helper still proves the result wherever that does not hold.
+		let old_atime = FileTime::from_unix_time(1_234_567_890, 0);
+		let old_mtime = FileTime::from_unix_time(2_222, 0);
 		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
-		update_times(&kept, &kept, false, &opts(ChangeTimes::MtimeOnly), new_mtime, new_mtime)
-			.unwrap();
-		let (got_atime, got_mtime) = times_of(&kept);
-		assert_eq!(got_mtime, new_mtime, "MtimeOnly must apply the modification stamp");
-		assert_eq!(got_atime, old_atime, "MtimeOnly must write back the access stamp it read");
+		assert_stamps_read_back(
+			"update_times(MtimeOnly)",
+			&root,
+			"kept",
+			(old_atime, new_mtime),
+			|path| {
+				set_file_times(path, old_atime, old_mtime).expect("baseline stamps");
+				update_times(path, path, false, &opts(ChangeTimes::MtimeOnly), new_mtime, new_mtime)
+			},
+		);
 	}
 
 	/// Seconds since the epoch, for telling a stamp that reverted to some
@@ -1219,10 +1284,10 @@ mod tests {
 	///
 	/// A gap remains where it does not: should the volume move the target's
 	/// access stamp before it is read, a copy that decayed and a copy that
-	/// never happened look alike. The copy itself is pinned with no interval at
-	/// all by `update_times_applies_requested_stamps_without_the_cli_layer`,
-	/// which is where that half of the contract is actually proven on such a
-	/// volume.
+	/// never happened look alike. The copy itself is pinned by
+	/// `update_times_applies_requested_stamps_without_the_cli_layer`, through
+	/// `assert_stamps_read_back`, which is where that half of the contract is
+	/// actually proven on such a volume.
 	#[test]
 	fn reference_copies_times_from_relative_reference() {
 		let (_dir, root) = canonical_tempdir();
@@ -1281,53 +1346,28 @@ mod tests {
 	/// `-m` sets the modification stamp and asks for no change to the access
 	/// stamp.
 	///
-	/// Only a filesystem that keeps access stamps can prove the second half by
-	/// re-reading one. The macOS CI volume does not: the tests run under
-	/// `$TMPDIR`, which `df` places on `/System/Volumes/Data`, an APFS volume
-	/// mounted without `noatime`, and a stamp set there moves to the current
-	/// time on its own within the same second. So `control` is stamped beside
-	/// the subject, never shown to the utility, and read beside it: it reports
-	/// what the volume did to an untouched file over the very same interval.
-	///
-	/// Where the control survived, the original contract is asserted exactly.
-	/// Where it did not, the subject is held to the only two values it may
-	/// legitimately carry — the stamp `-m` found, or this volume's current time
-	/// — which still rejects what this test exists to catch, the `-d` date
-	/// reaching the access stamp, and rejects any other value besides.
+	/// The second half is proven through `assert_stamps_read_back`, since the
+	/// macOS CI volume can move an access stamp at any moment. The whole CLI run
+	/// sits between the baseline and the read back, an interval long enough for
+	/// that volume to refresh most stamps it is willing to, so the baseline
+	/// access stamp is chosen later than both modification stamps: measured
+	/// there, such a stamp was never refreshed. A miss still has to read as a
+	/// later access, which rejects what this test exists to catch, the `-d`
+	/// date reaching the access stamp, on the first attempt.
 	#[test]
 	fn modification_only_preserves_existing_atime() {
 		let (_dir, root) = canonical_tempdir();
-		let old_atime = FileTime::from_unix_time(1_111, 0);
+		let old_atime = FileTime::from_unix_time(1_234_567_890, 0);
 		let old_mtime = FileTime::from_unix_time(2_222, 0);
 		let new_mtime = FileTime::from_unix_time(981_173_106, 0);
-		let subject = root.join("f");
-		let control = root.join("control");
-		// The control is stamped first so its exposure to the volume covers the
-		// subject's: if the control survived, the subject cannot have decayed.
-		// Stamping it afterwards would put its own file work inside the window
-		// the baseline read is meant to close.
-		for path in [&control, &subject] {
-			fs::write(path, b"x").unwrap();
-			set_file_times(path, old_atime, old_mtime).unwrap();
-		}
-		assert_eq!(times_of(&subject), (old_atime, old_mtime), "the baseline is in place");
-
-		let (code, capture) = run_util::<Touch>(&["-m", "-d", "@981173106", "f"], "", &root);
-		assert_eq!(code, 0);
-		assert_eq!(capture.err(), "");
-
-		let (atime, mtime) = times_of(&subject);
-		assert_eq!(mtime, new_mtime, "-m applies the requested modification stamp");
-		if times_of(&control).0 == old_atime {
-			assert_eq!(atime, old_atime, "-m must not change atime");
-		} else {
-			assert_ne!(atime, new_mtime, "-m must not write the -d date into the access stamp");
-			assert!(
-				atime == old_atime || (atime.unix_seconds() - wall_clock()).abs() <= 120,
-				"-m left an access stamp that is neither the one it found nor this volume's current \
-				 time: {atime:?}"
-			);
-		}
+		assert_stamps_read_back("touch -m", &root, "f", (old_atime, new_mtime), |path| {
+			set_file_times(path, old_atime, old_mtime)?;
+			let operand = path.file_name().and_then(|name| name.to_str()).unwrap();
+			let (code, capture) = run_util::<Touch>(&["-m", "-d", "@981173106", operand], "", &root);
+			assert_eq!(code, 0);
+			assert_eq!(capture.err(), "");
+			io::Result::Ok(())
+		});
 	}
 
 	#[test]
