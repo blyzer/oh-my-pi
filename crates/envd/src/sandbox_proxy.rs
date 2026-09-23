@@ -260,6 +260,9 @@ where
 		while !shutdown.load(Ordering::Acquire) {
 			match listener.accept() {
 				Ok(_stream) if shutdown.load(Ordering::Acquire) => break,
+				// BSD accept() hands out sockets that inherit the listener's O_NONBLOCK;
+				// every path below reads with blocking calls bounded by socket timeouts.
+				Ok(stream) if stream.set_blocking().is_err() => {},
 				Ok(stream) if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS => {
 					live.fetch_sub(1, Ordering::AcqRel);
 					reject_over_limit(stream, &rejecting);
@@ -312,9 +315,6 @@ fn reject_over_limit<S: ClientStream>(stream: S, rejecting: &Arc<AtomicUsize>) {
 }
 
 fn reject<S: ClientStream>(client: S) -> io::Result<()> {
-	// BSD accept() hands out sockets that inherit the listener's O_NONBLOCK, and
-	// the drain needs blocking reads bounded by its timeout.
-	client.set_blocking()?;
 	client.set_idle_timeout()?;
 	let mut reader = BufReader::new(client.duplicate()?);
 	http_reject(client, &mut reader, |client| http_deny(client))
@@ -1643,6 +1643,86 @@ mod tests {
 			.expect("denial is delivered before a clean close");
 		assert!(response.starts_with("HTTP/1.1 403"));
 		proxy.join().expect("denial proxy");
+	}
+
+	/// Accepts the way BSD and macOS do: the stream inherits the listener's
+	/// `O_NONBLOCK`, which Linux never passes on.
+	struct InheritingListener(TcpListener);
+
+	impl BrokerListener for InheritingListener {
+		type Stream = TcpStream;
+
+		fn accept(&self) -> io::Result<Self::Stream> {
+			let (stream, _) = self.0.accept()?;
+			stream.set_nonblocking(true)?;
+			Ok(stream)
+		}
+	}
+
+	#[test]
+	fn requests_arriving_after_accept_survive_an_inherited_nonblocking_socket() {
+		let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
+		let port = upstream.local_addr().expect("upstream address").port();
+		let upstream_task = thread::spawn(move || {
+			let (stream, _) = upstream.accept().expect("upstream client");
+			let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+			let mut line = String::new();
+			while line != "\r\n" {
+				line.clear();
+				reader.read_line(&mut line).expect("request head");
+			}
+			let mut body = [0_u8; 5];
+			reader.read_exact(&mut body).expect("request body");
+			assert_eq!(&body, b"hello");
+			let mut stream = stream;
+			stream
+				.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+				.expect("response");
+		});
+
+		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
+		listener
+			.set_nonblocking(true)
+			.expect("nonblocking listener");
+		let address = listener.local_addr().expect("proxy address");
+		let shutdown = Arc::new(AtomicBool::new(false));
+		let live = Arc::new(AtomicUsize::new(0));
+		let broker = spawn_listener(
+			"omp-scoped-proxy-test",
+			InheritingListener(listener),
+			policy(port),
+			Arc::clone(&live),
+			Arc::clone(&shutdown),
+		)
+		.expect("broker");
+
+		let mut client = TcpStream::connect(address).expect("connect proxy");
+		// Every byte arrives after the broker has accepted, so no read may assume
+		// the socket already holds data.
+		let accepted = Instant::now();
+		while live.load(Ordering::Acquire) == 0 {
+			assert!(accepted.elapsed() < Duration::from_secs(5), "broker never accepted");
+			thread::sleep(Duration::from_millis(5));
+		}
+		thread::sleep(Duration::from_millis(50));
+		write!(
+			client,
+			"POST http://127.0.0.1:{port}/upload HTTP/1.1\r\nProxy-Authorization: Basic \
+			 b21wOnRlc3QtdG9rZW4=\r\nContent-Length: 5\r\n\r\n"
+		)
+		.expect("request head");
+		thread::sleep(Duration::from_millis(50));
+		client.write_all(b"hello").expect("request body");
+		client
+			.set_read_timeout(Some(Duration::from_secs(5)))
+			.expect("read timeout");
+		let mut response = String::new();
+		client.read_to_string(&mut response).expect("response");
+		assert!(response.starts_with("HTTP/1.1 204"), "response: {response:?}");
+		drop(client);
+		upstream_task.join().expect("upstream task");
+		shutdown.store(true, Ordering::Release);
+		broker.join().expect("broker");
 	}
 
 	#[test]
