@@ -5,6 +5,7 @@ on:
     branches: [main, omp2]
     paths:
       - ".cargo/**"
+      - ".config/**"
       - ".github/workflows/ci.yml"
       - "about.toml"
       - "deny.toml"
@@ -25,6 +26,7 @@ on:
     branches: [main, omp2]
     paths:
       - ".cargo/**"
+      - ".config/**"
       - ".github/workflows/ci.yml"
       - "about.toml"
       - "deny.toml"
@@ -142,8 +144,21 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install lld uv zstd ninja
+      # Hosted runners start empty, so they install one pinned release. A
+      # self-hosted runner brings its own: downloading the latest release on
+      # every run took 11m38 in run 183 and then went unused, because an
+      # existing install earlier in PATH shadowed it. There the step checks
+      # the provisioned binary against the floor in .config/nextest.toml
+      # instead; a missing or too-old nextest fails here with nextest's own
+      # upgrade hint.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        if: runner.environment == 'github-hosted'
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+        with:
+          tool: nextest@0.9.146
+      - name: Check provisioned cargo-nextest
+        if: runner.environment != 'github-hosted'
+        run: cargo nextest show-config version
 
       # A self-hosted runner keeps its disk between runs but not its checkout:
       # actions/checkout runs `git clean -ffdx`, which deletes the ignored
@@ -371,7 +386,9 @@ jobs:
       # This job runs the proof through `cargo nextest`, same as the macOS
       # workspace job, so it needs the same provisioning step.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+        with:
+          tool: nextest@0.9.146
 
       - name: Cache embedded Python
         id: python-cache
