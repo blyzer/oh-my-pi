@@ -5,6 +5,9 @@
 //! `/move`, `/wt`) are driven through a real `Session` + console `Ctx`
 //! fixture to the effect pi specifies.
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{path::PathBuf, sync::Arc};
 
 use omp_chat::{
@@ -15,9 +18,9 @@ use omp_chat::{
 };
 use omp_con::Value;
 use omp_core::Str;
-use omp_session::{ComponentRegistry, Session};
 use omp_tui::{Key, Size, UiContext, frame_text, slots::ResizePolicy};
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
+use test_support::ScratchSession;
 
 /// Top-level `name:` of every entry in pi's builtin registry —
 /// `/work/pi/packages/coding-agent/src/slash-commands/builtin-*.ts`
@@ -134,10 +137,8 @@ fn every_pi_builtin_slash_command_is_registered() {
 	}
 }
 
-fn session() -> Session {
-	let directory = tempdir().expect("temp directory");
-	let path = directory.keep().join("commands.oms");
-	let mut session = Session::create(path, ComponentRegistry::standard()).expect("create session");
+fn session() -> ScratchSession {
+	let mut session = ScratchSession::create("commands.oms");
 	session.begin_turn().expect("begin turn");
 	session.user("hello", Vec::new()).expect("user");
 	session
@@ -219,11 +220,15 @@ struct Harness {
 	con:      Arc<omp_con::Ctx>,
 	feed:     Arc<Feed>,
 	project:  PathBuf,
+	// Owned for the harness's lifetime and dropped after the host above.
+	_session: ScratchSession,
+	_project: TempDir,
 }
 
 fn harness(models: Vec<omp_chat::ModelRow>) -> Harness {
 	let mut session = session();
-	let project = tempdir().expect("project").keep();
+	let project_dir = tempdir().expect("project");
+	let project = project_dir.path().to_path_buf();
 	std::fs::create_dir_all(project.join("wt")).expect("wt");
 	let feed = Arc::new(Feed {
 		project:  project.clone(),
@@ -261,8 +266,15 @@ fn harness(models: Vec<omp_chat::ModelRow>) -> Harness {
 		},
 		Size::new(120, 40),
 	);
-	std::mem::forget(session);
-	Harness { host, commands: command_rx, con, feed, project }
+	Harness {
+		host,
+		commands: command_rx,
+		con,
+		feed,
+		project,
+		_session: session,
+		_project: project_dir,
+	}
 }
 
 fn model_row(key: &'static str, name: &'static str) -> omp_chat::ModelRow {

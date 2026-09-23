@@ -1560,8 +1560,8 @@ mod tests {
 		use std::os::unix::fs::PermissionsExt;
 
 		let (temp, repo) = fixture();
-		let linked = temp.path().join("../linked-unreadable-index");
-		let _ = fs::remove_dir_all(&linked);
+		let worktrees = tempfile::tempdir().unwrap();
+		let linked = worktrees.path().join("linked-unreadable-index");
 		repo.worktree_add(&linked, "main", true).unwrap();
 		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
 		let linked_repo = GitRepo::require(&linked).unwrap();
@@ -1578,14 +1578,13 @@ mod tests {
 		));
 		assert_eq!(fs::read(linked.join(".git")).unwrap(), pointer_before);
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), git(&linked, &["rev-parse", "HEAD"]));
-		let _ = fs::remove_dir_all(linked);
 	}
 
 	#[test]
 	fn mutate_worktree_and_detach() {
 		let (temp, repo) = fixture();
-		let linked = temp.path().join("../linked-mut");
-		let _ = fs::remove_dir_all(&linked);
+		let worktrees = tempfile::tempdir().unwrap();
+		let linked = worktrees.path().join("linked-mut");
 		repo.worktree_add(&linked, "main", true).unwrap();
 		assert!(
 			git(temp.path(), &["worktree", "list", "--porcelain"])
@@ -1593,8 +1592,7 @@ mod tests {
 		);
 		assert!(repo.worktree_remove(&linked, true).unwrap());
 
-		let linked = temp.path().join("../linked-detach");
-		let _ = fs::remove_dir_all(&linked);
+		let linked = worktrees.path().join("linked-detach");
 		repo.worktree_add(&linked, "main", true).unwrap();
 		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
 		let source_head = git(temp.path(), &["rev-parse", "HEAD"]);
@@ -1608,6 +1606,5 @@ mod tests {
 				.contains(linked.to_string_lossy().as_ref())
 		);
 		assert!(repo.worktree_prune().is_ok());
-		let _ = fs::remove_dir_all(linked);
 	}
 }

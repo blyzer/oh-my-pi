@@ -1288,11 +1288,10 @@ mod tests {
 	use omp_tui::{Ui, frame_text};
 
 	use super::*;
+	use crate::test_support::ScratchSession;
 
-	fn empty_session() -> Session {
-		let directory = tempfile::tempdir().expect("temp directory");
-		let path = directory.keep().join("project.oms");
-		Session::create(path, ComponentRegistry::standard()).expect("session")
+	fn empty_session() -> ScratchSession {
+		ScratchSession::create("project.oms")
 	}
 
 	#[test]
@@ -1310,7 +1309,7 @@ mod tests {
 				signal: omp_session::ExitSignal::new("SIGTERM", Some(15)),
 			})
 			.expect("signal exit");
-		drop(interrupted);
+		let _journal = interrupted.close();
 		let replayed =
 			Session::open(path, ComponentRegistry::standard()).expect("exit journal replays");
 		let views = block_views(replayed.dom(), true);
@@ -1321,7 +1320,7 @@ mod tests {
 
 	/// A session whose newest assistant is still streaming: reasoning, then
 	/// answer text when `text` is non-empty — none of it finalized.
-	fn streaming(thinking: &str, text: &str) -> Session {
+	fn streaming(thinking: &str, text: &str) -> ScratchSession {
 		let mut session = empty_session();
 		session.begin_turn().expect("turn");
 		session.user("hi", Vec::new()).expect("user");
@@ -2384,7 +2383,7 @@ mod tests {
 		session.stream_append(sid, "after").expect("after text");
 		session.stream_close(sid).expect("after close");
 		session.assistant_end("stop").expect("assistant end");
-		drop(session);
+		let _journal = session.close();
 
 		let replayed = Session::open(path, ComponentRegistry::standard()).expect("replay");
 		let ordered = projected(&replayed, &options)
