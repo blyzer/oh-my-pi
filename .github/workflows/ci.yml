@@ -85,7 +85,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Select pinned Rust toolchain
         run: rustup show active-toolchain
+      # Building these three from source took about five minutes of a
+      # ten-second check. The versions are pinned, so the binaries are too.
+      - name: Cache pinned compliance tools
+        id: compliance-tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/just
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-about
+          key: compliance-tools-${{ runner.os }}-${{ runner.arch }}-just-1.58.0-cargo-deny-0.20.2-cargo-about-0.8.2
       - name: Install pinned compliance tools
+        if: steps.compliance-tools.outputs.cache-hit != 'true'
         run: |
           cargo install --locked --version 1.58.0 just
           cargo install --locked --version 0.20.2 cargo-deny
@@ -102,7 +114,9 @@ jobs:
     # it passed. They are independent questions and now answer in parallel.
     # This does not weaken the gate: runtime_spec still reports its own
     # conclusion and can still be a required check in branch protection.
-    needs: [format, licenses]
+    # The license policy is the same kind of independent question and is not
+    # a precondition either; waiting on it held this job back five minutes.
+    needs: format
     # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
     # somewhere else. Set it to a JSON label array to send this job to a
     # self-hosted Apple silicon machine, which is the only way to give it more
@@ -126,11 +140,55 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # A self-hosted runner keeps its disk between runs but not its checkout:
+      # actions/checkout runs `git clean -ffdx`, which deletes the ignored
+      # target/ and vendor/ trees every time. Each run therefore rebuilt the
+      # workspace from nothing and regenerated vendor/python, whose fresh
+      # stdlib.bin alone reruns omp-py's build script and everything above it.
+      # Keep both where the clean cannot reach: the target directory through
+      # CARGO_TARGET_DIR, the CPython trees behind vendor/ symlinks (the clean
+      # removes a link, never what it points at). Per runner, so two runners on
+      # one machine never share a tree. The target directory is keyed by the
+      # toolchain, which invalidates it anyway, and discarded when the disk
+      # runs low (repository variable CI_MIN_FREE_GB, default 60).
+      - name: Keep build state outside the checkout
+        id: state
+        if: runner.environment != 'github-hosted'
+        env:
+          PYTHON_KEY: ${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+          TOOLCHAIN_KEY: ${{ hashFiles('rust-toolchain.toml') }}
+          MIN_FREE_GB: ${{ vars.CI_MIN_FREE_GB || '60' }}
+        run: |
+          case "$(uname -s)" in
+            Darwin) state="$HOME/Library/Caches/omp-ci/$RUNNER_NAME" ;;
+            *) state="${XDG_CACHE_HOME:-$HOME/.cache}/omp-ci/$RUNNER_NAME" ;;
+          esac
+          python="$state/python-$PYTHON_KEY"
+          target="$state/target-$TOOLCHAIN_KEY"
+          mkdir -p "$python" vendor
+          find "$state" -mindepth 1 -maxdepth 1 \( \
+            \( -name 'python-*' ! -name "python-$PYTHON_KEY" \) -o \
+            \( -name 'target-*' ! -name "target-$TOOLCHAIN_KEY" \) \
+            \) -exec rm -rf {} +
+          free_gb=$(( $(df -Pk "$state" | awk 'NR == 2 { print $4 }') / 1048576 ))
+          if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+            echo "::warning::${free_gb} GB free, below ${MIN_FREE_GB} GB; discarding the warm target directory"
+            rm -rf "$target"
+          fi
+          ln -sfn "$python/python" vendor/python
+          ln -sfn "$python/python-release" vendor/python-release
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+          if [ -f "$python/.ready" ]; then
+            echo "python-ready=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "$free_gb GB free; target $target"
+
       - name: Cache embedded Python
         id: python-cache
-        # A self-hosted runner keeps its workspace between runs, so target/
-        # is already warm. Uploading it would mean tarring tens of GB against
-        # a 10 GB repository cache limit on every job.
+        # A self-hosted runner keeps these trees in the step above. Uploading
+        # them would mean tarring them against a 10 GB repository cache limit
+        # on every job.
         if: runner.environment == 'github-hosted'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -139,9 +197,19 @@ jobs:
             vendor/python-release
           key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
 
+      # Only when the inputs change: the script regenerates stdlib.bin even
+      # when its archive is current, and a new stdlib.bin rebuilds omp-py.
       - name: Prepare embedded Python
-        if: steps.python-cache.outputs.cache-hit != 'true'
-        run: crates/py/scripts/fetch-python.sh
+        if: steps.python-cache.outputs.cache-hit != 'true' && steps.state.outputs.python-ready != 'true'
+        env:
+          PYTHON_STATE: ${{ steps.state.outputs.python }}
+        run: |
+          if [ -n "$PYTHON_STATE" ]; then
+            crates/py/scripts/fetch-python.sh "$PYTHON_STATE"
+            touch "$PYTHON_STATE/.ready"
+          else
+            crates/py/scripts/fetch-python.sh
+          fi
 
       - name: Verify embedded Python toolchain
         run: |
@@ -149,9 +217,9 @@ jobs:
           crates/py/scripts/ld64.lld --version
 
       - name: Cache Cargo
-        # A self-hosted runner keeps its workspace between runs, so target/
-        # is already warm. Uploading it would mean tarring tens of GB against
-        # a 10 GB repository cache limit on every job.
+        # A self-hosted runner keeps its target directory outside the checkout
+        # (see above). Uploading it would mean tarring tens of GB against a
+        # 10 GB repository cache limit on every job.
         if: runner.environment == 'github-hosted'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
