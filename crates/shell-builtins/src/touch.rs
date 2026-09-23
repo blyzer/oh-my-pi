@@ -1075,7 +1075,7 @@ mod tests {
 		fmt::Display,
 		fs, io, iter,
 		path::{Path, PathBuf},
-		time::{SystemTime, UNIX_EPOCH},
+		time::SystemTime,
 	};
 
 	use clap::Parser;
@@ -1263,73 +1263,56 @@ mod tests {
 		);
 	}
 
-	/// Seconds since the epoch, for telling a stamp that reverted to some
-	/// earlier value apart from one that tracks the moment it is read.
-	fn wall_clock() -> i64 {
-		SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.map_or(0, |since| since.as_secs() as i64)
-	}
-
-	/// `-r` copies both stamps off the reference, and creates a missing target.
+	/// `-r` copies both stamps off a relative reference, onto an existing target
+	/// and onto one it has to create.
 	///
-	/// Two targets, because the two halves need different setups. `created`
-	/// does not exist beforehand and proves the create path still stamps what
-	/// it makes. `existing` is pre-stamped with a distinctive value of its own,
-	/// so a run that never copies the access stamp leaves something that is
-	/// neither the reference's stamp nor the current time.
-	///
-	/// `control` decides, as above, whether this volume keeps access stamps at
-	/// all; where it does, both stamps are asserted exactly.
-	///
-	/// A gap remains where it does not: should the volume move the target's
-	/// access stamp before it is read, a copy that decayed and a copy that
-	/// never happened look alike. The copy itself is pinned by
-	/// `update_times_applies_requested_stamps_without_the_cli_layer`, through
-	/// `assert_stamps_read_back`, which is where that half of the contract is
-	/// actually proven on such a volume.
+	/// Both go through `assert_stamps_read_back`. The existing target is first
+	/// stamped with a value of its own, so a run that never copies the access
+	/// stamp leaves one that is neither the reference's nor a later access. The
+	/// missing target is removed before each run, so the create path has to
+	/// stamp what it makes. As in `modification_only_preserves_existing_atime`,
+	/// a whole CLI run sits between stamping and reading, so the reference's
+	/// access stamp is chosen later than its modification stamp, which the macOS
+	/// CI volume was never seen to refresh. That holds for the reference while
+	/// `touch` reads it and for the target once the copy lands.
 	#[test]
 	fn reference_copies_times_from_relative_reference() {
 		let (_dir, root) = canonical_tempdir();
-		let ref_atime = FileTime::from_unix_time(1_000_000, 0);
-		let ref_mtime = FileTime::from_unix_time(2_000_000, 0);
+		let ref_atime = FileTime::from_unix_time(1_234_567_890, 0);
+		let ref_mtime = FileTime::from_unix_time(1_000_000, 0);
 		let never_copied = FileTime::from_unix_time(3_000_000, 0);
-		// Stamped before both the reference and the target, so a control that
-		// survived vouches for either of them having survived too.
-		let control = root.join("control");
-		fs::write(&control, b"x").unwrap();
-		set_file_times(&control, ref_atime, ref_mtime).unwrap();
-		fs::write(root.join("ref"), b"x").unwrap();
-		set_file_times(root.join("ref"), ref_atime, ref_mtime).unwrap();
-		let existing = root.join("existing");
-		fs::write(&existing, b"x").unwrap();
-		set_file_times(&existing, never_copied, never_copied).unwrap();
+		let touch_r = |target: &Path, reference: &str| -> io::Result<()> {
+			let reference_path = root.join(reference);
+			fs::write(&reference_path, b"x")?;
+			set_file_times(&reference_path, ref_atime, ref_mtime)?;
+			let operand = target.file_name().and_then(|name| name.to_str()).unwrap();
+			let (code, capture) = run_util::<Touch>(&["-r", reference, operand], "", &root);
+			assert_eq!(code, 0);
+			assert_eq!(capture.out(), "");
+			assert_eq!(capture.err(), "");
+			Ok(())
+		};
 
-		let (code, capture) = run_util::<Touch>(&["-r", "ref", "created", "existing"], "", &root);
-		assert_eq!(code, 0);
-		assert_eq!(capture.out(), "");
-		assert_eq!(capture.err(), "");
-
-		let created = root.join("created");
-		assert!(created.is_file(), "-r creates a missing target");
-		assert_eq!(times_of(&created).1, ref_mtime, "a created target takes the reference's mtime");
-
-		let (atime, mtime) = times_of(&existing);
-		assert_eq!(mtime, ref_mtime, "-r copies the modification stamp off the reference");
-		if times_of(&control).0 == ref_atime {
-			assert_eq!(atime, ref_atime, "-r copies the access stamp off the reference");
-			assert_eq!(times_of(&created).0, ref_atime, "a created target takes it too");
-		} else {
-			assert_ne!(
-				atime, never_copied,
-				"-r left the target's own access stamp, so the reference's was never copied"
-			);
-			assert!(
-				atime == ref_atime || (atime.unix_seconds() - wall_clock()).abs() <= 120,
-				"-r left an access stamp that is neither the reference's nor this volume's current \
-				 time: {atime:?}"
-			);
-		}
+		assert_stamps_read_back(
+			"touch -r onto an existing file",
+			&root,
+			"existing",
+			(ref_atime, ref_mtime),
+			|path| {
+				set_file_times(path, never_copied, never_copied)?;
+				touch_r(path, "ref-existing")
+			},
+		);
+		assert_stamps_read_back(
+			"touch -r onto a missing file",
+			&root,
+			"created",
+			(ref_atime, ref_mtime),
+			|path| {
+				fs::remove_file(path)?;
+				touch_r(path, "ref-created")
+			},
+		);
 	}
 
 	#[test]

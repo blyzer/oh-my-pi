@@ -30,23 +30,16 @@ modification stamp. So a stamp can be lost even between a time-setting call and
 a `stat` issued at once, or an `fstat` through a descriptor held across the call,
 roughly once in a hundred.
 
-So `touch`'s access-stamp tests never take one read as the whole answer. Most
+So `touch`'s access-stamp tests never take one read as the whole answer. They
 go through `assert_stamps_read_back`, which requires the expected access stamp
 to read back exactly on at least one of a few fresh attempts, since nothing but
 the code under test can have written that value, and holds every miss to the
 only value the volume may leave: an access later than the stamp the file carried
 going in, and no later than the read. That still rejects a wrong stamp the
 utility could write, on the first attempt, and keeps Darwin covered rather than
-skipped. Where a test spans a whole CLI run, its access stamp is chosen later
-than the modification stamps, which that volume was never seen to refresh, so
-the exact read lands there too.
-
-The `-r` test instead carries a control file: stamped beside the reference,
-never passed to the utility, and read beside the target. It reports what the
-volume did to an untouched file over the same interval. Where the control kept
-its stamp, the copy is asserted exactly; where it did not, the target is held to
-the values it may legitimately carry. The copy itself is proven at the seam that
-applies the stamps, through the same helper.
+skipped. Where a test spans a whole CLI run, as the `-m` and `-r` tests do, its
+access stamps are chosen later than the modification stamps, which that volume
+was never seen to refresh, so the exact read lands there too.
 
 ## Philosophy
 
