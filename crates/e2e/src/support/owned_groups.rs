@@ -1,17 +1,20 @@
 //! Process groups the harness owns, reachable from a panic hook.
 //!
-//! Dev builds compile `omp-e2e` with Cranelift, which emits no landing pads: a
-//! failing proof's panic unwinds past every destructor, so RAII alone would
-//! orphan the process groups the proof spawned. Each group is also leased in
-//! this registry, and a panic hook kills the groups the panicking thread
-//! owns. This covers only harness-owned process groups; it is not a general
-//! substitute for `Drop`.
+//! Test builds are LLVM (`[profile.test]` in `.cargo/config.toml`), so a
+//! failing proof's panic unwinds through its frames and [`OwnedProcess`]'s
+//! `Drop` kills the group. This registry is defense in depth for panics that
+//! run no destructors: a panic while panicking (which aborts), a
+//! `panic = "abort"` build, or a test build that is Cranelift again, whose
+//! frames carry no landing pads
+//! (`docs/audits/cranelift-panic-cleanup.md`). Each group is also leased here,
+//! and a panic hook kills the groups the panicking thread owns. Nothing here
+//! runs on SIGKILL, such as a nextest timeout. This covers only harness-owned
+//! process groups; it is not a general substitute for `Drop`.
 //!
 //! Scope is the thread that spawned the leader; proofs spawn from their test
-//! body. Only libtest can catch a panic here: the catch inside
-//! `thread::spawn` or `catch_unwind` is monomorphized into this crate without
-//! a landing pad, so a panic on another thread aborts the whole process after
-//! the hook has killed just that thread's groups.
+//! body. A panic on another thread kills only that thread's groups.
+//!
+//! [`OwnedProcess`]: crate::support::OwnedProcess
 //!
 //! Identity: a process-group id cannot be reused while its leader is
 //! unreaped, so an entry lives only while its leader is unreaped. The only
@@ -183,10 +186,10 @@ mod tests {
 			.any(|entry| entry.group == group)
 	}
 
-	/// A real panic on libtest's thread, in a child run of this binary:
-	/// Cranelift frames carry no landing pads, so only libtest can catch the
-	/// panic, and a failing proof ends its process. A hook installed before the
-	/// registry's records the state the registry's hook left behind.
+	/// A real panic on libtest's thread, in a child run of this binary. The
+	/// hook runs before any unwinding, so a hook installed before the
+	/// registry's records the state the registry's hook left behind, whatever
+	/// the backend does with destructors afterwards.
 	#[test]
 	fn panic_cleanup_is_scoped_to_the_panicking_thread_and_chains_the_previous_hook() {
 		let scratch = tempfile::tempdir().expect("scratch");

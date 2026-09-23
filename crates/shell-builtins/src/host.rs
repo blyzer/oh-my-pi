@@ -1224,17 +1224,18 @@ pub(crate) use matches_parser;
 mod testing {
 	//! In-memory [`Host`] construction for unit tests.
 
-	use std::iter;
 	#[cfg(unix)]
 	use std::os::fd;
+	use std::{iter, time::Duration};
 
 	use omp_shell::error;
 	use parking_lot::Mutex;
+	use tokio::time;
 
 	use super::{
 		Arc, AtomicBool, Error, HashMap, Host, OpenFile, OpenRequest, Ordering, OsString, PathAccess,
 		PathBuf, PathDenied, PathPolicy, Read, SpawnWrapper, Stdin, StreamWriter, Utility, Write, io,
-		openfiles, run_caught,
+		openfiles, panic_scope_active, run_caught, task,
 	};
 
 	/// Test policy admitting writes only beneath one root.
@@ -1633,6 +1634,42 @@ mod testing {
 
 			drop((reader, other_reader));
 		}
+	}
+
+	/// A utility whose body panics, as a port's `unwrap` on a `BrokenPipe`
+	/// would.
+	#[derive(clap::Parser)]
+	struct Boom {}
+
+	impl Utility for Boom {
+		const NAME: &'static str = "boom";
+
+		fn run(self, _host: &mut Host) -> i32 {
+			panic!("boom builtin failed");
+		}
+	}
+
+	/// Runs a panicking builtin the way `run_utility` does, through
+	/// `run_caught` on a blocking thread. The panic must stay inside the
+	/// blocking task and become exit 1 plus a note on the command's stderr,
+	/// and the thread must leave the panic scope. Without landing pads the
+	/// catch never engages and the awaiting handle never resolves.
+	#[tokio::test]
+	async fn builtin_panic_is_contained_at_the_builtin_boundary() {
+		let (mut host, capture) = Host::for_test(Boom::NAME, "", "/");
+		let parsed = <Boom as clap::Parser>::parse_from([Boom::NAME]);
+		let handle = task::spawn_blocking(move || {
+			let code = run_caught::<Boom>(parsed, &mut host);
+			(code, panic_scope_active())
+		});
+		let (code, in_scope) = time::timeout(Duration::from_secs(10), handle)
+			.await
+			.expect("the blocking task resolves")
+			.expect("the panic stays inside the blocking task");
+
+		assert_eq!(code, 1);
+		assert!(!in_scope, "the panic-scope guard was dropped");
+		assert_eq!(capture.err(), "boom: internal error\n");
 	}
 }
 
