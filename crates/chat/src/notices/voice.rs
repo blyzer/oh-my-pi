@@ -34,11 +34,19 @@ use std::{
 
 use flume::{Receiver, Sender, TrySendError};
 use omp_ai::realtime::rewrite::RewriteBlockAccumulator;
-use omp_audio::{VoiceError, audio::PlaybackStream, segmentation::SpeakableStream};
+use omp_audio::{
+	VoiceError,
+	audio::{PlaybackStream, PlaybackWriter},
+	segmentation::SpeakableStream,
+};
 use omp_con::{Ctx, Value};
 use omp_core::Str;
 use parking_lot::Mutex;
-use tokio::{sync::Notify, time::Instant};
+use tokio::{
+	sync::Notify,
+	task::{JoinError, spawn_blocking},
+	time::Instant,
+};
 
 /// Quiet time on the delta stream before the buffered partial is flushed.
 const IDLE_FLUSH: Duration = Duration::from_millis(1000);
@@ -166,6 +174,14 @@ pub enum VocalizerFailure {
 		/// Typed backend failure.
 		#[from]
 		source: SpeechSynthFailure,
+	},
+	/// The blocking task that opened or released the speaker panicked or
+	/// was cancelled with its runtime.
+	#[error("speaker device task did not complete")]
+	SpeakerTask {
+		/// Typed task failure.
+		#[source]
+		source: Arc<JoinError>,
 	},
 	/// Native speaker playback failed.
 	#[error(transparent)]
@@ -404,31 +420,68 @@ impl Shared {
 		};
 		if let Some(state) = stale {
 			state.wait_for_drain().await;
-			self.playback.lock().take();
+			let drained = self.playback.lock().take();
+			if let Some((_, stream)) = drained {
+				// Already drained; like a dropped session, a failed stop does
+				// not fail the next segment.
+				let _ = release(stream).await;
+			}
 			if !self.live(generation) {
 				return Ok(());
 			}
 		}
-		let writer = {
-			let mut slot = self.playback.lock();
-			if slot.is_none() {
-				let stream = (self.open_speaker)(audio.sample_rate)?;
-				stream.set_gain(f32::from_bits(self.gain_bits.load(Ordering::Acquire)))?;
-				*slot = Some((audio.sample_rate, stream));
-			}
-			slot
-				.as_ref()
-				.map(|(_, stream)| stream.writer())
-				.transpose()?
-		};
-		let Some(writer) = writer else {
-			return Err(VocalizerFailure::Playback { source: VoiceError::PlaybackClosed });
+		let current = self
+			.playback
+			.lock()
+			.as_ref()
+			.map(|(_, stream)| stream.writer());
+		let writer = match current {
+			Some(writer) => writer?,
+			None => match self.open_session(generation, audio.sample_rate).await? {
+				Some(writer) => writer,
+				None => return Ok(()),
+			},
 		};
 		if let Err(source) = writer.write_owned_async(audio.samples).await {
 			self.playback.lock().take();
 			return Err(VocalizerFailure::Playback { source });
 		}
 		Ok(())
+	}
+
+	/// Opens the speaker for a new session on the blocking pool, so a slow
+	/// audio stack never stalls the worker's runtime or holds the playback
+	/// lock that `clear` takes. Returns `None` when `clear` superseded the
+	/// utterance during the open; that speaker is released unused.
+	async fn open_session(
+		&self,
+		generation: u64,
+		sample_rate: u32,
+	) -> Result<Option<PlaybackWriter>, VocalizerFailure> {
+		let open_speaker = self.open_speaker;
+		let stream = spawn_blocking(move || open_speaker(sample_rate))
+			.await
+			.map_err(|source| VocalizerFailure::SpeakerTask { source: Arc::new(source) })??;
+		stream.set_gain(f32::from_bits(self.gain_bits.load(Ordering::Acquire)))?;
+		let writer = stream.writer()?;
+		let stale = {
+			let mut slot = self.playback.lock();
+			// `clear` bumps the generation before it takes this lock, so a
+			// session installed here is either live or aborted by that clear.
+			if self.live(generation) {
+				*slot = Some((sample_rate, stream));
+				None
+			} else {
+				Some(stream)
+			}
+		};
+		match stale {
+			None => Ok(Some(writer)),
+			Some(stream) => {
+				let _ = release(stream).await;
+				Ok(None)
+			},
+		}
 	}
 
 	/// Finishes the open session and waits until its audio has reached the
@@ -443,10 +496,11 @@ impl Shared {
 		};
 		let Some(state) = state else { return Ok(()) };
 		state.wait_for_drain().await;
-		if let Some((_, mut stream)) = self.playback.lock().take() {
-			stream.stop()?;
+		let drained = self.playback.lock().take();
+		match drained {
+			Some((_, stream)) => release(stream).await,
+			None => Ok(()),
 		}
-		Ok(())
 	}
 
 	/// Stops playback immediately and drops the open session.
@@ -456,6 +510,15 @@ impl Shared {
 			let _ = stream.abort();
 		}
 	}
+}
+
+/// Stops `stream` and releases its device on the blocking pool, off the
+/// worker's runtime.
+async fn release(mut stream: PlaybackStream) -> Result<(), VocalizerFailure> {
+	spawn_blocking(move || stream.stop())
+		.await
+		.map_err(|source| VocalizerFailure::SpeakerTask { source: Arc::new(source) })??;
+	Ok(())
 }
 
 /// Synthesis worker: synthesizes queued segments in order and feeds one
@@ -1049,6 +1112,18 @@ mod tests {
 		Vocalizer::with_speaker(synth, con, PlaybackStream::start_virtual)
 	}
 
+	/// How long [`slow_speaker`] takes to open, as a degraded audio stack does.
+	const SLOW_OPEN: Duration = Duration::from_secs(1);
+
+	/// Opens the virtual speaker only after blocking its thread for
+	/// [`SLOW_OPEN`].
+	fn slow_speaker(sample_rate: u32) -> Result<PlaybackStream, VoiceError> {
+		use std::thread;
+
+		thread::sleep(SLOW_OPEN);
+		PlaybackStream::start_virtual(sample_rate)
+	}
+
 	fn test_ctx() -> Arc<Ctx> {
 		Arc::new(Ctx::builder().isolated().build())
 	}
@@ -1202,6 +1277,65 @@ mod tests {
 			std::thread::sleep(Duration::from_millis(5));
 		}
 		assert!(!vocalizer.speaking());
+	}
+
+	#[tokio::test]
+	async fn a_slow_speaker_open_does_not_stall_the_runtime() {
+		use tokio::time::sleep;
+
+		let synth = FakeSynth::new();
+		let mut vocalizer = Vocalizer::with_speaker(synth.clone(), test_ctx(), slow_speaker);
+		let started = Instant::now();
+		vocalizer.push_text(SpeechMode::Assistant, TEXT);
+		vocalizer.message_completed(SpeechMode::Assistant);
+		synth.wait_for(1).await;
+		// The worker now opens the speaker on this single-threaded runtime;
+		// timers here (the idle flush's included) must keep firing meanwhile.
+		sleep(Duration::from_millis(20)).await;
+		assert!(
+			started.elapsed() < SLOW_OPEN / 2,
+			"the runtime stalled for {:?} behind the speaker open",
+			started.elapsed()
+		);
+		assert!(vocalizer.speaking(), "the utterance is still opening its speaker");
+		settle(&vocalizer).await;
+		assert!(!vocalizer.speaking(), "the utterance plays and drains once the speaker opens");
+		assert!(vocalizer.take_failure().is_none());
+	}
+
+	// Two worker threads: the host calls `clear` while the vocalizer worker
+	// is still inside the speaker open on another thread.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn clear_during_a_slow_open_installs_no_stale_session() {
+		use tokio::time::sleep;
+
+		let synth = FakeSynth::new();
+		let mut vocalizer = Vocalizer::with_speaker(synth.clone(), test_ctx(), slow_speaker);
+		vocalizer.push_text(SpeechMode::Assistant, TEXT);
+		vocalizer.message_completed(SpeechMode::Assistant);
+		synth.wait_for(1).await;
+		sleep(Duration::from_millis(20)).await;
+
+		let clearing = Instant::now();
+		vocalizer.clear();
+		assert!(
+			clearing.elapsed() < SLOW_OPEN / 2,
+			"clear waited {:?} on the speaker open",
+			clearing.elapsed()
+		);
+		assert!(!vocalizer.speaking());
+		sleep(SLOW_OPEN + Duration::from_millis(200)).await;
+		assert!(
+			vocalizer.shared.playback.lock().is_none(),
+			"the speaker opened for the cleared utterance was released, not installed"
+		);
+
+		vocalizer.push_text(SpeechMode::Assistant, "A fresh sentence after the clear. ");
+		vocalizer.message_completed(SpeechMode::Assistant);
+		synth.wait_for(2).await;
+		settle(&vocalizer).await;
+		assert!(!vocalizer.speaking());
+		assert!(spoken_contains(&synth.spoken(), "fresh sentence"));
 	}
 
 	#[tokio::test]
