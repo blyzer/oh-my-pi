@@ -27,7 +27,6 @@ on:
     paths:
       - ".github/actions/macos-build-state/**"
       - ".github/workflows/p8-baseline.yml"
-  workflow_dispatch:
 
 permissions:
   contents: read
