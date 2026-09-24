@@ -6,6 +6,7 @@ on:
     paths:
       - ".cargo/**"
       - ".config/**"
+      - ".github/actions/**"
       - ".github/workflows/ci.yml"
       - "about.toml"
       - "deny.toml"
@@ -27,6 +28,7 @@ on:
     paths:
       - ".cargo/**"
       - ".config/**"
+      - ".github/actions/**"
       - ".github/workflows/ci.yml"
       - "about.toml"
       - "deny.toml"
@@ -160,81 +162,9 @@ jobs:
         if: runner.environment != 'github-hosted'
         run: cargo nextest show-config version
 
-      # A self-hosted runner keeps its disk between runs but not its checkout:
-      # actions/checkout runs `git clean -ffdx`, which deletes the ignored
-      # target/ and vendor/ trees every time. Each run therefore rebuilt the
-      # workspace from nothing and regenerated vendor/python, whose fresh
-      # stdlib.bin alone reruns omp-py's build script and everything above it.
-      # Keep both where the clean cannot reach: the target directory through
-      # CARGO_TARGET_DIR, the CPython trees behind vendor/ symlinks (the clean
-      # removes a link, never what it points at). Per runner, so two runners on
-      # one machine never share a tree. The target directory is keyed by the
-      # toolchain, which invalidates it anyway, and discarded when the disk
-      # runs low (repository variable CI_MIN_FREE_GB, default 60).
-      - name: Keep build state outside the checkout
-        id: state
-        if: runner.environment != 'github-hosted'
-        env:
-          PYTHON_KEY: ${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
-          TOOLCHAIN_KEY: ${{ hashFiles('rust-toolchain.toml') }}
-          MIN_FREE_GB: ${{ vars.CI_MIN_FREE_GB || '60' }}
-        run: |
-          case "$(uname -s)" in
-            Darwin) state="$HOME/Library/Caches/omp-ci/$RUNNER_NAME" ;;
-            *) state="${XDG_CACHE_HOME:-$HOME/.cache}/omp-ci/$RUNNER_NAME" ;;
-          esac
-          python="$state/python-$PYTHON_KEY"
-          target="$state/target-$TOOLCHAIN_KEY"
-          mkdir -p "$python" vendor
-          find "$state" -mindepth 1 -maxdepth 1 \( \
-            \( -name 'python-*' ! -name "python-$PYTHON_KEY" \) -o \
-            \( -name 'target-*' ! -name "target-$TOOLCHAIN_KEY" \) \
-            \) -exec rm -rf {} +
-          free_gb=$(( $(df -Pk "$state" | awk 'NR == 2 { print $4 }') / 1048576 ))
-          if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
-            echo "::warning::${free_gb} GB free, below ${MIN_FREE_GB} GB; discarding the warm target directory"
-            rm -rf "$target"
-          fi
-          ln -sfn "$python/python" vendor/python
-          ln -sfn "$python/python-release" vendor/python-release
-          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
-          echo "python=$python" >> "$GITHUB_OUTPUT"
-          if [ -f "$python/.ready" ]; then
-            echo "python-ready=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "$free_gb GB free; target $target"
-
-      - name: Cache embedded Python
-        id: python-cache
-        # A self-hosted runner keeps these trees in the step above. Uploading
-        # them would mean tarring them against a 10 GB repository cache limit
-        # on every job.
-        if: runner.environment == 'github-hosted'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            vendor/python
-            vendor/python-release
-          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
-
-      # Only when the inputs change: the script regenerates stdlib.bin even
-      # when its archive is current, and a new stdlib.bin rebuilds omp-py.
-      - name: Prepare embedded Python
-        if: steps.python-cache.outputs.cache-hit != 'true' && steps.state.outputs.python-ready != 'true'
-        env:
-          PYTHON_STATE: ${{ steps.state.outputs.python }}
-        run: |
-          if [ -n "$PYTHON_STATE" ]; then
-            crates/py/scripts/fetch-python.sh "$PYTHON_STATE"
-            touch "$PYTHON_STATE/.ready"
-          else
-            crates/py/scripts/fetch-python.sh
-          fi
-
-      - name: Verify embedded Python toolchain
-        run: |
-          test -f vendor/python/pyo3-config.txt
-          crates/py/scripts/ld64.lld --version
+      # Target dir outside the checkout on a self-hosted runner, embedded
+      # CPython on both; shared with the P8 baseline workflow.
+      - uses: ./.github/actions/macos-build-state
 
       - name: Cache Cargo
         # A self-hosted runner keeps its target directory outside the checkout
