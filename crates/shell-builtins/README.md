@@ -41,6 +41,12 @@ skipped. Where a test spans a whole CLI run, as the `-m` and `-r` tests do, its
 access stamps are chosen later than the modification stamps, which that volume
 was never seen to refresh, so the exact read lands there too.
 
+`find`'s `-newerXY` test reads access stamps only through the comparison it
+proves, so it chooses stamps a refresh cannot flip instead. A refresh only moves
+an access stamp to a moment between the stamping and the walk, so the candidate
+that must match is compared against a reference stamped before the test began,
+and the one that must not against a reference stamped a day ahead.
+
 ## Philosophy
 
 Builtins run inside the shell so pipelines, redirections, the shell working directory, exported variables, and cancellation remain scoped to each command rather than relying on process-global state. General utilities and process-control commands stay independently selectable because embedders may choose different registration policies, including withholding destructive utilities.
