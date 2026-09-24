@@ -165,6 +165,8 @@ jobs:
       # Target dir outside the checkout on a self-hosted runner, embedded
       # CPython on both; shared with the P8 baseline workflow.
       - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
 
       - name: Cache Cargo
         # A self-hosted runner keeps its target directory outside the checkout

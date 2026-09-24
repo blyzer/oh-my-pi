@@ -4,6 +4,13 @@ description: >
   target dir and CPython trees outside the checkout so they survive between
   runs. Shared by every workflow that builds the workspace on the macOS runner.
 
+inputs:
+  min-free-gb:
+    # Composite actions cannot read the `vars` context, so callers pass the
+    # repository variable CI_MIN_FREE_GB through here.
+    description: Free disk, in GB, below which the warm target directory is discarded.
+    default: "60"
+
 runs:
   using: composite
   steps:
@@ -17,7 +24,7 @@ runs:
     # removes a link, never what it points at). Per runner, so two runners on
     # one machine never share a tree. The target directory is keyed by the
     # toolchain, which invalidates it anyway, and discarded when the disk
-    # runs low (repository variable CI_MIN_FREE_GB, default 60). Every
+    # runs low (input min-free-gb, default 60). Every
     # workflow using this action shares the same state, so a later job on the
     # runner starts from the previous job's build.
     - name: Keep build state outside the checkout
@@ -27,7 +34,7 @@ runs:
       env:
         PYTHON_KEY: ${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
         TOOLCHAIN_KEY: ${{ hashFiles('rust-toolchain.toml') }}
-        MIN_FREE_GB: ${{ vars.CI_MIN_FREE_GB || '60' }}
+        MIN_FREE_GB: ${{ inputs.min-free-gb }}
       run: |
         case "$(uname -s)" in
           Darwin) state="$HOME/Library/Caches/omp-ci/$RUNNER_NAME" ;;

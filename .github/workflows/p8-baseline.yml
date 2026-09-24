@@ -63,6 +63,8 @@ jobs:
         run: brew install lld uv zstd ninja
 
       - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
 
       # Read-only: ci.yml owns saving this cache on hosted runners.
       - name: Restore Cargo cache
@@ -121,7 +123,7 @@ jobs:
               echo
             fi
             echo '```'
-            cat target/e2e-artifacts/p8-host.txt
+            cat target/e2e-artifacts/p8-host.txt 2>/dev/null || echo "Host was not described."
             echo '```'
             if [ -f target/e2e-artifacts/p8-baselines.json ]; then
               echo '```json'
