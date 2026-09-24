@@ -25,6 +25,10 @@ use omp_envd::{site::TrustedModule, worker::ExtHostSpec};
 use omp_ext::config::ContributedCliValue;
 const ROOT_LICENSE: &str = include_str!("../../../LICENSE");
 const THIRD_PARTY_NOTICES: &str = include_str!("../../../THIRD-PARTY-NOTICES.txt");
+/// What `omp --version` prints. The `omp/X.Y.Z` shape is a release contract:
+/// the npm launcher's updater verifies an install by parsing exactly this
+/// line and rolls back on anything else (see `scripts/gen-npm-packages.py`).
+const VERSION_LINE: &str = concat!("omp/", env!("CARGO_PKG_VERSION"));
 
 fn write_license_output(mut output: impl io::Write) -> io::Result<()> {
 	writeln!(output, "OMP License and Third-Party Notices")?;
@@ -2904,7 +2908,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		return Ok(());
 	}
 	if cli.version {
-		println!("{}", env!("CARGO_PKG_VERSION"));
+		println!("{VERSION_LINE}");
 		return Ok(());
 	}
 	if cli.license {
@@ -4663,6 +4667,30 @@ mod tests {
 			parse(&["omp", "auth", "logout", "account"]).command,
 			Some(Command::Auth(AuthArgs { command: AuthCommand::Logout { .. }, .. }))
 		));
+	}
+
+	#[test]
+	fn version_line_is_the_updater_contract() {
+		// The npm updater accepts `omp/` followed by a bare semver with an
+		// optional prerelease suffix, and nothing after it.
+		let version = VERSION_LINE
+			.strip_prefix("omp/")
+			.expect("version line starts with omp/");
+		assert_eq!(version, env!("CARGO_PKG_VERSION"));
+		let (release, prerelease) = version.split_once('-').unwrap_or((version, ""));
+		let parts: Vec<&str> = release.split('.').collect();
+		assert_eq!(parts.len(), 3, "{version} is not X.Y.Z");
+		assert!(
+			parts
+				.iter()
+				.all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+		);
+		assert!(
+			prerelease
+				.bytes()
+				.all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+		);
+		assert!(!VERSION_LINE.contains(char::is_whitespace));
 	}
 
 	#[test]
