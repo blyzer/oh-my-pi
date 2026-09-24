@@ -1,0 +1,148 @@
+name: P8 baseline
+
+# Records the P8 performance baseline for a commit that has landed on omp2.
+# The functional half of P8 (the metric schema and contract,
+# tests/p8_baselines.rs) stays a required check in ci.yml; this workflow only
+# measures, so a pull request never pays for a noisy host measurement and
+# every recorded artifact names the omp2 commit it describes.
+#
+# Non-gating by design: the recorder's own gross-regression exit is reported
+# as a warning, never as a failed run.
+on:
+  push:
+    branches: [omp2]
+    paths:
+      - ".cargo/**"
+      - ".github/actions/**"
+      - ".github/workflows/p8-baseline.yml"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+  # Only to prove changes to this workflow and the build state it relies on
+  # before they reach omp2. The artifact of such a run describes the pull
+  # request's merge commit, not omp2.
+  pull_request:
+    branches: [omp2]
+    paths:
+      - ".github/actions/macos-build-state/**"
+      - ".github/workflows/p8-baseline.yml"
+
+permissions:
+  contents: read
+
+# One recording per ref at a time; a newer omp2 commit supersedes a queued one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  record:
+    name: Record P8 baseline
+    # Same machine as the rust job in ci.yml, so the numbers stay comparable
+    # with the history recorded there. With one runner registered the two
+    # jobs queue instead of measuring against each other.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+
+      - name: Install native build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install lld uv zstd ninja
+
+      - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+
+      # Read-only: ci.yml owns saving this cache on hosted runners.
+      - name: Restore Cargo cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      # Built before the clock starts, so the recording measures the run and
+      # not the compile.
+      - name: Build recorder
+        run: cargo build -p omp-e2e --bin baseline --locked
+
+      # What the host was doing when the numbers were taken, kept beside them.
+      - name: Describe host
+        run: |
+          mkdir -p target/e2e-artifacts
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF"
+            echo "event=$GITHUB_EVENT_NAME"
+            echo "run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+            echo "runner=$RUNNER_NAME ($RUNNER_ENVIRONMENT)"
+            echo "recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "toolchain=$(rustc --version)"
+            echo "os=$(uname -srm)"
+            echo "load_average=$(sysctl -n vm.loadavg 2>/dev/null || cat /proc/loadavg)"
+          } | tee target/e2e-artifacts/p8-host.txt
+
+      - name: Record P8 baseline
+        id: record
+        continue-on-error: true
+        run: |
+          cargo run -p omp-e2e --bin baseline --locked -- \
+            --artifact target/e2e-artifacts/p8-baselines.json
+
+      - name: Summarize
+        if: always()
+        env:
+          OUTCOME: ${{ steps.record.outcome }}
+        run: |
+          {
+            echo "## P8 baseline for \`${GITHUB_SHA}\`"
+            echo
+            if [ "$OUTCOME" != success ]; then
+              echo "> [!WARNING]"
+              echo "> The recorder exited non-zero ($OUTCOME). Non-gating; see its log."
+              echo
+            fi
+            echo '```'
+            cat target/e2e-artifacts/p8-host.txt 2>/dev/null || echo "Host was not described."
+            echo '```'
+            if [ -f target/e2e-artifacts/p8-baselines.json ]; then
+              echo '```json'
+              python3 -m json.tool target/e2e-artifacts/p8-baselines.json
+              echo '```'
+            else
+              echo "No baseline artifact was written."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$OUTCOME" != success ]; then
+            echo "::warning::P8 recorder exited non-zero ($OUTCOME); the run stays green by design"
+          fi
+
+      - name: Upload P8 baseline
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: p8-baseline-macos-arm64-${{ github.sha }}
+          path: |
+            target/e2e-artifacts/p8-baselines.json
+            target/e2e-artifacts/p8-host.txt
+          if-no-files-found: warn
+          retention-days: 90
