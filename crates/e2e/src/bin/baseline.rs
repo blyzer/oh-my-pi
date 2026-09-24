@@ -39,8 +39,8 @@ async fn main() -> Result<()> {
 	println!("{}", serde_json::to_string(&metrics)?);
 	if metrics.r#loop.gross_regression {
 		return Err(error(format!(
-			"full-loop throughput regressed {:.2}x versus raw scripted TurnClient (limit {:.2}x)",
-			metrics.r#loop.slowdown_ratio, metrics.r#loop.regression_limit
+			"full-loop throughput {:.0} tokens/s is below the {:.0} tokens/s floor",
+			metrics.r#loop.full_tokens_per_second, metrics.r#loop.min_tokens_per_second
 		)));
 	}
 	Ok(())

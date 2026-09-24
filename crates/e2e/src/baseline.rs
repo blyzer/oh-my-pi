@@ -24,9 +24,22 @@ use crate::{
 	support::{ScriptedInference, scripted_stream},
 };
 
-const SCHEMA_VERSION: u32 = 1;
-const GROSS_REGRESSION_LIMIT: f64 = 5.0;
+const SCHEMA_VERSION: u32 = 2;
 const TOKEN: &str = "·";
+
+/// Full-loop throughput, in tokens per second, below which a recording is a
+/// gross regression.
+///
+/// The floor is absolute because the loop has to keep up with the stream it
+/// receives, not with the scripted stream it is measured against: that raw
+/// stream only walks a vector, so even one `write` per commit is tens of times
+/// slower and a ratio limit could never hold. The fastest streaming providers
+/// sustain a few thousand tokens per second, and this floor keeps several
+/// times that in hand. It is also well clear of both sides of the history it
+/// has to separate: the dev-profile loop recorded 121 984 tokens/s on the
+/// self-hosted M1 Pro once stream deltas were coalesced, and 189 tokens/s
+/// while every delta paid its own `F_FULLFSYNC`.
+pub const LOOP_THROUGHPUT_FLOOR: f64 = 10_000.0;
 
 /// Recorded frame and agent-loop measurements for a baseline run.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -65,11 +78,14 @@ pub struct LoopMetrics {
 	pub raw_tokens_per_second:  f64,
 	/// End-to-end kernel throughput in tokens per second.
 	pub full_tokens_per_second: f64,
-	/// Ratio of raw throughput to end-to-end throughput.
+	/// Ratio of raw throughput to end-to-end throughput, recorded for
+	/// comparison between runs; it does not classify the run.
 	pub slowdown_ratio:         f64,
-	/// Threshold used to mark gross throughput regressions.
-	pub regression_limit:       f64,
-	/// Whether the measured slowdown exceeds the recorder threshold.
+	/// Throughput floor, in tokens per second, the run was classified against
+	/// ([`LOOP_THROUGHPUT_FLOOR`]).
+	pub min_tokens_per_second:  f64,
+	/// Whether end-to-end throughput fell below
+	/// [`Self::min_tokens_per_second`].
 	pub gross_regression:       bool,
 }
 
@@ -143,8 +159,8 @@ pub async fn measure(
 			raw_tokens_per_second:  raw_rate,
 			full_tokens_per_second: full_rate,
 			slowdown_ratio:         slowdown,
-			regression_limit:       GROSS_REGRESSION_LIMIT,
-			gross_regression:       slowdown > GROSS_REGRESSION_LIMIT,
+			min_tokens_per_second:  LOOP_THROUGHPUT_FLOOR,
+			gross_regression:       is_gross_regression(full_rate),
 		},
 	})
 }
@@ -215,6 +231,13 @@ pub fn slowdown_ratio(raw_rate: f64, full_rate: f64) -> Result<f64> {
 		return Err(error("token rates must be finite and positive"));
 	}
 	Ok(raw_rate / full_rate)
+}
+
+/// Whether a full-loop throughput is a gross regression: below
+/// [`LOOP_THROUGHPUT_FLOOR`]. A rate exactly at the floor is not.
+#[must_use]
+pub fn is_gross_regression(full_tokens_per_second: f64) -> bool {
+	full_tokens_per_second < LOOP_THROUGHPUT_FLOOR
 }
 
 /// Serializes measurements to the requested artifact path.
