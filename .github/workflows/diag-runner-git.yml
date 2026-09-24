@@ -2,9 +2,14 @@ name: Runner git diagnostics
 
 # Manual only. Shows where the self-hosted macOS runner's git and ssh settings
 # for github.com come from, to explain why a checkout once went over SSH.
-# The repository is public, so the log is too: values are redacted to names,
-# scopes and origins. No checkout step, so HOME is the runner's real one.
-# Start a run by pushing to the diag/runner-git branch.
+# The repository is public, so the log is too. It keeps only what the
+# diagnosis needs: whether github.com traffic is rewritten, by which rule, and
+# from which well-known config file. Credentials, hosts other than GitHub's,
+# includeIf conditions, included files, variable values and resolver details
+# are redacted, and repeated rules are counted instead of listed.
+# No checkout step, so HOME is the runner's real one.
+# Start a run by pushing to the diag/runner-git branch; commits marked
+# [skip ci] change the workflow without running it.
 on:
   push:
     branches: [diag/runner-git]
@@ -22,7 +27,32 @@ jobs:
         shell: bash --noprofile --norc {0}
         run: |
           set -u
-          redact() { sed -E 's#(://)[^/@[:space:]]+@#\1<redacted>@#g'; }
+          # Credentials in URLs, and every host other than GitHub's, are redacted: the
+          # diagnosis only needs to know whether traffic still goes to github.com.
+          redact() {
+            perl -pe '
+              s{(://)[^/\@\s]+\@}{$1<redacted>\@}g;
+              s{(://(?:<redacted>\@)?+)(?!(?:ssh\.)?github\.com(?:[/:\s]|$))[^/:\s<>\@]+}{$1<host>}g;
+              s{(\w\@)(?!(?:ssh\.)?github\.com:)[A-Za-z0-9.-]+:}{$1<host>:}g;
+            '
+          }
+          # includeIf conditions and include paths name local directories and files,
+          # which can identify clients or employers: keep only the rule's shape.
+          redact_rules() {
+            redact | sed -E \
+              -e 's#(includeif\.[a-z/]+:)[^[:space:]]*\.path[[:space:]].*#\1<redacted>.path <redacted>#' \
+              -e 's#(include\.path)[[:space:]].*#\1 <redacted>#'
+          }
+          # Well-known config locations print as they are; anything else, such as a
+          # file pulled in by an include, only as <redacted>.
+          known_path() {
+            case "$1" in
+              "$HOME/.gitconfig" | "$HOME/.config/git/config" | .git/config | \
+                /etc/gitconfig | /opt/homebrew/etc/gitconfig | /usr/local/etc/gitconfig | \
+                "$HOME/.ssh/config" | /etc/ssh/ssh_config) echo "$1" ;;
+              *) echo "<redacted>" ;;
+            esac
+          }
           section() { echo; echo "== $1 =="; }
 
           section "runner"
@@ -35,10 +65,26 @@ jobs:
           section "git rules that can redirect github.com (origin + scope)"
           rules=$(git config --show-origin --show-scope --get-regexp \
             '^(url\..*\.(insteadof|pushinsteadof)|core\.sshcommand|includeif\..*|include\.path)$' || true)
-          if [ -n "$rules" ]; then echo "$rules" | redact; else echo "(none)"; fi
+          if [ -n "$rules" ]; then
+            echo "$rules" | redact_rules |
+              while IFS=$'\t' read -r scope origin rule; do
+                case "$origin" in
+                  file:*) origin="file:$(known_path "${origin#file:}")" ;;
+                esac
+                printf '%s\t%s\t%s\n' "$scope" "$origin" "$rule"
+              done | sort | uniq -c
+          else
+            echo "(none)"
+          fi
 
           section "git config files in play"
-          git config --show-origin --show-scope --list | awk -F'\t' '{print $1"\t"$2}' | sort -u
+          git config --show-origin --show-scope --list | awk -F'\t' '{print $1"\t"$2}' | sort -u |
+            while IFS=$'\t' read -r scope origin; do
+              case "$origin" in
+                file:*) origin="file:$(known_path "${origin#file:}")" ;;
+              esac
+              printf '%s\t%s\n' "$scope" "$origin"
+            done | sort | uniq -c
 
           section "GIT_/SSH_ variables in the job environment (names only)"
           env | grep -E '^(GIT_|SSH_)' | sed -E 's/=.*//' | sort || true
@@ -54,9 +100,15 @@ jobs:
 
           section "effective ssh settings for github.com"
           if command -v ssh >/dev/null; then
-            ssh -G github.com 2>&1 | grep -Ei '^(hostname|user|port|proxycommand|proxyjump) '
+            ssh -G github.com 2>&1 | grep -Ei '^(hostname|user|port|proxycommand|proxyjump) ' |
+              perl -pe 's{^(hostname) (?!(?:ssh\.)?github\.com$).*}{$1 <host>}i; s{^(proxycommand|proxyjump) .*}{$1 <set>}i'
             echo "ssh config files mentioning github:"
-            grep -lis 'github' "$HOME/.ssh/config" /etc/ssh/ssh_config /etc/ssh/ssh_config.d/* 2>/dev/null || echo "(none)"
+            found=$(grep -lis 'github' "$HOME/.ssh/config" /etc/ssh/ssh_config /etc/ssh/ssh_config.d/* 2>/dev/null || true)
+            if [ -n "$found" ]; then
+              echo "$found" | while read -r path; do known_path "$path"; done | sort | uniq -c
+            else
+              echo "(none)"
+            fi
           fi
 
           section "name resolution"
