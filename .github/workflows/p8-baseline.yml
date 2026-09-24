@@ -60,10 +60,26 @@ jobs:
           test "$(uname -m)" = arm64
           rustup show active-toolchain
 
+      # As in ci.yml: hosted runners install the four tools, a self-hosted
+      # runner brings them and is only checked, so this job never needs to own
+      # the Homebrew prefix.
       - name: Install native build tools
+        if: runner.environment == 'github-hosted'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install lld uv zstd ninja
+      - name: Check provisioned native build tools
+        if: runner.environment != 'github-hosted'
+        run: |
+          missing=()
+          [ -x /opt/homebrew/bin/ld64.lld ] || missing+=(lld)
+          for tool in uv zstd ninja; do
+            command -v "$tool" >/dev/null || missing+=("$tool")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing on this runner: ${missing[*]}. As the owner of the Homebrew prefix, run: brew install ${missing[*]}"
+            exit 1
+          fi
 
       - uses: ./.github/actions/macos-build-state
         with:
