@@ -1,0 +1,76 @@
+name: Runner git diagnostics
+
+# Manual only. Shows where the self-hosted macOS runner's git and ssh settings
+# for github.com come from, to explain why a checkout once went over SSH.
+# The repository is public, so the log is too: values are redacted to names,
+# scopes and origins. No checkout step, so HOME is the runner's real one.
+# Start a run by pushing to the diag/runner-git branch.
+on:
+  push:
+    branches: [diag/runner-git]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Git and SSH origins on the runner
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    timeout-minutes: 10
+    steps:
+      - name: Report git and ssh configuration origins
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -u
+          redact() { sed -E 's#(://)[^/@[:space:]]+@#\1<redacted>@#g'; }
+          section() { echo; echo "== $1 =="; }
+
+          section "runner"
+          echo "runner=${RUNNER_NAME:-?} os=${RUNNER_OS:-?} user=$(id -un) HOME=$HOME"
+          git --version
+
+          section "checkout URL after git's rewrite rules"
+          git ls-remote --get-url "https://github.com/${GITHUB_REPOSITORY:-blyzer/oh-my-pi}" | redact
+
+          section "git rules that can redirect github.com (origin + scope)"
+          rules=$(git config --show-origin --show-scope --get-regexp \
+            '^(url\..*\.(insteadof|pushinsteadof)|core\.sshcommand|includeif\..*|include\.path)$' || true)
+          if [ -n "$rules" ]; then echo "$rules" | redact; else echo "(none)"; fi
+
+          section "git config files in play"
+          git config --show-origin --show-scope --list | awk -F'\t' '{print $1"\t"$2}' | sort -u
+
+          section "GIT_/SSH_ variables in the job environment (names only)"
+          env | grep -E '^(GIT_|SSH_)' | sed -E 's/=.*//' | sort || true
+          [ -z "$(env | grep -E '^(GIT_|SSH_)')" ] && echo "(none)"
+
+          section "runner .env (names only)"
+          runner_root="${RUNNER_WORKSPACE:-}"; runner_root="${runner_root%/_work/*}"
+          if [ -n "$runner_root" ] && [ -f "$runner_root/.env" ]; then
+            sed -E 's/=.*//' "$runner_root/.env"
+          else
+            echo "(no .env at ${runner_root:-?})"
+          fi
+
+          section "effective ssh settings for github.com"
+          if command -v ssh >/dev/null; then
+            ssh -G github.com 2>&1 | grep -Ei '^(hostname|user|port|proxycommand|proxyjump) '
+            echo "ssh config files mentioning github:"
+            grep -lis 'github' "$HOME/.ssh/config" /etc/ssh/ssh_config /etc/ssh/ssh_config.d/* 2>/dev/null || echo "(none)"
+          fi
+
+          section "name resolution"
+          if command -v dscacheutil >/dev/null; then
+            dscacheutil -q host -a name github.com | grep -E '^(name|ip_address)'
+            echo "resolvers:"
+            scutil --dns | grep -E '^resolver #|^  (domain|nameserver\[[0-9]+\]|search domain\[[0-9]+\])' \
+              | sed -E 's/(: ).*/\1<redacted>/' | uniq -c | head -40
+          else
+            getent hosts github.com || true
+          fi
+
+          section "ssh reachability (no prompts, 10 s)"
+          if command -v ssh >/dev/null; then
+            ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 | head -2 | sed -E 's/^Hi [^!]+!/Hi <user>!/'
+            echo "exit=${PIPESTATUS[0]}"
+          fi
