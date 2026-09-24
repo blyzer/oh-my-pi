@@ -5276,6 +5276,17 @@ mod tests {
 	/// Failure mode: `-newerXY ref` compared both X and Y timestamps of the
 	/// CANDIDATE against the reference's mtime, instead of comparing the
 	/// candidate's X timestamp against the reference's Y timestamp.
+	///
+	/// The candidates' access stamps cannot be trusted to stay where they were
+	/// set: on the macOS CI volume something outside the test can read a fresh
+	/// file and move its access stamp to the moment of that read (see
+	/// "Filesystem assumptions in tests" in the crate README). Such a move only
+	/// ever lands between the stamping and the walk, so each candidate is
+	/// checked against a reference whose modification stamp lies on the far
+	/// side of that window from the outcome it must not reach: `hit` against
+	/// one stamped before the test began, `miss` against one stamped a day
+	/// ahead. A moved access stamp can then neither drop `hit` nor admit
+	/// `miss`, and a wrong comparison still flips both.
 	#[cfg(unix)]
 	#[test]
 	fn newer_xy_compares_candidate_x_against_reference_y() {
@@ -5289,6 +5300,8 @@ mod tests {
 		let now = SystemTime::now();
 		let old = now - Duration::from_secs(2000);
 		let mid = now - Duration::from_secs(1000);
+		let ahead = now + Duration::from_secs(86_400);
+		let further = ahead + Duration::from_secs(86_400);
 
 		let write_with_times = |name: &str, accessed: SystemTime, modified: SystemTime| {
 			let path = root.join(name);
@@ -5302,24 +5315,30 @@ mod tests {
 				)
 				.unwrap();
 		};
+		let neweram = |candidate: &str, reference: &str| {
+			let (code, capture) = run(&root, &[
+				root.join(candidate).display().to_string(),
+				"-neweram".into(),
+				reference.into(),
+			]);
+			assert_eq!(code, 0, "stderr: {}", capture.err());
+			assert_eq!(capture.err(), "");
+			capture.out()
+		};
 
-		write_with_times("ref", mid, mid);
-		// atime newer than ref's mtime, but mtime older: -neweram must match.
-		// (The old code also demanded a newer mtime and rejected this file.)
+		write_with_times("before", mid, mid);
+		write_with_times("after", ahead, ahead);
+		// atime newer than the reference's mtime, but mtime older: -neweram must
+		// match. (The old code also demanded a newer mtime and rejected this
+		// file.) An outside read can only move the atime later still.
 		write_with_times("hit", now, old);
-		// atime older than ref's mtime: -neweram must not match.
-		write_with_times("miss", old, now);
+		// atime older than the reference's mtime, but mtime newer: -neweram must
+		// not match. An outside read can only move the atime up to the present,
+		// still short of the reference's mtime.
+		write_with_times("miss", old, further);
 
-		let (code, capture) = run(&root, &[
-			root.display().to_string(),
-			"-type".into(),
-			"f".into(),
-			"-neweram".into(),
-			"ref".into(),
-		]);
-		assert_eq!(code, 0, "stderr: {}", capture.err());
-		assert_eq!(capture.err(), "");
-		assert_eq!(capture.out(), format!("{}\n", root.join("hit").display()));
+		assert_eq!(neweram("hit", "before"), format!("{}\n", root.join("hit").display()));
+		assert_eq!(neweram("miss", "after"), "");
 	}
 
 	/// Failure mode: `-newermt` rejected ISO dates like `2026-01-01` with
