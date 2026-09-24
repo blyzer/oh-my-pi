@@ -19,6 +19,7 @@ pub mod pause;
 pub mod prompt;
 pub mod registry;
 pub mod steering;
+mod stream_coalesce;
 pub mod vars;
 /// Image-input policy (`ai_vision`).
 pub mod vision;
