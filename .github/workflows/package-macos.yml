@@ -1,0 +1,95 @@
+name: Package macOS
+
+# Builds the release omp for aarch64-apple-darwin, packages it with
+# scripts/package-macos.sh and installs the result into a scratch prefix with
+# scripts/install-smoke-macos.sh. The same two steps run locally as
+# `just package-macos` and `just install-smoke-macos`; this workflow only
+# runs them on the macOS runner and keeps the artifacts. It publishes
+# nothing.
+#
+# Manual only: a cold release build (thin LTO, one codegen unit, the LTO
+# CPython bundle) is far too slow for every push.
+on:
+  workflow_dispatch:
+  # Only to prove changes to this workflow and the scripts it runs.
+  pull_request:
+    branches: [omp2]
+    paths:
+      - ".github/workflows/package-macos.yml"
+      - "scripts/package-macos.sh"
+      - "scripts/install-smoke-macos.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  package:
+    name: Package and install-smoke omp (macOS arm64)
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+
+      # Same provisioning as the rust job in ci.yml. The release build links
+      # the LTO CPython bundle, which needs ld64.lld.
+      - name: Install native build tools
+        if: runner.environment == 'github-hosted'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install lld uv zstd ninja
+      - name: Check provisioned native build tools
+        if: runner.environment != 'github-hosted'
+        run: |
+          missing=()
+          [ -x /opt/homebrew/bin/ld64.lld ] || missing+=(lld)
+          for tool in uv zstd ninja; do
+            command -v "$tool" >/dev/null || missing+=("$tool")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing on this runner: ${missing[*]}. As the owner of the Homebrew prefix, run: brew install ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+
+      # `just build-release`, spelled out so the runner needs no `just`.
+      - name: Build release omp
+        run: |
+          PYO3_CONFIG_FILE="$PWD/vendor/python-release/pyo3-config.txt" \
+            cargo build -p omp-app --bin omp --release --locked
+
+      - name: Package
+        run: |
+          target=$(cargo metadata --no-deps --format-version 1 --locked |
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+          scripts/package-macos.sh "$target/release/omp"
+
+      - name: Install smoke
+        run: scripts/install-smoke-macos.sh dist
+
+      - name: Upload packages
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omp-macos-arm64-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/*.pkg
+            dist/*.sha256
+          if-no-files-found: warn
+          retention-days: 14

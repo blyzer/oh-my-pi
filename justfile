@@ -264,6 +264,16 @@ inference-smoke:
 license-check:
     cargo deny --locked check licenses sources
 
+# Build the release binary and package it as dist/omp-<sha>-aarch64-apple-darwin.{tar.gz,pkg,sha256} (macOS arm64).
+[group('release')]
+package-macos: build-release
+    scripts/package-macos.sh "$(cargo metadata --no-deps --format-version 1 --locked | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release/omp"
+
+# Install the package-macos artifacts into a scratch prefix and check checksums, `omp --version` and the .pkg payload.
+[group('release')]
+install-smoke-macos dist="dist":
+    scripts/install-smoke-macos.sh {{ dist }}
+
 # Assemble npm publish packages from built release binaries.
 [group('release')]
 npm-package version binaries out="dist/npm":
