@@ -138,13 +138,31 @@ jobs:
           test "$(uname -m)" = arm64
           rustup show active-toolchain
 
-      # Without this, `brew install` first refreshes every tap. On the
-      # self-hosted runner that took five minutes of a fifteen-minute job
-      # (run 182, attempt 2) to install nothing, since all four are present.
+      # Hosted runners start empty, so they install the four tools. Without
+      # HOMEBREW_NO_AUTO_UPDATE, `brew install` first refreshes every tap: five
+      # minutes of a fifteen-minute job in run 182, attempt 2. A self-hosted
+      # runner brings its own, as it does nextest. Its service may run as a
+      # user that does not own the Homebrew prefix, where `brew install` can
+      # fail even with nothing to install. So that step never calls brew: it
+      # checks the binaries the build uses, the linker at the path that
+      # .cargo/config.toml pins included, and names any that are missing.
       - name: Install native build tools
+        if: runner.environment == 'github-hosted'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install lld uv zstd ninja
+      - name: Check provisioned native build tools
+        if: runner.environment != 'github-hosted'
+        run: |
+          missing=()
+          [ -x /opt/homebrew/bin/ld64.lld ] || missing+=(lld)
+          for tool in uv zstd ninja; do
+            command -v "$tool" >/dev/null || missing+=("$tool")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing on this runner: ${missing[*]}. As the owner of the Homebrew prefix, run: brew install ${missing[*]}"
+            exit 1
+          fi
       # Hosted runners start empty, so they install one pinned release. A
       # self-hosted runner brings its own: downloading the latest release on
       # every run took 11m38 in run 183 and then went unused, because an
