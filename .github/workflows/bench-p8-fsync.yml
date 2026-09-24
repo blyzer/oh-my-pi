@@ -1,0 +1,54 @@
+name: bench p8 fsync
+
+# Throwaway experiment for the P8 gross_regression investigation. Lives only
+# on bench/p8-fsync; never merged.
+on:
+  push:
+    branches: [bench/p8-fsync]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+      - name: Host
+        run: |
+          uname -a; sysctl -n machdep.cpu.brand_string hw.memsize vm.loadavg || true
+          df -h "$RUNNER_TEMP"; diskutil info / | grep -E 'Device Node|Solid State|Protocol|File System' || true
+      - name: Durable append cost per variant
+        run: python3 scripts/bench-fsync.py 300
+      - name: Build recorder (control)
+        run: cargo build -p omp-e2e --bin baseline --locked
+      - name: Recorder, journal syncing every entry (control)
+        continue-on-error: true
+        run: cargo run -p omp-e2e --bin baseline --locked -- --artifact "$RUNNER_TEMP/control.json"
+      - name: Drop the per-append sync (experiment only)
+        run: |
+          grep -n 'self.file.sync_data()?;' crates/journal/src/lib.rs
+          perl -0pi -e 's/(self\.file\.write_all\(&encoded\)\?;\n\t\t)self\.file\.sync_data\(\)\?;/$1/' crates/journal/src/lib.rs
+          git diff --stat
+          git diff crates/journal/src/lib.rs
+          test -n "$(git diff crates/journal/src/lib.rs)"
+      - name: Build recorder (no sync)
+        run: cargo build -p omp-e2e --bin baseline --locked
+      - name: Recorder, journal without per-append sync
+        continue-on-error: true
+        run: cargo run -p omp-e2e --bin baseline --locked -- --artifact "$RUNNER_TEMP/nosync.json"
+      - name: Restore and rebuild so the shared dev target matches omp2 again
+        if: always()
+        run: |
+          git checkout -- crates/journal/src/lib.rs
+          cargo build -p omp-e2e --bin baseline --locked
+      - name: Summary
+        if: always()
+        run: |
+          for f in control nosync; do
+            echo "== $f"; cat "$RUNNER_TEMP/$f.json" 2>/dev/null || echo missing
+          done
