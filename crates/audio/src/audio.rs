@@ -16,7 +16,7 @@ use tokio::sync::{Notify, watch};
 
 use crate::{
 	AudioDirection, VoiceError, VoiceResult,
-	device::{CaptureDevice, DeviceConfig, PlaybackDevice, playback_drain_periods},
+	device::{CaptureDevice, DeviceConfig, PlaybackDevice, PlaybackFill, playback_drain_periods},
 };
 
 #[cfg(target_os = "linux")]
@@ -237,6 +237,29 @@ impl PlaybackStream {
 		)
 	)]
 	pub fn start_on(sample_rate: u32, device_id: Option<&str>) -> VoiceResult<Self> {
+		Self::open(sample_rate, device_id, PlaybackDevice::start)
+	}
+
+	/// Open a stream on an in-process speaker clock instead of a device: the
+	/// queue, gain, level, drain, and abort behave as on real hardware while
+	/// the rendered samples are discarded. For hosts and tests that must not
+	/// depend on the machine's audio stack.
+	#[cfg(feature = "virtual-output")]
+	#[tracing::instrument(
+		level = "debug",
+		name = "device_open",
+		skip_all,
+		fields(audio.direction = "playback", audio.sample_rate = sample_rate, audio.virtual = true)
+	)]
+	pub fn start_virtual(sample_rate: u32) -> VoiceResult<Self> {
+		Self::open(sample_rate, None, PlaybackDevice::start_virtual)
+	}
+
+	fn open(
+		sample_rate: u32,
+		device_id: Option<&str>,
+		start: fn(DeviceConfig, PlaybackFill) -> VoiceResult<PlaybackDevice>,
+	) -> VoiceResult<Self> {
 		let sample_rate = audio_sample_rate(sample_rate).map_err(|error| {
 			tracing::warn!(
 				audio.direction = "playback",
@@ -261,7 +284,7 @@ impl PlaybackStream {
 		let drain_callbacks =
 			(playback_drain_periods(config.clone()) as usize) + PLAYBACK_DRAIN_MARGIN_CALLBACKS;
 		let guard = FillGuard { state: Arc::clone(&state), level: level_tx.clone() };
-		let device = PlaybackDevice::start(
+		let device = start(
 			config,
 			Box::new(move |output| {
 				let _ = &guard;
@@ -696,6 +719,30 @@ mod tests {
 		let mut output = [9.0; 2];
 		render(&rx, &state, &mut current, &mut cursor, &mut empty, &mut output);
 		assert_eq!(output, [0.0, 0.0]);
+		assert!(state.is_stopped());
+	}
+
+	#[cfg(feature = "virtual-output")]
+	#[tokio::test]
+	async fn virtual_output_renders_to_drain_and_releases_on_stop() {
+		use std::time::Duration;
+
+		use tokio::time::timeout;
+
+		let mut stream = PlaybackStream::start_virtual(24_000).expect("virtual speaker opens");
+		let writer = stream.writer().expect("open stream has a writer");
+		writer
+			.write_owned_async(vec![0.25; 480])
+			.await
+			.expect("samples queue");
+		let state = stream.state();
+		stream.finish_input();
+		timeout(Duration::from_secs(3), state.wait_for_drain())
+			.await
+			.expect("the virtual clock renders the queue to drain");
+		assert!(state.is_drained());
+		assert!(!state.is_stopped(), "drain is not an abort");
+		stream.stop().expect("virtual speaker stops");
 		assert!(state.is_stopped());
 	}
 

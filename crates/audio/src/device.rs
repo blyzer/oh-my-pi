@@ -21,6 +21,9 @@ mod linux;
 #[cfg(all(feature = "native-audio", target_os = "linux"))]
 use linux as imp;
 
+#[cfg(feature = "virtual-output")]
+mod virtual_output;
+
 #[cfg(not(all(
 	feature = "native-audio",
 	any(target_os = "macos", target_os = "windows", target_os = "linux")
@@ -265,8 +268,13 @@ impl DeviceConfig {
 	}
 }
 
-pub(super) struct PlaybackDevice {
-	inner: imp::PlaybackDevice,
+/// Speaker a [`crate::audio::PlaybackStream`] renders into.
+pub(super) enum PlaybackDevice {
+	/// Platform speaker selected by the native backend.
+	Native(imp::PlaybackDevice),
+	/// In-process clock with no hardware behind it.
+	#[cfg(feature = "virtual-output")]
+	Virtual(virtual_output::VirtualPlayback),
 }
 
 impl PlaybackDevice {
@@ -281,21 +289,37 @@ impl PlaybackDevice {
 			any(target_os = "macos", target_os = "windows", target_os = "linux")
 		)))]
 		let inner = imp::PlaybackDevice::start(config, fill)?;
-		Ok(Self { inner })
+		Ok(Self::Native(inner))
+	}
+
+	#[cfg(feature = "virtual-output")]
+	pub(super) fn start_virtual(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
+		virtual_output::VirtualPlayback::start(config, fill).map(Self::Virtual)
 	}
 
 	pub(super) fn stop(&mut self) -> VoiceResult<()> {
-		#[cfg(all(
-			feature = "native-audio",
-			any(target_os = "macos", target_os = "windows", target_os = "linux")
-		))]
-		return self.inner.stop().map_err(VoiceError::backend);
-		#[cfg(not(all(
-			feature = "native-audio",
-			any(target_os = "macos", target_os = "windows", target_os = "linux")
-		)))]
-		self.inner.stop()
+		match self {
+			Self::Native(inner) => stop_native(inner),
+			#[cfg(feature = "virtual-output")]
+			Self::Virtual(inner) => {
+				inner.stop();
+				Ok(())
+			},
+		}
 	}
+}
+
+fn stop_native(inner: &mut imp::PlaybackDevice) -> VoiceResult<()> {
+	#[cfg(all(
+		feature = "native-audio",
+		any(target_os = "macos", target_os = "windows", target_os = "linux")
+	))]
+	return inner.stop().map_err(VoiceError::backend);
+	#[cfg(not(all(
+		feature = "native-audio",
+		any(target_os = "macos", target_os = "windows", target_os = "linux")
+	)))]
+	inner.stop()
 }
 
 /// Returns the maximum number of callback periods queued by the playback
