@@ -1,6 +1,7 @@
 //! Journal-first agent turn kernel.
 
 use std::{
+	pin::Pin,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -48,6 +49,7 @@ use crate::{
 		append_empty_output_retry, append_error_notice, append_interrupt_notice, append_named_notice,
 		append_notice, consume_steering, steering_pending,
 	},
+	stream_coalesce::{self, CoalescedStream, Pushed},
 };
 
 /// Maximum consecutive provider-declared non-terminal completions without a
@@ -703,6 +705,46 @@ impl<C> Kernel<C> {
 			DirectorStack::from_dom(session.dom(), &self.director_registry)
 				.apply_binds(session.dom(), con);
 		}
+	}
+
+	/// Buffers one streamed delta for `sid`, committing whatever another
+	/// stream left in the buffer first and committing at once when the buffer
+	/// is full. A delta that opens a window arms `timer` for its deadline.
+	fn coalesce_stream(
+		&mut self,
+		session: &mut Session,
+		coalesced: &mut CoalescedStream,
+		timer: Pin<&mut tokio::time::Sleep>,
+		sid: u32,
+		delta: &str,
+	) -> Result<(), KernelError> {
+		if coalesced.sid().is_some_and(|current| current != sid) {
+			self.commit_coalesced(session, coalesced)?;
+		}
+		match coalesced.push(sid, delta, tokio::time::Instant::now()) {
+			Pushed::Buffered => {},
+			Pushed::Armed => {
+				if let Some(deadline) = coalesced.deadline() {
+					timer.reset(deadline);
+				}
+			},
+			Pushed::Full => self.commit_coalesced(session, coalesced)?,
+		}
+		Ok(())
+	}
+
+	/// Commits buffered stream text as one durable append.
+	fn commit_coalesced(
+		&mut self,
+		session: &mut Session,
+		coalesced: &mut CoalescedStream,
+	) -> Result<(), KernelError> {
+		if let Some((sid, text)) = coalesced.pending() {
+			session.stream_append(sid, text)?;
+			coalesced.clear();
+			self.apply_live_components(session)?;
+		}
+		Ok(())
 	}
 
 	pub(crate) fn apply_live_components(
@@ -2160,12 +2202,20 @@ impl<C: Inference> Kernel<C> {
 		// First visible or reasoning byte (or the first streamed tool-call
 		// fragment) after the request left the kernel.
 		let mut first_token: Option<Instant> = None;
+		// Streamed text waits here for at most one window so a burst of
+		// deltas commits as one durable append (`stream_coalesce`). The timer
+		// is polled only while text is waiting, and ahead of the stream so a
+		// provider that never pauses cannot starve the commit.
+		let mut coalesced = CoalescedStream::default();
+		let commit_timer = tokio::time::sleep(stream_coalesce::WINDOW);
+		tokio::pin!(commit_timer);
 		let fold: Result<Fold, KernelError> = async {
 			loop {
 				let signal = tokio::select! {
 					biased;
 					() = control.cancelled() => StreamSignal::Cancelled,
 					message = self.mailbox_rx.recv_async() => StreamSignal::Control(message.ok()),
+					() = &mut commit_timer, if coalesced.deadline().is_some() => StreamSignal::CommitDue,
 					event = stream.next() => StreamSignal::Event(event),
 				};
 				let event = match signal {
@@ -2174,6 +2224,10 @@ impl<C: Inference> Kernel<C> {
 						return Ok(Fold::Cancelled);
 					},
 					StreamSignal::Control(Some(message)) => {
+						// Text that arrived before the message is journaled
+						// before anything the message records, and before a
+						// rewind moves the head.
+						self.commit_coalesced(session, &mut coalesced)?;
 						match call_control.handle(session, message)? {
 							Received::Cancelled => return Ok(Fold::Cancelled),
 							Received::ToolScopedAbort(reason) => {
@@ -2193,9 +2247,21 @@ impl<C: Inference> Kernel<C> {
 						continue;
 					},
 					StreamSignal::Control(None) => continue,
+					StreamSignal::CommitDue => {
+						self.commit_coalesced(session, &mut coalesced)?;
+						continue;
+					},
 					StreamSignal::Event(Some(event)) => event?,
 					StreamSignal::Event(None) => break Ok(Fold::Ended),
 				};
+				if !matches!(
+					event,
+					ChatEvent::TextDelta { .. }
+						| ChatEvent::ThinkingDelta { .. }
+						| ChatEvent::ToolArgumentsDelta { .. }
+				) {
+					self.commit_coalesced(session, &mut coalesced)?;
+				}
 				match event {
 					ChatEvent::Started(meta) => {
 						let model = meta
@@ -2235,8 +2301,13 @@ impl<C: Inference> Kernel<C> {
 					ChatEvent::TextDelta { index, text: delta } => {
 						first_token.get_or_insert_with(Instant::now);
 						let sid = content_sid(session, assistant, &mut content_streams, index, "text")?;
-						session.stream_append(sid, delta.as_str())?;
-						self.apply_live_components(session)?;
+						self.coalesce_stream(
+							session,
+							&mut coalesced,
+							commit_timer.as_mut(),
+							sid,
+							delta.as_str(),
+						)?;
 						self.events.publish(KernelEvent::TextDelta(delta.clone()));
 						text.push_str(delta.as_str());
 						if let (Some(hooks), Some(item)) = (&self.lifecycle_hooks, assistant) {
@@ -2258,8 +2329,13 @@ impl<C: Inference> Kernel<C> {
 						first_token.get_or_insert_with(Instant::now);
 						let sid =
 							content_sid(session, assistant, &mut content_streams, index, "thinking")?;
-						session.stream_append(sid, delta.as_str())?;
-						self.apply_live_components(session)?;
+						self.coalesce_stream(
+							session,
+							&mut coalesced,
+							commit_timer.as_mut(),
+							sid,
+							delta.as_str(),
+						)?;
 						if let (Some(hooks), Some(item)) = (&self.lifecycle_hooks, assistant) {
 							hooks.notify(
 								HookEventId::HookEventMessageUpdate,
@@ -2335,10 +2411,15 @@ impl<C: Inference> Kernel<C> {
 							.ok_or(KernelError::ToolCallMismatch)?;
 						let fragment = std::str::from_utf8(&bytes)
 							.map_err(|source| KernelError::ToolArgumentUtf8 { source })?;
-						session.stream_append(call.sid, fragment)?;
+						self.coalesce_stream(
+							session,
+							&mut coalesced,
+							commit_timer.as_mut(),
+							call.sid,
+							fragment,
+						)?;
 						call.raw_args.push_str(fragment);
 						call.prepared.arg_delta(fragment);
-						self.apply_live_components(session)?;
 						let abort_invalid_edit = streamed_edit_must_abort(
 							self.con.as_deref(),
 							call.identity.name.as_str(),
@@ -2619,6 +2700,16 @@ impl<C: Inference> Kernel<C> {
 			}
 		}
 		.await;
+		// Whatever ended the fold, text still inside the window was received
+		// and belongs in the journal before the streams close.
+		let fold = match (fold, self.commit_coalesced(session, &mut coalesced)) {
+			(fold, Ok(())) => fold,
+			(Ok(_), Err(journal)) => Err(journal),
+			(Err(error), Err(journal)) => {
+				tracing::warn!(error = ?journal, "failed to commit coalesced stream text after a stream error");
+				Err(error)
+			},
+		};
 		match fold {
 			Ok(Fold::Ended) => {},
 			Ok(state @ (Fold::Cancelled | Fold::ToolScopedAbort(_))) => {
@@ -3552,6 +3643,8 @@ enum StreamSignal {
 	Event(Option<Result<ChatEvent, omp_ai::Error>>),
 	Control(Option<Up>),
 	Cancelled,
+	/// The coalescing window of buffered stream text has elapsed.
+	CommitDue,
 }
 
 /// How one inference fold left the stream.
