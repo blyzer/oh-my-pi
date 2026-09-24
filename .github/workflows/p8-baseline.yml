@@ -27,6 +27,10 @@ on:
     paths:
       - ".github/actions/macos-build-state/**"
       - ".github/workflows/p8-baseline.yml"
+  # A manual re-recording, for example of an omp2 commit measured while the
+  # runner was busy. GitHub offers it because omp2 is the default branch; the
+  # artifact names the commit of whatever ref is dispatched.
+  workflow_dispatch:
 
 permissions:
   contents: read
