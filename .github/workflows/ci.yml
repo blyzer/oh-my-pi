@@ -113,9 +113,8 @@ jobs:
     name: Rust workspace and acceptance proofs
     # Deliberately NOT gated on runtime_spec. That check is cheap and reports
     # in two minutes; this one is the expensive proof and the only place the
-    # suite, P1-P8 and the baseline ever run. Chaining them meant a red spec
-    # gate skipped the suite entirely, so the branch could not learn whether
-    # it passed. They are independent questions and now answer in parallel.
+    # suite and P1-P8 ever run. Chaining them meant a red spec gate skipped
+    # the suite entirely, so the branch could not learn whether it passed. They are independent questions and now answer in parallel.
     # This does not weaken the gate: runtime_spec still reports its own
     # conclusion and can still be a required check in branch protection.
     # The license policy is the same kind of independent question and is not
@@ -217,23 +216,10 @@ jobs:
           TERM: xterm-256color
         run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked
 
+      # Only the metric contract gates a pull request. The measurement itself
+      # is recorded per omp2 commit by p8-baseline.yml, off the PR path.
       - name: Validate P8 baseline contract
         run: cargo nextest run --profile ci -p omp-e2e --test p8_baselines --locked
-
-      - name: Record P8 baseline
-        continue-on-error: true
-        run: |
-          cargo run -p omp-e2e --bin baseline --locked -- \
-            --artifact target/e2e-artifacts/p8-baselines.json
-
-      - name: Upload P8 baseline
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: omp-e2e-baseline-macos-arm64
-          path: target/e2e-artifacts/p8-baselines.json
-          if-no-files-found: warn
-          retention-days: 14
 
   # The workspace lint runs on macOS, so until this job existed no
   # `#[cfg(target_os = "linux")]` code had ever been linted by anything: the

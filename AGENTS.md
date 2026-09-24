@@ -78,9 +78,11 @@ all recipes.
 
 CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format,
 licences, runtime-symbol contracts and a second workspace lint on Linux;
-tests/P1-P8/baseline on arm64 macOS, plus P7 again on a Linux PTY. The macOS
-job reads `vars.MACOS_RUNNER` and falls back to `macos-15`, so a self-hosted
-Apple-silicon runner takes it when one is registered. Lint runs on BOTH
+tests/P1-P8 on arm64 macOS, plus P7 again on a Linux PTY. The P8 performance
+baseline is recorded per omp2 push by `.github/workflows/p8-baseline.yml`
+(non-gating, artifact named by commit), never in a PR. The macOS jobs read
+`vars.MACOS_RUNNER` and fall back to `macos-15`, so a self-hosted
+Apple-silicon runner takes them when one is registered. Lint runs on BOTH
 platforms deliberately: clippy on one target never sees the other's
 `#[cfg(target_os = ...)]` code, and the Linux-only paths went unlinted until
 `lint_linux` existed. Embedded CPython bundles exist for
