@@ -207,6 +207,19 @@ impl CardView<'_> {
 		}
 	}
 
+	/// Whether dispatch moved the settled outcome to the CAS as
+	/// [`omp_tool::CallOutcomeDetails::Spilled`], leaving no inline payload
+	/// for [`Self::result`] to decode. Cards use it to tell "too large to
+	/// show inline" apart from an empty result.
+	#[must_use]
+	pub fn result_spilled(&self) -> bool {
+		self
+			.result
+			.and_then(|node| node_outcome(node, PropId::Outcome))
+			.and_then(|raw| serde_json::from_str::<omp_tool::CallOutcomeDetails>(raw).ok())
+			.is_some_and(|details| matches!(details, omp_tool::CallOutcomeDetails::Spilled { .. }))
+	}
+
 	/// The successful result's raw journaled payload as untyped JSON.
 	///
 	/// Dedicated cards should prefer [`Self::result`] with their concrete
@@ -412,6 +425,12 @@ where
 	view
 		.result::<T>()
 		.and_then(|value| serde_json::to_value(value).ok())
+}
+
+/// The line a card shows in place of a payload dispatch stored in the CAS;
+/// the output-bounded notice below it carries the artifact address.
+pub(crate) fn spilled_result_line() -> Component {
+	dom! { <text fg=muted>{"Result too large to show inline"}</text> }.into_component()
 }
 
 /// Parses `data`, then the text, independently: live `data` is the

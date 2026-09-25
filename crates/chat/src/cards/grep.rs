@@ -68,6 +68,18 @@ fn render_done(
 		.into_iter()
 		.any(|field| result.get(field).and_then(Value::as_bool).unwrap_or(false));
 	let scope = path.unwrap_or(".");
+	if match_count == 0 && view.result_spilled() {
+		return dom! {
+			<col pad-x=1 w="100%">
+				<row gap=1>
+					<i:search fg=default/><text>{"Grep:"}</text><text fg=output>{query}</text>
+					<text fg=muted>{format!("in {scope}")}</text>
+				</row>
+				{super::spilled_result_line()}
+			</col>
+		}
+		.into_component();
+	}
 	if match_count == 0 {
 		return dom! {
 			<col pad-x=1 w="100%">

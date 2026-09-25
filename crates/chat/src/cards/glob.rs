@@ -49,7 +49,26 @@ impl Card for GlobCard {
 const COLLAPSED_FILES: usize = 8;
 
 fn render_done(view: &CardView<'_>, query: &str, expanded: bool) -> Component {
-	let result = typed_result::<omp_tools::glob::Payload>(view).unwrap_or(Value::Null);
+	let Some(result) = typed_result::<omp_tools::glob::Payload>(view) else {
+		if view.result_spilled() {
+			let scope = glob_scope(query);
+			return dom! {
+				<col pad-x=1>
+					<row gap=1>
+						<i:search fg=default/><text>{"Glob:"}</text><text fg=output>{query}</text>
+						<text fg=muted>{sf!("in {scope}")}</text>
+					</row>
+					{super::spilled_result_line()}
+				</col>
+			}
+			.into_component();
+		}
+		return render_payload(Value::Null, query, expanded);
+	};
+	render_payload(result, query, expanded)
+}
+
+fn render_payload(result: Value, query: &str, expanded: bool) -> Component {
 	let files = result
 		.get("files")
 		.or_else(|| result.get("matches"))
