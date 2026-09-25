@@ -11,9 +11,11 @@ use omp_core::Str;
 /// Environment override of the remembered default model.
 const DEFAULT_MODEL_ENV: &str = "OMP_DEFAULT_MODEL";
 
-/// Invocation-local resolved auxiliary model roles after CLI-over-environment
-/// precedence. The default model is not among them: it resolves through
-/// [`resolve_launch_default`] against the catalog the session routes through.
+/// Invocation-local resolved auxiliary model roles.
+///
+/// CLI values outrank the environment. The default model is not among them:
+/// it resolves through [`resolve_launch_default`] against the catalog the
+/// session routes through.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LaunchRoles {
 	/// Fast/low-cost model.
@@ -284,7 +286,7 @@ mod tests {
 		let sink = std::sync::Arc::clone(&saved);
 		let ctx = omp_con::Ctx::builder()
 			.saver(move |_, contents| {
-				*sink.lock() = contents.to_owned();
+				contents.clone_into(&mut sink.lock());
 				Ok(())
 			})
 			.build();

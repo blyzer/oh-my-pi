@@ -830,7 +830,7 @@ fn saving_host(
 	let con = Arc::new(
 		HostMailbox::new()
 			.attach(omp_con::Ctx::builder().saver(move |_, contents| {
-				*sink.lock() = contents.to_owned();
+				contents.clone_into(&mut sink.lock());
 				Ok(())
 			}))
 			.build(),

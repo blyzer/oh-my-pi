@@ -621,9 +621,9 @@ impl Launch {
 		if self.options.launch_model
 			== omp_driver::headless::kernel::LaunchModelPolicy::RememberedDefault
 		{
-			self.default_thinking = settled.thinking.clone();
+			self.default_thinking.clone_from(&settled.thinking);
 		}
-		self.missing_default = settled.missing_default.clone();
+		self.missing_default.clone_from(&settled.missing_default);
 		apply_launch_session(&self.ctx, &mut session, self)?;
 		Ok((kernel, session))
 	}

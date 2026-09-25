@@ -258,7 +258,7 @@ async fn a_login_refresh_reaches_new_turns_and_spares_the_in_flight_one() {
 	let ttl = expiry
 		.duration_since(SystemTime::now())
 		.expect("the generation is fresh");
-	assert!(ttl > Duration::from_secs(110 * 60), "the deadline is the 2 h TTL: {ttl:?}");
+	assert!(ttl > Duration::from_mins(110), "the deadline is the 2 h TTL: {ttl:?}");
 
 	// The turn in flight holds the launch registry; the next turn's routes
 	// are pinned the same way until they adopt a publication.

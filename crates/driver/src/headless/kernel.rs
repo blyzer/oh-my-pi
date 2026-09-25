@@ -214,6 +214,15 @@ pub struct LaunchModel {
 	pub missing_default: Option<Str>,
 }
 
+/// Neither the remembered default nor the launch's selector names a model in
+/// the catalog composition routes through.
+#[derive(Debug, thiserror::Error)]
+#[error("no catalog model matches the launch model selector")]
+pub struct UnknownLaunchModel {
+	/// The selector that matched nothing.
+	pub selector: Str,
+}
+
 /// Removes a no-session journal and its private blob/local/temp namespace
 /// regardless of which presentation adapter or error path drops the composed
 /// kernel.
@@ -249,7 +258,7 @@ pub struct ProductionInference {
 	launch:             LaunchModel,
 	_environment:       omp_envd::ProjectEnvironment,
 	_agent_control:     Mutex<Option<omp_envd::AgentControlBinding>>,
-	_stack:             ProductionStack,
+	stack:              ProductionStack,
 	con:                Arc<omp_con::Ctx>,
 	_python_components: Vec<omp_envd::exthost::PyComponent>,
 	_eval_parent:       Option<omp_envd::eval::ParentBindingLease>,
@@ -1446,13 +1455,13 @@ impl ComposedInference {
 			Self::Production(inference) => {
 				let settings = omp_catalog::settings::ModelSettings::from_con(&inference.con);
 				let selected = crate::discovery::roles::resolve_role_selector(
-					inference._stack.catalog().as_ref(),
+					inference.stack.catalog().as_ref(),
 					&settings,
 					"@tiny",
 				)
 				.ok()?;
 				Some(SpeechRewriteClient::Production {
-					registry: inference._stack.registry.clone(),
+					registry: inference.stack.registry.clone(),
 					model:    selected.model.clone(),
 				})
 			},
@@ -1482,7 +1491,7 @@ impl ComposedInference {
 	#[must_use]
 	pub const fn production_stack(&self) -> Option<&ProductionStack> {
 		match self {
-			Self::Production(inference) => Some(&inference._stack),
+			Self::Production(inference) => Some(&inference.stack),
 			Self::Gateway { .. } => None,
 		}
 	}
@@ -1493,7 +1502,7 @@ impl ComposedInference {
 	pub fn live_catalog(&self) -> Option<crate::registry::LiveCatalog> {
 		match self {
 			Self::Production(inference) => {
-				Some(crate::registry::LiveCatalog::Published(inference._stack.registry.clone()))
+				Some(crate::registry::LiveCatalog::Published(inference.stack.registry.clone()))
 			},
 			Self::Gateway { .. } => None,
 		}
@@ -1912,7 +1921,8 @@ pub async fn compose_kernel(
 		&project_root,
 		model_selector,
 		options.launch_model,
-	)?;
+	)
+	.map_err(|error| HeadlessError::UnknownModel { selector: error.selector })?;
 	let model = launch.model.clone();
 	let model_key = omp_catalog::ModelKey::from(model.as_str());
 	let model_spec = catalog
@@ -1933,12 +1943,12 @@ pub async fn compose_kernel(
 				bridge.bind_remote(channel.clone())?;
 			}
 			ComposedInference::Gateway {
-				inference:          GatewayInference::new(channel, model.as_str()),
-				launch:             launch.clone(),
-				_environment:       environment,
-				_agent_control:     Mutex::new(None),
+				inference: GatewayInference::new(channel, model.as_str()),
+				launch,
+				_environment: environment,
+				_agent_control: Mutex::new(None),
 				_python_components: python_components,
-				_eval_parent:       None,
+				_eval_parent: None,
 				_ephemeral_journal: None,
 			}
 		},
@@ -1968,10 +1978,10 @@ pub async fn compose_kernel(
 				routes,
 				meta,
 				model: omp_catalog::ModelKey::from(model.as_str()),
-				launch: launch.clone(),
+				launch,
 				_environment: environment,
 				_agent_control: Mutex::new(None),
-				_stack: stack,
+				stack,
 				con: Arc::clone(&ctx),
 				_python_components: python_components,
 				_eval_parent: None,
@@ -2551,56 +2561,57 @@ fn resolve_model_selector(
 ///
 /// # Errors
 ///
-/// [`HeadlessError::UnknownModel`] when neither the remembered default nor
-/// the fallback names a catalog model.
+/// [`UnknownLaunchModel`] when neither the remembered default nor the
+/// fallback names a catalog model.
 pub fn settle_launch_model(
 	catalog: &omp_catalog::snapshot::Catalog,
 	ctx: &omp_con::Ctx,
 	project_root: &Path,
 	model_selector: &str,
 	policy: LaunchModelPolicy,
-) -> Result<LaunchModel, HeadlessError> {
+) -> Result<LaunchModel, UnknownLaunchModel> {
 	let home = std::env::var_os("HOME").map_or_else(|| project_root.to_path_buf(), PathBuf::from);
 	let settings =
 		omp_catalog::settings::ModelSettings::from_con(ctx).resolve_path_scopes(project_root, &home);
 	// An exact key or alias, else a bare or provider-qualified model id
 	// (`--model fast`) through the same catalog selection `/model` uses.
-	let selected = |thinking, missing_default| {
-		resolve_model_selector(catalog, model_selector)
-			.or_else(|error| {
-				crate::discovery::roles::resolve_role_selector(catalog, &settings, model_selector)
-					.map(|selected| Str::new(selected.model.as_str()))
-					.map_err(|_| error)
-			})
-			.map(|model| LaunchModel { model, thinking, missing_default })
+	let selected = catalog
+		.model(omp_catalog::ModelKey::from_ref(model_selector))
+		.or_else(|| catalog.resolve_alias(model_selector))
+		.map(|model| Str::new(model.key.as_str()))
+		.or_else(|| {
+			crate::discovery::roles::resolve_role_selector(catalog, &settings, model_selector)
+				.ok()
+				.map(|selected| Str::new(selected.model.as_str()))
+		});
+	let unknown = || UnknownLaunchModel { selector: Str::new(model_selector) };
+	let default = match policy {
+		LaunchModelPolicy::Selected => crate::discovery::roles::LaunchDefault::Unset,
+		LaunchModelPolicy::RememberedDefault => {
+			crate::discovery::roles::resolve_launch_default(catalog, &settings)
+		},
 	};
-	if policy == LaunchModelPolicy::Selected {
-		return selected(None, None);
-	}
-	match crate::discovery::roles::resolve_launch_default(catalog, &settings) {
+	match default {
 		crate::discovery::roles::LaunchDefault::Resolved(default) => Ok(LaunchModel {
 			model:           Str::new(default.model.as_str()),
 			thinking:        default.thinking,
 			missing_default: None,
 		}),
-		crate::discovery::roles::LaunchDefault::Unset => selected(None, None),
+		crate::discovery::roles::LaunchDefault::Unset => {
+			let model = selected.ok_or_else(unknown)?;
+			Ok(LaunchModel { model, thinking: None, missing_default: None })
+		},
 		crate::discovery::roles::LaunchDefault::Missing { selector } => {
-			let launch = selected(None, Some(selector.clone())).or_else(|error| {
-				crate::discovery::roles::fallback_model_selector(catalog, &settings)
-					.map(|model| LaunchModel {
-						model,
-						thinking: None,
-						missing_default: Some(selector.clone()),
-					})
-					.ok_or(error)
-			})?;
+			let model = selected
+				.or_else(|| crate::discovery::roles::fallback_model_selector(catalog, &settings))
+				.ok_or_else(unknown)?;
 			tracing::warn!(
 				remembered = %selector,
-				fallback = %launch.model,
+				fallback = %model,
 				"the remembered default model is not in the catalog after discovery; launching on a \
 				 fallback"
 			);
-			Ok(launch)
+			Ok(LaunchModel { model, thinking: None, missing_default: Some(selector) })
 		},
 	}
 }
