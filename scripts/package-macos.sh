@@ -22,6 +22,10 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$REPO_ROOT"
 
 SHA=$(git rev-parse --short HEAD)
+# The version the binary was built as: the .pkg carries it, and
+# install-smoke-macos.sh checks `omp --version` against it.
+VERSION=$(cargo metadata --no-deps --format-version 1 --locked |
+    python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "omp-app"))')
 TRIPLE=aarch64-apple-darwin
 NAME="omp-${SHA}-${TRIPLE}"
 DIST=dist
@@ -51,6 +55,7 @@ chmod 755 "$ROOT/install.sh"
 cat > "$ROOT/README.txt" <<README
 omp macOS binary
 
+Version: ${VERSION}
 Build: ${SHA}
 Target: ${TRIPLE}
 Branch: ${BRANCH}
@@ -80,10 +85,9 @@ cp "$SRC" "$PKGROOT/usr/local/bin/omp"
 chmod 755 "$PKGROOT/usr/local/bin/omp"
 PKG="$REPO_ROOT/$DIST/${NAME}.pkg"
 rm -f "$PKG"
-# version must match CARGO_PKG_VERSION (workspace 0.1.0); keep it in sync.
 pkgbuild --root "$PKGROOT" \
     --identifier com.oh-my-pi.omp \
-    --version 0.1.0 \
+    --version "$VERSION" \
     "$PKG"
 
 # ---------------------------------------------------------------- checksums
