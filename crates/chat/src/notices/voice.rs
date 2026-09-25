@@ -295,6 +295,8 @@ struct Shared {
 	synth:         Arc<dyn SpeechSynth>,
 	/// Console settings sampled only when a new utterance starts.
 	con:           Arc<Ctx>,
+	/// Opens the speaker for a new playback session at a sample rate.
+	open_speaker:  fn(u32) -> Result<PlaybackStream, VoiceError>,
 	/// Current playback session and its sample rate.
 	playback:      Mutex<Option<(u32, PlaybackStream)>>,
 	/// Raw-input pipeline latched when the utterance receives its first delta.
@@ -410,7 +412,7 @@ impl Shared {
 		let writer = {
 			let mut slot = self.playback.lock();
 			if slot.is_none() {
-				let stream = PlaybackStream::start(audio.sample_rate)?;
+				let stream = (self.open_speaker)(audio.sample_rate)?;
 				stream.set_gain(f32::from_bits(self.gain_bits.load(Ordering::Acquire)))?;
 				*slot = Some((audio.sample_rate, stream));
 			}
@@ -634,15 +636,27 @@ pub struct Vocalizer {
 }
 
 impl Vocalizer {
-	/// Starts the synthesis worker over `synth`.
+	/// Starts the synthesis worker over `synth`, speaking through the default
+	/// speaker.
 	#[must_use]
 	pub fn new(synth: Arc<dyn SpeechSynth>, con: Arc<Ctx>) -> Self {
+		Self::with_speaker(synth, con, PlaybackStream::start)
+	}
+
+	/// Starts the synthesis worker over `synth`, opening each playback session
+	/// with `open_speaker`.
+	fn with_speaker(
+		synth: Arc<dyn SpeechSynth>,
+		con: Arc<Ctx>,
+		open_speaker: fn(u32) -> Result<PlaybackStream, VoiceError>,
+	) -> Self {
 		let shared = Arc::new(Shared {
 			generation: AtomicU64::new(1),
 			open: AtomicU64::new(0),
 			rewrites: Mutex::new((0, 0)),
 			synth: Arc::clone(&synth),
 			con,
+			open_speaker,
 			playback: Mutex::new(None),
 			input: Mutex::new(InputPipeline::Idle),
 			configuration: Mutex::new(None),
@@ -1029,6 +1043,12 @@ mod tests {
 		}
 	}
 
+	/// Plays on the virtual speaker, so these tests never wait on the host's
+	/// audio device.
+	fn vocalizer(synth: Arc<dyn SpeechSynth>, con: Arc<Ctx>) -> Vocalizer {
+		Vocalizer::with_speaker(synth, con, PlaybackStream::start_virtual)
+	}
+
 	fn test_ctx() -> Arc<Ctx> {
 		Arc::new(Ctx::builder().isolated().build())
 	}
@@ -1068,7 +1088,7 @@ mod tests {
 	#[tokio::test]
 	async fn assistant_mode_speaks_text_not_thinking() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer.push_text(SpeechMode::Assistant, TEXT);
 		vocalizer.push_thinking(SpeechMode::Assistant, THINKING);
 		vocalizer.message_completed(SpeechMode::Assistant);
@@ -1082,7 +1102,7 @@ mod tests {
 	#[tokio::test]
 	async fn all_mode_speaks_thinking_too() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer.push_thinking(SpeechMode::All, THINKING);
 		vocalizer.push_text(SpeechMode::All, TEXT);
 		vocalizer.message_completed(SpeechMode::All);
@@ -1097,7 +1117,7 @@ mod tests {
 	#[tokio::test]
 	async fn yield_mode_speaks_only_at_turn_end() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer.push_text(SpeechMode::Yield, TEXT);
 		vocalizer.push_thinking(SpeechMode::Yield, THINKING);
 		vocalizer.message_completed(SpeechMode::Yield);
@@ -1115,7 +1135,7 @@ mod tests {
 	#[tokio::test]
 	async fn off_mode_speaks_nothing() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer.push_text(SpeechMode::Off, TEXT);
 		vocalizer.push_thinking(SpeechMode::Off, THINKING);
 		vocalizer.message_completed(SpeechMode::Off);
@@ -1128,7 +1148,7 @@ mod tests {
 	#[tokio::test]
 	async fn clear_drops_queued_segments_and_bumps_generation() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		let paragraph = "First sentence of a long reply. Second sentence follows it. Third sentence \
 		                 keeps going. Fourth sentence is here too. Fifth sentence ends the \
 		                 paragraph. ";
@@ -1153,7 +1173,7 @@ mod tests {
 	#[tokio::test]
 	async fn message_completed_flushes_partial_sentence() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer.push_text(SpeechMode::Assistant, "Trailing partial");
 		tokio::time::sleep(Duration::from_millis(30)).await;
 		assert!(synth.spoken().is_empty(), "no boundary yet");
@@ -1169,7 +1189,7 @@ mod tests {
 	#[test]
 	fn works_without_a_current_runtime() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer.push_text(SpeechMode::Assistant, TEXT);
 		vocalizer.message_completed(SpeechMode::Assistant);
 		let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -1187,7 +1207,7 @@ mod tests {
 	#[tokio::test]
 	async fn suspension_stops_current_audio_and_gates_future_segments() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer.set_suspended(true);
 		vocalizer.push_text(SpeechMode::Assistant, TEXT);
 		vocalizer.message_completed(SpeechMode::Assistant);
@@ -1202,7 +1222,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn bounded_queue_reports_typed_backpressure() {
-		let mut vocalizer = Vocalizer::new(Arc::new(SlowSynth), test_ctx());
+		let mut vocalizer = vocalizer(Arc::new(SlowSynth), test_ctx());
 		let mut text = String::new();
 		for index in 0..(JOB_CAPACITY * 3) {
 			use std::fmt::Write as _;
@@ -1220,7 +1240,7 @@ mod tests {
 	async fn model_voice_and_format_are_latched_per_utterance() {
 		let synth =
 			Arc::new(ConfigSynth { calls: AtomicUsize::new(0), configs: Mutex::new(Vec::new()) });
-		let mut vocalizer = Vocalizer::new(synth.clone(), test_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), test_ctx());
 		vocalizer
 			.push_text(SpeechMode::Assistant, "First complete sentence. Second complete sentence.");
 		vocalizer.message_completed(SpeechMode::Assistant);
@@ -1244,7 +1264,7 @@ mod tests {
 	#[tokio::test]
 	async fn enhanced_mode_rewrites_fence_safe_blocks_in_order() {
 		let synth = FakeSynth::new();
-		let mut vocalizer = Vocalizer::new(synth.clone(), enhanced_ctx());
+		let mut vocalizer = vocalizer(synth.clone(), enhanced_ctx());
 		vocalizer.push_text(
 			SpeechMode::Assistant,
 			"First paragraph for speech.\n\n```rust\nnever_speak();\n```\n\nSecond paragraph.",
@@ -1288,7 +1308,7 @@ mod tests {
 	#[tokio::test]
 	async fn silence_command_is_registered() {
 		let synth = FakeSynth::new();
-		let vocalizer = Arc::new(Mutex::new(Vocalizer::new(synth.clone(), test_ctx())));
+		let vocalizer = Arc::new(Mutex::new(vocalizer(synth.clone(), test_ctx())));
 		let ctx = Ctx::new();
 		ctx.run("cl_voice_silence").expect("no-op without a slot");
 		install(&ctx, Arc::clone(&vocalizer));

@@ -6,6 +6,7 @@
 
 - `audio.rs` exposes the target-independent capture and playback contract.
 - `device.rs` selects the direct CoreAudio, WASAPI, or runtime-loaded PulseAudio/ALSA backend; unsupported targets fail with a typed availability error.
+- `device/virtual_output.rs` (feature `virtual-output`) is an in-process speaker clock with no hardware behind it; `PlaybackStream::start_virtual` runs the same queue, drain, and abort semantics on it for tests and headless hosts.
 - `coordinator.rs` owns microphone exclusion, live-voice TTS suspension, and push-to-talk ducking through idempotent RAII leases.
 
 ## Philosophy
