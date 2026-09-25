@@ -1,50 +1,16 @@
 name: CI
 
+# CI triggers on every pull request and push to a protected branch, whatever
+# it touches. A workflow-level `paths:` filter meant a pull request that
+# changed only unfiltered files (most of docs/) never ran CI, so the required
+# checks never reported and the pull request waited forever. The `changes` job
+# below makes the same path decision instead; when nothing relevant changed
+# the heavy jobs are skipped, not failed, and `CI gate` still reports.
 on:
   push:
     branches: [main, omp2]
-    paths:
-      - ".cargo/**"
-      - ".config/**"
-      - ".github/actions/**"
-      - ".github/workflows/ci.yml"
-      - "about.toml"
-      - "deny.toml"
-      - "justfile"
-      - "LICENSE*"
-      - "THIRD-PARTY-NOTICES.txt"
-      - "crates/**"
-      - "examples/**"
-      - "fixtures/**"
-      - "docs/py/**"
-      - "scripts/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "clippy.toml"
-      - "rust-toolchain.toml"
-      - "rustfmt.toml"
   pull_request:
     branches: [main, omp2]
-    paths:
-      - ".cargo/**"
-      - ".config/**"
-      - ".github/actions/**"
-      - ".github/workflows/ci.yml"
-      - "about.toml"
-      - "deny.toml"
-      - "justfile"
-      - "LICENSE*"
-      - "THIRD-PARTY-NOTICES.txt"
-      - "crates/**"
-      - "examples/**"
-      - "fixtures/**"
-      - "scripts/**"
-      - "docs/py/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "clippy.toml"
-      - "rust-toolchain.toml"
-      - "rustfmt.toml"
   workflow_dispatch:
 
 permissions:
@@ -59,8 +25,74 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  # Decides whether the Rust jobs have anything to check. Cheap and hosted: a
+  # docs-only change never queues a job on the (possibly self-hosted) Mac,
+  # because a job whose `if` is false is skipped before it is assigned a
+  # runner. Anything it cannot decide (a manual run, a new branch, a force
+  # push whose old head is gone) runs everything.
+  changes:
+    name: Detect Rust-relevant changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      # Full history without file contents: enough for `git merge-base` and a
+      # name-only diff, without downloading every blob ever committed.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      - name: Diff against the merge base
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # The paths the workflow-level filter used to list. Shell patterns;
+          # `*` also matches `/`.
+          relevant() {
+            case "$1" in
+              .cargo/* | .config/* | .github/actions/* | .github/workflows/ci.yml | \
+              about.toml | deny.toml | justfile | LICENSE* | THIRD-PARTY-NOTICES.txt | \
+              crates/* | examples/* | fixtures/* | docs/py/* | scripts/* | \
+              Cargo.toml | Cargo.lock | clippy.toml | rust-toolchain.toml | rustfmt.toml)
+                return 0 ;;
+            esac
+            return 1
+          }
+          decide() {
+            echo "rust=$1" >> "$GITHUB_OUTPUT"
+            echo "Rust jobs: $1 ($2)"
+            exit 0
+          }
+          case "$EVENT" in
+            pull_request) base="$PR_BASE" head="$PR_HEAD" ;;
+            push) base="$PUSH_BEFORE" head="$PUSH_AFTER" ;;
+            *) decide true "$EVENT runs everything" ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ]; then
+            decide true "no previous commit to diff against"
+          fi
+          if ! merge_base=$(git merge-base "$base" "$head"); then
+            decide true "no merge base between $base and $head"
+          fi
+          changed=$(git diff --name-only "$merge_base" "$head")
+          while IFS= read -r file; do
+            if [ -n "$file" ] && relevant "$file"; then
+              decide true "$file changed"
+            fi
+          done <<< "$changed"
+          decide false "no Rust-relevant path changed since $merge_base"
+
   format:
     name: Rust format
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -72,6 +104,8 @@ jobs:
 
   runtime_spec:
     name: Runtime symbol and dependency contracts
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -83,6 +117,8 @@ jobs:
 
   licenses:
     name: License policy and release notices
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -119,7 +155,9 @@ jobs:
     # conclusion and can still be a required check in branch protection.
     # The license policy is the same kind of independent question and is not
     # a precondition either; waiting on it held this job back five minutes.
-    needs: format
+    needs: [changes, format]
+    # Also skipped, never queued, when nothing Rust-relevant changed.
+    if: needs.changes.outputs.rust == 'true'
     # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
     # somewhere else. Set it to a JSON label array to send this job to a
     # self-hosted Apple silicon machine, which is the only way to give it more
@@ -248,7 +286,8 @@ jobs:
   # target gate.
   lint_linux:
     name: Lint workspace (Linux)
-    needs: format
+    needs: [changes, format]
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -301,7 +340,8 @@ jobs:
 
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
-    needs: format
+    needs: [changes, format]
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -359,3 +399,44 @@ jobs:
         env:
           TERM: xterm-256color
         run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked
+
+  # The one check branch protection requires. It needs every job above and
+  # always runs, so it reports on every pull request: green when each job
+  # succeeded, or when nothing Rust-relevant changed and each was skipped;
+  # red when any job failed or was cancelled, when `changes` itself did not
+  # succeed, or when a job was skipped although Rust-relevant files changed
+  # (for example because the format job it needs failed). A new job in this
+  # workflow must be added to `needs` here, or the gate will not wait for it.
+  gate:
+    name: CI gate
+    needs: [changes, format, runtime_spec, licenses, rust, lint_linux, p7_linux]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to pass or to be legitimately skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          RUST: ${{ needs.changes.outputs.rust }}
+        run: |
+          set -euo pipefail
+          # Parsed up front so a jq failure fails the gate instead of feeding
+          # the loop nothing, which would pass it.
+          results=$(jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<< "$NEEDS")
+          [ -n "$results" ] || { echo "::error::no needed job results"; exit 1; }
+          failed=0
+          while read -r job result; do
+            case "$job:$result:$RUST" in
+              *:success:*) ok="passed" ;;
+              changes:*) ok="" ;;
+              *:skipped:false) ok="skipped, nothing Rust-relevant changed" ;;
+              *) ok="" ;;
+            esac
+            if [ -n "$ok" ]; then
+              echo "$job: $ok"
+            else
+              echo "::error::$job: $result (Rust-relevant changes: ${RUST:-unknown})"
+              failed=1
+            fi
+          done <<< "$results"
+          exit "$failed"
