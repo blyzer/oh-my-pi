@@ -1,0 +1,62 @@
+---
+source: crates/ai/src/discovery/probe/characterization.rs
+expression: output
+---
+## empty list
+> GET http://127.0.0.1:11434/api/tags [-] 
+(no rows)
+
+## name only
+> GET http://127.0.0.1:11434/api/tags [-] 
+> POST http://127.0.0.1:11434/api/show [application/json] {"model":"named:latest"}
+{"provider":"ollama","route":"ollama/primary","wire_model":"named:latest","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unknown","input_modalities":"unknown","image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"ollama:http://127.0.0.1:11434//api/tags","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## model preferred over name
+> GET http://127.0.0.1:11434/api/tags [-] 
+> POST http://127.0.0.1:11434/api/show [application/json] {"model":"wire:7b"}
+{"provider":"ollama","route":"ollama/primary","wire_model":"wire:7b","aliases":[],"display_name":"Display","declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unknown","input_modalities":"unknown","image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"ollama:http://127.0.0.1:11434//api/tags","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## null model does not fall back to name
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## numeric model
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## blank id
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## missing id fails listing
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## non-object entry
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## missing models key
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## models is null
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## bare array
+> GET http://127.0.0.1:11434/api/tags [-] 
+> POST http://127.0.0.1:11434/api/show [application/json] {"model":"bare"}
+{"provider":"ollama","route":"ollama/primary","wire_model":"bare","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unknown","input_modalities":"unknown","image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"ollama:http://127.0.0.1:11434//api/tags","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## invalid JSON
+> GET http://127.0.0.1:11434/api/tags [-] 
+error: protocol
+
+## duplicate tag rows merge
+> GET http://127.0.0.1:11434/api/tags [-] 
+> POST http://127.0.0.1:11434/api/show [application/json] {"model":"dup"}
+{"provider":"ollama","route":"ollama/primary","wire_model":"dup","aliases":[],"display_name":"Dup","declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unknown","input_modalities":"unknown","image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":4096,"maximum_input_tokens":null,"maximum_output_tokens":4096,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"ollama:http://127.0.0.1:11434//api/tags","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}

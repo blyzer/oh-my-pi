@@ -1072,6 +1072,9 @@ pub enum ProbeError {
 }
 
 #[cfg(test)]
+mod characterization;
+
+#[cfg(test)]
 mod tests {
 	use std::{collections::BTreeMap, sync::Arc};
 
