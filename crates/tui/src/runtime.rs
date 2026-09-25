@@ -449,7 +449,8 @@ pub const fn is_core_chord(chord: Chord) -> bool {
 /// Input has already been routed into the retained tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppEvent {
-	/// Routed input changed the tree; the next [`App::next`] call presents it.
+	/// Routed input changed the tree. The change is already on screen when
+	/// [`App::next`] returns this event.
 	Updated,
 	/// A key no component claimed: it routed through the tree untouched —
 	/// pending damage from animations or other components never masks it —
@@ -678,7 +679,10 @@ impl App {
 						let _ = self.terminal.copy_to_clipboard(&text)?;
 						continue;
 					},
-					Routed::Event(event) => return Ok(Some(event)),
+					Routed::Event(event) => {
+						self.paint_routed_damage()?;
+						return Ok(Some(event));
+					},
 					Routed::Stop => return Ok(None),
 				}
 			}
@@ -712,6 +716,7 @@ impl App {
 						&& let ClipboardReadOutcome::Payload(clipboard) = outcome
 						&& let Some(event) = self.deliver_clipboard(clipboard, raw)
 					{
+						self.paint_routed_damage()?;
 						return Ok(Some(event));
 					}
 				},
@@ -740,6 +745,7 @@ impl App {
 							if let Some(pasted) = self.terminal.take_paste()
 								&& let Some(event) = self.deliver_pasted(pasted)
 							{
+								self.paint_routed_damage()?;
 								return Ok(Some(event));
 							}
 							continue;
@@ -751,7 +757,10 @@ impl App {
 								Routed::Copy(text) => {
 									let _ = self.terminal.copy_to_clipboard(&text)?;
 								},
-								Routed::Event(event) => return Ok(Some(event)),
+								Routed::Event(event) => {
+									self.paint_routed_damage()?;
+									return Ok(Some(event));
+								},
 								Routed::Stop => return Ok(None),
 							}
 						}
@@ -912,6 +921,17 @@ impl App {
 		};
 		self.last_frame_cost = started.elapsed();
 		self.last_stats = result?;
+		Ok(())
+	}
+
+	/// Flushes damage caused by an input route before surfacing the route's
+	/// application event. Eventful editors (`Changed`, `Filtered`, submit-side
+	/// mutations) can otherwise return to the host with the edited tree still
+	/// waiting for the next `App::next` turn to paint.
+	fn paint_routed_damage(&mut self) -> io::Result<()> {
+		if self.ui.has_damage() {
+			self.paint(None)?;
+		}
 		Ok(())
 	}
 
@@ -1297,6 +1317,121 @@ mod tests {
 			position(b"\x1b[3J").is_none(),
 			"an alt-first start and clean release never touch main history"
 		);
+	}
+
+	/// Flag routing the re-executed test binary into the routed-paint helper.
+	#[cfg(unix)]
+	const ROUTED_PAINT_HELPER_FLAG: &str = "OMP_TUI_TEST_ROUTED_PAINT_HELPER";
+
+	/// Child half of `routed_edit_is_painted_before_its_event_returns`.
+	#[cfg(unix)]
+	#[test]
+	fn routed_paint_pty_helper() {
+		use super::{AppEvent, AppOptions};
+		use crate::Ui;
+
+		if env::var_os(ROUTED_PAINT_HELPER_FLAG).is_none() {
+			return;
+		}
+		tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("helper runtime builds")
+			.block_on(async {
+				let mut app = AppOptions::new()
+					.start(|env| {
+						let mut ui = Ui::from_markup(
+							"<select id=pick h=4><option value=a label=alpha/><option value=b \
+							 label=beta/><option value=c label=gamma/></select>",
+							env.viewport.width,
+							env.ctx,
+						)
+						.unwrap();
+						ui.focus_first();
+						ui
+					})
+					.await
+					.expect("helper app starts on the override device");
+				let deadline = Instant::now() + Duration::from_secs(10);
+				loop {
+					let remaining = deadline.saturating_duration_since(Instant::now());
+					let event = tokio::time::timeout(remaining, app.next())
+						.await
+						.expect("the arrow key arrives")
+						.expect("terminal stays readable");
+					if matches!(event, Some(AppEvent::Highlighted { .. })) {
+						break;
+					}
+				}
+				// The host is handed the event only after the moved highlight is
+				// painted, never with the edited tree waiting for the next turn.
+				assert!(!app.ui().has_damage(), "the edit is on screen before its event returns");
+				drop(app);
+			});
+	}
+
+	/// A key that both edits the tree and surfaces an event (here a select's
+	/// `Highlighted`) paints before `App::next` hands the host that event, so
+	/// the host's work on it never delays what the user sees.
+	#[cfg(unix)]
+	#[test]
+	fn routed_edit_is_painted_before_its_event_returns() {
+		use std::io::{Read as _, Write as _};
+
+		use nix::fcntl::{FcntlArg, OFlag};
+
+		let winsize = nix::pty::Winsize { ws_row: 12, ws_col: 40, ws_xpixel: 0, ws_ypixel: 0 };
+		let pty = nix::pty::openpty(Some(&winsize), None).expect("openpty succeeds");
+		let device = nix::unistd::ttyname(&pty.slave).expect("the pty slave has a device path");
+		let mut master = fs::File::from(pty.master);
+		nix::fcntl::fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+			.expect("master goes nonblocking");
+
+		let exe = env::current_exe().expect("test binary path");
+		let mut child = process::Command::new(exe)
+			.args(["runtime::tests::routed_paint_pty_helper", "--exact", "--test-threads=1"])
+			.env(ROUTED_PAINT_HELPER_FLAG, "1")
+			.env(TTY_OVERRIDE, &device)
+			.stdout(process::Stdio::null())
+			.stderr(process::Stdio::null())
+			.spawn()
+			.expect("helper process spawns");
+
+		let mut buffer = [0_u8; 4096];
+		let mut stream = Vec::new();
+		let mut answered = false;
+		let mut typed_at: Option<Instant> = None;
+		let deadline = Instant::now() + Duration::from_secs(20);
+		let status = loop {
+			while let Ok(read) = master.read(&mut buffer) {
+				if read == 0 {
+					break;
+				}
+				stream.extend_from_slice(&buffer[..read]);
+			}
+			// Answer the startup device-attributes probe so the helper does not
+			// sit out its timeout, then keep pressing Down until it has seen
+			// the event: a key sent while the probe owns the input is eaten.
+			if !answered && stream.windows(3).any(|window| window == b"\x1b[c") {
+				master
+					.write_all(b"\x1b[?62c")
+					.expect("probe answer reaches the pty");
+				answered = true;
+			}
+			if !stream.is_empty()
+				&& typed_at.is_none_or(|at| at.elapsed() > Duration::from_millis(300))
+			{
+				master.write_all(b"\x1b[B").expect("key reaches the pty");
+				typed_at = Some(Instant::now());
+			}
+			if let Some(status) = child.try_wait().expect("helper status readable") {
+				break status;
+			}
+			assert!(Instant::now() < deadline, "helper finishes in time");
+			thread::sleep(Duration::from_millis(20));
+		};
+		assert!(typed_at.is_some(), "the key was sent before the helper exited");
+		assert!(status.success(), "the helper saw the edit painted before its event");
 	}
 
 	#[test]
