@@ -122,6 +122,7 @@ fn render_done(
 	expanded: bool,
 	ui: &UiContext,
 ) -> Component {
+	let spilled = view.result_spilled();
 	let result = typed_result::<omp_tools::read::Payload>(view).unwrap_or(Value::Null);
 	let content = result
 		.get("parts")
@@ -145,6 +146,7 @@ fn render_done(
 			.join("\n");
 		(Some(number_preview(visible.as_str(), content.start)), total - shown)
 	});
+	let spilled_note = (spilled && preview.is_none()).then(super::spilled_result_line);
 	let more = sf!("… {hidden} more line{} ⟨Ctrl+O: Expand⟩", if hidden == 1 { "" } else { "s" });
 	let src = content.and_then(|content| content.resolved);
 	let images = result_images(&result, target, ui);
@@ -159,6 +161,7 @@ fn render_done(
 			if let Some(question) = question {
 				<row gap=1 pad-x=1><text fg=muted>{"Question:"}</text><text fg=accent wrap=word>{question}</text></row>
 			}
+			if let Some(note) = spilled_note { <row pad-x=1>{note}</row> }
 			if let Some(preview) = preview { <pre wrap=word path={target}>{preview}</pre> }
 			if hidden > 0 { <text fg=muted pad-x=1>{more}</text> }
 			for image in images { {image} }
@@ -366,9 +369,11 @@ fn diag_text(node: Option<&Node>) -> Option<Str> {
 		})
 	})?;
 	let value: Value = serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.into()));
+	// An empty diag body is no message: fall through to the card's default.
 	value
 		.as_str()
 		.or_else(|| string_at(&value, "message"))
+		.filter(|text| !text.trim().is_empty())
 		.map(Str::new)
 }
 

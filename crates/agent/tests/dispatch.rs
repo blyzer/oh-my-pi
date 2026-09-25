@@ -622,6 +622,85 @@ impl ExternalToolExecutor for ScopedAbortExternal {
 	}
 }
 
+/// An environment-hosted unit that, like envd, stores its whole verdict in
+/// the session CAS and names it as the source artifact.
+struct ArtifactExternal {
+	text: &'static str,
+}
+
+impl ExternalToolExecutor for ArtifactExternal {
+	fn invoke(&self, request: ExternalDispatchRequest) -> ExternalDispatchStream {
+		let outcome = CallOutcome::<serde_json::Value, serde_json::Value>::Ok(serde_json::json!({
+			"text": self.text
+		}));
+		let bytes = serde_json::to_vec(&outcome).expect("outcome serializes");
+		let artifact = request.blobs.put(&bytes).expect("source artifact stores");
+		Box::pin(futures::stream::iter([ExternalDispatchEvent::Done {
+			outcome,
+			parts: vec![Part::Text { text: Str::new(self.text) }],
+			is_error: false,
+			source_artifact: Some(artifact),
+		}]))
+	}
+}
+
+/// The journaled `tool.result@1` payload of the only settled call.
+fn tool_result_data(session: &omp_session::Session) -> serde_json::Value {
+	let journal = std::fs::read_to_string(session.journal_path()).expect("journal reads");
+	let line = journal
+		.lines()
+		.skip_while(|line| *line != "event: tool.result@1")
+		.find(|line| line.starts_with("data: "))
+		.expect("tool.result@1 data");
+	serde_json::from_str(&line["data: ".len()..]).expect("tool.result@1 json")
+}
+
+#[tokio::test]
+async fn environment_source_artifact_keeps_small_outcomes_inline() {
+	for (text, inline_limit, inline) in
+		[("small result", 64 * 1024, true), ("a result longer than the inline limit", 16, false)]
+	{
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let tools = worker_registry();
+		let identity = tools.resolved_identity("worker").expect("worker identity");
+		let dispatcher =
+			Dispatcher::new(
+				Arc::clone(&tools),
+				DispatchPolicy::new(BlobStore::open(directory.path()).expect("blob store"))
+					.with_limits(inline_limit, 1024, Duration::from_secs(5)),
+			)
+			.with_external_executor(Arc::new(ArtifactExternal { text }));
+		let mut session = session(&directory.path().join("artifact.oms"));
+		let (entry, args) = call(&mut session, &identity, "artifact");
+		let cancellation = CancelTree::new().begin_turn();
+		let report = dispatcher
+			.dispatch(
+				&mut session,
+				request(
+					entry,
+					identity,
+					args,
+					ToolCancellation::ReadOnly(cancellation.read_only_tool()),
+					false,
+				),
+			)
+			.await
+			.expect("external dispatch completes");
+		assert!(!report.is_error);
+
+		let data = tool_result_data(&session);
+		let source = data["source_blob"].clone();
+		assert!(!source.is_null(), "the source artifact is recorded either way: {data}");
+		if inline {
+			// Cards decode `{kind, value}` straight from the element.
+			assert_eq!(data["outcome"]["kind"], "ok", "{data}");
+			assert_eq!(data["outcome"]["value"]["text"], text, "{data}");
+		} else {
+			assert_eq!(data["outcome"]["storage"], "spilled", "{data}");
+		}
+	}
+}
+
 fn worker_registry() -> Arc<omp_tool::Registry> {
 	let mut tools = omp_tool::Registry::new();
 	tools

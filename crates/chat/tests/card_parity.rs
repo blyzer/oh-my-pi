@@ -434,6 +434,54 @@ fn glob_card_distinguishes_empty_from_incomplete_and_surfaces_warnings() {
 	assert!(!limited.contains("2 files"), "{limited}");
 }
 
+/// A settled `<result>` whose outcome dispatch moved to the CAS
+/// (`CallOutcomeDetails::Spilled`): the element carries no payload.
+fn spilled_result_node() -> Node {
+	let mut result = node(KnownTag::Result, "");
+	result.props.push((
+		PropId::Outcome.into(),
+		DomValue::Json(
+			serde_json::value::to_raw_value(&json!({
+				"storage": "spilled",
+				"blob": {
+					"hash": "cd7c5157e6897e2e3613a414ac17f775b8f91324e5f3ccc55ac160b791f9b067",
+					"media_type": "application/json",
+					"byte_len": 90_000
+				},
+				"byte_len": 90_000
+			}))
+			.expect("spilled outcome JSON"),
+		),
+	));
+	result
+}
+
+#[test]
+fn spilled_search_results_never_read_as_empty() {
+	let result = spilled_result_node();
+	for (tool, args, empty) in [
+		("grep", r#"{"pattern":"input","path":"packages/tui/src"}"#, "No matches found"),
+		("glob", r#"{"path":"packages/**/*.ts"}"#, "No files found"),
+	] {
+		let input = node(KnownTag::Input, args);
+		let text = render(tool, &input, Some(&result), None, CardStatus::Done, false);
+		assert!(text.contains("Result too large to show inline"), "{tool}: {text}");
+		assert!(!text.contains(empty), "{tool}: {text}");
+		assert!(!text.contains("0 matches") && !text.contains("0 files"), "{tool}: {text}");
+	}
+	let input = node(KnownTag::Input, r#"{"path":"big.log"}"#);
+	let text = render("read", &input, Some(&result), None, CardStatus::Done, false);
+	assert!(text.contains("Result too large to show inline"), "{text}");
+}
+
+#[test]
+fn read_failure_with_an_empty_diag_still_says_it_failed() {
+	let input = node(KnownTag::Input, r#"{"path":"skill://investigate-first"}"#);
+	let diag = node(KnownTag::Diag, "");
+	let text = render("read", &input, None, Some(&diag), CardStatus::Failed, false);
+	assert!(text.contains("read failed"), "{text}");
+}
+
 #[test]
 fn read_card_caps_the_preview_when_collapsed() {
 	let preview = (1..=20)

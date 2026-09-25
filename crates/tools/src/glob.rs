@@ -467,8 +467,18 @@ fn payload_diags(payload: &Payload) -> impl Iterator<Item = Diag> {
 		)
 	});
 	let limit = payload.result_limit_reached.map(|limit| {
-		let diag = Diag::info(DiagKind::LimitReached, sf!("{limit} result limit reached"))
-			.continuation(sf!("limit={}", limit.saturating_mul(2)));
+		// Offer a larger limit only while one exists: past `MAX_LIMIT` the
+		// same capped list would come back, so narrowing is the way on.
+		let next = limit.saturating_mul(2).min(MAX_LIMIT);
+		let diag = if next > limit {
+			Diag::info(DiagKind::LimitReached, sf!("{limit} result limit reached"))
+				.continuation(sf!("limit={next}"))
+		} else {
+			Diag::info(
+				DiagKind::LimitReached,
+				sf!("{limit} result limit reached; narrow the path or pattern"),
+			)
+		};
 		let omitted = payload
 			.partial_match_count
 			.saturating_sub(u64::try_from(payload.matches.len()).unwrap_or(u64::MAX));
@@ -631,6 +641,28 @@ mod tests {
 		assert_eq!(diags[0].native_kind(), Some(DiagKind::LimitReached));
 		assert_eq!(diags[0].continuation.as_deref(), Some("limit=6"));
 		assert_eq!(diags[0].omitted, Some(omp_tool::Omitted { count: 1, unit: Unit::Files }));
+	}
+
+	#[test]
+	fn limit_continuation_never_exceeds_the_cap() {
+		let continuation = |limit: u64| {
+			let payload = Payload {
+				matches:              Vec::new(),
+				missing_paths:        Vec::new(),
+				timed_out:            false,
+				truncated:            true,
+				result_limit_reached: Some(limit),
+				partial_match_count:  limit + 1,
+				timeout_ms:           DEFAULT_TIMEOUT_MS,
+			};
+			let diag = payload_diags(&payload).next().expect("limit diag");
+			(diag.continuation.clone(), diag.text.clone())
+		};
+		assert_eq!(continuation(3).0.as_deref(), Some("limit=6"));
+		assert_eq!(continuation(150).0.as_deref(), Some("limit=200"));
+		let (at_cap, message) = continuation(MAX_LIMIT);
+		assert_eq!(at_cap, None, "a larger limit returns the same capped list");
+		assert!(message.contains("narrow"), "{message}");
 	}
 
 	#[test]

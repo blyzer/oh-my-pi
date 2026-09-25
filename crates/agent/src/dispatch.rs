@@ -2752,7 +2752,11 @@ impl Committer {
 			lines_clamped: bounded.lines_clamped,
 			visibility: bounded.visibility,
 			visibility_verdict,
-			force_spill: source_artifact.is_some(),
+			// A source artifact records where the whole verdict lives; it is no
+			// reason to move a small outcome off the element. Size and the
+			// `tool_result` hook still decide the spill in `commit_terminal`,
+			// which reuses this artifact when the bytes match.
+			force_spill: false,
 			source_artifact,
 		})
 	}
