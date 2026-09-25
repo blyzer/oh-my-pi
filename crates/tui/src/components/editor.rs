@@ -1237,12 +1237,10 @@ impl Component for EditInput {
 			self.spelling.request_completion(text, range.clone());
 			ghost = self.spelling.completion(text, &range);
 		}
-		// Usage hints are separate words, spaced from typed text; a word
-		// completion is the rest of the word under the caret, painted flush.
-		let (hint, spaced) = match self.editor.inline_hint() {
-			Some(hint) => (Some(hint), true),
-			None => (ghost, false),
-		};
+		// Ghost text is the literal continuation of the typed text, painted
+		// flush: the rest of a partially typed word starts in the caret cell,
+		// and a usage hint that is a separate word carries its own separator.
+		let hint = self.editor.inline_hint().or(ghost);
 		if spelling_changed {
 			pc.wake(self.slot, pc.now);
 		} else if self.spelling.awaiting() {
@@ -1588,10 +1586,7 @@ impl Component for EditInput {
 			if let Some(hint) = &hint
 				&& cursor == Some(content.text.len())
 			{
-				let gap = u16::from(spaced && !content.text.ends_with(char::is_whitespace));
-				let hint_x = x
-					.saturating_add(cell_width(content.text))
-					.saturating_add(gap);
+				let hint_x = x.saturating_add(cell_width(content.text));
 				let hint_width = rect
 					.x
 					.saturating_add(layout.side_chrome)
@@ -3218,31 +3213,63 @@ mod tests {
 
 	#[test]
 	fn usage_hint_is_spaced_from_a_word_and_flush_after_typed_space() {
-		let command = Command::new("security", "Audit", &[]).with_hint("plan|import|compare");
+		// No space typed: the hint carries the separating cell.
+		let (text, caret, start) = slash_hint_row("/security");
+		assert!(text.starts_with("/security plan|import|compare"), "{text:?}");
+		assert_eq!(caret, start + cell_width("/security"));
+		// The typed space is visible and the caret moves past it; the hint
+		// does not add a second gap.
+		let (text, caret, start) = slash_hint_row("/security ");
+		assert!(text.starts_with("/security plan|import|compare"), "{text:?}");
+		assert_eq!(caret, start + cell_width("/security "));
+	}
+
+	#[test]
+	fn argument_hint_is_flush_mid_word_and_spaced_after_the_word() {
+		// A partially typed argument: the ghost finishes that word in the
+		// caret cell, then its usage.
+		let (text, caret, start) = slash_hint_row("/security im");
+		assert!(text.starts_with("/security import <path>"), "{text:?}");
+		assert_eq!(caret, start + cell_width("/security im"));
+		// The complete argument word: its usage is one cell after it.
+		let (text, caret, start) = slash_hint_row("/security import");
+		assert!(text.starts_with("/security import <path>"), "{text:?}");
+		assert_eq!(caret, start + cell_width("/security import"));
+		// A typed trailing space is the separator; no second gap.
+		let (text, caret, start) = slash_hint_row("/security import ");
+		assert!(text.starts_with("/security import <path>"), "{text:?}");
+		assert_eq!(caret, start + cell_width("/security import "));
+	}
+
+	/// Paints `typed` into a focused slash-command composer and returns the
+	/// first row's text from the typed text on, the caret column, and the
+	/// column the typed text starts at.
+	fn slash_hint_row(typed: &str) -> (String, u16, u16) {
+		let command = Command::new("security", "Audit", &[])
+			.with_args(&[
+				("plan", "Draft a scan plan", ""),
+				("import", "Import an external report", "<path>"),
+			])
+			.with_hint("plan|import|compare");
 		let mut input = EditInput::new();
 		input.set_spelling_features(assist_features(false, false));
 		input.set_completion(Box::new(SlashCommands::new(vec![command].into_boxed_slice())));
 		let mut ui = Ui::from_root(input, 60, UiContext::default());
 		ui.focus_first();
+		for ch in typed.chars() {
+			ui.handle_key(if ch == ' ' { Key::Space } else { Key::Char(ch) });
+		}
 		let mut renderer = Renderer::new(Vec::new());
-		let mut paint = |ui: &mut Ui, typed: &str| {
-			for ch in typed.chars() {
-				ui.handle_key(if ch == ' ' { Key::Space } else { Key::Char(ch) });
-			}
-			ui.present(&mut renderer, 12).unwrap();
-			let row = frame_row_text(ui.frame(), 0);
-			let at = row
-				.find("/security plan|import|compare")
-				.unwrap_or_else(|| panic!("hint one cell after the text: {row:?}"));
-			(ui.frame().cursor(), cell_width(&row[..at]))
-		};
-		// No space typed: the painter supplies the separating cell.
-		let (caret, start) = paint(&mut ui, "/security");
-		assert_eq!(caret, Some((start + cell_width("/security"), 0)));
-		// The typed space is visible and the caret moves past it; the hint
-		// does not add a second gap.
-		let (caret, start) = paint(&mut ui, " ");
-		assert_eq!(caret, Some((start + cell_width("/security "), 0)));
+		ui.present(&mut renderer, 12).unwrap();
+		let text = frame_row_text(ui.frame(), 0);
+		let start = text
+			.find("/security")
+			.unwrap_or_else(|| panic!("typed text on the first row: {text:?}"));
+		let (caret, _) = ui
+			.frame()
+			.cursor()
+			.expect("focused composer places the caret");
+		(text[start..].to_owned(), caret, cell_width(&text[..start]))
 	}
 
 	#[test]

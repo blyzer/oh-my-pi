@@ -503,6 +503,18 @@ impl Slots {
 		}
 	}
 
+	/// Whether history rows are still staged for delivery: a resize replay
+	/// or repair in progress, or finalized rows queued behind it.
+	///
+	/// A width resize stages its replay as a transaction of its own, so a
+	/// block finalized in the same paint waits for the next [`Slots::plan`].
+	/// Presenters keep delivering while this holds (see
+	/// [`crate::Renderer::present_slots`]); a finalized block occupies no live
+	/// viewport rows, so leaving its rows staged would show it nowhere.
+	pub fn has_undelivered_rows(&self) -> bool {
+		self.replay.is_some() || self.repair.is_some() || !self.normal_rows().is_empty()
+	}
+
 	/// Canonical logical history, in block and row order.
 	pub fn logical_history(&self) -> impl Iterator<Item = &Row> {
 		self.history.iter()
