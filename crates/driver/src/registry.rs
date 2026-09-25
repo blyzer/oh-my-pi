@@ -329,11 +329,9 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 	let bundled = snapshot::Catalog::try_embedded()
 		.map_err(RegistryError::Catalog)?
 		.clone();
-	let loaded = if data_dir.exists() {
-		crate::discovery::models::load_or_import_legacy(data_dir).map_err(catalog_composition)?
-	} else {
-		None
-	};
+	let loaded = crate::discovery::models::ModelsConfigLocation::resolve(data_dir)
+		.and_then(|location| crate::discovery::models::load_or_import_legacy(&location))
+		.map_err(catalog_composition)?;
 	let user_overlay = loaded
 		.as_ref()
 		.map(|loaded| crate::discovery::models::lower_user_overlay(&loaded.config))
@@ -436,6 +434,36 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 	Ok(Arc::new(catalog))
 }
 
+/// Carries literal v1 `apiKey`s into the encrypted store once. A failure is
+/// logged, never fatal: the owner can still `/login`.
+fn import_legacy_api_keys(data_dir: &Path, control: &omp_ai::auth::AuthControlHandle) {
+	use crate::discovery::models::{LegacyApiKeyImport, ModelsConfigLocation};
+
+	let report = ModelsConfigLocation::resolve(data_dir)
+		.and_then(|location| crate::discovery::models::import_legacy_api_keys(&location, control));
+	match report {
+		Ok(report) => {
+			for entry in report {
+				match entry {
+					LegacyApiKeyImport::Stored { provider } => {
+						tracing::info!(%provider, "imported the v1 models.yml apiKey into the credential store");
+					},
+					LegacyApiKeyImport::AlreadyLoggedIn { provider } => {
+						tracing::info!(%provider, "kept the existing login over the v1 models.yml apiKey");
+					},
+					LegacyApiKeyImport::NeedsEnvironment { provider } => {
+						tracing::warn!(
+							%provider,
+							"the v1 models.yml apiKey names a variable or command; set OMP_<PROVIDER>_API_KEY or /login"
+						);
+					},
+				}
+			}
+		},
+		Err(error) => tracing::warn!(%error, "could not import v1 models.yml apiKeys"),
+	}
+}
+
 fn catalog_composition(source: impl std::error::Error + Send + Sync + 'static) -> RegistryError {
 	RegistryError::CatalogComposition(Box::new(source))
 }
@@ -449,8 +477,9 @@ async fn refresh_model_discovery_cache(
 		ProviderLifecycle,
 	};
 
-	let loaded =
-		crate::discovery::models::load_or_import_legacy(data_dir).map_err(catalog_composition)?;
+	let loaded = crate::discovery::models::ModelsConfigLocation::resolve(data_dir)
+		.and_then(|location| crate::discovery::models::load_or_import_legacy(&location))
+		.map_err(catalog_composition)?;
 	let probes = crate::discovery::models::discovery_probes(
 		loaded.as_ref().map(|loaded| &loaded.config),
 		&catalog,
@@ -1048,6 +1077,7 @@ async fn production_assembly_with_catalog(
 	.with_affinity_resolver(CredentialAffinityResolver::new(
 		Hash32::sum(placeholder_affinity_key().as_bytes()).into_bytes(),
 	));
+	import_legacy_api_keys(data_dir, &auth_manager.control_handle());
 	let exposed_auth_manager = auth_manager.clone();
 	usage_fetchers.install_builtins([
 		Arc::new(AlibabaTokenPlanUsageFetcher::new(oauth_http.clone()))
