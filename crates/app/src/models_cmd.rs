@@ -82,8 +82,10 @@ async fn refresh() -> miette::Result<()> {
 		.try_into()
 		.map_err(|_| miette!("system clock exceeds discovery timestamp range"))?;
 	store.prune_expired(now_ms).into_diagnostic()?;
+	let location =
+		omp_driver::discovery::models::ModelsConfigLocation::resolve(&data_dir).into_diagnostic()?;
 	let loaded_config =
-		omp_driver::discovery::models::load_or_import_legacy(&data_dir).into_diagnostic()?;
+		omp_driver::discovery::models::load_or_import_legacy(&location).into_diagnostic()?;
 	let mut refreshed = refresh_local_providers(
 		&store,
 		catalog,
