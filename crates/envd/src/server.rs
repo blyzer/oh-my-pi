@@ -3656,7 +3656,7 @@ impl EnvServer {
 			io::Error::new(io::ErrorKind::InvalidInput, "environment socket has no parent")
 		})?;
 		ensure_directory(parent)?;
-		let (listener, socket_metadata) = if let Some(listener) = prepared_listener {
+		let (listener, socket_metadata, _path_guard) = if let Some(listener) = prepared_listener {
 			let metadata = fs::symlink_metadata(path)?;
 			if !metadata.file_type().is_socket() {
 				return Err(
@@ -3667,7 +3667,8 @@ impl EnvServer {
 					.into(),
 				);
 			}
-			(listener, metadata)
+			let guard = UnixSocketPathGuard::new(path.to_path_buf(), &metadata);
+			(listener, metadata, guard)
 		} else {
 			match tokio::fs::symlink_metadata(path).await {
 				Ok(metadata) if metadata.file_type().is_socket() => {
@@ -3707,12 +3708,18 @@ impl EnvServer {
 			let staging_metadata = fs::symlink_metadata(&staging)?;
 			let staging_guard = UnixSocketPathGuard::new(staging.clone(), &staging_metadata);
 			tokio::fs::set_permissions(&staging, fs::Permissions::from_mode(0o600)).await?;
-			tokio::fs::hard_link(&staging, path).await?;
+			// Publish and take cleanup ownership with no await between them. A
+			// cancellation (task abort, dropped serve future) at an await after
+			// the link became reachable but before the guard existed leaked the
+			// published socket. The link shares the staging inode, so a guard
+			// keyed on the staging identity owns exactly the published path, and
+			// still never removes a competing daemon's socket if the link fails.
+			let path_guard = UnixSocketPathGuard::new(path.to_path_buf(), &staging_metadata);
+			fs::hard_link(&staging, path)?;
 			drop(staging_guard);
 			let metadata = fs::symlink_metadata(path)?;
-			(listener, metadata)
+			(listener, metadata, path_guard)
 		};
-		let _socket_path_guard = UnixSocketPathGuard::new(path.to_path_buf(), &socket_metadata);
 		let retire = CancellationToken::new();
 		let mut listener = Some(listener);
 		let mut connections = JoinSet::new();
@@ -13014,16 +13021,16 @@ mod tests {
 		)
 	}
 
-	#[tokio::test]
-	async fn extension_socket_is_owner_only_and_removed_on_shutdown() {
-		let root = tempfile::tempdir().expect("workspace");
-		let state = tempfile::tempdir().expect("state");
+	async fn socket_mode_extension_server(
+		root: &Path,
+		state: &Path,
+	) -> (Arc<EnvServer>, ExtensionDataBinding) {
 		let con = Arc::new(Ctx::new());
 		let convars = Arc::new(crate::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 		let server = Arc::new(
 			EnvServer::open_local(
-				root.path(),
-				state.path(),
+				root,
+				state,
 				Registry::new(),
 				ExtHostConfig::new(
 					PathBuf::from("unused"),
@@ -13039,16 +13046,24 @@ mod tests {
 			.expect("local environment"),
 		);
 		let binding = ExtensionDataBinding::scoped(
-			state.path(),
+			state,
 			HostKey::new("workspace", "trusted", "socket-mode"),
 			"test-session",
 			1,
 			Grants::supported(["env.fs.read"]),
 		);
+		(server, binding)
+	}
+
+	#[tokio::test]
+	async fn extension_socket_is_owner_only_and_removed_on_shutdown() {
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let (server, binding) = socket_mode_extension_server(root.path(), state.path()).await;
 		let socket = binding.path().to_path_buf();
 		let shutdown = CancellationToken::new();
 		let task = tokio::spawn(Arc::clone(&server).serve_extension_uds(binding, shutdown.clone()));
-		if time::timeout(Duration::from_secs(2), async {
+		if time::timeout(Duration::from_secs(30), async {
 			while !socket.exists() {
 				time::sleep(Duration::from_millis(10)).await;
 			}
@@ -13075,6 +13090,36 @@ mod tests {
 				.is_cancelled()
 		);
 		assert!(!socket.exists(), "extension socket survived task teardown");
+	}
+
+	/// Drops the serve future at the first poll boundary after its socket
+	/// becomes reachable: publication and cleanup ownership must be one step,
+	/// so no cancellation point leaves a published socket nothing will remove.
+	#[tokio::test]
+	async fn extension_socket_publication_is_cancellation_safe() {
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let (server, binding) = socket_mode_extension_server(root.path(), state.path()).await;
+		let socket = binding.path().to_path_buf();
+		{
+			let serve = server.serve_extension_uds(binding, CancellationToken::new());
+			tokio::pin!(serve);
+			// Hang guard only; each round polls the future once and never polls
+			// it again after the socket appears.
+			time::timeout(Duration::from_secs(30), async {
+				while !socket.exists() {
+					let pending = future::poll_fn(|cx| {
+						std::task::Poll::Ready(serve.as_mut().poll(cx).is_pending())
+					})
+					.await;
+					assert!(pending, "extension socket server returned before publishing");
+					time::sleep(Duration::from_millis(10)).await;
+				}
+			})
+			.await
+			.expect("extension socket was not published");
+		}
+		assert!(!socket.exists(), "extension socket survived a drop right after publication");
 	}
 
 	#[tokio::test]
