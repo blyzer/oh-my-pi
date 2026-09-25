@@ -515,6 +515,7 @@ A focusable choice list with optional filtering, multiple selection, previews, c
 - **Filtering:** A filterable single select types-to-filter directly — no `/` mode: printable keys, paste, `Backspace`, `Ctrl+U`, and `Ctrl+W` edit the query (shown with the hardware caret), matches are fuzzy-ranked best-first, `↑`/`↓` wrap, and `Esc` clears the query before bubbling `Cancel`. Multi selects keep the `/`-armed search so `Space` still toggles. `filter="text"` seeds the initial query.
 - **Events:** With an `id`, cursor motion surfaces `UiEvent::Highlighted`, activation (Enter or click) `UiEvent::Changed`, and query edits `UiEvent::Filtered` — hosts drive detail panes from these without touching the widget.
 - **Value:** Single selects export a string or `null`; `multi` exports an array.
+- **Host control:** Hosts that keep their own selection identity (a list rebuilt for a new scope, a roster replaced while open) drive a built `Select` through `Ui::with_component_mut`: `highlight_value` re-seats the cursor on a value when it is visible under the live query, `highlighted_value` reads the value under the cursor, and `set_query` replaces the query with one re-rank — cheaper than seeding `filter="text"` on a large catalog, which ranks once per appended option. Hosts that intercept keys before the tree call `Ui::clear_hover` so every keystroke clears the pointer band.
 
 ```rust
 # use omp_tui::dom;

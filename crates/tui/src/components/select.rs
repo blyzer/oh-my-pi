@@ -231,6 +231,50 @@ impl Select {
 		usize::from(self.state.scroll)
 	}
 
+	/// Value of the option under the cursor; `None` when no option matches
+	/// the live query. Hosts that keep their own selection identity read it
+	/// back after rebuilding or re-focusing the list.
+	#[must_use]
+	pub fn highlighted_value(&self) -> Option<Str> {
+		self.cursor_value()
+	}
+
+	/// Moves the cursor onto the visible option whose value is `value`; the
+	/// scroll window follows at the next placement. Returns whether such an
+	/// option is visible under the live query — hosts use this to keep a
+	/// selection by identity across a replaced option set.
+	pub fn highlight_value(&mut self, value: &str) -> bool {
+		let options = &self.state.options;
+		let Some(position) = self.state.visible.iter().position(|&index| {
+			let option = &options[usize::from(index)];
+			!option.custom && option.value == value
+		}) else {
+			return false;
+		};
+		self.state.cursor = position as u16;
+		true
+	}
+
+	/// The live filter query.
+	#[must_use]
+	pub fn query(&self) -> &str {
+		&self.state.filter_q
+	}
+
+	/// Replaces the filter query with one re-rank, returning the cursor to
+	/// the best match. Unlike seeding `filter="text"` before options are
+	/// appended, this ranks a built catalog once instead of once per option.
+	pub fn set_query(&mut self, query: &str) {
+		if self.state.filter_q == query {
+			return;
+		}
+		self.state.filter_q.clear();
+		self.state.filter_q.push_str(query);
+		self.state.refilter();
+		self.state.cursor = 0;
+		self.state.scroll = 0;
+	}
+
 	/// Sets one select property.
 	pub fn with(mut self, prop: Prop, value: impl Into<PropValue>) -> Self {
 		self.props.set(prop, value);
@@ -1436,6 +1480,55 @@ mod tests {
 		select.value(&mut values);
 		assert_eq!(values["pick"], serde_json::json!("2"));
 		assert_eq!(select.key(&mut event_ctx(&ctx), Key::Down), Flow::Skip);
+	}
+
+	/// Hosts keep a selection by identity: the cursor lands on a value only
+	/// while it is visible under the live query, and `set_query` re-ranks a
+	/// built catalog once with the cursor on the best match.
+	#[test]
+	fn highlight_value_and_set_query_keep_identity_under_the_query() {
+		let mut select = Select::new()
+			.with(Prop::Id, "pick")
+			.with(Prop::Filter, true)
+			.option(
+				SelectOption::new()
+					.label("alpha one")
+					.with(Prop::Value, "a1"),
+			)
+			.option(
+				SelectOption::new()
+					.label("beta two")
+					.with(Prop::Value, "b2"),
+			)
+			.option(
+				SelectOption::new()
+					.label("alpha three")
+					.with(Prop::Value, "a3"),
+			);
+		assert_eq!(select.highlighted_value().as_deref(), Some("a1"));
+		assert!(select.highlight_value("a3"));
+		assert_eq!(select.highlighted_value().as_deref(), Some("a3"));
+		assert!(!select.highlight_value("missing"), "unknown values leave the cursor");
+		assert_eq!(select.highlighted_value().as_deref(), Some("a3"));
+
+		select.set_query("beta");
+		assert_eq!(select.query(), "beta");
+		assert_eq!(select.visible_len(), 1);
+		assert_eq!(
+			select.highlighted_value().as_deref(),
+			Some("b2"),
+			"cursor rests on the best match"
+		);
+		assert!(!select.highlight_value("a3"), "a filtered-out value is not highlightable");
+
+		select.set_query("");
+		assert_eq!(select.visible_len(), 3);
+		assert!(select.highlight_value("a3"));
+		let ctx = UiContext::default();
+		assert_eq!(
+			select.key(&mut event_ctx(&ctx), Key::Enter),
+			Flow::Event(UiEvent::Changed { id: "pick".into(), value: "a3".into() })
+		);
 	}
 
 	#[test]

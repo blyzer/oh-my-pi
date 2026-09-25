@@ -37,6 +37,7 @@ use omp_tui::{
 	slots::{Mode, ResizePolicy},
 };
 use parking_lot::Mutex;
+use strum::IntoEnumIterator as _;
 use thiserror::Error;
 use tokio::sync::{Notify, oneshot};
 
@@ -66,7 +67,8 @@ use crate::{
 	},
 	overlays::{
 		HistoryPicker, ModelPicker, ModelRow, Overlay, Overlays, PanelAnchor, PanelCx, PanelEvent,
-		PanelNote, PanelOpener, PickerEvent, QuickRoleRow, Services,
+		PanelNote, PanelOpener, PickerEvent, PickerRole, QuickRoleRow, RoleMark, Services,
+		models::resolve_role_selector,
 		paste_menu::{PasteChoice, PasteMenu, save_paste_file, wrap_in_attachment_block},
 		services::ActiveUsageRequest,
 	},
@@ -207,6 +209,8 @@ const PLAN_DIRECTOR: &str = "plan";
 const LOOP_DIRECTOR: &str = "loop_mode";
 /// Notice shown when a bound command wants a reasoning level the model lacks.
 const NO_THINKING: &str = "Current model does not support thinking";
+/// Catalog convar holding `role → model selector` assignments.
+const MODEL_ROLES_VAR: &str = "ai_model_roles";
 /// `LEFT_DOUBLE_TAP_MIN_GAP_MS`: taps closer than this are a terminal
 /// burst, never a human double-tap.
 const LEFT_DOUBLE_TAP_MIN_GAP: Duration = Duration::from_millis(40);
@@ -3003,9 +3007,10 @@ impl Presenter {
 					quick_roles,
 					current_role,
 					session_only,
-					self.composer.frame().size().width,
+					self.viewport(),
 					&self.ui,
-				);
+				)
+				.with_roles(self.role_marks());
 				self.overlays.show(Overlay::Models(picker));
 				let _ = self
 					.commands
@@ -3615,6 +3620,7 @@ impl Presenter {
 				}
 				routed
 			},
+			PickerEvent::AssignRole { role, index } => self.assign_role(role, index),
 			PickerEvent::Recall(text) => {
 				self.close_overlay();
 				self.composer.set_text(text.as_str());
@@ -3681,6 +3687,98 @@ impl Presenter {
 		} else {
 			format!("Model: {label} (saved to config.cfg)")
 		})
+	}
+
+	/// Role marks for the model picker: each `ai_model_roles` assignment the
+	/// roster resolves, then the launch-resolved cycle roles the config
+	/// leaves unassigned (painted as automatic fallbacks).
+	fn role_marks(&self) -> Vec<RoleMark> {
+		let configured = match self.con.get(MODEL_ROLES_VAR) {
+			Some(omp_con::Value::Kv(roles)) => roles,
+			_ => omp_con::Kv::new(),
+		};
+		PickerRole::iter()
+			.filter_map(|role| {
+				if let Some(selector) = configured.get(role.name()).and_then(omp_con::Value::as_str) {
+					let row = resolve_role_selector(&self.models, selector)?;
+					return Some(RoleMark { role, key: row.key.clone(), auto: false });
+				}
+				let (_, key, _) = self
+					.cycle
+					.iter()
+					.find(|(name, ..)| name.as_str() == role.name())?;
+				Some(RoleMark { role, key: key.clone(), auto: true })
+			})
+			.collect()
+	}
+
+	/// Assigns `role` to the picker row at `index` — or clears the role when
+	/// that model already holds it — through `ai_model_roles`, saved to
+	/// `config.cfg` like v1's `/models` hub. The picker stays open and
+	/// repaints its marks; the Ctrl+P cycle roster follows the new model.
+	fn assign_role(&mut self, role: PickerRole, index: usize) -> Routed {
+		let Some(Overlay::Models(picker)) = self.overlays.active() else {
+			return Routed::Repaint;
+		};
+		let Some(row) = picker.rows().get(index).cloned() else {
+			return Routed::Repaint;
+		};
+		let clear = picker.holds_role(role, index);
+		let mut roles = match self.con.get(MODEL_ROLES_VAR) {
+			Some(omp_con::Value::Kv(roles)) => roles,
+			_ => omp_con::Kv::new(),
+		};
+		roles.0.retain(|(name, _)| name.as_str() != role.name());
+		if !clear {
+			roles
+				.0
+				.push((Str::new_static(role.name()), omp_con::Value::Str(row.key.clone())));
+		}
+		let script = format!("{MODEL_ROLES_VAR} {}", omp_con::Value::Kv(roles));
+		if let Err(error) = self.con.exec(&script, Source::Console) {
+			return self.notice(error.to_string());
+		}
+		if !clear
+			&& let Some(entry) = self
+				.cycle
+				.iter_mut()
+				.find(|(name, ..)| name.as_str() == role.name())
+		{
+			entry.1 = row.key.clone();
+			entry.2 = None;
+		}
+		let marks = self.role_marks();
+		if let Some(Overlay::Models(picker)) = self.overlays.active_mut() {
+			picker.set_roles(marks);
+		}
+		let label = if row.name.is_empty() {
+			row.key
+		} else {
+			row.name
+		};
+		let role = role.name();
+		if let Err(error) = self.con.exec("writecfg", Source::Console) {
+			return self.notice(format!("{role} role set for this session only: {error}"));
+		}
+		self.notice(if clear {
+			format!("{role} role cleared (saved to config.cfg)")
+		} else {
+			format!("{role} role: {label} (saved to config.cfg)")
+		})
+	}
+
+	/// Replaces the model roster (a discovery refresh). An open picker
+	/// re-derives its provider groups and keeps its selection, scope, and
+	/// query by model identity.
+	pub(crate) fn replace_models(&mut self, models: Vec<ModelRow>) {
+		self.models = models;
+		let marks = self.role_marks();
+		for overlay in self.overlays.iter_mut() {
+			if let Overlay::Models(picker) = overlay {
+				picker.replace_rows(self.models.clone());
+				picker.set_roles(marks.clone());
+			}
+		}
 	}
 
 	/// Clamps `ai_thinking` to what the newly selected model supports.
@@ -3872,7 +3970,7 @@ impl Presenter {
 	) -> Option<R> {
 		let center = Size::new(size.width * 4 / 5, size.height.saturating_sub(2));
 		match self.overlays.active_mut() {
-			Some(Overlay::Models(picker)) => Some(read(picker.frame(size), PanelAnchor::Bottom)),
+			Some(Overlay::Models(picker)) => Some(read(picker.frame(size), PanelAnchor::Full)),
 			Some(Overlay::History(picker)) => Some(read(picker.frame(size), PanelAnchor::Bottom)),
 			Some(Overlay::Panel(panel)) => {
 				let anchor = panel.anchor();
@@ -5034,6 +5132,13 @@ impl NativeHost {
 	/// Frame of the open picker or panel, when one is showing.
 	pub fn picker_frame(&self) -> Option<Frame> {
 		self.overlay.as_ref().map(|overlay| overlay.frame.clone())
+	}
+
+	/// Replaces the model roster (a discovery refresh); an open picker keeps
+	/// its selection, scope, and query by model identity.
+	pub fn replace_models(&mut self, models: Vec<ModelRow>) {
+		self.presenter.replace_models(models);
+		self.refresh();
 	}
 
 	/// Viewport band the open picker or panel is composited into — the

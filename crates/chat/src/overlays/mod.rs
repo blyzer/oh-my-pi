@@ -8,19 +8,13 @@
 //! [`PanelEvent`] — a console line (ADR 0014), a composer recall, a notice,
 //! a clipboard write — and never touch the session DOM.
 
-use std::{
-	fmt::{self, Write as _},
-	sync::Arc,
-	time::Duration,
-};
+use std::{fmt, sync::Arc, time::Duration};
 
 use omp_agent::{ApprovalDecision, ApprovalScope, ApprovalSource};
 use omp_con::Ctx;
-use omp_core::{FastHashSet, Str, StrMut, sf};
+use omp_core::{FastHashSet, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value};
-use omp_tui::{
-	Frame, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent, assets::provider_logo, dom,
-};
+use omp_tui::{Frame, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent, dom};
 use tokio_util::sync::CancellationToken;
 
 use crate::{history::HistoryEntry, host::HostCommand};
@@ -47,6 +41,8 @@ pub mod info;
 pub mod live;
 /// Login dialog, logout account selector, and provider picker.
 pub mod login;
+/// Full-screen two-pane model picker (provider rail + model list).
+pub mod models;
 /// `/move` directory autocomplete editor and creation confirmation.
 pub mod move_panel;
 /// Large-paste menu (wrapped block, local file, inline chip).
@@ -82,6 +78,7 @@ pub mod tree;
 /// Full-screen `/usage` dashboard.
 pub mod usage;
 
+pub use models::{ModelPicker, PickerRole, RoleMark};
 pub use services::{NoServices, Services};
 
 /// Where the host composites a [`Panel`] frame.
@@ -496,17 +493,9 @@ impl PartialEq for PanelCall {
 
 impl Eq for PanelCall {}
 
-const MODEL_HINT: &str =
-	"↑/↓ models · Enter switch · type to search · @ quick roles · Alt+P task model · Esc close";
-const MODEL_ROLE_HINT: &str = "↑/↓ roles · Enter apply role model · type to search · Esc close";
-const MODEL_TASK_HINT: &str =
-	"↑/↓ models · Enter use for task subagents · type to search · Alt+P session model · Esc close";
 const HISTORY_HINT: &str =
 	"↑/↓ prompts · Enter edit · Ctrl+Enter submit · Ctrl+C copy · type search · Esc close";
 const FRAME_ROWS: u16 = 6;
-const CONTEXT_WIDTH: u16 = 62;
-const INPUT_PRICE_WIDTH: u16 = 76;
-const OUTPUT_PRICE_WIDTH: u16 = 88;
 
 /// One open approval prompt projected from `<queues><prompts>`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -591,436 +580,20 @@ pub enum PickerEvent {
 	PickTask(usize),
 	/// Apply the configured quick role at this role-row index.
 	PickRole(usize),
+	/// Assign (or, when it already holds the role, clear) `role` to the
+	/// model at this row index; the picker stays open.
+	AssignRole {
+		/// Role the highlighted model should hold.
+		role:  PickerRole,
+		/// Row index of the highlighted model.
+		index: usize,
+	},
 	/// Put this prompt text back into the composer.
 	Recall(Str),
 	/// Submit this prompt directly from history.
 	SubmitHistory(Str),
 	/// Copy this prompt while keeping history open.
 	CopyHistory(Str),
-}
-
-/// Retained filterable model picker.
-pub struct ModelPicker {
-	ui:           Ui,
-	rows:         Vec<ModelRow>,
-	current:      usize,
-	task_current: usize,
-	quick_roles:  Vec<QuickRoleRow>,
-	current_role: Option<usize>,
-	role_mode:    bool,
-	task_mode:    bool,
-	session_only: bool,
-	ctx:          UiContext,
-	query:        Str,
-	list_rows:    u16,
-	width:        u16,
-}
-
-impl ModelPicker {
-	/// Opens the picker over `rows` with `current` preselected.
-	///
-	/// `session_only` reports whether the eventual pick should stay out of
-	/// `config.cfg` (Alt+P) or be archived (Alt+M).
-	#[must_use]
-	pub fn open(
-		rows: Vec<ModelRow>,
-		current: usize,
-		task_current: usize,
-		quick_roles: Vec<QuickRoleRow>,
-		current_role: Option<usize>,
-		session_only: bool,
-		width: u16,
-		ctx: &UiContext,
-	) -> Self {
-		let current = current.min(rows.len().saturating_sub(1));
-		let task_current = task_current.min(rows.len().saturating_sub(1));
-		let current_role = current_role.filter(|&index| index < quick_roles.len());
-		let mut picker = Self {
-			ui: Ui::from_root(dom! { <col/> }, width, ctx.clone()),
-			rows,
-			current,
-			task_current,
-			quick_roles,
-			current_role,
-			role_mode: false,
-			task_mode: false,
-			session_only,
-			ctx: ctx.clone(),
-			query: Str::default(),
-			list_rows: 6,
-			width,
-		};
-		picker.rebuild();
-		picker
-	}
-
-	/// Restyles the retained picker without changing its query or selection.
-	pub(crate) fn set_context(&mut self, ctx: &UiContext) {
-		self.ctx = ctx.clone();
-		self.ui.set_context(ctx.clone());
-	}
-
-	/// Whether the pick stays session-local.
-	#[must_use]
-	pub const fn session_only(&self) -> bool {
-		self.session_only
-	}
-
-	/// Host-supplied rows in picker order.
-	#[must_use]
-	pub fn rows(&self) -> &[ModelRow] {
-		&self.rows
-	}
-
-	/// Configured quick roles in cycle order.
-	#[must_use]
-	pub fn quick_roles(&self) -> &[QuickRoleRow] {
-		&self.quick_roles
-	}
-
-	/// Routes a key into the filter and list.
-	pub fn key(&mut self, key: Key) -> PickerEvent {
-		if key == Key::Alt('p') {
-			self.task_mode = !self.task_mode;
-			self.role_mode = self.query.starts_with('@') && !self.task_mode;
-			self.rebuild();
-			return PickerEvent::Consumed;
-		}
-		let event = self.ui.handle_key(key);
-		self.route(event)
-	}
-
-	/// Routes pasted text into the filter.
-	pub fn paste(&mut self, text: &str) -> PickerEvent {
-		let event = self.ui.handle_paste(text);
-		self.route(event)
-	}
-
-	/// Routes pointer input through the picker hit map.
-	pub fn mouse(&mut self, report: MouseReport) -> PickerEvent {
-		let event = self
-			.ui
-			.handle_mouse_with_mods(report.col, report.row, report.kind, report.mods);
-		self.route(event)
-	}
-
-	/// Reflows for a viewport, returning the frame to composite.
-	pub fn frame(&mut self, viewport: Size) -> &Frame {
-		let rows = (viewport.height * 2 / 5).saturating_sub(FRAME_ROWS).max(5);
-		if rows != self.list_rows {
-			self.list_rows = rows;
-			self.ui.set_prop("models", Prop::H, rows.saturating_add(1));
-		}
-		if self.width != viewport.width {
-			self.width = viewport.width;
-			self.rebuild();
-		}
-		self.ui.frame()
-	}
-
-	fn route(&mut self, event: UiEvent) -> PickerEvent {
-		match event {
-			UiEvent::Cancel => PickerEvent::Close,
-			UiEvent::Changed { id, value } if id.as_str() == "models" => value
-				.as_str()
-				.parse()
-				.map_or(PickerEvent::Consumed, |index| {
-					if self.role_mode {
-						PickerEvent::PickRole(index)
-					} else if self.task_mode {
-						PickerEvent::PickTask(index)
-					} else {
-						PickerEvent::Pick(index)
-					}
-				}),
-			UiEvent::Highlighted { id, value } if id.as_str() == "models" => {
-				self.show_detail(value.as_str().parse().ok());
-				PickerEvent::Consumed
-			},
-			UiEvent::Filtered { id, query, value } if id.as_str() == "models" => {
-				let role_mode = query.starts_with('@') && !self.task_mode;
-				self.query = query;
-				if role_mode != self.role_mode {
-					self.role_mode = role_mode;
-					self.rebuild();
-				} else {
-					self.show_detail(value.and_then(|value| value.as_str().parse().ok()));
-				}
-				PickerEvent::Consumed
-			},
-			_ => PickerEvent::Consumed,
-		}
-	}
-
-	fn rebuild(&mut self) {
-		let selected = if self.role_mode {
-			self.current_role.unwrap_or(0)
-		} else if self.task_mode {
-			self.task_current
-		} else {
-			self.current
-		};
-		self.ui = if self.role_mode {
-			build_roles(
-				&self.rows,
-				&self.quick_roles,
-				selected,
-				&self.query,
-				self.list_rows,
-				self.width,
-				&self.ctx,
-			)
-		} else {
-			build_models(
-				&self.rows,
-				selected,
-				&self.query,
-				self.list_rows,
-				self.width,
-				self.task_mode,
-				&self.ctx,
-			)
-		};
-		let has_rows = if self.role_mode {
-			!self.quick_roles.is_empty()
-		} else {
-			!self.rows.is_empty()
-		};
-		self.show_detail(has_rows.then_some(selected));
-	}
-
-	fn show_detail(&mut self, selected: Option<usize>) {
-		let model = if self.role_mode {
-			selected
-				.and_then(|index| self.quick_roles.get(index))
-				.and_then(|role| self.rows.get(role.model))
-		} else {
-			selected.and_then(|index| self.rows.get(index))
-		};
-		let text = model.map_or_else(|| sf!(" "), model_facts);
-		self.ui.set_text("model-facts", text);
-	}
-}
-
-struct DisplayRow {
-	value:    Str,
-	label:    Str,
-	logo_src: Option<Str>,
-	provider: Str,
-	name:     Str,
-	current:  bool,
-	context:  Str,
-	input:    Str,
-	output:   Str,
-}
-
-fn build_models(
-	rows: &[ModelRow],
-	current: usize,
-	query: &str,
-	list_rows: u16,
-	width: u16,
-	task_mode: bool,
-	ctx: &UiContext,
-) -> Ui {
-	let show_context = width >= CONTEXT_WIDTH && rows.iter().any(|row| row.context.is_some());
-	let show_input = width >= INPUT_PRICE_WIDTH && rows.iter().any(|row| row.input_mtok.is_some());
-	let show_output =
-		width >= OUTPUT_PRICE_WIDTH && rows.iter().any(|row| row.output_mtok.is_some());
-	let display: Vec<_> = rows
-		.iter()
-		.enumerate()
-		.map(|(index, row)| DisplayRow {
-			value:    sf!("{index}"),
-			label:    sf!("{} {} {}", row.provider, row.name, row.key),
-			logo_src: provider_logo(row.provider_id.as_str())
-				.is_some()
-				.then(|| sf!("asset://login/{}", row.provider_id)),
-			provider: if row.provider.is_empty() {
-				row.provider_id.clone()
-			} else {
-				row.provider.clone()
-			},
-			name:     if row.name.is_empty() {
-				row.key.clone()
-			} else {
-				row.name.clone()
-			},
-			current:  index == current,
-			context:  row
-				.context
-				.map_or_else(Str::default, |tokens| sf!("{} ctx", compact_count(tokens))),
-			input:    row
-				.input_mtok
-				.map_or_else(Str::default, |cost| sf!("${cost} in")),
-			output:   row
-				.output_mtok
-				.map_or_else(Str::default, |cost| sf!("${cost} out")),
-		})
-		.collect();
-	let seed = Str::new(query);
-	let current_mark = if task_mode {
-		Str::new_static(" task")
-	} else {
-		Str::new_static(" current")
-	};
-	let title = if task_mode {
-		"Switch Task Model"
-	} else {
-		"Switch Model"
-	};
-	let hint = if task_mode {
-		MODEL_TASK_HINT
-	} else {
-		MODEL_HINT
-	};
-	let height = list_rows.saturating_add(1);
-	let tree = dom! {
-		<box border=round title={title} pad-x=1>
-			<col>
-				<select id="models" filter={seed} h={height}>
-					for row in display {
-						<option value={row.value} label={row.label} recommended={row.current}>
-							<td>
-								if let Some(src) = row.logo_src.clone() { <img src={src} w=2 h=1/> }
-							</td>
-							<td truncate>
-								<pre fg=fg bg=border>{" "}{row.provider}{" "}</pre>
-							</td>
-							<td truncate=start grow>
-								<pre>{row.name}</pre>
-								if row.current { <pre fg=ok>{current_mark.clone()}</pre> }
-							</td>
-							if show_context { <td align=end><pre fg=muted>{row.context}</pre></td> }
-							if show_input { <td align=end><pre fg=muted>{row.input}</pre></td> }
-							if show_output { <td align=end><pre fg=muted>{row.output}</pre></td> }
-						</option>
-					}
-				</select>
-				<hr border=round/>
-				<text id="model-facts" fg=muted truncate>{" "}</text>
-				<text fg=muted truncate>{hint}</text>
-			</col>
-		</box>
-	};
-	Ui::from_root(tree, width, ctx.clone())
-}
-
-fn build_roles(
-	models: &[ModelRow],
-	roles: &[QuickRoleRow],
-	current: usize,
-	query: &str,
-	list_rows: u16,
-	width: u16,
-	ctx: &UiContext,
-) -> Ui {
-	struct RoleDisplay {
-		value:    Str,
-		label:    Str,
-		role:     Str,
-		model:    Str,
-		current:  bool,
-		thinking: Option<Str>,
-	}
-	let display = roles
-		.iter()
-		.enumerate()
-		.filter_map(|(index, role)| {
-			let model = models.get(role.model)?;
-			let name = if model.name.is_empty() {
-				model.key.clone()
-			} else {
-				model.name.clone()
-			};
-			Some(RoleDisplay {
-				value:    sf!("{index}"),
-				label:    sf!("@{} {} {} {}", role.role, model.provider, name, model.key),
-				role:     sf!("@{}", role.role),
-				model:    name,
-				current:  index == current,
-				thinking: role.thinking.clone(),
-			})
-		})
-		.collect::<Vec<_>>();
-	let seed = Str::new(query);
-	let height = list_rows.saturating_add(1);
-	let tree = dom! {
-		<box border=round title="Switch Quick Role" pad-x=1>
-			<col>
-				<select id="models" filter={seed} h={height}>
-					for row in display {
-						<option value={row.value} label={row.label} recommended={row.current}>
-							<td truncate>
-								<pre fg=accent>{row.role}</pre>
-							</td>
-							<td truncate=start grow>
-								<pre>{row.model}</pre>
-								if row.current { <pre fg=ok>{" current"}</pre> }
-							</td>
-							if let Some(thinking) = row.thinking {
-								<td align=end><pre fg=muted>{thinking}</pre></td>
-							}
-						</option>
-					}
-				</select>
-				<hr border=round/>
-				<text id="model-facts" fg=muted truncate>{" "}</text>
-				<text fg=muted truncate>{MODEL_ROLE_HINT}</text>
-			</col>
-		</box>
-	};
-	Ui::from_root(tree, width, ctx.clone())
-}
-
-fn model_facts(row: &ModelRow) -> Str {
-	let mut line = StrMut::with_capacity(96);
-	let name = if row.name.is_empty() {
-		&row.key
-	} else {
-		&row.name
-	};
-	push_fact(&mut line, format_args!("{name}"));
-	push_fact(&mut line, format_args!("{}", row.provider));
-	if let Some(context) = row.context {
-		push_fact(&mut line, format_args!("{} context", compact_count(context)));
-	}
-	match (row.input_mtok, row.output_mtok) {
-		(Some(input), Some(output)) => {
-			push_fact(&mut line, format_args!("${input}/${output} per Mtok"));
-		},
-		(Some(input), None) => push_fact(&mut line, format_args!("${input} in per Mtok")),
-		(None, Some(output)) => push_fact(&mut line, format_args!("${output} out per Mtok")),
-		(None, None) => {},
-	}
-	if !row.efforts.is_empty() {
-		let mut efforts = StrMut::new("thinking ");
-		for (index, effort) in row.efforts.iter().enumerate() {
-			if index > 0 {
-				efforts.push('/');
-			}
-			efforts.push_str(effort.as_str());
-		}
-		push_fact(&mut line, format_args!("{}", efforts.as_str()));
-	}
-	line.freeze()
-}
-
-fn push_fact(line: &mut StrMut, fact: fmt::Arguments<'_>) {
-	if !line.is_empty() {
-		line.push_str(" · ");
-	}
-	let _ = write!(line, "{fact}");
-}
-
-fn compact_count(value: u64) -> Str {
-	if value >= 1_000_000 {
-		sf!("{:.1}m", value as f64 / 1_000_000.0)
-	} else if value >= 1_000 {
-		sf!("{:.0}k", value as f64 / 1_000.0)
-	} else {
-		sf!("{value}")
-	}
 }
 
 /// Retained Ctrl+R prompt-history picker.
@@ -1354,6 +927,11 @@ impl Overlays {
 		PanelEvent::Ignored
 	}
 
+	/// Every stacked overlay, bottom first.
+	pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Overlay> + ExactSizeIterator {
+		self.stack.iter_mut()
+	}
+
 	/// Number of stacked overlays.
 	#[must_use]
 	pub const fn depth(&self) -> usize {
@@ -1550,137 +1128,9 @@ mod tests {
 			Vec::new(),
 			None,
 			true,
-			100,
+			Size::new(100, 40),
 			&UiContext::default(),
 		)
-	}
-
-	#[test]
-	fn absent_model_facts_are_omitted() {
-		let facts = model_facts(&row("p", "Model"));
-		assert!(!facts.contains("ctx"));
-		assert!(!facts.contains('$'));
-		assert!(!facts.contains("thinking"));
-	}
-
-	#[test]
-	fn typing_filters_models() {
-		let mut picker = picker(vec![row("alpha", "first"), row("beta", "second")], 0, 0);
-		assert_eq!(picker.key(Key::Char('b')), PickerEvent::Consumed);
-		assert_eq!(picker.key(Key::Enter), PickerEvent::Pick(1));
-	}
-
-	#[test]
-	fn down_then_enter_picks_the_next_model() {
-		let mut picker = picker(vec![row("alpha", "first"), row("beta", "second")], 0, 0);
-		assert_eq!(picker.key(Key::Down), PickerEvent::Consumed);
-		assert_eq!(picker.key(Key::Enter), PickerEvent::Pick(1));
-	}
-
-	#[test]
-	fn escape_closes_the_picker() {
-		let mut picker = picker(vec![row("alpha", "first")], 0, 0);
-		assert_eq!(picker.key(Key::Esc), PickerEvent::Close);
-	}
-
-	#[test]
-	fn alt_p_toggles_task_mode_and_picks_the_task_model() {
-		let mut picker = picker(vec![row("alpha", "first"), row("beta", "second")], 0, 1);
-		assert_eq!(picker.key(Key::Alt('p')), PickerEvent::Consumed);
-		assert_eq!(picker.key(Key::Enter), PickerEvent::PickTask(1));
-	}
-
-	#[test]
-	fn leading_at_switches_to_quick_roles_and_returns_the_role() {
-		let rows = vec![row("alpha", "first"), row("beta", "second")];
-		let roles = vec![
-			QuickRoleRow {
-				role:     Str::new_static("default"),
-				model:    0,
-				thinking: Some(Str::new_static("medium")),
-			},
-			QuickRoleRow {
-				role:     Str::new_static("slow"),
-				model:    1,
-				thinking: Some(Str::new_static("high")),
-			},
-		];
-		let mut picker =
-			ModelPicker::open(rows, 0, 0, roles, Some(0), true, 100, &UiContext::default());
-		for ch in "@slow".chars() {
-			assert_eq!(picker.key(Key::Char(ch)), PickerEvent::Consumed);
-		}
-		let shown = omp_tui::frame_text(picker.frame(Size::new(100, 40)));
-		assert!(shown.contains("Switch Quick Role"), "{shown}");
-		assert!(shown.contains("@slow"), "{shown}");
-		assert!(!shown.contains("@default"), "{shown}");
-		assert_eq!(picker.key(Key::Enter), PickerEvent::PickRole(1));
-		assert_eq!(picker.quick_roles()[1].thinking.as_deref(), Some("high"));
-	}
-
-	#[test]
-	fn picker_frame_paints_title_rows_and_hint() {
-		let mut picker = picker(vec![row("anthropic", "Claude"), row("openai", "GPT")], 0, 0);
-		let frame = picker.frame(Size::new(100, 40));
-		let text = omp_tui::frame_text(frame);
-		assert!(text.contains("Switch Model"), "{text}");
-		assert!(text.contains("Claude"), "{text}");
-		assert!(text.contains("current"), "{text}");
-		assert!(text.contains("Esc close"), "{text}");
-	}
-
-	/// A fresh picker over a large catalog opens scrolled to the current
-	/// model with the cursor marker on its row, and the facts line names
-	/// the same model (current model preselected and
-	/// visible).
-	#[test]
-	fn picker_opens_scrolled_to_the_current_model_with_the_cursor_on_it() {
-		let rows: Vec<ModelRow> = (0..300)
-			.map(|index| {
-				if index == 250 {
-					row("anthropic", "Claude Opus 5")
-				} else {
-					row("vendor", "model")
-				}
-			})
-			.collect();
-		let mut picker = picker(rows, 250, 0);
-		let frame = picker.frame(Size::new(100, 40));
-		let text = omp_tui::frame_text(frame);
-		let cursor = UiContext::default().charset.cursor().trim().to_owned();
-		let row = text
-			.lines()
-			.find(|line| line.contains("Claude Opus 5") && line.contains("current"))
-			.unwrap_or_else(|| panic!("the current model row is on screen:\n{text}"));
-		assert!(row.contains(&cursor), "the cursor marker sits on the current row: {row:?}");
-		assert!(text.contains("Claude Opus 5 · anthropic"), "facts describe the cursor row:\n{text}");
-		assert_eq!(picker.key(Key::Enter), PickerEvent::Pick(250), "Enter keeps the current model");
-	}
-
-	/// Filtering by a model name ranks whole-word matches ahead of scattered
-	/// subsequences, keeps the current model first among them, and moves the
-	/// cursor and facts line to the best match.
-	#[test]
-	fn picker_filter_ranks_the_current_whole_word_match_first() {
-		let rows = vec![
-			row("abliteration", "llama-3"),
-			row("openrouter", "Qwen Plus"),
-			row("openrouter", "gpt-oss-120b"),
-			row("zai", "glm-4-plus"),
-			row("openrouter", "Claude Opus 5"),
-			row("anthropic", "Claude Opus 5"),
-			row("anthropic", "Claude Opus 4.6"),
-		];
-		let mut picker = picker(rows, 5, 0);
-		for ch in "opus".chars() {
-			assert_eq!(picker.key(Key::Char(ch)), PickerEvent::Consumed);
-		}
-		let text = omp_tui::frame_text(picker.frame(Size::new(100, 40)));
-		assert!(!text.contains("Qwen Plus"), "o-p-u-s across words is not a match:\n{text}");
-		assert!(!text.contains("gpt-oss"), "{text}");
-		assert!(text.contains("3/7"), "three whole-word matches:\n{text}");
-		assert!(text.contains("Claude Opus 5 · anthropic"), "facts follow the best match:\n{text}");
-		assert_eq!(picker.key(Key::Enter), PickerEvent::Pick(5), "the current model ranks first");
 	}
 
 	#[test]

@@ -1680,7 +1680,11 @@ impl Ui {
 		}
 	}
 
-	fn clear_hover(&mut self) {
+	/// Drops the pointer hover chrome (row bands, hover borders). Keyboard
+	/// input routed through [`Ui::handle_key`] already does this; hosts that
+	/// intercept keys before the tree (pane switches, shortcuts) call it so a
+	/// keystroke always clears the pointer's highlight.
+	pub fn clear_hover(&mut self) {
 		if let Some((slot, _)) = self.hover.take() {
 			self.hover_repaint(slot);
 		}
