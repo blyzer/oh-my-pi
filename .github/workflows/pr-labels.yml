@@ -1,17 +1,33 @@
 name: PR labels
 
-# Labels each pull request by the paths it changes (area/*, kind/*, risk/*),
-# from .github/labeler.yml. sync-labels removes a label once the pull request
-# no longer touches its paths. Informational only: never a required check.
+# Labels each pull request, in two jobs:
+#
+# - paths: area/*, kind/*, risk/* from .github/labeler.yml. sync-labels
+#   removes a label once the pull request no longer touches its paths.
+# - size: size/xs .. size/xl by lines changed (additions plus deletions),
+#   and once per pull request a comment on size/xl suggesting a split.
+#
+#     size/xs  < 10     size/s  < 50     size/m  < 200
+#     size/l   < 500    size/xl >= 500
+#
+#   Lockfiles, generated notices, catalog data, insta snapshots and recorded
+#   fixtures do not count, so a dependency bump or a snapshot refresh is not
+#   mistaken for a large behavioural change.
+#
+# size runs after paths, never beside it: actions/labeler writes the whole
+# label set at once (setLabels), so a size label added while it runs can be
+# overwritten and lost. Informational only: never a required check.
 #
 # pull_request_target, because the token of a pull_request run from a fork
-# cannot write labels. It runs this file as it is on the base branch and
-# checks out nothing: actions/labeler reads the changed paths through the
-# API, so no code from the pull request runs with this token.
+# cannot write labels or comments. It runs this file as it is on the base
+# branch and checks out nothing: both jobs read the pull request through the
+# API, file names only as data, so no code from the pull request runs with
+# this token.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
-  # Relabel an existing pull request, for example after editing labeler.yml.
+  # Relabel an existing pull request, for example after editing labeler.yml
+  # or the size buckets.
   workflow_dispatch:
     inputs:
       pr:
@@ -29,7 +45,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  label:
+  paths:
     name: Label by changed paths
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -39,3 +55,115 @@ jobs:
           configuration-path: .github/labeler.yml
           sync-labels: true
           pr-number: ${{ github.event.pull_request.number || inputs.pr }}
+
+  size:
+    name: Label by lines changed
+    needs: paths
+    # Still size the pull request when path labelling failed; only the
+    # ordering matters.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number || inputs.pr }}
+    steps:
+      - name: Count lines changed
+        id: size
+        run: |
+          set -euo pipefail
+          # Paths that do not count toward the size. Shell patterns; `*`
+          # also matches `/`.
+          excluded() {
+            case "$1" in
+              *.lock | *.lock.json | THIRD-PARTY-NOTICES.txt | crates/py/notices/* | \
+              crates/catalog/data/* | */snapshots/* | fixtures/*) return 0 ;;
+            esac
+            return 1
+          }
+          # Captured first so a failed API call fails the step instead of
+          # reading as an empty pull request.
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" \
+            --jq '.[] | [.filename, .additions, .deletions] | @tsv')
+          additions=0 deletions=0 counted=0 skipped=0
+          while IFS=$'\t' read -r path added deleted; do
+            [ -n "$path" ] || continue
+            if excluded "$path"; then
+              skipped=$((skipped + 1))
+              continue
+            fi
+            counted=$((counted + 1))
+            additions=$((additions + added))
+            deletions=$((deletions + deleted))
+          done <<< "$files"
+          total=$((additions + deletions))
+          if [ "$total" -lt 10 ]; then bucket=xs
+          elif [ "$total" -lt 50 ]; then bucket=s
+          elif [ "$total" -lt 200 ]; then bucket=m
+          elif [ "$total" -lt 500 ]; then bucket=l
+          else bucket=xl
+          fi
+          echo "+$additions -$deletions = $total lines in $counted files ($skipped excluded): size/$bucket"
+          {
+            echo "additions=$additions"
+            echo "deletions=$deletions"
+            echo "total=$total"
+            echo "bucket=$bucket"
+          } >> "$GITHUB_OUTPUT"
+
+      # Adding a label through the issues API creates it if the repository
+      # does not have it yet.
+      - name: Apply the size label
+        env:
+          LABEL: size/${{ steps.size.outputs.bucket }}
+        run: |
+          set -euo pipefail
+          labels=$(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name')
+          while read -r current; do
+            case "$current" in
+              size/intrinsic | "$LABEL") ;;
+              size/*)
+                encoded=$(jq -rn --arg name "$current" '$name | @uri')
+                gh api -X DELETE "repos/$REPO/issues/$PR/labels/$encoded" > /dev/null
+                ;;
+            esac
+          done <<< "$labels"
+          gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null
+
+      # One comment per pull request, skipped when the size/intrinsic label
+      # says the size cannot be split (a rename, a vendored file).
+      - name: Suggest splitting a size/xl pull request
+        if: steps.size.outputs.bucket == 'xl'
+        env:
+          ADDITIONS: ${{ steps.size.outputs.additions }}
+          DELETIONS: ${{ steps.size.outputs.deletions }}
+          TOTAL: ${{ steps.size.outputs.total }}
+        run: |
+          set -euo pipefail
+          marker='<!-- omp-pr-size -->'
+          # Captured before grep: with pipefail, grep -q closing the pipe
+          # early could fail the pipeline and post the comment twice.
+          labels=$(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name')
+          if grep -qx 'size/intrinsic' <<< "$labels"; then
+            echo "size/intrinsic is set; not commenting"
+            exit 0
+          fi
+          comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq '.[].body')
+          if grep -qF "$marker" <<< "$comments"; then
+            echo "The size comment is already on the pull request"
+            exit 0
+          fi
+          body="$marker
+          ### PR size: \`size/xl\` ($TOTAL lines changed)
+
+          +$ADDITIONS / -$DELETIONS, not counting lockfiles, generated notices, catalog data, snapshots and fixtures.
+
+          Past 500 lines a review gets hard to do well. If this can be split, consider:
+
+          - a behaviour-preserving refactor first;
+          - one behavioural change per pull request;
+          - large test or fixture additions on their own.
+
+          If the size is intrinsic (a rename, a vendored file, a generated table), add the \`size/intrinsic\` label and this comment will not be posted again."
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -f "body=$body" > /dev/null
