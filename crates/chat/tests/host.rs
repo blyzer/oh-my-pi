@@ -797,6 +797,125 @@ fn alt_p_opens_the_model_picker_and_enter_sets_ai_model_for_the_session() {
 	assert!(commands.try_recv().is_err(), "a session-only pick never reaches the controller");
 }
 
+/// The picker is a full-screen two-pane overlay: role chords persist through
+/// `ai_model_roles` + `writecfg` while it stays open, a replaced roster keeps
+/// the highlighted model, pointer input anywhere on the overlay reaches it,
+/// and closing hands the mouse back to the terminal.
+#[test]
+fn model_picker_fills_the_screen_assigns_roles_and_accepts_a_replaced_roster() {
+	let (mut session, _) = fixture();
+	let (snapshot, dom_events) = session.subscribe();
+	let (_, kernel_events) = flume::unbounded();
+	let (commands, _command_rx) = flume::unbounded();
+	let (up, _) = flume::unbounded();
+	let saved = Arc::new(parking_lot::Mutex::new(String::new()));
+	let sink = Arc::clone(&saved);
+	let con = Arc::new(
+		HostMailbox::new()
+			.attach(omp_con::Ctx::builder().saver(move |_, contents| {
+				*sink.lock() = contents.to_owned();
+				Ok(())
+			}))
+			.build(),
+	);
+	// `ai_model_roles` is the catalog-owned convar the picker writes.
+	assert!(con.get("ai_model_roles").is_some(), "catalog role convar registered");
+	con.run(r#"bind alt+p "cl_model_select session""#)
+		.expect("binds");
+	let mut other = row("other/second", &[]);
+	other.name = "Second Model".into();
+	other.provider_id = "other".into();
+	other.provider = "Other Provider".into();
+	let mut host = NativeHost::new(
+		HostOptions {
+			model: omp_chat::ModelBadge::from_identifier("test/model"),
+			snapshot,
+			dom_events,
+			kernel_events,
+			commands,
+			up,
+			con: Arc::clone(&con),
+			models: vec![row("test/model", &[]), other.clone()],
+			cycle: vec![("default".into(), "test/model".into(), None)],
+			resize_policy: ResizePolicy::Rebuild,
+			project: std::path::PathBuf::new(),
+			welcome: omp_chat::welcome::WelcomeFacts::default(),
+			ui: UiContext::default(),
+			services: Arc::new(omp_chat::overlays::NoServices),
+			speech: None,
+			resuming: false,
+			initial_panel: None,
+		},
+		Size::new(100, 30),
+	);
+	host.key(Key::Alt('p')).expect("alt+p");
+	assert!(host.mouse_tracking(), "the open picker takes pointer reports");
+	let band = host.picker_band().expect("picker band");
+	assert_eq!((band.x, band.y, band.rows), (0, 0, 30), "the picker fills the viewport");
+	let text = omp_tui::frame_text(&host.picker_frame().expect("frame"));
+	assert!(text.contains("All models"), "{text}");
+	assert!(text.contains("Other Provider"), "{text}");
+	let current = text
+		.lines()
+		.find(|line| line.contains("test/model") && line.contains("current"))
+		.unwrap_or_else(|| panic!("current row:\n{text}"));
+	assert!(current.contains("default"), "the launch default is marked:\n{text}");
+
+	host.key(Key::Down).expect("down");
+	host.key(Key::Alt('2')).expect("assign smol");
+	assert!(host.overlay_open(), "assigning a role keeps the picker open");
+	assert_eq!(host.notice(), Some("smol role: Second Model (saved to config.cfg)"));
+	let roles = con.get("ai_model_roles").expect("roles");
+	assert_eq!(roles.to_string(), "{smol other/second}");
+	assert!(saved.lock().contains("ai_model_roles"), "writecfg persisted the role");
+	let text = omp_tui::frame_text(&host.picker_frame().expect("frame"));
+	let second = text
+		.lines()
+		.find(|line| line.contains("Second Model") && !line.contains("·"))
+		.unwrap_or_else(|| panic!("second row:\n{text}"));
+	assert!(second.contains("smol"), "the list marks the new holder:\n{text}");
+
+	host.key(Key::Alt('2')).expect("clear smol");
+	assert_eq!(host.notice(), Some("smol role cleared (saved to config.cfg)"));
+	assert_eq!(con.get("ai_model_roles").expect("roles").to_string(), "{}");
+
+	// Discovery replaces the roster: the highlight stays on Second Model.
+	let mut fresh = row("fresh/model", &[]);
+	fresh.provider_id = "fresh".into();
+	fresh.provider = "Fresh".into();
+	host.replace_models(vec![fresh, row("test/model", &[]), other]);
+	let text = omp_tui::frame_text(&host.picker_frame().expect("frame"));
+	assert!(text.contains("Fresh"), "{text}");
+	assert!(text.contains("Second Model · Other Provider"), "highlight kept:\n{text}");
+
+	// A click on the rail, far outside the old bottom band, scopes the list.
+	let (col, row) = text
+		.lines()
+		.enumerate()
+		.find_map(|(row, line)| {
+			let byte = line.find("Fresh ")?;
+			Some((omp_tui::cell_width(&line[..byte]), u16::try_from(row).unwrap()))
+		})
+		.expect("fresh rail row");
+	assert!(row < 10, "the rail starts at the top of the screen");
+	host
+		.mouse(MouseReport {
+			kind: Mouse::Click,
+			col,
+			row,
+			button: MouseButton::Left,
+			mods: Mods::default(),
+			pressed: true,
+		})
+		.expect("click");
+	let text = omp_tui::frame_text(&host.picker_frame().expect("frame"));
+	assert!(text.contains("Fresh · 1 model"), "{text}");
+
+	host.key(Key::Esc).expect("esc");
+	assert!(!host.overlay_open());
+	assert!(!host.mouse_tracking(), "closing hands the mouse back to the terminal");
+}
+
 #[test]
 fn escape_dismisses_the_picker_before_anything_else() {
 	let (mut host, _commands) = bound_host(vec![row("test/model", &[])]);
