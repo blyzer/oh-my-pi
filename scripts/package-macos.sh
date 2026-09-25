@@ -85,6 +85,16 @@ cp "$SRC" "$PKGROOT/usr/local/bin/omp"
 chmod 755 "$PKGROOT/usr/local/bin/omp"
 PKG="$REPO_ROOT/$DIST/${NAME}.pkg"
 rm -f "$PKG"
+# On macOS 27 (26A428), pkgbuild prints "write: Permission denied" four times
+# on stderr and still writes a valid package. The count is fixed: it does not
+# depend on the payload, on --component-plist, --preserve-xattr or
+# COPYFILE_DISABLE, and `pkgbuild --analyze` alone prints none. Leave those
+# lines unfiltered; install-smoke-macos.sh checks the package itself.
+#
+# Every file this runner creates carries com.apple.provenance, which a normal
+# process cannot remove (`xattr -d` succeeds and the attribute stays), so the
+# payload also holds AppleDouble entries (./._usr ... ./usr/local/bin/._omp).
+# `pkgutil --expand-full` folds them back into attributes.
 pkgbuild --root "$PKGROOT" \
     --identifier com.oh-my-pi.omp \
     --version "$VERSION" \
