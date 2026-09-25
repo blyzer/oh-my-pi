@@ -3858,9 +3858,18 @@ impl EnvServer {
 			match next {
 				LoopEvent::Finished(done) => connection.finish(done),
 				LoopEvent::AdmissionDeadline => {
-					for (request_id, invocation_id, denied) in connection.take_expired_admissions() {
+					for (request_id, invocation_id, delivery, denied) in
+						connection.take_expired_admissions()
+					{
 						connection.abandon_admission(request_id, &invocation_id);
-						send_policy_denied_verdict(&responses, request_id, &invocation_id, denied).await;
+						send_policy_denied_verdict(
+							&responses,
+							request_id,
+							&invocation_id,
+							&delivery,
+							denied,
+						)
+						.await;
 					}
 				},
 				LoopEvent::Frame(frame) => {
@@ -7351,6 +7360,11 @@ impl EnvServer {
 				.policy
 		};
 		let cancel = CancellationToken::new();
+		let delivery = VerdictDelivery {
+			blobs: self.blobs.clone(),
+			retention_session: principal.map(|principal| Str::from(principal.session_id.as_str())),
+			output_request,
+		};
 		if route == ToolRoute::Native {
 			let owner = if let Some(principal) = principal {
 				Str::from(
@@ -7415,6 +7429,7 @@ impl EnvServer {
 					request_scope: scope.map(|scope| scope.pty_denied),
 					edit_repair,
 					acp,
+					delivery: delivery.clone(),
 					cancel: cancel.clone(),
 				}),
 			);
@@ -7441,12 +7456,11 @@ impl EnvServer {
 				acp_context,
 				feed,
 				deadline,
-				output_request,
 				params,
 				Arc::clone(&registry),
 				lifecycle,
 				cancel,
-				self.blobs.clone(),
+				delivery,
 				responses.clone(),
 				finished.clone(),
 			)
@@ -7503,9 +7517,7 @@ impl EnvServer {
 					maximum_effects,
 					execution,
 					request_scope: scope.map(|scope| scope.pty_denied),
-					retention_session: principal
-						.map(|principal| Str::from(principal.session_id.as_str())),
-					output_request,
+					delivery,
 					interrupt,
 					interrupts: Some(interrupts),
 					cancel,
@@ -7586,16 +7598,17 @@ impl EnvServer {
 			},
 		}
 
-		let (admission, maximum_effects) =
+		let (admission, maximum_effects, delivery) =
 			match connection.invocation_mut(request_id, &request.invocation_id) {
 				Ok(
-					InvocationState::Native { admission, maximum_effects, .. }
-					| InvocationState::Worker { admission, maximum_effects, .. },
+					InvocationState::Native { admission, maximum_effects, delivery, .. }
+					| InvocationState::Worker { admission, maximum_effects, delivery, .. },
 				) => (
 					admission
 						.decide(self.workspace.root(), self.workspace.root())
 						.await,
 					maximum_effects.clone(),
+					delivery.clone(),
 				),
 				Err((code, message)) => {
 					send_error(responses, request_id, code, message).await;
@@ -7610,7 +7623,8 @@ impl EnvServer {
 			AdmissionDecision::Denied(policy) => {
 				let invocation_id = Str::from(request.invocation_id.as_str());
 				connection.abandon_admission(request_id, &invocation_id);
-				send_policy_denied_verdict(responses, request_id, &invocation_id, policy).await;
+				send_policy_denied_verdict(responses, request_id, &invocation_id, &delivery, policy)
+					.await;
 				return;
 			},
 		};
@@ -7682,8 +7696,7 @@ impl EnvServer {
 				committed,
 				cancel,
 				interrupts,
-				output_request,
-				retention_session,
+				delivery,
 				..
 			}) => {
 				if *committed {
@@ -7734,11 +7747,9 @@ impl EnvServer {
 					invocation,
 					cancel.clone(),
 					interrupts,
-					*output_request,
-					retention_session.clone(),
+					delivery.clone(),
 					responses.clone(),
 					finished.clone(),
-					self.blobs.clone(),
 				);
 			},
 			Err((code, message)) => send_error(responses, request_id, code, message).await,
@@ -8294,23 +8305,23 @@ enum InvocationState {
 		request_scope:   Option<bool>,
 		edit_repair:     Option<ConnectionEditRepairRoute>,
 		acp:             InvocationAcpRoutes,
+		delivery:        VerdictDelivery,
 		cancel:          CancellationToken,
 	},
 	Worker {
-		id:                Str,
-		owner:             HostKey,
-		invocation:        Option<ExtHostInvocation>,
-		committed:         bool,
-		admission:         AdmissionGate,
-		pending_commit:    Option<pb::ArgsCommitted>,
-		maximum_effects:   Effects,
-		execution:         InvocationExecutionPolicy,
-		request_scope:     Option<bool>,
-		retention_session: Option<Str>,
-		output_request:    omp_tool::OutputRequest,
-		interrupt:         flume::Sender<pb::Interrupt>,
-		interrupts:        Option<Receiver<pb::Interrupt>>,
-		cancel:            CancellationToken,
+		id:              Str,
+		owner:           HostKey,
+		invocation:      Option<ExtHostInvocation>,
+		committed:       bool,
+		admission:       AdmissionGate,
+		pending_commit:  Option<pb::ArgsCommitted>,
+		maximum_effects: Effects,
+		execution:       InvocationExecutionPolicy,
+		request_scope:   Option<bool>,
+		delivery:        VerdictDelivery,
+		interrupt:       flume::Sender<pb::Interrupt>,
+		interrupts:      Option<Receiver<pb::Interrupt>>,
+		cancel:          CancellationToken,
 	},
 }
 
@@ -8442,15 +8453,19 @@ impl ConnectionState {
 			.min()
 	}
 
-	fn take_expired_admissions(&mut self) -> Vec<(u64, Str, policy_pb::PolicyDenied)> {
+	fn take_expired_admissions(
+		&mut self,
+	) -> Vec<(u64, Str, VerdictDelivery, policy_pb::PolicyDenied)> {
 		let now = Instant::now();
 		self
 			.requests
 			.iter_mut()
 			.filter_map(|(request_id, state)| match state {
-				RequestState::Invocation(invocation) => invocation
-					.expire_admission(now)
-					.map(|denied| (*request_id, Str::from(invocation.id()), denied)),
+				RequestState::Invocation(invocation) => {
+					invocation.expire_admission(now).map(|denied| {
+						(*request_id, Str::from(invocation.id()), invocation.delivery().clone(), denied)
+					})
+				},
 				_ => None,
 			})
 			.collect()
@@ -8828,6 +8843,7 @@ impl ConnectionState {
 		finished: &flume::Sender<Finished>,
 	) {
 		if let Some(RequestState::Invocation(state)) = self.requests.get_mut(&request_id) {
+			let delivery = state.delivery().clone();
 			let terminal = match state {
 				InvocationState::Native { id, feed, lifecycle, edit_repair, acp, cancel, .. } => {
 					if let Some(route) = edit_repair {
@@ -8867,7 +8883,7 @@ impl ConnectionState {
 					.insert(request_id, RequestState::InvocationFinishing);
 			}
 			if let Some((invocation_id, abort)) = terminal {
-				send_abort_verdict(responses, request_id, &invocation_id, abort).await;
+				send_abort_verdict(responses, request_id, &invocation_id, &delivery, abort).await;
 				let _ = finished
 					.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
 					.await;
@@ -8909,6 +8925,7 @@ impl ConnectionState {
 	) {
 		let mut settle = None;
 		let result = self.invocation_mut(request_id, &request.invocation_id);
+		let delivery = result.as_ref().ok().map(|state| state.delivery().clone());
 		let terminal = match result {
 			Ok(InvocationState::Native { id, feed, lifecycle, edit_repair, acp, cancel, .. }) => {
 				if let Some(route) = edit_repair {
@@ -8951,8 +8968,8 @@ impl ConnectionState {
 				.requests
 				.insert(request_id, RequestState::InvocationFinishing);
 		}
-		if let Some((invocation_id, abort)) = terminal {
-			send_abort_verdict(responses, request_id, &invocation_id, abort).await;
+		if let (Some((invocation_id, abort)), Some(delivery)) = (terminal, delivery) {
+			send_abort_verdict(responses, request_id, &invocation_id, &delivery, abort).await;
 			let _ = finished
 				.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
 				.await;
@@ -9028,6 +9045,12 @@ impl InvocationState {
 		}
 	}
 
+	const fn delivery(&self) -> &VerdictDelivery {
+		match self {
+			Self::Native { delivery, .. } | Self::Worker { delivery, .. } => delivery,
+		}
+	}
+
 	fn pending_admission_deadline(&self) -> Option<Instant> {
 		match self {
 			Self::Native { admission, .. } | Self::Worker { admission, .. } => {
@@ -9078,21 +9101,19 @@ async fn spawn_native_invocation(
 	acp: InvocationAcpBackends,
 	feed: omp_tool::InvocationFeed,
 	deadline: Duration,
-	output_request: omp_tool::OutputRequest,
 	params: IncomingParams<'static>,
 	registry: Arc<Registry>,
 	lifecycle: Arc<NativeLifecycle>,
 	cancel: CancellationToken,
-	blobs: BlobHost,
+	delivery: VerdictDelivery,
 	responses: flume::Sender<pb::ServerFrame>,
 	finished: flume::Sender<Finished>,
 ) {
 	let (started, start) = flume::bounded(1);
-	let retention_session = session_id.clone();
 	tokio::spawn(with_invocation_scope(
 		pty_denied,
 		with_output_request_scope(
-			output_request,
+			delivery.output_request,
 			with_invocation_session_scope(
 				session_id,
 				with_edit_repair_scope(
@@ -9130,10 +9151,8 @@ async fn spawn_native_invocation(
 														reason,
 														request_id,
 														&invocation_id,
-														retention_session.as_deref(),
 														&lifecycle,
-														output_request,
-														&blobs,
+														&delivery,
 														&responses,
 													)
 													.await,
@@ -9162,6 +9181,7 @@ async fn spawn_native_invocation(
 														&responses,
 														request_id,
 														&invocation_id,
+														&delivery,
 														omp_tool::Abort::Interrupted { reason },
 													)
 													.await;
@@ -9186,10 +9206,8 @@ async fn spawn_native_invocation(
 													"",
 													request_id,
 													&invocation_id,
-													retention_session.as_deref(),
 													&lifecycle,
-													output_request,
-													&blobs,
+													&delivery,
 													&responses,
 												)
 												.await
@@ -9231,6 +9249,7 @@ async fn spawn_native_invocation(
 										&responses,
 										request_id,
 										&invocation_id,
+										&delivery,
 										omp_tool::Abort::EffectsUnknown { reason },
 									)
 									.await;
@@ -9352,10 +9371,8 @@ async fn forward_native_event(
 	fallback_reason: &str,
 	request_id: u64,
 	invocation_id: &Str,
-	retention_session: Option<&str>,
 	lifecycle: &NativeLifecycle,
-	output_request: omp_tool::OutputRequest,
-	blobs: &BlobHost,
+	delivery: &VerdictDelivery,
 	responses: &flume::Sender<pb::ServerFrame>,
 ) -> NativeForward {
 	match event {
@@ -9381,54 +9398,14 @@ async fn forward_native_event(
 		Some(Ok(ErasedEv::Done(outcome))) => {
 			if lifecycle.claim_terminal() {
 				let (json, is_error, useless) = erased_outcome_wire(outcome);
-				let details_blob =
-					match blobs.put_verdict_bytes(retention_session, invocation_id, &json) {
-						Ok(reference) => reference,
-						Err(error) => {
-							tracing::error!(
-								%error,
-								invocation_id = %invocation_id,
-								"could not retain native verdict before publication"
-							);
-							let _ = send_invocation_error(
-								responses,
-								request_id,
-								pb::ProtocolErrorCode::Internal,
-								"native verdict could not be retained",
-							)
-							.await;
-							return NativeForward::Terminal;
-						},
-					};
-				let source_bytes = u64::try_from(json.len()).unwrap_or(u64::MAX);
-				let limit = match output_request {
-					omp_tool::OutputRequest::Bounded => DEFAULT_RESULT_PROJECTION_BYTES,
-					omp_tool::OutputRequest::Complete => COMPLETE_RESULT_PROJECTION_BYTES,
-				};
-				let omitted = json.len() > limit;
-				let inline = if omitted { Bytes::new() } else { json };
-				let inline_bytes = u64::try_from(inline.len()).unwrap_or(u64::MAX);
-				let projection = output_projection(
-					output_request,
-					source_bytes,
-					inline_bytes,
-					omitted,
-					Some(details_blob.clone()),
-				);
-				send_invocation_terminal_body(
+				send_verdict_json(
 					responses,
 					request_id,
-					server_frame::Body::Verdict(pb::Verdict {
-						invocation_id: invocation_id.to_string(),
-						json: inline,
-						details_blob: Some(details_blob),
-						parts: Vec::new(),
-						is_error,
-						useless,
-						terminate: None,
-						projection: Some(projection),
-						props: Default::default(),
-					}),
+					invocation_id,
+					delivery,
+					json,
+					is_error,
+					useless,
 				)
 				.await;
 			}
@@ -9464,6 +9441,7 @@ async fn forward_native_event(
 					responses,
 					request_id,
 					invocation_id,
+					delivery,
 					omp_tool::Abort::EffectsUnknown { reason: Str::from(fallback_reason) },
 				)
 				.await;
@@ -9479,13 +9457,13 @@ fn spawn_worker_invocation(
 	mut invocation: ExtHostInvocation,
 	cancel: CancellationToken,
 	interrupts: Receiver<pb::Interrupt>,
-	output_request: omp_tool::OutputRequest,
-	retention_session: Option<Str>,
+	delivery: VerdictDelivery,
 	responses: flume::Sender<pb::ServerFrame>,
 	finished: flume::Sender<Finished>,
-	blobs: BlobHost,
 ) {
 	tokio::spawn(async move {
+		let VerdictDelivery { blobs, retention_session, output_request } = &delivery;
+		let output_request = *output_request;
 		let mut cancel_requested = false;
 		loop {
 			let event = if cancel_requested {
@@ -9537,7 +9515,7 @@ fn spawn_worker_invocation(
 				},
 				Some(ExtHostEvent::Complete(complete)) => {
 					let (json, details_blob, is_error) = match projected_worker_completion_json(
-						&blobs,
+						blobs,
 						&complete,
 						output_request,
 						retention_session.as_deref(),
@@ -9549,6 +9527,7 @@ fn spawn_worker_invocation(
 								&responses,
 								request_id,
 								&invocation_id,
+								&delivery,
 								omp_tool::Abort::EffectsUnknown { reason },
 							)
 							.await;
@@ -9563,6 +9542,7 @@ fn spawn_worker_invocation(
 									&responses,
 									request_id,
 									&invocation_id,
+									&delivery,
 									omp_tool::Abort::EffectsUnknown {
 										reason: sf!("worker verdict CAS returned an invalid hash"),
 									},
@@ -9585,6 +9565,7 @@ fn spawn_worker_invocation(
 								&responses,
 								request_id,
 								&invocation_id,
+								&delivery,
 								omp_tool::Abort::EffectsUnknown {
 									reason: sf!("worker verdict could not be retained"),
 								},
@@ -9641,6 +9622,7 @@ fn spawn_worker_invocation(
 							&responses,
 							request_id,
 							&invocation_id,
+							&delivery,
 							omp_tool::Abort::EffectsUnknown {
 								reason: sf!("worker verdict media is invalid or unavailable"),
 							},
@@ -9691,7 +9673,7 @@ fn spawn_worker_invocation(
 					} else {
 						omp_tool::Abort::Skipped { reason }
 					};
-					send_abort_verdict(&responses, request_id, &invocation_id, reason).await;
+					send_abort_verdict(&responses, request_id, &invocation_id, &delivery, reason).await;
 					break;
 				},
 				None => {
@@ -9704,6 +9686,7 @@ fn spawn_worker_invocation(
 						&responses,
 						request_id,
 						&invocation_id,
+						&delivery,
 						omp_tool::Abort::EffectsUnknown { reason },
 					)
 					.await;
@@ -9717,10 +9700,89 @@ fn spawn_worker_invocation(
 	});
 }
 
+/// What a terminal verdict needs to honor the `Verdict` contract: the CAS
+/// that holds the whole serialized `CallOutcome`, the session whose delivery
+/// lease retains it, and the projection the client asked for.
+#[derive(Clone, Debug)]
+struct VerdictDelivery {
+	blobs:             BlobHost,
+	retention_session: Option<Str>,
+	output_request:    omp_tool::OutputRequest,
+}
+
+/// Publishes one terminal verdict. Every terminal, including aborts and
+/// policy denials, stores its serialized `CallOutcome` in the environment CAS
+/// and carries the projection facts; the client refuses a verdict without
+/// them as an invalid outcome artifact.
+async fn send_verdict_json(
+	responses: &flume::Sender<pb::ServerFrame>,
+	request_id: u64,
+	invocation_id: &Str,
+	delivery: &VerdictDelivery,
+	json: Bytes,
+	is_error: bool,
+	useless: bool,
+) {
+	let details_blob = match delivery.blobs.put_verdict_bytes(
+		delivery.retention_session.as_deref(),
+		invocation_id,
+		&json,
+	) {
+		Ok(reference) => reference,
+		Err(error) => {
+			tracing::error!(
+				%error,
+				invocation_id = %invocation_id,
+				"could not retain the verdict before publication"
+			);
+			let _ = send_invocation_error(
+				responses,
+				request_id,
+				pb::ProtocolErrorCode::Internal,
+				"verdict could not be retained",
+			)
+			.await;
+			return;
+		},
+	};
+	let source_bytes = u64::try_from(json.len()).unwrap_or(u64::MAX);
+	let limit = match delivery.output_request {
+		omp_tool::OutputRequest::Bounded => DEFAULT_RESULT_PROJECTION_BYTES,
+		omp_tool::OutputRequest::Complete => COMPLETE_RESULT_PROJECTION_BYTES,
+	};
+	let omitted = json.len() > limit;
+	let inline = if omitted { Bytes::new() } else { json };
+	let inline_bytes = u64::try_from(inline.len()).unwrap_or(u64::MAX);
+	let projection = output_projection(
+		delivery.output_request,
+		source_bytes,
+		inline_bytes,
+		omitted,
+		Some(details_blob.clone()),
+	);
+	send_invocation_terminal_body(
+		responses,
+		request_id,
+		server_frame::Body::Verdict(pb::Verdict {
+			invocation_id: invocation_id.to_string(),
+			json: inline,
+			details_blob: Some(details_blob),
+			parts: Vec::new(),
+			is_error,
+			useless,
+			terminate: None,
+			projection: Some(projection),
+			props: Default::default(),
+		}),
+	)
+	.await;
+}
+
 async fn send_abort_verdict(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
 	invocation_id: &Str,
+	delivery: &VerdictDelivery,
 	abort: omp_tool::Abort,
 ) {
 	let verdict = CallOutcome::<serde_json::Value, serde_json::Value>::aborted(abort);
@@ -9734,20 +9796,14 @@ async fn send_abort_verdict(
 		.await;
 		return;
 	};
-	send_invocation_terminal_body(
+	send_verdict_json(
 		responses,
 		request_id,
-		server_frame::Body::Verdict(pb::Verdict {
-			invocation_id: invocation_id.to_string(),
-			json:          Bytes::from(json),
-			details_blob:  None,
-			parts:         Vec::new(),
-			is_error:      true,
-			useless:       false,
-			terminate:     None,
-			projection:    None,
-			props:         Default::default(),
-		}),
+		invocation_id,
+		delivery,
+		Bytes::from(json),
+		true,
+		false,
 	)
 	.await;
 }
@@ -9756,6 +9812,7 @@ async fn send_policy_denied_verdict(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
 	invocation_id: &Str,
+	delivery: &VerdictDelivery,
 	denied: policy_pb::PolicyDenied,
 ) {
 	tracing::warn!(
@@ -9792,20 +9849,14 @@ async fn send_policy_denied_verdict(
 		.await;
 		return;
 	};
-	send_invocation_terminal_body(
+	send_verdict_json(
 		responses,
 		request_id,
-		server_frame::Body::Verdict(pb::Verdict {
-			invocation_id: invocation_id.to_string(),
-			json:          Bytes::from(json),
-			details_blob:  None,
-			parts:         Vec::new(),
-			is_error:      true,
-			useless:       false,
-			terminate:     None,
-			projection:    None,
-			props:         Default::default(),
-		}),
+		invocation_id,
+		delivery,
+		Bytes::from(json),
+		true,
+		false,
 	)
 	.await;
 }
@@ -12403,6 +12454,76 @@ mod tests {
 		assert!(!requires_environment_host(&client_frame::Body::BlobDelete(
 			blob_pb::DeleteRequest::default(),
 		)));
+	}
+
+	/// Aborts and policy denials are terminal verdicts too: `env.proto` keeps
+	/// every whole `CallOutcome` in the environment CAS, and the client
+	/// rejects a verdict without its blob and projection as "an invalid
+	/// outcome artifact" instead of reporting the abort.
+	#[tokio::test]
+	async fn abort_and_policy_verdicts_carry_their_cas_blob_and_projection() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let invocation_id = Str::new_static("call-1");
+		for output_request in [omp_tool::OutputRequest::Bounded, omp_tool::OutputRequest::Complete] {
+			let delivery = VerdictDelivery {
+				blobs: blobs.clone(),
+				retention_session: Some(Str::new_static("session-1")),
+				output_request,
+			};
+			let (responses, frames) = flume::unbounded();
+			send_abort_verdict(
+				&responses,
+				7,
+				&invocation_id,
+				&delivery,
+				omp_tool::Abort::Interrupted { reason: Str::new_static("bash command was cancelled") },
+			)
+			.await;
+			send_policy_denied_verdict(
+				&responses,
+				8,
+				&invocation_id,
+				&delivery,
+				policy_pb::PolicyDenied { reason: "denied by policy".to_owned(), ..Default::default() },
+			)
+			.await;
+			for request_id in [7, 8] {
+				let frame = frames.recv_async().await.expect("verdict frame");
+				assert_eq!(frame.request_id, request_id);
+				let Some(server_frame::Body::Verdict(verdict)) = frame.body else {
+					panic!("expected a verdict frame");
+				};
+				assert!(verdict.is_error);
+				let details = verdict.details_blob.expect("verdict names its CAS blob");
+				let projection = verdict
+					.projection
+					.expect("verdict carries projection facts");
+				let size = u64::try_from(verdict.json.len()).expect("size");
+				assert_eq!(details.mime, "application/json");
+				assert!(details.inline.is_empty());
+				assert_eq!(details.size, size);
+				assert_eq!(details.hash.as_ref(), Hash32::sum(&verdict.json).as_bytes());
+				let stored = blobs
+					.worker_verdict_store()
+					.get(&omp_journal::blob::BlobRef::from(BlobId {
+						hash: details.hash.as_ref().try_into().expect("digest"),
+						size: details.size,
+					}))
+					.expect("verdict bytes live in the CAS");
+				assert_eq!(stored.as_ref(), verdict.json.as_ref());
+				assert_eq!(projection.request, match output_request {
+					omp_tool::OutputRequest::Bounded => pb::OutputRequest::Bounded as i32,
+					omp_tool::OutputRequest::Complete => pb::OutputRequest::Complete as i32,
+				});
+				assert_eq!((projection.source_bytes, projection.inline_bytes), (size, size));
+				assert!(!projection.omitted);
+				assert_eq!(projection.artifact.as_ref(), Some(&details));
+				let outcome: CallOutcome<serde_json::Value, serde_json::Value> =
+					serde_json::from_slice(&verdict.json).expect("inline CallOutcome");
+				assert!(!matches!(outcome, CallOutcome::Ok(_)));
+			}
+		}
 	}
 
 	#[tokio::test]
