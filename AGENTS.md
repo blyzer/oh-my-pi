@@ -88,6 +88,10 @@ platforms deliberately: clippy on one target never sees the other's
 `lint_linux` existed. Embedded CPython bundles exist for
 `aarch64-apple-darwin` (debug + release) and `x86_64`/`aarch64-unknown-linux-gnu`
 (debug); `crates/py/scripts/fetch-python.sh` errors on any other host.
+`pr-labels.yml` (area/kind/risk from `.github/labeler.yml`) and `pr-size.yml`
+label every PR; both informational, never required. A new crate gets exactly
+one `area/*` entry in `.github/labeler.yml`. Ruleset, required checks and
+auto-merge live in repo settings: `docs/BRANCH_PROTECTION.md`.
 
 ## Conventions
 
