@@ -11,17 +11,17 @@ code; apply them once in the GitHub UI.
 |---|---|---|
 | `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests and P1-P8 on macOS, P7 on a Linux PTY | Required (see below) |
 | `Package macOS` (`package-macos.yml`) | Release build, package, install smoke; only when the workflow or its scripts change | Not required |
-| `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml` | Informational |
-| `PR size` (`pr-size.yml`) | `size/xs` .. `size/xl` labels; one comment on `size/xl` | Informational |
+| `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml`, then `size/xs` .. `size/xl` labels and one comment on `size/xl` | Informational |
 
-Both label workflows run on `pull_request_target`, so they can label pull
-requests from forks. They check out nothing and run no code from the pull
-request. Both also have a `workflow_dispatch` input to relabel an existing
-pull request, for example after `.github/labeler.yml` changes:
+The label workflow runs on `pull_request_target`, so it can label pull
+requests from forks. It checks out nothing and runs no code from the pull
+request. Its size job runs after the path job, because `actions/labeler`
+replaces the whole label set and would drop a size label added beside it. A
+`workflow_dispatch` input relabels an existing pull request, for example after
+`.github/labeler.yml` or the size buckets change:
 
 ```sh
 gh workflow run pr-labels.yml -f pr=<number>
-gh workflow run pr-size.yml -f pr=<number>
 ```
 
 ## Ruleset on `omp2`
@@ -56,7 +56,7 @@ Use the job names exactly as the checks list of a pull request shows them:
 - `Rust workspace and acceptance proofs`
 - `Terminal proof P7 (Linux PTY)`
 
-Do **not** require `Package macOS`, `PR labels`, `PR size`, or the P8
+Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
 merge.
 
