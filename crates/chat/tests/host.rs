@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use omp_agent::{ApprovalBook, ApprovalScope, ApprovalSpec, Up};
 use omp_chat::{
-	BlockKind, CtrlCAction, Host, HostAction, HostCommand, HostMailbox, HostOptions, NativeEffect,
-	NativeHost, block_views, ctrl_c_action,
+	BlockKind, CtrlCAction, Host, HostAction, HostCommand, HostMailbox, HostOptions, ModelRoster,
+	NativeEffect, NativeHost, block_views, ctrl_c_action,
 	overlays::{
 		Outcome, Overlays,
 		services::{CollabOp, CollabOutcome, CollabParticipant, CollabRole, CollabState},
@@ -763,6 +763,107 @@ fn row(key: &'static str, efforts: &[&'static str]) -> omp_chat::ModelRow {
 	}
 }
 
+/// A discovery refresh posted to the actor's one mailbox while the picker is
+/// open reaches the open picker (new provider listed, highlight kept by model
+/// identity) and the `/model` roster.
+#[test]
+fn a_posted_model_roster_reaches_the_open_picker() {
+	let mut other = row("other/second", &[]);
+	other.name = "Second Model".into();
+	other.provider_id = "other".into();
+	other.provider = "Other Provider".into();
+	let (mut host, con, _saved) = saving_host(vec![row("test/model", &[]), other.clone()]);
+	host.key(Key::Alt('p')).expect("alt+p");
+	host.key(Key::Down).expect("down");
+	let text = omp_tui::frame_text(&host.picker_frame().expect("frame"));
+	assert!(!text.contains("Discovered"), "{text}");
+
+	let mut discovered = row("found/new-model", &[]);
+	discovered.name = "New Model".into();
+	discovered.provider_id = "found".into();
+	discovered.provider = "Discovered".into();
+	let roster = ModelRoster::new(vec![row("test/model", &[]), other, discovered]);
+	con.user::<HostMailbox>()
+		.expect("mailbox")
+		.post(HostAction::ModelsReplaced(roster));
+	assert_eq!(host.poll().expect("poll"), NativeEffect::Consumed);
+	assert!(host.overlay_open(), "a replaced roster keeps the picker open");
+	let text = omp_tui::frame_text(&host.picker_frame().expect("frame"));
+	assert!(text.contains("Discovered"), "the refreshed provider is listed:\n{text}");
+	assert!(text.contains("Second Model · Other Provider"), "highlight kept:\n{text}");
+
+	host.key(Key::Esc).expect("esc");
+	host.console("model found/new-model").expect("/model");
+	assert_eq!(host.model_badge().identifier, "found/new-model");
+}
+
+/// A saved pick (Alt+M, `/model`) is the next start's default: it assigns the
+/// `default` role, and the live `ai_model` route never reaches `config.cfg`.
+#[test]
+fn a_saved_pick_becomes_the_default_role_and_ai_model_stays_unarchived() {
+	let mut other = row("other/second", &[]);
+	other.name = "Second Model".into();
+	let (mut host, con, saved) = saving_host(vec![row("test/model", &[]), other]);
+	host.key(Key::Alt('m')).expect("alt+m");
+	host.key(Key::Down).expect("down");
+	host.key(Key::Enter).expect("enter");
+	assert_eq!(host.notice(), Some("Model: Second Model (default, saved to config.cfg)"));
+	assert_eq!(omp_agent::AI_MODEL.get(&con).as_str(), "other/second");
+	assert_eq!(con.get("ai_model_roles").expect("roles").to_string(), "{default other/second}");
+	let archive = saved.lock().clone();
+	assert!(archive.contains("ai_model_roles"), "{archive}");
+	assert!(!archive.lines().any(|line| line.starts_with("ai_model ")), "{archive}");
+}
+
+/// A picker host whose console saves `writecfg` output into the returned
+/// buffer; Alt+P opens the session-only picker, Alt+M the saving one.
+fn saving_host(
+	models: Vec<omp_chat::ModelRow>,
+) -> (NativeHost, Arc<omp_con::Ctx>, Arc<parking_lot::Mutex<String>>) {
+	let (mut session, _) = fixture();
+	let (snapshot, dom_events) = session.subscribe();
+	let (_, kernel_events) = flume::unbounded();
+	let (commands, _command_rx) = flume::unbounded();
+	let (up, _) = flume::unbounded();
+	let saved = Arc::new(parking_lot::Mutex::new(String::new()));
+	let sink = Arc::clone(&saved);
+	let con = Arc::new(
+		HostMailbox::new()
+			.attach(omp_con::Ctx::builder().saver(move |_, contents| {
+				*sink.lock() = contents.to_owned();
+				Ok(())
+			}))
+			.build(),
+	);
+	con.run(
+		r#"bind alt+p "cl_model_select session"; bind alt+m cl_model_select; bind escape cl_interrupt"#,
+	)
+	.expect("binds");
+	let host = NativeHost::new(
+		HostOptions {
+			model: omp_chat::ModelBadge::from_identifier("test/model"),
+			snapshot,
+			dom_events,
+			kernel_events,
+			commands,
+			up,
+			con: Arc::clone(&con),
+			models,
+			cycle: vec![("default".into(), "test/model".into(), None)],
+			resize_policy: ResizePolicy::Rebuild,
+			project: std::path::PathBuf::new(),
+			welcome: omp_chat::welcome::WelcomeFacts::default(),
+			ui: UiContext::default(),
+			services: Arc::new(omp_chat::overlays::NoServices),
+			speech: None,
+			resuming: false,
+			initial_panel: None,
+		},
+		Size::new(100, 30),
+	);
+	(host, con, saved)
+}
+
 #[test]
 fn alt_p_opens_the_model_picker_and_enter_sets_ai_model_for_the_session() {
 	let mut other = row("other/second", &["medium"]);
@@ -879,11 +980,19 @@ fn model_picker_fills_the_screen_assigns_roles_and_accepts_a_replaced_roster() {
 	assert_eq!(host.notice(), Some("smol role cleared (saved to config.cfg)"));
 	assert_eq!(con.get("ai_model_roles").expect("roles").to_string(), "{}");
 
-	// Discovery replaces the roster: the highlight stays on Second Model.
+	// Discovery replaces the roster through the actor's one mailbox: the
+	// highlight stays on Second Model.
 	let mut fresh = row("fresh/model", &[]);
 	fresh.provider_id = "fresh".into();
 	fresh.provider = "Fresh".into();
-	host.replace_models(vec![fresh, row("test/model", &[]), other]);
+	con.user::<HostMailbox>()
+		.expect("mailbox")
+		.post(HostAction::ModelsReplaced(ModelRoster::new(vec![
+			fresh,
+			row("test/model", &[]),
+			other,
+		])));
+	assert_eq!(host.poll().expect("poll"), NativeEffect::Consumed);
 	let text = omp_tui::frame_text(&host.picker_frame().expect("frame"));
 	assert!(text.contains("Fresh"), "{text}");
 	assert!(text.contains("Second Model · Other Provider"), "highlight kept:\n{text}");

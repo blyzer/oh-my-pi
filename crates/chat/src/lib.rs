@@ -60,7 +60,7 @@ pub mod transcript;
 /// Welcome banner.
 pub mod welcome;
 
-pub use actions::{HostAction, HostMailbox, SttFailureKind, SttUiEvent};
+pub use actions::{HostAction, HostMailbox, ModelRoster, SttFailureKind, SttUiEvent};
 pub use chrome::ModelBadge;
 pub use extension_status::{ExtensionStatus, ExtensionStatuses};
 pub use host::{

@@ -2956,6 +2956,10 @@ impl Presenter {
 				}
 			},
 			HostAction::DisplayReset => Routed::DisplayReset,
+			HostAction::ModelsReplaced(roster) => {
+				self.replace_models(roster.into_rows());
+				Routed::Repaint
+			},
 			HostAction::UpdateAvailable(update) => {
 				if self.transcript.update_available(update) {
 					Routed::RebuildProjection
@@ -3659,9 +3663,12 @@ impl Presenter {
 		}
 	}
 
-	/// Writes the picked model to the control plane: `ai_model` for the
-	/// session, `ai_task_model` for task subagents, archived to `config.cfg`
-	/// unless the picker was opened session-only.
+	/// Writes the picked model to the control plane: `ai_model` (the live
+	/// session route) or `ai_task_model` for task subagents. Unless the
+	/// picker was opened session-only, the choice is saved to `config.cfg`:
+	/// a session pick becomes the `default` role — the one persisted default
+	/// model, since `ai_model` itself is never archived — so the next start
+	/// launches on it and a later Alt+1 assignment is never outranked.
 	fn select_model(&mut self, row: &ModelRow, task: bool, session_only: bool) -> Routed {
 		let var = if task { "ai_task_model" } else { "ai_model" };
 		let script = format!("{var} {}", omp_con::Value::Str(row.key.clone()));
@@ -3671,6 +3678,9 @@ impl Presenter {
 		if !task {
 			self.reset_thinking_for(row);
 			self.sync_status();
+			if !session_only && let Err(error) = self.write_role(PickerRole::Default, Some(row)) {
+				return self.notice(error.to_string());
+			}
 		}
 		if !session_only && let Err(error) = self.con.exec("writecfg", Source::Console) {
 			return self.notice(format!("{} set for this session only: {error}", row.key));
@@ -3685,7 +3695,7 @@ impl Presenter {
 		} else if session_only {
 			format!("Session model: {label}")
 		} else {
-			format!("Model: {label} (saved to config.cfg)")
+			format!("Model: {label} (default, saved to config.cfg)")
 		})
 	}
 
@@ -3724,28 +3734,8 @@ impl Presenter {
 			return Routed::Repaint;
 		};
 		let clear = picker.holds_role(role, index);
-		let mut roles = match self.con.get(MODEL_ROLES_VAR) {
-			Some(omp_con::Value::Kv(roles)) => roles,
-			_ => omp_con::Kv::new(),
-		};
-		roles.0.retain(|(name, _)| name.as_str() != role.name());
-		if !clear {
-			roles
-				.0
-				.push((Str::new_static(role.name()), omp_con::Value::Str(row.key.clone())));
-		}
-		let script = format!("{MODEL_ROLES_VAR} {}", omp_con::Value::Kv(roles));
-		if let Err(error) = self.con.exec(&script, Source::Console) {
+		if let Err(error) = self.write_role(role, (!clear).then_some(&row)) {
 			return self.notice(error.to_string());
-		}
-		if !clear
-			&& let Some(entry) = self
-				.cycle
-				.iter_mut()
-				.find(|(name, ..)| name.as_str() == role.name())
-		{
-			entry.1 = row.key.clone();
-			entry.2 = None;
 		}
 		let marks = self.role_marks();
 		if let Some(Overlay::Models(picker)) = self.overlays.active_mut() {
@@ -3765,6 +3755,37 @@ impl Presenter {
 		} else {
 			format!("{role} role: {label} (saved to config.cfg)")
 		})
+	}
+
+	/// Assigns `role` to `row` in `ai_model_roles` (or clears it for `None`)
+	/// and points the Ctrl+P cycle's entry for that role at the new model.
+	fn write_role(
+		&mut self,
+		role: PickerRole,
+		row: Option<&ModelRow>,
+	) -> Result<(), omp_con::ConError> {
+		let mut roles = match self.con.get(MODEL_ROLES_VAR) {
+			Some(omp_con::Value::Kv(roles)) => roles,
+			_ => omp_con::Kv::new(),
+		};
+		roles.0.retain(|(name, _)| name.as_str() != role.name());
+		if let Some(row) = row {
+			roles
+				.0
+				.push((Str::new_static(role.name()), omp_con::Value::Str(row.key.clone())));
+		}
+		let script = format!("{MODEL_ROLES_VAR} {}", omp_con::Value::Kv(roles));
+		self.con.exec(&script, Source::Console)?;
+		if let Some(row) = row
+			&& let Some(entry) = self
+				.cycle
+				.iter_mut()
+				.find(|(name, ..)| name.as_str() == role.name())
+		{
+			entry.1 = row.key.clone();
+			entry.2 = None;
+		}
+		Ok(())
 	}
 
 	/// Replaces the model roster (a discovery refresh). An open picker
@@ -5132,13 +5153,6 @@ impl NativeHost {
 	/// Frame of the open picker or panel, when one is showing.
 	pub fn picker_frame(&self) -> Option<Frame> {
 		self.overlay.as_ref().map(|overlay| overlay.frame.clone())
-	}
-
-	/// Replaces the model roster (a discovery refresh); an open picker keeps
-	/// its selection, scope, and query by model identity.
-	pub fn replace_models(&mut self, models: Vec<ModelRow>) {
-		self.presenter.replace_models(models);
-		self.refresh();
 	}
 
 	/// Viewport band the open picker or panel is composited into — the

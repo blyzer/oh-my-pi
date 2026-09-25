@@ -74,7 +74,7 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	let project = fs::canonicalize(&launch.project).into_diagnostic()?;
 	let ctx = Arc::new(crate::process_ctx(&project)?);
 	let env = LaunchEnv::production(&project, launch.gateway.is_some())?;
-	let launch = Launch::prepare(launch, ctx, env).await?;
+	let mut launch = Launch::prepare(launch, ctx, env).await?;
 	let inputs = crate::chat_cmd::launch_input::prepare(&launch, piped_input, follow_ups)?;
 	if inputs.first.is_none() {
 		return Err(
@@ -82,7 +82,11 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 		);
 	}
 	let (mut kernel, mut session) = launch.compose().await?;
-	let catalog = Arc::clone(&launch.catalog);
+	// The catalog composition routed through, after discovery refreshed it.
+	let catalog = kernel
+		.inference()
+		.live_catalog()
+		.map_or_else(|| Arc::clone(&launch.catalog), |live| live.load());
 	let ephemeral_path = launch
 		.ephemeral
 		.then(|| session.journal_path().to_path_buf());
