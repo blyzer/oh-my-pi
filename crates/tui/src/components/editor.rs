@@ -1237,7 +1237,12 @@ impl Component for EditInput {
 			self.spelling.request_completion(text, range.clone());
 			ghost = self.spelling.completion(text, &range);
 		}
-		let hint = self.editor.inline_hint().or(ghost);
+		// Usage hints are separate words, spaced from typed text; a word
+		// completion is the rest of the word under the caret, painted flush.
+		let (hint, spaced) = match self.editor.inline_hint() {
+			Some(hint) => (Some(hint), true),
+			None => (ghost, false),
+		};
 		if spelling_changed {
 			pc.wake(self.slot, pc.now);
 		} else if self.spelling.awaiting() {
@@ -1583,7 +1588,10 @@ impl Component for EditInput {
 			if let Some(hint) = &hint
 				&& cursor == Some(content.text.len())
 			{
-				let hint_x = x.saturating_add(cell_width(content.text)).saturating_add(1);
+				let gap = u16::from(spaced && !content.text.ends_with(char::is_whitespace));
+				let hint_x = x
+					.saturating_add(cell_width(content.text))
+					.saturating_add(gap);
 				let hint_width = rect
 					.x
 					.saturating_add(layout.side_chrome)
@@ -3202,7 +3210,39 @@ mod tests {
 		let mut renderer = Renderer::new(Vec::new());
 		ui.present(&mut renderer, 10).unwrap();
 		let row = frame_row_text(ui.frame(), 0);
-		assert!(row.contains("recei ved"), "{row:?}");
+		// The completion starts in the caret cell, flush with the typed prefix.
+		let word = row.find("received").expect("ghost flush after the prefix");
+		let caret = cell_width(&row[..word]) + cell_width("recei");
+		assert_eq!(ui.frame().cursor(), Some((caret, 0)), "{row:?}");
+	}
+
+	#[test]
+	fn usage_hint_is_spaced_from_a_word_and_flush_after_typed_space() {
+		let command = Command::new("security", "Audit", &[]).with_hint("plan|import|compare");
+		let mut input = EditInput::new();
+		input.set_spelling_features(assist_features(false, false));
+		input.set_completion(Box::new(SlashCommands::new(vec![command].into_boxed_slice())));
+		let mut ui = Ui::from_root(input, 60, UiContext::default());
+		ui.focus_first();
+		let mut renderer = Renderer::new(Vec::new());
+		let mut paint = |ui: &mut Ui, typed: &str| {
+			for ch in typed.chars() {
+				ui.handle_key(if ch == ' ' { Key::Space } else { Key::Char(ch) });
+			}
+			ui.present(&mut renderer, 12).unwrap();
+			let row = frame_row_text(ui.frame(), 0);
+			let at = row
+				.find("/security plan|import|compare")
+				.unwrap_or_else(|| panic!("hint one cell after the text: {row:?}"));
+			(ui.frame().cursor(), cell_width(&row[..at]))
+		};
+		// No space typed: the painter supplies the separating cell.
+		let (caret, start) = paint(&mut ui, "/security");
+		assert_eq!(caret, Some((start + cell_width("/security"), 0)));
+		// The typed space is visible and the caret moves past it; the hint
+		// does not add a second gap.
+		let (caret, start) = paint(&mut ui, " ");
+		assert_eq!(caret, Some((start + cell_width("/security "), 0)));
 	}
 
 	#[test]
