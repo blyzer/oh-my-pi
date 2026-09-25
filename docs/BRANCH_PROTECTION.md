@@ -9,7 +9,7 @@ code; apply them once in the GitHub UI.
 
 | Workflow | What it does | Gating |
 |---|---|---|
-| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests and P1-P8 on macOS, P7 on a Linux PTY; the `CI gate` job summarises them | `CI gate` required (see below) |
+| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests and P1-P8 on macOS, P7 on a Linux PTY | Required (see below) |
 | `Package macOS` (`package-macos.yml`) | Release build, package, install smoke; only when the workflow or its scripts change | Not required |
 | `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml`, then `size/xs` .. `size/xl` labels and one comment on `size/xl` | Informational |
 
@@ -47,71 +47,24 @@ gh workflow run pr-labels.yml -f pr=<number>
 
 ### Required status checks
 
-Require exactly one check, named as the checks list of a pull request shows it:
+Use the job names exactly as the checks list of a pull request shows them:
 
-- `CI gate`
-
-`CI` runs on every pull request and every push to `omp2` and `main`. Its
-first job, `Detect Rust-relevant changes`, diffs the pull request against its
-merge base (a push against the previous head) and decides whether anything
-the Rust jobs check has changed: the paths listed in that job's `relevant()`
-function. When nothing has, for example in a pull request that touches only
-`docs/` outside `docs/py/`, every other job is skipped before it is queued, so
-nothing waits for the macOS runner. `CI gate` needs every job and always runs:
-
-| Situation | Jobs | `CI gate` |
-|---|---|---|
-| Nothing Rust-relevant changed | skipped | passes |
-| Rust-relevant change, every job green | succeeded | passes |
-| Any job failed, timed out or was cancelled | failure / cancelled | fails |
-| A job skipped although Rust-relevant files changed (its `needs` failed) | skipped | fails |
-| The change detection itself failed | skipped | fails |
-
-A manual run, a new branch and a push whose previous head is unknown always
-run every job. A job added to `ci.yml` must also be added to the gate's
-`needs:` list, or the gate will not wait for it.
-
-With the ruleset open in the UI, **Require status checks to pass > Add
-checks** takes `CI gate`, with GitHub Actions as its source. Through the API,
-the rule is:
-
-```json
-{
-  "type": "required_status_checks",
-  "parameters": {
-    "strict_required_status_checks_policy": false,
-    "required_status_checks": [
-      { "context": "CI gate", "integration_id": 15368 }
-    ]
-  }
-}
-```
-
-`integration_id` 15368 is GitHub Actions, so no other app can report a check
-of that name. The update replaces the ruleset's whole `rules` array, so keep
-every other rule and swap only the status-check rule:
-
-```sh
-id=$(gh api repos/blyzer/oh-my-pi/rulesets \
-  --jq '.[] | select(.name == "omp2-protected") | .id')
-gh api "repos/blyzer/oh-my-pi/rulesets/$id" --jq '{rules: ([.rules[]
-  | select(.type != "required_status_checks")] + [{type: "required_status_checks",
-  parameters: {strict_required_status_checks_policy: false, required_status_checks:
-  [{context: "CI gate", integration_id: 15368}]}}])}' > rules.json
-gh api --method PUT "repos/blyzer/oh-my-pi/rulesets/$id" --input rules.json
-```
-
-The six job checks (`Rust format`, `License policy and release notices`,
-`Runtime symbol and dependency contracts`, `Lint workspace (Linux)`,
-`Rust workspace and acceptance proofs`, `Terminal proof P7 (Linux PTY)`) keep
-their names, so a ruleset that still requires them keeps working until it is
-switched: GitHub counts a skipped job as passing a required check. Remove
-them from the ruleset when adding `CI gate`; the gate already covers them,
-including the case where one is skipped when it should not be.
+- `Rust format`
+- `License policy and release notices`
+- `Runtime symbol and dependency contracts`
+- `Lint workspace (Linux)`
+- `Rust workspace and acceptance proofs`
+- `Terminal proof P7 (Linux PTY)`
 
 Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
 merge.
+
+`CI` only runs when a pull request touches the paths listed in `ci.yml`, so a
+pull request that changes only other files (for example, most of `docs/`)
+never reports these checks. With them required, it waits forever. Either merge
+such pull requests as an admin, or give `ci.yml` a no-op job that always runs
+and require that job instead.
 
 ## Auto-merge
 
