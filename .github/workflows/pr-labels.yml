@@ -1,0 +1,41 @@
+name: PR labels
+
+# Labels each pull request by the paths it changes (area/*, kind/*, risk/*),
+# from .github/labeler.yml. sync-labels removes a label once the pull request
+# no longer touches its paths. Informational only: never a required check.
+#
+# pull_request_target, because the token of a pull_request run from a fork
+# cannot write labels. It runs this file as it is on the base branch and
+# checks out nothing: actions/labeler reads the changed paths through the
+# API, so no code from the pull request runs with this token.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  # Relabel an existing pull request, for example after editing labeler.yml.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: Label by changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: true
+          pr-number: ${{ github.event.pull_request.number || inputs.pr }}

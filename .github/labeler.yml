@@ -1,0 +1,180 @@
+# actions/labeler configuration: labels a pull request by the paths it
+# changes. Applied by .github/workflows/pr-labels.yml, which removes labels
+# whose paths the pull request no longer touches.
+#
+# Three flat families, so the pull request list filters on one label at a
+# time: area/* (which subsystem), kind/* (what sort of change), risk/* (a
+# surface that deserves a slower review). Areas follow the crate layout in
+# AGENTS.md; a new crate belongs in exactly one area.
+#
+# Globs: https://github.com/isaacs/minimatch (dot files match by default).
+
+# Areas
+
+area/app:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/app/**'
+          - 'crates/sdk/**'
+
+area/driver:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/driver/**'
+          - 'crates/adw/**'
+
+area/agent:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/agent/**'
+          - 'crates/scribe/**'
+          - 'crates/memory/**'
+          - 'crates/snapcompact/**'
+
+area/session:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/journal/**'
+          - 'crates/dom/**'
+          - 'crates/session/**'
+          - 'crates/vocab/**'
+
+area/inference:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/ai/**'
+          - 'crates/catalog/**'
+          - 'crates/oauth/**'
+          - 'crates/http/**'
+
+area/tools:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/tool/**'
+          - 'crates/tools/**'
+          - 'crates/edit/**'
+          - 'crates/ast/**'
+          - 'crates/walker/**'
+          - 'crates/vcs/**'
+          - 'crates/ar/**'
+          - 'crates/webview/**'
+          - 'crates/desktop/**'
+
+area/env:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/env/**'
+          - 'crates/envd/**'
+          - 'crates/sandbox/**'
+
+area/shell:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/shell/**'
+          - 'crates/shell-builtins/**'
+
+area/python:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/py/**'
+          - 'crates/py-link/**'
+          - 'crates/ext/**'
+          - 'docs/py/**'
+          - 'docs/pyx/**'
+
+area/ui:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/tui/**'
+          - 'crates/macros/**'
+          - 'crates/chat/**'
+          - 'crates/gui/**'
+
+area/audio:
+  - changed-files:
+      - any-glob-to-any-file: 'crates/audio/**'
+
+area/wire:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/proto/**'
+          - 'crates/rpc/**'
+          - 'crates/serve/**'
+
+area/platform:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/core/**'
+          - 'crates/con/**'
+          - 'crates/cache/**'
+          - 'crates/secrets/**'
+          - 'crates/observability/**'
+          - 'crates/collab/**'
+
+area/e2e:
+  - changed-files:
+      - any-glob-to-any-file: 'crates/e2e/**'
+
+area/ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - '.cargo/**'
+          - '.config/**'
+          - 'justfile'
+          - 'scripts/**'
+          - 'tools/**'
+          - 'rust-toolchain.toml'
+
+# Kinds
+
+kind/tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/*/tests/**'
+          - '**/snapshots/**'
+          - 'fixtures/**'
+
+kind/docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+
+kind/dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+          - 'crates/py/requirements.txt'
+          - 'deny.toml'
+          - 'about.toml'
+
+# Risks: surfaces where a mistake outlives the pull request.
+
+# Durable .oms journal and blob store: sessions written today are replayed
+# by every later build.
+risk/journal-format:
+  - changed-files:
+      - any-glob-to-any-file: 'crates/journal/**'
+
+# Protobuf sources: wire contracts other processes speak.
+risk/wire-protocol:
+  - changed-files:
+      - any-glob-to-any-file: 'crates/proto/proto/**'
+
+# Pinned toolchain, codegen backends and workspace-wide Cargo settings.
+risk/toolchain:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'rust-toolchain.toml'
+          - '.cargo/**'
+          - 'Cargo.toml'
+
+# Static CPython linkage: breaks every binary that embeds omp-py.
+risk/python-linkage:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'crates/py/build.rs'
+          - 'crates/py/scripts/**'
+          - 'crates/py-link/**'
