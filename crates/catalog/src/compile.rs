@@ -3880,7 +3880,7 @@ fn compile_models(
 						CompileError::Invariant(Str::from(format!("unknown reasoning mode `{mode}`")))
 					})?);
 			}
-			let key = ModelKey::new(format!("{provider}/{logical_id}"));
+			let key = ModelKey::provider_scoped(ProviderId::from_ref(&provider), &logical_id);
 			let thinking_id = thinking.as_ref().map(|profile| {
 				let id = profile.content_id();
 				thinking_policies
@@ -4011,18 +4011,18 @@ fn compile_models(
 					deprecated:       members.iter().all(|(_, row, _)| row.deprecated),
 				},
 				context_promotion_target: first.1.context_promotion_target.as_ref().map(|target| {
-					ModelKey::new(if target.contains('/') {
-						target.clone()
+					if target.contains('/') {
+						ModelKey::new(target.clone())
 					} else {
-						Str::from(format!("{provider}/{target}"))
-					})
+						ModelKey::provider_scoped(ProviderId::from_ref(&provider), target)
+					}
 				}),
 				compaction_model: first.1.compaction_model.as_ref().map(|target| {
-					ModelKey::new(if target.contains('/') {
-						target.clone()
+					if target.contains('/') {
+						ModelKey::new(target.clone())
 					} else {
-						Str::from(format!("{provider}/{target}"))
-					})
+						ModelKey::provider_scoped(ProviderId::from_ref(&provider), target)
+					}
 				}),
 				edit_revision,
 				remote_compaction: first.1.remote_compaction.as_ref().map(|source| {
