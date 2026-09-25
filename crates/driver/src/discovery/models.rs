@@ -4,6 +4,7 @@ use std::{
 	cmp::Reverse,
 	collections::BTreeMap,
 	env, fs, io,
+	iter::FusedIterator,
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::SystemTime,
@@ -19,11 +20,11 @@ use omp_catalog::{
 	AccountScope, AuthSpec, AuthSpecKind, Availability, CatalogOverlay, CatalogOverlayBuilder,
 	ClassId, ContextStrategy, CredentialSourceSpec, EvidenceConfidence, ModalityBits,
 	ModelAvailability, ModelKey, ModelLimits, ModelOverlay, ModelPatch, ModelProvenance, ModelSpec,
-	OverlaySource, OverlayStore, PremiumMultiplier, Pricing, ProvenanceKind, ProvenanceSource,
-	ProviderDef, ProviderId, RouteDef, RouteId, RouteOverlay, RoutePatch, ThinkingPolicy,
-	ThinkingRouting, WireModelId,
+	OverlaySource, OverlayStack, OverlayStore, PremiumMultiplier, Pricing, ProvenanceKind,
+	ProvenanceSource, ProviderDef, ProviderId, RouteDef, RouteId, RouteOverlay, RoutePatch,
+	ThinkingPolicy, ThinkingRouting, UnsafeTrustScope, WireModelId,
 };
-use omp_core::Str;
+use omp_core::{Str, string_id};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 use toml::{de, ser};
@@ -152,6 +153,33 @@ pub enum HeaderValueSource {
 }
 
 impl ProviderConfig {
+	/// Every model entry this provider declares, `models` then
+	/// `modelOverrides`, with its table name.
+	pub fn configured_models(
+		&self,
+	) -> impl DoubleEndedIterator<Item = (&str, &ModelConfig)> + FusedIterator + Clone + '_ {
+		self
+			.models
+			.iter()
+			.chain(self.model_overrides.iter())
+			.map(|(name, model)| (name.as_str(), model))
+	}
+
+	/// Whether this provider's `models.toml` table declares the model `key`
+	/// names, keyed `<provider>/<id>` like every catalog model.
+	pub fn declares(&self, provider: &ProviderId<str>, key: &ModelKey<str>) -> bool {
+		key.scoped_model(provider)
+			.is_some_and(|model| self.declares_wire(model))
+	}
+
+	/// Whether this provider's `models.toml` table declares the provider
+	/// model id `wire`.
+	pub fn declares_wire(&self, wire: &str) -> bool {
+		self
+			.configured_models()
+			.any(|(name, model)| model.wire_id(name) == wire)
+	}
+
 	/// Classifies configured headers without resolving or copying secret
 	/// material into the catalog.
 	pub fn header_sources(&self) -> Vec<(Str, HeaderValueSource)> {
@@ -204,12 +232,88 @@ pub struct ModelConfig {
 	/// Premium quota multiplier, written as text (`'0.25'`) or a number.
 	#[serde(default, deserialize_with = "number_or_text")]
 	pub premium_multiplier: Option<Str>,
-	/// Compaction model selector.
-	pub compaction_model: Option<Str>,
+	/// Compaction model reference.
+	pub compaction_model: Option<ModelReference>,
 	/// Preferred edit-tool contract revision.
 	pub edit_revision: Option<Str>,
-	/// Context-promotion target selector.
-	pub context_promotion_target: Option<Str>,
+	/// Context-promotion target reference.
+	pub context_promotion_target: Option<ModelReference>,
+}
+
+impl ModelConfig {
+	/// The provider's own id for the model this entry declares: the explicit
+	/// `id`, else the entry's table name.
+	pub fn wire_id<'a>(&'a self, name: &'a str) -> &'a str {
+		self.id.as_deref().unwrap_or(name)
+	}
+}
+
+string_id!(/// A model named by a `models.toml` fact (`compactionModel`,
+	/// `contextPromotionTarget`), written as the user wrote it: usually the
+	/// declaring provider's own model id, else any catalog model selector.
+	///
+	/// A reference resolves inside its declaring provider first
+	/// ([`ModelReference::within`]), then through the catalog-wide selection
+	/// every other model selector uses ([`ModelReference::across`]); one that
+	/// names nothing yet stays in the declaring provider's namespace, where
+	/// runtime discovery adds models.
+	ModelReference);
+
+impl ModelReference<str> {
+	/// The declaring provider's model this reference names: an entry of the
+	/// provider's own `models.toml` table (by table name or `id`), else a
+	/// catalog model or alias under `<provider>/<reference>`.
+	pub fn within(
+		&self,
+		provider: &ProviderId<str>,
+		declared: &ProviderConfig,
+		catalog: &omp_catalog::Catalog,
+	) -> Option<ModelKey> {
+		let reference = self.as_str();
+		if let Some(wire) = declared
+			.configured_models()
+			.find(|(name, model)| *name == reference || model.wire_id(name) == reference)
+			.map(|(name, model)| model.wire_id(name))
+		{
+			return Some(ModelKey::provider_scoped(provider, wire));
+		}
+		let scoped = ModelKey::provider_scoped(provider, reference);
+		if catalog.model(&scoped).is_some() {
+			return Some(scoped);
+		}
+		catalog
+			.resolve_alias(scoped.as_str())
+			.filter(|model| {
+				model.routes.iter().any(|route| {
+					catalog
+						.route(route)
+						.is_some_and(|route| route.provider.as_str() == provider.as_str())
+				})
+			})
+			.map(|model| model.key.clone())
+	}
+
+	/// The model the catalog-wide selector resolution names: exact keys,
+	/// aliases, `provider/model` pairs, and bare ids, exactly as `/model`,
+	/// role selectors, and `ai_model` resolve.
+	pub fn across(&self, catalog: &omp_catalog::Catalog) -> Option<ModelKey> {
+		omp_catalog::select_model(
+			catalog.models(),
+			catalog.routes(),
+			catalog.aliases(),
+			&[],
+			&BTreeMap::new(),
+			self.as_str(),
+		)
+		.ok()
+		.map(|selected| selected.model)
+	}
+
+	/// The key an unresolved reference keeps: the declaring provider's
+	/// namespace, where a later discovery listing adds the model.
+	pub fn unresolved(&self, provider: &ProviderId<str>) -> ModelKey {
+		ModelKey::provider_scoped(provider, self.as_str())
+	}
 }
 
 /// A scalar written either as text or as a bare number.
@@ -561,7 +665,10 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 	};
 	let mut builder = CatalogOverlayBuilder::new(source.clone());
 	let catalog = omp_catalog::Catalog::embedded();
+	let mut models = Vec::new();
+	let mut references = Vec::new();
 	for (provider, definition) in &config.providers {
+		let provider_id = ProviderId::from_ref(provider.as_str());
 		let configured_auth = definition
 			.auth
 			.as_deref()
@@ -687,12 +794,9 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 			}
 			Some(route_id)
 		};
-		for (name, model) in definition
-			.models
-			.iter()
-			.chain(definition.model_overrides.iter())
-		{
-			let key = model.id.as_deref().unwrap_or(name.as_str());
+		for (name, model) in definition.configured_models() {
+			let wire = model.wire_id(name);
+			let key = ModelKey::provider_scoped(provider_id, wire);
 			let limits =
 				(model.context_window.is_some() || model.max_tokens.is_some()).then_some(ModelLimits {
 					context_window:        model.context_window,
@@ -705,19 +809,22 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 				|| model.supports_streaming.is_some()
 				|| model.input.is_some()
 			{
-				let inherited = omp_catalog::Catalog::embedded()
-					.models()
-					.iter()
-					.find(|candidate| {
-						candidate.key.as_str() == key
-							|| candidate
+				// The provider's own record, else the same model id anywhere
+				// (a proxy reselling a bundled model inherits its evidence).
+				let inherited = catalog
+					.model(&key)
+					.or_else(|| {
+						catalog.models().iter().find(|candidate| {
+							candidate
 								.key
 								.as_str()
 								.split_once('/')
-								.is_some_and(|(_, id)| id == key)
+								.is_some_and(|(_, id)| id == wire)
+						})
 					})
-					.map(|candidate| candidate.capabilities.clone())
-					.unwrap_or_else(omp_catalog::unknown_capabilities);
+					.map_or_else(omp_catalog::unknown_capabilities, |candidate| {
+						candidate.capabilities.clone()
+					});
 				let mut updated = inherited;
 				updated
 					.operations
@@ -737,7 +844,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 				}
 				if let Some(input) = &model.input {
 					chat.input_modalities =
-						Availability::Native(parse_modalities(input, provider, key)?);
+						Availability::Native(parse_modalities(input, provider, wire)?);
 				}
 				capabilities = Some(updated);
 			}
@@ -749,7 +856,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 					let policy = value.clone().try_into::<ThinkingPolicy>().map_err(|_| {
 						ModelsConfigError::InvalidFact {
 							provider: provider.clone(),
-							model:    Str::new(key),
+							model:    Str::new(wire),
 							field:    "reasoning",
 						}
 					})?;
@@ -757,7 +864,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 						.validate()
 						.map_err(|_| ModelsConfigError::InvalidFact {
 							provider: provider.clone(),
-							model:    Str::new(key),
+							model:    Str::new(wire),
 							field:    "reasoning",
 						})?;
 					Some(Some(policy.content_id()))
@@ -772,7 +879,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 						.try_into::<Pricing>()
 						.map_err(|_| ModelsConfigError::InvalidFact {
 							provider: provider.clone(),
-							model:    Str::new(key),
+							model:    Str::new(wire),
 							field:    "cost",
 						})
 				})
@@ -782,7 +889,7 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 					.validate()
 					.map_err(|_| ModelsConfigError::InvalidFact {
 						provider: provider.clone(),
-						model:    Str::new(key),
+						model:    Str::new(wire),
 						field:    "cost",
 					})?;
 			}
@@ -792,25 +899,24 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 				.map(|value| {
 					parse_multiplier(value).ok_or_else(|| ModelsConfigError::InvalidFact {
 						provider: provider.clone(),
-						model:    Str::new(key),
+						model:    Str::new(wire),
 						field:    "premiumMultiplier",
 					})
 				})
 				.transpose()?
 				.map(|value| Some(PremiumMultiplier::from_millionths(value)));
-			let existing = catalog.models().iter().find(|candidate| {
-				candidate.key.as_str() == key
-					&& candidate.routes.iter().any(|route_id| {
-						catalog
-							.route(route_id)
-							.is_some_and(|route| route.provider.as_str() == provider.as_str())
-					})
+			let existing = catalog.model(&key).filter(|candidate| {
+				candidate.routes.iter().any(|route_id| {
+					catalog
+						.route(route_id)
+						.is_some_and(|route| route.provider.as_str() == provider.as_str())
+				})
 			});
 			let added = existing.is_none().then(|| {
 				configured_model_record(
 					catalog,
-					provider,
-					key,
+					key.clone(),
+					wire,
 					model,
 					definition,
 					configured_route
@@ -820,8 +926,22 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 					&source,
 				)
 			});
-			builder = builder.with_model(ModelOverlay {
-				selector: omp_catalog::ExactSelector::new(provider.clone(), ModelKey::from(key)),
+			for (field, reference) in [
+				(ReferenceField::CompactionModel, &model.compaction_model),
+				(ReferenceField::ContextPromotionTarget, &model.context_promotion_target),
+			] {
+				if let Some(reference) = reference {
+					references.push(PendingReference {
+						model: models.len(),
+						field,
+						provider: provider_id,
+						declared: definition,
+						reference,
+					});
+				}
+			}
+			models.push(ModelOverlay {
+				selector: omp_catalog::ExactSelector::new(provider.clone(), key),
 				added,
 				patch: ModelPatch {
 					display_name: model.name.clone(),
@@ -830,21 +950,80 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 					thinking,
 					pricing,
 					premium_multiplier_millionths,
-					compaction_model: model
-						.compaction_model
-						.clone()
-						.map(|value| Some(ModelKey::from(value))),
 					edit_revision: model.edit_revision.clone().map(Some),
-					context_promotion_target: model
-						.context_promotion_target
-						.clone()
-						.map(|value| Some(ModelKey::from(value))),
 					..ModelPatch::default()
 				},
 			});
 		}
 	}
-	Ok(builder.build())
+	// References resolve once every configured key is known: inside the
+	// declaring provider first, then catalog-wide against the configured
+	// catalog, which is materialized only when some reference needs it.
+	let mut global = Vec::new();
+	for pending in references {
+		match pending
+			.reference
+			.within(pending.provider, pending.declared, catalog)
+		{
+			Some(key) => pending.apply(&mut models, key),
+			None => global.push(pending),
+		}
+	}
+	if !global.is_empty() {
+		let configured = catalog
+			.with_overlay_stack(
+				&OverlayStack::from_layers([(
+					OverlaySource::UserConfig,
+					models
+						.iter()
+						.cloned()
+						.fold(builder.clone(), CatalogOverlayBuilder::with_model)
+						.build(),
+				)]),
+				UnsafeTrustScope::ALL,
+			)
+			.map_err(|source| ModelsConfigError::ReferenceCatalog { source })?;
+		for pending in global {
+			let key = pending
+				.reference
+				.across(&configured)
+				.unwrap_or_else(|| pending.reference.unresolved(pending.provider));
+			pending.apply(&mut models, key);
+		}
+	}
+	Ok(models
+		.into_iter()
+		.fold(builder, CatalogOverlayBuilder::with_model)
+		.build())
+}
+
+/// The `models.toml` facts that name another model.
+#[derive(Clone, Copy)]
+enum ReferenceField {
+	CompactionModel,
+	ContextPromotionTarget,
+}
+
+/// One model reference awaiting resolution against every configured key.
+struct PendingReference<'c> {
+	/// Index of the declaring model's overlay.
+	model:     usize,
+	field:     ReferenceField,
+	provider:  &'c ProviderId<str>,
+	declared:  &'c ProviderConfig,
+	reference: &'c ModelReference,
+}
+
+impl PendingReference<'_> {
+	fn apply(&self, models: &mut [ModelOverlay], key: ModelKey) {
+		let patch = &mut models[self.model].patch;
+		match self.field {
+			ReferenceField::CompactionModel => patch.compaction_model = Some(Some(key)),
+			ReferenceField::ContextPromotionTarget => {
+				patch.context_promotion_target = Some(Some(key));
+			},
+		}
+	}
 }
 
 fn validate_discovery(config: &ModelsConfig) -> Result<(), ModelsConfigError> {
@@ -991,8 +1170,8 @@ fn configured_auth_spec(provider: &str, auth: &str) -> Result<AuthSpec, ModelsCo
 
 fn configured_model_record(
 	catalog: &omp_catalog::Catalog,
-	_provider: &str,
-	key: &str,
+	key: ModelKey,
+	wire: &str,
 	model: &ModelConfig,
 	definition: &ProviderConfig,
 	route: RouteId,
@@ -1014,10 +1193,10 @@ fn configured_model_record(
 		.or_else(|| catalog.models().first())
 		.expect("embedded catalog has a model template");
 	ModelSpec {
-		key: ModelKey::from(key),
-		class: ClassId::from(key),
-		display_name: model.name.clone().unwrap_or_else(|| Str::new(key)),
-		wire_ids: Box::new([(route.clone(), WireModelId::from(key))]),
+		key,
+		class: ClassId::from(wire),
+		display_name: model.name.clone().unwrap_or_else(|| Str::new(wire)),
+		wire_ids: Box::new([(route.clone(), WireModelId::from(wire))]),
 		routes: Box::new([route]),
 		capabilities: configured_chat_capabilities(),
 		limits: ModelLimits::default(),
@@ -1593,6 +1772,14 @@ pub enum ModelsConfigError {
 		/// Provider listing the model.
 		provider: Str,
 	},
+	/// The configured catalog that model references resolve against did not
+	/// materialize.
+	#[error("the configured catalog for resolving model references is invalid")]
+	ReferenceCatalog {
+		/// Catalog validation failure.
+		#[source]
+		source: omp_catalog::snapshot::SnapshotError,
+	},
 	/// The configuration root could not be resolved.
 	#[error(transparent)]
 	ConfigRoot(#[from] omp_core::dirs::DataDirError),
@@ -1666,7 +1853,26 @@ mod tests {
 		let native = fs::read_to_string(location.config_dir.join("models.toml")).expect("native");
 		assert!(!native.contains("sk-literal-key"), "{native}");
 		assert_eq!(fs::read_to_string(&v1).expect("v1"), V1_MODELS_YML);
-		lower_user_overlay(&imported.config).expect("imported config lowers");
+		// The file keeps the provider's own ids; lowering scopes them.
+		assert!(native.contains("[providers.easycliproxy.models.claude-opus-5]"), "{native}");
+		let overlay = lower_user_overlay(&imported.config).expect("imported config lowers");
+		let catalog = omp_catalog::Catalog::embedded()
+			.with_overlay_stack(
+				&OverlayStack::from_layers([(OverlaySource::UserConfig, overlay)]),
+				UnsafeTrustScope::ALL,
+			)
+			.expect("imported config materializes");
+		let opus = catalog
+			.model(ModelKey::from_ref("easycliproxy/claude-opus-5"))
+			.expect("imported model is provider-scoped");
+		assert_eq!(opus.display_name, "Claude Opus 5");
+		assert_eq!(opus.limits.context_window, Some(1_000_000));
+		assert_eq!(opus.wire_ids[0].1.as_str(), "claude-opus-5");
+		assert!(
+			catalog
+				.model(ModelKey::from_ref("easycliproxy/gpt-5.5"))
+				.is_some()
+		);
 
 		let native = load_or_import_legacy(&location)
 			.expect("native")
@@ -1881,7 +2087,7 @@ mod tests {
 		let model = catalog
 			.models()
 			.iter()
-			.find(|model| model.key.as_str() == "fast")
+			.find(|model| model.key.as_str() == "demo/fast")
 			.expect("model");
 		assert_eq!(model.routes.as_ref(), provider.routes.as_ref());
 		assert_eq!(model.limits.context_window, Some(128_000));
@@ -1900,7 +2106,7 @@ mod tests {
 		let model = catalog
 			.models()
 			.iter()
-			.find(|model| model.key.as_str() == "fast")
+			.find(|model| model.key.as_str() == "demo/fast")
 			.expect("model");
 		assert!(
 			model

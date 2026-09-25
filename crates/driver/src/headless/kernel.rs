@@ -1834,7 +1834,17 @@ pub async fn compose_kernel(
 		Ok(stack) => Arc::clone(&stack.catalog),
 		Err(_) => Arc::new(omp_catalog::snapshot::Catalog::embedded().clone()),
 	};
-	let model = resolve_model_selector(catalog.as_ref(), model_selector)?;
+	// An exact key or alias, else a bare or provider-qualified model id
+	// (`--model fast`) through the same catalog selection `/model` uses.
+	let model = match resolve_model_selector(catalog.as_ref(), model_selector) {
+		Ok(model) => model,
+		Err(error) => {
+			let settings = omp_catalog::settings::ModelSettings::from_con(&ctx);
+			crate::discovery::roles::resolve_role_selector(catalog.as_ref(), &settings, model_selector)
+				.map(|selected| Str::new(selected.model.as_str()))
+				.map_err(|_| error)?
+		},
+	};
 	let model_key = omp_catalog::ModelKey::from(model.as_str());
 	let model_spec = catalog
 		.model(&model_key)
