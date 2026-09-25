@@ -90,4 +90,30 @@ describe("TUI input/render scheduling", () => {
 			tui.stop();
 		}
 	});
+
+	it("paints printable input synchronously instead of waiting for the render throttle", () => {
+		const term = new VirtualTerminal(20, 4);
+		const scheduler = new DeferredRenderScheduler();
+		const events: string[] = [];
+		const probe = new InputProbe(events);
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.addChild(probe);
+		tui.setFocus(probe);
+
+		try {
+			tui.start();
+			scheduler.immediates.shift()?.();
+			const initialTimer = scheduler.timers.shift();
+			if (initialTimer && !initialTimer.canceled) initialTimer.callback();
+			events.length = 0;
+			scheduler.nowMs = 1;
+
+			term.sendInput(" ");
+
+			expect(events).toEqual(["input", "render"]);
+			expect(scheduler.timers.filter(timer => !timer.canceled)).toHaveLength(0);
+		} finally {
+			tui.stop();
+		}
+	});
 });

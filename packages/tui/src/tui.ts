@@ -2004,6 +2004,18 @@ export class TUI extends Container {
 		this.#renderScheduler.scheduleImmediate(() => this.#scheduleRender());
 	}
 
+	/** Paint input-driven edits in the same stdin turn so typing never waits for the frame throttle. */
+	#renderAfterInput(): void {
+		if (this.#stopped) return;
+		if (this.#renderTimer) {
+			this.#renderTimer.cancel();
+			this.#renderTimer = undefined;
+		}
+		this.#renderRequested = false;
+		this.#executeRender();
+		if (this.#renderRequested) this.#scheduleRender();
+	}
+
 	#maybeDeferGhosttyInitialImagePaint(): boolean {
 		if (this.#ghosttyInitialImageDelayDone) return false;
 		if (TERMINAL.id !== "ghostty" || TERMINAL.imageProtocol !== ImageProtocol.Kitty) {
@@ -2143,8 +2155,9 @@ export class TUI extends Container {
 		if (data.length === 0) return;
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
-		// key would make idle navigation pay a full frame of latency.
-		if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) {
+		// key would make typing feel one frame behind.
+		const inputNeedsGrace = matchesKey(data, "ctrl+c") || matchesKey(data, "escape");
+		if (inputNeedsGrace) {
 			this.#inputRenderGraceUntilMs = this.#renderScheduler.now() + TUI.#INPUT_RENDER_GRACE_MS;
 		}
 		if (this.#inputListeners.size > 0) {
@@ -2201,7 +2214,8 @@ export class TUI extends Container {
 				return;
 			}
 			focused.handleInput(data);
-			this.requestRender();
+			if (inputNeedsGrace) this.requestRender();
+			else this.#renderAfterInput();
 		}
 	}
 
