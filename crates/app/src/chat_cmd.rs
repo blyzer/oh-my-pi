@@ -166,6 +166,18 @@ impl LaunchEnv {
 	}
 }
 
+/// The catalog an interactive session presents: the one the composed kernel
+/// routes through, else (behind a gateway) the launch snapshot.
+fn session_catalog(
+	kernel: &omp_agent::Kernel<omp_driver::headless::kernel::ComposedInference>,
+	launch: &Arc<Catalog>,
+) -> Arc<Catalog> {
+	kernel
+		.inference()
+		.catalog()
+		.map_or_else(|| Arc::clone(launch), Arc::clone)
+}
+
 /// One `--models` roster entry: the pattern it came from, the admitted model
 /// key, and the pattern's explicit thinking suffix.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -946,6 +958,11 @@ pub(crate) async fn run(
 	}
 	let launch_inputs = launch_input::prepare(&launch, None, Vec::new())?;
 	let (mut kernel, session) = launch.compose().await?;
+	// Composing the kernel refreshed runtime model discovery, after the
+	// launch snapshot was read. The badge, the picker, and the controller
+	// project the catalog the kernel routes through, so a model discovered
+	// now is listed and selectable in this session.
+	let catalog = &session_catalog(&kernel, catalog);
 	let live_auth = kernel
 		.inference()
 		.production_stack()
@@ -990,7 +1007,7 @@ pub(crate) async fn run(
 		badge
 	};
 	// Picker roster and cycle for the model keybindings (alt+p/alt+m,
-	// ctrl+p): catalog facts projected once at launch, never journaled. A
+	// ctrl+p): facts of the composed kernel's catalog, never journaled. A
 	// `--models` scope narrows the picker and becomes the cycle.
 	let models = crate::pickers::model_rows(catalog.as_ref(), &launch.scoped);
 	let cycle = launch.cycle();

@@ -374,6 +374,7 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 			.insert(omp_ai::discovery::DiscoveryCacheKey::endpoint(probe.provider, &probe.endpoint));
 	}
 	let mut normalized = Vec::new();
+	let mut claimed = DiscoveryClaims::default();
 	for key in cache_keys {
 		let Some(cached) = store
 			.load_fresh(&key, now_ms)
@@ -401,13 +402,7 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 			.normalize_batch(&cached.rows)
 			.map_err(catalog_composition)?
 		{
-			let explicitly_configured = explicit.is_some_and(|provider| {
-				provider.models.contains_key(record.model.key.as_str())
-					|| provider
-						.model_overrides
-						.contains_key(record.model.key.as_str())
-			});
-			if !explicitly_configured {
+			if let Some(record) = claimed.admit(&configured, explicit, record) {
 				normalized.push(record.into_catalog_overlay());
 			}
 		}
@@ -432,6 +427,76 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 		)
 		.map_err(catalog_composition)?;
 	Ok(Arc::new(catalog))
+}
+
+/// Keys already taken by the runtime-discovery layer being assembled.
+///
+/// Discovery is an additive layer over the bundled and configured catalog: a
+/// discovered row may add a model, never replace one. The overlay resolver
+/// patches an existing key in place, so a row that reused a bundled or
+/// configured key, or one an earlier cache generation already added, would
+/// rewrite that model's routes and wire ids. Keys are provider-scoped by the
+/// normalizer, so the only same-key rows left are the owning provider's own
+/// listing of a model the catalog already declares, and the first one wins.
+#[derive(Default)]
+struct DiscoveryClaims {
+	models:  BTreeSet<omp_catalog::ModelKey>,
+	aliases: BTreeSet<Str>,
+}
+
+impl DiscoveryClaims {
+	/// Returns `record` when it adds a new model, keeping only the aliases
+	/// that stay inside its provider's namespace and name nothing yet.
+	fn admit(
+		&mut self,
+		configured: &snapshot::Catalog,
+		explicit: Option<&crate::discovery::models::ProviderConfig>,
+		mut record: omp_catalog::NormalizedDiscovery,
+	) -> Option<omp_catalog::NormalizedDiscovery> {
+		let provider = record.provider.as_str();
+		let relative = record
+			.model
+			.key
+			.as_str()
+			.strip_prefix(provider)
+			.and_then(|rest| rest.strip_prefix('/'))
+			.unwrap_or(record.model.key.as_str());
+		// `models.toml` entries name the provider's own model id; the
+		// configured facts outrank whatever the listing declares.
+		let explicitly_configured = explicit.is_some_and(|provider| {
+			provider.models.contains_key(relative) || provider.model_overrides.contains_key(relative)
+		});
+		if explicitly_configured
+			|| configured.model(&record.model.key).is_some()
+			|| !self.models.insert(record.model.key.clone())
+		{
+			return None;
+		}
+		let aliases = std::mem::take(&mut record.aliases);
+		record.aliases = aliases
+			.into_vec()
+			.into_iter()
+			.filter(|alias| {
+				// The resolver scopes a bare alias to its provider and keeps a
+				// namespaced one verbatim; only the provider's own namespace
+				// is open to discovery.
+				let name = if alias.alias.contains('/') {
+					alias.alias.clone()
+				} else {
+					sf!("{provider}/{}", alias.alias)
+				};
+				name
+					.strip_prefix(provider)
+					.is_some_and(|rest| rest.starts_with('/'))
+					&& configured.resolve_alias(&name).is_none()
+					&& configured
+						.model(omp_catalog::ModelKey::from_ref(&name))
+						.is_none()
+					&& self.aliases.insert(name)
+			})
+			.collect();
+		Some(record)
+	}
 }
 
 /// Carries literal v1 `apiKey`s into the encrypted store once. A failure is
@@ -620,7 +685,7 @@ pub async fn production_registry_from_con(
 		inference_settings(ctx, None),
 	)
 	.await
-	.map(|(registry, ..)| registry)
+	.map(|assembly| assembly.registry)
 }
 /// Builds the production console-usage authority over the canonical
 /// credential and account stores.
@@ -630,7 +695,7 @@ pub async fn production_usage_manager(
 	let credential_store = open_credential_store(data_dir.join("credentials.db"))?;
 	production_assembly(data_dir, credential_store)
 		.await
-		.map(|(_, _, _, _, _, usage, ..)| usage)
+		.map(|assembly| assembly.usage_manager)
 }
 
 /// Redeems one saved Codex reset for an exact durable account.
@@ -694,7 +759,7 @@ pub async fn production_rpc_registry_from_con(
 		inference_settings(ctx, project_root),
 	)
 	.await
-	.map(|(registry, _, _, _, auth, ..)| (registry, auth))
+	.map(|assembly| (assembly.registry, assembly.auth_manager))
 }
 
 /// Invocation-owned inference values that must not enter agent or durable
@@ -722,6 +787,10 @@ pub struct InferenceSessionOverrides {
 pub struct ProductionInference {
 	/// Immutable registry used by direct chat and provider CONTROL projection.
 	pub registry:             Registry,
+	/// Catalog `registry` routes through: bundled, configured, and runtime
+	/// discovery layers as this composition's discovery refresh left them.
+	/// Model selection and pickers read this snapshot, never an earlier one.
+	pub catalog:              Arc<snapshot::Catalog>,
 	/// Cloneable route composition retained for atomic provider registry
 	/// rebuilds.
 	pub builtins:             BuiltinConfig,
@@ -815,16 +884,24 @@ pub async fn production_inference_for_session(
 		},
 	};
 	let inference_settings = inference_settings(ctx.as_ref(), project_root);
-	let (registry, sessions, authority, mcp_authority, auth_manager, usage_manager, builtins) =
-		production_assembly_with_catalog(
-			data_dir,
-			credential_store,
-			invocation_key,
-			usage_fetchers,
-			inference_settings,
-			catalog,
-		)
-		.await?;
+	let ProductionAssembly {
+		registry,
+		catalog,
+		sessions,
+		authority,
+		stored: mcp_authority,
+		auth_manager,
+		usage_manager,
+		builtins,
+	} = production_assembly_with_catalog(
+		data_dir,
+		credential_store,
+		invocation_key,
+		usage_fetchers,
+		inference_settings,
+		catalog,
+	)
+	.await?;
 	let usage_fetchers = usage_manager.fetchers();
 	let search_settings = omp_ai::search_settings::WebSearchSettings::from_con(ctx.as_ref());
 	let rpc = InferenceRpc::new(registry.clone(), sessions, tool_registry)
@@ -840,6 +917,7 @@ pub async fn production_inference_for_session(
 	));
 	let inference = ProductionInference {
 		registry,
+		catalog,
 		builtins,
 		rpc,
 		credential_authority: authority,
@@ -872,21 +950,25 @@ fn inference_settings(
 	}
 }
 
+/// Every authority one production composition assembles over a single
+/// credential owner.
+struct ProductionAssembly {
+	registry:      Registry,
+	/// Catalog `registry` routes through, after this composition's discovery
+	/// refresh.
+	catalog:       Arc<snapshot::Catalog>,
+	sessions:      ConversationSessionPlanner,
+	authority:     Arc<dyn omp_envd::github_url::CredentialAuthority>,
+	stored:        Arc<auth_backend::CombinedAuthAuthority>,
+	auth_manager:  AuthManager,
+	usage_manager: ConsoleUsageManager,
+	builtins:      BuiltinConfig,
+}
+
 async fn production_assembly(
 	data_dir: &Path,
 	credential_store: Arc<CredentialStore>,
-) -> Result<
-	(
-		Registry,
-		ConversationSessionPlanner,
-		Arc<dyn omp_envd::github_url::CredentialAuthority>,
-		Arc<auth_backend::CombinedAuthAuthority>,
-		AuthManager,
-		ConsoleUsageManager,
-		BuiltinConfig,
-	),
-	RegistryError,
-> {
+) -> Result<ProductionAssembly, RegistryError> {
 	production_assembly_for_session(
 		data_dir,
 		credential_store,
@@ -903,18 +985,7 @@ async fn production_assembly_for_session(
 	invocation_key: Option<(omp_catalog::ProviderId, SecretString)>,
 	usage_fetchers: UsageFetcherRegistry,
 	inference_settings: omp_ai::InferenceSettings,
-) -> Result<
-	(
-		Registry,
-		ConversationSessionPlanner,
-		Arc<dyn omp_envd::github_url::CredentialAuthority>,
-		Arc<auth_backend::CombinedAuthAuthority>,
-		AuthManager,
-		ConsoleUsageManager,
-		BuiltinConfig,
-	),
-	RegistryError,
-> {
+) -> Result<ProductionAssembly, RegistryError> {
 	production_assembly_with_catalog(
 		data_dir,
 		credential_store,
@@ -933,26 +1004,16 @@ async fn production_assembly_with_catalog(
 	usage_fetchers: UsageFetcherRegistry,
 	inference_settings: omp_ai::InferenceSettings,
 	catalog: Option<Arc<snapshot::Catalog>>,
-) -> Result<
-	(
-		Registry,
-		ConversationSessionPlanner,
-		Arc<dyn omp_envd::github_url::CredentialAuthority>,
-		Arc<auth_backend::CombinedAuthAuthority>,
-		AuthManager,
-		ConsoleUsageManager,
-		BuiltinConfig,
-	),
-	RegistryError,
-> {
+) -> Result<ProductionAssembly, RegistryError> {
 	fs::create_dir_all(data_dir).map_err(RegistryError::PrepareState)?;
-	let catalog = match catalog {
-		Some(catalog) => catalog,
-		None => {
-			let catalog = production_catalog(data_dir)?;
-			refresh_model_discovery_cache(data_dir, catalog, &credential_store).await?
-		},
+	// A caller-composed catalog is final. Otherwise the cached snapshot seeds
+	// the authentication stack, whose provider, route, and auth facts runtime
+	// discovery never changes; the refresh below adds models only.
+	let (catalog, refresh_discovery) = match catalog {
+		Some(catalog) => (catalog, false),
+		None => (production_catalog(data_dir)?, true),
 	};
+	let discovery_credentials = Arc::clone(&credential_store);
 	#[cfg(feature = "local-applefm")]
 	let apple_routes = catalog
 		.routes()
@@ -1102,6 +1163,14 @@ async fn production_assembly_with_catalog(
 		Hash32::sum(placeholder_affinity_key().as_bytes()).into_bytes(),
 	));
 	import_legacy_api_keys(data_dir, &auth_manager.control_handle());
+	// Probe only after the one-time v1 key import: on first run that key is
+	// what authenticates the configured provider's model listing, so its
+	// models join this session's registry instead of the next one's.
+	let catalog = if refresh_discovery {
+		refresh_model_discovery_cache(data_dir, catalog, &discovery_credentials).await?
+	} else {
+		catalog
+	};
 	let exposed_auth_manager = auth_manager.clone();
 	usage_fetchers.install_builtins([
 		Arc::new(AlibabaTokenPlanUsageFetcher::new(oauth_http.clone()))
@@ -1205,20 +1274,21 @@ async fn production_assembly_with_catalog(
 		}
 	};
 	let builtins = BuiltinConfig::production(dependencies);
-	let registry = Registry::builder(catalog)
+	let registry = Registry::builder(Arc::clone(&catalog))
 		.with_builtins(builtins.clone())?
 		.build()?;
 	let authority: Arc<dyn omp_envd::github_url::CredentialAuthority> =
 		Arc::new(GithubCredentialAuthority::new(Arc::clone(&stored)));
-	Ok((
+	Ok(ProductionAssembly {
 		registry,
+		catalog,
 		sessions,
 		authority,
 		stored,
-		exposed_auth_manager,
-		exposed_usage_manager,
+		auth_manager: exposed_auth_manager,
+		usage_manager: exposed_usage_manager,
 		builtins,
-	))
+	})
 }
 
 /// Resolves the Antigravity client version without blocking assembly work:

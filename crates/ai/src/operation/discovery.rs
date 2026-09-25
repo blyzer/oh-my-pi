@@ -417,7 +417,9 @@ fn project_mixed_page(
 				.normalize(&row)
 				.map_err(|_| protocol_error("discovery_normalization_failed"))?
 				.model;
-			if let Some(canonical) = canonical_reference(canonical_bundled, hints, &model.key) {
+			if let Some(canonical) =
+				canonical_reference(canonical_bundled, hints, provider, &model.key)
+			{
 				recover_canonical_params(&mut model, canonical, &row);
 			}
 			if let Some(hints) = hints
@@ -460,10 +462,17 @@ fn routing_variant_counterpart<'catalog>(
 fn canonical_reference<'catalog>(
 	canonical_bundled: Option<&'catalog BTreeMap<Str, ModelSpec>>,
 	hints: Option<&ResponsesRouteHints>,
+	provider: &ProviderId<str>,
 	key: &ModelKey<str>,
 ) -> Option<&'catalog ModelSpec> {
 	let index = canonical_bundled?;
-	let lookup = key.as_str().to_ascii_lowercase();
+	// Discovered keys are provider-scoped (`gmi/deepseek-ai/…`); the index is
+	// keyed by the identity relative to its owning provider.
+	let relative = key
+		.as_str()
+		.strip_prefix(provider.as_str())
+		.and_then(|rest| rest.strip_prefix('/'))?;
+	let lookup = relative.to_ascii_lowercase();
 	if !lookup.contains('/')
 		&& !hints.is_some_and(|hints| hints.hinted(WireModelId::from_ref(lookup.as_str())))
 	{
@@ -1173,7 +1182,7 @@ mod tests {
 		.expect("recovered page");
 		assert_eq!(page.models.len(), 1);
 		let model = &page.models[0];
-		assert_eq!(model.key.as_str(), "deepseek-ai/DeepSeek-V4-Pro");
+		assert_eq!(model.key.as_str(), "gmi-cloud/deepseek-ai/DeepSeek-V4-Pro");
 		assert_eq!(model.display_name.as_str(), "DeepSeek V4 Pro");
 		assert_eq!(model.limits.context_window, Some(1_000_000));
 		assert_eq!(model.limits.maximum_output_tokens, Some(384_000));

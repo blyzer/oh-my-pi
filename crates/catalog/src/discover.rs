@@ -491,6 +491,7 @@ impl DiscoveryNormalizer {
 			confidence:     EvidenceConfidence::Inferred,
 			observed_at_ms: row.observed_at_ms,
 		};
+		let key = provider_scoped_key(&row.provider, classification.logical_model.as_str());
 		let aliases = row
 			.aliases
 			.iter()
@@ -500,7 +501,7 @@ impl DiscoveryNormalizer {
 					.into_iter()
 					.map(|alias| CatalogAlias {
 						alias,
-						target: ModelKey::new(classification.logical_model.clone()),
+						target: key.clone(),
 						rationale: sf!("provider discovery declared an alternate wire model identifier",),
 						provenance: row.source.clone(),
 					})
@@ -511,7 +512,7 @@ impl DiscoveryNormalizer {
 			provider: row.provider.clone(),
 			source: declared.clone(),
 			model: ModelSpec {
-				key: ModelKey::new(classification.logical_model.clone()),
+				key,
 				class,
 				display_name: row
 					.display_name
@@ -575,6 +576,13 @@ impl DiscoveryNormalizer {
 		}
 		Ok(grouped.into_values().collect())
 	}
+}
+
+/// Names a discovered model the way the bundled compiler names every routed
+/// model: `<provider>/<model>`. Discovery rows from different providers, and
+/// from a provider and the bundled catalog, therefore never share a key.
+fn provider_scoped_key(provider: &ProviderId<str>, model: &str) -> ModelKey {
+	ModelKey::new(sf!("{provider}/{model}"))
 }
 
 fn merge_declared_pricing(defaults: &Pricing, declared: &[Price]) -> Pricing {
@@ -664,7 +672,7 @@ fn prepare_dynamic_effort_groups(normalized: &mut [NormalizedDiscovery]) {
 			continue;
 		}
 		if !safe.contains(&key) {
-			item.model.key = ModelKey::new(wire.as_str());
+			item.model.key = provider_scoped_key(&item.provider, wire.as_str());
 			for alias in &mut item.aliases {
 				alias.target = item.model.key.clone();
 			}
@@ -1081,7 +1089,7 @@ mod tests {
 				.iter()
 				.map(|model| model.key.as_str())
 				.collect::<Vec<_>>(),
-			["a-model", "z-model"]
+			["provider/a-model", "provider/z-model"]
 		);
 		assert_eq!(
 			page
@@ -1317,7 +1325,7 @@ mod tests {
 			.normalize_batch(&[high, low])
 			.expect("effort siblings normalize");
 		assert_eq!(normalized.len(), 1);
-		assert_eq!(normalized[0].model.key, "novel");
+		assert_eq!(normalized[0].model.key, "provider/novel");
 		assert_eq!(
 			normalized[0]
 				.model
@@ -1330,6 +1338,38 @@ mod tests {
 		assert!(normalized[0].model.capabilities.chat.is_none());
 	}
 	#[test]
+	fn discovered_keys_are_provider_scoped_like_bundled_models() {
+		let mut alpha = row("claude-opus-5");
+		alpha.provider = ProviderId::from("alpha");
+		alpha.aliases = Box::new([WireModelId::from("opus")]);
+		let mut beta = row("claude-opus-5");
+		beta.provider = ProviderId::from("beta");
+		let mut namespaced = row("anthropic/claude-opus-5");
+		namespaced.provider = ProviderId::from("alpha");
+		let normalized = DiscoveryNormalizer::new(defaults())
+			.normalize_batch(&[beta, namespaced, alpha])
+			.expect("rows normalize");
+		assert_eq!(
+			normalized
+				.iter()
+				.map(|item| item.model.key.as_str())
+				.collect::<Vec<_>>(),
+			["alpha/anthropic/claude-opus-5", "alpha/claude-opus-5", "beta/claude-opus-5"]
+		);
+		let alpha = normalized
+			.iter()
+			.find(|item| item.model.key == "alpha/claude-opus-5")
+			.expect("alpha row");
+		assert!(
+			alpha
+				.aliases
+				.iter()
+				.all(|alias| alias.target == "alpha/claude-opus-5"),
+			"aliases follow the scoped key"
+		);
+	}
+
+	#[test]
 	fn cursor_effort_siblings_collapse_with_aliases_and_extra_high_routing() {
 		let mut low = row("gpt-5.6-luna-low");
 		low.provider = ProviderId::from("cursor");
@@ -1340,7 +1380,7 @@ mod tests {
 			.expect("safe Cursor siblings normalize");
 		assert_eq!(normalized.len(), 1);
 		let model = &normalized[0].model;
-		assert_eq!(model.key, "gpt-5.6-luna");
+		assert_eq!(model.key, "cursor/gpt-5.6-luna");
 		assert_eq!(
 			model
 				.thinking_routing
@@ -1374,7 +1414,7 @@ mod tests {
 				.iter()
 				.map(|item| item.model.key.as_str())
 				.collect::<BTreeSet<_>>(),
-			BTreeSet::from(["review-extra-high", "review-low", "review-xhigh"])
+			BTreeSet::from(["cursor/review-extra-high", "cursor/review-low", "cursor/review-xhigh"])
 		);
 	}
 
@@ -1396,11 +1436,15 @@ mod tests {
 			.normalize_batch(&[base, low, high])
 			.expect("unsafe group remains live");
 		assert_eq!(normalized.len(), 3);
-		assert!(normalized.iter().any(|item| item.model.key == "review-low"));
 		assert!(
 			normalized
 				.iter()
-				.any(|item| item.model.key == "review-high")
+				.any(|item| item.model.key == "cursor/review-low")
+		);
+		assert!(
+			normalized
+				.iter()
+				.any(|item| item.model.key == "cursor/review-high")
 		);
 	}
 

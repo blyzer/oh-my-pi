@@ -1808,10 +1808,31 @@ pub async fn compose_kernel(
 	let registry =
 		install_yield_contract(registry, options.output_schema.as_ref(), options.schema_mode)?;
 
-	let catalog = if options.gateway.is_some() {
-		Arc::new(omp_catalog::snapshot::Catalog::embedded().clone())
-	} else {
-		crate::registry::production_catalog(data_dir)?
+	// The production stack refreshes runtime model discovery while it
+	// composes. The launch model and every later `ai_model` switch resolve
+	// against the catalog that refresh left, so a model discovered during
+	// this composition is selectable in this session.
+	let backend = match options.gateway {
+		Some(channel) => Err(channel),
+		None => Ok(production_inference_for_session(
+			data_dir,
+			Arc::clone(&registry),
+			Some(&project_root),
+			InferenceSessionOverrides {
+				provider: options
+					.api_key
+					.as_ref()
+					.and_then(|_| options.provider.clone()),
+				api_key: options.api_key,
+				con: Some(Arc::clone(&ctx)),
+				..InferenceSessionOverrides::default()
+			},
+		)
+		.await?),
+	};
+	let catalog = match &backend {
+		Ok(stack) => Arc::clone(&stack.catalog),
+		Err(_) => Arc::new(omp_catalog::snapshot::Catalog::embedded().clone()),
 	};
 	let model = resolve_model_selector(catalog.as_ref(), model_selector)?;
 	let model_key = omp_catalog::ModelKey::from(model.as_str());
@@ -1827,67 +1848,58 @@ pub async fn compose_kernel(
 		environment.client().clone()
 	};
 
-	let mut inference = if let Some(channel) = options.gateway {
-		if let Some(bridge) = &inference_bridge {
-			bridge.bind_remote(channel.clone())?;
-		}
-		ComposedInference::Gateway {
-			inference:          GatewayInference::new(channel, model.as_str()),
-			_environment:       environment,
-			_agent_control:     Mutex::new(None),
-			_python_components: python_components,
-			_eval_parent:       None,
-			_ephemeral_journal: None,
-		}
-	} else {
-		let stack = production_inference_for_session(
-			data_dir,
-			Arc::clone(&registry),
-			Some(&project_root),
-			InferenceSessionOverrides {
-				provider: options.api_key.as_ref().and(options.provider.clone()),
-				api_key: options.api_key,
-				con: Some(Arc::clone(&ctx)),
-				..InferenceSessionOverrides::default()
-			},
-		)
-		.await?;
-		if let Some(bridge) = &inference_bridge {
-			bridge.bind(stack.rpc.clone())?;
-		}
-		let planner = Router::new(stack.registry.clone(), Duration::from_secs(30));
-		let target = match options.provider {
-			Some(provider) => Target::Provider { provider, model: model_key },
-			None => Target::Model(model_key),
-		};
-		let meta = CallMeta {
-			id: RequestId::from(format!("omp-print-{}", Ulid::generate())),
-			target,
-			deadline: None,
-			budget: ExecutionBudget::default(),
-			session: None,
-			debug_session: None,
-			response_hooks: Default::default(),
-		};
-		let client = Client::new(stack.registry.service(), planner, meta.clone()).with_affinity(
-			omp_ai::CallAffinity {
-				prompt_cache:     options.prompt_cache_key.clone(),
-				provider_session: options.provider_session.clone(),
-			},
-		);
-		ComposedInference::Production(ProductionInference {
-			client,
-			meta,
-			model: omp_catalog::ModelKey::from(model.as_str()),
-			catalog: Arc::clone(&catalog),
-			_environment: environment,
-			_agent_control: Mutex::new(None),
-			_stack: stack,
-			con: Arc::clone(&ctx),
-			_python_components: python_components,
-			_eval_parent: None,
-			_ephemeral_journal: None,
-		})
+	let mut inference = match backend {
+		Err(channel) => {
+			if let Some(bridge) = &inference_bridge {
+				bridge.bind_remote(channel.clone())?;
+			}
+			ComposedInference::Gateway {
+				inference:          GatewayInference::new(channel, model.as_str()),
+				_environment:       environment,
+				_agent_control:     Mutex::new(None),
+				_python_components: python_components,
+				_eval_parent:       None,
+				_ephemeral_journal: None,
+			}
+		},
+		Ok(stack) => {
+			if let Some(bridge) = &inference_bridge {
+				bridge.bind(stack.rpc.clone())?;
+			}
+			let planner = Router::new(stack.registry.clone(), Duration::from_secs(30));
+			let target = match options.provider {
+				Some(provider) => Target::Provider { provider, model: model_key },
+				None => Target::Model(model_key),
+			};
+			let meta = CallMeta {
+				id: RequestId::from(format!("omp-print-{}", Ulid::generate())),
+				target,
+				deadline: None,
+				budget: ExecutionBudget::default(),
+				session: None,
+				debug_session: None,
+				response_hooks: Default::default(),
+			};
+			let client = Client::new(stack.registry.service(), planner, meta.clone()).with_affinity(
+				omp_ai::CallAffinity {
+					prompt_cache:     options.prompt_cache_key.clone(),
+					provider_session: options.provider_session.clone(),
+				},
+			);
+			ComposedInference::Production(ProductionInference {
+				client,
+				meta,
+				model: omp_catalog::ModelKey::from(model.as_str()),
+				catalog: Arc::clone(&catalog),
+				_environment: environment,
+				_agent_control: Mutex::new(None),
+				_stack: stack,
+				con: Arc::clone(&ctx),
+				_python_components: python_components,
+				_eval_parent: None,
+				_ephemeral_journal: None,
+			})
+		},
 	};
 
 	let terminal = terminal_identity();
