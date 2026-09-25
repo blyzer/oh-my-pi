@@ -707,11 +707,11 @@ impl App {
 				},
 				Wakeup::Message(Ok(Msg::Pasted { generation, raw, outcome })) => {
 					// A result from an expired or superseded read is dropped;
-					// its queued input already replayed without it.
 					if self.clipboard.settle(generation)
 						&& let ClipboardReadOutcome::Payload(clipboard) = outcome
 						&& let Some(event) = self.deliver_clipboard(clipboard, raw)
 					{
+						self.paint_routed_damage()?;
 						return Ok(Some(event));
 					}
 				},
@@ -740,6 +740,7 @@ impl App {
 							if let Some(pasted) = self.terminal.take_paste()
 								&& let Some(event) = self.deliver_pasted(pasted)
 							{
+								self.paint_routed_damage()?;
 								return Ok(Some(event));
 							}
 							continue;
@@ -751,7 +752,10 @@ impl App {
 								Routed::Copy(text) => {
 									let _ = self.terminal.copy_to_clipboard(&text)?;
 								},
-								Routed::Event(event) => return Ok(Some(event)),
+								Routed::Event(event) => {
+									self.paint_routed_damage()?;
+									return Ok(Some(event));
+								},
 								Routed::Stop => return Ok(None),
 							}
 						}
@@ -912,6 +916,17 @@ impl App {
 		};
 		self.last_frame_cost = started.elapsed();
 		self.last_stats = result?;
+		Ok(())
+	}
+
+	/// Flushes damage caused by an input route before surfacing the route's
+	/// application event. Eventful editors (`Changed`, `Filtered`, submit-side
+	/// mutations) can otherwise return to the host with the edited tree still
+	/// waiting for the next `App::next` turn to paint.
+	fn paint_routed_damage(&mut self) -> io::Result<()> {
+		if self.ui.has_damage() {
+			self.paint(None)?;
+		}
 		Ok(())
 	}
 
