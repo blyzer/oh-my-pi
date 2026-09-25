@@ -50,3 +50,5 @@ nix.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# The vocalizer tests play on the virtual speaker, never the host's device.
+omp-audio = { workspace = true, features = ["virtual-output"] }
