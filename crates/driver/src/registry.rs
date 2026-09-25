@@ -471,6 +471,7 @@ fn catalog_composition(source: impl std::error::Error + Send + Sync + 'static) -
 async fn refresh_model_discovery_cache(
 	data_dir: &Path,
 	catalog: Arc<snapshot::Catalog>,
+	credential_store: &Arc<CredentialStore>,
 ) -> Result<Arc<snapshot::Catalog>, RegistryError> {
 	use omp_ai::discovery::{
 		DiscoveryCacheKey, DiscoveryStore, DiscoveryStoreError, ProviderDiscoveryState,
@@ -480,7 +481,7 @@ async fn refresh_model_discovery_cache(
 	let loaded = crate::discovery::models::ModelsConfigLocation::resolve(data_dir)
 		.and_then(|location| crate::discovery::models::load_or_import_legacy(&location))
 		.map_err(catalog_composition)?;
-	let probes = crate::discovery::models::discovery_probes(
+	let mut probes = crate::discovery::models::discovery_probes(
 		loaded.as_ref().map(|loaded| &loaded.config),
 		&catalog,
 	)
@@ -488,6 +489,13 @@ async fn refresh_model_discovery_cache(
 	if probes.is_empty() {
 		return Ok(catalog);
 	}
+	crate::discovery::models::authenticate_probes_from_store(
+		&mut probes,
+		&catalog,
+		credential_store,
+		std::time::SystemTime::now(),
+	)
+	.await;
 	let store =
 		Arc::new(DiscoveryStore::open(&data_dir.join("models.db")).map_err(catalog_composition)?);
 	let now_ms = std::time::SystemTime::now()
@@ -529,6 +537,14 @@ async fn refresh_model_discovery_cache(
 			.map_err(catalog_composition)?;
 		let store = Arc::clone(&store);
 		let http = http.clone();
+		// Loopback runtimes are usually absent, so their failure is the steady
+		// state; a provider the user configured is expected to answer.
+		let configured = loaded.as_ref().is_some_and(|loaded| {
+			loaded
+				.config
+				.providers
+				.contains_key(probe.provider.as_str())
+		});
 		pending.push(async move {
 			let provider = probe.provider.clone();
 			match probe
@@ -545,11 +561,19 @@ async fn refresh_model_discovery_cache(
 				},
 				Err(error) => {
 					let error_code: &'static str = error.into();
-					tracing::debug!(
-						provider = %provider,
-						error_code,
-						"bounded model discovery probe was unavailable"
-					);
+					if configured {
+						tracing::warn!(
+							provider = %provider,
+							error_code,
+							"configured provider model discovery failed"
+						);
+					} else {
+						tracing::debug!(
+							provider = %provider,
+							error_code,
+							"bounded model discovery probe was unavailable"
+						);
+					}
 					store.set_lifecycle(&ProviderLifecycle {
 						provider,
 						cache_scope: key.credential_scope.clone(),
@@ -926,7 +950,7 @@ async fn production_assembly_with_catalog(
 		Some(catalog) => catalog,
 		None => {
 			let catalog = production_catalog(data_dir)?;
-			refresh_model_discovery_cache(data_dir, catalog).await?
+			refresh_model_discovery_cache(data_dir, catalog, &credential_store).await?
 		},
 	};
 	#[cfg(feature = "local-applefm")]

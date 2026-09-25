@@ -1,11 +1,20 @@
 //! Native `models.toml` decoding for configured catalog overlays.
 
 use std::{
+	cmp::Reverse,
 	collections::BTreeMap,
 	env, fs, io,
 	path::{Path, PathBuf},
+	sync::Arc,
+	time::SystemTime,
 };
 
+use omp_ai::{
+	auth::{
+		CredentialNeed, CredentialSource, CredentialStore, HeaderPlacement, StoredCredentialSource,
+	},
+	discovery::DiscoveryProbe,
+};
 use omp_catalog::{
 	AccountScope, AuthSpec, AuthSpecKind, Availability, CatalogOverlay, CatalogOverlayBuilder,
 	ClassId, ContextStrategy, CredentialSourceSpec, EvidenceConfidence, ModalityBits,
@@ -1223,6 +1232,75 @@ pub fn discovery_probes(
 	Ok(probes.into_values().collect())
 }
 
+/// Authenticates probes with the provider's stored `/login` credential.
+///
+/// [`discovery_probes`] resolves only static, `$ENV`, and
+/// `OMP_<PROVIDER>_API_KEY` headers, so a provider whose key lives in the
+/// encrypted store probed its model list anonymously and failed. A probe
+/// whose route authentication lists [`CredentialSourceSpec::Stored`] and that
+/// carries no credential header yet leases the provider's most recently
+/// updated stored account and applies it with the route's header placement.
+/// Returns how many probes were authenticated.
+pub async fn authenticate_probes_from_store(
+	probes: &mut [DiscoveryProbe],
+	catalog: &omp_catalog::Catalog,
+	store: &Arc<CredentialStore>,
+	now: SystemTime,
+) -> usize {
+	let Ok(mut accounts) = store.list_metadata() else {
+		return 0;
+	};
+	accounts.sort_by_key(|account| Reverse(account.updated_at_ms));
+	let source = StoredCredentialSource::new(store.clone());
+	let mut authenticated = 0;
+	for probe in probes {
+		let Some(spec) = catalog
+			.route(&probe.route)
+			.and_then(|route| catalog.auth_spec(&route.auth))
+		else {
+			continue;
+		};
+		let Some(header) = spec.header_name.as_ref() else {
+			continue;
+		};
+		if probe.headers.contains_key(header.as_str())
+			|| !spec
+				.credential_sources
+				.iter()
+				.any(|source| matches!(source, CredentialSourceSpec::Stored))
+		{
+			continue;
+		}
+		let placement = HeaderPlacement {
+			name:   header.clone(),
+			prefix: spec.prefix.clone().unwrap_or_default(),
+		};
+		let provider = probe.provider.as_str();
+		for account in accounts.iter().filter(|account| {
+			account
+				.account_id
+				.as_str()
+				.strip_prefix(provider)
+				.is_some_and(|rest| rest.starts_with(':'))
+		}) {
+			let need = CredentialNeed {
+				spec:        spec.id.clone(),
+				account:     Some(account.account_id.clone()),
+				principal:   None,
+				valid_after: now,
+			};
+			let Ok(lease) = source.lease(need).await else {
+				continue;
+			};
+			if lease.apply_header(&placement, &mut probe.headers).is_ok() {
+				authenticated += 1;
+				break;
+			}
+		}
+	}
+	authenticated
+}
+
 /// Applies process-level runtime metadata overrides after native probes.
 ///
 /// Ollama's `OLLAMA_CONTEXT_LENGTH` is the served context selected by its
@@ -1922,6 +2000,78 @@ mod tests {
 			.expect("proxy");
 		let routes = proxy.proxy_routes.as_ref().expect("proxy routes");
 		assert_ne!(routes.openai, routes.anthropic);
+	}
+
+	#[tokio::test]
+	async fn stored_login_credential_authenticates_configured_discovery_probe() {
+		use omp_ai::{
+			AccountId, PrincipalId,
+			auth::{CredentialOrigin, CredentialWrite, HeadlessKeySource, KeyId},
+		};
+		use omp_core::SecretBox;
+
+		let config: ModelsConfig = toml::from_str(
+			"[providers.demo]\nbaseUrl='https://proxy.example/v1'\nauth='apiKey'\ndiscovery={type='openai-models-list'}\n\
+			 [providers.keyless]\nbaseUrl='https://keyless.example/v1'\nauth='apiKey'\ndiscovery={type='openai-models-list'}\n\
+			 [providers.preset]\nbaseUrl='https://preset.example/v1'\nauth='apiKey'\ndiscovery={type='openai-models-list'}\nheaders={authorization='Bearer preset-header'}\n",
+		)
+		.expect("decode");
+		let overlay = lower_user_overlay(&config).expect("overlay");
+		let catalog = omp_catalog::Catalog::embedded()
+			.with_overlay_stack(
+				&omp_catalog::OverlayStack::from_layers([(OverlaySource::UserConfig, overlay)]),
+				omp_catalog::UnsafeTrustScope::ALL,
+			)
+			.expect("catalog");
+		let directory = tempfile::tempdir().expect("directory");
+		let keys = Arc::new(HeadlessKeySource::new(KeyId::new("discovery-probe-key"), [0x5a; 32]));
+		let store = Arc::new(
+			CredentialStore::open(directory.path().join("credentials.sqlite"), keys).expect("store"),
+		);
+		let write = |account: &str, secret: &str, now_ms: u64| {
+			store
+				.put(CredentialWrite {
+					account_id: AccountId::from_ref(account),
+					principal_id: PrincipalId::from_ref("login"),
+					kind: "api-key",
+					secret: &SecretBox::new(Box::new(secret.as_bytes().to_vec())),
+					expires_at_ms: None,
+					origin: CredentialOrigin::Persistent,
+					now_ms,
+					expected_generation: None,
+				})
+				.expect("write credential");
+		};
+		// The newest login wins; a provider whose name merely starts with
+		// `demo` never lends its key; `preset` keeps its explicit header.
+		write("demo:old", "stale-key", 1_000);
+		write("demo:work", "live-key", 2_000);
+		write("demo-other:work", "foreign-key", 3_000);
+		write("preset:work", "stored-key", 3_000);
+
+		let mut probes = discovery_probes(Some(&config), &catalog).expect("probes");
+		let demo = |probes: &[DiscoveryProbe]| {
+			probes
+				.iter()
+				.find(|probe| probe.provider.as_str() == "demo")
+				.is_some_and(|probe| probe.headers.contains_key(http::header::AUTHORIZATION))
+		};
+		assert!(!demo(&probes), "env-only resolution leaves the stored login unused");
+		let authenticated =
+			authenticate_probes_from_store(&mut probes, &catalog, &store, SystemTime::now()).await;
+		assert_eq!(authenticated, 1);
+		let authorization = |provider: &str| {
+			probes
+				.iter()
+				.find(|probe| probe.provider.as_str() == provider)
+				.expect("probe")
+				.headers
+				.get(http::header::AUTHORIZATION)
+				.map(|value| value.to_str().expect("ascii").to_owned())
+		};
+		assert_eq!(authorization("demo").as_deref(), Some("Bearer live-key"));
+		assert_eq!(authorization("keyless"), None);
+		assert_eq!(authorization("preset").as_deref(), Some("Bearer preset-header"));
 	}
 
 	#[test]

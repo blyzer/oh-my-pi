@@ -1359,16 +1359,15 @@ fn wrap_logical_line(
 			.iter()
 			.any(|glyph| glyph.width > 1);
 
-		if chunk_end == chunk_start && whitespace {
-			if let Some(previous) = result
+		// Whitespace at a soft wrap hangs off the previous row; at the start of
+		// the logical line it is indentation and stays visible.
+		if chunk_end == chunk_start
+			&& whitespace
+			&& let Some(previous) = result
 				.get_mut(first_segment..)
 				.and_then(|rows| rows.last_mut())
-			{
-				previous.source_end = token_end_byte;
-			} else {
-				chunk_start = token_end_byte;
-				chunk_end = token_end_byte;
-			}
+		{
+			previous.source_end = token_end_byte;
 			token_start = token_end;
 			continue;
 		}
@@ -1486,7 +1485,15 @@ fn wrap_logical_line(
 	}
 
 	if chunk_end > chunk_start || result.len() == first_segment {
-		push_wrapped_segment(text, result, chunk_source_start, logical_end, chunk_start, chunk_end);
+		// Untrimmed: trailing whitespace on the final row is typed content the
+		// caret sits after, not a wrap point. It fit, or it would have hung.
+		result.push(Segment {
+			source_start: chunk_source_start,
+			source_end:   logical_end,
+			start:        chunk_start,
+			end:          chunk_end,
+			last:         false,
+		});
 	} else if let Some(last) = result.last_mut() {
 		last.source_end = logical_end;
 	}
@@ -5127,6 +5134,33 @@ mod tests {
 		let rows = buffer.rows(6, 8);
 		assert_eq!(rows[0].cursor_column, Some(4));
 		assert_eq!(rows[1].cursor_column, None);
+	}
+
+	#[test]
+	fn trailing_whitespace_on_a_final_row_moves_the_caret() {
+		let mut editor = editor();
+		type_text(&mut editor, "space");
+		assert_eq!(editor.view(20)[0].cursor_column, Some(5));
+		assert_eq!(editor.handle_key(key(Key::Space)), EditOutcome::Changed);
+		assert_eq!(editor.view(20)[0].cursor_column, Some(6));
+		assert_eq!(editor.handle_key(key(Key::Space)), EditOutcome::Changed);
+		assert_eq!(editor.view(20)[0].cursor_column, Some(7));
+
+		// Every logical line's last row keeps its trailing whitespace; only
+		// soft-wrapped rows hang it at the break.
+		let buffer = EditBuffer::new("word next \nlast  ");
+		let rows = buffer.rows(6, 8);
+		assert_eq!(rows.iter().map(|row| row.text).collect::<Vec<_>>(), ["word", "next ", "last  "]);
+	}
+
+	#[test]
+	fn leading_whitespace_of_a_logical_line_is_visible() {
+		let mut buffer = EditBuffer::new("  indented\n   x");
+		let rows = buffer.rows(20, 8);
+		assert_eq!(rows.iter().map(|row| row.text).collect::<Vec<_>>(), ["  indented", "   x"]);
+		drop(rows);
+		buffer.set_cursor_line_column(0, 2);
+		assert_eq!(buffer.rows(20, 8)[0].cursor_column, Some(2));
 	}
 
 	#[test]

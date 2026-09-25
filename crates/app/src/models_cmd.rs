@@ -11,6 +11,7 @@ use std::{
 use miette::{IntoDiagnostic as _, miette};
 use omp_ai::{
 	Client,
+	auth::CredentialStore,
 	call::{CallMeta, DiscoveryRequest, Target},
 	discovery::{DiscoveryCacheKey, DiscoveryStore, ProviderDiscoveryState, ProviderLifecycle},
 	id::RequestId,
@@ -19,6 +20,7 @@ use omp_ai::{
 };
 use omp_catalog::{DiscoveredModel, ModelSpec, OperationBits, ProviderId, snapshot::Catalog};
 use omp_core::Str;
+use omp_driver::discovery::models::authenticate_probes_from_store;
 
 use crate::cli::{LaunchExtensions, ModelRole, ModelsArgs, ModelsCommand};
 
@@ -57,7 +59,7 @@ async fn refresh() -> miette::Result<()> {
 	fs::create_dir_all(&data_dir).into_diagnostic()?;
 	let credentials = omp_driver::registry::open_credential_store(data_dir.join("credentials.db"))
 		.into_diagnostic()?;
-	let registry = omp_driver::registry::production_registry(&data_dir, credentials)
+	let registry = omp_driver::registry::production_registry(&data_dir, credentials.clone())
 		.await
 		.into_diagnostic()?;
 	let catalog = registry.catalog();
@@ -88,6 +90,7 @@ async fn refresh() -> miette::Result<()> {
 		&store,
 		catalog,
 		loaded_config.as_ref().map(|loaded| &loaded.config),
+		&credentials,
 		now_ms,
 	)
 	.await?;
@@ -198,10 +201,12 @@ async fn refresh_local_providers(
 	store: &DiscoveryStore,
 	catalog: &Catalog,
 	config: Option<&omp_driver::discovery::models::ModelsConfig>,
+	credentials: &Arc<CredentialStore>,
 	now_ms: u64,
 ) -> miette::Result<usize> {
-	let probes =
+	let mut probes =
 		omp_driver::discovery::models::discovery_probes(config, catalog).into_diagnostic()?;
+	authenticate_probes_from_store(&mut probes, catalog, credentials, SystemTime::now()).await;
 	let http = omp_envd::model_discovery::ModelDiscoveryHttpHost::new();
 	let mut refreshed = 0_usize;
 	let mut failures = Vec::new();
