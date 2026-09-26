@@ -1116,6 +1116,7 @@ pub async fn production_inference_for_session(
 		builtins,
 	} = production_assembly_with_catalog(
 		data_dir,
+		project_root,
 		credential_store,
 		invocation_key,
 		usage_fetchers,
@@ -1212,6 +1213,7 @@ async fn production_assembly_for_session(
 ) -> Result<ProductionAssembly, RegistryError> {
 	production_assembly_with_catalog(
 		data_dir,
+		None,
 		credential_store,
 		invocation_key,
 		usage_fetchers,
@@ -1223,6 +1225,7 @@ async fn production_assembly_for_session(
 
 async fn production_assembly_with_catalog(
 	data_dir: &Path,
+	project_root: Option<&Path>,
 	credential_store: Arc<CredentialStore>,
 	invocation_key: Option<(omp_catalog::ProviderId, SecretString)>,
 	usage_fetchers: UsageFetcherRegistry,
@@ -1386,7 +1389,7 @@ async fn production_assembly_with_catalog(
 	.with_affinity_resolver(CredentialAffinityResolver::new(
 		Hash32::sum(placeholder_affinity_key().as_bytes()).into_bytes(),
 	));
-	crate::v1_import::first_run(data_dir, &auth_manager.control_handle());
+	crate::v1_import::first_run(data_dir, project_root, &auth_manager.control_handle());
 	// Probe only after the one-time v1 import: on first run its `models.yml` key is
 	// what authenticates the configured provider's model listing, so its
 	// models join this session's registry instead of the next one's.

@@ -137,6 +137,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "autolearn.min_tool_calls",
+			"legacy.path": "autolearn.minToolCalls",
 		},
 	};
 	/// Base directory for agent-managed worktrees; empty selects ~/.omp/wt and OMP_WORKTREE_DIR overrides it.
