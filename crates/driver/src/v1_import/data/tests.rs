@@ -614,6 +614,41 @@ fn lessons_need_no_hint_when_the_profile_runs_mnemopi() {
 	)]);
 }
 
+/// Owner decision: v1's `local` backend wrote the lessons, so the settings
+/// step (which runs first) turns Mnemopi on and the lessons need no hint.
+#[test]
+fn a_v1_local_backend_turns_mnemopi_on_for_the_imported_lessons() {
+	let root = tempfile::tempdir().expect("scratch");
+	let home = root.path().join("home");
+	let v2 = roots(root.path());
+	let app = project(root.path(), "svc");
+	write(
+		&home
+			.join(".omp/agent/memories")
+			.join(encode(&app))
+			.join("learned.md"),
+		"- one\n- two\n",
+	);
+	write(&home.join(".omp/agent/config.yml"), "memory:\n  backend: local\n");
+	let steps = ImportStep::registered().collect::<Vec<_>>();
+	let position = |step| steps.iter().position(|registered| *registered == step);
+	assert!(position(ImportStep::Settings) < position(ImportStep::LearnedLessons));
+
+	let report = import(&v2, inputs(&home), ImportMode::Apply);
+
+	let config = fs::read_to_string(v2.config_dir.join("config.cfg")).expect("config.cfg");
+	assert!(
+		config
+			.lines()
+			.any(|line| line.split_whitespace().eq(["ai_memory_backend", "mnemopi"])),
+		"{config}"
+	);
+	assert_eq!(summary(&report, ImportStep::LearnedLessons), [(
+		OutcomeKind::Imported,
+		Some(format!("{}: 2 lessons", app.display()))
+	)]);
+}
+
 #[test]
 fn the_marketplace_registry_and_cache_merge_into_v2() {
 	let root = tempfile::tempdir().expect("scratch");

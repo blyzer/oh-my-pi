@@ -36,8 +36,13 @@ fn provider_name(state: &ServiceState, provider: &ProviderId<str>) -> Str {
 	state
 		.catalog
 		.as_ref()
-		.and_then(|catalog| catalog.provider(provider))
-		.map_or_else(|| Str::new(provider.as_str()), |def| def.name.clone())
+		.and_then(|catalog| {
+			catalog
+				.load()
+				.provider(provider)
+				.map(|def| def.name.clone())
+		})
+		.unwrap_or_else(|| Str::new(provider.as_str()))
 }
 
 /// Every stored account, in the pool's stable account-id order.
@@ -76,7 +81,8 @@ pub fn providers(state: &ServiceState) -> ServiceResult<Vec<ProviderRow>> {
 	let catalog = state
 		.catalog
 		.as_ref()
-		.ok_or(ServiceError::Unavailable("provider catalog (remote gateway)"))?;
+		.ok_or(ServiceError::Unavailable("provider catalog (remote gateway)"))?
+		.load();
 	let accounts = control.accounts(None);
 	Ok(catalog
 		.providers()
@@ -114,7 +120,7 @@ pub fn login(state: &ServiceState, provider: &str) -> ServiceResult<LoginFlow> {
 	if state
 		.catalog
 		.as_ref()
-		.is_some_and(|catalog| catalog.provider(&provider_id).is_none())
+		.is_some_and(|catalog| catalog.load().provider(&provider_id).is_none())
 	{
 		return Err(ServiceError::Failed(sf!("Unknown OAuth provider: {provider}")));
 	}
@@ -126,9 +132,18 @@ pub fn login(state: &ServiceState, provider: &str) -> ServiceResult<LoginFlow> {
 	let database = state.data_dir.join("credentials.db");
 	let request = LoginRequest { provider: provider_id.clone(), method: None };
 	let title = name.clone();
+	let discovery = state.discovery.clone();
+	let refreshed = provider_id.clone();
 	state.runtime.spawn(async move {
 		let driver = Driver { auth, events: events_tx, input: input_rx, cancel: cancel_rx };
 		let outcome = driver.run(request, &title, &database).await;
+		// New credentials can list models the old ones could not: re-probe
+		// this provider now instead of at the next launch.
+		if outcome.is_ok()
+			&& let Some(discovery) = &discovery
+		{
+			discovery.request(omp_driver::registry::DiscoveryRefresh::LoggedIn(refreshed));
+		}
 		let _ = done_tx.send(outcome);
 	});
 	Ok(LoginFlow {

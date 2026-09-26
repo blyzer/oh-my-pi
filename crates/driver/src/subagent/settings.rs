@@ -293,26 +293,42 @@ omp_con::var! {
 			omp_core::DurationUnit::Seconds,
 		)),
 		flags: archive,
+		meta: {
+			"legacy.path": "task.agentIdleTtlMs",
+		},
 	};
 	/// Agent definitions excluded from spawn resolution.
 	pub static SV_TASK_DISABLED_AGENTS = sv_task_disabled_agents: Vec<Str> {
 		default: Vec::new(),
 		flags: archive,
+		meta: {
+			"legacy.path": "task.disabledAgents",
+		},
 	};
 	/// Definition-specific model-role overrides.
 	pub static SV_TASK_AGENT_MODEL_OVERRIDES = sv_task_agent_model_overrides: Kv {
 		default: Kv::default(),
 		flags: archive,
+		meta: {
+			"legacy.path": "task.agentModelOverrides",
+		},
 	};
 	/// Definition-specific prewalk-role overrides.
 	pub static SV_TASK_AGENT_PREWALK = sv_task_agent_prewalk: Kv {
 		default: Kv::default(),
 		flags: archive,
+		meta: {
+			"legacy.path": "task.agentPrewalk",
+			"legacy.path": "task.prewalk",
+		},
 	};
 	/// Definition-specific advisor-role overrides.
 	pub static SV_TASK_AGENT_ADVISOR = sv_task_agent_advisor: Kv {
 		default: Kv::default(),
 		flags: archive,
+		meta: {
+			"legacy.path": "task.agentAdvisor",
+		},
 	};
 	/// Backend used for subagent isolation and worktree cloning.
 	pub static SV_TASK_ISOLATION_MODE = sv_task_isolation_mode: TaskIsolationMode {

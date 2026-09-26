@@ -1200,6 +1200,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "model.roles",
+			"legacy.path": "modelRoles",
 		},
 	};
 	/// Where model selector role assignments are saved.
@@ -1225,6 +1226,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "model.tags",
+			"legacy.path": "modelTags",
 		},
 	};
 	/// Role names in quick-cycle order.
@@ -1234,6 +1236,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "model.cycle_order",
+			"legacy.path": "cycleOrder",
 		},
 	};
 	/// Optional canonical model selector allow-list.
@@ -1243,6 +1246,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "model.enabled_models",
+			"legacy.path": "enabledModels",
 		},
 	};
 	/// Provider ids excluded from discovery, selection, and routing.
@@ -1252,6 +1256,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "model.disabled_providers",
+			"legacy.path": "disabledProviders",
 		},
 	};
 	/// Reasoning depth for thinking-capable models.
@@ -1282,6 +1287,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "model.thinking_budgets",
+			"legacy.path": "thinkingBudgets",
 		},
 	};
 	/// Provider ids in preferred routing order.
@@ -1291,6 +1297,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "model.provider_order",
+			"legacy.path": "modelProviderOrder",
 		},
 	};
 	/// Processing tier for OpenAI / OpenAI-Codex requests, and OpenAI-family models routed via OpenRouter (none = omit). Sent as `service_tier`.

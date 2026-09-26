@@ -269,6 +269,16 @@ impl DiscoveryStore {
 		Ok(Some(CachedDiscovery { key: key.clone(), generation, rows, expires_at_ms }))
 	}
 
+	/// Earliest expiry after `now_ms` among the cached generations: the next
+	/// instant a fresh generation turns stale.
+	pub fn next_expiry_ms(&self, now_ms: u64) -> Result<Option<u64>, DiscoveryStoreError> {
+		Ok(self.connection.lock().query_row(
+			"SELECT MIN(expires_at_ms) FROM discovery_generations WHERE expires_at_ms>?1",
+			[now_ms],
+			|row| row.get::<_, Option<u64>>(0),
+		)?)
+	}
+
 	/// Invalidates exactly one endpoint/account namespace.
 	pub fn invalidate(&self, key: &DiscoveryCacheKey) -> Result<(), DiscoveryStoreError> {
 		let mut connection = self.connection.lock();
@@ -462,6 +472,34 @@ mod tests {
 			ProviderDiscoveryState::Ready
 		);
 	}
+	#[test]
+	fn next_expiry_is_the_earliest_generation_still_fresh() {
+		let directory = tempfile::tempdir().expect("directory");
+		let store = DiscoveryStore::open(&directory.path().join("models.db")).expect("open");
+		assert_eq!(store.next_expiry_ms(0).expect("empty"), None);
+		let early = ProviderId::from("early");
+		let late = ProviderId::from("late");
+		store
+			.publish(
+				&DiscoveryCacheKey::provider(early.clone()),
+				&[row(&early)],
+				100,
+				Duration::from_secs(1),
+			)
+			.expect("publish early");
+		store
+			.publish(
+				&DiscoveryCacheKey::provider(late.clone()),
+				&[row(&late)],
+				100,
+				Duration::from_secs(5),
+			)
+			.expect("publish late");
+		assert_eq!(store.next_expiry_ms(100).expect("both fresh"), Some(1_100));
+		assert_eq!(store.next_expiry_ms(1_100).expect("early expired"), Some(5_100));
+		assert_eq!(store.next_expiry_ms(5_100).expect("all expired"), None);
+	}
+
 	#[test]
 	fn pre_pricing_schema_rows_are_invalidated() {
 		let directory = tempfile::tempdir().expect("directory");

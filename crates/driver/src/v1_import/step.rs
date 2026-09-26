@@ -51,6 +51,8 @@ pub enum ImportStep {
 	Models,
 	/// Literal v1 `models.yml` `apiKey`s into the encrypted credential store.
 	ModelsKeys,
+	/// v1 `config.yml` into `config.cfg` (and `subagent.cfg`).
+	Settings,
 	/// v1 `history.db` prompts merged into `<data>/history.db`.
 	History,
 	/// v1 `install-id` into `<data>/install-id`, unless v2 has its own.
@@ -74,6 +76,7 @@ impl ImportStep {
 	pub const fn item(self) -> V1Item {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
+			Self::Settings => V1Item::Settings,
 			Self::History => V1Item::HistoryDb,
 			Self::InstallId => V1Item::InstallId,
 			Self::Mnemopi => V1Item::MnemopiMemory,
@@ -101,6 +104,7 @@ impl ImportStep {
 		match self {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
+			Self::Settings => super::settings::import_settings(cx),
 			Self::History => super::data::history::import(cx),
 			Self::InstallId => super::data::install_id::import(cx),
 			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
@@ -259,6 +263,7 @@ pub fn run(
 			.iter()
 			.map(|pair| run_pair(pair, mode, credentials))
 			.collect(),
+		project: Vec::new(),
 	}
 }
 
@@ -336,6 +341,9 @@ pub enum ImportError {
 	/// The v1 model configuration could not be read or converted.
 	#[error("could not import the model configuration")]
 	Models(#[from] crate::discovery::models::ModelsConfigError),
+	/// The v1 settings could not be imported.
+	#[error("could not import the settings")]
+	Settings(#[from] super::SettingsImportError),
 	/// A data or memory step could not read v1 or write v2.
 	#[error("could not import v1 data")]
 	Data(#[from] super::DataImportError),
