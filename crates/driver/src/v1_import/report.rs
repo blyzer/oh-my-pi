@@ -42,6 +42,9 @@ pub enum SkipReason {
 	/// profile's own first run (or `omp config import-v1`).
 	#[strum(to_string = "waits for that profile's first run or `omp config import-v1`")]
 	WaitsForProfile,
+	/// An earlier v1 credential of the same provider and identity was taken.
+	#[strum(to_string = "an earlier v1 credential has the same identity")]
+	DuplicateIdentity,
 }
 
 /// Why v1 data cannot move to v2.
@@ -61,6 +64,19 @@ pub enum Attention {
 		to_string = "the v1 key names a variable or command; set OMP_<PROVIDER>_API_KEY or /login"
 	)]
 	KeyNeedsEnvironment,
+	/// v2 cannot use a v1 login as stored (a missing refresh token or a
+	/// login-time fact v2 cannot derive); a fresh v2 login replaces it.
+	#[strum(to_string = "v2 cannot use this v1 login; re-run /login for this provider")]
+	ReloginRequired,
+	/// A v1 login bound to a custom endpoint v2 keeps per provider, not per
+	/// account.
+	#[strum(to_string = "the v1 login used a custom endpoint; set it as the provider's baseUrl in \
+	                     models.toml, then /login")]
+	CustomEndpoint,
+	/// A v1 MCP OAuth grant v2 cannot refresh or place (no server URL, token
+	/// endpoint, or client id, or disabled in v1).
+	#[strum(to_string = "re-authorize this MCP server in v2")]
+	McpReauthorize,
 	/// The step failed; nothing it would have written is marked done, so the
 	/// next run retries.
 	#[strum(to_string = "import failed")]
