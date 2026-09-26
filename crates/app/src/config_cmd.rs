@@ -84,7 +84,7 @@ fn import_v1(
 ) -> miette::Result<()> {
 	use omp_driver::v1_import::{
 		CredentialAccess, ImportMode, ImportReport, ProfileSelection, SessionImport, V1Inputs,
-		V1Source, V2Roots, import_project_settings, plan, run_with,
+		V1Source, V2Roots, import_project_assets, import_project_settings, plan, run_with,
 	};
 
 	let mut inputs = V1Inputs::from_process()
@@ -131,7 +131,10 @@ fn import_v1(
 		}
 	};
 	report.project = import_project_settings(project, &roots, mode);
-	print!("{}", render_v1_report(&report));
+	report
+		.project
+		.extend(import_project_assets(project, &source, &roots, mode));
+	print!("{}", render_v1_report(&report, project));
 	let failed = report.entries().any(|entry| {
 		matches!(
 			entry.outcome,
@@ -147,7 +150,7 @@ fn import_v1(
 }
 
 /// Renders a v1 import report for the terminal.
-fn render_v1_report(report: &omp_driver::v1_import::ImportReport) -> String {
+fn render_v1_report(report: &omp_driver::v1_import::ImportReport, project: &Path) -> String {
 	use std::fmt::Write as _;
 
 	fn profile(name: Option<&Str>) -> &str {
@@ -211,7 +214,8 @@ fn render_v1_report(report: &omp_driver::v1_import::ImportReport) -> String {
 	if !report.project.is_empty() {
 		let _ = writeln!(
 			out,
-			"project settings{}",
+			"project {}{}",
+			project.display(),
 			if report.dry_run {
 				" (dry run: nothing written)"
 			} else {
@@ -247,7 +251,12 @@ fn render_v1_entry(out: &mut String, entry: &omp_driver::v1_import::ImportEntry)
 		ImportOutcome::NotMigratable(reason) => {
 			let _ = write!(out, ": {reason}");
 		},
-		ImportOutcome::NeedsAttention(Attention::Failed(error)) => {
+		ImportOutcome::NeedsAttention(
+			attention @ (Attention::Failed(error) | Attention::Incompatible(error)),
+		) => {
+			if matches!(attention, Attention::Incompatible(_)) {
+				let _ = write!(out, ": {attention}");
+			}
 			let _ = write!(out, ": {error}");
 			let mut source = std::error::Error::source(error);
 			while let Some(cause) = source {

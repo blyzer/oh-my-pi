@@ -56,6 +56,32 @@ pub enum ImportStep {
 	/// v1 `agent.db` logins (API keys, OAuth, MCP OAuth) into the encrypted
 	/// credential store.
 	Credentials,
+	/// User assets copied file by file into the v2 `agent/` tree, keeping any
+	/// v2 file already there ([`super::assets`]): `skills/` and
+	/// `managed-skills/`, `rules/` with `RULES.md` and `AGENTS.md`,
+	/// `prompts/`, `commands/*.md` (into `prompts/`), `themes/`, the
+	/// `SYSTEM.md` family, and `lsp`/`dap`/`secrets.yml` once v2 can read them.
+	Skills,
+	/// See [`ImportStep::Skills`].
+	Rules,
+	/// See [`ImportStep::Skills`].
+	Prompts,
+	/// See [`ImportStep::Skills`].
+	Commands,
+	/// See [`ImportStep::Skills`].
+	Themes,
+	/// See [`ImportStep::Skills`].
+	SystemPrompts,
+	/// See [`ImportStep::Skills`].
+	LspDap,
+	/// See [`ImportStep::Skills`].
+	Secrets,
+	/// v1 `mcp.json` and `.mcp.json` servers merged into v2 `mcp.json`.
+	Mcp,
+	/// v1 `ssh.json` hosts converted into v2 `hosts.toml`. The project's
+	/// v1-only `.omp/` files convert once per project
+	/// ([`super::import_project_assets`]).
+	SshHosts,
 	/// v1 session transcripts into native journals: on demand, or all of them
 	/// with `omp config import-v1 --sessions` (owner decision #4).
 	Sessions,
@@ -74,8 +100,25 @@ impl ImportStep {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
 			Self::Settings => V1Item::Settings,
 			Self::Credentials => V1Item::AgentDb,
+			Self::Skills => V1Item::Skills,
+			Self::Rules => V1Item::Rules,
+			Self::Prompts => V1Item::Prompts,
+			Self::Commands => V1Item::Commands,
+			Self::Themes => V1Item::Themes,
+			Self::SystemPrompts => V1Item::SystemMd,
+			Self::LspDap => V1Item::Lsp,
+			Self::Secrets => V1Item::Secrets,
+			Self::Mcp => V1Item::Mcp,
+			Self::SshHosts => V1Item::Ssh,
 			Self::Sessions => V1Item::Sessions,
 		}
+	}
+
+	/// Whether this step imports `item`: its own [`item`](Self::item), plus
+	/// the companions a grouped step copies with it.
+	#[must_use]
+	pub fn imports(self, item: V1Item) -> bool {
+		super::assets::companions(self).contains(&item) || self.item() == item
 	}
 
 	/// Whether applying this step writes credentials.
@@ -99,6 +142,16 @@ impl ImportStep {
 			Self::ModelsKeys => super::models::import_keys(cx),
 			Self::Settings => super::settings::import_settings(cx),
 			Self::Credentials => super::auth_credentials::import_credentials(cx),
+			Self::Skills
+			| Self::Rules
+			| Self::Prompts
+			| Self::Commands
+			| Self::Themes
+			| Self::SystemPrompts
+			| Self::LspDap
+			| Self::Secrets
+			| Self::Mcp
+			| Self::SshHosts => super::assets::import(self, cx),
 			Self::Sessions => super::sessions::import_sessions(cx),
 		}
 	}
@@ -281,7 +334,7 @@ fn run_pair(
 		.source
 		.inventory()
 		.map(|(item, path)| {
-			let importers = steps.clone().filter(|step| step.item() == item).collect();
+			let importers = steps.clone().filter(|step| step.imports(item)).collect();
 			(item, path, importers)
 		})
 		.collect();
@@ -382,6 +435,9 @@ pub enum ImportError {
 	/// v1 `agent.db` credentials could not be read or stored.
 	#[error("could not import the v1 credentials")]
 	Credentials(#[from] super::CredentialsImportError),
+	/// A user asset could not be read, checked, or copied.
+	#[error(transparent)]
+	Assets(#[from] super::assets::AssetError),
 	/// A v1 session could not be imported.
 	#[error("could not import a v1 session")]
 	Session(#[from] super::sessions::SessionImportError),
