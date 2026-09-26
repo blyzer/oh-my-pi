@@ -455,17 +455,16 @@ impl DiscoveryClaims {
 		mut record: omp_catalog::NormalizedDiscovery,
 	) -> Option<omp_catalog::NormalizedDiscovery> {
 		let provider = record.provider.as_str();
-		let relative = record
-			.model
-			.key
-			.as_str()
-			.strip_prefix(provider)
-			.and_then(|rest| rest.strip_prefix('/'))
-			.unwrap_or(record.model.key.as_str());
-		// `models.toml` entries name the provider's own model id; the
-		// configured facts outrank whatever the listing declares.
-		let explicitly_configured = explicit.is_some_and(|provider| {
-			provider.models.contains_key(relative) || provider.model_overrides.contains_key(relative)
+		// `models.toml` entries are keyed `<provider>/<id>` like the listing's
+		// rows; the configured facts outrank whatever the listing declares,
+		// including a row that normalized the same wire id to another key.
+		let explicitly_configured = explicit.is_some_and(|declared| {
+			declared.declares(&record.provider, &record.model.key)
+				|| record
+					.model
+					.wire_ids
+					.iter()
+					.any(|(_, wire)| declared.declares_wire(wire.as_str()))
 		});
 		if explicitly_configured
 			|| configured.model(&record.model.key).is_some()

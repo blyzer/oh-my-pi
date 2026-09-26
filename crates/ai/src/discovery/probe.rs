@@ -1,6 +1,8 @@
 //! Active model-discovery probing over an injected HTTP boundary.
 
-use std::{collections::BTreeMap, future::Future, mem, pin::Pin, time::Duration};
+mod wire;
+
+use std::{collections::BTreeMap, future::Future, pin::Pin, time::Duration};
 
 use bytes::Bytes;
 use futures::{StreamExt as _, stream};
@@ -13,6 +15,10 @@ use omp_core::{Str, sf};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use self::wire::{
+	CapabilityEvidence, Field, LlamaArg, LlamaProps, ModelEntry, OllamaShow, OllamaShowRequest,
+	Rows, first_present, positive, positive_u64_text,
+};
 use super::endpoints::{DiscoveryEndpoint, DiscoveryEndpointKind};
 
 const DEFAULT_DISCOVERY_CONTEXT_WINDOW: u64 = 128_000;
@@ -124,9 +130,7 @@ impl DiscoveryProbe {
 				.into_iter()
 				.find(|model| *model.wire_model == *wire_model);
 			if let Some(row) = &mut row {
-				let body = serde_json::to_vec(&serde_json::json!({"model": wire_model.as_str()}))
-					.map(Bytes::from)
-					.map_err(|_| ProbeError::Protocol)?;
+				let body = self.ollama_show_body(wire_model.as_str())?;
 				if let Ok(Ok(show)) = tokio::time::timeout(
 					self.metadata_deadline(),
 					self.request(client, http::Method::POST, "/api/show", body, cancellation),
@@ -197,9 +201,7 @@ impl DiscoveryProbe {
 					let model = rows[index].wire_model.clone();
 					let cancellation = cancellation.clone();
 					async move {
-						let body = serde_json::to_vec(&serde_json::json!({"model": model.as_str()}))
-							.map(Bytes::from)
-							.map_err(|_| ProbeError::Protocol)?;
+						let body = self.ollama_show_body(model.as_str())?;
 						Ok::<_, ProbeError>((
 							index,
 							tokio::time::timeout(
@@ -259,16 +261,20 @@ impl DiscoveryProbe {
 			else {
 				continue;
 			};
-			let Ok(entries) = decode_json_rows(&payload) else {
+			let Ok(entries) = listing_rows(&payload) else {
 				continue;
 			};
 			let had_prior_models = !merged.is_empty();
-			for value in &entries {
-				let Some(id) = litellm_public_id(value) else {
+			for entry in entries
+				.0
+				.iter()
+				.filter_map(|raw| ModelEntry::decode(raw).ok().flatten())
+			{
+				let Some(id) = litellm_public_id(&entry) else {
 					continue;
 				};
-				let evidence = classify_litellm_route(Some(value), id);
-				let next = self.decode_model(value, id, path, route_for_evidence(self, evidence));
+				let evidence = classify_litellm_route(Some(&entry), id);
+				let next = self.decode_model(&entry, id, path, route_for_evidence(self, evidence));
 				let key = next.wire_model.clone();
 				if let Some((existing, held)) = merged.get_mut(&key) {
 					merge_discovered_model(existing, next);
@@ -293,14 +299,16 @@ impl DiscoveryProbe {
 		let payload = self
 			.request(client, http::Method::GET, path, Bytes::new(), cancellation)
 			.await?;
-		let entries = decode_json_rows(&payload)?;
+		let entries = listing_rows(&payload).map_err(|source| self.protocol(path, source))?;
 		Ok(dedupe_models(
 			entries
+				.0
 				.iter()
-				.filter_map(|value| {
-					let id = litellm_public_id(value)?;
+				.filter_map(|raw| {
+					let entry = ModelEntry::decode(raw).ok().flatten()?;
+					let id = litellm_public_id(&entry)?;
 					let evidence = classify_litellm_route(None, id);
-					Some(self.decode_model(value, id, path, route_for_evidence(self, evidence)))
+					Some(self.decode_model(&entry, id, path, route_for_evidence(self, evidence)))
 				})
 				.collect(),
 		))
@@ -334,63 +342,85 @@ impl DiscoveryProbe {
 		}
 	}
 
+	fn protocol(&self, endpoint: &'static str, source: ProbeProtocolError) -> ProbeError {
+		ProbeError::Protocol { provider: self.provider.clone(), endpoint, source }
+	}
+
+	fn ollama_show_body(&self, model: &str) -> Result<Bytes, ProbeError> {
+		serde_json::to_vec(&OllamaShowRequest { model })
+			.map(Bytes::from)
+			.map_err(|source| ProbeError::EncodeRequest {
+				provider: self.provider.clone(),
+				endpoint: "/api/show",
+				source,
+			})
+	}
+
 	fn decode_models(
 		&self,
 		payload: &[u8],
-		source_path: &str,
+		source_path: &'static str,
 	) -> Result<Vec<DiscoveredModel>, ProbeError> {
-		let rows = decode_json_rows(payload)?;
-		let mut discovered = Vec::with_capacity(rows.len());
-		for value in rows {
+		let rows = listing_rows(payload).map_err(|source| self.protocol(source_path, source))?;
+		let mut discovered = Vec::with_capacity(rows.0.len());
+		for (index, raw) in rows.0.iter().enumerate() {
+			let entry = ModelEntry::decode(raw)
+				.map_err(|source| ProbeProtocolError::Entry { index, source })
+				.and_then(|entry| entry.ok_or(ProbeProtocolError::EntryNotObject { index }))
+				.map_err(|source| self.protocol(source_path, source))?;
 			let id = if self.endpoint.kind == DiscoveryEndpointKind::Ollama {
-				value.get("model").or_else(|| value.get("name"))
+				first_present([&entry.model, &entry.name])
 			} else {
-				value
-					.get("id")
-					.or_else(|| value.get("name"))
-					.or_else(|| value.get("model"))
-					.or_else(|| value.get("model_group"))
-					.or_else(|| value.get("model_name"))
+				first_present([
+					&entry.id,
+					&entry.name,
+					&entry.model,
+					&entry.model_group,
+					&entry.model_name,
+				])
 			}
-			.and_then(serde_json::Value::as_str)
-			.ok_or(ProbeError::Protocol)?;
-			if id.trim().is_empty() {
-				return Err(ProbeError::Protocol);
-			}
+			.map(|id| id.as_ref())
+			.filter(|id| !id.trim().is_empty())
+			.ok_or_else(|| self.protocol(source_path, ProbeProtocolError::MissingModelId { index }))?;
 			let route = if self.endpoint.kind == DiscoveryEndpointKind::Proxy {
-				self.proxy_route(&value)
+				self.proxy_route(&entry)
 			} else {
 				self.route.clone()
 			};
-			discovered.push(self.decode_model(&value, id, source_path, route));
+			discovered.push(self.decode_model(&entry, id, source_path, route));
 		}
 		Ok(dedupe_models(discovered))
 	}
 
 	fn decode_model(
 		&self,
-		value: &serde_json::Value,
+		entry: &ModelEntry<'_>,
 		id: &str,
 		source_path: &str,
 		route: RouteId,
 	) -> DiscoveredModel {
 		let context = if self.endpoint.kind == DiscoveryEndpointKind::LmStudio
-			&& value.get("state").and_then(serde_json::Value::as_str) == Some("loaded")
+			&& entry.state.value().is_some_and(|state| state == "loaded")
 		{
-			positive_u64(value, &["loaded_context_length"])
-				.or_else(|| positive_u64(value, &["max_context_length", "context_length"]))
+			positive([&entry.loaded_context_length])
+				.or_else(|| positive([&entry.max_context_length, &entry.context_length]))
 		} else if self.endpoint.kind == DiscoveryEndpointKind::LlamaCpp {
-			llama_model_context_window(value)
-				.or_else(|| positive_u64(value, &["context_length", "max_context_length"]))
+			llama_model_context_window(entry)
+				.or_else(|| positive([&entry.context_length, &entry.max_context_length]))
 		} else {
-			positive_u64(value, &[
-				"context_length",
-				"contextWindow",
-				"max_context_length",
-				"max_model_len",
-				"max_input_tokens",
+			positive([
+				&entry.context_length,
+				&entry.context_window,
+				&entry.max_context_length,
+				&entry.max_model_len,
+				&entry.max_input_tokens,
 			])
-			.or_else(|| nested_positive_u64(value, "model_info", &["max_input_tokens"]))
+			.or_else(|| {
+				entry
+					.model_info
+					.value()
+					.and_then(|info| positive([&info.max_input_tokens]))
+			})
 		};
 		let context = context.unwrap_or(DEFAULT_DISCOVERY_CONTEXT_WINDOW);
 		let anthropic_proxy = self.endpoint.kind == DiscoveryEndpointKind::Proxy
@@ -403,8 +433,13 @@ impl DiscoveryProbe {
 		} else {
 			DEFAULT_DISCOVERY_MAX_OUTPUT
 		};
-		let output = positive_u64(value, &["max_output_tokens", "maxTokens"])
-			.or_else(|| nested_positive_u64(value, "model_info", &["max_output_tokens"]))
+		let output = positive([&entry.max_output_tokens, &entry.max_tokens])
+			.or_else(|| {
+				entry
+					.model_info
+					.value()
+					.and_then(|info| positive([&info.max_output_tokens]))
+			})
 			.unwrap_or(default_output)
 			.min(context);
 		let limits = Some(ModelLimits {
@@ -415,9 +450,9 @@ impl DiscoveryProbe {
 		});
 		let mut operations = OperationBits::empty();
 		operations.insert_kind(OperationKind::Chat);
-		let declared_capabilities = discovered_capabilities(value, self.endpoint.kind);
+		let declared_capabilities = discovered_capabilities(entry.evidence(), self.endpoint.kind);
 		let declared_pricing = if self.endpoint.kind == DiscoveryEndpointKind::LiteLlm {
-			litellm_reported_prices(value)
+			litellm_reported_prices(entry)
 		} else {
 			Box::new([])
 		};
@@ -426,11 +461,8 @@ impl DiscoveryProbe {
 			route,
 			wire_model: WireModelId::from(id),
 			aliases: Box::new([]),
-			display_name: value
-				.get("display_name")
-				.or_else(|| value.get("displayName"))
-				.or_else(|| value.get("name"))
-				.and_then(serde_json::Value::as_str)
+			display_name: first_present([&entry.display_name, &entry.display_name_camel, &entry.name])
+				.map(|name| name.as_ref())
 				.filter(|name| *name != id)
 				.map(Str::new),
 			declared_class: None,
@@ -447,29 +479,14 @@ impl DiscoveryProbe {
 		}
 	}
 
-	fn proxy_route(&self, value: &serde_json::Value) -> RouteId {
+	fn proxy_route(&self, entry: &ModelEntry<'_>) -> RouteId {
 		let Some(routes) = &self.proxy_routes else {
 			return self.route.clone();
 		};
-		let endpoints = value
-			.get("supported_endpoint_types")
-			.and_then(serde_json::Value::as_array);
-		if endpoints.is_some_and(|endpoints| {
-			endpoints
-				.iter()
-				.filter_map(serde_json::Value::as_str)
-				.any(|endpoint| endpoint.eq_ignore_ascii_case("anthropic"))
-		}) {
-			routes.anthropic.clone()
-		} else if endpoints.is_some_and(|endpoints| {
-			endpoints
-				.iter()
-				.filter_map(serde_json::Value::as_str)
-				.any(|endpoint| endpoint.eq_ignore_ascii_case("openai"))
-		}) {
-			routes.openai.clone()
-		} else {
-			self.route.clone()
+		match entry.supported_endpoint_types.value() {
+			Some(types) if types.anthropic => routes.anthropic.clone(),
+			Some(types) if types.openai => routes.openai.clone(),
+			_ => self.route.clone(),
 		}
 	}
 }
@@ -525,76 +542,30 @@ fn dedupe_models(rows: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
 }
 
 fn discovered_capabilities(
-	value: &serde_json::Value,
+	evidence: CapabilityEvidence,
 	kind: DiscoveryEndpointKind,
 ) -> Option<omp_catalog::ModelCapabilities> {
-	let capabilities = value.get("capabilities");
-	let capability_names = capabilities
-		.and_then(serde_json::Value::as_array)
-		.map(|values| {
-			values
-				.iter()
-				.filter_map(serde_json::Value::as_str)
-				.map(str::to_ascii_lowercase)
-				.collect::<Vec<_>>()
-		});
-	let object = capabilities.and_then(serde_json::Value::as_object);
+	let capabilities = evidence.capabilities.value();
 	let mut modalities = ModalityBits::TEXT;
 	let mut has_modality_evidence = false;
-	for candidate in [
-		value.get("input"),
-		value.get("input_modalities"),
-		value
-			.get("architecture")
-			.and_then(|architecture| architecture.get("input_modalities")),
-	] {
-		if let Some(values) = candidate.and_then(serde_json::Value::as_array) {
+	for candidate in [evidence.input, evidence.input_modalities, evidence.architecture_input] {
+		if let Some(listed) = candidate.value() {
 			has_modality_evidence = true;
-			if values
-				.iter()
-				.filter_map(serde_json::Value::as_str)
-				.any(|value| {
-					value.eq_ignore_ascii_case("image") || value.eq_ignore_ascii_case("vision")
-				}) {
+			if listed.image {
 				modalities.insert(ModalityBits::IMAGE);
 			}
 		}
 	}
-	if capability_names.as_ref().is_some_and(|names| {
-		names
-			.iter()
-			.any(|name| matches!(name.as_str(), "image" | "vision"))
-	}) || object.is_some_and(|object| {
-		object
-			.get("image")
-			.or_else(|| object.get("vision"))
-			.and_then(serde_json::Value::as_bool)
-			== Some(true)
-	}) || value
-		.get("supports_vision")
-		.and_then(serde_json::Value::as_bool)
-		== Some(true)
+	if capabilities.is_some_and(|capabilities| capabilities.vision)
+		|| evidence.supports_vision.value() == Some(&true)
 	{
 		has_modality_evidence = true;
 		modalities.insert(ModalityBits::IMAGE);
 	}
-	has_modality_evidence |= value.get("supports_vision").is_some();
-	let has_reasoning_evidence =
-		capability_names.is_some() || object.is_some() || value.get("supports_reasoning").is_some();
-	let reasoning = capability_names.as_ref().is_some_and(|names| {
-		names
-			.iter()
-			.any(|name| matches!(name.as_str(), "thinking" | "reasoning"))
-	}) || object.is_some_and(|object| {
-		object
-			.get("thinking")
-			.or_else(|| object.get("reasoning"))
-			.and_then(serde_json::Value::as_bool)
-			== Some(true)
-	}) || value
-		.get("supports_reasoning")
-		.and_then(serde_json::Value::as_bool)
-		== Some(true);
+	has_modality_evidence |= evidence.supports_vision.is_present();
+	let has_reasoning_evidence = capabilities.is_some() || evidence.supports_reasoning.is_present();
+	let reasoning = capabilities.is_some_and(|capabilities| capabilities.reasoning)
+		|| evidence.supports_reasoning.value() == Some(&true);
 	if !has_modality_evidence
 		&& !has_reasoning_evidence
 		&& !matches!(kind, DiscoveryEndpointKind::Ollama | DiscoveryEndpointKind::LlamaCpp)
@@ -624,40 +595,40 @@ fn discovered_capabilities(
 	Some(model)
 }
 
-fn llama_model_context_window(value: &serde_json::Value) -> Option<u64> {
-	value
-		.get("meta")
-		.and_then(|meta| positive_u64(meta, &["n_ctx"]))
-		.or_else(|| llama_configured_context_window(value))
-		.or_else(|| {
-			value
-				.get("meta")
-				.and_then(|meta| positive_u64(meta, &["n_ctx_train"]))
-		})
+fn llama_model_context_window(entry: &ModelEntry<'_>) -> Option<u64> {
+	let meta = entry.meta.value();
+	meta
+		.and_then(|meta| positive([&meta.n_ctx]))
+		.or_else(|| llama_configured_context_window(entry))
+		.or_else(|| meta.and_then(|meta| positive([&meta.n_ctx_train])))
 }
 
-fn llama_configured_context_window(value: &serde_json::Value) -> Option<u64> {
-	let status = value.get("status")?;
-	if let Some(arguments) = status.get("args").and_then(serde_json::Value::as_array) {
+fn llama_configured_context_window(entry: &ModelEntry<'_>) -> Option<u64> {
+	let status = entry.status.value()?;
+	if let Some(arguments) = status.args.value() {
 		for (index, argument) in arguments.iter().enumerate() {
-			let Some(argument) = argument.as_str() else {
+			let Some(LlamaArg::Text(argument)) = argument.value() else {
 				continue;
 			};
+			let argument: &str = argument;
 			let (flag, inline) = argument
 				.split_once('=')
 				.map_or((argument, None), |(flag, value)| (flag, Some(value)));
 			if !matches!(flag, "--ctx-size" | "-c") {
 				continue;
 			}
-			let value = inline
-				.and_then(positive_u64_text)
-				.or_else(|| arguments.get(index + 1).and_then(positive_u64_value));
+			let value = inline.and_then(positive_u64_text).or_else(|| {
+				arguments
+					.get(index + 1)
+					.and_then(Field::value)
+					.and_then(LlamaArg::positive)
+			});
 			if value.is_some() {
 				return value;
 			}
 		}
 	}
-	let preset = status.get("preset").and_then(serde_json::Value::as_str)?;
+	let preset = status.preset.value()?;
 	for line in preset.lines() {
 		let Some((key, value)) = line.split_once('=') else {
 			continue;
@@ -688,98 +659,72 @@ impl LiteLlmRouteEvidence {
 	}
 }
 
-fn decode_json_rows(payload: &[u8]) -> Result<Vec<serde_json::Value>, ProbeError> {
-	let mut envelope: serde_json::Value =
-		serde_json::from_slice(payload).map_err(|_| ProbeError::Protocol)?;
-	take_json_rows(&mut envelope).ok_or(ProbeError::Protocol)
+/// Splits a listing response into its raw model entries.
+fn listing_rows(payload: &[u8]) -> Result<Rows<'_>, ProbeProtocolError> {
+	serde_json::from_slice::<Field<Rows<'_>>>(payload)
+		.map_err(ProbeProtocolError::Json)?
+		.into_value()
+		.ok_or(ProbeProtocolError::MissingModelList)
 }
 
-fn take_json_rows(envelope: &mut serde_json::Value) -> Option<Vec<serde_json::Value>> {
-	if let serde_json::Value::Array(rows) = envelope {
-		return Some(mem::take(rows));
-	}
-	for key in ["data", "models", "result", "items"] {
-		if let Some(candidate) = envelope.get_mut(key)
-			&& let Some(rows) = take_json_rows(candidate)
+fn litellm_public_id<'e>(entry: &'e ModelEntry<'_>) -> Option<&'e str> {
+	first_present(
+		[&entry.model_group, &entry.model_name, &entry.id, &entry.name]
+			.into_iter()
+			.chain(entry.litellm_params.value().map(|params| &params.model)),
+	)
+	.map(|id| id.trim())
+	.filter(|id| !id.is_empty())
+}
+
+fn classify_litellm_route(entry: Option<&ModelEntry<'_>>, id: &str) -> LiteLlmRouteEvidence {
+	let provider_evidence = |provider: &str| {
+		if provider.eq_ignore_ascii_case("openai") {
+			LiteLlmRouteEvidence::OpenAi
+		} else {
+			LiteLlmRouteEvidence::Other
+		}
+	};
+	if let Some(entry) = entry {
+		if let Some(providers) = entry.providers.value()
+			&& providers.any
 		{
-			return Some(rows);
-		}
-	}
-	None
-}
-
-fn litellm_public_id(value: &serde_json::Value) -> Option<&str> {
-	value
-		.get("model_group")
-		.or_else(|| value.get("model_name"))
-		.or_else(|| value.get("id"))
-		.or_else(|| value.get("name"))
-		.or_else(|| value.get("litellm_params")?.get("model"))
-		.and_then(serde_json::Value::as_str)
-		.map(str::trim)
-		.filter(|id| !id.is_empty())
-}
-
-fn classify_litellm_route(value: Option<&serde_json::Value>, id: &str) -> LiteLlmRouteEvidence {
-	if let Some(value) = value {
-		if let Some(providers) = value.get("providers").and_then(serde_json::Value::as_array) {
-			let mut saw_provider = false;
-			let all_openai = providers
-				.iter()
-				.filter_map(serde_json::Value::as_str)
-				.map(str::trim)
-				.filter(|provider| !provider.is_empty())
-				.all(|provider| {
-					saw_provider = true;
-					provider.eq_ignore_ascii_case("openai")
-				});
-			if saw_provider {
-				return if all_openai {
-					LiteLlmRouteEvidence::OpenAi
-				} else {
-					LiteLlmRouteEvidence::Other
-				};
-			}
-		}
-		if let Some(params) = value.get("litellm_params") {
-			if let Some(provider) = params
-				.get("custom_llm_provider")
-				.and_then(serde_json::Value::as_str)
-				.map(str::trim)
-				.filter(|provider| !provider.is_empty())
-			{
-				return if provider.eq_ignore_ascii_case("openai") {
-					LiteLlmRouteEvidence::OpenAi
-				} else {
-					LiteLlmRouteEvidence::Other
-				};
-			}
-			if let Some(model) = params
-				.get("model")
-				.and_then(serde_json::Value::as_str)
-				.map(str::trim)
-				.filter(|model| !model.is_empty())
-				&& let Some((provider, _)) = model.split_once('/')
-			{
-				return if provider.eq_ignore_ascii_case("openai") {
-					LiteLlmRouteEvidence::OpenAi
-				} else {
-					LiteLlmRouteEvidence::Other
-				};
-			}
-		}
-		if let Some(base) = value
-			.get("model_info")
-			.and_then(|info| info.get("base_model"))
-			.or_else(|| value.get("base_model"))
-			.and_then(serde_json::Value::as_str)
-			&& let Some((provider, _)) = base.trim().split_once('/')
-		{
-			return if provider.eq_ignore_ascii_case("openai") {
+			return if providers.all_openai {
 				LiteLlmRouteEvidence::OpenAi
 			} else {
 				LiteLlmRouteEvidence::Other
 			};
+		}
+		if let Some(params) = entry.litellm_params.value() {
+			if let Some(provider) = params
+				.custom_llm_provider
+				.value()
+				.map(|provider| provider.trim())
+				.filter(|provider| !provider.is_empty())
+			{
+				return provider_evidence(provider);
+			}
+			if let Some((provider, _)) = params
+				.model
+				.value()
+				.map(|model| model.trim())
+				.filter(|model| !model.is_empty())
+				.and_then(|model| model.split_once('/'))
+			{
+				return provider_evidence(provider);
+			}
+		}
+		if let Some((provider, _)) = first_present(
+			entry
+				.model_info
+				.value()
+				.map(|info| &info.base_model)
+				.into_iter()
+				.chain([&entry.base_model]),
+		)
+		.and_then(|base| base.trim().split_once('/'))
+		{
+			return provider_evidence(provider);
 		}
 	}
 	let normalized = id.trim().to_ascii_lowercase();
@@ -855,27 +800,37 @@ fn merge_runtime_capabilities(
 	}
 }
 
-fn litellm_reported_prices(value: &serde_json::Value) -> Box<[Price]> {
+fn litellm_reported_prices(entry: &ModelEntry<'_>) -> Box<[Price]> {
+	let info = entry.model_info.value();
 	[
-		("input_cost_per_token", PriceUnit::MtokInput),
-		("output_cost_per_token", PriceUnit::MtokOutput),
-		("cache_read_input_token_cost", PriceUnit::MtokCacheRead),
-		("cache_creation_input_token_cost", PriceUnit::MtokCacheWrite),
+		(
+			&entry.input_cost_per_token,
+			info.map(|info| &info.input_cost_per_token),
+			PriceUnit::MtokInput,
+		),
+		(
+			&entry.output_cost_per_token,
+			info.map(|info| &info.output_cost_per_token),
+			PriceUnit::MtokOutput,
+		),
+		(
+			&entry.cache_read_input_token_cost,
+			info.map(|info| &info.cache_read_input_token_cost),
+			PriceUnit::MtokCacheRead,
+		),
+		(
+			&entry.cache_creation_input_token_cost,
+			info.map(|info| &info.cache_creation_input_token_cost),
+			PriceUnit::MtokCacheWrite,
+		),
 	]
 	.into_iter()
-	.filter_map(|(key, unit)| {
-		let value = value
-			.get(key)
-			.filter(|value| !value.is_null())
-			.or_else(|| {
-				value
-					.get("model_info")?
-					.get(key)
-					.filter(|value| !value.is_null())
-			})?;
-		let per_token = value
-			.as_f64()
-			.or_else(|| value.as_str()?.trim().parse::<f64>().ok())?;
+	.filter_map(|(declared, nested, unit)| {
+		// The first non-null declaration decides, even when it is not numeric.
+		let per_token = *declared
+			.non_null()
+			.or_else(|| nested.and_then(Field::non_null))?
+			.value()?;
 		if !per_token.is_finite() || per_token <= 0.0 {
 			return None;
 		}
@@ -898,35 +853,11 @@ fn litellm_pricing_is_partial(pricing: &[Price]) -> bool {
 		.any(|unit| pricing.iter().all(|price| price.unit != unit))
 }
 
-fn nested_positive_u64(value: &serde_json::Value, object: &str, keys: &[&str]) -> Option<u64> {
-	value
-		.get(object)
-		.and_then(|value| positive_u64(value, keys))
-}
-
-fn positive_u64(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
-	keys
-		.iter()
-		.find_map(|key| value.get(*key).and_then(positive_u64_value))
-}
-
-fn positive_u64_value(value: &serde_json::Value) -> Option<u64> {
-	value
-		.as_u64()
-		.filter(|value| *value > 0)
-		.or_else(|| value.as_str().and_then(positive_u64_text))
-}
-
-fn positive_u64_text(value: &str) -> Option<u64> {
-	value.trim().parse::<u64>().ok().filter(|value| *value > 0)
-}
-
-fn apply_ollama_show(row: &mut DiscoveredModel, payload: &[u8]) -> Result<(), ProbeError> {
-	let value: serde_json::Value =
-		serde_json::from_slice(payload).map_err(|_| ProbeError::Protocol)?;
-	let context = value
-		.get("parameters")
-		.and_then(serde_json::Value::as_str)
+fn apply_ollama_show(row: &mut DiscoveredModel, payload: &[u8]) -> Result<(), serde_json::Error> {
+	let show = OllamaShow::decode(payload)?;
+	let context = show
+		.parameters
+		.value()
 		.and_then(|parameters| {
 			parameters.lines().find_map(|line| {
 				let mut fields = line.split_whitespace();
@@ -935,20 +866,8 @@ fn apply_ollama_show(row: &mut DiscoveredModel, payload: &[u8]) -> Result<(), Pr
 					.flatten()
 			})
 		})
-		.or_else(|| {
-			value
-				.get("model_info")
-				.and_then(serde_json::Value::as_object)
-				.and_then(|info| {
-					info
-						.iter()
-						.find(|(key, _)| {
-							key.as_str() == "context_length" || key.ends_with(".context_length")
-						})
-						.and_then(|(_, value)| positive_u64_value(value))
-				})
-		})
-		.or_else(|| positive_u64(&value, &["context_length"]));
+		.or_else(|| show.model_info.value().and_then(|info| info.context_length))
+		.or_else(|| positive([&show.context_length]));
 	if let Some(context) = context.filter(|value| *value > 0) {
 		row.declared_limits
 			.get_or_insert(ModelLimits {
@@ -966,40 +885,30 @@ fn apply_ollama_show(row: &mut DiscoveredModel, payload: &[u8]) -> Result<(), Pr
 			*output = (*output).min(context);
 		}
 	}
-	if let Some(capabilities) = discovered_capabilities(&value, DiscoveryEndpointKind::Ollama) {
+	if let Some(capabilities) =
+		discovered_capabilities(show.evidence(), DiscoveryEndpointKind::Ollama)
+	{
 		row.declared_capabilities = Some(capabilities);
 	}
 	Ok(())
 }
 
-fn apply_llama_props(rows: &mut [DiscoveredModel], payload: &[u8]) -> Result<(), ProbeError> {
-	let value: serde_json::Value =
-		serde_json::from_slice(payload).map_err(|_| ProbeError::Protocol)?;
-	let context = value
-		.get("default_generation_settings")
-		.and_then(|settings| positive_u64(settings, &["n_ctx"]))
-		.or_else(|| positive_u64(&value, &["n_ctx", "n_ctx_train", "context_length"]));
-	let unlimited_output = [
-		value
-			.get("default_generation_settings")
-			.and_then(|settings| settings.get("params"))
-			.and_then(|params| params.get("max_tokens")),
-		value
-			.get("default_generation_settings")
-			.and_then(|settings| settings.get("params"))
-			.and_then(|params| params.get("n_predict")),
-		value.get("max_tokens"),
-		value.get("n_predict"),
-	]
-	.into_iter()
-	.flatten()
-	.any(|value| {
-		value.as_i64() == Some(-1)
-			|| value
-				.as_str()
-				.is_some_and(|value| value.trim().parse::<i64>() == Ok(-1))
-	});
-	let capabilities = discovered_capabilities(&value, DiscoveryEndpointKind::LlamaCpp);
+fn apply_llama_props(
+	rows: &mut [DiscoveredModel],
+	payload: &[u8],
+) -> Result<(), serde_json::Error> {
+	let props = LlamaProps::decode(payload)?;
+	let settings = props.default_generation_settings.value();
+	let params = settings.and_then(|settings| settings.params.value());
+	let context = settings
+		.and_then(|settings| positive([&settings.n_ctx]))
+		.or_else(|| positive([&props.n_ctx, &props.n_ctx_train, &props.context_length]));
+	let unlimited_output = params
+		.into_iter()
+		.flat_map(|params| [&params.max_tokens, &params.n_predict])
+		.chain([&props.max_tokens, &props.n_predict])
+		.any(|limit| limit.value() == Some(&-1));
+	let capabilities = discovered_capabilities(props.evidence(), DiscoveryEndpointKind::LlamaCpp);
 	for row in rows {
 		if let Some(server_context) = context {
 			let limits = row.declared_limits.get_or_insert(ModelLimits {
@@ -1042,7 +951,7 @@ pub enum ProbeTransportError {
 }
 
 /// Typed, redaction-safe probe failure.
-#[derive(Clone, Copy, Debug, strum::IntoStaticStr, thiserror::Error, Eq, PartialEq)]
+#[derive(Debug, strum::IntoStaticStr, thiserror::Error)]
 #[strum(serialize_all = "snake_case")]
 pub enum ProbeError {
 	/// The endpoint missed its loopback/remote deadline.
@@ -1066,16 +975,71 @@ pub enum ProbeError {
 	/// The typed endpoint could not be converted into a request URL.
 	#[error("model discovery endpoint is invalid")]
 	InvalidEndpoint,
+	/// A metadata request body could not be encoded.
+	#[error("model discovery request to {provider} {endpoint} could not be encoded")]
+	EncodeRequest {
+		/// Provider being probed.
+		provider: ProviderId,
+		/// Endpoint path, without the configured base URL.
+		endpoint: &'static str,
+		/// Encoder failure.
+		#[source]
+		source:   serde_json::Error,
+	},
 	/// The endpoint response was malformed.
-	#[error("model discovery response was malformed")]
-	Protocol,
+	#[error("model discovery response from {provider} {endpoint} was malformed")]
+	Protocol {
+		/// Provider being probed.
+		provider: ProviderId,
+		/// Endpoint path, without the configured base URL.
+		endpoint: &'static str,
+		/// What was malformed.
+		#[source]
+		source:   ProbeProtocolError,
+	},
+}
+
+/// Why a model-listing response could not be decoded.
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeProtocolError {
+	/// The body is not well-formed JSON.
+	#[error("response body is not well-formed JSON")]
+	Json(#[source] serde_json::Error),
+	/// No `data`, `models`, `result`, or `items` array was found.
+	#[error("response carries no model list")]
+	MissingModelList,
+	/// A model entry is not a JSON object.
+	#[error("model entry {index} is not a JSON object")]
+	EntryNotObject {
+		/// Zero-based entry position in the listing.
+		index: usize,
+	},
+	/// A model entry object could not be decoded.
+	#[error("model entry {index} could not be decoded")]
+	Entry {
+		/// Zero-based entry position in the listing.
+		index:  usize,
+		/// Decoder failure.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// A model entry carries no non-blank identifier.
+	#[error("model entry {index} carries no usable identifier")]
+	MissingModelId {
+		/// Zero-based entry position in the listing.
+		index: usize,
+	},
 }
 
 #[cfg(test)]
+mod characterization;
+
+#[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, sync::Arc};
+	use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 	use parking_lot::Mutex;
+	use serde_json::value::RawValue;
 
 	use super::*;
 	use crate::discovery::endpoints::{EndpointOrigin, configured_endpoint};
@@ -1513,6 +1477,109 @@ mod tests {
 		);
 	}
 
+	fn openai_probe() -> DiscoveryProbe {
+		DiscoveryProbe {
+			provider:     ProviderId::from("custom"),
+			route:        RouteId::from("custom-route"),
+			proxy_routes: None,
+			headers:      http::HeaderMap::new(),
+			endpoint:     configured_endpoint(
+				DiscoveryEndpointKind::OpenAi,
+				"https://models.example/v1",
+			)
+			.expect("endpoint"),
+		}
+	}
+
+	#[test]
+	fn listing_protocol_errors_are_typed_and_identify_provider_and_endpoint() {
+		let probe = openai_probe();
+		let decode = |payload: &[u8]| {
+			let Err(ProbeError::Protocol { provider, endpoint, source }) =
+				probe.decode_models(payload, "/v1/models")
+			else {
+				panic!("{} must be a protocol error", String::from_utf8_lossy(payload));
+			};
+			assert_eq!(provider.as_str(), "custom");
+			assert_eq!(endpoint, "/v1/models");
+			source
+		};
+		assert!(matches!(decode(b"{\"data\":["), ProbeProtocolError::Json(_)));
+		assert!(matches!(decode(br#"{"object":"list"}"#), ProbeProtocolError::MissingModelList));
+		assert!(matches!(
+			decode(br#"{"data":[{"id":"ok"},"junk"]}"#),
+			ProbeProtocolError::EntryNotObject { index: 1 }
+		));
+		assert!(matches!(
+			decode(br#"{"data":[{"id":"ok"},{"id":5,"name":"x"}]}"#),
+			ProbeProtocolError::MissingModelId { index: 1 }
+		));
+		assert!(matches!(
+			decode(br#"{"data":[{"id":"ok"},{"id":"  "}]}"#),
+			ProbeProtocolError::MissingModelId { index: 1 }
+		));
+		// Repeated members inside one entry are rejected by the typed decoder.
+		let duplicate = decode(br#"{"data":[{"id":"a","id":"b"}]}"#);
+		assert!(matches!(duplicate, ProbeProtocolError::Entry { index: 0, .. }));
+		assert!(
+			std::error::Error::source(&duplicate)
+				.is_some_and(|source| source.is::<serde_json::Error>())
+		);
+		let error = ProbeError::Protocol {
+			provider: ProviderId::from("custom"),
+			endpoint: "/v1/models",
+			source:   ProbeProtocolError::MissingModelList,
+		};
+		assert_eq!(<&'static str>::from(&error), "protocol");
+		assert_eq!(
+			error.to_string(),
+			"model discovery response from custom /v1/models was malformed"
+		);
+	}
+
+	#[test]
+	fn unread_members_do_not_fail_an_entry() {
+		let rows = openai_probe()
+			.decode_models(
+				br#"{"data":[{"id":"a","junk":1e400,"nested":{"deep":[1,{"x":null}]}}]}"#,
+				"/v1/models",
+			)
+			.expect("unread members are ignored");
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].wire_model.as_str(), "a");
+	}
+
+	#[test]
+	fn wire_fields_keep_value_accessor_semantics() {
+		use wire::{Positive, Shape as _};
+
+		let entry = |json: &'static str| {
+			let raw: &RawValue = serde_json::from_str(json).expect("raw entry");
+			ModelEntry::decode(raw).expect("entry").expect("object")
+		};
+		let parsed = entry(
+			r#"{"id":null,"name":7,"model":"m","context_length":"  42 ","contextWindow":0,"max_model_len":-3,"max_input_tokens":1.5}"#,
+		);
+		assert_eq!(parsed.id, Field::Null);
+		assert_eq!(parsed.name, Field::Mismatched);
+		assert_eq!(parsed.model_group, Field::Absent);
+		assert_eq!(parsed.context_length, Field::Value(Positive(42)));
+		assert_eq!(parsed.context_window, Field::Mismatched);
+		assert_eq!(parsed.max_model_len, Field::Mismatched);
+		assert_eq!(parsed.max_input_tokens, Field::Mismatched);
+		assert_eq!(first_present([&parsed.id, &parsed.model]), None);
+		assert_eq!(first_present([&parsed.model_group, &parsed.model]).map(|id| &**id), Some("m"));
+		// Unescaped text borrows from the response body.
+		assert!(matches!(entry(r#"{"id":"plain"}"#).id, Field::Value(Cow::Borrowed("plain"))));
+		assert!(matches!(
+			entry(r#"{"id":"esc\u0061ped"}"#).id,
+			Field::Value(Cow::Owned(ref id)) if id == "escaped"
+		));
+		assert_eq!(Positive::from_str("+7"), Some(Positive(7)));
+		let array: &RawValue = serde_json::from_str("[1]").expect("raw");
+		assert!(ModelEntry::decode(array).is_ok_and(|entry| entry.is_none()));
+	}
+
 	#[test]
 	fn probe_request_debug_redacts_url_headers_and_body() {
 		let mut headers = http::HeaderMap::new();
@@ -1559,9 +1626,9 @@ mod tests {
 			headers: http::HeaderMap::new(),
 			endpoint,
 		};
-		assert_eq!(
+		assert!(matches!(
 			probe.probe(&PendingClient, CancellationToken::new()).await,
 			Err(ProbeError::Timeout)
-		);
+		));
 	}
 }

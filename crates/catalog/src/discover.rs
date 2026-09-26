@@ -491,7 +491,7 @@ impl DiscoveryNormalizer {
 			confidence:     EvidenceConfidence::Inferred,
 			observed_at_ms: row.observed_at_ms,
 		};
-		let key = provider_scoped_key(&row.provider, classification.logical_model.as_str());
+		let key = ModelKey::provider_scoped(&row.provider, classification.logical_model.as_str());
 		let aliases = row
 			.aliases
 			.iter()
@@ -576,13 +576,6 @@ impl DiscoveryNormalizer {
 		}
 		Ok(grouped.into_values().collect())
 	}
-}
-
-/// Names a discovered model the way the bundled compiler names every routed
-/// model: `<provider>/<model>`. Discovery rows from different providers, and
-/// from a provider and the bundled catalog, therefore never share a key.
-fn provider_scoped_key(provider: &ProviderId<str>, model: &str) -> ModelKey {
-	ModelKey::new(sf!("{provider}/{model}"))
 }
 
 fn merge_declared_pricing(defaults: &Pricing, declared: &[Price]) -> Pricing {
@@ -672,7 +665,7 @@ fn prepare_dynamic_effort_groups(normalized: &mut [NormalizedDiscovery]) {
 			continue;
 		}
 		if !safe.contains(&key) {
-			item.model.key = provider_scoped_key(&item.provider, wire.as_str());
+			item.model.key = ModelKey::provider_scoped(&item.provider, wire.as_str());
 			for alias in &mut item.aliases {
 				alias.target = item.model.key.clone();
 			}

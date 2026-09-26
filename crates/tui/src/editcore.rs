@@ -1952,6 +1952,9 @@ impl Suggestion {
 	}
 
 	/// Ghost text shown after the cursor while this row is selected.
+	///
+	/// Painted flush against the caret, like [`EditorCompletion::hint`]: a
+	/// usage that is a separate word carries its own leading space.
 	pub fn with_hint(mut self, hint: impl IntoStr) -> Self {
 		self.hint = Some(hint.into_str());
 		self
@@ -2058,6 +2061,11 @@ pub trait EditorCompletion {
 
 	/// Dim ghost text rendered after the cursor (usage hints, AI
 	/// completion). Re-queried after every edit.
+	///
+	/// The text is the literal continuation of the typed text and is painted
+	/// flush against the caret: the rest of a partially typed word starts in
+	/// the caret cell, and a usage that is a separate word carries its own
+	/// leading space when the caret still sits on a word.
 	fn hint(&mut self, text: &str, cursor: usize) -> Option<Str> {
 		let _ = (text, cursor);
 		None
@@ -3121,9 +3129,10 @@ impl Editor {
 		self.picker = picker;
 	}
 
-	/// Dim ghost text rendered after the cursor: the selected suggestion's
-	/// hint while the dropdown is open, otherwise the completion engine's
-	/// latest [`EditorCompletion::hint`].
+	/// Dim ghost text rendered flush after the cursor: the selected
+	/// suggestion's hint while the dropdown is open, otherwise the completion
+	/// engine's latest [`EditorCompletion::hint`]. Separators are part of the
+	/// text, never added by the painter.
 	pub fn inline_hint(&self) -> Option<Str> {
 		if let Some(picker) = &self.picker
 			&& let Some(hint) = &picker.suggestions[picker.selected].hint
@@ -3211,6 +3220,9 @@ pub struct Command {
 	aliases:      SmallVec<Str, 1>,
 	icon:         Option<Icon>,
 	args:         Box<[CommandArg]>,
+	/// Usage ghost with its leading separator (` <usage>`), the form shown
+	/// while the caret still sits on the command name; the text after the
+	/// space is the form shown once a delimiter is typed.
 	hint:         Option<Str>,
 	dynamic_args: Option<Arc<dyn Fn(&str) -> Box<[CommandArgument]> + Send + Sync>>,
 	status:       Option<Arc<dyn Fn() -> Str + Send + Sync>>,
@@ -3287,10 +3299,17 @@ impl Command {
 	}
 
 	/// Usage hint shown as dim ghost text after the cursor
-	/// (e.g. `<name> [--scope project|user]`).
+	/// (e.g. `<name> [--scope project|user]`): one cell after a typed name,
+	/// flush after a typed space or `:` delimiter.
 	pub fn with_hint(mut self, hint: &str) -> Self {
-		self.hint = Some(Str::new(hint));
+		self.hint = Some(separated(hint));
 		self
+	}
+
+	/// Usage ghost after a typed delimiter: the stored hint without its
+	/// separator.
+	fn attached_hint(&self) -> Option<Str> {
+		self.hint.as_ref().map(|hint| hint.slice(1..))
 	}
 
 	/// The command's primary spelling, without the leading `/`.
@@ -3418,6 +3437,8 @@ impl SlashCommands {
 								.map_or_else(|| command.description.clone(), |status| status()),
 						),
 						icon:        command.icon,
+						// The name under the caret is a word of its own; its usage
+						// ghosts one cell after it.
 						hint:        command.hint.clone(),
 						category:    Some(sf!("Commands")),
 						match_spans: fuzzy_match_spans(selected_name, &query),
@@ -3526,6 +3547,10 @@ impl SlashCommands {
 
 /// Ghosts the untyped suffix of the selected argument before its post-accept
 /// usage. A bare command keeps its command-level hint instead.
+///
+/// The suffix continues the word under the caret and starts flush; a usage
+/// after a complete (or fuzzily matched) argument is a separate word and
+/// carries its separating space.
 fn argument_inline_hint(value: &str, partial: &str, usage: Option<&Str>) -> Option<Str> {
 	if partial.is_empty() {
 		return None;
@@ -3536,12 +3561,17 @@ fn argument_inline_hint(value: &str, partial: &str, usage: Option<&Str>) -> Opti
 			.is_some_and(|prefix| prefix.eq_ignore_ascii_case(partial))
 	});
 	match (remaining, usage) {
-		(Some(""), Some(usage)) => Some(usage.clone()),
-		(Some(""), None) => None,
+		(Some("") | None, None) => None,
+		(Some("") | None, Some(usage)) => Some(separated(usage)),
 		(Some(remaining), Some(usage)) => Some(sf!("{remaining} {usage}")),
 		(Some(remaining), None) => Some(Str::new(remaining)),
-		(None, usage) => usage.cloned(),
 	}
+}
+
+/// A usage ghost that follows the word under the caret as a separate word:
+/// the hint paints flush, so the separating space is part of its text.
+fn separated(usage: &str) -> Str {
+	sf!(" {usage}")
 }
 
 fn filesystem_path_arguments(partial: &str) -> Vec<CommandArgument> {
@@ -3635,6 +3665,11 @@ impl EditorCompletion for SlashCommands {
 	/// Usage ghosting: bare `/name ` shows the command's own usage; a partial
 	/// argument shows its remaining characters plus usage; a chosen argument
 	/// ghosts the usage words not yet typed.
+	///
+	/// The ghost paints flush against the caret (pi's `getInlineHint`
+	/// contract): the rest of a partially typed argument continues that word
+	/// (`/security im` + `port <path>`), while a usage after a complete word
+	/// carries its own separating space unless whitespace was typed.
 	fn hint(&mut self, text: &str, cursor: usize) -> Option<Str> {
 		let line_start = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
 		let line = &text[line_start..cursor];
@@ -3644,7 +3679,8 @@ impl EditorCompletion for SlashCommands {
 		let command = self.find(name)?;
 		let argument = rest.trim_start_matches([' ', '\t', ':']);
 		if argument.is_empty() {
-			return command.hint.clone();
+			// Only delimiters follow the name: the usage starts at the caret.
+			return command.attached_hint();
 		}
 		match argument.find(char::is_whitespace) {
 			None => {
@@ -3663,17 +3699,25 @@ impl EditorCompletion for SlashCommands {
 			Some(argument_end) => {
 				let (chosen, after) = argument.split_at(argument_end);
 				let arg = command.args.iter().find(|arg| arg.name == chosen)?;
-				let usage = arg.usage.as_deref()?;
+				let usage = arg.usage.as_ref()?;
 				let typed = after.split_whitespace().count();
 				if typed == 0 {
-					return Some(Str::new(usage));
+					return Some(usage.clone());
 				}
-				let mut words = usage.split(' ');
+				let mut remaining = usage.as_str();
 				for _ in 0..typed {
-					words.next()?;
+					(_, remaining) = remaining.split_once(' ')?;
 				}
-				let remaining = words.collect::<Vec<_>>().join(" ");
-				(!remaining.is_empty()).then(|| Str::new(&remaining))
+				if remaining.is_empty() {
+					return None;
+				}
+				// While the caret still sits on a typed usage word, the next
+				// one is a separate word.
+				Some(if line.ends_with(char::is_whitespace) {
+					usage.slice_ref(remaining)
+				} else {
+					separated(remaining)
+				})
 			},
 		}
 	}
@@ -4469,7 +4513,8 @@ mod tests {
 	fn inline_hint_follows_selection_arguments_and_usage() {
 		let mut editor = editor();
 		type_text(&mut editor, "/sec");
-		assert_eq!(editor.inline_hint().as_deref(), Some("plan|import|compare"));
+		// the selected command's usage is a separate word after the name
+		assert_eq!(editor.inline_hint().as_deref(), Some(" plan|import|compare"));
 		assert_eq!(editor.handle_key(key(Key::Tab)), EditOutcome::Changed);
 		assert_eq!(editor.text(), "/security ");
 		// bare `/name ` ghosts the command usage, picker open or not
@@ -4488,9 +4533,33 @@ mod tests {
 		// words count alike.
 		let mut compare = make_editor();
 		type_text(&mut compare, "/security compare one");
+		assert_eq!(compare.inline_hint().as_deref(), Some(" <run-b>"));
+		type_text(&mut compare, " ");
 		assert_eq!(compare.inline_hint().as_deref(), Some("<run-b>"));
-		type_text(&mut compare, " two");
+		type_text(&mut compare, "two");
 		assert_eq!(compare.inline_hint(), None, "usage fully consumed");
+	}
+
+	/// The ghost is the literal continuation of the typed text: the rest of a
+	/// partially typed argument continues that word, a usage after a complete
+	/// word carries one separating space, and a typed separator is never
+	/// doubled (pi's `buildSubcommandInlineHint` shape).
+	#[test]
+	fn inline_hint_is_flush_mid_word_and_separated_after_a_word() {
+		let hint = |typed: &str| {
+			let mut editor = editor();
+			type_text(&mut editor, typed);
+			editor.inline_hint()
+		};
+		assert_eq!(hint("/security im").as_deref(), Some("port <path>"));
+		assert_eq!(hint("/security:im").as_deref(), Some("port <path>"));
+		assert_eq!(hint("/security import").as_deref(), Some(" <path>"));
+		assert_eq!(hint("/security import ").as_deref(), Some("<path>"));
+		assert_eq!(hint("/security").as_deref(), Some(" plan|import|compare"));
+		assert_eq!(hint("/security ").as_deref(), Some("plan|import|compare"));
+		assert_eq!(hint("/security:").as_deref(), Some("plan|import|compare"));
+		// a fuzzy argument match ghosts only the chosen argument's usage
+		assert_eq!(hint("/security prt").as_deref(), Some(" <path>"));
 	}
 
 	#[test]

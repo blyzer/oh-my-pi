@@ -1,0 +1,25 @@
+---
+source: crates/ai/src/discovery/probe/characterization.rs
+expression: out
+---
+## deepseek-r1:latest
+> GET http://127.0.0.1:11434/api/tags [-] 
+> POST http://127.0.0.1:11434/api/show [application/json] {"model":"deepseek-r1:latest"}
+{"provider":"ollama","route":"ollama/primary","wire_model":"deepseek-r1:latest","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":{"native":{"features":1,"efforts":[],"minimum_budget_tokens":null,"maximum_budget_tokens":null}},"input_modalities":"unknown","image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":24576,"maximum_input_tokens":null,"maximum_output_tokens":24576,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"ollama:http://127.0.0.1:11434//api/tags","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## llama3.2-vision:11b
+> GET http://127.0.0.1:11434/api/tags [-] 
+> POST http://127.0.0.1:11434/api/show [application/json] {"model":"llama3.2-vision:11b"}
+{"provider":"ollama","route":"ollama/primary","wire_model":"llama3.2-vision:11b","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unsupported","input_modalities":{"native":3},"image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":131072,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"ollama:http://127.0.0.1:11434//api/tags","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## broken-show:latest
+> GET http://127.0.0.1:11434/api/tags [-] 
+> POST http://127.0.0.1:11434/api/show [application/json] {"model":"broken-show:latest"}
+{"provider":"ollama","route":"ollama/primary","wire_model":"broken-show:latest","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unknown","input_modalities":"unknown","image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"ollama:http://127.0.0.1:11434//api/tags","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## absent
+> GET http://127.0.0.1:11434/api/tags [-] 
+(no rows)

@@ -13,7 +13,7 @@ pub use endpoints::{
 };
 pub use probe::{
 	DiscoveryHttpClient, DiscoveryProbe, ProbeError, ProbeHttpFuture, ProbeHttpRequest,
-	ProbeTransportError, ProxyDiscoveryRoutes,
+	ProbeProtocolError, ProbeTransportError, ProxyDiscoveryRoutes,
 };
 pub use store::{
 	CachedDiscovery, DiscoveryCacheKey, DiscoveryStore, DiscoveryStoreError, ProviderDiscoveryState,
