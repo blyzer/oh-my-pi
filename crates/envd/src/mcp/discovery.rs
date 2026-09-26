@@ -469,7 +469,9 @@ fn push_document(
 	kind: ConfigSourceKind,
 	servers: BTreeMap<Str, ForeignServer>,
 ) {
-	let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+	let base = path
+		.parent()
+		.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
 	push_document_at(out, path, &base, kind, servers);
 }
 
@@ -523,7 +525,10 @@ impl ForeignServer {
 		// in its package, not in the session cwd.
 		let command = command.map(|command| {
 			if plugin_root.is_some() && (command.starts_with("./") || command.starts_with("../")) {
-				let relative = command.as_str().strip_prefix("./").unwrap_or(command.as_str());
+				let relative = command
+					.as_str()
+					.strip_prefix("./")
+					.unwrap_or(command.as_str());
 				Str::new(base.join(relative).to_string_lossy())
 			} else {
 				command

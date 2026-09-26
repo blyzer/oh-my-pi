@@ -1753,17 +1753,16 @@ pub async fn compose_kernel(
 			});
 		}
 	}
-	let claude_plugins = match &options.claude_plugins {
-		Some(plugins) => Arc::clone(plugins),
-		None => {
-			let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(data_dir, &project_root);
-			// The launching host surfaces these once; a host-less composition
-			// (child, maintenance, or tool kernel) only records them.
-			for diagnostic in &plugins.diagnostics {
-				tracing::debug!(error = %diagnostic, "installed plugin diagnostic");
-			}
-			Arc::new(plugins)
-		},
+	let claude_plugins = if let Some(plugins) = &options.claude_plugins {
+		Arc::clone(plugins)
+	} else {
+		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(data_dir, &project_root);
+		// The launching host surfaces these once; a host-less composition
+		// (child, maintenance, or tool kernel) only records them.
+		for diagnostic in &plugins.diagnostics {
+			tracing::debug!(error = %diagnostic, "installed plugin diagnostic");
+		}
+		Arc::new(plugins)
 	};
 	let skills = match &options.discovered_skills {
 		Some(skills) => {

@@ -5,7 +5,7 @@
 //! `<config root>/agent/skills`, then `.claude/skills`, Agent Plugins
 //! packages, installed marketplace plugins (`installed_plugins.json`, enabled
 //! installs only), `.agent[s]/skills`, opted-in user/project `.codex/skills`,
-//! project OpenCode skills, then `sv_skills_custom_directories`, then the
+//! project `OpenCode` skills, then `sv_skills_custom_directories`, then the
 //! isolated managed-skills root dead last. Within a name, the first source in
 //! that order wins; a custom directory beats a default-path provider. Every
 //! knob is a convar (`sv_skills_*`, `cl_disabled_extensions`), never a second
@@ -356,11 +356,12 @@ pub fn managed_skills_root(config_root: &Path) -> PathBuf {
 	config_root.join("agent/managed-skills")
 }
 
-/// Splices installed-plugin and extension sources into the ordinary ladder
-/// from [`sources`]: explicit `--ext` Agent Plugins, then installed
-/// marketplace plugins, sit just above the `.agent[s]/skills` providers;
-/// other extension roots sit below every authored root and above the
-/// isolated managed-skills fallback, which stays dead last.
+/// Splices installed-plugin and extension sources into the [`sources`] ladder.
+///
+/// Explicit `--ext` Agent Plugins, then installed marketplace plugins, sit
+/// just above the `.agent[s]/skills` providers; other extension roots sit
+/// below every authored root and above the isolated managed-skills fallback,
+/// which stays dead last.
 #[must_use]
 pub fn ordered_sources(
 	mut all: Vec<SkillSource>,

@@ -605,7 +605,7 @@ fn resolve_layout(
 			Err(source) => {
 				resolver.diagnostics.push(PluginDiagnostic::ManifestParse {
 					plugin: id.clone(),
-					path: manifest_path.clone().unwrap_or_default(),
+					path: manifest_path.unwrap_or_default(),
 					source,
 				});
 				return None;
