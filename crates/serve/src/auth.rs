@@ -818,6 +818,7 @@ impl pb::auth_server::Auth for AuthRpc {
 					.then(|| SecretString::from(request.access_token)),
 				refresh_token: SecretString::from(request.refresh_token),
 				expires_at_ms: (request.expires_at_ms != 0).then_some(request.expires_at_ms),
+				project: None,
 			})
 			.map_err(store_status)?;
 		Ok(Response::new(self.control_meta(account)?))

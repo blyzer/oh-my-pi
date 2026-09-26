@@ -45,6 +45,31 @@ pub(crate) struct StoredMcpOAuthCredential {
 	pub generation:     u64,
 }
 
+/// A renewable MCP OAuth grant crossing the import ingress: the complete
+/// refresh material a live authorization would have stored.
+pub struct McpOAuthGrant {
+	/// Current access token.
+	pub access_token:   SecretString,
+	/// Renewable token, when the server issued one.
+	pub refresh_token:  Option<SecretString>,
+	/// Token endpoint that refreshes the grant.
+	pub token_endpoint: Str,
+	/// Client identity the grant was issued to.
+	pub client_id:      Str,
+	/// Confidential client material, when the client has any.
+	pub client_secret:  Option<SecretString>,
+	/// RFC 8707 resource indicator.
+	pub resource:       Option<Str>,
+	/// Absolute access-token expiration.
+	pub expires_at_ms:  Option<u64>,
+}
+
+impl fmt::Debug for McpOAuthGrant {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		formatter.write_str("McpOAuthGrant([REDACTED])")
+	}
+}
+
 #[derive(Serialize)]
 struct StoredMcpOAuthCredentialRef<'a> {
 	access_token:   &'a str,
@@ -205,6 +230,48 @@ impl CombinedAuthAuthority {
 			expected_generation,
 		})?;
 		Ok(metadata.generation)
+	}
+
+	/// Persists a renewable MCP OAuth grant minted outside this host (the v1
+	/// importer) under the affinity a live authorization of the same server
+	/// uses. It never replaces a stored grant: an occupied affinity returns
+	/// `None`, a new one its store generation.
+	pub fn import_mcp_oauth(
+		&self,
+		affinity: &AuthAffinity,
+		grant: McpOAuthGrant,
+		now_ms: u64,
+	) -> Result<Option<u64>, McpOAuthStoreError> {
+		if self.has_mcp_grant(affinity)? {
+			return Ok(None);
+		}
+		let McpOAuthGrant {
+			access_token,
+			refresh_token,
+			token_endpoint,
+			client_id,
+			client_secret,
+			resource,
+			expires_at_ms,
+		} = grant;
+		let credential = StoredMcpOAuthCredential {
+			access_token,
+			refresh_token,
+			token_endpoint,
+			client_id,
+			client_secret,
+			resource,
+			expires_at_ms,
+			generation: 0,
+		};
+		self
+			.persist_mcp_oauth(affinity, &credential, now_ms, None)
+			.map(Some)
+	}
+
+	/// Whether any credential is stored under `affinity`.
+	pub fn has_mcp_grant(&self, affinity: &AuthAffinity) -> Result<bool, StoreError> {
+		Ok(self.store.metadata(&affinity.account)?.is_some())
 	}
 
 	/// Loads and audits one complete renewable MCP OAuth record.

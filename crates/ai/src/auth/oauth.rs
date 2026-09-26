@@ -1526,7 +1526,7 @@ fn jwt_claim(token: &str, claims: &[Str]) -> Result<Str, OAuthError> {
 	}
 	Err(OAuthError::PrincipalUnresolved)
 }
-fn codex_residency(token: &str) -> Option<Str> {
+pub(super) fn codex_residency(token: &str) -> Option<Str> {
 	let mut segments = token.split('.');
 	segments.next()?;
 	let payload = segments.next()?;
