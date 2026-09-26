@@ -26,7 +26,7 @@ use crate::{
 	},
 	overlay::Layer,
 	sixel::SixelImage,
-	slots::{Delivered, WritePlan},
+	slots::{Delivered, Slots, WritePlan},
 	terminal::{alt_screen_active, terminal_write_all},
 };
 
@@ -526,6 +526,43 @@ impl<W: Write> Renderer<W> {
 				.map_err(|source| DeliveryError { delivered, source })?;
 		}
 		Ok(Delivered::All)
+	}
+
+	/// Delivers every staged transcript transaction of `slots` and commits
+	/// each acknowledged prefix.
+	///
+	/// A width resize stages its replay (or repair) as a transaction of its
+	/// own; a block finalized in the same paint — row-pressure retirement at
+	/// the new geometry — queues behind it. Presenting only the first
+	/// transaction would leave that block in neither the viewport (finalized
+	/// blocks occupy no live rows) nor native history until an unrelated
+	/// repaint, so this presents [`Slots::plan`] through
+	/// [`Renderer::present_plan`] until [`Slots::has_undelivered_rows`] is
+	/// false. A paint-only plan ends the loop after one paint.
+	///
+	/// # Errors
+	///
+	/// Returns the first [`DeliveryError`] after committing its exact
+	/// delivered prefix.
+	pub fn present_slots(
+		&mut self,
+		slots: &mut Slots,
+		layers: &[Layer<'_>],
+	) -> Result<(), DeliveryError> {
+		loop {
+			let plan = slots.plan();
+			let paint_only = plan.is_paint_only();
+			match self.present_plan(&plan, layers) {
+				Ok(delivered) => slots.commit(plan, delivered),
+				Err(error) => {
+					slots.commit(plan, error.delivered());
+					return Err(error);
+				},
+			}
+			if paint_only || !slots.has_undelivered_rows() {
+				return Ok(());
+			}
+		}
 	}
 
 	/// Damage-hinted history-neutral paint of one viewport frame with overlay
@@ -2589,6 +2626,40 @@ mod tests {
 		let repeated = String::from_utf8(mem::take(renderer.writer_mut())).expect("terminal UTF-8");
 		assert!(!repeated.contains("38;2;18;52;86"));
 		assert!(!repeated.contains(target));
+	}
+
+	#[test]
+	fn resize_replay_and_the_rows_retired_with_it_deliver_in_one_present() {
+		let mut slots = Slots::new(12, 4, ResizePolicy::Rebuild);
+		let mut renderer = Renderer::new(Vec::new());
+		let mut terminal = TerminalModel::new(12, 4);
+		let first = slots.open(Mode::Mutable);
+		slots.set(first, TextLeaf::new().text("first"));
+		slots.finalize(first);
+		let second = slots.open(Mode::Mutable);
+		slots.set(second, TextLeaf::new().text("second"));
+		renderer.present_slots(&mut slots, &[]).unwrap();
+		apply(&mut renderer, &mut terminal);
+		assert_eq!(terminal.history, ["first"]);
+
+		// A width resize stages a rebuild replay; the same paint then retires
+		// the live block under the new geometry.
+		slots.resize(10, 3);
+		terminal.resize(10, 3);
+		slots.finalize(second);
+		renderer.present_slots(&mut slots, &[]).unwrap();
+		apply(&mut renderer, &mut terminal);
+		assert!(!slots.has_undelivered_rows());
+		assert_eq!(
+			terminal.history,
+			["first", "second"],
+			"the retired block follows the replay in the same present",
+		);
+
+		// Nothing is left to re-emit on the next paint.
+		renderer.present_slots(&mut slots, &[]).unwrap();
+		apply(&mut renderer, &mut terminal);
+		assert_eq!(terminal.history, ["first", "second"]);
 	}
 
 	#[test]

@@ -4767,18 +4767,12 @@ impl Host {
 		if let Some(frame) = approval.as_ref() {
 			layers.push(Layer { frame, options: &approval_options, active: true });
 		}
-		let plan = projection.slots.plan();
-		match renderer.present_plan(&plan, &layers) {
-			Ok(delivered) => {
-				projection.slots.commit(plan, delivered);
-				Ok(())
-			},
-			Err(error) => {
-				let delivered = error.delivered();
-				projection.slots.commit(plan, delivered);
-				Err(error.into())
-			},
-		}
+		// A resize replay and the blocks this paint just retired under the
+		// new geometry are separate transactions; deliver both now, or the
+		// retired rows show nowhere until an unrelated repaint.
+		renderer
+			.present_slots(&mut projection.slots, &layers)
+			.map_err(HostError::from)
 	}
 }
 

@@ -9,7 +9,7 @@ Most applications use `dom!` for their initial tree, stable `id` attributes for 
 - `components` and the `dom!` macro define retained layout, text, navigation, data, and input trees; runtime `markup` and typed builders provide alternate construction paths.
 - `Ui`, `App`, and the event/input modules retain widget state and route keyboard, mouse, paste, resize, and application events.
 - `Frame` and `Renderer` turn component output into differential terminal updates, while `terminal`, `graphics`, `notify`, and protocol-specific modules manage lifecycle and terminal capabilities.
-- `slots` owns transcript block lifecycle, logical history, viewport allocation, resize replay, and the staged delivery transaction. `Renderer::present_plan` is the only slots-to-terminal seam: it acknowledges `Delivered::All` or returns a `DeliveryError` carrying the exact complete-row prefix.
+- `slots` owns transcript block lifecycle, logical history, viewport allocation, resize replay, and the staged delivery transaction. `Renderer::present_plan` is the only slots-to-terminal seam: it acknowledges `Delivered::All` or returns a `DeliveryError` carrying the exact complete-row prefix. `Renderer::present_slots` drives it until nothing is staged, so a resize replay and the rows retired in the same paint both land.
 - `editcore`, `rich`, `markdown`, `latex`, `syntax`, `scene`, and `shader` provide editing and richer content pipelines. `build.rs` validates `icons.tsv` and generates the icon lookup catalog.
 
 ## Philosophy
@@ -971,6 +971,12 @@ match renderer.present_plan(&plan, &[]) {
 # Ok(())
 # }
 ```
+
+A width resize stages its replay (or repair) as its own transaction, and a block finalized in the
+same paint queues behind it. Hosts call `renderer.present_slots(&mut slots, &layers)`, which runs
+the loop above until `Slots::has_undelivered_rows` is false; otherwise that block would show in
+neither the viewport (finalized blocks hold no live rows) nor native history until an unrelated
+repaint.
 
 `Delivered::Partial(n)` acknowledges only that complete prefix. The next `plan` stages precisely
 the suffix, so a short write cannot silently drop a history row. A writer error still poisons the
