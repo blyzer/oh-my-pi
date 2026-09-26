@@ -262,7 +262,7 @@ fn a_bulk_import_places_links_pins_and_runs_once() {
 		(None, OutcomeKind::NothingToImport),
 	]);
 	// The subagent converted first, then its parent, which links it.
-	assert_eq!(recorder.sources(), [scout, alpha.clone(), gone.clone()]);
+	assert_eq!(recorder.sources(), [scout, alpha.clone(), gone]);
 	let calls = recorder.calls.lock().clone();
 	let project = fixture.sessions_dir(&ProjectBucket::for_cwd(Some(&fixture.project)));
 	let project_journals = journals(&project);
