@@ -177,6 +177,18 @@ fn resolve_profile(
 	}
 }
 
+/// Returns the active profile: the bootstrap selection published via
+/// [`set_selected_profile`], else `OMP_PROFILE`; `None` is the default
+/// profile.
+///
+/// # Errors
+///
+/// Returns [`ProfileNameError`] when an unbootstrapped `OMP_PROFILE` is not a
+/// valid contained profile component.
+pub fn active_profile() -> Result<Option<Str>, ProfileNameError> {
+	resolve_profile(SELECTED_PROFILE.get(), env::var_os("OMP_PROFILE").as_deref())
+}
+
 /// Resolves the configuration root the selected profile reads and writes:
 /// [`config_dir`] itself, or `<config dir>/profiles/<profile>` once a
 /// profile was published via [`set_selected_profile`] (or `OMP_PROFILE`).
@@ -191,7 +203,7 @@ fn resolve_profile(
 /// valid contained profile component.
 pub fn profile_config_dir(home: &Path) -> Result<PathBuf, ProfileNameError> {
 	let base = config_dir(home);
-	Ok(match resolve_profile(SELECTED_PROFILE.get(), env::var_os("OMP_PROFILE").as_deref())? {
+	Ok(match active_profile()? {
 		Some(profile) => base.join("profiles").join(profile.as_str()),
 		None => base,
 	})
@@ -239,7 +251,7 @@ pub fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, DataDirError> {
 		let home = home_dir().ok_or(DataDirError::HomeUnset)?;
 		native_directories(&home).data
 	};
-	Ok(match resolve_profile(SELECTED_PROFILE.get(), env::var_os("OMP_PROFILE").as_deref())? {
+	Ok(match active_profile()? {
 		Some(profile) => base.join("profiles").join(profile.as_str()),
 		None => base,
 	})

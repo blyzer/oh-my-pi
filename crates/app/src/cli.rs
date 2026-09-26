@@ -2204,6 +2204,21 @@ pub enum ConfigCommand {
 		#[command(subcommand)]
 		command: McpConfigCommand,
 	},
+	/// Copy a v1 install (`~/.omp`) into v2, each v1 profile into the
+	/// same-named profile; v1 files are only read.
+	#[command(name = "import-v1")]
+	ImportV1 {
+		/// Print the v1 inventory and what would be imported; write nothing.
+		#[arg(long)]
+		dry_run: bool,
+		/// Read the v1 configuration root at DIR instead of `~/.omp`.
+		#[arg(long, value_name = "DIR")]
+		from:    Option<PathBuf>,
+		/// Import only this v1 profile (`default` for the default one); every
+		/// profile is imported otherwise.
+		#[arg(long, value_name = "PROFILE")]
+		profile: Option<Str>,
+	},
 }
 
 /// Model catalog command tree.

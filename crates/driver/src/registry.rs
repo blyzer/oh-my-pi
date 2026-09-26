@@ -498,36 +498,6 @@ impl DiscoveryClaims {
 	}
 }
 
-/// Carries literal v1 `apiKey`s into the encrypted store once. A failure is
-/// logged, never fatal: the owner can still `/login`.
-fn import_legacy_api_keys(data_dir: &Path, control: &omp_ai::auth::AuthControlHandle) {
-	use crate::discovery::models::{LegacyApiKeyImport, ModelsConfigLocation};
-
-	let report = ModelsConfigLocation::resolve(data_dir)
-		.and_then(|location| crate::discovery::models::import_legacy_api_keys(&location, control));
-	match report {
-		Ok(report) => {
-			for entry in report {
-				match entry {
-					LegacyApiKeyImport::Stored { provider } => {
-						tracing::info!(%provider, "imported the v1 models.yml apiKey into the credential store");
-					},
-					LegacyApiKeyImport::AlreadyLoggedIn { provider } => {
-						tracing::info!(%provider, "kept the existing login over the v1 models.yml apiKey");
-					},
-					LegacyApiKeyImport::NeedsEnvironment { provider } => {
-						tracing::warn!(
-							%provider,
-							"the v1 models.yml apiKey names a variable or command; set OMP_<PROVIDER>_API_KEY or /login"
-						);
-					},
-				}
-			}
-		},
-		Err(error) => tracing::warn!(%error, "could not import v1 models.yml apiKeys"),
-	}
-}
-
 fn catalog_composition(source: impl std::error::Error + Send + Sync + 'static) -> RegistryError {
 	RegistryError::CatalogComposition(Box::new(source))
 }
@@ -1161,8 +1131,8 @@ async fn production_assembly_with_catalog(
 	.with_affinity_resolver(CredentialAffinityResolver::new(
 		Hash32::sum(placeholder_affinity_key().as_bytes()).into_bytes(),
 	));
-	import_legacy_api_keys(data_dir, &auth_manager.control_handle());
-	// Probe only after the one-time v1 key import: on first run that key is
+	crate::v1_import::first_run(data_dir, &auth_manager.control_handle());
+	// Probe only after the one-time v1 import: on first run its `models.yml` key is
 	// what authenticates the configured provider's model listing, so its
 	// models join this session's registry instead of the next one's.
 	let catalog = if refresh_discovery {
