@@ -531,7 +531,12 @@ fn learned_lessons_land_in_the_project_bank_through_the_learn_path() {
 		 nextest over cargo test\n- The API rate-limits at 10 rps\n- Prefer nextest over cargo \
 		 test\n",
 	);
-	let missing = root.path().join("projects/deleted-app");
+	// v1 encoded canonical cwds, so the vanished project shares the canonical
+	// scratch prefix (`/private/var/…` on macOS) and the rows sort the same on
+	// every host.
+	let missing = fs::canonicalize(root.path())
+		.expect("canonical scratch")
+		.join("projects/deleted-app");
 	write(&memories.join(encode(&missing)).join("learned.md"), "- orphaned lesson\n");
 	// v2 already learned one of them in an earlier session.
 	let earlier = session_memory(&v2, &app, "earlier-session");
