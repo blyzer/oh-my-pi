@@ -43,7 +43,7 @@ const FORWARD_ERROR_CAPACITY: usize = 8;
 const MAX_FORWARD_CONNECTIONS: usize = 16;
 
 /// A configured native SSH host.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
 	/// DNS name or numeric address.
@@ -62,6 +62,14 @@ pub struct HostConfig {
 	pub timeout_secs: u64,
 }
 
+impl HostConfig {
+	/// A host on the default port with the default operation timeout.
+	#[must_use]
+	pub const fn new(address: Str, user: Str, host_key: Str, auth: AuthPolicy) -> Self {
+		Self { address, port: default_port(), user, host_key, auth, timeout_secs: default_timeout() }
+	}
+}
+
 const fn default_port() -> u16 {
 	22
 }
@@ -70,7 +78,7 @@ const fn default_timeout() -> u64 {
 }
 
 /// Explicit SSH authentication policy. Passwords are intentionally unsupported.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuthPolicy {
 	/// Use identities from the native SSH agent protocol.
@@ -287,8 +295,10 @@ fn parse_hosts(path: &Path) -> Result<BTreeMap<Str, HostConfig>, SshError> {
 		Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
 		Err(source) => return Err(SshError::ConfigIo { path: path.to_path_buf(), source }),
 	};
-	let parsed: HostFile = toml::from_str(&body)
-		.map_err(|source| SshError::ConfigParse { path: path.to_path_buf(), source })?;
+	let parsed: HostFile = toml::from_str(&body).map_err(|source| SshError::ConfigParse {
+		path:   path.to_path_buf(),
+		source: Box::new(source),
+	})?;
 	for (alias, host) in &parsed.hosts {
 		validate_alias(alias)?;
 		validate_host(host)?;
@@ -301,6 +311,49 @@ fn persist_hosts(path: &Path, hosts: &BTreeMap<Str, HostConfig>) -> Result<(), S
 		.map_err(|source| SshError::ConfigEncode { path: path.to_path_buf(), source })?;
 	crate::atomic_replace(path, &body)
 		.map_err(|source| SshError::ConfigWrite { path: path.to_path_buf(), source })
+}
+
+/// Checks one host the way loading and [`HostStore::upsert`] do.
+///
+/// # Errors
+///
+/// Returns [`SshError::InvalidAlias`] or [`SshError::InvalidHostConfig`].
+pub fn validate_configured_host(alias: &str, host: &HostConfig) -> Result<(), SshError> {
+	validate_alias(alias)?;
+	validate_host(host)
+}
+
+/// The `SHA256:` fingerprint an OpenSSH `known_hosts` file pins for `host` on
+/// `port`, hashed entries included.
+///
+/// Several recorded keys resolve to the type the native client negotiates
+/// first: Ed25519, then ECDSA, then RSA. `None` when the file or the host is
+/// absent.
+///
+/// # Errors
+///
+/// Returns [`SshError::KnownHosts`] when the file cannot be read or holds a
+/// matching entry whose key cannot be decoded.
+pub fn known_host_fingerprint(
+	known_hosts: &Path,
+	host: &str,
+	port: u16,
+) -> Result<Option<Str>, SshError> {
+	let keys =
+		keys::known_hosts::known_host_keys_path(host, port, known_hosts).map_err(|source| {
+			SshError::KnownHosts { path: known_hosts.to_path_buf(), source: Box::new(source) }
+		})?;
+	let rank = |key: &keys::PublicKey| match key.algorithm() {
+		keys::Algorithm::Ed25519 => 0,
+		keys::Algorithm::Ecdsa { .. } => 1,
+		keys::Algorithm::Rsa { .. } => 2,
+		_ => 3,
+	};
+	Ok(keys
+		.iter()
+		.map(|(_, key)| key)
+		.min_by_key(|key| rank(key))
+		.map(|key| Str::new(key.fingerprint(HashAlg::Sha256).to_string())))
 }
 
 fn validate_alias(alias: &str) -> Result<(), SshError> {
@@ -535,8 +588,10 @@ impl SshService {
 		let authenticated = match &host.auth {
 			AuthPolicy::Key { path } => {
 				check_key_permissions(path)?;
-				let key = load_secret_key(path, None)
-					.map_err(|source| SshError::Key { path: path.clone(), source })?;
+				let key = load_secret_key(path, None).map_err(|source| SshError::Key {
+					path:   path.clone(),
+					source: Box::new(source),
+				})?;
 				let hash = session.best_supported_rsa_hash().await?.flatten();
 				session
 					.authenticate_publickey(
@@ -1005,9 +1060,10 @@ pub enum SshError {
 	ConfigParse {
 		/// Configuration file containing invalid TOML or fields.
 		path:   PathBuf,
-		/// TOML decoder failure.
+		/// TOML decoder failure. Boxed: the foreign decoder error alone is
+		/// about 100 bytes and would make every `SshError` that size.
 		#[source]
-		source: de::Error,
+		source: Box<de::Error>,
 	},
 	/// The in-memory host map could not be serialized as TOML.
 	#[error("cannot encode SSH host configuration {path}")]
@@ -1052,14 +1108,27 @@ pub enum SshError {
 		/// platforms.
 		path: PathBuf,
 	},
+	/// An OpenSSH `known_hosts` file could not be read or decoded.
+	#[error("cannot read known hosts {path}")]
+	KnownHosts {
+		/// The `known_hosts` file.
+		path:   PathBuf,
+		/// Read or key decoding failure.
+		/// Boxed: the foreign key error is several times the size of every
+		/// other `SshError` payload.
+		#[source]
+		source: Box<keys::Error>,
+	},
 	/// Loading or decoding a configured private key failed.
 	#[error("cannot load private key {path}")]
 	Key {
 		/// Configured private-key path passed to the key loader.
 		path:   PathBuf,
 		/// Key loading or decoding failure.
+		/// Boxed: the foreign key error is several times the size of every
+		/// other `SshError` payload.
 		#[source]
-		source: keys::Error,
+		source: Box<keys::Error>,
 	},
 	/// The configured key or every available agent identity was rejected by the
 	/// host.

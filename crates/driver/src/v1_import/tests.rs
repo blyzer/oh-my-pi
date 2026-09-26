@@ -492,6 +492,7 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 	assert!(
 		again
 			.entries()
+			.filter(|entry| entry.item == V1Item::Models)
 			.all(|entry| matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent)))
 	);
 	assert_eq!(snapshot(config), v2_before);

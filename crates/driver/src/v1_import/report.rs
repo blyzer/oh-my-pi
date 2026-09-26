@@ -35,6 +35,12 @@ pub enum SkipReason {
 	/// v2 already has its own copy, which the import never replaces.
 	#[strum(to_string = "v2 already has its own copy")]
 	TargetExists,
+	/// v2 already has byte-identical content (or the same declaration).
+	#[strum(to_string = "v2 already has the same content")]
+	AlreadyPresent,
+	/// The project's `.omp/` is a v1 root, which the import never writes.
+	#[strum(to_string = "the project's .omp is the v1 install, which is never written")]
+	InsideV1Root,
 	/// The provider already has a stored v2 account.
 	#[strum(to_string = "kept the existing v2 login")]
 	AccountExists,
@@ -70,6 +76,13 @@ pub enum Attention {
 		to_string = "the v1 key names a variable or command; set OMP_<PROVIDER>_API_KEY or /login"
 	)]
 	KeyNeedsEnvironment,
+	/// v2 already has different content under the same path or name; v2's
+	/// was kept and the v1 one was not copied.
+	#[strum(to_string = "v2 has a different one; kept v2's, merge the v1 one by hand if wanted")]
+	Conflict,
+	/// v2 cannot read the v1 data as it is, so it was not copied.
+	#[strum(to_string = "v2 cannot read it as it is; not copied")]
+	Incompatible(ImportError),
 	/// v2 has no such memory backend (v1 `hindsight`, `sharpshooter`); its
 	/// settings are kept as comments.
 	#[strum(to_string = "v2 has no such memory backend; set ai_memory_backend mnemopi or off")]
@@ -222,6 +235,14 @@ fn log_entry(entry: &ImportEntry) {
 	let kind = entry.outcome.kind();
 	let path = entry.path.as_ref().map(|path| path.display());
 	match &entry.outcome {
+		ImportOutcome::NeedsAttention(Attention::Incompatible(error)) => tracing::warn!(
+			step = %entry.step,
+			item = %entry.item,
+			path = ?path,
+			subject = ?entry.subject,
+			error = error as &dyn std::error::Error,
+			"v1 data v2 cannot read was not imported"
+		),
 		ImportOutcome::NeedsAttention(Attention::Failed(error)) => tracing::warn!(
 			step = %entry.step,
 			item = %entry.item,

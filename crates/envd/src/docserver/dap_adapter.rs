@@ -465,7 +465,8 @@ fn executable_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
 	vec![directory.join(command)]
 }
 
-pub(crate) fn builtin_adapters() -> Vec<DapAdapterSpec> {
+/// The built-in adapter catalog user and project DAP declarations patch.
+pub fn builtin_adapters() -> Vec<DapAdapterSpec> {
 	struct Builtin<'a> {
 		name:       &'a str,
 		command:    &'a str,

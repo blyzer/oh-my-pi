@@ -54,6 +54,7 @@
 //!    run writes nothing, a second run is a no-op, and the v1 tree is
 //!    byte-identical afterwards.
 
+mod assets;
 mod auth_credentials;
 mod credentials;
 pub mod locate;
@@ -67,6 +68,7 @@ mod tests;
 
 use std::path::Path;
 
+pub use assets::{AssetError, import_project_assets, project_assets_marker};
 pub use auth_credentials::CredentialsImportError;
 pub use locate::{
 	ImportPair, ItemShape, LocateError, ProfileSelection, V1Inputs, V1Item, V1Layout, V1Source,
@@ -98,7 +100,8 @@ pub fn active_pair() -> Result<ImportPair, LocateError> {
 ///
 /// Runs every registered step for every v1 profile ([`ProfileSelection::All`]),
 /// idempotently through the markers, then imports `project`'s own v1 settings
-/// (once per project, [`import_project_settings`]), and logs the report.
+/// and v1-only `.omp/` files (once per project, [`import_project_settings`],
+/// [`import_project_assets`]), and logs the report.
 /// Credential steps use the live store for the profile that owns `data_dir`;
 /// other profiles' credential steps wait, unmarked, for their own first run.
 /// A `data_dir` other than the process default (a test's or an explicit state
@@ -116,10 +119,11 @@ pub fn first_run(
 		.ok_or(LocateError::HomeUnset)
 		.and_then(|inputs| {
 			let roots = V2Roots::from_process()?;
-			let pairs = plan(&V1Source::new(inputs), &roots, &ProfileSelection::All)?;
-			Ok((roots, pairs))
+			let source = V1Source::new(inputs);
+			let pairs = plan(&source, &roots, &ProfileSelection::All)?;
+			Ok((source, roots, pairs))
 		});
-	let (roots, pairs) = match located {
+	let (source, roots, pairs) = match located {
 		Ok(located) => located,
 		Err(error) => {
 			tracing::warn!(
@@ -133,6 +137,9 @@ pub fn first_run(
 		run(&pairs, ImportMode::Apply, CredentialAccess::Live { data_dir, control: credentials });
 	if let Some(project) = project {
 		report.project = import_project_settings(project, &roots, ImportMode::Apply);
+		report
+			.project
+			.extend(import_project_assets(project, &source, &roots, ImportMode::Apply));
 	}
 	report.log();
 	Some(report)
