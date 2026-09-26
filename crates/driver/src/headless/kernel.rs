@@ -173,6 +173,10 @@ pub struct KernelOptions {
 	pub session_name:       Option<Str>,
 	/// Authenticated parent session id or routing name for a child kernel.
 	pub parent_session:     Option<Str>,
+	/// Agent class this kernel runs as; `None` is the top-level session
+	/// ([`MAIN_AGENT`](crate::subagent::MAIN_AGENT)). Rule `agents:` scopes are
+	/// evaluated against it.
+	pub agent:              Option<crate::subagent::AgentName>,
 	/// Explicit restricted registry for specialized child compositions.
 	pub tool_registry:      Option<Arc<Registry>>,
 	/// Child-specific structured output schema installed on `yield@2`.
@@ -1680,16 +1684,7 @@ pub async fn compose_kernel(
 		)?),
 	};
 	let (context_files, rules) = discover_prompt_material(&project_root, &options.prompt)?;
-	let facts = {
-		let buckets = rules.prompt_facts(crate::discovery::rules::MAIN_AGENT);
-		crate::discovery::PromptFacts {
-			skills:             skills.prompt_facts(),
-			context_files:      context_files.prompt_facts(),
-			always_apply_rules: buckets.always_apply,
-			rules:              buckets.rulebook,
-			active_repository:  crate::discovery::active_repo::resolve(&project_root),
-		}
-	};
+	let facts = prompt_facts(&project_root, &options, &skills, &context_files, &rules);
 	let inference_bridge =
 		tools_enabled.then(|| Arc::new(crate::bridges::InferenceBridge::default()));
 	let bridges = if tools_enabled {
@@ -2717,10 +2712,33 @@ pub fn journaled_prompt_facts(session: &Session) -> crate::discovery::PromptFact
 	facts
 }
 
+/// The prompt facts [`compose_kernel`] journals: skills, context files, the
+/// rules admitted for the kernel's agent class, and the active repository.
+pub(crate) fn prompt_facts(
+	project_root: &Path,
+	options: &KernelOptions,
+	skills: &crate::discovery::skills::ActiveSkills,
+	context_files: &crate::discovery::rules::ContextFiles,
+	rules: &crate::discovery::rules::ActiveRules,
+) -> crate::discovery::PromptFacts {
+	let agent = options
+		.agent
+		.as_deref()
+		.unwrap_or(crate::subagent::MAIN_AGENT);
+	let buckets = rules.prompt_facts(agent);
+	crate::discovery::PromptFacts {
+		skills:             skills.prompt_facts(),
+		context_files:      context_files.prompt_facts(),
+		always_apply_rules: buckets.always_apply,
+		rules:              buckets.rulebook,
+		active_repository:  crate::discovery::active_repo::resolve(project_root),
+	}
+}
+
 /// Discovers context files and rules for `project_root` under the invocation
 /// prompt policy: `--no-context-files` / `--no-rules` yield empty sets so the
 /// flags are honest seams rather than post-hoc filters.
-fn discover_prompt_material(
+pub(crate) fn discover_prompt_material(
 	project_root: &Path,
 	overrides: &PromptOverrides,
 ) -> Result<
