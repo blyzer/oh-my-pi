@@ -5,7 +5,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::Str;
+use omp_core::{Str, dirs::ProfileNameError};
 use thiserror::Error;
 
 /// A prompt customization file could not be read.
@@ -21,6 +21,9 @@ pub enum PromptInputError {
 		#[source]
 		source: io::Error,
 	},
+	/// The selected profile could not be resolved to a configuration root.
+	#[error("failed to resolve the user configuration root")]
+	Profile(#[from] ProfileNameError),
 }
 
 /// Resolves a value as inline text or a readable file.
@@ -42,12 +45,15 @@ pub fn resolve_prompt_input(input: Option<&str>) -> Result<Option<Str>, PromptIn
 }
 
 /// Discovers one native Markdown prompt with project-over-user precedence.
+///
+/// The project candidate is `<cwd>/.omp/<name>`; the user candidate lives in
+/// the selected profile's agent asset tree ([`user_prompt_path`]).
 pub fn discover_prompt_file(
 	cwd: &Path,
 	home: &Path,
 	name: &str,
 ) -> Result<Option<Str>, PromptInputError> {
-	for path in [cwd.join(".omp").join(name), home.join(".omp").join(name)] {
+	for path in [cwd.join(".omp").join(name), user_prompt_path(home, name)?] {
 		match fs::read_to_string(&path) {
 			Ok(content) => return Ok(Some(content.into())),
 			Err(source) if tolerant_literal_error(&source) => {},
@@ -64,13 +70,26 @@ pub fn discover_user_prompt_file(
 	name: &str,
 ) -> Result<Option<Str>, PromptInputError> {
 	let _ = cwd;
-	let path = home.join(".omp").join(name);
+	let path = user_prompt_path(home, name)?;
 	match fs::read_to_string(&path) {
 		Ok(content) if !content.trim().is_empty() => Ok(Some(content.into())),
 		Ok(_) => Ok(None),
 		Err(source) if tolerant_literal_error(&source) => Ok(None),
 		Err(source) => Err(PromptInputError::Read { path, source }),
 	}
+}
+
+/// Path of a user prompt file: `<profile config root>/agent/<name>`, i.e.
+/// `~/.o2/agent/<name>` (or `~/.o2/profiles/<p>/agent/<name>`), beside the
+/// user `AGENTS.md`, `RULES.md` and `prompts/`.
+///
+/// # Errors
+///
+/// Returns [`PromptInputError::Profile`] when the selected profile is invalid.
+pub fn user_prompt_path(home: &Path, name: &str) -> Result<PathBuf, PromptInputError> {
+	Ok(omp_core::dirs::profile_config_dir(home)?
+		.join("agent")
+		.join(name))
 }
 
 /// Resolves CLI customization ahead of project/user `SYSTEM.md` discovery and
@@ -110,9 +129,10 @@ mod tests {
 		let scratch = tempfile::tempdir().expect("scratch directory");
 		let home = scratch.path().join("home");
 		let project = scratch.path().join("repo");
-		fs::create_dir_all(home.join(".omp")).expect("user config directory");
+		let user_system = user_prompt_path(&home, "SYSTEM.md").expect("user prompt path");
+		fs::create_dir_all(user_system.parent().expect("agent dir")).expect("user agent directory");
 		fs::create_dir_all(project.join(".omp")).expect("project config directory");
-		fs::write(home.join(".omp/SYSTEM.md"), "user").expect("user system prompt");
+		fs::write(&user_system, "user").expect("user system prompt");
 		fs::write(project.join(".omp/SYSTEM.md"), "project").expect("project system prompt");
 
 		assert_eq!(
@@ -141,6 +161,42 @@ mod tests {
 				.expect("project title prompt")
 				.as_str(),
 			"project title"
+		);
+	}
+
+	#[test]
+	fn user_prompts_live_in_the_agent_asset_tree_not_home_dot_omp() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let home = scratch.path().join("home");
+		let project = scratch.path().join("repo");
+		fs::create_dir_all(&project).expect("project directory");
+
+		// v1 kept user prompts under `~/.omp/agent/`; `~/.omp/` itself was
+		// never a prompt root. Neither is read by v2.
+		fs::create_dir_all(home.join(".omp/agent")).expect("v1 agent directory");
+		fs::write(home.join(".omp/SYSTEM.md"), "stale").expect("stray prompt");
+		fs::write(home.join(".omp/agent/APPEND_SYSTEM.md"), "v1").expect("v1 prompt");
+		assert_eq!(discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery"), None);
+		assert_eq!(
+			discover_prompt_file(&project, &home, "APPEND_SYSTEM.md").expect("discovery"),
+			None
+		);
+
+		let user_append = user_prompt_path(&home, "APPEND_SYSTEM.md").expect("user prompt path");
+		assert!(user_append.ends_with("agent/APPEND_SYSTEM.md"));
+		fs::create_dir_all(user_append.parent().expect("agent dir")).expect("user agent dir");
+		fs::write(&user_append, "user append").expect("user append prompt");
+		assert_eq!(
+			discover_prompt_file(&project, &home, "APPEND_SYSTEM.md")
+				.expect("discovery")
+				.as_deref(),
+			Some("user append")
+		);
+		assert_eq!(
+			discover_user_prompt_file(&project, &home, "APPEND_SYSTEM.md")
+				.expect("user discovery")
+				.as_deref(),
+			Some("user append")
 		);
 	}
 }
