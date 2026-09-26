@@ -15,9 +15,8 @@ use omp_agent::{
 	Kernel, RouteFacts, RuntimeFlags,
 };
 use omp_ai::{
-	AnswerBody, Call, CallMeta, ChatEvent, ChatRequest, ChatStream, Client, ContentPart,
-	ExecutionBudget, Message, NegotiationPolicy, OperationCall, ProviderService, RequestId, Role,
-	Sampling, Setting, Target, router::Router,
+	AnswerBody, Call, CallMeta, ChatEvent, ChatRequest, ChatStream, ContentPart, ExecutionBudget,
+	Message, NegotiationPolicy, OperationCall, RequestId, Role, Sampling, Setting, Target,
 };
 use omp_core::{FastHashMap, Hash32, SecretString, Str, StrMut, Ulid, sf};
 use omp_dom::{Op, PropKey, Txn, Value};
@@ -34,7 +33,7 @@ mod con_journal;
 
 use super::{HeadlessError, gateway::GatewayInference};
 use crate::registry::{
-	InferenceSessionOverrides, ProductionInference as ProductionStack,
+	InferenceSessionOverrides, PinnedRoutes, ProductionInference as ProductionStack,
 	production_inference_for_session,
 };
 
@@ -157,6 +156,8 @@ pub struct KernelOptions {
 	pub approval_mode:      Option<omp_envd::tool_settings::ApprovalMode>,
 	/// Whether `model_selector` came from an explicit `--model`.
 	pub model_override:     bool,
+	/// How the launch model settles after discovery.
+	pub launch_model:       LaunchModelPolicy,
 	/// Stable prompt projection overrides.
 	pub prompt:             PromptOverrides,
 	/// Skill discovery snapshot shared with an interactive command host.
@@ -191,6 +192,41 @@ pub struct KernelOptions {
 	pub provider_session:   Option<Str>,
 }
 
+/// How composition settles the launch model once runtime discovery has
+/// refreshed the catalog.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LaunchModelPolicy {
+	/// The model selector names the launch model (an explicit flag, a
+	/// `--models` scope, a subagent or tool composition).
+	#[default]
+	Selected,
+	/// The launch follows the remembered default role (`OMP_DEFAULT_MODEL`,
+	/// else `ai_model_roles.default`), resolved against the post-discovery
+	/// catalog; the model selector is only the fallback.
+	RememberedDefault,
+}
+
+/// The launch model composition settled on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchModel {
+	/// Catalog key of the launch model.
+	pub model:           Str,
+	/// Thinking annotation carried by the remembered default selector.
+	pub thinking:        Option<Str>,
+	/// A remembered default the post-discovery catalog does not list; `model`
+	/// is the fallback launched in its place.
+	pub missing_default: Option<Str>,
+}
+
+/// Neither the remembered default nor the launch's selector names a model in
+/// the catalog composition routes through.
+#[derive(Debug, thiserror::Error)]
+#[error("no catalog model matches the launch model selector")]
+pub struct UnknownLaunchModel {
+	/// The selector that matched nothing.
+	pub selector: Str,
+}
+
 /// Removes a no-session journal and its private blob/local/temp namespace
 /// regardless of which presentation adapter or error path drops the composed
 /// kernel.
@@ -215,15 +251,18 @@ impl Drop for EphemeralJournal {
 /// Direct production inference client plus the authorities that keep its
 /// environment and authentication stack alive.
 pub struct ProductionInference {
-	client:             Client<ProviderService, Router>,
+	/// Route client pinned to one published registry; it adopts a newer
+	/// publication only at a turn boundary.
+	routes:             PinnedRoutes,
 	/// Call metadata as composed at launch; `ai_model` re-targets a copy.
 	meta:               CallMeta,
 	/// Model the client is currently targeted at.
 	model:              omp_catalog::ModelKey,
-	catalog:            Arc<omp_catalog::snapshot::Catalog>,
+	/// How composition settled the launch model.
+	launch:             LaunchModel,
 	_environment:       omp_envd::ProjectEnvironment,
 	_agent_control:     Mutex<Option<omp_envd::AgentControlBinding>>,
-	_stack:             ProductionStack,
+	stack:              ProductionStack,
 	con:                Arc<omp_con::Ctx>,
 	_python_components: Vec<omp_envd::exthost::PyComponent>,
 	_eval_parent:       Option<omp_envd::eval::ParentBindingLease>,
@@ -238,12 +277,12 @@ impl ProductionInference {
 		if selector.is_empty() {
 			return Str::new(self.model.as_str());
 		}
-		if let Ok(model) = resolve_model_selector(self.catalog.as_ref(), selector.as_str()) {
+		if let Ok(model) = resolve_model_selector(self.routes.catalog().as_ref(), selector.as_str()) {
 			return model;
 		}
 		let settings = omp_catalog::settings::ModelSettings::from_con(&self.con);
 		crate::discovery::roles::resolve_role_selector(
-			self.catalog.as_ref(),
+			self.routes.catalog().as_ref(),
 			&settings,
 			selector.as_str(),
 		)
@@ -256,9 +295,10 @@ impl ProductionInference {
 	fn route_facts(&self) -> Option<RouteFacts> {
 		let model = self.selected_model();
 		let spec = self
-			.catalog
+			.routes
+			.catalog()
 			.model(omp_catalog::ModelKey::from_ref(model.as_str()))?;
-		Some(route_facts(self.catalog.as_ref(), spec))
+		Some(route_facts(self.routes.catalog().as_ref(), spec))
 	}
 
 	/// Applies the control plane to the next call: `ai_model` re-targets the
@@ -275,7 +315,7 @@ impl ProductionInference {
 				},
 				_ => Target::Model(key.clone()),
 			};
-			self.client.set_call_meta(meta);
+			self.routes.client_mut().set_call_meta(meta);
 			self.model = key;
 		}
 		// Provider reasoning stays off; the kernel
@@ -284,14 +324,16 @@ impl ProductionInference {
 			request.reasoning = omp_ai::Setting::Unset;
 		} else if matches!(request.reasoning, omp_ai::Setting::Unset) {
 			let thinking = omp_agent::AI_THINKING.get(&self.con);
-			request.reasoning = convar_reasoning(self.catalog.as_ref(), &self.model, &thinking);
+			request.reasoning =
+				convar_reasoning(self.routes.catalog().as_ref(), &self.model, &thinking);
 		}
 		let provider = match &self.meta.target {
 			Target::Provider { provider, .. } | Target::ProviderService(provider) => {
 				Some(provider.as_str())
 			},
 			Target::Route { route, .. } | Target::RouteService(route) => self
-				.catalog
+				.routes
+				.catalog()
 				.route(route)
 				.map(|route| route.provider.as_str()),
 			Target::Model(_) => None,
@@ -1109,7 +1151,18 @@ impl omp_agent::Inference for ProductionInference {
 		mut request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.apply_convars(&mut request);
-		self.client.execute(request)
+		self.routes.client_mut().execute(request)
+	}
+
+	/// A discovery refresh published since the last turn becomes this turn's
+	/// registry; the previous turn finished on the one it started with.
+	fn begin_turn(&mut self) {
+		if self.routes.adopt_published() {
+			tracing::debug!(
+				models = self.routes.catalog().models().len(),
+				"turn adopted the refreshed model catalog"
+			);
+		}
 	}
 
 	/// One isolated call on `selector` (a catalog model, alias, or `@role`
@@ -1122,12 +1175,17 @@ impl omp_agent::Inference for ProductionInference {
 		selector: &str,
 		mut request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
-		let resolved = resolve_model_selector(self.catalog.as_ref(), selector).or_else(|_| {
-			let settings = omp_catalog::settings::ModelSettings::from_con(&self.con);
-			crate::discovery::roles::resolve_role_selector(self.catalog.as_ref(), &settings, selector)
+		let resolved =
+			resolve_model_selector(self.routes.catalog().as_ref(), selector).or_else(|_| {
+				let settings = omp_catalog::settings::ModelSettings::from_con(&self.con);
+				crate::discovery::roles::resolve_role_selector(
+					self.routes.catalog().as_ref(),
+					&settings,
+					selector,
+				)
 				.map(|selected| Str::new(selected.model.as_str()))
 				.map_err(|_| HeadlessError::UnknownModel { selector: Str::new(selector) })
-		});
+			});
 		async move {
 			let model = resolved.map_err(|_| {
 				omp_ai::Error::planning(
@@ -1141,9 +1199,9 @@ impl omp_agent::Inference for ProductionInference {
 				&& !omp_ai::settings::AI_EXTERNAL_THINKING.get(&self.con)
 			{
 				let thinking = omp_agent::AI_THINKING.get(&self.con);
-				request.reasoning = convar_reasoning(self.catalog.as_ref(), &key, &thinking);
+				request.reasoning = convar_reasoning(self.routes.catalog().as_ref(), &key, &thinking);
 			}
-			let live = self.client.call_meta().clone();
+			let live = self.routes.client_mut().call_meta().clone();
 			let mut meta = self.meta.clone();
 			meta.target = match &self.meta.target {
 				Target::Provider { provider, .. } => {
@@ -1151,9 +1209,9 @@ impl omp_agent::Inference for ProductionInference {
 				},
 				_ => Target::Model(key),
 			};
-			self.client.set_call_meta(meta);
-			let result = self.client.execute(request).await;
-			self.client.set_call_meta(live);
+			self.routes.client_mut().set_call_meta(meta);
+			let result = self.routes.client_mut().execute(request).await;
+			self.routes.client_mut().set_call_meta(live);
 			result
 		}
 	}
@@ -1162,9 +1220,9 @@ impl omp_agent::Inference for ProductionInference {
 		// Both the launch metadata (the base every `ai_model` re-target copies)
 		// and the client's live copy carry the sink.
 		self.meta.response_hooks = self.meta.response_hooks.clone().with_retry_sink(sink);
-		let mut live = self.client.call_meta().clone();
+		let mut live = self.routes.client_mut().call_meta().clone();
 		live.response_hooks = self.meta.response_hooks.clone();
-		self.client.set_call_meta(live);
+		self.routes.client_mut().set_call_meta(live);
 	}
 }
 
@@ -1176,8 +1234,9 @@ impl omp_agent::Inference for ProductionInference {
 pub enum SpeechRewriteClient {
 	/// Direct provider call sharing the session's registry and credentials.
 	Production {
-		/// Shared immutable route registry.
-		registry: omp_ai::Registry,
+		/// The session's registry publication point; each rewrite routes
+		/// through its current snapshot.
+		registry: omp_ai::RegistryHandle,
 		/// Resolved tiny-role model.
 		model:    omp_catalog::ModelKey,
 	},
@@ -1254,7 +1313,7 @@ impl SpeechRewriteClient {
 					response_hooks: Default::default(),
 				};
 				let execute = omp_ai::router::execute_registry_call(
-					registry.clone(),
+					omp_ai::Registry::clone(&registry.load()),
 					Call::new(meta, OperationCall::Chat(Arc::new(request))),
 					Duration::from_secs(6),
 				);
@@ -1324,6 +1383,8 @@ pub enum ComposedInference {
 	Gateway {
 		/// Raw gateway turn adapter.
 		inference:          GatewayInference,
+		/// How composition settled the launch model.
+		launch:             LaunchModel,
 		/// Environment owner retained for local tool execution.
 		_environment:       omp_envd::ProjectEnvironment,
 		/// Active session's generation-fenced Agent CONTROL lease.
@@ -1398,13 +1459,13 @@ impl ComposedInference {
 			Self::Production(inference) => {
 				let settings = omp_catalog::settings::ModelSettings::from_con(&inference.con);
 				let selected = crate::discovery::roles::resolve_role_selector(
-					inference.catalog.as_ref(),
+					inference.stack.catalog().as_ref(),
 					&settings,
 					"@tiny",
 				)
 				.ok()?;
 				Some(SpeechRewriteClient::Production {
-					registry: inference._stack.registry.clone(),
+					registry: inference.stack.registry.clone(),
 					model:    selected.model.clone(),
 				})
 			},
@@ -1434,18 +1495,29 @@ impl ComposedInference {
 	#[must_use]
 	pub const fn production_stack(&self) -> Option<&ProductionStack> {
 		match self {
-			Self::Production(inference) => Some(&inference._stack),
+			Self::Production(inference) => Some(&inference.stack),
 			Self::Gateway { .. } => None,
 		}
 	}
 
-	/// Catalog snapshot the composition routes through; `None` behind a
-	/// remote gateway.
+	/// The composition's live catalog publication: every read sees the latest
+	/// discovery refresh. `None` behind a remote gateway.
 	#[must_use]
-	pub const fn catalog(&self) -> Option<&Arc<omp_catalog::snapshot::Catalog>> {
+	pub fn live_catalog(&self) -> Option<crate::registry::LiveCatalog> {
 		match self {
-			Self::Production(inference) => Some(&inference.catalog),
+			Self::Production(inference) => {
+				Some(crate::registry::LiveCatalog::Published(inference.stack.registry.clone()))
+			},
 			Self::Gateway { .. } => None,
+		}
+	}
+
+	/// How composition settled the launch model.
+	#[must_use]
+	pub const fn launch_model(&self) -> &LaunchModel {
+		match self {
+			Self::Production(inference) => &inference.launch,
+			Self::Gateway { launch, .. } => launch,
 		}
 	}
 }
@@ -1479,7 +1551,16 @@ impl omp_agent::Inference for ComposedInference {
 	fn set_debug_session(&mut self, session: Option<Str>) {
 		if let Self::Production(inference) = self {
 			inference.meta.debug_session = session;
-			inference.client.set_call_meta(inference.meta.clone());
+			inference
+				.routes
+				.client_mut()
+				.set_call_meta(inference.meta.clone());
+		}
+	}
+
+	fn begin_turn(&mut self) {
+		if let Self::Production(inference) = self {
+			omp_agent::Inference::begin_turn(inference);
 		}
 	}
 
@@ -1826,20 +1907,18 @@ pub async fn compose_kernel(
 		.await?),
 	};
 	let catalog = match &backend {
-		Ok(stack) => Arc::clone(&stack.catalog),
+		Ok(stack) => stack.catalog(),
 		Err(_) => Arc::new(omp_catalog::snapshot::Catalog::embedded().clone()),
 	};
-	// An exact key or alias, else a bare or provider-qualified model id
-	// (`--model fast`) through the same catalog selection `/model` uses.
-	let model = match resolve_model_selector(catalog.as_ref(), model_selector) {
-		Ok(model) => model,
-		Err(error) => {
-			let settings = omp_catalog::settings::ModelSettings::from_con(&ctx);
-			crate::discovery::roles::resolve_role_selector(catalog.as_ref(), &settings, model_selector)
-				.map(|selected| Str::new(selected.model.as_str()))
-				.map_err(|_| error)?
-		},
-	};
+	let launch = settle_launch_model(
+		catalog.as_ref(),
+		&ctx,
+		&project_root,
+		model_selector,
+		options.launch_model,
+	)
+	.map_err(|error| HeadlessError::UnknownModel { selector: error.selector })?;
+	let model = launch.model.clone();
 	let model_key = omp_catalog::ModelKey::from(model.as_str());
 	let model_spec = catalog
 		.model(&model_key)
@@ -1859,11 +1938,12 @@ pub async fn compose_kernel(
 				bridge.bind_remote(channel.clone())?;
 			}
 			ComposedInference::Gateway {
-				inference:          GatewayInference::new(channel, model.as_str()),
-				_environment:       environment,
-				_agent_control:     Mutex::new(None),
+				inference: GatewayInference::new(channel, model.as_str()),
+				launch,
+				_environment: environment,
+				_agent_control: Mutex::new(None),
 				_python_components: python_components,
-				_eval_parent:       None,
+				_eval_parent: None,
 				_ephemeral_journal: None,
 			}
 		},
@@ -1871,7 +1951,6 @@ pub async fn compose_kernel(
 			if let Some(bridge) = &inference_bridge {
 				bridge.bind(stack.rpc.clone())?;
 			}
-			let planner = Router::new(stack.registry.clone(), Duration::from_secs(30));
 			let target = match options.provider {
 				Some(provider) => Target::Provider { provider, model: model_key },
 				None => Target::Model(model_key),
@@ -1885,20 +1964,19 @@ pub async fn compose_kernel(
 				debug_session: None,
 				response_hooks: Default::default(),
 			};
-			let client = Client::new(stack.registry.service(), planner, meta.clone()).with_affinity(
-				omp_ai::CallAffinity {
+			let routes =
+				PinnedRoutes::new(stack.registry.clone(), meta.clone(), omp_ai::CallAffinity {
 					prompt_cache:     options.prompt_cache_key.clone(),
 					provider_session: options.provider_session.clone(),
-				},
-			);
+				});
 			ComposedInference::Production(ProductionInference {
-				client,
+				routes,
 				meta,
 				model: omp_catalog::ModelKey::from(model.as_str()),
-				catalog: Arc::clone(&catalog),
+				launch,
 				_environment: environment,
 				_agent_control: Mutex::new(None),
-				_stack: stack,
+				stack,
 				con: Arc::clone(&ctx),
 				_python_components: python_components,
 				_eval_parent: None,
@@ -1922,7 +2000,10 @@ pub async fn compose_kernel(
 		.map(Str::new);
 	if let ComposedInference::Production(production) = &mut inference {
 		production.meta.debug_session = debug_session;
-		production.client.set_call_meta(production.meta.clone());
+		production
+			.routes
+			.client_mut()
+			.set_call_meta(production.meta.clone());
 	}
 	let ephemeral_journal = options.ephemeral.then(|| EphemeralJournal {
 		root: journal_path
@@ -2459,6 +2540,75 @@ fn resolve_model_selector(
 		return Ok(Str::new(model.key.as_str()));
 	}
 	Err(HeadlessError::UnknownModel { selector: Str::new(selector) })
+}
+
+/// Settles the launch model against the catalog composition routes through,
+/// after runtime discovery refreshed it.
+///
+/// `model_selector` resolves as an exact key or alias, else through catalog
+/// selection (a bare or provider-qualified id such as `--model fast`). Under
+/// [`LaunchModelPolicy::RememberedDefault`] the remembered default role
+/// resolves here rather than against the pre-discovery launch snapshot, so a
+/// discovered default survives an expired discovery cache. A remembered
+/// default the refreshed catalog still does not list falls back to
+/// `model_selector` (the launch's fallback) and is reported in
+/// [`LaunchModel::missing_default`] instead of being replaced silently.
+///
+/// # Errors
+///
+/// [`UnknownLaunchModel`] when neither the remembered default nor the
+/// fallback names a catalog model.
+pub fn settle_launch_model(
+	catalog: &omp_catalog::snapshot::Catalog,
+	ctx: &omp_con::Ctx,
+	project_root: &Path,
+	model_selector: &str,
+	policy: LaunchModelPolicy,
+) -> Result<LaunchModel, UnknownLaunchModel> {
+	let home = std::env::var_os("HOME").map_or_else(|| project_root.to_path_buf(), PathBuf::from);
+	let settings =
+		omp_catalog::settings::ModelSettings::from_con(ctx).resolve_path_scopes(project_root, &home);
+	// An exact key or alias, else a bare or provider-qualified model id
+	// (`--model fast`) through the same catalog selection `/model` uses.
+	let selected = catalog
+		.model(omp_catalog::ModelKey::from_ref(model_selector))
+		.or_else(|| catalog.resolve_alias(model_selector))
+		.map(|model| Str::new(model.key.as_str()))
+		.or_else(|| {
+			crate::discovery::roles::resolve_role_selector(catalog, &settings, model_selector)
+				.ok()
+				.map(|selected| Str::new(selected.model.as_str()))
+		});
+	let unknown = || UnknownLaunchModel { selector: Str::new(model_selector) };
+	let default = match policy {
+		LaunchModelPolicy::Selected => crate::discovery::roles::LaunchDefault::Unset,
+		LaunchModelPolicy::RememberedDefault => {
+			crate::discovery::roles::resolve_launch_default(catalog, &settings)
+		},
+	};
+	match default {
+		crate::discovery::roles::LaunchDefault::Resolved(default) => Ok(LaunchModel {
+			model:           Str::new(default.model.as_str()),
+			thinking:        default.thinking,
+			missing_default: None,
+		}),
+		crate::discovery::roles::LaunchDefault::Unset => {
+			let model = selected.ok_or_else(unknown)?;
+			Ok(LaunchModel { model, thinking: None, missing_default: None })
+		},
+		crate::discovery::roles::LaunchDefault::Missing { selector } => {
+			let model = selected
+				.or_else(|| crate::discovery::roles::fallback_model_selector(catalog, &settings))
+				.ok_or_else(unknown)?;
+			tracing::warn!(
+				remembered = %selector,
+				fallback = %model,
+				"the remembered default model is not in the catalog after discovery; launching on a \
+				 fallback"
+			);
+			Ok(LaunchModel { model, thinking: None, missing_default: Some(selector) })
+		},
+	}
 }
 
 fn terminal_identity() -> Option<Str> {

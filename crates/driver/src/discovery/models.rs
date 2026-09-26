@@ -29,21 +29,9 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 use toml::{de, ser};
 
-fn atomic_replace(path: &Path, contents: &str) -> io::Result<()> {
-	let mut temporary = path.as_os_str().to_owned();
-	temporary.push(format!(".tmp-{}", std::process::id()));
-	let temporary = PathBuf::from(temporary);
-	let result = (|| {
-		let file = fs::File::create(&temporary)?;
-		io::Write::write_all(&mut &file, contents.as_bytes())?;
-		file.sync_all()?;
-		fs::rename(&temporary, path)
-	})();
-	if result.is_err() {
-		let _ = fs::remove_file(&temporary);
-	}
-	result
-}
+use crate::v1_import::{
+	ImportMode, ImportPair, ImportStep, V1Item, V1Layout, step::atomic_replace,
+};
 
 /// Native model configuration. TOML is OMP's native serialization.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -371,37 +359,50 @@ pub struct LoadedModelsConfig {
 pub struct ModelsConfigLocation {
 	/// Directory holding `models.toml`: the profile's configuration root.
 	pub config_dir:  PathBuf,
-	/// Directories searched once, in order, when no `models.toml` exists yet:
-	/// the data directory earlier omp2 builds used, then the v1 agent
-	/// directory (`~/.omp/agent`).
+	/// Directories earlier omp2 builds kept model config in (the data
+	/// directory), searched once, in order, before v1.
 	pub legacy_dirs: Vec<PathBuf>,
+	/// The v1 profile whose model config is imported once when no
+	/// `models.toml` exists yet, as the v1 locator found it.
+	pub v1:          Option<V1Layout>,
 }
 
 impl ModelsConfigLocation {
-	/// Resolves the owner's profile configuration root (`~/.o2`, or
-	/// `OMP_CONFIG_DIR`), with `data_dir` and `~/.omp/agent` as one-time
-	/// import sources.
+	/// Resolves the active profile's configuration root (`~/.o2`, or
+	/// `OMP_CONFIG_DIR`), with `data_dir` and the same-named v1 profile (owner
+	/// decision #8) as one-time import sources.
 	///
 	/// A `data_dir` other than the process default (a test's temporary state,
 	/// an explicit state directory) isolates model configuration as well: it
 	/// is read from that directory and nothing is imported.
 	pub fn resolve(data_dir: &Path) -> Result<Self, ModelsConfigError> {
 		if omp_core::dirs::data_dir(None).ok().as_deref() != Some(data_dir) {
-			return Ok(Self { config_dir: data_dir.to_owned(), legacy_dirs: Vec::new() });
+			return Ok(Self {
+				config_dir:  data_dir.to_owned(),
+				legacy_dirs: Vec::new(),
+				v1:          None,
+			});
 		}
-		let config_dir = omp_core::dirs::user_config_root()?;
-		let mut legacy_dirs = vec![data_dir.to_owned()];
-		if let Some(home) = omp_core::dirs::home_dir() {
-			legacy_dirs.push(home.join(".omp").join("agent"));
+		Ok(Self::for_pair(&crate::v1_import::active_pair()?))
+	}
+
+	/// The location one v1 → v2 profile pair imports through: the target's
+	/// configuration root, its data directory, then the v1 profile.
+	#[must_use]
+	pub fn for_pair(pair: &ImportPair) -> Self {
+		Self {
+			config_dir:  pair.target.config_dir.clone(),
+			legacy_dirs: vec![pair.target.data_dir.clone()],
+			v1:          Some(pair.source.clone()),
 		}
-		Ok(Self { config_dir, legacy_dirs })
 	}
 
 	fn native(&self) -> PathBuf {
 		self.config_dir.join("models.toml")
 	}
 
-	/// The first legacy source file present, in search order.
+	/// The first legacy source file present, in search order: an earlier
+	/// omp2 directory, then the file v1 itself reads.
 	fn legacy_source(&self) -> Option<(PathBuf, LegacyFormat)> {
 		const NAMES: [(&str, LegacyFormat); 4] = [
 			("models.toml", LegacyFormat::Toml),
@@ -409,19 +410,41 @@ impl ModelsConfigLocation {
 			("models.yml", LegacyFormat::Yaml),
 			("models.yaml", LegacyFormat::Yaml),
 		];
-		self.legacy_dirs.iter().find_map(|directory| {
-			NAMES
-				.iter()
-				.map(|&(name, format)| (directory.join(name), format))
-				.find(|(path, _)| path.is_file())
-		})
+		self
+			.legacy_dirs
+			.iter()
+			.find_map(|directory| {
+				NAMES
+					.iter()
+					.map(|&(name, format)| (directory.join(name), format))
+					.find(|(path, _)| path.is_file())
+			})
+			.or_else(|| {
+				let path = self.v1.as_ref()?.locate(V1Item::Models)?;
+				let format = path.extension()?.to_str()?.parse().ok()?;
+				Some((path, format))
+			})
+	}
+
+	/// The model config file the one-time import reads, if any.
+	#[must_use]
+	pub fn legacy_path(&self) -> Option<PathBuf> {
+		self.legacy_source().map(|(path, _)| path)
 	}
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Legacy model-config encodings; parsed from the file extension, and
+/// labelled in the import marker.
+#[derive(Clone, Copy, Debug, Display, EnumString, Eq, IntoStaticStr, PartialEq)]
 enum LegacyFormat {
+	/// A `models.toml` an earlier omp2 build kept in the data directory.
+	#[strum(to_string = "moved-toml", serialize = "toml")]
 	Toml,
+	/// v1 JSON/JSONC.
+	#[strum(to_string = "legacy-json", serialize = "json")]
 	Json,
+	/// v1 YAML.
+	#[strum(to_string = "legacy-yaml", serialize = "yml", serialize = "yaml")]
 	Yaml,
 }
 
@@ -519,29 +542,43 @@ fn decode_legacy(
 	})
 }
 
-/// Loads `models.toml` from the configuration root, importing it once from
-/// the first legacy source when none exists yet.
+/// What the one-time model-config import found.
+#[derive(Clone, Debug)]
+pub enum LegacyModelsImport {
+	/// `models.toml` already exists; nothing was read.
+	NativePresent(PathBuf),
+	/// The import marker records an earlier run.
+	AlreadyImported,
+	/// No legacy source exists; in [`ImportMode::Apply`] the marker now
+	/// records that.
+	NothingToImport,
+	/// The legacy source, converted: written as `models.toml` in
+	/// [`ImportMode::Apply`], only decoded in [`ImportMode::DryRun`].
+	Imported(LoadedModelsConfig),
+}
+
+/// Imports `models.toml` once from the first legacy source, unless it exists
+/// or the `models` step's marker is set.
 ///
-/// Legacy formats are never live fallback decoders, and legacy files are only
-/// read, never changed: v1 may still be using them.
-pub fn load_or_import_legacy(
+/// Legacy files are only read, never changed: v1 may still be using them. A
+/// dry run decodes the source and writes nothing.
+pub fn import_legacy_models(
 	location: &ModelsConfigLocation,
-) -> Result<Option<LoadedModelsConfig>, ModelsConfigError> {
+	mode: ImportMode,
+) -> Result<LegacyModelsImport, ModelsConfigError> {
 	let native = location.native();
 	if native.exists() {
-		return Ok(Some(LoadedModelsConfig {
-			config: load_models_config(&native)?,
-			source: ModelsConfigSource::NativeToml(native),
-		}));
+		return Ok(LegacyModelsImport::NativePresent(native));
 	}
-	let marker = location.config_dir.join(".models-migration-v1");
-	if marker.exists() {
-		return Ok(None);
+	let marker = ImportStep::Models.marker(&location.config_dir);
+	if marker.is_set() {
+		return Ok(LegacyModelsImport::AlreadyImported);
 	}
-	fs::create_dir_all(&location.config_dir)?;
 	let Some((path, format)) = location.legacy_source() else {
-		atomic_replace(&marker, "revision = 1\n")?;
-		return Ok(None);
+		if mode == ImportMode::Apply {
+			marker.set(None)?;
+		}
+		return Ok(LegacyModelsImport::NothingToImport);
 	};
 	let legacy = decode_legacy(&path, format)?;
 	let mut config = ModelsConfig::default();
@@ -550,14 +587,12 @@ pub fn load_or_import_legacy(
 		config.providers.insert(provider, definition);
 	}
 	validate_discovery(&config)?;
-	atomic_replace(&native, &toml::to_string_pretty(&config)?)?;
-	let source = match format {
-		LegacyFormat::Toml => "moved-toml",
-		LegacyFormat::Json => "legacy-json",
-		LegacyFormat::Yaml => "legacy-yaml",
-	};
-	atomic_replace(&marker, &format!("revision = 1\nsource = \"{source}\"\n"))?;
-	Ok(Some(LoadedModelsConfig {
+	if mode == ImportMode::Apply {
+		fs::create_dir_all(&location.config_dir)?;
+		atomic_replace(&native, toml::to_string_pretty(&config)?.as_bytes())?;
+		marker.set(Some(format.into()))?;
+	}
+	Ok(LegacyModelsImport::Imported(LoadedModelsConfig {
 		config,
 		source: match format {
 			LegacyFormat::Toml => ModelsConfigSource::MovedToml(path),
@@ -567,11 +602,34 @@ pub fn load_or_import_legacy(
 	}))
 }
 
+/// Loads `models.toml` from the configuration root, importing it once from
+/// the first legacy source when none exists yet.
+///
+/// Legacy formats are never live fallback decoders, and legacy files are only
+/// read, never changed: v1 may still be using them.
+pub fn load_or_import_legacy(
+	location: &ModelsConfigLocation,
+) -> Result<Option<LoadedModelsConfig>, ModelsConfigError> {
+	Ok(match import_legacy_models(location, ImportMode::Apply)? {
+		LegacyModelsImport::NativePresent(native) => Some(LoadedModelsConfig {
+			config: load_models_config(&native)?,
+			source: ModelsConfigSource::NativeToml(native),
+		}),
+		LegacyModelsImport::Imported(loaded) => Some(loaded),
+		LegacyModelsImport::AlreadyImported | LegacyModelsImport::NothingToImport => None,
+	})
+}
+
 /// What happened to one v1 `apiKey` during the one-time key import.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LegacyApiKeyImport {
 	/// A literal key was saved to the encrypted store, as `/login` would.
 	Stored {
+		/// Provider the key belongs to.
+		provider: Str,
+	},
+	/// A dry run found a literal key a real run would store.
+	WouldStore {
 		/// Provider the key belongs to.
 		provider: Str,
 	},
@@ -588,27 +646,36 @@ pub enum LegacyApiKeyImport {
 	},
 }
 
+/// Where [`import_legacy_api_keys`] puts literal keys.
+#[derive(Clone, Copy)]
+pub enum LegacyKeyTarget<'a> {
+	/// Report what would be stored; write nothing.
+	DryRun,
+	/// Store them through this control handle.
+	Store(&'a omp_ai::auth::AuthControlHandle),
+}
+
 /// Moves literal v1 `apiKey` values into the encrypted credential store once.
 ///
 /// The v1 value resolved as `!command`, then an environment variable of that
 /// exact name, then the literal. Only a literal can be carried over: the
 /// others are reported so the owner can set `OMP_<PROVIDER>_API_KEY`. A
 /// provider that already has a stored account keeps it. Secrets never pass
-/// through `models.toml`.
+/// through `models.toml`. A dry run neither stores keys nor sets the marker.
 pub fn import_legacy_api_keys(
 	location: &ModelsConfigLocation,
-	control: &omp_ai::auth::AuthControlHandle,
+	target: LegacyKeyTarget<'_>,
 ) -> Result<Vec<LegacyApiKeyImport>, ModelsConfigError> {
-	let marker = location.config_dir.join(".models-keys-migration-v1");
-	if marker.exists() {
+	let marker = ImportStep::ModelsKeys.marker(&location.config_dir);
+	if marker.is_set() {
 		return Ok(Vec::new());
 	}
 	let Some((path, format)) = location
 		.legacy_source()
 		.filter(|(_, format)| *format != LegacyFormat::Toml)
 	else {
-		if location.config_dir.is_dir() {
-			atomic_replace(&marker, "revision = 1\n")?;
+		if matches!(target, LegacyKeyTarget::Store(_)) && location.config_dir.is_dir() {
+			marker.set(None)?;
 		}
 		return Ok(Vec::new());
 	};
@@ -618,6 +685,18 @@ pub fn import_legacy_api_keys(
 		let Some(key) = definition.api_key else {
 			continue;
 		};
+		let looks_like_variable = key.chars().all(|character| {
+			character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+		}) && key
+			.starts_with(|character: char| character.is_ascii_uppercase());
+		let LegacyKeyTarget::Store(control) = target else {
+			report.push(if key.starts_with('!') || looks_like_variable {
+				LegacyApiKeyImport::NeedsEnvironment { provider }
+			} else {
+				LegacyApiKeyImport::WouldStore { provider }
+			});
+			continue;
+		};
 		if !control
 			.accounts(Some(ProviderId::from_ref(provider.as_str())))
 			.is_empty()
@@ -625,10 +704,6 @@ pub fn import_legacy_api_keys(
 			report.push(LegacyApiKeyImport::AlreadyLoggedIn { provider });
 			continue;
 		}
-		let looks_like_variable = key.chars().all(|character| {
-			character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
-		}) && key
-			.starts_with(|character: char| character.is_ascii_uppercase());
 		if key.starts_with('!') || looks_like_variable {
 			report.push(LegacyApiKeyImport::NeedsEnvironment { provider });
 			continue;
@@ -643,8 +718,9 @@ pub fn import_legacy_api_keys(
 		})?;
 		report.push(LegacyApiKeyImport::Stored { provider });
 	}
-	fs::create_dir_all(&location.config_dir)?;
-	atomic_replace(&marker, "revision = 1\n")?;
+	if matches!(target, LegacyKeyTarget::Store(_)) {
+		marker.set(None)?;
+	}
 	Ok(report)
 }
 
@@ -1780,9 +1856,9 @@ pub enum ModelsConfigError {
 		#[source]
 		source: omp_catalog::snapshot::SnapshotError,
 	},
-	/// The configuration root could not be resolved.
+	/// The v1 install or the v2 configuration root could not be located.
 	#[error(transparent)]
-	ConfigRoot(#[from] omp_core::dirs::DataDirError),
+	Locate(#[from] crate::v1_import::LocateError),
 	/// Saving an imported v1 key to the encrypted store failed.
 	#[error(transparent)]
 	CredentialStore(#[from] omp_ai::auth::StoreError),
@@ -1792,13 +1868,26 @@ pub enum ModelsConfigError {
 mod tests {
 	use super::*;
 
-	/// A config root and a home holding a v1 `~/.omp/agent`, both temporary.
+	/// A config root and a home holding a v1 `~/.omp/agent`, both temporary,
+	/// with the v1 profile found by the locator.
 	fn location(root: &Path) -> ModelsConfigLocation {
 		let data = root.join("data");
-		let agent = root.join("home/.omp/agent");
+		let home = root.join("home");
 		fs::create_dir_all(&data).expect("data dir");
-		fs::create_dir_all(&agent).expect("agent dir");
-		ModelsConfigLocation { config_dir: root.join("config"), legacy_dirs: vec![data, agent] }
+		fs::create_dir_all(home.join(".omp/agent")).expect("agent dir");
+		let v1 =
+			crate::v1_import::V1Source::new(crate::v1_import::V1Inputs { home, ..Default::default() })
+				.layout(None);
+		ModelsConfigLocation {
+			config_dir:  root.join("config"),
+			legacy_dirs: vec![data],
+			v1:          Some(v1),
+		}
+	}
+
+	/// The located v1 agent directory.
+	fn v1_agent(location: &ModelsConfigLocation) -> &Path {
+		location.v1.as_ref().expect("v1 layout").agent_dir()
 	}
 
 	const V1_MODELS_YML: &str = concat!(
@@ -1829,7 +1918,7 @@ mod tests {
 	fn v1_models_yml_is_imported_into_the_config_root_once() {
 		let root = tempfile::tempdir().expect("directory");
 		let location = location(root.path());
-		let v1 = location.legacy_dirs[1].join("models.yml");
+		let v1 = v1_agent(&location).join("models.yml");
 		fs::write(&v1, V1_MODELS_YML).expect("v1 config");
 
 		let imported = load_or_import_legacy(&location)
@@ -1889,7 +1978,7 @@ mod tests {
 			"[providers.demo]\nbaseUrl='https://example.test/v1'\n[providers.demo.models.fast]\ncontextWindow=4096\n",
 		)
 		.expect("old native");
-		fs::write(location.legacy_dirs[1].join("models.yml"), V1_MODELS_YML).expect("v1 config");
+		fs::write(v1_agent(&location).join("models.yml"), V1_MODELS_YML).expect("v1 config");
 
 		let moved = load_or_import_legacy(&location)
 			.expect("move")
@@ -1905,7 +1994,11 @@ mod tests {
 		let state = tempfile::tempdir().expect("directory");
 		assert_eq!(
 			ModelsConfigLocation::resolve(state.path()).expect("location"),
-			ModelsConfigLocation { config_dir: state.path().to_owned(), legacy_dirs: Vec::new() }
+			ModelsConfigLocation {
+				config_dir:  state.path().to_owned(),
+				legacy_dirs: Vec::new(),
+				v1:          None,
+			}
 		);
 	}
 
@@ -1916,7 +2009,7 @@ mod tests {
 		assert!(load_or_import_legacy(&location).expect("empty").is_none());
 		// A v1 file that appears later is not picked up: the marker records
 		// that the one-time import already ran.
-		fs::write(location.legacy_dirs[1].join("models.yml"), V1_MODELS_YML).expect("v1 config");
+		fs::write(v1_agent(&location).join("models.yml"), V1_MODELS_YML).expect("v1 config");
 		assert!(load_or_import_legacy(&location).expect("marker").is_none());
 	}
 
@@ -1925,7 +2018,7 @@ mod tests {
 		let root = tempfile::tempdir().expect("directory");
 		let location = location(root.path());
 		fs::write(
-			location.legacy_dirs[1].join("models.yml"),
+			v1_agent(&location).join("models.yml"),
 			"providers:\n  demo:\n    models:\n      - name: Nameless\n",
 		)
 		.expect("v1 config");
@@ -1979,7 +2072,7 @@ mod tests {
 
 		let root = tempfile::tempdir().expect("directory");
 		let location = location(root.path());
-		fs::write(location.legacy_dirs[1].join("models.yml"), V1_MODELS_YML).expect("v1 config");
+		fs::write(v1_agent(&location).join("models.yml"), V1_MODELS_YML).expect("v1 config");
 		let config = load_or_import_legacy(&location)
 			.expect("import")
 			.expect("config");
@@ -2022,7 +2115,8 @@ mod tests {
 		.expect("manager");
 		let control = manager.control_handle();
 
-		let mut report = import_legacy_api_keys(&location, &control).expect("key import");
+		let mut report =
+			import_legacy_api_keys(&location, LegacyKeyTarget::Store(&control)).expect("key import");
 		report.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
 		assert_eq!(report, [
 			LegacyApiKeyImport::NeedsEnvironment { provider: Str::new("cmdkey") },
@@ -2045,7 +2139,7 @@ mod tests {
 		);
 		// The marker makes the import one-shot.
 		assert!(
-			import_legacy_api_keys(&location, &control)
+			import_legacy_api_keys(&location, LegacyKeyTarget::Store(&control))
 				.expect("second run")
 				.is_empty()
 		);

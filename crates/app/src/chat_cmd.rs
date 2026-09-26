@@ -166,16 +166,17 @@ impl LaunchEnv {
 	}
 }
 
-/// The catalog an interactive session presents: the one the composed kernel
-/// routes through, else (behind a gateway) the launch snapshot.
+/// The catalog an interactive session presents: the composed kernel's live
+/// publication (every discovery refresh), else (behind a gateway) the launch
+/// snapshot.
 fn session_catalog(
 	kernel: &omp_agent::Kernel<omp_driver::headless::kernel::ComposedInference>,
 	launch: &Arc<Catalog>,
-) -> Arc<Catalog> {
+) -> omp_driver::registry::LiveCatalog {
 	kernel
 		.inference()
-		.catalog()
-		.map_or_else(|| Arc::clone(launch), Arc::clone)
+		.live_catalog()
+		.unwrap_or_else(|| omp_driver::registry::LiveCatalog::Fixed(Arc::clone(launch)))
 }
 
 /// One `--models` roster entry: the pattern it came from, the admitted model
@@ -201,54 +202,61 @@ pub(crate) struct HandoffTarget {
 /// `..`): a flag clap accepts is lowered into a convar, a [`KernelOptions`]
 /// field, or a launch fact here, or the crate does not compile.
 pub(crate) struct Launch {
-	pub data_dir:      PathBuf,
-	pub project:       PathBuf,
-	pub ctx:           Arc<omp_con::Ctx>,
-	pub catalog:       Arc<Catalog>,
+	pub data_dir:         PathBuf,
+	pub project:          PathBuf,
+	pub ctx:              Arc<omp_con::Ctx>,
+	pub catalog:          Arc<Catalog>,
 	/// Configured model policy after `--config` overlays.
-	pub settings:      ModelSettings,
+	pub settings:         ModelSettings,
 	/// `settings` narrowed to the `--models` roster; identical to `settings`
 	/// without the flag.
-	pub scoped:        ModelSettings,
-	pub roles:         roles::LaunchRoles,
-	/// Primary model selector handed to the kernel.
-	pub model:         Str,
+	pub scoped:           ModelSettings,
+	pub roles:            roles::LaunchRoles,
+	/// Primary model selector handed to the kernel. When the launch follows
+	/// the remembered default role, [`Self::compose`] replaces this
+	/// pre-discovery guess with the model composition settled on.
+	pub model:            Str,
+	/// Thinking annotation of the remembered default selector.
+	pub default_thinking: Option<Str>,
+	/// A remembered default model the post-discovery catalog does not list;
+	/// set by [`Self::compose`], which launched on a fallback instead.
+	pub missing_default:  Option<Str>,
 	/// `--models` roster in flag order; the interactive cycle when non-empty.
-	pub scope:         Vec<ScopedModel>,
+	pub scope:            Vec<ScopedModel>,
 	/// Reasoning level applied after the session opened: `--thinking`, else the
 	/// first scoped pattern's explicit suffix on a fresh session.
-	pub thinking:      Option<Str>,
+	pub thinking:         Option<Str>,
 	/// `--plan-mode` / `--plan-yolo`: engage the plan Director at launch.
-	pub plan_mode:     bool,
+	pub plan_mode:        bool,
 	/// `--plan-yolo`: the target the plan Director hands off to on approval.
-	pub plan_yolo:     Option<HandoffTarget>,
+	pub plan_yolo:        Option<HandoffTarget>,
 	/// Armed prewalk hand-off target; `None` when prewalk is off or disarmed.
-	pub prewalk:       Option<HandoffTarget>,
-	pub sessions_dir:  Option<PathBuf>,
+	pub prewalk:          Option<HandoffTarget>,
+	pub sessions_dir:     Option<PathBuf>,
 	/// The launch reopens an existing session.
-	pub resuming:      bool,
-	pub ephemeral:     bool,
-	pub max_time:      Option<Duration>,
+	pub resuming:         bool,
+	pub ephemeral:        bool,
+	pub max_time:         Option<Duration>,
 	/// Ordered positional launch messages and `@file` references.
-	pub prompt:        Vec<Str>,
+	pub prompt:           Vec<Str>,
 	/// Prompt templates (`/name` slash commands): the discovered directories
 	/// unless `--no-prompt-templates`, plus every `--prompt-template` path.
-	pub templates:     Arc<PromptTemplates>,
+	pub templates:        Arc<PromptTemplates>,
 	/// Discovered skill declarations shared with the kernel and slash console.
-	pub skills:        Arc<omp_driver::discovery::skills::ActiveSkills>,
+	pub skills:           Arc<omp_driver::discovery::skills::ActiveSkills>,
 	/// The named dark-appearance theme the interactive host paints with:
 	/// `cl_theme_dark` resolved against `--theme` paths and the theme
 	/// directories; `None` is the stock dark palette.
-	pub theme:         Option<Arc<omp_tui::JsonTheme>>,
+	pub theme:            Option<Arc<omp_tui::JsonTheme>>,
 	/// The independently persisted named light-appearance theme. An explicit
 	/// `cl_theme`/`--use-theme` override fills both fields with the same fixed
 	/// named theme.
-	pub light_theme:   Option<Arc<omp_tui::JsonTheme>>,
+	pub light_theme:      Option<Arc<omp_tui::JsonTheme>>,
 	/// Every discovered named palette, retained for `/settings` runtime choices
 	/// and observer-local preview.
-	pub theme_catalog: Arc<omp_tui::ThemeCatalog>,
-	pub live_sessions: Arc<omp_driver::sessions::SessionRegistry>,
-	pub options:       KernelOptions,
+	pub theme_catalog:    Arc<omp_tui::ThemeCatalog>,
+	pub live_sessions:    Arc<omp_driver::sessions::SessionRegistry>,
+	pub options:          KernelOptions,
 }
 
 impl Launch {
@@ -390,7 +398,6 @@ impl Launch {
 		let roles = roles::resolve_launch_roles(
 			catalog.as_ref(),
 			&settings,
-			None,
 			smol.as_deref(),
 			slow.as_deref(),
 			plan.as_deref(),
@@ -404,17 +411,40 @@ impl Launch {
 			return Err(miette!("--models matched no catalog model"));
 		}
 		let model_override = model.is_some();
+		// The remembered default as the launch snapshot sees it. Runtime
+		// discovery has not run yet, so without an explicit choice the kernel
+		// settles the default again against the refreshed catalog
+		// (`LaunchModelPolicy::RememberedDefault`) and this is only a guess.
+		let remembered = match roles::resolve_launch_default(catalog.as_ref(), &settings) {
+			roles::LaunchDefault::Resolved(selected) => Some(selected),
+			roles::LaunchDefault::Missing { .. } | roles::LaunchDefault::Unset => None,
+		};
+		let default_thinking = remembered
+			.as_ref()
+			.and_then(|selected| selected.thinking.clone());
+		let launch_model = if model.is_some() || !scope.is_empty() {
+			omp_driver::headless::kernel::LaunchModelPolicy::Selected
+		} else {
+			omp_driver::headless::kernel::LaunchModelPolicy::RememberedDefault
+		};
 		let model = model
 			.or_else(|| {
 				// A `--models` scope pins the first scoped model
 				// unless the remembered default role resolves inside it.
 				let first = scope.first()?;
-				let remembered = roles.primary.as_ref().filter(|remembered| {
-					roles::model_selector_allowed(catalog.as_ref(), &scoped, remembered.as_str())
+				let remembered = remembered.as_ref().filter(|remembered| {
+					roles::model_selector_allowed(catalog.as_ref(), &scoped, remembered.model.as_str())
 				});
-				Some(remembered.map_or_else(|| first.key.clone(), |key| Str::new(key.as_str())))
+				Some(
+					remembered
+						.map_or_else(|| first.key.clone(), |selected| Str::new(selected.model.as_str())),
+				)
 			})
-			.or_else(|| roles.primary.as_ref().map(|value| Str::new(value.as_str())))
+			.or_else(|| {
+				remembered
+					.as_ref()
+					.map(|selected| Str::new(selected.model.as_str()))
+			})
 			.or_else(|| roles::fallback_model_selector(catalog.as_ref(), &scoped))
 			.ok_or_else(|| miette!("launch could not select a catalog model"))?;
 		if api_key.is_some() && !model_override && models.is_none() {
@@ -485,6 +515,7 @@ impl Launch {
 			api_key: api_key.clone(),
 			approval_mode: approval.map(Into::into),
 			model_override,
+			launch_model,
 			prompt: prompt_policy,
 			discovered_skills: Some(Arc::clone(&active_skills)),
 			extensions: driver_extension_policy(&extension_launch),
@@ -518,6 +549,8 @@ impl Launch {
 			scoped,
 			roles,
 			model,
+			default_thinking,
+			missing_default: None,
 			scope,
 			thinking,
 			plan_mode: plan_mode || plan_yolo,
@@ -564,8 +597,13 @@ impl Launch {
 	/// Composes the kernel and applies the session-scoped launch overrides
 	/// (`--thinking`, plan mode, prewalk target) after the journal opened, so
 	/// an explicit flag outranks a resumed session's journaled values.
+	///
+	/// Composition refreshes runtime model discovery; the launch model it
+	/// settled on (the remembered default resolved against the refreshed
+	/// catalog, or the fallback that replaced a missing one) becomes
+	/// [`Self::model`].
 	pub(crate) async fn compose(
-		&self,
+		&mut self,
 	) -> miette::Result<(
 		omp_agent::Kernel<omp_driver::headless::kernel::ComposedInference>,
 		omp_session::Session,
@@ -579,6 +617,14 @@ impl Launch {
 		)
 		.await
 		.into_diagnostic()?;
+		let settled = kernel.inference().launch_model();
+		self.model = settled.model.clone();
+		if self.options.launch_model
+			== omp_driver::headless::kernel::LaunchModelPolicy::RememberedDefault
+		{
+			self.default_thinking.clone_from(&settled.thinking);
+		}
+		self.missing_default.clone_from(&settled.missing_default);
 		apply_launch_session(&self.ctx, &mut session, self)?;
 		Ok((kernel, session))
 	}
@@ -597,7 +643,7 @@ impl Launch {
 			|key: &Option<omp_catalog::ModelKey>| key.as_ref().map(|key| Str::new(key.as_str()));
 		let by_role = [
 			("smol", key_of(&self.roles.smol), self.roles.smol_thinking.clone()),
-			("default", Some(self.model.clone()), self.roles.primary_thinking.clone()),
+			("default", Some(self.model.clone()), self.default_thinking.clone()),
 			("slow", key_of(&self.roles.slow), self.roles.slow_thinking.clone()),
 			("plan", key_of(&self.roles.plan), self.roles.plan_thinking.clone()),
 		];
@@ -849,6 +895,17 @@ pub(crate) fn model_scope(
 	(scoped, scope)
 }
 
+/// Shows one launch-time notice in the interactive host once it runs.
+fn launch_notice(ctx: &omp_con::Ctx, text: String) {
+	tracing::warn!("{text}");
+	if let Some(mailbox) = ctx.user::<omp_chat::HostMailbox>() {
+		mailbox.post(omp_chat::HostAction::Reply {
+			severity: omp_con::Severity::Warn,
+			text:     Str::from(text),
+		});
+	}
+}
+
 /// Session-scoped launch overrides, applied after the journal opened.
 fn apply_launch_session(
 	ctx: &omp_con::Ctx,
@@ -929,7 +986,25 @@ pub(crate) async fn run(
 	// dependency: the first frame and first prompt never await the network.
 	let _startup_update = crate::startup_update::schedule(Arc::clone(&ctx));
 	let env = LaunchEnv::production(&project, args.gateway.is_some())?;
-	let launch = Launch::prepare(args, ctx, env).await?;
+	let mut launch = Launch::prepare(args, ctx, env).await?;
+	let resuming = launch.resuming || imported;
+	// Prompt templates are `/name` console commands; a template named like a
+	// built-in command is dropped.
+	let interactive_prompts = Arc::new(InteractivePrompts {
+		templates: Arc::clone(&launch.templates),
+		skills:    Arc::clone(&launch.skills),
+	});
+	for reserved in omp_chat::commands::prompts::register(&launch.ctx, interactive_prompts.clone()) {
+		tracing::warn!(template = %reserved, "prompt template shadows a built-in command; skipped");
+	}
+	if omp_driver::settings::SV_SKILLS_ENABLE_SKILL_COMMANDS.get(&launch.ctx) {
+		for reserved in omp_chat::commands::prompts::register_skills(&launch.ctx, interactive_prompts)
+		{
+			tracing::warn!(command = %reserved, "skill command shadows a built-in command; skipped");
+		}
+	}
+	let launch_inputs = launch_input::prepare(&launch, None, Vec::new())?;
+	let (mut kernel, session) = launch.compose().await?;
 	let Launch {
 		data_dir,
 		project,
@@ -942,28 +1017,38 @@ pub(crate) async fn run(
 		prompt: initial_prompt,
 		..
 	} = &launch;
-	let resuming = launch.resuming || imported;
-	// Prompt templates are `/name` console commands; a template named like a
-	// built-in command is dropped.
-	let interactive_prompts = Arc::new(InteractivePrompts {
-		templates: Arc::clone(&launch.templates),
-		skills:    Arc::clone(&launch.skills),
-	});
-	for reserved in omp_chat::commands::prompts::register(ctx, interactive_prompts.clone()) {
-		tracing::warn!(template = %reserved, "prompt template shadows a built-in command; skipped");
-	}
-	if omp_driver::settings::SV_SKILLS_ENABLE_SKILL_COMMANDS.get(ctx) {
-		for reserved in omp_chat::commands::prompts::register_skills(ctx, interactive_prompts) {
-			tracing::warn!(command = %reserved, "skill command shadows a built-in command; skipped");
-		}
-	}
-	let launch_inputs = launch_input::prepare(&launch, None, Vec::new())?;
-	let (mut kernel, session) = launch.compose().await?;
 	// Composing the kernel refreshed runtime model discovery, after the
-	// launch snapshot was read. The badge, the picker, and the controller
-	// project the catalog the kernel routes through, so a model discovered
-	// now is listed and selectable in this session.
-	let catalog = &session_catalog(&kernel, catalog);
+	// launch snapshot was read, and settled the remembered default against
+	// it. A default that discovery still does not list launched on a
+	// fallback: say so once rather than switching silently.
+	if let Some(remembered) = &launch.missing_default {
+		launch_notice(
+			ctx,
+			format!(
+				"Default model {remembered} is not available (its provider did not list it); using \
+				 {model} for this session"
+			),
+		);
+	}
+	let live_catalog = session_catalog(&kernel, catalog);
+	let catalog = &live_catalog.load();
+	// Later discovery refreshes (a `/login`, the cache TTL) publish through
+	// the kernel's registry; the new roster reaches the picker as one typed
+	// action on the host's console mailbox.
+	let discovery = kernel
+		.inference()
+		.production_stack()
+		.and_then(|stack| stack.discovery.clone())
+		.map(|refresher| {
+			let host = Arc::clone(ctx);
+			let scoped = launch.scoped.clone();
+			refresher.spawn(move |catalog| {
+				let rows = crate::pickers::model_rows(catalog.as_ref(), &scoped);
+				if let Some(mailbox) = host.user::<omp_chat::HostMailbox>() {
+					mailbox.post(omp_chat::HostAction::ModelsReplaced(omp_chat::ModelRoster::new(rows)));
+				}
+			})
+		});
 	let live_auth = kernel
 		.inference()
 		.production_stack()
@@ -1071,7 +1156,8 @@ pub(crate) async fn run(
 				journal: session.journal_path().to_path_buf(),
 				live_journal: Arc::clone(&live_journal),
 				model: model.clone(),
-				catalog: composed.catalog().cloned(),
+				catalog: composed.live_catalog(),
+				discovery,
 				registry: Arc::clone(kernel.tool_registry()),
 				con: Arc::clone(ctx),
 				sessions: Arc::clone(live_sessions),
@@ -1143,7 +1229,7 @@ pub(crate) async fn run(
 		mutations,
 		Arc::clone(&services),
 		collab,
-		Some(Arc::clone(catalog)),
+		Some(live_catalog.clone()),
 		env,
 		Arc::clone(&live_journal),
 		data_dir.clone(),
@@ -1682,6 +1768,49 @@ mod tests {
 			launch.model
 		);
 		assert!(!launch.options.model_override);
+	}
+
+	/// A remembered default the launch snapshot does not list yet (a
+	/// discovered model whose cache expired) neither fails the launch nor
+	/// becomes a silent substitute: the kernel settles it after discovery.
+	#[tokio::test]
+	async fn a_remembered_default_missing_before_discovery_is_settled_by_the_kernel() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut args = ChatArgs::default_interactive();
+		args.project = dir.path().to_path_buf();
+		let ctx = Arc::new(omp_con::Ctx::new());
+		ctx.exec(
+			"ai_model_roles {default easycliproxy/discovered-later}",
+			omp_con::Source::Config(Str::new_static("config.cfg")),
+		)
+		.unwrap();
+		let launch = Launch::prepare(args, ctx, test_env(dir.path()))
+			.await
+			.unwrap();
+		assert_eq!(
+			launch.options.launch_model,
+			omp_driver::headless::kernel::LaunchModelPolicy::RememberedDefault
+		);
+		assert!(
+			embedded()
+				.model(&omp_catalog::ModelKey::from(launch.model.as_str()))
+				.is_some(),
+			"the pre-discovery guess is a listed fallback, got {}",
+			launch.model
+		);
+
+		let dir = tempfile::tempdir().unwrap();
+		let mut args = ChatArgs::default_interactive();
+		args.project = dir.path().to_path_buf();
+		args.model = Some(Str::new_static("openai/gpt-5"));
+		let launch = Launch::prepare(args, Arc::new(omp_con::Ctx::new()), test_env(dir.path()))
+			.await
+			.unwrap();
+		assert_eq!(
+			launch.options.launch_model,
+			omp_driver::headless::kernel::LaunchModelPolicy::Selected,
+			"an explicit --model is final"
+		);
 	}
 
 	#[tokio::test]

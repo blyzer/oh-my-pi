@@ -64,7 +64,7 @@ async fn run_inner(args: ChatArgs, ui_enabled: bool) -> miette::Result<()> {
 	let project = fs::canonicalize(&args.project).into_diagnostic()?;
 	let ctx = Arc::new(crate::process_ctx(&project)?);
 	let env = LaunchEnv::production(&project, args.gateway.is_some())?;
-	let launch = Launch::prepare(args, ctx, env).await?;
+	let mut launch = Launch::prepare(args, ctx, env).await?;
 	let (kernel, session) = launch.compose().await?;
 	let home = SessionHome::new(
 		&launch.data_dir,
@@ -83,7 +83,12 @@ async fn run_inner(args: ChatArgs, ui_enabled: bool) -> miette::Result<()> {
 	}
 	let runtime = RpcRuntime {
 		con:                  Some(Arc::clone(&launch.ctx)),
-		catalog:              Some(Arc::clone(&launch.catalog)),
+		catalog:              Some(
+			kernel
+				.inference()
+				.live_catalog()
+				.map_or_else(|| Arc::clone(&launch.catalog), |live| live.load()),
+		),
 		model:                launch.model.clone(),
 		model_cycle:          launch.cycle(),
 		model_cycle_index:    0,
