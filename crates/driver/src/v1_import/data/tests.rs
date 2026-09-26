@@ -634,6 +634,15 @@ fn a_v1_local_backend_turns_mnemopi_on_for_the_imported_lessons() {
 	let position = |step| steps.iter().position(|registered| *registered == step);
 	assert!(position(ImportStep::Settings) < position(ImportStep::LearnedLessons));
 
+	// A dry run, before the settings step wrote anything, reports the same.
+	let before = snapshot(root.path());
+	let dry = import(&v2, inputs(&home), ImportMode::DryRun);
+	assert_eq!(snapshot(root.path()), before);
+	assert_eq!(summary(&dry, ImportStep::LearnedLessons), [(
+		OutcomeKind::WouldImport,
+		Some(format!("{}: 2 lessons", app.display()))
+	)]);
+
 	let report = import(&v2, inputs(&home), ImportMode::Apply);
 
 	let config = fs::read_to_string(v2.config_dir.join("config.cfg")).expect("config.cfg");

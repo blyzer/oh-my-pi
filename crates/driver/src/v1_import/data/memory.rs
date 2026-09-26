@@ -37,9 +37,13 @@ use omp_envd::{
 use omp_memory::{MemoryBackend, MemoryRuntime, recall::RecallBounds};
 
 use super::{DataImportError, copied, counted, same_file, sqlite::V1Database, subject};
-use crate::v1_import::{
-	ImportEntry, ImportError, ImportMode, ImportOutcome, ImportStep, StepContext, V1Item, V2Target,
-	report::{Attention, SkipReason},
+use crate::{
+	legacy_settings::{self, LegacyMap, VarFold},
+	v1_import::{
+		ImportEntry, ImportError, ImportMode, ImportOutcome, ImportStep, StepContext, V1Item,
+		V2Target,
+		report::{Attention, SkipReason},
+	},
 };
 
 /// The primary (shared-bank) database file name in a Mnemopi directory.
@@ -59,13 +63,45 @@ fn finish(step: ImportStep, cx: &StepContext<'_>) -> Result<(), ImportError> {
 	Ok(())
 }
 
+/// The v1 settings the `settings` step has yet to import for this pair: its
+/// v1 `config.yml` until the step's marker is set (a dry run, or an apply
+/// before that step ran). An unreadable file is `None`; the settings step
+/// reports it.
+fn pending_settings(cx: &StepContext<'_>) -> Option<LegacyMap> {
+	if ImportStep::Settings
+		.marker(&cx.pair.target.config_dir)
+		.is_set()
+	{
+		return None;
+	}
+	legacy_settings::read_yaml_document(&cx.locate(V1Item::Settings)?).ok()
+}
+
 /// The memory settings a session of the target profile (in `project`, whose
-/// `.omp/config.cfg` overlays the profile's) runs with.
+/// `.omp/config.cfg` overlays the profile's) runs with, once `pending` v1
+/// settings are imported.
+///
+/// `pending` folds into the profile layer first, value by value as the
+/// `settings` step converts it, and the cfg files run after it: a convar the
+/// profile's `config.cfg` already sets keeps its value, as that step leaves
+/// it. So a dry run sees v1 `memory.backend: local` turn Mnemopi on exactly as
+/// an apply does.
 fn memory_settings(
 	target: &V2Target,
 	project: Option<&Path>,
+	pending: Option<&LegacyMap>,
 ) -> Result<HostSettings, DataImportError> {
 	let ctx = omp_con::Ctx::new();
+	if let Some(document) = pending {
+		for var in ctx.vars() {
+			if let Some(VarFold { outcome: Ok(Some(value)), .. }) =
+				legacy_settings::fold_var(document, &var)
+			{
+				// A value the convar rejects is reported by the settings step.
+				let _ = ctx.set(var.name, value, omp_con::Origin::Archive);
+			}
+		}
+	}
 	let files = crate::cfg::CfgFiles::with_roots(
 		target.config_dir.clone(),
 		project.map(|project| project.join(".omp")),
@@ -133,10 +169,11 @@ pub(in crate::v1_import) fn import_mnemopi(
 		)]);
 	}
 	let target = &cx.pair.target;
-	let profile = memory_settings(target, None)?;
+	let pending = pending_settings(cx);
+	let profile = memory_settings(target, None, pending.as_ref())?;
 	let mut entries = Vec::with_capacity(stores.len());
 	for store in &stores {
-		let (destination, unscoped) = match place(target, &profile, store)? {
+		let (destination, unscoped) = match place(target, &profile, pending.as_ref(), store)? {
 			Placement::Recalled(destination) => (destination, false),
 			Placement::Unscoped(destination) => (destination, true),
 			Placement::ProjectMissing(project) => {
@@ -202,6 +239,7 @@ fn v1_stores(root: &Path) -> Result<Vec<V1Store>, DataImportError> {
 fn place(
 	target: &V2Target,
 	profile: &HostSettings,
+	pending: Option<&LegacyMap>,
 	store: &V1Store,
 ) -> Result<Placement, DataImportError> {
 	let in_dir = |directory: &Path| match &store.bank {
@@ -228,7 +266,7 @@ fn place(
 	if !project.is_dir() {
 		return Ok(Placement::ProjectMissing(cwd));
 	}
-	let settings = memory_settings(target, Some(&project))?;
+	let settings = memory_settings(target, Some(&project), pending)?;
 	Ok(Placement::Recalled(in_dir(&project_bank_dir(target, &project, &settings)?)))
 }
 
@@ -302,6 +340,7 @@ pub(in crate::v1_import) fn import_learned(
 		)]);
 	}
 	let target = &cx.pair.target;
+	let pending = pending_settings(cx);
 	let mut entries = Vec::with_capacity(files.len());
 	let mut total = 0;
 	let mut inactive = false;
@@ -320,7 +359,7 @@ pub(in crate::v1_import) fn import_learned(
 			entries.push(entry(file, Some(subject(&project)), ImportOutcome::NothingToImport));
 			continue;
 		}
-		let settings = memory_settings(target, Some(&project))?;
+		let settings = memory_settings(target, Some(&project), pending.as_ref())?;
 		let stored = match cx.mode {
 			ImportMode::DryRun => Stored { new: lessons.len(), duplicate: 0 },
 			ImportMode::Apply => store_lessons(target, &project, &settings, &lessons)?,
