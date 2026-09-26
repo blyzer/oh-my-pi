@@ -42,6 +42,9 @@ pub enum SkipReason {
 	/// profile's own first run (or `omp config import-v1`).
 	#[strum(to_string = "waits for that profile's first run or `omp config import-v1`")]
 	WaitsForProfile,
+	/// The v1 value is already the v2 default, so no line is written.
+	#[strum(to_string = "already the v2 default")]
+	MatchesDefault,
 }
 
 /// Why v1 data cannot move to v2.
@@ -50,6 +53,9 @@ pub enum NotMigratable {
 	/// v2 has no equivalent feature or backend.
 	#[strum(to_string = "v2 has no equivalent")]
 	NoV2Equivalent,
+	/// v2 has the setting but rejects the v1 value.
+	#[strum(to_string = "v2 rejects the v1 value")]
+	ValueRejected,
 }
 
 /// What the owner has to do about an item.
@@ -61,6 +67,10 @@ pub enum Attention {
 		to_string = "the v1 key names a variable or command; set OMP_<PROVIDER>_API_KEY or /login"
 	)]
 	KeyNeedsEnvironment,
+	/// v2 has no such memory backend (v1 `hindsight`, `sharpshooter`); its
+	/// settings are kept as comments.
+	#[strum(to_string = "v2 has no such memory backend; set ai_memory_backend mnemopi or off")]
+	MemoryBackendDropped,
 	/// The step failed; nothing it would have written is marked done, so the
 	/// next run retries.
 	#[strum(to_string = "import failed")]
@@ -159,12 +169,19 @@ pub struct ImportReport {
 	pub dry_run: bool,
 	/// One report per profile pair.
 	pub pairs:   Vec<PairReport>,
+	/// The current project's items (`<project>/.omp`), imported once per
+	/// project.
+	pub project: Vec<ImportEntry>,
 }
 
 impl ImportReport {
 	/// Every entry across all pairs.
 	pub fn entries(&self) -> impl Iterator<Item = &ImportEntry> + '_ {
-		self.pairs.iter().flat_map(|pair| pair.entries.iter())
+		self
+			.pairs
+			.iter()
+			.flat_map(|pair| pair.entries.iter())
+			.chain(&self.project)
 	}
 
 	/// Logs the report: imports and skips at info, anything the owner must
@@ -179,41 +196,44 @@ impl ImportReport {
 					"v1 and v2 share an XDG root; the v1 data there is not relocated"
 				);
 			}
-			for entry in &pair.entries {
-				let kind = entry.outcome.kind();
-				let path = entry.path.as_ref().map(|path| path.display());
-				match &entry.outcome {
-					ImportOutcome::NeedsAttention(Attention::Failed(error)) => tracing::warn!(
-						step = %entry.step,
-						item = %entry.item,
-						path = ?path,
-						subject = ?entry.subject,
-						error = error as &dyn std::error::Error,
-						"v1 import step failed; it will retry next run"
-					),
-					ImportOutcome::NeedsAttention(attention) => tracing::warn!(
-						step = %entry.step,
-						item = %entry.item,
-						path = ?path,
-						subject = ?entry.subject,
-						%attention,
-						"v1 import needs attention"
-					),
-					ImportOutcome::Imported => tracing::info!(
-						step = %entry.step,
-						item = %entry.item,
-						path = ?path,
-						subject = ?entry.subject,
-						"imported from v1"
-					),
-					_ => tracing::debug!(
-						step = %entry.step,
-						item = %entry.item,
-						%kind,
-						"v1 import step had nothing new"
-					),
-				}
-			}
+			pair.entries.iter().for_each(log_entry);
 		}
+		self.project.iter().for_each(log_entry);
+	}
+}
+
+fn log_entry(entry: &ImportEntry) {
+	let kind = entry.outcome.kind();
+	let path = entry.path.as_ref().map(|path| path.display());
+	match &entry.outcome {
+		ImportOutcome::NeedsAttention(Attention::Failed(error)) => tracing::warn!(
+			step = %entry.step,
+			item = %entry.item,
+			path = ?path,
+			subject = ?entry.subject,
+			error = error as &dyn std::error::Error,
+			"v1 import step failed; it will retry next run"
+		),
+		ImportOutcome::NeedsAttention(attention) => tracing::warn!(
+			step = %entry.step,
+			item = %entry.item,
+			path = ?path,
+			subject = ?entry.subject,
+			%attention,
+			"v1 import needs attention"
+		),
+		ImportOutcome::Imported => tracing::info!(
+			step = %entry.step,
+			item = %entry.item,
+			path = ?path,
+			subject = ?entry.subject,
+			"imported from v1"
+		),
+		_ => tracing::debug!(
+			step = %entry.step,
+			item = %entry.item,
+			%kind,
+			"v1 import step had nothing new"
+		),
 	}
 }
