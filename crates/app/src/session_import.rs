@@ -58,6 +58,7 @@ impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat 
 		match source {
 			omp_chat::overlays::services::ForeignSessionSource::Claude => Self::Claude,
 			omp_chat::overlays::services::ForeignSessionSource::Codex => Self::Codex,
+			omp_chat::overlays::services::ForeignSessionSource::Omp1 => Self::Omp1,
 		}
 	}
 }
@@ -65,6 +66,9 @@ impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat 
 /// Enumerates transcripts for `format`, newest first, without materializing a
 /// native session.
 pub fn candidates(format: ForeignFormat) -> miette::Result<Vec<ForeignCandidate>> {
+	if format == ForeignFormat::Omp1 {
+		return v1_candidates();
+	}
 	let root = foreign_root(format)?;
 	let mut candidates = jsonl_candidates(format, &root)?
 		.into_iter()
@@ -150,11 +154,21 @@ pub(crate) fn prepare(args: &mut ChatArgs) -> miette::Result<()> {
 /// The selected path is revalidated against the source authority. Conversion
 /// happens in a hidden sibling file and becomes visible only after an atomic
 /// rename, so a failed import never leaves a resumable partial journal.
+///
+/// An omp v1 session ignores `destination`: it lands in its recorded
+/// project's bucket, or reopens the journal an earlier import made (owner
+/// decision #4, [`omp_driver::v1_import::sessions`]).
 pub fn import_selected(
 	format: ForeignFormat,
 	source: &Path,
 	destination: &Path,
 ) -> miette::Result<PathBuf> {
+	if format == ForeignFormat::Omp1 {
+		let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
+		return omp_driver::v1_import::sessions::import_selected(&pair, source, &V1Converter)
+			.map(|imported| imported.journal)
+			.into_diagnostic();
+	}
 	let source = validate_selection(format, source)?;
 	if destination.extension().and_then(|value| value.to_str()) != Some("oms") {
 		return Err(miette!("native session destination must use the .oms extension"));
@@ -213,6 +227,31 @@ impl omp_driver::v1_import::V1SessionConverter for V1Converter {
 	) -> Result<usize, omp_driver::v1_import::sessions::ConvertError> {
 		convert::import_v1(conversion).map_err(Into::into)
 	}
+}
+
+/// The active profile's v1 sessions, from their headers alone.
+fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
+	let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
+	Ok(omp_driver::v1_import::sessions::list(&pair.source)
+		.into_diagnostic()?
+		.into_iter()
+		.map(|session| ForeignCandidate {
+			cwd:           session.cwd.unwrap_or_else(|| {
+				session
+					.path
+					.parent()
+					.map(Path::to_path_buf)
+					.unwrap_or_default()
+			}),
+			id:            session.id,
+			path:          session.path,
+			title:         session.title,
+			created_ms:    session.created_ms,
+			modified_ms:   session.modified_ms,
+			messages:      session.messages,
+			first_message: session.first_message,
+		})
+		.collect())
 }
 
 fn foreign_root(format: ForeignFormat) -> miette::Result<PathBuf> {

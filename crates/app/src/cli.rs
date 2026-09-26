@@ -2210,14 +2210,18 @@ pub enum ConfigCommand {
 	ImportV1 {
 		/// Print the v1 inventory and what would be imported; write nothing.
 		#[arg(long)]
-		dry_run: bool,
+		dry_run:  bool,
 		/// Read the v1 configuration root at DIR instead of `~/.omp`.
 		#[arg(long, value_name = "DIR")]
-		from:    Option<PathBuf>,
+		from:     Option<PathBuf>,
 		/// Import only this v1 profile (`default` for the default one); every
 		/// profile is imported otherwise.
 		#[arg(long, value_name = "PROFILE")]
-		profile: Option<Str>,
+		profile:  Option<Str>,
+		/// Also convert every v1 session transcript into a native journal;
+		/// otherwise sessions convert when picked from `/resume @v1`.
+		#[arg(long)]
+		sessions: bool,
 	},
 }
 

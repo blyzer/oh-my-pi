@@ -142,7 +142,7 @@ omp_con::cmd! {
 	/// Deletes the current session file from disk and starts a new one.
 	drop() = |ctx, _args| post(ctx, CommandAction::Drop);
 
-	/// Resumes a stored session by id or path; `@claude`/`@codex` opens the
+	/// Resumes a stored session by id or path; `@claude`/`@codex`/`@v1` opens the
 	/// foreign import picker, and no argument opens the native picker.
 	resume(?session: Str) = |ctx, args| {
 		post(ctx, CommandAction::Resume { id: args.opt::<Str>(0)? })
