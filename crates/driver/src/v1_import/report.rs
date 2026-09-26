@@ -42,6 +42,9 @@ pub enum SkipReason {
 	/// profile's own first run (or `omp config import-v1`).
 	#[strum(to_string = "waits for that profile's first run or `omp config import-v1`")]
 	WaitsForProfile,
+	/// v2's `config.cfg` already binds the chord; the existing bind wins.
+	#[strum(to_string = "v2 config.cfg already binds this chord; kept the existing bind")]
+	ChordBound,
 }
 
 /// Why v1 data cannot move to v2.
@@ -61,6 +64,9 @@ pub enum Attention {
 		to_string = "the v1 key names a variable or command; set OMP_<PROVIDER>_API_KEY or /login"
 	)]
 	KeyNeedsEnvironment,
+	/// A v1 keybinding is not a chord or a list of chords v2 can parse.
+	#[strum(to_string = "not a key chord v2 understands; rebind it with `bind <chord> <command>`")]
+	InvalidKeybinding,
 	/// The step failed; nothing it would have written is marked done, so the
 	/// next run retries.
 	#[strum(to_string = "import failed")]

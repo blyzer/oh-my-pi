@@ -551,6 +551,27 @@ impl V1Layout {
 		})
 	}
 
+	/// Where the v1 default profile keeps an agent-directory `item` a named
+	/// profile inherits (v1 `resolveInheritedAgentDir`: `<base root>/agent`,
+	/// never `PI_CODING_AGENT_DIR` or an XDG root). `None` for the default
+	/// profile itself, for items outside the agent directory, and when absent.
+	#[must_use]
+	pub fn locate_inherited(&self, item: V1Item) -> Option<PathBuf> {
+		let spec = item.spec();
+		if self.profile.is_none() || spec.anchor != Anchor::Agent {
+			return None;
+		}
+		let agent_dir = self.base_root.join("agent");
+		spec
+			.names
+			.iter()
+			.map(|name| agent_dir.join(name))
+			.find(|path| match spec.shape {
+				ItemShape::File => path.is_file(),
+				ItemShape::Directory => path.is_dir(),
+			})
+	}
+
 	/// Every item this profile has, with where it lives, in [`V1Item`]
 	/// order.
 	pub fn inventory(&self) -> impl Iterator<Item = (V1Item, PathBuf)> + '_ {

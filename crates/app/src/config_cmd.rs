@@ -501,8 +501,8 @@ fn load_cfg_text(path: &Path, script: Option<&str>) -> miette::Result<Ctx> {
 	// The default bind cfg is the baseline the persisted script diffs
 	// against; without it a dump would `unbindall` the defaults away.
 	ctx.exec(
-		crate::keybindings::DEFAULT_BINDS,
-		Source::Config(Str::new_static(crate::keybindings::DEFAULT_BINDS_NAME)),
+		omp_driver::keybindings::DEFAULT_BINDS,
+		Source::Config(Str::new_static(omp_driver::keybindings::DEFAULT_BINDS_NAME)),
 	)
 	.into_diagnostic()?;
 	ctx.seal_bind_defaults();
@@ -645,8 +645,8 @@ pub fn migrate_settings(data_dir: &Path, project: &Path) -> miette::Result<PathB
 	let user = migrate_toml_sources(&user_sources)?;
 	user
 		.exec(
-			crate::keybindings::DEFAULT_BINDS,
-			Source::Config(Str::new_static(crate::keybindings::DEFAULT_BINDS_NAME)),
+			omp_driver::keybindings::DEFAULT_BINDS,
+			Source::Config(Str::new_static(omp_driver::keybindings::DEFAULT_BINDS_NAME)),
 		)
 		.into_diagnostic()?;
 	user.seal_bind_defaults();
@@ -746,47 +746,21 @@ fn migrate_keybindings(data_dir: &Path, ctx: &Ctx) -> miette::Result<()> {
 		return Ok(());
 	};
 	for (action, chords) in bindings {
-		let Some(command) = legacy_action_command(action) else {
+		let Some(command) = omp_driver::keybindings::pi_action_command(action) else {
 			continue;
 		};
 		let Some(chords) = chords.as_array() else {
 			continue;
 		};
-		remove_bound_command(ctx, command)?;
+		// The remap replaces the action's shipped chords; other contextual
+		// actions sharing a chord keep their order.
+		omp_driver::keybindings::strip_command(ctx, command, |_| false).into_diagnostic()?;
 		for chord in chords.iter().filter_map(toml::Value::as_str) {
 			ctx.bind(Str::new(chord), Str::new_static(command))
 				.into_diagnostic()?;
 		}
 	}
 	Ok(())
-}
-
-/// Removes one legacy action from every shipped fallback script before its
-/// replacement chords are installed. Other contextual actions sharing a
-/// chord remain in their original order.
-fn remove_bound_command(ctx: &Ctx, command: &str) -> miette::Result<()> {
-	for (chord, script) in ctx.binds() {
-		let kept = script
-			.as_str()
-			.split(';')
-			.map(str::trim)
-			.filter(|statement| *statement != command)
-			.collect::<Vec<_>>();
-		if kept.len() == script.as_str().split(';').count() {
-			continue;
-		}
-		if kept.is_empty() {
-			ctx.unbind(chord.as_str());
-		} else {
-			ctx.bind(chord, Str::new(kept.join("; ")))
-				.into_diagnostic()?;
-		}
-	}
-	Ok(())
-}
-
-fn legacy_action_command(action: &str) -> Option<&'static str> {
-	crate::keybindings::pi_action_command(action)
 }
 
 fn legacy_toml_value(path: &str, value: &toml::Value, ty: &TypeSpec) -> miette::Result<Value> {

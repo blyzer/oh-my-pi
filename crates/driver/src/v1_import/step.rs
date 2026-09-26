@@ -51,6 +51,8 @@ pub enum ImportStep {
 	Models,
 	/// Literal v1 `models.yml` `apiKey`s into the encrypted credential store.
 	ModelsKeys,
+	/// v1 `keybindings.yml` actions into `bind` lines in `config.cfg`.
+	Keybindings,
 }
 
 impl ImportStep {
@@ -64,6 +66,7 @@ impl ImportStep {
 	pub const fn item(self) -> V1Item {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
+			Self::Keybindings => V1Item::Keybindings,
 		}
 	}
 
@@ -86,6 +89,7 @@ impl ImportStep {
 		match self {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
+			Self::Keybindings => super::keybindings::import_keybindings(cx),
 		}
 	}
 }
@@ -343,4 +347,7 @@ pub enum ImportError {
 	/// The credential broker could not be composed over the catalog.
 	#[error("could not compose the credential broker")]
 	CredentialBroker(#[from] omp_ai::auth::CredentialBrokerError),
+	/// The v1 keybindings could not be read or written as `bind` lines.
+	#[error("could not import the keybindings")]
+	Keybindings(#[from] super::keybindings::KeybindingsImportError),
 }

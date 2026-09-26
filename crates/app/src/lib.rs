@@ -109,8 +109,9 @@ pub fn config_path() -> std::result::Result<PathBuf, omp_core::dirs::DataDirErro
 
 /// Builds the process control context from user and exact-project cfg files.
 ///
-/// The default bind cfg ([`keybindings::DEFAULT_BINDS`]) executes first, then
-/// user configuration, then `<project>/.omp/config.cfg` overlays it.
+/// The default bind cfg ([`omp_driver::keybindings::DEFAULT_BINDS`]) executes
+/// first, then user configuration, then `<project>/.omp/config.cfg` overlays
+/// it.
 pub fn process_ctx(project_root: &Path) -> Result<omp_con::Ctx> {
 	process_ctx_with(project_root, omp_con::Ctx::builder())
 }
@@ -131,8 +132,10 @@ pub fn process_ctx_with(project_root: &Path, builder: omp_con::CtxBuilder) -> Re
 		.saver(move |name: &str, contents: &str| omp_con::CfgSaver::save(&saver, name, contents))
 		.build();
 	ctx.exec(
-		keybindings::DEFAULT_BINDS,
-		omp_con::Source::Config(omp_core::Str::new_static(keybindings::DEFAULT_BINDS_NAME)),
+		omp_driver::keybindings::DEFAULT_BINDS,
+		omp_con::Source::Config(omp_core::Str::new_static(
+			omp_driver::keybindings::DEFAULT_BINDS_NAME,
+		)),
 	)
 	.into_diagnostic()?;
 	ctx.seal_bind_defaults();

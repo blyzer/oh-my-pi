@@ -18,6 +18,8 @@ use omp_catalog::ProviderId;
 use super::*;
 use crate::discovery::models::{ModelsConfigLocation, load_or_import_legacy};
 
+mod keybindings;
+
 const V1_MODELS_YML: &str = concat!(
 	"providers:\n",
 	"  easycliproxy:\n",
@@ -404,6 +406,7 @@ fn a_dry_run_writes_nothing() {
 		(ImportStep::Models, None, OutcomeKind::WouldImport),
 		(ImportStep::ModelsKeys, Some("easycliproxy"), OutcomeKind::WouldImport),
 		(ImportStep::ModelsKeys, Some("envkey"), OutcomeKind::NeedsAttention),
+		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 	]);
 	let inventory = &report.pairs[0].inventory;
 	assert_eq!(inventory[0].0, V1Item::Models);
@@ -433,10 +436,12 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 		(ImportStep::Models, None, OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, Some("easycliproxy"), OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, Some("envkey"), OutcomeKind::NeedsAttention),
+		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 		// The `work` profile's config imports into its v2 namesake; its
 		// credentials wait for its own live store, unmarked.
 		(ImportStep::Models, None, OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, None, OutcomeKind::Skipped),
+		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 	]);
 	let work = v2.config_dir.join("profiles/work");
 	assert!(work.join("models.toml").is_file());
@@ -480,6 +485,7 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 	assert_eq!(outcomes(&again), [
 		(ImportStep::Models, None, OutcomeKind::Skipped),
 		(ImportStep::ModelsKeys, None, OutcomeKind::Skipped),
+		(ImportStep::Keybindings, None, OutcomeKind::Skipped),
 	]);
 	assert!(
 		again
@@ -584,6 +590,7 @@ fn a_profile_without_keys_never_opens_a_credential_store() {
 	assert_eq!(outcomes(&report), [
 		(ImportStep::Models, None, OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, None, OutcomeKind::NothingToImport),
+		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 	]);
 	let target = v2.target(Some("work"));
 	assert!(ImportStep::ModelsKeys.marker(&target.config_dir).is_set());

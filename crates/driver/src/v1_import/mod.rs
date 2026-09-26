@@ -55,6 +55,7 @@
 //!    byte-identical afterwards.
 
 mod credentials;
+pub mod keybindings;
 pub mod locate;
 mod models;
 pub mod report;

@@ -2,8 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use omp_app::keybindings::{DEFAULT_BINDS, PI_ACTIONS, config::ConsoleKeybindings};
+use omp_app::keybindings::config::ConsoleKeybindings;
 use omp_chat::input::normalize_chord;
+use omp_driver::keybindings::{DEFAULT_BINDS, PI_ACTIONS};
 
 /// Pi `getDefaultPasteImageKeys(process.platform)`.
 #[cfg(target_os = "macos")]
