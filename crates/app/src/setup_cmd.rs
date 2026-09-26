@@ -28,7 +28,8 @@ pub async fn run(args: SetupArgs) -> miette::Result<()> {
 				.map_err(|source| miette!(source))?;
 			println!(
 				"OMP is ready with {} models. Use `omp auth login <provider>` to add credentials and \
-				 `omp config set ai_model <provider/model>` to choose the default.",
+				 `omp config set ai_model_roles '{{default <provider/model>}}'` (or Alt+M in chat) to \
+				 choose the default.",
 				catalog.models().len(),
 			);
 			Ok(())

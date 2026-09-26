@@ -19,8 +19,36 @@ use omp_core::Str;
 use crate::{
 	commands::CommandAction,
 	extension_status::ExtensionStatus,
-	overlays::{PanelCall, PanelOpener},
+	overlays::{ModelRow, PanelCall, PanelOpener},
 };
+
+/// A complete model-picker roster published by the application (a model
+/// discovery refresh), moved into the actor whole.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelRoster(Vec<ModelRow>);
+
+impl ModelRoster {
+	/// Wraps a complete roster in catalog order.
+	#[must_use]
+	pub const fn new(rows: Vec<ModelRow>) -> Self {
+		Self(rows)
+	}
+
+	/// Borrows the rows.
+	#[must_use]
+	pub fn rows(&self) -> &[ModelRow] {
+		&self.0
+	}
+
+	/// Moves the rows out.
+	#[must_use]
+	pub fn into_rows(self) -> Vec<ModelRow> {
+		self.0
+	}
+}
+
+/// Row prices are finite catalog facts, never NaN, so equality is total.
+impl Eq for ModelRoster {}
 
 /// Which rung of the Escape ladder an [`EscapeHook`] answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +265,10 @@ pub enum HostAction {
 	},
 	/// Ordered streaming speech-recognition state and editor updates.
 	SttEvent(SttUiEvent),
+	/// The model catalog changed mid-session (a discovery refresh after a
+	/// login or a cache expiry): replaces the picker roster. An open picker
+	/// keeps its selection, scope, and query by model identity.
+	ModelsReplaced(ModelRoster),
 	/// A validated newer official release for the archived update channel.
 	/// Presentation-only: it never enters the journal or initiates install.
 	UpdateAvailable(crate::notices::update::UpdateAvailable),

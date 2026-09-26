@@ -57,8 +57,12 @@ pub struct ServiceState {
 	pub live_journal:  Arc<parking_lot::RwLock<PathBuf>>,
 	/// Resolved launch model key (child kernels for `/btw`).
 	pub model:         Str,
-	/// Catalog snapshot; `None` behind a remote gateway.
-	pub catalog:       Option<Arc<omp_catalog::snapshot::Catalog>>,
+	/// The session's live catalog publication; `None` behind a remote
+	/// gateway.
+	pub catalog:       Option<omp_driver::registry::LiveCatalog>,
+	/// Mid-session model discovery refresh (a successful `/login` re-probes
+	/// that provider); `None` behind a gateway or over a caller-owned catalog.
+	pub discovery:     Option<omp_driver::registry::DiscoveryRefreshSender>,
 	/// Kernel tool registry.
 	pub registry:      Arc<omp_tool::Registry>,
 	/// Process console.
@@ -174,6 +178,7 @@ impl Services for AppServices {
 			.as_ref()
 			.map_or_else(Vec::new, |catalog| {
 				catalog
+					.load()
 					.providers()
 					.iter()
 					.map(|provider| Str::new(provider.id.as_str()))
@@ -184,7 +189,12 @@ impl Services for AppServices {
 			label:       Str::new_static("auto"),
 			description: Str::new_static("Auto-detect per prompt"),
 		}];
-		if let Some(catalog) = self.state.catalog.as_ref() {
+		if let Some(catalog) = self
+			.state
+			.catalog
+			.as_ref()
+			.map(omp_driver::registry::LiveCatalog::load)
+		{
 			let active_model = self
 				.state
 				.con

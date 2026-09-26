@@ -499,7 +499,7 @@ fn spawn_collab_ui(
 fn spawn_collab_status(
 	collab: omp_driver::collab::session::CollabCommandHandle,
 	ctx: Arc<Ctx>,
-	catalog: Option<Arc<Catalog>>,
+	catalog: Option<omp_driver::registry::LiveCatalog>,
 	fallback_model: Str,
 ) -> tokio::task::JoinHandle<()> {
 	let mut presence = collab.subscribe_presence();
@@ -532,7 +532,7 @@ fn spawn_collab_status(
 					}
 					if presence.borrow().is_some_and(|facts| facts.role() == RuntimeCollabRole::Host) {
 						let mut published = collab.published_state();
-						let model = model_metadata(&ctx, fallback_model.as_str(), catalog.as_deref());
+						let model = model_metadata(&ctx, fallback_model.as_str(), catalog.as_ref().map(omp_driver::registry::LiveCatalog::load).as_deref());
 						published.model = Some(model);
 						published.thinking_level = Some(omp_agent::AI_THINKING.get(&ctx).to_string())
 							.filter(|thinking| !thinking.is_empty());
@@ -570,7 +570,7 @@ pub(crate) struct Controller<C = ComposedInference> {
 	/// Collaboration relay and replica owner.
 	collab:         omp_driver::collab::session::CollabCommandHandle,
 	/// Catalog used to publish the host's current model metadata.
-	catalog:        Option<Arc<Catalog>>,
+	catalog:        Option<omp_driver::registry::LiveCatalog>,
 	/// Continuous presence/session-state projection into the chat actor.
 	collab_status:  tokio::task::JoinHandle<()>,
 	/// Host dialogs projected into this guest actor.
@@ -616,7 +616,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 		mutations: Arc<dyn Mutations>,
 		services: Arc<dyn Services>,
 		collab: omp_driver::collab::session::CollabCommandHandle,
-		catalog: Option<Arc<Catalog>>,
+		catalog: Option<omp_driver::registry::LiveCatalog>,
 		env: omp_env::EnvClient,
 		live_journal: Arc<RwLock<PathBuf>>,
 		data_dir: PathBuf,
@@ -636,7 +636,15 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let session_id = display_name(&session);
 		let (snapshot, events) = session.subscribe();
 		let forwarder = Some(forward(events, relay.clone()));
-		collab.publish_state(session_state_update(&session, &home, &ctx, catalog.as_deref()));
+		collab.publish_state(session_state_update(
+			&session,
+			&home,
+			&ctx,
+			catalog
+				.as_ref()
+				.map(omp_driver::registry::LiveCatalog::load)
+				.as_deref(),
+		));
 		let collab_status =
 			spawn_collab_status(collab.clone(), Arc::clone(&ctx), catalog.clone(), home.model.clone());
 		let (tan_tx, tan_rx) = flume::unbounded();
@@ -955,7 +963,11 @@ impl<C: omp_agent::Inference> Controller<C> {
 			&self.session,
 			&self.home,
 			&self.ctx,
-			self.catalog.as_deref(),
+			self
+				.catalog
+				.as_ref()
+				.map(omp_driver::registry::LiveCatalog::load)
+				.as_deref(),
 		));
 	}
 

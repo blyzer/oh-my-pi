@@ -86,9 +86,13 @@ fn control(root: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
 	(control, store)
 }
 
+/// The model steps' outcomes; later steps prove their own.
 fn outcomes(report: &ImportReport) -> Vec<(ImportStep, Option<&str>, OutcomeKind)> {
 	report
 		.entries()
+		.filter(|entry| {
+			matches!(entry.step, ImportStep::Models | ImportStep::ModelsKeys | ImportStep::Credentials)
+		})
 		.map(|entry| (entry.step, entry.subject.as_deref(), entry.outcome.kind()))
 		.collect()
 }
