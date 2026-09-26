@@ -338,6 +338,7 @@ impl ControlAuthority for CredentialSecretControlAuthority {
 						access_token: access,
 						refresh_token: refresh,
 						expires_at_ms: optional_u64(&arguments, "expires_at_ms")?,
+						project: None,
 					})
 					.map_err(store_control_error)?;
 				self.metadata_value(account)

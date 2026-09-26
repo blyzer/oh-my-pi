@@ -533,6 +533,7 @@ impl Launch {
 			sessions: Some(Arc::clone(&live_sessions)),
 			session_name: None,
 			parent_session: None,
+			agent: None,
 			tool_registry: None,
 			output_schema: None,
 			schema_mode: None,

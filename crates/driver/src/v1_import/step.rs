@@ -51,6 +51,11 @@ pub enum ImportStep {
 	Models,
 	/// Literal v1 `models.yml` `apiKey`s into the encrypted credential store.
 	ModelsKeys,
+	/// v1 `config.yml` into `config.cfg` (and `subagent.cfg`).
+	Settings,
+	/// v1 `agent.db` logins (API keys, OAuth, MCP OAuth) into the encrypted
+	/// credential store.
+	Credentials,
 	/// v1 session transcripts into native journals: on demand, or all of them
 	/// with `omp config import-v1 --sessions` (owner decision #4).
 	Sessions,
@@ -67,6 +72,8 @@ impl ImportStep {
 	pub const fn item(self) -> V1Item {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
+			Self::Settings => V1Item::Settings,
+			Self::Credentials => V1Item::AgentDb,
 			Self::Sessions => V1Item::Sessions,
 		}
 	}
@@ -74,7 +81,7 @@ impl ImportStep {
 	/// Whether applying this step writes credentials.
 	#[must_use]
 	pub const fn needs_credentials(self) -> bool {
-		matches!(self, Self::ModelsKeys)
+		matches!(self, Self::ModelsKeys | Self::Credentials)
 	}
 
 	/// This step's marker in a v2 profile configuration root.
@@ -90,6 +97,8 @@ impl ImportStep {
 		match self {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
+			Self::Settings => super::settings::import_settings(cx),
+			Self::Credentials => super::auth_credentials::import_credentials(cx),
 			Self::Sessions => super::sessions::import_sessions(cx),
 		}
 	}
@@ -257,6 +266,7 @@ pub fn run_with(
 			.iter()
 			.map(|pair| run_pair(pair, mode, credentials, sessions))
 			.collect(),
+		project: Vec::new(),
 	}
 }
 
@@ -339,6 +349,9 @@ pub enum ImportError {
 	/// The v1 model configuration could not be read or converted.
 	#[error("could not import the model configuration")]
 	Models(#[from] crate::discovery::models::ModelsConfigError),
+	/// The v1 settings could not be imported.
+	#[error("could not import the settings")]
+	Settings(#[from] super::SettingsImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,
@@ -366,6 +379,9 @@ pub enum ImportError {
 	/// The credential broker could not be composed over the catalog.
 	#[error("could not compose the credential broker")]
 	CredentialBroker(#[from] omp_ai::auth::CredentialBrokerError),
+	/// v1 `agent.db` credentials could not be read or stored.
+	#[error("could not import the v1 credentials")]
+	Credentials(#[from] super::CredentialsImportError),
 	/// A v1 session could not be imported.
 	#[error("could not import a v1 session")]
 	Session(#[from] super::sessions::SessionImportError),

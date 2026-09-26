@@ -66,6 +66,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "async.max_jobs",
+			"legacy.path": "async.maxJobs",
 		},
 	};
 	/// Milliseconds to retain terminal job rows for observation.

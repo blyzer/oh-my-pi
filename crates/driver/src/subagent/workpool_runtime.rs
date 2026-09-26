@@ -16,6 +16,7 @@ use serde_json::Value as Json;
 use tokio_util::sync::CancellationToken;
 
 use super::{
+	AgentName,
 	settings::{SV_TASK_RECURSION_DEPTH, TaskSettings, child_ctx},
 	spawn::{
 		SpawnError, child_session_path, configure_child_route, create_isolation, discard_isolation,
@@ -382,6 +383,7 @@ async fn run_kernel_worker_inner(
 		parent_session: Some(run.request.owner.clone()),
 		model_override: true,
 		tool_registry: run.forwarded_registry.clone(),
+		agent: Some(AgentName::new(run.request.agent.clone())),
 		..crate::headless::kernel::KernelOptions::default()
 	};
 	let composed = crate::headless::kernel::compose_kernel(
