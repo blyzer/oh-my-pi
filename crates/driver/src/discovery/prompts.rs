@@ -3,8 +3,10 @@
 //! Sources, in order: the user directory `<config root>/agent/prompts`, the
 //! project directory `<project>/.omp/prompts` (both scanned recursively; a
 //! nested `review/rust.md` is still `/rust`, its source reads
-//! `(project:review)`), then every `--prompt-template <file|dir>` path
-//! (`(custom)`). The first template to claim a name wins.
+//! `(project:review)`), then the `commands/` of every installed, enabled
+//! Claude-format marketplace plugin (`/<plugin>:<name>`, `(plugin:<plugin>)`),
+//! then every `--prompt-template <file|dir>` path (`(custom)`). The first
+//! template to claim a name wins.
 //! `--no-prompt-templates` drops the discovered directories; explicit paths
 //! always load.
 //!
@@ -21,6 +23,7 @@ use std::{
 };
 
 use omp_core::Str;
+use omp_ext::claude_plugin::ClaudePlugins;
 use serde::Deserialize;
 
 use super::rules::{Level, Warning, split_frontmatter};
@@ -35,7 +38,8 @@ pub struct PromptTemplate {
 	pub description: Str,
 	/// Body after the frontmatter.
 	pub content:     Str,
-	/// `(user)`, `(project)`, `(project:sub:dir)`, or `(custom)`.
+	/// `(user)`, `(project)`, `(project:sub:dir)`, `(plugin:<name>)`, or
+	/// `(custom)`.
 	pub source:      Str,
 	/// Canonical file path.
 	pub path:        PathBuf,
@@ -52,18 +56,33 @@ pub struct PromptTemplates {
 
 impl PromptTemplates {
 	/// Discovers templates for `project_root`: the two standard directories
-	/// when `discover` is set, then `explicit` files or directories.
+	/// and the installed `plugins`' commands when `discover` is set, then
+	/// `explicit` files or directories.
 	#[must_use]
 	pub fn discover(
 		project_root: &Path,
 		config_root: &Path,
+		plugins: &ClaudePlugins,
 		explicit: &[PathBuf],
 		discover: bool,
 	) -> Self {
 		let mut out = Self::default();
 		if discover {
-			out.load_dir(&config_root.join("agent/prompts"), Level::User, "", true);
-			out.load_dir(&project_root.join(".omp/prompts"), Level::Project, "", true);
+			out.load_dir(&config_root.join("agent/prompts"), Origin::Standard(Level::User), "");
+			out.load_dir(&project_root.join(".omp/prompts"), Origin::Standard(Level::Project), "");
+			for plugin in &plugins.plugins {
+				let Some(components) = plugin.claude_components() else {
+					continue;
+				};
+				let origin = Origin::Plugin(&plugin.name);
+				for path in &components.commands {
+					if path.is_dir() {
+						out.load_dir(path, origin, "");
+					} else if is_markdown(path) {
+						out.load_file(path, origin.source(""), origin.prefix());
+					}
+				}
+			}
 		}
 		for path in explicit {
 			let path = if path.is_absolute() {
@@ -72,8 +91,10 @@ impl PromptTemplates {
 				project_root.join(path)
 			};
 			match fs::metadata(&path) {
-				Ok(metadata) if metadata.is_dir() => out.load_dir(&path, Level::Project, "", false),
-				Ok(_) if is_markdown(&path) => out.load_file(&path, Str::new_static("(custom)")),
+				Ok(metadata) if metadata.is_dir() => out.load_dir(&path, Origin::Custom, ""),
+				Ok(_) if is_markdown(&path) => {
+					out.load_file(&path, Str::new_static("(custom)"), None);
+				},
 				Ok(_) => out.warnings.push(Warning {
 					path,
 					message: Str::new_static(
@@ -116,9 +137,10 @@ impl PromptTemplates {
 		self.get(name).map(|template| expand(template, args))
 	}
 
-	/// Recursively loads `*.md` files below `dir`. `standard` sources tag
-	/// nested directories (`(project:review)`), explicit ones read `(custom)`.
-	fn load_dir(&mut self, dir: &Path, level: Level, subdir: &str, standard: bool) {
+	/// Recursively loads `*.md` files below `dir`. Standard and plugin
+	/// sources tag nested directories (`(project:review)`), explicit ones read
+	/// `(custom)`.
+	fn load_dir(&mut self, dir: &Path, origin: Origin<'_>, subdir: &str) {
 		let entries = match fs::read_dir(dir) {
 			Ok(entries) => entries,
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
@@ -146,17 +168,7 @@ impl PromptTemplates {
 			.iter()
 			.filter(|path| path.is_file() && is_markdown(path))
 		{
-			let source = if !standard {
-				Str::new_static("(custom)")
-			} else {
-				let level: &'static str = level.into();
-				if subdir.is_empty() {
-					Str::new(format!("({level})"))
-				} else {
-					Str::new(format!("({level}:{subdir})"))
-				}
-			};
-			self.load_file(path, source);
+			self.load_file(path, origin.source(subdir), origin.prefix());
 		}
 		for path in paths.iter().filter(|path| path.is_dir()) {
 			let name = path
@@ -168,11 +180,12 @@ impl PromptTemplates {
 			} else {
 				format!("{subdir}:{name}")
 			};
-			self.load_dir(path, level, &nested, standard);
+			self.load_dir(path, origin, &nested);
 		}
 	}
 
-	fn load_file(&mut self, path: &Path, source: Str) {
+	/// Loads one template; `prefix` namespaces its name as `<prefix>:<stem>`.
+	fn load_file(&mut self, path: &Path, source: Str, prefix: Option<&str>) {
 		let canonical = match fs::canonicalize(path) {
 			Ok(canonical) => canonical,
 			Err(error) => {
@@ -193,11 +206,12 @@ impl PromptTemplates {
 				return;
 			},
 		};
-		let Some(name) = path
-			.file_stem()
-			.map(|stem| Str::new(stem.to_string_lossy()))
-		else {
+		let Some(stem) = path.file_stem().map(|stem| stem.to_string_lossy()) else {
 			return;
+		};
+		let name = match prefix {
+			Some(prefix) => Str::new(format!("{prefix}:{stem}")),
+			None => Str::new(stem),
 		};
 		if self.get(&name).is_some() {
 			self.warnings.push(Warning {
@@ -247,6 +261,43 @@ impl PromptTemplates {
 			source,
 			path: canonical,
 		});
+	}
+}
+
+/// Where a template directory comes from; decides its source tag and name
+/// namespace.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+	/// A standard user or project directory.
+	Standard(Level),
+	/// An explicit `--prompt-template` path.
+	Custom,
+	/// An installed marketplace plugin's commands, namespaced by plugin name.
+	Plugin(&'a str),
+}
+
+impl<'a> Origin<'a> {
+	fn source(self, subdir: &str) -> Str {
+		match (self, subdir.is_empty()) {
+			(Self::Custom, _) => Str::new_static("(custom)"),
+			(Self::Standard(level), true) => {
+				let level: &'static str = level.into();
+				Str::new(format!("({level})"))
+			},
+			(Self::Standard(level), false) => {
+				let level: &'static str = level.into();
+				Str::new(format!("({level}:{subdir})"))
+			},
+			(Self::Plugin(plugin), true) => Str::new(format!("(plugin:{plugin})")),
+			(Self::Plugin(plugin), false) => Str::new(format!("(plugin:{plugin}:{subdir})")),
+		}
+	}
+
+	const fn prefix(self) -> Option<&'a str> {
+		match self {
+			Self::Plugin(plugin) => Some(plugin),
+			Self::Standard(_) | Self::Custom => None,
+		}
 	}
 }
 
@@ -518,6 +569,7 @@ mod tests {
 		let templates = PromptTemplates::discover(
 			&project,
 			&config_root,
+			&ClaudePlugins::default(),
 			&[root.join("extra"), PathBuf::from("../extra.md"), root.join("missing.md")],
 			true,
 		);
@@ -544,13 +596,71 @@ mod tests {
 		assert_eq!(templates.expand_line("/unknown a").as_deref(), None);
 		assert_eq!(templates.expand_line("plain text").as_deref(), None);
 
-		let suppressed =
-			PromptTemplates::discover(&project, &config_root, &[root.join("extra.md")], false);
+		let suppressed = PromptTemplates::discover(
+			&project,
+			&config_root,
+			&ClaudePlugins::default(),
+			&[root.join("extra.md")],
+			false,
+		);
 		let names = suppressed
 			.templates
 			.iter()
 			.map(|t| t.name.as_str())
 			.collect::<Vec<_>>();
 		assert_eq!(names, ["extra"], "--no-prompt-templates keeps explicit paths only");
+	}
+
+	#[test]
+	fn installed_plugin_commands_are_namespaced_templates_unless_disabled() {
+		use omp_ext::claude_plugin::{InstallScope, InstalledPluginEntry, InstalledPluginsRegistry};
+
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path().canonicalize().unwrap();
+		let (data, project) = (root.join("data"), root.join("proj"));
+		let write = |path: PathBuf, text: &str| {
+			fs::create_dir_all(path.parent().unwrap()).unwrap();
+			fs::write(path, text).unwrap();
+		};
+		let enabled = data.join("plugins/cache/plugins/m___tools___1");
+		let disabled = data.join("plugins/cache/plugins/m___quiet___1");
+		write(
+			enabled.join("commands/review.md"),
+			"---\ndescription: Review it\n---\nReview $ARGUMENTS",
+		);
+		write(enabled.join("commands/git/push.md"), "Push");
+		write(disabled.join("commands/hush.md"), "Hush");
+		let mut registry = InstalledPluginsRegistry::default();
+		for (id, path, on) in [("tools@m", &enabled, true), ("quiet@m", &disabled, false)] {
+			registry
+				.plugins
+				.insert(Str::new(id), vec![InstalledPluginEntry {
+					scope:          InstallScope::User,
+					install_path:   path.clone(),
+					version:        Str::new_static("1"),
+					installed_at:   Str::new_static("t"),
+					last_updated:   Str::new_static("t"),
+					git_commit_sha: None,
+					enabled:        on,
+				}]);
+		}
+		write(
+			data.join("plugins/installed_plugins.json"),
+			&serde_json::to_string(&registry).unwrap(),
+		);
+		fs::create_dir_all(&project).unwrap();
+
+		let plugins = ClaudePlugins::resolve(&data, &project);
+		let templates = PromptTemplates::discover(&project, &root.join(".o2"), &plugins, &[], true);
+		let rows = templates
+			.templates
+			.iter()
+			.map(|t| (t.name.as_str(), t.source.as_str()))
+			.collect::<Vec<_>>();
+		assert_eq!(rows, [("tools:review", "(plugin:tools)"), ("tools:push", "(plugin:tools:git)")]);
+		assert_eq!(templates.expand_line("/tools:review a b").as_deref(), Some("Review a b"));
+
+		let suppressed = PromptTemplates::discover(&project, &root.join(".o2"), &plugins, &[], false);
+		assert!(suppressed.templates.is_empty(), "--no-prompt-templates drops plugin commands");
 	}
 }

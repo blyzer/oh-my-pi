@@ -11,7 +11,8 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::Str;
+use omp_core::{Str, sf};
+use omp_ext::claude_plugin::{ClaudePlugin, McpDeclaration, PluginScope};
 use serde::Deserialize;
 
 use super::{
@@ -80,6 +81,10 @@ struct ForeignServer {
 	request_id_format: Option<RequestIdFormat>,
 	#[serde(skip)]
 	plugin_data:       Option<PathBuf>,
+	/// Installed marketplace plugin root: `${CLAUDE_PLUGIN_ROOT}` and
+	/// path-like relative commands resolve against it.
+	#[serde(skip)]
+	plugin_root:       Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -138,7 +143,28 @@ struct AgentPluginMcpDocument {
 	mcp_servers: BTreeMap<Str, ForeignServer>,
 }
 
-const AGENT_PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+/// An installed plugin's MCP file: the nested `{"mcpServers": {...}}` shape
+/// or the flat `{name: server}` marketplace shape.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PluginMcpDocument {
+	Nested {
+		#[serde(rename = "mcpServers")]
+		mcp_servers: BTreeMap<Str, ForeignServer>,
+	},
+	Flat(BTreeMap<Str, ForeignServer>),
+}
+
+impl PluginMcpDocument {
+	fn into_servers(self) -> BTreeMap<Str, ForeignServer> {
+		match self {
+			Self::Nested { mcp_servers } => mcp_servers,
+			Self::Flat(servers) => servers,
+		}
+	}
+}
+
+const AGENT_PLUGIN_SCHEMA: &str = omp_ext::claude_plugin::AGENT_PLUGIN_SCHEMA;
 const AGENT_PLUGIN_MCP_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
 
 /// Discovers every supported foreign MCP source in deterministic precedence
@@ -197,6 +223,7 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 			ConfigSourceKind::AgentPluginProject,
 		);
 	}
+	push_claude_plugins(&mut sources, &paths.claude_plugins);
 
 	push_codex(&mut sources, project.join(".codex/config.toml"), ConfigSourceKind::CodexProject);
 	push_codex(&mut sources, home.join(".codex/config.toml"), ConfigSourceKind::CodexUser);
@@ -347,6 +374,56 @@ fn push_agent_plugin_root(
 	push_document(out, real, kind, document.mcp_servers);
 }
 
+/// Installed Claude-layout marketplace plugins: each `.mcp.json` or manifest
+/// `mcpServers` declaration, servers namespaced `<plugin>:<server>` and
+/// `${CLAUDE_PLUGIN_ROOT}` expanded to the plugin root.
+fn push_claude_plugins(out: &mut Vec<ConfigSource>, plugins: &[ClaudePlugin]) {
+	for plugin in plugins {
+		let Some(components) = plugin.claude_components() else {
+			continue;
+		};
+		let kind = match plugin.scope {
+			PluginScope::Project => ConfigSourceKind::ClaudePluginProject,
+			PluginScope::User => ConfigSourceKind::ClaudePluginUser,
+		};
+		let root = Str::new(plugin.root.to_string_lossy());
+		for declaration in &components.mcp {
+			let (path, base, servers) = match declaration {
+				McpDeclaration::File(path) => {
+					let Some(document) = read_json::<PluginMcpDocument>(path) else {
+						continue;
+					};
+					let base = path.parent().unwrap_or(&plugin.root).to_path_buf();
+					(path.clone(), base, document.into_servers())
+				},
+				McpDeclaration::Inline { manifest, servers } => {
+					match serde_json::from_str::<BTreeMap<Str, ForeignServer>>(servers) {
+						Ok(servers) => (manifest.clone(), plugin.root.clone(), servers),
+						Err(error) => {
+							tracing::warn!(path = %manifest.display(), %error, "failed to parse plugin manifest mcpServers");
+							continue;
+						},
+					}
+				},
+			};
+			let servers = servers
+				.into_iter()
+				.map(|(name, mut server)| {
+					server.plugin_root = Some(plugin.root.clone());
+					if server.command.is_some() {
+						server
+							.env
+							.entry(Str::new_static("CLAUDE_PLUGIN_ROOT"))
+							.or_insert_with(|| root.clone());
+					}
+					(sf!("{}:{name}", plugin.name), server)
+				})
+				.collect();
+			push_document_at(out, path, &base, kind, servers);
+		}
+	}
+}
+
 #[derive(Clone, Copy)]
 enum JsonShape {
 	Common,
@@ -392,10 +469,22 @@ fn push_document(
 	kind: ConfigSourceKind,
 	servers: BTreeMap<Str, ForeignServer>,
 ) {
+	let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+	push_document_at(out, path, &base, kind, servers);
+}
+
+/// Normalizes `servers` declared by `path`, resolving relative values against
+/// `base`.
+fn push_document_at(
+	out: &mut Vec<ConfigSource>,
+	path: PathBuf,
+	base: &Path,
+	kind: ConfigSourceKind,
+	servers: BTreeMap<Str, ForeignServer>,
+) {
 	if servers.is_empty() {
 		return;
 	}
-	let base = path.parent().unwrap_or(Path::new("."));
 	let mut file = McpConfigFile::default();
 	for (name, server) in servers {
 		match server.normalize(base) {
@@ -415,7 +504,10 @@ fn push_document(
 impl ForeignServer {
 	fn normalize(self, base: &Path) -> Option<McpServerConfig> {
 		let plugin_data = self.plugin_data;
-		let replace = |value| replace_plugin_vars(value, base, plugin_data.as_deref());
+		let plugin_root = self.plugin_root;
+		let replace = |value| {
+			replace_plugin_vars(value, plugin_root.as_deref().unwrap_or(base), plugin_data.as_deref())
+		};
 		let (command, mut command_args) = match self.command {
 			Some(ForeignCommand::One(command)) => (Some(replace(command)), Vec::new()),
 			Some(ForeignCommand::Many(mut words)) if !words.is_empty() => {
@@ -427,6 +519,16 @@ impl ForeignServer {
 			},
 			_ => (None, Vec::new()),
 		};
+		// A plugin's path-like relative command (`./bin/server`) names a file
+		// in its package, not in the session cwd.
+		let command = command.map(|command| {
+			if plugin_root.is_some() && (command.starts_with("./") || command.starts_with("../")) {
+				let relative = command.as_str().strip_prefix("./").unwrap_or(command.as_str());
+				Str::new(base.join(relative).to_string_lossy())
+			} else {
+				command
+			}
+		});
 		command_args.extend(self.args.into_iter().map(replace));
 		let mut env = self.environment;
 		env.extend(self.env);
@@ -735,6 +837,84 @@ mod tests {
 			)
 		);
 		assert!(!resolved.servers.contains_key("escaped"));
+	}
+
+	fn install_plugins(registry: &Path, entries: &[(&str, &Path, bool)]) {
+		use omp_ext::claude_plugin::{InstallScope, InstalledPluginEntry, InstalledPluginsRegistry};
+
+		let mut installed = InstalledPluginsRegistry::default();
+		for (id, path, enabled) in entries {
+			installed
+				.plugins
+				.insert(Str::new(id), vec![InstalledPluginEntry {
+					scope:          InstallScope::User,
+					install_path:   path.to_path_buf(),
+					version:        Str::new_static("1.0.0"),
+					installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+					last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+					git_commit_sha: None,
+					enabled:        *enabled,
+				}]);
+		}
+		write(registry, &serde_json::to_string(&installed).unwrap());
+	}
+
+	#[test]
+	fn installed_claude_plugin_servers_expand_the_plugin_root_unless_disabled() {
+		let temp = tempfile::tempdir().unwrap();
+		let home = temp.path().join("home");
+		let data = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let cache = data.join("plugins/cache/plugins");
+		let files = cache.join("market___files___1.0.0");
+		let inline = cache.join("market___inline___1.0.0");
+		let quiet = cache.join("market___quiet___1.0.0");
+		write(
+			&files.join(".mcp.json"),
+			r#"{"mcpServers":{"db":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/db","args":["--config","${CLAUDE_PLUGIN_ROOT}/db.toml"],"env":{"DB_HOME":"${CLAUDE_PLUGIN_ROOT}/state"}}}}"#,
+		);
+		write(
+			&inline.join(".claude-plugin/plugin.json"),
+			r#"{"name":"inline","mcpServers":{"api":{"command":"./server","args":["${CLAUDE_PLUGIN_ROOT}"]}}}"#,
+		);
+		write(&quiet.join(".mcp.json"), r#"{"hush":{"command":"hush"}}"#);
+		install_plugins(&data.join("plugins/installed_plugins.json"), &[
+			("files@market", &files, true),
+			("inline@market", &inline, true),
+			("quiet@market", &quiet, false),
+		]);
+		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project);
+		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
+
+		let discovered = sources(
+			&McpConfigPaths::new(&home.join(".o2"), &project)
+				.with_claude_plugins(plugins.plugins.into()),
+		);
+		let resolved = super::super::config::resolve_sources(&discovered, true);
+
+		let files = fs::canonicalize(&files).unwrap();
+		let inline = fs::canonicalize(&inline).unwrap();
+		let db = &resolved.servers["files:db"];
+		assert_eq!(db.source_kind, ConfigSourceKind::ClaudePluginUser);
+		assert_eq!(
+			db.config.command.as_deref(),
+			Some(files.join("bin/db").to_string_lossy().as_ref())
+		);
+		assert_eq!(db.config.args, [
+			Str::new_static("--config"),
+			Str::new(files.join("db.toml").to_string_lossy())
+		]);
+		assert_eq!(db.config.env["DB_HOME"], Str::new(files.join("state").to_string_lossy()));
+		assert_eq!(db.config.env["CLAUDE_PLUGIN_ROOT"], Str::new(files.to_string_lossy()));
+		let api = &resolved.servers["inline:api"];
+		assert_eq!(
+			api.config.command.as_deref(),
+			Some(inline.join("server").to_string_lossy().as_ref())
+		);
+		assert_eq!(api.config.args, [Str::new(inline.to_string_lossy())]);
+		assert!(!resolved.servers.contains_key("quiet:hush"), "a disabled plugin never loads");
+		assert!(!resolved.servers.keys().any(|name| name.contains("${")));
 	}
 
 	#[test]

@@ -665,6 +665,8 @@ pub struct McpConfigPaths {
 	pub(crate) home: PathBuf,
 	/// Explicit contained Agent Plugins package roots.
 	pub(crate) agent_plugin_roots: Vec<PathBuf>,
+	/// Installed Claude-layout marketplace plugins.
+	pub(crate) claude_plugins: Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
 }
 
 impl McpConfigPaths {
@@ -695,6 +697,7 @@ impl McpConfigPaths {
 			root: project_root.join(".mcp.json"),
 			home,
 			agent_plugin_roots: Vec::new(),
+			claude_plugins: Arc::default(),
 		}
 	}
 
@@ -702,6 +705,17 @@ impl McpConfigPaths {
 	#[must_use]
 	pub fn with_agent_plugin_roots(mut self, roots: Vec<PathBuf>) -> Self {
 		self.agent_plugin_roots = roots;
+		self
+	}
+
+	/// Adds installed Claude-layout marketplace plugins, whose `.mcp.json` or
+	/// manifest `mcpServers` declarations join read-only discovery.
+	#[must_use]
+	pub fn with_claude_plugins(
+		mut self,
+		plugins: Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
+	) -> Self {
+		self.claude_plugins = plugins;
 		self
 	}
 }

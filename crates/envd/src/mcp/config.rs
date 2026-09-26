@@ -44,6 +44,10 @@ pub enum ConfigSourceKind {
 	AgentPluginProject,
 	/// Portable Agent Plugin user package.
 	AgentPluginUser,
+	/// Installed Claude-format marketplace plugin, project scope.
+	ClaudePluginProject,
+	/// Installed Claude-format marketplace plugin, user scope.
+	ClaudePluginUser,
 	/// OpenAI Codex project configuration.
 	CodexProject,
 	/// OpenAI Codex user configuration.
@@ -80,6 +84,8 @@ impl ConfigSourceKind {
 			Self::ClaudeUser => 160,
 			Self::AgentPluginProject => 151,
 			Self::AgentPluginUser => 150,
+			Self::ClaudePluginProject => 146,
+			Self::ClaudePluginUser => 145,
 			Self::CodexProject => 141,
 			Self::CodexUser => 140,
 			Self::GeminiProject => 121,
@@ -108,6 +114,7 @@ impl ConfigSourceKind {
 				| Self::Root
 				| Self::ClaudeProject
 				| Self::AgentPluginProject
+				| Self::ClaudePluginProject
 				| Self::CodexProject
 				| Self::GeminiProject
 				| Self::OpenCodeProject
