@@ -1,0 +1,87 @@
+---
+source: crates/ai/src/discovery/probe/characterization.rs
+expression: out
+---
+## complete first endpoint stops early
+> GET http://primary:4000/model_group/info [-] 
+{"provider":"lite-llm","route":"lite-llm/primary","wire_model":"claude-sonnet","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":{"native":{"features":1,"efforts":[],"minimum_budget_tokens":null,"maximum_budget_tokens":null}},"input_modalities":{"native":3},"image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":200000,"maximum_input_tokens":null,"maximum_output_tokens":64000,"maximum_batch":null},"declared_pricing":[{"unit":"mtok_input","nanos_usd":3000000000},{"unit":"mtok_output","nanos_usd":15000000000},{"unit":"mtok_cache_read","nanos_usd":300000000},{"unit":"mtok_cache_write","nanos_usd":3750000000}],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//model_group/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"gpt-4o","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unknown","input_modalities":{"native":3},"image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":16384,"maximum_batch":null},"declared_pricing":[{"unit":"mtok_input","nanos_usd":2500000000},{"unit":"mtok_output","nanos_usd":10000000000},{"unit":"mtok_cache_read","nanos_usd":1250000000},{"unit":"mtok_cache_write","nanos_usd":2500000000}],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//model_group/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## partial evidence walks every info endpoint
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v2/model/info [-] 
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"embed-large","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[{"unit":"mtok_input","nanos_usd":130000000},{"unit":"mtok_cache_read","nanos_usd":1000000},{"unit":"mtok_cache_write","nanos_usd":2000000}],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"gpt-4o","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unknown","input_modalities":{"native":1},"image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[{"unit":"mtok_input","nanos_usd":2500000000},{"unit":"mtok_output","nanos_usd":10000000000},{"unit":"mtok_cache_read","nanos_usd":1250000000},{"unit":"mtok_cache_write","nanos_usd":2500000000}],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v1/model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/primary","wire_model":"local-llama","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":{"operations":1,"chat":{"roles":"unknown","mid_session_roles":"unknown","tools":"unknown","structured_output":"unknown","grammar":"unknown","text_verbosity":"unknown","reasoning":"unsupported","input_modalities":"unknown","image_input":"unknown","hosted_tools":"unknown","prompt_caching":"unknown","service_tiers":"unknown","sampling":"unknown","safety":"unknown","determinism":"unknown","server_state":"unknown","logprobs":"unknown"},"embeddings":null,"image":null,"video":null,"speech":null,"transcription":null,"realtime":null,"search":null,"tokenization":null},"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[{"unit":"mtok_input","nanos_usd":100000000},{"unit":"mtok_output","nanos_usd":200000000},{"unit":"mtok_cache_read","nanos_usd":10000000},{"unit":"mtok_cache_write","nanos_usd":20000000}],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/primary","wire_model":"named-only","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[{"unit":"mtok_input","nanos_usd":1000000000000000},{"unit":"mtok_output","nanos_usd":2000000000000000},{"unit":"mtok_cache_read","nanos_usd":3000000000000000},{"unit":"mtok_cache_write","nanos_usd":4000000000000000}],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"openai/gpt-4.1","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//model_group/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## unavailable group endpoint seeds from v2
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v2/model/info [-] 
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"embed-large","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v2/model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"gpt-4o","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":16384,"maximum_batch":null},"declared_pricing":[{"unit":"mtok_output","nanos_usd":10000000000}],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v2/model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"late-newcomer","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v2/model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/primary","wire_model":"local-llama","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":8192,"maximum_input_tokens":null,"maximum_output_tokens":8192,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v2/model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"named-only","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v2/model/info","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## malformed info endpoints fall through
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v1/models [-] 
+> GET http://primary:4000/v2/model/info [-] 
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"gpt-4o","aliases":[],"display_name":"GPT-4o","declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"openai/gpt-4.1-mini","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/primary","wire_model":"my-local","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":32768,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## models fallback only
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v1/models [-] 
+> GET http://primary:4000/v2/model/info [-] 
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"gpt-4o","aliases":[],"display_name":"GPT-4o","declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/openai-responses","wire_model":"openai/gpt-4.1-mini","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+{"provider":"lite-llm","route":"lite-llm/primary","wire_model":"my-local","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":32768,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"lite-llm:http://primary:4000//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## models fallback malformed
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v1/models [-] 
+> GET http://primary:4000/v2/model/info [-] 
+error: protocol
+
+## models fallback invalid JSON
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v1/models [-] 
+> GET http://primary:4000/v2/model/info [-] 
+error: protocol
+
+## models fallback empty
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v1/models [-] 
+> GET http://primary:4000/v2/model/info [-] 
+(no rows)
+
+## nothing reachable
+> GET http://primary:4000/model/info [-] 
+> GET http://primary:4000/model_group/info [-] 
+> GET http://primary:4000/v1/model/info [-] 
+> GET http://primary:4000/v1/models [-] 
+> GET http://primary:4000/v2/model/info [-] 
+error: http_status
