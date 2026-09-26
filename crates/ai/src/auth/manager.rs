@@ -90,6 +90,32 @@ pub struct AuthControlHandle {
 }
 
 impl AuthControlHandle {
+	/// Control-only handle over durable credential and account state.
+	///
+	/// It carries no login engines and refuses refresh, so it serves offline
+	/// writers (the one-shot v1 importer run by `omp config import-v1`) that
+	/// persist accounts before any inference stack exists. A later production
+	/// stack over the same stores observes every account written through it.
+	pub fn offline(
+		catalog: Arc<Catalog>,
+		store: Arc<CredentialStore>,
+		accounts: AccountPool,
+	) -> Result<Self, super::CredentialBrokerError> {
+		let broker = CredentialBroker::system(&catalog, super::CredentialBrokerEngines::default())?;
+		let manager = AuthManager {
+			catalog,
+			store,
+			broker,
+			accounts,
+			affinity: None,
+			login: Arc::new(BTreeMap::new()),
+			refresh: Arc::new(OfflineRefresh),
+			sessions: Arc::new(Mutex::new(BTreeMap::new())),
+			provider_hooks: Arc::new(Mutex::new(ProviderResponseHooks::default())),
+		};
+		Ok(manager.control_handle())
+	}
+
 	/// Subscribes to future secret-free mutations of the canonical account pool.
 	pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AccountPoolEvent> {
 		self.manager.accounts.subscribe()
@@ -1295,6 +1321,16 @@ where
 
 	fn bind_provider_hooks(&self, hooks: ProviderResponseHooks) {
 		*self.hooks.lock() = hooks;
+	}
+}
+
+/// Refresh engine of an [`AuthControlHandle::offline`] handle: offline
+/// writers never renew credentials.
+struct OfflineRefresh;
+
+impl AuthRefreshEngine for OfflineRefresh {
+	fn refresh(&self, _account: AccountId) -> BoxFuture<'_, Result<AccountSummary, Error>> {
+		futures::future::ready(Err(auth_unavailable())).boxed()
 	}
 }
 

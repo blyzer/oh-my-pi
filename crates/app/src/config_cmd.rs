@@ -26,6 +26,9 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 	if let ConfigCommand::InitXdg { json } = command {
 		return init_xdg(data_dir, *json);
 	}
+	if let ConfigCommand::ImportV1 { dry_run, from, profile } = command {
+		return import_v1(&project, *dry_run, from.as_deref(), profile.as_deref());
+	}
 	if let ConfigCommand::Mcp { command } = command {
 		let user_root = omp_core::dirs::user_config_root().into_diagnostic()?;
 		return run_mcp(&user_root, &project, command);
@@ -63,7 +66,170 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 		},
 		ConfigCommand::InitXdg { .. } => unreachable!("XDG initialization returns before config"),
 		ConfigCommand::Mcp { .. } => unreachable!("MCP commands return before config composition"),
+		ConfigCommand::ImportV1 { .. } => unreachable!("v1 import returns before config"),
 	}
+}
+
+/// `omp config import-v1`: locates the v1 install, pairs its profiles with
+/// v2 profiles, runs every registered import step, and prints the report.
+fn import_v1(
+	project: &Path,
+	dry_run: bool,
+	from: Option<&Path>,
+	profile: Option<&str>,
+) -> miette::Result<()> {
+	use omp_driver::v1_import::{
+		CredentialAccess, ImportMode, ProfileSelection, V1Inputs, V1Source, V2Roots, plan, run,
+	};
+
+	let mut inputs = V1Inputs::from_process()
+		.ok_or_else(|| miette::miette!("HOME must be set to locate the v1 install"))?;
+	if let Some(from) = from {
+		if !from.is_dir() {
+			return Err(miette::miette!("--from {} is not a directory", from.display()));
+		}
+		inputs = inputs.with_explicit_root(from.to_owned());
+	}
+	let source = V1Source::new(inputs);
+	if !source.exists() {
+		println!("no v1 install at {}; nothing to import", source.base_root().display());
+		return Ok(());
+	}
+	let selection = match profile {
+		Some(profile) => {
+			let profile = omp_core::dirs::normalize_profile_name(profile).into_diagnostic()?;
+			if let Some(name) = &profile
+				&& !source.has_profile(name)
+			{
+				println!(
+					"no v1 profile {name} under {}; nothing to import",
+					source.base_root().display()
+				);
+				return Ok(());
+			}
+			ProfileSelection::Named(profile)
+		},
+		None => ProfileSelection::All,
+	};
+	let roots = V2Roots::from_process().into_diagnostic()?;
+	let pairs = plan(&source, &roots, &selection).into_diagnostic()?;
+	let report = if dry_run {
+		run(&pairs, ImportMode::DryRun, CredentialAccess::Offline(&Ctx::new()))
+	} else {
+		let ctx = crate::process_ctx(project)?;
+		run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&ctx))
+	};
+	print!("{}", render_v1_report(&report));
+	let failed = report.entries().any(|entry| {
+		matches!(
+			entry.outcome,
+			omp_driver::v1_import::ImportOutcome::NeedsAttention(
+				omp_driver::v1_import::Attention::Failed(_)
+			)
+		)
+	});
+	if failed {
+		return Err(miette::miette!("some v1 import steps failed; they retry on the next run"));
+	}
+	Ok(())
+}
+
+/// Renders a v1 import report for the terminal.
+fn render_v1_report(report: &omp_driver::v1_import::ImportReport) -> String {
+	use std::fmt::Write as _;
+
+	use omp_driver::v1_import::{Attention, ImportOutcome};
+
+	fn profile(name: Option<&Str>) -> &str {
+		name.map_or("default", Str::as_str)
+	}
+
+	let mut out = String::new();
+	for pair in &report.pairs {
+		let _ = writeln!(
+			out,
+			"v1 profile {} ({}) -> v2 profile {} ({})",
+			profile(pair.source_profile.as_ref()),
+			pair.source_root.display(),
+			profile(pair.target_profile.as_ref()),
+			pair.target_config.display(),
+		);
+		let _ = writeln!(out, "  agent dir    {}", pair.agent_dir.display());
+		for (category, root) in &pair.xdg_roots {
+			let category: &str = (*category).into();
+			let _ = writeln!(out, "  xdg {category:<8} {}", root.display());
+		}
+		for collision in &pair.collisions {
+			let _ = writeln!(
+				out,
+				"  warning: the v1 xdg {} root {} is shared with v2 ({}); it is left in place",
+				collision.category,
+				collision.v1.display(),
+				collision.v2.display(),
+			);
+		}
+		let _ = writeln!(out, "  inventory");
+		if pair.inventory.is_empty() {
+			let _ = writeln!(out, "    (nothing found)");
+		}
+		for (item, path, steps) in &pair.inventory {
+			let item: &str = (*item).into();
+			let _ = write!(out, "    {item:<24} {}", path.display());
+			if steps.is_empty() {
+				let _ = writeln!(out, "  (no importer yet)");
+			} else {
+				let _ = write!(out, "  <-");
+				for step in steps {
+					let _ = write!(out, " {step}");
+				}
+				out.push('\n');
+			}
+		}
+		let _ = writeln!(
+			out,
+			"  {}",
+			if report.dry_run {
+				"import (dry run: nothing written)"
+			} else {
+				"import"
+			}
+		);
+		for entry in &pair.entries {
+			let kind: &str = entry.outcome.kind().into();
+			let step: &str = entry.step.into();
+			let _ = write!(out, "    {kind:<17} {step:<12}");
+			if let Some(subject) = &entry.subject {
+				let _ = write!(out, " {subject}");
+			}
+			if let Some(path) = &entry.path {
+				let _ = write!(out, " {}", path.display());
+			}
+			match &entry.outcome {
+				ImportOutcome::Skipped(reason) => {
+					let _ = write!(out, ": {reason}");
+				},
+				ImportOutcome::NotMigratable(reason) => {
+					let _ = write!(out, ": {reason}");
+				},
+				ImportOutcome::NeedsAttention(Attention::Failed(error)) => {
+					let _ = write!(out, ": {error}");
+					let mut source = std::error::Error::source(error);
+					while let Some(cause) = source {
+						let _ = write!(out, ": {cause}");
+						source = cause.source();
+					}
+				},
+				ImportOutcome::NeedsAttention(attention) => {
+					let _ = write!(out, ": {attention}");
+				},
+				ImportOutcome::Imported
+				| ImportOutcome::WouldImport
+				| ImportOutcome::NothingToImport => {},
+			}
+			out.push('\n');
+		}
+	}
+	out
 }
 
 #[derive(Serialize)]

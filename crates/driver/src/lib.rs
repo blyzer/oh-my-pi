@@ -24,3 +24,4 @@ pub mod settings;
 pub mod share;
 pub mod subagent;
 pub mod telemetry_upload;
+pub mod v1_import;
