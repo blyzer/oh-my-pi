@@ -72,8 +72,8 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 
 /// `omp config import-v1`: locates the v1 install, pairs its profiles with
 /// v2 profiles, runs every registered import step, imports the current
-/// project's v1 settings, and prints the report. Other projects import their
-/// own settings the first time omp runs in them.
+/// project's v1 settings and agents, and prints the report. Other projects
+/// import their own the first time omp runs in them.
 fn import_v1(
 	project: &Path,
 	dry_run: bool,
@@ -82,7 +82,7 @@ fn import_v1(
 ) -> miette::Result<()> {
 	use omp_driver::v1_import::{
 		CredentialAccess, ImportMode, ImportReport, ProfileSelection, V1Inputs, V1Source, V2Roots,
-		import_project_assets, import_project_settings, plan, run,
+		import_project_agents, import_project_assets, import_project_settings, plan, run,
 	};
 
 	let mut inputs = V1Inputs::from_process()
@@ -127,6 +127,9 @@ fn import_v1(
 	report
 		.project
 		.extend(import_project_assets(project, &source, &roots, mode));
+	report
+		.project
+		.extend(import_project_agents(project, &source, &roots, mode));
 	print!("{}", render_v1_report(&report, project));
 	let failed = report.entries().any(|entry| {
 		matches!(

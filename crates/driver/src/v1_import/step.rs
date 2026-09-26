@@ -82,6 +82,8 @@ pub enum ImportStep {
 	/// v1-only `.omp/` files convert once per project
 	/// ([`super::import_project_assets`]).
 	SshHosts,
+	/// v1 custom agents `agents/*.md` into class cfgs and agent-scoped rules.
+	Agents,
 }
 
 impl ImportStep {
@@ -107,6 +109,7 @@ impl ImportStep {
 			Self::Secrets => V1Item::Secrets,
 			Self::Mcp => V1Item::Mcp,
 			Self::SshHosts => V1Item::Ssh,
+			Self::Agents => V1Item::Agents,
 		}
 	}
 
@@ -148,6 +151,7 @@ impl ImportStep {
 			| Self::Secrets
 			| Self::Mcp
 			| Self::SshHosts => super::assets::import(self, cx),
+			Self::Agents => super::agents::import_agents(cx),
 		}
 	}
 }
@@ -382,6 +386,9 @@ pub enum ImportError {
 	/// The v1 settings could not be imported.
 	#[error("could not import the settings")]
 	Settings(#[from] super::SettingsImportError),
+	/// A v1 custom agent could not be read or written.
+	#[error("could not import the custom agents")]
+	Agents(#[from] super::AgentsImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,

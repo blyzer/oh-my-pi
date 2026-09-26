@@ -48,17 +48,10 @@ pub fn import_project_assets(
 	{
 		return single(ImportOutcome::NothingToImport);
 	}
-	// Run from `$HOME` (or inside a v1 root), the project's `.omp/` is the v1
-	// install itself, which is never written.
-	let layout = source.layout(None);
-	let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-	let project_omp = canonical(&omp);
-	if [source.base_root(), layout.agent_dir()]
-		.into_iter()
-		.any(|v1| project_omp.starts_with(canonical(v1)))
-	{
+	if inside_v1_root(&omp, source) {
 		return single(ImportOutcome::Skipped(SkipReason::InsideV1Root));
 	}
+	let layout = source.layout(None);
 	let marker = project_assets_marker(project, roots);
 	if marker.exists() {
 		return single(ImportOutcome::Skipped(SkipReason::MarkerPresent));
@@ -79,6 +72,18 @@ pub fn import_project_assets(
 		));
 	}
 	entries
+}
+
+/// Whether the project's `omp` directory lies in a v1 root: run from `$HOME`
+/// (or inside a v1 root), the project's `.omp/` is the v1 install itself,
+/// which is never written.
+pub(in crate::v1_import) fn inside_v1_root(omp: &Path, source: &V1Source) -> bool {
+	let layout = source.layout(None);
+	let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+	let project_omp = canonical(omp);
+	[source.base_root(), layout.agent_dir()]
+		.into_iter()
+		.any(|v1| project_omp.starts_with(canonical(v1)))
 }
 
 /// The three conversions, each reported under the user step it mirrors. The

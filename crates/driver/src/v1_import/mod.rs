@@ -54,6 +54,7 @@
 //!    run writes nothing, a second run is a no-op, and the v1 tree is
 //!    byte-identical afterwards.
 
+mod agents;
 mod assets;
 mod auth_credentials;
 mod credentials;
@@ -68,6 +69,7 @@ mod tests;
 
 use std::path::Path;
 
+pub use agents::{AgentsImportError, import_project_agents, project_agents_marker};
 pub use assets::{AssetError, import_project_assets, project_assets_marker};
 pub use auth_credentials::CredentialsImportError;
 pub use locate::{
@@ -100,7 +102,8 @@ pub fn active_pair() -> Result<ImportPair, LocateError> {
 ///
 /// Runs every registered step for every v1 profile ([`ProfileSelection::All`]),
 /// idempotently through the markers, then imports `project`'s own v1 settings
-/// and v1-only `.omp/` files (once per project, [`import_project_settings`],
+/// and agents, and v1-only `.omp/` files (once per project,
+/// [`import_project_settings`], [`import_project_agents`],
 /// [`import_project_assets`]), and logs the report.
 /// Credential steps use the live store for the profile that owns `data_dir`;
 /// other profiles' credential steps wait, unmarked, for their own first run.
@@ -140,6 +143,9 @@ pub fn first_run(
 		report
 			.project
 			.extend(import_project_assets(project, &source, &roots, ImportMode::Apply));
+		report
+			.project
+			.extend(import_project_agents(project, &source, &roots, ImportMode::Apply));
 	}
 	report.log();
 	Some(report)

@@ -1,0 +1,509 @@
+//! `agents` step proofs over temporary homes, v1 trees, v2 roots, and
+//! projects. Nothing here reads the process environment or the real `~/.omp`
+//! / `~/.o2`.
+
+use std::{
+	collections::BTreeMap,
+	fs,
+	path::{Path, PathBuf},
+};
+
+use omp_core::Str;
+
+use super::super::*;
+use crate::{
+	cfg::CfgFiles,
+	discovery::rules::ActiveRules,
+	subagent::{AgentName, MAIN_AGENT, settings::child_ctx},
+};
+
+/// Every frontmatter mapping at once: a folded description, a legacy role
+/// reference with a thinking suffix, v1 tool aliases and `exec`, a tool v2
+/// lacks, `task` withheld by `spawns: none`, and two keys without a home.
+const REVIEWER: &str = concat!(
+	"---\n",
+	"name: reviewer\n",
+	"description: Reviews diffs\n",
+	"  for correctness\n",
+	"model: pi/slow:high\n",
+	"thinkingLevel: medium\n",
+	"tools: read, search, exec, context_notes, Task\n",
+	"spawns: none\n",
+	"output:\n",
+	"  type: object\n",
+	"blocking: true\n",
+	"---\n",
+	"You review code.\n",
+	"\n",
+	"Be strict.\n",
+);
+
+const REVIEWER_CFG: &str = concat!(
+	"// Reviews diffs for correctness\n",
+	"ai_model @slow:high\n",
+	"ai_thinking medium\n",
+	"sv_tools [read grep eval bash yield hub]\n",
+);
+
+const REVIEWER_RULE: &str = concat!(
+	"---\n",
+	"alwaysApply: true\n",
+	"agents:\n",
+	"- reviewer\n",
+	"---\n",
+	"You review code.\n",
+	"\n",
+	"Be strict.\n",
+);
+
+fn write(path: &Path, contents: &str) {
+	fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+	fs::write(path, contents).expect("write");
+}
+
+fn read(path: &Path) -> String {
+	fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// Every file (with its bytes) and directory under `root`.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+	let mut tree = BTreeMap::new();
+	let mut pending = vec![root.to_owned()];
+	while let Some(directory) = pending.pop() {
+		let Ok(entries) = fs::read_dir(&directory) else {
+			continue;
+		};
+		for entry in entries {
+			let path = entry.expect("entry").path();
+			if path.is_dir() {
+				tree.insert(path.clone(), None);
+				pending.push(path);
+			} else {
+				tree.insert(path.clone(), Some(fs::read(&path).expect("read")));
+			}
+		}
+	}
+	tree
+}
+
+/// A scratch home with a v1 install, v2 roots beside it, and a project.
+struct Fixture {
+	root: tempfile::TempDir,
+}
+
+impl Fixture {
+	fn new() -> Self {
+		Self { root: tempfile::tempdir().expect("scratch") }
+	}
+
+	fn home(&self) -> PathBuf {
+		self.root.path().join("home")
+	}
+
+	fn omp(&self) -> PathBuf {
+		self.home().join(".omp")
+	}
+
+	/// The default profile's v1 `agents/` directory.
+	fn agents(&self) -> PathBuf {
+		self.omp().join("agent/agents")
+	}
+
+	fn project(&self) -> PathBuf {
+		self.root.path().join("project")
+	}
+
+	fn roots(&self) -> V2Roots {
+		let root = self.root.path();
+		V2Roots {
+			config_dir:     root.join("o2"),
+			data_dir:       root.join("share/omp"),
+			state_dir:      root.join("state/omp"),
+			cache_dir:      root.join("cache/omp"),
+			active_profile: None,
+		}
+	}
+
+	fn config(&self) -> PathBuf {
+		self.roots().config_dir
+	}
+
+	fn source(&self) -> V1Source {
+		V1Source::new(V1Inputs { home: self.home(), ..V1Inputs::default() })
+	}
+
+	fn run(&self, mode: ImportMode) -> ImportReport {
+		let pairs = plan(&self.source(), &self.roots(), &ProfileSelection::All).expect("plan");
+		run(&pairs, mode, CredentialAccess::Offline(&omp_con::Ctx::new()))
+	}
+
+	/// The rules a session in the project admits.
+	fn rules(&self, config_root: &Path) -> ActiveRules {
+		fs::create_dir_all(self.project()).expect("project");
+		ActiveRules::discover(&self.project(), &self.home(), config_root)
+	}
+}
+
+/// The agents step's entries: subject and outcome class.
+fn agents<'a>(
+	entries: impl IntoIterator<Item = &'a ImportEntry>,
+) -> Vec<(Option<&'a str>, OutcomeKind)> {
+	entries
+		.into_iter()
+		.filter(|entry| entry.step == ImportStep::Agents)
+		.map(|entry| (entry.subject.as_deref(), entry.outcome.kind()))
+		.collect()
+}
+
+fn report_agents(report: &ImportReport) -> Vec<(Option<&str>, OutcomeKind)> {
+	agents(report.entries())
+}
+
+#[test]
+fn a_dry_run_writes_nothing_and_an_import_runs_once_leaving_v1_byte_identical() {
+	let fixture = Fixture::new();
+	write(&fixture.agents().join("reviewer.md"), REVIEWER);
+	let before = snapshot(fixture.root.path());
+
+	let dry = fixture.run(ImportMode::DryRun);
+	assert_eq!(snapshot(fixture.root.path()), before, "a dry run must not write anywhere");
+	assert!(report_agents(&dry).contains(&(Some("reviewer"), OutcomeKind::WouldImport)));
+
+	let v1_before = snapshot(&fixture.omp());
+	let applied = fixture.run(ImportMode::Apply);
+	assert!(report_agents(&applied).contains(&(Some("reviewer"), OutcomeKind::Imported)));
+	assert_eq!(snapshot(&fixture.omp()), v1_before, "the v1 tree must stay byte-identical");
+	assert!(ImportStep::Agents.marker(&fixture.config()).is_set());
+	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
+
+	let v2_after = snapshot(&fixture.config());
+	let again = fixture.run(ImportMode::Apply);
+	assert_eq!(report_agents(&again), [(None, OutcomeKind::Skipped)]);
+	assert!(matches!(
+		again
+			.entries()
+			.find(|entry| entry.step == ImportStep::Agents)
+			.map(|entry| &entry.outcome),
+		Some(ImportOutcome::Skipped(SkipReason::MarkerPresent))
+	));
+	assert_eq!(snapshot(&fixture.config()), v2_after, "a second run is a no-op");
+	assert_eq!(snapshot(&fixture.omp()), v1_before);
+}
+
+#[test]
+fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
+	let fixture = Fixture::new();
+	write(&fixture.agents().join("reviewer.md"), REVIEWER);
+	write(
+		&fixture.agents().join("scout.md"),
+		concat!(
+			"---\n",
+			"name: scout\n",
+			"description: Finds things\n",
+			"model: \"@task\"\n",
+			"thinkingLevel: HIGH\n",
+			"tools: [read]\n",
+			"spawns: \"*\"\n",
+			"---\n",
+			"Scout the tree.\n",
+		),
+	);
+
+	let report = fixture.run(ImportMode::Apply);
+
+	assert_eq!(report_agents(&report), [
+		(Some("reviewer"), OutcomeKind::Imported),
+		(Some("reviewer: tool context_notes"), OutcomeKind::NotMigratable),
+		(Some("reviewer: blocking"), OutcomeKind::NotMigratable),
+		(Some("reviewer: output"), OutcomeKind::NotMigratable),
+		(Some("scout"), OutcomeKind::Imported),
+	]);
+	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
+	// `spawns: "*"` advertises `task`; `@task` follows the session model.
+	assert_eq!(
+		read(&fixture.config().join("scout.cfg")),
+		concat!(
+			"// Finds things\n",
+			"// v1 model @task follows the session model\n",
+			"ai_thinking high\n",
+			"sv_tools [read task yield hub]\n",
+		)
+	);
+
+	// The spawner's own loader runs the class cfg over the parent's values.
+	let parent = omp_con::Ctx::new();
+	parent
+		.run("ai_model parent/model; ai_thinking low")
+		.expect("parent values");
+	let files = CfgFiles::with_roots(fixture.config(), None);
+	let reviewer = child_ctx(&parent, &files, "reviewer").expect("reviewer child");
+	assert_eq!(omp_agent::AI_MODEL.get(&reviewer).as_str(), "@slow:high");
+	assert_eq!(omp_agent::AI_THINKING.get(&reviewer).as_str(), "medium");
+	assert_eq!(omp_agent::SV_TOOLS.get(&reviewer), ["read", "grep", "eval", "bash", "yield", "hub"]);
+	let scout = child_ctx(&parent, &files, "scout").expect("scout child");
+	assert_eq!(omp_agent::AI_MODEL.get(&scout).as_str(), "parent/model");
+	assert_eq!(omp_agent::SV_TOOLS.get(&scout), ["read", "task", "yield", "hub"]);
+}
+
+#[test]
+fn the_body_becomes_a_rule_admitted_only_for_its_class() {
+	let fixture = Fixture::new();
+	write(&fixture.agents().join("reviewer.md"), REVIEWER);
+
+	fixture.run(ImportMode::Apply);
+
+	let rule_path = fixture.config().join("agent/rules/agent-reviewer.md");
+	assert_eq!(read(&rule_path), REVIEWER_RULE);
+	let rules = fixture.rules(&fixture.config());
+	assert!(rules.warnings.is_empty(), "{:?}", rules.warnings);
+	let rule = rules.get("agent-reviewer").expect("rule admitted");
+	assert!(rule.always_apply);
+	assert_eq!(rule.agents, [Str::new_static("reviewer")]);
+	assert_eq!(rule.content.as_str(), "You review code.\n\nBe strict.\n");
+	let names = |agent: &str| {
+		rules
+			.for_agent(AgentName::from_ref(agent))
+			.map(|rule| rule.name.as_str().to_owned())
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(names("reviewer"), ["agent-reviewer"]);
+	assert!(
+		names(MAIN_AGENT.as_str()).is_empty(),
+		"the main session must not carry the agent's body"
+	);
+	assert_eq!(
+		rules
+			.prompt_facts(AgentName::from_ref("reviewer"))
+			.always_apply
+			.len(),
+		1
+	);
+	assert!(rules.prompt_facts(MAIN_AGENT).always_apply.is_empty());
+}
+
+#[test]
+fn unknown_tools_unmappable_models_and_keys_are_reported() {
+	let fixture = Fixture::new();
+	write(
+		&fixture.agents().join("odd.md"),
+		concat!(
+			"---\n",
+			"name: odd\n",
+			"description: Odd one\n",
+			"model: [\"@custom\", \"anthropic/claude-opus-5\"]\n",
+			"thinkingLevel: auto\n",
+			"tools: [read, mcp__github_search, new_context]\n",
+			"spawns: scout, reviewer\n",
+			"autoloadSkills: [rust]\n",
+			"prewalk: true\n",
+			"---\n",
+			"Be odd.\n",
+		),
+	);
+	write(
+		&fixture.agents().join("plain.md"),
+		concat!(
+			"---\n",
+			"name: plain\n",
+			"description: Plain\n",
+			"spawns: none\n",
+			"model: \"pi/unknown-role\"\n",
+			"---\n",
+		),
+	);
+	write(&fixture.agents().join("broken.md"), "no frontmatter at all\n");
+
+	let report = fixture.run(ImportMode::Apply);
+
+	assert_eq!(report_agents(&report), [
+		(Some("broken.md: no readable v1 agent frontmatter"), OutcomeKind::NotMigratable),
+		(Some("odd"), OutcomeKind::Imported),
+		(Some("odd: model @custom"), OutcomeKind::NotMigratable),
+		(Some("odd: model fallback anthropic/claude-opus-5"), OutcomeKind::NotMigratable),
+		(Some("odd: thinkingLevel auto"), OutcomeKind::NotMigratable),
+		(Some("odd: spawns scout,reviewer"), OutcomeKind::NotMigratable),
+		(Some("odd: tool mcp__github_search"), OutcomeKind::NotMigratable),
+		(Some("odd: tool new_context"), OutcomeKind::NotMigratable),
+		(Some("odd: autoloadSkills"), OutcomeKind::NotMigratable),
+		(Some("odd: prewalk"), OutcomeKind::NotMigratable),
+		(Some("plain"), OutcomeKind::Imported),
+		(Some("plain: model pi/unknown-role"), OutcomeKind::NotMigratable),
+		(Some("plain: spawns none without a tools list"), OutcomeKind::NotMigratable),
+	]);
+	// A spawn allowlist still lets the class delegate.
+	assert_eq!(
+		read(&fixture.config().join("odd.cfg")),
+		"// Odd one\nsv_tools [read task yield hub]\n"
+	);
+	assert_eq!(read(&fixture.config().join("plain.cfg")), "// Plain\n");
+	assert!(
+		!fixture.config().join("agent/rules/agent-plain.md").exists(),
+		"an empty body writes no rule"
+	);
+	assert!(ImportStep::Agents.marker(&fixture.config()).is_set());
+}
+
+#[test]
+fn a_different_v2_file_or_a_built_in_class_is_a_conflict_that_keeps_v2() {
+	let fixture = Fixture::new();
+	write(&fixture.agents().join("reviewer.md"), REVIEWER);
+	write(
+		&fixture.agents().join("task.md"),
+		"---\nname: task\ndescription: Overrides the default\n---\nBody.\n",
+	);
+	write(
+		&fixture.agents().join("twin.md"),
+		"---\nname: twin\ndescription: Twin\nthinkingLevel: low\n---\nTwin body.\n",
+	);
+	let mine = "// my own reviewer\nai_model @smol\n";
+	write(&fixture.config().join("reviewer.cfg"), mine);
+	// Identical content counts as already present; the missing rule lands.
+	write(&fixture.config().join("twin.cfg"), "// Twin\nai_thinking low\n");
+
+	let report = fixture.run(ImportMode::Apply);
+
+	let reviewer_cfg = fixture.config().join("reviewer.cfg");
+	let differs = format!("reviewer: {}", reviewer_cfg.display());
+	assert_eq!(report_agents(&report), [
+		(Some(differs.as_str()), OutcomeKind::NeedsAttention),
+		(Some("task: built-in v2 agent class"), OutcomeKind::NeedsAttention),
+		(Some("twin"), OutcomeKind::Imported),
+	]);
+	assert!(
+		report
+			.entries()
+			.filter(|entry| entry.step == ImportStep::Agents)
+			.take(2)
+			.all(|entry| matches!(entry.outcome, ImportOutcome::NeedsAttention(Attention::Conflict)))
+	);
+	assert_eq!(read(&reviewer_cfg), mine, "v2's own class cfg is kept");
+	let rules = fixture.config().join("agent/rules");
+	assert!(!rules.join("agent-reviewer.md").exists(), "a colliding agent writes nothing");
+	assert!(!fixture.config().join("task.cfg").exists());
+	assert!(!rules.join("agent-task.md").exists());
+	assert!(rules.join("agent-twin.md").is_file());
+}
+
+#[test]
+fn project_agents_import_into_the_project_once() {
+	let fixture = Fixture::new();
+	let project = fixture.project();
+	let omp = project.join(".omp");
+	write(
+		&omp.join("agents/helper.md"),
+		"---\nname: helper\ndescription: Project helper\ntools: grep\n---\nHelp here.\n",
+	);
+	let roots = fixture.roots();
+	let before = snapshot(fixture.root.path());
+
+	let dry = import_project_agents(&project, &fixture.source(), &roots, ImportMode::DryRun);
+	assert_eq!(agents(&dry), [(Some("helper"), OutcomeKind::WouldImport)]);
+	assert_eq!(snapshot(fixture.root.path()), before, "a dry run must not write anywhere");
+
+	let v1_before = snapshot(&omp.join("agents"));
+	let applied = import_project_agents(&project, &fixture.source(), &roots, ImportMode::Apply);
+	assert_eq!(agents(&applied), [(Some("helper"), OutcomeKind::Imported)]);
+	assert_eq!(read(&omp.join("helper.cfg")), "// Project helper\nsv_tools [grep yield hub]\n");
+	assert_eq!(snapshot(&omp.join("agents")), v1_before);
+	let marker = project_agents_marker(&project, &roots);
+	assert!(marker.starts_with(&roots.state_dir), "the marker stays out of the repository");
+	assert!(marker.is_file());
+
+	// The project rule is admitted for the class from the project's own
+	// `.omp/rules`, and the spawner reads the project class cfg.
+	let rules = fixture.rules(&fixture.config());
+	let names = |agent: &str| {
+		rules
+			.for_agent(AgentName::from_ref(agent))
+			.map(|rule| rule.name.as_str().to_owned())
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(names("helper"), ["agent-helper"]);
+	assert!(names(MAIN_AGENT.as_str()).is_empty());
+	let files = CfgFiles::with_roots(fixture.config(), Some(omp));
+	let child = child_ctx(&omp_con::Ctx::new(), &files, "helper").expect("helper child");
+	assert_eq!(omp_agent::SV_TOOLS.get(&child), ["grep", "yield", "hub"]);
+
+	let project_after = snapshot(&project);
+	let again = import_project_agents(&project, &fixture.source(), &roots, ImportMode::Apply);
+	assert_eq!(agents(&again), [(None, OutcomeKind::Skipped)]);
+	assert_eq!(snapshot(&project), project_after, "a second run is a no-op");
+
+	let empty = fixture.root.path().join("empty-project");
+	fs::create_dir_all(&empty).expect("empty project");
+	let nothing = import_project_agents(&empty, &fixture.source(), &roots, ImportMode::Apply);
+	assert_eq!(agents(&nothing), [(None, OutcomeKind::NothingToImport)]);
+	assert!(!project_agents_marker(&empty, &roots).exists());
+
+	// Run from `$HOME`, the project's `.omp/` is the v1 install: never written.
+	write(
+		&fixture.omp().join("agents/stray.md"),
+		"---\nname: stray\ndescription: Stray\n---\nBody.\n",
+	);
+	let v1_root = snapshot(&fixture.omp());
+	let inside =
+		import_project_agents(&fixture.home(), &fixture.source(), &roots, ImportMode::Apply);
+	assert!(matches!(inside.as_slice(), [ImportEntry {
+		outcome: ImportOutcome::Skipped(SkipReason::InsideV1Root),
+		..
+	}]));
+	assert_eq!(snapshot(&fixture.omp()), v1_root);
+}
+
+#[test]
+fn a_named_profile_imports_into_its_v2_namesake() {
+	let fixture = Fixture::new();
+	write(
+		&fixture.omp().join("profiles/work/agent/agents/lead.md"),
+		"---\nname: lead\ndescription: Work lead\nthinkingLevel: xhigh\n---\nLead the work.\n",
+	);
+	fs::create_dir_all(fixture.omp().join("agent")).expect("default profile");
+
+	let report = fixture.run(ImportMode::Apply);
+
+	assert_eq!(agents(&report.pairs[0].entries), [(None, OutcomeKind::NothingToImport)]);
+	assert_eq!(agents(&report.pairs[1].entries), [(Some("lead"), OutcomeKind::Imported)]);
+	let work = fixture.config().join("profiles/work");
+	assert_eq!(read(&work.join("lead.cfg")), "// Work lead\nai_thinking xhigh\n");
+	assert!(work.join("agent/rules/agent-lead.md").is_file());
+	assert!(!fixture.config().join("lead.cfg").exists());
+	assert!(ImportStep::Agents.marker(&fixture.config()).is_set());
+	assert!(ImportStep::Agents.marker(&work).is_set());
+	let rules = fixture.rules(&work);
+	assert_eq!(
+		rules
+			.for_agent(AgentName::from_ref("lead"))
+			.map(|rule| rule.name.as_str())
+			.collect::<Vec<_>>(),
+		["agent-lead"]
+	);
+}
+
+#[test]
+fn model_patterns_follow_v2_selector_rules() {
+	use super::{ModelMapping, map_model};
+	let selector = |text: &'static str| ModelMapping::Selector {
+		selector: Str::new_static(text),
+		thinking: None,
+	};
+	assert_eq!(map_model("@smol"), selector("@smol"));
+	assert_eq!(map_model("pi/slow"), selector("@slow"));
+	assert_eq!(map_model("*:high"), selector("@default:high"));
+	assert_eq!(
+		map_model("anthropic/claude-opus-5:xhigh"),
+		selector("anthropic/claude-opus-5:xhigh")
+	);
+	assert_eq!(map_model("opus:inherit"), selector("opus"));
+	assert_eq!(map_model("opus:off"), ModelMapping::Selector {
+		selector: Str::new_static("opus"),
+		thinking: Some("off"),
+	});
+	for inherited in ["*", "default", "@default", "pi/default", "@task", "pi/task"] {
+		assert_eq!(map_model(inherited), ModelMapping::Inherit, "{inherited}");
+	}
+	assert_eq!(map_model("@my-role"), ModelMapping::Unmappable);
+	assert_eq!(map_model("pi/nope"), ModelMapping::Unmappable);
+	assert_eq!(map_model("@smol:bogus"), ModelMapping::Unmappable);
+	assert_eq!(map_model("@plan:auto"), selector("@plan:auto"));
+	assert_eq!(map_model("bad::selector"), ModelMapping::Unmappable);
+}

@@ -151,7 +151,7 @@ fn file_name(name: &str) -> String {
 	format!("{}.cfg", name.trim_end_matches(".cfg"))
 }
 
-fn validate_name(name: &str) -> ConResult<()> {
+pub(crate) fn validate_name(name: &str) -> ConResult<()> {
 	let stem = name.trim_end_matches(".cfg");
 	let valid = !stem.is_empty()
 		&& stem != "."
