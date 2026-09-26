@@ -55,6 +55,7 @@
 //!    byte-identical afterwards.
 
 mod assets;
+mod auth_credentials;
 mod credentials;
 pub mod locate;
 mod models;
@@ -68,6 +69,7 @@ mod tests;
 use std::path::Path;
 
 pub use assets::{AssetError, import_project_assets, project_assets_marker};
+pub use auth_credentials::CredentialsImportError;
 pub use locate::{
 	ImportPair, ItemShape, LocateError, ProfileSelection, V1Inputs, V1Item, V1Layout, V1Source,
 	V2Roots, V2Target, XdgCategory, XdgCollision, plan,
