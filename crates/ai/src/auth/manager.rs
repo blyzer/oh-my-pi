@@ -43,7 +43,7 @@ use crate::{
 	call::{AccountRoutingContext, AuthInput, AuthMethod, AuthRequest, LoginRequest},
 	codec::{CredentialDisabledObservation, ProviderRefreshReason, ProviderResponseHooks},
 	error::{Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
-	id::{AccountId, LoginSessionId, PrincipalId, RegionId},
+	id::{AccountId, LoginSessionId, PrincipalId, ProjectId, RegionId},
 	receipt::ExecutionReceipt,
 	session::CredentialAffinityDigest,
 };
@@ -78,6 +78,10 @@ pub struct OAuthControlImport {
 	pub refresh_token: SecretString,
 	/// Optional absolute access-token expiration.
 	pub expires_at_ms: Option<u64>,
+	/// Cloud project a provider routes every request through, when the login
+	/// that minted the grant discovered one (Cloud Code Assist). It becomes
+	/// the account's routing project, as an interactive login's does.
+	pub project:       Option<ProjectId>,
 }
 
 /// Narrow control-plane handle over the live authentication manager.
@@ -191,6 +195,17 @@ impl AuthControlHandle {
 			.identity
 			.unwrap_or_else(|| Str::from(import.principal.as_str()));
 		let account = AccountId::from(format!("{}:{identity}", import.provider));
+		// Routing an interactive login derives from its token set: the
+		// workspace residency claim of the access token, and the project.
+		let routing = AccountRoutingContext {
+			project: import.project,
+			region: import
+				.access_token
+				.as_ref()
+				.and_then(|token| super::oauth::codex_residency(token.expose_secret()))
+				.map(RegionId::new),
+			..AccountRoutingContext::default()
+		};
 		let imported_at = SystemTime::now();
 		let expires_at = match import.expires_at_ms {
 			Some(millis) => UNIX_EPOCH
@@ -212,14 +227,22 @@ impl AuthControlHandle {
 				imported_at,
 				origin: CredentialOrigin::Persistent,
 			})?;
-		let record =
+		let mut record =
 			self.account_record(account, import.principal, import.provider, metadata.generation);
+		record.routing = routing;
 		self
 			.manager
 			.accounts
 			.upsert(record.clone())
 			.map_err(|_| StoreError::AccountState)?;
 		Ok((metadata, record))
+	}
+
+	/// The encrypted store this handle writes, for control-plane importers
+	/// that persist records in a format this crate does not own (MCP OAuth
+	/// grants, which the environment host encodes).
+	pub const fn credential_store(&self) -> &Arc<CredentialStore> {
+		&self.manager.store
 	}
 
 	/// Enables or disables an account in the one durable account pool.
@@ -1709,6 +1732,7 @@ impl AuthManager {
 						access_token: Some(credential.secret),
 						refresh_token,
 						expires_at_ms: credential.expires_at_ms,
+						project: None,
 					})
 					.map_err(auth_store_error)?;
 				AccountSummary {

@@ -53,6 +53,9 @@ pub enum ImportStep {
 	ModelsKeys,
 	/// v1 `config.yml` into `config.cfg` (and `subagent.cfg`).
 	Settings,
+	/// v1 `agent.db` logins (API keys, OAuth, MCP OAuth) into the encrypted
+	/// credential store.
+	Credentials,
 	/// v1 `history.db` prompts merged into `<data>/history.db`.
 	History,
 	/// v1 `install-id` into `<data>/install-id`, unless v2 has its own.
@@ -77,6 +80,7 @@ impl ImportStep {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
 			Self::Settings => V1Item::Settings,
+			Self::Credentials => V1Item::AgentDb,
 			Self::History => V1Item::HistoryDb,
 			Self::InstallId => V1Item::InstallId,
 			Self::Mnemopi => V1Item::MnemopiMemory,
@@ -88,7 +92,7 @@ impl ImportStep {
 	/// Whether applying this step writes credentials.
 	#[must_use]
 	pub const fn needs_credentials(self) -> bool {
-		matches!(self, Self::ModelsKeys)
+		matches!(self, Self::ModelsKeys | Self::Credentials)
 	}
 
 	/// This step's marker in a v2 profile configuration root.
@@ -105,6 +109,7 @@ impl ImportStep {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
 			Self::Settings => super::settings::import_settings(cx),
+			Self::Credentials => super::auth_credentials::import_credentials(cx),
 			Self::History => super::data::history::import(cx),
 			Self::InstallId => super::data::install_id::import(cx),
 			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
@@ -374,4 +379,7 @@ pub enum ImportError {
 	/// The credential broker could not be composed over the catalog.
 	#[error("could not compose the credential broker")]
 	CredentialBroker(#[from] omp_ai::auth::CredentialBrokerError),
+	/// v1 `agent.db` credentials could not be read or stored.
+	#[error("could not import the v1 credentials")]
+	Credentials(#[from] super::CredentialsImportError),
 }
