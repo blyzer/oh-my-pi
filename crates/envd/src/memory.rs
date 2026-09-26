@@ -142,6 +142,13 @@ pub fn prompt_snapshot(
 	})
 }
 
+/// The memory data directory [`start`] gives a runtime for one project's
+/// environment state directory (`<data>/projects/<id>`).
+#[must_use]
+pub fn memory_data_dir(state_dir: &Path) -> PathBuf {
+	state_dir.join("memory")
+}
+
 /// Constructs and registers one runtime from native settings and the
 /// Environment's immutable VCS snapshot. Memory never probes Git:
 /// `snapshot.primary_root` is the sole project-bank identity,
@@ -162,7 +169,7 @@ pub fn start(
 	let session_id = session_id.into();
 	let runtime = MemoryRuntime::start(RuntimeStart {
 		session_id: session_id.clone(),
-		data_dir: data_dir.join("memory"),
+		data_dir: memory_data_dir(data_dir),
 		workspace_root: workspace_root.into(),
 		canonical_primary_root: snapshot.and_then(|snapshot| snapshot.primary_root.clone()),
 		backend,

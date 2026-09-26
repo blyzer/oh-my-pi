@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_stream::stream;
 use futures::Stream;
 use omp_core::{Str, StrMut, sf};
-use omp_memory::MemoryRuntime;
+use omp_memory::{MemoryRuntime, runtime::SaveOutcome};
 use omp_tool::{
 	ArgIssue, ArgIssueKind, CommitError, Constraint, DocEffects, Effects, Ev, IncomingParams,
 	ParamError, Part, PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
@@ -170,6 +170,30 @@ pub fn spec() -> ToolSpec {
 	}
 }
 
+/// Stores one lesson in `memory`'s write bank as the record `learn@1` writes:
+/// a user-stated working-memory fact tagged `coding-agent-learn`, with
+/// `context` kept as the lesson's source context.
+///
+/// Every lesson writer goes through here (the device and the v1 importer), so
+/// they cannot drift apart.
+///
+/// # Errors
+///
+/// Returns the memory failure; an inactive runtime stores nothing and reports
+/// it in the outcome instead.
+pub fn retain_lesson(
+	memory: &MemoryRuntime,
+	lesson: &str,
+	context: Option<&str>,
+) -> omp_memory::Result<SaveOutcome> {
+	memory.save(lesson, LESSON_SOURCE, LESSON_IMPORTANCE, context)
+}
+
+/// Source label of every stored lesson.
+const LESSON_SOURCE: &str = "coding-agent-learn";
+/// Importance of every stored lesson.
+const LESSON_IMPORTANCE: f64 = 0.8;
+
 /// Creates `learn@1` over one active Mnemopi runtime and managed-skill
 /// authority.
 pub fn tool<A: ManagedSkillAuthority>(
@@ -207,12 +231,9 @@ impl<A: ManagedSkillAuthority> Tool for LearnTool<A> {
 				yield commit_event(error);
 				return;
 			}
-			let memory_id = if let Ok(outcome) = self.memory.save(
-				lesson.as_str(),
-				"coding-agent-learn",
-				0.8,
-				params.context.as_deref(),
-			) { if let Some(id) = outcome.id { id } else { yield done(Err(Fault::Memory)); return; } } else { yield done(Err(Fault::Memory)); return; };
+			let memory_id = if let Ok(outcome) =
+				retain_lesson(&self.memory, lesson.as_str(), params.context.as_deref())
+			{ if let Some(id) = outcome.id { id } else { yield done(Err(Fault::Memory)); return; } } else { yield done(Err(Fault::Memory)); return; };
 			let Some(skill) = params.skill else {
 				yield done(Ok(LearnOutcome {
 					memory_id,

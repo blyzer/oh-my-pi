@@ -138,6 +138,11 @@ pub enum V1Item {
 	Commands,
 	/// Custom agents `agent/agents/`.
 	Agents,
+	/// Memory root `memories/` (XDG state): the `local` backend's per-project
+	/// `--<encoded cwd>--/learned.md` lessons, beside `mnemopi/`.
+	Memories,
+	/// Usage statistics database `stats.db` (XDG data).
+	StatsDb,
 }
 
 /// Base a v1 item hangs off.
@@ -225,6 +230,10 @@ impl V1Item {
 			Self::TitleSystemMd => (Anchor::Agent, &["TITLE_SYSTEM.md"][..], ItemShape::File),
 			Self::Commands => (Anchor::Agent, &["commands"][..], ItemShape::Directory),
 			Self::Agents => (Anchor::Agent, &["agents"][..], ItemShape::Directory),
+			Self::Memories => {
+				(Anchor::AgentXdg(XdgCategory::State), &["memories"][..], ItemShape::Directory)
+			},
+			Self::StatsDb => (Anchor::RootXdg(XdgCategory::Data), &["stats.db"][..], ItemShape::File),
 		};
 		ItemSpec {
 			anchor,

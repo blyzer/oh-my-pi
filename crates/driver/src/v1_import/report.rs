@@ -42,6 +42,13 @@ pub enum SkipReason {
 	/// profile's own first run (or `omp config import-v1`).
 	#[strum(to_string = "waits for that profile's first run or `omp config import-v1`")]
 	WaitsForProfile,
+	/// v1 and v2 resolve to the same file (a shared XDG root), so there is
+	/// nothing to copy.
+	#[strum(to_string = "v1 and v2 share this file")]
+	SharedWithV2,
+	/// The v1 data belongs to a project directory that no longer exists.
+	#[strum(to_string = "the project directory no longer exists")]
+	ProjectMissing,
 }
 
 /// Why v1 data cannot move to v2.
@@ -61,6 +68,15 @@ pub enum Attention {
 		to_string = "the v1 key names a variable or command; set OMP_<PROVIDER>_API_KEY or /login"
 	)]
 	KeyNeedsEnvironment,
+	/// Lessons were imported into Mnemopi, but the profile's memory backend is
+	/// not Mnemopi.
+	#[strum(to_string = "enable `ai_memory_backend mnemopi` to use them")]
+	EnableMnemopi,
+	/// A copied Mnemopi store belongs to no single v2 project (v1's shared
+	/// bank, or a bank written from several directories).
+	#[strum(to_string = "no v2 project owns this Mnemopi store; point `ai_mnemopi_db_path` at the \
+	                     copied `mnemopi.db` to recall it")]
+	MnemopiStoreUnscoped,
 	/// The step failed; nothing it would have written is marked done, so the
 	/// next run retries.
 	#[strum(to_string = "import failed")]

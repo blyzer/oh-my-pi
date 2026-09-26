@@ -55,6 +55,7 @@
 //!    byte-identical afterwards.
 
 mod credentials;
+mod data;
 pub mod locate;
 mod models;
 pub mod report;
@@ -65,6 +66,7 @@ mod tests;
 
 use std::path::Path;
 
+pub use data::DataImportError;
 pub use locate::{
 	ImportPair, ItemShape, LocateError, ProfileSelection, V1Inputs, V1Item, V1Layout, V1Source,
 	V2Roots, V2Target, XdgCategory, XdgCollision, plan,

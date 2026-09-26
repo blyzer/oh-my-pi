@@ -279,11 +279,7 @@ impl MemoryRuntime {
 			configured_bank:        settings.bank.as_deref(),
 			scoping:                settings.scoping,
 		})?;
-		let db_dir = settings
-			.db_path
-			.as_deref()
-			.and_then(Path::parent)
-			.map_or_else(|| input.data_dir.join("mnemopi"), Path::to_path_buf);
+		let db_dir = database_dir(&input.data_dir, &settings);
 		let retain_path =
 			selected_database_path(&db_dir, settings.db_path.as_deref(), &scope.global, &scope.retain);
 		let retain = BankStore::open(retain_path, scope.retain.clone(), scope.identity_root.clone())?
@@ -1039,6 +1035,17 @@ impl RuntimeRegistry {
 			runtimes.remove(session_id);
 		}
 	}
+}
+
+/// The directory holding a runtime's bank databases: the configured primary
+/// database's directory, else `<memory data dir>/mnemopi`.
+#[must_use]
+pub fn database_dir(data_dir: &Path, settings: &MnemopiSettings) -> PathBuf {
+	settings
+		.db_path
+		.as_deref()
+		.and_then(Path::parent)
+		.map_or_else(|| data_dir.join("mnemopi"), Path::to_path_buf)
 }
 
 fn selected_database_path(

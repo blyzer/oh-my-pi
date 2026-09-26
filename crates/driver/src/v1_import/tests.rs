@@ -86,9 +86,11 @@ fn control(root: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
 	(control, store)
 }
 
+/// The model steps' outcomes; later steps prove their own.
 fn outcomes(report: &ImportReport) -> Vec<(ImportStep, Option<&str>, OutcomeKind)> {
 	report
 		.entries()
+		.filter(|entry| matches!(entry.step, ImportStep::Models | ImportStep::ModelsKeys))
 		.map(|entry| (entry.step, entry.subject.as_deref(), entry.outcome.kind()))
 		.collect()
 }
@@ -146,6 +148,7 @@ fn the_default_layout_resolves_every_item_as_v1_does() {
 		V1Item::MnemopiMemory,
 		V1Item::Marketplaces,
 		V1Item::Plugins,
+		V1Item::Memories,
 	]);
 }
 

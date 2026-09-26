@@ -51,6 +51,18 @@ pub enum ImportStep {
 	Models,
 	/// Literal v1 `models.yml` `apiKey`s into the encrypted credential store.
 	ModelsKeys,
+	/// v1 `history.db` prompts merged into `<data>/history.db`.
+	History,
+	/// v1 `install-id` into `<data>/install-id`, unless v2 has its own.
+	InstallId,
+	/// v1 Mnemopi stores copied to where v2 recalls them.
+	Mnemopi,
+	/// v1 `local`-backend `learned.md` lessons into each project's Mnemopi bank.
+	LearnedLessons,
+	/// v1 `hindsight` / `sharpshooter` / `local` memory settings (report only).
+	MemoryBackends,
+	/// Claude-format marketplace registry, installed plugins, and their cache.
+	Marketplace,
 }
 
 impl ImportStep {
@@ -64,6 +76,12 @@ impl ImportStep {
 	pub const fn item(self) -> V1Item {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
+			Self::History => V1Item::HistoryDb,
+			Self::InstallId => V1Item::InstallId,
+			Self::Mnemopi => V1Item::MnemopiMemory,
+			Self::LearnedLessons => V1Item::Memories,
+			Self::MemoryBackends => V1Item::Settings,
+			Self::Marketplace => V1Item::Marketplaces,
 		}
 	}
 
@@ -86,6 +104,12 @@ impl ImportStep {
 		match self {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
+			Self::History => super::data::history::import(cx),
+			Self::InstallId => super::data::install_id::import(cx),
+			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
+			Self::LearnedLessons => super::data::memory::import_learned(cx),
+			Self::MemoryBackends => super::data::memory::report_backends(cx),
+			Self::Marketplace => super::data::marketplace::import(cx),
 		}
 	}
 }
@@ -316,6 +340,9 @@ pub enum ImportError {
 	/// The v1 model configuration could not be read or converted.
 	#[error("could not import the model configuration")]
 	Models(#[from] crate::discovery::models::ModelsConfigError),
+	/// A data or memory step could not read v1 or write v2.
+	#[error("could not import v1 data")]
+	Data(#[from] super::DataImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,

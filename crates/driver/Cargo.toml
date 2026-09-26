@@ -62,6 +62,7 @@ omp-cache.workspace = true
 omp-observability.workspace = true
 omp-tool.workspace = true
 omp-tools.workspace = true
+omp-vcs.workspace = true
 omp-walker.workspace = true
 parking_lot.workspace = true
 rusqlite.workspace = true
@@ -87,6 +88,7 @@ xutf.workspace = true
 windows-sys.workspace = true
 prost.workspace = true
 smallvec.workspace = true
+tempfile.workspace = true
 ring.workspace = true
 globset.workspace = true
 notify.workspace = true
@@ -96,7 +98,6 @@ regex.workspace = true
 [dev-dependencies]
 omp-tui.workspace = true
 tokio.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true
