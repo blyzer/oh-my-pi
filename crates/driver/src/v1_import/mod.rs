@@ -54,6 +54,7 @@
 //!    run writes nothing, a second run is a no-op, and the v1 tree is
 //!    byte-identical afterwards.
 
+mod auth_credentials;
 mod credentials;
 pub mod locate;
 mod models;
@@ -66,6 +67,7 @@ mod tests;
 
 use std::path::Path;
 
+pub use auth_credentials::CredentialsImportError;
 pub use locate::{
 	ImportPair, ItemShape, LocateError, ProfileSelection, V1Inputs, V1Item, V1Layout, V1Source,
 	V2Roots, V2Target, XdgCategory, XdgCollision, plan,
