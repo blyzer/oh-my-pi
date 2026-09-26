@@ -446,6 +446,7 @@ impl V1Source {
 		}
 		V1Layout {
 			profile: profile.map(Str::new),
+			home: self.inputs.home.clone(),
 			base_root: self.base_root.clone(),
 			config_root,
 			agent_dir,
@@ -482,6 +483,7 @@ impl V1Source {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct V1Layout {
 	profile:     Option<Str>,
+	home:        PathBuf,
 	base_root:   PathBuf,
 	config_root: PathBuf,
 	agent_dir:   PathBuf,
@@ -499,6 +501,12 @@ impl V1Layout {
 	#[must_use]
 	pub fn base_root(&self) -> &Path {
 		&self.base_root
+	}
+
+	/// The owner's home directory (`~/.ssh/known_hosts` lives under it).
+	#[must_use]
+	pub fn home(&self) -> &Path {
+		&self.home
 	}
 
 	/// The profile root (`~/.omp` or `~/.omp/profiles/<profile>`).

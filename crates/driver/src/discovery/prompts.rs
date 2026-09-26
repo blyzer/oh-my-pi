@@ -206,11 +206,9 @@ impl PromptTemplates {
 			});
 			return;
 		}
-		let (header, body) = split_frontmatter(&text);
-		let header = match header.map(serde_yaml::from_str::<TemplateHeader>) {
-			None => TemplateHeader::default(),
-			Some(Ok(header)) => header,
-			Some(Err(error)) => {
+		let (header, body) = match parse_template(&text) {
+			Ok(parsed) => parsed,
+			Err(error) => {
 				self.warnings.push(Warning {
 					path:    canonical,
 					message: Str::new(format!("failed to parse prompt template frontmatter: {error}")),
@@ -253,6 +251,25 @@ impl PromptTemplates {
 #[derive(Default, Deserialize)]
 struct TemplateHeader {
 	description: Option<String>,
+}
+
+/// Splits a template into its parsed frontmatter and body.
+fn parse_template(text: &str) -> Result<(TemplateHeader, &str), serde_yaml::Error> {
+	let (header, body) = split_frontmatter(text);
+	let header = header
+		.map(serde_yaml::from_str::<TemplateHeader>)
+		.transpose()?
+		.unwrap_or_default();
+	Ok((header, body))
+}
+
+/// Checks that discovery would load a template's frontmatter.
+///
+/// # Errors
+///
+/// Returns the YAML failure discovery would warn about and skip the file for.
+pub(crate) fn check_template(text: &str) -> Result<(), serde_yaml::Error> {
+	parse_template(text).map(drop)
 }
 
 fn is_markdown(path: &Path) -> bool {
