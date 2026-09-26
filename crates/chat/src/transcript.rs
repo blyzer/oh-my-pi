@@ -784,6 +784,96 @@ mod tests {
 		);
 	}
 
+	/// Mirrors the host's paint: row pressure, the composed document layer
+	/// under an optional full-screen panel, then one transcript delivery.
+	fn present_under(
+		projection: &mut Projection,
+		renderer: &mut omp_tui::Renderer<Vec<u8>>,
+		terminal: &mut omp_tui::test_support::TerminalModel,
+		size: Size,
+		panel: bool,
+	) {
+		use omp_tui::{Dim, Layer, OverlayAnchor, OverlayOptions};
+		let mut chrome = Frame::new(Size::new(size.width, 2));
+		chrome.put(0, 0, "composer", Style::default());
+		projection.retire_under_pressure(chrome.size().height, size.height);
+		let document = projection.document(&chrome, size);
+		let mut cover = Frame::new(size);
+		for row in 0..size.height {
+			cover.put(0, row, "panel", Style::default());
+		}
+		let full = OverlayOptions::default()
+			.width(Dim::Cells(size.width))
+			.anchor(OverlayAnchor::TopLeft);
+		let document_options = full.non_modal().z(10);
+		let panel_options = full.z(20);
+		let mut layers =
+			vec![Layer { frame: &document, options: &document_options, active: !panel }];
+		if panel {
+			layers.push(Layer { frame: &cover, options: &panel_options, active: true });
+		}
+		renderer
+			.present_slots(&mut projection.slots, &layers)
+			.expect("in-memory delivery");
+		let output =
+			String::from_utf8(std::mem::take(renderer.writer_mut())).expect("renderer emits UTF-8");
+		terminal.apply(&output);
+	}
+
+	#[test]
+	fn resize_under_a_full_panel_delivers_the_rows_it_retires_before_close() {
+		let build = || {
+			vec![block(1, BlockKind::User, "first", true), block(2, BlockKind::User, "second", true)]
+		};
+		let size = Size::new(20, 8);
+		let mut projection = Projection::new(
+			size,
+			ResizePolicy::Rebuild,
+			&UiContext::default(),
+			build(),
+			build(),
+			Duration::ZERO,
+		);
+		let mut renderer = omp_tui::Renderer::new(Vec::new());
+		let mut terminal = omp_tui::test_support::TerminalModel::new(20, 8);
+		present_under(&mut projection, &mut renderer, &mut terminal, size, false);
+		assert_eq!(&terminal.visible_rows()[..5], ["first", "", "second", "", "composer"]);
+		present_under(&mut projection, &mut renderer, &mut terminal, size, true);
+		assert!(terminal.visible_rows().iter().all(|row| row == "panel"));
+
+		// The terminal shrinks while the panel covers it: the width change
+		// stages a rebuild replay, and the new height retires `first`.
+		let shrunk = Size::new(16, 5);
+		projection.resize(shrunk);
+		terminal.resize(16, 5);
+		present_under(&mut projection, &mut renderer, &mut terminal, shrunk, true);
+		assert!(projection.blocks[0].retired);
+		assert!(!projection.slots.has_undelivered_rows(), "nothing left staged behind the replay");
+		assert_eq!(
+			terminal
+				.history
+				.iter()
+				.filter(|row| row.as_str() == "first")
+				.count(),
+			1,
+			"the retired block reaches scrollback in the resize paint: {:?}",
+			terminal.history,
+		);
+
+		// Closing the panel repaints the live document above the composer and
+		// never re-emits history.
+		present_under(&mut projection, &mut renderer, &mut terminal, shrunk, false);
+		assert_eq!(&terminal.visible_rows()[..3], ["second", "", "composer"]);
+		assert_eq!(
+			terminal
+				.history
+				.iter()
+				.filter(|row| row.as_str() == "first")
+				.count(),
+			1
+		);
+	}
+
 	#[test]
 	fn document_is_top_anchored_when_it_fits_and_tail_anchored_otherwise() {
 		let projection = fixture(6, &[true, true]);

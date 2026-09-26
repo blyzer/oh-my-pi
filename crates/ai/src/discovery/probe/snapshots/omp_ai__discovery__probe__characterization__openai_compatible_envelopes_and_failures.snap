@@ -1,0 +1,88 @@
+---
+source: crates/ai/src/discovery/probe/characterization.rs
+expression: output
+---
+## empty data
+> GET https://models.example/v1/models [-] 
+(no rows)
+
+## bare array
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"bare","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## models key
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"from-name","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## result.items nesting
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"nested","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## data object with models
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"grouped","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## null data falls through to models
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"named","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## string data falls through to items
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"item","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## data wins over models
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"first","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## duplicate data key keeps last
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"last","aliases":[],"display_name":null,"declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## id precedence
+> GET https://models.example/v1/models [-] 
+{"provider":"open-ai","route":"open-ai/primary","wire_model":"a","aliases":[],"display_name":"b","declared_class":null,"declared_operations":1,"declared_capabilities":null,"declared_limits":{"context_window":128000,"maximum_input_tokens":null,"maximum_output_tokens":32768,"maximum_batch":null},"declared_pricing":[],"extended_context_mode":null,"availability":"available","source":"open-ai:https://models.example//v1/models","observed_at_ms":null,"updated_at_ms":null,"deprecated":null}
+
+
+## non-string first id fails
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## missing id fails
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## blank id fails
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## string entry fails
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## array entry fails
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## no envelope
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## scalar body
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## invalid JSON
+> GET https://models.example/v1/models [-] 
+error: protocol
+
+## trailing garbage
+> GET https://models.example/v1/models [-] 
+error: protocol

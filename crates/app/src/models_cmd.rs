@@ -238,7 +238,7 @@ async fn refresh_local_providers(
 				refreshed = refreshed.saturating_add(rows.len());
 			},
 			Err(error) => {
-				let error_code: &'static str = error.into();
+				let error_code: &'static str = (&error).into();
 				store
 					.set_lifecycle(&ProviderLifecycle {
 						provider:       provider.clone(),

@@ -1486,7 +1486,10 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 		 Path({left_ready_literal}).exists():\n    time.sleep(0.01)\nshared_name = \
 		 'right'\npeer_state = 73\nshared_name"
 	);
-	let (left, right) = time::timeout(Duration::from_secs(5), async {
+	// Hang guard only. The cells rendezvous on each other's marker, so kernels
+	// serialized behind one another never finish at all; the bound just turns
+	// that deadlock into a failure, and covers a cold interpreter boot under load.
+	let (left, right) = time::timeout(Duration::from_secs(60), async {
 		tokio::join!(
 			invoke_builtin(
 				harness.client(),
@@ -1723,7 +1726,8 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 	let code = format!(
 		"import threading\nfrom pathlib import Path\ndef spin_forever():\n    while True:\n        \
 		 pass\nthreading.Thread(target=spin_forever, \
-		 daemon=False).start()\nPath({started_literal}).write_text('started')\nwhile True:\n    pass"
+		 daemon=False).start()\nPath({started_literal}).write_text('started')\nprint('started', \
+		 flush=True)\nwhile True:\n    pass"
 	);
 	let mut cancelled = harness
 		.client()
@@ -1756,19 +1760,49 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 		)
 		.await
 		.expect("commit cancellable eval arguments");
-	time::timeout(Duration::from_secs(2), async {
-		while !started.exists() {
-			task::yield_now().await;
+	// Event-driven readiness: the cell announces itself on its own output
+	// stream after writing its marker, so the wait ends on that event rather
+	// than a wall-clock budget. The bound is a hang guard only.
+	time::timeout(Duration::from_secs(60), async {
+		let mut stdout = Vec::new();
+		while !stdout
+			.windows(b"started".len())
+			.any(|window| window == b"started")
+		{
+			let event = cancelled
+				.next_event()
+				.await
+				.expect("eval cancellation readiness event")
+				.expect("eval cancellation stream closed before the cell became active");
+			let InvocationEvent::Update(update) = event else {
+				panic!("eval cancellation cell settled before it became active");
+			};
+			let update: eval::Update =
+				serde_json::from_slice(&update.json).expect("typed eval output update");
+			stdout.extend_from_slice(update.data.as_ref());
 		}
 	})
 	.await
 	.expect("embedded Python cancellation cell never became active");
+	assert!(started.exists(), "embedded Python cancellation cell never became active");
 	cancelled.guard().cancel();
-	let terminal = time::timeout(Duration::from_secs(2), cancelled.next_event())
-		.await
-		.expect("eval cancellation terminal timeout")
-		.expect("eval cancellation terminal event")
-		.expect("eval cancellation stream closed");
+	// Hang guard only: the verdict is the event awaited, and output the cell
+	// flushed before the interrupt landed may still precede it.
+	let terminal = time::timeout(Duration::from_secs(60), async {
+		loop {
+			match cancelled
+				.next_event()
+				.await
+				.expect("eval cancellation terminal event")
+				.expect("eval cancellation stream closed")
+			{
+				InvocationEvent::Update(_) => {},
+				terminal => break terminal,
+			}
+		}
+	})
+	.await
+	.expect("eval cancellation never produced a terminal event");
 	let InvocationEvent::Verdict(terminal) = terminal else {
 		panic!("eval cancellation did not produce a verdict");
 	};
