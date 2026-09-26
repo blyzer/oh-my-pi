@@ -14,7 +14,7 @@
 //! | `ssh.json`                              | `hosts.toml` (converted)   | `omp_envd::ssh::HostPaths::user`                 |
 //!
 //! The working directory's project `.omp/` is read by v2 at the same paths,
-//! except three v1-only files [`project`] converts in place.
+//! except three v1-only files [`import_project_assets`] converts in place.
 //!
 //! Copy rules (owner decision #2): nothing under v1 is written. A destination
 //! v2 already has is kept: identical bytes (or the same declaration) are
@@ -25,6 +25,8 @@
 mod mcp;
 mod project;
 mod ssh;
+
+pub use project::{import_project_assets, project_assets_marker};
 
 #[cfg(test)]
 mod tests;
@@ -139,7 +141,6 @@ pub enum AssetError {
 }
 
 const _: () = assert!(size_of::<AssetError>() <= 112, "AssetError must stay compact");
-const _: () = assert!(size_of::<ImportError>() <= 112, "ImportError must stay compact");
 
 /// The items a grouped step imports besides its own [`ImportStep::item`].
 pub(super) const fn companions(step: ImportStep) -> &'static [V1Item] {
@@ -148,7 +149,6 @@ pub(super) const fn companions(step: ImportStep) -> &'static [V1Item] {
 		ImportStep::Rules => &[V1Item::RulesMd, V1Item::AgentsMd],
 		ImportStep::SystemPrompts => &[V1Item::AppendSystemMd, V1Item::TitleSystemMd],
 		ImportStep::LspDap => &[V1Item::Dap],
-		ImportStep::ProjectAssets => &[V1Item::ProjectMcp, V1Item::ProjectCommands],
 		_ => &[],
 	}
 }
@@ -242,10 +242,6 @@ pub(super) fn import(
 				&config.join("hosts.toml"),
 				source.home(),
 			)?;
-		},
-		ImportStep::ProjectAssets => {
-			project::import(&mut out, cx)?;
-			return Ok(out.list);
 		},
 		// Not an asset step; `ImportStep::run` never routes one here.
 		_ => return Ok(Vec::new()),

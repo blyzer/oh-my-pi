@@ -24,7 +24,7 @@ use crate::{
 	v1_import::{
 		CredentialAccess, ImportEntry, ImportMode, ImportOutcome, ImportPair, ImportReport,
 		ImportStep, OutcomeKind, ProfileSelection, SkipReason, V1Inputs, V1Item, V1Source, V2Roots,
-		plan, report::Attention, run,
+		import_project_assets, plan, project_assets_marker, report::Attention, run,
 	},
 };
 
@@ -98,17 +98,17 @@ impl Fixture {
 		&self.v2.config_dir
 	}
 
-	fn pairs_for(&self, project: &Path, selection: &ProfileSelection) -> Vec<ImportPair> {
-		let inputs = V1Inputs {
-			home: self.home.clone(),
-			project: Some(project.to_owned()),
-			..V1Inputs::default()
-		};
-		plan(&V1Source::new(inputs), &self.v2, selection).expect("plan")
+	fn source(&self) -> V1Source {
+		V1Source::new(V1Inputs { home: self.home.clone(), ..V1Inputs::default() })
 	}
 
 	fn pairs(&self) -> Vec<ImportPair> {
-		self.pairs_for(&self.project, &ProfileSelection::All)
+		plan(&self.source(), &self.v2, &ProfileSelection::All).expect("plan")
+	}
+
+	/// Converts `project`'s v1-only `.omp/` files.
+	fn project(&self, project: &Path) -> Vec<ImportEntry> {
+		import_project_assets(project, &self.source(), &self.v2, ImportMode::Apply)
 	}
 
 	fn known_host(&self, pattern: &str, key: &str) {
@@ -133,6 +133,14 @@ fn kinds(report: &ImportReport, step: ImportStep) -> Vec<(V1Item, Option<&str>, 
 		.entries()
 		.filter(|entry| entry.step == step)
 		.map(|entry| (entry.item, entry.subject.as_deref(), entry.outcome.kind()))
+		.collect()
+}
+
+/// `(step, subject, kind)` for project entries.
+fn listed(entries: &[ImportEntry]) -> Vec<(ImportStep, Option<&str>, OutcomeKind)> {
+	entries
+		.iter()
+		.map(|entry| (entry.step, entry.subject.as_deref(), entry.outcome.kind()))
 		.collect()
 }
 
@@ -183,7 +191,7 @@ fn populate(fixture: &Fixture, agent: &Path, tag: &str) {
 	fixture.known_host("build.example", HOST_KEY);
 }
 
-const ASSET_STEPS: [ImportStep; 11] = [
+const ASSET_STEPS: [ImportStep; 10] = [
 	ImportStep::Skills,
 	ImportStep::Rules,
 	ImportStep::Prompts,
@@ -194,23 +202,18 @@ const ASSET_STEPS: [ImportStep; 11] = [
 	ImportStep::Secrets,
 	ImportStep::Mcp,
 	ImportStep::SshHosts,
-	ImportStep::ProjectAssets,
 ];
 
 #[test]
 fn a_dry_run_reports_every_asset_and_writes_nothing() {
 	let fixture = Fixture::new();
 	populate(&fixture, &fixture.agent(), "default");
-	write(&fixture.project.join(".omp/ssh.json"), r#"{"hosts":{}}"#);
 	let before = snapshot(fixture.root.path());
 
 	let report = import(&fixture.pairs(), ImportMode::DryRun);
 
 	assert_eq!(snapshot(fixture.root.path()), before, "a dry run must not write anywhere");
-	for step in ASSET_STEPS
-		.into_iter()
-		.filter(|step| *step != ImportStep::ProjectAssets)
-	{
+	for step in ASSET_STEPS {
 		assert!(
 			kinds(&report, step)
 				.iter()
@@ -309,17 +312,11 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 		let hosts =
 			HostStore::load_layered(&HostPaths::new(config, &fixture.project)).expect("hosts");
 		assert_eq!(hosts.get("build").expect("build").host_key.as_str(), HOST_KEY_SHA256);
-		for step in ASSET_STEPS
-			.into_iter()
-			.filter(|step| *step != ImportStep::ProjectAssets)
-		{
+		for step in ASSET_STEPS {
 			assert!(step.marker(config).is_set(), "{step} marker for {profile:?}");
 		}
 	}
-	for step in ASSET_STEPS
-		.into_iter()
-		.filter(|step| *step != ImportStep::ProjectAssets)
-	{
+	for step in ASSET_STEPS {
 		assert!(
 			kinds(&report, step).iter().all(|(_, _, kind)| matches!(
 				kind,
@@ -335,10 +332,7 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 	let v2_before = snapshot(fixture.config());
 	let again = apply(&pairs);
 	assert_eq!(snapshot(fixture.config()), v2_before);
-	for step in ASSET_STEPS
-		.into_iter()
-		.filter(|step| *step != ImportStep::ProjectAssets)
-	{
+	for step in ASSET_STEPS {
 		assert!(
 			again
 				.entries()
@@ -611,7 +605,7 @@ fn a_project_omp_converts_in_place_once() {
 	write(&omp.join("commands/release.md"), "Release $1.\n");
 	let project_before = snapshot(&omp);
 
-	let report = apply(&fixture.pairs()[..1]);
+	let report = fixture.project(&fixture.project);
 
 	let config = fixture.config();
 	let hosts = HostStore::load_layered(&HostPaths::new(config, &fixture.project)).expect("hosts");
@@ -625,11 +619,11 @@ fn a_project_omp_converts_in_place_once() {
 	assert_eq!(mcp.mcp_servers["lint"].command.as_deref(), Some("lint-mcp"));
 	let templates = PromptTemplates::discover(&fixture.project, config, &[], true);
 	assert_eq!(templates.get("release").expect("release").source.as_str(), "(project)");
-	assert_eq!(kinds(&report, ImportStep::ProjectAssets), [
-		(V1Item::ProjectSsh, Some("stage"), OutcomeKind::Imported),
-		(V1Item::ProjectMcp, Some("lint"), OutcomeKind::Imported),
-		(V1Item::ProjectMcp, Some("repo"), OutcomeKind::NeedsAttention),
-		(V1Item::ProjectCommands, Some(".omp/prompts/release.md"), OutcomeKind::Imported),
+	assert_eq!(listed(&report), [
+		(ImportStep::SshHosts, Some("stage"), OutcomeKind::Imported),
+		(ImportStep::Mcp, Some("lint"), OutcomeKind::Imported),
+		(ImportStep::Mcp, Some("repo"), OutcomeKind::NeedsAttention),
+		(ImportStep::Commands, Some(".omp/prompts/release.md"), OutcomeKind::Imported),
 	]);
 	// The v1-only project files are untouched; `mcp.json`, which both
 	// versions read, gained the merged servers.
@@ -640,24 +634,32 @@ fn a_project_omp_converts_in_place_once() {
 	{
 		assert_eq!(after.get(path), Some(contents), "{}", path.display());
 	}
-	assert!(!ImportStep::ProjectAssets.marker(config).is_set(), "the marker is per project");
+	// The marker lives under the v2 state root, never in the repository.
+	let marker = project_assets_marker(&fixture.project, &fixture.v2);
+	assert!(marker.starts_with(&fixture.v2.state_dir) && marker.is_file());
 
 	// The same project is converted once; another project still converts.
-	let again = apply(&fixture.pairs()[..1]);
-	assert_eq!(kinds(&again, ImportStep::ProjectAssets), [(
-		V1Item::ProjectSsh,
-		None,
-		OutcomeKind::Skipped
-	)]);
+	let again = fixture.project(&fixture.project);
+	assert!(matches!(again.as_slice(), [ImportEntry {
+		outcome: ImportOutcome::Skipped(SkipReason::MarkerPresent),
+		..
+	}]));
 	let other = fixture.root.path().join("work/other");
 	write(&other.join(".omp/commands/hello.md"), "Hello.\n");
-	let pairs = fixture.pairs_for(&other, &ProfileSelection::Named(None));
-	let third = apply(&pairs);
-	assert_eq!(kinds(&third, ImportStep::ProjectAssets), [
-		(V1Item::ProjectSsh, None, OutcomeKind::NothingToImport),
-		(V1Item::ProjectMcp, None, OutcomeKind::NothingToImport),
-		(V1Item::ProjectCommands, Some(".omp/prompts/hello.md"), OutcomeKind::Imported),
+	assert_eq!(listed(&fixture.project(&other)), [
+		(ImportStep::SshHosts, None, OutcomeKind::NothingToImport),
+		(ImportStep::Mcp, None, OutcomeKind::NothingToImport),
+		(ImportStep::Commands, Some(".omp/prompts/hello.md"), OutcomeKind::Imported),
 	]);
+	// A project without v1 files is neither converted nor marked.
+	let plain = fixture.root.path().join("work/plain");
+	fs::create_dir_all(plain.join(".omp")).expect("plain project");
+	assert_eq!(listed(&fixture.project(&plain)), [(
+		ImportStep::SshHosts,
+		None,
+		OutcomeKind::NothingToImport
+	)]);
+	assert!(!project_assets_marker(&plain, &fixture.v2).exists());
 }
 
 #[test]
@@ -667,15 +669,12 @@ fn a_project_that_is_the_v1_home_is_never_written() {
 	write(&fixture.agent().join("AGENTS.md"), "Guidance.\n");
 	let v1_before = snapshot(&fixture.omp);
 	// Running from `$HOME` makes `~/.omp` look like the project's `.omp/`.
-	let pairs = fixture.pairs_for(&fixture.home, &ProfileSelection::Named(None));
-
-	let report = apply(&pairs);
+	let report = fixture.project(&fixture.home);
 
 	assert_eq!(snapshot(&fixture.omp), v1_before);
-	let project = report
-		.entries()
-		.filter(|entry| entry.step == ImportStep::ProjectAssets)
-		.collect::<Vec<_>>();
-	assert_eq!(project.len(), 1);
-	assert!(matches!(project[0].outcome, ImportOutcome::Skipped(SkipReason::InsideV1Root)));
+	assert!(matches!(report.as_slice(), [ImportEntry {
+		outcome: ImportOutcome::Skipped(SkipReason::InsideV1Root),
+		..
+	}]));
+	assert!(!project_assets_marker(&fixture.home, &fixture.v2).exists());
 }

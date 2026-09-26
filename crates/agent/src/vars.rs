@@ -30,10 +30,12 @@ pub enum VisionMode {
 omp_con::con_enum!(VisionMode);
 
 omp_con::var! {
-	/// Selected model route.
+	/// The session's live model route. Journaled with the session, never
+	/// archived: the remembered default model is `ai_model_roles.default`,
+	/// so a picker choice saved to `config.cfg` cannot outrank it.
 	pub static AI_MODEL = ai_model: Str {
 		default: Str::new_static(""),
-		flags: archive | session,
+		flags: session,
 	};
 	/// Model route for task subagents; empty inherits `ai_model`.
 	pub static AI_TASK_MODEL = ai_task_model: Str {

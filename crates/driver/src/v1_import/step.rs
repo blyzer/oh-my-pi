@@ -51,6 +51,8 @@ pub enum ImportStep {
 	Models,
 	/// Literal v1 `models.yml` `apiKey`s into the encrypted credential store.
 	ModelsKeys,
+	/// v1 `config.yml` into `config.cfg` (and `subagent.cfg`).
+	Settings,
 	/// User assets copied file by file into the v2 `agent/` tree, keeping any
 	/// v2 file already there ([`super::assets`]): `skills/` and
 	/// `managed-skills/`, `rules/` with `RULES.md` and `AGENTS.md`,
@@ -73,13 +75,10 @@ pub enum ImportStep {
 	Secrets,
 	/// v1 `mcp.json` and `.mcp.json` servers merged into v2 `mcp.json`.
 	Mcp,
-	/// v1 `ssh.json` hosts converted into v2 `hosts.toml`.
+	/// v1 `ssh.json` hosts converted into v2 `hosts.toml`. The project's
+	/// v1-only `.omp/` files convert once per project
+	/// ([`super::import_project_assets`]).
 	SshHosts,
-	/// The working directory's project `.omp/`: `ssh.json` into `hosts.toml`,
-	/// `.mcp.json` into `mcp.json`, `commands/` into `prompts/`. Its marker is
-	/// per project (`.project-assets-migration-v1.d/<project digest>`); the
-	/// step's plain marker is never set.
-	ProjectAssets,
 }
 
 impl ImportStep {
@@ -93,6 +92,7 @@ impl ImportStep {
 	pub const fn item(self) -> V1Item {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
+			Self::Settings => V1Item::Settings,
 			Self::Skills => V1Item::Skills,
 			Self::Rules => V1Item::Rules,
 			Self::Prompts => V1Item::Prompts,
@@ -103,7 +103,6 @@ impl ImportStep {
 			Self::Secrets => V1Item::Secrets,
 			Self::Mcp => V1Item::Mcp,
 			Self::SshHosts => V1Item::Ssh,
-			Self::ProjectAssets => V1Item::ProjectSsh,
 		}
 	}
 
@@ -133,6 +132,7 @@ impl ImportStep {
 		match self {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
+			Self::Settings => super::settings::import_settings(cx),
 			Self::Skills
 			| Self::Rules
 			| Self::Prompts
@@ -142,8 +142,7 @@ impl ImportStep {
 			| Self::LspDap
 			| Self::Secrets
 			| Self::Mcp
-			| Self::SshHosts
-			| Self::ProjectAssets => super::assets::import(self, cx),
+			| Self::SshHosts => super::assets::import(self, cx),
 		}
 	}
 }
@@ -297,6 +296,7 @@ pub fn run(
 			.iter()
 			.map(|pair| run_pair(pair, mode, credentials))
 			.collect(),
+		project: Vec::new(),
 	}
 }
 
@@ -374,6 +374,9 @@ pub enum ImportError {
 	/// The v1 model configuration could not be read or converted.
 	#[error("could not import the model configuration")]
 	Models(#[from] crate::discovery::models::ModelsConfigError),
+	/// The v1 settings could not be imported.
+	#[error("could not import the settings")]
+	Settings(#[from] super::SettingsImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,

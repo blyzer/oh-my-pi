@@ -134,18 +134,22 @@ impl ProductionCompressHost {
 	fn resolve_model(&self, requested: Option<&str>) -> Result<Str, ProductionError> {
 		let catalog = omp_catalog::snapshot::Catalog::try_embedded()
 			.map_err(|_| ProductionError::MissingModel)?;
-		crate::discovery::roles::resolve_launch_roles(
-			catalog,
-			&self.model_settings,
-			requested,
-			None,
-			None,
-			None,
-		)
-		.map_err(|_| ProductionError::MissingModel)?
-		.primary
-		.map(|model| Str::new(model.as_str()))
-		.ok_or(ProductionError::MissingModel)
+		let selected = match requested {
+			Some(selector) => {
+				crate::discovery::roles::resolve_role_selector(catalog, &self.model_settings, selector)
+					.map_err(|_| ProductionError::MissingModel)?
+			},
+			None => {
+				match crate::discovery::roles::resolve_launch_default(catalog, &self.model_settings) {
+					crate::discovery::roles::LaunchDefault::Resolved(selected) => selected,
+					crate::discovery::roles::LaunchDefault::Missing { .. }
+					| crate::discovery::roles::LaunchDefault::Unset => {
+						return Err(ProductionError::MissingModel);
+					},
+				}
+			},
+		};
+		Ok(Str::new(selected.model.as_str()))
 	}
 }
 

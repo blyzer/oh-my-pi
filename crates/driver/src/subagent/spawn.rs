@@ -36,6 +36,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::{
+	AgentName,
 	settings::{
 		SV_TASK_RECURSION_DEPTH, TaskEffortCeiling, TaskIsolationMerge, TaskSettings, child_ctx,
 	},
@@ -682,6 +683,25 @@ struct PreparedChild {
 	paused:       bool,
 }
 
+impl PreparedChild {
+	/// Composition options for this child: its own journal, routing name, and
+	/// parent, run as its agent class so class-scoped rules reach it.
+	fn kernel_options(&self) -> KernelOptions {
+		KernelOptions {
+			session: Some(self.session_path.clone()),
+			sessions_dir: Some(self.sessions_dir.clone()),
+			sessions: Some(Arc::clone(&self.sessions)),
+			session_name: self.child.name.clone().or_else(|| Some(self.id.clone())),
+			parent_session: Some(self.parent.clone()),
+			model_override: true,
+			output_schema: self.child.output_schema.clone(),
+			schema_mode: self.child.schema_mode,
+			agent: Some(AgentName::new(self.agent.clone())),
+			..KernelOptions::default()
+		}
+	}
+}
+
 struct ChildExecution {
 	status: Str,
 	result: ChildResult,
@@ -853,21 +873,7 @@ async fn run_child(prepared: PreparedChild) -> Result<ChildExecution, SpawnError
 		.as_ref()
 		.map_or_else(|| prepared.project_root.clone(), |isolation| isolation.root.clone());
 	let run = async {
-		let options = KernelOptions {
-			session: Some(prepared.session_path.clone()),
-			sessions_dir: Some(prepared.sessions_dir.clone()),
-			sessions: Some(Arc::clone(&prepared.sessions)),
-			session_name: prepared
-				.child
-				.name
-				.clone()
-				.or_else(|| Some(prepared.id.clone())),
-			parent_session: Some(prepared.parent.clone()),
-			model_override: true,
-			output_schema: prepared.child.output_schema.clone(),
-			schema_mode: prepared.child.schema_mode,
-			..KernelOptions::default()
-		};
+		let options = prepared.kernel_options();
 		let (mut kernel, mut child_session, _) = compose_kernel(
 			&prepared.data_dir,
 			&run_root,
@@ -1724,6 +1730,86 @@ mod tests {
 				.is_none()
 		);
 		assert_eq!(idle_park_delay(420_000), Some(Duration::from_secs(420)));
+	}
+
+	/// A child prepared for `agent` over a scratch project, with a detached
+	/// environment client: composition options only, nothing is run.
+	fn prepared_child(root: &Path, session: &Session, agent: &'static str) -> PreparedChild {
+		let (outgoing, _) = flume::unbounded();
+		let (_, incoming) = flume::unbounded();
+		PreparedChild {
+			data_dir:     root.join("data"),
+			project_root: root.join("proj"),
+			sessions_dir: root.join("sessions"),
+			sessions:     Arc::new(crate::sessions::SessionRegistry::new()),
+			env:          EnvClient::from_channels(outgoing, incoming),
+			ctx:          Arc::new(Ctx::new()),
+			settings:     TaskSettings::default(),
+			cancel:       BackgroundToolCancellation::from_token_for_host(CancellationToken::new()),
+			context:      Str::default(),
+			child:        ChildRequest { agent: Some(Str::new_static(agent)), ..plain_child() },
+			parent:       Str::new_static("main"),
+			id:           Str::new_static(agent),
+			agent:        Str::new_static(agent),
+			session_path: root.join("sessions").join(format!("{agent}.oms")),
+			handle:       session.dom().meta(),
+			paused:       false,
+		}
+	}
+
+	/// The always-apply rule names composition journals for `options`.
+	fn always_apply_rules(project: &Path, options: &KernelOptions) -> Vec<String> {
+		let (context_files, rules) =
+			crate::headless::kernel::discover_prompt_material(project, &options.prompt)
+				.expect("prompt material");
+		let skills = crate::discovery::skills::ActiveSkills::default();
+		crate::headless::kernel::prompt_facts(project, options, &skills, &context_files, &rules)
+			.always_apply_rules
+			.iter()
+			.filter_map(|row| row["name"].as_str().map(str::to_owned))
+			.collect()
+	}
+
+	#[test]
+	fn child_composition_admits_exactly_the_rules_scoped_to_its_agent_class() {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let root = temp.path().canonicalize().expect("canonical root");
+		let project = root.join("proj");
+		std::fs::create_dir_all(project.join(".git")).expect("repo root");
+		let rules = project.join(".omp/rules");
+		std::fs::create_dir_all(&rules).expect("rules dir");
+		for (name, header) in [
+			("scout-only", "alwaysApply: true\nagents: [scout]\n"),
+			("main-only", "alwaysApply: true\nagents: [main]\n"),
+			("everyone", "alwaysApply: true\n"),
+		] {
+			std::fs::write(rules.join(format!("{name}.md")), format!("---\n{header}---\n{name}\n"))
+				.expect("rule");
+		}
+		let session =
+			Session::create(root.join("parent.oms"), omp_session::ComponentRegistry::standard())
+				.expect("parent session");
+		// The developer's own config root may hold user-level rules; only the
+		// scratch project's rules are asserted.
+		let scoped = |options: &KernelOptions| {
+			let mut names = always_apply_rules(&project, options);
+			names.retain(|name| ["scout-only", "main-only", "everyone"].contains(&name.as_str()));
+			names.sort();
+			names
+		};
+
+		let scout = prepared_child(&root, &session, "scout").kernel_options();
+		assert_eq!(scout.agent.as_deref().map(|agent| agent.as_str()), Some("scout"));
+		assert_eq!(scoped(&scout), ["everyone", "scout-only"], "scout child gets its scoped rule");
+
+		let task = prepared_child(&root, &session, "task").kernel_options();
+		assert_eq!(scoped(&task), ["everyone"], "another class gets neither scoped rule");
+
+		assert_eq!(
+			scoped(&KernelOptions::default()),
+			["everyone", "main-only"],
+			"the top-level session runs as `main`"
+		);
 	}
 
 	#[test]

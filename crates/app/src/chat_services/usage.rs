@@ -45,7 +45,10 @@ const NO_ACTIVITY: &str = "Usage history unavailable (this host keeps no per-day
 pub fn fetch(state: &ServiceState) -> ServiceResult<Pending<UsageReport>> {
 	let (tx, rx) = flume::bounded(1);
 	let data_dir = state.data_dir.clone();
-	let catalog = state.catalog.clone();
+	let catalog = state
+		.catalog
+		.as_ref()
+		.map(omp_driver::registry::LiveCatalog::load);
 	state.runtime.spawn(async move {
 		let result = build(&data_dir, catalog.as_deref()).await;
 		let _ = tx.send(result);
@@ -66,10 +69,11 @@ pub fn active_account(
 		.ok_or(ServiceError::Unavailable("active account usage (remote gateway)"))?;
 	let catalog = state
 		.catalog
-		.as_deref()
-		.ok_or(ServiceError::Unavailable("provider catalog (remote gateway)"))?;
+		.as_ref()
+		.ok_or(ServiceError::Unavailable("provider catalog (remote gateway)"))?
+		.load();
 	let provider = ProviderId::from(request.provider.as_str());
-	let Some(route) = active_route(catalog, &provider, request.model.as_str()) else {
+	let Some(route) = active_route(&catalog, &provider, request.model.as_str()) else {
 		return Ok(ready_active(Ok(None)));
 	};
 	let Some(account) = stack

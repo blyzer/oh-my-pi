@@ -46,8 +46,7 @@ fn v1_system_prompts_land_where_user_prompt_path_reads_them() {
 			std::env::remove_var(name);
 		}
 	}
-	let inputs =
-		V1Inputs { project: Some(project.clone()), ..V1Inputs::from_process().expect("home") };
+	let inputs = V1Inputs::from_process().expect("home");
 	let roots = V2Roots::from_process().expect("v2 roots");
 	let pairs = plan(&V1Source::new(inputs), &roots, &ProfileSelection::All).expect("plan");
 	let report = run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&omp_con::Ctx::new()));
