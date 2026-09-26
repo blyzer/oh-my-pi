@@ -59,8 +59,6 @@ pub enum ImportStep {
 	Mnemopi,
 	/// v1 `local`-backend `learned.md` lessons into each project's Mnemopi bank.
 	LearnedLessons,
-	/// v1 `hindsight` / `sharpshooter` / `local` memory settings (report only).
-	MemoryBackends,
 	/// Claude-format marketplace registry, installed plugins, and their cache.
 	Marketplace,
 }
@@ -80,7 +78,6 @@ impl ImportStep {
 			Self::InstallId => V1Item::InstallId,
 			Self::Mnemopi => V1Item::MnemopiMemory,
 			Self::LearnedLessons => V1Item::Memories,
-			Self::MemoryBackends => V1Item::Settings,
 			Self::Marketplace => V1Item::Marketplaces,
 		}
 	}
@@ -108,7 +105,6 @@ impl ImportStep {
 			Self::InstallId => super::data::install_id::import(cx),
 			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
 			Self::LearnedLessons => super::data::memory::import_learned(cx),
-			Self::MemoryBackends => super::data::memory::report_backends(cx),
 			Self::Marketplace => super::data::marketplace::import(cx),
 		}
 	}

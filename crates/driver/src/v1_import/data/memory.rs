@@ -1,6 +1,7 @@
-//! The memory steps: `mnemopi` (v1 Mnemopi stores), `learned-lessons` (the v1
-//! `local` backend's `learned.md` lessons), and `memory-backends` (the v1
-//! backends v2 dropped, reported only).
+//! The memory steps: `mnemopi` (v1 Mnemopi stores) and `learned-lessons` (the
+//! v1 `local` backend's `learned.md` lessons). The v1 backends v2 dropped
+//! (`hindsight`, `sharpshooter`, `local`) and their settings are reported by
+//! the settings step.
 //!
 //! # Where v2 keeps Mnemopi
 //!
@@ -25,26 +26,19 @@
 use std::{
 	collections::HashSet,
 	ffi::OsString,
-	fmt::{self, Write as _},
 	fs, io,
 	path::{Path, PathBuf},
 };
 
-use omp_core::{Str, StrMut};
 use omp_envd::{
 	host_settings::HostSettings,
 	vcs::{RepositoryAvailability, RepositorySnapshot},
 };
 use omp_memory::{MemoryBackend, MemoryRuntime, recall::RecallBounds};
-use serde::{
-	Deserialize, Deserializer,
-	de::{self, IgnoredAny, MapAccess, Visitor},
-};
 
 use super::{DataImportError, copied, counted, same_file, sqlite::V1Database, subject};
 use crate::v1_import::{
-	ImportEntry, ImportError, ImportMode, ImportOutcome, ImportStep, NotMigratable, StepContext,
-	V1Item, V2Target,
+	ImportEntry, ImportError, ImportMode, ImportOutcome, ImportStep, StepContext, V1Item, V2Target,
 	report::{Attention, SkipReason},
 };
 
@@ -523,134 +517,6 @@ fn already_stored(runtime: &MemoryRuntime, lesson: &str) -> omp_memory::Result<b
 		.items
 		.iter()
 		.any(|item| item.memory.content.trim() == lesson))
-}
-
-// ── memory-backends ────────────────────────────────────────────────────
-
-/// The v1 `config.yml` memory keys v2 has no backend for.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct V1MemorySettings {
-	memory:       V1MemorySection,
-	hindsight:    KeyCount,
-	sharpshooter: KeyCount,
-	memories:     KeyCount,
-}
-
-/// How many settings a v1 section holds (`null` or absent is none); the
-/// values are never read.
-#[derive(Clone, Copy, Debug, Default)]
-struct KeyCount(usize);
-
-impl<'de> Deserialize<'de> for KeyCount {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		struct Keys;
-
-		impl<'de> Visitor<'de> for Keys {
-			type Value = KeyCount;
-
-			fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-				formatter.write_str("a settings section")
-			}
-
-			fn visit_unit<E: de::Error>(self) -> Result<KeyCount, E> {
-				Ok(KeyCount(0))
-			}
-
-			fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<KeyCount, A::Error> {
-				let mut count = 0;
-				while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {
-					count += 1;
-				}
-				Ok(KeyCount(count))
-			}
-		}
-
-		deserializer.deserialize_any(Keys)
-	}
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct V1MemorySection {
-	backend: Option<V1MemoryBackend>,
-}
-
-/// v1 `memory.backend`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, strum::IntoStaticStr)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
-enum V1MemoryBackend {
-	Off,
-	Local,
-	Hindsight,
-	Mnemopi,
-	Sharpshooter,
-	#[serde(other)]
-	Unknown,
-}
-
-pub(in crate::v1_import) fn report_backends(
-	cx: &StepContext<'_>,
-) -> Result<Vec<ImportEntry>, ImportError> {
-	let path = cx.locate(V1Item::Settings);
-	let settings = match &path {
-		Some(path) => {
-			let text = fs::read_to_string(path).map_err(DataImportError::read(path))?;
-			if text.trim().is_empty() {
-				V1MemorySettings::default()
-			} else {
-				serde_yaml::from_str::<V1MemorySettings>(&text)
-					.map_err(|source| DataImportError::Yaml { path: path.clone(), source })?
-			}
-		},
-		None => V1MemorySettings::default(),
-	};
-	let dropped = |subject: Str| ImportEntry {
-		step:    ImportStep::MemoryBackends,
-		item:    V1Item::Settings,
-		path:    path.clone(),
-		subject: Some(subject),
-		outcome: ImportOutcome::NotMigratable(NotMigratable::NoV2Equivalent),
-	};
-	let mut entries = Vec::new();
-	if let Some(
-		backend @ (V1MemoryBackend::Local
-		| V1MemoryBackend::Hindsight
-		| V1MemoryBackend::Sharpshooter),
-	) = settings.memory.backend
-	{
-		let name: &'static str = backend.into();
-		let mut text = StrMut::new("memory.backend ");
-		text.push_str(name);
-		if backend == V1MemoryBackend::Local {
-			text.push_str(" (its summaries; `learned.md` lessons move to Mnemopi)");
-		}
-		entries.push(dropped(text.freeze()));
-	}
-	for (prefix, keys, note) in [
-		("hindsight", &settings.hindsight, ""),
-		("sharpshooter", &settings.sharpshooter, ""),
-		("memories", &settings.memories, ", the `local` backend's tuning"),
-	] {
-		let KeyCount(count) = *keys;
-		if count > 0 {
-			let mut text = StrMut::default();
-			let _ =
-				write!(text, "{prefix}.* ({count} setting{}{note})", if count == 1 { "" } else { "s" });
-			entries.push(dropped(text.freeze()));
-		}
-	}
-	if entries.is_empty() {
-		entries.push(ImportEntry::new(
-			ImportStep::MemoryBackends,
-			V1Item::Settings,
-			path,
-			ImportOutcome::NothingToImport,
-		));
-	}
-	finish(ImportStep::MemoryBackends, cx)?;
-	Ok(entries)
 }
 
 #[cfg(test)]

@@ -189,11 +189,17 @@ pub(in crate::v1_import) fn import(cx: &StepContext<'_>) -> Result<Vec<ImportEnt
 					kept,
 					"installed plugin",
 				);
+				// v2 loads skills and MCP servers only from Agent Plugins 1.0
+				// packages (`agent/plugins`, `.agent/plugins`, `extensions`,
+				// `--ext` roots: `discovery::skills::sources`,
+				// `omp_envd::mcp::discovery`), never from this registry or its
+				// cache, and runs no JavaScript hooks.
 				if new + kept > 0 {
 					entries.push(entry(
 						&v1,
 						Some(Str::new_static(
-							"plugin JS hooks (their skills and MCP servers still load)",
+							"plugin skills, MCP servers and hooks (copied for `omp ext`; v2 does not \
+							 load them automatically yet)",
 						)),
 						ImportOutcome::NotMigratable(NotMigratable::NoV2Equivalent),
 					));

@@ -20,12 +20,11 @@ use crate::v1_import::{
 };
 
 /// The steps this module registers, in run order.
-const DATA_STEPS: [ImportStep; 6] = [
+const DATA_STEPS: [ImportStep; 5] = [
 	ImportStep::History,
 	ImportStep::InstallId,
 	ImportStep::Mnemopi,
 	ImportStep::LearnedLessons,
-	ImportStep::MemoryBackends,
 	ImportStep::Marketplace,
 ];
 
@@ -616,29 +615,6 @@ fn lessons_need_no_hint_when_the_profile_runs_mnemopi() {
 }
 
 #[test]
-fn hindsight_and_sharpshooter_settings_are_reported_as_dropped() {
-	let root = tempfile::tempdir().expect("scratch");
-	let home = root.path().join("home");
-	let v2 = roots(root.path());
-	write(
-		&home.join(".omp/agent/config.yml"),
-		"theme: dark\nmemory:\n  backend: hindsight\nhindsight:\n  apiUrl: https://h.example\n  \
-		 bankId: me\nsharpshooter:\n  intervalMinutes: 5\nmemories:\n  maxRolloutAgeDays: 7\n",
-	);
-	write(&home.join(".omp/profiles/work/agent/config.yml"), "memory:\n  backend: mnemopi\n");
-
-	let report = import(&v2, inputs(&home), ImportMode::Apply);
-
-	assert_eq!(summary(&report, ImportStep::MemoryBackends), [
-		(OutcomeKind::NotMigratable, owned("memory.backend hindsight")),
-		(OutcomeKind::NotMigratable, owned("hindsight.* (2 settings)")),
-		(OutcomeKind::NotMigratable, owned("sharpshooter.* (1 setting)")),
-		(OutcomeKind::NotMigratable, owned("memories.* (1 setting, the `local` backend's tuning)")),
-		(OutcomeKind::NothingToImport, None),
-	]);
-}
-
-#[test]
 fn the_marketplace_registry_and_cache_merge_into_v2() {
 	let root = tempfile::tempdir().expect("scratch");
 	let home = root.path().join("home");
@@ -720,7 +696,10 @@ fn the_marketplace_registry_and_cache_merge_into_v2() {
 		(OutcomeKind::Skipped, owned("1 installed plugin v2 already had")),
 		(
 			OutcomeKind::NotMigratable,
-			owned("plugin JS hooks (their skills and MCP servers still load)")
+			owned(
+				"plugin skills, MCP servers and hooks (copied for `omp ext`; v2 does not load them \
+				 automatically yet)"
+			)
 		),
 		(OutcomeKind::Imported, owned("1 cached marketplace")),
 		(OutcomeKind::Skipped, owned("cache/plugins/shared___fmt___2.0.0")),
@@ -788,7 +767,6 @@ fn full_fixture(root: &Path) -> (PathBuf, V2Roots) {
 		drop(v1_history(&agent.join("history.db"), &[("hello", 1, "/a")]));
 		v1_bank(&agent.join("memories/mnemopi/banks/app-1/mnemopi.db"), &[("a fact", &app)]);
 		write(&agent.join("memories").join(encode(&app)).join("learned.md"), "- a lesson\n");
-		write(&agent.join("config.yml"), "memory:\n  backend: sharpshooter\n");
 	}
 	write(&omp.join("marketplaces.json"), r#"{"version":1,"marketplaces":[]}"#);
 	write(&omp.join("plugins/cache/plugins/m___p___1/x"), "x");

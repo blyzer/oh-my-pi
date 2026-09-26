@@ -1,6 +1,5 @@
 //! Data and memory steps: prompt history, the install id, Mnemopi stores,
-//! `learned.md` lessons, dropped memory backends, and the Claude-format
-//! marketplace.
+//! `learned.md` lessons, and the Claude-format marketplace.
 //!
 //! Every v1 SQLite database is read without touching its directory: through
 //! an `immutable=1` URI, or, when a `-wal` holds pages not yet checkpointed,
