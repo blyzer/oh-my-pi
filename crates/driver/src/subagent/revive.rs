@@ -30,6 +30,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::{
+	AgentName,
 	settings::{SV_TASK_RECURSION_DEPTH, TaskSettings, child_ctx},
 	spawn::{
 		SpawnError, child_session_path, configure_child_route, create_isolation, discard_isolation,
@@ -290,6 +291,7 @@ async fn drive(
 		session_name: Some(child.id.clone()),
 		parent_session: Some(child.parent.clone()),
 		model_override: true,
+		agent: Some(AgentName::new(child.agent.clone())),
 		..KernelOptions::default()
 	};
 	let (mut kernel, mut session, _) =
