@@ -86,9 +86,11 @@ fn control(root: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
 	(control, store)
 }
 
+/// The model steps' outcomes; other steps have their own tests.
 fn outcomes(report: &ImportReport) -> Vec<(ImportStep, Option<&str>, OutcomeKind)> {
 	report
 		.entries()
+		.filter(|entry| entry.item == V1Item::Models)
 		.map(|entry| (entry.step, entry.subject.as_deref(), entry.outcome.kind()))
 		.collect()
 }
@@ -484,6 +486,7 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 	assert!(
 		again
 			.entries()
+			.filter(|entry| entry.item == V1Item::Models)
 			.all(|entry| matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent)))
 	);
 	assert_eq!(snapshot(config), v2_before);

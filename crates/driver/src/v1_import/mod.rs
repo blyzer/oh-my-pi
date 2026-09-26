@@ -54,6 +54,7 @@
 //!    run writes nothing, a second run is a no-op, and the v1 tree is
 //!    byte-identical afterwards.
 
+mod assets;
 mod credentials;
 pub mod locate;
 mod models;

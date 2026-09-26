@@ -211,7 +211,12 @@ fn render_v1_report(report: &omp_driver::v1_import::ImportReport) -> String {
 				ImportOutcome::NotMigratable(reason) => {
 					let _ = write!(out, ": {reason}");
 				},
-				ImportOutcome::NeedsAttention(Attention::Failed(error)) => {
+				ImportOutcome::NeedsAttention(
+					attention @ (Attention::Failed(error) | Attention::Incompatible(error)),
+				) => {
+					if matches!(attention, Attention::Incompatible(_)) {
+						let _ = write!(out, ": {attention}");
+					}
 					let _ = write!(out, ": {error}");
 					let mut source = std::error::Error::source(error);
 					while let Some(cause) = source {

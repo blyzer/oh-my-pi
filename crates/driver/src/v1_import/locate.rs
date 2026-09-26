@@ -138,6 +138,13 @@ pub enum V1Item {
 	Commands,
 	/// Custom agents `agent/agents/`.
 	Agents,
+	/// Project SSH hosts `<project>/.omp/ssh.json`.
+	ProjectSsh,
+	/// Project MCP servers in the hidden `<project>/.omp/.mcp.json`, which v2
+	/// does not read (it reads `.omp/mcp.json`).
+	ProjectMcp,
+	/// Project slash commands `<project>/.omp/commands/`.
+	ProjectCommands,
 }
 
 /// Base a v1 item hangs off.
@@ -152,6 +159,9 @@ enum Anchor {
 	RootXdg(XdgCategory),
 	/// The profile-independent root.
 	BaseRoot,
+	/// The project the import runs for (the working directory); profile
+	/// independent.
+	Project,
 }
 
 /// Static facts locating one [`V1Item`].
@@ -225,6 +235,9 @@ impl V1Item {
 			Self::TitleSystemMd => (Anchor::Agent, &["TITLE_SYSTEM.md"][..], ItemShape::File),
 			Self::Commands => (Anchor::Agent, &["commands"][..], ItemShape::Directory),
 			Self::Agents => (Anchor::Agent, &["agents"][..], ItemShape::Directory),
+			Self::ProjectSsh => (Anchor::Project, &[".omp/ssh.json"][..], ItemShape::File),
+			Self::ProjectMcp => (Anchor::Project, &[".omp/.mcp.json"][..], ItemShape::File),
+			Self::ProjectCommands => (Anchor::Project, &[".omp/commands"][..], ItemShape::Directory),
 		};
 		ItemSpec {
 			anchor,
@@ -258,6 +271,9 @@ pub struct V1Inputs {
 	/// An explicit v1 configuration root (`--from`), read as-is: it replaces
 	/// `$HOME/.omp` and disables `PI_*` and XDG relocation.
 	pub explicit_root:  Option<PathBuf>,
+	/// The project whose `.omp/` v1-only files convert in place (the working
+	/// directory).
+	pub project:        Option<PathBuf>,
 }
 
 impl V1Inputs {
@@ -275,6 +291,7 @@ impl V1Inputs {
 			xdg_state_home: path("XDG_STATE_HOME"),
 			xdg_cache_home: path("XDG_CACHE_HOME"),
 			explicit_root:  None,
+			project:        env::current_dir().ok(),
 		})
 	}
 
@@ -446,10 +463,12 @@ impl V1Source {
 		}
 		V1Layout {
 			profile: profile.map(Str::new),
+			home: self.inputs.home.clone(),
 			base_root: self.base_root.clone(),
 			config_root,
 			agent_dir,
 			xdg,
+			project: self.inputs.project.clone(),
 		}
 	}
 
@@ -482,10 +501,12 @@ impl V1Source {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct V1Layout {
 	profile:     Option<Str>,
+	home:        PathBuf,
 	base_root:   PathBuf,
 	config_root: PathBuf,
 	agent_dir:   PathBuf,
 	xdg:         [Option<PathBuf>; 3],
+	project:     Option<PathBuf>,
 }
 
 impl V1Layout {
@@ -499,6 +520,18 @@ impl V1Layout {
 	#[must_use]
 	pub fn base_root(&self) -> &Path {
 		&self.base_root
+	}
+
+	/// The owner's home directory (`~/.ssh/known_hosts` lives under it).
+	#[must_use]
+	pub fn home(&self) -> &Path {
+		&self.home
+	}
+
+	/// The project whose `.omp/` v1-only files convert in place, if any.
+	#[must_use]
+	pub fn project(&self) -> Option<&Path> {
+		self.project.as_deref()
 	}
 
 	/// The profile root (`~/.omp` or `~/.omp/profiles/<profile>`).
@@ -525,18 +558,20 @@ impl V1Layout {
 	pub fn candidates(&self, item: V1Item) -> impl Iterator<Item = PathBuf> + '_ {
 		let spec = item.spec();
 		let (primary, legacy) = match spec.anchor {
-			Anchor::Agent => (self.agent_dir.as_path(), None),
+			Anchor::Agent => (Some(self.agent_dir.as_path()), None),
 			Anchor::AgentXdg(category) => match self.xdg_root(category) {
-				Some(root) => (root, spec.adopts_legacy.then_some(self.agent_dir.as_path())),
-				None => (self.agent_dir.as_path(), None),
+				Some(root) => (Some(root), spec.adopts_legacy.then_some(self.agent_dir.as_path())),
+				None => (Some(self.agent_dir.as_path()), None),
 			},
 			Anchor::RootXdg(category) => match self.xdg_root(category) {
-				Some(root) => (root, spec.adopts_legacy.then_some(self.config_root.as_path())),
-				None => (self.config_root.as_path(), None),
+				Some(root) => (Some(root), spec.adopts_legacy.then_some(self.config_root.as_path())),
+				None => (Some(self.config_root.as_path()), None),
 			},
-			Anchor::BaseRoot => (self.base_root.as_path(), None),
+			Anchor::BaseRoot => (Some(self.base_root.as_path()), None),
+			Anchor::Project => (self.project.as_deref(), None),
 		};
-		std::iter::once(primary)
+		primary
+			.into_iter()
 			.chain(legacy)
 			.flat_map(move |base| spec.names.iter().map(move |name| base.join(name)))
 	}
