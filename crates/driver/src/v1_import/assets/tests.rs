@@ -3,6 +3,7 @@
 
 use std::{
 	collections::BTreeMap,
+	fmt::Write as _,
 	fs,
 	path::{Path, PathBuf},
 };
@@ -113,7 +114,7 @@ impl Fixture {
 	fn known_host(&self, pattern: &str, key: &str) {
 		let path = self.home.join(".ssh/known_hosts");
 		let mut text = fs::read_to_string(&path).unwrap_or_default();
-		text.push_str(&format!("{pattern} ssh-ed25519 {key}\n"));
+		let _ = writeln!(text, "{pattern} ssh-ed25519 {key}");
 		write(&path, &text);
 	}
 }
@@ -127,11 +128,11 @@ fn apply(pairs: &[ImportPair]) -> ImportReport {
 }
 
 /// `(item, subject, kind)` for one step's entries.
-fn kinds(report: &ImportReport, step: ImportStep) -> Vec<(V1Item, Option<String>, OutcomeKind)> {
+fn kinds(report: &ImportReport, step: ImportStep) -> Vec<(V1Item, Option<&str>, OutcomeKind)> {
 	report
 		.entries()
 		.filter(|entry| entry.step == step)
-		.map(|entry| (entry.item, entry.subject.as_deref().map(str::to_owned), entry.outcome.kind()))
+		.map(|entry| (entry.item, entry.subject.as_deref(), entry.outcome.kind()))
 		.collect()
 }
 
@@ -140,10 +141,6 @@ fn entry<'r>(report: &'r ImportReport, step: ImportStep, subject: &str) -> &'r I
 		.entries()
 		.find(|entry| entry.step == step && entry.subject.as_deref() == Some(subject))
 		.unwrap_or_else(|| panic!("no {step} entry for {subject}: {report:#?}"))
-}
-
-fn some(text: &str) -> Option<String> {
-	Some(text.to_owned())
 }
 
 /// A v1 agent directory with one of every asset.
@@ -371,9 +368,9 @@ fn a_tree_copy_keeps_v2_files_and_reports_each_conflict() {
 	assert_eq!(read(&v2_skills.join("a/SKILL.md")), "v2 a", "v2's file wins");
 	assert_eq!(read(&v2_skills.join("c/SKILL.md")), "v1 c");
 	assert_eq!(kinds(&report, ImportStep::Skills), [
-		(V1Item::Skills, some("agent/skills (1 file)"), OutcomeKind::Imported),
-		(V1Item::Skills, some("agent/skills (1 file)"), OutcomeKind::Skipped),
-		(V1Item::Skills, some("agent/skills/a/SKILL.md"), OutcomeKind::NeedsAttention),
+		(V1Item::Skills, Some("agent/skills (1 file)"), OutcomeKind::Imported),
+		(V1Item::Skills, Some("agent/skills (1 file)"), OutcomeKind::Skipped),
+		(V1Item::Skills, Some("agent/skills/a/SKILL.md"), OutcomeKind::NeedsAttention),
 		(V1Item::ManagedSkills, None, OutcomeKind::NothingToImport),
 	]);
 	let conflict = entry(&report, ImportStep::Skills, "agent/skills/a/SKILL.md");
@@ -501,14 +498,14 @@ fn ssh_json_converts_to_hosts_toml() {
 		["build", "kept", "plain"]
 	);
 	assert_eq!(kinds(&report, ImportStep::SshHosts), [
-		(V1Item::Ssh, some("anonymous"), OutcomeKind::NeedsAttention),
-		(V1Item::Ssh, some("build description"), OutcomeKind::NotMigratable),
-		(V1Item::Ssh, some("build compat"), OutcomeKind::NotMigratable),
-		(V1Item::Ssh, some("build"), OutcomeKind::Imported),
-		(V1Item::Ssh, some("env"), OutcomeKind::NeedsAttention),
-		(V1Item::Ssh, some("kept"), OutcomeKind::NeedsAttention),
-		(V1Item::Ssh, some("plain"), OutcomeKind::Imported),
-		(V1Item::Ssh, some("unpinned"), OutcomeKind::NeedsAttention),
+		(V1Item::Ssh, Some("anonymous"), OutcomeKind::NeedsAttention),
+		(V1Item::Ssh, Some("build description"), OutcomeKind::NotMigratable),
+		(V1Item::Ssh, Some("build compat"), OutcomeKind::NotMigratable),
+		(V1Item::Ssh, Some("build"), OutcomeKind::Imported),
+		(V1Item::Ssh, Some("env"), OutcomeKind::NeedsAttention),
+		(V1Item::Ssh, Some("kept"), OutcomeKind::NeedsAttention),
+		(V1Item::Ssh, Some("plain"), OutcomeKind::Imported),
+		(V1Item::Ssh, Some("unpinned"), OutcomeKind::NeedsAttention),
 	]);
 	let reason = |alias: &str| match &entry(&report, ImportStep::SshHosts, alias).outcome {
 		ImportOutcome::NeedsAttention(Attention::Incompatible(
@@ -556,10 +553,10 @@ fn v1_commands_become_prompt_templates() {
 	assert!(!config.join("agent/prompts/broken.md").exists());
 	assert!(!config.join("agent/prompts/.hidden.md").exists());
 	assert_eq!(kinds(&report, ImportStep::Commands), [
-		(V1Item::Commands, some("agent/prompts/broken.md"), OutcomeKind::NeedsAttention),
-		(V1Item::Commands, some("deploy"), OutcomeKind::NotMigratable),
-		(V1Item::Commands, some("agent/prompts/plain.md"), OutcomeKind::NeedsAttention),
-		(V1Item::Commands, some("agent/prompts/review.md"), OutcomeKind::Imported),
+		(V1Item::Commands, Some("agent/prompts/broken.md"), OutcomeKind::NeedsAttention),
+		(V1Item::Commands, Some("deploy"), OutcomeKind::NotMigratable),
+		(V1Item::Commands, Some("agent/prompts/plain.md"), OutcomeKind::NeedsAttention),
+		(V1Item::Commands, Some("agent/prompts/review.md"), OutcomeKind::Imported),
 	]);
 }
 
@@ -586,13 +583,13 @@ fn lsp_dap_and_secrets_copy_only_what_v2_can_load() {
 	let lsp = discover_native_lsp_sources(Some(config), &fixture.project).expect("lsp");
 	omp_envd::docserver::lsp_config::load_lsp_config(&lsp).expect("the copied LSP file loads");
 	assert_eq!(kinds(&report, ImportStep::LspDap), [
-		(V1Item::Lsp, some("agent/lsp.json"), OutcomeKind::Imported),
-		(V1Item::Lsp, some("agent/.lsp.yaml"), OutcomeKind::NeedsAttention),
-		(V1Item::Dap, some("agent/dap.json"), OutcomeKind::NeedsAttention),
+		(V1Item::Lsp, Some("agent/lsp.json"), OutcomeKind::Imported),
+		(V1Item::Lsp, Some("agent/.lsp.yaml"), OutcomeKind::NeedsAttention),
+		(V1Item::Dap, Some("agent/dap.json"), OutcomeKind::NeedsAttention),
 	]);
 	assert_eq!(kinds(&report, ImportStep::Secrets), [(
 		V1Item::Secrets,
-		some("secrets.yml"),
+		Some("secrets.yml"),
 		OutcomeKind::NeedsAttention
 	)]);
 }
@@ -629,10 +626,10 @@ fn a_project_omp_converts_in_place_once() {
 	let templates = PromptTemplates::discover(&fixture.project, config, &[], true);
 	assert_eq!(templates.get("release").expect("release").source.as_str(), "(project)");
 	assert_eq!(kinds(&report, ImportStep::ProjectAssets), [
-		(V1Item::ProjectSsh, some("stage"), OutcomeKind::Imported),
-		(V1Item::ProjectMcp, some("lint"), OutcomeKind::Imported),
-		(V1Item::ProjectMcp, some("repo"), OutcomeKind::NeedsAttention),
-		(V1Item::ProjectCommands, some(".omp/prompts/release.md"), OutcomeKind::Imported),
+		(V1Item::ProjectSsh, Some("stage"), OutcomeKind::Imported),
+		(V1Item::ProjectMcp, Some("lint"), OutcomeKind::Imported),
+		(V1Item::ProjectMcp, Some("repo"), OutcomeKind::NeedsAttention),
+		(V1Item::ProjectCommands, Some(".omp/prompts/release.md"), OutcomeKind::Imported),
 	]);
 	// The v1-only project files are untouched; `mcp.json`, which both
 	// versions read, gained the merged servers.
@@ -659,7 +656,7 @@ fn a_project_omp_converts_in_place_once() {
 	assert_eq!(kinds(&third, ImportStep::ProjectAssets), [
 		(V1Item::ProjectSsh, None, OutcomeKind::NothingToImport),
 		(V1Item::ProjectMcp, None, OutcomeKind::NothingToImport),
-		(V1Item::ProjectCommands, some(".omp/prompts/hello.md"), OutcomeKind::Imported),
+		(V1Item::ProjectCommands, Some(".omp/prompts/hello.md"), OutcomeKind::Imported),
 	]);
 }
 
