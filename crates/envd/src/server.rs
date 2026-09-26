@@ -467,11 +467,24 @@ fn approval_mode_from_wire(value: i32) -> Result<Option<ApprovalMode>, i32> {
 #[derive(Debug)]
 #[doc(hidden)]
 pub struct ExtensionDataBinding {
-	key:               HostKey,
-	path:              PathBuf,
-	grants:            Grants,
+	key:      HostKey,
+	path:     PathBuf,
+	grants:   Grants,
 	#[cfg(unix)]
-	prepared_listener: Option<std::os::unix::net::UnixListener>,
+	prepared: Option<PreparedEndpoint>,
+}
+
+/// A bound, published extension DATA socket awaiting its server.
+///
+/// Owns the published path from the moment it is bound: dropping it at any
+/// point (an unserved binding, a serve future dropped before its first poll)
+/// removes the socket, and the server inherits the same guard when it takes
+/// the listener over.
+#[cfg(unix)]
+#[derive(Debug)]
+struct PreparedEndpoint {
+	listener: std::os::unix::net::UnixListener,
+	guard:    UnixSocketPathGuard,
 }
 
 impl ExtensionDataBinding {
@@ -541,7 +554,7 @@ impl ExtensionDataBinding {
 			path,
 			grants,
 			#[cfg(unix)]
-			prepared_listener: None,
+			prepared: None,
 		}
 	}
 
@@ -564,9 +577,13 @@ impl ExtensionDataBinding {
 		})?;
 		ensure_directory(parent)?;
 		let listener = std::os::unix::net::UnixListener::bind(&self.path)?;
+		// Own the published path before anything else can fail: an error below,
+		// or a later drop of this binding or of the serve future holding it,
+		// removes exactly this inode and never a competing daemon's socket.
+		let guard = UnixSocketPathGuard::new(self.path.clone(), &fs::symlink_metadata(&self.path)?);
 		fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
 		listener.set_nonblocking(true)?;
-		self.prepared_listener = Some(listener);
+		self.prepared = Some(PreparedEndpoint { listener, guard });
 		Ok(())
 	}
 
@@ -3614,13 +3631,15 @@ impl EnvServer {
 			.authority
 			.register_host(binding.key.clone(), binding.grants.clone());
 		let policy = binding.policy();
-		let listener = binding
-			.prepared_listener
+		let prepared = binding
+			.prepared
 			.take()
-			.map(UnixListener::from_std)
+			.map(|PreparedEndpoint { listener, guard }| {
+				UnixListener::from_std(listener).map(|listener| (listener, guard))
+			})
 			.transpose()?;
 		let result = self
-			.serve_uds_with_policy(&binding.path, shutdown, Some(policy), None, listener)
+			.serve_uds_with_policy(&binding.path, shutdown, Some(policy), None, prepared)
 			.await;
 		if let Err(error) = &result {
 			tracing::error!(
@@ -3648,7 +3667,7 @@ impl EnvServer {
 		shutdown: CancellationToken,
 		connection_policy: Option<ConnectionPolicy>,
 		connection_gauge: Option<watch::Sender<usize>>,
-		prepared_listener: Option<UnixListener>,
+		prepared: Option<(UnixListener, UnixSocketPathGuard)>,
 	) -> Result<(), EnvdError> {
 		use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 
@@ -3656,7 +3675,10 @@ impl EnvServer {
 			io::Error::new(io::ErrorKind::InvalidInput, "environment socket has no parent")
 		})?;
 		ensure_directory(parent)?;
-		let (listener, socket_metadata, _path_guard) = if let Some(listener) = prepared_listener {
+		let (listener, socket_metadata, _path_guard) = if let Some((listener, guard)) = prepared {
+			// The guard has owned the published path since the endpoint was
+			// prepared; the server only inherits it. A path that no longer names
+			// that inode is someone else's and is never served or removed.
 			let metadata = fs::symlink_metadata(path)?;
 			if !metadata.file_type().is_socket() {
 				return Err(
@@ -3667,7 +3689,15 @@ impl EnvServer {
 					.into(),
 				);
 			}
-			let guard = UnixSocketPathGuard::new(path.to_path_buf(), &metadata);
+			if !guard.owns(&metadata) {
+				return Err(
+					io::Error::new(
+						io::ErrorKind::AlreadyExists,
+						"prepared environment socket was replaced",
+					)
+					.into(),
+				);
+			}
 			(listener, metadata, guard)
 		} else {
 			match tokio::fs::symlink_metadata(path).await {
@@ -12300,6 +12330,7 @@ async fn ensure_document_socket_free(root: &Path, socket: &Path) -> Result<(), E
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
 struct UnixSocketPathGuard {
 	path: PathBuf,
 	dev:  u64,
@@ -12313,16 +12344,20 @@ impl UnixSocketPathGuard {
 
 		Self { path, dev: metadata.dev(), ino: metadata.ino() }
 	}
+
+	/// Whether `metadata` describes the inode this guard owns.
+	fn owns(&self, metadata: &fs::Metadata) -> bool {
+		use std::os::unix::fs::MetadataExt as _;
+
+		metadata.dev() == self.dev && metadata.ino() == self.ino
+	}
 }
 
 #[cfg(unix)]
 impl Drop for UnixSocketPathGuard {
 	fn drop(&mut self) {
-		use std::os::unix::fs::MetadataExt as _;
-
 		if let Ok(metadata) = fs::symlink_metadata(&self.path)
-			&& metadata.dev() == self.dev
-			&& metadata.ino() == self.ino
+			&& self.owns(&metadata)
 		{
 			let _ = fs::remove_file(&self.path);
 		}
@@ -13090,6 +13125,32 @@ mod tests {
 				.is_cancelled()
 		);
 		assert!(!socket.exists(), "extension socket survived task teardown");
+	}
+
+	/// A prepared endpoint publishes its socket before any server runs, so the
+	/// serve future can be dropped before its first poll. The prepared endpoint
+	/// owns the published path from creation; nothing may leak it.
+	#[tokio::test]
+	async fn extension_socket_prepared_endpoint_is_removed_when_serve_is_dropped_unpolled() {
+		use std::os::unix::fs::FileTypeExt as _;
+
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let (server, mut binding) = socket_mode_extension_server(root.path(), state.path()).await;
+		binding
+			.prepare_endpoint()
+			.expect("prepare extension endpoint");
+		let socket = binding.path().to_path_buf();
+		assert!(
+			fs::symlink_metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket()),
+			"prepared endpoint did not publish its socket"
+		);
+		let serve = server.serve_extension_uds(binding, CancellationToken::new());
+		drop(serve);
+		assert!(
+			fs::symlink_metadata(&socket).is_err(),
+			"prepared extension socket survived a serve future dropped before its first poll"
+		);
 	}
 
 	/// Drops the serve future at the first poll boundary after its socket
