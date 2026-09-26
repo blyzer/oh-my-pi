@@ -1,4 +1,9 @@
-//! Claude Code and Codex transcript import into native `.oms` journals.
+//! Claude Code, Codex, and omp v1 transcript import into native `.oms`
+//! journals.
+//!
+//! omp v1 sessions are located, placed, and recorded by
+//! [`omp_driver::v1_import::sessions`]; this module converts their bytes
+//! ([`V1Converter`]).
 
 mod convert;
 
@@ -22,6 +27,8 @@ pub enum ForeignFormat {
 	Claude,
 	/// Codex CLI rollout JSON-line events.
 	Codex,
+	/// omp v1 (TypeScript `omp`) session transcripts.
+	Omp1,
 }
 
 /// Lightweight metadata for one importable foreign transcript.
@@ -194,6 +201,20 @@ pub fn import_file(
 	convert::import_file(format, source, destination)
 }
 
+/// The omp v1 session converter the driver's import runs through: the
+/// picker's on-demand import and `omp config import-v1 --sessions`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct V1Converter;
+
+impl omp_driver::v1_import::V1SessionConverter for V1Converter {
+	fn convert(
+		&self,
+		conversion: &omp_driver::v1_import::V1Conversion<'_>,
+	) -> Result<usize, omp_driver::v1_import::sessions::ConvertError> {
+		convert::import_v1(conversion).map_err(Into::into)
+	}
+}
+
 fn foreign_root(format: ForeignFormat) -> miette::Result<PathBuf> {
 	let home = std::env::var_os("HOME")
 		.map(PathBuf::from)
@@ -203,6 +224,11 @@ fn foreign_root(format: ForeignFormat) -> miette::Result<PathBuf> {
 			.map(PathBuf::from)
 			.unwrap_or_else(|| home.join(".claude")),
 		ForeignFormat::Codex => home.join(".codex"),
+		ForeignFormat::Omp1 => omp_driver::v1_import::active_pair()
+			.into_diagnostic()?
+			.source
+			.locate(omp_driver::v1_import::V1Item::Sessions)
+			.ok_or_else(|| miette!("no v1 sessions directory was found"))?,
 	})
 }
 
@@ -212,6 +238,7 @@ fn transcript_roots(format: ForeignFormat, root: &Path) -> Vec<PathBuf> {
 		ForeignFormat::Codex => {
 			vec![root.join("sessions"), root.join(".sessions"), root.join("archived_sessions")]
 		},
+		ForeignFormat::Omp1 => vec![root.to_path_buf()],
 	}
 }
 
@@ -404,6 +431,15 @@ fn foreign_message(format: ForeignFormat, value: &Value) -> Option<(&'static str
 			};
 			let content = payload.get("content").or_else(|| payload.get("message"))?;
 			text_content(content).map(|text| (role, text))
+		},
+		ForeignFormat::Omp1 => {
+			let message = value.get("message")?;
+			let role = match message.get("role")?.as_str()? {
+				"user" => "user",
+				"assistant" => "assistant",
+				_ => return None,
+			};
+			text_content(message.get("content")?).map(|text| (role, text))
 		},
 	}
 }
