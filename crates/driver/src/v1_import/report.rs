@@ -42,6 +42,13 @@ pub enum SkipReason {
 	/// profile's own first run (or `omp config import-v1`).
 	#[strum(to_string = "waits for that profile's first run or `omp config import-v1`")]
 	WaitsForProfile,
+	/// v1 sessions convert when picked from `/resume @v1`, or all at once with
+	/// `omp config import-v1 --sessions` (owner decision #4).
+	#[strum(to_string = "converted on demand: `/resume @v1`, or `omp config import-v1 --sessions`")]
+	OnDemand,
+	/// The session's earlier import still has its journal.
+	#[strum(to_string = "already imported")]
+	SessionImported,
 }
 
 /// Why v1 data cannot move to v2.

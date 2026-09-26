@@ -51,6 +51,9 @@ pub enum ImportStep {
 	Models,
 	/// Literal v1 `models.yml` `apiKey`s into the encrypted credential store.
 	ModelsKeys,
+	/// v1 session transcripts into native journals: on demand, or all of them
+	/// with `omp config import-v1 --sessions` (owner decision #4).
+	Sessions,
 }
 
 impl ImportStep {
@@ -64,6 +67,7 @@ impl ImportStep {
 	pub const fn item(self) -> V1Item {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
+			Self::Sessions => V1Item::Sessions,
 		}
 	}
 
@@ -86,6 +90,7 @@ impl ImportStep {
 		match self {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
+			Self::Sessions => super::sessions::import_sessions(cx),
 		}
 	}
 }
@@ -178,6 +183,8 @@ pub struct StepContext<'a> {
 	/// only in [`ImportMode::Apply`], and only when they have something to
 	/// store, so nothing is created for a profile without credentials.
 	pub credentials: &'a CredentialSlot<'a>,
+	/// Whether this run converts v1 sessions ([`super::SessionImport`]).
+	pub sessions:    super::SessionImport<'a>,
 }
 
 /// One pair's credential store, opened at most once and only on demand.
@@ -233,16 +240,32 @@ pub fn run(
 	mode: ImportMode,
 	credentials: CredentialAccess<'_>,
 ) -> ImportReport {
+	run_with(pairs, mode, credentials, super::SessionImport::OnDemand)
+}
+
+/// [`run`], converting v1 sessions as `sessions` says (bulk only for
+/// `omp config import-v1 --sessions`).
+pub fn run_with(
+	pairs: &[ImportPair],
+	mode: ImportMode,
+	credentials: CredentialAccess<'_>,
+	sessions: super::SessionImport<'_>,
+) -> ImportReport {
 	ImportReport {
 		dry_run: mode == ImportMode::DryRun,
 		pairs:   pairs
 			.iter()
-			.map(|pair| run_pair(pair, mode, credentials))
+			.map(|pair| run_pair(pair, mode, credentials, sessions))
 			.collect(),
 	}
 }
 
-fn run_pair(pair: &ImportPair, mode: ImportMode, access: CredentialAccess<'_>) -> PairReport {
+fn run_pair(
+	pair: &ImportPair,
+	mode: ImportMode,
+	access: CredentialAccess<'_>,
+	sessions: super::SessionImport<'_>,
+) -> PairReport {
 	let steps = ImportStep::registered();
 	let inventory = pair
 		.source
@@ -278,7 +301,7 @@ fn run_pair(pair: &ImportPair, mode: ImportMode, access: CredentialAccess<'_>) -
 			));
 			continue;
 		}
-		let cx = StepContext { pair, mode, credentials: &credentials };
+		let cx = StepContext { pair, mode, credentials: &credentials, sessions };
 		match step.run(&cx) {
 			Ok(produced) => entries.extend(produced),
 			Err(error) => entries.push(ImportEntry::new(
@@ -343,4 +366,7 @@ pub enum ImportError {
 	/// The credential broker could not be composed over the catalog.
 	#[error("could not compose the credential broker")]
 	CredentialBroker(#[from] omp_ai::auth::CredentialBrokerError),
+	/// A v1 session could not be imported.
+	#[error("could not import a v1 session")]
+	Session(#[from] super::sessions::SessionImportError),
 }

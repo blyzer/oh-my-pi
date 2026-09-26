@@ -86,9 +86,11 @@ fn control(root: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
 	(control, store)
 }
 
+/// Every entry but the sessions step's, which `sessions/tests.rs` proves.
 fn outcomes(report: &ImportReport) -> Vec<(ImportStep, Option<&str>, OutcomeKind)> {
 	report
 		.entries()
+		.filter(|entry| entry.step != ImportStep::Sessions)
 		.map(|entry| (entry.step, entry.subject.as_deref(), entry.outcome.kind()))
 		.collect()
 }
@@ -409,7 +411,7 @@ fn a_dry_run_writes_nothing() {
 	assert_eq!(inventory[0].0, V1Item::Models);
 	assert_eq!(inventory[0].2, [ImportStep::Models, ImportStep::ModelsKeys]);
 	assert_eq!(inventory[1].0, V1Item::Sessions);
-	assert!(inventory[1].2.is_empty(), "no session step is registered yet");
+	assert_eq!(inventory[1].2, [ImportStep::Sessions]);
 }
 
 #[test]
@@ -484,6 +486,7 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 	assert!(
 		again
 			.entries()
+			.filter(|entry| entry.step != ImportStep::Sessions)
 			.all(|entry| matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent)))
 	);
 	assert_eq!(snapshot(config), v2_before);
