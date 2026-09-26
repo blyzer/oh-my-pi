@@ -8,9 +8,9 @@ use std::{
 	future::Future,
 	io,
 	io::IsTerminal as _,
-	path::Path,
+	path::{Path, PathBuf},
 	sync::{Arc, LazyLock},
-	time::Duration,
+	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(target_os = "macos")]
@@ -20,7 +20,7 @@ use omp_ai::provider::builtin::LocalRouteBackend;
 #[cfg(feature = "local-applefm")]
 use omp_ai::receipt::ReasonId;
 use omp_ai::{
-	Registry,
+	CallAffinity, CallMeta, Client, ProviderService, Registry, RegistryHandle,
 	account::{
 		AccountPool, AccountStateStore, AccountStateStoreError, RefreshCoordinator, RefreshPolicy,
 	},
@@ -64,6 +64,7 @@ use omp_ai::{
 		AuthApplicationConfig, AzureEndpointConfig, GoogleCcaConfig, ProductionDependencies,
 		discover_antigravity_version,
 	},
+	router::Router,
 	session::{ConversationError, ConversationSessionPlanner},
 	transport::{http::HttpTransport, websocket_transport::WebSocketTransport},
 };
@@ -502,11 +503,24 @@ fn catalog_composition(source: impl std::error::Error + Send + Sync + 'static) -
 	RegistryError::CatalogComposition(Box::new(source))
 }
 
+/// One discovery pass over the configured probes.
+struct DiscoveryPass {
+	/// The catalog after the pass: rebuilt from the cache when any probe
+	/// published, else the catalog the pass started from.
+	catalog:   Arc<snapshot::Catalog>,
+	/// Whether any probe published a new cache generation.
+	published: bool,
+}
+
+/// Probes every configured discovery endpoint whose cache is stale, plus every
+/// endpoint of `forced` (a provider whose credentials just changed) even when
+/// its cache is fresh or its last failure is still backing off.
 async fn refresh_model_discovery_cache(
 	data_dir: &Path,
 	catalog: Arc<snapshot::Catalog>,
 	credential_store: &Arc<CredentialStore>,
-) -> Result<Arc<snapshot::Catalog>, RegistryError> {
+	forced: Option<&omp_catalog::ProviderId<str>>,
+) -> Result<DiscoveryPass, RegistryError> {
 	use omp_ai::discovery::{
 		DiscoveryCacheKey, DiscoveryStore, DiscoveryStoreError, ProviderDiscoveryState,
 		ProviderLifecycle,
@@ -521,7 +535,7 @@ async fn refresh_model_discovery_cache(
 	)
 	.map_err(catalog_composition)?;
 	if probes.is_empty() {
-		return Ok(catalog);
+		return Ok(DiscoveryPass { catalog, published: false });
 	}
 	crate::discovery::models::authenticate_probes_from_store(
 		&mut probes,
@@ -543,20 +557,23 @@ async fn refresh_model_discovery_cache(
 	let mut pending = Vec::new();
 	for probe in probes {
 		let key = DiscoveryCacheKey::endpoint(probe.provider.clone(), &probe.endpoint);
-		if store
-			.load_fresh(&key, now_ms)
-			.map_err(catalog_composition)?
-			.is_some()
+		let forced = forced.is_some_and(|provider| probe.provider.as_str() == provider.as_str());
+		if !forced
+			&& store
+				.load_fresh(&key, now_ms)
+				.map_err(catalog_composition)?
+				.is_some()
 		{
 			continue;
 		}
-		if store
-			.lifecycle(&key)
-			.map_err(catalog_composition)?
-			.is_some_and(|state| {
-				state.state == ProviderDiscoveryState::Failed
-					&& state.retry_at_ms.is_some_and(|retry| retry > now_ms)
-			}) {
+		if !forced
+			&& store
+				.lifecycle(&key)
+				.map_err(catalog_composition)?
+				.is_some_and(|state| {
+					state.state == ProviderDiscoveryState::Failed
+						&& state.retry_at_ms.is_some_and(|retry| retry > now_ms)
+				}) {
 			continue;
 		}
 		store
@@ -621,14 +638,239 @@ async fn refresh_model_discovery_cache(
 			}
 		});
 	}
-	let mut changed = false;
+	let mut published = false;
 	for result in futures::future::join_all(pending).await {
-		changed |= result.map_err(catalog_composition)?;
+		published |= result.map_err(catalog_composition)?;
 	}
-	if changed {
-		production_catalog(data_dir)
+	Ok(if published {
+		DiscoveryPass { catalog: production_catalog(data_dir)?, published }
 	} else {
-		Ok(catalog)
+		DiscoveryPass { catalog, published }
+	})
+}
+
+/// Why a mid-session model-discovery refresh runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiscoveryRefresh {
+	/// The earliest cached discovery generation reached its TTL.
+	Expired,
+	/// A login changed this provider's credentials: re-probe its endpoints
+	/// even while their cache is fresh.
+	LoggedIn(omp_catalog::ProviderId),
+}
+
+/// Re-runs runtime model discovery for a composed session and publishes the
+/// result atomically through the session's [`RegistryHandle`].
+///
+/// A refresh rebuilds one complete registry over the refreshed catalog from
+/// the retained [`BuiltinConfig`] and swaps it in; snapshots already loaded
+/// (an in-flight turn's) keep routing through the registry they loaded.
+#[derive(Clone)]
+pub struct DiscoveryRefresher {
+	data_dir:    PathBuf,
+	credentials: Arc<CredentialStore>,
+	builtins:    BuiltinConfig,
+	registry:    RegistryHandle,
+}
+
+impl DiscoveryRefresher {
+	/// Runs one discovery pass. Publishes and returns the refreshed catalog
+	/// when any probe produced a new generation; returns `None` and leaves the
+	/// published registry untouched otherwise. On error nothing is published.
+	pub async fn refresh(
+		&self,
+		why: &DiscoveryRefresh,
+	) -> Result<Option<Arc<snapshot::Catalog>>, RegistryError> {
+		let current = self.registry.load();
+		let forced = match why {
+			DiscoveryRefresh::Expired => None,
+			DiscoveryRefresh::LoggedIn(provider) => Some(&**provider),
+		};
+		let pass = refresh_model_discovery_cache(
+			&self.data_dir,
+			Arc::clone(current.shared_catalog()),
+			&self.credentials,
+			forced,
+		)
+		.await?;
+		if !pass.published {
+			return Ok(None);
+		}
+		let registry = Registry::builder(Arc::clone(&pass.catalog))
+			.with_builtins(self.builtins.clone())?
+			.with_generation(current.generation().saturating_add(1))
+			.build()?;
+		self.registry.replace(registry);
+		tracing::debug!(
+			?why,
+			models = pass.catalog.models().len(),
+			"published refreshed model discovery"
+		);
+		Ok(Some(pass.catalog))
+	}
+
+	/// Wall-clock instant the earliest still-fresh cached generation expires.
+	pub fn next_expiry(&self) -> Result<Option<SystemTime>, RegistryError> {
+		let path = self.data_dir.join("models.db");
+		if !path.exists() {
+			return Ok(None);
+		}
+		let store = omp_ai::discovery::DiscoveryStore::open(&path).map_err(catalog_composition)?;
+		let now_ms = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or_default()
+			.as_millis()
+			.try_into()
+			.unwrap_or(u64::MAX);
+		Ok(store
+			.next_expiry_ms(now_ms)
+			.map_err(catalog_composition)?
+			.map(|expiry| UNIX_EPOCH + Duration::from_millis(expiry)))
+	}
+
+	/// Starts the session's discovery refresh owner: one mailbox of refresh
+	/// requests plus a deadline timer armed at the next cache expiry. Every
+	/// published catalog is handed to `publish`; a failed refresh keeps the
+	/// current catalog and logs at warn. The owner stops once every
+	/// [`DiscoveryRefreshSender`] is dropped.
+	pub fn spawn(
+		self,
+		publish: impl Fn(Arc<snapshot::Catalog>) + Send + Sync + 'static,
+	) -> DiscoveryRefreshSender {
+		let (tx, rx) = flume::unbounded();
+		tokio::spawn(async move {
+			loop {
+				let deadline = match self.next_expiry() {
+					Ok(expiry) => expiry.map(|expiry| {
+						let wait = expiry.duration_since(SystemTime::now()).unwrap_or_default();
+						time::Instant::now() + wait + Duration::from_millis(1)
+					}),
+					Err(error) => {
+						tracing::warn!(%error, "model discovery cache expiry is unreadable");
+						None
+					},
+				};
+				let why = tokio::select! {
+					request = rx.recv_async() => match request {
+						Ok(why) => why,
+						Err(_) => break,
+					},
+					() = time::sleep_until(deadline.unwrap_or_else(time::Instant::now)),
+						if deadline.is_some() => DiscoveryRefresh::Expired,
+				};
+				match self.refresh(&why).await {
+					Ok(Some(catalog)) => publish(catalog),
+					Ok(None) => {},
+					Err(error) => tracing::warn!(
+						%error,
+						?why,
+						"model discovery refresh failed; keeping the current catalog"
+					),
+				}
+			}
+		});
+		DiscoveryRefreshSender { tx }
+	}
+}
+
+/// Mailbox into a running [`DiscoveryRefresher`] owner.
+#[derive(Clone)]
+pub struct DiscoveryRefreshSender {
+	tx: flume::Sender<DiscoveryRefresh>,
+}
+
+impl DiscoveryRefreshSender {
+	/// Queues one refresh; never blocks. A stopped owner drops the request.
+	pub fn request(&self, why: DiscoveryRefresh) {
+		let _ = self.tx.send(why);
+	}
+}
+
+/// Read side of one session's catalog publication.
+#[derive(Clone)]
+pub enum LiveCatalog {
+	/// The production stack's registry publication point: every read sees the
+	/// latest discovery refresh.
+	Published(RegistryHandle),
+	/// A fixed snapshot (behind a remote gateway, whose catalog lives there).
+	Fixed(Arc<snapshot::Catalog>),
+}
+
+impl LiveCatalog {
+	/// The catalog as currently published.
+	#[must_use]
+	pub fn load(&self) -> Arc<snapshot::Catalog> {
+		match self {
+			Self::Published(registry) => Arc::clone(registry.load().shared_catalog()),
+			Self::Fixed(catalog) => Arc::clone(catalog),
+		}
+	}
+}
+
+/// A route client pinned to one published registry snapshot.
+///
+/// Planning and dispatch both run on the pinned registry, so a discovery
+/// refresh can never split a request across two generations. The pin moves
+/// only when its owner calls [`Self::adopt_published`], which the kernel does
+/// once at the start of each turn: an in-flight turn keeps its routes, the
+/// next turn sees the swap.
+pub struct PinnedRoutes {
+	live:     RegistryHandle,
+	registry: Registry,
+	client:   Client<ProviderService, Router>,
+}
+
+/// How long a plan stays valid before dispatch must re-plan it.
+const PLAN_TTL: Duration = Duration::from_secs(30);
+
+impl PinnedRoutes {
+	/// Pins the currently published registry.
+	#[must_use]
+	pub fn new(live: RegistryHandle, meta: CallMeta, affinity: CallAffinity) -> Self {
+		let registry = Registry::clone(&live.load());
+		let client = Client::new(registry.service(), Router::new(registry.clone(), PLAN_TTL), meta)
+			.with_affinity(affinity);
+		Self { live, registry, client }
+	}
+
+	/// Re-pins to the latest publication when it changed, carrying the call
+	/// metadata and affinity over; returns whether the pin moved. Route
+	/// services are constructed with the registry, never here.
+	pub fn adopt_published(&mut self) -> bool {
+		let published = self.live.load();
+		if published.same_publication(&self.registry) {
+			return false;
+		}
+		let registry = Registry::clone(&published);
+		let meta = self.client.call_meta().clone();
+		let affinity = self.client.affinity().clone();
+		self.client = Client::new(registry.service(), Router::new(registry.clone(), PLAN_TTL), meta)
+			.with_affinity(affinity);
+		self.registry = registry;
+		true
+	}
+
+	/// The pinned registry.
+	#[must_use]
+	pub const fn registry(&self) -> &Registry {
+		&self.registry
+	}
+
+	/// The pinned registry's catalog.
+	#[must_use]
+	pub fn catalog(&self) -> &Arc<snapshot::Catalog> {
+		self.registry.shared_catalog()
+	}
+
+	/// The client over the pinned registry.
+	#[must_use]
+	pub const fn client(&self) -> &Client<ProviderService, Router> {
+		&self.client
+	}
+
+	/// Mutably borrows the client over the pinned registry.
+	pub const fn client_mut(&mut self) -> &mut Client<ProviderService, Router> {
+		&mut self.client
 	}
 }
 
@@ -654,7 +896,7 @@ pub async fn production_registry_from_con(
 		inference_settings(ctx, None),
 	)
 	.await
-	.map(|assembly| assembly.registry)
+	.map(|assembly| Registry::clone(&assembly.registry.load()))
 }
 /// Builds the production console-usage authority over the canonical
 /// credential and account stores.
@@ -728,7 +970,7 @@ pub async fn production_rpc_registry_from_con(
 		inference_settings(ctx, project_root),
 	)
 	.await
-	.map(|assembly| (assembly.registry, assembly.auth_manager))
+	.map(|assembly| (Registry::clone(&assembly.registry.load()), assembly.auth_manager))
 }
 
 /// Invocation-owned inference values that must not enter agent or durable
@@ -754,15 +996,17 @@ pub struct InferenceSessionOverrides {
 /// Session-owned production inference authorities assembled from one credential
 /// owner.
 pub struct ProductionInference {
-	/// Immutable registry used by direct chat and provider CONTROL projection.
-	pub registry:             Registry,
-	/// Catalog `registry` routes through: bundled, configured, and runtime
-	/// discovery layers as this composition's discovery refresh left them.
-	/// Model selection and pickers read this snapshot, never an earlier one.
-	pub catalog:              Arc<snapshot::Catalog>,
+	/// The session's one registry publication point. Its current snapshot's
+	/// catalog layers bundled, configured, and runtime-discovered models as
+	/// the latest discovery refresh left them; model selection and pickers
+	/// read it through [`Self::catalog`], never an earlier snapshot.
+	pub registry:             RegistryHandle,
 	/// Cloneable route composition retained for atomic provider registry
 	/// rebuilds.
 	pub builtins:             BuiltinConfig,
+	/// Mid-session discovery refresh over `registry`; `None` when the caller
+	/// composed the catalog itself (extension providers), which is final.
+	pub discovery:            Option<DiscoveryRefresher>,
 	/// RPC facade sharing the registry's route services and conversation owner.
 	pub rpc:                  InferenceRpc,
 	/// Narrow GitHub URL credential projection over the canonical encrypted
@@ -779,6 +1023,14 @@ pub struct ProductionInference {
 	pub auth_control:         AuthControlHandle,
 	/// Shared provider usage registry accepting extension-scoped overlays.
 	pub usage_fetchers:       UsageFetcherRegistry,
+}
+
+impl ProductionInference {
+	/// The catalog as currently published: the latest discovery refresh.
+	#[must_use]
+	pub fn catalog(&self) -> Arc<snapshot::Catalog> {
+		Arc::clone(self.registry.load().shared_catalog())
+	}
 }
 
 /// Builds the production inference RPC authority used by the gateway and chat.
@@ -855,7 +1107,7 @@ pub async fn production_inference_for_session(
 	let inference_settings = inference_settings(ctx.as_ref(), project_root);
 	let ProductionAssembly {
 		registry,
-		catalog,
+		discovery,
 		sessions,
 		authority,
 		stored: mcp_authority,
@@ -873,7 +1125,9 @@ pub async fn production_inference_for_session(
 	.await?;
 	let usage_fetchers = usage_manager.fetchers();
 	let search_settings = omp_ai::search_settings::WebSearchSettings::from_con(ctx.as_ref());
-	let rpc = InferenceRpc::new(registry.clone(), sessions, tool_registry)
+	// The RPC facade projects the launch generation; in-process chat follows
+	// later publications through `registry`.
+	let rpc = InferenceRpc::new(Registry::clone(&registry.load()), sessions, tool_registry)
 		.with_session_overrides(provider, overrides.prompt_cache_affinity)
 		.with_provider_response_hooks(provider_response_hooks.clone())
 		.with_search_settings(search_settings);
@@ -886,8 +1140,8 @@ pub async fn production_inference_for_session(
 	));
 	let inference = ProductionInference {
 		registry,
-		catalog,
 		builtins,
+		discovery,
 		rpc,
 		credential_authority: authority,
 		mcp_authority,
@@ -922,10 +1176,11 @@ fn inference_settings(
 /// Every authority one production composition assembles over a single
 /// credential owner.
 struct ProductionAssembly {
-	registry:      Registry,
-	/// Catalog `registry` routes through, after this composition's discovery
-	/// refresh.
-	catalog:       Arc<snapshot::Catalog>,
+	/// Publication point whose first snapshot routes through the catalog this
+	/// composition's discovery refresh left.
+	registry:      RegistryHandle,
+	/// Later refreshes of that discovery, when the catalog is not caller-owned.
+	discovery:     Option<DiscoveryRefresher>,
 	sessions:      ConversationSessionPlanner,
 	authority:     Arc<dyn omp_envd::github_url::CredentialAuthority>,
 	stored:        Arc<auth_backend::CombinedAuthAuthority>,
@@ -1136,7 +1391,9 @@ async fn production_assembly_with_catalog(
 	// what authenticates the configured provider's model listing, so its
 	// models join this session's registry instead of the next one's.
 	let catalog = if refresh_discovery {
-		refresh_model_discovery_cache(data_dir, catalog, &discovery_credentials).await?
+		refresh_model_discovery_cache(data_dir, catalog, &discovery_credentials, None)
+			.await?
+			.catalog
 	} else {
 		catalog
 	};
@@ -1245,12 +1502,19 @@ async fn production_assembly_with_catalog(
 	let builtins = BuiltinConfig::production(dependencies);
 	let registry = Registry::builder(Arc::clone(&catalog))
 		.with_builtins(builtins.clone())?
-		.build()?;
+		.build()?
+		.into_handle();
+	let discovery = refresh_discovery.then(|| DiscoveryRefresher {
+		data_dir:    data_dir.to_path_buf(),
+		credentials: discovery_credentials,
+		builtins:    builtins.clone(),
+		registry:    registry.clone(),
+	});
 	let authority: Arc<dyn omp_envd::github_url::CredentialAuthority> =
 		Arc::new(GithubCredentialAuthority::new(Arc::clone(&stored)));
 	Ok(ProductionAssembly {
 		registry,
-		catalog,
+		discovery,
 		sessions,
 		authority,
 		stored,

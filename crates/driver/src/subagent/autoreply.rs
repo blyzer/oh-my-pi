@@ -48,7 +48,7 @@ trait ReplyModel: Send + Sync {
 /// Cloneable model authority for ephemeral peer replies.
 #[derive(Clone)]
 enum AutoreplyClient {
-	Production { registry: omp_ai::Registry, target: Target },
+	Production { registry: omp_ai::RegistryHandle, target: Target },
 	Gateway(GatewayInference),
 }
 
@@ -89,7 +89,7 @@ impl ReplyModel for AutoreplyClient {
 						response_hooks: Default::default(),
 					};
 					let execute = omp_ai::router::execute_registry_call(
-						registry.clone(),
+						omp_ai::Registry::clone(&registry.load()),
 						Call::new(meta, OperationCall::Chat(Arc::new(request))),
 						Duration::from_secs(120),
 					);

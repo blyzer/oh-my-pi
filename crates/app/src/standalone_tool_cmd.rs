@@ -121,19 +121,19 @@ pub(crate) async fn session_at(
 	let model_settings =
 		omp_catalog::settings::ModelSettings::from_con(&ctx).resolve_path_scopes(&project, &home);
 	let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
-	let roles = omp_driver::discovery::roles::resolve_launch_roles(
-		catalog.as_ref(),
-		&model_settings,
-		None,
-		None,
-		None,
-		None,
-	)
-	.map_err(|error| miette!(error))?;
-	let model = roles
-		.primary
-		.map(|model| Str::from(model.as_str()))
-		.ok_or_else(|| miette!("standalone tools require a configured default model role"))?;
+	let model =
+		match omp_driver::discovery::roles::resolve_launch_default(catalog.as_ref(), &model_settings)
+		{
+			omp_driver::discovery::roles::LaunchDefault::Resolved(selected) => {
+				Str::from(selected.model.as_str())
+			},
+			omp_driver::discovery::roles::LaunchDefault::Missing { selector } => {
+				return Err(miette!("the default model role {selector} names no catalog model"));
+			},
+			omp_driver::discovery::roles::LaunchDefault::Unset => {
+				return Err(miette!("standalone tools require a configured default model role"));
+			},
+		};
 	let (kernel, session, _) =
 		compose_kernel(&data_dir, &project, model.as_str(), ctx, KernelOptions {
 			ephemeral: true,

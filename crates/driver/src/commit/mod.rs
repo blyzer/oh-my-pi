@@ -162,7 +162,7 @@ impl CommitGenerator {
 			data_dir: data_dir.to_owned(),
 			source:   Box::new(source),
 		})?;
-		Ok(Self::new(inference.registry, selected.model))
+		Ok(Self::new(omp_ai::Registry::clone(&inference.registry.load()), selected.model))
 	}
 
 	/// Generates, repairs, and validates one conventional commit with at most

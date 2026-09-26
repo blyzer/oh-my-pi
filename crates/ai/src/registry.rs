@@ -195,6 +195,18 @@ impl Registry {
 		&self.inner.catalog
 	}
 
+	/// Borrows the shared handle of the catalog snapshot this registry routes
+	/// through, for owners that retain it beyond one lookup.
+	pub fn shared_catalog(&self) -> &Arc<Catalog> {
+		&self.inner.catalog
+	}
+
+	/// Reports whether `other` is this exact published registry rather than an
+	/// equal-looking rebuild.
+	pub fn same_publication(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.inner, &other.inner)
+	}
+
 	/// Returns the immutable settings snapshot shared by planning and route
 	/// execution.
 	pub fn settings(&self) -> &settings::InferenceSettings {
