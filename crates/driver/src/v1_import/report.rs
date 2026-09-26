@@ -45,6 +45,9 @@ pub enum SkipReason {
 	/// The v1 value is already the v2 default, so no line is written.
 	#[strum(to_string = "already the v2 default")]
 	MatchesDefault,
+	/// An earlier v1 credential of the same provider and identity was taken.
+	#[strum(to_string = "an earlier v1 credential has the same identity")]
+	DuplicateIdentity,
 	/// v2's `config.cfg` already binds the chord; the existing bind wins.
 	#[strum(to_string = "v2 config.cfg already binds this chord; kept the existing bind")]
 	ChordBound,
@@ -74,6 +77,19 @@ pub enum Attention {
 	/// settings are kept as comments.
 	#[strum(to_string = "v2 has no such memory backend; set ai_memory_backend mnemopi or off")]
 	MemoryBackendDropped,
+	/// v2 cannot use a v1 login as stored (a missing refresh token or a
+	/// login-time fact v2 cannot derive); a fresh v2 login replaces it.
+	#[strum(to_string = "v2 cannot use this v1 login; re-run /login for this provider")]
+	ReloginRequired,
+	/// A v1 login bound to a custom endpoint v2 keeps per provider, not per
+	/// account.
+	#[strum(to_string = "the v1 login used a custom endpoint; set it as the provider's baseUrl in \
+	                     models.toml, then /login")]
+	CustomEndpoint,
+	/// A v1 MCP OAuth grant v2 cannot refresh or place (no server URL, token
+	/// endpoint, or client id, or disabled in v1).
+	#[strum(to_string = "re-authorize this MCP server in v2")]
+	McpReauthorize,
 	/// A v1 keybinding is not a chord or a list of chords v2 can parse.
 	#[strum(to_string = "not a key chord v2 understands; rebind it with `bind <chord> <command>`")]
 	InvalidKeybinding,

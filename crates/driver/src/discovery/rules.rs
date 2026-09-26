@@ -18,6 +18,14 @@
 //!   first-source-wins in that order. `alwaysApply` rules are injected in full;
 //!   described rules are listed by name and globs for the model to read through
 //!   `rule://<name>`.
+//!
+//! A rule's `agents:` frontmatter (a list or comma-separated string of globs)
+//! scopes it to agent classes: `*` spans any run and `?` one character, matched
+//! case-insensitively against the [`AgentName`] the kernel runs as —
+//! [`MAIN_AGENT`](crate::subagent::MAIN_AGENT) (`main`) for the top-level
+//! session, the spawned class (`task`, `scout`, ...) for a subagent. A rule
+//! without `agents:` reaches every agent; `agents: [main]` keeps a rule out of
+//! every subagent, and `agents: [scout]` confines it to `scout` children.
 
 use std::{
 	collections::BTreeSet,
@@ -37,6 +45,8 @@ use omp_tools::read::{
 	selector::ParsedSelector,
 };
 use serde::Deserialize;
+
+use crate::subagent::AgentName;
 
 /// Where a discovered document sits in the precedence ladder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
@@ -201,7 +211,8 @@ pub struct Rule {
 	pub condition:    Vec<Str>,
 	/// Frontmatter `scope`: TTSR stream scope tokens.
 	pub scope:        Vec<Str>,
-	/// Frontmatter `agents`: lowercased agent-name globs (empty = all).
+	/// Frontmatter `agents`: lowercased agent-class globs; empty admits every
+	/// agent (see [`ActiveRules::for_agent`]).
 	pub agents:       Vec<Str>,
 	/// Provider identity.
 	pub provider:     Str,
@@ -217,9 +228,6 @@ pub struct ActiveRules {
 	/// Malformed and colliding documents.
 	pub warnings: Vec<Warning>,
 }
-
-/// Agent name the top-level session evaluates `agents:` scopes with.
-pub const MAIN_AGENT: &str = "main";
 
 impl ActiveRules {
 	/// Discovers rules for `project_root` from the native, agents, cursor,
@@ -392,8 +400,13 @@ impl ActiveRules {
 		self.rules.iter().find(|rule| rule.name.as_str() == name)
 	}
 
-	/// Rules admitted for `agent`: a rule without `agents:` applies everywhere.
-	pub fn for_agent<'a>(&'a self, agent: &'a str) -> impl Iterator<Item = &'a Rule> + 'a {
+	/// Rules admitted for the agent class `agent`: a rule without `agents:`
+	/// applies everywhere; otherwise one of its globs must match the class,
+	/// case-insensitively.
+	pub fn for_agent<'a>(
+		&'a self,
+		agent: &'a AgentName<str>,
+	) -> impl Iterator<Item = &'a Rule> + 'a {
 		let agent = agent.to_ascii_lowercase();
 		self.rules.iter().filter(move |rule| {
 			rule.agents.is_empty()
@@ -410,7 +423,7 @@ impl ActiveRules {
 	/// demand. A rule with neither `alwaysApply` nor a description is reachable
 	/// only through `rule://`.
 	#[must_use]
-	pub fn prompt_facts(&self, agent: &str) -> RulePromptFacts {
+	pub fn prompt_facts(&self, agent: &AgentName<str>) -> RulePromptFacts {
 		let mut facts = RulePromptFacts::default();
 		for rule in self.for_agent(agent) {
 			if rule.always_apply {
@@ -878,6 +891,7 @@ impl ContentResolver for RuleResolver {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::subagent::MAIN_AGENT;
 
 	fn write(path: &Path, text: &str) {
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1081,7 +1095,7 @@ mod tests {
 			.map(|row| (row["name"].as_str().unwrap(), row["globs"].as_array().unwrap().len()))
 			.collect::<Vec<_>>();
 		assert_eq!(rulebook, [("style", 2), ("cursor", 1)], "hidden and sub-only stay out");
-		let sub = rules.prompt_facts("review-bot");
+		let sub = rules.prompt_facts(AgentName::from_ref("review-bot"));
 		assert!(sub.rulebook.iter().any(|row| row["name"] == "sub-only"));
 	}
 
