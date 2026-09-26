@@ -122,6 +122,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "shell.auto_background.threshold_ms",
+			"legacy.path": "bash.autoBackground.thresholdMs",
 		},
 	};
 	/// Block shell commands that have dedicated tools.
@@ -142,6 +143,7 @@ omp_con::var! {
 		flags: archive,
 		meta: {
 			"legacy.path": "shell.interceptor.patterns",
+			"legacy.path": "bashInterceptor.patterns",
 		},
 	};
 	/// Auto-load a repo's allowed direnv/devenv `.envrc` into the bash session.

@@ -15,6 +15,7 @@ pub mod discovery;
 pub mod ext_updates;
 pub mod headless;
 pub mod keybindings;
+pub mod legacy_settings;
 pub mod prompt_input;
 pub mod prompt_templates;
 pub mod registry;

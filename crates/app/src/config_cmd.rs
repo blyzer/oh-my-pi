@@ -8,7 +8,7 @@ use std::{
 };
 
 use miette::IntoDiagnostic as _;
-use omp_con::{Ctx, DumpOptions, Origin, Source, Span, TypeSpec, Value, ValueKind, VarFlags};
+use omp_con::{Ctx, DumpOptions, Origin, Source, ValueKind, VarFlags};
 use omp_core::Str;
 use omp_envd::mcp::{
 	McpConfigPaths,
@@ -71,7 +71,9 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 }
 
 /// `omp config import-v1`: locates the v1 install, pairs its profiles with
-/// v2 profiles, runs every registered import step, and prints the report.
+/// v2 profiles, runs every registered import step, imports the current
+/// project's v1 settings, and prints the report. Other projects import their
+/// own settings the first time omp runs in them.
 fn import_v1(
 	project: &Path,
 	dry_run: bool,
@@ -79,7 +81,8 @@ fn import_v1(
 	profile: Option<&str>,
 ) -> miette::Result<()> {
 	use omp_driver::v1_import::{
-		CredentialAccess, ImportMode, ProfileSelection, V1Inputs, V1Source, V2Roots, plan, run,
+		CredentialAccess, ImportMode, ImportReport, ProfileSelection, V1Inputs, V1Source, V2Roots,
+		import_project_settings, plan, run,
 	};
 
 	let mut inputs = V1Inputs::from_process()
@@ -91,34 +94,36 @@ fn import_v1(
 		inputs = inputs.with_explicit_root(from.to_owned());
 	}
 	let source = V1Source::new(inputs);
-	if !source.exists() {
-		println!("no v1 install at {}; nothing to import", source.base_root().display());
-		return Ok(());
-	}
 	let selection = match profile {
 		Some(profile) => {
-			let profile = omp_core::dirs::normalize_profile_name(profile).into_diagnostic()?;
-			if let Some(name) = &profile
-				&& !source.has_profile(name)
-			{
-				println!(
-					"no v1 profile {name} under {}; nothing to import",
-					source.base_root().display()
-				);
-				return Ok(());
-			}
-			ProfileSelection::Named(profile)
+			ProfileSelection::Named(omp_core::dirs::normalize_profile_name(profile).into_diagnostic()?)
 		},
 		None => ProfileSelection::All,
 	};
-	let roots = V2Roots::from_process().into_diagnostic()?;
-	let pairs = plan(&source, &roots, &selection).into_diagnostic()?;
-	let report = if dry_run {
-		run(&pairs, ImportMode::DryRun, CredentialAccess::Offline(&Ctx::new()))
+	let mode = if dry_run {
+		ImportMode::DryRun
 	} else {
-		let ctx = crate::process_ctx(project)?;
-		run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&ctx))
+		ImportMode::Apply
 	};
+	let roots = V2Roots::from_process().into_diagnostic()?;
+	let mut report = if !source.exists() {
+		println!("no v1 install at {}; nothing to import", source.base_root().display());
+		ImportReport { dry_run, ..ImportReport::default() }
+	} else if let ProfileSelection::Named(Some(name)) = &selection
+		&& !source.has_profile(name)
+	{
+		println!("no v1 profile {name} under {}; nothing to import", source.base_root().display());
+		ImportReport { dry_run, ..ImportReport::default() }
+	} else {
+		let pairs = plan(&source, &roots, &selection).into_diagnostic()?;
+		if dry_run {
+			run(&pairs, mode, CredentialAccess::Offline(&Ctx::new()))
+		} else {
+			let ctx = crate::process_ctx(project)?;
+			run(&pairs, mode, CredentialAccess::Offline(&ctx))
+		}
+	};
+	report.project = import_project_settings(project, &roots, mode);
 	print!("{}", render_v1_report(&report));
 	let failed = report.entries().any(|entry| {
 		matches!(
@@ -137,8 +142,6 @@ fn import_v1(
 /// Renders a v1 import report for the terminal.
 fn render_v1_report(report: &omp_driver::v1_import::ImportReport) -> String {
 	use std::fmt::Write as _;
-
-	use omp_driver::v1_import::{Attention, ImportOutcome};
 
 	fn profile(name: Option<&Str>) -> &str {
 		name.map_or("default", Str::as_str)
@@ -195,41 +198,62 @@ fn render_v1_report(report: &omp_driver::v1_import::ImportReport) -> String {
 			}
 		);
 		for entry in &pair.entries {
-			let kind: &str = entry.outcome.kind().into();
-			let step: &str = entry.step.into();
-			let _ = write!(out, "    {kind:<17} {step:<12}");
-			if let Some(subject) = &entry.subject {
-				let _ = write!(out, " {subject}");
+			render_v1_entry(&mut out, entry);
+		}
+	}
+	if !report.project.is_empty() {
+		let _ = writeln!(
+			out,
+			"project settings{}",
+			if report.dry_run {
+				" (dry run: nothing written)"
+			} else {
+				""
 			}
-			if let Some(path) = &entry.path {
-				let _ = write!(out, " {}", path.display());
-			}
-			match &entry.outcome {
-				ImportOutcome::Skipped(reason) => {
-					let _ = write!(out, ": {reason}");
-				},
-				ImportOutcome::NotMigratable(reason) => {
-					let _ = write!(out, ": {reason}");
-				},
-				ImportOutcome::NeedsAttention(Attention::Failed(error)) => {
-					let _ = write!(out, ": {error}");
-					let mut source = std::error::Error::source(error);
-					while let Some(cause) = source {
-						let _ = write!(out, ": {cause}");
-						source = cause.source();
-					}
-				},
-				ImportOutcome::NeedsAttention(attention) => {
-					let _ = write!(out, ": {attention}");
-				},
-				ImportOutcome::Imported
-				| ImportOutcome::WouldImport
-				| ImportOutcome::NothingToImport => {},
-			}
-			out.push('\n');
+		);
+		for entry in &report.project {
+			render_v1_entry(&mut out, entry);
 		}
 	}
 	out
+}
+
+/// Renders one v1 import report entry.
+fn render_v1_entry(out: &mut String, entry: &omp_driver::v1_import::ImportEntry) {
+	use std::fmt::Write as _;
+
+	use omp_driver::v1_import::{Attention, ImportOutcome};
+
+	let kind: &str = entry.outcome.kind().into();
+	let step: &str = entry.step.into();
+	let _ = write!(out, "    {kind:<17} {step:<12}");
+	if let Some(subject) = &entry.subject {
+		let _ = write!(out, " {subject}");
+	}
+	if let Some(path) = &entry.path {
+		let _ = write!(out, " {}", path.display());
+	}
+	match &entry.outcome {
+		ImportOutcome::Skipped(reason) => {
+			let _ = write!(out, ": {reason}");
+		},
+		ImportOutcome::NotMigratable(reason) => {
+			let _ = write!(out, ": {reason}");
+		},
+		ImportOutcome::NeedsAttention(Attention::Failed(error)) => {
+			let _ = write!(out, ": {error}");
+			let mut source = std::error::Error::source(error);
+			while let Some(cause) = source {
+				let _ = write!(out, ": {cause}");
+				source = cause.source();
+			}
+		},
+		ImportOutcome::NeedsAttention(attention) => {
+			let _ = write!(out, ": {attention}");
+		},
+		ImportOutcome::Imported | ImportOutcome::WouldImport | ImportOutcome::NothingToImport => {},
+	}
+	out.push('\n');
 }
 
 #[derive(Serialize)]
@@ -619,15 +643,6 @@ fn flag_names(flags: VarFlags) -> Vec<&'static str> {
 	.collect()
 }
 
-fn value_at<'a>(document: &'a toml::Table, path: &str) -> Option<&'a toml::Value> {
-	let mut segments = path.split('.');
-	let mut value = document.get(segments.next()?)?;
-	for segment in segments {
-		value = value.as_table()?.get(segment)?;
-	}
-	Some(value)
-}
-
 /// Migrates legacy TOML settings and keybindings to the archived command
 /// stream, scope for scope (ADR 0012): the user `config.toml` (plus
 /// `OMP_CONFIG_FILES` overlays) and legacy keybindings become the user
@@ -673,39 +688,7 @@ pub fn migrate_settings(data_dir: &Path, project: &Path) -> miette::Result<PathB
 /// Folds legacy TOML documents (later sources override earlier) into one
 /// archive-layer context through legacy paths owned by each declaration.
 fn migrate_toml_sources(sources: &[PathBuf]) -> miette::Result<Ctx> {
-	let mut document = toml::Table::new();
-	for source in sources {
-		if !source.is_file() {
-			continue;
-		}
-		let text = fs::read_to_string(source).into_diagnostic()?;
-		let incoming = text.parse::<toml::Table>().into_diagnostic()?;
-		merge_toml(&mut document, incoming);
-	}
-	let ctx = Ctx::new();
-	for var in ctx.vars() {
-		for path in var.meta_all("legacy.path") {
-			let Some(value) = value_at(&document, path) else {
-				continue;
-			};
-			ctx.set(var.name, legacy_toml_value(path, value, var.ty)?, Origin::Archive)
-				.into_diagnostic()?;
-		}
-	}
-	Ok(ctx)
-}
-
-fn merge_toml(target: &mut toml::Table, incoming: toml::Table) {
-	for (key, value) in incoming {
-		match (target.get_mut(&key), value) {
-			(Some(toml::Value::Table(target)), toml::Value::Table(incoming)) => {
-				merge_toml(target, incoming);
-			},
-			(_, value) => {
-				target.insert(key, value);
-			},
-		}
-	}
+	omp_driver::legacy_settings::fold_toml_sources(sources).into_diagnostic()
 }
 
 /// Sets and persists one convar in the selected cfg scope.
@@ -761,198 +744,4 @@ fn migrate_keybindings(data_dir: &Path, ctx: &Ctx) -> miette::Result<()> {
 		}
 	}
 	Ok(())
-}
-
-fn legacy_toml_value(path: &str, value: &toml::Value, ty: &TypeSpec) -> miette::Result<Value> {
-	if matches!(path, "display.hideToolActivity" | "hideThinkingBlock") {
-		let hidden = value
-			.as_bool()
-			.ok_or_else(|| miette::miette!("expected boolean migration value"))?;
-		return Ok(Value::Bool(!hidden));
-	}
-	if matches!(path, "completion.notify" | "error.notify" | "ask.notify")
-		&& let Some(value) = value.as_str()
-	{
-		return match value {
-			"on" => Ok(Value::Bool(true)),
-			"off" => Ok(Value::Bool(false)),
-			_ => Err(miette::miette!("expected `on` or `off` migration value")),
-		};
-	}
-	if path == "compaction.thresholdPercent" {
-		let percent = value
-			.as_float()
-			.or_else(|| value.as_integer().map(|value| value as f64))
-			.ok_or_else(|| miette::miette!("expected numeric percent migration value"))?;
-		return Ok(Value::Float(percent / 100.0));
-	}
-	if path == "compaction.thresholdTokens" && value.as_str() == Some("default") {
-		return Ok(Value::Int(-1));
-	}
-	if path == "task.isolation.enabled" {
-		let enabled = value
-			.as_bool()
-			.ok_or_else(|| miette::miette!("expected boolean migration value"))?;
-		return Ok(Value::Enum(Str::new_static(if enabled { "auto" } else { "none" })));
-	}
-	if path == "edit.mode"
-		&& let Some(revision) = value.as_str().and_then(|value| match value {
-			"apply_patch" => Some("apply_patch.1"),
-			"hashline" => Some("hl.1"),
-			"patch" => Some("patch.2"),
-			"replace" => Some("rep.2"),
-			"sloppy" => Some("sloppy.1"),
-			_ => None,
-		}) {
-		return Ok(Value::Str(Str::new_static(revision)));
-	}
-	if matches!(
-		path,
-		"providers.tinyModel"
-			| "providers.memoryModel"
-			| "providers.autoThinkingModel"
-			| "providers.unexpectedStopModel"
-	) && value.as_str() == Some("online")
-	{
-		return Ok(Value::Str(Str::new_static("@tiny")));
-	}
-	if path == "providers.fireworksTier" && value.as_str() == Some("standard") {
-		return Ok(Value::Enum(Str::new_static("none")));
-	}
-	if path == "share.store" && value.as_str() == Some("blob") {
-		return Ok(Value::Enum(Str::new_static("http")));
-	}
-	if path == "doubleEscapeAction" && value.as_str() == Some("rewind") {
-		return Ok(Value::Str(Str::new_static("branch")));
-	}
-	if matches!(path, "task.maxRuntimeMs" | "irc.timeoutMs")
-		&& let Some(millis) = value.as_integer()
-	{
-		let millis = u64::try_from(millis)
-			.map_err(|_| miette::miette!("expected non-negative millisecond migration value"))?;
-		let span = if millis == 0 {
-			Span::NEVER
-		} else {
-			Span::millis(millis)
-		};
-		return Ok(Value::Duration(span));
-	}
-	if path == "tools.maxTimeout"
-		&& let Some(seconds) = value.as_integer()
-	{
-		let seconds = u64::try_from(seconds)
-			.map_err(|_| miette::miette!("expected non-negative second migration value"))?;
-		let span = if seconds == 0 {
-			Span::NEVER
-		} else {
-			Span::secs(seconds)
-		};
-		return Ok(Value::Duration(span));
-	}
-	if matches!(
-		path,
-		"tools.artifactSpillThreshold" | "tools.artifactTailBytes" | "tools.artifactHeadBytes"
-	) {
-		let kibibytes = value
-			.as_float()
-			.or_else(|| value.as_integer().map(|value| value as f64))
-			.ok_or_else(|| miette::miette!("expected numeric kilobyte migration value"))?;
-		let bytes = kibibytes * 1024.0;
-		if !bytes.is_finite() || bytes < 0.0 || bytes > i64::MAX as f64 {
-			return Err(miette::miette!("kilobyte migration value is out of range"));
-		}
-		return Ok(Value::Int(bytes.round() as i64));
-	}
-	toml_to_value(value, ty)
-}
-
-fn toml_to_value(value: &toml::Value, ty: &TypeSpec) -> miette::Result<Value> {
-	match ty.kind {
-		ValueKind::Bool => value
-			.as_bool()
-			.map(Value::Bool)
-			.ok_or_else(|| miette::miette!("expected boolean migration value")),
-		ValueKind::Int => value
-			.as_integer()
-			.map(Value::Int)
-			.ok_or_else(|| miette::miette!("expected integer migration value")),
-		ValueKind::Float => value
-			.as_float()
-			.or_else(|| value.as_integer().map(|value| value as f64))
-			.map(Value::Float)
-			.ok_or_else(|| miette::miette!("expected numeric migration value")),
-		ValueKind::Str => Ok(Value::Str(Str::new(
-			value
-				.as_str()
-				.map_or_else(|| value.to_string(), str::to_owned),
-		))),
-		ValueKind::Enum => value
-			.as_str()
-			.map(|value| Value::Enum(Str::new(value)))
-			.ok_or_else(|| miette::miette!("expected enum migration value")),
-		ValueKind::Duration => {
-			let span = if let Some(value) = value.as_str() {
-				value.parse::<Span>().into_diagnostic()?
-			} else {
-				let millis = value
-					.as_integer()
-					.and_then(|value| u64::try_from(value).ok())
-					.ok_or_else(|| miette::miette!("expected duration migration value"))?;
-				Span::millis(millis)
-			};
-			Ok(Value::Duration(span))
-		},
-		ValueKind::List => {
-			let values = value
-				.as_array()
-				.ok_or_else(|| miette::miette!("expected list migration value"))?;
-			let elem = ty.elem.unwrap_or(TypeSpec::STR);
-			values
-				.iter()
-				.map(|value| {
-					if elem.kind == ValueKind::Kv
-						&& let Some(value) = value.as_str()
-					{
-						return Ok(Value::Kv(omp_con::Kv(vec![(
-							Str::new_static("value"),
-							Value::Str(Str::new(value)),
-						)])));
-					}
-					toml_to_value(value, elem)
-				})
-				.collect::<miette::Result<Vec<_>>>()
-				.map(Value::List)
-		},
-		ValueKind::Kv => value
-			.as_table()
-			.ok_or_else(|| miette::miette!("expected table migration value"))
-			.and_then(|table| {
-				table
-					.iter()
-					.map(|(key, value)| Ok((Str::new(key), toml_to_untyped_value(value)?)))
-					.collect::<miette::Result<Vec<_>>>()
-			})
-			.map(|entries| Value::Kv(omp_con::Kv(entries))),
-	}
-}
-
-fn toml_to_untyped_value(value: &toml::Value) -> miette::Result<Value> {
-	match value {
-		toml::Value::String(value) => Ok(Value::Str(Str::new(value))),
-		toml::Value::Integer(value) => Ok(Value::Int(*value)),
-		toml::Value::Float(value) => Ok(Value::Float(*value)),
-		toml::Value::Boolean(value) => Ok(Value::Bool(*value)),
-		toml::Value::Datetime(value) => Ok(Value::Str(Str::new(value.to_string()))),
-		toml::Value::Array(values) => values
-			.iter()
-			.map(toml_to_untyped_value)
-			.collect::<miette::Result<Vec<_>>>()
-			.map(Value::List),
-		toml::Value::Table(table) => table
-			.iter()
-			.map(|(key, value)| Ok((Str::new(key), toml_to_untyped_value(value)?)))
-			.collect::<miette::Result<Vec<_>>>()
-			.map(omp_con::Kv)
-			.map(Value::Kv),
-	}
 }

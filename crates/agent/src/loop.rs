@@ -120,6 +120,12 @@ pub trait Inference: Send {
 		self.chat(request)
 	}
 
+	/// Marks the start of one turn, before its first request. Stacks that
+	/// can swap routes mid-session (a model-discovery refresh) adopt the
+	/// latest publication here, so an in-flight turn keeps the routes it
+	/// started with. Other stacks keep the default no-op.
+	fn begin_turn(&mut self) {}
+
 	/// Rebinds observer-only wire capture to the live journal after a session
 	/// switch. Inference stacks without a local transport keep the default
 	/// no-op.
@@ -1217,6 +1223,7 @@ impl<C: Inference> Kernel<C> {
 		let mut request_budget_notice_sent = false;
 		let mut last_model: Option<Str> = None;
 		let turn_started = Instant::now();
+		self.client.begin_turn();
 
 		loop {
 			if control.is_expired() || turn_cancel.is_turn_cancelled() {

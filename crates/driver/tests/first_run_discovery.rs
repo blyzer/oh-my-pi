@@ -115,8 +115,9 @@ async fn a_v1_api_key_authenticates_discovery_in_the_first_session() {
 	for (key, wire) in [(opus, "claude-opus-5"), (ModelKey::from("easycliproxy/gpt-5.5"), "gpt-5.5")]
 	{
 		let model = inference
-			.catalog
+			.catalog()
 			.model(&key)
+			.cloned()
 			.unwrap_or_else(|| panic!("{key} is listed in the session that imported the key"));
 		assert!(
 			model
@@ -125,6 +126,6 @@ async fn a_v1_api_key_authenticates_discovery_in_the_first_session() {
 				.any(|(_, candidate)| candidate.as_str() == wire),
 			"{key} is sent to the proxy as {wire}"
 		);
-		assert!(inference.registry.catalog().model(&key).is_some(), "{key} is routable");
+		assert!(inference.registry.load().catalog().model(&key).is_some(), "{key} is routable");
 	}
 }

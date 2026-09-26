@@ -51,6 +51,8 @@ pub enum ImportStep {
 	Models,
 	/// Literal v1 `models.yml` `apiKey`s into the encrypted credential store.
 	ModelsKeys,
+	/// v1 `config.yml` into `config.cfg` (and `subagent.cfg`).
+	Settings,
 	/// v1 `keybindings.yml` actions into `bind` lines in `config.cfg`.
 	Keybindings,
 }
@@ -66,6 +68,7 @@ impl ImportStep {
 	pub const fn item(self) -> V1Item {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
+			Self::Settings => V1Item::Settings,
 			Self::Keybindings => V1Item::Keybindings,
 		}
 	}
@@ -89,6 +92,7 @@ impl ImportStep {
 		match self {
 			Self::Models => super::models::import_models(cx),
 			Self::ModelsKeys => super::models::import_keys(cx),
+			Self::Settings => super::settings::import_settings(cx),
 			Self::Keybindings => super::keybindings::import_keybindings(cx),
 		}
 	}
@@ -243,6 +247,7 @@ pub fn run(
 			.iter()
 			.map(|pair| run_pair(pair, mode, credentials))
 			.collect(),
+		project: Vec::new(),
 	}
 }
 
@@ -320,6 +325,9 @@ pub enum ImportError {
 	/// The v1 model configuration could not be read or converted.
 	#[error("could not import the model configuration")]
 	Models(#[from] crate::discovery::models::ModelsConfigError),
+	/// The v1 settings could not be imported.
+	#[error("could not import the settings")]
+	Settings(#[from] super::SettingsImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,

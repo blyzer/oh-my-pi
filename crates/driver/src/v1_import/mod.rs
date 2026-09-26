@@ -59,6 +59,7 @@ pub mod keybindings;
 pub mod locate;
 mod models;
 pub mod report;
+mod settings;
 pub mod step;
 
 #[cfg(test)]
@@ -74,6 +75,7 @@ pub use report::{
 	Attention, ImportEntry, ImportOutcome, ImportReport, NotMigratable, OutcomeKind, PairReport,
 	SkipReason,
 };
+pub use settings::{SettingsImportError, import_project_settings, project_marker};
 pub use step::{CredentialAccess, ImportError, ImportMode, ImportStep, Marker, StepContext, run};
 
 /// The active v2 profile's pair: the same-named v1 profile (the v1 default
@@ -94,26 +96,30 @@ pub fn active_pair() -> Result<ImportPair, LocateError> {
 /// The automatic first-run import (owner decisions #1 and #8).
 ///
 /// Runs every registered step for every v1 profile ([`ProfileSelection::All`]),
-/// idempotently through the markers, and logs the report. Credential steps
-/// use the live store for the profile that owns `data_dir`; other profiles'
-/// credential steps wait, unmarked, for their own first run. A `data_dir`
-/// other than the process default (a test's or an explicit state directory)
-/// is isolated: nothing is imported. Never fails: locating errors are logged
-/// and step failures are in the report.
+/// idempotently through the markers, then imports `project`'s own v1 settings
+/// (once per project, [`import_project_settings`]), and logs the report.
+/// Credential steps use the live store for the profile that owns `data_dir`;
+/// other profiles' credential steps wait, unmarked, for their own first run.
+/// A `data_dir` other than the process default (a test's or an explicit state
+/// directory) is isolated: nothing is imported. Never fails: locating errors
+/// are logged and step failures are in the report.
 pub fn first_run(
 	data_dir: &Path,
+	project: Option<&Path>,
 	credentials: &omp_ai::auth::AuthControlHandle,
 ) -> Option<ImportReport> {
 	if omp_core::dirs::data_dir(None).ok().as_deref() != Some(data_dir) {
 		return None;
 	}
-	let pairs = V1Inputs::from_process()
+	let located = V1Inputs::from_process()
 		.ok_or(LocateError::HomeUnset)
 		.and_then(|inputs| {
-			plan(&V1Source::new(inputs), &V2Roots::from_process()?, &ProfileSelection::All)
+			let roots = V2Roots::from_process()?;
+			let pairs = plan(&V1Source::new(inputs), &roots, &ProfileSelection::All)?;
+			Ok((roots, pairs))
 		});
-	let pairs = match pairs {
-		Ok(pairs) => pairs,
+	let (roots, pairs) = match located {
+		Ok(located) => located,
 		Err(error) => {
 			tracing::warn!(
 				error = &error as &dyn std::error::Error,
@@ -122,8 +128,11 @@ pub fn first_run(
 			return None;
 		},
 	};
-	let report =
+	let mut report =
 		run(&pairs, ImportMode::Apply, CredentialAccess::Live { data_dir, control: credentials });
+	if let Some(project) = project {
+		report.project = import_project_settings(project, &roots, ImportMode::Apply);
+	}
 	report.log();
 	Some(report)
 }

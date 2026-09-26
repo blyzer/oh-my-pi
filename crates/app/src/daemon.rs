@@ -287,6 +287,8 @@ impl DaemonHandle {
 		let omp_driver::registry::ProductionInference {
 			registry, rpc: inference, auth_control, ..
 		} = omp_driver::registry::production_inference(&data_dir, tool_registry, None).await?;
+		// The gateway serves the generation its RPC facade projects.
+		let registry = Registry::clone(&registry.load());
 		Self::start_rpc(config, data_dir, registry, inference, Some(auth_control)).await
 	}
 

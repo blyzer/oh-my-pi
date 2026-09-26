@@ -88,9 +88,11 @@ fn control(root: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
 	(control, store)
 }
 
+/// The model steps' outcomes; later steps prove their own.
 fn outcomes(report: &ImportReport) -> Vec<(ImportStep, Option<&str>, OutcomeKind)> {
 	report
 		.entries()
+		.filter(|entry| matches!(entry.step, ImportStep::Models | ImportStep::ModelsKeys))
 		.map(|entry| (entry.step, entry.subject.as_deref(), entry.outcome.kind()))
 		.collect()
 }
@@ -406,7 +408,6 @@ fn a_dry_run_writes_nothing() {
 		(ImportStep::Models, None, OutcomeKind::WouldImport),
 		(ImportStep::ModelsKeys, Some("easycliproxy"), OutcomeKind::WouldImport),
 		(ImportStep::ModelsKeys, Some("envkey"), OutcomeKind::NeedsAttention),
-		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 	]);
 	let inventory = &report.pairs[0].inventory;
 	assert_eq!(inventory[0].0, V1Item::Models);
@@ -436,12 +437,10 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 		(ImportStep::Models, None, OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, Some("easycliproxy"), OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, Some("envkey"), OutcomeKind::NeedsAttention),
-		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 		// The `work` profile's config imports into its v2 namesake; its
 		// credentials wait for its own live store, unmarked.
 		(ImportStep::Models, None, OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, None, OutcomeKind::Skipped),
-		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 	]);
 	let work = v2.config_dir.join("profiles/work");
 	assert!(work.join("models.toml").is_file());
@@ -485,7 +484,6 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 	assert_eq!(outcomes(&again), [
 		(ImportStep::Models, None, OutcomeKind::Skipped),
 		(ImportStep::ModelsKeys, None, OutcomeKind::Skipped),
-		(ImportStep::Keybindings, None, OutcomeKind::Skipped),
 	]);
 	assert!(
 		again
@@ -590,7 +588,6 @@ fn a_profile_without_keys_never_opens_a_credential_store() {
 	assert_eq!(outcomes(&report), [
 		(ImportStep::Models, None, OutcomeKind::Imported),
 		(ImportStep::ModelsKeys, None, OutcomeKind::NothingToImport),
-		(ImportStep::Keybindings, None, OutcomeKind::NothingToImport),
 	]);
 	let target = v2.target(Some("work"));
 	assert!(ImportStep::ModelsKeys.marker(&target.config_dir).is_set());

@@ -40,7 +40,7 @@ async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 	let project = fs::canonicalize(&args.project).into_diagnostic()?;
 	let ctx = Arc::new(crate::process_ctx(&project)?);
 	let env = LaunchEnv::production(&project, args.gateway.is_some())?;
-	let launch = Launch::prepare(args, ctx, env).await?;
+	let mut launch = Launch::prepare(args, ctx, env).await?;
 	let mut input = BufReader::new(stdin());
 	let mut output = stdout();
 	let Some(terminal_auth) = initialize_transport(&mut input, &mut output).await? else {
