@@ -1,6 +1,7 @@
 //! Registered import steps, their idempotency markers, and the runner.
 
 use std::{
+	cell::OnceCell,
 	fmt::Write as _,
 	fs, io,
 	path::{Path, PathBuf},
@@ -172,9 +173,45 @@ pub struct StepContext<'a> {
 	pub pair:        &'a ImportPair,
 	/// Whether the step may write.
 	pub mode:        ImportMode,
-	/// The credential store, present when `mode` is [`ImportMode::Apply`]
-	/// and the step [needs it](ImportStep::needs_credentials).
-	pub credentials: Option<&'a AuthControlHandle>,
+	/// The pair's credential store, opened on first use: steps that
+	/// [need it](ImportStep::needs_credentials) call [`CredentialSlot::get`]
+	/// only in [`ImportMode::Apply`], and only when they have something to
+	/// store, so nothing is created for a profile without credentials.
+	pub credentials: &'a CredentialSlot<'a>,
+}
+
+/// One pair's credential store, opened at most once and only on demand.
+pub struct CredentialSlot<'a> {
+	access: CredentialAccess<'a>,
+	target: &'a super::V2Target,
+	opened: OnceCell<Result<AuthControlHandle, Arc<ImportError>>>,
+}
+
+impl CredentialSlot<'_> {
+	/// The live store when it owns the target's data directory, else the
+	/// target's stores opened offline (once).
+	///
+	/// # Errors
+	///
+	/// Returns [`ImportError::NoCredentialStore`] when a live handle does not
+	/// own the target, and [`ImportError::CredentialsUnavailable`] when the
+	/// target's stores cannot be opened.
+	pub fn get(&self) -> Result<AuthControlHandle, ImportError> {
+		match self.access {
+			CredentialAccess::Live { data_dir, control } if self.target.data_dir == data_dir => {
+				Ok(control.clone())
+			},
+			CredentialAccess::Live { .. } => Err(ImportError::NoCredentialStore),
+			CredentialAccess::Offline(ctx) => self
+				.opened
+				.get_or_init(|| super::credentials::offline_control(self.target, ctx).map_err(Arc::new))
+				.clone()
+				.map_err(|source| ImportError::CredentialsUnavailable {
+					target: self.target.data_dir.clone(),
+					source,
+				}),
+		}
+	}
 }
 
 impl StepContext<'_> {
@@ -215,7 +252,7 @@ fn run_pair(pair: &ImportPair, mode: ImportMode, access: CredentialAccess<'_>) -
 			(item, path, importers)
 		})
 		.collect();
-	let mut offline: Option<Result<AuthControlHandle, Arc<ImportError>>> = None;
+	let credentials = CredentialSlot { access, target: &pair.target, opened: OnceCell::new() };
 	let mut entries = Vec::new();
 	for step in steps {
 		let marker = step.marker(&pair.target.config_dir);
@@ -228,46 +265,20 @@ fn run_pair(pair: &ImportPair, mode: ImportMode, access: CredentialAccess<'_>) -
 			));
 			continue;
 		}
-		let credentials = if mode == ImportMode::Apply && step.needs_credentials() {
-			match access {
-				CredentialAccess::Live { data_dir, control } if pair.target.data_dir == data_dir => {
-					Some(control.clone())
-				},
-				CredentialAccess::Live { .. } => {
-					entries.push(ImportEntry::new(
-						step,
-						step.item(),
-						pair.source.locate(step.item()),
-						ImportOutcome::Skipped(SkipReason::WaitsForProfile),
-					));
-					continue;
-				},
-				CredentialAccess::Offline(ctx) => {
-					match offline.get_or_insert_with(|| {
-						super::credentials::offline_control(&pair.target, ctx).map_err(Arc::new)
-					}) {
-						Ok(control) => Some(control.clone()),
-						Err(error) => {
-							entries.push(ImportEntry::new(
-								step,
-								step.item(),
-								pair.source.locate(step.item()),
-								ImportOutcome::NeedsAttention(Attention::Failed(
-									ImportError::CredentialsUnavailable {
-										target: pair.target.data_dir.clone(),
-										source: Arc::clone(error),
-									},
-								)),
-							));
-							continue;
-						},
-					}
-				},
-			}
-		} else {
-			None
-		};
-		let cx = StepContext { pair, mode, credentials: credentials.as_ref() };
+		if mode == ImportMode::Apply
+			&& step.needs_credentials()
+			&& let CredentialAccess::Live { data_dir, .. } = access
+			&& pair.target.data_dir != data_dir
+		{
+			entries.push(ImportEntry::new(
+				step,
+				step.item(),
+				pair.source.locate(step.item()),
+				ImportOutcome::Skipped(SkipReason::WaitsForProfile),
+			));
+			continue;
+		}
+		let cx = StepContext { pair, mode, credentials: &credentials };
 		match step.run(&cx) {
 			Ok(produced) => entries.extend(produced),
 			Err(error) => entries.push(ImportEntry::new(
@@ -305,8 +316,8 @@ pub enum ImportError {
 	/// The v1 model configuration could not be read or converted.
 	#[error("could not import the model configuration")]
 	Models(#[from] crate::discovery::models::ModelsConfigError),
-	/// A credential step ran without a credential store.
-	#[error("no credential store was provided to import into")]
+	/// A credential step asked for a store the run does not own.
+	#[error("no credential store is available to import into")]
 	NoCredentialStore,
 	/// The target profile's credential store could not be opened.
 	#[error("could not open the credential store under {}", target.display())]

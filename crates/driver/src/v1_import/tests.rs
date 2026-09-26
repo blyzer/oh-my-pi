@@ -566,3 +566,26 @@ fn the_models_import_under_xdg_reads_the_agent_models_yml() {
 	assert!(loaded.config.providers.contains_key("easycliproxy"));
 	assert!(!loaded.config.providers.contains_key("decoy"));
 }
+
+#[test]
+fn a_profile_without_keys_never_opens_a_credential_store() {
+	let root = tempfile::tempdir().expect("scratch");
+	let home = root.path().join("home");
+	write(
+		&home.join(".omp/profiles/work/agent/models.yml"),
+		"providers:\n  keyless:\n    baseUrl: http://localhost:4000/v1\n    auth: none\n",
+	);
+	let v2 = roots(root.path(), None);
+	let selection = ProfileSelection::Named(Some("work".into()));
+	let pairs = plan(&V1Source::new(inputs(&home)), &v2, &selection).expect("plan");
+
+	let report = run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&omp_con::Ctx::new()));
+
+	assert_eq!(outcomes(&report), [
+		(ImportStep::Models, None, OutcomeKind::Imported),
+		(ImportStep::ModelsKeys, None, OutcomeKind::NothingToImport),
+	]);
+	let target = v2.target(Some("work"));
+	assert!(ImportStep::ModelsKeys.marker(&target.config_dir).is_set());
+	assert!(!target.data_dir.exists(), "no credential store is created without a key to store");
+}

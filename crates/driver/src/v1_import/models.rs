@@ -38,14 +38,24 @@ pub(super) fn import_models(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, Im
 
 pub(super) fn import_keys(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, ImportError> {
 	let location = ModelsConfigLocation::for_pair(cx.pair);
-	let target = match cx.mode {
-		ImportMode::DryRun => LegacyKeyTarget::DryRun,
-		ImportMode::Apply => {
-			LegacyKeyTarget::Store(cx.credentials.ok_or(ImportError::NoCredentialStore)?)
-		},
-	};
 	let path = location.legacy_path();
-	let report = import_legacy_api_keys(&location, target)?;
+	// A dry pass classifies every key without touching any store; the store
+	// is opened only when a literal key is there to be written.
+	let mut report = import_legacy_api_keys(&location, LegacyKeyTarget::DryRun)?;
+	if cx.mode == ImportMode::Apply {
+		if report
+			.iter()
+			.any(|key| matches!(key, LegacyApiKeyImport::WouldStore { .. }))
+		{
+			let control = cx.credentials.get()?;
+			report = import_legacy_api_keys(&location, LegacyKeyTarget::Store(&control))?;
+		} else {
+			ImportStep::ModelsKeys
+				.marker(&location.config_dir)
+				.set(None)
+				.map_err(crate::discovery::models::ModelsConfigError::from)?;
+		}
+	}
 	if report.is_empty() {
 		return Ok(vec![ImportEntry::new(
 			ImportStep::ModelsKeys,
