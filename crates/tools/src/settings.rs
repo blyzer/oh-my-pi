@@ -440,9 +440,6 @@ omp_con::var! {
 		min: 1,
 		max: MAX_DIAGNOSTIC_HISTORY_CAPACITY as u32,
 		flags: archive | replicated,
-		meta: {
-			"legacy.path": "lsp.diagnosticsHistoryCapacity",
-		},
 	};
 	/// Maximum diagnostics retained in one committed batch.
 	pub static SV_LSP_MAX_DIAGNOSTICS_PER_BATCH = sv_lsp_max_diagnostics_per_batch: u32 {
@@ -450,9 +447,6 @@ omp_con::var! {
 		min: 1,
 		max: MAX_DIAGNOSTICS_PER_BATCH as u32,
 		flags: archive | replicated,
-		meta: {
-			"legacy.path": "lsp.maxDiagnosticsPerBatch",
-		},
 	};
 }
 

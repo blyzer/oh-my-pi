@@ -2151,8 +2151,6 @@ pub enum McpConfigCommand {
 /// Typed command-stream configuration operations.
 #[derive(Clone, Debug, Subcommand)]
 pub enum ConfigCommand {
-	/// Convert legacy settings/keybindings and relocate data-root MCP config.
-	Migrate,
 	/// Print the deterministic current `config.cfg` script.
 	Dump,
 	/// List convars with their values, defaults, and policy flags.

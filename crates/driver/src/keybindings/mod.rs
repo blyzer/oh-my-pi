@@ -5,8 +5,8 @@
 //! [`PI_ACTIONS`] maps legacy action ids to the console command each default
 //! binds, and [`strip_command`] removes one such command from the bound
 //! scripts before a migrated remap installs its own chords. Chord spelling is
-//! [`omp_con::normalize_chord`]'s. The app's `omp config migrate` and the v1
-//! importer ([`crate::v1_import`]) share these tables.
+//! [`omp_con::normalize_chord`]'s. The v1 importer ([`crate::v1_import`])
+//! reads these tables.
 
 use omp_con::{ConResult, Ctx};
 use omp_core::Str;

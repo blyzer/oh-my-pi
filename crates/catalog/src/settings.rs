@@ -1199,7 +1199,6 @@ omp_con::var! {
 		validate: validate_roles,
 		flags: archive,
 		meta: {
-			"legacy.path": "model.roles",
 			"legacy.path": "modelRoles",
 		},
 	};
@@ -1216,7 +1215,6 @@ omp_con::var! {
 			"ui.option.project": "Per-project",
 			"ui.option.project.desc": "Save project role models in .omp/config.cfg; missing project roles use global defaults",
 			"legacy.path": "modelRoleStorage",
-			"legacy.path": "model.role_storage",
 		},
 	};
 	/// Presentation metadata keyed by model role.
@@ -1225,7 +1223,6 @@ omp_con::var! {
 		validate: validate_tags,
 		flags: archive,
 		meta: {
-			"legacy.path": "model.tags",
 			"legacy.path": "modelTags",
 		},
 	};
@@ -1235,7 +1232,6 @@ omp_con::var! {
 		validate: validate_unique,
 		flags: archive,
 		meta: {
-			"legacy.path": "model.cycle_order",
 			"legacy.path": "cycleOrder",
 		},
 	};
@@ -1245,7 +1241,6 @@ omp_con::var! {
 		validate: validate_path_scoped_models,
 		flags: archive,
 		meta: {
-			"legacy.path": "model.enabled_models",
 			"legacy.path": "enabledModels",
 		},
 	};
@@ -1255,7 +1250,6 @@ omp_con::var! {
 		validate: validate_path_scoped_providers,
 		flags: archive,
 		meta: {
-			"legacy.path": "model.disabled_providers",
 			"legacy.path": "disabledProviders",
 		},
 	};
@@ -1269,16 +1263,12 @@ omp_con::var! {
 			"ui.label": "Thinking Level",
 			"ui.choices": "thinking-levels",
 			"legacy.path": "defaultThinkingLevel",
-			"legacy.path": "model.default_thinking",
 		},
 	};
 	/// Universal configured reasoning ceiling.
 	pub static AI_THINKING_CEILING = ai_thinking_ceiling: ThinkingEffort {
 		default: ThinkingEffort::Max,
 		flags: archive,
-		meta: {
-			"legacy.path": "model.thinking_ceiling",
-		},
 	};
 	/// Per-effort reasoning token budgets.
 	pub static AI_THINKING_BUDGETS = ai_thinking_budgets: Kv {
@@ -1286,7 +1276,6 @@ omp_con::var! {
 		validate: validate_budgets,
 		flags: archive,
 		meta: {
-			"legacy.path": "model.thinking_budgets",
 			"legacy.path": "thinkingBudgets",
 		},
 	};
@@ -1296,7 +1285,6 @@ omp_con::var! {
 		validate: validate_unique,
 		flags: archive,
 		meta: {
-			"legacy.path": "model.provider_order",
 			"legacy.path": "modelProviderOrder",
 		},
 	};
@@ -1321,7 +1309,6 @@ omp_con::var! {
 			"ui.option.priority": "Priority",
 			"ui.option.priority.desc": "Faster, higher cost (premium request)",
 			"legacy.path": "tier.openai",
-			"legacy.path": "model.tier_openai",
 		},
 	};
 	/// Processing tier for Claude requests. `priority` realizes fast mode (`speed: "fast"`) on supported direct Anthropic models; ignored on Bedrock/Vertex Claude and via OpenRouter.
@@ -1337,7 +1324,6 @@ omp_con::var! {
 			"ui.option.priority": "Priority",
 			"ui.option.priority.desc": "Fast mode (`speed: \"fast\"`) on supported direct Claude models; ignored on Bedrock/Vertex",
 			"legacy.path": "tier.anthropic",
-			"legacy.path": "model.tier_anthropic",
 		},
 	};
 	/// Processing tier for Gemini (Google AI Studio + Vertex) requests, and Google-family models routed via OpenRouter (none = omit). Sent as the top-level `serviceTier` field.
@@ -1355,7 +1341,6 @@ omp_con::var! {
 			"ui.option.priority": "Priority",
 			"ui.option.priority.desc": "Faster, higher reliability (Gemini API + Vertex)",
 			"legacy.path": "tier.google",
-			"legacy.path": "model.tier_google",
 		},
 	};
 	/// Serving path for Fireworks requests. Priority sends `service_tier: "priority"` for higher reliability during peak traffic at a higher price; Standard omits it. Fast (`-fast`) models ignore this — Fast is its own serving path.
@@ -1371,7 +1356,6 @@ omp_con::var! {
 			"ui.option.priority": "Priority",
 			"ui.option.priority.desc": "Priority serving path: higher reliability, premium per-token pricing",
 			"legacy.path": "providers.fireworksTier",
-			"legacy.path": "model.tier_fireworks",
 		},
 	};
 	/// Prompt-cache retention forwarded to providers that support it (Anthropic, Bedrock, OpenRouter, OpenAI).
@@ -1391,7 +1375,6 @@ omp_con::var! {
 			"ui.option.none": "Off",
 			"ui.option.none.desc": "Disable prompt caching and cache-affinity routing",
 			"legacy.path": "providers.cacheRetention",
-			"legacy.path": "model.cache_retention",
 		},
 	};
 	/// Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables).
@@ -1409,7 +1392,6 @@ omp_con::var! {
 			"ui.option.on": "On",
 			"ui.option.on.desc": "Force websockets for OpenAI Codex models",
 			"legacy.path": "providers.openaiWebsockets",
-			"legacy.path": "model.openai_websockets",
 		},
 	};
 	/// Default routing-variant suffix appended to OpenRouter model IDs (overridden when the selector already names a variant).
@@ -1431,7 +1413,6 @@ omp_con::var! {
 			"ui.option.exacto": ":exacto",
 			"ui.option.exacto.desc": "Cherry-picked high-quality providers (only defined for select models)",
 			"legacy.path": "providers.openrouterVariant",
-			"legacy.path": "model.openrouter_variant",
 		},
 	};
 	/// API format for Kimi Code provider (auto follows live model metadata).
@@ -1449,7 +1430,6 @@ omp_con::var! {
 			"ui.option.anthropic": "Anthropic",
 			"ui.option.anthropic.desc": "api.moonshot.ai",
 			"legacy.path": "providers.kimiApiFormat",
-			"legacy.path": "model.kimi_api_format",
 		},
 	};
 	/// Session-title model: online (the TINY role from /models, else @smol) by default, or a local on-device model.
@@ -1471,7 +1451,6 @@ omp_con::var! {
 			"ui.option.falcon-h1-90m": "Falcon H1 Tiny 90M",
 			"ui.option.falcon-h1-90m.desc": "Smallest option, about 147 MB cached; lower fidelity on complex prompts.",
 			"legacy.path": "providers.tinyModel",
-			"legacy.path": "model.tiny_selector",
 		},
 	};
 	/// Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model.
@@ -1498,7 +1477,6 @@ omp_con::var! {
 			"ui.option.lfm2-1.2b": "LFM2 1.2B",
 			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
 			"legacy.path": "providers.memoryModel",
-			"legacy.path": "model.memory_selector",
 		},
 	};
 	/// Difficulty classifier for the `auto` thinking level: online (the TINY role from /models, else smol) by default, or a local on-device model.
@@ -1525,7 +1503,6 @@ omp_con::var! {
 			"ui.option.lfm2-1.2b": "LFM2 1.2B",
 			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
 			"legacy.path": "providers.autoThinkingModel",
-			"legacy.path": "model.auto_thinking_selector",
 		},
 	};
 	/// Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.
@@ -1552,7 +1529,6 @@ omp_con::var! {
 			"ui.option.lfm2-1.2b": "LFM2 1.2B",
 			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
 			"legacy.path": "providers.unexpectedStopModel",
-			"legacy.path": "model.unexpected_stop_selector",
 		},
 	};
 }

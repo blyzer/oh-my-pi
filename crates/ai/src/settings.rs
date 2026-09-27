@@ -767,7 +767,6 @@ omp_con::var! {
 			"ui.option.5": "5 retries",
 			"ui.option.10": "10 retries",
 			"legacy.path": "retry.maxRetries",
-			"legacy.path": "retry.max_retries",
 		},
 	};
 	/// First exponential retry ceiling in milliseconds.
@@ -778,7 +777,6 @@ omp_con::var! {
 		validate: validate_retry_base,
 		flags: archive,
 		meta: {
-			"legacy.path": "retry.base_delay_ms",
 			"legacy.path": "retry.baseDelayMs",
 		},
 	};
@@ -795,7 +793,6 @@ omp_con::var! {
 			"ui.label": "Max Retry Delay",
 			"ui.unit": "ms",
 			"legacy.path": "retry.maxDelayMs",
-			"legacy.path": "retry.max_delay_ms",
 		},
 	};
 	/// Allow retry recovery to switch to configured fallback models
@@ -807,7 +804,6 @@ omp_con::var! {
 			"ui.group": "Retry & Fallback",
 			"ui.label": "Retry Model Fallback",
 			"legacy.path": "retry.modelFallback",
-			"legacy.path": "retry.model_fallback",
 		},
 	};
 	/// Use reliable coding-plan quota reports to prefer same-provider accounts, then configured fallback models, before a hard usage limit. Ordinary configured API keys are excluded.
@@ -819,7 +815,6 @@ omp_con::var! {
 			"ui.group": "Retry & Fallback",
 			"ui.label": "Usage-Aware Fallback",
 			"legacy.path": "retry.usageAwareFallback",
-			"legacy.path": "retry.usage_aware_fallback",
 		},
 	};
 	/// Treat a coding-plan model as near its limit below this remaining percentage. Unknown or unmapped usage keeps the primary model.
@@ -845,7 +840,6 @@ omp_con::var! {
 			"ui.option.25": "25%",
 			"ui.option.25.desc": "Very conservative",
 			"legacy.path": "retry.usageReservePct",
-			"legacy.path": "retry.usage_reserve_pct",
 		},
 	};
 	/// What to do when every same-provider coding-plan account is inside the reserve margin.
@@ -864,7 +858,6 @@ omp_con::var! {
 			"ui.option.fail-closed": "Fail closed",
 			"ui.option.fail-closed.desc": "Do not spend reserve quota or select a fallback",
 			"legacy.path": "retry.usageReservePolicy",
-			"legacy.path": "retry.usage_reserve_policy",
 		},
 	};
 	/// JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model's id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model's bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider's ids under the prefix.
@@ -877,7 +870,6 @@ omp_con::var! {
 			"ui.group": "Retry & Fallback",
 			"ui.label": "Retry Fallback Chains",
 			"legacy.path": "retry.fallbackChains",
-			"legacy.path": "retry.fallback_chains",
 		},
 	};
 	/// When to return to the primary model after a fallback
@@ -893,7 +885,6 @@ omp_con::var! {
 			"ui.option.never": "Never",
 			"ui.option.never.desc": "Stay on the fallback model until manually changed",
 			"legacy.path": "retry.fallbackRevertPolicy",
-			"legacy.path": "retry.fallback_revert",
 		},
 	};
 	/// When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 4.8 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.
@@ -905,7 +896,6 @@ omp_con::var! {
 			"ui.group": "Retry & Fallback",
 			"ui.label": "Anthropic Server-Side Fallback (Fable 5)",
 			"legacy.path": "providers.anthropic.serverSideFallback",
-			"legacy.path": "retry.server_side_fallback",
 		},
 	};
 	/// Sampling temperature (0 = deterministic, 1 = creative, -1 = provider default)
@@ -930,7 +920,6 @@ omp_con::var! {
 			"ui.option.0.7.desc": "Creative",
 			"ui.option.1": "1",
 			"ui.option.1.desc": "Maximum variety",
-			"legacy.path": "sampling.temperature",
 			"legacy.path": "temperature",
 		},
 	};
@@ -958,7 +947,6 @@ omp_con::var! {
 			"ui.option.1": "1",
 			"ui.option.1.desc": "No nucleus filtering",
 			"legacy.path": "topP",
-			"legacy.path": "sampling.top_p",
 		},
 	};
 	/// Sample from top-K tokens (-1 = provider default)
@@ -981,7 +969,6 @@ omp_con::var! {
 			"ui.option.100": "100",
 			"ui.option.100.desc": "Broad",
 			"legacy.path": "topK",
-			"legacy.path": "sampling.top_k",
 		},
 	};
 	/// Minimum probability threshold (0-1, -1 = provider default)
@@ -1004,7 +991,6 @@ omp_con::var! {
 			"ui.option.0.1": "0.1",
 			"ui.option.0.1.desc": "Strict",
 			"legacy.path": "minP",
-			"legacy.path": "sampling.min_p",
 		},
 	};
 	/// Penalty for introducing already-present tokens (-1 = provider default)
@@ -1027,7 +1013,6 @@ omp_con::var! {
 			"ui.option.2": "2",
 			"ui.option.2.desc": "Strong novelty",
 			"legacy.path": "presencePenalty",
-			"legacy.path": "sampling.presence_penalty",
 		},
 	};
 	/// Default frequency penalty; negative preserves provider default.
@@ -1035,9 +1020,6 @@ omp_con::var! {
 		default: -1.0,
 		validate: validate_finite,
 		flags: archive,
-		meta: {
-			"legacy.path": "sampling.frequency_penalty",
-		},
 	};
 	/// Penalty for repeated tokens (-1 = provider default)
 	pub static AI_SAMPLING_REPETITION_PENALTY = ai_sampling_repetition_penalty: f32 {
@@ -1061,7 +1043,6 @@ omp_con::var! {
 			"ui.option.1.5": "1.5",
 			"ui.option.1.5.desc": "Strong penalty",
 			"legacy.path": "repetitionPenalty",
-			"legacy.path": "sampling.repetition_penalty",
 		},
 	};
 	/// OpenAI Responses and Codex response verbosity (low, medium, or high)
@@ -1079,7 +1060,6 @@ omp_con::var! {
 			"ui.option.high": "High",
 			"ui.option.high.desc": "Prefer detailed responses",
 			"legacy.path": "textVerbosity",
-			"legacy.path": "sampling.verbosity",
 		},
 	};
 	/// Maximum concurrent LLM requests per provider id (for example "openai" or "anthropic"), shared across local OMP processes with this config root. Omitted providers are unlimited.
@@ -1093,7 +1073,6 @@ omp_con::var! {
 			"ui.label": "Max In-Flight Requests",
 			"ui.widget": "provider-limits",
 			"legacy.path": "providers.maxInFlightRequests",
-			"legacy.path": "provider_runtime.max_in_flight",
 		},
 	};
 	/// Maximum queued callers per provider before backpressure fails fast.
@@ -1102,9 +1081,6 @@ omp_con::var! {
 		min: 0,
 		max: 100_000,
 		flags: archive,
-		meta: {
-			"legacy.path": "provider_runtime.max_queued",
-		},
 	};
 	/// Per-transport-attempt timeout in seconds.
 	pub static AI_PROVIDER_TIMEOUT_SECONDS = ai_provider_timeout_seconds: u32 {
@@ -1112,9 +1088,6 @@ omp_con::var! {
 		min: 1,
 		max: 3_600,
 		flags: archive,
-		meta: {
-			"legacy.path": "provider_runtime.timeout_seconds",
-		},
 	};
 	/// Overall logical-call timeout in seconds; zero preserves caller deadlines.
 	pub static AI_PROVIDER_CALL_TIMEOUT_SECONDS = ai_provider_call_timeout_seconds: u32 {
@@ -1122,27 +1095,18 @@ omp_con::var! {
 		min: 0,
 		max: 86_400,
 		flags: archive,
-		meta: {
-			"legacy.path": "provider_runtime.call_timeout_seconds",
-		},
 	};
 	/// Bedrock guardrail policy keyed by provider id.
 	pub static AI_PROVIDER_BEDROCK_GUARDRAILS = ai_provider_bedrock_guardrails: Kv {
 		default: serialize_table(&BTreeMap::<Str, crate::codec::bedrock::BedrockGuardrail>::new()),
 		validate: validate_bedrock_guardrails,
 		flags: archive,
-		meta: {
-			"legacy.path": "provider_runtime.bedrock_guardrails",
-		},
 	};
 	/// Bedrock invocation-log attribution tags keyed by provider id.
 	pub static AI_PROVIDER_BEDROCK_REQUEST_METADATA = ai_provider_bedrock_request_metadata: Kv {
 		default: serialize_table(&BTreeMap::<Str, BTreeMap<Str, Str>>::new()),
 		validate: validate_bedrock_request_metadata,
 		flags: archive,
-		meta: {
-			"legacy.path": "provider_runtime.bedrock_request_metadata",
-		},
 	};
 }
 
