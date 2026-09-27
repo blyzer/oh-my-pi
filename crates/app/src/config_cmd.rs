@@ -1,7 +1,7 @@
 //! Reflected, typed settings command handlers.
 
 use std::{
-	env, fs,
+	env,
 	path::{Path, PathBuf},
 };
 
@@ -18,7 +18,7 @@ use omp_envd::mcp::{
 use crate::cli::{ConfigCommand, ConfigScope, McpConfigCommand, McpConfigScope};
 
 /// Runs a typed command-stream configuration operation.
-pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
+pub fn run(command: &ConfigCommand) -> miette::Result<()> {
 	let project = env::current_dir().into_diagnostic()?;
 	if let ConfigCommand::ImportV1 { dry_run, from, profile, sessions } = command {
 		return import_v1(&project, *dry_run, from.as_deref(), profile.as_deref(), *sessions);

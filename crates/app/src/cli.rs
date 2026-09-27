@@ -3039,9 +3039,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		Command::Ext(args) => ext_cli::run(args).await,
 		Command::Install(args) => install_shorthand(args).await,
 		Command::Images(args) => crate::images_cmd::run(args),
-		Command::Config(args) => {
-			config_cmd::run(&omp_core::dirs::data_dir(None).into_diagnostic()?, &args.command)
-		},
+		Command::Config(args) => config_cmd::run(&args.command),
 		Command::Ps(args) => crate::ps_cmd::run(args).await,
 		Command::Read(args) => crate::standalone_tool_cmd::read(args).await,
 		Command::Search(args) => crate::standalone_tool_cmd::search(args).await,

@@ -3,8 +3,8 @@
 //! v1 and v2 share the document shape (`mcpServers`, `disabledServers`,
 //! `enabledServers`; v2 even keeps v1's schema URL), so each v1 declaration
 //! parses into [`McpConfigFile`] as is. The merge is a copy: v1 files are
-//! read, never passed to `McpConfigStore::migrate_from`, which deletes its
-//! source. A name v2 already declares keeps v2's declaration.
+//! only read, never moved or deleted. A name v2 already declares keeps v2's
+//! declaration.
 
 use std::{
 	fs,
