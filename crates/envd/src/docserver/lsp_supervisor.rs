@@ -18,6 +18,7 @@ use std::{
 };
 
 use omp_core::{Hash32, Str};
+use omp_ext::claude_plugin::ClaudePlugin;
 use parking_lot::Mutex;
 use tokio::{sync::watch, time::timeout};
 use tokio_util::sync::CancellationToken;
@@ -26,7 +27,7 @@ use crate::docserver::{
 	Environment,
 	environment::WeakEnvironment,
 	lsp_binary::{BinaryPlatform, resolve_lsp_binary},
-	lsp_config::{LspConfigError, ResolvedLspServer, discover_native_lsp_sources, load_lsp_config},
+	lsp_config::{LspConfigError, ResolvedLspServer, discover_lsp_sources, load_lsp_config},
 	lsp_pool::{LspPool, LspPoolKey},
 	lsp_process::{LspProcess, LspProcessError},
 	lsp_registry::{LspStartupStage, root_marker_ancestor},
@@ -93,6 +94,7 @@ struct SupervisorInner {
 	environment: WeakEnvironment,
 	root:        PathBuf,
 	user_root:   Option<PathBuf>,
+	plugins:     Arc<[ClaudePlugin]>,
 	roster:      Mutex<BTreeMap<Str, ServerSlot>>,
 	pool:        LspPool<LspProcess, LspProcessError>,
 	pending:     watch::Sender<usize>,
@@ -107,21 +109,27 @@ pub struct NativeLspSupervisor {
 }
 
 impl NativeLspSupervisor {
-	/// Discovers the workspace roster: bundled, user, and project declarations
-	/// filtered to enabled non-linter servers whose root markers match the
-	/// project root and whose binary resolves.
+	/// Discovers the workspace roster: bundled, installed-plugin, user, and
+	/// project declarations filtered to enabled non-linter servers whose root
+	/// markers match the project root and whose binary resolves.
+	///
+	/// `plugins` are the installed, enabled marketplace plugins the
+	/// composition resolved; a plugin declaration that fails validation is
+	/// logged as a [`omp_ext::claude_plugin::PluginDiagnostic`] and skipped.
 	///
 	/// # Errors
-	/// Returns configuration read, parse, or validation failures.
+	/// Returns configuration read, parse, or validation failures of the
+	/// native (non-plugin) layers.
 	pub fn discover(
 		environment: &Environment,
 		user_config_root: Option<&Path>,
+		plugins: Arc<[ClaudePlugin]>,
 	) -> Result<Self, LspConfigError> {
 		let root = environment
 			.root_uri()
 			.to_file_path()
 			.unwrap_or_else(|()| PathBuf::from("/"));
-		let roster = discover_roster(&root, user_config_root)?;
+		let roster = discover_roster(&root, user_config_root, &plugins)?;
 		tracing::info!(server_count = roster.len(), "LSP roster discovered");
 		let (pending, _) = watch::channel(0_usize);
 		Ok(Self {
@@ -129,6 +137,7 @@ impl NativeLspSupervisor {
 				environment: environment.downgrade(),
 				root,
 				user_root: user_config_root.map(Path::to_path_buf),
+				plugins,
 				roster: Mutex::new(roster),
 				pool: LspPool::default(),
 				pending,
@@ -165,7 +174,8 @@ impl NativeLspSupervisor {
 	/// Returns configuration read, parse, or validation failures.
 	#[tracing::instrument(name = "lsp_roster_reload", level = "debug", skip_all)]
 	pub fn reload(&self) -> Result<(), LspConfigError> {
-		let fresh = discover_roster(&self.inner.root, self.inner.user_root.as_deref())?;
+		let fresh =
+			discover_roster(&self.inner.root, self.inner.user_root.as_deref(), &self.inner.plugins)?;
 		let mut roster = self.inner.roster.lock();
 		let mut previous = std::mem::take(&mut *roster);
 		let mut next = BTreeMap::new();
@@ -413,6 +423,12 @@ fn pool_key(name: &Str, config: &ResolvedLspServer, root: &Path) -> LspPoolKey {
 	fingerprint.push(0);
 	let _ = serde_json::to_writer(&mut fingerprint, &config.settings.value);
 	let _ = serde_json::to_writer(&mut fingerprint, &config.init_options.value);
+	for (key, value) in &config.env.value {
+		fingerprint.push(0);
+		fingerprint.extend_from_slice(key.as_bytes());
+		fingerprint.push(0);
+		fingerprint.extend_from_slice(value.as_bytes());
+	}
 	LspPoolKey {
 		server:        name.clone(),
 		workspace:     root.to_path_buf(),
@@ -423,9 +439,16 @@ fn pool_key(name: &Str, config: &ResolvedLspServer, root: &Path) -> LspPoolKey {
 fn discover_roster(
 	root: &Path,
 	user_config_root: Option<&Path>,
+	plugins: &[ClaudePlugin],
 ) -> Result<BTreeMap<Str, ServerSlot>, LspConfigError> {
-	let sources = discover_native_lsp_sources(user_config_root, root)?;
-	let config = load_lsp_config(&sources)?;
+	let discovered = discover_lsp_sources(user_config_root, root, Vec::new(), plugins)?;
+	for diagnostic in &discovered.diagnostics {
+		tracing::warn!(
+			error = diagnostic as &(dyn std::error::Error + 'static),
+			"installed plugin language server not loaded"
+		);
+	}
+	let config = load_lsp_config(&discovered.sources)?;
 	let platform = if cfg!(windows) {
 		BinaryPlatform::Windows
 	} else {
@@ -507,12 +530,12 @@ mod tests {
 		let scratch = tempfile::tempdir().unwrap();
 		let root = scratch.path();
 		// No markers at all: bundled catalog yields an empty roster.
-		let roster = discover_roster(root, None).unwrap();
+		let roster = discover_roster(root, None, &[]).unwrap();
 		assert!(roster.is_empty(), "unexpected servers: {:?}", roster.keys().collect::<Vec<_>>());
 
 		// A Cargo marker admits rust-analyzer only when the binary resolves.
 		std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
-		let roster = discover_roster(root, None).unwrap();
+		let roster = discover_roster(root, None, &[]).unwrap();
 		let expected = which_available("rust-analyzer");
 		assert_eq!(roster.contains_key("rust-analyzer"), expected);
 	}

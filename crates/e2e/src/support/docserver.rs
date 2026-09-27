@@ -45,6 +45,7 @@ impl DocServerTask {
 					lazy:    true,
 				},
 				user_config_root: None,
+				claude_plugins:   std::sync::Arc::default(),
 				shutdown:         None,
 				server_build:     Default::default(),
 				connections:      None,

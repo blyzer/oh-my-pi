@@ -565,8 +565,9 @@ fn lsp_dap_and_secrets_copy_only_what_v2_can_load() {
 		&agent.join("lsp.json"),
 		r#"{"servers":{"mine":{"command":"mine-ls","fileTypes":[".x"],"rootMarkers":[".git"]}}}"#,
 	);
-	// v2's schema has no `env`, so this file would break every LSP server.
-	write(&agent.join(".lsp.yaml"), "servers:\n  rust-analyzer:\n    env:\n      A: b\n");
+	// v2's schema has no `restartOnCrash`, so this file would break every LSP
+	// server.
+	write(&agent.join(".lsp.yaml"), "servers:\n  rust-analyzer:\n    restartOnCrash: true\n");
 	write(&agent.join("dap.json"), r#"{"adapters":{"acme":{"args":["--x"]}}}"#);
 	write(&agent.join("secrets.yml"), "- type: shout\n  content: hunter2-secret\n");
 

@@ -12,7 +12,9 @@ use std::{
 };
 
 use omp_core::{Str, sf};
-use omp_ext::claude_plugin::{ClaudePlugin, McpDeclaration, PluginScope};
+use omp_ext::claude_plugin::{
+	ClaudePlugin, ConfigDeclaration, PluginScope, expand_plugin_vars, resolve_plugin_command,
+};
 use serde::Deserialize;
 
 use super::{
@@ -389,14 +391,14 @@ fn push_claude_plugins(out: &mut Vec<ConfigSource>, plugins: &[ClaudePlugin]) {
 		let root = Str::new(plugin.root.to_string_lossy());
 		for declaration in &components.mcp {
 			let (path, base, servers) = match declaration {
-				McpDeclaration::File(path) => {
+				ConfigDeclaration::File(path) => {
 					let Some(document) = read_json::<PluginMcpDocument>(path) else {
 						continue;
 					};
 					let base = path.parent().unwrap_or(&plugin.root).to_path_buf();
 					(path.clone(), base, document.into_servers())
 				},
-				McpDeclaration::Inline { manifest, servers } => {
+				ConfigDeclaration::Inline { manifest, servers } => {
 					match serde_json::from_str::<BTreeMap<Str, ForeignServer>>(servers) {
 						Ok(servers) => (manifest.clone(), plugin.root.clone(), servers),
 						Err(error) => {
@@ -508,7 +510,7 @@ impl ForeignServer {
 		let plugin_data = self.plugin_data;
 		let plugin_root = self.plugin_root;
 		let replace = |value| {
-			replace_plugin_vars(value, plugin_root.as_deref().unwrap_or(base), plugin_data.as_deref())
+			expand_plugin_vars(value, plugin_root.as_deref().unwrap_or(base), plugin_data.as_deref())
 		};
 		let (command, mut command_args) = match self.command {
 			Some(ForeignCommand::One(command)) => (Some(replace(command)), Vec::new()),
@@ -524,12 +526,8 @@ impl ForeignServer {
 		// A plugin's path-like relative command (`./bin/server`) names a file
 		// in its package, not in the session cwd.
 		let command = command.map(|command| {
-			if plugin_root.is_some() && (command.starts_with("./") || command.starts_with("../")) {
-				let relative = command
-					.as_str()
-					.strip_prefix("./")
-					.unwrap_or(command.as_str());
-				Str::new(base.join(relative).to_string_lossy())
+			if plugin_root.is_some() {
+				resolve_plugin_command(command, base)
 			} else {
 				command
 			}
@@ -598,25 +596,6 @@ fn safe_plugin_name(name: &str) -> bool {
 		&& name.bytes().all(|byte| {
 			byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
 		})
-}
-
-fn replace_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
-	if !value.contains("${PLUGIN_ROOT}")
-		&& !value.contains("${PLUGIN_DATA}")
-		&& !value.contains("${CLAUDE_PLUGIN_ROOT}")
-		&& !value.contains("${OMP_PLUGIN_ROOT}")
-	{
-		return value;
-	}
-	let root = root.to_string_lossy();
-	let replaced = value
-		.replace("${PLUGIN_ROOT}", root.as_ref())
-		.replace("${CLAUDE_PLUGIN_ROOT}", root.as_ref())
-		.replace("${OMP_PLUGIN_ROOT}", root.as_ref());
-	match data {
-		Some(data) => Str::new(replaced.replace("${PLUGIN_DATA}", data.to_string_lossy().as_ref())),
-		None => Str::new(replaced),
-	}
 }
 
 fn push_codex(out: &mut Vec<ConfigSource>, path: PathBuf, kind: ConfigSourceKind) {

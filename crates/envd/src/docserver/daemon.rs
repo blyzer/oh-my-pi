@@ -13,11 +13,12 @@ use std::{
 	fs::{File, OpenOptions},
 	os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
 };
-use std::{io, mem, path::PathBuf, result, time::Duration};
+use std::{io, mem, path::PathBuf, result, sync::Arc, time::Duration};
 
 #[cfg(unix)]
 use omp_core::Hash32;
 use omp_core::Str;
+use omp_ext::claude_plugin::ClaudePlugin;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
@@ -43,7 +44,7 @@ use crate::docserver::{
 	Environment, LspProcess, LspProcessError, ServerConfig,
 	connection::{ConnectionConfig, ConnectionError, serve_io_until},
 	dap_adapter::builtin_adapters,
-	dap_config::{discover_native_dap_sources, load_dap_config},
+	dap_config::{discover_dap_sources, load_dap_config},
 	error, load_lsp_process_configs,
 	lsp_supervisor::{NativeLspOptions, NativeLspSupervisor},
 };
@@ -72,6 +73,9 @@ pub struct ServeOptions {
 	pub lsp:              NativeLspOptions,
 	/// User configuration root probed for `lsp.json` and `dap.json` overrides.
 	pub user_config_root: Option<PathBuf>,
+	/// Installed, enabled Claude-format marketplace plugins whose LSP and DAP
+	/// declarations join discovery beneath the user and project layers.
+	pub claude_plugins:   Arc<[ClaudePlugin]>,
 	/// External shutdown; `None` installs signal handling.
 	pub shutdown:         Option<CancellationToken>,
 	/// Executable-generation identity advertised in `ServerHello`.
@@ -244,7 +248,11 @@ async fn run_with_shutdown(root: PathBuf, transport: Transport, options: ServeOp
 	let authority_lock = config.try_lock_authority()?;
 	let environment = Environment::new(config)?;
 	if options.lsp.enabled {
-		match NativeLspSupervisor::discover(&environment, options.user_config_root.as_deref()) {
+		match NativeLspSupervisor::discover(
+			&environment,
+			options.user_config_root.as_deref(),
+			Arc::clone(&options.claude_plugins),
+		) {
 			Ok(supervisor) => {
 				environment.install_lsp_supervisor(supervisor.clone());
 				if !options.lsp.lazy {
@@ -256,7 +264,11 @@ async fn run_with_shutdown(root: PathBuf, transport: Transport, options: ServeOp
 			},
 		}
 	}
-	install_dap_overrides(&environment, options.user_config_root.as_deref());
+	install_dap_overrides(
+		&environment,
+		options.user_config_root.as_deref(),
+		&options.claude_plugins,
+	);
 	let mut processes = Vec::with_capacity(process_configs.len());
 	for process_config in process_configs {
 		match LspProcess::start(process_config, &environment, CancellationToken::new()).await {
@@ -295,15 +307,27 @@ async fn run_with_shutdown(root: PathBuf, transport: Transport, options: ServeOp
 	process_result
 }
 
-/// Overlays discovered user/project DAP adapter declarations onto the
-/// builtin registry; discovery failures never block the authority.
-fn install_dap_overrides(environment: &Environment, user_config_root: Option<&Path>) {
-	let root = match environment.root_uri().to_file_path() {
-		Ok(root) => root,
-		Err(()) => return,
+/// Overlays discovered plugin/user/project DAP adapter declarations onto
+/// the builtin registry; discovery failures never block the authority, and a
+/// rejected plugin declaration is logged as its plugin diagnostic.
+fn install_dap_overrides(
+	environment: &Environment,
+	user_config_root: Option<&std::path::Path>,
+	plugins: &[ClaudePlugin],
+) {
+	let Ok(root) = environment.root_uri().to_file_path() else {
+		return;
 	};
-	let sources = match discover_native_dap_sources(user_config_root, &root) {
-		Ok(sources) => sources,
+	let sources = match discover_dap_sources(user_config_root, &root, Vec::new(), plugins) {
+		Ok(discovered) => {
+			for diagnostic in &discovered.diagnostics {
+				tracing::warn!(
+					error = diagnostic as &(dyn std::error::Error + 'static),
+					"installed plugin debug adapter not loaded"
+				);
+			}
+			discovered.sources
+		},
 		Err(error) => {
 			tracing::warn!(%error, "native DAP discovery failed; continuing with builtins");
 			return;
@@ -667,6 +691,45 @@ mod tests {
 	};
 
 	#[test]
+	fn installed_plugin_debug_adapters_reach_the_authority_registry() {
+		use crate::docserver::lsp_config::tests::{installed_plugins, write};
+
+		let scratch = TempDir::new().expect("temporary directory");
+		let scratch = scratch.path().canonicalize().expect("canonical scratch");
+		let project = scratch.join("project");
+		fs::create_dir_all(&project).expect("project");
+		let enabled = scratch.join("enabled");
+		let disabled = scratch.join("disabled");
+		write(
+			&enabled.join(".dap.json"),
+			r#"{"adapters":{"acme-dbg":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/dbg","fileTypes":[".acme"]}}}"#,
+		);
+		write(&disabled.join(".dap.json"), r#"{"ghost-dbg":{"command":"ghost"}}"#);
+		let plugins = installed_plugins(&scratch.join("data"), &[
+			("enabled@m", &enabled, true),
+			("disabled@m", &disabled, false),
+		]);
+		let environment =
+			Environment::new(ServerConfig::new(project).expect("config")).expect("environment");
+
+		install_dap_overrides(&environment, None, &plugins.plugins);
+
+		let adapters = environment.dap_adapters().list();
+		let acme = adapters
+			.iter()
+			.find(|adapter| adapter.spec.name == "acme-dbg")
+			.expect("plugin adapter installed");
+		assert_eq!(acme.spec.command, format!("{}/bin/dbg", enabled.display()).as_str());
+		assert_eq!(acme.spec.extensions, ["acme"]);
+		assert!(
+			adapters
+				.iter()
+				.all(|adapter| adapter.spec.name != "ghost-dbg"),
+			"a disabled plugin contributed an adapter"
+		);
+	}
+
+	#[test]
 	fn authority_lock_is_exclusive_and_released_on_drop() {
 		let root = TempDir::new().expect("temporary directory");
 		let identity = root.path().join("workspace");
@@ -780,6 +843,7 @@ mod tests {
 				lsp_config_paths: Vec::new(),
 				lsp:              NativeLspOptions { enabled: false, ..NativeLspOptions::default() },
 				user_config_root: None,
+				claude_plugins:   Arc::default(),
 				shutdown:         Some(task_shutdown),
 				server_build:     Str::default(),
 				connections:      None,
@@ -818,6 +882,7 @@ mod tests {
 			lsp_config_paths: Vec::new(),
 			lsp:              NativeLspOptions { enabled: false, ..NativeLspOptions::default() },
 			user_config_root: None,
+			claude_plugins:   Arc::default(),
 			shutdown:         Some(shutdown.clone()),
 			server_build:     sf!("test-build"),
 			connections:      Some(connection_tx),
@@ -875,6 +940,7 @@ mod tests {
 			lsp_config_paths: Vec::new(),
 			lsp:              NativeLspOptions { enabled: false, ..NativeLspOptions::default() },
 			user_config_root: None,
+			claude_plugins:   Arc::default(),
 			shutdown:         Some(shutdown.clone()),
 			server_build:     Str::default(),
 			connections:      Some(connection_tx),

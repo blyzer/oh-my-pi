@@ -157,15 +157,15 @@ pub(in crate::v1_import) fn import(cx: &StepContext<'_>) -> Result<Vec<ImportEnt
 					"installed plugin",
 				);
 				// Runtime discovery (`ClaudePlugins::resolve`) loads an enabled
-				// install's skills, commands, rules and MCP servers; the kinds
-				// it has no home for are launch diagnostics
-				// (`PluginDiagnostic::Unsupported`).
+				// install's skills, commands, rules, MCP servers, language
+				// servers and debug adapters; the kinds it has no home for are
+				// launch diagnostics (`PluginDiagnostic::Unsupported`).
 				if new + kept > 0 {
 					entries.push(entry(
 						&v1,
 						Some(Str::new_static(
-							"plugin hooks, agents, LSP/DAP servers, JS tools and output styles (v2 loads \
-							 the skills, commands, rules and MCP servers of enabled plugins and reports \
+							"plugin hooks, agents, JS tools and output styles (v2 loads the skills, \
+							 commands, rules, MCP, LSP and DAP servers of enabled plugins and reports \
 							 these at launch)",
 						)),
 						ImportOutcome::NotMigratable(NotMigratable::NoV2Equivalent),

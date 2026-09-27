@@ -3327,7 +3327,8 @@ pub struct ActiveContentInputs {
 	/// automatic project discovery.
 	pub agent_plugin_roots:  Vec<PathBuf>,
 	/// Installed, enabled Claude-layout marketplace plugins whose MCP
-	/// declarations join automatic project discovery.
+	/// declarations join automatic project discovery and whose LSP and DAP
+	/// declarations reach the document authority's rosters.
 	pub claude_plugins:      Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
 }
 
