@@ -1,12 +1,11 @@
-//! Legacy settings documents folded into archive-layer convars.
+//! v1 settings documents folded into archive-layer convars.
 //!
-//! Two formats share this path: the early omp2 TOML settings (`omp config
-//! migrate`) and v1's YAML `config.yml` (the v1 import). Both parse into one
-//! [`LegacyMap`] tree. Each convar declares the document paths it takes over
-//! through `"legacy.path"` metadata ([`LEGACY_PATH`]), and [`convert`] turns
-//! the value found at one of those paths into the convar's typed value,
-//! including the shape changes between the formats (inverted booleans,
-//! percentages, millisecond counts, selector chains, path-scoped lists).
+//! v1's YAML `config.yml` (the v1 import's `settings` step) parses into one
+//! [`LegacyMap`] tree. Each convar declares the v1 paths it takes over through
+//! `"legacy.path"` metadata ([`LEGACY_PATH`]), and [`convert`] turns the value
+//! found at one of those paths into the convar's typed value, including the
+//! shape changes between v1 and v2 (inverted booleans, percentages,
+//! millisecond counts, selector chains, path-scoped lists).
 //!
 //! A path is looked up the way v1's `getByPath` did: one map level per
 //! `.`-separated segment. A `null` value is absent.
@@ -16,16 +15,13 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_con::{ConError, Ctx, Kv, Origin, Span, TypeSpec, Value, ValueKind, VarView};
+use omp_con::{Kv, Span, TypeSpec, Value, ValueKind, VarView};
 use omp_core::Str;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use thiserror::Error;
 
-/// Metadata key naming a legacy document path a convar takes over.
+/// Metadata key naming a v1 settings path a convar takes over.
 pub const LEGACY_PATH: &str = "legacy.path";
-
-/// The key the `toml` deserializer wraps a datetime in.
-const TOML_DATETIME_KEY: &str = "$__toml_private_datetime";
 
 /// One value of a legacy settings document.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,7 +34,7 @@ pub enum LegacyValue {
 	Int(i64),
 	/// Float (also integers beyond `i64`).
 	Float(f64),
-	/// String (TOML datetimes arrive as their text).
+	/// String.
 	Str(Str),
 	/// Sequence.
 	List(Vec<Self>),
@@ -128,19 +124,6 @@ impl LegacyMap {
 		}
 	}
 
-	/// Folds `incoming` over this table: nested tables merge, every other
-	/// value replaces.
-	pub fn merge(&mut self, incoming: Self) {
-		for (key, value) in incoming.0 {
-			match (self.0.iter_mut().find(|(candidate, _)| *candidate == key), value) {
-				(Some((_, LegacyValue::Map(target))), LegacyValue::Map(incoming)) => {
-					target.merge(incoming);
-				},
-				(_, value) => self.insert(key, value),
-			}
-		}
-	}
-
 	/// The value at a `.`-separated path, one table level per segment. A
 	/// `null` value is absent.
 	#[must_use]
@@ -227,9 +210,6 @@ impl<'de> Visitor<'de> for ValueVisitor {
 		let mut table = LegacyMap::default();
 		while let Some(LegacyKey(key)) = map.next_key()? {
 			let value: LegacyValue = map.next_value()?;
-			if key == TOML_DATETIME_KEY && table.is_empty() {
-				return Ok(value);
-			}
 			table.insert(key, value);
 		}
 		Ok(LegacyValue::Map(table))
@@ -326,10 +306,10 @@ pub enum LegacyValueError {
 	},
 }
 
-/// A convar whose legacy value could not be folded.
+/// A v1 settings document that could not be read.
 #[derive(Debug, Error)]
 pub enum LegacySettingsError {
-	/// A legacy settings file could not be read.
+	/// The settings file could not be read.
 	#[error("could not read {}", path.display())]
 	Read {
 		/// The file.
@@ -338,16 +318,7 @@ pub enum LegacySettingsError {
 		#[source]
 		source: io::Error,
 	},
-	/// A legacy TOML settings file did not parse.
-	#[error("{} is not valid TOML", path.display())]
-	Toml {
-		/// The file.
-		path:   PathBuf,
-		/// Parse failure.
-		#[source]
-		source: toml::de::Error,
-	},
-	/// A legacy YAML settings file did not parse.
+	/// The YAML settings file did not parse.
 	#[error("{} is not a valid YAML settings table", path.display())]
 	Yaml {
 		/// The file.
@@ -355,26 +326,6 @@ pub enum LegacySettingsError {
 		/// Parse failure.
 		#[source]
 		source: serde_yaml::Error,
-	},
-	/// The value at a legacy path does not convert into its convar's type.
-	#[error("legacy setting `{path}` does not convert into `{var}`")]
-	Value {
-		/// The legacy document path.
-		path:   Str,
-		/// The convar it feeds.
-		var:    Str,
-		/// Why.
-		#[source]
-		source: LegacyValueError,
-	},
-	/// The convar rejected the converted value.
-	#[error("`{var}` rejected the legacy value")]
-	Set {
-		/// The convar.
-		var:    Str,
-		/// The console's rejection.
-		#[source]
-		source: ConError,
 	},
 }
 
@@ -384,26 +335,6 @@ fn read_text(path: &Path) -> Result<Option<String>, LegacySettingsError> {
 		Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
 		Err(source) => Err(LegacySettingsError::Read { path: path.to_owned(), source }),
 	}
-}
-
-/// Reads legacy TOML documents, later sources overriding earlier ones. Missing
-/// files are skipped.
-///
-/// # Errors
-///
-/// Returns [`LegacySettingsError`] when a present file cannot be read or
-/// parsed.
-pub fn read_toml_documents(sources: &[PathBuf]) -> Result<LegacyMap, LegacySettingsError> {
-	let mut document = LegacyMap::default();
-	for source in sources {
-		let Some(text) = read_text(source)? else {
-			continue;
-		};
-		let incoming = toml::from_str::<LegacyMap>(&text)
-			.map_err(|error| LegacySettingsError::Toml { path: source.clone(), source: error })?;
-		document.merge(incoming);
-	}
-	Ok(document)
 }
 
 /// Reads one YAML settings document (v1 `config.yml`). An empty or missing
@@ -457,47 +388,6 @@ pub fn fold_var(document: &LegacyMap, var: &VarView<'_>) -> Option<VarFold> {
 		paths.push(path);
 	}
 	(!paths.is_empty()).then_some(VarFold { paths, outcome: Ok(current) })
-}
-
-/// Folds a legacy document into `ctx`'s archive layer through every
-/// convar's declared legacy paths.
-///
-/// # Errors
-///
-/// Returns [`LegacySettingsError`] for the first value that does not convert
-/// or that its convar rejects.
-pub fn fold_into(document: &LegacyMap, ctx: &Ctx) -> Result<(), LegacySettingsError> {
-	for var in ctx.vars() {
-		let Some(fold) = fold_var(document, &var) else {
-			continue;
-		};
-		let value = fold
-			.outcome
-			.map_err(|(path, source)| LegacySettingsError::Value {
-				path,
-				var: Str::new(var.name),
-				source,
-			})?;
-		if let Some(value) = value {
-			ctx.set(var.name, value, Origin::Archive)
-				.map_err(|source| LegacySettingsError::Set { var: Str::new(var.name), source })?;
-		}
-	}
-	Ok(())
-}
-
-/// Folds legacy TOML documents (later sources override earlier) into a fresh
-/// archive-layer context: the early omp2 `config.toml` migration.
-///
-/// # Errors
-///
-/// Returns [`LegacySettingsError`] when a source does not read or parse, or a
-/// value does not convert.
-pub fn fold_toml_sources(sources: &[PathBuf]) -> Result<Ctx, LegacySettingsError> {
-	let document = read_toml_documents(sources)?;
-	let ctx = Ctx::new();
-	fold_into(&document, &ctx)?;
-	Ok(ctx)
 }
 
 /// Converts the value at legacy `path` into `var`'s value.
@@ -824,6 +714,8 @@ fn untyped_value(value: &LegacyValue) -> Value {
 
 #[cfg(test)]
 mod tests {
+	use omp_con::Ctx;
+
 	use super::*;
 
 	fn yaml(text: &str) -> LegacyMap {
@@ -844,7 +736,7 @@ mod tests {
 	}
 
 	#[test]
-	fn yaml_and_toml_parse_into_one_tree() {
+	fn yaml_parses_into_one_tree() {
 		let from_yaml =
 			yaml("retry:\n  enabled: false\n  maxRetries: 5\ntheme: ~\nbig: 18446744073709551615\n");
 		assert_eq!(from_yaml.value_at("retry.enabled"), Some(&LegacyValue::Bool(false)));
@@ -852,14 +744,6 @@ mod tests {
 		assert_eq!(from_yaml.value_at("theme"), None, "null is absent");
 		assert_eq!(from_yaml.value_at("retry.enabled.deeper"), None);
 		assert!(matches!(from_yaml.value_at("big"), Some(LegacyValue::Float(_))));
-		let from_toml =
-			toml::from_str::<LegacyMap>("when = 1979-05-27T07:32:00Z\n[retry]\nenabled = false\n")
-				.expect("toml");
-		assert_eq!(from_toml.value_at("retry.enabled"), Some(&LegacyValue::Bool(false)));
-		assert_eq!(
-			from_toml.value_at("when").and_then(LegacyValue::as_str),
-			Some("1979-05-27T07:32:00Z")
-		);
 		assert!(serde_yaml::from_str::<LegacyMap>("- a\n- b\n").is_err(), "a list is not a table");
 	}
 

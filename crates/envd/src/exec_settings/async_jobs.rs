@@ -65,7 +65,6 @@ omp_con::var! {
 		default: 100,
 		flags: archive,
 		meta: {
-			"legacy.path": "async.max_jobs",
 			"legacy.path": "async.maxJobs",
 		},
 	};
@@ -74,9 +73,6 @@ omp_con::var! {
 		default: 300_000,
 		min: 0,
 		flags: archive,
-		meta: {
-			"legacy.path": "async.retention_ms",
-		},
 	};
 	/// How long a `hub` wait watches background jobs before returning the current state. A fixed value waits that exact duration every time. `smart` adapts from 5s to 5m and resets after about a minute without waiting.
 	pub static SV_ASYNC_POLL_WAIT_DURATION = sv_async_poll_wait_duration: PollWaitDuration {
@@ -93,7 +89,6 @@ omp_con::var! {
 			"ui.option.5m": "5 minutes",
 			"ui.option.smart": "Smart",
 			"ui.option.smart.desc": "Default — adaptive 5s→5m, resets when you stop polling",
-			"legacy.path": "async.poll_wait_duration",
 			"legacy.path": "async.pollWaitDuration",
 		},
 	};

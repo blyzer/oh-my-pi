@@ -21,9 +21,9 @@
 //! # What is written
 //!
 //! - Every convar declares the v1 paths it takes over (`"legacy.path"`);
-//!   [`crate::legacy_settings`] converts the values, shared with `omp config
-//!   migrate`. Only keys present in the v1 file are considered, and a value
-//!   that equals the v2 default is reported and not written.
+//!   [`crate::legacy_settings`] converts the values. Only keys present in the
+//!   v1 file are considered, and a value that equals the v2 default is reported
+//!   and not written.
 //! - Imported lines are appended to the destination `config.cfg` under a header
 //!   comment. Existing lines are never rewritten: a convar the file already
 //!   sets keeps its value and the report says so.

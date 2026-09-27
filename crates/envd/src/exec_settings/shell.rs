@@ -83,7 +83,6 @@ omp_con::var! {
 			"ui.tab": "shell",
 			"ui.group": "Bash",
 			"ui.label": "Bash",
-			"legacy.path": "shell.enabled",
 			"legacy.path": "bash.enabled",
 		},
 	};
@@ -91,17 +90,11 @@ omp_con::var! {
 	pub static SV_SHELL_COMMAND_PREFIX = sv_shell_command_prefix: Str {
 		default: Str::default(),
 		flags: archive,
-		meta: {
-			"legacy.path": "shell.command_prefix",
-		},
 	};
 	/// Advertise and enable the embedded builtin command set.
 	pub static SV_SHELL_EMBEDDED_BUILTINS = sv_shell_embedded_builtins: bool {
 		default: true,
 		flags: archive,
-		meta: {
-			"legacy.path": "shell.embedded_builtins",
-		},
 	};
 	/// Automatically background long-running bash commands and deliver the result later.
 	pub static SV_SHELL_AUTO_BACKGROUND_ENABLED = sv_shell_auto_background_enabled: bool {
@@ -111,7 +104,6 @@ omp_con::var! {
 			"ui.tab": "shell",
 			"ui.group": "Bash",
 			"ui.label": "Bash Auto-Background",
-			"legacy.path": "shell.auto_background.enabled",
 			"legacy.path": "bash.autoBackground.enabled",
 		},
 	};
@@ -121,7 +113,6 @@ omp_con::var! {
 		min: 0,
 		flags: archive,
 		meta: {
-			"legacy.path": "shell.auto_background.threshold_ms",
 			"legacy.path": "bash.autoBackground.thresholdMs",
 		},
 	};
@@ -133,7 +124,6 @@ omp_con::var! {
 			"ui.tab": "shell",
 			"ui.group": "Bash",
 			"ui.label": "Bash Interceptor",
-			"legacy.path": "shell.interceptor.enabled",
 			"legacy.path": "bashInterceptor.enabled",
 		},
 	};
@@ -142,7 +132,6 @@ omp_con::var! {
 		default: default_interceptor_kv(),
 		flags: archive,
 		meta: {
-			"legacy.path": "shell.interceptor.patterns",
 			"legacy.path": "bashInterceptor.patterns",
 		},
 	};
@@ -156,7 +145,6 @@ omp_con::var! {
 			"ui.label": "direnv Auto-Load",
 			"ui.option.auto": "Auto",
 			"ui.option.off": "Off",
-			"legacy.path": "shell.direnv",
 			"legacy.path": "bash.direnv",
 		},
 	};
@@ -170,7 +158,6 @@ omp_con::var! {
 			"ui.group": "Bash",
 			"ui.label": "direnv Load Timeout (ms)",
 			"ui.unit": "ms",
-			"legacy.path": "shell.direnv_load_timeout_ms",
 			"legacy.path": "bash.direnvLoadTimeoutMs",
 		},
 	};

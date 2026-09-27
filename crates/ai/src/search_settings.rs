@@ -219,7 +219,6 @@ omp_con::var! {
 			"ui.option.public": "Public Web",
 			"ui.option.public.desc": "Queries every credential-free engine in parallel and consolidates deduplicated results",
 			"legacy.path": "providers.webSearchOrder",
-			"legacy.path": "web_search.order",
 		},
 	};
 	/// Providers that web_search should never use, even as fallbacks
@@ -279,7 +278,6 @@ omp_con::var! {
 			"ui.option.public": "Public Web",
 			"ui.option.public.desc": "Queries every credential-free engine in parallel and consolidates deduplicated results",
 			"legacy.path": "providers.webSearchExclude",
-			"legacy.path": "web_search.exclusions",
 		},
 	};
 	/// Hard timeout for each provider's search transport before web_search advances to the next fallback, in seconds (maximum 300)
@@ -299,7 +297,6 @@ omp_con::var! {
 			"ui.option.180": "3 minutes",
 			"ui.option.300": "5 minutes",
 			"legacy.path": "providers.webSearchTimeoutSeconds",
-			"legacy.path": "web_search.timeout_seconds",
 		},
 	};
 	/// Base URL of a self-hosted SearXNG instance used for web search
@@ -312,7 +309,6 @@ omp_con::var! {
 			"ui.group": "Services",
 			"ui.label": "SearXNG Endpoint",
 			"legacy.path": "searxng.endpoint",
-			"legacy.path": "web_search.searxng_endpoint",
 		},
 	};
 	/// Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.
@@ -324,7 +320,6 @@ omp_con::var! {
 			"ui.group": "Services",
 			"ui.label": "Gemini web_search model",
 			"legacy.path": "providers.webSearchGeminiModel",
-			"legacy.path": "web_search.gemini_model",
 		},
 	};
 	/// Endpoint routing strategy for google-antigravity providers (chat, search, image, discovery)
@@ -342,16 +337,12 @@ omp_con::var! {
 			"ui.option.sandbox": "Sandbox Only",
 			"ui.option.sandbox.desc": "Force sandbox endpoint only",
 			"legacy.path": "providers.antigravityEndpoint",
-			"legacy.path": "web_search.antigravity_mode",
 		},
 	};
 	/// Use the Perplexity Responses endpoint.
 	pub static AI_SEARCH_PERPLEXITY_RESPONSES = ai_search_perplexity_responses: bool {
 		default: false,
 		flags: archive,
-		meta: {
-			"legacy.path": "web_search.perplexity_responses",
-		},
 	};
 }
 
