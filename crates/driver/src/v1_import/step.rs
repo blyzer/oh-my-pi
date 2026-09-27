@@ -82,6 +82,8 @@ pub enum ImportStep {
 	/// v1-only `.omp/` files convert once per project
 	/// ([`super::import_project_assets`]).
 	SshHosts,
+	/// v1 `keybindings.yml` actions into `bind` lines in `config.cfg`.
+	Keybindings,
 	/// v1 `history.db` prompts merged into `<data>/history.db`.
 	History,
 	/// v1 `install-id` into `<data>/install-id`, unless v2 has its own.
@@ -117,6 +119,7 @@ impl ImportStep {
 			Self::Secrets => V1Item::Secrets,
 			Self::Mcp => V1Item::Mcp,
 			Self::SshHosts => V1Item::Ssh,
+			Self::Keybindings => V1Item::Keybindings,
 			Self::History => V1Item::HistoryDb,
 			Self::InstallId => V1Item::InstallId,
 			Self::Mnemopi => V1Item::MnemopiMemory,
@@ -163,6 +166,7 @@ impl ImportStep {
 			| Self::Secrets
 			| Self::Mcp
 			| Self::SshHosts => super::assets::import(self, cx),
+			Self::Keybindings => super::keybindings::import_keybindings(cx),
 			Self::History => super::data::history::import(cx),
 			Self::InstallId => super::data::install_id::import(cx),
 			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
@@ -402,9 +406,6 @@ pub enum ImportError {
 	/// The v1 settings could not be imported.
 	#[error("could not import the settings")]
 	Settings(#[from] super::SettingsImportError),
-	/// A data or memory step could not read v1 or write v2.
-	#[error("could not import v1 data")]
-	Data(#[from] super::DataImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,
@@ -438,4 +439,10 @@ pub enum ImportError {
 	/// A user asset could not be read, checked, or copied.
 	#[error(transparent)]
 	Assets(#[from] super::assets::AssetError),
+	/// The v1 keybindings could not be read or written as `bind` lines.
+	#[error("could not import the keybindings")]
+	Keybindings(#[from] super::keybindings::KeybindingsImportError),
+	/// A data or memory step could not read v1 or write v2.
+	#[error("could not import v1 data")]
+	Data(#[from] super::DataImportError),
 }

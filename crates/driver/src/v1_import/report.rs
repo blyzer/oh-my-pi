@@ -54,6 +54,9 @@ pub enum SkipReason {
 	/// An earlier v1 credential of the same provider and identity was taken.
 	#[strum(to_string = "an earlier v1 credential has the same identity")]
 	DuplicateIdentity,
+	/// v2's `config.cfg` already binds the chord; the existing bind wins.
+	#[strum(to_string = "v2 config.cfg already binds this chord; kept the existing bind")]
+	ChordBound,
 	/// v1 and v2 resolve to the same file (a shared XDG root), so there is
 	/// nothing to copy.
 	#[strum(to_string = "v1 and v2 share this file")]
@@ -107,6 +110,9 @@ pub enum Attention {
 	/// endpoint, or client id, or disabled in v1).
 	#[strum(to_string = "re-authorize this MCP server in v2")]
 	McpReauthorize,
+	/// A v1 keybinding is not a chord or a list of chords v2 can parse.
+	#[strum(to_string = "not a key chord v2 understands; rebind it with `bind <chord> <command>`")]
+	InvalidKeybinding,
 	/// Lessons were imported into Mnemopi, but the profile's memory backend is
 	/// not Mnemopi.
 	#[strum(to_string = "enable `ai_memory_backend mnemopi` to use them")]
