@@ -271,6 +271,7 @@ pub struct ProductionInference {
 	_python_components: Vec<omp_envd::exthost::PyComponent>,
 	_eval_parent:       Option<omp_envd::eval::ParentBindingLease>,
 	_ephemeral_journal: Option<EphemeralJournal>,
+	rules:              Arc<crate::discovery::rules::RuleScope>,
 }
 
 impl ProductionInference {
@@ -1399,6 +1400,8 @@ pub enum ComposedInference {
 		_eval_parent:       Option<omp_envd::eval::ParentBindingLease>,
 		/// No-session journal cleanup owner.
 		_ephemeral_journal: Option<EphemeralJournal>,
+		/// Discovered rules and the agent class the live session runs as.
+		rules:              Arc<crate::discovery::rules::RuleScope>,
 	},
 }
 
@@ -1441,6 +1444,17 @@ impl ComposedInference {
 		match self {
 			Self::Production(inference) => inference._environment.client(),
 			Self::Gateway { _environment, .. } => _environment.client(),
+		}
+	}
+
+	/// The discovered rules and the agent class the live session runs as;
+	/// [`SessionHome::with_rules`] scopes the rule facts of sessions opened
+	/// in-chat with it.
+	#[must_use]
+	pub const fn rule_scope(&self) -> &Arc<crate::discovery::rules::RuleScope> {
+		match self {
+			Self::Production(inference) => &inference.rules,
+			Self::Gateway { rules, .. } => rules,
 		}
 	}
 
@@ -1786,7 +1800,15 @@ pub async fn compose_kernel(
 	};
 	let (context_files, rules) =
 		discover_prompt_material(&project_root, &options.prompt, &claude_plugins)?;
-	let facts = prompt_facts(&project_root, &options, &skills, &context_files, &rules);
+	// Serves the composition's class until the journal is open; a session
+	// resumed without an explicit class then settles it from its journal.
+	let rule_scope = Arc::new(crate::discovery::rules::RuleScope::new(
+		rules,
+		options
+			.agent
+			.clone()
+			.unwrap_or_else(|| crate::subagent::MAIN_AGENT.to_owned()),
+	));
 	let inference_bridge =
 		tools_enabled.then(|| Arc::new(crate::bridges::InferenceBridge::default()));
 	let bridges = if tools_enabled {
@@ -1796,7 +1818,7 @@ pub async fn compose_kernel(
 				.clone()
 				.map(|bridge| bridge as Arc<dyn omp_envd::SearchInference>),
 			telemetry_upload: Some(Arc::new(crate::bridges::TelemetryDelivery)),
-			url_resolvers: vec![skills.resolver(), rules.resolver()],
+			url_resolvers: vec![skills.resolver(), rule_scope.resolver()],
 			content: omp_envd::ActiveContentInputs {
 				authored_skills:     skills.names(),
 				managed_skills_root: Some(crate::discovery::skills::managed_skills_root(
@@ -1981,6 +2003,7 @@ pub async fn compose_kernel(
 				_python_components: python_components,
 				_eval_parent: None,
 				_ephemeral_journal: None,
+				rules: Arc::clone(&rule_scope),
 			}
 		},
 		Ok(stack) => {
@@ -2017,6 +2040,7 @@ pub async fn compose_kernel(
 				_python_components: python_components,
 				_eval_parent: None,
 				_ephemeral_journal: None,
+				rules: Arc::clone(&rule_scope),
 			})
 		},
 	};
@@ -2059,6 +2083,14 @@ pub async fn compose_kernel(
 	};
 	let con_journal = Arc::new(con_journal::ConJournal::attach(Arc::clone(&ctx), session.dom()));
 	apply_model_override(&ctx, model.as_str(), options.model_override)?;
+	// A child journals the class it runs as, so resuming its session later
+	// (from the main chat or `--resume`) scopes rules to that class.
+	if let Some(agent) = &options.agent {
+		crate::subagent::journal_agent(&mut session, agent)?;
+	}
+	let agent = kernel_agent(options.agent.as_deref(), session.dom());
+	rule_scope.select(agent.clone());
+	let facts = prompt_facts(&project_root, &agent, &skills, &context_files, rule_scope.rules());
 	install_prompt_facts(
 		&mut session,
 		&project_root,
@@ -2153,7 +2185,8 @@ pub async fn compose_kernel(
 		.with_runtime_flags(runtime_flags)
 		.with_con_context(Arc::clone(&ctx))
 		.with_hook_gate(Arc::clone(&admission_gate))
-		.with_session_state_bridge(con_journal.clone());
+		.with_session_state_bridge(con_journal.clone())
+		.with_session_state_bridge(Arc::clone(&rule_scope) as Arc<dyn omp_agent::SessionStateBridge>);
 	// The session's one approval authority: environment policy (sandbox
 	// amendments, privileged mutations, dynamic devices) and the tool
 	// executor's admission queries all prompt through the kernel mailbox,
@@ -2326,6 +2359,10 @@ pub struct SessionHome {
 	pub tools_enabled: bool,
 	/// The kernel's upward mailbox, shared by every session it drives.
 	pub up:            flume::Sender<omp_agent::Up>,
+	/// The kernel's discovered rules. When present, each session's rule facts
+	/// are scoped to the agent class journaled on it (a resumed child keeps
+	/// its own rules) instead of copying [`Self::facts`]' rule rows.
+	pub rules:         Option<Arc<crate::discovery::rules::RuleScope>>,
 }
 
 impl SessionHome {
@@ -2357,6 +2394,7 @@ impl SessionHome {
 			live,
 			tools_enabled: !options.no_tools,
 			up,
+			rules: None,
 		})
 	}
 
@@ -2376,6 +2414,31 @@ impl SessionHome {
 		self.with_facts(journaled_prompt_facts(session))
 	}
 
+	/// Scopes the rule facts of every session this home creates or opens to
+	/// the agent class journaled on it, over the kernel's discovered `rules`
+	/// ([`ComposedInference::rule_scope`]).
+	#[must_use]
+	pub fn with_rules(mut self, rules: Arc<crate::discovery::rules::RuleScope>) -> Self {
+		self.rules = Some(rules);
+		self
+	}
+
+	/// The prompt facts journaled on `session`: [`Self::facts`], with the rule
+	/// rows re-scoped to the session's agent class when [`Self::rules`] is set.
+	fn facts_for(&self, session: &Session) -> std::borrow::Cow<'_, crate::discovery::PromptFacts> {
+		let Some(scope) = &self.rules else {
+			return std::borrow::Cow::Borrowed(&self.facts);
+		};
+		let buckets = scope
+			.rules()
+			.prompt_facts(&crate::subagent::session_agent(session.dom()));
+		std::borrow::Cow::Owned(crate::discovery::PromptFacts {
+			always_apply_rules: buckets.always_apply,
+			rules: buckets.rulebook,
+			..self.facts.clone()
+		})
+	}
+
 	/// Path of a fresh journal in the session directory.
 	#[must_use]
 	pub fn fresh_path(&self) -> PathBuf {
@@ -2390,12 +2453,13 @@ impl SessionHome {
 			fs::create_dir_all(parent)?;
 		}
 		let mut session = Session::create(&path, ComponentRegistry::standard())?;
+		let facts = self.facts_for(&session);
 		install_prompt_facts(
 			&mut session,
 			&self.project_root,
 			self.model.as_str(),
 			&self.prompt,
-			&self.facts,
+			&facts,
 			self.tools_enabled,
 		)?;
 		self.register(&session);
@@ -2407,12 +2471,13 @@ impl SessionHome {
 		let path = resolve_session_path(&self.sessions_dir, path);
 		let mut session = Session::open(&path, ComponentRegistry::standard())?;
 		session.recover_process_disappearance()?;
+		let facts = self.facts_for(&session);
 		install_prompt_facts(
 			&mut session,
 			&self.project_root,
 			self.model.as_str(),
 			&self.prompt,
-			&self.facts,
+			&facts,
 			self.tools_enabled,
 		)?;
 		self.register(&session);
@@ -2915,19 +2980,26 @@ pub fn journaled_prompt_facts(session: &Session) -> crate::discovery::PromptFact
 	facts
 }
 
+/// The agent class a kernel composed over the session `dom` runs as: the
+/// composition's `explicit` class ([`KernelOptions::agent`], a spawned or
+/// revived child), else the class journaled on the session (a child resumed
+/// with `--resume`), else [`MAIN_AGENT`](crate::subagent::MAIN_AGENT).
+pub(crate) fn kernel_agent(
+	explicit: Option<&crate::subagent::AgentName<str>>,
+	dom: &omp_dom::Dom,
+) -> crate::subagent::AgentName {
+	explicit.map_or_else(|| crate::subagent::session_agent(dom), ToOwned::to_owned)
+}
+
 /// The prompt facts [`compose_kernel`] journals: skills, context files, the
 /// rules admitted for the kernel's agent class, and the active repository.
 pub(crate) fn prompt_facts(
 	project_root: &Path,
-	options: &KernelOptions,
+	agent: &crate::subagent::AgentName<str>,
 	skills: &crate::discovery::skills::ActiveSkills,
 	context_files: &crate::discovery::rules::ContextFiles,
 	rules: &crate::discovery::rules::ActiveRules,
 ) -> crate::discovery::PromptFacts {
-	let agent = options
-		.agent
-		.as_deref()
-		.unwrap_or(crate::subagent::MAIN_AGENT);
 	let buckets = rules.prompt_facts(agent);
 	crate::discovery::PromptFacts {
 		skills:             skills.prompt_facts(),
@@ -3560,6 +3632,134 @@ mod tests {
 		assert!(
 			rendered.contains("Exactly one direct-child git repo detected: `omp`"),
 			"active-repo.md names the nested repository:\n{rendered}"
+		);
+	}
+
+	/// A child session resumed from the main chat (`/resume` opens it through
+	/// the chat's [`SessionHome`]) journals rule facts for its own class, and
+	/// the kernel's `rule://` scope follows the switch.
+	#[tokio::test]
+	async fn resumed_child_session_scopes_rules_to_its_journaled_agent() {
+		use std::fs;
+
+		use omp_agent::SessionStateBridge as _;
+		use omp_core::Str;
+		use omp_session::{ComponentRegistry, Session};
+		use omp_tools::read::selector::ParsedSelector;
+
+		use super::SessionHome;
+		use crate::{
+			discovery::rules::{ActiveRules, Level, Rule, RuleScope},
+			subagent::{AgentName, MAIN_AGENT, journal_agent},
+		};
+
+		let scratch = tempfile::tempdir().expect("tempdir");
+		let sessions_dir = scratch.path().join("sessions");
+		fs::create_dir_all(&sessions_dir).expect("sessions dir");
+		let rule = |name: &'static str, agents: &[&'static str]| Rule {
+			name:         Str::new_static(name),
+			path:         scratch.path().join(format!("{name}.md")),
+			content:      Str::new_static(name),
+			description:  None,
+			globs:        Vec::new(),
+			always_apply: true,
+			condition:    Vec::new(),
+			scope:        Vec::new(),
+			agents:       agents.iter().copied().map(Str::new_static).collect(),
+			provider:     Str::new_static("native"),
+			level:        Level::Project,
+		};
+		let rules = Arc::new(ActiveRules {
+			rules:    vec![
+				rule("everyone", &[]),
+				rule("main-only", &["main"]),
+				rule("scout-only", &["scout"]),
+				rule("not-scout", &["!scout"]),
+			],
+			warnings: Vec::new(),
+		});
+		let scope = Arc::new(RuleScope::new(Arc::clone(&rules), MAIN_AGENT.to_owned()));
+		let always_apply = |session: &Session| {
+			super::journaled_prompt_facts(session)
+				.always_apply_rules
+				.iter()
+				.filter_map(|row| row["name"].as_str().map(str::to_owned))
+				.collect::<Vec<_>>()
+		};
+
+		// The child composed as `scout` journaled its class.
+		let child_path = sessions_dir.join("child.oms");
+		{
+			let mut child =
+				Session::create(&child_path, ComponentRegistry::standard()).expect("child");
+			journal_agent(&mut child, AgentName::from_ref("scout")).expect("journal agent");
+			journal_agent(&mut child, AgentName::from_ref("scout")).expect("idempotent");
+		}
+
+		let main_facts = crate::discovery::PromptFacts {
+			always_apply_rules: rules.prompt_facts(MAIN_AGENT).always_apply,
+			..crate::discovery::PromptFacts::default()
+		};
+		let home = SessionHome {
+			sessions_dir:  sessions_dir.clone(),
+			project_root:  scratch.path().to_path_buf(),
+			model:         Str::new_static("provider/model"),
+			prompt:        PromptOverrides::default(),
+			facts:         main_facts,
+			live:          Arc::new(crate::sessions::SessionRegistry::new()),
+			tools_enabled: false,
+			up:            flume::unbounded().0,
+			rules:         None,
+		}
+		.with_rules(Arc::clone(&scope));
+
+		let resumed = home.open(&child_path).expect("resume child");
+		assert_eq!(
+			crate::subagent::journaled_agent(resumed.dom())
+				.as_deref()
+				.map(AgentName::as_str),
+			Some("scout")
+		);
+		assert_eq!(always_apply(&resumed), ["everyone", "scout-only"], "child rules, not main's");
+		assert_eq!(
+			super::kernel_agent(None, resumed.dom()).as_str(),
+			"scout",
+			"`--resume` of the child composes as its journaled class"
+		);
+		assert_eq!(
+			super::kernel_agent(Some(AgentName::from_ref("task")), resumed.dom()).as_str(),
+			"task",
+			"an explicit composition class wins"
+		);
+
+		// The session switch resyncs the kernel's `rule://` scope.
+		scope.resync(resumed.dom());
+		assert_eq!(scope.agent(), "scout");
+		let resolver = scope.resolver();
+		assert!(
+			resolver
+				.read("scout-only", &ParsedSelector::None)
+				.await
+				.is_ok()
+		);
+		assert!(
+			resolver
+				.read("main-only", &ParsedSelector::None)
+				.await
+				.is_err()
+		);
+
+		// `/new` from there is a main session again.
+		let fresh = home.create(None).expect("new session");
+		assert_eq!(crate::subagent::journaled_agent(fresh.dom()), None);
+		assert_eq!(always_apply(&fresh), ["everyone", "main-only", "not-scout"]);
+		scope.resync(fresh.dom());
+		assert_eq!(scope.agent(), "main");
+		assert!(
+			resolver
+				.read("main-only", &ParsedSelector::None)
+				.await
+				.is_ok()
 		);
 	}
 

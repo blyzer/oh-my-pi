@@ -5,7 +5,7 @@ use std::{
 	env, fs,
 	future::Future,
 	pin::Pin,
-	sync::{Arc, Mutex},
+	sync::Arc,
 	time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -27,6 +27,7 @@ use omp_envd::{
 		},
 	},
 };
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
@@ -43,11 +44,7 @@ impl McpConnector for Connector {
 		roots: Arc<[Str]>,
 		_: CancellationToken,
 	) -> Pin<Box<dyn Future<Output = Result<ConnectedClient, ManagerError>> + Send + 'a>> {
-		self
-			.seen_auth
-			.lock()
-			.expect("auth observation")
-			.push(spec.auth.clone());
+		self.seen_auth.lock().push(spec.auth.clone());
 		let transport: Arc<dyn McpTransport> = self.transport.clone();
 		Box::pin(async move {
 			Ok(ConnectedClient {
@@ -209,16 +206,9 @@ async fn extension_scoped_mount_projects_lists_invokes_and_removes() {
 	assert_eq!(mounted["devices"][0]["precedence"], 700);
 	assert_eq!(mounted["devices"][0]["tier"], "privileged");
 
-	assert_eq!(
-		connector
-			.seen_auth
-			.lock()
-			.expect("auth observation")
-			.as_slice(),
-		[ControlMountAuth::OAuth {
-			scopes: Box::new([Str::new_static("repo"), Str::new_static("read:org")]),
-		}]
-	);
+	assert_eq!(connector.seen_auth.lock().as_slice(), [ControlMountAuth::OAuth {
+		scopes: Box::new([Str::new_static("repo"), Str::new_static("read:org")]),
+	}]);
 
 	let intruder_identity = identity("other.extension", &["env.net"]);
 	let intruder = McpControl::new(

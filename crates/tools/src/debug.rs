@@ -562,9 +562,10 @@ fn protocol_issue(message: Str) -> ArgIssue {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::{Arc, Mutex};
+	use std::sync::Arc;
 
 	use futures::StreamExt as _;
+	use parking_lot::Mutex;
 
 	use super::*;
 	use crate::debug_render;
@@ -579,11 +580,7 @@ mod tests {
 			_: Duration,
 			cancel: CancellationToken,
 		) -> impl Future<Output = Result<Payload, Fault>> + Send + '_ {
-			self
-				.0
-				.lock()
-				.expect("cancellation control")
-				.replace(cancel.clone());
+			self.0.lock().replace(cancel.clone());
 			async move {
 				cancel.cancelled().await;
 				Err(Fault::Cancelled)
@@ -710,7 +707,6 @@ mod tests {
 			control
 				.0
 				.lock()
-				.expect("cancellation control")
 				.as_ref()
 				.is_some_and(CancellationToken::is_cancelled),
 		);

@@ -1,12 +1,6 @@
 //! Native extension-host process contract tests.
 
-use std::{
-	collections::BTreeMap,
-	fs,
-	path::Path,
-	sync::{Arc, Mutex},
-	time::Duration,
-};
+use std::{collections::BTreeMap, fs, path::Path, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use omp_core::{ArtifactDigest, Principal, Provenance, Str, sf};
@@ -37,6 +31,7 @@ use omp_ext::config::{
 	ContributedValue, StaticDeclaration, StaticDeclarations,
 };
 use omp_proto::env::v1::ArgsCommitted;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::time;
 
@@ -167,7 +162,7 @@ struct CapturedAvailability(Mutex<Vec<AvailabilityBatch>>);
 
 impl AvailabilitySink for CapturedAvailability {
 	fn set_availability(&self, batch: AvailabilityBatch) {
-		self.0.lock().expect("availability capture").push(batch);
+		self.0.lock().push(batch);
 	}
 }
 
@@ -209,7 +204,7 @@ async fn control_progress_parallelism_availability_and_result_spill_are_preserve
 		.await
 		.expect("activate CONTROL feature host");
 
-	let batches = availability.0.lock().expect("availability capture");
+	let batches = availability.0.lock();
 	assert!(
 		batches
 			.iter()
@@ -525,7 +520,7 @@ async fn control_cancellation_restarts_only_the_owning_extension_host() {
 		Some(i64::from(sibling_pid)),
 		"cancelling one extension restarted its independent sibling",
 	);
-	let availability = availability.0.lock().expect("availability capture");
+	let availability = availability.0.lock();
 	let transitions = availability
 		.iter()
 		.flat_map(|batch| batch.deltas.iter())

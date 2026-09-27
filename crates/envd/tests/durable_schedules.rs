@@ -2,7 +2,7 @@
 //! and overlap policy.
 use std::{
 	collections::BTreeSet,
-	sync::{Arc, Mutex},
+	sync::Arc,
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +12,7 @@ use omp_envd::schedules::{
 	ScheduleDeliveryReceipt, ScheduleDeliveryRequest, open_durable_scheduler,
 	open_durable_scheduler_manual, open_durable_scheduler_unbound,
 };
+use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 use tokio::{task, time};
 
@@ -43,7 +44,7 @@ impl ScheduleDeliveryBackend for Delivery {
 		&self,
 		request: ScheduleDeliveryRequest,
 	) -> Result<ScheduleDeliveryReceipt, Str> {
-		let mut state = self.state.lock().expect("delivery state");
+		let mut state = self.state.lock();
 		state.attempts += 1;
 		if state.delivered.insert(request.idempotency_key) {
 			state.effects += 1;
@@ -160,14 +161,14 @@ async fn project_schedule_recovers_after_session_exit_and_deduplicates_restart()
 	let rows = history(&restarted, &id).await;
 	assert_eq!(rows.len(), 1);
 	assert_eq!(rows[0].get("outcome").and_then(Value::as_str), Some("injected"));
-	assert_eq!(delivery.state.lock().expect("state").effects, 1);
+	assert_eq!(delivery.state.lock().effects, 1);
 	drop(restarted);
 	task::yield_now().await;
 
 	let restarted_again =
 		open_durable_scheduler_manual(&path, delivery.clone()).expect("second restart");
 	assert_eq!(history(&restarted_again, &id).await.len(), 1);
-	let state = delivery.state.lock().expect("state");
+	let state = delivery.state.lock();
 	assert_eq!(state.attempts, 1);
 	assert_eq!(state.effects, 1);
 }
@@ -192,7 +193,7 @@ async fn owned_clock_fires_without_a_chat_timer() {
 	let rows = history(&handle, &id).await;
 	assert_eq!(rows.len(), 1);
 	assert_eq!(rows[0].get("outcome").and_then(Value::as_str), Some("injected"));
-	assert_eq!(delivery.state.lock().expect("state").effects, 1);
+	assert_eq!(delivery.state.lock().effects, 1);
 }
 
 #[tokio::test]
@@ -211,7 +212,7 @@ async fn pending_intent_replay_uses_idempotency_key_without_repeating_effect() {
 
 	let key = format!("{id}:1");
 	{
-		let mut state = delivery.state.lock().expect("state");
+		let mut state = delivery.state.lock();
 		state.delivered.insert(Str::from(key.as_str()));
 		state.effects = 1;
 	}
@@ -247,7 +248,7 @@ async fn pending_intent_replay_uses_idempotency_key_without_repeating_effect() {
 	let rows = history(&restarted, &id).await;
 	assert_eq!(rows.len(), 1);
 	assert_eq!(rows[0].get("outcome").and_then(Value::as_str), Some("injected"));
-	let state = delivery.state.lock().expect("state");
+	let state = delivery.state.lock();
 	assert_eq!(state.attempts, 1);
 	assert_eq!(state.effects, 1, "backend deduped the replayed intent key");
 }
@@ -293,7 +294,7 @@ async fn recovery_honors_skip_and_hard_budget_refusal() {
 	let refused_history = history(&restarted, &refused).await;
 	assert_eq!(refused_history.len(), 1);
 	assert_eq!(refused_history[0].get("outcome").and_then(Value::as_str), Some("budget_refused"));
-	assert_eq!(delivery.state.lock().expect("state").effects, 0);
+	assert_eq!(delivery.state.lock().effects, 0);
 }
 #[tokio::test]
 async fn coalesce_backfill_and_overlap_are_projected_durably() {

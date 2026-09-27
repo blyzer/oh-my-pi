@@ -1,10 +1,6 @@
 //! Proves configured CONTROL authority composition routes every owned operation
 //! namespace.
-use std::{
-	collections::BTreeSet,
-	path::PathBuf,
-	sync::{Arc, Mutex},
-};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use omp_core::{Principal, Str, sf};
@@ -18,6 +14,7 @@ use omp_envd::{
 	},
 	worker::{ExtHostConfig, ExtHostSupervisor},
 };
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 struct RecordingAuthority {
@@ -46,11 +43,7 @@ impl ControlAuthority for RecordingAuthority {
 		operation: Str,
 		_arguments: serde_json::Map<String, Value>,
 	) -> Result<Value, ControlProtocolError> {
-		self
-			.calls
-			.lock()
-			.expect("recording lock")
-			.push(format!("{}:{operation}", self.name));
+		self.calls.lock().push(format!("{}:{operation}", self.name));
 		Ok(json!({
 			"owner": self.name,
 			"extension": context.connection.extension.as_str(),
@@ -64,11 +57,7 @@ impl ControlAuthority for RecordingAuthority {
 		_context: ControlRequestContext,
 		_effect: ControlEffect,
 	) -> Result<(), ControlProtocolError> {
-		self
-			.calls
-			.lock()
-			.expect("recording lock")
-			.push(format!("{}:effect", self.name));
+		self.calls.lock().push(format!("{}:effect", self.name));
 		Ok(())
 	}
 }
@@ -187,12 +176,6 @@ async fn configured_composition_routes_every_owned_namespace() {
 		)
 		.await
 		.expect("effect sink");
-	assert!(
-		calls
-			.lock()
-			.expect("recording lock")
-			.iter()
-			.any(|call| call == "effects:effect")
-	);
+	assert!(calls.lock().iter().any(|call| call == "effects:effect"));
 	supervisor.shutdown().await;
 }

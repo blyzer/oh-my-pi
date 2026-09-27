@@ -1832,8 +1832,13 @@ mod tests {
 		}
 	}
 
-	/// The always-apply rule names composition journals for `options`.
-	fn always_apply_rules(project: &Path, options: &KernelOptions) -> Vec<String> {
+	/// The always-apply rule names composition journals for `options` over
+	/// the session `dom`.
+	fn always_apply_rules(
+		project: &Path,
+		options: &KernelOptions,
+		dom: &omp_dom::Dom,
+	) -> Vec<String> {
 		let (context_files, rules) = crate::headless::kernel::discover_prompt_material(
 			project,
 			&options.prompt,
@@ -1841,7 +1846,8 @@ mod tests {
 		)
 		.expect("prompt material");
 		let skills = crate::discovery::skills::ActiveSkills::default();
-		crate::headless::kernel::prompt_facts(project, options, &skills, &context_files, &rules)
+		let agent = crate::headless::kernel::kernel_agent(options.agent.as_deref(), dom);
+		crate::headless::kernel::prompt_facts(project, &agent, &skills, &context_files, &rules)
 			.always_apply_rules
 			.iter()
 			.filter_map(|row| row["name"].as_str().map(str::to_owned))
@@ -1870,7 +1876,7 @@ mod tests {
 		// The developer's own config root may hold user-level rules; only the
 		// scratch project's rules are asserted.
 		let scoped = |options: &KernelOptions| {
-			let mut names = always_apply_rules(&project, options);
+			let mut names = always_apply_rules(&project, options, session.dom());
 			names.retain(|name| ["scout-only", "main-only", "everyone"].contains(&name.as_str()));
 			names.sort();
 			names
@@ -1922,7 +1928,7 @@ mod tests {
 			Session::create(root.join("parent.oms"), omp_session::ComponentRegistry::standard())
 				.expect("parent session");
 		let imported = |options: &KernelOptions| {
-			let mut names = always_apply_rules(&project, options);
+			let mut names = always_apply_rules(&project, options, session.dom());
 			names.retain(|name| name == "agent-reviewer");
 			names
 		};

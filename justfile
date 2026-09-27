@@ -60,9 +60,11 @@ proto-lint:
 
 # Lint the Rust workspace with clippy (CI flags; own target dir so the
 # RUSTC_WORKSPACE_WRAPPER fingerprint never ping-pongs check/test artifacts).
+# `--all-targets` holds tests, examples and benches to the same policy as
+# library code (e.g. clippy.toml's `std::sync::Mutex` ban).
 [group('format & lint')]
 clippy:
-    CARGO_TARGET_DIR=target/clippy cargo clippy --workspace --locked
+    CARGO_TARGET_DIR=target/clippy cargo clippy --workspace --all-targets --locked
 
 # Warn (never fails) on lock-wrapped map/set state (`Mutex<HashMap<…>>` etc.); prefer
 # `dashmap::DashMap`/`DashSet` or another concurrent structure. clippy's `disallowed-types`

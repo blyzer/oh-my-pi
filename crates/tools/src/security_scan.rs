@@ -383,12 +383,10 @@ fn protocol_issue(message: Str) -> ArgIssue {
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		future,
-		sync::{Arc, Mutex},
-	};
+	use std::{future, sync::Arc};
 
 	use futures::StreamExt as _;
+	use parking_lot::Mutex;
 
 	use super::*;
 
@@ -401,7 +399,7 @@ mod tests {
 			params: Params,
 			_: CancellationToken,
 		) -> impl Future<Output = Result<Payload, Fault>> + Send + '_ {
-			self.0.lock().expect("recording").replace(params.action);
+			self.0.lock().replace(params.action);
 			future::ready(Ok(Payload {
 				action: params.action,
 				output: sf!("ok"),
@@ -492,6 +490,6 @@ mod tests {
 		feed.args_committed(raw.into()).expect("commit args");
 		let events = security.call(incoming).collect::<Vec<_>>().await;
 		assert!(matches!(events.last(), Some(Ev::Done(ToolTerminal::Done { result: Ok(_), .. }))));
-		assert_eq!(*control.0.lock().expect("recording"), Some(Action::Preflight));
+		assert_eq!(*control.0.lock(), Some(Action::Preflight));
 	}
 }

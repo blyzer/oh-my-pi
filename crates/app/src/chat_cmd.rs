@@ -1234,7 +1234,8 @@ pub(crate) async fn run(
 		up.clone(),
 	)
 	.into_diagnostic()?
-	.with_facts_of(&session);
+	.with_facts_of(&session)
+	.with_rules(Arc::clone(kernel.inference().rule_scope()));
 	let env = kernel.inference().environment_client().clone();
 	// Extension `omp.ui.*` requests (dialogs, presentation facts) and dynamic
 	// `ask` invocations are owned by this chat for its lifetime. Direct ask
