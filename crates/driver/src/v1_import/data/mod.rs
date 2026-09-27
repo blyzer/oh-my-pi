@@ -65,15 +65,9 @@ pub enum DataImportError {
 		#[source]
 		source: serde_json::Error,
 	},
-	/// The v1 settings could not be parsed.
-	#[error("invalid v1 settings in {}", path.display())]
-	Yaml {
-		/// The settings file.
-		path:   PathBuf,
-		/// Decoding failure.
-		#[source]
-		source: serde_yaml::Error,
-	},
+	/// A Claude-format installed-plugins registry could not be read.
+	#[error("could not read the installed-plugins registry")]
+	PluginRegistry(#[source] omp_ext::claude_plugin::RegistryError),
 	/// The target profile's configuration could not be loaded.
 	#[error("could not load the v2 configuration under {}", path.display())]
 	Config {

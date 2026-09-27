@@ -4,19 +4,23 @@
 //! v2 keeps the same files at the same places under its profile data
 //! directory (`omp ext`'s state paths): `marketplaces.json`,
 //! `plugins/installed_plugins.json`, and
-//! `plugins/cache/{marketplaces,plugins}`. Entries merge by marketplace name
+//! `plugins/cache/{marketplaces,plugins}`. The installed-plugins registry is
+//! read and written as [`omp_ext::claude_plugin::InstalledPluginsRegistry`],
+//! the type `omp ext` writes and runtime discovery
+//! ([`omp_ext::claude_plugin::ClaudePlugins::resolve`]) reads, so an imported
+//! enabled plugin loads on the next launch. Entries merge by marketplace name
 //! and plugin id, and an entry v2 already has wins. Paths into v1's plugin
 //! cache are rebased onto v2's copy, so v2 never reads the v1 tree. v1's usage
 //! statistics (`stats.db` and the usage tables of `agent.db`) are dropped and
 //! reported.
 
 use std::{
-	collections::BTreeMap,
 	fs, io,
 	path::{Path, PathBuf},
 };
 
 use omp_core::{Str, StrMut};
+use omp_ext::claude_plugin::{InstalledPluginsRegistry, REGISTRY_FILE, user_plugins_dir};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{DataImportError, copied, copy_tree, counted, same_file, sqlite::V1Database};
@@ -55,43 +59,6 @@ struct MarketplaceEntry {
 	updated_at:   Str,
 }
 
-/// `plugins/installed_plugins.json`: Claude Code's installed-plugins shape.
-#[derive(Debug, Deserialize, Serialize)]
-struct InstalledPlugins {
-	#[serde(default = "installed_version")]
-	version: u32,
-	#[serde(default)]
-	plugins: BTreeMap<Str, Vec<InstalledPlugin>>,
-}
-
-impl Default for InstalledPlugins {
-	fn default() -> Self {
-		Self { version: installed_version(), plugins: BTreeMap::new() }
-	}
-}
-
-const fn installed_version() -> u32 {
-	2
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InstalledPlugin {
-	scope:          Str,
-	install_path:   PathBuf,
-	version:        Str,
-	installed_at:   Str,
-	last_updated:   Str,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	git_commit_sha: Option<Str>,
-	#[serde(default = "enabled_by_default")]
-	enabled:        bool,
-}
-
-const fn enabled_by_default() -> bool {
-	true
-}
-
 /// v1 tables of per-model and per-command usage in `agent.db`.
 const USAGE_TABLES: [&str; 3] = ["model_usage", "model_perf", "command_usage"];
 
@@ -101,7 +68,7 @@ const CACHES: [(&str, &str); 2] =
 
 pub(in crate::v1_import) fn import(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, ImportError> {
 	let target = &cx.pair.target;
-	let v2_plugins = target.data_dir.join("plugins");
+	let v2_plugins = user_plugins_dir(&target.data_dir);
 	let v1_plugins = cx.locate(V1Item::Plugins);
 	let prefix = v1_plugins
 		.clone()
@@ -163,11 +130,11 @@ pub(in crate::v1_import) fn import(cx: &StepContext<'_>) -> Result<Vec<ImportEnt
 		if same_file(v1_plugins, &v2_plugins) {
 			entries.push(entry(v1_plugins, None, ImportOutcome::Skipped(SkipReason::SharedWithV2)));
 		} else {
-			let v1 = v1_plugins.join("installed_plugins.json");
+			let v1 = v1_plugins.join(REGISTRY_FILE);
 			if v1.is_file() {
-				let v2 = v2_plugins.join("installed_plugins.json");
+				let v2 = v2_plugins.join(REGISTRY_FILE);
 				let (new, kept) =
-					merge::<InstalledPlugins>(&v1, &v2, cx.mode, |incoming, existing| {
+					merge::<InstalledPluginsRegistry>(&v1, &v2, cx.mode, |incoming, existing| {
 						let mut new = 0;
 						for (id, mut installs) in incoming.plugins {
 							if existing.plugins.contains_key(&id) {
@@ -189,17 +156,17 @@ pub(in crate::v1_import) fn import(cx: &StepContext<'_>) -> Result<Vec<ImportEnt
 					kept,
 					"installed plugin",
 				);
-				// v2 loads skills and MCP servers only from Agent Plugins 1.0
-				// packages (`agent/plugins`, `.agent/plugins`, `extensions`,
-				// `--ext` roots: `discovery::skills::sources`,
-				// `omp_envd::mcp::discovery`), never from this registry or its
-				// cache, and runs no JavaScript hooks.
+				// Runtime discovery (`ClaudePlugins::resolve`) loads an enabled
+				// install's skills, commands, rules and MCP servers; the kinds
+				// it has no home for are launch diagnostics
+				// (`PluginDiagnostic::Unsupported`).
 				if new + kept > 0 {
 					entries.push(entry(
 						&v1,
 						Some(Str::new_static(
-							"plugin skills, MCP servers and hooks (copied for `omp ext`; v2 does not \
-							 load them automatically yet)",
+							"plugin hooks, agents, LSP/DAP servers, JS tools and output styles (v2 loads \
+							 the skills, commands, rules and MCP servers of enabled plugins and reports \
+							 these at launch)",
 						)),
 						ImportOutcome::NotMigratable(NotMigratable::NoV2Equivalent),
 					));
@@ -286,11 +253,11 @@ fn merge<R>(
 	add: impl FnOnce(R, &mut R) -> usize,
 ) -> Result<(usize, usize), DataImportError>
 where
-	R: Default + DeserializeOwned + Serialize + Entries,
+	R: Serialize + Registry,
 {
-	let incoming = read_json::<R>(v1)?.unwrap_or_default();
+	let incoming = R::read(v1)?;
 	let total = incoming.entries();
-	let mut existing = read_json::<R>(v2)?.unwrap_or_default();
+	let mut existing = R::read(v2)?;
 	let new = add(incoming, &mut existing);
 	if new > 0 && mode == ImportMode::Apply {
 		let bytes = serde_json::to_vec_pretty(&existing)
@@ -303,18 +270,32 @@ where
 	Ok((new, total - new))
 }
 
-/// A registry's entry count.
-trait Entries {
+/// A JSON registry the step merges.
+trait Registry: Sized {
+	/// Reads the registry at `path`; a missing file is the empty registry.
+	fn read(path: &Path) -> Result<Self, DataImportError>;
+
+	/// How many entries it holds.
 	fn entries(&self) -> usize;
 }
 
-impl Entries for MarketplacesRegistry {
+impl Registry for MarketplacesRegistry {
+	fn read(path: &Path) -> Result<Self, DataImportError> {
+		Ok(read_json(path)?.unwrap_or_default())
+	}
+
 	fn entries(&self) -> usize {
 		self.marketplaces.len()
 	}
 }
 
-impl Entries for InstalledPlugins {
+impl Registry for InstalledPluginsRegistry {
+	/// The shared reader, which also rejects a schema version runtime
+	/// discovery would skip.
+	fn read(path: &Path) -> Result<Self, DataImportError> {
+		Self::read(path).map_err(DataImportError::PluginRegistry)
+	}
+
 	fn entries(&self) -> usize {
 		self.plugins.len()
 	}

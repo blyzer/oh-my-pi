@@ -694,10 +694,15 @@ fn the_marketplace_registry_and_cache_merge_into_v2() {
 			  "installPath": v1_cache.join("plugins/shared___fmt___2.0.0"),
 			  "version": "2.0.0", "installedAt": "2026-01-03T00:00:00Z",
 			  "lastUpdated": "2026-01-03T00:00:00Z", "enabled": false }],
+			"old@acme": [{ "scope": "user",
+			  "installPath": v1_cache.join("plugins/acme___old___0.1.0"),
+			  "version": "0.1.0", "installedAt": "2026-01-03T00:00:00Z",
+			  "lastUpdated": "2026-01-03T00:00:00Z", "enabled": false }],
 		}})
 		.to_string(),
 	);
 	write(&v1_cache.join("marketplaces/acme/.claude-plugin/marketplace.json"), "{}");
+	write(&v1_cache.join("plugins/acme___old___0.1.0/skills/old/SKILL.md"), "# old");
 	write(&v1_cache.join("plugins/acme___lint___1.0.0/skills/lint/SKILL.md"), "# lint");
 	write(&v1_cache.join("plugins/shared___fmt___2.0.0/v1.txt"), "v1");
 	write(&v1_cache.join("plugins/.tmp-01J/partial"), "x");
@@ -741,18 +746,19 @@ fn the_marketplace_registry_and_cache_merge_into_v2() {
 	assert_eq!(summary(&report, ImportStep::Marketplace), [
 		(OutcomeKind::Imported, owned("1 marketplace")),
 		(OutcomeKind::Skipped, owned("1 marketplace v2 already had")),
-		(OutcomeKind::Imported, owned("1 installed plugin")),
+		(OutcomeKind::Imported, owned("2 installed plugins")),
 		(OutcomeKind::Skipped, owned("1 installed plugin v2 already had")),
 		(
 			OutcomeKind::NotMigratable,
 			owned(
-				"plugin skills, MCP servers and hooks (copied for `omp ext`; v2 does not load them \
-				 automatically yet)"
+				"plugin hooks, agents, LSP/DAP servers, JS tools and output styles (v2 loads the \
+				 skills, commands, rules and MCP servers of enabled plugins and reports these at \
+				 launch)"
 			)
 		),
 		(OutcomeKind::Imported, owned("1 cached marketplace")),
 		(OutcomeKind::Skipped, owned("cache/plugins/shared___fmt___2.0.0")),
-		(OutcomeKind::Imported, owned("1 cached plugin")),
+		(OutcomeKind::Imported, owned("2 cached plugins")),
 		(OutcomeKind::NotMigratable, owned("npm plugins (v2 runs no JavaScript plugins)")),
 		(OutcomeKind::NotMigratable, None),
 		(OutcomeKind::NotMigratable, owned("usage tables: model_usage")),
@@ -803,6 +809,31 @@ fn the_marketplace_registry_and_cache_merge_into_v2() {
 	);
 	assert!(!v2_plugins.join("cache/plugins/.tmp-01J").exists());
 	assert!(!v2.data_dir.join("stats.db").exists());
+
+	// Runtime discovery loads the imported enabled plugin from v2's cache; the
+	// one v1 had disabled stays disabled.
+	let workspace = project(root.path(), "workspace");
+	let resolved = omp_ext::claude_plugin::ClaudePlugins::resolve(&v2.data_dir, &workspace);
+	let lint_root = fs::canonicalize(v2_plugins.join("cache/plugins/acme___lint___1.0.0"))
+		.expect("imported lint cache");
+	assert_eq!(
+		resolved
+			.plugins
+			.iter()
+			.map(|plugin| (plugin.id.as_str(), plugin.root.as_path()))
+			.collect::<Vec<_>>(),
+		[("lint@acme", lint_root.as_path())]
+	);
+	let registry = omp_ext::claude_plugin::InstalledPluginsRegistry::read(
+		&v2_plugins.join(omp_ext::claude_plugin::REGISTRY_FILE),
+	)
+	.expect("v2 registry");
+	assert!(!registry.plugins["old@acme"][0].enabled);
+	assert!(
+		v2_plugins
+			.join("cache/plugins/acme___old___0.1.0/skills/old/SKILL.md")
+			.is_file()
+	);
 }
 
 /// One v1 install with every data item, in the default and a named profile.
