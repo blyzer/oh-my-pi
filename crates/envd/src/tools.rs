@@ -3326,6 +3326,9 @@ pub struct ActiveContentInputs {
 	/// Explicit Agent Plugins roots whose data-only MCP declarations join
 	/// automatic project discovery.
 	pub agent_plugin_roots:  Vec<PathBuf>,
+	/// Installed, enabled Claude-layout marketplace plugins whose MCP
+	/// declarations join automatic project discovery.
+	pub claude_plugins:      Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
 }
 
 /// Object-safe composition boundary for one active internal-URL resolver.

@@ -2437,7 +2437,8 @@ impl EnvServer {
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
 		mcp.bind_config_paths(
 			McpConfigPaths::new(&omp_core::dirs::user_config_root()?, workspace.root())
-				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone()),
+				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone())
+				.with_claude_plugins(Arc::clone(&bridges.content.claude_plugins)),
 		);
 		let lsp_settings = LspSettings::from_con(con);
 		let doc_config = crate::docserver::ServerConfig::new(root)
@@ -2678,7 +2679,8 @@ impl EnvServer {
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
 		mcp.bind_config_paths(
 			McpConfigPaths::new(&omp_core::dirs::user_config_root()?, workspace.root())
-				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone()),
+				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone())
+				.with_claude_plugins(Arc::clone(&bridges.content.claude_plugins)),
 		);
 		let lsp_settings = LspSettings::from_con(con);
 		let document_lsp = crate::docserver::NativeLspOptions {
@@ -2965,7 +2967,8 @@ impl EnvServer {
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
 		mcp.bind_config_paths(
 			McpConfigPaths::new(&omp_core::dirs::user_config_root()?, &root)
-				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone()),
+				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone())
+				.with_claude_plugins(Arc::clone(&bridges.content.claude_plugins)),
 		);
 		let github_cache = Arc::new(
 			GithubCache::open(

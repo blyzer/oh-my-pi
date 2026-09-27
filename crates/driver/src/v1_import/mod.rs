@@ -60,6 +60,7 @@
 mod assets;
 mod auth_credentials;
 mod credentials;
+pub mod keybindings;
 pub mod locate;
 mod models;
 pub mod report;
