@@ -26,6 +26,7 @@ mod mcp;
 mod project;
 mod ssh;
 
+pub(super) use project::inside_v1_root;
 pub use project::{import_project_assets, project_assets_marker};
 
 #[cfg(test)]
@@ -317,7 +318,7 @@ fn is_markdown(path: &Path) -> bool {
 
 /// What placing one file did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Placed {
+pub(super) enum Placed {
 	/// The destination was free: copied (or, dry, would be).
 	Copied,
 	/// The destination already holds the same bytes.
@@ -328,26 +329,58 @@ enum Placed {
 
 /// Copies `source` to a free `destination`; never replaces anything.
 fn place(source: &Path, destination: &Path, mode: ImportMode) -> Result<Placed, AssetError> {
+	let incoming = || {
+		fs::read(source)
+			.map_err(|error| AssetError::Read { path: source.to_owned(), source: error })
+	};
+	if let Some(held) = occupied(destination, incoming)? {
+		return Ok(held);
+	}
+	if mode == ImportMode::Apply {
+		copy_new(source, destination)?;
+	}
+	Ok(Placed::Copied)
+}
+
+/// Writes generated `contents` to a free `destination` under the same rule as
+/// [`place`]: identical bytes are [`Placed::Present`], anything else there is
+/// a kept [`Placed::Conflict`]. A dry run only classifies.
+pub(super) fn place_contents(
+	contents: &[u8],
+	destination: &Path,
+	mode: ImportMode,
+) -> Result<Placed, AssetError> {
+	if let Some(held) = occupied(destination, || Ok(contents.to_vec()))? {
+		return Ok(held);
+	}
+	if mode == ImportMode::Apply {
+		if let Some(parent) = destination.parent() {
+			fs::create_dir_all(parent).map_err(write(parent))?;
+		}
+		super::step::atomic_replace(destination, contents).map_err(write(destination))?;
+	}
+	Ok(Placed::Copied)
+}
+
+/// What `destination` already holds against the `incoming` bytes; `None`
+/// when it is free.
+fn occupied(
+	destination: &Path,
+	incoming: impl FnOnce() -> Result<Vec<u8>, AssetError>,
+) -> Result<Option<Placed>, AssetError> {
 	match fs::metadata(destination) {
 		Ok(metadata) if metadata.is_file() => {
-			let read = |path: &Path| {
-				fs::read(path)
-					.map_err(|error| AssetError::Read { path: path.to_owned(), source: error })
-			};
-			Ok(if read(source)? == read(destination)? {
+			let held = fs::read(destination)
+				.map_err(|error| AssetError::Read { path: destination.to_owned(), source: error })?;
+			Ok(Some(if incoming()? == held {
 				Placed::Present
 			} else {
 				Placed::Conflict
-			})
+			}))
 		},
-		Ok(_) => Ok(Placed::Conflict),
-		Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(Placed::Conflict),
-		Err(error) if error.kind() == io::ErrorKind::NotFound => {
-			if mode == ImportMode::Apply {
-				copy_new(source, destination)?;
-			}
-			Ok(Placed::Copied)
-		},
+		Ok(_) => Ok(Some(Placed::Conflict)),
+		Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(Some(Placed::Conflict)),
+		Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
 		Err(error) => Err(AssetError::Read { path: destination.to_owned(), source: error }),
 	}
 }

@@ -417,7 +417,7 @@ fn a_dry_run_writes_nothing() {
 	assert_eq!(inventory[0].0, V1Item::Models);
 	assert_eq!(inventory[0].2, [ImportStep::Models, ImportStep::ModelsKeys]);
 	assert_eq!(inventory[1].0, V1Item::Sessions);
-	assert!(inventory[1].2.is_empty(), "no session step is registered yet");
+	assert_eq!(inventory[1].2, [ImportStep::Sessions]);
 }
 
 #[test]

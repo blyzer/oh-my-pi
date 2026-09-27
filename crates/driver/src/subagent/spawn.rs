@@ -1815,6 +1815,50 @@ mod tests {
 		);
 	}
 
+	/// A v1 agent imported into the project reaches exactly its own class
+	/// through the real composition path, and never the top-level session.
+	#[test]
+	fn v1_import_agent_rule_reaches_only_its_child_class() {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let root = temp.path().canonicalize().expect("canonical root");
+		let project = root.join("proj");
+		std::fs::create_dir_all(project.join(".git")).expect("repo root");
+		std::fs::create_dir_all(project.join(".omp/agents")).expect("v1 agents dir");
+		std::fs::write(
+			project.join(".omp/agents/reviewer.md"),
+			"---\nname: reviewer\ndescription: Reviews\n---\nReview strictly.\n",
+		)
+		.expect("v1 agent");
+		let roots = crate::v1_import::V2Roots {
+			config_dir:     root.join("o2"),
+			data_dir:       root.join("data"),
+			state_dir:      root.join("state"),
+			cache_dir:      root.join("cache"),
+			active_profile: None,
+		};
+		let home = crate::v1_import::V1Inputs { home: root.join("home"), ..Default::default() };
+		crate::v1_import::import_project_agents(
+			&project,
+			&crate::v1_import::V1Source::new(home),
+			&roots,
+			crate::v1_import::ImportMode::Apply,
+		);
+		let session =
+			Session::create(root.join("parent.oms"), omp_session::ComponentRegistry::standard())
+				.expect("parent session");
+		let imported = |options: &KernelOptions| {
+			let mut names = always_apply_rules(&project, options);
+			names.retain(|name| name == "agent-reviewer");
+			names
+		};
+
+		let reviewer = prepared_child(&root, &session, "reviewer").kernel_options();
+		assert_eq!(imported(&reviewer), ["agent-reviewer"], "the class carries its body");
+		let task = prepared_child(&root, &session, "task").kernel_options();
+		assert!(imported(&task).is_empty(), "another class does not");
+		assert!(imported(&KernelOptions::default()).is_empty(), "the main session does not");
+	}
+
 	#[test]
 	fn cancelled_child_never_classifies_as_completed() {
 		assert_eq!(child_status(TurnStop::Cancelled, None).as_str(), "cancelled");

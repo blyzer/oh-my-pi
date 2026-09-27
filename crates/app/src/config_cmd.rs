@@ -26,8 +26,8 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 	if let ConfigCommand::InitXdg { json } = command {
 		return init_xdg(data_dir, *json);
 	}
-	if let ConfigCommand::ImportV1 { dry_run, from, profile } = command {
-		return import_v1(&project, *dry_run, from.as_deref(), profile.as_deref());
+	if let ConfigCommand::ImportV1 { dry_run, from, profile, sessions } = command {
+		return import_v1(&project, *dry_run, from.as_deref(), profile.as_deref(), *sessions);
 	}
 	if let ConfigCommand::Mcp { command } = command {
 		let user_root = omp_core::dirs::user_config_root().into_diagnostic()?;
@@ -72,17 +72,20 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 
 /// `omp config import-v1`: locates the v1 install, pairs its profiles with
 /// v2 profiles, runs every registered import step, imports the current
-/// project's v1 settings, and prints the report. Other projects import their
-/// own settings the first time omp runs in them.
+/// project's v1 settings and agents, and prints the report. Other projects
+/// import their own the first time omp runs in them. `sessions` converts every
+/// v1 session too, instead of leaving them to the resume picker.
 fn import_v1(
 	project: &Path,
 	dry_run: bool,
 	from: Option<&Path>,
 	profile: Option<&str>,
+	sessions: bool,
 ) -> miette::Result<()> {
 	use omp_driver::v1_import::{
-		CredentialAccess, ImportMode, ImportReport, ProfileSelection, V1Inputs, V1Source, V2Roots,
-		import_project_assets, import_project_settings, plan, run,
+		CredentialAccess, ImportMode, ImportReport, ProfileSelection, SessionImport, V1Inputs,
+		V1Source, V2Roots, import_project_agents, import_project_assets, import_project_settings,
+		plan, run_with,
 	};
 
 	let mut inputs = V1Inputs::from_process()
@@ -99,6 +102,11 @@ fn import_v1(
 			ProfileSelection::Named(omp_core::dirs::normalize_profile_name(profile).into_diagnostic()?)
 		},
 		None => ProfileSelection::All,
+	};
+	let sessions = if sessions {
+		SessionImport::Bulk(&crate::session_import::V1Converter)
+	} else {
+		SessionImport::OnDemand
 	};
 	let mode = if dry_run {
 		ImportMode::DryRun
@@ -117,16 +125,19 @@ fn import_v1(
 	} else {
 		let pairs = plan(&source, &roots, &selection).into_diagnostic()?;
 		if dry_run {
-			run(&pairs, mode, CredentialAccess::Offline(&Ctx::new()))
+			run_with(&pairs, mode, CredentialAccess::Offline(&Ctx::new()), sessions)
 		} else {
 			let ctx = crate::process_ctx(project)?;
-			run(&pairs, mode, CredentialAccess::Offline(&ctx))
+			run_with(&pairs, mode, CredentialAccess::Offline(&ctx), sessions)
 		}
 	};
 	report.project = import_project_settings(project, &roots, mode);
 	report
 		.project
 		.extend(import_project_assets(project, &source, &roots, mode));
+	report
+		.project
+		.extend(import_project_agents(project, &source, &roots, mode));
 	print!("{}", render_v1_report(&report, project));
 	let failed = report.entries().any(|entry| {
 		matches!(

@@ -110,8 +110,8 @@ pub struct SessionIndexOutcome {
 	pub result: Result<Vec<SessionRow>, Str>,
 }
 
-/// Retained `/resume @claude|@codex` picker. It owns only detached metadata;
-/// conversion and persistence remain controller-owned.
+/// Retained `/resume @claude|@codex|@v1` picker. It owns only detached
+/// metadata; conversion and persistence remain controller-owned.
 pub struct ForeignSessionPicker {
 	ui:      Ui,
 	ctx:     UiContext,

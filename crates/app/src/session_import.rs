@@ -1,4 +1,9 @@
-//! Claude Code and Codex transcript import into native `.oms` journals.
+//! Claude Code, Codex, and omp v1 transcript import into native `.oms`
+//! journals.
+//!
+//! omp v1 sessions are located, placed, and recorded by
+//! [`omp_driver::v1_import::sessions`]; this module converts their bytes
+//! ([`V1Converter`]).
 
 mod convert;
 
@@ -22,6 +27,8 @@ pub enum ForeignFormat {
 	Claude,
 	/// Codex CLI rollout JSON-line events.
 	Codex,
+	/// omp v1 (TypeScript `omp`) session transcripts.
+	Omp1,
 }
 
 /// Lightweight metadata for one importable foreign transcript.
@@ -51,6 +58,7 @@ impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat 
 		match source {
 			omp_chat::overlays::services::ForeignSessionSource::Claude => Self::Claude,
 			omp_chat::overlays::services::ForeignSessionSource::Codex => Self::Codex,
+			omp_chat::overlays::services::ForeignSessionSource::Omp1 => Self::Omp1,
 		}
 	}
 }
@@ -58,6 +66,9 @@ impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat 
 /// Enumerates transcripts for `format`, newest first, without materializing a
 /// native session.
 pub fn candidates(format: ForeignFormat) -> miette::Result<Vec<ForeignCandidate>> {
+	if format == ForeignFormat::Omp1 {
+		return v1_candidates();
+	}
 	let root = foreign_root(format)?;
 	let mut candidates = jsonl_candidates(format, &root)?
 		.into_iter()
@@ -143,11 +154,21 @@ pub(crate) fn prepare(args: &mut ChatArgs) -> miette::Result<()> {
 /// The selected path is revalidated against the source authority. Conversion
 /// happens in a hidden sibling file and becomes visible only after an atomic
 /// rename, so a failed import never leaves a resumable partial journal.
+///
+/// An omp v1 session ignores `destination`: it lands in its recorded
+/// project's bucket, or reopens the journal an earlier import made (owner
+/// decision #4, [`omp_driver::v1_import::sessions`]).
 pub fn import_selected(
 	format: ForeignFormat,
 	source: &Path,
 	destination: &Path,
 ) -> miette::Result<PathBuf> {
+	if format == ForeignFormat::Omp1 {
+		let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
+		return omp_driver::v1_import::sessions::import_selected(&pair, source, &V1Converter)
+			.map(|imported| imported.journal)
+			.into_diagnostic();
+	}
 	let source = validate_selection(format, source)?;
 	if destination.extension().and_then(|value| value.to_str()) != Some("oms") {
 		return Err(miette!("native session destination must use the .oms extension"));
@@ -194,6 +215,45 @@ pub fn import_file(
 	convert::import_file(format, source, destination)
 }
 
+/// The omp v1 session converter the driver's import runs through: the
+/// picker's on-demand import and `omp config import-v1 --sessions`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct V1Converter;
+
+impl omp_driver::v1_import::V1SessionConverter for V1Converter {
+	fn convert(
+		&self,
+		conversion: &omp_driver::v1_import::V1Conversion<'_>,
+	) -> Result<usize, omp_driver::v1_import::sessions::ConvertError> {
+		convert::import_v1(conversion).map_err(Into::into)
+	}
+}
+
+/// The active profile's v1 sessions, from their headers alone.
+fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
+	let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
+	Ok(omp_driver::v1_import::sessions::list(&pair.source)
+		.into_diagnostic()?
+		.into_iter()
+		.map(|session| ForeignCandidate {
+			cwd:           session.cwd.unwrap_or_else(|| {
+				session
+					.path
+					.parent()
+					.map(Path::to_path_buf)
+					.unwrap_or_default()
+			}),
+			id:            session.id,
+			path:          session.path,
+			title:         session.title,
+			created_ms:    session.created_ms,
+			modified_ms:   session.modified_ms,
+			messages:      session.messages,
+			first_message: session.first_message,
+		})
+		.collect())
+}
+
 fn foreign_root(format: ForeignFormat) -> miette::Result<PathBuf> {
 	let home = std::env::var_os("HOME")
 		.map(PathBuf::from)
@@ -203,6 +263,11 @@ fn foreign_root(format: ForeignFormat) -> miette::Result<PathBuf> {
 			.map(PathBuf::from)
 			.unwrap_or_else(|| home.join(".claude")),
 		ForeignFormat::Codex => home.join(".codex"),
+		ForeignFormat::Omp1 => omp_driver::v1_import::active_pair()
+			.into_diagnostic()?
+			.source
+			.locate(omp_driver::v1_import::V1Item::Sessions)
+			.ok_or_else(|| miette!("no v1 sessions directory was found"))?,
 	})
 }
 
@@ -212,6 +277,7 @@ fn transcript_roots(format: ForeignFormat, root: &Path) -> Vec<PathBuf> {
 		ForeignFormat::Codex => {
 			vec![root.join("sessions"), root.join(".sessions"), root.join("archived_sessions")]
 		},
+		ForeignFormat::Omp1 => vec![root.to_path_buf()],
 	}
 }
 
@@ -404,6 +470,15 @@ fn foreign_message(format: ForeignFormat, value: &Value) -> Option<(&'static str
 			};
 			let content = payload.get("content").or_else(|| payload.get("message"))?;
 			text_content(content).map(|text| (role, text))
+		},
+		ForeignFormat::Omp1 => {
+			let message = value.get("message")?;
+			let role = match message.get("role")?.as_str()? {
+				"user" => "user",
+				"assistant" => "assistant",
+				_ => return None,
+			};
+			text_content(message.get("content")?).map(|text| (role, text))
 		},
 	}
 }

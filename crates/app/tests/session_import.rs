@@ -154,3 +154,435 @@ truncated {
 	let (_journal, entries) = Journal::open(&destination).expect("journal");
 	assert!(abandoned(&entries).any(|entry| entry.data.contains("old answer")));
 }
+
+// omp v1 transcripts (`ForeignFormat::Omp1`), converted through the driver's
+// sessions import exactly as the picker and `omp config import-v1 --sessions`
+// do.
+
+mod omp1 {
+	use std::path::{Path, PathBuf};
+
+	use omp_app::session_import::V1Converter;
+	use omp_core::{Hash32, Str};
+	use omp_dom::{Dom, Handle, KnownTag, PropId, PropKey, Tag, Value as DomValue};
+	use omp_driver::v1_import::{
+		CredentialAccess, ImportMode, ImportOutcome, ImportPair, ImportStep, ProfileSelection,
+		SessionImport, SkipReason, V1Inputs, V1Source, V2Roots, plan, run_with,
+		sessions::import_session,
+	};
+	use omp_proto::thread::v1::{item, part};
+	use serde_json::{Value, json};
+
+	use super::*;
+
+	const PNG: &[u8] = b"\x89PNG v1 image bytes";
+
+	struct Tree {
+		root:    tempfile::TempDir,
+		home:    PathBuf,
+		project: PathBuf,
+	}
+
+	impl Tree {
+		fn new() -> Self {
+			let root = tempfile::tempdir().expect("scratch");
+			let home = root.path().join("home");
+			let project = root.path().join("project");
+			fs::create_dir_all(&project).expect("project");
+			Self { root, home, project }
+		}
+
+		fn agent(&self) -> PathBuf {
+			self.home.join(".omp/agent")
+		}
+
+		/// Writes `<agent>/sessions/-project/<ts>_<id>.jsonl`.
+		fn transcript(&self, id: &str, lines: &[Value]) -> PathBuf {
+			let path = self
+				.agent()
+				.join("sessions/-project")
+				.join(format!("2026-01-02T03-04-05-000Z_{id}.jsonl"));
+			write_lines(&path, lines);
+			path
+		}
+
+		fn header(&self, id: &str) -> Value {
+			json!({"type": "session", "version": 3, "id": id, "timestamp": "2026-01-02T03:04:05.000Z", "cwd": self.project, "providerPromptCacheKey": "cache-key-v1"})
+		}
+
+		fn pair(&self) -> ImportPair {
+			let v2 = V2Roots {
+				config_dir:     self.root.path().join("o2"),
+				data_dir:       self.root.path().join("share/omp"),
+				state_dir:      self.root.path().join("state/omp"),
+				cache_dir:      self.root.path().join("cache/omp"),
+				active_profile: None,
+			};
+			let inputs = V1Inputs { home: self.home.clone(), ..V1Inputs::default() };
+			plan(&V1Source::new(inputs), &v2, &ProfileSelection::Named(None))
+				.expect("plan")
+				.swap_remove(0)
+		}
+
+		/// Converts `source` as the picker would, and reopens the journal.
+		fn import(&self, source: &Path) -> (PathBuf, Session) {
+			let pair = self.pair();
+			let imported =
+				import_session(&pair.target, &pair.source, source, &V1Converter).expect("import");
+			assert!(imported.converted);
+			let session =
+				Session::open(&imported.journal, ComponentRegistry::standard()).expect("resume");
+			(imported.journal, session)
+		}
+	}
+
+	fn write_lines(path: &Path, lines: &[Value]) {
+		fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+		let mut text = String::new();
+		for line in lines {
+			text.push_str(&line.to_string());
+			text.push('\n');
+		}
+		fs::write(path, text).expect("transcript");
+	}
+
+	fn message(id: &str, parent: Option<&str>, message: Value) -> Value {
+		json!({"type": "message", "id": id, "parentId": parent, "timestamp": "2026-01-02T03:04:06.000Z", "message": message})
+	}
+
+	fn user(id: &str, parent: Option<&str>, text: &str) -> Value {
+		message(id, parent, json!({"role": "user", "content": text, "timestamp": 1}))
+	}
+
+	fn assistant(id: &str, parent: Option<&str>, text: &str) -> Value {
+		message(
+			id,
+			parent,
+			json!({"role": "assistant", "content": [{"type": "text", "text": text}], "api": "anthropic-messages", "provider": "anthropic", "model": "claude-opus-4-5", "stopReason": "stop", "timestamp": 2}),
+		)
+	}
+
+	/// Every text part the provider projection would send, in order.
+	fn thread_texts(dom: &Dom) -> Vec<String> {
+		omp_session::project_thread(dom)
+			.iter()
+			.filter_map(|item| match item.kind.as_ref()? {
+				item::Kind::Message(message) => Some(message),
+				_ => None,
+			})
+			.flat_map(|message| &message.parts)
+			.filter_map(|part| match part.kind.as_ref()? {
+				part::Kind::Text(text) => Some(text.to_string()),
+				_ => None,
+			})
+			.collect()
+	}
+
+	fn custom<'d>(dom: &'d Dom, handle: Handle, key: &'static str) -> Option<&'d DomValue> {
+		dom.get(handle)?
+			.prop(&PropKey::Custom(Str::new_static(key)))
+	}
+
+	fn tagged(dom: &Dom, tag: &Tag) -> Vec<Handle> {
+		dom.handles()
+			.filter(|handle| dom.get(*handle).is_some_and(|node| &node.tag == tag))
+			.collect()
+	}
+
+	#[test]
+	fn v1_messages_tools_thinking_images_and_usage_round_trip_and_resume() {
+		let tree = Tree::new();
+		let hash = Hash32::sum(PNG).to_hex();
+		let hash = hash.as_str();
+		let blobs = tree.agent().join("blobs");
+		fs::create_dir_all(&blobs).expect("blobs");
+		fs::write(blobs.join(hash), PNG).expect("blob");
+		let source = tree.transcript("rich", &[
+			json!({"type": "title", "v": 1, "title": "Rich v1 session", "updatedAt": "2026-01-02T03:05:00.000Z", "pad": "    "}),
+			tree.header("rich"),
+			json!({"type": "model_change", "id": "e0", "parentId": null, "timestamp": "2026-01-02T03:04:05.500Z", "model": "anthropic/claude-opus-4-5"}),
+			message("e1", Some("e0"), json!({"role": "user", "content": [{"type": "text", "text": "look at this"}, {"type": "image", "data": format!("blob:sha256:{hash}"), "mimeType": "image/png"}], "timestamp": 1})),
+			message("e2", Some("e1"), json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "inspect first", "thinkingSignature": "sig-from-v1"}, {"type": "text", "text": "reading"}, {"type": "toolCall", "id": "call-1", "name": "read", "arguments": {"path": "a.rs"}}], "api": "anthropic-messages", "provider": "anthropic", "model": "claude-opus-4-5", "responseId": "msg-1", "usage": {"input": 10, "output": 5, "cacheRead": 3, "cacheWrite": 2, "totalTokens": 20, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "toolUse", "timestamp": 2})),
+			message("e3", Some("e2"), json!({"role": "toolResult", "toolCallId": "call-1", "toolName": "read", "content": [{"type": "text", "text": "fn main() {}"}], "isError": false, "timestamp": 3})),
+			assistant("e4", Some("e3"), "done reading"),
+			json!({"type": "credential_pin", "id": "e5", "parentId": "e4", "timestamp": "2026-01-02T03:04:09.000Z", "provider": "anthropic", "hash": "pin-hash"}),
+			message("e6", Some("e5"), json!({"role": "bashExecution", "command": "ls", "output": "a.rs", "exitCode": 0, "cancelled": false, "truncated": false, "timestamp": 4})),
+		]);
+
+		let (journal, session) = tree.import(&source);
+
+		let text = fs::read_to_string(&journal).expect("journal");
+		assert!(text.contains("tool.call@1") && text.contains("tool.result@1"));
+		assert!(text.contains("import-format") && text.contains("omp1"));
+		assert!(text.contains("credential_pin") && text.contains("pin-hash"));
+		assert!(text.contains("cacheRead") && text.contains("tokens_in"));
+		let dom = session.dom();
+		let meta = dom.get(dom.meta()).expect("meta");
+		assert_eq!(
+			meta.prop(&PropId::Name.into()).and_then(DomValue::as_str),
+			Some("Rich v1 session")
+		);
+		assert_eq!(
+			meta
+				.prop(&PropKey::Custom(Str::new_static("import-source-id")))
+				.and_then(DomValue::as_str),
+			Some("rich")
+		);
+		assert_eq!(
+			omp_app::print_mode::transcript_text(dom),
+			"reading\n[tool: read]\ndone reading\n",
+			"thinking is not transcript text"
+		);
+		// Thinking is kept, its signature only as foreign metadata.
+		let thinking = tagged(dom, &Tag::Custom(Str::new_static(omp_session::ASSISTANT_CONTENT_TAG)))
+			.into_iter()
+			.find(|handle| {
+				dom.get(*handle)
+					.and_then(|node| node.prop(&PropId::Kind.into()))
+					.and_then(DomValue::as_str)
+					== Some("thinking")
+			})
+			.expect("thinking block");
+		assert!(custom(dom, thinking, "thinking-signature").is_none());
+		let Some(DomValue::Json(block)) = custom(dom, thinking, "foreign-block") else {
+			panic!("the raw thinking block is foreign metadata");
+		};
+		assert!(block.get().contains("sig-from-v1"));
+		// The tool call settled, so the resumed session has nothing pending.
+		assert!(session.unsettled_calls().is_empty());
+		let texts = thread_texts(dom);
+		assert!(texts.iter().any(|text| text.contains("look at this")), "{texts:?}");
+		assert!(texts.iter().any(|text| text.contains("done reading")), "{texts:?}");
+		// The `!ls` execution is a developer note in its turn.
+		let notes = tagged(dom, &Tag::Known(KnownTag::Developer));
+		assert!(notes.iter().any(|handle| {
+			custom(dom, *handle, "role").and_then(DomValue::as_str) == Some("bashExecution")
+		}));
+	}
+
+	#[test]
+	fn v1_blob_images_resolve_from_the_blob_store() {
+		let tree = Tree::new();
+		let hash = Hash32::sum(PNG).to_hex();
+		let hash = hash.as_str();
+		let blobs = tree.agent().join("blobs");
+		fs::create_dir_all(&blobs).expect("blobs");
+		fs::write(blobs.join(hash), PNG).expect("blob");
+		let missing = "0".repeat(64);
+		let source = tree.transcript("images", &[
+			tree.header("images"),
+			message("u1", None, json!({"role": "user", "content": [{"type": "text", "text": "see"}, {"type": "image", "data": format!("blob:sha256:{hash}"), "mimeType": "image/png"}, {"type": "image", "data": format!("blob:sha256:{missing}"), "mimeType": "image/png"}], "timestamp": 1})),
+		]);
+
+		let (journal, session) = tree.import(&source);
+
+		// The stored blob is the same bytes, so the same SHA-256 address, and
+		// the user message names it as its first attachment.
+		let blob = session
+			.blobs()
+			.get(&omp_journal::blob::BlobRef { hash: Hash32::sum(PNG), size: PNG.len() as u64 })
+			.expect("the image is in the journal store");
+		assert_eq!(blob.as_ref(), PNG);
+		let text = fs::read_to_string(&journal).expect("journal");
+		assert!(text.contains("[Image #1]"), "{text}");
+		assert!(text.contains(&format!("[v1 image blob:sha256:{missing} is missing]")), "{text}");
+	}
+
+	#[test]
+	fn v1_compactions_branches_and_clears_become_native() {
+		let tree = Tree::new();
+		let source = tree.transcript("tree", &[
+			tree.header("tree"),
+			user("u1", None, "first question"),
+			assistant("a1", Some("u1"), "first answer"),
+			user("u2", Some("a1"), "abandoned question"),
+			assistant("a2", Some("u2"), "abandoned answer"),
+			json!({"type": "branch_summary", "id": "b1", "parentId": "a1", "timestamp": "2026-01-02T03:04:10.000Z", "fromId": "a2", "summary": "tried the abandoned path"}),
+			user("u3", Some("b1"), "alternate question"),
+			assistant("a3", Some("u3"), "alternate answer"),
+			json!({"type": "compaction", "id": "c1", "parentId": "a3", "timestamp": "2026-01-02T03:04:11.000Z", "summary": "summary of the first exchange", "firstKeptEntryId": "b1", "tokensBefore": 1000, "method": "auto"}),
+			user("u4", Some("c1"), "after compaction"),
+			assistant("a4", Some("u4"), "final answer"),
+		]);
+
+		let (journal, session) = tree.import(&source);
+
+		let texts = thread_texts(session.dom());
+		assert_eq!(texts.first().map(String::as_str), Some("summary of the first exchange"));
+		for kept in ["alternate question", "alternate answer", "after compaction", "final answer"] {
+			assert!(texts.iter().any(|text| text == kept), "{kept} is live: {texts:?}");
+		}
+		for hidden in ["first question", "first answer", "abandoned question", "abandoned answer"] {
+			assert!(!texts.iter().any(|text| text == hidden), "{hidden} is hidden: {texts:?}");
+		}
+		let notes = tagged(session.dom(), &Tag::Known(KnownTag::Developer));
+		assert!(notes.iter().any(|handle| {
+			custom(session.dom(), *handle, "role").and_then(DomValue::as_str) == Some("branchSummary")
+		}));
+		drop(session);
+		let (_journal, entries) = Journal::open(&journal).expect("journal");
+		assert!(abandoned(&entries).any(|entry| entry.data.contains("abandoned answer")));
+
+		// A `/clear` boundary hides everything before it.
+		let cleared = tree.transcript("cleared", &[
+			tree.header("cleared"),
+			user("u1", None, "before clear"),
+			assistant("a1", Some("u1"), "old reply"),
+			json!({"type": "reset_boundary", "id": "r1", "parentId": "a1", "timestamp": "2026-01-02T03:04:12.000Z"}),
+			user("u2", Some("r1"), "after clear"),
+		]);
+		let (_, session) = tree.import(&cleared);
+		let texts = thread_texts(session.dom());
+		assert!(texts.iter().any(|text| text == "after clear"), "{texts:?}");
+		assert!(!texts.iter().any(|text| text == "before clear"), "{texts:?}");
+	}
+
+	#[test]
+	fn v1_and_v2_headers_migrate_before_import() {
+		let tree = Tree::new();
+		// Version 1: no ids, and a compaction indexing its first kept entry.
+		let legacy = tree.transcript("legacy", &[
+			json!({"type": "session", "id": "legacy", "timestamp": "2025-12-09T00:53:29.825Z", "cwd": tree.project}),
+			json!({"type": "message", "timestamp": "2025-12-09T00:53:30.000Z", "message": {"role": "user", "content": "oldest question", "timestamp": 1}}),
+			json!({"type": "message", "timestamp": "2025-12-09T00:53:31.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "oldest answer"}], "timestamp": 2}}),
+			json!({"type": "message", "timestamp": "2025-12-09T00:53:32.000Z", "message": {"role": "user", "content": "kept question", "timestamp": 3}}),
+			json!({"type": "compaction", "timestamp": "2025-12-09T00:53:33.000Z", "summary": "legacy summary", "firstKeptEntryIndex": 3, "tokensBefore": 10}),
+			json!({"type": "message", "timestamp": "2025-12-09T00:53:34.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "latest answer"}], "timestamp": 4}}),
+		]);
+		let (_, session) = tree.import(&legacy);
+		let texts = thread_texts(session.dom());
+		assert_eq!(texts.first().map(String::as_str), Some("legacy summary"), "{texts:?}");
+		assert!(texts.iter().any(|text| text == "kept question"), "{texts:?}");
+		assert!(texts.iter().any(|text| text == "latest answer"), "{texts:?}");
+		assert!(!texts.iter().any(|text| text == "oldest question"), "{texts:?}");
+
+		// Version 2: `hookMessage` became `custom` in version 3.
+		let hooked = tree.transcript("hooked", &[
+			json!({"type": "session", "version": 2, "id": "hooked", "timestamp": "2026-01-01T00:00:00.000Z", "cwd": tree.project}),
+			user("u1", None, "question"),
+			message("h1", Some("u1"), json!({"role": "hookMessage", "customType": "note", "content": "hook text", "display": true, "timestamp": 2})),
+		]);
+		let (_, session) = tree.import(&hooked);
+		let notes = tagged(session.dom(), &Tag::Known(KnownTag::Developer));
+		assert!(notes.iter().any(|handle| {
+			custom(session.dom(), *handle, "role").and_then(DomValue::as_str) == Some("custom")
+		}));
+	}
+
+	#[test]
+	fn v1_subagents_become_linked_child_journals_with_artifacts() {
+		let tree = Tree::new();
+		let parent = tree.transcript("parent", &[
+			tree.header("parent"),
+			user("u1", None, "delegate"),
+			assistant("a1", Some("u1"), "delegated"),
+		]);
+		let artifacts = parent.with_extension("");
+		write_lines(&artifacts.join("0-Scout.jsonl"), &[
+			json!({"type": "session", "version": 3, "id": "child", "timestamp": "2026-01-02T03:05:00.000Z", "cwd": tree.project}),
+			json!({"type": "session_init", "id": "i1", "parentId": null, "timestamp": "2026-01-02T03:05:00.000Z", "systemPrompt": "scout", "task": "look", "tools": ["read"], "agent": "scout"}),
+			user("c1", Some("i1"), "child task"),
+			assistant("c2", Some("c1"), "child result"),
+		]);
+		fs::write(artifacts.join("0.bash.log"), "spilled tool output").expect("artifact");
+
+		let (journal, session) = tree.import(&parent);
+
+		let dom = session.dom();
+		let jobs = tagged(dom, &Tag::Known(KnownTag::Subagent));
+		assert_eq!(jobs.len(), 1);
+		let job = dom.get(jobs[0]).expect("job");
+		assert_eq!(job.prop(&PropId::Status.into()).and_then(DomValue::as_str), Some("completed"));
+		assert_eq!(custom(dom, jobs[0], "agent").and_then(DomValue::as_str), Some("scout"));
+		assert_eq!(custom(dom, jobs[0], "delivered"), Some(&DomValue::Bool(true)));
+		let id = job
+			.prop(&PropId::Id.into())
+			.and_then(DomValue::as_str)
+			.expect("id");
+		let child_path = journal.with_file_name(format!("{id}.oms"));
+		let child = Session::open(&child_path, ComponentRegistry::standard()).expect("child");
+		assert_eq!(omp_app::print_mode::transcript_text(child.dom()), "child result\n");
+		// The spilled output is retained in the journal store and named.
+		let artifact = tagged(dom, &Tag::Custom(Str::new_static("foreign-artifact")));
+		assert_eq!(artifact.len(), 1);
+		assert_eq!(
+			dom.get(artifact[0])
+				.and_then(|node| node.prop(&PropId::Name.into()))
+				.and_then(DomValue::as_str),
+			Some("0.bash.log")
+		);
+	}
+
+	#[test]
+	fn v1_bulk_import_places_by_directory_remaps_pins_and_is_idempotent() {
+		let tree = Tree::new();
+		tree.transcript("here", &[tree.header("here"), user("u1", None, "in the project")]);
+		tree.transcript("gone", &[
+			json!({"type": "session", "version": 3, "id": "gone", "timestamp": "2026-01-02T03:04:05.000Z", "cwd": tree.root.path().join("deleted-project")}),
+			user("u1", None, "in a deleted project"),
+		]);
+		fs::write(tree.agent().join("session-pins.json"), "[\"gone\"]").expect("pins");
+		let pair = tree.pair();
+		let offline = omp_con::Ctx::new();
+		let pairs = [pair.clone()];
+
+		let report = run_with(
+			&pairs,
+			ImportMode::Apply,
+			CredentialAccess::Offline(&offline),
+			SessionImport::Bulk(&V1Converter),
+		);
+
+		let imported = report
+			.entries()
+			.filter(|entry| entry.step == ImportStep::Sessions)
+			.filter(|entry| matches!(entry.outcome, ImportOutcome::Imported))
+			.count();
+		assert_eq!(imported, 2);
+		let orphans = omp_env::project_state::no_directory(&pair.target.data_dir);
+		let pinned: Vec<String> =
+			serde_json::from_slice(&fs::read(orphans.join("session-pins.json")).expect("pins"))
+				.expect("pin list");
+		assert_eq!(pinned.len(), 1);
+		let orphan = orphans.join("sessions").join(format!("{}.oms", pinned[0]));
+		let session = Session::open(&orphan, ComponentRegistry::standard()).expect("resume");
+		assert!(
+			thread_texts(session.dom())
+				.iter()
+				.any(|text| text == "in a deleted project")
+		);
+		let project = omp_env::project_state::directory(&pair.target.data_dir, &tree.project)
+			.expect("project state")
+			.join("sessions");
+		assert_eq!(
+			fs::read_dir(&project)
+				.expect("sessions")
+				.filter(|entry| {
+					entry
+						.as_ref()
+						.expect("entry")
+						.path()
+						.extension()
+						.and_then(|value| value.to_str())
+						== Some("oms")
+				})
+				.count(),
+			1
+		);
+
+		let again = run_with(
+			&pairs,
+			ImportMode::Apply,
+			CredentialAccess::Offline(&offline),
+			SessionImport::Bulk(&V1Converter),
+		);
+		assert!(
+			again
+				.entries()
+				.filter(|entry| entry.step == ImportStep::Sessions)
+				.all(|entry| {
+					matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent))
+				})
+		);
+	}
+}

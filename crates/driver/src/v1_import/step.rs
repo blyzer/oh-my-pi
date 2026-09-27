@@ -84,6 +84,11 @@ pub enum ImportStep {
 	SshHosts,
 	/// v1 `keybindings.yml` actions into `bind` lines in `config.cfg`.
 	Keybindings,
+	/// v1 session transcripts into native journals: on demand, or all of them
+	/// with `omp config import-v1 --sessions` (owner decision #4).
+	Sessions,
+	/// v1 custom agents `agents/*.md` into class cfgs and agent-scoped rules.
+	Agents,
 	/// v1 `history.db` prompts merged into `<data>/history.db`.
 	History,
 	/// v1 `install-id` into `<data>/install-id`, unless v2 has its own.
@@ -120,6 +125,8 @@ impl ImportStep {
 			Self::Mcp => V1Item::Mcp,
 			Self::SshHosts => V1Item::Ssh,
 			Self::Keybindings => V1Item::Keybindings,
+			Self::Sessions => V1Item::Sessions,
+			Self::Agents => V1Item::Agents,
 			Self::History => V1Item::HistoryDb,
 			Self::InstallId => V1Item::InstallId,
 			Self::Mnemopi => V1Item::MnemopiMemory,
@@ -167,6 +174,8 @@ impl ImportStep {
 			| Self::Mcp
 			| Self::SshHosts => super::assets::import(self, cx),
 			Self::Keybindings => super::keybindings::import_keybindings(cx),
+			Self::Sessions => super::sessions::import_sessions(cx),
+			Self::Agents => super::agents::import_agents(cx),
 			Self::History => super::data::history::import(cx),
 			Self::InstallId => super::data::install_id::import(cx),
 			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
@@ -264,6 +273,8 @@ pub struct StepContext<'a> {
 	/// only in [`ImportMode::Apply`], and only when they have something to
 	/// store, so nothing is created for a profile without credentials.
 	pub credentials: &'a CredentialSlot<'a>,
+	/// Whether this run converts v1 sessions ([`super::SessionImport`]).
+	pub sessions:    super::SessionImport<'a>,
 }
 
 /// One pair's credential store, opened at most once and only on demand.
@@ -319,17 +330,33 @@ pub fn run(
 	mode: ImportMode,
 	credentials: CredentialAccess<'_>,
 ) -> ImportReport {
+	run_with(pairs, mode, credentials, super::SessionImport::OnDemand)
+}
+
+/// [`run`], converting v1 sessions as `sessions` says (bulk only for
+/// `omp config import-v1 --sessions`).
+pub fn run_with(
+	pairs: &[ImportPair],
+	mode: ImportMode,
+	credentials: CredentialAccess<'_>,
+	sessions: super::SessionImport<'_>,
+) -> ImportReport {
 	ImportReport {
 		dry_run: mode == ImportMode::DryRun,
 		pairs:   pairs
 			.iter()
-			.map(|pair| run_pair(pair, mode, credentials))
+			.map(|pair| run_pair(pair, mode, credentials, sessions))
 			.collect(),
 		project: Vec::new(),
 	}
 }
 
-fn run_pair(pair: &ImportPair, mode: ImportMode, access: CredentialAccess<'_>) -> PairReport {
+fn run_pair(
+	pair: &ImportPair,
+	mode: ImportMode,
+	access: CredentialAccess<'_>,
+	sessions: super::SessionImport<'_>,
+) -> PairReport {
 	let steps = ImportStep::registered();
 	let inventory = pair
 		.source
@@ -365,7 +392,7 @@ fn run_pair(pair: &ImportPair, mode: ImportMode, access: CredentialAccess<'_>) -
 			));
 			continue;
 		}
-		let cx = StepContext { pair, mode, credentials: &credentials };
+		let cx = StepContext { pair, mode, credentials: &credentials, sessions };
 		match step.run(&cx) {
 			Ok(produced) => entries.extend(produced),
 			Err(error) => entries.push(ImportEntry::new(
@@ -406,6 +433,9 @@ pub enum ImportError {
 	/// The v1 settings could not be imported.
 	#[error("could not import the settings")]
 	Settings(#[from] super::SettingsImportError),
+	/// A v1 custom agent could not be read or written.
+	#[error("could not import the custom agents")]
+	Agents(#[from] super::AgentsImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,
@@ -442,6 +472,9 @@ pub enum ImportError {
 	/// The v1 keybindings could not be read or written as `bind` lines.
 	#[error("could not import the keybindings")]
 	Keybindings(#[from] super::keybindings::KeybindingsImportError),
+	/// A v1 session could not be imported.
+	#[error("could not import a v1 session")]
+	Session(#[from] super::sessions::SessionImportError),
 	/// A data or memory step could not read v1 or write v2.
 	#[error("could not import v1 data")]
 	Data(#[from] super::DataImportError),

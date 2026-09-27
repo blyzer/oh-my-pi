@@ -14,6 +14,9 @@
 //!   [`Marker`] in the v2 profile configuration root (`.<step>-migration-v1`),
 //!   and the [`run`] loop.
 //! - [`report`]: the typed [`ImportReport`], rendered once at the app boundary.
+//! - [`sessions`]: the `sessions` step and the resume picker's on-demand
+//!   conversion of v1 transcripts (decision #4); bulk only through [`run_with`]
+//!   and [`SessionImport::Bulk`].
 //!
 //! Imports only copy (decision #2): nothing under a v1 root is ever written,
 //! moved, or deleted.
@@ -54,6 +57,7 @@
 //!    run writes nothing, a second run is a no-op, and the v1 tree is
 //!    byte-identical afterwards.
 
+mod agents;
 mod assets;
 mod auth_credentials;
 mod credentials;
@@ -62,6 +66,7 @@ pub mod keybindings;
 pub mod locate;
 mod models;
 pub mod report;
+pub mod sessions;
 mod settings;
 pub mod step;
 
@@ -70,6 +75,7 @@ mod tests;
 
 use std::path::Path;
 
+pub use agents::{AgentsImportError, import_project_agents, project_agents_marker};
 pub use assets::{AssetError, import_project_assets, project_assets_marker};
 pub use auth_credentials::CredentialsImportError;
 pub use data::DataImportError;
@@ -81,8 +87,14 @@ pub use report::{
 	Attention, ImportEntry, ImportOutcome, ImportReport, NotMigratable, OutcomeKind, PairReport,
 	SkipReason,
 };
+pub use sessions::{
+	ImportedSession, ProjectBucket, SessionImport, SessionImportError, V1ChildJob, V1Conversion,
+	V1SessionConverter, V1SessionInfo,
+};
 pub use settings::{SettingsImportError, import_project_settings, project_marker};
-pub use step::{CredentialAccess, ImportError, ImportMode, ImportStep, Marker, StepContext, run};
+pub use step::{
+	CredentialAccess, ImportError, ImportMode, ImportStep, Marker, StepContext, run, run_with,
+};
 
 /// The active v2 profile's pair: the same-named v1 profile (the v1 default
 /// for the v2 default), which the lazy `models.toml` import reads.
@@ -103,7 +115,8 @@ pub fn active_pair() -> Result<ImportPair, LocateError> {
 ///
 /// Runs every registered step for every v1 profile ([`ProfileSelection::All`]),
 /// idempotently through the markers, then imports `project`'s own v1 settings
-/// and v1-only `.omp/` files (once per project, [`import_project_settings`],
+/// and agents, and v1-only `.omp/` files (once per project,
+/// [`import_project_settings`], [`import_project_agents`],
 /// [`import_project_assets`]), and logs the report.
 /// Credential steps use the live store for the profile that owns `data_dir`;
 /// other profiles' credential steps wait, unmarked, for their own first run.
@@ -143,6 +156,9 @@ pub fn first_run(
 		report
 			.project
 			.extend(import_project_assets(project, &source, &roots, ImportMode::Apply));
+		report
+			.project
+			.extend(import_project_agents(project, &source, &roots, ImportMode::Apply));
 	}
 	report.log();
 	Some(report)
