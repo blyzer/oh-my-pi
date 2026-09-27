@@ -61,6 +61,7 @@ mod agents;
 mod assets;
 mod auth_credentials;
 mod credentials;
+mod data;
 pub mod keybindings;
 pub mod locate;
 mod models;
@@ -77,6 +78,7 @@ use std::path::Path;
 pub use agents::{AgentsImportError, import_project_agents, project_agents_marker};
 pub use assets::{AssetError, import_project_assets, project_assets_marker};
 pub use auth_credentials::CredentialsImportError;
+pub use data::DataImportError;
 pub use locate::{
 	ImportPair, ItemShape, LocateError, ProfileSelection, V1Inputs, V1Item, V1Layout, V1Source,
 	V2Roots, V2Target, XdgCategory, XdgCollision, plan,

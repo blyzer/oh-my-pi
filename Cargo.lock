@@ -8129,6 +8129,7 @@ dependencies = [
  "omp-tool",
  "omp-tools",
  "omp-tui",
+ "omp-vcs",
  "omp-walker",
  "parking_lot",
  "prost",

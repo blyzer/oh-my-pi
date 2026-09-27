@@ -89,6 +89,16 @@ pub enum ImportStep {
 	Sessions,
 	/// v1 custom agents `agents/*.md` into class cfgs and agent-scoped rules.
 	Agents,
+	/// v1 `history.db` prompts merged into `<data>/history.db`.
+	History,
+	/// v1 `install-id` into `<data>/install-id`, unless v2 has its own.
+	InstallId,
+	/// v1 Mnemopi stores copied to where v2 recalls them.
+	Mnemopi,
+	/// v1 `local`-backend `learned.md` lessons into each project's Mnemopi bank.
+	LearnedLessons,
+	/// Claude-format marketplace registry, installed plugins, and their cache.
+	Marketplace,
 }
 
 impl ImportStep {
@@ -117,6 +127,11 @@ impl ImportStep {
 			Self::Keybindings => V1Item::Keybindings,
 			Self::Sessions => V1Item::Sessions,
 			Self::Agents => V1Item::Agents,
+			Self::History => V1Item::HistoryDb,
+			Self::InstallId => V1Item::InstallId,
+			Self::Mnemopi => V1Item::MnemopiMemory,
+			Self::LearnedLessons => V1Item::Memories,
+			Self::Marketplace => V1Item::Marketplaces,
 		}
 	}
 
@@ -161,6 +176,11 @@ impl ImportStep {
 			Self::Keybindings => super::keybindings::import_keybindings(cx),
 			Self::Sessions => super::sessions::import_sessions(cx),
 			Self::Agents => super::agents::import_agents(cx),
+			Self::History => super::data::history::import(cx),
+			Self::InstallId => super::data::install_id::import(cx),
+			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
+			Self::LearnedLessons => super::data::memory::import_learned(cx),
+			Self::Marketplace => super::data::marketplace::import(cx),
 		}
 	}
 }
@@ -455,4 +475,7 @@ pub enum ImportError {
 	/// A v1 session could not be imported.
 	#[error("could not import a v1 session")]
 	Session(#[from] super::sessions::SessionImportError),
+	/// A data or memory step could not read v1 or write v2.
+	#[error("could not import v1 data")]
+	Data(#[from] super::DataImportError),
 }

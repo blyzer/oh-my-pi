@@ -152,6 +152,7 @@ fn the_default_layout_resolves_every_item_as_v1_does() {
 		V1Item::MnemopiMemory,
 		V1Item::Marketplaces,
 		V1Item::Plugins,
+		V1Item::Memories,
 	]);
 }
 
