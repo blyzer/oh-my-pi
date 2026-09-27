@@ -36,6 +36,7 @@ use std::{
 
 use omp_core::{CowBytes, Str};
 use omp_envd::ContentResolver;
+use omp_ext::claude_plugin::{ClaudePlugins, PluginScope};
 use omp_tools::read::{
 	Fault,
 	resolver::{
@@ -230,10 +231,16 @@ pub struct ActiveRules {
 }
 
 impl ActiveRules {
-	/// Discovers rules for `project_root` from the native, agents, cursor,
-	/// windsurf, and cline providers in priority order.
+	/// Discovers rules for `project_root` from the native, agents, installed
+	/// marketplace plugin (`rules/` of each enabled Claude-layout install),
+	/// cursor, windsurf, and cline providers in priority order.
 	#[must_use]
-	pub fn discover(project_root: &Path, home: &Path, config_root: &Path) -> Self {
+	pub fn discover(
+		project_root: &Path,
+		home: &Path,
+		config_root: &Path,
+		plugins: &ClaudePlugins,
+	) -> Self {
 		let mut out = Self::default();
 		let mut names = BTreeSet::<Str>::new();
 		let mut admit = |rule: Rule, warnings: &mut Vec<Warning>| {
@@ -314,6 +321,22 @@ impl ActiveRules {
 			for rule in
 				rules_in_dir(&home.join(name), "agents", Level::User, &["md", "mdc"], &mut warnings)
 			{
+				admit(rule, &mut warnings);
+			}
+		}
+		// claude-plugins: installed marketplace plugins, project installs first.
+		for plugin in &plugins.plugins {
+			let Some(dir) = plugin
+				.claude_components()
+				.and_then(|components| components.rules.as_deref())
+			else {
+				continue;
+			};
+			let level = match plugin.scope {
+				PluginScope::Project => Level::Project,
+				PluginScope::User => Level::User,
+			};
+			for rule in rules_in_dir(dir, "claude-plugins", level, &["md", "mdc"], &mut warnings) {
 				admit(rule, &mut warnings);
 			}
 		}
@@ -981,7 +1004,8 @@ mod tests {
 		write(&outside, "---\nalwaysApply: true\n---\noutside");
 		symlink(&outside, rules.join("escape.md")).unwrap();
 
-		let discovered = ActiveRules::discover(&project, &home, &config_root);
+		let discovered =
+			ActiveRules::discover(&project, &home, &config_root, &ClaudePlugins::default());
 		assert!(discovered.get("inside").is_some());
 		assert!(discovered.get("escape").is_none());
 		assert!(
@@ -990,6 +1014,43 @@ mod tests {
 				.iter()
 				.any(|warning| warning.message.contains("outside its discovery root"))
 		);
+	}
+
+	#[test]
+	fn installed_plugin_rules_load_unless_the_plugin_is_disabled() {
+		use omp_ext::claude_plugin::{InstallScope, InstalledPluginEntry, InstalledPluginsRegistry};
+
+		let (_temp, home, _repo, project) = layout();
+		let data = home.join("data");
+		let on = data.join("plugins/cache/plugins/m___style___1");
+		let off = data.join("plugins/cache/plugins/m___quiet___1");
+		write(&on.join("rules/house-style.md"), "---\nalwaysApply: true\n---\nUse tabs.");
+		write(&off.join("rules/hush.md"), "---\nalwaysApply: true\n---\nHush.");
+		let mut registry = InstalledPluginsRegistry::default();
+		for (id, path, enabled) in [("style@m", &on, true), ("quiet@m", &off, false)] {
+			registry
+				.plugins
+				.insert(Str::new(id), vec![InstalledPluginEntry {
+					scope: InstallScope::User,
+					install_path: path.clone(),
+					version: Str::new_static("1"),
+					installed_at: Str::new_static("t"),
+					last_updated: Str::new_static("t"),
+					git_commit_sha: None,
+					enabled,
+				}]);
+		}
+		write(
+			&data.join("plugins/installed_plugins.json"),
+			&serde_json::to_string(&registry).unwrap(),
+		);
+
+		let plugins = ClaudePlugins::resolve(&data, &project);
+		let rules = ActiveRules::discover(&project, &home, &home.join(".o2"), &plugins);
+		let rule = rules.get("house-style").expect("installed plugin rule");
+		assert_eq!(rule.provider, "claude-plugins");
+		assert_eq!(rule.level, Level::User);
+		assert!(rules.get("hush").is_none(), "a disabled plugin never loads");
 	}
 
 	#[test]
@@ -1046,7 +1107,7 @@ mod tests {
 		write(&repo.join(".clinerules"), "legacy cline rules\n");
 		write(&repo.join(".omp/rules/broken.md"), "---\ndescription: [unclosed\n---\nbody\n");
 
-		let rules = ActiveRules::discover(&project, &home, &config_root);
+		let rules = ActiveRules::discover(&project, &home, &config_root, &ClaudePlugins::default());
 		let names = rules
 			.rules
 			.iter()
@@ -1106,7 +1167,12 @@ mod tests {
 			&repo.join(".omp/rules/style.md"),
 			"---\ndescription: House style\n---\nline one\nline two\n",
 		);
-		let rules = Arc::new(ActiveRules::discover(&project, &home, &home.join(".o2")));
+		let rules = Arc::new(ActiveRules::discover(
+			&project,
+			&home,
+			&home.join(".o2"),
+			&ClaudePlugins::default(),
+		));
 		let resolver = rules.resolver();
 		assert_eq!(resolver.entry().scheme, Scheme::Rule);
 		let body = resolver.read("style", &ParsedSelector::None).await.unwrap();

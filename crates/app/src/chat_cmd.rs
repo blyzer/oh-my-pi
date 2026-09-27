@@ -379,13 +379,29 @@ impl Launch {
 		})
 		.into_diagnostic()?;
 		let config_root = omp_core::dirs::profile_config_dir(&home).into_diagnostic()?;
-		let templates =
-			PromptTemplates::discover(&project, &config_root, &prompt_template, !no_prompt_templates);
+		// Installed marketplace plugins: resolved once per launch and shared
+		// with the kernel; this is the one place their diagnostics surface.
+		let claude_plugins =
+			Arc::new(omp_ext::claude_plugin::ClaudePlugins::resolve(&data_dir, &project));
+		for diagnostic in &claude_plugins.diagnostics {
+			tracing::warn!(
+				error = diagnostic as &(dyn std::error::Error + 'static),
+				"installed plugin not fully loaded"
+			);
+		}
+		let templates = PromptTemplates::discover(
+			&project,
+			&config_root,
+			&claude_plugins,
+			&prompt_template,
+			!no_prompt_templates,
+		);
 		for warning in &templates.warnings {
 			tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 		}
 		let active_skills = Arc::new(
-			omp_driver::discovery::skills::ActiveSkills::discover(&ctx, &project).into_diagnostic()?,
+			omp_driver::discovery::skills::ActiveSkills::discover(&ctx, &project, &claude_plugins)
+				.into_diagnostic()?,
 		);
 		for warning in &active_skills.warnings {
 			tracing::warn!(path = %warning.path.display(), "{}", warning.message);
@@ -518,6 +534,7 @@ impl Launch {
 			launch_model,
 			prompt: prompt_policy,
 			discovered_skills: Some(Arc::clone(&active_skills)),
+			claude_plugins: Some(Arc::clone(&claude_plugins)),
 			extensions: driver_extension_policy(&extension_launch),
 			provider: provider
 				.as_ref()

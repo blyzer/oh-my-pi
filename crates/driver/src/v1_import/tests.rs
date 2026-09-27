@@ -18,6 +18,8 @@ use omp_catalog::ProviderId;
 use super::*;
 use crate::discovery::models::{ModelsConfigLocation, load_or_import_legacy};
 
+mod keybindings;
+
 const V1_MODELS_YML: &str = concat!(
 	"providers:\n",
 	"  easycliproxy:\n",

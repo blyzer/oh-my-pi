@@ -140,7 +140,7 @@ impl Fixture {
 	/// The rules a session in the project admits.
 	fn rules(&self, config_root: &Path) -> ActiveRules {
 		fs::create_dir_all(self.project()).expect("project");
-		ActiveRules::discover(&self.project(), &self.home(), config_root)
+		ActiveRules::discover(&self.project(), &self.home(), config_root, &Default::default())
 	}
 }
 
