@@ -1044,6 +1044,11 @@ async fn destroy_isolation(env: &EnvClient, id: &str) -> Result<(), SpawnError> 
 	Ok(())
 }
 
+/// Applies the spawner's explicit route choices to a child built by
+/// [`child_ctx`]: the requested effort, the `sv_task_max_effort` ceiling, and a
+/// `sv_task_agent_model_overrides` entry for `agent`, which outranks every cfg.
+/// `ai_task_model` is not consulted here: [`child_ctx`] seeds it beneath the
+/// class cfg, so a class's own `ai_model` keeps precedence over it.
 pub(crate) fn configure_child_route(
 	ctx: &Ctx,
 	settings: &TaskSettings,
@@ -1070,13 +1075,6 @@ pub(crate) fn configure_child_route(
 		omp_agent::AI_MODEL
 			.set(ctx, model)
 			.map_err(SpawnError::Con)?;
-	} else {
-		let task_model = omp_agent::AI_TASK_MODEL.get(ctx);
-		if !task_model.is_empty() {
-			omp_agent::AI_MODEL
-				.set(ctx, task_model)
-				.map_err(SpawnError::Con)?;
-		}
 	}
 	Ok(())
 }
@@ -1685,6 +1683,83 @@ mod tests {
 		configure_child_route(&ctx, &settings, "review", Some(TaskEffort::Hi)).expect("child route");
 		assert_eq!(omp_agent::AI_MODEL.get(&ctx).as_str(), "agent/model");
 		assert_eq!(omp_agent::AI_THINKING.get(&ctx).as_str(), "low");
+	}
+
+	/// A scratch user config root holding `cfgs`, as `(file name, text)`.
+	fn cfg_root(cfgs: &[(&str, &str)]) -> (tempfile::TempDir, crate::cfg::CfgFiles) {
+		let root = tempfile::tempdir().expect("scratch config root");
+		for (name, text) in cfgs {
+			std::fs::write(root.path().join(name), text).expect("cfg file");
+		}
+		let files = crate::cfg::CfgFiles::with_roots(root.path().to_path_buf(), None);
+		(root, files)
+	}
+
+	/// The model a child of `agent` spawned from `parent` routes to, built the
+	/// way every spawn path builds it: [`child_ctx`] then
+	/// [`configure_child_route`].
+	fn spawned_model(parent: &Ctx, files: &crate::cfg::CfgFiles, agent: &str) -> Str {
+		let ctx = child_ctx(parent, files, agent).expect("child context");
+		let settings = TaskSettings::from_con(&ctx);
+		configure_child_route(&ctx, &settings, agent, None).expect("child route");
+		omp_agent::AI_MODEL.get(&ctx)
+	}
+
+	fn parent_with(script: &str) -> Ctx {
+		let parent = Ctx::new();
+		parent.run(script).expect("parent values");
+		parent
+	}
+
+	#[test]
+	fn subagent_class_cfg_model_beats_task_model() {
+		let (_root, files) = cfg_root(&[
+			("reviewer.cfg", "ai_model class/model\nai_thinking low\n"),
+			("echo.cfg", "ai_model parent/model\n"),
+		]);
+		let parent = parent_with("ai_model parent/model; ai_task_model task/model");
+		assert_eq!(spawned_model(&parent, &files, "reviewer").as_str(), "class/model");
+		// A class may pin the same model its parent runs on; that is still the
+		// class's choice, not an inherited value the task model may replace.
+		assert_eq!(spawned_model(&parent, &files, "echo").as_str(), "parent/model");
+	}
+
+	#[test]
+	fn subagent_without_class_model_uses_task_model() {
+		let (_root, files) = cfg_root(&[("reviewer.cfg", "ai_thinking low\n")]);
+		let parent = parent_with("ai_model parent/model; ai_task_model task/model");
+		assert_eq!(spawned_model(&parent, &files, "reviewer").as_str(), "task/model");
+		assert_eq!(spawned_model(&parent, &files, "nocfg").as_str(), "task/model");
+	}
+
+	#[test]
+	fn subagent_agent_model_override_beats_class_cfg_and_task_model() {
+		let (_root, files) = cfg_root(&[("reviewer.cfg", "ai_model class/model\n")]);
+		let parent = parent_with(
+			"ai_model parent/model; ai_task_model task/model; sv_task_agent_model_overrides \
+			 {Reviewer override/model}",
+		);
+		assert_eq!(spawned_model(&parent, &files, "reviewer").as_str(), "override/model");
+	}
+
+	#[test]
+	fn subagent_with_no_model_settings_inherits_the_session_model() {
+		let (_root, files) = cfg_root(&[("reviewer.cfg", "ai_thinking low\n")]);
+		let parent = parent_with("ai_model parent/model");
+		assert_eq!(spawned_model(&parent, &files, "reviewer").as_str(), "parent/model");
+		assert_eq!(spawned_model(&parent, &files, "nocfg").as_str(), "parent/model");
+		assert_eq!(spawned_model(&Ctx::new(), &files, "reviewer").as_str(), "");
+	}
+
+	#[test]
+	fn subagent_cfg_model_beats_task_model_by_execution_order() {
+		let (_root, files) = cfg_root(&[
+			("subagent.cfg", "ai_model children/model\n"),
+			("reviewer.cfg", "ai_model class/model\n"),
+		]);
+		let parent = parent_with("ai_model parent/model; ai_task_model task/model");
+		assert_eq!(spawned_model(&parent, &files, "nocfg").as_str(), "children/model");
+		assert_eq!(spawned_model(&parent, &files, "reviewer").as_str(), "class/model");
 	}
 
 	#[tokio::test]

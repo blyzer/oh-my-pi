@@ -580,6 +580,11 @@ fn string_map(values: Kv) -> BTreeMap<Str, Str> {
 /// re-read: the parent already applied it, and re-running it would let a
 /// stale archived value override what the parent changed since startup.
 /// Whatever the spawner sets explicitly comes after this call.
+///
+/// A non-empty `ai_task_model` is part of the seed: it becomes the child's
+/// `ai_model` before either cfg runs, so an `ai_model` the class cfg (or
+/// `subagent.cfg`) assigns outranks it by execution order, as v1 let an agent
+/// definition's `model` outrank the task role.
 pub fn child_ctx(
 	parent: &Ctx,
 	loader: &dyn CfgLoader,
@@ -593,6 +598,10 @@ pub fn child_ctx(
 	}
 	for (name, value) in values {
 		child.set_value(name.as_str(), value, omp_con::SetSource::Code)?;
+	}
+	let task_model = omp_agent::AI_TASK_MODEL.get(&child);
+	if !task_model.is_empty() {
+		omp_agent::AI_MODEL.set(&child, task_model)?;
 	}
 	let outcome = child.exec_spawn_configs(loader, agent)?;
 	if outcome.failed > 0 {

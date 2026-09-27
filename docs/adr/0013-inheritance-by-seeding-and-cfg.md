@@ -72,7 +72,7 @@ bypasses this order.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/driver/src/subagent/settings.rs`. Child contexts seed effective values and execute `subagent.cfg` plus class cfg. User cfg files live in `~/.o2` (`omp_core::dirs::config_dir`, `OMP_CONFIG_DIR` override; owner decision 2026-09-03); `<project>/.omp/config.cfg` overlays. Cfg execution is lenient (`Ctx::exec_configs` reports and skips unknown names).
+**Implemented.** Primary implementation: `crates/driver/src/subagent/settings.rs`. Child contexts seed effective values and execute `subagent.cfg` plus class cfg. User cfg files live in `~/.o2` (`omp_core::dirs::config_dir`, `OMP_CONFIG_DIR` override; owner decision 2026-09-03); `<project>/.omp/config.cfg` overlays. Cfg execution is lenient (`Ctx::exec_configs` reports and skips unknown names). `ai_task_model` is seeded as the child's `ai_model` ahead of both cfgs, so a class cfg's own `ai_model` outranks it; a `sv_task_agent_model_overrides` entry is the spawner's explicit choice and is applied after them.
 
 ## References
 

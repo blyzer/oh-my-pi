@@ -246,6 +246,35 @@ fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
 }
 
 #[test]
+fn an_imported_agent_model_outranks_the_task_model_as_in_v1() {
+	let fixture = Fixture::new();
+	write(&fixture.agents().join("reviewer.md"), REVIEWER);
+	write(
+		&fixture.agents().join("scout.md"),
+		"---\nname: scout\ndescription: Finds things\nmodel: \"@task\"\n---\nScout the tree.\n",
+	);
+	fixture.run(ImportMode::Apply);
+	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
+
+	// v1 resolved an agent's own `model` ahead of the task role; `@task`
+	// followed the task role, which v2 spells `ai_task_model`.
+	let parent = omp_con::Ctx::new();
+	parent
+		.run("ai_model parent/model; ai_task_model task/model")
+		.expect("parent values");
+	let files = CfgFiles::with_roots(fixture.config(), None);
+	let spawned = |agent: &str| {
+		let ctx = child_ctx(&parent, &files, agent).expect("child context");
+		let settings = crate::subagent::settings::TaskSettings::from_con(&ctx);
+		crate::subagent::spawn::configure_child_route(&ctx, &settings, agent, None)
+			.expect("child route");
+		omp_agent::AI_MODEL.get(&ctx)
+	};
+	assert_eq!(spawned("reviewer").as_str(), "@slow:high");
+	assert_eq!(spawned("scout").as_str(), "task/model");
+}
+
+#[test]
 fn the_body_becomes_a_rule_admitted_only_for_its_class() {
 	let fixture = Fixture::new();
 	write(&fixture.agents().join("reviewer.md"), REVIEWER);
