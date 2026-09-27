@@ -35,9 +35,6 @@ omp_con::var! {
 	pub static SV_ACP_ROUTING = sv_acp_routing: AcpRouting {
 		default: AcpRouting::Auto,
 		flags: archive,
-		meta: {
-			"legacy.path": "acp.routing",
-		},
 	};
 }
 

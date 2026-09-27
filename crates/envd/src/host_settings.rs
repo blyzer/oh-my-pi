@@ -69,9 +69,6 @@ omp_con::var! {
 	pub static SV_INTERRUPT_GRACE = sv_interrupt_grace: Duration {
 		default: DEFAULT_INTERRUPT_GRACE,
 		flags: archive,
-		meta: {
-			"legacy.path": "runtime.interrupt_grace",
-		},
 	};
 	/// Select the durable memory backend.
 	pub static AI_MEMORY_BACKEND = ai_memory_backend: MemoryBackendSetting {
@@ -126,7 +123,6 @@ omp_con::var! {
 			"ui.group": "Auto-Learn",
 			"ui.label": "Auto-run capture at stop",
 			"ui.when": "ai_autolearn_enabled=true",
-			"legacy.path": "autolearn.auto_continue",
 			"legacy.path": "autolearn.autoContinue",
 		},
 	};
@@ -136,7 +132,6 @@ omp_con::var! {
 		min: 0,
 		flags: archive,
 		meta: {
-			"legacy.path": "autolearn.min_tool_calls",
 			"legacy.path": "autolearn.minToolCalls",
 		},
 	};

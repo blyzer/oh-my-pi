@@ -34,11 +34,6 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 		return run_mcp(&user_root, &project, command);
 	}
 	match command {
-		ConfigCommand::Migrate => {
-			let destination = migrate_settings(data_dir, &project)?;
-			println!("{}", destination.display());
-			Ok(())
-		},
 		ConfigCommand::Dump => {
 			print!("{}", crate::process_ctx(&project)?.dump());
 			Ok(())
@@ -565,14 +560,6 @@ fn load_cfg_text(path: &Path, script: Option<&str>) -> miette::Result<Ctx> {
 	Ok(ctx)
 }
 
-fn persist_cfg_with_options(path: &Path, ctx: &Ctx, options: DumpOptions) -> miette::Result<()> {
-	let transaction =
-		omp_driver::cfg::ConfigFileLock::acquire(path.to_path_buf()).into_diagnostic()?;
-	transaction
-		.replace(ctx.dump_with_options(options).as_str())
-		.into_diagnostic()
-}
-
 pub(crate) fn update_cfg(
 	path: &Path,
 	update: impl FnOnce(&Ctx) -> miette::Result<()>,
@@ -663,54 +650,6 @@ fn flag_names(flags: VarFlags) -> Vec<&'static str> {
 	.collect()
 }
 
-/// Migrates legacy TOML settings and keybindings to the archived command
-/// stream, scope for scope (ADR 0012): the user `config.toml` (plus
-/// `OMP_CONFIG_FILES` overlays) and legacy keybindings become the user
-/// `config.cfg`; `<project>/.omp/config.toml` becomes
-/// `<project>/.omp/config.cfg`, never a global setting. A legacy data-root
-/// `mcp.json` moves into the selected user/profile configuration root without
-/// overwriting an existing destination. Returns the user cfg path.
-///
-/// Re-running migration over unchanged inputs writes identical bytes.
-pub fn migrate_settings(data_dir: &Path, project: &Path) -> miette::Result<PathBuf> {
-	let mut user_sources = vec![data_dir.join("config.toml")];
-	if let Some(overlays) = env::var_os("OMP_CONFIG_FILES") {
-		user_sources.extend(env::split_paths(&overlays));
-	}
-	let user = migrate_toml_sources(&user_sources)?;
-	user
-		.exec(
-			omp_driver::keybindings::DEFAULT_BINDS,
-			Source::Config(Str::new_static(omp_driver::keybindings::DEFAULT_BINDS_NAME)),
-		)
-		.into_diagnostic()?;
-	user.seal_bind_defaults();
-	migrate_keybindings(data_dir, &user)?;
-	let migration_dump = DumpOptions { include_archived_defaults: true, ..DumpOptions::default() };
-	let destination = crate::config_path().into_diagnostic()?;
-	persist_cfg_with_options(&destination, &user, migration_dump)?;
-	let user_root = destination
-		.parent()
-		.ok_or_else(|| miette::miette!("user configuration path has no parent directory"))?;
-	McpConfigStore::new(user_root.join("mcp.json"))
-		.migrate_from(&data_dir.join("mcp.json"))
-		.into_diagnostic()?;
-
-	let project_source = project.join(".omp/config.toml");
-	if project_source.is_file() {
-		let scoped = migrate_toml_sources(std::slice::from_ref(&project_source))?;
-		scoped.seal_bind_defaults();
-		persist_cfg_with_options(&project.join(".omp/config.cfg"), &scoped, migration_dump)?;
-	}
-	Ok(destination)
-}
-
-/// Folds legacy TOML documents (later sources override earlier) into one
-/// archive-layer context through legacy paths owned by each declaration.
-fn migrate_toml_sources(sources: &[PathBuf]) -> miette::Result<Ctx> {
-	omp_driver::legacy_settings::fold_toml_sources(sources).into_diagnostic()
-}
-
 /// Sets and persists one convar in the selected cfg scope.
 pub fn set_persisted(
 	project: &Path,
@@ -725,43 +664,4 @@ pub fn set_persisted(
 			.into_diagnostic()?;
 		Ok(())
 	})
-}
-
-fn migrate_keybindings(data_dir: &Path, ctx: &Ctx) -> miette::Result<()> {
-	let path = data_dir.join("keybindings.toml");
-	if !path.is_file() {
-		return Ok(());
-	}
-	let text = fs::read_to_string(path).into_diagnostic()?;
-	let document = text.parse::<toml::Table>().into_diagnostic()?;
-	let active = document
-		.get("active")
-		.and_then(toml::Value::as_str)
-		.unwrap_or("default");
-	let Some(bindings) = document
-		.get("profiles")
-		.and_then(toml::Value::as_table)
-		.and_then(|profiles| profiles.get(active))
-		.and_then(toml::Value::as_table)
-		.and_then(|profile| profile.get("bindings"))
-		.and_then(toml::Value::as_table)
-	else {
-		return Ok(());
-	};
-	for (action, chords) in bindings {
-		let Some(command) = omp_driver::keybindings::pi_action_command(action) else {
-			continue;
-		};
-		let Some(chords) = chords.as_array() else {
-			continue;
-		};
-		// The remap replaces the action's shipped chords; other contextual
-		// actions sharing a chord keep their order.
-		omp_driver::keybindings::strip_command(ctx, command, |_| false).into_diagnostic()?;
-		for chord in chords.iter().filter_map(toml::Value::as_str) {
-			ctx.bind(Str::new(chord), Str::new_static(command))
-				.into_diagnostic()?;
-		}
-	}
-	Ok(())
 }

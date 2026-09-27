@@ -1,14 +1,60 @@
-//! Command-stream configuration migration and persistence contracts.
+//! Command-stream configuration persistence and v1 settings import contracts.
 
-use std::fs;
+use std::{fmt::Write as _, fs};
 
-use omp_app::{
-	cli::ConfigScope,
-	config_cmd::{migrate_settings, set_persisted},
-};
+use omp_app::{cli::ConfigScope, config_cmd::set_persisted};
+
+/// Imports `yaml` as a project's v1 `.omp/config.yml` through the full
+/// process registry and returns the `config.cfg` it writes.
+fn import_v1_project_settings(yaml: &str) -> String {
+	let root = tempfile::tempdir().expect("scratch");
+	let project = root.path().join("repo");
+	fs::create_dir_all(project.join(".omp")).expect(".omp");
+	fs::write(project.join(".omp/config.yml"), yaml).expect("v1 config.yml");
+	let roots = omp_driver::v1_import::V2Roots {
+		config_dir:     root.path().join("config"),
+		data_dir:       root.path().join("data"),
+		state_dir:      root.path().join("state"),
+		cache_dir:      root.path().join("cache"),
+		active_profile: None,
+	};
+	let entries = omp_driver::v1_import::import_project_settings(
+		&project,
+		&roots,
+		omp_driver::v1_import::ImportMode::Apply,
+	);
+	assert!(!entries.is_empty(), "the import reports");
+	fs::read_to_string(project.join(".omp/config.cfg")).expect("imported config.cfg")
+}
+
+/// Folds `yaml` as a v1 settings document through every convar in the
+/// process registry, the way the v1 settings step does before it drops values
+/// that equal the default, and returns one `name value` line per convar.
+fn v1_folds(yaml: &str) -> String {
+	let scratch = tempfile::tempdir().expect("scratch");
+	let path = scratch.path().join("config.yml");
+	fs::write(&path, yaml).expect("v1 config.yml");
+	let document = omp_driver::legacy_settings::read_yaml_document(&path).expect("v1 document");
+	let ctx = omp_con::Ctx::new();
+	let mut lines = String::new();
+	for var in ctx.vars() {
+		let Some(fold) = omp_driver::legacy_settings::fold_var(&document, &var) else {
+			continue;
+		};
+		let value = fold
+			.outcome
+			.unwrap_or_else(|(path, error)| panic!("{path} does not convert: {error}"))
+			.unwrap_or_else(|| panic!("{} folds to nothing", var.name));
+		ctx.set(var.name, value, omp_con::Origin::Archive)
+			.unwrap_or_else(|error| panic!("{} rejects the value: {error}", var.name));
+		let effective = ctx.value(var.name).expect("registered convar");
+		writeln!(lines, "{} {effective}", var.name).expect("write to a String");
+	}
+	lines
+}
 
 #[test]
-fn config_migrate_is_idempotent_and_uses_declaration_metadata() {
+fn v1_settings_reach_convars_declared_across_the_process() {
 	let registry = omp_con::Ctx::new();
 	let mut saw_retry_enabled = false;
 	let mut saw_steering_mode = false;
@@ -22,234 +68,118 @@ fn config_migrate_is_idempotent_and_uses_declaration_metadata() {
 	assert!(saw_retry_enabled, "retry.enabled metadata is missing");
 	assert!(saw_steering_mode, "steeringMode metadata is missing");
 
-	let data = tempfile::tempdir().expect("data directory");
-	let config = tempfile::tempdir().expect("config directory");
-	// SAFETY: nextest runs each test in its own process; nothing else reads the
-	// variable concurrently.
-	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
-	let project = tempfile::tempdir().expect("project directory");
-	fs::write(
-		data.path().join("config.toml"),
-		"steeringMode = \"all\"\nhideThinkingBlock = true\n[display]\nhideToolActivity = \
-		 true\n[retry]\nenabled = false\n[stt]\nenabled = true\nmodelName = \"turbo\"\n",
-	)
-	.expect("legacy TOML");
-
-	let path = migrate_settings(data.path(), project.path()).expect("first migration");
-	let first = fs::read(&path).expect("first config.cfg");
-	migrate_settings(data.path(), project.path()).expect("second migration");
-	let second = fs::read(&path).expect("second config.cfg");
-
-	assert_eq!(second, first);
-	let script = String::from_utf8(first).expect("UTF-8 cfg");
-	assert!(script.contains("ai_retry_enabled false"));
-	assert!(script.contains("ai_steering_mode all"));
-	assert!(script.contains("cl_showthinking false"));
-	assert!(script.contains("cl_showtools false"));
-	assert!(script.contains("cl_voice_stt_enabled true"));
-	assert!(script.contains("cl_stt_model turbo"));
+	let script = import_v1_project_settings(concat!(
+		"steeringMode: all
+",
+		"hideThinkingBlock: true
+",
+		"display:
+  hideToolActivity: true
+",
+		"retry:
+  enabled: false
+",
+		"stt:
+  enabled: true
+  modelName: turbo
+",
+	));
+	assert!(script.contains("ai_retry_enabled false"), "{script}");
+	assert!(script.contains("ai_steering_mode all"), "{script}");
+	assert!(script.contains("cl_showthinking false"), "{script}");
+	assert!(script.contains("cl_showtools false"), "{script}");
+	assert!(script.contains("cl_voice_stt_enabled true"), "{script}");
+	assert!(script.contains("cl_stt_model turbo"), "{script}");
 }
 
 #[test]
-fn config_migrate_moves_legacy_data_mcp_without_overwriting() {
-	let data = tempfile::tempdir().expect("data directory");
-	let config = tempfile::tempdir().expect("config directory");
-	// SAFETY: nextest runs each test in its own process.
-	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
-	let project = tempfile::tempdir().expect("project directory");
-	let legacy = data.path().join("mcp.json");
-	fs::write(&legacy, br#"{"mcpServers":{"legacy":{"type":"stdio","command":"legacy"}}}"#)
-		.expect("legacy MCP config");
-
-	migrate_settings(data.path(), project.path()).expect("migration");
-	let destination = config.path().join("mcp.json");
-	assert!(!legacy.exists());
-	let migrated = fs::read_to_string(&destination).expect("migrated MCP config");
-	assert!(migrated.contains("\"legacy\""));
-
-	fs::write(
-		&legacy,
-		br#"{"mcpServers":{"replacement":{"type":"stdio","command":"replacement"}}}"#,
-	)
-	.expect("replacement MCP config");
-	migrate_settings(data.path(), project.path()).expect("repeat migration");
-	assert!(legacy.exists());
-	assert_eq!(fs::read_to_string(destination).expect("preserved MCP config"), migrated);
+fn v1_settings_preserve_output_limit_kibibyte_values() {
+	let script = v1_folds(concat!(
+		"tools:
+",
+		"  artifactSpillThreshold: 50
+",
+		"  artifactTailBytes: 2.5
+",
+		"  artifactHeadBytes: 20
+",
+		"  outputMaxColumns: 768
+",
+		"  artifactTailLines: 500
+",
+	));
+	assert!(script.contains("sv_tools_output_spill_bytes 51200"), "{script}");
+	assert!(script.contains("sv_tools_artifact_tail_bytes 2560"), "{script}");
+	assert!(script.contains("sv_tools_artifact_head_bytes 20480"), "{script}");
+	assert!(script.contains("sv_tools_output_max_columns 768"), "{script}");
+	assert!(script.contains("sv_tools_artifact_tail_lines 500"), "{script}");
 }
 
 #[test]
-fn config_migrate_preserves_output_limit_kibibyte_values() {
-	let data = tempfile::tempdir().expect("data directory");
-	let config = tempfile::tempdir().expect("config directory");
-	// SAFETY: nextest runs each test in its own process.
-	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
-	let project = tempfile::tempdir().expect("project directory");
-	fs::write(
-		data.path().join("config.toml"),
-		r#"
-[tools]
-artifactSpillThreshold = 50
-artifactTailBytes = 2.5
-artifactHeadBytes = 20
-outputMaxColumns = 768
-artifactTailLines = 500
-"#,
-	)
-	.expect("legacy TOML");
-
-	let path = migrate_settings(data.path(), project.path()).expect("migration");
-	let script = fs::read_to_string(path).expect("config.cfg");
-	assert!(script.contains("sv_tools_output_spill_bytes 51200"));
-	assert!(script.contains("sv_tools_artifact_tail_bytes 2560"));
-	assert!(script.contains("sv_tools_artifact_head_bytes 20480"));
-	assert!(script.contains("sv_tools_output_max_columns 768"));
-	assert!(script.contains("sv_tools_artifact_tail_lines 500"));
-}
-
-#[test]
-fn config_migrate_converts_legacy_value_encodings() {
-	let data = tempfile::tempdir().expect("data directory");
-	let config = tempfile::tempdir().expect("config directory");
-	// SAFETY: nextest runs each test in its own process.
-	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
-	let project = tempfile::tempdir().expect("project directory");
-	fs::write(
-		data.path().join("config.toml"),
-		r#"
-doubleEscapeAction = "rewind"
-
-[completion]
-notify = "off"
-
-[error]
-notify = "on"
-
-[ask]
-notify = "off"
-
-[compaction]
-thresholdPercent = 80
-thresholdTokens = "default"
-
-[task]
-maxRuntimeMs = 0
-
-[task.isolation]
-enabled = true
-
-[irc]
-timeoutMs = 30000
-
-[tools]
-maxTimeout = 60
-
-[edit]
-mode = "hashline"
-
-[providers]
-tinyModel = "online"
-memoryModel = "online"
-autoThinkingModel = "online"
-unexpectedStopModel = "online"
-fireworksTier = "standard"
-
-[share]
-store = "blob"
-"#,
-	)
-	.expect("legacy TOML");
-
-	let path = migrate_settings(data.path(), project.path()).expect("migration");
-	let script = fs::read_to_string(path).expect("config.cfg");
-	assert!(script.contains("cl_double_escape branch"));
-	assert!(script.contains("cl_notify_completion false"));
-	assert!(script.contains("cl_notify_error true"));
-	assert!(script.contains("cl_notify_ask false"));
-	assert!(script.contains("ai_compact_threshold 0.8"));
-	assert!(script.contains("ai_compaction_threshold_tokens -1"));
-	assert!(script.contains("sv_task_isolation_mode auto"));
-	assert!(script.contains("sv_task_max_runtime never"));
-	assert!(script.contains("sv_irc_timeout 30000ms"));
-	assert!(script.contains("sv_tools_max_timeout 60s"));
-	assert!(script.contains("sv_tools_edit_dialect hl.1"));
-	assert!(script.contains("ai_tiny_selector @tiny"));
-	assert!(script.contains("ai_memory_selector @tiny"));
-	assert!(script.contains("ai_auto_thinking_selector @tiny"));
-	assert!(script.contains("ai_unexpected_stop_selector @tiny"));
-	assert!(script.contains("ai_tier_fireworks none"));
-	assert!(script.contains("sv_share_store http"));
-}
-
-#[test]
-fn keybinding_migration_replaces_action_defaults_without_erasing_unrelated_binds() {
-	let data = tempfile::tempdir().expect("data directory");
-	let config = tempfile::tempdir().expect("config directory");
-	// SAFETY: nextest runs each test in its own process.
-	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
-	let project = tempfile::tempdir().expect("project directory");
-	fs::write(
-		data.path().join("keybindings.toml"),
-		r#"
-active = "custom"
-
-[profiles.custom.bindings]
-"app.retry" = ["alt+shift+r"]
-"app.message.dequeue" = ["alt+up"]
-"#,
-	)
-	.expect("legacy keybindings");
-
-	let path = migrate_settings(data.path(), project.path()).expect("migration");
-	let script = fs::read_to_string(path).expect("config.cfg");
-	assert!(!script.contains("unbindall"), "a remap must not erase unrelated defaults");
-	assert!(script.contains("unbind f5"));
-	assert!(script.contains("unbind alt+r"));
-	assert!(script.contains("unbind shift+up"));
-	assert!(script.contains("bind alt+shift+r cl_retry"));
-
-	let ctx = omp_app::process_ctx(project.path()).expect("reload");
-	assert_eq!(ctx.bound("alt+r"), None);
-	assert_eq!(ctx.bound("f5"), None);
-	assert_eq!(ctx.bound("alt+shift+r").as_deref(), Some("cl_retry"));
-	assert_eq!(ctx.bound("shift+up"), None);
-	assert_eq!(ctx.bound("alt+up").as_deref(), Some("cl_dequeue"));
-	assert_eq!(ctx.bound("enter").as_deref(), Some("ed_enter"));
-}
-
-#[test]
-fn config_migrate_keeps_project_values_out_of_the_user_cfg() {
-	let data = tempfile::tempdir().expect("data directory");
-	let config = tempfile::tempdir().expect("config directory");
-	// SAFETY: see above.
-	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
-	let project = tempfile::tempdir().expect("project directory");
-	fs::create_dir_all(project.path().join(".omp")).expect(".omp");
-	fs::write(data.path().join("config.toml"), "[stt]\nenabled = true\n").expect("user TOML");
-	fs::write(project.path().join(".omp/config.toml"), "[stt]\nmodelName = \"turbo\"\n")
-		.expect("project TOML");
-
-	let user = migrate_settings(data.path(), project.path()).expect("migration");
-	let user_script = fs::read_to_string(&user).expect("user config.cfg");
-	assert!(user_script.contains("cl_voice_stt_enabled true"));
-	assert!(!user_script.contains("cl_stt_model"), "project value leaked into the user scope");
-	let project_script =
-		fs::read_to_string(project.path().join(".omp/config.cfg")).expect("project config.cfg");
-	assert!(
-		!project_script.contains("unbindall"),
-		"a settings migration must preserve default binds"
-	);
-	assert!(project_script.contains("cl_stt_model turbo"));
-	assert!(!project_script.contains("cl_voice_stt_enabled"));
-	let ctx = omp_app::process_ctx(project.path()).expect("reload context");
-	assert_eq!(
-		ctx.get_typed::<omp_app::voice::settings::SttModel>("cl_stt_model")
-			.expect("convar"),
-		omp_app::voice::settings::SttModel::Turbo
-	);
-	assert!(
-		ctx.get_typed::<bool>("cl_voice_stt_enabled")
-			.expect("convar")
-	);
+fn v1_settings_convert_legacy_value_encodings() {
+	let script = v1_folds(concat!(
+		"doubleEscapeAction: rewind
+",
+		"completion:
+  notify: \"off\"
+",
+		"error:
+  notify: \"on\"
+",
+		"ask:
+  notify: \"off\"
+",
+		"compaction:
+  thresholdPercent: 80
+  thresholdTokens: default
+",
+		"task:
+  maxRuntimeMs: 0
+  isolation:
+    enabled: true
+",
+		"irc:
+  timeoutMs: 30000
+",
+		"tools:
+  maxTimeout: 60
+",
+		"edit:
+  mode: hashline
+",
+		"providers:
+",
+		"  tinyModel: online
+",
+		"  memoryModel: online
+",
+		"  autoThinkingModel: online
+",
+		"  unexpectedStopModel: online
+",
+		"  fireworksTier: standard
+",
+		"share:
+  store: blob
+",
+	));
+	assert!(script.contains("cl_double_escape branch"), "{script}");
+	assert!(script.contains("cl_notify_completion false"), "{script}");
+	assert!(script.contains("cl_notify_error true"), "{script}");
+	assert!(script.contains("cl_notify_ask false"), "{script}");
+	assert!(script.contains("ai_compact_threshold 0.8"), "{script}");
+	assert!(script.contains("ai_compaction_threshold_tokens -1"), "{script}");
+	assert!(script.contains("sv_task_isolation_mode auto"), "{script}");
+	assert!(script.contains("sv_task_max_runtime never"), "{script}");
+	assert!(script.contains("sv_irc_timeout 30000ms"), "{script}");
+	assert!(script.contains("sv_tools_max_timeout 60s"), "{script}");
+	assert!(script.contains("sv_tools_edit_dialect hl.1"), "{script}");
+	assert!(script.contains("ai_tiny_selector @tiny"), "{script}");
+	assert!(script.contains("ai_memory_selector @tiny"), "{script}");
+	assert!(script.contains("ai_auto_thinking_selector @tiny"), "{script}");
+	assert!(script.contains("ai_unexpected_stop_selector @tiny"), "{script}");
+	assert!(script.contains("ai_tier_fireworks none"), "{script}");
+	assert!(script.contains("sv_share_store http"), "{script}");
 }
 
 #[test]
