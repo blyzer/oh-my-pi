@@ -2,13 +2,14 @@
 //! prompt (`<skills>`) and serves as `skill://<name>`.
 //!
 //! Sources: native `.omp/skills` (project walk-up) and
-//! `<config root>/agent/skills`, then `.claude/skills`,
-//! `.agent[s]/skills`, opted-in user/project `.codex/skills`, project OpenCode
-//! skills, then
-//! `sv_skills_custom_directories`, then the isolated managed-skills root dead
-//! last. Within a name, the first source in that order wins; a custom
-//! directory beats a default-path provider. Every knob is a convar
-//! (`sv_skills_*`, `cl_disabled_extensions`), never a second schema.
+//! `<config root>/agent/skills`, then `.claude/skills`, Agent Plugins
+//! packages, installed marketplace plugins (`installed_plugins.json`, enabled
+//! installs only), `.agent[s]/skills`, opted-in user/project `.codex/skills`,
+//! project `OpenCode` skills, then `sv_skills_custom_directories`, then the
+//! isolated managed-skills root dead last. Within a name, the first source in
+//! that order wins; a custom directory beats a default-path provider. Every
+//! knob is a convar (`sv_skills_*`, `cl_disabled_extensions`), never a second
+//! schema.
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -19,6 +20,7 @@ use std::{
 
 use omp_core::{CowBytes, Str};
 use omp_envd::{self as envd_settings, ContentResolver};
+use omp_ext::claude_plugin::{ClaudePlugins, PluginLayout, PluginScope};
 use omp_tools::read::{
 	Fault,
 	resolver::{
@@ -190,7 +192,9 @@ pub struct ActiveSkills {
 
 impl ActiveSkills {
 	/// Discovers skills for `project_root` under the process policy: the
-	/// production entry `compose_kernel` calls once per session.
+	/// production entry `compose_kernel` calls once per session. `plugins`
+	/// is the installed marketplace plugin set
+	/// ([`omp_ext::claude_plugin::ClaudePlugins::resolve`]).
 	///
 	/// # Errors
 	///
@@ -198,11 +202,13 @@ impl ActiveSkills {
 	pub fn discover(
 		ctx: &omp_con::Ctx,
 		project_root: &Path,
+		plugins: &ClaudePlugins,
 	) -> Result<Self, omp_core::dirs::DataDirError> {
-		Self::discover_with_sources(ctx, project_root, &[])
+		Self::discover_with_sources(ctx, project_root, plugins, &[])
 	}
 
-	/// Discovers the ordinary skill roots plus manifest-sealed extension roots.
+	/// Discovers the ordinary skill roots plus installed marketplace plugins
+	/// and manifest-sealed extension roots.
 	///
 	/// Extension skills sit below authored/custom roots and above the isolated
 	/// managed-skills fallback. Their Python decorators are verified separately
@@ -210,30 +216,17 @@ impl ActiveSkills {
 	pub fn discover_with_sources(
 		ctx: &omp_con::Ctx,
 		project_root: &Path,
+		plugins: &ClaudePlugins,
 		extension_sources: &[SkillSource],
 	) -> Result<Self, omp_core::dirs::DataDirError> {
 		let home = omp_core::dirs::home_dir().ok_or(omp_core::dirs::DataDirError::HomeUnset)?;
 		let config_root = omp_core::dirs::user_config_root()?;
 		let policy = SkillPolicy::from_con(ctx);
-		let mut all = sources(project_root, &home, &config_root, &policy);
-		let managed = all.pop();
-		let insertion = all
-			.iter()
-			.position(|source| source.provider.as_str() == "agents")
-			.unwrap_or(all.len());
-		let plugin_sources = extension_sources
-			.iter()
-			.filter(|source| source.provider.as_str() == "agent-plugins")
-			.cloned()
-			.collect::<Vec<_>>();
-		all.splice(insertion..insertion, plugin_sources);
-		all.extend(
-			extension_sources
-				.iter()
-				.filter(|source| source.provider.as_str() != "agent-plugins")
-				.cloned(),
+		let all = ordered_sources(
+			sources(project_root, &home, &config_root, &policy),
+			plugins,
+			extension_sources,
 		);
-		all.extend(managed);
 		Ok(discover(&all, &policy))
 	}
 
@@ -361,6 +354,69 @@ impl ActiveSkills {
 #[must_use]
 pub fn managed_skills_root(config_root: &Path) -> PathBuf {
 	config_root.join("agent/managed-skills")
+}
+
+/// Splices installed-plugin and extension sources into the [`sources`] ladder.
+///
+/// Explicit `--ext` Agent Plugins, then installed marketplace plugins, sit
+/// just above the `.agent[s]/skills` providers; other extension roots sit
+/// below every authored root and above the isolated managed-skills fallback,
+/// which stays dead last.
+#[must_use]
+pub fn ordered_sources(
+	mut all: Vec<SkillSource>,
+	plugins: &ClaudePlugins,
+	extension_sources: &[SkillSource],
+) -> Vec<SkillSource> {
+	let managed = all.pop();
+	let insertion = all
+		.iter()
+		.position(|source| source.provider.as_str() == "agents")
+		.unwrap_or(all.len());
+	let plugin_sources = extension_sources
+		.iter()
+		.filter(|source| source.provider.as_str() == "agent-plugins")
+		.cloned()
+		.chain(installed_plugin_skill_sources(plugins))
+		.collect::<Vec<_>>();
+	all.splice(insertion..insertion, plugin_sources);
+	all.extend(
+		extension_sources
+			.iter()
+			.filter(|source| source.provider.as_str() != "agent-plugins")
+			.cloned(),
+	);
+	all.extend(managed);
+	all
+}
+
+/// Provider identity of skills contributed by installed Claude-format
+/// marketplace plugins.
+pub const CLAUDE_PLUGINS_PROVIDER: &str = "claude-plugins";
+
+/// Skill sources of installed, enabled marketplace plugins, project installs
+/// first: each Claude-layout skills directory, or the Agent Plugins 1.0
+/// source of an install packaged in that format.
+#[must_use]
+pub fn installed_plugin_skill_sources(plugins: &ClaudePlugins) -> Vec<SkillSource> {
+	let mut out = Vec::new();
+	for plugin in &plugins.plugins {
+		let level = match plugin.scope {
+			PluginScope::Project => SkillLevel::Project,
+			PluginScope::User => SkillLevel::User,
+		};
+		match &plugin.layout {
+			PluginLayout::Claude(components) => {
+				out.extend(components.skills.iter().map(|root| SkillSource {
+					provider: Str::new_static(CLAUDE_PLUGINS_PROVIDER),
+					root: root.clone(),
+					level,
+				}));
+			},
+			PluginLayout::AgentPlugins => out.extend(agent_plugin_skill_source(&plugin.root, level)),
+		}
+	}
+	out
 }
 
 /// Ordered skill sources for one project: precedence is the vector order.
@@ -1123,6 +1179,75 @@ mod tests {
 
 	fn source(root: &Path, provider: &'static str, level: SkillLevel) -> SkillSource {
 		SkillSource { provider: Str::new_static(provider), root: root.to_path_buf(), level }
+	}
+
+	fn install(registry: &Path, entries: &[(&str, &Path, bool)]) {
+		let mut installed = omp_ext::claude_plugin::InstalledPluginsRegistry::default();
+		for (id, path, enabled) in entries {
+			installed.plugins.insert(Str::new(id), vec![
+				omp_ext::claude_plugin::InstalledPluginEntry {
+					scope:          omp_ext::claude_plugin::InstallScope::User,
+					install_path:   path.to_path_buf(),
+					version:        Str::new_static("1.0.0"),
+					installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+					last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+					git_commit_sha: None,
+					enabled:        *enabled,
+				},
+			]);
+		}
+		fs::create_dir_all(registry.parent().unwrap()).unwrap();
+		fs::write(registry, serde_json::to_vec(&installed).unwrap()).unwrap();
+	}
+
+	#[test]
+	fn installed_marketplace_plugin_skills_load_unless_disabled() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path().canonicalize().unwrap();
+		let (home, data, project) = (root.join("home"), root.join("data"), root.join("project"));
+		fs::create_dir_all(&project).unwrap();
+		let cache = data.join("plugins/cache/plugins");
+		let enabled = cache.join("market___helper___1.0.0");
+		let disabled = cache.join("market___quiet___1.0.0");
+		let scoped = root.join("project-copy");
+		write_skill(&enabled.join("skills"), "review", "description: plugin review", "b");
+		write_skill(&disabled.join("skills"), "hush", "description: disabled plugin", "b");
+		write_skill(&scoped.join("skills"), "local", "description: project plugin", "b");
+		install(&data.join("plugins/installed_plugins.json"), &[
+			("helper@market", &enabled, true),
+			("quiet@market", &disabled, false),
+		]);
+		install(&project.join(".omp/plugins/installed_plugins.json"), &[(
+			"scoped@market",
+			&scoped,
+			true,
+		)]);
+
+		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project);
+		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
+		let policy = SkillPolicy::default();
+		let all =
+			ordered_sources(sources(&project, &home, &home.join(".o2"), &policy), &plugins, &[]);
+		let plugin_at = all
+			.iter()
+			.position(|source| source.provider.as_str() == CLAUDE_PLUGINS_PROVIDER)
+			.expect("plugin source");
+		let agents_at = all
+			.iter()
+			.position(|source| source.provider.as_str() == "agents")
+			.unwrap();
+		assert!(plugin_at < agents_at);
+		let active = discover(&all, &policy);
+		let found = active
+			.skills
+			.iter()
+			.map(|skill| (skill.name.as_str(), skill.provider.as_str(), skill.level))
+			.collect::<Vec<_>>();
+		assert_eq!(found, [
+			("local", CLAUDE_PLUGINS_PROVIDER, SkillLevel::Project),
+			("review", CLAUDE_PLUGINS_PROVIDER, SkillLevel::User),
+		]);
+		assert_eq!(active.get("review").unwrap().base_dir, enabled.join("skills/review"));
 	}
 
 	#[test]

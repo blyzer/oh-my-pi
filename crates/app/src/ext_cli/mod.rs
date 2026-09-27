@@ -2396,8 +2396,8 @@ impl StatePaths {
 			index_key:           data_dir.join("ext/index.key"),
 			marketplaces:        data_dir.join("marketplaces.json"),
 			marketplace_cache:   data_dir.join("plugins/cache/marketplaces"),
-			user_plugins:        data_dir.join("plugins"),
-			project_plugins:     workspace.join("plugins"),
+			user_plugins:        omp_ext::claude_plugin::user_plugins_dir(data_dir),
+			project_plugins:     omp_ext::claude_plugin::project_plugins_dir(&project),
 			store:               data_dir.join("ext/store"),
 			site_override:       None,
 			offline:             OfflineMode::Online,
@@ -2429,7 +2429,9 @@ impl StatePaths {
 	}
 
 	fn plugin_registry(&self, scope: Scope) -> PathBuf {
-		self.plugin_root(scope).join("installed_plugins.json")
+		self
+			.plugin_root(scope)
+			.join(omp_ext::claude_plugin::REGISTRY_FILE)
 	}
 
 	pub(crate) fn scoped(&self, scope: Scope) -> Self {
