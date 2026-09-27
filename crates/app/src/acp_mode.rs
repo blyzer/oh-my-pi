@@ -55,7 +55,8 @@ async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 		kernel.mailbox(),
 	)
 	.into_diagnostic()?
-	.with_facts_of(&session);
+	.with_facts_of(&session)
+	.with_rules(Arc::clone(kernel.inference().rule_scope()));
 	serve_acp_state(kernel, session, home, input, output, true, terminal_auth).await
 }
 

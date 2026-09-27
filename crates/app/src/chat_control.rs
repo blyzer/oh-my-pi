@@ -2458,6 +2458,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			live: Arc::clone(&self.home.live),
 			tools_enabled: self.home.tools_enabled,
 			up: self.home.up.clone(),
+			rules: self.home.rules.clone(),
 		};
 		let next = match home.open(&destination) {
 			Ok(next) => next,
@@ -3796,6 +3797,7 @@ mod tests {
 				live:          Arc::clone(&live),
 				tools_enabled: true,
 				up:            kernel.mailbox(),
+				rules:         None,
 			};
 			fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 			let mut session = home.create(None).expect("session");
@@ -4159,6 +4161,7 @@ mod tests {
 			live:          Arc::new(omp_driver::sessions::SessionRegistry::new()),
 			tools_enabled: true,
 			up:            kernel.mailbox(),
+			rules:         None,
 		};
 		fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 		let session = home.create(None).expect("session");
