@@ -33,6 +33,21 @@ pub fn directory(data_dir: &Path, project_root: &Path) -> io::Result<PathBuf> {
 		.join(hex::encode_n(digest.as_bytes()).as_str()))
 }
 
+/// Name of the project-state bucket that holds sessions whose recorded project
+/// directory no longer exists.
+///
+/// Project buckets are 64-digit hex digests ([`directory`]), so this name
+/// never collides with one.
+pub const NO_DIRECTORY: &str = "no-directory";
+
+/// Returns the state directory for sessions without an existing project
+/// directory: `<data>/projects/no-directory`, beside the digest-named project
+/// buckets that session listings and journal GC already walk.
+#[must_use]
+pub fn no_directory(data_dir: &Path) -> PathBuf {
+	data_dir.join("projects").join(NO_DIRECTORY)
+}
+
 /// Returns the short owner-local environment socket path for `state_dir`.
 ///
 /// The path is keyed by the running executable's filesystem generation: a

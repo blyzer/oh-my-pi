@@ -498,6 +498,10 @@ pub enum ForeignSessionSource {
 	/// OpenAI Codex rollout JSONL transcripts.
 	#[strum(to_string = "Codex", serialize = "codex")]
 	Codex,
+	/// omp v1 (TypeScript `omp`) session transcripts, converted on pick
+	/// (`/resume @v1`).
+	#[strum(to_string = "omp v1", serialize = "v1", serialize = "omp1")]
+	Omp1,
 }
 
 /// Lightweight foreign transcript metadata used by the import picker. The
