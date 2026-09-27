@@ -26,6 +26,22 @@
 //! session, the spawned class (`task`, `scout`, ...) for a subagent. A rule
 //! without `agents:` reaches every agent; `agents: [main]` keeps a rule out of
 //! every subagent, and `agents: [scout]` confines it to `scout` children.
+//!
+//! An entry prefixed with `!` excludes the classes its glob matches. The
+//! positive entries define the admitted set (every agent when there are none)
+//! and the negated entries subtract from it, so a negation always wins:
+//! `agents: [!reviewer]` reaches every agent except `reviewer`, and
+//! `agents: [review-*, !review-bot]` reaches every `review-*` class but
+//! `review-bot`. Every spelling works — quoted (`["!reviewer"]`), bare (YAML
+//! reads `!reviewer` as a tag; the parser takes it back as a negation), and
+//! the comma-separated string (`agents: "!reviewer, !scout"`).
+//!
+//! The scope holds for every surface: an excluded rule is neither injected
+//! nor listed in the prompt, and `rule://<name>` refuses it with
+//! [`RuleLookupError::Excluded`] rather than serving its body. The class a
+//! session runs as is journaled on the session itself
+//! ([`journal_agent`](crate::subagent::journal_agent)), so resuming a child
+//! session — from the main chat or with `--resume` — keeps its own scope.
 
 use std::{
 	collections::BTreeSet,
@@ -35,8 +51,10 @@ use std::{
 };
 
 use omp_core::{CowBytes, Str};
+use omp_dom::Dom;
 use omp_envd::ContentResolver;
 use omp_ext::claude_plugin::{ClaudePlugins, PluginScope};
+use omp_session::{Session, SessionError};
 use omp_tools::read::{
 	Fault,
 	resolver::{
@@ -45,9 +63,10 @@ use omp_tools::read::{
 	},
 	selector::ParsedSelector,
 };
+use parking_lot::RwLock;
 use serde::Deserialize;
 
-use crate::subagent::AgentName;
+use crate::subagent::{AgentName, session_agent};
 
 /// Where a discovered document sits in the precedence ladder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
@@ -212,13 +231,77 @@ pub struct Rule {
 	pub condition:    Vec<Str>,
 	/// Frontmatter `scope`: TTSR stream scope tokens.
 	pub scope:        Vec<Str>,
-	/// Frontmatter `agents`: lowercased agent-class globs; empty admits every
-	/// agent (see [`ActiveRules::for_agent`]).
+	/// Frontmatter `agents`: lowercased agent-class globs, a `!` prefix
+	/// negating one; empty admits every agent (see [`Rule::admits`]).
 	pub agents:       Vec<Str>,
 	/// Provider identity.
 	pub provider:     Str,
 	/// User or project level.
 	pub level:        Level,
+}
+
+impl Rule {
+	/// Whether this rule's `agents:` scope admits the agent class `agent`,
+	/// case-insensitively: no positive glob, or one matching, and no `!` glob
+	/// matching.
+	#[must_use]
+	pub fn admits(&self, agent: &AgentName<str>) -> bool {
+		self.admits_lowercase(&agent.to_ascii_lowercase())
+	}
+
+	/// [`Self::admits`] for an already lowercased class.
+	fn admits_lowercase(&self, agent: &str) -> bool {
+		let mut positive = false;
+		let mut included = false;
+		for pattern in self.agents.iter().map(Str::as_str) {
+			if let Some(negated) = pattern.strip_prefix('!') {
+				if super::skills::glob_matches(negated.trim_start(), agent) {
+					return false;
+				}
+			} else {
+				positive = true;
+				included = included || super::skills::glob_matches(pattern, agent);
+			}
+		}
+		included || !positive
+	}
+}
+
+/// Why `rule://<name>` served no rule body.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RuleLookupError {
+	/// No rule admitted for the agent is named `name`.
+	#[error("Unknown rule: {name}\nAvailable: {}", name_list(available))]
+	Unknown {
+		/// Requested rule name.
+		name:      Str,
+		/// Rules the agent may read, in discovery order.
+		available: Box<[Str]>,
+	},
+	/// The rule exists, but its `agents:` frontmatter excludes the agent.
+	#[error("Rule `{rule}` is excluded for agent `{agent}` by its `agents:` frontmatter")]
+	Excluded {
+		/// Requested rule name.
+		rule:  Str,
+		/// Agent class the rule excludes.
+		agent: AgentName,
+	},
+}
+
+/// `a, b, c`, or `none` for an empty list.
+fn name_list(names: &[Str]) -> String {
+	if names.is_empty() {
+		return "none".to_owned();
+	}
+	names.iter().map(Str::as_str).collect::<Vec<_>>().join(", ")
+}
+
+/// `rule://` answers with the model-facing read diagnostic; the typed lookup
+/// error renders exactly once, here.
+impl From<RuleLookupError> for Fault {
+	fn from(error: RuleLookupError) -> Self {
+		Self::Source { message: Str::new(error.to_string()) }
+	}
 }
 
 /// The rules one session admitted, in discovery order.
@@ -423,21 +506,36 @@ impl ActiveRules {
 		self.rules.iter().find(|rule| rule.name.as_str() == name)
 	}
 
-	/// Rules admitted for the agent class `agent`: a rule without `agents:`
-	/// applies everywhere; otherwise one of its globs must match the class,
-	/// case-insensitively.
+	/// Rules admitted for the agent class `agent` ([`Rule::admits`]).
 	pub fn for_agent<'a>(
 		&'a self,
 		agent: &'a AgentName<str>,
 	) -> impl Iterator<Item = &'a Rule> + 'a {
 		let agent = agent.to_ascii_lowercase();
-		self.rules.iter().filter(move |rule| {
-			rule.agents.is_empty()
-				|| rule
-					.agents
-					.iter()
-					.any(|pattern| super::skills::glob_matches(pattern, &agent))
-		})
+		self
+			.rules
+			.iter()
+			.filter(move |rule| rule.admits_lowercase(&agent))
+	}
+
+	/// The rule named `name` as the agent class `agent` may read it: an
+	/// admitted rule, [`RuleLookupError::Excluded`] when its `agents:` scope
+	/// leaves `agent` out, else [`RuleLookupError::Unknown`] listing only the
+	/// rules `agent` may read.
+	pub fn lookup(&self, name: &str, agent: &AgentName<str>) -> Result<&Rule, RuleLookupError> {
+		match self.get(name) {
+			Some(rule) if rule.admits(agent) => Ok(rule),
+			Some(rule) => {
+				Err(RuleLookupError::Excluded { rule: rule.name.clone(), agent: agent.to_owned() })
+			},
+			None => Err(RuleLookupError::Unknown {
+				name:      Str::new(name),
+				available: self
+					.for_agent(agent)
+					.map(|rule| rule.name.clone())
+					.collect(),
+			}),
+		}
 	}
 
 	/// Prompt rows for `agent`: `always_apply_rules` are `{name, content, path}`
@@ -466,12 +564,61 @@ impl ActiveRules {
 		}
 		facts
 	}
+}
 
-	/// The `rule://` resolver over this snapshot, installed through
-	/// [`omp_envd::RegistryBridges::url_resolvers`].
+/// One kernel's discovered rules and the agent class its live session runs
+/// as: the scope `rule://` and the prompt rule facts evaluate `agents:` with.
+///
+/// The class is not a second source of truth. It is rehydrated from the live
+/// session's journal ([`session_agent`]) on every session switch through
+/// [`omp_agent::SessionStateBridge::resync`], so a child session resumed from
+/// the main chat reads rules as its own class.
+#[derive(Debug)]
+pub struct RuleScope {
+	rules: Arc<ActiveRules>,
+	agent: RwLock<AgentName>,
+}
+
+impl RuleScope {
+	/// A scope over `rules` serving the agent class `agent`.
+	#[must_use]
+	pub const fn new(rules: Arc<ActiveRules>, agent: AgentName) -> Self {
+		Self { rules, agent: RwLock::new(agent) }
+	}
+
+	/// The discovered rules, unfiltered.
+	#[must_use]
+	pub const fn rules(&self) -> &Arc<ActiveRules> {
+		&self.rules
+	}
+
+	/// The agent class the live session runs as.
+	#[must_use]
+	pub fn agent(&self) -> AgentName {
+		self.agent.read().clone()
+	}
+
+	/// Serves `agent` from now on.
+	pub fn select(&self, agent: AgentName) {
+		*self.agent.write() = agent;
+	}
+
+	/// The `rule://` resolver over this scope, installed through
+	/// [`omp_envd::RegistryBridges::url_resolvers`]: it reads, lists, and
+	/// completes only the rules the live agent class admits.
 	#[must_use]
 	pub fn resolver(self: &Arc<Self>) -> Arc<dyn ContentResolver> {
-		Arc::new(RuleResolver { rules: Arc::clone(self), lines: LineOffsetCache::default() })
+		Arc::new(RuleResolver { scope: Arc::clone(self), lines: LineOffsetCache::default() })
+	}
+}
+
+impl omp_agent::SessionStateBridge for RuleScope {
+	fn flush(&self, _session: &mut Session) -> Result<(), SessionError> {
+		Ok(())
+	}
+
+	fn resync(&self, dom: &Dom) {
+		self.select(session_agent(dom));
 	}
 }
 
@@ -558,7 +705,94 @@ struct RuleHeader {
 	#[serde(default)]
 	scope:        OneOrMany,
 	#[serde(default)]
-	agents:       OneOrMany,
+	agents:       AgentScopes,
+}
+
+/// Frontmatter `agents`: one string (comma-separated), a list, or YAML's bare
+/// `!name` spelling of a negated entry, which YAML parses as a tag on an empty
+/// node rather than as text.
+#[derive(Default)]
+struct AgentScopes(Vec<String>);
+
+impl<'de> Deserialize<'de> for AgentScopes {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		deserializer.deserialize_any(AgentScopesVisitor)
+	}
+}
+
+struct AgentScopesVisitor;
+
+impl<'de> serde::de::Visitor<'de> for AgentScopesVisitor {
+	type Value = AgentScopes;
+
+	fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter.write_str("an agent glob, a comma-separated string of them, or a list")
+	}
+
+	fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+		Ok(AgentScopes::default())
+	}
+
+	fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+		Ok(AgentScopes::default())
+	}
+
+	fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+		Ok(AgentScopes(value.split(',').map(str::to_owned).collect()))
+	}
+
+	fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+		let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+		while let Some(AgentEntry(entry)) = seq.next_element()? {
+			entries.push(entry);
+		}
+		Ok(AgentScopes(entries))
+	}
+
+	fn visit_enum<A: serde::de::EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+		Ok(AgentScopes(vec![negated_tag(data)?]))
+	}
+}
+
+/// One `agents:` list entry: text, or a bare `!name` tag.
+struct AgentEntry(String);
+
+impl<'de> Deserialize<'de> for AgentEntry {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		deserializer.deserialize_any(AgentEntryVisitor)
+	}
+}
+
+struct AgentEntryVisitor;
+
+impl<'de> serde::de::Visitor<'de> for AgentEntryVisitor {
+	type Value = AgentEntry;
+
+	fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter.write_str("an agent glob")
+	}
+
+	fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+		Ok(AgentEntry(value.to_owned()))
+	}
+
+	fn visit_enum<A: serde::de::EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+		negated_tag(data).map(AgentEntry)
+	}
+}
+
+/// `!name` from a YAML tag: a named tag on an empty node (`[!reviewer]`), or
+/// the non-specific `!` tag on a plain scalar (`[! reviewer]`).
+fn negated_tag<'de, A: serde::de::EnumAccess<'de>>(data: A) -> Result<String, A::Error> {
+	use serde::de::VariantAccess as _;
+	let (tag, variant) = data.variant::<String>()?;
+	let tag = tag.strip_prefix('!').unwrap_or(&tag);
+	if tag.is_empty() {
+		let name = variant.newtype_variant::<String>()?;
+		return Ok(format!("!{}", name.trim()));
+	}
+	variant.unit_variant()?;
+	Ok(format!("!{tag}"))
 }
 
 /// A frontmatter field accepts one string, a comma-separated string, or a list.
@@ -664,8 +898,10 @@ fn load_rule(
 		scope: header.scope.into_vec(true),
 		agents: header
 			.agents
-			.into_vec(true)
-			.into_iter()
+			.0
+			.iter()
+			.map(|agent| agent.trim())
+			.filter(|agent| !agent.is_empty())
 			.map(|agent| Str::new(agent.to_ascii_lowercase()))
 			.collect(),
 		provider: Str::new_static(provider),
@@ -769,35 +1005,22 @@ fn whole_file_rule(
 	Some(rule)
 }
 
-/// `rule://<name>` reads a rule body; bare `rule://` lists every rule.
+/// `rule://<name>` reads a rule body; bare `rule://` lists every rule the
+/// live agent class admits.
 struct RuleResolver {
-	rules: Arc<ActiveRules>,
+	scope: Arc<RuleScope>,
 	lines: LineOffsetCache,
 }
 
 impl RuleResolver {
-	fn rule(&self, name: &str) -> Result<&Rule, Fault> {
-		self.rules.get(name).ok_or_else(|| {
-			let available = self
-				.rules
-				.rules
-				.iter()
-				.map(|rule| rule.name.as_str())
-				.collect::<Vec<_>>();
-			let available = if available.is_empty() {
-				"none".to_owned()
-			} else {
-				available.join(", ")
-			};
-			Fault::Source {
-				message: Str::new(format!("Unknown rule: {name}\nAvailable: {available}")),
-			}
-		})
+	fn rule(&self, name: &str) -> Result<&Rule, RuleLookupError> {
+		self.scope.rules.lookup(name, &self.scope.agent())
 	}
 
 	fn index(&self) -> Vec<u8> {
+		let agent = self.scope.agent();
 		let mut text = String::from("# Rules\n\n");
-		for rule in &self.rules.rules {
+		for rule in self.scope.rules.for_agent(&agent) {
 			text.push_str("- rule://");
 			text.push_str(&rule.name);
 			if let Some(description) = &rule.description {
@@ -858,9 +1081,10 @@ impl ContentResolver for RuleResolver {
 				message: Str::new(format!("rule://{resource} is a document and cannot be listed.")),
 			});
 		}
+		let agent = self.scope.agent();
 		let mut entries = Vec::new();
 		let mut truncated = false;
-		for rule in &self.rules.rules {
+		for rule in self.scope.rules.for_agent(&agent) {
 			if entries.len() == max_entries {
 				truncated = true;
 				break;
@@ -888,10 +1112,11 @@ impl ContentResolver for RuleResolver {
 		query: &str,
 		max_results: usize,
 	) -> Result<Vec<ResourceCompletion>, Fault> {
+		let agent = self.scope.agent();
 		let mut matches = self
+			.scope
 			.rules
-			.rules
-			.iter()
+			.for_agent(&agent)
 			.filter_map(|rule| {
 				fuzzy_score(query, &rule.name).map(|score| ResourceCompletion {
 					value: Str::new(format!("rule://{}", rule.name)),
@@ -1173,7 +1398,7 @@ mod tests {
 			&home.join(".o2"),
 			&ClaudePlugins::default(),
 		));
-		let resolver = rules.resolver();
+		let resolver = Arc::new(RuleScope::new(rules, MAIN_AGENT.to_owned())).resolver();
 		assert_eq!(resolver.entry().scheme, Scheme::Rule);
 		let body = resolver.read("style", &ParsedSelector::None).await.unwrap();
 		assert_eq!(std::str::from_utf8(&body).unwrap(), "line one\nline two\n");
@@ -1192,5 +1417,208 @@ mod tests {
 			.await
 			.unwrap_err();
 		assert!(matches!(missing, Fault::Source { .. }));
+	}
+
+	/// A rule scoped by `agents` (raw frontmatter entries), always applied.
+	fn scoped_rule(name: &'static str, agents: &[&'static str]) -> Rule {
+		Rule {
+			name:         Str::new_static(name),
+			path:         PathBuf::from(format!("/rules/{name}.md")),
+			content:      Str::new_static("body\n"),
+			description:  Some(Str::new_static("scoped")),
+			globs:        Vec::new(),
+			always_apply: true,
+			condition:    Vec::new(),
+			scope:        Vec::new(),
+			agents:       agents.iter().copied().map(Str::new_static).collect(),
+			provider:     Str::new_static("native"),
+			level:        Level::Project,
+		}
+	}
+
+	fn admitted(rules: &ActiveRules, agent: &str) -> Vec<String> {
+		rules
+			.for_agent(AgentName::from_ref(agent))
+			.map(|rule| rule.name.to_string())
+			.collect()
+	}
+
+	#[test]
+	fn negated_agents_subtract_from_the_positive_set() {
+		let rules = ActiveRules {
+			rules:    vec![
+				scoped_rule("everyone", &[]),
+				scoped_rule("not-reviewer", &["!reviewer"]),
+				scoped_rule("not-scout-or-task", &["!scout", "!task"]),
+				scoped_rule("reviewers-but-bot", &["review*", "!review-bot"]),
+				scoped_rule("negation-wins", &["main", "!main"]),
+				scoped_rule("spaced", &["! scout"]),
+			],
+			warnings: Vec::new(),
+		};
+		assert_eq!(admitted(&rules, "main"), [
+			"everyone",
+			"not-reviewer",
+			"not-scout-or-task",
+			"spaced"
+		]);
+		assert_eq!(admitted(&rules, "reviewer"), [
+			"everyone",
+			"not-scout-or-task",
+			"reviewers-but-bot",
+			"spaced"
+		]);
+		assert_eq!(admitted(&rules, "Review-Bot"), [
+			"everyone",
+			"not-reviewer",
+			"not-scout-or-task",
+			"spaced"
+		]);
+		assert_eq!(admitted(&rules, "scout"), ["everyone", "not-reviewer"]);
+		assert_eq!(admitted(&rules, "task"), ["everyone", "not-reviewer", "spaced"]);
+	}
+
+	#[test]
+	fn negated_agents_parse_from_every_frontmatter_spelling() {
+		let (_temp, home, repo, project) = layout();
+		for (name, agents) in [
+			("quoted", "[\"!Reviewer\", \"review-*\"]"),
+			("comma", "\"!scout, !task\""),
+			("bare-flow", "[!reviewer, main, ! scout]"),
+			("bare-one", "!reviewer"),
+			("bare-block", "\n  - !reviewer\n  - \"!scout\""),
+		] {
+			write(
+				&repo.join(format!(".omp/rules/{name}.md")),
+				&format!("---\nalwaysApply: true\nagents: {agents}\n---\nbody\n"),
+			);
+		}
+		let rules =
+			ActiveRules::discover(&project, &home, &home.join(".o2"), &ClaudePlugins::default());
+		assert!(rules.warnings.is_empty(), "{:?}", rules.warnings);
+		let agents = |name: &str| {
+			rules
+				.get(name)
+				.unwrap()
+				.agents
+				.iter()
+				.map(Str::as_str)
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(agents("quoted"), ["!reviewer", "review-*"]);
+		assert_eq!(agents("comma"), ["!scout", "!task"]);
+		assert_eq!(agents("bare-flow"), ["!reviewer", "main", "!scout"]);
+		assert_eq!(agents("bare-one"), ["!reviewer"]);
+		assert_eq!(agents("bare-block"), ["!reviewer", "!scout"]);
+
+		let mine = |agent: &str| admitted(&rules, agent);
+		assert_eq!(mine("review-bot"), ["bare-block", "bare-one", "comma", "quoted"]);
+		assert_eq!(mine("reviewer"), ["comma"]);
+		assert_eq!(mine("scout"), ["bare-one"]);
+		assert_eq!(mine("main"), ["bare-block", "bare-flow", "bare-one", "comma"]);
+	}
+
+	#[tokio::test]
+	async fn rule_url_refuses_rules_excluded_for_the_live_agent() {
+		let rules = Arc::new(ActiveRules {
+			rules:    vec![
+				scoped_rule("main-only", &["main"]),
+				scoped_rule("not-scout", &["!scout"]),
+				scoped_rule("scout-only", &["scout"]),
+			],
+			warnings: Vec::new(),
+		});
+		let scope = Arc::new(RuleScope::new(Arc::clone(&rules), AgentName::new("scout")));
+		let resolver = scope.resolver();
+
+		assert_eq!(
+			rules.lookup("main-only", AgentName::from_ref("scout")),
+			Err(RuleLookupError::Excluded {
+				rule:  Str::new_static("main-only"),
+				agent: AgentName::new("scout"),
+			})
+		);
+		assert_eq!(
+			rules.lookup("nope", AgentName::from_ref("scout")),
+			Err(RuleLookupError::Unknown {
+				name:      Str::new_static("nope"),
+				available: Box::new([Str::new_static("scout-only")]),
+			}),
+			"the unknown-rule listing names only rules the agent may read"
+		);
+		assert_eq!(
+			rules
+				.lookup("scout-only", AgentName::from_ref("scout"))
+				.unwrap()
+				.name,
+			"scout-only"
+		);
+
+		for excluded in ["main-only", "not-scout"] {
+			let fault = resolver
+				.read(excluded, &ParsedSelector::None)
+				.await
+				.unwrap_err();
+			assert_eq!(
+				fault,
+				Fault::from(RuleLookupError::Excluded {
+					rule:  Str::new(excluded),
+					agent: AgentName::new("scout"),
+				})
+			);
+			assert!(fault.message().contains("excluded for agent `scout`"), "{fault:?}");
+			assert!(resolver.path(excluded).await.is_err(), "no path leaks for {excluded}");
+		}
+		let body = resolver
+			.read("scout-only", &ParsedSelector::None)
+			.await
+			.unwrap();
+		assert_eq!(&body[..], b"body\n");
+
+		let index = resolver.read("", &ParsedSelector::None).await.unwrap();
+		let index = std::str::from_utf8(&index).unwrap();
+		assert!(index.contains("rule://scout-only"), "{index}");
+		assert!(!index.contains("main-only") && !index.contains("not-scout"), "{index}");
+		let listing = resolver.list("", 10, usize::MAX).await.unwrap();
+		assert_eq!(
+			listing
+				.entries
+				.iter()
+				.map(|entry| entry.uri.as_str())
+				.collect::<Vec<_>>(),
+			["rule://scout-only"]
+		);
+		let completions = resolver.complete("", 10).await.unwrap();
+		assert_eq!(
+			completions
+				.iter()
+				.map(|row| row.value.as_str())
+				.collect::<Vec<_>>(),
+			["rule://scout-only"],
+			"autocomplete never offers an excluded rule"
+		);
+
+		// The live session switches to `main`: the scope follows it.
+		scope.select(MAIN_AGENT.to_owned());
+		assert!(
+			resolver
+				.read("main-only", &ParsedSelector::None)
+				.await
+				.is_ok()
+		);
+		assert!(
+			resolver
+				.read("scout-only", &ParsedSelector::None)
+				.await
+				.is_err()
+		);
+		let completions = resolver.complete("", 10).await.unwrap();
+		assert_eq!(
+			completions
+				.iter()
+				.map(|row| row.value.as_str())
+				.collect::<Vec<_>>(),
+			["rule://main-only", "rule://not-scout"]
+		);
 	}
 }

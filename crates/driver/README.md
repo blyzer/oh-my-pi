@@ -31,6 +31,17 @@ presentation adapter.
   `prompts` (Markdown prompt templates that become `/name` slash commands with
   `$1` / `$ARGUMENTS` substitution). `--no-context-files`, `--no-rules`,
   `--no-prompt-templates`, and `--prompt-template <path>` are their seams.
+- A rule's `agents:` frontmatter scopes it to agent classes (`main` for the
+  top-level session, the spawned class such as `task` or `scout` for a
+  subagent): case-insensitive globs, a list or a comma-separated string. A
+  `!` prefix negates an entry — positives define the admitted set (every
+  agent when there are none) and negations subtract from it, so
+  `agents: [!reviewer]` reaches every agent but `reviewer` and
+  `agents: [review-*, !review-bot]` every `review-*` class but `review-bot`.
+  An excluded rule is kept out of the prompt, out of `rule://` listings and
+  completion, and `rule://<name>` refuses it. A child session journals the
+  class it runs as, so resuming it (from the main chat's `/resume` or with
+  `--resume`) keeps the child's rules.
 
 `omp-driver` may construct `omp_envd::ProjectEnvironment` and supply the
 higher-layer bridges it needs, but the filesystem/process/document/tool host

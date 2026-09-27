@@ -83,6 +83,7 @@ fn session_home(temp: &tempfile::TempDir, kernel: &Kernel<ScriptedInference>) ->
 		live:          Arc::new(SessionRegistry::new()),
 		tools_enabled: true,
 		up:            kernel.mailbox(),
+		rules:         None,
 	}
 }
 
