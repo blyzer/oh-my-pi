@@ -8,10 +8,16 @@ use std::{
 };
 
 use omp_core::Str;
+use omp_ext::claude_plugin::{
+	ClaudePlugin, ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars,
+	resolve_plugin_command,
+};
 use serde::Deserialize;
 use serde_json::Map;
 
-use crate::docserver::dap_adapter::{DapAdapterError, DapAdapterSpec, DapTransport};
+use crate::docserver::dap_adapter::{
+	DapAdapterError, DapAdapterSpec, DapTransport, builtin_adapters,
+};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const CONFIG_NAMES: [&str; 6] =
@@ -30,6 +36,9 @@ pub enum DapConfigSourceKind {
 	Dotfile,
 	/// Validated native extension contribution.
 	Manifest,
+	/// Installed, enabled Claude-format marketplace plugin declaration (root
+	/// `.dap.json` family), validated on its own before it joins the merge.
+	Plugin,
 }
 
 /// Exact source retained on resolved fields.
@@ -54,11 +63,15 @@ pub struct DapProvenanced<T> {
 #[derive(Clone, Debug)]
 pub struct DapConfigSource {
 	/// Input identity.
-	pub provenance: DapConfigProvenance,
+	pub provenance:  DapConfigProvenance,
 	/// Input bytes.
-	pub bytes:      Arc<[u8]>,
+	pub bytes:       Arc<[u8]>,
 	/// YAML rather than JSON.
-	pub yaml:       bool,
+	pub yaml:        bool,
+	/// Installed plugin root for a [`DapConfigSourceKind::Plugin`] source:
+	/// `${CLAUDE_PLUGIN_ROOT}` in `command` and `args` expands to it and a
+	/// path-like relative `command` resolves against it.
+	pub plugin_root: Option<Arc<Path>>,
 }
 
 impl DapConfigSource {
@@ -72,13 +85,36 @@ impl DapConfigSource {
 		let bytes =
 			fs::read(path).map_err(|source| DapConfigError::Read { path: path.to_owned(), source })?;
 		Ok(Self {
-			provenance: DapConfigProvenance { kind, source: Str::new(path.to_string_lossy()) },
-			yaml:       matches!(
+			provenance:  DapConfigProvenance { kind, source: Str::new(path.to_string_lossy()) },
+			yaml:        matches!(
 				path.extension().and_then(|value| value.to_str()),
 				Some("yaml" | "yml")
 			),
-			bytes:      bytes.into(),
+			bytes:       bytes.into(),
+			plugin_root: None,
 		})
+	}
+
+	/// Reads one installed plugin's declaration: a root declaration file
+	/// (YAML by extension) or an inline adapter map.
+	pub fn plugin(
+		plugin: &ClaudePlugin,
+		declaration: &ConfigDeclaration,
+	) -> Result<Self, DapConfigError> {
+		let mut source = match declaration {
+			ConfigDeclaration::File(path) => Self::read(DapConfigSourceKind::Plugin, path)?,
+			ConfigDeclaration::Inline { manifest, servers } => Self {
+				provenance:  DapConfigProvenance {
+					kind:   DapConfigSourceKind::Plugin,
+					source: Str::new(manifest.to_string_lossy()),
+				},
+				bytes:       format!(r#"{{"adapters":{servers}}}"#).into_bytes().into(),
+				yaml:        false,
+				plugin_root: None,
+			},
+		};
+		source.plugin_root = Some(Arc::from(plugin.root.as_path()));
+		Ok(source)
 	}
 
 	/// Creates a contribution from a validated native extension manifest.
@@ -90,6 +126,7 @@ impl DapConfigSource {
 			},
 			bytes: bytes.into(),
 			yaml,
+			plugin_root: None,
 		}
 	}
 
@@ -132,6 +169,19 @@ struct DapAdapterPatch {
 	accepts_directory_program: Option<bool>,
 	connect_mode: Option<Str>,
 	preference: Option<u16>,
+}
+
+impl DapAdapterPatch {
+	/// Expands `${CLAUDE_PLUGIN_ROOT}` (and its aliases) in `command` and
+	/// `args`, then roots a path-like relative `command` at the plugin.
+	fn expand_plugin_root(&mut self, root: &Path) {
+		if let Some(command) = self.command.take() {
+			self.command = Some(resolve_plugin_command(expand_plugin_vars(command, root, None), root));
+		}
+		for arg in self.args.iter_mut().flatten() {
+			*arg = expand_plugin_vars(arg.clone(), root, None);
+		}
+	}
 }
 
 #[derive(Default)]
@@ -211,23 +261,48 @@ impl ResolvedDapAdapter {
 }
 
 /// Discovers only native user/project DAP files, low to high precedence.
+/// Foreign roots are never considered.
 pub fn discover_native_dap_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
 ) -> Result<Vec<DapConfigSource>, DapConfigError> {
-	discover_native_dap_sources_with_manifests(user_root, project_root, Vec::new())
+	discover_dap_sources(user_root, project_root, Vec::new(), &[]).map(|found| found.sources)
 }
 
-/// Enumerates extension-manifest, user, and project sources in increasing
-/// precedence; built-ins are merged before this returned list.
-pub fn discover_native_dap_sources_with_manifests(
+/// Ordered sources plus the plugin declarations that did not load.
+#[derive(Debug)]
+pub struct DiscoveredDapSources {
+	/// Sources from low to high precedence; built-ins merge beneath them.
+	pub sources:     Vec<DapConfigSource>,
+	/// One diagnostic per rejected plugin declaration.
+	pub diagnostics: Vec<PluginDiagnostic>,
+}
+
+/// Enumerates extension-manifest, installed-plugin, user, and project
+/// sources in increasing precedence; built-ins are merged before this
+/// returned list.
+///
+/// The only non-native roots ever read are the `plugins` handed in: the
+/// installed, enabled marketplace plugins the composition resolved, each
+/// contributing only the declarations its
+/// [`ClaudeComponents::dap`](omp_ext::claude_plugin::ClaudeComponents::dap)
+/// located inside its own root. Foreign configuration roots are never
+/// probed. Plugin declarations sit below every user and project file (OMP
+/// v1's order); a project-scope plugin overrides a user-scope one. Each
+/// plugin declaration is validated on its own against the layers beneath it,
+/// so an invalid one becomes a [`PluginDiagnostic::InvalidComponent`] instead
+/// of discarding every override.
+pub fn discover_dap_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
 	mut manifests: Vec<DapConfigSource>,
-) -> Result<Vec<DapConfigSource>, DapConfigError> {
+	plugins: &[ClaudePlugin],
+) -> Result<DiscoveredDapSources, DapConfigError> {
 	let mut sources = Vec::new();
 	manifests.sort_by(|left, right| left.provenance.source.cmp(&right.provenance.source));
 	sources.extend(manifests);
+	let mut diagnostics = Vec::new();
+	append_plugin_sources(&mut sources, plugins, &mut diagnostics);
 	if let Some(user_root) = user_root {
 		append_existing(&mut sources, user_root, DapConfigSourceKind::User)?;
 		append_existing(&mut sources, &user_root.join("agent"), DapConfigSourceKind::User)?;
@@ -239,7 +314,44 @@ pub fn discover_native_dap_sources_with_manifests(
 			sources.push(DapConfigSource::read(DapConfigSourceKind::Dotfile, &path)?);
 		}
 	}
-	Ok(sources)
+	Ok(DiscoveredDapSources { sources, diagnostics })
+}
+
+/// Appends every plugin declaration that merges and converts cleanly over
+/// the built-ins and `sources`, user-scope plugins first so project-scope
+/// ones win.
+fn append_plugin_sources(
+	sources: &mut Vec<DapConfigSource>,
+	plugins: &[ClaudePlugin],
+	diagnostics: &mut Vec<PluginDiagnostic>,
+) {
+	for plugin in plugins.iter().rev() {
+		let Some(components) = plugin.claude_components() else {
+			continue;
+		};
+		for declaration in &components.dap {
+			let admitted = DapConfigSource::plugin(plugin, declaration).and_then(|source| {
+				sources.push(source);
+				load_dap_config(builtin_adapters(), sources)
+					.and_then(|adapters| {
+						adapters
+							.values()
+							.try_for_each(|adapter| adapter.to_spec().map(drop))
+					})
+					.inspect_err(|_| {
+						sources.pop();
+					})
+			});
+			if let Err(error) = admitted {
+				diagnostics.push(PluginDiagnostic::InvalidComponent {
+					plugin:    plugin.id.clone(),
+					component: PluginComponent::DapAdapters,
+					path:      declaration.path().to_path_buf(),
+					source:    Box::new(error),
+				});
+			}
+		}
+	}
 }
 
 fn append_existing(
@@ -313,9 +425,13 @@ pub fn load_dap_config(
 			None => object,
 		};
 		for (name, value) in adapters {
-			let patch: DapAdapterPatch = serde_json::from_value(value).map_err(|source_error| {
-				DapConfigError::InvalidAdapter { adapter: Str::new(&name), source: source_error }
-			})?;
+			let mut patch: DapAdapterPatch =
+				serde_json::from_value(value).map_err(|source_error| {
+					DapConfigError::InvalidAdapter { adapter: Str::new(&name), source: source_error }
+				})?;
+			if let Some(root) = &source.plugin_root {
+				patch.expand_plugin_root(root);
+			}
 			merge_adapter(merged.entry(Str::new(name)).or_default(), patch, &source.provenance);
 		}
 	}
@@ -495,19 +611,19 @@ mod tests {
 	use std::iter::empty;
 
 	use super::*;
-	use crate::docserver::dap_adapter::builtin_adapters;
 
 	#[test]
 	fn yaml_field_merge_preserves_object_members_and_provenance() {
 		let source = DapConfigSource {
-			provenance: DapConfigProvenance {
+			provenance:  DapConfigProvenance {
 				kind:   DapConfigSourceKind::Project,
 				source: Str::new_static("fixture"),
 			},
-			bytes:      Arc::from(
+			bytes:       Arc::from(
 				&b"adapters:\n  debugpy:\n    launchDefaults:\n      stopOnEntry: false\n"[..],
 			),
-			yaml:       true,
+			yaml:        true,
+			plugin_root: None,
 		};
 		let adapters = load_dap_config(builtin_adapters(), &[source]).unwrap();
 		let debugpy = &adapters["debugpy"];
@@ -519,11 +635,11 @@ mod tests {
 	#[test]
 	fn preattached_option_is_preserved_in_adapter_attach_defaults() {
 		let source = DapConfigSource {
-			provenance: DapConfigProvenance {
+			provenance:  DapConfigProvenance {
 				kind:   DapConfigSourceKind::Project,
 				source: Str::new_static("fixture"),
 			},
-			bytes:      Arc::from(
+			bytes:       Arc::from(
 				&br#"{
 					"adapters": {
 						"pico-openocd": {
@@ -536,13 +652,73 @@ mod tests {
 					}
 				}"#[..],
 			),
-			yaml:       false,
+			yaml:        false,
+			plugin_root: None,
 		};
 		let adapters = load_dap_config(empty::<DapAdapterSpec>(), &[source]).unwrap();
 		let adapter = adapters["pico-openocd"].to_spec().unwrap();
 
 		assert!(adapter.skip_attach_request());
 		assert_eq!(adapter.merged_arguments(true, &Map::new())["skipAttachRequest"], true);
+	}
+
+	#[test]
+	fn enabled_plugin_adapters_load_below_user_and_disabled_or_invalid_ones_do_not() {
+		use crate::docserver::lsp_config::tests::{installed_plugins, write};
+
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		let user = temp.path().join("user");
+		let on = temp.path().join("on");
+		let off = temp.path().join("off");
+		let broken = temp.path().join("broken");
+		write(
+			&on.join(".dap.json"),
+			r#"{"adapters":{
+				"acme-dbg":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/dbg","args":["--data=${CLAUDE_PLUGIN_ROOT}/d"],"fileTypes":[".acme"]},
+				"relative-dbg":{"command":"./bin/rel"},
+				"shadowed":{"command":"plugin-shadowed","args":["--plugin"]}
+			}}"#,
+		);
+		write(&off.join(".dap.json"), r#"{"ghost-dbg":{"command":"ghost"}}"#);
+		write(&broken.join("dap.yaml"), "wrong:\n  command: x\n  connectMode: carrier-pigeon\n");
+		write(&user.join("dap.json"), r#"{"shadowed":{"command":"user-shadowed"}}"#);
+		let plugins = installed_plugins(&temp.path().join("data"), &[
+			("on@m", &on, true),
+			("off@m", &off, false),
+			("broken@m", &broken, true),
+		]);
+
+		let found =
+			discover_dap_sources(Some(&user), &project, Vec::new(), &plugins.plugins).unwrap();
+		let adapters = load_dap_config(builtin_adapters(), &found.sources).unwrap();
+
+		let root = fs::canonicalize(&on).unwrap();
+		let root = root.to_string_lossy();
+		let acme = &adapters["acme-dbg"];
+		assert_eq!(acme.command.value, format!("{root}/bin/dbg").as_str());
+		assert_eq!(acme.args.value, [format!("--data={root}/d").as_str()]);
+		assert_eq!(acme.command.provenance.kind, DapConfigSourceKind::Plugin);
+		assert_eq!(adapters["relative-dbg"].command.value, format!("{root}/bin/rel").as_str());
+		let shadowed = &adapters["shadowed"];
+		assert_eq!(shadowed.command.value, "user-shadowed");
+		assert_eq!(shadowed.command.provenance.kind, DapConfigSourceKind::User);
+		assert_eq!(shadowed.args.provenance.kind, DapConfigSourceKind::Plugin);
+		assert!(!adapters.contains_key("ghost-dbg"), "a disabled plugin contributed");
+		assert!(!adapters.contains_key("wrong"), "an invalid declaration loaded");
+		assert!(
+			matches!(found.diagnostics.as_slice(), [PluginDiagnostic::InvalidComponent {
+				plugin,
+				component: PluginComponent::DapAdapters,
+				source,
+				..
+			}] if plugin == "broken@m" && matches!(
+				source.downcast_ref::<DapConfigError>(),
+				Some(DapConfigError::InvalidConnectMode { .. })
+			)),
+			"{:?}",
+			found.diagnostics
+		);
 	}
 
 	#[test]

@@ -2687,7 +2687,10 @@ impl EnvServer {
 			enabled: lsp_settings.enabled,
 			lazy:    lsp_settings.lazy,
 		};
-		let document_user_config = Some(document_user_config_root()?);
+		let document_config = DocumentConfigInputs {
+			user_config_root: Some(document_user_config_root()?),
+			claude_plugins:   Arc::clone(&bridges.content.claude_plugins),
+		};
 		let server_build = Str::from(omp_env::build_id::current());
 		let (documents, mut document_authority) = connect_or_start_docserver(
 			&root,
@@ -2695,7 +2698,7 @@ impl EnvServer {
 			doc_connections.clone(),
 			require_document_ownership,
 			document_lsp.clone(),
-			document_user_config.clone(),
+			document_config.clone(),
 			server_build.clone(),
 		)
 		.await?;
@@ -2711,7 +2714,7 @@ impl EnvServer {
 				let socket = rehost_socket.clone();
 				let connections = rehost_connections.clone();
 				let lsp = document_lsp.clone();
-				let user_config_root = document_user_config.clone();
+				let config = document_config.clone();
 				let state_dir = rehost_state_dir.clone();
 				let server_build = server_build.clone();
 				Box::pin(async move {
@@ -2723,7 +2726,7 @@ impl EnvServer {
 						&socket,
 						connections,
 						lsp,
-						user_config_root,
+						config,
 						server_build,
 					)
 					.await
@@ -12058,6 +12061,17 @@ pub async fn run(_args: EnvdConfig, _bridges: RegistryBridges) -> Result<(), Env
 	)
 }
 
+/// Configuration inputs a started document authority discovers its LSP and
+/// DAP rosters from.
+#[derive(Clone, Default)]
+struct DocumentConfigInputs {
+	/// User configuration root probed for `lsp.json` and `dap.json`.
+	user_config_root: Option<PathBuf>,
+	/// Installed, enabled Claude-format marketplace plugins whose LSP and DAP
+	/// declarations join discovery.
+	claude_plugins:   Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
+}
+
 /// The user configuration root the document authority probes for `lsp.json`
 /// and `dap.json` overrides (`<root>` and `<root>/agent`).
 ///
@@ -12080,7 +12094,7 @@ async fn rehost_document_authority(
 	socket: &Path,
 	connections: Option<watch::Sender<usize>>,
 	lsp: crate::docserver::NativeLspOptions,
-	user_config_root: Option<PathBuf>,
+	config: DocumentConfigInputs,
 	server_build: Str,
 ) -> Result<Option<DocumentAuthority>, EnvdError> {
 	if crate::launcher_build_is_stale(state_dir, server_build.as_str()) {
@@ -12096,7 +12110,7 @@ async fn rehost_document_authority(
 		connections,
 		false,
 		lsp,
-		user_config_root,
+		config,
 		server_build.clone(),
 	)
 	.await?;
@@ -12114,7 +12128,7 @@ async fn connect_or_start_docserver(
 	connections: Option<watch::Sender<usize>>,
 	require_ownership: bool,
 	lsp: crate::docserver::NativeLspOptions,
-	user_config_root: Option<PathBuf>,
+	config: DocumentConfigInputs,
 	server_build: Str,
 ) -> Result<(DocumentHost, Option<DocumentAuthority>), EnvdError> {
 	const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
@@ -12162,7 +12176,7 @@ async fn connect_or_start_docserver(
 		let task_root = root.to_path_buf();
 		let task_socket = socket.to_path_buf();
 		let task_lsp = lsp.clone();
-		let task_user_config_root = user_config_root.clone();
+		let task_config = config.clone();
 		let task_server_build = server_build.clone();
 		let task_connections = connections.clone();
 		let task = tokio::spawn(async move {
@@ -12172,7 +12186,8 @@ async fn connect_or_start_docserver(
 				crate::docserver::daemon::ServeOptions {
 					lsp_config_paths: Vec::new(),
 					lsp:              task_lsp,
-					user_config_root: task_user_config_root,
+					user_config_root: task_config.user_config_root,
+					claude_plugins:   task_config.claude_plugins,
 					shutdown:         Some(task_shutdown),
 					server_build:     task_server_build,
 					connections:      task_connections,
@@ -12249,7 +12264,7 @@ async fn connect_or_start_docserver(
 	connections: Option<watch::Sender<usize>>,
 	require_ownership: bool,
 	lsp: crate::docserver::NativeLspOptions,
-	user_config_root: Option<PathBuf>,
+	config: DocumentConfigInputs,
 	server_build: Str,
 ) -> Result<(DocumentHost, Option<DocumentAuthority>), EnvdError> {
 	if let Ok(stream) = crate::docserver::windows::connect_owner_pipe(socket) {
@@ -12273,7 +12288,8 @@ async fn connect_or_start_docserver(
 	if lsp.enabled {
 		match crate::docserver::NativeLspSupervisor::discover(
 			&environment,
-			user_config_root.as_deref(),
+			config.user_config_root.as_deref(),
+			Arc::clone(&config.claude_plugins),
 		) {
 			Ok(supervisor) => {
 				environment.install_lsp_supervisor(supervisor.clone());
@@ -13956,7 +13972,7 @@ mod tests {
 			None,
 			true,
 			crate::docserver::NativeLspOptions { enabled: true, lazy: true },
-			None,
+			DocumentConfigInputs::default(),
 			sf!("test-build"),
 		)
 		.await
@@ -13975,6 +13991,79 @@ mod tests {
 			.expect("discovered declaration in roster");
 		assert_eq!(fake.stage, document_pb::LspServerStage::Available as i32);
 		assert_eq!(fake.file_types, vec![".foo".to_owned()]);
+		drop(documents);
+		drop(authority);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn spawned_document_authority_reports_installed_plugin_lsp_servers() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		use crate::docserver::lsp_config::tests::{installed_plugins, write};
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let scratch = scratch.path().canonicalize().expect("canonical scratch");
+		let project = scratch.join("project");
+		std::fs::create_dir_all(&project).expect("project");
+		let mut installs = Vec::new();
+		for (id, name) in [("enabled@m", "plugin-fake"), ("disabled@m", "ghost")] {
+			let plugin = scratch.join(name);
+			write(&plugin.join("bin/fake-lsp.sh"), "#!/bin/sh\nexit 0\n");
+			std::fs::set_permissions(
+				plugin.join("bin/fake-lsp.sh"),
+				std::fs::Permissions::from_mode(0o700),
+			)
+			.expect("chmod fake server");
+			write(
+				&plugin.join(".lsp.json"),
+				&serde_json::json!({
+					name: {
+						"command": "${CLAUDE_PLUGIN_ROOT}/bin/fake-lsp.sh",
+						"extensionToLanguage": {".foo": "foo"},
+					}
+				})
+				.to_string(),
+			);
+			installs.push((id, plugin, id.starts_with("enabled")));
+		}
+		let installs = installs
+			.iter()
+			.map(|(id, plugin, enabled)| (*id, plugin.as_path(), *enabled))
+			.collect::<Vec<_>>();
+		let plugins = installed_plugins(&scratch.join("data"), &installs);
+		let state = tempfile::tempdir().expect("document socket directory");
+		let socket = state.path().join("document.sock");
+		let (documents, authority) = connect_or_start_docserver(
+			&project,
+			&socket,
+			None,
+			true,
+			crate::docserver::NativeLspOptions { enabled: true, lazy: true },
+			DocumentConfigInputs { user_config_root: None, claude_plugins: plugins.plugins.into() },
+			sf!("test-build"),
+		)
+		.await
+		.expect("spawn document authority");
+		let response = documents
+			.lsp_status(
+				document_pb::LspStatusRequest { reload: false, start: false },
+				&CancellationToken::new(),
+			)
+			.await
+			.expect("lsp status");
+		let fake = response
+			.servers
+			.iter()
+			.find(|server| server.name == "plugin-fake")
+			.expect("installed plugin declaration in roster");
+		assert_eq!(fake.stage, document_pb::LspServerStage::Available as i32);
+		assert_eq!(fake.source, "plugin");
+		assert_eq!(fake.file_types, vec![".foo".to_owned()]);
+		assert!(
+			response.servers.iter().all(|server| server.name != "ghost"),
+			"a disabled plugin contributed a server"
+		);
 		drop(documents);
 		drop(authority);
 	}
@@ -14004,6 +14093,7 @@ mod tests {
 						lazy:    true,
 					},
 					user_config_root: None,
+					claude_plugins:   Arc::default(),
 					shutdown:         Some(serve_shutdown),
 					server_build:     old_config.server_build().clone(),
 					connections:      None,
@@ -14038,7 +14128,7 @@ mod tests {
 			None,
 			false,
 			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
-			None,
+			DocumentConfigInputs::default(),
 			sf!("new-build"),
 		)
 		.await
@@ -14075,7 +14165,7 @@ mod tests {
 			None,
 			false,
 			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
-			None,
+			DocumentConfigInputs::default(),
 			sf!("new-build"),
 		)
 		.await
@@ -14104,7 +14194,7 @@ mod tests {
 			&socket,
 			None,
 			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
-			None,
+			DocumentConfigInputs::default(),
 			old_config.server_build().clone(),
 		)
 		.await

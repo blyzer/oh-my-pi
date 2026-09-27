@@ -15,9 +15,19 @@
 //!   `hooks`, `mcpServers`, `outputStyles`, and `lspServers`;
 //! * `skills/<name>/SKILL.md`, `commands/*.md`, `rules/*.md` (an OMP v1
 //!   extension), `.mcp.json`;
-//! * `agents/`, `hooks/hooks.json`, `output-styles/`, `.lsp.json`, `.dap.json`,
-//!   `tools/` have no runtime home yet and surface as
-//!   [`PluginDiagnostic::Unsupported`] instead of being dropped silently.
+//! * language servers: the [`LSP_CONFIG_FILES`] at the root plus manifest
+//!   `lspServers` (an inline server map or contained file paths); debug
+//!   adapters: the [`DAP_CONFIG_FILES`] at the root. This module only locates
+//!   them; the document authority validates each declaration with its own LSP
+//!   and DAP parsers and reports a rejected one as
+//!   [`PluginDiagnostic::InvalidComponent`];
+//! * `agents/`, `hooks/hooks.json`, `output-styles/`, `tools/` have no runtime
+//!   home yet and surface as [`PluginDiagnostic::Unsupported`] instead of being
+//!   dropped silently.
+//!
+//! Plugin-shipped paths use `${CLAUDE_PLUGIN_ROOT}`; [`expand_plugin_vars`]
+//! and [`resolve_plugin_command`] are the one expansion every runtime seam
+//! applies.
 //!
 //! An install whose root carries an Agent Plugins 1.0 `plugin.json` resolves
 //! to [`PluginLayout::AgentPlugins`]: its components belong to the Agent
@@ -46,6 +56,16 @@ pub const INSTALLED_PLUGINS_VERSION: u32 = 2;
 
 /// Agent Plugins 1.0 root-manifest schema.
 pub const AGENT_PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+
+/// Language-server declaration files a plugin root may carry, lowest
+/// precedence first (the names OMP v1 probed at every plugin root).
+pub const LSP_CONFIG_FILES: [&str; 6] =
+	["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
+
+/// Debug-adapter declaration files a plugin root may carry, lowest precedence
+/// first (the names OMP v1 probed at every plugin root).
+pub const DAP_CONFIG_FILES: [&str; 6] =
+	["dap.json", ".dap.json", "dap.yaml", ".dap.yaml", "dap.yml", ".dap.yml"];
 
 /// The user-scope plugin directory beneath the data directory.
 #[must_use]
@@ -319,6 +339,22 @@ pub enum PluginDiagnostic {
 		/// Where the component was found.
 		path:      PathBuf,
 	},
+	/// A located declaration failed the owning runtime seam's validation; it
+	/// does not load and the rest of the plugin set still does.
+	#[error("plugin `{plugin}` declares invalid {component} in {}; not loaded", path.display())]
+	InvalidComponent {
+		/// Plugin id.
+		plugin:    Str,
+		/// Component kind.
+		component: PluginComponent,
+		/// Declaration file, or the manifest for an inline declaration.
+		path:      PathBuf,
+		/// The validating parser's typed error. Erased because that parser
+		/// (the document authority's LSP/DAP configuration) lives in a crate
+		/// downstream of this one; the concrete error stays downcastable.
+		#[source]
+		source:    Box<dyn std::error::Error + Send + Sync>,
+	},
 }
 
 /// One enabled, resolved plugin install.
@@ -359,13 +395,21 @@ pub struct ClaudeComponents {
 	/// `rules/` directory.
 	pub rules:    Option<PathBuf>,
 	/// MCP server declarations.
-	pub mcp:      Box<[McpDeclaration]>,
+	pub mcp:      Box<[ConfigDeclaration]>,
+	/// Language-server declarations, lowest precedence first: the root
+	/// [`LSP_CONFIG_FILES`], then manifest `lspServers`.
+	pub lsp:      Box<[ConfigDeclaration]>,
+	/// Debug-adapter declarations, lowest precedence first: the root
+	/// [`DAP_CONFIG_FILES`].
+	pub dap:      Box<[ConfigDeclaration]>,
 }
 
-/// Where a plugin declares MCP servers.
+/// Where a plugin declares a server map (MCP servers, language servers, or
+/// debug adapters).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum McpDeclaration {
-	/// A JSON file: `{"mcpServers": {...}}` or a flat `{name: server}` map.
+pub enum ConfigDeclaration {
+	/// A JSON (or, for LSP/DAP, YAML by extension) file: a `{kind: {...}}`
+	/// wrapper or a flat `{name: server}` map.
 	File(PathBuf),
 	/// A server map written inline in the plugin manifest.
 	Inline {
@@ -374,6 +418,58 @@ pub enum McpDeclaration {
 		/// The raw JSON object of servers.
 		servers:  Str,
 	},
+}
+
+impl ConfigDeclaration {
+	/// The file the declaration was read from: the declaration file itself, or
+	/// the manifest for an inline map.
+	#[must_use]
+	pub fn path(&self) -> &Path {
+		match self {
+			Self::File(path) | Self::Inline { manifest: path, .. } => path,
+		}
+	}
+}
+
+/// Expands the plugin path variables in one plugin-declared string.
+///
+/// `${CLAUDE_PLUGIN_ROOT}`, `${OMP_PLUGIN_ROOT}` and `${PLUGIN_ROOT}` become
+/// `root`; `${PLUGIN_DATA}` becomes `data` when the plugin has a data
+/// directory. A value without variables is returned as is.
+#[must_use]
+pub fn expand_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
+	if !value.contains("${PLUGIN_ROOT}")
+		&& !value.contains("${PLUGIN_DATA}")
+		&& !value.contains("${CLAUDE_PLUGIN_ROOT}")
+		&& !value.contains("${OMP_PLUGIN_ROOT}")
+	{
+		return value;
+	}
+	let root = root.to_string_lossy();
+	let replaced = value
+		.replace("${PLUGIN_ROOT}", root.as_ref())
+		.replace("${CLAUDE_PLUGIN_ROOT}", root.as_ref())
+		.replace("${OMP_PLUGIN_ROOT}", root.as_ref());
+	match data {
+		Some(data) => Str::new(replaced.replace("${PLUGIN_DATA}", data.to_string_lossy().as_ref())),
+		None => Str::new(replaced),
+	}
+}
+
+/// Resolves a plugin's path-like relative command (`./bin/server`,
+/// `../tool`) against `base`, the directory it names a file in; bare
+/// executables (`npx`) and absolute paths are returned unchanged.
+#[must_use]
+pub fn resolve_plugin_command(command: Str, base: &Path) -> Str {
+	if command.starts_with("./") || command.starts_with("../") {
+		let relative = command
+			.as_str()
+			.strip_prefix("./")
+			.unwrap_or(command.as_str());
+		Str::new(base.join(relative).to_string_lossy())
+	} else {
+		command
+	}
 }
 
 impl ClaudePlugin {
@@ -515,7 +611,7 @@ struct ManifestWire {
 	#[serde(default)]
 	output_styles: Option<IgnoredAny>,
 	#[serde(default)]
-	lsp_servers:   Option<IgnoredAny>,
+	lsp_servers:   Option<Box<RawValue>>,
 }
 
 /// A manifest path field: one path or several.
@@ -590,33 +686,34 @@ fn resolve_layout(
 	components.rules = resolver.existing_dir("rules");
 
 	// MCP: manifest `mcpServers` (inline map or file paths) replaces `.mcp.json`.
+	let manifest_file = manifest_path.as_deref().unwrap_or(root);
 	components.mcp = match manifest.mcp_servers {
-		Some(raw) if raw.get().trim_start().starts_with('{') => Box::new([McpDeclaration::Inline {
-			manifest: manifest_path.clone().unwrap_or_default(),
-			servers:  Str::new(raw.get()),
-		}]),
-		Some(raw) => match serde_json::from_str::<PathList>(raw.get()) {
-			Ok(paths) => paths
-				.into_vec()
-				.iter()
-				.filter_map(|path| resolver.declared(PluginComponent::McpServers, path))
-				.map(McpDeclaration::File)
-				.collect(),
-			Err(source) => {
-				resolver.diagnostics.push(PluginDiagnostic::ManifestParse {
-					plugin: id.clone(),
-					path: manifest_path.unwrap_or_default(),
-					source,
-				});
-				return None;
-			},
-		},
+		Some(raw) => resolver
+			.manifest_servers(PluginComponent::McpServers, &raw, manifest_file)?
+			.into(),
 		None => resolver
 			.existing_file(".mcp.json")
-			.map(McpDeclaration::File)
+			.map(ConfigDeclaration::File)
 			.into_iter()
 			.collect(),
 	};
+
+	// LSP: the root declaration files, then manifest `lspServers` on top (OMP
+	// v1 loaded every root file; Claude's manifest key supplements them).
+	let mut lsp = resolver.existing_files(&LSP_CONFIG_FILES);
+	if let Some(raw) = manifest.lsp_servers {
+		for declaration in
+			resolver.manifest_servers(PluginComponent::LspServers, &raw, manifest_file)?
+		{
+			if !lsp.contains(&declaration) {
+				lsp.push(declaration);
+			}
+		}
+	}
+	components.lsp = lsp.into_boxed_slice();
+	components.dap = resolver
+		.existing_files(&DAP_CONFIG_FILES)
+		.into_boxed_slice();
 
 	// Components without a runtime home: surfaced, never silently dropped.
 	let manifest_marker = manifest_path.unwrap_or_else(|| root.to_path_buf());
@@ -624,12 +721,6 @@ fn resolve_layout(
 		(PluginComponent::Hooks, manifest.hooks.is_some(), &["hooks"][..]),
 		(PluginComponent::Agents, manifest.agents.is_some(), &["agents"][..]),
 		(PluginComponent::OutputStyles, manifest.output_styles.is_some(), &["output-styles"][..]),
-		(
-			PluginComponent::LspServers,
-			manifest.lsp_servers.is_some(),
-			&[".lsp.json", "lsp.json", ".lsp.yaml", ".lsp.yml"][..],
-		),
-		(PluginComponent::DapAdapters, false, &[".dap.json", ".dap.yaml", ".dap.yml"][..]),
 		(PluginComponent::Tools, false, &["tools"][..]),
 	];
 	for (component, declared, conventional) in unsupported {
@@ -697,6 +788,53 @@ impl ComponentResolver<'_> {
 		fs::canonicalize(self.root.join(name))
 			.ok()
 			.filter(|path| path.starts_with(self.root) && path.is_file())
+	}
+
+	/// Every present, contained conventional file of `names`, in order.
+	fn existing_files(&self, names: &[&str]) -> Vec<ConfigDeclaration> {
+		let mut files = Vec::new();
+		for path in names.iter().filter_map(|name| self.existing_file(name)) {
+			let declaration = ConfigDeclaration::File(path);
+			if !files.contains(&declaration) {
+				files.push(declaration);
+			}
+		}
+		files
+	}
+
+	/// A manifest server-map field: an inline object, or one or several
+	/// contained file paths. `None` when the field has neither shape (the
+	/// manifest diagnostic is recorded and the plugin does not load).
+	fn manifest_servers(
+		&mut self,
+		component: PluginComponent,
+		raw: &RawValue,
+		manifest: &Path,
+	) -> Option<Vec<ConfigDeclaration>> {
+		if raw.get().trim_start().starts_with('{') {
+			return Some(vec![ConfigDeclaration::Inline {
+				manifest: manifest.to_path_buf(),
+				servers:  Str::new(raw.get()),
+			}]);
+		}
+		match serde_json::from_str::<PathList>(raw.get()) {
+			Ok(paths) => Some(
+				paths
+					.into_vec()
+					.iter()
+					.filter_map(|path| self.declared(component, path))
+					.map(ConfigDeclaration::File)
+					.collect(),
+			),
+			Err(source) => {
+				self.diagnostics.push(PluginDiagnostic::ManifestParse {
+					plugin: self.id.clone(),
+					path: manifest.to_path_buf(),
+					source,
+				});
+				None
+			},
+		}
 	}
 
 	/// A manifest-declared path, resolved against the root and contained.
@@ -781,7 +919,7 @@ mod tests {
 		let components = plugin.claude_components().unwrap();
 		assert_eq!(&*components.skills, [root.join("skills")]);
 		assert_eq!(&*components.commands, [root.join("commands")]);
-		assert_eq!(&*components.mcp, [McpDeclaration::File(root.join(".mcp.json"))]);
+		assert_eq!(&*components.mcp, [ConfigDeclaration::File(root.join(".mcp.json"))]);
 	}
 
 	#[test]
@@ -865,7 +1003,7 @@ mod tests {
 		assert_eq!(&*components.skills, [root.join("extra")]);
 		assert!(matches!(
 			&*components.mcp,
-			[McpDeclaration::Inline { servers, .. }] if servers.contains("\"srv\"")
+			[ConfigDeclaration::Inline { servers, .. }] if servers.contains("\"srv\"")
 		));
 		let unsupported = resolved
 			.diagnostics
@@ -885,6 +1023,74 @@ mod tests {
 		let resolved = ClaudePlugins::resolve(&data, &project);
 		assert_eq!(resolved.plugins.len(), 1);
 		assert_eq!(resolved.plugins[0].scope, PluginScope::User);
+	}
+
+	#[test]
+	fn lsp_and_dap_declarations_resolve_as_components_not_unsupported() {
+		let temp = tempfile::tempdir().unwrap();
+		let data = temp.path().join("data");
+		let inline = temp.path().join("inline");
+		let by_path = temp.path().join("by-path");
+		write(&inline.join(".lsp.json"), r#"{"go":{"command":"gopls"}}"#);
+		write(&inline.join("lsp.yaml"), "servers: {}\n");
+		write(&inline.join(".dap.yaml"), "adapters: {}\n");
+		write(
+			&inline.join(".claude-plugin/plugin.json"),
+			r#"{"name":"inline","lspServers":{"zig":{"command":"zls"}}}"#,
+		);
+		write(&by_path.join("config/servers.json"), "{}");
+		write(&by_path.join("dap.json"), "{}");
+		write(
+			&by_path.join(".claude-plugin/plugin.json"),
+			r#"{"name":"by-path","lspServers":"./config/servers.json"}"#,
+		);
+		write(
+			&data.join("plugins/installed_plugins.json"),
+			&registry(&[("inline@m", &inline, true), ("by-path@m", &by_path, true)]),
+		);
+
+		let resolved = ClaudePlugins::resolve(&data, temp.path());
+
+		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
+		let components = |id: &str| {
+			resolved
+				.plugins
+				.iter()
+				.find(|plugin| plugin.id == id)
+				.and_then(ClaudePlugin::claude_components)
+				.unwrap()
+				.clone()
+		};
+		let root = fs::canonicalize(&inline).unwrap();
+		let inline_components = components("inline@m");
+		assert_eq!(&inline_components.lsp[..2], [
+			ConfigDeclaration::File(root.join(".lsp.json")),
+			ConfigDeclaration::File(root.join("lsp.yaml")),
+		]);
+		assert!(matches!(
+			&inline_components.lsp[2],
+			ConfigDeclaration::Inline { manifest, servers }
+				if manifest.ends_with(".claude-plugin/plugin.json") && servers.contains("\"zls\"")
+		));
+		assert_eq!(&*inline_components.dap, [ConfigDeclaration::File(root.join(".dap.yaml"))]);
+		let root = fs::canonicalize(&by_path).unwrap();
+		let by_path_components = components("by-path@m");
+		assert_eq!(&*by_path_components.lsp, [ConfigDeclaration::File(
+			root.join("config/servers.json")
+		)]);
+		assert_eq!(&*by_path_components.dap, [ConfigDeclaration::File(root.join("dap.json"))]);
+	}
+
+	#[test]
+	fn plugin_vars_expand_and_relative_commands_root_at_the_base() {
+		let root = Path::new("/plugins/acme");
+		assert_eq!(
+			expand_plugin_vars(Str::new_static("${CLAUDE_PLUGIN_ROOT}/bin/x"), root, None),
+			"/plugins/acme/bin/x"
+		);
+		assert_eq!(expand_plugin_vars(Str::new_static("plain"), root, None), "plain");
+		assert_eq!(resolve_plugin_command(Str::new_static("./bin/x"), root), "/plugins/acme/bin/x");
+		assert_eq!(resolve_plugin_command(Str::new_static("gopls"), root), "gopls");
 	}
 
 	#[cfg(unix)]

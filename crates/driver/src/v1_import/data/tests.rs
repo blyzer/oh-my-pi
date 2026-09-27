@@ -827,9 +827,8 @@ fn the_marketplace_registry_and_cache_merge_into_v2() {
 		(
 			OutcomeKind::NotMigratable,
 			owned(
-				"plugin hooks, agents, LSP/DAP servers, JS tools and output styles (v2 loads the \
-				 skills, commands, rules and MCP servers of enabled plugins and reports these at \
-				 launch)"
+				"plugin hooks, agents, JS tools and output styles (v2 loads the skills, commands, \
+				 rules, MCP, LSP and DAP servers of enabled plugins and reports these at launch)"
 			)
 		),
 		(OutcomeKind::Imported, owned("1 cached marketplace")),

@@ -2232,6 +2232,7 @@ mod tests {
 						lazy:    true,
 					},
 					user_config_root: None,
+					claude_plugins:   std::sync::Arc::default(),
 					shutdown:         Some(serve_shutdown),
 					server_build:     Str::from(omp_env::build_id::current()),
 					connections:      None,

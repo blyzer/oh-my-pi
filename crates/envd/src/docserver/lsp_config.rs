@@ -9,6 +9,10 @@ use std::{
 };
 
 use omp_core::Str;
+use omp_ext::claude_plugin::{
+	ClaudePlugin, ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars,
+	resolve_plugin_command,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -39,6 +43,10 @@ pub enum LspConfigSourceKind {
 	Dotfile,
 	/// Validated native extension-manifest contribution.
 	Manifest,
+	/// Installed, enabled Claude-format marketplace plugin declaration (root
+	/// `.lsp.json` family or manifest `lspServers`), validated on its own
+	/// before it joins the merge.
+	Plugin,
 }
 
 /// Stable source identity retained on every resolved field.
@@ -63,11 +71,15 @@ pub struct Provenanced<T> {
 #[derive(Clone, Debug)]
 pub struct LspConfigSource {
 	/// Source provenance.
-	pub provenance: LspConfigProvenance,
+	pub provenance:  LspConfigProvenance,
 	/// Configuration bytes.
-	pub bytes:      Arc<[u8]>,
+	pub bytes:       Arc<[u8]>,
 	/// Whether the bytes use YAML rather than JSON.
-	pub yaml:       bool,
+	pub yaml:        bool,
+	/// Installed plugin root for a [`LspConfigSourceKind::Plugin`] source:
+	/// `${CLAUDE_PLUGIN_ROOT}` in `command`, `args` and `env` expands to it and
+	/// a path-like relative `command` resolves against it.
+	pub plugin_root: Option<Arc<Path>>,
 }
 
 impl LspConfigSource {
@@ -85,7 +97,30 @@ impl LspConfigSource {
 			provenance: LspConfigProvenance { kind, source: Str::new(path.to_string_lossy()) },
 			bytes: bytes.into(),
 			yaml,
+			plugin_root: None,
 		})
+	}
+
+	/// Reads one installed plugin's declaration: a root declaration file
+	/// (YAML by extension) or a manifest `lspServers` map.
+	pub fn plugin(
+		plugin: &ClaudePlugin,
+		declaration: &ConfigDeclaration,
+	) -> Result<Self, LspConfigError> {
+		let mut source = match declaration {
+			ConfigDeclaration::File(path) => Self::read(LspConfigSourceKind::Plugin, path)?,
+			ConfigDeclaration::Inline { manifest, servers } => Self {
+				provenance:  LspConfigProvenance {
+					kind:   LspConfigSourceKind::Plugin,
+					source: Str::new(manifest.to_string_lossy()),
+				},
+				bytes:       format!(r#"{{"servers":{servers}}}"#).into_bytes().into(),
+				yaml:        false,
+				plugin_root: None,
+			},
+		};
+		source.plugin_root = Some(Arc::from(plugin.root.as_path()));
+		Ok(source)
 	}
 
 	/// Creates a bounded native manifest contribution already validated by the
@@ -98,6 +133,7 @@ impl LspConfigSource {
 			},
 			bytes: bytes.into(),
 			yaml,
+			plugin_root: None,
 		}
 	}
 
@@ -146,6 +182,27 @@ struct LspServerPatch {
 	warmup_timeout_ms:      Option<u64>,
 	idle_timeout_ms:        Option<u64>,
 	readiness_timeout_ms:   Option<u64>,
+	env:                    Option<BTreeMap<Str, Str>>,
+	/// Claude Code's `{".ext": "languageId"}` map: its keys stand in for
+	/// `fileTypes`, and it implies the project-root marker `.` when no
+	/// `rootMarkers` are declared (OMP v1 parity).
+	extension_to_language:  Option<BTreeMap<Str, Str>>,
+}
+
+impl LspServerPatch {
+	/// Expands `${CLAUDE_PLUGIN_ROOT}` (and its aliases) in `command`, `args`
+	/// and `env`, then roots a path-like relative `command` at the plugin.
+	fn expand_plugin_root(&mut self, root: &Path) {
+		if let Some(command) = self.command.take() {
+			self.command = Some(resolve_plugin_command(expand_plugin_vars(command, root, None), root));
+		}
+		for arg in self.args.iter_mut().flatten() {
+			*arg = expand_plugin_vars(arg.clone(), root, None);
+		}
+		for value in self.env.iter_mut().flat_map(BTreeMap::values_mut) {
+			*value = expand_plugin_vars(value.clone(), root, None);
+		}
+	}
 }
 
 #[derive(Default)]
@@ -164,6 +221,7 @@ struct MergedServer {
 	warmup_timeout_ms:    Option<Provenanced<u64>>,
 	idle_timeout_ms:      Option<Provenanced<Option<u64>>>,
 	readiness_timeout_ms: Option<Provenanced<u64>>,
+	env:                  Option<Provenanced<BTreeMap<Str, Str>>>,
 }
 
 /// Fully validated native language-server declaration.
@@ -200,6 +258,8 @@ pub struct ResolvedLspServer {
 	pub idle_timeout_ms:      Provenanced<Option<u64>>,
 	/// Workspace readiness bound.
 	pub readiness_timeout_ms: Provenanced<u64>,
+	/// Extra process environment.
+	pub env:                  Provenanced<BTreeMap<Str, Str>>,
 }
 
 /// A resolved catalog plus global timing policy.
@@ -242,7 +302,7 @@ impl ResolvedLspServer {
 			},
 			executable: PathBuf::from(self.command.value.as_str()),
 			args: self.args.value.clone(),
-			env: BTreeMap::new(),
+			env: self.env.value.clone(),
 			initialization_options: Some(self.init_options.value.clone()),
 			settings: Some(self.settings.value.clone()),
 			root_markers: self.root_markers.value.clone(),
@@ -266,6 +326,7 @@ pub fn bundled_lsp_defaults() -> Result<LspConfigSource, LspConfigError> {
 		},
 		bytes,
 		yaml: false,
+		plugin_root: None,
 	})
 }
 
@@ -275,19 +336,45 @@ pub fn discover_native_lsp_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
 ) -> Result<Vec<LspConfigSource>, LspConfigError> {
-	discover_native_lsp_sources_with_manifests(user_root, project_root, Vec::new())
+	discover_lsp_sources(user_root, project_root, Vec::new(), &[]).map(|found| found.sources)
 }
 
-/// Enumerates built-in, extension-manifest, user, and project sources in
-/// increasing precedence.
-pub fn discover_native_lsp_sources_with_manifests(
+/// Ordered sources plus the plugin declarations that did not load.
+#[derive(Debug)]
+pub struct DiscoveredLspSources {
+	/// Sources from low to high precedence, ready for [`load_lsp_config`].
+	pub sources:     Vec<LspConfigSource>,
+	/// One diagnostic per rejected plugin declaration.
+	pub diagnostics: Vec<PluginDiagnostic>,
+}
+
+/// Enumerates built-in, extension-manifest, installed-plugin, user, and
+/// project sources in increasing precedence.
+///
+/// The only non-native roots ever read are the `plugins` handed in: the
+/// installed, enabled marketplace plugins the composition resolved
+/// ([`omp_ext::claude_plugin::ClaudePlugins`]), each contributing only the
+/// declarations its [`ClaudeComponents::lsp`] located inside its own root.
+/// `.claude`, `.codex`, and other foreign configuration roots are never
+/// probed. Plugin declarations sit below every user and project file (OMP
+/// v1's order), so a same-named user or project server overrides a plugin's
+/// fields; a project-scope plugin overrides a user-scope one. Each plugin
+/// declaration is validated on its own against the layers beneath it, so an
+/// invalid one becomes a [`PluginDiagnostic::InvalidComponent`] instead of
+/// failing the roster.
+///
+/// [`ClaudeComponents::lsp`]: omp_ext::claude_plugin::ClaudeComponents::lsp
+pub fn discover_lsp_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
 	mut manifests: Vec<LspConfigSource>,
-) -> Result<Vec<LspConfigSource>, LspConfigError> {
+	plugins: &[ClaudePlugin],
+) -> Result<DiscoveredLspSources, LspConfigError> {
 	let mut sources = vec![bundled_lsp_defaults()?];
 	manifests.sort_by(|left, right| left.provenance.source.cmp(&right.provenance.source));
 	sources.extend(manifests);
+	let mut diagnostics = Vec::new();
+	append_plugin_sources(&mut sources, plugins, &mut diagnostics);
 	if let Some(user_root) = user_root {
 		append_existing(&mut sources, user_root, LspConfigSourceKind::User)?;
 		append_existing(&mut sources, &user_root.join("agent"), LspConfigSourceKind::User)?;
@@ -299,7 +386,37 @@ pub fn discover_native_lsp_sources_with_manifests(
 			sources.push(LspConfigSource::read(LspConfigSourceKind::Dotfile, &path)?);
 		}
 	}
-	Ok(sources)
+	Ok(DiscoveredLspSources { sources, diagnostics })
+}
+
+/// Appends every plugin declaration that merges cleanly over `sources`,
+/// user-scope plugins first so project-scope ones win.
+fn append_plugin_sources(
+	sources: &mut Vec<LspConfigSource>,
+	plugins: &[ClaudePlugin],
+	diagnostics: &mut Vec<PluginDiagnostic>,
+) {
+	for plugin in plugins.iter().rev() {
+		let Some(components) = plugin.claude_components() else {
+			continue;
+		};
+		for declaration in &components.lsp {
+			let admitted = LspConfigSource::plugin(plugin, declaration).and_then(|source| {
+				sources.push(source);
+				load_lsp_config(sources).map(drop).inspect_err(|_| {
+					sources.pop();
+				})
+			});
+			if let Err(error) = admitted {
+				diagnostics.push(PluginDiagnostic::InvalidComponent {
+					plugin:    plugin.id.clone(),
+					component: PluginComponent::LspServers,
+					path:      declaration.path().to_path_buf(),
+					source:    Box::new(error),
+				});
+			}
+		}
+	}
 }
 
 fn append_existing(
@@ -335,7 +452,10 @@ pub fn load_lsp_config(sources: &[LspConfigSource]) -> Result<ResolvedLspConfig,
 			idle_timeout_ms =
 				Some(Provenanced { value: idle, provenance: source.provenance.clone() });
 		}
-		for (name, patch) in servers {
+		for (name, mut patch) in servers {
+			if let Some(root) = &source.plugin_root {
+				patch.expand_plugin_root(root);
+			}
 			merge_server(merged.entry(name).or_default(), patch, &source.provenance);
 		}
 	}
@@ -412,9 +532,17 @@ fn sourced<T>(value: T, provenance: &LspConfigProvenance) -> Provenanced<T> {
 
 fn merge_server(
 	target: &mut MergedServer,
-	patch: LspServerPatch,
+	mut patch: LspServerPatch,
 	provenance: &LspConfigProvenance,
 ) {
+	if let Some(extensions) = patch.extension_to_language.take() {
+		patch
+			.file_types
+			.get_or_insert_with(|| extensions.into_keys().collect());
+		if patch.root_markers.is_none() && target.root_markers.is_none() {
+			patch.root_markers = Some(vec![Str::new_static(".")]);
+		}
+	}
 	if let Some(value) = patch.command {
 		target.command = Some(sourced(value, provenance));
 	}
@@ -456,6 +584,9 @@ fn merge_server(
 	}
 	if let Some(value) = patch.readiness_timeout_ms {
 		target.readiness_timeout_ms = Some(sourced(value, provenance));
+	}
+	if let Some(value) = patch.env {
+		target.env = Some(sourced(value, provenance));
 	}
 }
 
@@ -510,6 +641,9 @@ fn resolve_server(name: Str, merged: MergedServer) -> Result<ResolvedLspServer, 
 		readiness_timeout_ms: merged
 			.readiness_timeout_ms
 			.unwrap_or_else(|| sourced(30_000, &fallback)),
+		env: merged
+			.env
+			.unwrap_or_else(|| sourced(BTreeMap::new(), &fallback)),
 	})
 }
 
@@ -624,8 +758,184 @@ pub enum LspConfigError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+	use omp_ext::claude_plugin::{
+		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
+	};
+
 	use super::*;
+
+	pub fn write(path: &Path, body: &str) {
+		fs::create_dir_all(path.parent().unwrap()).unwrap();
+		fs::write(path, body).unwrap();
+	}
+
+	/// Records `(id, root, enabled)` installs in a user registry under
+	/// `data` and resolves them the way the composition does.
+	pub fn installed_plugins(data: &Path, installs: &[(&str, &Path, bool)]) -> ClaudePlugins {
+		let mut registry = InstalledPluginsRegistry::default();
+		for (id, root, enabled) in installs {
+			registry
+				.plugins
+				.insert(Str::new(id), vec![InstalledPluginEntry {
+					scope:          InstallScope::User,
+					install_path:   root.to_path_buf(),
+					version:        Str::new_static("1.0.0"),
+					installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+					last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+					git_commit_sha: None,
+					enabled:        *enabled,
+				}]);
+		}
+		write(
+			&data.join("plugins/installed_plugins.json"),
+			&serde_json::to_string(&registry).unwrap(),
+		);
+		ClaudePlugins::resolve(data, data)
+	}
+
+	#[test]
+	fn enabled_plugin_servers_load_with_the_root_expanded_and_disabled_ones_never_do() {
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let on = temp.path().join("on");
+		let off = temp.path().join("off");
+		write(
+			&on.join(".lsp.json"),
+			r#"{"acme":{
+				"command":"${CLAUDE_PLUGIN_ROOT}/bin/acme-lsp",
+				"args":["--home=${CLAUDE_PLUGIN_ROOT}","--stdio"],
+				"env":{"ACME_HOME":"${CLAUDE_PLUGIN_ROOT}/share"},
+				"extensionToLanguage":{".acme":"acme"}
+			}}"#,
+		);
+		write(
+			&on.join(".claude-plugin/plugin.json"),
+			r#"{"name":"on","lspServers":{"zig":{
+				"command":"./bin/zls","fileTypes":[".zig"],"rootMarkers":["build.zig"]
+			}}}"#,
+		);
+		write(
+			&off.join(".lsp.json"),
+			r#"{"ghost":{"command":"ghost","extensionToLanguage":{".g":"g"}}}"#,
+		);
+		let plugins = installed_plugins(&temp.path().join("data"), &[
+			("on@m", &on, true),
+			("off@m", &off, false),
+		]);
+		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
+
+		let found = discover_lsp_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		assert!(found.diagnostics.is_empty(), "{:?}", found.diagnostics);
+		let config = load_lsp_config(&found.sources).unwrap();
+
+		let root = fs::canonicalize(&on).unwrap();
+		let root = root.to_string_lossy();
+		let acme = &config.servers["acme"];
+		assert_eq!(acme.command.value, format!("{root}/bin/acme-lsp").as_str());
+		assert_eq!(acme.command.provenance.kind, LspConfigSourceKind::Plugin);
+		assert_eq!(acme.args.value, [format!("--home={root}").as_str(), "--stdio"]);
+		assert_eq!(acme.env.value["ACME_HOME"], format!("{root}/share").as_str());
+		assert_eq!(acme.file_types.value, [".acme"]);
+		assert_eq!(acme.root_markers.value, ["."]);
+		let process = acme.to_process_config();
+		assert_eq!(process.env["ACME_HOME"], format!("{root}/share").as_str());
+		// Manifest inline `lspServers`: a path-like command roots at the plugin.
+		let zig = &config.servers["zig"];
+		assert_eq!(zig.command.value, format!("{root}/bin/zls").as_str());
+		assert_eq!(zig.command.provenance.kind, LspConfigSourceKind::Plugin);
+		assert!(!config.servers.contains_key("ghost"), "a disabled plugin contributed");
+	}
+
+	#[test]
+	fn user_and_project_declarations_override_a_plugin_server_of_the_same_name() {
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		let user = temp.path().join("user");
+		let plugin = temp.path().join("plugin");
+		write(
+			&plugin.join(".lsp.json"),
+			r#"{"servers":{
+				"acme":{"command":"plugin-acme","args":["--plugin"],"fileTypes":[".acme"],"rootMarkers":["."]},
+				"rust-analyzer":{"args":["--from-plugin"]}
+			}}"#,
+		);
+		write(&user.join("lsp.json"), r#"{"acme":{"command":"user-acme"}}"#);
+		write(&project.join(".omp/lsp.json"), r#"{"rust-analyzer":{"args":["--from-project"]}}"#);
+		let plugins = installed_plugins(&temp.path().join("data"), &[("p@m", &plugin, true)]);
+
+		let found =
+			discover_lsp_sources(Some(&user), &project, Vec::new(), &plugins.plugins).unwrap();
+		let config = load_lsp_config(&found.sources).unwrap();
+
+		let acme = &config.servers["acme"];
+		assert_eq!(acme.command.value, "user-acme");
+		assert_eq!(acme.command.provenance.kind, LspConfigSourceKind::User);
+		assert_eq!(acme.args.value, ["--plugin"]);
+		assert_eq!(acme.args.provenance.kind, LspConfigSourceKind::Plugin);
+		let rust = &config.servers["rust-analyzer"];
+		assert_eq!(rust.args.value, ["--from-project"]);
+		assert_eq!(rust.args.provenance.kind, LspConfigSourceKind::Project);
+		assert_eq!(rust.command.provenance.kind, LspConfigSourceKind::Builtin);
+	}
+
+	#[test]
+	fn an_invalid_plugin_declaration_is_a_diagnostic_and_the_rest_still_load() {
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		let broken = temp.path().join("broken");
+		let unknown = temp.path().join("unknown");
+		let good = temp.path().join("good");
+		write(&broken.join(".lsp.json"), "{ not json");
+		write(
+			&unknown.join("lsp.yaml"),
+			"acme:\n  command: acme\n  fileTypes: [.a]\n  rootMarkers: [.]\n  bogus: 1\n",
+		);
+		write(
+			&good.join(".lsp.json"),
+			r#"{"good":{"command":"good","extensionToLanguage":{".g":"g"}}}"#,
+		);
+		let plugins = installed_plugins(&temp.path().join("data"), &[
+			("broken@m", &broken, true),
+			("unknown@m", &unknown, true),
+			("good@m", &good, true),
+		]);
+
+		let found = discover_lsp_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		let config = load_lsp_config(&found.sources).unwrap();
+
+		assert!(config.servers.contains_key("good"));
+		assert!(!config.servers.contains_key("acme"));
+		let mut rejected = found
+			.diagnostics
+			.iter()
+			.map(|diagnostic| match diagnostic {
+				PluginDiagnostic::InvalidComponent {
+					plugin,
+					component: PluginComponent::LspServers,
+					path,
+					source,
+				} => {
+					let error = source
+						.downcast_ref::<LspConfigError>()
+						.expect("typed LSP error");
+					let kind = match error {
+						LspConfigError::ParseJson { .. } => "json",
+						LspConfigError::InvalidServer { .. } => "schema",
+						other => panic!("unexpected {other:?}"),
+					};
+					(plugin.to_string(), path.file_name().unwrap().to_owned(), kind)
+				},
+				other => panic!("unexpected {other:?}"),
+			})
+			.collect::<Vec<_>>();
+		rejected.sort();
+		assert_eq!(rejected, [
+			("broken@m".to_owned(), ".lsp.json".into(), "json"),
+			("unknown@m".to_owned(), "lsp.yaml".into(), "schema"),
+		]);
+	}
 
 	#[test]
 	fn bundled_catalog_is_complete_and_preserves_pi_fields() {
@@ -648,14 +958,15 @@ mod tests {
 	fn yaml_override_merges_fields_and_stamps_provenance() {
 		let defaults = bundled_lsp_defaults().unwrap();
 		let project = LspConfigSource {
-			provenance: LspConfigProvenance {
+			provenance:  LspConfigProvenance {
 				kind:   LspConfigSourceKind::Project,
 				source: Str::new_static("fixture"),
 			},
-			bytes:      Arc::from(
+			bytes:       Arc::from(
 				&b"servers:\n  rust-analyzer:\n    disabled: true\n    warmupTimeoutMs: 321\n"[..],
 			),
-			yaml:       true,
+			yaml:        true,
+			plugin_root: None,
 		};
 		let config = load_lsp_config(&[defaults, project]).unwrap();
 		let rust = &config.servers["rust-analyzer"];
