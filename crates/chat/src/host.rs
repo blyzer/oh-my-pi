@@ -616,6 +616,42 @@ impl LeftTaps {
 	}
 }
 
+/// The actor's presentation clock: time since the actor started, read by
+/// gestures, countdowns, and animation deadlines.
+///
+/// It runs on the monotonic clock until [`PresentationClock::advance`] holds
+/// it; a held clock moves only when advanced, so a driving host replays timed
+/// input (key cadences, release deadlines) at exact offsets.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PresentationClock {
+	epoch: Instant,
+	held:  Option<Duration>,
+}
+
+impl PresentationClock {
+	/// A running clock whose epoch is now.
+	fn start() -> Self {
+		Self { epoch: Instant::now(), held: None }
+	}
+
+	/// Current reading.
+	#[inline]
+	pub(crate) fn elapsed(&self) -> Duration {
+		self.held.unwrap_or_else(|| self.epoch.elapsed())
+	}
+
+	/// Holds the clock at its current reading, then moves it `by` forward.
+	fn advance(&mut self, by: Duration) {
+		self.held = Some(self.elapsed() + by);
+	}
+
+	/// Monotonic instant at which the reading reaches `at`; `None` while held,
+	/// since waiting never advances a held clock.
+	fn deadline(&self, at: Duration) -> Option<Instant> {
+		self.held.is_none().then(|| self.epoch + at)
+	}
+}
+
 /// Observer-local wall clock sampled only at its visible unit boundary or
 /// when its status configuration changes. Paint reads `label` and performs no
 /// time-zone lookup, formatting, or allocation.
@@ -689,7 +725,8 @@ pub(crate) struct Presenter {
 	pub(crate) last_clear: Option<Instant>,
 	/// Double-Left gesture state ( `#detectLeftDoubleTap`).
 	left_taps: LeftTaps,
-	pub(crate) clock: Instant,
+	/// The one clock every gesture, countdown, and animation deadline reads.
+	pub(crate) clock: PresentationClock,
 	/// Launch facts painted in the welcome box's right column.
 	pub(crate) welcome: WelcomeFacts,
 	/// Presentation-clock start of  3000ms brand intro; `None` once a
@@ -1168,7 +1205,7 @@ impl Presenter {
 			wall_clock,
 			last_clear: None,
 			left_taps: LeftTaps::default(),
-			clock: Instant::now(),
+			clock: PresentationClock::start(),
 			intro,
 			mailbox,
 			models: options.models,
@@ -4259,7 +4296,7 @@ impl Host {
 						TerminalEvent::Closed => break,
 					}
 				},
-				() = frame_deadline(self.presenter.clock, deadline) => {
+				() = frame_deadline(&self.presenter.clock, deadline) => {
 					self.sync_terminal_state(terminal)?;
 					let ticked = self.tick();
 					let settled = self
@@ -5261,10 +5298,19 @@ impl NativeHost {
 		changed
 	}
 
-	/// Presentation-clock epoch, for driving [`NativeHost::tick`].
+	/// Current presentation-clock reading, for driving [`NativeHost::tick`].
 	#[must_use]
-	pub const fn clock(&self) -> Instant {
-		self.presenter.clock
+	pub fn now(&self) -> Duration {
+		self.presenter.clock.elapsed()
+	}
+
+	/// Holds the presentation clock and moves it `by` forward.
+	///
+	/// The first call freezes the monotonic reading; from then on only this
+	/// method moves the clock that keys, [`NativeHost::poll`], and deadlines
+	/// read, so a driving host replays timed input at exact offsets.
+	pub fn advance_clock(&mut self, by: Duration) {
+		self.presenter.clock.advance(by);
 	}
 
 	fn native_effect(&mut self, routed: Routed) -> NativeEffect {
@@ -5356,10 +5402,10 @@ impl Drop for NativeHost {
 	}
 }
 
-/// Sleeps until `deadline` on the presentation clock whose epoch is `clock`.
-async fn frame_deadline(clock: Instant, deadline: Option<Duration>) {
-	match deadline {
-		Some(deadline) => tokio::time::sleep_until((clock + deadline).into()).await,
+/// Sleeps until `deadline` on the presentation `clock`.
+async fn frame_deadline(clock: &PresentationClock, deadline: Option<Duration>) {
+	match deadline.and_then(|deadline| clock.deadline(deadline)) {
+		Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
 		None => future::pending().await,
 	}
 }
