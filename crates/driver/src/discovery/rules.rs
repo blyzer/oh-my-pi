@@ -1045,7 +1045,7 @@ mod tests {
 			&serde_json::to_string(&registry).unwrap(),
 		);
 
-		let plugins = ClaudePlugins::resolve(&data, &project);
+		let plugins = ClaudePlugins::resolve(&data, &project, None);
 		let rules = ActiveRules::discover(&project, &home, &home.join(".o2"), &plugins);
 		let rule = rules.get("house-style").expect("installed plugin rule");
 		assert_eq!(rule.provider, "claude-plugins");

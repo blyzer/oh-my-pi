@@ -67,11 +67,42 @@ pub(super) fn report(state: &ServiceState) -> ServiceResult<PluginsReport> {
 				Scope::Project => "project",
 			}),
 			shadowed: view.shadowed,
+			external: false,
+		});
+	}
+	// Claude Code's own installs load read-only beside omp's; list them so
+	// the user sees what runs, never as something omp manages.
+	let claude_code = omp_ext::claude_plugin::ClaudePlugins::resolve(
+		&state.data_dir,
+		&state.project,
+		omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+	);
+	for plugin in claude_code
+		.plugins
+		.into_iter()
+		.filter(|plugin| plugin.source == omp_ext::claude_plugin::PluginSource::ClaudeCode)
+	{
+		if plugins.iter().any(|row| row.id == plugin.id) {
+			continue;
+		}
+		plugins.push(PluginRow {
+			id:          plugin.id,
+			name:        plugin.name,
+			version:     Some(plugin.version),
+			description: Str::default(),
+			marketplace: plugin.marketplace,
+			installed:   true,
+			enabled:     true,
+			scope:       Str::new_static(plugin.scope.into()),
+			shadowed:    false,
+			external:    true,
 		});
 	}
 	for package in available {
 		let already = installed.iter().any(|view| {
 			view.id == package.id && view.marketplace.as_deref() == Some(package.marketplace.as_str())
+		}) || plugins.iter().any(|row| {
+			row.external && row.name == package.id && row.marketplace == package.marketplace
 		});
 		if already {
 			continue;
@@ -86,6 +117,7 @@ pub(super) fn report(state: &ServiceState) -> ServiceResult<PluginsReport> {
 			enabled:     false,
 			scope:       Str::default(),
 			shadowed:    false,
+			external:    false,
 		});
 	}
 	Ok(PluginsReport {

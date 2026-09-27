@@ -280,14 +280,19 @@ fn installed_text(report: &PluginsReport) -> Str {
 	for plugin in installed {
 		let _ = writeln!(
 			body,
-			"  {} [{}]{}",
+			"  {} [{}]{}{}",
 			plugin.id,
 			if plugin.scope.is_empty() {
 				"user"
 			} else {
 				plugin.scope.as_str()
 			},
-			if plugin.shadowed { " [shadowed]" } else { "" }
+			if plugin.shadowed { " [shadowed]" } else { "" },
+			if plugin.external {
+				" [claude-code, read-only]"
+			} else {
+				""
+			}
 		);
 	}
 	Str::new(body)
@@ -571,6 +576,7 @@ mod tests {
 			enabled:     false,
 			scope:       Str::new_static("project"),
 			shadowed:    false,
+			external:    false,
 		});
 		assert_eq!(
 			plugins_report(&report).unwrap().as_str(),

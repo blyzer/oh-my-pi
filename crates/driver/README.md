@@ -14,6 +14,9 @@ presentation adapter.
 - `headless::kernel` constructs the production kernel, `.oms` session,
   inference route, environment authority, and session-owned `task`/`hub`
   tools reused by chat, print, RPC, and ACP.
+- `plugin_hooks` runs installed plugins' Claude-format hooks as one
+  in-process host on the kernel's generic hook gate, each command in the
+  environment's in-process shell.
 - `sessions` is the disposable process-local routing index for live kernel
   mailboxes and detached DOM snapshots.
 - `subagent` seeds child convars and composes child kernels through the same

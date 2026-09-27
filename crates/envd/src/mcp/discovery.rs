@@ -868,7 +868,7 @@ mod tests {
 			("inline@market", &inline, true),
 			("quiet@market", &quiet, false),
 		]);
-		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project);
+		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 
 		let discovered = sources(

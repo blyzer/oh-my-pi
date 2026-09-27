@@ -137,7 +137,11 @@ impl PluginSelector {
 					.version
 					.as_ref()
 					.map_or_else(Str::default, |version| sf!("@{version}"));
-				let status = if plugin.installed { " [installed]" } else { "" };
+				let status = match (plugin.installed, plugin.external) {
+					(_, true) => " [claude-code]",
+					(true, false) => " [installed]",
+					(false, false) => "",
+				};
 				let scope = if plugin.scope.is_empty() {
 					Str::default()
 				} else {
@@ -218,6 +222,11 @@ impl PluginSelector {
 		let Some(plugin) = self.report.plugins.iter().find(|plugin| plugin.id == id) else {
 			return PanelEvent::Consumed;
 		};
+		if plugin.external {
+			return PanelEvent::Notice(sf!(
+				"{id} is installed by Claude Code; manage it with Claude Code"
+			));
+		}
 		let installing = !plugin.installed;
 		let mutation = if installing {
 			Mutation::InstallPlugin { id: Str::new(id) }
@@ -338,6 +347,7 @@ mod tests {
 				Str::default()
 			},
 			shadowed: false,
+			external: false,
 		}
 	}
 
@@ -440,6 +450,21 @@ mod tests {
 		assert_eq!(panel.in_flight(), None);
 		let text = omp_tui::frame_text(panel.frame(Size { width: 110, height: 20 }));
 		assert!(text.contains("docs@1.0.0 [installed]"), "list refreshed from services:\n{text}");
+	}
+
+	#[test]
+	fn claude_code_installs_are_listed_read_only() {
+		let mut external = plugin("cc", true);
+		external.external = true;
+		let feed = feed(vec![external], 1);
+		let mut panel = open(&feed, PluginMode::Uninstall);
+		let text = omp_tui::frame_text(panel.frame(Size { width: 110, height: 20 }));
+		assert!(text.contains("cc@1.0.0 [claude-code] [user]"), "external row missing:\n{text}");
+		assert!(
+			matches!(panel.key(Key::Enter), PanelEvent::Notice(text) if text.contains("Claude Code")),
+			"Enter refuses to manage a Claude Code install"
+		);
+		assert_eq!(panel.in_flight(), None);
 	}
 
 	#[test]

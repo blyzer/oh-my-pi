@@ -297,7 +297,11 @@ fn load_items(project: &Path) -> miette::Result<Vec<SelectorItem>> {
 		.collect::<Vec<_>>();
 	let ctx = crate::process_ctx(project)?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data_dir, project);
+	let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(
+		&data_dir,
+		project,
+		omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+	);
 	let mut skills = ActiveSkills::discover(&ctx, project, &plugins).into_diagnostic()?;
 	// Disabled skills are absent from discovery; list them from the cfg so
 	// they can be switched back on.

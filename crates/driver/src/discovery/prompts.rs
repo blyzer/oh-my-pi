@@ -667,7 +667,7 @@ mod tests {
 		);
 		fs::create_dir_all(&project).unwrap();
 
-		let plugins = ClaudePlugins::resolve(&data, &project);
+		let plugins = ClaudePlugins::resolve(&data, &project, None);
 		let templates = PromptTemplates::discover(&project, &root.join(".o2"), &plugins, &[], true);
 		let rows = templates
 			.templates
