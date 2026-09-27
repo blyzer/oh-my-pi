@@ -13,14 +13,14 @@ use bytes::{Bytes, BytesMut};
 use flume::Receiver;
 use omp_core::{Str, sf};
 use omp_proto::toolhost::v1::HookEventId;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use smallvec::SmallVec;
 use strum::{Display, EnumString, IntoStaticStr};
 use thiserror::Error;
 
-use crate::ApprovalSpec;
+use crate::{ApprovalSpec, BoxFut};
 
 /// Ordered stage in the hook decision procedure.
 #[allow(missing_docs, reason = "strum IntoStaticStr generates undocumented as_str")]
@@ -520,6 +520,77 @@ pub struct LifecycleAdmission {
 	pub approvals: Vec<ApprovalSpec>,
 	/// Ordered transform evidence retained for the caller's durable record.
 	pub trail:     Vec<TransformTrail>,
+	/// Model-visible context in-process hosts contributed, in host order. A
+	/// seam that owns a turn journals it; others discard it.
+	pub context:   Vec<HookContext>,
+}
+
+/// Model-visible context one hook host contributed at a seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HookContext {
+	/// Producer name journaled beside the text (for example a plugin id).
+	pub source: Str,
+	/// The context the model reads.
+	pub body:   Str,
+}
+
+/// The answer an in-process hook host gives for one gateable event.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum NativeVerdict {
+	/// No opinion; the procedure continues unchanged.
+	#[default]
+	Defer,
+	/// Refuse the operation with a reason the caller surfaces.
+	Deny(Str),
+	/// Proceed with this replacement payload (REPLACE composition).
+	Modify(JsonValue),
+	/// `agent_settled` only: run another turn instead of settling.
+	Continue,
+}
+
+/// One in-process host reply: its verdict plus any model-visible context.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NativeReply {
+	/// The host's decision.
+	pub verdict: NativeVerdict,
+	/// Context for the model; only seams that own a turn journal it
+	/// (`before_agent_start`, and `agent_settled` when it continues).
+	pub context: Vec<HookContext>,
+}
+
+impl NativeReply {
+	/// A reply with no opinion and no context.
+	#[must_use]
+	pub const fn defer() -> Self {
+		Self { verdict: NativeVerdict::Defer, context: Vec::new() }
+	}
+}
+
+/// A Rust-native hook host registered on the same [`HookGate`] extension
+/// hosts use, without an out-of-process transport.
+///
+/// Native hosts answer before the extension procedure: a denial
+/// short-circuits it, a modification is the payload extension hosts then see,
+/// and observations reach native hosts beside extension observers. The
+/// boxed future is the quarantined cold `dyn` boundary: every production
+/// host performs process or network I/O per decision, and the gate only
+/// dispatches events a host declared in [`HookGate::attach_native`].
+pub trait NativeHookHost: Send + Sync + 'static {
+	/// Decides one gateable (or `agent_settled`) event.
+	fn decide<'a>(&'a self, event: HookEventId, payload: &'a JsonValue) -> BoxFut<'a, NativeReply>;
+	/// Observes one lifecycle notification; must not block the caller.
+	fn observe(&self, event: HookEventId, payload: &JsonValue) {
+		let _ = (event, payload);
+	}
+}
+
+/// `agent_settled` outcome plus the context a continuing host contributed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettledReply {
+	/// Continue or settle.
+	pub decision: AgentSettled,
+	/// Model-visible context to journal before the continuation turn.
+	pub context:  Vec<HookContext>,
 }
 
 /// Domain gate result retaining each valid responder's authenticated
@@ -593,6 +664,36 @@ impl LifecycleHooks {
 		&self.gate
 	}
 
+	/// Whether any extension or in-process host subscribes `event`.
+	#[inline]
+	#[must_use]
+	pub fn subscribed(&self, event: HookEventId) -> bool {
+		self.gate.subscribed(event) || self.gate.native_subscribed(event)
+	}
+
+	/// Runs every in-process host subscribed to `event` in attachment order:
+	/// a denial short-circuits, a modification replaces the payload the next
+	/// host (and then the extension procedure) sees.
+	async fn native_gate(
+		&self,
+		event: HookEventId,
+		mut payload: JsonValue,
+	) -> Result<(JsonValue, Vec<HookContext>), LifecycleHookError> {
+		let mut context = Vec::new();
+		for host in self.gate.native_hosts(event) {
+			let reply = host.decide(event, &payload).await;
+			context.extend(reply.context);
+			match reply.verdict {
+				NativeVerdict::Deny(reason) => {
+					return Err(LifecycleHookError::Denied { event, reason });
+				},
+				NativeVerdict::Modify(next) => payload = next,
+				NativeVerdict::Defer | NativeVerdict::Continue => {},
+			}
+		}
+		Ok((payload, context))
+	}
+
 	/// Evaluates a revision-1 JSON lifecycle gate without silently authorizing
 	/// an unresolved approval requirement.
 	pub async fn evaluate(
@@ -600,8 +701,18 @@ impl LifecycleHooks {
 		event: HookEventId,
 		payload: JsonValue,
 	) -> Result<LifecycleAdmission, LifecycleHookError> {
+		let (payload, context) = if self.gate.native_subscribed(event) {
+			self.native_gate(event, payload).await?
+		} else {
+			(payload, Vec::new())
+		};
 		if !self.gate.subscribed(event) {
-			return Ok(LifecycleAdmission { payload, approvals: Vec::new(), trail: Vec::new() });
+			return Ok(LifecycleAdmission {
+				payload,
+				approvals: Vec::new(),
+				trail: Vec::new(),
+				context,
+			});
 		}
 		let encoded = serde_json::to_vec(&payload)
 			.map_err(|source| LifecycleHookError::MalformedPayload { event, source })?;
@@ -613,14 +724,29 @@ impl LifecycleHooks {
 			GateOutcome::Allow { event: effective, trail } => {
 				let payload = serde_json::from_slice(&effective.effective_args)
 					.map_err(|source| LifecycleHookError::MalformedTransform { event, source })?;
-				Ok(LifecycleAdmission { payload, approvals: Vec::new(), trail })
+				Ok(LifecycleAdmission { payload, approvals: Vec::new(), trail, context })
 			},
 			GateOutcome::Deny { reason, .. } => Err(LifecycleHookError::Denied { event, reason }),
 			GateOutcome::Approval { event: effective, specs, trail } => {
 				let payload = serde_json::from_slice(&effective.effective_args)
 					.map_err(|source| LifecycleHookError::MalformedTransform { event, source })?;
-				Ok(LifecycleAdmission { payload, approvals: specs, trail })
+				Ok(LifecycleAdmission { payload, approvals: specs, trail, context })
 			},
+		}
+	}
+
+	/// [`Self::evaluate`] for a caller with no durable approval owner: an
+	/// approval requirement is an error, never silently authorized.
+	pub async fn admit(
+		&self,
+		event: HookEventId,
+		payload: JsonValue,
+	) -> Result<LifecycleAdmission, LifecycleHookError> {
+		let admission = self.evaluate(event, payload).await?;
+		if admission.approvals.is_empty() {
+			Ok(admission)
+		} else {
+			Err(LifecycleHookError::ApprovalUnsupported { event })
 		}
 	}
 
@@ -633,34 +759,43 @@ impl LifecycleHooks {
 		event: HookEventId,
 		payload: JsonValue,
 	) -> Result<JsonValue, LifecycleHookError> {
-		let admission = self.evaluate(event, payload).await?;
-		if admission.approvals.is_empty() {
-			Ok(admission.payload)
-		} else {
-			Err(LifecycleHookError::ApprovalUnsupported { event })
-		}
+		Ok(self.admit(event, payload).await?.payload)
 	}
 
-	/// Asks subscribed extensions whether a candidate yield should settle or
+	/// Asks subscribed hosts whether a candidate yield should settle or
 	/// continue (`agent_settled`); unsubscribed and failed replies settle.
-	pub async fn agent_settled(&self, payload: JsonValue) -> AgentSettled {
-		if !self.gate.subscribed(HookEventId::HookEventAgentSettled) {
-			return AgentSettled::Settle;
+	/// In-process hosts answer first; the first `Continue` wins with its
+	/// context.
+	pub async fn agent_settled(&self, payload: JsonValue) -> SettledReply {
+		let event = HookEventId::HookEventAgentSettled;
+		for host in self.gate.native_hosts(event) {
+			let reply = host.decide(event, &payload).await;
+			if reply.verdict == NativeVerdict::Continue {
+				return SettledReply { decision: AgentSettled::Continue, context: reply.context };
+			}
+		}
+		let settle = SettledReply { decision: AgentSettled::Settle, context: Vec::new() };
+		if !self.gate.subscribed(event) {
+			return settle;
 		}
 		let Ok(encoded) = serde_json::to_vec(&payload) else {
-			return AgentSettled::Settle;
+			return settle;
 		};
-		self
+		let decision = self
 			.gate
 			.gate_domain(&AgentSettledEvent { payload: Bytes::from(encoded) })
 			.await
-			.winner
+			.winner;
+		SettledReply { decision, context: Vec::new() }
 	}
 
 	/// Publishes a revision-1 JSON lifecycle observation.
 	///
 	/// A full observer queue remains lossy and is accounted by [`HookGate`].
 	pub fn notify(&self, event: HookEventId, payload: JsonValue) -> Result<(), LifecycleHookError> {
+		for host in self.gate.native_hosts(event) {
+			host.observe(event, &payload);
+		}
 		if !self.gate.subscribed(event) {
 			return Ok(());
 		}
@@ -710,6 +845,8 @@ pub struct HookGate {
 	delegated:         bool,
 	timeout_override:  Option<Duration>,
 	tool_call_timeout: Duration,
+	native_mask:       [AtomicU64; MASK_WORDS],
+	native:            RwLock<Vec<(u128, Arc<dyn NativeHookHost>)>>,
 }
 
 impl HookGate {
@@ -763,6 +900,8 @@ impl HookGate {
 				delegated,
 				timeout_override,
 				tool_call_timeout,
+				native_mask: [const { AtomicU64::new(0) }; MASK_WORDS],
+				native: RwLock::new(Vec::new()),
 			},
 			receive,
 		)
@@ -838,6 +977,41 @@ impl HookGate {
 			word.store(value, Ordering::Release);
 		}
 		Ok(())
+	}
+
+	/// Attaches an in-process host for `events`. It answers before the
+	/// extension procedure of every event it declared, in attachment order.
+	pub fn attach_native(&self, host: Arc<dyn NativeHookHost>, events: &[HookEventId]) {
+		let mask = events
+			.iter()
+			.fold(0_u128, |mask, event| mask | (1_u128 << (*event as u32)));
+		let mut native = self.native.write();
+		native.push((mask, host));
+		let combined = native.iter().fold(0_u128, |all, (mask, _)| all | mask);
+		self.native_mask[0].store(combined as u64, Ordering::Release);
+		self.native_mask[1].store((combined >> 64) as u64, Ordering::Release);
+	}
+
+	/// Whether an attached in-process host declared `event`.
+	#[inline]
+	pub fn native_subscribed(&self, event: HookEventId) -> bool {
+		let (word, bit) = event_position(event);
+		self.native_mask[word].load(Ordering::Relaxed) & bit != 0
+	}
+
+	/// The in-process hosts that declared `event`, in attachment order.
+	fn native_hosts(&self, event: HookEventId) -> SmallVec<Arc<dyn NativeHookHost>, 2> {
+		if !self.native_subscribed(event) {
+			return SmallVec::new();
+		}
+		let bit = 1_u128 << (event as u32);
+		self
+			.native
+			.read()
+			.iter()
+			.filter(|(mask, _)| mask & bit != 0)
+			.map(|(_, host)| Arc::clone(host))
+			.collect()
 	}
 
 	/// Returns whether an event has any subscribed or fail-closed stub bit.
@@ -1222,7 +1396,7 @@ mod tests {
 	use std::{sync::Arc, time::Duration};
 
 	use bytes::Bytes;
-	use omp_core::sf;
+	use omp_core::{Str, sf};
 	use omp_proto::toolhost::v1::HookEventId;
 
 	use super::{
@@ -1476,5 +1650,124 @@ mod tests {
 		let (outcome, ()) = tokio::join!(gate_future, driver);
 		assert_eq!(outcome.winner, super::AgentSettled::Continue);
 		assert_eq!(outcome.contributions.len(), 1);
+	}
+
+	/// A scripted in-process host recording what it saw.
+	struct ScriptedHost {
+		reply:    super::NativeReply,
+		seen:     parking_lot::Mutex<Vec<(HookEventId, serde_json::Value)>>,
+		observed: parking_lot::Mutex<Vec<HookEventId>>,
+	}
+
+	impl ScriptedHost {
+		fn new(reply: super::NativeReply) -> Arc<Self> {
+			Arc::new(Self {
+				reply,
+				seen: parking_lot::Mutex::new(Vec::new()),
+				observed: parking_lot::Mutex::new(Vec::new()),
+			})
+		}
+	}
+
+	impl super::NativeHookHost for ScriptedHost {
+		fn decide<'a>(
+			&'a self,
+			event: HookEventId,
+			payload: &'a serde_json::Value,
+		) -> crate::BoxFut<'a, super::NativeReply> {
+			self.seen.lock().push((event, payload.clone()));
+			Box::pin(std::future::ready(self.reply.clone()))
+		}
+
+		fn observe(&self, event: HookEventId, _: &serde_json::Value) {
+			self.observed.lock().push(event);
+		}
+	}
+
+	fn context(body: &'static str) -> Vec<super::HookContext> {
+		vec![super::HookContext { source: sf!("p@m"), body: Str::new_static(body) }]
+	}
+
+	#[tokio::test]
+	async fn native_denial_short_circuits_the_extension_procedure() {
+		let (gate, receiver) = HookGate::channel();
+		let mut precheck = subscription(HookPhase::Precheck, 1);
+		precheck.event = HookEventId::HookEventBeforeAgentStart;
+		gate.subscribe("test", [precheck]).unwrap();
+		let host = ScriptedHost::new(super::NativeReply {
+			verdict: super::NativeVerdict::Deny(sf!("plugin says no")),
+			context: Vec::new(),
+		});
+		gate.attach_native(host.clone(), &[HookEventId::HookEventBeforeAgentStart]);
+		let hooks = LifecycleHooks::new(Arc::new(gate));
+		let outcome = hooks
+			.evaluate(HookEventId::HookEventBeforeAgentStart, serde_json::json!({"text": "hi"}))
+			.await;
+		assert!(matches!(
+			outcome,
+			Err(LifecycleHookError::Denied { ref reason, .. }) if reason == "plugin says no"
+		));
+		assert_eq!(host.seen.lock().len(), 1);
+		assert!(receiver.try_recv().is_err(), "no extension dispatch after a native denial");
+	}
+
+	#[tokio::test]
+	async fn native_hosts_modify_and_contribute_context_without_extensions() {
+		let (gate, receiver) = HookGate::channel();
+		let host = ScriptedHost::new(super::NativeReply {
+			verdict: super::NativeVerdict::Modify(serde_json::json!({"text": "rewritten"})),
+			context: context("extra"),
+		});
+		gate.attach_native(host, &[HookEventId::HookEventBeforeAgentStart]);
+		assert!(!gate.subscribed(HookEventId::HookEventBeforeAgentStart));
+		assert!(gate.native_subscribed(HookEventId::HookEventBeforeAgentStart));
+		assert!(!gate.native_subscribed(HookEventId::HookEventToolCall));
+		let hooks = LifecycleHooks::new(Arc::new(gate));
+		assert!(hooks.subscribed(HookEventId::HookEventBeforeAgentStart));
+		let admission = hooks
+			.admit(HookEventId::HookEventBeforeAgentStart, serde_json::json!({"text": "hi"}))
+			.await
+			.unwrap();
+		assert_eq!(admission.payload, serde_json::json!({"text": "rewritten"}));
+		assert_eq!(admission.context, context("extra"));
+		assert!(receiver.try_recv().is_err());
+	}
+
+	#[tokio::test]
+	async fn native_continue_wins_agent_settled_with_its_context() {
+		let (gate, _receiver) = HookGate::channel();
+		let host = ScriptedHost::new(super::NativeReply {
+			verdict: super::NativeVerdict::Continue,
+			context: context("keep going"),
+		});
+		gate.attach_native(host, &[HookEventId::HookEventAgentSettled]);
+		let hooks = LifecycleHooks::new(Arc::new(gate));
+		let settled = hooks.agent_settled(serde_json::json!({})).await;
+		assert_eq!(settled.decision, AgentSettled::Continue);
+		assert_eq!(settled.context, context("keep going"));
+
+		let (gate, _receiver) = HookGate::channel();
+		gate.attach_native(ScriptedHost::new(super::NativeReply::defer()), &[
+			HookEventId::HookEventAgentSettled,
+		]);
+		let settled = LifecycleHooks::new(Arc::new(gate))
+			.agent_settled(serde_json::json!({}))
+			.await;
+		assert_eq!(settled.decision, AgentSettled::Settle);
+	}
+
+	#[test]
+	fn observations_reach_native_hosts_that_declared_the_event() {
+		let (gate, _receiver) = HookGate::channel();
+		let host = ScriptedHost::new(super::NativeReply::defer());
+		gate.attach_native(host.clone(), &[HookEventId::HookEventTurnEnd]);
+		let hooks = LifecycleHooks::new(Arc::new(gate));
+		hooks
+			.notify(HookEventId::HookEventTurnEnd, serde_json::json!({}))
+			.unwrap();
+		hooks
+			.notify(HookEventId::HookEventTurnStart, serde_json::json!({}))
+			.unwrap();
+		assert_eq!(*host.observed.lock(), [HookEventId::HookEventTurnEnd]);
 	}
 }

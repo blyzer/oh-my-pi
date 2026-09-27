@@ -1301,7 +1301,7 @@ mod tests {
 			.unwrap();
 		transactions.install("helper@market", false).await.unwrap();
 
-		let plugins = ClaudePlugins::resolve(&data_dir, &project);
+		let plugins = ClaudePlugins::resolve(&data_dir, &project, None);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		let [installed] = plugins.plugins.as_slice() else {
 			panic!("expected one installed plugin: {:?}", plugins.plugins);
@@ -1320,7 +1320,7 @@ mod tests {
 		assert_eq!(triage.provider, CLAUDE_PLUGINS_PROVIDER);
 
 		transactions.set_enabled("helper", false).unwrap();
-		let plugins = ClaudePlugins::resolve(&data_dir, &project);
+		let plugins = ClaudePlugins::resolve(&data_dir, &project, None);
 		assert!(plugins.plugins.is_empty(), "a disabled install never loads");
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 	}

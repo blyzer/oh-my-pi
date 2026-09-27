@@ -591,6 +591,9 @@ pub struct PluginRow {
 	pub scope:       Str,
 	/// Whether a project-scope install shadows this user-scope entry.
 	pub shadowed:    bool,
+	/// Installed by Claude Code: listed read-only, never installed,
+	/// uninstalled, or toggled from omp.
+	pub external:    bool,
 }
 
 /// One configured marketplace source.

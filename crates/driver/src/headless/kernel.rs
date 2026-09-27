@@ -1756,7 +1756,11 @@ pub async fn compose_kernel(
 	let claude_plugins = if let Some(plugins) = &options.claude_plugins {
 		Arc::clone(plugins)
 	} else {
-		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(data_dir, &project_root);
+		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(
+			data_dir,
+			&project_root,
+			omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+		);
 		// The launching host surfaces these once; a host-less composition
 		// (child, maintenance, or tool kernel) only records them.
 		for diagnostic in &plugins.diagnostics {
@@ -2148,7 +2152,7 @@ pub async fn compose_kernel(
 		.with_route_facts(route_facts)
 		.with_runtime_flags(runtime_flags)
 		.with_con_context(Arc::clone(&ctx))
-		.with_hook_gate(admission_gate)
+		.with_hook_gate(Arc::clone(&admission_gate))
 		.with_session_state_bridge(con_journal.clone());
 	// The session's one approval authority: environment policy (sandbox
 	// amendments, privileged mutations, dynamic devices) and the tool
@@ -2188,6 +2192,23 @@ pub async fn compose_kernel(
 		crate::subagent::settings::CL_IRC_RELAY_TO_MAIN.get(&relay_ctx)
 	});
 	let up = kernel.mailbox();
+	// Installed plugins' Claude-format hooks answer on the generic hook
+	// surface, beside extension hosts.
+	if tools_enabled
+		&& let Some(host) = crate::plugin_hooks::PluginHookHost::new(
+			hub_environment.clone(),
+			crate::plugin_hooks::PluginHookSession {
+				session_id:   id.clone(),
+				transcript:   journal_path.clone(),
+				project_root: project_root.clone(),
+				data_dir:     data_dir.to_path_buf(),
+				subagent:     options.parent_session.is_some(),
+			},
+			&claude_plugins,
+		) {
+		host.bind_mailbox(up.clone());
+		host.attach(&admission_gate);
+	}
 	let session_mutator = crate::subagent::workpool_scheduler::SessionMutator::new(up.clone());
 	kernel
 		.inference()

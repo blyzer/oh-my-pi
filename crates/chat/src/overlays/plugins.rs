@@ -137,7 +137,11 @@ impl PluginSelector {
 					.version
 					.as_ref()
 					.map_or_else(Str::default, |version| sf!("@{version}"));
-				let status = if plugin.installed { " [installed]" } else { "" };
+				let status = match (plugin.installed, plugin.external) {
+					(_, true) => " [claude-code]",
+					(true, false) => " [installed]",
+					(false, false) => "",
+				};
 				let scope = if plugin.scope.is_empty() {
 					Str::default()
 				} else {
@@ -218,6 +222,11 @@ impl PluginSelector {
 		let Some(plugin) = self.report.plugins.iter().find(|plugin| plugin.id == id) else {
 			return PanelEvent::Consumed;
 		};
+		if plugin.external {
+			return PanelEvent::Notice(sf!(
+				"{id} is installed by Claude Code; manage it with Claude Code"
+			));
+		}
 		let installing = !plugin.installed;
 		let mutation = if installing {
 			Mutation::InstallPlugin { id: Str::new(id) }
@@ -338,6 +347,7 @@ mod tests {
 				Str::default()
 			},
 			shadowed: false,
+			external: false,
 		}
 	}
 

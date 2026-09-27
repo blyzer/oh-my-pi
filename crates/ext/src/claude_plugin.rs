@@ -21,9 +21,12 @@
 //!   them; the document authority validates each declaration with its own LSP
 //!   and DAP parsers and reports a rejected one as
 //!   [`PluginDiagnostic::InvalidComponent`];
-//! * `agents/`, `hooks/hooks.json`, `output-styles/`, `tools/` have no runtime
-//!   home yet and surface as [`PluginDiagnostic::Unsupported`] instead of being
-//!   dropped silently.
+//! * hooks: `hooks/hooks.json` plus manifest `hooks` (a path, an inline event
+//!   map, or an array of either), parsed into [`PluginHook`]s by
+//!   [`crate::claude_hooks`]; the runtime runs them on its hook surface;
+//! * `agents/`, `output-styles/`, `tools/`, and OMP v1's JS/TS `hooks/pre|post`
+//!   factories have no runtime home yet and surface as
+//!   [`PluginDiagnostic::Unsupported`] instead of being dropped silently.
 //!
 //! Plugin-shipped paths use `${CLAUDE_PLUGIN_ROOT}`; [`expand_plugin_vars`]
 //! and [`resolve_plugin_command`] are the one expansion every runtime seam
@@ -36,6 +39,14 @@
 //! Precedence mirrors the `omp ext` projection: an enabled project install
 //! shadows the user install of the same plugin id; a disabled entry never
 //! loads and never shadows.
+//!
+//! Claude Code's own registry (`<claude>/plugins/installed_plugins.json`,
+//! [`ClaudeCodeHome`]) merges in read-only, as OMP v1 did: an id any omp
+//! registry records wins over Claude's entries for it, Claude's
+//! `enabledPlugins` settings override its registry's enabled state, and a
+//! project- or local-scope Claude entry loads only in its `projectPath`
+//! unless `enabledPlugins` opts it in. Those plugins carry
+//! [`PluginSource::ClaudeCode`].
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -47,6 +58,8 @@ use omp_core::Str;
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::value::RawValue;
 use strum::{Display, IntoStaticStr};
+
+use crate::claude_hooks::{ClaudeHookEvent, HookHandlerGap, PluginHook};
 
 /// Registry file name inside a scope's plugin directory.
 pub const REGISTRY_FILE: &str = "installed_plugins.json";
@@ -185,6 +198,55 @@ pub enum PluginScope {
 	Project,
 	/// `<data>/plugins/installed_plugins.json`.
 	User,
+}
+
+/// Which installer recorded a resolved plugin.
+#[derive(Clone, Copy, Debug, Display, Eq, IntoStaticStr, Ord, PartialEq, PartialOrd)]
+#[strum(serialize_all = "kebab-case")]
+pub enum PluginSource {
+	/// omp's registries, managed by `omp ext` and `/plugins`.
+	Omp,
+	/// Claude Code's registry: loaded read-only, managed by Claude Code.
+	ClaudeCode,
+}
+
+/// Claude Code's configuration directory: `$CLAUDE_CONFIG_DIR`, else
+/// `~/.claude`. Plugin resolution only ever reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaudeCodeHome {
+	config_dir: PathBuf,
+}
+
+impl ClaudeCodeHome {
+	/// Claude Code's configuration directory for this process:
+	/// `$CLAUDE_CONFIG_DIR` (Claude Code's own override), else `<home>/.claude`
+	/// with the home directory every omp path derives from.
+	#[must_use]
+	pub fn detect() -> Option<Self> {
+		std::env::var_os("CLAUDE_CONFIG_DIR")
+			.filter(|dir| !dir.is_empty())
+			.map(PathBuf::from)
+			.or_else(|| omp_core::dirs::home_dir().map(|home| home.join(".claude")))
+			.map(Self::at)
+	}
+
+	/// A Claude Code configuration directory at `config_dir`.
+	#[must_use]
+	pub fn at(config_dir: impl Into<PathBuf>) -> Self {
+		Self { config_dir: config_dir.into() }
+	}
+
+	/// The configuration directory.
+	#[must_use]
+	pub fn config_dir(&self) -> &Path {
+		&self.config_dir
+	}
+
+	/// Claude Code's `plugins/installed_plugins.json`.
+	#[must_use]
+	pub fn registry(&self) -> PathBuf {
+		self.config_dir.join("plugins").join(REGISTRY_FILE)
+	}
 }
 
 /// A plugin component kind, as diagnostics name it.
@@ -339,6 +401,88 @@ pub enum PluginDiagnostic {
 		/// Where the component was found.
 		path:      PathBuf,
 	},
+	/// A hooks declaration names an event Claude Code does not define.
+	#[error("plugin `{plugin}` hooks unknown event `{event}` in {}; not loaded", path.display())]
+	UnknownHookEvent {
+		/// Plugin id.
+		plugin: Str,
+		/// Declared event name.
+		event:  Str,
+		/// Declaration file, or the manifest for an inline declaration.
+		path:   PathBuf,
+	},
+	/// A hook event with no faithful omp counterpart; only that event's hooks
+	/// are skipped.
+	#[error("plugin `{plugin}` hooks {event} in {}, which omp does not run", path.display())]
+	UnsupportedHookEvent {
+		/// Plugin id.
+		plugin: Str,
+		/// The unsupported event.
+		event:  ClaudeHookEvent,
+		/// Declaration file, or the manifest for an inline declaration.
+		path:   PathBuf,
+	},
+	/// One hook handler omp cannot run as declared; the event's other
+	/// handlers still load.
+	#[error("plugin `{plugin}` {event} hook in {} does not run", path.display())]
+	UnsupportedHookHandler {
+		/// Plugin id.
+		plugin: Str,
+		/// The handler's event.
+		event:  ClaudeHookEvent,
+		/// What omp does not support.
+		#[source]
+		reason: HookHandlerGap,
+		/// Declaration file, or the manifest for an inline declaration.
+		path:   PathBuf,
+	},
+	/// A tool matcher names tools omp does not have; those names never match.
+	#[error(
+		"plugin `{plugin}` {event} matcher names tools omp does not have ({}) in {}; they never match",
+		tools.join(", "),
+		path.display()
+	)]
+	UnmappedHookMatcher {
+		/// Plugin id.
+		plugin: Str,
+		/// The matcher's event.
+		event:  ClaudeHookEvent,
+		/// Unmapped names (or the pattern matching no mapped name).
+		tools:  Box<[Str]>,
+		/// Declaration file, or the manifest for an inline declaration.
+		path:   PathBuf,
+	},
+	/// A matcher is not a valid regular expression; its group does not load.
+	#[error("plugin `{plugin}` {event} matcher in {} is not a valid pattern", path.display())]
+	InvalidHookMatcher {
+		/// Plugin id.
+		plugin: Str,
+		/// The matcher's event.
+		event:  ClaudeHookEvent,
+		/// Declaration file, or the manifest for an inline declaration.
+		path:   PathBuf,
+		/// Compilation failure.
+		#[source]
+		source: regex::Error,
+	},
+	/// A Claude Code settings file is not JSON; its `enabledPlugins` are
+	/// ignored.
+	#[error("Claude Code settings {} are malformed; their enabledPlugins are ignored", path.display())]
+	ClaudeSettings {
+		/// Settings path.
+		path:   PathBuf,
+		/// Decoding failure.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// A Claude Code registry entry has no `installPath`.
+	#[error("Claude Code plugin `{plugin}` entry in {} has no installPath", registry.display())]
+	ClaudeEntryWithoutPath {
+		/// Plugin id.
+		plugin:   Str,
+		/// Registry path.
+		registry: PathBuf,
+	},
 	/// A located declaration failed the owning runtime seam's validation; it
 	/// does not load and the rest of the plugin set still does.
 	#[error("plugin `{plugin}` declares invalid {component} in {}; not loaded", path.display())]
@@ -368,8 +512,10 @@ pub struct ClaudePlugin {
 	pub marketplace: Str,
 	/// Recorded version.
 	pub version:     Str,
-	/// Registry the install came from.
+	/// Registry scope the install came from.
 	pub scope:       PluginScope,
+	/// Which installer recorded it.
+	pub source:      PluginSource,
 	/// Canonical plugin root (the value of `${CLAUDE_PLUGIN_ROOT}`).
 	pub root:        PathBuf,
 	/// Package format and its loadable components.
@@ -402,10 +548,13 @@ pub struct ClaudeComponents {
 	/// Debug-adapter declarations, lowest precedence first: the root
 	/// [`DAP_CONFIG_FILES`].
 	pub dap:      Box<[ConfigDeclaration]>,
+	/// Hooks from `hooks/hooks.json` then manifest `hooks`, in declaration
+	/// order.
+	pub hooks:    Box<[PluginHook]>,
 }
 
 /// Where a plugin declares a server map (MCP servers, language servers, or
-/// debug adapters).
+/// debug adapters) or a hook-event map.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigDeclaration {
 	/// A JSON (or, for LSP/DAP, YAML by extension) file: a `{kind: {...}}`
@@ -415,7 +564,7 @@ pub enum ConfigDeclaration {
 	Inline {
 		/// Manifest path (the declaration's source).
 		manifest: PathBuf,
-		/// The raw JSON object of servers.
+		/// The raw JSON object (servers, or hook events).
 		servers:  Str,
 	},
 }
@@ -434,15 +583,11 @@ impl ConfigDeclaration {
 /// Expands the plugin path variables in one plugin-declared string.
 ///
 /// `${CLAUDE_PLUGIN_ROOT}`, `${OMP_PLUGIN_ROOT}` and `${PLUGIN_ROOT}` become
-/// `root`; `${PLUGIN_DATA}` becomes `data` when the plugin has a data
-/// directory. A value without variables is returned as is.
+/// `root`; `${CLAUDE_PLUGIN_DATA}` and `${PLUGIN_DATA}` become `data` when the
+/// plugin has a data directory. A value without variables is returned as is.
 #[must_use]
 pub fn expand_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
-	if !value.contains("${PLUGIN_ROOT}")
-		&& !value.contains("${PLUGIN_DATA}")
-		&& !value.contains("${CLAUDE_PLUGIN_ROOT}")
-		&& !value.contains("${OMP_PLUGIN_ROOT}")
-	{
+	if !value.contains("PLUGIN_ROOT}") && !value.contains("PLUGIN_DATA}") {
 		return value;
 	}
 	let root = root.to_string_lossy();
@@ -451,9 +596,36 @@ pub fn expand_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
 		.replace("${CLAUDE_PLUGIN_ROOT}", root.as_ref())
 		.replace("${OMP_PLUGIN_ROOT}", root.as_ref());
 	match data {
-		Some(data) => Str::new(replaced.replace("${PLUGIN_DATA}", data.to_string_lossy().as_ref())),
+		Some(data) => {
+			let data = data.to_string_lossy();
+			Str::new(
+				replaced
+					.replace("${PLUGIN_DATA}", data.as_ref())
+					.replace("${CLAUDE_PLUGIN_DATA}", data.as_ref()),
+			)
+		},
 		None => Str::new(replaced),
 	}
+}
+
+/// A plugin's persistent data directory under omp's data directory (the
+/// value of `${CLAUDE_PLUGIN_DATA}`): `<data>/plugins/data/<id>`, the id with
+/// every character but ASCII letters, digits, `_`, and `-` replaced by `-`,
+/// as Claude Code names its own. Never Claude Code's directory, which omp
+/// does not write.
+#[must_use]
+pub fn plugin_data_dir(data_dir: &Path, id: &str) -> PathBuf {
+	let name = id
+		.chars()
+		.map(|c| {
+			if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+				c
+			} else {
+				'-'
+			}
+		})
+		.collect::<String>();
+	user_plugins_dir(data_dir).join("data").join(name)
 }
 
 /// Resolves a plugin's path-like relative command (`./bin/server`,
@@ -495,78 +667,288 @@ pub struct ClaudePlugins {
 }
 
 impl ClaudePlugins {
-	/// Resolves the user registry under `data_dir` and the project registry
-	/// under `project_root`.
+	/// Resolves the user registry under `data_dir`, the project registry
+	/// under `project_root`, and, when `claude` is given, Claude Code's
+	/// registry and `enabledPlugins` settings (read-only).
+	///
+	/// Order and precedence follow OMP v1: enabled project installs first,
+	/// then Claude Code installs whose id no omp registry records, then user
+	/// installs; an enabled project install shadows every other install of
+	/// its id.
 	#[must_use]
-	pub fn resolve(data_dir: &Path, project_root: &Path) -> Self {
+	pub fn resolve(data_dir: &Path, project_root: &Path, claude: Option<&ClaudeCodeHome>) -> Self {
 		let project_root =
 			fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-		Self::resolve_registries(
-			&project_plugins_dir(&project_root).join(REGISTRY_FILE),
-			&user_plugins_dir(data_dir).join(REGISTRY_FILE),
-		)
-	}
-
-	/// Resolves one project and one user registry file.
-	#[must_use]
-	pub fn resolve_registries(project_registry: &Path, user_registry: &Path) -> Self {
 		let mut out = Self::default();
-		let mut shadowed = BTreeSet::<Str>::new();
+		let project_path = project_plugins_dir(&project_root).join(REGISTRY_FILE);
+		let user_path = user_plugins_dir(data_dir).join(REGISTRY_FILE);
+		let project = out.read_registry(&project_path);
+		let user = out.read_registry(&user_path);
+		let claude = claude.and_then(|home| out.read_claude_code(home, &project_root));
+		let project_enabled = project
+			.plugins
+			.iter()
+			.filter(|(_, entries)| entries.iter().any(|entry| entry.enabled))
+			.map(|(id, _)| id.clone())
+			.collect::<BTreeSet<_>>();
+		// OMP v1: the omp registries are authoritative; any install they
+		// record for an id drops Claude Code's entries for it.
+		let omp_ids = user
+			.plugins
+			.iter()
+			.filter(|(_, entries)| !entries.is_empty())
+			.map(|(id, _)| id.clone())
+			.chain(project_enabled.iter().cloned())
+			.collect::<BTreeSet<_>>();
 		let mut seen_roots = BTreeSet::<PathBuf>::new();
-		for (scope, registry_path) in
-			[(PluginScope::Project, project_registry), (PluginScope::User, user_registry)]
-		{
-			let registry = match InstalledPluginsRegistry::read(registry_path) {
-				Ok(registry) => registry,
-				Err(error) => {
-					out.diagnostics.push(error.into());
-					continue;
-				},
-			};
-			let mut enabled_here = Vec::new();
-			for (id, entries) in registry.plugins {
-				let Some((name, marketplace)) = id
-					.rsplit_once('@')
-					.filter(|(name, marketplace)| !name.is_empty() && !marketplace.is_empty())
-				else {
-					out.diagnostics
-						.push(PluginDiagnostic::InvalidId { registry: registry_path.to_owned(), id });
-					continue;
-				};
-				if shadowed.contains(&id) {
-					continue;
-				}
-				let (name, marketplace) = (Str::new(name), Str::new(marketplace));
-				let mut any_enabled = false;
-				for entry in entries.into_iter().filter(|entry| entry.enabled) {
-					any_enabled = true;
-					let Some(root) = open_root(&id, &entry.install_path, &mut out.diagnostics) else {
-						continue;
-					};
-					if !seen_roots.insert(root.clone()) {
-						continue;
-					}
-					let Some(layout) = resolve_layout(&id, &root, &mut out.diagnostics) else {
-						continue;
-					};
-					out.plugins.push(ClaudePlugin {
-						id: id.clone(),
-						name: name.clone(),
-						marketplace: marketplace.clone(),
-						version: entry.version,
-						scope,
-						root,
-						layout,
-					});
-				}
-				if any_enabled {
-					enabled_here.push(id);
+		for (id, entries) in project.plugins {
+			let candidates = entries
+				.into_iter()
+				.filter(|entry| entry.enabled)
+				.map(|entry| Candidate::omp(entry, PluginScope::Project));
+			out.admit(&project_path, id, PluginSource::Omp, candidates, &mut seen_roots);
+		}
+		if let Some((registry_path, claude)) = claude {
+			for (id, candidates) in claude {
+				if !omp_ids.contains(&id) {
+					out.admit(
+						&registry_path,
+						id,
+						PluginSource::ClaudeCode,
+						candidates.into_iter(),
+						&mut seen_roots,
+					);
 				}
 			}
-			shadowed.extend(enabled_here);
+		}
+		for (id, entries) in user.plugins {
+			if project_enabled.contains(&id) {
+				continue;
+			}
+			let candidates = entries
+				.into_iter()
+				.filter(|entry| entry.enabled)
+				.map(|entry| Candidate::omp(entry, PluginScope::User));
+			out.admit(&user_path, id, PluginSource::Omp, candidates, &mut seen_roots);
 		}
 		out
 	}
+
+	fn read_registry(&mut self, path: &Path) -> InstalledPluginsRegistry {
+		InstalledPluginsRegistry::read(path).unwrap_or_else(|error| {
+			self.diagnostics.push(error.into());
+			InstalledPluginsRegistry::default()
+		})
+	}
+
+	/// Claude Code's enabled, applicable installs keyed by id, with the
+	/// registry path; `None` when it has no registry.
+	fn read_claude_code(
+		&mut self,
+		home: &ClaudeCodeHome,
+		project_root: &Path,
+	) -> Option<(PathBuf, BTreeMap<Str, Vec<Candidate>>)> {
+		let registry_path = home.registry();
+		let bytes = match fs::read(&registry_path) {
+			Ok(bytes) => bytes,
+			Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+			Err(source) => {
+				self
+					.diagnostics
+					.push(RegistryError::Read { path: registry_path, source }.into());
+				return None;
+			},
+		};
+		let registry = match serde_json::from_slice::<ClaudeCodeRegistryWire>(&bytes) {
+			Ok(registry) => registry,
+			Err(source) => {
+				self
+					.diagnostics
+					.push(RegistryError::Parse { path: registry_path, source }.into());
+				return None;
+			},
+		};
+		let overrides = self.claude_enabled_overrides(home, project_root);
+		let mut installs = BTreeMap::new();
+		for (id, entries) in registry.plugins {
+			let override_enabled = overrides.get(&id).copied();
+			if override_enabled == Some(false) {
+				continue;
+			}
+			let mut candidates = Vec::new();
+			for entry in entries {
+				if entry.enabled == Some(false) {
+					continue;
+				}
+				let Some(install_path) = entry.install_path else {
+					self
+						.diagnostics
+						.push(PluginDiagnostic::ClaudeEntryWithoutPath {
+							plugin:   id.clone(),
+							registry: registry_path.clone(),
+						});
+					continue;
+				};
+				let project_bound = matches!(entry.scope.as_deref(), Some("project" | "local"));
+				// `enabledPlugins: true` opts a project-bound install into
+				// this project even when it was recorded for another one.
+				if project_bound
+					&& override_enabled != Some(true)
+					&& !entry
+						.project_path
+						.and_then(|path| fs::canonicalize(path).ok())
+						.is_some_and(|path| path == project_root)
+				{
+					continue;
+				}
+				candidates.push(Candidate {
+					install_path,
+					version: entry.version.unwrap_or_else(|| Str::new_static("unknown")),
+					scope: if project_bound {
+						PluginScope::Project
+					} else {
+						PluginScope::User
+					},
+				});
+			}
+			installs.insert(id, candidates);
+		}
+		Some((registry_path, installs))
+	}
+
+	/// Claude Code's `enabledPlugins`, merged in its own layer order: the
+	/// user `settings.json`, then the project's `.claude/settings.json` and
+	/// `.claude/settings.local.json`; later layers win.
+	fn claude_enabled_overrides(
+		&mut self,
+		home: &ClaudeCodeHome,
+		project_root: &Path,
+	) -> BTreeMap<Str, bool> {
+		let mut overrides = BTreeMap::new();
+		for path in [
+			home.config_dir().join("settings.json"),
+			project_root.join(".claude").join("settings.json"),
+			project_root.join(".claude").join("settings.local.json"),
+		] {
+			let Ok(bytes) = fs::read(&path) else {
+				continue;
+			};
+			match serde_json::from_slice::<ClaudeSettingsWire>(&bytes) {
+				Ok(ClaudeSettingsWire { enabled_plugins: Some(EnabledPluginsWire::Map(map)) }) => {
+					for (id, value) in map {
+						if let EnabledValueWire::Bool(enabled) = value {
+							overrides.insert(id, enabled);
+						}
+					}
+				},
+				Ok(_) => {},
+				Err(source) => self
+					.diagnostics
+					.push(PluginDiagnostic::ClaudeSettings { path, source }),
+			}
+		}
+		overrides
+	}
+
+	/// Admits one id's candidate installs from one registry.
+	fn admit(
+		&mut self,
+		registry: &Path,
+		id: Str,
+		source: PluginSource,
+		candidates: impl Iterator<Item = Candidate>,
+		seen_roots: &mut BTreeSet<PathBuf>,
+	) {
+		let Some((name, marketplace)) = id
+			.rsplit_once('@')
+			.filter(|(name, marketplace)| !name.is_empty() && !marketplace.is_empty())
+			.map(|(name, marketplace)| (Str::new(name), Str::new(marketplace)))
+		else {
+			self
+				.diagnostics
+				.push(PluginDiagnostic::InvalidId { registry: registry.to_owned(), id });
+			return;
+		};
+		for candidate in candidates {
+			let Some(root) = open_root(&id, &candidate.install_path, &mut self.diagnostics) else {
+				continue;
+			};
+			if !seen_roots.insert(root.clone()) {
+				continue;
+			}
+			let Some(layout) = resolve_layout(&id, &root, &mut self.diagnostics) else {
+				continue;
+			};
+			self.plugins.push(ClaudePlugin {
+				id: id.clone(),
+				name: name.clone(),
+				marketplace: marketplace.clone(),
+				version: candidate.version,
+				scope: candidate.scope,
+				source,
+				root,
+				layout,
+			});
+		}
+	}
+}
+
+/// One install a registry offers for resolution.
+struct Candidate {
+	install_path: PathBuf,
+	version:      Str,
+	scope:        PluginScope,
+}
+
+impl Candidate {
+	fn omp(entry: InstalledPluginEntry, scope: PluginScope) -> Self {
+		Self { install_path: entry.install_path, version: entry.version, scope }
+	}
+}
+
+/// Claude Code's `installed_plugins.json`, read leniently: any schema
+/// version, optional fields.
+#[derive(Deserialize)]
+struct ClaudeCodeRegistryWire {
+	#[serde(default)]
+	plugins: BTreeMap<Str, Vec<ClaudeCodeEntryWire>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeEntryWire {
+	#[serde(default)]
+	scope:        Option<Str>,
+	#[serde(default)]
+	install_path: Option<PathBuf>,
+	#[serde(default)]
+	version:      Option<Str>,
+	#[serde(default)]
+	enabled:      Option<bool>,
+	#[serde(default)]
+	project_path: Option<PathBuf>,
+}
+
+/// The one Claude Code settings key plugin resolution reads.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeSettingsWire {
+	#[serde(default)]
+	enabled_plugins: Option<EnabledPluginsWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EnabledPluginsWire {
+	Map(BTreeMap<Str, EnabledValueWire>),
+	Other(IgnoredAny),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EnabledValueWire {
+	Bool(bool),
+	Other(IgnoredAny),
 }
 
 fn open_root(
@@ -605,7 +987,7 @@ struct ManifestWire {
 	#[serde(default)]
 	agents:        Option<IgnoredAny>,
 	#[serde(default)]
-	hooks:         Option<IgnoredAny>,
+	hooks:         Option<Box<RawValue>>,
 	#[serde(default)]
 	mcp_servers:   Option<Box<RawValue>>,
 	#[serde(default)]
@@ -715,10 +1097,27 @@ fn resolve_layout(
 		.existing_files(&DAP_CONFIG_FILES)
 		.into_boxed_slice();
 
+	// Hooks: `hooks/hooks.json`, then whatever the manifest declares merges in
+	// (Claude's plugin reference: `hooks` merges with the default file).
+	let mut hook_declarations = resolver
+		.existing_file("hooks/hooks.json")
+		.map(ConfigDeclaration::File)
+		.into_iter()
+		.collect::<Vec<_>>();
+	if let Some(raw) = manifest.hooks {
+		for declaration in resolver.manifest_hooks(&raw, manifest_file)? {
+			if !hook_declarations.contains(&declaration) {
+				hook_declarations.push(declaration);
+			}
+		}
+	}
+	components.hooks =
+		crate::claude_hooks::load_hooks(id, &hook_declarations, resolver.diagnostics).into();
+
 	// Components without a runtime home: surfaced, never silently dropped.
 	let manifest_marker = manifest_path.unwrap_or_else(|| root.to_path_buf());
 	let unsupported = [
-		(PluginComponent::Hooks, manifest.hooks.is_some(), &["hooks"][..]),
+		(PluginComponent::Hooks, false, &["hooks/pre", "hooks/post"][..]),
 		(PluginComponent::Agents, manifest.agents.is_some(), &["agents"][..]),
 		(PluginComponent::OutputStyles, manifest.output_styles.is_some(), &["output-styles"][..]),
 		(PluginComponent::Tools, false, &["tools"][..]),
@@ -837,6 +1236,54 @@ impl ComponentResolver<'_> {
 		}
 	}
 
+	/// Manifest `hooks`: a file path, an inline event map, or an array mixing
+	/// both. `None` when it has none of those shapes (the manifest diagnostic
+	/// is recorded and the plugin does not load).
+	fn manifest_hooks(&mut self, raw: &RawValue, manifest: &Path) -> Option<Vec<ConfigDeclaration>> {
+		let entries = if raw.get().trim_start().starts_with('[') {
+			serde_json::from_str::<Vec<Box<RawValue>>>(raw.get())
+		} else {
+			serde_json::from_str::<Box<RawValue>>(raw.get()).map(|entry| vec![entry])
+		};
+		let entries = match entries {
+			Ok(entries) => entries,
+			Err(source) => {
+				return self.manifest_error(manifest, source);
+			},
+		};
+		let mut declarations = Vec::new();
+		for entry in entries {
+			if entry.get().trim_start().starts_with('{') {
+				declarations.push(ConfigDeclaration::Inline {
+					manifest: manifest.to_path_buf(),
+					servers:  Str::new(entry.get()),
+				});
+				continue;
+			}
+			match serde_json::from_str::<PathBuf>(entry.get()) {
+				Ok(path) => declarations.extend(
+					self
+						.declared(PluginComponent::Hooks, &path)
+						.map(ConfigDeclaration::File),
+				),
+				Err(source) => {
+					return self.manifest_error(manifest, source);
+				},
+			}
+		}
+		Some(declarations)
+	}
+
+	/// Records a malformed manifest field; the plugin does not load.
+	fn manifest_error<T>(&mut self, manifest: &Path, source: serde_json::Error) -> Option<T> {
+		self.diagnostics.push(PluginDiagnostic::ManifestParse {
+			plugin: self.id.clone(),
+			path: manifest.to_path_buf(),
+			source,
+		});
+		None
+	}
+
 	/// A manifest-declared path, resolved against the root and contained.
 	fn declared(&mut self, component: PluginComponent, path: &Path) -> Option<PathBuf> {
 		let joined = self.root.join(path);
@@ -908,7 +1355,7 @@ mod tests {
 			&registry(&[("on@m", &on, true), ("off@m", &off, false)]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, &project);
+		let resolved = ClaudePlugins::resolve(&data, &project, None);
 
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 		assert_eq!(resolved.plugins.len(), 1);
@@ -939,7 +1386,7 @@ mod tests {
 			]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, &project);
+		let resolved = ClaudePlugins::resolve(&data, &project, None);
 
 		assert!(resolved.plugins.is_empty(), "{:?}", resolved.plugins);
 		let kinds = resolved
@@ -962,7 +1409,7 @@ mod tests {
 		);
 
 		write(&data.join("plugins/installed_plugins.json"), "{ nope");
-		let resolved = ClaudePlugins::resolve(&data, &project);
+		let resolved = ClaudePlugins::resolve(&data, &project, None);
 		assert!(matches!(resolved.diagnostics.as_slice(), [PluginDiagnostic::Registry(
 			RegistryError::Parse { .. }
 		)]));
@@ -987,13 +1434,15 @@ mod tests {
 		write(&project_copy.join("extra/b/SKILL.md"), "x");
 		write(&project_copy.join("agents/helper.md"), "x");
 		write(&project_copy.join("hooks/hooks.json"), "{}");
+		// OMP v1's JS/TS hook factories have no runtime; `hooks.json` does.
+		write(&project_copy.join("hooks/pre/guard.ts"), "x");
 		write(&data.join("plugins/installed_plugins.json"), &registry(&[("p@m", &user_copy, true)]));
 		write(
 			&project.join(".omp/plugins/installed_plugins.json"),
 			&registry(&[("p@m", &project_copy, true)]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, &project);
+		let resolved = ClaudePlugins::resolve(&data, &project, None);
 
 		assert_eq!(resolved.plugins.len(), 1);
 		let plugin = &resolved.plugins[0];
@@ -1020,7 +1469,7 @@ mod tests {
 			&project.join(".omp/plugins/installed_plugins.json"),
 			&registry(&[("p@m", &project_copy, false)]),
 		);
-		let resolved = ClaudePlugins::resolve(&data, &project);
+		let resolved = ClaudePlugins::resolve(&data, &project, None);
 		assert_eq!(resolved.plugins.len(), 1);
 		assert_eq!(resolved.plugins[0].scope, PluginScope::User);
 	}
@@ -1049,7 +1498,7 @@ mod tests {
 			&registry(&[("inline@m", &inline, true), ("by-path@m", &by_path, true)]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, temp.path());
+		let resolved = ClaudePlugins::resolve(&data, temp.path(), None);
 
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 		let components = |id: &str| {
@@ -1104,12 +1553,214 @@ mod tests {
 		std::os::unix::fs::symlink(temp.path().join("outside"), plugin.join("skills")).unwrap();
 		write(&data.join("plugins/installed_plugins.json"), &registry(&[("p@m", &plugin, true)]));
 
-		let resolved = ClaudePlugins::resolve(&data, temp.path());
+		let resolved = ClaudePlugins::resolve(&data, temp.path(), None);
 
 		let components = resolved.plugins[0].claude_components().unwrap();
 		assert!(components.skills.is_empty(), "{:?}", components.skills);
 		assert!(matches!(resolved.diagnostics.as_slice(), [
 			PluginDiagnostic::ComponentOutsideRoot { component: PluginComponent::Skills, .. }
 		]));
+	}
+
+	#[test]
+	fn hooks_json_and_manifest_hooks_merge_into_components() {
+		let temp = tempfile::tempdir().unwrap();
+		let data = temp.path().join("data");
+		let plugin = temp.path().join("plugin");
+		write(
+			&plugin.join("hooks/hooks.json"),
+			r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"a"}]}]}}"#,
+		);
+		write(
+			&plugin.join("config/extra.json"),
+			r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"b"}]}]}}"#,
+		);
+		write(
+			&plugin.join(".claude-plugin/plugin.json"),
+			r#"{"hooks":["./config/extra.json",{"PostToolUse":[{"hooks":[{"type":"command","command":"c"}]}]}]}"#,
+		);
+		write(&data.join("plugins/installed_plugins.json"), &registry(&[("p@m", &plugin, true)]));
+
+		let resolved = ClaudePlugins::resolve(&data, temp.path(), None);
+
+		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
+		let hooks = &resolved.plugins[0].claude_components().unwrap().hooks;
+		let commands = hooks
+			.iter()
+			.map(|hook| (hook.event, hook.command.command.as_str()))
+			.collect::<Vec<_>>();
+		assert_eq!(commands, [
+			(ClaudeHookEvent::PreToolUse, "a"),
+			(ClaudeHookEvent::Stop, "b"),
+			(ClaudeHookEvent::PostToolUse, "c"),
+		]);
+	}
+
+	/// A fake Claude Code home: its registry plus user settings.
+	struct ClaudeFixture {
+		temp:    tempfile::TempDir,
+		data:    PathBuf,
+		project: PathBuf,
+		home:    ClaudeCodeHome,
+	}
+
+	impl ClaudeFixture {
+		fn new() -> Self {
+			let temp = tempfile::tempdir().unwrap();
+			let data = temp.path().join("data");
+			let project = temp.path().join("project");
+			fs::create_dir_all(&project).unwrap();
+			let home = ClaudeCodeHome::at(temp.path().join("home/.claude"));
+			Self { temp, data, project, home }
+		}
+
+		/// A Claude-installed plugin root with one skill.
+		fn plugin(&self, name: &str) -> PathBuf {
+			let root = self
+				.home
+				.config_dir()
+				.join("plugins/cache/m")
+				.join(name)
+				.join("1.0.0");
+			write(&root.join("skills/s/SKILL.md"), "x");
+			root
+		}
+
+		fn claude_registry(&self, body: &str) {
+			write(&self.home.registry(), body);
+		}
+
+		fn resolve(&self) -> ClaudePlugins {
+			ClaudePlugins::resolve(&self.data, &self.project, Some(&self.home))
+		}
+	}
+
+	fn claude_entry(scope: &str, root: &Path, project: Option<&Path>) -> String {
+		let project = project.map_or_else(String::new, |path| {
+			format!(r#","projectPath":{}"#, serde_json::to_string(path).unwrap())
+		});
+		format!(
+			r#"{{"scope":"{scope}","installPath":{},"version":"1.0.0","installedAt":"t","lastUpdated":"t"{project}}}"#,
+			serde_json::to_string(root).unwrap()
+		)
+	}
+
+	#[test]
+	fn claude_code_installs_load_read_only_and_marked_as_claude_code() {
+		let fixture = ClaudeFixture::new();
+		let root = fixture.plugin("cc");
+		fixture.claude_registry(&format!(
+			r#"{{"version":2,"plugins":{{"cc@m":[{}]}}}}"#,
+			claude_entry("user", &root, None)
+		));
+		let snapshot = |dir: &Path| {
+			let mut files = BTreeMap::new();
+			let mut stack = vec![dir.to_path_buf()];
+			while let Some(dir) = stack.pop() {
+				for entry in fs::read_dir(&dir).unwrap() {
+					let path = entry.unwrap().path();
+					if path.is_dir() {
+						stack.push(path);
+					} else {
+						files.insert(path.clone(), fs::read(&path).unwrap());
+					}
+				}
+			}
+			files
+		};
+		let before = snapshot(fixture.home.config_dir());
+
+		let resolved = fixture.resolve();
+
+		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
+		assert_eq!(resolved.plugins.len(), 1);
+		let plugin = &resolved.plugins[0];
+		assert_eq!(plugin.id, "cc@m");
+		assert_eq!(plugin.source, PluginSource::ClaudeCode);
+		assert_eq!(plugin.scope, PluginScope::User);
+		assert_eq!(plugin.root, fs::canonicalize(&root).unwrap());
+		assert_eq!(snapshot(fixture.home.config_dir()), before, "~/.claude stays byte-identical");
+		// Without a Claude Code home nothing of Claude's loads.
+		assert!(
+			ClaudePlugins::resolve(&fixture.data, &fixture.project, None)
+				.plugins
+				.is_empty()
+		);
+	}
+
+	#[test]
+	fn an_omp_install_of_the_same_id_wins_over_claude_code() {
+		let fixture = ClaudeFixture::new();
+		let claude_root = fixture.plugin("dup");
+		let omp_root = fixture.temp.path().join("omp-copy");
+		write(&omp_root.join("skills/o/SKILL.md"), "x");
+		fixture.claude_registry(&format!(
+			r#"{{"version":2,"plugins":{{"dup@m":[{}]}}}}"#,
+			claude_entry("user", &claude_root, None)
+		));
+		write(
+			&fixture.data.join("plugins/installed_plugins.json"),
+			&registry(&[("dup@m", &omp_root, true)]),
+		);
+
+		let resolved = fixture.resolve();
+
+		assert_eq!(resolved.plugins.len(), 1, "{:?}", resolved.plugins);
+		assert_eq!(resolved.plugins[0].source, PluginSource::Omp);
+		assert_eq!(resolved.plugins[0].root, fs::canonicalize(&omp_root).unwrap());
+	}
+
+	#[test]
+	fn enabled_plugins_false_disables_a_claude_code_install() {
+		let fixture = ClaudeFixture::new();
+		let root = fixture.plugin("off");
+		fixture.claude_registry(&format!(
+			r#"{{"version":2,"plugins":{{"off@m":[{}]}}}}"#,
+			claude_entry("user", &root, None)
+		));
+		write(
+			&fixture.home.config_dir().join("settings.json"),
+			r#"{"theme":"dark","enabledPlugins":{"off@m":false,"other@m":"yes"}}"#,
+		);
+		let resolved = fixture.resolve();
+		assert!(resolved.plugins.is_empty(), "{:?}", resolved.plugins);
+		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
+
+		// The project's local settings are a later layer and win.
+		write(
+			&fixture.project.join(".claude/settings.local.json"),
+			r#"{"enabledPlugins":{"off@m":true}}"#,
+		);
+		assert_eq!(fixture.resolve().plugins.len(), 1);
+	}
+
+	#[test]
+	fn project_scope_claude_entries_bind_to_their_project_path() {
+		let fixture = ClaudeFixture::new();
+		let here = fixture.plugin("here");
+		let there = fixture.plugin("there");
+		let elsewhere = fixture.temp.path().join("elsewhere");
+		fs::create_dir_all(&elsewhere).unwrap();
+		fixture.claude_registry(&format!(
+			r#"{{"version":2,"plugins":{{"here@m":[{}],"there@m":[{}]}}}}"#,
+			claude_entry("project", &here, Some(&fixture.project)),
+			claude_entry("local", &there, Some(&elsewhere)),
+		));
+
+		let resolved = fixture.resolve();
+
+		let ids = resolved
+			.plugins
+			.iter()
+			.map(|plugin| (plugin.id.as_str(), plugin.scope))
+			.collect::<Vec<_>>();
+		assert_eq!(ids, [("here@m", PluginScope::Project)]);
+
+		// `enabledPlugins: true` opts the other project's install in.
+		write(
+			&fixture.project.join(".claude/settings.json"),
+			r#"{"enabledPlugins":{"there@m":true}}"#,
+		);
+		assert_eq!(fixture.resolve().plugins.len(), 2);
 	}
 }

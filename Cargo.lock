@@ -8350,6 +8350,7 @@ dependencies = [
  "jiff",
  "omp-core",
  "pep440_rs",
+ "regex",
  "ring",
  "serde",
  "serde_json",

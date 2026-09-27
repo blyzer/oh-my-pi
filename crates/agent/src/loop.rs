@@ -937,9 +937,10 @@ impl<C: Inference> Kernel<C> {
 		let submission_id = session
 			.head()
 			.map_or_else(|| Str::new_static("submission"), |id| Str::new(id.to_string()));
+		let mut hook_context = Vec::new();
 		if let Some(hooks) = &self.lifecycle_hooks {
-			let payload = hooks
-				.gate(
+			let admission = hooks
+				.admit(
 					HookEventId::HookEventBeforeAgentStart,
 					serde_json::json!({
 						"submission_id": submission_id,
@@ -953,6 +954,8 @@ impl<C: Inference> Kernel<C> {
 					}),
 				)
 				.await?;
+			hook_context = admission.context;
+			let payload = admission.payload;
 			if let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) {
 				input.text = Str::new(text);
 				if let Some(prompt) = &mut skill_prompt {
@@ -993,8 +996,9 @@ impl<C: Inference> Kernel<C> {
 			},
 			(Some(_), Some(_)) => unreachable!("one explicit turn source"),
 		}
-		self.apply_live_components(session)?;
 		let turn = current_turn(session)?;
+		append_hook_context(session, turn, hook_context)?;
+		self.apply_live_components(session)?;
 		let _activity = TurnActivity::enter(Arc::clone(&self.turn_active));
 		let result = self
 			.run_turn_body(session, turn, &turn_cancel, &control, None)
@@ -1806,8 +1810,8 @@ impl<C: Inference> Kernel<C> {
 				LoopDecision::Continue { .. } => continue,
 				LoopDecision::Yield => {
 					// An extension may block the stop and demand another turn.
-					if let Some(hooks) = &self.lifecycle_hooks
-						&& hooks
+					if let Some(hooks) = &self.lifecycle_hooks {
+						let settled = hooks
 							.agent_settled(serde_json::json!({
 								"submission_id": turn.to_string(),
 								"reason": if was_steered { "stop" } else { "stop" },
@@ -1817,9 +1821,12 @@ impl<C: Inference> Kernel<C> {
 								"continuations_used": 0,
 								"incomplete_todos": [],
 							}))
-							.await == crate::AgentSettled::Continue
-					{
-						continue;
+							.await;
+						if settled.decision == crate::AgentSettled::Continue {
+							append_hook_context(session, turn, settled.context)?;
+							self.apply_live_components(session)?;
+							continue;
+						}
 					}
 					let stop = if was_steered {
 						TurnStop::Steered
@@ -3817,6 +3824,22 @@ fn close_streams(
 ) -> Result<(), SessionError> {
 	for (_, sid) in streams.drain() {
 		session.stream_close(sid)?;
+	}
+	Ok(())
+}
+
+/// Journals hook-contributed context as model-visible `<developer kind=hook>`
+/// messages under `turn`, hidden from the transcript like any hook context.
+fn append_hook_context(
+	session: &mut Session,
+	turn: Handle,
+	context: Vec<crate::HookContext>,
+) -> Result<(), KernelError> {
+	for item in context {
+		let mut message = omp_session::custom_message::CustomMessage::new(item.source, item.body);
+		message.kind = omp_session::custom_message::CustomMessageKind::Hook;
+		message.display = false;
+		append_custom_message(session, turn, message)?;
 	}
 	Ok(())
 }

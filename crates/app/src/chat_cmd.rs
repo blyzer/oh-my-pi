@@ -381,8 +381,11 @@ impl Launch {
 		let config_root = omp_core::dirs::profile_config_dir(&home).into_diagnostic()?;
 		// Installed marketplace plugins: resolved once per launch and shared
 		// with the kernel; this is the one place their diagnostics surface.
-		let claude_plugins =
-			Arc::new(omp_ext::claude_plugin::ClaudePlugins::resolve(&data_dir, &project));
+		let claude_plugins = Arc::new(omp_ext::claude_plugin::ClaudePlugins::resolve(
+			&data_dir,
+			&project,
+			omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+		));
 		for diagnostic in &claude_plugins.diagnostics {
 			tracing::warn!(
 				error = diagnostic as &(dyn std::error::Error + 'static),

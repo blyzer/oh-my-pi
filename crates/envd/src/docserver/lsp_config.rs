@@ -791,7 +791,7 @@ pub(crate) mod tests {
 			&data.join("plugins/installed_plugins.json"),
 			&serde_json::to_string(&registry).unwrap(),
 		);
-		ClaudePlugins::resolve(data, data)
+		ClaudePlugins::resolve(data, data, None)
 	}
 
 	#[test]

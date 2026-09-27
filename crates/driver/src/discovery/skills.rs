@@ -1223,7 +1223,7 @@ mod tests {
 			true,
 		)]);
 
-		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project);
+		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		let policy = SkillPolicy::default();
 		let all =

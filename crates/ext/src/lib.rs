@@ -5,6 +5,7 @@
 //! environment host, and this surface owns deterministic data transformations
 //! plus durable on-disk state.
 
+pub mod claude_hooks;
 pub mod claude_plugin;
 pub mod config;
 pub mod doctor;

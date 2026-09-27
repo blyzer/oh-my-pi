@@ -242,7 +242,7 @@ async fn installed_plugin_server_joins_the_roster_and_starts_with_its_root_expan
 	plugin_fixture(&disabled, "ghost");
 	let data = scratch.join("data");
 	install_plugins(&data, &[("enabled@m", &enabled, true), ("disabled@m", &disabled, false)]);
-	let plugins = ClaudePlugins::resolve(&data, &project);
+	let plugins = ClaudePlugins::resolve(&data, &project, None);
 	assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 
 	let environment =

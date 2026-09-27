@@ -2358,10 +2358,7 @@ impl Committer {
 		let Some(hooks) = &self.lifecycle_hooks else {
 			return Ok(staged);
 		};
-		if !hooks
-			.hook_gate()
-			.subscribed(omp_proto::toolhost::v1::HookEventId::HookEventToolResult)
-		{
+		if !hooks.subscribed(omp_proto::toolhost::v1::HookEventId::HookEventToolResult) {
 			return Ok(staged);
 		}
 		let outcome: serde_json::Value = serde_json::from_str(staged.outcome.get())?;
