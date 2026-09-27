@@ -25,7 +25,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::Hash32;
+use omp_core::{Hash32, StrMut};
 
 use super::{AssetError, Entries, mcp, ssh, write};
 use crate::v1_import::{
@@ -57,11 +57,12 @@ pub fn import_project_assets(
 	{
 		return single(ImportOutcome::NothingToImport);
 	}
+	let marker = project_assets_marker(project, roots);
 	if inside_v1_root(&omp, source) {
-		return single(ImportOutcome::Skipped(SkipReason::InsideV1Root));
+		return import_home_hosts(project, source, roots, mode, &marker)
+			.unwrap_or_else(|| single(ImportOutcome::Skipped(SkipReason::InsideV1Root)));
 	}
 	let layout = source.layout(None);
-	let marker = project_assets_marker(project, roots);
 	if marker.exists() {
 		return single(ImportOutcome::Skipped(SkipReason::MarkerPresent));
 	}
@@ -82,6 +83,71 @@ pub fn import_project_assets(
 	}
 	entries
 }
+
+/// The home directory as the project: its `.omp/` is the v1 install, which
+/// is never written, but v1 still read the host files a project declares
+/// there (`~/.omp/ssh.json`, then `~/ssh.json` and `~/.ssh.json`). They
+/// convert into the active profile's user `hosts.toml`, in v1's order, once,
+/// under the project's marker; everything else stays
+/// [`SkipReason::InsideV1Root`]. `None` when the project is not the home
+/// directory or has none of those files.
+fn import_home_hosts(
+	project: &Path,
+	source: &V1Source,
+	roots: &V2Roots,
+	mode: ImportMode,
+	marker: &Path,
+) -> Option<Vec<ImportEntry>> {
+	let layout = source.layout(roots.active_profile.as_deref());
+	let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+	let omp = project.join(".omp");
+	let found = |path: &Path| path.is_file();
+	if canonical(project) != canonical(layout.home())
+		|| !(found(&omp.join("ssh.json")) || ROOT_SSH.iter().any(|name| found(&project.join(name))))
+	{
+		return None;
+	}
+	let entry = |step, outcome| ImportEntry::new(step, V1Item::Ssh, Some(omp.clone()), outcome);
+	if marker.exists() {
+		return Some(vec![entry(
+			ImportStep::SshHosts,
+			ImportOutcome::Skipped(SkipReason::MarkerPresent),
+		)]);
+	}
+	let hosts = roots
+		.target(roots.active_profile.as_deref())
+		.config_dir
+		.join("hosts.toml");
+	let mut out = Entries { step: ImportStep::SshHosts, mode, list: Vec::new() };
+	let converted = convert_host_files(&mut out, project, &omp, &hosts, &layout).and_then(|()| {
+		if mode == ImportMode::Apply {
+			write_marker(marker, project)?;
+		}
+		Ok(())
+	});
+	let mut entries = out.list;
+	for entry in &mut entries {
+		entry.subject = entry.subject.take().map(|subject| {
+			let mut text = StrMut::default();
+			let _ = write!(text, "{subject} ({HOME_HOST})");
+			text.freeze()
+		});
+	}
+	if let Err(error) = converted {
+		entries.push(entry(
+			ImportStep::SshHosts,
+			ImportOutcome::NeedsAttention(Attention::Failed(ImportError::Assets(error))),
+		));
+	}
+	if omp.join(".mcp.json").is_file() || omp.join("commands").is_dir() {
+		entries.push(entry(ImportStep::SshHosts, ImportOutcome::Skipped(SkipReason::InsideV1Root)));
+	}
+	Some(entries)
+}
+
+/// Why a host from the home directory's project files went to the user
+/// hosts.
+const HOME_HOST: &str = "imported as a user host: the project is your home directory";
 
 /// Whether the project's `omp` directory lies in a v1 root: run from `$HOME`
 /// (or inside a v1 root), the project's `.omp/` is the v1 install itself,
@@ -133,7 +199,17 @@ fn convert_hosts(
 	omp: &Path,
 	layout: &V1Layout,
 ) -> Result<(), AssetError> {
-	let hosts = omp.join("hosts.toml");
+	convert_host_files(out, project, omp, &omp.join("hosts.toml"), layout)
+}
+
+/// [`convert_hosts`] into `hosts`.
+fn convert_host_files(
+	out: &mut Entries,
+	project: &Path,
+	omp: &Path,
+	hosts: &Path,
+	layout: &V1Layout,
+) -> Result<(), AssetError> {
 	let home = layout.home();
 	let present = |path: PathBuf| Some(path).filter(|path| path.is_file());
 	let mut claimed = BTreeSet::new();
@@ -142,7 +218,7 @@ fn convert_hosts(
 		V1Item::Ssh,
 		present(omp.join("ssh.json")),
 		project,
-		&hosts,
+		hosts,
 		home,
 		&mut claimed,
 	)?;
@@ -151,7 +227,7 @@ fn convert_hosts(
 	}
 	for name in ROOT_SSH {
 		if let Some(source) = present(project.join(name)) {
-			ssh::convert(out, V1Item::Ssh, Some(source), project, &hosts, home, &mut claimed)?;
+			ssh::convert(out, V1Item::Ssh, Some(source), project, hosts, home, &mut claimed)?;
 		}
 	}
 	Ok(())
