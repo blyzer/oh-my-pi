@@ -353,12 +353,17 @@ async fn a_disabled_plugin_contributes_no_hooks() {
 async fn commands_run_in_the_in_process_shell_with_the_plugin_root_expanded_and_exported() {
 	let fixture = Fixture::new(
 		r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command",
-			"command":"printf '%s|%s|%s|%s' \"${CLAUDE_PLUGIN_ROOT}\" \"$CLAUDE_PLUGIN_ROOT\" \"$(type -t cat)\" \"$(pwd):$PWD\" > \"${CLAUDE_PLUGIN_ROOT}/env.txt\""}]}]}}"#,
+			"command":"printf '%s|%s|%s|%s' \"${CLAUDE_PLUGIN_ROOT}\" \"$CLAUDE_PLUGIN_ROOT\" \"$(type -t cat)\" \"$(pwd):$PWD\" > \"${CLAUDE_PLUGIN_ROOT}/env.txt\""},
+			{"type":"command","command":"touch","args":["${CLAUDE_PLUGIN_ROOT}/it's exec form.txt"]}]}]}}"#,
 		true,
 	);
 	fixture.run(BASH).await;
 	let root = std::fs::canonicalize(&fixture.plugin).expect("plugin root");
 	let workspace = std::fs::canonicalize(&fixture.root).expect("workspace");
+	assert!(
+		root.join("it's exec form.txt").exists(),
+		"exec form expands `${{CLAUDE_PLUGIN_ROOT}}` in args and keeps each arg one word"
+	);
 	let recorded = read(&root.join("env.txt"));
 	let fields = recorded.split('|').collect::<Vec<_>>();
 	assert_eq!(fields.len(), 4, "{recorded}");

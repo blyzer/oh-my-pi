@@ -535,7 +535,7 @@ pub struct HookContext {
 }
 
 /// The answer an in-process hook host gives for one gateable event.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum NativeVerdict {
 	/// No opinion; the procedure continues unchanged.
 	#[default]
@@ -549,7 +549,7 @@ pub enum NativeVerdict {
 }
 
 /// One in-process host reply: its verdict plus any model-visible context.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeReply {
 	/// The host's decision.
 	pub verdict: NativeVerdict,

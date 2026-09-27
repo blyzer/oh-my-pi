@@ -259,22 +259,21 @@ impl PluginHookHost {
 		let mut input = None::<Bytes>;
 		let mut foreground = Vec::new();
 		for loaded in self.hooks_for(event, subject) {
-			let bytes = match &input {
-				Some(bytes) => bytes.clone(),
-				None => {
-					let payload = HookInput {
-						session_id:      &self.session.session_id,
-						transcript_path: &self.session.transcript,
-						cwd:             &self.session.project_root,
-						permission_mode: "default",
-						hook_event_name: event.into(),
-						fields:          &fields,
-					};
-					let Ok(bytes) = serde_json::to_vec(&payload).map(Bytes::from) else {
-						return Vec::new();
-					};
-					input.insert(bytes).clone()
-				},
+			let bytes = if let Some(bytes) = &input {
+				bytes.clone()
+			} else {
+				let payload = HookInput {
+					session_id:      &self.session.session_id,
+					transcript_path: &self.session.transcript,
+					cwd:             &self.session.project_root,
+					permission_mode: "default",
+					hook_event_name: event.into(),
+					fields:          &fields,
+				};
+				let Ok(bytes) = serde_json::to_vec(&payload).map(Bytes::from) else {
+					return Vec::new();
+				};
+				input.insert(bytes).clone()
 			};
 			if !loaded.hook.command.detached {
 				foreground.push(self.effect_of(loaded, bytes));
@@ -397,11 +396,10 @@ impl PluginHookHost {
 	}
 
 	fn post(&self, message: Up) {
-		match self.mailbox.get() {
-			Some(mailbox) => {
-				let _ = mailbox.send(message);
-			},
-			None => tracing::debug!("plugin hook notice before the kernel mailbox was bound"),
+		if let Some(mailbox) = self.mailbox.get() {
+			let _ = mailbox.send(message);
+		} else {
+			tracing::debug!("plugin hook notice before the kernel mailbox was bound");
 		}
 	}
 
@@ -903,7 +901,7 @@ struct HookOutputWire {
 	hook_specific_output: Option<SpecificWire>,
 }
 
-/// Top-level `decision`; PreToolUse's deprecated `approve`/`block` too.
+/// Top-level `decision`; `PreToolUse`'s deprecated `approve`/`block` too.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum DecisionWire {
@@ -1135,8 +1133,7 @@ struct FaultView {
 fn fault_text(fault: Option<&JsonValue>) -> Str {
 	match fault {
 		Some(fault) => FaultView::deserialize(fault)
-			.map(|view| view.message)
-			.unwrap_or_else(|_| Str::new(fault.to_string())),
+			.map_or_else(|_| Str::new(fault.to_string()), |view| view.message),
 		None => Str::default(),
 	}
 }

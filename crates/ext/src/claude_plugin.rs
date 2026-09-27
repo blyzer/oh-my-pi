@@ -608,11 +608,11 @@ pub fn expand_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
 	}
 }
 
-/// A plugin's persistent data directory under omp's data directory (the
-/// value of `${CLAUDE_PLUGIN_DATA}`): `<data>/plugins/data/<id>`, the id with
-/// every character but ASCII letters, digits, `_`, and `-` replaced by `-`,
-/// as Claude Code names its own. Never Claude Code's directory, which omp
-/// does not write.
+/// A plugin's `${CLAUDE_PLUGIN_DATA}` directory under omp's data directory.
+///
+/// `<data>/plugins/data/<id>`, the id with every character but ASCII
+/// letters, digits, `_`, and `-` replaced by `-`, as Claude Code names its
+/// own. Never Claude Code's directory, which omp does not write.
 #[must_use]
 pub fn plugin_data_dir(data_dir: &Path, id: &str) -> PathBuf {
 	let name = id
@@ -792,13 +792,11 @@ impl ClaudePlugins {
 				let project_bound = matches!(entry.scope.as_deref(), Some("project" | "local"));
 				// `enabledPlugins: true` opts a project-bound install into
 				// this project even when it was recorded for another one.
-				if project_bound
-					&& override_enabled != Some(true)
-					&& !entry
-						.project_path
-						.and_then(|path| fs::canonicalize(path).ok())
-						.is_some_and(|path| path == project_root)
-				{
+				let in_this_project = entry
+					.project_path
+					.and_then(|path| fs::canonicalize(path).ok())
+					.is_some_and(|path| path == project_root);
+				if project_bound && override_enabled != Some(true) && !in_this_project {
 					continue;
 				}
 				candidates.push(Candidate {

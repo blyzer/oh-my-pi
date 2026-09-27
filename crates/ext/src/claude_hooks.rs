@@ -611,7 +611,7 @@ mod tests {
 		assert!(!exact.matches_tool("bash"));
 		let pattern = HookMatcher::compile(Some("^(Read|Gl.*)$")).unwrap();
 		assert!(pattern.matches_tool("read") && pattern.matches_tool("glob"));
-		assert!(HookMatcher::compile(Some("*")).unwrap() == HookMatcher::All);
+		assert_eq!(HookMatcher::compile(Some("*")).unwrap(), HookMatcher::All);
 		assert!(
 			HookMatcher::compile(Some(""))
 				.unwrap()

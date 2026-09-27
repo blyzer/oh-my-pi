@@ -2199,7 +2199,7 @@ pub async fn compose_kernel(
 			hub_environment.clone(),
 			crate::plugin_hooks::PluginHookSession {
 				session_id:   id.clone(),
-				transcript:   journal_path.clone(),
+				transcript:   journal_path,
 				project_root: project_root.clone(),
 				data_dir:     data_dir.to_path_buf(),
 				subagent:     options.parent_session.is_some(),

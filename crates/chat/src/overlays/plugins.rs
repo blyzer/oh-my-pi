@@ -453,6 +453,21 @@ mod tests {
 	}
 
 	#[test]
+	fn claude_code_installs_are_listed_read_only() {
+		let mut external = plugin("cc", true);
+		external.external = true;
+		let feed = feed(vec![external], 1);
+		let mut panel = open(&feed, PluginMode::Uninstall);
+		let text = omp_tui::frame_text(panel.frame(Size { width: 110, height: 20 }));
+		assert!(text.contains("cc@1.0.0 [claude-code] [user]"), "external row missing:\n{text}");
+		assert!(
+			matches!(panel.key(Key::Enter), PanelEvent::Notice(text) if text.contains("Claude Code")),
+			"Enter refuses to manage a Claude Code install"
+		);
+		assert_eq!(panel.in_flight(), None);
+	}
+
+	#[test]
 	fn empty_catalog_explains_the_missing_marketplace() {
 		let feed = feed(Vec::new(), 0);
 		let mut panel = open(&feed, PluginMode::Install);
