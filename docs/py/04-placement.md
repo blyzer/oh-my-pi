@@ -65,7 +65,7 @@ shared host per layer; that was wrong, and everything downstream of it — blast
 radius, cancellation granularity, site-tree ownership — was wrong with it. The
 per-extension topology is final; see *Cancellation granularity* in the closing
 section for what the correction resolves.) In remote topology the two layers
-place their hosts on different machines: the client layer (`~/.omp`, the thin
+place their hosts on different machines: the client layer (`~/.o2`, the thin
 client's own `.omp`) spawns its extensions' hosts colocated with Agent Core, and
 the workspace layer (`<workspace cwd>/.omp`) spawns its extensions' hosts
 colocated with the Environment. All-local topology collapses the machines, not

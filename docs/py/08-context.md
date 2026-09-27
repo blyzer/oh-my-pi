@@ -1147,7 +1147,7 @@ does not, and uses the env-owned durable state scopes instead
 *rebuildable indexes only*: an FTS index over sessions can be rebuilt from the journal, so it
 belongs there; consolidated memory a user would grieve for belongs in a durable state scope.
 Within those rules a memory store is `sqlite3` from the standard library, `fts5` for lexical
-recall, a blob column for vectors — never `~/.omp` computed in Python, never a path derived
+recall, a blob column for vectors — never `~/.o2` computed in Python, never a path derived
 from `cwd`.
 
 **Where the index lives.** A workspace index is *file*-shaped data and belongs beside the

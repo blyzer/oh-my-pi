@@ -71,6 +71,10 @@ pub enum SkipReason {
 	/// The v1 data belongs to a project directory that no longer exists.
 	#[strum(to_string = "the project directory no longer exists")]
 	ProjectMissing,
+	/// v1 read an earlier declaration of the same name and never used this
+	/// one.
+	#[strum(to_string = "v1 used an earlier declaration of this name")]
+	ShadowedInV1,
 }
 
 /// Why v1 data cannot move to v2.

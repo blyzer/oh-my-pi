@@ -1214,7 +1214,7 @@ omp_con::var! {
 			"ui.option.global": "Global",
 			"ui.option.global.desc": "Save role models in the active profile config (current behavior)",
 			"ui.option.project": "Per-project",
-			"ui.option.project.desc": "Save project role models in .omp/config.yml; missing project roles use global defaults",
+			"ui.option.project.desc": "Save project role models in .omp/config.cfg; missing project roles use global defaults",
 			"legacy.path": "modelRoleStorage",
 			"legacy.path": "model.role_storage",
 		},

@@ -8,7 +8,7 @@ use std::{
 	sync::Arc,
 };
 
-use omp_ai::auth::AuthControlHandle;
+use omp_ai::auth::{AuthControlHandle, CredentialStore};
 use strum::{Display, EnumIter, EnumString, IntoEnumIterator as _, IntoStaticStr};
 use thiserror::Error;
 
@@ -93,6 +93,9 @@ pub enum ImportStep {
 	History,
 	/// v1 `install-id` into `<data>/install-id`, unless v2 has its own.
 	InstallId,
+	/// v1 `secret-placeholder.key` into the v2 state root, unless v2 has its
+	/// own (owner decision #10).
+	SecretPlaceholderKey,
 	/// v1 Mnemopi stores copied to where v2 recalls them.
 	Mnemopi,
 	/// v1 `local`-backend `learned.md` lessons into each project's Mnemopi bank.
@@ -129,6 +132,7 @@ impl ImportStep {
 			Self::Agents => V1Item::Agents,
 			Self::History => V1Item::HistoryDb,
 			Self::InstallId => V1Item::InstallId,
+			Self::SecretPlaceholderKey => V1Item::SecretPlaceholderKey,
 			Self::Mnemopi => V1Item::MnemopiMemory,
 			Self::LearnedLessons => V1Item::Memories,
 			Self::Marketplace => V1Item::Marketplaces,
@@ -178,6 +182,7 @@ impl ImportStep {
 			Self::Agents => super::agents::import_agents(cx),
 			Self::History => super::data::history::import(cx),
 			Self::InstallId => super::data::install_id::import(cx),
+			Self::SecretPlaceholderKey => super::data::placeholder_key::import(cx),
 			Self::Mnemopi => super::data::memory::import_mnemopi(cx),
 			Self::LearnedLessons => super::data::memory::import_learned(cx),
 			Self::Marketplace => super::data::marketplace::import(cx),
@@ -247,15 +252,17 @@ pub(crate) fn atomic_replace(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// How credential-writing steps reach the encrypted store.
 #[derive(Clone, Copy)]
 pub enum CredentialAccess<'a> {
-	/// The live authentication stack of this process, which owns the stores
-	/// under `data_dir` (the first-run hook). Other profiles' credential
-	/// steps wait, unmarked, for their own first run or `omp config
-	/// import-v1`: their stores follow their own launch's key policy.
+	/// The credential store this process's production composition opened
+	/// for `data_dir` (the first-run hook, which runs before that composition
+	/// builds its catalog and authentication stack, so both see what the
+	/// import wrote). Other profiles' credential steps wait, unmarked, for
+	/// their own first run or `omp config import-v1`: their stores follow
+	/// their own launch's key policy.
 	Live {
-		/// Data directory the live stack's stores live in.
+		/// Data directory the store lives in.
 		data_dir: &'a Path,
-		/// Control handle over those stores.
-		control:  &'a AuthControlHandle,
+		/// The live store.
+		store:    &'a Arc<CredentialStore>,
 	},
 	/// Open each target profile's stores on demand, under this console
 	/// policy (`omp config import-v1`).
@@ -286,7 +293,7 @@ pub struct CredentialSlot<'a> {
 
 impl CredentialSlot<'_> {
 	/// The live store when it owns the target's data directory, else the
-	/// target's stores opened offline (once).
+	/// target's stores opened offline; either is opened once.
 	///
 	/// # Errors
 	///
@@ -294,20 +301,25 @@ impl CredentialSlot<'_> {
 	/// own the target, and [`ImportError::CredentialsUnavailable`] when the
 	/// target's stores cannot be opened.
 	pub fn get(&self) -> Result<AuthControlHandle, ImportError> {
-		match self.access {
-			CredentialAccess::Live { data_dir, control } if self.target.data_dir == data_dir => {
-				Ok(control.clone())
+		let open = || match self.access {
+			CredentialAccess::Live { store, .. } => {
+				super::credentials::control_over(self.target, Arc::clone(store))
 			},
-			CredentialAccess::Live { .. } => Err(ImportError::NoCredentialStore),
-			CredentialAccess::Offline(ctx) => self
-				.opened
-				.get_or_init(|| super::credentials::offline_control(self.target, ctx).map_err(Arc::new))
-				.clone()
-				.map_err(|source| ImportError::CredentialsUnavailable {
-					target: self.target.data_dir.clone(),
-					source,
-				}),
+			CredentialAccess::Offline(ctx) => super::credentials::offline_control(self.target, ctx),
+		};
+		if let CredentialAccess::Live { data_dir, .. } = self.access
+			&& self.target.data_dir != data_dir
+		{
+			return Err(ImportError::NoCredentialStore);
 		}
+		self
+			.opened
+			.get_or_init(|| open().map_err(Arc::new))
+			.clone()
+			.map_err(|source| ImportError::CredentialsUnavailable {
+				target: self.target.data_dir.clone(),
+				source,
+			})
 	}
 }
 
@@ -429,7 +441,7 @@ fn run_pair(
 pub enum ImportError {
 	/// The v1 model configuration could not be read or converted.
 	#[error("could not import the model configuration")]
-	Models(#[from] crate::discovery::models::ModelsConfigError),
+	Models(#[from] super::models::ModelsImportError),
 	/// The v1 settings could not be imported.
 	#[error("could not import the settings")]
 	Settings(#[from] super::SettingsImportError),

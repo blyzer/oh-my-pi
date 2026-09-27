@@ -108,15 +108,9 @@ struct HostFile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostPaths {
 	/// User-owned `<config root>/hosts.toml`.
-	pub user:              PathBuf,
+	pub user:    PathBuf,
 	/// Project-owned `<project>/.omp/hosts.toml`.
-	pub project:           PathBuf,
-	/// Legacy user JSON source, read-only and lower precedence than TOML.
-	legacy_user:           PathBuf,
-	/// Legacy project JSON source, read-only and lower precedence than TOML.
-	legacy_project:        PathBuf,
-	/// Legacy hidden project JSON source.
-	legacy_project_hidden: PathBuf,
+	pub project: PathBuf,
 }
 
 impl HostPaths {
@@ -125,11 +119,8 @@ impl HostPaths {
 	#[must_use]
 	pub fn new(user_config_root: &Path, project_root: &Path) -> Self {
 		Self {
-			user:                  user_config_root.join("hosts.toml"),
-			project:               project_root.join(".omp/hosts.toml"),
-			legacy_user:           user_config_root.join("ssh.json"),
-			legacy_project:        project_root.join("ssh.json"),
-			legacy_project_hidden: project_root.join(".ssh.json"),
+			user:    user_config_root.join("hosts.toml"),
+			project: project_root.join(".omp/hosts.toml"),
 		}
 	}
 }
@@ -157,11 +148,10 @@ impl HostStore {
 		Ok(Self { hosts: Arc::new(RwLock::new(parse_hosts(path)?)), paths: None })
 	}
 
-	/// Atomically refreshes a layered store from every retained source.
+	/// Atomically refreshes a layered store from both `hosts.toml` files.
 	///
-	/// Missing foreign files remain empty, malformed foreign files are
-	/// contained to that source, and a malformed native file leaves the
-	/// previously published snapshot intact.
+	/// A missing file is empty, and a malformed one leaves the previously
+	/// published snapshot intact.
 	pub fn refresh(&self) -> Result<(), SshError> {
 		let Some(paths) = &self.paths else {
 			return Ok(());
@@ -213,80 +203,9 @@ impl HostStore {
 }
 
 fn load_effective_hosts(paths: &HostPaths) -> Result<BTreeMap<Str, HostConfig>, SshError> {
-	let mut hosts = parse_legacy_hosts(&paths.legacy_user);
-	hosts.extend(parse_hosts(&paths.user)?);
-	hosts.extend(parse_legacy_hosts(&paths.legacy_project_hidden));
-	hosts.extend(parse_legacy_hosts(&paths.legacy_project));
+	let mut hosts = parse_hosts(&paths.user)?;
 	hosts.extend(parse_hosts(&paths.project)?);
 	Ok(hosts)
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct LegacyHostFile {
-	#[serde(default)]
-	hosts: BTreeMap<Str, LegacyHostConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyHostConfig {
-	host:     Str,
-	username: Str,
-	#[serde(default = "default_port")]
-	port:     u16,
-	host_key: Str,
-	#[serde(default)]
-	key_path: Option<PathBuf>,
-}
-
-fn parse_legacy_hosts(path: &Path) -> BTreeMap<Str, HostConfig> {
-	let body = match fs::read_to_string(path) {
-		Ok(body) => body,
-		Err(source)
-			if matches!(source.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) =>
-		{
-			return BTreeMap::new();
-		},
-		Err(source) => {
-			tracing::warn!(path = %path.display(), %source, "failed to read legacy SSH configuration");
-			return BTreeMap::new();
-		},
-	};
-	let parsed = match serde_json::from_str::<LegacyHostFile>(&body) {
-		Ok(parsed) => parsed,
-		Err(source) => {
-			tracing::warn!(path = %path.display(), %source, "failed to parse legacy SSH configuration");
-			return BTreeMap::new();
-		},
-	};
-	let home = omp_core::dirs::home_dir();
-	parsed
-		.hosts
-		.into_iter()
-		.filter_map(|(alias, legacy)| {
-			let key = legacy.key_path.map(|path| {
-				let home_relative = path.strip_prefix("~").ok().map(Path::to_path_buf);
-				match (home_relative, &home) {
-					(Some(rest), Some(home)) => home.join(rest),
-					_ => path,
-				}
-			});
-			let host = HostConfig {
-				address:      legacy.host,
-				port:         legacy.port,
-				user:         legacy.username,
-				host_key:     legacy.host_key,
-				auth:         key.map_or(AuthPolicy::Agent, |path| AuthPolicy::Key { path }),
-				timeout_secs: default_timeout(),
-			};
-			if validate_alias(&alias).is_err() || validate_host(&host).is_err() {
-				tracing::warn!(path = %path.display(), host = %alias, "ignored invalid legacy SSH host");
-				None
-			} else {
-				Some((alias, host))
-			}
-		})
-		.collect()
 }
 
 fn parse_hosts(path: &Path) -> Result<BTreeMap<Str, HostConfig>, SshError> {
@@ -1288,15 +1207,16 @@ mod tests {
 		assert_eq!(layered.get("user-only").expect("user-only").user, "user-only");
 		assert!(matches!(layered.get("absent"), Err(SshError::UnknownHost { .. })));
 
-		fs::write(
-			&paths.legacy_project,
-			r#"{"hosts":{"legacy":{"host":"example.test","username":"legacy","hostKey":"SHA256:legacy"},"shared":{"host":"ignored.test","username":"legacy","hostKey":"SHA256:legacy"}}}"#,
-		)
-		.expect("write legacy project source");
-		fs::write(&paths.legacy_project_hidden, "{").expect("write malformed independent source");
-		assert_eq!(layered.aliases(), vec![sf!("legacy"), sf!("shared"), sf!("user-only")]);
-		assert_eq!(layered.get("legacy").expect("legacy").user, "legacy");
-		assert_eq!(layered.get("shared").expect("shared").user, "from-project");
+		// v1 `ssh.json` files are never read live; `omp config import-v1`
+		// converts them into `hosts.toml`.
+		let v1 = r#"{"hosts":{"v1":{"host":"example.test","username":"v1","hostKey":"SHA256:v1"}}}"#;
+		for source in
+			[user_root.join("ssh.json"), project_root.join("ssh.json"), project_root.join(".ssh.json")]
+		{
+			fs::write(source, v1).expect("write v1 host file");
+		}
+		assert_eq!(layered.aliases(), vec![sf!("shared"), sf!("user-only")]);
+		assert!(matches!(layered.get("v1"), Err(SshError::UnknownHost { .. })));
 
 		let project_store = HostStore::load(&paths.project).expect("reload project writer");
 		project_store
