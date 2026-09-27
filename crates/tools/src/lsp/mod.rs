@@ -521,9 +521,8 @@ fn valid(params: &Params) -> bool {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::Mutex;
-
 	use futures::StreamExt as _;
+	use parking_lot::Mutex;
 
 	use super::*;
 
@@ -560,11 +559,7 @@ mod tests {
 			_: Duration,
 			cancel: CancellationToken,
 		) -> impl Future<Output = Result<Payload, Fault>> + Send + '_ {
-			self
-				.0
-				.lock()
-				.expect("cancellation control")
-				.replace(cancel.clone());
+			self.0.lock().replace(cancel.clone());
 			async move {
 				cancel.cancelled().await;
 				Err(Fault::Cancelled)
@@ -579,7 +574,7 @@ mod tests {
 			_: Duration,
 			_: CancellationToken,
 		) -> impl Future<Output = Result<Payload, Fault>> + Send + '_ {
-			self.0.lock().expect("recording control").replace(params);
+			self.0.lock().replace(params);
 			std::future::ready(Ok(Payload {
 				action:  Action::Request,
 				servers: vec![sf!("rust-analyzer")],
@@ -674,7 +669,7 @@ mod tests {
 		feed.args_committed(raw.into()).expect("commit args");
 		let events = lsp.call(incoming).collect::<Vec<_>>().await;
 		assert!(matches!(events.last(), Some(Ev::Done(ToolTerminal::Done { result: Ok(_), .. }))));
-		let recorded = control.0.lock().expect("recording control");
+		let recorded = control.0.lock();
 		let params = recorded.as_ref().expect("request executed");
 		assert_eq!(params.query.as_deref(), Some("rust-analyzer/expandMacro"));
 		assert_eq!(params.payload.as_deref(), Some(r#"{"x":1}"#));
@@ -703,7 +698,6 @@ mod tests {
 			control
 				.0
 				.lock()
-				.expect("cancellation control")
 				.as_ref()
 				.is_some_and(CancellationToken::is_cancelled),
 			"host cancellation token must be raised before the tool settles",

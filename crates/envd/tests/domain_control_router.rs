@@ -1,9 +1,6 @@
 //! Proves domain CONTROL routing preserves request, callback, and effect
 //! ownership.
-use std::{
-	collections::BTreeSet,
-	sync::{Arc, Mutex},
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use omp_core::{ArtifactDigest, Principal, Provenance, Str, sf};
@@ -19,6 +16,7 @@ use omp_envd::exthost::{
 	seal_registry_evidence,
 };
 use omp_ext::config::StaticDeclarations;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 struct Owner {
@@ -47,11 +45,7 @@ impl ControlAuthority for Owner {
 		operation: Str,
 		_arguments: serde_json::Map<String, Value>,
 	) -> Result<Value, ControlProtocolError> {
-		self
-			.calls
-			.lock()
-			.expect("calls")
-			.push(format!("{}:{operation}", self.name));
+		self.calls.lock().push(format!("{}:{operation}", self.name));
 		Ok(Value::String(self.name.to_owned()))
 	}
 
@@ -66,11 +60,7 @@ impl ControlAuthority for Owner {
 			ControlEffect::Intent(_) => "intent",
 			ControlEffect::Log(_) => "log",
 		};
-		self
-			.calls
-			.lock()
-			.expect("calls")
-			.push(format!("{}:{kind}", self.name));
+		self.calls.lock().push(format!("{}:{kind}", self.name));
 		Ok(())
 	}
 }
@@ -220,12 +210,6 @@ async fn routes_requests_callbacks_and_effects_to_domain_owners() {
 			.effect(context(100 + index as u64), effect)
 			.await
 			.expect("routed effect");
-		assert!(
-			calls
-				.lock()
-				.expect("calls")
-				.iter()
-				.any(|call| call == expected)
-		);
+		assert!(calls.lock().iter().any(|call| call == expected));
 	}
 }

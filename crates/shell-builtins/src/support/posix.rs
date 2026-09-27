@@ -17,7 +17,9 @@ pub(crate) fn posix_version() -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-	use std::{env, ffi::OsString, sync::Mutex};
+	use std::{env, ffi::OsString};
+
+	use parking_lot::Mutex;
 
 	use super::{MODERN, OBSOLETE, TRADITIONAL, posix_version};
 
@@ -39,7 +41,7 @@ mod tests {
 
 	#[test]
 	fn parses_known_versions_and_rejects_invalid_values() {
-		let _guard = ENV_LOCK.lock().expect("environment test lock poisoned");
+		let _guard = ENV_LOCK.lock();
 		let _restore = Restore(env::var_os("_POSIX2_VERSION"));
 
 		for expected in [OBSOLETE, TRADITIONAL, MODERN, -1] {

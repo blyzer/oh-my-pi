@@ -2,7 +2,7 @@ use std::{
 	future,
 	num::NonZeroUsize,
 	sync::{
-		Arc, Mutex as StdMutex,
+		Arc,
 		atomic::{AtomicUsize, Ordering},
 	},
 };
@@ -11,6 +11,7 @@ use bytes::Bytes;
 use futures::{FutureExt as _, StreamExt as _, stream};
 use omp_catalog::{OperationKind, ProviderId, RouteId};
 use omp_core::{Str, sf};
+use parking_lot::Mutex;
 use tokio::{
 	io::{AsyncReadExt as _, AsyncWriteExt as _},
 	net::TcpListener,
@@ -45,7 +46,7 @@ use crate::{
 #[derive(Default)]
 struct ResponseObserver {
 	subscribed: bool,
-	observed:   StdMutex<Vec<ProviderResponseObservation>>,
+	observed:   Mutex<Vec<ProviderResponseObservation>>,
 }
 
 impl crate::codec::ProviderHookObserver for ResponseObserver {}
@@ -56,11 +57,7 @@ impl ProviderResponseObserver for ResponseObserver {
 	}
 
 	fn observe(&self, observation: ProviderResponseObservation) {
-		self
-			.observed
-			.lock()
-			.expect("observer lock")
-			.push(observation);
+		self.observed.lock().push(observation);
 	}
 }
 
@@ -249,7 +246,7 @@ async fn provider_response_hook_is_bitmap_gated_and_fires_for_each_attempt() {
 		}
 	});
 	let observer =
-		Arc::new(ResponseObserver { subscribed: true, observed: StdMutex::new(Vec::new()) });
+		Arc::new(ResponseObserver { subscribed: true, observed: Mutex::new(Vec::new()) });
 	let mut service = HttpTransport::new();
 	for attempt in 0..2 {
 		let mut call = request(
@@ -291,7 +288,7 @@ async fn provider_response_hook_is_bitmap_gated_and_fires_for_each_attempt() {
 	);
 	server.await.expect("response fixture");
 
-	let observed = observer.observed.lock().expect("observer lock");
+	let observed = observer.observed.lock();
 	assert_eq!(observed.len(), 2);
 	assert_eq!((observed[0].status, observed[1].status), (503, 200));
 	assert_eq!(observed[0].request_id.as_deref(), Some("req-1"));
@@ -319,13 +316,7 @@ async fn provider_response_hook_is_bitmap_gated_and_fires_for_each_attempt() {
 	assert!(observed[1].headers.iter().any(|(name, value)| {
 		name.as_str() == "anthropic-ratelimit-requests-remaining" && value.as_str() == "3"
 	}));
-	assert!(
-		unsubscribed
-			.observed
-			.lock()
-			.expect("observer lock")
-			.is_empty()
-	);
+	assert!(unsubscribed.observed.lock().is_empty());
 }
 
 fn attempt(

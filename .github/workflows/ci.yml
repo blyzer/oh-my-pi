@@ -202,8 +202,10 @@ jobs:
             cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-${{ runner.arch }}-
 
+      # `--all-targets` (kept in sync with `just clippy`) so tests, examples
+      # and benches are held to the same clippy.toml policy as library code.
       - name: Lint workspace
-        run: cargo clippy --workspace --locked
+        run: cargo clippy --workspace --all-targets --locked
 
       - name: Test workspace
         run: cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
@@ -297,7 +299,7 @@ jobs:
       # queue this job exists to drain is only visible if cargo reports every
       # failing crate in a single run rather than stopping at the first.
       - name: Lint workspace
-        run: cargo clippy --workspace --locked --keep-going
+        run: cargo clippy --workspace --all-targets --locked --keep-going
 
   p7_linux:
     name: Terminal proof P7 (Linux PTY)

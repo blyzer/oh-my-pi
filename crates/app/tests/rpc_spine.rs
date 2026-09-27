@@ -1,11 +1,6 @@
 //! RPC transport proof over a scripted journal-first kernel.
 
-use std::{
-	collections::VecDeque,
-	future::ready,
-	sync::{Arc, Mutex},
-	time::SystemTime,
-};
+use std::{collections::VecDeque, future::ready, sync::Arc, time::SystemTime};
 
 use omp_agent::{DispatchPolicy, Inference, Kernel, StaticPrompt};
 use omp_ai::{
@@ -20,6 +15,7 @@ use omp_rpc::framing::{MAX_FRAME_BYTES, RpcFrameDecoder, encode_json_v2};
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::Registry;
 use omp_tools::ask::{AskPresenter as _, OptionItem, Question};
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
@@ -40,7 +36,6 @@ impl Inference for ScriptedInference {
 		let stream = match self
 			.scripts
 			.get_mut()
-			.expect("script mutex poisoned")
 			.pop_front()
 			.expect("one scripted turn")
 		{
