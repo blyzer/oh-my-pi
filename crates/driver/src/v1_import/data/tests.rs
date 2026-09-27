@@ -20,9 +20,10 @@ use crate::v1_import::{
 };
 
 /// The steps this module registers, in run order.
-const DATA_STEPS: [ImportStep; 5] = [
+const DATA_STEPS: [ImportStep; 6] = [
 	ImportStep::History,
 	ImportStep::InstallId,
+	ImportStep::SecretPlaceholderKey,
 	ImportStep::Mnemopi,
 	ImportStep::LearnedLessons,
 	ImportStep::Marketplace,
@@ -377,6 +378,81 @@ fn install_id_is_copied_only_when_v2_has_none() {
 		fs::read_to_string(v2.data_dir.join("profiles/work/install-id")).expect("id"),
 		"v2-own-id"
 	);
+}
+
+/// Owner decision #10: v1's placeholder key becomes v2's once, so the
+/// placeholders in imported v1 sessions keep resolving. v2 never reads the v1
+/// copy live, and never replaces a key it already has.
+#[test]
+fn the_placeholder_key_is_adopted_once_and_never_replaces_v2s() {
+	let root = tempfile::tempdir().expect("scratch");
+	let home = root.path().join("home");
+	let v2 = roots(root.path());
+	let key = "A".repeat(43);
+	write(&home.join(".omp/agent/secret-placeholder.key"), &format!("{key}\n"));
+	write(&home.join(".omp/profiles/work/agent/secret-placeholder.key"), &("B".repeat(42) + "A"));
+	let before = snapshot(root.path());
+	let v1_before = snapshot(&home);
+
+	let dry = import(&v2, inputs(&home), ImportMode::DryRun);
+	assert_eq!(snapshot(root.path()), before, "a dry run writes nothing");
+	assert_eq!(summary(&dry, ImportStep::SecretPlaceholderKey), [
+		(OutcomeKind::WouldImport, None),
+		(OutcomeKind::WouldImport, None),
+	]);
+	let report = import(&v2, inputs(&home), ImportMode::Apply);
+
+	// The default profile's key is v2's; the work profile shares v2's state
+	// root, which already holds a different key.
+	assert_eq!(summary(&report, ImportStep::SecretPlaceholderKey), [
+		(OutcomeKind::Imported, None),
+		(
+			OutcomeKind::Skipped,
+			owned("v2 keeps its own key; secrets in imported v1 sessions stay as placeholders")
+		),
+	]);
+	let native = omp_cache::secret_key::path_in(&v2.state_dir);
+	assert_eq!(
+		omp_cache::secret_key::read_at(&native)
+			.expect("owner-only v2 key")
+			.as_deref(),
+		Some(key.as_str())
+	);
+	assert_eq!(snapshot(&home), v1_before, "the v1 tree is byte-identical");
+	let again = import(&v2, inputs(&home), ImportMode::Apply);
+	assert!(
+		step_entries(&again, ImportStep::SecretPlaceholderKey)
+			.iter()
+			.all(|entry| matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent)))
+	);
+}
+
+#[test]
+fn a_malformed_placeholder_key_needs_attention_and_v2_keeps_its_own() {
+	let root = tempfile::tempdir().expect("scratch");
+	let home = root.path().join("home");
+	let v2 = roots(root.path());
+	write(&home.join(".omp/agent/secret-placeholder.key"), "not a key");
+	let report = import(&v2, inputs(&home), ImportMode::Apply);
+	assert!(matches!(step_entries(&report, ImportStep::SecretPlaceholderKey)[..], [ImportEntry {
+		outcome: ImportOutcome::NeedsAttention(Attention::Incompatible(_)),
+		..
+	}]));
+	assert!(!omp_cache::secret_key::path_in(&v2.state_dir).exists());
+
+	// A key v2 minted before the import is never replaced.
+	let root = tempfile::tempdir().expect("scratch");
+	let home = root.path().join("home");
+	let v2 = roots(root.path());
+	write(&home.join(".omp/agent/secret-placeholder.key"), &"A".repeat(43));
+	let native = omp_cache::secret_key::path_in(&v2.state_dir);
+	let minted = omp_cache::secret_key::load_or_create_at(&native).expect("v2 key");
+	let report = import(&v2, inputs(&home), ImportMode::Apply);
+	assert_eq!(summary(&report, ImportStep::SecretPlaceholderKey), [(
+		OutcomeKind::Skipped,
+		owned("v2 keeps its own key; secrets in imported v1 sessions stay as placeholders")
+	)]);
+	assert_eq!(omp_cache::secret_key::read_at(&native).expect("kept"), Some(minted));
 }
 
 fn v1_bank(path: &Path, rows: &[(&str, &Path)]) {
@@ -843,6 +919,7 @@ fn full_fixture(root: &Path) -> (PathBuf, V2Roots) {
 	let omp = home.join(".omp");
 	write(&omp.join("install-id"), "11111111-2222-4333-8444-555555555555\n");
 	for agent in [omp.join("agent"), omp.join("profiles/work/agent")] {
+		write(&agent.join("secret-placeholder.key"), &"A".repeat(43));
 		drop(v1_history(&agent.join("history.db"), &[("hello", 1, "/a")]));
 		v1_bank(&agent.join("memories/mnemopi/banks/app-1/mnemopi.db"), &[("a fact", &app)]);
 		write(&agent.join("memories").join(encode(&app)).join("learned.md"), "- a lesson\n");

@@ -135,7 +135,7 @@ omp_con::var! {
 			"legacy.path": "autolearn.minToolCalls",
 		},
 	};
-	/// Base directory for agent-managed worktrees; empty selects ~/.omp/wt and OMP_WORKTREE_DIR overrides it.
+	/// Base directory for agent-managed worktrees; empty selects `<data>/worktrees` and OMP_WORKTREE_DIR overrides it.
 	pub static SV_WORKTREE_BASE = sv_worktree_base: Str {
 		default: Str::default(),
 		flags: archive,

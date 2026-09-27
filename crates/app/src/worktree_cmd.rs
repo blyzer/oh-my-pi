@@ -15,7 +15,10 @@ use crate::cli::{WorktreeArgs, WorktreeCommand};
 
 /// Current isolation-owner marker written by workspace operations.
 const ISOLATION_OWNER_FILE: &str = ".omp-isolation-owner";
-/// Legacy isolation-owner marker recognized during cleanup.
+/// The isolation-owner marker v1 (TS `omp`) writes. `OMP_WORKTREE_DIR` and
+/// `worktree.base` (imported as `sv_worktree_base`) can point v1 and v2 at one
+/// worktree base, so `clear` honours v1's live owners instead of treating
+/// their isolation directories as orphans.
 const LEGACY_ISOLATION_OWNER_FILE: &str = ".omp-isolation-owner.json";
 
 /// Owner metadata parsed from an isolation marker file.
@@ -45,7 +48,7 @@ struct DurableRecord {
 	source_root: PathBuf,
 }
 
-/// One classified worktree found in a current or legacy layout.
+/// One classified worktree found under the configured worktree base.
 #[derive(Clone, Debug, Serialize)]
 pub struct WorktreeRow {
 	/// Stable Environment identity.
@@ -137,15 +140,6 @@ fn discover(data_dir: &Path) -> io::Result<Vec<WorktreeRow>> {
 			let entry = entry?;
 			if entry.file_type()?.is_dir() {
 				roots.push(entry.path());
-			}
-		}
-	}
-	let legacy_projects = data_dir.join("projects");
-	if legacy_projects.is_dir() {
-		for entry in fs::read_dir(legacy_projects)? {
-			let legacy = entry?.path().join("workspace-ops");
-			if legacy.is_dir() && !roots.contains(&legacy) {
-				roots.push(legacy);
 			}
 		}
 	}

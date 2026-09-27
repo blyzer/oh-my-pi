@@ -37,7 +37,10 @@ omp_con::var! {
 		default: Str::new_static(""),
 		flags: session,
 	};
-	/// Model route for task subagents; empty inherits `ai_model`.
+	/// Model route for task subagents; empty inherits `ai_model`. It seeds a
+	/// child's `ai_model` before `subagent.cfg` and the agent class cfg run,
+	/// so an `ai_model` either cfg sets, and a `sv_task_agent_model_overrides`
+	/// entry for the class, both take precedence over it.
 	pub static AI_TASK_MODEL = ai_task_model: Str {
 		default: Str::new_static(""),
 		flags: archive | session,

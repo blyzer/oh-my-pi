@@ -2,7 +2,8 @@
 //! provider's models in that same session.
 //!
 //! The v1 `apiKey` is what authenticates the provider's `/v1/models`. The
-//! production composition must import it before probing, and must hand the
+//! production composition must run the one-time import before it composes
+//! its catalog (discovery itself never imports) and probes, and must hand the
 //! catalog that probe produced to model selection and the chat picker
 //! (`ProductionInference::catalog`) instead of the snapshot read at launch.
 
@@ -101,6 +102,10 @@ async fn a_v1_api_key_authenticates_discovery_in_the_first_session() {
 	let launch = production_catalog(&data_dir).expect("launch snapshot");
 	let opus = ModelKey::from("easycliproxy/claude-opus-5");
 	assert!(launch.model(&opus).is_none(), "nothing is discovered before composition");
+	// Discovery reads only the native `models.toml`; the v1 `models.yml`
+	// reaches it through the first-run import alone.
+	let native = root.path().join("config/models.toml");
+	assert!(!native.exists(), "reading the catalog never imports v1 model config");
 
 	let inference = production_inference_for_session(
 		&data_dir,
@@ -111,6 +116,7 @@ async fn a_v1_api_key_authenticates_discovery_in_the_first_session() {
 	.await
 	.expect("production inference composes");
 	server.abort();
+	assert!(native.is_file(), "the first-run import wrote models.toml");
 
 	for (key, wire) in [(opus, "claude-opus-5"), (ModelKey::from("easycliproxy/gpt-5.5"), "gpt-5.5")]
 	{

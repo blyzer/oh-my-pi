@@ -14,7 +14,8 @@
 //! | `ssh.json`                              | `hosts.toml` (converted)   | `omp_envd::ssh::HostPaths::user`                 |
 //!
 //! The working directory's project `.omp/` is read by v2 at the same paths,
-//! except three v1-only files [`import_project_assets`] converts in place.
+//! except three v1-only files [`import_project_assets`] converts in place,
+//! together with the project-root `ssh.json` and `.ssh.json` v1 also read.
 //!
 //! Copy rules (owner decision #2): nothing under v1 is written. A destination
 //! v2 already has is kept: identical bytes (or the same declaration) are
@@ -242,6 +243,7 @@ pub(super) fn import(
 				config,
 				&config.join("hosts.toml"),
 				source.home(),
+				&mut std::collections::BTreeSet::new(),
 			)?;
 		},
 		// Not an asset step; `ImportStep::run` never routes one here.
