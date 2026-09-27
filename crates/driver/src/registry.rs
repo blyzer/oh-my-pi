@@ -330,12 +330,11 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 	let bundled = snapshot::Catalog::try_embedded()
 		.map_err(RegistryError::Catalog)?
 		.clone();
-	let loaded = crate::discovery::models::ModelsConfigLocation::resolve(data_dir)
-		.and_then(|location| crate::discovery::models::load_or_import_legacy(&location))
-		.map_err(catalog_composition)?;
+	let loaded =
+		crate::discovery::models::load_configured_models(data_dir).map_err(catalog_composition)?;
 	let user_overlay = loaded
 		.as_ref()
-		.map(|loaded| crate::discovery::models::lower_user_overlay(&loaded.config))
+		.map(crate::discovery::models::lower_user_overlay)
 		.transpose()
 		.map_err(catalog_composition)?;
 	let configured = if let Some(overlay) = &user_overlay {
@@ -359,11 +358,8 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 		.as_millis()
 		.try_into()
 		.unwrap_or(u64::MAX);
-	let probes = crate::discovery::models::discovery_probes(
-		loaded.as_ref().map(|loaded| &loaded.config),
-		&configured,
-	)
-	.map_err(catalog_composition)?;
+	let probes = crate::discovery::models::discovery_probes(loaded.as_ref(), &configured)
+		.map_err(catalog_composition)?;
 	let mut cache_keys = BTreeSet::new();
 	for route in configured.routes() {
 		if route.discovery.is_some() {
@@ -398,7 +394,7 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 			});
 		let explicit = loaded
 			.as_ref()
-			.and_then(|loaded| loaded.config.providers.get(key.provider.as_str()));
+			.and_then(|loaded| loaded.providers.get(key.provider.as_str()));
 		for record in DiscoveryNormalizer::new(defaults)
 			.normalize_batch(&cached.rows)
 			.map_err(catalog_composition)?
@@ -526,14 +522,10 @@ async fn refresh_model_discovery_cache(
 		ProviderLifecycle,
 	};
 
-	let loaded = crate::discovery::models::ModelsConfigLocation::resolve(data_dir)
-		.and_then(|location| crate::discovery::models::load_or_import_legacy(&location))
+	let loaded =
+		crate::discovery::models::load_configured_models(data_dir).map_err(catalog_composition)?;
+	let mut probes = crate::discovery::models::discovery_probes(loaded.as_ref(), &catalog)
 		.map_err(catalog_composition)?;
-	let mut probes = crate::discovery::models::discovery_probes(
-		loaded.as_ref().map(|loaded| &loaded.config),
-		&catalog,
-	)
-	.map_err(catalog_composition)?;
 	if probes.is_empty() {
 		return Ok(DiscoveryPass { catalog, published: false });
 	}
@@ -590,12 +582,9 @@ async fn refresh_model_discovery_cache(
 		let http = http.clone();
 		// Loopback runtimes are usually absent, so their failure is the steady
 		// state; a provider the user configured is expected to answer.
-		let configured = loaded.as_ref().is_some_and(|loaded| {
-			loaded
-				.config
-				.providers
-				.contains_key(probe.provider.as_str())
-		});
+		let configured = loaded
+			.as_ref()
+			.is_some_and(|loaded| loaded.providers.contains_key(probe.provider.as_str()));
 		pending.push(async move {
 			let provider = probe.provider.clone();
 			match probe
@@ -1233,6 +1222,10 @@ async fn production_assembly_with_catalog(
 	catalog: Option<Arc<snapshot::Catalog>>,
 ) -> Result<ProductionAssembly, RegistryError> {
 	fs::create_dir_all(data_dir).map_err(RegistryError::PrepareState)?;
+	// The one-time v1 import runs first, so the `models.toml` it writes is in
+	// this session's catalog and authentication stack, and a v1
+	// `models.yml` key authenticates the discovery refresh below.
+	crate::v1_import::first_run(data_dir, project_root, &credential_store);
 	// A caller-composed catalog is final. Otherwise the cached snapshot seeds
 	// the authentication stack, whose provider, route, and auth facts runtime
 	// discovery never changes; the refresh below adds models only.
@@ -1389,10 +1382,6 @@ async fn production_assembly_with_catalog(
 	.with_affinity_resolver(CredentialAffinityResolver::new(
 		Hash32::sum(placeholder_affinity_key().as_bytes()).into_bytes(),
 	));
-	crate::v1_import::first_run(data_dir, project_root, &auth_manager.control_handle());
-	// Probe only after the one-time v1 import: on first run its `models.yml` key is
-	// what authenticates the configured provider's model listing, so its
-	// models join this session's registry instead of the next one's.
 	let catalog = if refresh_discovery {
 		refresh_model_discovery_cache(data_dir, catalog, &discovery_credentials, None)
 			.await?

@@ -666,6 +666,228 @@ fn a_project_omp_converts_in_place_once() {
 	assert!(!project_assets_marker(&plain, &fixture.v2).exists());
 }
 
+/// v1 also read hosts from the project-root `ssh.json` and `.ssh.json`
+/// (`discovery/ssh.ts`), after `.omp/ssh.json` and the user `ssh.json`,
+/// keeping the first host of a name. v2 reads only `hosts.toml`, so the
+/// project import converts both root files into `.omp/hosts.toml` under the
+/// same rules, and a name v1 took from an earlier file is not converted.
+#[test]
+fn project_root_ssh_files_convert_in_v1_order() {
+	let fixture = Fixture::new();
+	let omp = fixture.project.join(".omp");
+	write(
+		&omp.join("ssh.json"),
+		r#"{"hosts":{"stage":{"host":"stage.example","username":"deploy"}}}"#,
+	);
+	write(
+		&fixture.agent().join("ssh.json"),
+		r#"{"hosts":{"mine":{"host":"mine.example","username":"me"}}}"#,
+	);
+	write(
+		&fixture.project.join("ssh.json"),
+		r#"{"hosts":{
+			"stage":{"host":"shadowed.example","username":"deploy"},
+			"mine":{"host":"shadowed.example","username":"me"},
+			"root":{"host":"root.example","username":"ops","port":"2222"}
+		}}"#,
+	);
+	write(
+		&fixture.project.join(".ssh.json"),
+		r#"{"hosts":{
+			"root":{"host":"shadowed.example","username":"ops"},
+			"hidden":{"host":"hidden.example","username":"ops","keyPath":"~/.ssh/id_hidden"},
+			"unpinned":{"host":"unknown.example","username":"ops"}
+		}}"#,
+	);
+	fixture.known_host("stage.example", HOST_KEY);
+	fixture.known_host("[root.example]:2222", OTHER_KEY);
+	fixture.known_host("hidden.example", HOST_KEY);
+	fixture.known_host("shadowed.example", OTHER_KEY);
+	let before = snapshot(fixture.root.path());
+
+	let dry =
+		import_project_assets(&fixture.project, &fixture.source(), &fixture.v2, ImportMode::DryRun);
+	assert_eq!(snapshot(fixture.root.path()), before, "a dry run writes nothing");
+	let report = fixture.project(&fixture.project);
+
+	let expected = |copied| {
+		vec![
+			(ImportStep::SshHosts, Some("stage"), copied),
+			(ImportStep::SshHosts, Some("mine"), OutcomeKind::Skipped),
+			(ImportStep::SshHosts, Some("root"), copied),
+			(ImportStep::SshHosts, Some("stage"), OutcomeKind::Skipped),
+			(ImportStep::SshHosts, Some("hidden"), copied),
+			(ImportStep::SshHosts, Some("root"), OutcomeKind::Skipped),
+			(ImportStep::SshHosts, Some("unpinned"), OutcomeKind::NeedsAttention),
+			(ImportStep::Mcp, None, OutcomeKind::NothingToImport),
+			(ImportStep::Commands, None, OutcomeKind::NothingToImport),
+		]
+	};
+	assert_eq!(listed(&dry), expected(OutcomeKind::WouldImport));
+	assert_eq!(listed(&report), expected(OutcomeKind::Imported));
+	assert!(
+		report
+			.iter()
+			.filter(|entry| entry.outcome.kind() == OutcomeKind::Skipped)
+			.all(|entry| matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::ShadowedInV1)))
+	);
+
+	let hosts = HostStore::load(&omp.join("hosts.toml")).expect("project hosts.toml");
+	assert_eq!(
+		hosts
+			.aliases()
+			.iter()
+			.map(omp_core::Str::as_str)
+			.collect::<Vec<_>>(),
+		["hidden", "root", "stage"]
+	);
+	assert_eq!(hosts.get("stage").expect("stage").address.as_str(), "stage.example");
+	let mut root = HostConfig::new(
+		"root.example".into(),
+		"ops".into(),
+		OTHER_KEY_SHA256.into(),
+		AuthPolicy::Agent,
+	);
+	root.port = 2222;
+	assert_eq!(hosts.get("root").expect("root"), root);
+	assert_eq!(
+		hosts.get("hidden").expect("hidden"),
+		HostConfig::new(
+			"hidden.example".into(),
+			"ops".into(),
+			HOST_KEY_SHA256.into(),
+			AuthPolicy::Key { path: fixture.home.join(".ssh/id_hidden") },
+		)
+	);
+	assert!(!fixture.config().join("hosts.toml").exists(), "project hosts stay in the project");
+	// Copy only: every v1 file, in the project and in `~/.omp`, is unchanged.
+	let after = snapshot(fixture.root.path());
+	for (path, contents) in before.iter().filter(|(path, _)| path.is_file()) {
+		assert_eq!(after.get(path), Some(contents), "{}", path.display());
+	}
+}
+
+/// Run from `$HOME`, the project's `.omp/` is v1's own install and is never
+/// written, but v1 still read `~/ssh.json` and `~/.ssh.json` as the project's
+/// hosts. They convert into the user `hosts.toml` instead, in v1's order and
+/// once; v2's own user host of a name wins.
+#[test]
+fn home_root_ssh_files_become_user_hosts() {
+	let fixture = Fixture::new();
+	let home = fixture.home.clone();
+	write(
+		&fixture.agent().join("ssh.json"),
+		r#"{"hosts":{"mine":{"host":"mine.example","username":"me"}}}"#,
+	);
+	write(&fixture.omp.join("commands/stray.md"), "Stray.\n");
+	write(
+		&home.join("ssh.json"),
+		r#"{"hosts":{
+			"kept":{"host":"kept.example","username":"ops"},
+			"mine":{"host":"shadowed.example","username":"me"},
+			"root":{"host":"root.example","username":"ops","port":2222}
+		}}"#,
+	);
+	write(
+		&home.join(".ssh.json"),
+		r#"{"hosts":{
+			"hidden":{"host":"hidden.example","username":"ops","keyPath":"~/.ssh/id_hidden"},
+			"root":{"host":"shadowed.example","username":"ops"}
+		}}"#,
+	);
+	fixture.known_host("kept.example", HOST_KEY);
+	fixture.known_host("[root.example]:2222", OTHER_KEY);
+	fixture.known_host("hidden.example", HOST_KEY);
+	fixture.known_host("shadowed.example", OTHER_KEY);
+	let hosts_toml = fixture.config().join("hosts.toml");
+	write(
+		&hosts_toml,
+		"[hosts.kept]\naddress = \"kept.example\"\nuser = \"v2\"\nhost_key = \"SHA256:v2\"\nauth = \
+		 { type = \"agent\" }\n",
+	);
+	let before = snapshot(fixture.root.path());
+	let v1_before = snapshot(&fixture.omp);
+
+	let dry = import_project_assets(&home, &fixture.source(), &fixture.v2, ImportMode::DryRun);
+	assert_eq!(snapshot(fixture.root.path()), before, "a dry run writes nothing");
+	let report = fixture.project(&home);
+
+	let subject = |alias: &str| {
+		format!("{alias} (imported as a user host: the project is your home directory)")
+	};
+	let expected = |copied| {
+		vec![
+			(ImportStep::SshHosts, None, OutcomeKind::NothingToImport),
+			(ImportStep::SshHosts, Some(subject("kept")), OutcomeKind::NeedsAttention),
+			(ImportStep::SshHosts, Some(subject("mine")), OutcomeKind::Skipped),
+			(ImportStep::SshHosts, Some(subject("root")), copied),
+			(ImportStep::SshHosts, Some(subject("hidden")), copied),
+			(ImportStep::SshHosts, Some(subject("root")), OutcomeKind::Skipped),
+			// The rest of `~/.omp` is v1's own install.
+			(ImportStep::SshHosts, None, OutcomeKind::Skipped),
+		]
+	};
+	let owned = |entries: &[ImportEntry]| {
+		listed(entries)
+			.into_iter()
+			.map(|(step, subject, kind)| (step, subject.map(str::to_owned), kind))
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(owned(&dry), expected(OutcomeKind::WouldImport));
+	assert_eq!(owned(&report), expected(OutcomeKind::Imported));
+	assert!(matches!(report[1].outcome, ImportOutcome::NeedsAttention(Attention::Conflict)));
+	assert!(matches!(report[2].outcome, ImportOutcome::Skipped(SkipReason::ShadowedInV1)));
+	assert!(matches!(report[5].outcome, ImportOutcome::Skipped(SkipReason::ShadowedInV1)));
+	assert!(matches!(report[6].outcome, ImportOutcome::Skipped(SkipReason::InsideV1Root)));
+
+	let hosts = HostStore::load(&hosts_toml).expect("user hosts.toml");
+	assert_eq!(
+		hosts
+			.aliases()
+			.iter()
+			.map(omp_core::Str::as_str)
+			.collect::<Vec<_>>(),
+		["hidden", "kept", "root"]
+	);
+	assert_eq!(hosts.get("kept").expect("kept").user.as_str(), "v2", "v2's own host wins");
+	let mut root = HostConfig::new(
+		"root.example".into(),
+		"ops".into(),
+		OTHER_KEY_SHA256.into(),
+		AuthPolicy::Agent,
+	);
+	root.port = 2222;
+	assert_eq!(hosts.get("root").expect("root"), root);
+	assert_eq!(
+		hosts.get("hidden").expect("hidden"),
+		HostConfig::new(
+			"hidden.example".into(),
+			"ops".into(),
+			HOST_KEY_SHA256.into(),
+			AuthPolicy::Key { path: home.join(".ssh/id_hidden") },
+		)
+	);
+	// Nothing is written under `~/.omp`, and every v1 file keeps its bytes.
+	assert_eq!(snapshot(&fixture.omp), v1_before);
+	let after = snapshot(fixture.root.path());
+	for (path, contents) in before
+		.iter()
+		.filter(|(path, _)| path.is_file() && **path != hosts_toml)
+	{
+		assert_eq!(after.get(path), Some(contents), "{}", path.display());
+	}
+	assert!(project_assets_marker(&home, &fixture.v2).starts_with(&fixture.v2.state_dir));
+
+	// A second run from `$HOME` is a no-op.
+	let hosts_after = read(&hosts_toml);
+	let again = fixture.project(&home);
+	assert!(matches!(again.as_slice(), [ImportEntry {
+		outcome: ImportOutcome::Skipped(SkipReason::MarkerPresent),
+		..
+	}]));
+	assert_eq!(read(&hosts_toml), hosts_after);
+}
+
 #[test]
 fn a_project_that_is_the_v1_home_is_never_written() {
 	let fixture = Fixture::new();

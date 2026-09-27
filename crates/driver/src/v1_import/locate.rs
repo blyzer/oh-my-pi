@@ -674,7 +674,8 @@ pub enum ProfileSelection {
 	#[default]
 	All,
 	/// Only this profile (`None` is the default profile): `--profile <p>`, and
-	/// the lazy `models.toml` import of the active profile.
+	/// the resume picker's on-demand session conversion for the active
+	/// profile.
 	Named(Option<Str>),
 }
 

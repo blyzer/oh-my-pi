@@ -14,7 +14,7 @@ use std::{
 
 use omp_ai::{
 	AccountId,
-	account::AccountPool,
+	account::{AccountPool, AccountStateStore},
 	auth::{
 		AuditedCredentialReveal, AuthControlHandle, CredentialControlWrite, CredentialStore,
 		HeadlessKeySource, KeyId,
@@ -135,20 +135,29 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
 	tree
 }
 
-/// A control handle over a throwaway encrypted store under `root`.
-fn control(root: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
-	fs::create_dir_all(root).expect("store dir");
+/// A throwaway encrypted store in `data_dir`, where production keeps it, and
+/// a control handle over it and the account state beside it.
+fn control(data_dir: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
+	fs::create_dir_all(data_dir).expect("store dir");
 	let store = Arc::new(
 		CredentialStore::open(
-			root.join("credentials.sqlite"),
+			data_dir.join("credentials.db"),
 			Arc::new(HeadlessKeySource::new(KeyId::new("v1-credentials-test"), [0x5a; 32])),
 		)
 		.expect("store"),
 	);
+	(reopen(data_dir, &store), store)
+}
+
+/// A fresh control handle over `store`, whose account pool sees every
+/// account written so far.
+fn reopen(data_dir: &Path, store: &Arc<CredentialStore>) -> AuthControlHandle {
+	let accounts = AccountPool::with_store(Arc::new(
+		AccountStateStore::open(data_dir.join("credentials.db")).expect("account state"),
+	))
+	.expect("accounts");
 	let catalog = Arc::new(omp_catalog::Catalog::embedded().clone());
-	let control =
-		AuthControlHandle::offline(catalog, Arc::clone(&store), AccountPool::new()).expect("control");
-	(control, store)
+	AuthControlHandle::offline(catalog, Arc::clone(store), accounts).expect("control")
 }
 
 /// The stored secret bytes of one account.
@@ -227,12 +236,16 @@ impl Fixture {
 		self.pairs(&ProfileSelection::Named(None))
 	}
 
+	/// The default profile's v2 data directory.
+	fn data_dir(&self) -> PathBuf {
+		roots(self.root.path()).data_dir
+	}
+
 	/// Applies the default profile with its live store, as its first run does.
-	fn apply(&self, control: &AuthControlHandle) -> ImportReport {
-		let v2 = roots(self.root.path());
+	fn apply(&self, store: &Arc<CredentialStore>) -> ImportReport {
 		run(&self.default_pairs(), ImportMode::Apply, CredentialAccess::Live {
-			data_dir: &v2.data_dir,
-			control,
+			data_dir: &self.data_dir(),
+			store,
 		})
 	}
 }
@@ -246,9 +259,10 @@ fn api_keys_import_readable_once_and_leave_v1_untouched() {
 		("openrouter", "api_key", r#"{"key":"sk-or-stored-key"}"#, None, None),
 	]);
 	let v1_before = snapshot(&fixture.home());
-	let (control, store) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
-	let report = fixture.apply(&control);
+	let report = fixture.apply(&store);
+	let control = reopen(&fixture.data_dir(), &store);
 
 	assert_eq!(subjects(&report), [
 		(Some("anthropic api-key (api-key)"), OutcomeKind::Imported),
@@ -281,7 +295,7 @@ fn api_keys_import_readable_once_and_leave_v1_untouched() {
 	let connection = Connection::open(&db).expect("v1 db");
 	insert(&connection, &[("zai", "api_key", r#"{"key":"sk-late"}"#, None, None)]);
 	drop(connection);
-	let again = fixture.apply(&control);
+	let again = fixture.apply(&store);
 	assert!(
 		again
 			.entries()
@@ -325,7 +339,7 @@ fn a_credential_whose_identity_v2_already_has_is_skipped() {
 		("openrouter", "api_key", r#"{"key":"sk-duplicate-key"}"#, None, None),
 		("anthropic", "oauth", ANTHROPIC_OAUTH, None, Some(ANTHROPIC_IDENTITY)),
 	]);
-	let (control, store) = control(&fixture.root.path().join("store"));
+	let (control, store) = control(&fixture.data_dir());
 	// The owner already ran `/login` in v2 for the key and for the OAuth
 	// account (whose v2 principal is the login email).
 	for identity in ["api-key", "owner@example.com"] {
@@ -341,7 +355,7 @@ fn a_credential_whose_identity_v2_already_has_is_skipped() {
 			.expect("v2 login");
 	}
 
-	let report = fixture.apply(&control);
+	let report = fixture.apply(&store);
 
 	assert!(matches!(
 		outcome(&report, "anthropic api-key (api-key)"),
@@ -375,9 +389,10 @@ fn oauth_logins_import_access_refresh_and_expiry() {
 		None,
 		Some(ANTHROPIC_IDENTITY),
 	)]);
-	let (control, store) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
-	let report = fixture.apply(&control);
+	let report = fixture.apply(&store);
+	let control = reopen(&fixture.data_dir(), &store);
 
 	assert_eq!(subjects(&report), [(
 		Some("anthropic email:owner@example.com|org:org-1 (oauth)"),
@@ -447,9 +462,10 @@ fn provider_extras_follow_what_v2_uses_at_request_time() {
 			None,
 		),
 	]);
-	let (control, store) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
-	let report = fixture.apply(&control);
+	let report = fixture.apply(&store);
+	let control = reopen(&fixture.data_dir(), &store);
 
 	assert_eq!(subjects(&report), [
 		(Some("google-gemini-cli email:dev@example.com (oauth)"), OutcomeKind::Imported),
@@ -498,9 +514,10 @@ fn a_codex_login_derives_its_residency_from_the_access_token() {
 		None,
 		Some("email:dev@example.com|org:acct-1"),
 	)]);
-	let (control, _) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
-	fixture.apply(&control);
+	fixture.apply(&store);
+	let control = reopen(&fixture.data_dir(), &store);
 
 	let codex = &control.accounts(Some(ProviderId::from_ref("openai-codex")))[0];
 	assert_eq!(codex.routing.region.as_ref().map(|region| region.as_str()), Some("eu"));
@@ -516,9 +533,10 @@ fn a_disabled_v1_login_imports_disabled() {
 		Some("invalid_grant"),
 		Some(ANTHROPIC_IDENTITY),
 	)]);
-	let (control, _) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
-	let report = fixture.apply(&control);
+	let report = fixture.apply(&store);
+	let control = reopen(&fixture.data_dir(), &store);
 
 	assert_eq!(subjects(&report), [(
 		Some("anthropic email:owner@example.com|org:org-1 (oauth, disabled in v1)"),
@@ -577,9 +595,10 @@ fn mcp_grants_import_into_the_mcp_hosts_record() {
 					"tokenUrl":"https://legacy.example.com/token","clientId":"legacy-client"}}
 		}}"#,
 	);
-	let (control, store) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
-	let report = fixture.apply(&control);
+	let report = fixture.apply(&store);
+	let control = reopen(&fixture.data_dir(), &store);
 
 	assert_eq!(subjects(&report), [
 		(Some("mcp docs (mcp-oauth)"), OutcomeKind::Imported),
@@ -623,9 +642,9 @@ fn a_running_v1_is_read_through_its_wal_without_being_disturbed() {
 	insert(&running, &[("openrouter", "api_key", r#"{"key":"sk-or-stored-key"}"#, None, None)]);
 	assert!(fixture.agent().join("agent.db-wal").exists());
 	let main_before = fs::read(&db).expect("main db");
-	let (control, store) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
-	let report = fixture.apply(&control);
+	let report = fixture.apply(&store);
 
 	assert_eq!(subjects(&report), [(Some("openrouter agent-db (api-key)"), OutcomeKind::Imported)]);
 	assert_eq!(reveal(&store, "openrouter:agent-db"), b"sk-or-stored-key");
@@ -656,7 +675,7 @@ fn reports_never_carry_secret_values() {
 		),
 		("broken", "oauth", r#"{"access":"url-query-secret","expires":"not a number"}"#, None, None),
 	]);
-	let (control, _) = control(&fixture.root.path().join("store"));
+	let (_, store) = control(&fixture.data_dir());
 
 	for report in [
 		run(
@@ -664,7 +683,7 @@ fn reports_never_carry_secret_values() {
 			ImportMode::DryRun,
 			CredentialAccess::Offline(&omp_con::Ctx::new()),
 		),
-		fixture.apply(&control),
+		fixture.apply(&store),
 	] {
 		let mut rendered = format!("{report:?}");
 		for entry in report.entries() {
@@ -700,13 +719,13 @@ fn each_v1_profile_imports_into_its_own_v2_profile_store() {
 	let v2 = roots(fixture.root.path());
 	let work = v2.target(Some("work"));
 	let pairs = fixture.pairs(&ProfileSelection::All);
-	let (control, store) = control(&work.data_dir);
+	let (_, store) = control(&work.data_dir);
 
 	// The `work` profile's own first run: its live store owns `work`'s data
 	// directory, so the default profile's credentials wait, unmarked.
 	let report = run(&pairs, ImportMode::Apply, CredentialAccess::Live {
 		data_dir: &work.data_dir,
-		control:  &control,
+		store:    &store,
 	});
 
 	let credentials = |profile: Option<&str>| {

@@ -9,14 +9,28 @@ use std::{
 	sync::Arc,
 };
 
-use omp_ai::{
-	account::AccountPool,
-	auth::{AuthControlHandle, CredentialStore, HeadlessKeySource, KeyId},
-};
+use omp_ai::auth::{CredentialStore, HeadlessKeySource, KeyId};
 use omp_catalog::ProviderId;
 
-use super::*;
-use crate::discovery::models::{ModelsConfigLocation, load_or_import_legacy};
+use super::{
+	models::{LegacyModelsImport, ModelsConfigLocation, ModelsImportError, import_legacy_models},
+	*,
+};
+
+/// Applies the one-time model-config import; the converted config when it
+/// ran.
+fn imported(
+	location: &ModelsConfigLocation,
+) -> Result<Option<crate::discovery::models::ModelsConfig>, ModelsImportError> {
+	Ok(match import_legacy_models(location, ImportMode::Apply)? {
+		LegacyModelsImport::Imported(_) => Some(crate::discovery::models::load_models_config(
+			&location.config_dir.join("models.toml"),
+		)?),
+		LegacyModelsImport::NativePresent(_)
+		| LegacyModelsImport::AlreadyImported
+		| LegacyModelsImport::NothingToImport => None,
+	})
+}
 
 mod keybindings;
 
@@ -74,18 +88,15 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
 }
 
 /// A control handle over a throwaway encrypted store.
-fn control(root: &Path) -> (AuthControlHandle, Arc<CredentialStore>) {
-	let store = Arc::new(
+fn store(data_dir: &Path) -> Arc<CredentialStore> {
+	fs::create_dir_all(data_dir).expect("data dir");
+	Arc::new(
 		CredentialStore::open(
-			root.join("credentials.sqlite"),
+			data_dir.join("credentials.db"),
 			Arc::new(HeadlessKeySource::new(KeyId::new("v1-import-test"), [0x44; 32])),
 		)
 		.expect("store"),
-	);
-	let catalog = Arc::new(omp_catalog::Catalog::embedded().clone());
-	let control =
-		AuthControlHandle::offline(catalog, Arc::clone(&store), AccountPool::new()).expect("control");
-	(control, store)
+	)
 }
 
 /// The model steps' outcomes; later steps prove their own.
@@ -431,9 +442,9 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 	let v1_before = snapshot(&omp);
 	let v2 = roots(root.path(), None);
 	let pairs = plan(&V1Source::new(inputs(&home)), &v2, &ProfileSelection::All).expect("plan");
-	let (control, store) = control(root.path());
+	let store = store(&v2.data_dir);
 	// The live store belongs to the default profile, as in the first-run hook.
-	let live = CredentialAccess::Live { data_dir: &v2.data_dir, control: &control };
+	let live = CredentialAccess::Live { data_dir: &v2.data_dir, store: &store };
 
 	let report = run(&pairs, ImportMode::Apply, live);
 
@@ -474,6 +485,8 @@ fn an_import_copies_once_and_leaves_the_v1_tree_byte_identical() {
 			.collect::<Vec<_>>(),
 		["easycliproxy:models-yml"]
 	);
+	let control =
+		super::credentials::control_over(&v2.target(None), Arc::clone(&store)).expect("control");
 	assert_eq!(
 		control
 			.accounts(Some(ProviderId::from_ref("easycliproxy")))
@@ -512,10 +525,10 @@ fn a_failed_step_is_reported_and_retried() {
 	);
 	let v2 = roots(root.path(), None);
 	let pairs = plan(&V1Source::new(inputs(&home)), &v2, &ProfileSelection::All).expect("plan");
-	let (control, _) = control(root.path());
+	let store = store(&v2.data_dir);
 	let report = run(&pairs, ImportMode::Apply, CredentialAccess::Live {
 		data_dir: &v2.data_dir,
-		control:  &control,
+		store:    &store,
 	});
 	let models = report.entries().next().expect("models entry");
 	assert!(matches!(
@@ -537,10 +550,10 @@ fn the_models_import_honours_a_v1_profile() {
 	let location = ModelsConfigLocation::for_pair(&pairs[0]);
 	assert_eq!(location.config_dir, root.path().join("o2/profiles/work"));
 
-	let loaded = load_or_import_legacy(&location)
+	let loaded = imported(&location)
 		.expect("import")
 		.expect("the work profile's models.yml is imported");
-	assert!(loaded.config.providers.contains_key("easycliproxy"));
+	assert!(loaded.providers.contains_key("easycliproxy"));
 	assert!(root.path().join("o2/profiles/work/models.toml").is_file());
 	assert!(!root.path().join("o2/models.toml").exists(), "the default profile is untouched");
 }
@@ -555,7 +568,7 @@ fn the_models_import_honours_pi_coding_agent_dir() {
 	let pairs = plan(&source, &roots(root.path(), None), &ProfileSelection::All).expect("plan");
 	let location = ModelsConfigLocation::for_pair(&pairs[0]);
 	assert_eq!(location.legacy_path(), Some(custom.join("models.yaml")));
-	assert!(load_or_import_legacy(&location).expect("import").is_some());
+	assert!(imported(&location).expect("import").is_some());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -572,11 +585,11 @@ fn the_models_import_under_xdg_reads_the_agent_models_yml() {
 	let source = V1Source::new(V1Inputs { xdg_data_home: Some(data.clone()), ..inputs(&home) });
 	let pairs = plan(&source, &roots(root.path(), None), &ProfileSelection::All).expect("plan");
 	assert_eq!(pairs[0].source.locate(V1Item::AgentDb), Some(data.join("omp/agent.db")));
-	let loaded = load_or_import_legacy(&ModelsConfigLocation::for_pair(&pairs[0]))
+	let loaded = imported(&ModelsConfigLocation::for_pair(&pairs[0]))
 		.expect("import")
 		.expect("config");
-	assert!(loaded.config.providers.contains_key("easycliproxy"));
-	assert!(!loaded.config.providers.contains_key("decoy"));
+	assert!(loaded.providers.contains_key("easycliproxy"));
+	assert!(!loaded.providers.contains_key("decoy"));
 }
 
 #[test]

@@ -1,5 +1,6 @@
-//! Data and memory steps: prompt history, the install id, Mnemopi stores,
-//! `learned.md` lessons, and the Claude-format marketplace.
+//! Data and memory steps: prompt history, the install id, the secret
+//! placeholder key, Mnemopi stores, `learned.md` lessons, and the
+//! Claude-format marketplace.
 //!
 //! Every v1 SQLite database is read without touching its directory: through
 //! an `immutable=1` URI, or, when a `-wal` holds pages not yet checkpointed,
@@ -10,6 +11,7 @@ pub(super) mod history;
 pub(super) mod install_id;
 pub(super) mod marketplace;
 pub(super) mod memory;
+pub(super) mod placeholder_key;
 mod sqlite;
 
 #[cfg(test)]
@@ -65,6 +67,15 @@ pub enum DataImportError {
 		#[source]
 		source: serde_json::Error,
 	},
+	/// The v1 placeholder key is not one 256-bit base64url key.
+	#[error("{} is not a valid secret placeholder key", path.display())]
+	InvalidPlaceholderKey {
+		/// The v1 key file.
+		path: PathBuf,
+	},
+	/// The v2 placeholder key could not be read or installed.
+	#[error("could not install the secret placeholder key")]
+	PlaceholderKey(#[source] omp_cache::secret_key::SecretKeyError),
 	/// A Claude-format installed-plugins registry could not be read.
 	#[error("could not read the installed-plugins registry")]
 	PluginRegistry(#[source] omp_ext::claude_plugin::RegistryError),

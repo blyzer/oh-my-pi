@@ -2,8 +2,6 @@
 
 use std::{
 	env,
-	fs::{self, OpenOptions},
-	io,
 	path::{Path, PathBuf},
 };
 
@@ -16,16 +14,12 @@ use omp_envd::mcp::{
 	config_store::{McpConfigStore, set_server_enabled},
 	json_rpc,
 };
-use serde::Serialize;
 
 use crate::cli::{ConfigCommand, ConfigScope, McpConfigCommand, McpConfigScope};
 
 /// Runs a typed command-stream configuration operation.
-pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
+pub fn run(command: &ConfigCommand) -> miette::Result<()> {
 	let project = env::current_dir().into_diagnostic()?;
-	if let ConfigCommand::InitXdg { json } = command {
-		return init_xdg(data_dir, *json);
-	}
 	if let ConfigCommand::ImportV1 { dry_run, from, profile, sessions } = command {
 		return import_v1(&project, *dry_run, from.as_deref(), profile.as_deref(), *sessions);
 	}
@@ -59,7 +53,6 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 			println!("{}", path(&project, *scope)?.display());
 			Ok(())
 		},
-		ConfigCommand::InitXdg { .. } => unreachable!("XDG initialization returns before config"),
 		ConfigCommand::Mcp { .. } => unreachable!("MCP commands return before config composition"),
 		ConfigCommand::ImportV1 { .. } => unreachable!("v1 import returns before config"),
 	}
@@ -269,127 +262,6 @@ fn render_v1_entry(out: &mut String, entry: &omp_driver::v1_import::ImportEntry)
 		ImportOutcome::Imported | ImportOutcome::WouldImport | ImportOutcome::NothingToImport => {},
 	}
 	out.push('\n');
-}
-
-#[derive(Serialize)]
-struct XdgMigrationReport {
-	data:    PathBuf,
-	state:   PathBuf,
-	cache:   PathBuf,
-	moved:   Vec<PathBuf>,
-	skipped: Vec<PathBuf>,
-}
-
-fn init_xdg(data_dir: &Path, json: bool) -> miette::Result<()> {
-	let home = env::var_os("HOME")
-		.filter(|value| !value.is_empty())
-		.map(PathBuf::from)
-		.ok_or_else(|| miette::miette!("HOME must be set for config init-xdg"))?;
-	let mut roots = omp_core::dirs::native_directories(&home);
-	roots.data = data_dir.to_path_buf();
-	for root in [&roots.data, &roots.state, &roots.cache] {
-		fs::create_dir_all(root).into_diagnostic()?;
-	}
-	let legacy = home.join(".omp");
-	let mut report = XdgMigrationReport {
-		data:    roots.data.clone(),
-		state:   roots.state.clone(),
-		cache:   roots.cache.clone(),
-		moved:   Vec::new(),
-		skipped: Vec::new(),
-	};
-	let legacy_mcp = legacy.join("mcp.json");
-	if legacy_mcp.exists() {
-		let destination = omp_core::dirs::config_dir(&home).join("mcp.json");
-		if McpConfigStore::new(destination)
-			.migrate_from(&legacy_mcp)
-			.into_diagnostic()?
-		{
-			report.moved.push(legacy_mcp);
-		} else {
-			report.skipped.push(legacy_mcp);
-		}
-	}
-	for (source, destination) in [
-		(legacy.join("data"), roots.data.clone()),
-		(legacy.join("state"), roots.state.clone()),
-		(legacy.join("cache"), roots.cache.clone()),
-		(legacy.join("sessions"), roots.state.join("sessions")),
-		(legacy.join("projects"), roots.state.join("projects")),
-	] {
-		if source.exists() {
-			migrate_without_overwrite(&source, &destination, &mut report)?;
-		}
-	}
-	if json {
-		println!("{}", serde_json::to_string_pretty(&report).into_diagnostic()?);
-	} else {
-		println!("data\t{}", report.data.display());
-		println!("state\t{}", report.state.display());
-		println!("cache\t{}", report.cache.display());
-		println!("migrated\t{}", report.moved.len());
-		println!("preserved-conflicts\t{}", report.skipped.len());
-	}
-	Ok(())
-}
-
-fn migrate_without_overwrite(
-	source: &Path,
-	destination: &Path,
-	report: &mut XdgMigrationReport,
-) -> miette::Result<()> {
-	let metadata = fs::symlink_metadata(source).into_diagnostic()?;
-	if metadata.file_type().is_symlink() {
-		report.skipped.push(source.to_path_buf());
-		return Ok(());
-	}
-	if metadata.is_file() {
-		if destination.exists() {
-			report.skipped.push(source.to_path_buf());
-			return Ok(());
-		}
-		if let Some(parent) = destination.parent() {
-			fs::create_dir_all(parent).into_diagnostic()?;
-		}
-		let mut input = fs::File::open(source).into_diagnostic()?;
-		let mut output = OpenOptions::new()
-			.write(true)
-			.create_new(true)
-			.open(destination)
-			.into_diagnostic()?;
-		if let Err(error) = io::copy(&mut input, &mut output)
-			.and_then(|_| output.sync_all())
-			.and_then(|()| fs::set_permissions(destination, metadata.permissions()))
-		{
-			drop(output);
-			let _ = fs::remove_file(destination);
-			return Err(error).into_diagnostic();
-		}
-		fs::remove_file(source).into_diagnostic()?;
-		report.moved.push(source.to_path_buf());
-		return Ok(());
-	}
-	if !metadata.is_dir() {
-		report.skipped.push(source.to_path_buf());
-		return Ok(());
-	}
-	if destination.exists() && !destination.is_dir() {
-		report.skipped.push(source.to_path_buf());
-		return Ok(());
-	}
-	fs::create_dir_all(destination).into_diagnostic()?;
-	let mut entries = fs::read_dir(source)
-		.into_diagnostic()?
-		.collect::<Result<Vec<_>, _>>()
-		.into_diagnostic()?;
-	entries.sort_by_key(fs::DirEntry::file_name);
-	for entry in entries {
-		migrate_without_overwrite(&entry.path(), &destination.join(entry.file_name()), report)?;
-	}
-	if fs::read_dir(source).into_diagnostic()?.next().is_none() {
-		fs::remove_dir(source).into_diagnostic()?;
-	}
-	Ok(())
 }
 
 fn run_mcp(user_root: &Path, project: &Path, command: &McpConfigCommand) -> miette::Result<()> {

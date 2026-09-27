@@ -53,44 +53,6 @@ impl McpConfigStore {
 		self.write_unlocked(file)
 	}
 
-	/// Atomically migrates a legacy configuration into this store without
-	/// overwriting an existing destination.
-	///
-	/// Returns `true` only when the validated legacy document was committed
-	/// and the legacy file was removed.
-	pub fn migrate_from(&self, legacy_path: &Path) -> Result<bool, ConfigStoreError> {
-		if legacy_path == self.path {
-			return Ok(false);
-		}
-		let _lock = DirectoryLock::acquire(&self.path)?;
-		if self
-			.path
-			.try_exists()
-			.map_err(|source| ConfigStoreError::Io { path: self.path.clone(), source })?
-		{
-			return Ok(false);
-		}
-		let metadata = match fs::symlink_metadata(legacy_path) {
-			Ok(metadata) => metadata,
-			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-			Err(source) => {
-				return Err(ConfigStoreError::Io { path: legacy_path.to_path_buf(), source });
-			},
-		};
-		if !metadata.is_file() || metadata.file_type().is_symlink() {
-			return Ok(false);
-		}
-		let legacy = fs::read(legacy_path)
-			.map_err(|source| ConfigStoreError::Io { path: legacy_path.to_path_buf(), source })?;
-		let file: McpConfigFile = serde_json::from_slice(&legacy)
-			.map_err(|source| ConfigStoreError::Json { path: legacy_path.to_path_buf(), source })?;
-		validate_file(legacy_path, &file)?;
-		self.write_unlocked(&file)?;
-		fs::remove_file(legacy_path)
-			.map_err(|source| ConfigStoreError::Io { path: legacy_path.to_path_buf(), source })?;
-		Ok(true)
-	}
-
 	/// Adds a server and rejects duplicate names.
 	pub fn add(&self, name: &str, server: McpServerConfig) -> Result<(), ConfigStoreError> {
 		validate_name(&self.path, name)?;
@@ -634,56 +596,5 @@ mod tests {
 			error,
 			ConfigStoreError::Validation { path: error_path, .. } if error_path == path
 		));
-	}
-
-	#[test]
-	fn migration_is_validated_atomic_and_never_overwrites() {
-		let scratch = tempfile::tempdir().expect("scratch");
-		let legacy = scratch.path().join(".omp/mcp.json");
-		let destination = scratch.path().join(".o2/mcp.json");
-		fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
-		fs::write(&legacy, br#"{"mcpServers":{"legacy":{"type":"stdio","command":"legacy"}}}"#)
-			.expect("legacy config");
-
-		let store = McpConfigStore::new(destination.clone());
-		assert!(store.migrate_from(&legacy).expect("migration"));
-		assert!(!legacy.exists());
-		assert_eq!(
-			store
-				.get("legacy")
-				.expect("destination")
-				.expect("legacy server")
-				.command
-				.as_deref(),
-			Some("legacy")
-		);
-
-		fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
-		fs::write(
-			&legacy,
-			br#"{"mcpServers":{"replacement":{"type":"stdio","command":"replacement"}}}"#,
-		)
-		.expect("replacement");
-		assert!(!store.migrate_from(&legacy).expect("preserve destination"));
-		assert!(legacy.exists());
-		assert!(store.get("replacement").expect("destination").is_none());
-
-		let invalid_legacy = scratch.path().join("invalid/mcp.json");
-		let invalid_destination = scratch.path().join("fresh/mcp.json");
-		fs::create_dir_all(invalid_legacy.parent().expect("invalid parent")).expect("invalid parent");
-		fs::write(
-			&invalid_legacy,
-			br#"{"mcpServers":{"broken":{"type":"stdio","url":"https://example.test"}}}"#,
-		)
-		.expect("invalid legacy config");
-		let error = McpConfigStore::new(invalid_destination.clone())
-			.migrate_from(&invalid_legacy)
-			.expect_err("invalid migration");
-		assert!(matches!(
-			error,
-			ConfigStoreError::Validation { path, .. } if path == invalid_legacy
-		));
-		assert!(invalid_legacy.exists());
-		assert!(!invalid_destination.exists());
 	}
 }

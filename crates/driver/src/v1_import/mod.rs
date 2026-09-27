@@ -24,8 +24,8 @@
 //! # Entry points
 //!
 //! - [`first_run`]: the automatic hook production composition calls once its
-//!   credential store exists. It imports every v1 profile, logs the report, and
-//!   never fails startup.
+//!   credential store is open, before it builds the catalog. It imports every
+//!   v1 profile, logs the report, and never fails startup.
 //! - `omp config import-v1` (in `omp-app`): [`plan`] + [`run`] with
 //!   [`ImportMode::DryRun`] or [`ImportMode::Apply`] and
 //!   [`CredentialAccess::Offline`].
@@ -83,6 +83,7 @@ pub use locate::{
 	ImportPair, ItemShape, LocateError, ProfileSelection, V1Inputs, V1Item, V1Layout, V1Source,
 	V2Roots, V2Target, XdgCategory, XdgCollision, plan,
 };
+pub use models::ModelsImportError;
 pub use report::{
 	Attention, ImportEntry, ImportOutcome, ImportReport, NotMigratable, OutcomeKind, PairReport,
 	SkipReason,
@@ -97,7 +98,8 @@ pub use step::{
 };
 
 /// The active v2 profile's pair: the same-named v1 profile (the v1 default
-/// for the v2 default), which the lazy `models.toml` import reads.
+/// for the v2 default), which the resume picker's on-demand conversion of v1
+/// sessions reads.
 ///
 /// # Errors
 ///
@@ -118,15 +120,18 @@ pub fn active_pair() -> Result<ImportPair, LocateError> {
 /// and agents, and v1-only `.omp/` files (once per project,
 /// [`import_project_settings`], [`import_project_agents`],
 /// [`import_project_assets`]), and logs the report.
-/// Credential steps use the live store for the profile that owns `data_dir`;
-/// other profiles' credential steps wait, unmarked, for their own first run.
+/// Production composition calls it before it builds its catalog, so the
+/// `models.toml` the `models` step writes is in that first session's catalog
+/// and authentication stack; discovery itself never imports. Credential steps
+/// use the composition's store for the profile that owns `data_dir`; other
+/// profiles' credential steps wait, unmarked, for their own first run.
 /// A `data_dir` other than the process default (a test's or an explicit state
 /// directory) is isolated: nothing is imported. Never fails: locating errors
 /// are logged and step failures are in the report.
 pub fn first_run(
 	data_dir: &Path,
 	project: Option<&Path>,
-	credentials: &omp_ai::auth::AuthControlHandle,
+	credentials: &std::sync::Arc<omp_ai::auth::CredentialStore>,
 ) -> Option<ImportReport> {
 	if omp_core::dirs::data_dir(None).ok().as_deref() != Some(data_dir) {
 		return None;
@@ -150,7 +155,7 @@ pub fn first_run(
 		},
 	};
 	let mut report =
-		run(&pairs, ImportMode::Apply, CredentialAccess::Live { data_dir, control: credentials });
+		run(&pairs, ImportMode::Apply, CredentialAccess::Live { data_dir, store: credentials });
 	if let Some(project) = project {
 		report.project = import_project_settings(project, &roots, ImportMode::Apply);
 		report

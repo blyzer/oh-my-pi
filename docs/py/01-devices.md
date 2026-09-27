@@ -1444,7 +1444,7 @@ declaration it wants to make does not fit the type the API offers.
 ```python
 import omp
 
-CONFIGS = ("~/.omp/mcp.json", ".omp/mcp.json")
+CONFIGS = ("~/.o2/mcp.json", ".omp/mcp.json")
 
 
 @omp.hook("extension_activate")

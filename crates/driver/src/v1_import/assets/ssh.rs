@@ -9,7 +9,7 @@
 //! already declares keeps v2's host.
 
 use std::{
-	collections::BTreeMap,
+	collections::{BTreeMap, BTreeSet},
 	fs,
 	path::{Path, PathBuf},
 };
@@ -145,7 +145,22 @@ fn expand_tilde(path: &str, home: &Path) -> PathBuf {
 	}
 }
 
+/// The host names a v1 file declares; none when it is absent or v1 could not
+/// parse it (v1 skipped such a file).
+pub(super) fn declared(source: &Path) -> BTreeSet<Str> {
+	fs::read(source)
+		.ok()
+		.and_then(|bytes| serde_json::from_slice::<V1SshFile>(&bytes).ok())
+		.map(|file| file.hosts.into_keys().collect())
+		.unwrap_or_default()
+}
+
 /// Converts the v1 hosts in `source` into `destination`.
+///
+/// `claimed` holds the names earlier v1 sources declared: v1 kept the first
+/// host of a name, so a claimed name is reported as
+/// [`SkipReason::ShadowedInV1`] and not converted. The names `source`
+/// declares join it.
 pub(super) fn convert(
 	out: &mut Entries,
 	item: V1Item,
@@ -153,6 +168,7 @@ pub(super) fn convert(
 	root: &Path,
 	destination: &Path,
 	home: &Path,
+	claimed: &mut BTreeSet<Str>,
 ) -> Result<(), AssetError> {
 	let Some(source) = source else {
 		out.push(item, None, None, ImportOutcome::NothingToImport);
@@ -181,6 +197,15 @@ pub(super) fn convert(
 	let store = HostStore::load(destination).map_err(AssetError::SshStore)?;
 	let existing = store.aliases();
 	for (alias, v1) in file.hosts {
+		if !claimed.insert(alias.clone()) {
+			out.push(
+				item,
+				Some(source.clone()),
+				Some(alias),
+				ImportOutcome::Skipped(SkipReason::ShadowedInV1),
+			);
+			continue;
+		}
 		for (field, lost) in [
 			(
 				"description",

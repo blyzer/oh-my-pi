@@ -1,15 +1,16 @@
-//! Offline access to a target profile's credential stores, for imports run
-//! outside a live inference stack (`omp config import-v1`).
+//! Access to a target profile's credential stores: opened offline for
+//! `omp config import-v1`, or over the store the production composition
+//! opened for the first-run import.
 
 use std::sync::Arc;
 
 use omp_ai::{
 	account::{AccountPool, AccountStateStore},
-	auth::AuthControlHandle,
+	auth::{AuthControlHandle, CredentialStore},
 };
 use omp_catalog::{OverlaySource, OverlayStack, UnsafeTrustScope, snapshot};
 
-use super::{ImportError, V2Target};
+use super::{ImportError, ModelsImportError, V2Target};
 use crate::discovery::models::{load_models_config, lower_user_overlay};
 
 /// The target profile's catalog: the bundled snapshot plus its own
@@ -20,7 +21,9 @@ fn target_catalog(target: &V2Target) -> Result<Arc<snapshot::Catalog>, ImportErr
 	if !native.is_file() {
 		return Ok(Arc::new(bundled.clone()));
 	}
-	let overlay = lower_user_overlay(&load_models_config(&native)?)?;
+	let overlay = load_models_config(&native)
+		.and_then(|config| lower_user_overlay(&config))
+		.map_err(ModelsImportError::from)?;
 	let catalog = bundled
 		.with_overlay_stack(
 			&OverlayStack::from_layers([(OverlaySource::UserConfig, overlay)]),
@@ -40,9 +43,19 @@ pub(super) fn offline_control(
 	std::fs::create_dir_all(&target.data_dir).map_err(|source| {
 		ImportError::CredentialStore(crate::registry::RegistryError::PrepareState(source))
 	})?;
+	let store =
+		crate::registry::open_credential_store_from_con(target.data_dir.join("credentials.db"), ctx)
+			.map_err(ImportError::CredentialStore)?;
+	control_over(target, store)
+}
+
+/// A control-only handle over `store`, an already open credential store for
+/// the target's data directory, and the account state beside it.
+pub(super) fn control_over(
+	target: &V2Target,
+	store: Arc<CredentialStore>,
+) -> Result<AuthControlHandle, ImportError> {
 	let database = target.data_dir.join("credentials.db");
-	let store = crate::registry::open_credential_store_from_con(&database, ctx)
-		.map_err(ImportError::CredentialStore)?;
 	let accounts = AccountPool::with_store(Arc::new(AccountStateStore::open(&database)?))?;
 	Ok(AuthControlHandle::offline(target_catalog(target)?, store, accounts)?)
 }

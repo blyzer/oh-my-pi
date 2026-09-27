@@ -127,7 +127,7 @@ file that is the *only* copy of something is a bug — that is `pi-xtodo`'s
 silently overwrite each other.
 
 The cross-session variant of the same bug is a state-dir file — or a JSON file
-under `~/.omp` — that is the only copy of truth more than one session cares
+under `~/.o2` — that is the only copy of truth more than one session cares
 about. That is what `omp.state` exists to make unnecessary.
 
 ### Durable-state consistency rules
