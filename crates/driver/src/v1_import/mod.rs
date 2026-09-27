@@ -14,6 +14,9 @@
 //!   [`Marker`] in the v2 profile configuration root (`.<step>-migration-v1`),
 //!   and the [`run`] loop.
 //! - [`report`]: the typed [`ImportReport`], rendered once at the app boundary.
+//! - [`sessions`]: the `sessions` step and the resume picker's on-demand
+//!   conversion of v1 transcripts (decision #4); bulk only through [`run_with`]
+//!   and [`SessionImport::Bulk`].
 //!
 //! Imports only copy (decision #2): nothing under a v1 root is ever written,
 //! moved, or deleted.
@@ -62,6 +65,7 @@ pub mod keybindings;
 pub mod locate;
 mod models;
 pub mod report;
+pub mod sessions;
 mod settings;
 pub mod step;
 
@@ -81,8 +85,14 @@ pub use report::{
 	Attention, ImportEntry, ImportOutcome, ImportReport, NotMigratable, OutcomeKind, PairReport,
 	SkipReason,
 };
+pub use sessions::{
+	ImportedSession, ProjectBucket, SessionImport, SessionImportError, V1ChildJob, V1Conversion,
+	V1SessionConverter, V1SessionInfo,
+};
 pub use settings::{SettingsImportError, import_project_settings, project_marker};
-pub use step::{CredentialAccess, ImportError, ImportMode, ImportStep, Marker, StepContext, run};
+pub use step::{
+	CredentialAccess, ImportError, ImportMode, ImportStep, Marker, StepContext, run, run_with,
+};
 
 /// The active v2 profile's pair: the same-named v1 profile (the v1 default
 /// for the v2 default), which the lazy `models.toml` import reads.

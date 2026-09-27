@@ -17,6 +17,8 @@ use serde_json::{Map, Value, json, value::RawValue};
 
 use super::ForeignFormat;
 
+mod omp1;
+
 struct SourceRecord {
 	line:  usize,
 	value: Value,
@@ -35,16 +37,49 @@ struct SourceMetadata {
 
 struct ImportState {
 	model:       Str,
-	provider:    &'static str,
-	route:       &'static str,
+	provider:    Str,
+	route:       Str,
 	messages:    usize,
 	fallback_ms: u64,
+}
+
+/// What an omp v1 transcript brings beyond its own bytes.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Omp1Context<'a> {
+	/// The journal's final id, owner of its children's jobs.
+	pub id:        &'a str,
+	/// v1 blob store resolving `blob:sha256:<hex>` images.
+	pub blobs:     Option<&'a Path>,
+	/// The session's artifact directory.
+	pub artifacts: Option<&'a Path>,
+	/// Converted subagent journals to link as jobs.
+	pub children:  &'a [omp_driver::v1_import::V1ChildJob],
 }
 
 pub(super) fn import_file(
 	format: ForeignFormat,
 	source: &Path,
 	destination: &Path,
+) -> miette::Result<usize> {
+	import(format, source, destination, &Omp1Context::default())
+}
+
+pub(super) fn import_v1(
+	conversion: &omp_driver::v1_import::V1Conversion<'_>,
+) -> miette::Result<usize> {
+	import(ForeignFormat::Omp1, conversion.source, conversion.destination, &Omp1Context {
+		id:        conversion.id,
+		blobs:     conversion.blobs,
+		artifacts: conversion.artifacts,
+		children:  conversion.children,
+	})
+}
+
+fn import(
+	format: ForeignFormat,
+	source: &Path,
+	destination: &Path,
+	v1: &Omp1Context<'_>,
 ) -> miette::Result<usize> {
 	if destination.extension().and_then(|value| value.to_str()) != Some("oms") {
 		return Err(miette!("native session destination must use the .oms extension"));
@@ -53,10 +88,14 @@ pub(super) fn import_file(
 		fs::create_dir_all(parent).into_diagnostic()?;
 	}
 	let bytes = fs::read(source).into_diagnostic()?;
-	let (records, mut metadata) = parse_records(&bytes);
+	let (mut records, mut metadata) = parse_records(&bytes);
 	let file_metadata = fs::metadata(source).into_diagnostic()?;
 	let fallback_ms = system_time_millis(file_metadata.modified().unwrap_or(UNIX_EPOCH));
 	scan_metadata(&records, fallback_ms, &mut metadata);
+	if format == ForeignFormat::Omp1 {
+		omp1::migrate(&mut records);
+		omp1::metadata(&records, &mut metadata);
+	}
 
 	let mut session =
 		Session::create(destination, ComponentRegistry::standard()).into_diagnostic()?;
@@ -153,25 +192,22 @@ pub(super) fn import_file(
 			.into_diagnostic()?;
 	}
 	let base = head(&session)?;
+	let (model, provider, route) = match format {
+		ForeignFormat::Claude => ("unknown", "anthropic", "anthropic-messages"),
+		ForeignFormat::Codex => ("codex", "openai-codex", "openai-codex-responses"),
+		ForeignFormat::Omp1 => ("unknown", "unknown", "unknown"),
+	};
 	let mut state = ImportState {
-		model: Str::new_static(match format {
-			ForeignFormat::Claude => "unknown",
-			ForeignFormat::Codex => "codex",
-		}),
-		provider: match format {
-			ForeignFormat::Claude => "anthropic",
-			ForeignFormat::Codex => "openai-codex",
-		},
-		route: match format {
-			ForeignFormat::Claude => "anthropic-messages",
-			ForeignFormat::Codex => "openai-codex-responses",
-		},
+		model: Str::new_static(model),
+		provider: Str::new_static(provider),
+		route: Str::new_static(route),
 		messages: 0,
 		fallback_ms,
 	};
 	match format {
 		ForeignFormat::Claude => import_claude(&mut session, &records, base, &mut state)?,
 		ForeignFormat::Codex => import_codex(&mut session, &records, base, &mut state)?,
+		ForeignFormat::Omp1 => omp1::import(&mut session, &records, base, &mut state, v1)?,
 	}
 	session
 		.record_exit(omp_session::ExitCause::Normal)
@@ -364,7 +400,7 @@ fn import_claude_assistant(
 		state.model = model;
 	}
 	session
-		.assistant_start(state.model.clone(), state.provider, state.route)
+		.assistant_start(state.model.clone(), state.provider.clone(), state.route.clone())
 		.into_diagnostic()?;
 	let assistant = last_child_with_tag(session, last_turn(session)?, KnownTag::Assistant)?;
 	let mut block_index = 0_i64;
@@ -423,7 +459,7 @@ fn import_claude_assistant(
 		append_assistant_error(session, assistant, error, status, record)?;
 	}
 	if let Some(usage) = message.get("usage").and_then(Value::as_object) {
-		append_receipt(session, usage, stamp, state.provider, state.model.as_str())?;
+		append_receipt(session, usage, stamp, state.provider.as_str(), state.model.as_str())?;
 	}
 	state.messages += 1;
 	Ok(())
@@ -731,7 +767,7 @@ fn import_codex_event(
 				.and_then(Value::as_object)
 				.and_then(|info| info.get("total_token_usage").and_then(Value::as_object))
 				.unwrap_or(payload);
-			append_receipt(session, usage, stamp, state.provider, state.model.as_str())?;
+			append_receipt(session, usage, stamp, state.provider.as_str(), state.model.as_str())?;
 		},
 		"thread_rolled_back" => {
 			let turns = payload
@@ -787,7 +823,7 @@ fn append_assistant(
 ) -> miette::Result<()> {
 	ensure_turn(session)?;
 	session
-		.assistant_start(state.model.clone(), state.provider, state.route)
+		.assistant_start(state.model.clone(), state.provider.clone(), state.route.clone())
 		.into_diagnostic()?;
 	let assistant = last_child_with_tag(session, last_turn(session)?, KnownTag::Assistant)?;
 	let blocks = content
@@ -825,7 +861,7 @@ fn ensure_assistant_for_call(
 	state: &mut ImportState,
 ) -> miette::Result<()> {
 	session
-		.assistant_start(state.model.clone(), state.provider, state.route)
+		.assistant_start(state.model.clone(), state.provider.clone(), state.route.clone())
 		.into_diagnostic()?;
 	let assistant = last_child_with_tag(session, last_turn(session)?, KnownTag::Assistant)?;
 	import_tool_call(session, record, &Value::Object(payload.clone()), stamp, None)?;
@@ -916,7 +952,7 @@ fn import_tool_result(
 		Some(call) => call.entry,
 		None => {
 			session
-				.assistant_start(state.model.clone(), state.provider, state.route)
+				.assistant_start(state.model.clone(), state.provider.clone(), state.route.clone())
 				.into_diagnostic()?;
 			let call = session
 				.call(name.unwrap_or("unknown"), 1, call_id, None, Some(raw(json!({}))?), None)
@@ -985,7 +1021,7 @@ fn import_terminal_tool_event(
 	{
 		ensure_turn(session)?;
 		session
-			.assistant_start(state.model.clone(), state.provider, state.route)
+			.assistant_start(state.model.clone(), state.provider.clone(), state.route.clone())
 			.into_diagnostic()?;
 		let args = payload
 			.get("action")
@@ -1032,9 +1068,13 @@ fn append_receipt(
 ) -> miette::Result<()> {
 	let tokens_in = integer(usage, &["input_tokens", "input", "total_input_tokens"]);
 	let tokens_out = integer(usage, &["output_tokens", "output", "total_output_tokens"]);
-	let cache_read =
-		integer(usage, &["cache_read_input_tokens", "cached_input_tokens", "cache_read"]);
-	let cache_write = integer(usage, &["cache_creation_input_tokens", "cache_write"]);
+	let cache_read = integer(usage, &[
+		"cache_read_input_tokens",
+		"cached_input_tokens",
+		"cache_read",
+		"cacheRead",
+	]);
+	let cache_write = integer(usage, &["cache_creation_input_tokens", "cache_write", "cacheWrite"]);
 	session
 		.receipt(TurnReceipt {
 			tokens_in,
@@ -1131,9 +1171,11 @@ fn materialize_tool_parts(session: &Session, content: &Value) -> miette::Result<
 
 fn image_bytes(value: &Value) -> Option<(&str, Vec<u8>)> {
 	if value.get("type").and_then(Value::as_str) == Some("image") {
-		let source = value.get("source")?.as_object()?;
-		let mime = source.get("media_type")?.as_str()?;
-		let data = source.get("data")?.as_str()?;
+		// Claude Code nests `source`; omp v1 keeps `data` and `mimeType` inline.
+		let (mime, data) = match value.get("source") {
+			Some(source) => (source.get("media_type")?.as_str()?, source.get("data")?.as_str()?),
+			None => (value.get("mimeType")?.as_str()?, value.get("data")?.as_str()?),
+		};
 		return base64::decode(data.as_bytes())
 			.into_vec()
 			.ok()
