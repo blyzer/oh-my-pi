@@ -18,3 +18,7 @@ sits below both and can be reasoned about as data in, data out.
 - `trust`: signature verification and trust tiers.
 - `index`, `upgrade`, `doctor`: index metadata, generation commits, and
   integrity diagnostics.
+- `marketplace`, `claude_plugin`: Claude-compatible marketplace catalogs, the
+  `installed_plugins.json` registry `omp ext install` writes, and the
+  resolution of enabled installs into contained plugin roots whose skills,
+  commands, rules, and MCP servers the driver and Environment discovery load.

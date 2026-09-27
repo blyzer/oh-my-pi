@@ -6,9 +6,10 @@ use std::{
 
 use futures::StreamExt as _;
 use miette::{IntoDiagnostic as _, miette};
-use omp_core::Str;
+use omp_core::{Str, sf};
 use omp_ext::{
 	Layer as BackendLayer,
+	claude_plugin::{InstallScope, InstalledPluginEntry, InstalledPluginsRegistry},
 	index::SignedIndex,
 	lock::InstalledRecord,
 	marketplace::{
@@ -50,42 +51,6 @@ struct MarketplaceRegistryEntry {
 	catalog_path: PathBuf,
 	added_at:     Str,
 	updated_at:   Str,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct InstalledPluginsRegistry {
-	#[serde(default = "installed_plugins_version")]
-	version: u32,
-	#[serde(default)]
-	plugins: BTreeMap<String, Vec<InstalledPluginEntry>>,
-}
-
-impl Default for InstalledPluginsRegistry {
-	fn default() -> Self {
-		Self { version: installed_plugins_version(), plugins: BTreeMap::new() }
-	}
-}
-
-const fn installed_plugins_version() -> u32 {
-	2
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InstalledPluginEntry {
-	scope:          Str,
-	install_path:   PathBuf,
-	version:        Str,
-	installed_at:   Str,
-	last_updated:   Str,
-	#[serde(default)]
-	git_commit_sha: Option<Str>,
-	#[serde(default = "enabled_by_default")]
-	enabled:        bool,
-}
-
-const fn enabled_by_default() -> bool {
-	true
 }
 
 /// One configured signed extension index.
@@ -290,7 +255,7 @@ impl ExtensionTransactions {
 			.iter()
 			.find(|plugin| plugin.name == id)
 			.ok_or_else(|| miette!("plugin {id} is absent from marketplace {marketplace}"))?;
-		let plugin_id = format!("{id}@{marketplace}");
+		let plugin_id = sf!("{id}@{marketplace}");
 		let registry_path = self.state.plugin_registry(self.scope);
 		let mut installed = read_installed_plugins(&registry_path)?;
 		if !force && installed.plugins.contains_key(&plugin_id) {
@@ -305,8 +270,8 @@ impl ExtensionTransactions {
 			.and_then(|entries| entries.first())
 			.map_or_else(|| now.clone(), |entry| entry.installed_at.clone());
 		let scope = match self.scope {
-			Scope::User => Str::new_static("user"),
-			Scope::Project => Str::new_static("project"),
+			Scope::User => InstallScope::User,
+			Scope::Project => InstallScope::Project,
 		};
 		installed
 			.plugins
@@ -333,7 +298,7 @@ impl ExtensionTransactions {
 		let registry_path = self.state.plugin_registry(self.scope);
 		let mut installed = read_installed_plugins(&registry_path)?;
 		let plugin_id = if installed.plugins.contains_key(spec) {
-			spec.to_owned()
+			Str::new(spec)
 		} else {
 			let candidates = installed
 				.plugins
@@ -367,7 +332,7 @@ impl ExtensionTransactions {
 		}
 		unlink_plugin(&self.state.plugin_root(self.scope), id)?;
 		write_json(&registry_path, &installed)?;
-		Ok(Str::new(plugin_id))
+		Ok(plugin_id)
 	}
 
 	pub(crate) fn installed(&self) -> miette::Result<Vec<InstalledExtensionView>> {
@@ -378,7 +343,7 @@ impl ExtensionTransactions {
 		let registry_path = self.state.plugin_registry(self.scope);
 		let mut installed = read_installed_plugins(&registry_path)?;
 		let plugin_id = if spec.contains('@') {
-			spec.to_owned()
+			Str::new(spec)
 		} else {
 			installed
 				.plugins
@@ -395,14 +360,14 @@ impl ExtensionTransactions {
 			entry.enabled = enabled;
 		}
 		write_json(&registry_path, &installed)?;
-		Ok(Str::new(plugin_id))
+		Ok(plugin_id)
 	}
 
 	pub(crate) async fn upgrade(&self, spec: Option<&str>) -> miette::Result<Vec<UpgradeView>> {
 		let registry_path = self.state.plugin_registry(self.scope);
 		let installed = read_installed_plugins(&registry_path)?;
 		let ids = if let Some(spec) = spec {
-			vec![spec.to_owned()]
+			vec![Str::new(spec)]
 		} else {
 			installed.plugins.keys().cloned().collect()
 		};
@@ -440,7 +405,7 @@ impl ExtensionTransactions {
 			let from = current.version.clone();
 			let package = self.install(&plugin_id, true).await?;
 			upgrades.push(UpgradeView {
-				id:   Str::new(plugin_id),
+				id:   plugin_id,
 				from: Some(from),
 				to:   Some(package.version),
 			});
@@ -466,11 +431,7 @@ fn read_marketplace_registry(state: &StatePaths) -> miette::Result<MarketplaceRe
 }
 
 fn read_installed_plugins(path: &Path) -> miette::Result<InstalledPluginsRegistry> {
-	let registry: InstalledPluginsRegistry = read_json_or_default(path)?;
-	if registry.version != installed_plugins_version() {
-		return Err(miette!("unsupported installed plugin registry version {}", registry.version));
-	}
-	Ok(registry)
+	InstalledPluginsRegistry::read(path).into_diagnostic()
 }
 
 fn read_json_or_default<T>(path: &Path) -> miette::Result<T>
@@ -1091,9 +1052,9 @@ pub(super) async fn fetch_index(url: &str) -> miette::Result<Vec<u8>> {
 mod tests {
 	use super::*;
 
-	fn plugin_entry(scope: &'static str, enabled: bool) -> InstalledPluginEntry {
+	fn plugin_entry(scope: InstallScope, enabled: bool) -> InstalledPluginEntry {
 		InstalledPluginEntry {
-			scope: Str::new_static(scope),
+			scope,
 			install_path: PathBuf::from("/cache/sample"),
 			version: Str::new_static("1.0.0"),
 			installed_at: Str::new_static("2026-01-01T00:00:00Z"),
@@ -1113,11 +1074,11 @@ mod tests {
 		let mut user = InstalledPluginsRegistry::default();
 		user
 			.plugins
-			.insert("sample@index".to_owned(), vec![plugin_entry("user", false)]);
+			.insert(Str::new_static("sample@index"), vec![plugin_entry(InstallScope::User, false)]);
 		let mut project_record = InstalledPluginsRegistry::default();
 		project_record
 			.plugins
-			.insert("sample@index".to_owned(), vec![plugin_entry("project", false)]);
+			.insert(Str::new_static("sample@index"), vec![plugin_entry(InstallScope::Project, false)]);
 		write_json(&state.plugin_registry(Scope::User), &user).unwrap();
 		write_json(&state.plugin_registry(Scope::Project), &project_record).unwrap();
 
@@ -1141,7 +1102,7 @@ mod tests {
 		let mut installed = InstalledPluginsRegistry::default();
 		installed
 			.plugins
-			.insert("sample@index".to_owned(), vec![plugin_entry("user", true)]);
+			.insert(Str::new_static("sample@index"), vec![plugin_entry(InstallScope::User, true)]);
 		write_json(&state.plugin_registry(Scope::User), &installed).unwrap();
 
 		let removed = ExtensionTransactions::new(&data_dir, &project, Scope::User)
@@ -1164,7 +1125,7 @@ mod tests {
 		for id in ["sample@first", "sample@second"] {
 			installed
 				.plugins
-				.insert(id.to_owned(), vec![plugin_entry("user", true)]);
+				.insert(Str::new(id), vec![plugin_entry(InstallScope::User, true)]);
 		}
 		write_json(&state.plugin_registry(Scope::User), &installed).unwrap();
 
@@ -1205,7 +1166,7 @@ mod tests {
 		for id in ["sample@first", "sample@second"] {
 			installed
 				.plugins
-				.insert(id.to_owned(), vec![plugin_entry("user", true)]);
+				.insert(Str::new(id), vec![plugin_entry(InstallScope::User, true)]);
 		}
 		write_json(&state.plugin_registry(Scope::User), &installed).unwrap();
 
@@ -1229,11 +1190,11 @@ mod tests {
 		let mut user = InstalledPluginsRegistry::default();
 		user
 			.plugins
-			.insert("sample@index".to_owned(), vec![plugin_entry("user", true)]);
+			.insert(Str::new_static("sample@index"), vec![plugin_entry(InstallScope::User, true)]);
 		let mut project_record = InstalledPluginsRegistry::default();
 		project_record
 			.plugins
-			.insert("sample@index".to_owned(), vec![plugin_entry("project", true)]);
+			.insert(Str::new_static("sample@index"), vec![plugin_entry(InstallScope::Project, true)]);
 		write_json(&state.plugin_registry(Scope::User), &user).unwrap();
 		write_json(&state.plugin_registry(Scope::Project), &project_record).unwrap();
 
@@ -1302,6 +1263,68 @@ mod tests {
 		assert!(root.join("commands/review.md").is_file());
 		assert!(root.join(".lsp.json").is_file());
 	}
+	#[tokio::test]
+	async fn installed_plugin_registry_round_trips_into_runtime_discovery() {
+		use omp_driver::discovery::skills::{
+			CLAUDE_PLUGINS_PROVIDER, SkillPolicy, discover, installed_plugin_skill_sources,
+		};
+		use omp_ext::claude_plugin::ClaudePlugins;
+
+		let temp = tempfile::tempdir().unwrap();
+		let data_dir = temp.path().join("data");
+		let project = temp.path().join("project");
+		let marketplace = temp.path().join("marketplace");
+		fs::create_dir_all(&project).unwrap();
+		fs::create_dir_all(marketplace.join(".claude-plugin")).unwrap();
+		fs::write(
+			marketplace.join(".claude-plugin/marketplace.json"),
+			br#"{"name":"market","owner":{"name":"OMP"},"plugins":[{"name":"helper","version":"2.0.0","source":"./helper"}]}"#,
+		)
+		.unwrap();
+		let plugin = marketplace.join("helper");
+		fs::create_dir_all(plugin.join("skills/triage")).unwrap();
+		fs::write(
+			plugin.join("skills/triage/SKILL.md"),
+			"---\nname: triage\ndescription: Triage issues\n---\nTriage.",
+		)
+		.unwrap();
+		fs::write(
+			plugin.join(".mcp.json"),
+			r#"{"mcpServers":{"db":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/db"}}}"#,
+		)
+		.unwrap();
+
+		let transactions = ExtensionTransactions::new(&data_dir, &project, Scope::User);
+		transactions
+			.add_index(marketplace.to_str().unwrap())
+			.await
+			.unwrap();
+		transactions.install("helper@market", false).await.unwrap();
+
+		let plugins = ClaudePlugins::resolve(&data_dir, &project);
+		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
+		let [installed] = plugins.plugins.as_slice() else {
+			panic!("expected one installed plugin: {:?}", plugins.plugins);
+		};
+		assert_eq!(installed.id, "helper@market");
+		assert_eq!(installed.version, "2.0.0");
+		assert!(
+			installed
+				.root
+				.starts_with(fs::canonicalize(&data_dir).unwrap())
+		);
+		let components = installed.claude_components().unwrap();
+		assert_eq!(components.mcp.len(), 1);
+		let skills = discover(&installed_plugin_skill_sources(&plugins), &SkillPolicy::default());
+		let triage = skills.get("triage").expect("installed plugin skill");
+		assert_eq!(triage.provider, CLAUDE_PLUGINS_PROVIDER);
+
+		transactions.set_enabled("helper", false).unwrap();
+		let plugins = ClaudePlugins::resolve(&data_dir, &project);
+		assert!(plugins.plugins.is_empty(), "a disabled install never loads");
+		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
+	}
+
 	#[tokio::test]
 	async fn multiple_marketplace_catalogs_are_retained_and_aggregated() {
 		let temp = tempfile::tempdir().unwrap();

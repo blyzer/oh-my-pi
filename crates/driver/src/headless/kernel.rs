@@ -162,6 +162,10 @@ pub struct KernelOptions {
 	pub prompt:             PromptOverrides,
 	/// Skill discovery snapshot shared with an interactive command host.
 	pub discovered_skills:  Option<Arc<crate::discovery::skills::ActiveSkills>>,
+	/// Installed marketplace plugin set the launching host resolved and
+	/// surfaced diagnostics for; `None` resolves it from the data directory
+	/// during composition.
+	pub claude_plugins:     Option<Arc<omp_ext::claude_plugin::ClaudePlugins>>,
 	/// Invocation extension policy.
 	pub extensions:         LaunchExtensionPolicy,
 	/// Optional provider routing constraint.
@@ -1749,6 +1753,17 @@ pub async fn compose_kernel(
 			});
 		}
 	}
+	let claude_plugins = if let Some(plugins) = &options.claude_plugins {
+		Arc::clone(plugins)
+	} else {
+		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(data_dir, &project_root);
+		// The launching host surfaces these once; a host-less composition
+		// (child, maintenance, or tool kernel) only records them.
+		for diagnostic in &plugins.diagnostics {
+			tracing::debug!(error = %diagnostic, "installed plugin diagnostic");
+		}
+		Arc::new(plugins)
+	};
 	let skills = match &options.discovered_skills {
 		Some(skills) => {
 			let mut merged = (**skills).clone();
@@ -1761,10 +1776,12 @@ pub async fn compose_kernel(
 		None => Arc::new(crate::discovery::skills::ActiveSkills::discover_with_sources(
 			&ctx,
 			&project_root,
+			&claude_plugins,
 			&extension_skill_sources,
 		)?),
 	};
-	let (context_files, rules) = discover_prompt_material(&project_root, &options.prompt)?;
+	let (context_files, rules) =
+		discover_prompt_material(&project_root, &options.prompt, &claude_plugins)?;
 	let facts = prompt_facts(&project_root, &options, &skills, &context_files, &rules);
 	let inference_bridge =
 		tools_enabled.then(|| Arc::new(crate::bridges::InferenceBridge::default()));
@@ -1786,6 +1803,21 @@ pub async fn compose_kernel(
 					.native_roots
 					.iter()
 					.filter(|root| crate::discovery::skills::is_agent_plugin_root(root))
+					.cloned()
+					.chain(
+						claude_plugins
+							.plugins
+							.iter()
+							.filter(|plugin| {
+								plugin.layout == omp_ext::claude_plugin::PluginLayout::AgentPlugins
+							})
+							.map(|plugin| plugin.root.clone()),
+					)
+					.collect(),
+				claude_plugins:      claude_plugins
+					.plugins
+					.iter()
+					.filter(|plugin| plugin.claude_components().is_some())
 					.cloned()
 					.collect(),
 			},
@@ -2891,6 +2923,7 @@ pub(crate) fn prompt_facts(
 pub(crate) fn discover_prompt_material(
 	project_root: &Path,
 	overrides: &PromptOverrides,
+	plugins: &omp_ext::claude_plugin::ClaudePlugins,
 ) -> Result<
 	(crate::discovery::rules::ContextFiles, Arc<crate::discovery::rules::ActiveRules>),
 	HeadlessError,
@@ -2907,7 +2940,7 @@ pub(crate) fn discover_prompt_material(
 		ContextFiles::default()
 	};
 	let rules = if overrides.include_rules {
-		ActiveRules::discover(project_root, &home, &config_root)
+		ActiveRules::discover(project_root, &home, &config_root, plugins)
 	} else {
 		ActiveRules::default()
 	};
@@ -3560,20 +3593,27 @@ mod tests {
 				.filter(|rule| rule.level == Level::Project)
 				.count()
 		};
-		let (files, rules) =
-			super::discover_prompt_material(&project, &PromptOverrides::default()).expect("discovery");
+		let (files, rules) = super::discover_prompt_material(
+			&project,
+			&PromptOverrides::default(),
+			&Default::default(),
+		)
+		.expect("discovery");
 		assert_eq!(project_files(&files), 1);
 		assert_eq!(project_rules(&rules), 1);
 
 		let no_rules = PromptOverrides { include_rules: false, ..PromptOverrides::default() };
-		let (files, rules) = super::discover_prompt_material(&project, &no_rules).expect("discovery");
+		let (files, rules) =
+			super::discover_prompt_material(&project, &no_rules, &Default::default())
+				.expect("discovery");
 		assert_eq!(project_files(&files), 1, "--no-rules leaves context files alone");
 		assert!(rules.rules.is_empty(), "--no-rules suppresses rule discovery");
 
 		let no_context =
 			PromptOverrides { include_context_files: false, ..PromptOverrides::default() };
 		let (files, rules) =
-			super::discover_prompt_material(&project, &no_context).expect("discovery");
+			super::discover_prompt_material(&project, &no_context, &Default::default())
+				.expect("discovery");
 		assert!(files.files.is_empty(), "--no-context-files suppresses context files");
 		assert_eq!(project_rules(&rules), 1);
 	}

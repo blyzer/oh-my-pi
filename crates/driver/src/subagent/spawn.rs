@@ -1759,9 +1759,12 @@ mod tests {
 
 	/// The always-apply rule names composition journals for `options`.
 	fn always_apply_rules(project: &Path, options: &KernelOptions) -> Vec<String> {
-		let (context_files, rules) =
-			crate::headless::kernel::discover_prompt_material(project, &options.prompt)
-				.expect("prompt material");
+		let (context_files, rules) = crate::headless::kernel::discover_prompt_material(
+			project,
+			&options.prompt,
+			&Default::default(),
+		)
+		.expect("prompt material");
 		let skills = crate::discovery::skills::ActiveSkills::default();
 		crate::headless::kernel::prompt_facts(project, options, &skills, &context_files, &rules)
 			.always_apply_rules

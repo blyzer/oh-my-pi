@@ -268,7 +268,8 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 				.is_file()
 		);
 		// Rules, the sticky RULES.md, and AGENTS.md.
-		let rules = ActiveRules::discover(&fixture.project, &fixture.home, config);
+		let rules =
+			ActiveRules::discover(&fixture.project, &fixture.home, config, &Default::default());
 		let names = rules
 			.rules
 			.iter()
@@ -277,7 +278,8 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 		assert!(names.contains(&"style") && names.contains(&"RULES"), "{names:?}");
 		assert_eq!(read(&agent.join("AGENTS.md")), format!("Guidance {tag}.\n"));
 		// Prompts and commands both become templates.
-		let templates = PromptTemplates::discover(&fixture.project, config, &[], true);
+		let templates =
+			PromptTemplates::discover(&fixture.project, config, &Default::default(), &[], true);
 		assert!(templates.warnings.is_empty(), "{:?}", templates.warnings);
 		assert!(templates.get("explain").is_some());
 		assert_eq!(
@@ -535,7 +537,8 @@ fn v1_commands_become_prompt_templates() {
 	let report = apply(&fixture.pairs()[..1]);
 
 	let config = fixture.config();
-	let templates = PromptTemplates::discover(&fixture.project, config, &[], true);
+	let templates =
+		PromptTemplates::discover(&fixture.project, config, &Default::default(), &[], true);
 	let review = templates.get("review").expect("review");
 	assert_eq!(review.description.as_str(), "Review a change (user)");
 	assert_eq!(
@@ -617,7 +620,8 @@ fn a_project_omp_converts_in_place_once() {
 		.expect("project mcp");
 	assert_eq!(mcp.mcp_servers["repo"].command.as_deref(), Some("repo-mcp"));
 	assert_eq!(mcp.mcp_servers["lint"].command.as_deref(), Some("lint-mcp"));
-	let templates = PromptTemplates::discover(&fixture.project, config, &[], true);
+	let templates =
+		PromptTemplates::discover(&fixture.project, config, &Default::default(), &[], true);
 	assert_eq!(templates.get("release").expect("release").source.as_str(), "(project)");
 	assert_eq!(listed(&report), [
 		(ImportStep::SshHosts, Some("stage"), OutcomeKind::Imported),
