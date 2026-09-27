@@ -135,7 +135,6 @@ omp_con::var! {
 			"ui.tab": "interaction",
 			"ui.group": "Collab",
 			"ui.label": "Share Secret Redaction",
-			"legacy.path": "export.shareRedactSecrets",
 			"legacy.path": "share.redactSecrets",
 		},
 	};
