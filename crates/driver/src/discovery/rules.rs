@@ -589,7 +589,7 @@ impl OneOrMany {
 }
 
 /// Splits `---` frontmatter from a Markdown document.
-pub(super) fn split_frontmatter(source: &str) -> (Option<&str>, &str) {
+pub(crate) fn split_frontmatter(source: &str) -> (Option<&str>, &str) {
 	let Some(rest) = source
 		.strip_prefix("---\n")
 		.or_else(|| source.strip_prefix("---\r\n"))

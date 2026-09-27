@@ -87,6 +87,8 @@ pub enum ImportStep {
 	/// v1 session transcripts into native journals: on demand, or all of them
 	/// with `omp config import-v1 --sessions` (owner decision #4).
 	Sessions,
+	/// v1 custom agents `agents/*.md` into class cfgs and agent-scoped rules.
+	Agents,
 }
 
 impl ImportStep {
@@ -114,6 +116,7 @@ impl ImportStep {
 			Self::SshHosts => V1Item::Ssh,
 			Self::Keybindings => V1Item::Keybindings,
 			Self::Sessions => V1Item::Sessions,
+			Self::Agents => V1Item::Agents,
 		}
 	}
 
@@ -157,6 +160,7 @@ impl ImportStep {
 			| Self::SshHosts => super::assets::import(self, cx),
 			Self::Keybindings => super::keybindings::import_keybindings(cx),
 			Self::Sessions => super::sessions::import_sessions(cx),
+			Self::Agents => super::agents::import_agents(cx),
 		}
 	}
 }
@@ -409,6 +413,9 @@ pub enum ImportError {
 	/// The v1 settings could not be imported.
 	#[error("could not import the settings")]
 	Settings(#[from] super::SettingsImportError),
+	/// A v1 custom agent could not be read or written.
+	#[error("could not import the custom agents")]
+	Agents(#[from] super::AgentsImportError),
 	/// A credential step asked for a store the run does not own.
 	#[error("no credential store is available to import into")]
 	NoCredentialStore,
