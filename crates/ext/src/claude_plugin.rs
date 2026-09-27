@@ -28,6 +28,12 @@
 //!   factories have no runtime home yet and surface as
 //!   [`PluginDiagnostic::Unsupported`] instead of being dropped silently.
 //!
+//! No process a plugin declares (MCP server, language server, debug adapter)
+//! starts before the operator approved it: resolution attaches each plugin's
+//! approved launch digests from the local grant file, and every launching
+//! seam gates through [`ClaudePlugin::admit_launch`]
+//! ([`crate::plugin_command`]).
+//!
 //! Plugin-shipped paths use `${CLAUDE_PLUGIN_ROOT}`; [`expand_plugin_vars`]
 //! and [`resolve_plugin_command`] are the one expansion every runtime seam
 //! applies.
@@ -52,14 +58,20 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	fs, io,
 	path::{Path, PathBuf},
+	sync::Arc,
 };
 
-use omp_core::Str;
+use omp_core::{Hash32, Str};
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::value::RawValue;
 use strum::{Display, IntoStaticStr};
 
-use crate::claude_hooks::{ClaudeHookEvent, HookHandlerGap, PluginHook};
+use crate::{
+	ExtensionError,
+	claude_hooks::{ClaudeHookEvent, HookHandlerGap, PluginHook},
+	plugin_command::{PluginCommandBlocked, PluginLaunch, plugin_command_digest},
+	trust::{GrantsFile, grants_path},
+};
 
 /// Registry file name inside a scope's plugin directory.
 pub const REGISTRY_FILE: &str = "installed_plugins.json";
@@ -499,27 +511,47 @@ pub enum PluginDiagnostic {
 		#[source]
 		source:    Box<dyn std::error::Error + Send + Sync>,
 	},
+	/// A plugin server would launch a command the operator has not
+	/// approved; that server does not start.
+	#[error(transparent)]
+	CommandNotApproved(#[from] PluginCommandBlocked),
+	/// The local grant file could not be read, so no plugin launch counts as
+	/// approved.
+	#[error(
+		"plugin command approvals in {} cannot be read; plugin servers that launch commands do not start",
+		path.display()
+	)]
+	CommandApprovals {
+		/// Grant file path.
+		path:   PathBuf,
+		/// Decoding failure.
+		#[source]
+		source: ExtensionError,
+	},
 }
 
 /// One enabled, resolved plugin install.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaudePlugin {
 	/// Registry id, `name@marketplace`.
-	pub id:          Str,
+	pub id:                Str,
 	/// Plugin name (the id before `@`); namespaces commands and MCP servers.
-	pub name:        Str,
+	pub name:              Str,
 	/// Marketplace name (the id after `@`).
-	pub marketplace: Str,
+	pub marketplace:       Str,
 	/// Recorded version.
-	pub version:     Str,
+	pub version:           Str,
 	/// Registry scope the install came from.
-	pub scope:       PluginScope,
+	pub scope:             PluginScope,
 	/// Which installer recorded it.
-	pub source:      PluginSource,
+	pub source:            PluginSource,
 	/// Canonical plugin root (the value of `${CLAUDE_PLUGIN_ROOT}`).
-	pub root:        PathBuf,
+	pub root:              PathBuf,
 	/// Package format and its loadable components.
-	pub layout:      PluginLayout,
+	pub layout:            PluginLayout,
+	/// [`plugin_command_digest`]s of the launches the operator approved for
+	/// this plugin, read from the local grant file at resolution.
+	pub approved_commands: Arc<[Hash32]>,
 }
 
 /// The package format of one install.
@@ -653,6 +685,31 @@ impl ClaudePlugin {
 			PluginLayout::AgentPlugins => None,
 		}
 	}
+
+	/// The approval key of `launch` for this plugin at its recorded version.
+	#[must_use]
+	pub fn command_digest(&self, launch: &PluginLaunch) -> Hash32 {
+		plugin_command_digest(&self.id, &self.version, launch)
+	}
+
+	/// Whether the operator approved `launch` for this plugin.
+	#[must_use]
+	pub fn launch_approved(&self, launch: &PluginLaunch) -> bool {
+		self
+			.approved_commands
+			.contains(&self.command_digest(launch))
+	}
+
+	/// Admits `launch` when the operator approved it; otherwise returns the
+	/// diagnostic naming the plugin, the command, and how to approve it. A
+	/// launching seam never starts a refused launch.
+	pub fn admit_launch(&self, launch: PluginLaunch) -> Result<(), PluginCommandBlocked> {
+		let digest = self.command_digest(&launch);
+		if self.approved_commands.contains(&digest) {
+			return Ok(());
+		}
+		Err(PluginCommandBlocked::new(self.id.clone(), launch, digest))
+	}
 }
 
 /// The installed, enabled plugin set of one project, plus everything that did
@@ -685,6 +742,12 @@ impl ClaudePlugins {
 		let project = out.read_registry(&project_path);
 		let user = out.read_registry(&user_path);
 		let claude = claude.and_then(|home| out.read_claude_code(home, &project_root));
+		let approvals_path = grants_path(data_dir);
+		let approvals = GrantsFile::read(&approvals_path).unwrap_or_else(|source| {
+			out.diagnostics
+				.push(PluginDiagnostic::CommandApprovals { path: approvals_path, source });
+			GrantsFile::default()
+		});
 		let project_enabled = project
 			.plugins
 			.iter()
@@ -730,6 +793,9 @@ impl ClaudePlugins {
 				.filter(|entry| entry.enabled)
 				.map(|entry| Candidate::omp(entry, PluginScope::User));
 			out.admit(&user_path, id, PluginSource::Omp, candidates, &mut seen_roots);
+		}
+		for plugin in &mut out.plugins {
+			plugin.approved_commands = approvals.approved_plugin_commands(&plugin.id).collect();
 		}
 		out
 	}
@@ -886,6 +952,7 @@ impl ClaudePlugins {
 				source,
 				root,
 				layout,
+				approved_commands: Arc::default(),
 			});
 		}
 	}
@@ -1365,6 +1432,90 @@ mod tests {
 		assert_eq!(&*components.skills, [root.join("skills")]);
 		assert_eq!(&*components.commands, [root.join("commands")]);
 		assert_eq!(&*components.mcp, [ConfigDeclaration::File(root.join(".mcp.json"))]);
+	}
+
+	#[test]
+	fn resolution_attaches_each_plugins_approved_launches_and_gates_the_rest() {
+		use crate::{
+			plugin_command::{PluginLaunch, PluginLaunchKind},
+			trust::PluginCommandGrant,
+		};
+
+		let temp = tempfile::tempdir().unwrap();
+		let data = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let one = data.join("plugins/cache/plugins/m___one___1");
+		let two = data.join("plugins/cache/plugins/m___two___1");
+		write(&one.join(".lsp.json"), "{}");
+		write(&two.join(".lsp.json"), "{}");
+		write(
+			&data.join("plugins/installed_plugins.json"),
+			&registry(&[("one@m", &one, true), ("two@m", &two, true)]),
+		);
+		let launch = |args: &[&'static str]| {
+			PluginLaunch::new(
+				PluginLaunchKind::LanguageServer,
+				Str::new_static("srv"),
+				Str::new_static("srv-bin"),
+				args.iter().map(|arg| Str::new_static(arg)),
+				[],
+			)
+		};
+		let approved = launch(&["--stdio"]);
+		let digest = plugin_command_digest("one@m", "1.0.0", &approved);
+		crate::trust::GrantsFile::persist_plugin_command(&grants_path(&data), PluginCommandGrant {
+			plugin: Str::new_static("one@m"),
+			version: Str::new_static("1.0.0"),
+			kind: approved.kind,
+			server: approved.server.clone(),
+			command: approved.command.clone(),
+			args: approved.args.to_vec(),
+			digest,
+			granted_at: Str::new_static("2026-09-27T00:00:00Z"),
+			granted_by: Str::new_static("cli"),
+		})
+		.unwrap();
+
+		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
+		let [first, second] = &resolved.plugins[..] else {
+			panic!("two plugins: {:?}", resolved.plugins);
+		};
+		assert_eq!(first.id, "one@m");
+		assert_eq!(&*first.approved_commands, [digest]);
+		assert!(first.admit_launch(approved.clone()).is_ok());
+		let changed = first
+			.admit_launch(launch(&["--stdio", "--log"]))
+			.expect_err("changed arguments need a new approval");
+		assert_eq!(changed.plugin, "one@m");
+		assert_eq!(changed.digest, first.command_digest(&launch(&["--stdio", "--log"])));
+		assert!(second.approved_commands.is_empty());
+		let other = second
+			.admit_launch(approved)
+			.expect_err("an approval never crosses plugins");
+		assert_eq!(other.plugin, "two@m");
+	}
+
+	#[test]
+	fn unreadable_approvals_fail_closed_with_a_diagnostic() {
+		let temp = tempfile::tempdir().unwrap();
+		let data = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let one = data.join("plugins/cache/plugins/m___one___1");
+		write(&one.join(".lsp.json"), "{}");
+		write(&data.join("plugins/installed_plugins.json"), &registry(&[("one@m", &one, true)]));
+		write(&grants_path(&data), "plugin_command = 3");
+
+		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		assert!(
+			matches!(&resolved.diagnostics[..], [PluginDiagnostic::CommandApprovals { .. }]),
+			"{:?}",
+			resolved.diagnostics
+		);
+		assert_eq!(resolved.plugins.len(), 1);
+		assert!(resolved.plugins[0].approved_commands.is_empty());
 	}
 
 	#[test]

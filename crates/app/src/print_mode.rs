@@ -17,6 +17,7 @@
 //! complete.
 
 use std::{
+	fmt::Write as _,
 	fs,
 	path::Path,
 	sync::Arc,
@@ -82,6 +83,20 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 		);
 	}
 	let (mut kernel, mut session) = launch.compose().await?;
+	// Unapproved plugin servers never start without an interactive operator;
+	// report each on stderr, keeping stdout clean for the response.
+	if !launch.blocked_plugin_commands.is_empty() {
+		let mut report = String::new();
+		for blocked in &launch.blocked_plugin_commands {
+			let _ = writeln!(report, "warning: {blocked}");
+		}
+		let mut stderr = tokio::io::stderr();
+		stderr
+			.write_all(report.as_bytes())
+			.await
+			.into_diagnostic()?;
+		stderr.flush().await.into_diagnostic()?;
+	}
 	// The catalog composition routed through, after discovery refreshed it.
 	let catalog = kernel
 		.inference()

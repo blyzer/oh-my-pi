@@ -15,7 +15,12 @@ sits below both and can be reasoned about as data in, data out.
   contributions.
 - `lock`: reproducible lockfiles and local installed/enabled records.
 - `resolver`: the `uv` resolution driver and R1-R12 policy checks.
-- `trust`: signature verification and trust tiers.
+- `trust`: signature verification, trust tiers, and the local grant file,
+  including operator approvals of plugin-launched commands.
+- `plugin_command`: the approval key (`Hash32` digest of plugin version,
+  command, arguments, and environment) and typed refusal for every process an
+  installed plugin's MCP, LSP, or DAP declaration would start; plugin
+  resolution attaches approvals and each launching seam gates through them.
 - `index`, `upgrade`, `doctor`: index metadata, generation commits, and
   integrity diagnostics.
 - `marketplace`, `claude_plugin`: Claude-compatible marketplace catalogs, the

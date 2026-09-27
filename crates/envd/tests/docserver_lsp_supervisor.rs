@@ -9,7 +9,10 @@ use omp_envd::docserver::{
 	Environment, LspServerState, NativeLspSupervisor, ServerConfig,
 	lsp_registry::{LspRegistryEvent, LspStartupStage},
 };
-use omp_ext::claude_plugin::ClaudePlugins;
+use omp_ext::{
+	claude_plugin::ClaudePlugins,
+	trust::{GrantsFile, PluginCommandGrant, grants_path},
+};
 use tempfile::TempDir;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -202,6 +205,27 @@ fn install_plugins(data: &Path, installs: &[(&str, &Path, bool)]) {
 	.expect("write registry");
 }
 
+/// Records the operator's approval of every launch `plugins` declare in the
+/// grant file under `data`, the way `omp ext trust --approve-commands` does.
+fn approve_all(data: &Path, plugins: &ClaudePlugins) {
+	for plugin in &plugins.plugins {
+		for launch in omp_envd::plugin_commands::plugin_launches(plugin) {
+			GrantsFile::persist_plugin_command(&grants_path(data), PluginCommandGrant {
+				plugin:     plugin.id.clone(),
+				version:    plugin.version.clone(),
+				kind:       launch.kind,
+				server:     launch.server.clone(),
+				command:    launch.command.clone(),
+				args:       launch.args.to_vec(),
+				digest:     plugin.command_digest(&launch),
+				granted_at: "2026-09-27T00:00:00Z".into(),
+				granted_by: "test".into(),
+			})
+			.expect("persist approval");
+		}
+	}
+}
+
 /// A plugin root shipping the fake server under `bin/` and a Claude-format
 /// `.lsp.json` whose command and env name `${CLAUDE_PLUGIN_ROOT}`. The server
 /// refuses to start unless the env value is its own plugin root.
@@ -242,8 +266,17 @@ async fn installed_plugin_server_joins_the_roster_and_starts_with_its_root_expan
 	plugin_fixture(&disabled, "ghost");
 	let data = scratch.join("data");
 	install_plugins(&data, &[("enabled@m", &enabled, true), ("disabled@m", &disabled, false)]);
+	let unapproved = ClaudePlugins::resolve(&data, &project, None);
+	assert!(unapproved.diagnostics.is_empty(), "{:?}", unapproved.diagnostics);
+	assert_eq!(
+		omp_envd::plugin_commands::blocked_launches(&unapproved.plugins).len(),
+		1,
+		"the enabled plugin's server awaits approval"
+	);
+	approve_all(&data, &unapproved);
 	let plugins = ClaudePlugins::resolve(&data, &project, None);
 	assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
+	assert!(omp_envd::plugin_commands::blocked_launches(&plugins.plugins).is_empty());
 
 	let environment =
 		Environment::new(ServerConfig::new(project.clone()).expect("config")).expect("environment");
