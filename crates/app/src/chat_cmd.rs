@@ -202,61 +202,64 @@ pub(crate) struct HandoffTarget {
 /// `..`): a flag clap accepts is lowered into a convar, a [`KernelOptions`]
 /// field, or a launch fact here, or the crate does not compile.
 pub(crate) struct Launch {
-	pub data_dir:         PathBuf,
-	pub project:          PathBuf,
-	pub ctx:              Arc<omp_con::Ctx>,
-	pub catalog:          Arc<Catalog>,
+	pub data_dir:                PathBuf,
+	pub project:                 PathBuf,
+	pub ctx:                     Arc<omp_con::Ctx>,
+	pub catalog:                 Arc<Catalog>,
 	/// Configured model policy after `--config` overlays.
-	pub settings:         ModelSettings,
+	pub settings:                ModelSettings,
 	/// `settings` narrowed to the `--models` roster; identical to `settings`
 	/// without the flag.
-	pub scoped:           ModelSettings,
-	pub roles:            roles::LaunchRoles,
+	pub scoped:                  ModelSettings,
+	pub roles:                   roles::LaunchRoles,
 	/// Primary model selector handed to the kernel. When the launch follows
 	/// the remembered default role, [`Self::compose`] replaces this
 	/// pre-discovery guess with the model composition settled on.
-	pub model:            Str,
+	pub model:                   Str,
 	/// Thinking annotation of the remembered default selector.
-	pub default_thinking: Option<Str>,
+	pub default_thinking:        Option<Str>,
 	/// A remembered default model the post-discovery catalog does not list;
 	/// set by [`Self::compose`], which launched on a fallback instead.
-	pub missing_default:  Option<Str>,
+	pub missing_default:         Option<Str>,
+	/// Installed-plugin servers whose command the operator has not approved;
+	/// they do not start, and each launch mode names them once.
+	pub blocked_plugin_commands: Vec<omp_ext::plugin_command::PluginCommandBlocked>,
 	/// `--models` roster in flag order; the interactive cycle when non-empty.
-	pub scope:            Vec<ScopedModel>,
+	pub scope:                   Vec<ScopedModel>,
 	/// Reasoning level applied after the session opened: `--thinking`, else the
 	/// first scoped pattern's explicit suffix on a fresh session.
-	pub thinking:         Option<Str>,
+	pub thinking:                Option<Str>,
 	/// `--plan-mode` / `--plan-yolo`: engage the plan Director at launch.
-	pub plan_mode:        bool,
+	pub plan_mode:               bool,
 	/// `--plan-yolo`: the target the plan Director hands off to on approval.
-	pub plan_yolo:        Option<HandoffTarget>,
+	pub plan_yolo:               Option<HandoffTarget>,
 	/// Armed prewalk hand-off target; `None` when prewalk is off or disarmed.
-	pub prewalk:          Option<HandoffTarget>,
-	pub sessions_dir:     Option<PathBuf>,
+	pub prewalk:                 Option<HandoffTarget>,
+	pub sessions_dir:            Option<PathBuf>,
 	/// The launch reopens an existing session.
-	pub resuming:         bool,
-	pub ephemeral:        bool,
-	pub max_time:         Option<Duration>,
+	pub resuming:                bool,
+	pub ephemeral:               bool,
+	pub max_time:                Option<Duration>,
 	/// Ordered positional launch messages and `@file` references.
-	pub prompt:           Vec<Str>,
+	pub prompt:                  Vec<Str>,
 	/// Prompt templates (`/name` slash commands): the discovered directories
 	/// unless `--no-prompt-templates`, plus every `--prompt-template` path.
-	pub templates:        Arc<PromptTemplates>,
+	pub templates:               Arc<PromptTemplates>,
 	/// Discovered skill declarations shared with the kernel and slash console.
-	pub skills:           Arc<omp_driver::discovery::skills::ActiveSkills>,
+	pub skills:                  Arc<omp_driver::discovery::skills::ActiveSkills>,
 	/// The named dark-appearance theme the interactive host paints with:
 	/// `cl_theme_dark` resolved against `--theme` paths and the theme
 	/// directories; `None` is the stock dark palette.
-	pub theme:            Option<Arc<omp_tui::JsonTheme>>,
+	pub theme:                   Option<Arc<omp_tui::JsonTheme>>,
 	/// The independently persisted named light-appearance theme. An explicit
 	/// `cl_theme`/`--use-theme` override fills both fields with the same fixed
 	/// named theme.
-	pub light_theme:      Option<Arc<omp_tui::JsonTheme>>,
+	pub light_theme:             Option<Arc<omp_tui::JsonTheme>>,
 	/// Every discovered named palette, retained for `/settings` runtime choices
 	/// and observer-local preview.
-	pub theme_catalog:    Arc<omp_tui::ThemeCatalog>,
-	pub live_sessions:    Arc<omp_driver::sessions::SessionRegistry>,
-	pub options:          KernelOptions,
+	pub theme_catalog:           Arc<omp_tui::ThemeCatalog>,
+	pub live_sessions:           Arc<omp_driver::sessions::SessionRegistry>,
+	pub options:                 KernelOptions,
 }
 
 impl Launch {
@@ -390,6 +393,13 @@ impl Launch {
 			tracing::warn!(
 				error = diagnostic as &(dyn std::error::Error + 'static),
 				"installed plugin not fully loaded"
+			);
+		}
+		let blocked_plugin_commands = omp_driver::plugin_commands::blocked_launches(&claude_plugins);
+		for blocked in &blocked_plugin_commands {
+			tracing::warn!(
+				error = blocked as &(dyn std::error::Error + 'static),
+				"installed plugin server not started"
 			);
 		}
 		let templates = PromptTemplates::discover(
@@ -571,6 +581,7 @@ impl Launch {
 			model,
 			default_thinking,
 			missing_default: None,
+			blocked_plugin_commands,
 			scope,
 			thinking,
 			plan_mode: plan_mode || plan_yolo,
@@ -1037,6 +1048,11 @@ pub(crate) async fn run(
 		prompt: initial_prompt,
 		..
 	} = &launch;
+	// Unapproved plugin servers did not start; name each once, with the
+	// command that approves it.
+	for blocked in &launch.blocked_plugin_commands {
+		launch_notice(ctx, blocked.to_string());
+	}
 	// Composing the kernel refreshed runtime model discovery, after the
 	// launch snapshot was read, and settled the remembered default against
 	// it. A default that discovery still does not list launched on a

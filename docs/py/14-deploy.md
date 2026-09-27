@@ -2311,7 +2311,18 @@ capability, never changes a tier, never rewrites a lock, and never rotates a key
 | `--tier <trusted\|sandboxed>` | Change tier. Always prompts with the full capability diff. |
 | `--ship <installed\|source\|pickle>` | Change the code-shipping level (§3.9.2). `pickle` requires `--tier trusted`. |
 | `--key <FINGERPRINT>` | Accept a publisher key change after `E-KEY-CHANGED`. |
-| `--revoke` | Drop the grant. The extension stays installed and becomes `ungranted`. |
+| `--revoke` | Drop the grant. The extension stays installed and becomes `ungranted`. For an installed plugin id, also drops every approved plugin command. |
+| `--approve-command <DIGEST>` | Approve one command an installed plugin (`name@marketplace`) launches, by the digest the "not approved" notice names. Repeatable. |
+| `--approve-commands` | Approve every command an installed plugin currently launches. |
+
+An installed Claude-format plugin's stdio MCP servers, language servers, and debug adapters
+never start until the operator approved the exact launch. The approval is recorded beside the
+extension grants in `<data>/ext/grants.toml` (`[[plugin_command]]`), keyed on the plugin id
+and a SHA-256 digest of the plugin version, command, arguments, and environment overrides, so
+a plugin update or an edited command line is blocked again. Every launch mode names each
+blocked server once — an interactive notice, a `warning:` line on stderr in print mode — with
+the `omp ext trust <plugin> --approve-command <DIGEST>` invocation that approves it; `--show`
+lists a plugin's commands with their approval state.
 
 #### 3.13.12 `omp ext verify` / `bundle` / `publish` / `search` / `index` / `where`
 

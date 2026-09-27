@@ -9,9 +9,12 @@ use std::{
 };
 
 use omp_core::Str;
-use omp_ext::claude_plugin::{
-	ClaudePlugin, ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars,
-	resolve_plugin_command,
+use omp_ext::{
+	claude_plugin::{
+		ClaudePlugin, ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars,
+		resolve_plugin_command,
+	},
+	plugin_command::{PluginLaunch, PluginLaunchKind},
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -401,12 +404,14 @@ fn append_plugin_sources(
 			continue;
 		};
 		for declaration in &components.lsp {
-			let admitted = LspConfigSource::plugin(plugin, declaration).and_then(|source| {
-				sources.push(source);
-				load_lsp_config(sources).map(drop).inspect_err(|_| {
-					sources.pop();
-				})
-			});
+			let admitted = LspConfigSource::plugin(plugin, declaration)
+				.and_then(|source| gate_plugin_source(plugin, source, diagnostics))
+				.and_then(|source| {
+					sources.push(source);
+					load_lsp_config(sources).map(drop).inspect_err(|_| {
+						sources.pop();
+					})
+				});
 			if let Err(error) = admitted {
 				diagnostics.push(PluginDiagnostic::InvalidComponent {
 					plugin:    plugin.id.clone(),
@@ -417,6 +422,96 @@ fn append_plugin_sources(
 			}
 		}
 	}
+}
+
+/// Drops from one plugin declaration every server whose launch the operator
+/// has not approved ([`ClaudePlugin::admit_launch`]), recording each refusal
+/// as a [`PluginDiagnostic::CommandNotApproved`]; the approved servers still
+/// load.
+fn gate_plugin_source(
+	plugin: &ClaudePlugin,
+	mut source: LspConfigSource,
+	diagnostics: &mut Vec<PluginDiagnostic>,
+) -> Result<LspConfigSource, LspConfigError> {
+	let (mut document, launches) = plugin_source_launches(&source)?;
+	let mut blocked = Vec::new();
+	for (name, launch) in launches {
+		if let Err(refused) = plugin.admit_launch(launch) {
+			diagnostics.push(refused.into());
+			blocked.push(name);
+		}
+	}
+	if blocked.is_empty() {
+		return Ok(source);
+	}
+	// `plugin_source_launches` normalized this document, so it is an object
+	// whose `servers`, when present, is the server map.
+	if let Some(object) = document.as_object_mut() {
+		let servers = if object.contains_key("servers") {
+			object.get_mut("servers").and_then(Value::as_object_mut)
+		} else {
+			Some(object)
+		};
+		if let Some(servers) = servers {
+			for name in &blocked {
+				servers.remove(name.as_str());
+			}
+		}
+	}
+	source.bytes = serde_json::to_vec(&document)
+		.map_err(|source| LspConfigError::InvalidDocument { source })?
+		.into();
+	source.yaml = false;
+	Ok(source)
+}
+
+/// The parsed document of a plugin source plus, per server that sets its
+/// `command`, `args`, or `env`, the launch it declares after plugin-root
+/// expansion.
+fn plugin_source_launches(
+	source: &LspConfigSource,
+) -> Result<(Value, Vec<(Str, PluginLaunch)>), LspConfigError> {
+	let document = parse_value(source)?;
+	validate_value_bounds(&document)?;
+	let (servers, _) = normalize_document(document.clone())?;
+	let launches = servers
+		.into_iter()
+		.filter_map(|(name, mut patch)| {
+			if let Some(root) = &source.plugin_root {
+				patch.expand_plugin_root(root);
+			}
+			if patch.command.is_none() && patch.args.is_none() && patch.env.is_none() {
+				return None;
+			}
+			let launch = PluginLaunch::new(
+				PluginLaunchKind::LanguageServer,
+				name.clone(),
+				patch.command.unwrap_or_default(),
+				patch.args.unwrap_or_default(),
+				patch.env.unwrap_or_default(),
+			);
+			Some((name, launch))
+		})
+		.collect();
+	Ok((document, launches))
+}
+
+/// Every process `plugin`'s language-server declarations would launch,
+/// exactly as discovery gates them; a declaration that does not parse
+/// contributes nothing (it never loads).
+pub(crate) fn plugin_lsp_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
+	let Some(components) = plugin.claude_components() else {
+		return Vec::new();
+	};
+	components
+		.lsp
+		.iter()
+		.filter_map(|declaration| {
+			let source = LspConfigSource::plugin(plugin, declaration).ok()?;
+			plugin_source_launches(&source).ok()
+		})
+		.flat_map(|(_, launches)| launches.into_iter().map(|(_, launch)| launch))
+		.collect()
 }
 
 fn append_existing(
@@ -771,7 +866,8 @@ pub(crate) mod tests {
 	}
 
 	/// Records `(id, root, enabled)` installs in a user registry under
-	/// `data` and resolves them the way the composition does.
+	/// `data` and resolves them the way the composition does, with every
+	/// plugin launch approved.
 	pub fn installed_plugins(data: &Path, installs: &[(&str, &Path, bool)]) -> ClaudePlugins {
 		let mut registry = InstalledPluginsRegistry::default();
 		for (id, root, enabled) in installs {
@@ -791,7 +887,9 @@ pub(crate) mod tests {
 			&data.join("plugins/installed_plugins.json"),
 			&serde_json::to_string(&registry).unwrap(),
 		);
-		ClaudePlugins::resolve(data, data, None)
+		let mut plugins = ClaudePlugins::resolve(data, data, None);
+		crate::plugin_commands::approve_all(&mut plugins.plugins);
+		plugins
 	}
 
 	#[test]
@@ -846,6 +944,44 @@ pub(crate) mod tests {
 		assert_eq!(zig.command.value, format!("{root}/bin/zls").as_str());
 		assert_eq!(zig.command.provenance.kind, LspConfigSourceKind::Plugin);
 		assert!(!config.servers.contains_key("ghost"), "a disabled plugin contributed");
+	}
+
+	#[test]
+	fn unapproved_plugin_launches_are_left_out_with_a_diagnostic() {
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let plugin = temp.path().join("plugin");
+		write(
+			&plugin.join("lsp.yaml"),
+			"servers:\n  acme:\n    command: ${CLAUDE_PLUGIN_ROOT}/bin/acme\n    args: [--stdio]\n    \
+			 fileTypes: [.acme]\n    rootMarkers: [.]\n  trusted:\n    command: trusted-lsp\n    \
+			 fileTypes: [.t]\n    rootMarkers: [.]\n  rust-analyzer:\n    settings: {check: clippy}\n",
+		);
+		let mut plugins = installed_plugins(&temp.path().join("data"), &[("p@m", &plugin, true)]);
+		// Keep only `trusted` approved.
+		let plugin_entry = &mut plugins.plugins[0];
+		let trusted = crate::plugin_commands::plugin_launches(plugin_entry)
+			.into_iter()
+			.find(|launch| launch.server == "trusted")
+			.unwrap();
+		plugin_entry.approved_commands = [plugin_entry.command_digest(&trusted)].into();
+
+		let found = discover_lsp_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		let config = load_lsp_config(&found.sources).unwrap();
+
+		assert!(config.servers.contains_key("trusted"));
+		assert!(!config.servers.contains_key("acme"), "an unapproved server loaded");
+		// A declaration that launches nothing needs no approval.
+		assert_eq!(config.servers["rust-analyzer"].settings.value["check"], "clippy");
+		let [PluginDiagnostic::CommandNotApproved(blocked)] = &found.diagnostics[..] else {
+			panic!("{:?}", found.diagnostics);
+		};
+		let root = fs::canonicalize(&plugin).unwrap();
+		assert_eq!(blocked.plugin, "p@m");
+		assert_eq!(blocked.server, "acme");
+		assert_eq!(*blocked.command(), root.join("bin/acme").to_string_lossy().as_ref());
+		assert_eq!(blocked.args(), ["--stdio"]);
 	}
 
 	#[test]

@@ -12,8 +12,11 @@ use std::{
 };
 
 use omp_core::{Str, sf};
-use omp_ext::claude_plugin::{
-	ClaudePlugin, ConfigDeclaration, PluginScope, expand_plugin_vars, resolve_plugin_command,
+use omp_ext::{
+	claude_plugin::{
+		ClaudePlugin, ConfigDeclaration, PluginScope, expand_plugin_vars, resolve_plugin_command,
+	},
+	plugin_command::{PluginLaunch, PluginLaunchKind},
 };
 use serde::Deserialize;
 
@@ -378,52 +381,106 @@ fn push_agent_plugin_root(
 
 /// Installed Claude-layout marketplace plugins: each `.mcp.json` or manifest
 /// `mcpServers` declaration, servers namespaced `<plugin>:<server>` and
-/// `${CLAUDE_PLUGIN_ROOT}` expanded to the plugin root.
+/// `${CLAUDE_PLUGIN_ROOT}` expanded to the plugin root. A stdio server whose
+/// launch the operator has not approved
+/// ([`ClaudePlugin::admit_launch`]) is left out, so it never starts.
 fn push_claude_plugins(out: &mut Vec<ConfigSource>, plugins: &[ClaudePlugin]) {
 	for plugin in plugins {
-		let Some(components) = plugin.claude_components() else {
-			continue;
-		};
 		let kind = match plugin.scope {
 			PluginScope::Project => ConfigSourceKind::ClaudePluginProject,
 			PluginScope::User => ConfigSourceKind::ClaudePluginUser,
 		};
-		let root = Str::new(plugin.root.to_string_lossy());
-		for declaration in &components.mcp {
-			let (path, base, servers) = match declaration {
-				ConfigDeclaration::File(path) => {
-					let Some(document) = read_json::<PluginMcpDocument>(path) else {
-						continue;
-					};
-					let base = path.parent().unwrap_or(&plugin.root).to_path_buf();
-					(path.clone(), base, document.into_servers())
-				},
-				ConfigDeclaration::Inline { manifest, servers } => {
-					match serde_json::from_str::<BTreeMap<Str, ForeignServer>>(servers) {
-						Ok(servers) => (manifest.clone(), plugin.root.clone(), servers),
-						Err(error) => {
-							tracing::warn!(path = %manifest.display(), %error, "failed to parse plugin manifest mcpServers");
-							continue;
-						},
-					}
-				},
-			};
-			let servers = servers
-				.into_iter()
-				.map(|(name, mut server)| {
-					server.plugin_root = Some(plugin.root.clone());
-					if server.command.is_some() {
-						server
-							.env
-							.entry(Str::new_static("CLAUDE_PLUGIN_ROOT"))
-							.or_insert_with(|| root.clone());
-					}
-					(sf!("{}:{name}", plugin.name), server)
-				})
-				.collect();
-			push_document_at(out, path, &base, kind, servers);
+		for (path, servers) in plugin_mcp_declarations(plugin) {
+			let mut file = McpConfigFile::default();
+			for (name, server) in servers {
+				if let Some(launch) = plugin_mcp_launch(&name, &server)
+					&& let Err(blocked) = plugin.admit_launch(launch)
+				{
+					tracing::warn!(
+						error = &blocked as &(dyn std::error::Error + 'static),
+						"installed plugin MCP server not started"
+					);
+					continue;
+				}
+				file.mcp_servers.insert(name, server);
+			}
+			if !file.mcp_servers.is_empty() {
+				out.push(ConfigSource { path, kind, file });
+			}
 		}
 	}
+}
+
+/// Every process `plugin`'s MCP declarations would launch, exactly as
+/// discovery gates them.
+pub fn plugin_mcp_launches(plugin: &ClaudePlugin) -> impl Iterator<Item = PluginLaunch> {
+	plugin_mcp_declarations(plugin)
+		.into_iter()
+		.flat_map(|(_, servers)| servers)
+		.filter_map(|(name, server)| plugin_mcp_launch(&name, &server))
+}
+
+/// The launch a normalized plugin MCP server performs: stdio servers only.
+fn plugin_mcp_launch(name: &Str, server: &McpServerConfig) -> Option<PluginLaunch> {
+	let command = server.command.clone()?;
+	Some(PluginLaunch::new(
+		PluginLaunchKind::McpServer,
+		name.clone(),
+		command,
+		server.args.iter().cloned(),
+		server
+			.env
+			.iter()
+			.map(|(name, value)| (name.clone(), value.clone())),
+	))
+}
+
+/// `plugin`'s MCP declarations, each with its normalized, namespaced servers.
+fn plugin_mcp_declarations(plugin: &ClaudePlugin) -> Vec<(PathBuf, Vec<(Str, McpServerConfig)>)> {
+	let Some(components) = plugin.claude_components() else {
+		return Vec::new();
+	};
+	let root = Str::new(plugin.root.to_string_lossy());
+	let mut declarations = Vec::with_capacity(components.mcp.len());
+	for declaration in &components.mcp {
+		let (path, base, servers) = match declaration {
+			ConfigDeclaration::File(path) => {
+				let Some(document) = read_json::<PluginMcpDocument>(path) else {
+					continue;
+				};
+				let base = path.parent().unwrap_or(&plugin.root).to_path_buf();
+				(path.clone(), base, document.into_servers())
+			},
+			ConfigDeclaration::Inline { manifest, servers } => {
+				match serde_json::from_str::<BTreeMap<Str, ForeignServer>>(servers) {
+					Ok(servers) => (manifest.clone(), plugin.root.clone(), servers),
+					Err(error) => {
+						tracing::warn!(path = %manifest.display(), %error, "failed to parse plugin manifest mcpServers");
+						continue;
+					},
+				}
+			},
+		};
+		let servers = servers
+			.into_iter()
+			.filter_map(|(name, mut server)| {
+				server.plugin_root = Some(plugin.root.clone());
+				if server.command.is_some() {
+					server
+						.env
+						.entry(Str::new_static("CLAUDE_PLUGIN_ROOT"))
+						.or_insert_with(|| root.clone());
+				}
+				let normalized = server.normalize(&base);
+				if normalized.is_none() {
+					tracing::warn!(path = %path.display(), server = %name, "ignored malformed foreign MCP declaration");
+				}
+				Some((sf!("{}:{name}", plugin.name), normalized?))
+			})
+			.collect();
+		declarations.push((path, servers));
+	}
+	declarations
 }
 
 #[derive(Clone, Copy)]
@@ -844,6 +901,53 @@ mod tests {
 	}
 
 	#[test]
+	fn unapproved_claude_plugin_stdio_servers_never_reach_the_roster() {
+		let temp = tempfile::tempdir().unwrap();
+		let home = temp.path().join("home");
+		let data = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let plugin = data.join("plugins/cache/plugins/market___tools___1.0.0");
+		write(
+			&plugin.join(".mcp.json"),
+			r#"{"mcpServers":{
+				"db":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/db","args":["--stdio"]},
+				"ok":{"command":"ok-server"},
+				"remote":{"type":"http","url":"https://example.test/mcp"}
+			}}"#,
+		);
+		install_plugins(&data.join("plugins/installed_plugins.json"), &[(
+			"tools@market",
+			&plugin,
+			true,
+		)]);
+		let mut plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
+		let launches = crate::plugin_commands::plugin_launches(&plugins.plugins[0]);
+		assert_eq!(
+			launches
+				.iter()
+				.map(|launch| launch.server.as_str())
+				.collect::<Vec<_>>(),
+			["tools:db", "tools:ok"],
+			"only stdio servers launch a process"
+		);
+		let entry = &mut plugins.plugins[0];
+		entry.approved_commands = [entry.command_digest(&launches[1])].into();
+		let blocked = crate::plugin_commands::blocked_launches(&plugins.plugins);
+		assert_eq!(blocked.len(), 1);
+		assert_eq!(blocked[0].server, "tools:db");
+
+		let discovered = sources(
+			&McpConfigPaths::new(&home.join(".o2"), &project)
+				.with_claude_plugins(plugins.plugins.into()),
+		);
+		let resolved = super::super::config::resolve_sources(&discovered, true);
+		assert!(!resolved.servers.contains_key("tools:db"), "an unapproved server loaded");
+		assert!(resolved.servers.contains_key("tools:ok"));
+		assert!(resolved.servers.contains_key("tools:remote"), "a remote server needs no approval");
+	}
+
+	#[test]
 	fn installed_claude_plugin_servers_expand_the_plugin_root_unless_disabled() {
 		let temp = tempfile::tempdir().unwrap();
 		let home = temp.path().join("home");
@@ -868,8 +972,9 @@ mod tests {
 			("inline@market", &inline, true),
 			("quiet@market", &quiet, false),
 		]);
-		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
+		let mut plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
+		crate::plugin_commands::approve_all(&mut plugins.plugins);
 
 		let discovered = sources(
 			&McpConfigPaths::new(&home.join(".o2"), &project)
