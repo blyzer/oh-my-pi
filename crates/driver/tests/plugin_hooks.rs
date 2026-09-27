@@ -371,3 +371,19 @@ async fn commands_run_in_the_in_process_shell_with_the_plugin_root_expanded_and_
 	let workspace = workspace.to_string_lossy();
 	assert_eq!(fields[3], format!("{workspace}:{workspace}"), "the hook runs in the project root");
 }
+
+#[tokio::test]
+async fn a_blocking_stop_hook_continues_the_loop_with_its_reason() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"Stop":[{"hooks":[{"type":"command",
+			"command":"if [ -f \"$CLAUDE_PLUGIN_DATA/once\" ]; then exit 0; fi; touch \"$CLAUDE_PLUGIN_DATA/once\"; echo 'run the tests first' >&2; exit 2"}]}]}}"#,
+		true,
+	);
+	let outcome = fixture.run(BASH).await;
+	assert_eq!(outcome.requests.len(), 3, "the stop was blocked once: {:?}", outcome.requests);
+	assert!(
+		outcome.requests[2].contains("run the tests first"),
+		"the continuation carries the reason: {:?}",
+		outcome.requests
+	);
+}

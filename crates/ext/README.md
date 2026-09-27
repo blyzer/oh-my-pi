@@ -21,4 +21,9 @@ sits below both and can be reasoned about as data in, data out.
 - `marketplace`, `claude_plugin`: Claude-compatible marketplace catalogs, the
   `installed_plugins.json` registry `omp ext install` writes, and the
   resolution of enabled installs into contained plugin roots whose skills,
-  commands, rules, and MCP servers the driver and Environment discovery load.
+  commands, rules, MCP, LSP/DAP servers, and hooks the driver and Environment
+  discovery load. Claude Code's own registry merges in read-only
+  (`ClaudeCodeHome`); omp's registries win for the same id.
+- `claude_hooks`: Claude Code hook declarations (`hooks/hooks.json`, manifest
+  `hooks`) parsed into typed hooks, plus the data tables mapping Claude events
+  onto omp hook seams and Claude tool names onto omp tool families.
