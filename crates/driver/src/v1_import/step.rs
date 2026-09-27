@@ -82,6 +82,8 @@ pub enum ImportStep {
 	/// v1-only `.omp/` files convert once per project
 	/// ([`super::import_project_assets`]).
 	SshHosts,
+	/// v1 `keybindings.yml` actions into `bind` lines in `config.cfg`.
+	Keybindings,
 }
 
 impl ImportStep {
@@ -107,6 +109,7 @@ impl ImportStep {
 			Self::Secrets => V1Item::Secrets,
 			Self::Mcp => V1Item::Mcp,
 			Self::SshHosts => V1Item::Ssh,
+			Self::Keybindings => V1Item::Keybindings,
 		}
 	}
 
@@ -148,6 +151,7 @@ impl ImportStep {
 			| Self::Secrets
 			| Self::Mcp
 			| Self::SshHosts => super::assets::import(self, cx),
+			Self::Keybindings => super::keybindings::import_keybindings(cx),
 		}
 	}
 }
@@ -415,4 +419,7 @@ pub enum ImportError {
 	/// A user asset could not be read, checked, or copied.
 	#[error(transparent)]
 	Assets(#[from] super::assets::AssetError),
+	/// The v1 keybindings could not be read or written as `bind` lines.
+	#[error("could not import the keybindings")]
+	Keybindings(#[from] super::keybindings::KeybindingsImportError),
 }
