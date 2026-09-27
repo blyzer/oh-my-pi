@@ -248,13 +248,9 @@ impl Backend for WaylandBackend {
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		env, fs,
-		io::ErrorKind,
-		os::unix::net::UnixListener,
-		sync::{Mutex, mpsc},
-		thread, time,
-	};
+	use std::{env, fs, io::ErrorKind, os::unix::net::UnixListener, thread, time};
+
+	use parking_lot::Mutex;
 
 	use super::*;
 
@@ -271,14 +267,14 @@ mod tests {
 		}
 	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
-		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
+		let _guard = LIBEI_ENV_LOCK.lock();
 		let socket = env::temp_dir().join(format!("omp-libei-test-{}", std::process::id()));
 		let _ = fs::remove_file(&socket);
 		let listener = UnixListener::bind(&socket).expect("bind fake libei socket");
 		listener
 			.set_nonblocking(true)
 			.expect("make fake libei socket nonblocking");
-		let (stop_tx, stop_rx) = mpsc::channel();
+		let (stop_tx, stop_rx) = flume::unbounded();
 		let accepted = thread::spawn(move || {
 			loop {
 				match listener.accept() {
@@ -286,7 +282,7 @@ mod tests {
 					Err(err) if err.kind() == ErrorKind::WouldBlock => {
 						if !matches!(
 							stop_rx.recv_timeout(time::Duration::from_millis(10)),
-							Err(mpsc::RecvTimeoutError::Timeout)
+							Err(flume::RecvTimeoutError::Timeout)
 						) {
 							return false;
 						}

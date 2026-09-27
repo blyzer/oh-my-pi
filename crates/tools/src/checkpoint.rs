@@ -589,12 +589,13 @@ mod tests {
 	use std::{
 		future,
 		sync::{
-			Arc, Mutex,
+			Arc,
 			atomic::{AtomicBool, Ordering},
 		},
 	};
 
 	use futures::StreamExt as _;
+	use parking_lot::Mutex;
 
 	use super::*;
 
@@ -696,11 +697,7 @@ mod tests {
 			report: Str,
 			_: CancellationToken,
 		) -> impl Future<Output = Result<RewindAck, CheckpointFault>> + Send {
-			self
-				.0
-				.lock()
-				.expect("recording control")
-				.replace((checkpoint, report));
+			self.0.lock().replace((checkpoint, report));
 			future::ready(Ok(RewindAck {
 				checkpoint: Arc::new(info()),
 				receipt:    sf!("rewind-1"),
@@ -822,7 +819,6 @@ mod tests {
 			control
 				.0
 				.lock()
-				.expect("recording control")
 				.as_ref()
 				.map(|(checkpoint, report)| (checkpoint.as_str(), report.as_str())),
 			Some(("parser-baseline", "keep this finding"))

@@ -3,7 +3,7 @@
 use std::{
 	collections::VecDeque,
 	future::{Future, ready},
-	sync::{Arc, Mutex},
+	sync::Arc,
 	time::SystemTime,
 };
 
@@ -21,6 +21,7 @@ use omp_driver::{
 use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::Registry;
+use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
@@ -43,7 +44,6 @@ impl Inference for ScriptedInference {
 		let script = self
 			.scripts
 			.get_mut()
-			.expect("script mutex poisoned")
 			.pop_front()
 			.expect("one scripted turn");
 		ready(Ok(match script {
