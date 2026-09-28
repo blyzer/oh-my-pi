@@ -591,8 +591,12 @@ fn completion_value(completion: &ExtHostCompletion) -> Value {
 async fn wait_for_marker(path: &Path) -> i32 {
 	time::timeout(Duration::from_secs(3), async {
 		loop {
-			if let Ok(pid) = fs::read_to_string(path) {
-				return pid.parse().expect("marker contains worker pid");
+			// `open(..., "w")` creates the marker before the pid lands; poll for a
+			// parseable pid instead of racing the first byte.
+			if let Ok(text) = fs::read_to_string(path)
+				&& let Ok(pid) = text.trim().parse()
+			{
+				return pid;
 			}
 			time::sleep(Duration::from_millis(10)).await;
 		}

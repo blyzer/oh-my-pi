@@ -1,6 +1,11 @@
 //! Local grant, publisher-key, and revocation state.
 
-use std::{collections::BTreeSet, fs, io, path::Path, str::FromStr as _};
+use std::{
+	collections::BTreeSet,
+	fs, io,
+	path::{Path, PathBuf},
+	str::FromStr as _,
+};
 
 use jiff::Timestamp;
 use omp_core::{Hash32, Str, base64, encoding::hex, sf};
@@ -9,9 +14,19 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-	ExtensionCode, ExtensionError, Layer, TrustTier, WorkspaceUri, lock::atomic_toml,
+	ExtensionCode, ExtensionError, Layer, TrustTier, WorkspaceUri,
+	claude_plugin::ClaudePlugin,
+	lock::atomic_toml,
+	plugin_command::{PluginLaunch, PluginLaunchKind},
 	resolver::version_satisfies,
 };
+
+/// The local grant file under an omp data directory:
+/// `<data>/ext/grants.toml`.
+#[must_use]
+pub fn grants_path(data_dir: &Path) -> PathBuf {
+	data_dir.join("ext").join("grants.toml")
+}
 
 /// Directory containment covered by an operator grant.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -67,15 +82,63 @@ pub struct Grant {
 	pub duration:          GrantDuration,
 }
 
+/// An operator's approval for one process an installed plugin launches
+/// ([`crate::plugin_command`]).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PluginCommandGrant {
+	/// Plugin id, `name@marketplace`.
+	pub plugin:     Str,
+	/// Plugin version the launch was approved for.
+	pub version:    Str,
+	/// Component that declared the launch when it was approved.
+	pub kind:       PluginLaunchKind,
+	/// Server or adapter name when it was approved.
+	pub server:     Str,
+	/// Approved executable.
+	pub command:    Str,
+	/// Approved arguments.
+	#[serde(default)]
+	pub args:       Vec<Str>,
+	/// [`crate::plugin_command::plugin_command_digest`] of the approved launch;
+	/// the only field the gate compares besides the plugin id.
+	pub digest:     Hash32,
+	/// RFC 3339 timestamp.
+	pub granted_at: Str,
+	/// Operator channel: interactive or cli.
+	pub granted_by: Str,
+}
+
+impl PluginCommandGrant {
+	/// The operator's approval of `launch` for `plugin`, stamped now, through
+	/// the channel `granted_by` names.
+	#[must_use]
+	pub fn approve(plugin: &ClaudePlugin, launch: &PluginLaunch, granted_by: Str) -> Self {
+		Self {
+			plugin: plugin.id.clone(),
+			version: plugin.version.clone(),
+			kind: launch.kind,
+			server: launch.server.clone(),
+			command: launch.command.clone(),
+			args: launch.args.to_vec(),
+			digest: plugin.command_digest(launch),
+			granted_at: Str::new(Timestamp::now().to_string()),
+			granted_by,
+		}
+	}
+}
+
 /// Local grant file, never committed with a workspace.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GrantsFile {
 	/// File format version.
 	#[serde(default = "one")]
-	pub version: u32,
+	pub version:         u32,
 	/// Durable grants.
 	#[serde(rename = "grant", default)]
-	pub grants:  Vec<Grant>,
+	pub grants:          Vec<Grant>,
+	/// Approved plugin-launched commands.
+	#[serde(rename = "plugin_command", default, skip_serializing_if = "Vec::is_empty")]
+	pub plugin_commands: Vec<PluginCommandGrant>,
 }
 
 /// Failure while committing an operator grant through the canonical grant
@@ -240,15 +303,54 @@ impl GrantsFile {
 	/// Atomically writes only durable grants to the local grant file.
 	pub fn write(&self, path: &Path) -> io::Result<()> {
 		let durable = Self {
-			version: self.version,
-			grants:  self
+			version:         self.version,
+			grants:          self
 				.grants
 				.iter()
 				.filter(|grant| grant.duration == GrantDuration::Persistent)
 				.cloned()
 				.collect(),
+			plugin_commands: self.plugin_commands.clone(),
 		};
 		atomic_toml(path, &durable)
+	}
+
+	/// Digests of the plugin launches approved for `plugin`.
+	pub fn approved_plugin_commands<'a>(
+		&'a self,
+		plugin: &'a str,
+	) -> impl Iterator<Item = Hash32> + 'a {
+		self
+			.plugin_commands
+			.iter()
+			.filter(move |grant| grant.plugin == plugin)
+			.map(|grant| grant.digest)
+	}
+
+	/// Atomically records the operator's approval of one plugin launch,
+	/// replacing an earlier approval of the same plugin and digest.
+	pub fn persist_plugin_command(
+		path: &Path,
+		grant: PluginCommandGrant,
+	) -> Result<Self, GrantPersistenceError> {
+		let mut grants = Self::read(path).map_err(GrantPersistenceError::Read)?;
+		grants
+			.plugin_commands
+			.retain(|existing| existing.plugin != grant.plugin || existing.digest != grant.digest);
+		grants.plugin_commands.push(grant);
+		grants.write(path).map_err(GrantPersistenceError::Write)?;
+		Ok(grants)
+	}
+
+	/// Drops every approved launch of `plugin`, or only the one with
+	/// `digest`; returns how many approvals were removed. The caller commits
+	/// the change with [`Self::write`].
+	pub fn revoke_plugin_commands(&mut self, plugin: &str, digest: Option<&Hash32>) -> usize {
+		let before = self.plugin_commands.len();
+		self.plugin_commands.retain(|grant| {
+			grant.plugin != plugin || digest.is_some_and(|digest| grant.digest != *digest)
+		});
+		before - self.plugin_commands.len()
 	}
 
 	/// Replaces the prior decision for one extension and atomically persists the
@@ -724,7 +826,7 @@ mod tests {
 		let widened = capability_digest([sf!("net"), sf!("exec")], []);
 		let grants = GrantsFile {
 			version: 1,
-			grants:  vec![Grant {
+			grants: vec![Grant {
 				id:                id.clone(),
 				publisher:         publisher.clone(),
 				layer:             Layer::Client,
@@ -737,6 +839,7 @@ mod tests {
 				granted_by:        sf!("interactive"),
 				duration:          GrantDuration::Persistent,
 			}],
+			..GrantsFile::default()
 		};
 		assert!(!grant_covers(
 			&grants,
@@ -791,6 +894,68 @@ mod tests {
 		assert_eq!(GrantsFile::read(&path).expect("read grant").grants, [grant]);
 	}
 
+	fn plugin_command_grant(plugin: &'static str, args: &[&'static str]) -> PluginCommandGrant {
+		use crate::plugin_command::{PluginLaunch, plugin_command_digest};
+
+		let launch = PluginLaunch::new(
+			PluginLaunchKind::LanguageServer,
+			sf!("srv"),
+			sf!("/plugins/p/bin/srv"),
+			args.iter().map(|arg| Str::new_static(arg)),
+			[],
+		);
+		PluginCommandGrant {
+			plugin:     Str::new_static(plugin),
+			version:    sf!("1.0.0"),
+			kind:       launch.kind,
+			server:     launch.server.clone(),
+			command:    launch.command.clone(),
+			args:       launch.args.to_vec(),
+			digest:     plugin_command_digest(plugin, "1.0.0", &launch),
+			granted_at: sf!("2026-09-27T00:00:00Z"),
+			granted_by: sf!("cli"),
+		}
+	}
+
+	#[test]
+	fn plugin_command_approvals_round_trip_beside_extension_grants() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		assert_eq!(path, directory.path().join("ext/grants.toml"));
+		let extension = workspace_grant(workspace("file:///w"), GrantScope::Exact, "b3:c");
+		GrantsFile::persist(&path, extension.clone()).expect("persist extension grant");
+		let stdio = plugin_command_grant("p@m", &["--stdio"]);
+		let tcp = plugin_command_grant("p@m", &["--tcp"]);
+		let other = plugin_command_grant("q@m", &["--stdio"]);
+		for grant in [&stdio, &tcp, &other, &stdio] {
+			GrantsFile::persist_plugin_command(&path, grant.clone()).expect("persist approval");
+		}
+		let read = GrantsFile::read(&path).expect("read grants");
+		assert_eq!(read.grants, std::slice::from_ref(&extension), "extension grants survive");
+		assert_eq!(
+			read.plugin_commands,
+			[tcp.clone(), other.clone(), stdio.clone()],
+			"re-approving replaces rather than duplicates"
+		);
+		assert_eq!(read.approved_plugin_commands("p@m").collect::<Vec<_>>(), [
+			tcp.digest,
+			stdio.digest
+		]);
+		// An extension grant persisted afterwards keeps the approvals.
+		GrantsFile::persist(&path, extension).expect("re-persist extension grant");
+		let mut read = GrantsFile::read(&path).expect("read grants");
+		assert_eq!(read.plugin_commands.len(), 3);
+		assert_eq!(read.revoke_plugin_commands("p@m", Some(&tcp.digest)), 1);
+		assert_eq!(read.revoke_plugin_commands("p@m", None), 1);
+		read.write(&path).expect("write grants");
+		assert_eq!(
+			GrantsFile::read(&path)
+				.expect("read grants")
+				.plugin_commands,
+			[other]
+		);
+	}
+
 	fn workspace(uri: &'static str) -> WorkspaceUri {
 		WorkspaceUri { uri: Str::new_static(uri), digest: sf!("digest:{uri}") }
 	}
@@ -816,7 +981,7 @@ mod tests {
 		let child = workspace("file:///work/team/project/");
 		let grant =
 			workspace_grant(workspace("file:///work/team/"), GrantScope::Subtree, "b3:capabilities");
-		let grants = GrantsFile { version: 1, grants: vec![grant.clone()] };
+		let grants = GrantsFile { version: 1, grants: vec![grant.clone()], ..GrantsFile::default() };
 		assert!(grant_covers(
 			&grants,
 			&grant.id,
@@ -835,7 +1000,11 @@ mod tests {
 		let parent =
 			workspace_grant(workspace("file:///work/team/"), GrantScope::Subtree, "b3:parent");
 		let exact = workspace_grant(child.clone(), GrantScope::Exact, "b3:child");
-		let grants = GrantsFile { version: 1, grants: vec![parent.clone(), exact.clone()] };
+		let grants = GrantsFile {
+			version: 1,
+			grants: vec![parent.clone(), exact.clone()],
+			..GrantsFile::default()
+		};
 		assert!(!grant_covers(
 			&grants,
 			&parent.id,
@@ -870,7 +1039,7 @@ mod tests {
 				"b3:capabilities",
 			)
 		};
-		GrantsFile { version: 1, grants: vec![grant.clone()] }
+		GrantsFile { version: 1, grants: vec![grant.clone()], ..GrantsFile::default() }
 			.write(&path)
 			.expect("write durable subset");
 		assert!(

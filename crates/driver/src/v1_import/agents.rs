@@ -23,12 +23,31 @@
 //! - The cfg holds the frontmatter: `description` as its first `//` line (the
 //!   agents overlay shows it), `model` as `ai_model`, `thinkingLevel` (or
 //!   `thinking`) as `ai_thinking`, and `tools` as the `sv_tools` allowlist.
+//! - v1 ran an agent without a `model` (or with `default`, `@default`, `*`) on
+//!   the session's model, never the task role (`resolveAgentModelSelection` on
+//!   `main`): such a class gets `ai_model inherit`
+//!   ([`omp_agent::AI_MODEL_INHERIT`]), which outranks `ai_task_model`. Only
+//!   `@task` (`pi/task`) followed the task role; it writes no `ai_model`, so
+//!   `ai_task_model` applies, else the session's model.
 //! - `sv_tools` keeps what v1 advertised to the child: the listed tools
 //!   (`search`/`find` read as `grep`/`glob`, `exec` as `eval` and `bash`), plus
 //!   `task` when the agent may spawn, plus `yield` and `hub`, which v1 added to
 //!   every explicit list. `spawns: none` withholds `task`.
 //! - The rule holds the Markdown body, with `alwaysApply: true` and `agents:
 //!   [<name>]`, so only that class's children carry it.
+//!
+//! # A project agent replaces the user agent of its name
+//!
+//! v1 let a project agent replace a user agent of the same name whole. v2
+//! layers the project class cfg over the user one instead, and that layering
+//! stays: when any v1 profile has a user agent of the project agent's name,
+//! the project cfg ends with `reset <var>` for every class setting only the
+//! user agent's cfg assigns (`ai_model`, `ai_thinking`, `sv_tools`), so the
+//! layered result is the project agent's alone. `reset` restores a convar's
+//! declared default; for `ai_model` an empty value means no class model
+//! ([`crate::subagent::settings::child_ctx`]). A project rule already shadows
+//! the user rule of its name; a project agent with an empty body writes a
+//! bodiless, unlisted rule of that name, so the user body is not carried.
 //!
 //! # What is reported
 //!
@@ -83,8 +102,11 @@ const RESERVED_CFGS: &[&str] = &["config", "subagent"];
 const V1_SENTINEL_NAMES: &[&str] = &["main", "sub"];
 
 /// v1 `model` values that make an agent follow the session's model
-/// (`isSessionInheritedAgentPattern`): no `ai_model` line.
-const INHERITED_MODELS: &[&str] = &["default", "@default", "*", "pi/default", "@task", "pi/task"];
+/// (`isSessionInheritedAgentPattern`): `ai_model inherit`.
+const SESSION_MODELS: &[&str] = &["default", "@default", "*", "pi/default"];
+/// v1 `model` values that follow the task role, else the session's model:
+/// no `ai_model` line, so `ai_task_model` applies.
+const TASK_MODELS: &[&str] = &["@task", "pi/task"];
 /// v1's legacy role prefix; `@` is the current one.
 const V1_LEGACY_ROLE_PREFIX: &str = "pi/";
 
@@ -181,8 +203,11 @@ pub enum AgentsImportError {
 /// The `agents` step for one profile pair.
 pub(super) fn import_agents(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, ImportError> {
 	let config_dir = &cx.pair.target.config_dir;
-	let destination =
-		Destination { cfg_dir: config_dir.clone(), rules_dir: config_dir.join(USER_RULES_DIR) };
+	let destination = Destination {
+		cfg_dir:   config_dir.clone(),
+		rules_dir: config_dir.join(USER_RULES_DIR),
+		replaces:  BTreeMap::new(),
+	};
 	let source = cx.locate(V1Item::Agents);
 	let (entries, failed) = match &source {
 		Some(source) => import_dir(source, &destination, cx.mode),
@@ -225,7 +250,11 @@ pub fn import_project_agents(
 	if marker.exists() {
 		return vec![whole(Some(&source), ImportOutcome::Skipped(SkipReason::MarkerPresent))];
 	}
-	let destination = Destination { rules_dir: root.join(PROJECT_RULES_DIR), cfg_dir: root };
+	let destination = Destination {
+		rules_dir: root.join(PROJECT_RULES_DIR),
+		cfg_dir:   root,
+		replaces:  user_classes(v1),
+	};
 	let (mut entries, failed) = import_dir(&source, &destination, mode);
 	if mode == ImportMode::Apply
 		&& !failed
@@ -264,6 +293,88 @@ struct Destination {
 	cfg_dir:   PathBuf,
 	/// Native rules directory of the same scope.
 	rules_dir: PathBuf,
+	/// For project agents: what the user agents of each name write, which a
+	/// project agent of that name resets. Empty for user agents.
+	replaces:  BTreeMap<Str, Written>,
+}
+
+/// What one converted agent writes: the class convars its cfg assigns and
+/// whether it has a rule.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Written {
+	/// `ai_model`.
+	model:    bool,
+	/// `ai_thinking`.
+	thinking: bool,
+	/// `sv_tools`.
+	tools:    bool,
+	/// The `agent-<name>` rule.
+	rule:     bool,
+}
+
+impl Written {
+	/// Both agents' writes together.
+	const fn union(self, other: Self) -> Self {
+		Self {
+			model:    self.model || other.model,
+			thinking: self.thinking || other.thinking,
+			tools:    self.tools || other.tools,
+			rule:     self.rule || other.rule,
+		}
+	}
+
+	/// The class convars `user` assigns and `self` does not, in cfg order.
+	fn left_to(self, user: Self) -> impl Iterator<Item = &'static str> {
+		[
+			(user.model && !self.model, omp_agent::AI_MODEL.name()),
+			(user.thinking && !self.thinking, omp_agent::AI_THINKING.name()),
+			(user.tools && !self.tools, omp_agent::SV_TOOLS.name()),
+		]
+		.into_iter()
+		.filter_map(|(reset, name)| reset.then_some(name))
+	}
+}
+
+/// The classes the v1 user agents define, across every v1 profile, with what
+/// their cfgs write. v1 let a project agent replace the user agent of its
+/// name in whichever profile ran, so the project cfg resets what any of them
+/// sets.
+///
+/// Unreadable user agents are left out here: the user-level step reports
+/// them.
+fn user_classes(v1: &V1Source) -> BTreeMap<Str, Written> {
+	let lsp = omp_tools::lsp::spec().name;
+	let roster = Roster { lsp: lsp.as_str() };
+	// An unlistable `profiles/` is reported by `plan`; the default profile
+	// still counts.
+	let profiles = v1.profiles().unwrap_or_default();
+	let mut classes = BTreeMap::<Str, Written>::new();
+	for profile in std::iter::once(None).chain(profiles.iter().map(|name| Some(name.as_str()))) {
+		let Some(dir) = v1.layout(profile).locate(V1Item::Agents) else {
+			continue;
+		};
+		let Ok(files) = agent_files(&dir) else {
+			continue;
+		};
+		let mut seen = BTreeSet::<Str>::new();
+		for file in files {
+			let Ok(text) = fs::read_to_string(&file) else {
+				continue;
+			};
+			let Ok(agent) = read_agent(&text) else {
+				continue;
+			};
+			if !seen.insert(agent.name.clone()) {
+				continue;
+			}
+			let Ok(converted) = convert(&agent, &roster, None) else {
+				continue;
+			};
+			let class = classes.entry(agent.name).or_default();
+			*class = class.union(converted.written);
+		}
+	}
+	classes
 }
 
 /// Imports every `*.md` agent in `source`, in v1's order. The flag reports a
@@ -390,10 +501,48 @@ struct RuleHeader<'a> {
 
 /// One agent converted into its two v2 files.
 struct Converted {
-	cfg:   String,
-	rule:  Option<String>,
+	cfg:     String,
+	rule:    Option<String>,
 	/// What the class could not take, one report subject each.
-	notes: Vec<Str>,
+	notes:   Vec<Str>,
+	/// What `cfg` assigns and whether the agent has a rule of its own.
+	written: Written,
+}
+
+/// A v1 agent file v1 would load.
+struct V1Agent<'t> {
+	/// The frontmatter `name`: the class name.
+	name:        Str,
+	/// The frontmatter `description`.
+	description: String,
+	header:      V1AgentHeader,
+	/// The Markdown body.
+	body:        &'t str,
+}
+
+/// Why v1 would not load an agent file.
+enum Rejected {
+	/// No frontmatter, or none v1 could read.
+	Frontmatter,
+	/// No `name` or no `description`.
+	Anonymous,
+	/// A name v1 reserves for its own sessions.
+	Sentinel(String),
+}
+
+/// Reads one v1 agent file as v1's loader did.
+fn read_agent(text: &str) -> Result<V1Agent<'_>, Rejected> {
+	let (header, body) = split_frontmatter(text);
+	let mut header = header
+		.and_then(|header| serde_yaml::from_str::<V1AgentHeader>(header).ok())
+		.ok_or(Rejected::Frontmatter)?;
+	let (Some(name), Some(description)) = (header.name.take(), header.description.take()) else {
+		return Err(Rejected::Anonymous);
+	};
+	if V1_SENTINEL_NAMES.contains(&name.trim().to_ascii_lowercase().as_str()) {
+		return Err(Rejected::Sentinel(name));
+	}
+	Ok(V1Agent { name: Str::new(name), description, header, body })
 }
 
 fn import_file(
@@ -416,23 +565,22 @@ fn import_file(
 		subject: Some(subject),
 		outcome: ImportOutcome::NotMigratable(NotMigratable::NoV2Equivalent),
 	};
-	let (header, body) = split_frontmatter(&text);
-	let header = header.and_then(|header| serde_yaml::from_str::<V1AgentHeader>(header).ok());
-	let Some(header) = header else {
-		// v1 rejected these too: no frontmatter, or none it could read.
-		entries.push(not_migratable(sf!("{file_name}: no readable v1 agent frontmatter")));
-		return Ok(());
+	let agent = match read_agent(&text) {
+		Ok(agent) => agent,
+		Err(Rejected::Frontmatter) => {
+			entries.push(not_migratable(sf!("{file_name}: no readable v1 agent frontmatter")));
+			return Ok(());
+		},
+		Err(Rejected::Anonymous) => {
+			entries.push(not_migratable(sf!("{file_name}: v1 agent without name and description")));
+			return Ok(());
+		},
+		Err(Rejected::Sentinel(name)) => {
+			entries.push(not_migratable(sf!("{file_name}: v1 rejects the agent name {name:?}")));
+			return Ok(());
+		},
 	};
-	let (Some(name), Some(description)) = (header.name.as_deref(), header.description.as_deref())
-	else {
-		entries.push(not_migratable(sf!("{file_name}: v1 agent without name and description")));
-		return Ok(());
-	};
-	if V1_SENTINEL_NAMES.contains(&name.trim().to_ascii_lowercase().as_str()) {
-		entries.push(not_migratable(sf!("{file_name}: v1 rejects the agent name {name:?}")));
-		return Ok(());
-	}
-	let name = Str::new(name);
+	let name = agent.name.clone();
 	if !seen.insert(name.clone()) {
 		entries.push(not_migratable(sf!("{name}: {file_name} is shadowed by an earlier agent")));
 		return Ok(());
@@ -455,7 +603,7 @@ fn import_file(
 		));
 		return Ok(());
 	}
-	let converted = convert(&name, description, &header, body, roster)?;
+	let converted = convert(&agent, roster, destination.replaces.get(&name).copied())?;
 	let cfg_path = destination.cfg_dir.join(format!("{name}.cfg"));
 	let rule_path = destination
 		.rules_dir
@@ -500,15 +648,17 @@ fn import_file(
 	Ok(())
 }
 
-/// Builds the class cfg and the rule for one agent.
+/// Builds the class cfg and the rule for one agent. `replaces` is what the
+/// user agents of the same name write, when this is a project agent that
+/// replaces them.
 fn convert(
-	name: &Str,
-	description: &str,
-	header: &V1AgentHeader,
-	body: &str,
+	agent: &V1Agent<'_>,
 	roster: &Roster<'_>,
+	replaces: Option<Written>,
 ) -> Result<Converted, AgentsImportError> {
+	let V1Agent { name, description, header, body } = agent;
 	let mut notes = Vec::new();
+	let mut written = Written::default();
 	let mut cfg = String::with_capacity(128);
 	cfg.push_str("//");
 	for word in description.split_whitespace() {
@@ -518,16 +668,20 @@ fn convert(
 	cfg.push('\n');
 
 	let mut model_thinking = None;
-	if let Some(model) = &header.model
-		&& let Some(patterns) = model.entries()
-		&& let Some((first, fallbacks)) = patterns.split_first()
-	{
+	let patterns = header.model.as_ref().and_then(OneOrMany::entries);
+	if let Some((first, fallbacks)) = patterns.as_deref().and_then(<[&str]>::split_first) {
 		match map_model(first) {
-			ModelMapping::Inherit => {
-				let _ = writeln!(cfg, "// v1 model {first} follows the session model");
+			ModelMapping::Session => {
+				let _ = writeln!(cfg, "ai_model {}", omp_agent::AI_MODEL_INHERIT);
+				written.model = true;
+			},
+			ModelMapping::TaskRole => {
+				let _ =
+					writeln!(cfg, "// v1 model {first} follows ai_task_model, else the session model");
 			},
 			ModelMapping::Selector { selector, thinking } => {
 				let _ = writeln!(cfg, "ai_model {}", Value::Str(selector));
+				written.model = true;
 				model_thinking = thinking;
 			},
 			ModelMapping::Unmappable => notes.push(sf!("{name}: model {first}")),
@@ -535,6 +689,10 @@ fn convert(
 		for fallback in fallbacks {
 			notes.push(sf!("{name}: model fallback {fallback}"));
 		}
+	} else {
+		// v1 ran an agent without a model on the session's model.
+		let _ = writeln!(cfg, "ai_model {}", omp_agent::AI_MODEL_INHERIT);
+		written.model = true;
 	}
 
 	let thinking = header
@@ -545,11 +703,13 @@ fn convert(
 		Some((_, Ok(effort))) => {
 			let effort: &'static str = effort.into();
 			let _ = writeln!(cfg, "ai_thinking {effort}");
+			written.thinking = true;
 		},
 		Some((level, Err(_))) => notes.push(sf!("{name}: thinkingLevel {level}")),
 		None => {
 			if let Some(effort) = model_thinking {
 				let _ = writeln!(cfg, "ai_thinking {effort}");
+				written.thinking = true;
 			}
 		},
 	}
@@ -611,6 +771,7 @@ fn convert(
 			}
 			let list = Value::List(advertised.into_iter().map(Value::Str).collect());
 			let _ = writeln!(cfg, "sv_tools {list}");
+			written.tools = true;
 		},
 		// Every tool stays advertised; only an explicit list can withhold one.
 		None if withholds_task => notes.push(sf!("{name}: spawns none without a tools list")),
@@ -619,30 +780,52 @@ fn convert(
 	notes.extend(header.other.keys().map(|key| sf!("{name}: {key}")));
 
 	let body = body.trim_start_matches(['\n', '\r']);
-	let rule = if body.trim().is_empty() {
-		None
+	written.rule = !body.trim().is_empty();
+	let rule = if written.rule {
+		Some(class_rule(name, true, body)?)
+	} else if replaces.is_some_and(|user| user.rule) {
+		// A bodiless, unlisted rule of the same name shadows the user agent's
+		// body, as v1's replacement carried none.
+		Some(class_rule(name, false, "")?)
 	} else {
-		let header =
-			serde_yaml::to_string(&RuleHeader { always_apply: true, agents: [name.as_str()] })
-				.map_err(|source| AgentsImportError::RuleHeader { name: name.clone(), source })?;
-		let mut rule = String::with_capacity(header.len() + body.len() + 10);
-		rule.push_str("---\n");
-		rule.push_str(&header);
-		rule.push_str("---\n");
-		rule.push_str(body);
-		if !rule.ends_with('\n') {
-			rule.push('\n');
-		}
-		Some(rule)
+		None
 	};
-	Ok(Converted { cfg, rule, notes })
+	if let Some(user) = replaces {
+		let mut resets = written.left_to(user).peekable();
+		if resets.peek().is_some() {
+			cfg.push_str("// v1 used this project agent in place of the user agent of its name\n");
+		}
+		for var in resets {
+			let _ = writeln!(cfg, "reset {var}");
+		}
+	}
+	Ok(Converted { cfg, rule, notes, written })
+}
+
+/// A rule scoped to the class `name`: injected whole when `always_apply`,
+/// else reachable only through `rule://`.
+fn class_rule(name: &Str, always_apply: bool, body: &str) -> Result<String, AgentsImportError> {
+	let header = serde_yaml::to_string(&RuleHeader { always_apply, agents: [name.as_str()] })
+		.map_err(|source| AgentsImportError::RuleHeader { name: name.clone(), source })?;
+	let mut rule = String::with_capacity(header.len() + body.len() + 10);
+	rule.push_str("---\n");
+	rule.push_str(&header);
+	rule.push_str("---\n");
+	rule.push_str(body);
+	if !rule.ends_with('\n') {
+		rule.push('\n');
+	}
+	Ok(rule)
 }
 
 /// A v1 `model` pattern in v2 terms.
 #[derive(Debug, Eq, PartialEq)]
 enum ModelMapping {
-	/// Follows the session model: no `ai_model` line.
-	Inherit,
+	/// Follows the session model: `ai_model inherit`.
+	Session,
+	/// Follows the task role, else the session model: no `ai_model` line, so
+	/// `ai_task_model` applies.
+	TaskRole,
 	/// An `ai_model` selector, and the thinking level a `:off` suffix asked
 	/// for (v2 selectors carry no `:off`).
 	Selector { selector: Str, thinking: Option<&'static str> },
@@ -655,8 +838,11 @@ enum ModelMapping {
 /// and anything else must parse as a v2 selector.
 fn map_model(pattern: &str) -> ModelMapping {
 	let pattern = pattern.trim();
-	if INHERITED_MODELS.contains(&pattern) {
-		return ModelMapping::Inherit;
+	if SESSION_MODELS.contains(&pattern) {
+		return ModelMapping::Session;
+	}
+	if TASK_MODELS.contains(&pattern) {
+		return ModelMapping::TaskRole;
 	}
 	let (base, thinking) = match pattern.rsplit_once(':') {
 		Some((base, "off")) => (base, Some("off")),
