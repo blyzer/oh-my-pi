@@ -219,12 +219,12 @@ fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
 		(Some("scout"), OutcomeKind::Imported),
 	]);
 	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
-	// `spawns: "*"` advertises `task`; `@task` follows the session model.
+	// `spawns: "*"` advertises `task`; `@task` follows `ai_task_model`.
 	assert_eq!(
 		read(&fixture.config().join("scout.cfg")),
 		concat!(
 			"// Finds things\n",
-			"// v1 model @task follows the session model\n",
+			"// v1 model @task follows ai_task_model, else the session model\n",
 			"ai_thinking high\n",
 			"sv_tools [read task yield hub]\n",
 		)
@@ -272,6 +272,158 @@ fn an_imported_agent_model_outranks_the_task_model_as_in_v1() {
 	};
 	assert_eq!(spawned("reviewer").as_str(), "@slow:high");
 	assert_eq!(spawned("scout").as_str(), "task/model");
+}
+
+/// v1 ran an agent without a `model` (or with `default`) on the session's
+/// model, not the task role (`resolveAgentModelSelection`); only `@task`
+/// followed the task role.
+#[test]
+fn an_agent_without_a_model_runs_on_the_session_model_not_the_task_model() {
+	let fixture = Fixture::new();
+	write(&fixture.agents().join("bare.md"), "---\nname: bare\ndescription: Bare\n---\nBody.\n");
+	write(
+		&fixture.agents().join("dflt.md"),
+		"---\nname: dflt\ndescription: Default\nmodel: \"@default\"\n---\nBody.\n",
+	);
+	write(
+		&fixture.agents().join("scout.md"),
+		"---\nname: scout\ndescription: Finds things\nmodel: \"@task\"\n---\nScout.\n",
+	);
+	fixture.run(ImportMode::Apply);
+	assert_eq!(read(&fixture.config().join("bare.cfg")), "// Bare\nai_model inherit\n");
+	assert_eq!(read(&fixture.config().join("dflt.cfg")), "// Default\nai_model inherit\n");
+
+	let files = CfgFiles::with_roots(fixture.config(), None);
+	let spawned = |parent: &omp_con::Ctx, agent: &str| {
+		let ctx = child_ctx(parent, &files, agent).expect("child context");
+		let settings = crate::subagent::settings::TaskSettings::from_con(&ctx);
+		crate::subagent::spawn::configure_child_route(&ctx, &settings, agent, None)
+			.expect("child route");
+		omp_agent::AI_MODEL.get(&ctx)
+	};
+	let parent = omp_con::Ctx::new();
+	parent
+		.run("ai_model parent/model; ai_task_model task/model")
+		.expect("parent values");
+	assert_eq!(spawned(&parent, "bare").as_str(), "parent/model");
+	assert_eq!(spawned(&parent, "dflt").as_str(), "parent/model");
+	assert_eq!(spawned(&parent, "scout").as_str(), "task/model");
+	let untasked = omp_con::Ctx::new();
+	untasked
+		.run("ai_model parent/model")
+		.expect("parent values");
+	assert_eq!(spawned(&untasked, "scout").as_str(), "parent/model");
+}
+
+/// v1 used a project agent in place of the user agent of its name. v2
+/// layers the project class cfg over the user one, so the project cfg
+/// resets what only the user agent sets, and shadows its body.
+#[test]
+fn a_project_agent_resets_what_only_the_user_agent_of_its_name_sets() {
+	let fixture = Fixture::new();
+	write(
+		&fixture.agents().join("helper.md"),
+		concat!(
+			"---\n",
+			"name: helper\n",
+			"description: User helper\n",
+			"model: anthropic/claude-opus-5\n",
+			"thinkingLevel: low\n",
+			"tools: [read, grep]\n",
+			"---\n",
+			"User body.\n",
+		),
+	);
+	// A named profile's user agent of the same name counts too.
+	write(
+		&fixture.omp().join("profiles/work/agent/agents/lister.md"),
+		"---\nname: lister\ndescription: Lists\ntools: [glob]\n---\nList things.\n",
+	);
+	let project = fixture.project();
+	let omp = project.join(".omp");
+	write(
+		&omp.join("agents/helper.md"),
+		"---\nname: helper\ndescription: Project helper\nmodel: \"@task\"\ntools: [grep]\n---\n",
+	);
+	write(
+		&omp.join("agents/lister.md"),
+		"---\nname: lister\ndescription: Project lister\nthinkingLevel: medium\n---\nOwn body.\n",
+	);
+	write(&omp.join("agents/solo.md"), "---\nname: solo\ndescription: Solo\n---\nSolo.\n");
+	fixture.run(ImportMode::Apply);
+	let roots = fixture.roots();
+	let applied = import_project_agents(&project, &fixture.source(), &roots, ImportMode::Apply);
+	assert_eq!(agents(&applied), [
+		(Some("helper"), OutcomeKind::Imported),
+		(Some("lister"), OutcomeKind::Imported),
+		(Some("solo"), OutcomeKind::Imported),
+	]);
+	assert_eq!(
+		read(&omp.join("helper.cfg")),
+		concat!(
+			"// Project helper\n",
+			"// v1 model @task follows ai_task_model, else the session model\n",
+			"sv_tools [grep yield hub]\n",
+			"// v1 used this project agent in place of the user agent of its name\n",
+			"reset ai_model\n",
+			"reset ai_thinking\n",
+		)
+	);
+	assert_eq!(
+		read(&omp.join("lister.cfg")),
+		concat!(
+			"// Project lister\n",
+			"ai_model inherit\n",
+			"ai_thinking medium\n",
+			"// v1 used this project agent in place of the user agent of its name\n",
+			"reset sv_tools\n",
+		)
+	);
+	assert_eq!(read(&omp.join("solo.cfg")), "// Solo\nai_model inherit\n");
+	// The bodiless project agent still shadows the user body.
+	assert_eq!(
+		read(&omp.join("rules/agent-helper.md")),
+		"---\nalwaysApply: false\nagents:\n- helper\n---\n"
+	);
+
+	// Layered, the user cfg then the project cfg equal the project agent
+	// alone: the user agent's model, thinking level, and tools are gone.
+	let parent = omp_con::Ctx::new();
+	parent
+		.run("ai_model parent/model; ai_task_model task/model")
+		.expect("parent values");
+	let layered = CfgFiles::with_roots(fixture.config(), Some(omp.clone()));
+	let helper = child_ctx(&parent, &layered, "helper").expect("helper child");
+	assert_eq!(omp_agent::AI_MODEL.get(&helper).as_str(), "task/model");
+	assert_eq!(
+		omp_agent::AI_THINKING.get(&helper),
+		omp_agent::AI_THINKING.get(&omp_con::Ctx::new()),
+		"the declared default"
+	);
+	assert_eq!(omp_agent::SV_TOOLS.get(&helper), ["grep", "yield", "hub"]);
+	let work = CfgFiles::with_roots(fixture.config().join("profiles/work"), Some(omp));
+	let lister = child_ctx(&parent, &work, "lister").expect("lister child");
+	assert!(omp_agent::SV_TOOLS.get(&lister).is_empty(), "every tool, as the project agent");
+	assert_eq!(omp_agent::AI_MODEL.get(&lister).as_str(), "parent/model");
+
+	let rules = fixture.rules(&fixture.config());
+	// The user rule of the name is the one discovery skips.
+	let skipped = rules
+		.warnings
+		.iter()
+		.map(|warning| warning.path.as_path())
+		.collect::<Vec<_>>();
+	assert_eq!(skipped, [fixture.config().join("agent/rules/agent-helper.md")]);
+	let shadow = rules
+		.get("agent-helper")
+		.expect("the project rule wins the name");
+	assert!(shadow.content.trim().is_empty(), "the user body is not carried");
+	assert!(
+		rules
+			.prompt_facts(AgentName::from_ref("helper"))
+			.always_apply
+			.is_empty()
+	);
 }
 
 #[test]
@@ -387,7 +539,7 @@ fn a_different_v2_file_or_a_built_in_class_is_a_conflict_that_keeps_v2() {
 	let mine = "// my own reviewer\nai_model @smol\n";
 	write(&fixture.config().join("reviewer.cfg"), mine);
 	// Identical content counts as already present; the missing rule lands.
-	write(&fixture.config().join("twin.cfg"), "// Twin\nai_thinking low\n");
+	write(&fixture.config().join("twin.cfg"), "// Twin\nai_model inherit\nai_thinking low\n");
 
 	let report = fixture.run(ImportMode::Apply);
 
@@ -432,7 +584,10 @@ fn project_agents_import_into_the_project_once() {
 	let v1_before = snapshot(&omp.join("agents"));
 	let applied = import_project_agents(&project, &fixture.source(), &roots, ImportMode::Apply);
 	assert_eq!(agents(&applied), [(Some("helper"), OutcomeKind::Imported)]);
-	assert_eq!(read(&omp.join("helper.cfg")), "// Project helper\nsv_tools [grep yield hub]\n");
+	assert_eq!(
+		read(&omp.join("helper.cfg")),
+		"// Project helper\nai_model inherit\nsv_tools [grep yield hub]\n"
+	);
 	assert_eq!(snapshot(&omp.join("agents")), v1_before);
 	let marker = project_agents_marker(&project, &roots);
 	assert!(marker.starts_with(&roots.state_dir), "the marker stays out of the repository");
@@ -493,7 +648,7 @@ fn a_named_profile_imports_into_its_v2_namesake() {
 	assert_eq!(agents(&report.pairs[0].entries), [(None, OutcomeKind::NothingToImport)]);
 	assert_eq!(agents(&report.pairs[1].entries), [(Some("lead"), OutcomeKind::Imported)]);
 	let work = fixture.config().join("profiles/work");
-	assert_eq!(read(&work.join("lead.cfg")), "// Work lead\nai_thinking xhigh\n");
+	assert_eq!(read(&work.join("lead.cfg")), "// Work lead\nai_model inherit\nai_thinking xhigh\n");
 	assert!(work.join("agent/rules/agent-lead.md").is_file());
 	assert!(!fixture.config().join("lead.cfg").exists());
 	assert!(ImportStep::Agents.marker(&fixture.config()).is_set());
@@ -527,8 +682,11 @@ fn model_patterns_follow_v2_selector_rules() {
 		selector: Str::new_static("opus"),
 		thinking: Some("off"),
 	});
-	for inherited in ["*", "default", "@default", "pi/default", "@task", "pi/task"] {
-		assert_eq!(map_model(inherited), ModelMapping::Inherit, "{inherited}");
+	for inherited in ["*", "default", "@default", "pi/default"] {
+		assert_eq!(map_model(inherited), ModelMapping::Session, "{inherited}");
+	}
+	for task in ["@task", "pi/task"] {
+		assert_eq!(map_model(task), ModelMapping::TaskRole, "{task}");
 	}
 	assert_eq!(map_model("@my-role"), ModelMapping::Unmappable);
 	assert_eq!(map_model("pi/nope"), ModelMapping::Unmappable);
