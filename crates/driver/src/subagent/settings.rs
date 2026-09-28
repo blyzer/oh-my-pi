@@ -585,6 +585,12 @@ fn string_map(values: Kv) -> BTreeMap<Str, Str> {
 /// `ai_model` before either cfg runs, so an `ai_model` the class cfg (or
 /// `subagent.cfg`) assigns outranks it by execution order, as v1 let an agent
 /// definition's `model` outrank the task role.
+///
+/// Two `ai_model` values the cfgs leave are resolved here, once they have
+/// run: `inherit` ([`omp_agent::AI_MODEL_INHERIT`]) becomes the parent's own
+/// `ai_model`, skipping `ai_task_model`, as v1 ran an agent without a `model`
+/// on the session's model; empty (`reset ai_model`) means the cfgs chose no
+/// model, so the seed applies again: `ai_task_model`, else the parent's.
 pub fn child_ctx(
 	parent: &Ctx,
 	loader: &dyn CfgLoader,
@@ -599,9 +605,10 @@ pub fn child_ctx(
 	for (name, value) in values {
 		child.set_value(name.as_str(), value, omp_con::SetSource::Code)?;
 	}
+	let parent_model = omp_agent::AI_MODEL.get(&child);
 	let task_model = omp_agent::AI_TASK_MODEL.get(&child);
 	if !task_model.is_empty() {
-		omp_agent::AI_MODEL.set(&child, task_model)?;
+		omp_agent::AI_MODEL.set(&child, task_model.clone())?;
 	}
 	let outcome = child.exec_spawn_configs(loader, agent)?;
 	if outcome.failed > 0 {
@@ -610,6 +617,19 @@ pub fn child_ctx(
 			failed = outcome.failed,
 			"child cfg contained statements this build does not understand; they were skipped"
 		);
+	}
+	let chosen = omp_agent::AI_MODEL.get(&child);
+	if chosen.as_str() == omp_agent::AI_MODEL_INHERIT {
+		omp_agent::AI_MODEL.set(&child, parent_model)?;
+	} else if chosen.is_empty() {
+		let seeded = if task_model.is_empty() {
+			parent_model
+		} else {
+			task_model
+		};
+		if !seeded.is_empty() {
+			omp_agent::AI_MODEL.set(&child, seeded)?;
+		}
 	}
 	Ok(child)
 }

@@ -57,6 +57,10 @@ pub enum SkipReason {
 	/// v2's `config.cfg` already binds the chord; the existing bind wins.
 	#[strum(to_string = "v2 config.cfg already binds this chord; kept the existing bind")]
 	ChordBound,
+	/// Another v1 action on the same chord ran first in v1's dispatch order,
+	/// so v1 never ran this one; only the one v1 ran is bound.
+	#[strum(to_string = "v1 ran another action on this chord; only that one is bound")]
+	ShadowedChord,
 	/// v1 sessions convert when picked from `/resume @v1`, or all at once with
 	/// `omp config import-v1 --sessions` (owner decision #4).
 	#[strum(to_string = "converted on demand: `/resume @v1`, or `omp config import-v1 --sessions`")]

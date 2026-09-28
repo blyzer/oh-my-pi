@@ -382,3 +382,85 @@ fn the_keybindings_import_keeps_the_framework_invariants() {
 		.collect::<Vec<_>>();
 	assert_eq!(markers, [true, true]);
 }
+
+/// v1 bound a chord to every action listing it and ran whichever its focused
+/// component checked first; the import binds only that one and reports the
+/// rest.
+#[test]
+fn two_actions_on_one_chord_keep_only_the_one_v1_ran() {
+	let root = tempfile::tempdir().expect("scratch");
+	let home = root.path().join("home");
+	let file = home.join(".omp/agent/keybindings.yml");
+	write(
+		&file,
+		concat!(
+			// `CustomEditor` checks `app.model.select` before history search.
+			"app.history.search: alt+m\n",
+			"app.model.select: [alt+m, ctrl+shift+l]\n",
+			// Custom key handlers: the later registration (`app.session.new`)
+			// replaced `app.plan.toggle` on the key.
+			"app.plan.toggle: ctrl+k\n",
+			"app.session.new: ctrl+k\n",
+			// A select-list and an editor action never competed.
+			"tui.select.up: alt+j\n",
+			"app.stt.toggle: alt+j\n",
+			// `SelectList` checks cancel before confirm.
+			"tui.select.confirm: q\n",
+			"tui.select.cancel: q\n",
+		),
+	);
+	let v2 = roots(root.path(), None);
+
+	let dry = import(&home, &v2, ImportMode::DryRun);
+	assert!(subjects(&dry, 0).contains(&(
+		"app.history.search: alt+m (v1 ran app.model.select)".to_owned(),
+		"skipped: v1 ran another action on this chord; only that one is bound".to_owned(),
+	)));
+
+	let report = import(&home, &v2, ImportMode::Apply);
+	let shadowed = "skipped: v1 ran another action on this chord; only that one is bound";
+	let imported = "imported";
+	assert_eq!(
+		subjects(&report, 0),
+		owned(&[
+			("app.history.search: alt+m (v1 ran app.model.select)", shadowed),
+			("app.model.select: alt+m", imported),
+			("app.model.select: ctrl+shift+l", imported),
+			("app.plan.toggle: ctrl+k (v1 ran app.session.new)", shadowed),
+			("app.session.new: ctrl+k", imported),
+			("tui.select.up: alt+j", imported),
+			("app.stt.toggle: alt+j", imported),
+			("tui.select.confirm: q (v1 ran tui.select.cancel)", shadowed),
+			("tui.select.cancel: q", imported),
+		])
+	);
+	assert!(
+		report.pairs[0]
+			.entries
+			.iter()
+			.any(|entry| matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::ShadowedChord)))
+	);
+	let config = v2.config_dir.join("config.cfg");
+	let text = fs::read_to_string(&config).expect("config.cfg");
+	assert!(
+		text.contains(
+			"// not imported: v1 ran `app.model.select` on alt+m, never `app.history.search`\n"
+		),
+		"{text}"
+	);
+	let ctx = effective(&config);
+	assert_eq!(bound(&ctx, "alt+m").as_deref(), Some("cl_model_select"));
+	assert_eq!(bound(&ctx, "ctrl+k").as_deref(), Some("new; ed_delete_to_end"));
+	assert_eq!(bound(&ctx, "alt+j").as_deref(), Some("cl_stt_toggle; ed_up"));
+	assert_eq!(bound(&ctx, "q").as_deref(), Some("cl_interrupt"));
+	// Each shadowed entry still replaced its action's default chords in v1:
+	// history search left Ctrl+R and plan mode left Alt+Shift+P there too.
+	assert_eq!(bound(&ctx, "ctrl+r").as_deref(), Some("panel_rename"));
+	assert_eq!(bound(&ctx, "alt+shift+p"), None);
+	for (chord, script) in ctx.binds() {
+		assert!(
+			!script.contains("cl_history_search") && !script.contains("cl_plan_toggle"),
+			"{chord} still runs a shadowed action: {script}"
+		);
+	}
+}
