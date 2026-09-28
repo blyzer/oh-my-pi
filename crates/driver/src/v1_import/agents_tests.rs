@@ -219,12 +219,12 @@ fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
 		(Some("scout"), OutcomeKind::Imported),
 	]);
 	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
-	// `spawns: "*"` advertises `task`; `@task` follows `ai_task_model`.
+	// `spawns: "*"` advertises `task`; `@task` is v2's task role reference.
 	assert_eq!(
 		read(&fixture.config().join("scout.cfg")),
 		concat!(
 			"// Finds things\n",
-			"// v1 model @task follows ai_task_model, else the session model\n",
+			"ai_model @task\n",
 			"ai_thinking high\n",
 			"sv_tools [read task yield hub]\n",
 		)
@@ -241,7 +241,7 @@ fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
 	assert_eq!(omp_agent::AI_THINKING.get(&reviewer).as_str(), "medium");
 	assert_eq!(omp_agent::SV_TOOLS.get(&reviewer), ["read", "grep", "eval", "bash", "yield", "hub"]);
 	let scout = child_ctx(&parent, &files, "scout").expect("scout child");
-	assert_eq!(omp_agent::AI_MODEL.get(&scout).as_str(), "parent/model");
+	assert_eq!(omp_agent::AI_MODEL.get(&scout).as_str(), "@task");
 	assert_eq!(omp_agent::SV_TOOLS.get(&scout), ["read", "task", "yield", "hub"]);
 }
 
@@ -257,7 +257,7 @@ fn an_imported_agent_model_outranks_the_task_model_as_in_v1() {
 	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
 
 	// v1 resolved an agent's own `model` ahead of the task role; `@task`
-	// followed the task role, which v2 spells `ai_task_model`.
+	// named v1's task role, which v2 keeps as the `task` role reference.
 	let parent = omp_con::Ctx::new();
 	parent
 		.run("ai_model parent/model; ai_task_model task/model")
@@ -271,7 +271,7 @@ fn an_imported_agent_model_outranks_the_task_model_as_in_v1() {
 		omp_agent::AI_MODEL.get(&ctx)
 	};
 	assert_eq!(spawned("reviewer").as_str(), "@slow:high");
-	assert_eq!(spawned("scout").as_str(), "task/model");
+	assert_eq!(spawned("scout").as_str(), "@task");
 }
 
 /// v1 ran an agent without a `model` (or with `default`) on the session's
@@ -307,12 +307,59 @@ fn an_agent_without_a_model_runs_on_the_session_model_not_the_task_model() {
 		.expect("parent values");
 	assert_eq!(spawned(&parent, "bare").as_str(), "parent/model");
 	assert_eq!(spawned(&parent, "dflt").as_str(), "parent/model");
-	assert_eq!(spawned(&parent, "scout").as_str(), "task/model");
-	let untasked = omp_con::Ctx::new();
-	untasked
-		.run("ai_model parent/model")
+	assert_eq!(spawned(&parent, "scout").as_str(), "@task");
+}
+
+/// v1's `@task` (`pi/task`) followed the task role, `modelRoles.task`, which
+/// the settings step writes to `ai_model_roles.task`. The imported class's
+/// `ai_model @task` resolves through that role in the child: the child's
+/// route is the role's model, not the session's or `ai_task_model`.
+#[test]
+fn a_task_role_agent_follows_the_imported_task_role() {
+	let fixture = Fixture::new();
+	for (file, model) in [("scout.md", "\"@task\""), ("legacy.md", "pi/task")] {
+		let name = file.trim_end_matches(".md");
+		write(
+			&fixture.agents().join(file),
+			&format!("---\nname: {name}\ndescription: Finds things\nmodel: {model}\n---\nScout.\n"),
+		);
+	}
+	fixture.run(ImportMode::Apply);
+	for name in ["scout", "legacy"] {
+		assert_eq!(
+			read(&fixture.config().join(format!("{name}.cfg"))),
+			"// Finds things\nai_model @task\n"
+		);
+	}
+
+	let catalog = omp_catalog::snapshot::Catalog::embedded();
+	let mut models = catalog
+		.models()
+		.iter()
+		.map(|model| model.key.as_str())
+		.filter(|key| !key.contains([':', '@', ' ']));
+	let (session, task) =
+		(models.next().expect("a catalog model"), models.next().expect("a second catalog model"));
+	let parent = omp_con::Ctx::new();
+	parent
+		.run(&format!("ai_model {session}; ai_task_model {session}; ai_model_roles {{task {task}}}"))
 		.expect("parent values");
-	assert_eq!(spawned(&untasked, "scout").as_str(), "parent/model");
+	let files = CfgFiles::with_roots(fixture.config(), None);
+	for name in ["scout", "legacy"] {
+		let child = child_ctx(&parent, &files, name).expect("child context");
+		let settings = crate::subagent::settings::TaskSettings::from_con(&child);
+		crate::subagent::spawn::configure_child_route(&child, &settings, name, None)
+			.expect("child route");
+		let selector = omp_agent::AI_MODEL.get(&child);
+		assert_eq!(selector.as_str(), "@task");
+		let selected = crate::discovery::roles::resolve_role_selector(
+			catalog,
+			&omp_catalog::settings::ModelSettings::from_con(&child),
+			selector.as_str(),
+		)
+		.expect("the task role resolves in the child");
+		assert_eq!(selected.model.as_str(), task, "{name} runs on the task role's model");
+	}
 }
 
 /// v1 used a project agent in place of the user agent of its name. v2
@@ -362,10 +409,9 @@ fn a_project_agent_resets_what_only_the_user_agent_of_its_name_sets() {
 		read(&omp.join("helper.cfg")),
 		concat!(
 			"// Project helper\n",
-			"// v1 model @task follows ai_task_model, else the session model\n",
+			"ai_model @task\n",
 			"sv_tools [grep yield hub]\n",
 			"// v1 used this project agent in place of the user agent of its name\n",
-			"reset ai_model\n",
 			"reset ai_thinking\n",
 		)
 	);
@@ -394,7 +440,7 @@ fn a_project_agent_resets_what_only_the_user_agent_of_its_name_sets() {
 		.expect("parent values");
 	let layered = CfgFiles::with_roots(fixture.config(), Some(omp.clone()));
 	let helper = child_ctx(&parent, &layered, "helper").expect("helper child");
-	assert_eq!(omp_agent::AI_MODEL.get(&helper).as_str(), "task/model");
+	assert_eq!(omp_agent::AI_MODEL.get(&helper).as_str(), "@task");
 	assert_eq!(
 		omp_agent::AI_THINKING.get(&helper),
 		omp_agent::AI_THINKING.get(&omp_con::Ctx::new()),
@@ -690,7 +736,7 @@ fn model_patterns_follow_v2_selector_rules() {
 		assert_eq!(map_model(inherited), ModelMapping::Session, "{inherited}");
 	}
 	for task in ["@task", "pi/task"] {
-		assert_eq!(map_model(task), ModelMapping::TaskRole, "{task}");
+		assert_eq!(map_model(task), selector("@task"), "{task}");
 	}
 	assert_eq!(map_model("@my-role"), ModelMapping::Unmappable);
 	assert_eq!(map_model("pi/nope"), ModelMapping::Unmappable);

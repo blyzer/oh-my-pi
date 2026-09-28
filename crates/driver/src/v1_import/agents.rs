@@ -26,9 +26,16 @@
 //! - v1 ran an agent without a `model` (or with `default`, `@default`, `*`) on
 //!   the session's model, never the task role (`resolveAgentModelSelection` on
 //!   `main`): such a class gets `ai_model inherit`
-//!   ([`omp_agent::AI_MODEL_INHERIT`]), which outranks `ai_task_model`. Only
-//!   `@task` (`pi/task`) followed the task role; it writes no `ai_model`, so
-//!   `ai_task_model` applies, else the session's model.
+//!   ([`omp_agent::AI_MODEL_INHERIT`]), which outranks `ai_task_model`.
+//! - `@task` (and v1's legacy `pi/task`) followed v1's task role,
+//!   `modelRoles.task`, which the settings step carries to
+//!   `ai_model_roles.task`: such a class gets `ai_model @task`, the v2 role
+//!   reference the child's route resolves through `ai_model_roles`
+//!   ([`crate::discovery::roles::resolve_role_selector`]). Every other role
+//!   reference maps the same way (`pi/slow:high` is `ai_model @slow:high`).
+//!   With no `task` role assigned, v2's catalog resolves `@task` as it does
+//!   `@smol` (a small capable model). Like any class `ai_model`, it outranks
+//!   `ai_task_model`.
 //! - `sv_tools` keeps what v1 advertised to the child: the listed tools
 //!   (`search`/`find` read as `grep`/`glob`, `exec` as `eval` and `bash`), plus
 //!   `task` when the agent may spawn, plus `yield` and `hub`, which v1 added to
@@ -104,9 +111,6 @@ const V1_SENTINEL_NAMES: &[&str] = &["main", "sub"];
 /// v1 `model` values that make an agent follow the session's model
 /// (`isSessionInheritedAgentPattern`): `ai_model inherit`.
 const SESSION_MODELS: &[&str] = &["default", "@default", "*", "pi/default"];
-/// v1 `model` values that follow the task role, else the session's model:
-/// no `ai_model` line, so `ai_task_model` applies.
-const TASK_MODELS: &[&str] = &["@task", "pi/task"];
 /// v1's legacy role prefix; `@` is the current one.
 const V1_LEGACY_ROLE_PREFIX: &str = "pi/";
 
@@ -675,10 +679,6 @@ fn convert(
 				let _ = writeln!(cfg, "ai_model {}", omp_agent::AI_MODEL_INHERIT);
 				written.model = true;
 			},
-			ModelMapping::TaskRole => {
-				let _ =
-					writeln!(cfg, "// v1 model {first} follows ai_task_model, else the session model");
-			},
 			ModelMapping::Selector { selector, thinking } => {
 				let _ = writeln!(cfg, "ai_model {}", Value::Str(selector));
 				written.model = true;
@@ -823,9 +823,6 @@ fn class_rule(name: &Str, always_apply: bool, body: &str) -> Result<String, Agen
 enum ModelMapping {
 	/// Follows the session model: `ai_model inherit`.
 	Session,
-	/// Follows the task role, else the session model: no `ai_model` line, so
-	/// `ai_task_model` applies.
-	TaskRole,
 	/// An `ai_model` selector, and the thinking level a `:off` suffix asked
 	/// for (v2 selectors carry no `:off`).
 	Selector { selector: Str, thinking: Option<&'static str> },
@@ -840,9 +837,6 @@ fn map_model(pattern: &str) -> ModelMapping {
 	let pattern = pattern.trim();
 	if SESSION_MODELS.contains(&pattern) {
 		return ModelMapping::Session;
-	}
-	if TASK_MODELS.contains(&pattern) {
-		return ModelMapping::TaskRole;
 	}
 	let (base, thinking) = match pattern.rsplit_once(':') {
 		Some((base, "off")) => (base, Some("off")),
