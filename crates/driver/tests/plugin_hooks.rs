@@ -13,10 +13,14 @@ use std::{
 };
 
 use futures::stream;
-use omp_agent::{DispatchPolicy, Inference, Kernel, RunControl, StaticPrompt, TurnInput};
+use omp_agent::{
+	DispatchPolicy, Inference, Kernel, LifecycleHooks, RunControl, SessionShutdown, ShutdownReason,
+	StaticPrompt, SwitchReason, TurnInput,
+};
 use omp_ai::{
-	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
-	RequestId, ResponseMeta, ToolCall, ToolCallId, Usage,
+	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ErrorKind, ErrorPhase,
+	ExecutionReceipt, FinishReason, RequestId, ResponseMeta, RetryAction, ToolCall, ToolCallId,
+	Usage,
 };
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
@@ -24,6 +28,7 @@ use omp_driver::{
 	headless::kernel::{EnvToolExecutor, SettingsAdmission},
 	plugin_commands::{approve_launch, blocked_launches, plugin_launches},
 	plugin_hooks::{PluginHookHost, PluginHookSession},
+	subagent::AgentName,
 };
 use omp_envd::{
 	AttachOptions, ProjectEnvironment, RegistryBridges, mcp::McpConfigPaths,
@@ -35,15 +40,18 @@ use omp_ext::{
 	},
 	plugin_command::{PluginCommandBlocked, PluginLaunchKind},
 };
+use omp_proto::toolhost::v1::HookEventId;
 use omp_session::{ComponentRegistry, Session};
 use parking_lot::Mutex;
 
 /// One `bash` call, then a closing text turn; every request's messages are
-/// recorded so tests can see what reached the model.
+/// recorded so tests can see what reached the model. With `fail`, the first
+/// request fails with that provider error instead.
 struct BashThenText {
 	command:  String,
 	turns:    usize,
 	requests: Arc<Mutex<Vec<String>>>,
+	fail:     Option<ErrorKind>,
 }
 
 impl Inference for BashThenText {
@@ -53,6 +61,14 @@ impl Inference for BashThenText {
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.turns += 1;
 		self.requests.lock().push(format!("{:?}", request.messages));
+		if let Some(kind) = self.fail {
+			return ready(Err(omp_ai::Error::new(
+				kind,
+				ErrorPhase::Planning,
+				RetryAction::Never,
+				ExecutionReceipt::default(),
+			)));
+		}
 		let meta = ResponseMeta {
 			request_id:          RequestId::from("plugin-hooks"),
 			provider:            ProviderId::from("test"),
@@ -176,6 +192,12 @@ impl Fixture {
 
 	/// Runs one turn whose model calls `bash` with `command`.
 	async fn run(&self, command: &str) -> Outcome {
+		let harness = self.harness(command, Kind::default()).await;
+		harness.turn().await
+	}
+
+	/// A kernel and session in the workspace, the plugin host attached.
+	async fn harness(&self, command: &str, kind: Kind) -> Harness {
 		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		let state = self.scratch.path().join("state");
@@ -200,6 +222,7 @@ impl Fixture {
 				command:  command.to_owned(),
 				turns:    0,
 				requests: Arc::clone(&requests),
+				fail:     kind.fail,
 			},
 			environment.registry(),
 			DispatchPolicy::new(spill.clone()),
@@ -207,7 +230,7 @@ impl Fixture {
 		)
 		.with_hook_gate(Arc::clone(&gate));
 		let approvals = kernel.approval_route();
-		let mut kernel = kernel
+		let kernel = kernel
 			.with_external_executor(Arc::new(EnvToolExecutor::new(
 				environment.client().clone(),
 				approvals,
@@ -224,7 +247,10 @@ impl Fixture {
 				transcript:   journal.clone(),
 				project_root: std::fs::canonicalize(&self.root).expect("root"),
 				data_dir:     self.data.clone(),
-				subagent:     false,
+				subagent:     kind.subagent.is_some(),
+				agent:        kind
+					.subagent
+					.map(|name| AgentName::new(Str::new_static(name))),
 			},
 			&plugins,
 		);
@@ -233,14 +259,61 @@ impl Fixture {
 			host.bind_mailbox(kernel.mailbox());
 			host.attach(&gate);
 		}
-		let mut session =
-			Session::create_with_blob_store(&journal, ComponentRegistry::standard(), spill)
-				.expect("session");
+		let session = Session::create_with_blob_store(&journal, ComponentRegistry::standard(), spill)
+			.expect("session");
+		Harness { environment, kernel, session, requests, installed }
+	}
+}
+
+/// What kind of kernel a harness runs.
+#[derive(Clone, Copy, Default)]
+struct Kind {
+	/// A subagent of this agent class.
+	subagent: Option<&'static str>,
+	/// The model's first request fails with this provider error.
+	fail:     Option<ErrorKind>,
+}
+
+/// A live kernel, its environment, and its session.
+struct Harness {
+	environment: ProjectEnvironment,
+	kernel:      Kernel<BashThenText>,
+	session:     Session,
+	requests:    Arc<Mutex<Vec<String>>>,
+	installed:   bool,
+}
+
+impl Harness {
+	fn lifecycle(&self) -> LifecycleHooks {
+		self
+			.kernel
+			.lifecycle_hooks()
+			.expect("the kernel has a hook gate")
+	}
+
+	/// Runs one turn and settles; a failing turn is an outcome, not a panic.
+	async fn run_turn(&mut self) -> Duration {
+		let started = Instant::now();
+		let _ = tokio::time::timeout(
+			Duration::from_secs(90),
+			self.kernel.run_turn(
+				&mut self.session,
+				TurnInput { text: Str::new_static("run it"), attachments: Vec::new() },
+				RunControl::default(),
+			),
+		)
+		.await
+		.expect("turn settles");
+		started.elapsed()
+	}
+
+	/// Runs one turn that must succeed, then tears the kernel down.
+	async fn turn(mut self) -> Outcome {
 		let started = Instant::now();
 		tokio::time::timeout(
 			Duration::from_secs(90),
-			kernel.run_turn(
-				&mut session,
+			self.kernel.run_turn(
+				&mut self.session,
 				TurnInput { text: Str::new_static("run it"), attachments: Vec::new() },
 				RunControl::default(),
 			),
@@ -249,12 +322,36 @@ impl Fixture {
 		.expect("turn settles")
 		.expect("turn");
 		let elapsed = started.elapsed();
-		let journal = std::fs::read_to_string(session.journal_path()).expect("journal");
+		self.finish(elapsed)
+	}
+
+	fn finish(self, elapsed: Duration) -> Outcome {
+		let journal = std::fs::read_to_string(self.session.journal_path()).expect("journal");
+		let Self { environment, kernel, session, requests, installed } = self;
 		drop(kernel);
+		drop(session);
 		drop(environment);
 		let requests = requests.lock().clone();
 		Outcome { journal, requests, elapsed, installed }
 	}
+}
+
+/// Waits (bounded) for a background hook to write `path`.
+async fn written(path: &Path) -> String {
+	let deadline = Instant::now() + Duration::from_secs(30);
+	loop {
+		if let Ok(text) = std::fs::read_to_string(path)
+			&& !text.is_empty()
+		{
+			return text;
+		}
+		assert!(Instant::now() < deadline, "{} was never written", path.display());
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+}
+
+fn json(text: &str) -> serde_json::Value {
+	serde_json::from_str(text).unwrap_or_else(|error| panic!("hook stdin is JSON ({error}): {text}"))
 }
 
 struct Outcome {
@@ -488,4 +585,250 @@ async fn an_approved_hook_is_asked_again_when_its_command_or_trigger_changes() {
 	assert!(!outcome.installed, "the changed hook is not registered");
 	assert!(fixture.root.join("marker.txt").exists(), "nothing blocked the call");
 	assert!(!fixture.plugin_data().join("ran").exists(), "the changed hook never ran");
+}
+
+#[tokio::test]
+async fn session_end_runs_once_at_the_end_with_its_payload_and_cannot_outlive_the_budget() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","timeout":60,
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/end.json\"; echo end >> \"$CLAUDE_PLUGIN_DATA/ends\"; sleep 30"}]}]}}"#,
+		true,
+	)
+	.approved();
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	assert!(harness.installed);
+	let started = Instant::now();
+	harness
+		.lifecycle()
+		.session_shutdown(&SessionShutdown::new(&harness.session, ShutdownReason::UserExit))
+		.await;
+	let waited = started.elapsed();
+	assert!(
+		waited < omp_agent::SESSION_SHUTDOWN_BUDGET + Duration::from_secs(2),
+		"a hook sleeping past the budget does not hold the end: {waited:?}"
+	);
+	let input = json(&read(&fixture.plugin_data().join("end.json")));
+	assert_eq!(input["hook_event_name"], "SessionEnd");
+	assert_eq!(input["reason"], "prompt_input_exit");
+	assert_eq!(input["session_id"], "hooks");
+	assert!(
+		input["transcript_path"]
+			.as_str()
+			.is_some_and(|path| path.ends_with("hooks.oms")),
+		"{input}"
+	);
+	let root = std::fs::canonicalize(&fixture.root).expect("root");
+	assert_eq!(input["cwd"], root.to_string_lossy().as_ref());
+	assert_eq!(read(&fixture.plugin_data().join("ends")), "end\n", "it ran exactly once");
+	drop(harness);
+}
+
+#[tokio::test]
+async fn a_switch_ends_the_session_as_clear_and_the_host_follows_the_next_session() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"SessionEnd":[{"hooks":[{"type":"command",
+			"command":"cat >> \"$CLAUDE_PLUGIN_DATA/ends.jsonl\"; echo >> \"$CLAUDE_PLUGIN_DATA/ends.jsonl\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	let next_path = fixture.scratch.path().join("next.oms");
+	let next = Session::create(&next_path, ComponentRegistry::standard()).expect("next session");
+	let lifecycle = harness.lifecycle();
+	lifecycle
+		.session_shutdown(&SessionShutdown::switching(&harness.session, &next, SwitchReason::New))
+		.await;
+	lifecycle
+		.session_shutdown(&SessionShutdown::switching(&next, &harness.session, SwitchReason::Resume))
+		.await;
+	let ends = read(&fixture.plugin_data().join("ends.jsonl"));
+	let ends = ends
+		.lines()
+		.filter(|line| !line.trim().is_empty())
+		.map(json)
+		.collect::<Vec<_>>();
+	assert_eq!(ends.len(), 2, "{ends:?}");
+	assert_eq!(ends[0]["reason"], "clear", "`/new` is Claude Code's `/clear`");
+	assert_eq!(ends[0]["session_id"], "hooks");
+	assert_eq!(ends[1]["reason"], "resume");
+	assert_eq!(ends[1]["session_id"], "next", "the host followed the switch");
+	assert!(
+		ends[1]["transcript_path"]
+			.as_str()
+			.is_some_and(|path| path.ends_with("next.oms")),
+		"{:?}",
+		ends[1]
+	);
+	drop(harness);
+}
+
+#[tokio::test]
+async fn a_session_end_matcher_filters_on_the_reason() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"SessionEnd":[{"matcher":"clear","hooks":[{"type":"command",
+			"command":"touch \"$CLAUDE_PLUGIN_DATA/cleared\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	harness
+		.lifecycle()
+		.session_shutdown(&SessionShutdown::new(&harness.session, ShutdownReason::Signal))
+		.await;
+	assert!(!fixture.plugin_data().join("cleared").exists(), "a signal is `other`, not `clear`");
+	drop(harness);
+}
+
+#[tokio::test]
+async fn stop_failure_runs_when_a_turn_fails_on_a_provider_error() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"StopFailure":[{"matcher":"rate_limit","hooks":[{"type":"command",
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/failure.json\""}]}],
+			"Stop":[{"hooks":[{"type":"command","command":"touch \"$CLAUDE_PLUGIN_DATA/stopped\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let mut harness = fixture
+		.harness(BASH, Kind { fail: Some(ErrorKind::RateLimited), ..Kind::default() })
+		.await;
+	harness.run_turn().await;
+	let input = json(&written(&fixture.plugin_data().join("failure.json")).await);
+	assert_eq!(input["hook_event_name"], "StopFailure");
+	assert_eq!(input["error"], "rate_limit");
+	assert_eq!(input["error_details"], "rate_limited");
+	assert!(!fixture.plugin_data().join("stopped").exists(), "StopFailure runs instead of Stop");
+	drop(harness);
+}
+
+#[tokio::test]
+async fn post_compact_and_notification_run_at_their_observations() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"PostCompact":[{"matcher":"manual","hooks":[{"type":"command",
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/compact.json\""}]}],
+			"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command",
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/notification.json\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	let lifecycle = harness.lifecycle();
+	// The payloads the compaction Director and the approval route publish.
+	lifecycle
+		.notify(
+			HookEventId::HookEventCompactionDone,
+			serde_json::json!({
+				"preparation_id": "1", "tiers_run": ["local"], "from_extension": null,
+				"tokens_before": 10, "tokens_after": 2, "first_kept_id": "1", "epoch": 1,
+				"summary_bytes": 7, "warning": null, "reason": "manual", "summary": "summary",
+			}),
+		)
+		.expect("notify");
+	lifecycle
+		.notify(
+			HookEventId::HookEventToolApprovalRequested,
+			serde_json::json!({
+				"call_id": "bash-1", "ticket_id": 1,
+				"target": {"kind": "core", "name": "rm -rf build", "rev": "", "args": {}},
+				"reasons": ["run `rm -rf build`"], "requested_by": "user",
+			}),
+		)
+		.expect("notify");
+	let compact = json(&written(&fixture.plugin_data().join("compact.json")).await);
+	assert_eq!(compact["hook_event_name"], "PostCompact");
+	assert_eq!(compact["trigger"], "manual");
+	assert_eq!(compact["compact_summary"], "summary");
+	let notification = json(&written(&fixture.plugin_data().join("notification.json")).await);
+	assert_eq!(notification["hook_event_name"], "Notification");
+	assert_eq!(notification["notification_type"], "permission_prompt");
+	assert!(
+		notification["message"]
+			.as_str()
+			.is_some_and(|message| message.contains("rm -rf build")),
+		"{notification}"
+	);
+	drop(harness);
+}
+
+#[tokio::test]
+async fn subagent_start_runs_on_a_subagents_first_prompt_and_opens_its_context() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"SubagentStart":[{"matcher":"reviewer","hooks":[{"type":"command",
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/start.json\"; printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\",\"additionalContext\":\"subagent-context-9\"}}'"}]}],
+			"UserPromptSubmit":[{"hooks":[{"type":"command","command":"touch \"$CLAUDE_PLUGIN_DATA/prompted\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let outcome = fixture
+		.harness(BASH, Kind { subagent: Some("reviewer"), ..Kind::default() })
+		.await
+		.turn()
+		.await;
+	let input = json(&read(&fixture.plugin_data().join("start.json")));
+	assert_eq!(input["hook_event_name"], "SubagentStart");
+	assert_eq!(input["agent_type"], "reviewer");
+	assert_eq!(input["agent_id"], "hooks");
+	assert!(
+		outcome.requests[0].contains("subagent-context-9"),
+		"the subagent's first request carries the context: {:?}",
+		outcome.requests
+	);
+	assert!(
+		!fixture.plugin_data().join("prompted").exists(),
+		"prompt events stay with the main session"
+	);
+}
+
+const ENDING: &str = r#"{"hooks":{"SessionEnd":[{"hooks":[{"type":"command",
+	"command":"touch \"$CLAUDE_PLUGIN_DATA/ended\""}]}],
+	"PostCompact":[{"hooks":[{"type":"command","command":"touch \"$CLAUDE_PLUGIN_DATA/compacted\""}]}]}}"#;
+
+#[tokio::test]
+async fn newly_mapped_events_still_need_the_operators_approval() {
+	let fixture = Fixture::new(ENDING, true);
+	let mut blocked = fixture
+		.blocked()
+		.iter()
+		.map(|blocked| blocked.server.to_string())
+		.collect::<Vec<_>>();
+	blocked.sort();
+	assert_eq!(blocked, ["PostCompact", "SessionEnd"]);
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	assert!(!harness.installed, "no approved hook, no hook host");
+	harness
+		.lifecycle()
+		.session_shutdown(&SessionShutdown::new(&harness.session, ShutdownReason::UserExit))
+		.await;
+	assert!(!fixture.plugin_data().join("ended").exists(), "the unapproved hook never ran");
+	drop(harness);
+}
+
+#[tokio::test]
+async fn an_unsupported_event_is_named_once_per_plugin() {
+	// The same unsupported event in the hooks file and the manifest.
+	let fixture = Fixture::new(
+		r#"{"hooks":{"CwdChanged":[{"hooks":[{"type":"command","command":"a"}]}],
+			"PostToolBatch":[{"hooks":[{"type":"command","command":"b"}]}]}}"#,
+		true,
+	);
+	std::fs::create_dir_all(fixture.plugin.join(".claude-plugin")).expect("manifest dir");
+	std::fs::write(
+		fixture.plugin.join(".claude-plugin/plugin.json"),
+		r#"{"name":"hooky","hooks":{"CwdChanged":[{"hooks":[{"type":"command","command":"c"}]}]}}"#,
+	)
+	.expect("manifest");
+	let plugins = ClaudePlugins::resolve(&fixture.data, &fixture.root, None);
+	let unsupported = plugins
+		.unsupported_hook_events()
+		.map(ToString::to_string)
+		.collect::<Vec<_>>();
+	assert_eq!(unsupported.len(), 2, "{unsupported:?}");
+	for (event, notice) in ["CwdChanged", "PostToolBatch"].iter().zip(&unsupported) {
+		assert!(
+			notice.contains("plugin `hooky@m`")
+				&& notice.contains(event)
+				&& notice.contains("not supported by omp; this hook will not run"),
+			"{notice}"
+		);
+	}
+	assert!(fixture.blocked().is_empty(), "an unsupported hook is never a launch awaiting approval");
 }

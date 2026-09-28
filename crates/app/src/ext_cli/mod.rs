@@ -168,7 +168,17 @@ pub enum Layer {
 }
 
 /// The scope containing an extension installation record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Serialize, strum::Display)]
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Eq,
+	PartialEq,
+	ValueEnum,
+	serde::Serialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum Scope {
@@ -745,7 +755,7 @@ pub async fn run(args: ExtArgs) -> miette::Result<()> {
 		.map_err(|error| miette!("{error}"))?;
 	let missing_source = effective_missing_source(&extension_scopes);
 	match command {
-		ExtCommand::List(args) => list(&state, args, json),
+		ExtCommand::List(args) => list(&state, &data_dir, args, json),
 		ExtCommand::Info(args) => info(&state, args, json),
 		ExtCommand::Install(mut args) => {
 			if args.target.is_empty() {
@@ -803,7 +813,71 @@ pub async fn run(args: ExtArgs) -> miette::Result<()> {
 	}
 }
 
-fn list(state: &StatePaths, args: ExtListArgs, json: bool) -> miette::Result<()> {
+/// One installed marketplace plugin as `omp ext list` shows it.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+struct MarketplacePluginRow {
+	/// `name@marketplace`.
+	id:       Str,
+	/// Recorded version.
+	version:  Str,
+	/// Registry scope of the install.
+	scope:    &'static str,
+	/// Whether sessions load it.
+	enabled:  bool,
+	/// A user install an enabled project install of the same id replaces.
+	shadowed: bool,
+	/// Which installer recorded it: omp's registries, or Claude Code's
+	/// (loaded read-only).
+	source:   &'static str,
+}
+
+/// Every installed marketplace plugin: each install omp's registries record
+/// (Claude-layout and Agent Plugins packages alike), enabled or not, then
+/// every enabled Claude Code install sessions load read-only
+/// ([`omp_ext::claude_plugin::ClaudePlugins::resolve`]) whose id omp does not
+/// record.
+fn marketplace_plugins(
+	state: &StatePaths,
+	data_dir: &Path,
+	claude: Option<&omp_ext::claude_plugin::ClaudeCodeHome>,
+) -> miette::Result<Vec<MarketplacePluginRow>> {
+	let omp: &'static str = omp_ext::claude_plugin::PluginSource::Omp.into();
+	let mut rows = service::plugin_views(state)?
+		.into_iter()
+		.map(|view| MarketplacePluginRow {
+			id:       match &view.marketplace {
+				Some(marketplace) => sf!("{}@{marketplace}", view.id),
+				None => view.id,
+			},
+			version:  view.version.unwrap_or_default(),
+			scope:    view.scope.into(),
+			enabled:  view.enabled,
+			shadowed: view.shadowed,
+			source:   omp,
+		})
+		.collect::<Vec<_>>();
+	let resolved = omp_ext::claude_plugin::ClaudePlugins::resolve(data_dir, &state.project, claude);
+	for plugin in resolved
+		.plugins
+		.into_iter()
+		.filter(|plugin| plugin.source == omp_ext::claude_plugin::PluginSource::ClaudeCode)
+	{
+		if rows.iter().any(|row| row.id == plugin.id) {
+			continue;
+		}
+		rows.push(MarketplacePluginRow {
+			id:       plugin.id,
+			version:  plugin.version,
+			scope:    plugin.scope.into(),
+			enabled:  true,
+			shadowed: false,
+			source:   plugin.source.into(),
+		});
+	}
+	Ok(rows)
+}
+
+fn list(state: &StatePaths, data_dir: &Path, args: ExtListArgs, json: bool) -> miette::Result<()> {
 	let client_lock = read_lock_or_empty(&state.client_lock, BackendLayer::Client)?;
 	let workspace_lock = read_lock_or_empty(&state.workspace_lock, BackendLayer::Workspace)?;
 	let catalog = args
@@ -846,16 +920,33 @@ fn list(state: &StatePaths, args: ExtListArgs, json: bool) -> miette::Result<()>
 				&& outdated
 		})
 		.collect::<Vec<_>>();
+	// Tier, pool, signature, and index filters select extensions only.
+	let plugins = if args.tier.is_some() || args.pool.is_some() || args.outdated || args.unsigned {
+		Vec::new()
+	} else {
+		marketplace_plugins(
+			state,
+			data_dir,
+			omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+		)?
+		.into_iter()
+		.filter(|plugin| !args.enabled || plugin.enabled)
+		.filter(|plugin| !args.disabled || !plugin.enabled)
+		.collect::<Vec<_>>()
+	};
 	if json {
 		println!(
 			"{}",
-			serde_json::to_string_pretty(
-				&serde_json::json!({"count": entries.len(), "extensions": entries})
-			)
+			serde_json::to_string_pretty(&serde_json::json!({
+				"count": entries.len(),
+				"extensions": entries,
+				"plugins": plugins,
+			}))
 			.into_diagnostic()?
 		);
 		return Ok(());
 	}
+	print_marketplace_plugins(&plugins);
 	println!("{} extensions", entries.len());
 	for entry in entries {
 		let lock = match entry.scope {
@@ -895,6 +986,38 @@ fn list(state: &StatePaths, args: ExtListArgs, json: bool) -> miette::Result<()>
 		}
 	}
 	Ok(())
+}
+
+/// The marketplace plugin section of `omp ext list`; nothing when none is
+/// installed.
+fn print_marketplace_plugins(plugins: &[MarketplacePluginRow]) {
+	if plugins.is_empty() {
+		return;
+	}
+	println!("{} marketplace plugins", plugins.len());
+	for plugin in plugins {
+		println!("{}", marketplace_plugin_line(plugin));
+	}
+}
+
+fn marketplace_plugin_line(plugin: &MarketplacePluginRow) -> String {
+	format!(
+		"{} {} {} {}{} source={}",
+		plugin.id,
+		if plugin.version.is_empty() {
+			"?"
+		} else {
+			plugin.version.as_str()
+		},
+		plugin.scope,
+		if plugin.enabled {
+			"enabled"
+		} else {
+			"disabled"
+		},
+		if plugin.shadowed { " shadowed" } else { "" },
+		plugin.source,
+	)
 }
 
 fn info(state: &StatePaths, args: ExtInfoArgs, json: bool) -> miette::Result<()> {
@@ -3504,6 +3627,78 @@ mod tests {
 		let mut out = Vec::new();
 		show_plugin_commands(state, data, args, &mut out).expect("show plugin commands");
 		String::from_utf8(out).expect("UTF-8 rows")
+	}
+
+	#[test]
+	fn list_shows_installed_marketplace_plugins_with_their_state() {
+		use omp_ext::claude_plugin::{
+			ClaudeCodeHome, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
+		};
+
+		let tree = tempfile::tempdir().expect("temporary tree");
+		let data = tree.path().join("data");
+		let project = tree.path().join("project");
+		fs::create_dir_all(&project).expect("project");
+		let plugin_root = |name: &str| {
+			let root = tree.path().join("roots").join(name);
+			fs::create_dir_all(root.join("skills/s")).expect("plugin root");
+			fs::write(root.join("skills/s/SKILL.md"), "x").expect("skill");
+			root
+		};
+		let entry = |root: PathBuf, version: &'static str, enabled: bool| InstalledPluginEntry {
+			scope: InstallScope::User,
+			install_path: root,
+			version: Str::new_static(version),
+			installed_at: Str::new_static("2026-01-01T00:00:00Z"),
+			last_updated: Str::new_static("2026-01-01T00:00:00Z"),
+			git_commit_sha: None,
+			enabled,
+		};
+		let mut registry = InstalledPluginsRegistry::default();
+		registry
+			.plugins
+			.insert(Str::new_static("tools@market"), vec![entry(plugin_root("tools"), "1.0.0", true)]);
+		registry
+			.plugins
+			.insert(Str::new_static("off@market"), vec![entry(plugin_root("off"), "2.0.0", false)]);
+		fs::create_dir_all(data.join("plugins")).expect("plugins dir");
+		fs::write(
+			data.join("plugins/installed_plugins.json"),
+			serde_json::to_string(&registry).expect("registry"),
+		)
+		.expect("write registry");
+		// Claude Code's own install of an id omp does not record.
+		let claude = ClaudeCodeHome::at(tree.path().join("home/.claude"));
+		fs::create_dir_all(claude.config_dir().join("plugins")).expect("claude plugins");
+		fs::write(
+			claude.registry(),
+			format!(
+				r#"{{"version":2,"plugins":{{"cc@claude-market":[{{"scope":"user","installPath":{},"version":"3.1.0"}}]}}}}"#,
+				serde_json::to_string(&plugin_root("cc")).expect("path")
+			),
+		)
+		.expect("claude registry");
+
+		let state = StatePaths::new(&data, &project);
+		let rows = marketplace_plugins(&state, &data, Some(&claude)).expect("plugins");
+		let lines = rows.iter().map(marketplace_plugin_line).collect::<Vec<_>>();
+		assert_eq!(
+			lines,
+			[
+				"off@market 2.0.0 user disabled source=omp",
+				"tools@market 1.0.0 user enabled source=omp",
+				"cc@claude-market 3.1.0 user enabled source=claude-code",
+			],
+			"{rows:?}"
+		);
+		let json = serde_json::to_value(&rows[1]).expect("row");
+		assert_eq!(
+			json,
+			serde_json::json!({
+				"id": "tools@market", "version": "1.0.0", "scope": "user",
+				"enabled": true, "shadowed": false, "source": "omp",
+			})
+		);
 	}
 
 	#[test]

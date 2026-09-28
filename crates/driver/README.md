@@ -16,7 +16,11 @@ presentation adapter.
   tools reused by chat, print, RPC, and ACP.
 - `plugin_hooks` runs installed plugins' Claude-format hooks as one
   in-process host on the kernel's generic hook gate, each command in the
-  environment's in-process shell.
+  environment's in-process shell. Which Claude Code event runs at which
+  lifecycle point is tabulated in `crates/ext/README.md`; `SessionEnd` runs at
+  `session_shutdown`, which every launch mode reaches when its session ends
+  (quit, a finished run, a switch) and waits on for at most
+  `omp_agent::SESSION_SHUTDOWN_BUDGET`.
 - `sessions` is the disposable process-local routing index for live kernel
   mailboxes and detached DOM snapshots.
 - `subagent` seeds child convars and composes child kernels through the same

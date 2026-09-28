@@ -610,6 +610,24 @@ impl Launch {
 		})
 	}
 
+	/// What the operator is told once at launch about installed plugins:
+	/// every command awaiting approval, then every hook on an event omp does
+	/// not run. Neither runs.
+	pub(crate) fn plugin_warnings(&self) -> impl Iterator<Item = &dyn std::error::Error> + '_ {
+		self
+			.blocked_plugin_commands
+			.iter()
+			.map(|blocked| blocked as &dyn std::error::Error)
+			.chain(
+				self
+					.options
+					.claude_plugins
+					.iter()
+					.flat_map(|plugins| plugins.unsupported_hook_events())
+					.map(|diagnostic| diagnostic as &dyn std::error::Error),
+			)
+	}
+
 	/// A leading `/skill:<name>` positional message expanded through the same
 	/// discovered skill snapshot as the interactive console.
 	pub(crate) fn initial_skill_prompt(&self) -> Option<omp_journal::data::SkillPrompt> {
@@ -1057,9 +1075,10 @@ pub(crate) async fn run(
 		..
 	} = &launch;
 	// Unapproved plugin servers and hooks do not run; name each once, with
-	// the command that approves it.
-	for blocked in &launch.blocked_plugin_commands {
-		launch_notice(ctx, blocked.to_string());
+	// the command that approves it. Hooks on events omp does not run are
+	// named once per plugin and event.
+	for warning in launch.plugin_warnings() {
+		launch_notice(ctx, warning.to_string());
 	}
 	// Composing the kernel refreshed runtime model discovery, after the
 	// launch snapshot was read, and settled the remembered default against
@@ -1577,6 +1596,76 @@ mod tests {
 		assert!(!options.prompt.include_context_files);
 		assert!(!options.prompt.include_rules, "--no-rules reaches the prompt policy");
 		assert_eq!(options.prompt.additional_roots, vec![fs::canonicalize(&extra).unwrap()]);
+	}
+
+	/// The launch names, once each, every unapproved plugin command and every
+	/// hook on an event omp does not run; chat posts each as a notice, print
+	/// mode writes each as a `warning:` line on stderr.
+	#[tokio::test]
+	async fn plugin_warnings_name_blocked_commands_and_unsupported_hook_events_once() {
+		use omp_ext::claude_plugin::{InstallScope, InstalledPluginEntry, InstalledPluginsRegistry};
+
+		let dir = tempfile::tempdir().unwrap();
+		let env = test_env(dir.path());
+		let root = dir.path().join("plugins/hooky");
+		fs::create_dir_all(root.join("hooks")).unwrap();
+		fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+		fs::write(
+			root.join("hooks/hooks.json"),
+			r#"{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"end"}]}],
+				"CwdChanged":[{"hooks":[{"type":"command","command":"cwd"}]}]}}"#,
+		)
+		.unwrap();
+		fs::write(
+			root.join(".claude-plugin/plugin.json"),
+			r#"{"name":"hooky","hooks":{"CwdChanged":[{"hooks":[{"type":"command","command":"again"}]}]}}"#,
+		)
+		.unwrap();
+		let mut registry = InstalledPluginsRegistry::default();
+		registry
+			.plugins
+			.insert(Str::new_static("hooky@m"), vec![InstalledPluginEntry {
+				scope:          InstallScope::User,
+				install_path:   root,
+				version:        Str::new_static("1.0.0"),
+				installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+				last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+				git_commit_sha: None,
+				enabled:        true,
+			}]);
+		fs::create_dir_all(env.data_dir.join("plugins")).unwrap();
+		fs::write(
+			env.data_dir.join("plugins/installed_plugins.json"),
+			serde_json::to_string(&registry).unwrap(),
+		)
+		.unwrap();
+		let project = dir.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let mut args = ChatArgs::default_interactive();
+		args.model = Some(Str::new_static("openai/gpt-5"));
+		args.project = project;
+		let launch = Launch::prepare(args, Arc::new(omp_con::Ctx::new()), env)
+			.await
+			.expect("launch lowers");
+		// The host's own Claude Code installs may add warnings of their own.
+		let warnings = launch
+			.plugin_warnings()
+			.map(ToString::to_string)
+			.filter(|warning| warning.contains("hooky@m"))
+			.collect::<Vec<_>>();
+		assert_eq!(warnings.len(), 2, "{warnings:#?}");
+		assert!(
+			warnings[0].contains("SessionEnd") && warnings[0].contains("omp ext trust hooky@m"),
+			"the mapped hook awaits approval: {}",
+			warnings[0]
+		);
+		assert!(
+			warnings[1].contains("plugin `hooky@m`")
+				&& warnings[1].contains("CwdChanged")
+				&& warnings[1].contains("is not supported by omp; this hook will not run"),
+			"{}",
+			warnings[1]
+		);
 	}
 
 	#[tokio::test]

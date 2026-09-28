@@ -17,7 +17,10 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_agent::{Kernel, KernelEvent, LifecycleHooks, TurnInput, TurnStop, Up};
+use omp_agent::{
+	Kernel, KernelEvent, LifecycleHooks, SessionShutdown, ShutdownReason, SwitchReason, TurnInput,
+	TurnStop, Up,
+};
 use omp_ai::realtime::transport::{
 	LiveDelegationAdmission, LiveDelegationRequest, LiveDelegationTerminal,
 };
@@ -751,7 +754,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					let quit = self.run_turn(Some(input), &command_rx, None).await?
 						|| self.after_turn(&command_rx).await?;
 					if quit {
-						self.shutdown()?;
+						self.shutdown().await?;
 						return Ok(());
 					}
 				},
@@ -763,7 +766,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 						.run_turn(Some(TurnRequest::Custom(message)), &command_rx, Some(id))
 						.await? || self.after_turn(&command_rx).await?;
 					if quit {
-						self.shutdown()?;
+						self.shutdown().await?;
 						return Ok(());
 					}
 				},
@@ -771,7 +774,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					let quit = self.run_turn(None, &command_rx, None).await?
 						|| self.after_turn(&command_rx).await?;
 					if quit {
-						self.shutdown()?;
+						self.shutdown().await?;
 						return Ok(());
 					}
 				},
@@ -779,12 +782,12 @@ impl<C: omp_agent::Inference> Controller<C> {
 					let quit =
 						self.run_local(run, &command_rx).await? || self.after_turn(&command_rx).await?;
 					if quit {
-						self.shutdown()?;
+						self.shutdown().await?;
 						return Ok(());
 					}
 				},
 				Flow::Quit => {
-					self.shutdown()?;
+					self.shutdown().await?;
 					return Ok(());
 				},
 			}
@@ -798,7 +801,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					.run_turn(Some(TurnRequest::User(input)), &command_rx, None)
 					.await? || self.after_turn(&command_rx).await?;
 				if quit {
-					self.shutdown()?;
+					self.shutdown().await?;
 					return Ok(());
 				}
 			}
@@ -830,8 +833,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 	}
 
 	/// Commits process exit before observers see the bounded shutdown edge.
-	fn shutdown(&mut self) -> miette::Result<()> {
-		let session = display_name(&self.session);
+	async fn shutdown(&mut self) -> miette::Result<()> {
 		self.collab_status.abort();
 		self.collab_ui.abort();
 		if let Some(mailbox) = self.ctx.user::<HostMailbox>() {
@@ -855,15 +857,16 @@ impl<C: omp_agent::Inference> Controller<C> {
 			_ => None,
 		};
 		self.session.record_exit(cause).into_diagnostic()?;
-		self.notify_lifecycle(
-			HookEventId::HookEventSessionShutdown,
-			serde_json::json!({
-				"session_id": session,
-				"reason": signal.as_ref().map_or("user_exit", |signal| signal.name.as_str()),
-				"budget": "1s",
-				"target_session": serde_json::Value::Null,
-			}),
-		)?;
+		if let Some(lifecycle) = &self.lifecycle {
+			let reason = if signal.is_some() {
+				ShutdownReason::Signal
+			} else {
+				ShutdownReason::UserExit
+			};
+			lifecycle
+				.session_shutdown(&SessionShutdown::new(&self.session, reason))
+				.await;
+		}
 		match signal {
 			Some(signal) => Err(crate::exit_diagnostics::SignalExit::new(signal).into()),
 			None => Ok(()),
@@ -1577,7 +1580,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 				self.director("plan", false, &[]).into_diagnostic()?;
 				self.reply(Severity::Info, format!("Saved plan to {shown}."));
 				let next = self.home.create(None).map_err(|error| miette!(error))?;
-				self.switch_to(next, "new").await?;
+				self.switch_to(next, SwitchReason::New).await?;
 				self.reply(Severity::Info, "✓ New session started");
 			},
 			HostCommand::SessionOpen { path } => {
@@ -1591,7 +1594,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 				} else {
 					let next = self.home.open(&path).map_err(|error| miette!(error))?;
 					let name = display_name(&next);
-					self.switch_to(next, "resume").await?;
+					self.switch_to(next, SwitchReason::Resume).await?;
 					self.reply(Severity::Info, format!("Resumed session {name}"));
 				}
 			},
@@ -1612,13 +1615,13 @@ impl<C: omp_agent::Inference> Controller<C> {
 			},
 			HostCommand::SessionNew { model: _ } => {
 				let next = self.home.create(None).map_err(|error| miette!(error))?;
-				self.switch_to(next, "new").await?;
+				self.switch_to(next, SwitchReason::New).await?;
 				self.reply(Severity::Info, "✓ New session started");
 			},
 			HostCommand::SessionDrop => {
 				let dropped = self.session.journal_path().to_path_buf();
 				let next = self.home.create(None).map_err(|error| miette!(error))?;
-				self.switch_to(next, "new").await?;
+				self.switch_to(next, SwitchReason::New).await?;
 				let _ = fs::remove_file(&dropped);
 				remove_session_local_tree(&dropped);
 				if self.ephemeral.as_ref() == Some(&dropped) {
@@ -1660,7 +1663,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					next.rewind(target).map_err(|error| miette!(error))?;
 				}
 				let name = display_name(&next);
-				self.switch_to(next, "fork").await?;
+				self.switch_to(next, SwitchReason::Fork).await?;
 				self.notify_lifecycle(
 					HookEventId::HookEventSessionBranched,
 					serde_json::json!({
@@ -2300,20 +2303,27 @@ impl<C: omp_agent::Inference> Controller<C> {
 
 	/// Replaces the live session: the old one records a switch, the new
 	/// one's subscription is relayed after exactly one `Reset`.
-	async fn switch_to(&mut self, mut next: Session, reason: &'static str) -> miette::Result<()> {
+	async fn switch_to(&mut self, mut next: Session, reason: SwitchReason) -> miette::Result<()> {
 		let from = display_name(&self.session);
 		let to = display_name(&next);
 		let _ = Self::gate_lifecycle(
 			self.lifecycle.clone(),
 			HookEventId::HookEventSessionSwitch,
 			serde_json::json!({
-				"reason": reason,
+				"reason": <&'static str>::from(reason),
 				"from_session": from,
 				"to_session": to,
 				"target_cwd": next.journal_path().parent(),
 			}),
 		)
 		.await?;
+		// The switch is admitted: the current session ends here, before
+		// anything of it is torn down.
+		if let Some(lifecycle) = &self.lifecycle {
+			lifecycle
+				.session_shutdown(&SessionShutdown::switching(&self.session, &next, reason))
+				.await;
+		}
 		self.voice.cancel(&self.ctx);
 		self.live_next = None;
 		if self.voice.switch_session(to.clone(), &self.ctx).is_some() {
@@ -2369,7 +2379,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 		self.notify_lifecycle(
 			HookEventId::HookEventSessionSwitched,
 			serde_json::json!({
-				"reason": reason,
+				"reason": <&'static str>::from(reason),
 				"from_session": from,
 				"to_session": to,
 				"head_event": self.head()?,
@@ -2477,7 +2487,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 				return Err(miette!(error));
 			},
 		};
-		self.switch_to(next, "handoff").await?;
+		self.switch_to(next, SwitchReason::Handoff).await?;
 		self.home = home;
 		let _ = fs::remove_file(&source);
 		remove_session_local_tree(&source);
@@ -4231,7 +4241,10 @@ mod tests {
 				}
 			}
 		});
-		controller.switch_to(next, "new").await.expect("switch");
+		controller
+			.switch_to(next, SwitchReason::New)
+			.await
+			.expect("switch");
 		responder.await.expect("responder");
 		assert_eq!(order_rx.try_iter().collect::<Vec<_>>(), ["before", "flush", "resync", "after"],);
 	}

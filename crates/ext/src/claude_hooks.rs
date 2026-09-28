@@ -125,31 +125,64 @@ pub enum HookSeam {
 	ToolCall,
 	/// `tool_result` transform (`PostToolUse`, `PostToolUseFailure`).
 	ToolResult,
-	/// `before_agent_start` admission (`UserPromptSubmit`).
+	/// `before_agent_start` admission: `UserPromptSubmit` in a main session,
+	/// `SubagentStart` on a subagent's first prompt.
 	BeforeAgentStart,
 	/// `agent_settled` yield decision (`Stop`, `SubagentStop`).
 	AgentSettled,
 	/// `session_start` admission (`SessionStart`).
 	SessionStart,
+	/// `session_shutdown`, awaited within the shutdown budget (`SessionEnd`).
+	SessionShutdown,
+	/// `agent_end` observation of a turn that failed on a provider error
+	/// (`StopFailure`).
+	AgentEnd,
 	/// `compaction` admission (`PreCompact`).
 	Compaction,
+	/// `compaction_done` observation (`PostCompact`).
+	CompactionDone,
+	/// `tool_approval_requested` observation (`Notification`,
+	/// `permission_prompt`).
+	ToolApprovalRequested,
 }
 
 impl ClaudeHookEvent {
-	/// The omp seam running this event; `None` when omp has no faithful
-	/// counterpart. `SessionEnd` is one: omp's `session_shutdown` is a lossy
-	/// observation the process does not wait for, so a command could not run
-	/// to completion.
+	/// The omp seam running this event; `None` when omp has no lifecycle
+	/// point with the event's semantics. The crate README tabulates every
+	/// event, mapped or not, and why.
 	#[must_use]
 	pub const fn seam(self) -> Option<HookSeam> {
 		Some(match self {
 			Self::PreToolUse => HookSeam::ToolCall,
 			Self::PostToolUse | Self::PostToolUseFailure => HookSeam::ToolResult,
-			Self::UserPromptSubmit => HookSeam::BeforeAgentStart,
+			Self::UserPromptSubmit | Self::SubagentStart => HookSeam::BeforeAgentStart,
 			Self::Stop | Self::SubagentStop => HookSeam::AgentSettled,
 			Self::SessionStart => HookSeam::SessionStart,
+			Self::SessionEnd => HookSeam::SessionShutdown,
+			Self::StopFailure => HookSeam::AgentEnd,
 			Self::PreCompact => HookSeam::Compaction,
-			_ => return None,
+			Self::PostCompact => HookSeam::CompactionDone,
+			Self::Notification => HookSeam::ToolApprovalRequested,
+			Self::Setup
+			| Self::UserPromptExpansion
+			| Self::PostToolBatch
+			| Self::PermissionRequest
+			| Self::PermissionDenied
+			| Self::TaskCreated
+			| Self::TaskCompleted
+			| Self::TeammateIdle
+			| Self::FileChanged
+			| Self::ConfigChange
+			| Self::CwdChanged
+			| Self::DirectoryAdded
+			| Self::InstructionsLoaded
+			| Self::WorktreeCreate
+			| Self::WorktreeRemove
+			| Self::PreModelSwitch
+			| Self::PostModelSwitch
+			| Self::Elicitation
+			| Self::ElicitationResult
+			| Self::MessageDisplay => return None,
 		})
 	}
 
@@ -159,11 +192,14 @@ impl ClaudeHookEvent {
 		matches!(self, Self::PreToolUse | Self::PostToolUse | Self::PostToolUseFailure)
 	}
 
-	/// The spec's default command-hook timeout for this event.
+	/// The spec's default command-hook timeout for this event. A plugin's
+	/// `SessionEnd` hook never runs past the shutdown budget, whatever it
+	/// declares.
 	#[must_use]
 	pub const fn default_timeout(self) -> Duration {
 		match self {
 			Self::UserPromptSubmit => Duration::from_secs(30),
+			Self::SessionEnd => Duration::from_millis(1500),
 			_ => Duration::from_secs(600),
 		}
 	}
@@ -465,6 +501,9 @@ pub(crate) fn load_hooks(
 	diagnostics: &mut Vec<PluginDiagnostic>,
 ) -> Vec<PluginHook> {
 	let mut hooks = Vec::new();
+	// An unsupported event is reported once per plugin, however many of its
+	// declarations name it.
+	let mut unsupported = Vec::<ClaudeHookEvent>::new();
 	for declaration in declarations {
 		let path = declaration.path();
 		let owned;
@@ -498,11 +537,14 @@ pub(crate) fn load_hooks(
 				continue;
 			};
 			let Some(seam) = event.seam() else {
-				diagnostics.push(PluginDiagnostic::UnsupportedHookEvent {
-					plugin: plugin.clone(),
-					event,
-					path: path.to_path_buf(),
-				});
+				if !unsupported.contains(&event) {
+					unsupported.push(event);
+					diagnostics.push(PluginDiagnostic::UnsupportedHookEvent {
+						plugin: plugin.clone(),
+						event,
+						path: path.to_path_buf(),
+					});
+				}
 				continue;
 			};
 			let groups = match serde_json::from_str::<Vec<MatcherGroupWire>>(groups.get()) {
@@ -732,7 +774,7 @@ mod tests {
 	fn unsupported_events_handlers_and_unmapped_matchers_are_precise_diagnostics() {
 		let (hooks, diagnostics) = load(
 			r#"{"hooks":{
-				"Notification":[{"hooks":[{"type":"command","command":"n"}]}],
+				"CwdChanged":[{"hooks":[{"type":"command","command":"n"}]}],
 				"Bogus":[],
 				"PreToolUse":[
 					{"matcher":"NotebookEdit","hooks":[{"type":"command","command":"a"}]},
@@ -752,7 +794,7 @@ mod tests {
 				other => panic!("unexpected {other:?}"),
 			})
 			.collect::<Vec<_>>();
-		assert!(kinds.contains(&"event:Notification".to_owned()), "{kinds:?}");
+		assert!(kinds.contains(&"event:CwdChanged".to_owned()), "{kinds:?}");
 		assert!(kinds.contains(&"unknown:Bogus".to_owned()), "{kinds:?}");
 		assert!(
 			kinds
@@ -771,6 +813,80 @@ mod tests {
 		assert_eq!(hooks.len(), 2);
 		assert!(!hooks[0].matcher.matches_tool("bash"));
 		assert_eq!(hooks[1].command.command, "ok");
+	}
+
+	#[test]
+	fn newly_mapped_events_load_onto_their_seams() {
+		let (hooks, diagnostics) = load(
+			r#"{"SessionEnd":[{"matcher":"clear","hooks":[{"type":"command","command":"a","timeout":90}]}],
+				"StopFailure":[{"matcher":"rate_limit","hooks":[{"type":"command","command":"b"}]}],
+				"PostCompact":[{"matcher":"auto","hooks":[{"type":"command","command":"c"}]}],
+				"SubagentStart":[{"matcher":"task","hooks":[{"type":"command","command":"d"}]}],
+				"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"e"}]}]}"#,
+		);
+		assert!(diagnostics.is_empty(), "{diagnostics:?}");
+		let seams = hooks
+			.iter()
+			.map(|hook| (hook.event, hook.seam))
+			.collect::<Vec<_>>();
+		for expected in [
+			(ClaudeHookEvent::SessionEnd, HookSeam::SessionShutdown),
+			(ClaudeHookEvent::StopFailure, HookSeam::AgentEnd),
+			(ClaudeHookEvent::PostCompact, HookSeam::CompactionDone),
+			(ClaudeHookEvent::SubagentStart, HookSeam::BeforeAgentStart),
+			(ClaudeHookEvent::Notification, HookSeam::ToolApprovalRequested),
+		] {
+			assert!(seams.contains(&expected), "{expected:?} in {seams:?}");
+		}
+		// Each is a launch the operator approves under its own trigger.
+		let end = hooks
+			.iter()
+			.find(|hook| hook.event == ClaudeHookEvent::SessionEnd)
+			.unwrap();
+		assert_eq!(end.launch(Path::new("/p")).server, "SessionEnd clear");
+		assert_eq!(end.command.timeout, Duration::from_secs(90), "the host caps it at run");
+	}
+
+	#[test]
+	fn every_event_is_either_mapped_or_reported_once_per_plugin() {
+		for event in ClaudeHookEvent::VARIANTS {
+			let name: &'static str = event.into();
+			let body = format!(r#"{{"{name}":[{{"hooks":[{{"type":"command","command":"x"}}]}}]}}"#);
+			let mut diagnostics = Vec::new();
+			// The same event declared by the manifest and a hooks file.
+			let hooks = load_hooks(
+				&Str::new_static("p@m"),
+				&[
+					ConfigDeclaration::Inline {
+						manifest: "plugin.json".into(),
+						servers:  Str::new(body.clone()),
+					},
+					ConfigDeclaration::Inline {
+						manifest: "hooks.json".into(),
+						servers:  Str::new(body),
+					},
+				],
+				&mut diagnostics,
+			);
+			if event.seam().is_some() {
+				assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+				assert_eq!(hooks.len(), 2, "{name}");
+				continue;
+			}
+			assert!(hooks.is_empty(), "{name}");
+			let [PluginDiagnostic::UnsupportedHookEvent { event: reported, .. }] = &diagnostics[..]
+			else {
+				panic!("{name}: one diagnostic, not {diagnostics:?}");
+			};
+			assert_eq!(reported, event);
+			let text = diagnostics[0].to_string();
+			assert!(
+				text.contains("plugin `p@m`")
+					&& text.contains(name)
+					&& text.contains("not supported by omp; this hook will not run"),
+				"{text}"
+			);
+		}
 	}
 
 	fn hook_digest(body: &str) -> Hash32 {

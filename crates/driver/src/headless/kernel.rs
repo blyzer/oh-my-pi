@@ -2225,6 +2225,7 @@ pub async fn compose_kernel(
 				project_root: project_root.clone(),
 				data_dir:     data_dir.to_path_buf(),
 				subagent:     options.parent_session.is_some(),
+				agent:        options.agent.clone(),
 			},
 			&claude_plugins,
 		) {

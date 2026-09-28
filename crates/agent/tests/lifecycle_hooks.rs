@@ -643,3 +643,79 @@ async fn lifecycle_tool_call_denial_skips_executor_and_journals_abort() {
 	);
 	responder.await.expect("responder");
 }
+
+/// An in-process host that never answers `session_shutdown`.
+struct HangingHost {
+	asked: Arc<Mutex<Option<Value>>>,
+}
+
+impl omp_agent::NativeHookHost for HangingHost {
+	fn decide<'a>(
+		&'a self,
+		_: HookEventId,
+		payload: &'a Value,
+	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
+		*self.asked.lock() = Some(payload.clone());
+		Box::pin(std::future::pending())
+	}
+}
+
+#[tokio::test]
+async fn a_session_end_waits_on_native_hosts_only_within_the_budget_then_notifies_observers() {
+	let (gate, receiver) = HookGate::channel();
+	let gate = Arc::new(gate);
+	gate
+		.subscribe("test", [subscription(
+			1,
+			HookEventId::HookEventSessionShutdown,
+			HookPhase::Observe,
+		)])
+		.expect("observer subscription");
+	let asked = Arc::new(Mutex::new(None));
+	gate.attach_native(Arc::new(HangingHost { asked: Arc::clone(&asked) }), &[
+		HookEventId::HookEventSessionShutdown,
+	]);
+	let hooks = LifecycleHooks::new(Arc::clone(&gate));
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let session = fresh_session(&directory.path().join("ending.oms"));
+	let next = fresh_session(&directory.path().join("next.oms"));
+
+	let started = std::time::Instant::now();
+	hooks
+		.session_shutdown(&omp_agent::SessionShutdown::switching(
+			&session,
+			&next,
+			omp_agent::SwitchReason::New,
+		))
+		.await;
+	let waited = started.elapsed();
+	assert!(
+		waited >= omp_agent::SESSION_SHUTDOWN_BUDGET
+			&& waited < omp_agent::SESSION_SHUTDOWN_BUDGET + Duration::from_secs(1),
+		"a host that never answers holds the end exactly one budget: {waited:?}"
+	);
+	let native = asked.lock().clone().expect("the native host was asked");
+	let dispatch = receiver.try_recv().expect("the observation still goes out");
+	assert_eq!(dispatch.event, HookEventId::HookEventSessionShutdown);
+	let observed: Value = serde_json::from_slice(&dispatch.payload).expect("payload");
+	assert_eq!(observed, native, "observers and native hosts read one payload");
+	assert_eq!(observed["session_id"], "ending.oms");
+	assert_eq!(observed["reason"], "switch");
+	assert_eq!(observed["budget"], "1500ms");
+	assert_eq!(observed["target_session"], "next.oms");
+	assert_eq!(observed["switch_reason"], "new");
+	assert!(
+		observed["target_transcript_path"]
+			.as_str()
+			.is_some_and(|path| path.ends_with("next.oms"))
+	);
+	assert_eq!(
+		"1500ms"
+			.parse::<omp_core::time::Duration>()
+			.expect("budget text")
+			.to_std()
+			.expect("std duration"),
+		omp_agent::SESSION_SHUTDOWN_BUDGET,
+		"the payload's budget is the budget"
+	);
+}

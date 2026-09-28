@@ -1083,6 +1083,12 @@ impl<C: Inference> Kernel<C> {
 					},
 					"continued": false,
 					"error": error,
+					// The provider failure category of a turn that ended on
+					// an inference error (`omp_ai::ErrorKind`).
+					"error_kind": match &result {
+						Err(KernelError::Inference(error)) => Some(<&'static str>::from(error.kind)),
+						_ => None,
+					},
 				}),
 			)?;
 		}

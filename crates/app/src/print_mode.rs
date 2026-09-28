@@ -25,7 +25,10 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_agent::{DispatchError, KernelError, KernelEvent, RunControl, TurnInput, TurnStop, Up};
+use omp_agent::{
+	DispatchError, KernelError, KernelEvent, LifecycleHooks, RunControl, SessionShutdown,
+	ShutdownReason, TurnInput, TurnStop, Up,
+};
 use omp_catalog::{ModelKey, RouteId, snapshot::Catalog};
 use omp_core::{FastHashMap, Str, encoding::base64};
 use omp_dom::{Dom, Event, Handle, KnownTag, Node, Op, PropId, PropKey, Sid, StreamOp, Tag, Value};
@@ -83,13 +86,17 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 		);
 	}
 	let (mut kernel, mut session) = launch.compose().await?;
+	// Every exit below reaches the session's end on the lifecycle surface
+	// (plugin `SessionEnd` hooks), bounded by the shutdown budget.
+	let lifecycle = kernel.lifecycle_hooks();
 	// Unapproved plugin servers and hooks never run without an interactive
-	// operator; report each on stderr, keeping stdout clean for the response.
-	if !launch.blocked_plugin_commands.is_empty() {
-		let mut report = String::new();
-		for blocked in &launch.blocked_plugin_commands {
-			let _ = writeln!(report, "warning: {blocked}");
-		}
+	// operator, nor do hooks on events omp does not run; report each on
+	// stderr, keeping stdout clean for the response.
+	let mut report = String::new();
+	for warning in launch.plugin_warnings() {
+		let _ = writeln!(report, "warning: {warning}");
+	}
+	if !report.is_empty() {
 		let mut stderr = tokio::io::stderr();
 		stderr
 			.write_all(report.as_bytes())
@@ -233,6 +240,8 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 			session
 				.record_exit(ExitCause::Signal { signal: signal.clone() })
 				.into_diagnostic()?;
+			end_session(lifecycle.as_ref(), SessionShutdown::new(&session, ShutdownReason::Signal))
+				.await;
 			return Err(crate::exit_diagnostics::SignalExit::new(signal).into());
 		}
 		let stop = match result {
@@ -241,6 +250,8 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 				let message = sanitize_text(&error.to_string());
 				let cause = kernel_exit_cause(&error, launch.model.as_str());
 				session.record_exit(cause).into_diagnostic()?;
+				end_session(lifecycle.as_ref(), SessionShutdown::new(&session, ShutdownReason::Fatal))
+					.await;
 				report_print_failure(&message).await?;
 				return Err(PrintFailure.into());
 			},
@@ -265,6 +276,8 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 				TurnStop::Completed => ExitCause::Normal,
 			};
 			session.record_exit(cause).into_diagnostic()?;
+			end_session(lifecycle.as_ref(), SessionShutdown::new(&session, ShutdownReason::Fatal))
+				.await;
 			report_print_failure(&sanitize_text(message.as_str())).await?;
 			return Err(PrintFailure.into());
 		}
@@ -290,11 +303,20 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	}
 
 	session.record_exit(ExitCause::Normal).into_diagnostic()?;
+	end_session(lifecycle.as_ref(), SessionShutdown::new(&session, ShutdownReason::UserExit)).await;
 	drop(session);
 	if let Some(path) = ephemeral_path {
 		let _ = fs::remove_file(path);
 	}
 	Ok(())
+}
+
+/// Reaches the end of the run's session on the lifecycle surface, within the
+/// shutdown budget.
+async fn end_session(lifecycle: Option<&LifecycleHooks>, shutdown: SessionShutdown) {
+	if let Some(lifecycle) = lifecycle {
+		lifecycle.session_shutdown(&shutdown).await;
+	}
 }
 
 async fn report_print_failure(message: &str) -> miette::Result<()> {

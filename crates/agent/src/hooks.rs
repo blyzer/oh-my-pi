@@ -566,6 +566,104 @@ impl NativeReply {
 	}
 }
 
+/// How long a session's end waits for in-process `session_shutdown` hosts
+/// before the process (or the session switch) goes on without them.
+pub const SESSION_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1500);
+
+/// [`SESSION_SHUTDOWN_BUDGET`] as the payload's `budget` field.
+const SESSION_SHUTDOWN_BUDGET_TEXT: &str = "1500ms";
+
+/// Why a session ends (Python `ShutdownReason`).
+#[derive(Clone, Copy, Debug, Display, EnumString, Eq, IntoStaticStr, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ShutdownReason {
+	/// The user quit, or a one-shot run finished.
+	UserExit,
+	/// A termination signal ended the process.
+	Signal,
+	/// The host switched to another session.
+	Switch,
+	/// The run failed.
+	Fatal,
+	/// Another host took the session over.
+	HostReplaced,
+}
+
+/// Why the host switches sessions (Python `SwitchReason`).
+#[derive(Clone, Copy, Debug, Display, EnumString, Eq, IntoStaticStr, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum SwitchReason {
+	/// A fresh session (`/new`, dropping the current one, a saved plan).
+	New,
+	/// A stored session was resumed.
+	Resume,
+	/// A copy of a stored session was opened.
+	Fork,
+	/// The session moved to another project.
+	Handoff,
+}
+
+/// The `session_shutdown` payload: the session whose end the host reached.
+///
+/// It serializes as Python's `SessionShutdownEvent`, plus the switch reason
+/// and the switched-to journal, which in-process hosts use to follow the
+/// live session.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionShutdown {
+	/// The ending session's name (its journal file name).
+	pub session_id:             Str,
+	/// Why it ends.
+	pub reason:                 ShutdownReason,
+	budget:                     &'static str,
+	/// The session the host switches to, when it switches.
+	pub target_session:         Option<Str>,
+	/// Why the host switches, when it switches.
+	pub switch_reason:          Option<SwitchReason>,
+	/// The journal of the session the host switches to.
+	pub target_transcript_path: Option<std::path::PathBuf>,
+}
+
+impl SessionShutdown {
+	/// The end of `session` for `reason`.
+	#[must_use]
+	pub fn new(session: &omp_session::Session, reason: ShutdownReason) -> Self {
+		Self {
+			session_id: journal_name(session),
+			reason,
+			budget: SESSION_SHUTDOWN_BUDGET_TEXT,
+			target_session: None,
+			switch_reason: None,
+			target_transcript_path: None,
+		}
+	}
+
+	/// The end of `session` because the host switches to `next`.
+	#[must_use]
+	pub fn switching(
+		session: &omp_session::Session,
+		next: &omp_session::Session,
+		reason: SwitchReason,
+	) -> Self {
+		Self {
+			target_session: Some(journal_name(next)),
+			switch_reason: Some(reason),
+			target_transcript_path: Some(next.journal_path().to_path_buf()),
+			..Self::new(session, ShutdownReason::Switch)
+		}
+	}
+}
+
+/// A session's name on the lifecycle surface: its journal file name.
+fn journal_name(session: &omp_session::Session) -> Str {
+	session
+		.journal_path()
+		.file_name()
+		.and_then(|name| name.to_str())
+		.map_or_else(|| Str::new_static("session"), Str::new)
+}
+
 /// A Rust-native hook host registered on the same [`HookGate`] extension
 /// hosts use, without an out-of-process transport.
 ///
@@ -576,7 +674,9 @@ impl NativeReply {
 /// host performs process or network I/O per decision, and the gate only
 /// dispatches events a host declared in [`HookGate::attach_native`].
 pub trait NativeHookHost: Send + Sync + 'static {
-	/// Decides one gateable (or `agent_settled`) event.
+	/// Decides one gateable (or `agent_settled`) event. `session_shutdown`
+	/// arrives here too: the session's end awaits the reply for at most
+	/// [`SESSION_SHUTDOWN_BUDGET`] and ignores its verdict.
 	fn decide<'a>(&'a self, event: HookEventId, payload: &'a JsonValue) -> BoxFut<'a, NativeReply>;
 	/// Observes one lifecycle notification; must not block the caller.
 	fn observe(&self, event: HookEventId, payload: &JsonValue) {
@@ -789,6 +889,46 @@ impl LifecycleHooks {
 		SettledReply { decision, context: Vec::new() }
 	}
 
+	/// Reaches the end of a session (quit, a finished one-shot run, a switch
+	/// to another session): in-process hosts that declared
+	/// `session_shutdown` run concurrently for at most
+	/// [`SESSION_SHUTDOWN_BUDGET`], their verdicts ignored, then extension
+	/// observers get the lossy observation. Nothing here blocks or fails the
+	/// end past the budget.
+	pub async fn session_shutdown(&self, shutdown: &SessionShutdown) {
+		let event = HookEventId::HookEventSessionShutdown;
+		let native = self.gate.native_subscribed(event);
+		if !native && !self.gate.subscribed(event) {
+			return;
+		}
+		let payload = match serde_json::to_value(shutdown) {
+			Ok(payload) => payload,
+			Err(error) => {
+				tracing::debug!(
+					error = &error as &dyn std::error::Error,
+					"session_shutdown payload not encoded"
+				);
+				return;
+			},
+		};
+		if native {
+			let hosts = self.gate.native_hosts(event);
+			let replies =
+				futures::future::join_all(hosts.iter().map(|host| host.decide(event, &payload)));
+			if tokio::time::timeout(SESSION_SHUTDOWN_BUDGET, replies)
+				.await
+				.is_err()
+			{
+				tracing::debug!("session_shutdown hosts outlived the shutdown budget");
+			}
+		}
+		if self.gate.subscribed(event)
+			&& let Ok(encoded) = serde_json::to_vec(&payload)
+		{
+			self.gate.notify_payload(event, 1, Bytes::from(encoded));
+		}
+	}
+
 	/// Publishes a revision-1 JSON lifecycle observation.
 	///
 	/// A full observer queue remains lossy and is accounted by [`HookGate`].
@@ -913,7 +1053,7 @@ impl HookGate {
 			HookEventId::HookEventToolResult | HookEventId::HookEventSubagentSpawn => {
 				Duration::from_secs(30)
 			},
-			HookEventId::HookEventSessionShutdown => Duration::from_secs(2),
+			HookEventId::HookEventSessionShutdown => SESSION_SHUTDOWN_BUDGET,
 			_ => Duration::from_secs(5),
 		})
 	}
