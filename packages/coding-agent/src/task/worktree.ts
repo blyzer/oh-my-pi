@@ -535,17 +535,44 @@ function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
 }
 
+/**
+ * Backends whose merged view keeps reading the source for every path the task
+ * has not written: overlayfs (kernel or fuse) and ProjFS project the lower
+ * tree live instead of snapshotting it.
+ */
+const LIVE_SOURCE_BACKENDS: ReadonlySet<IsoBackendKind> = new Set([IsoBackendKind.Overlayfs, IsoBackendKind.Projfs]);
+
+export interface EnsureIsolationOptions {
+	/**
+	 * Refuse backends whose view tracks later writes to the source (see
+	 * {@link LIVE_SOURCE_BACKENDS}). Needed when the source itself changes
+	 * while the isolation is live — ADW integrates one writer's accepted patch
+	 * into the root its sibling writers were cloned from, and through a live
+	 * overlay that patch appears in every sibling as a change the sibling never
+	 * made. Falls back to `rcopy` when every host backend is live.
+	 *
+	 * FORK DIVERGENCE: fork-only option for ADW's concurrent writers; upstream
+	 * callers never set it. Keep it through an upstream merge.
+	 */
+	snapshot?: boolean;
+}
+
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
 	preferred?: IsoBackendKind,
+	options: EnsureIsolationOptions = {},
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = natives.isoResolve(preferred ?? null);
-	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
+	let candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
+	if (options.snapshot) {
+		candidates = candidates.filter(candidate => !LIVE_SOURCE_BACKENDS.has(candidate));
+		if (candidates.length === 0) candidates = [IsoBackendKind.Rcopy];
+	}
 	let fallbackReason = resolution.reason ?? null;
 
 	for (const candidate of candidates) {

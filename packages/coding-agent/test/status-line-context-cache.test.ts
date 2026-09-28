@@ -30,6 +30,15 @@ import {
 	cfgStatusLinePreset,
 	cfgStatusLineRightSegments,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
+import { cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
+/**
+ * A method order whose first choice runs in the background, so the gauge has a
+ * speculation tick to draw. Pinned rather than inherited: this fork's default
+ * order starts with local methods (snapcompact, shake), which never speculate.
+ */
+const SPECULATING_METHOD_ORDER: CompactionMethod[] = ["remote", "snapcompact", "handoff", "shake", "soft"];
 
 const statusLines = new StatusLineTestComponents();
 beforeAll(async () => {
@@ -353,6 +362,7 @@ describe("StatusLineComponent context breakdown", () => {
 		cfgStatusLineLeftSegments.override(settings, ["pi", "context_pct"]);
 		cfgStatusLineRightSegments.override(settings, ["context_total", "session_name"]);
 		cfgStatusLineContextLine.override(settings, "embedded");
+		cfgCompactionMethodOrder.override(settings, SPECULATING_METHOD_ORDER);
 
 		try {
 			const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
@@ -371,6 +381,7 @@ describe("StatusLineComponent context breakdown", () => {
 			expect(plain.indexOf("1M", windowIndex + 1)).toBe(-1);
 		} finally {
 			cfgStatusLineContextLine.clearOverride(settings);
+			cfgCompactionMethodOrder.clearOverride(settings);
 			cfgStatusLineRightSegments.clearOverride(settings);
 			cfgStatusLineLeftSegments.clearOverride(settings);
 			cfgStatusLinePreset.clearOverride(settings);
@@ -495,6 +506,7 @@ describe("StatusLineComponent context breakdown", () => {
 			contextLine: "annotated",
 		});
 
+		cfgCompactionMethodOrder.override(settings, SPECULATING_METHOD_ORDER);
 		await setSymbolPreset("nerd");
 		try {
 			const border = comp.getTopBorder(80).content;
@@ -517,6 +529,7 @@ describe("StatusLineComponent context breakdown", () => {
 			expect(unicode).not.toContain("󰁨");
 		} finally {
 			await initTheme();
+			cfgCompactionMethodOrder.clearOverride(settings);
 		}
 	});
 

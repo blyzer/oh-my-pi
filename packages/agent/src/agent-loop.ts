@@ -2037,6 +2037,12 @@ async function streamAssistantResponse(
 		return await runInActiveSpan(chatSpan, async () => {
 			let response = await streamFunction(model, llmContext, {
 				...config,
+				// FORK DIVERGENCE: this fork's `streamSimple` also applies
+				// `transformProviderContext` (so background callers are covered).
+				// `llmContext` already went through it above; forwarding it would
+				// run it twice and hand the provider freshly rebuilt messages,
+				// breaking append-only prefix identity.
+				transformProviderContext: undefined,
 				apiKey,
 				metadata: resolvedMetadata,
 				toolChoice: effectiveToolChoice,

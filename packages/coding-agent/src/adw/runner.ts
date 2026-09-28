@@ -1604,7 +1604,12 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				const generation = String(Snowflake.next());
 				// Await cloning here, not inside the turn promise: another accepted
 				// patch cannot mutate the source halfway through a snapshot.
-				const handle = await ensureIsolation(wsRepoRoot, `${adwId}-${generation}`, wsBackend);
+				// Snapshot backends only: sibling writers' accepted patches land in
+				// `wsRepoRoot` while this workspace is live, and an overlay would
+				// show them here as out-of-scope edits by this phase.
+				const handle = await ensureIsolation(wsRepoRoot, `${adwId}-${generation}`, wsBackend, {
+					snapshot: true,
+				});
 				const context = await prepareIsolationContext(handle.mergedDir);
 				record = { handle, context, generation, fromSeq: new TaskTraceReader(traceDir).count() };
 				await writeRunState(recordFile, record);
