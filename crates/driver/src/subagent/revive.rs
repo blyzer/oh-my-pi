@@ -31,9 +31,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	AgentName,
-	settings::{SV_TASK_RECURSION_DEPTH, TaskSettings, child_ctx},
+	settings::TaskSettings,
 	spawn::{
-		SpawnError, child_session_path, configure_child_route, create_isolation, discard_isolation,
+		SpawnError, child_session_path, configure_child, create_isolation, discard_isolation,
 		finish_isolation, idle_park_delay,
 	},
 };
@@ -121,11 +121,8 @@ pub fn revive_child(parent: &mut Session, request: ReviveRequest<'_>) -> Result<
 	if !session_path.exists() {
 		return Err(ReviveError::MissingJournal { id, path: session_path });
 	}
-	let depth = SV_TASK_RECURSION_DEPTH.get(request.parent_ctx);
-	let ctx = Arc::new(child_ctx(request.parent_ctx, request.cfg, agent.as_str())?);
-	SV_TASK_RECURSION_DEPTH.set(&ctx, depth.saturating_add(1))?;
-	let settings = TaskSettings::from_con(&ctx);
-	configure_child_route(&ctx, &settings, agent.as_str(), None)?;
+	let (ctx, settings) = configure_child(request.parent_ctx, request.cfg, agent.as_str(), None)?;
+	let ctx = Arc::new(ctx);
 	if omp_agent::AI_MODEL.get(&ctx).is_empty() {
 		omp_agent::AI_MODEL.set(&ctx, Str::new(request.model))?;
 	}

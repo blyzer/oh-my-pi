@@ -2070,7 +2070,22 @@ pub async fn compose_kernel(
 		}
 		Session::create(&journal_path, component_registry)?
 	};
-	let con_journal = Arc::new(con_journal::ConJournal::attach(Arc::clone(&ctx), session.dom()));
+	// A composition without an explicit class (the main chat, `--resume`)
+	// presents the class journaled on its live session, so a resumed child
+	// runs on its own class configuration; a spawned child arrives configured.
+	let class_scope = if options.agent.is_some() {
+		con_journal::ClassScope::Composed
+	} else {
+		match crate::cfg::CfgFiles::new(Some(&project_root)) {
+			Ok(files) => con_journal::ClassScope::Journaled(Arc::new(files)),
+			Err(error) => {
+				tracing::warn!(%error, "class cfgs unavailable; a resumed child keeps this console");
+				con_journal::ClassScope::Composed
+			},
+		}
+	};
+	let con_journal =
+		Arc::new(con_journal::ConJournal::attach(Arc::clone(&ctx), session.dom(), class_scope));
 	apply_model_override(&ctx, model.as_str(), options.model_override)?;
 	// A child journals the class it runs as, so resuming its session later
 	// (from the main chat or `--resume`) scopes rules to that class.
