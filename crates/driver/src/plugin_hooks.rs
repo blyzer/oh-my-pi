@@ -246,7 +246,7 @@ impl PluginHookHost {
 						return None;
 					}
 					Some(LoadedHook {
-						plugin: plugin.id.clone(),
+						plugin: plugin.id.clone().into(),
 						root:   plugin.root.clone(),
 						data:   plugin_data_dir(data_dir, &plugin.id),
 						hook:   hook.clone(),

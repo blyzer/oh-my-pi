@@ -12,13 +12,14 @@
 //! approval in the `omp-ext` trust domain's local grant file, which the next
 //! session reads.
 //!
-//! Two kinds of plugin own launches, each under its own approval identity:
-//! an installed Claude-layout plugin (its registry id, `name@marketplace`,
-//! and recorded version) launches MCP servers, language servers, debug
-//! adapters, and hooks; an Agent Plugins 1.0 package (its manifest `name` and
-//! `version`) launches the stdio MCP servers its `mcp.json` declares, whether
-//! it was found in a plugin directory, passed with `--plugin-dir`, or
-//! installed from a marketplace.
+//! Two kinds of plugin own launches, each under its approval identity
+//! ([`PluginId`]): an installed Claude-layout plugin (its registry id,
+//! `name@marketplace`, and recorded version) launches MCP servers, language
+//! servers, debug adapters, and hooks; an Agent Plugins 1.0 package launches
+//! the stdio MCP servers its `mcp.json` declares, under its registry id when
+//! it was installed from a marketplace, else (found in a plugin directory or
+//! passed with `--plugin-dir`) under its manifest `name`, at its manifest
+//! `version`.
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +33,9 @@ use omp_envd::{
 };
 use omp_ext::{
 	claude_plugin::{ClaudePlugin, ClaudePlugins, PluginLayout},
-	plugin_command::{CommandApprovals, PluginCommandBlocked, PluginLaunch, plugin_command_digest},
+	plugin_command::{
+		CommandApprovals, PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest,
+	},
 	trust::{GrantPersistenceError, GrantsFile, PluginCommandGrant, grants_path},
 };
 
@@ -69,7 +72,10 @@ pub fn agent_plugin_roots(
 				.filter(|plugin| plugin.layout == PluginLayout::AgentPlugins)
 				.map(|plugin| AgentPluginRoot {
 					root:   plugin.root.clone(),
-					origin: AgentPluginOrigin::Installed(plugin.scope),
+					origin: AgentPluginOrigin::Installed {
+						id:    plugin.id.clone(),
+						scope: plugin.scope,
+					},
 				}),
 		)
 		.collect()
@@ -130,9 +136,9 @@ pub fn blocked_launches(
 /// approvals bind.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginCommandSet {
-	/// Approval identity: an installed plugin's `name@marketplace`, or an
-	/// Agent Plugins package's manifest name.
-	pub plugin:   Str,
+	/// Approval identity: a marketplace install's `name@marketplace`, or a
+	/// local Agent Plugins package's manifest name.
+	pub plugin:   PluginId,
 	/// Version the approval digests bind.
 	pub version:  Str,
 	/// Where the plugin lives.
@@ -157,16 +163,19 @@ impl From<AgentPluginLaunches> for PluginCommandSet {
 }
 
 /// What `omp ext trust <id>` approves: the installed Claude-layout plugin
-/// `id`, and every Agent Plugins package `agent_plugins` discovers whose
-/// manifest name is `id` or that is the installed plugin `id`.
+/// `id`, and every Agent Plugins package `agent_plugins` discovers under the
+/// identity `id` (a marketplace install `name@marketplace`, a local package
+/// its manifest name).
 #[must_use]
 pub fn command_sets(
-	id: &str,
+	id: &PluginId<str>,
 	plugins: &ClaudePlugins,
 	agent_plugins: &McpConfigPaths,
 ) -> Vec<PluginCommandSet> {
-	let installed = plugins.plugins.iter().find(|plugin| plugin.id == id);
-	let mut sets = installed
+	let mut sets = plugins
+		.plugins
+		.iter()
+		.find(|plugin| plugin.id == *id)
 		.filter(|plugin| plugin.claude_components().is_some())
 		.map(|plugin| PluginCommandSet {
 			plugin:   plugin.id.clone(),
@@ -176,13 +185,10 @@ pub fn command_sets(
 		})
 		.into_iter()
 		.collect::<Vec<_>>();
-	let installed_root = installed
-		.filter(|plugin| plugin.layout == PluginLayout::AgentPlugins)
-		.and_then(|plugin| std::fs::canonicalize(&plugin.root).ok());
 	sets.extend(
 		omp_envd::plugin_commands::agent_plugin_launches(agent_plugins)
 			.into_iter()
-			.filter(|package| package.plugin == id || installed_root.as_ref() == Some(&package.root))
+			.filter(|package| package.plugin == *id)
 			.map(PluginCommandSet::from),
 	);
 	sets
@@ -217,7 +223,7 @@ pub fn command_approvals(data_dir: &Path) -> CommandApprovals {
 /// be read is never admitted, approved or not.
 pub fn approve_launch(
 	data_dir: &Path,
-	plugin: &Str,
+	plugin: &PluginId,
 	version: &Str,
 	launch: &PluginLaunch,
 	granted_by: Str,

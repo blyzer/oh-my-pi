@@ -52,8 +52,8 @@ use parking_lot::RwLock;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
-pub use self::settings::McpSettings;
 use self::config::ConfigSourceKind;
+pub use self::settings::McpSettings;
 use super::exthost::control::ControlConnectionIdentity;
 
 const NOTIFICATION_HISTORY: usize = 256;
@@ -655,31 +655,50 @@ impl McpService {
 }
 
 /// How an Agent Plugins package outside the scanned plugin directories
-/// reached the session; it decides the package's discovery scope.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// reached the session; it decides the package's discovery scope and
+/// identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentPluginOrigin {
 	/// Named by the invocation (`--plugin-dir`, `--extension`): the user asked
 	/// for it, so it loads whatever the project MCP policy
-	/// ([`ConfigSourceKind::AgentPluginExplicit`]).
+	/// ([`ConfigSourceKind::AgentPluginExplicit`]). Its identity is its
+	/// manifest `name`.
 	Explicit,
-	/// Installed from a marketplace at this registry scope: a project install
-	/// is project-scoped ([`ConfigSourceKind::AgentPluginProject`]), a user
-	/// install is not ([`ConfigSourceKind::AgentPluginUser`]).
-	Installed(omp_ext::claude_plugin::PluginScope),
+	/// Installed from a marketplace. A project install is project-scoped
+	/// ([`ConfigSourceKind::AgentPluginProject`]), a user install is not
+	/// ([`ConfigSourceKind::AgentPluginUser`]).
+	Installed {
+		/// Registry id, `name@marketplace`: the package's identity, keying its
+		/// approvals and data directory and namespacing its servers
+		/// (`name@marketplace:server`).
+		id:    omp_ext::plugin_command::PluginId,
+		/// Registry scope of the install.
+		scope: omp_ext::claude_plugin::PluginScope,
+	},
 }
 
 impl AgentPluginOrigin {
 	/// The discovery source a package of this origin joins as.
 	#[must_use]
-	pub const fn source_kind(self) -> ConfigSourceKind {
+	pub const fn source_kind(&self) -> ConfigSourceKind {
 		match self {
 			Self::Explicit => ConfigSourceKind::AgentPluginExplicit,
-			Self::Installed(omp_ext::claude_plugin::PluginScope::Project) => {
+			Self::Installed { scope: omp_ext::claude_plugin::PluginScope::Project, .. } => {
 				ConfigSourceKind::AgentPluginProject
 			},
-			Self::Installed(omp_ext::claude_plugin::PluginScope::User) => {
+			Self::Installed { scope: omp_ext::claude_plugin::PluginScope::User, .. } => {
 				ConfigSourceKind::AgentPluginUser
 			},
+		}
+	}
+
+	/// The registry id of a marketplace install; `None` for a package named
+	/// explicitly.
+	#[must_use]
+	pub const fn installed_id(&self) -> Option<&omp_ext::plugin_command::PluginId> {
+		match self {
+			Self::Explicit => None,
+			Self::Installed { id, .. } => Some(id),
 		}
 	}
 }
@@ -766,7 +785,8 @@ impl McpConfigPaths {
 
 	/// Adds the operator's plugin command approvals: an Agent Plugins
 	/// package's stdio server joins discovery only when its launch is
-	/// approved under the package's manifest name.
+	/// approved under the package's identity
+	/// ([`omp_ext::plugin_command::PluginId`]).
 	#[must_use]
 	pub fn with_command_approvals(
 		mut self,

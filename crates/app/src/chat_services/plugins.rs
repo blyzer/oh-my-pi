@@ -82,11 +82,11 @@ pub(super) fn report(state: &ServiceState) -> ServiceResult<PluginsReport> {
 		.into_iter()
 		.filter(|plugin| plugin.source == omp_ext::claude_plugin::PluginSource::ClaudeCode)
 	{
-		if plugins.iter().any(|row| row.id == plugin.id) {
+		if plugins.iter().any(|row| row.id == plugin.id.as_str()) {
 			continue;
 		}
 		plugins.push(PluginRow {
-			id:          plugin.id,
+			id:          plugin.id.into(),
 			name:        plugin.name,
 			version:     Some(plugin.version),
 			description: Str::default(),

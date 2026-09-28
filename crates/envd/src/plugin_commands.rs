@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use omp_core::Str;
 use omp_ext::{
 	claude_plugin::ClaudePlugin,
-	plugin_command::{PluginCommandBlocked, PluginLaunch, plugin_command_digest},
+	plugin_command::{PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest},
 };
 
 use crate::{
@@ -39,8 +39,9 @@ use crate::{
 /// its approvals are keyed on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentPluginLaunches {
-	/// The package's manifest `name`: its approval identity.
-	pub plugin:   Str,
+	/// The package's identity: a marketplace install's `name@marketplace`,
+	/// else its manifest `name`.
+	pub plugin:   PluginId,
 	/// The manifest `version`; empty when the manifest records none.
 	pub version:  Str,
 	/// Canonical package root.

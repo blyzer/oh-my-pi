@@ -536,8 +536,9 @@ pub struct ExtDoctorArgs {
 /// Options for `omp ext trust`.
 #[derive(Clone, Debug, Args)]
 pub struct ExtTrustArgs {
-	/// Extension identity, an installed plugin id (`name@marketplace`), or an
-	/// Agent Plugins package's manifest name.
+	/// Extension identity, an installed plugin id (`name@marketplace`, in
+	/// either plugin layout), or a local Agent Plugins package's manifest
+	/// name.
 	pub id:               Str,
 	/// Print the current trust grant, and a plugin's commands with their
 	/// approval state, only.
@@ -862,11 +863,11 @@ fn marketplace_plugins(
 		.into_iter()
 		.filter(|plugin| plugin.source == omp_ext::claude_plugin::PluginSource::ClaudeCode)
 	{
-		if rows.iter().any(|row| row.id == plugin.id) {
+		if rows.iter().any(|row| row.id == plugin.id.as_str()) {
 			continue;
 		}
 		rows.push(MarketplacePluginRow {
-			id:       plugin.id,
+			id:       plugin.id.into(),
 			version:  plugin.version,
 			scope:    plugin.scope.into(),
 			enabled:  true,
@@ -1975,7 +1976,7 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 	}
 	if args.revoke {
 		grants.grants.retain(|grant| grant.id != args.id);
-		grants.revoke_plugin_commands(&args.id, None);
+		grants.revoke_plugin_commands(omp_ext::plugin_command::PluginId::from_ref(&args.id), None);
 		grants.write(&state.grants).into_diagnostic()?;
 		return Ok(());
 	}
@@ -2090,7 +2091,11 @@ fn plugin_command_sets(
 	let agent_plugins =
 		omp_driver::plugin_commands::agent_plugin_paths(&state.project, &plugin_dirs, &plugins)
 			.into_diagnostic()?;
-	let sets = omp_driver::plugin_commands::command_sets(id, &plugins, &agent_plugins);
+	let sets = omp_driver::plugin_commands::command_sets(
+		omp_ext::plugin_command::PluginId::from_ref(id),
+		&plugins,
+		&agent_plugins,
+	);
 	Ok((sets, plugins.command_approvals))
 }
 
@@ -3813,7 +3818,7 @@ mod tests {
 				.iter()
 				.map(|blocked| blocked.server.as_str())
 				.collect::<Vec<_>>(),
-			["tools:db", "PreToolUse Bash"]
+			["tools@market:db", "PreToolUse Bash"]
 		);
 
 		trust(&state, &data, args(Vec::new(), true, false)).expect("approve every command");

@@ -349,7 +349,7 @@ fn append_plugin_sources(
 				});
 			if let Err(error) = admitted {
 				diagnostics.push(PluginDiagnostic::InvalidComponent {
-					plugin:    plugin.id.clone(),
+					plugin:    plugin.id.clone().into(),
 					component: PluginComponent::DapAdapters,
 					path:      declaration.path().to_path_buf(),
 					source:    Box::new(error),

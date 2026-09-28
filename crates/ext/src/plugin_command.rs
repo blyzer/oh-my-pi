@@ -32,10 +32,12 @@
 //! `v1` (before plugin files were bound) no longer match anything, so every
 //! plugin command must be approved again once.
 //!
-//! Plugin identities: an installed plugin is approved under its registry id
-//! (`name@marketplace`); an Agent Plugins 1.0 package discovered in a plugin
-//! directory or configured as an extension root is approved under its
-//! manifest `name`.
+//! Plugin identities ([`PluginId`]): a plugin installed from a marketplace,
+//! in either layout, is approved under its registry id `name@marketplace`
+//! (Claude Code's convention), so two marketplaces shipping the same plugin
+//! name never share approvals; an Agent Plugins 1.0 package discovered in a
+//! plugin directory or named with `--plugin-dir`/`--extension` is approved
+//! under its manifest `name`.
 //!
 //! Approvals persist beside the extension grants in the local grant file
 //! ([`crate::trust::GrantsFile::plugin_commands`]), read once per session
@@ -64,6 +66,48 @@ use crate::claude_plugin::{expand_plugin_vars, resolve_plugin_command};
 /// Domain separator of [`plugin_command_digest`]'s canonical encoding. `v2`
 /// binds the plugin files a launch names; `v1` approvals match nothing.
 const DIGEST_DOMAIN: &[u8] = b"omp.plugin-command.v2\0";
+
+omp_core::string_id!(
+	/// A plugin's identity: what its command approvals, its blocked-launch
+	/// reports, `omp ext trust`, and its hook and MCP server names are keyed
+	/// on.
+	///
+	/// A marketplace install is `name@marketplace` ([`Self::installed`]); an
+	/// Agent Plugins package loaded from a local directory is its manifest
+	/// `name`.
+	PluginId
+);
+
+impl PluginId {
+	/// The identity of the plugin `name` installed from `marketplace`.
+	#[must_use]
+	pub fn installed(name: &str, marketplace: &str) -> Self {
+		let mut id = omp_core::StrMut::with_capacity(name.len() + 1 + marketplace.len());
+		id.push_str(name);
+		id.push('@');
+		id.push_str(marketplace);
+		Self::new(id.freeze())
+	}
+}
+
+impl PluginId<str> {
+	/// The identity as one path segment: every character but ASCII letters,
+	/// digits, `_`, and `-` replaced by `-` (`docs@official` is
+	/// `docs-official`), as Claude Code names a plugin's data directory.
+	#[must_use]
+	pub fn dir_name(&self) -> String {
+		self
+			.chars()
+			.map(|c| {
+				if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+					c
+				} else {
+					'-'
+				}
+			})
+			.collect()
+	}
+}
 
 /// The plugin-root variables a hook script may name unbraced; the hook host
 /// exports each.
@@ -470,7 +514,11 @@ fn write_word(formatter: &mut fmt::Formatter<'_>, word: &str) -> fmt::Result {
 /// matcher asks again. A hook's timeout and `async` flag are not: they bound
 /// or discard what the approved command does, never what runs or when.
 #[must_use]
-pub fn plugin_command_digest(plugin_id: &str, version: &str, launch: &PluginLaunch) -> Hash32 {
+pub fn plugin_command_digest(
+	plugin_id: &PluginId<str>,
+	version: &str,
+	launch: &PluginLaunch,
+) -> Hash32 {
 	let mut hasher = Hash32::hasher();
 	hasher.update(DIGEST_DOMAIN);
 	let mut field = |bytes: &[u8]| {
@@ -527,28 +575,28 @@ pub fn plugin_command_digest(plugin_id: &str, version: &str, launch: &PluginLaun
 /// handed approvals fails closed.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommandApprovals {
-	approvals: Arc<[(Str, Hash32)]>,
+	approvals: Arc<[(PluginId, Hash32)]>,
 }
 
 impl CommandApprovals {
 	/// Approvals from `(plugin identity, digest)` pairs.
 	#[must_use]
-	pub fn new(approvals: impl IntoIterator<Item = (Str, Hash32)>) -> Self {
+	pub fn new(approvals: impl IntoIterator<Item = (PluginId, Hash32)>) -> Self {
 		Self { approvals: approvals.into_iter().collect() }
 	}
 
 	/// Digests approved for `plugin`.
-	pub fn of<'a>(&'a self, plugin: &'a str) -> impl Iterator<Item = Hash32> + Clone + 'a {
+	pub fn of<'a>(&'a self, plugin: &'a PluginId<str>) -> impl Iterator<Item = Hash32> + Clone + 'a {
 		self
 			.approvals
 			.iter()
-			.filter(move |(id, _)| id.as_str() == plugin)
+			.filter(move |(id, _)| **id == *plugin)
 			.map(|(_, digest)| *digest)
 	}
 
 	/// Whether the operator approved the launch with `digest` for `plugin`.
 	#[must_use]
-	pub fn approves(&self, plugin: &str, digest: &Hash32) -> bool {
+	pub fn approves(&self, plugin: &PluginId<str>, digest: &Hash32) -> bool {
 		self.of(plugin).any(|approved| approved == *digest)
 	}
 
@@ -559,7 +607,7 @@ impl CommandApprovals {
 	/// launch.
 	pub fn admit(
 		&self,
-		plugin: &Str,
+		plugin: &PluginId,
 		version: &str,
 		launch: PluginLaunch,
 	) -> Result<(), PluginCommandBlocked> {
@@ -584,8 +632,8 @@ impl CommandApprovals {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("plugin `{plugin}` {kind} `{server}` would run `{}`, {}", self.command_line(), self.refusal())]
 pub struct PluginCommandBlocked {
-	/// Plugin id, `name@marketplace`.
-	pub plugin:          Str,
+	/// Plugin identity ([`PluginId`]).
+	pub plugin:          PluginId,
 	/// Declaring component.
 	pub kind:            PluginLaunchKind,
 	/// Whether the operator approved other launches of this plugin identity:
@@ -607,7 +655,7 @@ pub struct PluginCommandBlocked {
 impl PluginCommandBlocked {
 	/// The refusal of `launch` for `plugin`, whose approval key is `digest`.
 	#[must_use]
-	pub fn new(plugin: Str, launch: PluginLaunch, digest: Hash32) -> Self {
+	pub fn new(plugin: PluginId, launch: PluginLaunch, digest: Hash32) -> Self {
 		let PluginLaunch { kind, server, command, args, env: _, cwd: _, files } = launch;
 		let argv = std::iter::once(command).chain(args).collect();
 		let unreadable = files.unreadable().cloned();
@@ -703,8 +751,8 @@ mod tests {
 	#[test]
 	fn digest_binds_plugin_version_command_args_and_env() {
 		let base = launch("/p/bin/srv", &["--stdio"], &[("A", "1")]);
-		let digest = plugin_command_digest("p@m", "1.0.0", &base);
-		assert_eq!(digest, plugin_command_digest("p@m", "1.0.0", &base));
+		let digest = plugin_command_digest(PluginId::from_ref("p@m"), "1.0.0", &base);
+		assert_eq!(digest, plugin_command_digest(PluginId::from_ref("p@m"), "1.0.0", &base));
 		for (plugin, version, other) in [
 			("q@m", "1.0.0", base.clone()),
 			("p@m", "1.0.1", base),
@@ -713,13 +761,17 @@ mod tests {
 			("p@m", "1.0.0", launch("/p/bin/srv", &["--stdio"], &[("A", "2")])),
 			("p@m", "1.0.0", launch("/p/bin/srv", &[], &[("A", "1")])),
 		] {
-			assert_ne!(digest, plugin_command_digest(plugin, version, &other), "{plugin} {version}");
+			assert_ne!(
+				digest,
+				plugin_command_digest(PluginId::from_ref(plugin), version, &other),
+				"{plugin} {version}"
+			);
 		}
 		// Field boundaries are length-prefixed: moving a byte between the
 		// command and an argument changes the digest.
 		assert_ne!(
-			plugin_command_digest("p@m", "1", &launch("ab", &["c"], &[])),
-			plugin_command_digest("p@m", "1", &launch("a", &["bc"], &[])),
+			plugin_command_digest(PluginId::from_ref("p@m"), "1", &launch("ab", &["c"], &[])),
+			plugin_command_digest(PluginId::from_ref("p@m"), "1", &launch("a", &["bc"], &[])),
 		);
 	}
 
@@ -730,20 +782,24 @@ mod tests {
 		second.kind = PluginLaunchKind::McpServer;
 		second.server = Str::new_static("other");
 		assert_eq!(
-			plugin_command_digest("p@m", "1", &first),
-			plugin_command_digest("p@m", "1", &second)
+			plugin_command_digest(PluginId::from_ref("p@m"), "1", &first),
+			plugin_command_digest(PluginId::from_ref("p@m"), "1", &second)
 		);
 	}
 
 	#[test]
 	fn digest_binds_the_working_directory_and_a_hooks_trigger() {
 		let base = launch("srv", &[], &[]);
-		let digest = plugin_command_digest("p@m", "1", &base);
+		let digest = plugin_command_digest(PluginId::from_ref("p@m"), "1", &base);
 		let in_dir = base.clone().with_cwd(Some(Str::new_static("/p/sub")));
-		assert_ne!(digest, plugin_command_digest("p@m", "1", &in_dir));
+		assert_ne!(digest, plugin_command_digest(PluginId::from_ref("p@m"), "1", &in_dir));
 		assert_ne!(
-			plugin_command_digest("p@m", "1", &in_dir),
-			plugin_command_digest("p@m", "1", &base.with_cwd(Some(Str::new_static("/p"))))
+			plugin_command_digest(PluginId::from_ref("p@m"), "1", &in_dir),
+			plugin_command_digest(
+				PluginId::from_ref("p@m"),
+				"1",
+				&base.with_cwd(Some(Str::new_static("/p")))
+			)
 		);
 		let hook = |trigger: &'static str| {
 			PluginLaunch::new(
@@ -754,27 +810,36 @@ mod tests {
 				[],
 			)
 		};
-		let pre = plugin_command_digest("p@m", "1", &hook("PreToolUse Bash"));
+		let pre = plugin_command_digest(PluginId::from_ref("p@m"), "1", &hook("PreToolUse Bash"));
 		assert_ne!(pre, digest, "a hook never shares a server's approval");
-		assert_ne!(pre, plugin_command_digest("p@m", "1", &hook("PostToolUse Bash")));
-		assert_eq!(pre, plugin_command_digest("p@m", "1", &hook("PreToolUse Bash")));
+		assert_ne!(
+			pre,
+			plugin_command_digest(PluginId::from_ref("p@m"), "1", &hook("PostToolUse Bash"))
+		);
+		assert_eq!(
+			pre,
+			plugin_command_digest(PluginId::from_ref("p@m"), "1", &hook("PreToolUse Bash"))
+		);
 	}
 
 	#[test]
 	fn approvals_admit_only_their_plugin_and_digest() {
 		let approved = launch("srv", &["--stdio"], &[]);
-		let digest = plugin_command_digest("portable", "", &approved);
-		let approvals = CommandApprovals::new([(Str::new_static("portable"), digest)]);
-		let portable = Str::new_static("portable");
+		let digest = plugin_command_digest(PluginId::from_ref("portable"), "", &approved);
+		let approvals = CommandApprovals::new([(PluginId::new_static("portable"), digest)]);
+		let portable = PluginId::new_static("portable");
 		assert!(approvals.admit(&portable, "", approved.clone()).is_ok());
 		let other = approvals
-			.admit(&Str::new_static("other"), "", approved.clone())
+			.admit(&PluginId::new_static("other"), "", approved.clone())
 			.expect_err("an approval never crosses plugins");
 		assert_eq!(other.plugin, "other");
 		let bumped = approvals
 			.admit(&portable, "2.0.0", approved.clone())
 			.expect_err("a new version asks again");
-		assert_eq!(bumped.digest, plugin_command_digest("portable", "2.0.0", &approved));
+		assert_eq!(
+			bumped.digest,
+			plugin_command_digest(PluginId::from_ref("portable"), "2.0.0", &approved)
+		);
 		assert!(
 			CommandApprovals::default()
 				.admit(&portable, "", approved)
@@ -786,8 +851,8 @@ mod tests {
 	#[test]
 	fn blocked_diagnostic_names_plugin_command_and_approval() {
 		let launch = launch("/p/bin/srv", &["--stdio", "a b"], &[]);
-		let digest = plugin_command_digest("p@m", "1", &launch);
-		let blocked = PluginCommandBlocked::new(Str::new_static("p@m"), launch, digest);
+		let digest = plugin_command_digest(PluginId::from_ref("p@m"), "1", &launch);
+		let blocked = PluginCommandBlocked::new(PluginId::new_static("p@m"), launch, digest);
 		let text = blocked.to_string();
 		assert!(text.contains("plugin `p@m` language server `srv`"), "{text}");
 		assert!(text.contains("`/p/bin/srv --stdio 'a b'`"), "{text}");
@@ -800,8 +865,8 @@ mod tests {
 			[],
 			[],
 		);
-		let digest = plugin_command_digest("p@m", "1", &hook);
-		let text = PluginCommandBlocked::new(Str::new_static("p@m"), hook, digest).to_string();
+		let digest = plugin_command_digest(PluginId::from_ref("p@m"), "1", &hook);
+		let text = PluginCommandBlocked::new(PluginId::new_static("p@m"), hook, digest).to_string();
 		assert!(
 			text.contains("plugin `p@m` hook `PreToolUse Bash` would run `./guard.sh \"$1\"`"),
 			"{text}"
@@ -841,6 +906,20 @@ mod tests {
 			.iter()
 			.map(|file| file.path.as_str())
 			.collect()
+	}
+
+	#[test]
+	fn an_installed_identity_names_the_marketplace_and_a_path_safe_directory() {
+		let id = PluginId::installed("docs", "official");
+		assert_eq!(id, "docs@official");
+		assert_eq!(id.dir_name(), "docs-official");
+		assert_eq!(PluginId::from_ref("../x@y/z").dir_name(), "---x-y-z");
+		// Two marketplaces shipping the same plugin never share an approval.
+		let launch = launch("srv", &[], &[]);
+		assert_ne!(
+			plugin_command_digest(&id, "1", &launch),
+			plugin_command_digest(&PluginId::installed("docs", "mirror"), "1", &launch)
+		);
 	}
 
 	#[test]
@@ -889,7 +968,7 @@ mod tests {
 		let (_scratch, root) = plugin_tree();
 		let digest = || {
 			let launch = server(&root, "node", &["${CLAUDE_PLUGIN_ROOT}/bin/server.js"]);
-			plugin_command_digest("p@m", "1.0.0", &launch)
+			plugin_command_digest(PluginId::from_ref("p@m"), "1.0.0", &launch)
 		};
 		let approved = digest();
 		assert_eq!(approved, digest(), "deterministic");
@@ -942,10 +1021,10 @@ mod tests {
 		assert!(unreadable.path.ends_with("scripts/guard.sh"), "{unreadable:?}");
 		assert_eq!(unreadable.source.kind(), io::ErrorKind::PermissionDenied);
 		// Even an approval carrying its exact digest does not admit it.
-		let digest = plugin_command_digest("p", "", &launch);
-		let approvals = CommandApprovals::new([(Str::new_static("p"), digest)]);
+		let digest = plugin_command_digest(PluginId::from_ref("p"), "", &launch);
+		let approvals = CommandApprovals::new([(PluginId::new_static("p"), digest)]);
 		let blocked = approvals
-			.admit(&Str::new_static("p"), "", launch)
+			.admit(&PluginId::new_static("p"), "", launch)
 			.expect_err("an unreadable plugin file fails closed");
 		assert!(blocked.unreadable.is_some());
 		let text = blocked.to_string();
