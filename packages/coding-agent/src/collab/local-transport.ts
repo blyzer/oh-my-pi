@@ -32,6 +32,8 @@ import type { CollabTransport } from "./transport";
 
 /** Guard against a peer streaming an unbounded line into memory. */
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
+/** How long `close()` lets a peer drain its final frames before destroying the connection. */
+const CLOSE_GRACE_MS = 1_000;
 
 export interface CollabLocalServerOptions {
 	/** Absolute path for the listening socket. Parent directory is created 0700. */
@@ -105,6 +107,8 @@ export class CollabLocalServer implements CollabTransport {
 	}
 
 	#ingest(peer: number, chunk: Buffer): void {
+		// A connection still draining after close() is not a peer anymore.
+		if (this.#closed) return;
 		let buffered = (this.#buffers.get(peer) ?? "") + chunk.toString("utf8");
 		for (;;) {
 			const newline = buffered.indexOf("\n");
@@ -150,10 +154,50 @@ export class CollabLocalServer implements CollabTransport {
 		this.#peers.get(targetPeer)?.write(line);
 	}
 
+	/**
+	 * Written in order on one connection, so a batch is contiguous by
+	 * construction: nothing else can interleave with a synchronous loop.
+	 */
+	sendBatch(frames: Iterable<CollabFrame>, targetPeer = 0): void {
+		for (const frame of frames) {
+			if (this.#closed) return;
+			if (targetPeer !== 0 && !this.#peers.has(targetPeer)) return;
+			this.send(frame, targetPeer);
+		}
+	}
+
+	/**
+	 * Ids are never reissued, so a peer is served exactly while its connection
+	 * is in the table: `#dropPeer` removes it before announcing `peer-left`.
+	 */
+	isServing(peerId: number): boolean {
+		return this.#peers.has(peerId);
+	}
+
+	/**
+	 * Nothing is queued above the sockets: `send` serializes and writes
+	 * synchronously, so there is no sealing backlog to revoke.
+	 */
+	discardPendingSends(): void {}
+
+	/**
+	 * Every `send` has already reached its socket's write buffer, and `close()`
+	 * ends connections gracefully, so a goodbye sent before close is delivered.
+	 */
+	flush(): Promise<void> {
+		return Promise.resolve();
+	}
+
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		for (const socket of this.#peers.values()) socket.destroy();
+		// end(), not destroy(): destroy drops whatever the socket still buffers,
+		// which is exactly the goodbye stop() sent a moment ago. A peer that never
+		// reads cannot hold the connection open past the grace period.
+		for (const socket of this.#peers.values()) {
+			socket.end();
+			setTimeout(() => socket.destroy(), CLOSE_GRACE_MS).unref();
+		}
 		this.#peers.clear();
 		this.#buffers.clear();
 		const server = this.#server;

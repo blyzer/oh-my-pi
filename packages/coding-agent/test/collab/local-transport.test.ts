@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { CollabLocalServer } from "@oh-my-pi/pi-coding-agent/collab/local-transport";
 import { COLLAB_PROTO, type CollabFrame } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
@@ -56,7 +57,7 @@ function makeHostContext(): HostHarness {
 		},
 	};
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionId: () => "sess-local",
 			getCwd: () => "/tmp",
@@ -157,7 +158,7 @@ describe("collab over a local transport", () => {
 		socketPath: string;
 	}> {
 		const socketPath = path.join(
-			await Bun.file(os.tmpdir()).exists() ? os.tmpdir() : "/tmp",
+			(await Bun.file(os.tmpdir()).exists()) ? os.tmpdir() : "/tmp",
 			`collab-test-${process.pid}-${Math.random().toString(36).slice(2)}`,
 			"collab.sock",
 		);

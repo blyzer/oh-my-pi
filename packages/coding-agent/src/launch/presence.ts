@@ -61,9 +61,7 @@ export interface DaemonPresenceRecord {
 }
 
 /** Fields a live process may rewrite about itself after registering. */
-export type DaemonPresenceUpdate = Partial<
-	Pick<DaemonPresenceRecord, "sessionId" | "sessionFile" | "collabSocket">
->;
+export type DaemonPresenceUpdate = Partial<Pick<DaemonPresenceRecord, "sessionId" | "sessionFile" | "collabSocket">>;
 
 /** Handle keeping one omp process registered in a project daemon scope. */
 export interface DaemonProjectPresence {
