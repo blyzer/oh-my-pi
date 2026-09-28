@@ -17,9 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	AgentName,
-	settings::{SV_TASK_RECURSION_DEPTH, TaskSettings, child_ctx},
+	settings::{SV_TASK_RECURSION_DEPTH, TaskSettings},
 	spawn::{
-		SpawnError, child_session_path, configure_child_route, create_isolation, discard_isolation,
+		SpawnError, child_session_path, configure_child, create_isolation, discard_isolation,
 		engage_workpool_yield_ladder, finish_isolation,
 	},
 	workpool_scheduler::{
@@ -365,11 +365,9 @@ async fn run_kernel_worker(run: KernelWorkerRun) -> JobSettlement {
 async fn run_kernel_worker_inner(
 	run: &KernelWorkerRun,
 ) -> Result<(Str, u64, u64, Option<omp_tools::task::WorkspaceOutcome>, bool), SpawnError> {
-	let ctx = Arc::new(child_ctx(&run.ctx, run.cfg.as_ref(), run.request.agent.as_str())?);
-	let depth = SV_TASK_RECURSION_DEPTH.get(&run.ctx);
-	SV_TASK_RECURSION_DEPTH.set(&ctx, depth.saturating_add(1))?;
-	let settings = TaskSettings::from_con(&ctx);
-	configure_child_route(&ctx, &settings, run.request.agent.as_str(), None)?;
+	let (ctx, settings) =
+		configure_child(&run.ctx, run.cfg.as_ref(), run.request.agent.as_str(), None)?;
+	let ctx = Arc::new(ctx);
 	if omp_agent::AI_MODEL.get(&ctx).is_empty() {
 		omp_agent::AI_MODEL.set(&ctx, run.model.clone())?;
 	}

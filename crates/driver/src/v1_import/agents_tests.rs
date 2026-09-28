@@ -56,6 +56,9 @@ const REVIEWER_RULE: &str = concat!(
 	"Be strict.\n",
 );
 
+/// v1 settings assigning the task role `@task` follows.
+const V1_TASK_ROLE: &str = "modelRoles:\n  task: provider/task-model\n";
+
 fn write(path: &Path, contents: &str) {
 	fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
 	fs::write(path, contents).expect("write");
@@ -208,6 +211,7 @@ fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
 			"Scout the tree.\n",
 		),
 	);
+	write(&fixture.omp().join("agent/config.yml"), V1_TASK_ROLE);
 
 	let report = fixture.run(ImportMode::Apply);
 
@@ -219,7 +223,8 @@ fn the_frontmatter_becomes_a_class_cfg_the_spawner_applies() {
 		(Some("scout"), OutcomeKind::Imported),
 	]);
 	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
-	// `spawns: "*"` advertises `task`; `@task` is v2's task role reference.
+	// `spawns: "*"` advertises `task`; with v1's task role assigned, `@task`
+	// is v2's task role reference.
 	assert_eq!(
 		read(&fixture.config().join("scout.cfg")),
 		concat!(
@@ -253,6 +258,7 @@ fn an_imported_agent_model_outranks_the_task_model_as_in_v1() {
 		&fixture.agents().join("scout.md"),
 		"---\nname: scout\ndescription: Finds things\nmodel: \"@task\"\n---\nScout the tree.\n",
 	);
+	write(&fixture.omp().join("agent/config.yml"), V1_TASK_ROLE);
 	fixture.run(ImportMode::Apply);
 	assert_eq!(read(&fixture.config().join("reviewer.cfg")), REVIEWER_CFG);
 
@@ -276,7 +282,8 @@ fn an_imported_agent_model_outranks_the_task_model_as_in_v1() {
 
 /// v1 ran an agent without a `model` (or with `default`) on the session's
 /// model, not the task role (`resolveAgentModelSelection`); only `@task`
-/// followed the task role.
+/// followed the task role, and with no `modelRoles.task` assigned it too ran
+/// on the session's model.
 #[test]
 fn an_agent_without_a_model_runs_on_the_session_model_not_the_task_model() {
 	let fixture = Fixture::new();
@@ -292,6 +299,7 @@ fn an_agent_without_a_model_runs_on_the_session_model_not_the_task_model() {
 	fixture.run(ImportMode::Apply);
 	assert_eq!(read(&fixture.config().join("bare.cfg")), "// Bare\nai_model inherit\n");
 	assert_eq!(read(&fixture.config().join("dflt.cfg")), "// Default\nai_model inherit\n");
+	assert_eq!(read(&fixture.config().join("scout.cfg")), "// Finds things\nai_model inherit\n");
 
 	let files = CfgFiles::with_roots(fixture.config(), None);
 	let spawned = |parent: &omp_con::Ctx, agent: &str| {
@@ -307,13 +315,14 @@ fn an_agent_without_a_model_runs_on_the_session_model_not_the_task_model() {
 		.expect("parent values");
 	assert_eq!(spawned(&parent, "bare").as_str(), "parent/model");
 	assert_eq!(spawned(&parent, "dflt").as_str(), "parent/model");
-	assert_eq!(spawned(&parent, "scout").as_str(), "@task");
+	assert_eq!(spawned(&parent, "scout").as_str(), "parent/model");
 }
 
 /// v1's `@task` (`pi/task`) followed the task role, `modelRoles.task`, which
-/// the settings step writes to `ai_model_roles.task`. The imported class's
-/// `ai_model @task` resolves through that role in the child: the child's
-/// route is the role's model, not the session's or `ai_task_model`.
+/// the settings step writes to `ai_model_roles.task`. When the v1 settings
+/// assign it, the imported class's `ai_model @task` resolves through that
+/// role in the child: the child's route is the role's model, not the
+/// session's or `ai_task_model`.
 #[test]
 fn a_task_role_agent_follows_the_imported_task_role() {
 	let fixture = Fixture::new();
@@ -324,6 +333,7 @@ fn a_task_role_agent_follows_the_imported_task_role() {
 			&format!("---\nname: {name}\ndescription: Finds things\nmodel: {model}\n---\nScout.\n"),
 		);
 	}
+	write(&fixture.omp().join("agent/config.yml"), V1_TASK_ROLE);
 	fixture.run(ImportMode::Apply);
 	for name in ["scout", "legacy"] {
 		assert_eq!(
@@ -362,6 +372,50 @@ fn a_task_role_agent_follows_the_imported_task_role() {
 	}
 }
 
+/// Without `modelRoles.task` in the v1 settings, v1 had no task model for
+/// `@task` to follow, so it ran on the session's model: the class gets
+/// `ai_model inherit` (a `:level` suffix becomes its `ai_thinking`), and the
+/// child runs on the spawning session's model — not `ai_task_model` and not
+/// v2's catalog `@task`. The same holds for a project agent.
+#[test]
+fn a_task_role_agent_without_a_v1_task_role_inherits_the_session_model() {
+	let fixture = Fixture::new();
+	write(
+		&fixture.agents().join("scout.md"),
+		"---\nname: scout\ndescription: Finds things\nmodel: \"@task\"\n---\nScout.\n",
+	);
+	write(
+		&fixture.agents().join("legacy.md"),
+		"---\nname: legacy\ndescription: Finds things\nmodel: pi/task:low\n---\nScout.\n",
+	);
+	// Other roles do not count.
+	write(&fixture.omp().join("agent/config.yml"), "modelRoles:\n  smol: provider/small\n");
+	fixture.run(ImportMode::Apply);
+	assert_eq!(read(&fixture.config().join("scout.cfg")), "// Finds things\nai_model inherit\n");
+	assert_eq!(
+		read(&fixture.config().join("legacy.cfg")),
+		"// Finds things\nai_model inherit\nai_thinking low\n"
+	);
+
+	let project = fixture.project();
+	write(
+		&project.join(".omp/agents/probe.md"),
+		"---\nname: probe\ndescription: Probes\nmodel: \"@task\"\n---\n",
+	);
+	import_project_agents(&project, &fixture.source(), &fixture.roots(), ImportMode::Apply);
+	assert_eq!(read(&project.join(".omp/probe.cfg")), "// Probes\nai_model inherit\n");
+
+	let parent = omp_con::Ctx::new();
+	parent
+		.run("ai_model parent/model; ai_task_model task/model")
+		.expect("parent values");
+	let files = CfgFiles::with_roots(fixture.config(), Some(project.join(".omp")));
+	for name in ["scout", "legacy", "probe"] {
+		let child = child_ctx(&parent, &files, name).expect("child context");
+		assert_eq!(omp_agent::AI_MODEL.get(&child).as_str(), "parent/model", "{name}");
+	}
+}
+
 /// v1 used a project agent in place of the user agent of its name. v2
 /// layers the project class cfg over the user one, so the project cfg
 /// resets what only the user agent sets, and shadows its body.
@@ -392,6 +446,8 @@ fn a_project_agent_resets_what_only_the_user_agent_of_its_name_sets() {
 		&omp.join("agents/helper.md"),
 		"---\nname: helper\ndescription: Project helper\nmodel: \"@task\"\ntools: [grep]\n---\n",
 	);
+	// The project's own v1 settings assign the task role `@task` follows.
+	write(&omp.join("config.yml"), V1_TASK_ROLE);
 	write(
 		&omp.join("agents/lister.md"),
 		"---\nname: lister\ndescription: Project lister\nthinkingLevel: medium\n---\nOwn body.\n",
@@ -715,32 +771,46 @@ fn a_named_profile_imports_into_its_v2_namesake() {
 
 #[test]
 fn model_patterns_follow_v2_selector_rules() {
-	use super::{ModelMapping, map_model};
+	use super::{ModelMapping, TaskRole, map_model};
 	let selector = |text: &'static str| ModelMapping::Selector {
 		selector: Str::new_static(text),
 		thinking: None,
 	};
-	assert_eq!(map_model("@smol"), selector("@smol"));
-	assert_eq!(map_model("pi/slow"), selector("@slow"));
-	assert_eq!(map_model("*:high"), selector("@default:high"));
-	assert_eq!(
-		map_model("anthropic/claude-opus-5:xhigh"),
-		selector("anthropic/claude-opus-5:xhigh")
-	);
-	assert_eq!(map_model("opus:inherit"), selector("opus"));
-	assert_eq!(map_model("opus:off"), ModelMapping::Selector {
+	let mapped = |pattern: &str| map_model(pattern, TaskRole::Defined);
+	assert_eq!(mapped("@smol"), selector("@smol"));
+	assert_eq!(mapped("pi/slow"), selector("@slow"));
+	assert_eq!(mapped("*:high"), selector("@default:high"));
+	assert_eq!(mapped("anthropic/claude-opus-5:xhigh"), selector("anthropic/claude-opus-5:xhigh"));
+	assert_eq!(mapped("opus:inherit"), selector("opus"));
+	assert_eq!(mapped("opus:off"), ModelMapping::Selector {
 		selector: Str::new_static("opus"),
 		thinking: Some("off"),
 	});
 	for inherited in ["*", "default", "@default", "pi/default"] {
-		assert_eq!(map_model(inherited), ModelMapping::Session, "{inherited}");
+		assert_eq!(mapped(inherited), ModelMapping::Session { thinking: None }, "{inherited}");
 	}
 	for task in ["@task", "pi/task"] {
-		assert_eq!(map_model(task), selector("@task"), "{task}");
+		assert_eq!(mapped(task), selector("@task"), "{task}");
+		assert_eq!(
+			map_model(task, TaskRole::Undefined),
+			ModelMapping::Session { thinking: None },
+			"{task} without a v1 task role"
+		);
 	}
-	assert_eq!(map_model("@my-role"), ModelMapping::Unmappable);
-	assert_eq!(map_model("pi/nope"), ModelMapping::Unmappable);
-	assert_eq!(map_model("@smol:bogus"), ModelMapping::Unmappable);
-	assert_eq!(map_model("@plan:auto"), selector("@plan:auto"));
-	assert_eq!(map_model("bad::selector"), ModelMapping::Unmappable);
+	assert_eq!(map_model("@task:high", TaskRole::Undefined), ModelMapping::Session {
+		thinking: Some("high"),
+	});
+	assert_eq!(map_model("@task:off", TaskRole::Undefined), ModelMapping::Session {
+		thinking: Some("off"),
+	});
+	assert_eq!(
+		map_model("@smol", TaskRole::Undefined),
+		selector("@smol"),
+		"only the task role depends on it"
+	);
+	assert_eq!(mapped("@my-role"), ModelMapping::Unmappable);
+	assert_eq!(mapped("pi/nope"), ModelMapping::Unmappable);
+	assert_eq!(mapped("@smol:bogus"), ModelMapping::Unmappable);
+	assert_eq!(mapped("@plan:auto"), selector("@plan:auto"));
+	assert_eq!(mapped("bad::selector"), ModelMapping::Unmappable);
 }
