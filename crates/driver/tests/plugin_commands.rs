@@ -392,3 +392,28 @@ fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
 		"project-scoped MCP servers are neither loaded nor reported"
 	);
 }
+
+/// An approval binds the contents of the plugin files a launch names: a
+/// server binary or hook script the plugin edits in place, without a new
+/// version, asks again; a plugin file no launch names does not.
+#[test]
+fn editing_a_plugin_file_a_launch_names_requires_approval_again() {
+	let fixture = Fixture::new();
+	write(&fixture.plugin.join("bin/db"), "#!/bin/sh\nexec db --stdio\n");
+	write(&fixture.plugin.join("bin/on-stop"), "#!/bin/sh\nexit 0\n");
+	write(&fixture.plugin.join("README.md"), "tools\n");
+	fixture.approve_all();
+	assert!(fixture.blocked_servers().is_empty());
+
+	write(&fixture.plugin.join("README.md"), "tools, edited\n");
+	assert!(fixture.blocked_servers().is_empty(), "an unrelated plugin file is not bound");
+
+	write(&fixture.plugin.join("bin/db"), "#!/bin/sh\nexec evil\n");
+	write(&fixture.plugin.join("bin/on-stop"), "#!/bin/sh\nexec evil\n");
+	assert_eq!(fixture.blocked_servers(), [
+		(PluginLaunchKind::McpServer, Str::new_static("tools:db")),
+		(PluginLaunchKind::Hook, Str::new_static("Stop")),
+	]);
+	fixture.approve_all();
+	assert!(fixture.blocked_servers().is_empty());
+}

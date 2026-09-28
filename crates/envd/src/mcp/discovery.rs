@@ -415,7 +415,7 @@ fn push_agent_plugin(
 ) {
 	let mut file = McpConfigFile::default();
 	for (name, server) in plugin.servers {
-		if let Some(launch) = plugin_mcp_launch(&name, &server)
+		if let Some(launch) = plugin_mcp_launch(&name, &server, &plugin.root)
 			&& let Err(blocked) = approvals.admit(&plugin.name, &plugin.version, launch)
 		{
 			tracing::warn!(
@@ -441,7 +441,7 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 			launches: plugin
 				.servers
 				.iter()
-				.filter_map(|(name, server)| plugin_mcp_launch(name, server))
+				.filter_map(|(name, server)| plugin_mcp_launch(name, server, &plugin.root))
 				.collect(),
 			plugin:   plugin.name,
 			version:  plugin.version,
@@ -462,7 +462,7 @@ fn push_claude_plugins(out: &mut Vec<ConfigSource>, plugins: &[ClaudePlugin]) {
 		for (path, servers) in plugin_mcp_declarations(plugin) {
 			let mut file = McpConfigFile::default();
 			for (name, server) in servers {
-				if let Some(launch) = plugin_mcp_launch(&name, &server)
+				if let Some(launch) = plugin_mcp_launch(&name, &server, &plugin.root)
 					&& let Err(blocked) = plugin.admit_launch(launch)
 				{
 					tracing::warn!(
@@ -482,7 +482,7 @@ fn push_claude_plugins(out: &mut Vec<ConfigSource>, plugins: &[ClaudePlugin]) {
 
 /// The source kind `plugin`'s MCP declarations join discovery as: project
 /// scope for a plugin installed for the project, else user scope.
-pub(crate) const fn claude_plugin_kind(plugin: &ClaudePlugin) -> ConfigSourceKind {
+pub const fn claude_plugin_kind(plugin: &ClaudePlugin) -> ConfigSourceKind {
 	match plugin.scope {
 		PluginScope::Project => ConfigSourceKind::ClaudePluginProject,
 		PluginScope::User => ConfigSourceKind::ClaudePluginUser,
@@ -495,11 +495,12 @@ pub fn plugin_mcp_launches(plugin: &ClaudePlugin) -> impl Iterator<Item = Plugin
 	plugin_mcp_declarations(plugin)
 		.into_iter()
 		.flat_map(|(_, servers)| servers)
-		.filter_map(|(name, server)| plugin_mcp_launch(&name, &server))
+		.filter_map(|(name, server)| plugin_mcp_launch(&name, &server, &plugin.root))
 }
 
-/// The launch a normalized plugin MCP server performs: stdio servers only.
-fn plugin_mcp_launch(name: &Str, server: &McpServerConfig) -> Option<PluginLaunch> {
+/// The launch a normalized MCP server of the plugin rooted at `root`
+/// performs, bound to the plugin files it names: stdio servers only.
+fn plugin_mcp_launch(name: &Str, server: &McpServerConfig, root: &Path) -> Option<PluginLaunch> {
 	let command = server.command.clone()?;
 	Some(
 		PluginLaunch::new(
@@ -517,7 +518,8 @@ fn plugin_mcp_launch(name: &Str, server: &McpServerConfig) -> Option<PluginLaunc
 				.cwd
 				.as_ref()
 				.map(|cwd| Str::new(cwd.to_string_lossy())),
-		),
+		)
+		.with_plugin_files(root),
 	)
 }
 

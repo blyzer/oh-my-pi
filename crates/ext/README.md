@@ -18,12 +18,16 @@ sits below both and can be reasoned about as data in, data out.
 - `trust`: signature verification, trust tiers, and the local grant file,
   including operator approvals of plugin-launched commands.
 - `plugin_command`: the approval key (`Hash32` digest of plugin version,
-  command, arguments, environment, working directory, and a hook's event and
-  matcher) and typed refusal for every command a plugin would run: an
+  command, arguments, environment, working directory, a hook's event and
+  matcher, and the contents of every plugin-root file the launch names, so a
+  script edited in place asks again; a named file that cannot be read is
+  never approvable) and typed refusal for every command a plugin would run: an
   installed plugin's MCP, LSP, and DAP servers and its hooks (approved under
   `name@marketplace`), and an Agent Plugins 1.0 package's stdio MCP servers
   (approved under its manifest name). Plugin resolution reads the approvals
-  (`CommandApprovals`) and each launching seam gates through them.
+  (`CommandApprovals`) and each launching seam gates through them. The
+  digest domain is `omp.plugin-command.v2`: approvals recorded before files
+  were bound match nothing, so plugin commands are approved once more.
 - `index`, `upgrade`, `doctor`: index metadata, generation commits, and
   integrity diagnostics.
 - `marketplace`, `claude_plugin`: Claude-compatible marketplace catalogs, the

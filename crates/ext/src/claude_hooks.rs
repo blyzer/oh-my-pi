@@ -455,15 +455,17 @@ impl PluginHook {
 	/// at `root`: the script the in-process shell runs
 	/// ([`HookCommand::script`]) with `${CLAUDE_PLUGIN_ROOT}` expanded, and
 	/// the trigger ([`Self::trigger`]) as its name, which the approval digest
-	/// covers. `${CLAUDE_PLUGIN_DATA}` and `${CLAUDE_PROJECT_DIR}` stay
-	/// variables: the host fills them per data directory and project, so one
-	/// approval holds in every project.
+	/// covers, together with the contents of the plugin files the script
+	/// names ([`PluginLaunch::with_plugin_files`]). `${CLAUDE_PLUGIN_DATA}`
+	/// and `${CLAUDE_PROJECT_DIR}` stay variables: the host fills them per
+	/// data directory and project, so one approval holds in every project.
 	#[must_use]
 	pub fn launch(&self, root: &Path) -> PluginLaunch {
 		let script = self
 			.command
 			.script(|word| expand_plugin_vars(word.clone(), root, None));
 		PluginLaunch::new(PluginLaunchKind::Hook, self.trigger(), Str::new(script), [], [])
+			.with_plugin_files(root)
 	}
 }
 

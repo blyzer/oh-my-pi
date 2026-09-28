@@ -86,10 +86,11 @@ pub fn agent_plugin_paths(
 		.with_command_approvals(plugins.command_approvals.clone()))
 }
 
-/// Every launch a session under the MCP discovery policy `mcp` loads that
-/// the operator has not approved, none of which runs: each installed
-/// plugin's servers and hooks, then the stdio MCP servers of each Agent
-/// Plugins package `agent_plugins` discovers.
+/// Every launch a session loads that the operator has not approved.
+///
+/// None of them runs: each installed plugin's servers and hooks, then the
+/// stdio MCP servers of each Agent Plugins package `agent_plugins`
+/// discovers, as a session under the MCP discovery policy `mcp` loads them.
 ///
 /// What MCP discovery skips under `mcp` is not reported: with project
 /// configuration disabled, neither the project's Agent Plugins packages nor
@@ -202,7 +203,9 @@ pub fn command_approvals(data_dir: &Path) -> CommandApprovals {
 ///
 /// `granted_by` records the approving channel. A later session admits the
 /// launch until the plugin's version or the launch's command, arguments,
-/// environment, working directory, or (for a hook) trigger change.
+/// environment, working directory, (for a hook) trigger, or the contents of
+/// a plugin file it names change. A launch naming a plugin file that cannot
+/// be read is never admitted, approved or not.
 pub fn approve_launch(
 	data_dir: &Path,
 	plugin: &Str,

@@ -65,9 +65,11 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 	crate::mcp::discovery::agent_plugin_launches(paths)
 }
 
-/// Every Agent Plugins stdio launch a session under `settings` would load
-/// for `paths` that the approvals `paths` carries do not admit, so it does
-/// not start. A package MCP discovery skips under `settings` (a project
+/// Every unapproved Agent Plugins stdio launch a session would load.
+///
+/// Those are the launches a session under `settings` loads for `paths` that
+/// the approvals `paths` carries do not admit, so they do not start. A
+/// package MCP discovery skips under `settings` (a project
 /// package while project configuration is disabled) launches nothing and is
 /// not reported.
 #[must_use]
@@ -100,8 +102,9 @@ pub fn plugin_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
 	launches
 }
 
-/// Every process `plugin` declares that a session under `settings` loads:
-/// [`plugin_launches`] without the MCP servers of a plugin whose MCP
+/// Every process `plugin` declares that a session under `settings` loads.
+///
+/// That is [`plugin_launches`] without the MCP servers of a plugin whose MCP
 /// declarations discovery skips (one installed for the project while project
 /// configuration is disabled).
 #[must_use]
