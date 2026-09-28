@@ -18,6 +18,7 @@ import type {
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
+import type { DaemonProjectPresence } from "../launch/presence";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
@@ -163,6 +164,12 @@ export interface InteractiveModeContext {
 	collabController: CollabController;
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
+	/**
+	 * This process's own entry in the project daemon scope, when it registered
+	 * one. Carried here so a local collab room can publish its socket path —
+	 * presence is the only place a sibling process can discover it.
+	 */
+	daemonPresence?: DaemonProjectPresence;
 	collabGuest?: CollabGuestLink;
 	eventController: EventController;
 	eventBus?: EventBus;

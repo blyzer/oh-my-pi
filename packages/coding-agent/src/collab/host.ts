@@ -60,6 +60,7 @@ import {
 	shrinkReplicatedEntry,
 	shrinkReplicatedEvent,
 } from "./replication-shrink";
+import type { CollabTransport } from "./transport";
 
 /** Events that change the footer state guests render. */
 const STATE_TRIGGER_EVENTS: Record<string, true> = {
@@ -184,7 +185,7 @@ export class CollabHostStoppedError extends Error {
 
 export class CollabHost {
 	#ctx: InteractiveModeContext;
-	#socket: CollabSocket | null = null;
+	#socket: CollabTransport | null = null;
 	#link = "";
 	#webLink = "";
 	#viewLink = "";
@@ -233,6 +234,8 @@ export class CollabHost {
 	/** The in-flight or finished `stop()`; concurrent callers share it. */
 	#stopDone: Promise<void> | undefined;
 	#stopped = false;
+	/** Set while a local room's endpoint is announced in presence; cleared on teardown. */
+	#publishedSocketPath: string | null = null;
 
 	constructor(ctx: InteractiveModeContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
@@ -379,9 +382,68 @@ export class CollabHost {
 		const key = await importRoomKey(rawKey);
 		if (this.ending) throw new CollabHostStoppedError("collab host stopped before connecting");
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
-		this.#socket = socket;
+		await this.#attach(new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key }), firstOpen, true);
+	}
 
+	/**
+	 * Share this session over a transport that is already confined to one
+	 * machine — a unix socket, a pipe, an in-process pair.
+	 *
+	 * Deliberately NOT a branch inside {@link start}: every line start() runs
+	 * before the socket exists is relay-shaped. `formatCollabLink` renders a
+	 * `wss://…/r/<room>.<key>` URL and `parseCollabLink` reads it straight back,
+	 * and `normalizeRelayOrigin` rejects any scheme that is not ws/wss/http/https,
+	 * so a socket path cannot make the round trip. The room key is equally
+	 * relay-shaped: it exists to keep the relay operator out of the plaintext,
+	 * and there is no operator in the middle of a unix socket whose permissions
+	 * already bound who may connect.
+	 *
+	 * What a local room still needs is the CAPABILITY split, so a caller can be
+	 * handed observation without control. That is the write token, and it is
+	 * minted here exactly as the relay path mints it — `#verifyWriteToken`
+	 * cannot tell the two paths apart, which is the point.
+	 *
+	 * There are no links to render, so `link`/`webLink`/`viewLink` stay empty
+	 * and the status segment reports a local room instead.
+	 */
+	async startLocal(transport: CollabTransport, socketPath?: string): Promise<Uint8Array> {
+		if (this.ending) throw new CollabHostStoppedError("collab host already stopped");
+		const writeToken = generateWriteToken();
+		this.#writeToken = writeToken;
+		const firstOpen = Promise.withResolvers<void>();
+		firstOpen.promise.catch(() => {});
+		this.#abortStart = firstOpen.reject;
+		await this.#attach(transport, firstOpen, false);
+		// Announce the endpoint only after the transport is listening and the
+		// taps are installed, so a peer that reads the record and connects
+		// immediately finds a room that can already answer.
+		// A fatal close or a stop() between the open and here already ran
+		// teardown; publishing now would advertise a socket nobody listens on.
+		if (socketPath && !this.ending) {
+			this.#publishedSocketPath = socketPath;
+			await this.#ctx.daemonPresence?.update({
+				collabSocket: socketPath,
+				sessionId: this.#sessionId,
+				sessionFile: this.#ctx.sessionManager.getSessionFile() ?? undefined,
+			});
+		}
+		return writeToken;
+	}
+
+	/**
+	 * Wire a connected-or-connecting transport to this session and install the taps.
+	 *
+	 * `firstOpen` is minted by the caller before its first await and exposed as
+	 * `#abortStart`, so a `stop()` that overtakes startup rejects the wait here.
+	 * `publishToRegistry` is false for a local room: the host registry's `link`
+	 * contract hands out a shareable relay URL, and a local room has none.
+	 */
+	async #attach(
+		socket: CollabTransport,
+		firstOpen: PromiseWithResolvers<void>,
+		publishToRegistry: boolean,
+	): Promise<void> {
+		this.#socket = socket;
 		let opened = false;
 		socket.onOpen = () => {
 			this.#relayConnected = true;
@@ -403,7 +465,7 @@ export class CollabHost {
 				return;
 			}
 			if (willReconnect) {
-				this.#ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
+				this.#ctx.showStatus(`Collab connection lost (${reason}), reconnecting…`, { dim: true });
 			} else {
 				void this.#teardown();
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
@@ -412,10 +474,7 @@ export class CollabHost {
 		};
 		socket.connect();
 
-		const timeout = setTimeout(
-			() => firstOpen.reject(new Error("timed out connecting to relay")),
-			CONNECT_TIMEOUT_MS,
-		);
+		const timeout = setTimeout(() => firstOpen.reject(new Error("timed out connecting")), CONNECT_TIMEOUT_MS);
 		try {
 			await firstOpen.promise;
 		} catch (err) {
@@ -468,6 +527,7 @@ export class CollabHost {
 			this.#scheduleStateBroadcast();
 		};
 		this.#updateStatusSegment();
+		if (!publishToRegistry) return;
 
 		// Publish to the local host registry only after the relay connection
 		// succeeded. Publication failure warns but never breaks hosting (#6099).
@@ -543,6 +603,13 @@ export class CollabHost {
 		// A room that ended on its own (fatal relay close) reaches here without
 		// `#runStop`: leave the public slot before the first await as well.
 		if (this.#ctx.collabHost === this) this.#ctx.collabHost = undefined;
+		// Retract before dropping the taps. A record advertising a socket that no
+		// longer listens sends every future peer into a connect that cannot
+		// succeed, which is strictly worse than no record at all.
+		if (this.#publishedSocketPath) {
+			this.#publishedSocketPath = null;
+			await this.#ctx.daemonPresence?.update({ collabSocket: undefined });
+		}
 		const publication = this.#registryPublication;
 		this.#registryPublication = null;
 		if (publication) {

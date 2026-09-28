@@ -61,7 +61,7 @@ import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
-import { registerDaemonProjectPresence } from "./launch/presence";
+import { type DaemonProjectPresence, registerDaemonProjectPresence } from "./launch/presence";
 import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
@@ -2113,7 +2113,11 @@ export async function runRootCommand(
 		if (isTelemetryExportEnabled()) {
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
-		await daemonPresencePromise;
+		// The handle was previously discarded: the only consumer was the
+		// postmortem cleanup registered inside the factory. It is bound now
+		// because a local collab room has to publish its socket path through it,
+		// and presence is the only place a sibling process can discover one.
+		const daemonPresence: DaemonProjectPresence | undefined = await daemonPresencePromise;
 
 		// Handle CLI --api-key as runtime override (not persisted)
 		if (parsedArgs.apiKey) {
