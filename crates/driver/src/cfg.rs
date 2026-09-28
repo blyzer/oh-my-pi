@@ -513,7 +513,10 @@ mod tests {
 		fs::write(user.join("scout.cfg"), "ai_model @smol\n").unwrap();
 		let files = CfgFiles::with_roots(user, Some(project));
 		let child = omp_con::Ctx::new();
-		omp_agent::AI_FASTMODE.set(&child, true).unwrap();
+		// The parent's seed is the child's inherited layer, beneath the cfgs.
+		omp_agent::AI_FASTMODE
+			.set_in(&child, true, omp_con::Origin::Inherited)
+			.unwrap();
 		let outcome = child.exec_spawn_configs(&files, "scout").unwrap();
 		assert_eq!(outcome.failed, 0);
 		assert!(!omp_agent::AI_FASTMODE.get(&child), "user subagent.cfg ran");

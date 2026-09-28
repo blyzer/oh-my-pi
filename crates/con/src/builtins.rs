@@ -220,13 +220,14 @@ crate::cmd! {
 		ctx.set_value(spec.name, next, SetSource::Script)
 	};
 
-	/// Restores a var to its default.
+	/// Resets a var to the value its scope inherits: removes this scope's
+	/// override (console: the session write; `<agent>.cfg`: the class value;
+	/// `config.cfg`: the archived value) so later changes beneath keep
+	/// flowing. A child falls back to its class, then its parent's value;
+	/// the main session to the user cfg, then the default.
 	reset(var @ "con::var": Str) = |ctx, args| {
 		let name: Str = args.get(0)?;
-		let Some(RegItem::Var(spec)) = ctx.find(name.as_str()) else {
-			return Err(ConError::NotAVar { name });
-		};
-		ctx.set_value(spec.name, (spec.default)(), SetSource::Script)
+		ctx.unset(name.as_str(), args.origin())
 	};
 
 	/// Prints the persistence script (diff from defaults) `writecfg` would

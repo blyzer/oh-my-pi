@@ -29,13 +29,17 @@
 //!   ([`omp_agent::AI_MODEL_INHERIT`]), which outranks `ai_task_model`.
 //! - `@task` (and v1's legacy `pi/task`) followed v1's task role,
 //!   `modelRoles.task`, which the settings step carries to
-//!   `ai_model_roles.task`: such a class gets `ai_model @task`, the v2 role
-//!   reference the child's route resolves through `ai_model_roles`
-//!   ([`crate::discovery::roles::resolve_role_selector`]). Every other role
-//!   reference maps the same way (`pi/slow:high` is `ai_model @slow:high`).
-//!   With no `task` role assigned, v2's catalog resolves `@task` as it does
-//!   `@smol` (a small capable model). Like any class `ai_model`, it outranks
-//!   `ai_task_model`.
+//!   `ai_model_roles.task`. When the v1 settings define that role — the
+//!   profile's own settings for a user agent; the project's `.omp/config.yml`
+//!   or any profile's settings for a project agent — such a class gets
+//!   `ai_model @task`, the v2 role reference the child's route resolves through
+//!   `ai_model_roles` ([`crate::discovery::roles::resolve_role_selector`]).
+//!   When they do not, v1 had no task model to follow and the class gets
+//!   `ai_model inherit`, as for an agent without a model (v2's catalog would
+//!   otherwise resolve `@task` as it does `@smol`); a `:level` suffix becomes
+//!   its `ai_thinking`. Every other role reference maps to its v2 role
+//!   (`pi/slow:high` is `ai_model @slow:high`). Like any class `ai_model`, it
+//!   outranks `ai_task_model`.
 //! - `sv_tools` keeps what v1 advertised to the child: the listed tools
 //!   (`search`/`find` read as `grep`/`glob`, `exec` as `eval` and `bash`), plus
 //!   `task` when the agent may spawn, plus `yield` and `hub`, which v1 added to
@@ -50,11 +54,13 @@
 //! stays: when any v1 profile has a user agent of the project agent's name,
 //! the project cfg ends with `reset <var>` for every class setting only the
 //! user agent's cfg assigns (`ai_model`, `ai_thinking`, `sv_tools`), so the
-//! layered result is the project agent's alone. `reset` restores a convar's
-//! declared default; for `ai_model` an empty value means no class model
-//! ([`crate::subagent::settings::child_ctx`]). A project rule already shadows
-//! the user rule of its name; a project agent with an empty body writes a
-//! bodiless, unlisted rule of that name, so the user body is not carried.
+//! layered result is the project agent's alone. Inside a class cfg, `reset`
+//! drops the class value the user cfg wrote, so the child keeps what it
+//! inherits from the spawning session (its `ai_task_model`, else its model,
+//! for `ai_model`; see [`crate::subagent::settings::child_ctx`]). A project
+//! rule already shadows the user rule of its name; a project agent with an
+//! empty body writes a bodiless, unlisted rule of that name, so the user body
+//! is not carried.
 //!
 //! # What is reported
 //!
@@ -87,10 +93,12 @@ use super::{
 	report::{Attention, NotMigratable, SkipReason},
 	step::atomic_replace,
 };
-use crate::discovery::rules::split_frontmatter;
+use crate::{discovery::rules::split_frontmatter, legacy_settings::LegacyValue};
 
 /// The project configuration directory, v1's and v2's alike.
 const PROJECT_DIR: &str = ".omp";
+/// v1's project settings file inside [`PROJECT_DIR`].
+const PROJECT_SETTINGS_FILE: &str = "config.yml";
 /// v1's agent directory name, under the agent directory or [`PROJECT_DIR`].
 const AGENTS_DIR: &str = "agents";
 /// Native user rules, relative to the v2 profile configuration root.
@@ -113,6 +121,8 @@ const V1_SENTINEL_NAMES: &[&str] = &["main", "sub"];
 const SESSION_MODELS: &[&str] = &["default", "@default", "*", "pi/default"];
 /// v1's legacy role prefix; `@` is the current one.
 const V1_LEGACY_ROLE_PREFIX: &str = "pi/";
+/// The v1 role `@task` names, `modelRoles.task`.
+const TASK_ROLE: &str = "task";
 
 /// v1's canonical tool names (`BUILTIN_TOOL_NAMES` + `HIDDEN_TOOL_NAMES`),
 /// which v1 matched case-insensitively; other names kept their spelling.
@@ -211,6 +221,7 @@ pub(super) fn import_agents(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, Im
 		cfg_dir:   config_dir.clone(),
 		rules_dir: config_dir.join(USER_RULES_DIR),
 		replaces:  BTreeMap::new(),
+		task_role: TaskRole::in_settings(cx.locate(V1Item::Settings).as_deref()),
 	};
 	let source = cx.locate(V1Item::Agents);
 	let (entries, failed) = match &source {
@@ -256,6 +267,7 @@ pub fn import_project_agents(
 	}
 	let destination = Destination {
 		rules_dir: root.join(PROJECT_RULES_DIR),
+		task_role: project_task_role(&root, v1),
 		cfg_dir:   root,
 		replaces:  user_classes(v1),
 	};
@@ -267,6 +279,21 @@ pub fn import_project_agents(
 		entries.push(failure(&source, error));
 	}
 	entries
+}
+
+/// Whether a project agent's `@task` had a task role in v1: the project's
+/// `.omp/config.yml`, or the settings of any v1 profile it may have run
+/// under, assigns `modelRoles.task`.
+fn project_task_role(project_omp: &Path, v1: &V1Source) -> TaskRole {
+	let profiles = v1.profiles().unwrap_or_default();
+	let settings = std::iter::once(project_omp.join(PROJECT_SETTINGS_FILE))
+		.chain(
+			std::iter::once(None)
+				.chain(profiles.iter().map(|name| Some(name.as_str())))
+				.filter_map(|profile| v1.layout(profile).locate(V1Item::Settings)),
+		)
+		.collect::<Vec<_>>();
+	TaskRole::in_settings(settings.iter().map(PathBuf::as_path))
 }
 
 /// Where `project`'s agents import marker lives: under the v2 state root,
@@ -300,6 +327,44 @@ struct Destination {
 	/// For project agents: what the user agents of each name write, which a
 	/// project agent of that name resets. Empty for user agents.
 	replaces:  BTreeMap<Str, Written>,
+	/// Whether the v1 settings these agents ran under define `modelRoles.task`.
+	task_role: TaskRole,
+}
+
+/// Whether v1 had a task role (`modelRoles.task`) for `@task` to follow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskRole {
+	/// Assigned: `@task` keeps the role reference.
+	Defined,
+	/// Unassigned: `@task` followed the session model.
+	Undefined,
+}
+
+impl TaskRole {
+	/// Whether any of the v1 settings files at `paths` assigns
+	/// `modelRoles.task` (a non-empty selector or fallback chain). An
+	/// unreadable file counts as not assigning it; the settings step reports
+	/// it.
+	fn in_settings<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Self {
+		let defined = paths.into_iter().any(|path| {
+			crate::legacy_settings::read_yaml_document(path).is_ok_and(|document| {
+				document
+					.get("modelRoles")
+					.and_then(LegacyValue::as_map)
+					.and_then(|roles| roles.get(TASK_ROLE))
+					.is_some_and(|task| match task {
+						LegacyValue::Str(selector) => !selector.trim().is_empty(),
+						LegacyValue::List(chain) => !chain.is_empty(),
+						_ => false,
+					})
+			})
+		});
+		if defined {
+			Self::Defined
+		} else {
+			Self::Undefined
+		}
+	}
 }
 
 /// What one converted agent writes: the class convars its cfg assigns and
@@ -354,9 +419,11 @@ fn user_classes(v1: &V1Source) -> BTreeMap<Str, Written> {
 	let profiles = v1.profiles().unwrap_or_default();
 	let mut classes = BTreeMap::<Str, Written>::new();
 	for profile in std::iter::once(None).chain(profiles.iter().map(|name| Some(name.as_str()))) {
-		let Some(dir) = v1.layout(profile).locate(V1Item::Agents) else {
+		let layout = v1.layout(profile);
+		let Some(dir) = layout.locate(V1Item::Agents) else {
 			continue;
 		};
+		let task_role = TaskRole::in_settings(layout.locate(V1Item::Settings).as_deref());
 		let Ok(files) = agent_files(&dir) else {
 			continue;
 		};
@@ -371,7 +438,7 @@ fn user_classes(v1: &V1Source) -> BTreeMap<Str, Written> {
 			if !seen.insert(agent.name.clone()) {
 				continue;
 			}
-			let Ok(converted) = convert(&agent, &roster, None) else {
+			let Ok(converted) = convert(&agent, &roster, None, task_role) else {
 				continue;
 			};
 			let class = classes.entry(agent.name).or_default();
@@ -607,7 +674,8 @@ fn import_file(
 		));
 		return Ok(());
 	}
-	let converted = convert(&agent, roster, destination.replaces.get(&name).copied())?;
+	let converted =
+		convert(&agent, roster, destination.replaces.get(&name).copied(), destination.task_role)?;
 	let cfg_path = destination.cfg_dir.join(format!("{name}.cfg"));
 	let rule_path = destination
 		.rules_dir
@@ -659,6 +727,7 @@ fn convert(
 	agent: &V1Agent<'_>,
 	roster: &Roster<'_>,
 	replaces: Option<Written>,
+	task_role: TaskRole,
 ) -> Result<Converted, AgentsImportError> {
 	let V1Agent { name, description, header, body } = agent;
 	let mut notes = Vec::new();
@@ -674,10 +743,11 @@ fn convert(
 	let mut model_thinking = None;
 	let patterns = header.model.as_ref().and_then(OneOrMany::entries);
 	if let Some((first, fallbacks)) = patterns.as_deref().and_then(<[&str]>::split_first) {
-		match map_model(first) {
-			ModelMapping::Session => {
+		match map_model(first, task_role) {
+			ModelMapping::Session { thinking } => {
 				let _ = writeln!(cfg, "ai_model {}", omp_agent::AI_MODEL_INHERIT);
 				written.model = true;
+				model_thinking = thinking;
 			},
 			ModelMapping::Selector { selector, thinking } => {
 				let _ = writeln!(cfg, "ai_model {}", Value::Str(selector));
@@ -821,8 +891,9 @@ fn class_rule(name: &Str, always_apply: bool, body: &str) -> Result<String, Agen
 /// A v1 `model` pattern in v2 terms.
 #[derive(Debug, Eq, PartialEq)]
 enum ModelMapping {
-	/// Follows the session model: `ai_model inherit`.
-	Session,
+	/// Follows the session model: `ai_model inherit`, and the thinking level
+	/// a `:level` suffix asked for.
+	Session { thinking: Option<&'static str> },
 	/// An `ai_model` selector, and the thinking level a `:off` suffix asked
 	/// for (v2 selectors carry no `:off`).
 	Selector { selector: Str, thinking: Option<&'static str> },
@@ -832,11 +903,12 @@ enum ModelMapping {
 
 /// Maps one v1 model pattern through v2's selector grammar: `@role` (or
 /// v1's legacy `pi/role`) keeps a built-in v2 role, `*` is the default role,
-/// and anything else must parse as a v2 selector.
-fn map_model(pattern: &str) -> ModelMapping {
+/// and anything else must parse as a v2 selector. `@task` keeps the role only
+/// when v1 assigned it (`task_role`); otherwise it follows the session model.
+fn map_model(pattern: &str, task_role: TaskRole) -> ModelMapping {
 	let pattern = pattern.trim();
 	if SESSION_MODELS.contains(&pattern) {
-		return ModelMapping::Session;
+		return ModelMapping::Session { thinking: None };
 	}
 	let (base, thinking) = match pattern.rsplit_once(':') {
 		Some((base, "off")) => (base, Some("off")),
@@ -867,6 +939,15 @@ fn map_model(pattern: &str) -> ModelMapping {
 			Err(_) => ModelMapping::Unmappable,
 		};
 	};
+	if role == TASK_ROLE && task_role == TaskRole::Undefined {
+		let thinking = match level.map(str::parse::<ReasoningEffort>) {
+			None => thinking,
+			Some(Ok(effort)) => Some(effort.into()),
+			// `auto` or an unknown level: the session's own thinking applies.
+			Some(Err(_)) => None,
+		};
+		return ModelMapping::Session { thinking };
+	}
 	let level_valid = level.is_none_or(|level| {
 		level == "auto"
 			|| level

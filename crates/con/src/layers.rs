@@ -24,12 +24,24 @@ impl LayerId {
 }
 
 /// Provenance and destination of a convar write.
+///
+/// Each variant names the layer a write commits to. Effective values resolve
+/// innermost first — engagement, session, class, inherited, archive, then the
+/// registration default — and `reset` removes a variable from the layer its
+/// statement commits to, so the value falls through to the next one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Origin {
-	/// Registration-time value.
+	/// Registration-time value. As a write destination it clears the archive
+	/// and session layers.
 	Default,
-	/// Profile value loaded from `config.cfg`.
+	/// Profile value loaded from `config.cfg` (user, then project overlay).
 	Archive,
+	/// Value a child scope inherits from its parent's live picture at spawn
+	/// (ADR 0013 seed).
+	Inherited,
+	/// Value the scope's agent class assigns: `subagent.cfg`, `<agent>.cfg`,
+	/// and the spawner's explicit route.
+	Class,
 	/// Durable value in the session tree.
 	Session,
 	/// Command-stream value, committed to the session layer.
@@ -112,6 +124,8 @@ pub struct EngagementLayer {
 #[derive(Default)]
 pub struct Layers {
 	pub(crate) archive:     FastHashMap<Str, Value>,
+	pub(crate) inherited:   FastHashMap<Str, Value>,
+	pub(crate) class:       FastHashMap<Str, Value>,
 	pub(crate) session:     FastHashMap<Str, Value>,
 	pub(crate) engagements: Vec<EngagementLayer>,
 	next_id:                u64,
@@ -137,6 +151,27 @@ impl Layers {
 			.iter()
 			.rev()
 			.find_map(|layer| layer.values.get(name))
+	}
+
+	/// The layered value of `name`, innermost first; `None` means the
+	/// registration default applies.
+	pub(crate) fn effective(&self, name: &str) -> Option<&Value> {
+		self
+			.engagement_value(name)
+			.or_else(|| self.session.get(name))
+			.or_else(|| self.class.get(name))
+			.or_else(|| self.inherited.get(name))
+			.or_else(|| self.archive.get(name))
+	}
+
+	/// The value persistence records for `name`: [`Self::effective`] without
+	/// the inherited and class layers, which a scope receives from its parent
+	/// and agent class rather than owning.
+	pub(crate) fn persisted(&self, name: &str) -> Option<&Value> {
+		self
+			.engagement_value(name)
+			.or_else(|| self.session.get(name))
+			.or_else(|| self.archive.get(name))
 	}
 
 	pub(crate) fn shadow(&self, name: &str) -> Option<(LayerId, Str)> {
