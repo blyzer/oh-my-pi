@@ -629,6 +629,13 @@ impl Launch {
 			)
 	}
 
+	/// Said once after the launch names its blocked plugin commands: how to
+	/// load a plugin from a local directory for one session instead of
+	/// installing it. `None` when nothing is blocked.
+	pub(crate) fn plugin_dir_hint(&self) -> Option<&'static str> {
+		(!self.blocked_plugin_commands.is_empty()).then_some(PLUGIN_DIR_HINT)
+	}
+
 	/// A leading `/skill:<name>` positional message expanded through the same
 	/// discovered skill snapshot as the interactive console.
 	pub(crate) fn initial_skill_prompt(&self) -> Option<omp_journal::data::SkillPrompt> {
@@ -964,6 +971,15 @@ fn launch_notice(ctx: &omp_con::Ctx, text: String) {
 	}
 }
 
+/// How to load a plugin from a local directory for development or one-off
+/// use: `--plugin-dir` loads an Agent Plugins package (or a native extension
+/// root) for one invocation, and its commands are approved like an installed
+/// plugin's.
+const PLUGIN_DIR_HINT: &str =
+	"To load a plugin from a local directory for one session instead (development or one-off use), \
+	 start omp with `--plugin-dir <path>` naming an Agent Plugins package; its commands are \
+	 approved the same way (`omp ext trust <name> --plugin-dir <path> --approve-commands`)";
+
 /// Session-scoped launch overrides, applied after the journal opened.
 fn apply_launch_session(
 	ctx: &omp_con::Ctx,
@@ -1080,6 +1096,9 @@ pub(crate) async fn run(
 	// named once per plugin and event.
 	for warning in launch.plugin_warnings() {
 		launch_notice(ctx, warning.to_string());
+	}
+	if let Some(hint) = launch.plugin_dir_hint() {
+		launch_notice(ctx, hint.to_owned());
 	}
 	// Composing the kernel refreshed runtime model discovery, after the
 	// launch snapshot was read, and settled the remembered default against
@@ -1667,6 +1686,12 @@ mod tests {
 			"{}",
 			warnings[1]
 		);
+		// Once, after them: how to load a plugin from a local directory.
+		let hint = launch
+			.plugin_dir_hint()
+			.expect("a blocked command names the local-directory route");
+		assert!(hint.contains("`--plugin-dir <path>`"), "{hint}");
+		assert!(hint.contains("--approve-commands"), "{hint}");
 	}
 
 	#[tokio::test]

@@ -96,6 +96,9 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	for warning in launch.plugin_warnings() {
 		let _ = writeln!(report, "warning: {warning}");
 	}
+	if let Some(hint) = launch.plugin_dir_hint() {
+		let _ = writeln!(report, "hint: {hint}");
+	}
 	if !report.is_empty() {
 		let mut stderr = tokio::io::stderr();
 		stderr
