@@ -60,6 +60,15 @@ Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
 merge.
 
+On the push that a merge makes to `omp2`, `Pushed tree already verified` checks
+whether the merge commit's tree is identical to the merged pull request's head
+and whether that head's `Rust workspace and acceptance proofs` run passed. If
+both are true, the macOS job is skipped rather than run a second time on the
+one runner. With "Require branches to be up to date" off, the trees match only
+when the pull request had the current base merged in before it was merged;
+otherwise the push runs the full job as before. It runs only on pushes, so do
+not require it either.
+
 `CI` only runs when a pull request touches the paths listed in `ci.yml`, so a
 pull request that changes only other files (for example, most of `docs/`)
 never reports these checks. With them required, it waits forever. Either merge

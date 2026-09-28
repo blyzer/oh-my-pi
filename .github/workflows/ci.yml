@@ -109,6 +109,58 @@ jobs:
       - name: Check license policy and release notices
         run: just license-check
 
+  # A push to omp2 or main is almost always a pull request's merge commit.
+  # When that pull request's head already contained the base, the merge
+  # commit has exactly the tree the pull request's own `rust` run just
+  # proved, and running it again only occupies the macOS runner for another
+  # 8-15 minutes per merge. This job finds the merged pull request, compares
+  # the pushed tree with its head's, and reads the head's latest `rust` check
+  # run. `rust` skips only on an identical tree whose run concluded success;
+  # anything else (a direct push, a head behind its base, an API error, a
+  # failure of this job) leaves `verified` unset and `rust` runs as before.
+  push_verified:
+    name: Pushed tree already verified
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    outputs:
+      verified: ${{ steps.tree.outputs.verified }}
+    steps:
+      - name: Match the pushed tree to a green pull request run
+        id: tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          CHECK: Rust workspace and acceptance proofs
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+            --jq "[.[] | select(.merge_commit_sha == \"$SHA\")][0].head.sha // empty")
+          if [ -z "$head" ]; then
+            echo "No pull request was merged as $SHA; running the macOS job"
+            exit 0
+          fi
+          pushed=$(gh api "repos/$REPO/commits/$SHA" --jq .commit.tree.sha)
+          tested=$(gh api "repos/$REPO/commits/$head" --jq .commit.tree.sha)
+          if [ "$pushed" != "$tested" ]; then
+            echo "Pushed tree $pushed differs from head $head's $tested; running the macOS job"
+            exit 0
+          fi
+          encoded=$(jq -rn --arg name "$CHECK" '$name | @uri')
+          conclusion=$(gh api "repos/$REPO/commits/$head/check-runs?check_name=$encoded&filter=latest" \
+            --jq '[.check_runs[] | select(.app.slug == "github-actions")][0].conclusion // empty')
+          if [ "$conclusion" != "success" ]; then
+            echo "Head $head's '$CHECK' concluded '${conclusion:-none}'; running the macOS job"
+            exit 0
+          fi
+          echo "Tree $pushed already passed '$CHECK' on $head; skipping the macOS job"
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+
   rust:
     name: Rust workspace and acceptance proofs
     # Deliberately NOT gated on runtime_spec. That check is cheap and reports
@@ -119,7 +171,10 @@ jobs:
     # conclusion and can still be a required check in branch protection.
     # The license policy is the same kind of independent question and is not
     # a precondition either; waiting on it held this job back five minutes.
-    needs: format
+    # On a push, push_verified may show the tree already passed this job in
+    # its pull request; a skipped or failed push_verified never skips it.
+    needs: [format, push_verified]
+    if: ${{ !cancelled() && needs.format.result == 'success' && needs.push_verified.outputs.verified != 'true' }}
     # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
     # somewhere else. Set it to a JSON label array to send this job to a
     # self-hosted Apple silicon machine, which is the only way to give it more
