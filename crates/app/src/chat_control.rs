@@ -1581,10 +1581,19 @@ impl<C: omp_agent::Inference> Controller<C> {
 				self.reply(Severity::Info, "✓ New session started");
 			},
 			HostCommand::SessionOpen { path } => {
-				let next = self.home.open(&path).map_err(|error| miette!(error))?;
-				let name = display_name(&next);
-				self.switch_to(next, "resume").await?;
-				self.reply(Severity::Info, format!("Resumed session {name}"));
+				// Picking the session this chat already holds (a v1 row whose
+				// import is the open journal, say) must not contend for its
+				// writer lock.
+				let current = fs::canonicalize(self.session.journal_path()).ok();
+				if current.is_some() && fs::canonicalize(&path).ok() == current {
+					let name = display_name(&self.session);
+					self.reply(Severity::Info, format!("Already in session {name}"));
+				} else {
+					let next = self.home.open(&path).map_err(|error| miette!(error))?;
+					let name = display_name(&next);
+					self.switch_to(next, "resume").await?;
+					self.reply(Severity::Info, format!("Resumed session {name}"));
+				}
 			},
 			HostCommand::ForeignSessionImport { source, path } => {
 				self

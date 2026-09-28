@@ -520,10 +520,10 @@ pub(super) fn production_url_resolvers(
 				"session artifacts by ordinal or durable digest",
 			)
 			.with_capabilities(true, true, true),
-			UrlResolver::Artifact(
-				artifact::ArtifactUrlResolver::open(blob_store.clone(), session_id)
-					.expect("artifact catalog opens with the environment blob store"),
-			),
+			UrlResolver::Artifact(artifact::ArtifactUrlResolver::open(
+				blob_store.clone(),
+				sessions_dir.clone(),
+			)),
 		)
 		.expect("artifact URL resolver is unique");
 	builder

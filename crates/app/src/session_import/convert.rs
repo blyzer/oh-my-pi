@@ -11,7 +11,7 @@ use omp_journal::{
 	EntryId,
 	data::{Attachment, TurnReceipt},
 };
-use omp_session::{ComponentRegistry, Session};
+use omp_session::{ComponentRegistry, Session, import};
 use omp_tool::Part as ToolPart;
 use serde_json::{Map, Value, json, value::RawValue};
 
@@ -48,10 +48,12 @@ struct ImportState {
 pub(super) struct Omp1Context<'a> {
 	/// The journal's final id, owner of its children's jobs.
 	pub id:        &'a str,
+	/// The v1 session id the driver indexes the import by.
+	pub source_id: &'a str,
 	/// v1 blob store resolving `blob:sha256:<hex>` images.
 	pub blobs:     Option<&'a Path>,
-	/// The session's artifact directory.
-	pub artifacts: Option<&'a Path>,
+	/// v1 artifacts the driver copied into the project blob store.
+	pub artifacts: &'a [omp_driver::v1_import::V1Artifact],
 	/// Converted subagent journals to link as jobs.
 	pub children:  &'a [omp_driver::v1_import::V1ChildJob],
 }
@@ -69,6 +71,7 @@ pub(super) fn import_v1(
 ) -> miette::Result<usize> {
 	import(ForeignFormat::Omp1, conversion.source, conversion.destination, &Omp1Context {
 		id:        conversion.id,
+		source_id: conversion.source_id,
 		blobs:     conversion.blobs,
 		artifacts: conversion.artifacts,
 		children:  conversion.children,
@@ -95,6 +98,11 @@ fn import(
 	if format == ForeignFormat::Omp1 {
 		omp1::migrate(&mut records);
 		omp1::metadata(&records, &mut metadata);
+		// The driver's index recognizes the import by this id, which it
+		// derives exactly as it listed the session.
+		if !v1.source_id.is_empty() {
+			metadata.id = Some(Str::new(v1.source_id));
+		}
 	}
 
 	let mut session =
@@ -131,17 +139,17 @@ fn import(
 			ops: vec![
 				Op::Set {
 					h:     meta,
-					prop:  PropKey::Custom(Str::new_static("import-source")),
+					prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE)),
 					value: DomValue::Str(Str::new(source.to_string_lossy())),
 				},
 				Op::Set {
 					h:     meta,
-					prop:  PropKey::Custom(Str::new_static("import-format")),
+					prop:  PropKey::Custom(Str::new_static(import::IMPORT_FORMAT)),
 					value: DomValue::Str(Str::new(format_name.as_str())),
 				},
 				Op::Set {
 					h:     meta,
-					prop:  PropKey::Custom(Str::new_static("import-source-blob")),
+					prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE_BLOB)),
 					value: DomValue::Str(source_address.clone()),
 				},
 				Op::Ins {
@@ -152,7 +160,7 @@ fn import(
 						.with_prop(PropId::Blob, DomValue::Str(source_address))
 						.with_prop(PropId::Mime, DomValue::Str(source_blob.mime))
 						.with_prop(
-							PropKey::Custom(Str::new_static("size")),
+							PropKey::Custom(Str::new_static(import::ARTIFACT_SIZE)),
 							DomValue::Int(i64::try_from(source_blob.blob.size).unwrap_or(i64::MAX)),
 						),
 				},
@@ -170,14 +178,14 @@ fn import(
 	if let Some(id) = &metadata.id {
 		metadata_ops.push(Op::Set {
 			h:     meta,
-			prop:  PropKey::Custom(Str::new_static("import-source-id")),
+			prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE_ID)),
 			value: DomValue::Str(id.clone()),
 		});
 	}
 	if let Some(cwd) = &metadata.cwd {
 		metadata_ops.push(Op::Set {
 			h:     meta,
-			prop:  PropKey::Custom(Str::new_static("import-source-cwd")),
+			prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE_CWD)),
 			value: DomValue::Str(cwd.clone()),
 		});
 	}
@@ -190,6 +198,10 @@ fn import(
 				ops: metadata_ops,
 			})
 			.into_diagnostic()?;
+	}
+	if format == ForeignFormat::Omp1 {
+		// Before the transcript, so every branch of it sees the mapping.
+		omp1::artifacts(&mut session, v1.artifacts)?;
 	}
 	let base = head(&session)?;
 	let (model, provider, route) = match format {

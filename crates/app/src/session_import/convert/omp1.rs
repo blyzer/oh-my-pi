@@ -18,7 +18,7 @@ use std::{borrow::Cow, fmt::Write as _, fs, path::Path};
 
 use miette::{IntoDiagnostic as _, miette};
 use omp_core::{FastHashMap, Str, base64, sf};
-use omp_dom::{KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value as DomValue};
+use omp_dom::{KnownTag, Op, PropId, PropKey, Txn, Value as DomValue};
 use omp_journal::{EntryId, data::Compaction};
 use omp_session::{Session, components::jobs};
 use serde_json::{Map, Value, json};
@@ -122,8 +122,8 @@ pub(super) fn metadata(records: &[SourceRecord], metadata: &mut SourceMetadata) 
 	}
 }
 
-/// Replays the entry tree onto `session`, then retains the session's
-/// artifacts and links its converted subagents.
+/// Replays the entry tree onto `session`, then links its converted
+/// subagents.
 pub(super) fn import(
 	session: &mut Session,
 	records: &[SourceRecord],
@@ -186,7 +186,6 @@ pub(super) fn import(
 		}
 		tails.insert(id, head(session)?);
 	}
-	artifacts(session, v1.artifacts)?;
 	children(session, v1)
 }
 
@@ -472,44 +471,32 @@ fn execution_text(role: &str, message: &Map<String, Value>) -> String {
 	text
 }
 
-/// Retains every file of the session's artifact directory (spilled tool
-/// output, agent outputs) in the journal store, each named by a
-/// `foreign-artifact` metadata node. Subagent transcripts are children, not
-/// artifacts.
-fn artifacts(session: &mut Session, directory: Option<&Path>) -> miette::Result<()> {
-	let Some(directory) = directory else {
-		return Ok(());
-	};
-	let mut files = Vec::new();
-	for entry in fs::read_dir(directory).into_diagnostic()? {
-		let path = entry.into_diagnostic()?.path();
-		if path.is_file() && path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-			files.push(path);
-		}
-	}
-	files.sort();
-	for path in files {
-		let bytes = fs::read(&path).into_diagnostic()?;
-		let mime = match path.extension().and_then(|value| value.to_str()) {
+/// Names every v1 artifact the driver copied into the project blob store
+/// (spilled tool output, agent outputs) as a `<meta><foreign-artifact>`, with
+/// the id v1's `artifact://<id>` resolved to
+/// ([`omp_session::import::foreign_artifact`]). Journaled text keeps v1's
+/// URIs; the environment's `artifact://` resolver maps them through these
+/// nodes.
+pub(super) fn artifacts(
+	session: &mut Session,
+	artifacts: &[omp_driver::v1_import::V1Artifact],
+) -> miette::Result<()> {
+	for artifact in artifacts {
+		let mime = match Path::new(artifact.name.as_str())
+			.extension()
+			.and_then(|value| value.to_str())
+		{
 			Some("log" | "md" | "txt") => "text/plain",
 			Some("json") => "application/json",
 			_ => "application/octet-stream",
 		};
-		let attachment = session.store_attachment(mime, &bytes).into_diagnostic()?;
-		let address = sf!("artifact://sha256/{}", attachment.blob.to_hex().as_str());
-		let name = path
-			.file_name()
-			.map(|name| Str::new(name.to_string_lossy()))
-			.unwrap_or_default();
+		let node = omp_session::import::foreign_artifact(
+			artifact.name.clone(),
+			artifact.blob,
+			Str::new_static(mime),
+			artifact.id,
+		);
 		let meta = session.dom().meta();
-		let node = NodeSpec::new(Tag::Custom(Str::new_static("foreign-artifact")))
-			.with_prop(PropId::Name, DomValue::Str(name))
-			.with_prop(PropId::Blob, DomValue::Str(address))
-			.with_prop(PropId::Mime, DomValue::Str(attachment.mime))
-			.with_prop(
-				PropKey::Custom(Str::new_static("size")),
-				DomValue::Int(i64::try_from(attachment.blob.size).unwrap_or(i64::MAX)),
-			);
 		let cause = head(session)?;
 		session
 			.patch(Txn {
@@ -567,7 +554,7 @@ fn children(session: &mut Session, v1: &Omp1Context<'_>) -> miette::Result<()> {
 					},
 					Op::Set {
 						h:     handle,
-						prop:  PropKey::Custom(Str::new_static("import-source-id")),
+						prop:  PropKey::Custom(Str::new_static(omp_session::import::IMPORT_SOURCE_ID)),
 						value: DomValue::Str(child.source_id.clone()),
 					},
 				],

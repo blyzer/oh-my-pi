@@ -155,6 +155,29 @@ impl Journal {
 		decode_committed(&bytes).map(|(entries, _)| entries)
 	}
 
+	/// Reads the committed entries within the first `limit` bytes of a
+	/// journal, without taking the writer lock.
+	///
+	/// A frame the limit cuts through is dropped exactly like a torn tail, so
+	/// the result is always a prefix of what [`Self::scan`] returns. Indexes
+	/// that only need facts a journal records when it is created (its genesis
+	/// and creation-time `<meta>`) read this much instead of the whole
+	/// history.
+	///
+	/// # Errors
+	///
+	/// Returns a typed error for I/O, malformed complete frames, invalid
+	/// journal structure, or invalid branch links within the prefix.
+	pub fn scan_prefix(path: impl AsRef<Path>, limit: u64) -> Result<Vec<Entry>, JournalError> {
+		let file = File::open(path)?;
+		let capacity = file
+			.metadata()
+			.map_or(limit, |metadata| metadata.len().min(limit));
+		let mut bytes = Vec::with_capacity(usize::try_from(capacity).unwrap_or_default());
+		io::Read::read_to_end(&mut io::Read::take(file, limit), &mut bytes)?;
+		decode_committed(&bytes).map(|(entries, _)| entries)
+	}
+
 	/// Appends and durably commits one entry.
 	///
 	/// # Errors

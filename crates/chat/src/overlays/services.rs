@@ -526,6 +526,10 @@ pub struct ForeignSessionRow {
 	pub messages:      u32,
 	/// First user message used for filtering and untitled rows.
 	pub first_message: Option<Str>,
+	/// The native journal an earlier import made from this transcript, when
+	/// the source tracks one (omp v1). The picker marks the row; picking it
+	/// reopens that journal instead of converting again.
+	pub imported:      Option<PathBuf>,
 }
 
 /// One on-disk session.

@@ -502,7 +502,8 @@ mod omp1 {
 		let child_path = journal.with_file_name(format!("{id}.oms"));
 		let child = Session::open(&child_path, ComponentRegistry::standard()).expect("child");
 		assert_eq!(omp_app::print_mode::transcript_text(child.dom()), "child result\n");
-		// The spilled output is retained in the journal store and named.
+		// The spilled output is copied into the project blob store and named,
+		// with the id v1 addressed it by.
 		let artifact = tagged(dom, &Tag::Custom(Str::new_static("foreign-artifact")));
 		assert_eq!(artifact.len(), 1);
 		assert_eq!(
@@ -511,6 +512,80 @@ mod omp1 {
 				.and_then(DomValue::as_str),
 			Some("0.bash.log")
 		);
+		assert_eq!(custom(dom, artifact[0], "v1-artifact"), Some(&DomValue::Int(0)));
+	}
+
+	/// The project blob store of the bucket `journal` landed in.
+	fn project_store(journal: &Path) -> omp_journal::blob::BlobStore {
+		let state = journal
+			.parent()
+			.and_then(Path::parent)
+			.expect("<state>/sessions/<id>.oms");
+		omp_journal::blob::BlobStore::open(omp_env::project_state::blob_store(state))
+			.expect("project blob store")
+	}
+
+	#[test]
+	fn v1_artifact_uris_stay_verbatim_and_map_to_the_copied_bytes() {
+		let tree = Tree::new();
+		let spilled = b"full output line 1\nfull output line 2\n";
+		let parent = tree.transcript("spill", &[
+			tree.header("spill"),
+			user("u1", None, "run the build"),
+			message("a1", Some("u1"), json!({"role": "assistant", "content": [{"type": "toolCall", "id": "call-1", "name": "bash", "arguments": {"command": "make"}}], "api": "anthropic-messages", "provider": "anthropic", "model": "claude-opus-4-5", "stopReason": "toolUse", "timestamp": 2})),
+			message("t1", Some("a1"), json!({"role": "toolResult", "toolCallId": "call-1", "toolName": "bash", "content": [{"type": "text", "text": "full output line 2\n[raw output: artifact://0]"}], "isError": false, "timestamp": 3})),
+			assistant("a2", Some("t1"), "see artifact://0 and the lost artifact://4"),
+		]);
+		let artifacts = parent.with_extension("");
+		fs::create_dir_all(&artifacts).expect("artifact dir");
+		fs::write(artifacts.join("0.bash.log"), spilled).expect("artifact");
+		write_lines(&artifacts.join("0-Task.jsonl"), &[
+			json!({"type": "session", "version": 3, "id": "task", "timestamp": "2026-01-02T03:05:00.000Z", "cwd": tree.project}),
+			assistant("c1", None, "the parent's artifact://0"),
+		]);
+		let pair = tree.pair();
+
+		let imported =
+			import_session(&pair.target, &pair.source, &parent, &V1Converter).expect("import");
+
+		// A missing artifact is reported, not fatal.
+		assert_eq!(imported.missing_artifacts, [omp_driver::v1_import::MissingArtifact {
+			transcript: parent,
+			id:         4,
+		}]);
+		assert_eq!(imported.artifacts, 1);
+		// Journaled text keeps v1's URI exactly.
+		let text = fs::read_to_string(&imported.journal).expect("journal");
+		assert!(text.contains("[raw output: artifact://0]"), "{text}");
+		// The journal maps v1's id to the copied bytes in the project store,
+		// where the environment's `artifact://` resolver reads.
+		let entries = Journal::scan(&imported.journal).expect("scan");
+		let mapped = omp_session::import::v1_artifacts(&entries).collect::<Vec<_>>();
+		assert_eq!(mapped.len(), 1);
+		assert_eq!(mapped[0].0, 0);
+		let store = project_store(&imported.journal);
+		assert_eq!(store.get(&mapped[0].1).expect("copied").as_ref(), spilled);
+		// The subagent shares its parent's artifacts, as v1 subagents did.
+		let session = Session::open(&imported.journal, ComponentRegistry::standard()).expect("open");
+		let job = tagged(session.dom(), &Tag::Known(KnownTag::Subagent))[0];
+		let child_id = session
+			.dom()
+			.get(job)
+			.and_then(|node| node.prop(&PropId::Id.into()))
+			.and_then(DomValue::as_str)
+			.expect("child id")
+			.to_owned();
+		let child = imported.journal.with_file_name(format!("{child_id}.oms"));
+		let child_entries = Journal::scan(&child).expect("child");
+		assert_eq!(omp_session::import::v1_artifacts(&child_entries).collect::<Vec<_>>(), mapped);
+		// The provenance the driver indexes is in the journal's first bytes.
+		let origin = omp_session::import::import_origin(
+			&Journal::scan_prefix(&imported.journal, omp_session::import::PROVENANCE_PREFIX_BYTES)
+				.expect("prefix"),
+		)
+		.expect("origin");
+		assert_eq!(origin.format, omp_session::import::OMP1_FORMAT);
+		assert_eq!(origin.source_id.as_deref(), Some("spill"));
 	}
 
 	#[test]
@@ -583,6 +658,30 @@ mod omp1 {
 				.all(|entry| {
 					matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent))
 				})
+		);
+		// Without the marker, the imported journals themselves keep every
+		// session from converting again, and the picker marks them.
+		fs::remove_file(ImportStep::Sessions.marker(&pair.target.config_dir).path()).expect("unmark");
+		let rerun = run_with(
+			&pairs,
+			ImportMode::Apply,
+			CredentialAccess::Offline(&offline),
+			SessionImport::Bulk(&V1Converter),
+		);
+		let skipped = rerun
+			.entries()
+			.filter(|entry| entry.step == ImportStep::Sessions)
+			.filter(|entry| {
+				matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::SessionImported))
+			})
+			.count();
+		assert_eq!(skipped, 2);
+		let rows = omp_driver::v1_import::sessions::list(&pair).expect("list");
+		assert_eq!(rows.len(), 2);
+		assert!(
+			rows
+				.iter()
+				.all(|row| row.imported.as_deref().is_some_and(Path::is_file))
 		);
 	}
 }

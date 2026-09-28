@@ -51,6 +51,7 @@ pub fn foreign_rows(source: ForeignSessionSource) -> ServiceResult<Vec<ForeignSe
 					modified_ms: candidate.modified_ms,
 					messages: candidate.messages,
 					first_message: candidate.first_message,
+					imported: candidate.imported,
 				})
 				.collect()
 		})

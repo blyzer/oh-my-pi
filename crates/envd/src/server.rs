@@ -2475,7 +2475,10 @@ impl EnvServer {
 			)
 			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
 		);
-		let blobs = BlobHost::open_managed(state_dir.join("blobs"), state_dir.join("sessions"))?;
+		let blobs = BlobHost::open_managed(
+			omp_env::project_state::blob_store(state_dir),
+			state_dir.join("sessions"),
+		)?;
 		ext_host_config.bind_result_store(blobs.clone());
 		let exec = ExecHost::new()
 			.with_process_store(ProcessStore::new(state_dir.join("processes").join("meta.json")))?
@@ -2759,7 +2762,10 @@ impl EnvServer {
 			)
 			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
 		);
-		let blobs = BlobHost::open_managed(state_dir.join("blobs"), state_dir.join("sessions"))?;
+		let blobs = BlobHost::open_managed(
+			omp_env::project_state::blob_store(state_dir),
+			state_dir.join("sessions"),
+		)?;
 		ext_host_config.bind_result_store(blobs.clone());
 		let exec = if doc_connections.is_some() {
 			ExecHost::new()
@@ -2980,7 +2986,10 @@ impl EnvServer {
 			)
 			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
 		);
-		let blobs = BlobHost::open_managed(state_dir.join("blobs"), state_dir.join("sessions"))?;
+		let blobs = BlobHost::open_managed(
+			omp_env::project_state::blob_store(state_dir),
+			state_dir.join("sessions"),
+		)?;
 		ext_host_config.bind_result_store(blobs.clone());
 		let exec = ExecHost::new()
 			.with_github_cache(Arc::clone(&github_cache))
