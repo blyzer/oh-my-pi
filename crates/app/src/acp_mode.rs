@@ -166,6 +166,12 @@ where
 {
 	kernel.reconcile_jobs(&mut session).into_diagnostic()?;
 	home.register(&session);
+	if let Some(lifecycle) = kernel.lifecycle_hooks() {
+		lifecycle
+			.session_start(&omp_agent::SessionStart::launch(&session, &home.project_root))
+			.await
+			.into_diagnostic()?;
+	}
 	let mut session_id = session_identifier(&session);
 	let (output_tx, output_rx) = flume::unbounded::<Value>();
 	let writer = tokio::spawn(async move {
@@ -336,7 +342,8 @@ where
 						&mut session_id,
 						&permission_session,
 						false,
-						(!closed).then_some(omp_agent::SwitchReason::New),
+						omp_agent::SwitchReason::New,
+						closed,
 					)
 					.await?;
 					closed = false;
@@ -382,7 +389,8 @@ where
 						&mut session_id,
 						&permission_session,
 						replay,
-						(!closed).then_some(omp_agent::SwitchReason::Resume),
+						omp_agent::SwitchReason::Resume,
+						closed,
 					)
 					.await?;
 					closed = false;
@@ -435,7 +443,8 @@ where
 						&mut session_id,
 						&permission_session,
 						false,
-						(!closed).then_some(omp_agent::SwitchReason::Fork),
+						omp_agent::SwitchReason::Fork,
+						closed,
 					)
 					.await?;
 					closed = false;
@@ -843,16 +852,22 @@ async fn switch_session<C>(
 	session_id: &mut Str,
 	permission_session: &parking_lot::RwLock<Str>,
 	replay: bool,
-	ending: Option<omp_agent::SwitchReason>,
+	reason: omp_agent::SwitchReason,
+	closed: bool,
 ) -> miette::Result<()> {
 	let (kernel, mut previous) = controller
 		.take()
 		.expect("idle ACP controller owns its kernel and session");
 	kernel.reconcile_jobs(&mut next).into_diagnostic()?;
 	// A live previous session ends here; a closed one already ended. The
-	// in-process hook hosts follow the switch either way.
-	if let Some(lifecycle) = kernel.lifecycle_hooks() {
-		lifecycle.session_switch(&previous, &next, ending).await;
+	// in-process hook hosts follow the switch either way, and `next` starts
+	// once the switch is committed.
+	let start = omp_agent::SessionStart::switched(&previous, &next, reason, &home.project_root);
+	let lifecycle = kernel.lifecycle_hooks();
+	if let Some(lifecycle) = &lifecycle {
+		lifecycle
+			.session_switch(&previous, &next, (!closed).then_some(reason))
+			.await;
 	}
 	let (snapshot, events) = next.subscribe();
 	let _ = previous.session_switch();
@@ -877,6 +892,16 @@ async fn switch_session<C>(
 		.await?,
 	);
 	*controller = Some((kernel, next));
+	// The switch cannot be undone here: a host refusing the new session's
+	// start is logged, and the session stays live.
+	if let Some(lifecycle) = lifecycle
+		&& let Err(error) = lifecycle.session_start(&start).await
+	{
+		tracing::warn!(
+			error = &error as &dyn std::error::Error,
+			"session_start refused after an ACP session switch"
+		);
+	}
 	Ok(())
 }
 

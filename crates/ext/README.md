@@ -53,8 +53,8 @@ trigger (`omp ext trust`).
 
 | Event | omp lifecycle point | Notes |
 | --- | --- | --- |
-| `SessionStart` | `session_start` | Matcher `startup`/`resume`; context reaches the next prompt. |
-| `SessionEnd` | `session_shutdown` | Quit, a finished print/RPC/ACP run, `/new` (`clear`), `/resume` (`resume`), fork/hand-off/signal (`other`). Runs within the 1.5 s shutdown budget, whatever its `timeout`; output discarded. |
+| `SessionStart` | `session_start` | Every session start of chat, print, RPC, and ACP: launch (`startup`, or `resume` on a journal that already holds a conversation), `/new` and ACP `session/new` (`clear`), `/resume`, ACP `session/load`/`session/resume`, and a hand-off (`resume`), a fork (`fork`). Context reaches the next prompt. |
+| `SessionEnd` | `session_shutdown` | Quit or the end of an RPC/ACP run (`prompt_input_exit`), `/new` (`clear`), `/resume` (`resume`), a finished print run, fork, hand-off, signal, or failure (`other`). Runs within the 1.5 s shutdown budget, whatever its `timeout`; output discarded. |
 | `UserPromptSubmit` | `before_agent_start` | Main session only. |
 | `PreToolUse` | `tool_call` | |
 | `PostToolUse` | `tool_result` (`ok`) | |
@@ -65,7 +65,7 @@ trigger (`omp ext trust`).
 | `StopFailure` | `agent_end` of a turn that failed on a provider error | `error` from the provider failure category; output discarded. |
 | `PreCompact` | `compaction` | Exit 2 / `block` cancels the compaction. |
 | `PostCompact` | `compaction_done` | `trigger` and `compact_summary`; output discarded. |
-| `Notification` | `tool_approval_requested` | `permission_prompt` only, when the approval prompt is filed (no idle delay); omp raises no other notification type. |
+| `Notification` | `tool_approval_requested`, `agent_end` | The types in the table below; output discarded. |
 | `Setup` | unsupported | omp has no `--init`/`--maintenance` run. |
 | `UserPromptExpansion` | unsupported | Prompt templates expand without a lifecycle point (`command_invoke` is not emitted). |
 | `PostToolBatch` | unsupported | No awaited point between a resolved tool batch and the next request: `turn_end` is a non-blocking observation and `turn_start` sees an already built request, so neither context nor a block could land before the next model call. |
@@ -80,6 +80,19 @@ trigger (`omp ext trust`).
 | `InstructionsLoaded` | unsupported | Context files and rules are discovered once at composition, without a lifecycle point. |
 | `WorktreeCreate`, `WorktreeRemove` | unsupported | Subagent worktree isolation has no hook point that could replace creation or removal. |
 | `PreModelSwitch` | unsupported | Model changes have no blockable point. |
-| `PostModelSwitch` | unsupported | `model_changed` fires only when the model changes between requests of one agent run, not for `/model` between prompts; most switches would never reach the hook. |
+| `PostModelSwitch` | `model_changed` | Every change of the selected model (a thinking-only change is no switch): `from_model`/`to_model` are the model ids the matcher filters on, `source` is `user_request` for a user or client selection and `automatic` for role routing and fallback, `effort.level` the effective thinking effort. Only `systemMessage` is honored. |
 | `Elicitation`, `ElicitationResult` | unsupported | omp's MCP client does not offer elicitation, so no server ever asks. |
 | `MessageDisplay` | unsupported | omp has no display-transform point: the TUI renders the journaled text, and `message_update` is an observation that cannot replace it. |
+
+`Notification` hooks filter on `notification_type`
+(`omp_ext::claude_hooks::NotificationType`); omp raises three types:
+
+| Type | omp lifecycle point | Notes |
+| --- | --- | --- |
+| `permission_prompt` | `tool_approval_requested` | When the approval prompt is filed. |
+| `idle_prompt` | `agent_end` of a main session | Once no prompt, switch, or session end followed the run within `sv_plugin_hook_idle_prompt` (60 s; `never` disables). |
+| `agent_completed` | `agent_end` of a subagent | `agent_type` (its class), `agent_id`, and `summary` (the run's final assistant text). |
+| `auth_success` | not raised | Provider and MCP logins run outside the session's hook surface. |
+| `elicitation_dialog`, `elicitation_url_dialog`, `elicitation_complete`, `elicitation_response` | not raised | omp's MCP client does not offer elicitation. |
+| `agent_needs_input` | not raised | A subagent waits on the user only at an approval prompt, which raises `permission_prompt`. |
+| `quota_auto_resume_fired`, `quota_auto_resume_stale`, `quota_auto_resume_disabled` | not raised | omp has no quota auto-resume. |

@@ -14,8 +14,8 @@ use std::{
 
 use futures::stream;
 use omp_agent::{
-	DispatchPolicy, Inference, Kernel, LifecycleHooks, RunControl, SessionShutdown, ShutdownReason,
-	StaticPrompt, SwitchReason, TurnInput,
+	DispatchPolicy, Inference, Kernel, LifecycleHooks, RunControl, SessionShutdown, SessionStart,
+	ShutdownReason, StaticPrompt, SwitchReason, TurnInput,
 };
 use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ErrorKind, ErrorPhase,
@@ -251,6 +251,7 @@ impl Fixture {
 				agent:        kind
 					.subagent
 					.map(|name| AgentName::new(Str::new_static(name))),
+				idle_prompt:  kind.idle_prompt,
 			},
 			&plugins,
 		);
@@ -269,9 +270,11 @@ impl Fixture {
 #[derive(Clone, Copy, Default)]
 struct Kind {
 	/// A subagent of this agent class.
-	subagent: Option<&'static str>,
+	subagent:    Option<&'static str>,
 	/// The model's first request fails with this provider error.
-	fail:     Option<ErrorKind>,
+	fail:        Option<ErrorKind>,
+	/// The idle wait before `idle_prompt`; `None` never raises it.
+	idle_prompt: Option<Duration>,
 }
 
 /// A live kernel, its environment, and its session.
@@ -865,4 +868,207 @@ async fn an_unsupported_event_is_named_once_per_plugin() {
 		);
 	}
 	assert!(fixture.blocked().is_empty(), "an unsupported hook is never a launch awaiting approval");
+}
+
+/// The JSON lines a hook appended to `path`.
+fn lines(path: &Path) -> Vec<serde_json::Value> {
+	read(path)
+		.lines()
+		.filter(|line| !line.trim().is_empty())
+		.map(json)
+		.collect()
+}
+
+#[tokio::test]
+async fn session_start_runs_on_every_start_with_the_source_that_started_it() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command",
+			"command":"cat >> \"$CLAUDE_PLUGIN_DATA/starts.jsonl\"; echo >> \"$CLAUDE_PLUGIN_DATA/starts.jsonl\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	let root = std::fs::canonicalize(&fixture.root).expect("root");
+	let next =
+		Session::create(&fixture.scratch.path().join("next.oms"), ComponentRegistry::standard())
+			.expect("next session");
+	let lifecycle = harness.lifecycle();
+	lifecycle
+		.session_start(&SessionStart::launch(&harness.session, &root))
+		.await
+		.expect("launch");
+	for reason in
+		[SwitchReason::New, SwitchReason::Resume, SwitchReason::Fork, SwitchReason::Handoff]
+	{
+		lifecycle
+			.session_switch(&harness.session, &next, Some(reason))
+			.await;
+		lifecycle
+			.session_start(&SessionStart::switched(&harness.session, &next, reason, &root))
+			.await
+			.expect("switched start");
+	}
+	let starts = lines(&fixture.plugin_data().join("starts.jsonl"));
+	let sources = starts
+		.iter()
+		.map(|start| start["source"].as_str().unwrap_or_default())
+		.collect::<Vec<_>>();
+	assert_eq!(sources, ["startup", "clear", "resume", "fork", "resume"], "{starts:?}");
+	assert_eq!(starts[0]["session_id"], "hooks");
+	assert_eq!(starts[1]["hook_event_name"], "SessionStart");
+	assert_eq!(starts[1]["session_id"], "next", "the host serves the started session");
+	drop(harness);
+}
+
+#[tokio::test]
+async fn a_finished_print_run_ends_its_session_as_other() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"SessionEnd":[{"matcher":"other","hooks":[{"type":"command",
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/end.json\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	harness
+		.lifecycle()
+		.session_shutdown(&SessionShutdown::new(&harness.session, ShutdownReason::Completed))
+		.await;
+	let input = json(&read(&fixture.plugin_data().join("end.json")));
+	assert_eq!(input["reason"], "other", "a finished `-p` run is no user exit: {input}");
+	drop(harness);
+}
+
+#[tokio::test]
+async fn post_model_switch_runs_on_a_model_change_and_never_on_a_thinking_one() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"PostModelSwitch":[{"matcher":".*opus.*","hooks":[{"type":"command",
+			"command":"cat >> \"$CLAUDE_PLUGIN_DATA/switches.jsonl\"; echo >> \"$CLAUDE_PLUGIN_DATA/switches.jsonl\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let harness = fixture.harness(BASH, Kind::default()).await;
+	let lifecycle = harness.lifecycle();
+	let change = |from: &str, to: &str, reason: &str, thinking: Option<&str>| {
+		let model = |key: &str| {
+			let (provider, model) = key.split_once('/').expect("catalog key");
+			serde_json::json!({"provider": provider, "api": "", "model": model})
+		};
+		serde_json::json!({
+			"from_model": model(from), "to_model": model(to), "role": "default",
+			"reason": reason, "previous_thinking": "high", "thinking": thinking,
+		})
+	};
+	let path = fixture.plugin_data().join("switches.jsonl");
+	// One observation at a time: each hook appends its line before the next
+	// change is published.
+	let publish = async |payload: serde_json::Value, expected: usize| {
+		lifecycle
+			.notify(HookEventId::HookEventModelChanged, payload)
+			.expect("notify");
+		let deadline = Instant::now() + Duration::from_secs(30);
+		while read(&path)
+			.lines()
+			.filter(|line| !line.trim().is_empty())
+			.count()
+			< expected
+		{
+			assert!(Instant::now() < deadline, "switch {expected} reaches the hook");
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	};
+	// Thinking only: the model repeats, so no switch; nor does a target the
+	// matcher filters out.
+	lifecycle
+		.notify(
+			HookEventId::HookEventModelChanged,
+			change("anthropic/claude-opus-5", "anthropic/claude-opus-5", "user", Some("low")),
+		)
+		.expect("notify");
+	lifecycle
+		.notify(
+			HookEventId::HookEventModelChanged,
+			change("anthropic/claude-opus-5", "openai/gpt-9", "user", Some("high")),
+		)
+		.expect("notify");
+	publish(change("openai/gpt-9", "anthropic/claude-opus-5", "user", Some("medium")), 1).await;
+	publish(change("anthropic/claude-opus-5", "bedrock/claude-opus-5", "fallback", None), 2).await;
+	tokio::time::sleep(Duration::from_millis(500)).await;
+	let switches = lines(&path);
+	assert_eq!(switches.len(), 2, "{switches:?}");
+	assert_eq!(switches[0]["hook_event_name"], "PostModelSwitch");
+	assert_eq!(switches[0]["source"], "user_request");
+	assert_eq!(switches[0]["from_model"], "gpt-9");
+	assert_eq!(switches[0]["to_model"], "claude-opus-5");
+	assert_eq!(switches[0]["effort"], serde_json::json!({"level": "medium"}));
+	assert_eq!(switches[1]["source"], "automatic", "a fallback is omp's own switch");
+	assert_eq!(switches[1]["from_model"], "claude-opus-5");
+	assert_eq!(switches[1]["to_model"], "claude-opus-5");
+	assert!(switches[1].get("effort").is_none(), "no reasoning request: {:?}", switches[1]);
+	drop(harness);
+}
+
+#[tokio::test]
+async fn idle_prompt_raises_once_a_run_end_stays_quiet_and_is_withdrawn_by_a_switch() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"Notification":[{"matcher":"idle_prompt","hooks":[{"type":"command",
+			"command":"cat >> \"$CLAUDE_PLUGIN_DATA/idle.jsonl\"; echo >> \"$CLAUDE_PLUGIN_DATA/idle.jsonl\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let wait = Duration::from_millis(400);
+	let harness = fixture
+		.harness(BASH, Kind { idle_prompt: Some(wait), ..Kind::default() })
+		.await;
+	let lifecycle = harness.lifecycle();
+	let run_end = serde_json::json!({
+		"submission_id": "1",
+		"summary": {"committed_turns": 1, "interrupted": false, "stop": "completed"},
+		"continued": false, "error": null, "error_kind": null, "assistant_text": "done",
+	});
+	let path = fixture.plugin_data().join("idle.jsonl");
+	// A switch inside the wait withdraws it.
+	lifecycle
+		.notify(HookEventId::HookEventAgentEnd, run_end.clone())
+		.expect("notify");
+	let next =
+		Session::create(&fixture.scratch.path().join("next.oms"), ComponentRegistry::standard())
+			.expect("next session");
+	lifecycle.session_switched(&next);
+	tokio::time::sleep(wait * 3).await;
+	assert!(lines(&path).is_empty(), "a switched-away run end raises nothing");
+	// A quiet run end raises it once the wait passed.
+	let ended = Instant::now();
+	lifecycle
+		.notify(HookEventId::HookEventAgentEnd, run_end)
+		.expect("notify");
+	let idle = json(&written(&path).await);
+	assert!(ended.elapsed() >= wait, "not before the wait");
+	assert_eq!(idle["hook_event_name"], "Notification");
+	assert_eq!(idle["notification_type"], "idle_prompt");
+	assert_eq!(idle["session_id"], "next");
+	drop(harness);
+}
+
+#[tokio::test]
+async fn agent_completed_runs_when_a_subagents_run_ends() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"Notification":[{"matcher":"agent_completed","hooks":[{"type":"command",
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/completed.json\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let mut harness = fixture
+		.harness(BASH, Kind {
+			subagent: Some("reviewer"),
+			idle_prompt: Some(Duration::from_millis(1)),
+			..Kind::default()
+		})
+		.await;
+	harness.run_turn().await;
+	let completed = json(&written(&fixture.plugin_data().join("completed.json")).await);
+	assert_eq!(completed["notification_type"], "agent_completed");
+	assert_eq!(completed["agent_type"], "reviewer");
+	assert_eq!(completed["agent_id"], "hooks");
+	assert_eq!(completed["summary"], "done");
+	drop(harness);
 }

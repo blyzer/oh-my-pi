@@ -193,6 +193,7 @@ Defines the wire values for cause of session shutdown.
 | Member | Wire value | Meaning |
 |---|---|---|
 | `USER_EXIT` | `'user_exit'` | Cause of session shutdown: user exit. |
+| `COMPLETED` | `'completed'` | Cause of session shutdown: a one-shot print-mode run finished normally. |
 | `SIGNAL` | `'signal'` | Cause of session shutdown: signal. |
 | `SWITCH` | `'switch'` | Cause of session shutdown: switch. |
 | `FATAL` | `'fatal'` | Cause of session shutdown: fatal. |

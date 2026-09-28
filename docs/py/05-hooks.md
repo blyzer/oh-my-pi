@@ -1095,6 +1095,13 @@ when it is first reached — a previous revision replayed `session_start` at lat
 host restart, which forced every handler to distinguish "the session started" from "you just
 arrived"; the two are now distinct events with distinct payloads (P0#8).
 
+A session transition is every start of a session a host serves: launch (chat, print, RPC, ACP), and
+each committed switch — `/new`, `/resume`, a fork, a hand-off, RPC `new_session`/`switch_session`/
+`branch`, ACP `session/new`/`session/load`/`session/resume`/`session/fork`. A switch runs
+`session_switch` → `session_shutdown` (the previous session) → `session_switched` →
+`session_start` (the next one, with `previous_session` naming the one it replaced); a denial there
+is reported and the switch stands, since it has already committed.
+
 ```python
 @dataclass(frozen=True, slots=True)
 class SessionStartEvent:
@@ -1172,7 +1179,8 @@ class SessionResetEvent:
 
 ```python
 class ShutdownReason(enum.StrEnum):
-	USER_EXIT = "user_exit"          # user quit the client
+	USER_EXIT = "user_exit"          # user quit the client (or an RPC/ACP client ended the run)
+	COMPLETED = "completed"          # a one-shot print-mode (`-p`) run finished normally
 	SIGNAL = "signal"                # SIGINT/SIGTERM delivered to the harness
 	SWITCH = "switch"                # this session is being replaced by another
 	FATAL = "fatal"                  # unrecoverable core error
@@ -1829,12 +1837,22 @@ changes. A thinking-only change repeats the same model in `from_model` and `to_m
 the transition through `previous_thinking` and `thinking`; extensions need not wait for the next
 `turn_start` to observe it.
 
+One kernel-level emitter raises it, the moment the change commits — between prompts as readily as
+mid-run: a write to `ai_model`, `ai_thinking`, `ai_model_roles` (while a role selector is live), or
+`ai_external_thinking` that changes the resolved model or effort, whoever made it (the `/model`
+picker, a slash command, an RPC/ACP client, a Director bind, a session switch restoring the next
+session's journaled selection); and the start of an answer the recovery middleware served on a
+model other than the one last reported. `thinking` is the effort the next request carries after the
+model's thinking policy clamped `ai_thinking` (`None` when it carries no reasoning request, as
+under `ai_external_thinking`). `role` names the role a role selector resolved through (`plan` for
+`@plan`), else `"default"`.
+
 ```python
 class ModelChangeReason(enum.StrEnum):
-	USER = "user"          # explicit user selection
-	FALLBACK = "fallback"  # retry fallback applied
-	ROLE = "role"          # role switch (plan/code/title)
-	POLICY = "policy"      # policy hook or trust tier forced it
+	USER = "user"          # a user or client selection: /model, the picker, ai_thinking, a resumed session
+	FALLBACK = "fallback"  # the recovery middleware served another model, or reverted to the selection
+	ROLE = "role"          # role routing: a role selector (@plan), a role remap, a Director bind
+	POLICY = "policy"      # policy hook or trust tier forced it (core raises none today)
 ```
 
 Two catalog-level rules that are this document's, not `13-inference.md`'s:

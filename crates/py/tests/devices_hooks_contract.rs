@@ -624,3 +624,68 @@ asyncio.run(exercise())
 		})
 		.expect("dynamic device and hook CONTROL contract");
 }
+
+/// The payloads core raises for a finished print run's end and for the
+/// kernel's `model_changed` emitter decode into their typed events.
+#[test]
+fn session_end_and_model_change_payloads_decode_into_their_events() {
+	let engine = Engine::builder().init().expect("embedded Python boots");
+	engine
+		.attach(|py| {
+			py.run(
+				c_str!(
+					r#"
+import omp
+from omp import hooks as hook_module
+from omp.events import spec as event_spec
+
+assert omp.ShutdownReason("completed") is omp.ShutdownReason.COMPLETED
+ended = hook_module._value_from_wire(
+    event_spec("session_shutdown").payload,
+    {
+        "session_id": "run.oms",
+        "reason": "completed",
+        "budget": "1500ms",
+        "target_session": None,
+        "switch_reason": None,
+        "target_transcript_path": None,
+    },
+)
+assert isinstance(ended, omp.SessionShutdownEvent)
+assert ended.reason is omp.ShutdownReason.COMPLETED
+
+started = hook_module._value_from_wire(
+    event_spec("session_start").payload,
+    {
+        "session_id": "next.oms", "root": "/p", "cwd": "/p", "dirs": [],
+        "resumed": False, "forked_from": None, "agent": None, "trust": "trusted",
+        "head_event": 3, "prompt_rev": "1", "previous_session": "first.oms",
+        "switch_reason": "new",
+    },
+)
+assert isinstance(started, omp.SessionStartEvent)
+assert started.previous_session == "first.oms"
+
+for reason, thinking in (("user", "low"), ("role", None), ("fallback", "xhigh")):
+    changed = hook_module._value_from_wire(
+        event_spec("model_changed").payload,
+        {
+            "from_model": {"provider": "p", "api": "", "model": "a"},
+            "to_model": {"provider": "p", "api": "", "model": "b"},
+            "role": "default",
+            "reason": reason,
+            "previous_thinking": "high",
+            "thinking": thinking,
+        },
+    )
+    assert isinstance(changed, omp.ModelChangedEvent)
+    assert changed.reason is omp.ModelChangeReason(reason)
+    assert changed.thinking == thinking
+"#
+				),
+				None,
+				None,
+			)
+		})
+		.expect("session end and model change payloads decode");
+}

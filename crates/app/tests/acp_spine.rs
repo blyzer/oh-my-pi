@@ -548,7 +548,8 @@ async fn list_and_fork_expose_stored_sessions() {
 	);
 }
 
-/// An in-process hook host recording each session end (`session_shutdown`)
+/// An in-process hook host recording each session start (`session_start`,
+/// with the switch that started it), each session end (`session_shutdown`),
 /// and each switch it is told to follow, by journal file name.
 #[derive(Default)]
 struct SwitchRecorder {
@@ -561,9 +562,16 @@ impl omp_agent::NativeHookHost for SwitchRecorder {
 		event: omp_proto::toolhost::v1::HookEventId,
 		payload: &'a Value,
 	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
-		if event == omp_proto::toolhost::v1::HookEventId::HookEventSessionShutdown {
-			let ended = payload["session_id"].as_str().unwrap_or("?");
-			self.events.lock().push(format!("end {ended}"));
+		let session = payload["session_id"].as_str().unwrap_or("?");
+		match event {
+			omp_proto::toolhost::v1::HookEventId::HookEventSessionShutdown => {
+				self.events.lock().push(format!("end {session}"));
+			},
+			omp_proto::toolhost::v1::HookEventId::HookEventSessionStart => {
+				let reason = payload["switch_reason"].as_str().unwrap_or("launch");
+				self.events.lock().push(format!("start {session} {reason}"));
+			},
+			_ => {},
 		}
 		Box::pin(ready(omp_agent::NativeReply::defer()))
 	}
@@ -578,9 +586,11 @@ impl omp_agent::NativeHookHost for SwitchRecorder {
 
 /// `session/close` ends the session once; a later switch away from it runs
 /// no second end, but the in-process hook hosts still follow the switch, so
-/// their hooks name the session the controller now serves.
+/// their hooks name the session the controller now serves. Every session the
+/// controller serves starts on the lifecycle surface, the launch one and each
+/// one a switch committed to.
 #[tokio::test]
-async fn a_switch_after_close_moves_the_hook_hosts_without_ending_twice() {
+async fn a_switch_after_close_moves_the_hook_hosts_without_ending_twice_and_starts_each_session() {
 	let directory = tempfile::tempdir().expect("temporary directory");
 	let sessions = directory.path().join("sessions");
 	std::fs::create_dir_all(&sessions).expect("sessions directory");
@@ -593,6 +603,7 @@ async fn a_switch_after_close_moves_the_hook_hosts_without_ending_twice() {
 	let recorder = Arc::new(SwitchRecorder::default());
 	gate.attach_native(Arc::clone(&recorder) as Arc<dyn omp_agent::NativeHookHost>, &[
 		omp_proto::toolhost::v1::HookEventId::HookEventSessionShutdown,
+		omp_proto::toolhost::v1::HookEventId::HookEventSessionStart,
 	]);
 	let kernel = kernel.with_hook_gate(gate);
 	let frames = exchange(
@@ -613,10 +624,13 @@ async fn a_switch_after_close_moves_the_hook_hosts_without_ending_twice() {
 	assert!(response(&frames, "close").get("error").is_none(), "{frames:#?}");
 	assert!(response(&frames, "load").get("error").is_none(), "{frames:#?}");
 	assert_eq!(*recorder.events.lock(), [
+		"start startup.oms launch".to_owned(),
 		"end startup.oms".to_owned(),
 		format!("switch {new_id}.oms"),
+		format!("start {new_id}.oms new"),
 		format!("end {new_id}.oms"),
 		"switch target.oms".to_owned(),
+		"start target.oms resume".to_owned(),
 		"end target.oms".to_owned(),
 	]);
 }

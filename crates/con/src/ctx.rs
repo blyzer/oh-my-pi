@@ -915,6 +915,15 @@ impl Ctx {
 			.collect()
 	}
 
+	/// The owner of the engagement layer that supplies `name`'s effective
+	/// value (a Director bind), when one does; `None` for an unknown name or
+	/// a value the session, archive, or default layer supplies.
+	#[must_use]
+	pub fn engagement_owner(&self, name: &str) -> Option<Str> {
+		let var = self.var(name).ok()?;
+		self.layers.read().shadow(var.name).map(|(_, owner)| owner)
+	}
+
 	/// Drops a variable's session-layer entry (a rewind re-deriving
 	/// `<meta><con>` from the live chain) without touching the archive layer
 	/// or publishing a session write; the effective value is refreshed.

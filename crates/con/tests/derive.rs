@@ -71,6 +71,21 @@ fn derive_layers_replaces_the_stack_from_the_director_chain() {
 	assert!(ctx.layer_owners().is_empty());
 }
 
+#[test]
+fn engagement_owner_names_the_layer_supplying_the_effective_value() {
+	let ctx = Ctx::new();
+	assert_eq!(ctx.engagement_owner("test_derived"), None);
+	ctx.set("test_derived", Value::Int(3), Origin::Session)
+		.unwrap();
+	assert_eq!(ctx.engagement_owner("test_derived"), None, "a session write is no engagement");
+	ctx.derive_layers(&chain(&[("plan#3", &[("test_derived", 7)]), ("goal#5", &[])]));
+	assert_eq!(ctx.engagement_owner("test_derived"), Some(Str::new("plan#3")));
+	assert_eq!(ctx.engagement_owner("test_layer_mode"), None);
+	assert_eq!(ctx.engagement_owner("no_such_var"), None);
+	ctx.derive_layers(&[]);
+	assert_eq!(ctx.engagement_owner("test_derived"), None);
+}
+
 /// Layer bindings must name registered variables of the bound type, or
 /// `derive_layers` drops the binding with an error reply.
 #[test]

@@ -1334,6 +1334,12 @@ where
 	R: AsyncRead + Unpin + Send + 'static,
 	W: AsyncWrite + Unpin + Send + 'static,
 {
+	if let Some(lifecycle) = kernel.lifecycle_hooks() {
+		lifecycle
+			.session_start(&omp_agent::SessionStart::launch(&session, &home.project_root))
+			.await
+			.into_diagnostic()?;
+	}
 	let (outgoing_tx, outgoing_rx) = flume::unbounded::<Outgoing>();
 	let writer = tokio::spawn(async move {
 		let mut protocol = PROTOCOL_V1;
@@ -2336,8 +2342,18 @@ where
 										Err(source) => Err((source.to_string(), old)),
 									};
 									match transition {
-										Ok(mut next) => {
+										Ok((mut next, start)) => {
 											idle_kernel.resync_session_state(&next);
+											// Committed and resynced: `next` starts. A host
+											// refusing it cannot undo the switch; it is logged.
+											if let Some(lifecycle) = idle_kernel.lifecycle_hooks()
+												&& let Err(error) = lifecycle.session_start(&start).await
+											{
+												tracing::warn!(
+													error = &error as &dyn std::error::Error,
+													"session_start refused after an RPC session switch"
+												);
+											}
 											let (snapshot, events) = next.subscribe();
 											dom_events = events;
 											dom_open = true;
@@ -2558,14 +2574,15 @@ where
 }
 
 /// Opens the session a transition command names; once it is open, `old`
-/// ends on the lifecycle surface and is switched away from.
+/// ends on the lifecycle surface and is switched away from. The caller
+/// starts the returned session once it resynced it.
 async fn transition_session(
 	home: &SessionHome,
 	lifecycle: Option<omp_agent::LifecycleHooks>,
 	mut old: Session,
 	command: &str,
 	params: &Map<String, Value>,
-) -> Result<Session, (String, Session)> {
+) -> Result<(Session, omp_agent::SessionStart), (String, Session)> {
 	let reason = match command {
 		"new_session" => omp_agent::SwitchReason::New,
 		"switch_session" => omp_agent::SwitchReason::Resume,
@@ -2621,8 +2638,9 @@ async fn transition_session(
 			if let Some(lifecycle) = &lifecycle {
 				lifecycle.session_switched(&next);
 			}
+			let start = omp_agent::SessionStart::switched(&old, &next, reason, &home.project_root);
 			home.unregister(&old);
-			Ok(next)
+			Ok((next, start))
 		},
 		Err(source) => Err((source, old)),
 	}

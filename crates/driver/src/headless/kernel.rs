@@ -278,20 +278,7 @@ impl ProductionInference {
 	/// The catalog model `ai_model` currently selects (role selectors such
 	/// as `@plan` resolve through the launch roles), else the launch model.
 	fn selected_model(&self) -> Str {
-		let selector = omp_agent::AI_MODEL.get(&self.con);
-		if selector.is_empty() {
-			return Str::new(self.model.as_str());
-		}
-		if let Ok(model) = resolve_model_selector(self.routes.catalog().as_ref(), selector.as_str()) {
-			return model;
-		}
-		let settings = omp_catalog::settings::ModelSettings::from_con(&self.con);
-		crate::discovery::roles::resolve_role_selector(
-			self.routes.catalog().as_ref(),
-			&settings,
-			selector.as_str(),
-		)
-		.map_or_else(|_| Str::new(self.model.as_str()), |selected| Str::new(selected.model.as_str()))
+		select_model(self.routes.catalog().as_ref(), &self.con, &self.launch.model).0
 	}
 
 	/// Catalog facts for the model the next request targets (R2 #10: `/model`
@@ -349,6 +336,72 @@ impl ProductionInference {
 			Some(model.as_str()),
 			None,
 		);
+	}
+}
+
+/// Resolves `ai_model` against `catalog`: an exact key or alias, else a role
+/// selector (`@plan`, reported with its role) or catalog selection; an empty
+/// or unresolvable selector is the launch model. The one resolution both the
+/// route and the kernel's `model_changed` watch read.
+fn select_model(
+	catalog: &omp_catalog::snapshot::Catalog,
+	con: &omp_con::Ctx,
+	launch: &str,
+) -> (Str, Option<Str>) {
+	let selector = omp_agent::AI_MODEL.get(con);
+	if selector.is_empty() {
+		return (Str::new(launch), None);
+	}
+	if let Ok(model) = resolve_model_selector(catalog, selector.as_str()) {
+		return (model, None);
+	}
+	let settings = omp_catalog::settings::ModelSettings::from_con(con);
+	match crate::discovery::roles::resolve_role_selector(catalog, &settings, selector.as_str()) {
+		Ok(selected) => {
+			let role = selector
+				.as_str()
+				.strip_prefix('@')
+				.map(|role| role.split_once(':').map_or(role, |(role, _)| role))
+				.filter(|role| !role.is_empty())
+				.map(Str::new);
+			(Str::new(selected.model.as_str()), role)
+		},
+		Err(_) => (Str::new(launch), None),
+	}
+}
+
+/// The reasoning effort the next request to `model` carries: `ai_thinking`
+/// clamped by the model's thinking policy ([`convar_reasoning`]), none when
+/// thinking runs through the hidden tool (`ai_external_thinking`).
+fn selected_thinking(
+	catalog: &omp_catalog::snapshot::Catalog,
+	con: &omp_con::Ctx,
+	model: &str,
+) -> Option<omp_catalog::ReasoningEffort> {
+	if omp_ai::settings::AI_EXTERNAL_THINKING.get(con) {
+		return None;
+	}
+	let thinking = omp_agent::AI_THINKING.get(con);
+	match convar_reasoning(catalog, omp_catalog::ModelKey::from_ref(model), &thinking) {
+		omp_ai::Setting::Prefer(reasoning) | omp_ai::Setting::Require(reasoning) => reasoning.effort,
+		omp_ai::Setting::Unset => None,
+	}
+}
+
+/// The production [`omp_agent::ModelSelector`]: the route's own resolution
+/// ([`select_model`], [`selected_thinking`]) over the catalog as currently
+/// published.
+struct LiveModelSelector {
+	catalog: crate::registry::LiveCatalog,
+	launch:  Str,
+}
+
+impl omp_agent::ModelSelector for LiveModelSelector {
+	fn select(&self, con: &omp_con::Ctx) -> Option<omp_agent::ModelSelection> {
+		let catalog = self.catalog.load();
+		let (model, role) = select_model(&catalog, con, &self.launch);
+		let thinking = selected_thinking(&catalog, con, &model);
+		Some(omp_agent::ModelSelection { model, role, thinking })
 	}
 }
 
@@ -1612,6 +1665,11 @@ impl omp_agent::Inference for ComposedInference {
 			Self::Gateway { .. } => None,
 		}
 	}
+
+	fn model_selector(&self) -> Option<Arc<dyn omp_agent::ModelSelector>> {
+		let catalog = self.live_catalog()?;
+		Some(Arc::new(LiveModelSelector { catalog, launch: self.launch_model().model.clone() }))
+	}
 }
 
 /// Concrete prompt projection returned by [`compose_kernel`].
@@ -2226,6 +2284,9 @@ pub async fn compose_kernel(
 				data_dir:     data_dir.to_path_buf(),
 				subagent:     options.parent_session.is_some(),
 				agent:        options.agent.clone(),
+				idle_prompt:  crate::plugin_hooks::SV_PLUGIN_HOOK_IDLE_PROMPT
+					.get(&ctx)
+					.to_std(),
 			},
 			&claude_plugins,
 		) {

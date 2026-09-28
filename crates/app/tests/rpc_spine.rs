@@ -453,11 +453,42 @@ async fn rpc_v2_reassembles_large_requests_and_chunks_large_responses() {
 	);
 }
 
+/// Records every session start (`session_start`) with the switch that
+/// started it.
+#[derive(Default)]
+struct StartRecorder {
+	starts: Mutex<Vec<(String, String)>>,
+}
+
+impl omp_agent::NativeHookHost for StartRecorder {
+	fn decide<'a>(
+		&'a self,
+		_: omp_proto::toolhost::v1::HookEventId,
+		payload: &'a Value,
+	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
+		self.starts.lock().push((
+			payload["session_id"].as_str().unwrap_or("?").to_owned(),
+			payload["switch_reason"]
+				.as_str()
+				.unwrap_or("launch")
+				.to_owned(),
+		));
+		Box::pin(ready(omp_agent::NativeReply::defer()))
+	}
+}
+
 #[tokio::test]
 async fn rpc_session_commands_publish_reset_snapshots() {
 	let temp = tempfile::tempdir().expect("tempdir");
 	let kernel = scripted_kernel(&temp, VecDeque::new());
 	let home = session_home(&temp, &kernel);
+	let (gate, _dispatches) = omp_agent::HookGate::channel();
+	let gate = Arc::new(gate);
+	let recorder = Arc::new(StartRecorder::default());
+	gate.attach_native(Arc::clone(&recorder) as Arc<dyn omp_agent::NativeHookHost>, &[
+		omp_proto::toolhost::v1::HookEventId::HookEventSessionStart,
+	]);
+	let kernel = kernel.with_hook_gate(gate);
 	std::fs::create_dir_all(&home.sessions_dir).expect("sessions directory");
 	let source_path = home.sessions_dir.join("source.oms");
 	let mut session = Session::create(&source_path, ComponentRegistry::standard()).expect("session");
@@ -508,6 +539,16 @@ async fn rpc_session_commands_publish_reset_snapshots() {
 		3,
 		"one public lifecycle event per transition",
 	);
+	// The launch session and every session a transition committed to start
+	// on the lifecycle surface, with the switch that started them.
+	let starts = recorder.starts.lock().clone();
+	let reasons = starts
+		.iter()
+		.map(|(_, reason)| reason.as_str())
+		.collect::<Vec<_>>();
+	assert_eq!(reasons, ["launch", "new", "resume", "fork"], "{starts:?}");
+	assert_eq!(starts[0].0, "source.oms");
+	assert_eq!(starts[2].0, "source.oms", "`switch_session` resumed the source");
 	assert!(
 		!frames.iter().any(|frame| frame["type"] == "snapshot"),
 		"the controller's private DOM snapshot is not an RPC event",

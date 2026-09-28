@@ -111,6 +111,7 @@ class ShutdownReason(StrEnum):
     """Explain why a session is shutting down."""
 
     USER_EXIT = "user_exit"
+    COMPLETED = "completed"
     SIGNAL = "signal"
     SWITCH = "switch"
     FATAL = "fatal"

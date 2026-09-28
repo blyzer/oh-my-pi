@@ -578,8 +578,10 @@ const SESSION_SHUTDOWN_BUDGET_TEXT: &str = "1500ms";
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ShutdownReason {
-	/// The user quit, or a one-shot run finished.
+	/// The user quit.
 	UserExit,
+	/// A one-shot (print-mode) run finished normally.
+	Completed,
 	/// A termination signal ended the process.
 	Signal,
 	/// The host switched to another session.
@@ -652,6 +654,75 @@ impl SessionShutdown {
 			switch_reason: Some(reason),
 			target_transcript_path: Some(next.journal_path().to_path_buf()),
 			..Self::new(session, ShutdownReason::Switch)
+		}
+	}
+}
+
+/// The `session_start` payload: the session a controller starts serving,
+/// at launch or once a switch to it is committed
+/// ([`LifecycleHooks::session_start`]).
+///
+/// It serializes as Python's `SessionStartEvent`, plus the switch reason
+/// when a switch started it (in-process hosts read it; Python ignores it).
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionStart {
+	/// The session's name (its journal file name).
+	pub session_id:       Str,
+	/// The project root.
+	pub root:             std::path::PathBuf,
+	/// The working directory the session starts in.
+	pub cwd:              std::path::PathBuf,
+	dirs:                 [(); 0],
+	/// Whether the session already holds a conversation (a resumed,
+	/// forked, or handed-off journal).
+	pub resumed:          bool,
+	forked_from:          Option<()>,
+	agent:                Option<()>,
+	trust:                &'static str,
+	/// The journal head the session starts at.
+	pub head_event:       Option<omp_journal::EntryId>,
+	prompt_rev:           &'static str,
+	/// The session the controller served before, when a switch started this
+	/// one.
+	pub previous_session: Option<Str>,
+	/// Why the controller switched, when a switch started this session.
+	pub switch_reason:    Option<SwitchReason>,
+}
+
+impl SessionStart {
+	/// `session` starts at launch, in the project at `root`.
+	#[must_use]
+	pub fn launch(session: &omp_session::Session, root: &std::path::Path) -> Self {
+		let dom = session.dom();
+		Self {
+			session_id:       journal_name(session),
+			root:             root.to_path_buf(),
+			cwd:              root.to_path_buf(),
+			dirs:             [],
+			resumed:          !dom.children(dom.body()).is_empty(),
+			forked_from:      None,
+			agent:            None,
+			trust:            "trusted",
+			head_event:       session.head(),
+			prompt_rev:       "1",
+			previous_session: None,
+			switch_reason:    None,
+		}
+	}
+
+	/// `next` starts because the controller switched to it from `previous`
+	/// for `reason`, in the project at `root`.
+	#[must_use]
+	pub fn switched(
+		previous: &omp_session::Session,
+		next: &omp_session::Session,
+		reason: SwitchReason,
+		root: &std::path::Path,
+	) -> Self {
+		Self {
+			previous_session: Some(journal_name(previous)),
+			switch_reason: Some(reason),
+			..Self::launch(next, root)
 		}
 	}
 }
@@ -958,12 +1029,34 @@ impl LifecycleHooks {
 		}
 	}
 
+	/// Starts `start`'s session on the lifecycle surface (`session_start`):
+	/// every controller calls it once at launch and once per committed
+	/// switch, after the switch's `session_switched` observation, so hosts
+	/// see the new session begin whether the process just started or
+	/// `/new`, `/resume`, a fork, or a hand-off moved it.
+	///
+	/// # Errors
+	///
+	/// A subscribed host denied the start, requested approval (a lifecycle
+	/// seam cannot file one), or returned a malformed payload.
+	pub async fn session_start(&self, start: &SessionStart) -> Result<(), LifecycleHookError> {
+		let event = HookEventId::HookEventSessionStart;
+		if !self.subscribed(event) {
+			return Ok(());
+		}
+		let payload = serde_json::to_value(start)
+			.map_err(|source| LifecycleHookError::MalformedPayload { event, source })?;
+		self.admit(event, payload).await.map(drop)
+	}
+
 	/// Switches the controller from `previous` to `next`: when `ending` names
 	/// why a live `previous` ends, its end runs first
 	/// ([`Self::session_shutdown`]); an already-ended one (an ACP
 	/// `session/close`) passes `None` and does not end twice. Either way every
 	/// in-process host then follows the switch
-	/// ([`Self::session_switched`]). The future borrows neither session.
+	/// ([`Self::session_switched`]). The future borrows neither session. The
+	/// controller then commits the switch and starts `next`
+	/// ([`Self::session_start`]).
 	pub fn session_switch<'a>(
 		&'a self,
 		previous: &omp_session::Session,
