@@ -301,7 +301,8 @@ struct AgentPluginMcp {
 }
 
 /// Every Agent Plugins package the project and user plugin directories hold,
-/// then every explicit root, in discovery precedence order.
+/// then every root beside them ([`McpConfigPaths::agent_plugin_roots`]), in
+/// discovery precedence order.
 fn agent_plugins(paths: &McpConfigPaths) -> Vec<AgentPluginMcp> {
 	let project = paths.root.parent().unwrap_or_else(|| Path::new("."));
 	let user_config_root = paths.user.parent().unwrap_or(&paths.home);
@@ -333,12 +334,11 @@ fn agent_plugins(paths: &McpConfigPaths) -> Vec<AgentPluginMcp> {
 			plugins.extend(read_agent_plugin(&plugin_data_root, &root, kind));
 		}
 	}
+	// Only a package that comes from the project is project-scoped: one the
+	// invocation names, or a user install, loads whatever the project MCP
+	// policy (`ConfigSourceKind::loads`).
 	for root in &paths.agent_plugin_roots {
-		plugins.extend(read_agent_plugin(
-			&plugin_data_root,
-			root,
-			ConfigSourceKind::AgentPluginProject,
-		));
+		plugins.extend(read_agent_plugin(&plugin_data_root, &root.root, root.origin.source_kind()));
 	}
 	plugins
 }
@@ -891,7 +891,7 @@ fn strip_json_comments(source: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::mcp::McpSettings;
+	use crate::mcp::{AgentPluginOrigin, AgentPluginRoot, McpSettings};
 
 	fn write(path: &Path, body: &str) {
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -948,8 +948,10 @@ mod tests {
 		write(&outside, r#"{"mcpServers":{"escaped":{"command":"bad"}}}"#);
 		symlink(&outside, escaped.join("mcp.json")).unwrap();
 
-		let paths = McpConfigPaths::new(&home.join(".o2"), &project)
-			.with_agent_plugin_roots(vec![plugin.clone(), escaped]);
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project).with_agent_plugin_roots(vec![
+			AgentPluginRoot::explicit(plugin.clone()),
+			AgentPluginRoot::explicit(escaped),
+		]);
 		let paths = paths
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
@@ -1015,7 +1017,7 @@ mod tests {
 		let explicit = temp.path().join("explicit");
 		agent_plugin(&explicit, "explicit", r#"{"tool":{"command":"./tool"}}"#);
 		let paths = McpConfigPaths::new(&home.join(".o2"), &project)
-			.with_agent_plugin_roots(vec![explicit.clone()]);
+			.with_agent_plugin_roots(vec![AgentPluginRoot::explicit(explicit.clone())]);
 
 		let packages = crate::plugin_commands::agent_plugin_launches(&paths);
 		assert_eq!(
@@ -1059,22 +1061,28 @@ mod tests {
 			"{}",
 			blocked[0]
 		);
-		// With project configuration disabled, discovery loads neither the
-		// project's package nor an explicit root (both project-scoped), and
-		// the report names neither.
+		// With project configuration disabled, discovery drops the project's
+		// package and the report no longer names it; the root the invocation
+		// named is the user's own choice and still loads and is reported.
 		let project_disabled = McpSettings { enable_project_config: false };
-		assert!(
+		assert_eq!(
 			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &project_disabled)
-				.is_empty()
+				.iter()
+				.map(|blocked| (blocked.plugin.as_str(), blocked.server.as_str()))
+				.collect::<Vec<_>>(),
+			[("explicit", "tool")]
 		);
 		let all_approved = paths
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
-		assert!(
+		assert_eq!(
 			super::super::config::resolve_sources(&sources(&all_approved), false)
 				.servers
-				.is_empty(),
-			"the loader skips them too"
+				.keys()
+				.map(Str::as_str)
+				.collect::<Vec<_>>(),
+			["tool"],
+			"the loader agrees with the report"
 		);
 		let resolved = super::super::config::resolve_sources(&sources(&paths), true);
 		assert!(!resolved.servers.contains_key("local"), "an unapproved server loaded");
@@ -1111,6 +1119,74 @@ mod tests {
 			crate::plugin_commands::blocked_agent_plugin_launches(&all, &McpSettings::default()).len(),
 			1
 		);
+	}
+
+	/// Only a package that comes from the project is project-scoped: with
+	/// project MCP configuration disabled, a user install and a package in the
+	/// user plugin directories still load and are still reported, while a
+	/// project install and a package in the project's plugin directory do
+	/// neither.
+	#[test]
+	fn agent_plugin_scope_follows_where_the_package_came_from() {
+		use omp_ext::claude_plugin::PluginScope;
+
+		let temp = tempfile::tempdir().unwrap();
+		let home = temp.path().join("home");
+		let project = temp.path().join("project");
+		let user_install = temp.path().join("cache/user-install");
+		let project_install = temp.path().join("cache/project-install");
+		agent_plugin(&user_install, "user-install", r#"{"a":{"command":"./a"}}"#);
+		agent_plugin(&project_install, "project-install", r#"{"b":{"command":"./b"}}"#);
+		agent_plugin(&project.join(".agents/plugins/dir"), "dir", r#"{"c":{"command":"./c"}}"#);
+		agent_plugin(
+			&home.join(".o2/agent/plugins/personal"),
+			"personal",
+			r#"{"d":{"command":"./d"}}"#,
+		);
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project).with_agent_plugin_roots(vec![
+			AgentPluginRoot {
+				root:   user_install,
+				origin: AgentPluginOrigin::Installed(PluginScope::User),
+			},
+			AgentPluginRoot {
+				root:   project_install,
+				origin: AgentPluginOrigin::Installed(PluginScope::Project),
+			},
+		]);
+		assert_eq!(
+			crate::plugin_commands::agent_plugin_launches(&paths)
+				.iter()
+				.map(|package| (package.plugin.as_str(), package.kind))
+				.collect::<Vec<_>>(),
+			[
+				("dir", ConfigSourceKind::AgentPluginProject),
+				("personal", ConfigSourceKind::AgentPluginUser),
+				("user-install", ConfigSourceKind::AgentPluginUser),
+				("project-install", ConfigSourceKind::AgentPluginProject),
+			]
+		);
+		let reported = |enable_project_config: bool| {
+			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &McpSettings {
+				enable_project_config,
+			})
+			.into_iter()
+			.map(|blocked| blocked.server)
+			.collect::<Vec<_>>()
+		};
+		assert_eq!(reported(true), ["c", "d", "a", "b"]);
+		assert_eq!(reported(false), ["d", "a"], "only project packages drop out");
+		let approved = paths
+			.clone()
+			.with_command_approvals(approve_agent_plugins(&paths));
+		let loaded = |enable_project_config: bool| {
+			super::super::config::resolve_sources(&sources(&approved), enable_project_config)
+				.servers
+				.keys()
+				.cloned()
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(loaded(true), ["a", "b", "c", "d"]);
+		assert_eq!(loaded(false), ["a", "d"], "the loader agrees with the report");
 	}
 
 	fn install_plugins(registry: &Path, entries: &[(&str, &Path, bool)]) {

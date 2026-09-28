@@ -417,3 +417,78 @@ fn editing_a_plugin_file_a_launch_names_requires_approval_again() {
 	fixture.approve_all();
 	assert!(fixture.blocked_servers().is_empty());
 }
+
+/// Only an Agent Plugins package that comes from the project is
+/// project-scoped. With `sv_mcp_enable_project_config` off, a package the
+/// user installed and one the invocation names (`--plugin-dir`) still load
+/// and are still reported; a project install is neither.
+#[test]
+fn user_installed_and_explicit_agent_plugins_ignore_the_project_mcp_policy() {
+	let fixture = Fixture::new();
+	let package = |root: &Path, name: &str| {
+		write(
+			&root.join("plugin.json"),
+			&format!(
+				r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"{name}","version":"1.0.0"}}"#
+			),
+		);
+		write(
+			&root.join("mcp.json"),
+			r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{
+				"local":{"type":"stdio","command":"${PLUGIN_ROOT}/server"}}}"#,
+		);
+	};
+	let cache = fixture.data.join("plugins/cache/plugins");
+	let user_package = cache.join("market___personal___1.0.0");
+	let project_package = cache.join("market___shared___1.0.0");
+	package(&user_package, "personal");
+	package(&project_package, "shared");
+	let explicit = fixture.data.join("../explicit");
+	package(&explicit, "explicit");
+	let entry = |scope, install_path: &Path| InstalledPluginEntry {
+		scope,
+		install_path: install_path.to_path_buf(),
+		version: Str::new_static("1.0.0"),
+		installed_at: Str::new_static("2026-01-01T00:00:00Z"),
+		last_updated: Str::new_static("2026-01-01T00:00:00Z"),
+		git_commit_sha: None,
+		enabled: true,
+	};
+	let mut user = InstalledPluginsRegistry::default();
+	user
+		.plugins
+		.insert(Str::new_static("personal@market"), vec![entry(InstallScope::User, &user_package)]);
+	write(
+		&fixture.data.join("plugins").join(REGISTRY_FILE),
+		&serde_json::to_string(&user).expect("registry"),
+	);
+	let mut project = InstalledPluginsRegistry::default();
+	project
+		.plugins
+		.insert(Str::new_static("shared@market"), vec![entry(
+			InstallScope::Project,
+			&project_package,
+		)]);
+	write(
+		&omp_ext::claude_plugin::project_plugins_dir(&fixture.project).join(REGISTRY_FILE),
+		&serde_json::to_string(&project).expect("registry"),
+	);
+
+	let plugins = fixture.resolve();
+	let explicit = explicit.canonicalize().expect("canonical package");
+	let paths = fixture
+		.agent_plugins(&plugins)
+		.with_agent_plugin_roots(agent_plugin_roots(&[explicit], &plugins));
+	let reported = |enable_project_config: bool| {
+		blocked_launches(&plugins, &paths, &omp_envd::mcp::McpSettings { enable_project_config })
+			.into_iter()
+			.map(|blocked| blocked.plugin)
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(reported(true), ["explicit", "shared", "personal"]);
+	assert_eq!(
+		reported(false),
+		["explicit", "personal"],
+		"the project install alone follows the project MCP policy"
+	);
+}

@@ -53,6 +53,7 @@ use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 pub use self::settings::McpSettings;
+use self::config::ConfigSourceKind;
 use super::exthost::control::ControlConnectionIdentity;
 
 const NOTIFICATION_HISTORY: usize = 256;
@@ -653,6 +654,54 @@ impl McpService {
 	}
 }
 
+/// How an Agent Plugins package outside the scanned plugin directories
+/// reached the session; it decides the package's discovery scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentPluginOrigin {
+	/// Named by the invocation (`--plugin-dir`, `--extension`): the user asked
+	/// for it, so it loads whatever the project MCP policy
+	/// ([`ConfigSourceKind::AgentPluginExplicit`]).
+	Explicit,
+	/// Installed from a marketplace at this registry scope: a project install
+	/// is project-scoped ([`ConfigSourceKind::AgentPluginProject`]), a user
+	/// install is not ([`ConfigSourceKind::AgentPluginUser`]).
+	Installed(omp_ext::claude_plugin::PluginScope),
+}
+
+impl AgentPluginOrigin {
+	/// The discovery source a package of this origin joins as.
+	#[must_use]
+	pub const fn source_kind(self) -> ConfigSourceKind {
+		match self {
+			Self::Explicit => ConfigSourceKind::AgentPluginExplicit,
+			Self::Installed(omp_ext::claude_plugin::PluginScope::Project) => {
+				ConfigSourceKind::AgentPluginProject
+			},
+			Self::Installed(omp_ext::claude_plugin::PluginScope::User) => {
+				ConfigSourceKind::AgentPluginUser
+			},
+		}
+	}
+}
+
+/// One Agent Plugins package root MCP discovery reads beside the scanned
+/// plugin directories.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPluginRoot {
+	/// The package root.
+	pub root:   PathBuf,
+	/// How the package reached the session.
+	pub origin: AgentPluginOrigin,
+}
+
+impl AgentPluginRoot {
+	/// A package root the invocation names explicitly.
+	#[must_use]
+	pub const fn explicit(root: PathBuf) -> Self {
+		Self { root, origin: AgentPluginOrigin::Explicit }
+	}
+}
+
 /// Native MCP mutation paths plus the roots used for read-only discovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpConfigPaths {
@@ -664,8 +713,9 @@ pub struct McpConfigPaths {
 	pub root: PathBuf,
 	/// Home root used by read-only foreign-provider discovery.
 	pub(crate) home: PathBuf,
-	/// Explicit contained Agent Plugins package roots.
-	pub(crate) agent_plugin_roots: Vec<PathBuf>,
+	/// Agent Plugins package roots outside the scanned plugin directories:
+	/// explicitly named ones and marketplace installs.
+	pub(crate) agent_plugin_roots: Vec<AgentPluginRoot>,
 	/// Installed Claude-layout marketplace plugins.
 	pub(crate) claude_plugins: Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
 	/// The operator's plugin command approvals, gating Agent Plugins stdio
@@ -706,9 +756,10 @@ impl McpConfigPaths {
 		}
 	}
 
-	/// Adds explicit data-only Agent Plugins package roots.
+	/// Adds data-only Agent Plugins package roots beside the scanned plugin
+	/// directories, each with where it came from.
 	#[must_use]
-	pub fn with_agent_plugin_roots(mut self, roots: Vec<PathBuf>) -> Self {
+	pub fn with_agent_plugin_roots(mut self, roots: Vec<AgentPluginRoot>) -> Self {
 		self.agent_plugin_roots = roots;
 		self
 	}
@@ -741,7 +792,7 @@ fn load_resolved_config(
 	paths: McpConfigPaths,
 	enable_project_config: bool,
 ) -> Result<config::ResolvedConfig, McpServiceError> {
-	use config::{ConfigSource, ConfigSourceKind};
+	use config::ConfigSource;
 
 	let mut sources = [
 		(ConfigSourceKind::User, paths.user.clone()),

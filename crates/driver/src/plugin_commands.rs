@@ -27,7 +27,7 @@ use omp_core::{
 	dirs::{DataDirError, user_config_root},
 };
 use omp_envd::{
-	mcp::{McpConfigPaths, McpSettings},
+	mcp::{AgentPluginOrigin, AgentPluginRoot, McpConfigPaths, McpSettings},
 	plugin_commands::AgentPluginLaunches,
 };
 use omp_ext::{
@@ -48,20 +48,29 @@ pub fn plugin_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
 /// The Agent Plugins package roots a session passes to MCP discovery.
 ///
 /// Beside the plugin directories discovery scans: every
-/// `--extension`/`--plugin-dir` root that is an Agent Plugins package, then
-/// every installed plugin in that layout.
+/// `--extension`/`--plugin-dir` root that is an Agent Plugins package
+/// ([`AgentPluginOrigin::Explicit`]), then every installed plugin in that
+/// layout at its registry scope ([`AgentPluginOrigin::Installed`]). Only a
+/// project install is project-scoped; an explicit root or a user install
+/// loads whatever `sv_mcp_enable_project_config`.
 #[must_use]
-pub fn agent_plugin_roots(native_roots: &[PathBuf], plugins: &ClaudePlugins) -> Vec<PathBuf> {
+pub fn agent_plugin_roots(
+	native_roots: &[PathBuf],
+	plugins: &ClaudePlugins,
+) -> Vec<AgentPluginRoot> {
 	native_roots
 		.iter()
 		.filter(|root| crate::discovery::skills::is_agent_plugin_root(root))
-		.cloned()
+		.map(|root| AgentPluginRoot::explicit(root.clone()))
 		.chain(
 			plugins
 				.plugins
 				.iter()
 				.filter(|plugin| plugin.layout == PluginLayout::AgentPlugins)
-				.map(|plugin| plugin.root.clone()),
+				.map(|plugin| AgentPluginRoot {
+					root:   plugin.root.clone(),
+					origin: AgentPluginOrigin::Installed(plugin.scope),
+				}),
 		)
 		.collect()
 }

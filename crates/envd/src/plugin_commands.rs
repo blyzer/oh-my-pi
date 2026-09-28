@@ -12,8 +12,11 @@
 //! A report of what a session refuses covers only what the session would
 //! load: under [`McpSettings::enable_project_config`] off, MCP discovery
 //! drops every project-scoped source ([`ConfigSourceKind::loads`]), so the
-//! project's Agent Plugins packages and the MCP servers of plugins installed
-//! for the project are neither loaded nor reported.
+//! project's Agent Plugins packages (its plugin directories and project
+//! installs) and the MCP servers of plugins installed for the project are
+//! neither loaded nor reported. A package the invocation names
+//! (`--plugin-dir`) or the user installed is not project-scoped
+//! ([`crate::mcp::AgentPluginOrigin`]) and is loaded and reported either way.
 
 use std::path::PathBuf;
 
@@ -59,7 +62,8 @@ impl AgentPluginLaunches {
 }
 
 /// Every Agent Plugins package MCP discovery would load for `paths`: the
-/// project and user plugin directories, then the explicit roots.
+/// project and user plugin directories, then the roots beside them
+/// (explicitly named packages and marketplace installs).
 #[must_use]
 pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches> {
 	crate::mcp::discovery::agent_plugin_launches(paths)
