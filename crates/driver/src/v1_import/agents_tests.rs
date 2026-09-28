@@ -413,7 +413,11 @@ fn a_project_agent_resets_what_only_the_user_agent_of_its_name_sets() {
 		.iter()
 		.map(|warning| warning.path.as_path())
 		.collect::<Vec<_>>();
-	assert_eq!(skipped, [fixture.config().join("agent/rules/agent-helper.md")]);
+	// Discovery reports canonical paths; the temp root may sit behind a
+	// symlink (macOS `/var` → `/private/var`).
+	let user_rule = std::fs::canonicalize(fixture.config().join("agent/rules/agent-helper.md"))
+		.expect("canonical user rule path");
+	assert_eq!(skipped, [user_rule]);
 	let shadow = rules
 		.get("agent-helper")
 		.expect("the project rule wins the name");
