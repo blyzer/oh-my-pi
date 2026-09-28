@@ -48,6 +48,9 @@ const IMPORT_CHANGED_HINT: &str =
 	"[Enter import · imported: Enter reopens · changed since import: imports again · Esc]";
 /// Note after the name of a row whose transcript changed since its import.
 const CHANGED_NOTE: &str = " · changed since import";
+/// Note after the name of a row not imported yet whose session another file
+/// was imported from.
+const OTHER_FILE_NOTE: &str = " · same session, other file";
 /// Empty-state wording.
 const NO_SESSIONS: &str = "No sessions found";
 /// Border, hint rule, hint, and blank rows around the list.
@@ -213,7 +216,14 @@ impl ForeignSessionPicker {
 			messages: Str,
 			name:     Str,
 			cwd:      Str,
-			imported: Option<bool>,
+			mark:     Option<Mark>,
+		}
+		/// How a row's earlier import shows.
+		#[derive(Clone, Copy)]
+		enum Mark {
+			Current,
+			Changed,
+			OtherFile,
 		}
 		let lines = self
 			.rows
@@ -235,25 +245,29 @@ impl ForeignSessionPicker {
 				label.push_str(&path);
 				label.push(' ');
 				label.push_str(&cwd);
-				let changed = match &row.imported {
-					None => None,
-					Some(ForeignImport::Current(_)) => Some(false),
-					Some(ForeignImport::Changed(_)) => Some(true),
-				};
-				if let Some(changed) = changed {
-					label.push_str(" imported");
-					if changed {
+				let mark = row.imported.as_ref().map(|imported| match imported {
+					ForeignImport::Current(_) => Mark::Current,
+					ForeignImport::Changed(_) => Mark::Changed,
+					ForeignImport::OtherFile(_) => Mark::OtherFile,
+				});
+				match mark {
+					None => {},
+					Some(Mark::Current) => label.push_str(" imported"),
+					Some(Mark::Changed) => {
+						label.push_str(" imported");
 						label.push_str(CHANGED_NOTE);
-					}
+					},
+					// Not imported: filtering for `imported` leaves it out.
+					Some(Mark::OtherFile) => label.push_str(OTHER_FILE_NOTE),
 				}
 				Line {
-					value:    Str::new(path),
-					label:    label.freeze(),
-					stamp:    self.stamp(row.modified_ms),
+					value: Str::new(path),
+					label: label.freeze(),
+					stamp: self.stamp(row.modified_ms),
 					messages: sf!("{} msgs", row.messages),
-					name:     Str::new(Self::display_name(row)),
-					cwd:      Str::new(cwd),
-					imported: changed,
+					name: Str::new(Self::display_name(row)),
+					cwd: Str::new(cwd),
+					mark,
 				}
 			})
 			.collect::<Vec<_>>();
@@ -266,7 +280,11 @@ impl ForeignSessionPicker {
 			.any(|row| matches!(row.imported, Some(ForeignImport::Changed(_))))
 		{
 			IMPORT_CHANGED_HINT
-		} else if self.rows.iter().any(|row| row.imported.is_some()) {
+		} else if self
+			.rows
+			.iter()
+			.any(|row| matches!(row.imported, Some(ForeignImport::Current(_))))
+		{
 			IMPORT_REOPEN_HINT
 		} else {
 			IMPORT_HINT
@@ -280,14 +298,16 @@ impl ForeignSessionPicker {
 								<td><pre fg=muted>{line.stamp}</pre></td>
 								<td align=end><pre fg=muted>{line.messages}</pre></td>
 								<td truncate grow>
-									match line.imported {
-										Some(false) => { <icon name="success" fg=success/> }
-										Some(true) => { <icon name="changed" fg=warning/> }
-										None => {}
+									match line.mark {
+										Some(Mark::Current) => { <icon name="success" fg=success/> }
+										Some(Mark::Changed) => { <icon name="changed" fg=warning/> }
+										Some(Mark::OtherFile) | None => {}
 									}
 									<pre>{line.name}</pre>
-									if line.imported == Some(true) {
-										<pre fg=warning>{CHANGED_NOTE}</pre>
+									match line.mark {
+										Some(Mark::Changed) => { <pre fg=warning>{CHANGED_NOTE}</pre> }
+										Some(Mark::OtherFile) => { <pre fg=muted>{OTHER_FILE_NOTE}</pre> }
+										Some(Mark::Current) | None => {}
 									}
 								</td>
 								<td truncate=start><pre fg=muted>{line.cwd}</pre></td>
@@ -1212,6 +1232,72 @@ mod tests {
 			panic!("Enter imports the highlighted row");
 		};
 		assert_eq!(path, PathBuf::from("/v1/sessions/-p/grown.jsonl"));
+	}
+
+	/// A v1 row whose session id only another file's import carries is not
+	/// imported: it is noted "same session, other file", carries no imported
+	/// mark, stays out of an `imported` filter, and picking it imports it.
+	#[test]
+	fn the_v1_picker_notes_another_file_of_an_imported_session() {
+		let ctx = UiContext::default();
+		let mut copy = v1_row(
+			"alpha",
+			"Copied session",
+			Some(ForeignImport::OtherFile(PathBuf::from("/v2/projects/p/sessions/01J.oms"))),
+		);
+		copy.path = PathBuf::from("/v1/sessions/-elsewhere/alpha.jsonl");
+		let mut picker = ForeignSessionPicker::from_rows(
+			ForeignSessionSource::Omp1,
+			vec![
+				v1_row("alpha", "Original session", current("/v2/projects/p/sessions/01J.oms")),
+				copy,
+			],
+			TimeZone::UTC,
+			VIEWPORT,
+			&ctx,
+		)
+		.unwrap();
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		let line = |title: &str| {
+			screen
+				.lines()
+				.find(|line| line.contains(title))
+				.unwrap_or_default()
+				.to_owned()
+		};
+		let success = ctx.charset.icon_named("success").expect("success icon");
+		let changed = ctx.charset.icon_named("changed").expect("changed icon");
+		let copied = line("Copied session");
+		assert!(copied.contains("same session, other file"), "{screen}");
+		assert!(!copied.contains(success) && !copied.contains(changed), "{screen}");
+		assert!(!copied.contains("changed since import"), "{screen}");
+		assert!(line("Original session").contains(success), "{screen}");
+
+		for key in "imported".chars() {
+			picker.key(Key::Char(key));
+		}
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		assert!(
+			screen.contains("Original session") && !screen.contains("Copied session"),
+			"{screen}"
+		);
+		for _ in "imported".chars() {
+			picker.key(Key::Backspace);
+		}
+		for key in "other file".chars() {
+			picker.key(Key::Char(key));
+		}
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		assert!(
+			screen.contains("Copied session") && !screen.contains("Original session"),
+			"{screen}"
+		);
+		let PanelEvent::Command(HostCommand::ForeignSessionImport { path, .. }) =
+			picker.key(Key::Enter)
+		else {
+			panic!("Enter imports the highlighted row");
+		};
+		assert_eq!(path, PathBuf::from("/v1/sessions/-elsewhere/alpha.jsonl"));
 	}
 
 	fn text(picker: &mut SessionPicker) -> String {

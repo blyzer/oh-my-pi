@@ -6,12 +6,15 @@ use std::{
 	collections::BTreeMap,
 	fs,
 	path::{Path, PathBuf},
+	time::{Duration, SystemTime},
 };
 
 use omp_core::{Hash32, Str};
 use omp_dom::{Op, PropKey, Txn, Value};
 use omp_journal::blob::{BlobRef, BlobStore};
-use omp_session::import::{IMPORT_FORMAT, IMPORT_SOURCE_BLOB, IMPORT_SOURCE_ID, OMP1_FORMAT};
+use omp_session::import::{
+	IMPORT_FORMAT, IMPORT_SOURCE, IMPORT_SOURCE_BLOB, IMPORT_SOURCE_ID, OMP1_FORMAT, SourceStamp,
+};
 use parking_lot::Mutex;
 use serde_json::json;
 
@@ -29,14 +32,16 @@ struct Call {
 }
 
 /// Writes a one-message journal per transcript, with the provenance the
-/// app's importer records first (the transcript's digest unless
-/// `unrecorded`), and records every call; the transcript named `fail` fails
-/// after writing a partial destination.
+/// app's importer records first (the transcript's path, its digest unless
+/// `unrecorded`, and its settled stamp unless `unstamped`), and records every
+/// call; the transcript named `fail` fails after writing a partial
+/// destination.
 #[derive(Default)]
 struct Recorder {
 	calls:      Mutex<Vec<Call>>,
 	fail:       Option<PathBuf>,
 	unrecorded: bool,
+	unstamped:  bool,
 }
 
 impl V1SessionConverter for Recorder {
@@ -64,11 +69,23 @@ impl V1SessionConverter for Recorder {
 			prop:  PropKey::Custom(Str::new_static(prop)),
 			value: Value::Str(Str::new(value)),
 		};
-		let mut ops =
-			vec![set(IMPORT_FORMAT, OMP1_FORMAT), set(IMPORT_SOURCE_ID, conversion.source_id)];
+		let mut ops = vec![
+			set(IMPORT_FORMAT, OMP1_FORMAT),
+			set(IMPORT_SOURCE_ID, conversion.source_id),
+			set(IMPORT_SOURCE, &conversion.source.to_string_lossy()),
+		];
+		let taken = SystemTime::now();
+		let stat = fs::metadata(conversion.source)?;
+		let bytes = fs::read(conversion.source)?;
 		if !self.unrecorded {
-			let digest = Hash32::sum(fs::read(conversion.source)?);
+			let digest = Hash32::sum(&bytes);
 			ops.push(set(IMPORT_SOURCE_BLOB, &format!("artifact://sha256/{}", digest.to_hex())));
+		}
+		if !self.unstamped
+			&& let Some(stamp) =
+				SourceStamp::of(&stat).and_then(|stamp| stamp.recordable(bytes.len() as u64, taken))
+		{
+			ops.extend(stamp.ops(meta));
 		}
 		session.patch(Txn { cause, label: None, ops })?;
 		session.begin_turn()?;
@@ -869,4 +886,249 @@ fn obsolete_import_records_are_retired_and_nothing_else() {
 			.iter()
 			.all(|entry| !matches!(entry.outcome, ImportOutcome::NeedsAttention(_)))
 	);
+}
+
+/// How many transcripts this thread digested so far.
+fn digests() -> usize {
+	super::DIGESTS.with(std::cell::Cell::get)
+}
+
+/// Sets `path`'s modification time a minute back: settled, so an import
+/// records its stamp.
+fn backdate(path: &Path) {
+	let earlier = SystemTime::now() - Duration::from_secs(60);
+	fs::File::options()
+		.write(true)
+		.open(path)
+		.and_then(|file| file.set_modified(earlier))
+		.expect("backdate");
+}
+
+/// Rewrites `from` as `to` (of the same length) in place, as v1 rewrote its
+/// padded title slot: same size, new modification time.
+fn retitle(transcript: &Path, from: &str, to: &str) {
+	assert_eq!(from.len(), to.len());
+	let bytes = fs::read(transcript).expect("transcript");
+	let at = memchr::memmem::find(&bytes, from.as_bytes()).expect("title");
+	let mut edited = bytes.clone();
+	edited[at..at + to.len()].copy_from_slice(to.as_bytes());
+	fs::write(transcript, &edited).expect("retitle");
+	assert_eq!(fs::metadata(transcript).expect("stat").len(), bytes.len() as u64);
+}
+
+/// The v2 pin list of the fixture project's bucket.
+fn project_pins(fixture: &Fixture) -> Vec<String> {
+	let state = ProjectBucket::for_cwd(Some(&fixture.project))
+		.state_dir(&fixture.v2.data_dir)
+		.expect("state");
+	fs::read(state.join("session-pins.json"))
+		.map(|bytes| serde_json::from_slice(&bytes).expect("pin list"))
+		.unwrap_or_default()
+}
+
+fn stem(journal: &Path) -> String {
+	journal
+		.file_stem()
+		.and_then(|stem| stem.to_str())
+		.expect("ULID stem")
+		.to_owned()
+}
+
+#[test]
+fn the_pin_follows_the_newest_import_of_a_pinned_session() {
+	let fixture = Fixture::new();
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	let beta = fixture.session(None, "beta", &fixture.project);
+	write(&fixture.agent(None).join("session-pins.json"), "[\"alpha\"]");
+	let v1_pins = fs::read(fixture.agent(None).join("session-pins.json")).expect("v1 pins");
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder::default();
+	let offline = omp_con::Ctx::new();
+	let bulk = SessionImport::Bulk(&recorder);
+	run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
+	let index = ImportedIndex::scan(&pairs[0].target).expect("index");
+	let first = index.journal("alpha").expect("alpha").to_owned();
+	let beta_first = index.journal("beta").expect("beta").to_owned();
+	assert_eq!(project_pins(&fixture), [stem(&first)]);
+	// The user pins beta's journal in v2; v1 does not pin beta.
+	let state = fixture
+		.sessions_dir(&ProjectBucket::for_cwd(Some(&fixture.project)))
+		.with_file_name("session-pins.json");
+	fs::write(&state, serde_json::to_vec(&[stem(&first), stem(&beta_first)]).expect("json"))
+		.expect("user pin");
+
+	grow(&alpha, "went on");
+	grow(&beta, "went on too");
+	let again = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(outcomes(&again), [
+		(Some("alpha"), OutcomeKind::Reimported),
+		(Some("beta"), OutcomeKind::Reimported),
+	]);
+	let index = ImportedIndex::scan(&pairs[0].target).expect("index");
+	let second = index.journal("alpha").expect("alpha").to_owned();
+	let beta_second = index.journal("beta").expect("beta").to_owned();
+	assert_ne!(second, first);
+	// alpha's pin moved to its newest journal; beta's v2 pin, which v1 never
+	// set, stays where the user put it, and the new journal is not pinned.
+	assert_eq!(project_pins(&fixture), [stem(&beta_first), stem(&second)]);
+	assert!(!project_pins(&fixture).contains(&stem(&beta_second)));
+
+	// The picker's re-import moves it too.
+	grow(&alpha, "and on");
+	let picked = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+	assert_eq!(picked.previous.as_deref(), Some(second.as_path()));
+	assert_eq!(project_pins(&fixture), [stem(&beta_first), stem(&picked.journal)]);
+	// Pins are v2 state: v1's list is only read.
+	assert_eq!(fs::read(fixture.agent(None).join("session-pins.json")).expect("v1"), v1_pins);
+}
+
+#[test]
+fn an_unchanged_transcript_is_not_read_to_tell_it_is_current() {
+	let fixture = Fixture::new();
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	backdate(&alpha);
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder::default();
+	let offline = omp_con::Ctx::new();
+	let bulk = SessionImport::Bulk(&recorder);
+	let picked = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+
+	// Listing, a dry run, a bulk run, and picking it again all find it
+	// current from its size and modification time alone.
+	let before = digests();
+	assert_eq!(
+		list(&pairs[0]).expect("list")[0].imported,
+		Some(PriorImport::Current(picked.journal.clone()))
+	);
+	let dry = run_with(&pairs, ImportMode::DryRun, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(outcomes(&dry), [(Some("alpha"), OutcomeKind::Skipped)]);
+	let rerun = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(outcomes(&rerun), [(Some("alpha"), OutcomeKind::Skipped)]);
+	assert!(
+		!import_selected(&pairs[0], &alpha, &recorder)
+			.expect("reopen")
+			.converted
+	);
+	assert_eq!(digests(), before, "an unchanged transcript is never digested");
+
+	// Touched but unchanged: the stamp differs, the digest still matches.
+	fs::File::options()
+		.write(true)
+		.open(&alpha)
+		.and_then(|file| file.set_modified(SystemTime::now()))
+		.expect("touch");
+	assert_eq!(
+		list(&pairs[0]).expect("list")[0].imported,
+		Some(PriorImport::Current(picked.journal.clone()))
+	);
+	assert_eq!(digests(), before + 1);
+
+	// v1 rewrote its padded title slot in place: the size is the same, the
+	// modification time is not, so the digest finds the change.
+	retitle(&alpha, "alpha title", "alpha TITLE");
+	assert_eq!(
+		list(&pairs[0]).expect("list")[0].imported,
+		Some(PriorImport::Changed(picked.journal))
+	);
+	assert_eq!(digests(), before + 2);
+}
+
+#[test]
+fn a_journal_without_a_recorded_stamp_falls_back_to_the_digest() {
+	let fixture = Fixture::new();
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	backdate(&alpha);
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder { unstamped: true, ..Recorder::default() };
+	let picked = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+
+	let before = digests();
+	assert_eq!(
+		list(&pairs[0]).expect("list")[0].imported,
+		Some(PriorImport::Current(picked.journal.clone()))
+	);
+	assert_eq!(digests(), before + 1, "no stamp to trust: digested");
+	grow(&alpha, "later");
+	assert_eq!(
+		list(&pairs[0]).expect("list")[0].imported,
+		Some(PriorImport::Changed(picked.journal))
+	);
+
+	// A transcript modified too recently records no stamp either.
+	let fresh = Fixture::new();
+	let beta = fresh.session(None, "beta", &fresh.project);
+	let pairs = fresh.pairs(&ProfileSelection::All);
+	let picked = import_selected(&pairs[0], &beta, &Recorder::default()).expect("pick");
+	let entries = omp_journal::Journal::scan(&picked.journal).expect("journal");
+	let origin = omp_session::import::import_origin(&entries).expect("origin");
+	assert_eq!(origin.source_stamp, None);
+	assert!(origin.source_digest.is_some());
+}
+
+#[test]
+fn another_file_of_an_imported_session_is_its_own_import() {
+	let fixture = Fixture::new();
+	// The v1 home is reached through a symlink: the picker canonicalizes
+	// what it imports, a listing and a bulk run do not.
+	#[cfg(unix)]
+	{
+		let real = fixture.root.path().join("real-home");
+		fs::create_dir_all(&real).expect("real home");
+		std::os::unix::fs::symlink(&real, &fixture.home).expect("home link");
+	}
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	// A second file carrying the same session id: a copy that went on.
+	let copy = fixture
+		.agent(None)
+		.join("sessions/-elsewhere/2026-01-02T03-04-05-000Z_alpha.jsonl");
+	fs::create_dir_all(copy.parent().expect("parent")).expect("dir");
+	fs::copy(&alpha, &copy).expect("copy");
+	grow(&copy, "only in the copy");
+	write(&fixture.agent(None).join("session-pins.json"), "[\"alpha\"]");
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder::default();
+	let offline = omp_con::Ctx::new();
+	let bulk = SessionImport::Bulk(&recorder);
+	let first = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+	assert_eq!(project_pins(&fixture), [stem(&first.journal)]);
+
+	let prior = |path: &Path| {
+		list(&pairs[0])
+			.expect("list")
+			.into_iter()
+			.find(|row| row.path == path)
+			.expect("row")
+			.imported
+	};
+	assert_eq!(prior(&alpha), Some(PriorImport::Current(first.journal.clone())));
+	assert_eq!(prior(&copy), Some(PriorImport::OtherFile(first.journal.clone())));
+	// Transcripts go in path order: `-elsewhere` first.
+	let dry = run_with(&pairs, ImportMode::DryRun, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(outcomes(&dry), [
+		(Some("alpha (same session, other file)"), OutcomeKind::WouldImport),
+		(Some("alpha"), OutcomeKind::Skipped),
+	]);
+
+	let report = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(outcomes(&report), [
+		(Some("alpha (same session, other file)"), OutcomeKind::Imported),
+		(Some("alpha"), OutcomeKind::Skipped),
+	]);
+	let Some(PriorImport::Current(copied)) = prior(&copy) else {
+		panic!("the copy has its own journal now");
+	};
+	assert_ne!(copied, first.journal);
+	assert_eq!(prior(&alpha), Some(PriorImport::Current(first.journal.clone())));
+	// Neither import supersedes the other: both files are pinned, as v1 pins
+	// the id.
+	assert_eq!(project_pins(&fixture), [stem(&first.journal), stem(&copied)]);
+
+	// A change to one file is a change to that file's import only.
+	grow(&alpha, "the original went on");
+	assert_eq!(prior(&alpha), Some(PriorImport::Changed(first.journal.clone())));
+	assert_eq!(prior(&copy), Some(PriorImport::Current(copied.clone())));
+	let again = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+	assert_eq!(again.previous.as_deref(), Some(first.journal.as_path()));
+	assert_eq!(again.other_file, None);
+	assert_eq!(project_pins(&fixture), [stem(&copied), stem(&again.journal)]);
 }

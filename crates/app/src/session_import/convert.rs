@@ -1,5 +1,6 @@
 use std::{
 	fs,
+	io::Read as _,
 	path::Path,
 	time::{SystemTime, UNIX_EPOCH},
 };
@@ -90,9 +91,18 @@ fn import(
 	if let Some(parent) = destination.parent() {
 		fs::create_dir_all(parent).into_diagnostic()?;
 	}
-	let bytes = fs::read(source).into_diagnostic()?;
+	// The stamp is taken before the bytes are read: a write after it moves
+	// the modification time past the recorded one.
+	let mut file = fs::File::open(source).into_diagnostic()?;
+	let stamped_at = SystemTime::now();
+	let file_metadata = file.metadata().into_diagnostic()?;
+	let mut bytes = Vec::with_capacity(usize::try_from(file_metadata.len()).unwrap_or(0));
+	file.read_to_end(&mut bytes).into_diagnostic()?;
+	drop(file);
+	let source_stamp = import::SourceStamp::of(&file_metadata).and_then(|stamp| {
+		stamp.recordable(u64::try_from(bytes.len()).unwrap_or(u64::MAX), stamped_at)
+	});
 	let (mut records, mut metadata) = parse_records(&bytes);
-	let file_metadata = fs::metadata(source).into_diagnostic()?;
 	let fallback_ms = system_time_millis(file_metadata.modified().unwrap_or(UNIX_EPOCH));
 	scan_metadata(&records, fallback_ms, &mut metadata);
 	if format == ForeignFormat::Omp1 {
@@ -132,40 +142,38 @@ fn import(
 	let meta = session.dom().meta();
 	let cause = head(&session)?;
 	let provenance_raw = serde_json::value::to_raw_value(&provenance).into_diagnostic()?;
+	let mut ops = vec![
+		Op::Set {
+			h:     meta,
+			prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE)),
+			value: DomValue::Str(Str::new(source.to_string_lossy())),
+		},
+		Op::Set {
+			h:     meta,
+			prop:  PropKey::Custom(Str::new_static(import::IMPORT_FORMAT)),
+			value: DomValue::Str(Str::new(format_name.as_str())),
+		},
+		Op::Set {
+			h:     meta,
+			prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE_BLOB)),
+			value: DomValue::Str(source_address.clone()),
+		},
+		Op::Ins {
+			parent: meta,
+			after:  session.dom().children(meta).last().copied(),
+			node:   NodeSpec::new(Tag::Custom(Str::new_static("foreign-import")))
+				.with_prop(PropId::Data, DomValue::Json(provenance_raw))
+				.with_prop(PropId::Blob, DomValue::Str(source_address))
+				.with_prop(PropId::Mime, DomValue::Str(source_blob.mime))
+				.with_prop(
+					PropKey::Custom(Str::new_static(import::ARTIFACT_SIZE)),
+					DomValue::Int(i64::try_from(source_blob.blob.size).unwrap_or(i64::MAX)),
+				),
+		},
+	];
+	ops.extend(source_stamp.into_iter().flat_map(|stamp| stamp.ops(meta)));
 	session
-		.patch(Txn {
-			cause,
-			label: Some(Str::new_static("session.import")),
-			ops: vec![
-				Op::Set {
-					h:     meta,
-					prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE)),
-					value: DomValue::Str(Str::new(source.to_string_lossy())),
-				},
-				Op::Set {
-					h:     meta,
-					prop:  PropKey::Custom(Str::new_static(import::IMPORT_FORMAT)),
-					value: DomValue::Str(Str::new(format_name.as_str())),
-				},
-				Op::Set {
-					h:     meta,
-					prop:  PropKey::Custom(Str::new_static(import::IMPORT_SOURCE_BLOB)),
-					value: DomValue::Str(source_address.clone()),
-				},
-				Op::Ins {
-					parent: meta,
-					after:  session.dom().children(meta).last().copied(),
-					node:   NodeSpec::new(Tag::Custom(Str::new_static("foreign-import")))
-						.with_prop(PropId::Data, DomValue::Json(provenance_raw))
-						.with_prop(PropId::Blob, DomValue::Str(source_address))
-						.with_prop(PropId::Mime, DomValue::Str(source_blob.mime))
-						.with_prop(
-							PropKey::Custom(Str::new_static(import::ARTIFACT_SIZE)),
-							DomValue::Int(i64::try_from(source_blob.blob.size).unwrap_or(i64::MAX)),
-						),
-				},
-			],
-		})
+		.patch(Txn { cause, label: Some(Str::new_static("session.import")), ops })
 		.into_diagnostic()?;
 	let mut metadata_ops = Vec::new();
 	if let Some(title) = &metadata.title {

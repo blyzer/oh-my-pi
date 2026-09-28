@@ -755,6 +755,60 @@ mod omp1 {
 		)]));
 	}
 
+	/// The converter records the transcript's size and modification time
+	/// beside its digest once the file settled, so a listing finds it
+	/// current without reading it. v1 rewrites its padded title slot in
+	/// place, keeping the size but moving the modification time: the listing
+	/// then digests it and finds the change. A transcript modified moments
+	/// before its import records no stamp.
+	#[test]
+	fn a_v1_import_records_the_transcript_stamp_and_a_same_size_retitle_is_caught() {
+		use std::time::{Duration, SystemTime};
+
+		use omp_session::import::{SourceStamp, import_origin};
+
+		let tree = Tree::new();
+		let title = |text: &str| json!({"type": "title", "v": 1, "title": text, "updatedAt": "2026-01-02T03:04:07.000Z", "pad": "    "});
+		let source = tree.transcript("stamped", &[
+			title("First title"),
+			tree.header("stamped"),
+			user("u1", None, "question"),
+		]);
+		fs::File::options()
+			.write(true)
+			.open(&source)
+			.and_then(|file| file.set_modified(SystemTime::now() - Duration::from_secs(60)))
+			.expect("settle");
+		let (journal, session) = tree.import(&source);
+		drop(session);
+		let entries = Journal::scan(&journal).expect("journal");
+		let origin = import_origin(&entries).expect("origin");
+		let stat = fs::metadata(&source).expect("stat");
+		assert!(origin.source_stamp.is_some());
+		assert_eq!(origin.source_stamp, SourceStamp::of(&stat));
+		assert_eq!(origin.source_stamp.map(|stamp| stamp.size), Some(stat.len()));
+		let pair = tree.pair();
+		assert_eq!(
+			list(&pair).expect("list")[0].imported,
+			Some(PriorImport::Current(journal.clone()))
+		);
+
+		let bytes = fs::read(&source).expect("transcript");
+		let text = String::from_utf8(bytes).expect("utf-8");
+		let retitled = text.replacen("First title", "Other title", 1);
+		assert_eq!(retitled.len(), text.len());
+		fs::write(&source, retitled).expect("retitle in place");
+		assert_eq!(list(&pair).expect("list")[0].imported, Some(PriorImport::Changed(journal)));
+
+		let fresh = tree.transcript("fresh", &[tree.header("fresh"), user("u1", None, "now")]);
+		let (journal, session) = tree.import(&fresh);
+		drop(session);
+		let entries = Journal::scan(&journal).expect("journal");
+		let origin = import_origin(&entries).expect("origin");
+		assert_eq!(origin.source_stamp, None, "modified moments ago: nothing to trust");
+		assert!(origin.source_digest.is_some());
+	}
+
 	/// `--dry-run --sessions` reports a referenced v1 artifact that is gone,
 	/// as a real run does, and writes nothing.
 	#[test]
