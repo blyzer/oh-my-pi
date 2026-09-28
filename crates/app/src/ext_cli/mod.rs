@@ -2071,32 +2071,25 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 
 /// Every command the plugin identity `id` launches as a session in the
 /// project resolves it (the installed plugin `id`, and each Agent Plugins
-/// package named `id` in the plugin directories, `plugin_dirs`, or installed
-/// as `id`), with the operator's current approvals.
+/// package with that identity in the plugin directories, `plugin_dirs`, or
+/// installed as `id`), with the operator's current approvals.
 fn plugin_command_sets(
 	state: &StatePaths,
 	data_dir: &Path,
 	id: &str,
 	plugin_dirs: &[PathBuf],
 ) -> miette::Result<(Vec<PluginCommandSet>, CommandApprovals)> {
-	let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(
-		data_dir,
-		&state.project,
-		omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
-	);
 	let plugin_dirs = plugin_dirs
 		.iter()
 		.map(|root| fs::canonicalize(root).into_diagnostic())
 		.collect::<miette::Result<Vec<_>>>()?;
-	let agent_plugins =
-		omp_driver::plugin_commands::agent_plugin_paths(&state.project, &plugin_dirs, &plugins)
-			.into_diagnostic()?;
-	let sets = omp_driver::plugin_commands::command_sets(
+	omp_driver::plugin_commands::resolve_command_sets(
+		data_dir,
+		&state.project,
+		&plugin_dirs,
 		omp_ext::plugin_command::PluginId::from_ref(id),
-		&plugins,
-		&agent_plugins,
-	);
-	Ok((sets, plugins.command_approvals))
+	)
+	.into_diagnostic()
 }
 
 /// `omp ext trust <plugin> --show`: writes every command the plugin
@@ -2135,20 +2128,18 @@ fn show_plugin_commands(
 
 /// `omp ext trust <plugin> --approve-command <digest>` / `--approve-commands`:
 /// records the operator's approval of the plugin's named (or every) current
-/// command in the local grant file; the next session runs them.
+/// command in the local grant file, through the same admission as the
+/// in-chat `/plugins approve`
+/// ([`omp_driver::plugin_commands::approve_commands`]); the next session runs
+/// them.
 fn approve_plugin_commands(
 	state: &StatePaths,
 	data_dir: &Path,
 	args: &ExtTrustArgs,
 ) -> miette::Result<()> {
+	use omp_driver::plugin_commands::{ApproveCommandsError, CommandSelection, approve_commands};
+
 	let (sets, _) = plugin_command_sets(state, data_dir, &args.id, &args.plugin_dir)?;
-	if sets.is_empty() {
-		return Err(miette!(
-			"{} is neither an installed, enabled plugin nor an Agent Plugins package this project \
-			 loads (pass --plugin-dir for a package loaded with --plugin-dir)",
-			args.id
-		));
-	}
 	let requested = args
 		.approve_command
 		.iter()
@@ -2161,57 +2152,36 @@ fn approve_plugin_commands(
 				.map_err(|error| miette!("invalid command digest {digest}: {error}"))
 		})
 		.collect::<miette::Result<Vec<_>>>()?;
-	for digest in &requested {
-		if !sets.iter().any(|set| {
-			set.launches
-				.iter()
-				.any(|launch| set.command_digest(launch) == *digest)
-		}) {
-			return Err(miette!(
-				"{} declares no command with digest {digest}; `omp ext trust {} --show` lists them",
-				args.id,
-				args.id
-			));
-		}
-	}
-	let mut approved = 0_usize;
-	for set in &sets {
-		let selected = set
-			.launches
-			.iter()
-			.filter(|launch| args.approve_commands || requested.contains(&set.command_digest(launch)));
-		for launch in selected {
-			// A launch naming a plugin file that cannot be read cannot be
-			// approved: its contents are part of the approval.
-			if let Some(unreadable) = launch.files.unreadable() {
-				eprintln!(
-					"not approved {} {} `{}`: the plugin file `{}` it names cannot be read",
-					set.plugin,
-					launch.kind,
-					launch.server,
-					unreadable.path.display()
-				);
-				continue;
-			}
-			omp_driver::plugin_commands::approve_launch(
-				data_dir,
-				&set.plugin,
-				&set.version,
-				launch,
-				Str::new_static("cli"),
-			)
-			.into_diagnostic()?;
-			approved += 1;
-			println!(
-				"approved {} {} `{}`: {}",
-				set.plugin,
+	let selection = if args.approve_commands {
+		CommandSelection::All
+	} else {
+		CommandSelection::Digests(&requested)
+	};
+	let id = omp_ext::plugin_command::PluginId::from_ref(&args.id);
+	let outcome = match approve_commands(data_dir, &sets, id, selection, Str::new_static("cli")) {
+		Ok(outcome) => outcome,
+		Err(error @ ApproveCommandsError::UnknownPlugin { .. }) => {
+			return Err(miette!("{error} (pass --plugin-dir for a package loaded with --plugin-dir)"));
+		},
+		Err(error @ ApproveCommandsError::UnknownDigest { .. }) => {
+			return Err(miette!("{error}; `omp ext trust {id} --show` lists them"));
+		},
+		Err(error) => return Err(error).into_diagnostic(),
+	};
+	for (plugin, launch) in &outcome.unreadable {
+		if let Some(unreadable) = launch.files.unreadable() {
+			eprintln!(
+				"not approved {plugin} {} `{}`: the plugin file `{}` it names cannot be read",
 				launch.kind,
 				launch.server,
-				launch.command_line()
+				unreadable.path.display()
 			);
 		}
 	}
-	if approved == 0 {
+	for (plugin, launch) in &outcome.approved {
+		println!("approved {plugin} {} `{}`: {}", launch.kind, launch.server, launch.command_line());
+	}
+	if outcome.approved.is_empty() {
 		println!("{} launches no commands", args.id);
 	}
 	Ok(())

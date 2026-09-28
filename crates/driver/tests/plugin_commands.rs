@@ -500,3 +500,106 @@ fn user_installed_and_explicit_agent_plugins_ignore_the_project_mcp_policy() {
 		"the project install alone follows the project MCP policy"
 	);
 }
+
+/// `approve_commands` is the one approval writer behind `omp ext trust` and
+/// the in-chat `/plugins approve`: it refuses an unknown identity or digest
+/// before recording anything, approves one command or all of them under the
+/// digests the seams check, and never approves a command naming an
+/// unreadable plugin file.
+#[test]
+fn approve_commands_admits_by_digest_or_all_and_refuses_unknowns() {
+	use omp_core::Hash32;
+	use omp_driver::plugin_commands::{
+		ApproveCommandsError, CommandSelection, approve_commands, resolve_command_sets,
+	};
+
+	let fixture = Fixture::new();
+	let id = PluginId::from_ref("tools@market");
+	let (sets, approvals) =
+		resolve_command_sets(&fixture.data, &fixture.project, &[], id).expect("resolve");
+	assert!(approvals.of(id).next().is_none());
+	let [set] = &sets[..] else {
+		panic!("one plugin: {sets:?}");
+	};
+	let grant = || Str::new_static("interactive");
+
+	let unknown = PluginId::from_ref("nothing@market");
+	let (none, _) =
+		resolve_command_sets(&fixture.data, &fixture.project, &[], unknown).expect("resolve");
+	assert!(matches!(
+		approve_commands(&fixture.data, &none, unknown, CommandSelection::All, grant()),
+		Err(ApproveCommandsError::UnknownPlugin { .. })
+	));
+	let stray = Hash32::sum(b"stray");
+	assert!(matches!(
+		approve_commands(
+			&fixture.data,
+			&sets,
+			id,
+			CommandSelection::Digests(&[stray]),
+			grant()
+		),
+		Err(ApproveCommandsError::UnknownDigest { digest, .. }) if digest == stray
+	));
+	assert_eq!(fixture.blocked_servers().len(), 4, "a refused request records nothing");
+
+	let lsp = set
+		.launches
+		.iter()
+		.find(|launch| launch.kind == PluginLaunchKind::LanguageServer)
+		.expect("language server");
+	let one = approve_commands(
+		&fixture.data,
+		&sets,
+		id,
+		CommandSelection::Digests(&[set.command_digest(lsp)]),
+		grant(),
+	)
+	.expect("approve one");
+	assert_eq!(one.approved.len(), 1);
+	assert_eq!(fixture.blocked_servers().len(), 3);
+	let grants = GrantsFile::read(&grants_path(&fixture.data)).expect("grant file");
+	assert_eq!(grants.plugin_commands[0].granted_by, "interactive");
+
+	let all = approve_commands(&fixture.data, &sets, id, CommandSelection::All, grant())
+		.expect("approve all");
+	assert_eq!(all.approved.len(), 4);
+	assert!(all.unreadable.is_empty());
+	assert!(fixture.blocked_servers().is_empty());
+}
+
+/// A command naming a plugin file that cannot be read is reported and never
+/// approved, even when every command is selected.
+#[cfg(unix)]
+#[test]
+fn approve_commands_never_approves_an_unreadable_plugin_file() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	use omp_driver::plugin_commands::{CommandSelection, approve_commands, resolve_command_sets};
+
+	let fixture = Fixture::new();
+	let script = fixture.plugin.join("bin/on-stop");
+	write(&script, "#!/bin/sh\nexit 0\n");
+	fs::set_permissions(&script, fs::Permissions::from_mode(0o000)).expect("chmod");
+	if fs::read(&script).is_ok() {
+		// Running with privileges that ignore file modes: nothing to prove.
+		return;
+	}
+	let id = PluginId::from_ref("tools@market");
+	let (sets, _) = resolve_command_sets(&fixture.data, &fixture.project, &[], id).expect("resolve");
+	let outcome = approve_commands(
+		&fixture.data,
+		&sets,
+		id,
+		CommandSelection::All,
+		Str::new_static("interactive"),
+	)
+	.expect("approve");
+	assert_eq!(outcome.approved.len(), 3);
+	let [(_, hook)] = &outcome.unreadable[..] else {
+		panic!("the hook naming the unreadable script: {outcome:?}");
+	};
+	assert_eq!(hook.kind, PluginLaunchKind::Hook);
+	assert_eq!(fixture.blocked_servers(), [(PluginLaunchKind::Hook, Str::new_static("Stop"))]);
+	fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod back");
+}

@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use omp_con::ConError;
-use omp_core::{Str, sf};
+use omp_core::{Hash32, Str, sf};
 use omp_tui::Icon;
 
 use super::PaletteEntry;
@@ -17,6 +17,7 @@ use crate::{
 	overlays::{
 		Panel, PanelAnchor, PanelCall, PanelCx, PanelEvent, PanelOpener,
 		extensions::ExtensionsDashboard,
+		plugin_approvals::PluginApprovals,
 		plugins::{PluginMode, PluginSelector},
 		report::ReportPanel,
 		services::{Mutation, PluginsReport, ToolRow},
@@ -66,6 +67,29 @@ pub enum PluginsOp {
 		/// `true` for `enable`.
 		enabled: bool,
 	},
+	/// `approve [<plugin> [<digest>|all]]`: approve plugin commands the
+	/// session blocked.
+	Approve(ApproveOp),
+}
+
+/// What `/plugins approve` approves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApproveOp {
+	/// No digest: the selector over blocked commands, filtered to a plugin
+	/// when one is named.
+	Browse(Option<Str>),
+	/// `<plugin> <digest>`: the one command the blocked notice names.
+	One {
+		/// Plugin identity (`name@marketplace`, or a local package's name).
+		plugin: Str,
+		/// Approval key, as the notice prints it.
+		digest: Hash32,
+	},
+	/// `<plugin> all`: every command the plugin launches.
+	All {
+		/// Plugin identity.
+		plugin: Str,
+	},
 }
 
 /// `/marketplace` subcommands.
@@ -99,7 +123,33 @@ fn usage(message: &'static str) -> ConError {
 	ConError::Usage(Str::new_static(message))
 }
 
-/// Parses `/plugins [list|enable <id>|disable <id>]`.
+const APPROVE_USAGE: &str = "Usage: /plugins approve [<plugin> [<digest>|all]]";
+
+/// Parses `/plugins approve [<plugin> [<digest>|all]]`.
+fn approve_op(rest: &str) -> Result<ApproveOp, ConError> {
+	let mut words = rest.split_whitespace();
+	let (plugin, target) = (words.next(), words.next());
+	if words.next().is_some() {
+		return Err(usage(APPROVE_USAGE));
+	}
+	Ok(match (plugin, target) {
+		(None, _) => ApproveOp::Browse(None),
+		(Some(plugin), None) => ApproveOp::Browse(Some(Str::new(plugin))),
+		(Some(plugin), Some("all")) => ApproveOp::All { plugin: Str::new(plugin) },
+		(Some(plugin), Some(digest)) => ApproveOp::One {
+			plugin: Str::new(plugin),
+			digest: digest
+				.strip_prefix("sha256:")
+				.unwrap_or(digest)
+				.parse::<Hash32>()
+				.map_err(|_| {
+					ConError::Usage(sf!("Invalid command digest {digest}. {APPROVE_USAGE}"))
+				})?,
+		},
+	})
+}
+
+/// Parses `/plugins [list|enable <id>|disable <id>|approve …]`.
 pub fn plugins_op(words: Option<Str>) -> Result<PluginsOp, ConError> {
 	let text = words.as_deref().unwrap_or("").trim();
 	let (verb, rest) = text
@@ -114,9 +164,11 @@ pub fn plugins_op(words: Option<Str>) -> Result<PluginsOp, ConError> {
 		"" | "list" => Ok(PluginsOp::List),
 		"enable" => id(true),
 		"disable" => id(false),
-		_ => {
-			Err(usage("Usage: /plugins [list|enable <name@marketplace>|disable <name@marketplace>]"))
-		},
+		"approve" => approve_op(rest).map(PluginsOp::Approve),
+		_ => Err(usage(
+			"Usage: /plugins [list|enable <name@marketplace>|disable <name@marketplace>|approve \
+			 [<plugin> [<digest>|all]]]",
+		)),
 	}
 }
 
@@ -428,7 +480,7 @@ omp_con::cmd! {
 		})))
 	};
 
-	/// Views and manages installed plugins: `/plugins [list|enable <id>|disable <id>]`.
+	/// Views and manages installed plugins: `/plugins [list|enable <id>|disable <id>|approve [<plugin> [<digest>|all]]]`.
 	plugins(?op: Str, ?id: Str) = |ctx, args| {
 		match plugins_op(super::rest(args, 0))? {
 			PluginsOp::List => post(ctx, HostAction::Open(PanelOpener::new(|cx| {
@@ -440,6 +492,22 @@ omp_con::cmd! {
 				PanelEvent::Command(HostCommand::Service(Mutation::SetPluginEnabled {
 					id: id.clone(),
 					enabled,
+				}))
+			}))),
+			PluginsOp::Approve(ApproveOp::Browse(plugin)) => post(ctx, HostAction::Open(PanelOpener::new(move |cx| {
+				PluginApprovals::open(cx.services, plugin.clone().unwrap_or_default(), cx.ui)
+					.map(|panel| Box::new(panel) as Box<dyn Panel>)
+			}))),
+			PluginsOp::Approve(ApproveOp::One { plugin, digest }) => post(ctx, HostAction::Call(PanelCall::new(move |_cx| {
+				PanelEvent::Command(HostCommand::Service(Mutation::ApprovePluginCommands {
+					plugin: plugin.clone(),
+					digest: Some(digest),
+				}))
+			}))),
+			PluginsOp::Approve(ApproveOp::All { plugin }) => post(ctx, HostAction::Call(PanelCall::new(move |_cx| {
+				PanelEvent::Command(HostCommand::Service(Mutation::ApprovePluginCommands {
+					plugin: plugin.clone(),
+					digest: None,
 				}))
 			}))),
 		}
@@ -518,6 +586,27 @@ mod tests {
 			plugins_op(Some(Str::new_static("disable docs"))).unwrap(),
 			PluginsOp::SetEnabled { id: Str::new_static("docs"), enabled: false }
 		);
+		let digest = Hash32::sum(b"launch");
+		assert_eq!(
+			plugins_op(Some(Str::new_static("approve"))).unwrap(),
+			PluginsOp::Approve(ApproveOp::Browse(None))
+		);
+		assert_eq!(
+			plugins_op(Some(Str::new_static("approve docs@official"))).unwrap(),
+			PluginsOp::Approve(ApproveOp::Browse(Some(Str::new_static("docs@official"))))
+		);
+		assert_eq!(
+			plugins_op(Some(Str::new_static("approve docs@official all"))).unwrap(),
+			PluginsOp::Approve(ApproveOp::All { plugin: Str::new_static("docs@official") })
+		);
+		for spelled in [sf!("{digest}"), sf!("sha256:{digest}")] {
+			assert_eq!(
+				plugins_op(Some(sf!("approve docs@official {spelled}"))).unwrap(),
+				PluginsOp::Approve(ApproveOp::One { plugin: Str::new_static("docs@official"), digest })
+			);
+		}
+		assert!(plugins_op(Some(Str::new_static("approve docs@official nothex"))).is_err());
+		assert!(plugins_op(Some(Str::new_static("approve a b c"))).is_err());
 		assert!(plugins_op(Some(Str::new_static("enable"))).is_err());
 		assert!(plugins_op(Some(Str::new_static("frobnicate"))).is_err());
 	}

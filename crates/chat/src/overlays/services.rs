@@ -615,6 +615,26 @@ pub struct PluginRow {
 	pub external:    bool,
 }
 
+/// One plugin command the session did not start because the operator has
+/// not approved it (`/plugins approve`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockedCommandRow {
+	/// Plugin identity: a marketplace install's `name@marketplace`, or a
+	/// local Agent Plugins package's manifest name.
+	pub plugin:     Str,
+	/// Declaring component (`MCP server`, `language server`, `hook`, …).
+	pub kind:       Str,
+	/// Server or adapter name; a hook's event and matcher.
+	pub server:     Str,
+	/// The command line it would run.
+	pub command:    Str,
+	/// The approval key `omp ext trust --approve-command` takes.
+	pub digest:     omp_core::Hash32,
+	/// A plugin file it names that cannot be read: such a command cannot be
+	/// approved.
+	pub unreadable: Option<Str>,
+}
+
 /// One configured marketplace source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketplaceSource {
@@ -1047,6 +1067,15 @@ pub enum Mutation {
 		/// Plugin id.
 		id: Str,
 	},
+	/// Approve blocked plugin commands (`/plugins approve`), recorded exactly
+	/// as `omp ext trust --approve-command(s)` records them.
+	ApprovePluginCommands {
+		/// Plugin identity.
+		plugin: Str,
+		/// The one command to approve; `None` approves every command the
+		/// plugin launches.
+		digest: Option<omp_core::Hash32>,
+	},
 	/// Delete one stored account.
 	Logout {
 		/// Stored account.
@@ -1107,6 +1136,7 @@ impl Mutation {
 			Self::ReloadExtensions => "reloaded",
 			Self::InstallPlugin { .. } => "installed",
 			Self::UninstallPlugin { .. } => "uninstalled",
+			Self::ApprovePluginCommands { .. } => "approved",
 			Self::Logout { .. } => "logged out",
 			Self::PinAccount { pinned: true, .. } | Self::PinSession { pinned: true, .. } => "pinned",
 			Self::PinAccount { pinned: false, .. } | Self::PinSession { pinned: false, .. } => {
@@ -1324,6 +1354,12 @@ pub trait Services: Send + Sync {
 	/// Marketplace sources and plugins.
 	fn plugins(&self) -> ServiceResult<PluginsReport> {
 		Err(ServiceError::Unavailable("marketplace"))
+	}
+
+	/// Plugin commands the session did not start because the operator has
+	/// not approved them, read fresh (an approval made since drops out).
+	fn blocked_plugin_commands(&self) -> ServiceResult<Vec<BlockedCommandRow>> {
+		Err(ServiceError::Unavailable("plugin command approval"))
 	}
 
 	/// Adds a marketplace source.
