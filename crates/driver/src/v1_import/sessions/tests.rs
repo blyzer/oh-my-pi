@@ -13,7 +13,8 @@ use omp_core::{Hash32, Str};
 use omp_dom::{Op, PropKey, Txn, Value};
 use omp_journal::blob::{BlobRef, BlobStore};
 use omp_session::import::{
-	IMPORT_FORMAT, IMPORT_SOURCE, IMPORT_SOURCE_BLOB, IMPORT_SOURCE_ID, OMP1_FORMAT, SourceStamp,
+	IMPORT_FORMAT, IMPORT_SOURCE, IMPORT_SOURCE_BLOB, IMPORT_SOURCE_ID, OMP1_FORMAT, STAMP_SETTLE,
+	SourceStamp,
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -893,8 +894,9 @@ fn digests() -> usize {
 	super::DIGESTS.with(std::cell::Cell::get)
 }
 
-/// Sets `path`'s modification time a minute back: settled, so an import
-/// records its stamp.
+/// Sets `path`'s modification time a minute back and, on Unix, waits for
+/// the change time that moved to now to settle: an import then records its
+/// stamp. No call sets the change time, so only waiting settles it.
 fn backdate(path: &Path) {
 	let earlier = SystemTime::now() - Duration::from_secs(60);
 	fs::File::options()
@@ -902,6 +904,9 @@ fn backdate(path: &Path) {
 		.open(path)
 		.and_then(|file| file.set_modified(earlier))
 		.expect("backdate");
+	if cfg!(unix) {
+		std::thread::sleep(STAMP_SETTLE + Duration::from_millis(50));
+	}
 }
 
 /// Rewrites `from` as `to` (of the same length) in place, as v1 rewrote its
@@ -1031,6 +1036,48 @@ fn an_unchanged_transcript_is_not_read_to_tell_it_is_current() {
 		Some(PriorImport::Changed(picked.journal))
 	);
 	assert_eq!(digests(), before + 2);
+}
+
+/// An edit that keeps the size and then puts the modification time back
+/// (`touch -r`, `rsync -t`, a backup restore) leaves size and modification
+/// time as imported; the change time, which no call sets, still moved, so
+/// the transcript is digested and the edit found.
+#[cfg(unix)]
+#[test]
+fn a_same_size_edit_with_its_modification_time_restored_is_digested() {
+	let fixture = Fixture::new();
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	backdate(&alpha);
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let picked = import_selected(&pairs[0], &alpha, &Recorder::default()).expect("pick");
+	let stat = fs::metadata(&alpha).expect("stat");
+	let imported = SourceStamp::of(&stat).expect("stamp");
+	let entries = omp_journal::Journal::scan(&picked.journal).expect("journal");
+	let origin = omp_session::import::import_origin(&entries).expect("origin");
+	assert_eq!(origin.source_stamp, Some(imported));
+	let before = digests();
+	assert_eq!(
+		list(&pairs[0]).expect("list")[0].imported,
+		Some(PriorImport::Current(picked.journal.clone()))
+	);
+	assert_eq!(digests(), before, "unchanged: not digested");
+
+	retitle(&alpha, "alpha title", "alpha TITLE");
+	fs::File::options()
+		.write(true)
+		.open(&alpha)
+		.and_then(|file| {
+			file.set_times(fs::FileTimes::new().set_modified(stat.modified().expect("mtime")))
+		})
+		.expect("restore the modification time");
+	let edited = SourceStamp::of(&fs::metadata(&alpha).expect("stat")).expect("stamp");
+	assert_eq!((edited.size, edited.modified_ns), (imported.size, imported.modified_ns));
+	assert_ne!(edited.changed_ns, imported.changed_ns);
+	assert_eq!(
+		list(&pairs[0]).expect("list")[0].imported,
+		Some(PriorImport::Changed(picked.journal))
+	);
+	assert_eq!(digests(), before + 1);
 }
 
 #[test]
