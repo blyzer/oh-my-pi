@@ -697,15 +697,19 @@ impl ClaudePlugin {
 		plugin_command_digest(&self.id, &self.version, launch)
 	}
 
-	/// Admits `launch` when the operator approved it; otherwise returns the
-	/// diagnostic naming the plugin, the command, and how to approve it. A
-	/// launching seam never starts a refused launch.
+	/// Admits `launch` when the operator approved it and every plugin file it
+	/// names could be read; otherwise returns the diagnostic naming the
+	/// plugin, the command, and how to approve it (or the file that cannot
+	/// be read). A launching seam never starts a refused launch.
 	pub fn admit_launch(&self, launch: PluginLaunch) -> Result<(), PluginCommandBlocked> {
 		let digest = self.command_digest(&launch);
-		if self.approved_commands.contains(&digest) {
+		if launch.files.unreadable().is_none() && self.approved_commands.contains(&digest) {
 			return Ok(());
 		}
-		Err(PluginCommandBlocked::new(self.id.clone(), launch, digest))
+		Err(
+			PluginCommandBlocked::new(self.id.clone(), launch, digest)
+				.with_other_approvals(!self.approved_commands.is_empty()),
+		)
 	}
 
 	/// Every hook this plugin declares with the launch the approval gate

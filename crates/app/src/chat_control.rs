@@ -2323,10 +2323,11 @@ impl<C: omp_agent::Inference> Controller<C> {
 		)
 		.await?;
 		// The switch is admitted: the current session ends here, before
-		// anything of it is torn down.
+		// anything of it is torn down, and the in-process hook hosts follow
+		// the switch.
 		if let Some(lifecycle) = &self.lifecycle {
 			lifecycle
-				.session_shutdown(&SessionShutdown::switching(&self.session, &next, reason))
+				.session_switch(&self.session, &next, Some(reason))
 				.await;
 		}
 		self.voice.cancel(&self.ctx);
