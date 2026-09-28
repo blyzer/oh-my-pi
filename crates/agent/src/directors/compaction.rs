@@ -281,6 +281,8 @@ impl CompactionDirector {
 					"epoch": plan.epoch,
 					"summary_bytes": summary_bytes,
 					"warning": warning,
+					"reason": if self.manual { "manual" } else { "threshold" },
+					"summary": summary,
 				}),
 			)?;
 		}

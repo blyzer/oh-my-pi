@@ -425,8 +425,12 @@ pub enum PluginDiagnostic {
 		path:   PathBuf,
 	},
 	/// A hook event with no faithful omp counterpart; only that event's hooks
-	/// are skipped.
-	#[error("plugin `{plugin}` hooks {event} in {}, which omp does not run", path.display())]
+	/// are skipped. Reported once per plugin and event, and named to the
+	/// operator at launch ([`ClaudePlugins::unsupported_hook_events`]).
+	#[error(
+		"plugin `{plugin}` declares a {event} hook: {event} is not supported by omp; this hook will not run ({})",
+		path.display()
+	)]
 	UnsupportedHookEvent {
 		/// Plugin id.
 		plugin: Str,
@@ -810,6 +814,16 @@ impl ClaudePlugins {
 		}
 		out.command_approvals = approvals;
 		out
+	}
+
+	/// Every hook event a resolved plugin declares that omp does not run,
+	/// once per plugin and event: the launching host names each to the
+	/// operator instead of the hook silently never running.
+	pub fn unsupported_hook_events(&self) -> impl Iterator<Item = &PluginDiagnostic> + Clone + '_ {
+		self
+			.diagnostics
+			.iter()
+			.filter(|diagnostic| matches!(diagnostic, PluginDiagnostic::UnsupportedHookEvent { .. }))
 	}
 
 	fn read_registry(&mut self, path: &Path) -> InstalledPluginsRegistry {

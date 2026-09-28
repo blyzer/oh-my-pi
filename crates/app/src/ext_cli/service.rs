@@ -795,7 +795,8 @@ fn unlink_path(path: &Path) -> miette::Result<()> {
 	}
 }
 
-fn plugin_views(state: &StatePaths) -> miette::Result<Vec<InstalledExtensionView>> {
+/// Every install omp's plugin registries record, enabled or not.
+pub(super) fn plugin_views(state: &StatePaths) -> miette::Result<Vec<InstalledExtensionView>> {
 	let user = read_installed_plugins(&state.plugin_registry(Scope::User))?;
 	let project = read_installed_plugins(&state.plugin_registry(Scope::Project))?;
 	let project_enabled = project

@@ -35,3 +35,47 @@ sits below both and can be reasoned about as data in, data out.
 - `claude_hooks`: Claude Code hook declarations (`hooks/hooks.json`, manifest
   `hooks`) parsed into typed hooks, plus the data tables mapping Claude events
   onto omp hook seams and Claude tool names onto omp tool families.
+
+## Claude Code hook events
+
+Every event of the Claude Code hooks reference either runs at the omp
+lifecycle point with its semantics (`ClaudeHookEvent::seam`; the driver's
+plugin hook host runs it) or is unsupported. A hook on an unsupported event
+never runs, and the launching host names it once per plugin and event (chat
+notice, print-mode `warning:` on stderr, and the RPC/ACP log): "plugin `id`
+declares a `Event` hook: `Event` is not supported by omp; this hook will not
+run". Every mapped hook still needs the operator's approval of its command and
+trigger (`omp ext trust`).
+
+| Event | omp lifecycle point | Notes |
+| --- | --- | --- |
+| `SessionStart` | `session_start` | Matcher `startup`/`resume`; context reaches the next prompt. |
+| `SessionEnd` | `session_shutdown` | Quit, a finished print/RPC/ACP run, `/new` (`clear`), `/resume` (`resume`), fork/hand-off/signal (`other`). Runs within the 1.5 s shutdown budget, whatever its `timeout`; output discarded. |
+| `UserPromptSubmit` | `before_agent_start` | Main session only. |
+| `PreToolUse` | `tool_call` | |
+| `PostToolUse` | `tool_result` (`ok`) | |
+| `PostToolUseFailure` | `tool_result` (`faulted`) | |
+| `Stop` | `agent_settled` | Main session only. |
+| `SubagentStop` | `agent_settled` | Subagent kernels only. |
+| `SubagentStart` | `before_agent_start`, a subagent's first prompt | Matcher on the agent class; `additionalContext` opens the subagent's context. |
+| `StopFailure` | `agent_end` of a turn that failed on a provider error | `error` from the provider failure category; output discarded. |
+| `PreCompact` | `compaction` | Exit 2 / `block` cancels the compaction. |
+| `PostCompact` | `compaction_done` | `trigger` and `compact_summary`; output discarded. |
+| `Notification` | `tool_approval_requested` | `permission_prompt` only, when the approval prompt is filed (no idle delay); omp raises no other notification type. |
+| `Setup` | unsupported | omp has no `--init`/`--maintenance` run. |
+| `UserPromptExpansion` | unsupported | Prompt templates expand without a lifecycle point (`command_invoke` is not emitted). |
+| `PostToolBatch` | unsupported | No awaited point between a resolved tool batch and the next request: `turn_end` is a non-blocking observation and `turn_start` sees an already built request, so neither context nor a block could land before the next model call. |
+| `PermissionRequest` | unsupported | `tool_approval_requested` is observe-only: a hook cannot answer omp's approval prompt. |
+| `PermissionDenied` | unsupported | omp has no auto-mode classifier whose denial a hook could let the model retry. |
+| `TaskCreated`, `TaskCompleted` | unsupported | omp's `todo` list has no create/complete lifecycle point a hook could roll back. |
+| `TeammateIdle` | unsupported | omp has no agent teams. |
+| `FileChanged` | unsupported | omp has no watched-file hook point. |
+| `ConfigChange` | unsupported | Configuration changes have no blockable lifecycle point. |
+| `CwdChanged` | unsupported | The session shell's working directory changes without a lifecycle point. |
+| `DirectoryAdded` | unsupported | Directories are added only at launch (`--add-dir`). |
+| `InstructionsLoaded` | unsupported | Context files and rules are discovered once at composition, without a lifecycle point. |
+| `WorktreeCreate`, `WorktreeRemove` | unsupported | Subagent worktree isolation has no hook point that could replace creation or removal. |
+| `PreModelSwitch` | unsupported | Model changes have no blockable point. |
+| `PostModelSwitch` | unsupported | `model_changed` fires only when the model changes between requests of one agent run, not for `/model` between prompts; most switches would never reach the hook. |
+| `Elicitation`, `ElicitationResult` | unsupported | omp's MCP client does not offer elicitation, so no server ever asks. |
+| `MessageDisplay` | unsupported | omp has no display-transform point: the TUI renders the journaled text, and `message_update` is an observation that cannot replace it. |

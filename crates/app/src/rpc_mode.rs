@@ -2332,7 +2332,7 @@ where
 								} else {
 									let (idle_kernel, mut old) = current.take().expect("idle RPC owns session");
 									let transition = match idle_kernel.flush_session_state(&mut old) {
-										Ok(()) => transition_session(&home, old, command.as_str(), &request.params),
+										Ok(()) => transition_session(&home, idle_kernel.lifecycle_hooks(), old, command.as_str(), &request.params).await,
 										Err(source) => Err((source.to_string(), old)),
 									};
 									match transition {
@@ -2530,6 +2530,14 @@ where
 	session
 		.record_exit(omp_session::ExitCause::Normal)
 		.into_diagnostic()?;
+	if let Some(lifecycle) = kernel.lifecycle_hooks() {
+		lifecycle
+			.session_shutdown(&omp_agent::SessionShutdown::new(
+				&session,
+				omp_agent::ShutdownReason::UserExit,
+			))
+			.await;
+	}
 	while let Ok(event) = dom_events.try_recv() {
 		replica.apply_event(&event).into_diagnostic()?;
 		for frame in projection.observe(&replica) {
@@ -2549,12 +2557,20 @@ where
 	Ok(())
 }
 
-fn transition_session(
+/// Opens the session a transition command names; once it is open, `old`
+/// ends on the lifecycle surface and is switched away from.
+async fn transition_session(
 	home: &SessionHome,
+	lifecycle: Option<omp_agent::LifecycleHooks>,
 	mut old: Session,
 	command: &str,
 	params: &Map<String, Value>,
 ) -> Result<Session, (String, Session)> {
+	let reason = match command {
+		"new_session" => omp_agent::SwitchReason::New,
+		"switch_session" => omp_agent::SwitchReason::Resume,
+		_ => omp_agent::SwitchReason::Fork,
+	};
 	let result: Result<Session, String> = match command {
 		"new_session" => home.create(None).map_err(|source| source.to_string()),
 		"switch_session" => {
@@ -2592,6 +2608,11 @@ fn transition_session(
 	};
 	match result {
 		Ok(next) => {
+			if let Some(lifecycle) = &lifecycle {
+				lifecycle
+					.session_shutdown(&omp_agent::SessionShutdown::switching(&old, &next, reason))
+					.await;
+			}
 			if let Err(source) = old.session_switch() {
 				home.unregister(&next);
 				return Err((source.to_string(), old));
