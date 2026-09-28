@@ -166,9 +166,10 @@ mod omp1 {
 	use omp_core::{Hash32, Str};
 	use omp_dom::{Dom, Handle, KnownTag, PropId, PropKey, Tag, Value as DomValue};
 	use omp_driver::v1_import::{
-		CredentialAccess, ImportMode, ImportOutcome, ImportPair, ImportStep, ProfileSelection,
-		SessionImport, SkipReason, V1Inputs, V1Source, V2Roots, plan, run_with,
-		sessions::import_session,
+		Attention, CredentialAccess, ImportMode, ImportOutcome, ImportPair, ImportReport, ImportStep,
+		PriorImport, ProfileSelection, SessionImport, SkipReason, V1Inputs, V1Source, V2Roots, plan,
+		run_with,
+		sessions::{import_session, list},
 	};
 	use omp_proto::thread::v1::{item, part};
 	use serde_json::{Value, json};
@@ -645,23 +646,14 @@ mod omp1 {
 			1
 		);
 
-		let again = run_with(
-			&pairs,
-			ImportMode::Apply,
-			CredentialAccess::Offline(&offline),
-			SessionImport::Bulk(&V1Converter),
-		);
+		// The marker set, a rerun still scans: the imported journals
+		// themselves keep every session from converting again, and the picker
+		// marks them.
 		assert!(
-			again
-				.entries()
-				.filter(|entry| entry.step == ImportStep::Sessions)
-				.all(|entry| {
-					matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent))
-				})
+			ImportStep::Sessions
+				.marker(&pair.target.config_dir)
+				.is_set()
 		);
-		// Without the marker, the imported journals themselves keep every
-		// session from converting again, and the picker marks them.
-		fs::remove_file(ImportStep::Sessions.marker(&pair.target.config_dir).path()).expect("unmark");
 		let rerun = run_with(
 			&pairs,
 			ImportMode::Apply,
@@ -676,12 +668,136 @@ mod omp1 {
 			})
 			.count();
 		assert_eq!(skipped, 2);
-		let rows = omp_driver::v1_import::sessions::list(&pair).expect("list");
+		let rows = list(&pair).expect("list");
 		assert_eq!(rows.len(), 2);
+		assert!(rows.iter().all(|row| {
+			matches!(&row.imported, Some(PriorImport::Current(journal)) if journal.is_file())
+		}));
+	}
+
+	fn sessions_outcomes(report: &ImportReport) -> Vec<(Option<String>, &ImportOutcome)> {
+		report
+			.entries()
+			.filter(|entry| entry.step == ImportStep::Sessions)
+			.map(|entry| (entry.subject.as_ref().map(ToString::to_string), &entry.outcome))
+			.collect()
+	}
+
+	/// A v1 session that went on after its import is imported again, into a
+	/// fresh journal holding the whole transcript; the earlier journal stays
+	/// exactly as it was.
+	#[test]
+	fn a_v1_session_that_grew_imports_again_beside_its_earlier_journal() {
+		let tree = Tree::new();
+		let lines = [tree.header("grew"), user("u1", None, "first question")];
+		let source = tree.transcript("grew", &lines);
+		let pair = tree.pair();
+		let pairs = [pair.clone()];
+		let offline = omp_con::Ctx::new();
+		let bulk = || {
+			run_with(
+				&pairs,
+				ImportMode::Apply,
+				CredentialAccess::Offline(&offline),
+				SessionImport::Bulk(&V1Converter),
+			)
+		};
+		let first = import_session(&pair.target, &pair.source, &source, &V1Converter)
+			.expect("import")
+			.journal;
+		let first_bytes = fs::read(&first).expect("journal");
+
+		tree.transcript("grew", &[
+			lines[0].clone(),
+			lines[1].clone(),
+			assistant("a1", Some("u1"), "first answer"),
+			user("u2", Some("a1"), "follow-up after the import"),
+		]);
+
+		let rows = list(&pair).expect("list");
+		assert_eq!(rows[0].imported, Some(PriorImport::Changed(first.clone())));
+		let dry = run_with(
+			&pairs,
+			ImportMode::DryRun,
+			CredentialAccess::Offline(&offline),
+			SessionImport::Bulk(&V1Converter),
+		);
+		assert!(matches!(sessions_outcomes(&dry)[..], [(_, ImportOutcome::WouldReimport)]));
+		assert_eq!(fs::read(&first).expect("journal"), first_bytes);
+
+		let report = bulk();
+		assert!(matches!(sessions_outcomes(&report)[..], [(_, ImportOutcome::Reimported)]));
+		assert_eq!(fs::read(&first).expect("earlier journal"), first_bytes, "never rewritten");
+		let Some(PriorImport::Current(second)) = list(&pair).expect("list").remove(0).imported else {
+			panic!("the fresh journal is the current import");
+		};
+		assert_ne!(second, first);
+		let session = Session::open(&second, ComponentRegistry::standard()).expect("resume");
+		let texts = thread_texts(session.dom());
+		assert!(texts.iter().any(|text| text == "first question"), "{texts:?}");
 		assert!(
-			rows
+			texts
 				.iter()
-				.all(|row| row.imported.as_deref().is_some_and(Path::is_file))
+				.any(|text| text == "follow-up after the import"),
+			"{texts:?}"
+		);
+		let earlier = Session::open(&first, ComponentRegistry::standard()).expect("earlier");
+		assert!(
+			!thread_texts(earlier.dom())
+				.iter()
+				.any(|text| text == "follow-up after the import")
+		);
+		drop((session, earlier));
+		// The fresh journal records the transcript's new digest: settled.
+		assert!(matches!(sessions_outcomes(&bulk())[..], [(
+			_,
+			ImportOutcome::Skipped(SkipReason::SessionImported)
+		)]));
+	}
+
+	/// `--dry-run --sessions` reports a referenced v1 artifact that is gone,
+	/// as a real run does, and writes nothing.
+	#[test]
+	fn a_v1_bulk_dry_run_reports_missing_artifacts() {
+		let tree = Tree::new();
+		let source = tree.transcript("lost", &[
+			tree.header("lost"),
+			user("u1", None, "run it"),
+			assistant("a1", Some("u1"), "kept artifact://0, lost artifact://3"),
+		]);
+		fs::create_dir_all(source.with_extension("")).expect("artifact dir");
+		fs::write(source.with_extension("").join("0.bash.log"), "kept").expect("artifact");
+		let pair = tree.pair();
+		let pairs = [pair.clone()];
+		let offline = omp_con::Ctx::new();
+		let run = |mode| {
+			run_with(
+				&pairs,
+				mode,
+				CredentialAccess::Offline(&offline),
+				SessionImport::Bulk(&V1Converter),
+			)
+		};
+
+		let dry = run(ImportMode::DryRun);
+		assert!(!pair.target.data_dir.exists(), "a dry run writes nothing");
+		let outcomes = sessions_outcomes(&dry);
+		assert!(
+			matches!(outcomes[..], [
+				(_, ImportOutcome::WouldImport),
+				(Some(ref subject), ImportOutcome::NeedsAttention(Attention::ArtifactMissing)),
+			] if subject == "lost artifact://3"),
+			"{outcomes:?}"
+		);
+
+		let real = run(ImportMode::Apply);
+		let outcomes = sessions_outcomes(&real);
+		assert!(
+			matches!(outcomes[..], [
+				(_, ImportOutcome::Imported),
+				(Some(ref subject), ImportOutcome::NeedsAttention(Attention::ArtifactMissing)),
+			] if subject == "lost artifact://3"),
+			"{outcomes:?}"
 		);
 	}
 }

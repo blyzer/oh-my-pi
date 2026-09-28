@@ -22,7 +22,8 @@ use omp_tui::{Frame, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent, dom};
 use super::{
 	Outcome, Panel, PanelAction, PanelAnchor, PanelCx, PanelEvent, PanelNote,
 	services::{
-		ForeignSessionRow, ForeignSessionSource, ServiceResult, Services, SessionRow, SessionScope,
+		ForeignImport, ForeignSessionRow, ForeignSessionSource, ServiceResult, Services, SessionRow,
+		SessionScope,
 	},
 };
 use crate::host::HostCommand;
@@ -41,6 +42,12 @@ const IMPORT_HINT: &str = "[Enter import · Esc cancel]";
 /// (marked), which Enter reopens instead of converting again.
 const IMPORT_REOPEN_HINT: &str =
 	"[Enter import · marked: already imported, Enter reopens · Esc cancel]";
+/// Import-picker footer when some rows changed since their import, which
+/// Enter imports again into a fresh session.
+const IMPORT_CHANGED_HINT: &str =
+	"[Enter import · imported: Enter reopens · changed since import: imports again · Esc]";
+/// Note after the name of a row whose transcript changed since its import.
+const CHANGED_NOTE: &str = " · changed since import";
 /// Empty-state wording.
 const NO_SESSIONS: &str = "No sessions found";
 /// Border, hint rule, hint, and blank rows around the list.
@@ -206,7 +213,7 @@ impl ForeignSessionPicker {
 			messages: Str,
 			name:     Str,
 			cwd:      Str,
-			imported: bool,
+			imported: Option<bool>,
 		}
 		let lines = self
 			.rows
@@ -228,8 +235,16 @@ impl ForeignSessionPicker {
 				label.push_str(&path);
 				label.push(' ');
 				label.push_str(&cwd);
-				if row.imported.is_some() {
+				let changed = match &row.imported {
+					None => None,
+					Some(ForeignImport::Current(_)) => Some(false),
+					Some(ForeignImport::Changed(_)) => Some(true),
+				};
+				if let Some(changed) = changed {
 					label.push_str(" imported");
+					if changed {
+						label.push_str(CHANGED_NOTE);
+					}
 				}
 				Line {
 					value:    Str::new(path),
@@ -238,14 +253,20 @@ impl ForeignSessionPicker {
 					messages: sf!("{} msgs", row.messages),
 					name:     Str::new(Self::display_name(row)),
 					cwd:      Str::new(cwd),
-					imported: row.imported.is_some(),
+					imported: changed,
 				}
 			})
 			.collect::<Vec<_>>();
 		let title = self.title();
 		let height = self.height.saturating_add(1);
 		let query = self.query.clone();
-		let hint = if self.rows.iter().any(|row| row.imported.is_some()) {
+		let hint = if self
+			.rows
+			.iter()
+			.any(|row| matches!(row.imported, Some(ForeignImport::Changed(_))))
+		{
+			IMPORT_CHANGED_HINT
+		} else if self.rows.iter().any(|row| row.imported.is_some()) {
 			IMPORT_REOPEN_HINT
 		} else {
 			IMPORT_HINT
@@ -259,8 +280,15 @@ impl ForeignSessionPicker {
 								<td><pre fg=muted>{line.stamp}</pre></td>
 								<td align=end><pre fg=muted>{line.messages}</pre></td>
 								<td truncate grow>
-									if line.imported { <icon name="success" fg=success/> }
+									match line.imported {
+										Some(false) => { <icon name="success" fg=success/> }
+										Some(true) => { <icon name="changed" fg=warning/> }
+										None => {}
+									}
 									<pre>{line.name}</pre>
+									if line.imported == Some(true) {
+										<pre fg=warning>{CHANGED_NOTE}</pre>
+									}
 								</td>
 								<td truncate=start><pre fg=muted>{line.cwd}</pre></td>
 							</option>
@@ -1061,19 +1089,23 @@ mod tests {
 		SessionPicker::from_rows(rows, TimeZone::UTC, VIEWPORT, &UiContext::default()).unwrap()
 	}
 
-	fn v1_row(id: &str, title: &str, imported: Option<&str>) -> ForeignSessionRow {
+	fn v1_row(id: &str, title: &str, imported: Option<ForeignImport>) -> ForeignSessionRow {
 		ForeignSessionRow {
-			source:        ForeignSessionSource::Omp1,
-			id:            Str::new(id),
-			path:          PathBuf::from(format!("/v1/sessions/-p/{id}.jsonl")),
-			cwd:           PathBuf::from("/p"),
-			title:         Some(Str::new(title)),
-			created_ms:    CREATED,
-			modified_ms:   MODIFIED,
-			messages:      4,
+			source: ForeignSessionSource::Omp1,
+			id: Str::new(id),
+			path: PathBuf::from(format!("/v1/sessions/-p/{id}.jsonl")),
+			cwd: PathBuf::from("/p"),
+			title: Some(Str::new(title)),
+			created_ms: CREATED,
+			modified_ms: MODIFIED,
+			messages: 4,
 			first_message: None,
-			imported:      imported.map(PathBuf::from),
+			imported,
 		}
+	}
+
+	fn current(journal: &str) -> Option<ForeignImport> {
+		Some(ForeignImport::Current(PathBuf::from(journal)))
 	}
 
 	/// An already-imported v1 row is marked, filterable as `imported`, and
@@ -1085,7 +1117,7 @@ mod tests {
 			ForeignSessionSource::Omp1,
 			vec![
 				v1_row("fresh", "Fresh session", None),
-				v1_row("done", "Done session", Some("/v2/projects/p/sessions/01J.oms")),
+				v1_row("done", "Done session", current("/v2/projects/p/sessions/01J.oms")),
 			],
 			TimeZone::UTC,
 			VIEWPORT,
@@ -1130,6 +1162,56 @@ mod tests {
 		.unwrap();
 		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
 		assert!(screen.contains(IMPORT_HINT) && !screen.contains("already imported"), "{screen}");
+	}
+
+	/// A v1 row whose transcript changed since its import is marked so,
+	/// filterable as `changed`, and picking it goes through the import, which
+	/// converts it again.
+	#[test]
+	fn the_v1_picker_marks_rows_changed_since_import() {
+		let ctx = UiContext::default();
+		let mut picker = ForeignSessionPicker::from_rows(
+			ForeignSessionSource::Omp1,
+			vec![
+				v1_row("done", "Done session", current("/v2/projects/p/sessions/01J.oms")),
+				v1_row(
+					"grown",
+					"Grown session",
+					Some(ForeignImport::Changed(PathBuf::from("/v2/projects/p/sessions/01H.oms"))),
+				),
+			],
+			TimeZone::UTC,
+			VIEWPORT,
+			&ctx,
+		)
+		.unwrap();
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		let line = |screen: &str, title: &str| {
+			screen
+				.lines()
+				.find(|line| line.contains(title))
+				.unwrap_or_default()
+				.to_owned()
+		};
+		let changed = ctx.charset.icon_named("changed").expect("changed icon");
+		let success = ctx.charset.icon_named("success").expect("success icon");
+		let grown = line(&screen, "Grown session");
+		assert!(grown.contains(changed) && grown.contains("changed since import"), "{screen}");
+		let done = line(&screen, "Done session");
+		assert!(done.contains(success) && !done.contains("changed since import"), "{screen}");
+		assert!(screen.contains(IMPORT_CHANGED_HINT), "{screen}");
+
+		for key in "changed".chars() {
+			picker.key(Key::Char(key));
+		}
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		assert!(screen.contains("Grown session") && !screen.contains("Done session"), "{screen}");
+		let PanelEvent::Command(HostCommand::ForeignSessionImport { path, .. }) =
+			picker.key(Key::Enter)
+		else {
+			panic!("Enter imports the highlighted row");
+		};
+		assert_eq!(path, PathBuf::from("/v1/sessions/-p/grown.jsonl"));
 	}
 
 	fn text(picker: &mut SessionPicker) -> String {

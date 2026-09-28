@@ -15,6 +15,15 @@ pub enum OutcomeKind {
 	Imported,
 	/// A dry run found something a real run would copy.
 	WouldImport,
+	/// Copied into v2 again because the v1 source changed since its earlier
+	/// import, which v2 keeps.
+	Reimported,
+	/// A dry run found a changed source a real run would copy again.
+	WouldReimport,
+	/// Obsolete files an earlier v2 import wrote were deleted.
+	Removed,
+	/// A dry run found obsolete files a real run would delete.
+	WouldRemove,
 	/// Already done (a marker, an existing v2 file, or an existing account),
 	/// or waiting for its profile's own run.
 	Skipped,
@@ -65,7 +74,8 @@ pub enum SkipReason {
 	/// `omp config import-v1 --sessions` (owner decision #4).
 	#[strum(to_string = "converted on demand: `/resume @v1`, or `omp config import-v1 --sessions`")]
 	OnDemand,
-	/// The session's earlier import still has its journal.
+	/// The session's earlier import still has its journal, and the v1
+	/// transcript has not changed since.
 	#[strum(to_string = "already imported")]
 	SessionImported,
 	/// v1 and v2 resolve to the same file (a shared XDG root), so there is
@@ -157,6 +167,15 @@ pub enum ImportOutcome {
 	Imported,
 	/// A dry run found something a real run would copy.
 	WouldImport,
+	/// Copied into v2 again because the v1 source changed since its earlier
+	/// import, which v2 keeps.
+	Reimported,
+	/// A dry run found a changed source a real run would copy again.
+	WouldReimport,
+	/// Obsolete files an earlier v2 import wrote were deleted.
+	Removed,
+	/// A dry run found obsolete files a real run would delete.
+	WouldRemove,
 	/// Already done.
 	Skipped(SkipReason),
 	/// v1 has nothing for this step.
@@ -174,6 +193,10 @@ impl ImportOutcome {
 		match self {
 			Self::Imported => OutcomeKind::Imported,
 			Self::WouldImport => OutcomeKind::WouldImport,
+			Self::Reimported => OutcomeKind::Reimported,
+			Self::WouldReimport => OutcomeKind::WouldReimport,
+			Self::Removed => OutcomeKind::Removed,
+			Self::WouldRemove => OutcomeKind::WouldRemove,
 			Self::Skipped(_) => OutcomeKind::Skipped,
 			Self::NothingToImport => OutcomeKind::NothingToImport,
 			Self::NotMigratable(_) => OutcomeKind::NotMigratable,
@@ -303,12 +326,20 @@ fn log_entry(entry: &ImportEntry) {
 			%attention,
 			"v1 import needs attention"
 		),
-		ImportOutcome::Imported => tracing::info!(
+		ImportOutcome::Imported | ImportOutcome::Reimported => tracing::info!(
 			step = %entry.step,
 			item = %entry.item,
 			path = ?path,
 			subject = ?entry.subject,
+			%kind,
 			"imported from v1"
+		),
+		ImportOutcome::Removed => tracing::info!(
+			step = %entry.step,
+			item = %entry.item,
+			path = ?path,
+			subject = ?entry.subject,
+			"removed obsolete records of an earlier import"
 		),
 		_ => tracing::debug!(
 			step = %entry.step,

@@ -526,10 +526,21 @@ pub struct ForeignSessionRow {
 	pub messages:      u32,
 	/// First user message used for filtering and untitled rows.
 	pub first_message: Option<Str>,
-	/// The native journal an earlier import made from this transcript, when
-	/// the source tracks one (omp v1). The picker marks the row; picking it
-	/// reopens that journal instead of converting again.
-	pub imported:      Option<PathBuf>,
+	/// What an earlier import of this transcript left, when the source tracks
+	/// one (omp v1). The picker marks the row; picking it reopens a current
+	/// import's journal, or imports a changed transcript again.
+	pub imported:      Option<ForeignImport>,
+}
+
+/// The native journal an earlier import made from a foreign transcript.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForeignImport {
+	/// Imported as the transcript is now: picking the row reopens this
+	/// journal.
+	Current(PathBuf),
+	/// The transcript changed since its newest import (this journal, which
+	/// stays): picking the row imports it again into a fresh session.
+	Changed(PathBuf),
 }
 
 /// One on-disk session.

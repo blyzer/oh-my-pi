@@ -89,7 +89,7 @@ pub use report::{
 	SkipReason,
 };
 pub use sessions::{
-	ImportedIndex, ImportedSession, MissingArtifact, ProjectBucket, SessionImport,
+	ImportedIndex, ImportedSession, MissingArtifact, PriorImport, ProjectBucket, SessionImport,
 	SessionImportError, V1Artifact, V1ChildJob, V1Conversion, V1SessionConverter, V1SessionInfo,
 };
 pub use settings::{SettingsImportError, import_project_settings, project_marker};

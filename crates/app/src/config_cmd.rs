@@ -259,7 +259,13 @@ fn render_v1_entry(out: &mut String, entry: &omp_driver::v1_import::ImportEntry)
 		ImportOutcome::NeedsAttention(attention) => {
 			let _ = write!(out, ": {attention}");
 		},
-		ImportOutcome::Imported | ImportOutcome::WouldImport | ImportOutcome::NothingToImport => {},
+		ImportOutcome::Imported
+		| ImportOutcome::WouldImport
+		| ImportOutcome::Reimported
+		| ImportOutcome::WouldReimport
+		| ImportOutcome::Removed
+		| ImportOutcome::WouldRemove
+		| ImportOutcome::NothingToImport => {},
 	}
 	out.push('\n');
 }
