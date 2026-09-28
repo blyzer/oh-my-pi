@@ -90,6 +90,19 @@ const adwPhaseSchema = type({
 	"directLaunch?": "boolean",
 
 	/**
+	 * Serve this command from a memo when the worktree is byte-identical to a
+	 * prior run of it within the same workflow.
+	 *
+	 * Opt-in, because only the author knows whether the command is a pure
+	 * function of the repository: `cargo test` is, `date` and anything that
+	 * publishes are not. Untracked files refuse the memo outright, since
+	 * their contents cannot be fingerprinted cheaply, and an `expect: fail`
+	 * phase is never memoized -- replaying its verdict would satisfy the
+	 * inverted criterion without running the test it exists to exercise.
+	 */
+	"cache?": "boolean",
+
+	/**
 	 * Phases that must pass before this one runs. Omitted: the declaration
 	 * predecessor is an implicit dependency. Explicit []: independent.
 	 * Ready phases dispatch in declaration order, bounded by concurrency.
