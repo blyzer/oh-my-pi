@@ -39,6 +39,7 @@ import { plainArgv } from "./types";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { ArtifactManager } from "../session/artifacts";
 import type { EventBus } from "../utils/event-bus";
+import type { PreparedExtension } from "../extensibility/extensions/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -131,6 +132,13 @@ export interface AdwHost {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Registers seats as children of the spawning session rather than orphans. */
 	agentId?: string;
+	/**
+	 * The parent session's imported extension factories. Seats that run in
+	 * {@link cwd} rebind these instead of re-discovering and re-importing every
+	 * extension module per spawn; sandboxed seats re-discover inside their
+	 * sandbox, as isolated task spawns do.
+	 */
+	preparedExtensions?: readonly PreparedExtension[];
 	eventBus?: EventBus;
 	/**
 	 * Answers a `human` phase. The run holds until this resolves, so a host
@@ -686,6 +694,9 @@ export function buildSeatSpawnOptions(args: {
 		additionalDirectories: host.additionalDirectories,
 		localProtocolOptions: host.localProtocolOptions,
 		parentAgentId: host.agentId,
+		// The parent's modules resolve against its own checkout; a seat in a
+		// sandbox discovers the sandbox's copies instead, like an isolated task.
+		preloadedPreparedExtensions: workRoot === host.cwd ? host.preparedExtensions : undefined,
 		eventBus: host.eventBus,
 		subagentEventBus: host.subagentEventBus,
 		// Lifecycle frames reach the host's surfaces through the buses above; a
