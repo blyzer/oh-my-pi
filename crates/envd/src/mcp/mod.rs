@@ -11,7 +11,7 @@ pub mod config_store;
 pub(crate) mod config_values;
 pub mod control;
 pub mod device;
-mod discovery;
+pub(crate) mod discovery;
 pub(crate) mod filter;
 pub(crate) mod header_policy;
 pub(crate) mod http;

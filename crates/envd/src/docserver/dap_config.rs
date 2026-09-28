@@ -8,9 +8,12 @@ use std::{
 };
 
 use omp_core::Str;
-use omp_ext::claude_plugin::{
-	ClaudePlugin, ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars,
-	resolve_plugin_command,
+use omp_ext::{
+	claude_plugin::{
+		ClaudePlugin, ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars,
+		resolve_plugin_command,
+	},
+	plugin_command::{PluginLaunch, PluginLaunchKind},
 };
 use serde::Deserialize;
 use serde_json::Map;
@@ -330,18 +333,20 @@ fn append_plugin_sources(
 			continue;
 		};
 		for declaration in &components.dap {
-			let admitted = DapConfigSource::plugin(plugin, declaration).and_then(|source| {
-				sources.push(source);
-				load_dap_config(builtin_adapters(), sources)
-					.and_then(|adapters| {
-						adapters
-							.values()
-							.try_for_each(|adapter| adapter.to_spec().map(drop))
-					})
-					.inspect_err(|_| {
-						sources.pop();
-					})
-			});
+			let admitted = DapConfigSource::plugin(plugin, declaration)
+				.and_then(|source| gate_plugin_source(plugin, source, diagnostics))
+				.and_then(|source| {
+					sources.push(source);
+					load_dap_config(builtin_adapters(), sources)
+						.and_then(|adapters| {
+							adapters
+								.values()
+								.try_for_each(|adapter| adapter.to_spec().map(drop))
+						})
+						.inspect_err(|_| {
+							sources.pop();
+						})
+				});
 			if let Err(error) = admitted {
 				diagnostics.push(PluginDiagnostic::InvalidComponent {
 					plugin:    plugin.id.clone(),
@@ -404,27 +409,48 @@ pub fn load_dap_config(
 				path: PathBuf::from(source.provenance.source.as_str()),
 			});
 		}
-		let value: serde_json::Value = if source.yaml {
-			serde_yaml::from_slice(&source.bytes).map_err(|error| DapConfigError::ParseYaml {
-				source_name: source.provenance.source.clone(),
-				source:      error,
-			})?
-		} else {
-			serde_json::from_slice(&source.bytes).map_err(|error| DapConfigError::ParseJson {
-				source_name: source.provenance.source.clone(),
-				source:      error,
-			})?
-		};
-		let mut object = value
-			.as_object()
-			.cloned()
-			.ok_or(DapConfigError::TopLevelObject)?;
-		let adapters = match object.remove("adapters") {
-			Some(serde_json::Value::Object(value)) => value,
-			Some(_) => return Err(DapConfigError::AdaptersObject),
-			None => object,
-		};
-		for (name, value) in adapters {
+		for (name, patch) in source_adapters(source, parse_source(source)?)? {
+			merge_adapter(merged.entry(name).or_default(), patch, &source.provenance);
+		}
+	}
+	merged
+		.into_iter()
+		.map(|(name, adapter)| resolve_adapter(name.clone(), adapter).map(|adapter| (name, adapter)))
+		.collect()
+}
+
+/// Parses one bounded source document.
+fn parse_source(source: &DapConfigSource) -> Result<serde_json::Value, DapConfigError> {
+	if source.yaml {
+		serde_yaml::from_slice(&source.bytes).map_err(|error| DapConfigError::ParseYaml {
+			source_name: source.provenance.source.clone(),
+			source:      error,
+		})
+	} else {
+		serde_json::from_slice(&source.bytes).map_err(|error| DapConfigError::ParseJson {
+			source_name: source.provenance.source.clone(),
+			source:      error,
+		})
+	}
+}
+
+/// The adapter patches of one parsed source document (the `adapters`
+/// wrapper or a flat map), plugin-root expanded for a plugin source.
+fn source_adapters(
+	source: &DapConfigSource,
+	document: serde_json::Value,
+) -> Result<Vec<(Str, DapAdapterPatch)>, DapConfigError> {
+	let serde_json::Value::Object(mut object) = document else {
+		return Err(DapConfigError::TopLevelObject);
+	};
+	let adapters = match object.remove("adapters") {
+		Some(serde_json::Value::Object(value)) => value,
+		Some(_) => return Err(DapConfigError::AdaptersObject),
+		None => object,
+	};
+	adapters
+		.into_iter()
+		.map(|(name, value)| {
 			let mut patch: DapAdapterPatch =
 				serde_json::from_value(value).map_err(|source_error| {
 					DapConfigError::InvalidAdapter { adapter: Str::new(&name), source: source_error }
@@ -432,12 +458,97 @@ pub fn load_dap_config(
 			if let Some(root) = &source.plugin_root {
 				patch.expand_plugin_root(root);
 			}
-			merge_adapter(merged.entry(Str::new(name)).or_default(), patch, &source.provenance);
+			Ok((Str::new(name), patch))
+		})
+		.collect()
+}
+
+/// The parsed document of a plugin source plus, per adapter that sets its
+/// `command` or `args`, the launch it declares after plugin-root expansion.
+fn plugin_source_launches(
+	source: &DapConfigSource,
+) -> Result<(serde_json::Value, Vec<(Str, PluginLaunch)>), DapConfigError> {
+	let document = parse_source(source)?;
+	let launches = source_adapters(source, document.clone())?
+		.into_iter()
+		.filter_map(|(name, patch)| {
+			if patch.command.is_none() && patch.args.is_none() {
+				return None;
+			}
+			let launch = PluginLaunch::new(
+				PluginLaunchKind::DebugAdapter,
+				name.clone(),
+				patch.command.unwrap_or_default(),
+				patch.args.unwrap_or_default(),
+				[],
+			);
+			Some((name, launch))
+		})
+		.collect();
+	Ok((document, launches))
+}
+
+/// Drops from one plugin declaration every adapter whose launch the operator
+/// has not approved ([`ClaudePlugin::admit_launch`]), recording each refusal
+/// as a [`PluginDiagnostic::CommandNotApproved`]; the approved adapters still
+/// load.
+fn gate_plugin_source(
+	plugin: &ClaudePlugin,
+	mut source: DapConfigSource,
+	diagnostics: &mut Vec<PluginDiagnostic>,
+) -> Result<DapConfigSource, DapConfigError> {
+	let (mut document, launches) = plugin_source_launches(&source)?;
+	let mut blocked = Vec::new();
+	for (name, launch) in launches {
+		if let Err(refused) = plugin.admit_launch(launch) {
+			diagnostics.push(refused.into());
+			blocked.push(name);
 		}
 	}
-	merged
-		.into_iter()
-		.map(|(name, adapter)| resolve_adapter(name.clone(), adapter).map(|adapter| (name, adapter)))
+	if blocked.is_empty() {
+		return Ok(source);
+	}
+	// `plugin_source_launches` normalized this document, so it is an object
+	// whose `adapters`, when present, is the adapter map.
+	if let Some(object) = document.as_object_mut() {
+		let adapters = if object.contains_key("adapters") {
+			object
+				.get_mut("adapters")
+				.and_then(serde_json::Value::as_object_mut)
+		} else {
+			Some(object)
+		};
+		if let Some(adapters) = adapters {
+			for name in &blocked {
+				adapters.remove(name.as_str());
+			}
+		}
+	}
+	source.bytes = serde_json::to_vec(&document)
+		.map_err(|error| DapConfigError::ParseJson {
+			source_name: source.provenance.source.clone(),
+			source:      error,
+		})?
+		.into();
+	source.yaml = false;
+	Ok(source)
+}
+
+/// Every process `plugin`'s debug-adapter declarations would launch, exactly
+/// as discovery gates them; a declaration that does not parse contributes
+/// nothing (it never loads).
+pub(crate) fn plugin_dap_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
+	let Some(components) = plugin.claude_components() else {
+		return Vec::new();
+	};
+	components
+		.dap
+		.iter()
+		.filter_map(|declaration| {
+			let source = DapConfigSource::plugin(plugin, declaration).ok()?;
+			plugin_source_launches(&source).ok()
+		})
+		.flat_map(|(_, launches)| launches.into_iter().map(|(_, launch)| launch))
 		.collect()
 }
 
@@ -719,6 +830,42 @@ mod tests {
 			"{:?}",
 			found.diagnostics
 		);
+	}
+
+	#[test]
+	fn unapproved_plugin_adapters_are_left_out_with_a_diagnostic() {
+		use crate::docserver::lsp_config::tests::{installed_plugins, write};
+
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		let plugin = temp.path().join("plugin");
+		write(
+			&plugin.join(".dap.json"),
+			r#"{"adapters":{
+				"acme-dbg":{"command":"./bin/dbg","args":["--stdio"],"fileTypes":[".acme"]},
+				"trusted-dbg":{"command":"trusted","fileTypes":[".t"]}
+			}}"#,
+		);
+		let mut plugins = installed_plugins(&temp.path().join("data"), &[("p@m", &plugin, true)]);
+		let entry = &mut plugins.plugins[0];
+		let trusted = crate::plugin_commands::plugin_launches(entry)
+			.into_iter()
+			.find(|launch| launch.server == "trusted-dbg")
+			.unwrap();
+		entry.approved_commands = [entry.command_digest(&trusted)].into();
+
+		let found = discover_dap_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		let adapters = load_dap_config(builtin_adapters(), &found.sources).unwrap();
+
+		assert!(adapters.contains_key("trusted-dbg"));
+		assert!(!adapters.contains_key("acme-dbg"), "an unapproved adapter loaded");
+		let [PluginDiagnostic::CommandNotApproved(blocked)] = &found.diagnostics[..] else {
+			panic!("{:?}", found.diagnostics);
+		};
+		assert_eq!(blocked.plugin, "p@m");
+		assert_eq!(blocked.server, "acme-dbg");
+		let root = fs::canonicalize(&plugin).unwrap();
+		assert_eq!(*blocked.command(), root.join("bin/dbg").to_string_lossy().as_ref());
 	}
 
 	#[test]

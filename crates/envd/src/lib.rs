@@ -36,6 +36,7 @@ mod media_devices;
 mod media_tts;
 pub mod memory;
 pub mod model_discovery;
+pub mod plugin_commands;
 pub mod policy;
 mod presence;
 pub mod process_identity;
