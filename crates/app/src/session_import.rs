@@ -51,9 +51,10 @@ pub struct ForeignCandidate {
 	pub messages:      u32,
 	/// First user message, when it occurs in the indexed prefix.
 	pub first_message: Option<Str>,
-	/// The native journal an earlier import made from this transcript, when
-	/// the source tracks one (omp v1): picking it reopens that journal.
-	pub imported:      Option<PathBuf>,
+	/// What an earlier import of this transcript left, when the source tracks
+	/// one (omp v1): picking it reopens a current import's journal, or imports
+	/// a changed transcript again.
+	pub imported:      Option<omp_chat::overlays::services::ForeignImport>,
 }
 
 impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat {
@@ -159,8 +160,9 @@ pub(crate) fn prepare(args: &mut ChatArgs) -> miette::Result<()> {
 /// rename, so a failed import never leaves a resumable partial journal.
 ///
 /// An omp v1 session ignores `destination`: it lands in its recorded
-/// project's bucket, or reopens the journal an earlier import made (owner
-/// decision #4, [`omp_driver::v1_import::sessions`]).
+/// project's bucket, or reopens the journal an earlier import made of the
+/// transcript as it is now (owner decision #4,
+/// [`omp_driver::v1_import::sessions`]).
 pub fn import_selected(
 	format: ForeignFormat,
 	source: &Path,
@@ -232,8 +234,12 @@ impl omp_driver::v1_import::V1SessionConverter for V1Converter {
 	}
 }
 
-/// The active profile's v1 sessions, from their headers alone.
+/// The active profile's v1 sessions, from their headers alone (and, for the
+/// ones imported earlier, their digests).
 fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
+	use omp_chat::overlays::services::ForeignImport;
+	use omp_driver::v1_import::PriorImport;
+
 	let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
 	Ok(omp_driver::v1_import::sessions::list(&pair)
 		.into_diagnostic()?
@@ -253,7 +259,10 @@ fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
 			modified_ms:   session.modified_ms,
 			messages:      session.messages,
 			first_message: session.first_message,
-			imported:      session.imported,
+			imported:      session.imported.map(|prior| match prior {
+				PriorImport::Current(journal) => ForeignImport::Current(journal),
+				PriorImport::Changed(journal) => ForeignImport::Changed(journal),
+			}),
 		})
 		.collect())
 }

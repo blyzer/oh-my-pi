@@ -28,17 +28,43 @@
 //! An imported journal records its provenance in `<meta>` before any
 //! transcript entry ([`omp_session::import`]: `import-format omp1`,
 //! `import-source-id <v1 id>`, `import-source <v1 transcript>`, and
-//! `import-source-blob`, the transcript's exact bytes). That journal is the
-//! only record of the import: [`ImportedIndex`] derives "which v1 sessions
-//! already have a journal" by reading the provenance prefix of every journal
-//! under `<data>/projects/*/sessions/`, so while an imported journal exists,
-//! neither the picker nor a bulk run converts its session again (a bulk run
-//! reports it [`SkipReason::SessionImported`]), and deleting the journal
-//! makes the session importable again. The picker marks such rows
+//! `import-source-blob`, the address of the transcript's exact bytes, whose
+//! SHA-256 digest is the transcript's content digest at import). That journal
+//! is the only record of the import: [`ImportedIndex`] derives "which v1
+//! sessions already have a journal" by reading the provenance prefix of every
+//! journal under `<data>/projects/*/sessions/`, so while an imported journal
+//! exists, neither the picker nor a bulk run converts its session again (a
+//! bulk run reports it [`SkipReason::SessionImported`]), and deleting the
+//! journal makes the session importable again. The picker marks such rows
 //! ([`V1SessionInfo::imported`]); picking one reopens its journal.
 //! Conversion also remaps the session's v1 pin
 //! (`<agent>/session-pins.json`, keyed by v1 id) to its ULID in the project's
 //! own `session-pins.json`.
+//!
+//! # Sessions that changed since their import
+//!
+//! v1 may keep writing a session after it was imported. When the
+//! transcript's digest matches none of its journals' `import-source-blob`s,
+//! the session is [changed since import](PriorImport::Changed): the picker
+//! marks the row so, and picking it or a bulk run converts it again into a
+//! fresh journal ([`ImportOutcome::Reimported`]). Journals are append-only,
+//! so the earlier journal is never touched and stays resumable; the index
+//! takes the newest journal (the greatest ULID) whose digest matches as the
+//! session's current import. A journal that recorded no digest counts as
+//! current. The step's marker does not gate an explicit bulk run
+//! ([`ImportStep::gated_by_marker`]): the journals keep it idempotent, and a
+//! rerun finds what changed.
+//!
+//! # Obsolete import records
+//!
+//! An earlier importer kept one record per converted session under
+//! `<data>/v1-sessions/` (`<v1 id>.json`, or the id's SHA-256 hex when the id
+//! is no safe file name, holding `{"id", "source", "journal"}`). The journals
+//! replaced them: every run of the step deletes each file there that has
+//! exactly a record's name and shape, then the directory once empty, and
+//! reports it ([`ImportOutcome::Removed`]; a dry run reports
+//! [`ImportOutcome::WouldRemove`] and deletes nothing). Nothing else there is
+//! touched.
 //!
 //! # Artifacts
 //!
@@ -55,7 +81,8 @@
 //! the session reading it. A subagent's journal carries the entries for the
 //! ids its own transcript references. A referenced id with no file is
 //! reported ([`ImportedSession::missing_artifacts`], and one
-//! [`Attention::ArtifactMissing`] entry per id in a bulk run), never fatal.
+//! [`Attention::ArtifactMissing`] entry per id in a bulk run, dry runs
+//! included), never fatal.
 //!
 //! The JSONL-to-journal conversion itself is the app's session importer
 //! (`ForeignFormat::Omp1`, beside the Claude Code and Codex importers),
@@ -68,7 +95,7 @@ use std::{
 	time::{SystemTime, UNIX_EPOCH},
 };
 
-use omp_core::{FastHashMap, Str, Ulid, sf};
+use omp_core::{FastHashMap, Hash32, Str, Ulid, sf};
 use omp_journal::{
 	Journal,
 	blob::{self, BlobRef, BlobStore},
@@ -76,6 +103,7 @@ use omp_journal::{
 use omp_session::import;
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use super::{
@@ -99,6 +127,15 @@ const MAX_EAGER_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_HEAD_LINES: usize = 64;
 /// Subagent nesting followed below one session.
 const MAX_CHILD_DEPTH: u8 = 8;
+/// Where an earlier importer kept one record per converted session, under a
+/// v2 data directory; see [Obsolete import
+/// records](self#obsolete-import-records).
+const RETIRED_RECORDS_DIR: &str = "v1-sessions";
+/// A retired record's file extension.
+const RETIRED_RECORD_EXTENSION: &str = "json";
+/// The largest file read as a possible retired record: one holds an id and
+/// two paths.
+const MAX_RETIRED_RECORD_BYTES: u64 = 64 * 1024;
 
 /// The error a [`V1SessionConverter`] reports, carried as the typed source of
 /// [`SessionImportError::Convert`].
@@ -249,9 +286,24 @@ pub struct V1SessionInfo {
 	pub messages:      u32,
 	/// First user message.
 	pub first_message: Option<Str>,
-	/// The v2 journal an earlier import made, when one still exists: picking
-	/// the row reopens it instead of converting again.
-	pub imported:      Option<PathBuf>,
+	/// What earlier imports left, when a journal of one still exists:
+	/// picking a [current](PriorImport::Current) row reopens its journal, and a
+	/// [changed](PriorImport::Changed) one converts again.
+	pub imported:      Option<PriorImport>,
+}
+
+/// The journal an earlier import of a v1 session left, and whether the
+/// transcript changed since.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PriorImport {
+	/// The newest journal imported from the transcript as it is now:
+	/// importing reopens it.
+	Current(PathBuf),
+	/// The transcript changed since every import (its digest matches no
+	/// journal's `import-source-blob`); this is the newest earlier journal,
+	/// which stays. Importing converts the transcript again into a fresh
+	/// journal.
+	Changed(PathBuf),
 }
 
 /// A converted (or earlier converted) session.
@@ -265,6 +317,9 @@ pub struct ImportedSession {
 	pub bucket:            ProjectBucket,
 	/// Whether this call converted it (`false`: an earlier import's journal).
 	pub converted:         bool,
+	/// When this call converted the session again because its transcript
+	/// changed since its import: that import's newest journal, which stays.
+	pub previous:          Option<PathBuf>,
 	/// Messages imported by this call (0 when not converted).
 	pub messages:          usize,
 	/// Child journals created by this call.
@@ -521,7 +576,8 @@ fn child_transcripts(artifacts: &Path) -> Result<Vec<PathBuf>, SessionImportErro
 /// for small files, message counts). Nothing is converted or written.
 ///
 /// Each row an earlier import already made a journal for carries it
-/// ([`V1SessionInfo::imported`]).
+/// ([`V1SessionInfo::imported`]), and whether the transcript changed since,
+/// which reads that transcript whole to digest it.
 ///
 /// # Errors
 ///
@@ -534,11 +590,15 @@ pub fn list(pair: &super::ImportPair) -> Result<Vec<V1SessionInfo>, SessionImpor
 	let index = ImportedIndex::scan(&pair.target)?;
 	let mut rows = Vec::new();
 	for path in transcripts(&root)? {
-		match inspect(&path) {
-			Ok(Some(mut row)) => {
-				row.imported = index.journal(&row.id).map(Path::to_owned);
-				rows.push(row);
-			},
+		let listed = inspect(&path).and_then(|row| {
+			row.map(|mut row| {
+				row.imported = index.prior(&row.id, &path)?;
+				Ok(row)
+			})
+			.transpose()
+		});
+		match listed {
+			Ok(Some(row)) => rows.push(row),
 			Ok(None) => {},
 			Err(error) => tracing::warn!(
 				transcript = %path.display(),
@@ -636,6 +696,27 @@ fn inspect(path: &Path) -> Result<Option<V1SessionInfo>, SessionImportError> {
 	}))
 }
 
+/// One journal an omp v1 import wrote.
+#[derive(Clone, Debug)]
+struct IndexedJournal {
+	path:   PathBuf,
+	/// The transcript's digest at import
+	/// ([`import::ImportOrigin::source_digest`]), when recorded.
+	digest: Option<Hash32>,
+}
+
+impl IndexedJournal {
+	/// Orders journals by their ULID file stem, oldest first.
+	fn age(&self) -> Option<&std::ffi::OsStr> {
+		self.path.file_name()
+	}
+}
+
+/// The newest of `journals`: the greatest ULID.
+fn newest<'j>(journals: impl Iterator<Item = &'j IndexedJournal>) -> Option<&'j IndexedJournal> {
+	journals.max_by(|left, right| left.age().cmp(&right.age()))
+}
+
 /// The v2 journals imported from v1 sessions, keyed by v1 session id.
 ///
 /// Derived, never stored: [`Self::scan`] reads the import provenance each
@@ -645,13 +726,13 @@ fn inspect(path: &Path) -> Result<Option<V1SessionInfo>, SessionImportError> {
 /// again.
 #[derive(Clone, Debug, Default)]
 pub struct ImportedIndex {
-	by_id: FastHashMap<Str, PathBuf>,
+	by_id: FastHashMap<Str, SmallVec<IndexedJournal, 1>>,
 }
 
 impl ImportedIndex {
 	/// Scans every project bucket of `target` for journals an omp v1 import
-	/// wrote. When several journals name one v1 session, the earliest (the
-	/// smallest ULID) wins.
+	/// wrote, keeping every journal of a session with the transcript digest
+	/// it recorded.
 	///
 	/// # Errors
 	///
@@ -664,7 +745,7 @@ impl ImportedIndex {
 			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
 			Err(source) => return Err(SessionImportError::Read { path: projects, source }),
 		};
-		let mut journals = Vec::new();
+		let mut index = Self::default();
 		for bucket in buckets {
 			let sessions = bucket
 				.map_err(read_error(&projects))?
@@ -683,50 +764,100 @@ impl ImportedIndex {
 				Err(source) => return Err(SessionImportError::Read { path: sessions, source }),
 			};
 			for entry in entries {
-				let path = entry.map_err(read_error(&sessions))?.path();
+				let journal = entry.map_err(read_error(&sessions))?.path();
 				// Hidden files are journals still being staged.
-				let visible = path
+				let visible = journal
 					.file_name()
 					.and_then(|name| name.to_str())
 					.is_some_and(|name| !name.starts_with('.'));
-				if visible
-					&& path.extension().and_then(|value| value.to_str())
-						== Some(omp_journal::FILE_EXTENSION)
+				if !visible
+					|| journal.extension().and_then(|value| value.to_str())
+						!= Some(omp_journal::FILE_EXTENSION)
 				{
-					journals.push(path);
-				}
-			}
-		}
-		journals.sort();
-		let mut index = Self::default();
-		for journal in journals {
-			let entries = match Journal::scan_prefix(&journal, import::PROVENANCE_PREFIX_BYTES) {
-				Ok(entries) => entries,
-				Err(error) => {
-					tracing::debug!(
-						journal = %journal.display(),
-						error = &error as &dyn std::error::Error,
-						"skipping unreadable journal while indexing v1 imports"
-					);
 					continue;
-				},
-			};
-			let Some(origin) = import::import_origin(&entries) else {
-				continue;
-			};
-			if origin.format == import::OMP1_FORMAT
-				&& let Some(id) = origin.source_id
-			{
-				index.by_id.entry(id).or_insert(journal);
+				}
+				let entries = match Journal::scan_prefix(&journal, import::PROVENANCE_PREFIX_BYTES) {
+					Ok(entries) => entries,
+					Err(error) => {
+						tracing::debug!(
+							journal = %journal.display(),
+							error = &error as &dyn std::error::Error,
+							"skipping unreadable journal while indexing v1 imports"
+						);
+						continue;
+					},
+				};
+				let Some(origin) = import::import_origin(&entries) else {
+					continue;
+				};
+				if origin.format == import::OMP1_FORMAT
+					&& let Some(id) = origin.source_id
+				{
+					index
+						.by_id
+						.entry(id)
+						.or_default()
+						.push(IndexedJournal { path: journal, digest: origin.source_digest });
+				}
 			}
 		}
 		Ok(index)
 	}
 
-	/// The journal an earlier import made for v1 session `id`.
+	/// The newest journal an import made for v1 session `id`.
 	#[must_use]
 	pub fn journal(&self, id: &str) -> Option<&Path> {
-		self.by_id.get(id).map(PathBuf::as_path)
+		newest(self.by_id.get(id)?.iter()).map(|journal| journal.path.as_path())
+	}
+
+	/// What earlier imports of v1 session `id` left, judged against
+	/// `transcript` as it is now; see [`PriorImport`]. Reads the transcript
+	/// whole to digest it only when a journal of `id` recorded a digest.
+	///
+	/// # Errors
+	///
+	/// Returns [`SessionImportError::Read`] when the transcript cannot be
+	/// read.
+	pub fn prior(
+		&self,
+		id: &str,
+		transcript: &Path,
+	) -> Result<Option<PriorImport>, SessionImportError> {
+		let recorded = self
+			.by_id
+			.get(id)
+			.is_some_and(|journals| journals.iter().any(|journal| journal.digest.is_some()));
+		let digest = if recorded {
+			Some(transcript_digest(transcript)?)
+		} else {
+			None
+		};
+		Ok(self.prior_by_digest(id, digest))
+	}
+
+	/// [`Self::prior`] for a transcript whose digest is `digest` (`None`
+	/// when not needed: no journal recorded one).
+	fn prior_by_digest(&self, id: &str, digest: Option<Hash32>) -> Option<PriorImport> {
+		let journals = self.by_id.get(id)?;
+		let current = newest(
+			journals
+				.iter()
+				.filter(|journal| journal.digest.is_none() || journal.digest == digest),
+		);
+		Some(match current {
+			Some(journal) => PriorImport::Current(journal.path.clone()),
+			None => PriorImport::Changed(newest(journals.iter())?.path.clone()),
+		})
+	}
+
+	/// Learns a journal this process just imported from a transcript whose
+	/// digest was `digest`.
+	fn learn(&mut self, id: Str, path: PathBuf, digest: Hash32) {
+		self
+			.by_id
+			.entry(id)
+			.or_default()
+			.push(IndexedJournal { path, digest: Some(digest) });
 	}
 
 	/// How many v1 sessions have an imported journal.
@@ -740,6 +871,15 @@ impl ImportedIndex {
 	pub fn is_empty(&self) -> bool {
 		self.by_id.is_empty()
 	}
+}
+
+/// The SHA-256 digest of a transcript's exact bytes: what an importer
+/// records as its `import-source-blob`.
+fn transcript_digest(path: &Path) -> Result<Hash32, SessionImportError> {
+	let mut file = fs::File::open(path).map_err(read_error(path))?;
+	let mut hasher = Hash32::hasher();
+	io::copy(&mut file, &mut hasher).map_err(read_error(path))?;
+	Ok(hasher.finalize())
 }
 
 /// Every v1 artifact id `transcript` references (`artifact://<N>`), sorted
@@ -778,14 +918,9 @@ fn artifact_id(name: &str) -> Option<u64> {
 		.flatten()
 }
 
-/// Copies every file of a v1 artifact directory (not its subagent
-/// transcripts or subdirectories) into `store`, in name order. The first
-/// file with a given numeric prefix carries that id, as v1's lookup found
-/// only one.
-fn store_artifacts(
-	directory: &Path,
-	store: &BlobStore,
-) -> Result<Vec<V1Artifact>, SessionImportError> {
+/// Every file of a v1 artifact directory (not its subagent transcripts or
+/// subdirectories), in name order.
+fn artifact_files(directory: &Path) -> Result<Vec<PathBuf>, SessionImportError> {
 	let mut files = Vec::new();
 	for entry in fs::read_dir(directory).map_err(read_error(directory))? {
 		let path = entry.map_err(read_error(directory))?.path();
@@ -794,6 +929,17 @@ fn store_artifacts(
 		}
 	}
 	files.sort();
+	Ok(files)
+}
+
+/// Copies every [artifact file](artifact_files) into `store`, in name order.
+/// The first file with a given numeric prefix carries that id, as v1's lookup
+/// found only one.
+fn store_artifacts(
+	directory: &Path,
+	store: &BlobStore,
+) -> Result<Vec<V1Artifact>, SessionImportError> {
+	let files = artifact_files(directory)?;
 	let mut artifacts = Vec::<V1Artifact>::with_capacity(files.len());
 	for path in files {
 		let file = match fs::File::open(&path) {
@@ -829,6 +975,53 @@ fn referenced_artifacts(
 		}
 	}
 	Ok(artifacts)
+}
+
+/// The `artifact://<id>` references a conversion of `source` would report
+/// missing ([`ImportedSession::missing_artifacts`]), in the same order
+/// (subagents before the transcript that holds them), found by reading only:
+/// what a dry run reports.
+fn dangling_references(source: &Path) -> Result<Vec<MissingArtifact>, SessionImportError> {
+	let directory = source.with_extension("");
+	let present = if directory.is_dir() {
+		artifact_files(&directory)?
+			.iter()
+			.filter_map(|path| artifact_id(path.file_name()?.to_str()?))
+			.collect()
+	} else {
+		SmallVec::<u64, 16>::new()
+	};
+	let mut missing = Vec::new();
+	collect_dangling(source, &present, 0, &mut missing)?;
+	Ok(missing)
+}
+
+/// [`dangling_references`] of `source` and, first, of every subagent
+/// transcript below it, walked exactly as [`Tree::convert`] converts them.
+fn collect_dangling(
+	source: &Path,
+	present: &[u64],
+	depth: u8,
+	missing: &mut Vec<MissingArtifact>,
+) -> Result<(), SessionImportError> {
+	let directory = source.with_extension("");
+	if depth < MAX_CHILD_DEPTH && directory.is_dir() {
+		for child in child_transcripts(&directory)? {
+			match read_head(&child) {
+				Ok(_) => collect_dangling(&child, present, depth + 1, missing)?,
+				Err(SessionImportError::NotASession { .. }) => {},
+				Err(error) => return Err(error),
+			}
+		}
+	}
+	let bytes = fs::read(source).map_err(read_error(source))?;
+	missing.extend(
+		artifact_references(&bytes)
+			.into_iter()
+			.filter(|id| !present.contains(id))
+			.map(|id| MissingArtifact { transcript: source.to_owned(), id }),
+	);
+	Ok(())
 }
 
 /// Reads a pin list; a missing file is empty.
@@ -990,7 +1183,8 @@ impl Tree<'_> {
 }
 
 /// Converts one v1 transcript of `layout` into `target`, unless an earlier
-/// import's journal still exists; see the [module docs](self).
+/// import's journal of the transcript as it is now still exists; see the
+/// [module docs](self).
 ///
 /// # Errors
 ///
@@ -1019,18 +1213,24 @@ fn import_indexed(
 	let head = read_head(source)?;
 	let id = head.id.unwrap_or_default();
 	let bucket = ProjectBucket::for_cwd(head.cwd.as_deref());
-	if let Some(earlier) = index.journal(&id) {
-		return Ok(ImportedSession {
-			journal: earlier.to_owned(),
-			id,
-			bucket,
-			converted: false,
-			messages: 0,
-			children: 0,
-			artifacts: 0,
-			missing_artifacts: Vec::new(),
-		});
-	}
+	let digest = transcript_digest(source)?;
+	let previous = match index.prior_by_digest(&id, Some(digest)) {
+		Some(PriorImport::Current(journal)) => {
+			return Ok(ImportedSession {
+				journal,
+				id,
+				bucket,
+				converted: false,
+				previous: None,
+				messages: 0,
+				children: 0,
+				artifacts: 0,
+				missing_artifacts: Vec::new(),
+			});
+		},
+		Some(PriorImport::Changed(journal)) => Some(journal),
+		None => None,
+	};
 	let state_dir = bucket
 		.state_dir(&target.data_dir)
 		.map_err(read_error(source))?;
@@ -1070,7 +1270,7 @@ fn import_indexed(
 		.pop()
 		.map(|file| file.journal)
 		.expect("the parent journal is staged last");
-	index.by_id.insert(id.clone(), journal.clone());
+	index.learn(id.clone(), journal.clone(), digest);
 	remap_pin(layout, &state_dir, &id, &journal_id)?;
 	for reference in &missing {
 		tracing::warn!(
@@ -1085,6 +1285,7 @@ fn import_indexed(
 		journal,
 		bucket,
 		converted: true,
+		previous,
 		messages,
 		children: staged.len(),
 		artifacts: shared.len(),
@@ -1118,25 +1319,35 @@ pub fn import_selected(
 }
 
 /// The `sessions` step.
+///
+/// It reads its own marker ([`ImportStep::gated_by_marker`]): on demand, a
+/// set marker only changes what the step reports; a bulk run always scans.
+/// Every run first retires the obsolete records of an earlier importer
+/// ([`retire_records`]).
 pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, ImportError> {
+	let mut entries = retire_records(&cx.pair.target, cx.mode);
 	let root = cx.locate(V1Item::Sessions);
 	let entry =
 		|path, outcome| ImportEntry::new(ImportStep::Sessions, V1Item::Sessions, path, outcome);
+	let marker = ImportStep::Sessions.marker(&cx.pair.target.config_dir);
 	let SessionImport::Bulk(converter) = cx.sessions else {
-		let outcome = if root.is_some() {
+		let outcome = if marker.is_set() {
+			ImportOutcome::Skipped(SkipReason::MarkerPresent)
+		} else if root.is_some() {
 			ImportOutcome::Skipped(SkipReason::OnDemand)
 		} else {
 			ImportOutcome::NothingToImport
 		};
-		return Ok(vec![entry(root, outcome)]);
+		entries.push(entry(root, outcome));
+		return Ok(entries);
 	};
-	let marker = ImportStep::Sessions.marker(&cx.pair.target.config_dir);
 	let set_marker = || marker.set(None).map_err(write_error(marker.path()));
 	let Some(root) = root else {
 		if cx.mode == ImportMode::Apply {
 			set_marker()?;
 		}
-		return Ok(vec![entry(None, ImportOutcome::NothingToImport)]);
+		entries.push(entry(None, ImportOutcome::NothingToImport));
+		return Ok(entries);
 	};
 	let files = transcripts(&root)?;
 	let mut index = ImportedIndex::scan(&cx.pair.target)?;
@@ -1144,60 +1355,29 @@ pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, 
 		if cx.mode == ImportMode::Apply {
 			set_marker()?;
 		}
-		return Ok(vec![entry(Some(root), ImportOutcome::NothingToImport)]);
+		entries.push(entry(Some(root), ImportOutcome::NothingToImport));
+		return Ok(entries);
 	}
-	let mut entries = Vec::with_capacity(files.len());
+	entries.reserve(files.len());
 	let mut failed = false;
 	for file in files {
-		let mut missing = Vec::new();
-		let (subject, outcome) = match cx.mode {
-			ImportMode::DryRun => match read_head(&file) {
-				Ok(head) => {
-					let id = head.id.unwrap_or_default();
-					let outcome = if index.journal(&id).is_some() {
-						ImportOutcome::Skipped(SkipReason::SessionImported)
-					} else {
-						ImportOutcome::WouldImport
-					};
-					(Some(subject(&id, &ProjectBucket::for_cwd(head.cwd.as_deref()))), outcome)
-				},
-				Err(SessionImportError::NotASession { .. }) => (None, ImportOutcome::NothingToImport),
-				Err(error) => {
-					failed = true;
-					(None, ImportOutcome::NeedsAttention(Attention::Failed(error.into())))
-				},
-			},
+		let session = match cx.mode {
+			ImportMode::DryRun => preview(&file, &index),
 			ImportMode::Apply => {
-				match import_indexed(&cx.pair.target, &cx.pair.source, &file, converter, &mut index) {
-					Ok(session) => {
-						missing = session
-							.missing_artifacts
-							.into_iter()
-							.map(|reference| ImportEntry {
-								step:    ImportStep::Sessions,
-								item:    V1Item::Sessions,
-								path:    Some(reference.transcript),
-								subject: Some(sf!("{} artifact://{}", session.id, reference.id)),
-								outcome: ImportOutcome::NeedsAttention(Attention::ArtifactMissing),
-							})
-							.collect();
-						(
-							Some(subject(&session.id, &session.bucket)),
-							if session.converted {
-								ImportOutcome::Imported
-							} else {
-								ImportOutcome::Skipped(SkipReason::SessionImported)
-							},
-						)
-					},
-					Err(SessionImportError::NotASession { .. } | SessionImportError::Empty { .. }) => {
-						(None, ImportOutcome::NothingToImport)
-					},
-					Err(error) => {
-						failed = true;
-						(None, ImportOutcome::NeedsAttention(Attention::Failed(error.into())))
-					},
-				}
+				import_indexed(&cx.pair.target, &cx.pair.source, &file, converter, &mut index)
+					.map(SessionOutcome::from)
+			},
+		};
+		let (subject, outcome, missing) = match session {
+			Ok(SessionOutcome { id, bucket, outcome, missing }) => {
+				(Some(subject(&id, &bucket)), outcome, Some((id, missing)))
+			},
+			Err(SessionImportError::NotASession { .. } | SessionImportError::Empty { .. }) => {
+				(None, ImportOutcome::NothingToImport, None)
+			},
+			Err(error) => {
+				failed = true;
+				(None, ImportOutcome::NeedsAttention(Attention::Failed(error.into())), None)
 			},
 		};
 		entries.push(ImportEntry {
@@ -1207,7 +1387,15 @@ pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, 
 			subject,
 			outcome,
 		});
-		entries.append(&mut missing);
+		if let Some((id, missing)) = missing {
+			entries.extend(missing.into_iter().map(|reference| ImportEntry {
+				step:    ImportStep::Sessions,
+				item:    V1Item::Sessions,
+				path:    Some(reference.transcript),
+				subject: Some(sf!("{id} artifact://{}", reference.id)),
+				outcome: ImportOutcome::NeedsAttention(Attention::ArtifactMissing),
+			}));
+		}
 	}
 	// A failed session leaves the marker unset, so the next run retries it;
 	// the converted ones' journals keep them from converting again.
@@ -1215,6 +1403,163 @@ pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, 
 		set_marker()?;
 	}
 	Ok(entries)
+}
+
+/// What the step did, or in a dry run would do, with one v1 session.
+struct SessionOutcome {
+	id:      Str,
+	bucket:  ProjectBucket,
+	outcome: ImportOutcome,
+	/// `artifact://<id>` references with no v1 file.
+	missing: Vec<MissingArtifact>,
+}
+
+impl From<ImportedSession> for SessionOutcome {
+	fn from(session: ImportedSession) -> Self {
+		let outcome = match (session.converted, session.previous.is_some()) {
+			(false, _) => ImportOutcome::Skipped(SkipReason::SessionImported),
+			(true, false) => ImportOutcome::Imported,
+			(true, true) => ImportOutcome::Reimported,
+		};
+		Self { id: session.id, bucket: session.bucket, outcome, missing: session.missing_artifacts }
+	}
+}
+
+/// A dry run's [`SessionOutcome`]: what [`import_indexed`] would do, found
+/// by reading only.
+fn preview(file: &Path, index: &ImportedIndex) -> Result<SessionOutcome, SessionImportError> {
+	let head = read_head(file)?;
+	let id = head.id.unwrap_or_default();
+	let bucket = ProjectBucket::for_cwd(head.cwd.as_deref());
+	let (outcome, missing) = match index.prior(&id, file)? {
+		Some(PriorImport::Current(_)) => {
+			(ImportOutcome::Skipped(SkipReason::SessionImported), Vec::new())
+		},
+		Some(PriorImport::Changed(_)) => (ImportOutcome::WouldReimport, dangling_references(file)?),
+		None => (ImportOutcome::WouldImport, dangling_references(file)?),
+	};
+	Ok(SessionOutcome { id, bucket, outcome, missing })
+}
+
+/// Deletes the obsolete records an earlier importer kept under
+/// `<data>/v1-sessions/` (a dry run only counts them), then that directory
+/// once empty; see [Obsolete import records](self#obsolete-import-records).
+/// Reports one [`ImportOutcome::Removed`] (or [`ImportOutcome::WouldRemove`])
+/// entry when there were any, and a failed entry per file that could not be
+/// deleted; nothing when the directory is absent.
+fn retire_records(target: &V2Target, mode: ImportMode) -> Vec<ImportEntry> {
+	let failed = |error: SessionImportError| {
+		ImportEntry::new(
+			ImportStep::Sessions,
+			V1Item::Sessions,
+			None,
+			ImportOutcome::NeedsAttention(Attention::Failed(error.into())),
+		)
+	};
+	let directory = target.data_dir.join(RETIRED_RECORDS_DIR);
+	let listing = match fs::read_dir(&directory) {
+		Ok(listing) => listing,
+		Err(error)
+			if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) =>
+		{
+			return Vec::new();
+		},
+		Err(source) => return vec![failed(SessionImportError::Read { path: directory, source })],
+	};
+	let mut entries = Vec::new();
+	let mut retired = 0_usize;
+	for item in listing {
+		let item = match item {
+			Ok(item) => item,
+			Err(source) => {
+				entries.push(failed(SessionImportError::Read { path: directory.clone(), source }));
+				continue;
+			},
+		};
+		if !is_retired_record(&item) {
+			continue;
+		}
+		if mode == ImportMode::DryRun {
+			retired += 1;
+			continue;
+		}
+		let path = item.path();
+		match fs::remove_file(&path) {
+			Ok(()) => retired += 1,
+			Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+			Err(source) => entries.push(failed(SessionImportError::Write { path, source })),
+		}
+	}
+	if mode == ImportMode::Apply {
+		// Succeeds only once nothing else is left there.
+		let _ = fs::remove_dir(&directory);
+	}
+	if retired > 0 {
+		let outcome = match mode {
+			ImportMode::DryRun => ImportOutcome::WouldRemove,
+			ImportMode::Apply => ImportOutcome::Removed,
+		};
+		entries.insert(0, ImportEntry {
+			step: ImportStep::Sessions,
+			item: V1Item::Sessions,
+			path: Some(directory),
+			subject: Some(sf!("{retired} obsolete v1 session import records")),
+			outcome,
+		});
+	}
+	entries
+}
+
+/// One record an earlier importer kept per converted session, exactly.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredRecord {
+	id:      Str,
+	source:  PathBuf,
+	journal: PathBuf,
+}
+
+/// Whether `item` is a regular file (never followed through a link) that has
+/// exactly a [`RetiredRecord`]'s name and shape: named after its id (or the
+/// id's SHA-256 hex when the id is no safe file name) with a `.json`
+/// extension, naming a v1 transcript and a journal.
+fn is_retired_record(item: &fs::DirEntry) -> bool {
+	if !item.file_type().is_ok_and(|kind| kind.is_file())
+		|| !item
+			.metadata()
+			.is_ok_and(|metadata| metadata.len() <= MAX_RETIRED_RECORD_BYTES)
+	{
+		return false;
+	}
+	let name = item.file_name();
+	let Some(stem) = name
+		.to_str()
+		.and_then(|name| name.strip_suffix(RETIRED_RECORD_EXTENSION))
+		.and_then(|name| name.strip_suffix('.'))
+	else {
+		return false;
+	};
+	let Ok(bytes) = fs::read(item.path()) else {
+		return false;
+	};
+	let Ok(record) = serde_json::from_slice::<RetiredRecord>(&bytes) else {
+		return false;
+	};
+	let id = record.id.as_str();
+	let safe = !id.is_empty()
+		&& id.len() <= 128
+		&& id
+			.bytes()
+			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+	let named = if safe {
+		stem == id
+	} else {
+		stem == Hash32::sum(id.as_bytes()).to_hex().as_str()
+	};
+	named
+		&& is_transcript(&record.source)
+		&& record.journal.extension().and_then(|value| value.to_str())
+			== Some(omp_journal::FILE_EXTENSION)
 }
 
 /// A report subject: the v1 id, noting the no-directory bucket.
