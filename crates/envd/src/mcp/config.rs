@@ -107,6 +107,14 @@ impl ConfigSourceKind {
 		matches!(self, Self::Project | Self::User | Self::Root)
 	}
 
+	/// Whether sources of this kind load under the MCP discovery policy
+	/// `enable_project_config` (`sv_mcp_enable_project_config`): project-scoped
+	/// sources load only while it is set, every other source always.
+	#[must_use]
+	pub const fn loads(self, enable_project_config: bool) -> bool {
+		enable_project_config || !self.project_scoped()
+	}
+
 	const fn project_scoped(self) -> bool {
 		matches!(
 			self,
@@ -446,7 +454,7 @@ pub fn resolve_sources(sources: &[ConfigSource], enable_project_config: bool) ->
 	let forced = user.map_or_else(BTreeSet::new, |source| source.file.enabled_servers.clone());
 	let mut ordered: Vec<&ConfigSource> = sources
 		.iter()
-		.filter(|source| enable_project_config || !source.kind.project_scoped())
+		.filter(|source| source.kind.loads(enable_project_config))
 		.collect();
 	ordered.sort_by(|left, right| right.kind.precedence().cmp(&left.kind.precedence()));
 

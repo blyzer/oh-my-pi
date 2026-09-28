@@ -26,7 +26,10 @@ use omp_core::{
 	Hash32, Str,
 	dirs::{DataDirError, user_config_root},
 };
-use omp_envd::{mcp::McpConfigPaths, plugin_commands::AgentPluginLaunches};
+use omp_envd::{
+	mcp::{McpConfigPaths, McpSettings},
+	plugin_commands::AgentPluginLaunches,
+};
 use omp_ext::{
 	claude_plugin::{ClaudePlugin, ClaudePlugins, PluginLayout},
 	plugin_command::{CommandApprovals, PluginCommandBlocked, PluginLaunch, plugin_command_digest},
@@ -83,24 +86,33 @@ pub fn agent_plugin_paths(
 		.with_command_approvals(plugins.command_approvals.clone()))
 }
 
-/// Every declared launch the operator has not approved, none of which runs:
-/// each installed plugin's servers and hooks, then the stdio MCP servers of
-/// each Agent Plugins package `agent_plugins` discovers.
+/// Every launch a session under the MCP discovery policy `mcp` loads that
+/// the operator has not approved, none of which runs: each installed
+/// plugin's servers and hooks, then the stdio MCP servers of each Agent
+/// Plugins package `agent_plugins` discovers.
+///
+/// What MCP discovery skips under `mcp` is not reported: with project
+/// configuration disabled, neither the project's Agent Plugins packages nor
+/// the MCP servers of a plugin installed for the project load
+/// ([`omp_envd::plugin_commands::loaded_plugin_launches`]), whatever their
+/// approval.
 #[must_use]
 pub fn blocked_launches(
 	plugins: &ClaudePlugins,
 	agent_plugins: &McpConfigPaths,
+	mcp: &McpSettings,
 ) -> Vec<PluginCommandBlocked> {
 	let mut blocked = plugins
 		.plugins
 		.iter()
 		.flat_map(|plugin| {
-			plugin_launches(plugin)
+			omp_envd::plugin_commands::loaded_plugin_launches(plugin, mcp)
 				.into_iter()
+				.chain(plugin.hook_launches().map(|(_, launch)| launch))
 				.filter_map(|launch| plugin.admit_launch(launch).err())
 		})
 		.collect::<Vec<_>>();
-	blocked.extend(omp_envd::plugin_commands::blocked_agent_plugin_launches(agent_plugins));
+	blocked.extend(omp_envd::plugin_commands::blocked_agent_plugin_launches(agent_plugins, mcp));
 	blocked
 }
 
@@ -129,7 +141,7 @@ impl PluginCommandSet {
 
 impl From<AgentPluginLaunches> for PluginCommandSet {
 	fn from(package: AgentPluginLaunches) -> Self {
-		let AgentPluginLaunches { plugin, version, root, launches } = package;
+		let AgentPluginLaunches { plugin, version, root, launches, kind: _ } = package;
 		Self { plugin, version, root, launches }
 	}
 }

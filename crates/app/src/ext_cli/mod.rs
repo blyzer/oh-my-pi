@@ -3751,7 +3751,11 @@ mod tests {
 			let plugins = ClaudePlugins::resolve(&data, &project, None);
 			let agent_plugins = omp_envd::mcp::McpConfigPaths::new(&home, &project)
 				.with_command_approvals(plugins.command_approvals.clone());
-			omp_driver::plugin_commands::blocked_launches(&plugins, &agent_plugins)
+			omp_driver::plugin_commands::blocked_launches(
+				&plugins,
+				&agent_plugins,
+				&omp_envd::mcp::McpSettings::default(),
+			)
 		};
 		let args = |approve_command: Vec<Str>, approve_commands: bool, revoke: bool| ExtTrustArgs {
 			revoke,
@@ -3846,10 +3850,14 @@ mod tests {
 			let agent_plugins =
 				omp_driver::plugin_commands::agent_plugin_paths(&project, &roots, &plugins)
 					.expect("agent plugin discovery");
-			omp_driver::plugin_commands::blocked_launches(&plugins, &agent_plugins)
-				.into_iter()
-				.filter(|blocked| matches!(blocked.plugin.as_str(), "portable" | "outside"))
-				.collect::<Vec<_>>()
+			omp_driver::plugin_commands::blocked_launches(
+				&plugins,
+				&agent_plugins,
+				&omp_envd::mcp::McpSettings::default(),
+			)
+			.into_iter()
+			.filter(|blocked| matches!(blocked.plugin.as_str(), "portable" | "outside"))
+			.collect::<Vec<_>>()
 		};
 
 		let pending = blocked(Vec::new());

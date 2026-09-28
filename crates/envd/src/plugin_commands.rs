@@ -8,6 +8,12 @@
 //! composition report every refusal up front and lets `omp ext trust` list
 //! and approve a plugin's launches, with digests that match what the seams
 //! check.
+//!
+//! A report of what a session refuses covers only what the session would
+//! load: under [`McpSettings::enable_project_config`] off, MCP discovery
+//! drops every project-scoped source ([`ConfigSourceKind::loads`]), so the
+//! project's Agent Plugins packages and the MCP servers of plugins installed
+//! for the project are neither loaded nor reported.
 
 use std::path::PathBuf;
 
@@ -19,7 +25,11 @@ use omp_ext::{
 
 use crate::{
 	docserver::{dap_config::plugin_dap_launches, lsp_config::plugin_lsp_launches},
-	mcp::{McpConfigPaths, discovery::plugin_mcp_launches},
+	mcp::{
+		McpConfigPaths, McpSettings,
+		config::ConfigSourceKind,
+		discovery::{claude_plugin_kind, plugin_mcp_launches},
+	},
 };
 
 /// One Agent Plugins 1.0 package's stdio MCP launches, under the identity
@@ -35,6 +45,9 @@ pub struct AgentPluginLaunches {
 	/// Every stdio server launch its `mcp.json` declares, as discovery
 	/// resolves it.
 	pub launches: Vec<PluginLaunch>,
+	/// The discovery source it joins as; a project-scoped package loads only
+	/// while project MCP configuration is enabled ([`ConfigSourceKind::loads`]).
+	pub kind:     ConfigSourceKind,
 }
 
 impl AgentPluginLaunches {
@@ -52,12 +65,19 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 	crate::mcp::discovery::agent_plugin_launches(paths)
 }
 
-/// Every Agent Plugins stdio launch for `paths` that the approvals `paths`
-/// carries do not admit, so it does not start.
+/// Every Agent Plugins stdio launch a session under `settings` would load
+/// for `paths` that the approvals `paths` carries do not admit, so it does
+/// not start. A package MCP discovery skips under `settings` (a project
+/// package while project configuration is disabled) launches nothing and is
+/// not reported.
 #[must_use]
-pub fn blocked_agent_plugin_launches(paths: &McpConfigPaths) -> Vec<PluginCommandBlocked> {
+pub fn blocked_agent_plugin_launches(
+	paths: &McpConfigPaths,
+	settings: &McpSettings,
+) -> Vec<PluginCommandBlocked> {
 	agent_plugin_launches(paths)
 		.into_iter()
+		.filter(|package| package.kind.loads(settings.enable_project_config))
 		.flat_map(|package| {
 			let AgentPluginLaunches { plugin, version, launches, .. } = package;
 			launches.into_iter().filter_map(move |launch| {
@@ -80,14 +100,33 @@ pub fn plugin_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
 	launches
 }
 
-/// Every declared launch across `plugins` that the operator has not
-/// approved, so it does not start.
+/// Every process `plugin` declares that a session under `settings` loads:
+/// [`plugin_launches`] without the MCP servers of a plugin whose MCP
+/// declarations discovery skips (one installed for the project while project
+/// configuration is disabled).
 #[must_use]
-pub fn blocked_launches(plugins: &[ClaudePlugin]) -> Vec<PluginCommandBlocked> {
+pub fn loaded_plugin_launches(plugin: &ClaudePlugin, settings: &McpSettings) -> Vec<PluginLaunch> {
+	let mut launches = if claude_plugin_kind(plugin).loads(settings.enable_project_config) {
+		plugin_mcp_launches(plugin).collect::<Vec<_>>()
+	} else {
+		Vec::new()
+	};
+	launches.extend(plugin_lsp_launches(plugin));
+	launches.extend(plugin_dap_launches(plugin));
+	launches
+}
+
+/// Every launch across `plugins` a session under `settings` loads that the
+/// operator has not approved, so it does not start.
+#[must_use]
+pub fn blocked_launches(
+	plugins: &[ClaudePlugin],
+	settings: &McpSettings,
+) -> Vec<PluginCommandBlocked> {
 	plugins
 		.iter()
 		.flat_map(|plugin| {
-			plugin_launches(plugin)
+			loaded_plugin_launches(plugin, settings)
 				.into_iter()
 				.filter_map(|launch| plugin.admit_launch(launch).err())
 		})

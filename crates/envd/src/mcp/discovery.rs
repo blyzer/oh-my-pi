@@ -446,6 +446,7 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 			plugin:   plugin.name,
 			version:  plugin.version,
 			root:     plugin.root,
+			kind:     plugin.kind,
 		})
 		.collect()
 }
@@ -457,10 +458,7 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 /// ([`ClaudePlugin::admit_launch`]) is left out, so it never starts.
 fn push_claude_plugins(out: &mut Vec<ConfigSource>, plugins: &[ClaudePlugin]) {
 	for plugin in plugins {
-		let kind = match plugin.scope {
-			PluginScope::Project => ConfigSourceKind::ClaudePluginProject,
-			PluginScope::User => ConfigSourceKind::ClaudePluginUser,
-		};
+		let kind = claude_plugin_kind(plugin);
 		for (path, servers) in plugin_mcp_declarations(plugin) {
 			let mut file = McpConfigFile::default();
 			for (name, server) in servers {
@@ -479,6 +477,15 @@ fn push_claude_plugins(out: &mut Vec<ConfigSource>, plugins: &[ClaudePlugin]) {
 				out.push(ConfigSource { path, kind, file });
 			}
 		}
+	}
+}
+
+/// The source kind `plugin`'s MCP declarations join discovery as: project
+/// scope for a plugin installed for the project, else user scope.
+pub(crate) const fn claude_plugin_kind(plugin: &ClaudePlugin) -> ConfigSourceKind {
+	match plugin.scope {
+		PluginScope::Project => ConfigSourceKind::ClaudePluginProject,
+		PluginScope::User => ConfigSourceKind::ClaudePluginUser,
 	}
 }
 
@@ -882,6 +889,7 @@ fn strip_json_comments(source: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::mcp::McpSettings;
 
 	fn write(path: &Path, body: &str) {
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1033,7 +1041,8 @@ mod tests {
 			"the package root is part of the approval key: {local:?}"
 		);
 
-		let blocked = crate::plugin_commands::blocked_agent_plugin_launches(&paths);
+		let blocked =
+			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &McpSettings::default());
 		assert_eq!(
 			blocked
 				.iter()
@@ -1047,6 +1056,23 @@ mod tests {
 				.contains(&format!("omp ext trust portable --approve-command {}", blocked[0].digest)),
 			"{}",
 			blocked[0]
+		);
+		// With project configuration disabled, discovery loads neither the
+		// project's package nor an explicit root (both project-scoped), and
+		// the report names neither.
+		let project_disabled = McpSettings { enable_project_config: false };
+		assert!(
+			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &project_disabled)
+				.is_empty()
+		);
+		let all_approved = paths
+			.clone()
+			.with_command_approvals(approve_agent_plugins(&paths));
+		assert!(
+			super::super::config::resolve_sources(&sources(&all_approved), false)
+				.servers
+				.is_empty(),
+			"the loader skips them too"
 		);
 		let resolved = super::super::config::resolve_sources(&sources(&paths), true);
 		assert!(!resolved.servers.contains_key("local"), "an unapproved server loaded");
@@ -1066,7 +1092,10 @@ mod tests {
 		let all = paths
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
-		assert!(crate::plugin_commands::blocked_agent_plugin_launches(&all).is_empty());
+		assert!(
+			crate::plugin_commands::blocked_agent_plugin_launches(&all, &McpSettings::default())
+				.is_empty()
+		);
 		let resolved = super::super::config::resolve_sources(&sources(&all), true);
 		assert!(
 			["local", "other", "tool", "remote"]
@@ -1076,7 +1105,10 @@ mod tests {
 
 		// An edited command line, or a moved working directory, asks again.
 		agent_plugin(&explicit, "explicit", r#"{"tool":{"command":"./tool","cwd":"sub"}}"#);
-		assert_eq!(crate::plugin_commands::blocked_agent_plugin_launches(&all).len(), 1);
+		assert_eq!(
+			crate::plugin_commands::blocked_agent_plugin_launches(&all, &McpSettings::default()).len(),
+			1
+		);
 	}
 
 	fn install_plugins(registry: &Path, entries: &[(&str, &Path, bool)]) {
@@ -1132,7 +1164,8 @@ mod tests {
 		);
 		let entry = &mut plugins.plugins[0];
 		entry.approved_commands = [entry.command_digest(&launches[1])].into();
-		let blocked = crate::plugin_commands::blocked_launches(&plugins.plugins);
+		let blocked =
+			crate::plugin_commands::blocked_launches(&plugins.plugins, &McpSettings::default());
 		assert_eq!(blocked.len(), 1);
 		assert_eq!(blocked[0].server, "tools:db");
 

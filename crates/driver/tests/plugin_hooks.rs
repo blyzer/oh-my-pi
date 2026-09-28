@@ -182,7 +182,7 @@ impl Fixture {
 		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
 		let agent_plugins = McpConfigPaths::new(&self.scratch.path().join("home/.o2"), &self.root)
 			.with_command_approvals(plugins.command_approvals.clone());
-		blocked_launches(&plugins, &agent_plugins)
+		blocked_launches(&plugins, &agent_plugins, &omp_envd::mcp::McpSettings::default())
 	}
 
 	/// The plugin's `${CLAUDE_PLUGIN_DATA}`.
