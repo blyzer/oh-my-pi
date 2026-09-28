@@ -3071,6 +3071,16 @@ mod tests {
 
 	#[tokio::test]
 	async fn slow_document_subscribers_observe_bounded_lag() {
+		// Every commit here is serial and durable: the prepared temporary and its
+		// parent directory are both flushed, which is `F_FULLFSYNC` on macOS and
+		// costs tens of milliseconds on a loaded runner. The deadline guards one
+		// commit round trip against a wedged actor; it is not a budget for the
+		// whole run of `DOCUMENT_EVENT_CAPACITY + 1` flushed commits.
+		const COMMIT_DEADLINE: Duration = Duration::from_secs(5);
+		// A native-watch echo that finds the disk unchanged keeps the reservation
+		// valid, so a rejection needs a real disk change. Bounding retries keeps a
+		// rejection loop a deterministic failure instead of a runaway test.
+		const MAX_REJECTIONS_PER_COMMIT: usize = 3;
 		let root = TempDir::new().expect("temporary directory");
 		let path = root.path().join("lag.txt");
 		fs::write(&path, b"initial").expect("write fixture");
@@ -3079,50 +3089,59 @@ mod tests {
 		let document_id = opened.head().document_id();
 		let mut revision = opened.head().revision();
 		let coordinator = TransactionCoordinator::new(store.clone(), [9; 16]);
-		let publish = async {
-			let mut attempt = 1_u128;
-			for index in 1..=DOCUMENT_EVENT_CAPACITY + 1 {
-				loop {
-					let request =
-						TransactionRequest::new(TransactionId::from_bytes(attempt.to_be_bytes()), vec![
-							DocumentMutation::new(
-								DocumentTarget::Document(document_id),
-								MutationOperation::Text(TextMutation::new(
-									revision,
-									TextProposal::Content(Bytes::from(vec![
-										u8::try_from(index).expect("small index"),
-									])),
-									StalePolicy::Fail,
-									FormatPolicy::Disabled,
-								)),
-							),
-						]);
-					attempt += 1;
-					let outcome = coordinator.commit(request, CancellationToken::new()).await;
-					match outcome.as_ref() {
-						TransactionOutcome::Committed { operations, .. } => {
-							revision = operations[0].head().revision();
-							break;
-						},
-						TransactionOutcome::Rejected {
-							reason: TransactionRejectReason::ExternalModification,
-							..
-						} => {
-							revision = store
-								.read(document_id, None, ReadSelection::Whole)
-								.await
-								.expect("reload after a native watcher notification")
-								.head()
-								.revision();
-						},
-						other => panic!("expected committed event, got {other:?}"),
-					}
+		let mut attempt = 1_u128;
+		for index in 1..=DOCUMENT_EVENT_CAPACITY + 1 {
+			let mut rejections = 0_usize;
+			loop {
+				let request =
+					TransactionRequest::new(TransactionId::from_bytes(attempt.to_be_bytes()), vec![
+						DocumentMutation::new(
+							DocumentTarget::Document(document_id),
+							MutationOperation::Text(TextMutation::new(
+								revision,
+								TextProposal::Content(Bytes::from(vec![
+									u8::try_from(index).expect("small index"),
+								])),
+								StalePolicy::Fail,
+								FormatPolicy::Disabled,
+							)),
+						),
+					]);
+				attempt += 1;
+				let outcome = time::timeout(
+					COMMIT_DEADLINE,
+					coordinator.commit(request, CancellationToken::new()),
+				)
+				.await
+				.unwrap_or_else(|_| panic!("commit {index} settles within {COMMIT_DEADLINE:?}"));
+				match outcome.as_ref() {
+					TransactionOutcome::Committed { operations, .. } => {
+						revision = operations[0].head().revision();
+						break;
+					},
+					TransactionOutcome::Rejected {
+						reason: TransactionRejectReason::ExternalModification,
+						..
+					} => {
+						rejections += 1;
+						assert!(
+							rejections <= MAX_REJECTIONS_PER_COMMIT,
+							"commit {index} was rejected {rejections} times with nothing else writing",
+						);
+						revision = time::timeout(
+							COMMIT_DEADLINE,
+							store.read(document_id, None, ReadSelection::Whole),
+						)
+						.await
+						.unwrap_or_else(|_| panic!("reload before commit {index} settles"))
+						.expect("reload after a native watcher notification")
+						.head()
+						.revision();
+					},
+					other => panic!("expected committed event, got {other:?}"),
 				}
 			}
-		};
-		time::timeout(Duration::from_secs(5), publish)
-			.await
-			.expect("commits settle despite native watcher notifications");
+		}
 
 		assert!(matches!(
 			opened.events().recv().await,

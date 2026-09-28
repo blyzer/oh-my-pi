@@ -18,8 +18,10 @@ use crate::{
 	receipt::{ExecutionReceipt, ReasonId},
 };
 
-/// Stable, policy-consumable failure category.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Stable, policy-consumable failure category; its wire name is the
+/// snake-case variant (`rate_limited`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ErrorKind {
 	/// Caller cancellation.
 	Cancelled,

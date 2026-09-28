@@ -336,6 +336,7 @@ where
 						&mut session_id,
 						&permission_session,
 						false,
+						(!closed).then_some(omp_agent::SwitchReason::New),
 					)
 					.await?;
 					closed = false;
@@ -381,6 +382,7 @@ where
 						&mut session_id,
 						&permission_session,
 						replay,
+						(!closed).then_some(omp_agent::SwitchReason::Resume),
 					)
 					.await?;
 					closed = false;
@@ -433,6 +435,7 @@ where
 						&mut session_id,
 						&permission_session,
 						false,
+						(!closed).then_some(omp_agent::SwitchReason::Fork),
 					)
 					.await?;
 					closed = false;
@@ -556,7 +559,15 @@ where
 			"session/close" if active.is_some() => Err((-32001, "a turn is already running")),
 			"session/close" => {
 				if !closed {
-					if let Some((_, session)) = controller.as_mut() {
+					if let Some((kernel, session)) = controller.as_mut() {
+						if let Some(lifecycle) = kernel.lifecycle_hooks() {
+							lifecycle
+								.session_shutdown(&omp_agent::SessionShutdown::new(
+									session,
+									omp_agent::ShutdownReason::UserExit,
+								))
+								.await;
+						}
 						session.session_switch().into_diagnostic()?;
 						home.unregister(session);
 					}
@@ -606,6 +617,14 @@ where
 		session
 			.record_exit(omp_session::ExitCause::Normal)
 			.into_diagnostic()?;
+		if let Some(lifecycle) = kernel.lifecycle_hooks() {
+			lifecycle
+				.session_shutdown(&omp_agent::SessionShutdown::new(
+					&session,
+					omp_agent::ShutdownReason::UserExit,
+				))
+				.await;
+		}
 		home.unregister(&session);
 	}
 	drop(session);
@@ -824,11 +843,18 @@ async fn switch_session<C>(
 	session_id: &mut Str,
 	permission_session: &parking_lot::RwLock<Str>,
 	replay: bool,
+	ending: Option<omp_agent::SwitchReason>,
 ) -> miette::Result<()> {
 	let (kernel, mut previous) = controller
 		.take()
 		.expect("idle ACP controller owns its kernel and session");
 	kernel.reconcile_jobs(&mut next).into_diagnostic()?;
+	// A live previous session ends here; a closed one already ended.
+	if let (Some(reason), Some(lifecycle)) = (ending, kernel.lifecycle_hooks()) {
+		lifecycle
+			.session_shutdown(&omp_agent::SessionShutdown::switching(&previous, &next, reason))
+			.await;
+	}
 	let (snapshot, events) = next.subscribe();
 	let _ = previous.session_switch();
 	home.unregister(&previous);

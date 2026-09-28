@@ -23,6 +23,17 @@
 //!   `additionalContext` becomes model-visible hook context, `systemMessage`
 //!   and failures become `<notice kind=hook>`, and `continue: false` stops.
 //!
+//! Observational events run beside the lifecycle and cannot hold it up:
+//! `StopFailure` (a turn failed on a provider error, `agent_end`),
+//! `PostCompact` (`compaction_done`), and `Notification` (`permission_prompt`,
+//! when an approval prompt is filed) run in the background with their output
+//! discarded, only failures surfacing. `SessionEnd` runs at the session's end
+//! (`session_shutdown`: quit, a finished run, a switch to another session)
+//! within [`SESSION_SHUTDOWN_BUDGET`], its output discarded; a switch moves
+//! the host onto the next session's id and journal. `SubagentStart` runs on
+//! a subagent's first prompt, its `additionalContext` opening the subagent's
+//! context.
+//!
 //! A hook runs only when the operator approved its command for its trigger
 //! (event and matcher) at the plugin's version, as every other command a
 //! plugin launches ([`omp_ext::plugin_command`]); an unapproved hook is
@@ -37,15 +48,17 @@ use std::{
 	path::{Path, PathBuf},
 	sync::{
 		Arc, OnceLock, Weak,
-		atomic::{AtomicU32, Ordering},
+		atomic::{AtomicBool, AtomicU32, Ordering},
 	},
 	time::Duration,
 };
 
 use bytes::Bytes;
 use omp_agent::{
-	BoxFut, EnvEvent, HookContext, HookGate, NativeHookHost, NativeReply, NativeVerdict, Up,
+	BoxFut, EnvEvent, HookContext, HookGate, NativeHookHost, NativeReply, NativeVerdict,
+	SESSION_SHUTDOWN_BUDGET, ShutdownReason, SwitchReason, Up,
 };
+use omp_ai::ErrorKind;
 use omp_core::{EnvPath, Str, sf};
 use omp_env::{ClientError, EnvClient, ExecEvent};
 use omp_ext::{
@@ -60,10 +73,11 @@ use omp_proto::{
 	toolhost::v1::HookEventId,
 };
 use omp_session::custom_message::{CustomMessage, CustomMessageKind};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use smallvec::SmallVec;
+use strum::IntoStaticStr;
 
 /// Captured bytes kept per output stream; the rest of a chatty hook's output
 /// is dropped.
@@ -155,8 +169,31 @@ pub struct PluginHookSession {
 	/// omp's data directory, holding each plugin's `${CLAUDE_PLUGIN_DATA}`.
 	pub data_dir:     PathBuf,
 	/// Whether this kernel runs a subagent: `SubagentStop` replaces `Stop`,
-	/// and prompt/session events stay with the main session.
+	/// `SubagentStart` runs on its first prompt, and prompt/session events
+	/// stay with the main session.
 	pub subagent:     bool,
+	/// The agent class this kernel runs (`SubagentStart`'s `agent_type`);
+	/// `None` is the default `task` class.
+	pub agent:        Option<crate::subagent::AgentName>,
+}
+
+/// The session a hook input names: the one the host serves now. A session
+/// switch moves the host onto the next one.
+#[derive(Clone, Debug)]
+struct LiveSession {
+	session_id: Str,
+	transcript: PathBuf,
+}
+
+impl LiveSession {
+	/// The session journaled at `transcript`, named by its stem.
+	fn at(transcript: PathBuf) -> Self {
+		let session_id = transcript
+			.file_stem()
+			.and_then(|stem| stem.to_str())
+			.map_or_else(|| Str::new_static("session"), Str::new);
+		Self { session_id, transcript }
+	}
 }
 
 /// The in-process hook host running every enabled plugin's hooks.
@@ -164,10 +201,13 @@ pub struct PluginHookHost {
 	this:               Weak<Self>,
 	client:             EnvClient,
 	session:            PluginHookSession,
+	live:               RwLock<LiveSession>,
 	hooks:              Box<[LoadedHook]>,
 	mailbox:            OnceLock<flume::Sender<Up>>,
 	stop_continuations: AtomicU32,
 	session_context:    Mutex<Vec<HookContext>>,
+	/// A subagent's first prompt has started (`SubagentStart` ran).
+	started:            AtomicBool,
 }
 
 impl PluginHookHost {
@@ -215,11 +255,16 @@ impl PluginHookHost {
 			Arc::new_cyclic(|this| Self {
 				this: this.clone(),
 				client,
+				live: RwLock::new(LiveSession {
+					session_id: session.session_id.clone(),
+					transcript: session.transcript.clone(),
+				}),
 				session,
 				hooks,
 				mailbox: OnceLock::new(),
 				stop_continuations: AtomicU32::new(0),
 				session_context: Mutex::new(Vec::new()),
+				started: AtomicBool::new(false),
 			})
 		})
 	}
@@ -269,13 +314,28 @@ impl PluginHookHost {
 		})
 	}
 
-	/// Runs every matching hook concurrently; detached (`async`) hooks run in
-	/// the background and contribute nothing.
+	/// Runs every matching hook concurrently for the live session; detached
+	/// (`async`) hooks run in the background and contribute nothing.
 	async fn run_all(
 		&self,
 		event: ClaudeHookEvent,
 		subject: Subject<'_>,
 		fields: EventFields<'_>,
+	) -> Vec<HookEffect> {
+		let session = self.live.read().clone();
+		self.run_for(&session, event, subject, fields, None).await
+	}
+
+	/// Runs every matching hook for `session`. With a `cap`, every hook runs
+	/// in the foreground and none past the cap: the caller's lifecycle point
+	/// is bounded (`SessionEnd`).
+	async fn run_for(
+		&self,
+		session: &LiveSession,
+		event: ClaudeHookEvent,
+		subject: Subject<'_>,
+		fields: EventFields<'_>,
+		cap: Option<Duration>,
 	) -> Vec<HookEffect> {
 		// The payload is serialized once, on the first matching hook.
 		let mut input = None::<Bytes>;
@@ -285,8 +345,8 @@ impl PluginHookHost {
 				bytes.clone()
 			} else {
 				let payload = HookInput {
-					session_id:      &self.session.session_id,
-					transcript_path: &self.session.transcript,
+					session_id:      &session.session_id,
+					transcript_path: &session.transcript,
 					cwd:             &self.session.project_root,
 					permission_mode: "default",
 					hook_event_name: event.into(),
@@ -297,12 +357,15 @@ impl PluginHookHost {
 				};
 				input.insert(bytes).clone()
 			};
-			if !loaded.hook.command.detached {
-				foreground.push(self.effect_of(loaded, bytes));
+			let declared = loaded.hook.command.timeout;
+			if let Some(cap) = cap {
+				foreground.push(self.effect_of(loaded, bytes, declared.min(cap)));
+			} else if !loaded.hook.command.detached {
+				foreground.push(self.effect_of(loaded, bytes, declared));
 			} else if let Some(host) = self.this.upgrade() {
 				let loaded = loaded.clone();
 				tokio::spawn(async move {
-					if let Err(error) = host.run(&loaded, bytes).await {
+					if let Err(error) = host.run(&loaded, bytes, declared).await {
 						tracing::debug!(
 							error = &error as &dyn std::error::Error,
 							"background plugin hook failed"
@@ -314,18 +377,24 @@ impl PluginHookHost {
 		futures::future::join_all(foreground).await
 	}
 
-	async fn effect_of(&self, loaded: &LoadedHook, input: Bytes) -> HookEffect {
+	async fn effect_of(&self, loaded: &LoadedHook, input: Bytes, timeout: Duration) -> HookEffect {
 		let event = loaded.hook.event;
 		let mut effect = HookEffect::new(loaded.plugin.clone());
-		match self.run(loaded, input).await {
+		match self.run(loaded, input, timeout).await {
 			Ok(finished) => effect.interpret(event, finished),
 			Err(error) => effect.notices.push(render(&error)),
 		}
 		effect
 	}
 
-	/// Runs one hook command in its own in-process shell session.
-	async fn run(&self, loaded: &LoadedHook, input: Bytes) -> Result<Finished, PluginHookError> {
+	/// Runs one hook command in its own in-process shell session, terminated
+	/// at `timeout`.
+	async fn run(
+		&self,
+		loaded: &LoadedHook,
+		input: Bytes,
+		timeout: Duration,
+	) -> Result<Finished, PluginHookError> {
 		let event = loaded.hook.event;
 		let start = |source| PluginHookError::Start { plugin: loaded.plugin.clone(), event, source };
 		let _ = std::fs::create_dir_all(&loaded.data);
@@ -360,7 +429,6 @@ impl PluginHookHost {
 			.await
 		{
 			Ok(mut run) => {
-				let timeout = loaded.hook.command.timeout;
 				// Dropping the run on timeout tears the command's process
 				// groups down TERM-then-KILL in the environment.
 				match tokio::time::timeout(timeout, drive(&self.client, &mut run, input)).await {
@@ -412,17 +480,36 @@ impl PluginHookHost {
 		}
 	}
 
-	/// Journals user-visible notices and, for `continue: false`, the stop.
+	/// Journals user-visible notices (failures, `systemMessage`) and, for
+	/// `continue: false`, the stop.
 	fn publish(&self, effects: &[HookEffect]) {
 		for effect in effects {
-			for body in effect.notices.iter().chain(effect.halt.iter()) {
-				self.post(Up::Env(EnvEvent::Notice {
-					kind: Str::new_static("hook"),
-					name: Some(effect.plugin.clone()),
-					body: body.clone(),
-				}));
+			for body in effect
+				.notices
+				.iter()
+				.chain(&effect.messages)
+				.chain(effect.halt.iter())
+			{
+				self.notice(&effect.plugin, body.clone());
 			}
 		}
+	}
+
+	/// Journals only the failures of hooks whose output the event discards.
+	fn publish_failures(&self, effects: &[HookEffect]) {
+		for effect in effects {
+			for body in &effect.notices {
+				self.notice(&effect.plugin, body.clone());
+			}
+		}
+	}
+
+	fn notice(&self, plugin: &Str, body: Str) {
+		self.post(Up::Env(EnvEvent::Notice {
+			kind: Str::new_static("hook"),
+			name: Some(plugin.clone()),
+			body,
+		}));
 	}
 
 	fn halted(effects: &[HookEffect]) -> Option<Str> {
@@ -515,6 +602,9 @@ impl PluginHookHost {
 		self.stop_continuations.store(0, Ordering::Relaxed);
 		let mut context = std::mem::take(&mut *self.session_context.lock());
 		if self.session.subagent {
+			if !self.started.swap(true, Ordering::Relaxed) {
+				context.extend(self.subagent_start().await);
+			}
 			return NativeReply { verdict: NativeVerdict::Defer, context };
 		}
 		let Ok(prompt) = PromptView::deserialize(payload) else {
@@ -583,6 +673,156 @@ impl PluginHookHost {
 		NativeReply { verdict: NativeVerdict::Continue, context }
 	}
 
+	/// `SubagentStart`: the subagent's first prompt. It cannot block; its
+	/// `additionalContext` opens the subagent's context.
+	async fn subagent_start(&self) -> Vec<HookContext> {
+		let agent_id = self.live.read().session_id.clone();
+		let agent_type = self
+			.session
+			.agent
+			.as_ref()
+			.map_or("task", |agent| agent.as_str());
+		let effects = self
+			.run_all(
+				ClaudeHookEvent::SubagentStart,
+				Subject::Value(agent_type),
+				EventFields::SubagentStart { agent_id: &agent_id, agent_type },
+			)
+			.await;
+		self.publish(&effects);
+		effects
+			.into_iter()
+			.flat_map(|effect| {
+				let plugin = effect.plugin;
+				effect
+					.context
+					.into_iter()
+					.map(move |body| HookContext { source: plugin.clone(), body })
+			})
+			.collect()
+	}
+
+	/// `SessionEnd`: the live session ends. Every matching hook runs to
+	/// completion or [`SESSION_SHUTDOWN_BUDGET`], whichever is first; its
+	/// output is discarded. A switch moves the host onto the next session
+	/// before the hooks run, so a budget cut short never leaves it behind.
+	async fn session_end(&self, payload: &JsonValue) -> NativeReply {
+		let Ok(view) = SessionShutdownView::deserialize(payload) else {
+			return NativeReply::defer();
+		};
+		let reason = end_reason(
+			view.reason.parse().unwrap_or(ShutdownReason::UserExit),
+			view.switch_reason.and_then(|reason| reason.parse().ok()),
+		);
+		let ending = self.live.read().clone();
+		if let Some(next) = view.target_transcript_path {
+			*self.live.write() = LiveSession::at(next);
+		}
+		let reason: &'static str = reason.into();
+		let effects = self
+			.run_for(
+				&ending,
+				ClaudeHookEvent::SessionEnd,
+				Subject::Value(reason),
+				EventFields::SessionEnd { reason },
+				Some(SESSION_SHUTDOWN_BUDGET),
+			)
+			.await;
+		for effect in &effects {
+			for notice in &effect.notices {
+				tracing::warn!(plugin = %effect.plugin, "{notice}");
+			}
+		}
+		NativeReply::defer()
+	}
+
+	/// Runs an observational event's hooks in the background: the lifecycle
+	/// point never waits on them.
+	fn observe_in_background(&self, event: HookEventId, payload: &JsonValue) {
+		let claude = match event {
+			HookEventId::HookEventAgentEnd => ClaudeHookEvent::StopFailure,
+			HookEventId::HookEventCompactionDone => ClaudeHookEvent::PostCompact,
+			HookEventId::HookEventToolApprovalRequested => ClaudeHookEvent::Notification,
+			_ => return,
+		};
+		if !self.hooks.iter().any(|loaded| loaded.hook.event == claude) {
+			return;
+		}
+		let (Some(host), Ok(runtime)) = (self.this.upgrade(), tokio::runtime::Handle::try_current())
+		else {
+			return;
+		};
+		let payload = payload.clone();
+		runtime.spawn(async move { host.observed(claude, &payload).await });
+	}
+
+	async fn observed(&self, event: ClaudeHookEvent, payload: &JsonValue) {
+		match event {
+			ClaudeHookEvent::StopFailure => {
+				let Ok(view) = AgentEndView::deserialize(payload) else {
+					return;
+				};
+				let Some(kind) = view
+					.error_kind
+					.and_then(|kind| kind.parse::<ErrorKind>().ok())
+				else {
+					return;
+				};
+				let Some(error) = stop_failure_error(kind) else {
+					return;
+				};
+				let error: &'static str = error.into();
+				// StopFailure discards the hook's output and exit status.
+				let effects = self
+					.run_all(event, Subject::Value(error), EventFields::StopFailure {
+						error,
+						error_details: kind.into(),
+					})
+					.await;
+				for effect in &effects {
+					for notice in &effect.notices {
+						tracing::debug!(plugin = %effect.plugin, "{notice}");
+					}
+				}
+			},
+			ClaudeHookEvent::PostCompact => {
+				let Ok(view) = CompactionDoneView::deserialize(payload) else {
+					return;
+				};
+				let trigger = if view.reason == "manual" {
+					"manual"
+				} else {
+					"auto"
+				};
+				let effects = self
+					.run_all(event, Subject::Value(trigger), EventFields::PostCompact {
+						trigger,
+						compact_summary: view.summary.as_deref().unwrap_or_default(),
+					})
+					.await;
+				self.publish_failures(&effects);
+			},
+			ClaudeHookEvent::Notification => {
+				let Ok(view) = ApprovalRequestedView::deserialize(payload) else {
+					return;
+				};
+				let message = match view.reasons.first() {
+					Some(reason) => sf!("omp needs your permission: {reason}"),
+					None => Str::new_static("omp needs your permission"),
+				};
+				let effects = self
+					.run_all(event, Subject::Value(PERMISSION_PROMPT), EventFields::Notification {
+						message,
+						title: "Permission needed",
+						notification_type: PERMISSION_PROMPT,
+					})
+					.await;
+				self.publish_failures(&effects);
+			},
+			_ => {},
+		}
+	}
+
 	async fn session_start(&self, payload: &JsonValue) -> NativeReply {
 		let source = match SessionStartView::deserialize(payload) {
 			Ok(SessionStartView { resumed: true }) => "resume",
@@ -649,9 +889,14 @@ impl NativeHookHost for PluginHookHost {
 				HookEventId::HookEventAgentSettled => self.agent_settled().await,
 				HookEventId::HookEventSessionStart => self.session_start(payload).await,
 				HookEventId::HookEventCompaction => self.compaction(payload).await,
+				HookEventId::HookEventSessionShutdown => self.session_end(payload).await,
 				_ => NativeReply::defer(),
 			}
 		})
+	}
+
+	fn observe(&self, event: HookEventId, payload: &JsonValue) {
+		self.observe_in_background(event, payload);
 	}
 }
 
@@ -659,10 +904,12 @@ impl NativeHookHost for PluginHookHost {
 /// kernel.
 const fn runs_in(event: ClaudeHookEvent, subagent: bool) -> bool {
 	match event {
-		ClaudeHookEvent::Stop | ClaudeHookEvent::UserPromptSubmit | ClaudeHookEvent::SessionStart => {
-			!subagent
-		},
-		ClaudeHookEvent::SubagentStop => subagent,
+		ClaudeHookEvent::Stop
+		| ClaudeHookEvent::StopFailure
+		| ClaudeHookEvent::UserPromptSubmit
+		| ClaudeHookEvent::SessionStart
+		| ClaudeHookEvent::SessionEnd => !subagent,
+		ClaudeHookEvent::SubagentStop | ClaudeHookEvent::SubagentStart => subagent,
 		_ => true,
 	}
 }
@@ -675,8 +922,79 @@ const fn seam_event(seam: HookSeam) -> HookEventId {
 		HookSeam::BeforeAgentStart => HookEventId::HookEventBeforeAgentStart,
 		HookSeam::AgentSettled => HookEventId::HookEventAgentSettled,
 		HookSeam::SessionStart => HookEventId::HookEventSessionStart,
+		HookSeam::SessionShutdown => HookEventId::HookEventSessionShutdown,
+		HookSeam::AgentEnd => HookEventId::HookEventAgentEnd,
 		HookSeam::Compaction => HookEventId::HookEventCompaction,
+		HookSeam::CompactionDone => HookEventId::HookEventCompactionDone,
+		HookSeam::ToolApprovalRequested => HookEventId::HookEventToolApprovalRequested,
 	}
+}
+
+/// `Notification`'s one type omp raises: an approval prompt was filed.
+const PERMISSION_PROMPT: &str = "permission_prompt";
+
+/// `SessionEnd`'s `reason`, which its matcher filters on.
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "snake_case")]
+enum SessionEndReason {
+	/// `/new` (Claude Code's `/clear`).
+	Clear,
+	/// Switching to a stored session.
+	Resume,
+	/// The user quit, or a one-shot run finished.
+	PromptInputExit,
+	/// Signals, failures, forks, hand-offs.
+	Other,
+}
+
+const fn end_reason(reason: ShutdownReason, switch: Option<SwitchReason>) -> SessionEndReason {
+	match (reason, switch) {
+		(ShutdownReason::UserExit, _) => SessionEndReason::PromptInputExit,
+		(ShutdownReason::Switch, Some(SwitchReason::New)) => SessionEndReason::Clear,
+		(ShutdownReason::Switch, Some(SwitchReason::Resume)) => SessionEndReason::Resume,
+		_ => SessionEndReason::Other,
+	}
+}
+
+/// `StopFailure`'s `error`, which its matcher filters on.
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "snake_case")]
+enum StopFailureError {
+	RateLimit,
+	AuthenticationFailed,
+	AccountOnHold,
+	BillingError,
+	InvalidRequest,
+	ModelNotFound,
+	ServerError,
+	Unknown,
+}
+
+/// The `StopFailure` error a provider failure category reports; `None` for
+/// a cancellation, which is no API error.
+const fn stop_failure_error(kind: ErrorKind) -> Option<StopFailureError> {
+	Some(match kind {
+		ErrorKind::Cancelled => return None,
+		ErrorKind::RateLimited | ErrorKind::QuotaExhausted => StopFailureError::RateLimit,
+		ErrorKind::Authentication | ErrorKind::Authorization => {
+			StopFailureError::AuthenticationFailed
+		},
+		ErrorKind::AccountDisabled => StopFailureError::AccountOnHold,
+		ErrorKind::PaymentRequired => StopFailureError::BillingError,
+		ErrorKind::InvalidRequest
+		| ErrorKind::ContextOverflow
+		| ErrorKind::PayloadRejected
+		| ErrorKind::NativeRequestRejected => StopFailureError::InvalidRequest,
+		ErrorKind::TargetNotFound => StopFailureError::ModelNotFound,
+		ErrorKind::Connectivity
+		| ErrorKind::Dns
+		| ErrorKind::Tls
+		| ErrorKind::Protocol
+		| ErrorKind::StreamCorruption
+		| ErrorKind::RouteUnavailable
+		| ErrorKind::ProviderContractMismatch => StopFailureError::ServerError,
+		_ => StopFailureError::Unknown,
+	})
 }
 
 fn hook_message(plugin: &Str, body: &Str) -> CustomMessage {
@@ -698,7 +1016,6 @@ fn render(error: &PluginHookError) -> Str {
 	Str::new(text)
 }
 
-/// Appends `word` as one single-quoted shell word.
 /// What a hook matcher is tested against.
 #[derive(Clone, Copy)]
 enum Subject<'a> {
@@ -784,20 +1101,29 @@ async fn read_events(
 
 /// What one hook's result asks for, before the seam composes it.
 struct HookEffect {
-	plugin:  Str,
+	plugin:   Str,
 	/// A blocking reason: exit 2's stderr, or a JSON block/deny reason.
-	block:   Option<Str>,
+	block:    Option<Str>,
 	/// Model-visible context.
-	context: Vec<Str>,
+	context:  Vec<Str>,
 	/// `continue: false` with its stop reason.
-	halt:    Option<Str>,
-	/// User-visible notices: `systemMessage` and failures.
-	notices: Vec<Str>,
+	halt:     Option<Str>,
+	/// User-visible failures of the hook itself.
+	notices:  Vec<Str>,
+	/// User-visible `systemMessage`s.
+	messages: Vec<Str>,
 }
 
 impl HookEffect {
 	const fn new(plugin: Str) -> Self {
-		Self { plugin, block: None, context: Vec::new(), halt: None, notices: Vec::new() }
+		Self {
+			plugin,
+			block: None,
+			context: Vec::new(),
+			halt: None,
+			notices: Vec::new(),
+			messages: Vec::new(),
+		}
 	}
 
 	fn interpret(&mut self, event: ClaudeHookEvent, finished: Finished) {
@@ -860,7 +1186,7 @@ impl HookEffect {
 			);
 		}
 		if let Some(message) = &output.system_message {
-			self.notices.push(message.clone());
+			self.messages.push(message.clone());
 		}
 		let specific = output.hook_specific_output.as_ref();
 		let permission_deny = specific
@@ -978,6 +1304,26 @@ enum EventFields<'a> {
 	PreCompact {
 		trigger:             &'static str,
 		custom_instructions: Option<&'a str>,
+	},
+	PostCompact {
+		trigger:         &'static str,
+		compact_summary: &'a str,
+	},
+	SessionEnd {
+		reason: &'static str,
+	},
+	StopFailure {
+		error:         &'static str,
+		error_details: &'static str,
+	},
+	SubagentStart {
+		agent_id:   &'a str,
+		agent_type: &'a str,
+	},
+	Notification {
+		message:           Str,
+		title:             &'static str,
+		notification_type: &'static str,
 	},
 }
 
@@ -1121,6 +1467,39 @@ struct CompactionView {
 	reason:              Str,
 	#[serde(default)]
 	custom_instructions: Option<Str>,
+}
+
+/// The `session_shutdown` payload fields `SessionEnd` reads.
+#[derive(Deserialize)]
+struct SessionShutdownView {
+	reason:                 Str,
+	#[serde(default)]
+	switch_reason:          Option<Str>,
+	#[serde(default)]
+	target_transcript_path: Option<PathBuf>,
+}
+
+/// The `agent_end` payload field `StopFailure` reads.
+#[derive(Deserialize)]
+struct AgentEndView {
+	#[serde(default)]
+	error_kind: Option<Str>,
+}
+
+/// The `compaction_done` payload fields `PostCompact` reads.
+#[derive(Deserialize)]
+struct CompactionDoneView {
+	#[serde(default)]
+	reason:  Str,
+	#[serde(default)]
+	summary: Option<Str>,
+}
+
+/// The `tool_approval_requested` payload field `Notification` reads.
+#[derive(Deserialize)]
+struct ApprovalRequestedView {
+	#[serde(default)]
+	reasons: Vec<Str>,
 }
 
 #[derive(Deserialize)]

@@ -648,6 +648,9 @@ async fn compaction_done_reports_the_outcome_to_observers() {
 	assert_eq!(outcome["from_extension"], serde_json::Value::Null);
 	assert_eq!(outcome["summary_bytes"], "observed summary".len());
 	assert_eq!(outcome["epoch"], 0);
+	// What plugin `PostCompact` hooks read: the trigger and the summary.
+	assert_eq!(outcome["reason"], "threshold");
+	assert_eq!(outcome["summary"], "observed summary");
 }
 
 #[tokio::test]
