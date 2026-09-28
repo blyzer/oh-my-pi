@@ -73,8 +73,9 @@ fn subagent_cfg_seeds_child_without_touching_parent() {
 	let parent = Ctx::new();
 	parent.run("test_cfg_fastmode 1").unwrap();
 	let child = Ctx::new();
+	// The seed is the child's inherited layer; its class cfgs sit above it.
 	for (name, value) in parent.seed_child().into_values() {
-		child.set(name.as_str(), value, Origin::Session).unwrap();
+		child.set(name.as_str(), value, Origin::Inherited).unwrap();
 	}
 	let outcome = child.exec_configs(&Loader, Some("sonic")).unwrap();
 	assert_eq!(outcome.failed, 0);

@@ -92,7 +92,8 @@ fn import(
 		fs::create_dir_all(parent).into_diagnostic()?;
 	}
 	// The stamp is taken before the bytes are read: a write after it moves
-	// the modification time past the recorded one.
+	// the modification time (and a restore of that the change time) past the
+	// recorded one.
 	let mut file = fs::File::open(source).into_diagnostic()?;
 	let stamped_at = SystemTime::now();
 	let file_metadata = file.metadata().into_diagnostic()?;

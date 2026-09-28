@@ -56,7 +56,16 @@ impl<T: ConType> CVar<T> {
 		ctx.set_value(self.spec.name, value.into_value(), SetSource::Code)
 	}
 
-	/// Restores the default.
+	/// Commits the value to the layer `origin` names (host provenance: the
+	/// `READONLY`/`UNSAFE` gates do not apply). The spawn path writes a
+	/// child's class values through [`Origin::Class`](crate::Origin::Class).
+	pub fn set_in(&self, ctx: &Ctx, value: T, origin: crate::Origin) -> ConResult<()> {
+		ctx.set(self.spec.name, value.into_value(), origin)
+			.map(|_| ())
+	}
+
+	/// Drops the host/session override, falling back to the value the scope
+	/// inherits ([`Ctx::unset`]).
 	pub fn reset(&self, ctx: &Ctx) -> ConResult<()> {
 		ctx.reset(self.spec.name)
 	}

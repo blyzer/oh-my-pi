@@ -67,22 +67,21 @@ pub enum Source {
 	Console,
 	/// A named archive config.
 	Config(Str),
-	/// Automatic child config.
+	/// Automatic child config; commits to the class layer.
 	Subagent,
-	/// Automatic agent-class config.
+	/// Automatic agent-class config; commits to the class layer.
 	Agent(Str),
 	/// Replay of a session-tree convar.
 	Session,
 }
 
 impl Source {
-	fn origin(&self) -> Origin {
+	const fn origin(&self) -> Origin {
 		match self {
 			Self::Config(_) => Origin::Archive,
 			Self::Session => Origin::Session,
 			Self::Console => Origin::Script(Str::new_static("console")),
-			Self::Subagent => Origin::Script(Str::new_static("subagent.cfg")),
-			Self::Agent(name) => Origin::Script(name.clone()),
+			Self::Subagent | Self::Agent(_) => Origin::Class,
 		}
 	}
 }
@@ -142,6 +141,10 @@ impl std::ops::AddAssign for ExecOutcome {
 		self.failed += rhs.failed;
 	}
 }
+
+/// One committed session-layer change: `(name, committed value)`, `None` when
+/// `reset` removed the session override.
+pub type SessionWrite = (Str, Option<Value>);
 
 /// Reply sink: receives all console output.
 pub type SinkFn = dyn Fn(Severity, &str) + Send + Sync;
@@ -488,8 +491,9 @@ pub struct Ctx {
 	pub(crate) completers: RwLock<FastHashMap<Str, Box<crate::CompleterFn>>>,
 	observers:             RwLock<Vec<Box<ObserverFn>>>,
 	/// Journaling subscribers: every committed `SESSION` write in the session
-	/// layer (never an engagement value), as `(name, committed value)`.
-	session_writes:        RwLock<Vec<flume::Sender<(Str, Value)>>>,
+	/// layer (never an engagement value), as `(name, committed value)`; `None`
+	/// when `reset` removed the session override.
+	session_writes:        RwLock<Vec<flume::Sender<SessionWrite>>>,
 	user:                  RwLock<FastHashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 	layers:                RwLock<Layers>,
 	depth:                 AtomicU32,
@@ -593,19 +597,21 @@ impl Ctx {
 	/// variables — the stream a session controller journals as
 	/// `<meta><con>` patches (ADR 0012: replay-honest values).
 	///
-	/// Each item is `(name, value committed to the session layer)`; a reset
-	/// to default delivers the default value. Engagement layers (Director
-	/// binds) never appear here: they derive from the `<directors>` subtree.
-	/// Dropped receivers are pruned on the next write.
-	pub fn subscribe_session_writes(&self) -> flume::Receiver<(Str, Value)> {
+	/// Each item is `(name, value committed to the session layer)`; an
+	/// [`Origin::Default`] write delivers the default value, and a `reset`
+	/// that removed the session override delivers `None` (the journal drops
+	/// the variable, so replay leaves it inherited). Engagement layers
+	/// (Director binds) never appear here: they derive from the `<directors>`
+	/// subtree. Dropped receivers are pruned on the next write.
+	pub fn subscribe_session_writes(&self) -> flume::Receiver<SessionWrite> {
 		let (tx, rx) = flume::unbounded();
 		self.session_writes.write().push(tx);
 		rx
 	}
 
-	fn publish_session_write(&self, name: &Str, value: &Value) {
+	fn publish_session_write(&self, name: &Str, value: Option<&Value>) {
 		let mut subscribers = self.session_writes.write();
-		subscribers.retain(|tx| tx.send((name.clone(), value.clone())).is_ok());
+		subscribers.retain(|tx| tx.send((name.clone(), value.cloned())).is_ok());
 	}
 
 	/// Number of statically registered items.
@@ -793,11 +799,137 @@ impl Ctx {
 			.map(|_| ())
 	}
 
-	/// Restores a variable to its registration-time default.
+	/// Drops the host/session override of a variable, so it falls back to the
+	/// value its scope inherits (see [`Ctx::unset`]).
 	pub fn reset(&self, name: &str) -> ConResult<()> {
+		self.unset(name, &Origin::Host)
+	}
+
+	/// Removes `name` from the layer `origin` commits to — the scope's own
+	/// override — instead of writing the inherited value as a new explicit
+	/// override, so later changes beneath it keep flowing through.
+	///
+	/// Layers resolve innermost first: engagement, session, class, inherited,
+	/// archive, then the registration default. A console or host `reset`
+	/// clears the session layer (a child then shows its class value, else
+	/// what it inherited from its parent, else the user cfg, else the
+	/// default); inside `subagent.cfg`/`<agent>.cfg` it clears the class
+	/// layer (back to the parent's value); inside `config.cfg` it clears the
+	/// archive layer (back to the default). [`Origin::Default`] clears both
+	/// archive and session, as a default write does.
+	///
+	/// Gates apply as for a statement with the same provenance: console and
+	/// class-cfg removals honor `READONLY`/`UNSAFE`. Removing a
+	/// `SESSION` variable's session override publishes `None` on
+	/// [`Ctx::subscribe_session_writes`].
+	pub fn unset(&self, name: &str, origin: &Origin) -> ConResult<()> {
 		let var = self.var(name)?;
-		let default = var.state.default_value().clone();
-		self.set(var.name, default, Origin::Host).map(|_| ())
+		let source = statement_source(origin);
+		self.check_gates(&var, source)?;
+		let name = var.name.to_str();
+		let session_removed = {
+			let mut layers = self.layers.write();
+			match origin {
+				Origin::Archive => {
+					layers.archive.remove(name.as_str());
+					false
+				},
+				Origin::Inherited => {
+					layers.inherited.remove(name.as_str());
+					false
+				},
+				Origin::Class => {
+					layers.class.remove(name.as_str());
+					false
+				},
+				Origin::Default => {
+					layers.archive.remove(name.as_str());
+					layers.session.remove(name.as_str()).is_some()
+				},
+				Origin::Engagement(id) => {
+					if let Some(layer) = layers.engagements.iter_mut().find(|layer| layer.id == *id) {
+						layer.values.remove(name.as_str());
+						false
+					} else {
+						layers.session.remove(name.as_str()).is_some()
+					}
+				},
+				Origin::Session | Origin::Script(_) | Origin::Host => {
+					layers.session.remove(name.as_str()).is_some()
+				},
+			}
+		};
+		if session_removed && var.flags.contains(VarFlags::SESSION) {
+			self.publish_session_write(&name, None);
+		}
+		self.refresh(name.as_str(), source);
+		Ok(())
+	}
+
+	/// Replaces this context's inherited and class layers with `scope`'s — a
+	/// child context composed by the spawn path — so this context presents
+	/// that child's configuration beneath its own session writes (the main
+	/// chat resuming a child session). Nothing is published: both layers are
+	/// derived from the child's definition, never journaled.
+	///
+	/// A value naming a variable this context does not declare, or of the
+	/// wrong type, is reported through the sink and dropped.
+	pub fn adopt_scope(&self, scope: &Self) {
+		let (inherited, class) = {
+			let layers = scope.layers.read();
+			(layers.inherited.clone(), layers.class.clone())
+		};
+		let checked = |values: FastHashMap<Str, Value>| -> FastHashMap<Str, Value> {
+			values
+				.into_iter()
+				.filter_map(|(name, value)| {
+					let var = self.var(name.as_str());
+					match var.and_then(|var| {
+						let value = self.check_value(&var, value, SetSource::Code)?;
+						Ok((var.name.to_str(), value))
+					}) {
+						Ok(entry) => Some(entry),
+						Err(error) => {
+							self.reply_fmt(
+								Severity::Warn,
+								format_args!("inherited `{name}` dropped: {error}"),
+							);
+							None
+						},
+					}
+				})
+				.collect()
+		};
+		let inherited = checked(inherited);
+		let class = checked(class);
+		self.replace_scope(inherited, class);
+	}
+
+	/// Clears the inherited and class layers [`Ctx::adopt_scope`] installed.
+	pub fn drop_scope(&self) {
+		self.replace_scope(FastHashMap::default(), FastHashMap::default());
+	}
+
+	fn replace_scope(&self, inherited: FastHashMap<Str, Value>, class: FastHashMap<Str, Value>) {
+		let touched = {
+			let mut layers = self.layers.write();
+			let mut touched: Vec<Str> = layers
+				.inherited
+				.keys()
+				.chain(layers.class.keys())
+				.chain(inherited.keys())
+				.chain(class.keys())
+				.cloned()
+				.collect();
+			layers.inherited = inherited;
+			layers.class = class;
+			touched.sort_unstable();
+			touched.dedup();
+			touched
+		};
+		for name in &touched {
+			self.refresh(name.as_str(), SetSource::Code);
+		}
 	}
 
 	/// Whether unsafe-gated writes are currently allowed.
@@ -996,16 +1128,24 @@ impl Ctx {
 		let var = self
 			.var(name)
 			.expect("layer references a registered variable");
-		let effective = {
-			let layers = self.layers.read();
-			layers
-				.engagement_value(name)
-				.or_else(|| layers.session.get(name))
-				.or_else(|| layers.archive.get(name))
-				.cloned()
-				.unwrap_or_else(|| var.state.default_value().clone())
-		};
+		let effective = self
+			.layers
+			.read()
+			.effective(name)
+			.cloned()
+			.unwrap_or_else(|| var.state.default_value().clone());
 		self.apply_effective(&var, effective, source);
+	}
+
+	/// The value persistence records for a variable: its effective value
+	/// without the inherited and class layers (see [`Layers::persisted`]).
+	pub(crate) fn persisted_value(&self, name: &str, default: &Value) -> Value {
+		self
+			.layers
+			.read()
+			.persisted(name)
+			.cloned()
+			.unwrap_or_else(|| default.clone())
 	}
 
 	fn commit_layer(&self, var: VarRef<'_>, value: Value, origin: Origin) -> ConResult<SetReport> {
@@ -1033,6 +1173,14 @@ impl Ctx {
 					layers.archive.insert(name.clone(), value);
 					Origin::Archive
 				},
+				Origin::Inherited => {
+					layers.inherited.insert(name.clone(), value);
+					Origin::Inherited
+				},
+				Origin::Class => {
+					layers.class.insert(name.clone(), value);
+					Origin::Class
+				},
 				Origin::Default => {
 					layers.archive.remove(name.as_str());
 					layers.session.remove(name.as_str());
@@ -1054,9 +1202,7 @@ impl Ctx {
 			};
 			let shadowed_by = layers.shadow(name.as_str());
 			let effective = layers
-				.engagement_value(name.as_str())
-				.or_else(|| layers.session.get(name.as_str()))
-				.or_else(|| layers.archive.get(name.as_str()))
+				.effective(name.as_str())
 				.cloned()
 				.unwrap_or_else(|| var.state.default_value().clone());
 			(committed_to, shadowed_by, effective)
@@ -1068,7 +1214,7 @@ impl Ctx {
 				_ => None,
 			};
 			if let Some(committed) = committed {
-				self.publish_session_write(&name, &committed);
+				self.publish_session_write(&name, Some(&committed));
 			}
 		}
 		self.apply_effective(&var, effective, source);
@@ -1086,6 +1232,18 @@ impl Ctx {
 			});
 		}
 		let value = clamp(var.min, var.max, value);
+		self.check_gates(var, source)?;
+		if source != SetSource::Replication
+			&& let Some(validate) = var.validate
+		{
+			validate(self, &value).map_err(|_| ConError::Invalid { name: name() })?;
+		}
+		Ok(value)
+	}
+
+	/// Replication and permission gates shared by writes and removals.
+	fn check_gates(&self, var: &VarRef<'_>, source: SetSource) -> ConResult<()> {
+		let name = || var.name.to_str();
 		if var.flags.contains(VarFlags::REPLICATED)
 			&& self.role == Role::Replica
 			&& source != SetSource::Replication
@@ -1100,12 +1258,7 @@ impl Ctx {
 				return Err(ConError::UnsafeGated { name: name() });
 			}
 		}
-		if source != SetSource::Replication
-			&& let Some(validate) = var.validate
-		{
-			validate(self, &value).map_err(|_| ConError::Invalid { name: name() })?;
-		}
-		Ok(value)
+		Ok(())
 	}
 
 	fn apply_effective(&self, var: &VarRef<'_>, value: Value, source: SetSource) {
@@ -1318,7 +1471,7 @@ impl Ctx {
 			return match item.spec {
 				RegItem::Var(spec) => self.dispatch_var(spec, &item.state, &stmt.args[1..], origin),
 				RegItem::Cmd(spec) => {
-					let args = Args { cmd: spec.name, spec: spec.args, values: &stmt.args[1..] };
+					let args = Args { cmd: spec.name, spec: spec.args, values: &stmt.args[1..], origin };
 					for (i, arg) in spec.args.iter().enumerate() {
 						if arg.required && i >= args.len() {
 							return Err(ConError::MissingArg {
@@ -1361,7 +1514,7 @@ impl Ctx {
 		let value = script::coerce_set_args(args, item.spec.ty)
 			.map_err(|issue| issue_error_str(item.spec.name.clone(), issue))?;
 		self
-			.commit_layer(
+			.commit_layer_source(
 				VarRef {
 					name:      item.spec.name.as_str(),
 					ty:        item.spec.ty,
@@ -1374,6 +1527,7 @@ impl Ctx {
 				},
 				value,
 				origin.clone(),
+				statement_source(origin),
 			)
 			.map(|_| ())
 	}
@@ -1400,7 +1554,7 @@ impl Ctx {
 		let value =
 			script::coerce_set_args(args, spec.ty).map_err(|issue| issue_error(spec.name, issue))?;
 		self
-			.commit_layer(
+			.commit_layer_source(
 				VarRef {
 					name: spec.name,
 					ty: spec.ty,
@@ -1413,6 +1567,7 @@ impl Ctx {
 				},
 				value,
 				origin.clone(),
+				statement_source(origin),
 			)
 			.map(|_| ())
 	}
@@ -1681,7 +1836,7 @@ impl Ctx {
 	}
 
 	/// Formats and emits a line through the reply sink.
-	pub(crate) fn reply_fmt(&self, severity: Severity, args: fmt::Arguments<'_>) {
+	pub fn reply_fmt(&self, severity: Severity, args: fmt::Arguments<'_>) {
 		if let Some(sink) = &self.sink {
 			let mut buf = StrMut::new("");
 			let _ = buf.write_fmt(args);
@@ -1695,9 +1850,17 @@ pub struct Args<'a> {
 	cmd:    &'static str,
 	spec:   &'static [crate::ArgSpec],
 	values: &'a [Arg],
+	origin: &'a Origin,
 }
 
 impl<'a> Args<'a> {
+	/// Provenance of the statement being dispatched: the layer a write from
+	/// this command commits to (console, cfg file, class cfg, replay).
+	#[must_use]
+	pub const fn origin(&self) -> &'a Origin {
+		self.origin
+	}
+
 	/// Canonical name of the dispatched static command.
 	#[must_use]
 	pub const fn command(&self) -> &'static str {
@@ -1800,6 +1963,16 @@ fn issue_error_str(name: Str, issue: CoerceIssue) -> ConError {
 	match issue {
 		CoerceIssue::Kind { expected, got } => ConError::TypeMismatch { name, expected, got },
 		CoerceIssue::Variant { got } => ConError::InvalidVariant { name, got },
+	}
+}
+
+/// Permission provenance of a command-stream statement committing to
+/// `origin`: console input and agent-class cfgs pass the script gates; the
+/// user's own cfgs, replay, and host writes do not.
+const fn statement_source(origin: &Origin) -> SetSource {
+	match origin {
+		Origin::Script(_) | Origin::Class => SetSource::Script,
+		_ => SetSource::Code,
 	}
 }
 

@@ -11,7 +11,7 @@ use omp_agent::{
 	JobBoard, JobSettlement, LifecycleHookError, LifecycleHooks, RunControl, SessionTool,
 	SessionToolCx, SessionToolFuture, TurnInput, TurnStop, directors::force_tool::ForceTool,
 };
-use omp_con::{CfgLoader, ConError, Ctx};
+use omp_con::{CfgLoader, ConError, Ctx, Origin};
 use omp_core::{Str, Ulid};
 use omp_dom::{PropId, PropKey, Value};
 use omp_env::EnvClient;
@@ -789,12 +789,9 @@ fn prepare_child(
 		.unwrap_or_else(|| Str::new(Ulid::generate().to_string()));
 	let id = allocate_id(parent, normalize_id(requested_id));
 	let session_path = child_session_path(request.sessions_dir, &id);
-	let ctx = Arc::new(child_ctx(request.parent_ctx, request.cfg, agent.as_str())?);
-	SV_TASK_RECURSION_DEPTH
-		.set(&ctx, parent_depth.saturating_add(1))
-		.map_err(SpawnError::Con)?;
-	let settings = TaskSettings::from_con(&ctx);
-	configure_child_route(&ctx, &settings, agent.as_str(), request.child.effort)?;
+	let (ctx, settings) =
+		configure_child(request.parent_ctx, request.cfg, agent.as_str(), request.child.effort)?;
+	let ctx = Arc::new(ctx);
 	if omp_agent::AI_MODEL.get(&ctx).is_empty() {
 		omp_agent::AI_MODEL
 			.set(&ctx, Str::new(request.model))
@@ -1044,11 +1041,37 @@ async fn destroy_isolation(env: &EnvClient, id: &str) -> Result<(), SpawnError> 
 	Ok(())
 }
 
+/// Builds a child's whole configuration the way the spawn path does.
+///
+/// Shared by every path that runs or presents a child (spawn, revive,
+/// workpool workers, and the main chat resuming a child session):
+/// [`child_ctx`] (the parent's live picture in the inherited layer, then
+/// `subagent.cfg` and `<agent>.cfg` in the class layer), the next recursion
+/// depth, and the spawner's explicit route (requested effort, the effort
+/// ceiling, a per-agent model override), all class-layer writes. The caller
+/// supplies a model when the result leaves `ai_model` empty.
+pub fn configure_child(
+	parent: &Ctx,
+	loader: &dyn omp_con::CfgLoader,
+	agent: &str,
+	effort: Option<TaskEffort>,
+) -> Result<(Ctx, TaskSettings), SpawnError> {
+	let depth = SV_TASK_RECURSION_DEPTH.get(parent);
+	let ctx = child_ctx(parent, loader, agent)?;
+	SV_TASK_RECURSION_DEPTH
+		.set_in(&ctx, depth.saturating_add(1), Origin::Class)
+		.map_err(SpawnError::Con)?;
+	let settings = TaskSettings::from_con(&ctx);
+	configure_child_route(&ctx, &settings, agent, effort)?;
+	Ok((ctx, settings))
+}
+
 /// Applies the spawner's explicit route choices to a child built by
 /// [`child_ctx`]: the requested effort, the `sv_task_max_effort` ceiling, and a
 /// `sv_task_agent_model_overrides` entry for `agent`, which outranks every cfg.
 /// `ai_task_model` is not consulted here: [`child_ctx`] seeds it beneath the
-/// class cfg, so a class's own `ai_model` keeps precedence over it.
+/// class cfg, so a class's own `ai_model` keeps precedence over it. Every
+/// write lands in the class layer.
 pub(crate) fn configure_child_route(
 	ctx: &Ctx,
 	settings: &TaskSettings,
@@ -1062,7 +1085,7 @@ pub(crate) fn configure_child_route(
 			TaskEffort::Hi => "high",
 		};
 		omp_agent::AI_THINKING
-			.set(ctx, Str::new_static(thinking))
+			.set_in(ctx, Str::new_static(thinking), Origin::Class)
 			.map_err(SpawnError::Con)?;
 	}
 	clamp_effort(ctx, settings.max_effort)?;
@@ -1073,7 +1096,7 @@ pub(crate) fn configure_child_route(
 		.map(|(_, model)| model.clone())
 	{
 		omp_agent::AI_MODEL
-			.set(ctx, model)
+			.set_in(ctx, model, Origin::Class)
 			.map_err(SpawnError::Con)?;
 	}
 	Ok(())
@@ -1104,7 +1127,7 @@ fn clamp_effort(ctx: &Ctx, ceiling: TaskEffortCeiling) -> Result<(), SpawnError>
 	let maximum: &'static str = ceiling.into();
 	if rank(current.as_str()) > rank(maximum) {
 		omp_agent::AI_THINKING
-			.set(ctx, Str::new_static(maximum))
+			.set_in(ctx, Str::new_static(maximum), Origin::Class)
 			.map_err(SpawnError::Con)?;
 	}
 	Ok(())
@@ -1668,12 +1691,13 @@ mod tests {
 
 	#[test]
 	fn agent_model_override_wins_over_task_model_and_effort_is_clamped() {
+		// Inherited from the parent, beneath the route's class writes.
 		let ctx = Ctx::new();
 		omp_agent::AI_TASK_MODEL
-			.set(&ctx, Str::new_static("task/model"))
+			.set_in(&ctx, Str::new_static("task/model"), Origin::Inherited)
 			.expect("task model");
 		omp_agent::AI_THINKING
-			.set(&ctx, Str::new_static("xhigh"))
+			.set_in(&ctx, Str::new_static("xhigh"), Origin::Inherited)
 			.expect("thinking");
 		let mut settings =
 			TaskSettings { max_effort: TaskEffortCeiling::Low, ..TaskSettings::default() };

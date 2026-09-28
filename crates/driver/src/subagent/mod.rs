@@ -21,6 +21,9 @@ omp_core::string_id!(
 /// Agent class of the top-level session.
 pub const MAIN_AGENT: &AgentName<str> = AgentName::from_ref("main");
 
+/// The bundled default child class: it needs no `task.cfg` to exist.
+pub const TASK_AGENT: &AgentName<str> = AgentName::from_ref("task");
+
 /// `<meta>` prop recording the agent class a session's kernel runs as. Child
 /// compositions journal it; a session without it is a [`MAIN_AGENT`] session.
 const AGENT_PROP: &str = "agent";

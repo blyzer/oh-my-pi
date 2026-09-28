@@ -47,7 +47,10 @@ presentation adapter.
   An excluded rule is kept out of the prompt, out of `rule://` listings and
   completion, and `rule://<name>` refuses it. A child session journals the
   class it runs as, so resuming it (from the main chat's `/resume` or with
-  `--resume`) keeps the child's rules.
+  `--resume`) keeps the child's rules and applies its class configuration
+  (`subagent.cfg`, `<agent>.cfg`, the next recursion depth) through the spawn
+  path, beneath the child's journaled convars; a class whose cfg is gone
+  resumes on the default subagent configuration with a notice.
 - `v1_import` is the one-shot v1 (TypeScript `omp`) migrator behind
   `omp config import-v1` and the automatic first run. Its `sessions` step and
   the `/resume @v1` picker convert v1 transcripts into `.oms` journals. The

@@ -2301,7 +2301,7 @@ default = "warning"
 		);
 		assert_eq!(
 			writes.try_recv().expect("effective override"),
-			("ext::demo::verbose".into(), ConValue::Bool(true)),
+			("ext::demo::verbose".into(), Some(ConValue::Bool(true))),
 		);
 	}
 

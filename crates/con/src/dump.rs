@@ -39,7 +39,10 @@ impl Ctx {
 	/// Renders the persistence script; see the module docs for semantics.
 	///
 	/// D10: the default behavior emits only archived values that differ from
-	/// their registration-time defaults.
+	/// their registration-time defaults. Values a child scope inherits from
+	/// its parent or agent class (the inherited and class layers) are not the
+	/// scope's own and are never persisted; a variable whose override was
+	/// `reset` therefore drops out of the script.
 	///
 	/// Output is deterministic: binds, aliases, and vars each sorted by
 	/// name. Replaying via [`Ctx::exec`] restores the captured state.
@@ -100,7 +103,11 @@ impl Ctx {
 			if !options.all_vars && !spec.flags.contains(VarFlags::ARCHIVE) {
 				continue;
 			}
-			let value = state.value();
+			let value = if options.include_defaults {
+				state.value()
+			} else {
+				self.persisted_value(spec.name, state.default_value())
+			};
 			if !options.include_defaults
 				&& value == *state.default_value()
 				&& !(options.include_archived_defaults && self.has_archive_write(spec.name))
@@ -116,6 +123,11 @@ impl Ctx {
 			if !options.all_vars && !flags.contains(VarFlags::ARCHIVE) {
 				continue;
 			}
+			let value = if options.include_defaults {
+				value
+			} else {
+				self.persisted_value(name, &default)
+			};
 			if !options.include_defaults
 				&& value == default
 				&& !(options.include_archived_defaults && self.has_archive_write(name))
