@@ -849,11 +849,10 @@ async fn switch_session<C>(
 		.take()
 		.expect("idle ACP controller owns its kernel and session");
 	kernel.reconcile_jobs(&mut next).into_diagnostic()?;
-	// A live previous session ends here; a closed one already ended.
-	if let (Some(reason), Some(lifecycle)) = (ending, kernel.lifecycle_hooks()) {
-		lifecycle
-			.session_shutdown(&omp_agent::SessionShutdown::switching(&previous, &next, reason))
-			.await;
+	// A live previous session ends here; a closed one already ended. The
+	// in-process hook hosts follow the switch either way.
+	if let Some(lifecycle) = kernel.lifecycle_hooks() {
+		lifecycle.session_switch(&previous, &next, ending).await;
 	}
 	let (snapshot, events) = next.subscribe();
 	let _ = previous.session_switch();

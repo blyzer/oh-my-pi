@@ -636,10 +636,10 @@ async fn a_switch_ends_the_session_as_clear_and_the_host_follows_the_next_sessio
 	let next = Session::create(&next_path, ComponentRegistry::standard()).expect("next session");
 	let lifecycle = harness.lifecycle();
 	lifecycle
-		.session_shutdown(&SessionShutdown::switching(&harness.session, &next, SwitchReason::New))
+		.session_switch(&harness.session, &next, Some(SwitchReason::New))
 		.await;
 	lifecycle
-		.session_shutdown(&SessionShutdown::switching(&next, &harness.session, SwitchReason::Resume))
+		.session_switch(&next, &harness.session, Some(SwitchReason::Resume))
 		.await;
 	let ends = read(&fixture.plugin_data().join("ends.jsonl"));
 	let ends = ends
@@ -658,6 +658,40 @@ async fn a_switch_ends_the_session_as_clear_and_the_host_follows_the_next_sessio
 			.is_some_and(|path| path.ends_with("next.oms")),
 		"{:?}",
 		ends[1]
+	);
+	drop(harness);
+}
+
+/// A switch away from a session that already ended (ACP `session/close`)
+/// runs no second `SessionEnd`, yet the host still follows it: a later hook
+/// names the next session. The plugin declares no `SessionEnd` hook, so the
+/// host never sees `session_shutdown` at all.
+#[tokio::test]
+async fn the_host_follows_every_switch_even_when_no_session_end_runs() {
+	let fixture = Fixture::new(
+		r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command",
+			"command":"cat > \"$CLAUDE_PLUGIN_DATA/prompt.json\""}]}]}}"#,
+		true,
+	)
+	.approved();
+	let mut harness = fixture.harness(BASH, Kind::default()).await;
+	assert!(harness.installed);
+	let next_path = fixture.scratch.path().join("next.oms");
+	let next = Session::create(&next_path, ComponentRegistry::standard()).expect("next session");
+	harness
+		.lifecycle()
+		.session_switch(&harness.session, &next, None)
+		.await;
+	harness.session = next;
+	harness.run_turn().await;
+	let input = json(&read(&fixture.plugin_data().join("prompt.json")));
+	assert_eq!(input["hook_event_name"], "UserPromptSubmit");
+	assert_eq!(input["session_id"], "next", "the host followed the switch: {input}");
+	assert!(
+		input["transcript_path"]
+			.as_str()
+			.is_some_and(|path| path.ends_with("next.oms")),
+		"{input}"
 	);
 	drop(harness);
 }
