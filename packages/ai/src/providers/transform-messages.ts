@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -414,19 +415,28 @@ function normalizeAnthropicTargetToolCallId<TApi extends Api>(
  * execution) instead of the irreversible `[*_token_redacted]` rewrite below —
  * an irreversible placeholder echoed back in edit-tool `old_string` can never
  * match the real bytes on disk.
+ */
+export const SENSITIVE_TOKEN_RE =
+	/(?<![a-zA-Z0-9_*-])(gh[opusr]_[a-zA-Z0-9_*]{36,}|github_pat_[a-zA-Z0-9_*]{36,}|glpat-[a-zA-Z0-9_*-]{20,}|sk-proj-[a-zA-Z0-9_*-]{36,}|sk-ant-[a-zA-Z0-9_*-]{36,}|sk-[a-zA-Z0-9_*-]{48,})(?![a-zA-Z0-9_*-])/gi;
+
+/**
+ * Fixed-format credentials: AWS access key ids (`AKIA`/`ASIA`) and JWTs.
  *
- * FORK DIVERGENCE: upstream covers six vendor prefixes only. This fork adds
- * AWS access key ids (`AKIA`/`ASIA`) and JWTs here, plus
+ * FORK DIVERGENCE: upstream covers only the six vendor prefixes in
+ * {@link SENSITIVE_TOKEN_RE}. This fork adds these shapes, plus
  * {@link PRIVATE_KEY_BLOCK_RE} below for PEM and OpenSSH keys. Keep the
  * additions through an upstream merge; without them a credentials file, an SSH
  * key or a bearer token in a log reaches the provider intact even with
  * redaction switched on. See docs/audit/README.md §10.
  *
- * Note the missing `i` flag: `AKIA`/`ASIA` are uppercase by definition, and
- * case-insensitivity would match prose.
+ * Kept apart from {@link SENSITIVE_TOKEN_RE} for two reasons. That regex is
+ * case-insensitive, and `AKIA`/`ASIA` are uppercase by definition, so an `i`
+ * flag here would match prose. And hosts reuse its source verbatim as one
+ * reversible-obfuscation pattern next to their own dedicated AWS and JWT
+ * entries, which folding these shapes into it would shadow.
  */
-export const SENSITIVE_TOKEN_RE =
-	/(?<![a-zA-Z0-9_*-])(gh[opusr]_[a-zA-Z0-9_*]{36,}|github_pat_[a-zA-Z0-9_*]{36,}|glpat-[a-zA-Z0-9_*-]{20,}|sk-proj-[a-zA-Z0-9_*-]{36,}|sk-ant-[a-zA-Z0-9_*-]{36,}|sk-[a-zA-Z0-9_*-]{48,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})(?![a-zA-Z0-9_*-])/g;
+const FIXED_FORMAT_TOKEN_RE =
+	/(?<![a-zA-Z0-9_*-])(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})(?![a-zA-Z0-9_*-])/g;
 
 /**
  * Private key blocks, matched whole rather than by token shape.
@@ -444,14 +454,6 @@ export const PRIVATE_KEY_BLOCK_RE =
 	/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----/g;
 
 function hasPlausibleCredentialEntropy(token: string): boolean {
-	// Shapes with a fixed, unambiguous format carry their own proof: an AWS key
-	// id is `AKIA` plus exactly 16 upper-alphanumerics, a JWT is three base64url
-	// segments. Applying a mixed-character heuristic to them would reject real
-	// credentials — `AKIAIOSFODNN7EXAMPLE` has no lowercase and no digits in
-	// some regions — which is the one error this function must not make.
-	if (/^(?:AKIA|ASIA)[0-9A-Z]{16}$/.test(token)) return true;
-	if (token.startsWith("eyJ")) return true;
-
 	const lower = token.toLowerCase();
 	const prefixLength = lower.startsWith("github_pat_")
 		? "github_pat_".length
@@ -470,14 +472,23 @@ function hasPlausibleCredentialEntropy(token: string): boolean {
 }
 
 /**
- * Whether outbound credential-pattern redaction is active. Off by default;
- * hosts opt in explicitly (the coding agent wires this to the
- * `secrets.enabled` setting).
+ * Whether outbound credential-pattern redaction is active outside any
+ * {@link withCredentialRedaction} scope. Off by default; hosts opt in
+ * explicitly (the coding agent wires this to the `secrets.enabled` setting).
  */
 let credentialRedactionEnabled = false;
 
+/** Per-request override of {@link credentialRedactionEnabled}; see {@link withCredentialRedaction}. */
+const credentialRedactionScope = new AsyncLocalStorage<boolean>();
+
+/** Redaction policy for the request being built: its scope's, else the process-wide switch. */
+function isCredentialRedactionActive(): boolean {
+	return credentialRedactionScope.getStore() ?? credentialRedactionEnabled;
+}
+
 /**
- * Toggle outbound credential-pattern redaction. When disabled (the default),
+ * Toggle process-wide outbound credential-pattern redaction (requests outside
+ * any {@link withCredentialRedaction} scope). When disabled (the default),
  * {@link redactSensitiveCredentials} and {@link redactSensitiveInObject} are
  * pass-throughs and outbound messages/system prompts leave the process
  * unmodified.
@@ -486,20 +497,27 @@ export function configureCredentialRedaction(enabled: boolean): void {
 	credentialRedactionEnabled = enabled;
 }
 
+/**
+ * Runs `fn` with outbound credential-pattern redaction forced on or off for
+ * every request it starts (including the async work those requests spawn),
+ * overriding {@link configureCredentialRedaction}. Lets concurrent sessions in
+ * one process each apply their own policy.
+ */
+export function withCredentialRedaction<T>(enabled: boolean, fn: () => T): T {
+	return credentialRedactionScope.run(enabled, fn);
+}
+
 export function redactSensitiveCredentials(text: string): string {
-	if (!credentialRedactionEnabled) return text;
+	if (!isCredentialRedactionActive()) return text;
 	// Key blocks first: their base64 body can contain runs that look like a
 	// token, and replacing the whole armoured block avoids leaving a redaction
 	// marker embedded inside a key that is otherwise still intact.
 	const withoutKeys = text.replace(PRIVATE_KEY_BLOCK_RE, "[private_key_redacted]");
-	return withoutKeys.replace(SENSITIVE_TOKEN_RE, match => {
+	const withoutFixedFormat = withoutKeys.replace(FIXED_FORMAT_TOKEN_RE, match =>
+		match.startsWith("eyJ") ? "[jwt_redacted]" : "[aws_access_key_redacted]",
+	);
+	return withoutFixedFormat.replace(SENSITIVE_TOKEN_RE, match => {
 		if (!hasPlausibleCredentialEntropy(match)) return match;
-		if (match.startsWith("AKIA") || match.startsWith("ASIA")) {
-			return "[aws_access_key_redacted]";
-		}
-		if (match.startsWith("eyJ")) {
-			return "[jwt_redacted]";
-		}
 		const lower = match.toLowerCase();
 		if (lower.startsWith("gh")) {
 			return "[github_token_redacted]";
@@ -518,7 +536,7 @@ export function redactSensitiveCredentials(text: string): string {
 }
 
 export function redactSensitiveInObject(val: unknown): { result: unknown; changed: boolean } {
-	if (!credentialRedactionEnabled) return { result: val, changed: false };
+	if (!isCredentialRedactionActive()) return { result: val, changed: false };
 	if (typeof val === "string") {
 		const redacted = redactSensitiveCredentials(val);
 		return { result: redacted, changed: redacted !== val };
@@ -545,8 +563,14 @@ export function redactSensitiveInObject(val: unknown): { result: unknown; change
 	return { result: val, changed: false };
 }
 
-function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
-	if (!credentialRedactionEnabled) return messages;
+/**
+ * Redact credential-shaped tokens across a message list.
+ *
+ * Exported for the one provider that forwards a Context verbatim instead of
+ * encoding per-provider, and so never reaches {@link transformMessages}.
+ */
+export function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
+	if (!isCredentialRedactionActive()) return messages;
 	return messages.map((msg): Message => {
 		if (msg.role === "user" || msg.role === "developer") {
 			const userMsg = msg as UserMessage | DeveloperMessage;
@@ -635,6 +659,7 @@ export function transformMessages<TApi extends Api>(
 	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
 	duplicateToolCallIdSuffixPrefix = "_dup",
 	targetCompat: Model<TApi>["compat"] = model.compat,
+	targetCredentialId?: number,
 ): Message[] {
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
@@ -746,6 +771,13 @@ export function transformMessages<TApi extends Api>(
 			// conservative direction (degraded reasoning, not broken requests).
 			const isOfficialAnthropicSource = isAnthropicReplay && assistantMsg.provider === "anthropic";
 			const isSigningAnthropicTarget = isAnthropicTarget && model.compat.signingEndpoint;
+			// Signatures and redacted thinking are bound to the credential that minted them.
+			// Unknown provenance preserves legacy replay for imported and older sessions.
+			const foreignCredential =
+				isSigningAnthropicTarget &&
+				assistantMsg.credentialId !== undefined &&
+				targetCredentialId !== undefined &&
+				assistantMsg.credentialId !== targetCredentialId;
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic
@@ -810,6 +842,7 @@ export function transformMessages<TApi extends Api>(
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
+				if (foreignCredential && (block.type === "thinking" || block.type === "redactedThinking")) return [];
 				if (
 					invalidBoundThinkingAssistantIndexes.has(index) &&
 					(block.type === "thinking" || block.type === "redactedThinking")

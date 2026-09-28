@@ -165,6 +165,8 @@ export async function classifyWorkflow(
 				modelOverride: ctx.model,
 				parentActiveModelPattern: ctx.host.activeModelPattern,
 				restrictToolNames: true,
+				// Rebinds the parent's hooks and providers without admitting their tools.
+				preloadedPreparedExtensions: ctx.host.preparedExtensions,
 				enableIrc: false,
 				enableLsp: false,
 				settings: ctx.host.settings,

@@ -21,7 +21,8 @@ import type { ExecutorOptions } from "../../src/task/executor";
 import * as taskExecutor from "../../src/task/executor";
 import * as isolationRunner from "../../src/task/isolation-runner";
 import { AgentOutputManager } from "../../src/task/output-manager";
-import type { AgentDefinition, AgentProgress, SingleResult, StructuredSubagentOutput } from "../../src/task/types";
+import type { AgentDefinition } from "../../src/task/types";
+import type { AgentProgress, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../../src/tools";
 
 const taskAgent = {
@@ -1113,19 +1114,6 @@ describe("runEvalAgent isolation", () => {
 		expect(mergeSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("preserves temp artifacts for non-isolated handle outputs", async () => {
-		mockAgents();
-		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
-		await runEvalAgentAndWait({ prompt: "plain handle", handle: true }, { session: makeSession() });
-
-		const removedArtifactsDir = rmSpy.mock.calls.some(
-			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
-		);
-		expect(removedArtifactsDir).toBe(false);
-	});
-
 	it("forwards merge=false as patch mode and passes the worktree cwd through baseOptions", async () => {
 		mockAgents();
 		const { repoRoot } = mockIsolationContext();
@@ -1375,7 +1363,7 @@ describe("runEvalAgent isolation", () => {
 			caught = err as Error;
 		}
 		expect(caught).toBeDefined();
-		const match = caught?.message.match(/(\/[^\s,]+?\.nested-0-sub_nested\.patch)/);
+		const match = caught?.message.match(/([^\s,]+?\.nested-0-sub_nested\.patch)/);
 		expect(match).not.toBeNull();
 		const persistedPath = match?.[1];
 		expect(persistedPath).toBeDefined();

@@ -39,6 +39,7 @@ import { plainArgv } from "./types";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { ArtifactManager } from "../session/artifacts";
 import type { EventBus } from "../utils/event-bus";
+import type { PreparedExtension } from "../extensibility/extensions/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -46,10 +47,17 @@ import type { AuthStorage } from "../session/auth-storage";
 import { classifyFailure } from "../task/admission";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
-import type { AgentDefinition, SingleResult } from "../task/types";
-import { parseConfiguredThinkingLevel } from "../thinking";
+import type { AgentDefinition } from "../task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { type IsolationContext, prepareIsolationContext } from "../task/isolation-runner";
 import { writeIsolationOwner } from "../task/isolation-ownership";
+import {
+	cfgIsolationBackend,
+	cfgTaskAgentModelOverrides,
+	cfgTaskEnableLsp,
+	cfgTaskMaxConcurrency,
+} from "../task/settings";
 import {
 	captureDeltaPatch,
 	type DeltaPatchResult,
@@ -124,6 +132,13 @@ export interface AdwHost {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Registers seats as children of the spawning session rather than orphans. */
 	agentId?: string;
+	/**
+	 * The parent session's imported extension factories. Seats that run in
+	 * {@link cwd} rebind these instead of re-discovering and re-importing every
+	 * extension module per spawn; sandboxed seats re-discover inside their
+	 * sandbox, as isolated task spawns do.
+	 */
+	preparedExtensions?: readonly PreparedExtension[];
 	eventBus?: EventBus;
 	/**
 	 * Answers a `human` phase. The run holds until this resolves, so a host
@@ -665,7 +680,7 @@ export function buildSeatSpawnOptions(args: {
 		// `task.enableLsp` defaults to false; the executor's own default is true,
 		// so omitting this silently overrides the operator and boots an LSP server
 		// set per seat.
-		enableLsp: !seat.readOnly && (host.settings?.get("task.enableLsp") ?? false),
+		enableLsp: !seat.readOnly && (host.settings ? cfgTaskEnableLsp.get(host.settings) : false),
 		settings: host.settings,
 		authStorage: host.authStorage,
 		modelRegistry: host.modelRegistry,
@@ -679,6 +694,9 @@ export function buildSeatSpawnOptions(args: {
 		additionalDirectories: host.additionalDirectories,
 		localProtocolOptions: host.localProtocolOptions,
 		parentAgentId: host.agentId,
+		// The parent's modules resolve against its own checkout; a seat in a
+		// sandbox discovers the sandbox's copies instead, like an isolated task.
+		preloadedPreparedExtensions: workRoot === host.cwd ? host.preparedExtensions : undefined,
 		eventBus: host.eventBus,
 		subagentEventBus: host.subagentEventBus,
 		// Lifecycle frames reach the host's surfaces through the buses above; a
@@ -704,7 +722,7 @@ export function createExecutorSeatRunner(ctx: {
 	signal?: AbortSignal;
 }): SeatRunner {
 	const { host, workRoot, artifactsDir, signal } = ctx;
-	const agentModelOverrides = host.settings?.get("task.agentModelOverrides") ?? {};
+	const agentModelOverrides = host.settings ? cfgTaskAgentModelOverrides.get(host.settings) : {};
 	const seatRoots = new Map<string, string>();
 
 	return async (seat: SeatRequest): Promise<SeatOutcome> => {
@@ -1015,7 +1033,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				};
 			} else {
 				const context = await prepareIsolationContext(host.cwd);
-				const backend = parseIsolationBackend(host.settings?.get("isolation.backend") ?? "auto");
+				const backend = parseIsolationBackend(host.settings ? cfgIsolationBackend.get(host.settings) : "auto");
 				const handle = await ensureIsolation(context.repoRoot, adwId, backend);
 				isolation = { handle, context };
 				await writeRunState(isolationRecordPath, {
@@ -1253,7 +1271,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				// narrower question, so the prompt cannot be shared across the panel.
 				const panelPromptFor = (seat: AdwSeatConfig) =>
 					buildPanelPrompt({ request, phase, seat, handoff: handoff ?? undefined, inputs: selectedInputs });
-				const limit = Math.max(1, host.settings?.get("task.maxConcurrency") ?? DEFAULT_MAX_PANEL_CONCURRENCY);
+				const limit = Math.max(
+					1,
+					host.settings ? cfgTaskMaxConcurrency.get(host.settings) : DEFAULT_MAX_PANEL_CONCURRENCY,
+				);
 				const settled = cached
 					? cached.map(opinion => ({ opinion, tokens: 0, cached: true }))
 					: await mapWithLimit(panel, limit, async (seat, seatIndex) => {
@@ -1510,7 +1531,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		// Writer turns overlap; cloning, judgment, integration and code barriers
 		// have one owner. Nothing rejected by a gate reaches the integration root.
 		const wsRepoRoot = await getRepoRoot(workRoot);
-		const wsBackend = parseIsolationBackend(host.settings?.get("isolation.backend") ?? "auto");
+		const wsBackend = parseIsolationBackend(host.settings ? cfgIsolationBackend.get(host.settings) : "auto");
 		interface WorkspaceRecord {
 			handle: IsolationHandle;
 			context: IsolationContext;
@@ -1594,7 +1615,12 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				const generation = String(Snowflake.next());
 				// Await cloning here, not inside the turn promise: another accepted
 				// patch cannot mutate the source halfway through a snapshot.
-				const handle = await ensureIsolation(wsRepoRoot, `${adwId}-${generation}`, wsBackend);
+				// Snapshot backends only: sibling writers' accepted patches land in
+				// `wsRepoRoot` while this workspace is live, and an overlay would
+				// show them here as out-of-scope edits by this phase.
+				const handle = await ensureIsolation(wsRepoRoot, `${adwId}-${generation}`, wsBackend, {
+					snapshot: true,
+				});
 				const context = await prepareIsolationContext(handle.mergedDir);
 				record = { handle, context, generation, fromSeq: new TaskTraceReader(traceDir).count() };
 				await writeRunState(recordFile, record);
