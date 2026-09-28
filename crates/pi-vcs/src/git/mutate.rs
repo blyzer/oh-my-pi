@@ -1,6 +1,7 @@
 //! In-process local Git mutations.
 
 use std::{
+	borrow::Cow,
 	collections::{BTreeMap, BTreeSet},
 	ffi::OsStr,
 	fs,
@@ -68,11 +69,7 @@ pub(crate) fn update_reference(
 				.duration_since(std::time::UNIX_EPOCH)
 				.map_or(0, |elapsed| elapsed.as_secs())
 		);
-		gix::actor::SignatureRef {
-			name:  "oh-my-pi".into(),
-			email: "omp@localhost".into(),
-			time:  &now,
-		}
+		gix::actor::SignatureRef { name: "omp".into(), email: "omp@localhost".into(), time: &now }
 	};
 	repo
 		.edit_references_as(Some(edit), Some(committer))
@@ -85,7 +82,11 @@ impl GitRepo {
 	///
 	/// Empty `files` matches `git add -A`: refresh tracked paths and add
 	/// untracked files that survive the standard ignore stack (nested
-	/// `.gitignore`, exclude files). When `core.precomposeUnicode` is set,
+	/// `.gitignore`, exclude files). Content goes through the worktree-to-git
+	/// filter pipeline (`.gitattributes` `text`/`eol`, `core.autocrlf`, clean
+	/// drivers) so the index blob matches what `git add` would store — a
+	/// `*.cmd text eol=crlf` file stages as LF even though the checkout is
+	/// CRLF. When `core.precomposeUnicode` is set,
 	/// a worktree path that is a unicode-composition equivalent of an
 	/// existing index path (macOS NFD dirent vs NFC index name) is stored
 	/// under the index name. Unrelated names that share an inode (hardlinks)
@@ -121,8 +122,11 @@ impl GitRepo {
 					.any(|wanted| stage_path_matches(&path, wanted)))
 				&& !selected.contains(path.as_ref())
 		});
+		let (mut filter, filter_index) = repo
+			.filter_pipeline(None)
+			.map_err(|err| Error::backend("git add", err))?;
 		for path in selected {
-			stage_one(&repo, self.root(), &mut index, &path)?;
+			stage_one(&mut filter, &filter_index, &mut index, &path)?;
 		}
 		index.sort_entries();
 		index
@@ -852,7 +856,17 @@ fn run_commit_hook(
 	if !hook_is_executable(&hook) {
 		return Ok(());
 	}
-	let output = Command::new(&hook)
+	// Windows CreateProcess cannot execute a shebang script directly. Let Git
+	// invoke the hook through its own shell, as `git commit` does.
+	#[cfg(windows)]
+	let mut command = {
+		let mut command = Command::new("git");
+		command.args(["hook", "run", "--ignore-missing", name, "--"]);
+		command
+	};
+	#[cfg(not(windows))]
+	let mut command = Command::new(&hook);
+	let output = command
 		.args(args)
 		.current_dir(repository.root())
 		.env("GIT_DIR", &repository.info().git_dir)
@@ -1205,54 +1219,40 @@ fn same_worktree_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
 	false
 }
 
+/// Write the filtered worktree content at `path` into the object database and
+/// replace its index entry. A path that vanished or is untrackable (socket,
+/// plain directory) is left out of the index, as `git add` would.
 fn stage_one(
-	repo: &gix::Repository,
-	root: &Path,
+	filter: &mut gix::filter::Pipeline<'_>,
+	filter_index: &gix::index::State,
 	index: &mut gix::index::File,
 	path: &str,
 ) -> Result<()> {
-	let full = root.join(path);
-	let metadata = fs::symlink_metadata(&full)?;
-	let (data, mode) = if metadata.file_type().is_symlink() {
-		(
-			fs::read_link(&full)?
-				.to_string_lossy()
-				.into_owned()
-				.into_bytes(),
-			gix::index::entry::Mode::SYMLINK,
-		)
-	} else {
-		let mode = if is_executable(&metadata) {
-			gix::index::entry::Mode::FILE_EXECUTABLE
-		} else {
-			gix::index::entry::Mode::FILE
-		};
-		(fs::read(&full)?, mode)
+	use gix::objs::tree::EntryKind;
+	let rela_path = path.as_bytes().as_bstr();
+	let Some((id, kind, _)) = filter
+		.worktree_file_to_object(rela_path, filter_index)
+		.map_err(|err| Error::backend("git add", err))?
+	else {
+		index.remove_entries(|_, p, _| p == rela_path);
+		return Ok(());
 	};
-	let id = repo
-		.write_blob(&data)
-		.map_err(|e| Error::backend("git add", e))?
-		.detach();
-	index.remove_entries(|_, p, _| p == path.as_bytes().as_bstr());
+	let mode = match kind {
+		EntryKind::Blob => gix::index::entry::Mode::FILE,
+		EntryKind::BlobExecutable => gix::index::entry::Mode::FILE_EXECUTABLE,
+		EntryKind::Link => gix::index::entry::Mode::SYMLINK,
+		EntryKind::Commit => gix::index::entry::Mode::COMMIT,
+		EntryKind::Tree => return Ok(()),
+	};
+	index.remove_entries(|_, p, _| p == rela_path);
 	index.dangerously_push_entry(
 		Default::default(),
 		id,
 		gix::index::entry::Flags::empty(),
 		mode,
-		path.as_bytes().as_bstr(),
+		rela_path,
 	);
 	Ok(())
-}
-
-#[cfg(unix)]
-fn is_executable(meta: &fs::Metadata) -> bool {
-	use std::os::unix::fs::PermissionsExt;
-	meta.permissions().mode() & 0o111 != 0
-}
-#[cfg(not(unix))]
-#[allow(clippy::missing_const_for_fn, reason = "matches non-const unix signature")]
-fn is_executable(_: &fs::Metadata) -> bool {
-	false
 }
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
@@ -1577,13 +1577,22 @@ fn collect_clone_reconciliation_paths(
 	Ok((dirty_tracked, untracked))
 }
 
+fn git_metadata_path(path: &Path) -> Cow<'_, str> {
+	let display = path.to_string_lossy();
+	if cfg!(windows) {
+		Cow::Owned(display.replace('\\', "/"))
+	} else {
+		display
+	}
+}
+
 fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> {
 	fs::create_dir_all(path)?;
 	let name = worktree_admin_name(common, path);
 	let admin = common.join("worktrees").join(name);
 	fs::create_dir_all(&admin)?;
-	fs::write(path.join(".git"), format!("gitdir: {}\n", admin.display()))?;
-	fs::write(admin.join("gitdir"), format!("{}\n", path.join(".git").display()))?;
+	fs::write(path.join(".git"), format!("gitdir: {}\n", git_metadata_path(&admin)))?;
+	fs::write(admin.join("gitdir"), format!("{}\n", git_metadata_path(&path.join(".git"))))?;
 	fs::write(admin.join("commondir"), "../..\n")?;
 	fs::write(admin.join("HEAD"), format!("{head}\n"))?;
 	Ok(admin)
@@ -1842,6 +1851,28 @@ mod tests {
 	}
 
 	#[test]
+	fn stage_applies_worktree_to_git_filters() {
+		// Regression: staging stored raw worktree bytes, so under
+		// `*.cmd text eol=crlf` a CRLF checkout staged a CRLF blob over the LF
+		// HEAD blob. `stage_files(&[])` re-stages every tracked path, so every
+		// untouched .cmd file surfaced as modified in both index and worktree.
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitattributes"), "*.cmd text eol=crlf\n").unwrap();
+		fs::write(temp.path().join("run.cmd"), "echo one\r\necho two\r\n").unwrap();
+		git(temp.path(), &["add", "."]);
+		git(temp.path(), &["commit", "-qm", "crlf"]);
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		repo.stage_files(&[]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		fs::write(temp.path().join("run.cmd"), "echo one\r\necho three\r\n").unwrap();
+		repo.stage_files(&["run.cmd".into()]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  run.cmd");
+		assert_eq!(git(temp.path(), &["show", ":run.cmd"]), "echo one\necho three");
+	}
+
+	#[test]
 	fn stage_all_skips_nested_gitignore_like_git_add() {
 		let (temp, repo) = fixture();
 		fs::create_dir_all(temp.path().join("tests/e2e/screenshots")).unwrap();
@@ -2019,6 +2050,11 @@ mod tests {
 		fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 	}
 
+	#[cfg(windows)]
+	fn write_hook(path: &Path, body: &str, _executable: bool) {
+		fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+	}
+
 	#[test]
 	fn stage_commit_survives_unadvanced_index_mtime() {
 		// Regression: a commit right after staging on the same cached handle used
@@ -2044,7 +2080,6 @@ mod tests {
 		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
 	}
 
-	#[cfg(unix)]
 	#[test]
 	fn commit_hooks_match_git_commit_behavior() {
 		let (temp, repo) = fixture();
@@ -2084,12 +2119,16 @@ mod tests {
 			.commit_create("missing hook is skipped", &CommitOptions::default())
 			.unwrap();
 
-		fs::write(temp.path().join("b"), "one more\n").unwrap();
-		repo.stage_files(&["b".into()]).unwrap();
-		write_hook(&pre_commit, "echo should-not-run >&2\nexit 1", false);
-		repo
-			.commit_create("non-executable hook is skipped", &CommitOptions::default())
-			.unwrap();
+		#[cfg(unix)]
+		{
+			fs::write(temp.path().join("b"), "one more\n").unwrap();
+			repo.stage_files(&["b".into()]).unwrap();
+			write_hook(&pre_commit, "echo should-not-run >&2\nexit 1", false);
+			repo
+				.commit_create("non-executable hook is skipped", &CommitOptions::default())
+				.unwrap();
+		}
+		#[cfg(unix)]
 		fs::remove_file(&pre_commit).unwrap();
 		repo
 			.commit_create("subject\n\nbody\n\n", &CommitOptions {
@@ -2303,7 +2342,8 @@ mod tests {
 		assert!(nested.join("secret.env").exists());
 		assert_eq!(fs::read_to_string(nested.join("secret.env")).unwrap(), "secret\n");
 
-		// Global excluded file MUST SURVIVE (config set after the handle was cached)
+		// Global excluded file MUST SURVIVE (config set after the handle was
+		// cached)
 		assert!(temp.path().join("global.env").exists());
 		assert_eq!(fs::read_to_string(temp.path().join("global.env")).unwrap(), "global-secret\n");
 
@@ -2325,7 +2365,8 @@ mod tests {
 		// Untracked nested repo MUST SURVIVE
 		assert!(untracked_repo.join(".git").exists());
 		assert!(untracked_repo.join("nested.txt").exists());
-		// Symlink to directory: symlink is removed, target directory content survives
+		// Symlink to directory: symlink is removed, target directory content
+		// survives
 		#[cfg(unix)]
 		{
 			assert!(!temp.path().join("symlink-to-dir").exists());
@@ -2388,6 +2429,35 @@ mod tests {
 		assert_eq!(fs::read(linked.join(".git")).unwrap(), pointer_before);
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), git(&linked, &["rev-parse", "HEAD"]));
 		let _ = fs::remove_dir_all(linked);
+	}
+
+	#[test]
+	fn worktree_registration_paths_are_accepted_by_git() {
+		let (temp, repo) = fixture();
+		let linked_dir = tempfile::tempdir().unwrap();
+		let linked = linked_dir.path().to_path_buf();
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		let admin = registered_admin(&linked.join(".git")).unwrap().unwrap();
+		assert_eq!(
+			fs::read_to_string(linked.join(".git")).unwrap(),
+			format!("gitdir: {}\n", git_metadata_path(&admin))
+		);
+		assert_eq!(
+			fs::read_to_string(admin.join("gitdir")).unwrap(),
+			format!("{}\n", git_metadata_path(&linked.join(".git")))
+		);
+
+		let listed = git(temp.path(), &["worktree", "list", "--porcelain"]);
+		let expected = format!("worktree {}", git_metadata_path(&linked));
+		assert!(listed.lines().any(|line| line == expected), "{listed}");
+		git(temp.path(), &["worktree", "repair", linked.to_str().unwrap()]);
 	}
 
 	#[test]

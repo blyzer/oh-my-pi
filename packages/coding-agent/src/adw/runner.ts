@@ -46,10 +46,17 @@ import type { AuthStorage } from "../session/auth-storage";
 import { classifyFailure } from "../task/admission";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
-import type { AgentDefinition, SingleResult } from "../task/types";
-import { parseConfiguredThinkingLevel } from "../thinking";
+import type { AgentDefinition } from "../task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { type IsolationContext, prepareIsolationContext } from "../task/isolation-runner";
 import { writeIsolationOwner } from "../task/isolation-ownership";
+import {
+	cfgIsolationBackend,
+	cfgTaskAgentModelOverrides,
+	cfgTaskEnableLsp,
+	cfgTaskMaxConcurrency,
+} from "../task/settings";
 import {
 	captureDeltaPatch,
 	type DeltaPatchResult,
@@ -665,7 +672,7 @@ export function buildSeatSpawnOptions(args: {
 		// `task.enableLsp` defaults to false; the executor's own default is true,
 		// so omitting this silently overrides the operator and boots an LSP server
 		// set per seat.
-		enableLsp: !seat.readOnly && (host.settings?.get("task.enableLsp") ?? false),
+		enableLsp: !seat.readOnly && (host.settings ? cfgTaskEnableLsp.get(host.settings) : false),
 		settings: host.settings,
 		authStorage: host.authStorage,
 		modelRegistry: host.modelRegistry,
@@ -704,7 +711,7 @@ export function createExecutorSeatRunner(ctx: {
 	signal?: AbortSignal;
 }): SeatRunner {
 	const { host, workRoot, artifactsDir, signal } = ctx;
-	const agentModelOverrides = host.settings?.get("task.agentModelOverrides") ?? {};
+	const agentModelOverrides = host.settings ? cfgTaskAgentModelOverrides.get(host.settings) : {};
 	const seatRoots = new Map<string, string>();
 
 	return async (seat: SeatRequest): Promise<SeatOutcome> => {
@@ -1015,7 +1022,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				};
 			} else {
 				const context = await prepareIsolationContext(host.cwd);
-				const backend = parseIsolationBackend(host.settings?.get("isolation.backend") ?? "auto");
+				const backend = parseIsolationBackend(host.settings ? cfgIsolationBackend.get(host.settings) : "auto");
 				const handle = await ensureIsolation(context.repoRoot, adwId, backend);
 				isolation = { handle, context };
 				await writeRunState(isolationRecordPath, {
@@ -1253,7 +1260,10 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 				// narrower question, so the prompt cannot be shared across the panel.
 				const panelPromptFor = (seat: AdwSeatConfig) =>
 					buildPanelPrompt({ request, phase, seat, handoff: handoff ?? undefined, inputs: selectedInputs });
-				const limit = Math.max(1, host.settings?.get("task.maxConcurrency") ?? DEFAULT_MAX_PANEL_CONCURRENCY);
+				const limit = Math.max(
+					1,
+					host.settings ? cfgTaskMaxConcurrency.get(host.settings) : DEFAULT_MAX_PANEL_CONCURRENCY,
+				);
 				const settled = cached
 					? cached.map(opinion => ({ opinion, tokens: 0, cached: true }))
 					: await mapWithLimit(panel, limit, async (seat, seatIndex) => {
@@ -1510,7 +1520,7 @@ export async function runAdw(options: AdwRunOptions): Promise<AdwRunResult> {
 		// Writer turns overlap; cloning, judgment, integration and code barriers
 		// have one owner. Nothing rejected by a gate reaches the integration root.
 		const wsRepoRoot = await getRepoRoot(workRoot);
-		const wsBackend = parseIsolationBackend(host.settings?.get("isolation.backend") ?? "auto");
+		const wsBackend = parseIsolationBackend(host.settings ? cfgIsolationBackend.get(host.settings) : "auto");
 		interface WorkspaceRecord {
 			handle: IsolationHandle;
 			context: IsolationContext;
