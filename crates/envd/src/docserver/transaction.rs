@@ -2285,6 +2285,67 @@ mod tests {
 		assert_eq!(current_bytes(&store, document_id).await, b"ALPHA BETA".as_slice());
 	}
 
+	/// macOS `FSEvents` can deliver the echo of the store's own write (or of the
+	/// fixture write before `open`) long after the post-commit reload settled.
+	/// An echo that finds the disk unchanged must not abort a transaction that
+	/// holds a reservation.
+	#[tokio::test]
+	async fn late_watch_echo_does_not_reject_a_reserved_rebase() {
+		let root = TempDir::new().expect("tempdir");
+		let path = root.path().join("late-echo.txt");
+		fs::write(&path, b"alpha beta").expect("fixture");
+		let store = setup(&root);
+		let opened = store.open(path).await.expect("open");
+		let document_id = opened.head().document_id();
+		let base = opened.head().revision();
+		let entered = Arc::new(Notify::new());
+		let resume = Arc::new(Notify::new());
+		let coordinator =
+			TransactionCoordinator::with_formatter(store.clone(), [3; 16], BlockingNoopFormatter {
+				entered: Arc::clone(&entered),
+				resume:  Arc::clone(&resume),
+			});
+		let first = coordinator
+			.commit(
+				text_request(
+					id(18),
+					document_id,
+					base,
+					b"ALPHA beta",
+					StalePolicy::Fail,
+					FormatPolicy::Disabled,
+				),
+				CancellationToken::new(),
+			)
+			.await;
+		let _first_head = committed_head(&first);
+
+		let request = text_request(
+			id(19),
+			document_id,
+			base,
+			b"alpha BETA",
+			StalePolicy::RebaseNonOverlapping,
+			FormatPolicy::Required,
+		);
+		let committing =
+			tokio::spawn(async move { coordinator.commit(request, CancellationToken::new()).await });
+		entered.notified().await;
+		store
+			.actor_handle(DocumentLocator::Document(document_id))
+			.expect("actor")
+			.inject_pending_watch_invalidation()
+			.await
+			.expect("inject late watch echo");
+		resume.notify_one();
+		let rebased = committing.await.expect("transaction task");
+		assert!(
+			matches!(&*rebased, TransactionOutcome::Committed { operations, .. } if operations[0].rebased()),
+			"unexpected rebase outcome: {rebased:?}"
+		);
+		assert_eq!(current_bytes(&store, document_id).await, b"ALPHA BETA".as_slice());
+	}
+
 	#[tokio::test]
 	async fn overlapping_rebase_and_force_replace_edits_are_rejected() {
 		let root = TempDir::new().expect("tempdir");

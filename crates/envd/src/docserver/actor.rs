@@ -1009,7 +1009,7 @@ impl ActorHandle {
 	}
 
 	#[cfg(test)]
-	async fn inject_pending_watch_invalidation(&self) -> Result<()> {
+	pub(crate) async fn inject_pending_watch_invalidation(&self) -> Result<()> {
 		let (reply, receive) = oneshot::channel();
 		self
 			.send(Command::InjectPendingWatchInvalidation { reply })
@@ -1071,7 +1071,12 @@ impl ActorHandle {
 	) -> Result<DocumentHead> {
 		let (reply, receive) = oneshot::channel();
 		self
-			.send(Command::CommitPrepared { reservation, prepared, metadata, reply })
+			.send(Command::Mutation(ReservedMutation::Write {
+				reservation,
+				prepared,
+				metadata,
+				reply,
+			}))
 			.await?;
 		receive.await.map_err(|_| actor_unavailable())?
 	}
@@ -1084,7 +1089,7 @@ impl ActorHandle {
 	) -> Result<DocumentHead> {
 		let (reply, receive) = oneshot::channel();
 		self
-			.send(Command::CommitPreparedDelete { reservation, prepared, reply })
+			.send(Command::Mutation(ReservedMutation::Delete { reservation, prepared, reply }))
 			.await?;
 		receive.await.map_err(|_| actor_unavailable())?
 	}
@@ -1099,12 +1104,12 @@ impl ActorHandle {
 	) -> Result<DocumentHead> {
 		let (reply, receive) = oneshot::channel();
 		self
-			.send(Command::CommitPreparedMove {
+			.send(Command::Mutation(ReservedMutation::Move {
 				reservation,
 				prepared: Box::new(prepared),
 				path,
 				reply,
-			})
+			}))
 			.await?;
 		receive.await.map_err(|_| actor_unavailable())?
 	}
@@ -1127,7 +1132,9 @@ impl ActorHandle {
 	/// Releases a reservation without changing actor generation.
 	pub(crate) async fn release(&self, reservation: DocumentReservation) -> Result<()> {
 		let (reply, receive) = oneshot::channel();
-		self.send(Command::Release { reservation, reply }).await?;
+		self
+			.send(Command::Mutation(ReservedMutation::Release { reservation, reply }))
+			.await?;
 		receive.await.map_err(|_| actor_unavailable())?
 	}
 
@@ -1196,23 +1203,7 @@ enum Command {
 	},
 	PermissionComplete(PermissionCompletion),
 	ReloadComplete(ReloadCompletion),
-	CommitPrepared {
-		reservation: DocumentReservation,
-		prepared:    PreparedWrite,
-		metadata:    CommittedSnapshotMetadata,
-		reply:       oneshot::Sender<Result<DocumentHead>>,
-	},
-	CommitPreparedDelete {
-		reservation: DocumentReservation,
-		prepared:    PreparedDelete,
-		reply:       oneshot::Sender<Result<DocumentHead>>,
-	},
-	CommitPreparedMove {
-		reservation: DocumentReservation,
-		prepared:    Box<PreparedMove>,
-		path:        PathReservation,
-		reply:       oneshot::Sender<Result<DocumentHead>>,
-	},
+	Mutation(ReservedMutation),
 	MoveComplete(MoveCompletion),
 	CommitComplete(CommitCompletion),
 	State {
@@ -1236,11 +1227,6 @@ enum Command {
 		replacement: DocumentId,
 		restored:    bool,
 	},
-
-	Release {
-		reservation: DocumentReservation,
-		reply:       oneshot::Sender<Result<()>>,
-	},
 	#[cfg(test)]
 	InstallTestWorkerGate {
 		kind:  TestWorkerKind,
@@ -1258,6 +1244,48 @@ enum Command {
 	Shutdown {
 		reply: Option<oneshot::Sender<()>>,
 	},
+}
+
+/// A command that consumes a transaction reservation.
+///
+/// These wait behind a pending native-watch reload: the notification alone does
+/// not prove the disk changed, so only the reload decides whether the
+/// reservation survives.
+enum ReservedMutation {
+	Write {
+		reservation: DocumentReservation,
+		prepared:    PreparedWrite,
+		metadata:    CommittedSnapshotMetadata,
+		reply:       oneshot::Sender<Result<DocumentHead>>,
+	},
+	Delete {
+		reservation: DocumentReservation,
+		prepared:    PreparedDelete,
+		reply:       oneshot::Sender<Result<DocumentHead>>,
+	},
+	Move {
+		reservation: DocumentReservation,
+		prepared:    Box<PreparedMove>,
+		path:        PathReservation,
+		reply:       oneshot::Sender<Result<DocumentHead>>,
+	},
+	Release {
+		reservation: DocumentReservation,
+		reply:       oneshot::Sender<Result<()>>,
+	},
+}
+
+impl ReservedMutation {
+	fn fail(self, error: Error) {
+		match self {
+			Self::Write { reply, .. } | Self::Delete { reply, .. } | Self::Move { reply, .. } => {
+				let _ = reply.send(Err(error));
+			},
+			Self::Release { reply, .. } => {
+				let _ = reply.send(Err(error));
+			},
+		}
+	}
 }
 
 struct ActivationCompletion {
@@ -1366,6 +1394,7 @@ struct DocumentActor {
 	queued_reads: Vec<(Option<Revision>, ReadSelection, ReadReply)>,
 	queued_states: Vec<StateReply>,
 	queued_reserves: Vec<(TransactionId, Revision, ReserveReply)>,
+	queued_mutations: Vec<ReservedMutation>,
 	activation_in_flight: bool,
 	reload_in_flight: bool,
 	persist_in_flight: bool,
@@ -1420,6 +1449,7 @@ impl DocumentActor {
 			queued_reads: Vec::new(),
 			queued_states: Vec::new(),
 			queued_reserves: Vec::new(),
+			queued_mutations: Vec::new(),
 			activation_in_flight: false,
 			reload_in_flight: false,
 			persist_in_flight: false,
@@ -1498,15 +1528,7 @@ impl DocumentActor {
 				self.start_set_permissions(expected, permissions, follow, reply);
 			},
 			Command::PermissionComplete(completion) => self.finish_set_permissions(completion),
-			Command::CommitPrepared { reservation, prepared, metadata, reply } => {
-				self.start_commit(reservation, prepared, metadata, reply);
-			},
-			Command::CommitPreparedDelete { reservation, prepared, reply } => {
-				self.start_delete(reservation, prepared, reply);
-			},
-			Command::CommitPreparedMove { reservation, prepared, path, reply } => {
-				self.start_move(reservation, *prepared, path, reply);
-			},
+			Command::Mutation(mutation) => self.handle_mutation(mutation),
 			Command::MoveComplete(completion) => self.finish_move(completion),
 			Command::CommitComplete(completion) => self.finish_commit(completion),
 			Command::State { reply } => {
@@ -1529,11 +1551,6 @@ impl DocumentActor {
 						return true;
 					}
 				}
-			},
-
-			Command::Release { reservation, reply } => {
-				let result = self.release(reservation);
-				let _ = reply.send(result);
 			},
 			#[cfg(test)]
 			Command::InstallTestWorkerGate { kind, gate, reply } => {
@@ -1601,6 +1618,7 @@ impl DocumentActor {
 			&& self.queued_reads.is_empty()
 			&& self.queued_states.is_empty()
 			&& self.queued_reserves.is_empty()
+			&& self.queued_mutations.is_empty()
 		{
 			self.idle_deadline = Some(Instant::now() + IDLE_EVICTION_DELAY);
 		}
@@ -1674,7 +1692,6 @@ impl DocumentActor {
 				.checked_add(delta)
 				.expect("reload generation exhausted");
 			self.invalidated = true;
-			self.invalidate_generation();
 		}
 		self.reload_cause.record(&event.kind);
 		if self.head.is_some()
@@ -1805,12 +1822,14 @@ impl DocumentActor {
 				}
 			} else if self.install_external(disk, cause).is_err() {
 				self.invalidated = true;
+				self.invalidate_generation();
 				self.fail_queued_reads();
 				return;
 			}
 			self.flush_queued();
 		} else {
 			self.invalidated = true;
+			self.invalidate_generation();
 			self.fail_queued_reads();
 		}
 	}
@@ -1945,6 +1964,7 @@ impl DocumentActor {
 			DocumentEventKind::ExternalModified
 		};
 		let head = snapshot.head().clone();
+		self.invalidate_generation();
 		self.fingerprint = fingerprint;
 		self.push_snapshot(snapshot);
 		self.publish_event(kind, head, previous_revision, None, None);
@@ -2031,6 +2051,10 @@ impl DocumentActor {
 		for (transaction_id, expected, reply) in reserves {
 			self.handle_reserve(transaction_id, expected, reply);
 		}
+		let mutations = mem::take(&mut self.queued_mutations);
+		for mutation in mutations {
+			self.handle_mutation(mutation);
+		}
 	}
 
 	fn fail_queued_reads(&mut self) {
@@ -2046,6 +2070,9 @@ impl DocumentActor {
 		}
 		for (_, _, reply) in self.queued_reserves.drain(..) {
 			let _ = reply.send(Err(Error::ExternalInvalidation { path: path.clone() }));
+		}
+		for mutation in self.queued_mutations.drain(..) {
+			mutation.fail(Error::ExternalInvalidation { path: path.clone() });
 		}
 	}
 
@@ -2124,7 +2151,6 @@ impl DocumentActor {
 			.expect("reload generation exhausted");
 		self.reload_cause.rescan = true;
 		self.invalidated = true;
-		self.invalidate_generation();
 		if self.head.is_some() && !self.reload_in_flight && !self.persist_in_flight {
 			self.start_reload();
 		}
@@ -2139,6 +2165,42 @@ impl DocumentActor {
 			lease_count:              self.leases.len(),
 			#[cfg(test)]
 			reloading:                self.reads_are_queued(),
+		}
+	}
+
+	/// Admits a reservation-bound mutation, or holds it until a pending
+	/// native-watch reload settles.
+	///
+	/// A watch notification is only a hint: native backends (notably macOS
+	/// `FSEvents`) may deliver the echo of this actor's own write long after the
+	/// post-commit reload. The reload invalidates reservations only when it
+	/// observes a changed disk fingerprint, so an echo that finds the disk
+	/// unchanged leaves in-flight transactions valid.
+	fn handle_mutation(&mut self, mutation: ReservedMutation) {
+		self.sync_pending_watch_callbacks();
+		if self.head.is_some()
+			&& self.reads_are_queued()
+			&& !self.persist_in_flight
+			&& !self.activation_in_flight
+		{
+			self.queued_mutations.push(mutation);
+			self.ensure_reload();
+			return;
+		}
+		match mutation {
+			ReservedMutation::Write { reservation, prepared, metadata, reply } => {
+				self.start_commit(reservation, prepared, metadata, reply);
+			},
+			ReservedMutation::Delete { reservation, prepared, reply } => {
+				self.start_delete(reservation, prepared, reply);
+			},
+			ReservedMutation::Move { reservation, prepared, path, reply } => {
+				self.start_move(reservation, *prepared, path, reply);
+			},
+			ReservedMutation::Release { reservation, reply } => {
+				let result = self.release(reservation);
+				let _ = reply.send(result);
+			},
 		}
 	}
 
@@ -3104,14 +3166,14 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn release_rejects_a_reservation_after_a_pending_watch_callback() {
+	async fn release_keeps_a_reservation_through_an_unchanged_watch_reload() {
 		let root = TempDir::new().expect("temporary directory");
-		let path = root.path().join("stale-release.txt");
+		let path = root.path().join("echo-release.txt");
 		fs::write(&path, b"base").expect("write fixture");
 		let store = store(&root, 4);
 		let opened = store.open(path).await.expect("open");
 		let actor = store.actor_handle(opened.lease_id()).expect("actor");
-		let transaction_id = TransactionId::from_bytes([41; 16]);
+		let transaction_id = TransactionId::from_bytes([40; 16]);
 		let reserved = actor
 			.reserve(transaction_id, opened.head().revision())
 			.await
@@ -3121,10 +3183,35 @@ mod tests {
 			.inject_pending_watch_invalidation()
 			.await
 			.expect("inject callback observed before its mailbox event");
-		let error = actor
-			.release(reserved.reservation)
+		time::timeout(Duration::from_secs(2), actor.release(reserved.reservation))
 			.await
-			.expect_err("pending callback makes release stale");
+			.expect("release waits for the watch reload")
+			.expect("an unchanged disk keeps the reservation valid");
+	}
+
+	#[tokio::test]
+	async fn release_rejects_a_reservation_after_a_changed_watch_reload() {
+		let root = TempDir::new().expect("temporary directory");
+		let path = root.path().join("stale-release.txt");
+		fs::write(&path, b"base").expect("write fixture");
+		let store = store(&root, 4);
+		let opened = store.open(path.clone()).await.expect("open");
+		let actor = store.actor_handle(opened.lease_id()).expect("actor");
+		let transaction_id = TransactionId::from_bytes([41; 16]);
+		let reserved = actor
+			.reserve(transaction_id, opened.head().revision())
+			.await
+			.expect("reserve current head");
+
+		fs::write(&path, b"external").expect("external change");
+		actor
+			.inject_pending_watch_invalidation()
+			.await
+			.expect("inject callback observed before its mailbox event");
+		let error = time::timeout(Duration::from_secs(2), actor.release(reserved.reservation))
+			.await
+			.expect("release waits for the watch reload")
+			.expect_err("a changed disk makes release stale");
 
 		assert!(
 			matches!(error, Error::StaleTransaction { transaction_id: id, .. } if id == transaction_id)
