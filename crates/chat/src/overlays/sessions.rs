@@ -37,6 +37,10 @@ const CONFIRM_HINT: &str = "[y delete · n/Esc keep]";
 /// Foreign import pickers use the same filter/select controls but expose no
 /// native-session mutation chords.
 const IMPORT_HINT: &str = "[Enter import · Esc cancel]";
+/// Import-picker footer when some rows already have an imported journal
+/// (marked), which Enter reopens instead of converting again.
+const IMPORT_REOPEN_HINT: &str =
+	"[Enter import · marked: already imported, Enter reopens · Esc cancel]";
 /// Empty-state wording.
 const NO_SESSIONS: &str = "No sessions found";
 /// Border, hint rule, hint, and blank rows around the list.
@@ -128,25 +132,37 @@ pub struct ForeignSessionPicker {
 impl ForeignSessionPicker {
 	/// Reads lightweight source metadata and opens the matching import picker.
 	pub fn open(source: ForeignSessionSource, cx: &PanelCx<'_>) -> Result<Self, Str> {
-		let mut rows = cx
+		let rows = cx
 			.services
 			.foreign_sessions(source)
 			.map_err(|error| sf!("Failed to list {source} sessions: {error}"))?;
+		Self::from_rows(source, rows, TimeZone::system(), cx.viewport, cx.ui)
+	}
+
+	/// Opens the picker over `source`'s `rows`, stamping dates in `zone`.
+	/// `Err` carries the empty-state wording when none belongs to `source`.
+	pub fn from_rows(
+		source: ForeignSessionSource,
+		mut rows: Vec<ForeignSessionRow>,
+		zone: TimeZone,
+		viewport: Size,
+		ctx: &UiContext,
+	) -> Result<Self, Str> {
 		rows.retain(|row| row.source == source);
 		if rows.is_empty() {
 			return Err(sf!("No {source} sessions found"));
 		}
 		let mut picker = Self {
-			ui: Ui::from_root(dom! { <col/> }, cx.viewport.width, cx.ui.clone()),
-			ctx: cx.ui.clone(),
-			zone: TimeZone::system(),
+			ui: Ui::from_root(dom! { <col/> }, viewport.width, ctx.clone()),
+			ctx: ctx.clone(),
+			zone,
 			source,
 			rows,
 			cursor: None,
 			query: Str::default(),
 			pending: None,
-			width: cx.viewport.width,
-			height: SessionPicker::list_rows_for(cx.viewport),
+			width: viewport.width,
+			height: SessionPicker::list_rows_for(viewport),
 		};
 		picker.rebuild();
 		Ok(picker)
@@ -190,6 +206,7 @@ impl ForeignSessionPicker {
 			messages: Str,
 			name:     Str,
 			cwd:      Str,
+			imported: bool,
 		}
 		let lines = self
 			.rows
@@ -211,6 +228,9 @@ impl ForeignSessionPicker {
 				label.push_str(&path);
 				label.push(' ');
 				label.push_str(&cwd);
+				if row.imported.is_some() {
+					label.push_str(" imported");
+				}
 				Line {
 					value:    Str::new(path),
 					label:    label.freeze(),
@@ -218,12 +238,18 @@ impl ForeignSessionPicker {
 					messages: sf!("{} msgs", row.messages),
 					name:     Str::new(Self::display_name(row)),
 					cwd:      Str::new(cwd),
+					imported: row.imported.is_some(),
 				}
 			})
 			.collect::<Vec<_>>();
 		let title = self.title();
 		let height = self.height.saturating_add(1);
 		let query = self.query.clone();
+		let hint = if self.rows.iter().any(|row| row.imported.is_some()) {
+			IMPORT_REOPEN_HINT
+		} else {
+			IMPORT_HINT
+		};
 		let tree = dom! {
 			<box border=round title={title} pad-x=1>
 				<col>
@@ -232,13 +258,16 @@ impl ForeignSessionPicker {
 							<option value={line.value} label={line.label}>
 								<td><pre fg=muted>{line.stamp}</pre></td>
 								<td align=end><pre fg=muted>{line.messages}</pre></td>
-								<td truncate grow><pre>{line.name}</pre></td>
+								<td truncate grow>
+									if line.imported { <icon name="success" fg=success/> }
+									<pre>{line.name}</pre>
+								</td>
 								<td truncate=start><pre fg=muted>{line.cwd}</pre></td>
 							</option>
 						}
 					</select>
 					<hr border=round/>
-					<text fg=muted truncate>{IMPORT_HINT}</text>
+					<text fg=muted truncate>{hint}</text>
 				</col>
 			</box>
 		};
@@ -1030,6 +1059,77 @@ mod tests {
 
 	fn picker(rows: Vec<SessionRow>) -> SessionPicker {
 		SessionPicker::from_rows(rows, TimeZone::UTC, VIEWPORT, &UiContext::default()).unwrap()
+	}
+
+	fn v1_row(id: &str, title: &str, imported: Option<&str>) -> ForeignSessionRow {
+		ForeignSessionRow {
+			source:        ForeignSessionSource::Omp1,
+			id:            Str::new(id),
+			path:          PathBuf::from(format!("/v1/sessions/-p/{id}.jsonl")),
+			cwd:           PathBuf::from("/p"),
+			title:         Some(Str::new(title)),
+			created_ms:    CREATED,
+			modified_ms:   MODIFIED,
+			messages:      4,
+			first_message: None,
+			imported:      imported.map(PathBuf::from),
+		}
+	}
+
+	/// An already-imported v1 row is marked, filterable as `imported`, and
+	/// picking it goes through the import, which reopens its journal.
+	#[test]
+	fn the_v1_picker_marks_imported_rows_and_picking_one_reopens_it() {
+		let ctx = UiContext::default();
+		let mut picker = ForeignSessionPicker::from_rows(
+			ForeignSessionSource::Omp1,
+			vec![
+				v1_row("fresh", "Fresh session", None),
+				v1_row("done", "Done session", Some("/v2/projects/p/sessions/01J.oms")),
+			],
+			TimeZone::UTC,
+			VIEWPORT,
+			&ctx,
+		)
+		.unwrap();
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		let marker = ctx.charset.icon_named("success").expect("success icon");
+		let marked = |screen: &str, title: &str| {
+			screen
+				.lines()
+				.find(|line| line.contains(title))
+				.is_some_and(|line| line.contains(marker))
+		};
+		assert!(marked(&screen, "Done session"), "{screen}");
+		assert!(!marked(&screen, "Fresh session"), "{screen}");
+		assert!(screen.contains("already imported"), "{screen}");
+
+		for key in "imported".chars() {
+			picker.key(Key::Char(key));
+		}
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		assert!(screen.contains("Done session") && !screen.contains("Fresh session"), "{screen}");
+		let PanelEvent::Command(HostCommand::ForeignSessionImport { source, path }) =
+			picker.key(Key::Enter)
+		else {
+			panic!("Enter imports the highlighted row");
+		};
+		assert_eq!(source, ForeignSessionSource::Omp1);
+		assert_eq!(path, PathBuf::from("/v1/sessions/-p/done.jsonl"));
+	}
+
+	#[test]
+	fn the_import_hint_mentions_reopening_only_when_a_row_was_imported() {
+		let mut picker = ForeignSessionPicker::from_rows(
+			ForeignSessionSource::Omp1,
+			vec![v1_row("fresh", "Fresh session", None)],
+			TimeZone::UTC,
+			VIEWPORT,
+			&UiContext::default(),
+		)
+		.unwrap();
+		let screen = omp_tui::frame_text(picker.frame(VIEWPORT));
+		assert!(screen.contains(IMPORT_HINT) && !screen.contains("already imported"), "{screen}");
 	}
 
 	fn text(picker: &mut SessionPicker) -> String {

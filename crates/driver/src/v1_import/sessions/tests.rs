@@ -8,24 +8,29 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::Str;
+use omp_core::{Hash32, Str};
+use omp_dom::{Op, PropKey, Txn, Value};
+use omp_journal::blob::{BlobRef, BlobStore};
+use omp_session::import::{IMPORT_FORMAT, IMPORT_SOURCE_ID, OMP1_FORMAT};
 use parking_lot::Mutex;
 use serde_json::json;
 
-use super::{super::*, ConvertError, import_selected, list};
+use super::{super::*, ConvertError, ImportedIndex, import_selected, list};
 
 /// One call the converter saw.
 #[derive(Clone, Debug)]
 struct Call {
 	source:    PathBuf,
 	id:        String,
+	source_id: String,
 	blobs:     Option<PathBuf>,
-	artifacts: Option<PathBuf>,
+	artifacts: Vec<V1Artifact>,
 	children:  Vec<V1ChildJob>,
 }
 
-/// Writes a one-message journal per transcript and records every call; the
-/// transcript named `fail` fails after writing a partial destination.
+/// Writes a one-message journal per transcript, with the provenance the
+/// app's importer records first, and records every call; the transcript
+/// named `fail` fails after writing a partial destination.
 #[derive(Default)]
 struct Recorder {
 	calls: Mutex<Vec<Call>>,
@@ -37,8 +42,9 @@ impl V1SessionConverter for Recorder {
 		self.calls.lock().push(Call {
 			source:    conversion.source.to_owned(),
 			id:        conversion.id.to_owned(),
+			source_id: conversion.source_id.to_owned(),
 			blobs:     conversion.blobs.map(Path::to_owned),
-			artifacts: conversion.artifacts.map(Path::to_owned),
+			artifacts: conversion.artifacts.to_vec(),
 			children:  conversion.children.to_vec(),
 		});
 		if self.fail.as_deref() == Some(conversion.source) {
@@ -49,6 +55,18 @@ impl V1SessionConverter for Recorder {
 			conversion.destination,
 			omp_session::ComponentRegistry::standard(),
 		)?;
+		let meta = session.dom().meta();
+		let cause = session.head().ok_or("no genesis")?;
+		let set = |prop: &'static str, value: &str| Op::Set {
+			h:     meta,
+			prop:  PropKey::Custom(Str::new_static(prop)),
+			value: Value::Str(Str::new(value)),
+		};
+		session.patch(Txn {
+			cause,
+			label: None,
+			ops: vec![set(IMPORT_FORMAT, OMP1_FORMAT), set(IMPORT_SOURCE_ID, conversion.source_id)],
+		})?;
 		session.begin_turn()?;
 		session.user("imported", Vec::new())?;
 		Ok(1)
@@ -284,9 +302,23 @@ fn a_bulk_import_places_links_pins_and_runs_once() {
 		source_id:  Str::new_static("0-Scout"),
 		started_ms: 1_767_323_100_000,
 	}]);
-	assert_eq!(calls[1].artifacts.as_deref(), Some(alpha.with_extension("").as_path()));
+	// The session keeps its whole artifact directory, copied into the
+	// bucket's project blob store; the subagent references none of it.
+	let spilled = BlobRef { hash: Hash32::sum(b"spilled output"), size: 14 };
+	assert_eq!(calls[1].artifacts, [V1Artifact {
+		name: Str::new_static("0.bash.log"),
+		id:   Some(0),
+		blob: spilled,
+	}]);
+	let store =
+		BlobStore::open(omp_env::project_state::blob_store(project.parent().expect("state dir")))
+			.expect("store");
+	assert_eq!(store.get(&spilled).expect("copied").as_ref(), b"spilled output");
+	assert!(calls[0].artifacts.is_empty());
 	assert_eq!(calls[1].blobs.as_deref(), Some(blobs.as_path()));
-	assert_eq!(calls[2].artifacts, None);
+	assert_eq!(calls[1].source_id, "alpha");
+	assert_eq!(calls[0].source_id, "0-Scout-session");
+	assert!(calls[2].artifacts.is_empty());
 	// A vanished working directory lands in the no-directory bucket.
 	let orphans = fixture.sessions_dir(&ProjectBucket::NoDirectory);
 	assert_eq!(orphans, fixture.v2.data_dir.join("projects/no-directory/sessions"));
@@ -326,7 +358,7 @@ fn the_picker_lists_without_converting_and_converts_on_pick() {
 	let pairs = fixture.pairs(&ProfileSelection::All);
 	let recorder = Recorder::default();
 
-	let rows = list(&pairs[0].source).expect("list");
+	let rows = list(&pairs[0]).expect("list");
 	assert!(!fixture.v2.data_dir.exists(), "listing converts nothing");
 	assert!(recorder.sources().is_empty());
 	let alpha_row = rows
@@ -339,6 +371,7 @@ fn the_picker_lists_without_converting_and_converts_on_pick() {
 	assert_eq!(alpha_row.messages, 2);
 	assert_eq!(alpha_row.cwd.as_deref(), Some(fixture.project.as_path()));
 	assert_eq!(alpha_row.created_ms, 1_767_323_045_000);
+	assert_eq!(alpha_row.imported, None);
 
 	let picked = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
 	assert!(picked.converted);
@@ -391,7 +424,13 @@ fn a_named_profile_imports_into_its_namesake() {
 		.expect("state")
 		.join("sessions");
 	assert_eq!(journals(&sessions).len(), 1);
-	assert!(work.data_dir.join("v1-sessions/w1.json").is_file());
+	let imported = ImportedIndex::scan(&work).expect("index");
+	assert_eq!(imported.journal("w1"), journals(&sessions).first().map(PathBuf::as_path));
+	assert!(
+		ImportedIndex::scan(&fixture.v2.target(None))
+			.expect("index")
+			.is_empty()
+	);
 	assert!(!fixture.v2.data_dir.join("projects").exists(), "the default profile is untouched");
 	assert!(ImportStep::Sessions.marker(&work.config_dir).is_set());
 	assert!(ImportStep::Sessions.marker(&fixture.v2.config_dir).is_set());
@@ -441,4 +480,124 @@ fn a_failed_session_is_reported_discarded_and_retried() {
 	]);
 	assert_eq!(retry.sources(), [gone]);
 	assert!(ImportStep::Sessions.marker(&fixture.v2.config_dir).is_set());
+}
+
+#[test]
+fn the_picker_marks_imported_sessions_and_a_deleted_journal_imports_again() {
+	let fixture = Fixture::new();
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	fixture.session(None, "gone", &fixture.root.path().join("vanished"));
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder::default();
+
+	let picked = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+
+	let rows = list(&pairs[0]).expect("list");
+	let imported = |id: &str| {
+		rows
+			.iter()
+			.find(|row| row.id == id)
+			.expect("row")
+			.imported
+			.clone()
+	};
+	assert_eq!(imported("alpha"), Some(picked.journal.clone()), "the journal is the record");
+	assert_eq!(imported("gone"), None);
+	// The journal is the only record: without it the session imports again.
+	fs::remove_file(&picked.journal).expect("delete the imported journal");
+	assert!(
+		list(&pairs[0])
+			.expect("list")
+			.iter()
+			.all(|row| row.imported.is_none())
+	);
+	let again = import_selected(&pairs[0], &alpha, &recorder).expect("pick again");
+	assert!(again.converted);
+	assert_ne!(again.journal, picked.journal);
+	assert!(!fixture.v2.data_dir.join("v1-sessions").exists(), "no side records");
+}
+
+#[test]
+fn artifact_references_parse_only_v1_ids() {
+	let text = br#"{"text":"see artifact://0 and artifact://12:1-30, artifact://3.\n[raw output: artifact://12]"}
+{"text":"artifact://sha256/abc artifact://4x artifact:// artifact://5_ artifact://99999999999999999999999"}"#;
+	assert_eq!(super::artifact_references(text), [0, 3, 12]);
+	assert_eq!(super::artifact_id("3.bash.log"), Some(3));
+	assert_eq!(super::artifact_id("0-Scout.md"), None);
+	assert_eq!(super::artifact_id(".log"), None);
+	assert_eq!(super::artifact_id("12"), None);
+}
+
+#[test]
+fn v1_artifacts_are_copied_mapped_and_missing_ones_reported() {
+	let fixture = Fixture::new();
+	let lines = [
+		json!({"type": "session", "version": 3, "id": "art", "timestamp": "2026-01-02T03:04:05.000Z", "cwd": fixture.project}),
+		json!({"type": "message", "id": "m1", "parentId": null, "timestamp": "2026-01-02T03:04:06.000Z", "message": {"role": "user", "content": "run it", "timestamp": 1}}),
+		json!({"type": "message", "id": "m2", "parentId": "m1", "timestamp": "2026-01-02T03:04:07.000Z", "message": {"role": "toolResult", "toolCallId": "c1", "toolName": "bash", "content": [{"type": "text", "text": "head\n[raw output: artifact://0]"}], "isError": false, "timestamp": 2}}),
+		json!({"type": "message", "id": "m3", "parentId": "m2", "timestamp": "2026-01-02T03:04:08.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "also artifact://9"}], "timestamp": 3}}),
+	];
+	let transcript = fixture
+		.agent(None)
+		.join("sessions/-project/2026-01-02T03-04-05-000Z_art.jsonl");
+	write(&transcript, &lines.map(|line| line.to_string() + "\n").concat());
+	let directory = transcript.with_extension("");
+	write(&directory.join("0.bash.log"), "zero output");
+	write(&directory.join("5.read.log"), "five output");
+	write(&directory.join("notes.md"), "notes");
+	let child = directory.join("0-Task.jsonl");
+	write(
+		&child,
+		&[
+			json!({"type": "session", "version": 3, "id": "task-session", "timestamp": "2026-01-02T03:05:00.000Z", "cwd": fixture.project}),
+			json!({"type": "message", "id": "c1", "parentId": null, "timestamp": "2026-01-02T03:05:01.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "read artifact://5 and artifact://7"}], "timestamp": 1}}),
+		]
+		.map(|line| line.to_string() + "\n")
+		.concat(),
+	);
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder::default();
+
+	let report = run_with(
+		&pairs,
+		ImportMode::Apply,
+		CredentialAccess::Offline(&omp_con::Ctx::new()),
+		SessionImport::Bulk(&recorder),
+	);
+
+	let entries = session_entries(&report);
+	assert_eq!(outcomes(&report), [
+		(Some("art"), OutcomeKind::Imported),
+		(Some("art artifact://7"), OutcomeKind::NeedsAttention),
+		(Some("art artifact://9"), OutcomeKind::NeedsAttention),
+	]);
+	assert!(matches!(entries[1].outcome, ImportOutcome::NeedsAttention(Attention::ArtifactMissing)));
+	assert_eq!(entries[1].path.as_deref(), Some(child.as_path()), "the subagent referenced it");
+	assert_eq!(entries[2].path.as_deref(), Some(transcript.as_path()));
+	assert!(
+		ImportStep::Sessions.marker(&fixture.v2.config_dir).is_set(),
+		"a missing artifact is not a failure"
+	);
+	let blob = |bytes: &[u8]| BlobRef { hash: Hash32::sum(bytes), size: bytes.len() as u64 };
+	let artifact = |name: &'static str, id: Option<u64>, bytes: &[u8]| V1Artifact {
+		name: Str::new_static(name),
+		id,
+		blob: blob(bytes),
+	};
+	let calls = recorder.calls.lock().clone();
+	assert_eq!(calls[0].source, child);
+	assert_eq!(calls[0].artifacts, [artifact("5.read.log", Some(5), b"five output")]);
+	assert_eq!(calls[1].artifacts, [
+		artifact("0.bash.log", Some(0), b"zero output"),
+		artifact("5.read.log", Some(5), b"five output"),
+		artifact("notes.md", None, b"notes"),
+	]);
+	let state = ProjectBucket::for_cwd(Some(&fixture.project))
+		.state_dir(&fixture.v2.data_dir)
+		.expect("state");
+	let store =
+		BlobStore::open(omp_env::project_state::blob_store(&state)).expect("project blob store");
+	for bytes in [b"zero output".as_slice(), b"five output", b"notes"] {
+		assert_eq!(store.get(&blob(bytes)).expect("copied").as_ref(), bytes);
+	}
 }

@@ -42,6 +42,21 @@ presentation adapter.
   completion, and `rule://<name>` refuses it. A child session journals the
   class it runs as, so resuming it (from the main chat's `/resume` or with
   `--resume`) keeps the child's rules.
+- `v1_import` is the one-shot v1 (TypeScript `omp`) migrator behind
+  `omp config import-v1` and the automatic first run. Its `sessions` step and
+  the `/resume @v1` picker convert v1 transcripts into `.oms` journals. The
+  imported journal is the only record of an import: its `<meta>` provenance
+  (`import-format omp1`, `import-source-id`, `import-source`) is written before
+  any transcript entry, and `ImportedIndex` derives from it which v1 sessions
+  already have a journal, so the picker marks those rows (picking one reopens
+  the journal) and a bulk re-run reports them skipped instead of converting
+  again; deleting the journal makes the session importable again. v1's
+  `artifact://<N>` URIs stay verbatim in journaled text: the importer copies
+  each file of the session's artifact directory into the bucket's project blob
+  store and journals its v1 id and `sha256` digest as
+  `<meta><foreign-artifact>`, and `omp-envd`'s `artifact://` resolver maps a
+  numeric id through that mapping for the session reading it. A referenced id
+  with no v1 file is reported, not fatal.
 
 `omp-driver` may construct `omp_envd::ProjectEnvironment` and supply the
 higher-layer bridges it needs, but the filesystem/process/document/tool host

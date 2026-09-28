@@ -24,6 +24,7 @@ pub mod components {
 }
 pub mod exit_diagnostics;
 mod fold;
+pub mod import;
 pub mod late_diagnostics;
 pub mod projection;
 pub mod rewind;

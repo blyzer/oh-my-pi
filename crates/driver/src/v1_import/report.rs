@@ -137,6 +137,13 @@ pub enum Attention {
 	#[strum(to_string = "no v2 project owns this Mnemopi store; point `ai_mnemopi_db_path` at the \
 	                     copied `mnemopi.db` to recall it")]
 	MnemopiStoreUnscoped,
+	/// An imported v1 session references `artifact://<id>`, but v1's artifact
+	/// directory has no such file; the session imported, and that reference
+	/// will not resolve.
+	#[strum(
+		to_string = "the referenced v1 artifact is gone; this artifact:// reference will not resolve"
+	)]
+	ArtifactMissing,
 	/// The step failed; nothing it would have written is marked done, so the
 	/// next run retries.
 	#[strum(to_string = "import failed")]

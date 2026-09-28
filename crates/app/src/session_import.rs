@@ -51,6 +51,9 @@ pub struct ForeignCandidate {
 	pub messages:      u32,
 	/// First user message, when it occurs in the indexed prefix.
 	pub first_message: Option<Str>,
+	/// The native journal an earlier import made from this transcript, when
+	/// the source tracks one (omp v1): picking it reopens that journal.
+	pub imported:      Option<PathBuf>,
 }
 
 impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat {
@@ -232,7 +235,7 @@ impl omp_driver::v1_import::V1SessionConverter for V1Converter {
 /// The active profile's v1 sessions, from their headers alone.
 fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
 	let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
-	Ok(omp_driver::v1_import::sessions::list(&pair.source)
+	Ok(omp_driver::v1_import::sessions::list(&pair)
 		.into_diagnostic()?
 		.into_iter()
 		.map(|session| ForeignCandidate {
@@ -250,6 +253,7 @@ fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
 			modified_ms:   session.modified_ms,
 			messages:      session.messages,
 			first_message: session.first_message,
+			imported:      session.imported,
 		})
 		.collect())
 }
@@ -326,6 +330,7 @@ fn inspect_candidate(
 		modified_ms: system_time_millis(modified),
 		messages: 0,
 		first_message: None,
+		imported: None,
 	};
 	let exact_count = metadata.len() <= MAX_EAGER_INDEX_BYTES;
 	let mut input = BufReader::new(fs::File::open(&candidate.path).into_diagnostic()?);
@@ -593,6 +598,16 @@ mod tests {
 		]);
 	}
 
+	/// The driver and the environment recognize an omp v1 import by the
+	/// format name this importer journals.
+	#[test]
+	fn the_omp1_format_name_is_the_one_the_driver_indexes() {
+		assert_eq!(
+			ForeignFormat::Omp1.to_string().to_ascii_lowercase(),
+			omp_session::import::OMP1_FORMAT
+		);
+	}
+
 	#[test]
 	fn imported_session_records_source_selection_metadata() {
 		let directory = tempfile::tempdir().unwrap();
@@ -604,13 +619,13 @@ mod tests {
 		let meta = session.dom().get(session.dom().meta()).unwrap();
 		assert_eq!(
 			meta
-				.prop(&PropKey::Custom(Str::new_static("import-source")))
+				.prop(&PropKey::Custom(Str::new_static(omp_session::import::IMPORT_SOURCE)))
 				.and_then(DomValue::as_str),
 			Some(source.to_string_lossy().as_ref())
 		);
 		assert_eq!(
 			meta
-				.prop(&PropKey::Custom(Str::new_static("import-format")))
+				.prop(&PropKey::Custom(Str::new_static(omp_session::import::IMPORT_FORMAT)))
 				.and_then(DomValue::as_str),
 			Some("claude")
 		);

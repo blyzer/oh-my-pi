@@ -25,11 +25,37 @@
 //!
 //! # Idempotency and pins
 //!
-//! `<data>/v1-sessions/<v1 id>.json` records each converted v1 session's
-//! journal: while that journal exists, neither the picker nor a bulk run
-//! converts the session again. Conversion also remaps the session's v1 pin
+//! An imported journal records its provenance in `<meta>` before any
+//! transcript entry ([`omp_session::import`]: `import-format omp1`,
+//! `import-source-id <v1 id>`, `import-source <v1 transcript>`, and
+//! `import-source-blob`, the transcript's exact bytes). That journal is the
+//! only record of the import: [`ImportedIndex`] derives "which v1 sessions
+//! already have a journal" by reading the provenance prefix of every journal
+//! under `<data>/projects/*/sessions/`, so while an imported journal exists,
+//! neither the picker nor a bulk run converts its session again (a bulk run
+//! reports it [`SkipReason::SessionImported`]), and deleting the journal
+//! makes the session importable again. The picker marks such rows
+//! ([`V1SessionInfo::imported`]); picking one reopens its journal.
+//! Conversion also remaps the session's v1 pin
 //! (`<agent>/session-pins.json`, keyed by v1 id) to its ULID in the project's
 //! own `session-pins.json`.
+//!
+//! # Artifacts
+//!
+//! v1 spilled large tool output into the session's artifact directory
+//! (`<session>/<N>.<tool>.log`, v1's `ArtifactManager`) and addressed it as
+//! `artifact://<N>`, a per-session counter shared with every subagent of the
+//! session. Journaled text keeps those URIs exactly as v1 wrote them. Instead,
+//! every file of the artifact directory is copied into the bucket's project
+//! blob store ([`omp_env::project_state::blob_store`], where the environment
+//! host resolves `artifact://`) and journaled as a `<meta><foreign-artifact>`
+//! naming its `artifact://sha256/<digest>` and v1 id
+//! ([`omp_session::import::foreign_artifact`]). The environment host's
+//! `artifact://` resolver translates a numeric id through that mapping for
+//! the session reading it. A subagent's journal carries the entries for the
+//! ids its own transcript references. A referenced id with no file is
+//! reported ([`ImportedSession::missing_artifacts`], and one
+//! [`Attention::ArtifactMissing`] entry per id in a bulk run), never fatal.
 //!
 //! The JSONL-to-journal conversion itself is the app's session importer
 //! (`ForeignFormat::Omp1`, beside the Claude Code and Codex importers),
@@ -42,8 +68,13 @@ use std::{
 	time::{SystemTime, UNIX_EPOCH},
 };
 
-use omp_core::{Hash32, Str, Ulid, sf};
-use serde::{Deserialize, Serialize};
+use omp_core::{FastHashMap, Str, Ulid, sf};
+use omp_journal::{
+	Journal,
+	blob::{self, BlobRef, BlobStore},
+};
+use omp_session::import;
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use thiserror::Error;
 
@@ -54,9 +85,8 @@ use super::{
 	step::atomic_replace,
 };
 
-/// Directory, under a v2 profile's data directory, of per-session import
-/// records.
-const RECORDS_DIR: &str = "v1-sessions";
+/// The URI scheme v1 addressed session artifacts by (`artifact://<N>`).
+const ARTIFACT_SCHEME: &[u8] = b"artifact://";
 /// Pinned session ids: v1 keeps them in the agent directory, v2 in each
 /// project's state directory.
 const PINS_FILE: &str = "session-pins.json";
@@ -100,12 +130,18 @@ pub struct V1Conversion<'a> {
 	/// The journal's final id (its ULID file stem), the owner of its
 	/// children's jobs.
 	pub id:          &'a str,
+	/// The v1 session id (the header `id`, else the file name's), which the
+	/// journal records as its `import-source-id` provenance: what
+	/// [`ImportedIndex`] recognizes the import by.
+	pub source_id:   &'a str,
 	/// v1's content-addressed blob store, which resolves
 	/// `blob:sha256:<hex>` image data.
 	pub blobs:       Option<&'a Path>,
-	/// The session's artifact directory (`<session>/`), whose tool-output
-	/// files the journal retains.
-	pub artifacts:   Option<&'a Path>,
+	/// v1 artifacts already copied into the project blob store, which the
+	/// journal names as `<meta><foreign-artifact>`
+	/// ([`omp_session::import::foreign_artifact`]): every file of a session's
+	/// artifact directory, or the ones a subagent's transcript references.
+	pub artifacts:   &'a [V1Artifact],
 	/// Subagent transcripts already converted into child journals, to link
 	/// from this journal's `<meta><jobs>`.
 	pub children:    &'a [V1ChildJob],
@@ -122,6 +158,27 @@ pub struct V1ChildJob {
 	pub source_id:  Str,
 	/// Start time, Unix milliseconds.
 	pub started_ms: u64,
+}
+
+/// A v1 artifact file copied into the v2 project blob store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct V1Artifact {
+	/// File name in the v1 artifact directory (`3.bash.log`).
+	pub name: Str,
+	/// The id v1 resolved `artifact://<id>` to (the file name's numeric
+	/// prefix; the first such file in name order when several share one).
+	pub id:   Option<u64>,
+	/// The copy in the project blob store.
+	pub blob: BlobRef,
+}
+
+/// A v1 `artifact://<id>` reference whose file was gone at import.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MissingArtifact {
+	/// The transcript (the session's or a subagent's) that references it.
+	pub transcript: PathBuf,
+	/// The v1 artifact id.
+	pub id:         u64,
 }
 
 /// How a run treats v1 sessions (owner decision #4).
@@ -192,23 +249,30 @@ pub struct V1SessionInfo {
 	pub messages:      u32,
 	/// First user message.
 	pub first_message: Option<Str>,
+	/// The v2 journal an earlier import made, when one still exists: picking
+	/// the row reopens it instead of converting again.
+	pub imported:      Option<PathBuf>,
 }
 
 /// A converted (or earlier converted) session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedSession {
 	/// v1 session id.
-	pub id:        Str,
+	pub id:                Str,
 	/// Its native journal.
-	pub journal:   PathBuf,
+	pub journal:           PathBuf,
 	/// Where the journal lives.
-	pub bucket:    ProjectBucket,
+	pub bucket:            ProjectBucket,
 	/// Whether this call converted it (`false`: an earlier import's journal).
-	pub converted: bool,
+	pub converted:         bool,
 	/// Messages imported by this call (0 when not converted).
-	pub messages:  usize,
+	pub messages:          usize,
 	/// Child journals created by this call.
-	pub children:  usize,
+	pub children:          usize,
+	/// v1 artifacts this call copied into the project blob store.
+	pub artifacts:         usize,
+	/// `artifact://<id>` references with no v1 file, found by this call.
+	pub missing_artifacts: Vec<MissingArtifact>,
 }
 
 /// A v1 session that could not be listed or imported.
@@ -232,7 +296,16 @@ pub enum SessionImportError {
 		#[source]
 		source: io::Error,
 	},
-	/// An import record or pin list is not valid JSON.
+	/// A v1 artifact could not be copied into the project blob store.
+	#[error("could not store {} in the v2 blob store", path.display())]
+	Store {
+		/// The v1 artifact (or the blob store, when it could not open).
+		path:   PathBuf,
+		/// Typed blob-store failure.
+		#[source]
+		source: blob::Error,
+	},
+	/// A pin list is not valid JSON.
 	#[error("{} is not valid JSON", path.display())]
 	Json {
 		/// The file.
@@ -444,21 +517,28 @@ fn child_transcripts(artifacts: &Path) -> Result<Vec<PathBuf>, SessionImportErro
 	Ok(found)
 }
 
-/// Lists v1 transcripts newest first, reading only headers (and, for small
-/// files, message counts). Nothing is converted or written.
+/// Lists the pair's v1 transcripts newest first, reading only headers (and,
+/// for small files, message counts). Nothing is converted or written.
+///
+/// Each row an earlier import already made a journal for carries it
+/// ([`V1SessionInfo::imported`]).
 ///
 /// # Errors
 ///
 /// Returns [`SessionImportError::Read`] when the sessions directory cannot be
-/// listed. Unreadable transcripts are skipped.
-pub fn list(layout: &V1Layout) -> Result<Vec<V1SessionInfo>, SessionImportError> {
-	let Some(root) = layout.locate(V1Item::Sessions) else {
+/// listed. Unreadable transcripts and journals are skipped.
+pub fn list(pair: &super::ImportPair) -> Result<Vec<V1SessionInfo>, SessionImportError> {
+	let Some(root) = pair.source.locate(V1Item::Sessions) else {
 		return Ok(Vec::new());
 	};
+	let index = ImportedIndex::scan(&pair.target)?;
 	let mut rows = Vec::new();
 	for path in transcripts(&root)? {
 		match inspect(&path) {
-			Ok(Some(row)) => rows.push(row),
+			Ok(Some(mut row)) => {
+				row.imported = index.journal(&row.id).map(Path::to_owned);
+				rows.push(row);
+			},
 			Ok(None) => {},
 			Err(error) => tracing::warn!(
 				transcript = %path.display(),
@@ -552,63 +632,203 @@ fn inspect(path: &Path) -> Result<Option<V1SessionInfo>, SessionImportError> {
 		modified_ms,
 		messages: if exact { messages } else { 0 },
 		first_message,
+		imported: None,
 	}))
 }
 
-/// Where one converted session's import record lives: `<data>/v1-sessions/`
-/// named after the v1 id, or its digest when the id is not file-name safe.
-fn record_path(target: &V2Target, id: &str) -> PathBuf {
-	let safe = !id.is_empty()
-		&& id.len() <= 128
-		&& id
-			.bytes()
-			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-	let directory = target.data_dir.join(RECORDS_DIR);
-	if safe {
-		let mut name = String::with_capacity(id.len() + 5);
-		name.push_str(id);
-		name.push_str(".json");
-		directory.join(name)
-	} else {
-		let mut name = String::with_capacity(69);
-		name.push_str(Hash32::sum(id.as_bytes()).to_hex().as_str());
-		name.push_str(".json");
-		directory.join(name)
+/// The v2 journals imported from v1 sessions, keyed by v1 session id.
+///
+/// Derived, never stored: [`Self::scan`] reads the import provenance each
+/// journal under `<data>/projects/*/sessions/` records in its first patches
+/// ([`omp_session::import::import_origin`]), so the journals stay the only
+/// record of an import and a deleted journal makes its session importable
+/// again.
+#[derive(Clone, Debug, Default)]
+pub struct ImportedIndex {
+	by_id: FastHashMap<Str, PathBuf>,
+}
+
+impl ImportedIndex {
+	/// Scans every project bucket of `target` for journals an omp v1 import
+	/// wrote. When several journals name one v1 session, the earliest (the
+	/// smallest ULID) wins.
+	///
+	/// # Errors
+	///
+	/// Returns [`SessionImportError::Read`] when a bucket directory cannot be
+	/// listed. An unreadable or invalid journal is skipped.
+	pub fn scan(target: &V2Target) -> Result<Self, SessionImportError> {
+		let projects = target.data_dir.join("projects");
+		let buckets = match fs::read_dir(&projects) {
+			Ok(entries) => entries,
+			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+			Err(source) => return Err(SessionImportError::Read { path: projects, source }),
+		};
+		let mut journals = Vec::new();
+		for bucket in buckets {
+			let sessions = bucket
+				.map_err(read_error(&projects))?
+				.path()
+				.join("sessions");
+			let entries = match fs::read_dir(&sessions) {
+				Ok(entries) => entries,
+				Err(error)
+					if matches!(
+						error.kind(),
+						io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+					) =>
+				{
+					continue;
+				},
+				Err(source) => return Err(SessionImportError::Read { path: sessions, source }),
+			};
+			for entry in entries {
+				let path = entry.map_err(read_error(&sessions))?.path();
+				// Hidden files are journals still being staged.
+				let visible = path
+					.file_name()
+					.and_then(|name| name.to_str())
+					.is_some_and(|name| !name.starts_with('.'));
+				if visible
+					&& path.extension().and_then(|value| value.to_str())
+						== Some(omp_journal::FILE_EXTENSION)
+				{
+					journals.push(path);
+				}
+			}
+		}
+		journals.sort();
+		let mut index = Self::default();
+		for journal in journals {
+			let entries = match Journal::scan_prefix(&journal, import::PROVENANCE_PREFIX_BYTES) {
+				Ok(entries) => entries,
+				Err(error) => {
+					tracing::debug!(
+						journal = %journal.display(),
+						error = &error as &dyn std::error::Error,
+						"skipping unreadable journal while indexing v1 imports"
+					);
+					continue;
+				},
+			};
+			let Some(origin) = import::import_origin(&entries) else {
+				continue;
+			};
+			if origin.format == import::OMP1_FORMAT
+				&& let Some(id) = origin.source_id
+			{
+				index.by_id.entry(id).or_insert(journal);
+			}
+		}
+		Ok(index)
+	}
+
+	/// The journal an earlier import made for v1 session `id`.
+	#[must_use]
+	pub fn journal(&self, id: &str) -> Option<&Path> {
+		self.by_id.get(id).map(PathBuf::as_path)
+	}
+
+	/// How many v1 sessions have an imported journal.
+	#[must_use]
+	pub fn len(&self) -> usize {
+		self.by_id.len()
+	}
+
+	/// Whether no v1 session has an imported journal.
+	#[must_use]
+	pub fn is_empty(&self) -> bool {
+		self.by_id.is_empty()
 	}
 }
 
-/// One converted session's idempotency record.
-#[derive(Debug, Deserialize, Serialize)]
-struct ImportRecord {
-	/// v1 session id.
-	id:      Str,
-	/// The transcript it came from.
-	source:  PathBuf,
-	/// Its native journal.
-	journal: PathBuf,
-}
-
-/// The earlier import of `id`, while its journal still exists.
-fn imported(target: &V2Target, id: &str) -> Result<Option<ImportRecord>, SessionImportError> {
-	let path = record_path(target, id);
-	let bytes = match fs::read(&path) {
-		Ok(bytes) => bytes,
-		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-		Err(source) => return Err(SessionImportError::Read { path, source }),
-	};
-	let record: ImportRecord = serde_json::from_slice(&bytes)
-		.map_err(|source| SessionImportError::Json { path: path.clone(), source })?;
-	Ok((record.id.as_str() == id && record.journal.is_file()).then_some(record))
-}
-
-fn record(target: &V2Target, record: &ImportRecord) -> Result<(), SessionImportError> {
-	let path = record_path(target, &record.id);
-	let bytes = serde_json::to_vec_pretty(record)
-		.map_err(|source| SessionImportError::Json { path: path.clone(), source })?;
-	if let Some(parent) = path.parent() {
-		fs::create_dir_all(parent).map_err(write_error(parent))?;
+/// Every v1 artifact id `transcript` references (`artifact://<N>`), sorted
+/// and deduplicated. A number followed by an identifier character is not an
+/// id v1 would have parsed.
+fn artifact_references(transcript: &[u8]) -> Vec<u64> {
+	let mut ids = Vec::new();
+	for start in memchr::memmem::find_iter(transcript, ARTIFACT_SCHEME) {
+		let rest = &transcript[start + ARTIFACT_SCHEME.len()..];
+		let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+		if digits == 0
+			|| rest
+				.get(digits)
+				.is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+		{
+			continue;
+		}
+		if let Some(id) = std::str::from_utf8(&rest[..digits])
+			.ok()
+			.and_then(|digits| digits.parse::<u64>().ok())
+		{
+			ids.push(id);
+		}
 	}
-	atomic_replace(&path, &bytes).map_err(write_error(&path))
+	ids.sort_unstable();
+	ids.dedup();
+	ids
+}
+
+/// The id v1 resolved a file of its artifact directory to: the numeric
+/// prefix before the first `.` (`3.bash.log`).
+fn artifact_id(name: &str) -> Option<u64> {
+	let (prefix, _) = name.split_once('.')?;
+	(!prefix.is_empty() && prefix.bytes().all(|byte| byte.is_ascii_digit()))
+		.then(|| prefix.parse().ok())
+		.flatten()
+}
+
+/// Copies every file of a v1 artifact directory (not its subagent
+/// transcripts or subdirectories) into `store`, in name order. The first
+/// file with a given numeric prefix carries that id, as v1's lookup found
+/// only one.
+fn store_artifacts(
+	directory: &Path,
+	store: &BlobStore,
+) -> Result<Vec<V1Artifact>, SessionImportError> {
+	let mut files = Vec::new();
+	for entry in fs::read_dir(directory).map_err(read_error(directory))? {
+		let path = entry.map_err(read_error(directory))?.path();
+		if path.is_file() && !is_transcript(&path) {
+			files.push(path);
+		}
+	}
+	files.sort();
+	let mut artifacts = Vec::<V1Artifact>::with_capacity(files.len());
+	for path in files {
+		let file = match fs::File::open(&path) {
+			Ok(file) => file,
+			// Removed since it was listed: as good as never written.
+			Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+			Err(source) => return Err(SessionImportError::Read { path, source }),
+		};
+		let blob = store
+			.put_reader(file)
+			.map_err(|source| SessionImportError::Store { path: path.clone(), source })?;
+		let name = Str::new(path.file_name().unwrap_or_default().to_string_lossy());
+		let id =
+			artifact_id(&name).filter(|id| !artifacts.iter().any(|artifact| artifact.id == Some(*id)));
+		artifacts.push(V1Artifact { name, id, blob });
+	}
+	Ok(artifacts)
+}
+
+/// The shared artifacts a transcript references, recording each id with no
+/// file in `missing`.
+fn referenced_artifacts(
+	transcript: &Path,
+	shared: &[V1Artifact],
+	missing: &mut Vec<MissingArtifact>,
+) -> Result<Vec<V1Artifact>, SessionImportError> {
+	let bytes = fs::read(transcript).map_err(read_error(transcript))?;
+	let mut artifacts = Vec::new();
+	for id in artifact_references(&bytes) {
+		match shared.iter().find(|artifact| artifact.id == Some(id)) {
+			Some(artifact) => artifacts.push(artifact.clone()),
+			None => missing.push(MissingArtifact { transcript: transcript.to_owned(), id }),
+		}
+	}
+	Ok(artifacts)
 }
 
 /// Reads a pin list; a missing file is empty.
@@ -668,69 +888,105 @@ fn discard(staged: &[Staged]) {
 	}
 }
 
-/// Converts `source` and, first, every subagent transcript in its artifact
-/// directory, into staged journals under `sessions`. Returns the new journal
-/// id and its message count.
-fn convert_tree(
-	sessions: &Path,
-	source: &Path,
-	blobs: Option<&Path>,
-	converter: &dyn V1SessionConverter,
-	staged: &mut Vec<Staged>,
-	depth: u8,
-) -> Result<(Str, usize), SessionImportError> {
-	let artifacts = source.with_extension("");
-	let artifacts = artifacts.is_dir().then_some(artifacts.as_path());
-	let mut children = Vec::new();
-	if let Some(directory) = artifacts
-		&& depth < MAX_CHILD_DEPTH
-	{
-		for child in child_transcripts(directory)? {
-			let head = match read_head(&child) {
-				Ok(head) => head,
-				Err(SessionImportError::NotASession { .. }) => continue,
-				Err(error) => return Err(error),
-			};
-			let (id, _) = convert_tree(sessions, &child, blobs, converter, staged, depth + 1)?;
-			let source_id = Str::new(
-				child
-					.file_stem()
-					.and_then(|stem| stem.to_str())
-					.unwrap_or_default(),
-			);
-			children.push(V1ChildJob {
-				id,
-				agent: head.agent.unwrap_or_else(|| source_id.clone()),
-				source_id,
-				started_ms: head.created_ms.unwrap_or_default(),
-			});
+/// One session's conversion: where its journals stage, and what they share.
+struct Tree<'a> {
+	sessions:  &'a Path,
+	blobs:     Option<&'a Path>,
+	store:     &'a BlobStore,
+	converter: &'a dyn V1SessionConverter,
+	/// Journals converted so far, children before their parents.
+	staged:    Vec<Staged>,
+	/// The top-level session's artifacts, which every subagent shares: v1
+	/// subagents adopted their root session's `ArtifactManager`.
+	shared:    Vec<V1Artifact>,
+	/// References with no v1 file.
+	missing:   Vec<MissingArtifact>,
+}
+
+impl Tree<'_> {
+	/// Converts `source` and, first, every subagent transcript in its
+	/// artifact directory, into staged journals. Returns the new journal id
+	/// and its message count.
+	fn convert(
+		&mut self,
+		source: &Path,
+		source_id: &str,
+		depth: u8,
+	) -> Result<(Str, usize), SessionImportError> {
+		let directory = source.with_extension("");
+		let directory = directory.is_dir().then_some(directory.as_path());
+		if depth == 0
+			&& let Some(directory) = directory
+		{
+			self.shared = store_artifacts(directory, self.store)?;
 		}
+		let mut children = Vec::new();
+		if let Some(directory) = directory
+			&& depth < MAX_CHILD_DEPTH
+		{
+			for child in child_transcripts(directory)? {
+				let head = match read_head(&child) {
+					Ok(head) => head,
+					Err(SessionImportError::NotASession { .. }) => continue,
+					Err(error) => return Err(error),
+				};
+				let (id, _) =
+					self.convert(&child, head.id.as_deref().unwrap_or_default(), depth + 1)?;
+				let source_id = Str::new(
+					child
+						.file_stem()
+						.and_then(|stem| stem.to_str())
+						.unwrap_or_default(),
+				);
+				children.push(V1ChildJob {
+					id,
+					agent: head.agent.unwrap_or_else(|| source_id.clone()),
+					source_id,
+					started_ms: head.created_ms.unwrap_or_default(),
+				});
+			}
+		}
+		// The session keeps its whole artifact directory; a subagent, what
+		// its transcript references.
+		let referenced = referenced_artifacts(source, &self.shared, &mut self.missing)?;
+		let artifacts = if depth == 0 {
+			self.shared.as_slice()
+		} else {
+			referenced.as_slice()
+		};
+		let id = sf!("{}", Ulid::generate());
+		let mut name = String::with_capacity(id.len() + 16);
+		name.push('.');
+		name.push_str(&id);
+		name.push_str(".importing.oms");
+		let staging = self.sessions.join(name);
+		let mut name = String::with_capacity(id.len() + 4);
+		name.push_str(&id);
+		name.push_str(".oms");
+		let journal = self.sessions.join(name);
+		self
+			.staged
+			.push(Staged { staging: staging.clone(), journal });
+		let messages = self
+			.converter
+			.convert(&V1Conversion {
+				source,
+				destination: &staging,
+				id: &id,
+				source_id,
+				blobs: self.blobs,
+				artifacts,
+				children: &children,
+			})
+			.map_err(|error| SessionImportError::Convert {
+				path:   source.to_owned(),
+				source: error,
+			})?;
+		if depth == 0 && messages == 0 && children.is_empty() {
+			return Err(SessionImportError::Empty { path: source.to_owned() });
+		}
+		Ok((id, messages))
 	}
-	let id = sf!("{}", Ulid::generate());
-	let mut name = String::with_capacity(id.len() + 16);
-	name.push('.');
-	name.push_str(&id);
-	name.push_str(".importing.oms");
-	let staging = sessions.join(name);
-	let mut name = String::with_capacity(id.len() + 4);
-	name.push_str(&id);
-	name.push_str(".oms");
-	let journal = sessions.join(name);
-	staged.push(Staged { staging: staging.clone(), journal });
-	let messages = converter
-		.convert(&V1Conversion {
-			source,
-			destination: &staging,
-			id: &id,
-			blobs,
-			artifacts,
-			children: &children,
-		})
-		.map_err(|error| SessionImportError::Convert { path: source.to_owned(), source: error })?;
-	if depth == 0 && messages == 0 && children.is_empty() {
-		return Err(SessionImportError::Empty { path: source.to_owned() });
-	}
-	Ok((id, messages))
 }
 
 /// Converts one v1 transcript of `layout` into `target`, unless an earlier
@@ -747,17 +1003,32 @@ pub fn import_session(
 	source: &Path,
 	converter: &dyn V1SessionConverter,
 ) -> Result<ImportedSession, SessionImportError> {
+	let mut index = ImportedIndex::scan(target)?;
+	import_indexed(target, layout, source, converter, &mut index)
+}
+
+/// [`import_session`] against an index the caller already scanned, which
+/// learns the new journal.
+fn import_indexed(
+	target: &V2Target,
+	layout: &V1Layout,
+	source: &Path,
+	converter: &dyn V1SessionConverter,
+	index: &mut ImportedIndex,
+) -> Result<ImportedSession, SessionImportError> {
 	let head = read_head(source)?;
 	let id = head.id.unwrap_or_default();
 	let bucket = ProjectBucket::for_cwd(head.cwd.as_deref());
-	if let Some(earlier) = imported(target, &id)? {
+	if let Some(earlier) = index.journal(&id) {
 		return Ok(ImportedSession {
+			journal: earlier.to_owned(),
 			id,
-			journal: earlier.journal,
 			bucket,
 			converted: false,
 			messages: 0,
 			children: 0,
+			artifacts: 0,
+			missing_artifacts: Vec::new(),
 		});
 	}
 	let state_dir = bucket
@@ -765,16 +1036,27 @@ pub fn import_session(
 		.map_err(read_error(source))?;
 	let sessions = state_dir.join("sessions");
 	fs::create_dir_all(&sessions).map_err(write_error(&sessions))?;
+	let store_root = omp_env::project_state::blob_store(&state_dir);
+	let store = BlobStore::open(&store_root)
+		.map_err(|source| SessionImportError::Store { path: store_root, source })?;
 	let blobs = layout.locate(V1Item::Blobs);
-	let mut staged = Vec::new();
-	let (journal_id, messages) =
-		match convert_tree(&sessions, source, blobs.as_deref(), converter, &mut staged, 0) {
-			Ok(converted) => converted,
-			Err(error) => {
-				discard(&staged);
-				return Err(error);
-			},
-		};
+	let mut tree = Tree {
+		sessions: &sessions,
+		blobs: blobs.as_deref(),
+		store: &store,
+		converter,
+		staged: Vec::new(),
+		shared: Vec::new(),
+		missing: Vec::new(),
+	};
+	let (journal_id, messages) = match tree.convert(source, &id, 0) {
+		Ok(converted) => converted,
+		Err(error) => {
+			discard(&tree.staged);
+			return Err(error);
+		},
+	};
+	let Tree { mut staged, shared, missing, .. } = tree;
 	// Children first, the parent last: a visible parent always finds its
 	// children.
 	for (index, file) in staged.iter().enumerate() {
@@ -788,13 +1070,26 @@ pub fn import_session(
 		.pop()
 		.map(|file| file.journal)
 		.expect("the parent journal is staged last");
-	record(target, &ImportRecord {
-		id:      id.clone(),
-		source:  source.to_owned(),
-		journal: journal.clone(),
-	})?;
+	index.by_id.insert(id.clone(), journal.clone());
 	remap_pin(layout, &state_dir, &id, &journal_id)?;
-	Ok(ImportedSession { id, journal, bucket, converted: true, messages, children: staged.len() })
+	for reference in &missing {
+		tracing::warn!(
+			session = %id,
+			transcript = %reference.transcript.display(),
+			artifact = reference.id,
+			"v1 artifact referenced by an imported session is missing"
+		);
+	}
+	Ok(ImportedSession {
+		id,
+		journal,
+		bucket,
+		converted: true,
+		messages,
+		children: staged.len(),
+		artifacts: shared.len(),
+		missing_artifacts: missing,
+	})
 }
 
 /// The picker's conversion: validates that `source` is a transcript in the
@@ -844,6 +1139,7 @@ pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, 
 		return Ok(vec![entry(None, ImportOutcome::NothingToImport)]);
 	};
 	let files = transcripts(&root)?;
+	let mut index = ImportedIndex::scan(&cx.pair.target)?;
 	if files.is_empty() {
 		if cx.mode == ImportMode::Apply {
 			set_marker()?;
@@ -853,11 +1149,12 @@ pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, 
 	let mut entries = Vec::with_capacity(files.len());
 	let mut failed = false;
 	for file in files {
+		let mut missing = Vec::new();
 		let (subject, outcome) = match cx.mode {
 			ImportMode::DryRun => match read_head(&file) {
 				Ok(head) => {
 					let id = head.id.unwrap_or_default();
-					let outcome = if imported(&cx.pair.target, &id)?.is_some() {
+					let outcome = if index.journal(&id).is_some() {
 						ImportOutcome::Skipped(SkipReason::SessionImported)
 					} else {
 						ImportOutcome::WouldImport
@@ -871,15 +1168,28 @@ pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, 
 				},
 			},
 			ImportMode::Apply => {
-				match import_session(&cx.pair.target, &cx.pair.source, &file, converter) {
-					Ok(session) => (
-						Some(subject(&session.id, &session.bucket)),
-						if session.converted {
-							ImportOutcome::Imported
-						} else {
-							ImportOutcome::Skipped(SkipReason::SessionImported)
-						},
-					),
+				match import_indexed(&cx.pair.target, &cx.pair.source, &file, converter, &mut index) {
+					Ok(session) => {
+						missing = session
+							.missing_artifacts
+							.into_iter()
+							.map(|reference| ImportEntry {
+								step:    ImportStep::Sessions,
+								item:    V1Item::Sessions,
+								path:    Some(reference.transcript),
+								subject: Some(sf!("{} artifact://{}", session.id, reference.id)),
+								outcome: ImportOutcome::NeedsAttention(Attention::ArtifactMissing),
+							})
+							.collect();
+						(
+							Some(subject(&session.id, &session.bucket)),
+							if session.converted {
+								ImportOutcome::Imported
+							} else {
+								ImportOutcome::Skipped(SkipReason::SessionImported)
+							},
+						)
+					},
 					Err(SessionImportError::NotASession { .. } | SessionImportError::Empty { .. }) => {
 						(None, ImportOutcome::NothingToImport)
 					},
@@ -897,9 +1207,10 @@ pub(super) fn import_sessions(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, 
 			subject,
 			outcome,
 		});
+		entries.append(&mut missing);
 	}
 	// A failed session leaves the marker unset, so the next run retries it;
-	// the per-session records keep the converted ones from converting again.
+	// the converted ones' journals keep them from converting again.
 	if cx.mode == ImportMode::Apply && !failed {
 		set_marker()?;
 	}

@@ -33,6 +33,14 @@ pub fn directory(data_dir: &Path, project_root: &Path) -> io::Result<PathBuf> {
 		.join(hex::encode_n(digest.as_bytes()).as_str()))
 }
 
+/// Returns the project blob store root below a project state directory: the
+/// content-addressed store the environment host spills tool output into and
+/// resolves `artifact://sha256/<digest>` from.
+#[must_use]
+pub fn blob_store(state_dir: &Path) -> PathBuf {
+	state_dir.join("blobs")
+}
+
 /// Name of the project-state bucket that holds sessions whose recorded project
 /// directory no longer exists.
 ///

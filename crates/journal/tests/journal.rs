@@ -206,3 +206,31 @@ fn scan_reads_the_committed_prefix_without_locking_or_truncating() {
 	assert_eq!(fs::metadata(&path).expect("metadata").len(), complete_len);
 	drop(opened);
 }
+
+/// `scan_prefix` reads only the committed entries inside its byte limit: a
+/// frame the limit cuts is dropped like a torn tail, never an error.
+#[test]
+fn scan_prefix_returns_the_committed_entries_inside_the_limit() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("prefix.oms");
+	let mut journal = Journal::create(&path).expect("create");
+	let genesis = journal.append(genesis()).expect("genesis");
+	let genesis_len = fs::metadata(&path).expect("metadata").len();
+	journal.append(draft(TURN_START, genesis.id)).expect("turn");
+	journal.append(draft(PATCH, genesis.id)).expect("patch");
+	let complete_len = fs::metadata(&path).expect("metadata").len();
+
+	let whole = Journal::scan(&path).expect("scan");
+	assert_eq!(whole.len(), 3);
+	let cut = Journal::scan_prefix(&path, genesis_len + 5).expect("a cut frame is a torn tail");
+	assert_eq!(cut, whole[..1]);
+	assert_eq!(Journal::scan_prefix(&path, genesis_len).expect("exact"), whole[..1]);
+	assert!(
+		Journal::scan_prefix(&path, 3)
+			.expect("inside genesis")
+			.is_empty()
+	);
+	assert_eq!(Journal::scan_prefix(&path, u64::MAX).expect("unbounded"), whole);
+	assert_eq!(fs::metadata(&path).expect("metadata").len(), complete_len, "never rewrites");
+	drop(journal);
+}

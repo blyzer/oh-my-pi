@@ -8102,6 +8102,7 @@ dependencies = [
  "im",
  "jiff",
  "libc",
+ "memchr",
  "notify",
  "omp-adw",
  "omp-agent",
