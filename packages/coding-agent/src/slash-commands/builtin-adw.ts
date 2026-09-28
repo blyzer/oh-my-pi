@@ -220,6 +220,7 @@ function buildHost(parts: {
 		artifactManager: sessionManager.getArtifactManager() ?? undefined,
 		additionalDirectories: sessionManager.getAdditionalDirectories(),
 		agentId: session.getAgentId(),
+		preparedExtensions: session.preparedExtensions,
 		// Auth-aware fallback: a seat pinned to a provider the operator is not
 		// authed for otherwise hard-fails instead of falling back.
 		activeModelPattern: session.model ? formatModelString(session.model) : undefined,
