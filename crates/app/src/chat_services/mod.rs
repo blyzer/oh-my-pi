@@ -332,7 +332,7 @@ impl Services for AppServices {
 		&self,
 		source: ForeignSessionSource,
 	) -> ServiceResult<Vec<ForeignSessionRow>> {
-		sessions::foreign_rows(source)
+		sessions::foreign_rows(&self.state, source)
 	}
 
 	fn agents(&self) -> ServiceResult<Vec<AgentRow>> {

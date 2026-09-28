@@ -1605,8 +1605,13 @@ impl<C: omp_agent::Inference> Controller<C> {
 					.into_diagnostic()?;
 				self.kernel.resync_session_state(&self.session);
 				let destination = self.home.fresh_path();
-				let result = crate::session_import::import_selected(source.into(), &path, &destination)
-					.map_err(ServiceError::failed);
+				let result = crate::session_import::import_selected(
+					source.into(),
+					&path,
+					&destination,
+					&self.data_dir,
+				)
+				.map_err(ServiceError::failed);
 				self.post_outcome(Outcome::ForeignSessionImport(ForeignSessionImportOutcome {
 					source,
 					selected: path,

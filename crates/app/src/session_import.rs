@@ -4,6 +4,12 @@
 //! omp v1 sessions are located, placed, and recorded by
 //! [`omp_driver::v1_import::sessions`]; this module converts their bytes
 //! ([`V1Converter`]).
+//!
+//! Every format is told "already imported" the same way: the driver's
+//! [`ImportedIndex`] reads the provenance each imported journal records.
+//! A Claude Code or Codex transcript whose import is current reopens that
+//! journal instead of converting again; a changed one (or another file of an
+//! imported session) converts into a fresh journal beside the earlier one.
 
 mod convert;
 
@@ -15,7 +21,9 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
+use omp_chat::overlays::services::ForeignImport;
 use omp_core::Str;
+use omp_driver::session_imports::{ImportedIndex, PriorImport};
 use serde_json::Value;
 
 use crate::cli::ChatArgs;
@@ -51,10 +59,10 @@ pub struct ForeignCandidate {
 	pub messages:      u32,
 	/// First user message, when it occurs in the indexed prefix.
 	pub first_message: Option<Str>,
-	/// What an earlier import of this transcript left, when the source tracks
-	/// one (omp v1): picking it reopens a current import's journal, or imports
+	/// What an earlier import of this transcript left, when a journal of one
+	/// still exists: picking it reopens a current import's journal, or imports
 	/// a changed transcript (or another file of an imported session).
-	pub imported:      Option<omp_chat::overlays::services::ForeignImport>,
+	pub imported:      Option<ForeignImport>,
 }
 
 impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat {
@@ -69,14 +77,41 @@ impl From<omp_chat::overlays::services::ForeignSessionSource> for ForeignFormat 
 
 /// Enumerates transcripts for `format`, newest first, without materializing a
 /// native session.
-pub fn candidates(format: ForeignFormat) -> miette::Result<Vec<ForeignCandidate>> {
+///
+/// Each Claude Code or Codex row carries what an earlier import left
+/// ([`ForeignCandidate::imported`]), found among the journals under
+/// `data_dir`'s project buckets and in `sessions_dir` (the chat's session
+/// directory, where the picker imports). omp v1 rows are the driver's
+/// ([`omp_driver::v1_import::sessions::list`]).
+pub fn candidates(
+	format: ForeignFormat,
+	data_dir: &Path,
+	sessions_dir: &Path,
+) -> miette::Result<Vec<ForeignCandidate>> {
 	if format == ForeignFormat::Omp1 {
 		return v1_candidates();
 	}
-	let root = foreign_root(format)?;
-	let mut candidates = jsonl_candidates(format, &root)?
+	foreign_candidates(format, &foreign_root(format)?, data_dir, sessions_dir)
+}
+
+/// [`candidates`] of a Claude Code or Codex install rooted at `root`.
+fn foreign_candidates(
+	format: ForeignFormat,
+	root: &Path,
+	data_dir: &Path,
+	sessions_dir: &Path,
+) -> miette::Result<Vec<ForeignCandidate>> {
+	let index = imported_index(format, data_dir, sessions_dir)?;
+	let mut candidates = jsonl_candidates(format, root)?
 		.into_iter()
-		.map(|path| inspect_candidate(format, path, &root))
+		.map(|path| {
+			let mut candidate = inspect_candidate(format, path, root)?;
+			candidate.imported = index
+				.prior(&candidate.id, &candidate.path)
+				.into_diagnostic()?
+				.map(foreign_import);
+			Ok(candidate)
+		})
 		.collect::<miette::Result<Vec<_>>>()?;
 	candidates.sort_by(|left, right| {
 		right
@@ -96,11 +131,20 @@ pub(crate) fn prepare(args: &mut ChatArgs) -> miette::Result<()> {
 		ForeignFormat::Codex
 	};
 	let root = foreign_root(format)?;
-	let candidates = candidates(format)?
-		.into_iter()
-		.map(|candidate| candidate.path)
+	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+	let project = fs::canonicalize(&args.project).into_diagnostic()?;
+	let state_dir =
+		omp_env::project_state::directory(&data_dir, &project).map_err(|source| miette!(source))?;
+	let sessions = args
+		.session_dir
+		.clone()
+		.unwrap_or_else(|| state_dir.join("sessions"));
+	let mut candidates = candidates(format, &data_dir, &sessions)?;
+	let paths = candidates
+		.iter()
+		.map(|candidate| candidate.path.clone())
 		.collect::<Vec<_>>();
-	let source = match candidates.as_slice() {
+	let source = match paths.as_slice() {
 		[] => {
 			return Err(miette!(
 				"no importable {} sessions were found under {}",
@@ -120,17 +164,21 @@ pub(crate) fn prepare(args: &mut ChatArgs) -> miette::Result<()> {
 			let mut input = stdin.lock();
 			let stderr = io::stderr();
 			let mut output = stderr.lock();
-			select_candidate(&candidates, &mut input, &mut output)?
+			select_candidate(&paths, &mut input, &mut output)?
 		},
 	};
-	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let project = fs::canonicalize(&args.project).into_diagnostic()?;
-	let state_dir =
-		omp_env::project_state::directory(&data_dir, &project).map_err(|source| miette!(source))?;
-	let sessions = args
-		.session_dir
-		.clone()
-		.unwrap_or_else(|| state_dir.join("sessions"));
+	let picked = candidates
+		.iter()
+		.position(|candidate| candidate.path == source)
+		.map(|index| candidates.swap_remove(index));
+	if let Some(ForeignImport::Current(journal)) = picked.and_then(|picked| picked.imported) {
+		eprintln!("Reopening {}, imported earlier from {}.", journal.display(), source.display());
+		args.resume = Some(Str::new(journal.to_string_lossy()));
+		args.session_dir = Some(sessions);
+		args.from_claude = false;
+		args.from_codex = false;
+		return Ok(());
+	}
 	fs::create_dir_all(&sessions).into_diagnostic()?;
 	let destination = sessions.join(format!("{}.oms", omp_core::Ulid::generate()));
 	let count = import_file(format, &source, &destination)?;
@@ -153,20 +201,25 @@ pub(crate) fn prepare(args: &mut ChatArgs) -> miette::Result<()> {
 	Ok(())
 }
 
-/// Imports a picker selection into a fresh native journal.
+/// Imports a picker selection into a fresh native journal, or reopens the
+/// journal an earlier import made of the transcript as it is now.
 ///
-/// The selected path is revalidated against the source authority. Conversion
-/// happens in a hidden sibling file and becomes visible only after an atomic
-/// rename, so a failed import never leaves a resumable partial journal.
+/// The selected path is revalidated against the source authority. Earlier
+/// imports are looked up among the journals under `data_dir`'s project
+/// buckets and beside `destination` ([`ImportedIndex`]); a
+/// [current](PriorImport::Current) one is returned as it is. Otherwise
+/// conversion happens in a hidden sibling file and becomes visible only after
+/// an atomic rename, so a failed import never leaves a resumable partial
+/// journal; an earlier import of a changed transcript stays untouched.
 ///
-/// An omp v1 session ignores `destination`: it lands in its recorded
-/// project's bucket, or reopens the journal an earlier import made of the
-/// transcript as it is now (owner decision #4,
-/// [`omp_driver::v1_import::sessions`]).
+/// An omp v1 session ignores `destination` and `data_dir`: it lands in its
+/// recorded project's bucket of the active profile, or reopens its current
+/// import (owner decision #4, [`omp_driver::v1_import::sessions`]).
 pub fn import_selected(
 	format: ForeignFormat,
 	source: &Path,
 	destination: &Path,
+	data_dir: &Path,
 ) -> miette::Result<PathBuf> {
 	if format == ForeignFormat::Omp1 {
 		let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
@@ -175,6 +228,17 @@ pub fn import_selected(
 			.into_diagnostic();
 	}
 	let source = validate_selection(format, source)?;
+	import_picked(format, &source, destination, data_dir)
+}
+
+/// [`import_selected`] of a Claude Code or Codex transcript already
+/// validated against its source authority.
+fn import_picked(
+	format: ForeignFormat,
+	source: &Path,
+	destination: &Path,
+	data_dir: &Path,
+) -> miette::Result<PathBuf> {
 	if destination.extension().and_then(|value| value.to_str()) != Some("oms") {
 		return Err(miette!("native session destination must use the .oms extension"));
 	}
@@ -184,9 +248,12 @@ pub fn import_selected(
 	let parent = destination
 		.parent()
 		.ok_or_else(|| miette!("native session destination has no parent directory"))?;
+	if let Some(journal) = current_import(format, source, data_dir, parent)? {
+		return Ok(journal);
+	}
 	fs::create_dir_all(parent).into_diagnostic()?;
 	let staging = parent.join(format!(".{}.importing.oms", omp_core::Ulid::generate()));
-	let imported = import_file(format, &source, &staging);
+	let imported = import_file(format, source, &staging);
 	let count = match imported {
 		Ok(count) => count,
 		Err(error) => {
@@ -234,12 +301,55 @@ impl omp_driver::v1_import::V1SessionConverter for V1Converter {
 	}
 }
 
+/// The import format a converted journal records for `format`
+/// (`import-format`), which [`ImportedIndex`] recognizes its imports by.
+fn import_format(format: ForeignFormat) -> String {
+	format.to_string().to_ascii_lowercase()
+}
+
+/// The journals imports of `format` wrote under `data_dir`'s project
+/// buckets and in `sessions_dir`.
+fn imported_index(
+	format: ForeignFormat,
+	data_dir: &Path,
+	sessions_dir: &Path,
+) -> miette::Result<ImportedIndex> {
+	let mut index = ImportedIndex::scan(data_dir, &import_format(format)).into_diagnostic()?;
+	index.scan_sessions(sessions_dir).into_diagnostic()?;
+	Ok(index)
+}
+
+/// The journal of a current earlier import of the Claude Code or Codex
+/// transcript at `source` (canonical), when one exists under `data_dir`'s
+/// project buckets or in `sessions_dir`.
+fn current_import(
+	format: ForeignFormat,
+	source: &Path,
+	data_dir: &Path,
+	sessions_dir: &Path,
+) -> miette::Result<Option<PathBuf>> {
+	let id = inspect_candidate(format, source.to_path_buf(), sessions_dir)?.id;
+	let prior = imported_index(format, data_dir, sessions_dir)?
+		.prior(&id, source)
+		.into_diagnostic()?;
+	Ok(match prior {
+		Some(PriorImport::Current(journal)) => Some(journal),
+		Some(PriorImport::Changed(_) | PriorImport::OtherFile(_)) | None => None,
+	})
+}
+
+/// How the picker shows what an earlier import left.
+fn foreign_import(prior: PriorImport) -> ForeignImport {
+	match prior {
+		PriorImport::Current(journal) => ForeignImport::Current(journal),
+		PriorImport::Changed(journal) => ForeignImport::Changed(journal),
+		PriorImport::OtherFile(journal) => ForeignImport::OtherFile(journal),
+	}
+}
+
 /// The active profile's v1 sessions, from their headers alone (and, for the
 /// ones imported earlier, their digests).
 fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
-	use omp_chat::overlays::services::ForeignImport;
-	use omp_driver::v1_import::PriorImport;
-
 	let pair = omp_driver::v1_import::active_pair().into_diagnostic()?;
 	Ok(omp_driver::v1_import::sessions::list(&pair)
 		.into_diagnostic()?
@@ -259,11 +369,7 @@ fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
 			modified_ms:   session.modified_ms,
 			messages:      session.messages,
 			first_message: session.first_message,
-			imported:      session.imported.map(|prior| match prior {
-				PriorImport::Current(journal) => ForeignImport::Current(journal),
-				PriorImport::Changed(journal) => ForeignImport::Changed(journal),
-				PriorImport::OtherFile(journal) => ForeignImport::OtherFile(journal),
-			}),
+			imported:      session.imported.map(foreign_import),
 		})
 		.collect())
 }
@@ -347,6 +453,14 @@ fn inspect_candidate(
 	let mut indexed_bytes = 0_u64;
 	let mut source_created_ms = None::<u64>;
 	let mut source_modified_ms = None::<u64>;
+	let mut named = false;
+	let text = |record: &'_ Value, key: &str| {
+		record
+			.get(key)
+			.and_then(Value::as_str)
+			.filter(|value| !value.is_empty())
+			.map(Str::new)
+	};
 	let mut line = Vec::new();
 	loop {
 		line.clear();
@@ -371,12 +485,18 @@ fn inspect_candidate(
 			source_created_ms = Some(source_created_ms.map_or(timestamp, |old| old.min(timestamp)));
 			source_modified_ms = Some(source_modified_ms.map_or(timestamp, |old| old.max(timestamp)));
 		}
-		if let Some(id) = value.get("sessionId").and_then(Value::as_str).or_else(|| {
-			(value.get("type").and_then(Value::as_str) == Some("session_meta"))
-				.then(|| payload.get("id").and_then(Value::as_str))
-				.flatten()
-		}) {
-			candidate.id = Str::new(id);
+		// The first id a record names, as the importer records it
+		// (`import-source-id`), so the row finds its earlier imports.
+		if !named
+			&& let Some(id) = text(&value, "sessionId")
+				.or_else(|| text(&value, "session_id"))
+				.or_else(|| {
+					(value.get("type").and_then(Value::as_str) == Some("session_meta"))
+						.then(|| text(payload, "id"))
+						.flatten()
+				}) {
+			candidate.id = id;
+			named = true;
 		}
 		if let Some(cwd) = value
 			.get("cwd")
@@ -616,6 +736,158 @@ mod tests {
 			ForeignFormat::Omp1.to_string().to_ascii_lowercase(),
 			omp_session::import::OMP1_FORMAT
 		);
+	}
+
+	/// A Claude Code transcript of session `id` with one exchange.
+	fn claude_transcript(path: &Path, id: &str) {
+		fs::create_dir_all(path.parent().unwrap()).unwrap();
+		let lines = [
+			serde_json::json!({"type": "user", "sessionId": id, "message": {"role": "user", "content": "hello"}}),
+			serde_json::json!({"type": "assistant", "sessionId": id, "message": {"role": "assistant", "content": [{"type": "text", "text": "world"}]}}),
+		];
+		fs::write(path, lines.map(|line| line.to_string() + "\n").concat()).unwrap();
+	}
+
+	/// Sets `path`'s modification time a minute back: settled, so an import
+	/// records its stamp.
+	fn backdate(path: &Path) {
+		let earlier = SystemTime::now() - std::time::Duration::from_secs(60);
+		fs::File::options()
+			.write(true)
+			.open(path)
+			.and_then(|file| file.set_modified(earlier))
+			.unwrap();
+	}
+
+	/// The visible journals directly in `directory`.
+	fn journals(directory: &Path) -> Vec<PathBuf> {
+		let mut found = fs::read_dir(directory)
+			.unwrap()
+			.map(|entry| entry.unwrap().path())
+			.filter(|path| {
+				path.extension().and_then(|value| value.to_str()) == Some("oms")
+					&& !path.file_name().unwrap().to_string_lossy().starts_with('.')
+			})
+			.collect::<Vec<_>>();
+		found.sort();
+		found
+	}
+
+	fn fresh(sessions: &Path) -> PathBuf {
+		sessions.join(format!("{}.oms", omp_core::Ulid::generate()))
+	}
+
+	#[test]
+	fn picking_the_same_claude_session_twice_reopens_its_journal() {
+		let directory = tempfile::tempdir().unwrap();
+		let root = directory.path().join(".claude");
+		let data = directory.path().join("data");
+		let sessions = data.join("projects/0123abcd/sessions");
+		let source = root.join("projects/-project/claude-1.jsonl");
+		claude_transcript(&source, "claude-1");
+		backdate(&source);
+
+		let first = import_picked(ForeignFormat::Claude, &source, &fresh(&sessions), &data).unwrap();
+		let again = import_picked(ForeignFormat::Claude, &source, &fresh(&sessions), &data).unwrap();
+		assert_eq!(again, first, "a current import reopens");
+		assert_eq!(journals(&sessions), [first.clone()]);
+		// Another project's chat reopens it too: every bucket is looked in.
+		let elsewhere = data.join("projects/4567ef01/sessions");
+		let other = import_picked(ForeignFormat::Claude, &source, &fresh(&elsewhere), &data).unwrap();
+		assert_eq!(other, first);
+		assert!(!elsewhere.exists());
+
+		// The picker marks the row.
+		let rows = foreign_candidates(ForeignFormat::Claude, &root, &data, &sessions).unwrap();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].id, "claude-1");
+		assert_eq!(rows[0].imported, Some(ForeignImport::Current(first.clone())));
+
+		// The session went on: marked changed, and picking it imports it
+		// again into a fresh journal beside the earlier one.
+		let mut bytes = fs::read(&source).unwrap();
+		bytes.extend_from_slice(
+			b"{\"type\":\"user\",\"sessionId\":\"claude-1\",\"message\":{\"content\":\"more\"}}\n",
+		);
+		fs::write(&source, bytes).unwrap();
+		let rows = foreign_candidates(ForeignFormat::Claude, &root, &data, &sessions).unwrap();
+		assert_eq!(rows[0].imported, Some(ForeignImport::Changed(first.clone())));
+		let second = import_picked(ForeignFormat::Claude, &source, &fresh(&sessions), &data).unwrap();
+		assert_ne!(second, first);
+		assert_eq!(journals(&sessions).len(), 2);
+		assert!(first.is_file());
+		let rows = foreign_candidates(ForeignFormat::Claude, &root, &data, &sessions).unwrap();
+		assert_eq!(rows[0].imported, Some(ForeignImport::Current(second.clone())));
+		assert_eq!(
+			import_picked(ForeignFormat::Claude, &source, &fresh(&sessions), &data).unwrap(),
+			second
+		);
+	}
+
+	#[test]
+	fn another_codex_rollout_of_an_imported_session_imports_on_its_own() {
+		let directory = tempfile::tempdir().unwrap();
+		let root = directory.path().join(".codex");
+		let data = directory.path().join("data");
+		// A chat with an explicit session directory, outside the buckets.
+		let sessions = directory.path().join("explicit-sessions");
+		let rollout = |name: &str, text: &str| {
+			let path = root.join("sessions/2026/01").join(name);
+			fs::create_dir_all(path.parent().unwrap()).unwrap();
+			let lines = [
+				serde_json::json!({"type": "session_meta", "payload": {"id": "codex-1", "cwd": "/project"}}),
+				serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}),
+			];
+			fs::write(&path, lines.map(|line| line.to_string() + "\n").concat()).unwrap();
+			path
+		};
+		let original = rollout("rollout-a.jsonl", "ping");
+		let resumed = rollout("rollout-b.jsonl", "ping again");
+		let first = import_picked(ForeignFormat::Codex, &original, &fresh(&sessions), &data).unwrap();
+		assert_eq!(
+			import_picked(ForeignFormat::Codex, &original, &fresh(&sessions), &data).unwrap(),
+			first
+		);
+		let rows = foreign_candidates(ForeignFormat::Codex, &root, &data, &sessions).unwrap();
+		let prior = |path: &Path| {
+			rows
+				.iter()
+				.find(|row| row.path == path)
+				.and_then(|row| row.imported.clone())
+		};
+		assert_eq!(prior(&original), Some(ForeignImport::Current(first.clone())));
+		assert_eq!(prior(&resumed), Some(ForeignImport::OtherFile(first.clone())));
+		let own = import_picked(ForeignFormat::Codex, &resumed, &fresh(&sessions), &data).unwrap();
+		assert_ne!(own, first);
+		assert_eq!(journals(&sessions), {
+			let mut both = vec![first, own];
+			both.sort();
+			both
+		});
+	}
+
+	/// A row's id is the first one its records name, the one the importer
+	/// records, so it finds that import.
+	#[test]
+	fn a_candidate_takes_the_first_session_id_its_records_name() {
+		let directory = tempfile::tempdir().unwrap();
+		let source = directory.path().join("resumed.jsonl");
+		fs::write(
+			&source,
+			concat!(
+				"{\"type\":\"user\",\"sessionId\":\"\",\"message\":{\"content\":\"a\"}}\n",
+				"{\"type\":\"user\",\"sessionId\":\"original\",\"message\":{\"content\":\"b\"}}\n",
+				"{\"type\":\"user\",\"sessionId\":\"resumed\",\"message\":{\"content\":\"c\"}}\n",
+			),
+		)
+		.unwrap();
+		let row = inspect_candidate(ForeignFormat::Claude, source.clone(), directory.path()).unwrap();
+		assert_eq!(row.id, "original");
+		let journal = directory.path().join("journal.oms");
+		import_file(ForeignFormat::Claude, &source, &journal).unwrap();
+		let entries = omp_journal::Journal::scan(&journal).unwrap();
+		let origin = omp_session::import::import_origin(&entries).unwrap();
+		assert_eq!(origin.source_id.as_deref(), Some("original"));
 	}
 
 	#[test]

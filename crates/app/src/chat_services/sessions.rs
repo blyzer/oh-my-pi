@@ -34,9 +34,13 @@ pub fn rows(state: &ServiceState, scope: SessionScope) -> ServiceResult<Vec<Sess
 	rows_in(&state.data_dir, &state.sessions_dir, &state.state_dir, scope)
 }
 
-/// Foreign Claude Code or Codex transcripts available for one-shot import.
-pub fn foreign_rows(source: ForeignSessionSource) -> ServiceResult<Vec<ForeignSessionRow>> {
-	crate::session_import::candidates(source.into())
+/// Foreign Claude Code, Codex, or omp v1 transcripts available for import,
+/// each with what an earlier import of it left.
+pub fn foreign_rows(
+	state: &ServiceState,
+	source: ForeignSessionSource,
+) -> ServiceResult<Vec<ForeignSessionRow>> {
+	crate::session_import::candidates(source.into(), &state.data_dir, &state.sessions_dir)
 		.map_err(ServiceError::failed)
 		.map(|candidates| {
 			candidates

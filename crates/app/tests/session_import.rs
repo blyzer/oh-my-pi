@@ -165,11 +165,14 @@ mod omp1 {
 	use omp_app::session_import::V1Converter;
 	use omp_core::{Hash32, Str};
 	use omp_dom::{Dom, Handle, KnownTag, PropId, PropKey, Tag, Value as DomValue};
-	use omp_driver::v1_import::{
-		Attention, CredentialAccess, ImportMode, ImportOutcome, ImportPair, ImportReport, ImportStep,
-		PriorImport, ProfileSelection, SessionImport, SkipReason, V1Inputs, V1Source, V2Roots, plan,
-		run_with,
-		sessions::{import_session, list},
+	use omp_driver::{
+		session_imports::PriorImport,
+		v1_import::{
+			Attention, CredentialAccess, ImportMode, ImportOutcome, ImportPair, ImportReport,
+			ImportStep, ProfileSelection, SessionImport, SkipReason, V1Inputs, V1Source, V2Roots,
+			plan, run_with,
+			sessions::{import_session, list},
+		},
 	};
 	use omp_proto::thread::v1::{item, part};
 	use serde_json::{Value, json};
