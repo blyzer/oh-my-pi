@@ -213,7 +213,9 @@ impl omp_envd::TelemetryUpload for TelemetryDelivery {
 /// Core tools, Python registrations, and session routing are installed by the
 /// environment and kernel composition directly; this helper carries the
 /// optional host-resource authority plus the driver-owned inference,
-/// command-credential, and telemetry-delivery seams.
+/// command-credential, and telemetry-delivery seams, and the operator's
+/// plugin command approvals from the data directory, so the Agent Plugins
+/// stdio servers the environment discovers start only when approved.
 #[must_use]
 pub fn builtin(
 	_root: &Path,
@@ -221,11 +223,25 @@ pub fn builtin(
 	_goal_control: AgentGoalControl,
 	host_resources: Option<Arc<dyn omp_envd::HostResources>>,
 ) -> omp_envd::RegistryBridges {
+	let command_approvals = omp_core::dirs::data_dir(None).map_or_else(
+		|error| {
+			tracing::warn!(
+				error = &error as &(dyn std::error::Error + 'static),
+				"no data directory; plugin commands do not run"
+			);
+			omp_ext::plugin_command::CommandApprovals::default()
+		},
+		|data_dir| crate::plugin_commands::command_approvals(&data_dir),
+	);
 	omp_envd::RegistryBridges {
 		host_resources,
 		search: Some(search),
 		command_credentials: Some(Arc::new(CommandCredentials)),
 		telemetry_upload: Some(Arc::new(TelemetryDelivery)),
+		content: omp_envd::ActiveContentInputs {
+			command_approvals,
+			..omp_envd::ActiveContentInputs::default()
+		},
 		..omp_envd::RegistryBridges::default()
 	}
 }

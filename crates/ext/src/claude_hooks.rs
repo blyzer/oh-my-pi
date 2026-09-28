@@ -13,7 +13,13 @@
 //! Spec: Claude Code hooks reference, `code.claude.com/docs/en/hooks`, and the
 //! plugin manifest reference, `code.claude.com/docs/en/plugins-reference`.
 
-use std::{collections::BTreeMap, fs, path::Path, time::Duration};
+use std::{
+	collections::BTreeMap,
+	fmt::{self, Display, Write as _},
+	fs,
+	path::Path,
+	time::Duration,
+};
 
 use omp_core::Str;
 use regex::Regex;
@@ -21,7 +27,10 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 
-use crate::claude_plugin::{ConfigDeclaration, PluginComponent, PluginDiagnostic};
+use crate::{
+	claude_plugin::{ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars},
+	plugin_command::{PluginLaunch, PluginLaunchKind},
+};
 
 /// Every hook event the Claude Code hooks reference names.
 #[derive(
@@ -231,6 +240,27 @@ impl PartialEq for HookMatcher {
 
 impl Eq for HookMatcher {}
 
+/// The canonical matcher text: `*` for every subject, the exact names joined
+/// with `|`, or the pattern's source. Distinct matchers never share a text:
+/// an exact list holds only characters a pattern must go beyond.
+impl Display for HookMatcher {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::All => formatter.write_str("*"),
+			Self::Exact(names) => {
+				for (index, name) in names.iter().enumerate() {
+					if index > 0 {
+						formatter.write_str("|")?;
+					}
+					formatter.write_str(name)?;
+				}
+				Ok(())
+			},
+			Self::Pattern(pattern) => formatter.write_str(pattern.as_str()),
+		}
+	}
+}
+
 impl HookMatcher {
 	/// Compiles a declared matcher.
 	///
@@ -322,6 +352,40 @@ pub struct HookCommand {
 	pub detached: bool,
 }
 
+impl HookCommand {
+	/// The script omp's in-process shell runs for this handler: the
+	/// shell-form command as declared, or the exec-form command and each
+	/// argument as one single-quoted word. `expand` maps every declared word
+	/// (plugin variables) first.
+	#[must_use]
+	pub fn script(&self, mut expand: impl FnMut(&Str) -> Str) -> String {
+		let Some(args) = &self.args else {
+			return expand(&self.command).to_string();
+		};
+		let mut script = String::new();
+		for word in std::iter::once(&self.command).chain(args.iter()) {
+			if !script.is_empty() {
+				script.push(' ');
+			}
+			push_quoted(&mut script, &expand(word));
+		}
+		script
+	}
+}
+
+/// Appends `word` single-quoted, each embedded quote closed, escaped, and
+/// reopened.
+fn push_quoted(script: &mut String, word: &str) {
+	script.push('\'');
+	for (index, part) in word.split('\'').enumerate() {
+		if index > 0 {
+			script.push_str("'\\''");
+		}
+		script.push_str(part);
+	}
+	script.push('\'');
+}
+
 /// One loaded plugin hook: an event, its matcher, and one command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginHook {
@@ -335,6 +399,36 @@ pub struct PluginHook {
 	pub command: HookCommand,
 	/// The declaration it came from (a hooks file or the manifest).
 	pub source:  std::path::PathBuf,
+}
+
+impl PluginHook {
+	/// What triggers the hook: its event, then its matcher unless it matches
+	/// everything (`PreToolUse Bash|Edit`, `Stop`).
+	#[must_use]
+	pub fn trigger(&self) -> Str {
+		let event: &'static str = self.event.into();
+		if matches!(self.matcher, HookMatcher::All) {
+			return Str::new_static(event);
+		}
+		let mut trigger = String::from(event);
+		let _ = write!(trigger, " {}", self.matcher);
+		Str::new(trigger)
+	}
+
+	/// The launch the operator approves for this hook in the plugin rooted
+	/// at `root`: the script the in-process shell runs
+	/// ([`HookCommand::script`]) with `${CLAUDE_PLUGIN_ROOT}` expanded, and
+	/// the trigger ([`Self::trigger`]) as its name, which the approval digest
+	/// covers. `${CLAUDE_PLUGIN_DATA}` and `${CLAUDE_PROJECT_DIR}` stay
+	/// variables: the host fills them per data directory and project, so one
+	/// approval holds in every project.
+	#[must_use]
+	pub fn launch(&self, root: &Path) -> PluginLaunch {
+		let script = self
+			.command
+			.script(|word| expand_plugin_vars(word.clone(), root, None));
+		PluginLaunch::new(PluginLaunchKind::Hook, self.trigger(), Str::new(script), [], [])
+	}
 }
 
 #[derive(Deserialize)]
@@ -565,6 +659,8 @@ pub enum HookHandlerGap {
 
 #[cfg(test)]
 mod tests {
+	use omp_core::Hash32;
+
 	use super::*;
 
 	fn load(body: &str) -> (Vec<PluginHook>, Vec<PluginDiagnostic>) {
@@ -675,5 +771,103 @@ mod tests {
 		assert_eq!(hooks.len(), 2);
 		assert!(!hooks[0].matcher.matches_tool("bash"));
 		assert_eq!(hooks[1].command.command, "ok");
+	}
+
+	fn hook_digest(body: &str) -> Hash32 {
+		let (hooks, diagnostics) = load(body);
+		assert!(diagnostics.is_empty(), "{diagnostics:?}");
+		let [hook] = &hooks[..] else {
+			panic!("one hook: {hooks:?}");
+		};
+		crate::plugin_command::plugin_command_digest(
+			"p@m",
+			"1.0.0",
+			&hook.launch(Path::new("/plugins/p")),
+		)
+	}
+
+	#[test]
+	fn a_hook_launch_is_its_script_under_its_trigger() {
+		let (hooks, _) = load(
+			r#"{"PreToolUse":[{"matcher":"Edit|Write","hooks":[
+				{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/check.sh \"$CLAUDE_PROJECT_DIR\""},
+				{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/bin/x","args":["it's","${CLAUDE_PLUGIN_DATA}/y"]}]}],
+			"Stop":[{"hooks":[{"type":"command","command":"stop"}]}]}"#,
+		);
+		let launches = hooks
+			.iter()
+			.map(|hook| hook.launch(Path::new("/plugins/p")))
+			.collect::<Vec<_>>();
+		assert!(
+			launches
+				.iter()
+				.all(|launch| launch.kind == PluginLaunchKind::Hook)
+		);
+		assert_eq!(launches[0].server, "PreToolUse Edit|Write");
+		assert_eq!(launches[0].command, r#"/plugins/p/check.sh "$CLAUDE_PROJECT_DIR""#);
+		assert_eq!(
+			launches[1].command, r"'/plugins/p/bin/x' 'it'\''s' '${CLAUDE_PLUGIN_DATA}/y'",
+			"exec form quotes each word; host variables stay for the host"
+		);
+		assert!(launches[1].args.is_empty() && launches[1].env.is_empty());
+		assert_eq!(launches[2].server, "Stop", "a match-all matcher is left out");
+		assert_eq!(
+			launches[0].command_line().to_string(),
+			r#"/plugins/p/check.sh "$CLAUDE_PROJECT_DIR""#,
+			"a hook script is shown verbatim"
+		);
+	}
+
+	#[test]
+	fn a_hook_digest_covers_what_runs_and_when() {
+		let base = hook_digest(
+			r#"{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"a"}]}]}"#,
+		);
+		for (changed, what) in [
+			(
+				r#"{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"b"}]}]}"#,
+				"command",
+			),
+			(
+				r#"{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"a"}]}]}"#,
+				"event",
+			),
+			(
+				r#"{"PreToolUse":[{"matcher":"Bash|Edit","hooks":[{"type":"command","command":"a"}]}]}"#,
+				"matcher",
+			),
+			(r#"{"PreToolUse":[{"hooks":[{"type":"command","command":"a"}]}]}"#, "match-all"),
+			(
+				r#"{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"a","args":[]}]}]}"#,
+				"exec form",
+			),
+		] {
+			assert_ne!(base, hook_digest(changed), "{what} re-asks");
+		}
+		for (same, what) in [
+			(
+				r#"{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"a","timeout":3}]}]}"#,
+				"timeout",
+			),
+			(
+				r#"{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"a","async":true}]}]}"#,
+				"async",
+			),
+			(
+				r#"{"PreToolUse":[{"matcher":" Bash ","hooks":[{"type":"command","command":"a"}]}]}"#,
+				"matcher spacing",
+			),
+		] {
+			assert_eq!(base, hook_digest(same), "{what} does not re-ask");
+		}
+		// The same command as a server is a different approval.
+		let server = PluginLaunch::new(
+			PluginLaunchKind::McpServer,
+			Str::new_static("PreToolUse Bash"),
+			Str::new_static("a"),
+			[],
+			[],
+		);
+		assert_ne!(base, crate::plugin_command::plugin_command_digest("p@m", "1.0.0", &server));
 	}
 }

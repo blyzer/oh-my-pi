@@ -667,6 +667,9 @@ pub struct McpConfigPaths {
 	pub(crate) agent_plugin_roots: Vec<PathBuf>,
 	/// Installed Claude-layout marketplace plugins.
 	pub(crate) claude_plugins: Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
+	/// The operator's plugin command approvals, gating Agent Plugins stdio
+	/// servers; empty (nothing approved) unless the composition read them.
+	pub(crate) command_approvals: omp_ext::plugin_command::CommandApprovals,
 }
 
 impl McpConfigPaths {
@@ -698,6 +701,7 @@ impl McpConfigPaths {
 			home,
 			agent_plugin_roots: Vec::new(),
 			claude_plugins: Arc::default(),
+			command_approvals: omp_ext::plugin_command::CommandApprovals::default(),
 		}
 	}
 
@@ -705,6 +709,18 @@ impl McpConfigPaths {
 	#[must_use]
 	pub fn with_agent_plugin_roots(mut self, roots: Vec<PathBuf>) -> Self {
 		self.agent_plugin_roots = roots;
+		self
+	}
+
+	/// Adds the operator's plugin command approvals: an Agent Plugins
+	/// package's stdio server joins discovery only when its launch is
+	/// approved under the package's manifest name.
+	#[must_use]
+	pub fn with_command_approvals(
+		mut self,
+		approvals: omp_ext::plugin_command::CommandApprovals,
+	) -> Self {
+		self.command_approvals = approvals;
 		self
 	}
 

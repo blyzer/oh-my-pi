@@ -83,8 +83,8 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 		);
 	}
 	let (mut kernel, mut session) = launch.compose().await?;
-	// Unapproved plugin servers never start without an interactive operator;
-	// report each on stderr, keeping stdout clean for the response.
+	// Unapproved plugin servers and hooks never run without an interactive
+	// operator; report each on stderr, keeping stdout clean for the response.
 	if !launch.blocked_plugin_commands.is_empty() {
 		let mut report = String::new();
 		for blocked in &launch.blocked_plugin_commands {

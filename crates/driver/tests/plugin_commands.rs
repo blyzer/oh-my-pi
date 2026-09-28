@@ -1,17 +1,22 @@
-//! Operator approval of plugin-launched processes through the composition's
+//! Operator approval of plugin-launched commands through the composition's
 //! seams: an installed plugin resolved from omp's registry, its launches
 //! enumerated and gated by the environment host's MCP, LSP, and DAP
-//! parsers, and approvals persisted in the `omp-ext` grant file and read back
-//! by the next resolution.
+//! parsers and by its hook declarations, and approvals persisted in the
+//! `omp-ext` grant file and read back by the next resolution.
 
 use std::{fs, path::Path};
 
 use omp_core::Str;
-use omp_driver::plugin_commands::{approve_launch, blocked_launches, plugin_launches};
-use omp_envd::docserver::{
-	dap_adapter::builtin_adapters,
-	dap_config::{discover_dap_sources, load_dap_config},
-	lsp_config::{discover_lsp_sources, load_lsp_config},
+use omp_driver::plugin_commands::{
+	agent_plugin_roots, approve_launch, blocked_launches, command_sets, plugin_launches,
+};
+use omp_envd::{
+	docserver::{
+		dap_adapter::builtin_adapters,
+		dap_config::{discover_dap_sources, load_dap_config},
+		lsp_config::{discover_lsp_sources, load_lsp_config},
+	},
+	mcp::McpConfigPaths,
 };
 use omp_ext::{
 	claude_plugin::{
@@ -56,6 +61,7 @@ fn lsp_declaration(args: &str) -> String {
 
 struct Fixture {
 	_scratch: tempfile::TempDir,
+	home:     std::path::PathBuf,
 	data:     std::path::PathBuf,
 	project:  std::path::PathBuf,
 	plugin:   std::path::PathBuf,
@@ -78,8 +84,12 @@ impl Fixture {
 			&plugin.join(".dap.json"),
 			r#"{"adapters":{"acme-dbg":{"command":"./bin/dbg","fileTypes":[".acme"]}}}"#,
 		);
+		write(
+			&plugin.join("hooks/hooks.json"),
+			r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/bin/on-stop"}]}]}}"#,
+		);
 		install(&data, &plugin, "1.0.0");
-		Self { _scratch: scratch, data, project, plugin }
+		Self { home: root.join("home/.o2"), _scratch: scratch, data, project, plugin }
 	}
 
 	fn resolve(&self) -> ClaudePlugins {
@@ -94,13 +104,21 @@ impl Fixture {
 		let plugins = self.resolve();
 		let plugin = &plugins.plugins[0];
 		for launch in plugin_launches(plugin) {
-			approve_launch(&self.data, plugin, &launch, Str::new_static("cli"))
+			approve_launch(&self.data, &plugin.id, &plugin.version, &launch, Str::new_static("cli"))
 				.expect("persist approval");
 		}
 	}
 
+	/// Discovery of Agent Plugins packages in the project and an empty user
+	/// configuration root, gated by `plugins`' approvals.
+	fn agent_plugins(&self, plugins: &ClaudePlugins) -> McpConfigPaths {
+		McpConfigPaths::new(&self.home, &self.project)
+			.with_command_approvals(plugins.command_approvals.clone())
+	}
+
 	fn blocked_servers(&self) -> Vec<(PluginLaunchKind, Str)> {
-		blocked_launches(&self.resolve())
+		let plugins = self.resolve();
+		blocked_launches(&plugins, &self.agent_plugins(&plugins))
 			.into_iter()
 			.map(|blocked| {
 				assert_eq!(blocked.plugin, "tools@market");
@@ -114,7 +132,7 @@ impl Fixture {
 fn unapproved_plugin_launches_are_blocked_and_named() {
 	let fixture = Fixture::new();
 	let plugins = fixture.resolve();
-	let blocked = blocked_launches(&plugins);
+	let blocked = blocked_launches(&plugins, &fixture.agent_plugins(&plugins));
 	assert_eq!(
 		blocked
 			.iter()
@@ -124,8 +142,23 @@ fn unapproved_plugin_launches_are_blocked_and_named() {
 			(PluginLaunchKind::McpServer, "tools:db"),
 			(PluginLaunchKind::LanguageServer, "acme"),
 			(PluginLaunchKind::DebugAdapter, "acme-dbg"),
+			(PluginLaunchKind::Hook, "Stop"),
 		],
-		"every process-launching server awaits approval; the remote MCP server launches nothing"
+		"every process-launching server and hook awaits approval; the remote MCP server launches \
+		 nothing"
+	);
+	let hook = blocked[3].to_string();
+	assert!(
+		hook.contains(&format!(
+			"plugin `tools@market` hook `Stop` would run `{}`",
+			fixture
+				.plugin
+				.canonicalize()
+				.expect("canonical plugin")
+				.join("bin/on-stop")
+				.display()
+		)),
+		"{hook}"
 	);
 	let root = fixture.plugin.canonicalize().expect("canonical plugin");
 	let lsp = &blocked[1];
@@ -157,7 +190,7 @@ fn approved_launches_persist_and_load() {
 	fixture.approve_all();
 
 	let grants = GrantsFile::read(&grants_path(&fixture.data)).expect("grant file");
-	assert_eq!(grants.plugin_commands.len(), 3);
+	assert_eq!(grants.plugin_commands.len(), 4);
 	assert!(grants.plugin_commands.iter().all(|grant| {
 		grant.plugin == "tools@market" && grant.version == "1.0.0" && grant.granted_by == "cli"
 	}));
@@ -200,9 +233,69 @@ fn changed_arguments_or_version_require_approval_again() {
 	fixture.approve_all();
 	assert!(fixture.blocked_servers().is_empty());
 	let grants = GrantsFile::read(&grants_path(&fixture.data)).expect("grant file");
-	assert_eq!(grants.plugin_commands.len(), 4);
+	assert_eq!(grants.plugin_commands.len(), 5);
 
 	// A plugin update is a new version: every launch asks again.
 	install(&fixture.data, &fixture.plugin, "1.1.0");
-	assert_eq!(fixture.blocked_servers().len(), 3);
+	assert_eq!(fixture.blocked_servers().len(), 4);
+}
+
+#[test]
+fn an_installed_agent_plugins_package_is_approved_under_its_manifest_name() {
+	let fixture = Fixture::new();
+	let package = fixture
+		.data
+		.join("plugins/cache/plugins/market___portable___1.0.0");
+	write(
+		&package.join("plugin.json"),
+		r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"portable","version":"1.0.0"}"#,
+	);
+	write(
+		&package.join("mcp.json"),
+		r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{
+			"local":{"type":"stdio","command":"${PLUGIN_ROOT}/server"},
+			"remote":{"type":"http","url":"https://example.test/mcp"}}}"#,
+	);
+	let mut registry = InstalledPluginsRegistry::default();
+	registry
+		.plugins
+		.insert(Str::new_static("portable@market"), vec![InstalledPluginEntry {
+			scope:          InstallScope::User,
+			install_path:   package,
+			version:        Str::new_static("1.0.0"),
+			installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+			last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+			git_commit_sha: None,
+			enabled:        true,
+		}]);
+	write(
+		&fixture.data.join("plugins").join(REGISTRY_FILE),
+		&serde_json::to_string(&registry).expect("registry"),
+	);
+	let agent_plugins = |plugins: &ClaudePlugins| {
+		fixture
+			.agent_plugins(plugins)
+			.with_agent_plugin_roots(agent_plugin_roots(&[], plugins))
+	};
+
+	let plugins = fixture.resolve();
+	let blocked = blocked_launches(&plugins, &agent_plugins(&plugins));
+	let [local] = &blocked[..] else {
+		panic!("the package's stdio server alone awaits approval: {blocked:?}");
+	};
+	assert_eq!((local.plugin.as_str(), local.server.as_str()), ("portable", "local"));
+
+	// `omp ext trust portable@market` finds the package through its install.
+	let sets = command_sets("portable@market", &plugins, &agent_plugins(&plugins));
+	let [set] = &sets[..] else {
+		panic!("one package: {sets:?}");
+	};
+	assert_eq!((set.plugin.as_str(), set.version.as_str()), ("portable", "1.0.0"));
+	assert_eq!(sets, command_sets("portable", &plugins, &agent_plugins(&plugins)));
+	for launch in &set.launches {
+		approve_launch(&fixture.data, &set.plugin, &set.version, launch, Str::new_static("cli"))
+			.expect("persist approval");
+	}
+	let plugins = fixture.resolve();
+	assert!(blocked_launches(&plugins, &agent_plugins(&plugins)).is_empty());
 }

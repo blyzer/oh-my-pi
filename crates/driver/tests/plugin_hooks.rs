@@ -2,7 +2,8 @@
 //! plugin resolved from omp's registry, a real project environment, the
 //! kernel's hook gate, and each hook command run by the environment's
 //! in-process shell. A scripted model calls `bash`; the hooks block it,
-//! annotate its result, add prompt context, time out, or never run.
+//! annotate its result, add prompt context, time out, or never run — never
+//! without the operator's approval of the hook's command and trigger.
 
 use std::{
 	future::ready,
@@ -21,11 +22,18 @@ use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
 use omp_driver::{
 	headless::kernel::{EnvToolExecutor, SettingsAdmission},
+	plugin_commands::{approve_launch, blocked_launches, plugin_launches},
 	plugin_hooks::{PluginHookHost, PluginHookSession},
 };
-use omp_envd::{AttachOptions, ProjectEnvironment, RegistryBridges, tool_settings::ApprovalMode};
-use omp_ext::claude_plugin::{
-	ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry, REGISTRY_FILE,
+use omp_envd::{
+	AttachOptions, ProjectEnvironment, RegistryBridges, mcp::McpConfigPaths,
+	tool_settings::ApprovalMode,
+};
+use omp_ext::{
+	claude_plugin::{
+		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry, REGISTRY_FILE,
+	},
+	plugin_command::{PluginCommandBlocked, PluginLaunchKind},
 };
 use omp_session::{ComponentRegistry, Session};
 use parking_lot::Mutex;
@@ -132,6 +140,33 @@ impl Fixture {
 		std::fs::write(&registry_path, serde_json::to_vec(&registry).expect("registry"))
 			.expect("registry file");
 		Self { scratch, root, data, plugin }
+	}
+
+	/// Approves every hook command the plugin currently declares, as
+	/// `omp ext trust hooky@m --approve-commands` does.
+	fn approved(self) -> Self {
+		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
+		for plugin in &plugins.plugins {
+			for launch in plugin_launches(plugin) {
+				approve_launch(
+					&self.data,
+					&plugin.id,
+					&plugin.version,
+					&launch,
+					Str::new_static("cli"),
+				)
+				.expect("persist approval");
+			}
+		}
+		self
+	}
+
+	/// Every hook launch of the plugin the operator has not approved.
+	fn blocked(&self) -> Vec<PluginCommandBlocked> {
+		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
+		let agent_plugins = McpConfigPaths::new(&self.scratch.path().join("home/.o2"), &self.root)
+			.with_command_approvals(plugins.command_approvals.clone());
+		blocked_launches(&plugins, &agent_plugins)
 	}
 
 	/// The plugin's `${CLAUDE_PLUGIN_DATA}`.
@@ -241,7 +276,8 @@ async fn pre_tool_use_exit_2_blocks_the_mapped_tool_with_stderr_as_the_reason() 
 		r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command",
 			"command":"cat > \"$CLAUDE_PLUGIN_DATA/pre.json\"; echo 'rm is not allowed here' >&2; exit 2"}]}]}}"#,
 		true,
-	);
+	)
+	.approved();
 	let outcome = fixture.run(BASH).await;
 	assert!(!fixture.root.join("marker.txt").exists(), "the blocked bash never ran");
 	assert!(
@@ -264,7 +300,8 @@ async fn pre_tool_use_json_decision_block_blocks_the_mapped_tool() {
 		r#"{"hooks":{"PreToolUse":[{"matcher":"Edit|Bash","hooks":[{"type":"command",
 			"command":"printf '%s' '{\"decision\":\"block\",\"reason\":\"json says no\"}'"}]}]}}"#,
 		true,
-	);
+	)
+	.approved();
 	let outcome = fixture.run(BASH).await;
 	eprintln!("DEBUGJOURNAL {}", outcome.journal);
 	assert!(!fixture.root.join("marker.txt").exists(), "the blocked bash never ran");
@@ -277,7 +314,8 @@ async fn post_tool_use_receives_the_tool_response_and_annotates_the_result() {
 		r#"{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command",
 			"command":"cat > \"$CLAUDE_PLUGIN_DATA/post.json\"; printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"post-context-7\"}}'"}]}]}}"#,
 		true,
-	);
+	)
+	.approved();
 	let outcome = fixture.run(BASH).await;
 	assert!(fixture.root.join("marker.txt").exists(), "PostToolUse never blocks");
 	let input = read(&fixture.plugin_data().join("post.json"));
@@ -304,7 +342,8 @@ async fn user_prompt_submit_context_reaches_the_model_as_hook_context() {
 		r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command",
 			"command":"printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"prompt-context-42\"},\"systemMessage\":\"hello from hooky\"}'"}]}]}}"#,
 		true,
-	);
+	)
+	.approved();
 	let outcome = fixture.run(BASH).await;
 	assert!(
 		outcome.requests[0].contains("prompt-context-42"),
@@ -325,7 +364,8 @@ async fn a_hook_past_its_timeout_is_terminated_and_reported_without_blocking() {
 		r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command",
 			"command":"sleep 30; exit 2","timeout":1}]}]}}"#,
 		true,
-	);
+	)
+	.approved();
 	let outcome = fixture.run(BASH).await;
 	assert!(fixture.root.join("marker.txt").exists(), "a timed-out hook renders no decision");
 	assert!(
@@ -356,7 +396,8 @@ async fn commands_run_in_the_in_process_shell_with_the_plugin_root_expanded_and_
 			"command":"printf '%s|%s|%s|%s' \"${CLAUDE_PLUGIN_ROOT}\" \"$CLAUDE_PLUGIN_ROOT\" \"$(type -t cat)\" \"$(pwd):$PWD\" > \"${CLAUDE_PLUGIN_ROOT}/env.txt\""},
 			{"type":"command","command":"touch","args":["${CLAUDE_PLUGIN_ROOT}/it's exec form.txt"]}]}]}}"#,
 		true,
-	);
+	)
+	.approved();
 	fixture.run(BASH).await;
 	let root = std::fs::canonicalize(&fixture.plugin).expect("plugin root");
 	let workspace = std::fs::canonicalize(&fixture.root).expect("workspace");
@@ -383,7 +424,8 @@ async fn a_blocking_stop_hook_continues_the_loop_with_its_reason() {
 		r#"{"hooks":{"Stop":[{"hooks":[{"type":"command",
 			"command":"if [ -f \"$CLAUDE_PLUGIN_DATA/once\" ]; then exit 0; fi; touch \"$CLAUDE_PLUGIN_DATA/once\"; echo 'run the tests first' >&2; exit 2"}]}]}}"#,
 		true,
-	);
+	)
+	.approved();
 	let outcome = fixture.run(BASH).await;
 	assert_eq!(outcome.requests.len(), 3, "the stop was blocked once: {:?}", outcome.requests);
 	assert!(
@@ -391,4 +433,59 @@ async fn a_blocking_stop_hook_continues_the_loop_with_its_reason() {
 		"the continuation carries the reason: {:?}",
 		outcome.requests
 	);
+}
+
+const GUARD: &str = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command",
+	"command":"touch \"$CLAUDE_PLUGIN_DATA/ran\"; echo 'guarded' >&2; exit 2"}]}]}}"#;
+
+#[tokio::test]
+async fn an_unapproved_hook_is_never_registered_and_is_named() {
+	let fixture = Fixture::new(GUARD, true);
+	let blocked = fixture.blocked();
+	let [hook] = &blocked[..] else {
+		panic!("the hook awaits approval: {blocked:?}");
+	};
+	assert_eq!(hook.kind, PluginLaunchKind::Hook);
+	assert_eq!(hook.plugin, "hooky@m");
+	assert_eq!(hook.server, "PreToolUse Bash", "the notice names the event and matcher");
+	let notice = hook.to_string();
+	assert!(notice.contains(r#"would run `touch "$CLAUDE_PLUGIN_DATA/ran";"#), "{notice}");
+	assert!(
+		notice.contains(&format!("omp ext trust hooky@m --approve-command {}", hook.digest)),
+		"{notice}"
+	);
+
+	let outcome = fixture.run(BASH).await;
+	assert!(!outcome.installed, "no approved hook, no hook host");
+	assert!(fixture.root.join("marker.txt").exists(), "nothing blocked the call");
+	assert!(!fixture.plugin_data().join("ran").exists(), "the hook never ran");
+	assert!(!outcome.journal.contains("guarded"), "{}", outcome.journal);
+}
+
+#[tokio::test]
+async fn an_approved_hook_is_asked_again_when_its_command_or_trigger_changes() {
+	// Every other test here runs an approved hook.
+	let fixture = Fixture::new(GUARD, true).approved();
+	assert!(fixture.blocked().is_empty());
+
+	// Widening the matcher changes when the command runs: asked again.
+	let widened = GUARD.replace(r#""matcher":"Bash""#, r#""matcher":"Bash|Edit""#);
+	std::fs::write(fixture.plugin.join("hooks/hooks.json"), &widened).expect("widen");
+	assert_eq!(
+		fixture
+			.blocked()
+			.iter()
+			.map(|blocked| blocked.server.as_str())
+			.collect::<Vec<_>>(),
+		["PreToolUse Bash|Edit"]
+	);
+
+	// A changed command is a new approval; the old one admits nothing.
+	let changed = GUARD.replace("guarded", "changed");
+	std::fs::write(fixture.plugin.join("hooks/hooks.json"), &changed).expect("change");
+	assert_eq!(fixture.blocked().len(), 1);
+	let outcome = fixture.run(BASH).await;
+	assert!(!outcome.installed, "the changed hook is not registered");
+	assert!(fixture.root.join("marker.txt").exists(), "nothing blocked the call");
+	assert!(!fixture.plugin_data().join("ran").exists(), "the changed hook never ran");
 }

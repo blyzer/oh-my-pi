@@ -16,7 +16,7 @@ use omp_ext::{
 	claude_plugin::{
 		ClaudePlugin, ConfigDeclaration, PluginScope, expand_plugin_vars, resolve_plugin_command,
 	},
-	plugin_command::{PluginLaunch, PluginLaunchKind},
+	plugin_command::{CommandApprovals, PluginLaunch, PluginLaunchKind},
 };
 use serde::Deserialize;
 
@@ -27,6 +27,7 @@ use super::{
 		TransportKind,
 	},
 };
+use crate::plugin_commands::AgentPluginLaunches;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,8 +137,10 @@ struct ClaudeUserDocument {
 #[derive(Debug, Deserialize)]
 struct AgentPluginManifest {
 	#[serde(rename = "$schema")]
-	schema: Str,
-	name:   Str,
+	schema:  Str,
+	name:    Str,
+	#[serde(default)]
+	version: Option<Str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,22 +214,8 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 		JsonShape::Common,
 	);
 
-	let user_config_root = paths.user.parent().unwrap_or(home);
-	let plugin_data_root = user_config_root.join("agent/plugin-data");
-	push_agent_plugins(&mut sources, &plugin_data_root, &[
-		(project.join(".omp/extensions"), ConfigSourceKind::AgentPluginProject),
-		(project.join(".agent/plugins"), ConfigSourceKind::AgentPluginProject),
-		(project.join(".agents/plugins"), ConfigSourceKind::AgentPluginProject),
-		(user_config_root.join("extensions"), ConfigSourceKind::AgentPluginUser),
-		(user_config_root.join("agent/plugins"), ConfigSourceKind::AgentPluginUser),
-	]);
-	for root in &paths.agent_plugin_roots {
-		push_agent_plugin_root(
-			&mut sources,
-			&plugin_data_root,
-			root,
-			ConfigSourceKind::AgentPluginProject,
-		);
+	for plugin in agent_plugins(paths) {
+		push_agent_plugin(&mut sources, plugin, &paths.command_approvals);
 	}
 	push_claude_plugins(&mut sources, &paths.claude_plugins);
 
@@ -296,16 +285,39 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	sources
 }
 
-fn push_agent_plugins(
-	out: &mut Vec<ConfigSource>,
-	data_root: &Path,
-	containers: &[(PathBuf, ConfigSourceKind)],
-) {
-	for (container, kind) in containers {
-		let Ok(container_root) = fs::canonicalize(container) else {
+/// One Agent Plugins 1.0 package's MCP declaration, normalized.
+struct AgentPluginMcp {
+	/// Manifest `name`: the package's approval identity.
+	name:    Str,
+	/// Manifest `version`; empty when the manifest records none.
+	version: Str,
+	/// Canonical package root.
+	root:    PathBuf,
+	/// The contained `mcp.json`.
+	path:    PathBuf,
+	kind:    ConfigSourceKind,
+	/// Normalized servers in name order.
+	servers: Vec<(Str, McpServerConfig)>,
+}
+
+/// Every Agent Plugins package the project and user plugin directories hold,
+/// then every explicit root, in discovery precedence order.
+fn agent_plugins(paths: &McpConfigPaths) -> Vec<AgentPluginMcp> {
+	let project = paths.root.parent().unwrap_or_else(|| Path::new("."));
+	let user_config_root = paths.user.parent().unwrap_or(&paths.home);
+	let plugin_data_root = user_config_root.join("agent/plugin-data");
+	let mut plugins = Vec::new();
+	for (container, kind) in [
+		(project.join(".omp/extensions"), ConfigSourceKind::AgentPluginProject),
+		(project.join(".agent/plugins"), ConfigSourceKind::AgentPluginProject),
+		(project.join(".agents/plugins"), ConfigSourceKind::AgentPluginProject),
+		(user_config_root.join("extensions"), ConfigSourceKind::AgentPluginUser),
+		(user_config_root.join("agent/plugins"), ConfigSourceKind::AgentPluginUser),
+	] {
+		let Ok(container_root) = fs::canonicalize(&container) else {
 			continue;
 		};
-		let Ok(entries) = fs::read_dir(container) else {
+		let Ok(entries) = fs::read_dir(&container) else {
 			continue;
 		};
 		let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
@@ -318,65 +330,124 @@ fn push_agent_plugins(
 				tracing::warn!(path = %entry.path().display(), "ignored Agent Plugin outside its discovery root");
 				continue;
 			}
-			push_agent_plugin_root(out, data_root, &root, *kind);
+			plugins.extend(read_agent_plugin(&plugin_data_root, &root, kind));
 		}
 	}
+	for root in &paths.agent_plugin_roots {
+		plugins.extend(read_agent_plugin(
+			&plugin_data_root,
+			root,
+			ConfigSourceKind::AgentPluginProject,
+		));
+	}
+	plugins
 }
 
-fn push_agent_plugin_root(
-	out: &mut Vec<ConfigSource>,
+fn read_agent_plugin(
 	data_root: &Path,
 	root: &Path,
 	kind: ConfigSourceKind,
-) {
-	let Ok(root) = fs::canonicalize(root) else {
-		return;
-	};
-	let Ok(manifest_path) = fs::canonicalize(root.join("plugin.json")) else {
-		return;
-	};
+) -> Option<AgentPluginMcp> {
+	let root = fs::canonicalize(root).ok()?;
+	let manifest_path = fs::canonicalize(root.join("plugin.json")).ok()?;
 	if !manifest_path.starts_with(&root) {
 		tracing::warn!(path = %manifest_path.display(), "ignored Agent Plugin manifest outside its package");
-		return;
+		return None;
 	}
-	let Ok(body) = fs::read_to_string(manifest_path) else {
-		return;
-	};
-	let Ok(manifest) = serde_json::from_str::<AgentPluginManifest>(&body) else {
-		return;
-	};
+	let body = fs::read_to_string(manifest_path).ok()?;
+	let manifest = serde_json::from_str::<AgentPluginManifest>(&body).ok()?;
 	if manifest.schema != AGENT_PLUGIN_SCHEMA || !safe_plugin_name(&manifest.name) {
-		return;
+		return None;
 	}
 	let configured = root.join("mcp.json");
-	let Ok(real) = fs::canonicalize(&configured) else {
-		return;
-	};
+	let real = fs::canonicalize(&configured).ok()?;
 	if !real.starts_with(&root) {
 		tracing::warn!(path = %configured.display(), "ignored Agent Plugin MCP file outside its package");
-		return;
+		return None;
 	}
-	let Some(mut document) = read_json::<AgentPluginMcpDocument>(&real) else {
-		return;
-	};
+	let document = read_json::<AgentPluginMcpDocument>(&real)?;
 	if document.schema != AGENT_PLUGIN_MCP_SCHEMA {
 		tracing::warn!(path = %real.display(), "ignored unsupported Agent Plugin MCP schema");
-		return;
+		return None;
 	}
 	let data = data_root.join(manifest.name.as_str());
-	for server in document.mcp_servers.values_mut() {
-		server.plugin_data = Some(data.clone());
-		server
-			.env
-			.insert(Str::new_static("PLUGIN_ROOT"), Str::new(root.to_string_lossy()));
-		server
-			.env
-			.insert(Str::new_static("PLUGIN_DATA"), Str::new(data.to_string_lossy()));
-		if server.cwd.is_none() && server.command.is_some() {
-			server.cwd = Some(root.clone());
+	let base = real
+		.parent()
+		.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+	let servers = document
+		.mcp_servers
+		.into_iter()
+		.filter_map(|(name, mut server)| {
+			server.plugin_data = Some(data.clone());
+			server
+				.env
+				.insert(Str::new_static("PLUGIN_ROOT"), Str::new(root.to_string_lossy()));
+			server
+				.env
+				.insert(Str::new_static("PLUGIN_DATA"), Str::new(data.to_string_lossy()));
+			if server.cwd.is_none() && server.command.is_some() {
+				server.cwd = Some(root.clone());
+			}
+			let normalized = server.normalize(&base);
+			if normalized.is_none() {
+				tracing::warn!(path = %real.display(), server = %name, "ignored malformed foreign MCP declaration");
+			}
+			Some((name, normalized?))
+		})
+		.collect();
+	Some(AgentPluginMcp {
+		name: manifest.name,
+		version: manifest.version.unwrap_or_default(),
+		root,
+		path: real,
+		kind,
+		servers,
+	})
+}
+
+/// One Agent Plugins package's servers. A stdio server whose launch the
+/// operator has not approved under the package's manifest name
+/// ([`CommandApprovals::admit`]) is left out, so it never starts.
+fn push_agent_plugin(
+	out: &mut Vec<ConfigSource>,
+	plugin: AgentPluginMcp,
+	approvals: &CommandApprovals,
+) {
+	let mut file = McpConfigFile::default();
+	for (name, server) in plugin.servers {
+		if let Some(launch) = plugin_mcp_launch(&name, &server)
+			&& let Err(blocked) = approvals.admit(&plugin.name, &plugin.version, launch)
+		{
+			tracing::warn!(
+				error = &blocked as &(dyn std::error::Error + 'static),
+				"Agent Plugin MCP server not started"
+			);
+			continue;
 		}
+		file.mcp_servers.insert(name, server);
 	}
-	push_document(out, real, kind, document.mcp_servers);
+	if !file.mcp_servers.is_empty() {
+		out.push(ConfigSource { path: plugin.path, kind: plugin.kind, file });
+	}
+}
+
+/// Every Agent Plugins package discovery would load for `paths`, with the
+/// stdio launches its MCP declaration performs, exactly as discovery gates
+/// them.
+pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches> {
+	agent_plugins(paths)
+		.into_iter()
+		.map(|plugin| AgentPluginLaunches {
+			launches: plugin
+				.servers
+				.iter()
+				.filter_map(|(name, server)| plugin_mcp_launch(name, server))
+				.collect(),
+			plugin:   plugin.name,
+			version:  plugin.version,
+			root:     plugin.root,
+		})
+		.collect()
 }
 
 /// Installed Claude-layout marketplace plugins: each `.mcp.json` or manifest
@@ -423,16 +494,24 @@ pub fn plugin_mcp_launches(plugin: &ClaudePlugin) -> impl Iterator<Item = Plugin
 /// The launch a normalized plugin MCP server performs: stdio servers only.
 fn plugin_mcp_launch(name: &Str, server: &McpServerConfig) -> Option<PluginLaunch> {
 	let command = server.command.clone()?;
-	Some(PluginLaunch::new(
-		PluginLaunchKind::McpServer,
-		name.clone(),
-		command,
-		server.args.iter().cloned(),
-		server
-			.env
-			.iter()
-			.map(|(name, value)| (name.clone(), value.clone())),
-	))
+	Some(
+		PluginLaunch::new(
+			PluginLaunchKind::McpServer,
+			name.clone(),
+			command,
+			server.args.iter().cloned(),
+			server
+				.env
+				.iter()
+				.map(|(name, value)| (name.clone(), value.clone())),
+		)
+		.with_cwd(
+			server
+				.cwd
+				.as_ref()
+				.map(|cwd| Str::new(cwd.to_string_lossy())),
+		),
+	)
 }
 
 /// `plugin`'s MCP declarations, each with its normalized, namespaced servers.
@@ -859,10 +938,12 @@ mod tests {
 		write(&outside, r#"{"mcpServers":{"escaped":{"command":"bad"}}}"#);
 		symlink(&outside, escaped.join("mcp.json")).unwrap();
 
-		let discovered = sources(
-			&McpConfigPaths::new(&home.join(".o2"), &project)
-				.with_agent_plugin_roots(vec![plugin.clone(), escaped]),
-		);
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project)
+			.with_agent_plugin_roots(vec![plugin.clone(), escaped]);
+		let paths = paths
+			.clone()
+			.with_command_approvals(approve_agent_plugins(&paths));
+		let discovered = sources(&paths);
 		let resolved = super::super::config::resolve_sources(&discovered, true);
 		let expected = fs::canonicalize(&plugin).unwrap().join("server");
 		assert_eq!(
@@ -878,6 +959,124 @@ mod tests {
 			)
 		);
 		assert!(!resolved.servers.contains_key("escaped"));
+	}
+
+	/// Approvals of every Agent Plugins launch `paths` discovers, as the
+	/// operator's `omp ext trust <name> --approve-commands` records them.
+	fn approve_agent_plugins(paths: &McpConfigPaths) -> CommandApprovals {
+		CommandApprovals::new(
+			crate::plugin_commands::agent_plugin_launches(paths)
+				.iter()
+				.flat_map(|package| {
+					package
+						.launches
+						.iter()
+						.map(|launch| (package.plugin.clone(), package.command_digest(launch)))
+				}),
+		)
+	}
+
+	fn agent_plugin(root: &Path, name: &str, servers: &str) {
+		write(
+			&root.join("plugin.json"),
+			&format!(
+				r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"{name}","version":"2.0.0"}}"#
+			),
+		);
+		write(
+			&root.join("mcp.json"),
+			&format!(
+				r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{servers}}}"#
+			),
+		);
+	}
+
+	#[test]
+	fn unapproved_agent_plugin_stdio_servers_never_reach_the_roster() {
+		let temp = tempfile::tempdir().unwrap();
+		let home = temp.path().join("home");
+		let project = temp.path().join("project");
+		let servers = r#"{
+			"local":{"type":"stdio","command":"${PLUGIN_ROOT}/server","args":["--stdio"]},
+			"other":{"type":"stdio","command":"other-server"},
+			"remote":{"type":"http","url":"https://example.test/mcp"}}"#;
+		// Discovered in the project's plugin directory, and passed explicitly.
+		agent_plugin(&project.join(".agents/plugins/portable"), "portable", servers);
+		let explicit = temp.path().join("explicit");
+		agent_plugin(&explicit, "explicit", r#"{"tool":{"command":"./tool"}}"#);
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project)
+			.with_agent_plugin_roots(vec![explicit.clone()]);
+
+		let packages = crate::plugin_commands::agent_plugin_launches(&paths);
+		assert_eq!(
+			packages
+				.iter()
+				.map(|package| (
+					package.plugin.as_str(),
+					package.version.as_str(),
+					package.launches.len()
+				))
+				.collect::<Vec<_>>(),
+			[("portable", "2.0.0", 2), ("explicit", "2.0.0", 1)],
+			"only stdio servers launch a process"
+		);
+		let portable = &packages[0];
+		let root = fs::canonicalize(project.join(".agents/plugins/portable")).unwrap();
+		let local = &portable.launches[0];
+		assert_eq!(local.command, Str::new(root.join("server").to_string_lossy()));
+		assert_eq!(local.cwd.as_deref(), Some(root.to_string_lossy().as_ref()));
+		assert!(
+			local
+				.env
+				.iter()
+				.any(|(name, value)| name == "PLUGIN_ROOT" && value.as_str() == root.to_string_lossy()),
+			"the package root is part of the approval key: {local:?}"
+		);
+
+		let blocked = crate::plugin_commands::blocked_agent_plugin_launches(&paths);
+		assert_eq!(
+			blocked
+				.iter()
+				.map(|blocked| (blocked.plugin.as_str(), blocked.server.as_str()))
+				.collect::<Vec<_>>(),
+			[("portable", "local"), ("portable", "other"), ("explicit", "tool")]
+		);
+		assert!(
+			blocked[0]
+				.to_string()
+				.contains(&format!("omp ext trust portable --approve-command {}", blocked[0].digest)),
+			"{}",
+			blocked[0]
+		);
+		let resolved = super::super::config::resolve_sources(&sources(&paths), true);
+		assert!(!resolved.servers.contains_key("local"), "an unapproved server loaded");
+		assert!(!resolved.servers.contains_key("tool"), "an unapproved server loaded");
+		assert!(resolved.servers.contains_key("remote"), "a remote server needs no approval");
+
+		// One approval admits exactly its server; approvals never cross
+		// package names.
+		let approved = paths.clone().with_command_approvals(CommandApprovals::new([
+			(Str::new_static("portable"), portable.command_digest(local)),
+			(Str::new_static("explicit"), portable.command_digest(&portable.launches[1])),
+		]));
+		let resolved = super::super::config::resolve_sources(&sources(&approved), true);
+		assert!(resolved.servers.contains_key("local"));
+		assert!(!resolved.servers.contains_key("other"));
+		assert!(!resolved.servers.contains_key("tool"));
+		let all = paths
+			.clone()
+			.with_command_approvals(approve_agent_plugins(&paths));
+		assert!(crate::plugin_commands::blocked_agent_plugin_launches(&all).is_empty());
+		let resolved = super::super::config::resolve_sources(&sources(&all), true);
+		assert!(
+			["local", "other", "tool", "remote"]
+				.iter()
+				.all(|name| resolved.servers.contains_key(*name))
+		);
+
+		// An edited command line, or a moved working directory, asks again.
+		agent_plugin(&explicit, "explicit", r#"{"tool":{"command":"./tool","cwd":"sub"}}"#);
+		assert_eq!(crate::plugin_commands::blocked_agent_plugin_launches(&all).len(), 1);
 	}
 
 	fn install_plugins(registry: &Path, entries: &[(&str, &Path, bool)]) {

@@ -12,6 +12,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use futures::StreamExt as _;
 use miette::{Diagnostic, IntoDiagnostic as _, miette};
 use omp_core::{Hash32, Str, base64, encoding::hex, sf};
+use omp_driver::plugin_commands::PluginCommandSet;
 use omp_env::{BundleFile, pack_bundle, unpack_bundle};
 use omp_ext::{
 	Layer as BackendLayer,
@@ -25,6 +26,7 @@ use omp_ext::{
 		InstalledExtension, InstalledRecord, LockFile, LockedExtension, LockedPackage, Wheel,
 		index_source,
 	},
+	plugin_command::CommandApprovals,
 	resolver::{ResolvePlan, ResolveRequirement, SystemUv, compare_versions, minimal_unsat_core},
 	trust::{
 		Grant, GrantsFile, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
@@ -524,10 +526,11 @@ pub struct ExtDoctorArgs {
 /// Options for `omp ext trust`.
 #[derive(Clone, Debug, Args)]
 pub struct ExtTrustArgs {
-	/// Extension identity, or an installed plugin id (`name@marketplace`).
+	/// Extension identity, an installed plugin id (`name@marketplace`), or an
+	/// Agent Plugins package's manifest name.
 	pub id:               Str,
-	/// Print the current trust grant, and an installed plugin's commands with
-	/// their approval state, only.
+	/// Print the current trust grant, and a plugin's commands with their
+	/// approval state, only.
 	#[arg(long)]
 	pub show:             bool,
 	/// Change containment tier after consent.
@@ -543,14 +546,20 @@ pub struct ExtTrustArgs {
 	/// uninstalling.
 	#[arg(long)]
 	pub revoke:           bool,
-	/// Approve the installed plugin's command with this digest, as the notice
-	/// that reported it blocked names it; repeatable.
+	/// Approve the plugin's command with this digest, as the notice that
+	/// reported it blocked names it; repeatable.
 	#[arg(long, value_name = "DIGEST", conflicts_with_all = ["show", "revoke"])]
 	pub approve_command:  Vec<Str>,
-	/// Approve every command the installed plugin currently launches (its
-	/// stdio MCP servers, language servers, and debug adapters).
+	/// Approve every command the plugin currently launches (an installed
+	/// plugin's stdio MCP servers, language servers, debug adapters, and
+	/// hooks; an Agent Plugins package's stdio MCP servers).
 	#[arg(long, conflicts_with_all = ["show", "revoke"])]
 	pub approve_commands: bool,
+	/// An Agent Plugins package root a session loads with `--plugin-dir` or
+	/// `--extension`, so `--show` and `--approve-command(s)` see its
+	/// commands; repeatable.
+	#[arg(long, value_name = "PATH")]
+	pub plugin_dir:       Vec<PathBuf>,
 }
 
 /// Options for `omp ext verify`.
@@ -1810,7 +1819,7 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 	}
 	let mut grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
 	if args.show {
-		show_plugin_commands(state, data_dir, &args.id);
+		show_plugin_commands(state, data_dir, &args, &mut std::io::stdout().lock())?;
 		let keys = KeysFile::read(&state.keys).map_err(extension_failure)?;
 		let key = keys
 			.keys
@@ -1936,57 +1945,80 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 	grants.write(&state.grants).into_diagnostic()
 }
 
-/// The installed, enabled plugin `id` as the runtime resolves it, with its
-/// currently approved commands.
-fn resolved_plugin(
+/// Every command the plugin identity `id` launches as a session in the
+/// project resolves it (the installed plugin `id`, and each Agent Plugins
+/// package named `id` in the plugin directories, `plugin_dirs`, or installed
+/// as `id`), with the operator's current approvals.
+fn plugin_command_sets(
 	state: &StatePaths,
 	data_dir: &Path,
 	id: &str,
-) -> Option<omp_ext::claude_plugin::ClaudePlugin> {
-	omp_ext::claude_plugin::ClaudePlugins::resolve(
+	plugin_dirs: &[PathBuf],
+) -> miette::Result<(Vec<PluginCommandSet>, CommandApprovals)> {
+	let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(
 		data_dir,
 		&state.project,
 		omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
-	)
-	.plugins
-	.into_iter()
-	.find(|plugin| plugin.id == id)
+	);
+	let plugin_dirs = plugin_dirs
+		.iter()
+		.map(|root| fs::canonicalize(root).into_diagnostic())
+		.collect::<miette::Result<Vec<_>>>()?;
+	let agent_plugins =
+		omp_driver::plugin_commands::agent_plugin_paths(&state.project, &plugin_dirs, &plugins)
+			.into_diagnostic()?;
+	let sets = omp_driver::plugin_commands::command_sets(id, &plugins, &agent_plugins);
+	Ok((sets, plugins.command_approvals))
 }
 
-/// `omp ext trust <plugin> --show`: every command the plugin launches and
-/// whether it is approved. Silent for an id that is no installed plugin.
-fn show_plugin_commands(state: &StatePaths, data_dir: &Path, id: &str) {
-	let Some(plugin) = resolved_plugin(state, data_dir, id) else {
-		return;
-	};
-	for launch in omp_driver::plugin_commands::plugin_launches(&plugin) {
-		let status = if plugin.launch_approved(&launch) {
-			"approved"
-		} else {
-			"blocked"
-		};
-		println!(
-			"{} {} `{}` {status} digest={} command={}",
-			plugin.id,
-			launch.kind,
-			launch.server,
-			plugin.command_digest(&launch),
-			launch.command_line(),
-		);
+/// `omp ext trust <plugin> --show`: writes every command the plugin
+/// launches and whether it is approved to `out`. Silent for an id that names
+/// no plugin.
+fn show_plugin_commands(
+	state: &StatePaths,
+	data_dir: &Path,
+	args: &ExtTrustArgs,
+	out: &mut impl std::io::Write,
+) -> miette::Result<()> {
+	let (sets, approvals) = plugin_command_sets(state, data_dir, &args.id, &args.plugin_dir)?;
+	for set in &sets {
+		for launch in &set.launches {
+			let digest = set.command_digest(launch);
+			let status = if approvals.approves(&set.plugin, &digest) {
+				"approved"
+			} else {
+				"blocked"
+			};
+			writeln!(
+				out,
+				"{} {} `{}` {status} digest={digest} command={}",
+				set.plugin,
+				launch.kind,
+				launch.server,
+				launch.command_line(),
+			)
+			.into_diagnostic()?;
+		}
 	}
+	Ok(())
 }
 
 /// `omp ext trust <plugin> --approve-command <digest>` / `--approve-commands`:
 /// records the operator's approval of the plugin's named (or every) current
-/// command in the local grant file; the next session starts them.
+/// command in the local grant file; the next session runs them.
 fn approve_plugin_commands(
 	state: &StatePaths,
 	data_dir: &Path,
 	args: &ExtTrustArgs,
 ) -> miette::Result<()> {
-	let plugin = resolved_plugin(state, data_dir, &args.id)
-		.ok_or_else(|| miette!("{} is not an installed, enabled plugin", args.id))?;
-	let launches = omp_driver::plugin_commands::plugin_launches(&plugin);
+	let (sets, _) = plugin_command_sets(state, data_dir, &args.id, &args.plugin_dir)?;
+	if sets.is_empty() {
+		return Err(miette!(
+			"{} is neither an installed, enabled plugin nor an Agent Plugins package this project \
+			 loads (pass --plugin-dir for a package loaded with --plugin-dir)",
+			args.id
+		));
+	}
 	let requested = args
 		.approve_command
 		.iter()
@@ -2000,10 +2032,11 @@ fn approve_plugin_commands(
 		})
 		.collect::<miette::Result<Vec<_>>>()?;
 	for digest in &requested {
-		if !launches
-			.iter()
-			.any(|launch| plugin.command_digest(launch) == *digest)
-		{
+		if !sets.iter().any(|set| {
+			set.launches
+				.iter()
+				.any(|launch| set.command_digest(launch) == *digest)
+		}) {
 			return Err(miette!(
 				"{} declares no command with digest {digest}; `omp ext trust {} --show` lists them",
 				args.id,
@@ -2011,29 +2044,33 @@ fn approve_plugin_commands(
 			));
 		}
 	}
-	let selected = launches
-		.iter()
-		.filter(|launch| args.approve_commands || requested.contains(&plugin.command_digest(launch)));
 	let mut approved = 0_usize;
-	for launch in selected {
-		omp_driver::plugin_commands::approve_launch(
-			data_dir,
-			&plugin,
-			launch,
-			Str::new_static("cli"),
-		)
-		.into_diagnostic()?;
-		approved += 1;
-		println!(
-			"approved {} {} `{}`: {}",
-			plugin.id,
-			launch.kind,
-			launch.server,
-			launch.command_line()
-		);
+	for set in &sets {
+		let selected = set
+			.launches
+			.iter()
+			.filter(|launch| args.approve_commands || requested.contains(&set.command_digest(launch)));
+		for launch in selected {
+			omp_driver::plugin_commands::approve_launch(
+				data_dir,
+				&set.plugin,
+				&set.version,
+				launch,
+				Str::new_static("cli"),
+			)
+			.into_diagnostic()?;
+			approved += 1;
+			println!(
+				"approved {} {} `{}`: {}",
+				set.plugin,
+				launch.kind,
+				launch.server,
+				launch.command_line()
+			);
+		}
 	}
 	if approved == 0 {
-		println!("{} launches no commands", plugin.id);
+		println!("{} launches no commands", args.id);
 	}
 	Ok(())
 }
@@ -3441,16 +3478,41 @@ mod tests {
 			revoke:           false,
 			approve_command:  Vec::new(),
 			approve_commands: false,
+			plugin_dir:       Vec::new(),
 		})
 		.expect("linked trust tier mutation");
 		let trusted = InstalledRecord::read(&state.client_installed).expect("trusted install record");
 		assert_eq!(trusted.extensions[0].tier, omp_ext::TrustTier::Trusted);
 	}
 
+	fn trust_args(id: &'static str) -> ExtTrustArgs {
+		ExtTrustArgs {
+			id:               Str::new_static(id),
+			show:             false,
+			tier:             None,
+			ship:             None,
+			key:              None,
+			revoke:           false,
+			approve_command:  Vec::new(),
+			approve_commands: false,
+			plugin_dir:       Vec::new(),
+		}
+	}
+
+	/// The `--show` rows for `args.id`.
+	fn shown(state: &StatePaths, data: &Path, args: &ExtTrustArgs) -> String {
+		let mut out = Vec::new();
+		show_plugin_commands(state, data, args, &mut out).expect("show plugin commands");
+		String::from_utf8(out).expect("UTF-8 rows")
+	}
+
 	#[test]
 	fn plugin_commands_are_approved_by_digest_or_all_at_once_and_revoked() {
-		use omp_ext::claude_plugin::{
-			ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
+		use omp_ext::{
+			claude_plugin::{
+				ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
+			},
+			plugin_command::PluginLaunchKind,
 		};
 
 		let tree = tempfile::tempdir().expect("temporary tree");
@@ -3458,7 +3520,7 @@ mod tests {
 		let project = tree.path().join("project");
 		fs::create_dir_all(&project).expect("project");
 		let root = data.join("plugins/cache/plugins/market___tools___1.0.0");
-		fs::create_dir_all(&root).expect("plugin root");
+		fs::create_dir_all(root.join("hooks")).expect("plugin root");
 		fs::write(
 			root.join(".lsp.json"),
 			r#"{"acme":{"command":"acme-lsp","extensionToLanguage":{".acme":"acme"}}}"#,
@@ -3466,6 +3528,11 @@ mod tests {
 		.expect("lsp declaration");
 		fs::write(root.join(".mcp.json"), r#"{"mcpServers":{"db":{"command":"db-server"}}}"#)
 			.expect("mcp declaration");
+		fs::write(
+			root.join("hooks/hooks.json"),
+			r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/guard.sh"}]}]}}"#,
+		)
+		.expect("hook declaration");
 		let mut registry = InstalledPluginsRegistry::default();
 		registry
 			.plugins
@@ -3484,27 +3551,40 @@ mod tests {
 		)
 		.expect("write registry");
 		let state = StatePaths::new(&data, &project);
+		let home = tree.path().join("home/.o2");
 		let blocked = || {
-			omp_driver::plugin_commands::blocked_launches(&ClaudePlugins::resolve(
-				&data, &project, None,
-			))
+			let plugins = ClaudePlugins::resolve(&data, &project, None);
+			let agent_plugins = omp_envd::mcp::McpConfigPaths::new(&home, &project)
+				.with_command_approvals(plugins.command_approvals.clone());
+			omp_driver::plugin_commands::blocked_launches(&plugins, &agent_plugins)
 		};
 		let args = |approve_command: Vec<Str>, approve_commands: bool, revoke: bool| ExtTrustArgs {
-			id: Str::new_static("tools@market"),
-			show: false,
-			tier: None,
-			ship: None,
-			key: None,
 			revoke,
 			approve_command,
 			approve_commands,
+			..trust_args("tools@market")
 		};
 		let pending = blocked();
-		assert_eq!(pending.len(), 2, "{pending:?}");
+		assert_eq!(pending.len(), 3, "{pending:?}");
 		let lsp = pending
 			.iter()
 			.find(|blocked| blocked.server == "acme")
 			.expect("blocked language server");
+		let hook = pending
+			.iter()
+			.find(|blocked| blocked.kind == PluginLaunchKind::Hook)
+			.expect("blocked hook");
+		assert_eq!(hook.server, "PreToolUse Bash");
+		assert!(hook.command().ends_with("/guard.sh"), "{hook}");
+		let rows = shown(&state, &data, &trust_args("tools@market"));
+		assert_eq!(rows.lines().count(), 3, "{rows}");
+		assert!(
+			rows.contains(&format!(
+				"tools@market hook `PreToolUse Bash` blocked digest={}",
+				hook.digest
+			)),
+			"{rows}"
+		);
 
 		let unknown =
 			trust(&state, &data, args(vec![Str::new(Hash32::sum(b"x").to_hex())], false, false))
@@ -3518,20 +3598,101 @@ mod tests {
 				.iter()
 				.map(|blocked| blocked.server.as_str())
 				.collect::<Vec<_>>(),
-			["tools:db"]
+			["tools:db", "PreToolUse Bash"]
 		);
 
 		trust(&state, &data, args(Vec::new(), true, false)).expect("approve every command");
 		assert!(blocked().is_empty());
+		let rows = shown(&state, &data, &trust_args("tools@market"));
+		assert_eq!(rows.matches(" approved digest=").count(), 3, "{rows}");
 
 		trust(&state, &data, args(Vec::new(), false, true)).expect("revoke");
-		assert_eq!(blocked().len(), 2);
+		assert_eq!(blocked().len(), 3);
 		assert!(
 			GrantsFile::read(&state.grants)
 				.expect("grants")
 				.plugin_commands
 				.is_empty()
 		);
+	}
+
+	#[test]
+	fn agent_plugin_stdio_servers_are_approved_under_their_manifest_name() {
+		use omp_ext::claude_plugin::ClaudePlugins;
+
+		let tree = tempfile::tempdir().expect("temporary tree");
+		let data = tree.path().join("data");
+		let project = tree.path().join("project");
+		let package = |root: &Path, name: &str| {
+			fs::create_dir_all(root).expect("package root");
+			fs::write(
+				root.join("plugin.json"),
+				format!(
+					r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"{name}","version":"1.2.0"}}"#
+				),
+			)
+			.expect("manifest");
+			fs::write(
+				root.join("mcp.json"),
+				r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{
+					"local":{"type":"stdio","command":"${PLUGIN_ROOT}/server","args":["--stdio"]},
+					"remote":{"type":"http","url":"https://example.test/mcp"}}}"#,
+			)
+			.expect("mcp declaration");
+		};
+		package(&project.join(".agents/plugins/portable"), "portable");
+		let outside = tree.path().join("outside");
+		package(&outside, "outside");
+		let state = StatePaths::new(&data, &project);
+		// What a session in the project reports, as `omp ext trust` resolves
+		// it (the user plugin directories may hold unrelated packages).
+		let blocked = |roots: Vec<PathBuf>| {
+			let plugins = ClaudePlugins::resolve(&data, &project, None);
+			let agent_plugins =
+				omp_driver::plugin_commands::agent_plugin_paths(&project, &roots, &plugins)
+					.expect("agent plugin discovery");
+			omp_driver::plugin_commands::blocked_launches(&plugins, &agent_plugins)
+				.into_iter()
+				.filter(|blocked| matches!(blocked.plugin.as_str(), "portable" | "outside"))
+				.collect::<Vec<_>>()
+		};
+
+		let pending = blocked(Vec::new());
+		let [local] = &pending[..] else {
+			panic!("the stdio server alone is blocked: {pending:?}");
+		};
+		assert_eq!((local.plugin.as_str(), local.server.as_str()), ("portable", "local"));
+		assert!(
+			local
+				.to_string()
+				.contains(&format!("omp ext trust portable --approve-command {}", local.digest)),
+			"{local}"
+		);
+		assert!(
+			shown(&state, &data, &trust_args("portable"))
+				.contains(&format!("portable MCP server `local` blocked digest={}", local.digest))
+		);
+		trust(&state, &data, ExtTrustArgs {
+			approve_command: vec![Str::new(local.digest.to_hex())],
+			..trust_args("portable")
+		})
+		.expect("approve the package's server");
+		assert!(blocked(Vec::new()).is_empty());
+
+		// A package loaded with `--plugin-dir` is found only through it.
+		let outside_root = fs::canonicalize(&outside).expect("canonical package");
+		assert_eq!(blocked(vec![outside_root.clone()]).len(), 1);
+		let missing =
+			trust(&state, &data, ExtTrustArgs { approve_commands: true, ..trust_args("outside") })
+				.expect_err("the package is not discovered without its root");
+		assert!(missing.to_string().contains("--plugin-dir"), "{missing}");
+		trust(&state, &data, ExtTrustArgs {
+			approve_commands: true,
+			plugin_dir: vec![outside],
+			..trust_args("outside")
+		})
+		.expect("approve the explicit package's servers");
+		assert!(blocked(vec![outside_root]).is_empty());
 	}
 
 	#[test]

@@ -15,9 +15,8 @@ use thiserror::Error;
 
 use super::{
 	ExtensionCode, ExtensionError, Layer, TrustTier, WorkspaceUri,
-	claude_plugin::ClaudePlugin,
 	lock::atomic_toml,
-	plugin_command::{PluginLaunch, PluginLaunchKind},
+	plugin_command::{CommandApprovals, PluginLaunch, PluginLaunchKind, plugin_command_digest},
 	resolver::version_satisfies,
 };
 
@@ -82,17 +81,19 @@ pub struct Grant {
 	pub duration:          GrantDuration,
 }
 
-/// An operator's approval for one process an installed plugin launches
+/// An operator's approval for one command a plugin launches
 /// ([`crate::plugin_command`]).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PluginCommandGrant {
-	/// Plugin id, `name@marketplace`.
+	/// Plugin identity: an installed plugin's `name@marketplace`, or an
+	/// Agent Plugins package's manifest name.
 	pub plugin:     Str,
 	/// Plugin version the launch was approved for.
 	pub version:    Str,
 	/// Component that declared the launch when it was approved.
 	pub kind:       PluginLaunchKind,
-	/// Server or adapter name when it was approved.
+	/// Server or adapter name, or a hook's event and matcher, when it was
+	/// approved.
 	pub server:     Str,
 	/// Approved executable.
 	pub command:    Str,
@@ -109,18 +110,18 @@ pub struct PluginCommandGrant {
 }
 
 impl PluginCommandGrant {
-	/// The operator's approval of `launch` for `plugin`, stamped now, through
-	/// the channel `granted_by` names.
+	/// The operator's approval of `launch` for `plugin` at `version`,
+	/// stamped now, through the channel `granted_by` names.
 	#[must_use]
-	pub fn approve(plugin: &ClaudePlugin, launch: &PluginLaunch, granted_by: Str) -> Self {
+	pub fn approve(plugin: &Str, version: &Str, launch: &PluginLaunch, granted_by: Str) -> Self {
 		Self {
-			plugin: plugin.id.clone(),
-			version: plugin.version.clone(),
+			plugin: plugin.clone(),
+			version: version.clone(),
 			kind: launch.kind,
 			server: launch.server.clone(),
 			command: launch.command.clone(),
 			args: launch.args.to_vec(),
-			digest: plugin.command_digest(launch),
+			digest: plugin_command_digest(plugin, version, launch),
 			granted_at: Str::new(Timestamp::now().to_string()),
 			granted_by,
 		}
@@ -315,16 +316,15 @@ impl GrantsFile {
 		atomic_toml(path, &durable)
 	}
 
-	/// Digests of the plugin launches approved for `plugin`.
-	pub fn approved_plugin_commands<'a>(
-		&'a self,
-		plugin: &'a str,
-	) -> impl Iterator<Item = Hash32> + 'a {
-		self
-			.plugin_commands
-			.iter()
-			.filter(move |grant| grant.plugin == plugin)
-			.map(|grant| grant.digest)
+	/// Every approved plugin launch, as the gate checks them.
+	#[must_use]
+	pub fn command_approvals(&self) -> CommandApprovals {
+		CommandApprovals::new(
+			self
+				.plugin_commands
+				.iter()
+				.map(|grant| (grant.plugin.clone(), grant.digest)),
+		)
 	}
 
 	/// Atomically records the operator's approval of one plugin launch,
@@ -937,7 +937,7 @@ mod tests {
 			[tcp.clone(), other.clone(), stdio.clone()],
 			"re-approving replaces rather than duplicates"
 		);
-		assert_eq!(read.approved_plugin_commands("p@m").collect::<Vec<_>>(), [
+		assert_eq!(read.command_approvals().of("p@m").collect::<Vec<_>>(), [
 			tcp.digest,
 			stdio.digest
 		]);

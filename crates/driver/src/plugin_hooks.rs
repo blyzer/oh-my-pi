@@ -23,6 +23,11 @@
 //!   `additionalContext` becomes model-visible hook context, `systemMessage`
 //!   and failures become `<notice kind=hook>`, and `continue: false` stops.
 //!
+//! A hook runs only when the operator approved its command for its trigger
+//! (event and matcher) at the plugin's version, as every other command a
+//! plugin launches ([`omp_ext::plugin_command`]); an unapproved hook is
+//! never registered.
+//!
 //! A failing hook is a typed [`PluginHookError`] rendered into a notice; it
 //! never fails the turn.
 
@@ -168,6 +173,12 @@ pub struct PluginHookHost {
 impl PluginHookHost {
 	/// Builds the host over every Claude-layout plugin's hooks; `None` when
 	/// no enabled plugin declares a hook this session runs.
+	///
+	/// A hook whose command the operator has not approved
+	/// ([`omp_ext::claude_plugin::ClaudePlugin::admit_launch`] over
+	/// [`PluginHook::launch`]) is never registered, so it never runs; each
+	/// refusal is logged here, and the launching host names it to the operator
+	/// through [`crate::plugin_commands::blocked_launches`].
 	#[must_use]
 	pub fn new(
 		client: EnvClient,
@@ -175,19 +186,30 @@ impl PluginHookHost {
 		plugins: &ClaudePlugins,
 	) -> Option<Arc<Self>> {
 		let data_dir = session.data_dir.as_path();
+		let subagent = session.subagent;
 		let hooks = plugins
 			.plugins
 			.iter()
-			.filter_map(|plugin| Some((plugin, plugin.claude_components()?)))
-			.flat_map(|(plugin, components)| {
-				components.hooks.iter().map(move |hook| LoadedHook {
-					plugin: plugin.id.clone(),
-					root:   plugin.root.clone(),
-					data:   plugin_data_dir(data_dir, &plugin.id),
-					hook:   hook.clone(),
+			.flat_map(|plugin| {
+				plugin.hook_launches().filter_map(move |(hook, launch)| {
+					if !runs_in(hook.event, subagent) {
+						return None;
+					}
+					if let Err(blocked) = plugin.admit_launch(launch) {
+						tracing::warn!(
+							error = &blocked as &(dyn std::error::Error + 'static),
+							"installed plugin hook not registered"
+						);
+						return None;
+					}
+					Some(LoadedHook {
+						plugin: plugin.id.clone(),
+						root:   plugin.root.clone(),
+						data:   plugin_data_dir(data_dir, &plugin.id),
+						hook:   hook.clone(),
+					})
 				})
 			})
-			.filter(|loaded| runs_in(loaded.hook.event, session.subagent))
 			.collect::<Box<[_]>>();
 		(!hooks.is_empty()).then(|| {
 			Arc::new_cyclic(|this| Self {
@@ -365,34 +387,21 @@ impl PluginHookHost {
 		Ok(finished)
 	}
 
-	/// The script the in-process shell runs: the expanded shell-form command,
-	/// or the exec-form command and arguments, each one quoted word.
+	/// The script the in-process shell runs: the approved script
+	/// ([`omp_ext::claude_hooks::HookCommand::script`]) with the plugin's
+	/// data directory and the project root filled in.
 	fn script(&self, loaded: &LoadedHook) -> String {
-		let expand = |value: &Str| {
+		loaded.hook.command.script(|value| {
 			let expanded = expand_plugin_vars(value.clone(), &loaded.root, Some(&loaded.data));
 			if expanded.contains("${CLAUDE_PROJECT_DIR}") {
-				expanded.replace(
+				Str::new(expanded.replace(
 					"${CLAUDE_PROJECT_DIR}",
 					self.session.project_root.to_string_lossy().as_ref(),
-				)
+				))
 			} else {
-				expanded.to_string()
+				expanded
 			}
-		};
-		let command = &loaded.hook.command;
-		match &command.args {
-			None => expand(&command.command),
-			Some(args) => {
-				let mut script = String::new();
-				for word in std::iter::once(&command.command).chain(args.iter()) {
-					if !script.is_empty() {
-						script.push(' ');
-					}
-					push_quoted(&mut script, &expand(word));
-				}
-				script
-			},
-		}
+		})
 	}
 
 	fn post(&self, message: Up) {
@@ -690,17 +699,6 @@ fn render(error: &PluginHookError) -> Str {
 }
 
 /// Appends `word` as one single-quoted shell word.
-fn push_quoted(script: &mut String, word: &str) {
-	script.push('\'');
-	for (index, part) in word.split('\'').enumerate() {
-		if index > 0 {
-			script.push_str("'\\''");
-		}
-		script.push_str(part);
-	}
-	script.push('\'');
-}
-
 /// What a hook matcher is tested against.
 #[derive(Clone, Copy)]
 enum Subject<'a> {
