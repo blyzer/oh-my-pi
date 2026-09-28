@@ -221,8 +221,8 @@ pub(crate) struct Launch {
 	/// A remembered default model the post-discovery catalog does not list;
 	/// set by [`Self::compose`], which launched on a fallback instead.
 	pub missing_default:         Option<Str>,
-	/// Installed-plugin servers whose command the operator has not approved;
-	/// they do not start, and each launch mode names them once.
+	/// Plugin servers and hooks whose command the operator has not approved;
+	/// they do not run, and each launch mode names them once.
 	pub blocked_plugin_commands: Vec<omp_ext::plugin_command::PluginCommandBlocked>,
 	/// `--models` roster in flag order; the interactive cycle when non-empty.
 	pub scope:                   Vec<ScopedModel>,
@@ -395,11 +395,19 @@ impl Launch {
 				"installed plugin not fully loaded"
 			);
 		}
-		let blocked_plugin_commands = omp_driver::plugin_commands::blocked_launches(&claude_plugins);
+		let blocked_plugin_commands = omp_driver::plugin_commands::blocked_launches(
+			&claude_plugins,
+			&omp_driver::plugin_commands::agent_plugin_paths(
+				&project,
+				&extension_launch.native_roots,
+				&claude_plugins,
+			)
+			.into_diagnostic()?,
+		);
 		for blocked in &blocked_plugin_commands {
 			tracing::warn!(
 				error = blocked as &(dyn std::error::Error + 'static),
-				"installed plugin server not started"
+				"plugin command not approved"
 			);
 		}
 		let templates = PromptTemplates::discover(
@@ -1048,8 +1056,8 @@ pub(crate) async fn run(
 		prompt: initial_prompt,
 		..
 	} = &launch;
-	// Unapproved plugin servers did not start; name each once, with the
-	// command that approves it.
+	// Unapproved plugin servers and hooks do not run; name each once, with
+	// the command that approves it.
 	for blocked in &launch.blocked_plugin_commands {
 		launch_notice(ctx, blocked.to_string());
 	}

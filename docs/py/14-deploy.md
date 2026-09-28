@@ -2312,17 +2312,31 @@ capability, never changes a tier, never rewrites a lock, and never rotates a key
 | `--ship <installed\|source\|pickle>` | Change the code-shipping level (§3.9.2). `pickle` requires `--tier trusted`. |
 | `--key <FINGERPRINT>` | Accept a publisher key change after `E-KEY-CHANGED`. |
 | `--revoke` | Drop the grant. The extension stays installed and becomes `ungranted`. For an installed plugin id, also drops every approved plugin command. |
-| `--approve-command <DIGEST>` | Approve one command an installed plugin (`name@marketplace`) launches, by the digest the "not approved" notice names. Repeatable. |
-| `--approve-commands` | Approve every command an installed plugin currently launches. |
+| `--approve-command <DIGEST>` | Approve one command a plugin launches (an installed plugin's `name@marketplace`, or an Agent Plugins package's manifest name), by the digest the "not approved" notice names. Repeatable. |
+| `--approve-commands` | Approve every command a plugin currently launches. |
+| `--plugin-dir <PATH>` | Also consider the Agent Plugins package at `PATH`, for a package a session loads with `--plugin-dir`/`--extension` rather than from a plugin directory. Repeatable. |
 
-An installed Claude-format plugin's stdio MCP servers, language servers, and debug adapters
-never start until the operator approved the exact launch. The approval is recorded beside the
-extension grants in `<data>/ext/grants.toml` (`[[plugin_command]]`), keyed on the plugin id
-and a SHA-256 digest of the plugin version, command, arguments, and environment overrides, so
-a plugin update or an edited command line is blocked again. Every launch mode names each
-blocked server once — an interactive notice, a `warning:` line on stderr in print mode — with
-the `omp ext trust <plugin> --approve-command <DIGEST>` invocation that approves it; `--show`
-lists a plugin's commands with their approval state.
+No command a plugin declares runs until the operator approved the exact launch: an installed
+Claude-format plugin's stdio MCP servers, language servers, debug adapters, and `command`
+hooks, and the stdio MCP servers of every Agent Plugins 1.0 package (found in
+`.omp/extensions`, `.agent/plugins`, `.agents/plugins`, the user configuration root's
+`extensions` and `agent/plugins`, passed with `--plugin-dir`/`--extension`, or installed from a
+marketplace). HTTP and SSE MCP servers launch nothing and need no approval. The approval is
+recorded beside the extension grants in `<data>/ext/grants.toml` (`[[plugin_command]]`), keyed
+on the plugin identity — an installed Claude-format plugin's id, an Agent Plugins package's
+manifest `name` — and a SHA-256 digest of the plugin version, command, arguments, environment
+overrides, and working directory. An Agent Plugins server's environment carries its package
+root (`PLUGIN_ROOT`), so an approval never admits a same-named package elsewhere. A hook's
+digest covers the script omp's in-process shell runs (`${CLAUDE_PLUGIN_ROOT}` expanded;
+`${CLAUDE_PLUGIN_DATA}` and `${CLAUDE_PROJECT_DIR}` left for the host) and its trigger — the
+event and matcher — because the event decides what the command reads and what its output can
+decide, and the matcher decides when it runs; its timeout and `async` flag are not part of it.
+A plugin update, an edited command line, or a hook moved to another event or matcher is
+blocked again. An unapproved hook is never registered. Every launch mode names each blocked
+server and hook once — an interactive notice, a `warning:` line on stderr in print mode, a log
+line in RPC and ACP — with the `omp ext trust <plugin> --approve-command <DIGEST>` invocation
+that approves it; `--show` lists a plugin's commands, hooks included, with their approval
+state.
 
 #### 3.13.12 `omp ext verify` / `bundle` / `publish` / `search` / `index` / `where`
 

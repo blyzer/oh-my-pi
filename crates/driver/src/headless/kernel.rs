@@ -1824,22 +1824,11 @@ pub async fn compose_kernel(
 				managed_skills_root: Some(crate::discovery::skills::managed_skills_root(
 					&omp_core::dirs::user_config_root()?,
 				)),
-				agent_plugin_roots:  options
-					.extensions
-					.native_roots
-					.iter()
-					.filter(|root| crate::discovery::skills::is_agent_plugin_root(root))
-					.cloned()
-					.chain(
-						claude_plugins
-							.plugins
-							.iter()
-							.filter(|plugin| {
-								plugin.layout == omp_ext::claude_plugin::PluginLayout::AgentPlugins
-							})
-							.map(|plugin| plugin.root.clone()),
-					)
-					.collect(),
+				agent_plugin_roots:  crate::plugin_commands::agent_plugin_roots(
+					&options.extensions.native_roots,
+					&claude_plugins,
+				),
+				command_approvals:   claude_plugins.command_approvals.clone(),
 				claude_plugins:      claude_plugins
 					.plugins
 					.iter()
