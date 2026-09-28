@@ -63,12 +63,18 @@
 //! a session v1 no longer pins therefore leaves every v2 pin alone.
 //!
 //! Telling whether a transcript changed does not read it while it is
-//! unchanged: an import also records the transcript's size and modification
-//! time ([`omp_session::import::SourceStamp`]), and a transcript whose stat
-//! still matches a journal of its file is current without being digested.
-//! Any other stat (v1 rewrites its padded title line in place, keeping the
-//! size but moving the modification time), or a journal that recorded no
-//! stamp, falls back to the digest.
+//! unchanged: an import also records the transcript's size, modification
+//! time, and on Unix inode change time
+//! ([`omp_session::import::SourceStamp`]), and a transcript whose stat still
+//! matches a journal of its file is current without being digested. Any
+//! other stat falls back to the digest: v1 rewrites its padded title line in
+//! place, keeping the size but moving the modification time, and an edit
+//! that restores the modification time afterwards (`touch -r`, `rsync -t`, a
+//! backup restore) still moves the change time, which user space cannot set.
+//! A journal that recorded no stamp falls back to the digest too, as does,
+//! on Unix, one whose importer recorded size and modification time but no
+//! change time: such a partial stamp cannot tell a restored modification
+//! time apart, so it is not trusted.
 //!
 //! # Several files of one session
 //!

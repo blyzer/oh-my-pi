@@ -748,8 +748,9 @@ mod tests {
 		fs::write(path, lines.map(|line| line.to_string() + "\n").concat()).unwrap();
 	}
 
-	/// Sets `path`'s modification time a minute back: settled, so an import
-	/// records its stamp.
+	/// Sets `path`'s modification time a minute back and, on Unix, waits for
+	/// the change time that moved to now to settle: an import then records
+	/// its stamp.
 	fn backdate(path: &Path) {
 		let earlier = SystemTime::now() - std::time::Duration::from_secs(60);
 		fs::File::options()
@@ -757,6 +758,11 @@ mod tests {
 			.open(path)
 			.and_then(|file| file.set_modified(earlier))
 			.unwrap();
+		if cfg!(unix) {
+			std::thread::sleep(
+				omp_session::import::STAMP_SETTLE + std::time::Duration::from_millis(50),
+			);
+		}
 	}
 
 	/// The visible journals directly in `directory`.

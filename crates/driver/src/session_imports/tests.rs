@@ -11,7 +11,7 @@ use std::{
 use omp_core::{Hash32, Str, Ulid};
 use omp_dom::{Op, PropKey, Txn, Value};
 use omp_session::import::{
-	IMPORT_FORMAT, IMPORT_SOURCE, IMPORT_SOURCE_BLOB, IMPORT_SOURCE_ID, SourceStamp,
+	IMPORT_FORMAT, IMPORT_SOURCE, IMPORT_SOURCE_BLOB, IMPORT_SOURCE_ID, STAMP_SETTLE, SourceStamp,
 };
 use serde_json::json;
 
@@ -30,8 +30,9 @@ fn write(path: &Path, contents: &str) {
 	fs::write(path, contents).expect("write");
 }
 
-/// Sets `path`'s modification time a minute back: settled, so an import
-/// records its stamp.
+/// Sets `path`'s modification time a minute back and, on Unix, waits for
+/// the change time that moved to now to settle: an import then records its
+/// stamp. No call sets the change time, so only waiting settles it.
 fn backdate(path: &Path) {
 	let earlier = SystemTime::now() - Duration::from_secs(60);
 	fs::File::options()
@@ -39,6 +40,9 @@ fn backdate(path: &Path) {
 		.open(path)
 		.and_then(|file| file.set_modified(earlier))
 		.expect("backdate");
+	if cfg!(unix) {
+		std::thread::sleep(STAMP_SETTLE + Duration::from_millis(50));
+	}
 }
 
 /// Appends a line to a transcript, as its tool does while the session goes

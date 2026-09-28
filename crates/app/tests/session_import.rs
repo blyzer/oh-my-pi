@@ -758,12 +758,12 @@ mod omp1 {
 		)]));
 	}
 
-	/// The converter records the transcript's size and modification time
-	/// beside its digest once the file settled, so a listing finds it
-	/// current without reading it. v1 rewrites its padded title slot in
-	/// place, keeping the size but moving the modification time: the listing
-	/// then digests it and finds the change. A transcript modified moments
-	/// before its import records no stamp.
+	/// The converter records the transcript's size, modification time, and
+	/// (on Unix) change time beside its digest once the file settled, so a
+	/// listing finds it current without reading it. v1 rewrites its padded
+	/// title slot in place, keeping the size but moving the modification time:
+	/// the listing then digests it and finds the change. A transcript modified
+	/// moments before its import records no stamp.
 	#[test]
 	fn a_v1_import_records_the_transcript_stamp_and_a_same_size_retitle_is_caught() {
 		use std::time::{Duration, SystemTime};
@@ -782,6 +782,11 @@ mod omp1 {
 			.open(&source)
 			.and_then(|file| file.set_modified(SystemTime::now() - Duration::from_secs(60)))
 			.expect("settle");
+		// Backdating moved the change time to now; no call sets it, so wait
+		// for it to settle too.
+		if cfg!(unix) {
+			std::thread::sleep(omp_session::import::STAMP_SETTLE + Duration::from_millis(50));
+		}
 		let (journal, session) = tree.import(&source);
 		drop(session);
 		let entries = Journal::scan(&journal).expect("journal");
