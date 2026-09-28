@@ -608,8 +608,9 @@ pub enum SwitchReason {
 /// The `session_shutdown` payload: the session whose end the host reached.
 ///
 /// It serializes as Python's `SessionShutdownEvent`, plus the switch reason
-/// and the switched-to journal, which in-process hosts use to follow the
-/// live session.
+/// and the switched-to journal. In-process hosts follow a switch through
+/// [`NativeHookHost::session_switched`], which every switch delivers, not
+/// through this payload, which an already-ended session never sends.
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionShutdown {
 	/// The ending session's name (its journal file name).
@@ -655,6 +656,27 @@ impl SessionShutdown {
 	}
 }
 
+/// The session a controller switched to, as in-process hook hosts follow
+/// it ([`NativeHookHost::session_switched`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionSwitched {
+	/// Its name (its journal file name).
+	pub session_id:      Str,
+	/// Its journal.
+	pub transcript_path: std::path::PathBuf,
+}
+
+impl SessionSwitched {
+	/// The switch to `next`.
+	#[must_use]
+	pub fn to(next: &omp_session::Session) -> Self {
+		Self {
+			session_id:      journal_name(next),
+			transcript_path: next.journal_path().to_path_buf(),
+		}
+	}
+}
+
 /// A session's name on the lifecycle surface: its journal file name.
 fn journal_name(session: &omp_session::Session) -> Str {
 	session
@@ -681,6 +703,13 @@ pub trait NativeHookHost: Send + Sync + 'static {
 	/// Observes one lifecycle notification; must not block the caller.
 	fn observe(&self, event: HookEventId, payload: &JsonValue) {
 		let _ = (event, payload);
+	}
+	/// The host now serves `next`: the controller switched sessions
+	/// ([`LifecycleHooks::session_switched`]). Delivered to every attached
+	/// host on every switch, whatever events it declared and whether or not
+	/// the previous session's end (`session_shutdown`) ran; must not block.
+	fn session_switched(&self, next: &SessionSwitched) {
+		let _ = next;
 	}
 }
 
@@ -929,6 +958,42 @@ impl LifecycleHooks {
 		}
 	}
 
+	/// Switches the controller from `previous` to `next`: when `ending` names
+	/// why a live `previous` ends, its end runs first
+	/// ([`Self::session_shutdown`]); an already-ended one (an ACP
+	/// `session/close`) passes `None` and does not end twice. Either way every
+	/// in-process host then follows the switch
+	/// ([`Self::session_switched`]). The future borrows neither session.
+	pub fn session_switch<'a>(
+		&'a self,
+		previous: &omp_session::Session,
+		next: &omp_session::Session,
+		ending: Option<SwitchReason>,
+	) -> impl Future<Output = ()> + Send + use<'a> {
+		let shutdown = ending.map(|reason| SessionShutdown::switching(previous, next, reason));
+		let switched = SessionSwitched::to(next);
+		async move {
+			if let Some(shutdown) = shutdown {
+				self.session_shutdown(&shutdown).await;
+			}
+			self.notify_switched(&switched);
+		}
+	}
+
+	/// Tells every attached in-process host that the controller now serves
+	/// `next` ([`NativeHookHost::session_switched`]), so what a host reports
+	/// about its session names `next`. A controller calls it on every
+	/// switch, once the switch is committed.
+	pub fn session_switched(&self, next: &omp_session::Session) {
+		self.notify_switched(&SessionSwitched::to(next));
+	}
+
+	fn notify_switched(&self, next: &SessionSwitched) {
+		for host in self.gate.native_hosts_all() {
+			host.session_switched(next);
+		}
+	}
+
 	/// Publishes a revision-1 JSON lifecycle observation.
 	///
 	/// A full observer queue remains lossy and is accounted by [`HookGate`].
@@ -1137,6 +1202,16 @@ impl HookGate {
 	pub fn native_subscribed(&self, event: HookEventId) -> bool {
 		let (word, bit) = event_position(event);
 		self.native_mask[word].load(Ordering::Relaxed) & bit != 0
+	}
+
+	/// Every attached in-process host, in attachment order.
+	fn native_hosts_all(&self) -> SmallVec<Arc<dyn NativeHookHost>, 2> {
+		self
+			.native
+			.read()
+			.iter()
+			.map(|(_, host)| Arc::clone(host))
+			.collect()
 	}
 
 	/// The in-process hosts that declared `event`, in attachment order.

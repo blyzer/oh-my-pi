@@ -118,13 +118,17 @@ impl Fixture {
 
 	fn blocked_servers(&self) -> Vec<(PluginLaunchKind, Str)> {
 		let plugins = self.resolve();
-		blocked_launches(&plugins, &self.agent_plugins(&plugins))
-			.into_iter()
-			.map(|blocked| {
-				assert_eq!(blocked.plugin, "tools@market");
-				(blocked.kind, blocked.server)
-			})
-			.collect()
+		blocked_launches(
+			&plugins,
+			&self.agent_plugins(&plugins),
+			&omp_envd::mcp::McpSettings::default(),
+		)
+		.into_iter()
+		.map(|blocked| {
+			assert_eq!(blocked.plugin, "tools@market");
+			(blocked.kind, blocked.server)
+		})
+		.collect()
 	}
 }
 
@@ -132,7 +136,11 @@ impl Fixture {
 fn unapproved_plugin_launches_are_blocked_and_named() {
 	let fixture = Fixture::new();
 	let plugins = fixture.resolve();
-	let blocked = blocked_launches(&plugins, &fixture.agent_plugins(&plugins));
+	let blocked = blocked_launches(
+		&plugins,
+		&fixture.agent_plugins(&plugins),
+		&omp_envd::mcp::McpSettings::default(),
+	);
 	assert_eq!(
 		blocked
 			.iter()
@@ -279,7 +287,8 @@ fn an_installed_agent_plugins_package_is_approved_under_its_manifest_name() {
 	};
 
 	let plugins = fixture.resolve();
-	let blocked = blocked_launches(&plugins, &agent_plugins(&plugins));
+	let blocked =
+		blocked_launches(&plugins, &agent_plugins(&plugins), &omp_envd::mcp::McpSettings::default());
 	let [local] = &blocked[..] else {
 		panic!("the package's stdio server alone awaits approval: {blocked:?}");
 	};
@@ -297,5 +306,114 @@ fn an_installed_agent_plugins_package_is_approved_under_its_manifest_name() {
 			.expect("persist approval");
 	}
 	let plugins = fixture.resolve();
-	assert!(blocked_launches(&plugins, &agent_plugins(&plugins)).is_empty());
+	assert!(
+		blocked_launches(&plugins, &agent_plugins(&plugins), &omp_envd::mcp::McpSettings::default())
+			.is_empty()
+	);
+}
+
+/// With `sv_mcp_enable_project_config` off, MCP discovery loads no
+/// project-scoped source: neither the project's Agent Plugins packages nor
+/// the MCP servers of a plugin installed for the project. The report leaves
+/// them out as well; user-scope packages, and the project plugin's language
+/// servers, debug adapters, and hooks, are still named.
+#[test]
+fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
+	let fixture = Fixture::new();
+	// Move the installed plugin from the user registry to the project's.
+	let mut registry = InstalledPluginsRegistry::default();
+	registry
+		.plugins
+		.insert(Str::new_static("tools@market"), vec![InstalledPluginEntry {
+			scope:          InstallScope::Project,
+			install_path:   fixture.plugin.clone(),
+			version:        Str::new_static("1.0.0"),
+			installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+			last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+			git_commit_sha: None,
+			enabled:        true,
+		}]);
+	fs::remove_file(fixture.data.join("plugins").join(REGISTRY_FILE)).expect("user registry");
+	write(
+		&omp_ext::claude_plugin::project_plugins_dir(&fixture.project).join(REGISTRY_FILE),
+		&serde_json::to_string(&registry).expect("registry"),
+	);
+	let package = |root: &Path, name: &str| {
+		write(
+			&root.join("plugin.json"),
+			&format!(
+				r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"{name}","version":"1.0.0"}}"#
+			),
+		);
+		write(
+			&root.join("mcp.json"),
+			r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{
+				"local":{"type":"stdio","command":"${PLUGIN_ROOT}/server"}}}"#,
+		);
+	};
+	package(&fixture.project.join(".agents/plugins/portable"), "portable");
+	package(&fixture.home.join("agent/plugins/personal"), "personal");
+
+	let plugins = fixture.resolve();
+	assert_eq!(plugins.plugins[0].scope, omp_ext::claude_plugin::PluginScope::Project);
+	let reported = |enable_project_config: bool| {
+		blocked_launches(&plugins, &fixture.agent_plugins(&plugins), &omp_envd::mcp::McpSettings {
+			enable_project_config,
+		})
+		.into_iter()
+		.map(|blocked| (blocked.plugin, blocked.server))
+		.collect::<Vec<_>>()
+	};
+	let named = |pairs: &[(&'static str, &'static str)]| {
+		pairs
+			.iter()
+			.map(|(plugin, server)| (Str::new_static(plugin), Str::new_static(server)))
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(
+		reported(true),
+		named(&[
+			("tools@market", "tools:db"),
+			("tools@market", "acme"),
+			("tools@market", "acme-dbg"),
+			("tools@market", "Stop"),
+			("portable", "local"),
+			("personal", "local"),
+		])
+	);
+	assert_eq!(
+		reported(false),
+		named(&[
+			("tools@market", "acme"),
+			("tools@market", "acme-dbg"),
+			("tools@market", "Stop"),
+			("personal", "local"),
+		]),
+		"project-scoped MCP servers are neither loaded nor reported"
+	);
+}
+
+/// An approval binds the contents of the plugin files a launch names: a
+/// server binary or hook script the plugin edits in place, without a new
+/// version, asks again; a plugin file no launch names does not.
+#[test]
+fn editing_a_plugin_file_a_launch_names_requires_approval_again() {
+	let fixture = Fixture::new();
+	write(&fixture.plugin.join("bin/db"), "#!/bin/sh\nexec db --stdio\n");
+	write(&fixture.plugin.join("bin/on-stop"), "#!/bin/sh\nexit 0\n");
+	write(&fixture.plugin.join("README.md"), "tools\n");
+	fixture.approve_all();
+	assert!(fixture.blocked_servers().is_empty());
+
+	write(&fixture.plugin.join("README.md"), "tools, edited\n");
+	assert!(fixture.blocked_servers().is_empty(), "an unrelated plugin file is not bound");
+
+	write(&fixture.plugin.join("bin/db"), "#!/bin/sh\nexec evil\n");
+	write(&fixture.plugin.join("bin/on-stop"), "#!/bin/sh\nexec evil\n");
+	assert_eq!(fixture.blocked_servers(), [
+		(PluginLaunchKind::McpServer, Str::new_static("tools:db")),
+		(PluginLaunchKind::Hook, Str::new_static("Stop")),
+	]);
+	fixture.approve_all();
+	assert!(fixture.blocked_servers().is_empty());
 }

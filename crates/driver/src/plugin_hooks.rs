@@ -29,8 +29,11 @@
 //! when an approval prompt is filed) run in the background with their output
 //! discarded, only failures surfacing. `SessionEnd` runs at the session's end
 //! (`session_shutdown`: quit, a finished run, a switch to another session)
-//! within [`SESSION_SHUTDOWN_BUDGET`], its output discarded; a switch moves
-//! the host onto the next session's id and journal. `SubagentStart` runs on
+//! within [`SESSION_SHUTDOWN_BUDGET`], its output discarded. Every session
+//! switch moves the host onto the next session's id and journal
+//! ([`NativeHookHost::session_switched`]), whether or not the previous
+//! session's end ran (an ACP `session/close` already ended it) and whatever
+//! events the host's hooks use. `SubagentStart` runs on
 //! a subagent's first prompt, its `additionalContext` opening the subagent's
 //! context.
 //!
@@ -56,7 +59,7 @@ use std::{
 use bytes::Bytes;
 use omp_agent::{
 	BoxFut, EnvEvent, HookContext, HookGate, NativeHookHost, NativeReply, NativeVerdict,
-	SESSION_SHUTDOWN_BUDGET, ShutdownReason, SwitchReason, Up,
+	SESSION_SHUTDOWN_BUDGET, SessionSwitched, ShutdownReason, SwitchReason, Up,
 };
 use omp_ai::ErrorKind;
 use omp_core::{EnvPath, Str, sf};
@@ -704,8 +707,9 @@ impl PluginHookHost {
 
 	/// `SessionEnd`: the live session ends. Every matching hook runs to
 	/// completion or [`SESSION_SHUTDOWN_BUDGET`], whichever is first; its
-	/// output is discarded. A switch moves the host onto the next session
-	/// before the hooks run, so a budget cut short never leaves it behind.
+	/// output is discarded. The session it names is the one the host serves;
+	/// a switch then moves the host through
+	/// [`NativeHookHost::session_switched`].
 	async fn session_end(&self, payload: &JsonValue) -> NativeReply {
 		let Ok(view) = SessionShutdownView::deserialize(payload) else {
 			return NativeReply::defer();
@@ -715,9 +719,6 @@ impl PluginHookHost {
 			view.switch_reason.and_then(|reason| reason.parse().ok()),
 		);
 		let ending = self.live.read().clone();
-		if let Some(next) = view.target_transcript_path {
-			*self.live.write() = LiveSession::at(next);
-		}
 		let reason: &'static str = reason.into();
 		let effects = self
 			.run_for(
@@ -897,6 +898,10 @@ impl NativeHookHost for PluginHookHost {
 
 	fn observe(&self, event: HookEventId, payload: &JsonValue) {
 		self.observe_in_background(event, payload);
+	}
+
+	fn session_switched(&self, next: &SessionSwitched) {
+		*self.live.write() = LiveSession::at(next.transcript_path.clone());
 	}
 }
 
@@ -1472,11 +1477,9 @@ struct CompactionView {
 /// The `session_shutdown` payload fields `SessionEnd` reads.
 #[derive(Deserialize)]
 struct SessionShutdownView {
-	reason:                 Str,
+	reason:        Str,
 	#[serde(default)]
-	switch_reason:          Option<Str>,
-	#[serde(default)]
-	target_transcript_path: Option<PathBuf>,
+	switch_reason: Option<Str>,
 }
 
 /// The `agent_end` payload field `StopFailure` reads.

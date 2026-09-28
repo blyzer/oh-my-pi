@@ -403,6 +403,7 @@ impl Launch {
 				&claude_plugins,
 			)
 			.into_diagnostic()?,
+			&omp_envd::mcp::McpSettings::from_con(&ctx),
 		);
 		for blocked in &blocked_plugin_commands {
 			tracing::warn!(

@@ -464,7 +464,8 @@ fn source_adapters(
 }
 
 /// The parsed document of a plugin source plus, per adapter that sets its
-/// `command` or `args`, the launch it declares after plugin-root expansion.
+/// `command` or `args`, the launch it declares after plugin-root expansion,
+/// bound to the plugin files it names.
 fn plugin_source_launches(
 	source: &DapConfigSource,
 ) -> Result<(serde_json::Value, Vec<(Str, PluginLaunch)>), DapConfigError> {
@@ -482,6 +483,10 @@ fn plugin_source_launches(
 				patch.args.unwrap_or_default(),
 				[],
 			);
+			let launch = match &source.plugin_root {
+				Some(root) => launch.with_plugin_files(root),
+				None => launch,
+			};
 			Some((name, launch))
 		})
 		.collect();

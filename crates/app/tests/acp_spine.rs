@@ -547,3 +547,76 @@ async fn list_and_fork_expose_stored_sessions() {
 		"the source is untouched by prompts in the fork"
 	);
 }
+
+/// An in-process hook host recording each session end (`session_shutdown`)
+/// and each switch it is told to follow, by journal file name.
+#[derive(Default)]
+struct SwitchRecorder {
+	events: Mutex<Vec<String>>,
+}
+
+impl omp_agent::NativeHookHost for SwitchRecorder {
+	fn decide<'a>(
+		&'a self,
+		event: omp_proto::toolhost::v1::HookEventId,
+		payload: &'a Value,
+	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
+		if event == omp_proto::toolhost::v1::HookEventId::HookEventSessionShutdown {
+			let ended = payload["session_id"].as_str().unwrap_or("?");
+			self.events.lock().push(format!("end {ended}"));
+		}
+		Box::pin(ready(omp_agent::NativeReply::defer()))
+	}
+
+	fn session_switched(&self, next: &omp_agent::SessionSwitched) {
+		self
+			.events
+			.lock()
+			.push(format!("switch {}", next.session_id));
+	}
+}
+
+/// `session/close` ends the session once; a later switch away from it runs
+/// no second end, but the in-process hook hosts still follow the switch, so
+/// their hooks name the session the controller now serves.
+#[tokio::test]
+async fn a_switch_after_close_moves_the_hook_hosts_without_ending_twice() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let sessions = directory.path().join("sessions");
+	std::fs::create_dir_all(&sessions).expect("sessions directory");
+	drop(
+		Session::create(sessions.join("target.oms"), ComponentRegistry::standard()).expect("target"),
+	);
+	let (kernel, session, home) = harness(&directory, []);
+	let (gate, _dispatches) = omp_agent::HookGate::channel();
+	let gate = Arc::new(gate);
+	let recorder = Arc::new(SwitchRecorder::default());
+	gate.attach_native(Arc::clone(&recorder) as Arc<dyn omp_agent::NativeHookHost>, &[
+		omp_proto::toolhost::v1::HookEventId::HookEventSessionShutdown,
+	]);
+	let kernel = kernel.with_hook_gate(gate);
+	let frames = exchange(
+		kernel,
+		session,
+		home,
+		br#"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1}}
+{"jsonrpc":"2.0","id":"new","method":"session/new","params":{}}
+{"jsonrpc":"2.0","id":"close","method":"session/close","params":{}}
+{"jsonrpc":"2.0","id":"load","method":"session/load","params":{"sessionId":"target"}}
+{"jsonrpc":"2.0","id":"shutdown","method":"shutdown","params":{}}
+"#,
+	)
+	.await;
+	let new_id = response(&frames, "new")["result"]["sessionId"]
+		.as_str()
+		.expect("new session id");
+	assert!(response(&frames, "close").get("error").is_none(), "{frames:#?}");
+	assert!(response(&frames, "load").get("error").is_none(), "{frames:#?}");
+	assert_eq!(*recorder.events.lock(), [
+		"end startup.oms".to_owned(),
+		format!("switch {new_id}.oms"),
+		format!("end {new_id}.oms"),
+		"switch target.oms".to_owned(),
+		"end target.oms".to_owned(),
+	]);
+}

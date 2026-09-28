@@ -2617,6 +2617,10 @@ async fn transition_session(
 				home.unregister(&next);
 				return Err((source.to_string(), old));
 			}
+			// Committed: the in-process hook hosts follow the switch.
+			if let Some(lifecycle) = &lifecycle {
+				lifecycle.session_switched(&next);
+			}
 			home.unregister(&old);
 			Ok(next)
 		},

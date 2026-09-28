@@ -467,7 +467,7 @@ fn gate_plugin_source(
 
 /// The parsed document of a plugin source plus, per server that sets its
 /// `command`, `args`, or `env`, the launch it declares after plugin-root
-/// expansion.
+/// expansion, bound to the plugin files it names.
 fn plugin_source_launches(
 	source: &LspConfigSource,
 ) -> Result<(Value, Vec<(Str, PluginLaunch)>), LspConfigError> {
@@ -490,6 +490,10 @@ fn plugin_source_launches(
 				patch.args.unwrap_or_default(),
 				patch.env.unwrap_or_default(),
 			);
+			let launch = match &source.plugin_root {
+				Some(root) => launch.with_plugin_files(root),
+				None => launch,
+			};
 			Some((name, launch))
 		})
 		.collect();

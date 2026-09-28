@@ -52,6 +52,7 @@ use parking_lot::RwLock;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
+pub use self::settings::McpSettings;
 use super::exthost::control::ControlConnectionIdentity;
 
 const NOTIFICATION_HISTORY: usize = 256;

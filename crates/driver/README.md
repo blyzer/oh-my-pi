@@ -20,7 +20,9 @@ presentation adapter.
   lifecycle point is tabulated in `crates/ext/README.md`; `SessionEnd` runs at
   `session_shutdown`, which every launch mode reaches when its session ends
   (quit, a finished run, a switch) and waits on for at most
-  `omp_agent::SESSION_SHUTDOWN_BUDGET`.
+  `omp_agent::SESSION_SHUTDOWN_BUDGET`. Every switch also moves the host onto
+  the next session (`LifecycleHooks::session_switched`), including a switch
+  away from an ACP session `session/close` already ended.
 - `sessions` is the disposable process-local routing index for live kernel
   mailboxes and detached DOM snapshots.
 - `subagent` seeds child convars and composes child kernels through the same

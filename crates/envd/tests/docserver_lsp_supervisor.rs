@@ -269,14 +269,24 @@ async fn installed_plugin_server_joins_the_roster_and_starts_with_its_root_expan
 	let unapproved = ClaudePlugins::resolve(&data, &project, None);
 	assert!(unapproved.diagnostics.is_empty(), "{:?}", unapproved.diagnostics);
 	assert_eq!(
-		omp_envd::plugin_commands::blocked_launches(&unapproved.plugins).len(),
+		omp_envd::plugin_commands::blocked_launches(
+			&unapproved.plugins,
+			&omp_envd::mcp::McpSettings::default()
+		)
+		.len(),
 		1,
 		"the enabled plugin's server awaits approval"
 	);
 	approve_all(&data, &unapproved);
 	let plugins = ClaudePlugins::resolve(&data, &project, None);
 	assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
-	assert!(omp_envd::plugin_commands::blocked_launches(&plugins.plugins).is_empty());
+	assert!(
+		omp_envd::plugin_commands::blocked_launches(
+			&plugins.plugins,
+			&omp_envd::mcp::McpSettings::default()
+		)
+		.is_empty()
+	);
 
 	let environment =
 		Environment::new(ServerConfig::new(project.clone()).expect("config")).expect("environment");
