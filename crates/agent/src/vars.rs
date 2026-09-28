@@ -29,18 +29,31 @@ pub enum VisionMode {
 
 omp_con::con_enum!(VisionMode);
 
+/// The `ai_model` value an agent class cfg (or `subagent.cfg`) sets to run
+/// its children on the spawning session's own model, ahead of
+/// `ai_task_model`.
+pub const AI_MODEL_INHERIT: &str = "inherit";
+
 omp_con::var! {
 	/// The session's live model route. Journaled with the session, never
 	/// archived: the remembered default model is `ai_model_roles.default`,
 	/// so a picker choice saved to `config.cfg` cannot outrank it.
+	///
+	/// In a subagent's `subagent.cfg` or agent class cfg, the value the cfgs
+	/// leave decides the child's route: a selector is the class's own model;
+	/// `inherit` ([`AI_MODEL_INHERIT`]) is the spawning session's model,
+	/// skipping `ai_task_model`; empty (`reset ai_model`) is no class model,
+	/// so `ai_task_model` applies, else the spawning session's model.
 	pub static AI_MODEL = ai_model: Str {
 		default: Str::new_static(""),
 		flags: session,
 	};
 	/// Model route for task subagents; empty inherits `ai_model`. It seeds a
 	/// child's `ai_model` before `subagent.cfg` and the agent class cfg run,
-	/// so an `ai_model` either cfg sets, and a `sv_task_agent_model_overrides`
-	/// entry for the class, both take precedence over it.
+	/// so an `ai_model` either cfg sets (including `inherit`, which picks the
+	/// spawning session's model instead), and a
+	/// `sv_task_agent_model_overrides` entry for the class, all take
+	/// precedence over it.
 	pub static AI_TASK_MODEL = ai_task_model: Str {
 		default: Str::new_static(""),
 		flags: archive | session,

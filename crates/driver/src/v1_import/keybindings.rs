@@ -17,6 +17,26 @@
 //! touched: the existing bind wins and the report says so. Actions v2 has no
 //! command for, and values that are not chords, are reported and kept as
 //! comments in the block.
+//!
+//! # Two actions on one chord
+//!
+//! v1 gave a chord to every action that listed it: its `KeybindingsManager`
+//! only recorded the clash (`getConflicts`, never shown), and the focused
+//! component's fixed check order decided which one ran. v2 would bind both
+//! commands to the chord. The import keeps only the action v1 ran and reports
+//! each other one as [`SkipReason::ShadowedChord`], naming the chord, the
+//! dropped action, and the one v1 ran. Two v1 dispatch contexts compete:
+//!
+//! - The prompt editor ([`V1_EDITOR_ORDER`]): `app.tools.expand`'s global input
+//!   listener, then `CustomEditor.handleInput`'s chain, then its custom key
+//!   handlers, where a later registration replaced an earlier one on the same
+//!   key, then `app.retry`, which yields to a custom handler, then the base
+//!   `Editor`'s chain.
+//! - Select lists ([`V1_SELECT_ORDER`], `SelectList.handleInput`).
+//!
+//! Actions in different contexts (a select-list and an editor action) never
+//! competed in v1 and both stay bound, as do actions v1 never dispatched by
+//! id (the session and tree panel actions).
 
 use std::{
 	fmt::{self, Write as _},
@@ -106,6 +126,142 @@ const LEGACY_ACTION_NAMES: &[(&str, &str)] = &[
 	("selectCancel", "tui.select.cancel"),
 	("toggleSessionNamedFilter", "app.session.togglePath"),
 ];
+
+/// v1's prompt-editor dispatch order on `main`, first to run first.
+///
+/// The global `app.tools.expand` listener (`InputController.setupKeyHandlers`),
+/// `CustomEditor.handleInput`'s chain, its custom key handlers (`Map.set` per
+/// key, so the last one registered wins: registration order reversed),
+/// `app.retry` (which runs a custom handler on its key instead), then the
+/// base `Editor`'s chain (`tui.input.copy` is never dispatched there).
+pub const V1_EDITOR_ORDER: &[&str] = &[
+	"app.tools.expand",
+	"app.clipboard.pasteImage",
+	"app.clipboard.pasteTextRaw",
+	"app.editor.external",
+	"app.model.selectTemporary",
+	"app.display.reset",
+	"app.suspend",
+	"app.thinking.toggle",
+	"app.model.select",
+	"app.history.search",
+	"app.tools.toggleVisibility",
+	"app.model.cycleBackward",
+	"app.model.cycleForward",
+	"app.thinking.cycle",
+	"app.interrupt",
+	"app.clear",
+	"app.exit",
+	"app.message.dequeue",
+	"app.clipboard.copyPrompt",
+	"app.agents.hub",
+	"app.session.observe",
+	"app.clipboard.copyLine",
+	"app.live.toggle",
+	"app.stt.toggle",
+	"app.message.followUp",
+	"app.session.resume",
+	"app.session.fork",
+	"app.session.tree",
+	"app.session.new",
+	"app.plan.toggle",
+	"app.retry",
+	"tui.editor.undo",
+	"tui.editor.spellingSuggestions",
+	"tui.input.tab",
+	"tui.editor.deleteToLineEnd",
+	"tui.editor.deleteToLineStart",
+	"tui.editor.deleteWordBackward",
+	"tui.editor.deleteWordForward",
+	"tui.editor.yank",
+	"tui.editor.yankPop",
+	"tui.input.submit",
+	"tui.input.newLine",
+	"tui.editor.deleteCharBackward",
+	"tui.editor.cursorLineStart",
+	"tui.editor.cursorLineEnd",
+	"tui.editor.pageUp",
+	"tui.editor.pageDown",
+	"tui.editor.deleteCharForward",
+	"tui.editor.cursorWordLeft",
+	"tui.editor.cursorWordRight",
+	"tui.editor.cursorUp",
+	"tui.editor.cursorDown",
+	"tui.editor.cursorRight",
+	"tui.editor.cursorLeft",
+	"tui.editor.jumpForward",
+	"tui.editor.jumpBackward",
+	"tui.input.copy",
+];
+
+/// v1's select-list dispatch order (`SelectList.handleInput` on `main`).
+pub const V1_SELECT_ORDER: &[&str] = &[
+	"tui.select.cancel",
+	"tui.select.up",
+	"tui.select.down",
+	"tui.select.pageUp",
+	"tui.select.pageDown",
+	"tui.select.confirm",
+];
+
+/// Where v1 dispatched `action`: its context (an index into the order
+/// tables) and its place in that context's order. `None` for actions v1 did
+/// not dispatch in a shared chain.
+fn v1_precedence(action: &str) -> Option<(usize, usize)> {
+	[V1_EDITOR_ORDER, V1_SELECT_ORDER]
+		.iter()
+		.enumerate()
+		.find_map(|(context, order)| {
+			order
+				.iter()
+				.position(|known| *known == action)
+				.map(|place| (context, place))
+		})
+}
+
+/// The action v1 ran on one chord within one dispatch context.
+struct ChordOwner {
+	chord:   Str,
+	context: usize,
+	place:   usize,
+	action:  Str,
+}
+
+/// For every chord the merged v1 map lists, per dispatch context, the action
+/// v1 ran on it: the earliest in that context's order.
+fn v1_chord_owners(bindings: &[Binding<'_>]) -> Vec<ChordOwner> {
+	let mut owners = Vec::<ChordOwner>::new();
+	for binding in bindings {
+		let Some((context, place)) = v1_precedence(&binding.action) else {
+			continue;
+		};
+		let chords = match &binding.keys {
+			V1Keys::One(chord) => std::slice::from_ref(chord),
+			V1Keys::Many(chords) => chords.as_slice(),
+			V1Keys::Unset(()) | V1Keys::Invalid(_) => continue,
+		};
+		for chord in chords {
+			let Ok(chord) = normalize_chord(chord.as_str()) else {
+				continue;
+			};
+			match owners
+				.iter_mut()
+				.find(|owner| owner.chord == chord && owner.context == context)
+			{
+				Some(owner) => {
+					if place < owner.place {
+						owner.place = place;
+						owner.action = binding.action.clone();
+					}
+				},
+				None => {
+					owners.push(ChordOwner { chord, context, place, action: binding.action.clone() });
+				},
+			}
+		}
+	}
+	owners
+}
 
 /// A failure reading v1 keybindings or appending them to `config.cfg`.
 #[derive(Debug, Error)]
@@ -371,6 +527,17 @@ fn plan(
 		subject.push_str(chord);
 		Str::new(subject)
 	};
+	let owners = v1_chord_owners(bindings);
+	// The action v1 ran on `chord` instead of `action`, when another action
+	// of its dispatch context took the chord.
+	let shadowed_by = |action: &str, chord: &str| {
+		let (context, _) = v1_precedence(action)?;
+		owners
+			.iter()
+			.find(|owner| owner.context == context && owner.chord == chord)
+			.filter(|owner| owner.action != action)
+			.map(|owner| owner.action.clone())
+	};
 	let mut entries = Vec::with_capacity(bindings.len());
 	let mut notes = String::new();
 	// Actions whose v1 entry replaces their default chords.
@@ -442,6 +609,24 @@ fn plan(
 				continue;
 			}
 			seen.push(normalized.clone());
+			if let Some(winner) = shadowed_by(action, &normalized) {
+				// v1 still replaced the action's default chords with this
+				// entry; the chord just never reached it.
+				overridden.insert(action);
+				comment(
+					&mut notes,
+					format_args!("not imported: v1 ran `{winner}` on {normalized}, never `{action}`"),
+				);
+				let mut subject =
+					String::with_capacity(action.len() + normalized.len() + winner.len() + 14);
+				let _ = write!(subject, "{action}: {normalized} (v1 ran {winner})");
+				entries.push(entry(
+					binding,
+					Str::new(subject),
+					ImportOutcome::Skipped(SkipReason::ShadowedChord),
+				));
+				continue;
+			}
 			if owned.contains(&normalized) {
 				comment(
 					&mut notes,

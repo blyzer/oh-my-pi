@@ -1762,6 +1762,45 @@ mod tests {
 		assert_eq!(spawned_model(&parent, &files, "reviewer").as_str(), "class/model");
 	}
 
+	/// The class-model precedence: the class's own model, then `inherit` (the
+	/// parent session's model), then `ai_task_model` when the class names no
+	/// model, then the parent's model.
+	#[test]
+	fn subagent_class_inherit_model_uses_the_session_model_over_the_task_model() {
+		let (_root, files) = cfg_root(&[
+			("pinned.cfg", "ai_model class/model\n"),
+			("inheriting.cfg", "ai_model inherit\nai_thinking low\n"),
+			("plain.cfg", "ai_thinking low\n"),
+			// A reset leaves no class model, so the default precedence applies.
+			("reset.cfg", "ai_model other/model\nreset ai_model\n"),
+		]);
+		let parent = parent_with("ai_model parent/model; ai_task_model task/model");
+		assert_eq!(spawned_model(&parent, &files, "pinned").as_str(), "class/model");
+		assert_eq!(spawned_model(&parent, &files, "inheriting").as_str(), "parent/model");
+		assert_eq!(spawned_model(&parent, &files, "plain").as_str(), "task/model");
+		assert_eq!(spawned_model(&parent, &files, "reset").as_str(), "task/model");
+
+		let without_task = parent_with("ai_model parent/model");
+		assert_eq!(spawned_model(&without_task, &files, "inheriting").as_str(), "parent/model");
+		assert_eq!(spawned_model(&without_task, &files, "reset").as_str(), "parent/model");
+
+		// `subagent.cfg` may ask for it too; a class cfg still outranks it.
+		let (_root, files) = cfg_root(&[
+			("subagent.cfg", "ai_model inherit\n"),
+			("pinned.cfg", "ai_model class/model\n"),
+		]);
+		assert_eq!(spawned_model(&parent, &files, "nocfg").as_str(), "parent/model");
+		assert_eq!(spawned_model(&parent, &files, "pinned").as_str(), "class/model");
+
+		// The spawner's explicit per-agent override still beats `inherit`.
+		let overridden = parent_with(
+			"ai_model parent/model; ai_task_model task/model; sv_task_agent_model_overrides \
+			 {inheriting override/model}",
+		);
+		let (_root, files) = cfg_root(&[("inheriting.cfg", "ai_model inherit\n")]);
+		assert_eq!(spawned_model(&overridden, &files, "inheriting").as_str(), "override/model");
+	}
+
 	#[tokio::test]
 	async fn idle_ttl_zero_keeps_child_live_and_nonzero_reaps_after_boundary() {
 		let temp = tempfile::tempdir().expect("tempdir");
