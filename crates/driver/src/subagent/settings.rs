@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use omp_con::{CfgLoader, Ctx, Kv, Value};
+use omp_con::{CfgLoader, Ctx, Kv, Origin, Value};
 use omp_core::Str;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
@@ -579,18 +579,25 @@ fn string_map(values: Kv) -> BTreeMap<Str, Str> {
 /// `subagent.cfg`, then `<agent>.cfg`. `config.cfg` is deliberately not
 /// re-read: the parent already applied it, and re-running it would let a
 /// stale archived value override what the parent changed since startup.
-/// Whatever the spawner sets explicitly comes after this call.
+/// Whatever the spawner sets explicitly comes after this call
+/// ([`super::spawn::configure_child`]).
 ///
-/// A non-empty `ai_task_model` is part of the seed: it becomes the child's
-/// `ai_model` before either cfg runs, so an `ai_model` the class cfg (or
-/// `subagent.cfg`) assigns outranks it by execution order, as v1 let an agent
-/// definition's `model` outrank the task role.
+/// The parent's picture lands in the child's inherited layer and both cfgs
+/// in its class layer ([`omp_con::Origin`]), so the child's own later writes
+/// sit above them and `reset <var>` falls back through them: on the child's
+/// console to its class value, else the parent's; inside a class cfg to the
+/// parent's value.
+///
+/// A non-empty `ai_task_model` is part of the seed: it is the `ai_model` the
+/// child inherits, so an `ai_model` the class cfg (or `subagent.cfg`) assigns
+/// outranks it by layer, as v1 let an agent definition's `model` outrank the
+/// task role, and a cfg's `reset ai_model` returns to it.
 ///
 /// Two `ai_model` values the cfgs leave are resolved here, once they have
 /// run: `inherit` ([`omp_agent::AI_MODEL_INHERIT`]) becomes the parent's own
 /// `ai_model`, skipping `ai_task_model`, as v1 ran an agent without a `model`
-/// on the session's model; empty (`reset ai_model`) means the cfgs chose no
-/// model, so the seed applies again: `ai_task_model`, else the parent's.
+/// on the session's model; empty means the cfgs chose no model, so the seed
+/// applies again: `ai_task_model`, else the parent's.
 pub fn child_ctx(
 	parent: &Ctx,
 	loader: &dyn CfgLoader,
@@ -603,12 +610,12 @@ pub fn child_ctx(
 		child.register_dynamic_var(spec)?;
 	}
 	for (name, value) in values {
-		child.set_value(name.as_str(), value, omp_con::SetSource::Code)?;
+		child.set(name.as_str(), value, Origin::Inherited)?;
 	}
 	let parent_model = omp_agent::AI_MODEL.get(&child);
 	let task_model = omp_agent::AI_TASK_MODEL.get(&child);
 	if !task_model.is_empty() {
-		omp_agent::AI_MODEL.set(&child, task_model.clone())?;
+		omp_agent::AI_MODEL.set_in(&child, task_model.clone(), Origin::Inherited)?;
 	}
 	let outcome = child.exec_spawn_configs(loader, agent)?;
 	if outcome.failed > 0 {
@@ -620,7 +627,7 @@ pub fn child_ctx(
 	}
 	let chosen = omp_agent::AI_MODEL.get(&child);
 	if chosen.as_str() == omp_agent::AI_MODEL_INHERIT {
-		omp_agent::AI_MODEL.set(&child, parent_model)?;
+		omp_agent::AI_MODEL.set_in(&child, parent_model, Origin::Class)?;
 	} else if chosen.is_empty() {
 		let seeded = if task_model.is_empty() {
 			parent_model
@@ -628,7 +635,7 @@ pub fn child_ctx(
 			task_model
 		};
 		if !seeded.is_empty() {
-			omp_agent::AI_MODEL.set(&child, seeded)?;
+			omp_agent::AI_MODEL.set_in(&child, seeded, Origin::Class)?;
 		}
 	}
 	Ok(child)

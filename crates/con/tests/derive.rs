@@ -129,14 +129,14 @@ fn session_writes_stream_carries_committed_values_not_engagement_values() {
 	let ctx = Ctx::new();
 	let rx = ctx.subscribe_session_writes();
 	ctx.run("test_derived 4").unwrap();
-	assert_eq!(rx.try_recv().unwrap(), (Str::new("test_derived"), Value::Int(4)));
+	assert_eq!(rx.try_recv().unwrap(), (Str::new("test_derived"), Some(Value::Int(4))));
 	// An engagement bind changes the effective value but is not a session write.
 	ctx.derive_layers(&chain(&[("plan#1", &[("test_derived", 9)])]));
 	assert_eq!(ctx.get("test_derived"), Some(Value::Int(9)));
 	assert!(rx.try_recv().is_err());
 	// A shadowed user write still commits (and journals) the session value.
 	ctx.run("test_derived 5").unwrap();
-	assert_eq!(rx.try_recv().unwrap(), (Str::new("test_derived"), Value::Int(5)));
+	assert_eq!(rx.try_recv().unwrap(), (Str::new("test_derived"), Some(Value::Int(5))));
 	assert_eq!(ctx.get("test_derived"), Some(Value::Int(9)));
 	// Archive-only variables never enter the journal stream.
 	ctx.run("test_archived_only true").unwrap();
@@ -144,7 +144,7 @@ fn session_writes_stream_carries_committed_values_not_engagement_values() {
 	// A reset journals the default so replay clears the earlier write.
 	ctx.set("test_derived", Value::Int(1), Origin::Default)
 		.unwrap();
-	assert_eq!(rx.try_recv().unwrap(), (Str::new("test_derived"), Value::Int(1)));
+	assert_eq!(rx.try_recv().unwrap(), (Str::new("test_derived"), Some(Value::Int(1))));
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn seed_child_carries_dynamic_declarations_before_values() {
 		child.register_dynamic_var(declaration).unwrap();
 	}
 	for (name, value) in values {
-		child.set(name.as_str(), value, Origin::Session).unwrap();
+		child.set(name.as_str(), value, Origin::Inherited).unwrap();
 	}
 	assert_eq!(child.get("ext::demo::enabled"), Some(Value::Bool(true)));
 }

@@ -100,6 +100,31 @@ pub fn con_write_txn(
 	Ok(Txn { cause, label: Some(Str::new_static("con.write")), ops })
 }
 
+/// Builds the `patch@1` transaction that drops one session convar — its
+/// session override was `reset`, so replay leaves the variable inherited.
+/// `None` when the journal holds no value for `name`.
+pub fn con_remove_txn(
+	dom: &Dom,
+	cause: EntryId,
+	name: &str,
+) -> Result<Option<Txn>, ConComponentError> {
+	let con = con_handle(dom).ok_or(ConComponentError::MissingCon)?;
+	let name_key = PropKey::Known(PropId::Name);
+	let ops: Vec<_> = dom
+		.children(con)
+		.iter()
+		.copied()
+		.filter(|handle| {
+			dom.get(*handle).is_some_and(|node| {
+				node.tag == Tag::Known(KnownTag::Var)
+					&& node.prop(&name_key).and_then(Value::as_str) == Some(name)
+			})
+		})
+		.map(Op::Rm)
+		.collect();
+	Ok((!ops.is_empty()).then(|| Txn { cause, label: Some(Str::new_static("con.remove")), ops }))
+}
+
 fn con_handle(dom: &Dom) -> Option<omp_dom::Handle> {
 	dom.children(dom.meta()).iter().copied().find(|handle| {
 		dom.get(*handle)
