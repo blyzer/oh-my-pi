@@ -28,8 +28,9 @@
 //!   factories have no runtime home yet and surface as
 //!   [`PluginDiagnostic::Unsupported`] instead of being dropped silently.
 //!
-//! No process a plugin declares (MCP server, language server, debug adapter)
-//! starts before the operator approved it: resolution attaches each plugin's
+//! No process a plugin declares (MCP server, language server, debug adapter,
+//! hook command) runs before the operator approved it: resolution attaches
+//! each plugin's
 //! approved launch digests from the local grant file, and every launching
 //! seam gates through [`ClaudePlugin::admit_launch`]
 //! ([`crate::plugin_command`]).
@@ -69,7 +70,7 @@ use strum::{Display, IntoStaticStr};
 use crate::{
 	ExtensionError,
 	claude_hooks::{ClaudeHookEvent, HookHandlerGap, PluginHook},
-	plugin_command::{PluginCommandBlocked, PluginLaunch, plugin_command_digest},
+	plugin_command::{CommandApprovals, PluginCommandBlocked, PluginLaunch, plugin_command_digest},
 	trust::{GrantsFile, grants_path},
 };
 
@@ -518,7 +519,7 @@ pub enum PluginDiagnostic {
 	/// The local grant file could not be read, so no plugin launch counts as
 	/// approved.
 	#[error(
-		"plugin command approvals in {} cannot be read; plugin servers that launch commands do not start",
+		"plugin command approvals in {} cannot be read; plugin servers and hooks that run commands do not start",
 		path.display()
 	)]
 	CommandApprovals {
@@ -692,14 +693,6 @@ impl ClaudePlugin {
 		plugin_command_digest(&self.id, &self.version, launch)
 	}
 
-	/// Whether the operator approved `launch` for this plugin.
-	#[must_use]
-	pub fn launch_approved(&self, launch: &PluginLaunch) -> bool {
-		self
-			.approved_commands
-			.contains(&self.command_digest(launch))
-	}
-
 	/// Admits `launch` when the operator approved it; otherwise returns the
 	/// diagnostic naming the plugin, the command, and how to approve it. A
 	/// launching seam never starts a refused launch.
@@ -710,6 +703,17 @@ impl ClaudePlugin {
 		}
 		Err(PluginCommandBlocked::new(self.id.clone(), launch, digest))
 	}
+
+	/// Every hook this plugin declares with the launch the approval gate
+	/// keys it on ([`PluginHook::launch`]); empty for an Agent Plugins
+	/// package.
+	pub fn hook_launches(&self) -> impl Iterator<Item = (&PluginHook, PluginLaunch)> + '_ {
+		self
+			.claude_components()
+			.into_iter()
+			.flat_map(|components| components.hooks.iter())
+			.map(|hook| (hook, hook.launch(&self.root)))
+	}
 }
 
 /// The installed, enabled plugin set of one project, plus everything that did
@@ -718,9 +722,13 @@ impl ClaudePlugin {
 pub struct ClaudePlugins {
 	/// Resolved plugins: project scope first, then user scope, each in id
 	/// order.
-	pub plugins:     Vec<ClaudePlugin>,
+	pub plugins:           Vec<ClaudePlugin>,
 	/// Non-fatal resolution diagnostics, one per problem.
-	pub diagnostics: Vec<PluginDiagnostic>,
+	pub diagnostics:       Vec<PluginDiagnostic>,
+	/// Every plugin command approval in the local grant file, read at
+	/// resolution; the gate of launches outside [`Self::plugins`] (Agent
+	/// Plugins packages). Empty when the grant file cannot be read.
+	pub command_approvals: CommandApprovals,
 }
 
 impl ClaudePlugins {
@@ -743,11 +751,14 @@ impl ClaudePlugins {
 		let user = out.read_registry(&user_path);
 		let claude = claude.and_then(|home| out.read_claude_code(home, &project_root));
 		let approvals_path = grants_path(data_dir);
-		let approvals = GrantsFile::read(&approvals_path).unwrap_or_else(|source| {
-			out.diagnostics
-				.push(PluginDiagnostic::CommandApprovals { path: approvals_path, source });
-			GrantsFile::default()
-		});
+		let approvals = GrantsFile::read(&approvals_path).map_or_else(
+			|source| {
+				out.diagnostics
+					.push(PluginDiagnostic::CommandApprovals { path: approvals_path, source });
+				CommandApprovals::default()
+			},
+			|grants| grants.command_approvals(),
+		);
 		let project_enabled = project
 			.plugins
 			.iter()
@@ -795,8 +806,9 @@ impl ClaudePlugins {
 			out.admit(&user_path, id, PluginSource::Omp, candidates, &mut seen_roots);
 		}
 		for plugin in &mut out.plugins {
-			plugin.approved_commands = approvals.approved_plugin_commands(&plugin.id).collect();
+			plugin.approved_commands = approvals.of(&plugin.id).collect();
 		}
+		out.command_approvals = approvals;
 		out
 	}
 

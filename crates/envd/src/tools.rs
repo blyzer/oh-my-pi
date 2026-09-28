@@ -3326,6 +3326,10 @@ pub struct ActiveContentInputs {
 	/// Explicit Agent Plugins roots whose data-only MCP declarations join
 	/// automatic project discovery.
 	pub agent_plugin_roots:  Vec<PathBuf>,
+	/// The operator's plugin command approvals: an Agent Plugins stdio MCP
+	/// server starts only when its launch is approved. Empty approves
+	/// nothing.
+	pub command_approvals:   omp_ext::plugin_command::CommandApprovals,
 	/// Installed, enabled Claude-layout marketplace plugins whose MCP
 	/// declarations join automatic project discovery and whose LSP and DAP
 	/// declarations reach the document authority's rosters.

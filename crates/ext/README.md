@@ -18,9 +18,12 @@ sits below both and can be reasoned about as data in, data out.
 - `trust`: signature verification, trust tiers, and the local grant file,
   including operator approvals of plugin-launched commands.
 - `plugin_command`: the approval key (`Hash32` digest of plugin version,
-  command, arguments, and environment) and typed refusal for every process an
-  installed plugin's MCP, LSP, or DAP declaration would start; plugin
-  resolution attaches approvals and each launching seam gates through them.
+  command, arguments, environment, working directory, and a hook's event and
+  matcher) and typed refusal for every command a plugin would run: an
+  installed plugin's MCP, LSP, and DAP servers and its hooks (approved under
+  `name@marketplace`), and an Agent Plugins 1.0 package's stdio MCP servers
+  (approved under its manifest name). Plugin resolution reads the approvals
+  (`CommandApprovals`) and each launching seam gates through them.
 - `index`, `upgrade`, `doctor`: index metadata, generation commits, and
   integrity diagnostics.
 - `marketplace`, `claude_plugin`: Claude-compatible marketplace catalogs, the
