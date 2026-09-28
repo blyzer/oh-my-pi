@@ -796,7 +796,7 @@ mod tests {
 		let first = import_picked(ForeignFormat::Claude, &source, &fresh(&sessions), &data).unwrap();
 		let again = import_picked(ForeignFormat::Claude, &source, &fresh(&sessions), &data).unwrap();
 		assert_eq!(again, first, "a current import reopens");
-		assert_eq!(journals(&sessions), [first.clone()]);
+		assert_eq!(journals(&sessions), std::slice::from_ref(&first));
 		// Another project's chat reopens it too: every bucket is looked in.
 		let elsewhere = data.join("projects/4567ef01/sessions");
 		let other = import_picked(ForeignFormat::Claude, &source, &fresh(&elsewhere), &data).unwrap();
