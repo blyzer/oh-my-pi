@@ -14,8 +14,13 @@
 //! never rewritten; a v1 `artifact://<id>` stays as v1 wrote it and resolves
 //! through [`v1_artifacts`].
 
+use std::{
+	fs,
+	time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 use omp_core::{Hash32, Str};
-use omp_dom::{Dom, NodeSpec, Op, PropId, PropKey, Tag, Value};
+use omp_dom::{Dom, Handle, NodeSpec, Op, PropId, PropKey, Tag, Value};
 use omp_journal::{Entry, Kind, KindName, blob::BlobRef, data::Patch};
 
 /// `<meta>` property: the importer's source format (`claude`, `codex`,
@@ -40,6 +45,21 @@ pub const IMPORT_SOURCE_CWD: &str = "import-source-cwd";
 /// importer compares a later read of the source against to tell that the
 /// source changed since ([`ImportOrigin::source_digest`]).
 pub const IMPORT_SOURCE_BLOB: &str = "import-source-blob";
+/// `<meta>` property: the source transcript's byte length when it was read
+/// for import ([`SourceStamp::size`]).
+pub const IMPORT_SOURCE_SIZE: &str = "import-source-size";
+/// `<meta>` property: the source transcript's modification time when it was
+/// read for import, in nanoseconds since the Unix epoch
+/// ([`SourceStamp::modified_ns`]).
+pub const IMPORT_SOURCE_MTIME: &str = "import-source-mtime-ns";
+/// How long before the importer's own clock a source's modification time
+/// must lie for its [`SourceStamp`] to be recorded
+/// ([`SourceStamp::recordable`]).
+///
+/// It is longer than the coarsest filesystem timestamp granularity (FAT's
+/// 2 s), so a write after the import always moves the modification time
+/// past the recorded one.
+pub const STAMP_SETTLE: Duration = Duration::from_secs(2);
 /// `<meta>` child naming one retained source artifact.
 pub const FOREIGN_ARTIFACT_TAG: &str = "foreign-artifact";
 /// `<foreign-artifact>` (and `<foreign-import>`) property: the byte length
@@ -64,6 +84,83 @@ pub struct ImportOrigin {
 	/// Digest of the source's exact bytes at import ([`IMPORT_SOURCE_BLOB`]),
 	/// when recorded as an `artifact://sha256/<hex>` address.
 	pub source_digest: Option<Hash32>,
+	/// The source file's size and modification time at import
+	/// ([`IMPORT_SOURCE_SIZE`], [`IMPORT_SOURCE_MTIME`]), when both were
+	/// recorded.
+	pub source_stamp:  Option<SourceStamp>,
+}
+
+/// A source file's size and modification time (nanosecond precision where
+/// the filesystem keeps it).
+///
+/// An importer records the stamp of the file it read
+/// ([`ImportOrigin::source_stamp`]); while the file's current stamp still
+/// equals it, the file holds the bytes it held then, so whoever compares the
+/// file against the import's [digest](ImportOrigin::source_digest) can skip
+/// reading it. Any other stamp (a same-size rewrite in place moves the
+/// modification time) means the file has to be read and digested.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct SourceStamp {
+	/// Byte length.
+	pub size:        u64,
+	/// Modification time, nanoseconds since the Unix epoch (negative before
+	/// it).
+	pub modified_ns: i64,
+}
+
+/// `time` as nanoseconds since the Unix epoch, when an `i64` holds it.
+fn unix_nanos(time: SystemTime) -> Option<i64> {
+	match time.duration_since(UNIX_EPOCH) {
+		Ok(after) => i64::try_from(after.as_nanos()).ok(),
+		Err(before) => i64::try_from(before.duration().as_nanos())
+			.ok()
+			.map(|nanos| -nanos),
+	}
+}
+
+impl SourceStamp {
+	/// The stamp of a file with `metadata`; `None` when the platform reports
+	/// no modification time.
+	#[must_use]
+	pub fn of(metadata: &fs::Metadata) -> Option<Self> {
+		Some(Self {
+			size:        metadata.len(),
+			modified_ns: unix_nanos(metadata.modified().ok()?)?,
+		})
+	}
+
+	/// This stamp, taken at `taken` before reading the file, when it is safe
+	/// to record for the `read` bytes that read returned.
+	///
+	/// `None` when the read saw another length (the file changed meanwhile),
+	/// or when the modification time is not at least [`STAMP_SETTLE`] before
+	/// `taken`: a write landing in the same tick of a coarse filesystem clock
+	/// could then leave the modification time unchanged. Recording nothing
+	/// only costs a later reader a digest.
+	#[must_use]
+	pub fn recordable(self, read: u64, taken: SystemTime) -> Option<Self> {
+		let settle = i64::try_from(STAMP_SETTLE.as_nanos()).unwrap_or(i64::MAX);
+		let latest = unix_nanos(taken)?.saturating_sub(settle);
+		(self.size == read && self.modified_ns <= latest).then_some(self)
+	}
+
+	/// The `<meta>` operations recording this stamp on `meta`
+	/// ([`IMPORT_SOURCE_SIZE`], [`IMPORT_SOURCE_MTIME`]).
+	#[must_use]
+	pub fn ops(self, meta: Handle) -> [Op; 2] {
+		[
+			Op::Set {
+				h:     meta,
+				prop:  PropKey::Custom(Str::new_static(IMPORT_SOURCE_SIZE)),
+				value: Value::Int(i64::try_from(self.size).unwrap_or(i64::MAX)),
+			},
+			Op::Set {
+				h:     meta,
+				prop:  PropKey::Custom(Str::new_static(IMPORT_SOURCE_MTIME)),
+				value: Value::Int(self.modified_ns),
+			},
+		]
+	}
 }
 
 /// Decodes the DOM operations of one `patch@1` entry; other kinds and
@@ -85,25 +182,32 @@ fn patch_ops(entry: &Entry) -> Option<Vec<Op>> {
 pub fn import_origin(entries: &[Entry]) -> Option<ImportOrigin> {
 	let meta = Dom::new().meta();
 	let mut origin = ImportOrigin::default();
+	let mut size = None;
+	let mut modified_ns = None;
 	for op in entries.iter().filter_map(patch_ops).flatten() {
-		let Op::Set { h, prop: PropKey::Custom(name), value: Value::Str(value) } = op else {
+		let Op::Set { h, prop: PropKey::Custom(name), value } = op else {
 			continue;
 		};
 		if h != meta {
 			continue;
 		}
-		match name.as_str() {
-			IMPORT_FORMAT => origin.format = value,
-			IMPORT_SOURCE => origin.source = Some(value),
-			IMPORT_SOURCE_ID => origin.source_id = Some(value),
-			IMPORT_SOURCE_BLOB => {
+		match (name.as_str(), value) {
+			(IMPORT_FORMAT, Value::Str(value)) => origin.format = value,
+			(IMPORT_SOURCE, Value::Str(value)) => origin.source = Some(value),
+			(IMPORT_SOURCE_ID, Value::Str(value)) => origin.source_id = Some(value),
+			(IMPORT_SOURCE_BLOB, Value::Str(value)) => {
 				origin.source_digest = value
 					.strip_prefix(ARTIFACT_PREFIX)
 					.and_then(|hex| hex.parse().ok());
 			},
+			(IMPORT_SOURCE_SIZE, Value::Int(value)) => size = u64::try_from(value).ok(),
+			(IMPORT_SOURCE_MTIME, Value::Int(value)) => modified_ns = Some(value),
 			_ => {},
 		}
 	}
+	origin.source_stamp = size
+		.zip(modified_ns)
+		.map(|(size, modified_ns)| SourceStamp { size, modified_ns });
 	(!origin.format.is_empty()).then_some(origin)
 }
 
@@ -200,17 +304,16 @@ mod tests {
 		let source = blob(b"{\"type\":\"session\"}\n");
 		let mut address = String::from(ARTIFACT_PREFIX);
 		address.push_str(source.to_hex().as_str());
+		let stamp = SourceStamp { size: 19, modified_ns: 1_767_323_045_123_456_789 };
+		let mut ops = vec![
+			set(IMPORT_FORMAT, "omp1"),
+			set(IMPORT_SOURCE, "/v1/sessions/a.jsonl"),
+			set(IMPORT_SOURCE_ID, "v1-session"),
+			set(IMPORT_SOURCE_BLOB, &address),
+		];
+		ops.extend(stamp.ops(meta));
 		session
-			.patch(Txn {
-				cause,
-				label: None,
-				ops: vec![
-					set(IMPORT_FORMAT, "omp1"),
-					set(IMPORT_SOURCE, "/v1/sessions/a.jsonl"),
-					set(IMPORT_SOURCE_ID, "v1-session"),
-					set(IMPORT_SOURCE_BLOB, &address),
-				],
-			})
+			.patch(Txn { cause, label: None, ops })
 			.expect("provenance");
 		for (name, bytes, id) in [
 			("3.bash.log", b"three".as_slice(), Some(3)),
@@ -245,6 +348,7 @@ mod tests {
 				source:        Some(Str::new_static("/v1/sessions/a.jsonl")),
 				source_id:     Some(Str::new_static("v1-session")),
 				source_digest: Some(source.hash),
+				source_stamp:  Some(stamp),
 			})
 		);
 		assert_eq!(v1_artifacts(&entries).collect::<Vec<_>>(), [
@@ -264,9 +368,40 @@ mod tests {
 		.expect("provenance");
 		drop(odd);
 		let odd = omp_journal::Journal::scan(directory.path().join("odd.oms")).expect("scan");
-		assert_eq!(import_origin(&odd).and_then(|origin| origin.source_digest), None);
+		let odd = import_origin(&odd).expect("origin");
+		assert_eq!(odd.source_digest, None);
+		// A journal of an importer that recorded no stamp (or half of one) has
+		// none.
+		assert_eq!(odd.source_stamp, None);
 		// The genesis alone is no import.
 		assert_eq!(import_origin(&entries[..1]), None);
 		assert_eq!(v1_artifacts(&entries[..1]).count(), 0);
+	}
+
+	#[test]
+	fn a_stamp_is_recorded_only_for_a_settled_file_read_whole() {
+		let directory = tempfile::tempdir().expect("scratch");
+		let path = directory.path().join("source.jsonl");
+		fs::write(&path, b"0123456789").expect("source");
+		let settled = UNIX_EPOCH + Duration::from_nanos(1_767_323_045_123_456_789);
+		fs::File::options()
+			.write(true)
+			.open(&path)
+			.and_then(|file| file.set_modified(settled))
+			.expect("backdate");
+		let stamp = SourceStamp::of(&fs::metadata(&path).expect("stat")).expect("stamp");
+		assert_eq!(stamp, SourceStamp { size: 10, modified_ns: 1_767_323_045_123_456_789 });
+
+		let later = settled + STAMP_SETTLE;
+		assert_eq!(stamp.recordable(10, later), Some(stamp));
+		// The read saw another length: the file changed while it was read.
+		assert_eq!(stamp.recordable(11, later), None);
+		// Modified too recently: a write in the same clock tick could leave
+		// the modification time as it is.
+		assert_eq!(stamp.recordable(10, later - Duration::from_nanos(1)), None);
+		assert_eq!(stamp.recordable(10, settled), None);
+		// Before the epoch still orders.
+		let early = SourceStamp { size: 1, modified_ns: -5_000_000_000 };
+		assert_eq!(early.recordable(1, UNIX_EPOCH), Some(early));
 	}
 }

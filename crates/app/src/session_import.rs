@@ -53,7 +53,7 @@ pub struct ForeignCandidate {
 	pub first_message: Option<Str>,
 	/// What an earlier import of this transcript left, when the source tracks
 	/// one (omp v1): picking it reopens a current import's journal, or imports
-	/// a changed transcript again.
+	/// a changed transcript (or another file of an imported session).
 	pub imported:      Option<omp_chat::overlays::services::ForeignImport>,
 }
 
@@ -262,6 +262,7 @@ fn v1_candidates() -> miette::Result<Vec<ForeignCandidate>> {
 			imported:      session.imported.map(|prior| match prior {
 				PriorImport::Current(journal) => ForeignImport::Current(journal),
 				PriorImport::Changed(journal) => ForeignImport::Changed(journal),
+				PriorImport::OtherFile(journal) => ForeignImport::OtherFile(journal),
 			}),
 		})
 		.collect())

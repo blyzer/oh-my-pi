@@ -541,6 +541,10 @@ pub enum ForeignImport {
 	/// The transcript changed since its newest import (this journal, which
 	/// stays): picking the row imports it again into a fresh session.
 	Changed(PathBuf),
+	/// This transcript was never imported, but another file of the same
+	/// session was (into this journal, which is left alone): picking the row
+	/// imports this file into a session of its own.
+	OtherFile(PathBuf),
 }
 
 /// One on-disk session.
