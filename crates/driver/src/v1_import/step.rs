@@ -152,6 +152,18 @@ impl ImportStep {
 		matches!(self, Self::ModelsKeys | Self::Credentials)
 	}
 
+	/// Whether the runner skips this step once its marker is set.
+	///
+	/// The sessions step reads its own marker instead
+	/// ([`super::sessions`]): each imported journal, not the marker, keeps a
+	/// session from converting twice, so an explicit bulk request still finds
+	/// the v1 sessions that are new or changed since their import, and every
+	/// run retires the obsolete per-session records of an earlier importer.
+	#[must_use]
+	pub const fn gated_by_marker(self) -> bool {
+		!matches!(self, Self::Sessions)
+	}
+
 	/// This step's marker in a v2 profile configuration root.
 	#[must_use]
 	pub fn marker(self, config_dir: &Path) -> Marker {
@@ -191,7 +203,9 @@ impl ImportStep {
 }
 
 /// A per-step, per-profile idempotency marker: once set, the step never runs
-/// again for that v2 profile, even if the v1 data changes.
+/// again for that v2 profile, even if the v1 data changes (except a step not
+/// [gated by its marker](ImportStep::gated_by_marker), which reads it
+/// itself).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Marker {
 	path: PathBuf,
@@ -333,7 +347,8 @@ impl StepContext<'_> {
 
 /// Runs every registered step for each pair, in order.
 ///
-/// Per step: a set marker skips it; otherwise the step runs and, in
+/// Per step: a set marker skips it (unless the step is not
+/// [gated by it](ImportStep::gated_by_marker)); otherwise the step runs and, in
 /// [`ImportMode::Apply`], sets its own marker once finished. A failure is
 /// reported as [`Attention::Failed`] and leaves the marker unset. Nothing
 /// under the v1 roots is ever written, moved, or deleted.
@@ -382,7 +397,7 @@ fn run_pair(
 	let mut entries = Vec::new();
 	for step in steps {
 		let marker = step.marker(&pair.target.config_dir);
-		if marker.is_set() {
+		if step.gated_by_marker() && marker.is_set() {
 			entries.push(ImportEntry::new(
 				step,
 				step.item(),

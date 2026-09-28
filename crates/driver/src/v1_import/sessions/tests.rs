@@ -11,11 +11,11 @@ use std::{
 use omp_core::{Hash32, Str};
 use omp_dom::{Op, PropKey, Txn, Value};
 use omp_journal::blob::{BlobRef, BlobStore};
-use omp_session::import::{IMPORT_FORMAT, IMPORT_SOURCE_ID, OMP1_FORMAT};
+use omp_session::import::{IMPORT_FORMAT, IMPORT_SOURCE_BLOB, IMPORT_SOURCE_ID, OMP1_FORMAT};
 use parking_lot::Mutex;
 use serde_json::json;
 
-use super::{super::*, ConvertError, ImportedIndex, import_selected, list};
+use super::{super::*, ConvertError, ImportedIndex, PriorImport, import_selected, list};
 
 /// One call the converter saw.
 #[derive(Clone, Debug)]
@@ -29,12 +29,14 @@ struct Call {
 }
 
 /// Writes a one-message journal per transcript, with the provenance the
-/// app's importer records first, and records every call; the transcript
-/// named `fail` fails after writing a partial destination.
+/// app's importer records first (the transcript's digest unless
+/// `unrecorded`), and records every call; the transcript named `fail` fails
+/// after writing a partial destination.
 #[derive(Default)]
 struct Recorder {
-	calls: Mutex<Vec<Call>>,
-	fail:  Option<PathBuf>,
+	calls:      Mutex<Vec<Call>>,
+	fail:       Option<PathBuf>,
+	unrecorded: bool,
 }
 
 impl V1SessionConverter for Recorder {
@@ -62,11 +64,13 @@ impl V1SessionConverter for Recorder {
 			prop:  PropKey::Custom(Str::new_static(prop)),
 			value: Value::Str(Str::new(value)),
 		};
-		session.patch(Txn {
-			cause,
-			label: None,
-			ops: vec![set(IMPORT_FORMAT, OMP1_FORMAT), set(IMPORT_SOURCE_ID, conversion.source_id)],
-		})?;
+		let mut ops =
+			vec![set(IMPORT_FORMAT, OMP1_FORMAT), set(IMPORT_SOURCE_ID, conversion.source_id)];
+		if !self.unrecorded {
+			let digest = Hash32::sum(fs::read(conversion.source)?);
+			ops.push(set(IMPORT_SOURCE_BLOB, &format!("artifact://sha256/{}", digest.to_hex())));
+		}
+		session.patch(Txn { cause, label: None, ops })?;
 		session.begin_turn()?;
 		session.user("imported", Vec::new())?;
 		Ok(1)
@@ -280,7 +284,7 @@ fn a_bulk_import_places_links_pins_and_runs_once() {
 		(None, OutcomeKind::NothingToImport),
 	]);
 	// The subagent converted first, then its parent, which links it.
-	assert_eq!(recorder.sources(), [scout, alpha.clone(), gone]);
+	assert_eq!(recorder.sources(), [scout, alpha, gone]);
 	let calls = recorder.calls.lock().clone();
 	let project = fixture.sessions_dir(&ProjectBucket::for_cwd(Some(&fixture.project)));
 	let project_journals = journals(&project);
@@ -331,22 +335,26 @@ fn a_bulk_import_places_links_pins_and_runs_once() {
 	// Copy only.
 	assert_eq!(snapshot(&fixture.home), v1_before);
 
-	// A second run is a no-op through the marker.
+	// The marker does not gate a second bulk run; the journals skip every
+	// session, and nothing is written.
 	let v2_before = snapshot(&fixture.v2.data_dir);
 	let again = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
-	assert!(matches!(
-		session_entries(&again)[0].outcome,
-		ImportOutcome::Skipped(SkipReason::MarkerPresent)
-	));
-	// Without the marker, the per-session records still skip every session.
-	fs::remove_file(ImportStep::Sessions.marker(&fixture.v2.config_dir).path()).expect("unmark");
-	let records = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
-	assert_eq!(outcomes(&records)[..2], [
+	assert_eq!(outcomes(&again), [
 		(Some("alpha"), OutcomeKind::Skipped),
 		(Some("gone (project directory gone: no-directory)"), OutcomeKind::Skipped),
+		(None, OutcomeKind::NothingToImport),
 	]);
+	assert!(matches!(
+		session_entries(&again)[0].outcome,
+		ImportOutcome::Skipped(SkipReason::SessionImported)
+	));
 	assert_eq!(recorder.sources().len(), 3, "nothing converts twice");
 	assert_eq!(snapshot(&fixture.v2.data_dir), v2_before);
+	// On demand, the marker reports the bulk run.
+	let on_demand = run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline));
+	let entries = session_entries(&on_demand);
+	assert_eq!(entries.len(), 1);
+	assert!(matches!(entries[0].outcome, ImportOutcome::Skipped(SkipReason::MarkerPresent)));
 }
 
 #[test]
@@ -501,7 +509,11 @@ fn the_picker_marks_imported_sessions_and_a_deleted_journal_imports_again() {
 			.imported
 			.clone()
 	};
-	assert_eq!(imported("alpha"), Some(picked.journal.clone()), "the journal is the record");
+	assert_eq!(
+		imported("alpha"),
+		Some(PriorImport::Current(picked.journal.clone())),
+		"the journal is the record"
+	);
 	assert_eq!(imported("gone"), None);
 	// The journal is the only record: without it the session imports again.
 	fs::remove_file(&picked.journal).expect("delete the imported journal");
@@ -557,14 +569,46 @@ fn v1_artifacts_are_copied_mapped_and_missing_ones_reported() {
 	);
 	let pairs = fixture.pairs(&ProfileSelection::All);
 	let recorder = Recorder::default();
+	let offline = omp_con::Ctx::new();
+	let missing = |report: &ImportReport| {
+		session_entries(report)
+			.into_iter()
+			.skip(1)
+			.map(|entry| {
+				assert!(matches!(
+					entry.outcome,
+					ImportOutcome::NeedsAttention(Attention::ArtifactMissing)
+				));
+				(entry.subject.clone(), entry.path.clone())
+			})
+			.collect::<Vec<_>>()
+	};
+
+	// A dry run reports the missing artifacts a real run reports, and writes
+	// nothing.
+	let before = snapshot(fixture.root.path());
+	let dry = run_with(
+		&pairs,
+		ImportMode::DryRun,
+		CredentialAccess::Offline(&offline),
+		SessionImport::Bulk(&recorder),
+	);
+	assert_eq!(snapshot(fixture.root.path()), before, "a dry run must not write anywhere");
+	assert!(recorder.sources().is_empty());
+	assert_eq!(outcomes(&dry), [
+		(Some("art"), OutcomeKind::WouldImport),
+		(Some("art artifact://7"), OutcomeKind::NeedsAttention),
+		(Some("art artifact://9"), OutcomeKind::NeedsAttention),
+	]);
 
 	let report = run_with(
 		&pairs,
 		ImportMode::Apply,
-		CredentialAccess::Offline(&omp_con::Ctx::new()),
+		CredentialAccess::Offline(&offline),
 		SessionImport::Bulk(&recorder),
 	);
 
+	assert_eq!(missing(&dry), missing(&report), "the dry run reports what the real run did");
 	let entries = session_entries(&report);
 	assert_eq!(outcomes(&report), [
 		(Some("art"), OutcomeKind::Imported),
@@ -600,4 +644,229 @@ fn v1_artifacts_are_copied_mapped_and_missing_ones_reported() {
 	for bytes in [b"zero output".as_slice(), b"five output", b"notes"] {
 		assert_eq!(store.get(&blob(bytes)).expect("copied").as_ref(), bytes);
 	}
+}
+
+/// Appends a user message to a v1 transcript, as v1 did when the session
+/// went on after its import.
+fn grow(transcript: &Path, text: &str) {
+	let line = json!({"type": "message", "id": "m9", "parentId": "m2", "timestamp": "2026-01-03T00:00:00.000Z", "message": {"role": "user", "content": text, "timestamp": 9}});
+	let mut bytes = fs::read(transcript).expect("transcript");
+	bytes.extend_from_slice(line.to_string().as_bytes());
+	bytes.push(b'\n');
+	fs::write(transcript, bytes).expect("grow");
+}
+
+#[test]
+fn a_session_changed_since_import_is_marked_and_imports_again_beside_the_earlier_one() {
+	let fixture = Fixture::new();
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	fixture.session(None, "beta", &fixture.project);
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder::default();
+	let offline = omp_con::Ctx::new();
+	let bulk = SessionImport::Bulk(&recorder);
+	run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
+	let first = ImportedIndex::scan(&pairs[0].target)
+		.expect("index")
+		.journal("alpha")
+		.expect("imported")
+		.to_owned();
+	let first_bytes = fs::read(&first).expect("journal");
+
+	grow(&alpha, "one more thing");
+
+	// The picker marks it changed, naming the earlier journal.
+	let rows = list(&pairs[0]).expect("list");
+	let prior = |rows: &[V1SessionInfo], id: &str| {
+		rows
+			.iter()
+			.find(|row| row.id == id)
+			.expect("row")
+			.imported
+			.clone()
+	};
+	assert_eq!(prior(&rows, "alpha"), Some(PriorImport::Changed(first.clone())));
+	assert!(matches!(prior(&rows, "beta"), Some(PriorImport::Current(_))));
+	// A dry run says it would import it again, and writes nothing.
+	let before = snapshot(fixture.root.path());
+	let dry = run_with(&pairs, ImportMode::DryRun, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(snapshot(fixture.root.path()), before);
+	assert_eq!(outcomes(&dry), [
+		(Some("alpha"), OutcomeKind::WouldReimport),
+		(Some("beta"), OutcomeKind::Skipped),
+	]);
+
+	// A bulk rerun imports it again into a fresh journal; the earlier one
+	// stays, untouched.
+	let again = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(outcomes(&again), [
+		(Some("alpha"), OutcomeKind::Reimported),
+		(Some("beta"), OutcomeKind::Skipped),
+	]);
+	assert_eq!(recorder.sources(), [
+		alpha.clone(),
+		fixture
+			.agent(None)
+			.join("sessions/-project/2026-01-02T03-04-05-000Z_beta.jsonl"),
+		alpha.clone()
+	]);
+	assert_eq!(fs::read(&first).expect("earlier journal"), first_bytes, "journals are append-only");
+	let project = fixture.sessions_dir(&ProjectBucket::for_cwd(Some(&fixture.project)));
+	assert_eq!(journals(&project).len(), 3, "both imports of alpha, and beta");
+	let second = project.join(format!("{}.oms", recorder.calls.lock()[2].id));
+	let rows = list(&pairs[0]).expect("list");
+	assert_eq!(prior(&rows, "alpha"), Some(PriorImport::Current(second.clone())));
+	let index = ImportedIndex::scan(&pairs[0].target).expect("index");
+	assert_eq!(index.len(), 2);
+	// Nothing changed since: the next run skips it.
+	let settled = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
+	assert_eq!(outcomes(&settled)[0], (Some("alpha"), OutcomeKind::Skipped));
+	assert_eq!(recorder.sources().len(), 3);
+
+	// The picker imports a changed session again too, and reopens it after.
+	grow(&alpha, "and another");
+	let picked = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+	assert!(picked.converted);
+	assert!(
+		picked
+			.previous
+			.as_ref()
+			.is_some_and(|previous| *previous == first || *previous == second),
+		"{picked:?}"
+	);
+	assert!(picked.journal != first && picked.journal != second);
+	let reopened = import_selected(&pairs[0], &alpha, &recorder).expect("pick again");
+	assert!(!reopened.converted);
+	assert_eq!(reopened.journal, picked.journal);
+	assert_eq!(journals(&project).len(), 4);
+}
+
+#[test]
+fn a_journal_without_a_recorded_digest_counts_as_current() {
+	let fixture = Fixture::new();
+	let alpha = fixture.session(None, "alpha", &fixture.project);
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let recorder = Recorder { unrecorded: true, ..Recorder::default() };
+	let picked = import_selected(&pairs[0], &alpha, &recorder).expect("pick");
+
+	grow(&alpha, "later");
+
+	let rows = list(&pairs[0]).expect("list");
+	assert_eq!(rows[0].imported, Some(PriorImport::Current(picked.journal)));
+	let again = import_selected(&pairs[0], &alpha, &recorder).expect("pick again");
+	assert!(!again.converted);
+}
+
+/// One record as the earlier importer wrote it.
+fn record(id: &str) -> String {
+	json!({"id": id, "source": format!("/v1/sessions/-p/2026-01-02T03-04-05-000Z_{id}.jsonl"), "journal": "/v2/projects/p/sessions/01JABCDEFGHJKMNPQRSTVWXYZ0.oms"}).to_string()
+}
+
+#[test]
+fn obsolete_import_records_are_retired_and_nothing_else() {
+	let fixture = Fixture::new();
+	fixture.session(None, "alpha", &fixture.project);
+	let pairs = fixture.pairs(&ProfileSelection::All);
+	let offline = omp_con::Ctx::new();
+	let records = fixture.v2.data_dir.join("v1-sessions");
+	// Two records: a safe id names its file, any other id its digest.
+	write(&records.join("alpha.json"), &record("alpha"));
+	let odd = "a b/c";
+	write(&records.join(format!("{}.json", Hash32::sum(odd.as_bytes()).to_hex())), &record(odd));
+	// Everything else stays.
+	let keep = [
+		("beta.json", record("gamma")),
+		("partial.json", json!({"id": "partial"}).to_string()),
+		(
+			"extra.json",
+			json!({"id": "extra", "source": "/v1/x_extra.jsonl", "journal": "/v2/y.oms", "more": 1})
+				.to_string(),
+		),
+		(
+			"journal.json",
+			json!({"id": "journal", "source": "/v1/x_journal.jsonl", "journal": "/v2/y.txt"})
+				.to_string(),
+		),
+		("notes.txt", record("notes")),
+		("alpha.json.tmp-7", record("alpha")),
+	];
+	for (name, contents) in &keep {
+		write(&records.join(name), contents);
+	}
+	fs::create_dir_all(records.join("delta.json")).expect("a directory");
+	#[cfg(unix)]
+	{
+		write(&fixture.root.path().join("elsewhere/linked.json"), &record("linked"));
+		std::os::unix::fs::symlink(
+			fixture.root.path().join("elsewhere/linked.json"),
+			records.join("linked.json"),
+		)
+		.expect("symlink");
+	}
+	// Retiring does not wait for the step's marker (an earlier bulk run set it).
+	ImportStep::Sessions
+		.marker(&fixture.v2.config_dir)
+		.set(None)
+		.expect("mark");
+	let retired = |report: &ImportReport| {
+		session_entries(report)
+			.into_iter()
+			.filter(|entry| {
+				matches!(entry.outcome, ImportOutcome::Removed | ImportOutcome::WouldRemove)
+			})
+			.map(|entry| (entry.subject.clone(), entry.path.clone(), entry.outcome.kind()))
+			.collect::<Vec<_>>()
+	};
+
+	let before = snapshot(fixture.root.path());
+	let dry = run(&pairs, ImportMode::DryRun, CredentialAccess::Offline(&offline));
+	assert_eq!(snapshot(fixture.root.path()), before, "a dry run deletes nothing");
+	assert_eq!(retired(&dry), [(
+		Some(Str::new_static("2 obsolete v1 session import records")),
+		Some(records.clone()),
+		OutcomeKind::WouldRemove
+	)]);
+
+	let report = run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline));
+	assert_eq!(retired(&report), [(
+		Some(Str::new_static("2 obsolete v1 session import records")),
+		Some(records.clone()),
+		OutcomeKind::Removed
+	)]);
+	let mut left = fs::read_dir(&records)
+		.expect("records")
+		.map(|entry| {
+			entry
+				.expect("entry")
+				.file_name()
+				.to_string_lossy()
+				.into_owned()
+		})
+		.collect::<Vec<_>>();
+	left.sort();
+	let mut expected = keep
+		.iter()
+		.map(|(name, _)| (*name).to_owned())
+		.collect::<Vec<_>>();
+	expected.push("delta.json".to_owned());
+	#[cfg(unix)]
+	expected.push("linked.json".to_owned());
+	expected.sort();
+	assert_eq!(left, expected);
+	#[cfg(unix)]
+	assert!(fixture.root.path().join("elsewhere/linked.json").is_file(), "links are not followed");
+
+	// Once only what was kept is gone, the empty directory goes too, quietly.
+	fs::remove_dir_all(&records).expect("clear");
+	fs::create_dir_all(&records).expect("empty");
+	let quiet = run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline));
+	assert!(retired(&quiet).is_empty());
+	assert!(!records.exists(), "the empty directory is removed");
+	let absent = run(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline));
+	assert!(retired(&absent).is_empty());
+	assert!(
+		session_entries(&absent)
+			.iter()
+			.all(|entry| !matches!(entry.outcome, ImportOutcome::NeedsAttention(_)))
+	);
 }

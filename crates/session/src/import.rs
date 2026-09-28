@@ -14,7 +14,7 @@
 //! never rewritten; a v1 `artifact://<id>` stays as v1 wrote it and resolves
 //! through [`v1_artifacts`].
 
-use omp_core::Str;
+use omp_core::{Hash32, Str};
 use omp_dom::{Dom, NodeSpec, Op, PropId, PropKey, Tag, Value};
 use omp_journal::{Entry, Kind, KindName, blob::BlobRef, data::Patch};
 
@@ -34,7 +34,11 @@ pub const IMPORT_SOURCE_ID: &str = "import-source-id";
 /// `<meta>` property: the source's recorded working directory.
 pub const IMPORT_SOURCE_CWD: &str = "import-source-cwd";
 /// `<meta>` property: `artifact://sha256/<hex>` of the source transcript's
-/// exact bytes.
+/// exact bytes at import.
+///
+/// The hex is the bytes' SHA-256 digest ([`omp_core::Hash32::sum`]), which an
+/// importer compares a later read of the source against to tell that the
+/// source changed since ([`ImportOrigin::source_digest`]).
 pub const IMPORT_SOURCE_BLOB: &str = "import-source-blob";
 /// `<meta>` child naming one retained source artifact.
 pub const FOREIGN_ARTIFACT_TAG: &str = "foreign-artifact";
@@ -52,11 +56,14 @@ const ARTIFACT_PREFIX: &str = "artifact://sha256/";
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ImportOrigin {
 	/// Source format ([`IMPORT_FORMAT`]).
-	pub format:    Str,
+	pub format:        Str,
 	/// Source transcript path ([`IMPORT_SOURCE`]).
-	pub source:    Option<Str>,
+	pub source:        Option<Str>,
 	/// Source session id ([`IMPORT_SOURCE_ID`]).
-	pub source_id: Option<Str>,
+	pub source_id:     Option<Str>,
+	/// Digest of the source's exact bytes at import ([`IMPORT_SOURCE_BLOB`]),
+	/// when recorded as an `artifact://sha256/<hex>` address.
+	pub source_digest: Option<Hash32>,
 }
 
 /// Decodes the DOM operations of one `patch@1` entry; other kinds and
@@ -89,6 +96,11 @@ pub fn import_origin(entries: &[Entry]) -> Option<ImportOrigin> {
 			IMPORT_FORMAT => origin.format = value,
 			IMPORT_SOURCE => origin.source = Some(value),
 			IMPORT_SOURCE_ID => origin.source_id = Some(value),
+			IMPORT_SOURCE_BLOB => {
+				origin.source_digest = value
+					.strip_prefix(ARTIFACT_PREFIX)
+					.and_then(|hex| hex.parse().ok());
+			},
 			_ => {},
 		}
 	}
@@ -180,11 +192,14 @@ mod tests {
 		let mut session = Session::create(&path, ComponentRegistry::standard()).expect("create");
 		let meta = session.dom().meta();
 		let cause = session.head().expect("genesis");
-		let set = |prop: &'static str, value: &'static str| Op::Set {
+		let set = |prop: &'static str, value: &str| Op::Set {
 			h:     meta,
 			prop:  PropKey::Custom(Str::new_static(prop)),
-			value: Value::Str(Str::new_static(value)),
+			value: Value::Str(Str::new(value)),
 		};
+		let source = blob(b"{\"type\":\"session\"}\n");
+		let mut address = String::from(ARTIFACT_PREFIX);
+		address.push_str(source.to_hex().as_str());
 		session
 			.patch(Txn {
 				cause,
@@ -193,6 +208,7 @@ mod tests {
 					set(IMPORT_FORMAT, "omp1"),
 					set(IMPORT_SOURCE, "/v1/sessions/a.jsonl"),
 					set(IMPORT_SOURCE_ID, "v1-session"),
+					set(IMPORT_SOURCE_BLOB, &address),
 				],
 			})
 			.expect("provenance");
@@ -225,15 +241,30 @@ mod tests {
 		assert_eq!(
 			import_origin(&entries),
 			Some(ImportOrigin {
-				format:    Str::new_static("omp1"),
-				source:    Some(Str::new_static("/v1/sessions/a.jsonl")),
-				source_id: Some(Str::new_static("v1-session")),
+				format:        Str::new_static("omp1"),
+				source:        Some(Str::new_static("/v1/sessions/a.jsonl")),
+				source_id:     Some(Str::new_static("v1-session")),
+				source_digest: Some(source.hash),
 			})
 		);
 		assert_eq!(v1_artifacts(&entries).collect::<Vec<_>>(), [
 			(3, blob(b"three")),
 			(7, blob(b"seven"))
 		]);
+		// An address that is no `artifact://sha256/<hex>` records no digest.
+		let mut odd =
+			Session::create(directory.path().join("odd.oms"), ComponentRegistry::standard())
+				.expect("create");
+		let cause = odd.head().expect("genesis");
+		odd.patch(Txn {
+			cause,
+			label: None,
+			ops: vec![set(IMPORT_FORMAT, "omp1"), set(IMPORT_SOURCE_BLOB, "blob:sha256:zz")],
+		})
+		.expect("provenance");
+		drop(odd);
+		let odd = omp_journal::Journal::scan(directory.path().join("odd.oms")).expect("scan");
+		assert_eq!(import_origin(&odd).and_then(|origin| origin.source_digest), None);
 		// The genesis alone is no import.
 		assert_eq!(import_origin(&entries[..1]), None);
 		assert_eq!(v1_artifacts(&entries[..1]).count(), 0);
