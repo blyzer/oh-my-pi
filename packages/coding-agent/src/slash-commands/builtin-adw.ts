@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyWorkflow, ClassifierUnavailableError, type WorkflowChoice } from "../adw/classify";
 import { AdwConfigError, discoverWorkflows, loadWorkflow } from "../adw/config";
+import { cancelActiveAdwRuns, trackAdwRun, untrackAdwRun } from "../adw/active-runs";
 import { type AdwHost, AdwRunError, runAdw } from "../adw/runner";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -9,28 +10,6 @@ import type { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import { commandConsumed, errorMessage } from "./helpers/parse";
 import type { SlashCommandResult, SlashCommandSpec } from "./types";
-
-/**
- * Runs in flight, so a workflow can be stopped. One entry per run: a workflow
- * can spend an hour across several models, and `handle` commands cannot reach
- * the TUI's Esc path on their own — {@link cancelActiveAdwRuns} is what the
- * input controller calls.
- */
-const active = new Map<string, { controller: AbortController; workflow: string }>();
-
-export function hasActiveAdwRun(): boolean {
-	return active.size > 0;
-}
-
-/** Aborts every in-flight workflow. Returns false when there was nothing to stop. */
-export function cancelActiveAdwRuns(): boolean {
-	if (active.size === 0) return false;
-	for (const [key, entry] of active) {
-		entry.controller.abort(new Error(`${entry.workflow} interrupted`));
-		active.delete(key);
-	}
-	return true;
-}
 
 /**
  * Is `name` a workflow defined in this repository?
@@ -145,7 +124,7 @@ async function runWorkflowCommand(args: string, io: AdwCommandIo): Promise<Slash
 	const found = await loadWorkflow(host.cwd, workflowName);
 	const controller = new AbortController();
 	const runKey = `${found.workflow.name}-${Date.now().toString(36)}`;
-	active.set(runKey, { controller, workflow: found.workflow.name });
+	trackAdwRun(runKey, controller, found.workflow.name);
 
 	// `output` is genuinely async over ACP/RPC. Chaining keeps progress lines in
 	// order and keeps their rejections inside this function's caller instead of
@@ -216,7 +195,7 @@ async function runWorkflowCommand(args: string, io: AdwCommandIo): Promise<Slash
 		await writes;
 		return commandConsumed();
 	} finally {
-		active.delete(runKey);
+		untrackAdwRun(runKey);
 		// Drain whatever the failure path queued before the caller moves on.
 		await writes.catch(() => {});
 	}
