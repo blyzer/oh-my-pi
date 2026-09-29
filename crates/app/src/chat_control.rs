@@ -2787,13 +2787,20 @@ impl<C: omp_agent::Inference> Controller<C> {
 	/// `/compact`, `/handoff`, `/shake`.
 	async fn compact(&mut self, method: CompactionMethod, hint: Option<Str>) -> miette::Result<()> {
 		match method {
-			CompactionMethod::Compact | CompactionMethod::Handoff => {
-				let label = if method == CompactionMethod::Handoff {
-					"handoff"
-				} else {
-					"manual"
+			CompactionMethod::Compact(_) | CompactionMethod::Handoff => {
+				// A handoff is always a written document; `/compact` pins the
+				// strategy its mode word named, else follows the convar.
+				let (label, strategy) = match method {
+					CompactionMethod::Compact(strategy) => ("manual", strategy),
+					CompactionMethod::Handoff | CompactionMethod::Shake => {
+						("handoff", Some(omp_agent::CompactionStrategy::Soft))
+					},
 				};
-				match self.kernel.compact(&mut self.session, hint, label).await {
+				match self
+					.kernel
+					.compact(&mut self.session, hint, label, strategy)
+					.await
+				{
 					Ok(true) => self.reply(
 						Severity::Info,
 						if method == CompactionMethod::Handoff {

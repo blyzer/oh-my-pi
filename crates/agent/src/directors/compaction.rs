@@ -4,7 +4,7 @@ use std::{str::FromStr, sync::Arc};
 
 use futures::StreamExt;
 use omp_ai::{
-	ChatEvent, ChatRequest, ContentPart, MediaInput, Message, OpaqueJson, Role, Setting, ToolChoice,
+	ChatEvent, ChatRequest, ContentPart, MediaInput, Message, OpaqueJson, Role, Setting,
 	ToolInputConstraint, ToolResultContent,
 	settings::{
 		AI_COMPACTION_ENABLED, AI_COMPACTION_KEEP_RECENT_TOKENS, AI_COMPACTION_MID_TURN_ENABLED,
@@ -14,13 +14,19 @@ use omp_ai::{
 use omp_con::Ctx;
 use omp_core::{Str, StrMut};
 use omp_dom::{Dom, Handle, KnownTag, Node, PropId, PropKey, Tag, Value};
-use omp_journal::{EntryId, data::Compaction};
+use omp_journal::{
+	EntryId,
+	data::{Attachment, Compaction},
+};
 use omp_proto::toolhost::v1::HookEventId;
-use omp_session::{project_thread, project_thread_through};
+use omp_session::{compaction_frames, project_thread, project_thread_through};
+use omp_snapcompact::archive::Archive;
 
+use super::snapcompact::{self, Fallback};
 use crate::{
-	AI_COMPACT_THRESHOLD, KernelEvent, LifecycleHookError, LifecycleHooks,
-	director::{BoxFut, Director, DirectorError, MutDirectorCx, Prepared},
+	AI_COMPACT_THRESHOLD, AI_COMPACTION_STRATEGY, CompactionStrategy, KernelEvent,
+	LifecycleHookError, LifecycleHooks,
+	director::{BoxFut, Director, DirectorError, MutDirectorCx, Prepared, RouteFacts},
 };
 
 const DEFAULT_THRESHOLD: f64 = 0.80;
@@ -41,13 +47,36 @@ const SUMMARY_INSTRUCTION: &str = include_str!("../../prompts/compaction/handoff
 
 /// Compacts projected history before inference when the live context reaches
 /// the threshold.
+///
+/// The [`CompactionStrategy`] decides how hidden history is condensed: the
+/// `soft` path asks the active model for a handoff summary; `snapcompact`
+/// renders the hidden messages verbatim into PNG frames retained in the
+/// session CAS and journaled on the `compaction@1` entry (method
+/// `snapcompact`). A snapcompact run that the route cannot read, or whose
+/// archive is not admissible, journals a notice and falls back to `soft`;
+/// it never fails the turn.
 #[derive(Clone, Debug, Default)]
 pub struct CompactionDirector {
-	focus:  Option<Str>,
-	manual: bool,
+	focus:    Option<Str>,
+	manual:   bool,
 	/// Journaled `method` for a manual run (`manual`, `handoff`); `None`
 	/// uses the automatic/manual default.
-	method: Option<Str>,
+	method:   Option<Str>,
+	/// Explicit strategy (`/compact soft`, `/compact snapcompact`,
+	/// `/handoff`); `None` follows `ai_compaction_strategy`.
+	strategy: Option<CompactionStrategy>,
+}
+
+/// The Python `CompactionTier` one run reports to extensions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
+enum Tier {
+	/// Summary written by the active model.
+	Local,
+	/// Handoff document replacing the context.
+	Handoff,
+	/// Verbatim bitmap archive.
+	Snapcompact,
 }
 
 /// Effective compaction settings.
@@ -65,11 +94,14 @@ struct Settings {
 	keep_recent_tokens: u64,
 	/// Whether automatic compaction may run after the turn's first inference.
 	mid_turn_enabled:   bool,
+	/// How hidden history is condensed when no explicit strategy is given.
+	strategy:           CompactionStrategy,
 }
 
 impl Settings {
 	/// Resolves from the effective control plane; a host without a console
-	/// (headless tests) reads only `ai_compact_threshold` from `<meta><con>`.
+	/// (headless tests) reads only `ai_compact_threshold` and
+	/// `ai_compaction_strategy` from `<meta><con>`.
 	fn resolve(con: Option<&Ctx>, dom: &Dom) -> Self {
 		let Some(con) = con else {
 			return Self {
@@ -79,6 +111,7 @@ impl Settings {
 				reserve_tokens:     None,
 				keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
 				mid_turn_enabled:   true,
+				strategy:           dom_compaction_strategy(dom),
 			};
 		};
 		let reserve = AI_COMPACTION_RESERVE_TOKENS.get(con);
@@ -92,6 +125,7 @@ impl Settings {
 				.then(|| reserve.floor() as u64),
 			keep_recent_tokens: u64::try_from(AI_COMPACTION_KEEP_RECENT_TOKENS.get(con)).unwrap_or(0),
 			mid_turn_enabled:   AI_COMPACTION_MID_TURN_ENABLED.get(con),
+			strategy:           AI_COMPACTION_STRATEGY.get(con),
 		}
 	}
 }
@@ -103,6 +137,8 @@ struct Marker {
 	/// Last entry it hides.
 	boundary: EntryId,
 	summary:  Str,
+	/// Snapcompact frames it retains, oldest first.
+	frames:   Vec<Attachment>,
 }
 
 /// Where the next summary cuts the live chain.
@@ -138,13 +174,21 @@ impl CompactionDirector {
 	/// Creates the standard automatic compaction director.
 	#[must_use]
 	pub const fn new() -> Self {
-		Self { focus: None, manual: false, method: None }
+		Self { focus: None, manual: false, method: None, strategy: None }
 	}
 
 	/// Creates a one-shot manual compaction request with optional summary focus.
 	#[must_use]
 	pub const fn manual(focus: Option<Str>) -> Self {
-		Self { focus, manual: true, method: None }
+		Self { focus, manual: true, method: None, strategy: None }
+	}
+
+	/// Pins the strategy instead of following `ai_compaction_strategy`
+	/// (`/compact soft`, `/compact snapcompact`, `/handoff`).
+	#[must_use]
+	pub const fn with_strategy(mut self, strategy: CompactionStrategy) -> Self {
+		self.strategy = Some(strategy);
+		self
 	}
 
 	/// Labels the journaled compaction method (`/handoff` journals
@@ -215,10 +259,24 @@ impl CompactionDirector {
 			.min(thread.len());
 		let kept = Message::from_thread_items(&thread[kept_from..])?;
 		let plan = Plan { cut, epoch: compaction_count(dom), context_tokens, target_tokens };
+		// The capability guard runs before the gate so extensions see the tier
+		// that will actually run.
+		let mut fallback = None;
+		let tier = match self.strategy.unwrap_or(settings.strategy) {
+			CompactionStrategy::Snapcompact => match snapcompact::capability(dom, cx.route) {
+				Ok(()) => Tier::Snapcompact,
+				Err(reason) => {
+					fallback = Some(reason);
+					self.summary_tier()
+				},
+			},
+			CompactionStrategy::Soft => self.summary_tier(),
+		};
 		let (summary, warning) = match cx.hooks {
 			Some(hooks) => {
 				let payload = self.hook_event(
 					dom,
+					tier,
 					&plan,
 					&hidden,
 					&kept,
@@ -238,12 +296,57 @@ impl CompactionDirector {
 		cx.notify(KernelEvent::CompactionSpeculating {
 			percent: occupancy_percent(context_tokens, context_window),
 		});
+		// An extension-authored summary replaces every producer.
+		if tier == Tier::Snapcompact && summary.is_none() {
+			let existing_images = request.messages[..system_prefix.min(request.messages.len())]
+				.iter()
+				.chain(kept.iter())
+				.map(snapcompact::image_count)
+				.fold(0_usize, usize::saturating_add);
+			match archive(cx.route, ArchiveInput {
+				previous: previous.as_ref(),
+				hidden: &hidden,
+				request,
+				context_tokens,
+				existing_images,
+			})
+			.await
+			{
+				Ok(archived) => {
+					let settled =
+						self.journal_archive(cx, &plan, previous.as_ref(), &kept, archived, warning);
+					cx.notify(KernelEvent::CompactionSettled { applied: settled.is_ok() });
+					return settled;
+				},
+				Err(reason) => fallback = Some(reason),
+			}
+		}
+		if let Some(reason) = fallback {
+			crate::steering::append_named_notice(
+				cx.session,
+				cx.turn,
+				Str::new_static("warn"),
+				Some(Str::new_static("snapcompact")),
+				Str::new_static(reason.notice()),
+			)?;
+		}
 		let summarized = if let Some(summary) = summary {
 			Ok(summary)
 		} else {
+			// A snapcompact marker's frames ride its projected summary message;
+			// the summariser reads them so a soft run after an archive keeps
+			// what the frames held.
+			let previous_message = previous.as_ref().map(|marker| {
+				request
+					.messages
+					.get(system_prefix)
+					.filter(|_| !marker.frames.is_empty())
+					.cloned()
+					.unwrap_or_else(|| text_message(Role::User, marker.summary.clone()))
+			});
 			let summary_request = summary_request(
 				&request.messages[..system_prefix],
-				previous.as_ref().map(|marker| marker.summary.clone()),
+				previous_message,
 				&hidden,
 				self.focus.as_deref(),
 			);
@@ -273,9 +376,76 @@ impl CompactionDirector {
 				HookEventId::HookEventCompactionDone,
 				serde_json::json!({
 					"preparation_id": plan.cut.boundary.to_string(),
-					"tiers_run": [self.tier()],
+					"tiers_run": [<&str>::from(self.summary_tier())],
 					"from_extension": from_extension.then_some("hook"),
 					"tokens_before": context_tokens,
+					"tokens_after": tokens_after,
+					"first_kept_id": first_kept_id(cx.session.dom(), plan.cut.first_kept),
+					"epoch": plan.epoch,
+					"summary_bytes": summary_bytes,
+					"warning": warning,
+					"reason": if self.manual { "manual" } else { "threshold" },
+					"summary": summary,
+				}),
+			)?;
+		}
+		Ok(Prepared::Rebuild)
+	}
+
+	/// Stores the archive's frames and journals the `snapcompact`
+	/// compaction: the summary note leads, earlier archive frames stay
+	/// before the new ones, oldest to newest.
+	fn journal_archive(
+		&self,
+		cx: &mut MutDirectorCx<'_>,
+		plan: &Plan,
+		previous: Option<&Marker>,
+		kept: &[Message],
+		archived: Archived,
+		warning: Option<Str>,
+	) -> Result<Prepared, DirectorError> {
+		let Archived { summary, archive } = archived;
+		let carried = previous.map_or(&[][..], |marker| marker.frames.as_slice());
+		let mut frames = Vec::with_capacity(carried.len().saturating_add(archive.frames.len()));
+		frames.extend_from_slice(carried);
+		for frame in &archive.frames {
+			frames.push(
+				cx.session
+					.store_attachment(Str::new_static("image/png"), &frame.png)?,
+			);
+		}
+		let frame_tokens = archive
+			.frames
+			.first()
+			.map_or(0, |frame| frame.shape.frame_token_estimate);
+		let tokens_after = estimate_text_tokens(summary.as_str())
+			.saturating_add(archive.savings.image_tokens)
+			.saturating_add(frame_tokens.saturating_mul(u64_len(carried.len())))
+			.saturating_add(
+				kept
+					.iter()
+					.map(estimate_message_tokens)
+					.fold(0_u64, u64::saturating_add),
+			);
+		let blob = cx.session.blobs().put(summary.as_bytes())?;
+		let summary_bytes = u64_len(summary.len());
+		cx.session.compaction(Compaction {
+			summary: blob,
+			boundary: plan.cut.boundary,
+			method: Some(Str::new_static("snapcompact")),
+			tokens_before: Some(plan.context_tokens),
+			tokens_after: Some(tokens_after),
+			warning: warning.clone(),
+			frames,
+		})?;
+		if let Some(hooks) = cx.hooks {
+			hooks.notify(
+				HookEventId::HookEventCompactionDone,
+				serde_json::json!({
+					"preparation_id": plan.cut.boundary.to_string(),
+					"tiers_run": [<&str>::from(Tier::Snapcompact)],
+					"from_extension": serde_json::Value::Null,
+					"tokens_before": plan.context_tokens,
 					"tokens_after": tokens_after,
 					"first_kept_id": first_kept_id(cx.session.dom(), plan.cut.first_kept),
 					"epoch": plan.epoch,
@@ -293,6 +463,7 @@ impl CompactionDirector {
 	fn hook_event(
 		&self,
 		dom: &Dom,
+		tier: Tier,
 		plan: &Plan,
 		hidden: &[Message],
 		kept: &[Message],
@@ -307,7 +478,7 @@ impl CompactionDirector {
 		};
 		serde_json::json!({
 			"preparation_id": plan.cut.boundary.to_string(),
-			"tier": self.tier(),
+			"tier": <&str>::from(tier),
 			"reason": if self.manual { "manual" } else { "threshold" },
 			"epoch": plan.epoch,
 			"tokens_before": plan.context_tokens,
@@ -323,12 +494,12 @@ impl CompactionDirector {
 		})
 	}
 
-	/// Python `CompactionTier` of this run.
-	fn tier(&self) -> &'static str {
+	/// Python `CompactionTier` of this run's summary path.
+	fn summary_tier(&self) -> Tier {
 		if self.method.as_deref() == Some("handoff") {
-			"handoff"
+			Tier::Handoff
 		} else {
-			"local"
+			Tier::Local
 		}
 	}
 
@@ -366,6 +537,85 @@ impl Director for CompactionDirector {
 	}
 }
 
+/// Inputs of one snapcompact archive attempt.
+struct ArchiveInput<'a> {
+	/// The newest earlier compaction, whose frames the new archive carries.
+	previous:        Option<&'a Marker>,
+	/// The run the new boundary hides.
+	hidden:          &'a [Message],
+	/// The request that triggered (or was measured for) this run.
+	request:         &'a ChatRequest,
+	/// Live context tokens (receipt-measured when a receipt exists).
+	context_tokens:  u64,
+	/// Images the rebuilt request sends besides any archive frame.
+	existing_images: usize,
+}
+
+/// An admitted archive and the note that precedes its frames.
+struct Archived {
+	summary: Str,
+	archive: Archive,
+}
+
+/// Renders the hidden run into admitted frames off the async executor.
+///
+/// The source measurement is the live context tokens apportioned by the
+/// hidden run's byte share of the request, so a provider receipt (the
+/// active model's own tokenizer) drives admission whenever one exists; with
+/// no receipt the share reduces to the byte estimate. An earlier soft
+/// summary stays text ahead of the note; an earlier archive's note and
+/// frames carry over unchanged.
+async fn archive(route: &RouteFacts, input: ArchiveInput<'_>) -> Result<Archived, Fallback> {
+	let carried = input
+		.previous
+		.map_or(&[][..], |marker| marker.frames.as_slice());
+	let carried_bytes = carried
+		.iter()
+		.map(|frame| frame.blob.size)
+		.fold(0_u64, u64::saturating_add);
+	let hidden_tokens = input
+		.hidden
+		.iter()
+		.map(estimate_message_tokens)
+		.fold(0_u64, u64::saturating_add);
+	let source_tokens =
+		measured_share(input.context_tokens, hidden_tokens, estimate_request_tokens(input.request));
+	let text = snapcompact::archive_text(input.hidden);
+	let identity = route.identity.clone();
+	let existing_images = input.existing_images.saturating_add(carried.len());
+	let carried_facts = (carried.len(), carried_bytes);
+	let archive = tokio::task::spawn_blocking(move || {
+		snapcompact::render(&text, source_tokens, identity.as_deref(), existing_images, carried_facts)
+	})
+	.await
+	.map_err(|error| {
+		tracing::warn!(%error, "snapcompact renderer task failed");
+		Fallback::Renderer
+	})??;
+	let note = snapcompact::PREAMBLE.trim_end();
+	let summary = match input.previous {
+		Some(marker) if !marker.frames.is_empty() => marker.summary.clone(),
+		Some(marker) => {
+			let mut summary = StrMut::new(marker.summary.as_str());
+			summary.push_str("\n\n");
+			summary.push_str(note);
+			summary.freeze()
+		},
+		None => Str::new_static(note),
+	};
+	Ok(Archived { summary, archive })
+}
+
+/// `measured` tokens apportioned by `part`'s share of the `whole` estimate;
+/// the estimate itself when nothing was measured.
+fn measured_share(measured: u64, part: u64, whole: u64) -> u64 {
+	if whole == 0 {
+		return part;
+	}
+	let share = u128::from(measured).saturating_mul(u128::from(part.min(whole))) / u128::from(whole);
+	u64::try_from(share).unwrap_or(u64::MAX)
+}
+
 /// Runs the `compaction` gate: a denial cancels this run; a transform may
 /// supply the summary (Python `CustomSummary.summary` / `.warning`).
 async fn gate_compaction(
@@ -400,13 +650,7 @@ pub(crate) fn message_ref(seq: usize, message: &Message) -> serde_json::Value {
 			Role::Tool => ("tool_result", false),
 		},
 	};
-	let role = match message.role {
-		Role::System => "system",
-		Role::Developer => "developer",
-		Role::User => "user",
-		Role::Assistant => "assistant",
-		Role::Tool => "tool",
-	};
+	let role = <&str>::from(message.role);
 	let media_count = message
 		.content
 		.iter()
@@ -457,11 +701,12 @@ fn first_kept_id(dom: &Dom, first_kept: Option<Handle>) -> String {
 }
 
 /// The summariser request: the handoff instruction, the live system prompt
-/// verbatim so providers hit the cached prefix, the previous summary, then
-/// only the history the new boundary hides.
+/// verbatim so providers hit the cached prefix, the previous summary message
+/// (with any archive frames it carries), then only the history the new
+/// boundary hides.
 fn summary_request(
 	system: &[Message],
-	previous_summary: Option<Str>,
+	previous: Option<Message>,
 	hidden: &[Message],
 	focus: Option<&str>,
 ) -> ChatRequest {
@@ -474,8 +719,8 @@ fn summary_request(
 		Vec::with_capacity(system.len().saturating_add(hidden.len()).saturating_add(2));
 	messages.push(text_message(Role::System, instruction.freeze()));
 	messages.extend(system.iter().cloned());
-	if let Some(previous) = previous_summary {
-		messages.push(text_message(Role::User, previous));
+	if let Some(previous) = previous {
+		messages.push(previous);
 	}
 	// The summariser reads history as text; attached media becomes `[image]`
 	// rather than re-uploading bytes, which the hidden run may no longer
@@ -712,6 +957,32 @@ fn dom_compact_threshold(dom: &Dom) -> f64 {
 	DEFAULT_THRESHOLD
 }
 
+/// The journaled `ai_compaction_strategy` for hosts without a console;
+/// `soft` when unset or unparseable.
+fn dom_compaction_strategy(dom: &Dom) -> CompactionStrategy {
+	let Ok(vars) = dom.select("con var") else {
+		return CompactionStrategy::default();
+	};
+	vars
+		.into_iter()
+		.filter_map(|handle| dom.get(handle))
+		.filter(|node| {
+			node
+				.prop(&PropKey::from(PropId::Name))
+				.or_else(|| node.prop(&PropKey::Custom(Str::new_static("name"))))
+				.and_then(Value::as_str)
+				== Some(AI_COMPACTION_STRATEGY.name())
+		})
+		.last()
+		.and_then(|node| {
+			node
+				.prop(&PropKey::from(PropId::Value))
+				.or_else(|| node.prop(&PropKey::Custom(Str::new_static("value"))))
+		})
+		.and_then(|value| value.as_str()?.parse().ok())
+		.unwrap_or_default()
+}
+
 fn threshold_value(value: &Value) -> Option<f64> {
 	match value {
 		Value::Float(value) => Some(*value),
@@ -738,6 +1009,7 @@ fn newest_marker(dom: &Dom) -> Option<Marker> {
 			id:       prop_text(node, PropId::Cause).and_then(|id| EntryId::from_str(id).ok())?,
 			boundary: prop_text(node, PropId::Boundary).and_then(|id| EntryId::from_str(id).ok())?,
 			summary:  Str::new(prop_text(node, PropId::Summary).unwrap_or_default()),
+			frames:   compaction_frames(node),
 		})
 	})
 }

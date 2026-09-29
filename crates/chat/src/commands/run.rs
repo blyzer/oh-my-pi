@@ -385,7 +385,7 @@ impl Presenter {
 		}
 		if compact {
 			let _ = self.commands.send(HostCommand::Compact {
-				method: CompactionMethod::Compact,
+				method: CompactionMethod::Compact(None),
 				hint:   Some(Str::new_static(
 					"Keep every decision and open question from the approved plan.",
 				)),
@@ -631,7 +631,7 @@ impl Presenter {
 	fn compact(&mut self, method: CompactionMethod, focus: Option<Str>) -> Routed {
 		let count = message_count(&self.replica);
 		match method {
-			CompactionMethod::Compact if count < 2 => {
+			CompactionMethod::Compact(_) if count < 2 => {
 				return self.notice("Nothing to compact (no messages yet)");
 			},
 			CompactionMethod::Handoff if self.turn_active => return self.notice(WAIT_BEFORE_HANDOFF),
@@ -645,7 +645,10 @@ impl Presenter {
 			.commands
 			.send(HostCommand::Compact { method, hint: focus });
 		self.notice(match method {
-			CompactionMethod::Compact => "Compacting context... (esc to cancel)",
+			CompactionMethod::Compact(Some(omp_agent::CompactionStrategy::Snapcompact)) => {
+				"Snap-compacting context... (esc to cancel)"
+			},
+			CompactionMethod::Compact(_) => "Compacting context... (esc to cancel)",
 			CompactionMethod::Handoff => "Generating handoff… (esc to cancel)",
 			CompactionMethod::Shake => "Shaking context…",
 		})

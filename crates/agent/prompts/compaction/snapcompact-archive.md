@@ -1,0 +1,1 @@
+The earlier conversation is archived verbatim in the images attached after this note, oldest to newest. Read them as the transcript it replaced: `[user]`, `[assistant]`, and `[tool]` headers open each message, `[call NAME]` and `[result NAME]` mark tool calls and their output, a solid black cell is a line break, and gray text is tool output.
