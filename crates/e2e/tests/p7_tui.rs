@@ -65,6 +65,14 @@ use tower::Service;
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+/// The glyph tier every `PtyChild` chat renders in. The chat host infers its
+/// charset from the inherited terminal identity (`TERM_PROGRAM`,
+/// `KITTY_WINDOW_ID`, ...), so a host running the suite inside Ghostty, kitty,
+/// or `WezTerm` would paint Nerd Font glyphs; `PtyChild::spawn` pins this tier
+/// through `OMP_TUI_CHARSET` so the screens are identical on every host.
+const CHARSET: omp_tui::Charset = omp_tui::Charset::Unicode;
+/// `OMP_TUI_CHARSET` spelling of [`CHARSET`].
+const CHARSET_ENV: &str = "unicode";
 /// The pi-parity composer prompt gutter painted on the input row.
 const COMPOSER_PROMPT: &str = "╰─ ";
 
@@ -674,6 +682,7 @@ impl PtyChild {
 			.env("HOME", &home)
 			.env("OMP_DATA_DIR", home.join("data"))
 			.env("OMP_TTY", &device)
+			.env("OMP_TUI_CHARSET", CHARSET_ENV)
 			.env("OMP_TUI_DEBUG", debug)
 			.env("NO_COLOR", "1")
 			.stdout(Stdio::piped())
@@ -1386,7 +1395,13 @@ fn overlay_box<'s>(screen: &'s str, title: &str, cols: usize) -> Vec<&'s str> {
 
 /// The selector's option row naming `label`, cursor or not.
 fn listed<'r>(overlay: &[&'r str], label: &str) -> Option<&'r str> {
-	let (selected, unselected) = (format!("│ ❯ {label}"), format!("│   {label}"));
+	// The cursor prefix is the one the selector paints: `Charset::cursor`,
+	// blank-padded to the same width on the rows it is not on.
+	let cursor = CHARSET.cursor();
+	let (selected, unselected) = (
+		format!("│ {cursor}{label}"),
+		format!("│ {:width$}{label}", "", width = xutf::width_str(cursor)),
+	);
 	overlay
 		.iter()
 		.copied()
@@ -1528,7 +1543,8 @@ async fn chat_tui_approves_blocked_plugin_commands_on_a_real_pty() {
 		assert!(opened.text.contains(text), "selector footer omits {text:?}:\n{}", opened.text);
 	}
 	let cursor = |overlay: &[&str], label: &str| {
-		listed(overlay, label).is_some_and(|row| row.contains(&format!("❯ {label}")))
+		listed(overlay, label)
+			.is_some_and(|row| row.contains(&format!("{}{label}", CHARSET.cursor())))
 	};
 	assert!(cursor(&overlay, order[0].1), "cursor starts on the first row:\n{}", opened.text);
 
