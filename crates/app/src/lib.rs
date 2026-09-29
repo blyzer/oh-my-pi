@@ -2,6 +2,7 @@
 
 //! Production application CLI, TUI, and command dispatch.
 
+pub mod acp_client;
 mod acp_events;
 pub mod acp_mode;
 pub mod adw_cmd;

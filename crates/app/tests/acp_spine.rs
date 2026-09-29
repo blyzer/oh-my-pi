@@ -13,6 +13,13 @@ use omp_ai::{
 	Artifact, ArtifactBody, BlockKind, ChatEvent, ChatRequest, ChatStream, Completion,
 	ExecutionReceipt, FinishReason, ProviderId, RequestId, ResponseMeta, RouteId, Usage,
 };
+use omp_app::{
+	acp_client::{
+		AcpClient, AcpFs, AcpSettings, AuthCapabilities, ClientCapabilities, ClientMethod,
+		ClientRequestError, FileSystemCapabilities,
+	},
+	acp_mode::AcpConnection,
+};
 use omp_core::Str;
 use omp_driver::{
 	headless::kernel::{KernelOptions, SessionHome},
@@ -30,6 +37,8 @@ enum Script {
 	Pending,
 	Text(&'static str),
 	TextAndImage(&'static str, &'static [u8]),
+	/// One call of the gated test tool with this command.
+	GatedCall(&'static str),
 }
 
 struct ScriptedInference {
@@ -94,6 +103,36 @@ impl Inference for ScriptedInference {
 				.map(Ok);
 				ChatStream::ordinary(Box::pin(futures::stream::iter(events)))
 			},
+			Script::GatedCall(command) => {
+				let arguments = serde_json::json!({"command": command});
+				let call = omp_ai::ToolCall {
+					id:        "call-gated".into(),
+					name:      Str::new_static("gated"),
+					arguments: omp_ai::call::OpaqueJson::new(arguments.clone()),
+				};
+				let events = vec![
+					started(),
+					ChatEvent::ToolCallStarted {
+						index: 0,
+						id:    call.id.clone(),
+						name:  call.name.clone(),
+					},
+					ChatEvent::ToolArgumentsDelta {
+						index: 0,
+						bytes: bytes::Bytes::from(serde_json::to_vec(&arguments).expect("arguments")),
+					},
+					ChatEvent::ToolCallReady { index: 0, call },
+					ChatEvent::Completed(Completion {
+						reason:  FinishReason::ToolCalls,
+						blocks:  1,
+						usage:   Usage::default(),
+						receipt: ExecutionReceipt::default().into(),
+					}),
+				]
+				.into_iter()
+				.map(Ok);
+				ChatStream::ordinary(Box::pin(futures::stream::iter(events)))
+			},
 		}))
 	}
 }
@@ -113,12 +152,20 @@ fn harness(
 	directory: &tempfile::TempDir,
 	scripts: impl IntoIterator<Item = Script>,
 ) -> (Kernel<ScriptedInference>, Session, SessionHome) {
+	harness_with(directory, scripts, Arc::new(Registry::new()))
+}
+
+fn harness_with(
+	directory: &tempfile::TempDir,
+	scripts: impl IntoIterator<Item = Script>,
+	registry: Arc<Registry>,
+) -> (Kernel<ScriptedInference>, Session, SessionHome) {
 	let sessions_dir = directory.path().join("sessions");
 	std::fs::create_dir_all(&sessions_dir).expect("sessions directory");
 	let spill = BlobStore::open(directory.path().join("blobs")).expect("blob store");
 	let kernel = Kernel::new(
 		ScriptedInference { scripts: Mutex::new(scripts.into_iter().collect()) },
-		Arc::new(Registry::new()),
+		registry,
 		DispatchPolicy::new(spill),
 		StaticPrompt(Str::new_static("system")),
 	);
@@ -149,7 +196,13 @@ async fn exchange(
 ) -> Vec<Value> {
 	let (client_io, server_io) = tokio::io::duplex(64 * 1024);
 	let (server_read, server_write) = tokio::io::split(server_io);
-	let server = omp_app::acp_mode::serve_acp(kernel, session, home, server_read, server_write);
+	let server = AcpConnection::new(AcpSettings::default()).serve(
+		kernel,
+		session,
+		home,
+		server_read,
+		server_write,
+	);
 	let client = async move {
 		let (client_read, mut client_write) = tokio::io::split(client_io);
 		client_write.write_all(requests).await.expect("requests");
@@ -633,4 +686,700 @@ async fn a_switch_after_close_moves_the_hook_hosts_without_ending_twice_and_star
 		"start target.oms resume".to_owned(),
 		"end target.oms".to_owned(),
 	]);
+}
+
+/// Bound on every wait for a frame from the agent.
+const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A scripted editor on the client end of one live ACP connection.
+struct FakeEditor {
+	write: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+	lines: tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+	/// Every frame the agent sent, in order.
+	seen:  Vec<Value>,
+	/// Canonical project root the connection serves.
+	root:  std::path::PathBuf,
+}
+
+impl FakeEditor {
+	async fn send(&mut self, frame: Value) {
+		let mut bytes = serde_json::to_vec(&frame).expect("frame encodes");
+		bytes.push(b'\n');
+		self.write.write_all(&bytes).await.expect("frame sent");
+	}
+
+	/// The next frame from the agent that is not a `session/update`.
+	async fn next(&mut self) -> Value {
+		loop {
+			let line = tokio::time::timeout(WAIT, self.lines.next_line())
+				.await
+				.expect("the agent sends a frame in time")
+				.expect("frame read")
+				.expect("the agent sends a frame before EOF");
+			let frame: Value = serde_json::from_str(&line).expect("JSON frame");
+			self.seen.push(frame.clone());
+			if frame["method"] != "session/update" {
+				return frame;
+			}
+		}
+	}
+
+	/// Sends a request; the agent's next frame must be its response.
+	async fn call(&mut self, id: &str, method: &str, params: Value) -> Value {
+		self
+			.send(serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+			.await;
+		let frame = self.next().await;
+		assert_eq!(frame["id"], id, "expected the response to {method}, got {frame:#?}");
+		frame
+	}
+
+	/// The agent's next frame must be a `method` request to the client.
+	async fn request(&mut self, method: &str) -> Value {
+		let frame = self.next().await;
+		assert_eq!(frame["method"], method, "expected a {method} request, got {frame:#?}");
+		assert!(frame["id"].is_u64(), "client requests carry numeric ids: {frame:#?}");
+		frame
+	}
+
+	async fn answer(&mut self, request: &Value, result: Value) {
+		self
+			.send(serde_json::json!({"jsonrpc": "2.0", "id": request["id"].clone(), "result": result}))
+			.await;
+	}
+
+	async fn initialize(&mut self, capabilities: Value) -> Value {
+		self
+			.call(
+				"init",
+				"initialize",
+				serde_json::json!({"protocolVersion": 1, "clientCapabilities": capabilities}),
+			)
+			.await
+	}
+
+	/// `session/new` with the project root as `cwd`; returns the session id.
+	async fn eligible_session(&mut self, id: &str) -> String {
+		let cwd = self.root.to_str().expect("UTF-8 root").to_owned();
+		let response = self
+			.call(id, "session/new", serde_json::json!({"cwd": cwd}))
+			.await;
+		response["result"]["sessionId"]
+			.as_str()
+			.expect("new session id")
+			.to_owned()
+	}
+
+	/// A round trip proving nothing else is queued: the agent's next frame is
+	/// the answer to this probe.
+	async fn quiet(&mut self, id: &str) {
+		let response = self.call(id, "session/list", serde_json::json!({})).await;
+		assert!(response.get("error").is_none(), "{response:#?}");
+	}
+
+	/// Ends the transport and returns every frame the agent sent.
+	async fn close(mut self) -> Vec<Value> {
+		self.write.shutdown().await.expect("request shutdown");
+		while let Some(line) = tokio::time::timeout(WAIT, self.lines.next_line())
+			.await
+			.expect("the agent ends in time")
+			.expect("frame read")
+		{
+			self
+				.seen
+				.push(serde_json::from_str(&line).expect("JSON frame"));
+		}
+		self.seen
+	}
+}
+
+/// Serves one connection to a [`FakeEditor`] driven by `script`, which must
+/// end by calling [`FakeEditor::close`].
+async fn with_editor<F, Fut>(
+	directory: &tempfile::TempDir,
+	settings: AcpSettings,
+	(kernel, session, home): (Kernel<ScriptedInference>, Session, SessionHome),
+	script: F,
+) where
+	F: FnOnce(AcpClient, FakeEditor) -> Fut,
+	Fut: Future<Output = ()>,
+{
+	let connection = AcpConnection::new(settings);
+	let client = connection.client();
+	let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+	let (server_read, server_write) = tokio::io::split(server_io);
+	let (client_read, client_write) = tokio::io::split(client_io);
+	let editor = FakeEditor {
+		write: client_write,
+		lines: BufReader::new(client_read).lines(),
+		seen:  Vec::new(),
+		root:  std::fs::canonicalize(directory.path()).expect("canonical root"),
+	};
+	let server = tokio::spawn(connection.serve(kernel, session, home, server_read, server_write));
+	tokio::time::timeout(std::time::Duration::from_secs(20), script(client, editor))
+		.await
+		.expect("the editor script must not deadlock");
+	tokio::time::timeout(WAIT, server)
+		.await
+		.expect("the ACP server ends at EOF")
+		.expect("ACP server task")
+		.expect("ACP server");
+}
+
+fn fs_capabilities() -> Value {
+	serde_json::json!({"fs": {"readTextFile": true, "writeTextFile": true}})
+}
+
+fn no_fs_or_terminal_request(frames: &[Value]) {
+	for frame in frames {
+		let method = frame["method"].as_str().unwrap_or_default();
+		assert!(
+			!method.starts_with("fs/") && !method.starts_with("terminal/"),
+			"unexpected client request {frame:#?}"
+		);
+	}
+}
+
+/// `clientCapabilities` parse into typed capabilities on every `initialize`:
+/// present fields are advertised, absent ones are not, and a malformed field is
+/// treated as absent without failing `initialize`.
+#[tokio::test]
+async fn initialize_parses_client_capabilities_present_absent_and_malformed() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	with_editor(&directory, AcpSettings::default(), parts, |client, mut editor| async move {
+		let full = editor
+			.initialize(serde_json::json!({
+				"fs": {"readTextFile": true, "writeTextFile": true},
+				"terminal": true,
+				"auth": {"terminal": true},
+				"_meta": {"vendor": "x"},
+			}))
+			.await;
+		assert_eq!(client.capabilities(), ClientCapabilities {
+			fs:       FileSystemCapabilities { read_text_file: true, write_text_file: true },
+			terminal: true,
+			auth:     AuthCapabilities { terminal: true },
+		});
+		assert_eq!(full["result"]["authMethods"].as_array().map(Vec::len), Some(2));
+		assert!(
+			full["result"]["agentCapabilities"].get("fs").is_none()
+				&& full["result"]["agentCapabilities"]
+					.get("terminal")
+					.is_none(),
+			"omp advertises nothing new: {full:#?}"
+		);
+
+		let absent = editor.initialize(serde_json::json!({})).await;
+		assert_eq!(client.capabilities(), ClientCapabilities::default());
+		assert_eq!(absent["result"]["authMethods"].as_array().map(Vec::len), Some(1));
+
+		let malformed = editor
+			.initialize(serde_json::json!({
+				"fs": {"readTextFile": "yes", "writeTextFile": true},
+				"terminal": {"create": true},
+				"auth": {"terminal": 1},
+			}))
+			.await;
+		assert!(malformed.get("error").is_none(), "{malformed:#?}");
+		assert_eq!(client.capabilities(), ClientCapabilities {
+			fs:       FileSystemCapabilities { read_text_file: false, write_text_file: true },
+			terminal: false,
+			auth:     AuthCapabilities::default(),
+		});
+		assert_eq!(malformed["result"]["authMethods"].as_array().map(Vec::len), Some(1));
+
+		let not_an_object = editor.initialize(serde_json::json!("everything")).await;
+		assert!(not_an_object.get("error").is_none(), "{not_an_object:#?}");
+		assert_eq!(client.capabilities(), ClientCapabilities::default());
+		no_fs_or_terminal_request(&editor.close().await);
+	})
+	.await;
+}
+
+/// Editor file I/O needs the capability, an open session whose `cwd` matched
+/// the project root, and a path inside that root; nothing that fails a gate
+/// ever reaches the wire, and `terminal: true` alone sends nothing.
+#[tokio::test]
+async fn fs_requests_need_the_capability_an_eligible_session_and_a_project_path() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	with_editor(&directory, AcpSettings::default(), parts, |client, mut editor| async move {
+		let path = editor.root.join("notes.md");
+		editor
+			.initialize(serde_json::json!({"terminal": true}))
+			.await;
+		assert!(!client.can_read() && !client.can_write());
+		assert!(matches!(
+			client.read_text_file(&path).await,
+			Err(ClientRequestError::NotAdvertised { method: ClientMethod::ReadTextFile })
+		));
+		assert!(matches!(
+			client.write_text_file(&path, "text").await,
+			Err(ClientRequestError::NotAdvertised { method: ClientMethod::WriteTextFile })
+		));
+
+		editor.initialize(fs_capabilities()).await;
+		assert!(
+			matches!(client.read_text_file(&path).await, Err(ClientRequestError::SessionIneligible)),
+			"the startup session never supplied a cwd"
+		);
+		editor
+			.call("bare", "session/new", serde_json::json!({}))
+			.await;
+		assert!(
+			matches!(client.read_text_file(&path).await, Err(ClientRequestError::SessionIneligible)),
+			"a session created without a cwd is not eligible"
+		);
+
+		editor.eligible_session("new").await;
+		assert!(client.can_read() && client.can_write());
+		for outside in [
+			std::path::PathBuf::from("relative.md"),
+			editor.root.join("..").join("escape.md"),
+			std::path::PathBuf::from("/definitely/elsewhere.md"),
+		] {
+			assert!(
+				matches!(
+					client.read_text_file(&outside).await,
+					Err(ClientRequestError::OutsideProject { .. })
+				),
+				"{} must never be sent",
+				outside.display()
+			);
+		}
+
+		editor
+			.call("close", "session/close", serde_json::json!({}))
+			.await;
+		assert!(!client.can_read());
+		assert!(matches!(client.read_text_file(&path).await, Err(ClientRequestError::NoSession)));
+		editor.quiet("probe").await;
+		no_fs_or_terminal_request(&editor.close().await);
+	})
+	.await;
+}
+
+/// `sv_acp_fs off` disables editor file I/O even when the client advertises
+/// it and the session is eligible.
+#[tokio::test]
+async fn sv_acp_fs_off_disables_editor_file_io() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	let settings = AcpSettings { fs: AcpFs::Off, ..AcpSettings::default() };
+	with_editor(&directory, settings, parts, |client, mut editor| async move {
+		editor.initialize(fs_capabilities()).await;
+		editor.eligible_session("new").await;
+		assert_eq!(client.settings().fs, AcpFs::Off);
+		assert!(!client.can_read() && !client.can_write());
+		let path = editor.root.join("notes.md");
+		assert!(matches!(client.read_text_file(&path).await, Err(ClientRequestError::Disabled)));
+		assert!(matches!(
+			client.write_text_file(&path, "text").await,
+			Err(ClientRequestError::Disabled)
+		));
+		editor.quiet("probe").await;
+		no_fs_or_terminal_request(&editor.close().await);
+	})
+	.await;
+}
+
+/// Answers correlate by JSON-RPC id, whatever order they arrive in; a
+/// response with an unknown id is dropped without an error frame; a
+/// JSON-RPC error answer surfaces typed.
+#[tokio::test]
+async fn fs_answers_correlate_by_id_and_unknown_responses_are_dropped() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	with_editor(&directory, AcpSettings::default(), parts, |client, mut editor| async move {
+		editor.initialize(fs_capabilities()).await;
+		let session_id = editor.eligible_session("new").await;
+		let (first_path, second_path) = (editor.root.join("a.txt"), editor.root.join("b.txt"));
+		let first = tokio::spawn({
+			let client = client.clone();
+			let path = first_path.clone();
+			async move { client.read_text_file(&path).await }
+		});
+		let first_request = editor.request("fs/read_text_file").await;
+		let second = tokio::spawn({
+			let client = client.clone();
+			let path = second_path.clone();
+			async move { client.read_text_file(&path).await }
+		});
+		let second_request = editor.request("fs/read_text_file").await;
+		assert_ne!(first_request["id"], second_request["id"]);
+		assert_eq!(first_request["params"], serde_json::json!({
+			"sessionId": session_id,
+			"path": first_path.to_str().expect("UTF-8 path"),
+		}));
+		assert_eq!(second_request["params"]["path"], second_path.to_str().expect("UTF-8 path"));
+		assert_eq!(client.pending(), 2);
+
+		editor
+			.send(serde_json::json!({"jsonrpc": "2.0", "id": 9_999, "result": {"content": "stray"}}))
+			.await;
+		editor
+			.send(serde_json::json!({"jsonrpc": "2.0", "id": "text-id", "error": {"code": 1, "message": "stray"}}))
+			.await;
+		editor
+			.answer(&second_request, serde_json::json!({"content": "second buffer"}))
+			.await;
+		editor
+			.answer(&first_request, serde_json::json!({"content": "first buffer"}))
+			.await;
+		assert_eq!(first.await.expect("first read").expect("first buffer").as_str(), "first buffer");
+		assert_eq!(second.await.expect("second read").expect("second buffer").as_str(), "second buffer");
+		assert_eq!(client.pending(), 0);
+		editor.quiet("probe").await;
+
+		let write = tokio::spawn({
+			let client = client.clone();
+			let path = first_path.clone();
+			async move { client.write_text_file(&path, "agent text").await }
+		});
+		let write_request = editor.request("fs/write_text_file").await;
+		assert_eq!(write_request["params"]["content"], "agent text");
+		assert_eq!(write_request["params"]["sessionId"], session_id.as_str());
+		editor.answer(&write_request, serde_json::json!(null)).await;
+		write.await.expect("write").expect("written");
+
+		let refused = tokio::spawn({
+			let client = client.clone();
+			async move { client.read_text_file(&first_path).await }
+		});
+		let refused_request = editor.request("fs/read_text_file").await;
+		editor
+			.send(serde_json::json!({
+				"jsonrpc": "2.0",
+				"id": refused_request["id"].clone(),
+				"error": {"code": -32002, "message": "no such buffer"},
+			}))
+			.await;
+		assert!(matches!(
+			refused.await.expect("refused read"),
+			Err(ClientRequestError::Refused { method: ClientMethod::ReadTextFile, code: -32002, .. })
+		));
+		let malformed = tokio::spawn({
+			let client = client.clone();
+			async move { client.read_text_file(&second_path).await }
+		});
+		let malformed_request = editor.request("fs/read_text_file").await;
+		editor
+			.answer(&malformed_request, serde_json::json!({"text": "wrong field"}))
+			.await;
+		assert!(matches!(
+			malformed.await.expect("malformed read"),
+			Err(ClientRequestError::Malformed { method: ClientMethod::ReadTextFile, .. })
+		));
+		let frames = editor.close().await;
+		assert!(
+			frames.iter().all(|frame| frame.get("error").is_none()),
+			"stray responses must be dropped, not answered: {frames:#?}"
+		);
+	})
+	.await;
+}
+
+/// An `fs/*` request the editor never answers fails at `sv_acp_fs_timeout`,
+/// and its late answer is dropped.
+#[tokio::test]
+async fn unanswered_fs_request_times_out_and_its_late_answer_is_dropped() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	let timeout = std::time::Duration::from_millis(150);
+	let settings = AcpSettings { fs_timeout: timeout, ..AcpSettings::default() };
+	with_editor(&directory, settings, parts, |client, mut editor| async move {
+		editor.initialize(fs_capabilities()).await;
+		editor.eligible_session("new").await;
+		let path = editor.root.join("slow.txt");
+		let started = tokio::time::Instant::now();
+		let read = tokio::spawn({
+			let client = client.clone();
+			async move { client.read_text_file(&path).await }
+		});
+		let request = editor.request("fs/read_text_file").await;
+		let outcome = read.await.expect("read task");
+		let elapsed = started.elapsed();
+		assert!(
+			matches!(outcome, Err(ClientRequestError::Timeout { method: ClientMethod::ReadTextFile, timeout: t }) if t == timeout),
+			"{outcome:?}"
+		);
+		assert!(elapsed >= timeout && elapsed < WAIT, "timed out after {elapsed:?}");
+		assert_eq!(client.pending(), 0, "the timed-out id is retired");
+		editor
+			.answer(&request, serde_json::json!({"content": "too late"}))
+			.await;
+		editor.quiet("probe").await;
+		let frames = editor.close().await;
+		assert!(frames.iter().all(|frame| frame.get("error").is_none()), "{frames:#?}");
+	})
+	.await;
+}
+
+/// A cancelled caller, a session switch, `session/close`, and EOF each retire
+/// pending `fs/*` requests; later requests name the live session only.
+#[tokio::test]
+async fn cancellation_switch_close_and_eof_retire_pending_fs_requests() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	with_editor(&directory, AcpSettings::default(), parts, |client, mut editor| async move {
+		editor.initialize(fs_capabilities()).await;
+		let first_session = editor.eligible_session("new").await;
+		let path = editor.root.join("file.txt");
+		let spawn_read = |client: &AcpClient| {
+			let client = client.clone();
+			let path = path.clone();
+			tokio::spawn(async move { client.read_text_file(&path).await })
+		};
+
+		let dropped = spawn_read(&client);
+		let dropped_request = editor.request("fs/read_text_file").await;
+		dropped.abort();
+		assert!(dropped.await.expect_err("aborted").is_cancelled());
+		assert_eq!(client.pending(), 0, "a dropped caller retires its id");
+		editor
+			.answer(&dropped_request, serde_json::json!({"content": "orphan"}))
+			.await;
+		editor.quiet("after-drop").await;
+
+		let switched = spawn_read(&client);
+		let switched_request = editor.request("fs/read_text_file").await;
+		assert_eq!(switched_request["params"]["sessionId"], first_session.as_str());
+		let second_session = editor.eligible_session("switch").await;
+		assert_ne!(second_session, first_session);
+		assert!(matches!(
+			switched.await.expect("switched read"),
+			Err(ClientRequestError::SessionEnded { method: ClientMethod::ReadTextFile })
+		));
+		editor
+			.answer(&switched_request, serde_json::json!({"content": "old session"}))
+			.await;
+		let current = spawn_read(&client);
+		let current_request = editor.request("fs/read_text_file").await;
+		assert_eq!(current_request["params"]["sessionId"], second_session.as_str());
+		editor
+			.answer(&current_request, serde_json::json!({"content": "live"}))
+			.await;
+		assert_eq!(
+			current
+				.await
+				.expect("current read")
+				.expect("live buffer")
+				.as_str(),
+			"live"
+		);
+
+		let closing = spawn_read(&client);
+		editor.request("fs/read_text_file").await;
+		editor
+			.call("close", "session/close", serde_json::json!({}))
+			.await;
+		assert!(matches!(
+			closing.await.expect("closing read"),
+			Err(ClientRequestError::SessionEnded { method: ClientMethod::ReadTextFile })
+		));
+
+		let third_session = editor.eligible_session("reopen").await;
+		let orphaned = spawn_read(&client);
+		let orphaned_request = editor.request("fs/read_text_file").await;
+		assert_eq!(orphaned_request["params"]["sessionId"], third_session.as_str());
+		let frames = editor.close().await;
+		assert!(matches!(
+			orphaned.await.expect("orphaned read"),
+			Err(ClientRequestError::Disconnected { method: ClientMethod::ReadTextFile })
+		));
+		assert!(matches!(
+			client.read_text_file(&path).await,
+			Err(ClientRequestError::Disconnected { method: ClientMethod::ReadTextFile })
+		));
+		assert_eq!(client.pending(), 0);
+		assert!(frames.iter().all(|frame| frame.get("error").is_none()), "{frames:#?}");
+	})
+	.await;
+}
+
+/// A tool that asks the kernel's approval route before acting.
+struct GatedTool {
+	spec:  omp_tool::ToolSpec,
+	route: Arc<Mutex<Option<omp_agent::ApprovalRoute>>>,
+}
+
+impl omp_tool::Tool for GatedTool {
+	type Fault = Value;
+	type Params = Value;
+	type Payload = Value;
+	type Update = Value;
+
+	fn spec(&self) -> &omp_tool::ToolSpec {
+		&self.spec
+	}
+
+	fn call<'c>(
+		&'c self,
+		mut params: omp_tool::IncomingParams<'c>,
+	) -> impl futures::Stream<Item = omp_tool::Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c
+	{
+		async_stream::stream! {
+			let args = params.whole::<Value>().await.expect("args");
+			let command = args["command"].as_str().unwrap_or_default().to_owned();
+			let route = self.route.lock().clone().expect("route bound before the turn");
+			let spec = omp_agent::ApprovalSpec {
+				title:         Str::new_static("Run bash"),
+				body:          Str::new(format!("$ {command}")),
+				subject:       Str::new(&command),
+				kind:          Str::new_static("exec"),
+				scopes:        vec![Str::new_static("once"), Str::new_static("session")],
+				default:       Some(false),
+				route:         Str::new_static("user"),
+				approver:      None,
+				timeout_ms:    0,
+				unreachable:   Str::new_static("deny"),
+				require_human: true,
+				pattern:       None,
+				evidence:      Vec::new(),
+			};
+			let ticket = route.request(Some(Str::new_static("gated-1")), vec![spec], 1).await;
+			let approved = ticket.decision.is_some_and(|decision| decision.approved);
+			yield omp_tool::Ev::Done(omp_tool::ToolTerminal::Done {
+				result: if approved {
+					Ok(serde_json::json!({"gated": "approved"}))
+				} else {
+					Err(serde_json::json!({"gated": "rejected"}))
+				},
+				useless: false,
+			});
+		}
+	}
+
+	fn prompt(&self, view: Result<&Value, &Value>, _: &omp_tool::PromptCaps) -> Vec<omp_tool::Part> {
+		vec![omp_tool::Part::Json {
+			json: bytes::Bytes::from(
+				serde_json::to_vec(view.unwrap_or_else(|fault| fault)).expect("JSON"),
+			),
+		}]
+	}
+}
+
+fn gated_registry(route: Arc<Mutex<Option<omp_agent::ApprovalRoute>>>) -> Arc<Registry> {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			GatedTool {
+				spec: omp_tool::ToolSpec {
+					name: Str::new_static("gated"),
+					rev: omp_tool::Rev { family: Str::new_static("test"), n: 1 },
+					description: Str::new_static("asks before acting"),
+					schema: bytes::Bytes::from_static(
+						br#"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}"#,
+					),
+					constraint: omp_tool::Constraint::None,
+					effects: omp_tool::Effects::empty(),
+					projection_code: [9; 32],
+				},
+				route,
+			},
+			omp_tool::Presentation::Slot,
+			omp_tool::Claims {
+				precedence: omp_tool::Precedence::CORE,
+				claimant:   Str::new_static("omp/core"),
+				replaces:   None,
+			},
+		)
+		.expect("gated tool registers");
+	Arc::new(registry)
+}
+
+/// `session/request_permission` and `fs/*` share one id space and one table:
+/// each answer reaches the request it names, and the selected permission
+/// option still decides the kernel's approval ticket.
+#[tokio::test]
+async fn permission_and_fs_requests_share_one_correlation_table() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let route = Arc::new(Mutex::new(None));
+	let (kernel, session, home) = harness_with(
+		&directory,
+		[Script::GatedCall("echo gated"), Script::Text("done")],
+		gated_registry(Arc::clone(&route)),
+	);
+	*route.lock() = Some(kernel.approval_route());
+	with_editor(
+		&directory,
+		AcpSettings::default(),
+		(kernel, session, home),
+		|client, mut editor| async move {
+			editor.initialize(fs_capabilities()).await;
+			let session_id = editor.eligible_session("new").await;
+			editor
+				.send(serde_json::json!({
+					"jsonrpc": "2.0",
+					"id": "prompt",
+					"method": "session/prompt",
+					"params": {"sessionId": session_id, "prompt": "run the gated tool"},
+				}))
+				.await;
+			let permission = editor.request("session/request_permission").await;
+			assert_eq!(permission["params"]["sessionId"], session_id.as_str());
+			assert_eq!(permission["params"]["toolCall"]["kind"], "execute");
+			assert_eq!(permission["params"]["options"][0]["optionId"], "allow_once");
+
+			let path = editor.root.join("open.rs");
+			let read = tokio::spawn({
+				let client = client.clone();
+				async move { client.read_text_file(&path).await }
+			});
+			let read_request = editor.request("fs/read_text_file").await;
+			assert_ne!(read_request["id"], permission["id"], "one id space for every client request");
+			assert_eq!(client.pending(), 2);
+
+			editor
+				.answer(&read_request, serde_json::json!({"content": "editor buffer"}))
+				.await;
+			assert_eq!(read.await.expect("read").expect("buffer").as_str(), "editor buffer");
+			editor
+				.answer(
+					&permission,
+					serde_json::json!({"outcome": {"outcome": "selected", "optionId": "allow_once"}}),
+				)
+				.await;
+			let prompt = editor.next().await;
+			assert_eq!(prompt["id"], "prompt", "{prompt:#?}");
+			assert_eq!(prompt["result"]["stopReason"], "end_turn", "{prompt:#?}");
+			assert_eq!(client.pending(), 0);
+			let frames = editor.close().await;
+			let transcript = serde_json::to_string(&frames).expect("frames encode");
+			assert!(
+				transcript.contains("approved") && !transcript.contains("rejected"),
+				"the selected option approves the ticket: {frames:#?}"
+			);
+		},
+	)
+	.await;
+}
+
+/// Blank lines are skipped, an unparseable line gets a parse error, and a
+/// frame that is neither a request nor a response is invalid; the connection
+/// keeps serving through all of them.
+#[tokio::test]
+async fn blank_and_malformed_frames_keep_the_connection_serving() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	with_editor(&directory, AcpSettings::default(), parts, |_client, mut editor| async move {
+		editor
+			.write
+			.write_all(b"\n   \r\n{not json\n")
+			.await
+			.expect("junk sent");
+		let parse_error = editor.next().await;
+		assert_eq!(parse_error["error"]["code"], -32700, "{parse_error:#?}");
+		editor.initialize(serde_json::json!({})).await;
+		editor
+			.send(serde_json::json!({"jsonrpc": "2.0", "id": "noop"}))
+			.await;
+		let no_method = editor.next().await;
+		assert_eq!(no_method["id"], "noop");
+		assert_eq!(no_method["error"]["code"], -32600, "{no_method:#?}");
+		editor.quiet("probe").await;
+		editor.close().await;
+	})
+	.await;
 }
