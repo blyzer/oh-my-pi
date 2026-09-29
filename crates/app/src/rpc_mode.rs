@@ -10,12 +10,13 @@ use std::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
 	},
-	time::{SystemTime, UNIX_EPOCH},
+	time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use miette::{IntoDiagnostic as _, miette};
 use omp_agent::{
-	Inference, Kernel, KernelError, KernelEvent, RunControl, TurnInput, TurnOutcome, TurnStop, Up,
+	Inference, Kernel, KernelError, KernelEvent, LocalRun, LocalRunKind, RunControl, TurnInput,
+	TurnOutcome, TurnStop, Up,
 };
 use omp_core::Str;
 use omp_dom::{
@@ -36,7 +37,10 @@ use omp_tool::{
 	HostToolExecutor, HostToolInvocation, HostToolResult as RuntimeHostToolResult, HostToolSpec,
 	HostToolUpdateSink,
 };
-use omp_tools::ask::{AskPresenter, Fault as AskFault, Presentation, Question, Selection};
+use omp_tools::{
+	ask::{AskPresenter, Fault as AskFault, Presentation, Question, Selection},
+	shell,
+};
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, stdin, stdout};
@@ -1256,9 +1260,29 @@ enum RpcTurnInput {
 	Skill(omp_journal::data::SkillPrompt),
 }
 
-/// What a spawned turn hands back: the kernel and session it borrowed plus
-/// the turn's result.
-type TurnCompletion<C> = (Kernel<C>, Session, Result<TurnOutcome, KernelError>);
+/// Which request a spawned run answers once it hands the kernel back.
+enum RunOrigin {
+	/// A model turn (`prompt`, `follow_up`, `abort_and_prompt`, a popped
+	/// follow-up): settles with `turn_end` and one terminal `agent_end`.
+	Turn,
+	/// One RPC `bash` request run through [`Kernel::run_local`]: settles with
+	/// that request's response.
+	Bash {
+		/// Request the settled run answers.
+		id:      Option<RequestId>,
+		/// Fallback clock when the run settles without a host status.
+		started: Instant,
+	},
+}
+
+/// What a spawned run hands back: the kernel and session it borrowed, the
+/// run's result, and the request it answers.
+struct TurnCompletion<C> {
+	kernel:  Kernel<C>,
+	session: Session,
+	result:  Result<TurnOutcome, KernelError>,
+	origin:  RunOrigin,
+}
 
 /// Moves the idle kernel and session into a spawned turn (`prompt`, an idle
 /// `follow_up`, `abort_and_prompt`, and the follow-up pop after a turn all
@@ -1287,7 +1311,9 @@ where
 					.await
 			},
 		};
-		let _ = turn_tx.send_async((kernel, session, result)).await;
+		let _ = turn_tx
+			.send_async(TurnCompletion { kernel, session, result, origin: RunOrigin::Turn })
+			.await;
 	}));
 	outgoing_tx
 		.send(Outgoing::Frame(json!({ "type": "agent_start" })))
@@ -1296,6 +1322,230 @@ where
 		.send(Outgoing::Frame(json!({ "type": "turn_start" })))
 		.into_diagnostic()
 }
+
+/// Moves the idle kernel and session into one RPC `bash` run.
+///
+/// The command is the interactive `!` prefix's user-local run
+/// ([`Kernel::run_local`]): it resolves the registry's `bash` tool, so the
+/// project environment's admission policy and sandbox, the persistent session
+/// shell (cwd, exports), the kernel's turn cancellation tree (`abort_bash`),
+/// and the dispatcher's single central output bound apply exactly as they do
+/// to a model-issued call. The run is journaled as a local-run element whose
+/// output joins the model context, like pi's `bashExecution` message.
+fn start_bash<C>(
+	current: &mut Option<(Kernel<C>, Session)>,
+	turn_tx: &flume::Sender<TurnCompletion<C>>,
+	id: Option<RequestId>,
+	command: Str,
+) where
+	C: Inference + Send + Sync + 'static,
+{
+	let (mut kernel, mut session) = current.take().expect("idle RPC owns kernel and session");
+	let turn_tx = turn_tx.clone();
+	let started = Instant::now();
+	drop(tokio::spawn(async move {
+		let run = LocalRun { kind: LocalRunKind::Bash, input: command, exclude: false };
+		let result = kernel
+			.run_local(&mut session, run, RunControl::default())
+			.await;
+		let _ = turn_tx
+			.send_async(TurnCompletion {
+				kernel,
+				session,
+				result,
+				origin: RunOrigin::Bash { id, started },
+			})
+			.await;
+	}));
+}
+
+/// The settled user-local `bash` element of the session's last turn.
+fn local_bash_element(dom: &Dom) -> Option<(Handle, &Node)> {
+	let turn = *dom.children(dom.body()).last()?;
+	dom.children(turn).iter().rev().find_map(|handle| {
+		let node = dom.get(*handle)?;
+		let local = node
+			.prop(&PropKey::Custom(Str::new_static(omp_agent::LOCAL_PRESENTATION_PROP)))
+			.and_then(DomValue::as_str)
+			== Some(omp_agent::LOCAL_PRESENTATION_VALUE);
+		let bash = node
+			.prop(&PropKey::Custom(Str::new_static(omp_agent::LOCAL_KIND_PROP)))
+			.and_then(DomValue::as_str)
+			== Some(<&'static str>::from(LocalRunKind::Bash));
+		(local && bash).then_some((*handle, node))
+	})
+}
+
+/// The `artifact://` address the dispatcher's single output bound recorded
+/// for a call (`<diag kind=output_bounded>`, ADR 0009), if it bounded one.
+fn bounded_artifact(dom: &Dom, call: Handle) -> Option<&str> {
+	let bounded: &'static str = omp_tool::DiagKind::OutputBounded.into();
+	dom.children(call).iter().find_map(|handle| {
+		let node = dom.get(*handle)?;
+		(node.tag == Tag::Known(KnownTag::Diag) && prop(node, PropId::Kind) == Some(bounded))
+			.then(|| prop(node, PropId::Recovery))
+			.flatten()
+	})
+}
+
+/// Durable call outcome of the `bash` tool.
+type BashOutcome = omp_tool::CallOutcome<shell::Payload, shell::Fault>;
+
+/// Decodes the journaled `bash` call outcome. An outcome the dispatcher moved
+/// into the session CAS (`CallOutcomeDetails::Spilled`) is read back: it is
+/// the environment's already-bounded verdict, never the raw output stream.
+fn bash_outcome(raw: &str, blobs: &omp_journal::blob::BlobStore) -> Option<BashOutcome> {
+	match serde_json::from_str::<omp_tool::CallOutcomeDetails>(raw) {
+		Ok(omp_tool::CallOutcomeDetails::Inline { json }) => serde_json::from_slice(&json).ok(),
+		Ok(omp_tool::CallOutcomeDetails::Spilled { blob, byte_len }) => {
+			if byte_len > omp_agent::DispatchPolicy::MAX_COMPLETE_OUTPUT_BYTES as u64 {
+				return None;
+			}
+			let reference =
+				omp_journal::blob::BlobRef::parse_hex(blob.hash.as_str(), byte_len).ok()?;
+			serde_json::from_slice(&blobs.get(&reference).ok()?).ok()
+		},
+		Err(_) => serde_json::from_str(raw).ok(),
+	}
+}
+
+/// Answers one settled RPC `bash` run from its journaled local-run element.
+///
+/// Response data (v1-compatible; clients ignore unknown keys): `stdout`,
+/// `stderr` (per channel; a PTY run reports on `stdout`), `exitCode`,
+/// `cancelled`, `truncated`, `durationMs`, plus `output` (both channels in
+/// host order, pi's `BashResult.output`) and `artifactId` — the
+/// `artifact://sha256/<hex>` address of the complete output, present exactly
+/// when `truncated` is true. A command refused before it started (approval
+/// policy, hooks, a denied prompt) or denied by the environment sandbox
+/// answers with error code `policy_denied`.
+fn bash_response(
+	id: Option<RequestId>,
+	session: &Session,
+	result: Result<TurnOutcome, KernelError>,
+	started: Instant,
+) -> miette::Result<RpcResponse> {
+	const COMMAND: &str = "bash";
+	let error = |id, message: &str, code: &str| {
+		Ok(RpcResponse::error(id, COMMAND, message, Some(RpcErrorCode::new(code))))
+	};
+	if let Err(source) = result {
+		return error(id, &source.to_string(), BASH_ERROR);
+	}
+	let dom = session.dom();
+	let Some((handle, _)) = local_bash_element(dom) else {
+		return error(id, "the bash run settled without a journaled result", BASH_ERROR);
+	};
+	// A settled call carries its outcome on `<result>`; a failed one on the
+	// fault `<diag>` (ADR 0008).
+	let raw = child(dom, handle, KnownTag::Result)
+		.and_then(|(_, result)| result.prop(&PropKey::from(PropId::Outcome)))
+		.or_else(|| {
+			dom.children(handle)
+				.iter()
+				.rev()
+				.find_map(|handle| dom.get(*handle)?.prop(&PropKey::from(PropId::Fault)))
+		})
+		.and_then(|value| match value {
+			DomValue::Json(raw) => Some(raw.get()),
+			_ => None,
+		});
+	let payload = match raw.and_then(|raw| bash_outcome(raw, session.blobs())) {
+		Some(omp_tool::CallOutcome::Ok(payload)) => payload,
+		Some(omp_tool::CallOutcome::Faulted(shell::Fault::CommandFailed { payload })) => *payload,
+		Some(omp_tool::CallOutcome::Aborted { kind: omp_tool::AbortKind::Cancelled, .. }) => {
+			return RpcResponse::success(
+				id,
+				COMMAND,
+				json!({
+					"stdout": "",
+					"stderr": "",
+					"output": "",
+					"exitCode": Value::Null,
+					"cancelled": true,
+					"truncated": false,
+					"durationMs": started.elapsed().as_millis(),
+				}),
+			)
+			.into_diagnostic();
+		},
+		Some(omp_tool::CallOutcome::Aborted { abort, policy, .. }) => {
+			let reason = policy.map_or_else(|| abort.render(), |policy| policy.reason);
+			return error(id, &reason, POLICY_DENIED);
+		},
+		Some(omp_tool::CallOutcome::Faulted(fault)) => {
+			return error(id, &fault.message(), BASH_ERROR);
+		},
+		Some(omp_tool::CallOutcome::ArgsRejected(_)) | None => {
+			return error(id, "the bash run settled without a shell result", BASH_ERROR);
+		},
+	};
+	let mut stdout = Vec::new();
+	let mut stderr = Vec::new();
+	let mut output = Vec::new();
+	for frame in &payload.transcript {
+		match frame.channel {
+			shell::OutputChannel::Stdout | shell::OutputChannel::Pty => {
+				stdout.extend_from_slice(&frame.data);
+			},
+			shell::OutputChannel::Stderr => stderr.extend_from_slice(&frame.data),
+		}
+		output.extend_from_slice(&frame.data);
+	}
+	if payload.status.outcome == shell::ExecOutcome::Denied {
+		let reason = String::from_utf8_lossy(&stderr);
+		let reason = reason.trim();
+		return error(
+			id,
+			if reason.is_empty() {
+				"bash command denied by environment policy"
+			} else {
+				reason
+			},
+			POLICY_DENIED,
+		);
+	}
+	let artifact = bounded_artifact(dom, handle)
+		.map(str::to_owned)
+		.or_else(|| {
+			payload
+				.status
+				.spilled_output
+				.as_ref()
+				.map(|blob| format!("artifact://sha256/{}", blob.hash))
+		});
+	let mut data = json!({
+		"stdout": String::from_utf8_lossy(&stdout),
+		"stderr": String::from_utf8_lossy(&stderr),
+		"output": String::from_utf8_lossy(&output),
+		"exitCode": payload.status.exit_code,
+		"cancelled": payload.status.aborted || payload.status.outcome == shell::ExecOutcome::Cancelled,
+		"truncated": artifact.is_some(),
+		"durationMs": payload.status.wall_clock_ms,
+	});
+	if let Some(artifact) = artifact {
+		data["artifactId"] = Value::String(artifact);
+	}
+	RpcResponse::success(id, COMMAND, data).into_diagnostic()
+}
+
+/// The document of the newest handoff compaction (`<compaction
+/// method=handoff>`), without its legacy `<handoff-context>` wrapper.
+fn handoff_document(dom: &Dom) -> Option<String> {
+	dom.children(dom.meta()).iter().rev().find_map(|handle| {
+		let node = dom.get(*handle)?;
+		(node.tag == Tag::Known(KnownTag::Compaction)
+			&& prop(node, PropId::Method) == Some("handoff"))
+		.then(|| prop(node, PropId::Summary))
+		.flatten()
+		.map(|summary| omp_session::custom_message::extract_handoff_document(summary).to_owned())
+	})
+}
+
+/// Error code for a `bash` run that failed outside the command itself.
+const BASH_ERROR: &str = "bash_error";
+/// Error code for a `bash` run the environment's policy refused.
+const POLICY_DENIED: &str = "policy_denied";
 
 /// Serves RPC over caller-provided transport halves.
 ///
@@ -1490,6 +1740,8 @@ where
 	let jobs = Arc::clone(kernel.jobs());
 	let mut current = Some((kernel, session));
 	let mut turn_running = false;
+	// The running kernel task is an RPC `bash` run (`abort_bash` target).
+	let mut bash_running = false;
 	// `abort_and_prompt` while a turn runs: the interrupt is sent now and the
 	// prompt starts the moment the aborted turn hands the session back.
 	let mut abort_prompt: Option<RpcTurnInput> = None;
@@ -1865,8 +2117,18 @@ where
 								};
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
-							"abort_retry" | "abort_bash" => {
+							"abort_retry" => {
 								let _ = mailbox.send(Up::Interrupt);
+								let response = RpcResponse::success_empty(id, command.as_str());
+								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
+							},
+							// Interrupts only an RPC `bash` run, through the kernel's turn
+							// cancellation (the environment stops the shell job); a model
+							// turn is left alone, as in pi.
+							"abort_bash" => {
+								if bash_running {
+									let _ = mailbox.send(Up::Interrupt);
+								}
 								let response = RpcResponse::success_empty(id, command.as_str());
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
@@ -1892,37 +2154,58 @@ where
 								};
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
+							// RPC `bash` is the user-local `!` run (see `start_bash`): the
+							// environment's in-process shell under its admission policy,
+							// never a host `/bin/sh`. The response follows once the run
+							// settles; `abort_bash` interrupts it meanwhile.
 							"bash" => {
+								let paused = current
+									.as_ref()
+									.is_some_and(|(_, session)| omp_agent::pause_state(session.dom()).active);
 								let response = match request.params.get("command").and_then(Value::as_str) {
+									_ if turn_running => Some(busy_response(id, command.as_str())),
+									Some(_) if paused => Some(RpcResponse::error(
+										id,
+										command.as_str(),
+										"Paused: resume before running local commands",
+										Some(RpcErrorCode::new("session_paused")),
+									)),
 									Some(script) => {
-										let started = std::time::Instant::now();
-										match tokio::process::Command::new("/bin/sh")
-											.arg("-lc")
-											.arg(script)
-											.current_dir(&runtime.project)
-											.output()
-											.await
-										{
-											Ok(output) => RpcResponse::success(id, command.as_str(), json!({
-												"stdout": String::from_utf8_lossy(&output.stdout),
-												"stderr": String::from_utf8_lossy(&output.stderr),
-												"exitCode": output.status.code(),
-												"cancelled": false,
-												"truncated": false,
-												"durationMs": started.elapsed().as_millis(),
-											})).into_diagnostic()?,
-											Err(source) => RpcResponse::error(id, command.as_str(), source.to_string(), Some(RpcErrorCode::new("bash_error"))),
-										}
+										start_bash(&mut current, &turn_tx, id, Str::new(script));
+										turn_running = true;
+										bash_running = true;
+										None
 									},
-									None => RpcResponse::error(id, command.as_str(), "bash requires `command`", Some(RpcErrorCode::new("invalid_params"))),
+									None => Some(RpcResponse::error(id, command.as_str(), "bash requires `command`", Some(RpcErrorCode::new("invalid_params")))),
 								};
-								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
+								if let Some(response) = response {
+									outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
+								}
 							},
+							// `/handoff` in chat: the kernel's in-place compaction under
+							// the `handoff` method, which journals a handoff document.
 							"handoff" => {
 								let response = if turn_running {
 									RpcResponse::error(id, command.as_str(), "Cannot hand off while a response is in progress", Some(RpcErrorCode::new(RpcErrorCode::SESSION_BUSY)))
 								} else {
-									RpcResponse::success(id, command.as_str(), Value::Null).into_diagnostic()?
+									let (kernel, session) = current.as_mut().expect("idle RPC owns session");
+									let focus = request.params.get("customInstructions").and_then(Value::as_str).map(Str::new);
+									match kernel.compact(session, focus, "handoff").await {
+										Ok(handed_off) => RpcResponse::success(
+											id,
+											command.as_str(),
+											json!({
+												"handedOff": handed_off,
+												"document": handed_off.then(|| handoff_document(session.dom())).flatten(),
+											}),
+										).into_diagnostic()?,
+										Err(source) => RpcResponse::error(
+											id,
+											command.as_str(),
+											source.to_string(),
+											Some(RpcErrorCode::new("handoff_error")),
+										),
+									}
 								};
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
@@ -2415,7 +2698,12 @@ where
 				}
 			},
 			completed = turn_rx.recv_async(), if turn_running => {
-				let (turn_kernel, mut turn_session, result) = completed.into_diagnostic()?;
+				let TurnCompletion {
+					kernel: turn_kernel,
+					session: mut turn_session,
+					result,
+					origin,
+				} = completed.into_diagnostic()?;
 				if let Some(title) = pending_session_name.take() {
 					rename_session(&mut turn_session, title).map_err(|source| miette!("{source}"))?;
 				}
@@ -2436,47 +2724,53 @@ where
 				for frame in observe_subagents(&jobs, subagent_subscription, &mut subagent_seen) {
 					outgoing_tx.send(Outgoing::Frame(frame)).into_diagnostic()?;
 				}
-				if let Some(last) = rpc_messages(&replica)
-					.into_iter()
-					.rev()
-					.find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
-				{
-					let tool_results = replica
-						.children(replica.body())
-						.last()
-						.copied()
-						.map(|turn| rpc_tool_results(&replica, turn))
-						.unwrap_or_default();
-					outgoing_tx.send(Outgoing::Frame(json!({
-						"type": "turn_end",
-						"message": last,
-						"toolResults": tool_results,
-					}))).into_diagnostic()?;
+				if let RunOrigin::Bash { id, started } = origin {
+					bash_running = false;
+					let response = bash_response(id, &turn_session, result, started)?;
+					outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
+				} else {
+					if let Some(last) = rpc_messages(&replica)
+						.into_iter()
+						.rev()
+						.find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+					{
+						let tool_results = replica
+							.children(replica.body())
+							.last()
+							.copied()
+							.map(|turn| rpc_tool_results(&replica, turn))
+							.unwrap_or_default();
+						outgoing_tx.send(Outgoing::Frame(json!({
+							"type": "turn_end",
+							"message": last,
+							"toolResults": tool_results,
+						}))).into_diagnostic()?;
+					}
+					let terminal = match result {
+						Ok(outcome) => json!({
+							"type": "agent_end",
+							"messages": replica.children(replica.body()).last().copied()
+								.map(|turn| rpc_turn_messages(&replica, turn))
+								.unwrap_or_default(),
+							"isTerminal": true,
+							"cancelled": outcome.stop == TurnStop::Cancelled,
+							"steered": outcome.stop == TurnStop::Steered,
+							"text": outcome.assistant_text,
+							"tokensIn": outcome.tokens_in,
+							"tokensOut": outcome.tokens_out,
+						}),
+						Err(source) => json!({
+							"type": "agent_end",
+							"messages": replica.children(replica.body()).last().copied()
+								.map(|turn| rpc_turn_messages(&replica, turn))
+								.unwrap_or_default(),
+							"isTerminal": true,
+							"cancelled": false,
+							"error": source.to_string(),
+						}),
+					};
+					outgoing_tx.send(Outgoing::Frame(terminal)).into_diagnostic()?;
 				}
-				let terminal = match result {
-					Ok(outcome) => json!({
-						"type": "agent_end",
-						"messages": replica.children(replica.body()).last().copied()
-							.map(|turn| rpc_turn_messages(&replica, turn))
-							.unwrap_or_default(),
-						"isTerminal": true,
-						"cancelled": outcome.stop == TurnStop::Cancelled,
-						"steered": outcome.stop == TurnStop::Steered,
-						"text": outcome.assistant_text,
-						"tokensIn": outcome.tokens_in,
-						"tokensOut": outcome.tokens_out,
-					}),
-					Err(source) => json!({
-						"type": "agent_end",
-						"messages": replica.children(replica.body()).last().copied()
-							.map(|turn| rpc_turn_messages(&replica, turn))
-							.unwrap_or_default(),
-						"isTerminal": true,
-						"cancelled": false,
-						"error": source.to_string(),
-					}),
-				};
-				outgoing_tx.send(Outgoing::Frame(terminal)).into_diagnostic()?;
 				if shutting_down || !input_open {
 					current = Some((turn_kernel, turn_session));
 					break;
