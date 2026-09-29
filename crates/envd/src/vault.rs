@@ -1722,12 +1722,9 @@ mod tests {
 		task.abort();
 		assert!(task.await.expect_err("cancelled task").is_cancelled());
 		for _ in 0..100 {
-			let all_gone = pids.iter().all(|pid| {
-				// SAFETY: signal 0 does not deliver a signal; it only probes
-				// whether the exact process still exists.
-				(unsafe { libc::kill(*pid, 0) }) == -1
-					&& io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-			});
+			let all_gone = pids
+				.iter()
+				.all(|pid| crate::test_process::process_terminated(nix::unistd::Pid::from_raw(*pid)));
 			if all_gone {
 				return;
 			}

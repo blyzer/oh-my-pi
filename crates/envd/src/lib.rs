@@ -55,6 +55,8 @@ mod server;
 pub mod shell_child;
 pub mod site;
 pub mod ssh;
+#[cfg(all(test, unix))]
+mod test_process;
 mod tool_ast_grep;
 mod tool_debug;
 mod tool_document;
