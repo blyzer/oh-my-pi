@@ -77,6 +77,7 @@ names real paths and says "not yet implemented" where true.
 - [0032](0032-presentation-policy-in-the-renderer.md) — Semantic colors, icons, charset, pacing belong to the renderer
 - [0033](0033-verification-is-part-of-the-interface.md) — A debug protocol defines what the UI is
 - [0034](0034-transcript-is-a-protocol.md) — Blocks, exactly-once history, append-only scrollback; TLA+-checked
+- [0037](0037-acp-editor-io.md) — ACP editors supply the document base; writes commit through the authority, then sync back (proposed)
 
 ### Stack
 - [0035](0035-rust-for-the-engine.md) — Language choice is architecture; Rust for the engine
