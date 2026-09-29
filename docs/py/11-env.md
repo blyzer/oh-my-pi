@@ -2181,9 +2181,11 @@ synchronization* (100-108), *Atomic text edit and workspace edit application eng
   `/tmp/omp-shell-snapshots-<uid>` on the *client* host. **Resolution: move the snapshot directory
   Environment-side.** A remote Environment must snapshot its own shell, not the client's.
 - *ACP / Client-Bridge terminal execution* (`tools-exec.md:70-79`) routes commands to an editor
-  client's terminal, bypassing the DATA socket entirely. **Resolution: this is a separate
-  transport, not an `omp.env` surface.** `omp.env.sh` must not silently become an ACP proxy;
-  extensions that want the editor's terminal ask through CONTROL.
+  client's terminal, bypassing the DATA socket entirely. **Resolution: not ported.** ACP
+  `terminal/*` stays unused ([ADR 0037](../adr/0037-acp-editor-io.md)); Bash always runs in the
+  Environment's in-process shell, and its output reaches the editor as `tool_call_update` content.
+  The `AcpExec*` frames and `AcpBind.exec` are removed and their field numbers reserved. Neither
+  `omp.env.sh` nor an extension can route a command to an editor terminal.
 - *LSP client lifecycle and protocol transport* (`lsp-dap.md:75-99`) and *LSP multiplexing via
   external lspmux* (`lsp-dap.md:153-167`) both assume client-side spawning. **Resolution: the
   document authority owns language server processes; `lspmux` is redundant with the docserver's own
