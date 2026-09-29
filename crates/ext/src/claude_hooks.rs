@@ -898,7 +898,7 @@ mod tests {
 			panic!("one hook: {hooks:?}");
 		};
 		crate::plugin_command::plugin_command_digest(
-			"p@m",
+			crate::plugin_command::PluginId::from_ref("p@m"),
 			"1.0.0",
 			&hook.launch(Path::new("/plugins/p")),
 		)
@@ -986,6 +986,13 @@ mod tests {
 			[],
 			[],
 		);
-		assert_ne!(base, crate::plugin_command::plugin_command_digest("p@m", "1.0.0", &server));
+		assert_ne!(
+			base,
+			crate::plugin_command::plugin_command_digest(
+				crate::plugin_command::PluginId::from_ref("p@m"),
+				"1.0.0",
+				&server
+			)
+		);
 	}
 }

@@ -23,7 +23,7 @@ use omp_ext::{
 		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
 		PluginDiagnostic, REGISTRY_FILE,
 	},
-	plugin_command::PluginLaunchKind,
+	plugin_command::{PluginId, PluginLaunchKind},
 	trust::{GrantsFile, grants_path},
 };
 
@@ -147,7 +147,7 @@ fn unapproved_plugin_launches_are_blocked_and_named() {
 			.map(|blocked| (blocked.kind, blocked.server.as_str()))
 			.collect::<Vec<_>>(),
 		[
-			(PluginLaunchKind::McpServer, "tools:db"),
+			(PluginLaunchKind::McpServer, "tools@market:db"),
 			(PluginLaunchKind::LanguageServer, "acme"),
 			(PluginLaunchKind::DebugAdapter, "acme-dbg"),
 			(PluginLaunchKind::Hook, "Stop"),
@@ -249,7 +249,7 @@ fn changed_arguments_or_version_require_approval_again() {
 }
 
 #[test]
-fn an_installed_agent_plugins_package_is_approved_under_its_manifest_name() {
+fn an_installed_agent_plugins_package_is_approved_under_its_marketplace_identity() {
 	let fixture = Fixture::new();
 	let package = fixture
 		.data
@@ -292,15 +292,23 @@ fn an_installed_agent_plugins_package_is_approved_under_its_manifest_name() {
 	let [local] = &blocked[..] else {
 		panic!("the package's stdio server alone awaits approval: {blocked:?}");
 	};
-	assert_eq!((local.plugin.as_str(), local.server.as_str()), ("portable", "local"));
+	assert_eq!(
+		(local.plugin.as_str(), local.server.as_str()),
+		("portable@market", "portable@market:local"),
+		"a marketplace install is identified, and its servers named, as `name@marketplace`"
+	);
 
-	// `omp ext trust portable@market` finds the package through its install.
-	let sets = command_sets("portable@market", &plugins, &agent_plugins(&plugins));
+	// `omp ext trust portable@market` finds the package through its install;
+	// its bare manifest name names no plugin.
+	let sets =
+		command_sets(PluginId::from_ref("portable@market"), &plugins, &agent_plugins(&plugins));
 	let [set] = &sets[..] else {
 		panic!("one package: {sets:?}");
 	};
-	assert_eq!((set.plugin.as_str(), set.version.as_str()), ("portable", "1.0.0"));
-	assert_eq!(sets, command_sets("portable", &plugins, &agent_plugins(&plugins)));
+	assert_eq!((set.plugin.as_str(), set.version.as_str()), ("portable@market", "1.0.0"));
+	assert!(
+		command_sets(PluginId::from_ref("portable"), &plugins, &agent_plugins(&plugins)).is_empty()
+	);
 	for launch in &set.launches {
 		approve_launch(&fixture.data, &set.plugin, &set.version, launch, Str::new_static("cli"))
 			.expect("persist approval");
@@ -367,13 +375,13 @@ fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
 	let named = |pairs: &[(&'static str, &'static str)]| {
 		pairs
 			.iter()
-			.map(|(plugin, server)| (Str::new_static(plugin), Str::new_static(server)))
+			.map(|(plugin, server)| (PluginId::new_static(plugin), Str::new_static(server)))
 			.collect::<Vec<_>>()
 	};
 	assert_eq!(
 		reported(true),
 		named(&[
-			("tools@market", "tools:db"),
+			("tools@market", "tools@market:db"),
 			("tools@market", "acme"),
 			("tools@market", "acme-dbg"),
 			("tools@market", "Stop"),
@@ -411,9 +419,187 @@ fn editing_a_plugin_file_a_launch_names_requires_approval_again() {
 	write(&fixture.plugin.join("bin/db"), "#!/bin/sh\nexec evil\n");
 	write(&fixture.plugin.join("bin/on-stop"), "#!/bin/sh\nexec evil\n");
 	assert_eq!(fixture.blocked_servers(), [
-		(PluginLaunchKind::McpServer, Str::new_static("tools:db")),
+		(PluginLaunchKind::McpServer, Str::new_static("tools@market:db")),
 		(PluginLaunchKind::Hook, Str::new_static("Stop")),
 	]);
 	fixture.approve_all();
 	assert!(fixture.blocked_servers().is_empty());
+}
+
+/// Only an Agent Plugins package that comes from the project is
+/// project-scoped. With `sv_mcp_enable_project_config` off, a package the
+/// user installed and one the invocation names (`--plugin-dir`) still load
+/// and are still reported; a project install is neither.
+#[test]
+fn user_installed_and_explicit_agent_plugins_ignore_the_project_mcp_policy() {
+	let fixture = Fixture::new();
+	let package = |root: &Path, name: &str| {
+		write(
+			&root.join("plugin.json"),
+			&format!(
+				r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"{name}","version":"1.0.0"}}"#
+			),
+		);
+		write(
+			&root.join("mcp.json"),
+			r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{
+				"local":{"type":"stdio","command":"${PLUGIN_ROOT}/server"}}}"#,
+		);
+	};
+	let cache = fixture.data.join("plugins/cache/plugins");
+	let user_package = cache.join("market___personal___1.0.0");
+	let project_package = cache.join("market___shared___1.0.0");
+	package(&user_package, "personal");
+	package(&project_package, "shared");
+	let explicit = fixture.data.join("../explicit");
+	package(&explicit, "explicit");
+	let entry = |scope, install_path: &Path| InstalledPluginEntry {
+		scope,
+		install_path: install_path.to_path_buf(),
+		version: Str::new_static("1.0.0"),
+		installed_at: Str::new_static("2026-01-01T00:00:00Z"),
+		last_updated: Str::new_static("2026-01-01T00:00:00Z"),
+		git_commit_sha: None,
+		enabled: true,
+	};
+	let mut user = InstalledPluginsRegistry::default();
+	user
+		.plugins
+		.insert(Str::new_static("personal@market"), vec![entry(InstallScope::User, &user_package)]);
+	write(
+		&fixture.data.join("plugins").join(REGISTRY_FILE),
+		&serde_json::to_string(&user).expect("registry"),
+	);
+	let mut project = InstalledPluginsRegistry::default();
+	project
+		.plugins
+		.insert(Str::new_static("shared@market"), vec![entry(
+			InstallScope::Project,
+			&project_package,
+		)]);
+	write(
+		&omp_ext::claude_plugin::project_plugins_dir(&fixture.project).join(REGISTRY_FILE),
+		&serde_json::to_string(&project).expect("registry"),
+	);
+
+	let plugins = fixture.resolve();
+	let explicit = explicit.canonicalize().expect("canonical package");
+	let paths = fixture
+		.agent_plugins(&plugins)
+		.with_agent_plugin_roots(agent_plugin_roots(&[explicit], &plugins));
+	let reported = |enable_project_config: bool| {
+		blocked_launches(&plugins, &paths, &omp_envd::mcp::McpSettings { enable_project_config })
+			.into_iter()
+			.map(|blocked| blocked.plugin)
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(reported(true), ["explicit", "shared@market", "personal@market"]);
+	assert_eq!(
+		reported(false),
+		["explicit", "personal@market"],
+		"the project install alone follows the project MCP policy"
+	);
+}
+
+/// `approve_commands` is the one approval writer behind `omp ext trust` and
+/// the in-chat `/plugins approve`: it refuses an unknown identity or digest
+/// before recording anything, approves one command or all of them under the
+/// digests the seams check, and never approves a command naming an
+/// unreadable plugin file.
+#[test]
+fn approve_commands_admits_by_digest_or_all_and_refuses_unknowns() {
+	use omp_core::Hash32;
+	use omp_driver::plugin_commands::{
+		ApproveCommandsError, CommandSelection, approve_commands, resolve_command_sets,
+	};
+
+	let fixture = Fixture::new();
+	let id = PluginId::from_ref("tools@market");
+	let (sets, approvals) =
+		resolve_command_sets(&fixture.data, &fixture.project, &[], id).expect("resolve");
+	assert!(approvals.of(id).next().is_none());
+	let [set] = &sets[..] else {
+		panic!("one plugin: {sets:?}");
+	};
+	let grant = || Str::new_static("interactive");
+
+	let unknown = PluginId::from_ref("nothing@market");
+	let (none, _) =
+		resolve_command_sets(&fixture.data, &fixture.project, &[], unknown).expect("resolve");
+	assert!(matches!(
+		approve_commands(&fixture.data, &none, unknown, CommandSelection::All, grant()),
+		Err(ApproveCommandsError::UnknownPlugin { .. })
+	));
+	let stray = Hash32::sum(b"stray");
+	assert!(matches!(
+		approve_commands(
+			&fixture.data,
+			&sets,
+			id,
+			CommandSelection::Digests(&[stray]),
+			grant()
+		),
+		Err(ApproveCommandsError::UnknownDigest { digest, .. }) if digest == stray
+	));
+	assert_eq!(fixture.blocked_servers().len(), 4, "a refused request records nothing");
+
+	let lsp = set
+		.launches
+		.iter()
+		.find(|launch| launch.kind == PluginLaunchKind::LanguageServer)
+		.expect("language server");
+	let one = approve_commands(
+		&fixture.data,
+		&sets,
+		id,
+		CommandSelection::Digests(&[set.command_digest(lsp)]),
+		grant(),
+	)
+	.expect("approve one");
+	assert_eq!(one.approved.len(), 1);
+	assert_eq!(fixture.blocked_servers().len(), 3);
+	let grants = GrantsFile::read(&grants_path(&fixture.data)).expect("grant file");
+	assert_eq!(grants.plugin_commands[0].granted_by, "interactive");
+
+	let all = approve_commands(&fixture.data, &sets, id, CommandSelection::All, grant())
+		.expect("approve all");
+	assert_eq!(all.approved.len(), 4);
+	assert!(all.unreadable.is_empty());
+	assert!(fixture.blocked_servers().is_empty());
+}
+
+/// A command naming a plugin file that cannot be read is reported and never
+/// approved, even when every command is selected.
+#[cfg(unix)]
+#[test]
+fn approve_commands_never_approves_an_unreadable_plugin_file() {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	use omp_driver::plugin_commands::{CommandSelection, approve_commands, resolve_command_sets};
+
+	let fixture = Fixture::new();
+	let script = fixture.plugin.join("bin/on-stop");
+	write(&script, "#!/bin/sh\nexit 0\n");
+	fs::set_permissions(&script, fs::Permissions::from_mode(0o000)).expect("chmod");
+	if fs::read(&script).is_ok() {
+		// Running with privileges that ignore file modes: nothing to prove.
+		return;
+	}
+	let id = PluginId::from_ref("tools@market");
+	let (sets, _) = resolve_command_sets(&fixture.data, &fixture.project, &[], id).expect("resolve");
+	let outcome = approve_commands(
+		&fixture.data,
+		&sets,
+		id,
+		CommandSelection::All,
+		Str::new_static("interactive"),
+	)
+	.expect("approve");
+	assert_eq!(outcome.approved.len(), 3);
+	let [(_, hook)] = &outcome.unreadable[..] else {
+		panic!("the hook naming the unreadable script: {outcome:?}");
+	};
+	assert_eq!(hook.kind, PluginLaunchKind::Hook);
+	assert_eq!(fixture.blocked_servers(), [(PluginLaunchKind::Hook, Str::new_static("Stop"))]);
+	fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod back");
 }

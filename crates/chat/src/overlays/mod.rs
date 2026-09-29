@@ -53,6 +53,8 @@ pub mod pause;
 pub mod plan_review;
 /// Destination editor opened by Plan Review's “Save and quit” verdict.
 pub mod plan_save;
+/// `/plugins approve` selector over blocked plugin commands.
+pub mod plugin_approvals;
 /// `/plugins`, `/marketplace` plugin selector.
 pub mod plugins;
 /// Centered scrollable markdown report.

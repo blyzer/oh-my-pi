@@ -3323,9 +3323,10 @@ pub struct ActiveContentInputs {
 	pub authored_skills:     BTreeSet<Str>,
 	/// Managed-skill authority root.
 	pub managed_skills_root: Option<PathBuf>,
-	/// Explicit Agent Plugins roots whose data-only MCP declarations join
-	/// automatic project discovery.
-	pub agent_plugin_roots:  Vec<PathBuf>,
+	/// Agent Plugins package roots beside the scanned plugin directories
+	/// (explicitly named ones and marketplace installs), whose data-only MCP
+	/// declarations join automatic discovery at their origin's scope.
+	pub agent_plugin_roots:  Vec<crate::mcp::AgentPluginRoot>,
 	/// The operator's plugin command approvals: an Agent Plugins stdio MCP
 	/// server starts only when its launch is approved. Empty approves
 	/// nothing.

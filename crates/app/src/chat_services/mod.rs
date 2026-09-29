@@ -46,6 +46,10 @@ pub struct ServiceState {
 	pub data_dir:      PathBuf,
 	/// Canonical project root.
 	pub project:       PathBuf,
+	/// Agent Plugins roots the invocation named (`--plugin-dir`,
+	/// `--extension`): `/plugins approve` resolves their commands like the
+	/// session did.
+	pub plugin_dirs:   Vec<PathBuf>,
 	/// Project state directory (`sessions/`).
 	pub state_dir:     PathBuf,
 	/// Durable session directory.
@@ -343,6 +347,12 @@ impl Services for AppServices {
 		plugins::report(&self.state)
 	}
 
+	fn blocked_plugin_commands(
+		&self,
+	) -> ServiceResult<Vec<omp_chat::overlays::services::BlockedCommandRow>> {
+		plugins::blocked_commands(&self.state)
+	}
+
 	fn add_marketplace(&self, source: &str) -> ServiceResult<Str> {
 		plugins::add_marketplace(&self.state, source)
 	}
@@ -480,6 +490,9 @@ impl Mutations for AppServices {
 			)),
 			Mutation::InstallPlugin { id } => plugins::install(&self.state, &id),
 			Mutation::UninstallPlugin { id } => plugins::uninstall(&self.state, &id),
+			Mutation::ApprovePluginCommands { plugin, digest } => {
+				Ok(ready(plugins::approve_commands(&self.state, &plugin, digest)))
+			},
 			Mutation::Logout { account } => self.logout(account),
 			Mutation::PinAccount { account, pinned } => {
 				Ok(ready(accounts::pin(&self.state, &account, pinned)))

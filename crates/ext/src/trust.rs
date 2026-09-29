@@ -16,7 +16,9 @@ use thiserror::Error;
 use super::{
 	ExtensionCode, ExtensionError, Layer, TrustTier, WorkspaceUri,
 	lock::atomic_toml,
-	plugin_command::{CommandApprovals, PluginLaunch, PluginLaunchKind, plugin_command_digest},
+	plugin_command::{
+		CommandApprovals, PluginId, PluginLaunch, PluginLaunchKind, plugin_command_digest,
+	},
 	resolver::version_satisfies,
 };
 
@@ -85,9 +87,9 @@ pub struct Grant {
 /// ([`crate::plugin_command`]).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PluginCommandGrant {
-	/// Plugin identity: an installed plugin's `name@marketplace`, or an
-	/// Agent Plugins package's manifest name.
-	pub plugin:     Str,
+	/// Plugin identity ([`PluginId`]): a marketplace install's
+	/// `name@marketplace`, or a local Agent Plugins package's manifest name.
+	pub plugin:     PluginId,
 	/// Plugin version the launch was approved for.
 	pub version:    Str,
 	/// Component that declared the launch when it was approved.
@@ -113,7 +115,12 @@ impl PluginCommandGrant {
 	/// The operator's approval of `launch` for `plugin` at `version`,
 	/// stamped now, through the channel `granted_by` names.
 	#[must_use]
-	pub fn approve(plugin: &Str, version: &Str, launch: &PluginLaunch, granted_by: Str) -> Self {
+	pub fn approve(
+		plugin: &PluginId,
+		version: &Str,
+		launch: &PluginLaunch,
+		granted_by: Str,
+	) -> Self {
 		Self {
 			plugin: plugin.clone(),
 			version: version.clone(),
@@ -345,10 +352,14 @@ impl GrantsFile {
 	/// Drops every approved launch of `plugin`, or only the one with
 	/// `digest`; returns how many approvals were removed. The caller commits
 	/// the change with [`Self::write`].
-	pub fn revoke_plugin_commands(&mut self, plugin: &str, digest: Option<&Hash32>) -> usize {
+	pub fn revoke_plugin_commands(
+		&mut self,
+		plugin: &PluginId<str>,
+		digest: Option<&Hash32>,
+	) -> usize {
 		let before = self.plugin_commands.len();
 		self.plugin_commands.retain(|grant| {
-			grant.plugin != plugin || digest.is_some_and(|digest| grant.digest != *digest)
+			grant.plugin != *plugin || digest.is_some_and(|digest| grant.digest != *digest)
 		});
 		before - self.plugin_commands.len()
 	}
@@ -905,13 +916,13 @@ mod tests {
 			[],
 		);
 		PluginCommandGrant {
-			plugin:     Str::new_static(plugin),
+			plugin:     PluginId::new_static(plugin),
 			version:    sf!("1.0.0"),
 			kind:       launch.kind,
 			server:     launch.server.clone(),
 			command:    launch.command.clone(),
 			args:       launch.args.to_vec(),
-			digest:     plugin_command_digest(plugin, "1.0.0", &launch),
+			digest:     plugin_command_digest(PluginId::from_ref(plugin), "1.0.0", &launch),
 			granted_at: sf!("2026-09-27T00:00:00Z"),
 			granted_by: sf!("cli"),
 		}
@@ -937,16 +948,19 @@ mod tests {
 			[tcp.clone(), other.clone(), stdio.clone()],
 			"re-approving replaces rather than duplicates"
 		);
-		assert_eq!(read.command_approvals().of("p@m").collect::<Vec<_>>(), [
-			tcp.digest,
-			stdio.digest
-		]);
+		assert_eq!(
+			read
+				.command_approvals()
+				.of(PluginId::from_ref("p@m"))
+				.collect::<Vec<_>>(),
+			[tcp.digest, stdio.digest]
+		);
 		// An extension grant persisted afterwards keeps the approvals.
 		GrantsFile::persist(&path, extension).expect("re-persist extension grant");
 		let mut read = GrantsFile::read(&path).expect("read grants");
 		assert_eq!(read.plugin_commands.len(), 3);
-		assert_eq!(read.revoke_plugin_commands("p@m", Some(&tcp.digest)), 1);
-		assert_eq!(read.revoke_plugin_commands("p@m", None), 1);
+		assert_eq!(read.revoke_plugin_commands(PluginId::from_ref("p@m"), Some(&tcp.digest)), 1);
+		assert_eq!(read.revoke_plugin_commands(PluginId::from_ref("p@m"), None), 1);
 		read.write(&path).expect("write grants");
 		assert_eq!(
 			GrantsFile::read(&path)

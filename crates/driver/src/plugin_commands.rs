@@ -7,18 +7,21 @@
 //! [`CommandApprovals::admit`]). This module is the composition's view of that
 //! gate: [`blocked_launches`] reports every refusal of a session's plugins up
 //! front, so a launching host can name each plugin and command instead of the
-//! servers and hooks silently missing; [`command_sets`] lists what one plugin
-//! identity launches for `omp ext trust`; and [`approve_launch`] records an
-//! approval in the `omp-ext` trust domain's local grant file, which the next
-//! session reads.
+//! servers and hooks silently missing; [`resolve_command_sets`] lists what
+//! one plugin identity launches; and [`approve_commands`] (over
+//! [`approve_launch`]) records approvals in the `omp-ext` trust domain's
+//! local grant file, which the next session reads. `omp ext trust
+//! --approve-command(s)` and the in-chat `/plugins approve` both approve
+//! through [`approve_commands`]: one admission, one writer.
 //!
-//! Two kinds of plugin own launches, each under its own approval identity:
-//! an installed Claude-layout plugin (its registry id, `name@marketplace`,
-//! and recorded version) launches MCP servers, language servers, debug
-//! adapters, and hooks; an Agent Plugins 1.0 package (its manifest `name` and
-//! `version`) launches the stdio MCP servers its `mcp.json` declares, whether
-//! it was found in a plugin directory, passed with `--plugin-dir`, or
-//! installed from a marketplace.
+//! Two kinds of plugin own launches, each under its approval identity
+//! ([`PluginId`]): an installed Claude-layout plugin (its registry id,
+//! `name@marketplace`, and recorded version) launches MCP servers, language
+//! servers, debug adapters, and hooks; an Agent Plugins 1.0 package launches
+//! the stdio MCP servers its `mcp.json` declares, under its registry id when
+//! it was installed from a marketplace, else (found in a plugin directory or
+//! passed with `--plugin-dir`) under its manifest `name`, at its manifest
+//! `version`.
 
 use std::path::{Path, PathBuf};
 
@@ -27,12 +30,14 @@ use omp_core::{
 	dirs::{DataDirError, user_config_root},
 };
 use omp_envd::{
-	mcp::{McpConfigPaths, McpSettings},
+	mcp::{AgentPluginOrigin, AgentPluginRoot, McpConfigPaths, McpSettings},
 	plugin_commands::AgentPluginLaunches,
 };
 use omp_ext::{
-	claude_plugin::{ClaudePlugin, ClaudePlugins, PluginLayout},
-	plugin_command::{CommandApprovals, PluginCommandBlocked, PluginLaunch, plugin_command_digest},
+	claude_plugin::{ClaudeCodeHome, ClaudePlugin, ClaudePlugins, PluginLayout},
+	plugin_command::{
+		CommandApprovals, PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest,
+	},
 	trust::{GrantPersistenceError, GrantsFile, PluginCommandGrant, grants_path},
 };
 
@@ -48,20 +53,32 @@ pub fn plugin_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
 /// The Agent Plugins package roots a session passes to MCP discovery.
 ///
 /// Beside the plugin directories discovery scans: every
-/// `--extension`/`--plugin-dir` root that is an Agent Plugins package, then
-/// every installed plugin in that layout.
+/// `--extension`/`--plugin-dir` root that is an Agent Plugins package
+/// ([`AgentPluginOrigin::Explicit`]), then every installed plugin in that
+/// layout at its registry scope ([`AgentPluginOrigin::Installed`]). Only a
+/// project install is project-scoped; an explicit root or a user install
+/// loads whatever `sv_mcp_enable_project_config`.
 #[must_use]
-pub fn agent_plugin_roots(native_roots: &[PathBuf], plugins: &ClaudePlugins) -> Vec<PathBuf> {
+pub fn agent_plugin_roots(
+	native_roots: &[PathBuf],
+	plugins: &ClaudePlugins,
+) -> Vec<AgentPluginRoot> {
 	native_roots
 		.iter()
 		.filter(|root| crate::discovery::skills::is_agent_plugin_root(root))
-		.cloned()
+		.map(|root| AgentPluginRoot::explicit(root.clone()))
 		.chain(
 			plugins
 				.plugins
 				.iter()
 				.filter(|plugin| plugin.layout == PluginLayout::AgentPlugins)
-				.map(|plugin| plugin.root.clone()),
+				.map(|plugin| AgentPluginRoot {
+					root:   plugin.root.clone(),
+					origin: AgentPluginOrigin::Installed {
+						id:    plugin.id.clone(),
+						scope: plugin.scope,
+					},
+				}),
 		)
 		.collect()
 }
@@ -121,9 +138,9 @@ pub fn blocked_launches(
 /// approvals bind.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginCommandSet {
-	/// Approval identity: an installed plugin's `name@marketplace`, or an
-	/// Agent Plugins package's manifest name.
-	pub plugin:   Str,
+	/// Approval identity: a marketplace install's `name@marketplace`, or a
+	/// local Agent Plugins package's manifest name.
+	pub plugin:   PluginId,
 	/// Version the approval digests bind.
 	pub version:  Str,
 	/// Where the plugin lives.
@@ -148,16 +165,19 @@ impl From<AgentPluginLaunches> for PluginCommandSet {
 }
 
 /// What `omp ext trust <id>` approves: the installed Claude-layout plugin
-/// `id`, and every Agent Plugins package `agent_plugins` discovers whose
-/// manifest name is `id` or that is the installed plugin `id`.
+/// `id`, and every Agent Plugins package `agent_plugins` discovers under the
+/// identity `id` (a marketplace install `name@marketplace`, a local package
+/// its manifest name).
 #[must_use]
 pub fn command_sets(
-	id: &str,
+	id: &PluginId<str>,
 	plugins: &ClaudePlugins,
 	agent_plugins: &McpConfigPaths,
 ) -> Vec<PluginCommandSet> {
-	let installed = plugins.plugins.iter().find(|plugin| plugin.id == id);
-	let mut sets = installed
+	let mut sets = plugins
+		.plugins
+		.iter()
+		.find(|plugin| plugin.id == *id)
 		.filter(|plugin| plugin.claude_components().is_some())
 		.map(|plugin| PluginCommandSet {
 			plugin:   plugin.id.clone(),
@@ -167,16 +187,160 @@ pub fn command_sets(
 		})
 		.into_iter()
 		.collect::<Vec<_>>();
-	let installed_root = installed
-		.filter(|plugin| plugin.layout == PluginLayout::AgentPlugins)
-		.and_then(|plugin| std::fs::canonicalize(&plugin.root).ok());
 	sets.extend(
 		omp_envd::plugin_commands::agent_plugin_launches(agent_plugins)
 			.into_iter()
-			.filter(|package| package.plugin == id || installed_root.as_ref() == Some(&package.root))
+			.filter(|package| package.plugin == *id)
 			.map(PluginCommandSet::from),
 	);
 	sets
+}
+
+/// Every command the plugin identity `id` launches as a session in
+/// `project`, with the Agent Plugins roots `plugin_dirs` the invocation
+/// names, resolves it ([`command_sets`]), with the operator's current
+/// approvals.
+///
+/// This is the one resolution `omp ext trust` and the in-chat
+/// `/plugins approve` approve from.
+///
+/// # Errors
+///
+/// No home directory locates the user configuration root.
+pub fn resolve_command_sets(
+	data_dir: &Path,
+	project: &Path,
+	plugin_dirs: &[PathBuf],
+	id: &PluginId<str>,
+) -> Result<(Vec<PluginCommandSet>, CommandApprovals), DataDirError> {
+	let plugins = ClaudePlugins::resolve(data_dir, project, ClaudeCodeHome::detect().as_ref());
+	let agent_plugins = agent_plugin_paths(project, plugin_dirs, &plugins)?;
+	let sets = command_sets(id, &plugins, &agent_plugins);
+	Ok((sets, plugins.command_approvals))
+}
+
+/// Every launch a session in `project`, with the Agent Plugins roots
+/// `plugin_dirs`, under the MCP policy `mcp`, would not start
+/// ([`blocked_launches`]), resolved fresh from the registries and the grant
+/// file.
+///
+/// # Errors
+///
+/// No home directory locates the user configuration root.
+pub fn session_blocked_launches(
+	data_dir: &Path,
+	project: &Path,
+	plugin_dirs: &[PathBuf],
+	mcp: &McpSettings,
+) -> Result<Vec<PluginCommandBlocked>, DataDirError> {
+	let plugins = ClaudePlugins::resolve(data_dir, project, ClaudeCodeHome::detect().as_ref());
+	let agent_plugins = agent_plugin_paths(project, plugin_dirs, &plugins)?;
+	Ok(blocked_launches(&plugins, &agent_plugins, mcp))
+}
+
+/// Which of a plugin's commands one approval request covers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandSelection<'a> {
+	/// Every command the plugin currently launches (`--approve-commands`,
+	/// `/plugins approve <plugin> all`).
+	All,
+	/// The commands with these digests, as a blocked notice names them
+	/// (`--approve-command`, `/plugins approve <plugin> <digest>`).
+	Digests(&'a [Hash32]),
+}
+
+/// What one approval request recorded.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ApprovedCommands {
+	/// Launches now approved, with the identity each was approved under.
+	pub approved:   Vec<(PluginId, PluginLaunch)>,
+	/// Selected launches naming a plugin file that cannot be read: never
+	/// approved ([`PluginLaunch::files`]).
+	pub unreadable: Vec<(PluginId, PluginLaunch)>,
+}
+
+/// Why an approval request recorded nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum ApproveCommandsError {
+	/// Nothing this project loads carries the identity.
+	#[error(
+		"{plugin} is neither an installed, enabled plugin nor an Agent Plugins package this project \
+		 loads"
+	)]
+	UnknownPlugin {
+		/// The requested identity.
+		plugin: PluginId,
+	},
+	/// A requested digest names none of the plugin's current commands.
+	#[error("{plugin} declares no command with digest {digest}")]
+	UnknownDigest {
+		/// The requested identity.
+		plugin: PluginId,
+		/// The digest no command carries.
+		digest: Hash32,
+	},
+	/// The grant file could not be updated.
+	#[error("the plugin command approval cannot be recorded")]
+	Persist(#[from] GrantPersistenceError),
+}
+
+/// Records the operator's approval of `plugin`'s `selection` among `sets`
+/// ([`resolve_command_sets`]) in the grant file under `data_dir`.
+///
+/// The single approval writer behind `omp ext trust --approve-command(s)`
+/// and the in-chat `/plugins approve`: every requested digest must name a
+/// current command (else nothing is recorded), each selected launch is
+/// persisted through [`approve_launch`] under the digest the launching seams
+/// check, and a launch naming a plugin file that cannot be read is reported
+/// and never approved. `granted_by` records the approving channel.
+///
+/// # Errors
+///
+/// [`ApproveCommandsError`]: `sets` is empty, a digest names no command, or
+/// the grant file cannot be written.
+pub fn approve_commands(
+	data_dir: &Path,
+	sets: &[PluginCommandSet],
+	plugin: &PluginId<str>,
+	selection: CommandSelection<'_>,
+	granted_by: Str,
+) -> Result<ApprovedCommands, ApproveCommandsError> {
+	if sets.is_empty() {
+		return Err(ApproveCommandsError::UnknownPlugin { plugin: plugin.to_owned() });
+	}
+	if let CommandSelection::Digests(digests) = selection
+		&& let Some(digest) = digests.iter().find(|digest| {
+			!sets.iter().any(|set| {
+				set.launches
+					.iter()
+					.any(|launch| set.command_digest(launch) == **digest)
+			})
+		}) {
+		return Err(ApproveCommandsError::UnknownDigest {
+			plugin: plugin.to_owned(),
+			digest: *digest,
+		});
+	}
+	let mut outcome = ApprovedCommands::default();
+	for set in sets {
+		let selected = set.launches.iter().filter(|launch| match selection {
+			CommandSelection::All => true,
+			CommandSelection::Digests(digests) => digests.contains(&set.command_digest(launch)),
+		});
+		for launch in selected {
+			// A launch naming a plugin file that cannot be read cannot be
+			// approved: its contents are part of the approval.
+			if launch.files.unreadable().is_some() {
+				outcome
+					.unreadable
+					.push((set.plugin.clone(), launch.clone()));
+				continue;
+			}
+			approve_launch(data_dir, &set.plugin, &set.version, launch, granted_by.clone())?;
+			outcome.approved.push((set.plugin.clone(), launch.clone()));
+		}
+	}
+	Ok(outcome)
 }
 
 /// The operator's plugin command approvals in the grant file under
@@ -208,7 +372,7 @@ pub fn command_approvals(data_dir: &Path) -> CommandApprovals {
 /// be read is never admitted, approved or not.
 pub fn approve_launch(
 	data_dir: &Path,
-	plugin: &Str,
+	plugin: &PluginId,
 	version: &Str,
 	launch: &PluginLaunch,
 	granted_by: Str,

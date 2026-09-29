@@ -44,6 +44,9 @@ pub enum ConfigSourceKind {
 	AgentPluginProject,
 	/// Portable Agent Plugin user package.
 	AgentPluginUser,
+	/// Portable Agent Plugin package the invocation names explicitly
+	/// (`--plugin-dir`, `--extension`).
+	AgentPluginExplicit,
 	/// Installed Claude-format marketplace plugin, project scope.
 	ClaudePluginProject,
 	/// Installed Claude-format marketplace plugin, user scope.
@@ -82,6 +85,7 @@ impl ConfigSourceKind {
 			Self::Manifest => 180,
 			Self::ClaudeProject => 161,
 			Self::ClaudeUser => 160,
+			Self::AgentPluginExplicit => 152,
 			Self::AgentPluginProject => 151,
 			Self::AgentPluginUser => 150,
 			Self::ClaudePluginProject => 146,

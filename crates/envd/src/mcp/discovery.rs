@@ -16,7 +16,7 @@ use omp_ext::{
 	claude_plugin::{
 		ClaudePlugin, ConfigDeclaration, PluginScope, expand_plugin_vars, resolve_plugin_command,
 	},
-	plugin_command::{CommandApprovals, PluginLaunch, PluginLaunchKind},
+	plugin_command::{CommandApprovals, PluginId, PluginLaunch, PluginLaunchKind},
 };
 use serde::Deserialize;
 
@@ -287,8 +287,9 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 
 /// One Agent Plugins 1.0 package's MCP declaration, normalized.
 struct AgentPluginMcp {
-	/// Manifest `name`: the package's approval identity.
-	name:    Str,
+	/// The package's identity: a marketplace install's `name@marketplace`,
+	/// else its manifest `name`.
+	id:      PluginId,
 	/// Manifest `version`; empty when the manifest records none.
 	version: Str,
 	/// Canonical package root.
@@ -301,7 +302,8 @@ struct AgentPluginMcp {
 }
 
 /// Every Agent Plugins package the project and user plugin directories hold,
-/// then every explicit root, in discovery precedence order.
+/// then every root beside them ([`McpConfigPaths::agent_plugin_roots`]), in
+/// discovery precedence order.
 fn agent_plugins(paths: &McpConfigPaths) -> Vec<AgentPluginMcp> {
 	let project = paths.root.parent().unwrap_or_else(|| Path::new("."));
 	let user_config_root = paths.user.parent().unwrap_or(&paths.home);
@@ -330,23 +332,33 @@ fn agent_plugins(paths: &McpConfigPaths) -> Vec<AgentPluginMcp> {
 				tracing::warn!(path = %entry.path().display(), "ignored Agent Plugin outside its discovery root");
 				continue;
 			}
-			plugins.extend(read_agent_plugin(&plugin_data_root, &root, kind));
+			plugins.extend(read_agent_plugin(&plugin_data_root, &root, kind, None));
 		}
 	}
+	// Only a package that comes from the project is project-scoped: one the
+	// invocation names, or a user install, loads whatever the project MCP
+	// policy (`ConfigSourceKind::loads`).
 	for root in &paths.agent_plugin_roots {
 		plugins.extend(read_agent_plugin(
 			&plugin_data_root,
-			root,
-			ConfigSourceKind::AgentPluginProject,
+			&root.root,
+			root.origin.source_kind(),
+			root.origin.installed_id(),
 		));
 	}
 	plugins
 }
 
+/// The package at `root`, joining discovery as `kind`. A marketplace install
+/// (`installed`, its registry id) is identified, keeps its data, and names
+/// its servers (`name@marketplace:server`) by that id, so two marketplaces
+/// shipping the same package never collide; a local package by its manifest
+/// `name`, its servers unprefixed.
 fn read_agent_plugin(
 	data_root: &Path,
 	root: &Path,
 	kind: ConfigSourceKind,
+	installed: Option<&PluginId>,
 ) -> Option<AgentPluginMcp> {
 	let root = fs::canonicalize(root).ok()?;
 	let manifest_path = fs::canonicalize(root.join("plugin.json")).ok()?;
@@ -370,7 +382,10 @@ fn read_agent_plugin(
 		tracing::warn!(path = %real.display(), "ignored unsupported Agent Plugin MCP schema");
 		return None;
 	}
-	let data = data_root.join(manifest.name.as_str());
+	let (id, data) = match installed {
+		Some(id) => (id.clone(), data_root.join(id.dir_name())),
+		None => (PluginId::from(manifest.name.clone()), data_root.join(manifest.name.as_str())),
+	};
 	let base = real
 		.parent()
 		.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -392,11 +407,12 @@ fn read_agent_plugin(
 			if normalized.is_none() {
 				tracing::warn!(path = %real.display(), server = %name, "ignored malformed foreign MCP declaration");
 			}
+			let name = if installed.is_some() { sf!("{id}:{name}") } else { name };
 			Some((name, normalized?))
 		})
 		.collect();
 	Some(AgentPluginMcp {
-		name: manifest.name,
+		id,
 		version: manifest.version.unwrap_or_default(),
 		root,
 		path: real,
@@ -406,7 +422,7 @@ fn read_agent_plugin(
 }
 
 /// One Agent Plugins package's servers. A stdio server whose launch the
-/// operator has not approved under the package's manifest name
+/// operator has not approved under the package's identity
 /// ([`CommandApprovals::admit`]) is left out, so it never starts.
 fn push_agent_plugin(
 	out: &mut Vec<ConfigSource>,
@@ -416,7 +432,7 @@ fn push_agent_plugin(
 	let mut file = McpConfigFile::default();
 	for (name, server) in plugin.servers {
 		if let Some(launch) = plugin_mcp_launch(&name, &server, &plugin.root)
-			&& let Err(blocked) = approvals.admit(&plugin.name, &plugin.version, launch)
+			&& let Err(blocked) = approvals.admit(&plugin.id, &plugin.version, launch)
 		{
 			tracing::warn!(
 				error = &blocked as &(dyn std::error::Error + 'static),
@@ -443,7 +459,7 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 				.iter()
 				.filter_map(|(name, server)| plugin_mcp_launch(name, server, &plugin.root))
 				.collect(),
-			plugin:   plugin.name,
+			plugin:   plugin.id,
 			version:  plugin.version,
 			root:     plugin.root,
 			kind:     plugin.kind,
@@ -452,7 +468,9 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 }
 
 /// Installed Claude-layout marketplace plugins: each `.mcp.json` or manifest
-/// `mcpServers` declaration, servers namespaced `<plugin>:<server>` and
+/// `mcpServers` declaration, servers namespaced by the plugin's registry id
+/// (`<name>@<marketplace>:<server>`, so two marketplaces shipping the same
+/// plugin never collide) and
 /// `${CLAUDE_PLUGIN_ROOT}` expanded to the plugin root. A stdio server whose
 /// launch the operator has not approved
 /// ([`ClaudePlugin::admit_launch`]) is left out, so it never starts.
@@ -563,7 +581,7 @@ fn plugin_mcp_declarations(plugin: &ClaudePlugin) -> Vec<(PathBuf, Vec<(Str, Mcp
 				if normalized.is_none() {
 					tracing::warn!(path = %path.display(), server = %name, "ignored malformed foreign MCP declaration");
 				}
-				Some((sf!("{}:{name}", plugin.name), normalized?))
+				Some((sf!("{}:{name}", plugin.id), normalized?))
 			})
 			.collect();
 		declarations.push((path, servers));
@@ -891,7 +909,7 @@ fn strip_json_comments(source: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::mcp::McpSettings;
+	use crate::mcp::{AgentPluginOrigin, AgentPluginRoot, McpSettings};
 
 	fn write(path: &Path, body: &str) {
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -948,8 +966,10 @@ mod tests {
 		write(&outside, r#"{"mcpServers":{"escaped":{"command":"bad"}}}"#);
 		symlink(&outside, escaped.join("mcp.json")).unwrap();
 
-		let paths = McpConfigPaths::new(&home.join(".o2"), &project)
-			.with_agent_plugin_roots(vec![plugin.clone(), escaped]);
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project).with_agent_plugin_roots(vec![
+			AgentPluginRoot::explicit(plugin.clone()),
+			AgentPluginRoot::explicit(escaped),
+		]);
 		let paths = paths
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
@@ -1015,7 +1035,7 @@ mod tests {
 		let explicit = temp.path().join("explicit");
 		agent_plugin(&explicit, "explicit", r#"{"tool":{"command":"./tool"}}"#);
 		let paths = McpConfigPaths::new(&home.join(".o2"), &project)
-			.with_agent_plugin_roots(vec![explicit.clone()]);
+			.with_agent_plugin_roots(vec![AgentPluginRoot::explicit(explicit.clone())]);
 
 		let packages = crate::plugin_commands::agent_plugin_launches(&paths);
 		assert_eq!(
@@ -1059,22 +1079,28 @@ mod tests {
 			"{}",
 			blocked[0]
 		);
-		// With project configuration disabled, discovery loads neither the
-		// project's package nor an explicit root (both project-scoped), and
-		// the report names neither.
+		// With project configuration disabled, discovery drops the project's
+		// package and the report no longer names it; the root the invocation
+		// named is the user's own choice and still loads and is reported.
 		let project_disabled = McpSettings { enable_project_config: false };
-		assert!(
+		assert_eq!(
 			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &project_disabled)
-				.is_empty()
+				.iter()
+				.map(|blocked| (blocked.plugin.as_str(), blocked.server.as_str()))
+				.collect::<Vec<_>>(),
+			[("explicit", "tool")]
 		);
 		let all_approved = paths
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
-		assert!(
+		assert_eq!(
 			super::super::config::resolve_sources(&sources(&all_approved), false)
 				.servers
-				.is_empty(),
-			"the loader skips them too"
+				.keys()
+				.map(Str::as_str)
+				.collect::<Vec<_>>(),
+			["tool"],
+			"the loader agrees with the report"
 		);
 		let resolved = super::super::config::resolve_sources(&sources(&paths), true);
 		assert!(!resolved.servers.contains_key("local"), "an unapproved server loaded");
@@ -1084,8 +1110,8 @@ mod tests {
 		// One approval admits exactly its server; approvals never cross
 		// package names.
 		let approved = paths.clone().with_command_approvals(CommandApprovals::new([
-			(Str::new_static("portable"), portable.command_digest(local)),
-			(Str::new_static("explicit"), portable.command_digest(&portable.launches[1])),
+			(PluginId::new_static("portable"), portable.command_digest(local)),
+			(PluginId::new_static("explicit"), portable.command_digest(&portable.launches[1])),
 		]));
 		let resolved = super::super::config::resolve_sources(&sources(&approved), true);
 		assert!(resolved.servers.contains_key("local"));
@@ -1110,6 +1136,136 @@ mod tests {
 		assert_eq!(
 			crate::plugin_commands::blocked_agent_plugin_launches(&all, &McpSettings::default()).len(),
 			1
+		);
+	}
+
+	/// Only a package that comes from the project is project-scoped: with
+	/// project MCP configuration disabled, a user install and a package in the
+	/// user plugin directories still load and are still reported, while a
+	/// project install and a package in the project's plugin directory do
+	/// neither.
+	#[test]
+	fn agent_plugin_scope_follows_where_the_package_came_from() {
+		use omp_ext::claude_plugin::PluginScope;
+
+		let temp = tempfile::tempdir().unwrap();
+		let home = temp.path().join("home");
+		let project = temp.path().join("project");
+		let user_install = temp.path().join("cache/user-install");
+		let project_install = temp.path().join("cache/project-install");
+		agent_plugin(&user_install, "user-install", r#"{"a":{"command":"./a"}}"#);
+		agent_plugin(&project_install, "project-install", r#"{"b":{"command":"./b"}}"#);
+		agent_plugin(&project.join(".agents/plugins/dir"), "dir", r#"{"c":{"command":"./c"}}"#);
+		agent_plugin(
+			&home.join(".o2/agent/plugins/personal"),
+			"personal",
+			r#"{"d":{"command":"./d"}}"#,
+		);
+		let installed = |root: PathBuf, name: &str, scope| AgentPluginRoot {
+			root,
+			origin: AgentPluginOrigin::Installed { id: PluginId::installed(name, "m"), scope },
+		};
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project).with_agent_plugin_roots(vec![
+			installed(user_install, "user-install", PluginScope::User),
+			installed(project_install, "project-install", PluginScope::Project),
+		]);
+		assert_eq!(
+			crate::plugin_commands::agent_plugin_launches(&paths)
+				.iter()
+				.map(|package| (package.plugin.as_str(), package.kind))
+				.collect::<Vec<_>>(),
+			[
+				("dir", ConfigSourceKind::AgentPluginProject),
+				("personal", ConfigSourceKind::AgentPluginUser),
+				("user-install@m", ConfigSourceKind::AgentPluginUser),
+				("project-install@m", ConfigSourceKind::AgentPluginProject),
+			]
+		);
+		let reported = |enable_project_config: bool| {
+			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &McpSettings {
+				enable_project_config,
+			})
+			.into_iter()
+			.map(|blocked| blocked.server)
+			.collect::<Vec<_>>()
+		};
+		assert_eq!(reported(true), ["c", "d", "user-install@m:a", "project-install@m:b"]);
+		assert_eq!(reported(false), ["d", "user-install@m:a"], "only project packages drop out");
+		let approved = paths
+			.clone()
+			.with_command_approvals(approve_agent_plugins(&paths));
+		let loaded = |enable_project_config: bool| {
+			super::super::config::resolve_sources(&sources(&approved), enable_project_config)
+				.servers
+				.keys()
+				.cloned()
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(loaded(true), ["c", "d", "project-install@m:b", "user-install@m:a"]);
+		assert_eq!(loaded(false), ["d", "user-install@m:a"], "the loader agrees with the report");
+	}
+
+	/// A package installed from a marketplace is identified as
+	/// `name@marketplace`: two marketplaces shipping the same package keep
+	/// their approvals, data directories, and servers apart.
+	#[test]
+	fn two_marketplaces_shipping_one_package_never_collide() {
+		use omp_ext::claude_plugin::PluginScope;
+
+		let temp = tempfile::tempdir().unwrap();
+		let home = temp.path().join("home");
+		let project = temp.path().join("project");
+		let official = temp.path().join("cache/official/docs");
+		let mirror = temp.path().join("cache/mirror/docs");
+		agent_plugin(&official, "docs", r#"{"search":{"command":"./search"}}"#);
+		agent_plugin(&mirror, "docs", r#"{"search":{"command":"./search"}}"#);
+		let installed = |root: &Path, marketplace: &str| AgentPluginRoot {
+			root:   root.to_path_buf(),
+			origin: AgentPluginOrigin::Installed {
+				id:    PluginId::installed("docs", marketplace),
+				scope: PluginScope::User,
+			},
+		};
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project).with_agent_plugin_roots(vec![
+			installed(&official, "official"),
+			installed(&mirror, "mirror"),
+		]);
+		let packages = crate::plugin_commands::agent_plugin_launches(&paths);
+		assert_eq!(
+			packages
+				.iter()
+				.map(|package| package.plugin.as_str())
+				.collect::<Vec<_>>(),
+			["docs@official", "docs@mirror"]
+		);
+		assert_ne!(
+			packages[0].command_digest(&packages[0].launches[0]),
+			packages[1].command_digest(&packages[1].launches[0]),
+			"approving one marketplace's package never approves the other's"
+		);
+		// Approving the official package alone loads its server alone.
+		let approved = paths.with_command_approvals(CommandApprovals::new([(
+			packages[0].plugin.clone(),
+			packages[0].command_digest(&packages[0].launches[0]),
+		)]));
+		let resolved = super::super::config::resolve_sources(&sources(&approved), true);
+		assert_eq!(resolved.servers.keys().map(Str::as_str).collect::<Vec<_>>(), [
+			"docs@official:search"
+		]);
+		assert_eq!(
+			resolved.servers["docs@official:search"].config.env["PLUGIN_DATA"],
+			Str::new(
+				home
+					.join(".o2/agent/plugin-data/docs-official")
+					.to_string_lossy()
+			)
+		);
+		assert_eq!(
+			crate::plugin_commands::blocked_agent_plugin_launches(&approved, &McpSettings::default())
+				.iter()
+				.map(|blocked| (blocked.plugin.as_str(), blocked.server.as_str()))
+				.collect::<Vec<_>>(),
+			[("docs@mirror", "docs@mirror:search")]
 		);
 	}
 
@@ -1161,7 +1317,7 @@ mod tests {
 				.iter()
 				.map(|launch| launch.server.as_str())
 				.collect::<Vec<_>>(),
-			["tools:db", "tools:ok"],
+			["tools@market:db", "tools@market:ok"],
 			"only stdio servers launch a process"
 		);
 		let entry = &mut plugins.plugins[0];
@@ -1169,16 +1325,19 @@ mod tests {
 		let blocked =
 			crate::plugin_commands::blocked_launches(&plugins.plugins, &McpSettings::default());
 		assert_eq!(blocked.len(), 1);
-		assert_eq!(blocked[0].server, "tools:db");
+		assert_eq!(blocked[0].server, "tools@market:db");
 
 		let discovered = sources(
 			&McpConfigPaths::new(&home.join(".o2"), &project)
 				.with_claude_plugins(plugins.plugins.into()),
 		);
 		let resolved = super::super::config::resolve_sources(&discovered, true);
-		assert!(!resolved.servers.contains_key("tools:db"), "an unapproved server loaded");
-		assert!(resolved.servers.contains_key("tools:ok"));
-		assert!(resolved.servers.contains_key("tools:remote"), "a remote server needs no approval");
+		assert!(!resolved.servers.contains_key("tools@market:db"), "an unapproved server loaded");
+		assert!(resolved.servers.contains_key("tools@market:ok"));
+		assert!(
+			resolved.servers.contains_key("tools@market:remote"),
+			"a remote server needs no approval"
+		);
 	}
 
 	#[test]
@@ -1218,7 +1377,7 @@ mod tests {
 
 		let files = fs::canonicalize(&files).unwrap();
 		let inline = fs::canonicalize(&inline).unwrap();
-		let db = &resolved.servers["files:db"];
+		let db = &resolved.servers["files@market:db"];
 		assert_eq!(db.source_kind, ConfigSourceKind::ClaudePluginUser);
 		assert_eq!(
 			db.config.command.as_deref(),
@@ -1230,13 +1389,13 @@ mod tests {
 		]);
 		assert_eq!(db.config.env["DB_HOME"], Str::new(files.join("state").to_string_lossy()));
 		assert_eq!(db.config.env["CLAUDE_PLUGIN_ROOT"], Str::new(files.to_string_lossy()));
-		let api = &resolved.servers["inline:api"];
+		let api = &resolved.servers["inline@market:api"];
 		assert_eq!(
 			api.config.command.as_deref(),
 			Some(inline.join("server").to_string_lossy().as_ref())
 		);
 		assert_eq!(api.config.args, [Str::new(inline.to_string_lossy())]);
-		assert!(!resolved.servers.contains_key("quiet:hush"), "a disabled plugin never loads");
+		assert!(!resolved.servers.contains_key("quiet@market:hush"), "a disabled plugin never loads");
 		assert!(!resolved.servers.keys().any(|name| name.contains("${")));
 	}
 

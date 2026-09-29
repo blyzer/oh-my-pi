@@ -4,8 +4,11 @@
 //! catalog update, upgrade) run on the application runtime and settle a
 //! [`Pending`] line the panel polls.
 
+use std::fmt::Write as _;
+
 use omp_chat::overlays::services::{
-	MarketplaceSource, Pending, PluginRow, PluginsReport, ServiceError, ServiceResult,
+	BlockedCommandRow, MarketplaceSource, Pending, PluginRow, PluginsReport, ServiceError,
+	ServiceResult,
 };
 use omp_core::{Str, sf};
 
@@ -82,11 +85,11 @@ pub(super) fn report(state: &ServiceState) -> ServiceResult<PluginsReport> {
 		.into_iter()
 		.filter(|plugin| plugin.source == omp_ext::claude_plugin::PluginSource::ClaudeCode)
 	{
-		if plugins.iter().any(|row| row.id == plugin.id) {
+		if plugins.iter().any(|row| row.id == plugin.id.as_str()) {
 			continue;
 		}
 		plugins.push(PluginRow {
-			id:          plugin.id,
+			id:          plugin.id.into(),
 			name:        plugin.name,
 			version:     Some(plugin.version),
 			description: Str::default(),
@@ -227,4 +230,81 @@ pub(super) fn upgrade(state: &ServiceState, spec: Option<&str>) -> ServiceResult
 		}
 		Ok(Str::new(lines))
 	}))
+}
+
+/// `/plugins approve`: every plugin command a session in this project, with
+/// this invocation's plugin roots, would not start, read fresh from the
+/// grant file, so a command approved since drops out.
+pub(super) fn blocked_commands(state: &ServiceState) -> ServiceResult<Vec<BlockedCommandRow>> {
+	let blocked = omp_driver::plugin_commands::session_blocked_launches(
+		&state.data_dir,
+		&state.project,
+		&state.plugin_dirs,
+		&omp_envd::mcp::McpSettings::from_con(&state.con),
+	)
+	.map_err(ServiceError::failed)?;
+	Ok(blocked
+		.into_iter()
+		.map(|blocked| BlockedCommandRow {
+			kind:       Str::new_static(blocked.kind.into()),
+			server:     blocked.server.clone(),
+			command:    sf!("{}", blocked.command_line()),
+			digest:     blocked.digest,
+			unreadable: blocked
+				.unreadable
+				.as_ref()
+				.map(|unreadable| Str::new(unreadable.path.to_string_lossy())),
+			plugin:     blocked.plugin.into(),
+		})
+		.collect())
+}
+
+/// `/plugins approve <plugin> <digest>|all`: records the operator's approval
+/// through the same admission `omp ext trust --approve-command(s)` uses
+/// ([`omp_driver::plugin_commands::approve_commands`]): the same digest, the
+/// same grant file, and the same refusal of a command naming an unreadable
+/// plugin file. The running session loaded its plugins at launch, so an
+/// approved command starts after `/restart`.
+pub(super) fn approve_commands(
+	state: &ServiceState,
+	plugin: &str,
+	digest: Option<omp_core::Hash32>,
+) -> ServiceResult<Str> {
+	use omp_driver::plugin_commands::{CommandSelection, approve_commands, resolve_command_sets};
+	use omp_ext::plugin_command::PluginId;
+
+	let plugin = PluginId::from_ref(plugin);
+	let (sets, _) =
+		resolve_command_sets(&state.data_dir, &state.project, &state.plugin_dirs, plugin)
+			.map_err(ServiceError::failed)?;
+	let selection = match &digest {
+		Some(digest) => CommandSelection::Digests(std::slice::from_ref(digest)),
+		None => CommandSelection::All,
+	};
+	let outcome =
+		approve_commands(&state.data_dir, &sets, plugin, selection, Str::new_static("interactive"))
+			.map_err(ServiceError::failed)?;
+	let mut line = String::new();
+	for (id, launch) in &outcome.approved {
+		let _ = write!(line, "Approved {id} {} `{}`. ", launch.kind, launch.server);
+	}
+	for (id, launch) in &outcome.unreadable {
+		if let Some(unreadable) = launch.files.unreadable() {
+			let _ = write!(
+				line,
+				"Not approved {id} {} `{}`: the plugin file `{}` it names cannot be read. ",
+				launch.kind,
+				launch.server,
+				unreadable.path.display()
+			);
+		}
+	}
+	if outcome.approved.is_empty() {
+		if outcome.unreadable.is_empty() {
+			let _ = write!(line, "{plugin} launches no commands.");
+		}
+	} else {
+		line.push_str("Run /restart to load the approved commands.");
+	}
+	Ok(Str::new(line.trim_end()))
 }

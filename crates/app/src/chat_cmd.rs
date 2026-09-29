@@ -629,6 +629,33 @@ impl Launch {
 			)
 	}
 
+	/// Said once after the launch names its blocked plugin commands: how to
+	/// load a plugin from a local directory for one session instead of
+	/// installing it. `None` when nothing is blocked.
+	pub(crate) fn plugin_dir_hint(&self) -> Option<&'static str> {
+		(!self.blocked_plugin_commands.is_empty()).then_some(PLUGIN_DIR_HINT)
+	}
+
+	/// Said last in chat after the launch names its blocked plugin commands,
+	/// so it is the notice that stays visible: how many did not run and how
+	/// to approve them without leaving the session (`/plugins approve`, which
+	/// records the same approval `omp ext trust` would; the session loaded
+	/// its plugins at launch, so they start after `/restart`). `None` when
+	/// nothing is blocked.
+	pub(crate) fn chat_approval_hint(&self) -> Option<String> {
+		match self.blocked_plugin_commands.len() {
+			0 => None,
+			1 => Some(
+				"1 plugin command did not run: approve it with `/plugins approve`, then `/restart`"
+					.to_owned(),
+			),
+			count => Some(format!(
+				"{count} plugin commands did not run: approve them with `/plugins approve`, then \
+				 `/restart`"
+			)),
+		}
+	}
+
 	/// A leading `/skill:<name>` positional message expanded through the same
 	/// discovered skill snapshot as the interactive console.
 	pub(crate) fn initial_skill_prompt(&self) -> Option<omp_journal::data::SkillPrompt> {
@@ -964,6 +991,15 @@ fn launch_notice(ctx: &omp_con::Ctx, text: String) {
 	}
 }
 
+/// How to load a plugin from a local directory for development or one-off
+/// use: `--plugin-dir` loads an Agent Plugins package (or a native extension
+/// root) for one invocation, and its commands are approved like an installed
+/// plugin's.
+const PLUGIN_DIR_HINT: &str =
+	"To load a plugin from a local directory for one session instead (development or one-off use), \
+	 start omp with `--plugin-dir <path>` naming an Agent Plugins package; its commands are \
+	 approved the same way (`omp ext trust <name> --plugin-dir <path> --approve-commands`)";
+
 /// Session-scoped launch overrides, applied after the journal opened.
 fn apply_launch_session(
 	ctx: &omp_con::Ctx,
@@ -1080,6 +1116,12 @@ pub(crate) async fn run(
 	// named once per plugin and event.
 	for warning in launch.plugin_warnings() {
 		launch_notice(ctx, warning.to_string());
+	}
+	if let Some(hint) = launch.plugin_dir_hint() {
+		launch_notice(ctx, hint.to_owned());
+	}
+	if let Some(hint) = launch.chat_approval_hint() {
+		launch_notice(ctx, hint);
 	}
 	// Composing the kernel refreshed runtime model discovery, after the
 	// launch snapshot was read, and settled the remembered default against
@@ -1213,6 +1255,7 @@ pub(crate) async fn run(
 			Arc::new(crate::chat_services::AppServices::new(crate::chat_services::ServiceState {
 				data_dir: data_dir.clone(),
 				project: project.clone(),
+				plugin_dirs: launch.options.extensions.native_roots.clone(),
 				sessions_dir: sessions_dir
 					.clone()
 					.unwrap_or_else(|| state_dir.join("sessions")),
@@ -1666,6 +1709,22 @@ mod tests {
 				&& warnings[1].contains("is not supported by omp; this hook will not run"),
 			"{}",
 			warnings[1]
+		);
+		// Once, after them: how to load a plugin from a local directory.
+		let hint = launch
+			.plugin_dir_hint()
+			.expect("a blocked command names the local-directory route");
+		assert!(hint.contains("`--plugin-dir <path>`"), "{hint}");
+		assert!(hint.contains("--approve-commands"), "{hint}");
+		// Chat also offers approving them in place.
+		let approve = launch
+			.chat_approval_hint()
+			.expect("chat offers in-place approval");
+		// (The host's own Claude Code installs may add blocked commands.)
+		assert!(approve.contains("did not run: approve"), "{approve}");
+		assert!(
+			approve.contains("`/plugins approve`") && approve.contains("`/restart`"),
+			"{approve}"
 		);
 	}
 

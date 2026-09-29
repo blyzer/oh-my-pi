@@ -70,7 +70,9 @@ use strum::{Display, IntoStaticStr};
 use crate::{
 	ExtensionError,
 	claude_hooks::{ClaudeHookEvent, HookHandlerGap, PluginHook},
-	plugin_command::{CommandApprovals, PluginCommandBlocked, PluginLaunch, plugin_command_digest},
+	plugin_command::{
+		CommandApprovals, PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest,
+	},
 	trust::{GrantsFile, grants_path},
 };
 
@@ -538,9 +540,10 @@ pub enum PluginDiagnostic {
 /// One enabled, resolved plugin install.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaudePlugin {
-	/// Registry id, `name@marketplace`.
-	pub id:                Str,
-	/// Plugin name (the id before `@`); namespaces commands and MCP servers.
+	/// Registry id, `name@marketplace`: its approval identity, and the
+	/// namespace of its MCP servers and hooks.
+	pub id:                PluginId,
+	/// Plugin name (the id before `@`); namespaces its commands.
 	pub name:              Str,
 	/// Marketplace name (the id after `@`).
 	pub marketplace:       Str,
@@ -652,17 +655,9 @@ pub fn expand_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
 /// own. Never Claude Code's directory, which omp does not write.
 #[must_use]
 pub fn plugin_data_dir(data_dir: &Path, id: &str) -> PathBuf {
-	let name = id
-		.chars()
-		.map(|c| {
-			if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-				c
-			} else {
-				'-'
-			}
-		})
-		.collect::<String>();
-	user_plugins_dir(data_dir).join("data").join(name)
+	user_plugins_dir(data_dir)
+		.join("data")
+		.join(PluginId::from_ref(id).dir_name())
 }
 
 /// Resolves a plugin's path-like relative command (`./bin/server`,
@@ -974,7 +969,7 @@ impl ClaudePlugins {
 				continue;
 			};
 			self.plugins.push(ClaudePlugin {
-				id: id.clone(),
+				id: PluginId::from(id.clone()),
 				name: name.clone(),
 				marketplace: marketplace.clone(),
 				version: candidate.version,
@@ -1493,9 +1488,9 @@ mod tests {
 			)
 		};
 		let approved = launch(&["--stdio"]);
-		let digest = plugin_command_digest("one@m", "1.0.0", &approved);
+		let digest = plugin_command_digest(PluginId::from_ref("one@m"), "1.0.0", &approved);
 		crate::trust::GrantsFile::persist_plugin_command(&grants_path(&data), PluginCommandGrant {
-			plugin: Str::new_static("one@m"),
+			plugin: PluginId::new_static("one@m"),
 			version: Str::new_static("1.0.0"),
 			kind: approved.kind,
 			server: approved.server.clone(),
