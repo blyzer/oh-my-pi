@@ -1150,12 +1150,19 @@ impl RpcClient {
 		self.request("abort_retry", &()).await
 	}
 
-	/// Runs a headless shell command.
+	/// Runs a command in the session's environment shell — the same
+	/// in-process interpreter, admission policy, and central output bound as
+	/// the interactive `!` prefix. Settles with `stdout`, `stderr`, `output`
+	/// (both channels in order), `exitCode`, `cancelled`, `truncated`, and
+	/// `durationMs`; a truncated result also carries `artifactId`, the
+	/// `artifact://` address of the complete output. A refused command
+	/// answers with error code `policy_denied`.
 	pub async fn bash(&self, command: &str) -> Result<Value, ClientError> {
 		self.request("bash", &json!({"command":command})).await
 	}
 
-	/// Aborts the active headless shell command.
+	/// Interrupts the running [`Self::bash`] command, which then settles with
+	/// `cancelled: true`; a model turn is not affected.
 	pub async fn abort_bash(&self) -> Result<Value, ClientError> {
 		self.request("abort_bash", &()).await
 	}
@@ -1208,7 +1215,9 @@ impl RpcClient {
 			.await
 	}
 
-	/// Hands session context to a new session.
+	/// Compacts the session in place under the handoff method (chat's
+	/// `/handoff`). Settles with `handedOff` and, when it handed off, the
+	/// journaled handoff `document`.
 	pub async fn handoff(&self, custom_instructions: Option<String>) -> Result<Value, ClientError> {
 		self
 			.request("handoff", &json!({"customInstructions":custom_instructions}))
