@@ -5,7 +5,7 @@
 
 use std::{fmt::Write as _, path::PathBuf, time::Duration};
 
-use omp_core::{Str, StrMut};
+use omp_core::{Str, StrMut, sf};
 use omp_dom::{Dom, Handle, KnownTag, PropId, PropKey, Tag, Value};
 
 use super::{
@@ -228,6 +228,7 @@ impl Presenter {
 			},
 			CommandAction::Session(op) => self.session(op)?,
 			CommandAction::Jobs => self.jobs()?,
+			CommandAction::Notices => self.notices()?,
 			CommandAction::Todo(op) => self.todo(op)?,
 			CommandAction::Btw { question } => {
 				let context = conversation_context(&self.replica);
@@ -725,6 +726,17 @@ impl Presenter {
 		};
 		self.act(HostAction::Open(PanelOpener::new(move |cx| {
 			Ok(Box::new(ReportPanel::new("jobs", "Background Jobs", body.clone(), cx.ui)) as Box<_>)
+		})))
+	}
+
+	/// Opens the notice history as a report: the same lines the status row
+	/// showed one at a time, oldest first.
+	fn notices(&mut self) -> Result<Routed, HostError> {
+		let log = self.overlays.notice_log();
+		let title = sf!("Notices ({})", log.entries().len());
+		let body = log.report();
+		self.act(HostAction::Open(PanelOpener::new(move |cx| {
+			Ok(Box::new(ReportPanel::new("notices", title.clone(), body.clone(), cx.ui)) as Box<_>)
 		})))
 	}
 

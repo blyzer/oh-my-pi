@@ -25,6 +25,7 @@ pub const PALETTE: &[PaletteEntry] = &[
 	PaletteEntry { name: "rename", icon: Icon::Tag },
 	PaletteEntry { name: "session", icon: Icon::Session },
 	PaletteEntry { name: "jobs", icon: Icon::Task },
+	PaletteEntry { name: "notices", icon: Icon::Bell },
 	PaletteEntry { name: "todo", icon: Icon::Todo },
 	PaletteEntry { name: "btw", icon: Icon::Question },
 	PaletteEntry { name: "tan", icon: Icon::Rocket },
@@ -196,6 +197,10 @@ omp_con::cmd! {
 
 	/// Lists running subagents and detached tool jobs.
 	jobs() = |ctx, _args| post(ctx, CommandAction::Jobs);
+
+	/// Lists the status notices chat showed, including ones a burst stacked
+	/// under the notice row (`+N more`).
+	notices() = |ctx, _args| post(ctx, CommandAction::Notices);
 
 	/// Edits the checklist: `append`, `start`, `done`, `drop`, `rm`, `copy`, `export`, `import`.
 	todo(?op: Str, ?args: Str) = |ctx, args| {

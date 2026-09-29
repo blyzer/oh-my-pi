@@ -2113,3 +2113,57 @@ fn session_reset_preserves_the_draft_and_staged_image_chip() {
 	);
 	assert!(commands.try_recv().is_err(), "resetting never submits the draft");
 }
+
+/// A burst leaves the last notice in the row with a `+N more (/notices)`
+/// label that survives truncation, `/notices` lists every one oldest first,
+/// and the next key empties the row without losing the history.
+#[test]
+fn a_notice_burst_counts_under_the_row_and_notices_lists_every_one() {
+	let (mut host, _commands) = bound_host(Vec::new());
+	assert!(host.status_frame().is_none());
+	host.console("no_such_command").expect("first notice");
+	assert!(
+		!text_of(&host.status_frame().expect("status row")).contains("more"),
+		"a lone notice hides nothing"
+	);
+	host.console("cl_model_select").expect("second notice");
+	host.console("also_missing").expect("third notice");
+	assert!(
+		host
+			.notice()
+			.is_some_and(|text| text.contains("also_missing"))
+	);
+	let row = text_of(&host.status_frame().expect("status row"));
+	assert!(row.contains("also_missing"), "{row}");
+	assert!(row.contains("+2 more (/notices)"), "{row}");
+
+	// Narrow terminals truncate the text, never the label.
+	host.resize(Size::new(28, 24));
+	let narrow = text_of(&host.status_frame().expect("status row"));
+	assert!(narrow.contains("+2 more (/notices)"), "{narrow}");
+	host.resize(Size::new(100, 30));
+
+	host.console("notices").expect("open the log");
+	assert_eq!(host.overlay_id(), Some("notices"));
+	let panel = text_of(&host.picker_frame().expect("log panel"));
+	let position = |needle: &str| {
+		panel
+			.find(needle)
+			.unwrap_or_else(|| panic!("`{needle}` missing:\n{panel}"))
+	};
+	assert!(panel.contains("Notices (3)"), "{panel}");
+	assert!(
+		position("no_such_command") < position("No models are available")
+			&& position("No models are available") < position("also_missing"),
+		"oldest first:\n{panel}"
+	);
+	host.key(Key::Esc).expect("close the log");
+	assert!(!host.overlay_open());
+
+	// Any key empties the row; the log still lists everything, and the
+	// panel opening did not add a notice of its own.
+	host.key(Key::Char('x')).expect("key");
+	assert!(host.notice().is_none() && host.status_frame().is_none());
+	host.console("notices").expect("reopen");
+	assert!(text_of(&host.picker_frame().expect("log panel")).contains("Notices (3)"));
+}

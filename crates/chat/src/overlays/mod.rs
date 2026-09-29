@@ -45,6 +45,8 @@ pub mod login;
 pub mod models;
 /// `/move` directory autocomplete editor and creation confirmation.
 pub mod move_panel;
+/// The notice row's history behind `/notices`.
+pub mod notices;
 /// Large-paste menu (wrapped block, local file, inline chip).
 pub mod paste_menu;
 /// `/pause` full-screen hold screen.
@@ -81,6 +83,7 @@ pub mod tree;
 pub mod usage;
 
 pub use models::{ModelPicker, PickerRole, RoleMark};
+pub use notices::NoticeLog;
 pub use services::{NoServices, Services};
 
 /// Where the host composites a [`Panel`] frame.
@@ -887,11 +890,12 @@ impl Overlay {
 	}
 }
 
-/// Retained local overlay stack plus the one transient status notice.
+/// Retained local overlay stack plus the transient status notice and the
+/// history behind it.
 #[derive(Default)]
 pub struct Overlays {
-	stack:  Vec<Overlay>,
-	notice: Option<Str>,
+	stack:   Vec<Overlay>,
+	notices: NoticeLog,
 }
 
 impl Overlays {
@@ -908,9 +912,11 @@ impl Overlays {
 	}
 
 	/// Shows a transient status line, cleared by the next
-	/// key; it never displaces an interactive overlay.
+	/// key; it never displaces an interactive overlay. A notice posted while
+	/// another is showing replaces it in the row, which counts it as `+N
+	/// more`; every notice stays listed by `/notices`.
 	pub fn notify(&mut self, text: impl Into<Str>) {
-		self.notice = Some(text.into());
+		self.notices.post(text.into());
 	}
 
 	/// Delivers a controller or DOM fact to open panels from newest to
@@ -1028,7 +1034,7 @@ impl Overlays {
 
 	/// Drops the transient notice, keeping every interactive overlay.
 	pub fn clear_notice(&mut self) {
-		self.notice = None;
+		self.notices.clear_visible();
 	}
 
 	/// Returns the topmost overlay.
@@ -1068,7 +1074,20 @@ impl Overlays {
 	/// Returns the visible notice text.
 	#[must_use]
 	pub fn notice(&self) -> Option<&str> {
-		self.notice.as_deref()
+		self.notices.visible().map(Str::as_str)
+	}
+
+	/// The notice row's `+N more (/notices)` label, when notices stacked
+	/// under the visible one.
+	#[must_use]
+	pub const fn notice_more(&self) -> Option<&Str> {
+		self.notices.more()
+	}
+
+	/// Every retained notice, for `/notices`.
+	#[must_use]
+	pub const fn notice_log(&self) -> &NoticeLog {
+		&self.notices
 	}
 }
 

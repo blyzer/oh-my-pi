@@ -1378,8 +1378,11 @@ fn overlay_box<'s>(screen: &'s str, title: &str, cols: usize) -> Vec<&'s str> {
 		.iter()
 		.position(|row| row.contains(title))
 		.expect("overlay title row");
-	let corner = rows[top]
-		.find('╭')
+	// The corner nearest the title: a centered panel may share its top row
+	// with the welcome box's own border.
+	let title_at = rows[top].find(title).expect("title on its row");
+	let corner = rows[top][..title_at]
+		.rfind('╭')
 		.unwrap_or_else(|| panic!("overlay top border is torn: {:?}\n{screen}", rows[top]));
 	let left = xutf::width_str(&rows[top][..corner]);
 	let right = xutf::width_str(&rows[top][..rows[top].rfind('╮').expect("top-right corner")]);
@@ -1510,6 +1513,101 @@ async fn chat_tui_approves_blocked_plugin_commands_on_a_real_pty() {
 			)
 	});
 	assert_surface(&ready, "blocked launch");
+
+	// The summary is one of several launch notices: the row counts the ones
+	// stacked under it, and `/notices` lists each blocked command's warning
+	// and the `--plugin-dir` hint that the row could not show.
+	let stacked = ready
+		.text
+		.split_once(" more (/notices)")
+		.and_then(|(head, _)| {
+			head
+				.split_whitespace()
+				.next_back()?
+				.strip_prefix('+')?
+				.parse::<usize>()
+				.ok()
+		})
+		.unwrap_or_else(|| panic!("the launch row omits its `+N more (/notices)`:\n{}", ready.text));
+	// Four blocked commands plus the `--plugin-dir` hint, under the summary.
+	assert!(stacked >= 5, "only {stacked} notices stacked under the summary:\n{}", ready.text);
+	let title = format!("Notices ({})", stacked + 1);
+	debug.keys("'/notices' enter");
+	let listed_notices = wait_snapshot(&mut debug, &raw_capture, "notice log open", |snapshot| {
+		snapshot.text.contains(&title)
+	});
+	let log = overlay_box(&listed_notices.text, &title, 120);
+	assert!(
+		!listed_notices.text.contains("more (/notices)"),
+		"the key that ran /notices left the row up:\n{}",
+		listed_notices.text
+	);
+	// Markdown wraps a long notice across rows: compare the reading text.
+	let reading = |log: &[&str]| {
+		log.iter()
+			.map(|row| row.trim_matches(|ch: char| ch == '│' || ch.is_whitespace()))
+			.collect::<Vec<_>>()
+			.join(" ")
+	};
+	let launch_lines = [
+		"alpha@market:db",
+		"beta@market:search",
+		"omp ext trust",
+		"--plugin-dir <path>",
+		"4 plugin commands did not run",
+	];
+	let read = reading(&log);
+	for text in launch_lines {
+		assert!(read.contains(text), "the notice log omits {text:?}:\n{}", listed_notices.text);
+	}
+	assert!(
+		read.find("alpha@market:db") < read.find("4 plugin commands did not run"),
+		"oldest first, summary last:\n{}",
+		listed_notices.text
+	);
+
+	// A resize re-lays the log out at the new geometry, nothing lost.
+	process.resize(24, 72);
+	debug
+		.op("resize")
+		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
+	wait_info(&mut debug, "settled notice log resize", |info| {
+		info.get("rows").and_then(Value::as_u64) == Some(24)
+			&& info.get("cols").and_then(Value::as_u64) == Some(72)
+			&& info.get("overlay").and_then(Value::as_bool) == Some(true)
+	});
+	let resized_log =
+		wait_snapshot(&mut debug, &raw_capture, "notice log re-laid out", |snapshot| {
+			snapshot.text.contains(&title) && snapshot.text.contains("Esc close")
+		});
+	// The 24-row panel scrolls: its first notice is in view, intact, and
+	// paging down brings the last ones (the hint, the summary) into it.
+	let read = reading(&overlay_box(&resized_log.text, &title, 72));
+	assert!(
+		read.contains("alpha@market:db"),
+		"the resize lost the first notice:\n{}",
+		resized_log.text
+	);
+	debug.keys("pgdn pgdn pgdn pgdn pgdn pgdn");
+	let paged = wait_snapshot(&mut debug, &raw_capture, "notice log paged to its end", |snapshot| {
+		snapshot.text.contains("4 plugin commands did not run")
+	});
+	let read = reading(&overlay_box(&paged.text, &title, 72));
+	for text in ["--plugin-dir <path>", "4 plugin commands did not run"] {
+		assert!(read.contains(text), "the resized log lost {text:?}:\n{}", paged.text);
+	}
+	process.resize(48, 120);
+	debug
+		.op("resize")
+		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
+	wait_info(&mut debug, "settled notice log restore", |info| {
+		info.get("rows").and_then(Value::as_u64) == Some(48)
+			&& info.get("cols").and_then(Value::as_u64) == Some(120)
+	});
+	debug.keys("escape");
+	wait_snapshot(&mut debug, &raw_capture, "notice log closed", |snapshot| {
+		!snapshot.text.contains(&title) && snapshot.text.contains(COMPOSER_PROMPT)
+	});
 
 	// The selector lists exactly the blocked commands, cursor on the first,
 	// each command's executable and arguments visible, with the approval
