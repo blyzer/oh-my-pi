@@ -8,6 +8,7 @@ pub mod goal;
 pub mod loop_mode;
 pub mod plan;
 pub mod prewalk;
+pub mod snapcompact;
 pub mod todo_reminder;
 pub mod vibe;
 

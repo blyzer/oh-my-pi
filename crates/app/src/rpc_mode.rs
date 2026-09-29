@@ -1876,7 +1876,7 @@ where
 								} else {
 									let (kernel, session) = current.as_mut().expect("idle RPC owns session");
 									let focus = request.params.get("customInstructions").and_then(Value::as_str).map(Str::new);
-									match kernel.compact(session, focus, "manual").await {
+									match kernel.compact(session, focus, "manual", None).await {
 										Ok(compacted) => RpcResponse::success(
 											id,
 											command.as_str(),
