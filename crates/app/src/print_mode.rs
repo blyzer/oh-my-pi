@@ -27,7 +27,7 @@ use std::{
 use miette::{IntoDiagnostic as _, miette};
 use omp_agent::{
 	DispatchError, KernelError, KernelEvent, LifecycleHooks, RunControl, SessionShutdown,
-	ShutdownReason, TurnInput, TurnStop, Up,
+	SessionStart, ShutdownReason, TurnInput, TurnStop, Up,
 };
 use omp_catalog::{ModelKey, RouteId, snapshot::Catalog};
 use omp_core::{FastHashMap, Str, encoding::base64};
@@ -106,6 +106,12 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 			.await
 			.into_diagnostic()?;
 		stderr.flush().await.into_diagnostic()?;
+	}
+	if let Some(lifecycle) = &lifecycle {
+		lifecycle
+			.session_start(&SessionStart::launch(&session, &launch.project))
+			.await
+			.into_diagnostic()?;
 	}
 	// The catalog composition routed through, after discovery refreshed it.
 	let catalog = kernel
@@ -306,7 +312,7 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	}
 
 	session.record_exit(ExitCause::Normal).into_diagnostic()?;
-	end_session(lifecycle.as_ref(), SessionShutdown::new(&session, ShutdownReason::UserExit)).await;
+	end_session(lifecycle.as_ref(), SessionShutdown::new(&session, ShutdownReason::Completed)).await;
 	drop(session);
 	if let Some(path) = ephemeral_path {
 		let _ = fs::remove_file(path);

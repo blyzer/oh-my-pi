@@ -158,6 +158,13 @@ pub trait Inference: Send {
 	fn selected_model(&self) -> Option<Str> {
 		None
 	}
+
+	/// The resolver of the live model selection, shared with the kernel's
+	/// `model_changed` emitter ([`crate::ModelWatch`]); stacks that resolve
+	/// no catalog return `None` and raise no `model_changed`.
+	fn model_selector(&self) -> Option<Arc<dyn crate::ModelSelector>> {
+		None
+	}
 }
 
 impl<S, P> Inference for Client<S, P>
@@ -404,6 +411,9 @@ pub struct Kernel<C> {
 	director_registry:     DirectorRegistry,
 	live_components:       Vec<Box<dyn LiveComponent>>,
 	lifecycle_hooks:       Option<crate::LifecycleHooks>,
+	/// The one `model_changed` emitter, armed once both the control plane
+	/// and the hook gate are installed.
+	model_watch:           Option<Arc<crate::ModelWatch>>,
 	state_bridges:         Vec<Arc<dyn SessionStateBridge>>,
 	file_mentions:         Option<FileMentionService>,
 	pub(crate) events:     crate::events::KernelEvents,
@@ -449,6 +459,7 @@ impl<C> Kernel<C> {
 			director_registry: DirectorRegistry::standard(),
 			live_components: Vec::new(),
 			lifecycle_hooks: None,
+			model_watch: None,
 			state_bridges: Vec::new(),
 			file_mentions: None,
 			approvals: crate::ApprovalDesk::new(events.clone()),
@@ -471,11 +482,29 @@ impl<C> Kernel<C> {
 
 	/// Installs the shared extension lifecycle gate.
 	#[must_use]
-	pub fn with_hook_gate(mut self, gate: Arc<crate::HookGate>) -> Self {
+	pub fn with_hook_gate(mut self, gate: Arc<crate::HookGate>) -> Self
+	where
+		C: Inference,
+	{
 		let hooks = crate::LifecycleHooks::new(gate);
 		self.dispatcher = self.dispatcher.with_lifecycle_hooks(hooks.clone());
 		self.lifecycle_hooks = Some(hooks);
+		self.arm_model_watch();
 		self
+	}
+
+	/// (Re)arms the `model_changed` emitter over the installed control plane
+	/// and hook gate; a replaced watch's observer goes quiet with its handle.
+	fn arm_model_watch(&mut self)
+	where
+		C: Inference,
+	{
+		self.model_watch = match (&self.con, &self.lifecycle_hooks, self.client.model_selector()) {
+			(Some(con), Some(hooks), Some(selector)) => {
+				Some(crate::ModelWatch::attach(hooks.clone(), selector, con))
+			},
+			_ => None,
+		};
 	}
 
 	/// Installs the existing Read/document authority used for submitted
@@ -535,8 +564,12 @@ impl<C> Kernel<C> {
 
 	/// Injects the effective control-plane context used for Director layers.
 	#[must_use]
-	pub fn with_con_context(mut self, con: Arc<omp_con::Ctx>) -> Self {
+	pub fn with_con_context(mut self, con: Arc<omp_con::Ctx>) -> Self
+	where
+		C: Inference,
+	{
 		self.con = Some(con);
+		self.arm_model_watch();
 		self
 	}
 
@@ -1089,6 +1122,9 @@ impl<C: Inference> Kernel<C> {
 						Err(KernelError::Inference(error)) => Some(<&'static str>::from(error.kind)),
 						_ => None,
 					},
+					// The run's visible assistant text (a finished subagent's
+					// summary for Claude-plugin `agent_completed`).
+					"assistant_text": result.as_ref().ok().map(|outcome| &outcome.assistant_text),
 				}),
 			)?;
 		}
@@ -1231,7 +1267,6 @@ impl<C: Inference> Kernel<C> {
 		let mut empty_output_retries = 0_u8;
 		let mut requests_started = 0_u32;
 		let mut request_budget_notice_sent = false;
-		let mut last_model: Option<Str> = None;
 		let turn_started = Instant::now();
 		self.client.begin_turn();
 
@@ -1322,23 +1357,6 @@ impl<C: Inference> Kernel<C> {
 				}
 				let mut request = self.finish_request(self.project_request(session)?).await?;
 				let model = self.client.selected_model();
-				if let (Some(hooks), Some(previous), Some(current)) =
-					(&self.lifecycle_hooks, &last_model, &model)
-					&& previous != current
-				{
-					hooks.notify(
-						HookEventId::HookEventModelChanged,
-						serde_json::json!({
-							"from_model": model_ref(Some(previous)),
-							"to_model": model_ref(Some(current)),
-							"role": "default",
-							"reason": "convar",
-							"previous_thinking": serde_json::Value::Null,
-							"thinking": reasoning_effort(&request),
-						}),
-					)?;
-				}
-				last_model = model.clone();
 				if let Some(hooks) = &self.lifecycle_hooks {
 					let enabled_tools = request
 						.tools
@@ -2284,6 +2302,9 @@ impl<C: Inference> Kernel<C> {
 				}
 				match event {
 					ChatEvent::Started(meta) => {
+						if let (Some(watch), Some(served)) = (&self.model_watch, &meta.model) {
+							watch.served(served.as_str());
+						}
 						let model = meta
 							.model
 							.map_or_else(|| Str::new_static("unknown"), |value| Str::new(&value));

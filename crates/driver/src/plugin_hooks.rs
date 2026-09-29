@@ -25,17 +25,24 @@
 //!
 //! Observational events run beside the lifecycle and cannot hold it up:
 //! `StopFailure` (a turn failed on a provider error, `agent_end`),
-//! `PostCompact` (`compaction_done`), and `Notification` (`permission_prompt`,
-//! when an approval prompt is filed) run in the background with their output
-//! discarded, only failures surfacing. `SessionEnd` runs at the session's end
-//! (`session_shutdown`: quit, a finished run, a switch to another session)
-//! within [`SESSION_SHUTDOWN_BUDGET`], its output discarded. Every session
-//! switch moves the host onto the next session's id and journal
-//! ([`NativeHookHost::session_switched`]), whether or not the previous
-//! session's end ran (an ACP `session/close` already ended it) and whatever
-//! events the host's hooks use. `SubagentStart` runs on
-//! a subagent's first prompt, its `additionalContext` opening the subagent's
-//! context.
+//! `PostCompact` (`compaction_done`), `PostModelSwitch` (`model_changed`:
+//! its `systemMessage` shows), and `Notification` run in the background with
+//! their output discarded, only failures surfacing. `Notification` raises
+//! `permission_prompt` when an approval prompt is filed, `idle_prompt` once a
+//! main session's run ended and no prompt followed within
+//! [`SV_PLUGIN_HOOK_IDLE_PROMPT`], and `agent_completed` when a subagent's
+//! run ends; [`NotificationType::seam`] names every type omp does not raise.
+//! `SessionEnd` runs at the session's end (`session_shutdown`: quit, a finished
+//! run, a switch to another session) within [`SESSION_SHUTDOWN_BUDGET`], its
+//! output discarded. `SessionStart` runs on every session start
+//! (`session_start`): launch (`startup`, or `resume` for a journal that already
+//! holds a conversation), `/new` (`clear`), `/resume` and a hand-off
+//! (`resume`), and a fork (`fork`). Every session switch moves the host onto
+//! the next session's id and journal ([`NativeHookHost::session_switched`]),
+//! whether or not the previous session's end ran (an ACP `session/close`
+//! already ended it) and whatever events the host's hooks use. `SubagentStart`
+//! runs on a subagent's first prompt, its `additionalContext` opening the
+//! subagent's context.
 //!
 //! A hook runs only when the operator approved its command for its trigger
 //! (event and matcher) at the plugin's version, as every other command a
@@ -51,21 +58,21 @@ use std::{
 	path::{Path, PathBuf},
 	sync::{
 		Arc, OnceLock, Weak,
-		atomic::{AtomicBool, AtomicU32, Ordering},
+		atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 	},
 	time::Duration,
 };
 
 use bytes::Bytes;
 use omp_agent::{
-	BoxFut, EnvEvent, HookContext, HookGate, NativeHookHost, NativeReply, NativeVerdict,
-	SESSION_SHUTDOWN_BUDGET, SessionSwitched, ShutdownReason, SwitchReason, Up,
+	BoxFut, EnvEvent, HookContext, HookGate, ModelChangeReason, NativeHookHost, NativeReply,
+	NativeVerdict, SESSION_SHUTDOWN_BUDGET, SessionSwitched, ShutdownReason, SwitchReason, Up,
 };
 use omp_ai::ErrorKind;
 use omp_core::{EnvPath, Str, sf};
 use omp_env::{ClientError, EnvClient, ExecEvent};
 use omp_ext::{
-	claude_hooks::{ClaudeHookEvent, HookSeam, PluginHook, claude_tool_name},
+	claude_hooks::{ClaudeHookEvent, HookSeam, NotificationType, PluginHook, claude_tool_name},
 	claude_plugin::{ClaudePlugins, expand_plugin_vars, plugin_data_dir},
 };
 use omp_proto::{
@@ -80,7 +87,20 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use smallvec::SmallVec;
-use strum::IntoStaticStr;
+use strum::{IntoStaticStr, VariantArray};
+
+omp_con::var! {
+	/// How long a main session waits for the next prompt after a run ends
+	/// before plugin `Notification` hooks see `idle_prompt`; `never` raises
+	/// none.
+	pub static SV_PLUGIN_HOOK_IDLE_PROMPT = sv_plugin_hook_idle_prompt: omp_con::Span {
+		default: omp_con::Span::Finite(omp_core::Duration::new(
+			60,
+			omp_core::DurationUnit::Seconds,
+		)),
+		flags: archive,
+	};
+}
 
 /// Captured bytes kept per output stream; the rest of a chatty hook's output
 /// is dropped.
@@ -178,6 +198,10 @@ pub struct PluginHookSession {
 	/// The agent class this kernel runs (`SubagentStart`'s `agent_type`);
 	/// `None` is the default `task` class.
 	pub agent:        Option<crate::subagent::AgentName>,
+	/// How long a main session's run may be followed by no prompt before
+	/// `Notification` raises `idle_prompt`; `None` never raises it
+	/// ([`SV_PLUGIN_HOOK_IDLE_PROMPT`]).
+	pub idle_prompt:  Option<Duration>,
 }
 
 /// The session a hook input names: the one the host serves now. A session
@@ -211,6 +235,9 @@ pub struct PluginHookHost {
 	session_context:    Mutex<Vec<HookContext>>,
 	/// A subagent's first prompt has started (`SubagentStart` ran).
 	started:            AtomicBool,
+	/// Bumped by every run end, prompt start, switch, and session end: a
+	/// pending `idle_prompt` raises only while its run end is the latest.
+	idle:               AtomicU64,
 }
 
 impl PluginHookHost {
@@ -268,6 +295,7 @@ impl PluginHookHost {
 				stop_continuations: AtomicU32::new(0),
 				session_context: Mutex::new(Vec::new()),
 				started: AtomicBool::new(false),
+				idle: AtomicU64::new(0),
 			})
 		})
 	}
@@ -297,6 +325,18 @@ impl PluginHookHost {
 			// delivered, when the next prompt starts.
 			if matches!(loaded.hook.seam, HookSeam::AgentSettled | HookSeam::SessionStart) {
 				push(HookEventId::HookEventBeforeAgentStart);
+			}
+			// Every point a hosted notification type is raised on; a
+			// pending `idle_prompt` is withdrawn when a prompt starts or the
+			// session ends.
+			if loaded.hook.event == ClaudeHookEvent::Notification {
+				for kind in NotificationType::VARIANTS {
+					if let Some(seam) = kind.seam() {
+						push(seam_event(seam));
+					}
+				}
+				push(HookEventId::HookEventBeforeAgentStart);
+				push(HookEventId::HookEventSessionShutdown);
 			}
 		}
 		events
@@ -602,6 +642,7 @@ impl PluginHookHost {
 	}
 
 	async fn before_agent_start(&self, payload: &JsonValue) -> NativeReply {
+		self.idle.fetch_add(1, Ordering::Relaxed);
 		self.stop_continuations.store(0, Ordering::Relaxed);
 		let mut context = std::mem::take(&mut *self.session_context.lock());
 		if self.session.subagent {
@@ -711,6 +752,7 @@ impl PluginHookHost {
 	/// a switch then moves the host through
 	/// [`NativeHookHost::session_switched`].
 	async fn session_end(&self, payload: &JsonValue) -> NativeReply {
+		self.idle.fetch_add(1, Ordering::Relaxed);
 		let Ok(view) = SessionShutdownView::deserialize(payload) else {
 			return NativeReply::defer();
 		};
@@ -740,21 +782,90 @@ impl PluginHookHost {
 	/// Runs an observational event's hooks in the background: the lifecycle
 	/// point never waits on them.
 	fn observe_in_background(&self, event: HookEventId, payload: &JsonValue) {
-		let claude = match event {
-			HookEventId::HookEventAgentEnd => ClaudeHookEvent::StopFailure,
-			HookEventId::HookEventCompactionDone => ClaudeHookEvent::PostCompact,
-			HookEventId::HookEventToolApprovalRequested => ClaudeHookEvent::Notification,
+		let claude: &[ClaudeHookEvent] = match event {
+			HookEventId::HookEventAgentEnd => {
+				&[ClaudeHookEvent::StopFailure, ClaudeHookEvent::Notification]
+			},
+			HookEventId::HookEventCompactionDone => &[ClaudeHookEvent::PostCompact],
+			HookEventId::HookEventToolApprovalRequested => &[ClaudeHookEvent::Notification],
+			HookEventId::HookEventModelChanged => &[ClaudeHookEvent::PostModelSwitch],
 			_ => return,
 		};
-		if !self.hooks.iter().any(|loaded| loaded.hook.event == claude) {
+		// A run end starts the idle wait whether or not it raises anything
+		// itself; the previous wait is over.
+		let idle = (event == HookEventId::HookEventAgentEnd)
+			.then(|| self.idle.fetch_add(1, Ordering::Relaxed) + 1);
+		for &claude in claude {
+			if !self.hooks.iter().any(|loaded| loaded.hook.event == claude) {
+				continue;
+			}
+			let (Some(host), Ok(runtime)) =
+				(self.this.upgrade(), tokio::runtime::Handle::try_current())
+			else {
+				return;
+			};
+			let payload = payload.clone();
+			match (claude, event) {
+				(ClaudeHookEvent::Notification, HookEventId::HookEventAgentEnd) => {
+					runtime.spawn(async move { host.run_ended(&payload, idle).await });
+				},
+				_ => {
+					runtime.spawn(async move { host.observed(claude, &payload).await });
+				},
+			}
+		}
+	}
+
+	/// `Notification` on a run's end: a subagent's is `agent_completed`; a
+	/// main session's is `idle_prompt` once the idle wait passed with no
+	/// prompt, switch, or session end in between.
+	async fn run_ended(&self, payload: &JsonValue, idle: Option<u64>) {
+		if self.session.subagent {
+			let Ok(view) = AgentEndView::deserialize(payload) else {
+				return;
+			};
+			let agent_id = self.live.read().session_id.clone();
+			let agent_type = self
+				.session
+				.agent
+				.as_ref()
+				.map_or("task", |agent| agent.as_str());
+			let kind = NotificationType::AgentCompleted;
+			let effects = self
+				.run_all(
+					ClaudeHookEvent::Notification,
+					Subject::Value(kind.into()),
+					EventFields::AgentNotification {
+						notification_type: kind.into(),
+						agent_type,
+						agent_id: &agent_id,
+						summary: view.assistant_text.as_deref().unwrap_or_default(),
+					},
+				)
+				.await;
+			self.publish_failures(&effects);
 			return;
 		}
-		let (Some(host), Ok(runtime)) = (self.this.upgrade(), tokio::runtime::Handle::try_current())
-		else {
+		let (Some(wait), Some(idle)) = (self.session.idle_prompt, idle) else {
 			return;
 		};
-		let payload = payload.clone();
-		runtime.spawn(async move { host.observed(claude, &payload).await });
+		tokio::time::sleep(wait).await;
+		if self.idle.load(Ordering::Relaxed) != idle {
+			return;
+		}
+		let kind = NotificationType::IdlePrompt;
+		let effects = self
+			.run_all(
+				ClaudeHookEvent::Notification,
+				Subject::Value(kind.into()),
+				EventFields::Notification {
+					message:           Str::new_static("omp is waiting for your input"),
+					title:             "Waiting for input",
+					notification_type: kind.into(),
+				},
+			)
+			.await;
+		self.publish_failures(&effects);
 	}
 
 	async fn observed(&self, event: ClaudeHookEvent, payload: &JsonValue) {
@@ -811,24 +922,55 @@ impl PluginHookHost {
 					Some(reason) => sf!("omp needs your permission: {reason}"),
 					None => Str::new_static("omp needs your permission"),
 				};
+				let kind = NotificationType::PermissionPrompt;
 				let effects = self
-					.run_all(event, Subject::Value(PERMISSION_PROMPT), EventFields::Notification {
+					.run_all(event, Subject::Value(kind.into()), EventFields::Notification {
 						message,
 						title: "Permission needed",
-						notification_type: PERMISSION_PROMPT,
+						notification_type: kind.into(),
 					})
 					.await;
 				self.publish_failures(&effects);
+			},
+			ClaudeHookEvent::PostModelSwitch => {
+				let Ok(view) = ModelChangedView::deserialize(payload) else {
+					return;
+				};
+				let source: &'static str = match view.reason.parse() {
+					Ok(ModelChangeReason::User) => ModelSwitchSource::UserRequest,
+					Ok(ModelChangeReason::Role | ModelChangeReason::Fallback) | Err(_) => {
+						ModelSwitchSource::Automatic
+					},
+				}
+				.into();
+				let to_model = view.to_model.model.as_str();
+				// A thinking-only change repeats the model: no switch.
+				if view.from_model.as_ref() == Some(&view.to_model) {
+					return;
+				}
+				let effects = self
+					.run_all(event, Subject::Value(to_model), EventFields::ModelSwitch {
+						from_model: view.from_model.as_ref().map(|model| model.model.as_str()),
+						to_model,
+						source,
+						effort: view.thinking.as_deref().map(|level| EffortWire { level }),
+					})
+					.await;
+				// PostModelSwitch honors `systemMessage`; nothing else.
+				for effect in &effects {
+					for body in effect.notices.iter().chain(&effect.messages) {
+						self.notice(&effect.plugin, body.clone());
+					}
+				}
 			},
 			_ => {},
 		}
 	}
 
 	async fn session_start(&self, payload: &JsonValue) -> NativeReply {
-		let source = match SessionStartView::deserialize(payload) {
-			Ok(SessionStartView { resumed: true }) => "resume",
-			_ => "startup",
-		};
+		let source = SessionStartView::deserialize(payload)
+			.map_or(SessionStartSource::Startup, |view| view.source());
+		let source: &'static str = source.into();
 		let effects = self
 			.run_all(
 				ClaudeHookEvent::SessionStart,
@@ -901,6 +1043,7 @@ impl NativeHookHost for PluginHookHost {
 	}
 
 	fn session_switched(&self, next: &SessionSwitched) {
+		self.idle.fetch_add(1, Ordering::Relaxed);
 		*self.live.write() = LiveSession::at(next.transcript_path.clone());
 	}
 }
@@ -932,11 +1075,34 @@ const fn seam_event(seam: HookSeam) -> HookEventId {
 		HookSeam::Compaction => HookEventId::HookEventCompaction,
 		HookSeam::CompactionDone => HookEventId::HookEventCompactionDone,
 		HookSeam::ToolApprovalRequested => HookEventId::HookEventToolApprovalRequested,
+		HookSeam::ModelChanged => HookEventId::HookEventModelChanged,
 	}
 }
 
-/// `Notification`'s one type omp raises: an approval prompt was filed.
-const PERMISSION_PROMPT: &str = "permission_prompt";
+/// `SessionStart`'s `source`, which its matcher filters on.
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "snake_case")]
+enum SessionStartSource {
+	/// The process started on a fresh session.
+	Startup,
+	/// A session holding a conversation started: launched on a stored
+	/// journal, `/resume`, or a hand-off to another project.
+	Resume,
+	/// `/new` (Claude Code's `/clear`).
+	Clear,
+	/// A fork of a stored session.
+	Fork,
+}
+
+/// `PostModelSwitch`'s `source`.
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "snake_case")]
+enum ModelSwitchSource {
+	/// A user or client selected the model.
+	UserRequest,
+	/// omp changed it: role routing or a fallback.
+	Automatic,
+}
 
 /// `SessionEnd`'s `reason`, which its matcher filters on.
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
@@ -946,9 +1112,9 @@ enum SessionEndReason {
 	Clear,
 	/// Switching to a stored session.
 	Resume,
-	/// The user quit, or a one-shot run finished.
+	/// The user quit.
 	PromptInputExit,
-	/// Signals, failures, forks, hand-offs.
+	/// A finished print-mode run, signals, failures, forks, hand-offs.
 	Other,
 }
 
@@ -1330,6 +1496,25 @@ enum EventFields<'a> {
 		title:             &'static str,
 		notification_type: &'static str,
 	},
+	AgentNotification {
+		notification_type: &'static str,
+		agent_type:        &'a str,
+		agent_id:          &'a str,
+		summary:           &'a str,
+	},
+	ModelSwitch {
+		from_model: Option<&'a str>,
+		to_model:   &'a str,
+		source:     &'static str,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		effort:     Option<EffortWire<'a>>,
+	},
+}
+
+/// `PostModelSwitch`'s `effort`.
+#[derive(Serialize)]
+struct EffortWire<'a> {
+	level: &'a str,
 }
 
 /// `tool_input` in the Claude tool's shape where omp's arguments map onto it
@@ -1461,10 +1646,29 @@ struct PromptView {
 	text: Str,
 }
 
+/// The `session_start` payload fields `SessionStart` reads.
 #[derive(Deserialize)]
 struct SessionStartView {
 	#[serde(default)]
-	resumed: bool,
+	resumed:       bool,
+	#[serde(default)]
+	switch_reason: Option<Str>,
+}
+
+impl SessionStartView {
+	fn source(&self) -> SessionStartSource {
+		match self
+			.switch_reason
+			.as_deref()
+			.map(str::parse::<SwitchReason>)
+		{
+			Some(Ok(SwitchReason::New)) => SessionStartSource::Clear,
+			Some(Ok(SwitchReason::Fork)) => SessionStartSource::Fork,
+			Some(Ok(SwitchReason::Resume | SwitchReason::Handoff)) => SessionStartSource::Resume,
+			Some(Err(_)) | None if self.resumed => SessionStartSource::Resume,
+			Some(Err(_)) | None => SessionStartSource::Startup,
+		}
+	}
 }
 
 #[derive(Deserialize)]
@@ -1482,11 +1686,31 @@ struct SessionShutdownView {
 	switch_reason: Option<Str>,
 }
 
-/// The `agent_end` payload field `StopFailure` reads.
+/// The `agent_end` payload fields `StopFailure` and `agent_completed` read.
 #[derive(Deserialize)]
 struct AgentEndView {
 	#[serde(default)]
-	error_kind: Option<Str>,
+	error_kind:     Option<Str>,
+	#[serde(default)]
+	assistant_text: Option<Str>,
+}
+
+/// The `model_changed` payload fields `PostModelSwitch` reads.
+#[derive(Deserialize)]
+struct ModelChangedView {
+	#[serde(default)]
+	from_model: Option<ModelRefView>,
+	to_model:   ModelRefView,
+	reason:     Str,
+	#[serde(default)]
+	thinking:   Option<Str>,
+}
+
+#[derive(Deserialize, PartialEq)]
+struct ModelRefView {
+	#[serde(default)]
+	provider: Str,
+	model:    Str,
 }
 
 /// The `compaction_done` payload fields `PostCompact` reads.

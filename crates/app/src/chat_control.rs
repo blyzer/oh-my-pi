@@ -18,8 +18,8 @@ use std::{
 
 use miette::{IntoDiagnostic as _, miette};
 use omp_agent::{
-	Kernel, KernelEvent, LifecycleHooks, SessionShutdown, ShutdownReason, SwitchReason, TurnInput,
-	TurnStop, Up,
+	Kernel, KernelEvent, LifecycleHooks, SessionShutdown, SessionStart, ShutdownReason,
+	SwitchReason, TurnInput, TurnStop, Up,
 };
 use omp_ai::realtime::transport::{
 	LiveDelegationAdmission, LiveDelegationRequest, LiveDelegationTerminal,
@@ -695,24 +695,12 @@ impl<C: omp_agent::Inference> Controller<C> {
 		mut self,
 		command_rx: flume::Receiver<HostCommand>,
 	) -> miette::Result<()> {
-		let _ = Self::gate_lifecycle(
-			self.lifecycle.clone(),
-			HookEventId::HookEventSessionStart,
-			serde_json::json!({
-				"session_id": display_name(&self.session),
-				"root": &self.home.project_root,
-				"cwd": &self.home.project_root,
-				"dirs": [],
-				"resumed": !self.session.dom().children(self.session.dom().body()).is_empty(),
-				"forked_from": serde_json::Value::Null,
-				"agent": serde_json::Value::Null,
-				"trust": "trusted",
-				"head_event": self.head()?,
-				"prompt_rev": "1",
-				"previous_session": serde_json::Value::Null,
-			}),
-		)
-		.await?;
+		if let Some(lifecycle) = &self.lifecycle {
+			lifecycle
+				.session_start(&SessionStart::launch(&self.session, &self.home.project_root))
+				.await
+				.into_diagnostic()?;
+		}
 		let input_gate = self
 			.ctx
 			.user::<omp_chat::PendingInputGate>()
@@ -2308,7 +2296,19 @@ impl<C: omp_agent::Inference> Controller<C> {
 
 	/// Replaces the live session: the old one records a switch, the new
 	/// one's subscription is relayed after exactly one `Reset`.
-	async fn switch_to(&mut self, mut next: Session, reason: SwitchReason) -> miette::Result<()> {
+	async fn switch_to(&mut self, next: Session, reason: SwitchReason) -> miette::Result<()> {
+		let root = self.home.project_root.clone();
+		self.switch_to_in(next, reason, &root).await
+	}
+
+	/// [`Self::switch_to`] for a session that starts in the project at
+	/// `root` (a hand-off moves it to another project).
+	async fn switch_to_in(
+		&mut self,
+		mut next: Session,
+		reason: SwitchReason,
+		root: &Path,
+	) -> miette::Result<()> {
 		let from = display_name(&self.session);
 		let to = display_name(&next);
 		let _ = Self::gate_lifecycle(
@@ -2324,7 +2324,8 @@ impl<C: omp_agent::Inference> Controller<C> {
 		.await?;
 		// The switch is admitted: the current session ends here, before
 		// anything of it is torn down, and the in-process hook hosts follow
-		// the switch.
+		// the switch. `next` starts once the switch is committed.
+		let start = SessionStart::switched(&self.session, &next, reason, root);
 		if let Some(lifecycle) = &self.lifecycle {
 			lifecycle
 				.session_switch(&self.session, &next, Some(reason))
@@ -2391,6 +2392,13 @@ impl<C: omp_agent::Inference> Controller<C> {
 				"head_event": self.head()?,
 			}),
 		)?;
+		// The switch cannot be undone here: a host refusing the new
+		// session's start is reported, and the session stays live.
+		if let Some(lifecycle) = &self.lifecycle
+			&& let Err(error) = lifecycle.session_start(&start).await
+		{
+			self.reply(Severity::Error, error.to_string());
+		}
 		Ok(())
 	}
 
@@ -2493,7 +2501,9 @@ impl<C: omp_agent::Inference> Controller<C> {
 				return Err(miette!(error));
 			},
 		};
-		self.switch_to(next, SwitchReason::Handoff).await?;
+		self
+			.switch_to_in(next, SwitchReason::Handoff, &target)
+			.await?;
 		self.home = home;
 		let _ = fs::remove_file(&source);
 		remove_session_local_tree(&source);
@@ -4156,7 +4166,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn session_switch_orders_gate_flush_transition_resync_then_observation() {
+	async fn session_switch_orders_gate_flush_transition_resync_observation_then_start() {
 		let dir = tempfile::tempdir().expect("temp dir");
 		let (gate, hook_rx) = HookGate::channel();
 		let gate = Arc::new(gate);
@@ -4164,6 +4174,7 @@ mod tests {
 			.subscribe("controller-test", [
 				subscription(HookEventId::HookEventSessionSwitch, HookPhase::Precheck, 1),
 				subscription(HookEventId::HookEventSessionSwitched, HookPhase::Observe, 2),
+				subscription(HookEventId::HookEventSessionStart, HookPhase::Review, 3),
 			])
 			.expect("subscriptions");
 		let (order_tx, order_rx) = flume::unbounded();
@@ -4241,6 +4252,21 @@ mod tests {
 						assert!(payload.get("to_session").is_some());
 						assert!(payload.get("head_event").is_some());
 						let _ = responder_order.send("after");
+					},
+					// The next session starts once the switch committed.
+					HookEventId::HookEventSessionStart => {
+						assert_eq!(payload["switch_reason"], "new");
+						assert!(payload["previous_session"].is_string());
+						assert_eq!(payload["resumed"], false);
+						let _ = responder_order.send("start");
+						let decisions = dispatch
+							.subscriptions
+							.iter()
+							.map(|subscription| (subscription.id, GateDecision::Defer))
+							.collect();
+						responder_gate
+							.answer(dispatch.dispatch_id, decisions)
+							.expect("answer start gate");
 						break;
 					},
 					other => panic!("unexpected hook dispatch {other:?}"),
@@ -4252,7 +4278,9 @@ mod tests {
 			.await
 			.expect("switch");
 		responder.await.expect("responder");
-		assert_eq!(order_rx.try_iter().collect::<Vec<_>>(), ["before", "flush", "resync", "after"],);
+		assert_eq!(order_rx.try_iter().collect::<Vec<_>>(), [
+			"before", "flush", "resync", "after", "start"
+		],);
 	}
 
 	/// A `!` command typed during a model turn runs after it and still hears

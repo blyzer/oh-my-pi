@@ -719,3 +719,101 @@ async fn a_session_end_waits_on_native_hosts_only_within_the_budget_then_notifie
 		"the payload's budget is the budget"
 	);
 }
+
+/// Records every `session_start` it is asked about; denies when told to.
+struct StartHost {
+	asked: Arc<Mutex<Vec<Value>>>,
+	deny:  bool,
+}
+
+impl omp_agent::NativeHookHost for StartHost {
+	fn decide<'a>(
+		&'a self,
+		event: HookEventId,
+		payload: &'a Value,
+	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
+		assert_eq!(event, HookEventId::HookEventSessionStart);
+		self.asked.lock().push(payload.clone());
+		let verdict = if self.deny {
+			omp_agent::NativeVerdict::Deny(sf!("not this one"))
+		} else {
+			omp_agent::NativeVerdict::Defer
+		};
+		Box::pin(std::future::ready(omp_agent::NativeReply { verdict, context: Vec::new() }))
+	}
+}
+
+#[tokio::test]
+async fn session_start_reports_a_launch_and_a_committed_switch_alike() {
+	let (gate, receiver) = HookGate::channel();
+	let gate = Arc::new(gate);
+	let asked = Arc::new(Mutex::new(Vec::new()));
+	gate.attach_native(Arc::new(StartHost { asked: Arc::clone(&asked), deny: false }), &[
+		HookEventId::HookEventSessionStart,
+	]);
+	let hooks = LifecycleHooks::new(Arc::clone(&gate));
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let root = directory.path().join("project");
+	let first = fresh_session(&directory.path().join("first.oms"));
+	let next = fresh_session(&directory.path().join("next.oms"));
+
+	hooks
+		.session_start(&omp_agent::SessionStart::launch(&first, &root))
+		.await
+		.expect("launch starts");
+	hooks
+		.session_start(&omp_agent::SessionStart::switched(
+			&first,
+			&next,
+			omp_agent::SwitchReason::New,
+			&root,
+		))
+		.await
+		.expect("the switched-to session starts");
+	let asked = std::mem::take(&mut *asked.lock());
+	assert_eq!(asked.len(), 2);
+	let launch = &asked[0];
+	assert_eq!(launch["session_id"], "first.oms");
+	assert_eq!(launch["root"], root.to_str().unwrap());
+	assert_eq!(launch["cwd"], root.to_str().unwrap());
+	assert_eq!(launch["dirs"], serde_json::json!([]));
+	assert_eq!(launch["resumed"], false);
+	assert_eq!(launch["forked_from"], Value::Null);
+	assert_eq!(launch["trust"], "trusted");
+	assert_eq!(launch["prompt_rev"], "1");
+	assert!(launch["head_event"].is_string() || launch["head_event"].is_number());
+	assert_eq!(launch["previous_session"], Value::Null);
+	assert_eq!(launch["switch_reason"], Value::Null);
+	let switched = &asked[1];
+	assert_eq!(switched["session_id"], "next.oms");
+	assert_eq!(switched["previous_session"], "first.oms");
+	assert_eq!(switched["switch_reason"], "new");
+	assert!(receiver.try_recv().is_err(), "no extension subscribed");
+}
+
+#[tokio::test]
+async fn a_refused_session_start_is_a_typed_denial() {
+	let (gate, _receiver) = HookGate::channel();
+	let gate = Arc::new(gate);
+	gate.attach_native(Arc::new(StartHost { asked: Arc::default(), deny: true }), &[
+		HookEventId::HookEventSessionStart,
+	]);
+	let hooks = LifecycleHooks::new(gate);
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let session = fresh_session(&directory.path().join("refused.oms"));
+	let error = hooks
+		.session_start(&omp_agent::SessionStart::launch(&session, directory.path()))
+		.await
+		.expect_err("the host refuses");
+	assert!(matches!(
+		error,
+		omp_agent::LifecycleHookError::Denied { event: HookEventId::HookEventSessionStart, ref reason }
+			if reason.as_str() == "not this one"
+	));
+	// Nothing subscribed: the start is free.
+	let (bare, _receiver) = HookGate::channel();
+	LifecycleHooks::new(Arc::new(bare))
+		.session_start(&omp_agent::SessionStart::launch(&session, directory.path()))
+		.await
+		.expect("an unsubscribed start never fails");
+}

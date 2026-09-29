@@ -142,8 +142,77 @@ pub enum HookSeam {
 	/// `compaction_done` observation (`PostCompact`).
 	CompactionDone,
 	/// `tool_approval_requested` observation (`Notification`,
-	/// `permission_prompt`).
+	/// `permission_prompt`); a `Notification` hook also runs on the
+	/// other points its hosted types name ([`NotificationType::seam`]).
 	ToolApprovalRequested,
+	/// `model_changed` observation (`PostModelSwitch`).
+	ModelChanged,
+}
+
+/// Every `notification_type` the Claude Code hooks reference names, which a
+/// `Notification` hook's matcher filters on.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Display,
+	EnumString,
+	Eq,
+	Hash,
+	IntoStaticStr,
+	Ord,
+	PartialEq,
+	PartialOrd,
+	VariantArray,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum NotificationType {
+	/// A permission dialog for a tool call.
+	PermissionPrompt,
+	/// The session has waited for the user's next prompt.
+	IdlePrompt,
+	/// The user authenticated with a service.
+	AuthSuccess,
+	/// An MCP server asked for text input.
+	ElicitationDialog,
+	/// An MCP server asked the user to open a URL.
+	ElicitationUrlDialog,
+	/// An MCP elicitation completed.
+	ElicitationComplete,
+	/// The user answered an MCP elicitation.
+	ElicitationResponse,
+	/// A subagent waits for user input.
+	AgentNeedsInput,
+	/// A subagent finished.
+	AgentCompleted,
+	/// Quota auto-resume activated.
+	QuotaAutoResumeFired,
+	/// A stale quota auto-resume entry was removed.
+	QuotaAutoResumeStale,
+	/// Quota auto-resume was disabled.
+	QuotaAutoResumeDisabled,
+}
+
+impl NotificationType {
+	/// The omp lifecycle point raising this notification; `None` when omp
+	/// has no point with its semantics, so a hook matching only it never
+	/// runs. The crate README tabulates every type and why.
+	#[must_use]
+	pub const fn seam(self) -> Option<HookSeam> {
+		Some(match self {
+			Self::PermissionPrompt => HookSeam::ToolApprovalRequested,
+			Self::IdlePrompt | Self::AgentCompleted => HookSeam::AgentEnd,
+			Self::AuthSuccess
+			| Self::ElicitationDialog
+			| Self::ElicitationUrlDialog
+			| Self::ElicitationComplete
+			| Self::ElicitationResponse
+			| Self::AgentNeedsInput
+			| Self::QuotaAutoResumeFired
+			| Self::QuotaAutoResumeStale
+			| Self::QuotaAutoResumeDisabled => return None,
+		})
+	}
 }
 
 impl ClaudeHookEvent {
@@ -163,6 +232,7 @@ impl ClaudeHookEvent {
 			Self::PreCompact => HookSeam::Compaction,
 			Self::PostCompact => HookSeam::CompactionDone,
 			Self::Notification => HookSeam::ToolApprovalRequested,
+			Self::PostModelSwitch => HookSeam::ModelChanged,
 			Self::Setup
 			| Self::UserPromptExpansion
 			| Self::PostToolBatch
@@ -179,7 +249,6 @@ impl ClaudeHookEvent {
 			| Self::WorktreeCreate
 			| Self::WorktreeRemove
 			| Self::PreModelSwitch
-			| Self::PostModelSwitch
 			| Self::Elicitation
 			| Self::ElicitationResult
 			| Self::MessageDisplay => return None,
@@ -824,7 +893,8 @@ mod tests {
 				"StopFailure":[{"matcher":"rate_limit","hooks":[{"type":"command","command":"b"}]}],
 				"PostCompact":[{"matcher":"auto","hooks":[{"type":"command","command":"c"}]}],
 				"SubagentStart":[{"matcher":"task","hooks":[{"type":"command","command":"d"}]}],
-				"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"e"}]}]}"#,
+				"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"e"}]}],
+				"PostModelSwitch":[{"matcher":".*opus.*","hooks":[{"type":"command","command":"f"}]}]}"#,
 		);
 		assert!(diagnostics.is_empty(), "{diagnostics:?}");
 		let seams = hooks
@@ -837,6 +907,7 @@ mod tests {
 			(ClaudeHookEvent::PostCompact, HookSeam::CompactionDone),
 			(ClaudeHookEvent::SubagentStart, HookSeam::BeforeAgentStart),
 			(ClaudeHookEvent::Notification, HookSeam::ToolApprovalRequested),
+			(ClaudeHookEvent::PostModelSwitch, HookSeam::ModelChanged),
 		] {
 			assert!(seams.contains(&expected), "{expected:?} in {seams:?}");
 		}
@@ -847,6 +918,24 @@ mod tests {
 			.unwrap();
 		assert_eq!(end.launch(Path::new("/p")).server, "SessionEnd clear");
 		assert_eq!(end.command.timeout, Duration::from_secs(90), "the host caps it at run");
+	}
+
+	#[test]
+	fn notification_types_name_the_point_raising_them() {
+		let hosted = NotificationType::VARIANTS
+			.iter()
+			.filter_map(|kind| kind.seam().map(|seam| (<&'static str>::from(*kind), seam)))
+			.collect::<Vec<_>>();
+		assert_eq!(hosted, [
+			("permission_prompt", HookSeam::ToolApprovalRequested),
+			("idle_prompt", HookSeam::AgentEnd),
+			("agent_completed", HookSeam::AgentEnd),
+		]);
+		assert_eq!(
+			"elicitation_url_dialog".parse::<NotificationType>().ok(),
+			Some(NotificationType::ElicitationUrlDialog)
+		);
+		assert_eq!(NotificationType::AuthSuccess.seam(), None);
 	}
 
 	#[test]
