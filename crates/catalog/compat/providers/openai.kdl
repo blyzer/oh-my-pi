@@ -1,6 +1,9 @@
 // Provider-wire compat for "openai"; regenerated from the frozen census using deployment contract selectors.
 
-provider "openai" {
+provider "openai" priority=-1 {
+	// Hosts speaking the OpenAI wire; a lineage rule (Claude or Gemini behind a
+	// gateway) speaks its own tier vocabulary and wins on priority.
+	service-tier-family "openai"
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
 	// Replaces both OpenAI tool-call id-limit baselines.

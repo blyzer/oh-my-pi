@@ -1,6 +1,8 @@
 // Provider-wire compat for "fireworks"; regenerated from the frozen census using deployment contract selectors.
 
 provider "fireworks" priority=-1 {
+	// Fireworks serving-path tiers (priority or standard) on every lineage it hosts.
+	service-tier-family "fireworks"
 	// Replaces the provider-keyed Fireworks minimal-effort remap.
 	thinking-effort-map {
 		minimal "none"

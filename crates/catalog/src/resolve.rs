@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
 	AuthSpec, AuthSpecId, Availability, CatalogAlias, CatalogRevision, ClassId, CodecId,
 	ContextStrategy, DiscoverySpecId, EmbeddingFormatBits, EndpointSpec, EvidenceConfidence,
-	GrammarBits, HeaderProfileId, HostedToolBits, ModalityBits, ModelAvailability,
-	ModelCapabilities, ModelKey, ModelLimits, ModelRemoteCompaction, ModelSpec, OperationKind,
-	OverlaySource, OverlayStack, PolicyModel, PremiumMultiplier, Pricing, ProvenanceKind,
-	ProvenanceSource, ProviderDef, ProviderId, ReasoningFeatureBits, RoleBits, RouteDef, RouteId,
-	RouteRestrictions, SamplingControlBits, StructuredOutputBits, TextVerbosityBits,
-	ThinkingPolicyId, ThinkingRouting, ToolFeatureBits, TransportKind, TrustDomain, WireModelId,
-	WirePolicyId, compile::CompiledCatalog,
+	GrammarBits, HeaderProfileId, HostedToolBits, ImageFrameGeometry, ModalityBits,
+	ModelAvailability, ModelCapabilities, ModelKey, ModelLimits, ModelRemoteCompaction, ModelSpec,
+	OperationKind, OverlaySource, OverlayStack, PolicyModel, PremiumMultiplier, Pricing,
+	ProvenanceKind, ProvenanceSource, ProviderDef, ProviderFamily, ProviderId, ReasoningFeatureBits,
+	RoleBits, RouteDef, RouteId, RouteRestrictions, SamplingControlBits, StructuredOutputBits,
+	TextVerbosityBits, ThinkingPolicyId, ThinkingRouting, ToolFeatureBits, TransportKind,
+	TrustDomain, WireModelId, WirePolicyId, compile::CompiledCatalog,
 };
 
 /// An exact provider and normalized-model selector.
@@ -192,6 +192,10 @@ pub enum ModelField {
 	RemoteCompaction,
 	/// Premium quota multiplier.
 	PremiumMultiplier,
+	/// Service-tier wire family.
+	ServiceTierFamily,
+	/// Imaged-history frame geometry.
+	ImageFrame,
 	/// Latest provider update time.
 	UpdatedAt,
 	/// Temporary block expiry.
@@ -272,6 +276,10 @@ pub struct ModelPatch {
 	pub remote_compaction: Option<Option<ModelRemoteCompaction>>,
 	/// `Some(None)` explicitly clears the premium multiplier.
 	pub premium_multiplier_millionths: Option<Option<PremiumMultiplier>>,
+	/// Replacement service-tier wire family.
+	pub service_tier_family: Option<ProviderFamily>,
+	/// `Some(None)` explicitly clears the imaged-history frame geometry.
+	pub image_frame: Option<Option<ImageFrameGeometry>>,
 	/// `Some(None)` explicitly clears the latest provider update time.
 	pub updated_at_ms: Option<Option<u64>>,
 	/// `Some(None)` explicitly clears the block expiry.
@@ -1208,6 +1216,8 @@ fn all_model_sources(source: ProvenanceSource) -> BTreeMap<ModelField, Provenanc
 		ModelField::EditRevision,
 		ModelField::RemoteCompaction,
 		ModelField::PremiumMultiplier,
+		ModelField::ServiceTierFamily,
+		ModelField::ImageFrame,
 		ModelField::UpdatedAt,
 		ModelField::BlockedUntil,
 		ModelField::Deprecated,
@@ -1281,6 +1291,8 @@ fn apply_model_patch(
 		source,
 		sources
 	);
+	patch_field!(patch, model, service_tier_family, ModelField::ServiceTierFamily, source, sources);
+	patch_field!(patch, model, image_frame, ModelField::ImageFrame, source, sources);
 	if let Some(value) = patch.updated_at_ms {
 		model.provenance.updated_at_ms = value;
 		sources.insert(ModelField::UpdatedAt, source.clone());
@@ -1637,6 +1649,8 @@ mod tests {
 			edit_revision: None,
 			remote_compaction: None,
 			premium_multiplier_millionths: None,
+			service_tier_family: ProviderFamily::Other,
+			image_frame: None,
 		}
 	}
 

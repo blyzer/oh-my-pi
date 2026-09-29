@@ -609,20 +609,6 @@ impl ModelSettings {
 			.then(|| self.provider_rank(provider))
 	}
 
-	/// Resolves route family and provider-specific tier policy.
-	pub fn service_tier_for_route(
-		&self,
-		provider: &str,
-		model: Option<&str>,
-		audience: TierAudience,
-		parent: Option<&ServiceTier>,
-	) -> Option<ServiceTier> {
-		if provider.contains("fireworks") {
-			return self.tier_fireworks.resolve(ProviderFamily::Other, parent);
-		}
-		self.service_tier(provider_family(provider, model), audience, parent)
-	}
-
 	/// Resolves a family/audience service tier into the concrete wire value.
 	pub fn service_tier(
 		&self,
@@ -634,6 +620,10 @@ impl ModelSettings {
 			ProviderFamily::OpenAi => &self.tier_openai,
 			ProviderFamily::Anthropic => &self.tier_anthropic,
 			ProviderFamily::Google => &self.tier_google,
+			// Fireworks tiers are serving paths, not OpenAI-family wire names.
+			ProviderFamily::Fireworks => {
+				return self.tier_fireworks.resolve(ProviderFamily::Other, parent);
+			},
 			ProviderFamily::Other => return None,
 		};
 		family_setting.resolve(family, parent)
@@ -1533,32 +1523,6 @@ omp_con::var! {
 	};
 }
 
-/// Resolves provider family from canonical route and model identities.
-pub fn provider_family(provider: &str, model: Option<&str>) -> ProviderFamily {
-	let model = model.unwrap_or_default();
-	if provider.contains("anthropic")
-		|| provider.contains("claude")
-		|| model.contains("anthropic/")
-		|| model.contains("claude")
-	{
-		ProviderFamily::Anthropic
-	} else if provider.contains("google")
-		|| provider.contains("gemini")
-		|| model.contains("google/")
-		|| model.contains("gemini")
-	{
-		ProviderFamily::Google
-	} else if provider.contains("openai")
-		|| provider == "openrouter"
-		|| provider == "azure"
-		|| model.contains("openai/")
-	{
-		ProviderFamily::OpenAi
-	} else {
-		ProviderFamily::Other
-	}
-}
-
 /// Exact configured model fallback chains keyed by model id or `provider/*`.
 pub type FallbackChains = BTreeMap<Str, Vec<Str>>;
 
@@ -1607,7 +1571,7 @@ mod tests {
 			let mut settings = ModelSettings::default();
 			settings.tier_openai = setting;
 			let tier = settings
-				.service_tier_for_route("openai", Some("gpt-5"), TierAudience::Session, None)
+				.service_tier(ProviderFamily::OpenAi, TierAudience::Session, None)
 				.expect("OpenAI tier resolves");
 			assert_eq!(tier.name.as_str(), name);
 			assert_eq!(tier.priority, priority);
@@ -1617,12 +1581,7 @@ mod tests {
 			settings.tier_anthropic = setting.clone();
 			assert!(
 				settings
-					.service_tier_for_route(
-						"anthropic",
-						Some("claude-sonnet-4-6"),
-						TierAudience::Session,
-						None,
-					)
+					.service_tier(ProviderFamily::Anthropic, TierAudience::Session, None)
 					.is_none(),
 				"{setting:?} is an OpenAI-family wire name"
 			);

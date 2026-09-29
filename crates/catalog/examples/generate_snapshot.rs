@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 		.expect("catalog crate is in workspace/crates");
 	let lock_path = crate_dir.join("data/sources.lock.json");
 	let mut lock: SourceLock = serde_json::from_slice(&fs::read(&lock_path)?)?;
-	if lock.schema_version != 2 {
+	if lock.schema_version != 3 {
 		return Err(format!("unsupported source-lock schema {}", lock.schema_version).into());
 	}
 	if env::args().skip(1).any(|argument| argument == "--relock") {

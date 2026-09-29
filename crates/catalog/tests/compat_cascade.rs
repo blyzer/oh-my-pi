@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use omp_catalog::{
 	AXES, BUNDLED_COMPAT, CascadeError, Catalog, ClassificationInput, ClassificationPhase,
-	CompatCascade, EffortTier, ModelKey, ResolveTarget, ThinkingEffort, ThinkingFormat, WirePolicy,
-	classify,
+	CompatCascade, EffortTier, ImageFrameGeometry, ModelKey, ProviderFamily, ResolveTarget,
+	ThinkingEffort, ThinkingFormat, WirePolicy, classify,
 };
 use omp_core::SemVer;
 use serde::Deserialize;
@@ -200,7 +200,13 @@ fn axis_vocabulary_is_literal_pi_parity() {
 	// every route was rejected before reaching a codec that implements it.
 	// The axis is provider-neutral — Anthropic, Google, and both OpenAI
 	// records carry it.
-	const DIVERGENCES: &[&str] = &["supports-response-schema"];
+	//
+	// `image-frame`, `service-tier-family`: catalog-namespace axes that replace
+	// model-id predicates in omp's hosts. Snapcompact used to pick frame
+	// geometry with `id.contains("claude")`-style checks and the service-tier
+	// policy used `model.contains("claude")`; both now read the resolved
+	// per-model fact, so pi's axis table has no counterpart.
+	const DIVERGENCES: &[&str] = &["image-frame", "service-tier-family", "supports-response-schema"];
 
 	let upstream = AXES
 		.iter()
@@ -866,4 +872,49 @@ fn run_compile_error_case(case: &Case) {
 		},
 		other => panic!("unmapped compile-error case {other}"),
 	}
+}
+
+/// Per-model host facts are compiled from rule data, so a model id is never
+/// the thing a host inspects: the geometry snapcompact renders with and the
+/// service-tier vocabulary a route speaks come from the resolved record.
+#[test]
+fn model_host_facts_are_compiled_from_rule_data() {
+	let catalog = Catalog::decode(CATALOG_POSTCARD).expect("compiled catalog snapshot decodes");
+	let facts = |key: &'static str| {
+		let model = catalog
+			.model(ModelKey::from_ref(key))
+			.unwrap_or_else(|| panic!("{key} is in the compiled catalog"));
+		(model.service_tier_family, model.image_frame)
+	};
+	let frame = |frame_size, cell_width, cell_height| {
+		Some(ImageFrameGeometry { frame_size, cell_width, cell_height })
+	};
+
+	// Claude lineage: 1932px frames for Fable, Mythos and Opus 4.7/4.8 only.
+	assert_eq!(
+		facts("anthropic/claude-sonnet-4-6"),
+		(ProviderFamily::Anthropic, frame(1_568, 11, 16))
+	);
+	assert_eq!(
+		facts("anthropic/claude-opus-4-8"),
+		(ProviderFamily::Anthropic, frame(1_932, 11, 16))
+	);
+	assert_eq!(facts("anthropic/claude-fable-5"), (ProviderFamily::Anthropic, frame(1_932, 11, 16)));
+	assert_eq!(facts("anthropic/claude-opus-5"), (ProviderFamily::Anthropic, frame(1_568, 11, 16)));
+	// The same lineage keeps its facts behind a gateway that speaks the OpenAI
+	// wire.
+	assert_eq!(
+		facts("openrouter/anthropic/claude-opus-4.8"),
+		(ProviderFamily::Anthropic, frame(1_932, 11, 16))
+	);
+	assert_eq!(
+		facts("google/gemini-3.1-pro-preview"),
+		(ProviderFamily::Google, frame(2_048, 8, 22))
+	);
+	assert_eq!(facts("zai/glm-5.2"), (ProviderFamily::Other, frame(1_568, 8, 16)));
+	// A gateway's own lineage-less rows fall back to the wire the gateway speaks.
+	assert_eq!(facts("openrouter/deepseek/deepseek-v4-pro"), (ProviderFamily::OpenAi, None));
+	assert_eq!(facts("openai/gpt-5.5"), (ProviderFamily::OpenAi, None));
+	// Fireworks tiers are serving paths, whatever lineage the row belongs to.
+	assert_eq!(facts("fireworks/deepseek-v4-flash"), (ProviderFamily::Fireworks, None));
 }

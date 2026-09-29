@@ -1,6 +1,9 @@
 // Provider-wire compat for "openai-codex"; regenerated from the frozen census using deployment contract selectors.
 
-provider "openai-codex" {
+provider "openai-codex" priority=-1 {
+	// Hosts speaking the OpenAI wire; a lineage rule (Claude or Gemini behind a
+	// gateway) speaks its own tier vocabulary and wins on priority.
+	service-tier-family "openai"
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
 	service-tier-cost {
 		flex 0.5

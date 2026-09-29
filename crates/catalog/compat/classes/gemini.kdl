@@ -1,6 +1,13 @@
 // Model-lineage compat for "gemini"; regenerated from the frozen census using class taxonomy selectors.
 
 class "gemini" {
+	service-tier-family "google"
+	// Snapcompact frame geometry Gemini reads imaged history best at.
+	image-frame {
+		frame-size 2048
+		cell-width 8
+		cell-height 22
+	}
 	// Gemini ladders follow the model generation on every host: pre-3.0 keeps
 	// the four-tier scale, Gemini 3+ Pro exposes only low/high, and the 3+
 	// Flash/Lite lines keep the four-tier scale.

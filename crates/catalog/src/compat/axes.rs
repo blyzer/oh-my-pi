@@ -300,6 +300,15 @@ pub const AXES: &[AxisDef] = &[
 		verbatim_keys: false,
 	},
 	AxisDef {
+		key:           "image-frame",
+		resolved_key:  "imageFrame",
+		set:           AxisSet::Catalog,
+		shape:         AxisShape::Object,
+		records:       &[],
+		values:        &[],
+		verbatim_keys: false,
+	},
+	AxisDef {
 		key:           "include-encrypted-reasoning",
 		resolved_key:  "include_encrypted_reasoning",
 		set:           AxisSet::Wire,
@@ -686,6 +695,15 @@ pub const AXES: &[AxisDef] = &[
 		shape:         AxisShape::Object,
 		records:       &[],
 		values:        &[],
+		verbatim_keys: false,
+	},
+	AxisDef {
+		key:           "service-tier-family",
+		resolved_key:  "serviceTierFamily",
+		set:           AxisSet::Catalog,
+		shape:         AxisShape::Scalar,
+		records:       &[],
+		values:        &["openai", "anthropic", "google", "fireworks"],
 		verbatim_keys: false,
 	},
 	AxisDef {

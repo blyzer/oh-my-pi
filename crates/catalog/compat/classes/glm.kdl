@@ -1,6 +1,12 @@
 // Model-lineage compat for "glm"; regenerated from the frozen census using class taxonomy selectors.
 
 class "glm" {
+	// Snapcompact frame geometry GLM reads imaged history best at.
+	image-frame {
+		frame-size 1568
+		cell-width 8
+		cell-height 16
+	}
 	// Replaces provider-keyed GLM 5+ coding-plan stream-idle dispatch.
 	on "zhipu-coding-plan" "opencode-go" "opencode-zen" {
 		revision ">=5" {

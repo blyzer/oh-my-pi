@@ -924,6 +924,9 @@ fn configured_model_record(
 		edit_revision: None,
 		remote_compaction: None,
 		premium_multiplier_millionths: None,
+		// The template deployment speaks the wire this provider is configured for.
+		service_tier_family: template.service_tier_family,
+		image_frame: None,
 	}
 }
 

@@ -35,8 +35,9 @@ use crate::{
 		OAuthSpecId, ProviderId, RouteId, ThinkingPolicyId, WireModelId, WirePolicyId,
 	},
 	model::{
-		CatalogModelMetrics, ContextStrategy, EvidenceConfidence, ModelAvailability, ModelLimits,
-		ModelProvenance, ModelRemoteCompaction, ModelSpec, ProvenanceKind, ProvenanceSource,
+		CatalogModelMetrics, ContextStrategy, EvidenceConfidence, ImageFrameGeometry,
+		ModelAvailability, ModelLimits, ModelProvenance, ModelRemoteCompaction, ModelSpec,
+		ProvenanceKind, ProvenanceSource,
 	},
 	policy::{
 		ApplyPatchWireKind, CacheControlFormat, ComputerUseConfigSupport, ComputerUseWireSupport,
@@ -57,7 +58,7 @@ use crate::{
 	thinking::{ReasoningMode, ThinkingEffort, ThinkingMode, ThinkingPolicy, ThinkingRouting},
 };
 /// Schema version of reviewable normalized compiler output.
-pub const COMPILED_SCHEMA_VERSION: u32 = 2;
+pub const COMPILED_SCHEMA_VERSION: u32 = 3;
 /// An explicit opaque source-model property boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -3769,6 +3770,19 @@ fn compile_models(
 				.and_then(Value::as_str)
 				.map(Str::new)
 				.or_else(|| first.1.edit_revision.clone());
+			let service_tier_family = parse_policy(
+				resolved
+					.catalog
+					.get("serviceTierFamily")
+					.and_then(Value::as_str),
+				None,
+			)?
+			.unwrap_or_default();
+			let image_frame = resolved
+				.catalog
+				.get("imageFrame")
+				.map(|frame| serde_json::from_value::<ImageFrameGeometry>(frame.clone()))
+				.transpose()?;
 			if resolved.thinking.contains_key("efforts") {
 				merged_row.reasoning = true;
 			}
@@ -4047,6 +4061,8 @@ fn compile_models(
 					.map(decimal_millionths)
 					.transpose()?
 					.map(PremiumMultiplier::from_millionths),
+				service_tier_family,
+				image_frame,
 			});
 		}
 	}

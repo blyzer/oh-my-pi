@@ -28,7 +28,7 @@ use crate::{
 };
 
 const MAGIC: &[u8; 8] = b"OMPLLCAT";
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const HEADER_LEN: usize = 8 + 4 + 32 + 32 + 32;
 const EMBEDDED_BYTES: &[u8] = include_bytes!("../data/catalog.postcard");
 const OVERLAY_CACHE_SCHEMA: u32 = 2;

@@ -198,6 +198,13 @@ The three value shapes are:
 - **Object**: no arguments and a child block, including an empty block. Child names are kebab-case: an axis-directive spelling compiles to its resolved axis key (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else converts mechanically (`input-threshold` → `inputThreshold`); camelCase names are a compile error. `extra-body` payloads (top-level or nested) are the exception — their child names are literal wire JSON keys copied verbatim (`enable_thinking`). Each child is either one scalar or another object; arrays are not representable inside an object payload.
 
 A rule cannot assign the same resolved axis twice in one block.
+
+Two `catalog` axes carry per-model facts that hosts read instead of inspecting model ids, so no host branches on `model.contains("claude")`-style predicates:
+
+- `service-tier-family "openai" | "anthropic" | "google" | "fireworks"` selects the service-tier vocabulary (`ProviderFamily`) a deployment speaks. Lineage classes declare theirs (`classes/anthropic.kdl`, `gemini.kdl`, `openai.kdl`); gateways that speak the OpenAI wire (`providers/openrouter.kdl`, `azure.kdl`, ...) declare it at `priority=-1` so a lineage rule wins for Claude or Gemini behind them. Absence resolves to `other`, which applies no tier.
+- `image-frame { frame-size N cell-width N cell-height N }` is the bitmap geometry snapcompact renders archive frames with (`ImageFrameGeometry`). Only lineages with a measured geometry declare one; a model without it renders at the default of its wire API's billing family.
+
+Both compile into `ModelSpec` and `PolicyModel` (snapshot schema 3); runtime-discovered rows that have no bundled counterpart carry `other`/none until the next snapshot refresh.
 One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
 
 ### Precedence and ambiguity
