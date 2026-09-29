@@ -4130,9 +4130,19 @@ impl Presenter {
 	}
 
 	/// One-row notice frame above the composer, when a notice is showing.
+	/// Notices stacked under the visible one add a `+N more (/notices)`
+	/// label the row keeps whole when the text truncates.
 	fn notice_frame(&self, width: u16) -> Option<Frame> {
-		let text = Str::new(self.overlays.notice()?);
-		let tree = omp_tui::dom! { <text fg=muted truncate>{" "}{text}</text> };
+		let text = self.overlays.notice_log().visible()?.clone();
+		let more = self.overlays.notice_more().cloned();
+		let tree = omp_tui::dom! {
+			<row h=1 gap=1>
+				<text grow truncate fg=muted>{" "}{text}</text>
+				if let Some(more) = more {
+					<text fg=accent>{more}</text>
+				}
+			</row>
+		};
 		Some(Ui::from_root(tree, width, self.ui.clone()).frame().clone())
 	}
 }

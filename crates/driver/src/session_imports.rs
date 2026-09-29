@@ -7,7 +7,7 @@
 //! source's own session id (`import-source-id`), the transcript's path
 //! (`import-source`), the address of its exact bytes (`import-source-blob`,
 //! whose SHA-256 digest is the transcript's content digest at import), and
-//! its size, modification time, and on Unix inode change time
+//! its size, modification time, and on Unix and Windows change time
 //! ([`import::SourceStamp`]).
 //!
 //! [`ImportedIndex`] reads that provenance back from every journal of one
@@ -95,8 +95,9 @@ struct IndexedJournal {
 	/// The transcript's digest at import
 	/// ([`import::ImportOrigin::source_digest`]), when recorded.
 	digest: Option<Hash32>,
-	/// The transcript's size, modification time, and (on Unix) change time
-	/// at import ([`import::ImportOrigin::source_stamp`]), when recorded.
+	/// The transcript's size, modification time, and (on Unix and Windows)
+	/// change time at import ([`import::ImportOrigin::source_stamp`]), when
+	/// recorded.
 	stamp:  Option<import::SourceStamp>,
 }
 
@@ -270,10 +271,10 @@ impl ImportedIndex {
 	/// `transcript` as it is now; see [`PriorImport`].
 	///
 	/// A journal imported from this very file whose recorded size,
-	/// modification time, and (on Unix) change time ([`import::SourceStamp`])
-	/// still match the file's is current without reading the transcript.
-	/// Otherwise the transcript is read whole to digest it, when a journal of
-	/// `id` recorded a digest to compare with.
+	/// modification time, and (on Unix and Windows) change time
+	/// ([`import::SourceStamp`]) still match the file's is current without
+	/// reading the transcript. Otherwise the transcript is read whole to digest
+	/// it, when a journal of `id` recorded a digest to compare with.
 	///
 	/// # Errors
 	///
