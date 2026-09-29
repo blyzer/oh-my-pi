@@ -128,6 +128,25 @@ impl OwnedProcess {
 		None
 	}
 
+	/// Runs `command` to completion as an owned process group within `limit`
+	/// and returns its exit status with everything it wrote to stdout and
+	/// stderr; a run that overstays `limit` is killed as a tree on return.
+	pub async fn output(mut command: Command, limit: Duration) -> Result<process::Output> {
+		use tokio::io::AsyncReadExt as _;
+
+		command.stdout(Stdio::piped()).stderr(Stdio::piped());
+		let mut owned = Self::spawn(command)?;
+		let mut stdout = owned.child.stdout.take().context("piped stdout")?;
+		let mut stderr = owned.child.stderr.take().context("piped stderr")?;
+		let (mut out, mut err) = (Vec::new(), Vec::new());
+		within("owned child output", limit, async {
+			tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+		})
+		.await??;
+		let status = owned.wait(limit).await?;
+		Ok(process::Output { status, stdout: out, stderr: err })
+	}
+
 	/// Waits for normal process exit within `limit`.
 	pub async fn wait(&mut self, limit: Duration) -> Result<process::ExitStatus> {
 		Ok(within("owned child exit", limit, self.reap()).await??)

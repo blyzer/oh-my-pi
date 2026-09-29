@@ -1273,3 +1273,408 @@ async fn chat_tui_persists_thinking_blocks_across_turns_and_resume() {
 	);
 	assert_restored(&resumed_bytes, &resumed_before, &resumed_after, &resumed_diagnostics);
 }
+
+/// Writes `body` to `path`, creating its parent directories.
+fn write_fixture(path: &Path, body: &str) {
+	fs::create_dir_all(path.parent().expect("fixture has a parent")).expect("fixture directory");
+	fs::write(path, body).expect("write fixture");
+}
+
+/// Installs each `(id, root)` marketplace plugin, enabled at user scope, in
+/// the plugin registry under `data`, the way `omp ext install` records one.
+fn install_plugins(data: &Path, plugins: &[(&'static str, &Path)]) {
+	use omp_ext::claude_plugin::{
+		InstallScope, InstalledPluginEntry, InstalledPluginsRegistry, REGISTRY_FILE,
+	};
+	let mut registry = InstalledPluginsRegistry::default();
+	for (id, root) in plugins {
+		registry
+			.plugins
+			.insert(Str::new_static(id), vec![InstalledPluginEntry {
+				scope:          InstallScope::User,
+				install_path:   root.to_path_buf(),
+				version:        Str::new_static("1.0.0"),
+				installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+				last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+				git_commit_sha: None,
+				enabled:        true,
+			}]);
+	}
+	write_fixture(
+		&data.join("plugins").join(REGISTRY_FILE),
+		&serde_json::to_string(&registry).expect("plugin registry encodes"),
+	);
+}
+
+/// The approval state `omp ext trust <plugin> --show` reports for the
+/// command it leads with `label`, run against the chat's own home, data
+/// directory, and project.
+async fn trust_status(binary: &Path, home: &Path, project: &Path, label: &str) -> &'static str {
+	let plugin = label.split(' ').next().expect("label names its plugin");
+	let mut command = tokio::process::Command::new(binary);
+	command
+		.args(["ext", "trust", plugin, "--show", "--project"])
+		.arg(project)
+		.current_dir(project)
+		.env("HOME", home)
+		.env("OMP_DATA_DIR", home.join("data"))
+		.env("NO_COLOR", "1");
+	let output = omp_e2e::support::OwnedProcess::output(command, READY_TIMEOUT)
+		.await
+		.unwrap_or_else(|error| panic!("omp ext trust {plugin} --show: {error}"));
+	let shown = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success(),
+		"omp ext trust {plugin} --show failed: {}\nstdout={shown}\nstderr={}",
+		output.status,
+		String::from_utf8_lossy(&output.stderr),
+	);
+	let line = shown
+		.lines()
+		.find(|line| line.starts_with(label))
+		.unwrap_or_else(|| panic!("omp ext trust {plugin} --show omits {label}:\n{shown}"));
+	["approved", "blocked", "unreadable"]
+		.into_iter()
+		.find(|status| line.contains(&format!("` {status} digest=")))
+		.unwrap_or_else(|| panic!("no approval state in {line:?}"))
+}
+
+/// The glyph painted at display column `column` of `row`.
+fn glyph_at(row: &str, column: usize) -> Option<char> {
+	let mut at = 0;
+	for glyph in row.chars() {
+		if at == column {
+			return Some(glyph);
+		}
+		at += xutf::width_char(glyph);
+		if at > column {
+			return None;
+		}
+	}
+	None
+}
+
+/// The painted rows of the bordered overlay titled `title` in `screen`, from
+/// its top border to its bottom border, after checking that it is one intact
+/// box: the title painted once, every row inside `cols`, and every row
+/// between the corners carrying its left and right border on the corners'
+/// display columns.
+fn overlay_box<'s>(screen: &'s str, title: &str, cols: usize) -> Vec<&'s str> {
+	let rows = screen.lines().collect::<Vec<_>>();
+	for row in &rows {
+		assert!(xutf::width_str(row) <= cols, "row wider than {cols} columns: {row:?}\n{screen}");
+	}
+	assert_eq!(screen.matches(title).count(), 1, "{title:?} painted more than once:\n{screen}");
+	let top = rows
+		.iter()
+		.position(|row| row.contains(title))
+		.expect("overlay title row");
+	let corner = rows[top]
+		.find('╭')
+		.unwrap_or_else(|| panic!("overlay top border is torn: {:?}\n{screen}", rows[top]));
+	let left = xutf::width_str(&rows[top][..corner]);
+	let right = xutf::width_str(&rows[top][..rows[top].rfind('╮').expect("top-right corner")]);
+	for (bottom, row) in rows.iter().enumerate().skip(top + 1) {
+		match (glyph_at(row, left), glyph_at(row, right)) {
+			(Some('╰'), Some('╯')) => return rows[top..=bottom].to_vec(),
+			(Some('│'), Some('│')) | (Some('├'), Some('┤')) => {},
+			sides => panic!("overlay row lost its borders {sides:?}: {row:?}\n{screen}"),
+		}
+	}
+	panic!("overlay has no bottom border:\n{screen}")
+}
+
+/// The selector's option row naming `label`, cursor or not.
+fn listed<'r>(overlay: &[&'r str], label: &str) -> Option<&'r str> {
+	let (selected, unselected) = (format!("│ ❯ {label}"), format!("│   {label}"));
+	overlay
+		.iter()
+		.copied()
+		.find(|row| row.contains(&selected) || row.contains(&unselected))
+}
+
+/// Proves in-chat approval of blocked plugin commands on a real PTY: the
+/// launch names what it blocked, `/plugins approve` opens the selector over
+/// exactly those commands, arrow navigation and Enter approve one through
+/// the same admission `omp ext trust` uses (read back through that CLI while
+/// chat still runs), the selector re-lays out across a resize, the direct
+/// `/plugins approve <plugin> all` form approves the rest of a plugin, and
+/// quitting restores the terminal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_tui_approves_blocked_plugin_commands_on_a_real_pty() {
+	use std::os::unix::fs::PermissionsExt;
+	omp_e2e::support::install_omp_binary_env().expect("install Cargo-built omp binary");
+	let scratch = tempfile::tempdir().expect("scratch root");
+	fs::set_permissions(scratch.path(), <fs::Permissions>::from_mode(0o700))
+		.expect("secure scratch root");
+	let project = scratch.path().join("project");
+	fs::create_dir(&project).expect("project directory");
+	let project = fs::canonicalize(&project).expect("canonical project root");
+	let metadata_dir = project.join(".omp");
+	fs::create_dir(&metadata_dir).expect("project metadata directory");
+	fs::set_permissions(&metadata_dir, <fs::Permissions>::from_mode(0o755))
+		.expect("use standard project metadata permissions");
+
+	// Two installed Claude-layout plugins, each declaring a stdio MCP server
+	// and a Stop hook nobody approved: the launch blocks all four commands.
+	// `PtyChild` points HOME at the scratch `home`, so the host's own Claude
+	// Code installs never join the fixture.
+	let home = scratch.path().join("home");
+	let data = home.join("data");
+	let mut roots = Vec::with_capacity(2);
+	for (name, server) in [("alpha", "db"), ("beta", "search")] {
+		let root = data.join(format!("plugins/cache/plugins/market___{name}___1.0.0"));
+		write_fixture(
+			&root.join(".mcp.json"),
+			&format!(
+				r#"{{"mcpServers":{{"{server}":{{"command":"${{CLAUDE_PLUGIN_ROOT}}/bin/{server}","args":["--stdio"]}}}}}}"#
+			),
+		);
+		write_fixture(
+			&root.join("hooks/hooks.json"),
+			r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/bin/on-stop"}]}]}}"#,
+		);
+		roots.push(root);
+	}
+	install_plugins(&data, &[
+		("alpha@market", roots[0].as_path()),
+		("beta@market", roots[1].as_path()),
+	]);
+	// Each row the selector lists, as `omp ext trust --show` also leads its
+	// line: plugin, component, and name.
+	let labels = [
+		"alpha@market MCP server `alpha@market:db`",
+		"alpha@market hook `Stop`",
+		"beta@market MCP server `beta@market:search`",
+		"beta@market hook `Stop`",
+	];
+	// The tail of each command line, which the selector must keep visible.
+	let tails = ["bin/db --stdio", "bin/on-stop", "bin/search --stdio", "bin/on-stop"];
+
+	let binary = omp_e2e::support::omp_binary().expect("locate omp binary");
+	for label in labels {
+		assert_eq!(
+			trust_status(&binary, &home, &project, label).await,
+			"blocked",
+			"{label} before launch"
+		);
+	}
+
+	let gateway_socket = scratch.path().join("gateway.sock");
+	let debug_socket = scratch.path().join("tui-debug.sock");
+	// No turn runs: approving a command never reaches the provider, and an
+	// unscripted call would fail the proof.
+	let gateway =
+		ScriptedGateway::start_with_scripts(scratch.path(), &gateway_socket, Vec::new()).await;
+	let session_path = scratch.path().join("p7-plugins.oms");
+	seed_session(&session_path);
+	let args = vec![
+		"chat".to_owned(),
+		"--model".to_owned(),
+		gateway.model.clone(),
+		"--project".to_owned(),
+		project.display().to_string(),
+		"--gateway".to_owned(),
+		gateway_socket.display().to_string(),
+		"--session".to_owned(),
+		session_path.display().to_string(),
+		"--envd-idle-timeout".to_owned(),
+		"2".to_owned(),
+	];
+	let mut process = PtyChild::spawn(&binary, &args, &project, &debug_socket);
+	let raw_capture = process.raw.clone();
+	let mut debug =
+		DebugClient::connect(&debug_socket, Instant::now() + READY_TIMEOUT, &mut process);
+
+	// The launch's last notice, the one that stays visible, counts the
+	// blocked commands and names the in-chat approval.
+	let ready = wait_snapshot(&mut debug, &raw_capture, "blocked launch named", |snapshot| {
+		snapshot.text.contains(COMPOSER_PROMPT)
+			&& snapshot.text.contains(
+				"4 plugin commands did not run: approve them with `/plugins approve`, then `/restart`",
+			)
+	});
+	assert_surface(&ready, "blocked launch");
+
+	// The selector lists exactly the blocked commands, cursor on the first,
+	// each command's executable and arguments visible, with the approval
+	// count, the `/restart` rule, and the `--plugin-dir` alternative.
+	debug.keys("'/plugins approve' enter");
+	let opened = wait_snapshot(&mut debug, &raw_capture, "approval selector open", |snapshot| {
+		snapshot.text.contains("Plugin commands")
+			&& snapshot.text.contains("4 commands await approval")
+	});
+	let overlay = overlay_box(&opened.text, "Plugin commands", 120);
+	let mut order = labels
+		.iter()
+		.zip(tails)
+		.map(|(label, tail)| {
+			let row = listed(&overlay, label)
+				.unwrap_or_else(|| panic!("selector omits {label}:\n{}", opened.text));
+			assert!(row.contains(tail), "{label} hides its command {tail:?}: {row:?}");
+			let index = overlay
+				.iter()
+				.position(|candidate| *candidate == row)
+				.expect("listed row");
+			(index, *label)
+		})
+		.collect::<Vec<_>>();
+	order.sort_unstable();
+	for text in [
+		"approved commands load after /restart",
+		"start omp with --plugin-dir <path>",
+		"Enter approve",
+	] {
+		assert!(opened.text.contains(text), "selector footer omits {text:?}:\n{}", opened.text);
+	}
+	let cursor = |overlay: &[&str], label: &str| {
+		listed(overlay, label).is_some_and(|row| row.contains(&format!("❯ {label}")))
+	};
+	assert!(cursor(&overlay, order[0].1), "cursor starts on the first row:\n{}", opened.text);
+
+	// Down moves the cursor to the second row; Enter approves that command.
+	let target = order[1].1;
+	debug.keys("down");
+	wait_snapshot(&mut debug, &raw_capture, "cursor on the second command", |snapshot| {
+		cursor(&overlay_box(&snapshot.text, "Plugin commands", 120), target)
+	});
+	debug.keys("enter");
+	// The outcome lands in the selector's own status row, inside the intact
+	// box, and the approved command leaves the list.
+	let approved_line = format!("Approved 1 command; run /restart to load it: {target}.");
+	let approved =
+		wait_snapshot(&mut debug, &raw_capture, "selected command approved", |snapshot| {
+			snapshot.text.contains(&approved_line)
+				&& listed(&overlay_box(&snapshot.text, "Plugin commands", 120), target).is_none()
+		});
+	let overlay = overlay_box(&approved.text, "Plugin commands", 120);
+	assert!(
+		overlay
+			.iter()
+			.any(|row| row.contains(&format!("│ {approved_line}"))),
+		"outcome outside the selector's status row:\n{}",
+		approved.text
+	);
+	let left = order
+		.iter()
+		.map(|(_, label)| *label)
+		.filter(|label| *label != target)
+		.collect::<Vec<_>>();
+	for label in &left {
+		assert!(listed(&overlay, label).is_some(), "{label} left the list:\n{}", approved.text);
+	}
+	// Persisted, through the grant file `omp ext trust` reads, while the
+	// session still runs.
+	assert_eq!(
+		trust_status(&binary, &home, &project, target).await,
+		"approved",
+		"{target} after Enter"
+	);
+	for label in &left {
+		assert_eq!(
+			trust_status(&binary, &home, &project, label).await,
+			"blocked",
+			"{label} after approving {target}"
+		);
+	}
+
+	// The next key returns the status row to the count; the rebuilt list
+	// started its cursor over, so Down selects the second remaining command.
+	debug.keys("down");
+	wait_snapshot(&mut debug, &raw_capture, "cursor on a remaining command", |snapshot| {
+		snapshot.text.contains("3 commands await approval")
+			&& cursor(&overlay_box(&snapshot.text, "Plugin commands", 120), left[1])
+	});
+
+	// A resize while the selector is open re-lays it out at the new
+	// geometry as one intact box over the surviving composer, the cursor
+	// still on the command the operator selected.
+	process.resize(24, 72);
+	debug
+		.op("resize")
+		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
+	wait_info(&mut debug, "settled selector resize", |info| {
+		info.get("rows").and_then(Value::as_u64) == Some(24)
+			&& info.get("cols").and_then(Value::as_u64) == Some(72)
+			&& info.get("overlay").and_then(Value::as_bool) == Some(true)
+	});
+	let resized = wait_snapshot(&mut debug, &raw_capture, "selector re-laid out", |snapshot| {
+		snapshot.text.contains("3 commands await approval") && snapshot.text.contains(COMPOSER_PROMPT)
+	});
+	let overlay = overlay_box(&resized.text, "Plugin commands", 72);
+	for label in &left {
+		assert!(listed(&overlay, label).is_some(), "{label} lost on resize:\n{}", resized.text);
+	}
+	assert!(
+		cursor(&overlay, left[1]),
+		"the resize moved the cursor off {}:\n{}",
+		left[1],
+		resized.text
+	);
+
+	debug.keys("escape");
+	wait_snapshot(&mut debug, &raw_capture, "selector closed", |snapshot| {
+		!snapshot.text.contains("Plugin commands") && snapshot.text.contains(COMPOSER_PROMPT)
+	});
+
+	// The direct form approves every command of one plugin; the result line
+	// keeps `/restart` in view even truncated at 72 columns.
+	debug.keys("'/plugins approve beta@market all' enter");
+	wait_snapshot(&mut debug, &raw_capture, "direct approval settled", |snapshot| {
+		snapshot
+			.text
+			.contains("Approved 2 commands; run /restart to load them: beta@market")
+	});
+	for label in &labels[2..] {
+		assert_eq!(
+			trust_status(&binary, &home, &project, label).await,
+			"approved",
+			"{label} after `all`"
+		);
+	}
+
+	// Reopened, the selector reads the grant file fresh: only the one alpha
+	// command neither approval covered is left.
+	let remaining = order
+		.iter()
+		.map(|(_, label)| *label)
+		.find(|label| *label != target && label.starts_with("alpha@"))
+		.expect("one alpha command stays blocked");
+	debug.keys("'/plugins approve' enter");
+	let reopened = wait_snapshot(&mut debug, &raw_capture, "selector reopened", |snapshot| {
+		snapshot.text.contains("1 command awaits approval")
+	});
+	let overlay = overlay_box(&reopened.text, "Plugin commands", 72);
+	assert!(listed(&overlay, remaining).is_some(), "{remaining} missing:\n{}", reopened.text);
+	assert!(
+		!overlay.iter().any(|row| row.contains("beta@market")),
+		"approved beta commands still listed:\n{}",
+		reopened.text
+	);
+	debug.keys("escape");
+	let closed = wait_snapshot(&mut debug, &raw_capture, "selector closed again", |snapshot| {
+		!snapshot.text.contains("Plugin commands") && snapshot.text.contains(COMPOSER_PROMPT)
+	});
+
+	debug.keys("ctrl+c ctrl+c");
+	drop(debug);
+	let before = process.before.clone();
+	let (status, raw, stdout, stderr, after) = process.wait(READY_TIMEOUT);
+	let diagnostics = format!(
+		"status={status}\nstdout={stdout}\nstderr={stderr}\nlast screen={}\nraw={}",
+		closed.text,
+		visible(&raw),
+	);
+	assert!(status.success(), "omp chat did not exit cleanly\n{diagnostics}");
+	assert_restored(&raw, &before, &after, &diagnostics);
+	assert_eq!(
+		trust_status(&binary, &home, &project, remaining).await,
+		"blocked",
+		"{remaining} after quit"
+	);
+	assert_eq!(
+		trust_status(&binary, &home, &project, target).await,
+		"approved",
+		"{target} after quit"
+	);
+}
