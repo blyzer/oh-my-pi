@@ -15,14 +15,14 @@ Both grammars are KDL v2. Unknown nodes/directives and malformed value shapes ar
 
 ## Regeneration and validation
 
+The compiled snapshot (`data/catalog.postcard`) and its provenance lock (`data/sources.lock.json`, the SHA-256 of every source below plus an aggregate digest) are generated, never hand-edited:
+
 ```sh
-cd /work/omp
-env OMP_LLM_CATALOG_REGEN=1 cargo run -p omp-catalog --example generate_snapshot --locked
-cargo nextest run -p omp-catalog --locked
-cargo test -p omp-catalog --doc --locked
+just catalog-snapshot                    # after editing any KDL, providers.toml, oauth.toml or policy fixture
+just test-pkg omp-catalog
 ```
 
-`compat-compile.test.ts` fails when `rules.json` drifts from the KDL sources; `compat-parity.test.ts` proves the engine reproduces every baked `models.json` compat/thinking value. Commit `data/catalog.postcard` and `data/sources.lock.json` together with the KDL change.
+`catalog-snapshot` runs `examples/generate_snapshot.rs --relock`: it rewrites the lock from the files on disk, compiles `fixtures/llm-oracle/catalog/{providers.toml,models.json.zst,oauth.toml}` through this cascade, and writes the postcard. `build.rs` refuses to compile the crate against a snapshot whose digest disagrees with the lock (`OMP_LLM_CATALOG_REGEN=1`, set by the recipe, lifts that check for the one build that replaces the snapshot). Commit `data/catalog.postcard` and `data/sources.lock.json` together with the source change.
 
 ## Taxonomy grammar
 
