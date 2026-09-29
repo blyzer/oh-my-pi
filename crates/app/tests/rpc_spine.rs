@@ -624,3 +624,330 @@ async fn rpc_ui_routes_retained_select_dialogs_and_responses() {
 		.expect("dialog answer");
 	assert_eq!(presentation.selections[0].selected, [Str::new_static("A")]);
 }
+
+/// One RPC server over a kernel whose registry is a real project
+/// environment's: `bash` resolves the environment's in-process shell, its
+/// admission policy, and the dispatcher's central output bound, exactly as
+/// production composes them (`EnvToolExecutor` + `SettingsAdmission`).
+struct EnvironmentRpc {
+	environment: omp_envd::ProjectEnvironment,
+	kernel:      Kernel<ScriptedInference>,
+	session:     Session,
+	home:        SessionHome,
+	root:        std::path::PathBuf,
+}
+
+async fn environment_rpc(temp: &tempfile::TempDir, con: omp_con::Ctx) -> EnvironmentRpc {
+	let root = temp.path().join("workspace");
+	let state = temp.path().join("state");
+	std::fs::create_dir_all(&root).expect("workspace");
+	std::fs::create_dir_all(&state).expect("state");
+	let con = Arc::new(con);
+	let environment = omp_envd::ProjectEnvironment::attach(&root, &state, omp_envd::AttachOptions {
+		py_eval:            false,
+		approval_mode:      None,
+		trusted_extensions: Vec::new(),
+		contributed_values: Vec::new(),
+		con:                Arc::clone(&con),
+		bridges:            omp_envd::RegistryBridges::default(),
+		spawn_idle_timeout: Some(2),
+	})
+	.await
+	.expect("environment");
+	let spill = BlobStore::open(temp.path().join("artifacts")).expect("spill");
+	let kernel = Kernel::new(
+		ScriptedInference { scripts: Mutex::new(VecDeque::new()) },
+		environment.registry(),
+		DispatchPolicy::new(spill.clone()),
+		StaticPrompt(Str::new_static("system")),
+	);
+	let approvals = kernel.approval_route();
+	environment.bind_approval_authority(
+		Some(Arc::new(omp_agent::ApprovalBook::new())),
+		Some(approvals.clone()),
+	);
+	let kernel = kernel
+		.with_external_executor(Arc::new(omp_driver::headless::kernel::EnvToolExecutor::new(
+			environment.client().clone(),
+			approvals,
+		)))
+		.with_tool_admission(Arc::new(omp_driver::headless::kernel::SettingsAdmission::new(
+			&con, None,
+		)));
+	let mut home = session_home(temp, &kernel);
+	home.project_root.clone_from(&root);
+	let session = Session::create_with_blob_store(
+		temp.path().join("rpc.oms"),
+		ComponentRegistry::standard(),
+		spill,
+	)
+	.expect("session");
+	EnvironmentRpc { environment, kernel, session, home, root }
+}
+
+/// Serves `rpc`, writing each request line in turn. A step naming a response
+/// id waits for that response before the next line; `delay_ms` pauses before
+/// writing. The last step should quit.
+async fn exchange(
+	rpc: EnvironmentRpc,
+	steps: &[(&'static str, Option<&'static str>, u64)],
+) -> Vec<Value> {
+	let EnvironmentRpc { environment, kernel, session, home, .. } = rpc;
+	let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+	let (server_read, server_write) = tokio::io::split(server_io);
+	let server =
+		omp_app::rpc_mode::serve_rpc(kernel, session, home, None, server_read, server_write);
+	let steps = steps.to_vec();
+	let client = async move {
+		let (client_read, mut client_write) = tokio::io::split(client_io);
+		let mut lines = BufReader::new(client_read).lines();
+		let mut frames = Vec::<Value>::new();
+		for (line, awaited, delay_ms) in steps {
+			tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+			client_write
+				.write_all(line.as_bytes())
+				.await
+				.expect("request");
+			let Some(awaited) = awaited else {
+				continue;
+			};
+			while let Some(line) = lines.next_line().await.expect("frame") {
+				let frame: Value = serde_json::from_str(&line).expect("json frame");
+				let done = frame["type"] == "response" && frame["id"] == awaited;
+				frames.push(frame);
+				if done {
+					break;
+				}
+			}
+		}
+		client_write.shutdown().await.expect("shutdown");
+		while let Some(line) = lines.next_line().await.expect("frame") {
+			frames.push(serde_json::from_str(&line).expect("json frame"));
+		}
+		frames
+	};
+	let (server, frames) = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+		tokio::join!(server, client)
+	})
+	.await
+	.expect("RPC bash exchange must settle");
+	server.expect("server");
+	// The environment outlives the server that dispatched into it.
+	drop(environment);
+	frames
+}
+
+/// RPC `bash` runs in the environment's persistent session shell, not a
+/// fresh host `/bin/sh`: stdout/stderr/exit status come from the shell's
+/// typed verdict, and cwd plus exports survive into the next request.
+#[tokio::test]
+async fn rpc_bash_runs_in_the_environment_session_shell() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let rpc = environment_rpc(&temp, omp_con::Ctx::new()).await;
+	let root = rpc.root.clone();
+	let frames = exchange(rpc, &[
+		(
+			"{\"id\":\"first\",\"type\":\"bash\",\"command\":\"mkdir -p sub; cd sub; export \
+			 OMP_RPC_PROBE=kept; echo out; echo err >&2; exit 3\"}\n",
+			Some("first"),
+			0,
+		),
+		(
+			"{\"id\":\"second\",\"type\":\"bash\",\"command\":\"pwd; echo \\\"$OMP_RPC_PROBE\\\"\"}\n",
+			Some("second"),
+			0,
+		),
+		("{\"id\":\"quit\",\"type\":\"quit\"}\n", None, 0),
+	])
+	.await;
+	let first = response(&frames, "first");
+	assert_eq!(first["success"], true, "{first}");
+	assert_eq!(first["data"]["stdout"], "out\n", "{first}");
+	assert_eq!(first["data"]["stderr"], "err\n", "{first}");
+	assert_eq!(first["data"]["exitCode"], 3, "{first}");
+	assert_eq!(first["data"]["cancelled"], false);
+	assert_eq!(first["data"]["truncated"], false);
+	assert!(first["data"].get("artifactId").is_none(), "{first}");
+	let second = response(&frames, "second");
+	assert_eq!(second["success"], true, "{second}");
+	let expected = format!(
+		"{}\nkept\n",
+		std::fs::canonicalize(root.join("sub"))
+			.expect("sub directory")
+			.display()
+	);
+	assert_eq!(second["data"]["stdout"], expected.as_str(), "{second}");
+	assert!(
+		!frames.iter().any(|frame| frame["type"] == "agent_end"),
+		"a bash run is not a model turn: {frames:#?}"
+	);
+}
+
+/// A command the environment's approval policy denies is denied through
+/// RPC too (`sv_tools_approval bash=deny`), and never runs.
+#[tokio::test]
+async fn rpc_bash_is_refused_by_environment_policy() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let con = omp_con::Ctx::new();
+	omp_envd::tool_settings::SV_TOOLS_APPROVAL
+		.set(
+			&con,
+			omp_con::Kv(vec![(Str::new_static("bash"), omp_con::Value::Str(Str::new_static("deny")))]),
+		)
+		.expect("deny bash");
+	let rpc = environment_rpc(&temp, con).await;
+	let marker = rpc.root.join("ran");
+	let frames = exchange(rpc, &[
+		("{\"id\":\"denied\",\"type\":\"bash\",\"command\":\"touch ran\"}\n", Some("denied"), 0),
+		("{\"id\":\"quit\",\"type\":\"quit\"}\n", None, 0),
+	])
+	.await;
+	let denied = response(&frames, "denied");
+	assert_eq!(denied["success"], false, "{denied}");
+	assert_eq!(denied["code"], "policy_denied", "{denied}");
+	assert!(!marker.exists(), "a denied command never runs");
+}
+
+/// Output beyond the central bound is truncated once, and the response names
+/// the artifact holding the complete output.
+#[tokio::test]
+async fn rpc_bash_output_over_the_bound_is_truncated_with_an_artifact() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let rpc = environment_rpc(&temp, omp_con::Ctx::new()).await;
+	let frames = exchange(rpc, &[
+		("{\"id\":\"large\",\"type\":\"bash\",\"command\":\"seq 1 40000\"}\n", Some("large"), 0),
+		("{\"id\":\"quit\",\"type\":\"quit\"}\n", None, 0),
+	])
+	.await;
+	let large = response(&frames, "large");
+	assert_eq!(large["success"], true, "{large}");
+	assert_eq!(large["data"]["truncated"], true, "{large}");
+	assert_eq!(large["data"]["exitCode"], 0);
+	let stdout = large["data"]["stdout"].as_str().expect("stdout");
+	assert!(stdout.starts_with("1\n2\n"), "{stdout:.64}");
+	assert!(
+		stdout.len() < "40000\n".len() * 40_000 / 2,
+		"inline stdout stays bounded: {} bytes",
+		stdout.len()
+	);
+	assert!(
+		large["data"]["artifactId"]
+			.as_str()
+			.is_some_and(|artifact| artifact.starts_with("artifact://sha256/")),
+		"{large}"
+	);
+}
+
+/// `abort_bash` interrupts a running command through the kernel's turn
+/// cancellation; the response reports `cancelled`.
+#[tokio::test]
+async fn rpc_abort_bash_cancels_the_running_command() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let rpc = environment_rpc(&temp, omp_con::Ctx::new()).await;
+	let started = std::time::Instant::now();
+	let frames = exchange(rpc, &[
+		("{\"id\":\"slow\",\"type\":\"bash\",\"command\":\"sleep 20\"}\n", None, 0),
+		("{\"id\":\"busy\",\"type\":\"prompt\",\"message\":\"hi\"}\n", Some("busy"), 300),
+		("{\"id\":\"abort\",\"type\":\"abort_bash\"}\n", Some("slow"), 0),
+		("{\"id\":\"quit\",\"type\":\"quit\"}\n", None, 0),
+	])
+	.await;
+	assert!(started.elapsed() < std::time::Duration::from_secs(15), "abort must not wait out sleep");
+	assert_eq!(response(&frames, "busy")["code"], "session_busy");
+	assert_eq!(response(&frames, "abort")["success"], true);
+	let slow = response(&frames, "slow");
+	assert_eq!(slow["success"], true, "{slow}");
+	assert_eq!(slow["data"]["cancelled"], true, "{slow}");
+}
+
+/// `handoff` is chat's `/handoff`: an in-place compaction under the handoff
+/// method. With nothing to hand off it says so instead of claiming success.
+#[tokio::test]
+async fn rpc_handoff_reports_nothing_to_hand_off() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let frames = converse(
+		&temp,
+		VecDeque::new(),
+		"{\"id\":\"empty\",\"type\":\"handoff\"}\n{\"id\":\"quit\",\"type\":\"quit\"}\n",
+		&[],
+	)
+	.await;
+	let empty = response(&frames, "empty");
+	assert_eq!(empty["success"], true, "{empty}");
+	assert_eq!(empty["data"]["handedOff"], false, "{empty}");
+	assert_eq!(empty["data"]["document"], Value::Null, "{empty}");
+}
+
+/// A session with history older than the kept tail hands off: the older turn
+/// is summarized by the handoff method and the response carries the
+/// journaled handoff document.
+#[tokio::test]
+async fn rpc_handoff_compacts_in_place_and_returns_the_document() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let kernel = scripted_kernel(
+		&temp,
+		VecDeque::from([completed_script("<handoff-context>\n# Goal\nShip it.\n</handoff-context>")]),
+	);
+	let home = session_home(&temp, &kernel);
+	let path = temp.path().join("rpc.oms");
+	let mut session = Session::create(&path, ComponentRegistry::standard()).expect("session");
+	session.begin_turn().expect("old turn");
+	session
+		.user(Str::new_static("an older request"), Vec::new())
+		.expect("old message");
+	// The newest turn alone fills the default kept tail, so the older turn is
+	// what the handoff summarizes.
+	session.begin_turn().expect("recent turn");
+	session
+		.user(Str::new("x".repeat(60 * 1024)), Vec::new())
+		.expect("recent message");
+	session.begin_turn().expect("recent turn");
+	session
+		.user(Str::new("y".repeat(60 * 1024)), Vec::new())
+		.expect("recent message");
+	let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+	let (server_read, server_write) = tokio::io::split(server_io);
+	let server =
+		omp_app::rpc_mode::serve_rpc(kernel, session, home, None, server_read, server_write);
+	let client = async move {
+		let (client_read, mut client_write) = tokio::io::split(client_io);
+		client_write
+			.write_all(
+				b"{\"id\":\"handoff\",\"type\":\"handoff\",\"customInstructions\":\"keep going\"}\n\
+				  {\"id\":\"quit\",\"type\":\"quit\"}\n",
+			)
+			.await
+			.expect("requests");
+		client_write.shutdown().await.expect("shutdown");
+		let mut lines = BufReader::new(client_read).lines();
+		let mut frames = Vec::<Value>::new();
+		while let Some(line) = lines.next_line().await.expect("frame") {
+			frames.push(serde_json::from_str::<Value>(&line).expect("json frame"));
+		}
+		frames
+	};
+	let (server, frames) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+		tokio::join!(server, client)
+	})
+	.await
+	.expect("handoff settles");
+	server.expect("server");
+	let handoff = response(&frames, "handoff");
+	assert_eq!(handoff["success"], true, "{handoff}");
+	assert_eq!(handoff["data"]["handedOff"], true, "{handoff}");
+	assert_eq!(handoff["data"]["document"], "# Goal\nShip it.", "{handoff}");
+	let session = Session::open(&path, ComponentRegistry::standard()).expect("journal reopens");
+	let dom = session.dom();
+	assert!(
+		dom.children(dom.meta()).iter().any(|handle| {
+			dom.get(*handle).is_some_and(|node| {
+				node.tag == omp_dom::Tag::Known(omp_dom::KnownTag::Compaction)
+					&& node
+						.prop(&omp_dom::PropKey::from(omp_dom::PropId::Method))
+						.and_then(omp_dom::Value::as_str)
+						== Some("handoff")
+			})
+		}),
+		"the handoff is journaled as a handoff compaction"
+	);
+}
