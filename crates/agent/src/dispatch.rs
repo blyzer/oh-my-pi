@@ -787,6 +787,20 @@ pub trait SessionTool: Send + Sync {
 	/// Executes one committed call against the authoritative session.
 	fn call<'a>(&'a self, cx: SessionToolCx<'a>, args: Box<RawValue>) -> SessionToolFuture<'a>;
 
+	/// Whether the next request advertises this tool's declaration.
+	///
+	/// A session tool whose availability follows the live session state (the
+	/// `task` tool at the recursion ceiling of the session it presents) is
+	/// withheld from the roster instead of advertised and refused. The answer
+	/// must derive from session-scoped state, which changes at a session
+	/// boundary (a switch, a resumed child's class) rather than between a
+	/// session's turns, so the roster a session's prompt cache holds stays
+	/// fixed within it. A call that still arrives reaches
+	/// [`SessionTool::call`], which owns its refusal.
+	fn advertised(&self) -> bool {
+		true
+	}
+
 	/// Projects the terminal truth into model-visible parts.
 	///
 	/// Structured session tools default to their typed JSON. Tools whose
@@ -1327,6 +1341,16 @@ impl Dispatcher {
 	pub(crate) fn with_lifecycle_hooks(mut self, hooks: crate::LifecycleHooks) -> Self {
 		self.committer.lifecycle_hooks = Some(hooks);
 		self
+	}
+
+	/// Whether a session tool claiming `name` withholds it from the next
+	/// request's roster ([`SessionTool::advertised`]).
+	#[must_use]
+	pub fn withholds(&self, name: &str) -> bool {
+		self
+			.session_tools
+			.get(name)
+			.is_some_and(|tool| !tool.advertised())
 	}
 
 	/// Borrows the runtime registry.

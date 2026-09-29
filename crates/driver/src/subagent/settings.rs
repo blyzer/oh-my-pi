@@ -603,7 +603,17 @@ pub fn child_ctx(
 	loader: &dyn CfgLoader,
 	agent: &str,
 ) -> Result<Ctx, omp_con::ConError> {
-	let seed = parent.seed_child();
+	seeded_child_ctx(parent.seed_child(), loader, agent)
+}
+
+/// [`child_ctx`] over an explicit `seed` in place of a live parent's picture:
+/// the main chat resuming a child session inherits the main scope's picture
+/// ([`Ctx::scope_seed`]), as it has no live parent to seed from.
+pub fn seeded_child_ctx(
+	seed: omp_con::Seed,
+	loader: &dyn CfgLoader,
+	agent: &str,
+) -> Result<Ctx, omp_con::ConError> {
 	let child = Ctx::new();
 	let (dynamic_vars, values) = seed.into_parts();
 	for spec in dynamic_vars {

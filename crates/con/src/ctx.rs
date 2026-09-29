@@ -866,14 +866,22 @@ impl Ctx {
 		Ok(())
 	}
 
-	/// Replaces this context's inherited and class layers with `scope`'s — a
-	/// child context composed by the spawn path — so this context presents
-	/// that child's configuration beneath its own session writes (the main
-	/// chat resuming a child session). Nothing is published: both layers are
-	/// derived from the child's definition, never journaled.
+	/// Presents `scope` — a child context composed by the spawn path — as
+	/// this context's configuration (the main chat resuming a child session):
+	/// its inherited and class layers replace this context's, and the first
+	/// adoption parks this context's session layer, so the main scope's
+	/// session writes (console and host writes, launch flags, the main
+	/// session's journaled values) neither outrank the child's class nor
+	/// become the child's own. The child's session layer starts empty; its
+	/// journal restores its own writes into it. While a scope is adopted, a
+	/// later adoption (the same session re-read, or another child) replaces
+	/// only the inherited and class layers and keeps both session layers.
 	///
-	/// A value naming a variable this context does not declare, or of the
-	/// wrong type, is reported through the sink and dropped.
+	/// Nothing is published: the class layers derive from the child's
+	/// definition and the parked layer belongs to the main scope, so neither
+	/// is journaled into the presented session. A value naming a variable
+	/// this context does not declare, or of the wrong type, is reported
+	/// through the sink and dropped.
 	pub fn adopt_scope(&self, scope: &Self) {
 		let (inherited, class) = {
 			let layers = scope.layers.read();
@@ -902,15 +910,54 @@ impl Ctx {
 		};
 		let inherited = checked(inherited);
 		let class = checked(class);
-		self.replace_scope(inherited, class);
+		self.replace_scope(inherited, class, ScopeSession::Park);
 	}
 
-	/// Clears the inherited and class layers [`Ctx::adopt_scope`] installed.
+	/// Leaves the scope [`Ctx::adopt_scope`] presented: clears its inherited
+	/// and class layers and restores the parked main-scope session layer in
+	/// place of the child's. The child's journaled writes stay in its
+	/// journal; its unjournaled writes lasted as long as the scope. Without
+	/// an adopted scope only the inherited and class layers are cleared.
 	pub fn drop_scope(&self) {
-		self.replace_scope(FastHashMap::default(), FastHashMap::default());
+		self.replace_scope(FastHashMap::default(), FastHashMap::default(), ScopeSession::Restore);
 	}
 
-	fn replace_scope(&self, inherited: FastHashMap<Str, Value>, class: FastHashMap<Str, Value>) {
+	/// The picture a child scope adopted by this context inherits (ADR 0013
+	/// seed, [`Ctx::adopt_scope`]): the main scope's session layer — parked
+	/// while a scope is adopted — over its archive layer, plus every dynamic
+	/// declaration. A spawned child seeds from its parent's live effective
+	/// picture ([`Ctx::seed_child`]); a resumed one has no live parent, so it
+	/// inherits the main scope without an adopted scope's layers, its own
+	/// session writes, or engagement binds, which the presented session
+	/// derives from its own journal. Rebuilding the seed while a scope is
+	/// adopted therefore yields the same picture.
+	#[must_use]
+	pub fn scope_seed(&self) -> Seed {
+		let values = {
+			let layers = self.layers.read();
+			let main = layers.parked.as_ref().unwrap_or(&layers.session);
+			let mut values = layers.archive.clone();
+			values.extend(
+				main
+					.iter()
+					.map(|(name, value)| (name.clone(), value.clone())),
+			);
+			values
+		};
+		let dynamic_vars = self
+			.dynamic_vars
+			.iter()
+			.map(|item| item.spec.clone())
+			.collect();
+		Seed::with_dynamic_vars(values, dynamic_vars)
+	}
+
+	fn replace_scope(
+		&self,
+		inherited: FastHashMap<Str, Value>,
+		class: FastHashMap<Str, Value>,
+		session: ScopeSession,
+	) {
 		let touched = {
 			let mut layers = self.layers.write();
 			let mut touched: Vec<Str> = layers
@@ -923,6 +970,21 @@ impl Ctx {
 				.collect();
 			layers.inherited = inherited;
 			layers.class = class;
+			match session {
+				ScopeSession::Park if layers.parked.is_none() => {
+					let main = std::mem::take(&mut layers.session);
+					touched.extend(main.keys().cloned());
+					layers.parked = Some(main);
+				},
+				ScopeSession::Restore => {
+					if let Some(main) = layers.parked.take() {
+						touched.extend(layers.session.keys().cloned());
+						touched.extend(main.keys().cloned());
+						layers.session = main;
+					}
+				},
+				ScopeSession::Park => {},
+			}
 			touched.sort_unstable();
 			touched.dedup();
 			touched
@@ -1964,6 +2026,16 @@ fn issue_error_str(name: Str, issue: CoerceIssue) -> ConError {
 		CoerceIssue::Kind { expected, got } => ConError::TypeMismatch { name, expected, got },
 		CoerceIssue::Variant { got } => ConError::InvalidVariant { name, got },
 	}
+}
+
+/// What [`Ctx::adopt_scope`] and [`Ctx::drop_scope`] do with the session
+/// layer.
+#[derive(Clone, Copy)]
+enum ScopeSession {
+	/// Set the main scope's session layer aside, unless a scope already did.
+	Park,
+	/// Put the parked main-scope session layer back, if one is parked.
+	Restore,
 }
 
 /// Permission provenance of a command-stream statement committing to

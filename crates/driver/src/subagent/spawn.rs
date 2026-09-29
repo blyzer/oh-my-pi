@@ -38,7 +38,8 @@ use tokio_util::sync::CancellationToken;
 use super::{
 	AgentName,
 	settings::{
-		SV_TASK_RECURSION_DEPTH, TaskEffortCeiling, TaskIsolationMerge, TaskSettings, child_ctx,
+		SV_TASK_RECURSION_DEPTH, TaskEffortCeiling, TaskIsolationMerge, TaskSettings,
+		seeded_child_ctx,
 	},
 	yield_assembly,
 };
@@ -258,6 +259,13 @@ impl TaskSessionTool {
 impl SessionTool for TaskSessionTool {
 	fn spec(&self) -> &ToolSpec {
 		&self.spec
+	}
+
+	/// Withheld at the recursion ceiling of the session the console presents:
+	/// a spawned child's own depth, or the class depth of a child the main
+	/// chat resumed ([`super::settings::task_withheld`]).
+	fn advertised(&self) -> bool {
+		!super::settings::task_withheld(&self.parent_ctx)
 	}
 
 	fn call<'a>(
@@ -1043,33 +1051,60 @@ async fn destroy_isolation(env: &EnvClient, id: &str) -> Result<(), SpawnError> 
 
 /// Builds a child's whole configuration the way the spawn path does.
 ///
-/// Shared by every path that runs or presents a child (spawn, revive,
-/// workpool workers, and the main chat resuming a child session):
-/// [`child_ctx`] (the parent's live picture in the inherited layer, then
-/// `subagent.cfg` and `<agent>.cfg` in the class layer), the next recursion
-/// depth, and the spawner's explicit route (requested effort, the effort
-/// ceiling, a per-agent model override), all class-layer writes. The caller
-/// supplies a model when the result leaves `ai_model` empty.
+/// Shared by every path that runs a child (spawn, revive, workpool workers)
+/// and, through [`configure_resumed_child`], by the main chat resuming a
+/// child session: [`child_ctx`](super::settings::child_ctx) (the parent's live
+/// picture in the inherited layer, then `subagent.cfg` and `<agent>.cfg` in the
+/// class layer), the next recursion depth, and the spawner's explicit route
+/// (requested effort, the effort ceiling, a per-agent model override), all
+/// class-layer writes. The caller supplies a model when the result leaves
+/// `ai_model` empty.
 pub fn configure_child(
 	parent: &Ctx,
 	loader: &dyn omp_con::CfgLoader,
 	agent: &str,
 	effort: Option<TaskEffort>,
 ) -> Result<(Ctx, TaskSettings), SpawnError> {
-	let depth = SV_TASK_RECURSION_DEPTH.get(parent);
-	let ctx = child_ctx(parent, loader, agent)?;
-	SV_TASK_RECURSION_DEPTH
-		.set_in(&ctx, depth.saturating_add(1), Origin::Class)
-		.map_err(SpawnError::Con)?;
+	let depth = SV_TASK_RECURSION_DEPTH.get(parent).saturating_add(1);
+	Ok(configure_seeded_child(parent.seed_child(), depth, loader, agent, effort)?)
+}
+
+/// Builds the configuration of a child session the main chat resumes.
+///
+/// It takes the spawn path of [`configure_child`] on `console`: the child
+/// inherits the main scope's picture ([`Ctx::scope_seed`], never the resumed
+/// session's own writes or a previously adopted class) and runs at `depth`,
+/// the recursion depth its journal records ([`super::journaled_depth`]). The
+/// spawner's route choices were per-spawn requests and are not replayed; the
+/// effort ceiling still applies.
+pub fn configure_resumed_child(
+	console: &Ctx,
+	loader: &dyn omp_con::CfgLoader,
+	agent: &str,
+	depth: u32,
+) -> Result<(Ctx, TaskSettings), ConError> {
+	configure_seeded_child(console.scope_seed(), depth, loader, agent, None)
+}
+
+fn configure_seeded_child(
+	seed: omp_con::Seed,
+	depth: u32,
+	loader: &dyn omp_con::CfgLoader,
+	agent: &str,
+	effort: Option<TaskEffort>,
+) -> Result<(Ctx, TaskSettings), ConError> {
+	let ctx = seeded_child_ctx(seed, loader, agent)?;
+	SV_TASK_RECURSION_DEPTH.set_in(&ctx, depth, Origin::Class)?;
 	let settings = TaskSettings::from_con(&ctx);
 	configure_child_route(&ctx, &settings, agent, effort)?;
 	Ok((ctx, settings))
 }
 
 /// Applies the spawner's explicit route choices to a child built by
-/// [`child_ctx`]: the requested effort, the `sv_task_max_effort` ceiling, and a
-/// `sv_task_agent_model_overrides` entry for `agent`, which outranks every cfg.
-/// `ai_task_model` is not consulted here: [`child_ctx`] seeds it beneath the
+/// [`child_ctx`](super::settings::child_ctx): the requested effort, the
+/// `sv_task_max_effort` ceiling, and a `sv_task_agent_model_overrides` entry
+/// for `agent`, which outranks every cfg. `ai_task_model` is not consulted
+/// here: [`child_ctx`](super::settings::child_ctx) seeds it beneath the
 /// class cfg, so a class's own `ai_model` keeps precedence over it. Every
 /// write lands in the class layer.
 pub(crate) fn configure_child_route(
@@ -1077,16 +1112,14 @@ pub(crate) fn configure_child_route(
 	settings: &TaskSettings,
 	agent: &str,
 	effort: Option<TaskEffort>,
-) -> Result<(), SpawnError> {
+) -> Result<(), ConError> {
 	if let Some(effort) = effort {
 		let thinking = match effort {
 			TaskEffort::Lo => "low",
 			TaskEffort::Med => "medium",
 			TaskEffort::Hi => "high",
 		};
-		omp_agent::AI_THINKING
-			.set_in(ctx, Str::new_static(thinking), Origin::Class)
-			.map_err(SpawnError::Con)?;
+		omp_agent::AI_THINKING.set_in(ctx, Str::new_static(thinking), Origin::Class)?;
 	}
 	clamp_effort(ctx, settings.max_effort)?;
 	if let Some(model) = settings
@@ -1095,9 +1128,7 @@ pub(crate) fn configure_child_route(
 		.find(|(name, _)| name.as_str().eq_ignore_ascii_case(agent))
 		.map(|(_, model)| model.clone())
 	{
-		omp_agent::AI_MODEL
-			.set_in(ctx, model, Origin::Class)
-			.map_err(SpawnError::Con)?;
+		omp_agent::AI_MODEL.set_in(ctx, model, Origin::Class)?;
 	}
 	Ok(())
 }
@@ -1112,7 +1143,7 @@ fn child_status(stop: TurnStop, error: Option<&Str>) -> Str {
 	}
 }
 
-fn clamp_effort(ctx: &Ctx, ceiling: TaskEffortCeiling) -> Result<(), SpawnError> {
+fn clamp_effort(ctx: &Ctx, ceiling: TaskEffortCeiling) -> Result<(), ConError> {
 	let current = omp_agent::AI_THINKING.get(ctx);
 	let rank = |value: &str| match value {
 		"off" => 0,
@@ -1126,9 +1157,7 @@ fn clamp_effort(ctx: &Ctx, ceiling: TaskEffortCeiling) -> Result<(), SpawnError>
 	};
 	let maximum: &'static str = ceiling.into();
 	if rank(current.as_str()) > rank(maximum) {
-		omp_agent::AI_THINKING
-			.set_in(ctx, Str::new_static(maximum), Origin::Class)
-			.map_err(SpawnError::Con)?;
+		omp_agent::AI_THINKING.set_in(ctx, Str::new_static(maximum), Origin::Class)?;
 	}
 	Ok(())
 }
@@ -1720,10 +1749,10 @@ mod tests {
 	}
 
 	/// The model a child of `agent` spawned from `parent` routes to, built the
-	/// way every spawn path builds it: [`child_ctx`] then
-	/// [`configure_child_route`].
+	/// way every spawn path builds it: [`child_ctx`](super::settings::child_ctx)
+	/// then [`configure_child_route`].
 	fn spawned_model(parent: &Ctx, files: &crate::cfg::CfgFiles, agent: &str) -> Str {
-		let ctx = child_ctx(parent, files, agent).expect("child context");
+		let ctx = super::super::settings::child_ctx(parent, files, agent).expect("child context");
 		let settings = TaskSettings::from_con(&ctx);
 		configure_child_route(&ctx, &settings, agent, None).expect("child route");
 		omp_agent::AI_MODEL.get(&ctx)
