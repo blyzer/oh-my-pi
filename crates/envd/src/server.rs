@@ -91,7 +91,7 @@ use super::{
 		BridgeHostError, ParentBindingLease, ParentSessionHost, PreludeInvoker, SessionBridgeHost,
 	},
 	exec::{ExecError, ExecEvent, ExecHost, ExecRun, ProcessEvent},
-	exec_settings::{AcpSettings, SandboxSettings, ShellSettings},
+	exec_settings::{SandboxSettings, ShellSettings},
 	exthost::{ExtensionManifest, control::CompositeControlAuthority, lifecycle::EscapeCapability},
 	github_url::GithubCredentialBridge,
 	host_info::HostInfoHost,
@@ -119,7 +119,6 @@ use super::{
 	site::{SiteError, SiteMaterializer, record_modules},
 	tool_document::{PrivilegedMutationFault, privileged_unlink, privileged_write},
 	tool_settings::{ApprovalMode, GithubCacheSettings, ToolSettings},
-	tool_shell::{AcpExecBackend, AcpExecSlot},
 	tool_url::UrlResolver,
 	tools::{
 		AgentCheckpointControl, InvocationAcpBackends, InvocationEditRepairContext,
@@ -1978,7 +1977,6 @@ pub struct EnvServer {
 	environment:             Option<EnvironmentAuthorities>,
 	tool_settings:           ToolSettings,
 	exec:                    ExecHost,
-	acp_exec:                AcpExecSlot,
 	approvals:               ApprovalAuthoritySlot,
 	http_egress:             HttpEgressHost,
 	workspace:               WorkspaceHost,
@@ -2014,13 +2012,12 @@ pub struct EnvServer {
 
 fn execution_settings(
 	ctx: &Ctx,
-) -> (HostSettings, BrowserSettings, ShellSettings, SandboxSettings, AcpSettings) {
+) -> (HostSettings, BrowserSettings, ShellSettings, SandboxSettings) {
 	(
 		HostSettings::from_con(ctx),
 		BrowserSettings::from_con(ctx),
 		ShellSettings::from_con(ctx),
 		SandboxSettings::from_con(ctx),
-		AcpSettings::from_con(ctx),
 	)
 }
 
@@ -2148,7 +2145,6 @@ fn requires_environment_host(body: &client_frame::Body) -> bool {
 			| client_frame::Body::EditRepairAnswer(_)
 			| client_frame::Body::AcpBind(_)
 			| client_frame::Body::AcpDocumentAnswer(_)
-			| client_frame::Body::AcpExecEvent(_)
 			| client_frame::Body::RegisterPresence(_)
 			| client_frame::Body::ReleasePresence(_)
 			| client_frame::Body::OpenSession(_)
@@ -2338,7 +2334,6 @@ impl EnvServer {
 		environment: Option<EnvironmentAuthorities>,
 		tool_settings: ToolSettings,
 		exec: ExecHost,
-		acp_exec: AcpExecSlot,
 		workspace: WorkspaceHost,
 		mcp: Arc<McpService>,
 		mcp_manager: Arc<McpManager>,
@@ -2373,7 +2368,6 @@ impl EnvServer {
 			environment,
 			tool_settings,
 			exec,
-			acp_exec,
 			approvals: ApprovalAuthoritySlot::default(),
 			http_egress: HttpEgressHost::new(),
 			workspace,
@@ -2529,7 +2523,7 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (host_settings, browser_settings, shell_settings, sandbox_settings, acp_settings) =
+		let (host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		let mcp_settings = McpSettings::from_con(con);
@@ -2547,7 +2541,6 @@ impl EnvServer {
 		)?;
 		let memory_runtime =
 			start_memory_runtime(&host_settings, state_dir, workspace.root(), &session_id).await?;
-		let acp_exec = AcpExecSlot::default();
 		let (
 			registry,
 			eval_bridge,
@@ -2580,8 +2573,6 @@ impl EnvServer {
 			&browser_settings,
 			&shell_settings,
 			&sandbox_settings,
-			&acp_settings,
-			acp_exec.clone(),
 			&host_settings.autolearn,
 			control_bindings.hooks.admission_gate(),
 			WorkerDeviceInvoker::new(Arc::clone(&ext_hosts), blobs.clone()),
@@ -2618,7 +2609,6 @@ impl EnvServer {
 			}),
 			host_settings.tools.clone(),
 			exec,
-			acp_exec,
 			workspace,
 			mcp,
 			mcp_manager,
@@ -2821,7 +2811,7 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, sandbox_settings, acp_settings) =
+		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		host_settings.tools = host_settings
@@ -2842,7 +2832,6 @@ impl EnvServer {
 		)?;
 		let memory_runtime =
 			start_memory_runtime(&host_settings, state_dir, workspace.root(), &session_id).await?;
-		let acp_exec = AcpExecSlot::default();
 		let (
 			registry,
 			eval_bridge,
@@ -2875,8 +2864,6 @@ impl EnvServer {
 			&browser_settings,
 			&shell_settings,
 			&sandbox_settings,
-			&acp_settings,
-			acp_exec.clone(),
 			&host_settings.autolearn,
 			control_bindings.hooks.admission_gate(),
 			WorkerDeviceInvoker::new(Arc::clone(&ext_hosts), blobs.clone()),
@@ -2913,7 +2900,6 @@ impl EnvServer {
 			}),
 			host_settings.tools.clone(),
 			exec,
-			acp_exec,
 			workspace,
 			mcp,
 			mcp_manager,
@@ -3049,7 +3035,7 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, _sandbox_settings, acp_settings) =
+		let (mut host_settings, browser_settings, shell_settings, _sandbox_settings) =
 			execution_settings(con);
 		host_settings.tools = host_settings
 			.tools
@@ -3079,7 +3065,6 @@ impl EnvServer {
 			ext_hosts.as_ref(),
 			&host_settings.tools,
 			&shell_settings,
-			&acp_settings,
 			&host_settings.memory,
 			&host_settings.autolearn,
 			&content,
@@ -3134,7 +3119,6 @@ impl EnvServer {
 			None,
 			host_settings.tools.clone(),
 			exec,
-			AcpExecSlot::default(),
 			workspace,
 			mcp,
 			mcp_manager,
@@ -3390,11 +3374,6 @@ impl EnvServer {
 	/// Returns the session's sole Off/Mnemopi runtime.
 	pub(crate) fn memory_runtime(&self) -> Arc<omp_memory::MemoryRuntime> {
 		Arc::clone(self._memory_runtime.runtime())
-	}
-
-	/// Binds or clears the session-scoped ACP terminal execution capability.
-	pub(crate) fn bind_acp_exec(&self, backend: Option<Arc<dyn AcpExecBackend>>) {
-		self.acp_exec.bind(backend);
 	}
 
 	/// Binds or clears the session-scoped ACP document authority.
@@ -4444,7 +4423,6 @@ impl EnvServer {
 				| client_frame::Body::Admission(_)
 				| client_frame::Body::EditRepairAnswer(_)
 				| client_frame::Body::AcpDocumentAnswer(_)
-				| client_frame::Body::AcpExecEvent(_)
 				| client_frame::Body::ArgsCommitted(_)
 				| client_frame::Body::Interrupt(_)
 				| client_frame::Body::Stdin(_)
@@ -4815,11 +4793,6 @@ impl EnvServer {
 			},
 			client_frame::Body::AcpDocumentAnswer(answer) => {
 				if let Err((code, message)) = connection.answer_acp_document(frame.request_id, answer) {
-					send_error(responses, frame.request_id, code, message).await;
-				}
-			},
-			client_frame::Body::AcpExecEvent(event) => {
-				if let Err((code, message)) = connection.answer_acp_exec(frame.request_id, event) {
 					send_error(responses, frame.request_id, code, message).await;
 				}
 			},
@@ -8147,158 +8120,13 @@ impl AcpDocumentBackend for ConnectionAcpDocumentRoute {
 	}
 }
 
-struct ConnectionAcpExecRoute {
-	request_id:    u64,
-	invocation_id: Str,
-	responses:     flume::Sender<pb::ServerFrame>,
-	next_query:    Arc<AtomicU64>,
-	pending: Arc<
-		Mutex<
-			HashMap<u64, flume::Sender<Result<omp_tools::shell::RunEvent, omp_tools::shell::Fault>>>,
-		>,
-	>,
-}
-
-impl ConnectionAcpExecRoute {
-	fn event(&self, event: pb::AcpExecEvent) -> Result<(), (pb::ProtocolErrorCode, &'static str)> {
-		if event.invocation_id.as_str() != self.invocation_id.as_str() {
-			return Err((
-				pb::ProtocolErrorCode::InvalidArgument,
-				"ACP exec event invocation_id does not match the open request",
-			));
-		}
-		let mut terminal = matches!(
-			&event.body,
-			Some(pb::acp_exec_event::Body::Exit(_)) | Some(pb::acp_exec_event::Body::Error(_)) | None
-		);
-		let sender = self
-			.pending
-			.lock()
-			.get(&event.query_id)
-			.cloned()
-			.ok_or((pb::ProtocolErrorCode::PreconditionFailed, "ACP exec query is not pending"))?;
-		let mapped = match event.body {
-			Some(pb::acp_exec_event::Body::Started(started)) => {
-				super::tool_shell::map_event(ExecEvent::Started { exec_id: started.exec })
-			},
-			Some(pb::acp_exec_event::Body::Output(output)) => {
-				super::tool_shell::map_event(ExecEvent::Output(output))
-			},
-			Some(pb::acp_exec_event::Body::Exit(exit)) => {
-				super::tool_shell::map_event(ExecEvent::Exit(exit))
-			},
-			Some(pb::acp_exec_event::Body::Error(error)) => Err(omp_tools::shell::Fault::Resource {
-				operation: sf!("run"),
-				message:   sf!("ACP exec error {}: {}", error.code, error.message),
-			}),
-			None => Err(omp_tools::shell::Fault::Resource {
-				operation: sf!("run"),
-				message:   sf!("ACP exec event body is missing"),
-			}),
-		};
-		terminal |= mapped.is_err();
-		if terminal {
-			self.pending.lock().remove(&event.query_id);
-		}
-		sender.send(mapped).map_err(|_| {
-			(pb::ProtocolErrorCode::PreconditionFailed, "ACP exec receiver is no longer pending")
-		})
-	}
-
-	fn disconnect(&self) {
-		self.pending.lock().clear();
-	}
-}
-
-impl AcpExecBackend for ConnectionAcpExecRoute {
-	fn run(
-		&self,
-		request: super::tool_shell::AcpExecRequest,
-	) -> pin::Pin<
-		Box<
-			dyn future::Future<Output = Result<super::tool_shell::AcpExecRun, omp_tools::shell::Fault>>
-				+ Send
-				+ '_,
-		>,
-	> {
-		Box::pin(async move {
-			let query_id = self.next_query.fetch_add(1, Ordering::Relaxed);
-			let (events, receiver) = flume::bounded(64);
-			{
-				let mut pending = self.pending.lock();
-				if pending.len() >= ACP_MAX_PENDING {
-					return Err(omp_tools::shell::Fault::Resource {
-						operation: sf!("run"),
-						message:   sf!("too many pending ACP exec queries"),
-					});
-				}
-				pending.insert(query_id, events);
-			}
-			let query = pb::AcpExecQuery {
-				query_id,
-				invocation_id: self.invocation_id.to_string(),
-				command: request.command.to_string(),
-				cwd: request.cwd.map_or_else(String::new, |cwd| cwd.to_string()),
-				env: request
-					.env
-					.into_iter()
-					.map(|(name, value)| (name.to_string(), value.to_string()))
-					.collect(),
-				timeout_ms: request.timeout_ms,
-			};
-			if self
-				.responses
-				.send_async(pb::ServerFrame {
-					request_id: self.request_id,
-					body: Some(server_frame::Body::AcpExecQuery(query)),
-					..pb::ServerFrame::default()
-				})
-				.await
-				.is_err()
-			{
-				self.pending.lock().remove(&query_id);
-				return Err(omp_tools::shell::Fault::Resource {
-					operation: sf!("run"),
-					message:   sf!("ACP exec connection disconnected"),
-				});
-			}
-			let cancel = CancellationToken::new();
-			let cancel_wait = cancel.clone();
-			let responses = self.responses.clone();
-			let invocation_id = self.invocation_id.clone();
-			let pending = Arc::clone(&self.pending);
-			let request_id = self.request_id;
-			tokio::spawn(async move {
-				cancel_wait.cancelled().await;
-				if pending.lock().remove(&query_id).is_some() {
-					let _ = responses
-						.send_async(pb::ServerFrame {
-							request_id,
-							body: Some(server_frame::Body::AcpExecCancel(pb::AcpExecCancel {
-								query_id,
-								invocation_id: invocation_id.to_string(),
-							})),
-							..pb::ServerFrame::default()
-						})
-						.await;
-				}
-			});
-			Ok(super::tool_shell::AcpExecRun { events: receiver, cancel })
-		})
-	}
-}
-
 struct InvocationAcpRoutes {
 	documents: Option<Arc<ConnectionAcpDocumentRoute>>,
-	exec:      Option<Arc<ConnectionAcpExecRoute>>,
 }
 
 impl InvocationAcpRoutes {
 	fn disconnect(&self) {
 		if let Some(route) = &self.documents {
-			route.disconnect();
-		}
-		if let Some(route) = &self.exec {
 			route.disconnect();
 		}
 	}
@@ -8309,10 +8137,6 @@ impl InvocationAcpRoutes {
 				.documents
 				.as_ref()
 				.map(|route| Arc::clone(route) as Arc<dyn AcpDocumentBackend>),
-			self
-				.exec
-				.as_ref()
-				.map(|route| Arc::clone(route) as Arc<dyn AcpExecBackend>),
 		)
 	}
 }
@@ -8328,7 +8152,6 @@ struct ConnectionState {
 	capabilities:     BTreeSet<Str>,
 	hello_props:      Option<ValueMap>,
 	acp_documents:    bool,
-	acp_exec:         bool,
 	host:             Option<HostKey>,
 	authority:        Arc<AuthorityTable>,
 	connection_owner: u64,
@@ -8488,7 +8311,6 @@ impl ConnectionState {
 			capabilities: hello.capabilities,
 			hello_props: hello.props,
 			acp_documents: false,
-			acp_exec: false,
 			host: policy.host.clone(),
 			authority,
 			connection_owner,
@@ -8550,7 +8372,6 @@ impl ConnectionState {
 
 	fn bind_acp(&mut self, binding: pb::AcpBind) {
 		self.acp_documents = binding.documents;
-		self.acp_exec = binding.exec;
 	}
 
 	fn acp_routes(
@@ -8559,23 +8380,13 @@ impl ConnectionState {
 		invocation_id: &Str,
 		responses: &flume::Sender<pb::ServerFrame>,
 	) -> InvocationAcpRoutes {
-		let next_query = Arc::new(AtomicU64::new(1));
 		InvocationAcpRoutes {
 			documents: self.acp_documents.then(|| {
 				Arc::new(ConnectionAcpDocumentRoute {
 					request_id,
 					invocation_id: invocation_id.clone(),
 					responses: responses.clone(),
-					next_query: Arc::clone(&next_query),
-					pending: Arc::new(Mutex::new(HashMap::new())),
-				})
-			}),
-			exec:      self.acp_exec.then(|| {
-				Arc::new(ConnectionAcpExecRoute {
-					request_id,
-					invocation_id: invocation_id.clone(),
-					responses: responses.clone(),
-					next_query,
+					next_query: Arc::new(AtomicU64::new(1)),
 					pending: Arc::new(Mutex::new(HashMap::new())),
 				})
 			}),
@@ -8606,39 +8417,6 @@ impl ConnectionState {
 			Some(RequestState::Invocation(_)) => Err((
 				pb::ProtocolErrorCode::PreconditionFailed,
 				"ACP document answers are only valid for native invocations",
-			)),
-			Some(_) => Err((
-				pb::ProtocolErrorCode::PreconditionFailed,
-				"request_id is not an invocation stream",
-			)),
-			None => Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
-		}
-	}
-
-	fn answer_acp_exec(
-		&self,
-		request_id: u64,
-		event: pb::AcpExecEvent,
-	) -> Result<(), (pb::ProtocolErrorCode, &'static str)> {
-		match self.requests.get(&request_id) {
-			Some(RequestState::Invocation(InvocationState::Native { id, acp, .. }))
-				if id == event.invocation_id.as_str() =>
-			{
-				acp.exec
-					.as_ref()
-					.ok_or((
-						pb::ProtocolErrorCode::PreconditionFailed,
-						"this invocation has no ACP exec route",
-					))?
-					.event(event)
-			},
-			Some(RequestState::Invocation(InvocationState::Native { .. })) => Err((
-				pb::ProtocolErrorCode::InvalidArgument,
-				"ACP exec event invocation_id does not match the open request",
-			)),
-			Some(RequestState::Invocation(_)) => Err((
-				pb::ProtocolErrorCode::PreconditionFailed,
-				"ACP exec events are only valid for native invocations",
 			)),
 			Some(_) => Err((
 				pb::ProtocolErrorCode::PreconditionFailed,
@@ -12839,7 +12617,6 @@ mod tests {
 			}),
 			ToolSettings::default(),
 			exec,
-			AcpExecSlot::default(),
 			workspace.clone(),
 			mcp,
 			mcp_manager,

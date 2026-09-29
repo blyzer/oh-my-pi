@@ -31,24 +31,24 @@ use omp_proto::{
 	env::{
 		v1,
 		v1::{
-			self as env_wire, AcpBind, AcpDocumentAnswer, AcpExecCancel, AcpExecEvent, AcpExecQuery,
-			AcpReadQuery, AcpWriteQuery, Admission, AdmitInvocation, ArgText, ArgsCommitted,
-			AttachOutput, BlobGetComplete, CancelRequest, ClientFrame, ClientHello,
-			CloseSessionRequest, CloseSessionResponse, CommitBlobPut, CreateWorktree, CurrentWorktree,
-			CurrentWorktreeResult, DataEvent, DataRequest, DataResponse, DestroyWorktree, DetachExec,
-			EditRepairAnswer, EditRepairQuery, EvalResetRequest, EventStreamError, EventStreamKind,
-			ExecRequest, ExecStarted, ExitEvent, GetProcess, HttpRequest, HttpResponse, Interrupt,
-			InvocationScope, InvokeAccepted, InvokeTool, ListProcesses, MaterializeSite,
-			MergeWorktree, OpenSessionRequest, OpenSessionResponse, OutputAttached, OutputFrame,
-			PresenceRegistered, PresenceReleased, ProcessCommandAccepted, ProcessInfo, ProcessList,
-			ProcessOutput, ProcessStarted, ProcessStateEvent, ProtocolError, ProtocolErrorCode,
-			RegisterPresence, ReleasePresence, ResourceCompletion, RestartProcess, Retire,
-			SearchComplete, SearchMatchMsg, SearchRequest, SendInput, ServerFrame, ServerHello,
-			SignalProcess, SignalRequest, SiteMaterialized, StartProcess, StdinFrame, StopProcess,
-			Update, Verdict, WalkComplete, WalkEntry, WalkRequest, WorktreeResult, cancel_request,
-			client_frame, data_event, data_request, data_response, document_op, document_result,
-			exec_session_op, exec_session_result, mcp_op, mcp_result, resource_op, server_frame,
-			stdin_frame, workspace_op, workspace_result, worktree_op,
+			self as env_wire, AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, Admission,
+			AdmitInvocation, ArgText, ArgsCommitted, AttachOutput, BlobGetComplete, CancelRequest,
+			ClientFrame, ClientHello, CloseSessionRequest, CloseSessionResponse, CommitBlobPut,
+			CreateWorktree, CurrentWorktree, CurrentWorktreeResult, DataEvent, DataRequest,
+			DataResponse, DestroyWorktree, DetachExec, EditRepairAnswer, EditRepairQuery,
+			EvalResetRequest, EventStreamError, EventStreamKind, ExecRequest, ExecStarted, ExitEvent,
+			GetProcess, HttpRequest, HttpResponse, Interrupt, InvocationScope, InvokeAccepted,
+			InvokeTool, ListProcesses, MaterializeSite, MergeWorktree, OpenSessionRequest,
+			OpenSessionResponse, OutputAttached, OutputFrame, PresenceRegistered, PresenceReleased,
+			ProcessCommandAccepted, ProcessInfo, ProcessList, ProcessOutput, ProcessStarted,
+			ProcessStateEvent, ProtocolError, ProtocolErrorCode, RegisterPresence, ReleasePresence,
+			ResourceCompletion, RestartProcess, Retire, SearchComplete, SearchMatchMsg, SearchRequest,
+			SendInput, ServerFrame, ServerHello, SignalProcess, SignalRequest, SiteMaterialized,
+			StartProcess, StdinFrame, StopProcess, Update, Verdict, WalkComplete, WalkEntry,
+			WalkRequest, WorktreeResult, cancel_request, client_frame, data_event, data_request,
+			data_response, document_op, document_result, exec_session_op, exec_session_result, mcp_op,
+			mcp_result, resource_op, server_frame, stdin_frame, workspace_op, workspace_result,
+			worktree_op,
 		},
 	},
 };
@@ -483,20 +483,6 @@ pub enum AcpRequest {
 		request_id: u64,
 		/// Typed document write query.
 		query:      AcpWriteQuery,
-	},
-	/// Starts one command through the bound ACP terminal.
-	Exec {
-		/// Frame request identifier used to retain invocation authority.
-		request_id: u64,
-		/// Typed command query.
-		query:      AcpExecQuery,
-	},
-	/// Cancels one command running through the bound ACP terminal.
-	ExecCancel {
-		/// Frame request identifier carrying the original invocation authority.
-		request_id: u64,
-		/// Typed command cancellation.
-		cancel:     AcpExecCancel,
 	},
 }
 
@@ -1032,12 +1018,12 @@ impl EnvClient {
 		self.inner.acp_requests.clone()
 	}
 
-	/// Binds or unbinds this connection as an ACP document and terminal host.
+	/// Binds or unbinds this connection as an ACP document host.
 	///
 	/// Binding is an unsolicited request-id-zero control frame and is only
 	/// valid after the protocol handshake. The send never waits for transport
 	/// capacity.
-	pub fn bind_acp(&self, documents: bool, exec: bool) -> Result<(), ClientError> {
+	pub fn bind_acp(&self, documents: bool) -> Result<(), ClientError> {
 		if self.inner.info.lock().is_none() {
 			return Err(ClientError::UnexpectedResponse {
 				expected: "a completed environment handshake before ACP binding",
@@ -1048,7 +1034,7 @@ impl EnvClient {
 			.outgoing
 			.try_send(ClientFrame {
 				request_id: 0,
-				body: Some(client_frame::Body::AcpBind(AcpBind { documents, exec })),
+				body: Some(client_frame::Body::AcpBind(AcpBind { documents })),
 				..ClientFrame::default()
 			})
 			.map_err(|error| match error {
@@ -1079,44 +1065,6 @@ impl EnvClient {
 			.send_async(ClientFrame {
 				request_id,
 				body: Some(client_frame::Body::AcpDocumentAnswer(answer)),
-				scope: Some(scope),
-				..ClientFrame::default()
-			})
-			.await
-			.map_err(|_| ClientError::TransportClosed)
-	}
-
-	/// Sends one typed ACP execution event without opening a correlated
-	/// response route.
-	///
-	/// Started and output events retain the query scope for later events. Exit
-	/// and protocol-error events terminate that retained correlation.
-	pub async fn send_acp_exec_event(
-		&self,
-		request_id: u64,
-		event: AcpExecEvent,
-	) -> Result<(), ClientError> {
-		let terminal = matches!(
-			event.body.as_ref(),
-			Some(env_wire::acp_exec_event::Body::Exit(_) | env_wire::acp_exec_event::Body::Error(_))
-		);
-		let scope = if terminal {
-			self.inner.acp_request_scopes.lock().remove(&request_id)
-		} else {
-			self
-				.inner
-				.acp_request_scopes
-				.lock()
-				.get(&request_id)
-				.cloned()
-		}
-		.ok_or(ClientError::ScopedOperationDenied)?;
-		self
-			.inner
-			.outgoing
-			.send_async(ClientFrame {
-				request_id,
-				body: Some(client_frame::Body::AcpExecEvent(event)),
 				scope: Some(scope),
 				..ClientFrame::default()
 			})
@@ -4335,29 +4283,21 @@ fn route_responses(
 			continue;
 		}
 		let acp_request = match frame.body.as_ref() {
-			Some(server_frame::Body::AcpReadQuery(query)) => Some((
-				query.invocation_id.as_str(),
-				AcpRequest::Read { request_id: frame.request_id, query: query.clone() },
-				true,
-			)),
-			Some(server_frame::Body::AcpWriteQuery(query)) => Some((
-				query.invocation_id.as_str(),
-				AcpRequest::Write { request_id: frame.request_id, query: query.clone() },
-				true,
-			)),
-			Some(server_frame::Body::AcpExecQuery(query)) => Some((
-				query.invocation_id.as_str(),
-				AcpRequest::Exec { request_id: frame.request_id, query: query.clone() },
-				true,
-			)),
-			Some(server_frame::Body::AcpExecCancel(cancel)) => Some((
-				cancel.invocation_id.as_str(),
-				AcpRequest::ExecCancel { request_id: frame.request_id, cancel: cancel.clone() },
-				false,
-			)),
+			Some(server_frame::Body::AcpReadQuery(query)) => {
+				Some((query.invocation_id.as_str(), AcpRequest::Read {
+					request_id: frame.request_id,
+					query:      query.clone(),
+				}))
+			},
+			Some(server_frame::Body::AcpWriteQuery(query)) => {
+				Some((query.invocation_id.as_str(), AcpRequest::Write {
+					request_id: frame.request_id,
+					query:      query.clone(),
+				}))
+			},
 			_ => None,
 		};
-		if let Some((invocation_id, request, retains_scope)) = acp_request {
+		if let Some((invocation_id, request)) = acp_request {
 			let scope = {
 				let scopes = client.request_scopes.lock();
 				scopes.get(&frame.request_id).cloned().or_else(|| {
@@ -4367,7 +4307,7 @@ fn route_responses(
 						.cloned()
 				})
 			};
-			if retains_scope && let Some(scope) = scope {
+			if let Some(scope) = scope {
 				client
 					.acp_request_scopes
 					.lock()
@@ -4744,7 +4684,7 @@ mod tests {
 		let (outgoing, requests) = flume::unbounded();
 		let (responses, incoming) = flume::unbounded();
 		let client = EnvClient::from_channels(outgoing, incoming);
-		assert!(matches!(client.bind_acp(true, true), Err(ClientError::UnexpectedResponse { .. })));
+		assert!(matches!(client.bind_acp(true), Err(ClientError::UnexpectedResponse { .. })));
 
 		let handshake = tokio::spawn({
 			let client = client.clone();
@@ -4765,14 +4705,11 @@ mod tests {
 			.expect("hello task")
 			.expect("complete hello");
 
-		client.bind_acp(true, false).expect("bind ACP documents");
+		client.bind_acp(true).expect("bind ACP documents");
 		let bind = requests.recv_async().await.expect("receive ACP bind");
 		assert_eq!(bind.request_id, 0);
 		assert!(bind.scope.is_none());
-		assert!(matches!(
-			bind.body,
-			Some(client_frame::Body::AcpBind(AcpBind { documents: true, exec: false }))
-		));
+		assert!(matches!(bind.body, Some(client_frame::Body::AcpBind(AcpBind { documents: true }))));
 		assert!(client.inner.pending.lock().is_empty(), "bind opened a response correlation");
 	}
 
@@ -4812,26 +4749,6 @@ mod tests {
 				})),
 				..ServerFrame::default()
 			},
-			ServerFrame {
-				request_id: 702,
-				body: Some(server_frame::Body::AcpExecQuery(AcpExecQuery {
-					query_id:      3,
-					invocation_id: "acp-1".into(),
-					command:       "cargo metadata".into(),
-					cwd:           "/workspace".into(),
-					env:           std::collections::BTreeMap::new(),
-					timeout_ms:    Some(2_000),
-				})),
-				..ServerFrame::default()
-			},
-			ServerFrame {
-				request_id: 703,
-				body: Some(server_frame::Body::AcpExecCancel(AcpExecCancel {
-					query_id:      3,
-					invocation_id: "acp-1".into(),
-				})),
-				..ServerFrame::default()
-			},
 		];
 		for frame in server_requests {
 			responses.send_async(frame).await.expect("send ACP request");
@@ -4839,11 +4756,6 @@ mod tests {
 
 		let read = acp_requests.recv_async().await.expect("receive ACP read");
 		let write = acp_requests.recv_async().await.expect("receive ACP write");
-		let exec = acp_requests.recv_async().await.expect("receive ACP exec");
-		let cancel = acp_requests
-			.recv_async()
-			.await
-			.expect("receive ACP cancellation");
 		assert!(matches!(
 			&read,
 			AcpRequest::Read { request_id: 700, query } if query.query_id == 1
@@ -4851,14 +4763,6 @@ mod tests {
 		assert!(matches!(
 			&write,
 			AcpRequest::Write { request_id: 701, query } if query.query_id == 2
-		));
-		assert!(matches!(
-			&exec,
-			AcpRequest::Exec { request_id: 702, query } if query.query_id == 3
-		));
-		assert!(matches!(
-			&cancel,
-			AcpRequest::ExecCancel { request_id: 703, cancel } if cancel.query_id == 3
 		));
 		assert!(pending.receiver.try_recv().is_err(), "ACP request entered invocation events");
 
@@ -4880,22 +4784,7 @@ mod tests {
 			})
 			.await
 			.expect("answer ACP write");
-		for body in [
-			env_wire::acp_exec_event::Body::Started(ExecStarted::default()),
-			env_wire::acp_exec_event::Body::Output(OutputFrame::default()),
-			env_wire::acp_exec_event::Body::Exit(ExitEvent::default()),
-		] {
-			client
-				.send_acp_exec_event(702, AcpExecEvent {
-					query_id:      3,
-					invocation_id: "acp-1".into(),
-					body:          Some(body),
-				})
-				.await
-				.expect("send ACP exec event");
-		}
-
-		for expected_request_id in [700, 701, 702, 702, 702] {
+		for expected_request_id in [700, 701] {
 			let answer = requests
 				.recv_async()
 				.await

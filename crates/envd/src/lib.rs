@@ -77,7 +77,6 @@ pub mod worker_pool;
 pub mod workspace;
 pub mod workspace_roots;
 use std::{
-	collections::{BTreeMap, HashMap},
 	env,
 	fs::{self, OpenOptions},
 	io,
@@ -113,25 +112,20 @@ use nix::{
 use omp_agent::KernelSender;
 use omp_ai::auth::AuthControlHandle;
 use omp_con::Ctx;
-use omp_core::{Hash32, Str, Ulid, sf};
+use omp_core::{Str, Ulid, sf};
 use omp_env::{AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames};
 use omp_ext::config::ContributedCliValue;
 use omp_proto::{
 	env::v1::{
-		AcpDocumentAnswer, AcpExecEvent, ApprovalMode as ProtoApprovalMode, ClientHello,
-		EditRepairAnswer, EditRepairFailure, EditRepairFailureCode, ExecOutcome as ProtoExecOutcome,
-		ExecStarted, ExecStatusMsg, ExitEvent, OutputChannel as ProtoOutputChannel, OutputFrame,
-		ProtocolError, ProtocolErrorCode, RegisterPresence, ReleasePresence, ServerHello,
-		acp_document_answer, acp_exec_event, edit_repair_answer,
+		AcpDocumentAnswer, ApprovalMode as ProtoApprovalMode, ClientHello, EditRepairAnswer,
+		EditRepairFailure, EditRepairFailureCode, ProtocolError, ProtocolErrorCode, RegisterPresence,
+		ReleasePresence, ServerHello, acp_document_answer, edit_repair_answer,
 	},
 	inference::v1::{Value, ValueMap, value},
 };
 use omp_tool::Registry;
-use omp_tools::{
-	eval::EvalSessionControl,
-	shell::{ExecOutcome, OutputChannel, RunEvent},
-};
-use parking_lot::{Mutex, RwLock};
+use omp_tools::eval::EvalSessionControl;
+use parking_lot::RwLock;
 pub use presence::PresenceError;
 /// Generation-fenced lease routing environment checkpoint controls to one
 /// active Agent session.
@@ -596,7 +590,6 @@ pub struct ProjectEnvironment {
 	search_bridge:       Arc<search_backend::SearchBridgeHost>,
 	github_credentials:  Arc<GithubCredentialBridge>,
 	acp_documents:       Arc<RwLock<Option<Arc<dyn docs::AcpDocumentBackend>>>>,
-	acp_exec:            Arc<RwLock<Option<Arc<dyn tool_shell::AcpExecBackend>>>>,
 	lifecycle:           ProjectLifecycle,
 }
 /// Cloneable authority for replacing the Environment's extension worker
@@ -907,7 +900,6 @@ impl ProjectEnvironment {
 			search_bridge,
 			github_credentials,
 			acp_documents: Arc::default(),
-			acp_exec: Arc::default(),
 			lifecycle,
 		})
 	}
@@ -1014,14 +1006,12 @@ impl ProjectEnvironment {
 		});
 		let shutdown = CancellationToken::new();
 		let acp_documents = Arc::new(RwLock::new(None));
-		let acp_exec = Arc::new(RwLock::new(None));
 		let mut tasks = vec![local_task, partition_task, remote_task, owner_bridge];
 		let acp_client = client.clone();
 		let acp_shutdown = shutdown.clone();
 		let pump_documents = Arc::clone(&acp_documents);
-		let pump_exec = Arc::clone(&acp_exec);
 		tasks.push(tokio::spawn(async move {
-			pump_acp_requests(acp_client, pump_documents, pump_exec, acp_shutdown).await;
+			pump_acp_requests(acp_client, pump_documents, acp_shutdown).await;
 		}));
 		if let Some(edit_repair) = edit_repair {
 			let repair_client = client.clone();
@@ -1048,7 +1038,6 @@ impl ProjectEnvironment {
 			search_bridge,
 			github_credentials,
 			acp_documents,
-			acp_exec,
 			lifecycle,
 		})
 	}
@@ -1117,7 +1106,6 @@ impl ProjectEnvironment {
 			search_bridge,
 			github_credentials,
 			acp_documents: Arc::default(),
-			acp_exec: Arc::default(),
 			lifecycle,
 		})
 	}
@@ -1161,14 +1149,6 @@ impl ProjectEnvironment {
 		Arc::clone(&self.registry)
 	}
 
-	/// Binds or clears the editor-owned terminal backend for this environment
-	/// composition.
-	pub fn bind_acp_exec(&self, backend: Option<Arc<dyn tool_shell::AcpExecBackend>>) {
-		self.acp_exec.write().clone_from(&backend);
-		self.lifecycle.server.bind_acp_exec(backend);
-		self.send_acp_binding();
-	}
-
 	/// Binds or clears the editor-owned document backend for this environment
 	/// composition.
 	pub fn bind_acp_documents(&self, backend: Option<Arc<dyn docs::AcpDocumentBackend>>) {
@@ -1179,9 +1159,8 @@ impl ProjectEnvironment {
 
 	fn send_acp_binding(&self) {
 		let documents = self.acp_documents.read().is_some();
-		let exec = self.acp_exec.read().is_some();
-		if let Err(error) = self.client.bind_acp(documents, exec) {
-			tracing::warn!(%error, documents, exec, "failed to update ACP connection binding");
+		if let Err(error) = self.client.bind_acp(documents) {
+			tracing::warn!(%error, documents, "failed to update ACP connection binding");
 		}
 	}
 
@@ -1587,21 +1566,12 @@ fn client_hello(
 	}
 }
 
-const MAX_ACTIVE_ACP_EXECS: usize = 256;
-
-enum ActiveAcpExec {
-	Starting { cancelled: bool },
-	Running(CancellationToken),
-}
-
 async fn pump_acp_requests(
 	client: EnvClient,
 	documents: Arc<RwLock<Option<Arc<dyn docs::AcpDocumentBackend>>>>,
-	exec: Arc<RwLock<Option<Arc<dyn tool_shell::AcpExecBackend>>>>,
 	shutdown: CancellationToken,
 ) {
 	let requests = client.acp_requests();
-	let active = Arc::new(Mutex::new(HashMap::<u64, ActiveAcpExec>::new()));
 	let mut children = JoinSet::new();
 	loop {
 		tokio::select! {
@@ -1619,7 +1589,6 @@ async fn pump_acp_requests(
 							if let Err(error) = client.answer_acp_document(request_id, answer).await {
 								tracing::warn!(%error, "failed to answer ACP document read");
 							}
-							None
 						});
 					},
 					AcpRequest::Write { request_id, query } => {
@@ -1630,80 +1599,21 @@ async fn pump_acp_requests(
 							if let Err(error) = client.answer_acp_document(request_id, answer).await {
 								tracing::warn!(%error, "failed to answer ACP document write");
 							}
-							None
 						});
-					},
-					AcpRequest::Exec { request_id, query } => {
-						let rejection = {
-							let mut active = active.lock();
-							if active.contains_key(&query.query_id) {
-								Some(acp_error(
-									ProtocolErrorCode::AlreadyExists,
-									"ACP execution query id is already active",
-								))
-							} else if active.len() >= MAX_ACTIVE_ACP_EXECS {
-								Some(acp_error(
-									ProtocolErrorCode::ResourceExhausted,
-									"too many active ACP execution queries",
-								))
-							} else {
-								active.insert(query.query_id, ActiveAcpExec::Starting {
-									cancelled: false,
-								});
-								None
-							}
-						};
-						if let Some(error) = rejection {
-							let client = client.clone();
-							children.spawn(async move {
-								send_acp_exec_error(&client, request_id, &query, error).await;
-								None
-							});
-							continue;
-						}
-						let backend = exec.read().clone();
-						let client = client.clone();
-						let child_active = Arc::clone(&active);
-						children.spawn(async move {
-							pump_acp_exec(client, request_id, backend, &query, &child_active).await;
-							Some(query.query_id)
-						});
-					},
-					AcpRequest::ExecCancel { request_id: _, cancel } => {
-						cancel_acp_exec(&active, cancel.query_id);
 					},
 				}
 			},
 			Some(result) = children.join_next(), if !children.is_empty() => {
-				match result {
-					Ok(Some(query_id)) => {
-						active.lock().remove(&query_id);
-					},
-					Ok(None) => {},
-					Err(error) if !error.is_cancelled() => {
-						tracing::warn!(%error, "ACP bridge child task failed");
-					},
-					Err(_) => {},
+				if let Err(error) = result
+					&& !error.is_cancelled()
+				{
+					tracing::warn!(%error, "ACP bridge child task failed");
 				}
 			},
 		}
 	}
-	for state in active.lock().values() {
-		if let ActiveAcpExec::Running(token) = state {
-			token.cancel();
-		}
-	}
 	children.abort_all();
 	while children.join_next().await.is_some() {}
-}
-
-fn cancel_acp_exec(active: &Mutex<HashMap<u64, ActiveAcpExec>>, query_id: u64) {
-	if let Some(state) = active.lock().get_mut(&query_id) {
-		match state {
-			ActiveAcpExec::Starting { cancelled } => *cancelled = true,
-			ActiveAcpExec::Running(token) => token.cancel(),
-		}
-	}
 }
 
 async fn answer_acp_read(
@@ -1770,206 +1680,6 @@ fn acp_document_error_answer(
 		query_id,
 		invocation_id,
 		body: Some(acp_document_answer::Body::Error(acp_error(code, message))),
-	}
-}
-
-async fn pump_acp_exec(
-	client: EnvClient,
-	request_id: u64,
-	backend: Option<Arc<dyn tool_shell::AcpExecBackend>>,
-	query: &omp_proto::env::v1::AcpExecQuery,
-	active: &Mutex<HashMap<u64, ActiveAcpExec>>,
-) {
-	let Some(backend) = backend else {
-		send_acp_exec_error(
-			&client,
-			request_id,
-			query,
-			acp_error(ProtocolErrorCode::PreconditionFailed, "ACP execution backend is not bound"),
-		)
-		.await;
-		return;
-	};
-	let request = tool_shell::AcpExecRequest {
-		command:    Str::from(query.command.as_str()),
-		cwd:        (!query.cwd.is_empty()).then(|| Str::from(query.cwd.as_str())),
-		env:        query
-			.env
-			.iter()
-			.map(|(name, value)| (Str::from(name.as_str()), Str::from(value.as_str())))
-			.collect::<BTreeMap<_, _>>(),
-		timeout_ms: query.timeout_ms,
-	};
-	let run = match backend.run(request).await {
-		Ok(run) => run,
-		Err(error) => {
-			send_acp_exec_error(
-				&client,
-				request_id,
-				query,
-				acp_error(ProtocolErrorCode::Internal, error.message()),
-			)
-			.await;
-			return;
-		},
-	};
-	{
-		let mut active = active.lock();
-		let cancelled =
-			matches!(active.get(&query.query_id), Some(ActiveAcpExec::Starting { cancelled: true }));
-		if cancelled {
-			run.cancel.cancel();
-		}
-		active.insert(query.query_id, ActiveAcpExec::Running(run.cancel.clone()));
-	}
-	let mut exec_id = Bytes::new();
-	while let Ok(event) = run.events.recv_async().await {
-		let (body, terminal) = match event {
-			Ok(event) => match acp_exec_body(event, &mut exec_id) {
-				Ok(body) => {
-					let terminal = matches!(body, acp_exec_event::Body::Exit(_));
-					(body, terminal)
-				},
-				Err(error) => (acp_exec_event::Body::Error(error), true),
-			},
-			Err(error) => (
-				acp_exec_event::Body::Error(acp_error(ProtocolErrorCode::Internal, error.message())),
-				true,
-			),
-		};
-		let wire = AcpExecEvent {
-			query_id:      query.query_id,
-			invocation_id: query.invocation_id.clone(),
-			body:          Some(body),
-		};
-		if let Err(error) = client.send_acp_exec_event(request_id, wire).await {
-			tracing::warn!(%error, "failed to forward ACP execution event");
-			return;
-		}
-		if terminal {
-			return;
-		}
-	}
-	send_acp_exec_error(
-		&client,
-		request_id,
-		query,
-		acp_error(
-			ProtocolErrorCode::Internal,
-			"ACP execution event stream closed before a terminal event",
-		),
-	)
-	.await;
-}
-
-async fn send_acp_exec_error(
-	client: &EnvClient,
-	request_id: u64,
-	query: &omp_proto::env::v1::AcpExecQuery,
-	error: ProtocolError,
-) {
-	let event = AcpExecEvent {
-		query_id:      query.query_id,
-		invocation_id: query.invocation_id.clone(),
-		body:          Some(acp_exec_event::Body::Error(error)),
-	};
-	if let Err(error) = client.send_acp_exec_event(request_id, event).await {
-		tracing::warn!(%error, "failed to forward ACP execution error");
-	}
-}
-
-fn acp_exec_body(
-	event: RunEvent,
-	exec_id: &mut Bytes,
-) -> Result<acp_exec_event::Body, ProtocolError> {
-	match event {
-		RunEvent::Started { exec_id: started } => {
-			*exec_id = started.clone();
-			Ok(acp_exec_event::Body::Started(ExecStarted {
-				session: Bytes::new(),
-				exec: started,
-				..ExecStarted::default()
-			}))
-		},
-		RunEvent::Output(update) => {
-			if !update.exec_id.is_empty() {
-				*exec_id = update.exec_id.clone();
-			}
-			let channel = match update.channel {
-				OutputChannel::Stdout => ProtoOutputChannel::Stdout,
-				OutputChannel::Stderr => ProtoOutputChannel::Stderr,
-				OutputChannel::Pty => ProtoOutputChannel::Pty,
-			};
-			Ok(acp_exec_event::Body::Output(OutputFrame {
-				exec:     update.exec_id,
-				channel:  channel as i32,
-				data:     Bytes::copy_from_slice(update.data.as_ref()),
-				sequence: update.sequence,
-				props:    Some(acp_bool_props([
-					("acp/started", update.started),
-					("acp/terminal", update.terminal),
-				])),
-			}))
-		},
-		RunEvent::Exit(status) => {
-			let outcome = match status.outcome {
-				ExecOutcome::Exited => ProtoExecOutcome::Exited,
-				ExecOutcome::Failed => ProtoExecOutcome::Failed,
-				ExecOutcome::Timeout => ProtoExecOutcome::Timeout,
-				ExecOutcome::Cancelled => ProtoExecOutcome::Cancelled,
-				ExecOutcome::Denied => ProtoExecOutcome::Denied,
-			};
-			let spilled_output = status
-				.spilled_output
-				.map(|reference| {
-					let hash = reference.hash.parse::<Hash32>().map_err(|error| {
-						acp_error(
-							ProtocolErrorCode::Internal,
-							format!("invalid ACP spilled-output hash: {error}"),
-						)
-					})?;
-					Ok(omp_proto::thread::v1::Blob {
-						hash: Bytes::copy_from_slice(hash.as_bytes()),
-						mime: reference.media_type.to_string(),
-						size: reference.byte_len,
-						..omp_proto::thread::v1::Blob::default()
-					})
-				})
-				.transpose()?;
-			let final_cwd_uri = status
-				.final_cwd_uri
-				.as_ref()
-				.map_or_else(String::new, ToString::to_string);
-			Ok(acp_exec_event::Body::Exit(ExitEvent {
-				exec: exec_id.clone(),
-				status: Some(ExecStatusMsg {
-					outcome: outcome as i32,
-					exit_code: status.exit_code,
-					signal: status
-						.signal
-						.as_ref()
-						.map_or_else(String::new, ToString::to_string),
-					wall_clock_ms: status.wall_clock_ms,
-					spilled_output,
-					aborted: status.aborted,
-					projection: None,
-					diags: status.diags.iter().map(exec::wire_diag).collect(),
-					props: Some(acp_bool_props([("acp/effects-unknown", status.effects_unknown)])),
-				}),
-				final_cwd_uri,
-				final_cwd_revision: status.final_cwd_revision,
-				..ExitEvent::default()
-			}))
-		},
-	}
-}
-
-fn acp_bool_props<const N: usize>(entries: [(&str, bool); N]) -> ValueMap {
-	ValueMap {
-		fields: entries
-			.into_iter()
-			.map(|(name, enabled)| (name.to_owned(), Value { kind: Some(value::Kind::Bool(enabled)) }))
-			.collect(),
 	}
 }
 
@@ -2321,6 +2031,8 @@ async fn owner_endpoint_ready(socket: &Path) -> bool {
 mod tests {
 	use std::{future::Future, pin::Pin};
 
+	use parking_lot::Mutex;
+
 	use super::*;
 
 	struct FormattingDocuments(Mutex<Str>);
@@ -2421,87 +2133,6 @@ mod tests {
 			panic!("unbound ACP documents must return a typed error");
 		};
 		assert_eq!(error.code, ProtocolErrorCode::PreconditionFailed as i32);
-	}
-
-	#[test]
-	fn acp_exec_events_preserve_ordered_channels_terminal_fields_and_cancel() {
-		use omp_core::CowBytes;
-		use omp_tool::BlobRef;
-		use omp_tools::shell::{ExecStatus, Update};
-
-		let exec_id = Bytes::from_static(b"exec-7");
-		let events = [
-			RunEvent::Started { exec_id: exec_id.clone() },
-			RunEvent::Output(Update {
-				channel:  OutputChannel::Stdout,
-				data:     CowBytes::owned(Bytes::from_static(b"out")),
-				sequence: 1,
-				exec_id:  exec_id.clone(),
-				started:  true,
-				terminal: false,
-			}),
-			RunEvent::Output(Update {
-				channel:  OutputChannel::Stderr,
-				data:     CowBytes::owned(Bytes::from_static(b"err")),
-				sequence: 2,
-				exec_id:  exec_id.clone(),
-				started:  false,
-				terminal: true,
-			}),
-			RunEvent::Exit(ExecStatus {
-				outcome:            ExecOutcome::Failed,
-				exit_code:          Some(17),
-				signal:             Some(sf!("SIGTERM")),
-				wall_clock_ms:      42,
-				spilled_output:     Some(BlobRef {
-					hash:       sf!("{}", Hash32::sum(b"spill")),
-					media_type: sf!("text/plain"),
-					byte_len:   5,
-				}),
-				aborted:            true,
-				effects_unknown:    true,
-				diags:              Vec::new(),
-				final_cwd_uri:      Some(sf!("file:///workspace/after")),
-				final_cwd_revision: 11,
-			}),
-		];
-		let mut remembered_exec = Bytes::new();
-		let bodies = events
-			.into_iter()
-			.map(|event| acp_exec_body(event, &mut remembered_exec).expect("wire conversion"))
-			.collect::<Vec<_>>();
-		assert!(matches!(
-			&bodies[1],
-			acp_exec_event::Body::Output(output)
-				if output.channel == ProtoOutputChannel::Stdout as i32
-					&& output.data == Bytes::from_static(b"out")
-					&& output.sequence == 1
-		));
-		assert!(matches!(
-			&bodies[2],
-			acp_exec_event::Body::Output(output)
-				if output.channel == ProtoOutputChannel::Stderr as i32
-					&& output.data == Bytes::from_static(b"err")
-					&& output.sequence == 2
-		));
-		let acp_exec_event::Body::Exit(exit) = &bodies[3] else {
-			panic!("terminal event was not retained in order");
-		};
-		assert_eq!(exit.exec, exec_id);
-		assert_eq!(exit.final_cwd_uri, "file:///workspace/after");
-		assert_eq!(exit.final_cwd_revision, 11);
-		let status = exit.status.as_ref().expect("terminal status");
-		assert_eq!(status.outcome, ProtoExecOutcome::Failed as i32);
-		assert_eq!(status.exit_code, Some(17));
-		assert_eq!(status.signal, "SIGTERM");
-		assert_eq!(status.wall_clock_ms, 42);
-		assert!(status.aborted);
-		assert_eq!(status.spilled_output.as_ref().expect("spill").size, 5);
-
-		let cancel = CancellationToken::new();
-		let active = Mutex::new(HashMap::from([(7, ActiveAcpExec::Running(cancel.clone()))]));
-		cancel_acp_exec(&active, 7);
-		assert!(cancel.is_cancelled());
 	}
 
 	async fn spawn_with(executable: &Path, deadline_ms: u64) -> Result<(), EnvdError> {
