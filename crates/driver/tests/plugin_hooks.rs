@@ -890,7 +890,7 @@ async fn session_start_runs_on_every_start_with_the_source_that_started_it() {
 	let harness = fixture.harness(BASH, Kind::default()).await;
 	let root = std::fs::canonicalize(&fixture.root).expect("root");
 	let next =
-		Session::create(&fixture.scratch.path().join("next.oms"), ComponentRegistry::standard())
+		Session::create(fixture.scratch.path().join("next.oms"), ComponentRegistry::standard())
 			.expect("next session");
 	let lifecycle = harness.lifecycle();
 	lifecycle
@@ -1031,7 +1031,7 @@ async fn idle_prompt_raises_once_a_run_end_stays_quiet_and_is_withdrawn_by_a_swi
 		.notify(HookEventId::HookEventAgentEnd, run_end.clone())
 		.expect("notify");
 	let next =
-		Session::create(&fixture.scratch.path().join("next.oms"), ComponentRegistry::standard())
+		Session::create(fixture.scratch.path().join("next.oms"), ComponentRegistry::standard())
 			.expect("next session");
 	lifecycle.session_switched(&next);
 	tokio::time::sleep(wait * 3).await;
