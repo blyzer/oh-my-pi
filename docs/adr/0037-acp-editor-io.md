@@ -1,6 +1,6 @@
 # 0037. ACP editors supply the document base; writes commit through the authority, then sync back
 
-Status: proposed
+Status: accepted
 Date: 2026-09-29
 Area: interface
 
@@ -104,7 +104,7 @@ Documents:
 - **D4 — commit only the agent's delta to disk; push buffer+delta to the editor.** This keeps the
   user's unsaved edits unsaved. It conflicts exactly when the agent works on what the user is typing,
   and clients that save on `fs/write_text_file` (reported for Zed, unverified) persist the buffer
-  anyway. Rejected; listed as open question 1.
+  anyway. Rejected (resolved question 1).
 
 Terminal:
 
@@ -131,21 +131,37 @@ Terminal:
    ignored. Capabilities are fixed per `initialize` and apply to every session on that connection.
 2. When `fs.readTextFile` or `fs.writeTextFile` is advertised, the driver binds an editor document
    backend into the environment (`ProjectEnvironment::bind_acp_documents`) for the live session. It
-   rebinds on session switch and unbinds on `session/close`, EOF and `shutdown`. `terminal` is
-   parsed and ignored (§6). omp advertises nothing new in `agentCapabilities`.
+   rebinds on session switch and unbinds on `session/close`, EOF and `shutdown`. It binds only when
+   the connection is eligible (§2): the live session's `cwd` matched the project root and convar
+   `sv_acp_fs` is not `off`. `terminal` is parsed and ignored (§6). omp advertises nothing new in
+   `agentCapabilities`.
 3. All outbound client requests (`session/request_permission`, `fs/*`) share one correlation table
-   keyed by JSON-RPC id, with a per-request deadline (convar `sv_acp_fs_timeout`, proposed default
-   5 s; this replaces `ACP_QUERY_TIMEOUT`). A response whose id is not pending is dropped. Inbound
-   frames get a length bound no smaller than the largest document we will accept (§4).
+   keyed by JSON-RPC id. Each `fs/*` request carries a deadline of convar `sv_acp_fs_timeout`
+   (default 5 s). One convar covers reads and writes, and it replaces `ACP_QUERY_TIMEOUT`.
+   `session/request_permission` waits for a human decision and carries no deadline: a 5 s bound
+   would reject every prompt the user takes longer than that to answer. A response whose id is not
+   pending is dropped. A pending request is retired when its caller is cancelled, and every pending
+   request fails when the transport closes. Inbound frames get a length bound no smaller than the
+   largest document we will accept (§4).
+4. Convar `sv_acp_fs` (`auto` | `off`, default `auto`) is the operator's switch for editor I/O.
+   `auto` uses `fs/*` whenever the capability and eligibility rules allow it. `off` never sends
+   `fs/*`, whatever the client advertises; it is the escape hatch for a remote editor whose path
+   namespace differs from the host's (resolved question 5).
 
 ### 2. Eligibility (security boundary)
 
 Editor I/O is used for a path only when all of the following hold. Otherwise the path uses disk
 through the authority exactly as today.
 
+- Convar `sv_acp_fs` is not `off`.
+- The live ACP session's `cwd` matched the host project root. `validate_session_cwd` rejects a
+  `cwd` that does not match, but it accepts a request with no `cwd`, and the session a connection
+  starts with was never given one. So eligibility requires a `cwd` that was supplied and matched on
+  the `session/new`, `session/load`, `session/resume` or `session/fork` that made the session
+  live. Equality is necessary but not sufficient for a shared path namespace; `sv_acp_fs off` covers
+  the rest.
 - The path canonicalizes through the authority's root resolution (`resolve_existing` /
-  `resolve_target`) to a location inside a project root of this session, and the session's `cwd`
-  matched the host project root (already enforced by `validate_session_cwd`).
+  `resolve_target`) to a location inside a project root of this session.
 - It is a text document (`DocumentKind::Text`, valid UTF-8) at or under the snapshot size cap
   (`omp_tools::read::SNAPSHOT_MAX_BYTES`, 4 MiB).
 - It is not an internal resource (`artifact://`, `agent://`, `history://`, `local://`, …) and not
@@ -177,11 +193,13 @@ For an eligible path with `readTextFile`, every Read, and every Edit `prepare`, 
 | B ≡ D | clean | D | K := D |
 | B ≡ K, or B ≡ a retained authority revision | stale-clean (editor has not reloaded) | D (disk wins) | unchanged |
 | otherwise, K present | dirty, anchored | `rebase_content(K, D, B)`: the user's delta K→B replayed onto D | K := B on commit |
-| otherwise, no K | dirty, unanchored (first contact) | B (buffer wins wholesale) + diag `editor_buffer_unanchored` | K := B on commit |
+| otherwise, no K | dirty, unanchored (first contact) | B (buffer wins wholesale) + `<diag severity=warn kind=editor_buffer_unanchored>`; no user prompt | K := B on commit |
 
 - **Equality.** "≡" is byte equality after line-ending/BOM normalization: B is re-encoded to D's
   dominant EOL and BOM before comparing and merging, because editors may expose normalized text
-  (client behaviour **unverified**).
+  (client behaviour **unverified**). Disk encoding wins: a buffer that differs from disk only in
+  line endings or BOM is clean, and every E, merge and write-back uses D's EOL and BOM (resolved
+  question 4).
 - **Conflict.** A conflict in the dirty-anchored merge rejects the operation before any effect. It
   returns the existing typed `RebaseConflict` ranges in K's coordinate space (the same convention as
   `DocumentConflict.conflicting_ranges`) as a `<diag kind=editor_buffer_conflict>`, with line ranges
@@ -193,7 +211,7 @@ For an eligible path with `readTextFile`, every Read, and every Edit `prepare`, 
   authored-snapshot → base rebase then applies unchanged.
 - **Buffer read failure.** An error, a timeout, a malformed or non-UTF-8 answer, or an oversize
   buffer falls back to E = D with `<diag severity=warn kind=editor_buffer_unavailable>`. It never
-  fails the tool (open question 2).
+  fails the tool, not even when `writeTextFile` is advertised (resolved question 2).
 
 ### 4. Writes commit through the authority; write-back follows
 
@@ -259,8 +277,9 @@ to the client. The dormant shell-escape seam is removed in a clean cutover:
 - the "ACP routing" prompt text in `crates/tools/src/shell.rs`;
 - the `terminalId` → `{type:"terminal"}` mapping in `acp_events.rs`.
 
-Bash output continues as `tool_call_update` content. T3 may be proposed in a later record once a
-client's display-only mechanism is verified. T2 is rejected.
+Bash output continues as `tool_call_update` content. T2 is rejected. T3 is not pursued now; it may
+be proposed in a later record once a client's display-only mechanism is verified (resolved question
+7).
 
 ## Consequences
 
@@ -274,7 +293,7 @@ client's display-only mechanism is verified. T2 is rejected.
 - 0001 modes:
   - *Multiplexed workspace*: TUI, no client, so disk as today.
   - *Remote driver*: this record. It is only valid while the client and host share a path namespace
-    (open question 5).
+    (resolved question 5). `sv_acp_fs off` disables editor I/O when it is not.
   - *Spectator*: views are projections of the journaled element. Only the controlling ACP
     connection serves `fs/*`.
   - *Factorio*: no editor, so the capability is absent and the behaviour is unchanged.
@@ -299,25 +318,28 @@ and the edit rebase is `crates/tools/src/edit.rs`.
 
 1. **Capability negotiation + types** (`crates/app`). Typed `ClientCapabilities` and `fs/*`
    request/response structs. A unified outbound request table (subsuming `PermissionRequests`) with
-   `sv_acp_fs_timeout`. An inbound frame length bound. No binding yet, so no behaviour change.
+   the `sv_acp_fs_timeout` deadline for `fs/*`. The `sv_acp_fs` and `sv_acp_fs_timeout` convars and
+   the per-session eligibility state (§2). An inbound frame length bound. No binding yet, so no
+   behaviour change.
 2. **Read-through as document base** (`crates/envd`, `crates/driver`, `crates/app`). Anchor table
    and effective base E in `DocumentHost`, Read provenance, Edit `prepare` using E with
    `base_revision = Rd`. Delete the `acp:` pseudo-revision *and* the `write_plain` early return, so
    binding never activates the bypass. Bind documents in ACP mode when `readTextFile` is
-   advertised.
+   advertised and the session is eligible (§2).
 3. **Write-back propagation** (`crates/envd`, `crates/app`). Per-path FIFO queue with supersession,
    pre-write re-read and merge, `fs/write_text_file`, read-back drift → `ClientFormatDrift`,
    ordering before settle, the post-commit cancellation handoff, and drain on close/switch/shutdown.
    Enabled by `writeTextFile`.
 4. **Terminal cutover** (`crates/envd`, `crates/env`, `crates/proto`, `crates/tools`, `crates/app`).
    Remove the exec seam and convar listed in §6 and reserve the proto fields. `terminal` stays
-   parsed and ignored.
+   parsed and ignored. This step does not depend on steps 1–3 and lands as its own change.
 
 ### Test plan (owning seams)
 
 - **`crates/app/tests/acp_spine.rs`**, with a fake client over the existing NDJSON harness that
   advertises the caps and answers `fs/*` from an in-memory buffer map:
   - Without caps, no `fs/*` request is ever sent, even with `terminal: true`.
+  - With caps, `sv_acp_fs off` or a session without a matched `cwd` sends no `fs/*` request.
   - Response correlation works alongside `session/request_permission`.
   - A read that is never answered times out within the bound.
   - Unknown or late response ids are dropped.
@@ -342,19 +364,36 @@ and the edit rebase is `crates/tools/src/edit.rs`.
     and ordering is commit → write → settle.
   - The overlapping variant is rejected with typed ranges, with no disk or editor write.
 
-### Open questions for the owner
+### Resolved questions
 
-1. Accept that agent commits on a dirty buffer save the user's unsaved edits (D3), or prefer D4?
-2. Buffer-read failure: fall back to disk (v1, proposed), or fail closed when `writeTextFile` is
-   advertised?
-3. First-contact dirty buffer: buffer wins (proposed), or ask the user?
-4. EOL/BOM normalization when the buffer and disk differ only in encoding: confirm the proposed
-   "disk encoding wins" rule.
-5. Remote driver with a different path namespace (editor on a laptop, agent on a remote host): how
-   do we detect it and disable `fs/*`? Session-cwd equality is necessary but not sufficient.
-6. Timeout default (5 s) and whether read and write deserve separate convars.
-7. Confirm deleting the dormant `AcpExec*` seam and `sv_acp_routing` (T1), and whether to
-   investigate T3.
+The owner resolved the proposal's open questions on 2026-09-29. The Decision above states each
+outcome as a rule; this list keeps the reasoning.
+
+1. **Dirty buffer on commit: D3.** An agent commit on a file with unsaved editor changes also
+   saves those changes to disk. The buffer merged with disk is the base, and the commit goes
+   through the authority. D4 would keep them unsaved, but it conflicts exactly when the agent works
+   on what the user is typing, and clients that save on `fs/write_text_file` persist the buffer
+   anyway.
+2. **Buffer-read failure: fall back to disk** with `<diag severity=warn
+   kind=editor_buffer_unavailable>` (§3), even when `writeTextFile` is advertised. Failing closed
+   would let a slow or broken client block every Read and Edit, and the authority commit is safe
+   against disk either way.
+3. **First-contact dirty buffer: the buffer wins** with `<diag severity=warn
+   kind=editor_buffer_unanchored>` and no user prompt. The buffer is what the user sees, and a
+   prompt per file would add a second permission surface that §2 excludes.
+4. **Encoding: disk wins.** A difference only in line endings or BOM counts as equal, and E, merges
+   and write-backs use D's EOL and BOM. Editors may normalize the text they expose; re-encoding to
+   disk keeps a line-ending-only difference from rewriting the file.
+5. **Remote-editor path namespace.** Editor `fs/*` is used only when the ACP session's `cwd`
+   matched the project root and convar `sv_acp_fs` (`auto` | `off`, default `auto`) is not `off`.
+   `cwd` equality is necessary but cannot prove the client and the host share a filesystem, so
+   `off` is the operator's escape hatch for a remote editor (§1, §2).
+6. **Timeout: one convar.** `sv_acp_fs_timeout` (default 5 s) bounds reads and writes alike.
+   It stays one knob until a client shows that reads and writes need different bounds.
+   `session/request_permission` is not bounded by it, because it waits for a human (§1).
+7. **Terminal: T1.** The dormant `AcpExec*` seam and `sv_acp_routing` are deleted (§6, plan step
+   4). T3 is not pursued now; a later record may propose it once a client's display-only mechanism
+   is verified.
 
 ## References
 
