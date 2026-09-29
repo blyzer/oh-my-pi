@@ -884,12 +884,85 @@ pub struct RegistryArgs {
 	pub json:      bool,
 }
 
-/// Standalone collaboration guest options.
+/// Collaboration guest options: open chat and join a shared room.
 #[derive(Clone, Debug, Args)]
 pub struct JoinArgs {
-	/// Collaboration link shared by the authoritative host.
+	/// Collaboration link shared by the authoritative host (`omp share` or
+	/// `/collab`).
 	#[arg(value_name = "LINK")]
 	pub link: Str,
+	/// Display name shown to the room's other participants.
+	#[arg(long, value_name = "NAME")]
+	pub name: Option<Str>,
+}
+
+/// Headless collaboration host options: run a session and share it.
+///
+/// The launch options select the session and model exactly as `omp print`
+/// and `omp rpc` do; the host prints the viewer and editor links, then runs
+/// every prompt writable guests send until interrupted.
+#[derive(Clone, Debug, Args)]
+pub struct ShareArgs {
+	/// Launch and session settings shared with interactive, print, and RPC
+	/// modes. Positional prompts are not accepted: guests supply the prompts.
+	#[command(flatten)]
+	pub launch: ChatArgs,
+	/// Relay origin to create the room on; the public relay when absent.
+	#[arg(long, value_name = "URL")]
+	pub relay:  Option<Str>,
+	/// Publish only the read-only viewer link to the local host registry.
+	#[arg(long)]
+	pub view:   bool,
+	/// Emit the room facts as one JSON document instead of prose.
+	#[arg(long)]
+	pub json:   bool,
+}
+
+impl std::ops::Deref for ShareArgs {
+	type Target = ChatArgs;
+
+	fn deref(&self) -> &Self::Target {
+		&self.launch
+	}
+}
+
+/// Local collaboration host discovery.
+#[derive(Clone, Debug, Args)]
+pub struct CollabArgs {
+	/// Discovery operation; lists active hosts when omitted.
+	#[command(subcommand)]
+	pub command: Option<CollabCommand>,
+}
+
+/// Local collaboration host discovery operations.
+#[derive(Clone, Debug, Subcommand)]
+pub enum CollabCommand {
+	/// List active collaboration hosts on this machine.
+	List(CollabListArgs),
+	/// Print a link for one active host.
+	Link(CollabLinkArgs),
+}
+
+/// `omp collab list` options.
+#[derive(Clone, Debug, Args)]
+pub struct CollabListArgs {
+	/// Emit deterministic machine-readable JSON.
+	#[arg(long, short = 'j')]
+	pub json: bool,
+}
+
+/// `omp collab link` options.
+#[derive(Clone, Debug, Args)]
+pub struct CollabLinkArgs {
+	/// Host instance id or pid, as `omp collab list` shows it.
+	#[arg(value_name = "INSTANCE_OR_PID")]
+	pub selector: Str,
+	/// Request a view-only link instead of control access.
+	#[arg(long)]
+	pub view:     bool,
+	/// Emit deterministic machine-readable JSON.
+	#[arg(long, short = 'j')]
+	pub json:     bool,
 }
 /// Bounded checker discovery and file-disjoint repair options.
 #[derive(Clone, Debug, Args)]
@@ -983,6 +1056,12 @@ pub enum Command {
 	/// Start an interactive project agent session.
 	#[command(alias = "i", alias = "launch")]
 	Chat(ChatArgs),
+	/// Join a shared collaboration room as a guest.
+	Join(JoinArgs),
+	/// Host a session headlessly and print its collaboration links.
+	Share(ShareArgs),
+	/// Discover local collaboration hosts and retrieve their links.
+	Collab(CollabArgs),
 	/// Run a single prompt and stream its response to standard output.
 	#[command(alias = "p")]
 	Print(PrintArgs),
@@ -1416,7 +1495,9 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "token", aliases: &[] },
 	CommandSpec { name: "update", aliases: &[] },
 	CommandSpec { name: "registry", aliases: &[] },
+	CommandSpec { name: "join", aliases: &[] },
 	CommandSpec { name: "share", aliases: &[] },
+	CommandSpec { name: "collab", aliases: &[] },
 	CommandSpec { name: "models", aliases: &["model"] },
 	CommandSpec { name: "worktree", aliases: &["wt"] },
 	CommandSpec { name: "stats", aliases: &[] },
@@ -1441,7 +1522,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 fn is_launch_command(argument: &OsString) -> bool {
 	matches!(
 		argument.to_string_lossy().as_ref(),
-		"chat" | "i" | "launch" | "print" | "p" | "rpc" | "rpc-ui" | "acp"
+		"chat" | "i" | "launch" | "print" | "p" | "rpc" | "rpc-ui" | "acp" | "share"
 	)
 }
 
@@ -2447,6 +2528,9 @@ enum DispatchTarget {
 	Serve,
 	Envd,
 	Chat,
+	Join,
+	Share,
+	Collab,
 	Print,
 	Render,
 	Rpc,
@@ -2493,6 +2577,9 @@ enum DispatchTarget {
 const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 	match command {
 		None | Some(Command::Chat(_)) => DispatchTarget::Chat,
+		Some(Command::Join(_)) => DispatchTarget::Join,
+		Some(Command::Share(_)) => DispatchTarget::Share,
+		Some(Command::Collab(_)) => DispatchTarget::Collab,
 		Some(Command::BrowserRelay(_)) => DispatchTarget::BrowserRelay,
 		Some(Command::Commit(_)) => DispatchTarget::Commit,
 		Some(Command::Print(_)) => DispatchTarget::Print,
@@ -2680,6 +2767,7 @@ fn command_extension_args(command: Option<&Command>) -> Option<&InvocationExtens
 		None => None,
 		Some(Command::Chat(args)) => Some(&args.extensions),
 		Some(Command::Print(args)) => Some(&args.launch.extensions),
+		Some(Command::Share(args)) => Some(&args.launch.extensions),
 		Some(Command::Rpc(args) | Command::RpcUi(args)) => Some(&args.launch.extensions),
 		Some(Command::Acp(args)) => Some(&args.launch.extensions),
 		Some(Command::Models(args)) => Some(&args.extensions),
@@ -2951,6 +3039,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		None
 			| Some(Command::Chat(_))
 			| Some(Command::Print(_))
+			| Some(Command::Share(_))
 			| Some(Command::Rpc(_))
 			| Some(Command::RpcUi(_))
 			| Some(Command::Acp(_))
@@ -3007,6 +3096,21 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 			)
 			.await
 		},
+		Command::Join(args) => {
+			let mut chat = ChatArgs::default_interactive();
+			chat.extension_launch = launch_extensions;
+			Box::pin(chat_cmd::run(
+				chat,
+				ChatStart::Join { link: args.link, name: args.name },
+				ChatPresentation::Terminal,
+			))
+			.await
+		},
+		Command::Share(mut args) => {
+			args.launch.extension_launch = launch_extensions;
+			crate::share_cmd::run(args).await
+		},
+		Command::Collab(args) => crate::collab_cmd::run(args).await,
 		Command::Print(mut args) => {
 			args.launch.extension_launch = launch_extensions;
 			print_mode::run(args, piped_input).await
@@ -4068,6 +4172,72 @@ mod tests {
 			assert_eq!(dispatch_target(parse(arguments).command.as_ref()), target);
 		}
 	}
+	#[test]
+	fn parses_collaboration_commands() {
+		let Some(Command::Join(join)) =
+			parse(&["omp", "join", "room.key.token", "--name", "Ada"]).command
+		else {
+			panic!("join command");
+		};
+		assert_eq!(join.link.as_str(), "room.key.token");
+		assert_eq!(join.name.as_deref(), Some("Ada"));
+		assert_eq!(
+			dispatch_target(parse(&["omp", "join", "room.key"]).command.as_ref()),
+			DispatchTarget::Join
+		);
+		assert!(OmpCli::try_parse_from(["omp", "join"]).is_err(), "a link is required to join");
+
+		let Some(Command::Share(share)) = parse(&[
+			"omp",
+			"share",
+			"--relay",
+			"ws://127.0.0.1:9",
+			"--view",
+			"--json",
+			"--model",
+			"provider/model",
+			"--no-session",
+		])
+		.command
+		else {
+			panic!("share command");
+		};
+		assert_eq!(share.relay.as_deref(), Some("ws://127.0.0.1:9"));
+		assert!(share.view && share.json);
+		assert_eq!(share.model.as_deref(), Some("provider/model"), "launch options flatten in");
+		assert!(share.no_session);
+		assert!(share.prompt.is_empty());
+		assert_eq!(dispatch_target(parse(&["omp", "share"]).command.as_ref()), DispatchTarget::Share);
+
+		let Some(Command::Collab(bare)) = parse(&["omp", "collab"]).command else {
+			panic!("collab command");
+		};
+		assert!(bare.command.is_none(), "collab lists by default");
+		let Some(Command::Collab(CollabArgs { command: Some(CollabCommand::List(list)) })) =
+			parse(&["omp", "collab", "list", "--json"]).command
+		else {
+			panic!("collab list");
+		};
+		assert!(list.json);
+		let Some(Command::Collab(CollabArgs { command: Some(CollabCommand::Link(link)) })) =
+			parse(&["omp", "collab", "link", "0123abcd", "--view", "-j"]).command
+		else {
+			panic!("collab link");
+		};
+		assert_eq!(link.selector.as_str(), "0123abcd");
+		assert!(link.view && link.json);
+		assert!(
+			OmpCli::try_parse_from(["omp", "collab", "link"]).is_err(),
+			"a link request names its host"
+		);
+		for name in ["join", "share", "collab"] {
+			assert!(
+				COMMAND_REGISTRY.iter().any(|entry| entry.name == name),
+				"{name} must be registered so it is never routed to chat as a prompt"
+			);
+		}
+	}
+
 	#[test]
 	fn literal_pi_launch_flag_oracle_is_reserved_by_the_cli() {
 		// Literal oracle from pi

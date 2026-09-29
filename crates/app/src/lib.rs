@@ -21,6 +21,7 @@ pub mod chat_services;
 pub mod chat_voice;
 pub mod cleanse_cmd;
 pub mod cli;
+pub mod collab_cmd;
 pub mod commit_cmd;
 pub mod complete_cmd;
 pub mod completions;
@@ -71,6 +72,7 @@ pub mod say_cmd {
 }
 pub mod session_import;
 pub mod setup_cmd;
+pub mod share_cmd;
 pub mod shell_cmd;
 pub mod smoke_test;
 pub mod spec;
