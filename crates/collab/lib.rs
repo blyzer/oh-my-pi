@@ -8,6 +8,8 @@ pub mod link;
 pub mod presence;
 pub mod relay;
 pub mod replication;
+#[cfg(any(test, feature = "test-relay"))]
+pub mod test_relay;
 
 /// The only protocol revision accepted by this crate.
 pub const PROTOCOL_REVISION: u32 = 3;
