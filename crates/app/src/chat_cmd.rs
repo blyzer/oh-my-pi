@@ -640,8 +640,9 @@ impl Launch {
 	/// so it is the notice that stays visible: how many did not run and how
 	/// to approve them without leaving the session (`/plugins approve`, which
 	/// records the same approval `omp ext trust` would; the session loaded
-	/// its plugins at launch, so they start after `/restart`). `None` when
-	/// nothing is blocked.
+	/// its plugins at launch, so they start after `/restart`). The notice row
+	/// counts the warnings and hint stacked under it (`+N more (/notices)`),
+	/// and `/notices` lists them. `None` when nothing is blocked.
 	pub(crate) fn chat_approval_hint(&self) -> Option<String> {
 		match self.blocked_plugin_commands.len() {
 			0 => None,

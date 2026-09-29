@@ -320,6 +320,9 @@ pub enum CommandAction {
 	Session(SessionOp),
 	/// `/jobs`: list detached jobs and subagents.
 	Jobs,
+	/// `/notices`: list every status notice still retained, including the
+	/// ones a burst stacked under the notice row.
+	Notices,
 	/// `/todo [subcommand] [args]`: edit the session checklist.
 	Todo(TodoOp),
 	/// `/btw <question>`: side question answered by a child kernel.
