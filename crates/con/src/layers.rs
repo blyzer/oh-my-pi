@@ -127,6 +127,10 @@ pub struct Layers {
 	pub(crate) inherited:   FastHashMap<Str, Value>,
 	pub(crate) class:       FastHashMap<Str, Value>,
 	pub(crate) session:     FastHashMap<Str, Value>,
+	/// The main scope's session layer, set aside while an adopted child
+	/// scope presents its own (`Ctx::adopt_scope`); never consulted for an
+	/// effective value, restored by `Ctx::drop_scope`.
+	pub(crate) parked:      Option<FastHashMap<Str, Value>>,
 	pub(crate) engagements: Vec<EngagementLayer>,
 	next_id:                u64,
 }

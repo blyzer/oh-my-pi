@@ -25,6 +25,12 @@ administration all use one parser and one registry.
   control state without a second settings database.
 - Every declared value is copied from the parent's effective view at spawn, then
   `subagent.cfg` and `<agent>.cfg` execute in that order; inheritance is not a flag.
+- A context can present a child scope in place of its own (`adopt_scope`, the
+  main chat resuming a child session): the child's inherited and class layers
+  replace its own, and its session layer is parked, so the main scope's
+  writes neither outrank the child's class nor become the child's own; they
+  reach the child only through `scope_seed`, its inherited picture.
+  `drop_scope` restores the parked layer.
 - `REPLICATED` values are authority-owned and locally immutable on replicas.
 - Persistence is a replayable command script, not a parallel serialization
   format. `dumpcfg` (`Ctx::dump`) includes only `ARCHIVE` diffs plus aliases and binds.
@@ -39,7 +45,7 @@ The built-in names use subsystem prefixes (`ai_*`, `cl_*`, `sv_*`), including
 | `value` | Typed values, durations, enums, lists, and kv blocks |
 | `spec` | Variable/command/action declarations and flags |
 | `ctx` | Registry, command execution, cfg loading, binds, and aliases |
-| `layers` | Archive/inherited/class/session/engagement precedence and child seeds |
+| `layers` | Archive/inherited/class/session/engagement precedence, parked scopes, and child seeds |
 | `script` | Quotes, comments, separators, lists, and kv parsing |
 | `dump` | Deterministic diff-from-default command script |
 | `repl` | Authority-to-replica patches |

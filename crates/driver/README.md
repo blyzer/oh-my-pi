@@ -46,11 +46,16 @@ presentation adapter.
   `agents: [review-*, !review-bot]` every `review-*` class but `review-bot`.
   An excluded rule is kept out of the prompt, out of `rule://` listings and
   completion, and `rule://<name>` refuses it. A child session journals the
-  class it runs as, so resuming it (from the main chat's `/resume` or with
-  `--resume`) keeps the child's rules and applies its class configuration
-  (`subagent.cfg`, `<agent>.cfg`, the next recursion depth) through the spawn
-  path, beneath the child's journaled convars; a class whose cfg is gone
-  resumes on the default subagent configuration with a notice.
+  class and recursion depth it runs at, so resuming it (from the main chat's
+  `/resume` or with `--resume`) keeps the child's rules and applies its class
+  configuration (`subagent.cfg`, `<agent>.cfg`, its journaled depth) through
+  the spawn path, beneath the child's journaled convars; a class whose cfg is
+  gone resumes on the default subagent configuration with a notice. The main
+  session's own convar writes are parked meanwhile: they seed the child's
+  inherited layer beneath its class, are never journaled into the child, and
+  return on switching back. The `task` tool follows the presented session: a
+  resumed child at the recursion ceiling is not advertised `task`, exactly as
+  a child spawned at that depth is not.
 - `v1_import` is the one-shot v1 (TypeScript `omp`) migrator behind
   `omp config import-v1` and the automatic first run. Its `sessions` step and
   the `/resume @v1` picker convert v1 transcripts into `.oms` journals. The

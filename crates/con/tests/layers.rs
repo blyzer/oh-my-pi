@@ -229,6 +229,62 @@ fn adopted_scope_sits_beneath_session_writes_and_drops_cleanly() {
 	assert_eq!(main.get("test_scoped"), Some(Value::Int(10)));
 }
 
+/// The main scope's session writes — journaled or not — are parked while a
+/// child scope is adopted: they never outrank the child's class, reach the
+/// child only through the seed it inherits, and come back with `drop_scope`.
+#[test]
+fn adopted_scope_parks_the_main_session_layer_beneath_its_class() {
+	let main = Ctx::new();
+	main
+		.set("test_layered", Value::Int(2), Origin::Archive)
+		.unwrap();
+	main.run("test_layered 3").unwrap();
+	main
+		.set("test_scoped", Value::Int(30), Origin::Host)
+		.unwrap();
+	let seed = main.scope_seed();
+	assert_eq!(seed.get("test_layered"), Some(&Value::Int(3)), "session over archive");
+	assert_eq!(seed.get("test_scoped"), Some(&Value::Int(30)), "host writes seed too");
+
+	// The spawn path builds the child over that seed; its class sets only
+	// `test_layered`.
+	let child = Ctx::new();
+	for (name, value) in seed.iter() {
+		child
+			.set(name.as_str(), value.clone(), Origin::Inherited)
+			.unwrap();
+	}
+	child.exec("test_layered 6", Source::Subagent).unwrap();
+
+	let writes = main.subscribe_session_writes();
+	main.adopt_scope(&child);
+	assert_eq!(value(&main), Value::Int(6), "the class outranks the main session's write");
+	assert_eq!(main.get("test_scoped"), Some(Value::Int(30)), "inherited beneath the class");
+	assert_eq!(main.session_writes().count(), 0, "the child's session layer starts empty");
+	assert!(writes.try_recv().is_err(), "parking journals nothing");
+
+	// The child's own write outranks its class and survives re-adoption (a
+	// resync at every command boundary); the seed still describes the main
+	// scope, never the child's writes.
+	main.run("test_layered 9").unwrap();
+	main.run("test_scoped 40").unwrap();
+	assert_eq!(main.scope_seed().get("test_layered"), Some(&Value::Int(3)));
+	main.adopt_scope(&child);
+	assert_eq!(value(&main), Value::Int(9));
+	assert_eq!(main.get("test_scoped"), Some(Value::Int(40)));
+	main.run("reset test_scoped").unwrap();
+	assert_eq!(main.get("test_scoped"), Some(Value::Int(30)), "reset falls to the inherited seed");
+
+	// Switching back restores the main scope's layer, not the child's.
+	while writes.try_recv().is_ok() {}
+	main.drop_scope();
+	assert_eq!(value(&main), Value::Int(3));
+	assert_eq!(main.get("test_scoped"), Some(Value::Int(30)));
+	assert!(writes.try_recv().is_err(), "restoring journals nothing");
+	main.drop_scope();
+	assert_eq!(value(&main), Value::Int(3), "a second drop is a no-op");
+}
+
 /// `reset` completes variable names and documents its inheritance.
 #[test]
 fn reset_completes_variables_and_explains_itself() {

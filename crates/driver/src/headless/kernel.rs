@@ -2145,10 +2145,15 @@ pub async fn compose_kernel(
 	let con_journal =
 		Arc::new(con_journal::ConJournal::attach(Arc::clone(&ctx), session.dom(), class_scope));
 	apply_model_override(&ctx, model.as_str(), options.model_override)?;
-	// A child journals the class it runs as, so resuming its session later
-	// (from the main chat or `--resume`) scopes rules to that class.
+	// A child journals the class and recursion depth it runs at, so resuming
+	// its session later (from the main chat or `--resume`) scopes rules to
+	// that class and presents its configuration and roster at that depth.
 	if let Some(agent) = &options.agent {
-		crate::subagent::journal_agent(&mut session, agent)?;
+		crate::subagent::journal_agent(
+			&mut session,
+			agent,
+			crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&ctx),
+		)?;
 	}
 	let agent = kernel_agent(options.agent.as_deref(), session.dom());
 	rule_scope.select(agent.clone());
@@ -2377,21 +2382,22 @@ pub async fn compose_kernel(
 		kernel = kernel.with_session_tool(Arc::new(super::todo::TodoSessionTool::new()));
 		// ADR 0013: `subagent.cfg` and `<agent>.cfg` resolve through the same
 		// user (`~/.o2`) and project cfg roots every other `exec` uses.
-		// A child at the recursion ceiling never sees `task`,
-		// so it cannot plan a delegation the spawner would refuse.
-		if !crate::subagent::settings::task_withheld(&ctx) {
-			kernel = kernel.with_session_tool(Arc::new(crate::subagent::spawn::TaskSessionTool::new(
-				data_dir.to_path_buf(),
-				project_root.clone(),
-				sessions_dir.clone(),
-				Arc::clone(&live_sessions),
-				Arc::clone(&ctx),
-				Arc::clone(&cfg),
-				hub_environment.clone(),
-				name.clone(),
-				model,
-			)));
-		}
+		// The tool follows the live console: a session at the recursion
+		// ceiling — a spawned child, or a child the main chat resumed — is
+		// never advertised `task`, so it cannot plan a delegation the spawner
+		// would refuse, and a switch back to the main session advertises it
+		// again.
+		kernel = kernel.with_session_tool(Arc::new(crate::subagent::spawn::TaskSessionTool::new(
+			data_dir.to_path_buf(),
+			project_root.clone(),
+			sessions_dir.clone(),
+			Arc::clone(&live_sessions),
+			Arc::clone(&ctx),
+			Arc::clone(&cfg),
+			hub_environment.clone(),
+			name.clone(),
+			model,
+		)));
 		kernel = kernel.with_session_tool(Arc::new(crate::subagent::hub::HubSessionTool::new(
 			hub_environment,
 			project_root.clone(),
@@ -3758,8 +3764,9 @@ mod tests {
 		{
 			let mut child =
 				Session::create(&child_path, ComponentRegistry::standard()).expect("child");
-			journal_agent(&mut child, AgentName::from_ref("scout")).expect("journal agent");
-			journal_agent(&mut child, AgentName::from_ref("scout")).expect("idempotent");
+			journal_agent(&mut child, AgentName::from_ref("scout"), 1).expect("journal agent");
+			journal_agent(&mut child, AgentName::from_ref("scout"), 1).expect("idempotent");
+			assert_eq!(crate::subagent::journaled_depth(child.dom()), Some(1));
 		}
 
 		let main_facts = crate::discovery::PromptFacts {

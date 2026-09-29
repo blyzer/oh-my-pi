@@ -2184,6 +2184,9 @@ impl<C: Inference> Kernel<C> {
 		if let Some(roster) = crate::tool_allowlist(self.con.as_deref()) {
 			tools.retain(|tool| roster.contains(&tool.definition.name));
 		}
+		// A session tool may withhold its declaration for the session it
+		// presents (`task` at the recursion ceiling).
+		tools.retain(|tool| !self.dispatcher.withholds(tool.definition.name.as_str()));
 		// Goal engagement mounts its hidden lifecycle tool in addition to the
 		// user's ordinary roster; pause, completion, drop, rewind, and resume
 		// all re-derive this decision from the selected branch.

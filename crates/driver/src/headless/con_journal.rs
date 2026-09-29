@@ -13,10 +13,13 @@
 //! When the composition follows the live session's class
 //! ([`ClassScope::Journaled`]: the main chat, `--resume`), a session journaled
 //! as a child class ([`crate::subagent::journaled_agent`]) presents that
-//! child's configuration: the spawn path ([`configure_child`]) builds it over
-//! the console's own picture, and [`Ctx::adopt_scope`] installs its inherited
-//! and class layers beneath the journaled session writes. Switching to a main
-//! session drops them again ([`Ctx::drop_scope`]). Neither layer is journaled
+//! child's configuration: the spawn path ([`configure_resumed_child`]) builds
+//! it over the main scope's picture at the child's journaled recursion depth,
+//! and [`Ctx::adopt_scope`] installs its inherited and class layers beneath
+//! the child's journaled session writes, parking the main scope's session
+//! layer so none of the main session's writes outrank the class or journal
+//! into the child. Switching to a main session drops them again and restores
+//! the parked layer ([`Ctx::drop_scope`]). Neither class layer is journaled
 //! or persisted, so the child's definition is re-read on every resume.
 
 use std::sync::Arc;
@@ -32,7 +35,9 @@ use omp_session::{
 };
 use parking_lot::Mutex;
 
-use crate::subagent::{TASK_AGENT, journaled_agent, spawn::configure_child};
+use crate::subagent::{
+	TASK_AGENT, journaled_agent, journaled_depth, spawn::configure_resumed_child,
+};
 
 /// Provenance recorded on journaled session writes.
 const ORIGIN: &str = "session";
@@ -40,8 +45,9 @@ const ORIGIN: &str = "session";
 /// How a composition's console follows the agent class of its live session.
 pub enum ClassScope {
 	/// The composition configured the class itself (a spawned, revived, or
-	/// workpool child built by [`configure_child`]); the console stays as
-	/// composed.
+	/// workpool child built by
+	/// [`configure_child`](crate::subagent::spawn::configure_child)); the
+	/// console stays as composed.
 	Composed,
 	/// Follow the class journaled on the live session (the main chat,
 	/// `--resume`): a child session presents its class configuration through
@@ -81,6 +87,10 @@ impl ConJournal {
 	/// class, the rest are restored, and pending writes are dropped because
 	/// they described the abandoned branch.
 	pub fn resync(&self, dom: &Dom) {
+		// The class goes first: returning to a main session restores its
+		// parked session layer, which the stale sweep then aligns with the
+		// journal of the session actually presented.
+		apply_class(&self.ctx, &self.scope, dom);
 		let live = con_writes(dom);
 		let stale = self
 			.ctx
@@ -93,7 +103,6 @@ impl ConJournal {
 				tracing::warn!(%name, %error, "session convar could not be cleared on resync");
 			}
 		}
-		apply_class(&self.ctx, &self.scope, dom);
 		hydrate(&self.ctx, dom);
 		self.pending.lock().clear();
 		while self.writes.try_recv().is_ok() {}
@@ -174,17 +183,21 @@ impl ConJournal {
 }
 
 /// Presents the class configuration of the session `dom` journals, when the
-/// composition follows it: drops the previous session's, then — for a child
-/// session — builds the child exactly as the spawn path does over the
-/// console's own picture and adopts its inherited and class layers. A class
-/// whose definition (`<agent>.cfg`) is gone, or that fails to configure, is
-/// reported through the console sink, never skipped silently.
+/// composition follows it. For a child session it builds the child exactly
+/// as the spawn path does ([`configure_resumed_child`]) — over the main
+/// scope's picture, at the journaled recursion depth — and adopts its
+/// inherited and class layers; the first adoption parks the main scope's
+/// session layer, so the main session's writes sit beneath the class as the
+/// inherited seed rather than above it. For a main session it drops the
+/// adopted scope, restoring the parked layer. A class whose definition
+/// (`<agent>.cfg`) is gone, or that fails to configure, is reported through
+/// the console sink, never skipped silently.
 fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom) {
 	let ClassScope::Journaled(cfg) = scope else {
 		return;
 	};
-	ctx.drop_scope();
 	let Some(agent) = journaled_agent(dom) else {
+		ctx.drop_scope();
 		return;
 	};
 	if agent.as_str() != TASK_AGENT.as_str() {
@@ -208,15 +221,21 @@ fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom) {
 			),
 		}
 	}
-	match configure_child(ctx, cfg.as_ref(), agent.as_str(), None) {
+	// A child journaled before depths were is resumed as a direct child of
+	// the main session.
+	let depth = journaled_depth(dom).unwrap_or(1);
+	match configure_resumed_child(ctx, cfg.as_ref(), agent.as_str(), depth) {
 		Ok((child, _)) => ctx.adopt_scope(&child),
-		Err(error) => ctx.reply_fmt(
-			Severity::Warn,
-			format_args!(
-				"agent `{agent}` configuration could not be applied: {error}; this session resumes \
-				 with the main session's configuration"
-			),
-		),
+		Err(error) => {
+			ctx.drop_scope();
+			ctx.reply_fmt(
+				Severity::Warn,
+				format_args!(
+					"agent `{agent}` configuration could not be applied: {error}; this session resumes \
+					 with the main session's configuration"
+				),
+			);
+		},
 	}
 }
 
@@ -410,10 +429,14 @@ mod tests {
 		Arc::new(crate::cfg::CfgFiles::with_roots(root.to_path_buf(), None))
 	}
 
-	fn child_session(path: &std::path::Path, agent: &str) -> Session {
+	fn child_session(path: &std::path::Path, agent: &str, depth: u32) -> Session {
 		let mut session = open(path);
-		crate::subagent::journal_agent(&mut session, crate::subagent::AgentName::from_ref(agent))
-			.expect("journal agent");
+		crate::subagent::journal_agent(
+			&mut session,
+			crate::subagent::AgentName::from_ref(agent),
+			depth,
+		)
+		.expect("journal agent");
 		session
 	}
 
@@ -438,7 +461,7 @@ mod tests {
 
 		// `--resume child.oms`: the composition follows the journaled class.
 		let child_path = directory.path().join("child.oms");
-		let mut child = child_session(&child_path, "scout");
+		let mut child = child_session(&child_path, "scout", 1);
 		let journal =
 			ConJournal::attach(Arc::clone(&ctx), child.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
 		assert_eq!(omp_agent::AI_MODEL.get(&ctx), "scout/model");
@@ -489,7 +512,7 @@ mod tests {
 		let directory = tempfile::tempdir().expect("tempdir");
 		let cfg = class_files(directory.path(), &[("subagent.cfg", "ai_fastmode 1\n")]);
 		let (ctx, replies) = console();
-		let child = child_session(&directory.path().join("gone.oms"), "retired");
+		let child = child_session(&directory.path().join("gone.oms"), "retired", 1);
 		let _journal = ConJournal::attach(Arc::clone(&ctx), child.dom(), ClassScope::Journaled(cfg));
 		assert!(omp_agent::AI_FASTMODE.get(&ctx), "the default subagent configuration applies");
 		assert_eq!(crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&ctx), 1);
@@ -499,7 +522,7 @@ mod tests {
 		// The bundled `task` class needs no cfg and is not reported.
 		let (task_ctx, task_replies) = console();
 		let empty = tempfile::tempdir().expect("tempdir");
-		let task = child_session(&empty.path().join("task.oms"), "task");
+		let task = child_session(&empty.path().join("task.oms"), "task", 1);
 		let _journal = ConJournal::attach(
 			Arc::clone(&task_ctx),
 			task.dom(),
@@ -507,5 +530,168 @@ mod tests {
 		);
 		assert!(task_replies.lock().is_empty(), "{:?}", task_replies.lock());
 		assert_eq!(crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&task_ctx), 1);
+	}
+
+	fn bool_var(ctx: &Ctx, name: &str) -> bool {
+		match ctx.get(name) {
+			Some(omp_con::Value::Bool(value)) => value,
+			other => panic!("`{name}` is not a boolean: {other:?}"),
+		}
+	}
+
+	/// Resuming a child parks the main session's writes: neither its
+	/// journaled values nor its unjournaled console and host writes outrank
+	/// the child's class. The unjournaled ones reach the child only as the
+	/// seed it inherits, nothing of the main session is journaled into the
+	/// child, and switching back restores them.
+	#[test]
+	fn resuming_a_child_parks_the_main_session_writes_beneath_its_class() {
+		let directory = tempfile::tempdir().expect("tempdir");
+		let cfg =
+			class_files(directory.path(), &[("scout.cfg", "ai_thinking low\nsv_lsp_enabled 1\n")]);
+		let (ctx, _) = console();
+		ctx.exec(
+			"ai_model main/model",
+			omp_con::Source::Config(omp_core::Str::new_static("config.cfg")),
+		)
+		.expect("user cfg");
+
+		// The main chat, on a main session: one journaled write, two the
+		// journal does not keep (variables without `SESSION`).
+		let mut main = open(&directory.path().join("main.oms"));
+		let journal =
+			ConJournal::attach(Arc::clone(&ctx), main.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
+		ctx.run("ai_thinking xhigh").expect("journaled write");
+		ctx.run("sv_lsp_enabled 0").expect("unjournaled write");
+		ctx.run("ai_external_thinking 1")
+			.expect("unjournaled write");
+		journal.flush(&mut main).expect("flush");
+
+		// `/resume` of a `scout` child.
+		let child_path = directory.path().join("child.oms");
+		let mut child = child_session(&child_path, "scout", 1);
+		journal.resync(child.dom());
+		let assert_child = |ctx: &Ctx| {
+			assert_eq!(omp_agent::AI_THINKING.get(ctx), "low", "the class outranks a journaled write");
+			assert!(bool_var(ctx, "sv_lsp_enabled"), "the class outranks an unjournaled write");
+			assert!(bool_var(ctx, "ai_external_thinking"), "inherited beneath the class");
+			assert_eq!(omp_agent::AI_MODEL.get(ctx), "main/model");
+		};
+		assert_child(&ctx);
+		assert!(ctx.session_writes().next().is_none(), "the child's session layer is its own");
+		// The resync at every command boundary presents the same picture.
+		journal.flush(&mut child).expect("flush");
+		journal.resync(child.dom());
+		assert_child(&ctx);
+		assert!(con_writes(child.dom()).is_empty(), "nothing of the main session is journaled");
+
+		// The child's own writes outrank its class and last across command
+		// boundaries.
+		ctx.run("ai_thinking medium").expect("child write");
+		ctx.run("sv_lsp_enabled 0").expect("child write");
+		journal.flush(&mut child).expect("flush");
+		journal.resync(child.dom());
+		assert_eq!(omp_agent::AI_THINKING.get(&ctx), "medium");
+		assert!(!bool_var(&ctx, "sv_lsp_enabled"));
+		assert_eq!(
+			con_writes(child.dom())
+				.into_iter()
+				.map(|write| write.name)
+				.collect::<Vec<_>>(),
+			["ai_thinking"]
+		);
+
+		// Switching back restores the main session's writes.
+		ctx.run("sv_lsp_enabled 1").expect("child write");
+		journal.flush(&mut child).expect("flush");
+		journal.resync(main.dom());
+		assert_eq!(omp_agent::AI_THINKING.get(&ctx), "xhigh");
+		assert!(!bool_var(&ctx, "sv_lsp_enabled"), "the main session's write is back");
+		assert!(bool_var(&ctx, "ai_external_thinking"));
+		assert_eq!(omp_agent::AI_MODEL.get(&ctx), "main/model");
+
+		// From the child straight to a new main session: the main scope's
+		// unjournaled writes return, the previous main session's journaled
+		// ones stay in its journal.
+		journal.resync(child.dom());
+		assert_eq!(omp_agent::AI_THINKING.get(&ctx), "medium");
+		let fresh = open(&directory.path().join("fresh.oms"));
+		journal.resync(fresh.dom());
+		assert_eq!(omp_agent::AI_THINKING.get(&ctx), omp_agent::AI_THINKING.get(&Ctx::new()));
+		assert!(!bool_var(&ctx, "sv_lsp_enabled"));
+		assert!(bool_var(&ctx, "ai_external_thinking"));
+	}
+
+	fn task_tool(
+		ctx: &Arc<Ctx>,
+		cfg: &Arc<dyn omp_con::CfgLoader>,
+	) -> crate::subagent::spawn::TaskSessionTool {
+		let scratch = std::env::temp_dir();
+		let (env, _transport) = omp_env::EnvClient::in_process(0);
+		crate::subagent::spawn::TaskSessionTool::new(
+			scratch.clone(),
+			scratch.clone(),
+			scratch,
+			Arc::new(crate::sessions::SessionRegistry::new()),
+			Arc::clone(ctx),
+			Arc::clone(cfg),
+			env,
+			omp_core::Str::new_static("main"),
+			omp_core::Str::new_static("provider/model"),
+		)
+	}
+
+	/// The `task` tool's place in the roster follows the class and recursion
+	/// depth of the session the console presents, as a freshly spawned child
+	/// of that class and depth has it: a resumed child at the recursion
+	/// ceiling is never advertised `task`, and switching back to the main
+	/// session advertises it again.
+	#[test]
+	fn resumed_child_roster_matches_a_spawned_child_at_its_depth() {
+		use omp_agent::SessionTool as _;
+
+		use crate::subagent::spawn::configure_child;
+
+		let directory = tempfile::tempdir().expect("tempdir");
+		let cfg = class_files(directory.path(), &[("scout.cfg", "ai_thinking low\n")]);
+		let (ctx, _) = console();
+		ctx.exec(
+			"sv_task_max_recursion_depth 2",
+			omp_con::Source::Config(omp_core::Str::new_static("config.cfg")),
+		)
+		.expect("user cfg");
+		let tool = task_tool(&ctx, &cfg);
+		let main = open(&directory.path().join("main.oms"));
+		let journal =
+			ConJournal::attach(Arc::clone(&ctx), main.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
+		assert!(tool.advertised(), "the main session may delegate");
+
+		// Children spawned from here: `scout` at depth 1, its own `scout` at 2.
+		let (spawned, _) = configure_child(&ctx, cfg.as_ref(), "scout", None).expect("child");
+		let spawned = Arc::new(spawned);
+		let (grandchild, _) =
+			configure_child(&spawned, cfg.as_ref(), "scout", None).expect("grandchild");
+		let grandchild = Arc::new(grandchild);
+		let spawned_tool = task_tool(&spawned, &cfg);
+		let grandchild_tool = task_tool(&grandchild, &cfg);
+		assert!(spawned_tool.advertised());
+		assert!(!grandchild_tool.advertised(), "the ceiling withholds `task`");
+
+		// Resuming each from the main chat presents the same roster.
+		let child = child_session(&directory.path().join("child.oms"), "scout", 1);
+		journal.resync(child.dom());
+		assert_eq!(tool.advertised(), spawned_tool.advertised());
+		let deep = child_session(&directory.path().join("grandchild.oms"), "scout", 2);
+		journal.resync(deep.dom());
+		assert_eq!(crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&ctx), 2);
+		assert_eq!(tool.advertised(), grandchild_tool.advertised());
+		// Every command boundary re-derives the same depth.
+		journal.resync(deep.dom());
+		assert!(!tool.advertised());
+
+		// Switching back restores the main session's roster.
+		journal.resync(main.dom());
+		assert!(tool.advertised());
+		assert_eq!(crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&ctx), 0);
 	}
 }

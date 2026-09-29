@@ -1,5 +1,10 @@
 //! Cross-crate runtime flags gate Director behavior at the kernel boundary.
 
+use std::sync::{
+	Arc,
+	atomic::{AtomicBool, Ordering},
+};
+
 use omp_agent::{
 	DirectorRegistry, DirectorStack, DispatchPolicy, Kernel, RunControl, RuntimeFlags, StaticPrompt,
 	TurnInput, directors::goal::Goal,
@@ -11,6 +16,7 @@ mod support;
 
 use support::{
 	ScriptedInference, fresh_session, registry, spec, spec_family, text_script, tool_script,
+	tool_spec,
 };
 
 const INLINE_EDIT: &str = "<SM:EDIT path=\"src/a.rs\">\n<SM:FIND>\nlet x = \
@@ -263,4 +269,79 @@ async fn disabled_goal_is_removed_before_inference_while_enabled_goal_remains() 
 		);
 		assert_eq!(requests.lock().len(), 1, "one provider request per prose-only turn");
 	}
+}
+
+/// A session tool whose availability follows session-scoped state (`task` at
+/// the recursion ceiling of the session the host presents).
+struct Withholding {
+	spec:       omp_tool::ToolSpec,
+	advertised: Arc<AtomicBool>,
+}
+
+impl omp_agent::SessionTool for Withholding {
+	fn spec(&self) -> &omp_tool::ToolSpec {
+		&self.spec
+	}
+
+	fn call<'a>(
+		&'a self,
+		_cx: omp_agent::SessionToolCx<'a>,
+		_args: Box<serde_json::value::RawValue>,
+	) -> omp_agent::SessionToolFuture<'a> {
+		Box::pin(async move {
+			Ok(omp_tool::CallOutcome::Ok(
+				serde_json::value::to_raw_value("refused").expect("raw payload"),
+			))
+		})
+	}
+
+	fn advertised(&self) -> bool {
+		self.advertised.load(Ordering::SeqCst)
+	}
+}
+
+/// The roster withholds a registry declaration its session tool withholds,
+/// and advertises it again once the session state admits it — the next
+/// request, not a recomposed kernel.
+#[tokio::test]
+async fn session_tool_withholding_follows_its_state_per_request() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let advertised = Arc::new(AtomicBool::new(false));
+	let (inference, requests) =
+		ScriptedInference::new([text_script("first"), text_script("second")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("task", 1, "declaration"), spec("read", 1, "read")]),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("system")),
+	)
+	.with_runtime_flags(flags(false, true))
+	.with_session_tool(Arc::new(Withholding {
+		spec:       tool_spec("task", 1),
+		advertised: Arc::clone(&advertised),
+	}));
+	let mut session = fresh_session(&temp.path().join("withheld.oms"));
+	for _ in 0..2 {
+		kernel
+			.run_turn(
+				&mut session,
+				TurnInput { text: sf!("run"), attachments: Vec::new() },
+				RunControl::default(),
+			)
+			.await
+			.expect("turn");
+		advertised.store(true, Ordering::SeqCst);
+	}
+	let requests = requests.lock();
+	let names = |index: usize| {
+		requests[index]
+			.tools
+			.iter()
+			.map(|tool| tool.name.to_string())
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(names(0), ["read"], "withheld while the session tool says so");
+	let mut admitted = names(1);
+	admitted.sort_unstable();
+	assert_eq!(admitted, ["read", "task"]);
 }
