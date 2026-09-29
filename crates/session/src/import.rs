@@ -52,9 +52,11 @@ pub const IMPORT_SOURCE_SIZE: &str = "import-source-size";
 /// read for import, in nanoseconds since the Unix epoch
 /// ([`SourceStamp::modified_ns`]).
 pub const IMPORT_SOURCE_MTIME: &str = "import-source-mtime-ns";
-/// `<meta>` property: the source transcript's inode change time (`ctime`)
-/// when it was read for import, in nanoseconds since the Unix epoch
-/// (`SourceStamp::changed_ns`, recorded on Unix only).
+/// `<meta>` property: the source transcript's change time when it was read
+/// for import (`SourceStamp::changed_ns`).
+///
+/// In nanoseconds since the Unix epoch, recorded on Unix and Windows only:
+/// the inode `ctime` on Unix, NTFS's `ChangeTime` on Windows.
 ///
 /// Unlike the modification time, no user-space call sets it: every write,
 /// `touch`, `chmod`, or restore moves it to the kernel's clock, so an edit
@@ -62,8 +64,8 @@ pub const IMPORT_SOURCE_MTIME: &str = "import-source-mtime-ns";
 /// (`touch -r`, `rsync -t`, a backup restore) still changes the stamp.
 pub const IMPORT_SOURCE_CTIME: &str = "import-source-ctime-ns";
 /// How long before the importer's own clock a source's modification time
-/// (and, on Unix, its change time) must lie for its [`SourceStamp`] to be
-/// recorded ([`SourceStamp::recordable`]).
+/// (and, on Unix and Windows, its change time) must lie for its [`SourceStamp`]
+/// to be recorded ([`SourceStamp::recordable`]).
 ///
 /// It is longer than the coarsest filesystem timestamp granularity (FAT's
 /// 2 s), so a write after the import always moves the modification time
@@ -93,19 +95,22 @@ pub struct ImportOrigin {
 	/// Digest of the source's exact bytes at import ([`IMPORT_SOURCE_BLOB`]),
 	/// when recorded as an `artifact://sha256/<hex>` address.
 	pub source_digest: Option<Hash32>,
-	/// The source file's size, modification time, and (on Unix) change time
-	/// at import ([`IMPORT_SOURCE_SIZE`], [`IMPORT_SOURCE_MTIME`],
-	/// [`IMPORT_SOURCE_CTIME`]), when all of them were recorded.
+	/// The source file's size, modification time, and (on Unix and Windows)
+	/// change time at import ([`IMPORT_SOURCE_SIZE`],
+	/// [`IMPORT_SOURCE_MTIME`], [`IMPORT_SOURCE_CTIME`]), when all of them
+	/// were recorded.
 	///
-	/// On Unix a journal that recorded the size and modification time but no
-	/// change time (an importer predating [`IMPORT_SOURCE_CTIME`]) has no
-	/// stamp: comparing its partial stamp would let a restored modification
-	/// time pass for an unchanged file, so a reader digests the file instead.
+	/// On Unix and Windows a journal that recorded the size and modification
+	/// time but no change time (an importer predating [`IMPORT_SOURCE_CTIME`])
+	/// has no stamp: comparing its partial stamp would let a restored
+	/// modification time pass for an unchanged file, so a reader digests the
+	/// file instead.
 	pub source_stamp:  Option<SourceStamp>,
 }
 
-/// A source file's size, modification time, and, on Unix, inode change time
-/// (nanosecond precision where the filesystem keeps it).
+/// A source file's size, modification time, and, on Unix and Windows, change
+/// time (nanosecond precision where the filesystem keeps it; Windows keeps
+/// 100 ns).
 ///
 /// An importer records the stamp of the file it read
 /// ([`ImportOrigin::source_stamp`]); while the file's current stamp still
@@ -114,13 +119,17 @@ pub struct ImportOrigin {
 /// reading it. Any other stamp means the file has to be read and digested: a
 /// same-size rewrite in place moves the modification time, and restoring
 /// that afterwards (`touch -r`, `rsync -t`) still moves the change time,
-/// which user space cannot set. A change time that moved without the bytes
+/// which user space cannot set (the inode `ctime` on Unix, NTFS's
+/// `ChangeTime` on Windows). A change time that moved without the bytes
 /// changing (`chmod`, a rename on some filesystems) only costs that digest.
 ///
-/// Outside Unix the stamp is size and modification time alone, and a
-/// same-size edit whose modification time is restored passes for unchanged;
-/// so can one on a Unix filesystem that stores no change time of its own
-/// (FAT, whose reported change time follows the modification time).
+/// Where the platform has no change time to read (neither Unix nor Windows)
+/// the stamp is size and modification time alone, and a same-size edit whose
+/// modification time is restored passes for unchanged; so can one on a
+/// filesystem that stores no change time of its own (FAT, whose reported
+/// change time follows the modification time). On Windows a file whose
+/// metadata carries no change time (`Metadata::change_time` is `None`) has
+/// no stamp at all ([`SourceStamp::of`]), so a reader digests it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct SourceStamp {
 	/// Byte length.
@@ -128,8 +137,9 @@ pub struct SourceStamp {
 	/// Modification time, nanoseconds since the Unix epoch (negative before
 	/// it).
 	pub modified_ns: i64,
-	/// Inode change time (`ctime`), nanoseconds since the Unix epoch.
-	#[cfg(unix)]
+	/// Change time, nanoseconds since the Unix epoch: the inode `ctime` on
+	/// Unix, NTFS's `ChangeTime` on Windows.
+	#[cfg(any(unix, windows))]
 	pub changed_ns:  i64,
 }
 
@@ -137,11 +147,11 @@ const _: () = assert!(size_of::<SourceStamp>() <= 24, "SourceStamp must stay com
 
 /// How many `<meta>` properties record a [`SourceStamp`]
 /// ([`SourceStamp::ops`]).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const STAMP_PROPS: usize = 3;
 /// How many `<meta>` properties record a [`SourceStamp`]
 /// ([`SourceStamp::ops`]).
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 const STAMP_PROPS: usize = 2;
 
 /// `time` as nanoseconds since the Unix epoch, when an `i64` holds it.
@@ -166,23 +176,54 @@ fn changed_nanos(metadata: &fs::Metadata) -> Option<i64> {
 		.checked_add(metadata.ctime_nsec())
 }
 
+/// The change time of a file with `metadata`, as nanoseconds since the Unix
+/// epoch, when the metadata carries one and an `i64` holds it.
+///
+/// Metadata from `DirEntry::metadata` carries none, and neither do some
+/// filesystems; the stamp is then not taken.
+#[cfg(windows)]
+fn changed_nanos(metadata: &fs::Metadata) -> Option<i64> {
+	use std::os::windows::fs::MetadataExt as _;
+
+	filetime_nanos(metadata.change_time()?)
+}
+
+/// 100 ns ticks between the Windows epoch (1601-01-01) and the Unix epoch.
+#[cfg(any(windows, test))]
+const WINDOWS_TO_UNIX_TICKS: u64 = 116_444_736_000_000_000;
+
+/// A Windows `FILETIME` value (100 ns ticks since 1601-01-01) as
+/// nanoseconds since the Unix epoch (negative before it), when an `i64`
+/// holds it.
+#[cfg(any(windows, test))]
+fn filetime_nanos(ticks: u64) -> Option<i64> {
+	let (after, magnitude) = match ticks.checked_sub(WINDOWS_TO_UNIX_TICKS) {
+		Some(after) => (true, after),
+		None => (false, WINDOWS_TO_UNIX_TICKS - ticks),
+	};
+	let nanos = i64::try_from(magnitude.checked_mul(100)?).ok()?;
+	Some(if after { nanos } else { -nanos })
+}
+
 impl SourceStamp {
 	/// The stamp of a file with `metadata`; `None` when the platform reports
-	/// no modification time.
+	/// no modification time, or, on Unix and Windows, no change time
+	/// (Windows metadata from `DirEntry::metadata`, or of a filesystem that
+	/// keeps none).
 	#[must_use]
 	pub fn of(metadata: &fs::Metadata) -> Option<Self> {
 		Some(Self {
-			size:                    metadata.len(),
-			modified_ns:             unix_nanos(metadata.modified().ok()?)?,
-			#[cfg(unix)]
-			changed_ns:              changed_nanos(metadata)?,
+			size: metadata.len(),
+			modified_ns: unix_nanos(metadata.modified().ok()?)?,
+			#[cfg(any(unix, windows))]
+			changed_ns: changed_nanos(metadata)?,
 		})
 	}
 
 	/// The later of the stamp's times: what has to have settled for it to be
 	/// recorded.
 	const fn latest_ns(self) -> i64 {
-		#[cfg(unix)]
+		#[cfg(any(unix, windows))]
 		if self.changed_ns > self.modified_ns {
 			return self.changed_ns;
 		}
@@ -193,7 +234,8 @@ impl SourceStamp {
 	/// to record for the `read` bytes that read returned.
 	///
 	/// `None` when the read saw another length (the file changed meanwhile),
-	/// or when the modification time (or, on Unix, the change time) is not at
+	/// or when the modification time (or, on Unix and Windows, the change
+	/// time) is not at
 	/// least [`STAMP_SETTLE`] before `taken`: a write, or a write followed by
 	/// a restore of the modification time, landing in the same tick of a
 	/// coarse filesystem clock could then leave the stamp unchanged.
@@ -206,8 +248,8 @@ impl SourceStamp {
 	}
 
 	/// The `<meta>` operations recording this stamp on `meta`
-	/// ([`IMPORT_SOURCE_SIZE`], [`IMPORT_SOURCE_MTIME`], and on Unix
-	/// [`IMPORT_SOURCE_CTIME`]).
+	/// ([`IMPORT_SOURCE_SIZE`], [`IMPORT_SOURCE_MTIME`], and on Unix and
+	/// Windows [`IMPORT_SOURCE_CTIME`]).
 	#[must_use]
 	pub fn ops(self, meta: Handle) -> [Op; STAMP_PROPS] {
 		let set = |prop: &'static str, value: i64| Op::Set {
@@ -218,7 +260,7 @@ impl SourceStamp {
 		[
 			set(IMPORT_SOURCE_SIZE, i64::try_from(self.size).unwrap_or(i64::MAX)),
 			set(IMPORT_SOURCE_MTIME, self.modified_ns),
-			#[cfg(unix)]
+			#[cfg(any(unix, windows))]
 			set(IMPORT_SOURCE_CTIME, self.changed_ns),
 		]
 	}
@@ -246,7 +288,7 @@ pub fn import_origin(entries: &[Entry]) -> Option<ImportOrigin> {
 	let mut origin = ImportOrigin::default();
 	let mut size = None;
 	let mut modified_ns = None;
-	#[cfg(unix)]
+	#[cfg(any(unix, windows))]
 	let mut changed_ns = None;
 	for op in entries.iter().filter_map(patch_ops).flatten() {
 		let Op::Set { h, prop: PropKey::Custom(name), value } = op else {
@@ -266,7 +308,7 @@ pub fn import_origin(entries: &[Entry]) -> Option<ImportOrigin> {
 			},
 			(IMPORT_SOURCE_SIZE, Value::Int(value)) => size = u64::try_from(value).ok(),
 			(IMPORT_SOURCE_MTIME, Value::Int(value)) => modified_ns = Some(value),
-			#[cfg(unix)]
+			#[cfg(any(unix, windows))]
 			(IMPORT_SOURCE_CTIME, Value::Int(value)) => changed_ns = Some(value),
 			_ => {},
 		}
@@ -275,7 +317,7 @@ pub fn import_origin(entries: &[Entry]) -> Option<ImportOrigin> {
 		Some(SourceStamp {
 			size,
 			modified_ns,
-			#[cfg(unix)]
+			#[cfg(any(unix, windows))]
 			changed_ns: changed_ns?,
 		})
 	});
@@ -360,13 +402,20 @@ mod tests {
 		BlobRef { hash: Hash32::sum(bytes), size: bytes.len() as u64 }
 	}
 
-	/// A stamp of these times; the change time only exists on Unix.
-	#[cfg_attr(not(unix), expect(unused_variables, reason = "no change time outside Unix"))]
+	/// Whether a stamp carries a change time here.
+	const HAS_CHANGE_TIME: bool = cfg!(any(unix, windows));
+
+	/// A stamp of these times; the change time only exists on Unix and
+	/// Windows.
+	#[cfg_attr(
+		not(any(unix, windows)),
+		expect(unused_variables, reason = "no change time off Unix and Windows")
+	)]
 	const fn stamp_at(size: u64, modified_ns: i64, changed_ns: i64) -> SourceStamp {
 		SourceStamp {
 			size,
 			modified_ns,
-			#[cfg(unix)]
+			#[cfg(any(unix, windows))]
 			changed_ns,
 		}
 	}
@@ -456,7 +505,8 @@ mod tests {
 		// none.
 		assert_eq!(odd.source_stamp, None);
 		// One that recorded the size and modification time but no change time
-		// (an importer predating it) has none on Unix: a reader digests.
+		// (an importer predating it) has none on Unix and Windows: a reader
+		// digests.
 		let partial = directory.path().join("partial.oms");
 		let mut session = Session::create(&partial, ComponentRegistry::standard()).expect("create");
 		let cause = session.head().expect("genesis");
@@ -470,7 +520,7 @@ mod tests {
 		drop(session);
 		let partial = import_origin(&omp_journal::Journal::scan(&partial).expect("scan"));
 		let partial = partial.expect("origin").source_stamp;
-		if cfg!(unix) {
+		if HAS_CHANGE_TIME {
 			assert_eq!(partial, None);
 		} else {
 			assert_eq!(partial, Some(stamp));
@@ -502,6 +552,17 @@ mod tests {
 			// Backdating the modification time moved the change time to now.
 			assert!(stamp.changed_ns > stamp.modified_ns + 1_000_000_000);
 		}
+		#[cfg(windows)]
+		{
+			use std::os::windows::fs::MetadataExt as _;
+
+			// NTFS's `ChangeTime`, as nanoseconds since the Unix epoch.
+			let ticks = metadata.change_time().expect("NTFS keeps a change time");
+			let unix = (i128::from(ticks) - i128::from(WINDOWS_TO_UNIX_TICKS)) * 100;
+			assert_eq!(i128::from(stamp.changed_ns), unix);
+			// Backdating the modification time moved the change time to now.
+			assert!(stamp.changed_ns > stamp.modified_ns + 1_000_000_000);
+		}
 
 		let latest = UNIX_EPOCH + Duration::from_nanos(stamp.latest_ns().cast_unsigned());
 		let later = latest + STAMP_SETTLE;
@@ -513,13 +574,28 @@ mod tests {
 		// it is.
 		assert_eq!(stamp.recordable(10, later - Duration::from_nanos(1)), None);
 		assert_eq!(stamp.recordable(10, latest), None);
-		// On Unix a settled modification time is not enough: the change time
-		// has to have settled too.
-		assert_eq!(stamp.recordable(10, settled + STAMP_SETTLE), (!cfg!(unix)).then_some(stamp));
+		// Where a stamp has a change time, a settled modification time is not
+		// enough: the change time has to have settled too.
+		assert_eq!(stamp.recordable(10, settled + STAMP_SETTLE), (!HAS_CHANGE_TIME).then_some(stamp));
 		// Before the epoch still orders.
 		let early = stamp_at(1, -5_000_000_000, -5_000_000_000);
 		assert_eq!(early.recordable(1, UNIX_EPOCH), Some(early));
 		let restamped = stamp_at(1, -5_000_000_000, 0);
-		assert_eq!(restamped.recordable(1, UNIX_EPOCH), (!cfg!(unix)).then_some(restamped));
+		assert_eq!(restamped.recordable(1, UNIX_EPOCH), (!HAS_CHANGE_TIME).then_some(restamped));
+	}
+
+	#[test]
+	fn a_windows_file_time_converts_to_unix_nanoseconds() {
+		// The Unix epoch itself.
+		assert_eq!(filetime_nanos(WINDOWS_TO_UNIX_TICKS), Some(0));
+		// 100 ns per tick, either side of it.
+		assert_eq!(filetime_nanos(WINDOWS_TO_UNIX_TICKS + 1), Some(100));
+		assert_eq!(filetime_nanos(WINDOWS_TO_UNIX_TICKS - 1), Some(-100));
+		// 2026-01-02T03:04:05.1234567Z.
+		assert_eq!(filetime_nanos(134_117_966_451_234_567), Some(1_767_323_045_123_456_700));
+		// 1601 (the Windows epoch) and the far end of the range lie beyond
+		// what an `i64` of nanoseconds holds (1677 to 2262).
+		assert_eq!(filetime_nanos(0), None);
+		assert_eq!(filetime_nanos(u64::MAX), None);
 	}
 }

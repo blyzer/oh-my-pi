@@ -894,9 +894,9 @@ fn digests() -> usize {
 	crate::session_imports::DIGESTS.with(std::cell::Cell::get)
 }
 
-/// Sets `path`'s modification time a minute back and, on Unix, waits for
-/// the change time that moved to now to settle: an import then records its
-/// stamp. No call sets the change time, so only waiting settles it.
+/// Sets `path`'s modification time a minute back and, on Unix and Windows,
+/// waits for the change time that moved to now to settle: an import then
+/// records its stamp. No call sets the change time, so only waiting settles it.
 fn backdate(path: &Path) {
 	let earlier = SystemTime::now() - Duration::from_secs(60);
 	fs::File::options()
@@ -904,7 +904,7 @@ fn backdate(path: &Path) {
 		.open(path)
 		.and_then(|file| file.set_modified(earlier))
 		.expect("backdate");
-	if cfg!(unix) {
+	if cfg!(any(unix, windows)) {
 		std::thread::sleep(STAMP_SETTLE + Duration::from_millis(50));
 	}
 }
@@ -1042,7 +1042,7 @@ fn an_unchanged_transcript_is_not_read_to_tell_it_is_current() {
 /// (`touch -r`, `rsync -t`, a backup restore) leaves size and modification
 /// time as imported; the change time, which no call sets, still moved, so
 /// the transcript is digested and the edit found.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn a_same_size_edit_with_its_modification_time_restored_is_digested() {
 	let fixture = Fixture::new();

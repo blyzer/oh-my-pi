@@ -4,6 +4,8 @@
 //! writes are committed to the journal before the exact appended entry is
 //! folded, and replay uses that same fold.
 
+#![cfg_attr(windows, feature(windows_change_time))]
+
 mod component;
 pub mod custom_message;
 pub mod components {
