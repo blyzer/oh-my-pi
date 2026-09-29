@@ -284,9 +284,31 @@ pub(super) fn approve_commands(
 	let outcome =
 		approve_commands(&state.data_dir, &sets, plugin, selection, Str::new_static("interactive"))
 			.map_err(ServiceError::failed)?;
+	Ok(Str::new(approval_line(plugin, &outcome).trim_end()))
+}
+
+/// The one line chat shows for an approval outcome. Chat's notice row is a
+/// single line truncated at the terminal edge, so the `/restart`
+/// instruction leads and the approved commands follow it: approving several
+/// must not push the instruction off screen.
+fn approval_line(
+	plugin: &omp_ext::plugin_command::PluginId<str>,
+	outcome: &omp_driver::plugin_commands::ApprovedCommands,
+) -> String {
 	let mut line = String::new();
-	for (id, launch) in &outcome.approved {
-		let _ = write!(line, "Approved {id} {} `{}`. ", launch.kind, launch.server);
+	match outcome.approved.len() {
+		0 => {},
+		1 => line.push_str("Approved 1 command; run /restart to load it: "),
+		count => {
+			let _ = write!(line, "Approved {count} commands; run /restart to load them: ");
+		},
+	}
+	for (index, (id, launch)) in outcome.approved.iter().enumerate() {
+		let separator = if index == 0 { "" } else { ", " };
+		let _ = write!(line, "{separator}{id} {} `{}`", launch.kind, launch.server);
+	}
+	if !outcome.approved.is_empty() {
+		line.push_str(". ");
 	}
 	for (id, launch) in &outcome.unreadable {
 		if let Some(unreadable) = launch.files.unreadable() {
@@ -299,12 +321,60 @@ pub(super) fn approve_commands(
 			);
 		}
 	}
-	if outcome.approved.is_empty() {
-		if outcome.unreadable.is_empty() {
-			let _ = write!(line, "{plugin} launches no commands.");
-		}
-	} else {
-		line.push_str("Run /restart to load the approved commands.");
+	if outcome.approved.is_empty() && outcome.unreadable.is_empty() {
+		let _ = write!(line, "{plugin} launches no commands.");
 	}
-	Ok(Str::new(line.trim_end()))
+	line
+}
+
+#[cfg(test)]
+mod tests {
+	use omp_core::Str;
+	use omp_driver::plugin_commands::ApprovedCommands;
+	use omp_ext::plugin_command::{PluginId, PluginLaunch, PluginLaunchKind};
+
+	use super::approval_line;
+
+	fn launch(kind: PluginLaunchKind, server: &'static str) -> PluginLaunch {
+		PluginLaunch {
+			kind,
+			server: Str::new_static(server),
+			command: Str::new_static("/plugins/tools/bin/serve"),
+			args: Box::default(),
+			env: Box::default(),
+			cwd: None,
+			files: Default::default(),
+		}
+	}
+
+	/// Chat's notice row truncates one line at the terminal edge, so however
+	/// many commands one request approves, `/restart` leads the line.
+	#[test]
+	fn the_restart_instruction_leads_the_approval_line() {
+		let plugin = PluginId::from_ref("tools@market");
+		let owned = plugin.to_owned();
+		let one = ApprovedCommands {
+			approved:   vec![(owned.clone(), launch(PluginLaunchKind::Hook, "Stop"))],
+			unreadable: Vec::new(),
+		};
+		assert_eq!(
+			approval_line(plugin, &one).trim_end(),
+			"Approved 1 command; run /restart to load it: tools@market hook `Stop`."
+		);
+		let several = ApprovedCommands {
+			approved:   vec![
+				(owned.clone(), launch(PluginLaunchKind::McpServer, "tools@market:db")),
+				(owned.clone(), launch(PluginLaunchKind::McpServer, "tools@market:search")),
+				(owned, launch(PluginLaunchKind::Hook, "Stop")),
+			],
+			unreadable: Vec::new(),
+		};
+		let line = approval_line(plugin, &several);
+		assert!(line.starts_with("Approved 3 commands; run /restart to load them: "), "{line}");
+		assert!(line.trim_end().ends_with(", tools@market hook `Stop`."), "{line}");
+		assert_eq!(
+			approval_line(plugin, &ApprovedCommands::default()),
+			"tools@market launches no commands."
+		);
+	}
 }
