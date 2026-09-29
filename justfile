@@ -224,6 +224,12 @@ catalog-test:
 catalog-snapshot:
     OMP_LLM_CATALOG_REGEN=1 cargo run -p omp-catalog --example generate_snapshot --locked -- --relock
 
+# Refresh the model roster fixture from pi's generated models.json (e.g. `git show origin/main:packages/catalog/src/models.json > /tmp/models.json`), then rebuild the snapshot.
+[group('catalog')]
+catalog-import-v1 models_json:
+    python3 crates/catalog/scripts/import_v1_models.py --v1 {{ models_json }}
+    just catalog-snapshot
+
 # ---------------------------------------------------------------------------
 # Run & explore
 # ---------------------------------------------------------------------------

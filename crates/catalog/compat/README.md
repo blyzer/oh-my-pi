@@ -19,10 +19,13 @@ The compiled snapshot (`data/catalog.postcard`) and its provenance lock (`data/s
 
 ```sh
 just catalog-snapshot                    # after editing any KDL, providers.toml, oauth.toml or policy fixture
+just catalog-import-v1 /tmp/models.json # refresh the model roster from pi's generated models.json, then snapshot
 just test-pkg omp-catalog
 ```
 
 `catalog-snapshot` runs `examples/generate_snapshot.rs --relock`: it rewrites the lock from the files on disk, compiles `fixtures/llm-oracle/catalog/{providers.toml,models.json.zst,oauth.toml}` through this cascade, and writes the postcard. `build.rs` refuses to compile the crate against a snapshot whose digest disagrees with the lock (`OMP_LLM_CATALOG_REGEN=1`, set by the recipe, lifts that check for the one build that replaces the snapshot). Commit `data/catalog.postcard` and `data/sources.lock.json` together with the source change.
+
+`fixtures/llm-oracle/catalog/models.json.zst` is produced by `scripts/import_v1_models.py` from pi's checked-in `packages/catalog/src/models.json` (itself the output of pi's network-backed generator). The importer applies a fixed set of mechanical rewrites and aborts on any key, api or provider it does not model; its module docstring lists them.
 
 ## Taxonomy grammar
 

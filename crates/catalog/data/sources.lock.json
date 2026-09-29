@@ -1,11 +1,11 @@
 {
   "schema_version": 3,
-  "source_digest": "62d0e8eb914c4b02f190c4a0b7178c03bdb2612dd032a547392699868e2857d2",
+  "source_digest": "ba9e89dfc861fdb4657ace911958eb07b906e0932f497c9a0606a5e38c8cf93e",
   "inputs": [
     {
       "id": "catalog.models.compressed.v1",
       "path": "fixtures/llm-oracle/catalog/models.json.zst",
-      "sha256": "7773227493fd11ffa3d33946735084321cfa87064f48ec6a8c8e10b9804dc3f0",
+      "sha256": "53ee0351bb81787b425955250e72f25d9ae8c16cda9853a9e746903d3a045ebc",
       "source": "oracle:catalog.models.compressed.v1"
     },
     {
@@ -35,7 +35,7 @@
     {
       "id": "catalog.policy.exact-model-overrides.v1",
       "path": "fixtures/llm-oracle/catalog-policy/exact-model-overrides.json",
-      "sha256": "ec7bfe74ece9d4f24f841e5748017ceb58bf0b8bdfbe6c374e22ca69d44d7097",
+      "sha256": "23eb75a39442e8ac323fa5db36995868cb9f57ba9f1280e1e643d66b4d67623a",
       "source": "oracle:catalog.policy.exact-model-overrides.v1"
     },
     {
@@ -71,7 +71,7 @@
     {
       "id": "catalog.providers.source.v1",
       "path": "fixtures/llm-oracle/catalog/providers.toml",
-      "sha256": "fdaf688fe55ca76297c550d43504b597bb7f944f82bb641f64cd8a819f012c31",
+      "sha256": "96d24a73744219802023c0cc1293976b04315899a201669d5d0b6658d66a05ac",
       "source": "oracle:catalog.providers.source.v1"
     },
     {

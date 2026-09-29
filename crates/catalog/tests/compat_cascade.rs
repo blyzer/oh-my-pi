@@ -121,29 +121,30 @@ fn bundled_sources_match_the_compat_tree() {
 }
 
 #[test]
-fn checked_in_model_source_matches_current_pi_roster() {
+fn checked_in_model_source_carries_a_chat_roster_for_every_declared_provider() {
 	let json = zstd::stream::decode_all(CATALOG_MODELS).expect("models fixture decompresses");
 	let providers: serde_json::Map<String, Value> =
 		serde_json::from_slice(&json).expect("models fixture parses");
-	let count = providers
-		.values()
-		.map(|models| models.as_object().expect("provider models are keyed").len())
-		.sum::<usize>();
-	assert_eq!(count, 4_763, "current pi models.json roster size");
-	assert_eq!(
-		providers["cline-pass"]
+	// Rosters move with every refresh from pi's `models.json`, so the contract
+	// is shape, not size: each provider entry is a non-empty keyed roster whose
+	// rows name the provider they sit under, and the providers a refresh once
+	// added (Command Code, Muse Code, StepFun) stay present.
+	for (provider, models) in &providers {
+		let models = models
 			.as_object()
-			.expect("ClinePass roster")
-			.len(),
-		18
-	);
-	assert_eq!(
-		providers["abliteration"]
-			.as_object()
-			.expect("Abliteration roster")
-			.len(),
-		3
-	);
+			.unwrap_or_else(|| panic!("{provider} roster is keyed"));
+		assert!(!models.is_empty(), "{provider} has an empty roster");
+		for (id, row) in models {
+			assert_eq!(row["provider"], provider.as_str(), "{provider}/{id} names its provider");
+			assert!(
+				row.get("kind").is_none(),
+				"{provider}/{id} is a specialist row; the importer keeps those out of the chat roster"
+			);
+		}
+	}
+	for provider in ["commandcode", "muse-code", "stepfun", "cline-pass", "abliteration"] {
+		assert!(providers.contains_key(provider), "{provider} roster is missing");
+	}
 }
 
 #[test]
