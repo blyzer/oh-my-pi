@@ -72,4 +72,6 @@ recognizes read-output footers, since they cannot appear in pasted result text.
 - 0002 (helpers become mandatory), 0006 (bounded streams across the trust boundary), 0008 (`<diag>`
   channel), 0027 (`Read` materializes `artifact://`), 0025 (Code mode / `Eval` as consumers)
 - `crates/tool/src/lib.rs` (`CallOutcomeSpill`, `ThresholdWriter`, `Spilled`),
-  `crates/agent/src/subagent.rs` (`SubagentDisposition`)
+  `crates/agent/src/dispatch.rs` (`DispatchPolicy`, the central bound). `SubagentDisposition`
+  (formerly `crates/agent/src/subagent.rs`) no longer exists; it was removed by `d98ed242f5`, and
+  child settlement now lives in `crates/driver/src/subagent/`

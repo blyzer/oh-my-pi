@@ -82,7 +82,7 @@ names are `omp-` prefixed; directory names are not.
 | -------------- | ----------------------------------------------------------------------------- |
 | `tui`          | Retained-mode terminal UI: components, rendering, input, terminal integration |
 | `chat`         | Actor over `Session::subscribe()`: transcript projection, cards, composer, overlays |
-| `macros`       | Procedural macros for declarative TUI markup and per-thread function caching |
+| `macros`       | Procedural macros: `dom!` (TUI components), `view!` (typed tool-renderer views), per-thread `cached` |
 | `gui`          | GPU-accelerated native window host for omp-tui apps                           |
 | `desktop`      | Actor-owned native desktop capture, input, and accessibility automation |
 | `webview`      | Pluggable embedded-browser surfaces using system webviews or installed Chromium/Firefox |
@@ -101,9 +101,9 @@ names are `omp-` prefixed; directory names are not.
 
 | Path                  | What it is                                            |
 | --------------------- | ----------------------------------------------------- |
-| `PLAN.md`             | P0–P7 verification gate ledger                        |
-| `.plan/quirks/`       | Catalog and inference notes                           |
-| `.plan/qa/`           | Joined-system QA findings and stable regressions      |
+| `PLAN.md`             | Local-only planning ledger (gitignored, absent from a clean clone) |
+| `.plan/quirks/`       | Local-only catalog and inference notes (gitignored)   |
+| `.plan/qa/`           | Local-only QA findings and regressions (gitignored)   |
 | `fixtures/llm-oracle` | Recorded inference fixtures                           |
 | `npm/pi-coding-agent` | npm package shim (`scripts/gen-npm-packages.py`)      |
 | `vendor/python`       | Gitignored embedded-Python build inputs (see below)   |
