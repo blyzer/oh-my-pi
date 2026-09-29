@@ -112,7 +112,7 @@ The Python authoring contracts live under `docs/py/`; their registry is implemen
 | Devices and tools | `@omp.device` and `@omp.tool` declare host-facing capabilities; soft devices remain behind the `dyn` catalog while granted hard tools may occupy model slots (`docs/py/01-devices.md`). Runtime tools are checked as `SealedToolRegistration` and invoked through `ExtHostSupervisor::open` (`crates/envd/src/worker.rs`). |
 | Typed call outcomes | A tool emits updates and one durable `CallOutcome`: success, typed fault, argument rejection, or abort. Prompt and UI representations are projections, not execution truth (`docs/py/02-verdicts.md`; Rust types are `Ev`, `ToolTerminal`, and `CallOutcome` in `crates/tool/src/lib.rs`). |
 | Hooks | `@omp.hook` returns allow, deny, modify, defer, require-approval, or a bounded domain result (`docs/py/05-hooks.md`). `HookControlFactory::compose` sorts sealed subscriptions by phase/order/name/extension and invokes callbacks through the live dispatcher (`crates/envd/src/tools.rs`). |
-| Regimes | `@omp.regime` installs durable middleware at the fixed agent points CONTEXT, TOOL_CHOICE, PRE_MODEL, STREAM, ADMISSION, BATCH, TURN_END, SETTLE, and IDLE. Handlers stage effects through `ctx` and select at most one control through `next_` (`docs/py/15-regimes.md`). Envd encodes `RegimeDispatch`, while `ExtensionRegimeResolver` creates the generation-fenced `omp_agent::Regime` adapter (`crates/envd/src/exthost/dispatch.rs`, `crates/envd/src/worker.rs`). |
+| Directors and Components | `@omp.director` registers a lifecycle callback (`before_inference`, `on_yield`) on the engine Director stack, and `@omp.component` a journal-to-DOM reducer (`docs/py/15-directors.md`). `ExtensionRegistrar` installs both (`crates/agent/src/extensions.rs`); `PyDirector` and `PyComponent` call the killable extension host (`crates/envd/src/exthost/extensions.rs`). Regimes (`@omp.regime`) were removed. |
 | Eval prelude | `@omp.prelude` publishes a synchronous JSON-bound helper stub into newly created eval namespaces; the implementation may be sync or async in the extension worker (`docs/py/16-prelude.md`). Worker-side discovery and invocation are handled by `load_prelude` and the ordinary supervised invocation path (`crates/envd/src/worker.rs`). |
 
 ## Hook dispatch
@@ -180,5 +180,5 @@ stateDiagram-v2
 | Device API | `docs/py/01-devices.md` |
 | Typed outcome API | `docs/py/02-verdicts.md` |
 | Hook API | `docs/py/05-hooks.md` |
-| Regime API | `docs/py/15-regimes.md` |
+| Director and Component API | `docs/py/15-directors.md` |
 | Eval prelude API | `docs/py/16-prelude.md` |

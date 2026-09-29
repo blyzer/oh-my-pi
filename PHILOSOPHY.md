@@ -213,7 +213,7 @@ static vocabulary exists: `Str`-typed wire fields become real enums, `KNOWN_PROP
 tables become a macro-generated typed prop struct, scattered escape literals become one
 `esc!`. If two artifacts must agree, one source generates both.
 
-**Macros are vocabulary, and vocabulary is short.** `sf!`, `esc!`, `dom!`, `layout!`,
+**Macros are vocabulary, and vocabulary is short.** `sf!`, `esc!`, `dom!`, `view!`,
 `semver!` — each names one concern, is used consistently everywhere, and does its
 dispatch at compile time: `sf!("literal")` compiles to a static, `sf!("{x}")` to a
 format, because "you can just match at the macro level no?" (2026-08-20). Names are cut
