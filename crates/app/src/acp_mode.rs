@@ -1,6 +1,6 @@
 //! Agent Client Protocol adapter over the journal-first kernel and session.
 
-use std::{borrow::Cow, fs, path::Path, sync::Arc};
+use std::{borrow::Cow, fs, io, mem, path::Path, sync::Arc};
 
 use miette::{IntoDiagnostic as _, miette};
 use omp_agent::{
@@ -9,6 +9,7 @@ use omp_agent::{
 use omp_core::{Str, base64};
 use omp_driver::{headless::kernel::SessionHome, sessions::SessionIndex};
 use omp_session::{AttachmentInput, Session, SessionError};
+use serde::Deserialize as _;
 use serde_json::{Map, Value, json};
 use tokio::io::{
 	AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader, stdin,
@@ -16,6 +17,10 @@ use tokio::io::{
 };
 
 use crate::{
+	acp_client::{
+		AcpClient, AcpSettings, Answer, ClientCapabilities, PermissionOptionId, PermissionOutcome,
+		RequestPermissionResponse, RpcError,
+	},
 	acp_events::AcpEventMapper,
 	chat_cmd::{Launch, LaunchEnv},
 	cli::{AcpArgs, ChatArgs},
@@ -23,6 +28,18 @@ use crate::{
 
 /// Maximum number of sessions returned by one `session/list` request.
 const SESSION_PAGE_SIZE: usize = 50;
+
+/// Largest inbound NDJSON frame the adapter accepts (ADR 0037 §1). It must
+/// hold the largest document an editor may send back (the 4 MiB snapshot cap)
+/// after worst-case JSON escaping, and base64 prompt images ride the same
+/// frames. A longer frame is discarded up to its newline and answered with an
+/// invalid-request error; the connection stays up.
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+const _: () = assert!(
+	MAX_FRAME_BYTES >= 6 * omp_tools::read::SNAPSHOT_MAX_BYTES + 64 * 1024,
+	"an escaped maximum-size editor buffer must fit one ACP frame"
+);
 
 /// Runs ACP using stdin for NDJSON requests and stdout for NDJSON responses.
 pub async fn run(args: AcpArgs) -> miette::Result<()> {
@@ -39,13 +56,15 @@ pub async fn run(args: AcpArgs) -> miette::Result<()> {
 async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 	let project = fs::canonicalize(&args.project).into_diagnostic()?;
 	let ctx = Arc::new(crate::process_ctx(&project)?);
+	let connection = AcpConnection::new(AcpSettings::from_con(&ctx));
 	let env = LaunchEnv::production(&project, args.gateway.is_some())?;
 	let mut launch = Launch::prepare(args, ctx, env).await?;
-	let mut input = BufReader::new(stdin());
+	let mut input = FrameReader::new(BufReader::new(stdin()), MAX_FRAME_BYTES);
 	let mut output = stdout();
-	let Some(terminal_auth) = initialize_transport(&mut input, &mut output).await? else {
+	let Some(capabilities) = initialize_transport(&mut input, &mut output).await? else {
 		return Ok(());
 	};
+	connection.client.initialize(capabilities);
 	let (kernel, session) = launch.compose().await?;
 	let home = SessionHome::new(
 		&launch.data_dir,
@@ -57,24 +76,30 @@ async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 	.into_diagnostic()?
 	.with_facts_of(&session)
 	.with_rules(Arc::clone(kernel.inference().rule_scope()));
-	serve_acp_state(kernel, session, home, input, output, true, terminal_auth).await
+	serve_acp_state(kernel, session, home, input, output, connection, true).await
 }
 
-async fn initialize_transport<R, W>(input: &mut R, output: &mut W) -> miette::Result<Option<bool>>
+async fn initialize_transport<R, W>(
+	input: &mut FrameReader<R>,
+	output: &mut W,
+) -> miette::Result<Option<ClientCapabilities>>
 where
 	R: AsyncBufRead + Unpin,
 	W: AsyncWrite + Unpin,
 {
-	let mut line = String::new();
 	loop {
-		line.clear();
-		if input.read_line(&mut line).await.into_diagnostic()? == 0 {
-			return Ok(None);
+		match input.next().await.into_diagnostic()? {
+			Frame::Eof => return Ok(None),
+			Frame::Oversize => {
+				write_frame(output, &error(Value::Null, -32600, OVERSIZE_FRAME)).await?;
+				continue;
+			},
+			Frame::Line => {},
 		}
-		if line.trim().is_empty() {
+		if input.is_blank() {
 			continue;
 		}
-		let frame: Value = match serde_json::from_str(&line) {
+		let frame: Value = match serde_json::from_slice(input.line()) {
 			Ok(frame) => frame,
 			Err(source) => {
 				write_frame(output, &error(Value::Null, -32700, &source.to_string())).await?;
@@ -102,15 +127,94 @@ where
 			}
 			continue;
 		}
-		let terminal_auth = params
-			.and_then(|params| params.get("clientCapabilities"))
-			.and_then(|capabilities| capabilities.pointer("/auth/terminal"))
-			.and_then(Value::as_bool)
-			.unwrap_or(false);
+		let capabilities = params.map_or_else(ClientCapabilities::default, |params| {
+			ClientCapabilities::from_initialize(params)
+		});
 		if let Some(id) = id {
-			write_frame(output, &success(id, initialize_response(terminal_auth))).await?;
+			write_frame(output, &success(id, initialize_response(capabilities.auth.terminal))).await?;
 		}
-		return Ok(Some(terminal_auth));
+		return Ok(Some(capabilities));
+	}
+}
+
+/// Answer to an inbound frame longer than [`MAX_FRAME_BYTES`].
+const OVERSIZE_FRAME: &str = "frame exceeds the ACP frame size limit";
+
+/// What [`FrameReader::next`] found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Frame {
+	/// A complete line, readable through [`FrameReader::line`] until the next
+	/// read.
+	Line,
+	/// A line longer than the limit, discarded through its newline.
+	Oversize,
+	/// End of input.
+	Eof,
+}
+
+/// Bounded NDJSON line reader. One owned line buffer is reused across frames;
+/// a line past the limit is discarded without buffering it. Cancel-safe: all
+/// progress lives in `self`, so a `select!` may drop [`Self::next`] at any
+/// await point.
+struct FrameReader<R> {
+	reader:     R,
+	line:       Vec<u8>,
+	limit:      usize,
+	complete:   bool,
+	discarding: bool,
+}
+
+impl<R: AsyncBufRead + Unpin> FrameReader<R> {
+	const fn new(reader: R, limit: usize) -> Self {
+		Self { reader, line: Vec::new(), limit, complete: false, discarding: false }
+	}
+
+	async fn next(&mut self) -> io::Result<Frame> {
+		if mem::take(&mut self.complete) {
+			self.line.clear();
+		}
+		loop {
+			let available = self.reader.fill_buf().await?;
+			if available.is_empty() {
+				// A final line without a newline is still a frame.
+				if !self.line.is_empty() && !self.discarding {
+					self.complete = true;
+					return Ok(Frame::Line);
+				}
+				self.line.clear();
+				self.discarding = false;
+				return Ok(Frame::Eof);
+			}
+			let newline = available.iter().position(|byte| *byte == b'\n');
+			let chunk = &available[..newline.unwrap_or(available.len())];
+			if !self.discarding {
+				if self.line.len() + chunk.len() > self.limit {
+					self.discarding = true;
+					self.line = Vec::new();
+				} else {
+					self.line.extend_from_slice(chunk);
+				}
+			}
+			let used = newline.map_or(available.len(), |index| index + 1);
+			self.reader.consume(used);
+			if newline.is_some() {
+				if mem::take(&mut self.discarding) {
+					return Ok(Frame::Oversize);
+				}
+				self.complete = true;
+				return Ok(Frame::Line);
+			}
+		}
+	}
+
+	/// The line the last [`Frame::Line`] completed, without its newline.
+	fn line(&self) -> &[u8] {
+		&self.line
+	}
+
+	/// Whether the completed line holds only whitespace.
+	fn is_blank(&self) -> bool {
+		self.line.iter().all(u8::is_ascii_whitespace)
 	}
 }
 
@@ -129,41 +233,70 @@ struct TurnCompletion<C> {
 }
 
 enum InputEvent<C> {
-	Line(Option<String>),
+	Frame(Frame),
 	Turn(TurnCompletion<C>),
 }
 
-/// Serves ACP over caller-provided NDJSON transport halves.
-#[doc(hidden)]
-pub async fn serve_acp<C, R, W>(
-	kernel: Kernel<C>,
-	session: Session,
-	home: SessionHome,
-	input: R,
-	output: W,
-) -> miette::Result<()>
-where
-	C: Inference + Send + Sync + 'static,
-	R: AsyncRead + Unpin,
-	W: AsyncWrite + Unpin + Send + 'static,
-{
-	serve_acp_state(kernel, session, home, input, output, false, false).await
+/// One ACP connection: the controller loop over an NDJSON transport, and the
+/// [`AcpClient`] through which the agent reaches the editor on the other end.
+pub struct AcpConnection {
+	client: AcpClient,
+	output: flume::Sender<Value>,
+	frames: flume::Receiver<Value>,
+}
+
+impl AcpConnection {
+	/// Creates a connection with `settings`. Nothing is served until
+	/// [`Self::serve`].
+	#[must_use]
+	pub fn new(settings: AcpSettings) -> Self {
+		let (output, frames) = flume::unbounded();
+		Self { client: AcpClient::new(settings, output.clone()), output, frames }
+	}
+
+	/// The editor handle of this connection. It outlives the connection; once
+	/// the transport is gone every request fails with
+	/// [`crate::acp_client::ClientRequestError::Disconnected`].
+	#[must_use]
+	pub fn client(&self) -> AcpClient {
+		self.client.clone()
+	}
+
+	/// Serves ACP over caller-provided NDJSON transport halves. The client
+	/// must `initialize` before anything else.
+	pub async fn serve<C, R, W>(
+		self,
+		kernel: Kernel<C>,
+		session: Session,
+		home: SessionHome,
+		input: R,
+		output: W,
+	) -> miette::Result<()>
+	where
+		C: Inference + Send + Sync + 'static,
+		R: AsyncRead + Unpin,
+		W: AsyncWrite + Unpin + Send + 'static,
+	{
+		let input = FrameReader::new(BufReader::new(input), MAX_FRAME_BYTES);
+		serve_acp_state(kernel, session, home, input, output, self, false).await
+	}
 }
 
 async fn serve_acp_state<C, R, W>(
 	mut kernel: Kernel<C>,
 	mut session: Session,
 	home: SessionHome,
-	input: R,
+	mut lines: FrameReader<R>,
 	mut output: W,
+	connection: AcpConnection,
 	mut initialized: bool,
-	mut terminal_auth: bool,
 ) -> miette::Result<()>
 where
 	C: Inference + Send + Sync + 'static,
-	R: AsyncRead + Unpin,
+	R: AsyncBufRead + Unpin,
 	W: AsyncWrite + Unpin + Send + 'static,
 {
+	let AcpConnection { client, output: output_tx, frames: output_rx } = connection;
 	kernel.reconcile_jobs(&mut session).into_diagnostic()?;
 	home.register(&session);
 	if let Some(lifecycle) = kernel.lifecycle_hooks() {
@@ -173,7 +306,9 @@ where
 			.into_diagnostic()?;
 	}
 	let mut session_id = session_identifier(&session);
-	let (output_tx, output_rx) = flume::unbounded::<Value>();
+	// The session a connection starts with was never given a `cwd`, so it is
+	// not eligible for editor file I/O (ADR 0037 §2).
+	client.switch_session(session_id.clone(), false, &home.project_root);
 	let writer = tokio::spawn(async move {
 		while let Ok(value) = output_rx.recv_async().await {
 			let mut bytes = serde_json::to_vec(&value).into_diagnostic()?;
@@ -201,31 +336,37 @@ where
 	// one `session/request_permission` request; the client's selected
 	// option answers the prompt (`session/approve` remains for clients that
 	// answer by prompt id).
-	let permission_session = Arc::new(parking_lot::RwLock::new(session_id.clone()));
-	let permission_requests =
-		request_permissions(kernel.subscribe(), output_tx.clone(), Arc::clone(&permission_session));
+	let _permissions = request_permissions(kernel.subscribe(), client.clone());
 	let mut controller = Some((kernel, session));
 	let mut active: Option<tokio::task::JoinHandle<TurnCompletion<C>>> = None;
 	let mut closed = false;
-	let mut lines = BufReader::new(input).lines();
 
 	loop {
 		let input_event: InputEvent<C> = if let Some(turn) = active.as_mut() {
 			tokio::select! {
 				completed = turn => InputEvent::Turn(completed.into_diagnostic()?),
-				line = lines.next_line() => InputEvent::Line(line.into_diagnostic()?),
+				frame = lines.next() => InputEvent::Frame(frame.into_diagnostic()?),
 			}
 		} else {
-			InputEvent::Line(lines.next_line().await.into_diagnostic()?)
+			InputEvent::Frame(lines.next().await.into_diagnostic()?)
 		};
-		let line = match input_event {
+		match input_event {
 			InputEvent::Turn(completed) => {
 				active = None;
 				restore_turn(completed, &mut controller, &output_tx, forwarder.as_ref()).await?;
 				continue;
 			},
-			InputEvent::Line(Some(line)) => line,
-			InputEvent::Line(None) => {
+			InputEvent::Frame(Frame::Line) => {},
+			InputEvent::Frame(Frame::Oversize) => {
+				output_tx
+					.send(error(Value::Null, -32600, OVERSIZE_FRAME))
+					.into_diagnostic()?;
+				continue;
+			},
+			InputEvent::Frame(Frame::Eof) => {
+				// Transport loss: no answer can arrive any more, so requests in
+				// flight fail now rather than at their deadlines.
+				client.disconnect();
 				if let Some(turn) = active.take() {
 					let _ = mailbox.send(Up::Interrupt);
 					restore_turn(
@@ -238,11 +379,11 @@ where
 				}
 				break;
 			},
-		};
-		if line.trim().is_empty() {
+		}
+		if lines.is_blank() {
 			continue;
 		}
-		let frame: Value = match serde_json::from_str(&line) {
+		let mut frame: Value = match serde_json::from_slice(lines.line()) {
 			Ok(frame) => frame,
 			Err(source) => {
 				output_tx
@@ -253,17 +394,21 @@ where
 		};
 		let id = frame.get("id").cloned();
 		let Some(method) = frame.get("method").and_then(Value::as_str) else {
-			// A response to one of our `session/request_permission` requests.
-			if let Some((prompt_id, decision)) =
-				permission_requests.answer(id.as_ref(), frame.get("result"))
-			{
-				let _ = mailbox.send(Up::Approve { id: prompt_id, decision });
-				continue;
-			}
-			if let Some(id) = id {
-				output_tx
-					.send(error(id, -32600, "request has no method"))
-					.into_diagnostic()?;
+			match (id, client_answer(&mut frame)) {
+				// A response to one of our client requests. An approval answer
+				// reaches the mailbox in line; a response nobody awaits is dropped.
+				(Some(id), Some(answer)) => {
+					if let Some((prompt_id, answer)) = client.answer(&id, answer) {
+						let decision = permission_decision(answer);
+						let _ = mailbox.send(Up::Approve { id: prompt_id, decision });
+					}
+				},
+				(Some(id), None) => {
+					output_tx
+						.send(error(id, -32600, "request has no method"))
+						.into_diagnostic()?;
+				},
+				(None, _) => {},
 			}
 			continue;
 		};
@@ -300,17 +445,15 @@ where
 					Err((-32602, "unsupported ACP protocol version"))
 				} else {
 					initialized = true;
-					terminal_auth = serde_json::Value::Object(params.clone())
-						.pointer("/clientCapabilities/auth/terminal")
-						.and_then(Value::as_bool)
-						.unwrap_or(false);
-					Ok(initialize_response(terminal_auth))
+					let capabilities = ClientCapabilities::from_initialize(&params);
+					client.initialize(capabilities);
+					Ok(initialize_response(capabilities.auth.terminal))
 				}
 			},
 			"authenticate" => {
 				let method = params.get("methodId").and_then(Value::as_str);
 				if matches!(method, Some("agent"))
-					|| terminal_auth && matches!(method, Some("terminal"))
+					|| client.capabilities().auth.terminal && matches!(method, Some("terminal"))
 				{
 					Ok(json!({}))
 				} else {
@@ -319,7 +462,8 @@ where
 			},
 			"session/new" if active.is_some() => Err((-32001, "a turn is already running")),
 			"session/new" => {
-				if let Err(message) = validate_session_cwd(&home, &params) {
+				let cwd = validate_session_cwd(&home, &params);
+				if let Err(message) = cwd {
 					Err((-32602, message))
 				} else {
 					let next = match home.create(None) {
@@ -340,7 +484,8 @@ where
 						&output_tx,
 						&mut forwarder,
 						&mut session_id,
-						&permission_session,
+						&client,
+						cwd == Ok(true),
 						false,
 						omp_agent::SwitchReason::New,
 						closed,
@@ -354,7 +499,8 @@ where
 				Err((-32001, "a turn is already running"))
 			},
 			"session/load" | "session/resume" => {
-				if let Err(message) = validate_session_cwd(&home, &params) {
+				let cwd = validate_session_cwd(&home, &params);
+				if let Err(message) = cwd {
 					Err((-32602, message))
 				} else {
 					let selector = match requested_session(&params) {
@@ -387,7 +533,8 @@ where
 						&output_tx,
 						&mut forwarder,
 						&mut session_id,
-						&permission_session,
+						&client,
+						cwd == Ok(true),
 						replay,
 						omp_agent::SwitchReason::Resume,
 						closed,
@@ -409,7 +556,8 @@ where
 			// branch tree travels) and switch authority to the copy.
 			"session/fork" if active.is_some() => Err((-32001, "a turn is already running")),
 			"session/fork" => {
-				if let Err(message) = validate_session_cwd(&home, &params) {
+				let cwd = validate_session_cwd(&home, &params);
+				if let Err(message) = cwd {
 					Err((-32602, message))
 				} else {
 					let selector = match requested_session(&params) {
@@ -441,7 +589,8 @@ where
 						&output_tx,
 						&mut forwarder,
 						&mut session_id,
-						&permission_session,
+						&client,
+						cwd == Ok(true),
 						false,
 						omp_agent::SwitchReason::Fork,
 						closed,
@@ -580,6 +729,7 @@ where
 						session.session_switch().into_diagnostic()?;
 						home.unregister(session);
 					}
+					client.close_session();
 					closed = true;
 				}
 				Ok(json!({}))
@@ -588,6 +738,8 @@ where
 				if let Some(id) = id {
 					output_tx.send(success(id, json!({}))).into_diagnostic()?;
 				}
+				// No frame is read after `shutdown`, so no answer can arrive.
+				client.disconnect();
 				if let Some(turn) = active.take() {
 					// ACP shutdown is graceful: it waits for the active prompt's
 					// delivery handlers before disposing the session. EOF remains
@@ -619,6 +771,7 @@ where
 		}
 	}
 
+	client.disconnect();
 	let (kernel, mut session) = controller
 		.take()
 		.expect("ACP controller owns its kernel and session after active turn completion");
@@ -646,58 +799,62 @@ where
 	Ok(())
 }
 
-/// Outstanding `session/request_permission` requests keyed by JSON-RPC id.
-#[derive(Clone)]
-struct PermissionRequests {
-	pending: Arc<parking_lot::Mutex<std::collections::BTreeMap<u64, Str>>>,
-	_task:   Arc<tokio::task::JoinHandle<()>>,
+/// Splits a client response off its JSON-RPC envelope: its `result`, or its
+/// `error` object. `None` when the frame is neither.
+fn client_answer(frame: &mut Value) -> Option<Answer> {
+	let frame = frame.as_object_mut()?;
+	if let Some(result) = frame.remove("result") {
+		return Some(Ok(result));
+	}
+	let error = frame.remove("error")?;
+	Some(Err(
+		RpcError::deserialize(&error)
+			.unwrap_or_else(|_| RpcError { code: -32603, message: Str::new_static("") }),
+	))
 }
 
-impl PermissionRequests {
-	/// Maps a client response to the prompt it answers: option ids
-	/// `allow_once`/`allow_always`/`reject_once`/`reject_always`; a
-	/// `cancelled` outcome or an unknown option fails closed.
-	fn answer(&self, id: Option<&Value>, result: Option<&Value>) -> Option<(Str, ApprovalDecision)> {
-		let id = id.and_then(Value::as_u64)?;
-		let prompt_id = self.pending.lock().remove(&id)?;
-		let outcome = result.and_then(|result| result.get("outcome"));
-		let option = outcome
-			.filter(|outcome| outcome.get("outcome").and_then(Value::as_str) == Some("selected"))
-			.and_then(|outcome| outcome.get("optionId"))
-			.and_then(Value::as_str);
-		let (approved, scope) = match option {
-			Some("allow_once") => (true, ApprovalScope::Once),
-			Some("allow_always") => (true, ApprovalScope::Session),
-			Some("reject_always") => (false, ApprovalScope::Session),
-			_ => (false, ApprovalScope::Once),
-		};
-		Some((prompt_id, ApprovalDecision {
-			approved,
-			scope,
-			source: ApprovalSource::External,
-			decided_by: None,
-			reason: (!approved).then(|| Str::new_static("rejected by ACP client")),
-			audited: false,
-		}))
+/// Maps a `session/request_permission` answer to the kernel's decision:
+/// option ids `allow_once`/`allow_always`/`reject_once`/`reject_always`; an
+/// error, a `cancelled` outcome, a malformed answer, or an unknown option
+/// fails closed.
+fn permission_decision(answer: Answer) -> ApprovalDecision {
+	let option = answer
+		.ok()
+		.and_then(|result| RequestPermissionResponse::deserialize(&result).ok())
+		.and_then(|response| match response.outcome {
+			PermissionOutcome::Selected { option_id } => Some(option_id),
+			PermissionOutcome::Cancelled => None,
+		});
+	let (approved, scope) = match option {
+		Some(PermissionOptionId::AllowOnce) => (true, ApprovalScope::Once),
+		Some(PermissionOptionId::AllowAlways) => (true, ApprovalScope::Session),
+		Some(PermissionOptionId::RejectAlways) => (false, ApprovalScope::Session),
+		Some(PermissionOptionId::RejectOnce | PermissionOptionId::Unknown) | None => {
+			(false, ApprovalScope::Once)
+		},
+	};
+	ApprovalDecision {
+		approved,
+		scope,
+		source: ApprovalSource::External,
+		decided_by: None,
+		reason: (!approved).then(|| Str::new_static("rejected by ACP client")),
+		audited: false,
 	}
 }
 
+/// Sends one `session/request_permission` per kernel approval ticket through
+/// the connection's request table. Ends when the kernel's event stream or
+/// the transport does.
 fn request_permissions(
 	events: flume::Receiver<omp_agent::KernelEvent>,
-	output: flume::Sender<Value>,
-	session_id: Arc<parking_lot::RwLock<Str>>,
-) -> PermissionRequests {
-	let pending = Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new()));
-	let table = Arc::clone(&pending);
-	let task = tokio::spawn(async move {
-		let mut next_id = 1_u64;
+	client: AcpClient,
+) -> tokio::task::JoinHandle<()> {
+	tokio::spawn(async move {
 		while let Ok(event) = events.recv_async().await {
 			let omp_agent::KernelEvent::ApprovalRequested(ticket) = event else {
 				continue;
 			};
-			let id = next_id;
-			next_id += 1;
-			table.lock().insert(id, ticket.ticket_id.clone());
 			let first = ticket.reasons.first();
 			let mut tool_call = json!({
 				"toolCallId": ticket.invocation_id.as_deref().unwrap_or(ticket.ticket_id.as_str()),
@@ -725,27 +882,15 @@ fn request_permissions(
 					}]);
 				}
 			}
-			let request = json!({
-				"jsonrpc": "2.0",
-				"id": id,
-				"method": "session/request_permission",
-				"params": {
-					"sessionId": session_id.read().clone(),
-					"toolCall": tool_call,
-					"options": [
-						{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
-						{"optionId": "allow_always", "name": "Always allow", "kind": "allow_always"},
-						{"optionId": "reject_once", "name": "Reject", "kind": "reject_once"},
-						{"optionId": "reject_always", "name": "Always reject", "kind": "reject_always"},
-					],
-				},
-			});
-			if output.send(request).is_err() {
+			if let Err(error) = client.request_permission(ticket.ticket_id.clone(), tool_call) {
+				tracing::debug!(
+					error = &error as &dyn std::error::Error,
+					"ACP permission request not sent"
+				);
 				break;
 			}
 		}
-	});
-	PermissionRequests { pending, _task: Arc::new(task) }
+	})
 }
 
 struct EventForwarder {
@@ -850,7 +995,8 @@ async fn switch_session<C>(
 	output: &flume::Sender<Value>,
 	forwarder: &mut Option<EventForwarder>,
 	session_id: &mut Str,
-	permission_session: &parking_lot::RwLock<Str>,
+	client: &AcpClient,
+	cwd_matched: bool,
 	replay: bool,
 	reason: omp_agent::SwitchReason,
 	closed: bool,
@@ -878,7 +1024,7 @@ async fn switch_session<C>(
 	}
 	home.register(&next);
 	*session_id = session_identifier(&next);
-	*permission_session.write() = session_id.clone();
+	client.switch_session(session_id.clone(), cwd_matched, &home.project_root);
 	*forwarder = Some(
 		start_forwarder(
 			snapshot,
@@ -928,12 +1074,15 @@ fn targets_session(params: &Map<String, Value>, current: &str) -> bool {
 		.is_none_or(|requested| requested == current)
 }
 
+/// Checks a session request's optional `cwd` against the project root.
+/// `Ok(true)` means a `cwd` was supplied and matched, which editor file I/O
+/// requires (ADR 0037 §2); `Ok(false)` means none was supplied.
 fn validate_session_cwd(
 	home: &SessionHome,
 	params: &Map<String, Value>,
-) -> Result<(), &'static str> {
+) -> Result<bool, &'static str> {
 	let Some(cwd) = params.get("cwd").and_then(Value::as_str) else {
-		return Ok(());
+		return Ok(false);
 	};
 	let path = Path::new(cwd);
 	if !path.is_absolute() {
@@ -943,7 +1092,7 @@ fn validate_session_cwd(
 	if path != home.project_root {
 		return Err("cwd does not match the configured ACP project");
 	}
-	Ok(())
+	Ok(true)
 }
 
 /// `session/list {cwd?, cursor?}` → `{sessions, nextCursor?}` pages every
@@ -1368,6 +1517,71 @@ mod tests {
 			prompt_input(&params(json!({"prompt": [{"type": "image", "data": "aGVsbG8="}]}))).err(),
 			Some("image content block requires mimeType")
 		);
+	}
+
+	#[tokio::test]
+	async fn frame_reader_bounds_lines_across_chunks_and_keeps_reading() {
+		let input: &[u8] = b"exactly8\nthis line is far too long\n  \r\nlast";
+		// A four-byte buffer makes every line span several reads.
+		let mut frames = FrameReader::new(BufReader::with_capacity(4, input), 8);
+		assert_eq!(frames.next().await.expect("read"), Frame::Line);
+		assert_eq!(frames.line(), b"exactly8", "a line at the limit is accepted");
+		assert_eq!(frames.next().await.expect("read"), Frame::Oversize);
+		assert_eq!(frames.next().await.expect("read"), Frame::Line);
+		assert!(frames.is_blank());
+		assert_eq!(frames.next().await.expect("read"), Frame::Line);
+		assert_eq!(frames.line(), b"last", "a final line needs no newline");
+		assert_eq!(frames.next().await.expect("read"), Frame::Eof);
+
+		let mut unterminated = FrameReader::new(&b"ok\noverflowing"[..], 4);
+		assert_eq!(unterminated.next().await.expect("read"), Frame::Line);
+		assert_eq!(unterminated.next().await.expect("read"), Frame::Eof);
+	}
+
+	#[test]
+	fn permission_answers_decide_or_fail_closed() {
+		let selected =
+			|option: &str| Ok(json!({"outcome": {"outcome": "selected", "optionId": option}}));
+		let decide = |answer: Answer| {
+			let decision = permission_decision(answer);
+			(decision.approved, decision.scope)
+		};
+		assert_eq!(decide(selected("allow_once")), (true, ApprovalScope::Once));
+		assert_eq!(decide(selected("allow_always")), (true, ApprovalScope::Session));
+		assert_eq!(decide(selected("reject_once")), (false, ApprovalScope::Once));
+		assert_eq!(decide(selected("reject_always")), (false, ApprovalScope::Session));
+		assert_eq!(decide(selected("maybe")), (false, ApprovalScope::Once));
+		assert_eq!(
+			decide(Ok(json!({"outcome": {"outcome": "cancelled"}}))),
+			(false, ApprovalScope::Once)
+		);
+		assert_eq!(decide(Ok(json!({"outcome": 3}))), (false, ApprovalScope::Once));
+		assert_eq!(
+			decide(Err(RpcError { code: -32603, message: Str::new_static("") })),
+			(false, ApprovalScope::Once)
+		);
+		assert_eq!(
+			permission_decision(selected("reject_once"))
+				.reason
+				.as_deref(),
+			Some("rejected by ACP client")
+		);
+	}
+
+	#[test]
+	fn client_answers_split_result_and_error_envelopes() {
+		let mut result = json!({"jsonrpc": "2.0", "id": 1, "result": {"content": "x"}});
+		assert_eq!(client_answer(&mut result), Some(Ok(json!({"content": "x"}))));
+		let mut failure =
+			json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "gone"}});
+		assert_eq!(
+			client_answer(&mut failure),
+			Some(Err(RpcError { code: -32002, message: Str::new_static("gone") }))
+		);
+		let mut odd_error = json!({"jsonrpc": "2.0", "id": 1, "error": "gone"});
+		assert_eq!(client_answer(&mut odd_error).map(|answer| answer.is_err()), Some(true));
+		assert_eq!(client_answer(&mut json!({"jsonrpc": "2.0", "id": 1})), None);
+		assert_eq!(client_answer(&mut json!([1])), None);
 	}
 
 	#[test]

@@ -2,6 +2,7 @@
 //! these is a `Session` create/open/rewind or a `<meta>`/`<queues>` patch
 //! performed by the controller, never presentation state.
 
+use omp_agent::CompactionStrategy;
 use omp_con::ConError;
 use omp_core::Str;
 use omp_journal::EntryId;
@@ -36,9 +37,14 @@ pub const PALETTE: &[PaletteEntry] = &[
 	PaletteEntry { name: "handoff", icon: Icon::Handoff },
 ];
 
-/// The TS implementation has `/compact` mode words; OMP has one local summary
-/// path, so a mode word is accepted and the remainder is the focus.
-const COMPACT_MODES: [&str; 3] = ["soft", "remote", "snapcompact"];
+/// The strategy a `/compact` mode word selects. `remote` (provider-side
+/// compaction) has no OMP transport, so it runs the soft summary.
+fn compact_mode(word: &str) -> Option<CompactionStrategy> {
+	if word == "remote" {
+		return Some(CompactionStrategy::Soft);
+	}
+	word.parse().ok()
+}
 
 /// Parses a journal entry id argument (`/fork 01J…`).
 fn entry_id(text: &str) -> Result<EntryId, ConError> {
@@ -51,25 +57,28 @@ fn usage(message: &'static str) -> ConError {
 	ConError::Usage(Str::new_static(message))
 }
 
-/// Splits `/compact [mode] [focus]` into its focus.
-pub fn compact_focus(words: Option<Str>) -> Result<Option<Str>, ConError> {
+/// Splits `/compact [soft|remote|snapcompact] [focus]` into the pinned
+/// strategy (`None` follows `ai_compaction_strategy`) and the focus.
+pub fn compact_args(
+	words: Option<Str>,
+) -> Result<(Option<CompactionStrategy>, Option<Str>), ConError> {
 	let Some(words) = words else {
-		return Ok(None);
+		return Ok((None, None));
 	};
 	let text = words.as_str().trim();
 	let (first, remainder) = text
 		.split_once(char::is_whitespace)
 		.map_or((text, ""), |(first, remainder)| (first, remainder.trim_start()));
-	if COMPACT_MODES.contains(&first) {
-		if first == "snapcompact" && !remainder.is_empty() {
+	if let Some(strategy) = compact_mode(first) {
+		if strategy == CompactionStrategy::Snapcompact && !remainder.is_empty() {
 			return Err(usage(
 				"/compact snapcompact does not take focus instructions (it archives history without \
 				 an LLM summary).",
 			));
 		}
-		return Ok((!remainder.is_empty()).then(|| Str::new(remainder)));
+		return Ok((Some(strategy), (!remainder.is_empty()).then(|| Str::new(remainder))));
 	}
-	Ok((!text.is_empty()).then(|| Str::new(text)))
+	Ok((None, (!text.is_empty()).then(|| Str::new(text))))
 }
 
 /// Parses `/shake [mode]`; empty defaults to `elide`.
@@ -234,8 +243,8 @@ omp_con::cmd! {
 
 	/// Compacts the context now: `/compact [soft|remote|snapcompact] [focus]`.
 	compact(?mode: Str, ?focus: Str) = |ctx, args| {
-		let focus = compact_focus(rest(args, 0))?;
-		post(ctx, CommandAction::Compact { method: CompactionMethod::Compact, focus })
+		let (strategy, focus) = compact_args(rest(args, 0))?;
+		post(ctx, CommandAction::Compact { method: CompactionMethod::Compact(strategy), focus })
 	};
 
 	/// Drops recoverable heavy content in place: `/shake [elide|images|thinking]`.
@@ -259,17 +268,24 @@ mod tests {
 
 	#[test]
 	fn compact_words_split_a_known_mode_from_the_focus() {
-		assert_eq!(compact_focus(None).unwrap(), None);
+		assert_eq!(compact_args(None).unwrap(), (None, None));
 		assert_eq!(
-			compact_focus(Some(Str::new_static("soft keep the API notes"))).unwrap(),
-			Some(Str::new_static("keep the API notes"))
+			compact_args(Some(Str::new_static("soft keep the API notes"))).unwrap(),
+			(Some(CompactionStrategy::Soft), Some(Str::new_static("keep the API notes")))
 		);
-		assert_eq!(compact_focus(Some(Str::new_static("remote"))).unwrap(), None);
 		assert_eq!(
-			compact_focus(Some(Str::new_static("keep the API notes"))).unwrap(),
-			Some(Str::new_static("keep the API notes"))
+			compact_args(Some(Str::new_static("remote"))).unwrap(),
+			(Some(CompactionStrategy::Soft), None)
 		);
-		assert!(compact_focus(Some(Str::new_static("snapcompact focus"))).is_err());
+		assert_eq!(
+			compact_args(Some(Str::new_static("snapcompact"))).unwrap(),
+			(Some(CompactionStrategy::Snapcompact), None)
+		);
+		assert_eq!(
+			compact_args(Some(Str::new_static("keep the API notes"))).unwrap(),
+			(None, Some(Str::new_static("keep the API notes")))
+		);
+		assert!(compact_args(Some(Str::new_static("snapcompact focus"))).is_err());
 	}
 
 	#[test]

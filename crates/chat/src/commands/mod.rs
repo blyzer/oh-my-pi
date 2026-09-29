@@ -111,8 +111,9 @@ pub enum Selector {
 /// How `/compact` and `/handoff` summarize.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompactionMethod {
-	/// `/compact`: summarize in place with the active model.
-	Compact,
+	/// `/compact`: condense in place. The strategy pins the soft summary or
+	/// the snapcompact archive; `None` follows `ai_compaction_strategy`.
+	Compact(Option<omp_agent::CompactionStrategy>),
 	/// `/handoff`: generate a handoff document and continue from it.
 	Handoff,
 	/// `/shake`: drop recoverable heavy content in place without an LLM

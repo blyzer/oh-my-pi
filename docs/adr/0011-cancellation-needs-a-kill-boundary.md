@@ -98,6 +98,6 @@ Proof: `crates/agent/tests/dispatch.rs::interrupt_kills_a_running_shell_tool_and
   mandatory boundary pleasant"
 - 0006 (host/sandbox split), 0010 (one job primitive), 0008 (call element status), 0036 (Python,
   `@remote`), 0002 (supervision owned once)
-- `crates/envd/src/worker.rs`, `crates/envd/src/eval/process.rs`, `crates/agent/src/batch.rs`,
-  `crates/agent/src/loop.rs`, `crates/agent/src/jobs.rs`, `crates/e2e/tests/p2_cancel_matrix.rs`
+- `crates/envd/src/worker.rs`, `crates/envd/src/eval/process.rs`, `crates/agent/src/dispatch.rs` (batch driving; the
+  former `crates/agent/src/batch.rs`), `crates/agent/src/loop.rs`, `crates/agent/src/jobs.rs`, `crates/e2e/tests/p2_cancel_matrix.rs`
 - Prior art named by the post: JavaScript `AbortSignal`, Go `context.Context`

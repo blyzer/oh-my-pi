@@ -102,7 +102,9 @@ the spec and model-checked first; a counterexample trace is the review artifact.
 - The Harness Playbook, "The interface": "The transcript is a protocol", "Specify the impossible
   part"; Appendix B "Elastic Speculative Slots" (paper and `ElasticSlots.tla`)
 - Lamport, TLA+ (lamport.azurewebsites.net/tla)
-- `PLAN.md`, `crates/chat/src/blocks.rs`, `crates/chat/src/scene.rs`,
-  `crates/tui/src/renderer.rs`, `crates/tui/README.md`
+- `crates/tui/src/slots.rs`, `crates/chat/src/transcript.rs` (the retained
+  transcript projection), `crates/tui/src/renderer.rs`, `crates/tui/README.md`. The former
+  `crates/chat/src/blocks.rs` and `crates/chat/src/scene.rs` no longer exist; `PLAN.md` is a
+  local-only, gitignored file
 - 0003 (the journal is the canonical record the transcript projects), 0005 (views are
   projections), 0033 (how the protocol is exercised on a real PTY), 0030

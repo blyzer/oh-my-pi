@@ -369,6 +369,7 @@ class CompactionTier(StrEnum):
     LOCAL = "local"
     REMOTE = "remote"
     HANDOFF = "handoff"
+    SNAPCOMPACT = "snapcompact"
 ```
 
 One rung of the context compaction ladder.
@@ -589,3 +590,4 @@ Raised when a strict context lane attempts a write after its captured epoch chan
 | `CompactionTier` | `LOCAL` | `"local"` | Run local summarization. |
 | `CompactionTier` | `REMOTE` | `"remote"` | Run remote summarization. |
 | `CompactionTier` | `HANDOFF` | `"handoff"` | Perform rescue handoff. |
+| `CompactionTier` | `SNAPCOMPACT` | `"snapcompact"` | Archive hidden history verbatim as image frames. |

@@ -77,4 +77,6 @@ aliases, remote administration, and journal replay all address these declared va
 - Valve Developer Community, ConVar (https://developer.valvesoftware.com/wiki/ConVar)
 - 0003 (session tree as authority), 0004 (lifecycle derives from the tree), 0013 (seeding and
   cfg), 0014 (command stream)
-- `crates/settings/src/schema.rs`, `crates/settings/src/snapshot.rs`, `crates/agent/src/regime.rs`
+- `crates/con/src/spec.rs` (declarations and flags), `crates/con/src/layers.rs` (layered values and
+  spawn seeds), `crates/agent/src/director.rs` (engagement `binds`). The former
+  `crates/settings` schema/snapshot stack and `crates/agent/src/regime.rs` no longer exist

@@ -557,7 +557,7 @@ impl<C> Kernel<C> {
 
 	/// Replaces catalog-derived facts for the selected route.
 	#[must_use]
-	pub const fn with_route_facts(mut self, route: RouteFacts) -> Self {
+	pub fn with_route_facts(mut self, route: RouteFacts) -> Self {
 		self.route = route;
 		self
 	}
@@ -2078,7 +2078,10 @@ impl<C: Inference> Kernel<C> {
 	/// selection when inference resolves `ai_model` per request, else the
 	/// facts fixed at composition.
 	pub(crate) fn current_route(&self) -> RouteFacts {
-		self.client.route_facts().unwrap_or(self.route)
+		self
+			.client
+			.route_facts()
+			.unwrap_or_else(|| self.route.clone())
 	}
 
 	/// The `thread_projection` gate over an owned projection, then the
@@ -3234,18 +3237,21 @@ impl<C: Inference> Kernel<C> {
 	}
 
 	/// Runs the manual compaction path between turns (`/compact`,
-	/// `/handoff`): summarizes the projected history through the
+	/// `/handoff`): condenses the projected history through the
 	/// [`CompactionDirector`] and journals a `compaction@1` labeled
-	/// `method`. Returns whether a compaction landed (an empty session
-	/// projects nothing to summarize and journals nothing).
+	/// `method` (`snapcompact` when the archive path lands). `strategy`
+	/// pins the path; `None` follows `ai_compaction_strategy`. Returns
+	/// whether a compaction landed (an empty session projects nothing to
+	/// summarize and journals nothing).
 	pub async fn compact(
 		&mut self,
 		session: &mut Session,
 		focus: Option<Str>,
 		method: &'static str,
+		strategy: Option<crate::CompactionStrategy>,
 	) -> Result<bool, KernelError> {
 		self
-			.compact_with(session, focus, method, RunControl::default())
+			.compact_with(session, focus, method, strategy, RunControl::default())
 			.await
 	}
 
@@ -3257,6 +3263,7 @@ impl<C: Inference> Kernel<C> {
 		session: &mut Session,
 		focus: Option<Str>,
 		method: &'static str,
+		strategy: Option<crate::CompactionStrategy>,
 		control: RunControl,
 	) -> Result<bool, KernelError> {
 		let Ok(turn) = current_turn(session) else {
@@ -3264,6 +3271,10 @@ impl<C: Inference> Kernel<C> {
 		};
 		let request = self.finish_request(self.project_request(session)?).await?;
 		let director = CompactionDirector::manual(focus).with_method(method);
+		let director = match strategy {
+			Some(strategy) => director.with_strategy(strategy),
+			None => director,
+		};
 		let route = self.current_route();
 		let turn_cancel = self.cancel.begin_turn();
 		let preflight_control = CallControl::new(

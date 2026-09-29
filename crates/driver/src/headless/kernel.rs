@@ -290,7 +290,7 @@ impl ProductionInference {
 			.routes
 			.catalog()
 			.model(omp_catalog::ModelKey::from_ref(model.as_str()))?;
-		Some(route_facts(self.routes.catalog().as_ref(), spec))
+		Some(route_facts(self.routes.catalog().as_ref(), spec, Some(&self.meta.target)))
 	}
 
 	/// Applies the control plane to the next call: `ai_model` re-targets the
@@ -2028,7 +2028,7 @@ pub async fn compose_kernel(
 	let model_spec = catalog
 		.model(&model_key)
 		.ok_or_else(|| HeadlessError::UnknownModel { selector: model.clone() })?;
-	let route_facts = route_facts(catalog.as_ref(), model_spec);
+	let route_facts = route_facts(catalog.as_ref(), model_spec, None);
 	let tool_client = if options.no_pty {
 		environment
 			.client()
@@ -2654,11 +2654,16 @@ fn apply_model_override(
 	Ok(())
 }
 
+/// Catalog facts for `model`, identified on the route `target` pins (its
+/// route, or its provider's most preferred route) or else the model's most
+/// preferred route.
 fn route_facts(
 	catalog: &omp_catalog::snapshot::Catalog,
 	model: &omp_catalog::ModelSpec,
+	target: Option<&Target>,
 ) -> RouteFacts {
 	RouteFacts {
+		identity:           route_identity(catalog, model, target),
 		// `forced_choice` is capability, not cost. Only an affirmative
 		// penalty-free named-choice fact skips ADR 0019's soft escalation.
 		forced_choice_free: catalog
@@ -2699,6 +2704,29 @@ fn route_facts(
 				modalities.contains(omp_catalog::capability::ModalityBits::IMAGE)
 			}),
 	}
+}
+
+fn route_identity(
+	catalog: &omp_catalog::snapshot::Catalog,
+	model: &omp_catalog::ModelSpec,
+	target: Option<&Target>,
+) -> Option<Arc<omp_agent::RouteIdentity>> {
+	let preferred = || model.routes.iter().find_map(|route| catalog.route(route));
+	let route = match target {
+		Some(Target::Route { route, .. } | Target::RouteService(route)) => catalog.route(route),
+		Some(Target::Provider { provider, .. } | Target::ProviderService(provider)) => model
+			.routes
+			.iter()
+			.filter_map(|route| catalog.route(route))
+			.find(|route| route.provider == *provider),
+		Some(Target::Model(_)) | None => None,
+	}
+	.or_else(preferred)?;
+	Some(Arc::new(omp_agent::RouteIdentity {
+		model:    model.key.clone(),
+		provider: route.provider.clone(),
+		codec:    route.codec.clone(),
+	}))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3935,14 +3963,14 @@ mod tests {
 		let paid = claude_with_penalty(true)
 			.expect("embedded Anthropic model whose forced choice declares a penalty");
 		assert!(
-			!route_facts(catalog, paid).forced_choice_free,
+			!route_facts(catalog, paid, None).forced_choice_free,
 			"a declared penalty is not penalty-free routing, named choice notwithstanding"
 		);
 
 		let unpriced = claude_with_penalty(false)
 			.expect("embedded Anthropic model whose forced choice declares no penalty");
 		assert!(
-			route_facts(catalog, unpriced).forced_choice_free,
+			route_facts(catalog, unpriced, None).forced_choice_free,
 			"named choice with no declared penalty is the one route that skips escalation"
 		);
 	}

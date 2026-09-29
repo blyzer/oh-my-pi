@@ -31,6 +31,64 @@ pub enum DataUrlContext {
 
 const DAMAGED_PAYLOAD_MIN_CHARS: usize = 40;
 
+/// Zero-width toggle that switches the following text to dim (tool-output)
+/// ink.
+pub const DIM_ON: char = '\u{e}';
+/// Zero-width toggle that ends a [`DIM_ON`] span.
+pub const DIM_OFF: char = '\u{f}';
+/// One-cell, full-ink line-break marker: newline runs fold to it so line
+/// structure survives whitespace collapse.
+pub const LINE_BREAK: char = '\u{2588}';
+
+const _: () = assert!(
+	DIM_ON as u32 == crate::DIM_ON
+		&& DIM_OFF as u32 == crate::DIM_OFF
+		&& LINE_BREAK as u32 == crate::FULL_BLOCK,
+	"archive text markers must match the renderer's ink toggles"
+);
+
+/// Appends `text` to `out` as renderer-ready archive text.
+///
+/// Leading and trailing whitespace is dropped; every interior whitespace run
+/// collapses to one space, or to one [`LINE_BREAK`] when the run contains a
+/// newline. Other control characters (including stray [`DIM_ON`] /
+/// [`DIM_OFF`] toggles) are dropped, so only the caller's own toggles change
+/// ink. The grid is a continuous cell stream, so collapsed whitespace is the
+/// difference between archiving text and archiving indentation.
+pub fn push_normalized(out: &mut String, text: &str) {
+	#[derive(Clone, Copy, Eq, PartialEq)]
+	enum Gap {
+		None,
+		Space,
+		Break,
+	}
+	let mut emitted = false;
+	let mut gap = Gap::None;
+	for ch in text.chars() {
+		if ch.is_whitespace() {
+			gap = if ch == '\n' || gap == Gap::Break {
+				Gap::Break
+			} else {
+				Gap::Space
+			};
+			continue;
+		}
+		if ch.is_control() {
+			continue;
+		}
+		if emitted {
+			match gap {
+				Gap::None => {},
+				Gap::Space => out.push(' '),
+				Gap::Break => out.push(LINE_BREAK),
+			}
+		}
+		gap = Gap::None;
+		emitted = true;
+		out.push(ch);
+	}
+}
+
 const fn ascii_eq(left: u8, right: u8) -> bool {
 	left.eq_ignore_ascii_case(&right)
 }
@@ -277,15 +335,44 @@ pub fn elide_data_urls(text: &str, context: DataUrlContext) -> Cow<'_, str> {
 }
 
 /// Provider billing family for image inputs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Parses both the OMP catalog codec ids (`anthropic`, `openai-responses`,
+/// `google-genai`, …) and the legacy wire API names (`anthropic-messages`,
+/// `google-generative-ai`, …); an unrecognized name is a parse error the
+/// caller lowers to [`BillingFamily::Unknown`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
 pub enum BillingFamily {
 	/// Anthropic patch billing.
+	#[strum(
+		serialize = "anthropic",
+		serialize = "anthropic-messages",
+		serialize = "anthropic-bedrock",
+		serialize = "anthropic-vertex",
+		serialize = "bedrock-converse",
+		serialize = "bedrock-converse-stream"
+	)]
 	Anthropic,
 	/// Google fixed media-resolution billing.
+	#[strum(
+		serialize = "google-genai",
+		serialize = "google-generative-ai",
+		serialize = "google-cca",
+		serialize = "google-gemini-cli",
+		serialize = "google-vertex"
+	)]
 	Google,
 	/// `OpenAI` patch billing.
+	#[strum(
+		serialize = "openai-chat",
+		serialize = "openai-completions",
+		serialize = "openai-responses",
+		serialize = "openai-codex",
+		serialize = "openai-codex-responses",
+		serialize = "azure-openai-responses"
+	)]
 	OpenAi,
 	/// Conservative unknown-provider billing.
+	#[strum(disabled)]
 	Unknown,
 }
 
@@ -400,19 +487,10 @@ pub enum ArchiveError {
 /// Archive construction result.
 pub type ArchiveResult<T, E = ArchiveError> = result::Result<T, E>;
 
-/// Resolves a wire API name to its image billing family.
+/// Resolves a catalog codec id or wire API name to its image billing family.
 pub fn billing_family(api: Option<&str>) -> BillingFamily {
-	match api {
-		Some("anthropic-messages" | "bedrock-converse-stream") => BillingFamily::Anthropic,
-		Some("google-generative-ai" | "google-gemini-cli" | "google-vertex") => BillingFamily::Google,
-		Some(
-			"openai-completions"
-			| "openai-responses"
-			| "openai-codex-responses"
-			| "azure-openai-responses",
-		) => BillingFamily::OpenAi,
-		_ => BillingFamily::Unknown,
-	}
+	api.and_then(|api| api.parse().ok())
+		.unwrap_or(BillingFamily::Unknown)
 }
 
 /// Returns the conservative request image budget for a provider.
@@ -633,6 +711,34 @@ mod tests {
 		let elided = elide_data_urls(&source, DataUrlContext::Source);
 		assert!(elided.contains("[data URL omitted: image/png, 8000 base64 chars]"));
 		assert!(!elided.contains(";base64,"), "no decodable prefix can straddle a later slice");
+	}
+
+	#[test]
+	fn normalization_folds_whitespace_runs_and_drops_control_characters() {
+		let mut out = String::from("[user] ");
+		push_normalized(&mut out, "  first\tline  \n\n  second\u{e}\u{f}\u{7} line \r\n ");
+		assert_eq!(out, "[user] first line\u{2588}second line");
+		let mut empty = String::new();
+		push_normalized(&mut empty, " \n\t ");
+		assert!(empty.is_empty(), "whitespace-only text appends nothing");
+	}
+
+	#[test]
+	fn billing_family_parses_catalog_codecs_and_wire_api_names() {
+		for (name, family) in [
+			("anthropic", BillingFamily::Anthropic),
+			("anthropic-messages", BillingFamily::Anthropic),
+			("bedrock-converse", BillingFamily::Anthropic),
+			("google-genai", BillingFamily::Google),
+			("google-generative-ai", BillingFamily::Google),
+			("openai-responses", BillingFamily::OpenAi),
+			("openai-chat", BillingFamily::OpenAi),
+		] {
+			assert_eq!(billing_family(Some(name)), family, "{name}");
+		}
+		assert_eq!(billing_family(Some("ollama")), BillingFamily::Unknown);
+		assert_eq!(billing_family(Some("Unknown")), BillingFamily::Unknown);
+		assert_eq!(billing_family(None), BillingFamily::Unknown);
 	}
 
 	#[test]

@@ -99,8 +99,23 @@ impl BindValue {
 	}
 }
 
+/// Catalog identity of the selected route.
+///
+/// The model, the provider domain that serves it, and the wire codec that
+/// carries it. Provider-aware renderers (snapcompact frame geometry and image
+/// budgets) select by these.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteIdentity {
+	/// Normalized catalog model key.
+	pub model:    omp_catalog::ModelKey,
+	/// Provider domain serving the route.
+	pub provider: omp_catalog::ProviderId,
+	/// Wire codec carrying the route.
+	pub codec:    omp_catalog::CodecId,
+}
+
 /// Catalog-derived facts for the selected inference route.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RouteFacts {
 	/// Native named tool choice has no declared route penalty.
 	pub forced_choice_free: bool,
@@ -116,6 +131,10 @@ pub struct RouteFacts {
 	pub grammar:            omp_catalog::GrammarBits,
 	/// Maximum model-visible tool declarations, when the route bounds them.
 	pub maximum_tools:      Option<u16>,
+	/// Catalog identity of the route; `None` when the host resolved no
+	/// catalog route (gateways, headless tests). Shared, so cloning the facts
+	/// per request stays O(1).
+	pub identity:           Option<Arc<RouteIdentity>>,
 }
 
 impl RouteFacts {
