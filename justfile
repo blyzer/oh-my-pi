@@ -200,11 +200,14 @@ e2e-baseline:
     cargo run -p omp-e2e --bin baseline --locked -- \
         --artifact target/e2e-artifacts/p8-baselines.json
 
-# Run every P1-P10 proof plus the tool-sources check, in CI order.
+# Run the tool-sources check: production environment source routing and shared document snapshots.
 [group('e2e')]
-e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10
+e2e-tool-sources:
     cargo nextest run -p omp-e2e --test tool_sources --locked
-    cargo nextest run -p omp-e2e --test p8_baselines --locked
+
+# Run every P1-P10 proof plus the tool-sources check (CI runs P1-P8 on macOS, plus P7, P9, P10 and tool_sources on Linux).
+[group('e2e')]
+e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-tool-sources e2e-p8
 
 # ---------------------------------------------------------------------------
 # LLM catalog & compat cascade (crates/llm-catalog)

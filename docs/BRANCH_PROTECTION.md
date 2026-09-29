@@ -9,7 +9,7 @@ code; apply them once in the GitHub UI.
 
 | Workflow | What it does | Gating |
 |---|---|---|
-| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests and P1-P8 on macOS, P7 on a Linux PTY | Required (see below) |
+| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests and P1-P8 on macOS, P7 on a Linux PTY, P9, P10 and `tool_sources` on Linux | Required (see below) |
 | `Package macOS` (`package-macos.yml`) | Release build, package, install smoke; only when the workflow or its scripts change | Not required |
 | `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml`, then `size/xs` .. `size/xl` labels and one comment on `size/xl` | Informational |
 
@@ -55,6 +55,12 @@ Use the job names exactly as the checks list of a pull request shows them:
 - `Lint workspace (Linux)`
 - `Rust workspace and acceptance proofs`
 - `Terminal proof P7 (Linux PTY)`
+- `Acceptance proofs P9, P10 and tool sources (Linux)`
+
+`Acceptance proofs P9, P10 and tool sources (Linux)` runs on a GitHub-hosted
+runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
+queue. Add it to the ruleset once it has reported green on a pull request;
+existing required checks keep their names.
 
 Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
