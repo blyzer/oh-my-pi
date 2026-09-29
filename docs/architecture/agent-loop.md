@@ -1,5 +1,14 @@
 # Agent loop
 
+> **Out of date.** This page describes the kernel before commit `d98ed242f5` reimplemented it
+> (`Agent<C: TurnClient>`, `AgentState`, `Journal`, the `Arbiter` / `RegimeSet` regime stack).
+> Those types and the files it cites (`crates/agent/src/{arbiter,regime,control,batch,turn,state,journal,mailbox}.rs`,
+> `crates/inference`, `crates/driver/src/chat.rs`) no longer exist. The current loop is
+> `crates/agent/src/loop.rs` (`Kernel`, the `Inference` capability, `Up` mailbox), tool dispatch is
+> `crates/agent/src/dispatch.rs`, and control across turns is the Director stack in
+> `crates/agent/src/director.rs` ([ADR 0015](../adr/0015-directors.md)). Regimes and the campaign
+> arbiter were removed. This page has not been rewritten yet; do not rely on it.
+
 The agent loop is the durable owner of a caller submission from canonical input through inference, speculative tool execution, journal commitment, and presentation events. `Agent<C: TurnClient>` in `crates/agent/src/loop.rs` composes transport, environment access, immutable turn state, the append-only journal, the event bus, the interrupt mailbox, tool and hook channels, jobs, control-plane regimes, and recovery state. Driver code assembles those dependencies; the loop itself stays transport-neutral. Process placement and protobuf transport boundaries are described separately in [`processes.md`](processes.md).
 
 ## Composition and state ownership
@@ -157,7 +166,7 @@ Hooks also attach at submission, prompt, stream, item-commit, tool-result, agent
 
 Extension regimes cross the envd control plane as `RegimeStart`, `RegimeApply`, `RegimeStop`, and `RegimeDraft` frames. `ExtensionRegimeResolver` constructs an `omp_agent::Regime` only from exact-generation sealed registry evidence (`crates/envd/src/worker.rs`), and `AgentRegimeControlBackend` delegates mutations to the sole live loop (`crates/driver/src/chat.rs`). This keeps extension code outside the mutable agent owner while allowing durable middleware at fixed points.
 
-The repository's owner guidance still uses “campaign arbiter” and `omp.Decision` as architectural shorthand (`AGENTS.md`), but those are not current public/runtime symbols. The current Python contract explicitly has no public decision object: regime handlers stage effects through `ctx` and choose at most one control through `next_` (`docs/py/15-regimes.md`). The frozen-surface test asserts that `omp.campaign` and `omp.CampaignScope` do not exist (`crates/py/tests/frozen_surface.rs`). The implemented Rust vocabulary is `Arbiter`, `Regime`, `RegimeContext`, `Next`, and internal `RegimeDraft` (`crates/agent/src/arbiter.rs`, `crates/agent/src/regime.rs`).
+The repository's owner guidance still uses “campaign arbiter” and `omp.Decision` as architectural shorthand (`AGENTS.md`), but those are not current public/runtime symbols. The current Python contract explicitly has no public decision object: regime handlers stage effects through `ctx` and choose at most one control through `next_` (removed; now `docs/py/15-directors.md`). The frozen-surface test asserts that `omp.campaign` and `omp.CampaignScope` do not exist (`crates/py/tests/frozen_surface.rs`). The implemented Rust vocabulary is `Arbiter`, `Regime`, `RegimeContext`, `Next`, and internal `RegimeDraft` (`crates/agent/src/arbiter.rs`, `crates/agent/src/regime.rs`).
 
 ```mermaid
 flowchart LR
@@ -240,4 +249,4 @@ This produces one final ANSI materialization boundary: streamed inference and to
 | Interactive event adapter | `crates/app/src/chat_ui.rs` |
 | Retained component model | `crates/tui/src/component.rs` |
 | Final terminal renderer | `crates/tui/src/renderer.rs` |
-| Python regime contract | `docs/py/15-regimes.md` |
+| Python Director/Component contract | `docs/py/15-directors.md` |

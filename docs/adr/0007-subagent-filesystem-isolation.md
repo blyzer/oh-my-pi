@@ -57,5 +57,6 @@ the parent receives a diff.
 - `pi-iso` (prior art: CoW workspace views for pi subagents)
 - 0006 (host/sandbox rule), 0010 (subagents as jobs), 0001 (multiplexed-workspace row)
 - `crates/driver/src/subagent/settings.rs`, `crates/envd/src/workspace/operations.rs`,
-  `crates/envd/src/lib.rs` (`isolated`), `crates/agent/src/subagent.rs`,
-  `crates/e2e/tests/p9_isolation.rs`
+  `crates/envd/src/lib.rs` (`isolated`), `crates/driver/src/subagent/spawn.rs`
+  (child-kernel spawn; the retained-run-state file `crates/agent/src/subagent.rs`
+  was removed by `d98ed242f5`), `crates/e2e/tests/p9_isolation.rs`

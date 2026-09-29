@@ -13,13 +13,13 @@ omp's Python extension surface, from the process outward.
 | [06-policy.md](06-policy.md) | verdict-based policy, bash AST IR, `omp.SandboxProfile`, `SandboxEnforcement`, `ApprovalSpec` and durable approval tickets |
 | [07-ui.md](07-ui.md) | `omp.ui.*`, TML, slots, dialogs, triggers, ghost text, `@omp.command`, `@omp.shortcut`, `@omp.message_renderer` |
 | [08-context.md](08-context.md) | `omp.MessageRef`, `omp.ContextPatch`, `thread_projection`, `@omp.prompt_slot`, `CompactionEvent`, compaction verdicts, memory |
-| [09-journal.md](09-journal.md) | `omp.journal` (`append`, `append_many`, `append_atomic`), `omp.sessions`, `omp.artifacts`, `ArtifactUrl` / `HistoryUrl` / `AgentUrl`, durable state scopes, the state directory |
+| [09-journal.md](09-journal.md) | `omp.journal` (DOM patch builders `insert` / `remove` / `set_prop` / `move` / `patch`, read-only `JournalEntry` projections), `omp.sessions`, `omp.artifacts`, `ArtifactUrl` / `HistoryUrl` / `AgentUrl`, the state directory |
 | [10-telemetry.md](10-telemetry.md) | `@omp.telemetry`, event kinds, AutoQA / `report_issue`, per-rev metrics |
 | [11-env.md](11-env.md) | `omp.env`: doc leases, fs, exec, named processes, blobs, walker, capabilities, `EnvPath` / `ClientPath` / `BlobRef`, `EnvError` |
 | [12-agents.md](12-agents.md) | `omp.agents`: subagents, goal loops, schedules, messaging, rewind |
 | [13-inference.md](13-inference.md) | `@omp.provider`, the provider surface, `omp.creds`, request intents |
 | [14-deploy.md](14-deploy.md) | packaging, distribution, dependency resolution, install/trust lifecycle, `(publisher_key, extension_id)` identity, the manifest declaration table, `WorkspaceUri`, client↔remote layering |
-| [15-regimes.md](15-regimes.md) | `@omp.regime`, fixed loop events, transactional `ctx` / `next_` handlers, durable state, exclusive resources, and modes |
+| [15-directors.md](15-directors.md) | `@omp.director` (claims, binds, `before_inference` / `on_yield` verdicts) and `@omp.component` (journal-to-DOM reducers); supersedes the removed regimes |
 | [16-prelude.md](16-prelude.md) | `@omp.prelude`, extension-declared eval-namespace helpers, declaration and manifest identity, generated sync stubs, JSON call boundary, lifecycle, and failure semantics |
 | [17-scribe.md](17-scribe.md) | `omp.scribe`: `Template`, `render`, `canonicalize`, `TemplateError` — deterministic prompt templating, the props value model, the template grammar, and the builtin helper set |
 | [18-convars.md](18-convars.md) | `omp.convars`: `declare`, `get`, `observe`, `Snapshot`, `Observation` — extension-declared settings on the shared control plane |

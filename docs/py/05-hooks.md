@@ -27,8 +27,8 @@
 > [`13-inference.md`](13-inference.md) (`ModelRef`, `RouteRef`, `omp.Failover`,
 > `CapabilityIntent`, provider event payloads),
 > [`14-deploy.md`](14-deploy.md) (how extension code arrives, layering, install-time trust),
-> [`15-regimes.md`](15-regimes.md) (stateful multi-turn regimes, transactional middleware isolation,
-> durable bounds, and modes).
+> [`15-directors.md`](15-directors.md) (Directors that keep control across turns and journal-derived
+> Components; regimes were removed).
 
 ## 1. Purpose
 
