@@ -127,5 +127,10 @@ assistant node for replay.
   candidate yields", "Plan mode, completely", "Hooks, Directors, and inference"
 - 0002 (one owner), 0003 (tree as authority), 0004 (rewind/resume derive from the tree),
   0016 (semantic requests), 0019 (forced-call escalation)
-- `crates/agent/src/regime.rs`, `crates/agent/src/arbiter.rs`, `crates/agent/src/control.rs`,
-  `docs/architecture/agent-loop.md`, `docs/py/15-regimes.md`, `AGENTS.md` "Locked Deviations"
+- `crates/agent/src/director.rs`, `crates/agent/src/directors/`,
+  `crates/agent/src/extensions.rs` (extension Director/Component registrar),
+  `crates/py/python/omp/extensions.py` (`@omp.director`, `@omp.component`),
+  `docs/py/15-directors.md`, `AGENTS.md` "Locked Deviations". The former stacked-regime
+  design (`crates/agent/src/regime.rs`, `arbiter.rs`, `control.rs`, and Python `@omp.regime`) was
+  removed by `d98ed242f5` and `47e02d12a6`. `docs/architecture/agent-loop.md` still describes that
+  design and predates the Director rewrite

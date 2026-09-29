@@ -71,4 +71,5 @@ locally and the RPC `pause`/`resume` commands remotely; both journal the same DO
 - Valve Developer Community, ConVar; Source console commands `bind`, `toggle`, `alias`, `exec`
 - 0012 (declared variables), 0013 (cfg files and auto-exec points), 0004 (replay)
 - `crates/app/src/keybindings/config.rs`, `crates/app/src/keybindings/mod.rs`,
-  `crates/app/src/chat_ui/commands/mod.rs`, `crates/app/src/chat_ui/commands/registry.rs`
+  `crates/chat/src/commands/mod.rs` (the slash-command registry; the former
+  `crates/app/src/chat_ui/commands/` was removed by `d3d7c61fc4`)

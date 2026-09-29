@@ -63,7 +63,7 @@ A stale-build daemon drains without rehosting and releases authority as soon as
 its last client disconnects.
 
 The crate is deliberately below the headless driver and application layers.
-Capabilities that require regime state, inference composition,
+Capabilities that require Director/goal state, inference composition,
 application-authored content, host RPC resources, or telemetry delivery enter
 through `RegistryBridges`. `omp-driver` constructs those bridges and the
 session composition; `omp-envd` does not import app presentation policy.

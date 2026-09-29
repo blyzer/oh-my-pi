@@ -13866,7 +13866,10 @@ mod tests {
 		assert!(validate_document_root(environment.path(), "memory://foreign").is_err());
 	}
 
-	#[tokio::test]
+	/// Runs on tokio's paused clock: `wait_idle` reads only tokio time, so every
+	/// sleep below advances virtual time deterministically and scheduler jitter
+	/// on a loaded host cannot move a deadline across an assertion.
+	#[tokio::test(start_paused = true)]
 	async fn idle_wait_requires_one_continuous_quiet_window() {
 		let state = tempfile::tempdir().expect("daemon state");
 		let window = Duration::from_millis(30);
@@ -13911,14 +13914,26 @@ mod tests {
 		assert!(!reset.is_finished(), "activity did not reset the idle window");
 		time::sleep(Duration::from_millis(15)).await;
 		reset.await.expect("reset idle wait task");
+	}
 
+	/// A live persistent process holds the daemon open. This phase drives a real
+	/// child process, which a paused clock would race past, so it keeps real
+	/// time and gates on a release file rather than on wall-clock durations:
+	/// the process stays alive until the test says otherwise, however slow the
+	/// host.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn idle_wait_stays_open_while_a_persistent_process_lives() {
+		let state = tempfile::tempdir().expect("daemon state");
+		let release = state.path().join("release");
+		let window = Duration::from_millis(30);
 		let processes = ExecHost::new();
 		processes
 			.start_process(env_pb::StartProcess {
 				name: String::from("persistent-idle"),
 				spec: Some(env_pb::ProcessSpec {
 					source: Some(env_pb::Script {
-						text: String::from("sleep 0.2"),
+						text: format!("while [ ! -e '{}' ]; do sleep 0.02; done", release.display()),
 						..Default::default()
 					}),
 					cwd_uri: Url::from_directory_path(state.path())
@@ -13942,9 +13957,11 @@ mod tests {
 			sf!("same-build"),
 			processes,
 		));
-		time::sleep(Duration::from_millis(75)).await;
+		// Several idle windows elapse while the process is held alive.
+		time::sleep(window * 5).await;
 		assert!(!persistent.is_finished(), "live persistent process did not hold the daemon open");
-		time::timeout(Duration::from_secs(1), persistent)
+		std::fs::write(&release, b"").expect("release persistent process");
+		time::timeout(Duration::from_secs(30), persistent)
 			.await
 			.expect("idle window did not begin after the persistent process exited")
 			.expect("persistent idle task");
