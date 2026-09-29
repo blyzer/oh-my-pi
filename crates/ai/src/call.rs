@@ -437,8 +437,10 @@ pub struct NegotiationPolicy {
 	pub vendor_option_mismatch: MismatchPolicy,
 }
 
-/// Canonical conversational role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Canonical conversational role; its lowercase name (`user`, `tool`, …)
+/// is the `IntoStaticStr` label.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
 pub enum Role {
 	/// System-level control instruction.
 	System,

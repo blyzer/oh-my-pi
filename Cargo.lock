@@ -7598,6 +7598,7 @@ dependencies = [
  "omp-proto",
  "omp-scribe",
  "omp-session",
+ "omp-snapcompact",
  "omp-tool",
  "omp-vocab",
  "parking_lot",
@@ -8794,6 +8795,7 @@ version = "2.0.0"
 dependencies = [
  "fontdue",
  "png 0.18.1",
+ "strum",
  "thiserror 2.0.20",
  "tracing",
 ]
