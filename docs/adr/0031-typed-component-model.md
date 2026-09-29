@@ -88,7 +88,7 @@ and `{@render usage}` are semantic; the renderer resolves them (0032).
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/chat/src/cards/mod.rs`. Typed `dom!` cards consume real tool contracts. Extension custom-message renderer identities and replacement TML are journaled through `crates/session/src/custom_message.rs`, sealed by `crates/envd/src/exthost`, and projected with Markdown fallback by `crates/chat/src/notices/custom.rs`. Gap: runtime-markup control flow, `layout!`, and equivalent web projection are not proved.
+**Partial.** Primary implementation: `crates/chat/src/cards/mod.rs`. Typed `dom!` cards consume real tool contracts. Extension custom-message renderer identities and replacement TML are journaled through `crates/session/src/custom_message.rs`, sealed by `crates/envd/src/exthost`, and projected with Markdown fallback by `crates/chat/src/notices/custom.rs`. Gap: runtime-markup control flow and equivalent web projection are not proved. The post's `layout!` macro does not exist; `crates/macros` provides `dom!` (retained components) and `view!` (typed renderer view trees, `crates/macros/src/view.rs`).
 
 ## References
 

@@ -46,6 +46,7 @@ names real paths and says "not yet implemented" where true.
 - [0009](0009-bound-output-once.md) — Output is bounded centrally; full results become artifacts
 - [0010](0010-one-job-primitive.md) — One job primitive for tools, subagents, daemons, and background work
 - [0011](0011-cancellation-needs-a-kill-boundary.md) — Cancellation is a runtime guarantee, not cooperative etiquette
+- [0039](0039-remote-control-and-factory-modes.md) — Remote control is a session-control projection; the factory is a leased fleet over the one job primitive (proposed)
 
 ### Control plane
 - [0012](0012-convars.md) — Settings are convars: policy declared with the variable
@@ -53,6 +54,7 @@ names real paths and says "not yet implemented" where true.
 - [0014](0014-command-stream-binds-and-aliases.md) — Binds, toggles, aliases, and profiles ride the command stream
 - [0015](0015-directors.md) — Directors own candidate yields
 - [0016](0016-semantic-requests-cross-layers.md) — Directors state intent; inference chooses how to satisfy it
+- [0038](0038-stream-rules-as-a-director.md) — Stream rules are a Director over a generic stream-watch hook; a match redirects the response (proposed)
 
 ### Inference
 - [0017](0017-compatibility-as-structured-knowledge.md) — Model compatibility is compiled knowledge with explicit precedence

@@ -79,5 +79,7 @@ bypasses this order.
 - The Harness Playbook, "The control plane" → "Inheritance should not require a second setting"
 - Team Fortress 2 class cfg files (`<class>.cfg` auto-exec); Source `config.cfg`
 - 0012 (convars), 0014 (command stream and cfg execution), 0003, 0004
-- `crates/driver/src/chat.rs`, `crates/driver/src/subagent/snapshot.rs`,
-  `crates/driver/src/subagent/settings.rs`, `crates/agent/src/tree.rs`
+- `crates/driver/src/headless/kernel.rs` (`compose_kernel`), `crates/driver/src/cfg.rs`,
+  `crates/con/src/layers.rs` (spawn seeds), `crates/driver/src/subagent/settings.rs`. The former
+  `crates/driver/src/chat.rs`, `crates/driver/src/subagent/snapshot.rs`, and
+  `crates/agent/src/tree.rs` no longer exist; the tree is `crates/dom` and `crates/session`

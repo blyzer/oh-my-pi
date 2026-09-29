@@ -44,13 +44,17 @@ rewrite of `pi`: port observable behavior, not TS shape.
   client protocol APIs go to `omp-env`.
   `crates/edit|ast|walker`: multi-paradigm edit engine, syntax, fs discovery.
   `crates/shell|shell-builtins`: in-process Bash parser/runtime, built-ins.
-- `crates/tui`+`tui-macros`: retained declarative UI; `crates/chat`: terminal
+- `crates/tui`+`crates/macros`: retained declarative UI and its proc macros
+  (`omp-macros`: `dom!`, `view!`, `cached`); `crates/chat`: terminal
   and native chat actor/projections; `crates/gui`: native window host.
   None owns agent/provider policy.
-- `crates/e2e/tests`: authoritative joined-system proofs P1-P8.
+- `crates/e2e/tests`: authoritative joined-system proofs P1-P10 plus
+  `tool_sources` (`crates/e2e/README.md`).
 - `PLAN.md`: authoritative plan — locked decisions D1-D8, defect ledger, 8
-  parts + checklists.
-- `fixtures`, `.plan/quirks`: conformance data, recorded incompatibilities.
+  parts + checklists. Local-only: `/*PLAN.md` and `/.plan/` are gitignored, so
+  neither exists in a clean clone.
+- `fixtures`, `.plan/quirks`: conformance data, recorded incompatibilities
+  (`fixtures` is tracked; `.plan/quirks` is local-only as above).
   Other `.plan` scratch (research, port, feature-map) NEVER outranks production
   code/tests.
 - `.omp/tools`, `scripts`, `crates/*/scripts`: agent tooling, release gen,
@@ -61,10 +65,10 @@ entry dispatch) → `omp_app::run` / `app/src/cli.rs` (command and presentation
 adapter) → `omp-driver` chat/headless composition (environment, registries,
 journal, agent session, and higher-layer host bridges) → `omp-envd`
 project-environment host, reached through `omp-env` clients for effects →
-`agent/src/loop.rs` (mailbox input/interrupts, `TurnClient`, typed tool batches,
-durable `AgentEvent`s) → `omp-ai` (facade + Tower spine; streamed events
-→ storage → app adapter) → TUI retained tree → terminal output materialized
-once at final renderer.
+`agent/src/loop.rs` (mailbox input/interrupts, the `Inference` capability, typed
+tool batches through `Dispatcher`, journaled turns with ephemeral `KernelEvent`s)
+→ `omp-ai` (facade + Tower spine; streamed events → storage → app adapter) →
+TUI retained tree → terminal output materialized once at final renderer.
 
 ## Commands
 
@@ -73,16 +77,21 @@ all recipes.
 - One-time before anything linking `omp-py`: `just setup-python`.
 - Iterate targeted (`just check-pkg <pkg>`, `just test-pkg <pkg>`); broaden
   (`check`, `test`, `lint`) after the changed contract passes.
-- E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-baseline`).
+- E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-p9|e2e-p10|e2e-baseline`;
+  `just e2e` runs P1-P7, P9, P10, `tool_sources`, then the P8 recorder test).
 - `just ci` ≈ CI format+rust jobs locally.
 
 CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format,
 licences, runtime-symbol contracts and a second workspace lint on Linux;
-tests/P1-P8 on arm64 macOS, plus P7 again on a Linux PTY. The P8 performance
-baseline is recorded per omp2 push by `.github/workflows/p8-baseline.yml`
-(non-gating, artifact named by commit), never in a PR. The macOS jobs read
-`vars.MACOS_RUNNER` and fall back to `macos-15`, so a self-hosted
-Apple-silicon runner takes them when one is registered. Lint runs on BOTH
+workspace tests and the e2e acceptance proofs on arm64 macOS and Linux (P7 also
+on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P10 and
+`tool_sources` (`ci.yml` says which job runs which; keep it and `just e2e` in
+step). P8 remains a non-gating recorder: only its metric schema/arithmetic test
+gates. The measured performance baseline is recorded per omp2 push by
+`.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),
+never in a PR. The macOS jobs read `vars.MACOS_RUNNER` and fall back to
+`macos-15`, so a self-hosted Apple-silicon runner takes them when one is
+registered. Lint runs on BOTH
 platforms deliberately: clippy on one target never sees the other's
 `#[cfg(target_os = ...)]` code, and the Linux-only paths went unlinted until
 `lint_linux` existed. Embedded CPython bundles exist for
@@ -145,7 +154,7 @@ edition.workspace = true
 workspace = true
 ```
 
-Taxonomy: domain prefix after `omp-` (`omp-llm-*`, `omp-shell*`).
+Taxonomy: domain prefix after `omp-` (`omp-shell*`, `omp-py*`).
 **transport** = provider wire protocol ≠ **dialect** = thread rendering to the
 LLM; NEVER conflate. Providers = catalog data entries; code only for genuinely
 distinct wire behavior; routing stays in ai. `omp-tool` defines
@@ -173,8 +182,8 @@ match table = reviewer-reject; migrate on touch.
 
 Composition/errors/state:
 - `crates/driver` is the reusable DI boundary for registries, concrete Tower
-  services, `TurnClient`s, environment sessions, and higher-layer host
-  bridges. `crates/app` adapts that composition to commands and presentation;
+  services, `Inference` implementations, environment sessions, and
+  higher-layer host bridges. `crates/app` adapts that composition to commands and presentation;
   it NEVER owns environment-host, extension-host, or Python-worker internals.
   Libraries NEVER build a second production stack.
 - Library errors: `thiserror`, every variant `#[error("…")]`. Hand-written
@@ -188,8 +197,8 @@ Composition/errors/state:
   `#[error("…")]`, never a `Str` payload. App orchestration:
   `miette`; classify/redact untrusted provider diagnostics before stderr.
 - Durable state = append-only transcript journal + blob store; turn state =
-  `AgentSnapshot` + journal projection; NEVER a parallel mutable source of
-  truth.
+  the journal-folded session DOM (`omp-session`/`omp-dom`, ADR 0003); NEVER a
+  parallel mutable source of truth.
 - Loops: one `flume` mailbox; priority lifecycle: `tokio::watch`.
   Ownership/cancellation explicit.
 - Every public symbol documented (`missing_docs` workspace-warned).
@@ -227,7 +236,7 @@ a real path? no → default type right; don't churn.
     convert.
 - Strings: default `omp_core::Str` (`crates/core/src/str.rs`; NOT smol_str).
   Inline ≤23 bytes; heap `Bytes`-backed: O(1) clone, zero-copy
-  slice/split/trim. Build `StrMut`+`freeze()` or `fmts!`; convert `IntoStr`
+  slice/split/trim. Build `StrMut`+`freeze()` or `fmts_mut!`; convert `IntoStr`
   (`.to_str()`). Pays for stored/cloned/sliced strings (ids, names, tokens,
   messages). `String` fine as transient build buffer consumed immediately +
   APIs requiring it (`fmt::Write`, FFI, serde sinks). Large/edited text →
@@ -432,8 +441,11 @@ heap-grooming. Non-negotiable:
   component; hardcoded colors + hand-emitted glyphs banned. Icons from
   `icons.tsv` (generic name + optional specific alias, per-charset, degrading
   inline). Border defaults themed + dim, not `#fff`.
-- `dom!`/`layout!` = canonical construction (typed props, loops, `if`/`match`,
-  `IntoComponent` for `&str`/`String`/`Str`/`()`/Vec).
+- `dom!` (`omp-macros`, re-exported as `omp_tui::dom`) = canonical component
+  construction (typed props, loops, `if`/`match`, `IntoComponent` for
+  `&str`/`String`/`Str`/`()`/Vec). `view!` (same crate) is its sibling for typed
+  tool-renderer view trees (`omp_tools::render::view`). There is no `layout!`
+  macro (ADR 0031 mentions one from the original design post).
   `write!`/`format!`→`String`→reparse = discouraged path.
 - Effects are props, not one-offs: shimmer, hover gradient + eased lift,
   streaming reveal (`<text reveal>`), truncate-from-start, tree/checklist,
@@ -471,7 +483,8 @@ heap-grooming. Non-negotiable:
 ### Locked Deviations from pi (owner decisions — NEVER port back)
 "pi does X" is NEVER an argument for any item below. Each was decided
 explicitly; regressing to pi shape = defect, not parity. Full audit ledger:
-`.plan/parity-regression-audit.md`.
+`.plan/parity-regression-audit.md` (local-only, gitignored; absent from a clean
+clone).
 - Extensions/eval: embedded free-threaded CPython only — no JS/TS plugin
   runtime, no multi-language eval; stdlib frozen in-binary.
 - Shell: in-process bash parser/interpreter + builtin coreutils; NEVER shell
@@ -500,13 +513,25 @@ explicitly; regressing to pi shape = defect, not parity. Full audit ledger:
   (Frozen/Stable/Dynamic/Volatile); volatile facts (date, cwd, mounts) NEVER
   in a stable prefix; one structured notices channel, not pi's seven ad-hoc
   XML tag formats.
-- Control plane: stacked regimes + campaign arbiter (`omp.Decision`,
-  `docs/py/15-regimes.md`); the agent loop is a generic hook surface —
-  hardcoded per-feature outcome tracking (TTSR-style) prohibited.
+- Control plane: Directors + Components, no regimes. Behavior that keeps
+  control across turns is a `Director`: a stack living in the session DOM that
+  the loop only walks (`crates/agent/src/director.rs`; built-ins in
+  `crates/agent/src/directors/`; ADR 0015), arbitrating exclusive `Slot` claims
+  (`mode`, `loop`, `tool_choice`, `worktree`) and convar binds. Journal-derived
+  durable state is a `Component` (`omp-session`) reducing to `<meta>`.
+  Extensions use `@omp.director` / `@omp.component`
+  (`crates/py/python/omp/extensions.py`, `docs/py/15-directors.md`). The
+  earlier `@omp.regime` / `omp.Decision` / campaign-arbiter design was removed
+  (commits `d98ed242f5`, `47e02d12a6`); do not reintroduce it or an alias. The
+  agent loop is a generic hook surface — hardcoded per-feature outcome tracking
+  (TTSR-style) prohibited. Stream rules (TTSR-like behavior) are still
+  intended and MUST be built as a Director: `crates/driver/src/discovery/rules.rs`
+  already parses their `condition`/`scope` frontmatter, but no such Director
+  exists yet in `crates/agent/src/directors/`.
 - Runtime: tokio + rayon only (custom executor crates prohibited); local
   audio/ML via candle, never C/C++ binding graphs (whisper-rs, llama-cpp).
 - Feature graphs earn their weight: a crate enabling a feature whose code it
-  never imports (e.g. app → `omp-inference/realtime` → WebRTC/DTLS/
+  never imports (e.g. app → `omp-ai/realtime` → WebRTC/DTLS/
   Opus) is a defect; cold `cargo run --bin omp` build time is a gate. No
   dual-committed catalog formats, no leftover port fixtures, no lockfiles
   nothing reads.
@@ -651,9 +676,11 @@ master stream to a VT emulator (e.g. `pyte`) for screen assertions.
   `crates/driver` for headless/session composition; `crates/app` for CLI,
   presentation, and protocol adapters. Prefer these seams over mocks of
   production authority.
-- `crates/e2e/tests/p1_doc_race.rs`…`p8_baselines.rs`: authoritative for
-  concurrency, cancellation, detached jobs, schema isolation, prefix
-  stability, crash/replay, real-PTY lifecycle, recorded perf. Bounded waits +
+- `crates/e2e/tests/p1_doc_race.rs`…`p10_lift_idempotence.rs` and
+  `tool_sources.rs`: authoritative for concurrency, cancellation, detached
+  jobs, schema isolation, prefix stability, crash/replay, real-PTY lifecycle,
+  recorded perf, isolated worktrees and extension Director/Component control,
+  tool-lift idempotence, environment tool-source routing. Bounded waits +
   RAII-owned processes; preserve both.
 - P8 = non-gating recorder (metric math/schema, p95 frame time, token-loop
   throughput). NEVER turn noisy host measurements into an unreviewed hard
