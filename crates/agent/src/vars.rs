@@ -29,6 +29,30 @@ pub enum VisionMode {
 
 omp_con::con_enum!(VisionMode);
 
+/// How context compaction condenses the history it hides.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Eq,
+	PartialEq,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantNames,
+)]
+#[strum(serialize_all = "lowercase")]
+pub enum CompactionStrategy {
+	/// The active model writes a textual handoff summary.
+	#[default]
+	Soft,
+	/// The hidden history is rendered verbatim into PNG frames the model
+	/// reads as images; routes without image input fall back to `soft`.
+	Snapcompact,
+}
+
+omp_con::con_enum!(CompactionStrategy);
+
 /// The `ai_model` value an agent class cfg (or `subagent.cfg`) sets to run
 /// its children on the spawning session's own model, ahead of
 /// `ai_task_model`.
@@ -95,6 +119,20 @@ omp_con::var! {
 		default: Str::new_static(""),
 		suggest: ["plan", "vibe", "autoresearch"],
 		flags: session,
+	};
+	/// How automatic and bare `/compact` compaction condenses hidden history:
+	/// `soft` summarizes with the active model; `snapcompact` archives it
+	/// verbatim as image frames (vision routes only, else `soft`).
+	pub static AI_COMPACTION_STRATEGY = ai_compaction_strategy: CompactionStrategy {
+		default: CompactionStrategy::Soft,
+		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "Compaction",
+			"ui.label": "Compaction Strategy",
+			"ui.option.soft": "Soft (LLM summary)",
+			"ui.option.snapcompact": "Snapcompact (image archive; vision models)",
+		},
 	};
 	/// Context-window fraction at which context maintenance begins.
 	pub static AI_COMPACT_THRESHOLD = ai_compact_threshold: f64 {

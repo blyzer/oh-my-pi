@@ -2138,7 +2138,7 @@ where
 								} else {
 									let (kernel, session) = current.as_mut().expect("idle RPC owns session");
 									let focus = request.params.get("customInstructions").and_then(Value::as_str).map(Str::new);
-									match kernel.compact(session, focus, "manual").await {
+									match kernel.compact(session, focus, "manual", None).await {
 										Ok(compacted) => RpcResponse::success(
 											id,
 											command.as_str(),
@@ -2190,7 +2190,8 @@ where
 								} else {
 									let (kernel, session) = current.as_mut().expect("idle RPC owns session");
 									let focus = request.params.get("customInstructions").and_then(Value::as_str).map(Str::new);
-									match kernel.compact(session, focus, "handoff").await {
+									// A handoff is always a written document: pin the soft strategy.
+									match kernel.compact(session, focus, "handoff", Some(omp_agent::CompactionStrategy::Soft)).await {
 										Ok(handed_off) => RpcResponse::success(
 											id,
 											command.as_str(),

@@ -519,3 +519,31 @@ fn live_turn_facts_are_projected_from_session_dom_into_volatile_band() {
 	assert_eq!(&bands[..SlotClass::Volatile as usize], &baseline_bands[..3]);
 	assert_ne!(bands[SlotClass::Volatile as usize], baseline_bands[3]);
 }
+
+#[test]
+fn journaled_snapcompact_archive_leaves_every_system_band_hash_unchanged() {
+	let (_, mut session) = session_with_facts(serde_json::json!({}));
+	session.begin_turn().expect("turn");
+	let boundary = session.user("old context", Vec::new()).expect("user");
+	let (_, before) = CanonicalPromptSource.banded_render(session.dom()).unwrap();
+	let summary = session
+		.blobs()
+		.put(b"archive note")
+		.expect("summary stores");
+	let frame = session
+		.store_attachment("image/png", b"snapcompact png")
+		.expect("frame stores");
+	session
+		.compaction(omp_journal::data::Compaction {
+			summary,
+			boundary,
+			method: Some(Str::new_static("snapcompact")),
+			tokens_before: Some(100_000),
+			tokens_after: Some(8_000),
+			warning: None,
+			frames: vec![frame],
+		})
+		.expect("compaction");
+	let (_, after) = CanonicalPromptSource.banded_render(session.dom()).unwrap();
+	assert_eq!(before, after, "archive frames ride the thread, never a system band");
+}

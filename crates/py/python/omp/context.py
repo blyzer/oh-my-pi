@@ -469,6 +469,7 @@ class CompactionTier(StrEnum):
     LOCAL = "local"
     REMOTE = "remote"
     HANDOFF = "handoff"
+    SNAPCOMPACT = "snapcompact"
 
 
 @dataclass(frozen=True, slots=True)

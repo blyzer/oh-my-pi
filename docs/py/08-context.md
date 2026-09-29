@@ -937,6 +937,7 @@ indistinguishable from turning the prefix cache off.
 | `CompactionTier.LOCAL` | Summarizes a prefix with a local model call and appends a `Compact` event. | The main interception point: `CustomSummary` here replaces the summarizer entirely. |
 | `CompactionTier.REMOTE` | Uses a provider-native context-management endpoint, preserving provider replay data. | Cancel it when a custom summary must stay portable across providers. |
 | `CompactionTier.HANDOFF` | Ends the session and starts a child with a handoff summary and transferred artifacts. | Last resort; extensions usually let it run. |
+| `CompactionTier.SNAPCOMPACT` | Renders the hidden history verbatim into PNG frames retained in the session CAS; the model reads them as images after a fixed note. Selected by `/compact snapcompact` or `ai_compaction_strategy snapcompact`; routes without image input fall back to `LOCAL` with a notice. | `CustomSummary` here replaces the archive with a text summary; cancel it to keep history uncompressed. |
 
 #### `omp.CompactionEvent`
 
@@ -2004,11 +2005,12 @@ tested (`crates/storage/tests/transcript_roundtrip.rs`). What is missing is the 
   `CustomSummary` must therefore stay a real textual summary and never an opaque
   provider blob, which is why `CustomSummary.summary` is `str` and not bytes.
 
-There is no `crates/snapcompact`, and `.plan/feature-map/compact/` is a compacted copy of the
-feature map, not compaction code — worth stating because both names invite the wrong guess.
-The `snapcompact` tier (`FEATURES.md:238`: PNG frames, shape selection, image budget, savings
-journal) is a genuinely separate subsystem and is out of this document's scope beyond having
-a `CompactionTier` slot reserved for it.
+`.plan/feature-map/compact/` is a compacted copy of the feature map, not compaction code —
+worth stating because the name invites the wrong guess. The `snapcompact` tier
+(`FEATURES.md:238`) is a separate producer: `crates/snapcompact` renders PNG frames with
+provider-aware shape selection and image budgets, and the `CompactionDirector` journals them on
+`compaction@1` (method `snapcompact`, ordered `frames`). Beyond the `CompactionTier.SNAPCOMPACT`
+gate described above it is out of this document's scope.
 
 ### Feature-map reconciliation
 
