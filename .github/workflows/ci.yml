@@ -356,6 +356,82 @@ jobs:
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked --keep-going
 
+  # P9, P10 and tool_sources were only ever run by `just e2e`. Nothing in them
+  # needs macOS: they drive the production environment host, document
+  # authority and embedded-Python extension host over unix sockets and
+  # scratch roots, with no PTY and no Apple-only code path. They therefore
+  # run here, on a hosted Linux runner, so the single self-hosted Mac (the
+  # `rust` job's queue) does not get longer. Same provisioning as p7_linux,
+  # and its Cargo cache is the fallback seed so a cold cache starts warm.
+  p9_p10_linux:
+    name: Acceptance proofs P9, P10 and tool sources (Linux)
+    needs: format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = x86_64
+          rustup show active-toolchain
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pipx zstd
+          command -v uv >/dev/null || pipx install uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+        with:
+          tool: nextest@0.9.146
+
+      - name: Cache embedded Python
+        id: python-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vendor/python
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+
+      - name: Prepare embedded Python
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        run: crates/py/scripts/fetch-python.sh
+
+      - name: Verify embedded Python toolchain
+        run: |
+          test -f vendor/python/pyo3-config.txt
+          test -x vendor/python/install/bin/python3.14td
+
+      - name: Cache Cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
+            cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-
+            cargo-p7-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
+            cargo-p7-${{ runner.os }}-${{ runner.arch }}-
+
+      # `--profile ci` gives e2e tests the whole machine one at a time
+      # (`threads-required = "num-cpus"` in .config/nextest.toml), so these
+      # proofs never race for sockets or the shared embedded interpreter.
+      - name: Run proofs P9 and P10
+        run: |
+          cargo nextest run --profile ci -p omp-e2e --locked \
+            --test p9_isolation \
+            --test p9_extension_control \
+            --test p10_lift_idempotence
+
+      - name: Run tool source routing check
+        run: cargo nextest run --profile ci -p omp-e2e --test tool_sources --locked
+
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
     needs: format
