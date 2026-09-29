@@ -1058,7 +1058,7 @@ mod tests {
 		transport.close().await.expect("close");
 		let pid = Pid::from_raw(i32::try_from(pid).expect("pid range"));
 		for _ in 0..20 {
-			if signal::kill(pid, None).is_err() {
+			if crate::test_process::process_terminated(pid) {
 				return;
 			}
 			time::sleep(Duration::from_millis(25)).await;
