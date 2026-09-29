@@ -40,7 +40,7 @@ fn backdate(path: &Path) {
 		.open(path)
 		.and_then(|file| file.set_modified(earlier))
 		.expect("backdate");
-	if cfg!(unix) {
+	if cfg!(any(unix, windows)) {
 		std::thread::sleep(STAMP_SETTLE + Duration::from_millis(50));
 	}
 }
