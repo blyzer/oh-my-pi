@@ -17,6 +17,7 @@ Every wait is bounded. Every process, task, socket, and temporary root has an RA
 - P5: Frozen, Stable, Dynamic, and Volatile prompt-band hashes preserve the provider cache prefix.
 - P6: a killed mid-turn writer loses only a torn tail; `Session::open` reproduces the last committed DOM snapshot.
 - P7: the production chat host handles input, streamed cards, resize, replay, and clean terminal restoration.
+  Its plugin-approval case launches chat over installed plugins whose commands nobody approved and proves in-chat approval on the PTY: the blocked-launch notice, the `/plugins approve` selector (rows, command tails, `--plugin-dir` footer, arrow + Enter), persistence read back through `omp ext trust --show` while chat runs, a resize that keeps the box intact and the cursor on the selected command, the direct `/plugins approve <plugin> all` form, and clean quit.
 - P8: retained-frame and journal-first kernel throughput recorder.
 - P9: isolated environment worktrees and extension Director/Component registration.
 - P10: historical tool lifts are idempotent and the lifted live revision executes through `Dispatcher`.

@@ -4,14 +4,18 @@
 //! the selected command through the controller's typed mutation stream
 //! ([`Mutation::ApprovePluginCommands`]), which records the same approval
 //! `omp ext trust --approve-command` does; settled outcomes return through
-//! [`Panel::notify`] and the list refreshes from the application's feed. A
-//! footer line names `--plugin-dir`, which loads a plugin from a local
-//! directory for one session instead.
+//! [`Panel::notify`], the list refreshes from the application's feed, and
+//! the outcome shows in the selector's own status row until the next key
+//! (chat's notice row would paint across the centered box). A footer line
+//! names `--plugin-dir`, which loads a plugin from a local directory for one
+//! session instead.
 
 use std::sync::Arc;
 
 use omp_core::{Hash32, Str, sf};
-use omp_tui::{Frame, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent, dom};
+use omp_tui::{
+	Frame, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent, components::Select, dom,
+};
 
 use super::{
 	Outcome, Panel, PanelAnchor, PanelEvent, PanelNote,
@@ -24,17 +28,28 @@ const MAX_VISIBLE: usize = 16;
 /// Border rows, divider, status row, local-directory hint, and key hint.
 const CHROME_ROWS: u16 = 6;
 const EMPTY_VALUE: &str = "__empty__";
+const COMMANDS_ID: &str = "commands";
+const STATUS_ID: &str = "approval-status";
 const HINT: &str = "↑/↓ commands · Enter approve · type to search · Esc close";
 /// How to load a plugin from a local directory instead of an install; its
 /// commands are approved here the same way.
 const PLUGIN_DIR_HINT: &str =
 	"Load a plugin from a local directory for one session: start omp with --plugin-dir <path>";
 
+/// A settled approval, as the status row shows it.
+struct Settled {
+	line:   Str,
+	failed: bool,
+}
+
 /// Retained selector over the session's blocked plugin commands.
 pub struct PluginApprovals {
 	services:  Arc<dyn Services>,
 	rows:      Vec<BlockedCommandRow>,
 	in_flight: Option<Mutation>,
+	/// The last settled approval's line, shown in the status row until the
+	/// next key.
+	settled:   Option<Settled>,
 	query:     Str,
 	ui:        Ui,
 	ctx:       UiContext,
@@ -53,6 +68,7 @@ impl PluginApprovals {
 			services: Arc::clone(services),
 			rows,
 			in_flight: None,
+			settled: None,
 			query,
 			ui: Ui::from_root(dom! { <col/> }, 80, ctx.clone()),
 			ctx: ctx.clone(),
@@ -90,6 +106,9 @@ impl PluginApprovals {
 		if let Some((plugin, _)) = self.in_flight() {
 			return sf!("Approving {plugin}…");
 		}
+		if let Some(settled) = &self.settled {
+			return settled.line.clone();
+		}
 		match self.rows.len() {
 			0 => Str::new_static("Every plugin command is approved"),
 			1 => Str::new_static("1 command awaits approval · approved commands load after /restart"),
@@ -115,17 +134,13 @@ impl PluginApprovals {
 			.collect();
 		let empty = options.is_empty();
 		let status = self.status_line();
-		let status_fg = if self.in_flight.is_some() {
-			"accent"
-		} else {
-			"muted"
-		};
+		let status_fg = self.status_fg();
 		let seed = self.query.clone();
 		let height = self.visible.saturating_add(1);
 		let tree = dom! {
 			<box border=round title="Plugin commands" pad-x=1>
 				<col>
-					<select id="commands" filter={seed} h={height}>
+					<select id={COMMANDS_ID} filter={seed} h={height}>
 						if empty {
 							<option value={EMPTY_VALUE} label="No blocked commands">
 								<td><pre>{"No blocked commands"}</pre></td>
@@ -135,7 +150,10 @@ impl PluginApprovals {
 						for (value, label, command, unreadable, refused) in options {
 							<option value={value} label={label.clone()}>
 								<td><pre>{label}</pre></td>
-								<td truncate grow><pre fg=muted>{command}</pre></td>
+								// A command line is the plugin root, then the
+								// executable and its arguments: clip the root so
+								// what would run stays readable.
+								<td truncate=start grow><pre fg=muted>{command}</pre></td>
 								if refused {
 									<td align=end><pre fg=err>{unreadable}</pre></td>
 								}
@@ -143,13 +161,43 @@ impl PluginApprovals {
 						}
 					</select>
 					<hr border=round/>
-					<text id="approval-status" fg={status_fg} truncate>{status}</text>
+					<text id={STATUS_ID} fg={status_fg} truncate>{status}</text>
 					<text fg=muted truncate>{PLUGIN_DIR_HINT}</text>
 					<text fg=muted truncate>{HINT}</text>
 				</col>
 			</box>
 		};
+		// A rebuild (a resize, a refreshed list) keeps the cursor on the
+		// command it was on, so Enter never approves a different one than
+		// the operator selected; an approved command left the list, and the
+		// cursor starts over.
+		let highlighted = self
+			.ui
+			.with_component::<Select, _>(COMMANDS_ID, Select::highlighted_value)
+			.flatten();
 		self.ui = Ui::from_root(tree, self.width, self.ctx.clone());
+		if let Some(value) = highlighted {
+			self
+				.ui
+				.with_component_mut::<Select, _>(COMMANDS_ID, |select| select.highlight_value(&value));
+		}
+	}
+
+	const fn status_fg(&self) -> &'static str {
+		match &self.settled {
+			_ if self.in_flight.is_some() => "accent",
+			Some(Settled { failed: true, .. }) => "err",
+			Some(Settled { failed: false, .. }) => "accent",
+			None => "muted",
+		}
+	}
+
+	/// The next key ends a settled outcome's turn in the status row.
+	fn clear_settled(&mut self) {
+		if self.settled.take().is_some() {
+			self.ui.set_text(STATUS_ID, self.status_line());
+			self.ui.set_prop(STATUS_ID, Prop::Fg, self.status_fg());
+		}
 	}
 
 	/// Approves the command whose digest `value` renders.
@@ -186,8 +234,10 @@ impl PluginApprovals {
 	fn route(&mut self, event: UiEvent) -> PanelEvent {
 		match event {
 			UiEvent::Cancel => PanelEvent::Close,
-			UiEvent::Changed { id, value } if id.as_str() == "commands" => self.choose(value.as_str()),
-			UiEvent::Filtered { id, query, .. } if id.as_str() == "commands" => {
+			UiEvent::Changed { id, value } if id.as_str() == COMMANDS_ID => {
+				self.choose(value.as_str())
+			},
+			UiEvent::Filtered { id, query, .. } if id.as_str() == COMMANDS_ID => {
 				self.query = query;
 				PanelEvent::Consumed
 			},
@@ -206,11 +256,13 @@ impl Panel for PluginApprovals {
 	}
 
 	fn key(&mut self, key: Key) -> PanelEvent {
+		self.clear_settled();
 		let event = self.ui.handle_key(key);
 		self.route(event)
 	}
 
 	fn paste(&mut self, text: &str) -> PanelEvent {
+		self.clear_settled();
 		let event = self.ui.handle_paste(text);
 		self.route(event)
 	}
@@ -228,7 +280,7 @@ impl Panel for PluginApprovals {
 			self.visible = visible;
 			self
 				.ui
-				.set_prop("commands", Prop::H, visible.saturating_add(1));
+				.set_prop(COMMANDS_ID, Prop::H, visible.saturating_add(1));
 		}
 		if viewport.width != self.width {
 			self.width = viewport.width;
@@ -250,11 +302,12 @@ impl Panel for PluginApprovals {
 		{
 			self.rows = rows;
 		}
+		self.settled = Some(match &outcome.result {
+			Ok(line) => Settled { line: line.clone(), failed: false },
+			Err(error) => Settled { line: sf!("Plugin approval failed: {error}"), failed: true },
+		});
 		self.rebuild();
-		match &outcome.result {
-			Ok(line) => PanelEvent::Notice(line.clone()),
-			Err(error) => PanelEvent::Notice(sf!("Plugin approval failed: {error}")),
-		}
+		PanelEvent::Consumed
 	}
 }
 
@@ -338,13 +391,23 @@ mod tests {
 			mutation,
 			result: Ok(Str::new_static("Approved docs@official MCP server `search`")),
 		});
-		assert_eq!(
-			panel.notify(PanelNote::Outcome(&outcome)),
-			PanelEvent::Notice(Str::new_static("Approved docs@official MCP server `search`"))
-		);
+		// The outcome shows in the selector's own status row, not chat's
+		// notice row, which would paint across the centered box.
+		assert_eq!(panel.notify(PanelNote::Outcome(&outcome)), PanelEvent::Consumed);
 		assert_eq!(panel.in_flight(), None);
 		let text = omp_tui::frame_text(panel.frame(Size { width: 120, height: 20 }));
-		assert!(!text.contains("docs@official"), "approved row left the list:\n{text}");
+		assert!(
+			!text.contains("│ ❯ docs@official") && !text.contains("│   docs@official"),
+			"approved row left the list:\n{text}"
+		);
+		assert!(
+			text.contains("Approved docs@official MCP server `search`"),
+			"outcome in the status row:\n{text}"
+		);
+		// The next key hands the status row back to the count.
+		panel.key(Key::Down);
+		let text = omp_tui::frame_text(panel.frame(Size { width: 120, height: 20 }));
+		assert!(!text.contains("Approved docs@official"), "outcome cleared:\n{text}");
 		assert!(text.contains("1 command awaits approval"), "status refreshed:\n{text}");
 		// Another mutation's outcome is not this panel's.
 		let other = Outcome::Service(ServiceOutcome {
@@ -352,6 +415,47 @@ mod tests {
 			result:   Ok(Str::new_static("Plugins reloaded.")),
 		});
 		assert_eq!(panel.notify(PanelNote::Outcome(&other)), PanelEvent::Ignored);
+	}
+
+	/// A resize rebuilds the selector at the new width; the cursor stays on
+	/// the command the operator moved it to, so Enter approves that one.
+	#[test]
+	fn a_rebuild_keeps_the_cursor_on_the_selected_command() {
+		let second = row("portable", "local", None);
+		let feed = feed(vec![
+			row("docs@official", "search", None),
+			second.clone(),
+			row("tools@market", "db", None),
+		]);
+		let mut panel = open(&feed, "");
+		panel.frame(Size { width: 120, height: 20 });
+		panel.key(Key::Down);
+		let text = omp_tui::frame_text(panel.frame(Size { width: 72, height: 12 }));
+		assert!(text.contains("❯ portable MCP server `local`"), "cursor moved:\n{text}");
+		assert_eq!(
+			panel.key(Key::Enter),
+			PanelEvent::Command(HostCommand::Service(Mutation::ApprovePluginCommands {
+				plugin: second.plugin,
+				digest: Some(second.digest),
+			}))
+		);
+	}
+
+	/// Plugin roots are long install paths; the executable and arguments at
+	/// the end of the command line are what the operator approves, so a
+	/// clipped command drops the root, never the tail.
+	#[test]
+	fn a_long_command_line_keeps_the_executable_and_arguments_visible() {
+		let mut long = row("docs@official", "search", None);
+		long.command = sf!(
+			"/home/operator/.local/share/omp/plugins/cache/plugins/official___docs___1.0.0/bin/serve \
+			 --stdio"
+		);
+		let feed = feed(vec![long]);
+		let mut panel = open(&feed, "");
+		let text = omp_tui::frame_text(panel.frame(Size { width: 100, height: 20 }));
+		assert!(text.contains("bin/serve --stdio"), "command tail clipped:\n{text}");
+		assert!(text.contains("…"), "the root is clipped:\n{text}");
 	}
 
 	#[test]
