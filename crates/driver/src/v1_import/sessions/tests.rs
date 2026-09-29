@@ -19,7 +19,7 @@ use omp_session::import::{
 use parking_lot::Mutex;
 use serde_json::json;
 
-use super::{super::*, ConvertError, ImportedIndex, PriorImport, import_selected, list};
+use super::{super::*, ConvertError, PriorImport, import_selected, list, scan_imports};
 
 /// One call the converter saw.
 #[derive(Clone, Debug)]
@@ -450,10 +450,10 @@ fn a_named_profile_imports_into_its_namesake() {
 		.expect("state")
 		.join("sessions");
 	assert_eq!(journals(&sessions).len(), 1);
-	let imported = ImportedIndex::scan(&work).expect("index");
+	let imported = scan_imports(&work).expect("index");
 	assert_eq!(imported.journal("w1"), journals(&sessions).first().map(PathBuf::as_path));
 	assert!(
-		ImportedIndex::scan(&fixture.v2.target(None))
+		scan_imports(&fixture.v2.target(None))
 			.expect("index")
 			.is_empty()
 	);
@@ -684,7 +684,7 @@ fn a_session_changed_since_import_is_marked_and_imports_again_beside_the_earlier
 	let offline = omp_con::Ctx::new();
 	let bulk = SessionImport::Bulk(&recorder);
 	run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
-	let first = ImportedIndex::scan(&pairs[0].target)
+	let first = scan_imports(&pairs[0].target)
 		.expect("index")
 		.journal("alpha")
 		.expect("imported")
@@ -734,7 +734,7 @@ fn a_session_changed_since_import_is_marked_and_imports_again_beside_the_earlier
 	let second = project.join(format!("{}.oms", recorder.calls.lock()[2].id));
 	let rows = list(&pairs[0]).expect("list");
 	assert_eq!(prior(&rows, "alpha"), Some(PriorImport::Current(second.clone())));
-	let index = ImportedIndex::scan(&pairs[0].target).expect("index");
+	let index = scan_imports(&pairs[0].target).expect("index");
 	assert_eq!(index.len(), 2);
 	// Nothing changed since: the next run skips it.
 	let settled = run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
@@ -891,7 +891,7 @@ fn obsolete_import_records_are_retired_and_nothing_else() {
 
 /// How many transcripts this thread digested so far.
 fn digests() -> usize {
-	super::DIGESTS.with(std::cell::Cell::get)
+	crate::session_imports::DIGESTS.with(std::cell::Cell::get)
 }
 
 /// Sets `path`'s modification time a minute back and, on Unix, waits for
@@ -951,7 +951,7 @@ fn the_pin_follows_the_newest_import_of_a_pinned_session() {
 	let offline = omp_con::Ctx::new();
 	let bulk = SessionImport::Bulk(&recorder);
 	run_with(&pairs, ImportMode::Apply, CredentialAccess::Offline(&offline), bulk);
-	let index = ImportedIndex::scan(&pairs[0].target).expect("index");
+	let index = scan_imports(&pairs[0].target).expect("index");
 	let first = index.journal("alpha").expect("alpha").to_owned();
 	let beta_first = index.journal("beta").expect("beta").to_owned();
 	assert_eq!(project_pins(&fixture), [stem(&first)]);
@@ -969,7 +969,7 @@ fn the_pin_follows_the_newest_import_of_a_pinned_session() {
 		(Some("alpha"), OutcomeKind::Reimported),
 		(Some("beta"), OutcomeKind::Reimported),
 	]);
-	let index = ImportedIndex::scan(&pairs[0].target).expect("index");
+	let index = scan_imports(&pairs[0].target).expect("index");
 	let second = index.journal("alpha").expect("alpha").to_owned();
 	let beta_second = index.journal("beta").expect("beta").to_owned();
 	assert_ne!(second, first);

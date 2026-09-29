@@ -23,6 +23,7 @@ pub mod prompt_templates;
 pub mod registry;
 pub mod rules;
 pub mod secrets;
+pub mod session_imports;
 pub mod sessions;
 pub mod settings;
 pub mod share;
