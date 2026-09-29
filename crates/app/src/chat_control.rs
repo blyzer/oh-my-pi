@@ -43,13 +43,16 @@ use omp_chat::{
 	},
 };
 use omp_collab::{
-	host::{AuthorizedMutation, RemoteOperation},
+	host::AuthorizedMutation,
 	presence::{CollabRole as RuntimeCollabRole, ConnectionState, PresenceFacts},
 };
 use omp_con::{Ctx, Severity};
 use omp_core::{Str, Ulid};
 use omp_dom::{Event, Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_driver::headless::kernel::{ComposedInference, KernelOptions, SessionHome};
+use omp_driver::{
+	collab::admission::{GuestAction, GuestAgentCommand},
+	headless::kernel::{ComposedInference, KernelOptions, SessionHome},
+};
 use omp_journal::{EntryId, blob::BlobStore, data::Attachment, gc::copy_journal_blobs};
 use omp_proto::{
 	collab::v1::{ContextUsage, ModelMetadata, SessionStateUpdate},
@@ -218,6 +221,14 @@ fn store_attachments(
 				.map(|blob| Attachment { blob, mime: input.mime })
 		})
 		.collect()
+}
+
+fn agent_op(command: GuestAgentCommand) -> AgentOp {
+	match command {
+		GuestAgentCommand::Chat(text) => AgentOp::Send(text),
+		GuestAgentCommand::Kill => AgentOp::Kill,
+		GuestAgentCommand::Revive => AgentOp::Revive,
+	}
 }
 
 /// Replaces `path` only after the complete plan is durable in a same-directory
@@ -1163,48 +1174,21 @@ impl<C: omp_agent::Inference> Controller<C> {
 	}
 
 	async fn apply_remote_idle(&mut self, mutation: AuthorizedMutation) -> miette::Result<Flow> {
-		let author = Str::new(mutation.principal.display_name());
-		Ok(match mutation.operation {
-			RemoteOperation::Prompt(prompt) => {
-				let attachments: Vec<AttachmentInput> = prompt
-					.images
-					.into_iter()
-					.map(|image| AttachmentInput { mime: Str::new(image.mime_type), bytes: image.data })
-					.collect();
-				let attachments = self
-					.session
-					.store_attachments(attachments)
-					.into_diagnostic()?;
-				let text = Str::new(prompt.text);
-				self.record_loop_prompt(&text)?;
-				Flow::Turn(TurnRequest::Authored { input: TurnInput { text, attachments }, author })
+		Ok(match GuestAction::admit(mutation) {
+			Ok(GuestAction::Prompt(prompt)) => {
+				let stored = prompt.store(self.session.blobs()).into_diagnostic()?;
+				self.record_loop_prompt(&stored.input.text)?;
+				Flow::Turn(TurnRequest::Authored { input: stored.input, author: stored.author })
 			},
-			RemoteOperation::Abort(_) => {
+			Ok(GuestAction::Interrupt) => {
 				let _ = self.up.send(Up::Interrupt);
 				Flow::Idle
 			},
-			RemoteOperation::AgentCommand(command) => {
-				use omp_proto::collab::v1::agent_command;
-				let op = match agent_command::Command::try_from(command.command) {
-					Ok(agent_command::Command::Chat) => {
-						let Some(text) = command
-							.text
-							.as_deref()
-							.map(str::trim)
-							.filter(|text| !text.is_empty())
-						else {
-							return Ok(Flow::Idle);
-						};
-						AgentOp::Send(Str::new(text))
-					},
-					Ok(agent_command::Command::Kill) => AgentOp::Kill,
-					Ok(agent_command::Command::Revive) => AgentOp::Revive,
-					Err(_) => return Ok(Flow::Idle),
-				};
-				let _ = self.supervise_agent(&command.agent_id, op).await;
+			Ok(GuestAction::Agent { agent_id, command }) => {
+				let _ = self.supervise_agent(&agent_id, agent_op(command)).await;
 				Flow::Idle
 			},
-			RemoteOperation::UiResponse(_) => Flow::Idle,
+			Err(_) => Flow::Idle,
 		})
 	}
 
@@ -1398,45 +1382,22 @@ impl<C: omp_agent::Inference> Controller<C> {
 					},
 					remote = self.collab_remote.recv_async(), if self.collab.presence().is_some_and(|facts| facts.role() == omp_collab::presence::CollabRole::Host) => {
 						if let Ok(remote) = remote {
-							let author = Str::new(remote.principal.display_name());
-							match remote.operation {
-								RemoteOperation::Prompt(prompt) => {
-									let stored = store_attachments(
-										&blobs,
-										prompt.images.into_iter().map(|image| AttachmentInput {
-											mime: Str::new(image.mime_type),
-											bytes: image.data,
-										}).collect(),
-									);
-									if let Ok(attachments) = stored {
-										let _ = self.up.send(Up::SteerAuthored {
-											text: Str::new(prompt.text),
-											attachments,
-											author,
-										});
+							match GuestAction::admit(remote) {
+								Ok(GuestAction::Prompt(prompt)) => {
+									if let Ok(stored) = prompt.store(&blobs) {
+										let _ = self.up.send(stored.into_steer());
 									}
 								},
-								RemoteOperation::Abort(_) => {
+								Ok(GuestAction::Interrupt) => {
 									let _ = self.up.send(Up::Interrupt);
 								},
-								RemoteOperation::AgentCommand(command) => {
-									use omp_proto::collab::v1::agent_command;
-									let op = match agent_command::Command::try_from(command.command) {
-										Ok(agent_command::Command::Chat) => {
-											command.text.map(Str::new).map(AgentOp::Send)
-										},
-										Ok(agent_command::Command::Kill) => Some(AgentOp::Kill),
-										Ok(agent_command::Command::Revive) => Some(AgentOp::Revive),
-										Err(_) => None,
-									};
-									if let Some(op) = op {
-										self.pending.push(HostCommand::Agent {
-											id: Str::new(command.agent_id),
-											op,
-										});
-									}
+								Ok(GuestAction::Agent { agent_id, command }) => {
+									self.pending.push(HostCommand::Agent {
+										id: agent_id,
+										op: agent_op(command),
+									});
 								},
-								RemoteOperation::UiResponse(_) => {},
+								Err(_) => {},
 							}
 						}
 					},
@@ -2097,7 +2058,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			self.publish_collab_state();
 		}
 		let request = match &op {
-			CollabOp::Start { relay, .. } => {
+			CollabOp::Start { relay, read_only } => {
 				let origin = relay
 					.as_deref()
 					.unwrap_or(omp_collab::link::DEFAULT_RELAY_URL);
@@ -2108,7 +2069,18 @@ impl<C: omp_agent::Inference> Controller<C> {
 							Arc::clone(&self.home.live),
 							self.home.sessions_dir.clone(),
 						);
-						Ok(CollabOwnerCommand::Start { relay, snapshot, events, agents })
+						Ok(CollabOwnerCommand::Start {
+							relay,
+							snapshot,
+							events,
+							agents,
+							session_id: runtime_id(&self.session),
+							access: if *read_only {
+								omp_driver::collab::registry::Access::View
+							} else {
+								omp_driver::collab::registry::Access::Control
+							},
+						})
 					},
 					Err(error) => Err(ServiceError::failed(error)),
 				}
