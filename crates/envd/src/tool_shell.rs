@@ -624,6 +624,7 @@ mod tests {
 	use std::pin::Pin;
 
 	use super::*;
+	use crate::exec_settings::ExecSandboxMode;
 
 	#[test]
 	fn exec_diagnostics_preserve_typed_recovery_fields_across_the_wire() {
