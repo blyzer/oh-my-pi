@@ -8176,6 +8176,7 @@ dependencies = [
  "omp-ai",
  "omp-app",
  "omp-catalog",
+ "omp-collab",
  "omp-con",
  "omp-core",
  "omp-dom",

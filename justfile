@@ -152,7 +152,7 @@ test-pkg pkg:
     cargo test --doc -p {{ pkg }} --locked
 
 # ---------------------------------------------------------------------------
-# E2E acceptance suite (crates/e2e, joined-system proofs P1-P10)
+# E2E acceptance suite (crates/e2e, joined-system proofs P1-P11)
 # ---------------------------------------------------------------------------
 
 # Compile every acceptance proof without running them.
@@ -194,6 +194,11 @@ e2e-p9:
 e2e-p10:
     cargo nextest run -p omp-e2e --test p10_lift_idempotence --locked
 
+# Run proof P11: spectator convergence through a real relay, and read-only enforcement.
+[group('e2e')]
+e2e-p11:
+    cargo nextest run -p omp-e2e --test p11_collab_spectator --locked
+
 # Record a fresh P8 performance-baseline artifact.
 [group('e2e')]
 e2e-baseline:
@@ -205,9 +210,9 @@ e2e-baseline:
 e2e-tool-sources:
     cargo nextest run -p omp-e2e --test tool_sources --locked
 
-# Run every P1-P10 proof plus the tool-sources check (CI runs P1-P8 on macOS, plus P7, P9, P10 and tool_sources on Linux).
+# Run every P1-P11 proof plus the tool-sources check (CI runs P1-P8 on macOS, plus P7, P9, P10, P11 and tool_sources on Linux).
 [group('e2e')]
-e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-tool-sources e2e-p8
+e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-p11 e2e-tool-sources e2e-p8
 
 # ---------------------------------------------------------------------------
 # LLM catalog & compat cascade (crates/llm-catalog)
