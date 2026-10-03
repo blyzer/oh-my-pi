@@ -1465,7 +1465,22 @@ impl<C: Inference> Kernel<C> {
 					request = self.finish_request(self.project_request(session)?).await?;
 					directors = DirectorStack::from_dom(session.dom(), &self.director_registry);
 				}
-				let director_cx = DirectorCx::new(turn, &route);
+				let response_ordinal = session
+					.dom()
+					.children(turn)
+					.iter()
+					.filter(|handle| {
+						session
+							.dom()
+							.get(**handle)
+							.is_some_and(|node| node.tag == KnownTag::Assistant.into())
+					})
+					.count()
+					.try_into()
+					.unwrap_or(u32::MAX);
+				let director_cx = DirectorCx::new(turn, &route)
+					.with_con(self.con.as_deref())
+					.with_response_ordinal(response_ordinal);
 				directors.prepare_inference(session.dom(), &director_cx, &mut request);
 				let watchers = directors.watch_stream(session.dom(), &director_cx, &request);
 				let redirect_count = stream_redirect_count(session.dom(), turn);

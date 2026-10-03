@@ -53,6 +53,79 @@ pub enum CompactionStrategy {
 
 omp_con::con_enum!(CompactionStrategy);
 
+/// When a matching stream rule stops generation.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Eq,
+	PartialEq,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantNames,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum StreamRuleInterrupt {
+	/// Interrupt for prose and tool argument matches.
+	#[default]
+	Always,
+	/// Interrupt for text and thinking only.
+	ProseOnly,
+	/// Interrupt for tool argument matches only.
+	ToolOnly,
+	/// Deliver reminders without stopping generation.
+	Never,
+}
+
+omp_con::con_enum!(StreamRuleInterrupt);
+
+/// Whether interrupted assistant output stays in model context.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Eq,
+	PartialEq,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantNames,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum StreamRuleContext {
+	/// Exclude the partial assistant response.
+	#[default]
+	Discard,
+	/// Keep the partial assistant response.
+	Keep,
+}
+
+omp_con::con_enum!(StreamRuleContext);
+
+/// How often a stream rule may fire in a session.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Eq,
+	PartialEq,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantNames,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum StreamRuleRepeat {
+	/// Fire at most once per session.
+	#[default]
+	Once,
+	/// Fire again after the configured response gap.
+	AfterGap,
+}
+
+omp_con::con_enum!(StreamRuleRepeat);
+
 /// The `ai_model` value an agent class cfg (or `subagent.cfg`) sets to run
 /// its children on the spawning session's own model, ahead of
 /// `ai_task_model`.
@@ -195,6 +268,38 @@ omp_con::var! {
 	pub static SV_TOOLS = sv_tools: Vec<Str> {
 		default: Vec::new(),
 		flags: archive | session | replicated,
+	};
+	/// Enables stream-time rule matching.
+	pub static AI_STREAM_RULES_ENABLED = ai_stream_rules_enabled: bool {
+		default: true,
+		flags: archive | session,
+	};
+	/// Interrupt policy for matching stream rules.
+	pub static AI_STREAM_RULES_INTERRUPT = ai_stream_rules_interrupt: StreamRuleInterrupt {
+		default: StreamRuleInterrupt::Always,
+		flags: archive | session,
+	};
+	/// Context policy for interrupted stream-rule responses.
+	pub static AI_STREAM_RULES_CONTEXT = ai_stream_rules_context: StreamRuleContext {
+		default: StreamRuleContext::Discard,
+		flags: archive | session,
+	};
+	/// Repeat policy for stream rules.
+	pub static AI_STREAM_RULES_REPEAT = ai_stream_rules_repeat: StreamRuleRepeat {
+		default: StreamRuleRepeat::Once,
+		flags: archive | session,
+	};
+	/// Completed assistant responses required between repeated rule matches.
+	pub static AI_STREAM_RULES_REPEAT_GAP = ai_stream_rules_repeat_gap: u32 {
+		default: 10,
+		min: 0,
+		max: 1000,
+		flags: archive | session,
+	};
+	/// Rule names excluded from stream matching.
+	pub static AI_STREAM_RULES_DISABLED = ai_stream_rules_disabled: Vec<Str> {
+		default: Vec::new(),
+		flags: archive | session,
 	};
 }
 

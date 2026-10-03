@@ -216,28 +216,30 @@ pub struct Rule {
 	/// Unique name: the file stem, or a provider-fixed name for whole-file
 	/// rules (`RULES`, `RULES@project`, `cursorrules`, `clinerules`,
 	/// `windsurfrules`, `global_rules`).
-	pub name:         Str,
+	pub name:           Str,
 	/// Canonical path.
-	pub path:         PathBuf,
+	pub path:           PathBuf,
 	/// Body after the frontmatter.
-	pub content:      Str,
+	pub content:        Str,
 	/// Frontmatter `description`.
-	pub description:  Option<Str>,
+	pub description:    Option<Str>,
 	/// Frontmatter `globs` this rule applies to.
-	pub globs:        Vec<Str>,
+	pub globs:          Vec<Str>,
 	/// Frontmatter `alwaysApply`: injected in full every turn.
-	pub always_apply: bool,
+	pub always_apply:   bool,
 	/// Frontmatter `condition`: regex triggers for the TTSR director.
-	pub condition:    Vec<Str>,
+	pub condition:      Vec<Str>,
 	/// Frontmatter `scope`: TTSR stream scope tokens.
-	pub scope:        Vec<Str>,
+	pub scope:          Vec<Str>,
+	/// Frontmatter `interruptMode` override for stream rules.
+	pub interrupt_mode: Option<Str>,
 	/// Frontmatter `agents`: lowercased agent-class globs, a `!` prefix
 	/// negating one; empty admits every agent (see [`Rule::admits`]).
-	pub agents:       Vec<Str>,
+	pub agents:         Vec<Str>,
 	/// Provider identity.
-	pub provider:     Str,
+	pub provider:       Str,
 	/// User or project level.
-	pub level:        Level,
+	pub level:          Level,
 }
 
 impl Rule {
@@ -704,17 +706,18 @@ fn read_non_empty(path: &Path, warnings: &mut Vec<Warning>) -> Option<Str> {
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuleHeader {
-	description:  Option<String>,
+	description:    Option<String>,
 	#[serde(default)]
-	globs:        OneOrMany,
+	globs:          OneOrMany,
 	#[serde(default)]
-	always_apply: bool,
+	always_apply:   bool,
 	#[serde(default)]
-	condition:    OneOrMany,
+	condition:      OneOrMany,
 	#[serde(default)]
-	scope:        OneOrMany,
+	scope:          OneOrMany,
+	interrupt_mode: Option<String>,
 	#[serde(default)]
-	agents:       AgentScopes,
+	agents:         AgentScopes,
 }
 
 /// Frontmatter `agents`: one string (comma-separated), a list, or YAML's bare
@@ -905,6 +908,12 @@ fn load_rule(
 		always_apply: header.always_apply,
 		condition: header.condition.into_vec(false),
 		scope: header.scope.into_vec(true),
+		interrupt_mode: header
+			.interrupt_mode
+			.as_deref()
+			.map(str::trim)
+			.filter(|value| !value.is_empty())
+			.map(Str::new),
 		agents: header
 			.agents
 			.0
@@ -1431,17 +1440,18 @@ mod tests {
 	/// A rule scoped by `agents` (raw frontmatter entries), always applied.
 	fn scoped_rule(name: &'static str, agents: &[&'static str]) -> Rule {
 		Rule {
-			name:         Str::new_static(name),
-			path:         PathBuf::from(format!("/rules/{name}.md")),
-			content:      Str::new_static("body\n"),
-			description:  Some(Str::new_static("scoped")),
-			globs:        Vec::new(),
-			always_apply: true,
-			condition:    Vec::new(),
-			scope:        Vec::new(),
-			agents:       agents.iter().copied().map(Str::new_static).collect(),
-			provider:     Str::new_static("native"),
-			level:        Level::Project,
+			name:           Str::new_static(name),
+			path:           PathBuf::from(format!("/rules/{name}.md")),
+			content:        Str::new_static("body\n"),
+			description:    Some(Str::new_static("scoped")),
+			globs:          Vec::new(),
+			always_apply:   true,
+			condition:      Vec::new(),
+			scope:          Vec::new(),
+			interrupt_mode: None,
+			agents:         agents.iter().copied().map(Str::new_static).collect(),
+			provider:       Str::new_static("native"),
+			level:          Level::Project,
 		}
 	}
 

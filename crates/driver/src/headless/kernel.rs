@@ -2166,9 +2166,12 @@ pub async fn compose_kernel(
 				.condition
 				.iter()
 				.map(move |pattern| omp_agent::directors::stream_rules::RulePattern {
-					name:    rule.name.clone(),
-					body:    rule.content.clone(),
-					pattern: pattern.clone(),
+					name:           rule.name.clone(),
+					body:           rule.content.clone(),
+					pattern:        pattern.clone(),
+					scope:          rule.scope.clone(),
+					globs:          rule.globs.clone(),
+					interrupt_mode: rule.interrupt_mode.clone(),
 				})
 		})
 		.collect::<Vec<_>>();
@@ -3781,17 +3784,18 @@ mod tests {
 		let sessions_dir = scratch.path().join("sessions");
 		fs::create_dir_all(&sessions_dir).expect("sessions dir");
 		let rule = |name: &'static str, agents: &[&'static str]| Rule {
-			name:         Str::new_static(name),
-			path:         scratch.path().join(format!("{name}.md")),
-			content:      Str::new_static(name),
-			description:  None,
-			globs:        Vec::new(),
-			always_apply: true,
-			condition:    Vec::new(),
-			scope:        Vec::new(),
-			agents:       agents.iter().copied().map(Str::new_static).collect(),
-			provider:     Str::new_static("native"),
-			level:        Level::Project,
+			name:           Str::new_static(name),
+			path:           scratch.path().join(format!("{name}.md")),
+			content:        Str::new_static(name),
+			description:    None,
+			globs:          Vec::new(),
+			always_apply:   true,
+			condition:      Vec::new(),
+			scope:          Vec::new(),
+			interrupt_mode: None,
+			agents:         agents.iter().copied().map(Str::new_static).collect(),
+			provider:       Str::new_static("native"),
+			level:          Level::Project,
 		};
 		let rules = Arc::new(ActiveRules {
 			rules:    vec![

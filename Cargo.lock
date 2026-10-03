@@ -7587,6 +7587,7 @@ dependencies = [
  "bytes",
  "flume",
  "futures",
+ "globset",
  "insta",
  "jiff",
  "omp-ai",

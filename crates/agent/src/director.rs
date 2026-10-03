@@ -268,18 +268,37 @@ pub enum Verdict {
 /// Read-only facts available while preparing or judging one turn.
 pub struct DirectorCx<'a> {
 	/// Current `<turn>` element.
-	pub turn:  Handle,
+	pub turn:             Handle,
 	/// Catalog facts for the resolved route.
-	pub route: &'a RouteFacts,
-	node:      Option<&'a Node>,
-	director:  Option<Handle>,
+	pub route:            &'a RouteFacts,
+	/// Assistant response ordinal within the current session, including
+	/// completed responses in the current turn.
+	pub response_ordinal: u32,
+	/// Effective control plane, when composed by an interactive host.
+	pub con:              Option<&'a omp_con::Ctx>,
+	node:                 Option<&'a Node>,
+	director:             Option<Handle>,
 }
 
 impl<'a> DirectorCx<'a> {
 	/// Creates context for a turn before the stack selects a Director.
 	#[must_use]
 	pub const fn new(turn: Handle, route: &'a RouteFacts) -> Self {
-		Self { turn, route, node: None, director: None }
+		Self { turn, route, con: None, response_ordinal: 0, node: None, director: None }
+	}
+
+	/// Associates the effective control plane for convar-aware observers.
+	#[must_use]
+	pub const fn with_con(mut self, con: Option<&'a omp_con::Ctx>) -> Self {
+		self.con = con;
+		self
+	}
+
+	/// Sets the current assistant response ordinal.
+	#[must_use]
+	pub const fn with_response_ordinal(mut self, ordinal: u32) -> Self {
+		self.response_ordinal = ordinal;
+		self
 	}
 
 	/// Returns the current Director element handle.
@@ -304,10 +323,12 @@ impl<'a> DirectorCx<'a> {
 
 	const fn for_director<'b>(&'b self, director: Handle, node: &'b Node) -> DirectorCx<'b> {
 		DirectorCx {
-			turn:     self.turn,
-			route:    self.route,
-			node:     Some(node),
-			director: Some(director),
+			turn:             self.turn,
+			route:            self.route,
+			con:              self.con,
+			response_ordinal: self.response_ordinal,
+			node:             Some(node),
+			director:         Some(director),
 		}
 	}
 
