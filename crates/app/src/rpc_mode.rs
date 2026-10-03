@@ -3130,6 +3130,7 @@ fn kernel_event_value(event: KernelEvent) -> Option<Value> {
 		| KernelEvent::ThinkingDelta(_)
 		| KernelEvent::ToolReady { .. }
 		| KernelEvent::ToolUpdate { .. }
+		| KernelEvent::StreamRedirected { .. }
 		| KernelEvent::ToolSettled { .. } => None,
 		KernelEvent::CompactionSpeculating { percent } => Some(json!({
 			"type": "auto_compaction_start",
