@@ -1786,8 +1786,8 @@ extension did not declare.
 | `await omp.creds.report_block(*, until_ms, scope=None, id=None, provider=None) -> None` | Records a rate-limit or quota block. Shared across processes and persisted. |
 | `await omp.creds.usage(*, scope=UsageScope.ALL, allow_stale=True, provider=None) -> UsageReport \| None` | The resolved usage report, from cache, a Rust projection, or `provider_usage`. |
 | `await omp.creds.mint_scoped(facet: str, *, ttl: omp.Duration \| None = None, provider=None) -> ScopedToken` | Mints a short-lived, facet-restricted token. **This is how a proxy or a worker gets egress without getting the credential.** |
-| `await omp.creds.import_oauth(*, refresh_token, access_token=None, expires_at_ms=None, identity=None, props=FROZEN_EMPTY, provider=None) -> CredentialMeta` | Adopts an externally-obtained OAuth credential. Requires the `credentials.import` grant and is journaled. |
-| `await omp.creds.reveal(*, id=None, provider=None) -> Secret` | Returns the raw secret. Requires the separate `credentials.reveal` grant, journals every call with the extension id, and is intended for the import path only. |
+| `await omp.creds.import_oauth(*, refresh_token, access_token=None, expires_at_ms=None, identity=None, props=FROZEN_EMPTY, provider=None) -> CredentialMeta` | Adopts an externally-obtained OAuth credential. Requires the `credentials.import` grant and writes secret-free audit evidence atomically with the credential. |
+| `await omp.creds.reveal(*, id=None, provider=None) -> Secret` | Returns the raw secret. Requires the separate `credentials.reveal` grant, writes durable audit evidence for every call with the extension id, and is intended for the import path only. |
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -2466,23 +2466,31 @@ More exists than expected. `crates/proto/proto/omp/auth/v1/auth.proto` already h
 **`MintScopedToken(provider, facet, session_id) -> ScopedToken`** (line 92). The proxy pattern's
 "give the bridge a token, not the credential" is already an RPC.
 
-Remaining work:
+Implemented in the current tree:
 
-1. **Scope enforcement at the CONTROL boundary.** A `CredentialScope` derived from the manifest's
-   `credentials.allow` glob set, attached to the host's session, checked before every `omp.creds`
-   frame reaches the auth service. Enforced in Rust, never in Python — a Python-side allowlist is a
-   suggestion.
-2. **A `Secret` type with real teeth.** New in `crates/core`: a wrapper whose `Debug`/`Display` emit
-   `<redacted>`, that cannot be `Serialize`d except through an explicit sealed-frame path, and that
-   zeroizes on drop. Then a PyO3 binding whose `__repr__`, `__str__`, and `__format__` all redact and
-   whose value is reachable only through the `use()` context manager. Without this, `Secret` is a
-   naming convention and the first `logger.debug(cred)` leaks a token.
-3. **Three separate grants.** `credentials.allow` (metadata + store + refresh), `credentials.import`
-   (adopt an external OAuth credential), `credentials.reveal` (raw secret). Collapsing these is how
-   scraping comes back through the front door: an extension that can legitimately store a Kimi token
-   has no business reading one.
-4. **Journaling `reveal()` and `import_oauth()`** as first-class journal entries with the extension
-   id, so "which extension read my credential" is a query.
+1. **CONTROL scope enforcement.** `omp-driver` derives three independent Rust-side
+   `CredentialScope`s from admitted manifest grants and checks the provider before forwarding each
+   `omp.creds` request. See `crates/driver/src/secrets/mod.rs` and
+   `crates/driver/src/auth_backend.rs`.
+2. **Redacted secret values.** `omp-core::Secret` is non-serializable, redacts `Debug`/`Display`,
+   zeroizes on drop, and exposes bytes only through a callback. The Python `Secret` surface redacts
+   formatting and limits plaintext access to its `use()` context manager. See
+   `crates/core/src/secret.rs` and `crates/py/python/omp/creds.py`.
+3. **Independent grants.** `credentials.allow`, `credentials.import`, and `credentials.reveal`
+   each select a separate scope at the CONTROL boundary.
+4. **Reveal auditing.** Every extension reveal is bound to its extension, principal, provider,
+   host/session generations, and request id, and committed to the credential store before plaintext
+   is exposed.
+5. **Import auditing.** Each extension OAuth import commits a secret-free audit row in the same
+   SQLite transaction as the encrypted credential update. Evidence binds the extension, principal,
+   provider, host/session generations, request id, account, and credential generation; token
+   material is never recorded. Interactive and offline imports omit this extension-specific audit
+   context. This is durable credential-store audit evidence, not an `omp-session` transcript item.
+
+Operators can inspect reveal and import records with `omp auth audit`, optionally filtering by
+`--provider` and `--extension`; `--json` emits the same secret-free projection as JSON. The command
+opens the local credential store through the configured owner key source. It does not expose audit
+rows to extension CONTROL clients.
 
 Existing to build on: `auth/store.rs` (encrypted SQLite), `auth/key.rs` (`OsCredentialKeySource` for
 macOS Keychain and Linux Secret Service, plus `HeadlessKeySource`), `auth/broker.rs`, `auth/lease.rs`,

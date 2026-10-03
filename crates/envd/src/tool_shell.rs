@@ -3,24 +3,19 @@ use std::{
 	env,
 	future::{self, Future},
 	path::Path,
-	pin::Pin,
 	sync::Arc,
 	time::Duration,
 };
 
 use bytes::Bytes;
-use flume::Receiver;
 use omp_core::{CowBytes, Str, encoding::hex, sf};
-use omp_proto::{
-	env::{
-		v1,
-		v1::{
-			EnvironmentDelta, ExecOutcome as EnvExecOutcome, ExecRequest, OpenSessionRequest,
-			OutputChannel as EnvOutputChannel, ProcessSpec, PtySpec, RestartPolicy, RestartSpec,
-			Script, ShellProfileInput, StartProcess,
-		},
+use omp_proto::env::{
+	v1,
+	v1::{
+		EnvironmentDelta, ExecOutcome as EnvExecOutcome, ExecRequest, OpenSessionRequest,
+		OutputChannel as EnvOutputChannel, ProcessSpec, PtySpec, RestartPolicy, RestartSpec, Script,
+		ShellProfileInput, StartProcess,
 	},
-	inference::v1::value,
 };
 use omp_tool::{BlobRef, JobOwner};
 use omp_tools::{
@@ -35,88 +30,25 @@ use omp_tools::{
 	},
 	shell_uri::QuoteContext,
 };
-use parking_lot::Mutex;
-use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
 	blobs::BlobHost,
 	direnv::DirenvDelta,
 	exec::{ExecError, ExecEvent, ExecHost, ExecRun},
-	exec_settings::{
-		DirenvMode, ExecSandboxMode, ReadMode, SandboxNetworkMode, SandboxSettings, ShellSettings,
-	},
+	exec_settings::{DirenvMode, SandboxSettings, ShellSettings},
 	tool_url::UrlResolver,
 	tools,
 };
 
-/// Session-scoped ACP terminal execution selected ahead of local shell
-/// placement when a capable editor peer is attached.
-pub trait AcpExecBackend: Send + Sync {
-	/// Starts a foreground command and exposes its ordinary shell event stream.
-	fn run(
-		&self,
-		request: AcpExecRequest,
-	) -> Pin<Box<dyn Future<Output = Result<AcpExecRun, Fault>> + Send + '_>>;
-}
-
-/// One ACP terminal request after shell session option resolution.
-pub struct AcpExecRequest {
-	/// Shell command line to execute.
-	pub command:    Str,
-	/// Resolved local working-directory path, when one was requested.
-	pub cwd:        Option<Str>,
-	/// Resolved environment additions for the command.
-	pub env:        BTreeMap<Str, Str>,
-	/// Optional command timeout in milliseconds.
-	pub timeout_ms: Option<u64>,
-}
-
-/// ACP terminal event handle consumed through the ordinary shell resource
-/// contract.
-pub struct AcpExecRun {
-	/// Ordered execution events produced by the editor-owned terminal.
-	pub events: Receiver<Result<RunEvent, Fault>>,
-	/// Cancellation handle for the editor-owned terminal.
-	pub cancel: CancellationToken,
-}
-
-/// Late-bound ACP backend capability shared with one Environment registry.
-#[derive(Clone, Default)]
-pub(crate) struct AcpExecSlot {
-	backend: Arc<parking_lot::RwLock<Option<Arc<dyn AcpExecBackend>>>>,
-}
-
-impl AcpExecSlot {
-	/// Replaces the session capability currently available to shell calls.
-	pub(crate) fn bind(&self, backend: Option<Arc<dyn AcpExecBackend>>) {
-		*self.backend.write() = backend;
-	}
-
-	fn backend(&self) -> Option<Arc<dyn AcpExecBackend>> {
-		tools::invocation_acp_exec().or_else(|| self.backend.read().clone())
-	}
-}
-
 /// Shell resource adapter backed by the local execution authority.
 #[derive(Clone)]
 pub struct ShellExecHost {
-	host:               ExecHost,
-	blobs:              BlobHost,
-	cwd_uri:            Str,
-	resolvers:          Arc<ResolverTable<UrlResolver>>,
-	settings:           ShellSettings,
-	/// Sandbox posture compiled for external commands and in-process writes.
-	pub(crate) sandbox: SandboxSettings,
-	acp:                AcpExecSlot,
-	acp_routing:        bool,
-	acp_sessions:       Arc<Mutex<BTreeMap<Bytes, AcpSessionOptions>>>,
-}
-#[derive(Clone)]
-struct AcpSessionOptions {
-	cwd:   Option<Str>,
-	env:   BTreeMap<Str, Str>,
-	unset: Vec<String>,
+	host:      ExecHost,
+	blobs:     BlobHost,
+	cwd_uri:   Str,
+	resolvers: Arc<ResolverTable<UrlResolver>>,
+	settings:  ShellSettings,
 }
 
 impl ShellExecHost {
@@ -128,26 +60,14 @@ impl ShellExecHost {
 		cwd_uri: Str,
 		resolvers: Arc<ResolverTable<UrlResolver>>,
 		settings: ShellSettings,
-		sandbox: SandboxSettings,
-		acp: AcpExecSlot,
-		acp_routing: bool,
+		sandbox: &SandboxSettings,
 	) -> Self {
 		if let Ok(uri) = Url::parse(&cwd_uri)
 			&& let Ok(root) = uri.to_file_path()
 		{
-			host.configure_sandbox(&sandbox, &root);
+			host.configure_sandbox(sandbox, &root);
 		}
-		Self {
-			host,
-			blobs,
-			cwd_uri,
-			resolvers,
-			settings,
-			sandbox,
-			acp,
-			acp_routing,
-			acp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-		}
+		Self { host, blobs, cwd_uri, resolvers, settings }
 	}
 }
 impl ShellExecHost {
@@ -282,35 +202,6 @@ impl ShellExecHost {
 		Ok(Str::from(uri.to_string()))
 	}
 
-	fn acp_command_prefix(&self, unset: &[String]) -> Str {
-		let profile = self.shell_profile();
-		let mut prefix = String::new();
-		#[cfg(not(windows))]
-		{
-			let names = unset
-				.iter()
-				.filter(|name| valid_env_name(name))
-				.map(String::as_str)
-				.collect::<Vec<_>>();
-			if !names.is_empty() {
-				prefix.push_str("unset -v ");
-				prefix.push_str(&names.join(" "));
-				prefix.push_str("; ");
-			}
-		}
-		#[cfg(windows)]
-		for name in unset.iter().filter(|name| valid_env_name(name)) {
-			prefix.push_str("set \"");
-			prefix.push_str(name);
-			prefix.push_str("=\" && ");
-		}
-		if !profile.command_prefix.is_empty() {
-			prefix.push_str(&profile.command_prefix);
-			prefix.push(' ');
-		}
-		Str::from(prefix)
-	}
-
 	async fn environment(
 		&self,
 		cwd_uri: &str,
@@ -437,14 +328,6 @@ fn command_environment(environment: BTreeMap<Str, Option<Str>>) -> EnvironmentDe
 	EnvironmentDelta { set, unset, props: None }
 }
 
-fn valid_env_name(name: &str) -> bool {
-	let mut bytes = name.bytes();
-	bytes
-		.next()
-		.is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
-		&& bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-}
-
 fn named_process(started: v1::ProcessStarted) -> DetachedJob {
 	let id = sf!("{}#{}", started.name, started.generation);
 	DetachedJob {
@@ -460,7 +343,7 @@ fn cwd_fault(message: impl Into<Str>) -> Fault {
 	Fault::Resource { operation: sf!("cwd"), message: message.into() }
 }
 /// Foreground shell run retaining the concrete host's process-tree guard.
-pub(crate) struct HostShellRun {
+pub struct HostShellRun {
 	host: ExecHost,
 	run:  ExecRun,
 }
@@ -492,55 +375,8 @@ impl ShellRun for HostShellRun {
 	}
 }
 
-/// Foreground run selected from the capability-advertised ACP backend or the
-/// normal Environment host.
-pub struct SelectedShellRun {
-	kind: SelectedShellRunKind,
-}
-
-enum SelectedShellRunKind {
-	Host(HostShellRun),
-	Acp(AcpExecRun),
-}
-
-impl ShellRun for SelectedShellRun {
-	async fn next_event(&mut self) -> Result<Option<RunEvent>, Fault> {
-		match &mut self.kind {
-			SelectedShellRunKind::Host(run) => run.next_event().await,
-			SelectedShellRunKind::Acp(run) => match run.events.recv_async().await {
-				Ok(event) => event.map(Some),
-				Err(_) => Ok(None),
-			},
-		}
-	}
-
-	async fn cancel(&self) -> Result<(), Fault> {
-		match &self.kind {
-			SelectedShellRunKind::Host(run) => run.cancel().await,
-			SelectedShellRunKind::Acp(run) => {
-				run.cancel.cancel();
-				Ok(())
-			},
-		}
-	}
-
-	async fn detach(&self, name: Str) -> Result<DetachedJob, Fault> {
-		match &self.kind {
-			SelectedShellRunKind::Host(run) => run
-				.host
-				.detach_exec(run.run.id(), &name)
-				.map(named_process)
-				.map_err(|error| resource_fault("detach_running", error)),
-			SelectedShellRunKind::Acp(_) => Err(Fault::Resource {
-				operation: sf!("detach_running"),
-				message:   sf!("ACP terminal runs remain foreground-owned by the editor"),
-			}),
-		}
-	}
-}
-
 impl ShellExec for ShellExecHost {
-	type Run = SelectedShellRun;
+	type Run = HostShellRun;
 
 	async fn open_session(&self, options: SessionOptions) -> Result<Session, Fault> {
 		if options.pty && tools::pty_denied() {
@@ -551,28 +387,6 @@ impl ShellExec for ShellExecHost {
 		let environment = self
 			.environment(&cwd_uri, self.expand_environment(options.env).await?, pty)
 			.await;
-		if sandbox_authority_is_inactive(&self.sandbox)
-			&& self.acp_routing
-			&& self.acp.backend().is_some()
-			&& !pty
-		{
-			let cwd = Url::parse(&cwd_uri)
-				.ok()
-				.and_then(|uri| uri.to_file_path().ok())
-				.map(|path| Str::from(path.to_string_lossy().as_ref()));
-			let env = environment
-				.set
-				.iter()
-				.map(|(name, value)| (Str::from(name.as_str()), Str::from(value.as_str())))
-				.collect();
-			let unset = environment.unset;
-			let id = Bytes::from(format!("acp:{}", omp_core::Ulid::generate()));
-			self
-				.acp_sessions
-				.lock()
-				.insert(id.clone(), AcpSessionOptions { cwd, env, unset });
-			return Ok(Session { id });
-		}
 		let request = OpenSessionRequest {
 			cwd_uri: cwd_uri.to_string(),
 			env_delta: Some(environment),
@@ -594,9 +408,6 @@ impl ShellExec for ShellExecHost {
 		session: &'a Session,
 	) -> impl Future<Output = Result<(), Fault>> + Send + 'a {
 		async move {
-			if self.acp_sessions.lock().remove(&session.id).is_some() {
-				return Ok(());
-			}
 			self
 				.host
 				.close_session(&session.id)
@@ -614,39 +425,6 @@ impl ShellExec for ShellExecHost {
 			.expand_internal_uris(request.command.as_str(), true)
 			.await?;
 		let environment = command_environment(self.expand_environment(request.environment).await?);
-		let acp_options = self.acp_sessions.lock().get(&session.id).cloned();
-		if sandbox_authority_is_inactive(&self.sandbox)
-			&& let Some(options) = acp_options
-		{
-			let backend = self.acp.backend().ok_or_else(|| Fault::Resource {
-				operation: sf!("run"),
-				message:   sf!("ACP terminal backend disconnected"),
-			})?;
-			let mut env = options.env;
-			env.extend(
-				environment
-					.set
-					.iter()
-					.map(|(name, value)| (Str::from(name.as_str()), Str::from(value.as_str()))),
-			);
-			let mut unset = options.unset;
-			unset.retain(|name| !environment.set.contains_key(name));
-			unset.extend(environment.unset.iter().cloned());
-			let command_prefix = self.acp_command_prefix(&unset);
-			return backend
-				.run(AcpExecRequest {
-					command: if command_prefix.is_empty() {
-						command
-					} else {
-						sf!("{}{}", command_prefix, command)
-					},
-					cwd: options.cwd,
-					env,
-					timeout_ms: request.timeout_ms,
-				})
-				.await
-				.map(|run| SelectedShellRun { kind: SelectedShellRunKind::Acp(run) });
-		}
 		let mut exec_request = ExecRequest {
 			session: session.id.clone(),
 			source: Some(Script { text: command.to_string(), ..Default::default() }),
@@ -662,9 +440,7 @@ impl ShellExec for ShellExecHost {
 			.exec(exec_request, request.timeout_ms.map(Duration::from_millis))
 			.await
 			.map_err(|error| resource_fault("run", error))?;
-		Ok(SelectedShellRun {
-			kind: SelectedShellRunKind::Host(HostShellRun::new(self.host.clone(), run)),
-		})
+		Ok(HostShellRun::new(self.host.clone(), run))
 	}
 
 	async fn store_attachment(&self, bytes: Bytes, media_type: Str) -> Result<BlobRef, Fault> {
@@ -744,9 +520,8 @@ pub(crate) fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 				data: CowBytes::owned(frame.data),
 				sequence: frame.sequence,
 				exec_id: frame.exec,
-				started: wire_bool(&frame.props, "acp/started").unwrap_or(false),
-				terminal: wire_bool(&frame.props, "acp/terminal")
-					.unwrap_or(channel == OutputChannel::Pty),
+				started: false,
+				terminal: channel == OutputChannel::Pty,
 			}))
 		},
 		ExecEvent::Exit(event) => {
@@ -779,7 +554,7 @@ pub(crate) fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 				wall_clock_ms: status.wall_clock_ms,
 				spilled_output,
 				aborted: status.aborted,
-				effects_unknown: wire_bool(&status.props, "acp/effects-unknown").unwrap_or(false),
+				effects_unknown: false,
 				diags: status
 					.diags
 					.into_iter()
@@ -836,28 +611,6 @@ fn tool_diag(diag: v1::ToolDiag) -> Result<omp_tool::Diag, Fault> {
 	})
 }
 
-fn sandbox_authority_is_inactive(sandbox: &SandboxSettings) -> bool {
-	sandbox.mode == ExecSandboxMode::Off
-		&& sandbox.environment_policy_is_default()
-		&& sandbox.read_mode == ReadMode::Host
-		&& sandbox.readable_roots.is_empty()
-		&& sandbox.read_deny.is_empty()
-		&& sandbox.read_deny_globs.is_empty()
-		&& sandbox.network_mode == SandboxNetworkMode::Disabled
-		&& sandbox.allow_domains.is_empty()
-		&& sandbox.deny_domains.is_empty()
-		&& sandbox.allow_ports == [80, 443]
-		&& !sandbox.allow_localhost
-		&& sandbox.allow_unix_sockets.is_empty()
-}
-
-fn wire_bool(props: &Option<omp_proto::inference::v1::ValueMap>, key: &str) -> Option<bool> {
-	match props.as_ref()?.fields.get(key)?.kind.as_ref()? {
-		value::Kind::Bool(value) => Some(*value),
-		_ => None,
-	}
-}
-
 fn resource_fault(operation: &'static str, error: ExecError) -> Fault {
 	protocol_fault(operation, sf!("{error}"))
 }
@@ -868,7 +621,10 @@ fn protocol_fault(operation: &'static str, message: impl Into<Str>) -> Fault {
 
 #[cfg(test)]
 mod tests {
+	use std::pin::Pin;
+
 	use super::*;
+	use crate::exec_settings::ExecSandboxMode;
 
 	#[test]
 	fn exec_diagnostics_preserve_typed_recovery_fields_across_the_wire() {
@@ -881,25 +637,6 @@ mod tests {
 		assert_eq!(actual, expected);
 	}
 
-	#[test]
-	fn acp_requires_all_sandbox_authority_to_be_inactive() {
-		assert!(sandbox_authority_is_inactive(&SandboxSettings::default()));
-		for sandbox in [
-			SandboxSettings { network_mode: SandboxNetworkMode::Open, ..SandboxSettings::default() },
-			SandboxSettings { network_mode: SandboxNetworkMode::Scoped, ..SandboxSettings::default() },
-			SandboxSettings {
-				allow_domains: vec![sf!("api.example.test")],
-				..SandboxSettings::default()
-			},
-			SandboxSettings {
-				allow_unix_sockets: vec![sf!("/tmp/service.sock")],
-				..SandboxSettings::default()
-			},
-		] {
-			assert!(!sandbox_authority_is_inactive(&sandbox));
-		}
-	}
-
 	fn test_host(root: &Path) -> ShellExecHost {
 		let root_uri = Url::from_directory_path(root)
 			.expect("workspace URI")
@@ -910,16 +647,14 @@ mod tests {
 			Str::from(root_uri),
 			Arc::new(ResolverTable::default()),
 			ShellSettings::default(),
-			SandboxSettings::default(),
-			AcpExecSlot::default(),
-			false,
+			&SandboxSettings::default(),
 		)
 	}
 
 	#[cfg(target_os = "macos")]
 	async fn approval_gated_sandbox_run(
 		root: &Path,
-	) -> (ShellExecHost, Session, SelectedShellRun, omp_agent::ApprovalInbox) {
+	) -> (ShellExecHost, Session, HostShellRun, omp_agent::ApprovalInbox) {
 		std::fs::create_dir(root.join(".git")).expect("git carve-out");
 		let exec = ExecHost::new();
 		let book = Arc::new(omp_agent::ApprovalBook::new());
@@ -934,9 +669,7 @@ mod tests {
 			Str::from(root_uri),
 			Arc::new(ResolverTable::default()),
 			ShellSettings::default(),
-			SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
-			AcpExecSlot::default(),
-			false,
+			&SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
 		);
 		let session = host
 			.open_session(SessionOptions::default())
@@ -955,7 +688,7 @@ mod tests {
 
 	#[cfg(target_os = "macos")]
 	async fn pending_sandbox_approval(
-		run: &mut SelectedShellRun,
+		run: &mut HostShellRun,
 		inbox: &omp_agent::ApprovalInbox,
 	) -> omp_agent::ApprovalRequest {
 		loop {
@@ -989,7 +722,7 @@ mod tests {
 	}
 
 	#[cfg(target_os = "macos")]
-	async fn assert_cancelled_without_sandbox_amendment(run: &mut SelectedShellRun, root: &Path) {
+	async fn assert_cancelled_without_sandbox_amendment(run: &mut HostShellRun, root: &Path) {
 		let status = loop {
 			let event = run
 				.next_event()
@@ -1090,9 +823,7 @@ mod tests {
 			Str::from(root_uri),
 			Arc::new(ResolverTable::default()),
 			ShellSettings::default(),
-			SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
-			AcpExecSlot::default(),
-			false,
+			&SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
 		);
 		let approver = tokio::spawn(async move {
 			let request = inbox.recv().await.expect("sandbox approval ticket");
@@ -1185,6 +916,84 @@ mod tests {
 		assert_eq!(restored.outcome, ExecOutcome::Denied);
 		assert!(!root.path().join(".git/blocked-again.txt").exists());
 		host.close_session(&session).await.expect("close session");
+	}
+
+	/// Editor peer that fails the test if the shell ever reaches it.
+	struct UntouchedEditor(std::sync::atomic::AtomicUsize);
+
+	impl crate::docs::AcpDocumentBackend for UntouchedEditor {
+		fn deadline(&self) -> std::time::Duration {
+			std::time::Duration::from_secs(5)
+		}
+
+		fn read_text(
+			&self,
+			_absolute_path: Str,
+		) -> Pin<Box<dyn Future<Output = Result<Str, crate::docs::EditorIoError>> + Send + '_>> {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			Box::pin(future::ready(Ok(Str::from(""))))
+		}
+
+		fn write_text(
+			&self,
+			_absolute_path: Str,
+			content: Str,
+		) -> Pin<Box<dyn Future<Output = Result<Str, crate::docs::EditorIoError>> + Send + '_>> {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			Box::pin(future::ready(Ok(content)))
+		}
+	}
+
+	#[tokio::test]
+	async fn shell_commands_run_in_process_under_an_acp_editor_scope() {
+		use super::super::tools::{InvocationAcpBackends, with_acp_scope};
+		let root = tempfile::tempdir().expect("workspace");
+		let host = test_host(root.path());
+		let editor = Arc::new(UntouchedEditor(std::sync::atomic::AtomicUsize::new(0)));
+		let scope = InvocationAcpBackends::new(Some(crate::editor_base::EditorRoute::new(
+			Arc::clone(&editor) as Arc<dyn crate::docs::AcpDocumentBackend>,
+			Arc::new(crate::editor_base::EditorSession::new(std::time::Duration::from_secs(5))),
+		)));
+		let (events, outcome) = with_acp_scope(scope, async {
+			let session = host
+				.open_session(SessionOptions::default())
+				.await
+				.expect("session opens in the local host");
+			assert!(
+				!session.id.starts_with(b"acp:"),
+				"ACP scopes must not mint editor-owned shell sessions"
+			);
+			let mut run = host
+				.run(&session, RunRequest {
+					command:     sf!("printf acp-shell-ok"),
+					environment: BTreeMap::new(),
+					timeout_ms:  Some(5_000),
+				})
+				.await
+				.expect("command starts in the in-process shell");
+			let mut output = Vec::new();
+			let mut started = 0;
+			let status = loop {
+				match run.next_event().await.expect("shell event") {
+					Some(RunEvent::Started { .. }) => started += 1,
+					Some(RunEvent::Output(update)) => output.extend_from_slice(update.data.as_ref()),
+					Some(RunEvent::Exit(status)) => break status,
+					None => panic!("shell event stream closed before exit"),
+				}
+			};
+			host.close_session(&session).await.expect("close session");
+			((started, output), status)
+		})
+		.await;
+		assert_eq!(events.0, 1);
+		assert_eq!(String::from_utf8_lossy(&events.1), "acp-shell-ok");
+		assert_eq!(outcome.outcome, ExecOutcome::Exited);
+		assert_eq!(outcome.exit_code, Some(0));
+		assert_eq!(
+			editor.0.load(std::sync::atomic::Ordering::SeqCst),
+			0,
+			"shell execution must never reach the editor peer"
+		);
 	}
 
 	#[tokio::test]

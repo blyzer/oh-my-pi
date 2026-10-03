@@ -41,7 +41,8 @@ use crate::{
 	DirectorStack, DispatchError, DispatchPolicy, Dispatcher, ExternalToolExecutor,
 	FileMentionService, FileMentionSource, KernelEvent, LiveComponent, LiveComponentError,
 	LoopDecision, MaterializedFileMention, MutDirectorCx, Prepared, PreparedCall, Received,
-	ReplyObligations, RouteFacts, SessionTool, ToolCancellation, TurnView, Up,
+	ReplyObligations, RouteFacts, SessionTool, StreamEffect, StreamFragment, StreamInterrupt,
+	StreamObserver, StreamSource, StreamVerdict, ToolCancellation, TurnView, Up,
 	directors::compaction::CompactionDirector,
 	parse_file_mentions,
 	steering::{
@@ -1464,8 +1465,31 @@ impl<C: Inference> Kernel<C> {
 					request = self.finish_request(self.project_request(session)?).await?;
 					directors = DirectorStack::from_dom(session.dom(), &self.director_registry);
 				}
-				let director_cx = DirectorCx::new(turn, &route);
+				let response_ordinal = session
+					.dom()
+					.children(turn)
+					.iter()
+					.filter(|handle| {
+						session
+							.dom()
+							.get(**handle)
+							.is_some_and(|node| node.tag == KnownTag::Assistant.into())
+					})
+					.count()
+					.try_into()
+					.unwrap_or(u32::MAX);
+				let director_cx = DirectorCx::new(turn, &route)
+					.with_con(self.con.as_deref())
+					.with_response_ordinal(response_ordinal);
 				directors.prepare_inference(session.dom(), &director_cx, &mut request);
+				let watchers = directors.watch_stream(session.dom(), &director_cx, &request);
+				let redirect_count = stream_redirect_count(session.dom(), turn);
+				let redirect_cap = self
+					.con
+					.as_deref()
+					.map_or(3, |con| omp_ai::settings::AI_STREAM_REDIRECT_CAP.get(con));
+				let redirect_cap_reached = redirect_count >= redirect_cap;
+				let cap_notice_sent = stream_redirect_cap_notice_sent(session.dom(), turn);
 				let request_started = Instant::now();
 				requests_started = requests_started.saturating_add(1);
 				let opening_control = CallControl::new(
@@ -1525,7 +1549,16 @@ impl<C: Inference> Kernel<C> {
 					}
 				};
 				let driven = self
-					.drive_inference(session, stream, control, turn_cancel, request_started)
+					.drive_inference(
+						session,
+						stream,
+						watchers,
+						redirect_cap_reached,
+						cap_notice_sent,
+						control,
+						turn_cancel,
+						request_started,
+					)
 					.await?;
 				tokens_in = tokens_in.saturating_add(driven.usage.input_tokens);
 				tokens_out = tokens_out.saturating_add(driven.usage.output_tokens);
@@ -1533,6 +1566,9 @@ impl<C: Inference> Kernel<C> {
 				if driven.cancelled {
 					self.notify_deadline_or_interrupt(session, turn, control, turn_started);
 					return Ok(outcome(TurnStop::Cancelled, total_text, tokens_in, tokens_out));
+				}
+				if driven.redirected {
+					continue;
 				}
 				driven
 			};
@@ -2223,6 +2259,9 @@ impl<C: Inference> Kernel<C> {
 		&mut self,
 		session: &mut Session,
 		mut stream: ChatStream,
+		mut watchers: Vec<StreamObserver>,
+		redirect_cap_reached: bool,
+		mut cap_notice_sent: bool,
 		control: &RunControl,
 		turn_cancel: &crate::TurnCancellation,
 		request_started: Instant,
@@ -2236,6 +2275,8 @@ impl<C: Inference> Kernel<C> {
 		let mut stop_reason = Str::new_static("stop");
 		let mut completed = false;
 		let mut had_tool_calls = false;
+		let mut stream_effects = Vec::<(Handle, StreamEffect)>::new();
+		let mut current_block = None;
 		let call_control = CallControl::new(
 			self.mailbox_rx.clone(),
 			turn_cancel.clone(),
@@ -2334,16 +2375,28 @@ impl<C: Inference> Kernel<C> {
 						}
 						self.events.publish(KernelEvent::InferenceStarted);
 					},
-					ChatEvent::BlockStarted { index, kind } => match kind {
-						BlockKind::Text => {
-							content_sid(session, assistant, &mut content_streams, index, "text")?;
-							self.apply_live_components(session)?;
-						},
-						BlockKind::Thinking => {
-							content_sid(session, assistant, &mut content_streams, index, "thinking")?;
-							self.apply_live_components(session)?;
-						},
-						BlockKind::ToolCall | BlockKind::Artifact => {},
+					ChatEvent::BlockStarted { index, kind } => {
+						if let Some(previous) = current_block.replace(index)
+							&& let Some(interrupt) = inspect_block_end(
+								&mut watchers,
+								previous,
+								&mut stream_effects,
+								redirect_cap_reached,
+								&mut cap_notice_sent,
+							) {
+							return Ok(Fold::Redirect(interrupt.0, interrupt.1));
+						}
+						match kind {
+							BlockKind::Text => {
+								content_sid(session, assistant, &mut content_streams, index, "text")?;
+								self.apply_live_components(session)?;
+							},
+							BlockKind::Thinking => {
+								content_sid(session, assistant, &mut content_streams, index, "thinking")?;
+								self.apply_live_components(session)?;
+							},
+							BlockKind::ToolCall | BlockKind::Artifact => {},
+						}
 					},
 					ChatEvent::TextDelta { index, text: delta } => {
 						first_token.get_or_insert_with(Instant::now);
@@ -2371,6 +2424,15 @@ impl<C: Inference> Kernel<C> {
 								}),
 							)?;
 						}
+						if let Some((owner, interrupt)) = inspect_stream_fragment(
+							&mut watchers,
+							StreamFragment { index, source: StreamSource::Text, bytes: delta.as_bytes() },
+							&mut stream_effects,
+							redirect_cap_reached,
+							&mut cap_notice_sent,
+						) {
+							return Ok(Fold::Redirect(owner, interrupt));
+						}
 					},
 					ChatEvent::ThinkingDelta { index, text: delta } => {
 						first_token.get_or_insert_with(Instant::now);
@@ -2397,7 +2459,22 @@ impl<C: Inference> Kernel<C> {
 								}),
 							)?;
 						}
-						self.events.publish(KernelEvent::ThinkingDelta(delta));
+						self
+							.events
+							.publish(KernelEvent::ThinkingDelta(delta.clone()));
+						if let Some((owner, interrupt)) = inspect_stream_fragment(
+							&mut watchers,
+							StreamFragment {
+								index,
+								source: StreamSource::Thinking,
+								bytes: delta.as_bytes(),
+							},
+							&mut stream_effects,
+							redirect_cap_reached,
+							&mut cap_notice_sent,
+						) {
+							return Ok(Fold::Redirect(owner, interrupt));
+						}
 					},
 					ChatEvent::ToolCallStarted { index, id, name } => {
 						first_token.get_or_insert_with(Instant::now);
@@ -2453,11 +2530,16 @@ impl<C: Inference> Kernel<C> {
 						});
 					},
 					ChatEvent::ToolArgumentsDelta { index, bytes } => {
+						let call_identity = pending.get(&index).ok_or(KernelError::ToolCallMismatch)?;
+						let call_id = call_identity.call_id.clone();
+						let tool = call_identity.identity.name.clone();
+						let source =
+							StreamSource::ToolArgs { call_id: call_id.as_str(), tool: tool.as_str() };
+						let fragment = std::str::from_utf8(&bytes)
+							.map_err(|source| KernelError::ToolArgumentUtf8 { source })?;
 						let call = pending
 							.get_mut(&index)
 							.ok_or(KernelError::ToolCallMismatch)?;
-						let fragment = std::str::from_utf8(&bytes)
-							.map_err(|source| KernelError::ToolArgumentUtf8 { source })?;
 						self.coalesce_stream(
 							session,
 							&mut coalesced,
@@ -2467,6 +2549,15 @@ impl<C: Inference> Kernel<C> {
 						)?;
 						call.raw_args.push_str(fragment);
 						call.prepared.arg_delta(fragment);
+						if let Some((owner, interrupt)) = inspect_stream_fragment(
+							&mut watchers,
+							StreamFragment { index, source, bytes: &bytes },
+							&mut stream_effects,
+							redirect_cap_reached,
+							&mut cap_notice_sent,
+						) {
+							return Ok(Fold::Redirect(owner, interrupt));
+						}
 						let abort_invalid_edit = streamed_edit_must_abort(
 							self.con.as_deref(),
 							call.identity.name.as_str(),
@@ -2580,6 +2671,22 @@ impl<C: Inference> Kernel<C> {
 						}
 						prepared.require_approvals(approvals);
 						prepared.commit(args);
+						let match_text = self
+							.dispatcher
+							.registry()
+							.stream_match_text(call.name.as_str(), call.arguments.as_value());
+						if let Some((owner, interrupt)) = inspect_call_ready(
+							&mut watchers,
+							index,
+							&call,
+							match_text.as_deref(),
+							&mut stream_effects,
+							redirect_cap_reached,
+							&mut cap_notice_sent,
+						) {
+							ready.push(IndexedPreparedCall { index, call: prepared });
+							return Ok(Fold::Redirect(owner, interrupt));
+						}
 						self.events.publish(KernelEvent::ToolReady {
 							call_id: call_id.clone(),
 							name:    identity.name.clone(),
@@ -2594,6 +2701,16 @@ impl<C: Inference> Kernel<C> {
 						});
 					},
 					ChatEvent::Completed(completion) => {
+						if let Some(index) = current_block.take()
+							&& let Some((owner, interrupt)) = inspect_block_end(
+								&mut watchers,
+								index,
+								&mut stream_effects,
+								redirect_cap_reached,
+								&mut cap_notice_sent,
+							) {
+							return Ok(Fold::Redirect(owner, interrupt));
+						}
 						close_streams(session, &mut content_streams)?;
 						self.apply_live_components(session)?;
 						stop_reason = finish_reason(&completion.reason);
@@ -2759,10 +2876,20 @@ impl<C: Inference> Kernel<C> {
 		};
 		match fold {
 			Ok(Fold::Ended) => {},
-			Ok(state @ (Fold::Cancelled | Fold::ToolScopedAbort(_))) => {
-				let scoped = match &state {
-					Fold::ToolScopedAbort(reason) => Some(reason),
-					Fold::Cancelled | Fold::Ended => None,
+			Ok(state @ (Fold::Cancelled | Fold::ToolScopedAbort(_) | Fold::Redirect(..))) => {
+				let (scoped, redirect) = match state {
+					Fold::ToolScopedAbort(reason) => (Some(reason), None),
+					Fold::Redirect(owner, interrupt) => {
+						let scoped = interrupt.culprit.as_ref().map(|call_id| {
+							crate::ToolScopedAbortReason::one(
+								Str::new(call_id.as_str()),
+								interrupt.label.clone(),
+								Str::new_static("another call was skipped after stream redirect"),
+							)
+						});
+						(scoped, Some((owner, interrupt)))
+					},
+					Fold::Cancelled | Fold::Ended => (None, None),
 				};
 				close_streams(session, &mut content_streams)?;
 				// Placeholder results follow provider call order even when some
@@ -2782,7 +2909,7 @@ impl<C: Inference> Kernel<C> {
 				);
 				aborted.sort_unstable_by_key(|(index, ..)| *index);
 				for (_, authorized, prepared) in aborted {
-					let reason = scoped.map_or_else(
+					let reason = scoped.as_ref().map_or_else(
 						|| {
 							if authorized {
 								Str::new_static("inference cancelled before tool execution")
@@ -2798,9 +2925,35 @@ impl<C: Inference> Kernel<C> {
 						.dispatcher
 						.abort_prepared(session, prepared, Abort::Skipped { reason })?;
 				}
+				if let Some((owner, interrupt)) = redirect {
+					let assistant = assistant.ok_or(KernelError::MissingResponseStart)?;
+					let director = session
+						.dom()
+						.get(owner)
+						.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("family"))))
+						.and_then(Value::as_str)
+						.map_or_else(|| Str::new_static("stream-watch"), Str::new);
+					session.assistant_end("interrupted")?;
+					self.apply_live_components(session)?;
+					session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
+					stream_effects.push((owner, interrupt.effect));
+					commit_stream_effects(
+						session,
+						current_turn(session)?,
+						Some(assistant),
+						stream_effects,
+						Some((interrupt.partial, owner)),
+					)?;
+					self.apply_live_components(session)?;
+					self
+						.events
+						.publish(KernelEvent::StreamRedirected { director });
+					return Ok(DrivenInference::redirected(text, usage));
+				}
 				return Ok(DrivenInference::cancelled(text, usage));
 			},
 			Err(error) => {
+				stream_effects.clear();
 				if let Err(journal) = close_streams(session, &mut content_streams) {
 					tracing::warn!(error = ?journal, "failed to close reveal streams after a stream error");
 				}
@@ -2870,6 +3023,8 @@ impl<C: Inference> Kernel<C> {
 			session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
 			self.apply_live_components(session)?;
 		}
+		commit_stream_effects(session, current_turn(session)?, assistant, stream_effects, None)?;
+		self.apply_live_components(session)?;
 		Ok(DrivenInference {
 			text: Str::new(text),
 			usage,
@@ -2877,6 +3032,7 @@ impl<C: Inference> Kernel<C> {
 			calls: ready.into_iter().map(|prepared| prepared.call).collect(),
 			had_tool_calls,
 			cancelled: false,
+			redirected: false,
 		})
 	}
 
@@ -3379,6 +3535,7 @@ struct DrivenInference {
 	calls:          Vec<PreparedCall>,
 	had_tool_calls: bool,
 	cancelled:      bool,
+	redirected:     bool,
 }
 
 impl DrivenInference {
@@ -3390,6 +3547,19 @@ impl DrivenInference {
 			calls: Vec::new(),
 			had_tool_calls: false,
 			cancelled: true,
+			redirected: false,
+		}
+	}
+
+	fn redirected(text: String, usage: Usage) -> Self {
+		Self {
+			text: Str::new(text),
+			usage,
+			stop_reason: Str::new_static("interrupted"),
+			calls: Vec::new(),
+			had_tool_calls: false,
+			cancelled: false,
+			redirected: true,
 		}
 	}
 
@@ -3402,8 +3572,226 @@ impl DrivenInference {
 			calls,
 			had_tool_calls: true,
 			cancelled: false,
+			redirected: false,
 		}
 	}
+}
+
+fn inspect_stream_fragment(
+	watchers: &mut [StreamObserver],
+	fragment: StreamFragment<'_>,
+	effects: &mut Vec<(Handle, StreamEffect)>,
+	redirect_cap_reached: bool,
+	cap_notice_sent: &mut bool,
+) -> Option<(Handle, StreamInterrupt)> {
+	for observer in watchers {
+		if let Some(interrupt) = capture_stream_verdict(
+			observer.director,
+			observer.watch.fragment(fragment),
+			effects,
+			redirect_cap_reached,
+			cap_notice_sent,
+		) {
+			return Some((observer.director, interrupt));
+		}
+	}
+	None
+}
+
+fn stream_redirect_count(dom: &omp_dom::Dom, turn: Handle) -> u32 {
+	dom.children(turn)
+		.iter()
+		.filter(|handle| {
+			dom.get(**handle).is_some_and(|node| {
+				node.tag == Tag::Known(KnownTag::Assistant)
+					&& node
+						.prop(&PropKey::Custom(Str::new_static("interrupt")))
+						.and_then(Value::as_str)
+						.is_some()
+			})
+		})
+		.count()
+		.try_into()
+		.unwrap_or(u32::MAX)
+}
+
+fn stream_redirect_cap_notice_sent(dom: &omp_dom::Dom, turn: Handle) -> bool {
+	dom.children(turn).iter().any(|handle| {
+		dom.get(*handle).is_some_and(|node| {
+			node.tag == Tag::Known(KnownTag::Notice)
+				&& node
+					.prop(&PropKey::Custom(Str::new_static("name")))
+					.and_then(Value::as_str)
+					== Some("stream-redirect-cap")
+		})
+	})
+}
+
+fn inspect_block_end(
+	watchers: &mut [StreamObserver],
+	index: u32,
+	effects: &mut Vec<(Handle, StreamEffect)>,
+	redirect_cap_reached: bool,
+	cap_notice_sent: &mut bool,
+) -> Option<(Handle, StreamInterrupt)> {
+	for observer in watchers {
+		if let Some(interrupt) = capture_stream_verdict(
+			observer.director,
+			observer.watch.block_end(index),
+			effects,
+			redirect_cap_reached,
+			cap_notice_sent,
+		) {
+			return Some((observer.director, interrupt));
+		}
+	}
+	None
+}
+
+fn inspect_call_ready(
+	watchers: &mut [StreamObserver],
+	index: u32,
+	call: &omp_ai::ToolCall,
+	match_text: Option<&[omp_tool::StreamMatchText]>,
+	effects: &mut Vec<(Handle, StreamEffect)>,
+	redirect_cap_reached: bool,
+	cap_notice_sent: &mut bool,
+) -> Option<(Handle, StreamInterrupt)> {
+	for observer in watchers {
+		if let Some(interrupt) = capture_stream_verdict(
+			observer.director,
+			observer
+				.watch
+				.call_ready_with_match_text(index, call, match_text),
+			effects,
+			redirect_cap_reached,
+			cap_notice_sent,
+		) {
+			return Some((observer.director, interrupt));
+		}
+	}
+	None
+}
+
+fn capture_stream_verdict(
+	owner: Handle,
+	verdict: StreamVerdict,
+	effects: &mut Vec<(Handle, StreamEffect)>,
+	redirect_cap_reached: bool,
+	cap_notice_sent: &mut bool,
+) -> Option<StreamInterrupt> {
+	match verdict {
+		StreamVerdict::Pass => None,
+		StreamVerdict::Note(effect) => {
+			effects.push((owner, effect));
+			None
+		},
+		StreamVerdict::Interrupt(interrupt) if !redirect_cap_reached => Some(interrupt),
+		StreamVerdict::Interrupt(interrupt) => {
+			effects.push((owner, interrupt.effect));
+			if !*cap_notice_sent {
+				effects.push((owner, StreamEffect {
+					notice: Some(Str::new_static(
+						"Stream redirect limit reached; further matches are recorded without resampling.",
+					)),
+					notice_name: Some(Str::new_static("stream-redirect-cap")),
+					..StreamEffect::default()
+				}));
+				*cap_notice_sent = true;
+			}
+			None
+		},
+	}
+}
+
+fn commit_stream_effects(
+	session: &mut Session,
+	turn: Handle,
+	assistant: Option<Handle>,
+	effects: Vec<(Handle, StreamEffect)>,
+	interrupt: Option<(crate::PartialOutput, Handle)>,
+) -> Result<(), KernelError> {
+	let mut ops = Vec::new();
+	for (owner, effect) in effects {
+		ops.extend(crate::director::update_ops(owner, effect.updates));
+		if let Some(text) = effect.developer {
+			ops.push(Op::Ins {
+				parent: turn,
+				after:  session.dom().children(turn).last().copied(),
+				node:   NodeSpec::new(KnownTag::Developer).with_content(text),
+			});
+		}
+		if let Some(body) = effect.notice {
+			ops.push(Op::Ins {
+				parent: turn,
+				after:  session.dom().children(turn).last().copied(),
+				node:   NodeSpec::new(KnownTag::Notice)
+					.with_prop(PropId::Kind, Value::Str(Str::new_static("warn")))
+					.with_prop(
+						PropKey::Custom(Str::new_static("name")),
+						Value::Str(
+							effect
+								.notice_name
+								.unwrap_or_else(|| Str::new_static("stream-watch")),
+						),
+					)
+					.with_content(body),
+			});
+		}
+		for (call_id, body) in effect.call_diags {
+			let call = session.dom().children(turn).iter().copied().find(|handle| {
+				session.dom().get(*handle).is_some_and(|node| {
+					node
+						.prop(&PropKey::from(PropId::Id))
+						.and_then(Value::as_str)
+						== Some(call_id.as_str())
+				})
+			});
+			if let Some(call) = call {
+				ops.push(Op::Ins {
+					parent: call,
+					after:  session.dom().children(call).last().copied(),
+					node:   NodeSpec::new(KnownTag::Diag)
+						.with_prop(PropId::Severity, Value::Str(Str::new_static("warn")))
+						.with_prop(
+							PropKey::Custom(Str::new_static("kind")),
+							Value::Str(Str::new_static("stream-watch")),
+						)
+						.with_content(body),
+				});
+			}
+		}
+	}
+	if let Some((partial, owner)) = interrupt {
+		let assistant = assistant.ok_or(KernelError::MissingResponseStart)?;
+		let family = session
+			.dom()
+			.get(owner)
+			.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("family"))))
+			.and_then(Value::as_str)
+			.map_or_else(|| Str::new_static("stream-watch"), Str::new);
+		ops.push(Op::Set {
+			h:     assistant,
+			prop:  PropKey::Custom(Str::new_static("interrupt")),
+			value: Value::Str(family),
+		});
+		if partial == crate::PartialOutput::Discard {
+			ops.push(Op::Set {
+				h:     assistant,
+				prop:  PropKey::Custom(Str::new_static("context")),
+				value: Value::Str(Str::new_static("excluded")),
+			});
+		}
+	}
+	if ops.is_empty() {
+		return Ok(());
+	}
+	session.patch(Txn {
+		cause: session.head().ok_or(SessionError::NoActiveTurn)?,
+		label: Some(Str::new_static("director.stream-interrupt")),
+		ops,
+	})?;
+	Ok(())
 }
 
 /// Why the scheduling pause at a candidate yield ended.
@@ -3711,6 +4099,9 @@ enum Fold {
 	/// One identified tool call aborted the request; siblings receive neutral
 	/// placeholders rather than being blamed for the trigger.
 	ToolScopedAbort(crate::ToolScopedAbortReason),
+	/// A Director stopped one provider response and requested an in-turn
+	/// resample.
+	Redirect(Handle, StreamInterrupt),
 }
 
 /// Renders an error with its full `source()` chain, one cause per line.

@@ -256,9 +256,6 @@ fn route_client_frame(
 		Some(client_frame::Body::AcpDocumentAnswer(value)) => {
 			invocation_route(&value.invocation_id, invocations)
 		},
-		Some(client_frame::Body::AcpExecEvent(value)) => {
-			invocation_route(&value.invocation_id, invocations)
-		},
 		Some(client_frame::Body::Cancel(cancel)) => match cancel.target.as_ref() {
 			Some(omp_proto::env::v1::cancel_request::Target::TargetRequestId(id)) => {
 				(requests.get(id).copied().unwrap_or(remote), None)
@@ -303,10 +300,7 @@ fn route_client_frame(
 }
 
 const fn opens_response_route(frame: &ClientFrame) -> bool {
-	!matches!(
-		frame.body.as_ref(),
-		Some(client_frame::Body::AcpDocumentAnswer(_) | client_frame::Body::AcpExecEvent(_))
-	)
+	!matches!(frame.body.as_ref(), Some(client_frame::Body::AcpDocumentAnswer(_)))
 }
 
 fn invocation_route(id: &str, routes: &FastHashMap<Str, Backend>) -> (Backend, Option<Str>) {
@@ -387,9 +381,9 @@ mod tests {
 	use std::time::Duration;
 
 	use omp_proto::env::v1::{
-		AcpBind, AcpDocumentAnswer, AcpExecCancel, AcpExecEvent, AcpExecQuery, AcpReadQuery,
-		AcpWriteQuery, ArgText, ClientHello, DataRequest, DocumentOp, EditRepairAnswer,
-		EditRepairQuery, EvalResetRequest, InvokeTool, RegisterPresence, ServerHello, Update,
+		AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, ArgText, ClientHello, DataRequest,
+		DocumentOp, EditRepairAnswer, EditRepairQuery, EvalResetRequest, InvokeTool,
+		RegisterPresence, ServerHello, Update,
 	};
 
 	use super::*;
@@ -441,14 +435,8 @@ mod tests {
 
 	#[test]
 	fn acp_bind_always_routes_to_the_environment_backend() {
-		let bind = frame(
-			0,
-			client_frame::Body::AcpBind(AcpBind {
-				documents:     true,
-				exec:          true,
-				fs_timeout_ms: 5_000,
-			}),
-		);
+		let bind =
+			frame(0, client_frame::Body::AcpBind(AcpBind { documents: true, fs_timeout_ms: 5_000 }));
 		let (backend, invocation) = route_client_frame(
 			&bind,
 			&FastHashSet::default(),
@@ -460,7 +448,7 @@ mod tests {
 	}
 
 	#[test]
-	fn acp_answers_and_events_follow_the_invoking_backend_without_correlation() {
+	fn acp_answers_follow_the_invoking_backend_without_correlation() {
 		let remote_tools = FastHashSet::default();
 		let mut invocations = FastHashMap::default();
 		invocations.insert(Str::from("local-acp"), Backend::Local);
@@ -479,20 +467,11 @@ mod tests {
 					..AcpDocumentAnswer::default()
 				}),
 			);
-			let exec_event = frame(
-				91,
-				client_frame::Body::AcpExecEvent(AcpExecEvent {
-					invocation_id: invocation_id.into(),
-					..AcpExecEvent::default()
-				}),
-			);
-			for answer in [document_answer, exec_event] {
-				let (actual, pinned_invocation) =
-					route_client_frame(&answer, &remote_tools, &invocations, &requests);
-				assert_eq!(actual, expected);
-				assert_eq!(pinned_invocation.as_deref(), Some(invocation_id));
-				assert!(!opens_response_route(&answer));
-			}
+			let (actual, pinned_invocation) =
+				route_client_frame(&document_answer, &remote_tools, &invocations, &requests);
+			assert_eq!(actual, expected);
+			assert_eq!(pinned_invocation.as_deref(), Some(invocation_id));
+			assert!(!opens_response_route(&document_answer));
 		}
 	}
 
@@ -510,7 +489,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn acp_queries_and_cancellation_merge_without_rewriting() {
+	async fn acp_queries_merge_without_rewriting() {
 		let (client, merged) = flume::unbounded();
 		let mut invocations = FastHashMap::default();
 		let mut requests = FastHashMap::default();
@@ -532,23 +511,6 @@ mod tests {
 					invocation_id: "remote-acp".into(),
 					path:          "two.rs".into(),
 					content:       "updated".into(),
-				})),
-				..ServerFrame::default()
-			},
-			ServerFrame {
-				request_id: 83,
-				body: Some(server_frame::Body::AcpExecQuery(AcpExecQuery {
-					query_id: 3,
-					invocation_id: "remote-acp".into(),
-					..AcpExecQuery::default()
-				})),
-				..ServerFrame::default()
-			},
-			ServerFrame {
-				request_id: 84,
-				body: Some(server_frame::Body::AcpExecCancel(AcpExecCancel {
-					query_id:      3,
-					invocation_id: "remote-acp".into(),
 				})),
 				..ServerFrame::default()
 			},

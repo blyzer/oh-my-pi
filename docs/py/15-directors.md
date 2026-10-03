@@ -79,10 +79,10 @@ second MUST be a Director; anything that needs only the first MUST NOT be
 
 The agent loop is a generic hook surface. It does not carry per-feature outcome tracking. Rules
 that watch model output while it streams (the TTSR family) are intended to be built as a Director;
-`crates/driver/src/discovery/rules.rs` already parses their `condition` and `scope` frontmatter, but
-no such built-in Director exists yet in `crates/agent/src/directors/`. The `ttsr_triggered` hook
-event (`toolhost.proto`, `omp.events.TtsrTriggeredEvent`) remains in the vocabulary, and no emitter
-for it was found under `crates/agent`; who will emit it is **Unknown**.
+`crates/driver/src/discovery/rules.rs` parses their `condition` and `scope` frontmatter, and the
+built-in `stream-rules` Director watches the response through the generic stream hook. The
+extension-facing `ttsr_triggered` event (`toolhost.proto`, `omp.events.TtsrTriggeredEvent`) remains
+in the vocabulary, but no emitter for it has been implemented under `crates/agent` yet.
 
 ## `@omp.director`
 

@@ -57,7 +57,7 @@ impl Editor {
 /// until the connection closes.
 fn serve_editor(client: EnvClient, editor: Arc<Editor>) -> Result<tokio::task::JoinHandle<()>> {
 	client
-		.bind_acp(Some(DEFAULT_TIMEOUT), false)
+		.bind_acp(Some(DEFAULT_TIMEOUT))
 		.map_err(|source| error(format!("binding the editor failed: {source}")))?;
 	let requests = client.acp_requests();
 	Ok(tokio::spawn(async move {
@@ -82,7 +82,6 @@ fn serve_editor(client: EnvClient, editor: Arc<Editor>) -> Result<tokio::task::J
 					let body = acp_document_answer::Body::Content(query.content);
 					(request_id, query.query_id, query.invocation_id, body)
 				},
-				AcpRequest::Exec { .. } | AcpRequest::ExecCancel { .. } => continue,
 			};
 			let answer = AcpDocumentAnswer { query_id, invocation_id, body: Some(body) };
 			if client

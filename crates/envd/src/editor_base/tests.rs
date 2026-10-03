@@ -128,13 +128,10 @@ impl Fixture {
 	}
 
 	fn route(&self) -> InvocationAcpBackends {
-		InvocationAcpBackends::new(
-			Some(EditorRoute::new(
-				Arc::clone(&self.editor) as Arc<dyn AcpDocumentBackend>,
-				Arc::clone(&self.session),
-			)),
-			None,
-		)
+		InvocationAcpBackends::new(Some(EditorRoute::new(
+			Arc::clone(&self.editor) as Arc<dyn AcpDocumentBackend>,
+			Arc::clone(&self.session),
+		)))
 	}
 
 	async fn scoped<T>(&self, future: impl Future<Output = T>) -> T {
@@ -854,9 +851,13 @@ async fn a_bound_composition_answers_reads_over_the_environment_wire() {
 	fs::create_dir_all(&state).expect("state");
 	let root = fs::canonicalize(&root).expect("canonical root");
 	fs::write(root.join("notes.txt"), "on disk\n").expect("fixture");
-	let environment = crate::ProjectEnvironment::isolated(
+	let environment = crate::ProjectEnvironment::start_embedded(
 		&root,
 		&state,
+		&omp_env::project_state::document_socket(&state),
+		false,
+		&[],
+		&[],
 		Arc::new(omp_con::Ctx::new()),
 		crate::RegistryBridges::default(),
 	)

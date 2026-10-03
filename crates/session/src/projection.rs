@@ -346,6 +346,8 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 		// even without text. An assistant with nothing at all is omitted with
 		// its receipt.
 		let mut issuing = BTreeSet::new();
+		let mut context_excluded = BTreeSet::new();
+		let mut excluded_issues = false;
 		let mut last_assistant = None;
 		for child in children {
 			let Some(node) = dom.get(*child) else {
@@ -358,8 +360,15 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 				Tag::Known(KnownTag::Assistant) => {
 					awaiting_receipt = Some(*child);
 					last_assistant = Some(*child);
+					excluded_issues = is_context_excluded(node);
+					if excluded_issues {
+						context_excluded.insert(*child);
+					}
 				},
-				Tag::Known(KnownTag::User | KnownTag::Developer) => last_assistant = None,
+				Tag::Known(KnownTag::User | KnownTag::Developer) => {
+					last_assistant = None;
+					excluded_issues = false;
+				},
 				Tag::Known(KnownTag::Usage) => {
 					if let Some(assistant) = awaiting_receipt.take()
 						&& let Some(usage) = usage_of(node)
@@ -368,7 +377,9 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 					}
 				},
 				Tag::Custom(_) => {
-					if let Some(assistant) = last_assistant {
+					if excluded_issues {
+						context_excluded.insert(*child);
+					} else if let Some(assistant) = last_assistant {
 						issuing.insert(assistant);
 					}
 				},
@@ -376,6 +387,9 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 			}
 		}
 		for child in children {
+			if context_excluded.contains(child) {
+				continue;
+			}
 			let Some(node) = dom.get(*child) else {
 				continue;
 			};
@@ -426,6 +440,13 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 pub const LOCAL_CONTEXT_PROP: &str = "context";
 /// [`LOCAL_CONTEXT_PROP`] value hiding the run.
 pub const LOCAL_CONTEXT_EXCLUDED: &str = "excluded";
+
+fn is_context_excluded(node: &Node) -> bool {
+	node
+		.prop(&PropKey::Custom(Str::new_static(LOCAL_CONTEXT_PROP)))
+		.and_then(Value::as_str)
+		== Some(LOCAL_CONTEXT_EXCLUDED)
+}
 
 /// Projects a host-run tool element as a user message. A run still in flight
 /// or one excluded from context contributes nothing.

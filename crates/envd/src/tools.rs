@@ -92,7 +92,7 @@ use super::{
 		PreludeParamStub, PreludeTable, ProcessEvalExec, SessionBridgeHost,
 	},
 	exec::ExecHost,
-	exec_settings::{AcpRouting, AcpSettings, SandboxSettings, ShellSettings},
+	exec_settings::{SandboxSettings, ShellSettings},
 	exthost::{
 		CallbackConcurrency, ExtensionManifest,
 		control::{
@@ -123,7 +123,7 @@ use super::{
 	tool_read_sources::ReadSourceAdapter,
 	tool_search::WorkspaceSearchAdapter,
 	tool_settings::ToolSettings,
-	tool_shell::{AcpExecSlot, ShellExecHost},
+	tool_shell::ShellExecHost,
 	tool_url::{UrlResolver, production_url_resolvers},
 	vault::{VaultPaths, VaultService},
 	worker::ExtHostSupervisor,
@@ -162,15 +162,11 @@ impl InvocationEditRepairContext {
 #[derive(Clone, Default)]
 pub(super) struct InvocationAcpBackends {
 	documents: Option<super::editor_base::EditorRoute>,
-	exec:      Option<Arc<dyn super::tool_shell::AcpExecBackend>>,
 }
 
 impl InvocationAcpBackends {
-	pub(super) fn new(
-		documents: Option<super::editor_base::EditorRoute>,
-		exec: Option<Arc<dyn super::tool_shell::AcpExecBackend>>,
-	) -> Self {
-		Self { documents, exec }
+	pub(super) fn new(documents: Option<super::editor_base::EditorRoute>) -> Self {
+		Self { documents }
 	}
 }
 
@@ -3509,12 +3505,6 @@ pub(super) fn invocation_acp_documents() -> Option<super::editor_base::EditorRou
 		.flatten()
 }
 
-pub(super) fn invocation_acp_exec() -> Option<Arc<dyn super::tool_shell::AcpExecBackend>> {
-	ACP_BACKENDS
-		.try_with(|context| context.exec.clone())
-		.ok()
-		.flatten()
-}
 /// Returns the caller-selected output policy for the current invocation.
 pub(super) fn invocation_output_request() -> omp_tool::OutputRequest {
 	OUTPUT_REQUEST
@@ -3911,7 +3901,6 @@ pub(crate) fn build_environment_declaration_inputs(
 	workers: &ExtHostSupervisor,
 	tool_settings: &ToolSettings,
 	shell_settings: &ShellSettings,
-	acp_settings: &AcpSettings,
 	memory_settings: &omp_memory::MemorySettings,
 	autolearn_settings: &omp_memory::AutolearnSettings,
 	content: &ActiveContentInputs,
@@ -3963,7 +3952,6 @@ pub(crate) fn build_environment_declaration_inputs(
 					message: rule.message.clone(),
 				})
 				.collect(),
-			acp_routing:         acp_settings.routing != AcpRouting::Never,
 			command_prefix:      shell_settings.command_prefix.is_some(),
 		}
 	});
@@ -4296,8 +4284,6 @@ pub(crate) fn production_registry<
 	browser_settings: &BrowserSettings,
 	shell_settings: &ShellSettings,
 	sandbox_settings: &SandboxSettings,
-	acp_settings: &AcpSettings,
-	acp_exec: AcpExecSlot,
 	autolearn_settings: &omp_memory::config::AutolearnSettings,
 	hooks: Arc<HookGate>,
 	device_invoker: I,
@@ -4846,7 +4832,6 @@ pub(crate) fn production_registry<
 					message: rule.message.clone(),
 				})
 				.collect(),
-			acp_routing: acp_settings.routing != AcpRouting::Never,
 			command_prefix: shell_settings.command_prefix.is_some(),
 		};
 		let shell = omp_tools::shell::shell_with_snapshot_and_timeout_bounds(
@@ -4856,9 +4841,7 @@ pub(crate) fn production_registry<
 				root_uri.clone(),
 				Arc::clone(&resolvers),
 				shell_settings.clone(),
-				sandbox_settings.clone(),
-				acp_exec,
-				acp_settings.routing != AcpRouting::Never,
+				sandbox_settings,
 			),
 			shell_timeout_bounds(tool_settings),
 			&snapshot,
@@ -6186,7 +6169,6 @@ mod tests {
 				devices:             true,
 				interceptor_enabled: false,
 				interceptor_rules:   Arc::default(),
-				acp_routing:         false,
 			}),
 			memory:           omp_memory::Capabilities::default(),
 			managed_skills:   false,

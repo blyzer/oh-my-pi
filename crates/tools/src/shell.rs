@@ -415,8 +415,6 @@ pub struct ShellPromptSnapshot {
 	pub interceptor_enabled: bool,
 	/// Ordered configured interception rules.
 	pub interceptor_rules:   Arc<[Rule]>,
-	/// Whether capability-gated ACP routing is allowed.
-	pub acp_routing:         bool,
 }
 
 impl ShellPromptSnapshot {
@@ -447,7 +445,7 @@ impl ShellPromptSnapshot {
 		}
 		let _ = write!(
 			description,
-			" Command prefix: {}; embedded builtins: {}; intent interceptor: {}; ACP routing: {}.",
+			" Command prefix: {}; embedded builtins: {}; intent interceptor: {}.",
 			if self.command_prefix {
 				"configured"
 			} else {
@@ -459,11 +457,6 @@ impl ShellPromptSnapshot {
 				"disabled"
 			},
 			if self.interceptor_enabled {
-				"enabled"
-			} else {
-				"disabled"
-			},
-			if self.acp_routing {
 				"enabled"
 			} else {
 				"disabled"
@@ -1321,7 +1314,6 @@ mod tests {
 			devices,
 			interceptor_enabled: false,
 			interceptor_rules: Arc::default(),
-			acp_routing: false,
 		}
 	}
 
