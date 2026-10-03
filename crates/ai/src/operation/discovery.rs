@@ -1476,7 +1476,7 @@ mod tests {
 					// Bundled chat SKU off the discovery route keeps its card.
 					discovered(&provider, &route.id, "deepseek-v4-pro"),
 					// No bundled signal on either gateway: stays conservative.
-					discovered(&provider, &route.id, "muse-spark-1.3"),
+					discovered(&provider, &route.id, "unlisted-gateway-first-model"),
 				],
 				None,
 			)
@@ -1510,7 +1510,7 @@ mod tests {
 			Pricing::default(),
 			"the provider's own bundled card wins even off the discovery route"
 		);
-		let unknown = find("muse-spark-1.3");
+		let unknown = find("unlisted-gateway-first-model");
 		assert_eq!(
 			unknown.routes.as_ref(),
 			std::slice::from_ref(&route.id),

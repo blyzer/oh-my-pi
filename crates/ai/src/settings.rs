@@ -538,15 +538,16 @@ impl InferenceSettings {
 	/// Applies live control-plane defaults to one chat request for a resolved
 	/// route, preserving every caller-explicit semantic intent.
 	///
-	/// `provider`, `model`, and `codec` are compiled catalog facts. Passing
-	/// `None` applies only route-independent settings; callers that already
-	/// resolved a route should pass all three so codec-specific controls and
-	/// service-tier policy are projected without provider-name branching.
+	/// `tier_family` and `codec` are compiled catalog facts: the model record's
+	/// `service-tier-family` and the route's wire codec. Passing
+	/// [`ProviderFamily::Other`] and `None` applies only route-independent
+	/// settings; callers that already resolved a route pass both so
+	/// codec-specific controls and service-tier policy are projected without
+	/// provider- or model-name branching.
 	pub fn apply_chat_request(
 		&self,
 		chat: &mut ChatRequest,
-		provider: Option<&str>,
-		model: Option<&str>,
+		tier_family: omp_catalog::ProviderFamily,
 		codec: Option<&str>,
 	) {
 		let openai_chat = codec == Some("openai-chat");
@@ -565,14 +566,11 @@ impl InferenceSettings {
 			};
 		}
 		if matches!(chat.service_tier, Setting::Unset)
-			&& let Some(tier) = provider.and_then(|provider| {
-				self.model.service_tier_for_route(
-					provider,
-					model,
-					omp_catalog::TierAudience::Session,
-					None,
-				)
-			}) {
+			&& let Some(tier) =
+				self
+					.model
+					.service_tier(tier_family, omp_catalog::TierAudience::Session, None)
+		{
 			chat.service_tier = Setting::Prefer(tier);
 		}
 	}
@@ -580,13 +578,13 @@ impl InferenceSettings {
 	/// Applies request-level projections after the immutable plan is selected.
 	pub fn apply_call(&self, call: &mut Call) {
 		let execution = call.execution.as_ref();
-		let provider = execution.map(|execution| execution.provider.as_str());
-		let model = execution
-			.and_then(|execution| execution.model.as_deref())
-			.map(omp_catalog::ModelKey::as_str);
+		let tier_family = execution
+			.and_then(|execution| execution.policy_model.as_deref())
+			.map(|model| model.service_tier_family)
+			.unwrap_or_default();
 		let codec = execution.map(|execution| execution.codec.as_str());
 		if let OperationCall::Chat(chat) = &mut call.operation {
-			self.apply_chat_request(sync::Arc::make_mut(chat), provider, model, codec);
+			self.apply_chat_request(sync::Arc::make_mut(chat), tier_family, codec);
 		}
 	}
 }

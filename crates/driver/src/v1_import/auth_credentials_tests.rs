@@ -311,7 +311,7 @@ fn a_dry_run_writes_nothing_and_reports_what_it_would_import() {
 	agent_db(&fixture.agent().join("agent.db"), &[
 		("anthropic", "api_key", r#"{"key":"sk-ant-login-key","source":"login"}"#, None, None),
 		("anthropic", "oauth", ANTHROPIC_OAUTH, None, Some(ANTHROPIC_IDENTITY)),
-		("muse-code", "oauth", r#"{"access":"a","refresh":"r","expires":1}"#, None, None),
+		("v1-only-provider", "oauth", r#"{"access":"a","refresh":"r","expires":1}"#, None, None),
 	]);
 	let before = snapshot(fixture.root.path());
 
@@ -325,8 +325,9 @@ fn a_dry_run_writes_nothing_and_reports_what_it_would_import() {
 	assert_eq!(subjects(&report), [
 		(Some("anthropic api-key (api-key)"), OutcomeKind::WouldImport),
 		(Some("anthropic email:owner@example.com|org:org-1 (oauth)"), OutcomeKind::WouldImport),
-		// A login for a provider v2 does not have.
-		(Some("muse-code agent-db (oauth)"), OutcomeKind::NotMigratable),
+		// A login for a provider v2 does not have. The id is synthetic so a catalog
+		// refresh that adds a real provider cannot turn it into a migratable one.
+		(Some("v1-only-provider agent-db (oauth)"), OutcomeKind::NotMigratable),
 	]);
 }
 

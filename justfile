@@ -210,14 +210,25 @@ e2e-tool-sources:
 e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-tool-sources e2e-p8
 
 # ---------------------------------------------------------------------------
-# LLM catalog & compat cascade (crates/llm-catalog)
+# LLM catalog & compat cascade (crates/catalog)
 # ---------------------------------------------------------------------------
 
 # Run the taxonomy and compat-cascade test suites.
 [group('catalog')]
 catalog-test:
-    cargo nextest run -p omp-llm-catalog --lib taxonomy
-    cargo nextest run -p omp-llm-catalog --test compat_cascade
+    cargo nextest run -p omp-catalog --lib taxonomy
+    cargo nextest run -p omp-catalog --test compat_cascade
+
+# Rebuild crates/catalog/data/{catalog.postcard,sources.lock.json} from the oracle fixtures and KDL rules (run after editing any of them). OMP_LLM_CATALOG_REGEN lets the build compile against the stale snapshot being replaced.
+[group('catalog')]
+catalog-snapshot:
+    OMP_LLM_CATALOG_REGEN=1 cargo run -p omp-catalog --example generate_snapshot --locked -- --relock
+
+# Refresh the model roster fixture from pi's generated models.json (e.g. `git show origin/main:packages/catalog/src/models.json > /tmp/models.json`), then rebuild the snapshot.
+[group('catalog')]
+catalog-import-v1 models_json:
+    python3 crates/catalog/scripts/import_v1_models.py --v1 {{ models_json }}
+    just catalog-snapshot
 
 # ---------------------------------------------------------------------------
 # Run & explore

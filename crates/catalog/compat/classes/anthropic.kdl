@@ -1,6 +1,39 @@
 // Model-lineage compat for "anthropic"; regenerated from the frozen census using class taxonomy selectors.
 
 class "anthropic" {
+	// Wire family whose service-tier vocabulary (priority, fast) this lineage speaks.
+	service-tier-family "anthropic"
+	// Snapcompact frame geometry the lineage reads imaged history best at. Fable,
+	// Mythos, and Opus 4.7/4.8 accept the larger 1932px frame; every other
+	// Claude keeps the 1568px frame.
+	image-frame {
+		frame-size 1568
+		cell-width 11
+		cell-height 16
+	}
+	family "fable" {
+		image-frame {
+			frame-size 1932
+			cell-width 11
+			cell-height 16
+		}
+	}
+	family "mythos" {
+		image-frame {
+			frame-size 1932
+			cell-width 11
+			cell-height 16
+		}
+	}
+	family "opus" {
+		revision ">=4.7 <4.9" {
+			image-frame {
+				frame-size 1932
+				cell-width 11
+				cell-height 16
+			}
+		}
+	}
 	family "fable" {
 		revision ">=5.1" {
 			// Fable 5.1+ binds signed thinking to the exact preceding conversation.

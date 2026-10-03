@@ -35,8 +35,9 @@ use crate::{
 		OAuthSpecId, ProviderId, RouteId, ThinkingPolicyId, WireModelId, WirePolicyId,
 	},
 	model::{
-		CatalogModelMetrics, ContextStrategy, EvidenceConfidence, ModelAvailability, ModelLimits,
-		ModelProvenance, ModelRemoteCompaction, ModelSpec, ProvenanceKind, ProvenanceSource,
+		CatalogModelMetrics, ContextStrategy, EvidenceConfidence, ImageFrameGeometry,
+		ModelAvailability, ModelLimits, ModelProvenance, ModelRemoteCompaction, ModelSpec,
+		ProvenanceKind, ProvenanceSource,
 	},
 	policy::{
 		ApplyPatchWireKind, CacheControlFormat, ComputerUseConfigSupport, ComputerUseWireSupport,
@@ -57,7 +58,7 @@ use crate::{
 	thinking::{ReasoningMode, ThinkingEffort, ThinkingMode, ThinkingPolicy, ThinkingRouting},
 };
 /// Schema version of reviewable normalized compiler output.
-pub const COMPILED_SCHEMA_VERSION: u32 = 2;
+pub const COMPILED_SCHEMA_VERSION: u32 = 3;
 /// An explicit opaque source-model property boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -3769,6 +3770,19 @@ fn compile_models(
 				.and_then(Value::as_str)
 				.map(Str::new)
 				.or_else(|| first.1.edit_revision.clone());
+			let service_tier_family = parse_policy(
+				resolved
+					.catalog
+					.get("serviceTierFamily")
+					.and_then(Value::as_str),
+				None,
+			)?
+			.unwrap_or_default();
+			let image_frame = resolved
+				.catalog
+				.get("imageFrame")
+				.map(|frame| serde_json::from_value::<ImageFrameGeometry>(frame.clone()))
+				.transpose()?;
 			if resolved.thinking.contains_key("efforts") {
 				merged_row.reasoning = true;
 			}
@@ -4047,6 +4061,8 @@ fn compile_models(
 					.map(decimal_millionths)
 					.transpose()?
 					.map(PremiumMultiplier::from_millionths),
+				service_tier_family,
+				image_frame,
 			});
 		}
 	}
@@ -6737,8 +6753,10 @@ facets = ["chat"]
 		let providers = include_str!("../../../fixtures/llm-oracle/catalog/providers.toml");
 		let models = include_bytes!("../../../fixtures/llm-oracle/catalog/models.json.zst");
 		let source = parse_oracle(providers, models).expect("AWS source inventory parses");
-		assert_eq!(source.models["amazon-bedrock"].len(), 149);
-		assert_eq!(source.models["bedrock-mantle"].len(), 5);
+		// Rosters move with every catalog refresh; the contract is which rows the
+		// provider defaults below resolve against, never how many there are.
+		assert!(source.models["amazon-bedrock"].contains_key("us.anthropic.claude-opus-4-8"));
+		assert!(source.models["bedrock-mantle"].contains_key("openai.gpt-5.6-terra"));
 
 		let bedrock_source = &source.providers["amazon-bedrock"];
 		assert_eq!(bedrock_source.facets, [SourceFacet::Chat]);
@@ -6760,6 +6778,22 @@ facets = ["chat"]
 		assert_eq!(mantle_discovery.label.as_str(), "Amazon Bedrock Mantle");
 		assert!(mantle_discovery.authoritative);
 
+		// Estimated metrics ride every catalog refresh; the contract is that the
+		// compiler carries the source row's values, not which values pi last had.
+		let source_metrics = |id: &str| {
+			let row = &source.models["amazon-bedrock"][id];
+			let millionths = |value: &Option<Number>| {
+				value
+					.as_ref()
+					.and_then(Number::as_f64)
+					.map(|value| (value * 1_000_000.0).round() as u32)
+			};
+			(millionths(&row.int), millionths(&row.tps))
+		};
+		let deepseek_metrics = source_metrics("deepseek.v3.2");
+		let nemotron_metrics = source_metrics("nvidia.nemotron-nano-9b-v2");
+		assert!(deepseek_metrics.0.is_some() && nemotron_metrics.0.is_some());
+		assert!(nemotron_metrics.1.is_some(), "the fixture must exercise the throughput metric");
 		let compiled = compile(source).expect("AWS source inventory compiles");
 		for (provider_id, name, default_model, auth_kinds, authoritative) in [
 			(
@@ -6850,15 +6884,25 @@ facets = ["chat"]
 			.iter()
 			.find(|model| model.key.as_str() == "amazon-bedrock/deepseek.v3.2")
 			.expect("Bedrock DeepSeek model");
-		assert_eq!(deepseek.catalog_metrics.intelligence_millionths, Some(25_100_000));
-		assert_eq!(deepseek.catalog_metrics.output_tokens_per_second_millionths, None);
+		assert_eq!(
+			(
+				deepseek.catalog_metrics.intelligence_millionths,
+				deepseek.catalog_metrics.output_tokens_per_second_millionths
+			),
+			deepseek_metrics
+		);
 		let nemotron = compiled
 			.models
 			.iter()
 			.find(|model| model.key.as_str() == "amazon-bedrock/nvidia.nemotron-nano-9b-v2")
 			.expect("Bedrock Nemotron model");
-		assert_eq!(nemotron.catalog_metrics.intelligence_millionths, Some(7_200_000));
-		assert_eq!(nemotron.catalog_metrics.output_tokens_per_second_millionths, Some(159_900_000));
+		assert_eq!(
+			(
+				nemotron.catalog_metrics.intelligence_millionths,
+				nemotron.catalog_metrics.output_tokens_per_second_millionths
+			),
+			nemotron_metrics
+		);
 	}
 
 	#[test]

@@ -1,16 +1,21 @@
 //! Regenerates the checked-in catalog artifacts from the offline oracle
 //! fixtures.
+//!
+//! `--relock` first rewrites `data/sources.lock.json` from the bytes of the
+//! files it lists (an edited fixture or KDL source changes its hash), then
+//! compiles the snapshot against the fresh lock. Without it a stale lock is an
+//! error, so an edit can never be snapshotted against the wrong provenance.
 
 use std::{
-	error, fs,
+	env, error, fs,
 	path::{Path, PathBuf},
 };
 
 use omp_catalog::{Catalog, SnapshotProvenance, compile_oracle};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceLock {
 	schema_version: u32,
@@ -18,7 +23,7 @@ struct SourceLock {
 	inputs:         Vec<SourceInput>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceInput {
 	id:     String,
@@ -34,9 +39,16 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 		.and_then(Path::parent)
 		.expect("catalog crate is in workspace/crates");
 	let lock_path = crate_dir.join("data/sources.lock.json");
-	let lock: SourceLock = serde_json::from_slice(&fs::read(&lock_path)?)?;
-	if lock.schema_version != 2 {
+	let mut lock: SourceLock = serde_json::from_slice(&fs::read(&lock_path)?)?;
+	if lock.schema_version != 3 {
 		return Err(format!("unsupported source-lock schema {}", lock.schema_version).into());
+	}
+	if env::args().skip(1).any(|argument| argument == "--relock") {
+		relock(workspace, &mut lock)?;
+		let mut encoded = serde_json::to_string_pretty(&lock)?;
+		encoded.push('\n');
+		fs::write(&lock_path, encoded)?;
+		println!("relocked {} sources", lock.inputs.len());
 	}
 	let source_digest = verify_sources(workspace, &lock)?;
 	let providers =
@@ -48,9 +60,29 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 	fs::write(crate_dir.join("data/catalog.postcard"), artifacts.postcard)?;
 	// The normalized JSON is a review artifact only: reproducible from the
 	// postcard (its hash rides the snapshot header), so it stays out of git.
-	let review = workspace.join("target/catalog.normalized.json");
+	let target =
+		env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
+	fs::create_dir_all(&target)?;
+	let review = target.join("catalog.normalized.json");
 	fs::write(&review, artifacts.normalized_json)?;
 	println!("review artifact: {}", review.display());
+	Ok(())
+}
+
+/// Recomputes every input hash and the aggregate digest from disk.
+fn relock(workspace: &Path, lock: &mut SourceLock) -> Result<(), Box<dyn error::Error>> {
+	let mut source_hasher = Sha256::new();
+	for input in &mut lock.inputs {
+		let bytes = fs::read(workspace.join(&input.path))?;
+		input.sha256 = hex(&Sha256::digest(bytes).into());
+		source_hasher.update(input.id.as_bytes());
+		source_hasher.update([0]);
+		source_hasher.update(input.path.as_bytes());
+		source_hasher.update([0]);
+		source_hasher.update(input.sha256.as_bytes());
+		source_hasher.update([0]);
+	}
+	lock.source_digest = hex(&source_hasher.finalize().into());
 	Ok(())
 }
 
