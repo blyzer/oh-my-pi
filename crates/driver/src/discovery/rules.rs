@@ -547,6 +547,15 @@ impl ActiveRules {
 	pub fn prompt_facts(&self, agent: &AgentName<str>) -> RulePromptFacts {
 		let mut facts = RulePromptFacts::default();
 		for rule in self.for_agent(agent) {
+			// Conditional documents are delivered by the stream-rules Director,
+			// never as static instructions that bypass their condition.
+			if rule
+				.condition
+				.iter()
+				.any(|pattern| regex::Regex::new(pattern).is_ok())
+			{
+				continue;
+			}
 			if rule.always_apply {
 				facts.always_apply.push(serde_json::json!({
 					"name": rule.name.as_str(),

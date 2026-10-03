@@ -2157,6 +2157,30 @@ pub async fn compose_kernel(
 	}
 	let agent = kernel_agent(options.agent.as_deref(), session.dom());
 	rule_scope.select(agent.clone());
+	let stream_patterns = rule_scope
+		.rules()
+		.for_agent(&agent)
+		.filter(|rule| !rule.condition.is_empty())
+		.flat_map(|rule| {
+			rule
+				.condition
+				.iter()
+				.map(move |pattern| omp_agent::directors::stream_rules::RulePattern {
+					name:    rule.name.clone(),
+					body:    rule.content.clone(),
+					pattern: pattern.clone(),
+				})
+		})
+		.collect::<Vec<_>>();
+	if let Some(set) = omp_agent::directors::stream_rules::StreamRuleSet::compile(stream_patterns) {
+		director_registry.register_extension(Box::new(
+			omp_agent::directors::stream_rules::StreamRules::new(Arc::new(set)),
+		));
+		let mut directors = omp_agent::DirectorStack::from_dom(session.dom(), &director_registry);
+		if !directors.active_ids().contains(&"stream-rules") {
+			directors.engage_registered(&mut session, "stream-rules")?;
+		}
+	}
 	let facts = prompt_facts(&project_root, &agent, &skills, &context_files, rule_scope.rules());
 	install_prompt_facts(
 		&mut session,

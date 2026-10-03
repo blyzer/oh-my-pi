@@ -7602,6 +7602,7 @@ dependencies = [
  "omp-tool",
  "omp-vocab",
  "parking_lot",
+ "regex-automata",
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.13",
