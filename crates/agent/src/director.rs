@@ -212,11 +212,13 @@ impl BindValue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteIdentity {
 	/// Normalized catalog model key.
-	pub model:    omp_catalog::ModelKey,
+	pub model:       omp_catalog::ModelKey,
 	/// Provider domain serving the route.
-	pub provider: omp_catalog::ProviderId,
+	pub provider:    omp_catalog::ProviderId,
 	/// Wire codec carrying the route.
-	pub codec:    omp_catalog::CodecId,
+	pub codec:       omp_catalog::CodecId,
+	/// The catalog's measured imaged-history frame geometry for the model.
+	pub image_frame: Option<omp_catalog::ImageFrameGeometry>,
 }
 
 /// Catalog-derived facts for the selected inference route.

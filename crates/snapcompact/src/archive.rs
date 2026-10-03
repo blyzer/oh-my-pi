@@ -399,13 +399,30 @@ pub struct Shape {
 	pub frame_token_estimate: u64,
 }
 
-/// Model and transport identity used to select a shape.
+/// Frame geometry a model reads imaged text from best.
+///
+/// The catalog measures this per model lineage; the renderer never infers it
+/// from a model id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameGeometry {
+	/// Square frame edge in pixels.
+	pub frame_size:  u32,
+	/// Horizontal cell advance.
+	pub cell_width:  u32,
+	/// Vertical cell pitch.
+	pub cell_height: u32,
+}
+
+/// Transport and catalog geometry used to select a shape.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ShapeTarget<'a> {
 	/// Wire API name.
 	pub api:      Option<&'a str>,
-	/// Catalog model identifier.
+	/// Catalog model identifier, carried for diagnostics only.
 	pub model_id: Option<&'a str>,
+	/// The catalog's measured geometry for the model, when its lineage has one;
+	/// the wire API's billing family decides otherwise.
+	pub geometry: Option<FrameGeometry>,
 }
 
 /// A rendered PNG and its exact reading geometry.
@@ -526,34 +543,23 @@ fn billed_tokens(family: BillingFamily, frame_size: u32) -> u64 {
 }
 
 /// Selects eval-winning geometry for a model and carrying API.
+///
+/// Catalog geometry wins; a model without a measured lineage falls back to
+/// the billing family of the wire API that carries it.
 pub fn resolve_shape(target: ShapeTarget<'_>) -> Shape {
 	let family = billing_family(target.api);
-	let id = target.model_id.unwrap_or_default().to_ascii_lowercase();
-	let (font, cell_width, cell_height, stretch, frame_size) = if id.contains("claude") {
-		let high_resolution = id.contains("fable")
-			|| id.contains("mythos")
-			|| id.contains("opus-4-7")
-			|| id.contains("opus-4.7")
-			|| id.contains("opus-4-8")
-			|| id.contains("opus-4.8");
-		("8x13", 11, 16, Some(false), if high_resolution { 1_932 } else { 1_568 })
-	} else if id.contains("gemini") {
-		("8x13", 8, 22, Some(false), 2_048)
-	} else if id.contains("glm") {
-		("8x13", 8, 16, Some(false), 1_568)
-	} else {
-		match family {
-			BillingFamily::Anthropic => ("8x13", 11, 16, Some(false), 1_568),
-			BillingFamily::Google | BillingFamily::OpenAi | BillingFamily::Unknown => {
-				("8x13", 8, 22, Some(false), 1_568)
-			},
-		}
+	let (cell_width, cell_height, frame_size) = match target.geometry {
+		Some(geometry) => (geometry.cell_width, geometry.cell_height, geometry.frame_size),
+		None => match family {
+			BillingFamily::Anthropic => (11, 16, 1_568),
+			BillingFamily::Google | BillingFamily::OpenAi | BillingFamily::Unknown => (8, 22, 1_568),
+		},
 	};
 	Shape {
-		font,
+		font: "8x13",
 		cell_width,
 		cell_height,
-		stretch,
+		stretch: Some(false),
 		variant: "bw",
 		line_repeat: 1,
 		columns: 1,
@@ -762,6 +768,37 @@ mod tests {
 		assert_eq!(provider_frame_budget(Some("umans"), 7), 3);
 		assert_eq!(provider_frame_budget(Some("openai"), 0), 17);
 	}
+	#[test]
+	fn catalog_geometry_wins_and_the_billing_family_is_only_the_fallback() {
+		let geometry = FrameGeometry { frame_size: 1_932, cell_width: 11, cell_height: 16 };
+		let measured = resolve_shape(ShapeTarget {
+			api:      Some("openai-chat"),
+			model_id: Some("any-model-id"),
+			geometry: Some(geometry),
+		});
+		assert_eq!(
+			(measured.frame_size, measured.cell_width, measured.cell_height),
+			(1_932, 11, 16),
+			"a model id never overrides what the catalog measured"
+		);
+		let anthropic = resolve_shape(ShapeTarget {
+			api:      Some("anthropic"),
+			model_id: Some("claude-opus-4-8"),
+			geometry: None,
+		});
+		assert_eq!(
+			(anthropic.frame_size, anthropic.cell_width, anthropic.cell_height),
+			(1_568, 11, 16),
+			"without catalog geometry the wire API's billing family decides, not the model id"
+		);
+		let other = resolve_shape(ShapeTarget {
+			api:      Some("openai-chat"),
+			model_id: Some("claude-opus-4-8"),
+			geometry: None,
+		});
+		assert_eq!((other.cell_width, other.cell_height), (8, 22));
+	}
+
 	#[test]
 	fn cjk_row_straddles_start_on_the_next_frame_row_without_loss() {
 		let text = "aaa界z";

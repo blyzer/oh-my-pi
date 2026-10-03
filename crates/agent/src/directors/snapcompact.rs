@@ -16,7 +16,8 @@ use omp_ai::{ContentPart, Message, ToolResultContent};
 use omp_dom::Dom;
 use omp_journal::data::{MAX_SNAPCOMPACT_FRAME_BYTES, MAX_SNAPCOMPACT_FRAMES};
 use omp_snapcompact::archive::{
-	self, Archive, ArchiveError, DIM_OFF, DIM_ON, LINE_BREAK, ShapeTarget, push_normalized,
+	self, Archive, ArchiveError, DIM_OFF, DIM_ON, FrameGeometry, LINE_BREAK, ShapeTarget,
+	push_normalized,
 };
 
 use crate::{
@@ -202,6 +203,13 @@ pub fn render(
 	let target = ShapeTarget {
 		api:      identity.map(|identity| identity.codec.as_str()),
 		model_id: identity.map(|identity| identity.model.as_str()),
+		geometry: identity
+			.and_then(|identity| identity.image_frame)
+			.map(|frame| FrameGeometry {
+				frame_size:  frame.frame_size,
+				cell_width:  frame.cell_width,
+				cell_height: frame.cell_height,
+			}),
 	};
 	let provider = identity.map(|identity| identity.provider.as_str());
 	let archive = archive::render_archive(text, source_tokens, target, provider, existing_images)

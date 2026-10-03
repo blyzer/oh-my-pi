@@ -152,7 +152,7 @@ test-pkg pkg:
     cargo test --doc -p {{ pkg }} --locked
 
 # ---------------------------------------------------------------------------
-# E2E acceptance suite (crates/e2e, joined-system proofs P1-P10)
+# E2E acceptance suite (crates/e2e, joined-system proofs P1-P11)
 # ---------------------------------------------------------------------------
 
 # Compile every acceptance proof without running them.
@@ -194,6 +194,11 @@ e2e-p9:
 e2e-p10:
     cargo nextest run -p omp-e2e --test p10_lift_idempotence --locked
 
+# Run proof P11: spectator convergence through a real relay, and read-only enforcement.
+[group('e2e')]
+e2e-p11:
+    cargo nextest run -p omp-e2e --test p11_collab_spectator --locked
+
 # Record a fresh P8 performance-baseline artifact.
 [group('e2e')]
 e2e-baseline:
@@ -205,19 +210,30 @@ e2e-baseline:
 e2e-tool-sources:
     cargo nextest run -p omp-e2e --test tool_sources --locked
 
-# Run every P1-P10 proof plus the tool-sources check (CI runs P1-P8 on macOS, plus P7, P9, P10 and tool_sources on Linux).
+# Run every P1-P11 proof plus the tool-sources check (CI runs P1-P8 on macOS, plus P7, P9, P10, P11 and tool_sources on Linux).
 [group('e2e')]
-e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-tool-sources e2e-p8
+e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10 e2e-p11 e2e-tool-sources e2e-p8
 
 # ---------------------------------------------------------------------------
-# LLM catalog & compat cascade (crates/llm-catalog)
+# LLM catalog & compat cascade (crates/catalog)
 # ---------------------------------------------------------------------------
 
 # Run the taxonomy and compat-cascade test suites.
 [group('catalog')]
 catalog-test:
-    cargo nextest run -p omp-llm-catalog --lib taxonomy
-    cargo nextest run -p omp-llm-catalog --test compat_cascade
+    cargo nextest run -p omp-catalog --lib taxonomy
+    cargo nextest run -p omp-catalog --test compat_cascade
+
+# Rebuild crates/catalog/data/{catalog.postcard,sources.lock.json} from the oracle fixtures and KDL rules (run after editing any of them). OMP_LLM_CATALOG_REGEN lets the build compile against the stale snapshot being replaced.
+[group('catalog')]
+catalog-snapshot:
+    OMP_LLM_CATALOG_REGEN=1 cargo run -p omp-catalog --example generate_snapshot --locked -- --relock
+
+# Refresh the model roster fixture from pi's generated models.json (e.g. `git show origin/main:packages/catalog/src/models.json > /tmp/models.json`), then rebuild the snapshot.
+[group('catalog')]
+catalog-import-v1 models_json:
+    python3 crates/catalog/scripts/import_v1_models.py --v1 {{ models_json }}
+    just catalog-snapshot
 
 # ---------------------------------------------------------------------------
 # Run & explore

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{
-	capability::{CacheRetentionBits, ModelCapabilities},
+	capability::{CacheRetentionBits, ModelCapabilities, ProviderFamily},
 	id::{
 		CatalogRevision, ClassId, CodecId, ModelKey, RouteId, ThinkingPolicyId, WireModelId,
 		WirePolicyId,
@@ -212,6 +212,25 @@ pub struct CatalogModelMetrics {
 const _: () =
 	assert!(std::mem::size_of::<CatalogModelMetrics>() <= 16, "catalog metrics must stay compact");
 
+/// Square bitmap frame geometry a model reads imaged text from best.
+///
+/// Compiled from the `image-frame` rule axis, so the per-lineage geometry that
+/// snapcompact archives render with is catalog data rather than a predicate on
+/// the model id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageFrameGeometry {
+	/// Square frame edge in pixels.
+	pub frame_size:  u32,
+	/// Horizontal cell advance in pixels.
+	pub cell_width:  u32,
+	/// Vertical cell pitch in pixels.
+	pub cell_height: u32,
+}
+
+const _: () =
+	assert!(std::mem::size_of::<ImageFrameGeometry>() <= 12, "frame geometry must stay compact");
+
 /// Selectable model deployment and its route-specific wire identifiers.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpec {
@@ -255,6 +274,10 @@ pub struct ModelSpec {
 	pub remote_compaction: Option<ModelRemoteCompaction>,
 	/// Premium quota multiplier at millionth precision.
 	pub premium_multiplier_millionths: Option<PremiumMultiplier>,
+	/// Wire family whose service-tier vocabulary this deployment speaks.
+	pub service_tier_family: ProviderFamily,
+	/// Frame geometry for imaged history, when the lineage has a measured one.
+	pub image_frame: Option<ImageFrameGeometry>,
 }
 
 /// Router-facing model facts with no logical or wire model identifier.
@@ -286,6 +309,10 @@ pub struct PolicyModel {
 	pub edit_revision: Option<Str>,
 	/// Premium quota multiplier at millionth precision.
 	pub premium_multiplier_millionths: Option<PremiumMultiplier>,
+	/// Wire family whose service-tier vocabulary this deployment speaks.
+	pub service_tier_family: ProviderFamily,
+	/// Frame geometry for imaged history, when the lineage has a measured one.
+	pub image_frame: Option<ImageFrameGeometry>,
 }
 
 impl From<&ModelSpec> for PolicyModel {
@@ -304,6 +331,8 @@ impl From<&ModelSpec> for PolicyModel {
 			compaction_model: model.compaction_model.clone(),
 			edit_revision: model.edit_revision.clone(),
 			premium_multiplier_millionths: model.premium_multiplier_millionths,
+			service_tier_family: model.service_tier_family,
+			image_frame: model.image_frame,
 		}
 	}
 }

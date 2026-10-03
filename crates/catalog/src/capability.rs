@@ -466,6 +466,7 @@ pub struct ServiceTier {
 	Clone,
 	Copy,
 	Debug,
+	Default,
 	Display,
 	EnumString,
 	Eq,
@@ -479,12 +480,17 @@ pub struct ServiceTier {
 #[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub enum ProviderFamily {
 	/// OpenAI-compatible flex, scale, and priority tiers.
+	#[serde(rename = "openai")]
+	#[strum(serialize = "openai")]
 	OpenAi,
 	/// Anthropic priority and fast-mode tiers.
 	Anthropic,
 	/// Google flex and priority tiers.
 	Google,
+	/// Fireworks serving-path tiers (priority or standard).
+	Fireworks,
 	/// Provider-specific vocabulary without family defaults.
+	#[default]
 	Other,
 }
 
@@ -551,7 +557,7 @@ impl FamilyServiceTierPolicy {
 			ProviderFamily::OpenAi => &self.openai,
 			ProviderFamily::Anthropic => &self.anthropic,
 			ProviderFamily::Google => &self.google,
-			ProviderFamily::Other => &ServiceTierIntent::Unset,
+			ProviderFamily::Fireworks | ProviderFamily::Other => &ServiceTierIntent::Unset,
 		};
 		let audience_intent = match audience {
 			TierAudience::Session => family_intent,

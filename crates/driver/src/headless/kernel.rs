@@ -319,21 +319,15 @@ impl ProductionInference {
 			request.reasoning =
 				convar_reasoning(self.routes.catalog().as_ref(), &self.model, &thinking);
 		}
-		let provider = match &self.meta.target {
-			Target::Provider { provider, .. } | Target::ProviderService(provider) => {
-				Some(provider.as_str())
-			},
-			Target::Route { route, .. } | Target::RouteService(route) => self
-				.routes
-				.catalog()
-				.route(route)
-				.map(|route| route.provider.as_str()),
-			Target::Model(_) => None,
-		};
+		let tier_family = self
+			.routes
+			.catalog()
+			.model(&self.model)
+			.map(|spec| spec.service_tier_family)
+			.unwrap_or_default();
 		omp_ai::settings::InferenceSettings::from_con(&self.con).apply_chat_request(
 			request,
-			provider,
-			Some(model.as_str()),
+			tier_family,
 			None,
 		);
 	}
@@ -2759,9 +2753,10 @@ fn route_identity(
 	}
 	.or_else(preferred)?;
 	Some(Arc::new(omp_agent::RouteIdentity {
-		model:    model.key.clone(),
-		provider: route.provider.clone(),
-		codec:    route.codec.clone(),
+		model:       model.key.clone(),
+		provider:    route.provider.clone(),
+		codec:       route.codec.clone(),
+		image_frame: model.image_frame,
 	}))
 }
 

@@ -15,14 +15,17 @@ Both grammars are KDL v2. Unknown nodes/directives and malformed value shapes ar
 
 ## Regeneration and validation
 
+The compiled snapshot (`data/catalog.postcard`) and its provenance lock (`data/sources.lock.json`, the SHA-256 of every source below plus an aggregate digest) are generated, never hand-edited:
+
 ```sh
-cd /work/omp
-env OMP_LLM_CATALOG_REGEN=1 cargo run -p omp-catalog --example generate_snapshot --locked
-cargo nextest run -p omp-catalog --locked
-cargo test -p omp-catalog --doc --locked
+just catalog-snapshot                    # after editing any KDL, providers.toml, oauth.toml or policy fixture
+just catalog-import-v1 /tmp/models.json # refresh the model roster from pi's generated models.json, then snapshot
+just test-pkg omp-catalog
 ```
 
-`compat-compile.test.ts` fails when `rules.json` drifts from the KDL sources; `compat-parity.test.ts` proves the engine reproduces every baked `models.json` compat/thinking value. Commit `data/catalog.postcard` and `data/sources.lock.json` together with the KDL change.
+`catalog-snapshot` runs `examples/generate_snapshot.rs --relock`: it rewrites the lock from the files on disk, compiles `fixtures/llm-oracle/catalog/{providers.toml,models.json.zst,oauth.toml}` through this cascade, and writes the postcard. `build.rs` refuses to compile the crate against a snapshot whose digest disagrees with the lock (`OMP_LLM_CATALOG_REGEN=1`, set by the recipe, lifts that check for the one build that replaces the snapshot). Commit `data/catalog.postcard` and `data/sources.lock.json` together with the source change.
+
+`fixtures/llm-oracle/catalog/models.json.zst` is produced by `scripts/import_v1_models.py` from pi's checked-in `packages/catalog/src/models.json` (itself the output of pi's network-backed generator). The importer applies a fixed set of mechanical rewrites and aborts on any key, api or provider it does not model; its module docstring lists them.
 
 ## Taxonomy grammar
 
@@ -198,6 +201,13 @@ The three value shapes are:
 - **Object**: no arguments and a child block, including an empty block. Child names are kebab-case: an axis-directive spelling compiles to its resolved axis key (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else converts mechanically (`input-threshold` → `inputThreshold`); camelCase names are a compile error. `extra-body` payloads (top-level or nested) are the exception — their child names are literal wire JSON keys copied verbatim (`enable_thinking`). Each child is either one scalar or another object; arrays are not representable inside an object payload.
 
 A rule cannot assign the same resolved axis twice in one block.
+
+Two `catalog` axes carry per-model facts that hosts read instead of inspecting model ids, so no host branches on `model.contains("claude")`-style predicates:
+
+- `service-tier-family "openai" | "anthropic" | "google" | "fireworks"` selects the service-tier vocabulary (`ProviderFamily`) a deployment speaks. Lineage classes declare theirs (`classes/anthropic.kdl`, `gemini.kdl`, `openai.kdl`); gateways that speak the OpenAI wire (`providers/openrouter.kdl`, `azure.kdl`, ...) declare it at `priority=-1` so a lineage rule wins for Claude or Gemini behind them. Absence resolves to `other`, which applies no tier.
+- `image-frame { frame-size N cell-width N cell-height N }` is the bitmap geometry snapcompact renders archive frames with (`ImageFrameGeometry`). Only lineages with a measured geometry declare one; a model without it renders at the default of its wire API's billing family.
+
+Both compile into `ModelSpec` and `PolicyModel` (snapshot schema 3); runtime-discovered rows that have no bundled counterpart carry `other`/none until the next snapshot refresh.
 One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
 
 ### Precedence and ambiguity

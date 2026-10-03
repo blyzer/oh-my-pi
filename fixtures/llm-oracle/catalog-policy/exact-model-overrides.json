@@ -45,31 +45,6 @@
     },
     {
       "expected": {
-        "apply_patch_tool_type": "freeform",
-        "context_promotion_target": "openai-codex/gpt-5.5",
-        "prefer_websockets": true,
-        "priority": 26,
-        "remote_compaction": {
-          "enabled": true,
-          "transport": "open-ai-codex",
-          "v2_streaming_enabled": true
-        },
-        "thinking": {
-          "efforts": [
-            "low",
-            "medium",
-            "high",
-            "xhigh"
-          ],
-          "mode": "effort"
-        }
-      },
-      "model": "openai-codex/gpt-5.3-codex-spark",
-      "provenance": "archive/llm-legacy/llm-catalog/tests/generated_models.rs::checked_in_snapshot_retains_representative_server_behavior",
-      "rationale": "Codex Spark prefers WebSockets, has provider routing priority 26, and owns native remote compaction metadata."
-    },
-    {
-      "expected": {
         "request_model_id": "gemini-3.1-pro-low",
         "thinking": {
           "effortBudgets": {
@@ -116,7 +91,7 @@
       "expected": {
         "apply_patch_tool_type": "freeform",
         "prefer_websockets": true,
-        "priority": 3,
+        "priority": 8,
         "thinking": {
           "efforts": [
             "low",

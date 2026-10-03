@@ -21,6 +21,7 @@ Every wait is bounded. Every process, task, socket, and temporary root has an RA
 - P8: retained-frame and journal-first kernel throughput recorder.
 - P9: isolated environment worktrees and extension Director/Component registration.
 - P10: historical tool lifts are idempotent and the lifted live revision executes through `Dispatcher`.
+- P11: a spectator converges with a headless collaboration host through a real socket relay (`omp_collab::test_relay`). A viewer and an editor join a session with history, survive a partition, and receive the patches of a guest-driven turn; the host refuses a viewer's mutation (client API, no token, forged token); the relay only carries ciphertext; the room is listed in the local host registry while it lives; departures and room close are announced.
 - `tool_sources`: production environment source routing and shared document snapshots.
 
-`just e2e-build` compiles the suite. `just e2e` runs P1–P7, P9, P10, and `tool_sources`, then runs the non-gating P8 recorder test. Individual groups are available as `e2e-core`, `e2e-p7`, `e2e-p8`, `e2e-p9`, and `e2e-p10`.
+`just e2e-build` compiles the suite. `just e2e` runs P1–P7, P9, P10, P11, and `tool_sources`, then runs the non-gating P8 recorder test. Individual groups are available as `e2e-core`, `e2e-p7`, `e2e-p8`, `e2e-p9`, `e2e-p10`, and `e2e-p11`.

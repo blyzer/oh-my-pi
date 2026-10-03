@@ -45,6 +45,7 @@ omp-envd.workspace = true
 omp-ext.workspace = true
 omp-edit.workspace = true
 omp-catalog.workspace = true
+omp-collab = { workspace = true, features = ["test-relay"] }
 omp-ai.workspace = true
 omp-journal.workspace = true
 omp-proto.workspace = true

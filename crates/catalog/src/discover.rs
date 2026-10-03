@@ -17,8 +17,8 @@ use crate::{
 	EvidenceConfidence, ExactSelector, ExtendedContextMode, ModelAvailability, ModelCapabilities,
 	ModelKey, ModelLimits, ModelOverlay, ModelPatch, ModelProvenance, ModelSpec, OperationBits,
 	OperationKind, Price, PriceUnit, Pricing, ProvenanceKind, ProvenanceSource, ProviderDef,
-	ProviderId, RouteDef, RouteId, ScopedAlias, ThinkingEffort, ThinkingPolicyId, ThinkingRouting,
-	WireModelId, WirePolicyId, classify,
+	ProviderFamily, ProviderId, RouteDef, RouteId, ScopedAlias, ThinkingEffort, ThinkingPolicyId,
+	ThinkingRouting, WireModelId, WirePolicyId, classify,
 	classify::{strip_effort_lane, supports_dynamic_effort_siblings},
 };
 
@@ -423,6 +423,8 @@ impl NormalizedDiscovery {
 				edit_revision: Some(model.edit_revision),
 				remote_compaction: Some(model.remote_compaction),
 				premium_multiplier_millionths: Some(model.premium_multiplier_millionths),
+				service_tier_family: Some(model.service_tier_family),
+				image_frame: Some(model.image_frame),
 				updated_at_ms: Some(model.provenance.updated_at_ms),
 				blocked_until_ms: Some(model.provenance.blocked_until_ms),
 				deprecated: Some(model.provenance.deprecated),
@@ -540,6 +542,8 @@ impl DiscoveryNormalizer {
 				edit_revision: None,
 				remote_compaction: None,
 				premium_multiplier_millionths: None,
+				service_tier_family: ProviderFamily::Other,
+				image_frame: None,
 			},
 			classification: Box::new([classification.evidence]),
 			aliases,

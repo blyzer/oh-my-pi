@@ -1,6 +1,7 @@
 // Model-lineage compat for "openai"; regenerated from the frozen census using class taxonomy selectors.
 
 class "openai" {
+	service-tier-family "openai"
 	// Replaces the o-series mandatory-reasoning fallback.
 	family "o-series" {
 		thinking-requires-effort #true

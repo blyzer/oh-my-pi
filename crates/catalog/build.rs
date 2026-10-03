@@ -7,7 +7,7 @@ use std::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const MAGIC: &[u8; 8] = b"OMPLLCAT";
 const HEADER_LEN: usize = 8 + 4 + 32 + 32 + 32;
 
@@ -37,6 +37,7 @@ fn main() {
 	for path in [&source_lock_path, &snapshot_path] {
 		println!("cargo:rerun-if-changed={}", path.display());
 	}
+	println!("cargo:rerun-if-env-changed=OMP_LLM_CATALOG_REGEN");
 
 	let lock_bytes = read_required(&source_lock_path);
 	let lock: SourceLock = serde_json::from_slice(&lock_bytes).unwrap_or_else(|error| {

@@ -68,7 +68,7 @@ pub(crate) async fn process_signal() -> std::io::Result<omp_session::ExitSignal>
 }
 
 /// Initial surface selected by the command boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ChatStart {
 	/// Open the transcript and composer immediately.
 	Session,
@@ -77,6 +77,14 @@ pub(crate) enum ChatStart {
 	/// The journal-first host currently resolves `--continue`/`--resume` at the
 	/// controller boundary, so this selection opens that resolved session.
 	SessionIndex,
+	/// Open the transcript, then join a collaboration room as a guest
+	/// (`omp join`).
+	Join {
+		/// Compact or browser collaboration link.
+		link: Str,
+		/// Display name shown to the room's other participants.
+		name: Option<Str>,
+	},
 }
 
 /// Presentation selected for the interactive project-chat session.
@@ -1243,7 +1251,17 @@ pub(crate) async fn run(
 	// Application feeds behind the dashboards and account commands: engines
 	// stay here, the actor only reads rows (ADR 0005).
 	let live_journal = Arc::new(parking_lot::RwLock::new(session.journal_path().to_path_buf()));
-	let (collab_authority, collab) = omp_driver::collab::session::CollabSessionAuthority::new();
+	let (mut collab_authority, collab) = omp_driver::collab::session::CollabSessionAuthority::new();
+	// Rooms this chat hosts are discoverable by `omp collab list`; discovery is
+	// a convenience, so a registry that cannot be prepared never blocks chat.
+	match omp_driver::collab::registry::default_registry_dir() {
+		Ok(dir) => {
+			if let Err(error) = collab_authority.publish_to(dir) {
+				tracing::warn!(%error, "collaboration host registry is unavailable");
+			}
+		},
+		Err(error) => tracing::warn!(%error, "collaboration host registry directory is unresolved"),
+	}
 	let _collab_owner = omp_driver::collab::session::spawn_session_owner(collab_authority);
 	let (services, mutations): (
 		Arc<dyn omp_chat::overlays::Services>,
@@ -1366,6 +1384,14 @@ pub(crate) async fn run(
 			.with_appearance_palettes(launch.theme.clone(), launch.light_theme.clone()),
 		speech,
 	};
+	if let ChatStart::Join { link, name } = start {
+		commands
+			.send(omp_chat::HostCommand::Collab(omp_chat::overlays::services::CollabOp::Join {
+				link,
+				name,
+			}))
+			.into_diagnostic()?;
+	}
 	let skill_prompt = (!launch_inputs.has_files)
 		.then(|| launch.initial_skill_prompt())
 		.flatten();
