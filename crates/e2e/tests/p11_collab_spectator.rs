@@ -162,7 +162,8 @@ impl Spectator {
 }
 
 /// A client that bypasses the guest owner's own read-only check and speaks the
-/// wire directly, as a modified client would. Returns the host's refusal code.
+/// wire directly, as a modified client would. Returns the host's refusal
+/// message.
 async fn hostile_prompt(link: &str, token: Option<&[u8]>, text: &str) -> Result<String> {
 	let link = CollabLink::parse(link).context("parse link")?;
 	let key = RoomKey::from_bytes(*link.credentials().key()).context("room key")?;
@@ -215,7 +216,8 @@ async fn hostile_prompt(link: &str, token: Option<&[u8]>, text: &str) -> Result<
 			match client.receive().await.context("receive")? {
 				Some(RelayInbound::Frame(routed)) => {
 					if let Some(collab_frame::Payload::Error(refusal)) = routed.frame.payload {
-						return Ok::<String, Error>(refusal.code);
+						// The revision-3 JSON grammar carries only the message of an error frame.
+						return Ok::<String, Error>(refusal.message);
 					}
 				},
 				Some(_) => {},
@@ -346,16 +348,10 @@ async fn p11a_spectators_converge_through_a_relay_and_a_viewer_cannot_mutate() -
 			})
 			.await;
 		assert!(matches!(attempt, Err(CollabCommandFault::ReadOnly)), "{attempt:?}");
-		assert_eq!(
-			hostile_prompt(&viewer_link, None, HOSTILE_UNTOKENED).await?,
-			"read_only",
-			"a viewer link carries no write token"
-		);
-		assert_eq!(
-			hostile_prompt(&viewer_link, Some(&[0xaa; 16]), HOSTILE_FORGED).await?,
-			"read_only",
-			"a forged write token authenticates as read-only"
-		);
+		let untokened = hostile_prompt(&viewer_link, None, HOSTILE_UNTOKENED).await?;
+		assert!(untokened.contains("read-only"), "a viewer link carries no write token: {untokened}");
+		let forged = hostile_prompt(&viewer_link, Some(&[0xaa; 16]), HOSTILE_FORGED).await?;
+		assert!(forged.contains("read-only"), "a forged write token is read-only: {forged}");
 		eventually("hostile peers leave", || {
 			relay.guest_count() == 2
 				&& host

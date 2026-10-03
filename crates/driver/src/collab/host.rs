@@ -141,7 +141,9 @@ impl HeadlessRoom {
 	/// withdrawn.
 	pub async fn stop(self) {
 		let _ = self.handle.request(CollabOwnerCommand::Leave).await;
-		drop(self.handle);
+		// Other clones of the handle may outlive the room; the owner has no
+		// active session left, so stopping it does not wait for them.
+		self.owner.abort();
 		let _ = self.owner.await;
 	}
 

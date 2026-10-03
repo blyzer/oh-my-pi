@@ -4262,6 +4262,90 @@ mod tests {
 		],);
 	}
 
+	/// A host-admitted guest prompt reaches an idle controller as an authored
+	/// turn stamped with the admitted principal, and an interrupt is not a turn.
+	#[tokio::test]
+	async fn guest_prompt_becomes_an_authored_turn_and_abort_does_not() {
+		use omp_collab::{PROTOCOL_REVISION, crypto::WriteToken, host::HostAdmission};
+		use omp_proto::collab::v1::{AbortRequest, Hello, PromptRequest, collab_frame};
+
+		let dir = tempfile::tempdir().expect("temp dir");
+		let kernel = Kernel::new(
+			SlowInference { delay: Duration::ZERO, script: Script::Text, requests: 0 },
+			SleepingBash::registry(),
+			DispatchPolicy::new(
+				omp_journal::blob::BlobStore::open(dir.path().join("blobs")).expect("blob store"),
+			),
+			StaticPrompt(Str::new_static("test system")),
+		);
+		let home = SessionHome {
+			sessions_dir:  dir.path().join("sessions"),
+			project_root:  dir.path().to_path_buf(),
+			model:         Str::new_static("test/model"),
+			prompt:        omp_driver::headless::kernel::PromptOverrides::default(),
+			facts:         Default::default(),
+			live:          Arc::new(omp_driver::sessions::SessionRegistry::new()),
+			tools_enabled: true,
+			up:            kernel.mailbox(),
+			rules:         None,
+		};
+		fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
+		let session = home.create(None).expect("session");
+		let (relay, _dom_events) = flume::unbounded();
+		let ctx = Arc::new(HostMailbox::new().attach(Ctx::builder()).build());
+		let live_journal = Arc::new(RwLock::new(session.journal_path().to_path_buf()));
+		let (collab_authority, collab) = omp_driver::collab::session::CollabSessionAuthority::new();
+		let _collab_owner = omp_driver::collab::session::spawn_session_owner(collab_authority);
+		let (mut controller, _snapshot) = Controller::new(
+			kernel,
+			session,
+			home,
+			relay,
+			ctx,
+			Arc::new(omp_chat::overlays::services::NoMutations),
+			Arc::new(NoServices),
+			collab,
+			None,
+			detached_env(),
+			live_journal,
+			dir.path().to_path_buf(),
+			None,
+			None,
+			omp_driver::headless::AskRoute::new(),
+		);
+
+		let token = [3_u8; 16];
+		let authority = HostAdmission::new(Str::new_static("room"), WriteToken::from_bytes(token));
+		let peer = authority
+			.authenticate(4, &Hello {
+				protocol_revision: PROTOCOL_REVISION,
+				display_name:      "  Ada  ".to_owned(),
+				write_token:       Some(bytes::Bytes::copy_from_slice(&token)),
+				client_version:    String::new(),
+			})
+			.expect("writable guest");
+		let admit = |payload| authority.admit_mutation(&peer, &payload).expect("admitted");
+
+		let flow = controller
+			.apply_remote_idle(admit(collab_frame::Payload::Prompt(PromptRequest {
+				text:   "guest question".to_owned(),
+				images: Vec::new(),
+			})))
+			.await
+			.expect("idle prompt");
+		let Flow::Turn(TurnRequest::Authored { input, author }) = flow else {
+			panic!("an idle guest prompt runs as an authored turn");
+		};
+		assert_eq!(input.text.as_str(), "guest question");
+		assert_eq!(author.as_str(), "Ada", "the author is the sanitized admitted name");
+
+		let flow = controller
+			.apply_remote_idle(admit(collab_frame::Payload::Abort(AbortRequest::default())))
+			.await
+			.expect("idle abort");
+		assert!(matches!(flow, Flow::Idle), "an interrupt while idle starts nothing");
+	}
+
 	/// A `!` command typed during a model turn runs after it and still hears
 	/// Esc: the interrupt from the
 	/// host reaches the deferred run instead of waiting for it to finish.

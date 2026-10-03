@@ -205,7 +205,7 @@ mod tests {
 		list(&dir, false, &mut text).await.expect("list");
 		let text = String::from_utf8(text).expect("utf8");
 		assert!(text.starts_with("1 active collab host\n"), "{text}");
-		assert!(text.contains("0123456789abcdef  evil name (01SESSION)  /work"), "{text}");
+		assert!(text.contains("0123456789abcdef  evilname (01SESSION)  /work"), "{text}");
 		for detail in
 			["gen 3", "p/m", "2 guests", "control", "relay connected", "input required", "working"]
 		{
