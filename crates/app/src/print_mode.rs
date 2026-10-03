@@ -709,6 +709,7 @@ async fn print_kernel_event(
 		| KernelEvent::ToolUpdate { .. }
 		| KernelEvent::ToolSettled { .. }
 		| KernelEvent::JobsDelivered { .. }
+		| KernelEvent::StreamRedirected { .. }
 		| KernelEvent::WorkflowActionAnswered { .. } => None,
 	};
 	if args.mode == "json"
