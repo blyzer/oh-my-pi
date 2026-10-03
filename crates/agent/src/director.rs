@@ -115,7 +115,7 @@ pub trait StreamWatch: Send {
 		&mut self,
 		index: u32,
 		call: &ToolCall,
-		_match_text: Option<&[Str]>,
+		_match_text: Option<&[omp_tool::StreamMatchText]>,
 	) -> StreamVerdict {
 		self.call_ready(index, call)
 	}

@@ -1261,7 +1261,7 @@ pub trait Tool: Send + Sync + 'static {
 	/// Projects authored text that a streaming rule should treat as newly
 	/// introduced by this call. Tools that do not implement this contract keep
 	/// the default JSON string-value matching behavior.
-	fn stream_match_text(&self, _arguments: &serde_json::Value) -> Option<Vec<Str>> {
+	fn stream_match_text(&self, _arguments: &serde_json::Value) -> Option<Vec<StreamMatchText>> {
 		None
 	}
 
@@ -1269,6 +1269,15 @@ pub trait Tool: Send + Sync + 'static {
 	fn lift(&self, _from: &Rev, _call: RecordedCall<'_>) -> Option<LiftedCall> {
 		None
 	}
+}
+
+/// One text segment authored by a tool call, with its target path when known.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamMatchText {
+	/// Target path associated with this text, when the arguments identify one.
+	pub path: Option<Str>,
+	/// Newly authored text to inspect for stream-rule matches.
+	pub text: Str,
 }
 
 /// One event emitted by a typed tool invocation.

@@ -17,8 +17,8 @@ use omp_core::{Str, sf};
 use omp_edit::modes::hashline::format::format_hashline_header;
 use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
-	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec,
-	ToolTerminal, Unit,
+	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, StreamMatchText, Tool,
+	ToolSpec, ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -555,16 +555,19 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 		&self.spec
 	}
 
-	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<Str>> {
-		Some(
-			arguments
-				.get("content")
-				.and_then(serde_json::Value::as_str)
-				.filter(|content| !content.is_empty())
-				.map(Str::new)
-				.into_iter()
-				.collect(),
-		)
+	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<StreamMatchText>> {
+		let path = arguments
+			.get("path")
+			.and_then(serde_json::Value::as_str)
+			.map(Str::new);
+		let segments = arguments
+			.get("content")
+			.and_then(serde_json::Value::as_str)
+			.filter(|content| !content.is_empty())
+			.map(|text| StreamMatchText { path, text: Str::new(text) })
+			.into_iter()
+			.collect();
+		Some(segments)
 	}
 
 	fn call<'c>(

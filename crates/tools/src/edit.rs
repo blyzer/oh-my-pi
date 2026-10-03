@@ -38,7 +38,7 @@ use omp_edit::{
 use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, ArgPath, CallOutcome, CommitError, Constraint, Diag, DiagKind,
 	Dialect, DocEffects, Effects, Ev, IncomingParams, InterruptWaitError, LiftedCall, ParamError,
-	Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec, ToolTerminal,
+	Part, PromptCaps, RecordedCall, Rev, StreamMatchText, Tool, ToolSpec, ToolTerminal,
 };
 pub use replace::{
 	LegacyReplaceOperation, LegacyReplaceParams, ReplaceParams, ReplaceTool,
@@ -755,11 +755,11 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 		&self.spec
 	}
 
-	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<Str>> {
+	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<StreamMatchText>> {
 		let Some(input) = arguments.get("input").and_then(serde_json::Value::as_str) else {
 			return Some(Vec::new());
 		};
-		Some(authored_insertions(input).into_iter().collect())
+		Some(authored_insertions(input))
 	}
 
 	fn call<'c>(
@@ -1214,11 +1214,16 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 	}
 }
 
-fn authored_insertions(input: &str) -> Option<Str> {
-	let patch = Patch::parse(input, &SplitOptions::default()).ok()?;
-	let mut added = String::new();
+fn authored_insertions(input: &str) -> Vec<StreamMatchText> {
+	let Ok(patch) = Patch::parse(input, &SplitOptions::default()) else {
+		return Vec::new();
+	};
+	let mut segments = Vec::new();
 	for section in patch.sections {
-		let parsed = section.parse().ok()?;
+		let Ok(parsed) = section.parse() else {
+			continue;
+		};
+		let mut added = String::new();
 		for edit in &parsed.edits {
 			if let Edit::Insert { text, .. } = edit {
 				if !added.is_empty() {
@@ -1227,8 +1232,12 @@ fn authored_insertions(input: &str) -> Option<Str> {
 				added.push_str(text);
 			}
 		}
+		if !added.is_empty() {
+			segments
+				.push(StreamMatchText { path: Some(Str::new(section.path)), text: Str::new(added) });
+		}
 	}
-	(!added.is_empty()).then(|| Str::new(added))
+	segments
 }
 
 fn lift_replace_to_hashline(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
@@ -1642,7 +1651,10 @@ mod tests {
 			"{}\nPUT 2.=2:\n-two\n+replacement\n",
 			format_hashline_header("a.txt", &file_hash("one\ntwo\n"))
 		);
-		assert_eq!(authored_insertions(&input).as_deref(), Some("replacement"));
+		let projected = authored_insertions(&input);
+		assert_eq!(projected.len(), 1);
+		assert_eq!(projected[0].path.as_deref(), Some("a.txt"));
+		assert_eq!(projected[0].text, "replacement");
 	}
 
 	#[test]

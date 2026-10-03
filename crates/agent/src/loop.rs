@@ -3652,7 +3652,7 @@ fn inspect_call_ready(
 	watchers: &mut [StreamObserver],
 	index: u32,
 	call: &omp_ai::ToolCall,
-	match_text: Option<&[Str]>,
+	match_text: Option<&[omp_tool::StreamMatchText]>,
 	effects: &mut Vec<(Handle, StreamEffect)>,
 	redirect_cap_reached: bool,
 	cap_notice_sent: &mut bool,

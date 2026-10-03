@@ -547,6 +547,39 @@ impl Watch {
 		}
 		StreamVerdict::Pass
 	}
+
+	fn call_ready_segments(
+		&mut self,
+		index: u32,
+		call: &ToolCall,
+		segments: &[omp_tool::StreamMatchText],
+	) -> StreamVerdict {
+		let mut argument_paths = Vec::new();
+		collect_paths(call.arguments.as_value(), &mut argument_paths);
+		let source =
+			StreamSource::ToolArgs { call_id: call.id.as_str(), tool: call.name.as_str() };
+		for (segment_index, segment) in segments.iter().enumerate() {
+			let Ok(segment_index) = u32::try_from(segment_index) else {
+				break;
+			};
+			let segment_paths = segment
+				.path
+				.as_ref()
+				.map(std::slice::from_ref)
+				.unwrap_or(&argument_paths);
+			let key = (2, index, segment_index);
+			let scanned = self.scan(key, segment.text.as_bytes(), source, segment_paths);
+			let verdict = match scanned {
+				StreamVerdict::Pass => self.finish(key, source, segment_paths),
+				verdict => verdict,
+			};
+			match verdict {
+				StreamVerdict::Pass => {},
+				verdict => return verdict,
+			}
+		}
+		StreamVerdict::Pass
+	}
 }
 
 impl StreamWatch for Watch {
@@ -580,13 +613,12 @@ impl StreamWatch for Watch {
 		&mut self,
 		index: u32,
 		call: &ToolCall,
-		match_text: Option<&[Str]>,
+		match_text: Option<&[omp_tool::StreamMatchText]>,
 	) -> StreamVerdict {
 		let Some(match_text) = match_text else {
 			return self.call_ready(index, call);
 		};
-		let values = match_text.iter().map(Str::as_str).collect::<Vec<_>>();
-		self.call_ready_values(index, call, &values)
+		self.call_ready_segments(index, call, match_text)
 	}
 }
 
@@ -717,7 +749,14 @@ mod tests {
 			arguments: omp_ai::OpaqueJson::new(args),
 		};
 		assert!(matches!(
-			watch.call_ready_with_match_text(0, &call, Some(&[Str::new_static("new code")])),
+			watch.call_ready_with_match_text(
+				0,
+				&call,
+				Some(&[omp_tool::StreamMatchText {
+					path: Some(Str::new_static("src/main.rs")),
+					text: Str::new_static("new code"),
+				}]),
+			),
 			StreamVerdict::Pass
 		));
 		let mut matching_watch = make_watch(
@@ -730,7 +769,10 @@ mod tests {
 		let StreamVerdict::Interrupt(interrupt) = matching_watch.call_ready_with_match_text(
 			0,
 			&call,
-			Some(&[Str::new_static("removed text")]),
+			Some(&[omp_tool::StreamMatchText {
+				path: Some(Str::new_static("src/main.rs")),
+				text: Str::new_static("removed text"),
+			}]),
 		) else {
 			panic!("newly authored text should match")
 		};

@@ -398,9 +398,12 @@ generic `StreamWatch` hook and loop redirect are in `crates/agent`; the built-in
 incremental DFA matcher, policy convars, discovery filtering, and driver installation are also
 present. Its matching and redirect behavior has package coverage in `omp-agent`.
 
-Tool-specific authored-text projections are being added through the `omp-tool` contract. The
-hashline `edit` implementation currently projects inserted rows, and `write` projects its new
-content. Other edit dialects do not yet implement the contract. The `ttsr_triggered` Python hook,
+Tool-specific authored-text projections use the `omp-tool` contract. Hashline `edit` projects
+inserted rows, replace projects replacement text, patch and apply-patch project added lines or
+created-file contents, sloppy projects rewrite candidates, and `write` projects its new content.
+Each segment carries its target path when the dialect identifies one, so path-scoped rules only
+match text intended for that file. Deletions, removed diff rows, and context rows are excluded.
+`ast_edit` remains outside these textual edit dialects. The `ttsr_triggered` Python hook,
 the `omp rules` CLI, and TUI/ACP/print surface work in implementation plan step 5 remain open.
 The matcher also still needs its planned property and integration coverage, and the remaining
 items in the test plan below are not yet proven end to end.
@@ -423,8 +426,9 @@ items in the test plan below are not yet proven end to end.
      `legacy.path`.
    - Driver install/engage/resync, including subagent composition.
 4. **Tool match surfaces** (`crates/tool`, `crates/tools`). An optional contract by which a tool
-   projects its streaming arguments into `(path, added text)` segments; edit families and write
-   implement it. The watcher prefers it over decoded strings.
+   projects its streaming arguments into path-aware authored-text segments; edit families and
+   write implement it. The watcher prefers it over decoded strings. Implemented for hashline,
+   replace, patch, apply-patch, and sloppy edit dialects.
 5. **Surfaces** (`crates/proto`, `crates/py`, `crates/envd`, `crates/app`, `crates/chat`).
    - The hook rename and emitter; update `docs/py` (05/10/15) and `docs/pyx` in the same change.
    - `omp rules list|test|scan` over the same matcher, replacing the orphan `Ttsr*` clap types

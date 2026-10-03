@@ -17,7 +17,7 @@ use omp_edit::{
 };
 use omp_tool::{
 	Abort, Constraint, Diag, DocEffects, Effects, Ev, IncomingParams, InterruptWaitError, Part,
-	PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	PromptCaps, Rev, StreamMatchText, Tool, ToolSpec, ToolTerminal,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,7 @@ struct ReplaceOperation {
 
 trait ReplaceArguments: serde::de::DeserializeOwned + Serialize + Send + Sync + 'static {
 	fn into_operations(self) -> Vec<ReplaceOperation>;
+	fn stream_match_text(arguments: &serde_json::Value) -> Vec<StreamMatchText>;
 }
 
 impl ReplaceArguments for ReplaceParams {
@@ -104,6 +105,18 @@ impl ReplaceArguments for ReplaceParams {
 			allow_fuzzy: true,
 			threshold:   None,
 		}]
+	}
+
+	fn stream_match_text(arguments: &serde_json::Value) -> Vec<StreamMatchText> {
+		let (Some(path), Some(text)) = (
+			arguments.get("path").and_then(serde_json::Value::as_str),
+			arguments
+				.get("new_string")
+				.and_then(serde_json::Value::as_str),
+		) else {
+			return Vec::new();
+		};
+		vec![StreamMatchText { path: Some(Str::new(path)), text: Str::new(text) }]
 	}
 }
 
@@ -119,6 +132,20 @@ impl ReplaceArguments for LegacyReplaceParams {
 				replace_all: operation.replace_all,
 				allow_fuzzy: operation.allow_fuzzy,
 				threshold:   operation.threshold,
+			})
+			.collect()
+	}
+
+	fn stream_match_text(arguments: &serde_json::Value) -> Vec<StreamMatchText> {
+		arguments
+			.get("edits")
+			.and_then(serde_json::Value::as_array)
+			.into_iter()
+			.flatten()
+			.filter_map(|edit| {
+				let path = edit.get("path").and_then(serde_json::Value::as_str)?;
+				let text = edit.get("new").and_then(serde_json::Value::as_str)?;
+				Some(StreamMatchText { path: Some(Str::new(path)), text: Str::new(text) })
 			})
 			.collect()
 	}
@@ -280,6 +307,10 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 
 	fn spec(&self) -> &ToolSpec {
 		&self.spec
+	}
+
+	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<StreamMatchText>> {
+		Some(P::stream_match_text(arguments))
 	}
 
 	fn call<'c>(
@@ -705,5 +736,24 @@ mod tests {
 		let noop = replace_text("same\n", "same", "same", false, false, None)
 			.expect("identical replacement is represented by unchanged content");
 		assert_eq!(noop.content, "same\n");
+	}
+
+	#[test]
+	fn stream_rule_projection_contains_new_text_and_target_path_only() {
+		let projected = ReplaceParams::stream_match_text(&serde_json::json!({
+			"path": "src/a.rs",
+			"old_string": "removed",
+			"new_string": "added",
+		}));
+		assert_eq!(projected.len(), 1);
+		assert_eq!(projected[0].path.as_deref(), Some("src/a.rs"));
+		assert_eq!(projected[0].text, "added");
+
+		let projected = LegacyReplaceParams::stream_match_text(&serde_json::json!({
+			"edits": [{"path": "src/b.rs", "old": "before", "new": "after"}]
+		}));
+		assert_eq!(projected.len(), 1);
+		assert_eq!(projected[0].path.as_deref(), Some("src/b.rs"));
+		assert_eq!(projected[0].text, "after");
 	}
 }
