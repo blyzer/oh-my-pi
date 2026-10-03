@@ -377,35 +377,100 @@ impl Watch {
 		source: StreamSource<'_>,
 		paths: &[Str],
 	) -> StreamVerdict {
-		let cursor = self.cursors.entry(key).or_insert_with(|| {
-			let mut cache = self.set.dfa.create_cache();
-			let state = start_state(&self.set.dfa, &mut cache);
-			Cursor { cache, state }
-		});
-		for byte in bytes {
-			let (state, matches) = advance(&self.set.dfa, &mut cursor.cache, cursor.state, *byte);
-			cursor.state = state;
-			for rule_index in matches {
-				if !self.fired.contains(&rule_index)
-					&& scope_allows(&self.set.rules[rule_index], source)
-					&& match source {
-						StreamSource::ToolArgs { tool, .. } => {
-							has_path(&self.set.rules[rule_index], paths, tool)
-						},
-						_ => true,
-					} && self.fired.insert(rule_index)
-				{
-					let name = &self.set.rules[rule_index].pattern.name;
-					for (index, rule) in self.set.rules.iter().enumerate() {
-						if &rule.pattern.name == name {
-							self.fired.insert(index);
-						}
+		let found = {
+			let cursor = self.cursors.entry(key).or_insert_with(|| {
+				let mut cache = self.set.dfa.create_cache();
+				let state = start_state(&self.set.dfa, &mut cache);
+				Cursor { cache, state }
+			});
+			let mut found = None;
+			'bytes: for byte in bytes {
+				let (state, matches) = advance(&self.set.dfa, &mut cursor.cache, cursor.state, *byte);
+				cursor.state = state;
+				for rule_index in matches {
+					if !self.fired.contains(&rule_index)
+						&& scope_allows(&self.set.rules[rule_index], source)
+						&& match source {
+							StreamSource::ToolArgs { tool, .. } => {
+								has_path(&self.set.rules[rule_index], paths, tool)
+							},
+							_ => true,
+						} {
+						found = Some(rule_index);
+						break 'bytes;
 					}
-					return self.hit(rule_index, source);
 				}
+			}
+			found
+		};
+		if let Some(rule_index) = found {
+			if let Some(verdict) = self.trigger(rule_index, source, paths) {
+				return verdict;
 			}
 		}
 		StreamVerdict::Pass
+	}
+
+	#[define_opaque(LazyState)]
+	fn finish(
+		&mut self,
+		key: (u8, u32, u32),
+		source: StreamSource<'_>,
+		paths: &[Str],
+	) -> StreamVerdict {
+		let matches = {
+			let Some(cursor) = self.cursors.get_mut(&key) else {
+				return StreamVerdict::Pass;
+			};
+			let Ok(state) = self.set.dfa.next_eoi_state(&mut cursor.cache, cursor.state) else {
+				return StreamVerdict::Pass;
+			};
+			cursor.state = state;
+			if !state.is_match() {
+				return StreamVerdict::Pass;
+			}
+			(0..self.set.dfa.match_len(&cursor.cache, state))
+				.map(|index| {
+					self
+						.set
+						.dfa
+						.match_pattern(&cursor.cache, state, index)
+						.as_usize()
+				})
+				.collect::<smallvec::SmallVec<usize, 4>>()
+		};
+		for rule_index in matches {
+			if let Some(verdict) = self.trigger(rule_index, source, paths) {
+				return verdict;
+			}
+		}
+		StreamVerdict::Pass
+	}
+
+	fn trigger(
+		&mut self,
+		rule_index: usize,
+		source: StreamSource<'_>,
+		paths: &[Str],
+	) -> Option<StreamVerdict> {
+		if self.fired.contains(&rule_index)
+			|| !scope_allows(&self.set.rules[rule_index], source)
+			|| !match source {
+				StreamSource::ToolArgs { tool, .. } => {
+					has_path(&self.set.rules[rule_index], paths, tool)
+				},
+				_ => true,
+			} {
+			return None;
+		}
+		self.fired.insert(rule_index);
+		let name = &self.set.rules[rule_index].pattern.name;
+		for (index, rule) in self.set.rules.iter().enumerate() {
+			if &rule.pattern.name == name {
+				self.fired.insert(index);
+			}
+		}
+		Some(self.hit(rule_index, source))
 	}
 
 	fn hit(&self, index: usize, source: StreamSource<'_>) -> StreamVerdict {
@@ -473,6 +538,14 @@ impl StreamWatch for Watch {
 		self.scan(key, fragment.bytes, fragment.source, &[])
 	}
 
+	fn block_end(&mut self, index: u32) -> StreamVerdict {
+		match self.finish((0, index, 0), StreamSource::Text, &[]) {
+			StreamVerdict::Pass => {},
+			verdict => return verdict,
+		}
+		self.finish((1, index, 0), StreamSource::Thinking, &[])
+	}
+
 	fn call_ready(&mut self, index: u32, call: &ToolCall) -> StreamVerdict {
 		let arguments = call.arguments.as_value();
 		let mut paths = Vec::new();
@@ -486,12 +559,169 @@ impl StreamWatch for Watch {
 			let source =
 				StreamSource::ToolArgs { call_id: call.id.as_str(), tool: call.name.as_str() };
 			let key = (2, index, value_index);
-			if let verdict @ (StreamVerdict::Interrupt(_) | StreamVerdict::Note(_)) =
-				self.scan(key, value.as_bytes(), source, &paths)
-			{
-				return verdict;
+			let scanned = self.scan(key, value.as_bytes(), source, &paths);
+			let verdict = match scanned {
+				StreamVerdict::Pass => self.finish(key, source, &paths),
+				verdict => verdict,
+			};
+			match verdict {
+				StreamVerdict::Pass => {},
+				verdict => return verdict,
 			}
 		}
 		StreamVerdict::Pass
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn make_watch(
+		pattern: &str,
+		scope: &[&str],
+		globs: &[&str],
+		interrupt_mode: Option<&str>,
+		context: StreamRuleContext,
+	) -> Watch {
+		let rule = RulePattern {
+			name:           Str::new_static("guard"),
+			body:           Str::new_static("Follow the repository rule."),
+			pattern:        Str::new(pattern),
+			scope:          scope.iter().map(|item| Str::new(*item)).collect(),
+			globs:          globs.iter().map(|item| Str::new(*item)).collect(),
+			interrupt_mode: interrupt_mode.map(Str::new),
+		};
+		let set =
+			std::sync::Arc::new(StreamRuleSet::compile(vec![rule]).expect("valid rule compiles"));
+		Watch::new(set, omp_core::FastHashSet::default(), StreamRuleInterrupt::Always, context, 1)
+	}
+
+	fn fragment<'a>(index: u32, source: StreamSource<'a>, text: &'a [u8]) -> StreamFragment<'a> {
+		StreamFragment { index, source, bytes: text }
+	}
+
+	#[test]
+	fn matches_across_text_fragments_and_interrupts_with_context_policy() {
+		let mut watch = make_watch("danger", &["text"], &[], None, StreamRuleContext::Keep);
+		assert!(matches!(
+			watch.fragment(fragment(0, StreamSource::Text, b"first dan")),
+			StreamVerdict::Pass
+		));
+		let verdict = watch.fragment(fragment(0, StreamSource::Text, b"gerous line"));
+		let StreamVerdict::Interrupt(interrupt) = verdict else {
+			panic!("expected stream redirect")
+		};
+		assert_eq!(interrupt.partial, PartialOutput::Keep);
+		assert_eq!(interrupt.effect.developer.as_deref(), Some("Follow the repository rule."));
+	}
+
+	#[test]
+	fn default_scope_skips_thinking_while_explicit_scope_matches_it() {
+		let mut default_watch = make_watch("secret", &[], &[], None, StreamRuleContext::Discard);
+		let thinking = StreamSource::Thinking;
+		assert!(matches!(
+			default_watch.fragment(fragment(0, thinking, b"secret")),
+			StreamVerdict::Pass
+		));
+		assert!(matches!(default_watch.block_end(0), StreamVerdict::Pass));
+		assert!(matches!(
+			default_watch.fragment(fragment(0, StreamSource::Text, b"secret")),
+			StreamVerdict::Pass
+		));
+		assert!(matches!(default_watch.block_end(0), StreamVerdict::Interrupt(_)));
+
+		let mut thinking_watch =
+			make_watch("secret", &["thinking"], &[], None, StreamRuleContext::Discard);
+		assert!(matches!(
+			thinking_watch.fragment(fragment(0, thinking, b"secret")),
+			StreamVerdict::Pass
+		));
+		assert!(matches!(thinking_watch.block_end(0), StreamVerdict::Interrupt(_)));
+		assert!(matches!(
+			thinking_watch.fragment(fragment(0, StreamSource::Text, b"secret")),
+			StreamVerdict::Pass
+		));
+	}
+
+	#[test]
+	fn tool_scope_and_path_gate_use_decoded_json_string_values() {
+		let mut watch = make_watch(
+			"remove this file",
+			&["tool:edit(src/**)"],
+			&["src/**"],
+			None,
+			StreamRuleContext::Discard,
+		);
+		let args = serde_json::from_str(r#"{"path":"src/main.rs","content":"remove this file"}"#)
+			.expect("valid tool JSON");
+		let call = ToolCall {
+			id:        ToolCallId::from("call-1"),
+			name:      Str::new_static("edit"),
+			arguments: omp_ai::OpaqueJson::new(args),
+		};
+		let verdict = watch.call_ready(0, &call);
+		let StreamVerdict::Interrupt(interrupt) = verdict else {
+			panic!("expected matching tool rule")
+		};
+		assert_eq!(interrupt.culprit, Some(ToolCallId::from("call-1")));
+
+		let mut gated = make_watch(
+			"remove this file",
+			&["tool:edit(src/**)"],
+			&["src/**"],
+			None,
+			StreamRuleContext::Discard,
+		);
+		let args = serde_json::from_str(r#"{"path":"docs/guide.md","content":"remove this file"}"#)
+			.expect("valid tool JSON");
+		let call = ToolCall {
+			id:        ToolCallId::from("call-2"),
+			name:      Str::new_static("edit"),
+			arguments: omp_ai::OpaqueJson::new(args),
+		};
+		assert!(matches!(gated.call_ready(0, &call), StreamVerdict::Pass));
+	}
+
+	#[test]
+	fn interrupt_mode_override_delivers_note_and_tool_diagnostics() {
+		let mut prose =
+			make_watch("forbidden", &["text"], &[], Some("never"), StreamRuleContext::Discard);
+		assert!(matches!(
+			prose.fragment(fragment(0, StreamSource::Text, b"forbidden")),
+			StreamVerdict::Pass
+		));
+		let StreamVerdict::Note(note) = prose.block_end(0) else {
+			panic!("never policy should record a note")
+		};
+		assert_eq!(note.developer.as_deref(), Some("Follow the repository rule."));
+
+		let mut tool =
+			make_watch("forbidden", &["tool:edit"], &[], Some("never"), StreamRuleContext::Discard);
+		let args = serde_json::from_str(r#"{"content":"forbidden"}"#).expect("valid tool JSON");
+		let call = ToolCall {
+			id:        ToolCallId::from("call-3"),
+			name:      Str::new_static("edit"),
+			arguments: omp_ai::OpaqueJson::new(args),
+		};
+		let StreamVerdict::Note(note) = tool.call_ready(0, &call) else {
+			panic!("expected non-interrupting note")
+		};
+		assert_eq!(note.call_diags.len(), 1);
+		assert_eq!(note.call_diags[0].0, call.id);
+	}
+
+	#[test]
+	fn invalid_path_glob_makes_rule_unreachable() {
+		let mut watch =
+			make_watch("forbidden", &["tool:edit"], &["["], None, StreamRuleContext::Discard);
+		let args = serde_json::from_str(r#"{"path":"src/main.rs","content":"forbidden"}"#)
+			.expect("valid tool JSON");
+		let call = ToolCall {
+			id:        ToolCallId::from("call-4"),
+			name:      Str::new_static("edit"),
+			arguments: omp_ai::OpaqueJson::new(args),
+		};
+		assert!(matches!(watch.call_ready(0, &call), StreamVerdict::Pass));
 	}
 }
