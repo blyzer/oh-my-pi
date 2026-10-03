@@ -35,7 +35,7 @@ use crate::{
 	id::{AccountId, PrincipalId},
 };
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const OAUTH_RENEWABLE_KIND: &str = "oauth-renewable-v1";
 
@@ -99,6 +99,55 @@ pub struct AuditedCredentialReveal {
 	/// Closed, non-secret purpose recorded for operator review.
 	pub reason:             Str,
 }
+
+/// Authenticated evidence durably committed with one extension OAuth import.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditedCredentialImport {
+	/// Extension importing the OAuth material.
+	pub extension:          Str,
+	/// Authenticated daemon principal which owns the CONTROL connection.
+	pub caller_principal:   Str,
+	/// Provider scope already authorized by the CONTROL boundary.
+	pub provider:           Str,
+	/// Active child incarnation.
+	pub host_generation:    u64,
+	/// Active session incarnation.
+	pub session_generation: u64,
+	/// Child-local request correlation, unique within the host generation.
+	pub request_id:         u64,
+	/// Closed, non-secret purpose recorded for operator review.
+	pub reason:             Str,
+}
+
+/// Secret-free operator projection of one credential reveal or import.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CredentialAuditEntry {
+	/// Audit action: `import_oauth` or `reveal`.
+	pub action:                Str,
+	/// Extension which performed the operation.
+	pub extension:             Str,
+	/// Authenticated daemon principal which owned the CONTROL connection.
+	pub caller_principal:      Str,
+	/// Provider namespace authorized by the CONTROL boundary.
+	pub provider:              Str,
+	/// Active child incarnation.
+	pub host_generation:       u64,
+	/// Active session incarnation.
+	pub session_generation:    u64,
+	/// Child-local request correlation id.
+	pub request_id:            u64,
+	/// Account affected by the operation.
+	pub account_id:            Str,
+	/// Credential principal bound to the account.
+	pub credential_principal:  Str,
+	/// Credential generation observed by the operation.
+	pub credential_generation: u64,
+	/// Closed, non-secret purpose recorded for operator review.
+	pub reason:                Str,
+	/// Operation time in Unix milliseconds.
+	pub observed_at_ms:        u64,
+}
+
 /// Authenticated request for one durable, facet-restricted scoped token.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScopedCredentialGrant {
@@ -330,6 +379,9 @@ pub enum StoreError {
 	/// Audited reveal evidence omitted an authenticated binding.
 	#[error("credential reveal audit context is invalid")]
 	InvalidRevealAudit,
+	/// Audited OAuth import evidence omitted an authenticated binding.
+	#[error("credential import audit context is invalid")]
+	InvalidImportAudit,
 	/// A retried reveal request changed its authenticated evidence.
 	#[error("credential reveal audit request conflicts with durable evidence")]
 	RevealAuditConflict,
@@ -406,7 +458,7 @@ impl CredentialStore {
 	where
 		S: AsRef<[u8]> + zeroize::Zeroize + ?Sized,
 	{
-		self.put_inner(write, None)
+		self.put_inner(write, None, None)
 	}
 
 	/// Canonically encodes and persists an imported renewable OAuth bundle.
@@ -414,21 +466,35 @@ impl CredentialStore {
 		&self,
 		import: OAuthCredentialImport,
 	) -> Result<CredentialMetadata, StoreError> {
+		self.import_oauth_bundle_with_audit(import, None)
+	}
+
+	/// Canonically encodes and persists an OAuth bundle with optional
+	/// authenticated audit evidence.
+	pub fn import_oauth_bundle_with_audit(
+		&self,
+		import: OAuthCredentialImport,
+		audit: Option<&AuditedCredentialImport>,
+	) -> Result<CredentialMetadata, StoreError> {
 		let expires_in = import
 			.expires_at
 			.duration_since(import.imported_at)
 			.unwrap_or(Duration::ZERO);
 		let bundle =
 			oauth::encode_imported_bundle(import.access_token, import.refresh_token, expires_in)?;
-		self.put_oauth_bundle(OAuthCredentialWrite {
-			account_id:          &import.account_id,
-			principal_id:        &import.principal_id,
-			bundle:              &bundle,
-			expires_at_ms:       Some(unix_ms(import.expires_at)?),
-			origin:              import.origin,
-			now_ms:              unix_ms(import.imported_at)?,
-			expected_generation: None,
-		})
+		self.put_oauth_bundle_inner(
+			OAuthCredentialWrite {
+				account_id:          &import.account_id,
+				principal_id:        &import.principal_id,
+				bundle:              &bundle,
+				expires_at_ms:       Some(unix_ms(import.expires_at)?),
+				origin:              import.origin,
+				now_ms:              unix_ms(import.imported_at)?,
+				expected_generation: None,
+			},
+			None,
+			audit,
+		)
 	}
 
 	/// Persists an OAuth-owned opaque renewable bundle atomically.
@@ -436,7 +502,7 @@ impl CredentialStore {
 		&self,
 		write: OAuthCredentialWrite<'_>,
 	) -> Result<CredentialMetadata, StoreError> {
-		self.put_oauth_bundle_inner(write, None)
+		self.put_oauth_bundle_inner(write, None, None)
 	}
 
 	/// Persists an OAuth-owned opaque bundle under a current refresh fencing
@@ -450,7 +516,7 @@ impl CredentialStore {
 		if write.account_id != &lease.account_id {
 			return Err(StoreError::LeaseLost);
 		}
-		self.put_oauth_bundle_inner(write, Some((lease, unix_ms(now)?)))
+		self.put_oauth_bundle_inner(write, Some((lease, unix_ms(now)?)), None)
 	}
 
 	/// Persists an OAuth bundle under the account coordinator's opaque refresh
@@ -469,6 +535,7 @@ impl CredentialStore {
 		&self,
 		write: OAuthCredentialWrite<'_>,
 		lease: Option<(&PersistentLease, u64)>,
+		audit: Option<&AuditedCredentialImport>,
 	) -> Result<CredentialMetadata, StoreError> {
 		self.put_inner(
 			CredentialWrite {
@@ -482,6 +549,7 @@ impl CredentialStore {
 				expected_generation: write.expected_generation,
 			},
 			lease,
+			audit,
 		)
 	}
 
@@ -511,13 +579,14 @@ impl CredentialStore {
 		if write.account_id != &lease.account_id {
 			return Err(StoreError::LeaseLost);
 		}
-		self.put_inner(write, Some((lease, unix_ms(now)?)))
+		self.put_inner(write, Some((lease, unix_ms(now)?)), None)
 	}
 
 	fn put_inner<S>(
 		&self,
 		write: CredentialWrite<'_, S>,
 		lease: Option<(&PersistentLease, u64)>,
+		audit: Option<&AuditedCredentialImport>,
 	) -> Result<CredentialMetadata, StoreError>
 	where
 		S: AsRef<[u8]> + zeroize::Zeroize + ?Sized,
@@ -610,6 +679,35 @@ impl CredentialStore {
 				blob.ciphertext,
 			],
 		)?;
+		if let Some(audit) = audit {
+			if audit.extension.is_empty()
+				|| audit.caller_principal.is_empty()
+				|| audit.provider.is_empty()
+				|| audit.reason.is_empty()
+			{
+				return Err(StoreError::InvalidImportAudit);
+			}
+			transaction.execute(
+				"INSERT INTO credential_import_audit (
+				 extension, caller_principal, provider, host_generation, session_generation,
+				 request_id, account_id, credential_principal, credential_generation, reason,
+				 observed_at_ms
+				 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+				params![
+					audit.extension.as_str(),
+					audit.caller_principal.as_str(),
+					audit.provider.as_str(),
+					audit.host_generation,
+					audit.session_generation,
+					audit.request_id,
+					write.account_id.as_str(),
+					write.principal_id.as_str(),
+					generation,
+					audit.reason.as_str(),
+					write.now_ms,
+				],
+			)?;
+		}
 		transaction.commit()?;
 		Ok(CredentialMetadata {
 			account_id: write.account_id.to_owned(),
@@ -759,6 +857,56 @@ impl CredentialStore {
 		}
 		let temporary = Secret::new(stored.secret.expose_secret().clone());
 		Ok(use_secret(&temporary))
+	}
+
+	/// Lists durable secret-free extension credential audit evidence for an
+	/// operator.
+	///
+	/// Results include OAuth imports and credential reveals, newest first. The
+	/// requested limit is capped at 1,000 rows to keep this diagnostic query
+	/// bounded.
+	pub fn credential_audit(
+		&self,
+		provider: Option<&str>,
+		extension: Option<&str>,
+		limit: usize,
+	) -> Result<Vec<CredentialAuditEntry>, StoreError> {
+		let limit = limit.min(1_000) as u32;
+		let connection = self.connection()?;
+		let mut statement = connection.prepare(
+			"SELECT * FROM (
+				 SELECT 'import_oauth' AS action, extension, caller_principal, provider,
+					host_generation, session_generation, request_id, account_id,
+					credential_principal, credential_generation, reason, observed_at_ms
+				 FROM credential_import_audit
+				 WHERE (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR extension = ?2)
+				 UNION ALL
+				 SELECT 'reveal' AS action, extension, caller_principal, provider,
+					host_generation, session_generation, request_id, account_id,
+					credential_principal, credential_generation, reason, observed_at_ms
+				 FROM credential_reveal_audit
+				 WHERE (?1 IS NULL OR provider = ?1) AND (?2 IS NULL OR extension = ?2)
+			 ) ORDER BY observed_at_ms DESC, extension, request_id LIMIT ?3",
+		)?;
+		let rows = statement.query_map(params![provider, extension, limit], |row| {
+			Ok(CredentialAuditEntry {
+				action:                Str::new(row.get::<_, String>(0)?),
+				extension:             Str::new(row.get::<_, String>(1)?),
+				caller_principal:      Str::new(row.get::<_, String>(2)?),
+				provider:              Str::new(row.get::<_, String>(3)?),
+				host_generation:       row.get(4)?,
+				session_generation:    row.get(5)?,
+				request_id:            row.get(6)?,
+				account_id:            Str::new(row.get::<_, String>(7)?),
+				credential_principal:  Str::new(row.get::<_, String>(8)?),
+				credential_generation: row.get(9)?,
+				reason:                Str::new(row.get::<_, String>(10)?),
+				observed_at_ms:        row.get(11)?,
+			})
+		})?;
+		rows
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(StoreError::from)
 	}
 
 	/// Mints or replays one idempotent, durable scoped-token grant.
@@ -1488,6 +1636,22 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
 		 );
 		 CREATE INDEX IF NOT EXISTS credential_reveal_audit_account
 		 ON credential_reveal_audit(account_id, observed_at_ms);
+		 CREATE TABLE IF NOT EXISTS credential_import_audit (
+			extension TEXT NOT NULL,
+			caller_principal TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			host_generation INTEGER NOT NULL,
+			session_generation INTEGER NOT NULL,
+			request_id INTEGER NOT NULL,
+			account_id TEXT NOT NULL,
+			credential_principal TEXT NOT NULL,
+			credential_generation INTEGER NOT NULL,
+			reason TEXT NOT NULL,
+			observed_at_ms INTEGER NOT NULL,
+			PRIMARY KEY (extension, host_generation, request_id)
+		 );
+		 CREATE INDEX IF NOT EXISTS credential_import_audit_account
+		 ON credential_import_audit(account_id, observed_at_ms);
 		 CREATE TABLE IF NOT EXISTS credential_scoped_grants (
 			extension TEXT NOT NULL,
 			caller_principal TEXT NOT NULL,
@@ -1582,6 +1746,7 @@ fn refresh_store_error(error: StoreError) -> RefreshStoreError {
 		StoreError::OAuth(_) => "oauth-bundle",
 		StoreError::InvalidTime => "invalid-time",
 		StoreError::InvalidRevealAudit => "invalid-reveal-audit",
+		StoreError::InvalidImportAudit => "invalid-import-audit",
 		StoreError::RevealAuditConflict => "reveal-audit-conflict",
 		StoreError::AccountState => "account-state",
 		StoreError::InvalidScopedGrant => "invalid-scoped-grant",

@@ -372,6 +372,7 @@ fn apply(
 				refresh_token: refresh,
 				expires_at_ms,
 				project,
+				audit: None,
 			})
 		},
 		AccountWrite::Key { secret, expires_at_ms } => control.store(CredentialControlWrite {

@@ -2,7 +2,7 @@
 
 use std::{future, future::Future, pin::Pin, sync::Arc};
 
-use omp_ai::{ChatRequest, ChatStream, ContentPart, Message, Role};
+use omp_ai::{ChatRequest, ChatStream, ContentPart, Message, Role, ToolCall};
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Handle, KnownTag, Node, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_journal::blob::{BlobStore, Error as BlobError};
@@ -23,6 +23,111 @@ const QUEUED: &str = "queued";
 
 /// One heap-pinned future at the cold, type-erased inference boundary.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Source category for one fragment observed during an inference response.
+#[derive(Clone, Copy)]
+pub enum StreamSource<'a> {
+	/// User-visible assistant text.
+	Text,
+	/// Assistant reasoning text.
+	Thinking,
+	/// Incremental JSON arguments for one tool call.
+	ToolArgs {
+		/// Provider call identity.
+		call_id: &'a str,
+		/// Tool name as declared by the provider.
+		tool:    &'a str,
+	},
+}
+
+/// One provider fragment offered to Director stream observers.
+#[derive(Clone, Copy)]
+pub struct StreamFragment<'a> {
+	/// Provider content-block index.
+	pub index:  u32,
+	/// Fragment source.
+	pub source: StreamSource<'a>,
+	/// Raw UTF-8 bytes received from the canonical event.
+	pub bytes:  &'a [u8],
+}
+
+/// Durable side effects requested by a stream observer.
+#[derive(Default)]
+pub struct StreamEffect {
+	/// Properties to apply to the observer's Director state.
+	pub updates:     Vec<StateUpdate>,
+	/// Model-visible developer text to append after the interrupted response.
+	pub developer:   Option<Str>,
+	/// Host-visible notice content.
+	pub notice:      Option<Str>,
+	/// Host-visible notice identity, defaulting to `stream-watch`.
+	pub notice_name: Option<Str>,
+	/// Diagnostics to attach to tool calls.
+	pub call_diags:  Vec<(omp_ai::ToolCallId, Str)>,
+}
+
+/// Request-scoped decision returned by a stream observer.
+pub enum StreamVerdict {
+	/// Continue folding the response.
+	Pass,
+	/// Continue while retaining durable effects.
+	Note(StreamEffect),
+	/// Stop the current response and resample in the same turn.
+	Interrupt(StreamInterrupt),
+}
+
+/// Instruction to redirect an in-progress inference response.
+pub struct StreamInterrupt {
+	/// Tool call that triggered the redirect, if any.
+	pub culprit: Option<omp_ai::ToolCallId>,
+	/// Whether partial assistant output remains in model context.
+	pub partial: PartialOutput,
+	/// Placeholder label for the triggering tool call.
+	pub label:   Str,
+	/// Durable effects to commit with the redirect.
+	pub effect:  StreamEffect,
+}
+
+/// Visibility of partial assistant output after a stream redirect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PartialOutput {
+	/// Exclude the partial assistant response and its calls from future context.
+	Discard,
+	/// Keep the partial response and settled call placeholders in context.
+	Keep,
+}
+
+/// Synchronous observer for one inference response.
+pub trait StreamWatch: Send {
+	/// Inspects a streamed fragment.
+	fn fragment(&mut self, fragment: StreamFragment<'_>) -> StreamVerdict;
+	/// Inspects the end of a content block.
+	fn block_end(&mut self, _index: u32) -> StreamVerdict {
+		StreamVerdict::Pass
+	}
+	/// Inspects a fully assembled tool call before execution admission.
+	fn call_ready(&mut self, _index: u32, _call: &ToolCall) -> StreamVerdict {
+		StreamVerdict::Pass
+	}
+	/// Inspects tool-authored text projected by the tool contract. The default
+	/// preserves ordinary `call_ready` behavior for watchers without this need.
+	fn call_ready_with_match_text(
+		&mut self,
+		index: u32,
+		call: &ToolCall,
+		_match_text: Option<&[omp_tool::StreamMatchText]>,
+	) -> StreamVerdict {
+		self.call_ready(index, call)
+	}
+}
+
+/// A request-scoped stream observer paired with its durable Director state.
+pub struct StreamObserver {
+	/// Active Director element whose state the observer may update.
+	pub director: Handle,
+	/// Synchronous observer for the current response.
+	pub watch:    Box<dyn StreamWatch>,
+}
 
 /// An exclusive resource claimed by a Director engagement.
 #[derive(
@@ -173,18 +278,37 @@ pub enum Verdict {
 /// Read-only facts available while preparing or judging one turn.
 pub struct DirectorCx<'a> {
 	/// Current `<turn>` element.
-	pub turn:  Handle,
+	pub turn:             Handle,
 	/// Catalog facts for the resolved route.
-	pub route: &'a RouteFacts,
-	node:      Option<&'a Node>,
-	director:  Option<Handle>,
+	pub route:            &'a RouteFacts,
+	/// Assistant response ordinal within the current session, including
+	/// completed responses in the current turn.
+	pub response_ordinal: u32,
+	/// Effective control plane, when composed by an interactive host.
+	pub con:              Option<&'a omp_con::Ctx>,
+	node:                 Option<&'a Node>,
+	director:             Option<Handle>,
 }
 
 impl<'a> DirectorCx<'a> {
 	/// Creates context for a turn before the stack selects a Director.
 	#[must_use]
 	pub const fn new(turn: Handle, route: &'a RouteFacts) -> Self {
-		Self { turn, route, node: None, director: None }
+		Self { turn, route, con: None, response_ordinal: 0, node: None, director: None }
+	}
+
+	/// Associates the effective control plane for convar-aware observers.
+	#[must_use]
+	pub const fn with_con(mut self, con: Option<&'a omp_con::Ctx>) -> Self {
+		self.con = con;
+		self
+	}
+
+	/// Sets the current assistant response ordinal.
+	#[must_use]
+	pub const fn with_response_ordinal(mut self, ordinal: u32) -> Self {
+		self.response_ordinal = ordinal;
+		self
 	}
 
 	/// Returns the current Director element handle.
@@ -209,10 +333,12 @@ impl<'a> DirectorCx<'a> {
 
 	const fn for_director<'b>(&'b self, director: Handle, node: &'b Node) -> DirectorCx<'b> {
 		DirectorCx {
-			turn:     self.turn,
-			route:    self.route,
-			node:     Some(node),
-			director: Some(director),
+			turn:             self.turn,
+			route:            self.route,
+			con:              self.con,
+			response_ordinal: self.response_ordinal,
+			node:             Some(node),
+			director:         Some(director),
 		}
 	}
 
@@ -466,6 +592,15 @@ pub trait Director: Send + Sync {
 
 	/// Refines a request synchronously. The stack walks outermost to innermost.
 	fn prepare_inference(&self, _cx: &DirectorCx<'_>, _req: &mut ChatRequest) {}
+
+	/// Opens an optional synchronous observer for one response.
+	fn watch_stream(
+		&self,
+		_cx: &DirectorCx<'_>,
+		_req: &ChatRequest,
+	) -> Option<Box<dyn StreamWatch>> {
+		None
+	}
 
 	/// Runs a cold auxiliary operation at a candidate yield, before the stack
 	/// judges it (the advisor's second-model review). Same boxed cold-path
@@ -892,6 +1027,27 @@ impl DirectorStack {
 				.director
 				.prepare_inference(&cx.for_director(frame.handle, node), req);
 		}
+	}
+
+	/// Opens request-scoped stream observers, ordered outermost to innermost.
+	#[must_use]
+	pub fn watch_stream(
+		&self,
+		dom: &Dom,
+		cx: &DirectorCx<'_>,
+		req: &ChatRequest,
+	) -> Vec<StreamObserver> {
+		self
+			.active
+			.iter()
+			.filter_map(|frame| {
+				let node = dom.get(frame.handle)?;
+				let watch = frame
+					.director
+					.watch_stream(&cx.for_director(frame.handle, node), req)?;
+				Some(StreamObserver { director: frame.handle, watch })
+			})
+			.collect()
 	}
 
 	/// Commits observation-derived state for every completed turn.

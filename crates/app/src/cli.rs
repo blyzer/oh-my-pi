@@ -2110,6 +2110,22 @@ pub struct AuthArgs {
 /// Typed authentication commands.
 #[derive(Clone, Debug, Subcommand)]
 pub enum AuthCommand {
+	/// Query durable extension credential audit records without exposing
+	/// secrets.
+	Audit {
+		/// Filter by exact provider identifier.
+		#[arg(long)]
+		provider:  Option<Str>,
+		/// Filter by exact extension identifier.
+		#[arg(long)]
+		extension: Option<Str>,
+		/// Maximum rows to print (capped at 1,000).
+		#[arg(long, default_value_t = 100)]
+		limit:     usize,
+		/// Emit machine-readable JSON.
+		#[arg(long)]
+		json:      bool,
+	},
 	/// Begin an interactive provider login.
 	Login {
 		/// Target provider identifier.

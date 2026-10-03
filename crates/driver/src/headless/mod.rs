@@ -50,6 +50,9 @@ pub enum HeadlessError {
 	/// Journal-backed session creation or replay failed.
 	#[error("session journal operation failed")]
 	Session(#[from] omp_session::SessionError),
+	/// The session's stream-rules Director could not be engaged.
+	#[error("stream-rules Director engagement failed")]
+	Director(#[from] omp_agent::DirectorError),
 	/// Artifact storage could not be opened.
 	#[error("artifact storage operation failed")]
 	Blob(#[from] omp_journal::blob::Error),

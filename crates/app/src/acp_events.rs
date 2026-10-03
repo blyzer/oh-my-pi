@@ -623,9 +623,6 @@ fn tool_content(name: &str, input: &JsonValue, output: &JsonValue) -> Vec<JsonVa
 	{
 		content.push(text_content(&limit_text(&format!("$ {command}"))));
 	}
-	if let Some(terminal_id) = find_string(output, "terminalId") {
-		content.push(json!({"type": "terminal", "terminalId": terminal_id}));
-	}
 	for diff in find_diffs(output) {
 		content.push(diff);
 	}
@@ -662,7 +659,6 @@ fn tool_content(name: &str, input: &JsonValue, output: &JsonValue) -> Vec<JsonVa
 		}) {
 		content.push(text_content(&limit_text(text)));
 	} else if blocks.is_none()
-		&& find_string(output, "terminalId").is_none()
 		&& output
 			.pointer("/details/images")
 			.and_then(JsonValue::as_array)
@@ -692,15 +688,6 @@ fn readable_text(value: &JsonValue) -> Option<&str> {
 		return Some(content);
 	}
 	None
-}
-
-fn find_string<'a>(value: &'a JsonValue, key: &str) -> Option<&'a str> {
-	value.get(key).and_then(JsonValue::as_str).or_else(|| {
-		value
-			.get("details")
-			.and_then(|details| details.get(key))
-			.and_then(JsonValue::as_str)
-	})
 }
 
 fn find_diffs(value: &JsonValue) -> Vec<JsonValue> {
@@ -851,10 +838,11 @@ mod tests {
 			.find(|update| update["sessionUpdate"] == "tool_call_update")
 			.expect("tool end");
 		assert_eq!(end["status"], "completed");
-		assert!(end["content"].as_array().is_some_and(|content| {
-			content
-				.iter()
-				.any(|item| item["type"] == "terminal" && item["terminalId"] == "term-1")
-		}));
+		let content = end["content"].as_array().expect("tool content");
+		assert!(
+			content.iter().all(|item| item["type"] != "terminal"),
+			"terminal/* is unused, so no tool card may embed a client terminal"
+		);
+		assert!(content.iter().any(|item| item["content"]["text"] == "ok"));
 	}
 }

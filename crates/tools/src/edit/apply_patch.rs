@@ -19,14 +19,15 @@ use omp_edit::{
 		patch::{Operation, apply_hunks},
 		sloppy::{
 			apply::{ApplyContext, apply_sloppy},
-			parse::split_sloppy_sections,
+			parse::{parse_operations as parse_sloppy_operations, split_sloppy_sections},
+			types::OperationRewrite,
 		},
 	},
 	store::EditStore,
 };
 use omp_tool::{
 	Abort, Constraint, Diag, DiagKind, Dialect, DocEffects, Effects, Ev, IncomingParams,
-	InterruptWaitError, Part, PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	InterruptWaitError, Part, PromptCaps, Rev, StreamMatchText, Tool, ToolSpec, ToolTerminal,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -455,6 +456,24 @@ impl<D: EditDocuments, P: EditInputParams> Tool for FreeformEditTool<D, P> {
 		&self.spec
 	}
 
+	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<StreamMatchText>> {
+		let input = if let Some(input) = arguments.get("input").and_then(serde_json::Value::as_str) {
+			input.to_owned()
+		} else if self.kind == FreeformKind::Patch {
+			let mut domain = arguments.clone();
+			if let Some(object) = domain.as_object_mut() {
+				object.remove("i");
+				object.remove("notrunc");
+			}
+			render_structured_patch(serde_json::from_value::<PatchParams>(domain).ok()?)
+				.ok()?
+				.to_string()
+		} else {
+			return Some(Vec::new());
+		};
+		Some(project_authored_text(self.kind, &input))
+	}
+
 	fn call<'c>(
 		&'c self,
 		mut params: IncomingParams<'c>,
@@ -759,6 +778,60 @@ impl<D: EditDocuments, P: EditInputParams> Tool for FreeformEditTool<D, P> {
 	}
 }
 
+fn project_authored_text(kind: FreeformKind, input: &str) -> Vec<StreamMatchText> {
+	let Ok(operations) = parse_operations(kind, input) else {
+		return Vec::new();
+	};
+	let mut segments = Vec::new();
+	for operation in operations {
+		match operation {
+			AuthoredOperation::Foreign(operation) => {
+				let Some(diff) = operation.diff.as_deref() else {
+					continue;
+				};
+				let text = if operation.op == Operation::Create {
+					diff.to_owned()
+				} else {
+					diff
+						.lines()
+						.filter_map(|line| line.strip_prefix('+').filter(|_| !line.starts_with("+++ ")))
+						.collect::<Vec<_>>()
+						.join("\n")
+				};
+				if !text.is_empty() {
+					segments.push(StreamMatchText {
+						path: Some(Str::new(operation.rename.as_deref().unwrap_or(&operation.path))),
+						text: Str::new(text),
+					});
+				}
+			},
+			AuthoredOperation::Sloppy { path, input } => {
+				let Ok(operations) = parse_sloppy_operations(&input, "") else {
+					continue;
+				};
+				for operation in operations {
+					match operation.rewrite {
+						OperationRewrite::Explicit { text } if !text.is_empty() => {
+							segments
+								.push(StreamMatchText { path: Some(path.clone()), text: Str::new(text) });
+						},
+						OperationRewrite::Inline { replacements } => {
+							for text in replacements.into_iter().filter(|text| !text.is_empty()) {
+								segments.push(StreamMatchText {
+									path: Some(path.clone()),
+									text: Str::new(text),
+								});
+							}
+						},
+						OperationRewrite::Explicit { .. } => {},
+					}
+				}
+			},
+		}
+	}
+	segments
+}
+
 fn parse_operations(kind: FreeformKind, input: &str) -> Result<Vec<AuthoredOperation>, String> {
 	match kind {
 		FreeformKind::PatchLegacy | FreeformKind::Patch | FreeformKind::ApplyPatch => {
@@ -888,6 +961,40 @@ mod tests {
 		let params: FreeformEditParams =
 			serde_json::from_str(r#"{"input":"x","provider_cache":true}"#).expect("extras ignored");
 		assert_eq!(params.input, "x");
+	}
+
+	#[test]
+	fn stream_rule_projection_covers_patch_apply_patch_and_sloppy_additions() {
+		let patch = project_authored_text(
+			FreeformKind::ApplyPatch,
+			"*** Begin Patch\n*** Update File: src/a.rs\n@@\n-removed\n+added\n*** End Patch",
+		);
+		assert_eq!(patch.len(), 1);
+		assert_eq!(patch[0].path.as_deref(), Some("src/a.rs"));
+		assert_eq!(patch[0].text, "added");
+
+		let structured = render_structured_patch(PatchParams {
+			path:  "src/new.rs".into(),
+			edits: vec![PatchEditEntry {
+				op:     Some(PatchOp::Create),
+				rename: None,
+				diff:   Some("new file text".into()),
+			}],
+		})
+		.expect("structured create");
+		let structured = project_authored_text(FreeformKind::Patch, &structured);
+		assert_eq!(structured.len(), 1);
+		assert_eq!(structured[0].path.as_deref(), Some("src/new.rs"));
+		assert_eq!(structured[0].text, "new file text\n");
+
+		let sloppy = project_authored_text(
+			FreeformKind::Sloppy,
+			"<SM:EDIT path=\"src/sloppy.rs\">\n<SM:FIND>\nremoved\n</SM:FIND>\n<SM:PUT>\nadded\n</SM:\
+			 PUT>\n</SM:EDIT>",
+		);
+		assert_eq!(sloppy.len(), 1);
+		assert_eq!(sloppy[0].path.as_deref(), Some("src/sloppy.rs"));
+		assert_eq!(sloppy[0].text, "added");
 	}
 
 	#[test]

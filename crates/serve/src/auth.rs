@@ -819,6 +819,7 @@ impl pb::auth_server::Auth for AuthRpc {
 				refresh_token: SecretString::from(request.refresh_token),
 				expires_at_ms: (request.expires_at_ms != 0).then_some(request.expires_at_ms),
 				project: None,
+				audit: None,
 			})
 			.map_err(store_status)?;
 		Ok(Response::new(self.control_meta(account)?))
@@ -1151,6 +1152,14 @@ fn store_status(error: auth::StoreError) -> Status {
 				rpc.service = "auth",
 				rpc.method = "reveal_credential",
 				"credential reveal audit rejected"
+			);
+			Status::permission_denied(error.to_string())
+		},
+		auth::StoreError::InvalidImportAudit => {
+			tracing::warn!(
+				rpc.service = "auth",
+				rpc.method = "import_o_auth",
+				"credential import audit rejected"
 			);
 			Status::permission_denied(error.to_string())
 		},
