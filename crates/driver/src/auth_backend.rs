@@ -13,10 +13,10 @@ use std::{
 use omp_ai::{
 	AccountId, PrincipalId, auth,
 	auth::{
-		APP_HEADER, AuditedCredentialReveal, AuthControlHandle, CommandCredentialError,
-		CommandCredentialExecutor, CommandExecutionFuture, CredentialControlWrite, CredentialGrants,
-		HOSTNAME_HEADER, INSTALL_ID_HEADER, OAuthControlImport, ScopedCredentialGrant,
-		UsageAttribution,
+		APP_HEADER, AuditedCredentialImport, AuditedCredentialReveal, AuthControlHandle,
+		CommandCredentialError, CommandCredentialExecutor, CommandExecutionFuture,
+		CredentialControlWrite, CredentialGrants, HOSTNAME_HEADER, INSTALL_ID_HEADER,
+		OAuthControlImport, ScopedCredentialGrant, UsageAttribution,
 	},
 };
 use omp_core::{EnvPath, ExposeSecret as _, InvocationPhase, Secret, SecretString, Str};
@@ -339,6 +339,15 @@ impl ControlAuthority for CredentialSecretControlAuthority {
 						refresh_token: refresh,
 						expires_at_ms: optional_u64(&arguments, "expires_at_ms")?,
 						project: None,
+						audit: Some(AuditedCredentialImport {
+							extension:          context.connection.extension.clone(),
+							caller_principal:   Str::from(context.connection.principal.id()),
+							provider:           Str::from(self.provider(&arguments)?),
+							host_generation:    context.connection.host_generation,
+							session_generation: context.connection.session_generation,
+							request_id:         context.request_id,
+							reason:             Str::new_static("extension_control_import_oauth"),
+						}),
 					})
 					.map_err(store_control_error)?;
 				self.metadata_value(account)
@@ -1294,9 +1303,9 @@ fn store_control_error(error: auth::StoreError) -> ControlProtocolError {
 		auth::StoreError::GenerationConflict | auth::StoreError::RevealAuditConflict => {
 			control_error("CredentialConflict", error.to_string())
 		},
-		auth::StoreError::InvalidRevealAudit | auth::StoreError::InvalidScopedGrant => {
-			control_error("PermissionError", error.to_string())
-		},
+		auth::StoreError::InvalidRevealAudit
+		| auth::StoreError::InvalidImportAudit
+		| auth::StoreError::InvalidScopedGrant => control_error("PermissionError", error.to_string()),
 		_ => control_error("CredentialStoreError", error.to_string()),
 	}
 }

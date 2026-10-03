@@ -2,8 +2,8 @@
 
 The host restricts every operation to providers named by the extension's
 ``credentials.allow`` declaration. Secret disclosure through :func:`reveal`
-additionally requires the ``credentials.reveal`` grant and is journaled by the
-host; ordinary operations expose metadata or short-lived scoped tokens only.
+additionally requires the ``credentials.reveal`` grant and is durably audited
+by the host; ordinary operations expose metadata or short-lived scoped tokens only.
 """
 
 from __future__ import annotations
