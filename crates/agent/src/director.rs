@@ -25,6 +25,7 @@ const QUEUED: &str = "queued";
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Source category for one fragment observed during an inference response.
+#[derive(Clone, Copy)]
 pub enum StreamSource<'a> {
 	/// User-visible assistant text.
 	Text,
@@ -40,6 +41,7 @@ pub enum StreamSource<'a> {
 }
 
 /// One provider fragment offered to Director stream observers.
+#[derive(Clone, Copy)]
 pub struct StreamFragment<'a> {
 	/// Provider content-block index.
 	pub index:  u32,
@@ -53,13 +55,15 @@ pub struct StreamFragment<'a> {
 #[derive(Default)]
 pub struct StreamEffect {
 	/// Properties to apply to the observer's Director state.
-	pub updates:    Vec<StateUpdate>,
+	pub updates:     Vec<StateUpdate>,
 	/// Model-visible developer text to append after the interrupted response.
-	pub developer:  Option<Str>,
+	pub developer:   Option<Str>,
 	/// Host-visible notice content.
-	pub notice:     Option<Str>,
+	pub notice:      Option<Str>,
+	/// Host-visible notice identity, defaulting to `stream-watch`.
+	pub notice_name: Option<Str>,
 	/// Diagnostics to attach to tool calls.
-	pub call_diags: Vec<(omp_ai::ToolCallId, Str)>,
+	pub call_diags:  Vec<(omp_ai::ToolCallId, Str)>,
 }
 
 /// Request-scoped decision returned by a stream observer.
@@ -105,6 +109,14 @@ pub trait StreamWatch: Send {
 	fn call_ready(&mut self, _index: u32, _call: &ToolCall) -> StreamVerdict {
 		StreamVerdict::Pass
 	}
+}
+
+/// A request-scoped stream observer paired with its durable Director state.
+pub struct StreamObserver {
+	/// Active Director element whose state the observer may update.
+	pub director: Handle,
+	/// Synchronous observer for the current response.
+	pub watch:    Box<dyn StreamWatch>,
 }
 
 /// An exclusive resource claimed by a Director engagement.
@@ -993,15 +1005,16 @@ impl DirectorStack {
 		dom: &Dom,
 		cx: &DirectorCx<'_>,
 		req: &ChatRequest,
-	) -> Vec<Box<dyn StreamWatch>> {
+	) -> Vec<StreamObserver> {
 		self
 			.active
 			.iter()
 			.filter_map(|frame| {
 				let node = dom.get(frame.handle)?;
-				frame
+				let watch = frame
 					.director
-					.watch_stream(&cx.for_director(frame.handle, node), req)
+					.watch_stream(&cx.for_director(frame.handle, node), req)?;
+				Some(StreamObserver { director: frame.handle, watch })
 			})
 			.collect()
 	}
