@@ -549,7 +549,7 @@ impl AcpDocumentBackend for EditorBuffers {
 		self
 			.0
 			.upgrade()
-			.map_or(AcpSettings::default().fs_timeout, |shared| shared.settings.fs_timeout)
+			.map_or_else(|| AcpSettings::default().fs_timeout, |shared| shared.settings.fs_timeout)
 	}
 
 	fn read_text(

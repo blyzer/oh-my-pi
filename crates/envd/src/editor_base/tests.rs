@@ -179,6 +179,9 @@ fn kind(kind: DiagKind) -> Str {
 	Str::new_static(kind.into())
 }
 
+/// Expected conflict spans: (buffer lines, disk lines), one-based inclusive.
+type Spans = &'static [((usize, usize), (usize, usize))];
+
 /// What one table row expects of the effective base.
 #[derive(Debug)]
 enum Expect {
@@ -187,7 +190,7 @@ enum Expect {
 	/// E is these bytes; these diag kinds are attached.
 	Editor(&'static str, &'static [DiagKind]),
 	/// The anchored merge conflicts at these (buffer, disk) line spans.
-	Conflict(&'static [((usize, usize), (usize, usize))]),
+	Conflict(Spans),
 }
 
 struct Row {
@@ -738,8 +741,15 @@ fn a_new_binding_starts_unanchored() {
 }
 
 fn text() -> impl Strategy<Value = String> {
-	prop::collection::vec(prop::sample::select(vec!["a", "b", "c", "dd", ""]), 0..8)
-		.prop_map(|lines| lines.iter().map(|line| format!("{line}\n")).collect())
+	prop::collection::vec(prop::sample::select(vec!["a", "b", "c", "dd", ""]), 0..8).prop_map(
+		|lines| {
+			lines.iter().fold(String::new(), |mut text, line| {
+				text.push_str(line);
+				text.push('\n');
+				text
+			})
+		},
+	)
 }
 
 /// Encodes LF `text` with CRLF endings and/or a BOM.
@@ -825,7 +835,7 @@ proptest! {
 		let proposal = Bytes::from(proposal);
 		// A second host prepends a line on disk after the prepare.
 		let head = Bytes::from(format!("header\n{disk}"));
-		let base_on_disk = Bytes::from(disk.clone());
+		let base_on_disk = Bytes::from(disk);
 		// The commit: E's divergence from D plus the agent's line, rebased by
 		// the authority onto the moved head.
 		if let Ok(Ok(committed)) = rebase_content(&base_on_disk, &head, &proposal) {

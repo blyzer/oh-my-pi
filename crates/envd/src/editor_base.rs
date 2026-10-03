@@ -123,7 +123,7 @@ impl Lineages {
 /// session runtime state, never a second source of truth: it only decides
 /// which bytes a tool treats as its base.
 #[derive(Debug)]
-pub(crate) struct EditorSession {
+pub struct EditorSession {
 	deadline: Duration,
 	lineages: Mutex<Lineages>,
 }
@@ -131,7 +131,7 @@ pub(crate) struct EditorSession {
 impl EditorSession {
 	/// Starts an unanchored binding whose requests wait at most `deadline`
 	/// (zero means the default).
-	pub(crate) fn new(deadline: Duration) -> Self {
+	pub fn new(deadline: Duration) -> Self {
 		Self {
 			deadline: if deadline.is_zero() {
 				DEFAULT_DEADLINE
@@ -143,7 +143,7 @@ impl EditorSession {
 	}
 
 	/// Deadline for each editor request of this binding.
-	pub(crate) const fn deadline(&self) -> Duration {
+	pub const fn deadline(&self) -> Duration {
 		self.deadline
 	}
 
@@ -200,14 +200,14 @@ impl EditorSession {
 
 /// The editor bound to an invoking connection plus its binding's anchors.
 #[derive(Clone)]
-pub(crate) struct EditorRoute {
+pub struct EditorRoute {
 	backend: Arc<dyn AcpDocumentBackend>,
 	session: Arc<EditorSession>,
 }
 
 impl EditorRoute {
 	/// Pairs an editor with the anchor table of its binding.
-	pub(crate) fn new(backend: Arc<dyn AcpDocumentBackend>, session: Arc<EditorSession>) -> Self {
+	pub fn new(backend: Arc<dyn AcpDocumentBackend>, session: Arc<EditorSession>) -> Self {
 		Self { backend, session }
 	}
 
@@ -226,7 +226,7 @@ impl EditorRoute {
 
 /// How the effective base relates to the disk head.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Choice {
+pub enum Choice {
 	/// B ≡ D: disk is the base, and B anchors.
 	Clean,
 	/// B ≡ K or an earlier disk revision: the editor has not reloaded, so
@@ -243,15 +243,15 @@ pub(crate) enum Choice {
 
 /// A base choice plus the normalized inputs it was made from.
 #[derive(Clone, Debug)]
-pub(crate) struct Selection {
+pub struct Selection {
 	/// The choice.
-	pub(crate) choice: Choice,
+	pub(super) choice: Choice,
 	/// B normalized to LF without BOM: what an anchor stores.
-	pub(crate) buffer: Bytes,
+	pub(super) buffer: Bytes,
 	/// D normalized to LF without BOM.
-	pub(crate) disk:   Bytes,
+	pub(super) disk:   Bytes,
 	/// The anchor K the choice was made against.
-	pub(crate) anchor: Option<Bytes>,
+	pub(super) anchor: Option<Bytes>,
 }
 
 /// Text with any BOM removed and every line ending normalized to LF.
@@ -293,7 +293,7 @@ fn encode_like(disk: &str, text: &[u8]) -> Bytes {
 
 /// ADR 0037 §3's base selection, a pure function of D, B, K and the retained
 /// disk revisions.
-pub(crate) fn select_base(
+pub fn select_base(
 	disk: &str,
 	buffer: &str,
 	anchor: Option<&Bytes>,
@@ -326,7 +326,7 @@ pub(crate) fn select_base(
 
 /// Records K := B once the authority committed an edit whose base was B.
 #[derive(Debug)]
-pub(crate) struct CommitAnchor {
+pub struct CommitAnchor {
 	session: Arc<EditorSession>,
 	path:    Str,
 	buffer:  Bytes,
@@ -335,20 +335,20 @@ pub(crate) struct CommitAnchor {
 impl CommitAnchor {
 	/// The commit is durable: the buffer is now part of the authority's
 	/// lineage, so an editor that has not reloaded reads as stale-clean.
-	pub(crate) fn committed(self) {
+	pub fn committed(self) {
 		self.session.anchor(&self.path, self.buffer);
 	}
 }
 
 /// The base a Read or Edit uses for one document.
 #[derive(Debug, Default)]
-pub(crate) struct EffectiveBase {
+pub struct EffectiveBase {
 	/// E when it differs from the disk head; `None` means disk is the base.
-	pub(crate) bytes:     Option<Bytes>,
+	pub(super) bytes:     Option<Bytes>,
 	/// Notices for the tool element.
-	pub(crate) diags:     Vec<Diag>,
+	pub(super) diags:     Vec<Diag>,
 	/// Anchor to record once a commit used this base.
-	pub(crate) on_commit: Option<CommitAnchor>,
+	pub(super) on_commit: Option<CommitAnchor>,
 }
 
 impl EffectiveBase {
@@ -366,24 +366,24 @@ impl EffectiveBase {
 
 /// One conflicting range, as one-based inclusive line spans.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ConflictLines {
+pub struct ConflictLines {
 	/// Lines in the anchor K (the typed ranges' own coordinates).
-	pub(crate) anchor: (usize, usize),
+	pub(super) anchor: (usize, usize),
 	/// The same span projected into the editor buffer B.
-	pub(crate) buffer: (usize, usize),
+	pub(super) buffer: (usize, usize),
 	/// The same span projected into the disk head D.
-	pub(crate) disk:   (usize, usize),
+	pub(super) disk:   (usize, usize),
 }
 
 /// The user's unsaved changes overlap a disk change made since the anchor.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EditorConflict {
+pub struct EditorConflict {
 	/// Canonical path of the document.
-	pub(crate) path:   Str,
+	pub(super) path:   Str,
 	/// Typed conflicting ranges in K's normalized byte coordinates.
-	pub(crate) ranges: Vec<ByteRange>,
+	pub(super) ranges: Vec<ByteRange>,
 	/// The ranges as line spans in K, B and D.
-	pub(crate) lines:  Vec<ConflictLines>,
+	pub(super) lines:  Vec<ConflictLines>,
 }
 
 impl EditorConflict {
@@ -410,7 +410,7 @@ impl EditorConflict {
 	}
 
 	/// The warning a Read attaches when it falls back to disk.
-	pub(crate) fn diag(&self) -> Diag {
+	pub fn diag(&self) -> Diag {
 		let mut text = format!(
 			"unsaved editor changes to {} overlap a change on disk; read the file on disk",
 			self.path
@@ -498,10 +498,10 @@ impl DocumentHost {
 	/// binding for an invocation over the environment wire, or this host's
 	/// in-process binding for a native call made by the owning composition's
 	/// kernel (an embedded environment runs its native tools in-process).
-	pub(crate) fn editor_route(&self) -> Option<EditorRoute> {
+	pub fn editor_route(&self) -> Option<EditorRoute> {
 		match super::tools::invocation_acp_documents() {
-			Some(connection) => connection,
-			None => self.in_process_editor(),
+			super::tools::InvocationEditor::Connection(route) => route,
+			super::tools::InvocationEditor::InProcess => self.in_process_editor(),
 		}
 	}
 
@@ -513,7 +513,7 @@ impl DocumentHost {
 	/// Otherwise the editor's buffer is read once. A conflicting anchored merge
 	/// is returned as the error; every other outcome, including a failed read,
 	/// yields a base.
-	pub(crate) async fn editor_base(
+	pub async fn editor_base(
 		&self,
 		head: &pb::DocumentHead,
 		disk: &[u8],
@@ -573,7 +573,7 @@ impl DocumentHost {
 	/// reloaded reads as stale-clean instead of reverting the write. `None`
 	/// without a bound editor, for an ineligible path, or when the editor
 	/// cannot answer.
-	pub(crate) async fn editor_superseded(&self, path: &Path) -> Option<CommitAnchor> {
+	pub async fn editor_superseded(&self, path: &Path) -> Option<CommitAnchor> {
 		let route = self.editor_route()?;
 		let root = file_path(self.hello().root_uri.as_str())?;
 		let metadata = std::fs::metadata(path).ok()?;

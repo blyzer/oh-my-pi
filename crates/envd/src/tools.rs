@@ -165,7 +165,7 @@ pub(super) struct InvocationAcpBackends {
 }
 
 impl InvocationAcpBackends {
-	pub(super) fn new(documents: Option<super::editor_base::EditorRoute>) -> Self {
+	pub(super) const fn new(documents: Option<super::editor_base::EditorRoute>) -> Self {
 		Self { documents }
 	}
 }
@@ -3494,15 +3494,22 @@ pub(super) async fn with_acp_scope<T>(
 	ACP_BACKENDS.scope(context, future).await
 }
 
-/// The editor of the invoking environment connection: `Some(route)` when that
-/// connection bound one, `Some(None)` when it did not, and `None` outside any
-/// connection invocation (an in-process native call by the composition's own
-/// kernel). A connection never reaches another connection's editor, which is
-/// what keeps subagents (their own compositions) off the parent's editor.
-pub(super) fn invocation_acp_documents() -> Option<Option<super::editor_base::EditorRoute>> {
+/// Which editor binding governs the current call.
+pub enum InvocationEditor {
+	/// An invocation over an environment connection: only that connection's
+	/// binding, if it made one. A connection never reaches another
+	/// connection's editor, which keeps subagents (their own compositions)
+	/// off the parent's editor.
+	Connection(Option<super::editor_base::EditorRoute>),
+	/// An in-process native call by the composition's own kernel.
+	InProcess,
+}
+
+/// Classifies the current call for editor access.
+pub fn invocation_acp_documents() -> InvocationEditor {
 	ACP_BACKENDS
 		.try_with(|context| context.documents.clone())
-		.ok()
+		.map_or(InvocationEditor::InProcess, InvocationEditor::Connection)
 }
 
 /// Returns the caller-selected output policy for the current invocation.
