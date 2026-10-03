@@ -1511,6 +1511,15 @@ impl ComposedInference {
 		}
 	}
 
+	/// The seam through which an ACP adapter binds its editor as the document
+	/// base of this composition's environment (ADR 0037 §1.2). The handle is
+	/// cloneable, so the adapter can rebind on session switches while a turn
+	/// owns the kernel.
+	#[must_use]
+	pub fn editor_documents(&self) -> omp_envd::EditorDocuments {
+		self.environment().editor_documents()
+	}
+
 	/// Borrows the project environment retained by this composition (MCP
 	/// inspection, extension reload).
 	#[must_use]

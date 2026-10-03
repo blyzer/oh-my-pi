@@ -16,7 +16,7 @@ use omp_ai::{
 use omp_app::{
 	acp_client::{
 		AcpClient, AcpFs, AcpSettings, AuthCapabilities, ClientCapabilities, ClientMethod,
-		ClientRequestError, FileSystemCapabilities,
+		ClientRequestError, EditorDocumentsHost, FileSystemCapabilities,
 	},
 	acp_mode::AcpConnection,
 };
@@ -25,6 +25,7 @@ use omp_driver::{
 	headless::kernel::{KernelOptions, SessionHome},
 	sessions::SessionRegistry,
 };
+use omp_envd::docs::{AcpDocumentBackend, EditorIoError};
 use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::Registry;
@@ -39,6 +40,8 @@ enum Script {
 	TextAndImage(&'static str, &'static [u8]),
 	/// One call of the gated test tool with this command.
 	GatedCall(&'static str),
+	/// One call of the named tool with these JSON arguments.
+	Call(&'static str, &'static str),
 }
 
 struct ScriptedInference {
@@ -103,11 +106,21 @@ impl Inference for ScriptedInference {
 				.map(Ok);
 				ChatStream::ordinary(Box::pin(futures::stream::iter(events)))
 			},
-			Script::GatedCall(command) => {
-				let arguments = serde_json::json!({"command": command});
+			Script::GatedCall(_) | Script::Call(..) => {
+				let (id, name, arguments) = match script {
+					Script::GatedCall(command) => {
+						("call-gated", "gated", serde_json::json!({"command": command}))
+					},
+					Script::Call(name, arguments) => (
+						"call-tool",
+						name,
+						serde_json::from_str(arguments).expect("scripted tool arguments"),
+					),
+					_ => unreachable!("tool-call scripts only"),
+				};
 				let call = omp_ai::ToolCall {
-					id:        "call-gated".into(),
-					name:      Str::new_static("gated"),
+					id:        id.into(),
+					name:      Str::new_static(name),
 					arguments: omp_ai::call::OpaqueJson::new(arguments.clone()),
 				};
 				let events = vec![
@@ -798,13 +811,26 @@ impl FakeEditor {
 async fn with_editor<F, Fut>(
 	directory: &tempfile::TempDir,
 	settings: AcpSettings,
+	parts: (Kernel<ScriptedInference>, Session, SessionHome),
+	script: F,
+) where
+	F: FnOnce(AcpClient, FakeEditor) -> Fut,
+	Fut: Future<Output = ()>,
+{
+	serve_editor(directory.path(), AcpConnection::new(settings), parts, script).await;
+}
+
+/// Serves `connection` to a [`FakeEditor`] rooted at `root`, driven by
+/// `script`, which must end by calling [`FakeEditor::close`].
+async fn serve_editor<F, Fut>(
+	root: &std::path::Path,
+	connection: AcpConnection,
 	(kernel, session, home): (Kernel<ScriptedInference>, Session, SessionHome),
 	script: F,
 ) where
 	F: FnOnce(AcpClient, FakeEditor) -> Fut,
 	Fut: Future<Output = ()>,
 {
-	let connection = AcpConnection::new(settings);
 	let client = connection.client();
 	let (client_io, server_io) = tokio::io::duplex(64 * 1024);
 	let (server_read, server_write) = tokio::io::split(server_io);
@@ -813,7 +839,7 @@ async fn with_editor<F, Fut>(
 		write: client_write,
 		lines: BufReader::new(client_read).lines(),
 		seen:  Vec::new(),
-		root:  std::fs::canonicalize(directory.path()).expect("canonical root"),
+		root:  std::fs::canonicalize(root).expect("canonical root"),
 	};
 	let server = tokio::spawn(connection.serve(kernel, session, home, server_read, server_write));
 	tokio::time::timeout(std::time::Duration::from_secs(20), script(client, editor))
@@ -1382,4 +1408,284 @@ async fn blank_and_malformed_frames_keep_the_connection_serving() {
 		editor.close().await;
 	})
 	.await;
+}
+
+/// Records every editor binding the connection makes into the environment.
+#[derive(Default)]
+struct RecordingDocuments {
+	binds: Mutex<Vec<Option<Arc<dyn AcpDocumentBackend>>>>,
+}
+
+impl EditorDocumentsHost for RecordingDocuments {
+	fn bind(&self, editor: Option<Arc<dyn AcpDocumentBackend>>) {
+		self.binds.lock().push(editor);
+	}
+}
+
+impl RecordingDocuments {
+	/// Whether each bind so far bound an editor (`true`) or unbound it.
+	fn bound(&self) -> Vec<bool> {
+		self.binds.lock().iter().map(Option::is_some).collect()
+	}
+
+	/// The editor of the latest bind.
+	fn latest(&self) -> Arc<dyn AcpDocumentBackend> {
+		self
+			.binds
+			.lock()
+			.last()
+			.cloned()
+			.flatten()
+			.expect("the latest bind bound an editor")
+	}
+}
+
+/// The editor is bound into the environment as the document base only while
+/// the live session is eligible (ADR 0037 §1.2, §2): the capability is
+/// advertised and the session was made live with a matching `cwd`. Every
+/// switch rebinds (a fresh, unanchored binding); a withdrawn capability,
+/// `session/close` and EOF unbind. The bound editor reads through the gated
+/// `fs/read_text_file` of the live session, and never sends a path outside the
+/// project root.
+#[tokio::test]
+async fn the_editor_is_bound_as_the_document_base_only_while_the_session_is_eligible() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	let documents = Arc::new(RecordingDocuments::default());
+	let settings =
+		AcpSettings { fs_timeout: std::time::Duration::from_secs(3), ..AcpSettings::default() };
+	let connection = AcpConnection::new(settings);
+	connection.bind_documents(Arc::clone(&documents) as Arc<dyn EditorDocumentsHost>);
+	let recorded = Arc::clone(&documents);
+	serve_editor(directory.path(), connection, parts, |_client, mut editor| async move {
+		editor
+			.initialize(serde_json::json!({"terminal": true}))
+			.await;
+		editor.initialize(fs_capabilities()).await;
+		editor
+			.call("bare", "session/new", serde_json::json!({}))
+			.await;
+		assert!(recorded.bound().is_empty(), "no eligible session yet: {:?}", recorded.bound());
+
+		let first = editor.eligible_session("first").await;
+		assert_eq!(recorded.bound(), [true]);
+		let backend = recorded.latest();
+		assert_eq!(backend.deadline(), std::time::Duration::from_secs(3), "sv_acp_fs_timeout");
+		let path = editor.root.join("notes.md");
+		let wire_path = Str::new(path.to_str().expect("UTF-8 path"));
+		let read = tokio::spawn({
+			let backend = Arc::clone(&backend);
+			let wire_path = wire_path.clone();
+			async move { backend.read_text(wire_path).await }
+		});
+		let request = editor.request("fs/read_text_file").await;
+		assert_eq!(
+			request["params"],
+			serde_json::json!({"sessionId": first, "path": wire_path.as_str()})
+		);
+		editor
+			.answer(&request, serde_json::json!({"content": "unsaved buffer"}))
+			.await;
+		assert_eq!(read.await.expect("read task").expect("buffer").as_str(), "unsaved buffer");
+		assert_eq!(
+			backend
+				.read_text(Str::new_static("/definitely/elsewhere.md"))
+				.await
+				.expect_err("outside the project"),
+			EditorIoError::Unavailable,
+			"a path outside the project root is never sent"
+		);
+
+		editor.eligible_session("second").await;
+		assert_eq!(recorded.bound(), [true, true], "a switch rebinds, unanchored");
+		editor.initialize(serde_json::json!({})).await;
+		assert_eq!(recorded.bound(), [true, true, false], "a withdrawn capability unbinds");
+		editor.initialize(fs_capabilities()).await;
+		assert_eq!(recorded.bound(), [true, true, false, true]);
+		editor
+			.call("close", "session/close", serde_json::json!({}))
+			.await;
+		assert_eq!(recorded.bound(), [true, true, false, true, false], "session/close unbinds");
+		assert_eq!(
+			backend.read_text(wire_path).await.expect_err("closed"),
+			EditorIoError::Unavailable,
+			"an editor kept past its binding reaches nothing"
+		);
+		editor.eligible_session("third").await;
+		editor.quiet("probe").await;
+		let frames = editor.close().await;
+		assert_eq!(recorded.bound(), [true, true, false, true, false, true, false], "EOF unbinds");
+		assert_eq!(
+			frames
+				.iter()
+				.filter(|frame| frame["method"] == "fs/read_text_file")
+				.count(),
+			1,
+			"only the eligible read reached the editor"
+		);
+	})
+	.await;
+}
+
+/// Without the capability, or with `sv_acp_fs off`, no editor is ever bound,
+/// even for an eligible session.
+#[tokio::test]
+async fn no_capability_or_sv_acp_fs_off_never_binds_the_editor() {
+	for (settings, capabilities) in [
+		(AcpSettings::default(), serde_json::json!({"terminal": true})),
+		(AcpSettings { fs: AcpFs::Off, ..AcpSettings::default() }, fs_capabilities()),
+	] {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let parts = harness(&directory, []);
+		let documents = Arc::new(RecordingDocuments::default());
+		let connection = AcpConnection::new(settings);
+		connection.bind_documents(Arc::clone(&documents) as Arc<dyn EditorDocumentsHost>);
+		let recorded = Arc::clone(&documents);
+		serve_editor(directory.path(), connection, parts, |_client, mut editor| async move {
+			editor.initialize(capabilities).await;
+			editor.eligible_session("new").await;
+			editor.quiet("probe").await;
+			no_fs_or_terminal_request(&editor.close().await);
+			assert!(recorded.bound().is_empty(), "{:?}", recorded.bound());
+		})
+		.await;
+	}
+}
+
+/// Joined proof over a real project environment and document authority: in an
+/// eligible ACP session, the Read tool returns the editor's unsaved buffer
+/// (asked for through `fs/read_text_file` by the environment), and the Write
+/// tool commits through the authority to disk with nothing pushed to the
+/// editor.
+#[tokio::test]
+async fn an_acp_session_reads_the_editor_buffer_and_writes_through_the_authority() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let root = directory.path().join("workspace");
+	let state = directory.path().join("state");
+	let sessions_dir = directory.path().join("sessions");
+	for path in [&root, &state, &sessions_dir] {
+		std::fs::create_dir_all(path).expect("directory");
+	}
+	let root = std::fs::canonicalize(&root).expect("canonical workspace");
+	std::fs::write(root.join("notes.txt"), "on disk\n").expect("fixture");
+	let con = Arc::new(omp_con::Ctx::new());
+	let environment = omp_envd::ProjectEnvironment::attach(&root, &state, omp_envd::AttachOptions {
+		py_eval:            false,
+		approval_mode:      None,
+		trusted_extensions: Vec::new(),
+		contributed_values: Vec::new(),
+		con:                Arc::clone(&con),
+		bridges:            omp_envd::RegistryBridges::default(),
+		spawn_idle_timeout: Some(2),
+	})
+	.await
+	.expect("environment");
+	let spill = BlobStore::open(directory.path().join("blobs")).expect("blob store");
+	let kernel = Kernel::new(
+		ScriptedInference {
+			scripts: Mutex::new(
+				[
+					Script::Call("read", r#"{"path":"notes.txt"}"#),
+					Script::Call("write", r#"{"path":"notes.txt","content":"agent wrote\n"}"#),
+					Script::Text("done"),
+				]
+				.into_iter()
+				.collect(),
+			),
+		},
+		environment.registry(),
+		DispatchPolicy::new(spill.clone()),
+		StaticPrompt(Str::new_static("system")),
+	);
+	let approvals = kernel.approval_route();
+	environment.bind_approval_authority(
+		Some(Arc::new(omp_agent::ApprovalBook::new())),
+		Some(approvals.clone()),
+	);
+	let kernel = kernel
+		.with_external_executor(Arc::new(omp_driver::headless::kernel::EnvToolExecutor::new(
+			environment.client().clone(),
+			approvals,
+		)))
+		.with_tool_admission(Arc::new(omp_driver::headless::kernel::SettingsAdmission::new(
+			&con, None,
+		)));
+	let home = SessionHome {
+		sessions_dir:  sessions_dir.clone(),
+		project_root:  root.clone(),
+		model:         Str::new_static("scripted/test"),
+		prompt:        Default::default(),
+		facts:         Default::default(),
+		live:          Arc::new(SessionRegistry::new()),
+		tools_enabled: true,
+		up:            kernel.mailbox(),
+		rules:         None,
+	};
+	let session = Session::create_with_blob_store(
+		sessions_dir.join("startup.oms"),
+		ComponentRegistry::standard(),
+		spill,
+	)
+	.expect("startup session");
+	let connection = AcpConnection::new(AcpSettings::default());
+	connection.bind_documents(Arc::new(environment.editor_documents()));
+	let disk = root.join("notes.txt");
+	serve_editor(&root, connection, (kernel, session, home), |_client, mut editor| async move {
+		editor.initialize(fs_capabilities()).await;
+		let session_id = editor.eligible_session("new").await;
+		editor
+			.send(serde_json::json!({
+				"jsonrpc": "2.0",
+				"id": "prompt",
+				"method": "session/prompt",
+				"params": {"sessionId": session_id, "prompt": "read, then rewrite the notes"},
+			}))
+			.await;
+		let mut reads = Vec::new();
+		let response = loop {
+			let frame = editor.next().await;
+			match frame["method"].as_str() {
+				Some("fs/read_text_file") => {
+					reads.push(frame["params"].clone());
+					editor
+						.answer(&frame, serde_json::json!({"content": "on disk\nUNSAVED EDITOR LINE\n"}))
+						.await;
+				},
+				Some("session/request_permission") => {
+					editor
+						.answer(
+							&frame,
+							serde_json::json!({"outcome": {"outcome": "selected", "optionId": "allow_once"}}),
+						)
+						.await;
+				},
+				Some("fs/write_text_file") => panic!("nothing is pushed to the editor: {frame:#?}"),
+				_ if frame["id"] == "prompt" => break frame,
+				_ => panic!("unexpected frame {frame:#?}"),
+			}
+		};
+		assert_eq!(response["result"]["stopReason"], "end_turn", "{response:#?}");
+		assert!(
+			!reads.is_empty(),
+			"the environment asked the editor for its buffer: {:#?}",
+			editor.seen
+		);
+		for read in &reads {
+			assert_eq!(read["sessionId"], session_id.as_str());
+			assert_eq!(read["path"], disk.to_str().expect("UTF-8 path"));
+		}
+		let frames = editor.close().await;
+		let transcript = serde_json::to_string(&frames).expect("frames encode");
+		assert!(
+			transcript.contains("UNSAVED EDITOR LINE"),
+			"the Read tool returned the editor's buffer: {frames:#?}"
+		);
+		assert_eq!(
+			std::fs::read_to_string(&disk).expect("disk"),
+			"agent wrote\n",
+			"the Write committed through the authority"
+		);
+	})
+	.await;
+	drop(environment);
 }

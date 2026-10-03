@@ -161,13 +161,13 @@ impl InvocationEditRepairContext {
 /// connection.
 #[derive(Clone, Default)]
 pub(super) struct InvocationAcpBackends {
-	documents: Option<Arc<dyn super::docs::AcpDocumentBackend>>,
+	documents: Option<super::editor_base::EditorRoute>,
 	exec:      Option<Arc<dyn super::tool_shell::AcpExecBackend>>,
 }
 
 impl InvocationAcpBackends {
 	pub(super) fn new(
-		documents: Option<Arc<dyn super::docs::AcpDocumentBackend>>,
+		documents: Option<super::editor_base::EditorRoute>,
 		exec: Option<Arc<dyn super::tool_shell::AcpExecBackend>>,
 	) -> Self {
 		Self { documents, exec }
@@ -3498,7 +3498,11 @@ pub(super) async fn with_acp_scope<T>(
 	ACP_BACKENDS.scope(context, future).await
 }
 
-pub(super) fn invocation_acp_documents() -> Option<Arc<dyn super::docs::AcpDocumentBackend>> {
+/// Returns the editor bound to the invoking connection, if any. Only a native
+/// invocation arriving over a connection that bound an editor has one; the
+/// editor is never reachable from another connection's invocations, which is
+/// what keeps subagents (their own compositions) off the parent's editor.
+pub(super) fn invocation_acp_documents() -> Option<super::editor_base::EditorRoute> {
 	ACP_BACKENDS
 		.try_with(|context| context.documents.clone())
 		.ok()

@@ -470,6 +470,11 @@ pub trait EditPrepared: Send + Sync {
 	/// Exact retained bytes named by the authored tag, or live bytes when
 	/// untagged.
 	fn authored_bytes(&self) -> &Bytes;
+	/// Notices the host attached while choosing the base, such as where the
+	/// base bytes came from when they are not the revision's disk bytes.
+	fn diags(&self) -> &[Diag] {
+		&[]
+	}
 }
 
 /// The final filesystem transition for one prepared section.
@@ -934,6 +939,7 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 				}
 
 				let mut diags = work.diags.clone();
+				diags.extend(work.prepared.diags().iter().cloned());
 				diags.extend(work.prepared.path_recoveries().iter().map(path_recovery_diag));
 				diags.extend(
 					work.parsed

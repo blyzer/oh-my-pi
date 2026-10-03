@@ -85,8 +85,9 @@ use super::{
 	browser_daemon::BrowserSettings,
 	docs::{
 		AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHost,
-		DocumentLease, LspEvents, LspRegistryEvent,
+		DocumentLease, EditorIoError, LspEvents, LspRegistryEvent,
 	},
+	editor_base::{EditorRoute, EditorSession},
 	eval::{
 		BridgeHostError, ParentBindingLease, ParentSessionHost, PreludeInvoker, SessionBridgeHost,
 	},
@@ -3395,16 +3396,6 @@ impl EnvServer {
 	/// Binds or clears the session-scoped ACP terminal execution capability.
 	pub(crate) fn bind_acp_exec(&self, backend: Option<Arc<dyn AcpExecBackend>>) {
 		self.acp_exec.bind(backend);
-	}
-
-	/// Binds or clears the session-scoped ACP document authority.
-	pub(crate) fn bind_acp_documents(&self, backend: Option<Arc<dyn AcpDocumentBackend>>) {
-		self
-			.environment
-			.as_ref()
-			.expect("session-only environment host has no document authority")
-			.documents
-			.bind_acp_documents(backend);
 	}
 
 	/// Binds the live durable approval authority used by Environment fallbacks.
@@ -8039,25 +8030,28 @@ impl ConnectionEditRepairRoute {
 	}
 }
 
-const ACP_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const ACP_MAX_PENDING: usize = 64;
+
+type AcpDocumentReply = flume::Sender<Result<Str, EditorIoError>>;
 
 struct ConnectionAcpDocumentRoute {
 	request_id:    u64,
 	invocation_id: Str,
 	responses:     flume::Sender<pb::ServerFrame>,
 	next_query:    Arc<AtomicU64>,
-	pending:       Arc<Mutex<HashMap<u64, flume::Sender<miette::Result<Str>>>>>,
+	pending:       Arc<Mutex<HashMap<u64, AcpDocumentReply>>>,
+	/// The binding's editor deadline (`AcpBind.fs_timeout_ms`).
+	deadline:      Duration,
 }
 
 impl ConnectionAcpDocumentRoute {
-	async fn query(&self, path: Str, content: Option<Str>) -> miette::Result<Str> {
+	async fn query(&self, path: Str, content: Option<Str>) -> Result<Str, EditorIoError> {
 		let query_id = self.next_query.fetch_add(1, Ordering::Relaxed);
 		let (reply, answer) = flume::bounded(1);
 		{
 			let mut pending = self.pending.lock();
 			if pending.len() >= ACP_MAX_PENDING {
-				return Err(miette::miette!("too many pending ACP document queries"));
+				return Err(EditorIoError::Busy);
 			}
 			pending.insert(query_id, reply);
 		}
@@ -8086,12 +8080,12 @@ impl ConnectionAcpDocumentRoute {
 			.is_err()
 		{
 			self.pending.lock().remove(&query_id);
-			return Err(miette::miette!("ACP document connection disconnected"));
+			return Err(EditorIoError::Disconnected);
 		}
-		let result = match time::timeout(ACP_QUERY_TIMEOUT, answer.recv_async()).await {
+		let result = match time::timeout(self.deadline, answer.recv_async()).await {
 			Ok(Ok(result)) => result,
-			Ok(Err(_)) => Err(miette::miette!("ACP document invocation ended")),
-			Err(_) => Err(miette::miette!("ACP document query timed out")),
+			Ok(Err(_)) => Err(EditorIoError::Disconnected),
+			Err(_) => Err(EditorIoError::Timeout),
 		};
 		self.pending.lock().remove(&query_id);
 		result
@@ -8116,9 +8110,9 @@ impl ConnectionAcpDocumentRoute {
 		let result = match answer.body {
 			Some(pb::acp_document_answer::Body::Content(content)) => Ok(Str::from(content)),
 			Some(pb::acp_document_answer::Body::Error(error)) => {
-				Err(miette::miette!("ACP document error {}: {}", error.code, error.message))
+				Err(EditorIoError::from_protocol_code(error.code))
 			},
-			None => Err(miette::miette!("ACP document answer body is missing")),
+			None => Err(EditorIoError::Malformed),
 		};
 		reply.send(result).map_err(|_| {
 			(pb::ProtocolErrorCode::PreconditionFailed, "ACP document query is no longer pending")
@@ -8131,10 +8125,14 @@ impl ConnectionAcpDocumentRoute {
 }
 
 impl AcpDocumentBackend for ConnectionAcpDocumentRoute {
+	fn deadline(&self) -> Duration {
+		self.deadline
+	}
+
 	fn read_text(
 		&self,
 		absolute_path: Str,
-	) -> pin::Pin<Box<dyn future::Future<Output = miette::Result<Str>> + Send + '_>> {
+	) -> pin::Pin<Box<dyn future::Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
 		Box::pin(self.query(absolute_path, None))
 	}
 
@@ -8142,7 +8140,7 @@ impl AcpDocumentBackend for ConnectionAcpDocumentRoute {
 		&self,
 		absolute_path: Str,
 		content: Str,
-	) -> pin::Pin<Box<dyn future::Future<Output = miette::Result<Str>> + Send + '_>> {
+	) -> pin::Pin<Box<dyn future::Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
 		Box::pin(self.query(absolute_path, Some(content)))
 	}
 }
@@ -8289,13 +8287,13 @@ impl AcpExecBackend for ConnectionAcpExecRoute {
 }
 
 struct InvocationAcpRoutes {
-	documents: Option<Arc<ConnectionAcpDocumentRoute>>,
+	documents: Option<(Arc<ConnectionAcpDocumentRoute>, Arc<EditorSession>)>,
 	exec:      Option<Arc<ConnectionAcpExecRoute>>,
 }
 
 impl InvocationAcpRoutes {
 	fn disconnect(&self) {
-		if let Some(route) = &self.documents {
+		if let Some((route, _)) = &self.documents {
 			route.disconnect();
 		}
 		if let Some(route) = &self.exec {
@@ -8305,10 +8303,9 @@ impl InvocationAcpRoutes {
 
 	fn context(&self) -> super::tools::InvocationAcpBackends {
 		super::tools::InvocationAcpBackends::new(
-			self
-				.documents
-				.as_ref()
-				.map(|route| Arc::clone(route) as Arc<dyn AcpDocumentBackend>),
+			self.documents.as_ref().map(|(route, session)| {
+				EditorRoute::new(Arc::clone(route) as Arc<dyn AcpDocumentBackend>, Arc::clone(session))
+			}),
 			self
 				.exec
 				.as_ref()
@@ -8327,7 +8324,9 @@ struct ConnectionState {
 	grants:           Grants,
 	capabilities:     BTreeSet<Str>,
 	hello_props:      Option<ValueMap>,
-	acp_documents:    bool,
+	/// The editor binding this connection serves document queries for; a
+	/// fresh binding per `AcpBind` so anchors never outlive a session switch.
+	acp_documents:    Option<Arc<EditorSession>>,
 	acp_exec:         bool,
 	host:             Option<HostKey>,
 	authority:        Arc<AuthorityTable>,
@@ -8487,7 +8486,7 @@ impl ConnectionState {
 			grants: hello.grants,
 			capabilities: hello.capabilities,
 			hello_props: hello.props,
-			acp_documents: false,
+			acp_documents: None,
 			acp_exec: false,
 			host: policy.host.clone(),
 			authority,
@@ -8549,7 +8548,9 @@ impl ConnectionState {
 	}
 
 	fn bind_acp(&mut self, binding: pb::AcpBind) {
-		self.acp_documents = binding.documents;
+		self.acp_documents = binding
+			.documents
+			.then(|| Arc::new(EditorSession::new(Duration::from_millis(binding.fs_timeout_ms))));
 		self.acp_exec = binding.exec;
 	}
 
@@ -8561,14 +8562,16 @@ impl ConnectionState {
 	) -> InvocationAcpRoutes {
 		let next_query = Arc::new(AtomicU64::new(1));
 		InvocationAcpRoutes {
-			documents: self.acp_documents.then(|| {
-				Arc::new(ConnectionAcpDocumentRoute {
+			documents: self.acp_documents.as_ref().map(|session| {
+				let route = Arc::new(ConnectionAcpDocumentRoute {
 					request_id,
 					invocation_id: invocation_id.clone(),
 					responses: responses.clone(),
 					next_query: Arc::clone(&next_query),
 					pending: Arc::new(Mutex::new(HashMap::new())),
-				})
+					deadline: session.deadline(),
+				});
+				(route, Arc::clone(session))
 			}),
 			exec:      self.acp_exec.then(|| {
 				Arc::new(ConnectionAcpExecRoute {
@@ -8593,6 +8596,7 @@ impl ConnectionState {
 			{
 				acp.documents
 					.as_ref()
+					.map(|(route, _)| route)
 					.ok_or((
 						pb::ProtocolErrorCode::PreconditionFailed,
 						"this invocation has no ACP document route",

@@ -441,7 +441,14 @@ mod tests {
 
 	#[test]
 	fn acp_bind_always_routes_to_the_environment_backend() {
-		let bind = frame(0, client_frame::Body::AcpBind(AcpBind { documents: true, exec: true }));
+		let bind = frame(
+			0,
+			client_frame::Body::AcpBind(AcpBind {
+				documents:     true,
+				exec:          true,
+				fs_timeout_ms: 5_000,
+			}),
+		);
 		let (backend, invocation) = route_client_frame(
 			&bind,
 			&FastHashSet::default(),

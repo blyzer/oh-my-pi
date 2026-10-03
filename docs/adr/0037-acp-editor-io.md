@@ -310,9 +310,18 @@ be proposed in a later record once a client's display-only mechanism is verified
 
 ## Status in omp
 
-**Not yet implemented.** ACP: `crates/app/src/acp_mode.rs` (no `fs/*`/`terminal/*` use). The dormant
-and non-conforming envd seam is described in Context. The authority is `crates/envd/src/docserver`,
-and the edit rebase is `crates/tools/src/edit.rs`.
+**Partially implemented (plan steps 1–2).** Step 1: `crates/app/src/acp_client.rs` (typed
+capabilities, one request table, gated `fs/*`). Step 2: the base selection of §3 lives in
+`crates/envd/src/editor_base.rs`; the connection binds its editor through
+`ProjectEnvironment::editor_documents` (driver: `ComposedInference::editor_documents`), one anchor
+table per `AcpBind` of that environment connection, with `AcpBind.fs_timeout_ms` carrying
+`sv_acp_fs_timeout` in place of `ACP_QUERY_TIMEOUT`. The `write_plain` bypass and the `acp:`
+pseudo-revision are deleted. Two refinements over §3 as written: a first-contact (unanchored) read
+also sets K := D, so a disk change made after that read is merged or conflicts instead of being
+reverted by the buffer; and an agent Write anchors the buffer it superseded (K := B, read before the
+commit) until write-back (step 3) sets K := R. A conflicting merge rejects an Edit with typed ranges;
+a Read falls back to D with `editor_buffer_conflict`. Notebooks (`.ipynb`) are not eligible. Steps 3
+(write-back) and 4 (terminal cutover) are open.
 
 ### Implementation plan (PR-sized)
 
