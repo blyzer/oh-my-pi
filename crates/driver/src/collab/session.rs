@@ -862,7 +862,7 @@ async fn start_host(
 				viewer_link:    viewer.clone(),
 				input_required: Arc::clone(&input_required),
 			});
-			match Publication::publish(&plan.dir, plan.instance_id.as_str(), source).await {
+			match Publication::publish(&plan.dir, plan.instance_id.as_str(), source) {
 				Ok(publication) => Some(publication),
 				Err(error) => {
 					// Discovery is a convenience; a room stays hosted without it.

@@ -46,7 +46,7 @@ struct RoomFacts<'a> {
 	editor:  Option<PublishedLink<'a>>,
 }
 
-fn published<'a>(link: &'a Str) -> PublishedLink<'a> {
+fn published(link: &Str) -> PublishedLink<'_> {
 	let browser = CollabLink::parse(link.as_str())
 		.ok()
 		.map(|parsed| parsed.browser(&WebEndpoint::from_relay(parsed.relay())));
@@ -88,7 +88,7 @@ pub async fn run(args: ShareArgs) -> miette::Result<()> {
 	let ctx = Arc::new(crate::process_ctx(&project)?);
 	let env = LaunchEnv::production(&project, launch.gateway.is_some())?;
 	let mut launch = Launch::prepare(launch, ctx, env).await?;
-	let (mut kernel, mut session) = launch.compose().await?;
+	let (mut kernel, mut session) = Box::pin(launch.compose()).await?;
 	let lifecycle = kernel.lifecycle_hooks();
 	report_launch_warnings(&launch).await?;
 	if let Some(lifecycle) = &lifecycle {
@@ -247,7 +247,7 @@ mod tests {
 	async fn a_positional_prompt_is_refused_before_any_session_work() {
 		let mut launch = crate::cli::ChatArgs::default_interactive();
 		launch.prompt = vec![Str::new_static("do a thing")];
-		let error = run(ShareArgs { launch, relay: None, view: false, json: false })
+		let error = Box::pin(run(ShareArgs { launch, relay: None, view: false, json: false }))
 			.await
 			.expect_err("guests supply the prompts");
 		assert!(error.to_string().contains("takes no prompt"), "{error}");

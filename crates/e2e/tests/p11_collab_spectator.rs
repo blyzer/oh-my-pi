@@ -129,7 +129,11 @@ impl Spectator {
 	}
 
 	/// Waits, bounded, for `condition` to hold over this replica.
-	async fn until(&mut self, label: &'static str, condition: impl Fn(&Self) -> bool) -> Result<()> {
+	async fn until(
+		&mut self,
+		label: &'static str,
+		condition: impl Fn(&Self) -> bool + Send + Sync,
+	) -> Result<()> {
 		within(label, BOUND, async {
 			loop {
 				self.drain()?;
@@ -231,7 +235,7 @@ async fn hostile_prompt(link: &str, token: Option<&[u8]>, text: &str) -> Result<
 }
 
 /// Waits, bounded, until `condition` holds, polling cheap state.
-async fn eventually(label: &'static str, condition: impl Fn() -> bool) -> Result<()> {
+async fn eventually(label: &'static str, condition: impl Fn() -> bool + Send + Sync) -> Result<()> {
 	within(label, BOUND, async {
 		while !condition() {
 			tokio::time::sleep(Duration::from_millis(20)).await;
@@ -445,9 +449,10 @@ async fn p11a_spectators_converge_through_a_relay_and_a_viewer_cannot_mutate() -
 		Ok::<Spectator, Error>(editor)
 	};
 
-	let (end, editor) =
-		within("P11-a", Duration::from_secs(120), async { tokio::try_join!(host_flow, guests) })
-			.await??;
+	let (end, editor) = Box::pin(within("P11-a", Duration::from_secs(120), async {
+		tokio::try_join!(host_flow, guests)
+	}))
+	.await??;
 	assert_eq!(end, ServeEnd::Shutdown);
 
 	// Closing the room disconnects the remaining guest and withdraws the host.

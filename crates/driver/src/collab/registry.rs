@@ -478,7 +478,7 @@ mod unix {
 		/// Creates the owner-only directory, starts a private endpoint backed by
 		/// `source`, and writes discovery metadata that never carries links or
 		/// room secrets.
-		pub async fn publish<S: HostRegistrySource>(
+		pub fn publish<S: HostRegistrySource>(
 			dir: &Path,
 			instance_id: &str,
 			source: Arc<S>,
@@ -830,7 +830,7 @@ pub struct Publication;
 #[cfg(not(unix))]
 impl Publication {
 	/// Local host discovery needs Unix domain sockets.
-	pub async fn publish<S: HostRegistrySource>(
+	pub fn publish<S: HostRegistrySource>(
 		_dir: &Path,
 		_instance_id: &str,
 		_source: Arc<S>,
@@ -917,7 +917,6 @@ mod tests {
 		let root = tempfile::tempdir().expect("scratch");
 		let dir = root.path().join("collab-hosts");
 		let publication = Publication::publish(&dir, "0123456789abcdef", Fixed::new(Access::Control))
-			.await
 			.expect("publish");
 		assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
 		assert_eq!(
@@ -951,9 +950,8 @@ mod tests {
 	async fn view_only_hosts_refuse_control_links() {
 		let root = tempfile::tempdir().expect("scratch");
 		let dir = root.path().join("hosts");
-		let _publication = Publication::publish(&dir, "0123456789abcdef", Fixed::new(Access::View))
-			.await
-			.expect("publish");
+		let _publication =
+			Publication::publish(&dir, "0123456789abcdef", Fixed::new(Access::View)).expect("publish");
 		let error = resolve_link(&dir, "0123456789abcdef", Access::Control, DEADLINE)
 			.await
 			.expect_err("control refused");
@@ -1018,7 +1016,6 @@ mod tests {
 		let root = tempfile::tempdir().expect("scratch");
 		let dir = root.path().join("hosts");
 		let publication = Publication::publish(&dir, "0123456789abcdef", Fixed::new(Access::Control))
-			.await
 			.expect("publish");
 		let endpoint = publication.endpoint().to_path_buf();
 		assert_eq!(list_hosts(&dir, DEADLINE).await.unwrap().len(), 1);
@@ -1062,7 +1059,7 @@ mod tests {
 			Err(RegistryError::SymlinkDirectory { .. })
 		));
 		assert!(matches!(
-			Publication::publish(&link, "0123456789abcdef", Fixed::new(Access::View)).await,
+			Publication::publish(&link, "0123456789abcdef", Fixed::new(Access::View)),
 			Err(RegistryError::SymlinkDirectory { .. })
 		));
 	}
@@ -1072,7 +1069,7 @@ mod tests {
 		let long = Str::new("x".repeat(MAX_FIELD_CHARS * 3));
 		let snapshot = HostSnapshot {
 			session_name: Some(long.clone()),
-			cwd: long.clone(),
+			cwd: long,
 			..Fixed::new(Access::View).snapshot().unwrap()
 		}
 		.bounded();

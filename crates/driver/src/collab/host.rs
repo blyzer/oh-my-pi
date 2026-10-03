@@ -156,6 +156,10 @@ impl HeadlessRoom {
 	///
 	/// Prompts run as authored turns on `kernel`; the caller keeps the session
 	/// and kernel and remains their only writer.
+	#[expect(
+		clippy::future_not_send,
+		reason = "generic over the caller's inference client, whose `Sync`-ness is not required"
+	)]
 	pub async fn serve<C: Inference>(
 		&mut self,
 		kernel: &mut Kernel<C>,
@@ -208,6 +212,10 @@ impl HeadlessRoom {
 		}
 	}
 
+	#[expect(
+		clippy::future_not_send,
+		reason = "generic over the caller's inference client, whose `Sync`-ness is not required"
+	)]
 	async fn run_turn<C: Inference>(
 		&mut self,
 		kernel: &mut Kernel<C>,

@@ -195,6 +195,10 @@ fn parse_route(request: &Request) -> Option<Route> {
 	Some(Route { room, role: role? })
 }
 
+#[allow(
+	clippy::result_large_err,
+	reason = "tungstenite's handshake `Callback` fixes the error type it returns"
+)]
 async fn serve_connection(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
 	let mut route = None;
 	let callback = |request: &Request, response: Response| -> Result<Response, ErrorResponse> {

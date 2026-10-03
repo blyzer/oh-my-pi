@@ -37,7 +37,7 @@ struct LinkOutput<'a> {
 /// Runs the selected discovery operation against the default registry.
 pub async fn run(args: CollabArgs) -> miette::Result<()> {
 	let dir = default_registry_dir().into_diagnostic()?;
-	let mut stdout = std::io::stdout().lock();
+	let mut stdout = std::io::stdout();
 	match args
 		.command
 		.unwrap_or(CollabCommand::List(CollabListArgs { json: false }))
@@ -189,18 +189,17 @@ mod tests {
 		}
 	}
 
-	async fn fixture(access: Access) -> (tempfile::TempDir, std::path::PathBuf, Publication) {
+	fn fixture(access: Access) -> (tempfile::TempDir, std::path::PathBuf, Publication) {
 		let root = tempfile::tempdir().expect("scratch");
 		let dir = root.path().join("hosts");
 		let publication = Publication::publish(&dir, "0123456789abcdef", Arc::new(Host { access }))
-			.await
 			.expect("publish");
 		(root, dir, publication)
 	}
 
 	#[tokio::test]
 	async fn list_renders_one_clean_line_per_field_and_json_is_versioned() {
-		let (_root, dir, _publication) = fixture(Access::Control).await;
+		let (_root, dir, _publication) = fixture(Access::Control);
 		let mut text = Vec::new();
 		list(&dir, false, &mut text).await.expect("list");
 		let text = String::from_utf8(text).expect("utf8");
@@ -233,7 +232,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn link_prints_the_url_or_a_typed_usage_error() {
-		let (_root, dir, _publication) = fixture(Access::View).await;
+		let (_root, dir, _publication) = fixture(Access::View);
 		let request = |selector: &str, view: bool, json: bool| CollabLinkArgs {
 			selector: Str::new(selector),
 			view,
