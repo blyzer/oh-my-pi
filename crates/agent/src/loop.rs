@@ -2671,10 +2671,15 @@ impl<C: Inference> Kernel<C> {
 						}
 						prepared.require_approvals(approvals);
 						prepared.commit(args);
+						let match_text = self
+							.dispatcher
+							.registry()
+							.stream_match_text(call.name.as_str(), call.arguments.as_value());
 						if let Some((owner, interrupt)) = inspect_call_ready(
 							&mut watchers,
 							index,
 							&call,
+							match_text.as_deref(),
 							&mut stream_effects,
 							redirect_cap_reached,
 							&mut cap_notice_sent,
@@ -3647,6 +3652,7 @@ fn inspect_call_ready(
 	watchers: &mut [StreamObserver],
 	index: u32,
 	call: &omp_ai::ToolCall,
+	match_text: Option<&[Str]>,
 	effects: &mut Vec<(Handle, StreamEffect)>,
 	redirect_cap_reached: bool,
 	cap_notice_sent: &mut bool,
@@ -3654,7 +3660,9 @@ fn inspect_call_ready(
 	for observer in watchers {
 		if let Some(interrupt) = capture_stream_verdict(
 			observer.director,
-			observer.watch.call_ready(index, call),
+			observer
+				.watch
+				.call_ready_with_match_text(index, call, match_text),
 			effects,
 			redirect_cap_reached,
 			cap_notice_sent,

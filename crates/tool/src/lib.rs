@@ -1258,6 +1258,13 @@ pub trait Tool: Send + Sync + 'static {
 		None
 	}
 
+	/// Projects authored text that a streaming rule should treat as newly
+	/// introduced by this call. Tools that do not implement this contract keep
+	/// the default JSON string-value matching behavior.
+	fn stream_match_text(&self, _arguments: &serde_json::Value) -> Option<Vec<Str>> {
+		None
+	}
+
 	/// Deterministically migrates one historical call toward this revision.
 	fn lift(&self, _from: &Rev, _call: RecordedCall<'_>) -> Option<LiftedCall> {
 		None

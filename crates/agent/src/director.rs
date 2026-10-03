@@ -109,6 +109,16 @@ pub trait StreamWatch: Send {
 	fn call_ready(&mut self, _index: u32, _call: &ToolCall) -> StreamVerdict {
 		StreamVerdict::Pass
 	}
+	/// Inspects tool-authored text projected by the tool contract. The default
+	/// preserves ordinary `call_ready` behavior for watchers without this need.
+	fn call_ready_with_match_text(
+		&mut self,
+		index: u32,
+		call: &ToolCall,
+		_match_text: Option<&[Str]>,
+	) -> StreamVerdict {
+		self.call_ready(index, call)
+	}
 }
 
 /// A request-scoped stream observer paired with its durable Director state.

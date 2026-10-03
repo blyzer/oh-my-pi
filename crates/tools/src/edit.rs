@@ -755,6 +755,13 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 		&self.spec
 	}
 
+	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<Str>> {
+		let Some(input) = arguments.get("input").and_then(serde_json::Value::as_str) else {
+			return Some(Vec::new());
+		};
+		Some(authored_insertions(input).into_iter().collect())
+	}
+
 	fn call<'c>(
 		&'c self,
 		mut params: IncomingParams<'c>,
@@ -1207,6 +1214,23 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 	}
 }
 
+fn authored_insertions(input: &str) -> Option<Str> {
+	let patch = Patch::parse(input, &SplitOptions::default()).ok()?;
+	let mut added = String::new();
+	for section in patch.sections {
+		let parsed = section.parse().ok()?;
+		for edit in &parsed.edits {
+			if let Edit::Insert { text, .. } = edit {
+				if !added.is_empty() {
+					added.push('\n');
+				}
+				added.push_str(text);
+			}
+		}
+	}
+	(!added.is_empty()).then(|| Str::new(added))
+}
+
 fn lift_replace_to_hashline(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 	if from.family.as_str() != "rep" || !matches!(from.n, 1 | 2) {
 		return None;
@@ -1610,6 +1634,15 @@ mod tests {
 					.into()
 			)
 		);
+	}
+
+	#[test]
+	fn stream_rule_projection_keeps_only_authored_insertions() {
+		let input = format!(
+			"{}\nPUT 2.=2:\n-two\n+replacement\n",
+			format_hashline_header("a.txt", &file_hash("one\ntwo\n"))
+		);
+		assert_eq!(authored_insertions(&input).as_deref(), Some("replacement"));
 	}
 
 	#[test]

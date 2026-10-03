@@ -393,11 +393,17 @@ All flags are `archive | session`, `ui.tab=context`, `ui.group="Rules (TTSR)"` (
 
 ## Status in omp
 
-**Not yet implemented.** Frontmatter parsing exists (`crates/driver/src/discovery/rules.rs`). The
-hook vocabulary exists without an emitter (`toolhost.proto`, `omp/events.py`, `omp_rpc`). Orphan
-CLI types (`crates/app/src/cli.rs`) and the tool-scoped abort machinery
-(`crates/agent/src/steering.rs`, `loop.rs` `Fold::ToolScopedAbort`) are described in Context. There
-is no `watch_stream`, no `Fold::Redirect`, no stream-rules Director, no matcher, and no convars.
+**Core redirect and rule matching are implemented; the surface work remains incomplete.** The
+generic `StreamWatch` hook and loop redirect are in `crates/agent`; the built-in Director,
+incremental DFA matcher, policy convars, discovery filtering, and driver installation are also
+present. Its matching and redirect behavior has package coverage in `omp-agent`.
+
+Tool-specific authored-text projections are being added through the `omp-tool` contract. The
+hashline `edit` implementation currently projects inserted rows, and `write` projects its new
+content. Other edit dialects do not yet implement the contract. The `ttsr_triggered` Python hook,
+the `omp rules` CLI, and TUI/ACP/print surface work in implementation plan step 5 remain open.
+The matcher also still needs its planned property and integration coverage, and the remaining
+items in the test plan below are not yet proven end to end.
 
 ### Implementation plan (PR-sized)
 

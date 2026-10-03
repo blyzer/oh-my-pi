@@ -1285,6 +1285,9 @@ trait ErasedTool: Send + Sync {
 		invocation_id: &str,
 		json: &[u8],
 	) -> Result<Option<InvokeInput>, RegistryError>;
+	fn stream_match_text(&self, _arguments: &Value) -> Option<Vec<Str>> {
+		None
+	}
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall>;
 }
 static NATIVE_TOOL_ROUTE: ToolRoute = ToolRoute::Native;
@@ -1700,6 +1703,10 @@ impl<T: Tool> ErasedTool for Registered<T> {
 				source,
 			})?;
 		Ok(self.tool.invoke_input(&update, invocation_id))
+	}
+
+	fn stream_match_text(&self, arguments: &Value) -> Option<Vec<Str>> {
+		self.tool.stream_match_text(arguments)
 	}
 
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
@@ -2725,6 +2732,16 @@ impl Registry {
 		}
 		let correlation = Str::from(omp_core::Ulid::generate().to_string());
 		self.invoke_host(name, correlation.clone(), correlation, params)
+	}
+
+	/// Projects newly authored text for a live typed tool when it opts into
+	/// stream-rule matching. Host and worker tools return no projection.
+	#[must_use]
+	pub fn stream_match_text(&self, name: &str, arguments: &Value) -> Option<Vec<Str>> {
+		self
+			.live_entry(name)
+			.map(|entry| entry.tool.stream_match_text(arguments))
+			.unwrap_or(None)
 	}
 
 	/// Dispatches one host tool with caller-supplied transport correlation.

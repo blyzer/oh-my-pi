@@ -523,6 +523,30 @@ impl Watch {
 			effect,
 		})
 	}
+
+	fn call_ready_values(&mut self, index: u32, call: &ToolCall, values: &[&str]) -> StreamVerdict {
+		let arguments = call.arguments.as_value();
+		let mut paths = Vec::new();
+		collect_paths(arguments, &mut paths);
+		for (value_index, value) in values.iter().enumerate() {
+			let Ok(value_index) = u32::try_from(value_index) else {
+				break;
+			};
+			let source =
+				StreamSource::ToolArgs { call_id: call.id.as_str(), tool: call.name.as_str() };
+			let key = (2, index, value_index);
+			let scanned = self.scan(key, value.as_bytes(), source, &paths);
+			let verdict = match scanned {
+				StreamVerdict::Pass => self.finish(key, source, &paths),
+				verdict => verdict,
+			};
+			match verdict {
+				StreamVerdict::Pass => {},
+				verdict => return verdict,
+			}
+		}
+		StreamVerdict::Pass
+	}
 }
 
 impl StreamWatch for Watch {
@@ -547,29 +571,22 @@ impl StreamWatch for Watch {
 	}
 
 	fn call_ready(&mut self, index: u32, call: &ToolCall) -> StreamVerdict {
-		let arguments = call.arguments.as_value();
-		let mut paths = Vec::new();
-		collect_paths(arguments, &mut paths);
 		let mut values = Vec::new();
-		collect_json_strings(arguments, &mut |value| values.push(value));
-		for (value_index, value) in values.into_iter().enumerate() {
-			let Ok(value_index) = u32::try_from(value_index) else {
-				break;
-			};
-			let source =
-				StreamSource::ToolArgs { call_id: call.id.as_str(), tool: call.name.as_str() };
-			let key = (2, index, value_index);
-			let scanned = self.scan(key, value.as_bytes(), source, &paths);
-			let verdict = match scanned {
-				StreamVerdict::Pass => self.finish(key, source, &paths),
-				verdict => verdict,
-			};
-			match verdict {
-				StreamVerdict::Pass => {},
-				verdict => return verdict,
-			}
-		}
-		StreamVerdict::Pass
+		collect_json_strings(call.arguments.as_value(), &mut |value| values.push(value));
+		self.call_ready_values(index, call, &values)
+	}
+
+	fn call_ready_with_match_text(
+		&mut self,
+		index: u32,
+		call: &ToolCall,
+		match_text: Option<&[Str]>,
+	) -> StreamVerdict {
+		let Some(match_text) = match_text else {
+			return self.call_ready(index, call);
+		};
+		let values = match_text.iter().map(Str::as_str).collect::<Vec<_>>();
+		self.call_ready_values(index, call, &values)
 	}
 }
 
@@ -681,6 +698,43 @@ mod tests {
 			arguments: omp_ai::OpaqueJson::new(args),
 		};
 		assert!(matches!(gated.call_ready(0, &call), StreamVerdict::Pass));
+	}
+
+	#[test]
+	fn tool_projection_matches_only_newly_authored_text() {
+		let mut watch = make_watch(
+			"removed text",
+			&["tool:edit(src/**)"],
+			&["src/**"],
+			None,
+			StreamRuleContext::Discard,
+		);
+		let args = serde_json::from_str(r#"{"path":"src/main.rs","content":"removed text"}"#)
+			.expect("valid tool JSON");
+		let call = ToolCall {
+			id:        ToolCallId::from("call-projected"),
+			name:      Str::new_static("edit"),
+			arguments: omp_ai::OpaqueJson::new(args),
+		};
+		assert!(matches!(
+			watch.call_ready_with_match_text(0, &call, Some(&[Str::new_static("new code")])),
+			StreamVerdict::Pass
+		));
+		let mut matching_watch = make_watch(
+			"removed text",
+			&["tool:edit(src/**)"],
+			&["src/**"],
+			None,
+			StreamRuleContext::Discard,
+		);
+		let StreamVerdict::Interrupt(interrupt) = matching_watch.call_ready_with_match_text(
+			0,
+			&call,
+			Some(&[Str::new_static("removed text")]),
+		) else {
+			panic!("newly authored text should match")
+		};
+		assert_eq!(interrupt.culprit, Some(ToolCallId::from("call-projected")));
 	}
 
 	#[test]

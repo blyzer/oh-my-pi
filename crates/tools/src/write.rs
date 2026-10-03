@@ -555,6 +555,18 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 		&self.spec
 	}
 
+	fn stream_match_text(&self, arguments: &serde_json::Value) -> Option<Vec<Str>> {
+		Some(
+			arguments
+				.get("content")
+				.and_then(serde_json::Value::as_str)
+				.filter(|content| !content.is_empty())
+				.map(Str::new)
+				.into_iter()
+				.collect(),
+		)
+	}
+
 	fn call<'c>(
 		&'c self,
 		mut params: IncomingParams<'c>,
