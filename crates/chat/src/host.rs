@@ -1333,9 +1333,12 @@ impl Presenter {
 			// prompts land in the DOM (async-result follow-ups, tool results,
 			// `<queues><prompts>`); the patch stream projects them (the
 			// approval overlay opens from `sync_approval`), so the event
-			// itself carries no host state.
+			// itself carries no host state. A Director redirect is journaled as
+			// one atomic patch (the interrupted response, its host-only notice and
+			// the injected rule text), so the same stream projects it.
 			KernelEvent::JobsDelivered { .. }
 			| KernelEvent::WorkflowActionAnswered { .. }
+			| KernelEvent::StreamRedirected { .. }
 			| KernelEvent::ApprovalRequested(_) => {},
 		}
 		self.log_speech_failure();
