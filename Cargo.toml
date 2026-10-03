@@ -199,6 +199,7 @@ raw-window-handle = "0.6"
 rayon = "1.10"
 reis = { version = "=0.5.0", features = ["tokio"] }
 regex = "1.11"
+regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "hybrid", "perf", "unicode"] }
 resvg = "0.45.1"
 rustc-demangle = "0.1"
 rustix = { version = "1.1", features = ["fs", "pipe", "process", "time"] }

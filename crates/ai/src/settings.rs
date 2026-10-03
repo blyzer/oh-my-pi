@@ -741,6 +741,18 @@ fn validate_retry_max(ctx: &Ctx, value: &u32) -> Result<(), Str> {
 }
 
 omp_con::var! {
+	/// Maximum stream-watch redirects allowed within one assistant turn.
+	pub static AI_STREAM_REDIRECT_CAP = ai_stream_redirect_cap: u32 {
+		default: 3,
+		min: 0,
+		max: 100,
+		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Stream Rules",
+			"ui.label": "Stream Redirect Limit",
+		},
+	};
 	/// Enables transport and model fallback recovery.
 	pub static AI_RETRY_ENABLED = ai_retry_enabled: bool {
 		default: true,

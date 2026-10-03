@@ -103,7 +103,8 @@ pub use spec::{
 	QueryPlacement, SessionTokenSpec, SigV4Spec,
 };
 pub use store::{
-	AuditedCredentialReveal, CredentialMetadata, CredentialOrigin, CredentialStore, CredentialWrite,
-	LeaseOutcome, OAuthCredentialImport, PersistentLease, ScopedCredentialGrant,
-	ScopedCredentialToken, StoreError, StoredCredentialSource,
+	AuditedCredentialImport, AuditedCredentialReveal, CredentialAuditEntry, CredentialMetadata,
+	CredentialOrigin, CredentialStore, CredentialWrite, LeaseOutcome, OAuthCredentialImport,
+	PersistentLease, ScopedCredentialGrant, ScopedCredentialToken, StoreError,
+	StoredCredentialSource,
 };

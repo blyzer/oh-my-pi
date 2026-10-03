@@ -1,5 +1,7 @@
 //! Journal-first agent kernel over `omp-session`.
 
+#![feature(type_alias_impl_trait)]
+
 pub mod approvals;
 pub mod cancel;
 pub mod context;

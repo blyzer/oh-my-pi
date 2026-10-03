@@ -14,6 +14,7 @@ use omp_ai::{
 	answer::{
 		AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind as InferenceAuthPromptKind, AuthResponse,
 	},
+	auth::CredentialAuditEntry,
 	call::{AuthInput, AuthRequest, CallMeta, LoginRequest, Target},
 	id::{AccountId, RequestId},
 	receipt::ExecutionBudget,
@@ -35,6 +36,12 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 		.ok_or_else(|| miette!("HOME or OMP_DATA_DIR must be set"))?;
 	fs::create_dir_all(data_dir).into_diagnostic()?;
 	let store = omp_driver::registry::open_credential_store(&database).into_diagnostic()?;
+	if let AuthCommand::Audit { provider, extension, limit, json } = &command {
+		let entries = store
+			.credential_audit(provider.as_deref(), extension.as_deref(), *limit)
+			.into_diagnostic()?;
+		return print_audit(&entries, *json);
+	}
 	let registry = omp_driver::registry::production_registry(data_dir, store)
 		.await
 		.into_diagnostic()?;
@@ -45,6 +52,9 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 		.map(|provider| provider.id.clone())
 		.ok_or_else(|| miette!("embedded catalog is unavailable"))?;
 	let (provider, operation) = match command {
+		AuthCommand::Audit { .. } => {
+			unreachable!("audit command returned before registry composition")
+		},
 		AuthCommand::Login { provider } => {
 			let provider = ProviderId::from(provider);
 			(provider.clone(), AuthRequest::Login(LoginRequest { provider, method: None }))
@@ -73,6 +83,35 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 	let planner = router::Router::new(registry.clone(), time::Duration::from_secs(30));
 	let mut client = Client::new(registry.service(), planner, meta);
 	print_auth(client.execute(operation).await.into_diagnostic()?, &database).await
+}
+
+fn print_audit(entries: &[CredentialAuditEntry], json: bool) -> miette::Result<()> {
+	if json {
+		println!("{}", serde_json::to_string_pretty(entries).into_diagnostic()?);
+		return Ok(());
+	}
+	if entries.is_empty() {
+		println!("no credential audit records");
+		return Ok(());
+	}
+	for entry in entries {
+		println!(
+			"{} action={} extension={} provider={} account={} principal={} generation={} host={} \
+			 session={} request={} reason={}",
+			entry.observed_at_ms,
+			entry.action,
+			entry.extension,
+			entry.provider,
+			entry.account_id,
+			entry.credential_principal,
+			entry.credential_generation,
+			entry.host_generation,
+			entry.session_generation,
+			entry.request_id,
+			entry.reason,
+		);
+	}
+	Ok(())
 }
 
 async fn print_auth(answer: AuthAnswer, database: &Path) -> miette::Result<()> {

@@ -82,6 +82,8 @@ pub struct OAuthControlImport {
 	/// that minted the grant discovered one (Cloud Code Assist). It becomes
 	/// the account's routing project, as an interactive login's does.
 	pub project:       Option<ProjectId>,
+	/// Optional authenticated audit evidence for extension CONTROL imports.
+	pub audit:         Option<super::AuditedCredentialImport>,
 }
 
 /// Narrow control-plane handle over the live authentication manager.
@@ -213,10 +215,8 @@ impl AuthControlHandle {
 				.ok_or(StoreError::InvalidTime)?,
 			None => imported_at,
 		};
-		let metadata = self
-			.manager
-			.store
-			.import_oauth_bundle(OAuthCredentialImport {
+		let metadata = self.manager.store.import_oauth_bundle_with_audit(
+			OAuthCredentialImport {
 				account_id: account.clone(),
 				principal_id: import.principal.clone(),
 				access_token: import
@@ -226,7 +226,9 @@ impl AuthControlHandle {
 				expires_at,
 				imported_at,
 				origin: CredentialOrigin::Persistent,
-			})?;
+			},
+			import.audit.as_ref(),
+		)?;
 		let mut record =
 			self.account_record(account, import.principal, import.provider, metadata.generation);
 		record.routing = routing;
@@ -1733,6 +1735,7 @@ impl AuthManager {
 						refresh_token,
 						expires_at_ms: credential.expires_at_ms,
 						project: None,
+						audit: None,
 					})
 					.map_err(auth_store_error)?;
 				AccountSummary {

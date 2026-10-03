@@ -14,6 +14,12 @@ use parking_lot::Mutex;
 pub enum KernelEvent {
 	/// An inference response selected its concrete route.
 	InferenceStarted,
+	/// A Director redirected one response and the kernel will resample in the
+	/// same turn.
+	StreamRedirected {
+		/// Stable Director family that requested the redirect.
+		director: Str,
+	},
 	/// The transport layer is about to wait `delay` before same-route retry
 	/// `attempt` of `max_attempts`. Pre-commit and replay-irrelevant, so it is
 	/// never journaled.
