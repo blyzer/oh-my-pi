@@ -18,8 +18,8 @@ use tokio::io::{
 
 use crate::{
 	acp_client::{
-		AcpClient, AcpSettings, Answer, ClientCapabilities, PermissionOptionId, PermissionOutcome,
-		RequestPermissionResponse, RpcError,
+		AcpClient, AcpSettings, Answer, ClientCapabilities, EditorDocumentsHost, PermissionOptionId,
+		PermissionOutcome, RequestPermissionResponse, RpcError,
 	},
 	acp_events::AcpEventMapper,
 	chat_cmd::{Launch, LaunchEnv},
@@ -66,6 +66,7 @@ async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 	};
 	connection.client.initialize(capabilities);
 	let (kernel, session) = launch.compose().await?;
+	connection.bind_documents(Arc::new(kernel.inference().editor_documents()));
 	let home = SessionHome::new(
 		&launch.data_dir,
 		&launch.project,
@@ -260,6 +261,16 @@ impl AcpConnection {
 	#[must_use]
 	pub fn client(&self) -> AcpClient {
 		self.client.clone()
+	}
+
+	/// Binds the editor of this connection into `host` as the document base
+	/// whenever the live session is eligible (ADR 0037 §1.2): the client
+	/// advertises `fs.readTextFile`, `sv_acp_fs` is not `off`, and the session
+	/// was made live with a `cwd` matching the project root. The binding is
+	/// renewed on every session switch and dropped on `session/close`,
+	/// `shutdown` and EOF.
+	pub fn bind_documents(&self, host: Arc<dyn EditorDocumentsHost>) {
+		self.client.bind_documents(host);
 	}
 
 	/// Serves ACP over caller-provided NDJSON transport halves. The client

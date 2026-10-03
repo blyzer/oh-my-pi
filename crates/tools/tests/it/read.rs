@@ -43,6 +43,7 @@ struct FileSource {
 	stat:     SourceStat,
 	bytes:    Bytes,
 	revision: Str,
+	diags:    Vec<Diag>,
 }
 
 #[derive(Clone, Default)]
@@ -59,6 +60,7 @@ struct Lease {
 	canonical_path: Str,
 	revision:       Str,
 	bytes:          Bytes,
+	diags:          Vec<Diag>,
 }
 
 impl ReadLease for Lease {
@@ -72,6 +74,10 @@ impl ReadLease for Lease {
 
 	fn read_all(&self) -> impl Future<Output = Result<Bytes, Fault>> + Send + '_ {
 		ready(Ok(self.bytes.clone()))
+	}
+
+	fn diags(&self) -> &[Diag] {
+		&self.diags
 	}
 }
 
@@ -103,6 +109,7 @@ impl ReadSources for Sources {
 				canonical_path: path.clone(),
 				revision:       source.revision.clone(),
 				bytes:          source.bytes.clone(),
+				diags:          source.diags.clone(),
 			})
 			.ok_or_else(|| Fault::source(format!("Path '{path}' not found")));
 		ready(result)
@@ -296,6 +303,7 @@ impl Sources {
 			},
 			bytes,
 			revision: sf!("revision-7"),
+			diags: Vec::new(),
 		};
 		self.files.insert(authored.to_owned(), source.clone());
 		self.files.insert(canonical.to_owned(), source.clone());
@@ -331,6 +339,7 @@ impl Sources {
 			},
 			bytes:    Bytes::new(),
 			revision: sf!("symlink"),
+			diags:    Vec::new(),
 		});
 	}
 
@@ -348,6 +357,7 @@ impl Sources {
 			},
 			bytes:    target_source.bytes,
 			revision: target_source.revision,
+			diags:    target_source.diags,
 		});
 	}
 
@@ -360,6 +370,26 @@ impl Sources {
 			.clone();
 		self.suffixes.insert(authored.to_owned(), stat);
 	}
+}
+
+/// Notices the source attached while pinning a file (such as where an editor
+/// buffer came from) reach the read result beside the read's own.
+#[tokio::test]
+async fn lease_diags_reach_the_read_result() {
+	let sources = Sources::default();
+	sources.file("notes.txt", "alpha\nbeta\n");
+	sources.files.alter("notes.txt", |_, source| FileSource {
+		diags: vec![Diag::warn(DiagKind::EditorBufferUnanchored, "unsaved editor changes")],
+		..source
+	});
+	let (text, diags) = text_with_diags(sources, r#"{"path":"notes.txt"}"#).await;
+	assert!(text.contains("alpha"), "{text}");
+	assert!(
+		diags
+			.iter()
+			.any(|diag| diag.native_kind() == Some(DiagKind::EditorBufferUnanchored)),
+		"{diags:?}"
+	);
 }
 
 async fn project(sources: Sources, blobs: Blobs, raw: &str, media: bool) -> Vec<Part> {

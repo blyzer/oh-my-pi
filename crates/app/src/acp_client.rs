@@ -8,15 +8,24 @@
 //! deadline, are gated by `sv_acp_fs` and by the live session's eligibility,
 //! and are retired when their caller is dropped, their session ends, or the
 //! transport closes; a response whose id is no longer pending is dropped.
+//!
+//! While the live session is eligible and the editor advertises
+//! `fs.readTextFile`, the connection binds the editor into the project
+//! environment as the document base (ADR 0037 §1.2, [`EditorDocumentsHost`]);
+//! it rebinds on every session switch and unbinds on `session/close`, a
+//! capability change that removes it, and transport loss.
 
 use std::{
+	future::Future,
 	path::{Component, Path, PathBuf},
-	sync::Arc,
+	pin::Pin,
+	sync::{Arc, Weak},
 	time::Duration as StdDuration,
 };
 
 use omp_con::Ctx;
 use omp_core::{Duration, DurationUnit, FastHashMap, Str};
+use omp_envd::docs::{AcpDocumentBackend, EditorIoError};
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -495,8 +504,103 @@ impl Table {
 }
 
 struct Shared {
-	table:    Mutex<Table>,
-	settings: AcpSettings,
+	table:     Mutex<Table>,
+	settings:  AcpSettings,
+	/// Where the editor is bound as the document base, and whether it is
+	/// bound now.
+	documents: Mutex<Option<(Arc<dyn EditorDocumentsHost>, bool)>>,
+}
+
+/// The project environment's editor binding, as the connection drives it
+/// (ADR 0037 §1.2). Production binds through the driver's composition
+/// ([`omp_envd::EditorDocuments`]); a test can observe the calls.
+pub trait EditorDocumentsHost: Send + Sync {
+	/// Binds `editor` as the document base for the live session, or unbinds
+	/// it with `None`. Every bind starts unanchored.
+	fn bind(&self, editor: Option<Arc<dyn AcpDocumentBackend>>);
+}
+
+impl EditorDocumentsHost for omp_envd::EditorDocuments {
+	fn bind(&self, editor: Option<Arc<dyn AcpDocumentBackend>>) {
+		Self::bind(self, editor);
+	}
+}
+
+/// The editor's buffers as the environment reads them: `fs/read_text_file`
+/// through this connection's gated request table.
+///
+/// Holds the connection weakly, so a binding left in the environment never
+/// keeps a finished connection alive; a request after the connection is gone
+/// fails as [`EditorIoError::Disconnected`].
+struct EditorBuffers(Weak<Shared>);
+
+impl EditorBuffers {
+	fn client(&self) -> Result<AcpClient, EditorIoError> {
+		self
+			.0
+			.upgrade()
+			.map(AcpClient)
+			.ok_or(EditorIoError::Disconnected)
+	}
+}
+
+impl AcpDocumentBackend for EditorBuffers {
+	fn deadline(&self) -> StdDuration {
+		self
+			.0
+			.upgrade()
+			.map_or_else(|| AcpSettings::default().fs_timeout, |shared| shared.settings.fs_timeout)
+	}
+
+	fn read_text(
+		&self,
+		absolute_path: Str,
+	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
+		Box::pin(async move {
+			self
+				.client()?
+				.read_text_file(Path::new(absolute_path.as_str()))
+				.await
+				.map_err(editor_io_error)
+		})
+	}
+
+	fn write_text(
+		&self,
+		absolute_path: Str,
+		content: Str,
+	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
+		Box::pin(async move {
+			self
+				.client()?
+				.write_text_file(Path::new(absolute_path.as_str()), content.as_str())
+				.await
+				.map_err(editor_io_error)?;
+			Ok(content)
+		})
+	}
+}
+
+/// Classifies a failed editor request for the environment, which falls back
+/// to disk whatever the cause; the cause itself is logged here, once.
+fn editor_io_error(error: ClientRequestError) -> EditorIoError {
+	tracing::debug!(error = &error as &dyn std::error::Error, "ACP editor request failed");
+	match error {
+		ClientRequestError::Disabled
+		| ClientRequestError::NotAdvertised { .. }
+		| ClientRequestError::NoSession
+		| ClientRequestError::SessionIneligible
+		| ClientRequestError::OutsideProject { .. }
+		| ClientRequestError::NonUtf8Path { .. } => EditorIoError::Unavailable,
+		ClientRequestError::Timeout { .. } => EditorIoError::Timeout,
+		ClientRequestError::SessionEnded { .. } | ClientRequestError::Disconnected { .. } => {
+			EditorIoError::Disconnected
+		},
+		ClientRequestError::Refused { .. } => EditorIoError::Refused,
+		ClientRequestError::Encode { .. } | ClientRequestError::Malformed { .. } => {
+			EditorIoError::Malformed
+		},
+	}
 }
 
 /// The editor on the other end of one ACP connection, as the agent reaches
@@ -525,7 +629,35 @@ impl AcpClient {
 				project_root: PathBuf::new(),
 			}),
 			settings,
+			documents: Mutex::new(None),
 		}))
+	}
+
+	/// Binds this connection's editor into `host` whenever the live session
+	/// may read editor buffers, and keeps that binding current from here on.
+	pub(crate) fn bind_documents(&self, host: Arc<dyn EditorDocumentsHost>) {
+		*self.0.documents.lock() = Some((host, false));
+		self.rebind_documents();
+	}
+
+	/// Brings the environment's editor binding in line with the gate: bound
+	/// (freshly, so unanchored) while `fs/read_text_file` would be sent,
+	/// unbound otherwise.
+	fn rebind_documents(&self) {
+		let eligible = self.can_read();
+		let mut documents = self.0.documents.lock();
+		let Some((host, bound)) = documents.as_mut() else {
+			return;
+		};
+		if !eligible && !*bound {
+			return;
+		}
+		*bound = eligible;
+		host.bind(
+			eligible.then(|| {
+				Arc::new(EditorBuffers(Arc::downgrade(&self.0))) as Arc<dyn AcpDocumentBackend>
+			}),
+		);
 	}
 
 	/// Connection settings.
@@ -677,36 +809,53 @@ impl AcpClient {
 
 	/// Records the capabilities of a (re-)`initialize`.
 	pub(crate) fn initialize(&self, capabilities: ClientCapabilities) {
-		self.0.table.lock().capabilities = capabilities;
+		let changed = {
+			let mut table = self.0.table.lock();
+			let changed = table.capabilities != capabilities;
+			table.capabilities = capabilities;
+			changed
+		};
+		if changed {
+			self.rebind_documents();
+		}
 	}
 
 	/// Makes `id` the live session. Calls that named the previous session
 	/// fail with [`ClientRequestError::SessionEnded`].
 	pub(crate) fn switch_session(&self, id: Str, cwd_matched: bool, project_root: &Path) {
-		let mut table = self.0.table.lock();
-		retire_calls(&mut table, |method| ClientRequestError::SessionEnded { method });
-		table.session = LiveSession { id, open: true, cwd_matched };
-		if table.project_root != project_root {
-			project_root.clone_into(&mut table.project_root);
+		{
+			let mut table = self.0.table.lock();
+			retire_calls(&mut table, |method| ClientRequestError::SessionEnded { method });
+			table.session = LiveSession { id, open: true, cwd_matched };
+			if table.project_root != project_root {
+				project_root.clone_into(&mut table.project_root);
+			}
 		}
+		self.rebind_documents();
 	}
 
 	/// `session/close`: no `fs/*` request is sent until the next switch, and
 	/// calls in flight fail with [`ClientRequestError::SessionEnded`].
 	pub(crate) fn close_session(&self) {
-		let mut table = self.0.table.lock();
-		retire_calls(&mut table, |method| ClientRequestError::SessionEnded { method });
-		table.session.open = false;
+		{
+			let mut table = self.0.table.lock();
+			retire_calls(&mut table, |method| ClientRequestError::SessionEnded { method });
+			table.session.open = false;
+		}
+		self.rebind_documents();
 	}
 
 	/// The transport is gone: every call in flight fails with
 	/// [`ClientRequestError::Disconnected`], approval tickets are forgotten,
 	/// and later requests fail at once.
 	pub(crate) fn disconnect(&self) {
-		let mut table = self.0.table.lock();
-		table.output = None;
-		retire_calls(&mut table, |method| ClientRequestError::Disconnected { method });
-		table.pending.clear();
+		{
+			let mut table = self.0.table.lock();
+			table.output = None;
+			retire_calls(&mut table, |method| ClientRequestError::Disconnected { method });
+			table.pending.clear();
+		}
+		self.rebind_documents();
 	}
 }
 

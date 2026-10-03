@@ -206,6 +206,11 @@ pub trait ReadLease: Send + Sync {
 	fn canonical_path(&self) -> &Str;
 	/// Reads the complete pinned file bytes.
 	fn read_all(&self) -> impl Future<Output = Result<Bytes, Fault>> + Send + '_;
+	/// Notices the source attached while pinning these bytes, such as where
+	/// they came from when they are not the revision's disk bytes.
+	fn diags(&self) -> &[Diag] {
+		&[]
+	}
 }
 
 /// App-owned local-source I/O boundary.
@@ -1272,13 +1277,15 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			let rendered = notebook::render(&source_bytes, &stat.display_path)
 				.map_err(|error| Fault::Source { message: Str::new(error.message()) })?;
 			let rendered_bytes = Bytes::copy_from_slice(rendered.text.as_bytes());
-			return self.text_parts(
-				&stat,
-				&rendered.text,
-				&parsed,
-				Some((lease.canonical_path(), lease.revision(), &rendered_bytes)),
-				suffix_from,
-			);
+			return self
+				.text_parts(
+					&stat,
+					&rendered.text,
+					&parsed,
+					Some((lease.canonical_path(), lease.revision(), &rendered_bytes)),
+					suffix_from,
+				)
+				.map(|section| section.with_diags(lease.diags().iter().cloned()));
 		}
 		if self.policy.render_markdown && markit::supports_path(path) {
 			let bytes = self.sources.read_bytes(stat.canonical_path.clone()).await?;
@@ -1334,22 +1341,26 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			&& (MIN_SUMMARY_LINES..=MAX_SUMMARY_LINES).contains(&text.lines().count())
 			&& let Some(summary) = structural_summary(&stat.display_path, &text)
 		{
-			return self.structural_parts(
-				&stat,
-				summary,
-				lease.canonical_path(),
-				lease.revision(),
-				&bytes,
-				suffix_from,
-			);
+			return self
+				.structural_parts(
+					&stat,
+					summary,
+					lease.canonical_path(),
+					lease.revision(),
+					&bytes,
+					suffix_from,
+				)
+				.map(|section| section.with_diags(lease.diags().iter().cloned()));
 		}
-		self.text_parts(
-			&stat,
-			&text,
-			&parsed,
-			Some((lease.canonical_path(), lease.revision(), &bytes)),
-			suffix_from,
-		)
+		self
+			.text_parts(
+				&stat,
+				&text,
+				&parsed,
+				Some((lease.canonical_path(), lease.revision(), &bytes)),
+				suffix_from,
+			)
+			.map(|section| section.with_diags(lease.diags().iter().cloned()))
 	}
 
 	async fn read_web(&self, target: web::ParsedTarget) -> Result<ReadSection, Fault> {

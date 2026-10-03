@@ -14,7 +14,7 @@ fn legacy_acp_bind_exec_flag_is_skipped_as_an_unknown_field() {
 	// documents = true (field 1), exec = true (reserved field 2).
 	let legacy = [0x08, 0x01, 0x10, 0x01];
 	let bind = AcpBind::decode(legacy.as_slice()).expect("legacy bind decodes");
-	assert_eq!(bind, AcpBind { documents: true });
+	assert_eq!(bind, AcpBind { documents: true, fs_timeout_ms: 0 });
 	assert_eq!(bind.encode_to_vec(), [0x08, 0x01]);
 }
 

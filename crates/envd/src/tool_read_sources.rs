@@ -21,6 +21,7 @@ use http::{
 };
 use omp_cache::document_cache::{DocumentCache, DocumentCacheKey};
 use omp_core::{Hash32, Str, dirs::home_dir, sf, shorten_home_path};
+use omp_tool::Diag;
 use omp_tools::read::{
 	DirectoryEntry, DirectorySource, Fault, ReadLease, ReadSources, SNAPSHOT_MAX_BYTES,
 	SnapshotRecord, SourceKind, SourceStat,
@@ -625,11 +626,21 @@ pub struct ReadDocumentLease {
 	backing:        ReadLeaseBacking,
 	revision:       Str,
 	canonical_path: Str,
+	diags:          Vec<Diag>,
 }
 
 #[derive(Debug)]
 enum ReadLeaseBacking {
-	Document { host: DocumentHost, lease: DocumentLease },
+	Document {
+		host:  DocumentHost,
+		lease: DocumentLease,
+	},
+	/// Bytes already chosen while pinning: the effective base against an
+	/// editor buffer (ADR 0037 §3). The lease keeps the disk revision pinned.
+	Resolved {
+		bytes:  Bytes,
+		_lease: DocumentLease,
+	},
 	File(Bytes),
 }
 
@@ -647,8 +658,14 @@ impl ReadLease for ReadDocumentLease {
 			ReadLeaseBacking::Document { host, lease } => read_whole(host, lease)
 				.await
 				.map_err(|error| Fault::source(error.to_string())),
-			ReadLeaseBacking::File(bytes) => Ok(bytes.clone()),
+			ReadLeaseBacking::Resolved { bytes, .. } | ReadLeaseBacking::File(bytes) => {
+				Ok(bytes.clone())
+			},
 		}
+	}
+
+	fn diags(&self) -> &[Diag] {
+		&self.diags
 	}
 }
 
@@ -662,6 +679,7 @@ async fn open_filesystem_lease(io_path: Str, source_path: Str) -> Result<ReadDoc
 		backing: ReadLeaseBacking::File(bytes),
 		revision,
 		canonical_path: source_path,
+		diags: Vec::new(),
 	})
 }
 
@@ -716,25 +734,6 @@ impl ReadSources for ReadSourceAdapter {
 	}
 
 	async fn open(&self, path: Str) -> Result<Self::Lease, Fault> {
-		let authored_path = resolve_authored_path(self.workspace.root(), &path);
-		let authored_display = display_path(self.workspace.root(), &authored_path)?;
-		let acp_path = utf8_path(&authored_path)?;
-		if let Some(result) = self.documents.read_acp_text(acp_path.clone()).await {
-			match result {
-				Ok(text) => {
-					let bytes = Bytes::copy_from_slice(text.as_bytes());
-					let revision = Str::from(format!("acp:{}", Hash32::sum(&bytes).to_hex()));
-					return Ok(ReadDocumentLease {
-						backing: ReadLeaseBacking::File(bytes),
-						revision,
-						canonical_path: authored_display.clone(),
-					});
-				},
-				Err(error) => {
-					tracing::debug!(%error, path = %acp_path, "ACP document read fell back to document authority");
-				},
-			}
-		}
 		let stat = self.stat_path(&path).await?;
 		let canonical = Path::new(stat.canonical_path.as_str());
 		let Ok(relative) = canonical.strip_prefix(self.workspace.root()) else {
@@ -748,10 +747,29 @@ impl ReadSources for ReadSourceAdapter {
 			.map_err(|error| Fault::source(error.to_string()))?;
 		let (revision, _canonical_path) =
 			read_document_metadata(lease.head()).map_err(Fault::source)?;
+		if self.documents.editor_route().is_none() {
+			return Ok(ReadDocumentLease {
+				backing: ReadLeaseBacking::Document { host: self.documents.clone(), lease },
+				revision,
+				canonical_path: stat.display_path,
+				diags: Vec::new(),
+			});
+		}
+		// An editor is bound: the bytes read are the effective base E, and the
+		// revision stays the disk head's, so an Edit prepared from this read
+		// commits against the revision the authority actually holds.
+		let disk = read_whole(&self.documents, &lease)
+			.await
+			.map_err(|error| Fault::source(error.to_string()))?;
+		let (bytes, diags) = match self.documents.editor_base(lease.head(), &disk).await {
+			Ok(base) => (base.bytes.unwrap_or(disk), base.diags),
+			Err(conflict) => (disk, vec![conflict.diag()]),
+		};
 		Ok(ReadDocumentLease {
-			backing: ReadLeaseBacking::Document { host: self.documents.clone(), lease },
+			backing: ReadLeaseBacking::Resolved { bytes, _lease: lease },
 			revision,
 			canonical_path: stat.display_path,
+			diags,
 		})
 	}
 

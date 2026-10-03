@@ -41,48 +41,110 @@ use crate::docserver::{
 	diagnostics::parse_push,
 	wire::{self, FrameConfig},
 };
-/// Editor-client document authority installed for an ACP session.
+/// The ACP editor on the other end of a session, as the environment reaches
+/// it for document buffers (ADR 0037).
 ///
-/// The boxed futures are confined to this cold dynamic RPC boundary; ordinary
-/// document and tool calls remain statically dispatched.
+/// The editor is never a document authority: its buffer is at most the base a
+/// tool reads and proposes against, and every write commits through the
+/// document authority. The boxed futures are confined to this cold dynamic
+/// RPC boundary, one allocation per editor round trip; ordinary document and
+/// tool calls remain statically dispatched.
 pub trait AcpDocumentBackend: Send + Sync {
-	/// Reads the editor's exact current UTF-8 buffer for an absolute path.
+	/// Deadline the editor applies to each request (`sv_acp_fs_timeout`); the
+	/// environment bounds its own wait by it.
+	fn deadline(&self) -> Duration;
+
+	/// Reads the editor's whole current UTF-8 buffer for a canonical absolute
+	/// path inside the project root.
 	fn read_text(
 		&self,
 		absolute_path: Str,
-	) -> Pin<Box<dyn Future<Output = miette::Result<Str>> + Send + '_>>;
+	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>>;
 
-	/// Writes the editor buffer and returns its authoritative read-back after
-	/// any client format-on-save hook.
+	/// Replaces the editor's buffer for a canonical absolute path inside the
+	/// project root and returns the buffer the editor then holds. Reserved for
+	/// the post-commit write-back (ADR 0037 §4.3); nothing in the environment
+	/// calls it before that lands.
 	fn write_text(
 		&self,
 		absolute_path: Str,
 		content: Str,
-	) -> Pin<Box<dyn Future<Output = miette::Result<Str>> + Send + '_>>;
+	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>>;
 }
 
-/// Late-bound ACP document capability shared by every tool adapter using one
-/// document connection.
-#[derive(Clone, Default)]
-pub(crate) struct AcpDocumentSlot(Arc<RwLock<Option<Arc<dyn AcpDocumentBackend>>>>);
-
-impl fmt::Debug for AcpDocumentSlot {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		formatter
-			.debug_struct("AcpDocumentSlot")
-			.field("bound", &self.0.read().is_some())
-			.finish()
-	}
+/// Why the editor produced no buffer for a request.
+///
+/// Each variant crosses the environment wire as one
+/// [`omp_proto::env::v1::ProtocolErrorCode`], so the daemon sees the same
+/// classification an in-process editor reports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum EditorIoError {
+	/// No editor answers document requests on this connection.
+	#[error("no editor answers document requests on this connection")]
+	Unbound,
+	/// The editor does not serve this request now: `sv_acp_fs off`, the
+	/// capability is not advertised, no session is open, or the session or
+	/// path is not eligible.
+	#[error("the editor does not serve this request")]
+	Unavailable,
+	/// The editor did not answer before the deadline.
+	#[error("the editor did not answer before the deadline")]
+	Timeout,
+	/// The editor connection or session ended before it answered.
+	#[error("the editor connection closed before it answered")]
+	Disconnected,
+	/// The editor answered with an error.
+	#[error("the editor refused the request")]
+	Refused,
+	/// The editor's answer does not have the expected shape.
+	#[error("the editor's answer is malformed")]
+	Malformed,
+	/// The editor's buffer is larger than the document snapshot cap.
+	#[error("the editor's buffer exceeds the document snapshot cap")]
+	Oversize,
+	/// Too many editor requests are already pending on this invocation.
+	#[error("too many editor requests are pending")]
+	Busy,
 }
 
-impl AcpDocumentSlot {
-	/// Replaces the active editor-client authority.
-	pub(crate) fn bind(&self, backend: Option<Arc<dyn AcpDocumentBackend>>) {
-		*self.0.write() = backend;
+impl EditorIoError {
+	/// The environment-wire code carrying this classification.
+	pub(crate) const fn protocol_code(self) -> omp_proto::env::v1::ProtocolErrorCode {
+		use omp_proto::env::v1::ProtocolErrorCode as Code;
+		match self {
+			Self::Unbound => Code::NotFound,
+			Self::Unavailable => Code::PreconditionFailed,
+			Self::Timeout => Code::DeadlineExceeded,
+			Self::Disconnected => Code::Cancelled,
+			Self::Refused => Code::PermissionDenied,
+			Self::Malformed => Code::InvalidArgument,
+			Self::Oversize => Code::Unsupported,
+			Self::Busy => Code::ResourceExhausted,
+		}
 	}
 
-	fn backend(&self) -> Option<Arc<dyn AcpDocumentBackend>> {
-		super::tools::invocation_acp_documents().or_else(|| self.0.read().clone())
+	/// Classifies an environment-wire error code; a code no variant sends is a
+	/// refusal.
+	pub(crate) fn from_protocol_code(code: i32) -> Self {
+		use omp_proto::env::v1::ProtocolErrorCode as Code;
+		match Code::try_from(code) {
+			Ok(Code::NotFound) => Self::Unbound,
+			Ok(Code::PreconditionFailed) => Self::Unavailable,
+			Ok(Code::DeadlineExceeded) => Self::Timeout,
+			Ok(Code::Cancelled) => Self::Disconnected,
+			Ok(Code::InvalidArgument) => Self::Malformed,
+			Ok(Code::Unsupported) => Self::Oversize,
+			Ok(Code::ResourceExhausted) => Self::Busy,
+			Ok(
+				Code::PermissionDenied
+				| Code::Unspecified
+				| Code::Internal
+				| Code::AlreadyExists
+				| Code::Uncommitted,
+			)
+			| Err(_) => Self::Refused,
+		}
 	}
 }
 
@@ -358,13 +420,14 @@ struct PendingLateDiagnostics {
 struct Inner {
 	hello:              DocumentHello,
 	resource_mutations: RwLock<Option<ResourceMutationServices>>,
-	acp_documents:      AcpDocumentSlot,
 	connection:         RwLock<ConnectionState>,
 	endpoint:           Option<DocumentEndpoint>,
 	rehost:             RwLock<Option<RehostCallback>>,
 	next_request:       AtomicU64,
 	shutdown:           CancellationToken,
 	edit_store:         EditStore,
+	/// Editor bound by the owning composition for its in-process native calls.
+	in_process_editor:  RwLock<Option<crate::editor_base::EditorRoute>>,
 	late_diagnostics:   Mutex<FastHashMap<Bytes, PendingLateDiagnostics>>,
 	recent_diagnostics: Mutex<FastHashMap<Bytes, pb::LspEvent>>,
 	late_inflight:      Mutex<FastHashSet<Bytes>>,
@@ -534,25 +597,17 @@ impl DocumentHost {
 		}
 	}
 
-	/// Binds or clears the editor-owned document authority.
-	pub(crate) fn bind_acp_documents(&self, backend: Option<Arc<dyn AcpDocumentBackend>>) {
-		self.inner.acp_documents.bind(backend);
+	/// Binds (or clears) the editor the owning composition's in-process native
+	/// calls read buffers from; each bind starts a fresh, unanchored session.
+	pub(crate) fn bind_in_process_editor(&self, editor: Option<Arc<dyn AcpDocumentBackend>>) {
+		*self.inner.in_process_editor.write() = editor.map(|editor| {
+			let session = Arc::new(crate::editor_base::EditorSession::new(editor.deadline()));
+			crate::editor_base::EditorRoute::new(editor, session)
+		});
 	}
 
-	/// Reads the current editor buffer when an ACP document authority is live.
-	pub(crate) async fn read_acp_text(&self, absolute_path: Str) -> Option<miette::Result<Str>> {
-		let backend = self.inner.acp_documents.backend()?;
-		Some(backend.read_text(absolute_path).await)
-	}
-
-	/// Writes through the current editor and returns its formatted read-back.
-	pub(crate) async fn write_acp_text(
-		&self,
-		absolute_path: Str,
-		content: Str,
-	) -> Option<miette::Result<Str>> {
-		let backend = self.inner.acp_documents.backend()?;
-		Some(backend.write_text(absolute_path, content).await)
+	pub(crate) fn in_process_editor(&self) -> Option<crate::editor_base::EditorRoute> {
+		self.inner.in_process_editor.read().clone()
 	}
 
 	/// Installs the app-owned capability-checked internal resource writers.
@@ -619,7 +674,6 @@ impl DocumentHost {
 		let inner = Arc::new(Inner {
 			hello: negotiated.0,
 			resource_mutations: RwLock::new(None),
-			acp_documents: AcpDocumentSlot::default(),
 			connection: RwLock::new(ConnectionState {
 				current:         None,
 				reconnect:       None,
@@ -631,6 +685,7 @@ impl DocumentHost {
 			next_request: AtomicU64::new(1),
 			shutdown: CancellationToken::new(),
 			edit_store: EditStore::default(),
+			in_process_editor: RwLock::new(None),
 			late_diagnostics: Mutex::new(FastHashMap::default()),
 			recent_diagnostics: Mutex::new(FastHashMap::default()),
 			late_inflight: Mutex::new(FastHashSet::default()),
