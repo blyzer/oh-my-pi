@@ -1,3 +1,5 @@
 # omp-collab
 
 `omp-collab` owns OMP's versioned, bounded collaboration relay substrate: room cryptography, revision-3 JSON framing with the browser-compatible four-byte relay envelope, deterministic replication reduction, correlated host UI requests, and reconnect transport state. It deliberately has no application or UI dependencies. The `/r/<room>`, AES-GCM, envelope, and shared frame grammar match `collab-web`; native agent inspection extends that grammar with detached DOM snapshot/event frames so actors never read host journal files.
+
+The `test-relay` feature (always on under `cargo test`) adds `test_relay::TestRelay`, an in-process content-blind relay server for joined-system proofs. The hosted relay is not self-hostable, so tests dial this one: it speaks the same grammar (`/r/<room>?role=&revision=3`, four-byte peer-routed envelopes, `peer-joined`/`peer-left`/`room-closed` controls, `4004`/`4009`/`4029` admission closes), holds no key, and records every forwarded envelope so a proof can assert that plaintext never crossed it. It is test support, not a production relay.

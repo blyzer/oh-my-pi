@@ -1,6 +1,14 @@
 //! Process-local owner for replica-backed collaboration relay sessions.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+	collections::BTreeMap,
+	path::PathBuf,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	time::Duration,
+};
 
 use bytes::Bytes;
 use omp_collab::{
@@ -28,8 +36,15 @@ use serde_json::value::RawValue;
 use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use super::observer::{
-	AgentViewFailureCode, HostAgentBridge, RemoteAgentView, RemoteAgentViewError, registry_snapshot,
+use super::{
+	observer::{
+		AgentViewFailureCode, HostAgentBridge, RemoteAgentView, RemoteAgentViewError,
+		registry_snapshot,
+	},
+	registry::{
+		Access, HostRegistrySource, HostSnapshot, ModelRef, Publication, RegistryError,
+		new_instance_id,
+	},
 };
 
 const INITIAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,13 +63,17 @@ pub enum CollabOwnerCommand {
 	/// ordered patch stream.
 	Start {
 		/// Validated relay origin.
-		relay:    RelayEndpoint,
+		relay:      RelayEndpoint,
 		/// Race-free session snapshot captured with `events`.
-		snapshot: Snapshot,
+		snapshot:   Snapshot,
 		/// Events following `snapshot` in journal order.
-		events:   flume::Receiver<Event>,
+		events:     flume::Receiver<Event>,
 		/// Controller-owned child transcript subscription authority.
-		agents:   HostAgentBridge,
+		agents:     HostAgentBridge,
+		/// Id of the hosted session, published to the local host registry.
+		session_id: Str,
+		/// Highest access the local host registry hands out for this room.
+		access:     Access,
 	},
 	/// Join a parsed room link under the resolved local identity.
 	Join {
@@ -402,6 +421,8 @@ struct ActiveSession {
 	host_ui:     Option<flume::Sender<HostUiOpen>>,
 	editor_link: Option<Str>,
 	viewer_link: Option<Str>,
+	/// Local host-registry entry; dropping the session withdraws it.
+	_registry:   Option<Publication>,
 }
 
 impl ActiveSession {
@@ -430,6 +451,14 @@ pub struct CollabSessionAuthority {
 	replica_events:   flume::Sender<Event>,
 	remote_ui:        flume::Sender<RemoteUiRequest>,
 	remote_mutations: flume::Sender<AuthorizedMutation>,
+	registry:         Option<RegistryIdentity>,
+	generation:       u64,
+}
+
+/// Where and as whom hosted rooms publish themselves for local discovery.
+struct RegistryIdentity {
+	dir:         PathBuf,
+	instance_id: Str,
 }
 
 impl CollabSessionAuthority {
@@ -456,6 +485,8 @@ impl CollabSessionAuthority {
 				replica_events,
 				remote_ui,
 				remote_mutations,
+				registry: None,
+				generation: 0,
 			},
 			CollabCommandHandle {
 				commands,
@@ -471,19 +502,38 @@ impl CollabSessionAuthority {
 		)
 	}
 
-	async fn run(self) {
+	/// Publishes every room this owner hosts to the local host registry in
+	/// `dir`, so `omp collab list` and `omp collab link` can discover it.
+	///
+	/// The instance id is stable across the room generations this owner
+	/// starts.
+	pub fn publish_to(&mut self, dir: PathBuf) -> Result<(), RegistryError> {
+		self.registry = Some(RegistryIdentity { dir, instance_id: new_instance_id()? });
+		Ok(())
+	}
+
+	async fn run(mut self) {
 		let mut active: Option<ActiveSession> = None;
 		while let Ok(request) = self.commands.recv_async().await {
 			let result = match request.command {
-				CollabOwnerCommand::Start { relay, snapshot, events, agents } => {
+				CollabOwnerCommand::Start { relay, snapshot, events, agents, session_id, access } => {
 					if let Some(previous) = active.take() {
 						previous.close().await;
 					}
 					self.replica.send_replace(None);
 					self.state.send_replace(None);
 					self.agents.send_replace(RegistrySnapshot::default());
+					self.generation = self.generation.saturating_add(1);
+					let publication = self.registry.as_ref().map(|identity| RegistryPlan {
+						dir: identity.dir.clone(),
+						instance_id: identity.instance_id.clone(),
+						generation: self.generation,
+						session_id,
+						access,
+					});
 					match start_host(
 						relay,
+						publication,
 						snapshot,
 						events,
 						agents,
@@ -709,8 +759,71 @@ struct GuestView {
 	next:     u32,
 }
 
+/// Registry publication parameters resolved by the owner for one room.
+struct RegistryPlan {
+	dir:         PathBuf,
+	instance_id: Str,
+	generation:  u64,
+	session_id:  Str,
+	access:      Access,
+}
+
+/// Live room state served to `omp collab list` and `omp collab link`.
+struct RoomSource {
+	instance_id:    Str,
+	generation:     u64,
+	session_id:     Str,
+	access:         Access,
+	started_at:     u64,
+	presence:       watch::Receiver<Option<PresenceFacts>>,
+	state:          watch::Receiver<Option<SessionStateUpdate>>,
+	editor_link:    Str,
+	viewer_link:    Str,
+	input_required: Arc<AtomicBool>,
+}
+
+impl HostRegistrySource for RoomSource {
+	fn snapshot(&self) -> Option<HostSnapshot> {
+		let presence = (*self.presence.borrow())?;
+		let state = self.state.borrow().clone();
+		let state = state.as_ref();
+		Some(HostSnapshot {
+			instance_id:     self.instance_id.clone(),
+			generation:      self.generation,
+			pid:             std::process::id(),
+			session_id:      self.session_id.clone(),
+			session_name:    state
+				.map(|state| state.session_name.as_str())
+				.filter(|name| !name.is_empty())
+				.map(Str::new),
+			cwd:             state
+				.map_or_else(|| Str::new_static(""), |state| Str::new(state.host_cwd.as_str())),
+			model:           state
+				.and_then(|state| state.model.as_ref())
+				.map(|model| ModelRef {
+					provider: Str::new(model.provider.as_str()),
+					id:       Str::new(model.id.as_str()),
+				}),
+			started_at:      self.started_at,
+			participants:    u32::try_from(presence.participant_count()).unwrap_or(u32::MAX),
+			relay_connected: presence.connection() == ConnectionState::Connected,
+			input_required:  self.input_required.load(Ordering::Relaxed),
+			busy:            state.is_some_and(|state| state.is_streaming),
+			access:          self.access,
+		})
+	}
+
+	fn link(&self, access: Access) -> Option<Str> {
+		match access {
+			Access::View => Some(self.viewer_link.clone()),
+			Access::Control => (self.access == Access::Control).then(|| self.editor_link.clone()),
+		}
+	}
+}
+
 async fn start_host(
 	relay_endpoint: RelayEndpoint,
+	registry: Option<RegistryPlan>,
 	snapshot: Snapshot,
 	events: flume::Receiver<Event>,
 	agents: HostAgentBridge,
@@ -734,6 +847,33 @@ async fn start_host(
 	let editor_link = Some(Str::new(room.full.compact()));
 	let viewer_link = Some(Str::new(room.view.compact()));
 	let presence = presence_tx.subscribe();
+	let input_required = Arc::new(AtomicBool::new(false));
+	let publication = match (registry, &editor_link, &viewer_link) {
+		(Some(plan), Some(editor), Some(viewer)) => {
+			let source = Arc::new(RoomSource {
+				instance_id:    plan.instance_id.clone(),
+				generation:     plan.generation,
+				session_id:     plan.session_id,
+				access:         plan.access,
+				started_at:     super::registry::now_ms(),
+				presence:       presence_tx.subscribe(),
+				state:          state_tx.subscribe(),
+				editor_link:    editor.clone(),
+				viewer_link:    viewer.clone(),
+				input_required: Arc::clone(&input_required),
+			});
+			match Publication::publish(&plan.dir, plan.instance_id.as_str(), source) {
+				Ok(publication) => Some(publication),
+				Err(error) => {
+					// Discovery is a convenience; a room stays hosted without it.
+					tracing::warn!(%error, "collaboration host registry publication failed");
+					None
+				},
+			}
+		},
+		_ => None,
+	};
+	let input_required_flag = input_required;
 	let task = tokio::spawn(async move {
 		let mut replica = Dom::from_snapshot(&snapshot);
 		let mut peers = BTreeMap::<u32, AuthenticatedPeer>::new();
@@ -831,6 +971,7 @@ async fn start_host(
 							});
 							ui_answers
 								.insert(request_id, HostUiWaiter { answer: open.answer, cancellation });
+							input_required_flag.store(true, Ordering::Relaxed);
 							for mut target in frames {
 								sequence = sequence.saturating_add(1);
 								target.frame.sequence = sequence;
@@ -867,6 +1008,7 @@ async fn start_host(
 						waiter.cancellation.abort();
 						let _ = waiter.answer.try_send(Err(HostUiRequestError::Cancelled));
 					}
+					input_required_flag.store(!ui_answers.is_empty(), Ordering::Relaxed);
 				},
 				Wake::UiCancel(Err(_)) => break,
 				Wake::ViewReady(Ok(ready)) => {
@@ -1186,6 +1328,7 @@ async fn start_host(
 										waiter.cancellation.abort();
 										let _ = waiter.answer.try_send(Ok(answer));
 									}
+									input_required_flag.store(!ui_answers.is_empty(), Ordering::Relaxed);
 									for mut target in cleanup {
 										sequence = sequence.saturating_add(1);
 										target.frame.sequence = sequence;
@@ -1270,6 +1413,7 @@ async fn start_host(
 		host_ui: Some(host_ui),
 		editor_link,
 		viewer_link,
+		_registry: publication,
 	})
 }
 
@@ -1463,10 +1607,13 @@ async fn start_guest(
 										{
 											break;
 										}
+										// Read the count in its own statement: a `borrow()` guard
+										// alive across `send_replace` self-deadlocks the watch lock.
+										let participants = (*presence_tx.borrow())
+											.map_or(1, PresenceFacts::participant_count);
 										presence_tx.send_replace(Some(PresenceFacts::guest(
 											ConnectionState::Connected,
-											(*presence_tx.borrow())
-												.map_or(1, PresenceFacts::participant_count),
+											participants,
 											read_only,
 										)));
 										if initial {
@@ -1643,9 +1790,11 @@ async fn start_guest(
 					for (_, cancel) in std::mem::take(&mut ui_requests) {
 						cancel.cancel();
 					}
+					let participants =
+						(*presence_tx.borrow()).map_or(1, PresenceFacts::participant_count);
 					presence_tx.send_replace(Some(PresenceFacts::guest(
 						ConnectionState::Reconnecting,
-						(*presence_tx.borrow()).map_or(1, PresenceFacts::participant_count),
+						participants,
 						read_only,
 					)));
 					if !reconnect(&mut relay, &task_cancel).await {
@@ -1690,6 +1839,7 @@ async fn start_guest(
 			host_ui: None,
 			editor_link: None,
 			viewer_link: None,
+			_registry: None,
 		}),
 		Ok(Ok(Err(error))) => {
 			cancel.cancel();
