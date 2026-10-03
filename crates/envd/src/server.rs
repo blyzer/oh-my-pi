@@ -3377,6 +3377,15 @@ impl EnvServer {
 		Arc::clone(self._memory_runtime.runtime())
 	}
 
+	/// Binds the editor this host's in-process native calls read buffers from.
+	/// A session-only host owns no document authority and runs no document
+	/// tools in-process, so it has nothing to bind.
+	pub(crate) fn bind_in_process_editor(&self, editor: Option<Arc<dyn AcpDocumentBackend>>) {
+		if let Some(environment) = &self.environment {
+			environment.documents.bind_in_process_editor(editor);
+		}
+	}
+
 	/// Binds the live durable approval authority used by Environment fallbacks.
 	pub(crate) fn bind_approval_authority(
 		&self,

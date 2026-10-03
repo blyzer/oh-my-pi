@@ -426,6 +426,8 @@ struct Inner {
 	next_request:       AtomicU64,
 	shutdown:           CancellationToken,
 	edit_store:         EditStore,
+	/// Editor bound by the owning composition for its in-process native calls.
+	in_process_editor:  RwLock<Option<crate::editor_base::EditorRoute>>,
 	late_diagnostics:   Mutex<FastHashMap<Bytes, PendingLateDiagnostics>>,
 	recent_diagnostics: Mutex<FastHashMap<Bytes, pb::LspEvent>>,
 	late_inflight:      Mutex<FastHashSet<Bytes>>,
@@ -595,6 +597,19 @@ impl DocumentHost {
 		}
 	}
 
+	/// Binds (or clears) the editor the owning composition's in-process native
+	/// calls read buffers from; each bind starts a fresh, unanchored session.
+	pub(crate) fn bind_in_process_editor(&self, editor: Option<Arc<dyn AcpDocumentBackend>>) {
+		*self.inner.in_process_editor.write() = editor.map(|editor| {
+			let session = Arc::new(crate::editor_base::EditorSession::new(editor.deadline()));
+			crate::editor_base::EditorRoute::new(editor, session)
+		});
+	}
+
+	pub(crate) fn in_process_editor(&self) -> Option<crate::editor_base::EditorRoute> {
+		self.inner.in_process_editor.read().clone()
+	}
+
 	/// Installs the app-owned capability-checked internal resource writers.
 	pub(super) fn set_resource_mutations(&self, services: ResourceMutationServices) {
 		*self.inner.resource_mutations.write() = Some(services);
@@ -670,6 +685,7 @@ impl DocumentHost {
 			next_request: AtomicU64::new(1),
 			shutdown: CancellationToken::new(),
 			edit_store: EditStore::default(),
+			in_process_editor: RwLock::new(None),
 			late_diagnostics: Mutex::new(FastHashMap::default()),
 			recent_diagnostics: Mutex::new(FastHashMap::default()),
 			late_inflight: Mutex::new(FastHashSet::default()),

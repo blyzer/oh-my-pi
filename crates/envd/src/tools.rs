@@ -3494,15 +3494,15 @@ pub(super) async fn with_acp_scope<T>(
 	ACP_BACKENDS.scope(context, future).await
 }
 
-/// Returns the editor bound to the invoking connection, if any. Only a native
-/// invocation arriving over a connection that bound an editor has one; the
-/// editor is never reachable from another connection's invocations, which is
+/// The editor of the invoking environment connection: `Some(route)` when that
+/// connection bound one, `Some(None)` when it did not, and `None` outside any
+/// connection invocation (an in-process native call by the composition's own
+/// kernel). A connection never reaches another connection's editor, which is
 /// what keeps subagents (their own compositions) off the parent's editor.
-pub(super) fn invocation_acp_documents() -> Option<super::editor_base::EditorRoute> {
+pub(super) fn invocation_acp_documents() -> Option<Option<super::editor_base::EditorRoute>> {
 	ACP_BACKENDS
 		.try_with(|context| context.documents.clone())
 		.ok()
-		.flatten()
 }
 
 /// Returns the caller-selected output policy for the current invocation.

@@ -494,6 +494,17 @@ fn file_path(uri: &str) -> Option<PathBuf> {
 }
 
 impl DocumentHost {
+	/// The editor reachable from the current call: the invoking connection's
+	/// binding for an invocation over the environment wire, or this host's
+	/// in-process binding for a native call made by the owning composition's
+	/// kernel (an embedded environment runs its native tools in-process).
+	pub(crate) fn editor_route(&self) -> Option<EditorRoute> {
+		match super::tools::invocation_acp_documents() {
+			Some(connection) => connection,
+			None => self.in_process_editor(),
+		}
+	}
+
 	/// Chooses the effective base for one document whose disk head is `head`
 	/// with bytes `disk` (ADR 0037 §3).
 	///
@@ -507,7 +518,7 @@ impl DocumentHost {
 		head: &pb::DocumentHead,
 		disk: &[u8],
 	) -> Result<EffectiveBase, EditorConflict> {
-		let Some(route) = super::tools::invocation_acp_documents() else {
+		let Some(route) = self.editor_route() else {
 			return Ok(EffectiveBase::default());
 		};
 		self.editor_base_with(&route, head, disk).await
@@ -563,7 +574,7 @@ impl DocumentHost {
 	/// without a bound editor, for an ineligible path, or when the editor
 	/// cannot answer.
 	pub(crate) async fn editor_superseded(&self, path: &Path) -> Option<CommitAnchor> {
-		let route = super::tools::invocation_acp_documents()?;
+		let route = self.editor_route()?;
 		let root = file_path(self.hello().root_uri.as_str())?;
 		let metadata = std::fs::metadata(path).ok()?;
 		if path == root

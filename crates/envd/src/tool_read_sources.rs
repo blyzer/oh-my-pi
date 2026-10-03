@@ -39,7 +39,6 @@ use url::Url;
 use super::{
 	docs::{DocumentHost, DocumentLease},
 	tool_document::{read_document_metadata, read_whole, resolve_read_document, snapshot_text},
-	tools::invocation_acp_documents,
 	workspace::WorkspaceHost,
 };
 
@@ -748,7 +747,7 @@ impl ReadSources for ReadSourceAdapter {
 			.map_err(|error| Fault::source(error.to_string()))?;
 		let (revision, _canonical_path) =
 			read_document_metadata(lease.head()).map_err(Fault::source)?;
-		if invocation_acp_documents().is_none() {
+		if self.documents.editor_route().is_none() {
 			return Ok(ReadDocumentLease {
 				backing: ReadLeaseBacking::Document { host: self.documents.clone(), lease },
 				revision,

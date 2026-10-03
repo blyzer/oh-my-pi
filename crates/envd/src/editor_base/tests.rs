@@ -905,3 +905,43 @@ async fn a_bound_composition_answers_reads_over_the_environment_wire() {
 	assert_eq!(fs::read(root.join("notes.txt")).expect("disk"), b"on disk\n");
 	drop(environment);
 }
+
+/// The composition's in-process binding serves only its own kernel's native
+/// calls: an invocation over any environment connection that bound no editor
+/// (another session, a subagent's composition) never reaches it.
+#[tokio::test]
+async fn the_in_process_editor_never_serves_another_connections_invocations() {
+	let fixture = Fixture::new(&[("doc.txt", b"a\n")]).await;
+	fixture.buffer("doc.txt", Ok("a\nunsaved\n"));
+	fixture
+		.host
+		.bind_in_process_editor(Some(Arc::clone(&fixture.editor) as Arc<dyn AcpDocumentBackend>));
+	let lease = fixture.lease("doc.txt").await;
+	let disk = read_whole(&fixture.host, &lease).await.expect("disk");
+
+	let unbound_connection = with_acp_scope(
+		InvocationAcpBackends::default(),
+		fixture.host.editor_base(lease.head(), &disk),
+	)
+	.await
+	.expect("disk");
+	assert_eq!(unbound_connection.bytes, None);
+	assert_eq!(fixture.reads(), 0, "a connection without a binding never reaches the editor");
+
+	let native = fixture
+		.host
+		.editor_base(lease.head(), &disk)
+		.await
+		.expect("buffer");
+	assert_eq!(native.bytes.as_deref(), Some(&b"a\nunsaved\n"[..]));
+	assert_eq!(fixture.reads(), 1, "the owning kernel's native call reads the buffer");
+
+	fixture.host.bind_in_process_editor(None);
+	let unbound = fixture
+		.host
+		.editor_base(lease.head(), &disk)
+		.await
+		.expect("disk");
+	assert_eq!(unbound.bytes, None);
+	assert_eq!(fixture.reads(), 1);
+}

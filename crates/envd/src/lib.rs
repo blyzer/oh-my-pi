@@ -1149,7 +1149,11 @@ impl ProjectEnvironment {
 	/// Returns the handle through which an ACP adapter binds its editor as the
 	/// document base of this composition (ADR 0037 §1.2).
 	pub fn editor_documents(&self) -> EditorDocuments {
-		EditorDocuments { client: self.client.clone(), documents: Arc::clone(&self.acp_documents) }
+		EditorDocuments {
+			client:    self.client.clone(),
+			documents: Arc::clone(&self.acp_documents),
+			server:    Arc::downgrade(&self.lifecycle.server),
+		}
 	}
 
 	/// Replaces the ask presenter for this environment composition.
@@ -1569,6 +1573,8 @@ type AcpDocumentsBinding = Arc<RwLock<Option<Arc<dyn docs::AcpDocumentBackend>>>
 pub struct EditorDocuments {
 	client:    EnvClient,
 	documents: AcpDocumentsBinding,
+	/// Held weakly: a binding kept past the composition reaches nothing.
+	server:    std::sync::Weak<EnvServer>,
 }
 
 impl EditorDocuments {
@@ -1576,6 +1582,11 @@ impl EditorDocuments {
 	/// close, an ineligible session, transport loss).
 	pub fn bind(&self, editor: Option<Arc<dyn docs::AcpDocumentBackend>>) {
 		let deadline = editor.as_ref().map(|editor| editor.deadline());
+		// An embedded host runs the kernel's native document tools in-process,
+		// outside any connection; they reach the editor through the host.
+		if let Some(server) = self.server.upgrade() {
+			server.bind_in_process_editor(editor.clone());
+		}
 		*self.documents.write() = editor;
 		if let Err(error) = self.client.bind_acp(deadline) {
 			tracing::warn!(
