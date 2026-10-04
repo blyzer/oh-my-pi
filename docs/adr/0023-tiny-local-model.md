@@ -43,7 +43,12 @@ title generation, translation, sentiment, and local TTS/STT through it by defaul
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/ai/src/lib.rs`. Gap: no embedded tiny local model is present for harness chores.
+**Status: Partially implemented.** Tiny-model plumbing (role, verified artifacts, lifecycle, local speech) exists, but no embedded text model runs harness chores by default. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Present: the `@tiny` role (`AI_TINY_SELECTOR` in `crates/catalog/src/settings.rs`) used for speech rewriting in `crates/driver/src/headless/kernel.rs`; curated GGUF artifact catalog and `ONLINE_TINY_MODEL` sentinel in `crates/ai/src/local/tiny_catalog.rs`; verified artifact store and admission/idle-unload runtime in `crates/ai/src/local/{artifact,runtime}.rs`; `omp tiny-models` installer in `crates/app/src/tiny_models_cmd.rs`.
+- Local candle speech: Whisper/Parakeet STT and Kokoro TTS in `crates/ai/src/local/{stt,parakeet,tts}.rs` behind `local-stt`/`local-tts`. An opt-in Apple Foundation Models route exists behind `local-applefm` (`crates/ai/src/local/applefm.rs`).
+- Missing: a candle or other in-process generator for the GGUF title/memory/classifier models. `crates/ai/src/local/mod.rs` still carries a doc comment for 'llama.cpp GGUF text generation' with no module behind it, and `normalize_generated_title` in `local/title.rs` has no caller outside its module.
+- Decision text says the tiny model is the default for chores; the default selector resolves through the normal routing/online path. Owner decision: build the embedded generator, or re-scope the ADR to the `@tiny` role plus optional local backends.
 
 ## References
 

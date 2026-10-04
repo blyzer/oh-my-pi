@@ -52,7 +52,11 @@ Applied as a review test:
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/lib.rs`. The new spine assigns journal/DOM state, dispatch, presentation, and configuration to single engine owners.
+**Status: Implemented.** A review rule, enforced by placing each invariant in one engine owner; there is no single code artifact. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Examples of single owners found in code: central output bound and spill in `crates/agent/src/dispatch.rs` (0009), kill boundary in `crates/agent/src/cancel.rs` (0011), `i` intent injected into every schema by `crates/tool/src/lib.rs` (0026), charitable argument repair in `crates/tool/src/incoming.rs` (0020), compatibility as KDL data in `crates/catalog/compat` (0017).
+- Mechanical backstops: `[workspace.lints]` in `Cargo.toml`, `clippy.toml` disallowed lists, and `tools/lintx` (model-name conditionals), run by `just lint`.
+- No code can prove the rule itself; adherence is checked per change in review.
 
 ## References
 

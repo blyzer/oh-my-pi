@@ -53,7 +53,15 @@ through that protocol.
 
 ## Status in omp
 
-**Implemented.** Primary terminal implementation: `crates/tui/src/debug.rs`. The real-PTY
+**Status: Implemented.** A named, off-screen debug protocol serves both the terminal and the native host. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Terminal: `crates/tui/src/debug.rs` (`OMP_TUI_DEBUG`, `OMP_TTY`) with `tree`, `keys`, `paste`, `mouse`, `resize`, text and values ops; driven by `.omp/tools/tui.ts`.
+- Native: `crates/app/src/gui.rs` serves the same wire off-screen, including frame PNG and clean quit; `crates/chat/tests/host.rs` compares terminal and native projections.
+- Real-PTY lifecycle proof: `crates/e2e/tests/p7_tui.rs`.
+
+### Implementation notes (carried over)
+
+Primary terminal implementation: `crates/tui/src/debug.rs`. The real-PTY
 protocol and terminal chat smoke are implemented. `crates/app/src/gui.rs` serves the same named
 debug wire against the production `NativeHost` off-screen, including key/chord, mouse, paste,
 resize, text, tree, values, slots, frame PNG, and clean quit. Its native lifecycle extensions

@@ -75,7 +75,16 @@ New resource kinds are added as projections behind `Read`, NEVER as new roster t
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/tools/src/read.rs`. Read materializes local, internal, web, archive, SQLite, notebook, image, and structural resources. Focused image inspection is the optional `Read.question` path: local, archive-member, internal-URL, and HTTP(S) images become bounded blob parts plus a typed vision request for the active route, with metadata fallback when media is unavailable. `crates/tools/src/read/image.rs` bounds encoded bytes, decoded pixels, raster dimensions, and cached normalized output; `crates/chat/src/cards/read.rs` owns the combined Read/Inspect card. `crates/envd/src/{vault.rs,tool_url/vault.rs,tool_document.rs}` implements configured and Obsidian-discovered `vault://` roots with project/user/CLI precedence, strict URL decoding and selectors, bounded directory/file reads and CLI output, symlink confinement, cancellable and deadline-bounded CLI process-tree cleanup, atomic filesystem writes, search/read CLI queries, and create/move/delete/open mutations routed through Read/Write. Device discovery is not a Read scheme: `dyn` owns it (0025).
+**Status: Implemented.** `Read` materializes local, internal, web, archive, SQLite, notebook, document, image and structural resources; I found no missing resource kind. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Resolver and selectors: `crates/tools/src/read.rs`, `read/{selector,resolver,archive,sqlite,notebook,pdf,image,profile,conflicts,web}.rs`, document extraction in `read/markit/{docx,pptx,xlsx,epub,...}.rs`.
+- Internal schemes: `crates/envd/src/tool_url/{artifact,attachment,docs,local,mcp,memory,ssh,vault}.rs`, `crates/envd/src/github_url.rs` (`issue://`, `pr://.../diff`), `rule://` in `crates/driver/src/discovery/rules.rs`; `security://` is served by `crates/envd/src/security_scan.rs`.
+- Path recovery and `~` expansion: `crates/tools/src/path.rs` and `read.rs`; `:raw`, ranges, `:conflicts` and `:img` in `read/selector.rs`.
+- The prior note said 'Partial' without naming a gap and I could not find one; treat that label as resolved unless the owner knows of a missing kind. Not exercised here: each scheme's behavior.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/tools/src/read.rs`. Read materializes local, internal, web, archive, SQLite, notebook, image, and structural resources. Focused image inspection is the optional `Read.question` path: local, archive-member, internal-URL, and HTTP(S) images become bounded blob parts plus a typed vision request for the active route, with metadata fallback when media is unavailable. `crates/tools/src/read/image.rs` bounds encoded bytes, decoded pixels, raster dimensions, and cached normalized output; `crates/chat/src/cards/read.rs` owns the combined Read/Inspect card. `crates/envd/src/{vault.rs,tool_url/vault.rs,tool_document.rs}` implements configured and Obsidian-discovered `vault://` roots with project/user/CLI precedence, strict URL decoding and selectors, bounded directory/file reads and CLI output, symlink confinement, cancellable and deadline-bounded CLI process-tree cleanup, atomic filesystem writes, search/read CLI queries, and create/move/delete/open mutations routed through Read/Write. Device discovery is not a Read scheme: `dyn` owns it (0025).
 
 ## References
 

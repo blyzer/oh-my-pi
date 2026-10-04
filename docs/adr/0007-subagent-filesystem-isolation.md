@@ -49,7 +49,12 @@ the parent receives a diff.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/driver/src/subagent/settings.rs`. Subagent isolation and patch/branch merge policy are centralized in driver composition.
+**Status: Partially implemented.** Every subagent gets a copy-on-write workspace and returns a patch or branch, but the configurable backend choice is not wired to anything. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Isolation and return path: `create_isolation`/`finish_isolation`/`discard_isolation` in `crates/driver/src/subagent/spawn.rs` call `CreateWorktree`/`MergeWorktree`; `run_child` isolates every child. The result is an `artifact://sha256/...` patch or a retained branch, applied only when `isolation.apply` allows.
+- Environment side: `crates/envd/src/workspace/operations.rs::create_worktree` clones each manifest entry with `clonefile`/`FICLONE` and a hardlink/copy fallback; the baseline covers untracked content and refuses oversize untracked trees. Proof: `crates/e2e/tests/p9_isolation.rs`.
+- Divergence: the ADR says backend choice is a setting. `TaskIsolationMode` in `crates/driver/src/subagent/settings.rs` declares auto/apfs/btrfs/zfs/reflink/overlayfs/projfs/block-clone/rcopy, but `CreateWorktree` carries no backend field and the mode is read only to test for `none` in `subagent_spec`. Owner decision: wire the backends or prune the enum.
+- Unverified: whether ignored files are included in the copy ('entire workspace, not the tracked subset').
 
 ## References
 

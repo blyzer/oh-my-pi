@@ -104,7 +104,15 @@ MUST run on this public surface so holes in it cannot be ignored.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/director.rs`. Director stacks, verdicts,
+**Status: Implemented.** Directors are a stack in the session DOM walked by a small loop, and built-in modes run on the same surface. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Verdicts `Pass`, `Continue`, `Yield`, `Push`, `Done`, `Fail` and the stack: `crates/agent/src/director.rs`; built-ins in `crates/agent/src/directors/` (`advisor`, `autoresearch`, `compaction`, `force_tool`, `goal`, `loop_mode`, `plan`, `prewalk`, `snapcompact`, `stream_rules`, `todo_reminder`, `vibe`).
+- Small differences from the sketch: `Fail` pops, journals an error notice and re-offers the candidate (doc on `Verdict::Fail`), where the text says 'pop with an error'; extensions register Directors with `@omp.director` (`crates/py/python/omp/extensions.py`) rather than `agent.direct(...)`.
+- The earlier regime design (`regime.rs`, `arbiter.rs`) was removed; see References.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/agent/src/director.rs`. Director stacks, verdicts,
 slot arbitration, binds, and journal-derived state are implemented and covered by the ported
 acceptance suite. Goal's Director retains ownership but yields on a prose-only candidate;
 `crates/app/src/chat_control.rs` revalidates the live session pause, Plan, configured presentation

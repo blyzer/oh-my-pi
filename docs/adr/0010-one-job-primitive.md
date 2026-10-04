@@ -50,7 +50,15 @@ features independently or lack them.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/jobs.rs`. The kernel job board and session `<meta><jobs>` component own detached tools and subagents. A durable call-entry link lets `JobBoard` adopt a terminal tool artifact after restart when `tool.result@1` committed but `jobs.settle` did not; otherwise the missing execution unit is orphan-settled, and the atomic async-result marker prevents duplicate delivery. Remote detached outcomes use the same path: `crates/driver/src/headless/kernel.rs` resumes verified CAS replication after a stream reconnect, while `crates/envd/src/blobs.rs` persists session/invocation-scoped delivery leases across host restarts, acknowledges each lease once, and releases content only after journal-derived roots disappear. `crates/agent/src/dispatch.rs` holds new tool, subagent, and job admission at the journal-derived global pause gate while existing units may settle.
+**Status: Implemented.** Tools, subagents, daemons and work pools settle through one job board and one detach path. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Job board: `crates/agent/src/jobs.rs` plus the `<meta><jobs>` component; detach on exceeding the blocking limit in `crates/agent/src/dispatch.rs` (`Dispatcher::detach`, `JobRef`).
+- Daemons and subagents: `crates/driver/src/subagent/hub.rs` (start/list/describe/logs/wait/send/restart/stop); work pools in `crates/driver/src/subagent/{workpool,workpool_scheduler,workpool_runtime}.rs`.
+- Restart reconciliation, orphan settling and replay adoption are covered by `crates/e2e/tests/p3_detached_jobs.rs` and `crates/agent/tests/jobs.rs`.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/agent/src/jobs.rs`. The kernel job board and session `<meta><jobs>` component own detached tools and subagents. A durable call-entry link lets `JobBoard` adopt a terminal tool artifact after restart when `tool.result@1` committed but `jobs.settle` did not; otherwise the missing execution unit is orphan-settled, and the atomic async-result marker prevents duplicate delivery. Remote detached outcomes use the same path: `crates/driver/src/headless/kernel.rs` resumes verified CAS replication after a stream reconnect, while `crates/envd/src/blobs.rs` persists session/invocation-scoped delivery leases across host restarts, acknowledges each lease once, and releases content only after journal-derived roots disappear. `crates/agent/src/dispatch.rs` holds new tool, subagent, and job admission at the journal-derived global pause gate while existing units may settle.
 
 Named daemons use that same surface: `crates/driver/src/subagent/hub.rs` maps
 start/list/describe/logs/wait/send/restart/stop onto generation-fenced `omp-env` process requests,

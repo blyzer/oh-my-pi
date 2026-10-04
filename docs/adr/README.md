@@ -26,7 +26,15 @@ Area: foundations | state | runtime | control-plane | inference | tools | interf
 ```
 
 Rules: `Decision` is normative (MUST/NEVER); `Context` is evidence, not opinion; `Status in omp`
-names real paths and says "not yet implemented" where true.
+names real paths, leads with one status label, and says "not yet implemented" or "unverified" where true.
+
+## Implementation status
+
+[STATUS.md](STATUS.md) is the one-table view of how far each record is implemented, with the gap and
+the records where code departs from the decision text. Each record's `## Status in omp` section opens
+with `Status: Implemented | Partially implemented | Not started | Superseded or diverged`, then
+bullets of evidence (paths, symbols), then divergences. Update the section and its STATUS.md row in the
+same change that moves the code.
 
 ## Index
 

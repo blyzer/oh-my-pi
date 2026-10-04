@@ -42,7 +42,10 @@ failure of the request, never silently downgraded.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/directors/force_tool.rs`. Directors express semantic force intent; inference/catalog capability selects the concrete mechanism.
+**Status: Implemented.** Directors state a forced-call intent and the inference layer picks the mechanism. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- `crates/agent/src/directors/force_tool.rs` sets only `Setting::Require`/`Prefer(ToolChoice::Named(..))` and the slot claim; it returns `Verdict::Fail` when the request cannot be satisfied.
+- Translation lives in `crates/ai/src/plan.rs` (`forced_call_ladder`) and `crates/ai/src/provider/builtin.rs` (`forced_call_operation`), driven by catalog capability bits (0019).
 
 ## References
 

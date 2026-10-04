@@ -88,7 +88,15 @@ and `{@render usage}` are semantic; the renderer resolves them (0032).
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/chat/src/cards/mod.rs`. Typed `dom!` cards consume real tool contracts. Extension custom-message renderer identities and replacement TML are journaled through `crates/session/src/custom_message.rs`, sealed by `crates/envd/src/exthost`, and projected with Markdown fallback by `crates/chat/src/notices/custom.rs`. Gap: runtime-markup control flow and equivalent web projection are not proved. The post's `layout!` macro does not exist; `crates/macros` provides `dom!` (retained components) and `view!` (typed renderer view trees, `crates/macros/src/view.rs`).
+**Status: Partially implemented.** Typed `dom!`/`view!` construction and HTML-style degradation exist; runtime-markup control flow and a web projection are not found. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Construction: `crates/macros/src/{dom,view,markup}.rs` (`dom!`, `view!`); cards in `crates/chat/src/cards`; `AGENTS.md` records that there is no `layout!` macro.
+- Degradation and inheritance: unknown tags become `CustomElement` (`crates/tui/src/components/custom.rs`); props inherit and are typed in `crates/tui/src/props.rs`; extension custom messages in `crates/session/src/custom_message.rs` and `crates/chat/src/notices/custom.rs`.
+- Gap: the ADR's example uses `{#if}`, `{#each}` and `{@render}` in runtime markup; searching `crates/tui`, `crates/chat` and `crates/macros` found none. No web or remote-inspector projection of the markup was found. Compile-time rejection of misplaced children is unverified.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/chat/src/cards/mod.rs`. Typed `dom!` cards consume real tool contracts. Extension custom-message renderer identities and replacement TML are journaled through `crates/session/src/custom_message.rs`, sealed by `crates/envd/src/exthost`, and projected with Markdown fallback by `crates/chat/src/notices/custom.rs`. Gap: runtime-markup control flow and equivalent web projection are not proved. The post's `layout!` macro does not exist; `crates/macros` provides `dom!` (retained components) and `view!` (typed renderer view trees, `crates/macros/src/view.rs`).
 
 ## References
 

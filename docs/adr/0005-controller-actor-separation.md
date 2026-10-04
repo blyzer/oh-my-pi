@@ -56,7 +56,16 @@ Controller and actor are completely separate.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/chat/src/host.rs`. The terminal and native chat
+**Status: Implemented.** Actors are projections over `Session::subscribe()` and return commands; none holds controller state. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Terminal and native chat actors: `crates/chat/src/host.rs`; `crates/chat/tests/host.rs` proves identical boot projections and one controller teardown per actor.
+- Native host: `crates/app/src/gui.rs` builds `NativeHost` from the detached snapshot/event contract; `crates/gui` owns only window and GPU lifecycle.
+- Stdio actor `crates/app/src/rpc_mode.rs` projects the same stream; private DOM snapshots do not cross the public RPC boundary. Collaboration child inspection reuses the transcript viewer through `crates/driver/src/collab/observer.rs`.
+- The ADR names a web client as a peer; the only `webview` crate is browser automation, so that peer is not present.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/chat/src/host.rs`. The terminal and native chat
 actors consume `Session::subscribe()` and return commands without holding controller authority;
 `crates/gui` owns only winit/GPU lifecycle and input delivery. `crates/app/src/gui.rs` proves its
 native `NativeHost` is built from the detached snapshot/event contract, while

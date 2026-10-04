@@ -66,7 +66,11 @@ extensions.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/ai/src/provider`. Provider infrastructure owns auth, codecs, routing, streaming, and typed errors. Local and configured model discovery is implemented by `crates/ai/src/discovery`, the bounded `crates/envd/src/model_discovery.rs` HTTP authority, and driver-owned cache/catalog composition.
+**Status: Implemented.** Provider infrastructure owns auth, retry, routing and an enumerated operation surface. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Infrastructure: `crates/ai/src/provider`, `crates/ai/src/auth`, `crates/ai/src/discovery`, with the bounded HTTP authority in `crates/envd/src/model_discovery.rs`.
+- Operation surface: `OperationKind` in `crates/catalog/src/capability.rs` enumerates Chat, CountTokens, Tokenize, Detokenize, Embed, GenerateImage, GenerateVideo, Speak, Transcribe, Realtime, Search, Usage, DiscoverModels, Auth, Native, Extract.
+- Extension hooks (`provider_login`, `provider_refresh`, `before_request`, `provider_usage`, `search_parse`) exist in `crates/py/python/omp/hooks.py` and `crates/ai/src/codec/provider_hooks.rs`. Unverified: that no extension path can hold or refresh a credential itself.
 
 ## References
 

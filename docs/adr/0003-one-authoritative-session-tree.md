@@ -108,7 +108,16 @@ Rules:
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/session/src/fold.rs`. Live writes and replay use the same journal-to-DOM fold; replay and Appendix A laws passed P2. `crates/journal/src/gc.rs` derives attachment, assistant-media, compaction, tool-artifact, child-job, checkpoint, and imported-session blob roots across every journal in a project/session namespace. Collection holds an exclusive namespace lease from the authoritative inventory through the CAS sweep, refuses live writers, retains complete branch history unless that same run first prunes it, and fails closed on malformed data, cancellation, or traversal bounds. `crates/journal/src/blob.rs` gives dry-run and apply identical age/candidate selection, serializes collection with atomic placement, and reports eligible separately from reclaimed bytes.
+**Status: Implemented.** The tree is the single authority and live writes and replay share one fold, but the journal keeps a closed typed entry vocabulary rather than a pure patch stream. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Tree: `crates/dom` (arena, ops, txn, subscribe) with the closed tag vocabulary in `crates/vocab` (`Session`, `Meta`, `Body`, `Queues`, `Todo`, `Jobs`, `Directors`, `Con`, ...); `fold_genesis` in `crates/session/src/fold.rs` mounts `<meta>` components and `<queues>`.
+- Journal and fold: `crates/journal` (`.oms`, blob CAS); one `Session::apply` fold in `crates/session/src/fold.rs` serves live writes and replay; component state reduces into `<meta>` through `crates/session/src/components`.
+- Divergence from rule 1: the journal's closed kind set is `journal`, `turn.start`, `msg.user`, `msg.assistant.start`/`end`, `stream`, `tool.call`/`update`/`result`, `turn.receipt`, `compaction` and `patch` (`crates/journal/src/kind.rs`), each folded by its own Rust arm. Only components and non-chat mutations ride `patch@1`. Owner decision needed: bless the typed entry kinds in the ADR, or move them onto patches.
+- Rule 5 (templates by hash plus variables) is not implemented as stored hash records. The system prompt is a pure projection of the tree on every request (`crates/agent/src/prompt`, `ProjectedRequest` in `crates/agent/src/loop.rs`), which meets the intent of not repeating it per entry.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/session/src/fold.rs`. Live writes and replay use the same journal-to-DOM fold; replay and Appendix A laws passed P2. `crates/journal/src/gc.rs` derives attachment, assistant-media, compaction, tool-artifact, child-job, checkpoint, and imported-session blob roots across every journal in a project/session namespace. Collection holds an exclusive namespace lease from the authoritative inventory through the CAS sweep, refuses live writers, retains complete branch history unless that same run first prunes it, and fails closed on malformed data, cancellation, or traversal bounds. `crates/journal/src/blob.rs` gives dry-run and apply identical age/candidate selection, serializes collection with atomic placement, and reports eligible separately from reclaimed bytes.
 
 Work-pool presentation is likewise replay-derived: `omp_journal::data::WorkpoolObservation`
 converts the producer-authenticated transition into the same typed IRC notice folded by

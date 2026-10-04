@@ -94,7 +94,12 @@ capabilities, NEVER on model or provider names.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/catalog/src/compat/axes.rs`. The closed compatibility vocabulary is compiled with explicit precedence and conformance coverage. Runtime rows from local and configured provider discovery pass through `omp_catalog::DiscoveryNormalizer`; endpoint protocol selection is typed configuration rather than URL/model-name inference.
+**Status: Implemented.** Compatibility is KDL data in three strata compiled with explicit precedence; ties are compile errors. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Data: `crates/catalog/compat/{taxonomy,classes,providers}/*.kdl`; compiler and cascade in `crates/catalog/src/{compile,cascade}.rs`; axes in `crates/catalog/src/compat/axes.rs`.
+- Tie handling: `CascadeError::AmbiguousOverlap` ('tie; add an explicit priority').
+- Model-name conditionals in `.rs` are rejected by `tools/lintx` (`just lintx`).
+- Runtime discovery rows pass through `omp_catalog::DiscoveryNormalizer`.
 
 ## References
 

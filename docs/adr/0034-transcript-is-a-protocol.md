@@ -95,7 +95,12 @@ the spec and model-checked first; a counterexample trace is the review artifact.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/tui/src/slots.rs`. Elastic slots, delivery transactions, resize policies, TLA+ artifacts, and law tests implement the transcript protocol.
+**Status: Partially implemented.** Elastic slots, delivery transactions and the TLA+ artifacts exist; the viewport-geometry cutover is not done and a user-selectable resize mode remains. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Protocol: `crates/tui/src/slots.rs` (block states, `Mode::{Mutable, AppendOnly}`, `ResizePolicy::{Preserve, Append, Rebuild}`); chat projection `crates/chat/src/transcript.rs`; laws in `crates/tui/tests/{elastic_props,seal_rebuild}.rs`.
+- Specification: `docs/adr/0034/ElasticSlots.tla` (+ PlusCal and `.cfg`), mirrored in `elastic/proof`.
+- Not done: the 'Viewport geometry (cutover plan)' (full card to compact card to pulse row to hidden). The ADR also says there is no user-selectable resize scrollback mode, but `CL_RESIZE_POLICY` (`crates/chat/src/settings.rs`, default `Rebuild`) is an archived, user-visible setting wired in `crates/app/src/chat_cmd.rs`. Owner decision: execute the cutover or revise the ADR.
+- Unverified: no TLC invocation found in `justfile`, `scripts` or `.github/workflows`, so the 'model-check first' rule has no automated gate.
 
 ## References
 

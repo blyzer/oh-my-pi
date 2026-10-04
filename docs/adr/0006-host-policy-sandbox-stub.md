@@ -59,7 +59,16 @@ The trust boundary is fixed as follows.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/envd/src/server.rs`. Host policy and bounded environment
+**Status: Partially implemented.** Host-owned policy, approval and bounded transport are in place; the sandbox side is the full envd binary, not a minimal stub, and one callback path points back into host authority. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Host policy and bounded environment transport: `crates/envd/src/server.rs`, `crates/envd/src/tools.rs` (hook approval descriptions merged into one durable ticket by `crates/agent/src/{hooks,approvals,dispatch}.rs`), `crates/envd/src/{exec,process_store}.rs` (process leases, generation fencing, tree cleanup).
+- Gap carried from the prior note: remote, container and VM targets run the full `omp-envd` binary rather than a minimized obedient stub.
+- Possible tension with 'the stub NEVER initiates calls into host authority': `omp_envd::eval::ParentSessionHost` (`crates/envd/src/eval/bridge.rs`) is an authenticated callback through which stub-side eval code runs parent completions, workpools and session mutations; the driver binds it with `ProjectEnvironment::bind_eval_sdk_parent`. I did not verify its behavior on remote targets. Owner decision: accept this as a bounded host-granted capability, or amend the ADR.
+- Extensions and eval run in supervised child processes the host can kill (`crates/envd/src/{worker,exthost}`), consistent with the last rule.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/envd/src/server.rs`. Host policy and bounded environment
 transport are implemented. The live `web_search@2` path is session-local policy: `omp-driver`
 binds the one production inference facade into `omp-envd`'s search bridge, while provider HTTP
 execution remains in the bounded host transport. Lifecycle-hook approval descriptions are generation-fenced in

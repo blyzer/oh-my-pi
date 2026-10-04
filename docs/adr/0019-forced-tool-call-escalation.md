@@ -61,7 +61,15 @@ invariant; inference chooses how to satisfy it.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/directors/force_tool.rs`. Forced calls escalate from prompt to capability-safe native choice with bounded retries. The ladder itself is `crates/ai/src/plan.rs::forced_call_ladder`, applied per attempt by `crates/ai/src/provider/builtin.rs::forced_call_operation`. Its inputs are compiled by `crates/catalog/src/compile.rs`: `tool_feature_bits` derives `NAMED_CHOICE`/`REQUIRED_CHOICE` from the model's compiled tool policy (affirmative facts only), and the host-declared `forced_tool_choice_penalty` (provider `compat`) is inherited by every model the provider serves unless a more specific rule declares one.
+**Status: Implemented.** The ladder is soft prompt always, native flag only when free, escalation with a recorded penalty when the model does not comply. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- `forced_call_ladder` in `crates/ai/src/plan.rs` takes catalog bits `NAMED_CHOICE`/`REQUIRED_CHOICE` and the declared penalty; it records `Adjustment::Escalated` with the penalty. Test: `forced_call_ladder_skips_paid_native_choice_then_records_escalation`.
+- Inputs compiled by `crates/catalog/src/compile.rs` (`tool_feature_bits`) and the provider `forced_tool_choice_penalty`.
+- Placement differs slightly from the text: the soft prompt is appended after the transcript, not added to the system prompt (test `soft_prompt_is_appended_after_the_transcript_not_prepended_to_system`), apparently to protect the cached prefix.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/agent/src/directors/force_tool.rs`. Forced calls escalate from prompt to capability-safe native choice with bounded retries. The ladder itself is `crates/ai/src/plan.rs::forced_call_ladder`, applied per attempt by `crates/ai/src/provider/builtin.rs::forced_call_operation`. Its inputs are compiled by `crates/catalog/src/compile.rs`: `tool_feature_bits` derives `NAMED_CHOICE`/`REQUIRED_CHOICE` from the model's compiled tool policy (affirmative facts only), and the host-declared `forced_tool_choice_penalty` (provider `compat`) is inherited by every model the provider serves unless a more specific rule declares one.
 
 ## References
 

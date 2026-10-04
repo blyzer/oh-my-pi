@@ -53,7 +53,15 @@ same boundary viewed from the stop side.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/cancel.rs` (scopes) and
+**Status: Implemented.** Cooperative request, bounded grace, forced termination and an effects-unknown record, enforced in the dispatcher and envd. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Scopes and ladder: `crates/agent/src/cancel.rs` and `Dispatcher::dispatch` in `crates/agent/src/dispatch.rs` journal `Abort::EffectsUnknown` for started calls that ignore the grace period.
+- Process-level TERM, grace, KILL: `crates/envd/src/exec.rs`, `crates/envd/src/mcp/{stdio,http}.rs`.
+- Verified present: `interrupt_kills_a_running_shell_tool_and_settles_aborted`, `tool_scoped_abort_forces_only_the_selected_sibling_and_replays` (`crates/agent/tests/dispatch.rs`), `crates/agent/tests/cancel.rs`, `crates/e2e/tests/p2_cancel_matrix.rs`, `crates/e2e/tests/p7_tui.rs`.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/agent/src/cancel.rs` (scopes) and
 `crates/agent/src/dispatch.rs` (the ladder). Every tool scope carries two views of one stop: the
 *commit* token a foreground mutation observes (session-only, so a turn interrupt never tears an
 atomic commit) and the *interrupt* token the host raises on turn interruption or session

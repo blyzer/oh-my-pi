@@ -54,7 +54,10 @@ dialect charitably. The repair layer is engine-owned, declarative, and receipted
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/tool/src/incoming.rs`. Raw arguments are journaled while the typed decoder performs charitable dialect repair before strict validation.
+**Status: Implemented.** Declared coercions and aliases run before strict validation, and repairs are receipted. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Decoder: `crates/tool/src/incoming.rs` (`Coerce`, `Repair`, `RepairKind::{Alias, Coercion, Elision}`), declared on the argument spec in `crates/tool/src/lib.rs`.
+- Evidence: the dispatcher attaches the repair trail to the call (`crates/agent/src/dispatch.rs`, `"repairs"`), and raw arguments stay journaled.
 
 ## References
 

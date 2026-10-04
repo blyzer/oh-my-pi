@@ -57,7 +57,12 @@ a long tail reachable through ordinary composition (0025).
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/tools/src/lib.rs`. The permanent native roster is fixed and optional capabilities route through stable code/device surfaces.
+**Status: Partially implemented.** The native roster is a fixed identity set with the long tail behind `dyn`, but the advertised roster is recomputed per request and does change mid-session. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Fixed identity set: `builtin_tool_identities()` in `crates/tools/src/lib.rs` (32 families, 6 hidden); MCP, media and security devices ride `dyn` (0025).
+- Divergence from rule 2: `ProjectedRequest` assembly in `crates/agent/src/loop.rs` (around line 2213) re-derives the tool list on every request: it applies the `sv_tools` allowlist (so Plan/Vibe Director binds restrict it mid-session), mounts the hidden `goal` tool while a Goal Director is active, adds `think` when `AI_EXTERNAL_THINKING` is set, and withholds `task` at the recursion ceiling. Each change alters the tool prefix.
+- No test pins roster stability; `crates/e2e/tests/p5_prefix_stability.rs` covers prompt bands only. Owner decision: accept Director-driven roster changes (and say so in the ADR) or freeze the roster at composition.
+- Not verified: the 'wall-clock benchmark' acceptance test named in the ADR.
 
 ## References
 

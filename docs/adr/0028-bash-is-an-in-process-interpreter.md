@@ -61,7 +61,12 @@ variables, exit codes, and `$!` do not survive between calls.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/shell/src/lib.rs`. The Bash parser/runtime and coreutils are in process with persistent shell state. Gap: distinct network-request approval and the grep routing proof remain incomplete.
+**Status: Partially implemented.** Parser, interpreter and coreutils are in process with persistent state; approval is sandbox-denial-and-rerun, not interpreter-boundary capability approval. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- In-process shell: `crates/shell` (parser/runtime) and `crates/shell-builtins` (about 80 builtins including `grep` and `rg` on the ripgrep libraries, `find`, `sed`, `sort`, `ln`, `jq`); persistent cwd and exports through `crates/envd/src/exec.rs`.
+- Divergence: approval in `crates/envd/src/exec.rs` (around line 2430), `crates/envd/src/exec_sandbox.rs` and `crates/envd/src/tool_shell.rs` classifies an OS sandbox denial, asks once for a path or network amendment (`ApprovedSandboxAmendment::{Path, Network}`) and reruns the command. The ADR describes just-in-time capability approval as interpretation reaches the boundary ('May I use Git to push?'). I found no git-push or `ln` capability unit (grep of `crates/shell`, `crates/envd/src/exec*`).
+- The prior gap 'no distinct network-request approval' looks stale: network amendments exist. Whether a rerun can repeat side effects of the first attempt is not verified.
+- `crates/tools/src/shell_intercept.rs` offers rule-configured guidance toward dedicated tools; the ADR's grep-to-ripgrep routing is satisfied by the `grep` builtin itself. Owner decision: keep the denial-and-rerun model and amend the ADR, or implement boundary-time capability approval.
 
 ## References
 
