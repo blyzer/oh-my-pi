@@ -475,15 +475,6 @@ fn compare(ordering: Ordering, op: CompareOp) -> bool {
 	}
 }
 
-#[derive(Clone, Copy, Debug, strum::Display)]
-#[strum(serialize_all = "lowercase")]
-enum StateScope {
-	Session,
-	Project,
-	User,
-	Organization,
-}
-
 macro_rules! string_enum {
 	($rust:ident, $python:literal, $inner:ty, [$($member:ident => $variant:path),+ $(,)?]) => {
 		#[doc = concat!("Canonical Python ", $python, " vocabulary.")]
@@ -525,12 +516,6 @@ string_enum!(PyRestartReason, "RestartReason", RestartReason, [
 	PROTOCOL_ERROR => RestartReason::ProtocolError,
 	OOM => RestartReason::Oom,
 	HEALTH_TIMEOUT => RestartReason::HealthTimeout,
-]);
-string_enum!(PyStateScope, "StateScope", StateScope, [
-	SESSION => StateScope::Session,
-	PROJECT => StateScope::Project,
-	USER => StateScope::User,
-	ORGANIZATION => StateScope::Organization,
 ]);
 
 string_enum!(PyDurability, "Durability", Durability, [
@@ -4352,7 +4337,7 @@ mod _omp {
 		PyDurability, PyDuration, PyEnvPath, PyEnvironmentBackend, PyEnvironmentStream, PyHistoryUrl,
 		PyInvocationPhase, PyLifecyclePhase, PyOperationSpec, PyPrincipal, PyQuotaStatus,
 		PyResourceReceipt, PyRestartReason, PyScribeTemplate, PySecret, PySecretUse, PySessionSetup,
-		PyStateScope, PyWorkspaceUri, StaleGeneration, TemplateError, operation_spec, resources,
+		PyWorkspaceUri, StaleGeneration, TemplateError, operation_spec, resources,
 	};
 	#[pymodule_export]
 	use crate::env_types::{

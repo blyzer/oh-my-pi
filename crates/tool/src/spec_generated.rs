@@ -176,7 +176,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		"(symbol: str) -> OperationSpec",
 		CallbackAbi::None,
 		OPEN_LOCAL,
-		"omp.operation_spec(\"omp.journal.append\")"
+		"omp.operation_spec(\"omp.sessions.create\")"
 	),
 	symbol!(
 		"docs/py/00-overview.md",
@@ -214,83 +214,11 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 	},
 	symbol!(
 		"docs/py/09-journal.md",
-		"omp.journal.append",
-		"(entry, *, display=None, idempotency_key=None) -> EntryId",
-		CallbackAbi::None,
-		CORE_DURABLE,
-		"await omp.journal.append(entry)"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.journal.entries",
-		"(kind=None, *, rev=None, since=None, limit=None, live=True) -> Sequence[JournalEntry]",
-		CallbackAbi::None,
-		OPEN_METERED,
-		"omp.journal.entries(\"dev.example.turn\")"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.journal.latest",
-		"(kind) -> JournalEntry | None",
-		CallbackAbi::None,
-		OPEN_METERED,
-		"omp.journal.latest(\"dev.example.turn\")"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.journal.fold",
-		"(kind, reducer, initial, *, since=None) -> tuple[T, EntryId | None]",
-		CallbackAbi::None,
-		OPEN_METERED,
-		"omp.journal.fold(\"dev.example.turn\", reducer, initial)"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.journal.label",
-		"(target, label) -> EntryId",
-		CallbackAbi::None,
-		CORE_DURABLE,
-		"await omp.journal.label(target, \"accepted\")"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
 		"omp.journal.decode",
 		"(raw) -> Any",
 		CallbackAbi::None,
 		OPEN_LOCAL,
 		"omp.journal.decode(entry.raw)"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.state.append",
-		"(entry, *, scope, idempotency_key=None) -> StateEntryId",
-		CallbackAbi::None,
-		CORE_DURABLE,
-		"await omp.state.append(entry, scope=omp.StateScope.SESSION)"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.state.entries",
-		"(kind, *, scope, since=None, limit=None) -> Sequence[StateEntry]",
-		CallbackAbi::None,
-		OPEN_METERED,
-		"omp.state.entries(\"dev.example.pref\", scope=omp.StateScope.WORKSPACE)"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.state.latest",
-		"(kind, *, scope) -> StateEntry | None",
-		CallbackAbi::None,
-		OPEN_METERED,
-		"omp.state.latest(\"dev.example.pref\", scope=omp.StateScope.WORKSPACE)"
-	),
-	symbol!(
-		"docs/py/09-journal.md",
-		"omp.state.fold",
-		"(kind, reducer, initial, *, scope, since=None) -> tuple[T, StateEntryId | None]",
-		CallbackAbi::None,
-		OPEN_METERED,
-		"omp.state.fold(\"dev.example.pref\", reducer, initial, scope=omp.StateScope.WORKSPACE)"
 	),
 	symbol!(
 		"docs/py/09-journal.md",

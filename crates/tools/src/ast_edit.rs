@@ -576,7 +576,7 @@ impl StagedProposalAction for AstEditAction {
 		if matches!(
 			decision,
 			ProposalDecision::Reject(
-				ProposalRejection::Requested { .. } | ProposalRejection::RegimeLimitReached
+				ProposalRejection::Requested { .. } | ProposalRejection::ProposalLimitReached
 			)
 		) {
 			return Ok(serde_json::json!({ "rejected": true }));
@@ -1229,7 +1229,7 @@ mod tests {
 	}
 
 	#[test]
-	fn staged_action_mutates_only_after_resolve_and_regime_limit_is_effect_free() {
+	fn staged_action_mutates_only_after_resolve_and_proposal_limit_is_effect_free() {
 		let temp = tempfile::tempdir().expect("temporary workspace");
 		let path = temp.path().join("sample.rs");
 		let original = b"fn old() {}\n";
@@ -1237,7 +1237,7 @@ mod tests {
 
 		let mut rejected = action(temp.path(), &path, original, "fn new() {}\n");
 		rejected
-			.finalize(&ProposalDecision::Reject(ProposalRejection::RegimeLimitReached))
+			.finalize(&ProposalDecision::Reject(ProposalRejection::ProposalLimitReached))
 			.expect("proposal rejected");
 		assert_eq!(fs::read(&path).expect("source readable"), original);
 

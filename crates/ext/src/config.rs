@@ -2063,9 +2063,6 @@ pub struct StaticDeclarations {
 	/// Inference provider catalog declarations.
 	#[serde(default)]
 	pub providers:         Box<[StaticDeclaration]>,
-	/// Session and turn regime declarations.
-	#[serde(default)]
-	pub regimes:           Box<[StaticDeclaration]>,
 	/// Interactive presentation declarations.
 	#[serde(default)]
 	pub ui:                UiDeclarations,
@@ -2109,8 +2106,6 @@ pub enum StaticDeclarationClass {
 	Service,
 	/// Inference provider.
 	Provider,
-	/// Regime.
-	Regime,
 	/// UI command.
 	UiCommand,
 	/// UI shortcut.
@@ -2163,7 +2158,6 @@ impl StaticDeclarations {
 		let mut hooks = Vec::from(parsed.hooks);
 		let mut services = Vec::from(parsed.services);
 		let mut providers = Vec::from(parsed.providers);
-		let mut regimes = Vec::from(parsed.regimes);
 		let mut commands = Vec::from(parsed.ui.commands);
 		let mut shortcuts = Vec::from(parsed.ui.shortcuts);
 		let mut message_renderers = Vec::from(parsed.ui.message_renderers);
@@ -2196,7 +2190,6 @@ impl StaticDeclarations {
 				"hook" => hooks.push(row.clone()),
 				"service" => services.push(row.clone()),
 				"provider" => providers.push(row.clone()),
-				"regime" => regimes.push(row.clone()),
 				"command" => commands.push(row.clone()),
 				"shortcut" => shortcuts.push(row.clone()),
 				"message_renderer" => message_renderers.push(row.clone()),
@@ -2222,7 +2215,6 @@ impl StaticDeclarations {
 		parsed.hooks = hooks.into_boxed_slice();
 		parsed.services = services.into_boxed_slice();
 		parsed.providers = providers.into_boxed_slice();
-		parsed.regimes = regimes.into_boxed_slice();
 		parsed.ui.commands = commands.into_boxed_slice();
 		parsed.ui.shortcuts = shortcuts.into_boxed_slice();
 		parsed.ui.message_renderers = message_renderers.into_boxed_slice();
@@ -2266,7 +2258,6 @@ impl StaticDeclarations {
 			.chain(self.hooks.iter())
 			.chain(self.services.iter())
 			.chain(self.providers.iter())
-			.chain(self.regimes.iter())
 			.chain(self.ui.commands.iter())
 			.chain(self.ui.shortcuts.iter())
 			.chain(self.ui.message_renderers.iter())
@@ -2307,12 +2298,6 @@ impl StaticDeclarations {
 					.providers
 					.iter()
 					.map(|row| (StaticDeclarationClass::Provider, &row.id)),
-			)
-			.chain(
-				self
-					.regimes
-					.iter()
-					.map(|row| (StaticDeclarationClass::Regime, &row.id)),
 			)
 			.chain(
 				self
@@ -2600,40 +2585,28 @@ skills = []
 	}
 
 	#[test]
-	fn regime_declarations_serialize_under_the_clean_class_name() {
-		let declarations = StaticDeclarations {
-			regimes: vec![StaticDeclaration {
-				id: sf!("acme.goal-loop"),
-				..StaticDeclaration::default()
-			}]
-			.into_boxed_slice(),
-			..StaticDeclarations::default()
-		};
-
-		let encoded = serde_json::to_value(&declarations).expect("serialize declarations");
-		assert_eq!(encoded["regimes"][0]["id"], "acme.goal-loop");
-	}
-
-	#[test]
-	fn ordered_regime_declaration_lowers_and_unknown_kind_is_rejected() {
+	fn ordered_declaration_lowers_and_unknown_kind_is_rejected() {
 		let mut properties = BTreeMap::new();
 		properties.insert(
 			sf!("declarations"),
-			serde_json::json!([{"id": "acme.goal-loop", "kind": "regime"}]),
+			serde_json::json!([{"id": "acme.review", "kind": "provider"}]),
 		);
 		let declarations =
-			StaticDeclarations::from_properties(&properties).expect("lower regime declaration");
-		assert_eq!(declarations.regimes.len(), 1);
-		let (class, id) = declarations.identities().next().expect("regime identity");
-		assert_eq!(class, StaticDeclarationClass::Regime);
-		assert_eq!(id.as_str(), "acme.goal-loop");
+			StaticDeclarations::from_properties(&properties).expect("lower provider declaration");
+		assert_eq!(declarations.providers.len(), 1);
+		let (class, id) = declarations.identities().next().expect("provider identity");
+		assert_eq!(class, StaticDeclarationClass::Provider);
+		assert_eq!(id.as_str(), "acme.review");
 
-		properties.insert(
-			sf!("declarations"),
-			serde_json::json!([{"id": "acme.legacy", "kind": "legacy_control"}]),
-		);
-		assert!(StaticDeclarations::from_properties(&properties).is_err());
+		// `regime` is not a declaration kind any more: Directors are claimed in
+		// code, so the host refuses the retired row instead of lowering it.
+		for kind in ["regime", "legacy_control"] {
+			properties
+				.insert(sf!("declarations"), serde_json::json!([{"id": "acme.legacy", "kind": kind}]));
+			assert!(StaticDeclarations::from_properties(&properties).is_err(), "kind {kind}");
+		}
 	}
+
 	#[test]
 	fn extension_setting_convar_names_are_owner_qualified() {
 		assert_eq!(

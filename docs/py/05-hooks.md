@@ -1199,9 +1199,9 @@ class BranchReason(enum.StrEnum):
 ```
 
 `session_rewind` is the admission gate for **user-initiated UI rewinds only**; loop-internal
-flavors (retry, checkpoint-regime rewinds, extension-requested `omp.agents.rewind`) are core turn
+flavors (retry, checkpoint rewinds, extension-requested `omp.agents.rewind`) are core turn
 machinery and are never gateable. `session_rewound` fires after **every** history rewrite — UI
-rewind, retry, checkpoint-regime rewind, and `omp.agents.rewind` — once the agent has reconciled
+rewind, retry, checkpoint rewind, and `omp.agents.rewind` — once the agent has reconciled
 journal-derived environment state (todo slot restore, background-job policy). `running_jobs` lists
 background jobs still pending after the rewrite; `cancelled_jobs` lists jobs whose launch the
 rewrite dropped and which were therefore cancelled (checkpoint rewinds cancel nothing). State

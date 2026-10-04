@@ -1,4 +1,4 @@
-//! Hidden goal lifecycle tool over application-owned regime control.
+//! Hidden goal lifecycle tool over application-owned goal control.
 
 use async_stream::stream;
 use futures::Stream;
@@ -129,11 +129,11 @@ pub struct Payload {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Update {}
 
-/// Typed refusal from the goal regime owner.
+/// Typed refusal from the goal owner.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fault {
-	/// No live durable goal regime control is installed.
+	/// No live durable goal control is installed.
 	#[error("goal mode is not active")]
 	Unavailable,
 	/// An operation required an existing goal.
@@ -148,8 +148,8 @@ pub enum Fault {
 	/// The active mode prevents a goal transition.
 	#[error("the active execution mode prevents this goal transition")]
 	ModeConflict,
-	/// A resource required by the goal regime is owned by another activation.
-	#[error("the goal regime resource {resource} is owned by activation {owner}")]
+	/// A resource required by goal mode is owned by another activation.
+	#[error("the goal resource {resource} is owned by activation {owner}")]
 	ResourceConflict {
 		/// Canonical resource name, such as `mode`.
 		resource: Str,
@@ -163,7 +163,7 @@ pub enum Fault {
 	InvalidTransition,
 }
 
-/// App-owned durable goal regime control consumed through a frozen registry
+/// App-owned durable goal control consumed through a frozen registry
 /// entry.
 pub trait GoalControl: Clone + Send + Sync + 'static {
 	/// Applies one validated operation atomically and returns its latest
@@ -172,7 +172,7 @@ pub trait GoalControl: Clone + Send + Sync + 'static {
 	-> impl Future<Output = Result<Option<Goal>, Fault>> + Send + '_;
 }
 
-/// Hidden goal tool backed by one durable regime-control handle.
+/// Hidden goal tool backed by one durable goal-control handle.
 pub struct GoalTool<C> {
 	control: C,
 	spec:    ToolSpec,

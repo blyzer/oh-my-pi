@@ -1229,7 +1229,7 @@ impl ProjectEnvironment {
 	}
 
 	/// Returns the live generation-fenced extension callback transport used by
-	/// provider, regime, presentation, and job owners.
+	/// provider, presentation, and job owners.
 	pub fn extension_callback_dispatcher(&self) -> Arc<dyn CallbackDispatcher> {
 		self.lifecycle.server.extension_callback_dispatcher()
 	}
@@ -1263,7 +1263,7 @@ impl ProjectEnvironment {
 		self.lifecycle.server.extension_control_manifest(identity)
 	}
 
-	/// Returns full frozen provider and regime declarations for one exact
+	/// Returns full frozen provider declarations for one exact
 	/// authenticated extension generation.
 	pub fn extension_registry_evidence(
 		&self,
