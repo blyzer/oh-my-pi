@@ -59,11 +59,11 @@ renders a gradient. No theme object anywhere.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/chat/src/project.rs`. Chat and cards emit semantic
-presentation values into one ambient renderer context. `crates/gui/src/host.rs` maps the native
-window's initial and changed light/dark appearance into that same `UiContext`; `NativeHost`
-reprojects the retained actor and composer from the ambient palette rather than threading a native
-theme through components.
+**Status: Implemented.** Icons, colors, charset, theme and reveal pacing resolve in the renderer through one ambient `UiContext`. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Context and icons: `crates/tui/src/context.rs`, `crates/tui/src/icons.rs` with `crates/tui/icons.tsv`; `<ico:name/>` is tested in `crates/tui/src/components/tests.rs`.
+- Gradients as values (`a..b`) in `crates/tui/src/props.rs`; `reveal` prop for streaming pacing; native appearance mapped into the same context in `crates/gui/src/host.rs`.
+- Chat and cards emit semantic values: `crates/chat/src/project.rs`.
 
 ## References
 

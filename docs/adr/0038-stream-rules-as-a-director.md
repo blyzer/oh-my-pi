@@ -393,7 +393,7 @@ All flags are `archive | session`, `ui.tab=context`, `ui.group="Rules (TTSR)"` (
 
 ## Status in omp
 
-**Core redirect and rule matching are implemented; the surface work remains incomplete.** The
+**Status: Partially implemented (plan steps 1-4 done, step 5 open).** Verified 2026-10-04 against `omp2` at `083b38fe7d`. The
 generic `StreamWatch` hook and loop redirect are in `crates/agent`; the built-in Director,
 incremental DFA matcher, policy convars, discovery filtering, and driver installation are also
 present. Its matching and redirect behavior has package coverage in `omp-agent`.
@@ -407,6 +407,18 @@ match text intended for that file. Deletions, removed diff rows, and context row
 the `omp rules` CLI, and TUI/ACP/print surface work in implementation plan step 5 remain open.
 The matcher also still needs its planned property and integration coverage, and the remaining
 items in the test plan below are not yet proven end to end.
+
+Verification notes. The matcher, Director and policy types live in one file,
+`crates/agent/src/directors/stream_rules.rs` (not the `stream_rules/matcher.rs` split named in plan
+step 2); the six convars (`ai_stream_rules_*`) are in `crates/agent/src/vars.rs` and
+`AI_STREAM_REDIRECT_CAP` in `crates/ai`; driver installation is in
+`crates/driver/src/headless/kernel.rs`. Test coverage is narrower than 'package coverage' suggests: the
+only tests I found are the six unit tests inside `stream_rules.rs`. The files named in the test plan,
+`crates/agent/tests/stream_watch.rs` and `crates/agent/tests/directors/stream_rules.rs`, do not exist,
+and no test drives a redirect through the loop, replay or rewind. The `ttsr_triggered` hook name is
+registered in `crates/py/python/omp/{hooks,events}.py` but no Rust code emits it, and the orphan `Ttsr*`
+clap types remain in `crates/app/src/cli.rs`. `AGENTS.md` ('Control plane') still says no stream-rule
+Director exists in `crates/agent/src/directors/`; that sentence is out of date.
 
 ### Implementation plan (PR-sized)
 

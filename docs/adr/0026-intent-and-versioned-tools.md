@@ -46,7 +46,15 @@ input, output, diagnostics, or usage is avoidable technical debt.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/tool/src/lib.rs`. Every native schema receives `i`; durable calls record `ToolIdentity { name, rev }`. The production checkpoint family is a clean revisioned cutover: `checkpoint@3` owns named create/list and `rewind@4` owns explicit token-or-label selection; the former create-only and report-only argument shapes are rejected rather than accepted through aliases. `crates/tools/src/web_search.rs` records the expanded provider/query/deadline contract as `web_search@2` and carries an explicit, redacting `@1` journal lift.
+**Status: Implemented.** Every native schema gets `i` and a durable `name@rev` identity. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- `i` injection (and `notrunc`) in `crates/tool/src/lib.rs`; `ToolIdentity { name, rev }` in the same file, recorded on every call.
+- Revision cutovers: `checkpoint@3`, `rewind@4`, and `web_search@2` with an explicit redacting `@1` journal lift (`crates/tools/src/web_search.rs`).
+- Search found no tool-local `reason`/`purpose`/`why` argument fields in `crates/tools/src`.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/tool/src/lib.rs`. Every native schema receives `i`; durable calls record `ToolIdentity { name, rev }`. The production checkpoint family is a clean revisioned cutover: `checkpoint@3` owns named create/list and `rewind@4` owns explicit token-or-label selection; the former create-only and report-only argument shapes are rejected rather than accepted through aliases. `crates/tools/src/web_search.rs` records the expanded provider/query/deadline contract as `web_search@2` and carries an explicit, redacting `@1` journal lift.
 
 ## References
 

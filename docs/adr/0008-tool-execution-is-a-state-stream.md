@@ -87,7 +87,15 @@ The element shape:
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/dispatch.rs`. Tool calls stream through one
+**Status: Implemented.** One tool-call element carries streamed args, ordered execution markers, typed diagnostics and the terminal result. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Dispatcher and lifecycle: `crates/agent/src/dispatch.rs` (authorization, `kernel=started`, terminal result as ordered journal entries; replay derives `execution-started`).
+- Typed diagnostics: `omp_tool::Diag` in `crates/tool/src/diag.rs` with `DiagKind`, `continuation`, `artifact`, `omitted`; the model projection in `crates/session/src/projection.rs` renders them as a trailing `<diag>` part, never inside result data.
+- Element shape: `Usage` and `Diag` are first-class tags in `crates/vocab`.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/agent/src/dispatch.rs`. Tool calls stream through one
 versioned element and settle through the journal-first session API. Authorization (committed args on
 `tool.call`, or `kernel=ready` after streaming), execution start (`kernel=started`), and the terminal
 result are separate ordered journal entries;

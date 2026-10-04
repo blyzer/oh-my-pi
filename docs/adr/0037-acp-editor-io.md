@@ -310,7 +310,7 @@ be proposed in a later record once a client's display-only mechanism is verified
 
 ## Status in omp
 
-**Partially implemented (plan steps 1–3).** Step 1: `crates/app/src/acp_client.rs` (typed
+**Status: Implemented (plan steps 1–4).** Verified 2026-10-04 against `omp2` at `083b38fe7d`. Step 1: `crates/app/src/acp_client.rs` (typed
 capabilities, one request table, gated `fs/*`). Step 2: the base selection of §3 lives in
 `crates/envd/src/editor_base.rs`; the connection binds its editor through
 `ProjectEnvironment::editor_documents` (driver: `ComposedInference::editor_documents`), one anchor
@@ -371,7 +371,16 @@ was built, and where it differs from the text above:
   which drops the queue. On `shutdown` the drain runs before the transport is closed and before the
   active turn is awaited.
 
-Step 4 (terminal cutover) is open.
+Step 4 (terminal cutover, §6) landed in PR #126 (`0bf06b7f97`, merged before steps 2 and 3). A search of
+`crates` finds no `AcpExecBackend`, `AcpExecSlot`, `SelectedShellRunKind::Acp`, `bind_acp_exec`,
+`sv_acp_routing` or `AcpRouting`; `crates/envd/src/exec_settings/` has no `acp.rs`; shell runs use
+`HostShellRun` (`crates/envd/src/tool_shell.rs`). In `crates/proto/proto/omp/env/v1/env.proto`,
+`AcpBind.exec` (2), `ClientFrame.acp_exec_event` and `ServerFrame.acp_exec_query`/`acp_exec_cancel` are
+`reserved`, and `crates/proto/tests/env_acp_wire.rs` checks that legacy bytes decode as skipped unknown
+fields. The `terminal` client capability is still parsed and never used (`crates/app/src/acp_client.rs`);
+`crates/app/tests/acp_spine.rs` asserts that no `fs/*` or `terminal/*` request is sent without the
+capabilities. The earlier wording 'Step 4 is open' was stale. The 'Unbound envd seam' bullet in Context
+describes the pre-cutover tree and is kept as history.
 
 ### Implementation plan (PR-sized)
 

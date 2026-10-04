@@ -83,7 +83,10 @@ session's render time from 267 s to 90 ms.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/tui/src/rich.rs`. The one-pass `RichSink` pipeline and slot write plans are implemented. Gap: the diff component still has a string-building truncation path.
+**Status: Implemented.** Rendering pushes styled runs into a `RichSink` and ANSI is decomposed once at the boundary. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- `RichSink` and slot write plans: `crates/tui/src/rich.rs`, `crates/tui/src/slots.rs`; the diff component `crates/tui/src/components/diff.rs` paints through `RichText`/`RichSink`.
+- The prior note listed 'the diff component still has a string-building truncation path'. I read `diff.rs`, `diff_doc.rs` and `diff_pane.rs` and found no such path, so that gap is unverified rather than confirmed. Rules 6 and 7 (single-pass width, pooled buffers) were not audited.
 
 ## References
 

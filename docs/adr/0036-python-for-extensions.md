@@ -82,7 +82,16 @@ can actually terminate.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/py/src/lib.rs`. Embedded free-threaded CPython, Eval,
+**Status: Partially implemented.** Embedded free-threaded CPython hosts extensions, Eval and Directors in killable children; `@remote` placement is declared but not proved end to end. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Runtime: `crates/py` (static CPython 3.14t, frozen stdlib, `$OMP_PY_SITE`); extension host and workers in `crates/envd/src/{exthost,worker,eval}`; signed-index extension management in `crates/ext` and `crates/app/src/ext_cli`.
+- `@remote`: `crates/py/python/omp_remote.py` (content-addressed code shipping with out-of-band buffers) and `crates/py/python/omp/placement.py` (`Place.worker(name)`, host/env/worker).
+- Gap: extension rows record `place: "host"` by default (`crates/envd/src/exthost/extensions.rs`); I did not find proof that device bodies placed on `env` or `worker:<name>` run there. The prior note also lists scoped env handles and spill diversion as unproved.
+- No JavaScript/TypeScript plugin runtime or multi-language Eval found; Agent Plugins skill/MCP resources are admitted as data only (`crates/driver/src/discovery/skills.rs`).
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/py/src/lib.rs`. Embedded free-threaded CPython, Eval,
 Directors, Components, and manifest-sealed custom-message renderer callbacks are implemented.
 `crates/ext` and `crates/app/src/ext_cli` implement signed-index resolution, target-evaluated
 dependency markers, reproducible lock identity, TOFU/operator key decisions, exact capability

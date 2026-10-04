@@ -73,7 +73,16 @@ surface.** Neither MUST change the permanent roster after discovery.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/shell-builtins/src/dyn.rs`. `dyn` lists, documents,
+**Status: Partially implemented.** `dyn` and the Browser and Computer code surfaces carry the long tail; Eval binding and the image passthrough consumer are missing. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- `dyn`: `crates/shell-builtins/src/dyn.rs` (list, `--q` search, schema-synthesized `--help`, literal/`@file`/`-` inputs); live catalog from `crates/envd/src/mcp/discovery.rs` and `crates/envd/src/mcp/manager.rs`.
+- Devices behind it: `image_gen@4`, `tts@4` (`crates/envd/src/{media_devices,media_tts}.rs`), `security_scan@2`, `report_issue@1`; code surfaces `browser@3` (`crates/tools/src/browser.rs`, `crates/envd/src/browser_daemon.rs`) and `computer` (`crates/tools/src/computer.rs`).
+- Gap: no `dyn` function in the Python/Eval prelude (searched `crates/py/python` and `crates/envd/src/eval`).
+- Gap: `crates/shell-builtins/src/graphics.rs` emits kitty graphics only (no sixel), and I found no code in `crates/tools` or `crates/envd` that parses that passthrough out of Bash output to attach images.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/shell-builtins/src/dyn.rs`. `dyn` lists, documents,
 validates, and calls long-tail devices. `crates/envd/src/mcp/discovery.rs` composes native,
 Claude, Agent Plugins, Codex, Gemini, OpenCode, Cursor, Windsurf, VS Code, and standalone MCP
 sources with deterministic provider/scope precedence; reload re-runs discovery without changing

@@ -39,7 +39,16 @@ needed data, and which repair belongs in the harness.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/envd/src/report_issue.rs`, mounted through
+**Status: Partially implemented.** `report_issue@1` and the AutoQA prompt guidance exist and delivery is consent-fenced; the misattribution filter is not found. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Device: `crates/envd/src/report_issue.rs` (redacted local store, tool identity, session and structured verdict) mounted through `crates/envd/src/tools.rs` and reachable via `dyn`; card in `crates/chat/src/cards/report_issue.rs`.
+- Prompt: `AUTO_QA_PROMPT_GUIDANCE` in `crates/tools/src/device.rs` ('False positives are acceptable ...'), injected as `auto_qa_guidance` in `crates/driver/src/headless/kernel.rs`.
+- Delivery: `crates/driver/src/telemetry_upload.rs`, consent-only, endpoint overridable with `OMP_AUTO_QA_PUSH_URL`.
+- Gap: no code or setting for a misattribution filter (grep for `misattribut` finds nothing) and no AutoQA enable convar was found.
+
+### Implementation notes (carried over)
+
+Primary implementation: `crates/envd/src/report_issue.rs`, mounted through
 `crates/envd/src/tools.rs` and documented by `crates/tools/src/device.rs`. `report_issue@1` records
 an exact session, device path, canonical revision, and bounded structured verdict in the redacted
 local issue store; typed results state that delivery requires a separate user-owned consent action.

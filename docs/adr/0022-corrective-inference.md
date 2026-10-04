@@ -56,7 +56,10 @@ Everything between the wire and that turn is inference's job.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/ai/src/recovery`. Recovery and codec stages normalize vendor behavior into canonical `ChatEvent` turns. Catalog-selected Harmony mitigation keeps the attempt behind the whole-attempt gate, repairs only exactly framed `analysis`/`final` channels, rejects provable unframed leakage with a bounded semantic retry, and carries typed recovery evidence through `turn.receipt@1` so replay observes the same audit record.
+**Status: Implemented.** Streams decode to canonical `ChatEvent`s through a bounded recovery pipeline whose actions are receipted. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Pipeline: `crates/ai/src/recovery` and `crates/ai/src/codec`; receipt kinds (JSON repair, Harmony channel repair, tool-result repair) in `crates/journal/src/data.rs`, carried by `turn.receipt@1`.
+- Catalog-selected Harmony mitigation repairs only exactly framed channels and retries on provable leakage (prior note, `crates/ai/src/recovery`).
 
 ## References
 

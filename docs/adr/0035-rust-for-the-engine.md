@@ -83,7 +83,12 @@ amount of safety for free.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `Cargo.toml`. All engine crates are Rust and workspace lints encode the baseline. Gap: allocation and typed-error-string discipline still relies partly on review.
+**Status: Partially implemented.** The engine is Rust with workspace lints and a pinned toolchain; error-type and allocation discipline still depends on review and the code does not meet it everywhere. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Baseline: every crate under `crates/` is Rust; `[workspace.lints]` in `Cargo.toml` (`missing_docs`, `allow_attributes_without_reason`), `clippy.toml` disallow lists, `rustfmt.toml`, pinned `rust-toolchain.toml`; `tools/lintx` for model-name conditionals.
+- Divergence from rule 2 (typed `#[source]` errors, no string-payload variants): a grep over `crates` finds about 175 `#[error]` enum variants whose only payload is `Str` or `String` (for example `crates/catalog/src/selection.rs`, `crates/catalog/src/policy.rs`, `crates/envd/src/workspace/operations.rs`) and about 700 `error.to_string()` call sites. Some payloads are identifiers rather than stringified errors, so the count is an upper bound; no lint enforces the rule.
+- Strum-derived enum/string tables and allocation replacements were not audited here.
+- Owner decision: add mechanical enforcement (a lintx rule) and migrate, or soften the ADR wording.
 
 ## References
 

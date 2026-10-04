@@ -66,7 +66,11 @@ the wire.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/ai/src/codec`. Inference owns grammar/strict-schema translation. Gap: strict-schema token/time budgets and all grammar-dialect fallbacks are not proved end to end.
+**Status: Partially implemented.** Intents, budgets and typed `Dropped` adjustments exist; end-to-end proof across all grammar dialects is missing. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Budgeting and lowering: `ConstraintBudgetCaps { maximum_tools, maximum_strict }` and unit tests in `crates/ai/src/plan.rs`; `ConstraintDisposition` in `crates/tool/src/registry.rs`.
+- Typed degradation reasons such as `catalog.strict-schema-unsupported` appear in `crates/ai/src/codec/openai_chat.rs` and `openai_responses.rs`.
+- Not found or unproved: a joined test spending the strict budget in priority order across registrations, every grammar dialect fallback, and the declaration-time error for `on_unsupported=ERROR`.
 
 ## References
 

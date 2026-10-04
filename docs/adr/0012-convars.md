@@ -69,7 +69,11 @@ aliases, remote administration, and journal replay all address these declared va
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/con/src/lib.rs`. Typed convars and DOM-backed SESSION writes replace the former settings stack.
+**Status: Implemented.** Typed convars carry their own policy flags and session-scoped ones are journaled DOM nodes. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Declaration and flags: `VarFlags` in `crates/con/src/spec.rs` (`ARCHIVE`, `SESSION`, `REPLICATED`, `UNSAFE`, `READONLY`, `NOTIFY`); variables are declared where used (for example `omp_agent::vars`, `omp_catalog::settings`, `omp_chat::settings`).
+- Journaled session writes: `crates/driver/src/headless/con_journal.rs` and the `<meta><con>` component in `crates/session/src/components/con.rs`.
+- Difference from the decision text: scope (process/user/project/session) is expressed by the layer an assignment lands in (`Origin` in `crates/con/src/layers.rs`) rather than a flag, and `REPLICATED` is authority-to-replica only; no client-owned value flows back up.
 
 ## References
 

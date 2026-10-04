@@ -51,7 +51,13 @@ Five consequences follow and bind the rest of the records:
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/driver/src/headless/kernel.rs`. P0–P7 production modes share the journal-first composition; final P7 integration rerun is tracked in `PLAN.md`.
+**Status: Partially implemented.** The four-mode rule is a design gate with no code of its own; the architecture meets the multiplexed-workspace and spectator modes, the remote-driver and factory modes only in part. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Multiplexed workspace: journal-first composition in `crates/driver/src/headless/kernel.rs` (`compose_kernel`); joined-system proofs `crates/e2e/tests/p1_doc_race.rs` through `p10_lift_idempotence.rs`.
+- Spectator: `crates/collab` plus `crates/driver/src/collab/{session,observer,admission,registry}.rs`; `crates/e2e/tests/p11_collab_spectator.rs` proves convergence and no viewer mutation through the in-process `omp_collab::test_relay`. The production relay is the hosted one; no relay server ships in the tree.
+- Remote driver: only stdio `omp rpc` / `omp acp` exist. No `omp.session.v1` proto, no `omp attach`, and `omp_rpc::server_tls` has no caller outside `crates/rpc` (0039 phases R1-R4 open).
+- Factory: no `crates/fleet`; `crates/driver/src/adw` has no journal references and `crates/adw/src/lib.rs` leaves durability to the caller, consistent with the 0039 inventory (transitions not journaled, no resume).
+- The prior note cited `PLAN.md` for the final P7 rerun. `PLAN.md` is gitignored and absent from a clean clone, so that claim cannot be checked here.
 
 ## References
 

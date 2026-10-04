@@ -60,10 +60,12 @@ express.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/con/src/builtins.rs`. Bindings, toggles, aliases,
-actions, exec, `dumpcfg`, and `writecfg` share the con command stream (`dump` writes the
-transcript; `crates/chat/src/commands/control.rs`). Pause/resume use the same typed host command
-locally and the RPC `pause`/`resume` commands remotely; both journal the same DOM transition.
+**Status: Partially implemented.** Binds, toggles, aliases, `exec` and cfg dump/write share one command language; a raw remote console channel was not found. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+
+- Language: `bind`, `toggle` (bool flip, enum cycle, explicit value cycle), `alias`, `exec`, `dumpcfg`/`writecfg` in `crates/con/src/builtins.rs`; `+name`/`-name` press and release dispatch in `crates/con/src/ctx.rs`.
+- Default bindings are cfg `bind` lines: `crates/driver/src/keybindings/default.cfg`, `default-macos.cfg`, `default-windows.cfg`.
+- Journal replay re-executes variable changes through `crates/driver/src/headless/con_journal.rs`.
+- Gap (unverified): the decision says a remote client sends the same lines a local console would. In `crates/app/src/rpc_mode.rs` the only con entry I found is `set_con`, which runs `"{name} {value}"`; I found no console-line verb in `rpc_mode.rs`, `crates/rpc` or `crates/proto`.
 
 ## References
 
