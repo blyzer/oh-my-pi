@@ -23,9 +23,17 @@ the parent receives a diff.
 
 ## Decision
 
-- A subagent that may write MUST receive its own view of the entire workspace, not of the tracked
-  subset. The view is copy-on-write where the filesystem supports it and a full copy otherwise;
-  backend choice is a setting, not a code path the child can observe.
+- A subagent that may write MUST receive its own view of the workspace, not of the tracked subset
+  only. The implemented view is every tracked file plus every untracked file that is not
+  gitignored (hidden files included, `.git` excluded), captured as a content-addressed manifest
+  of the live workspace generation. Gitignored paths (build output, dependency directories) are
+  not copied; carrying them is an open gap, so a child that needs them must restore them itself.
+- The view is created per file. Each file is cloned copy-on-write where the filesystem supports
+  it (APFS `clonefile` on macOS, `FICLONE` reflink on Linux) and copied otherwise. The copy
+  fallback never shares a writable inode with the parent. This is the only implemented isolation
+  mechanism. Other mechanisms (btrfs or ZFS snapshots, overlayfs, ProjFS, block clone, a git
+  worktree or recursive-copy backend) are future targets, not current behavior, and no setting
+  selects among backends. The child cannot observe which path was taken.
 - The child MUST NOT share the parent's mutable authority. It never writes into the parent's tree;
   it writes into its view.
 - The child's result MUST be returned as changes — a content-addressed patch or a retained branch —
@@ -38,23 +46,38 @@ the parent receives a diff.
 
 - Parallel children can edit overlapping files without corrupting each other; conflicts surface as
   a merge decision at the parent, not as interleaved writes.
-- Children can build, because the view carries untracked and ignored files.
+- Children see tracked and untracked non-ignored files, so work on new files in progress is
+  visible. Gitignored build output and dependency directories are not in the view (see Decision).
 - A child that fails or is cancelled leaves nothing in the parent's tree; its view is discarded or
   retained for inspection.
 - Prohibited: children spawned with direct write access to the parent workspace when isolation is
   available. Prohibited: worktree-only isolation presented as full isolation.
 - Cost accepted: a copy fallback on filesystems without CoW is slow and space-hungry for large
-  workspaces. That cost is paid by the backend selection, not by weakening the rule.
+  workspaces. That cost is paid by the fallback, not by weakening the rule; creation refuses an
+  untracked tree over the snapshot budget rather than copy it unbounded.
 - Cost accepted: the parent must own merge and conflict policy. That is where it belongs.
+
+## Amendment (2026-10-04)
+
+The owner decided to bring this record in line with the code. The decision originally said the
+backend is whatever the filesystem offers (APFS, btrfs, ZFS, overlayfs, ProjFS) and that backend
+choice is a setting. Only per-file reflink with a copy fallback is implemented. The other
+mechanisms stay as possible future targets and are no longer described as selectable. The
+`sv_task_isolation_mode` convar and its `TaskIsolationMode` enum
+(`crates/driver/src/subagent/settings.rs`) advertise backends that have no implementation, and
+nothing selects a backend from them, so their unimplemented options are to be removed in a
+follow-up code change; this record does not wait for that change. The rest of the decision stands:
+every writing child works in its own view and returns a patch or branch that the parent applies
+under its own policy.
 
 ## Status in omp
 
-**Status: Partially implemented.** Every subagent gets a copy-on-write workspace and returns a patch or branch, but the configurable backend choice is not wired to anything. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+**Status: Partially implemented.** Every subagent gets a copy-on-write workspace and returns a patch or branch, with per-file reflink and a copy fallback as the only backend. Open: gitignored files are not copied, and the inert `sv_task_isolation_mode` convar still lists unimplemented backends until the follow-up code change. (Verified 2026-10-04 against `omp2` at `9b2d91fe9d`.)
 
-- Isolation and return path: `create_isolation`/`finish_isolation`/`discard_isolation` in `crates/driver/src/subagent/spawn.rs` call `CreateWorktree`/`MergeWorktree`; `run_child` isolates every child. The result is an `artifact://sha256/...` patch or a retained branch, applied only when `isolation.apply` allows.
-- Environment side: `crates/envd/src/workspace/operations.rs::create_worktree` clones each manifest entry with `clonefile`/`FICLONE` and a hardlink/copy fallback; the baseline covers untracked content and refuses oversize untracked trees. Proof: `crates/e2e/tests/p9_isolation.rs`.
-- Divergence: the ADR says backend choice is a setting. `TaskIsolationMode` in `crates/driver/src/subagent/settings.rs` declares auto/apfs/btrfs/zfs/reflink/overlayfs/projfs/block-clone/rcopy, but `CreateWorktree` carries no backend field and the mode is read only to test for `none` in `subagent_spec`. Owner decision: wire the backends or prune the enum.
-- Unverified: whether ignored files are included in the copy ('entire workspace, not the tracked subset').
+- Isolation and return path: `create_isolation`/`finish_isolation`/`discard_isolation` in `crates/driver/src/subagent/spawn.rs` call `CreateWorktree`/`MergeWorktree`. `run_child` creates an isolated root for every composed child unconditionally (comment at `spawn.rs:874`). The result is an `artifact://sha256/...` patch or a retained branch, applied only when `isolation.apply` allows.
+- Environment side: `crates/envd/src/workspace/operations.rs::create_worktree` snapshots the live workspace, then clones each manifest entry with `clone_file_cow`: `clonefile` (macOS) or `FICLONE` (Linux), falling back on `ENOTSUP`/`EXDEV` (macOS) or `EOPNOTSUPP`/`EXDEV`/`ENOTTY`/`EINVAL` (Linux) to `hardlink_copy_fallback`, which probes a hard link and immediately replaces it with a copy, or plain `fs::copy`; other platforms always take the copy path. It refuses an oversize untracked tree (`IsolationBaselineTooLargeError`). Proof: `crates/e2e/tests/p9_isolation.rs`.
+- Gap, ignored files: the snapshot walk in `snapshot_at` runs with `.gitignore(true)` and `.skip_git(true)` (`operations.rs`, around line 779), so gitignored files are not in the manifest and are not copied. Untracked non-ignored files and hidden files are included. This replaces the earlier note that the question was unverified.
+- Gap, inert convar: `TaskIsolationMode` declares `none`, `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone` and `rcopy`. `CreateWorktree` carries no backend field (`crates/proto/proto/omp/env/v1/env.proto`), and the mode is read in one place, `subagent_spec` in `spawn.rs`, where `none` only sets the hook payload's `worktree` flag to false. Isolation still happens. The convar therefore does not select a backend and `none` does not disable isolation. Follow-up code change: remove the unimplemented variants and their `ui.option.*` metadata, and reword the `task.isolation.mode: none` advice in `IsolationBaselineTooLargeError`.
 
 ## References
 

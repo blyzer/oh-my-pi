@@ -72,8 +72,19 @@ there is exactly one authority.
 
 Rules:
 
-1. The tree is the authority. The journal stores its incremental changes as a property-change
-   stream; there is no second entry vocabulary and no engine-less fold.
+1. The journal is the sole durable authority and the tree is derived from it. The journal is an
+   append-only stream of typed, versioned entries (`kind@rev`) drawn from a closed vocabulary.
+   Every kind folds through one deterministic function into DOM operations, and live writes and
+   replay use that same function. The revision-1 vocabulary has twelve kinds: `journal` (genesis),
+   `turn.start`, `msg.user`, `msg.assistant.start`, `stream`, `msg.assistant.end`, `tool.call`,
+   `tool.update`, `tool.result`, `turn.receipt`, `compaction`, and `patch`. `patch@1` is the
+   generic property-change kind, an atomic batch of DOM operations used by components and
+   non-chat mutations; it is one kind among the twelve, not the only entry vocabulary. A new kind
+   needs a place in the closed set and a fold arm; no entry has an effect on the tree that is
+   defined outside that fold, and there is no second fold. Folding the same journal prefix always
+   yields the same tree.
+
+   A `patch@1` entry:
 
    ```text
    : todo.done
@@ -102,17 +113,29 @@ Rules:
   journaled, branched, and replayed by default.
 - Prohibited: `custom` entries with author-owned derivation, per-feature restore hooks as the
   mechanism of correctness, config that cannot be rewound because it was never journaled.
-- Cost accepted: the engine owns a DOM, a patch codec, and materialization; the journal format
-  carries op-level granularity rather than whole messages. That machinery replaces roughly
-  fifteen scattered lifecycle bugs.
+- Cost accepted: the engine owns a DOM, a patch codec, a closed set of entry kinds with one fold
+  arm each, and materialization; the journal carries typed chat and tool entries plus op-level
+  patches rather than only whole messages. That machinery replaces roughly fifteen scattered
+  lifecycle bugs.
+
+## Amendment (2026-10-04)
+
+The owner decided to bring this record in line with the code rather than move chat and tool
+traffic onto patches. Rule 1 originally said the journal is a property-change stream with no
+second entry vocabulary. The implemented journal carries a closed vocabulary of typed entries
+(messages, streamed deltas, the tool lifecycle, turn receipts, compactions, and `patch@1`), each
+folded by its own arm of one function. The invariant this record exists to protect is unchanged
+and is what rule 1 now states: the journal is the sole authority, the tree is derived from it,
+replay is deterministic, and no parallel mutable truth exists. The typed kinds are part of the
+single authority, not a second one.
 
 ## Status in omp
 
-**Status: Implemented.** The tree is the single authority and live writes and replay share one fold, but the journal keeps a closed typed entry vocabulary rather than a pure patch stream. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+**Status: Implemented.** The journal is the sole authority; live writes and replay share one fold; the typed entry vocabulary is the decision as amended 2026-10-04. (Verified 2026-10-04 against `omp2` at `9b2d91fe9d`.)
 
 - Tree: `crates/dom` (arena, ops, txn, subscribe) with the closed tag vocabulary in `crates/vocab` (`Session`, `Meta`, `Body`, `Queues`, `Todo`, `Jobs`, `Directors`, `Con`, ...); `fold_genesis` in `crates/session/src/fold.rs` mounts `<meta>` components and `<queues>`.
 - Journal and fold: `crates/journal` (`.oms`, blob CAS); one `Session::apply` fold in `crates/session/src/fold.rs` serves live writes and replay; component state reduces into `<meta>` through `crates/session/src/components`.
-- Divergence from rule 1: the journal's closed kind set is `journal`, `turn.start`, `msg.user`, `msg.assistant.start`/`end`, `stream`, `tool.call`/`update`/`result`, `turn.receipt`, `compaction` and `patch` (`crates/journal/src/kind.rs`), each folded by its own Rust arm. Only components and non-chat mutations ride `patch@1`. Owner decision needed: bless the typed entry kinds in the ADR, or move them onto patches.
+- Closed kind set (`KindName` in `crates/journal/src/kind.rs`): twelve kinds in revision 1, `journal`, `turn.start`, `msg.user`, `msg.assistant.start`, `stream`, `msg.assistant.end`, `tool.call`, `tool.update`, `tool.result`, `turn.receipt`, `patch` and `compaction`. `Session::apply` dispatches each `(kind, rev)` to its own fold arm (`fold_user`, `fold_stream`, `fold_tool_call`, `fold_patch`, `fold_compaction`, ...), then runs the interested components. An earlier version of this note counted twelve kinds besides `patch@1`; the correct count is twelve including it.
 - Rule 5 (templates by hash plus variables) is not implemented as stored hash records. The system prompt is a pure projection of the tree on every request (`crates/agent/src/prompt`, `ProjectedRequest` in `crates/agent/src/loop.rs`), which meets the intent of not repeating it per entry.
 
 ### Implementation notes (carried over)
