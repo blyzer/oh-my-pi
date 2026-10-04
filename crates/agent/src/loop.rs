@@ -2252,7 +2252,8 @@ impl<C: Inference> Kernel<C> {
 				.chain(
 					mounts
 						.into_iter()
-						.filter_map(|(name, mounted)| mounted.then(|| Str::new_static(name))),
+						.filter(|&(_, mounted)| mounted)
+						.map(|(name, _)| Str::new_static(name)),
 				)
 				.collect::<Arc<[Str]>>();
 			let director = self
@@ -3399,8 +3400,7 @@ impl<C: Inference> Kernel<C> {
 				self.dispatcher.deny_prepared(session, prepared, &denial)?;
 				self.apply_live_components(session)?;
 				let error = serde_json::json!({ "error": denial.reason() }).to_string();
-				return self
-					.submit_workflow_response(action, stream_control, error, true)
+				return submit_workflow_response(&self.events, action, stream_control, error, true)
 					.await;
 			}
 			let mut prepared =
@@ -3440,55 +3440,7 @@ impl<C: Inference> Kernel<C> {
 			self.apply_live_components(session)?;
 			(serde_json::json!({"error": format!("unknown tool {}", action.name)}).to_string(), true)
 		};
-		self
-			.submit_workflow_response(action, stream_control, outcome, is_error)
-			.await
-	}
-
-	/// Answers one provider workflow action with its journaled outcome.
-	async fn submit_workflow_response(
-		&self,
-		action: omp_ai::WorkflowAction,
-		stream_control: &omp_ai::ChatControl,
-		outcome: String,
-		is_error: bool,
-	) -> Result<(), KernelError> {
-		use omp_ai::{
-			InvokeComplete, InvokeInput, WorkflowActionResponse, WorkflowResponse,
-			WorkflowResponseKind,
-		};
-		let response = match action.response_kind {
-			WorkflowResponseKind::Action => {
-				WorkflowResponse::WorkflowActionResponse(WorkflowActionResponse {
-					invocation: action.invocation.clone(),
-					response: bytes::Bytes::from(outcome),
-					is_error,
-				})
-			},
-			WorkflowResponseKind::Invoke => {
-				stream_control
-					.submit(WorkflowResponse::InvokeInput(InvokeInput {
-						invocation: action.invocation.clone(),
-						payload:    bytes::Bytes::from(outcome.clone()),
-					}))
-					.await
-					.map_err(KernelError::WorkflowResponse)?;
-				WorkflowResponse::InvokeComplete(InvokeComplete {
-					invocation: action.invocation.clone(),
-					payload:    bytes::Bytes::from(outcome),
-				})
-			},
-		};
-		stream_control
-			.submit(response)
-			.await
-			.map_err(KernelError::WorkflowResponse)?;
-		self.events.publish(KernelEvent::WorkflowActionAnswered {
-			invocation: action.invocation,
-			name: action.name,
-			is_error,
-		});
-		Ok(())
+		submit_workflow_response(&self.events, action, stream_control, outcome, is_error).await
 	}
 
 	/// Holds all new inference, tool, subagent, and job admission while the
@@ -3727,6 +3679,51 @@ impl<C: Inference> Kernel<C> {
 		self.apply_live_components(session)?;
 		Ok(prepared == Prepared::Rebuild)
 	}
+}
+
+/// Answers one provider workflow action with its journaled outcome.
+async fn submit_workflow_response(
+	events: &crate::events::KernelEvents,
+	action: omp_ai::WorkflowAction,
+	stream_control: &omp_ai::ChatControl,
+	outcome: String,
+	is_error: bool,
+) -> Result<(), KernelError> {
+	use omp_ai::{
+		InvokeComplete, InvokeInput, WorkflowActionResponse, WorkflowResponse, WorkflowResponseKind,
+	};
+	let response = match action.response_kind {
+		WorkflowResponseKind::Action => {
+			WorkflowResponse::WorkflowActionResponse(WorkflowActionResponse {
+				invocation: action.invocation.clone(),
+				response: bytes::Bytes::from(outcome),
+				is_error,
+			})
+		},
+		WorkflowResponseKind::Invoke => {
+			stream_control
+				.submit(WorkflowResponse::InvokeInput(InvokeInput {
+					invocation: action.invocation.clone(),
+					payload:    bytes::Bytes::from(outcome.clone()),
+				}))
+				.await
+				.map_err(KernelError::WorkflowResponse)?;
+			WorkflowResponse::InvokeComplete(InvokeComplete {
+				invocation: action.invocation.clone(),
+				payload:    bytes::Bytes::from(outcome),
+			})
+		},
+	};
+	stream_control
+		.submit(response)
+		.await
+		.map_err(KernelError::WorkflowResponse)?;
+	events.publish(KernelEvent::WorkflowActionAnswered {
+		invocation: action.invocation,
+		name: action.name,
+		is_error,
+	});
+	Ok(())
 }
 
 /// The owned projection of one request before the `thread_projection` gate.

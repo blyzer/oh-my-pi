@@ -89,6 +89,10 @@ fn kernel<C: Inference>(
 	.with_runtime_flags(flags())
 }
 
+#[allow(
+	clippy::future_not_send,
+	reason = "the kernel turn future is driven on the test's own task, never sent"
+)]
 async fn run(kernel: &mut Kernel<impl Inference>, session: &mut Session) {
 	kernel
 		.run_turn(

@@ -2313,8 +2313,8 @@ mod tests {
 		);
 		assert_eq!(
 			error.to_string(),
-			"nested tool call refused: `edit` is not available while plan mode is active. No 			 \
-			 action was taken. Available now: read, write, bash."
+			"nested tool call refused: `edit` is not available while plan mode is active. No action \
+			 was taken. Available now: read, write, bash."
 		);
 		for path in ["src/main.rs", "local://x/../../PLAN.md", "/tmp/PLAN.md", "local://../PLAN.md"] {
 			let error = call("write", json!({"path": path, "content": "x"}))

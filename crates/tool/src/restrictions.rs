@@ -214,7 +214,7 @@ impl ToolRestrictions {
 	/// The plan file plan-scoped tools are confined to, while plan mode is
 	/// active.
 	#[must_use]
-	pub fn plan_file(&self) -> Option<&Str> {
+	pub const fn plan_file(&self) -> Option<&Str> {
 		self.plan_file.as_ref()
 	}
 
@@ -585,8 +585,11 @@ mod tests {
 		);
 		let raw = RawValue::from_string(r#"{"path":"local://PLAN.md"}"#.to_owned()).unwrap();
 		assert!(restrictions.check_raw("write", &raw).is_ok());
-		let raw = RawValue::from_string("not json".to_owned()).unwrap();
-		assert!(restrictions.check_raw("write", &raw).is_err());
+		let raw = RawValue::from_string("[\"local://PLAN.md\"]".to_owned()).unwrap();
+		assert!(
+			restrictions.check_raw("write", &raw).is_err(),
+			"arguments without a target fail closed"
+		);
 	}
 
 	#[test]
