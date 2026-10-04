@@ -4,12 +4,12 @@ OMP extensions are signed Python distributions whose deployment manifest declare
 
 ## Definition and authority
 
-An extension has a stable `id`, a canonical Python `entry`, dependencies, capabilities, optional features, binaries, settings, and a sealed declaration inventory (`DeploymentManifest` in `crates/ext/src/config.rs`). `StaticDeclarations` partitions that inventory into tools, hooks, services, providers, regimes, UI contributions, telemetry, prompt slots, credentials, secrets, workers, placement, agents, LSP servers, and DAP adapters. Each `StaticDeclaration` carries its module, activation trigger, API revision, failure behavior, grants, optional hook filter, and class-specific signed properties.
+An extension has a stable `id`, a canonical Python `entry`, dependencies, capabilities, optional features, binaries, settings, and a sealed declaration inventory (`DeploymentManifest` in `crates/ext/src/config.rs`). `StaticDeclarations` partitions that inventory into tools, hooks, services, providers, regimes (a leftover class: no Python decorator declares one, see `docs/py/15-directors.md`), UI contributions, telemetry, prompt slots, credentials, secrets, workers, placement, agents, LSP servers, and DAP adapters. Each `StaticDeclaration` carries its module, activation trigger, API revision, failure behavior, grants, optional hook filter, and class-specific signed properties.
 
 This separation is an authority boundary:
 
 - Discovery and admission read deployment metadata; they do not import the entry module. `ExtensionManifest::new_with_static` receives authenticated `StaticDeclarations` before a child starts (`crates/envd/src/exthost/lifecycle.rs`).
-- Python registration supplies runtime detail but cannot silently widen the signed surface. `LifecycleMachine::activate_declared` checks `DeclarationDrift`, freezes regime declarations, calls the host `freeze`, then activates (`crates/envd/src/exthost/lifecycle.rs`).
+- Python registration supplies runtime detail but cannot silently widen the signed surface. `LifecycleMachine::activate_declared` checks `DeclarationDrift`, calls the host `freeze`, then activates (`crates/envd/src/exthost/lifecycle.rs`).
 - Static activation classes are `Static`, `FirstReach`, `BeforeFirstPrompt`, and `BeforeUiInput` (`ActivationTrigger` in `crates/envd/src/exthost/lifecycle.rs`). `Static` requires no Python host; the other classes can start a child.
 - `ExtHostSpec` binds one admitted manifest to a `HostKey`, data grants, managed Python site, settings, optional pool, and optional linked-source watch root (`crates/envd/src/worker.rs`). Extensions share a process only when they explicitly name the same pool in the same layer and tier; otherwise `ExtHostSupervisor::spawn` isolates them.
 
@@ -83,13 +83,13 @@ flowchart TD
 
 `ExtHostSupervisor` is the runtime owner (`crates/envd/src/worker.rs`). `ExtHostConfig` supplies the authenticated principal, session and host generation fences, workspace root, active `ExtHostSpec` values, frame limits, health/spawn timeouts, interrupt grace, retry backoff, DATA authority, journal routing, and CONTROL authority factories. An empty extension set starts no interpreter.
 
-For a CONTROL-capable extension, `ExtHostSupervisor::spawn` derives a `ControlConnectionIdentity`, builds a manifest snapshot, calls `exthost::spawn` with the managed Python site and environment socket, and binds the resulting child to composed CONTROL authorities (`crates/envd/src/worker.rs`, `crates/envd/src/exthost/spawn.rs`). Registry evidence is fenced by `(layer, tier, extension, generation)` and sealed by `seal_registry_evidence`; hook, tool, UI, service, and regime runtime declarations are checked against authenticated manifest facts before publication (`crates/envd/src/worker.rs`).
+For a CONTROL-capable extension, `ExtHostSupervisor::spawn` derives a `ControlConnectionIdentity`, builds a manifest snapshot, calls `exthost::spawn` with the managed Python site and environment socket, and binds the resulting child to composed CONTROL authorities (`crates/envd/src/worker.rs`, `crates/envd/src/exthost/spawn.rs`). Registry evidence is fenced by `(layer, tier, extension, generation)` and sealed by `seal_registry_evidence`; hook, tool, UI, and service runtime declarations are checked against authenticated manifest facts before publication (`crates/envd/src/worker.rs`).
 
 The activation path is sequential and generation-fenced:
 
 1. `ExtensionManifest::lifecycle` creates a `LifecycleMachine` in `Declared` state.
 2. Its module iterator orders `entry` first, followed by distinct declaration modules in manifest order.
-3. Runtime declarations and UI/regime tables are checked, then FREEZE closes registration.
+3. Runtime declarations and UI tables are checked, then FREEZE closes registration.
 4. `activate_declared` moves through `Frozen` and `Verified`, calls the host activation handler, and enters `Active`; drift, stale generations, import failures, or callback failures enter `Degraded` (`crates/envd/src/exthost/lifecycle.rs`).
 5. `activate_control_hosts` waits for sealed CONTROL registry evidence and publishes `extension_load` through the hook gate (`crates/envd/src/worker.rs`).
 
@@ -153,7 +153,7 @@ stateDiagram-v2
     Declared --> Frozen: import modules and seal runtime registry
     Frozen --> VerifiedRuntime: compare registry with manifest
     VerifiedRuntime --> Active: extension_activate
-    Active --> Active: hook device regime and prelude dispatch
+    Active --> Active: hook, device, and prelude dispatch
     Active --> Declared: supervised restart or hot reload
     Active --> Quarantined: revocation or integrity failure
     Active --> Stopped: shutdown and extension_unload
@@ -172,7 +172,7 @@ stateDiagram-v2
 | Grants, TOFU pins, revocations, Ed25519 verification | `crates/ext/src/trust.rs` |
 | CLI install, resolve, trust, verify transactions | `crates/app/src/ext_cli/mod.rs` |
 | Extension host lifecycle machine | `crates/envd/src/exthost/lifecycle.rs` |
-| Hook and regime callback transport | `crates/envd/src/exthost/dispatch.rs` |
+| Hook callback transport | `crates/envd/src/exthost/dispatch.rs` |
 | Extension and Python worker supervisor | `crates/envd/src/worker.rs` |
 | Live hook composer | `crates/envd/src/tools.rs` |
 | Embedded CPython engine | `crates/py/src/lib.rs` |

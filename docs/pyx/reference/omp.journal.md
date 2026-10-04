@@ -1,21 +1,20 @@
 # `omp.journal`
 
-Use `omp.journal` for typed, durable extension records in the authoritative session journal. You declare entry kinds elsewhere with `@omp.entry_kind`; this module serializes declared values canonically, appends them through Core, and reads immutable records back in durable order.
+Use `omp.journal` to build the DOM operations a Component returns and to read the engine's immutable journal projections. Only the engine writes the session journal: an extension does not append entries or define entry kinds. It contributes durable changes by returning ordinary DOM operations from an `@omp.component` callback (or `ops` from an `@omp.director` callback), and the host commits them as one `patch@1` entry.
 
 ```python
-from dataclasses import dataclass
 import omp
 
-@omp.entry_kind("com.example.review", rev="1")
-@dataclass(frozen=True, slots=True)
-class ReviewRecord:
-    path: str
-    passed: bool
-
-entry_id = await omp.journal.append(ReviewRecord("src/parser.py", True))
+@omp.component("review-marks", interested=("tool.result@1",))
+def mark(entry: dict) -> dict:
+    return omp.journal.patch(
+        omp.journal.set_prop(7, "reviewed", True),
+    )
 ```
 
-`EntryAccessDenied`, `EntryId`, `EntryKindConflict`, `EntryTooLarge`, `EntryUndecodable`, `JournalEntry`, `JournalError`, `JournalIndeterminate`, `StateEntry`, `StateEntryId`, and `UnknownEntryKind` are also re-exported from top-level `omp`. Their canonical reference entries remain on this page.
+This module performs no I/O. Every builder is pure, and every node handle must be a positive `int`; a `bool`, `0`, or a negative number raises `TypeError`.
+
+`EntryAccessDenied`, `EntryId`, `EntryTooLarge`, `EntryUndecodable`, `JournalEntry`, `JournalError`, and `JournalIndeterminate` are also re-exported from top-level `omp`. Their canonical reference entries remain on this page.
 
 See [Agents and sessions](../guides/agents-and-sessions.md), [`omp.sessions`](omp.sessions.md), and [`omp.context`](omp.context.md).
 
@@ -48,19 +47,6 @@ entry_id = omp.EntryId.parse("01JSESSION:42")
 assert str(entry_id) == "01JSESSION:42"
 ```
 
-### `omp.journal.StateEntryId`
-
-```python
-@dataclass(frozen=True, slots=True, order=True)
-class StateEntryId:
-    scope: str
-    index: int
-
-    def __str__(self) -> str
-```
-
-Opaque, totally ordered physical index within one scoped state log. String form is `<scope_instance>:<index>`.
-
 ### `omp.journal.JournalEntry`
 
 ```python
@@ -79,36 +65,18 @@ class JournalEntry(Generic[_T]):
     artifact: ArtifactRef | None = None
 ```
 
-Immutable decoded view of one durable session-journal record.
+Immutable read-only projection of one engine journal entry.
 
 | Field | Meaning |
 |---|---|
 | `id` | Physical session-journal position. |
-| `kind` / `rev` | Declared entry identity and revision. |
+| `kind` / `rev` | Engine entry identity and revision. |
 | `ts` | Host timestamp. |
 | `principal` / `provenance` | Core-authenticated writer and package provenance. |
-| `value` | Typed decoded value when its declaration can be resolved, otherwise `None` or the host-supplied value for an unknown kind. |
+| `value` | Decoded value supplied by the host, otherwise `None`. |
 | `raw` | Canonical JSON bytes. |
 | `display` / `in_context` | Host projection flags. |
 | `artifact` | Spill reference when the payload is stored outside the inline record. |
-
-### `omp.journal.StateEntry`
-
-```python
-@dataclass(frozen=True, slots=True)
-class StateEntry(Generic[_T]):
-    id: StateEntryId
-    kind: str
-    rev: str
-    ts: int
-    principal: Principal
-    provenance: Provenance
-    value: _T | None
-    raw: bytes
-    artifact: ArtifactRef | None = None
-```
-
-Immutable decoded view of one durable scoped-state record. It parallels `JournalEntry` without session display/context flags.
 
 ## Errors
 
@@ -124,25 +92,7 @@ class JournalError(OmpError):
     ) -> None
 ```
 
-Base error for journal operations. For a partial non-atomic multi-entry append, `appended` records entries already accepted.
-
-### `omp.journal.UnknownEntryKind`
-
-```python
-class UnknownEntryKind(JournalError):
-    def __init__(self, kind: object) -> None
-```
-
-Raised when an appended value is not an instance of a declared entry kind, or a requested type is undeclared.
-
-### `omp.journal.EntryKindConflict`
-
-```python
-class EntryKindConflict(JournalError):
-    def __init__(self, name: str, owner: str | None = None) -> None
-```
-
-Raised when an entry-kind name is already owned by another declaration.
+Base error for journal-derived projections and host-owned journal operations. `appended` records entries already accepted when a multi-entry host operation failed part-way.
 
 ### `omp.journal.EntryTooLarge`
 
@@ -151,7 +101,7 @@ class EntryTooLarge(JournalError):
     def __init__(self, actual: int, limit: int) -> None
 ```
 
-Raised when canonical encoded bytes exceed the applicable inline or hard ceiling.
+Raised when a projected entry exceeds an engine-owned size bound.
 
 ### `omp.journal.EntryAccessDenied`
 
@@ -160,7 +110,7 @@ class EntryAccessDenied(JournalError):
     def __init__(self, kind: str) -> None
 ```
 
-Raised when the caller may not read an entry-kind namespace.
+Raised when the caller may not read the requested journal projection.
 
 ### `omp.journal.JournalIndeterminate`
 
@@ -174,7 +124,7 @@ class JournalIndeterminate(JournalError):
     ) -> None
 ```
 
-Raised when Core cannot prove the durability outcome of a mutation.
+Raised when Core cannot prove the durability outcome of a host-owned journal operation.
 
 ### `omp.journal.EntryUndecodable`
 
@@ -185,93 +135,69 @@ class EntryUndecodable(JournalError):
 
 Raised when bytes are not exactly the canonical JSON encoding accepted by `decode()`.
 
-## Writing entries
+## DOM operation builders
 
-### `omp.journal.append`
+A patch is a list of operations against integer node handles. On the wire and in the journal each operation is a JSON array. The Rust decoder accepts exactly these four opcodes (`crates/dom/src/op.rs`).
+
+### `omp.journal.insert`
 
 ```python
-async def append(
-    entry: object,
+def insert(
+    parent: int,
+    after: int | None,
+    tag: str,
     *,
-    display: bool | None = None,
-    idempotency_key: str | None = None,
-) -> EntryId
+    props: Mapping[str, object] | None = None,
+    content: str | None = None,
+) -> list[object]
 ```
 
-Appends one declared value through the authoritative session journal.
+Builds one `ins` operation: `["ins", parent, after, {"tag", "props", "kids", "content"?}]`.
 
-**Parameters**
+**Raises**: `TypeError` for a non-positive handle, an empty or non-string `tag`, or non-string `content`.
 
-- `entry`: Instance of a registered entry-kind implementation.
-- `display`: Optional per-append display override.
-- `idempotency_key`: Non-empty caller key; `None` generates a fresh UUID key.
-
-**Returns**: The durable `EntryId`.
-
-**Raises**: `UnknownEntryKind`, `EntryTooLarge`, `TypeError` for invalid display/key or non-JSON-compatible fields, and mutation errors reported by Core.
-
-### `omp.journal.append_many`
+### `omp.journal.remove`
 
 ```python
-async def append_many(
-    entries: Iterable[object], *, idempotency_key: str | None = None
-) -> list[EntryId]
+def remove(handle: int) -> list[object]
 ```
 
-Appends an ordered, non-atomic group in one CONTROL round trip.
+Builds one `rm` operation: `["rm", handle]`.
 
-**Returns**: Accepted ids in order.
-
-**Raises**: `JournalError`; inspect its `appended` field when Core reports partial success.
-
-> **Warning** This operation is not atomic. Use `append_atomic()` when the group must be all-or-nothing.
-
-### `omp.journal.append_atomic`
+### `omp.journal.set_prop`
 
 ```python
-async def append_atomic(
-    entries: Iterable[object], *, idempotency_key: str
-) -> list[EntryId]
+def set_prop(handle: int, prop: str, value: object) -> list[object]
 ```
 
-Appends an idempotent group atomically.
+Builds one `set` operation: `["set", handle, prop, value]`.
 
-**Parameters**: `idempotency_key` is required and must be non-empty.
+**Raises**: `TypeError` for a non-positive handle or an empty `prop`.
 
-**Returns**: Durable ids in input order.
-
-**Raises**: `JournalError` when the batch exceeds `MAX_ATOMIC_ENTRIES`; `TypeError` for an invalid key or value; `EntryTooLarge` for an oversized entry.
+### `omp.journal.move`
 
 ```python
-ids = await omp.journal.append_atomic(
-    [ReviewRecord("src/a.py", True), ReviewRecord("src/b.py", False)],
-    idempotency_key="review-wave-17",
+def move(handle: int, parent: int, after: int | None = None) -> list[object]
+```
+
+Builds one `mv` operation: `["mv", handle, parent, after]`.
+
+### `omp.journal.patch`
+
+```python
+def patch(*ops: Sequence[object]) -> dict[str, list[list[object]]]
+```
+
+Returns the canonical Component callback result, `{"ops": [...]}`, for the given operations.
+
+```python
+result = omp.journal.patch(
+    omp.journal.insert(3, None, "note", content="checked"),
+    omp.journal.set_prop(9, "status", "done"),
 )
 ```
 
-### `omp.journal.label`
-
-```python
-async def label(target: EntryId, label: str | None) -> EntryId
-```
-
-Appends a durable label assignment for an addressable journal entry. `None` clears the live label.
-
-**Returns**: The id of the appended label event.
-
-**Raises**: `TypeError` for an invalid target or label; `JournalError` when the label exceeds `MAX_LABEL_BYTES`.
-
-### `omp.journal.label_of`
-
-```python
-async def label_of(target: EntryId) -> str | None
-```
-
-Returns the latest live label assignment for an entry.
-
-**Raises**: `TypeError` when `target` is not an `EntryId` or when the host response is malformed.
-
-## Reading entries
+## Reading projections
 
 ### `omp.journal.decode`
 
@@ -285,107 +211,19 @@ Decodes bytes only when they are exactly the canonical JSON encoding written by 
 
 **Raises**: `TypeError` for non-bytes and `EntryUndecodable` for invalid UTF-8, invalid JSON, non-finite values, or a non-canonical encoding.
 
-### `omp.journal.entries`
+### `omp.journal.raw_bytes`
 
 ```python
-async def entries(
-    kind: str | type[_T] | None = None,
-    *,
-    rev: str | None = None,
-    since: EntryId | None = None,
-    limit: int | None = None,
-    live: bool = True,
-) -> Sequence[JournalEntry[_T]]
+def raw_bytes(row: Mapping[str, object]) -> bytes
 ```
 
-Reads authoritative entries in ascending durable order.
+Reads canonical bytes from an engine projection row, from its `raw` (`bytes` or `str`) or `raw_base64` field.
 
-**Parameters**
+**Raises**: `TypeError` when the row carries neither field or `raw_base64` is invalid.
 
-- `kind`: Entry-kind name, declared implementation type, or `None` for all readable kinds.
-- `rev`: Optional non-empty revision filter.
-- `since`: Optional physical watermark.
-- `limit`: Optional non-negative maximum.
-- `live`: Select the host's live projection when true.
-
-**Returns**: An immutable tuple of decoded entries.
-
-**Raises**: `UnknownEntryKind`, `TypeError` for invalid filters or malformed responses, `EntryAccessDenied`, or `JournalError` if Core returns non-increasing ids.
-
-```python
-for entry in await omp.journal.entries(ReviewRecord):
-    if entry.value is not None:
-        print(entry.value.path, entry.value.passed)
-```
-
-### `omp.journal.latest`
-
-```python
-async def latest(
-    kind: str | type[_T]
-) -> JournalEntry[_T] | None
-```
-
-Returns the highest-index live entry of one kind, or `None` when no such entry exists.
-
-### `omp.journal.fold`
-
-```python
-async def fold(
-    kind: str | type[_T],
-    reducer: Callable[[_A, JournalEntry[_T]], _A],
-    initial: _A,
-    *,
-    since: EntryId | None = None,
-) -> tuple[_A, EntryId | None]
-```
-
-Folds authoritative live entries left-to-right and returns the accumulator with the last processed id.
-
-**Parameters**: `kind` selects records; `reducer` combines the accumulator and each entry; `initial` seeds the fold; `since` supplies a watermark.
-
-**Returns**: `(accumulator, watermark)`, where the watermark is `None` when no entries were processed.
-
-**Raises**: `TypeError` when `reducer` is not callable, plus errors from `entries()` or your reducer.
-
-## Limits
-
-### `omp.journal.MAX_INLINE_BYTES`
-
-```python
-MAX_INLINE_BYTES = 65_536
-```
-
-Largest canonical entry encoded inline before artifact spilling is required. A declaration that does not permit spilling raises `EntryTooLarge` beyond this value.
-
-### `omp.journal.MAX_ENTRY_BYTES`
-
-```python
-MAX_ENTRY_BYTES = 16_777_216
-```
-
-Hard canonical encoded-size ceiling for one entry.
-
-### `omp.journal.MAX_LABEL_BYTES`
-
-```python
-MAX_LABEL_BYTES = 256
-```
-
-Maximum UTF-8 byte length of a journal label.
-
-### `omp.journal.MAX_ATOMIC_ENTRIES`
-
-```python
-MAX_ATOMIC_ENTRIES = 1_024
-```
-
-Maximum number of values accepted by one atomic append.
 ## Data model field index
 
 | Dataclass | Fields |
 |---|---|
 | `EntryId` | `session`, `index` |
-| `StateEntryId` | `scope`, `index` |
 | `JournalEntry` | `id`, `kind`, `rev`, `ts`, `principal`, `provenance`, `value`, `raw`, `display`, `in_context`, `artifact=None` |
-| `StateEntry` | `id`, `kind`, `rev`, `ts`, `principal`, `provenance`, `value`, `raw`, `artifact=None` |

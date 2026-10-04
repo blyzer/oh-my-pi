@@ -200,4 +200,4 @@ def approve_workspace_write(
     )
 ```
 
-See [`omp.hooks`](../reference/omp.hooks.md) for declaration and decision details, and [`regimes and policy`](regimes-and-policy.md) for longer-lived policy state.
+See [`omp.hooks`](../reference/omp.hooks.md) for declaration and decision details, and [`omp.extensions`](../reference/omp.extensions.md) for Directors and Components that keep control or state across turns.

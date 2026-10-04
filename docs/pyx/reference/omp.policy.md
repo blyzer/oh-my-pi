@@ -13,7 +13,7 @@ def deny_egress(event: omp.ToolCallEvent, ctx: omp.Context):
     return omp.Defer()
 ```
 
-See [Regimes and policy](../guides/regimes-and-policy.md) for an end-to-end policy flow.
+See [Policy](../guides/policy.md) for an end-to-end policy flow.
 
 ## Bash IR constants
 

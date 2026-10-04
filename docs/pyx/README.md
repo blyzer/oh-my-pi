@@ -1,6 +1,6 @@
 # omp Python extension API
 
-The `omp` package is the frozen Python surface for extending the omp coding agent. It runs on the free-threaded CPython 3.14t interpreter embedded in the `omp` binary, so users do not install a separate Python runtime. Reach for it when you want to add tools and devices, react to agent events, shape regimes, contribute UI behavior, or coordinate agents and sessions.
+The `omp` package is the frozen Python surface for extending the omp coding agent. It runs on the free-threaded CPython 3.14t interpreter embedded in the `omp` binary, so users do not install a separate Python runtime. Reach for it when you want to add tools and devices, react to agent events, own the loop with Directors, contribute UI behavior, or coordinate agents and sessions.
 
 ```python
 from typing import Annotated
@@ -23,7 +23,7 @@ async def word_count(
 ## What you can build
 
 - **Tools and devices** with typed parameters, generated schemas, placement controls, and stable revisions.
-- **Hooks and regimes** that observe events, participate in admission decisions, or replace the default agent loop.
+- **Hooks, Directors, and Components** that observe events, participate in admission decisions, judge candidate yields, or reduce journal entries into the session tree.
 - **User interfaces** with commands, shortcuts, renderers, completions, and effects.
 - **Agent workflows** that create subagents, inspect sessions, and persist durable records.
 - **Environment-aware integrations** that request explicit capabilities instead of inheriting ambient machine access.

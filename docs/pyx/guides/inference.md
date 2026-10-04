@@ -252,5 +252,5 @@ async def acme_usage(query: UsageQuery) -> UsageReport | None:
 
 - Use the exhaustive [`omp.provider` reference](../reference/omp.provider.md) when authoring route, model, callback, or media values.
 - Read [agents and sessions](agents-and-sessions.md) for supervised and conversational inference.
-- Read [regimes and policy](regimes-and-policy.md) before relying on paid or network effects.
+- Read [policy](policy.md) before relying on paid or network effects.
 - Read [hooks](hooks.md) for callback phases, filters, failure behavior, and composition.

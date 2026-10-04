@@ -24,7 +24,7 @@ start from zero. Then the third one did too.
 than chat completions. In omp a provider declares which of fifteen typed `Operation`s it serves, and
 gets synchronized OAuth refresh, account rotation, rate reservation, retry classification, cost
 accounting, and cross-route failover for all of them, because those live in the Tower spine
-(`crates/inference/src/layer/stack.rs:194-221`) rather than in each provider's code.
+(`crates/ai/src/layer/stack.rs`) rather than in each provider's code.
 
 The measure of how much room `stream`/`streamSimple` left is that it left none. Grep
 `/work/pi/packages/ai/src` — the entire inference package — and the count of files mentioning
@@ -112,7 +112,7 @@ lossless-bytes escape valve, and it is *not* an extension slot — see "Custom w
 ### Codecs are selected, never implemented
 
 `api=` on a `RouteSpec` selects from a closed codec set that Rust owns
-(`crates/inference/src/codec/`). An extension picks `Api.OPENAI_CHAT` or `Api.ANTHROPIC_MESSAGES`;
+(`crates/ai/src/codec/`). An extension picks `Api.OPENAI_CHAT` or `Api.ANTHROPIC_MESSAGES`;
 it never writes a codec. This is the hard line that keeps Python out of the token path, and it is what
 makes class (c) a proxy rather than a plugin.
 
@@ -138,7 +138,7 @@ flowchart TD
 ```
 
 Two properties matter. First, degradation is never silent: a dropped preference produces an
-`Adjustment` in the execution receipt (`crates/inference/src/receipt.rs:42-79`), which reaches
+`Adjustment` in the execution receipt (`crates/ai/src/receipt.rs`), which reaches
 telemetry (`docs/py/10-telemetry.md`) and the journal (`docs/py/09-journal.md`). Second, `REQUIRE`
 fails loudly rather than degrading, so a tool that genuinely cannot work unconstrained says so once
 instead of emitting garbage forever.
@@ -207,8 +207,8 @@ class-count reversal on its side.
 `omp.creds` is bound to the providers the extension declares in its manifest. There is no
 cross-provider read, no enumeration of other providers' accounts, and no filesystem path to the
 store. The store itself is Rust: an encrypted SQLite table
-(`crates/inference/src/auth/store.rs`) whose master key comes from the OS keychain
-(`crates/inference/src/auth/key.rs`), reached over CONTROL through the daemon so refresh is
+(`crates/ai/src/auth/store.rs`) whose master key comes from the OS keychain
+(`crates/ai/src/auth/key.rs`), reached over CONTROL through the daemon so refresh is
 serialized across every omp process on the machine.
 
 The default is stronger than scoping: **`omp.creds` hands out metadata, not secrets.** A refresh hook
@@ -451,7 +451,7 @@ class ManagementSpec:
 `operations` are the *provider-level* operations — typically `{Operation.AUTH}`,
 `{Operation.USAGE}`, `{Operation.DISCOVER_MODELS}` — as distinct from a model's operations.
 `multiple_accounts` opts the provider into the account pool, so several stored principals may be
-selected and rotated (`crates/inference/src/account/pool.rs`). `refresh` declares that a
+selected and rotated (`crates/ai/src/account/pool.rs`). `refresh` declares that a
 credential can be renewed without changing principal, which is what makes `RetryAction::RefreshCredential`
 a legal failover. `principal_quota` declares that quota observations are per-principal rather than
 per-provider, which is what makes rotation on `QuotaExhausted` meaningful.
@@ -567,7 +567,7 @@ This is the field that deletes a whole category of extension code:
 `authorization: Bearer <token>`, because pi's Anthropic client hard-coded an `sk-ant-oat` prefix check
 before it would use a bearer. Here that is `AuthSpec(mode=AuthMode.BEARER, header="authorization",
 prefix="Bearer ")` — data, applied by `CredentialApplyService`
-(`crates/inference/src/layer/encode.rs:209`) with no extension in the path.
+(`crates/ai/src/layer/encode.rs`) with no extension in the path.
 
 `account_scope`: `PROVIDER` (one principal for everything), `ROUTE`, or `REGION`. Sets the boundary at
 which a principal and its quota are shared, and therefore what "rotate to a sibling account" means.
@@ -1202,7 +1202,7 @@ has not thought about it.
 
 On the Rust side this lowers onto two existing types rather than one: the value plus `Fallback.ERROR`
 becomes `Setting::Require`, the value plus `IGNORE`/`EMULATE` becomes `Setting::Prefer`
-(`crates/inference/src/call.rs:300-308`), and the ignore-versus-emulate distinction becomes
+(`crates/ai/src/call.rs`), and the ignore-versus-emulate distinction becomes
 `NegotiationPolicy.emulation` (`EmulationPolicy::Forbid | AllowLossless | AllowDeclaredLossy`,
 `call.rs:311-320`) — where `Emulation::PromptInstruction` is the one classified lossy, so
 `Fallback.IGNORE` maps to `Forbid` and `Fallback.EMULATE` to `AllowDeclaredLossy`.
@@ -1248,7 +1248,7 @@ Three consequences follow from the protocol rather than from taste:
 3. **The remaining intent kinds have no toolhost frame, because they are not tool properties.**
    `FORCE_CALL`, `SERVICE_TIER`, `VERBOSITY`, `CACHE_RETENTION`, `REASONING`, `SAFETY`,
    `DETERMINISM`, and `HOSTED_TOOL` all constrain the *turn*, and in Rust they are already
-   `Setting<T>` fields on `ChatRequest` (`crates/inference/src/call.rs:699-728`). They are what
+   `Setting<T>` fields on `ChatRequest` (`crates/ai/src/call.rs`). They are what
    `omp.intents.set` needs a new frame for; `STRICT` and `GRAMMAR` do not.
 4. **Degradation is already implemented, so the documented behavior is observed behavior.** Inside the
    environment, `ToolConstraint` becomes `omp_tool::Constraint`
@@ -1380,7 +1380,7 @@ class Adjustment:
 capability was reproduced by, and `Emulation.PROMPT_INSTRUCTION` is the one classified as lossy — so
 `EmulationPolicy.ALLOW_LOSSLESS` permits everything except prompt-level fakery.
 
-These mirror `Adjustment` in `crates/inference/src/receipt.rs:42-79`, which is the *receipt* form.
+These mirror `Adjustment` in `crates/ai/src/receipt.rs`, which is the *receipt* form.
 The *wire* form already exists too, as `omp.inference.v1.Unsupported`
 (`crates/proto/proto/omp/inference/v1/common.proto:120-132`), returned as
 `repeated Unsupported unsupported` on chat (`inference.proto:597`, `:644`), media (`media.proto:107`,
@@ -1672,7 +1672,7 @@ class ProviderError:
 `ACCOUNT_DISABLED`, `PAYMENT_REQUIRED`, `CONTEXT_OVERFLOW`, `RESOURCE_EXHAUSTED`, `CONNECTIVITY`,
 `STREAM_CORRUPTION`, `MALFORMED_MODEL_OUTPUT`, `TOOL_NON_COMPLIANCE`, `EMPTY_COMPLETION`,
 `SESSION_EXPIRED`, `CONTENT_FILTER`, `SAFETY_REFUSAL`, `INVALID_REQUEST`, and the rest of
-`crates/inference/src/error.rs:11-96`. `retryability` is the typed retry lane
+`crates/ai/src/error.rs` (`ErrorKind`). `retryability` is the typed retry lane
 (`docs/py/10-telemetry.md` §Retryability). `retry_after` is already parsed from the header into an
 `omp.Duration`, whether it arrived as a delta or an HTTP date.
 
@@ -1747,7 +1747,7 @@ class UsageWindow:
 policy, and any status widget — which is why `@ogulcancelik/pi-minimal-footer` and
 `@benvargas/pi-synthetic-provider`'s quota command become a declaration plus a TML slot instead of a
 private HTTP client and a cache file. Fourteen providers already have Rust usage projections
-(`crates/inference/src/operation/usage/`); this hook is for the fifteenth.
+(`crates/ai/src/operation/usage/`); this hook is for the fifteenth.
 
 #### `search_parse`
 
@@ -1912,7 +1912,7 @@ That is the whole extension. What went where:
   0600 file and shelling out to a platform binary for a fingerprint is not solving its own problem.
 - **Prompt caching** → `ContextSpec.prefix_cache` + `ChatCaps.prompt_caching`, so the harness places
   breakpoints instead of the extension guessing.
-- **>1 MB image auto-upload** → nothing. Large media staging is `crates/inference/src/staging.rs`
+- **>1 MB image auto-upload** → nothing. Large media staging is `crates/ai/src/staging.rs`
   and `MediaInput`, with `StagingReceipt` evidence. This was never an extension's job; it looked like
   one because pi's provider interface had no media concept.
 - **Token counting** → one member in `operations`. pi had no slot for Anthropic's endpoint at all;
@@ -2231,12 +2231,12 @@ Concretely:
    `OverlayStack::with_replaced(source, overlay) -> Self` returning a new stack with a bumped
    generation. Immutable-with-generation, not interior-mutable: `ExecutionPlan` already validates
    itself against `(CatalogRevision, generation)` in `plan_is_current`
-   (`crates/catalog/../llm-inference/src/plan.rs:324-335`), so in-flight requests are already
+   (`crates/ai/src/plan.rs`), so in-flight requests are already
    safe against a swap. This is the single strongest argument for the generation design over any
    locking scheme — the invalidation protocol is written and tested.
 
-2. **`crates/inference/src/registry.rs`** — the real friction. `RegistryBuilder` states that
-   "mutation ends permanently at `build`" (line 166) and `RouteBinding` services are preconstructed
+2. **`crates/ai/src/registry.rs`** — the real friction. `RegistryBuilder` states that
+   "mutation ends permanently at `build`" and `RouteBinding` services are preconstructed
    per route. An extension-declared route has no preconstructed stack.
 
    Three options:
@@ -2314,7 +2314,7 @@ Concretely:
    these messages already carries — which is what that field is for, and it means none of this work
    needs to land as a protocol change before it can be exercised.
 
-4. **`crates/inference/src/layer/`** — the cold-path hooks need dispatch points. `before_request`
+4. **`crates/ai/src/layer/`** — the cold-path hooks need dispatch points. `before_request`
    fits `EncodeService`. `provider_error` needs a classification interception in the
    `Error → RetryAction` path, before `fallback_is_safe` (`registry.rs:481-489`) consumes it.
    `provider_sign` sits inside `CredentialApplyService` (`layer/encode.rs:209`) and is the only new
@@ -2360,7 +2360,7 @@ route and a `Fallback.ERROR` must still fail honestly — but build it knowing t
 designed out rather than budgeted for, and build the filter first, because until it exists the budget
 would be arbitrating a set that should not be on the wire.
 
-New: `ConstraintBudget` in `crates/inference/src/plan.rs`, holding per-route ceilings
+`ConstraintBudget` lives in `crates/ai/src/plan.rs`, holding per-route ceilings
 (`maximum_tools`, provider strict-schema cap, grammar-tool cap) and an `assign(&[Intent]) -> Assignment`.
 
 The interesting design question is not the allocation rule; it is **stability**. A greedy
@@ -2435,8 +2435,8 @@ What remains is narrower and more precise than "build the lowering":
   silently truncated or rejected value depending on which side clamps. Pick one width — `u8` is ample
   for a priority band and is the one already in the executing code, so the wire field should be
   documented as `u8`-ranged rather than widening Rust.
-- **EBNF is missing only on the toolhost wire.** Both `crates/tool::GrammarSyntax`
-  (`lib.rs:124-131`) and `llm-inference::ToolGrammarSyntax` carry `Ebnf`; only
+- **EBNF is missing only on the toolhost wire.** Both `omp_tool::GrammarSyntax`
+  (`crates/tool/src/lib.rs`) and `omp_ai::ToolGrammarSyntax` (`crates/ai/src/call.rs`) carry `Ebnf`; only
   `omp.toolhost.v1.GrammarSyntax` stops at `LARK`/`REGEX`. The gap is exactly one additive enum member,
   as listed above.
 - **A wire home for `Adjustment::Escalated`.** As noted in the reference section, `Unsupported.Action`
@@ -2667,17 +2667,14 @@ overlay wiring (item 1 above) is a prerequisite and belongs earlier.
    there, and this document links to it rather than restating its signature.
 
    This is a handoff, not a punt, and it has landed. The model side was already built, so the entry
-   point is a wrapper rather than new machinery: `ChatParentHost::completion`
-   (`crates/app/src/chat.rs:511`), reached through `ParentSessionHost::completion`
-   (`crates/app/src/envd/eval/bridge.rs:483`), is the same call the eval prelude's `completion()`
-   already exposes. `Operation.CHAT` against a `smol`/`tiny` role reaches
-   `crates/inference/src/local/text.rs`, which has `TextAdapter::generate`, `GenerationOptions`,
-   `TextCapabilities`, and idle unloading for on-device models;
-   `.plan/feature-map/voice.md:146-155` names the shipped Q4 models (`lfm2-350m`, `qwen3-0.6b`,
-   `gemma-270m`, `qwen2.5-0.5b`). The blogpost's "Extra: Use local models!" argues for exactly this,
-   and `FEATURES.md:356-360` shows omp already doing it in Rust for auto-thinking difficulty
-   classification: "online backend: tiny model, allowMax variant, 5-level output, earliest-match
-   parsing, transient retry", with "fallback to provisional or previous level on failure".
+   point is a wrapper rather than new machinery: `ParentSessionHost::completion`
+   (`crates/envd/src/eval/bridge.rs`), implemented by the driver's work-pool scheduler
+   (`crates/driver/src/subagent/workpool_scheduler.rs`), is the same call the eval prelude's
+   `completion()` exposes. `Operation.CHAT` against a `smol`/`tiny` role reaches the on-device
+   adapters under `crates/ai/src/local/` (`tiny_catalog.rs`, `applefm.rs`). The omp precedent is
+   auto-thinking difficulty classification in Rust (`crates/ai/src/difficulty.rs`): a tiny model, a
+   five-level output, earliest-match parsing, a transient retry, and a fallback to the provisional
+   or previous level on failure.
 
    Two properties from that precedent should be non-optional in whatever surface lands, because they
    are what make a tiny-model call safe rather than merely available. Constrain the output to a small

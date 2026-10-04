@@ -186,7 +186,7 @@ links rather than restating them:
 | the admission gate that produces `POLICY_DENIED` aborts, approval tickets | `docs/py/06-policy.md` |
 | `omp.ui.notify`, `@omp.command`, TML | `docs/py/07-ui.md` |
 | `@omp.prompt_slot`, `CompactionEvent`, `MessageRef`/`ContextPatch` | `docs/py/08-context.md` |
-| `omp.journal`, `@omp.entry_kind` typed entries, turn receipts, `omp.sessions`, `omp.artifacts`, `ArtifactUrl` | `docs/py/09-journal.md` |
+| `omp.journal` DOM patch builders, turn receipts, `omp.sessions`, `omp.artifacts`, `ArtifactUrl` | `docs/py/09-journal.md` |
 | `omp.env`, `EnvPath`, named processes, blobs | `docs/py/11-env.md` |
 | capability intents, strength, budget resolution, `omp.creds` | `docs/py/13-inference.md` |
 | `(publisher_key, extension_id)` identity, the provenance septet, the manifest declaration table | `docs/py/14-deploy.md` |
@@ -1774,8 +1774,6 @@ switch?* — because no single event carried it. The fingerprint is guessed from
 In omp the causality is already in the event, so the whole state machine is one sink:
 
 ```python
-from dataclasses import dataclass
-
 import omp
 
 THRESHOLD = 0.10
@@ -1785,13 +1783,6 @@ regressions = omp.telemetry.counter(
 hit_rate = omp.telemetry.histogram(
     "cache.hit_rate", unit="1", description="Prompt-cache hit rate per model request."
 )
-
-@omp.entry_kind("dev.mrclrchtr.cache.turn", rev="v.1")   # docs/py/09-journal.md
-@dataclass(frozen=True, slots=True)
-class CacheTurn:
-    rate: float
-    stable_prefix_bytes: int
-    changed_slots: tuple[str, ...]
 
 prev: omp.telemetry.ModelRequest | None = None
 
@@ -1804,11 +1795,6 @@ async def watch_cache(event: omp.telemetry.Event, ctx: omp.Context) -> None:
         case omp.telemetry.ModelRequest() as req:
             rate = req.usage.cache_hit_rate
             hit_rate.record(rate, model=req.served_model)
-            omp.journal.append(CacheTurn(
-                rate=rate,
-                stable_prefix_bytes=req.prompt.prefix_stable_bytes,
-                changed_slots=req.prompt.changed,
-            ))
             if prev is not None and prev.usage.cache_hit_rate - rate > THRESHOLD:
                 cause = (
                     f"prompt slots changed: {', '.join(req.prompt.changed)}"
@@ -1822,10 +1808,10 @@ async def watch_cache(event: omp.telemetry.Event, ctx: omp.Context) -> None:
             prev = req
 ```
 
-(The journal write is a **typed declared entry**, not a raw `("cache-turn", dict)` pair — raw
-string/dict appends were removed everywhere by the journal-tightening ruling, and the durable record
-is what makes this data queryable a year later. The append is durable and ordered; the *alerting*
-rides the droppable stream, which is the right division.)
+(The sink writes nothing to the journal. An extension cannot append journal entries, and the data it
+would have recorded is already durable: every model request's receipt is a `turn.receipt` in the
+session journal, queryable a year later through `omp.sessions`. The *alerting* rides the droppable
+stream, which is the right division.)
 
 `req.prompt.changed` replaces `diffFingerprints` and, critically, is *correct*: it is computed by the
 assembler over every slot it actually emitted, not by an extension over the subset of prompt inputs
@@ -2364,7 +2350,7 @@ The issue store is a table in the same database. `FEATURES.md:643` describes `re
 late if AutoQA is meant to drive device revisions, because the loop is worth most while devices are
 still churning. Pulling it forward is a sequencing recommendation, not a design one.
 
-### `crates/tools`, `crates/tool`, `crates/inference`, `crates/env`
+### `crates/tools`, `crates/tool`, `crates/ai`, `crates/env`
 
 - `crates/tools/src/render/truncate.rs` already computes every `ArtifactSpill` field for
   `layer="render"`: `DEFAULT_MAX_BYTES` (51 200), `DEFAULT_MAX_LINES` (3 000), `DEFAULT_MAX_COLUMN`
@@ -2376,12 +2362,14 @@ still churning. Pulling it forward is a sequencing recommendation, not a design 
   claim in this document that the loop needed a `rev()` accessor added. It already stamps
   `TOOL_REV_PROP`. What `layer="verdict"` needs is an environment implementation of the existing
   `VerdictSpill` trait, plus the defect below.
-- `crates/inference` emits `ModelRequest` where it already holds `Outcome`. Field mapping is
-  direct: `Outcome.usage`→`Tokens`, `Outcome.cost`→`Cost`, `Outcome.unsupported`→`Degradation`
-  (`Unsupported.Action` maps 1:1 onto `DegradeAction`), `Outcome.diagnostics`→`Diagnostic`,
-  `Outcome.duration_ms`/`ttft_ms`, `Outcome.provider`/`model`/`upstream_provider`. `Accepted.replay`
-  becomes `ModelRequest.replayed`. This is the payoff for `Unsupported` existing in the proto: silent
-  drops are already modelled, so degradation telemetry is a projection rather than an investigation.
+- `crates/ai` emits `ModelRequest` where it already holds the final `Completion`
+  (`crates/ai/src/event.rs`), whose `receipt` is the authoritative `ExecutionReceipt`
+  (`crates/ai/src/receipt.rs`): usage, cost, attempts, recoveries, and every `Adjustment`. Field
+  mapping is direct: receipt usage→`Tokens`, cost→`Cost`, adjustments→`Degradation` (each
+  `Adjustment` maps onto a `DegradeAction`), recoveries→`Diagnostic`, plus duration, time to first
+  token, and the provider, model, and upstream provider the receipt names. This is the payoff for
+  the receipt recording silent drops: degradation telemetry is a projection rather than an
+  investigation.
 - `crates/env` gains nothing new for `ProcessTarget` beyond a framed-write sink onto an existing
   named process. The frames are produced by the exporter in Rust; Python is not in the path.
 
@@ -2646,7 +2634,8 @@ Changes this file made in the post-review revision, and the review point that dr
   and `Compaction.artifacts_promoted`. The callback ABI is `(event, ctx)` in every sink, hook, and
   command example; the braintrust port's `@omp.hook("session_start")` became `extension_activate`;
   the supi-cache example's raw `journal.append("cache-turn", {...})` became a typed
-  `@omp.entry_kind` `CacheTurn` entry (P0#17). No `AUTO_REVIEW`/`Priority` band usages existed in
+  `@omp.entry_kind` `CacheTurn` entry (P0#17), and the append was later removed with the extension
+  journal API (see `docs/py/09-journal.md`). No `AUTO_REVIEW`/`Priority` band usages existed in
   this file, so the `HookPhase` rename required no change here beyond the consumed-symbols table.
 - **Python fences.** The indented `OtlpTarget` fragment — the one block in this file that failed
   `ast.parse` — is dedented into a parseable snippet; all ten blocks now parse.

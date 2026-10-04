@@ -11,7 +11,7 @@ def project_status(ctx: PromptContext) -> str:
     return f"Project root: {ctx.roots[0]}" if ctx.roots else "No project root"
 ```
 
-For template-backed contributions, see [`omp.scribe`](omp.scribe.md). For prompt placement and cache policy in context, see [Regimes and policy](../guides/regimes-and-policy.md).
+For template-backed contributions, see [`omp.scribe`](omp.scribe.md). For prompt placement and cache policy in context, see [Policy](../guides/policy.md).
 
 ## Writable slots
 

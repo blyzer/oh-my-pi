@@ -135,7 +135,7 @@ sentence, and the catalog row lives in §3.11 family H.
 `omp.events.spec(event).returns` reports the return type, so this is discoverable rather than
 folklore. A domain return is not an escape hatch for new event families: adding one requires that
 the decision space already exists as a typed enumeration owned by a sibling document — `omp.Failover`
-mirrors `crates/inference/src/error.rs`, `ContextPatch`'s op set is closed and validated by
+mirrors `crates/ai/src/error.rs`, `ContextPatch`'s op set is closed and validated by
 [`08-context.md`](08-context.md) — not merely that five arms feel awkward.
 
 ### 2.3 Where hooks attach — and who decides
@@ -322,7 +322,7 @@ behaviour, not today's.
 A hook must be able to consult the world in the middle of forming its decision — read the journal,
 read a file through `omp.env`, run a budgeted completion in REVIEW or the turn-scoped `turn_start`
 TRANSFORM — without deadlocking anything.
-CONTROL is full-duplex and request-multiplexed: when a handler awaits `omp.state.latest(DeclaredKind, scope=...)`,
+CONTROL is full-duplex and request-multiplexed: when a handler awaits `omp.sessions.journal(...)`,
 the
 host allocates a fresh `request_id` and writes a request frame on the same connection the pending
 decision is riding.
@@ -354,7 +354,7 @@ Four properties make the round-trips that remain safe:
    `ui.custom` component actually mounts (`runner.ts:146-187`, `runner.ts:282-298`) — kept in
    intent, but made explicit on the wire (`BudgetPause`) instead of inferred from which request is
    in flight, which is why pi has to special-case component mounting. Non-interactive round-trips
-   (`omp.journal.append`, reads through `omp.env.docs.open`) do **not** suspend it. Approval waits no longer
+   (reads through `omp.env.docs.open`) do **not** suspend it. Approval waits no longer
    appear here at all: the ticket is Core's, so no handler budget is suspended for one.
 3. **Dialogs never raise.** `omp.ui.confirm` / `select` / `input` / `ask_user` return
    `omp.ui.DialogOutcome` and, absent a TUI, return
@@ -1219,7 +1219,9 @@ Mutable fields: `session_branch.summarize` (REPLACE), `session_rewind.restore_wo
 @omp.hook("session_shutdown")
 async def flush_index(event: omp.SessionShutdownEvent, ctx: omp.Context) -> None:
 	# every shutdown handler shares omp.limits.SHUTDOWN_BUDGET; do bounded work only
-	await omp.journal.append(IndexFlush(session=event.session_id))
+	state = await omp.state_dir()              # a rebuildable index, never session truth (09-journal.md)
+	worker = await omp.workers.get("index")
+	await worker.call(flush_index_db, state)   # an env-colocated @omp_remote.remote function
 ```
 
 ---
@@ -2266,50 +2268,41 @@ prompt, and records progress with `appendEntry`. It works until a second continu
 installed, at which point the two race: pi's `session_stop` result is a single object and the last
 handler's `continue` flag wins.
 
+In omp, owning automatic continuation is a Director claim on the `loop` slot
+([`15-directors.md`](15-directors.md)), not a hook race, and progress is a property on the Director's
+own element in the session tree, not an extension-defined journal entry (there is no
+`omp.journal.append` or `@omp.entry_kind`; see [`09-journal.md`](09-journal.md)). The production
+version of this feature is the built-in `goal` Director (`crates/agent/src/directors/goal.rs`); an
+extension-declared loop owner looks like this:
+
 ```python
 import omp
-from omp.agents import Continue, Settle
+
+CONTINUATION_CAP = 20
 
 
-def active_goal() -> GoalState | None:
-	entry = omp.journal.latest(GoalState)
-	return entry.value if entry is not None else None
-
-
-@omp.hook("turn_end")
-def account_tokens(event: omp.TurnEndEvent, ctx: omp.Context) -> None:
-	goal = active_goal()
-	if goal is None:
-		return
-	# reused cache reads are not new spend
-	delta = event.usage.input + event.usage.cache_write + event.usage.output
-	omp.journal.append(GoalSpend(goal=goal.id, delta=delta))
-
-
-@omp.hook("agent_settled")
-def continue_or_stop(event: omp.AgentSettledEvent, ctx: omp.Context) -> Continue | Settle:
-	goal = active_goal()
-	if goal is None:
-		return Settle()
-	if event.reason is omp.SettleReason.INTERRUPTED:
-		omp.journal.append(GoalPaused(goal=goal.id, reason="interrupted"))
-		return Settle()
-	if goal.spent >= goal.budget:
-		return Settle()
-	if event.continuations_used + 1 >= omp.limits.SETTLE_CONTINUATION_CAP:
-		return Settle()
-	return Continue(prompt=goal.continuation_prompt)
+@omp.director("goal-loop", claims=("loop",))
+class GoalLoop:
+	def on_yield(self, event):
+		used = int(event["state"].get("continuations", 0))
+		if used >= CONTINUATION_CAP:
+			return "done"                      # pop this Director; the candidate goes to its parent
+		return {
+			"verdict": "continue",             # consume the yield and run another turn
+			"reminder": "The goal is not met yet. Continue working toward it.",
+			"updates": {"continuations": used + 1},   # durable, scalar, on this Director's element
+		}
 ```
 
-Three things the omp shape gets for free. Resolution is first-`Continue`-wins in the deterministic
-`(layer, publisher, extension_id)` order with an explicit `Settle()` veto — domain-return hooks
-take no `phase=` — so an autoresearch auto-resume hook and this goal loop
-compose deterministically instead of one silently losing. `event.reason is
-SettleReason.INTERRUPTED` is the loop's own taxonomy (`crates/agent/src/mailbox.rs:10-17`,
-`loop.rs:386-411`), not a heuristic over message shapes — so "pause on SIGINT, preserve budget on
-internal aborts" is a two-line distinction rather than a guess. And `agent_settled` fires exactly
-once per submission at the `DrainPoint::Idle` boundary (`loop.rs:580-597`), never after a tool
-follow-up, so the continuation cannot land mid-batch and fight the model.
+What the omp shape gets for free. A second loop owner cannot race this one: both claim `loop`, so
+the newcomer is queued FIFO and promoted when the slot frees instead of the last handler winning.
+The count lives on the Director element, so rewind and resume re-derive it from the journal and a
+module global is never the authority. And `on_yield` fires once per candidate yield, never after a
+tool follow-up, so the continuation cannot land mid-batch and fight the model. Token accounting
+(`turn_end` usage) is not visible to a Director callback: the event carries `state`,
+`had_tool_calls`, `assistant_text`, and `stop_reason` only, so a spend budget is the built-in
+`goal` Director's job. The one-shot `agent_settled` hook (`Continue | Settle`) remains available
+for a stateless decision that needs no ownership of the loop.
 
 ### 4.3 Two-phase plan mode — `@dreki-gg/pi-plan-mode`
 
@@ -2320,90 +2313,48 @@ intercepts `tool_call` to deny dangerous bash during planning, filters stale mes
 the toolset costs a prompt-cache miss every transition; and the `context` hook rewrites history
 client-side.
 
-```python
-from dataclasses import dataclass
+In omp, plan mode is the built-in `plan` Director (`crates/agent/src/directors/plan.rs`, ADR 0015).
+It claims the `mode` and `worktree` slots and binds convars while it is engaged: `ai_prompt_mode`,
+`ai_model` (the `@plan` role), and a list-valued `sv_tools` allowlist. Binds are convar
+values installed on the engagement layer while the Director is active (ADR 0012), not a whole-set
+write to a shared toolset. An extension can declare the same shape for its own mode, restricted to
+scalar binds:
 
+```python
 import omp
 
-PLAN_DEVICES = frozenset({"read", "grep", "glob", "plan"})
-
-@omp.entry_kind("dev.dreki_gg.plan.state", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class PlanState:
-	mode: str
-	model: omp.ModelRef
-
-async def current_plan_state() -> PlanState | None:
-	record = await omp.state.latest(PlanState, scope=omp.StateScope.PROJECT)
-	return None if record is None else record.value
-
-@omp.hook("device_list", phase=omp.HookPhase.TRANSFORM, order=50, on_failure=omp.OnFailure.DENY)
-async def narrow_to_plan_devices(event: omp.DeviceListEvent, ctx: omp.Context) -> omp.HookDecision:
-	state = await current_plan_state()
-	if state is None or state.mode != "plan":
-		return omp.Defer()
-	keep = tuple(d for d in event.devices if d.name in PLAN_DEVICES)
-	return omp.Modify(patch={"devices": keep}, reason="plan mode is read-only")
-
-@omp.hook("tool_call", phase=omp.HookPhase.PRECHECK, on_failure=omp.OnFailure.DENY)
-async def no_writes_while_planning(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecision:
-	state = await current_plan_state()
-	if state is None or state.mode != "plan":
-		return omp.Defer()
-	match event.target:
-		case omp.CoreTool(name="write" | "edit"):
-			return omp.Deny("plan mode may not write to the filesystem", code="plan_readonly")
-		case omp.CoreTool(name="bash") if event.bash is not None:
-			if any(cmd.writes for cmd in event.bash.commands):
-				return omp.Deny("plan mode may not write to the filesystem", code="plan_readonly")
-	return omp.Defer()
-
-@omp.hook("turn_start", phase=omp.HookPhase.TRANSFORM, order=50)
-async def use_plan_model(event: omp.TurnStartEvent, ctx: omp.Context) -> omp.HookDecision:
-	state = await current_plan_state()
-	if state is None or state.mode != "plan":
-		return omp.Defer()
-	return omp.Modify(patch={"model": state.model})
+@omp.director("readonly-review", claims=("mode",), binds={"ai_model": "@plan"})
+class ReadonlyReview:
+	def on_yield(self, event):
+		if event["state"].get("reviewed"):
+			return "done"
+		return {
+			"verdict": "continue",
+			"reminder": "List what you would change and why, without writing any files.",
+			"updates": {"reviewed": True},
+		}
 ```
 
-`device_list` composes `INTERSECT`, so plan mode and a read-only-audit extension narrow
-independently and correctly, and neither can be widened by a later transform. Because extensions
-register with the host and not the model, narrowing devices appends one system-notification item and
-leaves the request's tool array byte-identical, so no cache is invalidated — the pi version's
-per-transition re-registration was the reason `pi-cache-optimizer` had to exist. `turn_start` is the
-right seam for the model switch, since it fires after the journal `TurnStart` is fixed but before
-transport opens (`crates/agent/src/loop.rs:804-851`), making pi's "defer model switches if triggered
-while a turn is actively streaming" workaround unnecessary. And the `tool_call` gate here is
-advisory UX layered over an env-enforced read-only scope, per
-`.plan/feature-map/roadmap/auto-loops.md:6` — it gives the model an early, well-worded error; it is
-not the enforcement.
+The model switch is a bind, so `turn_start` needs no hook for it. **Unknown:** whether a Python hook can observe which Director is engaged; no `omp.Context` field
+exposes it, so an extension that must also deny writes while its mode is active has no sanctioned
+way to condition a `tool_call` PRECHECK hook on it. Narrowing the roster (`sv_tools`) takes a list
+value, which `@omp.director` binds do not accept (scalars only), so it is currently built-in only.
+Whatever a hook denies is advisory UX layered over an env-enforced read-only scope: it gives the
+model an early, well-worded error and is not the enforcement.
 
-### 4.4 Guardian auto-review with a circuit breaker — `@shinynito/pi-menshen`
+### 4.4 Guardian auto-review — `@shinynito/pi-menshen`
 
 pi-menshen is a four-stage pipeline: rule matching, tree-sitter WASM bash parsing, deterministic
 read-only fast paths, and an asynchronous secondary-LLM review with a rejection circuit breaker. It
 bundles a 1.3 MB `tree-sitter-bash.wasm`, pays 50–200 ms initializing it, and degrades to forced
-review when parsing fails.
+review when parsing fails. The breaker needs a denial count that survives a restart. An extension can
+no longer journal one (there is no extension-defined journal kind, see
+[`09-journal.md`](09-journal.md)), so the breaker is not reproduced here; the review is.
 
 ```python
-from dataclasses import dataclass
-
 import omp
 
 READ_ONLY = frozenset({"ls", "cat", "grep", "rg", "find", "head", "tail", "wc", "git"})
-
-@omp.entry_kind("dev.shinynito.menshen.breaker", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class BreakerState:
-	denials: int
-
-@omp.hook("tool_call", phase=omp.HookPhase.PRECHECK, on_failure=omp.OnFailure.DENY,
-          timeout=omp.Duration("100ms"), when=omp.When(name={"bash"}))
-async def breaker_gate(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecision:
-	record = await omp.state.latest(BreakerState, scope=omp.StateScope.PROJECT)
-	if record is not None and record.value.denials >= 3:
-		return omp.Deny("guardian circuit breaker is open", code="breaker_open")
-	return omp.Defer()
 
 @omp.hook("tool_call", phase=omp.HookPhase.REVIEW, on_failure=omp.OnFailure.DENY,
           timeout=omp.Duration("20s"), when=omp.When(name={"bash"}))
@@ -2419,7 +2370,6 @@ async def guardian(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecisi
 		# no `default=`: a guardian's safe answer is Deny, and the harness cannot know that
 	)
 	if answer.strip().upper().startswith("DENY"):
-		await omp.journal.append(GuardianDenial(call=event.call_id, why=answer))
 		return omp.Deny(answer, code="guardian_deny")
 	return omp.Defer()              # an APPROVAL rule can still have its say
 ```
@@ -2431,8 +2381,7 @@ possible. `has_dynamic_eval` is a field, not an inference: `rm -rf $(echo /etc)`
 fails the fast path instead of maybe passing an allowlist. The deterministic read-only fast path
 lives *inside* the reviewer, not as an earlier hook: REVIEW is parallel, so there is no earlier
 deny-capable position from which an `Allow` could pre-empt a peer, and returning before the
-`completion` call is what actually saves the money. The breaker is a PRECHECK, where deny-only
-parallelism makes it free. And the reviewer's own 20 s fail-closed deadline means a stalled
+`completion` call is what actually saves the money. And the reviewer's own 20 s fail-closed deadline means a stalled
 classifier denies its own invocation rather than hanging tool dispatch, which is `runner.ts`'s
 issue #3948 made structurally impossible: under D6 there is no shared dispatch path left to hang.
 
@@ -2707,7 +2656,7 @@ Attach sites, all at existing seams:
 
 Session-family hooks attach in the session manager around `Agent::rewind` (`loop.rs:235`),
 `rewind_targets` (`loop.rs:251`) and the switch/branch paths; provider-family hooks attach in
-`crates/inference` at request assembly and error classification; `compaction` attaches wherever
+`crates/ai` at request assembly and error classification; `compaction` attaches wherever
 `Kind::Compact` is written. The decision procedure for `tool_call` runs in `HookGate`, off the
 mailbox loop — the loop never awaits it, which is what keeps the batch invariant intact. A previous
 revision called this component "a small, self-contained courier task"; per §2.3 that framing is

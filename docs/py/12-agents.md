@@ -713,21 +713,15 @@ exactly the reason a subagent does: it spends the user's tokens.
   one.
 - **It never writes a thread item.** No journal entry, no transcript row, no
   `TOOL_REV_PROP` stamp — the emission exists only in the returned `Completion`
-  and in telemetry. A caller that wants a record appends one itself
-  (`docs/py/09-journal.md`), which is what the worked example below does for the
-  degraded case. Callers running a deprioritized background lane over this call
+  and in telemetry. An extension cannot append journal entries
+  (`docs/py/09-journal.md`), so a caller that wants a record of the degraded case
+  logs it through `ctx.log`, as the worked example below does. Callers running a deprioritized background lane over this call
   — never preempting the conversation, never spending the constraint budget,
   never forcing a call — should read `docs/py/08-context.md`, which owns that
   policy and its epoch-staleness discipline.
 
 ```python
 import omp
-from dataclasses import dataclass
-
-@omp.entry_kind("dev.acme.guard.degraded", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class GuardDegraded:
-	reason: str
 
 @omp.hook("tool_call", phase=omp.HookPhase.REVIEW, when=omp.When(name={"bash"}))
 async def classify(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecision:
@@ -740,7 +734,7 @@ async def classify(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecisi
 		labels={"gate": "bash"},
 	)
 	if answer.fell_back:
-		omp.journal.append(GuardDegraded(reason=str(answer.fault)))
+		ctx.log("warning", "guard classifier fell back", reason=str(answer.fault))
 	return omp.Allow() if answer.choice == "allow" else omp.Deny(answer.text)
 ```
 
@@ -924,7 +918,7 @@ that the visible setup prompt itself is submitted:
 
 ```python
 @omp.command("handoff")
-async def handoff(_: omp.CommandContext) -> None:
+async def handoff(inv: omp.ui.Invocation, ctx: omp.Context) -> None:
     created = await omp.sessions.create(
         omp.sessions.SessionSetup(
             title="Focused follow-up",
@@ -1013,10 +1007,10 @@ at-least-once safe is the key: every firing carries
   `Spawn` re-attaches to the run the first delivery started instead of
   spawning a twin;
 - everything durable a firing causes should reuse it: the spawned child's
-  `session_init` carries it, and a handler making its own durable appends
-  uses `journal.append_atomic(entries, idempotency_key=…)`
-  (`docs/py/09-journal.md`), so a replayed firing converges instead of
-  double-writing.
+  `session_init` carries it, and a handler making its own durable side effects
+  (a spawned child, an injected prompt) uses it as their idempotency key, so a
+  replayed firing converges instead of double-writing. An extension has no
+  journal append of its own (`docs/py/09-journal.md`).
 
 Schedule upserts are themselves durable requests and carry the standard
 `request_id, idempotency_key, host_generation, session_generation` quartet
@@ -1557,18 +1551,12 @@ QuickJS sandbox, shells out to `git worktree` per step, and persists runs to
 `.pi/workflows/runs/<runId>.json`.
 
 In omp the DAG is Python, the fan-out is one CONTROL frame, and the run state is
-a journal entry.
+the set of child sessions it spawned.
 
 ```python
 import asyncio
 import omp
 from dataclasses import dataclass
-
-@omp.entry_kind("dev.acme.workflow.wave", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class WorkflowWave:
-	steps: tuple[str, ...]
-	usage: dict[str, omp.agents.Usage]
 
 @dataclass(frozen=True, slots=True)
 class Step:
@@ -1596,10 +1584,6 @@ async def run_wave(wave: list[Step], done: dict[str, omp.agents.SubagentResult])
 	handles = await omp.agents.spawn_all(specs)
 	for step, result in zip(wave, await asyncio.gather(*(h.wait() for h in handles))):
 		done[step.name] = result
-	omp.journal.append(WorkflowWave(
-		steps=tuple(s.name for s in wave),
-		usage={s.name: done[s.name].subtree_usage for s in wave},
-	))
 
 @omp.command("workflow")
 async def workflow(inv: omp.ui.Invocation, ctx: omp.Context) -> omp.ui.CommandResult:
@@ -1612,10 +1596,10 @@ async def workflow(inv: omp.ui.Invocation, ctx: omp.Context) -> omp.ui.CommandRe
 ```
 
 Downstream steps receive `agent://<name>` URLs, not pasted transcripts —
-results reference, they do not embed. Resumability is free: the journal entries
-are the run state, so streaming `omp.sessions.journal(id)`
-(`docs/py/09-journal.md`) replaces `runs/<runId>.json` and works for a remote
-session too. And a step whose body touches many files declares
+results reference, they do not embed. There is no run file to maintain: every
+step is its own journaled child session, so `omp.sessions` and
+`omp.sessions.journal(id)` (`docs/py/09-journal.md`) replace
+`runs/<runId>.json` and work for a remote session too. And a step whose body touches many files declares
 `place="env"` (`docs/py/04-placement.md`) so its bytes never transit the host.
 
 ### 3. `@ayulab/pi-rewind` — time travel without a shadow VCS
@@ -1625,16 +1609,12 @@ The original keeps a bare git repo at `~/.pi/checkpoints/<sessionId>.git`, runs
 `turn_end`, intercepts `session_before_tree`/`session_tree` to restore, and
 force-writes files with `git read-tree -u --reset`.
 
+The extension keeps no record of its own: an extension cannot append journal entries
+(`docs/py/09-journal.md`), and the pairing of a workspace generation with a thread
+point is what `RewindTarget.snapshot_id` reports.
+
 ```python
 import omp
-from dataclasses import dataclass
-
-@omp.entry_kind("dev.ayulab.rewind.checkpoint", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class RewindCheckpoint:
-	snapshot: str
-	generation: int
-	event: int
 
 @omp.hook("turn_end", phase=omp.HookPhase.OBSERVE)
 async def checkpoint(event: omp.TurnEndEvent, ctx: omp.Context) -> None:
@@ -1642,10 +1622,7 @@ async def checkpoint(event: omp.TurnEndEvent, ctx: omp.Context) -> None:
 	# Fail-open by construction — a checkpoint miss must never fail a turn.
 	if not omp.env.has(omp.env.Capability.WORKSPACE_SNAPSHOT):
 		return
-	snap = await omp.agents.snapshot(label=f"turn {event.turn_index}")
-	omp.journal.append(RewindCheckpoint(
-		snapshot=snap.id, generation=snap.generation, event=event.event_index,
-	))
+	await omp.agents.snapshot(label=f"turn {event.turn_index}")
 
 @omp.command("rewind")
 async def rewind(inv: omp.ui.Invocation, ctx: omp.Context) -> omp.ui.CommandResult | None:
@@ -1726,13 +1703,6 @@ collapse its own older continuation markers, because otherwise they accumulate.
 import omp
 from dataclasses import dataclass
 
-@omp.entry_kind("dev.narumitw.goal.budget_limited", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class GoalBudgetLimited:
-	spend: int
-	budget: int
-	committed_turns: int
-
 @dataclass(slots=True)
 class Goal:
 	objective: str
@@ -1765,10 +1735,7 @@ async def continue_goal(event: omp.AgentSettledEvent, ctx: omp.Context) -> omp.a
 		return omp.agents.Settle()
 
 	if _goal.token_budget is not None and _spend >= _goal.token_budget:
-		omp.journal.append(GoalBudgetLimited(
-			spend=_spend, budget=_goal.token_budget,
-			committed_turns=event.committed_turns,
-		))
+		omp.ui.notify(f"goal budget exhausted: {_spend}/{_goal.token_budget} tokens", level="warn")
 		return omp.agents.Settle()
 
 	ledger = await omp.agents.continuations()
@@ -2961,7 +2928,7 @@ Changes this file made for Revision 2, and the review point that drove each:
   typed locations (`EnvPath` for `cwd`/`worktree_path`/conflict paths,
   `AgentUrl`/`HistoryUrl` for outputs and transcripts, `ArtifactUrl` for
   patches, `WorkspaceUri` for the snapshot root); journal examples rewritten
-  to typed `@omp.entry_kind` entries (P0#17); the `context` hook reference in
+  to typed `@omp.entry_kind` entries (P0#17; later removed with the extension journal API, see `docs/py/09-journal.md`); the `context` hook reference in
   `Isolation.FILTERED` renamed `thread_projection` (P0#11); the boundary
   flowchart's "verdict" relabeled "decision" so the retired `Verdict`
   name stops leaking into prose.

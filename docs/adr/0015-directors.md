@@ -140,5 +140,5 @@ assistant node for replay.
   `crates/py/python/omp/extensions.py` (`@omp.director`, `@omp.component`),
   `docs/py/15-directors.md`, `AGENTS.md` "Locked Deviations". The former stacked-regime
   design (`crates/agent/src/regime.rs`, `arbiter.rs`, `control.rs`, and Python `@omp.regime`) was
-  removed by `d98ed242f5` and `47e02d12a6`. `docs/architecture/agent-loop.md` still describes that
-  design and predates the Director rewrite
+  removed by `d98ed242f5` and `47e02d12a6`; `docs/architecture/agent-loop.md` describes the
+  current Director-walking kernel
