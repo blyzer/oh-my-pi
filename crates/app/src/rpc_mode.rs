@@ -3130,8 +3130,13 @@ fn kernel_event_value(event: KernelEvent) -> Option<Value> {
 		| KernelEvent::ThinkingDelta(_)
 		| KernelEvent::ToolReady { .. }
 		| KernelEvent::ToolUpdate { .. }
-		| KernelEvent::StreamRedirected { .. }
 		| KernelEvent::ToolSettled { .. } => None,
+		KernelEvent::StreamRedirected { director, label, reason } => {
+			Some(stream_redirect_frame(&director, &label, reason.as_ref()))
+		},
+		KernelEvent::StreamObserved { event, payload, .. } => {
+			stream_observation_frame(event, &payload)
+		},
 		KernelEvent::CompactionSpeculating { percent } => Some(json!({
 			"type": "auto_compaction_start",
 			"reason": "threshold",
@@ -3224,4 +3229,33 @@ fn approve_response(
 fn error_frame(id: Option<RequestId>, command: &str, code: &str, message: &str) -> Value {
 	serde_json::to_value(RpcResponse::error(id, command, message, Some(RpcErrorCode::new(code))))
 		.expect("RPC error envelope serializes")
+}
+
+/// The `stream_redirected` frame print and RPC hosts emit when a Director
+/// redirects a response: who redirected, the culprit label (`stream rule
+/// <name>`), and the journaled notice as the reason.
+pub(crate) fn stream_redirect_frame(director: &str, label: &str, reason: Option<&Str>) -> Value {
+	json!({
+		"type": "stream_redirected",
+		"director": director,
+		"label": label,
+		"reason": reason.map(Str::as_str),
+	})
+}
+
+/// A journaled stream observation as a frame named after its hook event
+/// (`stream_rule_triggered` for `HOOK_EVENT_STREAM_RULE_TRIGGERED`), carrying
+/// the payload extensions received. `None` for a payload that is not a JSON
+/// object.
+pub(crate) fn stream_observation_frame(
+	event: omp_proto::toolhost::v1::HookEventId,
+	payload: &str,
+) -> Option<Value> {
+	let Ok(Value::Object(mut fields)) = serde_json::from_str::<Value>(payload) else {
+		return None;
+	};
+	let name = event.as_str_name();
+	let name = name.strip_prefix("HOOK_EVENT_").unwrap_or(name);
+	fields.insert("type".to_owned(), Value::from(name.to_ascii_lowercase()));
+	Some(Value::Object(fields))
 }

@@ -787,6 +787,26 @@ impl<C> Kernel<C> {
 		Ok(())
 	}
 
+	/// Publishes journaled stream observations to lifecycle hooks and, for
+	/// hosts that mirror hook events, as [`KernelEvent::StreamObserved`].
+	/// Observe-only: a full queue or a malformed payload never blocks the
+	/// turn.
+	fn publish_stream_observations(&self, observations: Vec<CommittedObservation>) {
+		for CommittedObservation { director, observation } in observations {
+			let payload = serde_json::Value::Object(observation.payload);
+			if let Some(hooks) = &self.lifecycle_hooks
+				&& let Err(error) = hooks.notify(observation.event, payload.clone())
+			{
+				tracing::warn!(%error, "stream observation was not published to lifecycle hooks");
+			}
+			self.events.publish(KernelEvent::StreamObserved {
+				director,
+				event: observation.event,
+				payload: Str::new(payload.to_string()),
+			});
+		}
+	}
+
 	pub(crate) fn apply_live_components(
 		&mut self,
 		session: &mut Session,
@@ -1562,13 +1582,15 @@ impl<C: Inference> Kernel<C> {
 					.await?;
 				tokens_in = tokens_in.saturating_add(driven.usage.input_tokens);
 				tokens_out = tokens_out.saturating_add(driven.usage.output_tokens);
+				// A redirected response is abandoned: whatever its context policy,
+				// its text is never part of the turn's answer.
+				if driven.redirected {
+					continue;
+				}
 				total_text.push_str(driven.text.as_str());
 				if driven.cancelled {
 					self.notify_deadline_or_interrupt(session, turn, control, turn_started);
 					return Ok(outcome(TurnStop::Cancelled, total_text, tokens_in, tokens_out));
-				}
-				if driven.redirected {
-					continue;
 				}
 				driven
 			};
@@ -2927,17 +2949,19 @@ impl<C: Inference> Kernel<C> {
 				}
 				if let Some((owner, interrupt)) = redirect {
 					let assistant = assistant.ok_or(KernelError::MissingResponseStart)?;
-					let director = session
-						.dom()
-						.get(owner)
-						.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("family"))))
-						.and_then(Value::as_str)
-						.map_or_else(|| Str::new_static("stream-watch"), Str::new);
+					let director = director_family(session.dom(), owner);
 					session.assistant_end("interrupted")?;
 					self.apply_live_components(session)?;
 					session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
-					stream_effects.push((owner, interrupt.effect));
-					commit_stream_effects(
+					let mut effect = interrupt.effect;
+					let reason = effect.notice.clone();
+					if let Some(observation) = &mut effect.observation {
+						observation
+							.payload
+							.insert("interrupted".to_owned(), serde_json::Value::Bool(true));
+					}
+					stream_effects.push((owner, effect));
+					let observations = commit_stream_effects(
 						session,
 						current_turn(session)?,
 						Some(assistant),
@@ -2945,9 +2969,12 @@ impl<C: Inference> Kernel<C> {
 						Some((interrupt.partial, owner)),
 					)?;
 					self.apply_live_components(session)?;
-					self
-						.events
-						.publish(KernelEvent::StreamRedirected { director });
+					self.events.publish(KernelEvent::StreamRedirected {
+						director,
+						label: interrupt.label,
+						reason,
+					});
+					self.publish_stream_observations(observations);
 					return Ok(DrivenInference::redirected(text, usage));
 				}
 				return Ok(DrivenInference::cancelled(text, usage));
@@ -3023,8 +3050,10 @@ impl<C: Inference> Kernel<C> {
 			session.receipt(receipt_facts(&usage, 0, request_started, first_token, &[]))?;
 			self.apply_live_components(session)?;
 		}
-		commit_stream_effects(session, current_turn(session)?, assistant, stream_effects, None)?;
+		let observations =
+			commit_stream_effects(session, current_turn(session)?, assistant, stream_effects, None)?;
 		self.apply_live_components(session)?;
+		self.publish_stream_observations(observations);
 		Ok(DrivenInference {
 			text: Str::new(text),
 			usage,
@@ -3710,9 +3739,13 @@ fn commit_stream_effects(
 	assistant: Option<Handle>,
 	effects: Vec<(Handle, StreamEffect)>,
 	interrupt: Option<(crate::PartialOutput, Handle)>,
-) -> Result<(), KernelError> {
+) -> Result<Vec<CommittedObservation>, KernelError> {
 	let mut ops = Vec::new();
+	let mut observations = Vec::new();
 	for (owner, effect) in effects {
+		if let Some(observation) = effect.observation {
+			observations.push((director_family(session.dom(), owner), observation));
+		}
 		ops.extend(crate::director::update_ops(owner, effect.updates));
 		if let Some(text) = effect.developer {
 			ops.push(Op::Ins {
@@ -3764,12 +3797,7 @@ fn commit_stream_effects(
 	}
 	if let Some((partial, owner)) = interrupt {
 		let assistant = assistant.ok_or(KernelError::MissingResponseStart)?;
-		let family = session
-			.dom()
-			.get(owner)
-			.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("family"))))
-			.and_then(Value::as_str)
-			.map_or_else(|| Str::new_static("stream-watch"), Str::new);
+		let family = director_family(session.dom(), owner);
 		ops.push(Op::Set {
 			h:     assistant,
 			prop:  PropKey::Custom(Str::new_static("interrupt")),
@@ -3783,15 +3811,43 @@ fn commit_stream_effects(
 			});
 		}
 	}
-	if ops.is_empty() {
-		return Ok(());
+	if !ops.is_empty() {
+		session.patch(Txn {
+			cause: session.head().ok_or(SessionError::NoActiveTurn)?,
+			label: Some(Str::new_static("director.stream-interrupt")),
+			ops,
+		})?;
 	}
-	session.patch(Txn {
-		cause: session.head().ok_or(SessionError::NoActiveTurn)?,
-		label: Some(Str::new_static("director.stream-interrupt")),
-		ops,
-	})?;
-	Ok(())
+	let session_id = crate::hooks::journal_name(session);
+	let sequence = session.dom().high_water();
+	Ok(observations
+		.into_iter()
+		.map(|(director, mut observation)| {
+			let payload = &mut observation.payload;
+			payload.insert("session_id".to_owned(), serde_json::Value::from(session_id.as_str()));
+			payload.insert("turn_id".to_owned(), serde_json::Value::from(turn.to_string()));
+			payload.insert("sequence".to_owned(), serde_json::Value::from(sequence));
+			payload
+				.entry("interrupted")
+				.or_insert(serde_json::Value::Bool(false));
+			CommittedObservation { director, observation }
+		})
+		.collect())
+}
+
+/// A stream observation whose effect is journaled, stamped and ready to
+/// publish.
+struct CommittedObservation {
+	director:    Str,
+	observation: crate::StreamObservation,
+}
+
+/// The `family` of the Director element `owner`, `stream-watch` when unset.
+fn director_family(dom: &omp_dom::Dom, owner: Handle) -> Str {
+	dom.get(owner)
+		.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("family"))))
+		.and_then(Value::as_str)
+		.map_or_else(|| Str::new_static("stream-watch"), Str::new)
 }
 
 /// Why the scheduling pause at a candidate yield ended.

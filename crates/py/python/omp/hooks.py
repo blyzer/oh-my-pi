@@ -337,7 +337,7 @@ _EVENT_NAMES = (
     "capability_budget", "model_changed", "credential_disabled", "compaction",
     "compaction_done", "context_reset", "thread_projection", "subagent_spawn", "worker_state",
     "job_registered", "job_settled", "extension_activate", "extension_load",
-    "extension_unload", "host_reconnect", "ttsr_triggered",
+    "extension_unload", "host_reconnect", "stream_rule_triggered",
     "retry_start", "retry_end", "fallback_applied", "fallback_succeeded",
     "mcp_notification", "provider_response", "session_renamed",
 )
@@ -379,7 +379,7 @@ _OBSERVATION_EVENTS = frozenset(
         "capability_budget", "model_changed", "credential_disabled",
         "compaction_done", "context_reset", "worker_state", "job_registered", "job_settled",
         "extension_activate", "extension_load", "extension_unload", "host_reconnect",
-        "ttsr_triggered", "retry_start", "retry_end",
+        "stream_rule_triggered", "retry_start", "retry_end",
         "fallback_applied", "fallback_succeeded", "mcp_notification",
         "provider_response", "session_renamed",
     }

@@ -1487,29 +1487,34 @@ Carries the immutable payload for the `host_reconnect` hook event.
 | `restart_cause` | `str` | required | Reason the host generation was replaced. |
 | `uptime` | `Duration` | required | Replacement host uptime. |
 
-### `omp.events.TtsrTriggeredEvent`
+### `omp.events.StreamRuleTriggeredEvent`
 
 ```python
-TtsrTriggeredEvent(
+StreamRuleTriggeredEvent(
     session_id: str,
     turn_id: str,
     sequence: int,
     rule: str,
     matched: str,
     interrupted: bool,
+    source: str,
+    call_id: str | None = None,
 )
 ```
 
-Carries the immutable payload for the `ttsr_triggered` hook event.
+Carries the immutable payload for the `stream_rule_triggered` hook event, published after the
+stream rule's redirect or note is journaled.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `session_id` | `str` | required | Stable session identifier. |
 | `turn_id` | `str` | required | Stable model-turn identifier. |
 | `sequence` | `int` | required | Monotonic sequence within the lifecycle stream. |
-| `rule` | `str` | required | Identifier of the triggered rule. |
-| `matched` | `str` | required | Text or pattern fragment that matched. |
-| `interrupted` | `bool` | required | Whether execution was interrupted. |
+| `rule` | `str` | required | Name of the stream rule that fired. |
+| `matched` | `str` | required | The rule condition that matched. |
+| `interrupted` | `bool` | required | Whether the response was redirected (`False`: recorded as a note). |
+| `source` | `str` | required | Stream that matched: `text`, `thinking`, or `tool`. |
+| `call_id` | `str | None` | `None` | Tool call that matched, for a `tool` source. |
 
 ### `omp.events.RetryLifecycleEvent`
 

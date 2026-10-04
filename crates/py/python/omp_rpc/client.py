@@ -51,6 +51,7 @@ from .protocol import (
     SessionStats,
     SteeringMode,
     StreamingBehavior,
+    StreamRuleTriggeredEvent,
     ThinkingLevel,
     ThinkingLevelCycleResult,
     TodoItem,
@@ -61,7 +62,6 @@ from .protocol import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
-    TtsrTriggeredEvent,
     TurnEndEvent,
     TurnStartEvent,
     UnknownNotification,
@@ -104,7 +104,7 @@ AutoRetryStartListener = Callable[[AutoRetryStartEvent], None]
 AutoRetryEndListener = Callable[[AutoRetryEndEvent], None]
 RetryFallbackAppliedListener = Callable[[RetryFallbackAppliedEvent], None]
 RetryFallbackSucceededListener = Callable[[RetryFallbackSucceededEvent], None]
-TtsrTriggeredListener = Callable[[TtsrTriggeredEvent], None]
+StreamRuleTriggeredListener = Callable[[StreamRuleTriggeredEvent], None]
 TodoReminderListener = Callable[[TodoReminderEvent], None]
 TodoAutoClearListener = Callable[[TodoAutoClearEvent], None]
 ProtocolErrorListener = Callable[["RpcProtocolError"], None]
@@ -796,8 +796,10 @@ class RpcClient:
     ) -> Callable[[], None]:
         return self._add_typed_event_listener("retry_fallback_succeeded", listener)
 
-    def on_ttsr_triggered(self, listener: TtsrTriggeredListener) -> Callable[[], None]:
-        return self._add_typed_event_listener("ttsr_triggered", listener)
+    def on_stream_rule_triggered(
+        self, listener: StreamRuleTriggeredListener
+    ) -> Callable[[], None]:
+        return self._add_typed_event_listener("stream_rule_triggered", listener)
 
     def on_todo_reminder(self, listener: TodoReminderListener) -> Callable[[], None]:
         return self._add_typed_event_listener("todo_reminder", listener)

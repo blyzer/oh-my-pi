@@ -402,32 +402,36 @@ not receipted. The decision text above already states each of these; the record 
 
 ## Status in omp
 
-**Status: Partially implemented (plan steps 1-4 done, step 5 open).** Verified 2026-10-04 against `omp2` at `083b38fe7d`. The
-generic `StreamWatch` hook and loop redirect are in `crates/agent`; the built-in Director,
-incremental DFA matcher, policy convars, discovery filtering, and driver installation are also
-present. Its matching and redirect behavior has package coverage in `omp-agent`.
+**Status: Partially implemented (plan steps 1-5 done; the test plan and two decision details are open, listed below).** Verified 2026-10-04
+against `omp2` at `083b38fe7d`, plus the step 5 changes recorded here. The generic `StreamWatch`
+hook and loop redirect are in `crates/agent`; the built-in Director, incremental DFA matcher,
+policy convars, discovery filtering, and driver installation are also present.
 
 Tool-specific authored-text projections use the `omp-tool` contract. Hashline `edit` projects
 inserted rows, replace projects replacement text, patch and apply-patch project added lines or
 created-file contents, sloppy projects rewrite candidates, and `write` projects its new content.
 Each segment carries its target path when the dialect identifies one, so path-scoped rules only
 match text intended for that file. Deletions, removed diff rows, and context rows are excluded.
-`ast_edit` remains outside these textual edit dialects. Step 5's `omp rules list|test|scan`
-CLI is implemented (see "Surfaces as built" below); the `ttsr_triggered` Python hook rename and
-emitter and the TUI/ACP/print surface work remain open.
-The matcher also still needs its planned property and integration coverage, and the remaining
-items in the test plan below are not yet proven end to end.
+`ast_edit` remains outside these textual edit dialects. Step 5 is implemented: the `omp rules`
+CLI and the hook rename, emitter, and host surfaces (see the two "Surfaces as built" sections
+below).
 
 Verification notes. The matcher, Director and policy types live in one file,
 `crates/agent/src/directors/stream_rules.rs` (not the `stream_rules/matcher.rs` split named in plan
 step 2); the six convars (`ai_stream_rules_*`) are in `crates/agent/src/vars.rs` and
 `AI_STREAM_REDIRECT_CAP` in `crates/ai`; driver installation is in
-`crates/driver/src/headless/kernel.rs`. Test coverage is narrower than 'package coverage' suggests: the
-only tests I found are the six unit tests inside `stream_rules.rs`. The files named in the test plan,
-`crates/agent/tests/stream_watch.rs` and `crates/agent/tests/directors/stream_rules.rs`, do not exist,
-and no test drives a redirect through the loop, replay or rewind. The `ttsr_triggered` hook name is
-registered in `crates/py/python/omp/{hooks,events}.py` but no Rust code emits it, and the orphan `Ttsr*`
-clap types remain in `crates/app/src/cli.rs` (deleted since; see "Surfaces as built").
+`crates/driver/src/headless/kernel.rs`. Coverage: unit tests in `stream_rules.rs` (matching, scope,
+path gates, typed compile warnings, the probe agreeing with the live watch);
+`crates/agent/tests/stream_watch.rs` drives a scripted watcher through the loop (redirect, the
+trailing developer item, the excluded assistant, the notice, the `stream_rule_triggered`
+observation after commit, the cap downgrading to `Note`, replay equality); `crates/driver`
+covers `omp rules` composition; P7 (`chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit`)
+renders a project rule's redirect on a real PTY. Still unproven: proptests over byte splits, the
+JSON-string decoder, the allocation-free Pass path, rewind across a redirect, `Up::Interrupt`
+during a redirect, the request-budget interaction, `Keep` projection, tool-culprit labels through
+the loop, and the P2/P5/P6 rows of the test plan. The Director also still compiles its rules into
+one `StreamRuleSet` without the pooled per-key caches §5 describes, and the notice and the hook
+event carry no matched excerpt (§4).
 
 ### Surfaces as built: `omp rules`
 
@@ -458,6 +462,30 @@ test (`Rule::is_stream_rule`) now asks the streaming matcher (`condition_compile
 `regex::Regex`, so a condition the DFA rejects (for example a Unicode `\b`) no longer drops a
 rule from the prompt while also never matching. The orphan `TtsrArgs`/`TtsrCommand`/`TtsrSourceArg`
 and `AgentsArgs`/`AgentsAction` clap types are deleted.
+
+### Surfaces as built: the hook, the emitter, and hosts
+
+- **Rename.** `HOOK_EVENT_TTSR_TRIGGERED` is `HOOK_EVENT_STREAM_RULE_TRIGGERED` (wire number 58),
+  `TtsrTriggeredEventV1` is `StreamRuleTriggeredEventV1{context, rule, matched, interrupted,
+  source, call_id}`, `omp.events.TtsrTriggeredEvent` is `StreamRuleTriggeredEvent` with event id
+  `stream_rule_triggered`, and `omp_rpc`'s `on_ttsr_triggered` is `on_stream_rule_triggered`. No
+  alias remains.
+- **Emitter.** `StreamEffect` gained a generic `observation: Option<StreamObservation>` (a hook
+  event id plus JSON fields). The loop publishes it through `LifecycleHooks::notify` only after the
+  effect's transaction is journaled, stamping `session_id`, `turn_id`, `sequence` (the DOM
+  high-water mark), and `interrupted` (whether the effect committed with a redirect, so a capped
+  interrupt reports `false`). The loop still knows no rule names. The stream-rules Director attaches
+  `{rule, matched, source, call_id}`, where `matched` is the condition that matched: the watcher
+  keeps no text buffer, so the matched excerpt is not reported (an excerpt recovered cold from the
+  journal stays open).
+- **Notice.** A redirect journals `<notice kind=warn name=stream-rule>` naming the rule and the
+  source (text, thinking, or the tool call), without the excerpt (same reason).
+- **Hosts.** `KernelEvent::StreamRedirected` now carries `{director, label, reason}` and a new
+  `KernelEvent::StreamObserved {director, event, payload}` mirrors each published observation.
+  The TUI renders `<notice name=stream-*>` as a card led by the themed `rule-extension` icon; print
+  JSON and RPC emit `stream_redirected` and `stream_rule_triggered` frames, print text mode writes
+  the redirect to stderr; ACP sends stream notices as `agent_thought_chunk` updates, live and on
+  replay. The settings group is "Stream Rules", and the convars carry their v1 `legacy.path`.
 
 ### Implementation plan (PR-sized)
 

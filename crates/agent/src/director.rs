@@ -25,13 +25,18 @@ const QUEUED: &str = "queued";
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Source category for one fragment observed during an inference response.
-#[derive(Clone, Copy)]
+///
+/// Its static name (`text`, `thinking`, `tool`) is the `source` that stream
+/// observations report.
+#[derive(Clone, Copy, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum StreamSource<'a> {
 	/// User-visible assistant text.
 	Text,
 	/// Assistant reasoning text.
 	Thinking,
 	/// Incremental JSON arguments for one tool call.
+	#[strum(serialize = "tool")]
 	ToolArgs {
 		/// Provider call identity.
 		call_id: &'a str,
@@ -64,6 +69,26 @@ pub struct StreamEffect {
 	pub notice_name: Option<Str>,
 	/// Diagnostics to attach to tool calls.
 	pub call_diags:  Vec<(omp_ai::ToolCallId, Str)>,
+	/// Lifecycle observation to publish once this effect is journaled.
+	pub observation: Option<StreamObservation>,
+}
+
+/// A revision-1 lifecycle observation published after its effect commits.
+///
+/// A stream observer asks the loop to publish it through
+/// [`crate::LifecycleHooks`] once the effect carrying it is journaled, so
+/// extensions never hear of a fact the journal lacks.
+///
+/// The loop stamps the generic facts into `payload` before publishing:
+/// `session_id`, `turn_id`, `sequence` (the DOM high-water mark after the
+/// commit), and `interrupted` (whether the effect committed with a
+/// redirect; a capped redirect commits as a note).
+#[derive(Clone, Debug)]
+pub struct StreamObservation {
+	/// Hook event published.
+	pub event:   omp_proto::toolhost::v1::HookEventId,
+	/// Event-specific JSON fields.
+	pub payload: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Request-scoped decision returned by a stream observer.

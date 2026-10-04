@@ -80,7 +80,15 @@ fn label(event: &KernelEvent) -> Option<Str> {
 			sf!("compaction {}", if *applied { "applied" } else { "abandoned" })
 		},
 		KernelEvent::JobsDelivered { ids } => sf!("jobs delivered: {}", ids.join(", ")),
-		KernelEvent::StreamRedirected { director } => sf!("stream redirected by {director}"),
+		KernelEvent::StreamRedirected { director, label, reason: Some(reason) } => {
+			sf!("{label} redirected the response ({director}): {reason}")
+		},
+		KernelEvent::StreamRedirected { director, label, reason: None } => {
+			sf!("{label} redirected the response ({director})")
+		},
+		KernelEvent::StreamObserved { director, event, .. } => {
+			sf!("stream observation from {director}: {}", event.as_str_name())
+		},
 		KernelEvent::ApprovalRequested(ticket) => sf!("approval requested: {}", ticket.ticket_id),
 		KernelEvent::WorkflowActionAnswered { name, is_error, .. } => {
 			sf!("workflow action {name}{}", if *is_error { " (error)" } else { "" })

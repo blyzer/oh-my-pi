@@ -92,6 +92,15 @@ impl AcpEventMapper {
 					Tag::Known(KnownTag::Assistant) => {
 						self.replay_assistant(*handle, node, &mut updates);
 					},
+					Tag::Known(KnownTag::Notice) => {
+						if let Some(text) = stream_notice(node) {
+							updates.push(message_chunk(
+								"agent_thought_chunk",
+								text,
+								&node_id(node, *handle),
+							));
+						}
+					},
 					Tag::Custom(_) if is_tool_node(&self.dom, *handle, node) => {
 						if let Some(tool) = project_tool(&self.dom, *handle, &self.cwd) {
 							updates.push(tool_start(&tool));
@@ -336,6 +345,15 @@ impl AcpEventMapper {
 			let Some(node) = self.dom.get(handle) else {
 				continue;
 			};
+			if let Some(text) = stream_notice(node)
+				&& self
+					.dom
+					.parent(handle)
+					.and_then(|parent| self.dom.get(parent))
+					.is_some_and(|parent| parent.tag == Tag::Known(KnownTag::Turn))
+			{
+				updates.push(message_chunk("agent_thought_chunk", text, &node_id(node, handle)));
+			}
 			if matches!(&node.tag, Tag::Custom(tag) if tag.as_str() == "artifact")
 				&& let Some(assistant) = self.dom.parent(handle)
 				&& let Some(assistant_node) = self.dom.get(assistant)
@@ -376,6 +394,21 @@ fn plan_update(dom: &Dom) -> JsonValue {
 		})
 		.collect::<Vec<_>>();
 	json!({"sessionUpdate": "plan", "entries": entries})
+}
+
+/// The text of a stream observer's host-visible notice (`<notice
+/// name=stream-rule|stream-redirect-cap|stream-watch>`). ACP has no notice
+/// update, so a redirect reaches the editor as a thought chunk rather than
+/// being silently dropped.
+fn stream_notice(node: &Node) -> Option<&str> {
+	if node.tag != Tag::Known(KnownTag::Notice) {
+		return None;
+	}
+	node
+		.prop(&PropKey::Custom(Str::new_static("name")))
+		.and_then(Value::as_str)
+		.filter(|name| name.starts_with("stream-"))?;
+	node.content.as_deref().filter(|text| !text.is_empty())
 }
 
 fn message_chunk(kind: &'static str, text: &str, message_id: &Str) -> JsonValue {
@@ -844,5 +877,52 @@ mod tests {
 			"terminal/* is unused, so no tool card may embed a client terminal"
 		);
 		assert!(content.iter().any(|item| item["content"]["text"] == "ok"));
+	}
+
+	#[test]
+	fn stream_rule_notices_reach_acp_live_and_on_replay() {
+		let root = tempfile::tempdir().expect("tempdir");
+		let mut session = Session::create(root.path().join("acp.oms"), ComponentRegistry::standard())
+			.expect("session");
+		let (snapshot, events) = session.subscribe();
+		let mut mapper =
+			AcpEventMapper::new(&snapshot, root.path().to_path_buf(), session.blobs().clone());
+		session.begin_turn().expect("turn");
+		let turn = *session
+			.dom()
+			.children(session.dom().body())
+			.last()
+			.expect("turn");
+		let notice = |name: &'static str, text: &'static str| Op::Ins {
+			parent: turn,
+			after:  None,
+			node:   NodeSpec::new(KnownTag::Notice)
+				.with_prop(PropId::Kind, Value::Str(Str::new_static("warn")))
+				.with_prop(PropKey::Custom(Str::new_static("name")), Value::Str(Str::new_static(name)))
+				.with_content(Str::new_static(text)),
+		};
+		session
+			.patch(Txn {
+				cause: session.head().expect("head"),
+				label: Some(Str::new_static("director.stream-interrupt")),
+				ops:   vec![
+					notice("stream-rule", "Stream rule no-unwrap matched the text output."),
+					notice("compaction", "unrelated warning"),
+				],
+			})
+			.expect("notice");
+		let live = events
+			.try_iter()
+			.flat_map(|event| mapper.map_event(&event).expect("map"))
+			.collect::<Vec<_>>();
+		let thoughts = |updates: &[JsonValue]| {
+			updates
+				.iter()
+				.filter(|update| update["sessionUpdate"] == "agent_thought_chunk")
+				.map(|update| update["content"]["text"].clone())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(thoughts(&live), [json!("Stream rule no-unwrap matched the text output.")]);
+		assert_eq!(thoughts(&mapper.replay_updates().expect("replay")), thoughts(&live));
 	}
 }

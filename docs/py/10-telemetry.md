@@ -43,7 +43,8 @@ can hang the token path, which is Lesson #2 with extra steps.
 
 Mid-stream interception is a real feature, and it is deliberately **not** here. pi's TTSR engine
 (`.plan/feature-map/observability.md:150`) matches partial model output and time-travels the request;
-that stays a Rust-side facility on the inference path. If you want to react to output as it forms,
+in omp that is the Rust-side stream-rules Director (ADR 0038), and Python hears of a firing only
+afterwards, through the `stream_rule_triggered` hook event. If you want to react to output as it forms,
 the honest answer is that you cannot from Python, and this document says so rather than shipping a
 hook that quietly costs a millisecond a token.
 
@@ -2526,8 +2527,8 @@ Conflicts, stated rather than glossed:
 
 - `observability.md:150-167` (TTSR) is a **token-stream** facility: it matches partial model output
   and interrupts generation. It must stay in Rust on the inference path and MUST NOT be reachable as
-  a telemetry sink. An extension that wants to react to forming output gets a `ttsr_triggered`-shaped
-  event *after* the fact, not a callback during. This is a real capability reduction relative to pi's
+  a telemetry sink. An extension that wants to react to forming output gets the
+  `stream_rule_triggered` event *after* the fact, not a callback during. This is a real capability reduction relative to pi's
   extension surface, and it is the correct one.
 - `observability.md:64-74` (V8/JSC CPU profiler, heap snapshots, remote JSC inspector) has no
   analogue; `ROADMAP.md:1598-1600` already marks all three `⚠ redesign`. `omp.telemetry.span` covers

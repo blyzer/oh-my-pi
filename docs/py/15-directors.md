@@ -78,11 +78,15 @@ second MUST be a Director; anything that needs only the first MUST NOT be
 ([`05-hooks.md`](05-hooks.md)).
 
 The agent loop is a generic hook surface. It does not carry per-feature outcome tracking. Rules
-that watch model output while it streams (the TTSR family) are intended to be built as a Director;
+that watch model output while it streams (stream rules, v1's TTSR) are a Director:
 `crates/driver/src/discovery/rules.rs` parses their `condition` and `scope` frontmatter, and the
-built-in `stream-rules` Director watches the response through the generic stream hook. The
-extension-facing `ttsr_triggered` event (`toolhost.proto`, `omp.events.TtsrTriggeredEvent`) remains
-in the vocabulary, but no emitter for it has been implemented under `crates/agent` yet.
+built-in `stream-rules` Director (`crates/agent/src/directors/stream_rules.rs`) watches the
+response through the generic Rust-only stream hook (ADR 0038). Python never sees the stream. It
+gets the after-the-fact `stream_rule_triggered` event (`toolhost.proto`
+`HOOK_EVENT_STREAM_RULE_TRIGGERED`, `omp.events.StreamRuleTriggeredEvent`): the Director attaches
+the observation to its stream effect, and the loop publishes it through `LifecycleHooks` only after
+the redirect transaction (or the note) is journaled. It is observe-only and never blocks the
+resample. `omp rules list|test|scan` inspects the same rules through the same matcher.
 
 ## `@omp.director`
 

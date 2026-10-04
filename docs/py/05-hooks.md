@@ -1937,6 +1937,14 @@ deterministic `(layer, publisher, extension_id)` order, like every domain-return
 | `extension_load` | `ExtensionLoadEvent` | — | OBSERVE | SESSION | DEFER | yes | — |
 | `extension_unload` | `ExtensionUnloadEvent` | — | OBSERVE | SESSION | DEFER | no | — |
 | `host_reconnect` | `HostReconnectEvent` | — | OBSERVE | SESSION | DEFER | yes | — |
+| `stream_rule_triggered` | `StreamRuleTriggeredEvent` | — | OBSERVE | TURN | DEFER | no | — |
+
+`stream_rule_triggered` reports one stream rule firing (ADR 0038). The stream-rules Director
+matches in Rust while the response streams; the loop publishes this observation only after the
+redirect transaction or the note is journaled, so an extension never hears of a fact the journal
+lacks. `interrupted` says whether the response was redirected (a redirect past the per-turn cap is
+recorded as a note), `matched` is the rule condition that matched, `source` is `text`, `thinking`,
+or `tool`, and `call_id` names the call for a tool source. There is no per-token callback.
 
 `subagent_spawn` is the policy gate before a child session is admitted. Its payload carries the
 decoded `omp.agents.SubagentSpec` plus the resolved depth and remaining concurrency
