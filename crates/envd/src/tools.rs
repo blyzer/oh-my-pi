@@ -4870,6 +4870,11 @@ pub(crate) fn production_registry<
 	eval_host
 		.bind_prelude(prelude, Arc::new(prelude_invoker))
 		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
+	// Nested `tool.<name>()` calls obey explicit per-tool `deny` overrides,
+	// frozen at composition like the `dyn` builtin's nested admission.
+	eval_host
+		.bind_approval_overrides(tool_settings.approval.clone())
+		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
 	Ok((
 		registry,
 		eval_host,

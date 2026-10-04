@@ -19,7 +19,7 @@ use omp_core::{ExposeSecret as _, IntoStr, SecretString, Str, Ulid, sf};
 use omp_proto::toolhost::v1::PreludeParamKind;
 use omp_tool::{
 	CapsBase, Diag, DiagEnvelope, ErasedEv, ErasedOutcome, IncomingParams, ModelClass, Part,
-	PromptCaps, Registry, ToolIdentity, ToolRoute,
+	PromptCaps, Registry, RosterDenial, ToolIdentity, ToolRestrictions, ToolRoute,
 };
 use omp_tools::eval::{RuntimeSnapshot, idle_timeout::TimeoutHandle, kernel::NamespaceInstaller};
 use parking_lot::Mutex;
@@ -35,6 +35,7 @@ use tokio::{runtime::Handle, time};
 use tokio_util::sync::CancellationToken;
 
 use super::PYTHON_PRELUDE;
+use crate::admission::ApprovalPolicy;
 
 const COMPLETION: &str = "__completion__";
 const AGENT: &str = "__agent__";
@@ -401,6 +402,21 @@ pub enum BridgeHostError {
 	/// Canonical policy denial produced before a child session exists.
 	#[error("child session spawn was denied by policy")]
 	PolicyDenied(Arc<omp_tool::PolicyDenied>),
+	/// The resolved per-tool approval policy denies this nested native call.
+	/// Eval-level approval is the unit of prompts, so an explicit `deny`
+	/// refuses without prompting.
+	#[error(
+		"tool `{tool}` is denied by approval policy (tools.approval.{tool}); no action was taken"
+	)]
+	ApprovalDenied {
+		/// Refused native tool.
+		tool: Str,
+	},
+	/// The calling invocation's roster restrictions (`sv_tools`, a mode
+	/// Director's bind, a `turn_start` hook, or plan mode's plan-file scope)
+	/// refuse this nested call.
+	#[error("nested tool call refused: {0}")]
+	RosterRestricted(RosterDenial),
 }
 
 impl BridgeHostError {
@@ -910,10 +926,11 @@ pub struct EvalSessionConfig {
 impl EvalSessionConfig {
 	fn runtime_snapshot(&self) -> RuntimeSnapshot {
 		RuntimeSnapshot {
-			cwd:         Some(self.cwd.clone()),
-			managed_env: [(sf!("OMP_EVAL_LOCAL_ROOTS"), self.local_roots_json.clone())]
+			cwd:          Some(self.cwd.clone()),
+			managed_env:  [(sf!("OMP_EVAL_LOCAL_ROOTS"), self.local_roots_json.clone())]
 				.into_iter()
 				.collect(),
+			restrictions: None,
 		}
 	}
 }
@@ -964,6 +981,9 @@ struct RuntimeLease {
 /// that owner until the eval session is released.
 pub struct SessionBridgeHost {
 	registry:          OnceLock<Arc<Registry>>,
+	/// Explicit per-tool approval overrides frozen at composition; a nested
+	/// call to a tool resolved to `deny` is refused.
+	approval:          OnceLock<Arc<BTreeMap<Str, ApprovalPolicy>>>,
 	prelude:           OnceLock<(Arc<PreludeTable>, Arc<dyn PreludeInvoker>)>,
 	parents:           Arc<Mutex<BTreeMap<Str, ParentBinding>>>,
 	runtime_snapshots: Mutex<BTreeMap<(Str, Bytes), RuntimeLease>>,
@@ -973,6 +993,7 @@ impl SessionBridgeHost {
 	pub(crate) fn new() -> Self {
 		Self {
 			registry:          OnceLock::new(),
+			approval:          OnceLock::new(),
 			prelude:           OnceLock::new(),
 			parents:           Arc::new(Mutex::new(BTreeMap::new())),
 			runtime_snapshots: Mutex::new(BTreeMap::new()),
@@ -984,6 +1005,64 @@ impl SessionBridgeHost {
 			.registry
 			.set(registry)
 			.map_err(|_| BridgeHostError::message("eval bridge registry is already bound"))
+	}
+
+	/// Binds the explicit per-tool approval overrides (`sv_tools_approval`)
+	/// nested native calls obey. Only `deny` is enforced here: nested calls
+	/// never prompt (the eval invocation's own admission is the prompt).
+	pub(crate) fn bind_approval_overrides(
+		&self,
+		overrides: BTreeMap<Str, ApprovalPolicy>,
+	) -> Result<(), BridgeHostError> {
+		self
+			.approval
+			.set(Arc::new(overrides))
+			.map_err(|_| BridgeHostError::message("eval bridge approval policy is already bound"))
+	}
+
+	/// Admits one nested native tool call: an explicit per-tool `deny`
+	/// refuses it, then the calling invocation's roster restrictions apply.
+	/// Never prompts.
+	fn admit_nested(
+		&self,
+		name: &str,
+		args: &Value,
+		restrictions: Option<&ToolRestrictions>,
+	) -> Result<(), BridgeHostError> {
+		if self
+			.approval
+			.get()
+			.and_then(|overrides| overrides.get(name))
+			.is_some_and(|policy| *policy == ApprovalPolicy::Deny)
+		{
+			tracing::info!(tool = name, "eval bridge refused a nested call denied by approval policy");
+			return Err(BridgeHostError::ApprovalDenied { tool: Str::new(name) });
+		}
+		if let Some(restrictions) = restrictions
+			&& let Err(denial) = restrictions.check_call(name, args)
+		{
+			tracing::info!(tool = name, rule = %denial.rule(), "eval bridge refused a restricted nested call");
+			return Err(BridgeHostError::RosterRestricted(denial));
+		}
+		Ok(())
+	}
+
+	/// Runs one admitted nested call against the bound native registry.
+	async fn call_native(
+		&self,
+		name: &str,
+		args: Value,
+		restrictions: Option<&ToolRestrictions>,
+		progress: &dyn BridgeProgressSink,
+	) -> Result<Value, BridgeHostError> {
+		self.admit_nested(name, &args, restrictions)?;
+		let registry = self
+			.registry
+			.get()
+			.ok_or_else(|| BridgeHostError::message("eval bridge registry is not bound"))?;
+		RegistryBridgeHost::new(Arc::clone(registry))
+			.call(name, args, progress)
+			.await
 	}
 
 	pub(crate) fn bind_prelude(
@@ -1148,12 +1227,16 @@ impl SessionBridgeHost {
 			.map_or_else(Vec::new, |(table, _)| table.helpers().map(PreludeStubWire::from).collect())
 	}
 
+	/// Dispatches one authenticated bridge call for `owner`'s eval session.
+	/// `restrictions` are the roster restrictions of the invocation that
+	/// started the calling cell; nested native calls obey them.
 	pub(super) async fn call_for(
 		&self,
 		owner: &str,
 		session: &Bytes,
 		name: &str,
 		args: Value,
+		restrictions: Option<&ToolRestrictions>,
 		progress: &dyn BridgeProgressSink,
 	) -> Result<Value, BridgeHostError> {
 		if let Some(helper_name) = name.strip_prefix(PRELUDE_PREFIX) {
@@ -1179,13 +1262,7 @@ impl SessionBridgeHost {
 					"eval bridge parent session is not bound for this owner",
 				));
 			}
-			let registry = self
-				.registry
-				.get()
-				.ok_or_else(|| BridgeHostError::message("eval bridge registry is not bound"))?;
-			return RegistryBridgeHost::new(Arc::clone(registry))
-				.call(name, args, progress)
-				.await;
+			return self.call_native(name, args, restrictions, progress).await;
 		};
 		if !self
 			.parents
@@ -1195,7 +1272,9 @@ impl SessionBridgeHost {
 		{
 			return Err(BridgeHostError::message("eval bridge parent lease was revoked"));
 		}
-		self.call_with_parent(parent, name, args, progress).await
+		self
+			.call_with_parent(parent, name, args, restrictions, progress)
+			.await
 	}
 
 	async fn call_with_parent(
@@ -1203,6 +1282,7 @@ impl SessionBridgeHost {
 		parent: Arc<dyn ParentSessionHost>,
 		name: &str,
 		args: Value,
+		restrictions: Option<&ToolRestrictions>,
 		progress: &dyn BridgeProgressSink,
 	) -> Result<Value, BridgeHostError> {
 		match name {
@@ -1211,15 +1291,7 @@ impl SessionBridgeHost {
 			WORKPOOL => parent.workpool(args, progress).await,
 			CONCURRENCY => parent.concurrency(args).await,
 			BUDGET => parent.budget(args).await,
-			_ => {
-				let registry = self
-					.registry
-					.get()
-					.ok_or_else(|| BridgeHostError::message("eval bridge registry is not bound"))?;
-				RegistryBridgeHost::new(Arc::clone(registry))
-					.call(name, args, progress)
-					.await
-			},
+			_ => self.call_native(name, args, restrictions, progress).await,
 		}
 	}
 }
@@ -1233,7 +1305,9 @@ impl BridgeHost for SessionBridgeHost {
 		progress: &dyn BridgeProgressSink,
 	) -> Result<Value, BridgeHostError> {
 		let (_, _, parent) = self.parent_for("__unscoped_eval_bridge__")?;
-		self.call_with_parent(parent, name, args, progress).await
+		self
+			.call_with_parent(parent, name, args, None, progress)
+			.await
 	}
 }
 
@@ -1761,6 +1835,7 @@ mod tests {
 					&Bytes::from_static(b"unbound-session"),
 					"__prelude__:merge_patches",
 					args.clone(),
+					None,
 					&NoopBridgeProgress,
 				)
 				.await
@@ -1999,7 +2074,14 @@ mod tests {
 		drop(snapshots);
 		assert_eq!(
 			host
-				.call_for(child_owner, &child_eval, BUDGET, json!({"op":"spent"}), &NoopBridgeProgress,)
+				.call_for(
+					child_owner,
+					&child_eval,
+					BUDGET,
+					json!({"op":"spent"}),
+					None,
+					&NoopBridgeProgress,
+				)
 				.await
 				.expect("composite owner routes to bound parent"),
 			json!({"operation":"budget","args":{"op":"spent"}})
@@ -2024,7 +2106,7 @@ mod tests {
 		drop(binding);
 		assert_eq!(parent.releases.load(Ordering::Relaxed), 1);
 		assert!(matches!(
-			host.call_for("owner", &session, BUDGET, json!({}), &NoopBridgeProgress).await,
+			host.call_for("owner", &session, BUDGET, json!({}), None, &NoopBridgeProgress).await,
 			Err(BridgeHostError::Message(message)) if message == "eval bridge parent lease was revoked"
 		));
 	}
@@ -2064,6 +2146,7 @@ mod tests {
 						&session,
 						name,
 						json!({ "marker": operation }),
+						None,
 						&NoopBridgeProgress,
 					)
 					.await
@@ -2135,6 +2218,149 @@ mod tests {
 			json!({"op":"tool","name":"update_probe","update":{"step":1}}),
 			json!({"op":"tool","name":"update_probe","update":{"step":2}}),
 		]);
+	}
+
+	fn restricted_host() -> SessionBridgeHost {
+		let mut registry = Registry::new();
+		for name in ["read", "edit", "write", "bash"] {
+			registry
+				.register(StreamingProbe::new(name, false), Presentation::Slot, test_claims())
+				.expect("register nested probe");
+		}
+		let host = SessionBridgeHost::new();
+		host
+			.bind_registry(Arc::new(registry))
+			.expect("bind registry");
+		host
+			.bind_approval_overrides(BTreeMap::from([
+				(sf!("bash"), ApprovalPolicy::Deny),
+				(sf!("read"), ApprovalPolicy::Prompt),
+			]))
+			.expect("bind approval overrides");
+		host
+	}
+
+	fn plan_restrictions() -> ToolRestrictions {
+		let names = |names: &[&'static str]| {
+			names
+				.iter()
+				.copied()
+				.map(Str::new_static)
+				.collect::<Arc<[Str]>>()
+		};
+		let mut restrictions = ToolRestrictions::default()
+			.with_allowlist(names(&["read", "write", "bash"]), Some(sf!("plan")))
+			.with_plan_file(sf!("local://PLAN.md"));
+		restrictions.set_available(names(&["read", "write", "bash"]));
+		restrictions
+	}
+
+	#[tokio::test]
+	async fn nested_calls_obey_explicit_deny_without_prompting() {
+		let host = restricted_host();
+		let session = Bytes::from_static(b"cell-session");
+		let error = host
+			.call_for(
+				"bare-owner",
+				&session,
+				"bash",
+				json!({"command": "ls"}),
+				None,
+				&NoopBridgeProgress,
+			)
+			.await
+			.expect_err("explicit deny refuses the nested call");
+		assert!(matches!(&error, BridgeHostError::ApprovalDenied { tool } if tool == "bash"));
+		assert_eq!(
+			error.to_string(),
+			"tool `bash` is denied by approval policy (tools.approval.bash); no action was taken"
+		);
+		assert_eq!(
+			host
+				.call_for(
+					"bare-owner",
+					&session,
+					"read",
+					json!({"path": "a"}),
+					None,
+					&NoopBridgeProgress
+				)
+				.await
+				.expect("a prompt policy never prompts a nested call"),
+			json!({"result": "done", "diags": [{
+				"severity": "info",
+				"kind": "pagination",
+				"text": "more results",
+				"continuation": "skip=2",
+				"omitted": {"count": 3, "unit": "items"},
+			}]}),
+		);
+	}
+
+	#[tokio::test]
+	async fn nested_calls_obey_the_invocation_roster_and_plan_file_scope() {
+		let host = restricted_host();
+		let restrictions = plan_restrictions();
+		let session = Bytes::from_static(b"cell-session");
+		let call = |name: &'static str, args: Value| {
+			host.call_for("bare-owner", &session, name, args, Some(&restrictions), &NoopBridgeProgress)
+		};
+		let error = call("edit", json!({"path": "src/lib.rs", "input": "x"}))
+			.await
+			.expect_err("edit is outside the plan roster");
+		assert!(
+			matches!(&error, BridgeHostError::RosterRestricted(denial) if denial.tool() == "edit")
+		);
+		assert_eq!(
+			error.to_string(),
+			"nested tool call refused: `edit` is not available while plan mode is active. No 			 \
+			 action was taken. Available now: read, write, bash."
+		);
+		for path in ["src/main.rs", "local://x/../../PLAN.md", "/tmp/PLAN.md", "local://../PLAN.md"] {
+			let error = call("write", json!({"path": path, "content": "x"}))
+				.await
+				.expect_err(path);
+			assert_eq!(
+				error.to_string(),
+				"nested tool call refused: `write` is limited to the plan file local://PLAN.md while \
+				 plan mode is active; no action was taken.",
+			);
+		}
+		call("write", json!({"path": "local://PLAN.md", "content": "plan"}))
+			.await
+			.expect("the plan file stays writable");
+		call("read", json!({"path": "a"}))
+			.await
+			.expect("allowed tools are unaffected");
+		let error = call("bash", json!({"command": "ls"}))
+			.await
+			.expect_err("explicit deny wins over an allowing roster");
+		assert!(matches!(error, BridgeHostError::ApprovalDenied { .. }));
+	}
+
+	#[tokio::test]
+	async fn parent_bound_cells_apply_the_roster_to_registry_tools_only() {
+		let host = restricted_host();
+		let parent =
+			Arc::new(RecordingParent { calls: AtomicUsize::new(0), releases: AtomicUsize::new(0) });
+		let _binding = host
+			.bind_sdk_parent(sf!("owner"), parent.clone())
+			.expect("bind parent");
+		let session = Bytes::from_static(b"bound-session");
+		host
+			.freeze_runtime("owner", &session)
+			.expect("freeze runtime");
+		let restrictions = plan_restrictions();
+		let error = host
+			.call_for("owner", &session, "edit", json!({}), Some(&restrictions), &NoopBridgeProgress)
+			.await
+			.expect_err("roster applies through the parent route");
+		assert!(matches!(error, BridgeHostError::RosterRestricted(_)));
+		host
+			.call_for("owner", &session, BUDGET, json!({}), Some(&restrictions), &NoopBridgeProgress)
+			.await
+			.expect("privileged parent helpers are not roster tool names");
+		assert_eq!(parent.calls.load(Ordering::Relaxed), 1);
 	}
 
 	#[tokio::test]

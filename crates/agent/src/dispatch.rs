@@ -31,9 +31,9 @@ use omp_tool::{
 	Abort, ArtifactLifetime, BlobRef as ToolBlobRef, CallOutcome, CallOutcomeDetails, CapsBase,
 	Diag, DiagEnvelope, DiagKind, Effects, ErasedEv, ErasedOutcome, ExpectedArtifact,
 	IncomingParams, Interrupt, InvocationFeed, JobKind, JobMetadata, JobOwner, JobRef, ModelClass,
-	OutputProjection, OutputRequest, Part, ProjectionSpan, PromptCaps, Registry, RegistryError, Rev,
-	Severity, ToolIdentity, ToolRoute, ToolSpec, Unit as ToolUnit, VisibilityReceipt,
-	VisibleSourceLine,
+	OutputProjection, OutputRequest, Part, PolicyDenied, ProjectionSpan, PromptCaps, Registry,
+	RegistryError, Rev, RosterDenial, Severity, ToolIdentity, ToolRestrictions, ToolRoute, ToolSpec,
+	Unit as ToolUnit, VisibilityReceipt, VisibleSourceLine,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -234,6 +234,9 @@ pub struct ExternalDispatchRequest {
 	/// Turn/session cancellation the executor must honor (ADR 0011): once
 	/// cancelled, the invocation is interrupted and settles aborted.
 	pub cancellation:   CancellationToken,
+	/// Roster restrictions of the request that named the call, forwarded so
+	/// a tool hosting nested calls applies them; `None` when unrestricted.
+	pub restrictions:   Option<Arc<ToolRestrictions>>,
 }
 
 /// One state mutation produced by an externally routed tool executor.
@@ -1123,6 +1126,8 @@ pub struct Dispatcher {
 	jobs:          Arc<JobBoard>,
 	authority:     Option<Arc<dyn SessionAuthority>>,
 	admission:     Option<Arc<dyn ToolAdmission>>,
+	/// Roster restrictions of the request in flight (`None`: unrestricted).
+	restrictions:  Option<Arc<ToolRestrictions>>,
 }
 
 /// Where a prepared call executes.
@@ -1188,6 +1193,8 @@ pub struct PreparedCall {
 	approval_timeout: Option<(Instant, crate::ApprovalDecision)>,
 	/// Call-specific stop label supplied by a scoped abort.
 	abort_reason:     Option<Str>,
+	/// Roster restrictions of the request that named the call.
+	restrictions:     Option<Arc<ToolRestrictions>>,
 }
 
 impl PreparedCall {
@@ -1292,6 +1299,7 @@ impl Dispatcher {
 			jobs,
 			authority: None,
 			admission: None,
+			restrictions: None,
 		}
 	}
 
@@ -1351,6 +1359,61 @@ impl Dispatcher {
 			.session_tools
 			.get(name)
 			.is_some_and(|tool| !tool.advertised())
+	}
+
+	/// Installs the roster restrictions of the request about to stream. Every
+	/// call prepared afterwards is checked against, and carries, this
+	/// snapshot; `None` (or an unrestricted snapshot) restricts nothing.
+	pub fn set_restrictions(&mut self, restrictions: Option<Arc<ToolRestrictions>>) {
+		self.restrictions = restrictions.filter(|restrictions| !restrictions.is_unrestricted());
+	}
+
+	/// Roster restrictions of the request in flight.
+	#[must_use]
+	pub const fn restrictions(&self) -> Option<&Arc<ToolRestrictions>> {
+		self.restrictions.as_ref()
+	}
+
+	/// Checks a call the model named against the request's roster by name
+	/// alone, before anything is prepared. Allocation-free when allowed.
+	pub fn check_roster(&self, name: &str) -> Result<(), RosterDenial> {
+		self
+			.restrictions
+			.as_deref()
+			.map_or(Ok(()), |restrictions| restrictions.check_name(name))
+	}
+
+	/// Whether the request's roster inspects `name`'s committed arguments
+	/// (plan mode's plan-file scope). Such a call opens no execution unit
+	/// until its arguments pass.
+	#[must_use]
+	pub fn roster_scopes_arguments(&self, name: &str) -> bool {
+		self
+			.restrictions
+			.as_deref()
+			.is_some_and(|restrictions| restrictions.scopes_arguments(name))
+	}
+
+	/// Checks a call's committed arguments against the request's roster
+	/// (plan mode confines `write` to the plan file).
+	pub fn check_roster_arguments(
+		&self,
+		name: &str,
+		args: &serde_json::Value,
+	) -> Result<(), RosterDenial> {
+		self
+			.restrictions
+			.as_deref()
+			.map_or(Ok(()), |restrictions| restrictions.check_arguments(name, args))
+	}
+
+	/// [`Self::check_roster`] and [`Self::check_roster_arguments`] over raw
+	/// committed arguments, parsed only when they are in scope.
+	pub fn check_roster_raw(&self, name: &str, args: &RawValue) -> Result<(), RosterDenial> {
+		self
+			.restrictions
+			.as_deref()
+			.map_or(Ok(()), |restrictions| restrictions.check_raw(name, args))
 	}
 
 	/// Borrows the runtime registry.
@@ -1418,12 +1481,14 @@ impl Dispatcher {
 				approval_specs: Vec::new(),
 				approval_timeout: None,
 				abort_reason: None,
+				restrictions: self.restrictions.clone(),
 			});
 		}
 		let route = self.committer.registry.route(name.as_str())?;
 		let (unit, task) = match route {
 			ToolRoute::Native => {
 				let (feed, params) = IncomingParams::channel_for(None, Some(call_id.clone()));
+				let params = params.with_restrictions(self.restrictions.clone());
 				let registry = Arc::clone(&self.committer.registry);
 				let task = tokio::spawn(async move {
 					let mut stream = registry.invoke(name.as_str(), params)?;
@@ -1467,7 +1532,67 @@ impl Dispatcher {
 			approval_specs: Vec::new(),
 			approval_timeout: None,
 			abort_reason: None,
+			restrictions: self.restrictions.clone(),
 		})
+	}
+
+	/// Opens an inert placeholder for a call the roster refused: no execution
+	/// unit, task, or argument feed exists, so nothing can preview or act. It
+	/// settles only through [`Self::deny_prepared`].
+	#[must_use]
+	pub fn prepare_refused(
+		&self,
+		identity: ToolIdentity,
+		call_id: Str,
+		call: EntryId,
+		cancellation: ToolCancellation,
+	) -> PreparedCall {
+		let interrupt = cancellation.interrupt_token();
+		let (_, events) = flume::unbounded();
+		PreparedCall {
+			identity,
+			call_id,
+			call,
+			cancellation,
+			interrupt,
+			interrupted: None,
+			unit: Unit::Detached { feed: None },
+			stream: events.clone().into_stream(),
+			events,
+			task: None,
+			args: None,
+			options: DispatchOptions::default(),
+			output: None,
+			phase: Phase::Pending,
+			started: None,
+			grace_until: None,
+			closed: true,
+			report: None,
+			ticket: None,
+			approval_specs: Vec::new(),
+			approval_timeout: None,
+			abort_reason: None,
+			restrictions: None,
+		}
+	}
+
+	/// Settles a prepared call the roster refused with its durable
+	/// `tool.roster.restricted` policy denial, journaled like any verdict.
+	/// A speculative unit, if one was opened, is aborted before it can act.
+	pub fn deny_prepared(
+		&self,
+		session: &mut Session,
+		mut call: PreparedCall,
+		denial: &RosterDenial,
+	) -> Result<DispatchReport, DispatchError> {
+		if let Some(task) = call.task.take() {
+			task.abort();
+		}
+		let (abort, policy) = denial.verdict(call.call_id.clone());
+		let mut output = std::mem::take(call.output(&self.committer.policy));
+		self
+			.committer
+			.commit_aborted(session, &call, abort, Some(policy), &mut output)
 	}
 
 	/// Drives one authorized call to exactly one journaled terminal.
@@ -1989,6 +2114,7 @@ impl Dispatcher {
 						blocking_limit: self.committer.policy.blocking_limit,
 						output_request: call.options.output_request(),
 						cancellation: call.interrupt.clone(),
+						restrictions: call.restrictions.clone(),
 					};
 					let event_tx = event_tx.take().expect("external unit starts once");
 					call.task = Some(tokio::spawn(async move {
@@ -2305,6 +2431,7 @@ impl crate::jobs::DetachedCall {
 			approval_specs:   Vec::new(),
 			approval_timeout: None,
 			abort_reason:     None,
+			restrictions:     None,
 		};
 		while let Ok(event) = self.events.try_recv() {
 			// A detached settlement lands from the job board's synchronous
@@ -2847,13 +2974,30 @@ impl Committer {
 		abort: Abort,
 		output: &mut OutputStream,
 	) -> Result<DispatchReport, DispatchError> {
+		self.commit_aborted(session, call, abort, None, output)
+	}
+
+	/// Journals a harness-owned abort, or with `policy` a structured policy
+	/// denial ([`CallOutcome::policy_denied`]). The model sees the abort's
+	/// rendering; the journal keeps the typed evidence.
+	pub(crate) fn commit_aborted(
+		&self,
+		session: &mut Session,
+		call: &PreparedCall,
+		abort: Abort,
+		policy: Option<PolicyDenied>,
+		output: &mut OutputStream,
+	) -> Result<DispatchReport, DispatchError> {
 		// An abort is harness-owned: its projection never depends on the tool
 		// or its route, so external units settle exactly like native ones.
 		let parts = vec![Part::Text { text: abort.render() }];
-		let outcome = serde_json::value::to_raw_value(&CallOutcome::<
-			serde_json::Value,
-			serde_json::Value,
-		>::aborted(abort))?;
+		let outcome = match policy {
+			Some(policy) => {
+				CallOutcome::<serde_json::Value, serde_json::Value>::policy_denied(abort, policy)
+			},
+			None => CallOutcome::aborted(abort),
+		};
+		let outcome = serde_json::value::to_raw_value(&outcome)?;
 		self.finish_external(session, call, outcome, parts, true, output)
 	}
 

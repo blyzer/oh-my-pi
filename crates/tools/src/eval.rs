@@ -642,9 +642,14 @@ pub struct Session {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeSnapshot {
 	/// Scoped working directory for this cell.
-	pub cwd:         Option<PathBuf>,
+	pub cwd:          Option<PathBuf>,
 	/// Sanitized managed-environment replacements and removals.
-	pub managed_env: BTreeMap<Str, Option<Str>>,
+	pub managed_env:  BTreeMap<Str, Option<Str>>,
+	/// Roster restrictions of the invocation that started this cell, applied
+	/// by the host to every nested `tool.<name>()` call. Host-only: never
+	/// serialized to the Python child.
+	#[serde(skip)]
+	pub restrictions: Option<Arc<omp_tool::ToolRestrictions>>,
 }
 
 /// One authenticated, generation-fenced eval-defined tool registration.
@@ -1467,7 +1472,7 @@ impl<E: EvalExec> Tool for PyEvalTool<E> {
 				},
 			};
 			let runtime = match self.exec.runtime_snapshot(owner.as_str(), &session) {
-				Ok(runtime) => runtime,
+				Ok(runtime) => RuntimeSnapshot { restrictions: params.restrictions().cloned(), ..runtime },
 				Err(fault) => {
 					yield Ev::Done(ToolTerminal::Done {
 						result: Err(py_eval_resource(fault)),
@@ -1660,7 +1665,7 @@ impl<E: EvalExec> Tool for EvalTool<E> {
 				return;
 			}
 			let runtime = match self.exec.runtime_snapshot(owner.as_str(), &session) {
-				Ok(runtime) => runtime,
+				Ok(runtime) => RuntimeSnapshot { restrictions: params.restrictions().cloned(), ..runtime },
 				Err(fault) => {
 					yield Ev::Done(ToolTerminal::Done { result: Err(fault), useless: false });
 					return;

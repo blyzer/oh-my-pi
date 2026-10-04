@@ -2399,10 +2399,11 @@ print("right")"#
 		let first = tempfile::tempdir().expect("first runtime directory");
 		let second = tempfile::tempdir().expect("second runtime directory");
 		let snapshot = |cwd: &Path, local_roots: Option<&str>| RuntimeSnapshot {
-			cwd:         Some(cwd.to_path_buf()),
-			managed_env: [(sf!("OMP_EVAL_LOCAL_ROOTS"), local_roots.map(Str::new))]
+			cwd:          Some(cwd.to_path_buf()),
+			managed_env:  [(sf!("OMP_EVAL_LOCAL_ROOTS"), local_roots.map(Str::new))]
 				.into_iter()
 				.collect(),
+			restrictions: None,
 		};
 		let mut first_run = runtime
 			.run(&session, RunRequest {
