@@ -576,10 +576,6 @@ class PinBudgetExceeded(OmpError):
     """A pin request would exceed the configured context-window budget."""
 
 
-class StaleEpoch(OmpError):
-    """A strict context lane attempted a write after its epoch changed."""
-
-
 async def view() -> ContextView:
     """Fetch the current context projection from the host."""
 
@@ -708,15 +704,7 @@ async def epoch() -> int:
     return _integer(_payload(response, "omp.context.epoch.v1"), "context epoch")
 
 
-@dataclass(frozen=True, slots=True)
-class _LaneState:
-    strict_epoch: bool
-    entered_epoch: int | None
-
-
-_lane_active: ContextVar[_LaneState | None] = ContextVar(
-    "omp_context_lane", default=None
-)
+_lane_active: ContextVar[bool] = ContextVar("omp_context_lane", default=False)
 
 
 def _wire_ids(ids: Iterable[str]) -> list[str]:
@@ -728,21 +716,11 @@ def _wire_ids(ids: Iterable[str]) -> list[str]:
     return result
 
 
-def _journal_epoch_fence() -> int | None:
-    state = _lane_active.get()
-    if state is None or not state.strict_epoch:
-        return None
-    return state.entered_epoch
-
-
 @asynccontextmanager
-async def lane(*, strict_epoch: bool = False) -> AsyncIterator[None]:
+async def lane() -> AsyncIterator[None]:
     """Mark an asynchronous block as deprioritized auxiliary context work."""
 
-    if not isinstance(strict_epoch, bool):
-        raise TypeError("strict_epoch must be bool")
-    entered_epoch = await epoch() if strict_epoch else None
-    token = _lane_active.set(_LaneState(strict_epoch, entered_epoch))
+    token = _lane_active.set(True)
     try:
         yield
     finally:
@@ -775,7 +753,6 @@ __all__ = (
     "Prune",
     "Reorder",
     "Replace",
-    "StaleEpoch",
     "ToolRef",
     "compact",
     "epoch",

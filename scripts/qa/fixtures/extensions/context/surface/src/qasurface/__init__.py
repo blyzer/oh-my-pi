@@ -37,7 +37,7 @@ async def hello() -> str:
     ]
     for error in (
         c.CompactionBusy, c.CompactionRefused, c.ContextGone, c.NoVerdict,
-        c.PatchRejected, c.PinBudgetExceeded, c.StaleEpoch,
+        c.PatchRejected, c.PinBudgetExceeded,
     ):
         values.append(error("probe"))
     assert all(callable(item) for item in (c.compact, c.epoch, c.lane, c.pin, c.unpin, c.usage, c.view))
@@ -45,18 +45,12 @@ async def hello() -> str:
     j = omp.journal
     entry_id = j.EntryId.parse("session:12")
     assert str(entry_id) == "session:12" and j.decode(b'{"a":1}') == {"a": 1}
-    state_id = j.StateEntryId("project", 2)
     journal_entry = j.JournalEntry(entry_id, "dev.qa.note", "v.1", 1, None, None, {"a": 1}, b'{"a":1}', False, False)
-    state_entry = j.StateEntry(state_id, "dev.qa.note", "v.1", 1, None, None, {"a": 1}, b'{"a":1}')
     errors = [
-        j.JournalError("probe"), j.UnknownEntryKind("kind"),
-        j.EntryKindConflict("dev.qa.note"), j.EntryTooLarge(2, 1),
-        j.EntryAccessDenied("dev.other.note"), j.JournalIndeterminate(),
-        j.EntryUndecodable(b"x", "probe"),
+        j.JournalError("probe"), j.EntryTooLarge(2, 1), j.EntryAccessDenied("dev.other.note"),
+        j.JournalIndeterminate(), j.EntryUndecodable(b"x", "probe"),
     ]
-    assert journal_entry.id == entry_id and state_entry.id == state_id and len(errors) == 7
-    assert (j.MAX_INLINE_BYTES, j.MAX_ENTRY_BYTES, j.MAX_LABEL_BYTES, j.MAX_ATOMIC_ENTRIES) == (65536, 16777216, 256, 1024)
-    assert all(callable(item) for item in (j.append, j.append_many, j.append_atomic, j.entries, j.latest, j.fold, j.label, j.label_of))
+    assert journal_entry.id == entry_id and len(errors) == 5
 
     s = omp.sessions
     token_usage = s.Usage(input=3, output=2, total=5, accuracy=s.UsageAccuracy.EXACT)

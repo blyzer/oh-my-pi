@@ -10,7 +10,7 @@
 > `omp.journal` to DOM patch builders and read-only projections, and the session tree became the
 > single authority ([ADR 0003](../adr/0003-one-authoritative-session-tree.md),
 > [ADR 0004](../adr/0004-lifecycle-derives-from-the-tree.md)). The removed material, the
-> cross-session `omp.state` design, and the storage-crate implementation plan that used to close
+> cross-session `state` design, and the storage-crate implementation plan that used to close
 > this file are recorded under **Superseded** at the end. Statements here are checked against the
 > code named beside them; where the code does not settle a question the text says **Unknown**.
 
@@ -100,7 +100,7 @@ indexes.
 
 If losing a file would lose information, it belongs in the tree. If losing it would only cost a
 rebuild, it belongs in the state dir. A state-dir file that is the only copy of something is a bug.
-There is currently no documented home for cross-session extension state (see `omp.state` below).
+There is currently no documented home for cross-session extension state (the `state` namespace was removed; see below).
 
 ### Rules that still hold
 
@@ -215,20 +215,17 @@ All derive from `omp.JournalError(omp.OmpError)`, whose `appended` attribute lis
 | `omp.EntryAccessDenied(kind)` | The caller may not read that journal projection. |
 | `omp.JournalIndeterminate(operation="journal mutation", *, appended=())` | A host-owned journal operation's durability could not be proven. |
 | `omp.EntryUndecodable(raw, reason)` | Bytes are not canonical JSON (`omp.journal.decode`, and mapped from the host error code in `_host.py`). |
-| `omp.StateScopeDenied` | Subclass of `JournalError` defined at the package root, left over from `omp.state`. |
 
 Which host operations raise `EntryTooLarge`, `EntryAccessDenied`, and `JournalIndeterminate` today is
 **Unknown**: only `EntryUndecodable` has a producer in `omp/_host.py`.
 
-### `omp.state`
+### The removed `state` namespace
 
-**Not usable.** `omp.state` is still defined in `omp/__init__.py` as a small object with `append`,
-`entries`, `latest`, `fold`, `cas_put`, and `cas_get`, each forwarding a CONTROL request named
-`omp.state.*`. No host authority handles those operations: the router asserts
-`omp.state.latest` is not handled (`crates/envd/tests/domain_control_router.rs`), and no Rust source
-implements any `omp.state.*` request. The types the earlier design depended on are gone
-(`StateEntry`, `StateEntryId`, `@entry_kind`). Only `omp.StateScope`
-(`SESSION | PROJECT | USER | ORGANIZATION`) and `omp.StateScopeDenied` remain.
+The top-level `state` object (`append`, `entries`, `latest`, `fold`, `cas_put`, `cas_get`), the
+`StateScope` vocabulary, and `StateScopeDenied` no longer exist: the Python object, the native
+vocabulary, and the runtime-symbol rows were deleted together. No host authority ever handled
+the `state.*` requests, and the router asserts `state.latest` is not handled
+(`crates/envd/tests/domain_control_router.rs`), so that assertion is kept as a negative guard.
 
 There is no documented replacement for cross-session extension state. Extension-declared settings
 ride the control plane through `omp.convars` ([`18-convars.md`](18-convars.md)); anything else
@@ -1020,8 +1017,8 @@ If `index.db` is deleted, this rebuilds it. If the journal is deleted, nothing
 rebuilds it — which is the difference between the two, stated as code.
 
 **Shape 2 — no filesystem at all** was the scoped store
-(`omp.state.fold(...)`). It is not available (see `omp.state` above), so there
-is currently exactly one sanctioned shape.
+(`state.fold(...)`). It was removed (see *The removed `state` namespace* above), so there
+is exactly one sanctioned shape.
 
 **Channel** DATA. **Latency class** per-session. **Failure** fail-closed — an
 extension that cannot obtain its state dir does not load.
@@ -1045,9 +1042,9 @@ them:
 | Earlier section | Status | Read instead |
 |---|---|---|
 | "One entry, three projections", `@entry_kind` (`data` / `render` / `project`, `lift`, `rev`) | Removed. Extensions cannot define journal kinds; Components consume the engine's closed kind vocabulary. | [`15-directors.md`](15-directors.md), ADR 0003 |
-| `journal.append`, `append_many`, `append_atomic`, `entries`, `latest`, `fold`, `label`, `label_of` | Removed. Only DOM patch builders, `decode`, and `raw_bytes` remain. | `omp.journal` above |
+| `journal.append`, `append_many`, `append_atomic`, `entries`, `latest`, `fold`, `label`, `label_of` | Removed, including their runtime-symbol rows and the `journal.appends` quota. Only DOM patch builders, `decode`, and `raw_bytes` remain; `decode` is the one `omp.journal` function that keeps a runtime-symbol row. | `omp.journal` above |
 | `MAX_INLINE_BYTES`, `MAX_ENTRY_BYTES`, `MAX_LABEL_BYTES`, `MAX_ATOMIC_ENTRIES`, `EntryKindConflict`, `UnknownEntryKind` | Removed. | none |
-| `omp.state` scoped log and CAS, `StateEntry`, `StateEntryId` | Python object remains but no host handles it; the design is not implemented. | `omp.state` above |
+| `state` scoped log and CAS, `StateScope`, `StateScopeDenied`, `StateEntry`, `StateEntryId` | Removed. No host ever handled the `state.*` requests; the Python object, native vocabulary, and runtime-symbol rows were deleted. | *The removed `state` namespace* above |
 | Consistency rules 5, 7, 8 (fail-closed appends, stamped authorship, per-invocation-phase append legality) | Written for appends. Generation fencing is still owned by `00-overview.md`. | [`00-overview.md`](00-overview.md) |
 | "Patterns" (four pi-extension case studies) | Removed: each rewrote a state file into `journal.append` / `journal.entries` / `state.fold`. | ADR 0003 "Context" for the failures they illustrated |
 | "What this requires us to build" (`crates/storage`, `crates/agent` journal owner, `toolhost/v1` frames, `crates/tools` URL resolution), feature-map reconciliation, performance, failure semantics, open questions, Revisions 2 to 2.2 | Removed: an implementation plan against a tree that no longer exists (`crates/storage` is gone). | `crates/journal`, `crates/session`, `crates/dom`, [`docs/architecture/crates.md`](../architecture/crates.md), ADR 0003, ADR 0004, ADR 0036 |

@@ -21,8 +21,6 @@ pub mod names {
 	pub const UI_UPDATES: &str = "ui.updates";
 	/// Unique telemetry instruments and attribute series.
 	pub const TELEMETRY_CARDINALITY: &str = "telemetry.cardinality";
-	/// Durable extension-authored journal appends.
-	pub const JOURNAL_APPENDS: &str = "journal.appends";
 	/// Durable approval-ticket filing requests.
 	pub const APPROVAL_REQUESTS: &str = "approval.requests";
 	/// Provider discovery and replacement requests.
@@ -41,7 +39,7 @@ pub enum QuotaBehavior {
 /// Definition of one CONTROL-side quota.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuotaSpec {
-	/// Stable quota name, such as `journal.appends` or `ui.effects`.
+	/// Stable quota name, such as `approval.requests` or `ui.effects`.
 	pub name:                Str,
 	/// Maximum usage by one extension in the window.
 	pub per_extension_limit: u64,
@@ -423,7 +421,6 @@ pub fn request_quota(operation: &str) -> Option<&'static str> {
 	match operation {
 		"omp.ui.effect" | "omp.ui.emit" => Some(names::UI_EFFECTS),
 		"omp.ui.update" => Some(names::UI_UPDATES),
-		"omp.journal.append" => Some(names::JOURNAL_APPENDS),
 		"omp.approvals.request" | "omp.policy.request_approval" => Some(names::APPROVAL_REQUESTS),
 		"omp.provider.discover" | "omp.provider.replace" => Some(names::PROVIDER_DISCOVERY),
 		_ => None,
@@ -571,7 +568,9 @@ mod tests {
 
 	#[test]
 	fn canonical_reverse_operations_map_only_to_owned_quotas() {
-		assert_eq!(request_quota("omp.journal.append"), Some(names::JOURNAL_APPENDS));
+		assert_eq!(request_quota("omp.ui.effect"), Some(names::UI_EFFECTS));
+		assert_eq!(request_quota("omp.policy.request_approval"), Some(names::APPROVAL_REQUESTS));
+		assert_eq!(request_quota("omp.journal.append"), None);
 		assert_eq!(request_quota("omp.provider.discover"), Some(names::PROVIDER_DISCOVERY));
 		assert_eq!(request_quota("omp.sessions.get"), None);
 	}

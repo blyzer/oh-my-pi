@@ -358,7 +358,7 @@ Every durable or effectful record carries the quintet: **principal, extension ar
 
 ### Idempotency and generation fencing
 
-A durable request that races a restart is the classic double-write, and *Crash and restart* makes restarts routine. Every durable or effectful request — journal appends, schedule creation, provider replacement, process creation, blob adoption, approval resolution — carries four fields:
+A durable request that races a restart is the classic double-write, and *Crash and restart* makes restarts routine. Every durable or effectful request — schedule creation, provider replacement, process creation, blob adoption, approval resolution — carries four fields:
 
 ```text
 request_id           unique per attempt; correlation
@@ -373,9 +373,9 @@ Fencing needs a channel that cannot be corrupted by accident, so CONTROL rides a
 
 ### Quotas and fairness
 
-A hostile or merely buggy extension can exhaust resources without ever violating a capability: thousands of UI effects, floods of updates, high-cardinality telemetry instruments, journal-append storms, document-lease hoarding, thread creation, CPU-bound spins, worker churn, repeated provider discovery, repeated approval requests. Capabilities gate *kinds* of access; quotas gate *amounts*.
+A hostile or merely buggy extension can exhaust resources without ever violating a capability: thousands of UI effects, floods of updates, high-cardinality telemetry instruments, document-lease hoarding, thread creation, CPU-bound spins, worker churn, repeated provider discovery, repeated approval requests. Capabilities gate *kinds* of access; quotas gate *amounts*.
 
-Every extension runs under per-extension quotas. CONTROL-side quotas — UI effects, updates, telemetry cardinality, journal appends, approval requests, provider discovery — are enforced by core and owned here. DATA-side quotas — leases, processes, blob bytes — are enforced by the environment ([11-env.md](11-env.md)). Threads and CPU are bounded by the child's own supervisor. Exhaustion is visible, not mysterious: soft quotas drop and count (effects already do — `omp.MAX_PENDING_EFFECTS`), hard quotas raise `omp.QuotaExceeded`, and both surface in the extension's **resource receipt** (`omp.resources()`, *Value types*). Fairness is two-level: across extensions within a session, and across sessions served by one daemon — one extension in one session can saturate neither.
+Every extension runs under per-extension quotas. CONTROL-side quotas — UI effects, updates, telemetry cardinality, approval requests, provider discovery — are enforced by core and owned here. DATA-side quotas — leases, processes, blob bytes — are enforced by the environment ([11-env.md](11-env.md)). Threads and CPU are bounded by the child's own supervisor. Exhaustion is visible, not mysterious: soft quotas drop and count (effects already do — `omp.MAX_PENDING_EFFECTS`), hard quotas raise `omp.QuotaExceeded`, and both surface in the extension's **resource receipt** (`omp.resources()`, *Value types*). Fairness is two-level: across extensions within a session, and across sessions served by one daemon — one extension in one session can saturate neither.
 
 ### Extension services
 
@@ -797,7 +797,7 @@ class ResourceReceipt:
 - **Channel** — none; the receipt is pushed with quota updates and read locally.
 - **Latency** — nanoseconds.
 
-A soft quota (effects, updates) drops and counts; a hard quota (journal appends, approval requests) raises `omp.QuotaExceeded` carrying the receipt. The receipt is also what doctor surfaces render when a user asks why an extension is throttled.
+A soft quota (effects, updates) drops and counts; a hard quota (approval requests) raises `omp.QuotaExceeded` carrying the receipt. The receipt is also what doctor surfaces render when a user asks why an extension is throttled.
 
 ### `@omp.service` / `omp.services`
 

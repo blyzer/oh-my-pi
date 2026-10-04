@@ -340,4 +340,4 @@ if await omp.context.epoch() == epoch:
     omp.ui.notify(summary.text)
 ```
 
-If compaction or a reset lands first, the epoch differs and the result describes history the model can no longer see, so drop it. `omp.context.lane(strict_epoch=True)` also records the epoch on entry, but nothing in the current surface enforces it as a fence.
+If compaction or a reset lands first, the epoch differs and the result describes history the model can no longer see, so drop it. `omp.context.lane()` does not record or enforce the epoch, so the comparison above is the only fence.
