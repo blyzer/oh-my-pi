@@ -337,15 +337,13 @@ Releases pins owned by the calling extension and returns the host-reported unpin
 
 ```python
 @asynccontextmanager
-async def lane(*, strict_epoch: bool = False) -> AsyncIterator[None]
+async def lane() -> AsyncIterator[None]
 ```
 
-Marks an async block as deprioritized auxiliary context work. With `strict_epoch=True`, the lane captures the current epoch on entry. No extension write consults that captured epoch today (an extension cannot append to the journal), so compare `await omp.context.epoch()` against the value you captured before acting on a result.
-
-**Raises**: `TypeError` when `strict_epoch` is not boolean.
+Marks an async block as deprioritized auxiliary context work. The lane takes no arguments and does not capture or enforce an epoch (an extension cannot append to the journal), so compare `await omp.context.epoch()` against a value you captured before the block when acting on its result.
 
 ```python
-async with omp.context.lane(strict_epoch=True):
+async with omp.context.lane():
     summary = await omp.agents.completion("Summarize the current thread", context="thread")
     omp.ui.notify(summary.text)
 ```
@@ -535,13 +533,6 @@ class PinBudgetExceeded(OmpError)
 
 Raised when a pin request would exceed the configured context-window budget.
 
-### `omp.context.StaleEpoch`
-
-```python
-class StaleEpoch(OmpError)
-```
-
-Defined for a strict context lane whose captured epoch changed. Nothing in the current surface raises it.
 ## Data model field index
 
 | Dataclass | Fields |

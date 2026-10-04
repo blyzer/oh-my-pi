@@ -182,7 +182,7 @@ pub struct RegistryBridges {
 	pub dynamic_tool_factories: Vec<Arc<dyn DynamicToolFactory>>,
 	/// Internal-URL resolvers installed into the read resolver table.
 	pub url_resolvers:          Vec<Arc<dyn ContentResolver>>,
-	/// Regime/goal authority backing the `goal` tool.
+	/// Goal authority backing the `goal` tool.
 	pub goal_control:           Option<Arc<dyn GoalAuthority>>,
 	/// Auxiliary inference used by workspace search and media tools.
 	pub search:                 Option<Arc<dyn SearchInference>>,
@@ -3388,7 +3388,7 @@ pub trait ContentResolver: Send + Sync + 'static {
 	}
 }
 
-/// Object-safe regime authority supplied by composition.
+/// Object-safe goal authority supplied by composition.
 ///
 /// This exists because [`goal::GoalControl`] requires `Clone` and
 /// uses return-position `impl Future`, so that tools trait is not

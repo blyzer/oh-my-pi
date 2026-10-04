@@ -3244,7 +3244,7 @@ impl EnvServer {
 	}
 
 	/// Returns the generation-fenced callback transport shared by provider,
-	/// regime, presentation, and job backends.
+	/// presentation, and job backends.
 	pub fn extension_callback_dispatcher(&self) -> Arc<dyn CallbackDispatcher> {
 		Arc::new(WeakExtensionCallbackDispatcher { supervisor: Arc::downgrade(&self.ext_hosts) })
 	}
@@ -3295,7 +3295,7 @@ impl EnvServer {
 		self.ext_hosts.control_manifest(identity)
 	}
 
-	/// Returns the full frozen runtime provider/regime declaration projection
+	/// Returns the full frozen runtime provider declaration projection
 	/// for an exact authenticated connection generation.
 	pub fn extension_registry_evidence(
 		&self,

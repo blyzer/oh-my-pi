@@ -4,7 +4,7 @@ OMP extensions are signed Python distributions whose deployment manifest declare
 
 ## Definition and authority
 
-An extension has a stable `id`, a canonical Python `entry`, dependencies, capabilities, optional features, binaries, settings, and a sealed declaration inventory (`DeploymentManifest` in `crates/ext/src/config.rs`). `StaticDeclarations` partitions that inventory into tools, hooks, services, providers, regimes (a leftover class: no Python decorator declares one, see `docs/py/15-directors.md`), UI contributions, telemetry, prompt slots, credentials, secrets, workers, placement, agents, LSP servers, and DAP adapters. Each `StaticDeclaration` carries its module, activation trigger, API revision, failure behavior, grants, optional hook filter, and class-specific signed properties.
+An extension has a stable `id`, a canonical Python `entry`, dependencies, capabilities, optional features, binaries, settings, and a sealed declaration inventory (`DeploymentManifest` in `crates/ext/src/config.rs`). `StaticDeclarations` partitions that inventory into tools, hooks, services, providers, UI contributions, telemetry, prompt slots, credentials, secrets, workers, placement, agents, LSP servers, and DAP adapters. Each `StaticDeclaration` carries its module, activation trigger, API revision, failure behavior, grants, optional hook filter, and class-specific signed properties.
 
 This separation is an authority boundary:
 

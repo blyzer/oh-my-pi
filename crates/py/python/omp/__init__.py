@@ -42,7 +42,6 @@ from _omp import (
     OmpError,
     OperationSpec,
     RestartReason,
-    StateScope,
     PlacementError,
     Principal,
     ResourceReceipt,
@@ -217,10 +216,6 @@ from .journal import (
 )
 
 
-class StateScopeDenied(JournalError):
-    """The authenticated principal may not access a requested state scope."""
-
-
 class PermissionDenied(PermissionError, OmpError):
     """The authenticated principal lacks permission for a requested operation."""
 
@@ -264,64 +259,6 @@ async def _read_url(url: _Any) -> _Any:
 
 
 
-class _State:
-    """Typed append-log and content-addressed state surface."""
-
-    async def append(
-        self,
-        entry: _Any,
-        *,
-        scope: StateScope,
-        idempotency_key: str | None = None,
-    ) -> _Any:
-        """Append one typed state entry durably."""
-        return await _control_request(
-            "omp.state.append", entry=entry, scope=scope, idempotency_key=idempotency_key
-        )
-
-    async def entries(
-        self,
-        kind: _Any,
-        *,
-        scope: StateScope,
-        since: _Any = None,
-        limit: int | None = None,
-    ) -> _Any:
-        """Read ordered entries of one registered kind."""
-        return await _control_request(
-            "omp.state.entries", kind=kind, scope=scope, since=since, limit=limit
-        )
-
-    async def latest(self, kind: _Any, *, scope: StateScope) -> _Any:
-        """Return the latest entry of one kind, if present."""
-        return await _control_request("omp.state.latest", kind=kind, scope=scope)
-
-    async def fold(
-        self,
-        kind: _Any,
-        reducer: _Any,
-        initial: _Any,
-        *,
-        scope: StateScope,
-        since: _Any = None,
-    ) -> tuple[_Any, _Any]:
-        """Fold ordered state entries without exposing storage internals."""
-        value = initial
-        mark = None
-        for record in await self.entries(kind, scope=scope, since=since):
-            value = reducer(value, record)
-            mark = getattr(record, "id", None)
-        return value, mark
-
-    async def cas_put(self, data: bytes, *, scope: StateScope) -> BlobRef:
-        """Store content-addressed state rooted in a durable scope."""
-        return await _control_request("omp.state.cas_put", data=data, scope=scope)
-
-    async def cas_get(self, ref: BlobRef, *, scope: StateScope) -> bytes:
-        """Read content-addressed state rooted in a durable scope."""
-        return await _control_request("omp.state.cas_get", ref=ref, scope=scope)
-
-
 def operation_spec(symbol: str | _Any) -> OperationSpec | None:
     """Return canonical generated operation metadata for a public symbol."""
     return _native_operation_spec(symbol)
@@ -332,7 +269,6 @@ async def state_dir() -> EnvPath:
     return await _control_request("omp.state_dir")
 
 
-state = _State()
 CancelledError = _asyncio.CancelledError
 
 
@@ -778,7 +714,6 @@ from .context import (
     Prune,
     Reorder,
     Replace,
-    StaleEpoch,
     ToolRef,
 )
 from .sessions import (
@@ -1746,7 +1681,6 @@ __all__ += (
     "Separator",
     "SettingSchema",
     "Span",
-    "StaleEpoch",
     "TicketState",
     "Tier",
     "ToolRef",

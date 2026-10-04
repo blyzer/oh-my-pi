@@ -1460,7 +1460,7 @@ connection belongs to exactly one extension — and refuses past the ceiling wit
 | Stream fan-out | live event streams per extension | abandoned `stream`-class handles costing the Environment a task each |
 
 Ceiling values are configuration, not contract, and the DATA side is only half the ledger:
-CONTROL-side quotas (UI effects, journal appends, telemetry cardinality, approval requests) and
+CONTROL-side quotas (UI effects, UI updates, telemetry cardinality, approval requests, provider discovery) and
 the **resource receipt** that exposes both halves are owned by `docs/py/00-overview.md`. Fairness
 holds across extensions within a session and across sessions of one daemon. The lease-budget open
 question from the first revision is subsumed here: the mechanism is decided (per-extension quota,

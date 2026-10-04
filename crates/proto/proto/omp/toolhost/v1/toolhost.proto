@@ -757,174 +757,6 @@ message HookWorkerEnvelope {
   omp.inference.v1.ValueMap props = 15;
 }
 
-// Regime declaration, lifecycle, and middleware draft traffic. Point numbers
-// preserve the fixed event placement table; all enum tables are append-only.
-enum RegimePoint {
-  REGIME_POINT_UNSPECIFIED = 0;
-  REGIME_POINT_CONTEXT = 1;
-  REGIME_POINT_TOOL_CHOICE = 2;
-  REGIME_POINT_PRE_MODEL = 3;
-  REGIME_POINT_STREAM = 4;
-  REGIME_POINT_ADMISSION = 5;
-  REGIME_POINT_BATCH = 6;
-  REGIME_POINT_TURN_END = 7;
-  REGIME_POINT_SETTLE = 8;
-  REGIME_POINT_IDLE = 9;
-}
-
-// The one control selected by a consuming Next value.
-enum RegimeControlKind {
-  REGIME_CONTROL_KIND_UNSPECIFIED = 0;
-  REGIME_CONTROL_KIND_RETRY = 1;
-  REGIME_CONTROL_KIND_WAIT = 2;
-  REGIME_CONTROL_KIND_REJECT = 3;
-  REGIME_CONTROL_KIND_CANCEL = 4;
-  REGIME_CONTROL_KIND_COMPLETE = 5;
-  REGIME_CONTROL_KIND_FAIL = 6;
-}
-
-// An effect staged through a RegimeContext writer.
-enum RegimeEffectKind {
-  REGIME_EFFECT_KIND_UNSPECIFIED = 0;
-  REGIME_EFFECT_KIND_APPEND_CONTEXT = 1;
-  REGIME_EFFECT_KIND_REWRITE_CONTEXT = 2;
-  REGIME_EFFECT_KIND_REQUIRE_TOOL = 3;
-  REGIME_EFFECT_KIND_SET_SCOPED = 4;
-  REGIME_EFFECT_KIND_REPLACE_STATE = 5;
-}
-
-// How long an activation may survive after it starts.
-enum RegimeLifetime {
-  REGIME_LIFETIME_UNSPECIFIED = 0;
-  REGIME_LIFETIME_TURN = 1;
-  REGIME_LIFETIME_RUN = 2;
-  REGIME_LIFETIME_SESSION = 3;
-}
-
-// One sealed regime declaration. Structured declaration values in when and
-// sets use the canonical JSON encoding negotiated by the extension API level.
-message RegimeManifest {
-  string id = 1;
-  uint32 revision = 2;
-  repeated RegimePoint points = 3;
-  int32 precedence = 4;
-  RegimeLifetime lifetime = 5;
-  optional uint32 max_steps = 6;
-  bool has_on_limit = 7;
-  optional string state_family = 8;
-  optional uint32 state_revision = 9;
-  bytes when = 10;
-  repeated string owns = 11;
-  bytes sets = 12;
-  omp.inference.v1.ValueMap props = 15;
-  optional uint64 minimum_duration_ms = 16;
-  OnFailure on_failure = 17;
-  optional uint64 committed_step_interval_ms = 18;
-}
-
-// Worker import-time declaration table. Core exact-validates every enum table
-// and manifest at FREEZE before admitting the extension domain.
-message RegimeDeclare {
-  string extension_id = 1;
-  uint64 generation = 2;
-  uint32 api_level = 3;
-  uint32 table_revision = 4;
-  repeated RegimeManifest manifests = 5;
-  repeated RegimePoint point_table = 6;
-  repeated RegimeControlKind control_table = 7;
-  repeated RegimeEffectKind effect_table = 8;
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// Starts or restores an activation after Core has resolved resource ownership.
-message RegimeStart {
-  string regime_id = 1;
-  string activation_id = 2;
-  uint32 regime_revision = 3;
-  bytes state = 4;
-  optional uint32 state_revision = 5;
-  uint64 deadline_ms = 6;
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// Evaluates one fixed event against an isolated activation draft.
-message RegimeApply {
-  string regime_id = 1;
-  string activation_id = 2;
-  uint32 regime_revision = 3;
-  RegimePoint point = 4;
-  uint32 event_revision = 5;
-  bytes event_payload = 6;
-  bytes state = 7;
-  optional uint32 state_revision = 8;
-  uint64 committed_steps = 9;
-  uint64 deadline_ms = 10;
-  bool limit_handler = 11;
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// At most one control selected through Next. Only fields meaningful to kind may
-// be populated; FREEZE and the event resolver enforce that closed shape.
-message RegimeControl {
-  RegimeControlKind kind = 1;
-  optional string reason = 2;
-  optional string wait_ticket = 3;
-  optional uint64 wait_deadline_ms = 4;
-  bytes error = 5;
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// One ordered effect staged through RegimeContext. payload carries canonical
-// bytes for the selected kind; name identifies a tool or scoped setting.
-message RegimeEffect {
-  RegimeEffectKind kind = 1;
-  bytes payload = 2;
-  optional string name = 3;
-  optional uint32 state_revision = 4;
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// A successful callback contributes one optional control and its effects in
-// insertion order. Callback failure discards this message's entire draft.
-message RegimeDraft {
-  string activation_id = 1;
-  uint32 regime_revision = 2;
-  uint32 event_revision = 3;
-  optional RegimeControl control = 4;
-  repeated RegimeEffect effects = 5;
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// Stops one activation after Core atomically handles owned resources, scoped
-// settings.
-message RegimeStop {
-  string regime_id = 1;
-  string activation_id = 2;
-  uint32 regime_revision = 3;
-  optional string reason = 4;
-  uint64 deadline_ms = 5;
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// Core-to-worker regime lifecycle and event traffic.
-message RegimeHostEnvelope {
-  oneof body {
-    RegimeStart start = 1;
-    RegimeApply apply = 2;
-    RegimeStop stop = 3;
-  }
-  omp.inference.v1.ValueMap props = 15;
-}
-
-// Worker-to-Core declarations and isolated callback drafts.
-message RegimeWorkerEnvelope {
-  oneof body {
-    RegimeDeclare declare = 1;
-    RegimeDraft draft = 2;
-  }
-  omp.inference.v1.ValueMap props = 15;
-}
-
 // Projection, lift, render, and availability operations.
 message ProjectionKey {
   string name = 1;
@@ -1596,6 +1428,9 @@ message TelemetryWorkerEnvelope {
 // One unambiguous owner per top-level tag. Domain growth occurs inside the
 // nested envelopes so tag 15 remains ValueMap and existing direct arms stay put.
 message HostFrame {
+  reserved 16;
+  reserved "regimes";
+
   uint64 request_id = 1;
   oneof body {
     InvokeTool invoke_tool = 2;
@@ -1611,7 +1446,6 @@ message HostFrame {
     ControlHostEnvelope control = 12;
     InferenceHostEnvelope inference = 13;
     TelemetryHostEnvelope telemetry = 14;
-    RegimeHostEnvelope regimes = 16;
   }
   omp.inference.v1.ValueMap props = 15;
 }
@@ -1619,6 +1453,8 @@ message HostFrame {
 message WorkerFrame {
   reserved 5;
   reserved "tool_complete";
+  reserved 21;
+  reserved "regimes";
 
   uint64 request_id = 1;
   oneof body {
@@ -1639,7 +1475,6 @@ message WorkerFrame {
     ControlWorkerEnvelope control = 18;
     InferenceWorkerEnvelope inference = 19;
     TelemetryWorkerEnvelope telemetry = 20;
-    RegimeWorkerEnvelope regimes = 21;
     ResultWorkerEnvelope result = 22;
   }
   omp.inference.v1.ValueMap props = 15;

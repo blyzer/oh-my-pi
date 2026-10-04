@@ -29,7 +29,6 @@ fn verified_properties() -> BTreeMap<Str, serde_json::Value> {
 				"grants": ["network.provider"],
 				"models": ["test-model"]
 			},
-			{"id": "regime", "kind": "regime"},
 			{"id": "command", "kind": "command"},
 			{"id": "shortcut", "kind": "shortcut"},
 			{"id": "renderer", "kind": "verdict_renderer"},
@@ -63,12 +62,11 @@ fn verified_manifest_retains_every_control_declaration_before_runtime_import() {
 	let properties = verified_properties();
 	let static_declarations =
 		StaticDeclarations::from_properties(&properties).expect("verified declaration projection");
-	assert_eq!(static_declarations.rows().count(), 16);
-	assert_eq!(static_declarations.regimes[0].id, "regime");
+	assert_eq!(static_declarations.rows().count(), 15);
 	assert!(
 		static_declarations
 			.identities()
-			.any(|(class, id)| class == StaticDeclarationClass::Regime && id == "regime")
+			.any(|(class, id)| class == StaticDeclarationClass::Provider && id == "provider")
 	);
 	assert_eq!(static_declarations.providers[0].module, "extension.provider");
 	assert_eq!(static_declarations.providers[0].grants.as_ref(), ["network.provider"]);
@@ -104,7 +102,7 @@ fn verified_manifest_retains_every_control_declaration_before_runtime_import() {
 	assert_eq!(manifest.declarations.tools().len(), 1);
 	assert_eq!(manifest.declarations.hooks().len(), 1);
 	assert_eq!(manifest.services.provides().len(), 1);
-	assert_eq!(manifest.static_declarations().rows().count(), 16);
+	assert_eq!(manifest.static_declarations().rows().count(), 15);
 
 	assert_eq!(
 		manifest.activation_triggers,
@@ -126,7 +124,7 @@ fn verified_manifest_retains_every_control_declaration_before_runtime_import() {
 	.expect("verified site declaration snapshot");
 	assert_eq!(site.artifact_digest(), &ArtifactDigest::new([7; 32]));
 	assert_eq!(site.declaration_modules(), manifest.declaration_modules.as_ref());
-	assert_eq!(site.declarations().rows().count(), 16);
+	assert_eq!(site.declarations().rows().count(), 15);
 }
 
 #[test]
