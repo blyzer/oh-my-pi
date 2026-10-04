@@ -1,6 +1,6 @@
 # 0038. Stream rules are a Director over a generic stream-watch hook
 
-Status: proposed
+Status: accepted
 Date: 2026-09-29
 Area: control-plane
 
@@ -391,6 +391,15 @@ All flags are `archive | session`, `ui.tab=context`, `ui.group="Rules (TTSR)"` (
   - in-memory repeat counters;
   - `ttsr_*` aliases after the rename.
 
+## Amendment (2026-10-04)
+
+The owner resolved the eight open questions as this record proposed (see "Open questions for the
+owner"): `discard` stays the default context policy, the hook is renamed to
+`stream_rule_triggered` without an alias, `scope` must be explicit, there is no lookahead
+conjunction, the per-turn redirect cap is 3 and downgrades to `Note`, `astCondition` and `question`
+rules are later records, omp2 ships no built-in stream rules, and interrupted-response usage is
+not receipted. The decision text above already states each of these; the record is accepted.
+
 ## Status in omp
 
 **Status: Partially implemented (plan steps 1-4 done, step 5 open).** Verified 2026-10-04 against `omp2` at `083b38fe7d`. The
@@ -403,8 +412,9 @@ inserted rows, replace projects replacement text, patch and apply-patch project 
 created-file contents, sloppy projects rewrite candidates, and `write` projects its new content.
 Each segment carries its target path when the dialect identifies one, so path-scoped rules only
 match text intended for that file. Deletions, removed diff rows, and context rows are excluded.
-`ast_edit` remains outside these textual edit dialects. The `ttsr_triggered` Python hook,
-the `omp rules` CLI, and TUI/ACP/print surface work in implementation plan step 5 remain open.
+`ast_edit` remains outside these textual edit dialects. Step 5's `omp rules list|test|scan`
+CLI is implemented (see "Surfaces as built" below); the `ttsr_triggered` Python hook rename and
+emitter and the TUI/ACP/print surface work remain open.
 The matcher also still needs its planned property and integration coverage, and the remaining
 items in the test plan below are not yet proven end to end.
 
@@ -417,8 +427,37 @@ only tests I found are the six unit tests inside `stream_rules.rs`. The files na
 `crates/agent/tests/stream_watch.rs` and `crates/agent/tests/directors/stream_rules.rs`, do not exist,
 and no test drives a redirect through the loop, replay or rewind. The `ttsr_triggered` hook name is
 registered in `crates/py/python/omp/{hooks,events}.py` but no Rust code emits it, and the orphan `Ttsr*`
-clap types remain in `crates/app/src/cli.rs`. `AGENTS.md` ('Control plane') still says no stream-rule
-Director exists in `crates/agent/src/directors/`; that sentence is out of date.
+clap types remain in `crates/app/src/cli.rs` (deleted since; see "Surfaces as built").
+
+### Surfaces as built: `omp rules`
+
+`omp rules [list|test|scan]` (`crates/app/src/rules_cmd.rs`, presentation only) runs on
+`omp_driver::rules::stream::StreamRuleInspector`, which composes what a kernel composes: the same
+`ActiveRules::discover` call, the `agents:` filter (`--agent`, default `main`),
+`ActiveRules::stream_patterns`, and `StreamRuleSet::compile`. Matching runs through
+`StreamRuleSet::probe`, which drives the Director's own automaton, scope and path gates, and
+interrupt-policy resolution. There is no second matcher.
+
+- `list` prints every admitted rule with a `condition`: scope, conditions with the compiled count,
+  globs, the effective interrupt policy (frontmatter `interruptMode` over
+  `ai_stream_rules_interrupt`), whether `ai_stream_rules_disabled` names it, and every typed
+  compile warning (`StreamRuleWarning`) and discovery warning.
+- `test` matches a snippet, a file, or standard input as one complete block from `--source`
+  (`text`, `thinking`, or `tool` with `--tool` and `--path`). It reports each rule once, with the
+  line, a bounded excerpt, and whether a live session would interrupt or only note.
+- `scan` has the smallest honest live meaning: each UTF-8 file under a directory is matched as
+  the authored text of one `--tool` call (default `write`) whose target is the file's path
+  relative to the project. It answers "would the model writing this file have tripped a rule".
+  Rules scoped only to `text` or `thinking` never match a scan; non-UTF-8 files are skipped and
+  counted. Scanning a session journal is not offered: replay never re-runs the matcher, and the
+  journal already records every redirect and note as facts.
+
+Compile diagnostics are now typed: `StreamRuleSet::compile` returns `CompiledStreamRules { set,
+warnings }`, and kernel composition logs the same warnings. Discovery's "is this a stream rule"
+test (`Rule::is_stream_rule`) now asks the streaming matcher (`condition_compiles`) instead of
+`regex::Regex`, so a condition the DFA rejects (for example a Unicode `\b`) no longer drops a
+rule from the prompt while also never matching. The orphan `TtsrArgs`/`TtsrCommand`/`TtsrSourceArg`
+and `AgentsArgs`/`AgentsAction` clap types are deleted.
 
 ### Implementation plan (PR-sized)
 
@@ -509,22 +548,22 @@ Director exists in `crates/agent/src/directors/`; that sentence is out of date.
 - Usage accounting for interrupted requests: today a cancelled inference writes no receipt, so the
   tokens spent on an interrupted response are not recorded.
 
-### Open questions for the owner
+### Open questions for the owner (resolved 2026-10-04)
 
-1. Default `ai_stream_rules_context`: `discard` (v1 default, best for the cache, hides the
-   violation from the model), or `keep`?
-2. Rename `ttsr_triggered` → `stream_rule_triggered` (proposed), or keep the v1 name?
-3. Port v1's "glob-looking `condition` ⇒ `tool:edit/write(<glob>)` with `.*`" shorthand, or require
-   an explicit `scope` (proposed)?
-4. Should lookahead-conjunction patterns be expressible? For example, a frontmatter `all:` list
-   evaluated as an AND of DFA hits, instead of `fancy-regex`.
-5. Default per-turn redirect cap (3), and should the cap downgrade to `Note` (proposed) or fail the
-   turn?
-6. `astCondition` (ast-grep at `call_ready`, a natural fit for phase 4) and judged `question` rules
-   (post-response, a judge or tiny-model role, 0023): separate records, or fold into this one?
-7. Ship built-in default rules (v1 `builtinRules`)? omp2 has none today.
-8. Should interrupted-response usage be receipted, which would change the cancelled-inference
-   receipt contract that `turn.rs` asserts?
+The owner resolved every question as this record proposed:
+
+1. Default `ai_stream_rules_context`: **`discard`** (the v1 default; best for the prompt cache).
+2. The hook is renamed **`ttsr_triggered` → `stream_rule_triggered`** in one clean cutover, with
+   no alias.
+3. **An explicit `scope` is required.** v1's glob-looking `condition` shorthand is not ported.
+4. **No lookahead conjunction now.** There is no `all:` list; a pattern the lazy DFA rejects stays
+   a compile warning.
+5. **Per-turn redirect cap 3**, downgrading the verdict to `Note` (with one `stream-redirect-cap`
+   notice) when it is exceeded, never failing the turn.
+6. **`astCondition` and judged `question` rules are separate, later records**, out of scope here.
+7. **No built-in default rules.** omp2 ships none.
+8. **Interrupted-response usage is not receipted now.** The cancelled-inference receipt contract
+   that `turn.rs` asserts does not change.
 
 ## References
 

@@ -2160,25 +2160,13 @@ pub async fn compose_kernel(
 	}
 	let agent = kernel_agent(options.agent.as_deref(), session.dom());
 	rule_scope.select(agent.clone());
-	let stream_patterns = rule_scope
-		.rules()
-		.for_agent(&agent)
-		.filter(|rule| !rule.condition.is_empty())
-		.flat_map(|rule| {
-			rule
-				.condition
-				.iter()
-				.map(move |pattern| omp_agent::directors::stream_rules::RulePattern {
-					name:           rule.name.clone(),
-					body:           rule.content.clone(),
-					pattern:        pattern.clone(),
-					scope:          rule.scope.clone(),
-					globs:          rule.globs.clone(),
-					interrupt_mode: rule.interrupt_mode.clone(),
-				})
-		})
-		.collect::<Vec<_>>();
-	if let Some(set) = omp_agent::directors::stream_rules::StreamRuleSet::compile(stream_patterns) {
+	let compiled = omp_agent::directors::stream_rules::StreamRuleSet::compile(
+		rule_scope.rules().stream_patterns(&agent),
+	);
+	for warning in &compiled.warnings {
+		tracing::warn!(error = %warning, "stream rule left out");
+	}
+	if let Some(set) = compiled.set {
 		director_registry.register_extension(Box::new(
 			omp_agent::directors::stream_rules::StreamRules::new(Arc::new(set)),
 		));

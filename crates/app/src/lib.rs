@@ -57,6 +57,7 @@ pub mod progress_reporter;
 pub mod ps_cmd;
 pub mod render_cmd;
 pub mod rpc_mode;
+pub mod rules_cmd;
 #[cfg(feature = "local-tts")]
 pub mod say_cmd;
 /// Process- and presentation-level setting convars.

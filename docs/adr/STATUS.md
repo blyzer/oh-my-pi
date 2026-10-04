@@ -43,7 +43,7 @@ Statuses: **Implemented** (decision realized in code; remaining limits are liste
 | [0035](0035-rust-for-the-engine.md) | Language choice is architecture; Rust for the engine | Partially implemented | About 175 error variants carry a bare `Str`/`String`; error text is formatted in many places. | Yes |
 | [0036](0036-python-for-extensions.md) | Embedded Python for extensions, `@remote`, and `Eval` | Partially implemented | `@remote` placement beyond the host, scoped env handles and spill diversion unproved. | - |
 | [0037](0037-acp-editor-io.md) | ACP editors supply the document base; writes commit through the authority, then sync back | Implemented | Plan steps 1-4 done (terminal cutover landed in PR #126); moves, deletes and notebooks are not written back. | - |
-| [0038](0038-stream-rules-as-a-director.md) | Stream rules are a Director over a generic stream-watch hook | Partially implemented | Step 5 open: `ttsr_triggered` emitter, `omp rules` CLI, TUI/ACP/print surfaces; redirect has no loop-level test. | - |
+| [0038](0038-stream-rules-as-a-director.md) | Stream rules are a Director over a generic stream-watch hook | Partially implemented | Step 5: `omp rules list\|test\|scan` done; `ttsr_triggered` rename and emitter, TUI/ACP/print surfaces open; redirect has no loop-level test. Open questions 1-8 resolved as proposed. | Decided 2026-10-04 |
 | [0039](0039-remote-control-and-factory-modes.md) | Remote control is a session-control projection; the factory is a leased fleet over the one job primitive | Partially implemented | Only phase S0 done (PR #129); network session attach, TLS listener, daemon sessions and the fleet are not started. | - |
 
 Totals: 24 implemented, 15 partially implemented.
@@ -72,4 +72,4 @@ The owner brought these decisions in line with the code. Each ADR's decision tex
 - 0039: the note said 'not yet implemented'; phase S0 is done (PR #129).
 - 0028: upgraded to Implemented by the 2026-10-04 amendment, which states the approval model that exists; the old gap note about network approval was stale and is removed.
 
-`AGENTS.md` ('Control plane') still says no stream-rule Director exists (0038); that is outside `docs/adr` and not changed here.
+`AGENTS.md` ('Control plane') now names the stream-rules Director (0038); the earlier note that it said otherwise is stale.
