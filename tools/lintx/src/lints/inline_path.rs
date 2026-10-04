@@ -600,7 +600,6 @@ const QUALIFIED_NAMES: &[&str] = &[
 	"SpeakRequest",
 	"Spec",
 	"State",
-	"StateScope",
 	"Status",
 	"Step",
 	"StopReason",

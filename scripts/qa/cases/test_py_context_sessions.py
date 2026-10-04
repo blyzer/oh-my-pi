@@ -38,7 +38,6 @@ CONTEXT_SYMBOLS = [
 	"omp.context.Prune",
 	"omp.context.Reorder",
 	"omp.context.Replace",
-	"omp.context.StaleEpoch",
 	"omp.context.ToolRef",
 	"omp.context.compact",
 	"omp.context.epoch",
@@ -88,28 +87,12 @@ SESSIONS_SYMBOLS = [
 JOURNAL_SYMBOLS = [
 	"omp.journal.EntryAccessDenied",
 	"omp.journal.EntryId",
-	"omp.journal.EntryKindConflict",
 	"omp.journal.EntryTooLarge",
 	"omp.journal.EntryUndecodable",
 	"omp.journal.JournalEntry",
 	"omp.journal.JournalError",
 	"omp.journal.JournalIndeterminate",
-	"omp.journal.MAX_ATOMIC_ENTRIES",
-	"omp.journal.MAX_ENTRY_BYTES",
-	"omp.journal.MAX_INLINE_BYTES",
-	"omp.journal.MAX_LABEL_BYTES",
-	"omp.journal.StateEntry",
-	"omp.journal.StateEntryId",
-	"omp.journal.UnknownEntryKind",
-	"omp.journal.append",
-	"omp.journal.append_atomic",
-	"omp.journal.append_many",
 	"omp.journal.decode",
-	"omp.journal.entries",
-	"omp.journal.fold",
-	"omp.journal.label",
-	"omp.journal.label_of",
-	"omp.journal.latest",
 ]
 
 COVERS = {"py": CONTEXT_SYMBOLS + SESSIONS_SYMBOLS + JOURNAL_SYMBOLS, "rpc": []}
@@ -134,51 +117,6 @@ class PyContextSessions(unittest.TestCase):
 				self.assertIn("constructed", str(result.mock["captures"][1]))
 			finally:
 				shutil.rmtree(project, ignore_errors=True)
-
-	@unittest.expectedFailure
-	def test_journal_append_and_session_scoped_read_survive_resume(self):
-		"""Ledger: tool callbacks lack the agent journal/current-session CONTROL binding."""
-		with extension_fixture("context/journal") as directory:
-			project = Path(tempfile.mkdtemp(prefix="omp-qa-context-project-"))
-			data_dir = Path(tempfile.mkdtemp(prefix="omp-qa-context-data-"))
-			try:
-				first = drive(
-					call("hello", {"mode": "write"}),
-					"written",
-					prompt="write the durable note",
-					extensions=[directory],
-					project=project,
-					data_dir=data_dir,
-					keep=True,
-					timeout=60,
-				)
-				self.assertFalse(first.timed_out)
-				self.assertEqual(first.exit_code, 0, first.stderr)
-				session = first.of_type("session")[0]["id"]
-				first_follow_up = str(first.mock["captures"][1])
-				self.assertIn(session, first_follow_up)
-				self.assertIn('"texts": ["durable-91", "many-a", "many-b", "atomic-a", "atomic-b"]', first_follow_up)
-
-				second = drive(
-					call("hello", {"mode": "read"}),
-					"read",
-					prompt="read the durable note",
-					args=["--resume", session],
-					extensions=[directory],
-					project=project,
-					data_dir=data_dir,
-					keep=True,
-					timeout=60,
-				)
-				self.assertFalse(second.timed_out)
-				self.assertEqual(second.exit_code, 0, second.stderr)
-				second_follow_up = str(second.mock["captures"][1])
-				self.assertIn(session, second_follow_up)
-				self.assertIn('"texts": ["durable-91", "many-a", "many-b", "atomic-a", "atomic-b"]', second_follow_up)
-				self.assertIn('"latest": "atomic-b"', second_follow_up)
-			finally:
-				shutil.rmtree(project, ignore_errors=True)
-				shutil.rmtree(data_dir, ignore_errors=True)
 
 	@unittest.expectedFailure
 	def test_prompt_slot_and_context_patch_are_provider_visible(self):

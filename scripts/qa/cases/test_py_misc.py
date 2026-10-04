@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Python extension cases for regimes, limits, prompts, scribe, and diagnostics."""
+"""Python extension cases for limits, prompts, scribe, and diagnostics."""
 
 from __future__ import annotations
 
@@ -11,33 +11,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness import OMP_BINARY, call, drive, extension_fixture, introspect  # noqa: E402
 
-REGIME_SYMBOLS = [
-	"omp.regimes.ADMISSION",
-	"omp.regimes.BATCH",
-	"omp.regimes.CONTEXT",
-	"omp.regimes.IDLE",
-	"omp.regimes.Next",
-	"omp.regimes.PRE_MODEL",
-	"omp.regimes.Point",
-	"omp.regimes.RegimeContext",
-	"omp.regimes.RegimeContractError",
-	"omp.regimes.RegimeEvent",
-	"omp.regimes.RegimeHandle",
-	"omp.regimes.RegimeLifetime",
-	"omp.regimes.RegimeRecord",
-	"omp.regimes.SETTLE",
-	"omp.regimes.STREAM",
-	"omp.regimes.StateDecodeError",
-	"omp.regimes.StateSchemaMismatch",
-	"omp.regimes.TOOL_CHOICE",
-	"omp.regimes.TURN_END",
-	"omp.regimes.active",
-	"omp.regimes.regime",
-	"omp.regimes.start",
-	"omp.regimes.stop",
-	"omp.regimes.user_text",
-	"omp.regimes.when",
-]
 LIMIT_SYMBOLS = [
 	"omp.limits.ACTIVATION_TIMEOUT",
 	"omp.limits.API_LEVEL",
@@ -81,13 +54,13 @@ DIAGNOSTIC_SYMBOLS = [
 	"omp.diagnostics.WarningCode",
 ]
 COVERS = {
-	"py": REGIME_SYMBOLS + LIMIT_SYMBOLS + PROMPT_SYMBOLS + SCRIBE_SYMBOLS + DIAGNOSTIC_SYMBOLS,
+	"py": LIMIT_SYMBOLS + PROMPT_SYMBOLS + SCRIBE_SYMBOLS + DIAGNOSTIC_SYMBOLS,
 	"rpc": [],
 }
 
 
 def _run_fixture(name: str, *replies, timeout: float):
-	with extension_fixture(f"regimes/{name}") as directory:
+	with extension_fixture(f"misc/{name}") as directory:
 		return drive(*replies, extensions=[directory], timeout=timeout)
 
 
@@ -102,7 +75,7 @@ def _tool_result_text(result) -> str:
 	raise AssertionError(f"drive returned no text tool result: {result.stdout}")
 
 
-class PyRegimesMiscSurface(unittest.TestCase):
+class PyMiscSurface(unittest.TestCase):
 	def test_live_runtime_exports_every_assigned_symbol(self) -> None:
 		report = introspect(COVERS["py"], timeout=90)
 		self.assertEqual({symbol: "ok" for symbol in COVERS["py"]}, report)
@@ -140,23 +113,6 @@ class PyRegimesMiscSurface(unittest.TestCase):
 		self.assertEqual(0, result.exit_code, result.stderr)
 		generation = int(_tool_result_text(result))
 		self.assertGreaterEqual(generation, 0)
-	
-	@unittest.expectedFailure
-	def test_regime_start_active_draft_retry_and_stop(self) -> None:
-		"""Ledger: Python regime activation/dispatch does not complete on the current host."""
-		result = _run_fixture(
-			"qaregime",
-			call("hello"),
-			"first settlement",
-			call("hello"),
-			"after regime stop",
-			timeout=40,
-		)
-		self.assertFalse(result.timed_out, result.stderr)
-		self.assertEqual(0, result.exit_code, result.stderr)
-		self.assertEqual(4, len(result.mock["requests"]), result.stdout)
-		third_request = json.dumps(result.mock["requests"][2])
-		self.assertIn("REGIME_DRAFT_EFFECT", third_request)
 
 
 if __name__ == "__main__":
