@@ -227,9 +227,9 @@ pub struct Rule {
 	pub globs:          Vec<Str>,
 	/// Frontmatter `alwaysApply`: injected in full every turn.
 	pub always_apply:   bool,
-	/// Frontmatter `condition`: regex triggers for the TTSR director.
+	/// Frontmatter `condition`: regex triggers for the stream-rules Director.
 	pub condition:      Vec<Str>,
-	/// Frontmatter `scope`: TTSR stream scope tokens.
+	/// Frontmatter `scope`: stream-rule scope tokens.
 	pub scope:          Vec<Str>,
 	/// Frontmatter `interruptMode` override for stream rules.
 	pub interrupt_mode: Option<Str>,
@@ -249,6 +249,18 @@ impl Rule {
 	#[must_use]
 	pub fn admits(&self, agent: &AgentName<str>) -> bool {
 		self.admits_lowercase(&agent.to_ascii_lowercase())
+	}
+
+	/// Whether the stream-rules Director owns this rule: at least one
+	/// `condition` compiles for its streaming matcher
+	/// ([`omp_agent::directors::stream_rules::condition_compiles`]). Such a
+	/// rule leaves the prompt buckets and stays readable at `rule://`.
+	#[must_use]
+	pub fn is_stream_rule(&self) -> bool {
+		self
+			.condition
+			.iter()
+			.any(|pattern| omp_agent::directors::stream_rules::condition_compiles(pattern))
 	}
 
 	/// [`Self::admits`] for an already lowercased class.
@@ -520,6 +532,32 @@ impl ActiveRules {
 			.filter(move |rule| rule.admits_lowercase(&agent))
 	}
 
+	/// The stream conditions `agent` admits, one
+	/// [`RulePattern`](omp_agent::directors::stream_rules::RulePattern) per
+	/// `condition` entry in discovery order: the exact input the stream-rules
+	/// Director compiles, shared by kernel composition and `omp rules`.
+	#[must_use]
+	pub fn stream_patterns(
+		&self,
+		agent: &AgentName<str>,
+	) -> Vec<omp_agent::directors::stream_rules::RulePattern> {
+		self
+			.for_agent(agent)
+			.flat_map(|rule| {
+				rule.condition.iter().map(move |pattern| {
+					omp_agent::directors::stream_rules::RulePattern {
+						name:           rule.name.clone(),
+						body:           rule.content.clone(),
+						pattern:        pattern.clone(),
+						scope:          rule.scope.clone(),
+						globs:          rule.globs.clone(),
+						interrupt_mode: rule.interrupt_mode.clone(),
+					}
+				})
+			})
+			.collect()
+	}
+
 	/// The rule named `name` as the agent class `agent` may read it: an
 	/// admitted rule, [`RuleLookupError::Excluded`] when its `agents:` scope
 	/// leaves `agent` out, else [`RuleLookupError::Unknown`] listing only the
@@ -551,11 +589,7 @@ impl ActiveRules {
 		for rule in self.for_agent(agent) {
 			// Conditional documents are delivered by the stream-rules Director,
 			// never as static instructions that bypass their condition.
-			if rule
-				.condition
-				.iter()
-				.any(|pattern| regex::Regex::new(pattern).is_ok())
-			{
+			if rule.is_stream_rule() {
 				continue;
 			}
 			if rule.always_apply {

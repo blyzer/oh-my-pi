@@ -759,80 +759,97 @@ pub struct GrievancesArgs {
 	pub json:   bool,
 }
 
-/// Stream category used by standalone TTSR matching.
+/// Stream source `omp rules test` feeds the matcher.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-pub enum TtsrSourceArg {
-	/// Assistant visible text.
+pub enum RulesSourceArg {
+	/// Assistant-visible text.
 	#[default]
 	Text,
-	/// Assistant reasoning text.
+	/// Assistant reasoning.
 	Thinking,
-	/// Tool snapshot text.
+	/// Authored text of one tool call (see `--tool` and `--path`).
 	Tool,
 }
 
-/// Standalone TTSR options.
+/// Stream-rule inspection over the matcher live sessions use.
 #[derive(Clone, Debug, Args)]
-pub struct TtsrArgs {
-	/// Workspace root used for rule discovery.
-	#[arg(long, value_name = "PATH")]
-	pub root:    Option<PathBuf>,
-	/// TTSR operation; omitted lists active rules.
+pub struct RulesArgs {
+	/// Project root whose rules are discovered.
+	#[arg(long, value_name = "PATH", default_value = ".", global = true)]
+	pub project: PathBuf,
+	/// Agent class whose `agents:` scope filters the rules.
+	#[arg(long, value_name = "CLASS", global = true)]
+	pub agent:   Option<Str>,
+	/// Operation; omitted lists the discovered stream rules.
 	#[command(subcommand)]
-	pub command: Option<TtsrCommand>,
+	pub command: Option<RulesCommand>,
 }
 
-/// TTSR inspection and matching operations.
+/// Stream-rule operations.
 #[derive(Clone, Debug, Subcommand)]
-pub enum TtsrCommand {
-	/// List active rules.
+pub enum RulesCommand {
+	/// List discovered stream rules with scope, conditions, interrupt
+	/// policy, and compile warnings.
 	List {
 		/// Emit machine-readable JSON.
-		#[arg(long)]
+		#[arg(long, short = 'j')]
 		json: bool,
 	},
-	/// Test a snippet, file, or standard input.
+	/// Run the stream-rule matcher over a snippet, a file, or standard
+	/// input, as one complete block from `--source`.
 	Test {
-		/// Inline snippet; omit with `--file -` to read standard input.
+		/// Inline snippet; omit it and pass `--file` (or `--file -`).
+		#[arg(required_unless_present = "file", conflicts_with = "file")]
 		snippet: Option<String>,
-		/// File to inspect, or `-` for standard input.
-		#[arg(long, short = 'f')]
+		/// File to test, or `-` for standard input.
+		#[arg(long, short = 'f', value_name = "PATH")]
 		file:    Option<PathBuf>,
-		/// Restrict reported matches to one rule name.
-		#[arg(long, short = 'r')]
-		rule:    Option<String>,
-		/// Stream category.
+		/// Report only this rule.
+		#[arg(long, short = 'r', value_name = "NAME")]
+		rule:    Option<Str>,
+		/// Stream source the text stands for.
 		#[arg(long, value_enum, default_value_t)]
-		source:  TtsrSourceArg,
-		/// Tool name for tool-stream matching.
-		#[arg(long, default_value = "edit")]
-		tool:    String,
-		/// Candidate path used by glob and AST-language matching.
-		#[arg(long, short = 'p')]
-		path:    Option<String>,
-		/// Include matched reminder content.
-		#[arg(long, short = 'v')]
+		source:  RulesSourceArg,
+		/// Tool name for `--source tool`.
+		#[arg(long, default_value = "write")]
+		tool:    Str,
+		/// Target path for `--source tool` (path-gated rules need one).
+		#[arg(long, short = 'p', value_name = "PATH")]
+		path:    Option<Str>,
+		/// Also print each matching rule's body.
+		#[arg(long)]
 		verbose: bool,
 		/// Emit machine-readable JSON.
-		#[arg(long)]
+		#[arg(long, short = 'j')]
 		json:    bool,
 	},
-	/// Scan a directory with native walker ignore semantics.
+	/// Report which files under a directory would trigger a stream rule if
+	/// the model wrote them.
+	#[command(long_about = "Report which files under a directory would trigger a stream rule if \
+	                        the model wrote them.\n\nEach UTF-8 file is matched as the authored \
+	                        text of one `--tool` call (default `write`) whose target is the \
+	                        file's path relative to the project, through the same matcher, \
+	                        scopes, path gates, and interrupt policy as a live session. Rules \
+	                        scoped only to `text` or `thinking` never match a scan; files that \
+	                        are not UTF-8 are skipped and counted.")]
 	Scan {
 		/// Directory to scan.
 		#[arg(default_value = ".")]
 		directory:    PathBuf,
-		/// Restrict reported matches to one rule name.
-		#[arg(long, short = 'r')]
-		rule:         Option<String>,
-		/// Ignore repository ignore files.
+		/// Report only this rule.
+		#[arg(long, short = 'r', value_name = "NAME")]
+		rule:         Option<Str>,
+		/// Tool whose authored text each file stands for.
+		#[arg(long, default_value = "write")]
+		tool:         Str,
+		/// Ignore `.gitignore` and `.ignore` files.
 		#[arg(long)]
 		no_gitignore: bool,
-		/// Maximum bytes read from any candidate.
+		/// Maximum bytes matched per file.
 		#[arg(long, default_value_t = 4 * 1024 * 1024)]
 		max_bytes:    u64,
 		/// Emit machine-readable JSON.
-		#[arg(long)]
+		#[arg(long, short = 'j')]
 		json:         bool,
 	},
 }
@@ -1142,6 +1159,8 @@ pub enum Command {
 	Say(SayArgs),
 	/// View, clean, or manually push reported tool issues.
 	Grievances(GrievancesArgs),
+	/// Inspect stream rules: list them, test text, or scan a file tree.
+	Rules(RulesArgs),
 	/// Manage scoped native SSH hosts and run bounded client operations.
 	Ssh(SshArgs),
 	/// Detect, repair, and verify native project diagnostics.
@@ -1185,36 +1204,6 @@ pub enum CompletionShell {
 	/// Fish.
 	Fish,
 }
-/// Bundled-agent materialization options.
-#[derive(Clone, Debug, Args)]
-pub struct AgentsArgs {
-	/// Operation to perform.
-	#[arg(value_enum, default_value = "unpack")]
-	pub action:  AgentsAction,
-	/// Overwrite existing definitions.
-	#[arg(long)]
-	pub force:   bool,
-	/// Emit machine-readable JSON.
-	#[arg(long)]
-	pub json:    bool,
-	/// Explicit target directory.
-	#[arg(long, value_name = "PATH")]
-	pub dir:     Option<PathBuf>,
-	/// Write to the user discovery layer.
-	#[arg(long, conflicts_with = "project")]
-	pub user:    bool,
-	/// Write to the project discovery layer.
-	#[arg(long, conflicts_with = "user")]
-	pub project: bool,
-}
-
-/// Bundled-agent operations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum AgentsAction {
-	/// Write bundled definitions to disk.
-	Unpack,
-}
-
 /// Browser relay options.
 #[derive(Clone, Debug, Args)]
 pub struct BrowserRelayArgs {
@@ -1511,6 +1500,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "setup", aliases: &[] },
 	CommandSpec { name: "say", aliases: &[] },
 	CommandSpec { name: "grievances", aliases: &[] },
+	CommandSpec { name: "rules", aliases: &[] },
 	CommandSpec { name: "ssh", aliases: &[] },
 	CommandSpec { name: "cleanse", aliases: &[] },
 	CommandSpec { name: "completions", aliases: &[] },
@@ -2582,6 +2572,7 @@ enum DispatchTarget {
 	Setup,
 	Say,
 	Grievances,
+	Rules,
 	Ssh,
 	Cleanse,
 	Adw,
@@ -2637,6 +2628,7 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Setup(_)) => DispatchTarget::Setup,
 		Some(Command::Say(_)) => DispatchTarget::Say,
 		Some(Command::Grievances(_)) => DispatchTarget::Grievances,
+		Some(Command::Rules(_)) => DispatchTarget::Rules,
 		Some(Command::Ssh(_)) => DispatchTarget::Ssh,
 		Some(Command::Cleanse(_)) => DispatchTarget::Cleanse,
 		Some(Command::Adw(_)) => DispatchTarget::Adw,
@@ -3182,6 +3174,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		Command::Setup(args) => setup_cmd::run(args).await,
 		Command::Say(args) => say_cmd::run(args).await,
 		Command::Grievances(args) => grievances_cmd::run(args).await,
+		Command::Rules(args) => crate::rules_cmd::run(args),
 		Command::Ssh(args) => ssh_cmd::run(args).await,
 		Command::Cleanse(args) => {
 			cleanse_cmd::run(CleanseArgs {
@@ -4106,6 +4099,72 @@ mod tests {
 		assert_eq!(clean.id.as_deref(), Some("qa-a"));
 		assert!(clean.all);
 	}
+	#[test]
+	fn parses_rules_list_test_and_scan() {
+		let Some(Command::Rules(bare)) = parse(&["omp", "rules"]).command else {
+			panic!("rules command");
+		};
+		assert!(bare.command.is_none(), "bare `omp rules` lists");
+		assert_eq!(bare.project, PathBuf::from("."));
+		assert_eq!(dispatch_target(Some(&Command::Rules(bare))), DispatchTarget::Rules);
+
+		let Some(Command::Rules(RulesArgs {
+			command: Some(RulesCommand::List { json }), agent, ..
+		})) = parse(&["omp", "rules", "list", "--json", "--agent", "scout"]).command
+		else {
+			panic!("rules list");
+		};
+		assert!(json);
+		assert_eq!(agent.as_deref(), Some("scout"), "--agent is global to the subcommands");
+
+		let Some(Command::Rules(RulesArgs {
+			command: Some(RulesCommand::Test { snippet, file, rule, source, tool, path, .. }),
+			..
+		})) = parse(&[
+			"omp",
+			"rules",
+			"test",
+			"x.unwrap()",
+			"--source",
+			"tool",
+			"-p",
+			"src/a.rs",
+			"-r",
+			"no-unwrap",
+		])
+		.command
+		else {
+			panic!("rules test");
+		};
+		assert_eq!(snippet.as_deref(), Some("x.unwrap()"));
+		assert!(file.is_none());
+		assert_eq!(rule.as_deref(), Some("no-unwrap"));
+		assert_eq!(source, RulesSourceArg::Tool);
+		assert_eq!(tool.as_str(), "write");
+		assert_eq!(path.as_deref(), Some("src/a.rs"));
+		assert!(
+			OmpCli::try_parse_from(["omp", "rules", "test"]).is_err(),
+			"test needs a snippet or --file"
+		);
+		assert!(
+			OmpCli::try_parse_from(["omp", "rules", "test", "a", "--file", "b"]).is_err(),
+			"a snippet and --file conflict"
+		);
+
+		let Some(Command::Rules(RulesArgs {
+			command: Some(RulesCommand::Scan { directory, no_gitignore, max_bytes, tool, .. }),
+			..
+		})) = parse(&["omp", "rules", "scan", "src", "--no-gitignore", "--tool", "edit"]).command
+		else {
+			panic!("rules scan");
+		};
+		assert_eq!(directory, PathBuf::from("src"));
+		assert!(no_gitignore);
+		assert_eq!(max_bytes, 4 * 1024 * 1024);
+		assert_eq!(tool.as_str(), "edit");
+		assert!(COMMAND_REGISTRY.iter().any(|entry| entry.name == "rules"));
+	}
+
 	#[test]
 	fn parses_cleanse_and_compress_contracts() {
 		let Some(Command::Cleanse(cleanse)) =
