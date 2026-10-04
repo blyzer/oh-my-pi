@@ -1020,10 +1020,12 @@ impl EnvClient {
 
 	/// Binds or unbinds this connection as an ACP document host.
 	///
-	/// Binding is an unsolicited request-id-zero control frame and is only
-	/// valid after the protocol handshake. The send never waits for transport
-	/// capacity.
-	pub fn bind_acp(&self, documents: bool) -> Result<(), ClientError> {
+	/// `documents` is the editor's per-request deadline when this connection
+	/// answers document queries, or `None` to unbind them; every bind starts a
+	/// fresh editor epoch in the daemon. Binding is an unsolicited
+	/// request-id-zero control frame and is only valid after the protocol
+	/// handshake. The send never waits for transport capacity.
+	pub fn bind_acp(&self, documents: Option<std::time::Duration>) -> Result<(), ClientError> {
 		if self.inner.info.lock().is_none() {
 			return Err(ClientError::UnexpectedResponse {
 				expected: "a completed environment handshake before ACP binding",
@@ -1034,7 +1036,11 @@ impl EnvClient {
 			.outgoing
 			.try_send(ClientFrame {
 				request_id: 0,
-				body: Some(client_frame::Body::AcpBind(AcpBind { documents })),
+				body: Some(client_frame::Body::AcpBind(AcpBind {
+					documents:     documents.is_some(),
+					fs_timeout_ms: documents
+						.map_or(0, |deadline| u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
+				})),
 				..ClientFrame::default()
 			})
 			.map_err(|error| match error {
@@ -4684,7 +4690,11 @@ mod tests {
 		let (outgoing, requests) = flume::unbounded();
 		let (responses, incoming) = flume::unbounded();
 		let client = EnvClient::from_channels(outgoing, incoming);
-		assert!(matches!(client.bind_acp(true), Err(ClientError::UnexpectedResponse { .. })));
+		let deadline = std::time::Duration::from_millis(1_500);
+		assert!(matches!(
+			client.bind_acp(Some(deadline)),
+			Err(ClientError::UnexpectedResponse { .. })
+		));
 
 		let handshake = tokio::spawn({
 			let client = client.clone();
@@ -4705,11 +4715,20 @@ mod tests {
 			.expect("hello task")
 			.expect("complete hello");
 
-		client.bind_acp(true).expect("bind ACP documents");
+		client.bind_acp(Some(deadline)).expect("bind ACP documents");
 		let bind = requests.recv_async().await.expect("receive ACP bind");
 		assert_eq!(bind.request_id, 0);
 		assert!(bind.scope.is_none());
-		assert!(matches!(bind.body, Some(client_frame::Body::AcpBind(AcpBind { documents: true }))));
+		assert!(matches!(
+			bind.body,
+			Some(client_frame::Body::AcpBind(AcpBind { documents: true, fs_timeout_ms: 1_500 }))
+		));
+		client.bind_acp(None).expect("unbind ACP documents");
+		let unbind = requests.recv_async().await.expect("receive ACP unbind");
+		assert!(matches!(
+			unbind.body,
+			Some(client_frame::Body::AcpBind(AcpBind { documents: false, fs_timeout_ms: 0 }))
+		));
 		assert!(client.inner.pending.lock().is_empty(), "bind opened a response correlation");
 	}
 

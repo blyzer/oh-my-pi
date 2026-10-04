@@ -110,6 +110,13 @@ pub enum DiagKind {
 	ProviderWarning,
 	/// The host applied a sandbox policy to the command.
 	Sandbox,
+	/// The editor's unsaved buffer had no known common ancestor with the file
+	/// on disk, so the buffer was used as the base wholesale (ADR 0037 §3).
+	EditorBufferUnanchored,
+	/// The editor's buffer could not be read; the file on disk was used.
+	EditorBufferUnavailable,
+	/// The editor's unsaved changes overlap a change made on disk.
+	EditorBufferConflict,
 }
 
 /// Unit of elided content reported by [`Diag::omitted`].
@@ -290,6 +297,18 @@ mod tests {
 		assert_eq!(decoded.diag, diag);
 		assert_eq!(decoded.diag.native_kind(), Some(DiagKind::Pagination));
 		assert!(!json.contains("artifact"));
+	}
+
+	#[test]
+	fn editor_buffer_kinds_use_the_adr_vocabulary() {
+		for (kind, name) in [
+			(DiagKind::EditorBufferUnanchored, "editor_buffer_unanchored"),
+			(DiagKind::EditorBufferUnavailable, "editor_buffer_unavailable"),
+			(DiagKind::EditorBufferConflict, "editor_buffer_conflict"),
+		] {
+			assert_eq!(<&'static str>::from(kind), name);
+			assert_eq!(Diag::warn(kind, "x").native_kind(), Some(kind));
+		}
 	}
 
 	#[test]

@@ -32,7 +32,7 @@ use omp_proto::document::v1::{
 	self as pb, commit_transaction_response, document_mutation, document_target,
 	read_document_response, read_selection, text_mutation,
 };
-use omp_tool::BlobRef;
+use omp_tool::{BlobRef, Diag};
 use omp_tools::{
 	edit::{
 		CommitResult, CommittedSection, Conflict, EditAction, EditCommitError, EditDiagnostic,
@@ -60,6 +60,7 @@ use url::Url;
 use super::{
 	blobs::BlobHost,
 	docs::{DocumentError, DocumentHost, DocumentLease, lease_target},
+	editor_base::{CommitAnchor, EditorConflict},
 	tool_url::ssh,
 };
 use crate::docserver::fs::{self, LocalFs};
@@ -195,6 +196,10 @@ enum BatchOperationRole {
 }
 /// Prepared hashline edit retaining its exact protocol lease, live bytes, and
 /// the retained snapshot named by the authored section tag.
+///
+/// `base_bytes` is the effective base: the disk head's bytes, or the bound
+/// editor's buffer merged with them (ADR 0037 §3). `base_revision` and
+/// `raw_base_bytes` always name the disk head the commit is checked against.
 #[derive(Debug)]
 pub struct PreparedDocument {
 	lease:           DocumentLease,
@@ -207,6 +212,10 @@ pub struct PreparedDocument {
 	exists:          bool,
 	notebook:        bool,
 	path_recoveries: Vec<PathRecovery>,
+	/// Notices from choosing the effective base.
+	diags:           Vec<Diag>,
+	/// Editor anchor to record once this section's commit is durable.
+	on_commit:       Option<CommitAnchor>,
 }
 
 impl EditSnapshotStore for BlobHost {
@@ -303,6 +312,10 @@ impl EditPrepared for PreparedDocument {
 	fn authored_bytes(&self) -> &Bytes {
 		&self.authored_bytes
 	}
+
+	fn diags(&self) -> &[Diag] {
+		&self.diags
+	}
 }
 
 impl EditDocuments for DocumentHost {
@@ -355,13 +368,20 @@ impl EditDocuments for DocumentHost {
 				request.path
 			)));
 		}
+		// The editor's buffer, when one is bound, is the base the section is
+		// applied to; the commit still names the disk revision, so disk moving
+		// after prepare rebases or rejects in the authority as always.
+		let editor = self
+			.editor_base(lease.head(), &raw_base_bytes)
+			.await
+			.map_err(|conflict| editor_conflict_fault(&conflict))?;
 		let notebook = canonical_path.ends_with(".ipynb");
 		let base_bytes = if notebook {
 			let rendered = notebook::render(&raw_base_bytes, &request.path)
 				.map_err(|error| edit_invalid(error.to_string()))?;
 			Bytes::from(rendered.text)
 		} else {
-			raw_base_bytes.clone()
+			editor.bytes.unwrap_or_else(|| raw_base_bytes.clone())
 		};
 		let base_text = snapshot_text(&base_bytes)
 			.ok_or_else(|| edit_invalid("hashline edits require UTF-8 document content"))?;
@@ -403,6 +423,8 @@ impl EditDocuments for DocumentHost {
 			exists,
 			notebook,
 			path_recoveries,
+			diags: editor.diags,
+			on_commit: editor.on_commit,
 		})
 	}
 
@@ -583,6 +605,15 @@ impl EditDocuments for DocumentHost {
 			});
 		}
 
+		let mut prepared = prepared;
+		for (section, proposal) in prepared.iter_mut().zip(&proposals) {
+			let anchor = section.on_commit.take();
+			if !matches!(proposal.action, EditAction::Delete)
+				&& let Some(anchor) = anchor
+			{
+				anchor.committed();
+			}
+		}
 		let snapshots = self.snapshot_store();
 		for (index, proposal) in proposals.iter().enumerate() {
 			omp_walker::invalidate_path(Path::new(&prepared[index].path));
@@ -1488,6 +1519,30 @@ fn line_at_offset(bytes: &[u8], offset: u64) -> usize {
 	bytecount::count(&bytes[..offset], b'\n').saturating_add(1)
 }
 
+/// The user's unsaved editor changes overlap a disk change: the edit is
+/// rejected before any effect, with the typed ranges in the buffer's lines (the
+/// text the user sees) and the matching disk lines named in each message.
+fn editor_conflict_fault(conflict: &EditorConflict) -> EditFault {
+	EditFault {
+		reason:    RejectionReason::Conflict,
+		conflicts: conflict
+			.lines
+			.iter()
+			.map(|span| Conflict {
+				start_line: span.buffer.0,
+				end_line:   span.buffer.1,
+				message:    sf!(
+					"unsaved editor changes to {} overlap a change on disk (disk lines {}-{}); save or \
+					 revert them in the editor, then re-read",
+					conflict.path,
+					span.disk.0,
+					span.disk.1
+				),
+			})
+			.collect(),
+	}
+}
+
 fn edit_invalid(message: impl Into<String>) -> EditFault {
 	EditFault {
 		reason:    RejectionReason::InvalidPatch { message: Str::from(message.into()) },
@@ -1760,28 +1815,6 @@ impl WriteDocuments for DocumentHost {
 		let content = Bytes::copy_from_slice(request.content.as_bytes());
 		let absolute_path = Str::from(resolved.path.to_string_lossy().into_owned());
 		self.invalidate_late_diagnostics_path(&absolute_path);
-		if let Some(result) = self
-			.write_acp_text(absolute_path.clone(), request.content.clone())
-			.await
-		{
-			let formatted = result
-				.map_err(|error| write_rejected(format!("ACP document write failed: {error}")))?;
-			let content = Bytes::copy_from_slice(formatted.as_bytes());
-			omp_walker::invalidate_path(&resolved.path);
-			let snapshot_tag = record_write_snapshot(self, absolute_path.clone(), content.clone());
-			return Ok(PlainWriteResult {
-				resolved_path: absolute_path,
-				display_path: resolved.display_path,
-				byte_len: u64::try_from(content.len()).unwrap_or(u64::MAX),
-				disposition: if existed {
-					WriteDisposition::Overwrote
-				} else {
-					WriteDisposition::Created
-				},
-				made_executable: false,
-				snapshot_tag,
-			});
-		}
 		if !resolved.use_document_host {
 			atomic_write_plain(&resolved.path, &content).map_err(write_rejected)?;
 			let resolved_path = Str::from(resolved.path.to_string_lossy().into_owned());
@@ -1801,6 +1834,14 @@ impl WriteDocuments for DocumentHost {
 				snapshot_tag,
 			});
 		}
+		// Every write commits through the authority, a bound editor included
+		// (ADR 0037 §4.1). The editor's buffer is read first only to anchor it:
+		// once the write is durable that buffer is known to be superseded.
+		let superseded = if existed {
+			self.editor_superseded(&resolved.path).await
+		} else {
+			None
+		};
 		let _late_diagnostics = self.begin_late_diagnostics_uri(resolved.uri.clone());
 		let transaction_id = transaction_id(self.hello().server_epoch.as_ref());
 		let response = self
@@ -1872,6 +1913,9 @@ impl WriteDocuments for DocumentHost {
 			.map_err(|message| WriteCommitError::EffectsUnknown { reason: Str::from(message) })?;
 		let (_, diagnostics_complete) = committed_diagnostics(operation);
 		self.expect_late_diagnostics(head, diagnostics_complete);
+		if let Some(superseded) = superseded {
+			superseded.committed();
+		}
 		let resolved_path = document_path(head)
 			.map_err(|message| WriteCommitError::EffectsUnknown { reason: Str::from(message) })?;
 		let made_executable =
@@ -2803,6 +2847,8 @@ mod tests {
 			exists: true,
 			notebook: false,
 			path_recoveries: Vec::new(),
+			diags: Vec::new(),
+			on_commit: None,
 		}
 	}
 

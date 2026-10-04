@@ -15,6 +15,7 @@ pub mod docs;
 /// language-server operations.
 pub mod docserver;
 pub mod document_cache;
+mod editor_base;
 pub mod eval;
 pub mod exec;
 mod exec_sandbox;
@@ -589,7 +590,7 @@ pub struct ProjectEnvironment {
 	eval_control:        EvalSessionControl,
 	search_bridge:       Arc<search_backend::SearchBridgeHost>,
 	github_credentials:  Arc<GithubCredentialBridge>,
-	acp_documents:       Arc<RwLock<Option<Arc<dyn docs::AcpDocumentBackend>>>>,
+	acp_documents:       AcpDocumentsBinding,
 	lifecycle:           ProjectLifecycle,
 }
 /// Cloneable authority for replacing the Environment's extension worker
@@ -886,6 +887,7 @@ impl ProjectEnvironment {
 			tokio::spawn(async move { in_process_server.serve_in_process(transport).await });
 		let shutdown = CancellationToken::new();
 		let mut tasks = vec![in_process];
+		let acp_documents = spawn_acp_pump(&client, &shutdown, &mut tasks);
 		spawn_extension_data_servers(&server, data_bindings, &shutdown, &mut tasks);
 		hello(&client).await?;
 		let lifecycle =
@@ -899,7 +901,7 @@ impl ProjectEnvironment {
 			eval_control,
 			search_bridge,
 			github_credentials,
-			acp_documents: Arc::default(),
+			acp_documents,
 			lifecycle,
 		})
 	}
@@ -1005,14 +1007,8 @@ impl ProjectEnvironment {
 			}
 		});
 		let shutdown = CancellationToken::new();
-		let acp_documents = Arc::new(RwLock::new(None));
 		let mut tasks = vec![local_task, partition_task, remote_task, owner_bridge];
-		let acp_client = client.clone();
-		let acp_shutdown = shutdown.clone();
-		let pump_documents = Arc::clone(&acp_documents);
-		tasks.push(tokio::spawn(async move {
-			pump_acp_requests(acp_client, pump_documents, acp_shutdown).await;
-		}));
+		let acp_documents = spawn_acp_pump(&client, &shutdown, &mut tasks);
 		if let Some(edit_repair) = edit_repair {
 			let repair_client = client.clone();
 			let repair_shutdown = shutdown.clone();
@@ -1092,6 +1088,7 @@ impl ProjectEnvironment {
 			tokio::spawn(async move { in_process_server.serve_in_process(transport).await });
 		let shutdown = CancellationToken::new();
 		let mut tasks = vec![in_process];
+		let acp_documents = spawn_acp_pump(&client, &shutdown, &mut tasks);
 		spawn_extension_data_servers(&server, data_bindings, &shutdown, &mut tasks);
 		hello(&client).await?;
 		let lifecycle =
@@ -1105,7 +1102,7 @@ impl ProjectEnvironment {
 			eval_control,
 			search_bridge,
 			github_credentials,
-			acp_documents: Arc::default(),
+			acp_documents,
 			lifecycle,
 		})
 	}
@@ -1149,18 +1146,13 @@ impl ProjectEnvironment {
 		Arc::clone(&self.registry)
 	}
 
-	/// Binds or clears the editor-owned document backend for this environment
-	/// composition.
-	pub fn bind_acp_documents(&self, backend: Option<Arc<dyn docs::AcpDocumentBackend>>) {
-		self.acp_documents.write().clone_from(&backend);
-		self.lifecycle.server.bind_acp_documents(backend);
-		self.send_acp_binding();
-	}
-
-	fn send_acp_binding(&self) {
-		let documents = self.acp_documents.read().is_some();
-		if let Err(error) = self.client.bind_acp(documents) {
-			tracing::warn!(%error, documents, "failed to update ACP connection binding");
+	/// Returns the handle through which an ACP adapter binds its editor as the
+	/// document base of this composition (ADR 0037 §1.2).
+	pub fn editor_documents(&self) -> EditorDocuments {
+		EditorDocuments {
+			client:    self.client.clone(),
+			documents: Arc::clone(&self.acp_documents),
+			server:    Arc::downgrade(&self.lifecycle.server),
 		}
 	}
 
@@ -1566,6 +1558,62 @@ fn client_hello(
 	}
 }
 
+type AcpDocumentsBinding = Arc<RwLock<Option<Arc<dyn docs::AcpDocumentBackend>>>>;
+
+/// Cloneable handle binding the ACP editor as the document base of one
+/// environment composition (ADR 0037 §1.2).
+///
+/// Binding registers this composition's environment connection as the editor
+/// for its own tool invocations only: other connections, including every
+/// subagent's composition, never reach the editor. Each bind starts a fresh
+/// editor epoch in the daemon, so a session switch or resume begins
+/// unanchored. Editor content is only ever a document base; every write still
+/// commits through the document authority.
+#[derive(Clone)]
+pub struct EditorDocuments {
+	client:    EnvClient,
+	documents: AcpDocumentsBinding,
+	/// Held weakly: a binding kept past the composition reaches nothing.
+	server:    std::sync::Weak<EnvServer>,
+}
+
+impl EditorDocuments {
+	/// Binds `editor` for the live session, or unbinds it with `None` (session
+	/// close, an ineligible session, transport loss).
+	pub fn bind(&self, editor: Option<Arc<dyn docs::AcpDocumentBackend>>) {
+		let deadline = editor.as_ref().map(|editor| editor.deadline());
+		// An embedded host runs the kernel's native document tools in-process,
+		// outside any connection; they reach the editor through the host.
+		if let Some(server) = self.server.upgrade() {
+			server.bind_in_process_editor(editor.clone());
+		}
+		*self.documents.write() = editor;
+		if let Err(error) = self.client.bind_acp(deadline) {
+			tracing::warn!(
+				error = &error as &dyn std::error::Error,
+				documents = deadline.is_some(),
+				"failed to update ACP connection binding"
+			);
+		}
+	}
+}
+
+/// Starts the task answering the daemon's editor queries for `client` from the
+/// binding it returns.
+fn spawn_acp_pump(
+	client: &EnvClient,
+	shutdown: &CancellationToken,
+	tasks: &mut Vec<JoinHandle<()>>,
+) -> AcpDocumentsBinding {
+	let documents = AcpDocumentsBinding::default();
+	let pump = (client.clone(), Arc::clone(&documents), shutdown.clone());
+	tasks.push(tokio::spawn(async move {
+		let (client, documents, shutdown) = pump;
+		pump_acp_requests(client, documents, shutdown).await;
+	}));
+	documents
+}
+
 async fn pump_acp_requests(
 	client: EnvClient,
 	documents: Arc<RwLock<Option<Arc<dyn docs::AcpDocumentBackend>>>>,
@@ -1622,14 +1670,7 @@ async fn answer_acp_read(
 ) -> AcpDocumentAnswer {
 	let result = match backend {
 		Some(backend) => backend.read_text(Str::from(query.path.as_str())).await,
-		None => {
-			return acp_document_error_answer(
-				query.query_id,
-				query.invocation_id,
-				ProtocolErrorCode::PreconditionFailed,
-				"ACP document backend is not bound",
-			);
-		},
+		None => Err(docs::EditorIoError::Unbound),
 	};
 	acp_document_answer(query.query_id, query.invocation_id, result)
 }
@@ -1644,43 +1685,26 @@ async fn answer_acp_write(
 				.write_text(Str::from(query.path.as_str()), Str::from(query.content.as_str()))
 				.await
 		},
-		None => {
-			return acp_document_error_answer(
-				query.query_id,
-				query.invocation_id,
-				ProtocolErrorCode::PreconditionFailed,
-				"ACP document backend is not bound",
-			);
-		},
+		None => Err(docs::EditorIoError::Unbound),
 	};
 	acp_document_answer(query.query_id, query.invocation_id, result)
 }
 
+/// Encodes an editor answer for the daemon; a failure crosses as its typed
+/// code, named by its classification.
 fn acp_document_answer(
 	query_id: u64,
 	invocation_id: String,
-	result: miette::Result<Str>,
+	result: Result<Str, docs::EditorIoError>,
 ) -> AcpDocumentAnswer {
 	let body = match result {
 		Ok(content) => acp_document_answer::Body::Content(content.to_string()),
-		Err(error) => {
-			acp_document_answer::Body::Error(acp_error(ProtocolErrorCode::Internal, error.to_string()))
-		},
+		Err(error) => acp_document_answer::Body::Error(acp_error(
+			error.protocol_code(),
+			<&'static str>::from(error),
+		)),
 	};
 	AcpDocumentAnswer { query_id, invocation_id, body: Some(body) }
-}
-
-fn acp_document_error_answer(
-	query_id: u64,
-	invocation_id: String,
-	code: ProtocolErrorCode,
-	message: impl Into<String>,
-) -> AcpDocumentAnswer {
-	AcpDocumentAnswer {
-		query_id,
-		invocation_id,
-		body: Some(acp_document_answer::Body::Error(acp_error(code, message))),
-	}
 }
 
 fn acp_error(code: ProtocolErrorCode, message: impl Into<String>) -> ProtocolError {
@@ -2038,10 +2062,14 @@ mod tests {
 	struct FormattingDocuments(Mutex<Str>);
 
 	impl docs::AcpDocumentBackend for FormattingDocuments {
+		fn deadline(&self) -> std::time::Duration {
+			std::time::Duration::from_secs(5)
+		}
+
 		fn read_text(
 			&self,
 			_absolute_path: Str,
-		) -> Pin<Box<dyn Future<Output = miette::Result<Str>> + Send + '_>> {
+		) -> Pin<Box<dyn Future<Output = Result<Str, docs::EditorIoError>> + Send + '_>> {
 			Box::pin(async move { Ok(self.0.lock().clone()) })
 		}
 
@@ -2049,7 +2077,7 @@ mod tests {
 			&self,
 			_absolute_path: Str,
 			content: Str,
-		) -> Pin<Box<dyn Future<Output = miette::Result<Str>> + Send + '_>> {
+		) -> Pin<Box<dyn Future<Output = Result<Str, docs::EditorIoError>> + Send + '_>> {
 			Box::pin(async move {
 				let formatted = sf!("{}\n", content.trim_end());
 				*self.0.lock() = formatted.clone();
@@ -2132,7 +2160,12 @@ mod tests {
 		let Some(acp_document_answer::Body::Error(error)) = unbound.body else {
 			panic!("unbound ACP documents must return a typed error");
 		};
-		assert_eq!(error.code, ProtocolErrorCode::PreconditionFailed as i32);
+		assert_eq!(error.code, ProtocolErrorCode::NotFound as i32);
+		assert_eq!(
+			docs::EditorIoError::from_protocol_code(error.code),
+			docs::EditorIoError::Unbound,
+			"the daemon decodes the classification the pump sent"
+		);
 	}
 
 	async fn spawn_with(executable: &Path, deadline_ms: u64) -> Result<(), EnvdError> {

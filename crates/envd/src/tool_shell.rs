@@ -922,10 +922,14 @@ mod tests {
 	struct UntouchedEditor(std::sync::atomic::AtomicUsize);
 
 	impl crate::docs::AcpDocumentBackend for UntouchedEditor {
+		fn deadline(&self) -> std::time::Duration {
+			std::time::Duration::from_secs(5)
+		}
+
 		fn read_text(
 			&self,
 			_absolute_path: Str,
-		) -> Pin<Box<dyn Future<Output = miette::Result<Str>> + Send + '_>> {
+		) -> Pin<Box<dyn Future<Output = Result<Str, crate::docs::EditorIoError>> + Send + '_>> {
 			self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 			Box::pin(future::ready(Ok(Str::from(""))))
 		}
@@ -934,7 +938,7 @@ mod tests {
 			&self,
 			_absolute_path: Str,
 			content: Str,
-		) -> Pin<Box<dyn Future<Output = miette::Result<Str>> + Send + '_>> {
+		) -> Pin<Box<dyn Future<Output = Result<Str, crate::docs::EditorIoError>> + Send + '_>> {
 			self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 			Box::pin(future::ready(Ok(content)))
 		}
@@ -946,7 +950,10 @@ mod tests {
 		let root = tempfile::tempdir().expect("workspace");
 		let host = test_host(root.path());
 		let editor = Arc::new(UntouchedEditor(std::sync::atomic::AtomicUsize::new(0)));
-		let scope = InvocationAcpBackends::new(Some(Arc::clone(&editor) as _));
+		let scope = InvocationAcpBackends::new(Some(crate::editor_base::EditorRoute::new(
+			Arc::clone(&editor) as Arc<dyn crate::docs::AcpDocumentBackend>,
+			Arc::new(crate::editor_base::EditorSession::new(std::time::Duration::from_secs(5))),
+		)));
 		let (events, outcome) = with_acp_scope(scope, async {
 			let session = host
 				.open_session(SessionOptions::default())
