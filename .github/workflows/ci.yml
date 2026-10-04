@@ -25,6 +25,10 @@ on:
       - "rustfmt.toml"
   pull_request:
     branches: [main, omp2]
+    # KEEP IN SYNC with `paths-ignore` in ci-skipped.yml: the two lists must
+    # match exactly (`just check-ci-skipped`). ci-skipped.yml reports the
+    # required checks, under the same names, for pull requests that this
+    # filter keeps out of CI.
     paths:
       - ".cargo/**"
       - ".config/**"
