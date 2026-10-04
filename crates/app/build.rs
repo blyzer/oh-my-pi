@@ -12,7 +12,12 @@ use std::{
 
 fn main() {
 	omp_py_link::emit();
-	write_changelog(&PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+	// Read at run time, never `env!`: the compiled build-script binary is shared by
+	// every worktree using one `CARGO_TARGET_DIR`, so a compile-time path would
+	// bake in whichever worktree built it first.
+	write_changelog(&PathBuf::from(
+		env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not set CARGO_MANIFEST_DIR"),
+	));
 }
 
 fn write_changelog(manifest: &Path) {

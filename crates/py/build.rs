@@ -31,7 +31,12 @@ use std::{
 const TCL_LIBS: [&str; 2] = ["tcl9.0", "tcl9tk9.0"];
 
 fn main() {
-	let manifest = PathBuf::from(std::env!("CARGO_MANIFEST_DIR"));
+	// Read at run time, never `env!`: the compiled build-script binary is shared by
+	// every worktree using one `CARGO_TARGET_DIR`, so a compile-time path would
+	// bake in whichever worktree built it first.
+	let manifest = PathBuf::from(
+		env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not set CARGO_MANIFEST_DIR"),
+	);
 	let target = env::var("TARGET").expect("Cargo must provide TARGET to omp-py/build.rs");
 
 	// pyo3-ffi configures itself from PYO3_CONFIG_FILE *before* this script

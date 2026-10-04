@@ -1,6 +1,10 @@
 //! Compiles checked-in vendor protobuf schemas into `OUT_DIR`.
 
-use std::{collections::BTreeSet, env, fs, path::Path};
+use std::{
+	collections::BTreeSet,
+	env, fs,
+	path::{Path, PathBuf},
+};
 
 use prost::Message as _;
 use serde::Deserialize;
@@ -10,7 +14,12 @@ const CURSOR_SCHEMA_SHA256: &str =
 	"fc1ac3ed472676e6d863fe2238ab1529247b68d3ea21f33b3fae1abae481892c";
 
 fn main() {
-	let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+	// Read at run time, never `env!`: the compiled build-script binary is shared by
+	// every worktree using one `CARGO_TARGET_DIR`, so a compile-time path would
+	// bake in whichever worktree built it first.
+	let manifest = &PathBuf::from(
+		env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not set CARGO_MANIFEST_DIR"),
+	);
 	let schema = manifest.join("../../fixtures/llm-oracle/vendor-schemas/cursor/agent.proto");
 	println!("cargo::rerun-if-changed={}", schema.display());
 	let source = fs::read(&schema).expect("checked-in Cursor agent.proto is missing");

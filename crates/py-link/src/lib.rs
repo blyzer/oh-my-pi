@@ -21,25 +21,29 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-/// This crate's own directory, fixed at compile time.
-///
-/// Deliberately not the caller's `CARGO_MANIFEST_DIR`: every consumer must
-/// resolve the same link inputs, wherever its own manifest sits.
-const SELF_DIR: &str = env!("CARGO_MANIFEST_DIR");
-
 /// `crates/py`, which owns the vendored interpreter and every link input
-/// applied here. Built from this crate's sibling rather than by appending
-/// `..`, so the paths that reach cargo and the linker stay normalized.
+/// applied here. Built from the repository root rather than by appending `..`,
+/// so the paths that reach cargo and the linker stay normalized.
 fn py_crate() -> PathBuf {
 	workspace_root().join("crates/py")
 }
 
-/// The repository root: this crate sits two levels below it.
+/// The repository root: the nearest ancestor of the consumer's manifest
+/// directory that holds `crates/py`, so every consumer resolves the same link
+/// inputs wherever its own manifest sits.
+///
+/// Read from `CARGO_MANIFEST_DIR` at run time, never baked in with `env!`:
+/// the compiled `omp-py-link` rlib is shared by every worktree using one
+/// `CARGO_TARGET_DIR`, so a compile-time path would point every other
+/// worktree's build scripts at whichever worktree built it first.
 fn workspace_root() -> PathBuf {
-	Path::new(SELF_DIR)
+	let manifest = PathBuf::from(
+		env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not set CARGO_MANIFEST_DIR"),
+	);
+	manifest
 		.ancestors()
-		.nth(2)
-		.expect("omp-py-link sits two directories below the workspace root")
+		.find(|dir| dir.join("crates/py/Cargo.toml").is_file())
+		.expect("a consumer of omp-py-link sits inside the omp workspace")
 		.to_path_buf()
 }
 
