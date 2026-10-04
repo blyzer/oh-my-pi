@@ -644,7 +644,7 @@ def operation_spec(symbol: str | Any) -> OperationSpec | None
 Returns canonical generated operation metadata for a public symbol. Pass a qualified symbol name or a public object. Unknown symbols return `None`.
 
 ```python
-spec = omp.operation_spec("omp.state.append")
+spec = omp.operation_spec("omp.sessions.create")
 if spec is not None:
     print(spec.minimum_phase, spec.durability)
 ```
@@ -873,118 +873,7 @@ def child(self, **overrides: object) -> Context
 
 Returns a dataclass replacement with the requested field overrides. Unknown field names and invalid replacement arguments raise the normal dataclass `TypeError`.
 
-## State
-
-### `omp.StateScope`
-
-```python
-class StateScope
-```
-
-Selects durable state ownership: `SESSION` (`"session"`), `USER` (`"user"`), `PROJECT` (`"project"`), or `ORGANIZATION` (`"organization"`). The type is available as `omp.StateScope` for the state methods even though it is not included by `from omp import *`.
-
-### `omp.state`
-
-```python
-state: _State
-```
-
-Provides the singleton typed append-log and content-addressed state client. Every I/O method is asynchronous and requires an explicit `StateScope`.
-
-### `omp.state.append`
-
-```python
-async def append(
-    entry: Any,
-    *,
-    scope: StateScope,
-    idempotency_key: str | None = None,
-) -> Any
-```
-
-Appends one typed state entry durably.
-
-**Parameters**
-
-| Name | Type | Meaning |
-|---|---|---|
-| `entry` | `Any` | Registered typed entry value. |
-| `scope` | `StateScope` | Durable ownership scope. |
-| `idempotency_key` | `str | None` | Optional key for retry-safe append identity. |
-
-**Returns**
-
-The host's append result.
-
-**Raises**
-
-`HostDisconnected` when no CONTROL bridge exists, plus the [journal errors](omp.journal.md) reported by the host.
-
-### `omp.state.entries`
-
-```python
-async def entries(
-    kind: Any,
-    *,
-    scope: StateScope,
-    since: Any = None,
-    limit: int | None = None,
-) -> Any
-```
-
-Reads ordered records for one registered entry kind.
-
-`since` supplies a host-understood starting mark and `limit` bounds the result. The host's collection is returned unchanged.
-
-### `omp.state.latest`
-
-```python
-async def latest(kind: Any, *, scope: StateScope) -> Any
-```
-
-Returns the latest record of a registered kind, or the host's empty result when no record exists.
-
-### `omp.state.fold`
-
-```python
-async def fold(
-    kind: Any,
-    reducer: Any,
-    initial: Any,
-    *,
-    scope: StateScope,
-    since: Any = None,
-) -> tuple[Any, Any]
-```
-
-Folds ordered records locally after retrieving them with `entries()`.
-
-The reducer is called as `reducer(current_value, record)`. The result is `(value, mark)`, where `mark` is the last record's `id` attribute or `None` when no record was read.
-
-```python
-total, mark = await omp.state.fold(
-    CounterEntry,
-    lambda value, record: value + record.amount,
-    0,
-    scope=omp.StateScope.PROJECT,
-)
-```
-
-### `omp.state.cas_put`
-
-```python
-async def cas_put(data: bytes, *, scope: StateScope) -> BlobRef
-```
-
-Stores bytes in content-addressed state rooted at the requested scope and returns their `BlobRef`.
-
-### `omp.state.cas_get`
-
-```python
-async def cas_get(ref: BlobRef, *, scope: StateScope) -> bytes
-```
-
-Reads content-addressed bytes from the requested scope.
+## State directory
 
 ### `omp.state_dir`
 
@@ -1006,7 +895,7 @@ See [journal](omp.journal.md) for DOM patch builders and journal projections, [a
 
 ## Errors
 
-The shared hierarchy lets you catch broadly at `OmpError` or handle a declaration, capability, transport, or state failure specifically. Errors owned by submodules are linked in the re-export index below.
+The shared hierarchy lets you catch broadly at `OmpError` or handle a declaration, capability, transport, or journal failure specifically. Errors owned by submodules are linked in the re-export index below.
 
 ```text
 BaseException
@@ -1031,9 +920,8 @@ BaseException
     │   ├── ExtensionError
     │   │   └── SpecError
     │   ├── QuotaExceeded
-    │   └── PermissionDenied  (also PermissionError)
-    └── JournalError
-        └── StateScopeDenied
+    │   ├── PermissionDenied  (also PermissionError)
+    │   └── JournalError
 ```
 
 ### `omp.OmpError`
@@ -1156,14 +1044,6 @@ QuotaExceeded(quota: str, receipt: ResourceReceipt | None)
 
 Reports exhaustion of a hard per-extension quota. The exception exposes `quota` and the available `receipt`; `receipt` may be `None` when the host cannot attach a snapshot.
 
-### `omp.StateScopeDenied`
-
-```python
-class StateScopeDenied(JournalError)
-```
-
-Reports that the authenticated principal may not access the requested state scope. This top-level attribute is not included by `from omp import *`.
-
 ### `omp.PermissionDenied`
 
 ```python
@@ -1232,7 +1112,7 @@ The remaining `omp.__all__` names preserve convenient top-level access to APIs o
 
 ### [omp.context](omp.context.md)
 
-[`omp.Anchor`](omp.context.md), [`omp.CancelCompaction`](omp.context.md), [`omp.CompactionBusy`](omp.context.md), [`omp.CompactionEvent`](omp.context.md), [`omp.CompactionOutcome`](omp.context.md), [`omp.CompactionRefused`](omp.context.md), [`omp.CompactionTier`](omp.context.md), [`omp.CompactionVerdict`](omp.context.md), [`omp.ContextGone`](omp.context.md), [`omp.ContextPatch`](omp.context.md), [`omp.ContextResetEvent`](omp.context.md), [`omp.ContextUsage`](omp.context.md), [`omp.ContextView`](omp.context.md), [`omp.CustomSummary`](omp.context.md), [`omp.DelegateCompaction`](omp.context.md), [`omp.DropParts`](omp.context.md), [`omp.Insert`](omp.context.md), [`omp.MessageKind`](omp.context.md), [`omp.MessageRef`](omp.context.md), [`omp.NoVerdict`](omp.context.md), [`omp.PatchRejected`](omp.context.md), [`omp.PinBudgetExceeded`](omp.context.md), [`omp.Prune`](omp.context.md), [`omp.Reorder`](omp.context.md), [`omp.Replace`](omp.context.md), [`omp.StaleEpoch`](omp.context.md), [`omp.ToolRef`](omp.context.md), [`omp.context`](omp.context.md).
+[`omp.Anchor`](omp.context.md), [`omp.CancelCompaction`](omp.context.md), [`omp.CompactionBusy`](omp.context.md), [`omp.CompactionEvent`](omp.context.md), [`omp.CompactionOutcome`](omp.context.md), [`omp.CompactionRefused`](omp.context.md), [`omp.CompactionTier`](omp.context.md), [`omp.CompactionVerdict`](omp.context.md), [`omp.ContextGone`](omp.context.md), [`omp.ContextPatch`](omp.context.md), [`omp.ContextResetEvent`](omp.context.md), [`omp.ContextUsage`](omp.context.md), [`omp.ContextView`](omp.context.md), [`omp.CustomSummary`](omp.context.md), [`omp.DelegateCompaction`](omp.context.md), [`omp.DropParts`](omp.context.md), [`omp.Insert`](omp.context.md), [`omp.MessageKind`](omp.context.md), [`omp.MessageRef`](omp.context.md), [`omp.NoVerdict`](omp.context.md), [`omp.PatchRejected`](omp.context.md), [`omp.PinBudgetExceeded`](omp.context.md), [`omp.Prune`](omp.context.md), [`omp.Reorder`](omp.context.md), [`omp.Replace`](omp.context.md), [`omp.ToolRef`](omp.context.md), [`omp.context`](omp.context.md).
 
 ### [omp.creds](omp.creds.md)
 

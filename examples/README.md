@@ -6,7 +6,7 @@ section), but commit `00611047c1` ("removed legacy example scripts and related c
 files") deleted them all (367 files). Only this README remains.
 
 Several ports were written against APIs that no longer exist (`@omp.regime`, `omp.journal.append` /
-`@omp.entry_kind`; see `docs/py/15-directors.md` and `docs/py/09-journal.md`), and none was
+`@omp.entry_kind`, `omp.state`; see `docs/py/15-directors.md` and `docs/py/09-journal.md`), and none was
 re-verified against the current surface, so treat them as history rather than working examples.
 They are still readable:
 
@@ -17,12 +17,11 @@ git ls-tree -r --name-only 00611047c1^ -- examples/   # every removed file
 
 ## Where extension code lives now
 
-- **QA fixture extensions**: `scripts/qa/fixtures/extensions/` holds 37 small extensions in 13
-  groups (`agents`, `context`, `devices`, `env`, `hooks`, `introspect`, `policy`, `provider`,
-  `regimes`, `root`, `storage`, `telemetry`, `ui`), each with an `omp.toml` and a Python package
-  under `src/`. They are test fixtures driven by `scripts/qa/cases/`, not documentation, and some
-  target removed APIs (`regimes/qaregime`, `context/journal`). Read `scripts/qa/README.md` before
-  relying on one.
+- **QA fixture extensions**: `scripts/qa/fixtures/extensions/` holds 38 small extensions in 13
+  groups (`agents`, `context`, `devices`, `env`, `hooks`, `introspect`, `misc`, `policy`, `provider`,
+  `root`, `storage`, `telemetry`, `ui`), each with an `omp.toml` and a Python package under
+  `src/`. They are test fixtures driven by `scripts/qa/cases/`, not documentation. Read
+  `scripts/qa/README.md` before relying on one.
 - **Frozen surface contract**: `crates/py/tests/*.rs` declare and exercise the current package
   (`crates/py/python/omp`), including `@omp.director` and `@omp.component`
   (`crates/py/tests/extension_registrar_contract.rs`).

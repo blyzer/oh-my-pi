@@ -238,21 +238,22 @@ projection, and it does not match the one-argument call in `_dispatch_component_
 - Python callbacks run in the killable extension host; the engine, not the extension, owns
   ordering, durability, and rewind.
 
-## Residual regime vocabulary
+## Removed regime vocabulary
 
-Some regime names survive outside the Python API. They are not part of it, and nothing in
-`crates/py`, `crates/agent`, or `crates/envd/src` produces or consumes them
-(`crates/envd/tests/control_authority.rs` asserts `omp.regimes.start` is not handled):
+The wire and manifest vocabulary that once carried regimes is gone too, so no part of the tree
+can declare, start, or dispatch one (`crates/envd/tests/control_authority.rs` and
+`crates/envd/tests/domain_control_router.rs` keep asserting that `omp.regimes.start` is not
+handled):
 
-- `crates/proto/proto/omp/toolhost/v1/toolhost.proto` still defines the `Regime*` messages and
-  enums (`RegimePoint`, `RegimeManifest`, `RegimeDeclare`, ...).
-- `crates/ext/src/config.rs` still lists a `regimes` static-declaration class
-  (`StaticDeclarationClass::Regime`) with no Python decorator that can declare one.
-- Doc comments in `crates/tools/src/{goal,staging}.rs` and `crates/envd/src/tools.rs` still say
-  "regime" for what is now Director/goal control.
-
-Whether the wire messages and the declaration class are to be deleted or repurposed for Directors
-is **Unknown**; treat them as leftovers, not as a contract.
+- `crates/proto/proto/omp/toolhost/v1/toolhost.proto` no longer defines the `Regime*` messages
+  and enums. `HostFrame` tag 16 and `WorkerFrame` tag 21 (both named `regimes`) are `reserved`,
+  so the numbers and names cannot be reused.
+- `crates/ext/src/config.rs` no longer has a `regimes` static-declaration class
+  (`StaticDeclarationClass::Regime`); a manifest row with `kind = "regime"` is rejected as an
+  unknown declaration kind.
+- The staged-proposal limit rejection is `ProposalRejection::ProposalLimitReached` (wire name
+  `proposal_limit_reached`, formerly `regime_limit_reached`), and the goal and staging doc
+  comments describe goal control and proposals rather than regimes.
 
 ## Design boundary
 

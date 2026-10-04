@@ -35,8 +35,6 @@ const AGENT_DENIED_DIRECT_EDGES: &[&str] = &["omp-envd", "omp-shell", "omp-walke
 // Pre-existing Python operations awaiting Part 1 rows. This fixed debt baseline
 // may shrink; newly frozen CONTROL operations cannot be added without a row.
 const PYTHON_SPEC_BASELINE: &[&str] = &[
-	"omp.state.cas_get",
-	"omp.state.cas_put",
 	"omp.state_dir",
 	"omp.urls.read",
 ];
@@ -225,13 +223,13 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 		failures.push("interrupt-grace telemetry attributes drifted".into());
 	}
 
-	match operation_spec("omp.journal.append") {
+	match operation_spec("omp.sessions.create") {
 		Some(spec)
 			if spec.minimum_phase == InvocationPhase::EffectsAuthorized
 				&& spec.durability == Durability::Durable
 				&& spec.authority == Authority::Core => {},
 		_ => failures.push(
-			"omp.journal.append must be a durable Core Request from EFFECTS_AUTHORIZED".into(),
+			"omp.sessions.create must be a durable Core Request from EFFECTS_AUTHORIZED".into(),
 		),
 	}
 

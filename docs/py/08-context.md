@@ -663,11 +663,12 @@ form of `pi-observational-memory`'s `ctx.compact()` call from `agent_end`.
 pipeline compares this against the epoch it started with; a change means the item ids it
 captured may have been spliced out, and it should re-read rather than write stale work.
 
-**`omp.context.lane(*, strict_epoch: bool = False)`** — Async context manager marking a block
+**`omp.context.lane()`** — Async context manager marking a block
 as auxiliary context work. Completions issued inside it (`omp.agents.completion`,
 `docs/py/12-agents.md`) are deprioritized against the conversation and abstain from the
-constrained-sampling budget. With `strict_epoch=True`, journal writes from inside the block are
-refused with `omp.StaleEpoch` if the compaction epoch moved while the block was open. Entering a
+constrained-sampling budget. A lane does not capture or fence the compaction epoch (the
+`strict_epoch` option and the `StaleEpoch` error were removed with the extension journal API); compare
+`epoch()` yourself. Entering a
 lane never calls a model, and it does not set the cancellation scope — that is
 `completion(scope=…)`. See *Background auxiliary inference* below.
 
@@ -1198,7 +1199,6 @@ policy
 | `omp.PinBudgetExceeded` | `pin()` would exceed the pin fraction of the window. | Nothing pinned. |
 | `omp.CompactionBusy` | `compact()` while one runs. | — |
 | `omp.CompactionRefused` | `CancelCompaction` at `HANDOFF` under `reason="rescue"`. | Verdict dropped, handoff proceeds. |
-| `omp.StaleEpoch` | `omp.context.lane` block writes to the journal after a compaction or reset changed the epoch, when the lane was entered with `strict_epoch=True`. | Write refused. Opt-in; the default is to let the pipeline check `epoch()` itself. |
 | `omp.PermissionDenied` | `unpin()` on another owner's pin; a manifest capability is absent. | — |
 
 ## Patterns
@@ -1703,8 +1703,6 @@ works:
 0. Compare the patch's `ContextView.epoch` with the live `compaction_epoch`. If the epoch
    advanced, reject the whole patch before validation with `ContextGone`: leave the
    projection untouched, journal the rejection, and proceed with the turn unpatched.
-   `StaleEpoch` remains scoped to strict context-lane journal writes; it is not the patch
-   fence error.
 1. Build `SparseMap<Str, u32>` from item id to index over the projected slice. `SparseMap` is
    already in `crates/core`.
 2. Validate each op and resolve its ids to indexes. A duplicate id, unknown-but-required id,
@@ -2261,7 +2259,7 @@ The rest are genuine open questions.
 
 9. **Resolved (2026-08-20 ruling): same-patch application order is fixed as `prune → drop_parts → replace → insert → reorder`, and conflicts are earlier-op-wins with the later op dropped and journaled.** **Reorder and prune ordering.** The body said all patch ops were order-independent (`docs/py/08-context.md:403-404`), while the plan-building algorithm necessarily resolves removals and moves in some order without specifying which (`docs/py/08-context.md:1579-1593`); the competing readings were order-independent set composition versus a fixed semantic order.
 
-10. **Resolved (2026-08-20 ruling): a patch applies only at the `ContextView` epoch where it was minted; if live `compaction_epoch` advanced, the whole patch is rejected before validation with `ContextGone`, projection untouched and rejection journaled, and the turn proceeds unpatched. `StaleEpoch` remains exclusive to strict-lane journal writes.** **Patch epoch fence.** `ContextView` carries an epoch and compaction advances it (`docs/py/08-context.md:352-377`), but the patch algorithm had no pre-validation epoch comparison (`docs/py/08-context.md:1579-1593`) while `StaleEpoch` was already reserved for strict context-lane journal writes (`docs/py/08-context.md:619-624`); the competing readings were applying ids against the new projection versus whole-patch stale rejection with `ContextGone`.
+10. **Resolved (2026-08-20 ruling): a patch applies only at the `ContextView` epoch where it was minted; if live `compaction_epoch` advanced, the whole patch is rejected before validation with `ContextGone`, projection untouched and rejection journaled, and the turn proceeds unpatched. (`StaleEpoch` and strict lanes were later removed with the extension journal API.)** **Patch epoch fence.** `ContextView` carries an epoch and compaction advances it (`docs/py/08-context.md:352-377`), but the patch algorithm had no pre-validation epoch comparison (`docs/py/08-context.md:1579-1593`) while `StaleEpoch` was already reserved for strict context-lane journal writes (`docs/py/08-context.md:619-624`); the competing readings were applying ids against the new projection versus whole-patch stale rejection with `ContextGone`.
 
 ### Revision 2 (post-review)
 

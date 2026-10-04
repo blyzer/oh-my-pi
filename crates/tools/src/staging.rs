@@ -1,4 +1,5 @@
-//! Shared staged-proposal lifecycle for regime-mediated tools.
+//! Shared staged-proposal lifecycle for tools that hold a preview until the
+//! agent resolves it.
 
 use std::{
 	collections::BTreeMap,
@@ -37,8 +38,8 @@ pub enum ProposalRejection {
 		/// One-sentence rejection reason.
 		reason: Str,
 	},
-	/// The proposal regime reached its finite step bound.
-	RegimeLimitReached,
+	/// The proposal reached its finite step bound.
+	ProposalLimitReached,
 }
 
 /// A final decision for one staged proposal.
@@ -104,8 +105,8 @@ pub enum ProposalActivationError {
 	/// No active agent owns the proposal activation hook.
 	#[error("staged proposal cannot be announced because the agent owner is unavailable")]
 	Unavailable,
-	/// The active agent rejected regime activation.
-	#[error("staged proposal regime activation was rejected")]
+	/// The active agent rejected the proposal announcement.
+	#[error("staged proposal announcement was rejected")]
 	Rejected,
 }
 
@@ -116,7 +117,7 @@ pub trait StagedProposalAction: Send + 'static {
 	fn finalize(&mut self, decision: &ProposalDecision) -> Result<Value, ProposalError>;
 }
 
-/// Synchronous resolver installed for the active proposal regime.
+/// Synchronous resolver installed for the active staged proposal.
 pub type ProposalResolver =
 	Arc<dyn Fn(ProposalDecision) -> Result<ProposalOutcome, ProposalError> + Send + Sync + 'static>;
 
@@ -136,7 +137,8 @@ pub struct StagedProposal {
 /// Future returned by the late-bound agent observer.
 pub type ActivationObserverFuture =
 	Pin<Box<dyn Future<Output = Result<(), ProposalActivationError>> + Send + 'static>>;
-/// Callback that registers the resolver and starts its proposal regime.
+/// Callback that registers the resolver and announces the proposal to the
+/// agent.
 pub type ActivationObserver =
 	Arc<dyn Fn(StagedProposal) -> ActivationObserverFuture + Send + Sync + 'static>;
 
@@ -384,10 +386,11 @@ mod tests {
 		assert_eq!(error, ProposalActivationError::Rejected);
 	}
 	#[test]
-	fn regime_limit_rejection_has_stable_wire_name() {
+	fn proposal_limit_rejection_has_stable_wire_name() {
 		assert_eq!(
-			serde_json::to_value(ProposalRejection::RegimeLimitReached).expect("rejection serializes"),
-			json!("regime_limit_reached")
+			serde_json::to_value(ProposalRejection::ProposalLimitReached)
+				.expect("rejection serializes"),
+			json!("proposal_limit_reached")
 		);
 	}
 }

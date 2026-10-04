@@ -2612,7 +2612,6 @@ journal_error = omp.JournalError(
 )
 assert omp.JournalError is omp.journal.JournalError
 assert issubclass(omp.JournalError, omp.OmpError)
-assert issubclass(omp.StateScopeDenied, omp.JournalError)
 assert str(journal_error) == "only a prefix was appended"
 assert journal_error.appended == [journal_entry_id]
 assert "JournalError" in omp.__all__
