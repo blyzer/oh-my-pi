@@ -51,6 +51,7 @@ pub struct TestTool {
 	delay:      Duration,
 	barrier:    Option<Arc<tokio::sync::Barrier>>,
 	started:    Option<Arc<AtomicUsize>>,
+	opened:     Option<Arc<AtomicUsize>>,
 	visibility: Option<Arc<Mutex<Vec<VisibleSourceLine>>>>,
 	fault:      bool,
 }
@@ -81,6 +82,7 @@ pub fn spec_family(name: &str, family: &str, revision: u16, output: &str) -> Tes
 		delay:      Duration::ZERO,
 		barrier:    None,
 		started:    None,
+		opened:     None,
 		visibility: None,
 		fault:      false,
 	}
@@ -100,6 +102,13 @@ impl TestTool {
 	) -> Self {
 		self.started = Some(started);
 		self.barrier = Some(barrier);
+		self
+	}
+
+	/// Counts execution units opened for this tool: the count rises when a
+	/// call is prepared (speculative preview), before arguments commit.
+	pub fn opened_probe(mut self, opened: Arc<AtomicUsize>) -> Self {
+		self.opened = Some(opened);
 		self
 	}
 
@@ -129,6 +138,9 @@ impl Tool for TestTool {
 		mut params: IncomingParams<'c>,
 	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
 		stream! {
+			if let Some(opened) = &self.opened {
+				opened.fetch_add(1, Ordering::SeqCst);
+			}
 			let _ = params.committed().await;
 			if let Some(update) = self.update.clone() {
 				yield Ev::Update(update);

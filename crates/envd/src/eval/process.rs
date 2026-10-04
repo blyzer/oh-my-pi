@@ -710,6 +710,9 @@ impl EvalChild {
 				.await;
 			return RunCellDisposition::Drop;
 		};
+		// Nested calls from this cell obey the restrictions of the invocation
+		// that started it; they never travel to the Python child.
+		let restrictions = request.runtime.restrictions.clone();
 		if let Err(error) = write_frame(&mut self.stdin, &ParentFrame::Run {
 			run_id,
 			cell_id: cell_id.clone(),
@@ -961,6 +964,7 @@ impl EvalChild {
 					let task_owner = Str::new(owner);
 					let task_session = session.clone();
 					let task_events = bridge_events_tx.clone();
+					let task_restrictions = restrictions.clone();
 					bridge_tasks.spawn(async move {
 						let progress = ProgressChannel { request_id, events: task_events.clone() };
 						let response = task_timeout
@@ -969,6 +973,7 @@ impl EvalChild {
 								&task_session,
 								name.as_str(),
 								args,
+								task_restrictions.as_deref(),
 								&progress,
 							))
 							.await;
@@ -2267,6 +2272,144 @@ mod tests {
 		child.terminate().await;
 	}
 
+	struct NestedProbe {
+		spec: omp_tool::ToolSpec,
+		ran:  Arc<AtomicU64>,
+	}
+
+	impl omp_tool::Tool for NestedProbe {
+		type Fault = Value;
+		type Params = Value;
+		type Payload = Value;
+		type Update = Value;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: omp_tool::IncomingParams<'c>,
+		) -> impl futures::Stream<Item = omp_tool::Ev<Value, Value, Value>> + Send + 'c {
+			async_stream::stream! {
+				params.whole::<Value>().await.expect("probe arguments");
+				params.committed().await.expect("probe commitment");
+				self.ran.fetch_add(1, Ordering::AcqRel);
+				yield omp_tool::Ev::Done(omp_tool::ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "ran"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&Value, &Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("ran") }]
+		}
+	}
+
+	/// A real Python cell calling `tool.<name>()`: the parent applies the
+	/// starting invocation's roster to each nested call and the cell sees a
+	/// typed refusal it can catch; allowed tools still run.
+	#[tokio::test]
+	async fn cell_nested_calls_obey_the_invocation_roster() {
+		use omp_tool::{
+			Claims, Constraint, Effects, Precedence, Presentation, Registry, Rev, ToolRestrictions,
+			ToolSpec,
+		};
+
+		let cwd = env::current_dir().expect("current directory");
+		let interpreter = discover_external_python(&cwd, None).expect("test host provides Python");
+		let ran = Arc::new(AtomicU64::new(0));
+		let mut registry = Registry::new();
+		for name in ["read", "edit"] {
+			let spec = ToolSpec {
+				name:            Str::new(name),
+				rev:             Rev { family: Str::default(), n: 1 },
+				description:     sf!("nested roster probe"),
+				schema:          Bytes::from_static(br#"{"type":"object"}"#),
+				constraint:      Constraint::None,
+				effects:         Effects::empty(),
+				projection_code: [0; 32],
+			};
+			registry
+				.register(NestedProbe { spec, ran: Arc::clone(&ran) }, Presentation::Slot, Claims {
+					precedence: Precedence::CORE,
+					claimant:   sf!("omp/core"),
+					replaces:   None,
+				})
+				.expect("register probe");
+		}
+		let host = Arc::new(SessionBridgeHost::new());
+		host
+			.bind_registry(Arc::new(registry))
+			.expect("bind bridge registry");
+		let session = Bytes::from_static(b"external-runner-roster");
+		let mut child = EvalChild::spawn(
+			Path::new("unused-for-external-python"),
+			&interpreter,
+			&session,
+			&cwd,
+			Arc::clone(&host),
+			"1s".parse().expect("interrupt grace"),
+			None,
+		)
+		.await
+		.expect("launch selected interpreter");
+		let mut restrictions =
+			ToolRestrictions::default().with_allowlist(Arc::from([sf!("read")]), Some(sf!("plan")));
+		restrictions.set_available(Arc::from([sf!("read")]));
+		let mut runtime = runtime_snapshot(cwd);
+		runtime.restrictions = Some(Arc::new(restrictions));
+		let (events, received) = flume::unbounded();
+		let reset = AtomicBool::new(false);
+		let disposition = child
+			.run_cell(
+				Bytes::from_static(b"external-runner-roster:cell-1"),
+				RunRequest {
+					code: sf!(
+						"try:\n    tool.edit(path='src/lib.rs')\nexcept RuntimeError as error:\n    \
+						 print('REFUSED:', error)\nprint('READ:', tool.read(path='a'))"
+					),
+					timeout: Some(Duration::from_secs(5)),
+					reset: false,
+					runtime,
+				},
+				CancellationToken::new(),
+				&events,
+				"owner",
+				&session,
+				host,
+				&reset,
+				None,
+				true,
+			)
+			.await;
+		assert!(matches!(disposition, RunCellDisposition::Keep));
+		let mut stdout = Vec::new();
+		for event in received.try_iter() {
+			if let Ok(RunEvent::Output(update)) = event
+				&& update.channel == OutputChannel::Stdout
+			{
+				stdout.extend_from_slice(update.data.as_ref());
+			}
+		}
+		let stdout = String::from_utf8(stdout).expect("UTF-8 stdout");
+		assert!(
+			stdout.contains(
+				"REFUSED: nested tool call refused: `edit` is not available while plan mode is \
+				 active. No action was taken. Available now: read."
+			),
+			"{stdout}"
+		);
+		assert!(stdout.contains("READ:"), "{stdout}");
+		assert_eq!(ran.load(Ordering::Acquire), 1, "only the allowed nested call ran");
+		child.terminate().await;
+	}
+
 	struct OverlapParent {
 		cwd:       PathBuf,
 		barrier:   tokio::sync::Barrier,
@@ -2386,11 +2529,12 @@ mod tests {
 
 	fn runtime_snapshot(cwd: PathBuf) -> RuntimeSnapshot {
 		RuntimeSnapshot {
-			cwd:         Some(cwd),
-			managed_env: MANAGED_ENV_KEYS
+			cwd:          Some(cwd),
+			managed_env:  MANAGED_ENV_KEYS
 				.into_iter()
 				.map(|key| (Str::new(key), None))
 				.collect(),
+			restrictions: None,
 		}
 	}
 

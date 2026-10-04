@@ -262,9 +262,11 @@ omp_con::var! {
 		default: Str::new_static("on-request"),
 		flags: archive | session | replicated,
 	};
-	/// Advertised tool allowlist: stable tool names the model may see this
-	/// request (`--tools`, Director binds such as Vibe's `[read todo]`).
-	/// Empty advertises every registered tool.
+	/// Tool allowlist: stable tool names the model may see and call this
+	/// request (`--tools`, Director binds such as Vibe's `[read todo]`). The
+	/// kernel snapshots it per request and refuses any other call at
+	/// dispatch (`tool.roster.restricted`). Empty allows every registered
+	/// tool.
 	pub static SV_TOOLS = sv_tools: Vec<Str> {
 		default: Vec::new(),
 		flags: archive | session | replicated,

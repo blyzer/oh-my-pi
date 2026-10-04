@@ -801,6 +801,9 @@ impl ExternalToolExecutor for EnvToolExecutor {
 						omp_env::frame::OutputRequest::Complete as i32
 					},
 				},
+				// The environment hands the request's roster to tools hosting
+				// nested calls (the eval bridge), which apply it per call.
+				restrictions: request.restrictions.as_deref().map(Into::into),
 				..Default::default()
 			}).await;
 			let mut invocation = match opened {

@@ -9,6 +9,7 @@ mod diag;
 mod incoming;
 mod registry;
 pub mod render;
+mod restrictions;
 mod spec_generated;
 
 use std::{
@@ -43,6 +44,9 @@ pub use registry::{
 	LoweringCaps, MemoryToolState, MountedDevice, Precedence, ProjectedCall, ProjectedVerdict,
 	ProjectionKey, ProjectionRequest, PublishedLeaf, Registry, RegistryError, RegistryLeaf,
 	ShadowClaim, ToolLocus, ToolPromptEntry, ToolPromptProjection, ToolRoute, WorkerSiteKind,
+};
+pub use restrictions::{
+	ROSTER_RESTRICTED, RosterDenial, RosterRule, ToolNameList, ToolRestrictions, plan_target_matches,
 };
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize, de, de::DeserializeOwned};

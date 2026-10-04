@@ -769,6 +769,7 @@ pub struct IncomingParams<'c> {
 	events:        Receiver<InvocationEvent>,
 	owner:         Option<Str>,
 	invocation:    Option<Str>,
+	restrictions:  Option<Arc<crate::ToolRestrictions>>,
 	direct:        Option<Arc<DirectFeed>>,
 	feed:          Option<IncomingFeed>,
 	doc:           Option<IncomingDoc>,
@@ -815,6 +816,7 @@ impl IncomingParams<'static> {
 			events,
 			owner,
 			invocation,
+			restrictions: None,
 			direct: Some(direct),
 			feed: None,
 			arg_specs: None,
@@ -839,6 +841,7 @@ impl<'c> IncomingParams<'c> {
 			events,
 			owner: None,
 			invocation: None,
+			restrictions: None,
 			direct: None,
 			feed: Some(feed),
 			arg_specs: None,
@@ -863,6 +866,20 @@ impl<'c> IncomingParams<'c> {
 	/// session tree), when the dispatcher supplied one.
 	pub const fn invocation_id(&self) -> Option<&Str> {
 		self.invocation.as_ref()
+	}
+
+	/// Roster restrictions the dispatcher applied to this invocation, which a
+	/// tool hosting nested calls (the eval bridge) applies to each of them.
+	/// `None` means unrestricted.
+	pub const fn restrictions(&self) -> Option<&Arc<crate::ToolRestrictions>> {
+		self.restrictions.as_ref()
+	}
+
+	/// Attaches the dispatcher's roster restrictions for this invocation.
+	#[must_use]
+	pub fn with_restrictions(mut self, restrictions: Option<Arc<crate::ToolRestrictions>>) -> Self {
+		self.restrictions = restrictions;
+		self
 	}
 
 	/// Binds argument pulls to the immutable declarations for the invoked
