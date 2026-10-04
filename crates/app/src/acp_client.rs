@@ -10,22 +10,27 @@
 //! transport closes; a response whose id is no longer pending is dropped.
 //!
 //! While the live session is eligible and the editor advertises
-//! `fs.readTextFile`, the connection binds the editor into the project
-//! environment as the document base (ADR 0037 §1.2, [`EditorDocumentsHost`]);
-//! it rebinds on every session switch and unbinds on `session/close`, a
-//! capability change that removes it, and transport loss.
+//! `fs.readTextFile` or `fs.writeTextFile`, the connection binds the editor
+//! into the project environment (ADR 0037 §1.2, [`EditorDocumentsHost`]): its
+//! buffers become the document base, and committed writes are written back to
+//! it on a per-path queue owned by the binding. The connection rebinds on
+//! every session switch and unbinds on `session/close`, a capability change
+//! that removes it, and transport loss; before a switch, close or graceful
+//! shutdown it drains the queue, bounded by `sv_acp_fs_timeout`
+//! ([`AcpClient::drain_write_backs`]).
 
 use std::{
-	future::Future,
 	path::{Component, Path, PathBuf},
-	pin::Pin,
 	sync::{Arc, Weak},
 	time::Duration as StdDuration,
 };
 
 use omp_con::Ctx;
 use omp_core::{Duration, DurationUnit, FastHashMap, Str};
-use omp_envd::docs::{AcpDocumentBackend, EditorIoError};
+use omp_envd::{
+	docs::{AcpDocumentBackend, EditorCapabilities, EditorIoError},
+	editor_sync::{EditorBackend, EditorFiles},
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -506,9 +511,16 @@ impl Table {
 struct Shared {
 	table:     Mutex<Table>,
 	settings:  AcpSettings,
-	/// Where the editor is bound as the document base, and whether it is
-	/// bound now.
-	documents: Mutex<Option<(Arc<dyn EditorDocumentsHost>, bool)>>,
+	/// Where the editor is bound into the environment, and the editor bound
+	/// there now.
+	documents: Mutex<Option<DocumentsBinding>>,
+}
+
+/// The environment's editor binding as this connection drives it.
+struct DocumentsBinding {
+	host:   Arc<dyn EditorDocumentsHost>,
+	/// The editor bound for the live session, with its write-back queue.
+	editor: Option<EditorBackend<SessionFiles>>,
 }
 
 /// The project environment's editor binding, as the connection drives it
@@ -526,58 +538,45 @@ impl EditorDocumentsHost for omp_envd::EditorDocuments {
 	}
 }
 
-/// The editor's buffers as the environment reads them: `fs/read_text_file`
-/// through this connection's gated request table.
+/// The editor's `fs/*` methods for one bound session, through this
+/// connection's gated request table.
 ///
 /// Holds the connection weakly, so a binding left in the environment never
 /// keeps a finished connection alive; a request after the connection is gone
-/// fails as [`EditorIoError::Disconnected`].
-struct EditorBuffers(Weak<Shared>);
+/// fails as [`EditorIoError::Disconnected`]. Every request names the session
+/// the binding was made for; once another session is live it fails as
+/// [`EditorIoError::Disconnected`], so a stale binding never reaches the
+/// editor in another session's name.
+struct SessionFiles {
+	shared:  Weak<Shared>,
+	session: Str,
+}
 
-impl EditorBuffers {
+impl SessionFiles {
 	fn client(&self) -> Result<AcpClient, EditorIoError> {
 		self
-			.0
+			.shared
 			.upgrade()
 			.map(AcpClient)
 			.ok_or(EditorIoError::Disconnected)
 	}
 }
 
-impl AcpDocumentBackend for EditorBuffers {
-	fn deadline(&self) -> StdDuration {
+impl EditorFiles for SessionFiles {
+	async fn read_text(&self, path: Str) -> Result<Str, EditorIoError> {
 		self
-			.0
-			.upgrade()
-			.map_or_else(|| AcpSettings::default().fs_timeout, |shared| shared.settings.fs_timeout)
+			.client()?
+			.read_in(Some(&self.session), Path::new(path.as_str()))
+			.await
+			.map_err(editor_io_error)
 	}
 
-	fn read_text(
-		&self,
-		absolute_path: Str,
-	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
-		Box::pin(async move {
-			self
-				.client()?
-				.read_text_file(Path::new(absolute_path.as_str()))
-				.await
-				.map_err(editor_io_error)
-		})
-	}
-
-	fn write_text(
-		&self,
-		absolute_path: Str,
-		content: Str,
-	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
-		Box::pin(async move {
-			self
-				.client()?
-				.write_text_file(Path::new(absolute_path.as_str()), content.as_str())
-				.await
-				.map_err(editor_io_error)?;
-			Ok(content)
-		})
+	async fn write_text(&self, path: Str, content: Str) -> Result<(), EditorIoError> {
+		self
+			.client()?
+			.write_in(Some(&self.session), Path::new(path.as_str()), content.as_str())
+			.await
+			.map_err(editor_io_error)
 	}
 }
 
@@ -634,30 +633,68 @@ impl AcpClient {
 	}
 
 	/// Binds this connection's editor into `host` whenever the live session
-	/// may read editor buffers, and keeps that binding current from here on.
+	/// may use editor buffers, and keeps that binding current from here on.
 	pub(crate) fn bind_documents(&self, host: Arc<dyn EditorDocumentsHost>) {
-		*self.0.documents.lock() = Some((host, false));
+		*self.0.documents.lock() = Some(DocumentsBinding { host, editor: None });
 		self.rebind_documents();
 	}
 
 	/// Brings the environment's editor binding in line with the gate: bound
-	/// (freshly, so unanchored) while `fs/read_text_file` would be sent,
-	/// unbound otherwise.
+	/// (freshly, so unanchored and with an empty write-back queue) while
+	/// `fs/read_text_file` or `fs/write_text_file` would be sent, unbound
+	/// otherwise.
 	fn rebind_documents(&self) {
-		let eligible = self.can_read();
+		let capabilities = EditorCapabilities { read: self.can_read(), write: self.can_write() };
+		let eligible = capabilities.read || capabilities.write;
+		let session = self.0.table.lock().session.id.clone();
 		let mut documents = self.0.documents.lock();
-		let Some((host, bound)) = documents.as_mut() else {
+		let Some(binding) = documents.as_mut() else {
 			return;
 		};
-		if !eligible && !*bound {
+		if !eligible && binding.editor.is_none() {
 			return;
 		}
-		*bound = eligible;
-		host.bind(
-			eligible.then(|| {
-				Arc::new(EditorBuffers(Arc::downgrade(&self.0))) as Arc<dyn AcpDocumentBackend>
-			}),
+		binding.editor = eligible.then(|| {
+			EditorBackend::new(
+				SessionFiles { shared: Arc::downgrade(&self.0), session },
+				capabilities,
+				self.0.settings.fs_timeout,
+			)
+		});
+		binding.host.bind(
+			binding
+				.editor
+				.clone()
+				.map(|editor| Arc::new(editor) as Arc<dyn AcpDocumentBackend>),
 		);
+	}
+
+	/// Write-backs queued for the live session's editor and not yet finished.
+	#[must_use]
+	pub fn write_backs_outstanding(&self) -> usize {
+		self
+			.0
+			.documents
+			.lock()
+			.as_ref()
+			.and_then(|binding| binding.editor.as_ref())
+			.map_or(0, EditorBackend::outstanding)
+	}
+
+	/// Waits until the live session's queued write-backs have finished,
+	/// bounded by `sv_acp_fs_timeout` (ADR 0037 §4.6). Returns whether the
+	/// queue drained. The editor's answers must keep arriving meanwhile.
+	pub async fn drain_write_backs(&self) -> bool {
+		let editor = self
+			.0
+			.documents
+			.lock()
+			.as_ref()
+			.and_then(|binding| binding.editor.clone());
+		match editor {
+			Some(editor) => editor.drain(self.0.settings.fs_timeout).await,
+			None => true,
+		}
 	}
 
 	/// Connection settings.
@@ -705,9 +742,15 @@ impl AcpClient {
 	///
 	/// Dropping the future retires the request: its late answer is dropped.
 	pub async fn read_text_file(&self, path: &Path) -> Result<Str, ClientRequestError> {
+		self.read_in(None, path).await
+	}
+
+	/// [`Self::read_text_file`] on behalf of the binding made for `session`,
+	/// when given.
+	async fn read_in(&self, session: Option<&Str>, path: &Path) -> Result<Str, ClientRequestError> {
 		let method = ClientMethod::ReadTextFile;
 		let result = self
-			.call(method, path, |session_id, path| {
+			.call(method, session, path, |session_id, path| {
 				serde_json::to_value(ReadTextFileRequest { session_id, path })
 			})
 			.await?;
@@ -726,8 +769,19 @@ impl AcpClient {
 		path: &Path,
 		content: &str,
 	) -> Result<(), ClientRequestError> {
+		self.write_in(None, path, content).await
+	}
+
+	/// [`Self::write_text_file`] on behalf of the binding made for `session`,
+	/// when given.
+	async fn write_in(
+		&self,
+		session: Option<&Str>,
+		path: &Path,
+		content: &str,
+	) -> Result<(), ClientRequestError> {
 		self
-			.call(ClientMethod::WriteTextFile, path, |session_id, path| {
+			.call(ClientMethod::WriteTextFile, session, path, |session_id, path| {
 				serde_json::to_value(WriteTextFileRequest { session_id, path, content })
 			})
 			.await
@@ -735,16 +789,21 @@ impl AcpClient {
 	}
 
 	/// Sends one gated `fs/*` request and awaits its answer within the
-	/// deadline.
+	/// deadline. With `session`, the request is refused unless that session is
+	/// still the live one.
 	async fn call(
 		&self,
 		method: ClientMethod,
+		session: Option<&Str>,
 		path: &Path,
 		params: impl FnOnce(&str, &str) -> serde_json::Result<Value>,
 	) -> Result<Value, ClientRequestError> {
 		let (id, reply) = {
 			let mut table = self.0.table.lock();
 			let session_id = table.admit_fs(method, self.0.settings.fs)?;
+			if session.is_some_and(|session| *session != session_id) {
+				return Err(ClientRequestError::SessionEnded { method });
+			}
 			let path = project_path(&table.project_root, path)?;
 			let params = params(session_id.as_str(), path)
 				.map_err(|source| ClientRequestError::Encode { method, source })?;

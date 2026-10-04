@@ -126,6 +126,7 @@ fn committed(
 		disposition,
 		made_executable,
 		snapshot_tag: snapshot_tag.map(Str::new_static),
+		editor_sync: omp_tools::editor_sync::EditorSync::default(),
 	}
 }
 
@@ -497,4 +498,85 @@ async fn post_start_special_write_interruption_is_effects_unknown() {
 		),
 		"post-start interruption truth changed: {events:?}"
 	);
+}
+
+/// A committed write whose editor write-back reports on `reports`.
+fn synced_write(
+	reports: flume::Receiver<omp_tools::editor_sync::EditorSyncReport>,
+) -> (FakeDocuments, IncomingParams<'static>, omp_tool::InvocationFeed) {
+	let mut result = committed(WriteDisposition::Overwrote, 5, false, Some("ab12"));
+	result.editor_sync = omp_tools::editor_sync::EditorSync::new(
+		vec![omp_tools::editor_sync::EditorSyncTarget {
+			path:     Str::new_static("/workspace/out.txt"),
+			revision: Str::new_static("2:ab"),
+		}],
+		reports,
+	);
+	let documents = FakeDocuments::success(LiteralPathProbe::Exists, result);
+	let (feed, params) = IncomingParams::channel();
+	feed
+		.args_committed(Str::new_static(r#"{"path":"out.txt","content":"hello"}"#))
+		.expect("write invocation remains live");
+	(documents, params, feed)
+}
+
+/// Commit durable → write-back → settle (ADR 0037 §4.4): the call settles only
+/// once the editor write-back reported, carrying its notices.
+#[tokio::test(flavor = "current_thread")]
+async fn a_committed_write_settles_after_its_editor_write_back() {
+	let (reports, received) = flume::unbounded();
+	let (documents, params, _feed) = synced_write(received);
+	let tool = write::tool(documents);
+	let events = tool.call(params).collect::<Vec<_>>();
+	tokio::pin!(events);
+	assert!(
+		time::timeout(Duration::from_millis(100), &mut events)
+			.await
+			.is_err(),
+		"the call waits for its write-back"
+	);
+	reports
+		.send(omp_tools::editor_sync::EditorSyncReport {
+			target: 0,
+			diags:  vec![Diag::info(DiagKind::ClientFormatDrift, "reformatted")],
+		})
+		.expect("report the write-back");
+	let events = time::timeout(Duration::from_secs(1), &mut events)
+		.await
+		.expect("the call settles after the report");
+	let [.., Ev::Diag(drift), Ev::Done(ToolTerminal::Done { result: Ok(_), .. })] =
+		events.as_slice()
+	else {
+		panic!("the write-back's notice precedes an ok verdict: {events:?}");
+	};
+	assert_eq!(drift.native_kind(), Some(DiagKind::ClientFormatDrift));
+}
+
+/// An interrupt after the commit settles the call at once, ok, with
+/// `editor_sync_pending` (ADR 0037 §4.6).
+#[tokio::test(flavor = "current_thread")]
+async fn an_interrupt_after_the_commit_settles_ok_with_editor_sync_pending() {
+	let (_reports, received) = flume::unbounded();
+	let (documents, params, feed) = synced_write(received);
+	let tool = write::tool(documents);
+	let events = tool.call(params).collect::<Vec<_>>();
+	tokio::pin!(events);
+	assert!(
+		time::timeout(Duration::from_millis(100), &mut events)
+			.await
+			.is_err()
+	);
+	feed
+		.interrupt(Interrupt { class: sf!("immediate"), reason: sf!("stop") })
+		.expect("write invocation accepts interruption");
+	let events = time::timeout(Duration::from_secs(1), &mut events)
+		.await
+		.expect("the interrupt settles the call at once");
+	let [.., Ev::Diag(pending), Ev::Done(ToolTerminal::Done { result: Ok(_), .. })] =
+		events.as_slice()
+	else {
+		panic!("the committed write settles ok with a pending notice: {events:?}");
+	};
+	assert_eq!(pending.native_kind(), Some(DiagKind::EditorSyncPending));
+	assert!(pending.text.contains("/workspace/out.txt"), "{}", pending.text);
 }

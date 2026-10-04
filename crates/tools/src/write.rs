@@ -179,6 +179,9 @@ pub struct PlainWriteResult {
 	/// Four-character tag recorded in the shared session snapshot store.
 	/// Absent for oversized or otherwise untaggable text.
 	pub snapshot_tag:    Option<Str>,
+	/// Write-back of the committed file to a bound editor, awaited before the
+	/// call settles (ADR 0037 §4.4).
+	pub editor_sync:     crate::editor_sync::EditorSync,
 }
 
 /// Resource request for one revision-checked conflict splice.
@@ -1002,36 +1005,47 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 				format_policy: self.format_policy,
 				guard_generated: self.guard_generated,
 			};
-			let operation = self.documents.write_plain(request).fuse();
-			let interruption = params.next_interrupt().fuse();
-			pin_mut!(operation, interruption);
-			select_biased! {
-				result = operation => match result {
-					Ok(result) => {
-						let payload = Payload {
-							resolved_path: result.resolved_path,
-							display_path: result.display_path,
-							canonical_recovery,
-							byte_len: result.byte_len,
-							reported_len,
-							disposition: result.disposition,
-							stripped_wrapper: stripped.stripped,
-							made_executable: result.made_executable,
-							snapshot_tag: result.snapshot_tag,
-							operation: WriteOperation::Plain,
-						};
-						for diag in diags(&payload) {
-							yield Ev::Diag(diag);
-						}
-						yield done(Ok(payload));
+			let outcome = {
+				let operation = self.documents.write_plain(request).fuse();
+				let interruption = params.next_interrupt().fuse();
+				pin_mut!(operation, interruption);
+				select_biased! {
+					result = operation => Some(result),
+					interrupt = interruption => {
+						yield interrupt_event(interrupt, true);
+						None
 					},
-					Err(WriteCommitError::Rejected(fault)) => yield done(Err(fault)),
-					Err(WriteCommitError::EffectsUnknown { reason }) => {
-						yield Ev::Aborted(Abort::EffectsUnknown { reason });
-					},
+				}
+			};
+			let Some(outcome) = outcome else { return; };
+			match outcome {
+				Ok(result) => {
+					let payload = Payload {
+						resolved_path: result.resolved_path,
+						display_path: result.display_path,
+						canonical_recovery,
+						byte_len: result.byte_len,
+						reported_len,
+						disposition: result.disposition,
+						stripped_wrapper: stripped.stripped,
+						made_executable: result.made_executable,
+						snapshot_tag: result.snapshot_tag,
+						operation: WriteOperation::Plain,
+					};
+					for diag in diags(&payload) {
+						yield Ev::Diag(diag);
+					}
+					// The commit is durable and the result is fixed; the call settles
+					// once a bound editor holds the written bytes, or at once with
+					// `editor_sync_pending` when interrupted (ADR 0037 §4.4–§4.6).
+					for diag in result.editor_sync.settle(params.next_interrupt()).await {
+						yield Ev::Diag(diag);
+					}
+					yield done(Ok(payload));
 				},
-				interrupt = interruption => {
-					yield interrupt_event(interrupt, true);
+				Err(WriteCommitError::Rejected(fault)) => yield done(Err(fault)),
+				Err(WriteCommitError::EffectsUnknown { reason }) => {
+					yield Ev::Aborted(Abort::EffectsUnknown { reason });
 				},
 			}
 		}

@@ -5,7 +5,6 @@ use std::{
 	fs,
 	future::Future,
 	path::PathBuf,
-	pin::Pin,
 	sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -33,49 +32,66 @@ use crate::{
 	workspace::WorkspaceHost,
 };
 
-/// An editor answering `fs/read_text_file` from an in-memory buffer map.
+/// An editor answering `fs/read_text_file` from an in-memory buffer map and
+/// storing what `fs/write_text_file` sends.
 #[derive(Default)]
 struct FakeEditor {
-	buffers: Mutex<HashMap<PathBuf, Result<Str, EditorIoError>>>,
-	reads:   AtomicUsize,
-	writes:  AtomicUsize,
-	delay:   Option<Duration>,
+	buffers:     Mutex<HashMap<PathBuf, Result<Str, EditorIoError>>>,
+	reads:       AtomicUsize,
+	writes:      AtomicUsize,
+	/// Every write, in order.
+	written:     Mutex<Vec<(PathBuf, Str)>>,
+	delay:       Option<Duration>,
+	/// Applied to every written buffer, like a client's format-on-save.
+	formatter:   Option<fn(&str) -> String>,
+	/// The answer to every write instead of storing it.
+	write_error: Option<EditorIoError>,
+	/// Each write waits for one release on this gate.
+	gate:        Option<flume::Receiver<()>>,
 }
 
-impl AcpDocumentBackend for FakeEditor {
-	fn deadline(&self) -> Duration {
-		Duration::from_millis(250)
+/// The fake editor's file methods, as the binding's queue drives them.
+struct Files(Arc<FakeEditor>);
+
+impl crate::editor_sync::EditorFiles for Files {
+	async fn read_text(&self, path: Str) -> Result<Str, EditorIoError> {
+		self.0.reads.fetch_add(1, Ordering::SeqCst);
+		if let Some(delay) = self.0.delay {
+			time::sleep(delay).await;
+		}
+		self
+			.0
+			.buffers
+			.lock()
+			.get(Path::new(path.as_str()))
+			.cloned()
+			.unwrap_or(Err(EditorIoError::Refused))
 	}
 
-	fn read_text(
-		&self,
-		absolute_path: Str,
-	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
-		Box::pin(async move {
-			self.reads.fetch_add(1, Ordering::SeqCst);
-			if let Some(delay) = self.delay {
-				time::sleep(delay).await;
-			}
-			self
-				.buffers
-				.lock()
-				.get(Path::new(absolute_path.as_str()))
-				.cloned()
-				.unwrap_or(Err(EditorIoError::Refused))
-		})
-	}
-
-	fn write_text(
-		&self,
-		_absolute_path: Str,
-		content: Str,
-	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
-		Box::pin(async move {
-			self.writes.fetch_add(1, Ordering::SeqCst);
-			Ok(content)
-		})
+	async fn write_text(&self, path: Str, content: Str) -> Result<(), EditorIoError> {
+		if let Some(gate) = &self.0.gate {
+			gate
+				.recv_async()
+				.await
+				.map_err(|_| EditorIoError::Disconnected)?;
+		}
+		self.0.writes.fetch_add(1, Ordering::SeqCst);
+		if let Some(error) = self.0.write_error {
+			return Err(error);
+		}
+		let stored = self
+			.0
+			.formatter
+			.map_or_else(|| content.clone(), |format| Str::new(format(&content)));
+		let path = PathBuf::from(path.as_str());
+		self.0.written.lock().push((path.clone(), content));
+		self.0.buffers.lock().insert(path, Ok(stored));
+		Ok(())
 	}
 }
+
+const READS_ONLY: EditorCapabilities = EditorCapabilities { read: true, write: false };
+const READS_AND_WRITES: EditorCapabilities = EditorCapabilities { read: true, write: true };
 
 struct Fixture {
 	_root:       tempfile::TempDir,
@@ -83,6 +99,7 @@ struct Fixture {
 	environment: Environment,
 	host:        DocumentHost,
 	editor:      Arc<FakeEditor>,
+	backend:     Arc<dyn AcpDocumentBackend>,
 	session:     Arc<EditorSession>,
 }
 
@@ -93,11 +110,26 @@ async fn connect(environment: &Environment) -> DocumentHost {
 }
 
 impl Fixture {
+	/// An editor that serves reads only: buffers are the base, nothing is
+	/// written back.
 	async fn new(files: &[(&str, &[u8])]) -> Self {
 		Self::with_editor(files, FakeEditor::default()).await
 	}
 
 	async fn with_editor(files: &[(&str, &[u8])], editor: FakeEditor) -> Self {
+		Self::bound(files, editor, READS_ONLY).await
+	}
+
+	/// An editor that also accepts write-backs.
+	async fn writable(files: &[(&str, &[u8])], editor: FakeEditor) -> Self {
+		Self::bound(files, editor, READS_AND_WRITES).await
+	}
+
+	async fn bound(
+		files: &[(&str, &[u8])],
+		editor: FakeEditor,
+		capabilities: EditorCapabilities,
+	) -> Self {
 		let directory = tempfile::tempdir().expect("workspace");
 		let root = fs::canonicalize(directory.path()).expect("canonical workspace");
 		for (name, content) in files {
@@ -106,9 +138,20 @@ impl Fixture {
 		let environment =
 			Environment::new(ServerConfig::new(&root).expect("docserver config")).expect("authority");
 		let host = connect(&environment).await;
+		// A held write must outlast its test's holding, not the deadline.
+		let deadline = if editor.gate.is_some() {
+			Duration::from_secs(5)
+		} else {
+			Duration::from_millis(250)
+		};
 		let editor = Arc::new(editor);
-		let session = Arc::new(EditorSession::new(editor.deadline()));
-		Self { _root: directory, root, environment, host, editor, session }
+		let backend = Arc::new(crate::editor_sync::EditorBackend::new(
+			Files(Arc::clone(&editor)),
+			capabilities,
+			deadline,
+		)) as Arc<dyn AcpDocumentBackend>;
+		let session = Arc::new(EditorSession::new(deadline, capabilities));
+		Self { _root: directory, root, environment, host, editor, backend, session }
 	}
 
 	fn path(&self, name: &str) -> PathBuf {
@@ -129,7 +172,7 @@ impl Fixture {
 
 	fn route(&self) -> InvocationAcpBackends {
 		InvocationAcpBackends::new(Some(EditorRoute::new(
-			Arc::clone(&self.editor) as Arc<dyn AcpDocumentBackend>,
+			Arc::clone(&self.backend),
 			Arc::clone(&self.session),
 		)))
 	}
@@ -731,12 +774,12 @@ fn editor_errors_cross_the_wire_as_their_own_classification() {
 
 #[test]
 fn a_new_binding_starts_unanchored() {
-	let session = EditorSession::new(Duration::ZERO);
+	let session = EditorSession::new(Duration::ZERO, READS_ONLY);
 	assert_eq!(session.deadline(), DEFAULT_DEADLINE);
 	let path = Str::new_static("/work/a.txt");
 	let _ = session.select(&path, "a\n", "a\n");
 	assert!(session.anchor_of("/work/a.txt").is_some());
-	let rebound = EditorSession::new(Duration::from_secs(1));
+	let rebound = EditorSession::new(Duration::from_secs(1), READS_ONLY);
 	assert!(rebound.anchor_of("/work/a.txt").is_none());
 }
 
@@ -880,7 +923,11 @@ async fn a_bound_composition_answers_reads_over_the_environment_wire() {
 		.insert(root.join("notes.txt"), Ok(Str::new_static("on disk\nunsaved line\n")));
 	environment
 		.editor_documents()
-		.bind(Some(Arc::clone(&editor) as Arc<dyn AcpDocumentBackend>));
+		.bind(Some(Arc::new(crate::editor_sync::EditorBackend::new(
+			Files(Arc::clone(&editor)),
+			READS_ONLY,
+			Duration::from_secs(5),
+		))));
 	let client = environment.client().clone();
 	let mut invocation = client
 		.invoke(omp_proto::env::v1::InvokeTool {
@@ -925,7 +972,7 @@ async fn the_in_process_editor_never_serves_another_connections_invocations() {
 	fixture.buffer("doc.txt", Ok("a\nunsaved\n"));
 	fixture
 		.host
-		.bind_in_process_editor(Some(Arc::clone(&fixture.editor) as Arc<dyn AcpDocumentBackend>));
+		.bind_in_process_editor(Some(Arc::clone(&fixture.backend)));
 	let lease = fixture.lease("doc.txt").await;
 	let disk = read_whole(&fixture.host, &lease).await.expect("disk");
 
@@ -954,4 +1001,392 @@ async fn the_in_process_editor_never_serves_another_connections_invocations() {
 		.expect("disk");
 	assert_eq!(unbound.bytes, None);
 	assert_eq!(fixture.reads(), 1);
+}
+
+/// Waits for a commit's write-backs to report, as an uninterrupted tool does.
+async fn settled(sync: EditorSync) -> Vec<Diag> {
+	time::timeout(Duration::from_secs(5), sync.settle(std::future::pending::<()>()))
+		.await
+		.expect("the write-backs settle in time")
+}
+
+/// Commits `content` as an Edit of `name` prepared against the editor.
+async fn edit_commit(fixture: &Fixture, name: &str, content: &'static str) -> EditorSync {
+	let mut prepared = fixture
+		.scoped(fixture.host.prepare(Fixture::prepare_request(name)))
+		.await
+		.expect("prepare");
+	edit_commit_prepared(fixture, &mut prepared, content).await
+}
+
+async fn edit_commit_prepared(
+	fixture: &Fixture,
+	prepared: &mut crate::tool_document::PreparedDocument,
+	content: &'static str,
+) -> EditorSync {
+	let revision = prepared.base_revision().clone();
+	let clipboard = fixture.host.start_clipboard_batch();
+	let result = fixture
+		.scoped(EditDocuments::commit(
+			&fixture.host,
+			vec![prepared],
+			vec![EditProposal {
+				action:        EditAction::Write { content: Bytes::from_static(content.as_bytes()) },
+				base_revision: revision,
+				stale_policy:  StalePolicy::RebaseNonOverlapping,
+				format_policy: FormatPolicy::Disabled,
+			}],
+			clipboard,
+		))
+		.await
+		.expect("the commit lands");
+	assert_eq!(result.editor_sync.targets().len(), 1, "one write-back per committed text path");
+	result.editor_sync
+}
+
+fn editor_buffer(fixture: &Fixture, name: &str) -> Option<Str> {
+	fixture
+		.editor
+		.buffers
+		.lock()
+		.get(&fixture.path(name))
+		.cloned()
+		.and_then(Result::ok)
+}
+
+fn anchor(fixture: &Fixture, name: &str) -> Option<Bytes> {
+	fixture.session.anchor_of(fixture.key(name).as_str())
+}
+
+/// Commit durable → write-back → settle (ADR 0037 §4.4): the commit is on disk
+/// before the editor is written, and the call's write-backs report only once
+/// the editor holds the committed bytes, which anchor (K := R).
+#[tokio::test]
+async fn an_edit_is_written_back_after_its_commit_and_before_it_settles() {
+	let (release, gate) = flume::unbounded();
+	let fixture = Fixture::writable(&[("e.txt", ANCESTOR.as_bytes())], FakeEditor {
+		gate: Some(gate),
+		..FakeEditor::default()
+	})
+	.await;
+	fixture.buffer("e.txt", Ok(ANCESTOR));
+	let committed = "one\ntwo\nthree\nfour\nfive\nsix\n";
+	let sync = edit_commit(&fixture, "e.txt", committed).await;
+	assert_eq!(fs::read_to_string(fixture.path("e.txt")).expect("disk"), committed, "durable first");
+	let mut settling = Box::pin(settled(sync));
+	assert!(
+		time::timeout(Duration::from_millis(100), &mut settling)
+			.await
+			.is_err(),
+		"the call does not settle while the write-back is in flight"
+	);
+	assert_eq!(fixture.editor.writes.load(Ordering::SeqCst), 0);
+	release.send(()).expect("release the write");
+	assert!(settling.await.is_empty(), "a clean write-back adds no notice");
+	assert_eq!(editor_buffer(&fixture, "e.txt").as_deref(), Some(committed));
+	assert_eq!(anchor(&fixture, "e.txt").as_deref(), Some(committed.as_bytes()), "K := R");
+	let base = fixture.base("e.txt").await.expect("synced");
+	assert_eq!(base.bytes, None, "the synced editor is clean");
+}
+
+/// What the user types between the agent's read and the write-back is merged
+/// onto the committed bytes before they are sent; disk keeps the commit.
+#[tokio::test]
+async fn keystrokes_typed_during_the_call_survive_the_write_back() {
+	let fixture = Fixture::writable(&[("k.txt", ANCESTOR.as_bytes())], FakeEditor::default()).await;
+	fixture.buffer("k.txt", Ok(ANCESTOR));
+	let mut prepared = fixture
+		.scoped(fixture.host.prepare(Fixture::prepare_request("k.txt")))
+		.await
+		.expect("prepare");
+	// The user types on line 5 while the agent edits line 1.
+	fixture.buffer("k.txt", Ok("one\ntwo\nthree\nfour\nFIVE\n"));
+	let sync = edit_commit_prepared(&fixture, &mut prepared, "ONE\ntwo\nthree\nfour\nfive\n").await;
+	assert!(settled(sync).await.is_empty());
+	assert_eq!(
+		fs::read_to_string(fixture.path("k.txt")).expect("disk"),
+		"ONE\ntwo\nthree\nfour\nfive\n",
+		"disk holds the commit"
+	);
+	let merged = "ONE\ntwo\nthree\nfour\nFIVE\n";
+	assert_eq!(editor_buffer(&fixture, "k.txt").as_deref(), Some(merged), "the keystroke survives");
+	assert_eq!(anchor(&fixture, "k.txt").as_deref(), Some(merged.as_bytes()), "K := the bytes sent");
+}
+
+/// A keystroke overlapping the agent's change skips the write-back with
+/// `editor_sync_conflict` ranges; the editor keeps its buffer, the commit
+/// stands, and K stays the base the commit used.
+#[tokio::test]
+async fn an_overlapping_keystroke_skips_the_write_back_with_ranges() {
+	let fixture = Fixture::writable(&[("o.txt", ANCESTOR.as_bytes())], FakeEditor::default()).await;
+	fixture.buffer("o.txt", Ok(ANCESTOR));
+	let mut prepared = fixture
+		.scoped(fixture.host.prepare(Fixture::prepare_request("o.txt")))
+		.await
+		.expect("prepare");
+	fixture.buffer("o.txt", Ok("uno\ntwo\nthree\nfour\nfive\n"));
+	let sync = edit_commit_prepared(&fixture, &mut prepared, "ONE\ntwo\nthree\nfour\nfive\n").await;
+	let diags = settled(sync).await;
+	assert_eq!(kinds(&diags), [kind(DiagKind::EditorSyncConflict)]);
+	assert_eq!(diags[0].severity, omp_tool::Severity::Warn);
+	assert!(diags[0].text.contains("bytes 0-"), "typed ranges: {}", diags[0].text);
+	assert!(diags[0].text.contains("lines 1-1"), "{}", diags[0].text);
+	assert_eq!(fixture.editor.writes.load(Ordering::SeqCst), 0, "nothing was written");
+	assert_eq!(editor_buffer(&fixture, "o.txt").as_deref(), Some("uno\ntwo\nthree\nfour\nfive\n"));
+	assert_eq!(
+		fs::read_to_string(fixture.path("o.txt")).expect("disk"),
+		"ONE\ntwo\nthree\nfour\nfive\n"
+	);
+	assert_eq!(anchor(&fixture, "o.txt").as_deref(), Some(ANCESTOR.as_bytes()), "K := B");
+}
+
+/// A client that reformats the written buffer is reported as client format
+/// drift; nothing is committed again.
+#[tokio::test]
+async fn client_reformatting_is_reported_as_drift() {
+	let fixture = Fixture::writable(&[("d.txt", b"a\n")], FakeEditor {
+		formatter: Some(|text| text.to_uppercase()),
+		..FakeEditor::default()
+	})
+	.await;
+	fixture.buffer("d.txt", Ok("a\n"));
+	let diags = settled(edit_commit(&fixture, "d.txt", "a\nb\n").await).await;
+	assert_eq!(kinds(&diags), [kind(DiagKind::ClientFormatDrift)]);
+	assert!(diags[0].text.contains("client_formatted=true"), "{}", diags[0].text);
+	assert!(
+		diags[0]
+			.text
+			.contains("bytes_changed_after_client_format=true"),
+		"{}",
+		diags[0].text
+	);
+	assert_eq!(editor_buffer(&fixture, "d.txt").as_deref(), Some("A\nB\n"));
+	assert_eq!(fs::read(fixture.path("d.txt")).expect("disk"), b"a\nb\n", "no new commit");
+	assert_eq!(anchor(&fixture, "d.txt").as_deref(), Some(&b"a\nb\n"[..]), "K := the bytes sent");
+}
+
+/// A failed write-back never un-commits: the write-back reports
+/// `editor_sync_failed`, K stays the base buffer, and the stale buffer then
+/// reads as stale-clean so the next read resolves to disk.
+#[tokio::test]
+async fn a_failed_write_back_keeps_the_commit_and_warns() {
+	let fixture = Fixture::writable(&[("f.txt", b"a\n")], FakeEditor {
+		write_error: Some(EditorIoError::Timeout),
+		..FakeEditor::default()
+	})
+	.await;
+	fixture.buffer("f.txt", Ok("a\nunsaved\n"));
+	let diags = settled(edit_commit(&fixture, "f.txt", "a\nunsaved\nagent\n").await).await;
+	assert_eq!(kinds(&diags), [kind(DiagKind::EditorSyncFailed)]);
+	assert_eq!(diags[0].severity, omp_tool::Severity::Warn);
+	assert!(diags[0].text.contains("timeout"), "{}", diags[0].text);
+	assert_eq!(fs::read(fixture.path("f.txt")).expect("disk"), b"a\nunsaved\nagent\n");
+	assert_eq!(anchor(&fixture, "f.txt").as_deref(), Some(&b"a\nunsaved\n"[..]), "K := B");
+	let base = fixture.base("f.txt").await.expect("stale-clean");
+	assert_eq!(base.bytes, None, "the stale buffer resolves to disk");
+	assert!(base.diags.is_empty());
+}
+
+/// An interrupt after the commit settles the call at once with
+/// `editor_sync_pending`; the queued write-back still completes.
+#[tokio::test]
+async fn an_interrupt_after_the_commit_leaves_the_write_back_queued() {
+	let (release, gate) = flume::unbounded();
+	let fixture = Fixture::writable(&[("i.txt", b"a\n")], FakeEditor {
+		gate: Some(gate),
+		..FakeEditor::default()
+	})
+	.await;
+	fixture.buffer("i.txt", Ok("a\n"));
+	let sync = edit_commit(&fixture, "i.txt", "a\nb\n").await;
+	let diags = sync.settle(std::future::ready(())).await;
+	assert_eq!(kinds(&diags), [kind(DiagKind::EditorSyncPending)]);
+	release.send(()).expect("release the write");
+	time::timeout(Duration::from_secs(5), async {
+		while editor_buffer(&fixture, "i.txt").as_deref() != Some("a\nb\n") {
+			time::sleep(Duration::from_millis(5)).await;
+		}
+	})
+	.await
+	.expect("the queued write-back completes");
+}
+
+/// Cancelled before the commit: nothing is written back.
+#[tokio::test]
+async fn cancellation_before_the_commit_writes_nothing_back() {
+	let fixture = Fixture::writable(&[("c.txt", b"a\n")], FakeEditor::default()).await;
+	fixture.buffer("c.txt", Ok("a\n"));
+	let prepared = fixture
+		.scoped(fixture.host.prepare(Fixture::prepare_request("c.txt")))
+		.await
+		.expect("prepare");
+	drop(prepared);
+	time::sleep(Duration::from_millis(20)).await;
+	assert_eq!(fixture.editor.writes.load(Ordering::SeqCst), 0);
+	assert_eq!(fs::read(fixture.path("c.txt")).expect("disk"), b"a\n");
+}
+
+/// Three Writes of one path while the first write-back is held: the second,
+/// never sent, is superseded by the third; the editor sees the first and the
+/// third, in order.
+#[tokio::test]
+async fn a_newer_commit_supersedes_a_queued_write_back() {
+	let (release, gate) = flume::unbounded();
+	let fixture = Fixture::writable(&[("s.txt", b"0\n")], FakeEditor {
+		gate: Some(gate),
+		..FakeEditor::default()
+	})
+	.await;
+	fixture.buffer("s.txt", Ok("0\n"));
+	let mut syncs = Vec::new();
+	for content in ["1\n", "2\n", "3\n"] {
+		let written = fixture
+			.scoped(fixture.host.write_plain(PlainWriteRequest {
+				path:            Str::new_static("s.txt"),
+				content:         Str::new_static(content),
+				format_policy:   FormatPolicy::Disabled,
+				guard_generated: false,
+			}))
+			.await
+			.expect("write commits");
+		syncs.push(written.editor_sync);
+		// Let the write-back reach the editor's queue before the next commit.
+		time::sleep(Duration::from_millis(20)).await;
+	}
+	let third = syncs.pop().expect("third");
+	let second = syncs.pop().expect("second");
+	let first = syncs.pop().expect("first");
+	let superseded = settled(second).await;
+	assert!(superseded.is_empty(), "superseded: no notice, nothing sent: {superseded:?}");
+	release.send(()).expect("release the first write");
+	release.send(()).expect("release the third write");
+	assert!(settled(first).await.is_empty());
+	assert!(settled(third).await.is_empty());
+	let written: Vec<_> = fixture
+		.editor
+		.written
+		.lock()
+		.iter()
+		.map(|(_, content)| content.clone())
+		.collect();
+	assert_eq!(written, ["1\n", "3\n"]);
+	assert_eq!(anchor(&fixture, "s.txt").as_deref(), Some(&b"3\n"[..]));
+}
+
+/// A created file is written back as is: there is no buffer to merge with.
+#[tokio::test]
+async fn a_created_file_is_written_back() {
+	let fixture = Fixture::writable(&[], FakeEditor::default()).await;
+	let written = fixture
+		.scoped(fixture.host.write_plain(PlainWriteRequest {
+			path:            Str::new_static("new.txt"),
+			content:         Str::new_static("created\n"),
+			format_policy:   FormatPolicy::Disabled,
+			guard_generated: false,
+		}))
+		.await
+		.expect("create commits");
+	assert!(settled(written.editor_sync).await.is_empty());
+	assert_eq!(editor_buffer(&fixture, "new.txt").as_deref(), Some("created\n"));
+	assert_eq!(fs::read(fixture.path("new.txt")).expect("disk"), b"created\n");
+}
+
+/// Joined over the environment wire: a Write invoked over a composition's
+/// connection commits through the authority, then the daemon's write-back
+/// crosses as `AcpWriteQuery` to the editor's queue, and only then does the
+/// tool's verdict arrive (commit → write-back → settle).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bound_composition_writes_back_over_the_environment_wire() {
+	let directory = tempfile::tempdir().expect("scratch");
+	let root = directory.path().join("workspace");
+	let state = directory.path().join("state");
+	fs::create_dir_all(&root).expect("workspace");
+	fs::create_dir_all(&state).expect("state");
+	let root = fs::canonicalize(&root).expect("canonical root");
+	fs::write(root.join("notes.txt"), "on disk\n").expect("fixture");
+	let environment = crate::ProjectEnvironment::start_embedded(
+		&root,
+		&state,
+		&omp_env::project_state::document_socket(&state),
+		false,
+		&[],
+		&[],
+		Arc::new(omp_con::Ctx::new()),
+		crate::RegistryBridges::default(),
+	)
+	.await
+	.expect("environment");
+	let (release, gate) = flume::unbounded();
+	let editor = Arc::new(FakeEditor { gate: Some(gate), ..FakeEditor::default() });
+	editor
+		.buffers
+		.lock()
+		.insert(root.join("notes.txt"), Ok(Str::new_static("on disk\n")));
+	environment
+		.editor_documents()
+		.bind(Some(Arc::new(crate::editor_sync::EditorBackend::new(
+			Files(Arc::clone(&editor)),
+			READS_AND_WRITES,
+			Duration::from_secs(5),
+		))));
+	let client = environment.client().clone();
+	let mut invocation = client
+		.invoke(omp_proto::env::v1::InvokeTool {
+			invocation_id: "write-1".to_owned(),
+			name: "write".to_owned(),
+			rev: "2".to_owned(),
+			..omp_proto::env::v1::InvokeTool::default()
+		})
+		.await
+		.expect("invoke");
+	let accepted = invocation.next_event().await.expect("event");
+	assert!(matches!(accepted, Some(omp_env::InvocationEvent::Accepted(_))), "{accepted:?}");
+	invocation
+		.commit_args(
+			Bytes::from_static(br#"{"path":"notes.txt","content":"agent wrote\n"}"#),
+			Bytes::from_static(b"editor-sync-test-token"),
+			1000,
+			None,
+		)
+		.await
+		.expect("commit args");
+	let verdict = tokio::spawn(async move {
+		loop {
+			match invocation.next_event().await.expect("event") {
+				Some(omp_env::InvocationEvent::Verdict(verdict)) => break verdict,
+				Some(_) => {},
+				None => panic!("invocation closed before its verdict"),
+			}
+		}
+	});
+	time::timeout(Duration::from_secs(5), async {
+		while fs::read(root.join("notes.txt")).expect("disk") != b"agent wrote\n" {
+			time::sleep(Duration::from_millis(5)).await;
+		}
+	})
+	.await
+	.expect("the commit is durable first");
+	time::sleep(Duration::from_millis(150)).await;
+	assert!(!verdict.is_finished(), "the call settles only after its write-back");
+	assert_eq!(editor.writes.load(Ordering::SeqCst), 0);
+	release.send(()).expect("release the write");
+	let verdict = time::timeout(Duration::from_secs(5), verdict)
+		.await
+		.expect("the verdict follows the write-back")
+		.expect("verdict task");
+	let json = String::from_utf8_lossy(&verdict.json).into_owned();
+	assert!(!json.contains("editor_sync"), "a clean write-back adds no notice: {json}");
+	assert_eq!(editor.writes.load(Ordering::SeqCst), 1);
+	assert_eq!(
+		editor
+			.buffers
+			.lock()
+			.get(&root.join("notes.txt"))
+			.cloned()
+			.and_then(Result::ok)
+			.as_deref(),
+		Some("agent wrote\n"),
+		"the editor holds the committed bytes"
+	);
+	drop(environment);
 }

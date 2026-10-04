@@ -42,17 +42,21 @@ use crate::docserver::{
 	wire::{self, FrameConfig},
 };
 /// The ACP editor on the other end of a session, as the environment reaches
-/// it for document buffers (ADR 0037).
+/// it for document buffers and write-backs (ADR 0037).
 ///
 /// The editor is never a document authority: its buffer is at most the base a
-/// tool reads and proposes against, and every write commits through the
-/// document authority. The boxed futures are confined to this cold dynamic
-/// RPC boundary, one allocation per editor round trip; ordinary document and
-/// tool calls remain statically dispatched.
+/// tool reads and proposes against, every write commits through the document
+/// authority, and the committed bytes are only then written back. The boxed
+/// futures are confined to this cold dynamic RPC boundary, one allocation per
+/// editor round trip; ordinary document and tool calls remain statically
+/// dispatched.
 pub trait AcpDocumentBackend: Send + Sync {
 	/// Deadline the editor applies to each request (`sv_acp_fs_timeout`); the
 	/// environment bounds its own wait by it.
 	fn deadline(&self) -> Duration;
+
+	/// The `fs/*` methods the editor serves; fixed for the binding.
+	fn capabilities(&self) -> EditorCapabilities;
 
 	/// Reads the editor's whole current UTF-8 buffer for a canonical absolute
 	/// path inside the project root.
@@ -61,15 +65,62 @@ pub trait AcpDocumentBackend: Send + Sync {
 		absolute_path: Str,
 	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>>;
 
-	/// Replaces the editor's buffer for a canonical absolute path inside the
-	/// project root and returns the buffer the editor then holds. Reserved for
-	/// the post-commit write-back (ADR 0037 §4.3); nothing in the environment
-	/// calls it before that lands.
-	fn write_text(
+	/// Writes committed bytes back to the editor (ADR 0037 §4.3).
+	///
+	/// The write-back is queued behind earlier write-backs of the same path
+	/// before this returns, so it runs to its end even when the returned
+	/// future is dropped; the future only reports the outcome.
+	fn write_back(
 		&self,
-		absolute_path: Str,
-		content: Str,
-	) -> Pin<Box<dyn Future<Output = Result<Str, EditorIoError>> + Send + '_>>;
+		write_back: WriteBack,
+	) -> Pin<Box<dyn Future<Output = Result<WriteBackOutcome, EditorIoError>> + Send + '_>>;
+}
+
+/// The editor's `fs/*` capabilities (`clientCapabilities.fs`, ADR 0037 §1).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EditorCapabilities {
+	/// `fs.readTextFile`: buffers are read as the document base, before each
+	/// write-back, and once after it.
+	pub read:  bool,
+	/// `fs.writeTextFile`: every commit is written back.
+	pub write: bool,
+}
+
+/// One write-back of committed bytes to the editor (ADR 0037 §4.3).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteBack {
+	/// Canonical absolute path inside the project root.
+	pub path:    Str,
+	/// The committed bytes R, in the file's encoding on disk.
+	pub content: Str,
+	/// The buffer B the commit used as its base, normalized to LF without a
+	/// BOM; `None` when the commit read no buffer (a create, or an editor that
+	/// serves no reads), and R is then written as is.
+	pub base:    Option<Str>,
+}
+
+/// What one write-back did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WriteBackOutcome {
+	/// The editor holds the committed bytes, merged with what the user typed
+	/// since the base.
+	Written {
+		/// The bytes sent when they differ from R: the user's changes since
+		/// the base merged onto it.
+		merged:    Option<Str>,
+		/// The buffer read back after the write when it differs from what was
+		/// sent: the client reformatted it.
+		read_back: Option<Str>,
+	},
+	/// Skipped: the user's changes since the base overlap the commit, so the
+	/// editor's own dirty-versus-disk handling takes over.
+	Conflict {
+		/// Overlapping ranges in the base's normalized byte coordinates.
+		ranges: Vec<crate::docserver::ByteRange>,
+	},
+	/// Skipped: a newer committed revision of the same path replaced this one
+	/// before it was sent.
+	Superseded,
 }
 
 /// Why the editor produced no buffer for a request.
@@ -144,6 +195,57 @@ impl EditorIoError {
 				| Code::Uncommitted,
 			)
 			| Err(_) => Self::Refused,
+		}
+	}
+}
+
+impl WriteBackOutcome {
+	/// The outcome as it crosses the environment wire, in an
+	/// `AcpDocumentAnswer` to an `AcpWriteQuery`.
+	#[must_use]
+	pub fn into_wire(self) -> omp_proto::env::v1::AcpWriteBack {
+		use omp_proto::env::v1::{
+			AcpWriteBack, AcpWriteConflict, AcpWriteSuperseded, AcpWritten, acp_write_back::Outcome,
+		};
+		let outcome = match self {
+			Self::Written { merged, read_back } => Outcome::Written(AcpWritten {
+				merged:    merged.map(|merged| merged.as_str().to_owned()),
+				read_back: read_back.map(|read_back| read_back.as_str().to_owned()),
+			}),
+			Self::Conflict { ranges } => Outcome::Conflict(AcpWriteConflict {
+				ranges: ranges
+					.into_iter()
+					.map(|range| pb::ByteRange { start: range.start(), end: range.end() })
+					.collect(),
+			}),
+			Self::Superseded => Outcome::Superseded(AcpWriteSuperseded {}),
+		};
+		AcpWriteBack { outcome: Some(outcome) }
+	}
+
+	/// Decodes an outcome from the environment wire.
+	///
+	/// # Errors
+	///
+	/// [`EditorIoError::Malformed`] when the outcome is missing or a range is
+	/// reversed.
+	pub fn from_wire(write_back: omp_proto::env::v1::AcpWriteBack) -> Result<Self, EditorIoError> {
+		use omp_proto::env::v1::acp_write_back::Outcome;
+		match write_back.outcome {
+			Some(Outcome::Written(written)) => Ok(Self::Written {
+				merged:    written.merged.map(Str::from),
+				read_back: written.read_back.map(Str::from),
+			}),
+			Some(Outcome::Conflict(conflict)) => Ok(Self::Conflict {
+				ranges: conflict
+					.ranges
+					.iter()
+					.map(|range| crate::docserver::ByteRange::new(range.start, range.end))
+					.collect::<Result<_, _>>()
+					.map_err(|_| EditorIoError::Malformed)?,
+			}),
+			Some(Outcome::Superseded(_)) => Ok(Self::Superseded),
+			None => Err(EditorIoError::Malformed),
 		}
 	}
 }
@@ -601,7 +703,10 @@ impl DocumentHost {
 	/// calls read buffers from; each bind starts a fresh, unanchored session.
 	pub(crate) fn bind_in_process_editor(&self, editor: Option<Arc<dyn AcpDocumentBackend>>) {
 		*self.inner.in_process_editor.write() = editor.map(|editor| {
-			let session = Arc::new(crate::editor_base::EditorSession::new(editor.deadline()));
+			let session = Arc::new(crate::editor_base::EditorSession::new(
+				editor.deadline(),
+				editor.capabilities(),
+			));
 			crate::editor_base::EditorRoute::new(editor, session)
 		});
 	}

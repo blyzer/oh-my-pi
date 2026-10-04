@@ -178,7 +178,7 @@ impl EditDocuments for Fake {
 		let mut state = self.state.lock();
 		state.commit_batches.push(proposals.len());
 		state.commits.extend(proposals);
-		future::ready(Ok(CommitResult { sections }))
+		future::ready(Ok(CommitResult { sections, ..CommitResult::default() }))
 	}
 }
 

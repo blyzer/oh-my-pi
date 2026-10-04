@@ -25,7 +25,9 @@ use omp_driver::{
 	headless::kernel::{KernelOptions, SessionHome},
 	sessions::SessionRegistry,
 };
-use omp_envd::docs::{AcpDocumentBackend, EditorIoError};
+use omp_envd::docs::{
+	AcpDocumentBackend, EditorCapabilities, EditorIoError, WriteBack, WriteBackOutcome,
+};
 use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::Registry;
@@ -1552,13 +1554,160 @@ async fn no_capability_or_sv_acp_fs_off_never_binds_the_editor() {
 	}
 }
 
+/// An editor advertising only `fs.writeTextFile` is bound for write-backs: its
+/// buffers are never read, and committed bytes are written as they are.
+#[tokio::test]
+async fn a_write_only_editor_is_bound_for_write_backs_without_reads() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	let documents = Arc::new(RecordingDocuments::default());
+	let connection = AcpConnection::new(AcpSettings::default());
+	connection.bind_documents(Arc::clone(&documents) as Arc<dyn EditorDocumentsHost>);
+	let recorded = Arc::clone(&documents);
+	serve_editor(directory.path(), connection, parts, |_client, mut editor| async move {
+		editor
+			.initialize(serde_json::json!({"fs": {"writeTextFile": true}}))
+			.await;
+		let session = editor.eligible_session("new").await;
+		assert_eq!(recorded.bound(), [true]);
+		let backend = recorded.latest();
+		assert_eq!(backend.capabilities(), EditorCapabilities { read: false, write: true });
+		let path = Str::new(editor.root.join("w.txt").to_str().expect("UTF-8 path"));
+		assert_eq!(
+			backend.read_text(path.clone()).await.expect_err("no reads"),
+			EditorIoError::Unavailable
+		);
+		let write_back = tokio::spawn({
+			let backend = Arc::clone(&backend);
+			async move {
+				backend
+					.write_back(WriteBack {
+						path,
+						content: Str::new_static("committed\n"),
+						base: Some(Str::new_static("before\n")),
+					})
+					.await
+			}
+		});
+		let write = editor.request("fs/write_text_file").await;
+		assert_eq!(write["params"]["sessionId"], session.as_str());
+		assert_eq!(write["params"]["content"], "committed\n");
+		editor.answer(&write, serde_json::json!(null)).await;
+		assert_eq!(
+			write_back.await.expect("write-back task"),
+			Ok(WriteBackOutcome::Written { merged: None, read_back: None })
+		);
+		editor.quiet("probe").await;
+		let frames = editor.close().await;
+		assert!(
+			frames
+				.iter()
+				.all(|frame| frame["method"] != "fs/read_text_file"),
+			"{frames:#?}"
+		);
+	})
+	.await;
+}
+
+/// Write-backs still queued when the session switches or closes are drained
+/// first, bounded by `sv_acp_fs_timeout` (ADR 0037 §4.6): their requests name
+/// the session they were made in, the controller keeps routing the editor's
+/// answers meanwhile, and a request that arrives during the drain is answered
+/// after the switch, in order. EOF drops what is left.
+#[tokio::test]
+async fn queued_write_backs_drain_before_a_switch_or_close_and_drop_at_eof() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let parts = harness(&directory, []);
+	let documents = Arc::new(RecordingDocuments::default());
+	let timeout = std::time::Duration::from_millis(300);
+	let connection =
+		AcpConnection::new(AcpSettings { fs_timeout: timeout, ..AcpSettings::default() });
+	connection.bind_documents(Arc::clone(&documents) as Arc<dyn EditorDocumentsHost>);
+	let recorded = Arc::clone(&documents);
+	serve_editor(directory.path(), connection, parts, |client, mut editor| async move {
+		editor.initialize(fs_capabilities()).await;
+		let first = editor.eligible_session("first").await;
+		let path = Str::new(editor.root.join("a.txt").to_str().expect("UTF-8 path"));
+		let write_back = |backend: Arc<dyn AcpDocumentBackend>| {
+			let path = path.clone();
+			tokio::spawn(async move {
+				backend
+					.write_back(WriteBack { path, content: Str::new_static("committed\n"), base: None })
+					.await
+			})
+		};
+
+		let drained = write_back(recorded.latest());
+		let write = editor.request("fs/write_text_file").await;
+		assert_eq!(write["params"]["sessionId"], first.as_str());
+		assert_eq!(client.write_backs_outstanding(), 1);
+		let cwd = editor.root.to_str().expect("UTF-8 root").to_owned();
+		editor
+			.send(serde_json::json!({
+				"jsonrpc": "2.0", "id": "switch", "method": "session/new", "params": {"cwd": cwd},
+			}))
+			.await;
+		editor
+			.send(serde_json::json!({
+				"jsonrpc": "2.0", "id": "listed", "method": "session/list", "params": {},
+			}))
+			.await;
+		editor.answer(&write, serde_json::json!(null)).await;
+		let read_back = editor.request("fs/read_text_file").await;
+		assert_eq!(read_back["params"]["sessionId"], first.as_str(), "drained in its own session");
+		editor
+			.answer(&read_back, serde_json::json!({"content": "committed\n"}))
+			.await;
+		let switched = editor.next().await;
+		assert_eq!(switched["id"], "switch", "the switch waited for the drain: {switched:#?}");
+		let second = switched["result"]["sessionId"]
+			.as_str()
+			.expect("new session id")
+			.to_owned();
+		assert_ne!(second, first);
+		let listed = editor.next().await;
+		assert_eq!(listed["id"], "listed", "the deferred request is answered after: {listed:#?}");
+		assert_eq!(
+			drained.await.expect("write-back task"),
+			Ok(WriteBackOutcome::Written { merged: None, read_back: None })
+		);
+		assert_eq!(client.write_backs_outstanding(), 0);
+
+		// An editor that never answers holds `session/close` for at most the
+		// bound.
+		let unanswered = write_back(recorded.latest());
+		let write = editor.request("fs/write_text_file").await;
+		assert_eq!(write["params"]["sessionId"], second.as_str());
+		let started = tokio::time::Instant::now();
+		let closed = editor
+			.call("close", "session/close", serde_json::json!({}))
+			.await;
+		assert!(closed.get("error").is_none(), "{closed:#?}");
+		assert!(started.elapsed() < WAIT, "the drain is bounded");
+		assert_eq!(
+			unanswered.await.expect("write-back task"),
+			Err(EditorIoError::Timeout),
+			"the unanswered write timed out"
+		);
+
+		// EOF drops the queue: a write-back in flight fails at once.
+		editor.eligible_session("third").await;
+		let dropped = write_back(recorded.latest());
+		editor.request("fs/write_text_file").await;
+		editor.close().await;
+		assert_eq!(dropped.await.expect("write-back task"), Err(EditorIoError::Disconnected));
+	})
+	.await;
+}
+
 /// Joined proof over a real project environment and document authority: in an
 /// eligible ACP session, the Read tool returns the editor's unsaved buffer
-/// (asked for through `fs/read_text_file` by the environment), and the Write
-/// tool commits through the authority to disk with nothing pushed to the
-/// editor.
+/// (asked for through `fs/read_text_file` by the environment), the Write tool
+/// commits through the authority to disk, and only then is the committed
+/// content written back with `fs/write_text_file` (ADR 0037 §4.3): after the
+/// commit, before the write tool settles.
 #[tokio::test]
-async fn an_acp_session_reads_the_editor_buffer_and_writes_through_the_authority() {
+async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit() {
 	let directory = tempfile::tempdir().expect("temporary directory");
 	let root = directory.path().join("workspace");
 	let state = directory.path().join("state");
@@ -1641,14 +1790,16 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_through_the_authority
 				"params": {"sessionId": session_id, "prompt": "read, then rewrite the notes"},
 			}))
 			.await;
+		let mut buffer = String::from("on disk\nUNSAVED EDITOR LINE\n");
 		let mut reads = Vec::new();
+		let mut writes = Vec::new();
 		let response = loop {
 			let frame = editor.next().await;
 			match frame["method"].as_str() {
 				Some("fs/read_text_file") => {
 					reads.push(frame["params"].clone());
 					editor
-						.answer(&frame, serde_json::json!({"content": "on disk\nUNSAVED EDITOR LINE\n"}))
+						.answer(&frame, serde_json::json!({"content": buffer.clone()}))
 						.await;
 				},
 				Some("session/request_permission") => {
@@ -1659,7 +1810,19 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_through_the_authority
 						)
 						.await;
 				},
-				Some("fs/write_text_file") => panic!("nothing is pushed to the editor: {frame:#?}"),
+				Some("fs/write_text_file") => {
+					assert_eq!(
+						std::fs::read_to_string(&disk).expect("disk"),
+						"agent wrote\n",
+						"the commit is durable before the editor is written"
+					);
+					writes.push(frame["params"].clone());
+					frame["params"]["content"]
+						.as_str()
+						.expect("text content")
+						.clone_into(&mut buffer);
+					editor.answer(&frame, serde_json::json!(null)).await;
+				},
 				_ if frame["id"] == "prompt" => break frame,
 				_ => panic!("unexpected frame {frame:#?}"),
 			}
@@ -1674,17 +1837,46 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_through_the_authority
 			assert_eq!(read["sessionId"], session_id.as_str());
 			assert_eq!(read["path"], disk.to_str().expect("UTF-8 path"));
 		}
+		assert_eq!(writes, [serde_json::json!({
+			"sessionId": session_id,
+			"path": disk.to_str().expect("UTF-8 path"),
+			"content": "agent wrote\n",
+		})]);
 		let frames = editor.close().await;
 		let transcript = serde_json::to_string(&frames).expect("frames encode");
 		assert!(
 			transcript.contains("UNSAVED EDITOR LINE"),
 			"the Read tool returned the editor's buffer: {frames:#?}"
 		);
+		assert!(!transcript.contains("editor_sync"), "a clean write-back adds no notice");
 		assert_eq!(
 			std::fs::read_to_string(&disk).expect("disk"),
 			"agent wrote\n",
 			"the Write committed through the authority"
 		);
+		// Commit → write-back → settle: the write tool's call completes only
+		// after the editor was written.
+		let announced = frames
+			.iter()
+			.position(|frame| {
+				let update = &frame["params"]["update"];
+				update["sessionUpdate"] == "tool_call"
+					&& update["rawInput"]["content"] == "agent wrote\n"
+			})
+			.expect("the write tool call is announced");
+		let after = |predicate: &dyn Fn(&Value) -> bool| {
+			frames[announced..]
+				.iter()
+				.position(predicate)
+				.map(|index| announced + index)
+				.expect("the frame was sent")
+		};
+		let written = after(&|frame| frame["method"] == "fs/write_text_file");
+		let settled = after(&|frame| {
+			let update = &frame["params"]["update"];
+			update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed"
+		});
+		assert!(written < settled, "the write tool settles after its write-back: {frames:#?}");
 	})
 	.await;
 	drop(environment);

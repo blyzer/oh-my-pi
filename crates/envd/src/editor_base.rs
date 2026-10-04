@@ -23,6 +23,12 @@
 //! oversize buffer read falls back to D with an `editor_buffer_unavailable`
 //! warning.
 //!
+//! Once a commit is durable and the editor accepts writes, the committed bytes
+//! are written back to it ([`start_write_backs`], queued by the editor's
+//! connection in [`crate::editor_sync`]); a write-back that lands sets K to the
+//! bytes sent (ADR 0037 §3(c)), and one that fails or is skipped leaves K at
+//! the buffer the commit used.
+//!
 //! The buffer never becomes an authority head. E is only the base a tool reads
 //! and proposes against; the commit is an ordinary authority transaction
 //! against D's revision, so the docserver actor's rule that a head equals the
@@ -32,6 +38,7 @@
 
 use std::{
 	borrow::Cow,
+	fmt,
 	path::{Path, PathBuf},
 	str,
 	sync::Arc,
@@ -43,14 +50,20 @@ use omp_core::{FastHashMap, Hash32, Str, sf};
 use omp_edit::text::{BOM, LineEnding, normalize_to_lf, restore_line_endings, strip_bom};
 use omp_proto::document::v1 as pb;
 use omp_tool::{Diag, DiagKind};
-use omp_tools::read::SNAPSHOT_MAX_BYTES;
+use omp_tools::{
+	editor_sync::{EditorSync, EditorSyncReport, EditorSyncTarget},
+	read::SNAPSHOT_MAX_BYTES,
+};
 use parking_lot::Mutex;
 use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 use tokio::time;
 use url::Url;
 
 use crate::{
-	docs::{AcpDocumentBackend, DocumentHost, EditorIoError},
+	docs::{
+		AcpDocumentBackend, DocumentHost, EditorCapabilities, EditorIoError, WriteBack,
+		WriteBackOutcome,
+	},
 	docserver::{ByteRange, rebase_content},
 };
 
@@ -79,6 +92,11 @@ struct PathLineage {
 	next:     usize,
 	/// Recency stamp for eviction.
 	touched:  u64,
+	/// Last write-back ticket issued for this path.
+	issued:   u64,
+	/// Ticket of the write-back that last set the anchor, so an older
+	/// write-back finishing late never overrides a newer one.
+	synced:   u64,
 }
 
 impl PathLineage {
@@ -124,20 +142,22 @@ impl Lineages {
 /// which bytes a tool treats as its base.
 #[derive(Debug)]
 pub struct EditorSession {
-	deadline: Duration,
-	lineages: Mutex<Lineages>,
+	deadline:     Duration,
+	capabilities: EditorCapabilities,
+	lineages:     Mutex<Lineages>,
 }
 
 impl EditorSession {
-	/// Starts an unanchored binding whose requests wait at most `deadline`
-	/// (zero means the default).
-	pub fn new(deadline: Duration) -> Self {
+	/// Starts an unanchored binding of an editor with `capabilities` whose
+	/// requests wait at most `deadline` (zero means the default).
+	pub fn new(deadline: Duration, capabilities: EditorCapabilities) -> Self {
 		Self {
 			deadline: if deadline.is_zero() {
 				DEFAULT_DEADLINE
 			} else {
 				deadline
 			},
+			capabilities,
 			lineages: Mutex::default(),
 		}
 	}
@@ -145,6 +165,11 @@ impl EditorSession {
 	/// Deadline for each editor request of this binding.
 	pub const fn deadline(&self) -> Duration {
 		self.deadline
+	}
+
+	/// The `fs/*` methods the bound editor serves.
+	pub const fn capabilities(&self) -> EditorCapabilities {
+		self.capabilities
 	}
 
 	/// Chooses the effective base for `path` and records what the choice
@@ -187,6 +212,25 @@ impl EditorSession {
 		self.lineages.lock().entry(path).anchor = Some(buffer);
 	}
 
+	/// Issues the ticket of a new write-back of `path`.
+	fn issue(&self, path: &Str) -> u64 {
+		let mut lineages = self.lineages.lock();
+		let lineage = lineages.entry(path);
+		lineage.issued += 1;
+		lineage.issued
+	}
+
+	/// A write-back succeeded: the editor holds `sent`, so K := the bytes sent
+	/// (ADR 0037 §3(c)), unless a newer write-back already set K.
+	fn synced(&self, path: &Str, ticket: u64, sent: Bytes) {
+		let mut lineages = self.lineages.lock();
+		let lineage = lineages.entry(path);
+		if ticket > lineage.synced {
+			lineage.synced = ticket;
+			lineage.anchor = Some(sent);
+		}
+	}
+
 	#[cfg(test)]
 	fn anchor_of(&self, path: &str) -> Option<Bytes> {
 		self
@@ -214,6 +258,9 @@ impl EditorRoute {
 	/// Reads the whole buffer of `path`, bounded by the binding's deadline and
 	/// the snapshot cap.
 	async fn read(&self, path: &Str) -> Result<Str, EditorIoError> {
+		if !self.session.capabilities.read {
+			return Err(EditorIoError::Unavailable);
+		}
 		let buffer = time::timeout(self.session.deadline, self.backend.read_text(path.clone()))
 			.await
 			.unwrap_or(Err(EditorIoError::Timeout))?;
@@ -255,7 +302,7 @@ pub struct Selection {
 }
 
 /// Text with any BOM removed and every line ending normalized to LF.
-fn normalized(text: &str) -> Bytes {
+pub fn normalized(text: &str) -> Bytes {
 	match normalize_to_lf(strip_bom(text).1) {
 		Cow::Borrowed(text) => Bytes::copy_from_slice(text.as_bytes()),
 		Cow::Owned(text) => Bytes::from(text),
@@ -274,7 +321,7 @@ fn dominant_line_ending(text: &str) -> LineEnding {
 }
 
 /// Re-encodes normalized `text` with `disk`'s BOM and dominant line ending.
-fn encode_like(disk: &str, text: &[u8]) -> Bytes {
+pub fn encode_like(disk: &str, text: &[u8]) -> Bytes {
 	let text = str::from_utf8(text).expect("normalized editor text is UTF-8");
 	let bom = if strip_bom(disk).0.is_empty() {
 		""
@@ -324,20 +371,194 @@ pub fn select_base(
 	Selection { choice, buffer: normalized_buffer, disk: normalized_disk, anchor: anchor.cloned() }
 }
 
-/// Records K := B once the authority committed an edit whose base was B.
-#[derive(Debug)]
+/// What a durable commit of one document tells the bound editor: K := B for
+/// the buffer B its base was chosen against (ADR 0037 §3(b)), then the
+/// write-back of the committed bytes (§4.3).
+#[derive(Clone)]
 pub struct CommitAnchor {
-	session: Arc<EditorSession>,
-	path:    Str,
-	buffer:  Bytes,
+	route:  EditorRoute,
+	path:   Str,
+	/// B normalized to LF without BOM; `None` when no buffer was read (a
+	/// create, or an editor that serves no reads).
+	buffer: Option<Bytes>,
+}
+
+impl fmt::Debug for CommitAnchor {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		formatter
+			.debug_struct("CommitAnchor")
+			.field("path", &self.path)
+			.field("buffer", &self.buffer.as_ref().map(Bytes::len))
+			.finish_non_exhaustive()
+	}
 }
 
 impl CommitAnchor {
-	/// The commit is durable: the buffer is now part of the authority's
-	/// lineage, so an editor that has not reloaded reads as stale-clean.
-	pub fn committed(self) {
-		self.session.anchor(&self.path, self.buffer);
+	/// The commit is durable but its bytes are not written back (a move): the
+	/// buffer is part of the authority's lineage, so an editor that has not
+	/// reloaded reads as stale-clean.
+	pub fn anchored(self) {
+		if let Some(buffer) = self.buffer {
+			self.route.session.anchor(&self.path, buffer);
+		}
 	}
+
+	/// The commit is durable with `committed` (R, the bytes on disk) as
+	/// `revision`: K := B, and when the editor accepts writes the write-back
+	/// of R is returned for [`start_write_backs`].
+	pub fn committed(self, committed: Bytes, revision: Str) -> Option<WriteBackJob> {
+		if let Some(buffer) = &self.buffer {
+			self.route.session.anchor(&self.path, buffer.clone());
+		}
+		if !self.route.session.capabilities.write {
+			return None;
+		}
+		let content = Str::from_utf8_owned(committed).ok()?;
+		let ticket = self.route.session.issue(&self.path);
+		Some(WriteBackJob {
+			route: self.route,
+			path: self.path,
+			content,
+			base: self.buffer,
+			revision,
+			ticket,
+		})
+	}
+}
+
+#[cfg(test)]
+impl CommitAnchor {
+	/// An anchor for `path` against `buffer`, as a prepare would record it.
+	pub(crate) const fn for_test(route: EditorRoute, path: Str, buffer: Option<Bytes>) -> Self {
+		Self { route, path, buffer }
+	}
+}
+
+/// One committed document to write back to the editor.
+pub struct WriteBackJob {
+	route:    EditorRoute,
+	path:     Str,
+	/// R: the committed bytes.
+	content:  Str,
+	/// B, normalized.
+	base:     Option<Bytes>,
+	revision: Str,
+	ticket:   u64,
+}
+
+impl WriteBackJob {
+	fn target(&self) -> EditorSyncTarget {
+		EditorSyncTarget { path: self.path.clone(), revision: self.revision.clone() }
+	}
+
+	/// Writes R back and returns the notices for the tool element. A failure
+	/// leaves K at B (set by the commit), so the stale buffer reads as
+	/// stale-clean and resolves to disk (ADR 0037 §4.5).
+	async fn run(self) -> Vec<Diag> {
+		let base = self
+			.base
+			.clone()
+			.and_then(|base| Str::from_utf8_owned(base).ok());
+		let write_back = WriteBack { path: self.path.clone(), content: self.content.clone(), base };
+		match self.route.backend.write_back(write_back).await {
+			Ok(WriteBackOutcome::Written { merged, read_back }) => {
+				let sent = merged.unwrap_or_else(|| self.content.clone());
+				self
+					.route
+					.session
+					.synced(&self.path, self.ticket, normalized(&sent));
+				read_back
+					.map(|_| {
+						Diag::info(
+							DiagKind::ClientFormatDrift,
+							sf!(
+								"the editor reformatted {} after revision {} was written back to it \
+								 (client_formatted=true bytes_changed_after_client_format=true); the file \
+								 on disk keeps the committed bytes until the editor saves it",
+								self.path,
+								self.revision
+							),
+						)
+					})
+					.into_iter()
+					.collect()
+			},
+			Ok(WriteBackOutcome::Conflict { ranges }) => vec![self.conflict_diag(&ranges)],
+			Ok(WriteBackOutcome::Superseded) => Vec::new(),
+			// The environment stopped waiting (an interrupt, or the editor's
+			// connection ended); the editor's queue may still finish it.
+			Err(EditorIoError::Disconnected) => vec![Diag::info(
+				DiagKind::EditorSyncPending,
+				sf!(
+					"{} is committed at revision {}; writing it back to the editor continues after \
+					 this call",
+					self.path,
+					self.revision
+				),
+			)],
+			Err(error) => {
+				let reason: &'static str = error.into();
+				vec![Diag::warn(
+					DiagKind::EditorSyncFailed,
+					sf!(
+						"revision {} of {} is committed, but writing it back to the editor failed \
+						 ({reason}); the editor still shows its earlier buffer",
+						self.revision,
+						self.path
+					),
+				)]
+			},
+		}
+	}
+
+	/// The user's changes made during the call overlap the commit: the ranges
+	/// in the base B, and the same lines in B and in the committed bytes R.
+	fn conflict_diag(&self, ranges: &[ByteRange]) -> Diag {
+		use std::fmt::Write as _;
+		let base = self.base.as_deref().unwrap_or_default();
+		let committed = normalized(&self.content);
+		let base_lines = split_lines(base);
+		let to_committed = line_ops(&base_lines, &split_lines(&committed));
+		let mut text = format!(
+			"unsaved editor changes to {} made during this call overlap the committed revision {}; \
+			 the editor was not updated and keeps its own changes",
+			self.path, self.revision
+		);
+		for range in ranges {
+			let start = line_index(base, range.start());
+			let end = line_index(base, range.end().saturating_sub(1).max(range.start()));
+			let _ = write!(
+				text,
+				"; bytes {}-{} of the base (lines {}-{}) vs committed lines {}-{}",
+				range.start(),
+				range.end(),
+				start + 1,
+				end + 1,
+				project(&to_committed, start) + 1,
+				project(&to_committed, end) + 1
+			);
+		}
+		Diag::warn(DiagKind::EditorSyncConflict, text)
+	}
+}
+
+/// Starts the write-backs of one commit on their own tasks and returns the
+/// handle the tool settles on. The tasks outlive the tool: an interrupt only
+/// stops the tool waiting (ADR 0037 §4.6).
+pub fn start_write_backs(jobs: Vec<WriteBackJob>) -> EditorSync {
+	if jobs.is_empty() {
+		return EditorSync::default();
+	}
+	let (reports, received) = flume::unbounded();
+	let targets = jobs.iter().map(WriteBackJob::target).collect();
+	for (target, job) in jobs.into_iter().enumerate() {
+		let reports = reports.clone();
+		tokio::spawn(async move {
+			let diags = job.run().await;
+			let _ = reports.send(EditorSyncReport { target, diags });
+		});
+	}
+	EditorSync::new(targets, received)
 }
 
 /// The base a Read or Edit uses for one document.
@@ -465,14 +686,28 @@ fn project(ops: &[DiffOp], line: usize) -> usize {
 /// the workspace root, not a notebook, and its disk bytes UTF-8 within the
 /// snapshot cap.
 fn eligible_path(root_uri: &str, head: &pb::DocumentHead, disk: &[u8]) -> Option<Str> {
-	if pb::DocumentKind::try_from(head.kind) != Ok(pb::DocumentKind::Text)
-		|| head.presence != pb::DocumentPresence::Present as i32
+	if head.presence != pb::DocumentPresence::Present as i32
 		|| disk.len() > SNAPSHOT_MAX_BYTES
 		|| str::from_utf8(disk).is_err()
 	{
 		return None;
 	}
+	editor_path(root_uri, head)
+}
+
+/// Canonical local path of a text document inside the workspace root that is
+/// not a notebook: a path the editor may be told about, present or not.
+fn editor_path(root_uri: &str, head: &pb::DocumentHead) -> Option<Str> {
+	if pb::DocumentKind::try_from(head.kind) != Ok(pb::DocumentKind::Text) {
+		return None;
+	}
 	let path = file_path(head.document.as_ref()?.uri.as_str())?;
+	inside_root(root_uri, &path)
+}
+
+/// `path` as text when it lies strictly inside the workspace root and is not
+/// a notebook.
+fn inside_root(root_uri: &str, path: &Path) -> Option<Str> {
 	let root = file_path(root_uri)?;
 	if path == root || !path.starts_with(&root) {
 		return None;
@@ -530,22 +765,47 @@ impl DocumentHost {
 		head: &pb::DocumentHead,
 		disk: &[u8],
 	) -> Result<EffectiveBase, EditorConflict> {
-		let Some(path) = eligible_path(self.hello().root_uri.as_str(), head, disk) else {
-			return Ok(EffectiveBase::default());
+		let root_uri = self.hello().root_uri.as_str();
+		let capabilities = route.session.capabilities;
+		let Some(path) = eligible_path(root_uri, head, disk) else {
+			// A document about to be created is written back once committed.
+			let on_commit = (capabilities.write
+				&& head.presence != pb::DocumentPresence::Present as i32)
+				.then(|| editor_path(root_uri, head))
+				.flatten()
+				.map(|path| CommitAnchor { route: route.clone(), path, buffer: None });
+			return Ok(EffectiveBase { on_commit, ..EffectiveBase::default() });
 		};
+		if !capabilities.read {
+			// An editor that serves no reads: disk is the base, and the commit is
+			// written back as is.
+			let on_commit =
+				capabilities
+					.write
+					.then(|| CommitAnchor { route: route.clone(), path, buffer: None });
+			return Ok(EffectiveBase { on_commit, ..EffectiveBase::default() });
+		}
 		let disk = str::from_utf8(disk).expect("eligible disk bytes are UTF-8");
 		let buffer = match route.read(&path).await {
 			Ok(buffer) => buffer,
+			// No buffer known, so nothing is anchored and nothing is written
+			// back: a blind write-back could overwrite changes the user made in
+			// a buffer the environment never saw.
 			Err(error) => return Ok(EffectiveBase::unavailable(&path, error)),
 		};
 		let selection = route.session.select(&path, disk, &buffer);
+		let on_commit = CommitAnchor {
+			route:  route.clone(),
+			path:   path.clone(),
+			buffer: Some(selection.buffer.clone()),
+		};
 		let (bytes, diags) = match &selection.choice {
-			Choice::Clean | Choice::StaleClean => return Ok(EffectiveBase::default()),
+			Choice::Clean | Choice::StaleClean => (None, Vec::new()),
 			Choice::Conflict(ranges) => {
 				return Err(EditorConflict::new(path, ranges.clone(), &selection));
 			},
-			Choice::Merged(merged) => (merged.clone(), Vec::new()),
-			Choice::Unanchored(buffer) => (buffer.clone(), vec![Diag::warn(
+			Choice::Merged(merged) => (Some(merged.clone()), Vec::new()),
+			Choice::Unanchored(buffer) => (Some(buffer.clone()), vec![Diag::warn(
 				DiagKind::EditorBufferUnanchored,
 				sf!(
 					"{path} has unsaved editor changes with no known common base with the file on \
@@ -554,7 +814,7 @@ impl DocumentHost {
 				),
 			)]),
 		};
-		let bytes = (bytes.as_ref() != disk.as_bytes()).then_some(bytes);
+		let bytes = bytes.filter(|bytes| bytes.as_ref() != disk.as_bytes());
 		let mut diags = diags;
 		if let Some(bytes) = &bytes {
 			diags.push(Diag::info(
@@ -562,34 +822,31 @@ impl DocumentHost {
 				sf!("source=editor-buffer path={path} sha256={}", Hash32::sum(bytes)),
 			));
 		}
-		let on_commit =
-			CommitAnchor { session: Arc::clone(&route.session), path, buffer: selection.buffer };
 		Ok(EffectiveBase { bytes, diags, on_commit: Some(on_commit) })
 	}
 
-	/// Reads the editor's buffer for a file an agent Write is about to replace,
-	/// so the commit can anchor it: after the write the editor's content is
-	/// known to be superseded by the authority, and an editor that has not
-	/// reloaded reads as stale-clean instead of reverting the write. `None`
-	/// without a bound editor, for an ineligible path, or when the editor
-	/// cannot answer.
-	pub async fn editor_superseded(&self, path: &Path) -> Option<CommitAnchor> {
+	/// What an agent Write of `path` tells the bound editor once committed:
+	/// for an existing file the buffer it supersedes is read first and
+	/// anchored, so an editor that has not reloaded reads as stale-clean
+	/// instead of reverting the write, and the pre-write re-read keeps what
+	/// the user types meanwhile; a created file is written back as is. `None`
+	/// without a bound editor, for a path outside the root or a notebook, or
+	/// when an existing file's buffer cannot be read.
+	pub async fn editor_write_target(&self, path: &Path, existed: bool) -> Option<CommitAnchor> {
 		let route = self.editor_route()?;
-		let root = file_path(self.hello().root_uri.as_str())?;
+		let capabilities = route.session.capabilities;
+		let path_text = inside_root(self.hello().root_uri.as_str(), path)?;
+		if !existed || !capabilities.read {
+			return capabilities
+				.write
+				.then(|| CommitAnchor { route, path: path_text, buffer: None });
+		}
 		let metadata = std::fs::metadata(path).ok()?;
-		if path == root
-			|| !path.starts_with(&root)
-			|| !metadata.is_file()
-			|| metadata.len() > SNAPSHOT_MAX_BYTES as u64
-			|| path
-				.extension()
-				.is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
-		{
+		if !metadata.is_file() || metadata.len() > SNAPSHOT_MAX_BYTES as u64 {
 			return None;
 		}
-		let path = Str::new(path.to_str()?);
-		let buffer = route.read(&path).await.ok()?;
-		Some(CommitAnchor { session: Arc::clone(&route.session), path, buffer: normalized(&buffer) })
+		let buffer = route.read(&path_text).await.ok()?;
+		Some(CommitAnchor { route, path: path_text, buffer: Some(normalized(&buffer)) })
 	}
 }
 

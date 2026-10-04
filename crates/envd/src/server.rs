@@ -85,7 +85,8 @@ use super::{
 	browser_daemon::BrowserSettings,
 	docs::{
 		AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHost,
-		DocumentLease, EditorIoError, LspEvents, LspRegistryEvent,
+		DocumentLease, EditorCapabilities, EditorIoError, LspEvents, LspRegistryEvent, WriteBack,
+		WriteBackOutcome,
 	},
 	editor_base::{EditorRoute, EditorSession},
 	eval::{
@@ -8014,7 +8015,12 @@ impl ConnectionEditRepairRoute {
 
 const ACP_MAX_PENDING: usize = 64;
 
-type AcpDocumentReply = flume::Sender<Result<Str, EditorIoError>>;
+/// Editor requests one write-back may wait behind and make: the write-back
+/// already running for the path, then its own pre-write re-read, write and
+/// read-back, each bounded by the editor's deadline.
+const WRITE_BACK_REQUESTS: u32 = 6;
+
+type AcpDocumentReply = flume::Sender<Result<pb::acp_document_answer::Body, EditorIoError>>;
 
 struct ConnectionAcpDocumentRoute {
 	request_id:    u64,
@@ -8024,10 +8030,16 @@ struct ConnectionAcpDocumentRoute {
 	pending:       Arc<Mutex<HashMap<u64, AcpDocumentReply>>>,
 	/// The binding's editor deadline (`AcpBind.fs_timeout_ms`).
 	deadline:      Duration,
+	/// The binding's editor capabilities (`AcpBind.read_text`/`write_text`).
+	capabilities:  EditorCapabilities,
 }
 
 impl ConnectionAcpDocumentRoute {
-	async fn query(&self, path: Str, content: Option<Str>) -> Result<Str, EditorIoError> {
+	async fn query(
+		&self,
+		body: impl FnOnce(u64) -> server_frame::Body,
+		wait: Duration,
+	) -> Result<pb::acp_document_answer::Body, EditorIoError> {
 		let query_id = self.next_query.fetch_add(1, Ordering::Relaxed);
 		let (reply, answer) = flume::bounded(1);
 		{
@@ -8037,25 +8049,11 @@ impl ConnectionAcpDocumentRoute {
 			}
 			pending.insert(query_id, reply);
 		}
-		let body = if let Some(content) = content {
-			server_frame::Body::AcpWriteQuery(pb::AcpWriteQuery {
-				query_id,
-				invocation_id: self.invocation_id.to_string(),
-				path: path.to_string(),
-				content: content.to_string(),
-			})
-		} else {
-			server_frame::Body::AcpReadQuery(pb::AcpReadQuery {
-				query_id,
-				invocation_id: self.invocation_id.to_string(),
-				path: path.to_string(),
-			})
-		};
 		if self
 			.responses
 			.send_async(pb::ServerFrame {
 				request_id: self.request_id,
-				body: Some(body),
+				body: Some(body(query_id)),
 				..pb::ServerFrame::default()
 			})
 			.await
@@ -8064,13 +8062,46 @@ impl ConnectionAcpDocumentRoute {
 			self.pending.lock().remove(&query_id);
 			return Err(EditorIoError::Disconnected);
 		}
-		let result = match time::timeout(self.deadline, answer.recv_async()).await {
+		let result = match time::timeout(wait, answer.recv_async()).await {
 			Ok(Ok(result)) => result,
 			Ok(Err(_)) => Err(EditorIoError::Disconnected),
 			Err(_) => Err(EditorIoError::Timeout),
 		};
 		self.pending.lock().remove(&query_id);
 		result
+	}
+
+	async fn read(&self, path: Str) -> Result<Str, EditorIoError> {
+		let invocation_id = self.invocation_id.to_string();
+		let body = move |query_id| {
+			server_frame::Body::AcpReadQuery(pb::AcpReadQuery {
+				query_id,
+				invocation_id,
+				path: path.to_string(),
+			})
+		};
+		match self.query(body, self.deadline).await? {
+			pb::acp_document_answer::Body::Content(content) => Ok(Str::from(content)),
+			_ => Err(EditorIoError::Malformed),
+		}
+	}
+
+	async fn write_back(&self, write_back: WriteBack) -> Result<WriteBackOutcome, EditorIoError> {
+		let invocation_id = self.invocation_id.to_string();
+		let body = move |query_id| {
+			server_frame::Body::AcpWriteQuery(pb::AcpWriteQuery {
+				query_id,
+				invocation_id,
+				path: write_back.path.to_string(),
+				content: write_back.content.to_string(),
+				base: write_back.base.map(|base| base.to_string()),
+			})
+		};
+		let wait = self.deadline.saturating_mul(WRITE_BACK_REQUESTS);
+		match self.query(body, wait).await? {
+			pb::acp_document_answer::Body::WriteBack(outcome) => WriteBackOutcome::from_wire(outcome),
+			_ => Err(EditorIoError::Malformed),
+		}
 	}
 
 	fn answer(
@@ -8090,10 +8121,10 @@ impl ConnectionAcpDocumentRoute {
 			));
 		};
 		let result = match answer.body {
-			Some(pb::acp_document_answer::Body::Content(content)) => Ok(Str::from(content)),
 			Some(pb::acp_document_answer::Body::Error(error)) => {
 				Err(EditorIoError::from_protocol_code(error.code))
 			},
+			Some(body) => Ok(body),
 			None => Err(EditorIoError::Malformed),
 		};
 		reply.send(result).map_err(|_| {
@@ -8111,19 +8142,24 @@ impl AcpDocumentBackend for ConnectionAcpDocumentRoute {
 		self.deadline
 	}
 
+	fn capabilities(&self) -> EditorCapabilities {
+		self.capabilities
+	}
+
 	fn read_text(
 		&self,
 		absolute_path: Str,
 	) -> pin::Pin<Box<dyn future::Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
-		Box::pin(self.query(absolute_path, None))
+		Box::pin(self.read(absolute_path))
 	}
 
-	fn write_text(
+	fn write_back(
 		&self,
-		absolute_path: Str,
-		content: Str,
-	) -> pin::Pin<Box<dyn future::Future<Output = Result<Str, EditorIoError>> + Send + '_>> {
-		Box::pin(self.query(absolute_path, Some(content)))
+		write_back: WriteBack,
+	) -> pin::Pin<
+		Box<dyn future::Future<Output = Result<WriteBackOutcome, EditorIoError>> + Send + '_>,
+	> {
+		Box::pin(self.write_back(write_back))
 	}
 }
 
@@ -8377,9 +8413,12 @@ impl ConnectionState {
 	}
 
 	fn bind_acp(&mut self, binding: pb::AcpBind) {
-		self.acp_documents = binding
-			.documents
-			.then(|| Arc::new(EditorSession::new(Duration::from_millis(binding.fs_timeout_ms))));
+		self.acp_documents = binding.documents.then(|| {
+			Arc::new(EditorSession::new(
+				Duration::from_millis(binding.fs_timeout_ms),
+				EditorCapabilities { read: binding.read_text, write: binding.write_text },
+			))
+		});
 	}
 
 	fn acp_routes(
@@ -8397,6 +8436,7 @@ impl ConnectionState {
 					next_query: Arc::new(AtomicU64::new(1)),
 					pending: Arc::new(Mutex::new(HashMap::new())),
 					deadline: session.deadline(),
+					capabilities: session.capabilities(),
 				});
 				(route, Arc::clone(session))
 			}),

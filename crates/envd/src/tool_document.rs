@@ -40,6 +40,7 @@ use omp_tools::{
 		Fault as EditFault, FormatPolicy, NoopResult, PathRecovery, PathRecoveryHow, PrepareRequest,
 		RejectionReason, SnapshotFault, StalePolicy,
 	},
+	editor_sync::EditorSync,
 	read::{
 		Fault as ReadFault, ReadBlobs, SNAPSHOT_MAX_BYTES, StoredArtifact, archive,
 		conflicts::{splice_registered, splice_registered_bulk},
@@ -60,7 +61,7 @@ use url::Url;
 use super::{
 	blobs::BlobHost,
 	docs::{DocumentError, DocumentHost, DocumentLease, lease_target},
-	editor_base::{CommitAnchor, EditorConflict},
+	editor_base::{CommitAnchor, EditorConflict, start_write_backs},
 	tool_url::ssh,
 };
 use crate::docserver::fs::{self, LocalFs};
@@ -605,13 +606,21 @@ impl EditDocuments for DocumentHost {
 			});
 		}
 
+		// The commit is durable: tell a bound editor. Written sections are
+		// written back with the committed bytes; a move only anchors (the
+		// editor learns about moves and deletes from its own file watcher).
 		let mut prepared = prepared;
-		for (section, proposal) in prepared.iter_mut().zip(&proposals) {
-			let anchor = section.on_commit.take();
-			if !matches!(proposal.action, EditAction::Delete)
-				&& let Some(anchor) = anchor
-			{
-				anchor.committed();
+		let mut write_backs = Vec::new();
+		for ((section, proposal), committed) in prepared.iter_mut().zip(&proposals).zip(&sections) {
+			let Some(anchor) = section.on_commit.take() else {
+				continue;
+			};
+			match (&proposal.action, &committed.content, &committed.new_revision) {
+				(EditAction::Write { .. }, Some(content), Some(revision)) if !section.notebook => {
+					write_backs.extend(anchor.committed(content.clone(), revision.clone()));
+				},
+				(EditAction::Delete, ..) => {},
+				_ => anchor.anchored(),
 			}
 		}
 		let snapshots = self.snapshot_store();
@@ -640,7 +649,7 @@ impl EditDocuments for DocumentHost {
 			}
 		}
 		self.snapshot_store().commit_clipboard(&clipboard);
-		Ok(CommitResult { sections })
+		Ok(CommitResult { sections, editor_sync: start_write_backs(write_backs) })
 	}
 }
 
@@ -1628,6 +1637,30 @@ where
 	result.map_err(|error| special_fault(format!("{task_name} write task failed: {error}")))?
 }
 
+impl DocumentHost {
+	/// Starts the editor write-back of a committed Write (ADR 0037 §4.3). R is
+	/// the bytes written, or the committed head's bytes when the authority
+	/// formatted them.
+	async fn write_back_written(
+		&self,
+		editor: CommitAnchor,
+		operation: &pb::OperationResult,
+		head: &pb::DocumentHead,
+		content: &Bytes,
+	) -> EditorSync {
+		let committed = if operation.formatted {
+			read_committed_view(self, head, false, "").await.ok()
+		} else {
+			Some(content.clone())
+		};
+		let (Some(committed), Ok(revision)) = (committed, revision_identity(head)) else {
+			editor.anchored();
+			return EditorSync::default();
+		};
+		start_write_backs(editor.committed(committed, revision).into_iter().collect())
+	}
+}
+
 impl WriteDocuments for DocumentHost {
 	async fn write_resource(
 		&self,
@@ -1832,16 +1865,13 @@ impl WriteDocuments for DocumentHost {
 				},
 				made_executable,
 				snapshot_tag,
+				editor_sync: EditorSync::default(),
 			});
 		}
 		// Every write commits through the authority, a bound editor included
-		// (ADR 0037 §4.1). The editor's buffer is read first only to anchor it:
-		// once the write is durable that buffer is known to be superseded.
-		let superseded = if existed {
-			self.editor_superseded(&resolved.path).await
-		} else {
-			None
-		};
+		// (ADR 0037 §4.1). The editor's buffer is read first to anchor it, as
+		// the base its write-back merges the user's later typing against.
+		let editor = self.editor_write_target(&resolved.path, existed).await;
 		let _late_diagnostics = self.begin_late_diagnostics_uri(resolved.uri.clone());
 		let transaction_id = transaction_id(self.hello().server_epoch.as_ref());
 		let response = self
@@ -1913,9 +1943,14 @@ impl WriteDocuments for DocumentHost {
 			.map_err(|message| WriteCommitError::EffectsUnknown { reason: Str::from(message) })?;
 		let (_, diagnostics_complete) = committed_diagnostics(operation);
 		self.expect_late_diagnostics(head, diagnostics_complete);
-		if let Some(superseded) = superseded {
-			superseded.committed();
-		}
+		let editor_sync = match editor {
+			Some(editor) => {
+				self
+					.write_back_written(editor, operation, head, &content)
+					.await
+			},
+			None => EditorSync::default(),
+		};
 		let resolved_path = document_path(head)
 			.map_err(|message| WriteCommitError::EffectsUnknown { reason: Str::from(message) })?;
 		let made_executable =
@@ -1932,6 +1967,7 @@ impl WriteDocuments for DocumentHost {
 			},
 			made_executable,
 			snapshot_tag,
+			editor_sync,
 		})
 	}
 
@@ -2306,6 +2342,7 @@ async fn commit_conflict_content(
 		disposition: WriteDisposition::Overwrote,
 		made_executable: false,
 		snapshot_tag,
+		editor_sync: EditorSync::default(),
 	})
 }
 
@@ -2768,6 +2805,29 @@ mod tests {
 		);
 		let mut a = prepared_for_test(a_lease, &a_path);
 		let mut b = prepared_for_test(b_lease, &b_path);
+		// A bound editor that accepts write-backs: the rolled-back partial
+		// commit must write nothing back (ADR 0037 §4.3).
+		let editor_writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let capabilities = crate::docs::EditorCapabilities { read: true, write: true };
+		let editor = crate::editor_sync::EditorBackend::new(
+			CountingEditor(Arc::clone(&editor_writes)),
+			capabilities,
+			std::time::Duration::from_secs(1),
+		);
+		let route = crate::editor_base::EditorRoute::new(
+			Arc::new(editor.clone()),
+			Arc::new(crate::editor_base::EditorSession::new(
+				std::time::Duration::from_secs(1),
+				capabilities,
+			)),
+		);
+		for (prepared, path) in [(&mut a, &a_path), (&mut b, &b_path)] {
+			prepared.on_commit = Some(CommitAnchor::for_test(
+				route.clone(),
+				Str::new(path.to_str().expect("UTF-8 path")),
+				Some(Bytes::from_static(b"old\n")),
+			));
+		}
 		let proposals = [&a, &b]
 			.into_iter()
 			.enumerate()
@@ -2804,6 +2864,13 @@ mod tests {
 			matches!(result, Err(EditCommitError::Rejected(_))),
 			"unexpected partial-commit result: {result:?}"
 		);
+		tokio::task::yield_now().await;
+		assert_eq!(editor.outstanding(), 0, "no write-back was queued");
+		assert_eq!(
+			editor_writes.load(std::sync::atomic::Ordering::SeqCst),
+			0,
+			"the compensated partial commit wrote nothing back"
+		);
 		assert!(
 			host
 				.start_clipboard_batch()
@@ -2815,6 +2882,27 @@ mod tests {
 			.send(())
 			.expect("release fake document server");
 		server_task.await.expect("fake document server");
+	}
+
+	/// An editor counting the write-backs it receives.
+	struct CountingEditor(Arc<std::sync::atomic::AtomicUsize>);
+
+	impl crate::editor_sync::EditorFiles for CountingEditor {
+		fn read_text(
+			&self,
+			_path: Str,
+		) -> impl Future<Output = Result<Str, crate::docs::EditorIoError>> + Send + '_ {
+			ready(Ok(Str::new_static("old\n")))
+		}
+
+		fn write_text(
+			&self,
+			_path: Str,
+			_content: Str,
+		) -> impl Future<Output = Result<(), crate::docs::EditorIoError>> + Send + '_ {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			ready(Ok(()))
+		}
 	}
 
 	fn test_document_head(
