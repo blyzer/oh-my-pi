@@ -1,0 +1,97 @@
+name: CI (not needed)
+
+# Companion to ci.yml. ci.yml only runs on pull requests that touch the paths
+# in its `pull_request.paths` list, so a pull request that changes only other
+# files (for example docs/adr) would never report the required status checks
+# and would wait forever. This workflow is GitHub's documented answer: it runs
+# on the same pull requests with `paths-ignore` set to the same list, and each
+# job below reports one required check under the byte-identical name, passing
+# at once.
+#
+# KEEP IN SYNC with `pull_request.paths` in ci.yml: the two lists must match
+# exactly, and every job `name:` below must equal a job `name:` in ci.yml.
+# `just check-ci-skipped` (scripts/check-ci-skipped.py) verifies both.
+
+on:
+  pull_request:
+    branches: [main, omp2]
+    paths-ignore:
+      - ".cargo/**"
+      - ".config/**"
+      - ".github/actions/**"
+      - ".github/workflows/ci.yml"
+      - "about.toml"
+      - "deny.toml"
+      - "justfile"
+      - "LICENSE*"
+      - "THIRD-PARTY-NOTICES.txt"
+      - "crates/**"
+      - "examples/**"
+      - "fixtures/**"
+      - "scripts/**"
+      - "docs/py/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: Rust format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'
+
+  license_policy:
+    name: License policy and release notices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'
+
+  runtime_spec:
+    name: Runtime symbol and dependency contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'
+
+  lint_linux:
+    name: Lint workspace (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'
+
+  rust:
+    name: Rust workspace and acceptance proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'
+
+  p7_linux:
+    name: Terminal proof P7 (Linux PTY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'
+
+  p9_p10_linux:
+    name: Acceptance proofs P9, P10 and tool sources (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'

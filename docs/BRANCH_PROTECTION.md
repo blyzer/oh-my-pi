@@ -77,9 +77,38 @@ not require it either.
 
 `CI` only runs when a pull request touches the paths listed in `ci.yml`, so a
 pull request that changes only other files (for example, most of `docs/`)
-never reports these checks. With them required, it waits forever. Either merge
-such pull requests as an admin, or give `ci.yml` a no-op job that always runs
-and require that job instead.
+would never report these checks and, with them required, would wait forever.
+`.github/workflows/ci-skipped.yml` closes that gap with GitHub's documented
+pattern. It runs on the same pull requests (`branches: [main, omp2]`) with
+`paths-ignore` set to the same list as `ci.yml`'s `pull_request.paths`, and
+defines one job per required check under the byte-identical `name:`. Each job
+runs on a hosted Linux runner with read-only permissions and succeeds at once,
+printing that CI was not needed because no CI-relevant paths changed. A pull
+request that touches only non-CI paths therefore gets all seven checks green
+without running the real jobs; one that touches a CI path runs `ci.yml` as
+usual.
+
+Two things keep this honest:
+
+- The two path lists must match exactly, and every job name in
+  `ci-skipped.yml` must equal a job name in `ci.yml`, because a required check is
+  matched by name. Both files carry a comment saying so. `just check-ci-skipped`
+  (`scripts/check-ci-skipped.py`) verifies both; run it whenever either file
+  changes, and rename a required check in both workflows and in the ruleset
+  together.
+- A pull request that touches both CI paths and other paths runs both
+  workflows, so each check name reports twice: the instant pass from
+  `ci-skipped.yml` and the real result from `ci.yml`. A failing or pending real
+  run still blocks the merge; the instant pass never masks it.
+
+`Package macOS`, `PR labels` and the P8 recorder are not in `ci-skipped.yml`
+because they are not required.
+
+If the ruleset requires `Rust workspace and acceptance proofs` while the
+`MACOS_RUNNER` variable points that job at a self-hosted Mac, an outage of that
+runner leaves the check pending and blocks every merge that touches CI paths.
+The escape hatch is the ruleset's admin bypass: merge as an admin, or unset
+`MACOS_RUNNER` so the job falls back to the hosted `macos-15` runner.
 
 ## Auto-merge
 
