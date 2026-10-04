@@ -709,8 +709,24 @@ async fn print_kernel_event(
 		| KernelEvent::ToolUpdate { .. }
 		| KernelEvent::ToolSettled { .. }
 		| KernelEvent::JobsDelivered { .. }
-		| KernelEvent::StreamRedirected { .. }
 		| KernelEvent::WorkflowActionAnswered { .. } => None,
+		KernelEvent::StreamRedirected { director, label, reason } => {
+			if args.mode == "text" {
+				// Text mode keeps stdout for the final response; the redirect
+				// is progress, so it goes to stderr like `Working...`.
+				let line = match &reason {
+					Some(reason) => format!("{label} redirected the response: {reason}\n"),
+					None => format!("{label} redirected the response ({director})\n"),
+				};
+				let mut stderr = tokio::io::stderr();
+				stderr.write_all(line.as_bytes()).await.into_diagnostic()?;
+				stderr.flush().await.into_diagnostic()?;
+			}
+			Some(crate::rpc_mode::stream_redirect_frame(&director, &label, reason.as_ref()))
+		},
+		KernelEvent::StreamObserved { event, payload, .. } => {
+			crate::rpc_mode::stream_observation_frame(event, &payload)
+		},
 	};
 	if args.mode == "json"
 		&& let Some(value) = value

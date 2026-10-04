@@ -559,7 +559,7 @@ enum HookEventId {
   HOOK_EVENT_EXTENSION_LOAD = 55;
   HOOK_EVENT_EXTENSION_UNLOAD = 56;
   HOOK_EVENT_HOST_RECONNECT = 57;
-  HOOK_EVENT_TTSR_TRIGGERED = 58;
+  HOOK_EVENT_STREAM_RULE_TRIGGERED = 58;
   reserved 59; // Permanent tombstone: provisional todo_reminder was never public.
   HOOK_EVENT_RETRY_START = 60;
   HOOK_EVENT_RETRY_END = 61;
@@ -579,11 +579,17 @@ message LifecycleEventContext {
   uint64 sequence = 3;
 }
 
-message TtsrTriggeredEventV1 {
+// One stream rule fired: emitted by the stream-rules Director after the redirect
+// transaction (or the note) is journaled. `matched` is the rule condition that
+// matched; `source` is `text`, `thinking`, or `tool`; `call_id` names the tool
+// call for a tool source.
+message StreamRuleTriggeredEventV1 {
   LifecycleEventContext context = 1;
   string rule = 2;
   string matched = 3;
   bool interrupted = 4;
+  string source = 5;
+  optional string call_id = 6;
 }
 
 message RetryLifecycleEventV1 {

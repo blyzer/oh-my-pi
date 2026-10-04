@@ -839,8 +839,14 @@ class HostReconnectEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class TtsrTriggeredEvent:
-    """Observe one authoritative TTSR rule activation."""
+class StreamRuleTriggeredEvent:
+    """Observe one stream rule firing, after its redirect or note is journaled.
+
+    ``matched`` is the rule condition that matched, ``source`` is ``"text"``,
+    ``"thinking"``, or ``"tool"``, and ``call_id`` names the tool call for a
+    tool source. ``interrupted`` is true when the response was redirected and
+    false when the match was recorded as a note.
+    """
 
     session_id: str
     turn_id: str
@@ -848,6 +854,8 @@ class TtsrTriggeredEvent:
     rule: str
     matched: str
     interrupted: bool
+    source: str
+    call_id: str | None = None
 
 
 
@@ -919,7 +927,7 @@ _EVENT_NAMES_BY_ID = (
     "capability_budget", "model_changed", "credential_disabled", "compaction",
     "compaction_done", "thread_projection", "subagent_spawn", "worker_state",
     "job_registered", "job_settled", "extension_activate", "extension_load",
-    "extension_unload", "host_reconnect", "ttsr_triggered", None,
+    "extension_unload", "host_reconnect", "stream_rule_triggered", None,
     "retry_start", "retry_end", "fallback_applied", "fallback_succeeded",
     "mcp_notification", "provider_response", "session_renamed",
 )
@@ -1033,7 +1041,7 @@ _EVENT_METADATA = {
     "extension_load": (ExtensionLoadEvent, _OBSERVE, LatencyClass.SESSION, OnFailure.DEFER, True, _DOMAIN, None, {}),
     "extension_unload": (ExtensionUnloadEvent, _OBSERVE, LatencyClass.SESSION, OnFailure.DEFER, False, _DOMAIN, None, {}),
     "host_reconnect": (HostReconnectEvent, _OBSERVE, LatencyClass.SESSION, OnFailure.DEFER, True, _DOMAIN, None, {}),
-    "ttsr_triggered": (TtsrTriggeredEvent, _OBSERVE, LatencyClass.TURN, OnFailure.DEFER, False, _DOMAIN, None, {}),
+    "stream_rule_triggered": (StreamRuleTriggeredEvent, _OBSERVE, LatencyClass.TURN, OnFailure.DEFER, False, _DOMAIN, None, {}),
     "retry_start": (RetryLifecycleEvent, _OBSERVE, LatencyClass.TURN, OnFailure.DEFER, False, _DOMAIN, None, {}),
     "retry_end": (RetryLifecycleEvent, _OBSERVE, LatencyClass.TURN, OnFailure.DEFER, False, _DOMAIN, None, {}),
     "fallback_applied": (FallbackLifecycleEvent, _OBSERVE, LatencyClass.TURN, OnFailure.DEFER, False, _DOMAIN, None, {}),

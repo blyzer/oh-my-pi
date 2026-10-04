@@ -9,13 +9,14 @@
 use std::{ops::ControlFlow, str::FromStr};
 
 use omp_ai::{ChatRequest, ToolCall, ToolCallId};
-use omp_core::Str;
+use omp_core::{Str, sf};
+use omp_proto::toolhost::v1::HookEventId;
 use regex_automata::{Input, MatchKind, hybrid::dfa::DFA};
 
 use crate::{
 	director::{
 		BindValue, Director, DirectorCx, PartialOutput, StateUpdate, StreamEffect, StreamFragment,
-		StreamInterrupt, StreamSource, StreamVerdict, StreamWatch,
+		StreamInterrupt, StreamObservation, StreamSource, StreamVerdict, StreamWatch,
 	},
 	vars::{
 		AI_STREAM_RULES_CONTEXT, AI_STREAM_RULES_DISABLED, AI_STREAM_RULES_ENABLED,
@@ -26,6 +27,27 @@ use crate::{
 
 /// Registry family for the stream-rules Director.
 pub const FAMILY: &str = "stream-rules";
+
+/// `name` of the host-visible `<notice>` a stream-rule redirect journals.
+pub const NOTICE_NAME: &str = "stream-rule";
+
+/// The `stream_rule_triggered` lifecycle observation for one hit; the loop
+/// stamps the session, turn, sequence, and `interrupted` facts after commit.
+fn observation(
+	rule: &RulePattern,
+	source: StreamSource<'_>,
+	call_id: Option<&ToolCallId>,
+) -> StreamObservation {
+	let mut payload = serde_json::Map::new();
+	payload.insert("rule".to_owned(), serde_json::Value::from(rule.name.as_str()));
+	payload.insert("matched".to_owned(), serde_json::Value::from(rule.pattern.as_str()));
+	payload.insert("source".to_owned(), serde_json::Value::from(<&'static str>::from(source)));
+	payload.insert(
+		"call_id".to_owned(),
+		call_id.map_or(serde_json::Value::Null, |id| serde_json::Value::from(id.as_str())),
+	);
+	StreamObservation { event: HookEventId::HookEventStreamRuleTriggered, payload }
+}
 
 /// One compiled condition and its rule body.
 #[derive(Clone, Debug)]
@@ -721,44 +743,56 @@ impl Watch {
 	fn hit(&self, index: usize, source: StreamSource<'_>) -> StreamVerdict {
 		let compiled = &self.set.rules[index];
 		let rule = &compiled.pattern;
-		let tool_source = matches!(source, StreamSource::ToolArgs { .. });
 		let should_interrupt = interrupts(compiled.interrupt.unwrap_or(self.interrupt), source);
 		let update = StateUpdate::new(
-			Str::new(format!("fired.{}", rule.name)),
+			sf!("fired.{}", rule.name),
 			BindValue::Int(i64::from(self.response_ordinal)),
 		);
+		let call_id = match source {
+			StreamSource::ToolArgs { call_id, .. } => Some(ToolCallId::from(call_id)),
+			StreamSource::Text | StreamSource::Thinking => None,
+		};
+		let observation = observation(rule, source, call_id.as_ref());
 		if !should_interrupt {
-			let mut effect = StreamEffect { updates: vec![update], ..StreamEffect::default() };
-			if tool_source {
-				if let StreamSource::ToolArgs { call_id, .. } = source {
-					effect
-						.call_diags
-						.push((ToolCallId::from(call_id), rule.body.clone()));
-				}
+			let mut effect = StreamEffect {
+				updates: vec![update],
+				observation: Some(observation),
+				..StreamEffect::default()
+			};
+			if let Some(call_id) = call_id {
+				effect.call_diags.push((call_id, rule.body.clone()));
 			} else {
 				effect.developer = Some(rule.body.clone());
 			}
 			return StreamVerdict::Note(effect);
 		}
+		let source_name = <&'static str>::from(source);
+		let notice = match (&call_id, source) {
+			(Some(call_id), StreamSource::ToolArgs { tool, .. }) => sf!(
+				"Stream rule {} matched the {tool} call {call_id}; the response was redirected.",
+				rule.name
+			),
+			_ => sf!(
+				"Stream rule {} matched the {source_name} output; the response was redirected.",
+				rule.name
+			),
+		};
 		let effect = StreamEffect {
 			updates:     vec![update],
 			developer:   Some(rule.body.clone()),
-			notice:      None,
-			notice_name: None,
+			notice:      Some(notice),
+			notice_name: Some(Str::new_static(NOTICE_NAME)),
 			call_diags:  Vec::new(),
-		};
-		let culprit = match source {
-			StreamSource::ToolArgs { call_id, .. } => Some(ToolCallId::from(call_id)),
-			_ => None,
+			observation: Some(observation),
 		};
 		StreamVerdict::Interrupt(StreamInterrupt {
-			culprit,
+			culprit: call_id,
 			partial: if self.context == StreamRuleContext::Keep {
 				PartialOutput::Keep
 			} else {
 				PartialOutput::Discard
 			},
-			label: Str::new(format!("stream rule {}", rule.name)),
+			label: sf!("stream rule {}", rule.name),
 			effect,
 		})
 	}

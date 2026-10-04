@@ -542,8 +542,8 @@ async fn scoped_stream_abort_labels_siblings_in_call_order_and_replays() {
 		}
 		up.send(Up::AbortTools(ToolScopedAbortReason::one(
 			"invalid-edit",
-			"TTSR matched rule: no-unwrap",
-			"TTSR interrupt on another tool call",
+			"stream rule no-unwrap",
+			"interrupted by a stream rule on another tool call",
 		)))
 		.expect("scoped abort queues");
 		(&mut run)
@@ -553,15 +553,15 @@ async fn scoped_stream_abort_labels_siblings_in_call_order_and_replays() {
 	assert_eq!(outcome.stop, TurnStop::Cancelled);
 	let innocent_text = support::result_text(&session, "innocent-read");
 	assert!(
-		innocent_text[0].contains("TTSR interrupt on another tool call"),
+		innocent_text[0].contains("interrupted by a stream rule on another tool call"),
 		"innocent sibling receives the neutral label"
 	);
 	assert!(
-		!innocent_text[0].contains("TTSR matched rule"),
+		!innocent_text[0].contains("stream rule no-unwrap"),
 		"innocent sibling is not blamed for the matching call"
 	);
 	assert!(
-		support::result_text(&session, "invalid-edit")[0].contains("TTSR matched rule: no-unwrap"),
+		support::result_text(&session, "invalid-edit")[0].contains("stream rule no-unwrap"),
 		"matching call receives its own abort reason"
 	);
 
@@ -613,11 +613,9 @@ async fn scoped_stream_abort_labels_siblings_in_call_order_and_replays() {
 	assert_eq!(replayed.dom().snapshot(), live);
 	assert!(
 		support::result_text(&replayed, "innocent-read")[0]
-			.contains("TTSR interrupt on another tool call")
+			.contains("interrupted by a stream rule on another tool call")
 	);
-	assert!(
-		support::result_text(&replayed, "invalid-edit")[0].contains("TTSR matched rule: no-unwrap")
-	);
+	assert!(support::result_text(&replayed, "invalid-edit")[0].contains("stream rule no-unwrap"));
 }
 
 #[tokio::test]

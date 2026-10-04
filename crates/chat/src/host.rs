@@ -1335,10 +1335,13 @@ impl Presenter {
 			// approval overlay opens from `sync_approval`), so the event
 			// itself carries no host state. A Director redirect is journaled as
 			// one atomic patch (the interrupted response, its host-only notice and
-			// the injected rule text), so the same stream projects it.
+			// the injected rule text), so the same stream projects it: the
+			// `<notice name=stream-rule>` card and the interrupted response
+			// render from the DOM, and the observation is extension-facing.
 			KernelEvent::JobsDelivered { .. }
 			| KernelEvent::WorkflowActionAnswered { .. }
 			| KernelEvent::StreamRedirected { .. }
+			| KernelEvent::StreamObserved { .. }
 			| KernelEvent::ApprovalRequested(_) => {},
 		}
 		self.log_speech_failure();

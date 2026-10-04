@@ -1283,6 +1283,124 @@ async fn chat_tui_persists_thinking_blocks_across_turns_and_resume() {
 	assert_restored(&resumed_bytes, &resumed_before, &resumed_after, &resumed_diagnostics);
 }
 
+/// The text-only response `text` in one block.
+fn text_script(text: &'static str) -> FakeScript {
+	FakeScript::chat(vec![
+		Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text }),
+		Ok(ChatEvent::TextDelta { index: 0, text: Str::from(text) }),
+		Ok(completed(FinishReason::Stop, 1)),
+	])
+}
+
+/// ADR 0038 surfaces on a real PTY: a project stream rule interrupts the
+/// first response, the TUI paints the redirect notice card and the
+/// resampled answer, both survive a resize, and quitting restores the
+/// terminal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit() {
+	use std::os::unix::fs::PermissionsExt;
+	omp_e2e::support::install_omp_binary_env().expect("install Cargo-built omp binary");
+	let scratch = tempfile::tempdir().expect("scratch root");
+	fs::set_permissions(scratch.path(), <fs::Permissions>::from_mode(0o700))
+		.expect("secure scratch root");
+	let project = scratch.path().join("project");
+	fs::create_dir(&project).expect("project directory");
+	let project = fs::canonicalize(&project).expect("canonical project root");
+	let metadata_dir = project.join(".omp");
+	fs::create_dir(&metadata_dir).expect("project metadata directory");
+	fs::set_permissions(&metadata_dir, <fs::Permissions>::from_mode(0o755))
+		.expect("use standard project metadata permissions");
+	write_fixture(
+		&metadata_dir.join("rules/no-forbidden.md"),
+		"---\ncondition: forbidden\nscope: text\n---\nNever use the forbidden word.\n",
+	);
+	let gateway_socket = scratch.path().join("gateway.sock");
+	let debug_socket = scratch.path().join("tui-debug.sock");
+	let gateway = ScriptedGateway::start_with_scripts(scratch.path(), &gateway_socket, vec![
+		text_script("Here is the forbidden word you asked about."),
+		text_script("Clean answer after the rule."),
+	])
+	.await;
+	gateway.release(0);
+	gateway.release(1);
+
+	let sessions_dir = scratch.path().join("sessions");
+	fs::create_dir(&sessions_dir).expect("session directory");
+	let session_path = sessions_dir.join("stream-rule.oms");
+	seed_session(&session_path);
+	let binary = omp_e2e::support::omp_binary().expect("locate omp binary");
+	let args = vec![
+		"chat".to_owned(),
+		"--model".to_owned(),
+		gateway.model,
+		"--project".to_owned(),
+		project.display().to_string(),
+		"--gateway".to_owned(),
+		gateway_socket.display().to_string(),
+		"--session-dir".to_owned(),
+		sessions_dir.display().to_string(),
+		"--envd-idle-timeout".to_owned(),
+		"2".to_owned(),
+		"--session".to_owned(),
+		session_path.display().to_string(),
+	];
+	let mut process = PtyChild::spawn(&binary, &args, &project, &debug_socket);
+	let raw_capture = process.raw.clone();
+	let mut debug =
+		DebugClient::connect(&debug_socket, Instant::now() + READY_TIMEOUT, &mut process);
+	let ready = wait_snapshot(&mut debug, &raw_capture, "chat shell ready", |snapshot| {
+		snapshot.combined().contains(COMPOSER_PROMPT)
+	});
+	assert_surface(&ready, "ready");
+
+	const NOTICE: &str =
+		"Stream rule no-forbidden matched the text output; the response was redirected.";
+	debug.keys("'use the word' enter");
+	let redirected = wait_snapshot(&mut debug, &raw_capture, "stream rule redirect", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains(NOTICE) && surface.contains("Clean answer after the rule.")
+	});
+	assert_surface(&redirected, "redirected");
+	let card = redirected
+		.combined()
+		.lines()
+		.find(|line| line.contains(NOTICE))
+		.map(str::to_owned)
+		.expect("notice row");
+	assert!(card.contains('⚖'), "the stream-rule card leads with the themed rule glyph: {card:?}");
+	let session_journal = journal(&session_path);
+	assert!(session_journal.contains("director.stream-interrupt"), "{session_journal}");
+	assert_journal_chain(&session_journal);
+	mark("stream rule redirect painted");
+
+	process.resize(30, 96);
+	debug
+		.op("resize")
+		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
+	let resized = wait_snapshot(&mut debug, &raw_capture, "redirect survives resize", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains(NOTICE)
+			&& surface.contains("Clean answer after the rule.")
+			&& surface.contains(COMPOSER_PROMPT)
+	});
+	assert_surface(&resized, "resized");
+	let info = wait_info(&mut debug, "settled resize", |info| {
+		info.get("rows").and_then(Value::as_u64) == Some(30)
+			&& info.get("cols").and_then(Value::as_u64) == Some(96)
+	});
+	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(96), "resize cols: {info}");
+	mark("resize settled");
+
+	debug.keys("ctrl+c ctrl+c");
+	drop(debug);
+	let before = process.before.clone();
+	let (status, raw, stdout, stderr, after) = process.wait(READY_TIMEOUT);
+	let diagnostics =
+		format!("status={status}\nstdout={stdout}\nstderr={stderr}\nraw={}", visible(&raw));
+	assert!(status.success(), "omp chat did not exit cleanly\n{diagnostics}");
+	assert_restored(&raw, &before, &after, &diagnostics);
+}
+
 /// Writes `body` to `path`, creating its parent directories.
 fn write_fixture(path: &Path, body: &str) {
 	fs::create_dir_all(path.parent().expect("fixture has a parent")).expect("fixture directory");

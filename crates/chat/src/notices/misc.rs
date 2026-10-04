@@ -157,12 +157,44 @@ pub(crate) fn launch_completion_block(completion: &LaunchCompletion) -> Componen
 /// the controller kinds (`error | warn | info | success`) and anything else.
 #[must_use]
 pub fn custom_notice(kind: &str, node: &Node, expanded: bool) -> Option<Component> {
+	if let Some(card) = stream_notice_card(node) {
+		return Some(card);
+	}
 	match kind {
 		"diagnostics" => Some(diagnostics_card(node, expanded)),
 		"tangent" => Some(tangent_pill(node)),
 		"advisor" => Some(advisor_card(node, expanded)),
 		_ => None,
 	}
+}
+
+/// The card for a stream observer's notice.
+///
+/// `<notice name=stream-rule>` marks a stream-rule redirect,
+/// `stream-redirect-cap` the per-turn cap turning a redirect into a note, and
+/// `stream-watch` any other observer. The card is the themed rule glyph and
+/// the journaled reason between muted rules; the redirected response stays in
+/// the transcript above it, so the card says why the model started over.
+#[must_use]
+pub fn stream_notice_card(node: &Node) -> Option<Component> {
+	node
+		.prop(&omp_dom::PropKey::Custom(Str::new_static("name")))
+		.and_then(Value::as_str)
+		.filter(|name| name.starts_with("stream-"))?;
+	let text = node.content.clone().filter(|text| !text.is_empty())?;
+	Some(
+		dom! {
+			<col>
+				<hr fg=muted/>
+				<row gap=1 pad-x=1>
+					<icon name="rule-extension" fg=warning/>
+					<text grow>{text}</text>
+				</row>
+				<hr fg=muted/>
+			</col>
+		}
+		.into_component(),
+	)
 }
 
 /// One parsed `path:line:col [severity] [source] message (code)` line.
@@ -773,6 +805,30 @@ mod tests {
 		assert!(
 			!rendered.contains("readiness process exited"),
 			"fault detail stays out of the compact row: {rendered:?}"
+		);
+	}
+
+	#[test]
+	fn stream_rule_notice_card_shows_the_rule_glyph_and_reason() {
+		let mut node = notice(
+			"warn",
+			&[],
+			Some("Stream rule no-unwrap matched the edit call c1; the response was redirected."),
+		);
+		node.props.push((
+			PropKey::Custom(Str::new_static("name")),
+			Value::Str(Str::new_static("stream-rule")),
+		));
+		let card = custom_notice("warn", &node, false).expect("stream notices get their card");
+		let text = render(card, 100);
+		let lines = text.lines().collect::<Vec<_>>();
+		assert_eq!(
+			lines[1].trim_end(),
+			" ⚖ Stream rule no-unwrap matched the edit call c1; the response was redirected."
+		);
+		assert!(
+			custom_notice("warn", &notice("warn", &[], Some("plain warning")), false).is_none(),
+			"other warn notices keep the generic card"
 		);
 	}
 

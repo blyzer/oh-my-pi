@@ -19,6 +19,23 @@ pub enum KernelEvent {
 	StreamRedirected {
 		/// Stable Director family that requested the redirect.
 		director: Str,
+		/// The Director's culprit label (for stream rules, `stream rule
+		/// <name>`).
+		label:    Str,
+		/// The host-visible notice journaled with the redirect, when the
+		/// Director wrote one.
+		reason:   Option<Str>,
+	},
+	/// A Director's stream observation was journaled (with a redirect or as
+	/// a note) and published to lifecycle hooks; hosts that mirror hook
+	/// events forward it.
+	StreamObserved {
+		/// Stable Director family that produced it.
+		director: Str,
+		/// Hook event published.
+		event:    omp_proto::toolhost::v1::HookEventId,
+		/// The stamped revision-1 JSON payload, exactly as published.
+		payload:  Str,
 	},
 	/// The transport layer is about to wait `delay` before same-route retry
 	/// `attempt` of `max_attempts`. Pre-commit and replay-irrelevant, so it is

@@ -275,21 +275,45 @@ omp_con::var! {
 	pub static AI_STREAM_RULES_ENABLED = ai_stream_rules_enabled: bool {
 		default: true,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "Stream Rules",
+			"ui.label": "Stream Rules",
+			"legacy.path": "ttsr.enabled",
+		},
 	};
 	/// Interrupt policy for matching stream rules.
 	pub static AI_STREAM_RULES_INTERRUPT = ai_stream_rules_interrupt: StreamRuleInterrupt {
 		default: StreamRuleInterrupt::Always,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "Stream Rules",
+			"ui.label": "Interrupt",
+			"legacy.path": "ttsr.interruptMode",
+		},
 	};
 	/// Context policy for interrupted stream-rule responses.
 	pub static AI_STREAM_RULES_CONTEXT = ai_stream_rules_context: StreamRuleContext {
 		default: StreamRuleContext::Discard,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "Stream Rules",
+			"ui.label": "Interrupted Output",
+			"legacy.path": "ttsr.contextMode",
+		},
 	};
 	/// Repeat policy for stream rules.
 	pub static AI_STREAM_RULES_REPEAT = ai_stream_rules_repeat: StreamRuleRepeat {
 		default: StreamRuleRepeat::Once,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "Stream Rules",
+			"ui.label": "Repeat",
+			"legacy.path": "ttsr.repeatMode",
+		},
 	};
 	/// Completed assistant responses required between repeated rule matches.
 	pub static AI_STREAM_RULES_REPEAT_GAP = ai_stream_rules_repeat_gap: u32 {
@@ -297,11 +321,23 @@ omp_con::var! {
 		min: 0,
 		max: 1000,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "Stream Rules",
+			"ui.label": "Repeat Gap",
+			"legacy.path": "ttsr.repeatGap",
+		},
 	};
 	/// Rule names excluded from stream matching.
 	pub static AI_STREAM_RULES_DISABLED = ai_stream_rules_disabled: Vec<Str> {
 		default: Vec::new(),
 		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "Stream Rules",
+			"ui.label": "Disabled Rules",
+			"legacy.path": "ttsr.disabledRules",
+		},
 	};
 }
 

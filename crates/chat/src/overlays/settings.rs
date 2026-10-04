@@ -106,7 +106,7 @@ const SETTING_TABS: &[TabSpec] = &[
 		tab:    SettingTab::Context,
 		label:  "Context",
 		icon:   "tab.context",
-		groups: &["General", "Compaction", "Rules (TTSR)", "Experimental"],
+		groups: &["General", "Compaction", "Stream Rules", "Experimental"],
 	},
 	TabSpec {
 		tab:    SettingTab::Memory,

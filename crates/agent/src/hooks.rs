@@ -749,7 +749,7 @@ impl SessionSwitched {
 }
 
 /// A session's name on the lifecycle surface: its journal file name.
-fn journal_name(session: &omp_session::Session) -> Str {
+pub(crate) fn journal_name(session: &omp_session::Session) -> Str {
 	session
 		.journal_path()
 		.file_name()

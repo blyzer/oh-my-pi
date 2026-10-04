@@ -769,7 +769,7 @@ impl LifecycleEvent {
 	) -> Result<CowBytes<'static>, LifecycleEventError> {
 		if !matches!(
 			self.id,
-			HookEventId::HookEventTtsrTriggered
+			HookEventId::HookEventStreamRuleTriggered
 				| HookEventId::HookEventRetryStart
 				| HookEventId::HookEventRetryEnd
 				| HookEventId::HookEventFallbackApplied

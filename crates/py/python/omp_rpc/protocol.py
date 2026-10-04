@@ -177,14 +177,6 @@ def _optional_json_objects(
     return tuple(_clone_json_object(item, field=f"{field}[]") for item in values)
 
 
-def _clone_json_objects(values: object, *, field: str) -> tuple[JsonObject, ...]:
-    if values is None:
-        return ()
-    if not isinstance(values, list):
-        raise ValueError(f"{field} must be a list")
-    return tuple(_clone_json_object(item, field=f"{field}[]") for item in values)
-
-
 def _require_literal(value: object, allowed: frozenset[str], *, field: str) -> str:
     if not isinstance(value, str) or value not in allowed:
         expected = ", ".join(sorted(allowed))
@@ -1117,9 +1109,16 @@ class RetryFallbackSucceededEvent:
 
 
 @dataclass(slots=True, frozen=True)
-class TtsrTriggeredEvent:
-    rules: tuple[JsonObject, ...]
-    type: Literal["ttsr_triggered"] = "ttsr_triggered"
+class StreamRuleTriggeredEvent:
+    """One stream rule fired; mirrors the ``stream_rule_triggered`` hook event."""
+
+    rule: str
+    matched: str
+    interrupted: bool
+    source: str
+    call_id: str | None = None
+    turn_id: str = ""
+    type: Literal["stream_rule_triggered"] = "stream_rule_triggered"
 
 
 @dataclass(slots=True, frozen=True)
@@ -1159,7 +1158,7 @@ RpcAgentEvent: TypeAlias = (
     | AutoRetryEndEvent
     | RetryFallbackAppliedEvent
     | RetryFallbackSucceededEvent
-    | TtsrTriggeredEvent
+    | StreamRuleTriggeredEvent
     | TodoReminderEvent
     | TodoAutoClearEvent
 )
@@ -1808,11 +1807,15 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         return RetryFallbackSucceededEvent(
             model=str(payload.get("model", "")), role=str(payload.get("role", ""))
         )
-    if event_type == "ttsr_triggered":
-        return TtsrTriggeredEvent(
-            rules=_clone_json_objects(
-                payload.get("rules"), field="ttsr_triggered.rules"
-            )
+    if event_type == "stream_rule_triggered":
+        call_id = payload.get("call_id")
+        return StreamRuleTriggeredEvent(
+            rule=str(payload.get("rule", "")),
+            matched=str(payload.get("matched", "")),
+            interrupted=bool(payload.get("interrupted", False)),
+            source=str(payload.get("source", "")),
+            call_id=None if call_id is None else str(call_id),
+            turn_id=str(payload.get("turn_id", "")),
         )
     if event_type == "todo_reminder":
         return TodoReminderEvent(
