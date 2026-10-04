@@ -934,13 +934,22 @@ mod tests {
 			Box::pin(future::ready(Ok(Str::from(""))))
 		}
 
-		fn write_text(
+		fn capabilities(&self) -> crate::docs::EditorCapabilities {
+			crate::docs::EditorCapabilities { read: true, write: true }
+		}
+
+		fn write_back(
 			&self,
-			_absolute_path: Str,
-			content: Str,
-		) -> Pin<Box<dyn Future<Output = Result<Str, crate::docs::EditorIoError>> + Send + '_>> {
+			_write_back: crate::docs::WriteBack,
+		) -> Pin<
+			Box<
+				dyn Future<Output = Result<crate::docs::WriteBackOutcome, crate::docs::EditorIoError>>
+					+ Send
+					+ '_,
+			>,
+		> {
 			self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-			Box::pin(future::ready(Ok(content)))
+			Box::pin(future::ready(Ok(crate::docs::WriteBackOutcome::Superseded)))
 		}
 	}
 
@@ -952,7 +961,10 @@ mod tests {
 		let editor = Arc::new(UntouchedEditor(std::sync::atomic::AtomicUsize::new(0)));
 		let scope = InvocationAcpBackends::new(Some(crate::editor_base::EditorRoute::new(
 			Arc::clone(&editor) as Arc<dyn crate::docs::AcpDocumentBackend>,
-			Arc::new(crate::editor_base::EditorSession::new(std::time::Duration::from_secs(5))),
+			Arc::new(crate::editor_base::EditorSession::new(
+				std::time::Duration::from_secs(5),
+				crate::docs::EditorCapabilities { read: true, write: true },
+			)),
 		)));
 		let (events, outcome) = with_acp_scope(scope, async {
 			let session = host

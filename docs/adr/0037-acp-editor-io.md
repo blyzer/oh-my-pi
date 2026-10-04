@@ -310,7 +310,7 @@ be proposed in a later record once a client's display-only mechanism is verified
 
 ## Status in omp
 
-**Partially implemented (plan steps 1–2).** Step 1: `crates/app/src/acp_client.rs` (typed
+**Partially implemented (plan steps 1–3).** Step 1: `crates/app/src/acp_client.rs` (typed
 capabilities, one request table, gated `fs/*`). Step 2: the base selection of §3 lives in
 `crates/envd/src/editor_base.rs`; the connection binds its editor through
 `ProjectEnvironment::editor_documents` (driver: `ComposedInference::editor_documents`), one anchor
@@ -319,9 +319,59 @@ table per `AcpBind` of that environment connection, with `AcpBind.fs_timeout_ms`
 pseudo-revision are deleted. Two refinements over §3 as written: a first-contact (unanchored) read
 also sets K := D, so a disk change made after that read is merged or conflicts instead of being
 reverted by the buffer; and an agent Write anchors the buffer it superseded (K := B, read before the
-commit) until write-back (step 3) sets K := R. A conflicting merge rejects an Edit with typed ranges;
-a Read falls back to D with `editor_buffer_conflict`. Notebooks (`.ipynb`) are not eligible. Steps 3
-(write-back) and 4 (terminal cutover) are open.
+commit). A conflicting merge rejects an Edit with typed ranges; a Read falls back to D with
+`editor_buffer_conflict`. Notebooks (`.ipynb`) are not eligible.
+
+Step 3 (write-back, §4.3–§4.6): after a durable commit, the Edit and Write hosts in
+`crates/envd/src/tool_document.rs` start one write-back per committed text section
+(`editor_base::start_write_backs`) and hand the tool an `omp_tools::editor_sync::EditorSync`; the
+tool builds its result from the commit, then waits for the write-backs before it settles. How it
+was built, and where it differs from the text above:
+
+- **The queue lives with the editor's connection, not in the daemon's `DocumentHost`.** The daemon
+  sends one `AcpWriteQuery{path, content = R, base = B}` per committed path and awaits an
+  `AcpWriteBack` outcome (`written{merged?, read_back?}` | `conflict{ranges}` | `superseded`). The
+  per-path FIFO, supersession, pre-write re-read and merge, `fs/write_text_file` and read-back run
+  in `omp_envd::editor_sync::EditorBackend`, which the ACP adapter creates per binding (its
+  `EditorFiles` are the connection's gated `fs/*` requests, each naming the session the binding was
+  made for). The daemon's per-invocation editor route dies with the invocation, while §4.6 needs a
+  write-back that outlives an interrupted call and is drained or dropped at the adapter's own
+  lifecycle events; owning the queue there gives both. The daemon bounds its wait for one
+  write-back at six editor deadlines (one write-back ahead of it on the path, plus its own three
+  round trips).
+- **Wire.** `AcpBind` gains `read_text`/`write_text` (the editor's capabilities),
+  `AcpWriteQuery` gains `optional base`, and `AcpDocumentAnswer` gains the `write_back` outcome
+  (`AcpWriteBack`, `AcpWritten`, `AcpWriteConflict`, `AcpWriteSuperseded`).
+- **Binding (§1.2).** The adapter now binds when `readTextFile` *or* `writeTextFile` is advertised
+  (step 2 bound on `readTextFile` only). A write-only editor is never read: disk is the base and R is
+  written as is, with no re-read and no read-back.
+- **Anchors.** K := B still happens at the commit, so a failed or skipped write-back leaves K = B
+  (§4.5); a successful one sets K := the bytes sent, and a write-back that finishes late never
+  overrides a newer one's anchor. A queued write-back whose base is a buffer the previous
+  write-back of the same path replaced has that base swapped for what the previous write-back left,
+  so the queue's own write is never mistaken for user typing.
+- **What is written back.** Written sections of an Edit and plain Writes (creates included, written
+  as is). Moves and deletes are not (no ACP method). A commit whose pre-commit buffer read failed
+  is not written back: with no B known, a blind write could overwrite typing the environment never
+  saw. Conflict splices (`conflict://`), archive members and other special writes are not written
+  back; omp has no subagent-diff lift into the project scope yet.
+- **Partial commits.** The Edit host compensates a `TransactionPartiallyCommitted` by rolling the
+  landed operations back, so no committed operation is left to write back; the write-back is
+  selected per committed section, and a rolled-back partial commit writes nothing
+  (`production_host_rolls_back_landed_prefix_and_keeps_registers_unpublished`).
+- **Notices.** `editor_sync_failed` and `editor_sync_conflict` (ranges in B's normalized byte
+  coordinates, with the lines in B and R) are warnings; `editor_sync_pending` is informational and
+  is also what a call reports when the daemon stops waiting because the editor's connection went
+  away. Client format drift is the informational diag `client_format_drift`, whose text states
+  `client_formatted=true bytes_changed_after_client_format=true`; no `ClientFormatDrift` message is
+  added to the tool element.
+- **Drain.** Before `session/close`, a session switch and graceful `shutdown` the adapter waits for
+  the queue, bounded by `sv_acp_fs_timeout`; meanwhile it keeps routing client responses (approvals
+  included) and defers any request to after the switch, in order. EOF fails every pending request,
+  which drops the queue. On `shutdown` the drain runs before the transport is closed and before the
+  active turn is awaited.
+
+Step 4 (terminal cutover) is open.
 
 ### Implementation plan (PR-sized)
 

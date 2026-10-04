@@ -96,6 +96,8 @@ pub mod device;
 pub mod device_ctl;
 /// Hashline document transactions with speculative previews.
 pub mod edit;
+/// Editor write-backs that follow a durable commit (ADR 0037).
+pub mod editor_sync;
 /// Persistent Python evaluation.
 pub mod eval;
 /// Native renderer lifecycle fixtures for visual QA.

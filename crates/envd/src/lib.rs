@@ -16,6 +16,9 @@ pub mod docs;
 pub mod docserver;
 pub mod document_cache;
 mod editor_base;
+/// Write-back of committed bytes to the ACP editor, on a per-path queue owned
+/// by the editor's connection (ADR 0037 §4).
+pub mod editor_sync;
 pub mod eval;
 pub mod exec;
 mod exec_sandbox;
@@ -118,7 +121,7 @@ use omp_env::{AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames}
 use omp_ext::config::ContributedCliValue;
 use omp_proto::{
 	env::v1::{
-		AcpDocumentAnswer, ApprovalMode as ProtoApprovalMode, ClientHello, EditRepairAnswer,
+		AcpBind, AcpDocumentAnswer, ApprovalMode as ProtoApprovalMode, ClientHello, EditRepairAnswer,
 		EditRepairFailure, EditRepairFailureCode, ProtocolError, ProtocolErrorCode, RegisterPresence,
 		ReleasePresence, ServerHello, acp_document_answer, edit_repair_answer,
 	},
@@ -1581,17 +1584,26 @@ impl EditorDocuments {
 	/// Binds `editor` for the live session, or unbinds it with `None` (session
 	/// close, an ineligible session, transport loss).
 	pub fn bind(&self, editor: Option<Arc<dyn docs::AcpDocumentBackend>>) {
-		let deadline = editor.as_ref().map(|editor| editor.deadline());
+		let binding = editor.as_ref().map_or_else(AcpBind::default, |editor| {
+			let capabilities = editor.capabilities();
+			AcpBind {
+				documents:     true,
+				fs_timeout_ms: u64::try_from(editor.deadline().as_millis()).unwrap_or(u64::MAX),
+				read_text:     capabilities.read,
+				write_text:    capabilities.write,
+			}
+		});
 		// An embedded host runs the kernel's native document tools in-process,
 		// outside any connection; they reach the editor through the host.
 		if let Some(server) = self.server.upgrade() {
 			server.bind_in_process_editor(editor.clone());
 		}
 		*self.documents.write() = editor;
-		if let Err(error) = self.client.bind_acp(deadline) {
+		let documents = binding.documents;
+		if let Err(error) = self.client.bind_acp(binding) {
 			tracing::warn!(
 				error = &error as &dyn std::error::Error,
-				documents = deadline.is_some(),
+				documents,
 				"failed to update ACP connection binding"
 			);
 		}
@@ -1682,12 +1694,24 @@ async fn answer_acp_write(
 	let result = match backend {
 		Some(backend) => {
 			backend
-				.write_text(Str::from(query.path.as_str()), Str::from(query.content.as_str()))
+				.write_back(docs::WriteBack {
+					path:    Str::from(query.path),
+					content: Str::from(query.content),
+					base:    query.base.map(Str::from),
+				})
 				.await
 		},
 		None => Err(docs::EditorIoError::Unbound),
 	};
-	acp_document_answer(query.query_id, query.invocation_id, result)
+	let body = match result {
+		Ok(outcome) => acp_document_answer::Body::WriteBack(outcome.into_wire()),
+		Err(error) => acp_document_answer::Body::Error(acp_document_error(error)),
+	};
+	AcpDocumentAnswer {
+		query_id:      query.query_id,
+		invocation_id: query.invocation_id,
+		body:          Some(body),
+	}
 }
 
 /// Encodes an editor answer for the daemon; a failure crosses as its typed
@@ -1699,12 +1723,13 @@ fn acp_document_answer(
 ) -> AcpDocumentAnswer {
 	let body = match result {
 		Ok(content) => acp_document_answer::Body::Content(content.to_string()),
-		Err(error) => acp_document_answer::Body::Error(acp_error(
-			error.protocol_code(),
-			<&'static str>::from(error),
-		)),
+		Err(error) => acp_document_answer::Body::Error(acp_document_error(error)),
 	};
 	AcpDocumentAnswer { query_id, invocation_id, body: Some(body) }
+}
+
+fn acp_document_error(error: docs::EditorIoError) -> ProtocolError {
+	acp_error(error.protocol_code(), <&'static str>::from(error))
 }
 
 fn acp_error(code: ProtocolErrorCode, message: impl Into<String>) -> ProtocolError {
@@ -2053,36 +2078,30 @@ async fn owner_endpoint_ready(socket: &Path) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
-	use std::{future::Future, pin::Pin};
+	use std::future::Future;
 
 	use parking_lot::Mutex;
 
 	use super::*;
 
-	struct FormattingDocuments(Mutex<Str>);
+	/// An editor whose client reformats every buffer written to it.
+	struct FormattingFiles(Mutex<Str>);
 
-	impl docs::AcpDocumentBackend for FormattingDocuments {
-		fn deadline(&self) -> std::time::Duration {
-			std::time::Duration::from_secs(5)
-		}
-
+	impl editor_sync::EditorFiles for FormattingFiles {
 		fn read_text(
 			&self,
-			_absolute_path: Str,
-		) -> Pin<Box<dyn Future<Output = Result<Str, docs::EditorIoError>> + Send + '_>> {
-			Box::pin(async move { Ok(self.0.lock().clone()) })
+			_path: Str,
+		) -> impl Future<Output = Result<Str, docs::EditorIoError>> + Send + '_ {
+			std::future::ready(Ok(self.0.lock().clone()))
 		}
 
 		fn write_text(
 			&self,
-			_absolute_path: Str,
+			_path: Str,
 			content: Str,
-		) -> Pin<Box<dyn Future<Output = Result<Str, docs::EditorIoError>> + Send + '_>> {
-			Box::pin(async move {
-				let formatted = sf!("{}\n", content.trim_end());
-				*self.0.lock() = formatted.clone();
-				Ok(formatted)
-			})
+		) -> impl Future<Output = Result<(), docs::EditorIoError>> + Send + '_ {
+			*self.0.lock() = sf!("{}\n", content.trim_end());
+			std::future::ready(Ok(()))
 		}
 	}
 
@@ -2133,17 +2152,31 @@ mod tests {
 	}
 	#[tokio::test]
 	async fn acp_document_answers_return_formatted_readback_and_typed_unbound_failure() {
-		let backend: Arc<dyn docs::AcpDocumentBackend> =
-			Arc::new(FormattingDocuments(Mutex::new(sf!("before"))));
+		let backend: Arc<dyn docs::AcpDocumentBackend> = Arc::new(editor_sync::EditorBackend::new(
+			FormattingFiles(Mutex::new(sf!("before"))),
+			docs::EditorCapabilities { read: true, write: true },
+			std::time::Duration::from_secs(5),
+		));
 		let written =
 			answer_acp_write(Some(Arc::clone(&backend)), omp_proto::env::v1::AcpWriteQuery {
 				query_id:      7,
 				invocation_id: "invocation".into(),
 				path:          "/workspace/main.rs".into(),
 				content:       "fn main() {}  ".into(),
+				base:          None,
 			})
 			.await;
-		assert_eq!(written.body, Some(acp_document_answer::Body::Content("fn main() {}\n".into())));
+		let Some(acp_document_answer::Body::WriteBack(outcome)) = written.body else {
+			panic!("a write-back answers with its outcome: {written:?}");
+		};
+		assert_eq!(
+			docs::WriteBackOutcome::from_wire(outcome),
+			Ok(docs::WriteBackOutcome::Written {
+				merged:    None,
+				read_back: Some(Str::new_static("fn main() {}\n")),
+			}),
+			"the client's reformatting crosses the wire as the read-back"
+		);
 		let read = answer_acp_read(Some(backend), omp_proto::env::v1::AcpReadQuery {
 			query_id:      8,
 			invocation_id: "invocation".into(),

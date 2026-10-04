@@ -554,10 +554,13 @@ pub struct CommittedSection {
 }
 
 /// Structured successful response from the atomic transaction owner.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommitResult {
 	/// Results in authored section order.
-	pub sections: Vec<CommittedSection>,
+	pub sections:    Vec<CommittedSection>,
+	/// Write-backs of the committed documents to a bound editor, awaited
+	/// before the call settles (ADR 0037 §4.4).
+	pub editor_sync: crate::editor_sync::EditorSync,
 }
 
 /// One conflicting base/current range retained from transaction rejection.
@@ -1118,7 +1121,7 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 			};
 			let Some(result) = result else { return; };
 			match result {
-				Ok(result) if result.sections.len() == parsed_sections.len() => {
+				Ok(mut result) if result.sections.len() == parsed_sections.len() => {
 					for (work, committed) in parsed_sections.iter().zip(&result.sections) {
 						if let Some(content) = &committed.content
 							&& let Err(fault) = utf8(content, "committed document")
@@ -1158,6 +1161,13 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 						for diag in &projection.diags {
 							yield Ev::Diag(diag.clone());
 						}
+					}
+					// The commit is durable and the result is fixed; the call settles
+					// once a bound editor holds the committed bytes, or at once with
+					// `editor_sync_pending` when interrupted (ADR 0037 §4.4–§4.6).
+					let editor_sync = std::mem::take(&mut result.editor_sync);
+					for diag in editor_sync.settle(params.next_interrupt()).await {
+						yield Ev::Diag(diag);
 					}
 					yield Ev::Done(ToolTerminal::Done { result: Ok(payload), useless: false });
 				},

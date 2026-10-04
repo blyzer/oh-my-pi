@@ -1,6 +1,6 @@
 //! Agent Client Protocol adapter over the journal-first kernel and session.
 
-use std::{borrow::Cow, fs, io, mem, path::Path, sync::Arc};
+use std::{borrow::Cow, collections::VecDeque, fs, io, mem, path::Path, sync::Arc};
 
 use miette::{IntoDiagnostic as _, miette};
 use omp_agent::{
@@ -263,12 +263,14 @@ impl AcpConnection {
 		self.client.clone()
 	}
 
-	/// Binds the editor of this connection into `host` as the document base
-	/// whenever the live session is eligible (ADR 0037 §1.2): the client
-	/// advertises `fs.readTextFile`, `sv_acp_fs` is not `off`, and the session
-	/// was made live with a `cwd` matching the project root. The binding is
-	/// renewed on every session switch and dropped on `session/close`,
-	/// `shutdown` and EOF.
+	/// Binds the editor of this connection into `host` whenever the live
+	/// session is eligible (ADR 0037 §1.2): the client advertises
+	/// `fs.readTextFile` or `fs.writeTextFile`, `sv_acp_fs` is not `off`, and
+	/// the session was made live with a `cwd` matching the project root. Its
+	/// buffers are then the document base and commits are written back to it.
+	/// The binding is renewed on every session switch and dropped on
+	/// `session/close`, `shutdown` and EOF, after its queued write-backs
+	/// drained (EOF drops them).
 	pub fn bind_documents(&self, host: Arc<dyn EditorDocumentsHost>) {
 		self.client.bind_documents(host);
 	}
@@ -351,9 +353,15 @@ where
 	let mut controller = Some((kernel, session));
 	let mut active: Option<tokio::task::JoinHandle<TurnCompletion<C>>> = None;
 	let mut closed = false;
+	// Requests that arrived while editor write-backs drained, handled in
+	// order before any new frame.
+	let mut deferred: VecDeque<Vec<u8>> = VecDeque::new();
 
 	loop {
-		let input_event: InputEvent<C> = if let Some(turn) = active.as_mut() {
+		let deferred_line = deferred.pop_front();
+		let input_event: InputEvent<C> = if deferred_line.is_some() {
+			InputEvent::Frame(Frame::Line)
+		} else if let Some(turn) = active.as_mut() {
 			tokio::select! {
 				completed = turn => InputEvent::Turn(completed.into_diagnostic()?),
 				frame = lines.next() => InputEvent::Frame(frame.into_diagnostic()?),
@@ -391,10 +399,11 @@ where
 				break;
 			},
 		}
-		if lines.is_blank() {
+		let line = deferred_line.as_deref().unwrap_or_else(|| lines.line());
+		if line.iter().all(u8::is_ascii_whitespace) {
 			continue;
 		}
-		let mut frame: Value = match serde_json::from_slice(lines.line()) {
+		let mut frame: Value = match serde_json::from_slice(line) {
 			Ok(frame) => frame,
 			Err(source) => {
 				output_tx
@@ -477,6 +486,7 @@ where
 				if let Err(message) = cwd {
 					Err((-32602, message))
 				} else {
+					drain_write_backs(&client, &mut lines, &mut deferred, &output_tx, &mailbox).await?;
 					let next = match home.create(None) {
 						Ok(next) => next,
 						Err(source) => {
@@ -526,6 +536,7 @@ where
 						},
 					};
 					let replay = method == "session/load";
+					drain_write_backs(&client, &mut lines, &mut deferred, &output_tx, &mailbox).await?;
 					let next = match home.open(Path::new(selector)) {
 						Ok(next) => next,
 						Err(source) => {
@@ -582,6 +593,7 @@ where
 							continue;
 						},
 					};
+					drain_write_backs(&client, &mut lines, &mut deferred, &output_tx, &mailbox).await?;
 					let next = match home.fork(Path::new(selector)) {
 						Ok(next) => next,
 						Err(source) => {
@@ -728,6 +740,7 @@ where
 			"session/close" if active.is_some() => Err((-32001, "a turn is already running")),
 			"session/close" => {
 				if !closed {
+					drain_write_backs(&client, &mut lines, &mut deferred, &output_tx, &mailbox).await?;
 					if let Some((kernel, session)) = controller.as_mut() {
 						if let Some(lifecycle) = kernel.lifecycle_hooks() {
 							lifecycle
@@ -749,7 +762,10 @@ where
 				if let Some(id) = id {
 					output_tx.send(success(id, json!({}))).into_diagnostic()?;
 				}
-				// No frame is read after `shutdown`, so no answer can arrive.
+				// Graceful: the editor write-backs still queued finish first,
+				// bounded by `sv_acp_fs_timeout`. No request is served after
+				// `shutdown`, and once the queue drained no answer is read either.
+				drain_write_backs(&client, &mut lines, &mut deferred, &output_tx, &mailbox).await?;
 				client.disconnect();
 				if let Some(turn) = active.take() {
 					// ACP shutdown is graceful: it waits for the active prompt's
@@ -808,6 +824,66 @@ where
 	drop(output_tx);
 	writer.await.into_diagnostic()??;
 	Ok(())
+}
+
+/// Waits until the editor write-backs queued for the live session finished,
+/// bounded by `sv_acp_fs_timeout` (ADR 0037 §4.6): on `session/close`, a
+/// session switch and graceful `shutdown`, before the session the write-backs
+/// name stops being live.
+///
+/// The editor's answers keep arriving through the controller loop, so this
+/// keeps reading frames meanwhile: a response is routed to its request (an
+/// approval answer to the kernel), and a request waits in `deferred` until the
+/// controller loop handles it in order. EOF drops the queue.
+async fn drain_write_backs<R: AsyncBufRead + Unpin>(
+	client: &AcpClient,
+	lines: &mut FrameReader<R>,
+	deferred: &mut VecDeque<Vec<u8>>,
+	output: &flume::Sender<Value>,
+	mailbox: &flume::Sender<Up>,
+) -> miette::Result<()> {
+	if client.write_backs_outstanding() == 0 {
+		return Ok(());
+	}
+	let drained = client.drain_write_backs();
+	tokio::pin!(drained);
+	loop {
+		let frame = tokio::select! {
+			biased;
+			_ = &mut drained => return Ok(()),
+			frame = lines.next() => frame.into_diagnostic()?,
+		};
+		match frame {
+			Frame::Eof => {
+				client.disconnect();
+				return Ok(());
+			},
+			Frame::Oversize => {
+				output
+					.send(error(Value::Null, -32600, OVERSIZE_FRAME))
+					.into_diagnostic()?;
+			},
+			Frame::Line if lines.is_blank() => {},
+			Frame::Line => {
+				let response = serde_json::from_slice::<Value>(lines.line())
+					.ok()
+					.filter(|frame| frame.get("method").is_none());
+				let routed = response.and_then(|mut frame| {
+					let id = frame.get("id").cloned()?;
+					Some((id, client_answer(&mut frame)?))
+				});
+				match routed {
+					Some((id, answer)) => {
+						if let Some((prompt_id, answer)) = client.answer(&id, answer) {
+							let decision = permission_decision(answer);
+							let _ = mailbox.send(Up::Approve { id: prompt_id, decision });
+						}
+					},
+					None => deferred.push_back(lines.line().to_vec()),
+				}
+			},
+		}
+	}
 }
 
 /// Splits a client response off its JSON-RPC envelope: its `result`, or its

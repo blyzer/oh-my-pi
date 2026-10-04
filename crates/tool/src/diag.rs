@@ -117,6 +117,18 @@ pub enum DiagKind {
 	EditorBufferUnavailable,
 	/// The editor's unsaved changes overlap a change made on disk.
 	EditorBufferConflict,
+	/// The committed result is still being written back to the editor; the
+	/// write-back continues after the call (ADR 0037 §4.6).
+	EditorSyncPending,
+	/// Writing the committed result back to the editor failed; the commit
+	/// stands (ADR 0037 §4.5).
+	EditorSyncFailed,
+	/// The user's later editor changes overlap the commit, so it was not
+	/// written back to the editor (ADR 0037 §4.3).
+	EditorSyncConflict,
+	/// The editor client reformatted the bytes written back to it (ADR 0037
+	/// §4.3).
+	ClientFormatDrift,
 }
 
 /// Unit of elided content reported by [`Diag::omitted`].
@@ -305,6 +317,10 @@ mod tests {
 			(DiagKind::EditorBufferUnanchored, "editor_buffer_unanchored"),
 			(DiagKind::EditorBufferUnavailable, "editor_buffer_unavailable"),
 			(DiagKind::EditorBufferConflict, "editor_buffer_conflict"),
+			(DiagKind::EditorSyncPending, "editor_sync_pending"),
+			(DiagKind::EditorSyncFailed, "editor_sync_failed"),
+			(DiagKind::EditorSyncConflict, "editor_sync_conflict"),
+			(DiagKind::ClientFormatDrift, "client_format_drift"),
 		] {
 			assert_eq!(<&'static str>::from(kind), name);
 			assert_eq!(Diag::warn(kind, "x").native_kind(), Some(kind));

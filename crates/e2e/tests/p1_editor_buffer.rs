@@ -1,96 +1,169 @@
 //! P1, editor-buffer case (ADR 0037 §3–§4): with an ACP editor bound to one
 //! environment connection, Read and Edit use the editor's unsaved buffer merged
-//! with disk as their base, a second host's concurrent disk edit survives, and
-//! every write commits through the real document authority. Nothing is pushed
-//! to the editor.
+//! with disk as their base, a second host's concurrent disk edit survives,
+//! every write commits through the real document authority, and only then are
+//! the committed bytes written back to the editor, before the call settles.
 //!
-//! The editor answers the daemon's `AcpReadQuery` frames on its own framed
-//! connection, exactly as the `omp acp` adapter's environment client does; the
-//! adapter's `fs/read_text_file` hop is proven by
-//! `crates/app/tests/acp_spine.rs`.
+//! The editor answers the daemon's `AcpReadQuery` and `AcpWriteQuery` frames on
+//! its own framed connection, through the same write-back queue
+//! ([`omp_envd::editor_sync::EditorBackend`]) the `omp acp` adapter's
+//! environment client runs; the adapter's `fs/read_text_file` and
+//! `fs/write_text_file` hop is proven by `crates/app/tests/acp_spine.rs`.
 
 #![cfg(unix)]
 
-use std::sync::{
-	Arc,
-	atomic::{AtomicUsize, Ordering},
+use std::{
+	future::{Future, ready},
+	path::PathBuf,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
 };
 
 use bytes::Bytes;
+use omp_core::Str;
 use omp_e2e::{
 	Result, error,
 	support::{DEFAULT_TIMEOUT, EnvHarness, Scratch, within},
 };
 use omp_env::{AcpRequest, EnvClient, InvocationEvent};
-use omp_proto::env::v1::{AcpDocumentAnswer, InvokeTool, acp_document_answer};
+use omp_envd::{
+	docs::{AcpDocumentBackend, EditorCapabilities, EditorIoError, WriteBack},
+	editor_sync::{EditorBackend, EditorFiles},
+};
+use omp_proto::env::v1::{
+	AcpBind, AcpDocumentAnswer, InvokeTool, ProtocolError, acp_document_answer,
+};
 use omp_tool::{CallOutcome, Registry};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 /// The editor on the other end of one environment connection: one buffer per
-/// file name, and a count of every query it answered.
-#[derive(Default)]
+/// file name, and what it saw.
 struct Editor {
+	/// The project root, to observe disk when a write-back arrives.
+	root:    PathBuf,
 	buffers: Mutex<Vec<(String, String)>>,
 	reads:   AtomicUsize,
 	writes:  AtomicUsize,
+	/// For each write-back: the bytes written and the file on disk then.
+	written: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 impl Editor {
+	fn new(scratch: &Scratch) -> Self {
+		Self {
+			root:    scratch.project().to_path_buf(),
+			buffers: Mutex::default(),
+			reads:   AtomicUsize::new(0),
+			writes:  AtomicUsize::new(0),
+			written: Mutex::default(),
+		}
+	}
+
 	fn set(&self, name: &str, text: &str) {
 		let mut buffers = self.buffers.lock();
 		buffers.retain(|(stored, _)| stored != name);
 		buffers.push((name.to_owned(), text.to_owned()));
 	}
 
+	fn name(path: &str) -> &str {
+		path.rsplit('/').next().unwrap_or(path)
+	}
+
 	fn buffer(&self, path: &str) -> Option<String> {
+		let name = Self::name(path);
 		self
 			.buffers
 			.lock()
 			.iter()
-			.find(|(name, _)| path.ends_with(&format!("/{name}")))
+			.find(|(stored, _)| stored == name)
 			.map(|(_, text)| text.clone())
+	}
+}
+
+/// The editor's `fs/*` methods, as the write-back queue drives them.
+struct Files(Arc<Editor>);
+
+impl EditorFiles for Files {
+	fn read_text(
+		&self,
+		path: Str,
+	) -> impl Future<Output = std::result::Result<Str, EditorIoError>> + Send + '_ {
+		self.0.reads.fetch_add(1, Ordering::SeqCst);
+		ready(
+			self
+				.0
+				.buffer(&path)
+				.map(Str::from)
+				.ok_or(EditorIoError::Refused),
+		)
+	}
+
+	fn write_text(
+		&self,
+		path: Str,
+		content: Str,
+	) -> impl Future<Output = std::result::Result<(), EditorIoError>> + Send + '_ {
+		self.0.writes.fetch_add(1, Ordering::SeqCst);
+		let name = Editor::name(&path);
+		let disk = std::fs::read(self.0.root.join(name)).unwrap_or_default();
+		self.0.written.lock().push((content.to_string(), disk));
+		self.0.set(name, &content);
+		ready(Ok(()))
 	}
 }
 
 /// Binds `client` as the editor's connection and answers its document queries
 /// until the connection closes.
 fn serve_editor(client: EnvClient, editor: Arc<Editor>) -> Result<tokio::task::JoinHandle<()>> {
+	let capabilities = EditorCapabilities { read: true, write: true };
 	client
-		.bind_acp(Some(DEFAULT_TIMEOUT))
+		.bind_acp(AcpBind {
+			documents:     true,
+			fs_timeout_ms: u64::try_from(DEFAULT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+			read_text:     capabilities.read,
+			write_text:    capabilities.write,
+		})
 		.map_err(|source| error(format!("binding the editor failed: {source}")))?;
+	let backend = Arc::new(EditorBackend::new(Files(editor), capabilities, DEFAULT_TIMEOUT));
 	let requests = client.acp_requests();
 	Ok(tokio::spawn(async move {
 		while let Ok(request) = requests.recv_async().await {
-			let (request_id, query_id, invocation_id, body) = match request {
-				AcpRequest::Read { request_id, query } => {
-					editor.reads.fetch_add(1, Ordering::SeqCst);
-					let body = editor.buffer(&query.path).map_or_else(
-						|| {
-							acp_document_answer::Body::Error(omp_proto::env::v1::ProtocolError {
-								code:    omp_proto::env::v1::ProtocolErrorCode::PermissionDenied as i32,
-								message: "no such buffer".to_owned(),
-								props:   None,
+			let client = client.clone();
+			let backend = Arc::clone(&backend);
+			tokio::spawn(async move {
+				let (request_id, query_id, invocation_id, result) = match request {
+					AcpRequest::Read { request_id, query } => {
+						let result = backend
+							.read_text(Str::from(query.path))
+							.await
+							.map(|content| acp_document_answer::Body::Content(content.to_string()));
+						(request_id, query.query_id, query.invocation_id, result)
+					},
+					AcpRequest::Write { request_id, query } => {
+						let result = backend
+							.write_back(WriteBack {
+								path:    Str::from(query.path),
+								content: Str::from(query.content),
+								base:    query.base.map(Str::from),
 							})
-						},
-						acp_document_answer::Body::Content,
-					);
-					(request_id, query.query_id, query.invocation_id, body)
-				},
-				AcpRequest::Write { request_id, query } => {
-					editor.writes.fetch_add(1, Ordering::SeqCst);
-					let body = acp_document_answer::Body::Content(query.content);
-					(request_id, query.query_id, query.invocation_id, body)
-				},
-			};
-			let answer = AcpDocumentAnswer { query_id, invocation_id, body: Some(body) };
-			if client
-				.answer_acp_document(request_id, answer)
-				.await
-				.is_err()
-			{
-				break;
-			}
+							.await
+							.map(|outcome| acp_document_answer::Body::WriteBack(outcome.into_wire()));
+						(request_id, query.query_id, query.invocation_id, result)
+					},
+				};
+				let body = result.unwrap_or_else(|_| {
+					acp_document_answer::Body::Error(ProtocolError {
+						code:    omp_proto::env::v1::ProtocolErrorCode::PermissionDenied as i32,
+						message: "no such buffer".to_owned(),
+						props:   None,
+					})
+				});
+				let answer = AcpDocumentAnswer { query_id, invocation_id, body: Some(body) };
+				let _ = client.answer_acp_document(request_id, answer).await;
+			});
 		}
 	}))
 }
@@ -169,7 +242,7 @@ async fn p1_editor_buffer_merges_user_host_and_agent_edits_through_the_authority
 	let scratch = Scratch::new()?;
 	scratch.write("race.txt", ORIGINAL)?;
 	let env = EnvHarness::spawn(&scratch, Registry::new()).await?;
-	let editor = Arc::new(Editor::default());
+	let editor = Arc::new(Editor::new(&scratch));
 	let editor_connection = env.connect_client("acp-editor").await?;
 	let agent = editor_connection.client_clone();
 	let pump = serve_editor(agent.clone(), Arc::clone(&editor))?;
@@ -195,13 +268,25 @@ async fn p1_editor_buffer_merges_user_host_and_agent_edits_through_the_authority
 	assert!(seen.contains("mid=user") && seen.contains("left=host"), "{seen}");
 	assert_eq!(scratch.read("race.txt")?, b"left=host\nmid=0\nright=0\n", "a read has no effect");
 
-	// The agent's edit commits user delta + host delta + agent delta.
-	edit(&agent, "agent-edit", "race.txt", merged, "PUT 3.=3:\n+right=agent\n")
+	// The agent's edit commits user delta + host delta + agent delta, and the
+	// editor is written back with exactly those bytes before the call settles.
+	let committed = b"left=host\nmid=user\nright=agent\n";
+	let payload = edit(&agent, "agent-edit", "race.txt", merged, "PUT 3.=3:\n+right=agent\n")
 		.await?
 		.map_err(|fault| error(format!("agent edit failed: {fault}")))?;
-	assert_eq!(scratch.read("race.txt")?, b"left=host\nmid=user\nright=agent\n");
+	assert_eq!(scratch.read("race.txt")?, committed);
 	assert!(editor.reads.load(Ordering::SeqCst) >= 3, "every agent read and prepare asked");
-	assert_eq!(editor.writes.load(Ordering::SeqCst), 0, "nothing is pushed to the editor");
+	assert_eq!(
+		editor.writes.load(Ordering::SeqCst),
+		1,
+		"the write-back reached the editor before the verdict: {payload}"
+	);
+	let written = editor.written.lock().clone();
+	assert_eq!(written.len(), 1);
+	assert_eq!(written[0].0.as_bytes(), committed, "the editor received exactly the commit");
+	assert_eq!(written[0].1, committed, "the commit was durable before the write-back");
+	assert_eq!(editor.buffer("race.txt").as_deref().map(str::as_bytes), Some(&committed[..]));
+	assert!(!payload.to_string().contains("editor_sync"), "a clean write-back: {payload}");
 
 	pump.abort();
 	drop(editor_connection);
@@ -214,7 +299,7 @@ async fn p1_editor_buffer_overlapping_changes_reject_the_edit_before_any_effect(
 	let scratch = Scratch::new()?;
 	scratch.write("conflict.txt", ORIGINAL)?;
 	let env = EnvHarness::spawn(&scratch, Registry::new()).await?;
-	let editor = Arc::new(Editor::default());
+	let editor = Arc::new(Editor::new(&scratch));
 	let editor_connection = env.connect_client("acp-editor").await?;
 	let agent = editor_connection.client_clone();
 	let pump = serve_editor(agent.clone(), Arc::clone(&editor))?;
