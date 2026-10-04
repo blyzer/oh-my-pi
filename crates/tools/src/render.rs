@@ -90,7 +90,7 @@ pub struct BuiltinRendererIdentities {
 	pub lsp:        Option<ToolIdentity>,
 	/// Identity of the native debugger bridge, when enabled.
 	pub debug:      Option<ToolIdentity>,
-	/// Identity of the native durable goal regime, when enabled.
+	/// Identity of the native durable goal tool, when enabled.
 	pub goal:       Option<ToolIdentity>,
 	/// Identity of the native GitHub device, when enabled.
 	pub github:     Option<ToolIdentity>,
