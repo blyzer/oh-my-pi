@@ -30,7 +30,7 @@ use omp_proto::{
 	toolhost::v1::HookEventId,
 };
 use omp_session::{Session, SessionError};
-use omp_tool::{Abort, Registry, RegistryError, ToolIdentity};
+use omp_tool::{Abort, Registry, RegistryError, RosterDenial, ToolIdentity, ToolRestrictions};
 use serde_json::value::RawValue;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -1159,7 +1159,17 @@ impl<C: Inference> Kernel<C> {
 		self.resync_session_state(session);
 		let turn = current_turn(session)?;
 		let turn_cancel = self.cancel.begin_turn();
+		// The tail re-runs under the restrictions in effect now: the live
+		// binds and allowlist (no request, so no `turn_start` hook filter).
+		if let Some(con) = &self.con {
+			DirectorStack::from_dom(session.dom(), &self.director_registry)
+				.apply_binds(session.dom(), con);
+		}
+		let allowlist = crate::tool_allowlist(self.con.as_deref());
+		let roster = self.roster_basis(session.dom(), allowlist.as_deref());
+		self.dispatcher.set_restrictions(Some(Arc::new(roster)));
 		let mut calls = Vec::new();
+		let mut refused = 0_usize;
 		for unsettled in session.unsettled_calls() {
 			let identity = self
 				.dispatcher
@@ -1175,6 +1185,21 @@ impl<C: Inference> Kernel<C> {
 			if !unsettled.committed {
 				session.call_ready(unsettled.entry, args.clone())?;
 			}
+			if let Err(denial) = self
+				.dispatcher
+				.check_roster_raw(identity.name.as_str(), &args)
+			{
+				let prepared = self.dispatcher.prepare_refused(
+					identity,
+					unsettled.call_id,
+					unsettled.entry,
+					cancellation,
+				);
+				self.dispatcher.deny_prepared(session, prepared, &denial)?;
+				self.apply_live_components(session)?;
+				refused += 1;
+				continue;
+			}
 			let mut prepared = self.dispatcher.prepare(
 				identity,
 				unsettled.call_id.clone(),
@@ -1189,7 +1214,7 @@ impl<C: Inference> Kernel<C> {
 			});
 			calls.push(prepared);
 		}
-		if calls.is_empty() {
+		if calls.is_empty() && refused == 0 {
 			return Err(KernelError::NothingToRetry);
 		}
 		let submission_id = Str::new(target.to_string());
@@ -1356,7 +1381,8 @@ impl<C: Inference> Kernel<C> {
 				if let Some(con) = &self.con {
 					directors.apply_binds(session.dom(), con);
 				}
-				let mut request = self.finish_request(self.project_request(session)?).await?;
+				let (mut request, mut roster) =
+					self.finish_request(self.project_request(session)?).await?;
 				let model = self.client.selected_model();
 				if let Some(hooks) = &self.lifecycle_hooks {
 					let enabled_tools = request
@@ -1392,6 +1418,15 @@ impl<C: Inference> Kernel<C> {
 						.get("enabled_tools")
 						.and_then(serde_json::Value::as_array)
 					{
+						// The hook's INTERSECT also gates dispatch: a call to a
+						// tool it disabled settles as a roster denial.
+						roster.set_hook(
+							enabled
+								.iter()
+								.filter_map(serde_json::Value::as_str)
+								.map(Str::new)
+								.collect::<Arc<[Str]>>(),
+						);
 						request.tools = request
 							.tools
 							.iter()
@@ -1462,7 +1497,13 @@ impl<C: Inference> Kernel<C> {
 				};
 				self.apply_live_components(session)?;
 				if prepared == Prepared::Rebuild {
-					request = self.finish_request(self.project_request(session)?).await?;
+					let hook = roster.hook().cloned();
+					(request, roster) = self.finish_request(self.project_request(session)?).await?;
+					// A rebuild re-projects without re-running `turn_start`;
+					// the hook's dispatch filter for this request still holds.
+					if let Some(hook) = hook {
+						roster.set_hook(hook);
+					}
 					directors = DirectorStack::from_dom(session.dom(), &self.director_registry);
 				}
 				let response_ordinal = session
@@ -1482,6 +1523,20 @@ impl<C: Inference> Kernel<C> {
 					.with_con(self.con.as_deref())
 					.with_response_ordinal(response_ordinal);
 				directors.prepare_inference(session.dom(), &director_cx, &mut request);
+				// Snapshot the request's restrictions next to it: every call the
+				// model samples from this request is checked against exactly
+				// what it was told, whatever con writes land meanwhile.
+				let roster = (!roster.is_unrestricted()).then(|| {
+					roster.set_available(
+						request
+							.tools
+							.iter()
+							.map(|tool| tool.name.clone())
+							.collect::<Arc<[Str]>>(),
+					);
+					Arc::new(roster)
+				});
+				self.dispatcher.set_restrictions(roster);
 				let watchers = directors.watch_stream(session.dom(), &director_cx, &request);
 				let redirect_count = stream_redirect_count(session.dom(), turn);
 				let redirect_cap = self
@@ -2124,8 +2179,11 @@ impl<C: Inference> Kernel<C> {
 	/// request assembly. The projection ([`Self::project_request`]) is
 	/// synchronous over the session so no session borrow crosses the hook
 	/// await (`Session` is not `Sync`).
-	async fn finish_request(&self, projected: ProjectedRequest) -> Result<ChatRequest, KernelError> {
-		let ProjectedRequest { facts, mut messages, tools } = projected;
+	async fn finish_request(
+		&self,
+		projected: ProjectedRequest,
+	) -> Result<(ChatRequest, ToolRestrictions), KernelError> {
+		let ProjectedRequest { facts, mut messages, tools, roster } = projected;
 		// `thread_projection` (Python `ContextView` → `ContextPatch`): an
 		// extension edits this request's working copy of the projection;
 		// the journal and DOM stay untouched.
@@ -2139,23 +2197,80 @@ impl<C: Inference> Kernel<C> {
 				);
 			}
 		}
-		Ok(ChatRequest {
-			messages:          messages.into(),
-			tools:             tools.into(),
-			hosted_tools:      Arc::from([]),
-			tool_choice:       Setting::Unset,
-			output:            Setting::Unset,
-			reasoning:         Setting::Unset,
-			verbosity:         Setting::Unset,
-			cache_retention:   Setting::Unset,
-			service_tier:      Setting::Unset,
-			sampling:          Sampling::default(),
-			max_output_tokens: None,
-			top_logprobs:      None,
-			safety:            Arc::<[SafetySetting]>::from([]),
-			negotiation:       NegotiationPolicy::default(),
-			forced_call:       None,
-		})
+		Ok((
+			ChatRequest {
+				messages:          messages.into(),
+				tools:             tools.into(),
+				hosted_tools:      Arc::from([]),
+				tool_choice:       Setting::Unset,
+				output:            Setting::Unset,
+				reasoning:         Setting::Unset,
+				verbosity:         Setting::Unset,
+				cache_retention:   Setting::Unset,
+				service_tier:      Setting::Unset,
+				sampling:          Sampling::default(),
+				max_output_tokens: None,
+				top_logprobs:      None,
+				safety:            Arc::<[SafetySetting]>::from([]),
+				negotiation:       NegotiationPolicy::default(),
+				forced_call:       None,
+			},
+			roster,
+		))
+	}
+
+	/// Whether the Goal Director's hidden `goal` tool is mounted for the next
+	/// request.
+	fn goal_visible(&self, dom: &omp_dom::Dom) -> bool {
+		self.runtime_flags.goal_enabled
+			&& crate::find_director(dom, "goal").is_some_and(|(_, node)| {
+				crate::director_status(node) == Some("active")
+					&& !crate::state_bool(node, "done").unwrap_or(false)
+					&& !crate::state_bool(node, "dropped").unwrap_or(false)
+			})
+	}
+
+	/// Whether the hidden `think` tool is mounted for the next request.
+	fn think_mounted(&self) -> bool {
+		self
+			.con
+			.as_deref()
+			.is_some_and(|con| omp_ai::settings::AI_EXTERNAL_THINKING.get(con))
+	}
+
+	/// The roster restrictions of a request projected now, before its
+	/// `turn_start` hook: the effective `sv_tools` allowlist plus the hidden
+	/// mounts advertised beside it (and the Director whose bind supplied it),
+	/// and the active plan file.
+	fn roster_basis(&self, dom: &omp_dom::Dom, allowlist: Option<&[Str]>) -> ToolRestrictions {
+		let mut roster = ToolRestrictions::default();
+		if let Some(allowlist) = allowlist {
+			let mounts = [("goal", self.goal_visible(dom)), ("think", self.think_mounted())];
+			let names = allowlist
+				.iter()
+				.cloned()
+				.chain(
+					mounts
+						.into_iter()
+						.filter(|&(_, mounted)| mounted)
+						.map(|(name, _)| Str::new_static(name)),
+				)
+				.collect::<Arc<[Str]>>();
+			let director = self
+				.con
+				.as_deref()
+				.and_then(|con| con.engagement_owner(crate::SV_TOOLS.name()))
+				.and_then(|owner| {
+					owner
+						.split_once('#')
+						.map(|(director, _)| Str::new(director))
+				});
+			roster = roster.with_allowlist(names, director);
+		}
+		if let Some(plan_file) = crate::directors::plan::active_plan_file(dom) {
+			roster = roster.with_plan_file(plan_file);
+		}
+		roster
 	}
 
 	/// Projects the session into the working copy of the next request.
@@ -2210,19 +2325,17 @@ impl<C: Inference> Kernel<C> {
 		};
 		let caps = route.lowering_caps();
 		let registry = self.dispatcher.registry();
-		let goal_visible = self.runtime_flags.goal_enabled
-			&& crate::find_director(session.dom(), "goal").is_some_and(|(_, node)| {
-				crate::director_status(node) == Some("active")
-					&& !crate::state_bool(node, "done").unwrap_or(false)
-					&& !crate::state_bool(node, "dropped").unwrap_or(false)
-			});
+		let goal_visible = self.goal_visible(session.dom());
 		let mut tools = registry.advertise(caps)?;
 		tools.retain(|tool| tool.definition.name.as_str() != "goal" || goal_visible);
 		// `sv_tools` is the effective roster: the user's allowlist or a mode
-		// Director's bind (plan/vibe restrict what the model may call).
-		if let Some(roster) = crate::tool_allowlist(self.con.as_deref()) {
+		// Director's bind (plan/vibe restrict what the model may call). The
+		// same allowlist gates dispatch through `roster`.
+		let allowlist = crate::tool_allowlist(self.con.as_deref());
+		if let Some(roster) = &allowlist {
 			tools.retain(|tool| roster.contains(&tool.definition.name));
 		}
+		let roster = self.roster_basis(session.dom(), allowlist.as_deref());
 		// A session tool may withhold its declaration for the session it
 		// presents (`task` at the recursion ceiling).
 		tools.retain(|tool| !self.dispatcher.withholds(tool.definition.name.as_str()));
@@ -2238,10 +2351,7 @@ impl<C: Inference> Kernel<C> {
 		}
 		// When provider reasoning is off, advertise the hidden `think` slot so
 		// the model reasons through a tool.
-		if self
-			.con
-			.as_deref()
-			.is_some_and(|con| omp_ai::settings::AI_EXTERNAL_THINKING.get(con))
+		if self.think_mounted()
 			&& !tools
 				.iter()
 				.any(|tool| tool.definition.name.as_str() == "think")
@@ -2252,7 +2362,7 @@ impl<C: Inference> Kernel<C> {
 			.into_iter()
 			.map(|tool| tool.definition)
 			.collect::<Vec<_>>();
-		Ok(ProjectedRequest { facts, messages, tools })
+		Ok(ProjectedRequest { facts, messages, tools, roster })
 	}
 
 	async fn drive_inference(
@@ -2483,6 +2593,17 @@ impl<C: Inference> Kernel<C> {
 							.registry()
 							.resolved_identity(name.as_str())
 							.ok_or_else(|| RegistryError::UnknownTool(name.clone()))?;
+						// The roster check runs before any execution unit opens,
+						// so a refused call never previews or acts. The call is
+						// still journaled faithfully, arguments included.
+						let refused = self.dispatcher.check_roster(identity.name.as_str()).err();
+						// A call whose target the roster scopes (plan mode's
+						// `write`) opens its unit only once its committed
+						// arguments pass, so nothing previews an unchecked path.
+						let deferred = refused.is_none()
+							&& self
+								.dispatcher
+								.roster_scopes_arguments(identity.name.as_str());
 						let (entry, sid) = session.call_streaming(
 							name.clone(),
 							crate::journal_revision(&identity.rev),
@@ -2497,13 +2618,24 @@ impl<C: Inference> Kernel<C> {
 							identity.name.as_str(),
 							turn_cancel,
 						)?;
-						let prepared = self.dispatcher.prepare(
-							identity.clone(),
-							call_id.clone(),
-							entry,
-							cancellation,
-						)?;
-						if let Some(hooks) = &self.lifecycle_hooks {
+						let prepared = if refused.is_some() || deferred {
+							self.dispatcher.prepare_refused(
+								identity.clone(),
+								call_id.clone(),
+								entry,
+								cancellation,
+							)
+						} else {
+							self.dispatcher.prepare(
+								identity.clone(),
+								call_id.clone(),
+								entry,
+								cancellation,
+							)?
+						};
+						if refused.is_none()
+							&& let Some(hooks) = &self.lifecycle_hooks
+						{
 							hooks.notify(
 								HookEventId::HookEventCallOpen,
 								serde_json::json!({
@@ -2527,6 +2659,8 @@ impl<C: Inference> Kernel<C> {
 							call_id,
 							prepared,
 							raw_args: String::new(),
+							refused,
+							deferred,
 						});
 					},
 					ChatEvent::ToolArgumentsDelta { index, bytes } => {
@@ -2558,11 +2692,12 @@ impl<C: Inference> Kernel<C> {
 						) {
 							return Ok(Fold::Redirect(owner, interrupt));
 						}
-						let abort_invalid_edit = streamed_edit_must_abort(
-							self.con.as_deref(),
-							call.identity.name.as_str(),
-							&call.raw_args,
-						);
+						let abort_invalid_edit = call.refused.is_none()
+							&& streamed_edit_must_abort(
+								self.con.as_deref(),
+								call.identity.name.as_str(),
+								&call.raw_args,
+							);
 						if abort_invalid_edit {
 							let reason = crate::ToolScopedAbortReason::one(
 								call.call_id.clone(),
@@ -2578,7 +2713,7 @@ impl<C: Inference> Kernel<C> {
 					ChatEvent::ToolCallReady { index, call } => {
 						had_tool_calls = true;
 						let args = serde_json::value::to_raw_value(call.arguments.as_value())?;
-						let (entry, identity, mut prepared) = if let Some(streaming) =
+						let (entry, identity, mut prepared, refused, deferred) = if let Some(streaming) =
 							pending.remove(&index)
 						{
 							if call.id != streaming.call_id.as_str()
@@ -2586,13 +2721,24 @@ impl<C: Inference> Kernel<C> {
 							{
 								return Err(KernelError::ToolCallMismatch);
 							}
-							(streaming.entry, streaming.identity, streaming.prepared)
+							(
+								streaming.entry,
+								streaming.identity,
+								streaming.prepared,
+								streaming.refused,
+								streaming.deferred,
+							)
 						} else {
 							let identity = self
 								.dispatcher
 								.registry()
 								.resolved_identity(call.name.as_str())
 								.ok_or_else(|| RegistryError::UnknownTool(call.name.clone()))?;
+							let refused = self.dispatcher.check_roster(identity.name.as_str()).err();
+							let deferred = refused.is_none()
+								&& self
+									.dispatcher
+									.roster_scopes_arguments(identity.name.as_str());
 							let intent = call
 								.arguments
 								.as_value()
@@ -2613,13 +2759,50 @@ impl<C: Inference> Kernel<C> {
 								identity.name.as_str(),
 								turn_cancel,
 							)?;
-							let prepared =
+							let prepared = if refused.is_some() || deferred {
+								self.dispatcher.prepare_refused(
+									identity.clone(),
+									call_id,
+									entry,
+									cancellation,
+								)
+							} else {
 								self
 									.dispatcher
-									.prepare(identity.clone(), call_id, entry, cancellation)?;
-							(entry, identity, prepared)
+									.prepare(identity.clone(), call_id, entry, cancellation)?
+							};
+							(entry, identity, prepared, refused, deferred)
 						};
+						// Committed arguments are checked before the lifecycle
+						// hook sees the call (plan mode confines `write`).
+						if let Some(denial) = refused.or_else(|| {
+							self
+								.dispatcher
+								.check_roster_arguments(identity.name.as_str(), call.arguments.as_value())
+								.err()
+						}) {
+							session.call_ready(entry, args.clone())?;
+							prepared.commit(args);
+							self.dispatcher.deny_prepared(session, prepared, &denial)?;
+							self.apply_live_components(session)?;
+							continue;
+						}
 						let call_id = Str::new(&call.id);
+						if deferred {
+							// The scoped target passed: open the real unit now.
+							let cancellation = tool_cancellation(
+								self.dispatcher.registry(),
+								identity.name.as_str(),
+								turn_cancel,
+							)?;
+							prepared = self.dispatcher.prepare(
+								identity.clone(),
+								call_id.clone(),
+								entry,
+								cancellation,
+							)?;
+							prepared.arg_delta(args.get());
+						}
 						let denied_args = args.clone();
 						let session_id = session
 							.journal_path()
@@ -2641,7 +2824,24 @@ impl<C: Inference> Kernel<C> {
 						)
 						.await
 						{
-							ToolGate::Allow { identity, args, approvals } => (identity, args, approvals),
+							ToolGate::Allow { identity, args, approvals } => {
+								// A hook that retargets or rewrites the call is held
+								// to the same roster as the model.
+								let rewritten = prepared.identity().name != identity.name
+									|| args.get() != denied_args.get();
+								if rewritten
+									&& let Err(denial) = self
+										.dispatcher
+										.check_roster_raw(identity.name.as_str(), &args)
+								{
+									session.call_ready(entry, args.clone())?;
+									prepared.commit(args);
+									self.dispatcher.deny_prepared(session, prepared, &denial)?;
+									self.apply_live_components(session)?;
+									continue;
+								}
+								(identity, args, approvals)
+							},
 							ToolGate::Deny(reason) => {
 								session.call_ready(entry, denied_args.clone())?;
 								prepared.commit(denied_args);
@@ -2718,6 +2918,7 @@ impl<C: Inference> Kernel<C> {
 							&& matches!(completion.reason, FinishReason::Stop)
 							&& pending.is_empty()
 							&& ready.is_empty()
+							&& self.dispatcher.check_roster("edit").is_ok()
 							&& let Some(identity) = self.dispatcher.registry().resolved_identity("edit")
 							&& identity.rev.family.as_str() == "sloppy"
 							&& let Some((remaining, input, _regions)) =
@@ -3160,10 +3361,6 @@ impl<C: Inference> Kernel<C> {
 		turn_cancel: &crate::TurnCancellation,
 		control: &RunControl,
 	) -> Result<(), KernelError> {
-		use omp_ai::{
-			InvokeComplete, InvokeInput, WorkflowActionResponse, WorkflowResponse,
-			WorkflowResponseKind,
-		};
 		let call_id = action
 			.call
 			.as_ref()
@@ -3191,6 +3388,21 @@ impl<C: Inference> Kernel<C> {
 			self.apply_live_components(session)?;
 			let cancellation =
 				tool_cancellation(self.dispatcher.registry(), identity.name.as_str(), turn_cancel)?;
+			let roster = self
+				.dispatcher
+				.check_roster_raw(identity.name.as_str(), &args);
+			if let Err(denial) = roster {
+				// A provider workflow cannot reach a tool the model may not call.
+				let prepared =
+					self
+						.dispatcher
+						.prepare_refused(identity, call_id.clone(), entry, cancellation);
+				self.dispatcher.deny_prepared(session, prepared, &denial)?;
+				self.apply_live_components(session)?;
+				let error = serde_json::json!({ "error": denial.reason() }).to_string();
+				return submit_workflow_response(&self.events, action, stream_control, error, true)
+					.await;
+			}
 			let mut prepared =
 				self
 					.dispatcher
@@ -3228,38 +3440,7 @@ impl<C: Inference> Kernel<C> {
 			self.apply_live_components(session)?;
 			(serde_json::json!({"error": format!("unknown tool {}", action.name)}).to_string(), true)
 		};
-		let response = match action.response_kind {
-			WorkflowResponseKind::Action => {
-				WorkflowResponse::WorkflowActionResponse(WorkflowActionResponse {
-					invocation: action.invocation.clone(),
-					response: bytes::Bytes::from(outcome),
-					is_error,
-				})
-			},
-			WorkflowResponseKind::Invoke => {
-				stream_control
-					.submit(WorkflowResponse::InvokeInput(InvokeInput {
-						invocation: action.invocation.clone(),
-						payload:    bytes::Bytes::from(outcome.clone()),
-					}))
-					.await
-					.map_err(KernelError::WorkflowResponse)?;
-				WorkflowResponse::InvokeComplete(InvokeComplete {
-					invocation: action.invocation.clone(),
-					payload:    bytes::Bytes::from(outcome),
-				})
-			},
-		};
-		stream_control
-			.submit(response)
-			.await
-			.map_err(KernelError::WorkflowResponse)?;
-		self.events.publish(KernelEvent::WorkflowActionAnswered {
-			invocation: action.invocation,
-			name: action.name,
-			is_error,
-		});
-		Ok(())
+		submit_workflow_response(&self.events, action, stream_control, outcome, is_error).await
 	}
 
 	/// Holds all new inference, tool, subagent, and job admission while the
@@ -3425,7 +3606,7 @@ impl<C: Inference> Kernel<C> {
 		let Ok(turn) = current_turn(session) else {
 			return Ok(false);
 		};
-		let request = self.finish_request(self.project_request(session)?).await?;
+		let (request, _) = self.finish_request(self.project_request(session)?).await?;
 		let director = CompactionDirector::manual(focus).with_method(method);
 		let director = match strategy {
 			Some(strategy) => director.with_strategy(strategy),
@@ -3500,11 +3681,58 @@ impl<C: Inference> Kernel<C> {
 	}
 }
 
+/// Answers one provider workflow action with its journaled outcome.
+async fn submit_workflow_response(
+	events: &crate::events::KernelEvents,
+	action: omp_ai::WorkflowAction,
+	stream_control: &omp_ai::ChatControl,
+	outcome: String,
+	is_error: bool,
+) -> Result<(), KernelError> {
+	use omp_ai::{
+		InvokeComplete, InvokeInput, WorkflowActionResponse, WorkflowResponse, WorkflowResponseKind,
+	};
+	let response = match action.response_kind {
+		WorkflowResponseKind::Action => {
+			WorkflowResponse::WorkflowActionResponse(WorkflowActionResponse {
+				invocation: action.invocation.clone(),
+				response: bytes::Bytes::from(outcome),
+				is_error,
+			})
+		},
+		WorkflowResponseKind::Invoke => {
+			stream_control
+				.submit(WorkflowResponse::InvokeInput(InvokeInput {
+					invocation: action.invocation.clone(),
+					payload:    bytes::Bytes::from(outcome.clone()),
+				}))
+				.await
+				.map_err(KernelError::WorkflowResponse)?;
+			WorkflowResponse::InvokeComplete(InvokeComplete {
+				invocation: action.invocation.clone(),
+				payload:    bytes::Bytes::from(outcome),
+			})
+		},
+	};
+	stream_control
+		.submit(response)
+		.await
+		.map_err(KernelError::WorkflowResponse)?;
+	events.publish(KernelEvent::WorkflowActionAnswered {
+		invocation: action.invocation,
+		name: action.name,
+		is_error,
+	});
+	Ok(())
+}
+
 /// The owned projection of one request before the `thread_projection` gate.
 struct ProjectedRequest {
 	facts:    crate::context::ContextFacts,
 	messages: Vec<InferenceMessage>,
 	tools:    Vec<omp_ai::ToolDefinition>,
+	/// Roster restrictions derived from the same inputs as `tools`.
+	roster:   ToolRestrictions,
 }
 
 struct StreamingCall {
@@ -3514,6 +3742,12 @@ struct StreamingCall {
 	call_id:  Str,
 	prepared: PreparedCall,
 	raw_args: String,
+	/// Roster refusal decided when the call was named; the placeholder in
+	/// `prepared` never opened an execution unit.
+	refused:  Option<RosterDenial>,
+	/// The roster checks this call's committed arguments first; `prepared`
+	/// is an inert placeholder until they pass.
+	deferred: bool,
 }
 
 struct IndexedPreparedCall {

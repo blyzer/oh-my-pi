@@ -10,8 +10,16 @@ use crate::director::{
 
 const CLAIMS: &[Slot] = &[Slot::Mode, Slot::Worktree];
 /// Tools a planning turn may use: read-only discovery plus the plan file
-/// write and the decision request. The built-in `write` stays active while
-/// the read-only guard handles every other tool.
+/// write and the decision request.
+///
+/// The bind narrows the advertised roster, and the kernel enforces the same
+/// restriction at dispatch: every model, session, or host tool call is checked
+/// against the request's [`omp_tool::ToolRestrictions`] snapshot before any
+/// preview or execution, and a call outside this list settles as a journaled
+/// `tool.roster.restricted` policy denial. While plan mode is active the same
+/// snapshot confines `write` to [`Plan`]'s plan file
+/// ([`omp_tool::plan_target_matches`]); nested `tool.<name>()` calls from an
+/// eval cell obey the identical snapshot in the environment's bridge.
 pub const PLAN_TOOLS: &[&str] = &[
 	"read",
 	"grep",
@@ -190,17 +198,24 @@ fn plan_binds() -> Vec<(Str, BindValue)> {
 	]
 }
 
+/// The plan file of the active plan engagement, which the dispatch roster
+/// check confines `write` to; `None` when plan mode is not active.
+#[must_use]
+pub fn active_plan_file(dom: &Dom) -> Option<Str> {
+	let (_, node) = crate::find_director(dom, "plan")?;
+	(crate::director_status(node) == Some("active")).then(|| Plan::from_node(node).plan_file)
+}
+
+/// Whether a `write` in `turn` targeted the plan file, compared exactly as
+/// the dispatch check compares it.
 fn call_wrote_path(dom: &Dom, turn: omp_dom::Handle, expected: &str) -> bool {
 	turn_call_inputs(dom, turn, "write").any(|input| {
 		serde_json::from_str::<serde_json::Value>(input)
 			.ok()
-			.and_then(|value| {
-				value
-					.get("path")
-					.and_then(|path| path.as_str())
-					.map(str::to_owned)
-			})
-			.is_some_and(|path| path == expected)
+			.as_ref()
+			.and_then(|value| value.get("path"))
+			.and_then(serde_json::Value::as_str)
+			.is_some_and(|path| omp_tool::plan_target_matches(expected, path))
 	})
 }
 

@@ -7265,7 +7265,7 @@ impl EnvServer {
 	async fn open_invocation(
 		&self,
 		request_id: u64,
-		request: pb::InvokeTool,
+		mut request: pb::InvokeTool,
 		scope: Option<&pb::InvocationScope>,
 		responses: &flume::Sender<pb::ServerFrame>,
 		finished: &flume::Sender<Finished>,
@@ -7413,6 +7413,14 @@ impl EnvServer {
 				connection.owner.clone()
 			};
 			let (feed, params) = IncomingParams::channel_for(Some(owner), Some(invocation_id.clone()));
+			// The client's roster snapshot for this call reaches tools that host
+			// nested calls (the eval bridge applies it to each `tool.<name>()`).
+			let params = params.with_restrictions(
+				request
+					.restrictions
+					.take()
+					.map(|restrictions| Arc::new(omp_tool::ToolRestrictions::from(restrictions))),
+			);
 			let lifecycle = Arc::new(NativeLifecycle::default());
 			let name = Str::from(request.name);
 			let edit_repair = connection

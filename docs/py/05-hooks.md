@@ -1390,6 +1390,9 @@ the core refuses, journals the refusal, and settles.
 
 Mutable fields: `before_agent_start.{text, items}` (REPLACE, APPEND),
 `turn_start.enabled_tools` (INTERSECT), `turn_start.{model, route, thinking, deadline}` (REPLACE).
+`enabled_tools` narrows both the request's advertised tools and dispatch: a call to a tool the
+hook disabled settles as a journaled `tool.roster.restricted` policy denial, and nested
+`tool.<name>()` calls from an eval cell started by that request are refused the same way.
 
 **Resolved (2026-08-20 ruling): `turn_start.thinking` uses the portable `Effort` vocabulary and
 is patchable alongside the model and route. Three independent extensions — plan-mode, profiles,
