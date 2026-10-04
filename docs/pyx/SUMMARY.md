@@ -12,7 +12,7 @@
 
 - [Devices](guides/devices.md)
 - [Hooks](guides/hooks.md)
-- [Regimes and Policy](guides/regimes-and-policy.md)
+- [Policy](guides/policy.md)
 - [Environment](guides/environment.md)
 - [Agents and Sessions](guides/agents-and-sessions.md)
 - [User Interface](guides/ui.md)
@@ -27,7 +27,7 @@
 - [`omp.params`](reference/omp.params.md)
 - [`omp.hooks`](reference/omp.hooks.md)
 - [`omp.events`](reference/omp.events.md)
-- [`omp.regimes`](reference/omp.regimes.md)
+- [`omp.extensions`](reference/omp.extensions.md)
 - [`omp.policy`](reference/omp.policy.md)
 - [`omp.limits`](reference/omp.limits.md)
 - [`omp.env`](reference/omp.env.md)

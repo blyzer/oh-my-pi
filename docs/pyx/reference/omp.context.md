@@ -340,21 +340,14 @@ Releases pins owned by the calling extension and returns the host-reported unpin
 async def lane(*, strict_epoch: bool = False) -> AsyncIterator[None]
 ```
 
-Marks an async block as deprioritized auxiliary context work. With `strict_epoch=True`, the lane captures the current epoch; journal mutations made through this module's fence are rejected if that epoch changes.
+Marks an async block as deprioritized auxiliary context work. With `strict_epoch=True`, the lane captures the current epoch on entry. No extension write consults that captured epoch today (an extension cannot append to the journal), so compare `await omp.context.epoch()` against the value you captured before acting on a result.
 
-**Raises**: `TypeError` when `strict_epoch` is not boolean; `StaleEpoch` when a fenced write reaches a newer epoch.
+**Raises**: `TypeError` when `strict_epoch` is not boolean.
 
 ```python
-from dataclasses import dataclass
-
-@omp.entry_kind("com.example.summary", rev="1")
-@dataclass(frozen=True, slots=True)
-class MySummary:
-    text: str
-
 async with omp.context.lane(strict_epoch=True):
     summary = await omp.agents.completion("Summarize the current thread", context="thread")
-    await omp.journal.append(MySummary(summary.text))
+    omp.ui.notify(summary.text)
 ```
 
 ## Compaction
@@ -548,7 +541,7 @@ Raised when a pin request would exceed the configured context-window budget.
 class StaleEpoch(OmpError)
 ```
 
-Raised when a strict context lane attempts a write after its captured epoch changed.
+Defined for a strict context lane whose captured epoch changed. Nothing in the current surface raises it.
 ## Data model field index
 
 | Dataclass | Fields |

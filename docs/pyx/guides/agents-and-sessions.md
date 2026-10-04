@@ -6,7 +6,7 @@ This guide connects four modules:
 
 - [`omp.agents`](../reference/omp.agents.md) starts and supervises child agents.
 - [`omp.sessions`](../reference/omp.sessions.md) indexes current and historical sessions.
-- [`omp.journal`](../reference/omp.journal.md) writes and reads typed durable records in the current session.
+- [`omp.journal`](../reference/omp.journal.md) builds the DOM operations a Component returns and describes the read-only journal projections.
 - [`omp.context`](../reference/omp.context.md) projects the model's live context and defines bounded patches.
 
 ## Spawn a subagent and await its result
@@ -245,33 +245,20 @@ live_branch = await omp.sessions.branch()
 
 `tree()` preserves all decoded nodes, including orphans as roots. `branch()` walks one parent chain from a selected `EntryId`, current-session index, or the current live leaf.
 
-## Write extension-owned journal records
+## Contribute durable state
 
-Declare a dataclass entry kind, then append instances. The journal accepts JSON-compatible dataclass fields and writes canonical bytes.
+Only the engine writes the session journal. An extension has no `append` and cannot define an entry kind; session state is one materialized tree whose durable form is the journal's stream of patches. You contribute to it by returning DOM operations, which the host commits as one `patch@1` entry:
 
-```python
-from dataclasses import dataclass
-
-@omp.entry_kind("com.example.audit.completed", rev="1")
-@dataclass(frozen=True, slots=True)
-class AuditCompleted:
-    run_id: str
-    findings: int
-
-record_id = await omp.journal.append(
-    AuditCompleted(run_id=result.run_id, findings=len(result.warnings)),
-    idempotency_key=f"audit:{result.run_id}",
-)
-```
-
-Use `append_atomic()` with a required idempotency key for an all-or-nothing group. `append_many()` is ordered but non-atomic; if it fails after partial acceptance, `JournalError.appended` reports known accepted ids.
-
-Read your type directly and keep a watermark for incremental work:
+- an `@omp.component` callback reduces a newly appended journal entry into operations (`omp.journal.insert`, `set_prop`, `remove`, `move`, wrapped by `omp.journal.patch`);
+- an `@omp.director` callback returns `ops` from `before_inference` and scalar `updates` from `on_yield`.
 
 ```python
-records = await omp.journal.entries(AuditCompleted, since=record_id)
-latest = await omp.journal.latest(AuditCompleted)
+@omp.component("audit-marks", interested=("tool.result@1",))
+def mark(entry: dict) -> dict:
+    return omp.journal.patch(omp.journal.set_prop(7, "audited", True))
 ```
+
+Read history back with `omp.sessions.journal()` as shown above. Indexes and caches that you can rebuild from the journal belong in `await omp.state_dir()`, not in the journal.
 
 ## Read the live model context
 
@@ -340,22 +327,17 @@ Choose the smallest operation that expresses the change:
 
 > **Warning** Message ids belong to a particular projection epoch. Core can reject structurally stale or invalid patches with `PatchRejected`.
 
-For auxiliary work that may race compaction, use a strict lane:
+For auxiliary work that may race compaction, run it in a lane and re-check the epoch before using the result:
 
 ```python
-from dataclasses import dataclass
-
-@omp.entry_kind("com.example.thread.summary", rev="1")
-@dataclass(frozen=True, slots=True)
-class ThreadSummary:
-    text: str
-
-async with omp.context.lane(strict_epoch=True):
+epoch = await omp.context.epoch()
+async with omp.context.lane():
     summary = await omp.agents.completion(
         "Summarize the current thread in three bullets.",
         context="thread",
     )
-    await omp.journal.append(ThreadSummary(summary.text))
+if await omp.context.epoch() == epoch:
+    omp.ui.notify(summary.text)
 ```
 
-The strict lane captures the current compaction epoch and supplies it as a fence to journal mutations. If the epoch changes first, the write raises `StaleEpoch` instead of committing work derived from an obsolete projection.
+If compaction or a reset lands first, the epoch differs and the result describes history the model can no longer see, so drop it. `omp.context.lane(strict_epoch=True)` also records the epoch on entry, but nothing in the current surface enforces it as a fence.

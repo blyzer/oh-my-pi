@@ -450,7 +450,7 @@ A CPU fragment shader rasterized into half-block pixels (`▀` foreground over b
 - **Availability:** Rust only — the shader is code. Mount `components::Shader` as a `dom!` expression child, or register a `<shader>` tag through `Elements::builder()` with a factory that captures your program.
 - **Props:** Shared; `bg` paints a backdrop behind unlit (transparent) cells.
 - **Program:** Implement `shader::Program` (`advance` sees the clock and pixel resolution, `fragment` shades one pixel, `particles` splats point sprites over the field), or pass a plain `Fn(f32, f32) -> (Vec3, f32)` closure for a still field. `Shader::size(cols, rows)` fixes the cell viewport; `Shader::still()` paints once instead of waking every frame.
-- **Built-in:** `shader::Eclipse` is the reference program — the stippled-eclipse landing shader ported from WebGPU. `examples/eclipse.rs` mounts it fullscreen; the chat demo's welcome card paints it as a backdrop through `Surface::render`.
+- **Built-in:** `shader::Eclipse` is the reference program — the stippled-eclipse landing shader ported from WebGPU. The gallery's `Eclipse` tab (`examples/gallery/eclipse.rs`) mounts it as a pane, and `omp-app`'s extension configuration screen (`crates/app/src/ext_cli/config.rs`) mounts it fullscreen; any caller can paint a `Program` into a cell grid through `Surface::render`.
 
 ### Input and action elements
 
@@ -1078,7 +1078,7 @@ Keyboard hand-off:
 - `focused_overlay()` reports the pane holding the keyboard; `top_overlay()` reports whichever layer currently receives keys, modal or focused. The hardware caret follows the same ownership: the active layer places it (or hides it when it has no caret of its own), while passive panes let the document's caret show through.
 - Hiding (`set_overlay_hidden`) or closing the focused pane returns the keyboard to the base tree.
 
-`fill_height()` stretches a retained overlay tree to the full available viewport height on every present (margins and `max_height` still apply), so `grow` and `valign` lay the rail out like a full-height column; without it the band follows content height. Raw-frame `Layer` hosts size their frame directly instead — see `examples/chat` for a full-height, click-to-focus sidebar over an immediate-mode document.
+`fill_height()` stretches a retained overlay tree to the full available viewport height on every present (margins and `max_height` still apply), so `grow` and `valign` lay the rail out like a full-height column; without it the band follows content height. Raw-frame `Layer` hosts size their frame directly instead — see the `fill_height_stretches_layer_to_the_viewport_band` test in `src/ui.rs` for the retained form.
 
 Teardown: a pane must not remain composited when terminal ownership returns to the shell. `App` clears renderer layer state automatically on drop; manual hosts call `Renderer::clear_layers()` after releasing any alternate-screen hold and before dropping the `Terminal`.
 

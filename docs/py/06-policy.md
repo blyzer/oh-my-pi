@@ -1962,20 +1962,10 @@ and three are `ir.is_read_only()`. Stage four is the part worth keeping.
 
 ```python
 import json
-from dataclasses import dataclass
 import omp
-
-CONSECUTIVE_DENIALS = 0
-BREAKER_TRIP = 3
-
-@omp.entry_kind("dev.example.guardian.degraded", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class GuardianDegraded:
-    fault: str
 
 @omp.hook("tool_call", phase=omp.HookPhase.REVIEW)
 async def guardian(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecision:
-    global CONSECUTIVE_DENIALS
     if event.kind is not omp.TargetKind.CORE or event.bash is None:
         return omp.Defer()
     ir = event.bash
@@ -1984,9 +1974,6 @@ async def guardian(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecisi
     # validators, and the tree-sitter parse behind them. One IR predicate, no WASM.
     if ir.is_read_only() and not ir.reads_outside(ctx.roots):
         return omp.Allow(reason="read-only fast path")
-    if CONSECUTIVE_DENIALS >= BREAKER_TRIP:
-        return omp.Deny("guardian circuit breaker is open after repeated denials",
-                        code="guardian.breaker")
 
     evidence = json.dumps({
         "script": ir.source,
@@ -2008,18 +1995,20 @@ async def guardian(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecisi
         deadline=omp.Duration("2s"),
         labels={"gate": "guardian"},
     )
-    if review.fell_back:
-        omp.journal.append(GuardianDegraded(fault=str(review.fault)))
+    # review.fell_back reports that the deterministic default answered; review.fault says why.
     match review.choice:
         case "allow":
-            CONSECUTIVE_DENIALS = 0
             return omp.Defer()          # let the APPROVAL phase have the last word
         case "deny":
-            CONSECUTIVE_DENIALS += 1
             return omp.Deny(review.text, code="guardian.denied")
         case _:
             return omp.Defer()          # "review" falls through to the APPROVAL phase
 ```
+
+The rejection circuit breaker is deliberately absent. It needs a denial count that survives a
+restart, and an extension can no longer persist one: there is no `omp.journal.append`,
+`@omp.entry_kind`, or module-global authority (`docs/py/09-journal.md`, `docs/py/15-directors.md`).
+Counting consecutive denials across calls belongs in a Director's durable state if it is wanted.
 
 Three differences from the pi shape, in descending order of importance.
 
@@ -2027,10 +2016,8 @@ Three differences from the pi shape, in descending order of importance.
 caller either supplies `default=` or accepts `omp.agents.CompletionFailed`. A guardian that
 returned `Allow` because a 350M model timed out would be worse than no guardian, so the API
 makes that a caller bug rather than a default. `fell_back=True` says the deterministic path
-ran, which is a fact worth journaling — this mirrors the failure semantics of the auto-thinking
-classifier already shipping in Rust (`.plan/feature-map/FEATURES.md:356-360`: "online backend:
-tiny model, allowMax variant, 5-level output, earliest-match parsing, transient retry" with
-"fallback to provisional or previous level on failure").
+ran. This mirrors the failure semantics of the auto-thinking classifier already shipping in Rust
+(`crates/ai/src/difficulty.rs`: a bounded-output tiny-model call with deterministic fallbacks).
 
 **The output is constrained, not parsed.** Menshen prompts for prose and reads it back;
 `choices` is an ordered ladder resolved by earliest match, so `"review — because $VAR is
@@ -2766,7 +2753,8 @@ Changes this file made for Revision 2, and the review point that drove each:
   `SandboxRequest.cwd` are `EnvPath`, roots are `WorkspaceUri`, with `match_paths(path: str)`
   deliberately kept raw and the reason stated); late-activation re-offer language uses
   `extension_activate`, never `session_start`; the guardian example's raw string/dict
-  `journal.append` became a declared `@omp.entry_kind` instance (P0#17); profile composition
+  `journal.append` became a declared `@omp.entry_kind` instance (P0#17), and both were later
+  removed with the extension journal API (see `docs/py/09-journal.md`); profile composition
   is restated as order-independent rather than `Priority`-ordered.
 
 **Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:

@@ -35,7 +35,7 @@ retries = 0
 # rather than letting a hung PTY test burn the job's wall clock.
 slow-timeout = { period = "60s", terminate-after = 4 }
 
-# The e2e acceptance proofs (P1-P8) drive real PTYs, spawn daemons, and bind
+# The e2e acceptance proofs (P1-P11) drive real PTYs, spawn daemons, and bind
 # sockets. They were written against `cargo test`, which runs one test binary
 # at a time; under nextest they would otherwise race each other.
 [[profile.default.overrides]]

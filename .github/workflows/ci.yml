@@ -165,7 +165,8 @@ jobs:
     name: Rust workspace and acceptance proofs
     # Deliberately NOT gated on runtime_spec. That check is cheap and reports
     # in two minutes; this one is the expensive proof and the only place the
-    # suite and P1-P8 ever run. Chaining them meant a red spec gate skipped
+    # suite and P1-P8 ever run on macOS (P9-P11 and tool_sources run in
+    # p9_p10_linux). Chaining them meant a red spec gate skipped
     # the suite entirely, so the branch could not learn whether it passed. They are independent questions and now answer in parallel.
     # This does not weaken the gate: runtime_spec still reports its own
     # conclusion and can still be a required check in branch protection.
@@ -356,7 +357,7 @@ jobs:
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked --keep-going
 
-  # P9, P10 and tool_sources were only ever run by `just e2e`. Nothing in them
+  # P9, P10, P11 and tool_sources were only ever run by `just e2e`. Nothing in them
   # needs macOS: they drive the production environment host, document
   # authority and embedded-Python extension host over unix sockets and
   # scratch roots, with no PTY and no Apple-only code path. They therefore

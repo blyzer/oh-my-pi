@@ -48,7 +48,7 @@ rewrite of `pi`: port observable behavior, not TS shape.
   (`omp-macros`: `dom!`, `view!`, `cached`); `crates/chat`: terminal
   and native chat actor/projections; `crates/gui`: native window host.
   None owns agent/provider policy.
-- `crates/e2e/tests`: authoritative joined-system proofs P1-P10 plus
+- `crates/e2e/tests`: authoritative joined-system proofs P1-P11 plus
   `tool_sources` (`crates/e2e/README.md`).
 - `PLAN.md`: authoritative plan — locked decisions D1-D8, defect ledger, 8
   parts + checklists. Local-only: `/*PLAN.md` and `/.plan/` are gitignored, so
@@ -77,14 +77,14 @@ all recipes.
 - One-time before anything linking `omp-py`: `just setup-python`.
 - Iterate targeted (`just check-pkg <pkg>`, `just test-pkg <pkg>`); broaden
   (`check`, `test`, `lint`) after the changed contract passes.
-- E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-p9|e2e-p10|e2e-baseline`;
-  `just e2e` runs P1-P7, P9, P10, `tool_sources`, then the P8 recorder test).
+- E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-p9|e2e-p10|e2e-p11|e2e-baseline`;
+  `just e2e` runs P1-P7, P9, P10, P11, `tool_sources`, then the P8 recorder test).
 - `just ci` ≈ CI format+rust jobs locally.
 
 CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format,
 licences, runtime-symbol contracts and a second workspace lint on Linux;
 workspace tests and the e2e acceptance proofs on arm64 macOS and Linux (P7 also
-on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P10 and
+on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P11 and
 `tool_sources` (`ci.yml` says which job runs which; keep it and `just e2e` in
 step). P8 remains a non-gating recorder: only its metric schema/arithmetic test
 gates. The measured performance baseline is recorded per omp2 push by
@@ -524,10 +524,11 @@ clone).
   earlier `@omp.regime` / `omp.Decision` / campaign-arbiter design was removed
   (commits `d98ed242f5`, `47e02d12a6`); do not reintroduce it or an alias. The
   agent loop is a generic hook surface — hardcoded per-feature outcome tracking
-  (TTSR-style) prohibited. Stream rules (TTSR-like behavior) are still
-  intended and MUST be built as a Director: `crates/driver/src/discovery/rules.rs`
-  already parses their `condition`/`scope` frontmatter, but no such Director
-  exists yet in `crates/agent/src/directors/`.
+  (TTSR-style) prohibited. Stream rules (TTSR-like behavior) are a
+  Director (`crates/agent/src/directors/stream_rules.rs`, engaged by
+  `crates/driver/src/headless/kernel.rs`); `crates/driver/src/discovery/rules.rs`
+  parses their `condition`/`scope` frontmatter. Further TTSR-like behavior MUST
+  also be a Director.
 - Runtime: tokio + rayon only (custom executor crates prohibited); local
   audio/ML via candle, never C/C++ binding graphs (whisper-rs, llama-cpp).
 - Feature graphs earn their weight: a crate enabling a feature whose code it

@@ -197,7 +197,6 @@ class SessionSetup:
         self,
         title = None,
         parent = None,
-        entries = None,
         initial_prompt = None,
     ) -> None
 
@@ -205,8 +204,6 @@ class SessionSetup:
     def title(self) -> str | None
     @property
     def parent(self) -> str | None
-    @property
-    def entries(self) -> tuple[object, ...]
     @property
     def initial_prompt(self) -> object | None
 ```
@@ -217,10 +214,9 @@ Immutable setup for an atomic interactive-session transition. This type is imple
 |---|---|---|
 | `title` | `None` | Optional user title. |
 | `parent` | `None` | Optional accessible lineage parent. |
-| `entries` | empty tuple | Values declared with `@omp.entry_kind`, written while creating the session. |
 | `initial_prompt` | `None` | Visible prompt persisted without submission; accepts text or a non-empty tuple of text/blob parts. |
 
-> **Note** `create()` validates entry declarations and prompt parts while serializing the setup.
+> **Note** `create()` validates prompt parts while serializing the setup.
 
 ## Usage types
 
@@ -403,7 +399,7 @@ async def create(setup: SessionSetup = SessionSetup()) -> SessionInfo
 
 Atomically creates, seeds, and switches to a top-level interactive session. It does not itself submit `initial_prompt` for inference.
 
-**Parameters**: `setup` supplies title, lineage, typed entries, and an optional visible initial prompt.
+**Parameters**: `setup` supplies title, lineage, and an optional visible initial prompt.
 
 **Returns**: The created `SessionInfo`.
 

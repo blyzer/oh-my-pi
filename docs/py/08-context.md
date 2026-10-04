@@ -171,7 +171,7 @@ structural problems that cannot recur here:
    OpenAI `prompt_cache_key`, stripping `prompt_cache_retention` on models that 400 on it,
    and reordering Anthropic's mixed cache-control TTLs. This one is real work and it does
    not belong to an extension either — it is provider-dialect normalization, and it belongs
-   in `crates/inference` beside every other quirk (`docs/py/13-inference.md`).
+   in `crates/ai` beside every other quirk (`docs/py/13-inference.md`).
 
 So the useful reading of that package is not "a competing context extension." It is a bug
 report with four items, filed against the harness, three of which are answered by making
@@ -507,9 +507,9 @@ Adds a synthetic item that exists only in this turn's working copy.
   `MessageKind.NOTICE` item and is rendered as such.
 - `ephemeral` — `True` means the item is never journaled; the next turn's patch must insert
   it again. `False` requests durability, so that op is dropped and journaled with
-  `omp.PatchRejected`: durable additions go through `omp.journal.append`
-  (`docs/py/09-journal.md`), where they get an id,
-  an event index, and a place in the chain. There is no back door.
+  `omp.PatchRejected`: durable session state is not an extension write at all: only the engine
+  appends to the journal, and an extension contributes durable changes as Director `ops` or a Component
+  reduction (`docs/py/09-journal.md`, `docs/py/15-directors.md`). There is no back door.
 - `dedupe_key` — when set, at most one insert with that key survives per turn across all
   handlers. Two nudge-injecting extensions using the same key produce one nudge instead of
   two; the handler earliest in deterministic handler order wins (see **Chaining**).
@@ -709,7 +709,7 @@ epoch = await omp.context.epoch()
 result = await omp.agents.completion(...)          # seconds later
 if await omp.context.epoch() != epoch:
     return                                          # compaction or reset landed; drop the batch
-await omp.journal.append(observations)             # a declared @omp.entry_kind instance
+await save_observations(observations)              # a rebuildable cache in omp.state_dir(), see below
 ```
 
 Without it, a pipeline that started before a compaction writes observations keyed to item ids
@@ -1372,17 +1372,27 @@ because there is no way to ask for a delta. Under omp the design survives intact
 problems are gone:
 
 ```python
+import json
+
 import omp
-from dataclasses import dataclass
+import omp_remote
 
 OBSERVE_EVERY_TOKENS = 20_000
 _state = {"observed_at": 0, "epoch": 0}
 
-@omp.entry_kind("dev.om.observations", rev="v.1")
-@dataclass(frozen=True, slots=True)
-class ObservationsRecorded:
-    turn: int
-    observations: tuple[str, ...]
+# An extension cannot define a journal kind, so the ledger is a rebuildable cache in the
+# extension's state dir, written by an env-colocated worker (docs/py/09-journal.md, "Shape 1").
+@omp_remote.remote
+def append_ledger(state: omp.EnvPath, row: str) -> None:
+    with open(state.local_path() / "observations.jsonl", "a", encoding="utf-8") as ledger:
+        ledger.write(row + "\n")
+
+@omp_remote.remote
+def read_ledger(state: omp.EnvPath) -> list[str]:
+    path = state.local_path() / "observations.jsonl"
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+omp.workers.declare(omp.WorkerSpec(name="ledger", site=omp.Site.ENV))
 
 @omp.telemetry(["turn_end"])
 async def observe(ev: omp.telemetry.TurnEnd, ctx: omp.Context) -> None:
@@ -1413,20 +1423,20 @@ async def observe(ev: omp.telemetry.TurnEnd, ctx: omp.Context) -> None:
         return
     if await omp.context.epoch() != _state["epoch"]:
         return  # context was compacted or reset under us; drop this batch
-    await omp.journal.append(ObservationsRecorded(
-        turn=ev.turn,
-        observations=tuple(out.text.splitlines()),
-    ))
+    worker = await omp.workers.get("ledger")
+    await worker.call(
+        append_ledger,
+        await omp.state_dir(),
+        json.dumps({"turn": ev.turn, "observations": out.text.splitlines()}),
+    )
 
 @omp.hook("compaction")
 async def supply_fold(ev: omp.CompactionEvent, ctx: omp.Context) -> omp.CompactionVerdict | None:
     if ev.tier is not omp.CompactionTier.LOCAL:
         return None  # let PRUNE/DROP_MEDIA/ELIDE run; we only replace summarization
-    lines = []
-    async for entry in omp.sessions.journal(
-        ctx.session, kinds=("dev.om.observations",)
-    ):
-        lines.extend(entry.observations)
+    worker = await omp.workers.get("ledger")
+    rows = await worker.call(read_ledger, await omp.state_dir())
+    lines = [line for row in rows for line in json.loads(row)["observations"]]
     if not lines:
         return None  # nothing folded yet — let the default summarizer earn its keep
     return omp.CustomSummary(
@@ -1460,9 +1470,9 @@ And returning `None` when the ledger is empty hands the turn back to the default
 pi's shape forces a choice at load time — cancel always, or never — so an extension that has
 not warmed up yet leaves an overflowing session with no compaction at all.
 
-Finally, `buildCompactionProjection`'s walk over serialized `branchEntries` becomes a filtered
-journal query by entry type. The ledger is read from the journal it was written to, by type,
-without materializing the branch.
+Finally, `buildCompactionProjection`'s walk over serialized `branchEntries` goes away. The ledger is
+read from the state dir it was written to, without materializing the branch. Because it is a cache
+rather than session truth, deleting it loses observations but never history.
 
 And the memory block is a `SlotClass.EPOCHAL` contribution invalidated when consolidation
 finishes, so it changes exactly when the prefix was already lost and never otherwise.
@@ -1950,7 +1960,7 @@ the Python function's determinism is checked at *pull* time by calling it twice 
 and after that the agent renders from immutable bytes. A slot that is nondeterministic is
 caught in Python, where the traceback names the extension.
 
-**Cache breakpoint emission.** `crates/inference` needs a per-provider breakpoint budget
+**Cache breakpoint emission.** `crates/ai` needs a per-provider breakpoint budget
 and a placement pass consuming `[BandHash; 4]` plus the trailing message window — this pass
 *is* the semantic-groups-into-marker-budget packing `docs/py/13-inference.md` owns. Anthropic
 gets four `cache_control` markers, three at band transitions and one trailing; providers with
@@ -2304,9 +2314,9 @@ Changes this file made in the post-review revision, and the review points that d
   placement-checked `local_path()` in pattern 3 and *Memory integration* (P0#12). pi's
   `context` / `before_agent_start` names remain only as pi history.
 - **P0#2 / P0#17 alignment** — pattern examples updated: devices take final `(args, ctx)`
-  (no `IncomingParams`, no `params.committed()`); journal writes use declared
-  `@omp.entry_kind` instances instead of raw string + dict; session reads filter by declared
-  entry type.
+  (no `IncomingParams`, no `params.committed()`); journal writes used declared
+  `@omp.entry_kind` instances instead of raw string + dict, and session reads filtered by declared
+  entry type (both were later removed with the extension journal API; see `docs/py/09-journal.md`).
 
 **Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
 

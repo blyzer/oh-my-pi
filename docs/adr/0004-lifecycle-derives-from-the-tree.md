@@ -92,5 +92,5 @@ Rules:
 - The Harness Playbook, "The state" — "What one authority buys"; Appendix A items 2, 5, 6, 7, 8
 - 0001 (remote driver, spectator), 0003 (the tree and its patch stream), 0005 (controller and
   actor), 0008 (tool call as one element), 0010 (jobs), 0031 (typed component model)
-- `docs/architecture/agent-loop.md` — "Durable turn flow", "Events, storage, and presentation"
+- `docs/architecture/agent-loop.md` — "One turn", "Events, storage, and presentation"
 - Source Engine `.dem` replay: seek to a tick and re-derive
