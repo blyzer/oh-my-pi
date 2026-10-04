@@ -1,9 +1,10 @@
 # Architecture Decision Records
 
 Owner decisions for the omp harness, one file per decision. Each record states the forces that
-made the decision necessary, the decision itself, and what it commits the codebase to. Records are
-append-only: a superseded decision gets a new record and a `Superseded by` line, never an edit that
-rewrites history.
+made the decision necessary, the decision itself, and what it commits the codebase to. A record that
+is replaced gets a new record and a `Superseded by` line. A record whose decision the owner revises
+in place (for example to match what the code does) keeps its number and gets a dated
+`## Amendment (YYYY-MM-DD)` section saying what changed and why; the history stays in git.
 
 Source: most records distil "The Harness Playbook" (blog, 2026-09-02) and cross-reference the crates
 that implement them. `AGENTS.md` "Locked Deviations from pi" is the enforcement summary; these
@@ -21,6 +22,7 @@ Area: foundations | state | runtime | control-plane | inference | tools | interf
 ## Context      — the forces, with evidence (what broke in omp v1 / pi, measurements)
 ## Decision     — what we do, stated as rules; call sites / shapes where useful
 ## Consequences — what becomes easy, what becomes prohibited, costs accepted
+## Amendment (YYYY-MM-DD) — optional; owner-decided in-place revision of the Decision, with why
 ## Status in omp — crates/files implementing it; gaps marked plainly
 ## References   — related records, code, external prior art
 ```
