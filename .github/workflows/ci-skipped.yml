@@ -29,6 +29,7 @@ on:
       - "examples/**"
       - "fixtures/**"
       - "scripts/**"
+      - "tools/lintx/**"
       - "docs/py/**"
       - "Cargo.toml"
       - "Cargo.lock"

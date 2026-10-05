@@ -40,7 +40,7 @@ Statuses: **Implemented** (decision realized in code; remaining limits are liste
 | [0032](0032-presentation-policy-in-the-renderer.md) | Semantic colors, icons, charset, pacing belong to the renderer | Implemented | None found. | - |
 | [0033](0033-verification-is-part-of-the-interface.md) | A debug protocol defines what the UI is | Implemented | None found. | - |
 | [0034](0034-transcript-is-a-protocol.md) | Blocks, exactly-once history, append-only scrollback; TLA+-checked | Partially implemented | No full/compact/pulse geometry; `cl_resize_policy` convar still exists; TLC not run in CI. | Yes |
-| [0035](0035-rust-for-the-engine.md) | Language choice is architecture; Rust for the engine | Partially implemented | About 175 error variants carry a bare `Str`/`String`; error text is formatted in many places. | Yes |
+| [0035](0035-rust-for-the-engine.md) | Language choice is architecture; Rust for the engine | Partially implemented | Error discipline now ratchets: lintx counts bare-`Str`/`String` error variants (245) and formatted error values (1042) per crate and fails any rise; the legacy sites remain to be migrated. | Enforcement decided 2026-10-05 |
 | [0036](0036-python-for-extensions.md) | Embedded Python for extensions, `@remote`, and `Eval` | Partially implemented | `@remote` placement beyond the host, scoped env handles and spill diversion unproved. | - |
 | [0037](0037-acp-editor-io.md) | ACP editors supply the document base; writes commit through the authority, then sync back | Implemented | Plan steps 1-4 done (terminal cutover landed in PR #126); moves, deletes and notebooks are not written back. | - |
 | [0038](0038-stream-rules-as-a-director.md) | Stream rules are a Director over a generic stream-watch hook | Partially implemented | Steps 1-5 done (`omp rules`, `stream_rule_triggered` rename and emitter, TUI/ACP/print/RPC surfaces, loop-level redirect test). Unproven: matcher proptests, rewind/interrupt/budget rows, P2/P5/P6; notices and the hook carry no matched excerpt. Open questions 1-8 resolved as proposed. | Decided 2026-10-04 |
@@ -52,7 +52,7 @@ Totals: 24 implemented, 15 partially implemented.
 
 - [0024](0024-small-permanent-roster.md) Every permanent tool taxes every turn; the roster stays small and fixed: Roster varies mid-session (`sv_tools`, Goal, `think`, `task` ceiling); decision rule 2 says it never does.
 - [0034](0034-transcript-is-a-protocol.md) Blocks, exactly-once history, append-only scrollback; TLA+-checked: No full/compact/pulse geometry; `cl_resize_policy` convar still exists; TLC not run in CI.
-- [0035](0035-rust-for-the-engine.md) Language choice is architecture; Rust for the engine: About 175 error variants carry a bare `Str`/`String`; error text is formatted in many places.
+- [0035](0035-rust-for-the-engine.md) Language choice is architecture; Rust for the engine: 245 bare-string error variants and 1042 formatted error values remain, held by a per-crate lintx ratchet (`tools/lintx/baselines/error-formatting.toml`); migration to zero is open.
 
 ## Resolved by amendment (2026-10-04)
 

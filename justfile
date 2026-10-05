@@ -93,9 +93,25 @@ lintx *paths='crates':
 lintx-fix *paths='crates':
     cargo run --quiet --release --locked --manifest-path tools/lintx/Cargo.toml -- --fix {{ paths }}
 
+# Error-formatting ratchet (ADR 0035): fail when a crate has more bare-`Str`/`String` error variants
+# (`error-str-payload`) or formatted error values (`error-format`) than tools/lintx/baselines/error-formatting.toml.
+[group('format & lint')]
+lintx-ratchet:
+    cargo run --quiet --release --locked --manifest-path tools/lintx/Cargo.toml -- --ratchet tools/lintx/baselines/error-formatting.toml crates
+
+# Lower the error-formatting baseline after migrating sites. Refuses (writes nothing) if any count rose.
+[group('format & lint')]
+lintx-ratchet-update:
+    cargo run --quiet --release --locked --manifest-path tools/lintx/Cargo.toml -- --ratchet-update tools/lintx/baselines/error-formatting.toml crates
+
+# lintx's own unit tests (a separate Cargo workspace, so `just test` does not run them).
+[group('test')]
+lintx-test:
+    cargo test --locked --manifest-path tools/lintx/Cargo.toml
+
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
-lint: fmt-check clippy proto-lint lint-locked-maps
+lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet
 
 # ---------------------------------------------------------------------------
 # Build & check
