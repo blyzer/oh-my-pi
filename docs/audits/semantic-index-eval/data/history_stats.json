@@ -1,0 +1,7 @@
+{"source": "Claude Code session history, one session plus 108 subagents, 2026-10",
+ "assistant_turns": 34015, "output_tokens": 9858434, "cache_read_tokens": 9463721352,
+ "bash_result_tokens": {"file reading": 3284650, "code search/list": 1444911, "git": 996335, "other": 634721,
+   "verify (cargo/just/nextest)": 540403, "reading logs": 336370, "polling/disk/ps": 113487, "github/CI": 28855},
+ "sed_n_range_reads": {"calls": 2842, "tokens": 2771429, "avg_tokens": 975},
+ "cat_whole_file": {"calls": 141, "tokens": 253388, "avg_tokens": 1797},
+ "git_show": {"calls": 400, "tokens": 431383}, "git_diff": {"calls": 193, "tokens": 183095}}
