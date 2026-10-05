@@ -161,15 +161,6 @@ impl Router {
 		Self { registry, plan_ttl, runtime: Arc::new(HashMap::new()), settings }
 	}
 
-	/// Returns the configured selector for one harness-owned auxiliary model
-	/// use.
-	pub const fn special_selector(
-		&self,
-		purpose: omp_catalog::settings::SpecialModelPurpose,
-	) -> &Str {
-		self.settings.model.special_selector(purpose)
-	}
-
 	/// Replaces credential-free route observations used by subsequent
 	/// side-effect-free plans.
 	pub fn with_runtime_evidence(mut self, runtime: HashMap<RouteId, RuntimeRouteEvidence>) -> Self {

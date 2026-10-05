@@ -11,6 +11,11 @@
 //! - `model-gate`: model-name literals gating behavior in `crates/inference`.
 //! - `model-table`: hardcoded model-id arrays in `crates/inference`.
 //!
+//! Two further rules, `error-str-payload` and `error-format`, are not part of
+//! the default pass: they are counted per crate against a committed baseline
+//! (`--ratchet <baseline>`, `--ratchet-update <baseline>`; see `ratchet.rs`
+//! and the README).
+//!
 //! `--fix` rewrites paths according to explicit bare/qualified-name policy and
 //! inserts a `use` into the nearest enclosing module scope, iterating each file
 //! to a fixpoint. `--only <rule>` restricts detection and fixes to one or more
@@ -20,6 +25,7 @@ mod bindings;
 mod fix;
 mod lint;
 mod lints;
+mod ratchet;
 mod scope;
 
 use std::{collections::BTreeMap, fmt::Write as _, path::PathBuf};
@@ -33,6 +39,7 @@ struct Options {
 	max_segments: usize,
 	only:         Vec<String>,
 	paths:        Vec<PathBuf>,
+	ratchet:      Option<(ratchet::Mode, PathBuf)>,
 }
 
 fn main() {
@@ -48,11 +55,24 @@ fn main() {
 					.expect("--max-segments <N>");
 			},
 			"--only" => opts.only.push(args.next().expect("--only <rule>")),
+			"--ratchet" => {
+				let file = args.next().expect("--ratchet <baseline>");
+				opts.ratchet = Some((ratchet::Mode::Check, PathBuf::from(file)));
+			},
+			"--ratchet-update" => {
+				let file = args.next().expect("--ratchet-update <baseline>");
+				opts.ratchet = Some((ratchet::Mode::Update, PathBuf::from(file)));
+			},
 			_ => opts.paths.push(PathBuf::from(arg)),
 		}
 	}
 	if opts.paths.is_empty() {
 		opts.paths.push(PathBuf::from("."));
+	}
+
+	if let Some((mode, baseline)) = &opts.ratchet {
+		assert!(!opts.fix && opts.only.is_empty(), "--ratchet takes only a baseline and paths");
+		std::process::exit(ratchet::run(*mode, baseline, &opts.paths));
 	}
 
 	let mut rules = lints::all(opts.max_segments);

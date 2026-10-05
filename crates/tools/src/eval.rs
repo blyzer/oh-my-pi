@@ -462,8 +462,11 @@ pub enum PyEvalFault {
 }
 
 /// Ordered text stream emitted by Python.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// The static string form is the matching `sys` attribute name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum OutputChannel {
 	/// Python standard output.
 	Stdout,

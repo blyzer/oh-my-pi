@@ -71,6 +71,9 @@ runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
 queue. Add it to the ruleset once it has reported green on a pull request;
 existing required checks keep their names.
 
+`Error-formatting ratchet (lintx)` (ADR 0035) runs on a GitHub-hosted runner as
+well; add it to the ruleset once it has reported green on a pull request.
+
 Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
 merge.

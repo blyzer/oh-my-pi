@@ -83,12 +83,14 @@ amount of safety for free.
 
 ## Status in omp
 
-**Status: Partially implemented.** The engine is Rust with workspace lints and a pinned toolchain; error-type and allocation discipline still depends on review and the code does not meet it everywhere. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+**Status: Partially implemented.** The engine is Rust with workspace lints and a pinned toolchain. Error-type discipline is now enforced as a ratchet: it cannot grow, and the legacy sites still await migration. Allocation discipline still depends on review. (Verified 2026-10-05 against `omp2` at `6bfa10e313`.)
 
-- Baseline: every crate under `crates/` is Rust; `[workspace.lints]` in `Cargo.toml` (`missing_docs`, `allow_attributes_without_reason`), `clippy.toml` disallow lists, `rustfmt.toml`, pinned `rust-toolchain.toml`; `tools/lintx` for model-name conditionals.
-- Divergence from rule 2 (typed `#[source]` errors, no string-payload variants): a grep over `crates` finds about 175 `#[error]` enum variants whose only payload is `Str` or `String` (for example `crates/catalog/src/selection.rs`, `crates/catalog/src/policy.rs`, `crates/envd/src/workspace/operations.rs`) and about 700 `error.to_string()` call sites. Some payloads are identifiers rather than stringified errors, so the count is an upper bound; no lint enforces the rule.
+- Baseline: every crate under `crates/` is Rust; `[workspace.lints]` in `Cargo.toml` (`missing_docs`, `allow_attributes_without_reason`), `clippy.toml` disallow lists, `rustfmt.toml`, pinned `rust-toolchain.toml`; `tools/lintx` for model-name conditionals and path rules.
+- Rule 2, typed `#[source]` errors and no string-payload variants: the owner chose mechanical enforcement. `tools/lintx` now has two counted rules, `error-str-payload` (an `#[error]` variant or struct whose only field is a `Str`/`String`/`&str`, or a catch-all-named one such as `reason`) and `error-format` (`.to_string()` or `format!`/`sf!`/`fmts!` on a value bound as an error by `map_err`, `or_else`, `unwrap_or_else`, `inspect_err`, `map_or_else`, or an `Err(e)` arm or `if let`). Exact definitions, scope (test code excluded) and the `// lintx-allow: <rule> <reason>` escape for a genuine render-once boundary are in `tools/lintx/README.md`.
+- The ratchet: `just lintx-ratchet` (also in `just lint`, and the CI job `Error-formatting ratchet (lintx)`) counts both rules per crate and fails when a crate's count is above `tools/lintx/baselines/error-formatting.toml`. `just lintx-ratchet-update` lowers the file after a migration and refuses to raise any count. New violations are blocked; old ones migrate when the code is touched.
+- Numbers when the baseline was generated (2026-10-05): 245 `error-str-payload` sites (largest: `envd` 78, `shell-builtins` 35, `shell` 27, `tools` 27, `app` 14) and 1042 `error-format` sites (largest: `envd` 309, `shell-builtins` 184, `app` 86, `desktop` 86, `tools` 79, `chat` 69, `ai` 66). These are not comparable with the earlier estimate of about 175 variants and about 700 call sites, which was a text grep: the rules here also count record catch-alls, structs, and `format!`/`sf!` sites, and skip test code. Some tuple payloads are identifiers rather than stringified errors, so the first count is an upper bound.
+- Open: migrating the baseline to zero. The ratchet makes no claim that the legacy sites are acceptable.
 - Strum-derived enum/string tables and allocation replacements were not audited here.
-- Owner decision: add mechanical enforcement (a lintx rule) and migrate, or soften the ADR wording.
 
 ## References
 

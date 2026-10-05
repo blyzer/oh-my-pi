@@ -2,6 +2,7 @@
 //! runs.
 
 mod arc_struct;
+mod error_format;
 mod import_alias;
 mod inline_path;
 mod model_name;
@@ -22,4 +23,10 @@ pub fn all(max_segments: usize) -> Vec<Box<dyn AnyLint>> {
 		Box::new(model_name::ModelGate),
 		Box::new(model_name::ModelTable),
 	]
+}
+
+/// The rules counted by the error-formatting ratchet ([`crate::ratchet`]).
+/// Kept out of [`all`]: hundreds of legacy sites would drown a normal run.
+pub fn ratchet() -> Vec<Box<dyn AnyLint>> {
+	vec![Box::new(error_format::ErrorStrPayload), Box::new(error_format::ErrorFormat)]
 }

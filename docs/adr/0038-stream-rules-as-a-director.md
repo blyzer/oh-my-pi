@@ -484,8 +484,10 @@ and `AgentsArgs`/`AgentsAction` clap types are deleted.
   `KernelEvent::StreamObserved {director, event, payload}` mirrors each published observation.
   The TUI renders `<notice name=stream-*>` as a card led by the themed `rule-extension` icon; print
   JSON and RPC emit `stream_redirected` and `stream_rule_triggered` frames, print text mode writes
-  the redirect to stderr; ACP sends stream notices as `agent_thought_chunk` updates, live and on
-  replay. The settings group is "Stream Rules", and the convars carry their v1 `legacy.path`.
+  the redirect to stderr; ACP sends stream notices and the injected rule text (`<developer>`) as
+  `agent_thought_chunk` updates, live and on replay, never as `user_message_chunk` (only `<user>`
+  elements are the person's input). The settings group is "Stream Rules", and the convars carry
+  their v1 `legacy.path`.
 
 ### Implementation plan (PR-sized)
 

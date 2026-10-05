@@ -54,8 +54,7 @@ pub const ISOLATION_BASELINE_MAX_UNTRACKED_BYTES: u64 = 1024 * 1024 * 1024;
 #[derive(Debug, Error)]
 #[error(
 	"working tree at {root:?} carries {content_bytes} bytes of untracked content, over the \
-	 {limit_bytes}-byte isolation snapshot budget; commit or gitignore the bulk, or set \
-	 `task.isolation.mode: none`"
+	 {limit_bytes}-byte isolation snapshot budget; commit or gitignore the bulk"
 )]
 pub struct IsolationBaselineTooLargeError {
 	/// Repository whose isolation baseline was refused.

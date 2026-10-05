@@ -64,20 +64,22 @@ backend is whatever the filesystem offers (APFS, btrfs, ZFS, overlayfs, ProjFS) 
 choice is a setting. Only per-file reflink with a copy fallback is implemented. The other
 mechanisms stay as possible future targets and are no longer described as selectable. The
 `sv_task_isolation_mode` convar and its `TaskIsolationMode` enum
-(`crates/driver/src/subagent/settings.rs`) advertise backends that have no implementation, and
-nothing selects a backend from them, so their unimplemented options are to be removed in a
-follow-up code change; this record does not wait for that change. The rest of the decision stands:
+(`crates/driver/src/subagent/settings.rs`) advertised backends that have no implementation, and
+nothing selected a backend from them. The follow-up code change deleted the convar, the enum and
+`TaskIsolationSettings::mode` outright rather than trimming the enum: once the unimplemented
+backends were gone only `none` and `auto` remained, and neither selected anything, so the convar
+changed nothing observable (`none` never disabled isolation). The rest of the decision stands:
 every writing child works in its own view and returns a patch or branch that the parent applies
 under its own policy.
 
 ## Status in omp
 
-**Status: Partially implemented.** Every subagent gets a copy-on-write workspace and returns a patch or branch, with per-file reflink and a copy fallback as the only backend. Open: gitignored files are not copied, and the inert `sv_task_isolation_mode` convar still lists unimplemented backends until the follow-up code change. (Verified 2026-10-04 against `omp2` at `9b2d91fe9d`.)
+**Status: Partially implemented.** Every subagent gets a copy-on-write workspace and returns a patch or branch, with per-file reflink and a copy fallback as the only backend. Open: gitignored files are not copied. (Verified 2026-10-05 against `omp2` at `6bfa10e313`, after the convar cleanup.)
 
 - Isolation and return path: `create_isolation`/`finish_isolation`/`discard_isolation` in `crates/driver/src/subagent/spawn.rs` call `CreateWorktree`/`MergeWorktree`. `run_child` creates an isolated root for every composed child unconditionally (comment at `spawn.rs:874`). The result is an `artifact://sha256/...` patch or a retained branch, applied only when `isolation.apply` allows.
 - Environment side: `crates/envd/src/workspace/operations.rs::create_worktree` snapshots the live workspace, then clones each manifest entry with `clone_file_cow`: `clonefile` (macOS) or `FICLONE` (Linux), falling back on `ENOTSUP`/`EXDEV` (macOS) or `EOPNOTSUPP`/`EXDEV`/`ENOTTY`/`EINVAL` (Linux) to `hardlink_copy_fallback`, which probes a hard link and immediately replaces it with a copy, or plain `fs::copy`; other platforms always take the copy path. It refuses an oversize untracked tree (`IsolationBaselineTooLargeError`). Proof: `crates/e2e/tests/p9_isolation.rs`.
 - Gap, ignored files: the snapshot walk in `snapshot_at` runs with `.gitignore(true)` and `.skip_git(true)` (`operations.rs`, around line 779), so gitignored files are not in the manifest and are not copied. Untracked non-ignored files and hidden files are included. This replaces the earlier note that the question was unverified.
-- Gap, inert convar: `TaskIsolationMode` declares `none`, `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone` and `rcopy`. `CreateWorktree` carries no backend field (`crates/proto/proto/omp/env/v1/env.proto`), and the mode is read in one place, `subagent_spec` in `spawn.rs`, where `none` only sets the hook payload's `worktree` flag to false. Isolation still happens. The convar therefore does not select a backend and `none` does not disable isolation. Follow-up code change: remove the unimplemented variants and their `ui.option.*` metadata, and reword the `task.isolation.mode: none` advice in `IsolationBaselineTooLargeError`.
+- Removed, inert convar: `sv_task_isolation_mode` and `TaskIsolationMode` declared `none`, `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone` and `rcopy`, yet `CreateWorktree` carries no backend field (`crates/proto/proto/omp/env/v1/env.proto`) and the only reader set the hook payload's `worktree` flag. They are deleted, with the v1 import mapping for `task.isolation.enabled` and `isolation.backend` (those v1 keys now import as unmapped comments). The `SubagentSpec` hook payload now reports `worktree: true` and the configured merge strategy for every child, matching `run_child`. `sv_task_isolation_apply` and `sv_task_isolation_merge` remain and are the live isolation settings. The `IsolationBaselineTooLargeError` message no longer advises `task.isolation.mode: none`, which never disabled isolation. The task tool's `isolated` parameter stays on the wire as a hint that does not change whether a view is created.
 
 ## References
 
