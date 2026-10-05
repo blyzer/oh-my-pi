@@ -302,49 +302,41 @@ pub type ModelTags = BTreeMap<Str, ModelTag>;
 #[serde(default)]
 pub struct ModelSettings {
 	/// Model selector assignments keyed by role name.
-	pub roles:                    ModelRoles,
+	pub roles:              ModelRoles,
 	/// Persistence scope for model role assignments.
-	pub role_storage:             ModelRoleStorage,
+	pub role_storage:       ModelRoleStorage,
 	/// Presentation metadata keyed by model role.
-	pub tags:                     ModelTags,
+	pub tags:               ModelTags,
 	/// Role names in quick-cycle order.
-	pub cycle_order:              ArcStrList,
+	pub cycle_order:        ArcStrList,
 	/// Optional canonical model selector allow-list.
-	pub enabled_models:           PathScopedStrList,
+	pub enabled_models:     PathScopedStrList,
 	/// Provider ids excluded from discovery, selection, and routing.
-	pub disabled_providers:       PathScopedStrList,
+	pub disabled_providers: PathScopedStrList,
 	/// Default thinking effort used when a caller leaves effort unset.
-	pub default_thinking:         ThinkingEffort,
+	pub default_thinking:   ThinkingEffort,
 	/// Universal configured reasoning ceiling.
-	pub thinking_ceiling:         ThinkingEffort,
+	pub thinking_ceiling:   ThinkingEffort,
 	/// Per-effort reasoning token budgets.
-	pub thinking_budgets:         ThinkingBudgets,
+	pub thinking_budgets:   ThinkingBudgets,
 	/// Provider ids in preferred routing order.
-	pub provider_order:           ArcStrList,
+	pub provider_order:     ArcStrList,
 	/// OpenAI-family service tier.
-	pub tier_openai:              TierSetting,
+	pub tier_openai:        TierSetting,
 	/// Anthropic-family service tier.
-	pub tier_anthropic:           TierSetting,
+	pub tier_anthropic:     TierSetting,
 	/// Google-family service tier.
-	pub tier_google:              TierSetting,
+	pub tier_google:        TierSetting,
 	/// Fireworks serving tier.
-	pub tier_fireworks:           TierSetting,
+	pub tier_fireworks:     TierSetting,
 	/// Prompt-cache retention policy.
-	pub cache_retention:          CacheRetentionSetting,
+	pub cache_retention:    CacheRetentionSetting,
 	/// `OpenAI` Codex websocket preference.
-	pub openai_websockets:        WireToggle,
+	pub openai_websockets:  WireToggle,
 	/// Default `OpenRouter` routing suffix.
-	pub openrouter_variant:       OpenRouterVariant,
+	pub openrouter_variant: OpenRouterVariant,
 	/// Kimi wire format preference.
-	pub kimi_api_format:          KimiApiFormat,
-	/// Model selector for tiny/title work.
-	pub tiny_selector:            Str,
-	/// Model selector for memory inference.
-	pub memory_selector:          Str,
-	/// Model selector for automatic-thinking classification.
-	pub auto_thinking_selector:   Str,
-	/// Model selector for unexpected-stop classification.
-	pub unexpected_stop_selector: Str,
+	pub kimi_api_format:    KimiApiFormat,
 }
 
 /// Clone-cheap string sequence.
@@ -398,32 +390,28 @@ pub type PathScopedStrList = sync::Arc<[PathScopedStringEntry]>;
 impl Default for ModelSettings {
 	fn default() -> Self {
 		Self {
-			roles:                    BTreeMap::new(),
-			role_storage:             ModelRoleStorage::Global,
-			tags:                     BTreeMap::new(),
-			cycle_order:              sync::Arc::from([
+			roles:              BTreeMap::new(),
+			role_storage:       ModelRoleStorage::Global,
+			tags:               BTreeMap::new(),
+			cycle_order:        sync::Arc::from([
 				Str::new_static("smol"),
 				Str::new_static("default"),
 				Str::new_static("slow"),
 			]),
-			enabled_models:           sync::Arc::from([]),
-			disabled_providers:       sync::Arc::from([]),
-			default_thinking:         ThinkingEffort::High,
-			thinking_ceiling:         ThinkingEffort::Max,
-			thinking_budgets:         ThinkingBudgets::default(),
-			provider_order:           sync::Arc::from([]),
-			tier_openai:              TierSetting::None,
-			tier_anthropic:           TierSetting::None,
-			tier_google:              TierSetting::None,
-			tier_fireworks:           TierSetting::None,
-			cache_retention:          CacheRetentionSetting::Auto,
-			openai_websockets:        WireToggle::Auto,
-			openrouter_variant:       OpenRouterVariant::Default,
-			kimi_api_format:          KimiApiFormat::Auto,
-			tiny_selector:            Str::new_static("@tiny"),
-			memory_selector:          Str::new_static("@tiny"),
-			auto_thinking_selector:   Str::new_static("@tiny"),
-			unexpected_stop_selector: Str::new_static("@tiny"),
+			enabled_models:     sync::Arc::from([]),
+			disabled_providers: sync::Arc::from([]),
+			default_thinking:   ThinkingEffort::High,
+			thinking_ceiling:   ThinkingEffort::Max,
+			thinking_budgets:   ThinkingBudgets::default(),
+			provider_order:     sync::Arc::from([]),
+			tier_openai:        TierSetting::None,
+			tier_anthropic:     TierSetting::None,
+			tier_google:        TierSetting::None,
+			tier_fireworks:     TierSetting::None,
+			cache_retention:    CacheRetentionSetting::Auto,
+			openai_websockets:  WireToggle::Auto,
+			openrouter_variant: OpenRouterVariant::Default,
+			kimi_api_format:    KimiApiFormat::Auto,
 		}
 	}
 }
@@ -433,28 +421,24 @@ impl ModelSettings {
 	#[must_use]
 	pub fn from_con(ctx: &Ctx) -> Self {
 		Self {
-			roles:                    roles_from_kv(AI_MODEL_ROLES.get(ctx)),
-			role_storage:             AI_MODEL_ROLE_STORAGE.get(ctx),
-			tags:                     tags_from_kv(AI_MODEL_TAGS.get(ctx)),
-			cycle_order:              AI_MODEL_CYCLE_ORDER.get(ctx).into(),
-			enabled_models:           path_scoped_from_kv(AI_MODEL_ENABLED_MODELS.get(ctx)),
-			disabled_providers:       path_scoped_from_kv(AI_MODEL_DISABLED_PROVIDERS.get(ctx)),
-			default_thinking:         AI_DEFAULT_THINKING.get(ctx),
-			thinking_ceiling:         AI_THINKING_CEILING.get(ctx),
-			thinking_budgets:         thinking_budgets_from_kv(AI_THINKING_BUDGETS.get(ctx)),
-			provider_order:           AI_PROVIDER_ORDER.get(ctx).into(),
-			tier_openai:              AI_TIER_OPENAI.get(ctx),
-			tier_anthropic:           AI_TIER_ANTHROPIC.get(ctx),
-			tier_google:              AI_TIER_GOOGLE.get(ctx),
-			tier_fireworks:           AI_TIER_FIREWORKS.get(ctx),
-			cache_retention:          AI_CACHE_RETENTION.get(ctx),
-			openai_websockets:        AI_OPENAI_WEBSOCKETS.get(ctx),
-			openrouter_variant:       AI_OPENROUTER_VARIANT.get(ctx),
-			kimi_api_format:          AI_KIMI_API_FORMAT.get(ctx),
-			tiny_selector:            AI_TINY_SELECTOR.get(ctx),
-			memory_selector:          AI_MEMORY_SELECTOR.get(ctx),
-			auto_thinking_selector:   AI_AUTO_THINKING_SELECTOR.get(ctx),
-			unexpected_stop_selector: AI_UNEXPECTED_STOP_SELECTOR.get(ctx),
+			roles:              roles_from_kv(AI_MODEL_ROLES.get(ctx)),
+			role_storage:       AI_MODEL_ROLE_STORAGE.get(ctx),
+			tags:               tags_from_kv(AI_MODEL_TAGS.get(ctx)),
+			cycle_order:        AI_MODEL_CYCLE_ORDER.get(ctx).into(),
+			enabled_models:     path_scoped_from_kv(AI_MODEL_ENABLED_MODELS.get(ctx)),
+			disabled_providers: path_scoped_from_kv(AI_MODEL_DISABLED_PROVIDERS.get(ctx)),
+			default_thinking:   AI_DEFAULT_THINKING.get(ctx),
+			thinking_ceiling:   AI_THINKING_CEILING.get(ctx),
+			thinking_budgets:   thinking_budgets_from_kv(AI_THINKING_BUDGETS.get(ctx)),
+			provider_order:     AI_PROVIDER_ORDER.get(ctx).into(),
+			tier_openai:        AI_TIER_OPENAI.get(ctx),
+			tier_anthropic:     AI_TIER_ANTHROPIC.get(ctx),
+			tier_google:        AI_TIER_GOOGLE.get(ctx),
+			tier_fireworks:     AI_TIER_FIREWORKS.get(ctx),
+			cache_retention:    AI_CACHE_RETENTION.get(ctx),
+			openai_websockets:  AI_OPENAI_WEBSOCKETS.get(ctx),
+			openrouter_variant: AI_OPENROUTER_VARIANT.get(ctx),
+			kimi_api_format:    AI_KIMI_API_FORMAT.get(ctx),
 		}
 	}
 
@@ -663,33 +647,10 @@ impl ModelSettings {
 		Str::from(format!("{}:{}", model, <&'static str>::from(self.openrouter_variant))).into()
 	}
 
-	/// Selects the configured model for one harness-owned auxiliary purpose.
-	pub const fn special_selector(&self, purpose: SpecialModelPurpose) -> &Str {
-		match purpose {
-			SpecialModelPurpose::Tiny => &self.tiny_selector,
-			SpecialModelPurpose::Memory => &self.memory_selector,
-			SpecialModelPurpose::AutoThinking => &self.auto_thinking_selector,
-			SpecialModelPurpose::UnexpectedStop => &self.unexpected_stop_selector,
-		}
-	}
-
 	/// Returns a bounded first-event timeout derived from provider settings.
 	pub const fn plan_ttl(&self) -> Duration {
 		Duration::from_secs(30)
 	}
-}
-
-/// Harness-owned auxiliary model use.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SpecialModelPurpose {
-	/// Session titles and cheap transforms.
-	Tiny,
-	/// Memory extraction and consolidation.
-	Memory,
-	/// Automatic thinking classifier.
-	AutoThinking,
-	/// Unexpected-stop classifier.
-	UnexpectedStop,
 }
 
 impl ModelSettings {
@@ -699,14 +660,6 @@ impl ModelSettings {
 		let budgets = self.thinking_budgets;
 		let ordered =
 			[budgets.minimal, budgets.low, budgets.medium, budgets.high, budgets.xhigh, budgets.max];
-		let selectors_valid = [
-			&self.tiny_selector,
-			&self.memory_selector,
-			&self.auto_thinking_selector,
-			&self.unexpected_stop_selector,
-		]
-		.into_iter()
-		.all(|value| !value.trim().is_empty());
 		let lists_valid = unique_nonempty(&self.provider_order)
 			&& unique_nonempty(&self.cycle_order)
 			&& scoped_entries_valid(&self.enabled_models, ScopedValueKind::Models)
@@ -721,7 +674,6 @@ impl ModelSettings {
 			.all(|(role, tag)| !role.trim().is_empty() && !tag.name.trim().is_empty());
 		ordered.iter().all(|value| *value > 0)
 			&& ordered.windows(2).all(|pair| pair[0] <= pair[1])
-			&& selectors_valid
 			&& lists_valid
 			&& roles_valid
 			&& tags_valid
@@ -1174,14 +1126,6 @@ fn validate_path_scoped_providers(_: &Ctx, value: &Vec<Kv>) -> Result<(), Str> {
 	}
 }
 
-fn validate_selector(_: &Ctx, value: &Str) -> Result<(), Str> {
-	if value.trim().is_empty() {
-		invalid("model selector must not be empty")
-	} else {
-		Ok(())
-	}
-}
-
 omp_con::var! {
 	/// Model selector assignments keyed by role name.
 	pub static AI_MODEL_ROLES = ai_model_roles: Kv {
@@ -1420,105 +1364,6 @@ omp_con::var! {
 			"ui.option.anthropic": "Anthropic",
 			"ui.option.anthropic.desc": "api.moonshot.ai",
 			"legacy.path": "providers.kimiApiFormat",
-		},
-	};
-	/// Session-title model: online (the TINY role from /models, else @smol) by default, or a local on-device model.
-	pub static AI_TINY_SELECTOR = ai_tiny_selector: Str {
-		default: Str::new_static("@tiny"),
-		suggest: ["@tiny", "lfm2.5-230m", "lfm2.5-350m", "falcon-h1-90m"],
-		validate: validate_selector,
-		flags: archive,
-		meta: {
-			"ui.tab": "providers",
-			"ui.group": "Tiny Model",
-			"ui.label": "Tiny Model",
-			"ui.option.@tiny": "Online (TINY role, else @smol)",
-			"ui.option.@tiny.desc": "Online title generation: the TINY model role (set one in /models) when assigned, otherwise the online fallback (commit role, then @smol). No local download or on-device inference.",
-			"ui.option.lfm2.5-230m": "LFM2.5 230M",
-			"ui.option.lfm2.5-230m.desc": "Recommended local model; fastest LFM2.5 option, about 214 MB cached.",
-			"ui.option.lfm2.5-350m": "LFM2.5 350M",
-			"ui.option.lfm2.5-350m.desc": "Larger LFM2.5 option, about 292 MB cached; tends toward terse titles.",
-			"ui.option.falcon-h1-90m": "Falcon H1 Tiny 90M",
-			"ui.option.falcon-h1-90m.desc": "Smallest option, about 147 MB cached; lower fidelity on complex prompts.",
-			"legacy.path": "providers.tinyModel",
-		},
-	};
-	/// Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model.
-	pub static AI_MEMORY_SELECTOR = ai_memory_selector: Str {
-		default: Str::new_static("@tiny"),
-		suggest: ["@tiny", "qwen3-1.7b", "llama3.2:3b", "gemma-3-1b", "qwen2.5-1.5b", "lfm2-1.2b"],
-		validate: validate_selector,
-		flags: archive,
-		meta: {
-			"ui.tab": "memory",
-			"ui.group": "General",
-			"ui.label": "Memory Model",
-			"ui.when": "ai_memory_backend=mnemopi",
-			"ui.option.@tiny": "Online (TINY role, else @smol)",
-			"ui.option.@tiny.desc": "Use the online model: the TINY role from /models when set, otherwise @smol. No local model download or on-device inference.",
-			"ui.option.qwen3-1.7b": "Qwen3 1.7B",
-			"ui.option.qwen3-1.7b.desc": "MLX only (providers.tinyModelDevice=mlx): onnxruntime-node cannot run this ONNX export's RotaryEmbedding cache updates.",
-			"ui.option.llama3.2:3b": "Llama 3.2 3B",
-			"ui.option.llama3.2:3b.desc": "Larger Llama 3.2 option for local memory/classifier tasks; higher quality potential at higher disk/RAM/latency cost.",
-			"ui.option.gemma-3-1b": "Gemma 3 1B",
-			"ui.option.gemma-3-1b.desc": "Best consolidation/dedup; lighter footprint, but leaks small talk during extraction.",
-			"ui.option.qwen2.5-1.5b": "Qwen2.5 1.5B",
-			"ui.option.qwen2.5-1.5b.desc": "Best extraction granularity (atomic facts); weaker consolidation.",
-			"ui.option.lfm2-1.2b": "LFM2 1.2B",
-			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
-			"legacy.path": "providers.memoryModel",
-		},
-	};
-	/// Difficulty classifier for the `auto` thinking level: online (the TINY role from /models, else smol) by default, or a local on-device model.
-	pub static AI_AUTO_THINKING_SELECTOR = ai_auto_thinking_selector: Str {
-		default: Str::new_static("@tiny"),
-		suggest: ["@tiny", "qwen3-1.7b", "llama3.2:3b", "gemma-3-1b", "qwen2.5-1.5b", "lfm2-1.2b"],
-		validate: validate_selector,
-		flags: archive,
-		meta: {
-			"ui.tab": "model",
-			"ui.group": "Thinking",
-			"ui.label": "Auto Thinking Model",
-			"ui.when": "ai_default_thinking=auto",
-			"ui.option.@tiny": "Online (TINY role, else @smol)",
-			"ui.option.@tiny.desc": "Classify prompt difficulty online with the TINY role model (set one in /models) or @smol; no local download or on-device inference.",
-			"ui.option.qwen3-1.7b": "Qwen3 1.7B",
-			"ui.option.qwen3-1.7b.desc": "MLX only (providers.tinyModelDevice=mlx): onnxruntime-node cannot run this ONNX export's RotaryEmbedding cache updates.",
-			"ui.option.llama3.2:3b": "Llama 3.2 3B",
-			"ui.option.llama3.2:3b.desc": "Larger Llama 3.2 option for local memory/classifier tasks; higher quality potential at higher disk/RAM/latency cost.",
-			"ui.option.gemma-3-1b": "Gemma 3 1B",
-			"ui.option.gemma-3-1b.desc": "Best consolidation/dedup; lighter footprint, but leaks small talk during extraction.",
-			"ui.option.qwen2.5-1.5b": "Qwen2.5 1.5B",
-			"ui.option.qwen2.5-1.5b.desc": "Best extraction granularity (atomic facts); weaker consolidation.",
-			"ui.option.lfm2-1.2b": "LFM2 1.2B",
-			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
-			"legacy.path": "providers.autoThinkingModel",
-		},
-	};
-	/// Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.
-	pub static AI_UNEXPECTED_STOP_SELECTOR = ai_unexpected_stop_selector: Str {
-		default: Str::new_static("@tiny"),
-		suggest: ["@tiny", "qwen3-1.7b", "llama3.2:3b", "gemma-3-1b", "qwen2.5-1.5b", "lfm2-1.2b"],
-		validate: validate_selector,
-		flags: archive,
-		meta: {
-			"ui.tab": "providers",
-			"ui.group": "Tiny Model",
-			"ui.label": "Unexpected Stop Model",
-			"ui.when": "ai_features_unexpected_stop_detection=smart",
-			"ui.option.@tiny": "Online (TINY role, else @smol)",
-			"ui.option.@tiny.desc": "Use the online model: the TINY role from /models when set, otherwise @smol. No local model download or on-device inference.",
-			"ui.option.qwen3-1.7b": "Qwen3 1.7B",
-			"ui.option.qwen3-1.7b.desc": "MLX only (providers.tinyModelDevice=mlx): onnxruntime-node cannot run this ONNX export's RotaryEmbedding cache updates.",
-			"ui.option.llama3.2:3b": "Llama 3.2 3B",
-			"ui.option.llama3.2:3b.desc": "Larger Llama 3.2 option for local memory/classifier tasks; higher quality potential at higher disk/RAM/latency cost.",
-			"ui.option.gemma-3-1b": "Gemma 3 1B",
-			"ui.option.gemma-3-1b.desc": "Best consolidation/dedup; lighter footprint, but leaks small talk during extraction.",
-			"ui.option.qwen2.5-1.5b": "Qwen2.5 1.5B",
-			"ui.option.qwen2.5-1.5b.desc": "Best extraction granularity (atomic facts); weaker consolidation.",
-			"ui.option.lfm2-1.2b": "LFM2 1.2B",
-			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
-			"legacy.path": "providers.unexpectedStopModel",
 		},
 	};
 }

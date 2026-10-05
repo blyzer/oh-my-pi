@@ -1,4 +1,4 @@
-# 0023. An embedded tiny model handles harness chores
+# 0023. A dedicated tiny model role handles harness chores
 
 Status: accepted
 Date: 2026-09-02
@@ -61,15 +61,16 @@ separate chore role is unchanged and is met by the role itself.
 
 ## Status in omp
 
-**Status: Partially implemented.** The `tiny` role, verified local artifacts, the lifecycle runtime and local speech exist; the role resolves to an online model by default; no in-process tiny text generator exists, and most named chores have no caller. (Verified 2026-10-04 against `omp2` at `9b2d91fe9d`.)
+**Status: Partially implemented.** The `tiny` role, verified local artifacts, the lifecycle runtime and local speech exist; the role resolves to an online model by default; no in-process tiny text generator exists, and most named chores have no caller. (Verified 2026-10-05 against `omp2` at `6bfa10e313`, after the dead-code cleanup.)
 
-- Role: `AI_TINY_SELECTOR` (default `@tiny`) in `crates/catalog/src/settings.rs`; the `tiny` role falls back to `commit`, then `smol` when unassigned (`crates/catalog/src/selection.rs`, around lines 448 and 480). Speech rewriting resolves `@tiny` through `resolve_role_selector` and calls it (`speech_rewriter` and `SpeechRewriteClient::rewrite` in `crates/driver/src/headless/kernel.rs`; `crates/ai/src/realtime/rewrite.rs`).
+- Role: the `tiny` role has no convar of its own (the unread `ai_tiny_selector` family was removed); it is assigned like any role and falls back to `commit`, then `smol` when unassigned (`crates/catalog/src/selection.rs`, around lines 448 and 480). Speech rewriting resolves `@tiny` through `resolve_role_selector` and calls it (`speech_rewriter` and `SpeechRewriteClient::rewrite` in `crates/driver/src/headless/kernel.rs`; `crates/ai/src/realtime/rewrite.rs`).
 - Local artifacts and lifecycle: curated GGUF artifact catalog and the `ONLINE_TINY_MODEL` sentinel in `crates/ai/src/local/tiny_catalog.rs`; verified artifact store and admission/idle-unload runtime in `crates/ai/src/local/{artifact,runtime}.rs`; `omp tiny-models` installer in `crates/app/src/tiny_models_cmd.rs`.
 - Local speech: candle Whisper and Parakeet STT and Kokoro TTS in `crates/ai/src/local/{stt,parakeet,tts}.rs` behind `local-stt`/`local-tts`.
 - Opt-in on-device text: an Apple Foundation Models route behind `local-applefm` (`crates/ai/src/local/applefm.rs`, bound as the `local` provider's `CodecProfile::AppleFm` in `crates/ai/src/provider/builtin.rs`).
 - Not present: a candle or other in-process generator for the GGUF title, memory and classifier models in `tiny_catalog.rs`.
-- Chores without a caller (checked by grep, 2026-10-04): the auto-thinking `DifficultyClassifier` in `crates/ai/src/difficulty.rs` builds an `@tiny` request, but nothing outside that module calls `classify_online`; the title helpers `is_low_signal_title_input` and `normalize_generated_title` in `crates/ai/src/local/title.rs` have no caller anywhere; the `memory_selector`, `auto_thinking_selector`, `unexpected_stop_selector` and `tiny_selector` fields of `ModelSettings` (`crates/catalog/src/settings.rs`) are filled from convars (`ai_memory_selector`, `ai_auto_thinking_selector`, `ai_unexpected_stop_selector`, `ai_tiny_selector`) and read nowhere else, so those convars, whose suggestions list local models, change nothing today.
-- Stale code comments and dead code, for a follow-up cleanup (no `.rs` file is changed by this amendment): `crates/ai/src/local/mod.rs` line 13 carries `/// llama.cpp GGUF text generation.` above `pub mod message_preproc` with no module behind it, which `AGENTS.md` prohibits as a direction; line 8, `/// FastEmbed local embeddings.`, merges into the doc of `pub mod device`; `crates/ai/src/local/title.rs` lines 22 and 40 are the caller-less validators.
+- Chores without a caller (checked by grep, 2026-10-05): speech rewriting is the only chore with a production caller. The auto-thinking `DifficultyClassifier` in `crates/ai/src/difficulty.rs` has no caller outside its module at all; its `classify_online`, the online request and error types and their helpers are deleted, leaving the memo and the deterministic `fallback` path, which nothing calls either.
+- Removed dead code: the `ModelSettings` selector fields `tiny_selector`, `memory_selector`, `auto_thinking_selector` and `unexpected_stop_selector`, with `SpecialModelPurpose`, `ModelSettings::special_selector`, `Router::special_selector`, the convars `ai_tiny_selector`, `ai_memory_selector`, `ai_auto_thinking_selector`, `ai_unexpected_stop_selector` (nothing read them; their suggestions advertised local models that no generator runs) and their v1 mappings (`providers.tinyModel`, `memoryModel`, `autoThinkingModel`, `unexpectedStopModel` now import as unmapped comments); the whole `crates/ai/src/local/title.rs` module (its two validators `is_low_signal_title_input` and `normalize_generated_title` had no caller, and everything else in the file served only them); and the stale `FastEmbed`/`llama.cpp` module doc lines in `crates/ai/src/local/mod.rs`.
+- Still present and caller-less, kept deliberately: `crates/ai/src/local/message_preproc.rs` (title and chat envelope formatting) and the GGUF artifact catalog `tiny_catalog.rs`, which a future in-process generator would use; `omp tiny-models` installs from that catalog.
 
 ## References
 

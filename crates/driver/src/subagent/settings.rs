@@ -67,47 +67,6 @@ pub enum TaskEffortCeiling {
 	Max,
 }
 
-/// Environment-owned isolation backend selected for child workspaces.
-#[derive(
-	Clone,
-	Copy,
-	Debug,
-	Default,
-	Deserialize,
-	Display,
-	EnumString,
-	Eq,
-	IntoStaticStr,
-	PartialEq,
-	Serialize,
-	strum::VariantNames,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
-pub enum TaskIsolationMode {
-	/// Run in the parent workspace.
-	#[default]
-	None,
-	/// Let Environment select the best native backend.
-	Auto,
-	/// APFS clonefile isolation.
-	Apfs,
-	/// Btrfs subvolume isolation.
-	Btrfs,
-	/// ZFS clone isolation.
-	Zfs,
-	/// Native reflink isolation.
-	Reflink,
-	/// Linux overlay filesystem isolation.
-	Overlayfs,
-	/// Windows projected filesystem isolation.
-	Projfs,
-	/// Windows block-clone isolation.
-	BlockClone,
-	/// Git worktree or recursive-copy fallback.
-	Rcopy,
-}
-
 /// Merge strategy for a successful isolated child workspace.
 #[derive(
 	Clone,
@@ -135,7 +94,6 @@ pub enum TaskIsolationMerge {
 
 omp_con::con_enum!(TaskEagerMode);
 omp_con::con_enum!(TaskEffortCeiling);
-omp_con::con_enum!(TaskIsolationMode);
 omp_con::con_enum!(TaskIsolationMerge);
 
 omp_con::var! {
@@ -330,37 +288,6 @@ omp_con::var! {
 			"legacy.path": "task.agentAdvisor",
 		},
 	};
-	/// Backend used for subagent isolation and worktree cloning.
-	pub static SV_TASK_ISOLATION_MODE = sv_task_isolation_mode: TaskIsolationMode {
-		default: TaskIsolationMode::None,
-		flags: archive,
-		meta: {
-			"ui.tab": "tasks",
-			"ui.group": "Isolation",
-			"ui.label": "Isolation Backend",
-			"ui.option.none": "Disabled",
-			"ui.option.auto": "Auto",
-			"ui.option.auto.desc": "Let the environment pick the best available backend",
-			"ui.option.apfs": "APFS",
-			"ui.option.apfs.desc": "macOS clonefile reflink (APFS)",
-			"ui.option.btrfs": "btrfs",
-			"ui.option.btrfs.desc": "btrfs subvolume snapshot",
-			"ui.option.zfs": "ZFS",
-			"ui.option.zfs.desc": "ZFS snapshot + clone",
-			"ui.option.reflink": "Reflink",
-			"ui.option.reflink.desc": "Linux FICLONE per-file reflink",
-			"ui.option.overlayfs": "Overlayfs",
-			"ui.option.overlayfs.desc": "Linux kernel overlay (or fuse-overlayfs fallback)",
-			"ui.option.projfs": "ProjFS",
-			"ui.option.projfs.desc": "Windows Projected File System",
-			"ui.option.block-clone": "Block clone",
-			"ui.option.block-clone.desc": "Windows FSCTL_DUPLICATE_EXTENTS_TO_FILE (NTFS/ReFS)",
-			"ui.option.rcopy": "Recursive copy",
-			"ui.option.rcopy.desc": "git worktree if available, otherwise recursive copy",
-			"legacy.path": "task.isolation.enabled",
-			"legacy.path": "isolation.backend",
-		},
-	};
 	/// Automatically apply successful isolated task changes to the parent checkout; disable to
 	/// retain patch or branch artifacts.
 	pub static SV_TASK_ISOLATION_APPLY = sv_task_isolation_apply: bool {
@@ -432,12 +359,12 @@ omp_con::var! {
 	};
 }
 
-/// Child workspace isolation defaults.
+/// Child workspace isolation defaults. Isolation itself is unconditional
+/// (ADR 0007); these settings only govern how a settled child's changes
+/// return to the parent.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct TaskIsolationSettings {
-	/// Backend selection.
-	pub mode:  TaskIsolationMode,
 	/// Apply successful changes automatically.
 	pub apply: bool,
 	/// Merge strategy.
@@ -446,7 +373,7 @@ pub struct TaskIsolationSettings {
 
 impl Default for TaskIsolationSettings {
 	fn default() -> Self {
-		Self { mode: TaskIsolationMode::None, apply: true, merge: TaskIsolationMerge::Patch }
+		Self { apply: true, merge: TaskIsolationMerge::Patch }
 	}
 }
 
@@ -531,7 +458,6 @@ impl TaskSettings {
 			agent_prewalk: string_map(SV_TASK_AGENT_PREWALK.get(ctx)),
 			agent_advisor: string_map(SV_TASK_AGENT_ADVISOR.get(ctx)),
 			isolation: TaskIsolationSettings {
-				mode:  SV_TASK_ISOLATION_MODE.get(ctx),
 				apply: SV_TASK_ISOLATION_APPLY.get(ctx),
 				merge: SV_TASK_ISOLATION_MERGE.get(ctx),
 			},

@@ -45,7 +45,7 @@ same change that moves the code.
 - [0002](0002-complexity-has-one-owner.md) — Push hard problems down into the engine
 
 ### State
-- [0003](0003-one-authoritative-session-tree.md) — One authoritative session tree; the journal is its patch stream
+- [0003](0003-one-authoritative-session-tree.md) — One authoritative session tree, derived from the journal
 - [0004](0004-lifecycle-derives-from-the-tree.md) — Rewind, fork, resume, replication, and prompts derive from the tree
 - [0005](0005-controller-actor-separation.md) — Controller owns state; views are projections
 
@@ -73,7 +73,7 @@ same change that moves the code.
 - [0020](0020-charitable-argument-repair.md) — Validate the contract strictly, repair the model's dialect charitably
 - [0021](0021-constrained-sampling-ownership.md) — Inference owns strict-schema budgets and grammar dialects
 - [0022](0022-corrective-inference.md) — An adapter is complete when it yields one canonical turn
-- [0023](0023-tiny-local-model.md) — An embedded tiny model handles harness chores
+- [0023](0023-tiny-local-model.md) — A dedicated tiny model role handles harness chores
 
 ### Tool surface
 - [0024](0024-small-permanent-roster.md) — Every permanent tool taxes every turn; the roster stays small and fixed
