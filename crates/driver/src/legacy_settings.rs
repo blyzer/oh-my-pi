@@ -430,14 +430,6 @@ pub fn convert(
 				return Ok(Some(Value::Str(Str::new_static(revision))));
 			}
 		},
-		"providers.tinyModel"
-		| "providers.memoryModel"
-		| "providers.autoThinkingModel"
-		| "providers.unexpectedStopModel"
-			if value.as_str() == Some("online") =>
-		{
-			return Ok(Some(Value::Str(Str::new_static("@tiny"))));
-		},
 		"providers.fireworksTier" if value.as_str() == Some("standard") => {
 			return Ok(Some(Value::Enum(Str::new_static("none"))));
 		},

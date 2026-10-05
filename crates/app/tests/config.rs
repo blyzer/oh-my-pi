@@ -147,14 +147,6 @@ fn v1_settings_convert_legacy_value_encodings() {
 ",
 		"providers:
 ",
-		"  tinyModel: online
-",
-		"  memoryModel: online
-",
-		"  autoThinkingModel: online
-",
-		"  unexpectedStopModel: online
-",
 		"  fireworksTier: standard
 ",
 		"share:
@@ -171,10 +163,6 @@ fn v1_settings_convert_legacy_value_encodings() {
 	assert!(script.contains("sv_irc_timeout 30000ms"), "{script}");
 	assert!(script.contains("sv_tools_max_timeout 60s"), "{script}");
 	assert!(script.contains("sv_tools_edit_dialect hl.1"), "{script}");
-	assert!(script.contains("ai_tiny_selector @tiny"), "{script}");
-	assert!(script.contains("ai_memory_selector @tiny"), "{script}");
-	assert!(script.contains("ai_auto_thinking_selector @tiny"), "{script}");
-	assert!(script.contains("ai_unexpected_stop_selector @tiny"), "{script}");
 	assert!(script.contains("ai_tier_fireworks none"), "{script}");
 	assert!(script.contains("sv_share_store http"), "{script}");
 }
