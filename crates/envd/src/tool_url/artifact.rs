@@ -8,14 +8,9 @@
 //! were. The invoking session's journal is folded once into an id → digest
 //! map ([`V1Ids`]).
 
-use std::{
-	fmt, fs, io,
-	ops::Range,
-	path::{Path, PathBuf},
-	sync::Arc,
-};
+use std::{fmt, fs, io, ops::Range, path::PathBuf, sync::Arc};
 
-use omp_core::{CowBytes, FastHashMap, Hash32, Str, sf};
+use omp_core::{CowBytes, FastHashMap, Str, sf};
 use omp_journal::{
 	Journal,
 	blob::{BlobRef, BlobStore},
@@ -66,27 +61,7 @@ struct V1Ids {
 impl V1Ids {
 	/// The journal among `sessions_dir`'s whose path hashes to `principal`.
 	fn journal(&self, principal: &str) -> Result<Option<PathBuf>, Fault> {
-		let entries = match fs::read_dir(&self.sessions_dir) {
-			Ok(entries) => entries,
-			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-			Err(error) => return Err(io_fault(error)),
-		};
-		let principal_of = |path: &Path| Hash32::sum(path.as_os_str().as_encoded_bytes()).to_hex();
-		for entry in entries {
-			let path = entry.map_err(io_fault)?.path();
-			if path.extension().and_then(|extension| extension.to_str())
-				!= Some(omp_journal::FILE_EXTENSION)
-			{
-				continue;
-			}
-			if principal_of(&path).as_str() == principal
-				|| fs::canonicalize(&path)
-					.is_ok_and(|canonical| principal_of(&canonical).as_str() == principal)
-			{
-				return Ok(Some(path));
-			}
-		}
-		Ok(None)
+		super::local::principal_journal(&self.sessions_dir, principal).map_err(io_fault)
 	}
 
 	/// The v1 id → project blob map of the session `principal` names, or
@@ -317,6 +292,9 @@ fn io_fault(source: io::Error) -> Fault {
 
 #[cfg(test)]
 mod tests {
+	use std::path::Path;
+
+	use omp_core::Hash32;
 	use omp_dom::{Op, PropKey, Txn, Value};
 	use omp_session::{
 		ComponentRegistry, Session,

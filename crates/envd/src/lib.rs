@@ -40,6 +40,8 @@ mod media_devices;
 mod media_tts;
 pub mod memory;
 pub mod model_discovery;
+#[cfg(test)]
+mod plan_writes;
 pub mod plugin_commands;
 pub mod policy;
 mod presence;

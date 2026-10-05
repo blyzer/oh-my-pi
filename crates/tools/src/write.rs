@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	edit::FormatPolicy,
-	path::{HostPaths, normalize_target},
+	path::{HostPaths, local_resource, normalize_target},
 	read::{
 		conflicts::{
 			ConflictRegistry, ConflictReplacement, RegisteredConflict, parse_bulk_directives,
@@ -1240,9 +1240,12 @@ fn read_selector_list_misfire(target: &str) -> Option<usize> {
 	(count >= 2).then_some(count)
 }
 
+/// Refuses URI-shaped targets no writer owns. `local://` (and its `local:/`
+/// shorthand) is a plain write the environment resolves inside the invoking
+/// session's scratch root, so it passes.
 fn reject_uri_like_target(target: &str) -> Option<Fault> {
 	let trimmed = target.trim();
-	if windows_absolute(trimmed) {
+	if windows_absolute(trimmed) || local_resource(trimmed).is_some() {
 		return None;
 	}
 	let colon = trimmed.find(':')?;
@@ -1623,6 +1626,12 @@ mod tests {
 			"skill:// targets are not supported yet"
 		);
 		assert!(reject_uri_like_target("C:\\tmp\\x").is_none());
+		for local in ["local://PLAN.md", "local:/PLAN.md", "LOCAL://plans/a.md"] {
+			assert!(
+				reject_uri_like_target(local).is_none(),
+				"{local} is a plain write the environment resolves"
+			);
+		}
 
 		let fault = reject_uri_like_target("device:/custom")
 			.expect("fault rejected")

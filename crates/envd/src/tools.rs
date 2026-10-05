@@ -4442,8 +4442,9 @@ pub(crate) fn production_registry<
 		.map_err(|error| EnvdError::State(Str::new(error.to_string())))?
 		.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
 	documents.set_resource_mutations(ResourceMutationServices {
-		ssh:   ssh.clone(),
-		vault: vault.clone(),
+		ssh:            ssh.clone(),
+		vault:          vault.clone(),
+		local_sessions: state_dir.join("sessions"),
 	});
 	let read_sources = ReadSourceAdapter::new(
 		documents.clone(),

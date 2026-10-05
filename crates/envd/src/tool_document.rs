@@ -41,6 +41,7 @@ use omp_tools::{
 		RejectionReason, SnapshotFault, StalePolicy,
 	},
 	editor_sync::EditorSync,
+	path::local_resource,
 	read::{
 		Fault as ReadFault, ReadBlobs, SNAPSHOT_MAX_BYTES, StoredArtifact, archive,
 		conflicts::{splice_registered, splice_registered_bulk},
@@ -62,7 +63,10 @@ use super::{
 	blobs::BlobHost,
 	docs::{DocumentError, DocumentHost, DocumentLease, lease_target},
 	editor_base::{CommitAnchor, EditorConflict, start_write_backs},
-	tool_url::ssh,
+	tool_url::{
+		local::{self, LocalWriteError},
+		ssh,
+	},
 };
 use crate::docserver::fs::{self, LocalFs};
 
@@ -2032,7 +2036,31 @@ fn resolve_plain_write(host: &DocumentHost, input: &str) -> Result<ResolvedPlain
 			.to_file_path()
 			.map_err(|()| "document workspace root is not a local file URI".to_owned())?,
 	)?;
+	if let Some(resource) = local_resource(input) {
+		let path = resolve_local_write(host, resource).map_err(|error| error.to_string())?;
+		let canonical_root = std_fs::canonicalize(&root)
+			.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))?;
+		let use_document_host = path != canonical_root && path.starts_with(&canonical_root);
+		let uri = Url::from_file_path(&path)
+			.map_err(|()| "local:// path cannot be represented as a file URI".to_owned())?;
+		return Ok(ResolvedPlainWrite {
+			uri: Str::from(uri.as_str()),
+			path,
+			display_path: sf!("local://{resource}"),
+			use_document_host,
+		});
+	}
 	resolve_plain_write_from_root(&root, input)
+}
+
+/// Resolves a `local://` write target inside the invoking session's scratch
+/// root, the same root `local://` reads resolve against.
+fn resolve_local_write(host: &DocumentHost, resource: &str) -> Result<PathBuf, LocalWriteError> {
+	let sessions = host
+		.local_sessions_dir()
+		.ok_or(LocalWriteError::Unavailable)?;
+	let session = crate::tools::invocation_session_id().ok_or(LocalWriteError::NoSession)?;
+	local::resolve_write_target(&sessions, &session, resource)
 }
 
 fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPlainWrite, String> {
@@ -3381,6 +3409,12 @@ fn resolve_special_write_path(
 	host: &DocumentHost,
 	input: &str,
 ) -> Result<PathBuf, backends::Fault> {
+	if local_resource(input).is_some() {
+		// Only whole-file plain writes resolve inside a session scratch root.
+		return Err(special_fault(
+			"archive member and SQLite row writes are not supported for local:// targets",
+		));
+	}
 	let root_url = Url::parse(host.hello().root_uri.as_str()).map_err(|error| {
 		special_fault(format!("document workspace root is not a valid URI: {error}"))
 	})?;

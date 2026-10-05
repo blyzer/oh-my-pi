@@ -549,11 +549,13 @@ impl fmt::Debug for Inner {
 	}
 }
 
-/// App-owned SSH and vault authorities used by document resource writes.
+/// App-owned SSH and vault authorities used by document resource writes, and
+/// the sessions directory holding every session's `local://` scratch root.
 #[derive(Clone, Debug)]
 pub(super) struct ResourceMutationServices {
-	pub(super) ssh:   SshService,
-	pub(super) vault: VaultService,
+	pub(super) ssh:            SshService,
+	pub(super) vault:          VaultService,
+	pub(super) local_sessions: PathBuf,
 }
 
 /// Client connection to the project document server.
@@ -722,6 +724,17 @@ impl DocumentHost {
 
 	pub(super) fn resource_mutations(&self) -> Option<ResourceMutationServices> {
 		self.inner.resource_mutations.read().clone()
+	}
+
+	/// The sessions directory holding every session's `local://` scratch
+	/// root, once the composition installed its resource writers.
+	pub(super) fn local_sessions_dir(&self) -> Option<PathBuf> {
+		self
+			.inner
+			.resource_mutations
+			.read()
+			.as_ref()
+			.map(|services| services.local_sessions.clone())
 	}
 
 	/// Connects to an already-running document server and completes its hello.
