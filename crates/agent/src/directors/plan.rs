@@ -56,10 +56,12 @@ pub const PLAN_READ_ONLY_TOOLS: &[&str] = &[
 	"yield",
 ];
 
-/// Whether a subagent spawned from `con` must be read-only: `con` runs under
-/// plan mode (the plan Director owns its `sv_tools` engagement) or already
-/// carries the read-only ceiling. Inheritance is a ceiling, like the `task`
-/// recursion limit: a child's own cfg cannot lift it.
+/// Whether a subagent spawned from `con` must be read-only.
+///
+/// It must when `con` runs under plan mode (the plan Director owns its
+/// `sv_tools` engagement) or already carries the read-only ceiling.
+/// Inheritance is a ceiling, like the `task` recursion limit: a child's own
+/// cfg cannot lift it.
 #[must_use]
 pub fn spawns_read_only(con: &omp_con::Ctx) -> bool {
 	crate::SV_TOOLS_READ_ONLY.get(con)
