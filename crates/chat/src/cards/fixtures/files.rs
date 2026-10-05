@@ -1,7 +1,7 @@
 use super::{CardFixture, FixtureState};
 
 const READ_ARGS: &str = r#"{"path":"packages/coding-agent/src/tools/glob.ts:437-448"}"#;
-/// `read@1` `Payload`: the hashline-numbered projection the tool journals
+/// `read@3` `Payload`: the hashline-numbered projection the tool journals
 /// (`[<path>#<tag>]` header, `LINE:TEXT` rows); the card derives the gutter
 /// from it.
 const READ_RESULT: &str = r#"{"parts":[{"kind":"text","text":"[packages/coding-agent/src/tools/glob.ts#E48E]\n437:export const globToolRenderer = {\n438:\tinline: true,\n439:\trenderCall(args: GlobRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {\n440:\t\tconst meta: string[] = [];\n441:\t\tif (args.limit !== undefined) meta.push(`limit:${args.limit}`);\n442:\n443:\t\tconst text = renderStatusLine(\n444:\t\t\t{ icon: \"pending\", title: \"Glob\", description: formatGlobRenderPaths(args.paths) || \"*\", meta },\n445:\t\t\tuiTheme,\n446:\t\t);\n447:\t\treturn new Text(text, 0, 0);\n448:\t},"}]}"#;

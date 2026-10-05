@@ -218,7 +218,7 @@ async fn invoke(
 }
 
 async fn read(client: &EnvClient, id: &str, path: &str) -> Result<String> {
-	let payload = invoke(client, id, "read", "2", json!({"path": path}))
+	let payload = invoke(client, id, "read", "3", json!({"path": path}))
 		.await?
 		.map_err(|fault| error(format!("read failed: {fault}")))?;
 	Ok(payload.to_string())

@@ -830,7 +830,7 @@ fn ok_builtin_payload(verdict: v1::Verdict, operation: &str) -> Value {
 }
 
 async fn read_builtin_text(client: &EnvClient, invocation_id: &str, path: &str) -> String {
-	let verdict = invoke_builtin(client, invocation_id, "read", "2", json!({"path": path})).await;
+	let verdict = invoke_builtin(client, invocation_id, "read", "3", json!({"path": path})).await;
 	let payload = ok_builtin_payload(verdict, "read");
 	payload["parts"][0]["text"]
 		.as_str()
@@ -899,7 +899,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		("edit", "hl.1".to_owned()),
 		("glob", "1".to_owned()),
 		("grep", "1".to_owned()),
-		("read", "2".to_owned()),
+		("read", "3".to_owned()),
 	]);
 	for name in ["eval", "write"] {
 		assert_eq!(
@@ -1057,7 +1057,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 	);
 
 	let read =
-		invoke_builtin(harness.client(), "builtin-read", "read", "2", json!({"path":"note.txt"}))
+		invoke_builtin(harness.client(), "builtin-read", "read", "3", json!({"path":"note.txt"}))
 			.await;
 	assert!(
 		!read.is_error,

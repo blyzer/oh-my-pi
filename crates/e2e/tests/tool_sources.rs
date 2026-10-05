@@ -115,7 +115,7 @@ async fn production_env_reads_special_sources_and_shares_write_edit_snapshots() 
 		("read-image", "images/pixel.png"),
 		("read-profile", "profiles/run.cpuprofile"),
 	] {
-		let payload = invoke_ok(env.client(), id, "read", "2", json!({"path": path})).await?;
+		let payload = invoke_ok(env.client(), id, "read", "3", json!({"path": path})).await?;
 		assert!(payload.is_object(), "read payload for {path}: {payload}");
 	}
 

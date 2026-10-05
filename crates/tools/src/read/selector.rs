@@ -38,12 +38,24 @@ pub enum ParsedSelector {
 		/// Whether numbering and hashline framing are disabled.
 		raw:    bool,
 	},
+	/// Return the one declaration named by a `:@Type.method` query.
+	///
+	/// A local-file read resolves this to [`Self::Lines`] before any projection,
+	/// so formatters never see it.
+	Symbol {
+		/// Dotted declaration query without the `@` sigil. Its syntax is checked
+		/// at resolution, so an unrelated `:@` suffix (a SQLite key, say) still
+		/// parses.
+		query: Str,
+		/// Whether numbering and hashline framing are disabled.
+		raw:   bool,
+	},
 }
 
 impl ParsedSelector {
 	/// Whether this selector requests verbatim output.
 	pub const fn is_raw(&self) -> bool {
-		matches!(self, Self::Raw | Self::Lines { raw: true, .. })
+		matches!(self, Self::Raw | Self::Lines { raw: true, .. } | Self::Symbol { raw: true, .. })
 	}
 
 	/// Whether this selector contains more than one disjoint line range.
@@ -234,6 +246,16 @@ pub fn parse_selector(input: Option<&str>) -> Result<ParsedSelector, SelectorErr
 			if let Some(ranges) = range.map(parse_line_ranges).transpose()?.flatten() {
 				return Ok(ParsedSelector::Lines { ranges, raw: true });
 			}
+			let symbol = if first.eq_ignore_ascii_case("raw") {
+				symbol_query(second)
+			} else if second.eq_ignore_ascii_case("raw") {
+				symbol_query(first)
+			} else {
+				None
+			};
+			if let Some(query) = symbol {
+				return Ok(ParsedSelector::Symbol { query: Str::new(query), raw: true });
+			}
 		}
 		let mut all_read_like = true;
 		for chunk in input.split(':') {
@@ -256,6 +278,9 @@ pub fn parse_selector(input: Option<&str>) -> Result<ParsedSelector, SelectorErr
 	if input.eq_ignore_ascii_case("img") {
 		return Ok(ParsedSelector::Image);
 	}
+	if let Some(query) = symbol_query(input) {
+		return Ok(ParsedSelector::Symbol { query: Str::new(query), raw: false });
+	}
 	Ok(match parse_line_ranges(input)? {
 		Some(ranges) => ParsedSelector::Lines { ranges, raw: false },
 		None => ParsedSelector::None,
@@ -266,7 +291,7 @@ fn selector_chunk_looks_read_like(input: &str) -> Result<bool, SelectorError> {
 	if input.eq_ignore_ascii_case("raw") || input.eq_ignore_ascii_case("conflicts") {
 		return Ok(true);
 	}
-	if input.eq_ignore_ascii_case("img") {
+	if input.eq_ignore_ascii_case("img") || is_symbol_selector(input) {
 		return Ok(true);
 	}
 	if parse_line_ranges(input)?.is_some() {
@@ -292,7 +317,8 @@ fn selector_chunk_looks_read_like(input: &str) -> Result<bool, SelectorError> {
 fn invalid_selector(input: &str) -> SelectorError {
 	SelectorError::from_message(format!(
 		"Invalid selector ':{input}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list \
-		 of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100)."
+		 of ranges, :@Type.method (one declaration), :raw, :img for SVG rendering, or a range or \
+		 :@symbol combined with raw (e.g. :raw:50-100)."
 	))
 }
 
@@ -311,15 +337,17 @@ pub fn split_path_and_selector(raw_path: &str) -> SplitPath<'_> {
 		return SplitPath { path: raw_path, selector: None };
 	};
 	let candidate = &raw_path[colon + 1..];
-	if !is_simple_selector(candidate) {
+	if !is_simple_selector(candidate) && !is_symbol_selector(candidate) {
 		return SplitPath { path: raw_path, selector: None };
 	}
 	let mut path = &raw_path[..colon];
 	let mut selector = candidate;
 	if let Some(inner_colon) = path.rfind(':').filter(|colon| *colon > 0) {
 		let inner = &path[inner_colon + 1..];
-		let compound = (inner.eq_ignore_ascii_case("raw") && is_range_list(candidate))
-			|| (is_range_list(inner) && candidate.eq_ignore_ascii_case("raw"));
+		let compound = (inner.eq_ignore_ascii_case("raw")
+			&& (is_range_list(candidate) || is_symbol_selector(candidate)))
+			|| ((is_range_list(inner) || is_symbol_selector(inner))
+				&& candidate.eq_ignore_ascii_case("raw"));
 		if compound {
 			path = &path[..inner_colon];
 			selector = &raw_path[inner_colon + 1..];
@@ -333,6 +361,26 @@ fn is_simple_selector(input: &str) -> bool {
 		|| input.eq_ignore_ascii_case("conflicts")
 		|| input.eq_ignore_ascii_case("img")
 		|| is_range_list(input)
+}
+
+/// Whether a split selector text (`@Type.method`, `raw:@name`, ...) names a
+/// symbol.
+pub fn selector_has_symbol(selector: &str) -> bool {
+	selector.split(':').any(is_symbol_selector)
+}
+
+/// Whether `input` is a symbol selector chunk: `@` then a dotted query.
+///
+/// Only the sigil is checked; the query's own syntax is validated when it is
+/// resolved against a file, so the empty `@` reaches the model as a symbol
+/// error instead of becoming part of a missing path.
+fn is_symbol_selector(input: &str) -> bool {
+	symbol_query(input).is_some()
+}
+
+/// The dotted query of a symbol selector chunk, without its `@` sigil.
+fn symbol_query(input: &str) -> Option<&str> {
+	input.strip_prefix('@')
 }
 
 fn is_range_list(input: &str) -> bool {
@@ -658,8 +706,11 @@ fn split_uri_selector<'a>(raw_path: &'a str, raw_scheme: &str, scheme: Scheme) -
 	}
 }
 
+/// Internal URIs never carry symbol selectors: a trailing `:@x` stays in the
+/// resource, as it did before symbol selectors existed.
 fn internal_selector_chunk(input: &str) -> bool {
-	is_simple_selector(input) || selector_chunk_looks_read_like(input).unwrap_or(true)
+	!is_symbol_selector(input)
+		&& (is_simple_selector(input) || selector_chunk_looks_read_like(input).unwrap_or(true))
 }
 
 /// A unique suffix resolution candidate.
@@ -761,10 +812,55 @@ mod tests {
 				.unwrap_err()
 				.to_string(),
 			"Invalid selector ':raw:conflicts'. Use :N, :N-M, :N+K, :N- (open-ended), a \
-			 comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with \
-			 raw (e.g. :raw:50-100)."
+			 comma-separated list of ranges, :@Type.method (one declaration), :raw, :img for SVG \
+			 rendering, or a range or :@symbol combined with raw (e.g. :raw:50-100)."
 		);
 		assert_eq!(parse_selector(Some("table:key")).unwrap(), ParsedSelector::None);
+	}
+
+	#[test]
+	fn symbol_selectors_parse_split_and_combine_with_raw() {
+		let symbol = |query: &str, raw| ParsedSelector::Symbol { query: Str::new(query), raw };
+		for (suffix, expected) in [
+			("@name", symbol("name", false)),
+			("@Type.method", symbol("Type.method", false)),
+			("@", symbol("", false)),
+			("@Type.method:raw", symbol("Type.method", true)),
+			("raw:@Type.method", symbol("Type.method", true)),
+			("@raw", symbol("raw", false)),
+		] {
+			assert_eq!(parse_selector(Some(suffix)).unwrap(), expected, ":{suffix}");
+			let input = format!("src/lib.rs:{suffix}");
+			let split = split_path_and_selector(&input);
+			assert_eq!(split, SplitPath { path: "src/lib.rs", selector: Some(suffix) }, ":{suffix}");
+		}
+		assert!(parse_selector(Some("@a:5-9")).is_err(), "a symbol and a range do not combine");
+		assert!(parse_selector(Some("@a:conflicts")).is_err());
+		assert!(parse_selector(Some("@a:@b")).is_err());
+		assert!(ParsedSelector::Symbol { query: Str::new("a"), raw: true }.is_raw());
+		assert!(!ParsedSelector::Symbol { query: Str::new("a"), raw: false }.is_raw());
+	}
+
+	#[test]
+	fn symbol_selectors_do_not_disturb_other_colon_paths() {
+		// Only a sigil directly after the final colon is a symbol selector.
+		for input in
+			["db.sqlite:users:alice", "src/lib.rs", "a@b.rs", "C:\\dir\\@file.rs", "pkg/@scope/x.rs"]
+		{
+			assert_eq!(split_path_and_selector(input).selector, None, "{input}");
+		}
+		// A SQLite key that begins with `@` is peeled but never resolved as a symbol.
+		assert_eq!(split_path_and_selector("db.sqlite:users:@alice"), SplitPath {
+			path:     "db.sqlite:users",
+			selector: Some("@alice"),
+		});
+		// Internal URIs keep a trailing `:@x` in the resource.
+		let uri = parse_uri("skill://plugin/file:@x").unwrap().unwrap();
+		assert_eq!(uri.resource, "plugin/file:@x");
+		assert_eq!(uri.selector, ParsedSelector::None);
+		let nested = parse_uri("ssh://host/src/lib.rs:5-9:@x").unwrap().unwrap();
+		assert_eq!(nested.resource, "host/src/lib.rs:5-9:@x");
+		assert_eq!(nested.selector, ParsedSelector::None);
 	}
 
 	#[test]

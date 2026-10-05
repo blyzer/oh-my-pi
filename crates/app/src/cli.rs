@@ -1328,7 +1328,7 @@ impl PsAction {
 /// Standalone read-tool options.
 #[derive(Clone, Debug, Args)]
 pub struct ReadCliArgs {
-	/// Path, URL, or internal URI passed to `read@2`.
+	/// Path, URL, or internal URI passed to `read@3`.
 	pub path: Str,
 }
 

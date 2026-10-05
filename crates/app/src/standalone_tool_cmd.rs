@@ -10,7 +10,7 @@ use omp_tool::{CallOutcome, DiagEnvelope, ErasedEv, ErasedOutcome, Registry};
 
 use crate::cli::{ReadCliArgs, SearchCliArgs};
 
-/// Executes `read@2` and prints precisely the model-visible parts.
+/// Executes `read@3` and prints precisely the model-visible parts.
 pub(crate) async fn read(args: ReadCliArgs) -> miette::Result<()> {
 	let session = session().await?;
 	let payload: omp_tools::read::Payload = invoke::<_, _, omp_tools::read::Fault>(

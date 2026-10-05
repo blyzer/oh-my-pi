@@ -47,6 +47,7 @@ Selectors are appended after `:` and compose with every kind:
 :conflicts      one line per unresolved merge-conflict block
 :50  :50-  :50-200  :50+150  :5-16,960-973
 :raw:50-100  :50-100:raw
+:@Type.method   exactly one declaration (see the amendment below)
 ```
 
 Internal schemes share one resolver, one selector grammar, and one byte/entry ceiling:
@@ -79,8 +80,31 @@ New resource kinds are added as projections behind `Read`, NEVER as new roster t
 
 - Resolver and selectors: `crates/tools/src/read.rs`, `read/{selector,resolver,archive,sqlite,notebook,pdf,image,profile,conflicts,web}.rs`, document extraction in `read/markit/{docx,pptx,xlsx,epub,...}.rs`.
 - Internal schemes: `crates/envd/src/tool_url/{artifact,attachment,docs,local,mcp,memory,ssh,vault}.rs`, `crates/envd/src/github_url.rs` (`issue://`, `pr://.../diff`), `rule://` in `crates/driver/src/discovery/rules.rs`; `security://` is served by `crates/envd/src/security_scan.rs`.
-- Path recovery and `~` expansion: `crates/tools/src/path.rs` and `read.rs`; `:raw`, ranges, `:conflicts` and `:img` in `read/selector.rs`.
+- Path recovery and `~` expansion: `crates/tools/src/path.rs` and `read.rs`; `:raw`, ranges, `:conflicts`, `:img` and `:@symbol` in `read/selector.rs`; symbol resolution in `read/symbol.rs`.
 - The prior note said 'Partial' without naming a gap and I could not find one; treat that label as resolved unless the owner knows of a missing kind. Not exercised here: each scheme's behavior.
+
+### Amendment: symbol selector (`read@3`)
+
+`path:@Type.method` / `path:@name` reads one declaration of a local source file instead of a line
+range, because a method body is a fraction of the tokens of the range an agent would otherwise guess.
+The `@` sigil directly after the final `:` marks it (so it cannot collide with `:raw`, `:conflicts`,
+`:img`, ranges, SQLite `file.db:table:key`, or hashline `[file#TAG]`), a dot nests, and it combines
+with `:raw` in either order. It is resolved with tree-sitter (`omp_ast::symbol`) against the text
+`read` already holds, for Rust, TypeScript/TSX/JavaScript, Python, Go and Java, and a single match
+is rewritten to the equivalent `:START-END` range: the numbered projection, `[path#TAG]` header,
+seen ranges, spill gate and versions are the range read's own. The leading attributes, decorators
+and outer doc comments of the declaration are part of its range.
+
+Ambiguity is an error, never a guess: no match names the query and the path; more than one match
+(a bare `Type` matches the struct plus its impls; `fmt` matches every trait impl) lists every
+candidate with its kind, implemented trait and `START-END` range and tells the model to retry with
+`path:START-END` or a longer dotted query. An unsupported language or a failed parse is a typed
+error too. An existing literal path still wins over a selector; symbol selectors are for local
+files only (not archives, URLs or internal schemes, where a trailing `:@x` is part of the address).
+
+Revision cutover: argument shape and verdicts are unchanged, but the model-facing description
+changes, so `read@2` became `read@3` (0026) with a lift from `@1` and `@2` and no `@2` alias. The
+registry skips an unregistered intermediate revision and lets the live tool lift directly.
 
 ### Implementation notes (carried over)
 
