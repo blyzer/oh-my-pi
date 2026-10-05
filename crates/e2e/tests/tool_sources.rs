@@ -232,43 +232,27 @@ while True:
 const LIB: &str = "struct Widget;\n\nimpl Widget {\n\t/// Make one.\n\tpub fn new() -> Self \
                    {\n\t\tWidget\n\t}\n}\n";
 
-/// The declaration a `read path:@symbol` returned, taken from its numbered
-/// projection.
-struct ReadDeclaration {
-	/// First numbered line, doc comments included.
-	first:     u32,
-	/// Last numbered line.
-	last:      u32,
-	/// One-based line of the declaration's own name.
-	name_line: u32,
-}
+/// The `Widget.new` declaration range both tools must agree on: the doc comment
+/// starts it on line 4 and its closing brace is line 7.
+const DECLARATION: (u32, u32) = (4, 7);
 
-/// Parses the `N:content` lines below the `[path#TAG]` header of a read payload
-/// and locates the line holding `name_marker`.
-fn read_declaration(payload: Value, name_marker: &str) -> Result<ReadDeclaration> {
+/// Finds the one-based line holding `name_marker` in the `N:content` lines of a
+/// read payload. A range read also shows leading and trailing context lines
+/// around the selected range, so the projection's first and last numbers are
+/// not the selection; only the numbered line carrying the name is compared.
+fn read_name_line(payload: Value, name_marker: &str) -> Result<u32> {
 	let payload = serde_json::from_value::<read::Payload>(payload)?;
 	let [PayloadPart::Text { text }] = payload.parts.as_slice() else {
 		return Err(error("a source read is exactly one text part"));
 	};
-	let mut numbered = Vec::new();
-	let mut name_line = None;
-	for line in text.as_str().lines().skip(1) {
-		let Some((number, content)) = line.split_once(':') else {
-			continue;
-		};
-		let Ok(number) = number.parse::<u32>() else {
-			continue;
-		};
-		if content.contains(name_marker) {
-			name_line = Some(number);
-		}
-		numbered.push(number);
-	}
-	Ok(ReadDeclaration {
-		first:     *numbered.first().context("read returned no lines")?,
-		last:      *numbered.last().context("read returned no lines")?,
-		name_line: name_line.context("the read declaration holds its name line")?,
-	})
+	text
+		.as_str()
+		.lines()
+		.skip(1)
+		.filter_map(|line| line.split_once(':'))
+		.filter(|(_, content)| content.contains(name_marker))
+		.find_map(|(number, _)| number.parse::<u32>().ok())
+		.context("the read declaration holds its name line")
 }
 
 async fn invoke_lsp(env: &EnvHarness, id: &str, args: Value) -> Result<lsp::Payload> {
@@ -334,20 +318,21 @@ async fn lsp_symbol_and_read_symbol_resolve_the_same_declaration() -> Result<()>
 		json!({"path": "src/lib.rs:@Widget.new"}),
 	)
 	.await?;
-	let declared = read_declaration(by_symbol.clone(), "pub fn new")?;
-	assert_eq!((declared.first, declared.last, declared.name_line), (4, 7, 5));
+	let name_line = read_name_line(by_symbol.clone(), "pub fn new")?;
+	assert_eq!(name_line, 5, "the read declaration's name line");
+	let (first, last) = DECLARATION;
 	let by_range = invoke_ok(
 		env.client(),
 		"read-range",
 		"read",
 		&read_rev(),
-		json!({"path": format!("src/lib.rs:{}-{}", declared.first, declared.last)}),
+		json!({"path": format!("src/lib.rs:{first}-{last}")}),
 	)
 	.await?;
 	assert_eq!(by_symbol, by_range, "a symbol read is the range read of its declaration");
 
 	// A symbol-only `lsp` call (no `line`) lands on that declaration's name.
-	let name_position = json!({"line": declared.name_line - 1, "character": 8});
+	let name_position = json!({"line": name_line - 1, "character": 8});
 	for (id, action) in [("lsp-references", "references"), ("lsp-definition", "definition")] {
 		let payload = invoke_lsp(
 			&env,
@@ -365,15 +350,16 @@ async fn lsp_symbol_and_read_symbol_resolve_the_same_declaration() -> Result<()>
 		json!({"action": "hover", "file": "src/lib.rs", "symbol": "Widget.new"}),
 	)
 	.await?;
-	assert_eq!(hover.output.as_str(), format!("position {}:8", declared.name_line - 1));
+	assert_eq!(hover.output.as_str(), format!("position {}:8", name_line - 1));
 
-	// The symbols projection advertises the range `read` resolves to.
+	// The symbols projection advertises the declaration range that `read` was
+	// shown to select (its range read of that span is the same payload).
 	let symbols =
 		invoke_lsp(&env, "lsp-symbols", json!({"action": "symbols", "file": "src/lib.rs"})).await?;
 	assert!(
 		symbols
 			.output
-			.contains(&format!("method new in Widget @ lines {}-{}", declared.first, declared.last)),
+			.contains(&format!("method new in Widget @ lines {first}-{last}")),
 		"{}",
 		symbols.output
 	);
