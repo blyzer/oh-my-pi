@@ -550,17 +550,30 @@ clone).
   adapt to the tree as is.
 
 ### Code Navigation
-Pick the cheapest source of evidence before reading source.
-- Text (exact strings, literals, config keys, error messages, comments, regex,
-  discovering an unknown symbol name): `rg`/Grep, bounded — scope to a path or
-  glob, cap matches.
-- Semantics (definition, references, implementations, type info,
-  callers/callees): a language-server-backed tool, in omp `lsp` with `file` +
-  `symbol` (no `line` needed). Never infer these from text search when it can
-  answer; with no such tool, text hits are candidates, not proof.
-- Reading: only after the above narrowed file and range. Bounded
-  `read path:START-END` or `read path:@Type.method`, never a whole file when a
-  range suffices.
+Pick the cheapest evidence before reading source.
+- Text (exact strings, literals, config keys, errors, comments, regex, or a
+  symbol not yet known): bounded `rg`/Grep — scope to a path or glob, cap
+  matches.
+- Known declaration symbol: prefer `lsp` over text search for semantic
+  relationships. It needs an active language server and never falls back to
+  tree-sitter. `file` + `symbol` (dotted, `Type.method`; no `line`) works for
+  `definition`, `type_definition`, `implementation`, `references`, `hover`,
+  `incoming_calls`, `outgoing_calls`, and resolves declarations only in Rust,
+  TS/TSX/JS, Python, Go, Java — not fields, locals or macro-generated items.
+  Ambiguous symbols are never guessed: use the returned candidates, retry with
+  a longer dotted query or `line`. `rename` and `code_actions` still require
+  `line`. Callers/callees are flat location lists, not a multi-level call
+  hierarchy.
+- Reading: once navigation names a declaration, `read path:@Type.method`;
+  otherwise `read path:START-END`. Avoid whole-file reads: a selectorless read
+  of a large parseable source file returns a structural summary, not the
+  source, so request the symbol or range needed.
+- Flow: known symbol -> `lsp` -> `read @symbol` (more bounded reads only if
+  needed). Unknown name -> bounded `rg` -> identify the declaration -> `lsp`
+  when supported -> `read @symbol` or range.
+- No active or supported language server (unsupported language, missing
+  server, unresolvable symbol): bounded `rg` + bounded read; textual hits are
+  candidates, not semantic proof.
 
 ## Key Files
 `Cargo.toml`: members, shared deps, lints, release profile.
