@@ -1,0 +1,49 @@
+{
+  "name": "omp2-protected",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/omp2"],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [
+    {
+      "actor_id": 5,
+      "actor_type": "RepositoryRole",
+      "bypass_mode": "always"
+    }
+  ],
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true,
+        "allowed_merge_methods": ["merge"]
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "Rust format" },
+          { "context": "License policy and release notices" },
+          { "context": "Runtime symbol and dependency contracts" },
+          { "context": "Lint workspace (Linux)" },
+          { "context": "Rust workspace and acceptance proofs" },
+          { "context": "Terminal proof P7 (Linux PTY)" },
+          { "context": "Acceptance proofs P9, P10 and tool sources (Linux)" }
+        ]
+      }
+    }
+  ]
+}
