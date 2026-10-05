@@ -86,6 +86,27 @@ fn engagement_owner_names_the_layer_supplying_the_effective_value() {
 	assert_eq!(ctx.engagement_owner("test_derived"), None);
 }
 
+#[test]
+fn value_below_engagements_ignores_every_director_bind() {
+	let ctx = Ctx::new();
+	assert_eq!(ctx.value_below_engagements("test_derived").unwrap(), Value::Int(1), "the default");
+	ctx.derive_layers(&chain(&[
+		("plan#3", &[("test_derived", 7)]),
+		("goal#5", &[("test_derived", 9)]),
+	]));
+	assert_eq!(ctx.get("test_derived"), Some(Value::Int(9)));
+	assert_eq!(
+		ctx.value_below_engagements("test_derived").unwrap(),
+		Value::Int(1),
+		"the binds shadow the effective value, not the one beneath them"
+	);
+	ctx.set("test_derived", Value::Int(3), Origin::Session)
+		.unwrap();
+	assert_eq!(ctx.get("test_derived"), Some(Value::Int(9)), "the bind still shadows the write");
+	assert_eq!(ctx.value_below_engagements("test_derived").unwrap(), Value::Int(3));
+	assert!(ctx.value_below_engagements("no_such_var").is_err());
+}
+
 /// Layer bindings must name registered variables of the bound type, or
 /// `derive_layers` drops the binding with an error reply.
 #[test]

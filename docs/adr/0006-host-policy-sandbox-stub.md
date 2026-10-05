@@ -110,8 +110,9 @@ The owner closed the open gap with a middle path:
   so a nested prompt could be answered without interrupting the cell for every call.
 
 The roster restrictions are the agent's, not the environment's, so they travel with the call: the
-agent snapshots one `omp_tool::ToolRestrictions` per model request (from the same inputs the
-advertised roster is derived from), checks every call against it before any preview or execution,
+agent snapshots one `omp_tool::ToolRestrictions` per model request (the live `sv_tools`
+allowlist and Director binds, the hook filter, the hidden mounts the session never mounted; the
+advertised roster itself is latched per session, ADR 0024), checks every call against it before any preview or execution,
 and forwards it on `InvokeTool.restrictions` (`omp.env.v1.ToolRestrictions`). The environment hands
 it to the eval cell through `IncomingParams::restrictions` and `RuntimeSnapshot::restrictions`
 (host-only, never serialized to the child), and the parent side of the bridge applies it to each
@@ -128,7 +129,9 @@ The owner decided four follow-ups to the nested-call amendment:
 - **Subagents of a plan-mode parent are read-only.** A child spawned while the parent runs under
   plan mode, or by a read-only parent, carries a read-only ceiling (`sv_tools_read_only`) that its
   own cfg cannot lift: inheritance is a ceiling, like the `task` recursion limit. The ceiling is
-  part of the same per-request `ToolRestrictions` snapshot the dispatch check uses.
+  part of the same per-request `ToolRestrictions` snapshot the dispatch check uses. The ceiling is
+  fixed for the child's life, so the child's latched wire roster (ADR 0024) is also capped at the
+  read-only tools from its first request; the parent's wire roster is never narrowed by Plan.
 - **The environment confines writes as well.** An invocation whose restrictions carry a plan file
   or a read-only ceiling runs inside a write scope, and the environment's writers refuse every
   change the scope does not admit, with a typed error. The dispatch check stays: it gives the

@@ -262,11 +262,13 @@ omp_con::var! {
 		default: Str::new_static("on-request"),
 		flags: archive | session | replicated,
 	};
-	/// Tool allowlist: stable tool names the model may see and call this
-	/// request (`--tools`, Director binds such as Vibe's `[read todo]`). The
-	/// kernel snapshots it per request and refuses any other call at
-	/// dispatch (`tool.roster.restricted`). Empty allows every registered
-	/// tool.
+	/// Tool allowlist: stable tool names the model may call (`--tools`, Director
+	/// binds such as Vibe's `[read todo]`). The kernel snapshots it per request
+	/// and refuses any other call at dispatch (`tool.roster.restricted`). The
+	/// value the session is composed with also narrows the advertised roster;
+	/// that roster is latched at the first request (ADR 0024), so later writes
+	/// and Director binds change what may run, never what is advertised. Empty
+	/// allows every registered tool.
 	pub static SV_TOOLS = sv_tools: Vec<Str> {
 		default: Vec::new(),
 		flags: archive | session | replicated,
@@ -387,10 +389,22 @@ omp_con::var! {
 	};
 }
 
-/// Tool names the effective `sv_tools` allowlist advertises; `None` means
-/// every registered tool.
+/// Tool names the effective `sv_tools` allowlist lets a call use (a Director's
+/// bind included); `None` means every registered tool.
 #[must_use]
 pub fn tool_allowlist(con: Option<&omp_con::Ctx>) -> Option<Vec<Str>> {
 	let roster = SV_TOOLS.get(con?);
+	(!roster.is_empty()).then_some(roster)
+}
+
+/// The `sv_tools` allowlist the session was composed with (`--tools`, agent
+/// cfg), which narrows the latched wire roster: the value beneath every
+/// Director bind, so a session composed or resumed while Plan or Vibe is
+/// engaged still advertises its full roster. `None` means every registered
+/// tool.
+#[must_use]
+pub fn composed_tool_allowlist(con: Option<&omp_con::Ctx>) -> Option<Vec<Str>> {
+	let value = con?.value_below_engagements(SV_TOOLS.name()).ok()?;
+	let roster = <Vec<Str> as omp_con::ConType>::from_value(&value)?;
 	(!roster.is_empty()).then_some(roster)
 }

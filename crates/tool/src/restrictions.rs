@@ -1,15 +1,16 @@
 //! Per-request tool-roster restrictions enforced where a call starts.
 //!
-//! The advertised roster narrows the tools a model *sees*; these restrictions
-//! decide which calls may *run*. The agent snapshots one [`ToolRestrictions`]
-//! per model request (the same inputs the advertised list is derived from:
-//! the `sv_tools` allowlist and the Director that bound it, the `turn_start`
-//! hook filter, the active plan file, and the read-only ceiling a subagent of
-//! a plan-mode session inherits) and checks every call against it before any
-//! preview or execution. A tool that hosts nested calls (the eval bridge)
-//! receives the same snapshot and applies it to every nested call, and the
-//! environment confines the writes of every invocation that carries a plan
-//! file or a read-only ceiling to that scope.
+//! The advertised (wire) roster is latched for the session so the cached
+//! prompt prefix never changes (ADR 0024); these restrictions decide which
+//! calls may *run*. The agent snapshots one [`ToolRestrictions`] per model
+//! request (the `sv_tools` allowlist and the Director that bound it, the
+//! `turn_start` hook filter, the hidden mounts the session never mounted, the
+//! active plan file, and the read-only ceiling a subagent of a plan-mode
+//! session inherits) and checks every call against it before any preview or
+//! execution. A tool that hosts nested calls (the eval bridge) receives the
+//! same snapshot and applies it to every nested call, and the environment
+//! confines the writes of every invocation that carries a plan file or a
+//! read-only ceiling to that scope.
 //!
 //! Model-visible refusal text comes from one place: the [`RosterDenial`]
 //! `Display` derive.
@@ -23,8 +24,12 @@ use smallvec::SmallVec;
 
 use crate::{Abort, PolicyDenied};
 
-/// Stable denial code journaled for every roster refusal.
+/// Stable denial code journaled for a call a restriction refused.
 pub const ROSTER_RESTRICTED: &str = "tool.roster.restricted";
+
+/// Stable denial code journaled for a call to a tool the wire declared but
+/// the registry no longer resolves.
+pub const ROSTER_UNAVAILABLE: &str = "tool.roster.unavailable";
 
 /// Tools whose target is confined to the plan file while plan mode is active.
 const PLAN_SCOPED_TOOLS: &[&str] = &["write"];
@@ -86,6 +91,12 @@ pub enum RosterRule {
 	/// The plan Director's plan-file write scope.
 	#[strum(to_string = "director:plan/plan_file")]
 	PlanFile,
+	/// A hidden tool the session never mounted.
+	#[strum(to_string = "mount")]
+	Unmounted,
+	/// A declared tool the registry no longer resolves.
+	#[strum(to_string = "wire/unavailable")]
+	Unavailable,
 	/// The read-only ceiling of a subagent spawned under plan mode.
 	#[strum(to_string = "parent:plan/read_only")]
 	ReadOnly,
@@ -136,6 +147,15 @@ pub enum RosterDenial {
 		/// The only target the tool may change.
 		plan_file: Str,
 	},
+	/// The tool is a hidden mount (`goal`, `think`) this session never mounted.
+	#[strum(to_string = "`{tool}` is not mounted in this session. No action was taken. Available \
+	                     now: {available}.")]
+	Unmounted {
+		/// Refused tool.
+		tool:      Str,
+		/// Tools the model may call under this roster.
+		available: ToolNameList,
+	},
 	/// The caller is a subagent of a plan-mode session, which may only read.
 	#[strum(to_string = "`{tool}` is not available to a subagent of a plan-mode session, which \
 	                     may only read. No action was taken. Available now: {available}.")]
@@ -144,6 +164,13 @@ pub enum RosterDenial {
 		tool:      Str,
 		/// Tools the model may call under this roster.
 		available: ToolNameList,
+	},
+	/// The wire declared the tool but the registry no longer resolves it (a
+	/// host tool roster was replaced after the request left).
+	#[strum(to_string = "`{tool}` is no longer available in this session. No action was taken.")]
+	Unavailable {
+		/// Refused tool.
+		tool: Str,
 	},
 	/// Plan mode (or the read-only ceiling it hands to subagents) refuses an
 	/// operation that launches or feeds a process.
@@ -164,6 +191,8 @@ impl RosterDenial {
 			| Self::Allowlist { tool, .. }
 			| Self::Hook { tool, .. }
 			| Self::PlanFile { tool, .. }
+			| Self::Unmounted { tool, .. }
+			| Self::Unavailable { tool }
 			| Self::ReadOnly { tool, .. }
 			| Self::Processes { tool } => tool,
 		}
@@ -177,6 +206,8 @@ impl RosterDenial {
 			Self::Allowlist { .. } => RosterRule::Allowlist,
 			Self::Hook { .. } => RosterRule::Hook,
 			Self::PlanFile { .. } => RosterRule::PlanFile,
+			Self::Unmounted { .. } => RosterRule::Unmounted,
+			Self::Unavailable { .. } => RosterRule::Unavailable,
 			Self::ReadOnly { .. } => RosterRule::ReadOnly,
 			Self::Processes { .. } => RosterRule::Processes,
 		}
@@ -195,9 +226,14 @@ impl RosterDenial {
 	pub fn verdict(&self, decision_id: Str) -> (Abort, PolicyDenied) {
 		let reason = self.reason();
 		let rule = sf!("{}", self.rule());
+		let code = if matches!(self, Self::Unavailable { .. }) {
+			ROSTER_UNAVAILABLE
+		} else {
+			ROSTER_RESTRICTED
+		};
 		(Abort::Skipped { reason: reason.clone() }, PolicyDenied {
 			reason,
-			code: Some(Str::new_static(ROSTER_RESTRICTED)),
+			code: Some(Str::new_static(code)),
 			decision_id,
 			rules: Arc::from([rule]),
 		})
@@ -216,8 +252,19 @@ pub struct ToolRestrictions {
 	allowlist: Option<Allowlist>,
 	hook:      Option<Arc<[Str]>>,
 	ceiling:   Option<Arc<[Str]>>,
+	/// The wire roster the model was shown; refusals quote what remains
+	/// callable of it.
 	available: ToolNameList,
+	unmounted: Arc<[Str]>,
 	plan_file: Option<Str>,
+}
+
+/// Why a name alone is refused, before any refusal text is built.
+enum Blocked<'a> {
+	ReadOnly,
+	Unmounted,
+	Allowlist(&'a Allowlist),
+	Hook,
 }
 
 impl ToolRestrictions {
@@ -237,6 +284,15 @@ impl ToolRestrictions {
 		self
 	}
 
+	/// Refuses the hidden mount tools in `names`: the session never mounted
+	/// them, so a call to one is not available however the model learned the
+	/// name.
+	#[must_use]
+	pub fn with_unmounted(mut self, names: impl Into<Arc<[Str]>>) -> Self {
+		self.unmounted = names.into();
+		self
+	}
+
 	/// Caps calls at `names`, the read-only tools a subagent spawned under
 	/// plan mode may call whatever its own allowlist says. The environment
 	/// refuses every write such a caller's invocations attempt.
@@ -251,18 +307,26 @@ impl ToolRestrictions {
 		self.hook = Some(names.into());
 	}
 
-	/// Records the names advertised to the model, quoted in refusals.
+	/// Records the wire roster the model was shown (shared, never copied per
+	/// request). Refusals quote the names of it that remain callable.
 	pub fn set_available(&mut self, names: impl Into<Arc<[Str]>>) {
 		self.available = ToolNameList(names.into());
 	}
 
 	/// Whether no restriction applies.
 	#[must_use]
-	pub const fn is_unrestricted(&self) -> bool {
+	pub fn is_unrestricted(&self) -> bool {
 		self.allowlist.is_none()
 			&& self.hook.is_none()
 			&& self.ceiling.is_none()
 			&& self.plan_file.is_none()
+			&& self.unmounted.is_empty()
+	}
+
+	/// The hidden mount tools this session never mounted.
+	#[must_use]
+	pub fn unmounted(&self) -> &[Str] {
+		&self.unmounted
 	}
 
 	/// The read-only ceiling of a subagent spawned under plan mode, when the
@@ -286,46 +350,68 @@ impl ToolRestrictions {
 		self.hook.as_ref()
 	}
 
-	/// The names advertised to the model for the request.
+	/// The wire roster the model was shown for the request.
 	#[must_use]
 	pub fn available(&self) -> &[Str] {
 		self.available.names()
 	}
 
-	/// Checks a call by name alone. Allocation-free when the call is allowed.
-	pub fn check_name(&self, tool: &str) -> Result<(), RosterDenial> {
+	/// What a name alone is refused for, if anything.
+	fn blocked(&self, tool: &str) -> Option<Blocked<'_>> {
 		if let Some(ceiling) = &self.ceiling
 			&& !contains(ceiling, tool)
 		{
-			return Err(RosterDenial::ReadOnly {
-				tool:      Str::new(tool),
-				available: self.available.clone(),
-			});
+			return Some(Blocked::ReadOnly);
+		}
+		if contains(&self.unmounted, tool) {
+			return Some(Blocked::Unmounted);
 		}
 		if let Some(allowlist) = &self.allowlist
 			&& !contains(&allowlist.names, tool)
 		{
-			return Err(match &allowlist.director {
-				Some(director) => RosterDenial::Director {
-					tool:      Str::new(tool),
-					director:  director.clone(),
-					available: self.available.clone(),
-				},
-				None => RosterDenial::Allowlist {
-					tool:      Str::new(tool),
-					available: self.available.clone(),
-				},
-			});
+			return Some(Blocked::Allowlist(allowlist));
 		}
 		if let Some(hook) = &self.hook
 			&& !contains(hook, tool)
 		{
-			return Err(RosterDenial::Hook {
-				tool:      Str::new(tool),
-				available: self.available.clone(),
-			});
+			return Some(Blocked::Hook);
 		}
-		Ok(())
+		None
+	}
+
+	/// The names of the wire roster a call may use now, in wire order.
+	#[must_use]
+	pub fn callable(&self) -> ToolNameList {
+		ToolNameList(
+			self
+				.available
+				.names()
+				.iter()
+				.filter(|name| self.blocked(name.as_str()).is_none())
+				.cloned()
+				.collect(),
+		)
+	}
+
+	/// Checks a call by name alone. Allocation-free when the call is allowed;
+	/// a refusal lists what is callable now.
+	pub fn check_name(&self, tool: &str) -> Result<(), RosterDenial> {
+		let Some(blocked) = self.blocked(tool) else {
+			return Ok(());
+		};
+		let tool = Str::new(tool);
+		let available = self.callable();
+		Err(match blocked {
+			Blocked::ReadOnly => RosterDenial::ReadOnly { tool, available },
+			Blocked::Unmounted => RosterDenial::Unmounted { tool, available },
+			Blocked::Allowlist(Allowlist { director: Some(director), .. }) => {
+				RosterDenial::Director { tool, director: director.clone(), available }
+			},
+			Blocked::Allowlist(Allowlist { director: None, .. }) => {
+				RosterDenial::Allowlist { tool, available }
+			},
+			Blocked::Hook => RosterDenial::Hook { tool, available },
+		})
 	}
 
 	/// Whether [`Self::check_arguments`] can refuse `tool`: a plan-scoped
@@ -543,6 +629,7 @@ impl From<&ToolRestrictions> for wire::ToolRestrictions {
 				.map(|ceiling| wire::ToolNames { names: names(ceiling) }),
 			available:          names(restrictions.available.names()),
 			plan_file:          restrictions.plan_file.as_ref().map(ToString::to_string),
+			unmounted:          names(&restrictions.unmounted),
 		}
 	}
 }
@@ -559,6 +646,7 @@ impl From<wire::ToolRestrictions> for ToolRestrictions {
 			hook:      wire.hook.map(|hook| names(hook.names)),
 			ceiling:   wire.read_only_ceiling.map(|ceiling| names(ceiling.names)),
 			available: ToolNameList(names(wire.available)),
+			unmounted: names(wire.unmounted),
 			plan_file: wire.plan_file.map(Str::from),
 		}
 	}
@@ -656,6 +744,62 @@ mod tests {
 			.expect_err("hook disabled grep");
 		assert_eq!(hook.rule().to_string(), "hook:turn_start/enabled_tools");
 		assert!(restrictions.check_name("read").is_ok());
+	}
+
+	#[test]
+	fn refusals_quote_only_the_part_of_the_wire_roster_still_callable() {
+		let mut restrictions =
+			ToolRestrictions::default().with_allowlist(names(&["read", "grep"]), None);
+		restrictions.set_available(names(&["read", "grep", "edit", "write"]));
+		assert_eq!(
+			restrictions
+				.check_name("edit")
+				.expect_err("outside the allowlist")
+				.to_string(),
+			"`edit` is not in the `sv_tools` allowlist. No action was taken. Available now: read, \
+			 grep."
+		);
+		restrictions.set_hook(names(&["read"]));
+		assert_eq!(restrictions.callable().to_string(), "read");
+		assert!(
+			ToolRestrictions::default().callable().names().is_empty(),
+			"an empty roster renders as `none`"
+		);
+	}
+
+	#[test]
+	fn an_unmounted_hidden_tool_is_refused_whatever_else_allows_it() {
+		let mut restrictions = ToolRestrictions::default().with_unmounted(names(&["goal", "think"]));
+		restrictions.set_available(names(&["read"]));
+		assert!(!restrictions.is_unrestricted());
+		assert!(restrictions.check_name("read").is_ok());
+		let denial = restrictions
+			.check_name("goal")
+			.expect_err("goal was never mounted");
+		assert_eq!(
+			denial.to_string(),
+			"`goal` is not mounted in this session. No action was taken. Available now: read."
+		);
+		let (_, policy) = denial.verdict(Str::new_static("call-1"));
+		assert_eq!(policy.code.as_deref(), Some(ROSTER_RESTRICTED));
+		assert_eq!(policy.rules.as_ref(), [Str::new_static("mount")]);
+		let allowlisted = ToolRestrictions::default()
+			.with_allowlist(names(&["goal"]), None)
+			.with_unmounted(names(&["goal"]));
+		assert!(allowlisted.check_name("goal").is_err(), "an allowlist never mounts a hidden tool");
+	}
+
+	#[test]
+	fn an_unresolvable_declared_tool_has_its_own_typed_code() {
+		let denial = RosterDenial::Unavailable { tool: Str::new_static("fetch_ticket") };
+		assert_eq!(
+			denial.to_string(),
+			"`fetch_ticket` is no longer available in this session. No action was taken."
+		);
+		let (abort, policy) = denial.verdict(Str::new_static("call-9"));
+		assert_eq!(abort.render().as_str(), format!("skipped: {denial}"));
+		assert_eq!(policy.code.as_deref(), Some(ROSTER_UNAVAILABLE));
+		assert_eq!(policy.rules.as_ref(), [Str::new_static("wire/unavailable")]);
 	}
 
 	#[test]
@@ -804,7 +948,7 @@ mod tests {
 
 	#[test]
 	fn wire_round_trip_preserves_every_restriction() {
-		let mut restrictions = plan();
+		let mut restrictions = plan().with_unmounted(names(&["goal"]));
 		restrictions.set_hook(names(&["read"]));
 		let wire = wire::ToolRestrictions::from(&restrictions);
 		assert_eq!(ToolRestrictions::from(wire), restrictions);

@@ -168,6 +168,17 @@ impl Layers {
 			.or_else(|| self.archive.get(name))
 	}
 
+	/// [`Self::effective`] with every engagement layer popped: what the user,
+	/// class, inherited, and archive layers say.
+	pub(crate) fn below_engagements(&self, name: &str) -> Option<&Value> {
+		self
+			.session
+			.get(name)
+			.or_else(|| self.class.get(name))
+			.or_else(|| self.inherited.get(name))
+			.or_else(|| self.archive.get(name))
+	}
+
 	/// The value persistence records for `name`: [`Self::effective`] without
 	/// the inherited and class layers, which a scope receives from its parent
 	/// and agent class rather than owning.

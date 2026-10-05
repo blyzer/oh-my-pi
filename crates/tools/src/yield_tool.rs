@@ -238,7 +238,7 @@ pub fn tool_for_workpool(items: Vec<WorkpoolItem>) -> Result<Yield, SchemaContra
 			return Err(SchemaContractError::DuplicateWorkpoolItem);
 		}
 	}
-	let spec = workpool_yield_spec(&items)?;
+	let spec = workpool_yield_spec()?;
 	Ok(Yield {
 		spec,
 		schema: None,
@@ -275,15 +275,17 @@ fn yield_spec(data_schema: Value, mode: SchemaMode) -> Result<ToolSpec, SchemaCo
 	})
 }
 
-fn workpool_yield_spec(items: &[WorkpoolItem]) -> Result<ToolSpec, SchemaContractError> {
-	let keys = items.iter().map(|item| item.index).collect::<Vec<_>>();
+fn workpool_yield_spec() -> Result<ToolSpec, SchemaContractError> {
+	// The schema must not depend on the batch (the tail batch is usually
+	// smaller): a different tool declaration is a different cached prefix. The
+	// key stays closed at runtime (`UnknownWorkpoolItem`).
 	let schema = serde_json::json!({
 		"type": "object",
 		"description": "Submit exactly one active workpool item outcome.",
 		"properties": {
 			"key": {
 				"type": "integer",
-				"enum": keys,
+				"minimum": 1,
 				"description": "One-based workpool item number."
 			},
 			"data": {
@@ -665,7 +667,11 @@ mod tests {
 			.expect("workpool yield");
 		assert!(matches!(tool.spec().constraint, Constraint::None));
 		let schema: Value = serde_json::from_slice(&tool.spec().schema).expect("schema");
-		assert_eq!(schema["properties"]["key"]["enum"], serde_json::json!([1, 2]));
+		assert_eq!(schema["properties"]["key"]["minimum"], 1);
+		assert!(
+			schema["properties"]["key"].get("enum").is_none(),
+			"the key is closed at runtime, never by a batch-sized schema"
+		);
 		assert_eq!(schema["additionalProperties"], false);
 		assert_eq!(
 			workpool_output_schema(&[
@@ -716,6 +722,23 @@ mod tests {
 				..
 			}) if id == "pool#beta"
 		));
+	}
+
+	/// The wire contract of a workpool worker must not depend on how many items
+	/// a batch holds (the tail batch is usually smaller): a different schema is
+	/// a different cached tool prefix.
+	#[test]
+	fn workpool_wire_contract_is_identical_for_every_batch_size() {
+		let contract = |len: u32| {
+			let items = (1..=len)
+				.map(|index| WorkpoolItem { id: sf!("pool#{index}"), index })
+				.collect();
+			let tool = tool_for_workpool(items).expect("workpool yield");
+			let spec = tool.spec();
+			(spec.description.clone(), spec.schema.clone())
+		};
+		assert_eq!(contract(1), contract(2));
+		assert_eq!(contract(2), contract(3));
 	}
 
 	#[tokio::test]

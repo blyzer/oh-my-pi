@@ -1415,9 +1415,12 @@ struct HostToolRoster {
 
 #[derive(Default)]
 struct HostToolState {
-	rosters: BTreeMap<Str, HostToolRoster>,
-	live:    BTreeMap<Str, Str>,
-	history: BTreeMap<ToolIdentity, Arc<dyn ErasedTool>>,
+	rosters:    BTreeMap<Str, HostToolRoster>,
+	live:       BTreeMap<Str, Str>,
+	history:    BTreeMap<ToolIdentity, Arc<dyn ErasedTool>>,
+	/// Counts successful roster replacements, so a holder of a lowered
+	/// roster can tell that the host tools it lowered were replaced.
+	generation: u64,
 }
 
 struct Worker {
@@ -1766,7 +1769,7 @@ impl Registry {
 		let host_tools = {
 			let state = self.host_tools.read();
 			HostToolState {
-				rosters: state
+				rosters:    state
 					.rosters
 					.iter()
 					.map(|(claimant, roster)| {
@@ -1782,18 +1785,19 @@ impl Registry {
 						})
 					})
 					.collect(),
-				live:    state
+				live:       state
 					.live
 					.iter()
 					.filter(|(name, _)| keep(name))
 					.map(|(name, claimant)| (name.clone(), claimant.clone()))
 					.collect(),
-				history: state
+				history:    state
 					.history
 					.iter()
 					.filter(|(identity, _)| keep(&identity.name))
 					.map(|(identity, tool)| (identity.clone(), Arc::clone(tool)))
 					.collect(),
+				generation: state.generation,
 			}
 		};
 		Self {
@@ -1955,7 +1959,16 @@ impl Registry {
 			executor,
 			entries,
 		});
+		state.generation = state.generation.saturating_add(1);
 		Ok(())
+	}
+
+	/// How many host tool rosters this registry has accepted. A lowered roster
+	/// is stale once this differs from the value it was lowered under: the
+	/// host tools it declared were replaced.
+	#[must_use]
+	pub fn host_roster_generation(&self) -> u64 {
+		self.host_tools.read().generation
 	}
 
 	/// Returns one attached host's installed roster revision.

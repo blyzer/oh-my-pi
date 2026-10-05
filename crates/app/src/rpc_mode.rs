@@ -1843,6 +1843,12 @@ where
 									))).into_diagnostic()?;
 								}
 							},
+							"set_host_tools" if turn_running => {
+								// A host roster replacement reshapes the tool array every
+								// request of the running turn carries (and the provider's
+								// cached prefix); it is accepted only between turns.
+								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(busy_response(id, command.as_str())).into_diagnostic()?)).into_diagnostic()?;
+							},
 							"set_host_tools" => {
 								let definitions = request.params
 									.get("tools")

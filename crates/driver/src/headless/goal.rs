@@ -109,30 +109,10 @@ impl SessionTool for GoalSessionTool {
 					if existing.is_some() {
 						return fault(goal::Fault::InvalidTransition);
 					}
-					stack.engage(
-						cx.session,
-						Box::new(omp_agent::directors::goal::Goal::new(
-							params.objective.expect("validated objective"),
-							params.token_budget,
-						)),
-					)?;
-					// Goal accounting begins at creation, not at the request
-					// that led the model to create it.
-					if let (Some((handle, _)), Some(turn)) =
-						(find_director(cx.session.dom(), FAMILY), cx.session.dom().parent(cx.call))
-					{
-						let baseline = omp_agent::turn_tokens(cx.session.dom(), turn);
-						patch_state(cx.session, handle, [
-							(
-								"state/accounted_turn",
-								Value::Int(i64::try_from(turn.get()).unwrap_or(i64::MAX)),
-							),
-							(
-								"state/accounted_turn_tokens",
-								Value::Int(i64::try_from(baseline).unwrap_or(i64::MAX)),
-							),
-						])?;
-					}
+					// The tool is mounted only once the user has engaged a goal,
+					// and the model never opens one itself: a goal begins with
+					// the user's `/goal`.
+					return fault(goal::Fault::UserOnly);
 				},
 				Operation::Get => {},
 				Operation::Complete => {

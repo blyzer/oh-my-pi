@@ -441,7 +441,13 @@ class AgentStartEvent:
 
 @dataclass(frozen=True, slots=True)
 class TurnStartEvent:
-    """Describe a turn after its prompt and toolset are assembled."""
+    """Describe a turn after its prompt and toolset are assembled.
+
+    ``toolset_hash`` digests the session's latched wire roster, and
+    ``toolset_changed`` is true only when that roster differs from the previous
+    request's. ``enabled_tools`` lists the tools a call may use now; a hook that
+    narrows it refuses calls and never changes the advertised roster.
+    """
 
     turn_id: str
     turn_index: int

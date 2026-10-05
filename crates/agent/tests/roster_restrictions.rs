@@ -152,10 +152,24 @@ async fn plan_mode_refuses_hidden_tools_and_off_plan_writes_at_dispatch() {
 	engage(&mut session, Box::new(Plan::new(PLAN_FILE)));
 	run(&mut kernel, &mut session).await;
 
-	// Advertising is unchanged: the bind still narrows the wire roster.
+	// The wire roster is fixed: Plan's bind never narrows it, so the model still
+	// sees `edit` and the refusal tells it what plan mode leaves callable.
 	let roster = advertised(&requests, 0);
-	assert!(!roster.iter().any(|name| name == "edit"), "{roster:?}");
-	let available = roster.join(", ");
+	assert!(roster.iter().any(|name| name == "edit"), "{roster:?}");
+	let sent = requests.lock().len();
+	for index in 1..sent {
+		assert_eq!(
+			advertised(&requests, index),
+			roster,
+			"request {index} advertises the same roster"
+		);
+	}
+	let available = roster
+		.iter()
+		.filter(|name| *name != "edit")
+		.cloned()
+		.collect::<Vec<_>>()
+		.join(", ");
 
 	assert_eq!(edit.opened(), 0, "a refused call never opens a unit, so it cannot preview");
 	assert_eq!(result_text(&session, "edit-1"), [format!(
@@ -380,8 +394,8 @@ async fn restrictions_are_snapshotted_per_request() {
 		text_script("done"),
 	]);
 	// The narrowing write lands while request 0 streams: calls sampled under
-	// request 0's instructions still run; request 1 is projected (and checked)
-	// under the narrowed roster.
+	// request 0's instructions still run; request 1 is checked under the
+	// narrowed allowlist while its wire roster stays the latched one.
 	let inference = WritingInference {
 		inner,
 		con: Arc::clone(&con),
@@ -396,7 +410,11 @@ async fn restrictions_are_snapshotted_per_request() {
 	let mut session = fresh_session(&temp.path().join("snapshot.oms"));
 	run(&mut kernel, &mut session).await;
 	assert_eq!(advertised(&requests, 0), ["grep", "read"]);
-	assert_eq!(advertised(&requests, 1), ["read"]);
+	assert_eq!(
+		advertised(&requests, 1),
+		["grep", "read"],
+		"a mid-turn write never reshapes the wire"
+	);
 	assert_eq!(result_text(&session, "grep-1"), ["grep ran"]);
 	assert_eq!(result_text(&session, "grep-2"), ["skipped: `grep` is not in the `sv_tools` \
 	                                              allowlist. No action was taken. Available now: \
@@ -462,7 +480,8 @@ async fn turn_start_hook_enabled_tools_gates_dispatch() {
 	.with_hook_gate(Arc::clone(&gate));
 	let mut session = fresh_session(&temp.path().join("hook.oms"));
 	run(&mut kernel, &mut session).await;
-	assert_eq!(advertised(&requests, 0), ["read"], "the hook still filters the wire roster");
+	assert_eq!(advertised(&requests, 0), ["grep", "read"], "the hook filters calls, not the wire");
+	assert_eq!(advertised(&requests, 1), ["grep", "read"]);
 	assert_eq!(grep.opened(), 0);
 	assert_eq!(result_text(&session, "grep-1"), ["skipped: `grep` was disabled for this request \
 	                                              by a turn_start hook. No action was taken. \
@@ -471,4 +490,98 @@ async fn turn_start_hook_enabled_tools_gates_dispatch() {
 	assert!(journal(&session).contains("hook:turn_start/enabled_tools"));
 	drop(kernel);
 	responder.abort();
+}
+
+/// Host executor that answers every call.
+struct NoHost;
+
+impl omp_tool::HostToolExecutor for NoHost {
+	fn execute(
+		&self,
+		_invocation: omp_tool::HostToolInvocation,
+		_updates: omp_tool::HostToolUpdateSink,
+		_cancellation: tokio_util::sync::CancellationToken,
+	) -> std::pin::Pin<
+		Box<dyn Future<Output = Result<omp_tool::HostToolResult, Str>> + Send + 'static>,
+	> {
+		Box::pin(std::future::ready(Ok(omp_tool::HostToolResult {
+			result:   serde_json::json!({"ok": true}),
+			is_error: false,
+		})))
+	}
+}
+
+/// Replaces the host roster while a request streams, after its tools left.
+struct ReplacingInference {
+	inner:    ScriptedInference,
+	registry: Arc<omp_tool::Registry>,
+	calls:    usize,
+}
+
+impl Inference for ReplacingInference {
+	fn chat(
+		&mut self,
+		request: ChatRequest,
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+		self.calls += 1;
+		if self.calls == 1 {
+			self
+				.registry
+				.replace_host_tools(sf!("rpc"), 2, Vec::new(), Arc::new(NoHost))
+				.expect("host roster replaces");
+		}
+		self.inner.chat(request)
+	}
+}
+
+/// A name the wire declares but the registry no longer resolves (a host roster
+/// replaced after the request left) settles as a typed
+/// `tool.roster.unavailable` denial, not a kernel error; the next request
+/// re-lowers the replaced roster.
+#[tokio::test]
+async fn a_declared_tool_that_no_longer_resolves_settles_as_typed_unavailable() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let con = Arc::new(Ctx::new());
+	let registry = registry([spec("read", 1, "read ran")]);
+	registry
+		.replace_host_tools(
+			sf!("rpc"),
+			1,
+			vec![omp_tool::HostToolSpec {
+				name:        sf!("fetch_ticket"),
+				description: sf!("Fetch a ticket"),
+				parameters:  serde_json::json!({"type": "object"}),
+				rev:         None,
+			}],
+			Arc::new(NoHost),
+		)
+		.expect("host roster installs");
+	let (inner, requests) = ScriptedInference::new([
+		tool_script("ticket-1", "fetch_ticket", serde_json::json!({})),
+		text_script("done"),
+	]);
+	let mut kernel = Kernel::new(
+		ReplacingInference { inner, registry: Arc::clone(&registry), calls: 0 },
+		Arc::clone(&registry),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_director_registry(DirectorRegistry::standard())
+	.with_con_context(Arc::clone(&con))
+	.with_runtime_flags(flags());
+	let mut session = fresh_session(&temp.path().join("unavailable.oms"));
+	run(&mut kernel, &mut session).await;
+	let mut first = advertised(&requests, 0);
+	first.sort_unstable();
+	assert_eq!(first, ["fetch_ticket", "read"]);
+	assert_eq!(
+		advertised(&requests, 1),
+		["read"],
+		"the replaced host roster is an explicit boundary"
+	);
+	assert_eq!(result_text(&session, "ticket-1"), ["skipped: `fetch_ticket` is no longer \
+	                                                available in this session. No action was \
+	                                                taken."]);
+	let journal = journal(&session);
+	assert!(journal.contains("tool.roster.unavailable"), "{journal}");
 }

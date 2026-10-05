@@ -161,6 +161,9 @@ pub enum Fault {
 	/// The requested transition is invalid for the current goal state.
 	#[error("the requested goal transition is invalid for its durable state")]
 	InvalidTransition,
+	/// Only the user opens a goal: `create` with no goal present is refused.
+	#[error("a goal is created only when the user sets one (/goal); ask the user")]
+	UserOnly,
 }
 
 /// App-owned durable goal control consumed through a frozen registry

@@ -273,6 +273,34 @@ fn response<'a>(frames: &'a [Value], id: &str) -> &'a Value {
 		.unwrap_or_else(|| panic!("missing response {id}: {frames:#?}"))
 }
 
+/// `set_host_tools` replaces the tool array every request carries, so it is
+/// accepted only between turns: during a turn it is refused with the typed
+/// `session_busy` code and changes nothing; idle it is accepted.
+#[tokio::test]
+async fn rpc_set_host_tools_is_accepted_only_between_turns() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let tools =
+		r#""tools":[{"name":"fetch_ticket","description":"Fetch","parameters":{"type":"object"}}]"#;
+	let during = format!(
+		"{{\"id\":\"prompt\",\"type\":\"prompt\",\"message\":\"wait\"}}\n{{\"id\":\"busy\",\"type\":\
+		 \"set_host_tools\",{tools}}}\n{{\"id\":\"cancel\",\"type\":\"cancel\"}}\n"
+	);
+	// `converse` writes one `after_turns` entry per `agent_end`, and the cancelled
+	// prompt yields exactly one: the idle request and the quit travel together.
+	let idle = format!(r#"{{"id":"idle","type":"set_host_tools",{tools}}}"#);
+	let quit = r#"{"id":"quit","type":"quit"}"#;
+	let after = format!("{idle}\n{quit}\n");
+	let during: &'static str = Box::leak(during.into_boxed_str());
+	let after: &'static [&'static str] = Box::leak(Box::new([&*Box::leak(after.into_boxed_str())]));
+	let frames = converse(&temp, VecDeque::from([Script::Pending]), during, after).await;
+	let busy = response(&frames, "busy");
+	assert_eq!(busy["success"], false, "{busy}");
+	assert_eq!(busy["code"], "session_busy", "{busy}");
+	let idle = response(&frames, "idle");
+	assert_eq!(idle["success"], true, "{idle}");
+	assert_eq!(idle["data"]["toolNames"], json!(["fetch_ticket"]));
+}
+
 /// `follow_up`: behind a running turn the message is queued (not
 /// steering) and runs as its own turn once the agent yields; idle, it runs
 /// immediately. Each follow-up produces a `turn_start` and one `agent_end`.
