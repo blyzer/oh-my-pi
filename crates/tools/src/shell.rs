@@ -485,12 +485,9 @@ fn spec_described(description: Str) -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		// The shell string is not an approval capability, so the declaration is
-		// statically empty and tool-level admission does not prompt for `bash@2`
-		// (ADR 0028). Policy is enforced by the exec sandbox while the command
-		// runs: a denial is typed as one path or network fact, the host asks once
-		// for exactly that fact, and the command reruns a single time with the
-		// sandbox amended by that scope. Nothing is predicted before execution.
+		// The shell string is not an approval capability. The environment host
+		// admits exact filesystem, spawn, and network effects as interpretation
+		// reaches those boundaries.
 		effects: Effects::empty(),
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),

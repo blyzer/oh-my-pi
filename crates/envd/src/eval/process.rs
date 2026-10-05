@@ -711,8 +711,11 @@ impl EvalChild {
 			return RunCellDisposition::Drop;
 		};
 		// Nested calls from this cell obey the restrictions of the invocation
-		// that started it; they never travel to the Python child.
+		// that started it; they never travel to the Python child. They also
+		// run in that invocation's write scope, which their bridge tasks would
+		// otherwise not inherit.
 		let restrictions = request.runtime.restrictions.clone();
+		let write_scope = crate::write_scope::current();
 		if let Err(error) = write_frame(&mut self.stdin, &ParentFrame::Run {
 			run_id,
 			cell_id: cell_id.clone(),
@@ -965,18 +968,21 @@ impl EvalChild {
 					let task_session = session.clone();
 					let task_events = bridge_events_tx.clone();
 					let task_restrictions = restrictions.clone();
+					let task_scope = write_scope.clone();
 					bridge_tasks.spawn(async move {
 						let progress = ProgressChannel { request_id, events: task_events.clone() };
-						let response = task_timeout
-							.host_wait(task_host.call_for(
+						let response = crate::write_scope::scoped(
+							task_scope,
+							task_timeout.host_wait(task_host.call_for(
 								task_owner.as_str(),
 								&task_session,
 								name.as_str(),
 								args,
 								task_restrictions.as_deref(),
 								&progress,
-							))
-							.await;
+							)),
+						)
+						.await;
 						let (value, error) = match response {
 							Ok(value) => (Some(value), None),
 							Err(error) => (None, Some(Str::from(error.to_string()))),
@@ -2407,6 +2413,155 @@ mod tests {
 		);
 		assert!(stdout.contains("READ:"), "{stdout}");
 		assert_eq!(ran.load(Ordering::Acquire), 1, "only the allowed nested call ran");
+		child.terminate().await;
+	}
+
+	/// A writer that consults the calling invocation's write scope, as the
+	/// document host does before every change.
+	struct ScopedWriterProbe {
+		spec: omp_tool::ToolSpec,
+	}
+
+	impl omp_tool::Tool for ScopedWriterProbe {
+		type Fault = Value;
+		type Params = Value;
+		type Payload = Value;
+		type Update = Value;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: omp_tool::IncomingParams<'c>,
+		) -> impl futures::Stream<Item = omp_tool::Ev<Value, Value, Value>> + Send + 'c {
+			async_stream::stream! {
+				let args = params.whole::<Value>().await.expect("probe arguments");
+				params.committed().await.expect("probe commitment");
+				let path = PathBuf::from(args["path"].as_str().expect("path"));
+				let result = crate::write_scope::admit_path(&path)
+					.map(|()| serde_json::json!({"text": "written"}))
+					.map_err(|denied| serde_json::json!({"text": denied.to_string()}));
+				yield omp_tool::Ev::Done(omp_tool::ToolTerminal::Done { result, useless: false });
+			}
+		}
+
+		fn prompt(
+			&self,
+			view: Result<&Value, &Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			let (Ok(value) | Err(value)) = view;
+			vec![omp_tool::Part::Text { text: Str::new(value["text"].as_str().unwrap_or_default()) }]
+		}
+	}
+
+	/// Nested `tool.<name>()` calls run on bridge tasks of their own, yet in
+	/// the write scope of the `eval` invocation that started the cell: with
+	/// no roster restriction in the way, the scoped writer still refuses an
+	/// off-plan path and admits the plan file.
+	#[tokio::test]
+	async fn cell_nested_calls_run_in_the_invocations_write_scope() {
+		use omp_tool::{
+			Claims, Constraint, Effects, Precedence, Presentation, Registry, Rev, ToolSpec,
+		};
+
+		let cwd = env::current_dir().expect("current directory");
+		let interpreter = discover_external_python(&cwd, None).expect("test host provides Python");
+		let scratch = tempfile::tempdir().expect("scratch");
+		let plan = scratch.path().join("PLAN.md");
+		let mut registry = Registry::new();
+		registry
+			.register(
+				ScopedWriterProbe {
+					spec: ToolSpec {
+						name:            sf!("write"),
+						rev:             Rev { family: Str::default(), n: 1 },
+						description:     sf!("scoped writer probe"),
+						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [0; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+			)
+			.expect("register probe");
+		let host = Arc::new(SessionBridgeHost::new());
+		host
+			.bind_registry(Arc::new(registry))
+			.expect("bind bridge registry");
+		let session = Bytes::from_static(b"external-runner-write-scope");
+		let mut child = EvalChild::spawn(
+			Path::new("unused-for-external-python"),
+			&interpreter,
+			&session,
+			&cwd,
+			Arc::clone(&host),
+			"1s".parse().expect("interrupt grace"),
+			None,
+		)
+		.await
+		.expect("launch selected interpreter");
+		let scope = Arc::new(crate::write_scope::WriteScope::PlanFile {
+			plan_file: sf!("local://PLAN.md"),
+			target:    Some(plan.clone()),
+		});
+		let (events, received) = flume::unbounded();
+		let reset = AtomicBool::new(false);
+		let code = format!(
+			"try:\n    print('OFF:', tool.write(path='{}'))\nexcept RuntimeError as error:\n    \
+			 print('OFF:', error)\nprint('PLAN:', tool.write(path='{}'))",
+			cwd.join("src/main.rs").display(),
+			plan.display(),
+		);
+		let disposition = crate::write_scope::scoped(
+			Some(scope),
+			child.run_cell(
+				Bytes::from_static(b"external-runner-write-scope:cell-1"),
+				RunRequest {
+					code:    Str::from(code),
+					timeout: Some(Duration::from_secs(5)),
+					reset:   false,
+					runtime: runtime_snapshot(cwd.clone()),
+				},
+				CancellationToken::new(),
+				&events,
+				"owner",
+				&session,
+				host,
+				&reset,
+				None,
+				true,
+			),
+		)
+		.await;
+		assert!(matches!(disposition, RunCellDisposition::Keep));
+		let mut stdout = Vec::new();
+		for event in received.try_iter() {
+			if let Ok(RunEvent::Output(update)) = event
+				&& update.channel == OutputChannel::Stdout
+			{
+				stdout.extend_from_slice(update.data.as_ref());
+			}
+		}
+		let stdout = String::from_utf8(stdout).expect("UTF-8 stdout");
+		assert!(
+			stdout.contains(
+				"plan mode is active: the environment refused to change {}; only the plan file \
+				 local://PLAN.md may change"
+					.replace("{}", &cwd.join("src/main.rs").display().to_string())
+					.as_str()
+			),
+			"{stdout}"
+		);
+		let plan_line = stdout
+			.lines()
+			.find(|line| line.starts_with("PLAN:"))
+			.unwrap_or_default();
+		assert!(plan_line.contains("written"), "{stdout}");
 		child.terminate().await;
 	}
 

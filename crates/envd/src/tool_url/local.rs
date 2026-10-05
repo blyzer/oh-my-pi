@@ -26,7 +26,7 @@ const SNIFF_BYTES: usize = 8 * 1024;
 /// Ordinary ULID/session identifiers remain human-readable. Identities with
 /// path syntax are mapped to a deterministic digest so they cannot escape the
 /// project sessions directory.
-pub(crate) fn session_local_root(sessions_dir: &Path, session_id: &str) -> PathBuf {
+pub fn session_local_root(sessions_dir: &Path, session_id: &str) -> PathBuf {
 	let component = if !session_id.is_empty()
 		&& session_id
 			.bytes()
@@ -41,11 +41,133 @@ pub(crate) fn session_local_root(sessions_dir: &Path, session_id: &str) -> PathB
 	sessions_dir.join(component).join("local")
 }
 
+/// Why a `local://` write target cannot be resolved inside the invoking
+/// session's scratch root.
+#[derive(Debug, thiserror::Error)]
+pub enum LocalWriteError {
+	/// The composition installed no `local://` sessions directory.
+	#[error("local:// writes are unavailable in this deployment")]
+	Unavailable,
+	/// The invocation carries no session principal, so it has no scratch
+	/// root.
+	#[error("local:// writes require a session principal")]
+	NoSession,
+	/// The resource is empty, absolute, traversing, or badly encoded.
+	#[error("local:// write targets must name a file relative to the session scratch root")]
+	Invalid,
+	/// An existing ancestor resolves outside the scratch root (a symlink).
+	#[error("local:// write target escapes the session scratch root")]
+	Escapes,
+	/// The scratch root could not be created or resolved.
+	#[error("local:// scratch root is unavailable")]
+	Root(#[source] io::Error),
+}
+
+/// The journal in `sessions_dir` the invocation `principal` names. The
+/// kernel's dispatcher names a session by the SHA-256 of its journal path, so
+/// the journal is found by digesting each candidate's path as spelled and as
+/// canonicalized.
+pub fn principal_journal(
+	sessions_dir: &Path,
+	principal: &str,
+) -> Result<Option<PathBuf>, io::Error> {
+	let entries = match fs::read_dir(sessions_dir) {
+		Ok(entries) => entries,
+		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+		Err(error) => return Err(error),
+	};
+	let principal_of =
+		|path: &Path| omp_core::Hash32::sum(path.as_os_str().as_encoded_bytes()).to_hex();
+	for entry in entries {
+		let path = entry?.path();
+		if path.extension().and_then(ffi::OsStr::to_str) != Some(omp_journal::FILE_EXTENSION) {
+			continue;
+		}
+		if principal_of(&path).as_str() == principal
+			|| fs::canonicalize(&path)
+				.is_ok_and(|canonical| principal_of(&canonical).as_str() == principal)
+		{
+			return Ok(Some(path));
+		}
+	}
+	Ok(None)
+}
+
+/// The `local://` scratch root of the session `principal` names: the
+/// directory beside its journal (`<sessions>/<stem>/local`), the root the
+/// app's session services and plan review read and `omp gc` keeps while the
+/// journal lives. A principal no journal digests to (an in-process or test
+/// session) keeps [`session_local_root`].
+pub fn principal_local_root(sessions_dir: &Path, principal: &str) -> Result<PathBuf, io::Error> {
+	Ok(match principal_journal(sessions_dir, principal)? {
+		Some(journal) => journal.with_extension("").join("local"),
+		None => session_local_root(sessions_dir, principal),
+	})
+}
+
+/// The path `local://<resource>` names under the scratch `root`, lexically:
+/// nothing is created or resolved on disk.
+pub fn local_path(root: &Path, resource: &str) -> Result<PathBuf, LocalWriteError> {
+	let relative = decode_relative(resource).map_err(|_| LocalWriteError::Invalid)?;
+	if !relative
+		.components()
+		.any(|component| matches!(component, Component::Normal(_)))
+	{
+		return Err(LocalWriteError::Invalid);
+	}
+	Ok(root.join(relative))
+}
+
+/// Resolves a `local://` write target inside the scratch root of the session
+/// `principal` names, creating the root. Existing ancestors are
+/// canonicalized, so a symlink that leaves the root is refused; the target
+/// itself may not exist yet.
+pub fn resolve_write_target(
+	sessions_dir: &Path,
+	principal: &str,
+	resource: &str,
+) -> Result<PathBuf, LocalWriteError> {
+	let root = principal_local_root(sessions_dir, principal).map_err(LocalWriteError::Root)?;
+	let candidate = local_path(&root, resource)?;
+	fs::create_dir_all(&root).map_err(LocalWriteError::Root)?;
+	let root = fs::canonicalize(root).map_err(LocalWriteError::Root)?;
+	let resolved = canonicalize_allowing_missing(&candidate).map_err(LocalWriteError::Root)?;
+	if resolved == root || !resolved.starts_with(&root) {
+		return Err(LocalWriteError::Escapes);
+	}
+	Ok(resolved)
+}
+
+/// Canonicalizes the longest existing ancestor of an absolute `path` and
+/// appends the missing remainder unchanged.
+pub fn canonicalize_allowing_missing(path: &Path) -> Result<PathBuf, io::Error> {
+	let mut ancestor = path;
+	let canonical = loop {
+		match fs::canonicalize(ancestor) {
+			Ok(canonical) => break canonical,
+			Err(error)
+				if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) =>
+			{
+				ancestor = ancestor.parent().ok_or(error)?;
+			},
+			Err(error) => return Err(error),
+		}
+	};
+	let suffix = path
+		.strip_prefix(ancestor)
+		.expect("an ancestor prefixes its descendant");
+	Ok(if suffix.as_os_str().is_empty() {
+		canonical
+	} else {
+		canonical.join(suffix)
+	})
+}
+
 /// Copies session-local artifacts across a session handoff.
 ///
 /// Only regular files and directories are migrated; symbolic links and other
 /// filesystem objects are ignored rather than followed.
-pub(crate) fn migrate_session_artifacts(
+pub fn migrate_session_artifacts(
 	sessions_dir: &Path,
 	source_session: &str,
 	destination_session: &str,
@@ -94,7 +216,11 @@ fn copy_artifact_entries(source: &Path, destination: &Path) -> Result<(), io::Er
 
 /// Confined resolver for one session's local scratch root.
 #[derive(Debug)]
-pub(crate) struct LocalResolver {
+pub struct LocalResolver {
+	/// The sessions directory as composed, matching the journal paths the
+	/// kernel digests into principals.
+	spelled:      PathBuf,
+	/// Its canonical form, which every scratch root must stay inside.
 	sessions_dir: PathBuf,
 	roots:        Mutex<FastHashMap<Str, Arc<SessionRoot>>>,
 }
@@ -108,8 +234,12 @@ struct SessionRoot {
 impl LocalResolver {
 	pub(super) fn open(sessions_dir: PathBuf) -> Result<Self, io::Error> {
 		fs::create_dir_all(&sessions_dir)?;
-		let sessions_dir = fs::canonicalize(sessions_dir)?;
-		Ok(Self { sessions_dir, roots: Mutex::new(FastHashMap::default()) })
+		let canonical = fs::canonicalize(&sessions_dir)?;
+		Ok(Self {
+			spelled:      sessions_dir,
+			sessions_dir: canonical,
+			roots:        Mutex::new(FastHashMap::default()),
+		})
 	}
 
 	fn session_root(&self) -> Result<Arc<SessionRoot>, Fault> {
@@ -121,7 +251,7 @@ impl LocalResolver {
 			return Ok(root);
 		}
 
-		let root = session_local_root(&self.sessions_dir, &session_id);
+		let root = principal_local_root(&self.spelled, &session_id).map_err(io_fault)?;
 		fs::create_dir_all(&root).map_err(io_fault)?;
 		let path = fs::canonicalize(root).map_err(io_fault)?;
 		if !path.starts_with(&self.sessions_dir) {
