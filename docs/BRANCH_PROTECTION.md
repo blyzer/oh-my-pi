@@ -31,7 +31,7 @@ The ruleset below is also kept as importable JSON in
 To apply it: **Settings > Rules > Rulesets > New ruleset > Import a ruleset**, choose that file, review
 it and save. The JSON targets `refs/heads/omp2` only, lets the repository **Admin** role bypass it
 (`bypass_mode: always`, so the owner can still push to `omp2` directly and merge with failing or
-pending checks when a runner is down), allows only merge commits, requires the seven status checks
+pending checks when a runner is down), allows only merge commits, requires the eight status checks
 listed below and resolved review threads, and leaves "up to date" and linear history off. Keep the file
 and the table below in sync.
 
@@ -65,6 +65,7 @@ Use the job names exactly as the checks list of a pull request shows them:
 - `Rust workspace and acceptance proofs`
 - `Terminal proof P7 (Linux PTY)`
 - `Acceptance proofs P9, P10 and tool sources (Linux)`
+- `Error-formatting ratchet (lintx)`
 
 `Acceptance proofs P9, P10 and tool sources (Linux)` runs on a GitHub-hosted
 runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
@@ -72,7 +73,9 @@ queue. Add it to the ruleset once it has reported green on a pull request;
 existing required checks keep their names.
 
 `Error-formatting ratchet (lintx)` (ADR 0035) runs on a GitHub-hosted runner as
-well; add it to the ruleset once it has reported green on a pull request.
+well and is required (it reported green on a pull request before it was added).
+`ci-skipped.yml` reports it for pull requests that skip CI, so such pull requests
+are not blocked by it.
 
 Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
@@ -96,7 +99,7 @@ pattern. It runs on the same pull requests (`branches: [main, omp2]`) with
 defines one job per required check under the byte-identical `name:`. Each job
 runs on a hosted Linux runner with read-only permissions and succeeds at once,
 printing that CI was not needed because no CI-relevant paths changed. A pull
-request that touches only non-CI paths therefore gets all seven checks green
+request that touches only non-CI paths therefore gets all eight checks green
 without running the real jobs; one that touches a CI path runs `ci.yml` as
 usual.
 
