@@ -4,9 +4,12 @@
 //! decide which calls may *run*. The agent snapshots one [`ToolRestrictions`]
 //! per model request (the same inputs the advertised list is derived from:
 //! the `sv_tools` allowlist and the Director that bound it, the `turn_start`
-//! hook filter, and the active plan file) and checks every call against it
-//! before any preview or execution. A tool that hosts nested calls (the eval
-//! bridge) receives the same snapshot and applies it to every nested call.
+//! hook filter, the active plan file, and the read-only ceiling a subagent of
+//! a plan-mode session inherits) and checks every call against it before any
+//! preview or execution. A tool that hosts nested calls (the eval bridge)
+//! receives the same snapshot and applies it to every nested call, and the
+//! environment confines the writes of every invocation that carries a plan
+//! file or a read-only ceiling to that scope.
 //!
 //! Model-visible refusal text comes from one place: the [`RosterDenial`]
 //! `Display` derive.
@@ -25,6 +28,17 @@ pub const ROSTER_RESTRICTED: &str = "tool.roster.restricted";
 
 /// Tools whose target is confined to the plan file while plan mode is active.
 const PLAN_SCOPED_TOOLS: &[&str] = &["write"];
+
+/// The session tool that can launch and drive processes; plan mode and the
+/// read-only ceiling keep its peer and observation operations only.
+const PROCESS_TOOL: &str = "hub";
+
+/// `hub` operations that neither run nor feed a process, the only ones left
+/// while plan mode or a read-only ceiling applies (`start` and `restart`
+/// are refused). `send` stays only when it targets a peer agent (`to`) rather
+/// than a process (`name`); any other operation fails closed.
+const PROCESS_FREE_OPS: &[&str] =
+	&["send", "wait", "inbox", "list", "jobs", "cancel", "ps", "logs", "stop", "describe"];
 
 /// Comma-separated tool names quoted in a refusal; `none` when empty.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -72,6 +86,12 @@ pub enum RosterRule {
 	/// The plan Director's plan-file write scope.
 	#[strum(to_string = "director:plan/plan_file")]
 	PlanFile,
+	/// The read-only ceiling of a subagent spawned under plan mode.
+	#[strum(to_string = "parent:plan/read_only")]
+	ReadOnly,
+	/// Plan mode's refusal to launch or drive processes.
+	#[strum(to_string = "director:plan/processes")]
+	Processes,
 }
 
 /// Why one call was refused. `Display` is the model-visible text (projected
@@ -116,6 +136,23 @@ pub enum RosterDenial {
 		/// The only target the tool may change.
 		plan_file: Str,
 	},
+	/// The caller is a subagent of a plan-mode session, which may only read.
+	#[strum(to_string = "`{tool}` is not available to a subagent of a plan-mode session, which \
+	                     may only read. No action was taken. Available now: {available}.")]
+	ReadOnly {
+		/// Refused tool.
+		tool:      Str,
+		/// Tools the model may call under this roster.
+		available: ToolNameList,
+	},
+	/// Plan mode (or the read-only ceiling it hands to subagents) refuses an
+	/// operation that launches or feeds a process.
+	#[strum(to_string = "`{tool}` cannot start, restart, or send input to a process while plan \
+	                     mode is active; no action was taken.")]
+	Processes {
+		/// Refused tool.
+		tool: Str,
+	},
 }
 
 impl RosterDenial {
@@ -126,7 +163,9 @@ impl RosterDenial {
 			Self::Director { tool, .. }
 			| Self::Allowlist { tool, .. }
 			| Self::Hook { tool, .. }
-			| Self::PlanFile { tool, .. } => tool,
+			| Self::PlanFile { tool, .. }
+			| Self::ReadOnly { tool, .. }
+			| Self::Processes { tool } => tool,
 		}
 	}
 
@@ -138,6 +177,8 @@ impl RosterDenial {
 			Self::Allowlist { .. } => RosterRule::Allowlist,
 			Self::Hook { .. } => RosterRule::Hook,
 			Self::PlanFile { .. } => RosterRule::PlanFile,
+			Self::ReadOnly { .. } => RosterRule::ReadOnly,
+			Self::Processes { .. } => RosterRule::Processes,
 		}
 	}
 
@@ -174,6 +215,7 @@ struct Allowlist {
 pub struct ToolRestrictions {
 	allowlist: Option<Allowlist>,
 	hook:      Option<Arc<[Str]>>,
+	ceiling:   Option<Arc<[Str]>>,
 	available: ToolNameList,
 	plan_file: Option<Str>,
 }
@@ -195,6 +237,15 @@ impl ToolRestrictions {
 		self
 	}
 
+	/// Caps calls at `names`, the read-only tools a subagent spawned under
+	/// plan mode may call whatever its own allowlist says. The environment
+	/// refuses every write such a caller's invocations attempt.
+	#[must_use]
+	pub fn with_read_only_ceiling(mut self, names: impl Into<Arc<[Str]>>) -> Self {
+		self.ceiling = Some(names.into());
+		self
+	}
+
 	/// Intersects calls with the names a `turn_start` hook left enabled.
 	pub fn set_hook(&mut self, names: impl Into<Arc<[Str]>>) {
 		self.hook = Some(names.into());
@@ -208,7 +259,17 @@ impl ToolRestrictions {
 	/// Whether no restriction applies.
 	#[must_use]
 	pub const fn is_unrestricted(&self) -> bool {
-		self.allowlist.is_none() && self.hook.is_none() && self.plan_file.is_none()
+		self.allowlist.is_none()
+			&& self.hook.is_none()
+			&& self.ceiling.is_none()
+			&& self.plan_file.is_none()
+	}
+
+	/// The read-only ceiling of a subagent spawned under plan mode, when the
+	/// caller is one.
+	#[must_use]
+	pub const fn read_only_ceiling(&self) -> Option<&Arc<[Str]>> {
+		self.ceiling.as_ref()
 	}
 
 	/// The plan file plan-scoped tools are confined to, while plan mode is
@@ -233,6 +294,14 @@ impl ToolRestrictions {
 
 	/// Checks a call by name alone. Allocation-free when the call is allowed.
 	pub fn check_name(&self, tool: &str) -> Result<(), RosterDenial> {
+		if let Some(ceiling) = &self.ceiling
+			&& !contains(ceiling, tool)
+		{
+			return Err(RosterDenial::ReadOnly {
+				tool:      Str::new(tool),
+				available: self.available.clone(),
+			});
+		}
 		if let Some(allowlist) = &self.allowlist
 			&& !contains(&allowlist.names, tool)
 		{
@@ -259,17 +328,27 @@ impl ToolRestrictions {
 		Ok(())
 	}
 
-	/// Whether [`Self::check_arguments`] can refuse `tool`: only a plan-scoped
-	/// tool while plan mode is active inspects its arguments.
+	/// Whether [`Self::check_arguments`] can refuse `tool`: a plan-scoped
+	/// tool while plan mode is active, and the process-launching `hub` while
+	/// plan mode or a read-only ceiling applies.
 	#[must_use]
 	pub fn scopes_arguments(&self, tool: &str) -> bool {
-		self.plan_file.is_some() && PLAN_SCOPED_TOOLS.contains(&tool)
+		(self.plan_file.is_some() && PLAN_SCOPED_TOOLS.contains(&tool))
+			|| (self.confines_processes() && tool == PROCESS_TOOL)
+	}
+
+	const fn confines_processes(&self) -> bool {
+		self.plan_file.is_some() || self.ceiling.is_some()
 	}
 
 	/// Checks a call's committed arguments: while plan mode is active,
-	/// `write` may target only the plan file. A missing or unrecognized target
-	/// fails closed.
+	/// `write` may target only the plan file, and while plan mode or a
+	/// read-only ceiling applies, `hub` may not start, restart, or send input
+	/// to a process. A missing or unrecognized target fails closed.
 	pub fn check_arguments(&self, tool: &str, args: &serde_json::Value) -> Result<(), RosterDenial> {
+		if tool == PROCESS_TOOL && self.confines_processes() {
+			return check_process_operation(tool, args);
+		}
 		let Some(plan_file) = self
 			.plan_file
 			.as_ref()
@@ -301,6 +380,21 @@ impl ToolRestrictions {
 			serde_json::from_str::<serde_json::Value>(args.get()).unwrap_or(serde_json::Value::Null);
 		self.check_arguments(tool, &value)
 	}
+}
+
+/// Refuses a `hub` call that runs or feeds a process. An unrecognized
+/// operation fails closed.
+fn check_process_operation(tool: &str, args: &serde_json::Value) -> Result<(), RosterDenial> {
+	let refused = || RosterDenial::Processes { tool: Str::new(tool) };
+	let op = args
+		.get("op")
+		.and_then(serde_json::Value::as_str)
+		.ok_or_else(refused)?;
+	let feeds_process = op == "send" && args.get("name").is_some_and(|name| !name.is_null());
+	if !PROCESS_FREE_OPS.contains(&op) || feeds_process {
+		return Err(refused());
+	}
+	Ok(())
 }
 
 fn contains(names: &[Str], tool: &str) -> bool {
@@ -443,6 +537,10 @@ impl From<&ToolRestrictions> for wire::ToolRestrictions {
 				.hook
 				.as_deref()
 				.map(|hook| wire::ToolNames { names: names(hook) }),
+			read_only_ceiling:  restrictions
+				.ceiling
+				.as_deref()
+				.map(|ceiling| wire::ToolNames { names: names(ceiling) }),
 			available:          names(restrictions.available.names()),
 			plan_file:          restrictions.plan_file.as_ref().map(ToString::to_string),
 		}
@@ -459,6 +557,7 @@ impl From<wire::ToolRestrictions> for ToolRestrictions {
 					.then(|| Str::from(wire.allowlist_director)),
 			}),
 			hook:      wire.hook.map(|hook| names(hook.names)),
+			ceiling:   wire.read_only_ceiling.map(|ceiling| names(ceiling.names)),
 			available: ToolNameList(names(wire.available)),
 			plan_file: wire.plan_file.map(Str::from),
 		}
@@ -592,6 +691,77 @@ mod tests {
 		);
 	}
 
+	fn read_only_child() -> ToolRestrictions {
+		let mut restrictions = ToolRestrictions::default()
+			.with_allowlist(names(&["read", "write", "edit", "bash", "hub"]), None)
+			.with_read_only_ceiling(names(&["read", "hub"]));
+		restrictions.set_available(names(&["read", "hub"]));
+		restrictions
+	}
+
+	#[test]
+	fn the_read_only_ceiling_caps_a_wider_allowlist() {
+		let restrictions = read_only_child();
+		assert!(!restrictions.is_unrestricted());
+		for tool in ["write", "edit", "bash", "ast_edit"] {
+			let denial = restrictions.check_name(tool).expect_err(tool);
+			assert_eq!(
+				denial.to_string(),
+				format!(
+					"`{tool}` is not available to a subagent of a plan-mode session, which may only \
+					 read. No action was taken. Available now: read, hub."
+				)
+			);
+			assert_eq!(denial.rule().to_string(), "parent:plan/read_only");
+		}
+		assert!(restrictions.check_name("read").is_ok());
+		assert!(
+			restrictions
+				.check_call("write", &json!({"path": "local://PLAN.md", "content": "x"}))
+				.is_err(),
+			"a read-only child has no plan file to write"
+		);
+	}
+
+	#[test]
+	fn plan_mode_and_the_ceiling_keep_hub_off_processes() {
+		for restrictions in [plan(), read_only_child()] {
+			assert!(restrictions.scopes_arguments("hub"));
+			for args in [
+				json!({"op": "start", "name": "dev", "application": "sh"}),
+				json!({"op": "restart", "name": "dev"}),
+				json!({"op": "send", "name": "dev", "message": "rm -rf ."}),
+				json!({"op": "detonate"}),
+				json!({}),
+			] {
+				let denial = restrictions
+					.check_arguments("hub", &args)
+					.expect_err("refused");
+				assert_eq!(denial.rule(), RosterRule::Processes);
+				assert_eq!(
+					denial.to_string(),
+					"`hub` cannot start, restart, or send input to a process while plan mode is \
+					 active; no action was taken."
+				);
+			}
+			for args in [
+				json!({"op": "send", "to": "scout", "message": "hi"}),
+				json!({"op": "list"}),
+				json!({"op": "logs", "name": "dev"}),
+				json!({"op": "ps"}),
+			] {
+				assert!(restrictions.check_arguments("hub", &args).is_ok(), "{args}");
+			}
+		}
+		let unrestricted = ToolRestrictions::default();
+		assert!(!unrestricted.scopes_arguments("hub"));
+		assert!(
+			unrestricted
+				.check_arguments("hub", &json!({"op": "start"}))
+				.is_ok()
+		);
+	}
+
 	#[test]
 	fn relative_plan_files_compare_lexically_and_never_through_traversal() {
 		assert!(plan_target_matches("docs/PLAN.md", "./docs/PLAN.md"));
@@ -611,5 +781,7 @@ mod tests {
 		assert_eq!(ToolRestrictions::from(wire), restrictions);
 		let user = ToolRestrictions::default().with_allowlist(names(&["read"]), None);
 		assert_eq!(ToolRestrictions::from(wire::ToolRestrictions::from(&user)), user);
+		let child = read_only_child();
+		assert_eq!(ToolRestrictions::from(wire::ToolRestrictions::from(&child)), child);
 	}
 }

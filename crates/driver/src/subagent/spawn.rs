@@ -1059,6 +1059,12 @@ async fn destroy_isolation(env: &EnvClient, id: &str) -> Result<(), SpawnError> 
 /// (requested effort, the effort ceiling, a per-agent model override), all
 /// class-layer writes. The caller supplies a model when the result leaves
 /// `ai_model` empty.
+///
+/// A child of a parent running under plan mode (or of one that is itself
+/// read-only) carries the read-only ceiling
+/// ([`omp_agent::SV_TOOLS_READ_ONLY`], see
+/// [`omp_agent::directors::plan::spawns_read_only`]); its cfgs run first and
+/// cannot lift it.
 pub fn configure_child(
 	parent: &Ctx,
 	loader: &dyn omp_con::CfgLoader,
@@ -1066,7 +1072,8 @@ pub fn configure_child(
 	effort: Option<TaskEffort>,
 ) -> Result<(Ctx, TaskSettings), SpawnError> {
 	let depth = SV_TASK_RECURSION_DEPTH.get(parent).saturating_add(1);
-	Ok(configure_seeded_child(parent.seed_child(), depth, loader, agent, effort)?)
+	let read_only = omp_agent::directors::plan::spawns_read_only(parent);
+	Ok(configure_seeded_child(parent.seed_child(), depth, read_only, loader, agent, effort)?)
 }
 
 /// Builds the configuration of a child session the main chat resumes.
@@ -1083,18 +1090,25 @@ pub fn configure_resumed_child(
 	agent: &str,
 	depth: u32,
 ) -> Result<(Ctx, TaskSettings), ConError> {
-	configure_seeded_child(console.scope_seed(), depth, loader, agent, None)
+	let read_only = omp_agent::directors::plan::spawns_read_only(console);
+	configure_seeded_child(console.scope_seed(), depth, read_only, loader, agent, None)
 }
 
 fn configure_seeded_child(
 	seed: omp_con::Seed,
 	depth: u32,
+	read_only: bool,
 	loader: &dyn omp_con::CfgLoader,
 	agent: &str,
 	effort: Option<TaskEffort>,
 ) -> Result<(Ctx, TaskSettings), ConError> {
 	let ctx = seeded_child_ctx(seed, loader, agent)?;
 	SV_TASK_RECURSION_DEPTH.set_in(&ctx, depth, Origin::Class)?;
+	if read_only {
+		// Set after the cfgs ran, as host code: the variable is script
+		// read-only, so neither a cfg nor the child's console can lift it.
+		omp_agent::SV_TOOLS_READ_ONLY.set_in(&ctx, true, Origin::Inherited)?;
+	}
 	let settings = TaskSettings::from_con(&ctx);
 	configure_child_route(&ctx, &settings, agent, effort)?;
 	Ok((ctx, settings))
