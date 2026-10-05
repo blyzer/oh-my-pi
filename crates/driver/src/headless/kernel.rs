@@ -4023,7 +4023,7 @@ mod tests {
 	}
 
 	#[test]
-	fn workpool_yield_contract_is_child_local_and_rebuilt_for_each_batch() {
+	fn workpool_yield_contract_is_child_local_and_wire_identical_for_each_batch() {
 		let mut registry = omp_tool::Registry::new();
 		registry
 			.register(
@@ -4052,7 +4052,8 @@ mod tests {
 		let schema: serde_json::Value =
 			serde_json::from_slice(&batch.live_spec("yield").expect("child yield").schema)
 				.expect("batch schema");
-		assert_eq!(schema["properties"]["key"]["enum"], serde_json::json!([1, 2]));
+		assert_eq!(schema["properties"]["key"]["minimum"], 1);
+		assert!(schema["properties"]["key"].get("enum").is_none());
 		assert!(matches!(
 			batch.live_spec("yield").expect("child yield").constraint,
 			omp_tool::Constraint::None
@@ -4065,10 +4066,16 @@ mod tests {
 			omp_tools::yield_tool::WorkpoolItem { id: sf!("pool#3"), index: 1 },
 		])
 		.expect("next batch contract");
-		let next_schema: serde_json::Value =
-			serde_json::from_slice(&next.live_spec("yield").expect("next yield").schema)
-				.expect("next schema");
-		assert_eq!(next_schema["properties"]["key"]["enum"], serde_json::json!([1]));
+		// A smaller tail batch installs a rebuilt registry whose `yield`
+		// declaration is byte-identical: the cached tool prefix survives it.
+		assert_eq!(
+			next.live_spec("yield").expect("next yield").schema,
+			batch.live_spec("yield").expect("child yield").schema
+		);
+		assert_eq!(
+			next.live_spec("yield").expect("next yield").description,
+			batch.live_spec("yield").expect("child yield").description
+		);
 	}
 
 	#[test]

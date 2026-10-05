@@ -195,9 +195,96 @@ async fn inline_sloppy_edit_recovery_is_gated_and_rejects_malformed_or_non_slopp
 	assert_eq!(assistant, malformed);
 }
 
+/// The tool names of request `index`, in wire order.
+fn tool_names(requests: &support::Requests, index: usize) -> Vec<String> {
+	requests.lock()[index]
+		.tools
+		.iter()
+		.map(|tool| tool.name.to_string())
+		.collect()
+}
+
+/// The `tools` array of request `index` as the codec would receive it,
+/// rendered once so two requests compare byte for byte.
+fn tool_bytes(requests: &support::Requests, index: usize) -> String {
+	format!("{:?}", requests.lock()[index].tools)
+}
+
+#[allow(
+	clippy::future_not_send,
+	reason = "the kernel turn future is driven on the test's own task, never sent"
+)]
+async fn turn<C: omp_agent::Inference>(kernel: &mut Kernel<C>, session: &mut omp_session::Session) {
+	kernel
+		.run_turn(
+			session,
+			TurnInput { text: sf!("run"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("turn");
+}
+
+/// `goal` is not in the roster until a goal is first engaged; the engagement
+/// mounts it at the next turn boundary and it stays for the rest of the
+/// session, byte for byte, through pause, completion, and removal of the goal
+/// (the `goal` tool answers an inactive goal with a typed fault instead).
 #[tokio::test]
-async fn goal_tool_roster_follows_the_durable_engagement_state() {
-	for (paused, expected) in [(false, true), (true, false)] {
+async fn goal_tool_mounts_at_the_first_engagement_and_stays_for_the_session() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let directors = DirectorRegistry::standard();
+	let mut session = fresh_session(&temp.path().join("goal-roster.oms"));
+	let (inference, requests) = ScriptedInference::new([
+		text_script("before"),
+		text_script("engaged"),
+		text_script("paused"),
+		text_script("removed"),
+		text_script("replaced"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("goal", 1, "goal"), spec("read", 1, "read")]),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("system")),
+	)
+	.with_director_registry(DirectorRegistry::standard())
+	.with_runtime_flags(flags(false, true));
+
+	turn(&mut kernel, &mut session).await;
+	assert_eq!(tool_names(&requests, 0), ["read"], "no goal has been engaged yet");
+
+	let mut stack = DirectorStack::from_dom(session.dom(), &directors);
+	stack
+		.engage(&mut session, Box::new(Goal::new("finish", None)))
+		.expect("goal engages");
+	turn(&mut kernel, &mut session).await;
+	assert_eq!(tool_names(&requests, 1), ["read", "goal"], "the engagement mounts goal");
+
+	let mut stack = DirectorStack::from_dom(session.dom(), &directors);
+	stack.pause(&mut session, "goal").expect("goal pauses");
+	turn(&mut kernel, &mut session).await;
+	let mut stack = DirectorStack::from_dom(session.dom(), &directors);
+	stack.exit(&mut session, "goal").expect("goal exits");
+	turn(&mut kernel, &mut session).await;
+	let mut stack = DirectorStack::from_dom(session.dom(), &directors);
+	stack
+		.engage(&mut session, Box::new(Goal::new("again", None)))
+		.expect("a replacement goal engages");
+	turn(&mut kernel, &mut session).await;
+	for index in 2..5 {
+		assert_eq!(
+			tool_bytes(&requests, index),
+			tool_bytes(&requests, 1),
+			"request {index}: pause, removal, and replacement never change the roster"
+		);
+	}
+}
+
+/// A session opened on an existing goal (any status) mounts `goal` from its
+/// first request: the engagement predates the kernel.
+#[tokio::test]
+async fn an_existing_goal_mounts_the_tool_from_the_first_request_whatever_its_status() {
+	for paused in [false, true] {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let directors = DirectorRegistry::standard();
 		let mut session = fresh_session(&temp.path().join("goal-roster.oms"));
@@ -217,25 +304,52 @@ async fn goal_tool_roster_follows_the_durable_engagement_state() {
 		)
 		.with_director_registry(directors)
 		.with_runtime_flags(flags(false, true));
-		kernel
-			.run_turn(
-				&mut session,
-				TurnInput { text: sf!("run"), attachments: Vec::new() },
-				RunControl::default(),
-			)
-			.await
-			.expect("turn");
-		let requests = requests.lock();
-		assert_eq!(
-			requests[0].tools.iter().any(|tool| tool.name == "goal"),
-			expected,
-			"pause and replay must re-derive hidden Goal tool visibility"
-		);
+		turn(&mut kernel, &mut session).await;
+		assert_eq!(tool_names(&requests, 0), ["goal"], "paused: {paused}");
+	}
+}
+
+/// Only a goal engagement mounts `goal`: a model that names the tool before
+/// any engagement is refused at dispatch (typed, journaled), the director it
+/// asked for never exists, and the next request's roster is unchanged.
+#[tokio::test]
+async fn the_model_cannot_mount_goal_by_calling_it() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let mut session = fresh_session(&temp.path().join("model-goal.oms"));
+	let (inference, requests) = ScriptedInference::new([
+		tool_script("goal-1", "goal", serde_json::json!({"op": "create", "objective": "mine"})),
+		text_script("refused"),
+		text_script("next turn"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("goal", 1, "goal ran"), spec("read", 1, "read")]),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(Str::new_static("system")),
+	)
+	.with_director_registry(DirectorRegistry::standard())
+	.with_runtime_flags(flags(false, true));
+	turn(&mut kernel, &mut session).await;
+	assert_eq!(support::result_text(&session, "goal-1"), ["skipped: `goal` is not mounted in \
+	                                                       this session. No action was taken. \
+	                                                       Available now: read."]);
+	let journal = std::fs::read_to_string(session.journal_path()).expect("journal reads");
+	assert!(journal.contains("tool.roster.restricted"), "{journal}");
+	assert_eq!(
+		session
+			.dom()
+			.count("directors director[family=goal]")
+			.expect("selector"),
+		0
+	);
+	turn(&mut kernel, &mut session).await;
+	for index in 0..3 {
+		assert_eq!(tool_names(&requests, index), ["read"], "request {index}");
 	}
 }
 
 #[tokio::test]
-async fn disabled_goal_is_removed_before_inference_while_enabled_goal_remains() {
+async fn disabled_goal_is_removed_before_inference_and_never_mounted() {
 	for (enabled, expected) in [(false, 0), (true, 1)] {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let directors = DirectorRegistry::standard();
@@ -246,20 +360,13 @@ async fn disabled_goal_is_removed_before_inference_while_enabled_goal_remains() 
 		let (inference, requests) = ScriptedInference::new([text_script("candidate")]);
 		let mut kernel = Kernel::new(
 			inference,
-			registry(std::iter::empty()),
+			registry([spec("goal", 1, "goal")]),
 			DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
 			StaticPrompt(Str::new_static("system")),
 		)
 		.with_director_registry(directors)
 		.with_runtime_flags(flags(false, enabled));
-		kernel
-			.run_turn(
-				&mut session,
-				TurnInput { text: sf!("run"), attachments: Vec::new() },
-				RunControl::default(),
-			)
-			.await
-			.expect("turn");
+		turn(&mut kernel, &mut session).await;
 		assert_eq!(
 			session
 				.dom()
@@ -268,6 +375,11 @@ async fn disabled_goal_is_removed_before_inference_while_enabled_goal_remains() 
 			expected
 		);
 		assert_eq!(requests.lock().len(), 1, "one provider request per prose-only turn");
+		assert_eq!(
+			tool_names(&requests, 0).iter().any(|name| name == "goal"),
+			enabled,
+			"a disabled goal mounts nothing; an enabled one mounts the tool"
+		);
 	}
 }
 
@@ -300,48 +412,44 @@ impl omp_agent::SessionTool for Withholding {
 	}
 }
 
-/// The roster withholds a registry declaration its session tool withholds,
-/// and advertises it again once the session state admits it — the next
-/// request, not a recomposed kernel.
+/// A session tool's withholding is read once, when the roster is latched at
+/// the first request: a later change of the state it follows (the `task`
+/// recursion ceiling) cannot add or remove the declaration mid-session.
 #[tokio::test]
-async fn session_tool_withholding_follows_its_state_per_request() {
-	let temp = tempfile::tempdir().expect("tempdir");
-	let advertised = Arc::new(AtomicBool::new(false));
-	let (inference, requests) =
-		ScriptedInference::new([text_script("first"), text_script("second")]);
-	let mut kernel = Kernel::new(
-		inference,
-		registry([spec("task", 1, "declaration"), spec("read", 1, "read")]),
-		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
-		StaticPrompt(Str::new_static("system")),
-	)
-	.with_runtime_flags(flags(false, true))
-	.with_session_tool(Arc::new(Withholding {
-		spec:       tool_spec("task", 1),
-		advertised: Arc::clone(&advertised),
-	}));
-	let mut session = fresh_session(&temp.path().join("withheld.oms"));
-	for _ in 0..2 {
-		kernel
-			.run_turn(
-				&mut session,
-				TurnInput { text: sf!("run"), attachments: Vec::new() },
-				RunControl::default(),
-			)
-			.await
-			.expect("turn");
-		advertised.store(true, Ordering::SeqCst);
+async fn session_tool_withholding_is_latched_at_the_first_request() {
+	for admitted_first in [false, true] {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let advertised = Arc::new(AtomicBool::new(admitted_first));
+		let (inference, requests) =
+			ScriptedInference::new([text_script("first"), text_script("second")]);
+		let mut kernel = Kernel::new(
+			inference,
+			registry([spec("task", 1, "declaration"), spec("read", 1, "read")]),
+			DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+			StaticPrompt(Str::new_static("system")),
+		)
+		.with_runtime_flags(flags(false, true))
+		.with_session_tool(Arc::new(Withholding {
+			spec:       tool_spec("task", 1),
+			advertised: Arc::clone(&advertised),
+		}));
+		let mut session = fresh_session(&temp.path().join("withheld.oms"));
+		for _ in 0..2 {
+			turn(&mut kernel, &mut session).await;
+			advertised.store(!admitted_first, Ordering::SeqCst);
+		}
+		let mut names = tool_names(&requests, 0);
+		names.sort_unstable();
+		let expected: &[&str] = if admitted_first {
+			&["read", "task"]
+		} else {
+			&["read"]
+		};
+		assert_eq!(names, expected, "latched by the state at the first request");
+		assert_eq!(
+			tool_bytes(&requests, 1),
+			tool_bytes(&requests, 0),
+			"flipping the state afterwards never changes the roster"
+		);
 	}
-	let requests = requests.lock();
-	let names = |index: usize| {
-		requests[index]
-			.tools
-			.iter()
-			.map(|tool| tool.name.to_string())
-			.collect::<Vec<_>>()
-	};
-	assert_eq!(names(0), ["read"], "withheld while the session tool says so");
-	let mut admitted = names(1);
-	admitted.sort_unstable();
-	assert_eq!(admitted, ["read", "task"]);
 }
