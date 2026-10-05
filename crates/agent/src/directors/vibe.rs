@@ -11,7 +11,8 @@ const CLAIMS: &[Slot] = &[Slot::Mode, Slot::Loop];
 pub const VIBE_TOOLS: &[&str] =
 	&["read", "grep", "glob", "todo", "think", "ask", "task", "hub", "yield"];
 
-/// Restricts dispatch to the coordinator roster and defers delivery while coordinating vibe workers.
+/// Restricts dispatch to the coordinator roster and defers delivery while
+/// coordinating vibe workers.
 pub struct Vibe {
 	binds: Vec<(Str, BindValue)>,
 }

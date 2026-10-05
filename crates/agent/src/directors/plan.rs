@@ -13,13 +13,14 @@ const CLAIMS: &[Slot] = &[Slot::Mode, Slot::Worktree];
 /// write and the decision request.
 ///
 /// The wire roster is latched for the session (ADR 0024), so the bind never
-/// narrows what is advertised; the kernel enforces it at dispatch: every model, session, or host tool call is checked
-/// against the request's [`omp_tool::ToolRestrictions`] snapshot before any
-/// preview or execution, and a call outside this list settles as a journaled
-/// `tool.roster.restricted` policy denial. While plan mode is active the same
-/// snapshot confines `write` to [`Plan`]'s plan file
-/// ([`omp_tool::plan_target_matches`]); nested `tool.<name>()` calls from an
-/// eval cell obey the identical snapshot in the environment's bridge.
+/// narrows what is advertised; the kernel enforces it at dispatch: every model,
+/// session, or host tool call is checked against the request's
+/// [`omp_tool::ToolRestrictions`] snapshot before any preview or execution, and
+/// a call outside this list settles as a journaled `tool.roster.restricted`
+/// policy denial. While plan mode is active the same snapshot confines `write`
+/// to [`Plan`]'s plan file ([`omp_tool::plan_target_matches`]); nested
+/// `tool.<name>()` calls from an eval cell obey the identical snapshot in the
+/// environment's bridge.
 pub const PLAN_TOOLS: &[&str] = &[
 	"read",
 	"grep",
