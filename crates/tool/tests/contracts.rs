@@ -1495,6 +1495,42 @@ fn incomplete_lift_chain_preserves_the_exact_original_as_data() {
 	assert_eq!(registry.project(original.clone()), ProjectedCall::Data(original));
 }
 
+#[test]
+fn unregistered_intermediate_revisions_are_lifted_by_the_live_tool() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(3, "three", Arc::new(AtomicUsize::new(0))).lifting_from(1),
+			Presentation::Slot,
+			claims("omp/tests", Precedence::CORE),
+		)
+		.unwrap();
+	let lifted = registry.project(RecordedCallOwned {
+		identity: identity(1),
+		raw_args: Bytes::from_static(b"raw"),
+		verdict:  Bytes::from_static(b"verdict"),
+	});
+	assert_eq!(
+		lifted,
+		ProjectedCall::Live(RecordedCallOwned {
+			identity: identity(3),
+			raw_args: Bytes::from_static(b"raw>3"),
+			verdict:  Bytes::from_static(b"verdict>3"),
+		})
+	);
+
+	let declined = RecordedCallOwned {
+		identity: identity(2),
+		raw_args: Bytes::from_static(b"raw"),
+		verdict:  Bytes::from_static(b"verdict"),
+	};
+	assert_eq!(
+		registry.project(declined.clone()),
+		ProjectedCall::Data(declined),
+		"the live tool still decides which older revisions it understands"
+	);
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SpillError {
 	Open,

@@ -3011,7 +3011,11 @@ impl Registry {
 		entry.invoke_input(invocation_id, json)
 	}
 
-	/// Composes registered adjacent lift steps toward the live revision.
+	/// Composes lift steps toward the live revision.
+	///
+	/// Each step is the next revision's tool when it is registered. A revision
+	/// that is not registered is skipped: the live tool then lifts from whatever
+	/// older revision it is handed, or declines.
 	///
 	/// Failure of any step returns the exact original bytes as `Data`; partially
 	/// migrated history is never exposed or mistaken for a live schema.
@@ -3045,12 +3049,16 @@ impl Registry {
 		let mut current =
 			LiftedCall { raw_args: original.raw_args.clone(), verdict: original.verdict.clone() };
 		while &current_rev != live_rev {
-			let next_rev = if current_rev.family == live_rev.family && current_rev.n < live_rev.n {
-				Rev { family: current_rev.family.clone(), n: current_rev.n.saturating_add(1) }
-			} else {
-				live_rev.clone()
-			};
-			let step = versions.get(&next_rev)?;
+			let adjacent =
+				(current_rev.family == live_rev.family && current_rev.n < live_rev.n).then(|| Rev {
+					family: current_rev.family.clone(),
+					n:      current_rev.n.saturating_add(1),
+				});
+			let (next_rev, step) =
+				match adjacent.and_then(|rev| versions.get(&rev).map(|step| (rev, step))) {
+					Some(registered) => registered,
+					None => (live_rev.clone(), versions.get(live_rev)?),
+				};
 			let lifted = step.tool.lift(&current_rev, RecordedCall {
 				raw_args: &current.raw_args,
 				verdict:  &current.verdict,
