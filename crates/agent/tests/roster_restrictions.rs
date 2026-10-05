@@ -156,7 +156,8 @@ async fn plan_mode_refuses_hidden_tools_and_off_plan_writes_at_dispatch() {
 	// sees `edit` and the refusal tells it what plan mode leaves callable.
 	let roster = advertised(&requests, 0);
 	assert!(roster.iter().any(|name| name == "edit"), "{roster:?}");
-	for index in 1..requests.lock().len() {
+	let sent = requests.lock().len();
+	for index in 1..sent {
 		assert_eq!(
 			advertised(&requests, index),
 			roster,

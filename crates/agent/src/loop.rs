@@ -422,6 +422,8 @@ pub struct Kernel<C> {
 	route:                 RouteFacts,
 	con:                   Option<Arc<omp_con::Ctx>>,
 	runtime_flags:         RuntimeFlags,
+	/// The session's latched wire roster (ADR 0024).
+	wire:                  crate::roster::WireRoster,
 	pub(crate) mailbox_tx: flume::Sender<Up>,
 	mailbox_rx:            flume::Receiver<Up>,
 	/// Reply channels of the approval prompts journaled from the mailbox.
@@ -469,6 +471,7 @@ impl<C> Kernel<C> {
 			route: RouteFacts::default(),
 			con: None,
 			runtime_flags: RuntimeFlags::default(),
+			wire: crate::roster::WireRoster::default(),
 			mailbox_tx,
 			mailbox_rx,
 		}
@@ -639,11 +642,15 @@ impl<C> Kernel<C> {
 	/// Replaces the runtime tool registry between turns.
 	///
 	/// This is intentionally a mutable, host-only operation: workpool workers
-	/// install the strict yield schema for their next batch before inference
-	/// sees the roster. Ordinary sessions retain their composed registry.
+	/// install the contract of their next batch before inference sees the
+	/// roster. Ordinary sessions retain their composed registry. The wire
+	/// roster re-lowers against the new registry at the next request (an
+	/// explicit boundary: the workpool `yield` declaration is byte-identical
+	/// across batches, so the cached prefix survives it).
 	pub fn replace_tool_registry(&mut self, registry: Arc<Registry>) {
 		debug_assert!(!self.turn_active.load(Ordering::Acquire));
 		self.dispatcher.replace_registry(registry);
+		self.wire.invalidate();
 	}
 
 	/// Borrows the runtime job board supervising detached tools, subagents,
@@ -1185,19 +1192,21 @@ impl<C: Inference> Kernel<C> {
 			DirectorStack::from_dom(session.dom(), &self.director_registry)
 				.apply_binds(session.dom(), con);
 		}
+		self.observe_roster_boundary(session);
+		let wire = self.wire_view(session, self.current_route().lowering_caps())?;
 		let allowlist = crate::tool_allowlist(self.con.as_deref());
-		let roster = self.roster_basis(session.dom(), allowlist.as_deref());
+		let roster = self.roster_basis(session.dom(), allowlist.as_deref(), &wire);
 		self.dispatcher.set_restrictions(Some(Arc::new(roster)));
 		let mut calls = Vec::new();
 		let mut refused = 0_usize;
 		for unsettled in session.unsettled_calls() {
-			let identity = self
-				.dispatcher
-				.registry()
-				.resolved_identity(unsettled.name.as_str())
-				.ok_or_else(|| RegistryError::UnknownTool(unsettled.name.clone()))?;
-			let cancellation =
-				tool_cancellation(self.dispatcher.registry(), identity.name.as_str(), &turn_cancel)?;
+			let (identity, unresolved) = self.resolve_call(&unsettled.name)?;
+			let cancellation = call_cancellation(
+				self.dispatcher.registry(),
+				identity.name.as_str(),
+				unresolved,
+				&turn_cancel,
+			)?;
 			let args = match unsettled.args {
 				Some(args) => args,
 				None => RawValue::from_string("{}".to_owned())?,
@@ -1205,10 +1214,7 @@ impl<C: Inference> Kernel<C> {
 			if !unsettled.committed {
 				session.call_ready(unsettled.entry, args.clone())?;
 			}
-			if let Err(denial) = self
-				.dispatcher
-				.check_roster_raw(identity.name.as_str(), &args)
-			{
+			if let Err(denial) = self.check_call_raw(&identity, unresolved, &args) {
 				let prepared = self.dispatcher.prepare_refused(
 					identity,
 					unsettled.call_id,
@@ -1300,6 +1306,7 @@ impl<C: Inference> Kernel<C> {
 			})?;
 			directors = DirectorStack::from_dom(session.dom(), &self.director_registry);
 		}
+		self.observe_roster_boundary(session);
 		if self.runtime_flags.automatic_compaction
 			&& !directors.active_ids().contains(&"compaction")
 			&& !directors.queued_ids().contains(&"compaction")
@@ -1401,15 +1408,16 @@ impl<C: Inference> Kernel<C> {
 				if let Some(con) = &self.con {
 					directors.apply_binds(session.dom(), con);
 				}
-				let (mut request, mut roster) =
-					self.finish_request(self.project_request(session)?).await?;
+				let projected = self.project_request(session)?;
+				let (mut request, mut roster) = self.finish_request(projected).await?;
+				let fingerprint = self.wire.fingerprint().unwrap_or_default();
+				let toolset_changed = self.wire.announce(fingerprint);
 				let model = self.client.selected_model();
 				if let Some(hooks) = &self.lifecycle_hooks {
-					let enabled_tools = request
-						.tools
-						.iter()
-						.map(|tool| tool.name.clone())
-						.collect::<Vec<_>>();
+					// What a call may use now: the latched wire roster under the
+					// request's restrictions. The hook narrows this set; the wire
+					// roster itself never changes.
+					let enabled_tools = roster.callable().names().to_vec();
 					let payload = hooks
 						.gate(
 							HookEventId::HookEventTurnStart,
@@ -1417,7 +1425,7 @@ impl<C: Inference> Kernel<C> {
 								"turn_id": turn.to_string(),
 								"turn_index": requests_started,
 								"prompt_hash": prompt_hash(&request),
-								"toolset_hash": toolset_hash(&enabled_tools),
+								"toolset_hash": fingerprint.to_hex().as_str(),
 								"enabled_tools": enabled_tools,
 								"input_mode": "full",
 								"model": model_ref(model.as_ref()),
@@ -1429,7 +1437,7 @@ impl<C: Inference> Kernel<C> {
 								"deadline": serde_json::Value::Null,
 								"attempt": requests_started,
 								"prompt_changed": requests_started == 0,
-								"toolset_changed": requests_started == 0,
+								"toolset_changed": toolset_changed,
 							}),
 						)
 						.await?;
@@ -1438,8 +1446,9 @@ impl<C: Inference> Kernel<C> {
 						.get("enabled_tools")
 						.and_then(serde_json::Value::as_array)
 					{
-						// The hook's INTERSECT also gates dispatch: a call to a
-						// tool it disabled settles as a roster denial.
+						// The hook's INTERSECT gates dispatch, not the wire: a call
+						// to a tool it disabled settles as a roster denial, and the
+						// tool array the provider caches never changes.
 						roster.set_hook(
 							enabled
 								.iter()
@@ -1447,17 +1456,6 @@ impl<C: Inference> Kernel<C> {
 								.map(Str::new)
 								.collect::<Arc<[Str]>>(),
 						);
-						request.tools = request
-							.tools
-							.iter()
-							.filter(|tool| {
-								enabled
-									.iter()
-									.any(|name| name.as_str() == Some(tool.name.as_str()))
-							})
-							.cloned()
-							.collect::<Vec<_>>()
-							.into();
 					}
 				}
 				let preflight_control = CallControl::new(
@@ -1518,7 +1516,8 @@ impl<C: Inference> Kernel<C> {
 				self.apply_live_components(session)?;
 				if prepared == Prepared::Rebuild {
 					let hook = roster.hook().cloned();
-					(request, roster) = self.finish_request(self.project_request(session)?).await?;
+					let projected = self.project_request(session)?;
+					(request, roster) = self.finish_request(projected).await?;
 					// A rebuild re-projects without re-running `turn_start`;
 					// the hook's dispatch filter for this request still holds.
 					if let Some(hook) = hook {
@@ -1546,17 +1545,9 @@ impl<C: Inference> Kernel<C> {
 				// Snapshot the request's restrictions next to it: every call the
 				// model samples from this request is checked against exactly
 				// what it was told, whatever con writes land meanwhile.
-				let roster = (!roster.is_unrestricted()).then(|| {
-					roster.set_available(
-						request
-							.tools
-							.iter()
-							.map(|tool| tool.name.clone())
-							.collect::<Arc<[Str]>>(),
-					);
-					Arc::new(roster)
-				});
-				self.dispatcher.set_restrictions(roster);
+				self
+					.dispatcher
+					.set_restrictions((!roster.is_unrestricted()).then(|| Arc::new(roster)));
 				let watchers = directors.watch_stream(session.dom(), &director_cx, &request);
 				let redirect_count = stream_redirect_count(session.dom(), turn);
 				let redirect_cap = self
@@ -2221,35 +2212,34 @@ impl<C: Inference> Kernel<C> {
 		}
 		Ok((
 			ChatRequest {
-				messages:          messages.into(),
-				tools:             tools.into(),
-				hosted_tools:      Arc::from([]),
-				tool_choice:       Setting::Unset,
-				output:            Setting::Unset,
-				reasoning:         Setting::Unset,
-				verbosity:         Setting::Unset,
-				cache_retention:   Setting::Unset,
-				service_tier:      Setting::Unset,
-				sampling:          Sampling::default(),
+				messages: messages.into(),
+				tools,
+				hosted_tools: Arc::from([]),
+				tool_choice: Setting::Unset,
+				output: Setting::Unset,
+				reasoning: Setting::Unset,
+				verbosity: Setting::Unset,
+				cache_retention: Setting::Unset,
+				service_tier: Setting::Unset,
+				sampling: Sampling::default(),
 				max_output_tokens: None,
-				top_logprobs:      None,
-				safety:            Arc::<[SafetySetting]>::from([]),
-				negotiation:       NegotiationPolicy::default(),
-				forced_call:       None,
+				top_logprobs: None,
+				safety: Arc::<[SafetySetting]>::from([]),
+				negotiation: NegotiationPolicy::default(),
+				forced_call: None,
 			},
 			roster,
 		))
 	}
 
-	/// Whether the Goal Director's hidden `goal` tool is mounted for the next
-	/// request.
-	fn goal_visible(&self, dom: &omp_dom::Dom) -> bool {
-		self.runtime_flags.goal_enabled
-			&& crate::find_director(dom, "goal").is_some_and(|(_, node)| {
-				crate::director_status(node) == Some("active")
-					&& !crate::state_bool(node, "done").unwrap_or(false)
-					&& !crate::state_bool(node, "dropped").unwrap_or(false)
-			})
+	/// A turn boundary for the wire roster: once a goal has been engaged in the
+	/// session (by the user, since the model cannot mount `goal` itself), the
+	/// hidden `goal` tool joins the roster for the rest of the session. A
+	/// disabled goal (`cl_goal_enabled`) never mounts.
+	fn observe_roster_boundary(&mut self, session: &Session) {
+		let engaged =
+			self.runtime_flags.goal_enabled && crate::find_director(session.dom(), "goal").is_some();
+		self.wire.observe_boundary(session.journal_path(), engaged);
 	}
 
 	/// Whether the hidden `think` tool is mounted for the next request.
@@ -2260,22 +2250,57 @@ impl<C: Inference> Kernel<C> {
 			.is_some_and(|con| omp_ai::settings::AI_EXTERNAL_THINKING.get(con))
 	}
 
+	/// The inputs that decide the wire roster, read once when it latches.
+	fn composition(&self) -> crate::roster::Composition {
+		crate::roster::Composition {
+			allowlist: crate::composed_tool_allowlist(self.con.as_deref())
+				.map(|roster| roster.into_iter().collect::<Arc<[Str]>>()),
+			withheld:  self.dispatcher.withheld_names().into(),
+			think:     self.think_mounted(),
+		}
+	}
+
+	/// The session's latched wire roster lowered for `caps`.
+	fn wire_view(
+		&mut self,
+		session: &Session,
+		caps: omp_tool::LoweringCaps,
+	) -> Result<WireView, RegistryError> {
+		if !self.wire.is_composed(session.journal_path()) {
+			let composition = self.composition();
+			self.wire.compose(composition);
+		}
+		let lowered = self.wire.lowered(self.dispatcher.registry(), caps)?;
+		Ok(WireView {
+			tools:     Arc::clone(&lowered.tools),
+			names:     Arc::clone(&lowered.names),
+			unmounted: Arc::clone(&lowered.unmounted),
+		})
+	}
+
 	/// The roster restrictions of a request projected now, before its
-	/// `turn_start` hook: the effective `sv_tools` allowlist plus the hidden
-	/// mounts advertised beside it (and the Director whose bind supplied it),
-	/// and the active plan file.
-	fn roster_basis(&self, dom: &omp_dom::Dom, allowlist: Option<&[Str]>) -> ToolRestrictions {
-		let mut roster = ToolRestrictions::default();
+	/// `turn_start` hook: the live `sv_tools` allowlist plus the hidden mounts
+	/// the wire carries (and the Director whose bind supplied it), the hidden
+	/// mounts it does not, the wire roster quoted in refusals, and the active
+	/// plan file.
+	fn roster_basis(
+		&self,
+		dom: &omp_dom::Dom,
+		allowlist: Option<&[Str]>,
+		wire: &WireView,
+	) -> ToolRestrictions {
+		let mut roster = ToolRestrictions::default().with_unmounted(Arc::clone(&wire.unmounted));
+		roster.set_available(Arc::clone(&wire.names));
 		if let Some(allowlist) = allowlist {
-			let mounts = [("goal", self.goal_visible(dom)), ("think", self.think_mounted())];
 			let names = allowlist
 				.iter()
 				.cloned()
 				.chain(
-					mounts
-						.into_iter()
-						.filter(|&(_, mounted)| mounted)
-						.map(|(name, _)| Str::new_static(name)),
+					wire
+						.names
+						.iter()
+						.filter(|name| crate::roster::is_mount(name.as_str()))
+						.cloned(),
 				)
 				.collect::<Arc<[Str]>>();
 			let director = self
@@ -2295,8 +2320,47 @@ impl<C: Inference> Kernel<C> {
 		roster
 	}
 
+	/// The tool a call names, and whether it no longer resolves: a name the
+	/// wire declared but the registry dropped (a host roster replaced) resolves
+	/// to its latched declaration so the call can settle as a typed denial.
+	fn resolve_call(&self, name: &Str) -> Result<(ToolIdentity, bool), KernelError> {
+		if let Some(identity) = self.dispatcher.registry().resolved_identity(name.as_str()) {
+			return Ok((identity, false));
+		}
+		self
+			.wire
+			.identity(name.as_str())
+			.cloned()
+			.map(|identity| (identity, true))
+			.ok_or_else(|| RegistryError::UnknownTool(name.clone()).into())
+	}
+
+	/// The refusal for a call named by `identity`, by name alone.
+	fn check_call_name(&self, identity: &ToolIdentity, unresolved: bool) -> Option<RosterDenial> {
+		if unresolved {
+			return Some(RosterDenial::Unavailable { tool: identity.name.clone() });
+		}
+		self.dispatcher.check_roster(identity.name.as_str()).err()
+	}
+
+	/// [`Self::check_call_name`] and the plan-file scope over committed
+	/// arguments.
+	fn check_call_raw(
+		&self,
+		identity: &ToolIdentity,
+		unresolved: bool,
+		args: &RawValue,
+	) -> Result<(), RosterDenial> {
+		if unresolved {
+			return Err(RosterDenial::Unavailable { tool: identity.name.clone() });
+		}
+		self
+			.dispatcher
+			.check_roster_raw(identity.name.as_str(), args)
+	}
+
 	/// Projects the session into the working copy of the next request.
-	fn project_request(&self, session: &Session) -> Result<ProjectedRequest, KernelError> {
+	fn project_request(&mut self, session: &Session) -> Result<ProjectedRequest, KernelError> {
 		let route = self.current_route();
 		let mut items = self
 			.prompt
@@ -2345,46 +2409,14 @@ impl<C: Inference> Kernel<C> {
 			prompt_hash:        Str::new(prompt_hash_of(&messages)),
 			prompt_head_tokens: crate::context::prompt_head_tokens(&messages),
 		};
-		let caps = route.lowering_caps();
-		let registry = self.dispatcher.registry();
-		let goal_visible = self.goal_visible(session.dom());
-		let mut tools = registry.advertise(caps)?;
-		tools.retain(|tool| tool.definition.name.as_str() != "goal" || goal_visible);
-		// `sv_tools` is the effective roster: the user's allowlist or a mode
-		// Director's bind (plan/vibe restrict what the model may call). The
-		// same allowlist gates dispatch through `roster`.
+		// The wire roster is latched: every request shares one lowering, and
+		// only a route with different capabilities (a model switch) or a
+		// replaced host tool roster re-lowers it. Everything the roster used
+		// to omit per request is refused at dispatch through `roster`.
+		let wire = self.wire_view(session, route.lowering_caps())?;
 		let allowlist = crate::tool_allowlist(self.con.as_deref());
-		if let Some(roster) = &allowlist {
-			tools.retain(|tool| roster.contains(&tool.definition.name));
-		}
-		let roster = self.roster_basis(session.dom(), allowlist.as_deref());
-		// A session tool may withhold its declaration for the session it
-		// presents (`task` at the recursion ceiling).
-		tools.retain(|tool| !self.dispatcher.withholds(tool.definition.name.as_str()));
-		// Goal engagement mounts its hidden lifecycle tool in addition to the
-		// user's ordinary roster; pause, completion, drop, rewind, and resume
-		// all re-derive this decision from the selected branch.
-		if goal_visible
-			&& !tools
-				.iter()
-				.any(|tool| tool.definition.name.as_str() == "goal")
-		{
-			tools.extend(registry.advertise_selected(caps, &[Str::new_static("goal")])?);
-		}
-		// When provider reasoning is off, advertise the hidden `think` slot so
-		// the model reasons through a tool.
-		if self.think_mounted()
-			&& !tools
-				.iter()
-				.any(|tool| tool.definition.name.as_str() == "think")
-		{
-			tools.extend(registry.advertise_selected(caps, &[Str::new_static("think")])?);
-		}
-		let tools = tools
-			.into_iter()
-			.map(|tool| tool.definition)
-			.collect::<Vec<_>>();
-		Ok(ProjectedRequest { facts, messages, tools, roster })
+		let roster = self.roster_basis(session.dom(), allowlist.as_deref(), &wire);
+		Ok(ProjectedRequest { facts, messages, tools: wire.tools, roster })
 	}
 
 	async fn drive_inference(
@@ -2610,15 +2642,11 @@ impl<C: Inference> Kernel<C> {
 					},
 					ChatEvent::ToolCallStarted { index, id, name } => {
 						first_token.get_or_insert_with(Instant::now);
-						let identity = self
-							.dispatcher
-							.registry()
-							.resolved_identity(name.as_str())
-							.ok_or_else(|| RegistryError::UnknownTool(name.clone()))?;
+						let (identity, unresolved) = self.resolve_call(&name)?;
 						// The roster check runs before any execution unit opens,
 						// so a refused call never previews or acts. The call is
 						// still journaled faithfully, arguments included.
-						let refused = self.dispatcher.check_roster(identity.name.as_str()).err();
+						let refused = self.check_call_name(&identity, unresolved);
 						// A call whose target the roster scopes (plan mode's
 						// `write`) opens its unit only once its committed
 						// arguments pass, so nothing previews an unchecked path.
@@ -2635,9 +2663,10 @@ impl<C: Inference> Kernel<C> {
 						record_provider_tool_index(session, entry, index)?;
 						self.apply_live_components(session)?;
 						let call_id = Str::new(&id);
-						let cancellation = tool_cancellation(
+						let cancellation = call_cancellation(
 							self.dispatcher.registry(),
 							identity.name.as_str(),
+							unresolved,
 							turn_cancel,
 						)?;
 						let prepared = if refused.is_some() || deferred {
@@ -2751,12 +2780,8 @@ impl<C: Inference> Kernel<C> {
 								streaming.deferred,
 							)
 						} else {
-							let identity = self
-								.dispatcher
-								.registry()
-								.resolved_identity(call.name.as_str())
-								.ok_or_else(|| RegistryError::UnknownTool(call.name.clone()))?;
-							let refused = self.dispatcher.check_roster(identity.name.as_str()).err();
+							let (identity, unresolved) = self.resolve_call(&call.name)?;
+							let refused = self.check_call_name(&identity, unresolved);
 							let deferred = refused.is_none()
 								&& self
 									.dispatcher
@@ -2776,9 +2801,10 @@ impl<C: Inference> Kernel<C> {
 							)?;
 							record_provider_tool_index(session, entry, index)?;
 							self.apply_live_components(session)?;
-							let cancellation = tool_cancellation(
+							let cancellation = call_cancellation(
 								self.dispatcher.registry(),
 								identity.name.as_str(),
+								unresolved,
 								turn_cancel,
 							)?;
 							let prepared = if refused.is_some() || deferred {
@@ -3635,7 +3661,8 @@ impl<C: Inference> Kernel<C> {
 		let Ok(turn) = current_turn(session) else {
 			return Ok(false);
 		};
-		let (request, _) = self.finish_request(self.project_request(session)?).await?;
+		let projected = self.project_request(session)?;
+		let (request, _) = self.finish_request(projected).await?;
 		let director = CompactionDirector::manual(focus).with_method(method);
 		let director = match strategy {
 			Some(strategy) => director.with_strategy(strategy),
@@ -3759,9 +3786,17 @@ async fn submit_workflow_response(
 struct ProjectedRequest {
 	facts:    crate::context::ContextFacts,
 	messages: Vec<InferenceMessage>,
-	tools:    Vec<omp_ai::ToolDefinition>,
-	/// Roster restrictions derived from the same inputs as `tools`.
+	/// The latched wire roster, shared by every request of the session.
+	tools:    Arc<[omp_ai::ToolDefinition]>,
+	/// What a call to a tool on `tools` may do under this request.
 	roster:   ToolRestrictions,
+}
+
+/// The latched wire roster as one request sees it.
+struct WireView {
+	tools:     Arc<[omp_ai::ToolDefinition]>,
+	names:     Arc<[Str]>,
+	unmounted: Arc<[Str]>,
 }
 
 struct StreamingCall {
@@ -4302,16 +4337,6 @@ fn prompt_hash_of(messages: &[InferenceMessage]) -> String {
 	format!("{:016x}", std::hash::Hasher::finish(&hasher))
 }
 
-/// Stable hash over the advertised tool names.
-fn toolset_hash(names: &[Str]) -> String {
-	let mut hasher = std::collections::hash_map::DefaultHasher::new();
-	for name in names {
-		std::hash::Hasher::write(&mut hasher, name.as_bytes());
-		std::hash::Hasher::write_u8(&mut hasher, 0);
-	}
-	format!("{:016x}", std::hash::Hasher::finish(&hasher))
-}
-
 /// `Usage` hook payload for one completed request.
 fn usage_json(usage: &Usage) -> serde_json::Value {
 	serde_json::json!({
@@ -4620,6 +4645,20 @@ fn tool_cancellation(
 	} else {
 		ToolCancellation::ReadOnly(turn.read_only_tool())
 	})
+}
+
+/// The cancellation scope of a call to `name`: the tool's own effects when it
+/// resolves, a read-only scope for a call that will only be refused.
+fn call_cancellation(
+	registry: &Registry,
+	name: &str,
+	unresolved: bool,
+	turn: &crate::TurnCancellation,
+) -> Result<ToolCancellation, RegistryError> {
+	if unresolved {
+		return Ok(ToolCancellation::ReadOnly(turn.read_only_tool()));
+	}
+	tool_cancellation(registry, name, turn)
 }
 
 fn extract_inline_sloppy_edits(text: &str) -> Option<(String, String, usize)> {

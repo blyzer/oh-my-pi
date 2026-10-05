@@ -790,16 +790,15 @@ pub trait SessionTool: Send + Sync {
 	/// Executes one committed call against the authoritative session.
 	fn call<'a>(&'a self, cx: SessionToolCx<'a>, args: Box<RawValue>) -> SessionToolFuture<'a>;
 
-	/// Whether the next request advertises this tool's declaration.
+	/// Whether the session's wire roster advertises this tool's declaration.
 	///
-	/// A session tool whose availability follows the live session state (the
+	/// A session tool whose availability follows the session state (the
 	/// `task` tool at the recursion ceiling of the session it presents) is
-	/// withheld from the roster instead of advertised and refused. The answer
-	/// must derive from session-scoped state, which changes at a session
-	/// boundary (a switch, a resumed child's class) rather than between a
-	/// session's turns, so the roster a session's prompt cache holds stays
-	/// fixed within it. A call that still arrives reaches
-	/// [`SessionTool::call`], which owns its refusal.
+	/// withheld from the roster instead of advertised and refused. The kernel
+	/// asks once, when it latches the session's wire roster (ADR 0024), so a
+	/// later change of that state cannot add or remove the declaration
+	/// mid-session. A call that still arrives reaches [`SessionTool::call`],
+	/// which owns its refusal.
 	fn advertised(&self) -> bool {
 		true
 	}
@@ -1351,14 +1350,17 @@ impl Dispatcher {
 		self
 	}
 
-	/// Whether a session tool claiming `name` withholds it from the next
-	/// request's roster ([`SessionTool::advertised`]).
+	/// The session tools that withhold their declaration from the wire roster
+	/// ([`SessionTool::advertised`]). The kernel reads this once, when it
+	/// latches the roster.
 	#[must_use]
-	pub fn withholds(&self, name: &str) -> bool {
+	pub fn withheld_names(&self) -> Vec<Str> {
 		self
 			.session_tools
-			.get(name)
-			.is_some_and(|tool| !tool.advertised())
+			.iter()
+			.filter(|(_, tool)| !tool.advertised())
+			.map(|(name, _)| name.clone())
+			.collect()
 	}
 
 	/// Installs the roster restrictions of the request about to stream. Every

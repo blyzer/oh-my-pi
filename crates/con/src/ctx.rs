@@ -1109,6 +1109,18 @@ impl Ctx {
 			.collect()
 	}
 
+	/// The value `name` takes with every engagement layer popped: the value a
+	/// Director's bind shadows (the user's own, else the class, inherited, or
+	/// archive value, else the registration default).
+	pub fn value_below_engagements(&self, name: &str) -> ConResult<Value> {
+		let var = self.var(name)?;
+		let layers = self.layers.read();
+		Ok(layers
+			.below_engagements(name)
+			.cloned()
+			.unwrap_or_else(|| var.state.default_value().clone()))
+	}
+
 	/// The owner of the engagement layer that supplies `name`'s effective
 	/// value (a Director bind), when one does; `None` for an unknown name or
 	/// a value the session, archive, or default layer supplies.
