@@ -46,7 +46,8 @@ pub use registry::{
 	ShadowClaim, ToolLocus, ToolPromptEntry, ToolPromptProjection, ToolRoute, WorkerSiteKind,
 };
 pub use restrictions::{
-	ROSTER_RESTRICTED, RosterDenial, RosterRule, ToolNameList, ToolRestrictions, plan_target_matches,
+	ROSTER_RESTRICTED, RosterDenial, RosterRule, ToolNameList, ToolRestrictions, WriteScopeDenied,
+	plan_target_matches,
 };
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize, de, de::DeserializeOwned};

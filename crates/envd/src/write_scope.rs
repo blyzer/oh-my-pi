@@ -56,30 +56,9 @@ pub(crate) enum WriteScope {
 	ReadOnly,
 }
 
-/// A write the invocation's scope does not admit.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum WriteScopeDenied {
-	/// Plan mode is active and the target is not the plan file.
-	#[error(
-		"plan mode is active: the environment refused to change {target}; only the plan file \
-		 {plan_file} may change"
-	)]
-	OutsidePlanFile {
-		/// The only target that may change.
-		plan_file: Str,
-		/// The refused target.
-		target:    Str,
-	},
-	/// The caller is a read-only subagent of a plan-mode session.
-	#[error(
-		"this agent is a read-only subagent of a plan-mode session: the environment refused to \
-		 change {target}"
-	)]
-	ReadOnly {
-		/// The refused target.
-		target: Str,
-	},
-}
+/// A write the invocation's scope does not admit (the contract lives in
+/// `omp-tool`, so a write tool can journal it as its typed fault).
+pub use omp_tool::WriteScopeDenied;
 
 impl WriteScope {
 	/// The scope an invocation with `restrictions` runs in, if any. A

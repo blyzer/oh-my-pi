@@ -307,6 +307,10 @@ pub enum Fault {
 		/// Exact resource-owned explanation.
 		message: Str,
 	},
+	/// The invocation's write scope (plan mode, or a read-only subagent of a
+	/// plan-mode session) refused the target before anything changed.
+	#[error(transparent)]
+	WriteScope(#[from] omp_tool::WriteScopeDenied),
 }
 
 /// Resource failure classification for the effectful whole-file transaction.
@@ -899,7 +903,7 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 					result = operation => match result {
 						Ok(result) => result,
 						Err(fault) => {
-							yield done(Err(Fault::Document { message: fault.message }));
+							yield done(Err(Fault::from(fault)));
 							return;
 						},
 					},
@@ -938,7 +942,7 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 					result = operation => match result {
 						Ok(result) => result,
 						Err(fault) => {
-							yield done(Err(Fault::Document { message: fault.message }));
+							yield done(Err(Fault::from(fault)));
 							return;
 						},
 					},
@@ -1471,6 +1475,42 @@ mod tests {
 	use omp_tool::{Omitted, Severity};
 
 	use super::*;
+
+	/// A scope denial is journaled as a typed fault, survives the journal
+	/// round trip, and renders the environment's refusal text; a special
+	/// write's denial becomes the same fault.
+	#[test]
+	fn write_scope_denials_are_durable_typed_faults() {
+		let denied = omp_tool::WriteScopeDenied::OutsidePlanFile {
+			plan_file: sf!("local://PLAN.md"),
+			target:    sf!("/w/src/lib.rs"),
+		};
+		let fault = Fault::WriteScope(denied.clone());
+		let json = serde_json::to_value(&fault).expect("serialize");
+		assert_eq!(
+			json,
+			serde_json::json!({
+				"kind": "write_scope",
+				"scope": "outside_plan_file",
+				"plan_file": "local://PLAN.md",
+				"target": "/w/src/lib.rs",
+			})
+		);
+		assert_eq!(serde_json::from_value::<Fault>(json).expect("deserialize"), fault);
+		assert_eq!(
+			fault.to_string(),
+			"plan mode is active: the environment refused to change /w/src/lib.rs; only the plan \
+			 file local://PLAN.md may change"
+		);
+		let read_only = omp_tool::WriteScopeDenied::ReadOnly { target: sf!("/w/a.zip:x") };
+		assert_eq!(
+			Fault::from(backends::Fault::from(read_only.clone())),
+			Fault::WriteScope(read_only)
+		);
+		assert_eq!(Fault::from(backends::Fault::new("bad member")), Fault::Document {
+			message: sf!("bad member"),
+		});
+	}
 
 	#[test]
 	fn strips_strict_hashline_read_echo() {

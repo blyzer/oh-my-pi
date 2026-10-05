@@ -26,15 +26,32 @@ use crate::read::{
 
 /// A model-facing special-write failure.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("{message}")]
-pub struct Fault {
-	/// Exact model-facing error text.
-	pub message: Str,
+pub enum Fault {
+	/// The resource refused the write.
+	#[error("{message}")]
+	Message {
+		/// Exact model-facing error text.
+		message: Str,
+	},
+	/// The invocation's write scope (plan mode, or a read-only subagent of a
+	/// plan-mode session) refused the target before anything changed.
+	#[error(transparent)]
+	WriteScope(#[from] omp_tool::WriteScopeDenied),
 }
 
 impl Fault {
-	fn new(message: impl IntoStr) -> Self {
-		Self { message: message.into_str() }
+	/// A failure with the exact model-facing `message`.
+	pub fn new(message: impl IntoStr) -> Self {
+		Self::Message { message: message.into_str() }
+	}
+}
+
+impl From<Fault> for super::Fault {
+	fn from(fault: Fault) -> Self {
+		match fault {
+			Fault::Message { message } => Self::Document { message },
+			Fault::WriteScope(denied) => Self::WriteScope(denied),
+		}
 	}
 }
 

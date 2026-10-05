@@ -33,7 +33,7 @@ enum Settled {
 	/// The verdict's `CallOutcome` JSON.
 	Verdict(Value),
 	/// The environment refused the invocation before its tool ran.
-	Refused(String),
+	Refused(omp_env::ClientError),
 }
 
 impl Settled {
@@ -44,7 +44,7 @@ impl Settled {
 	fn text(&self) -> String {
 		match self {
 			Self::Verdict(outcome) => outcome.to_string(),
-			Self::Refused(message) => message.clone(),
+			Self::Refused(refusal) => refusal.to_string(),
 		}
 	}
 }
@@ -135,7 +135,7 @@ impl Fixture {
 					},
 					Ok(Some(_)) => {},
 					Ok(None) => panic!("invocation closed before its verdict"),
-					Err(error) => break Settled::Refused(error.to_string()),
+					Err(error) => break Settled::Refused(error),
 				}
 			}
 		})

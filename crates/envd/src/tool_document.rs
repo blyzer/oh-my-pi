@@ -1683,7 +1683,7 @@ impl WriteDocuments for DocumentHost {
 		let Some(services) = self.resource_mutations() else {
 			return Ok(None);
 		};
-		write_scope::admit_uri(&request.uri).map_err(|denied| write_rejected(denied.to_string()))?;
+		write_scope::admit_uri(&request.uri).map_err(scope_rejected)?;
 		let byte_len = request.content.len() as u64;
 		let revision = match request.capability {
 			MutationCapability::Ssh => {
@@ -1829,8 +1829,7 @@ impl WriteDocuments for DocumentHost {
 		let resolved = resolve_plain_write(self, &request.path).map_err(write_rejected)?;
 		// Before any effect (parent directories included): plan mode and a
 		// read-only subagent change nothing but the plan file.
-		write_scope::admit_path(&resolved.path)
-			.map_err(|denied| write_rejected(denied.to_string()))?;
+		write_scope::admit_path(&resolved.path).map_err(scope_rejected)?;
 		let existed = match std_fs::symlink_metadata(&resolved.path) {
 			Ok(_) => true,
 			Err(error)
@@ -2061,9 +2060,10 @@ fn resolve_plain_write(host: &DocumentHost, input: &str) -> Result<ResolvedPlain
 			.map_err(|()| "document workspace root is not a local file URI".to_owned())?,
 	)?;
 	if let Some(resource) = local_resource(input) {
+		// Rendered once: this function's error is the WriteFault::Document text.
+		// lintx-allow: error-format model-facing write refusal text
 		let path = resolve_local_write(host, resource).map_err(|error| error.to_string())?;
-		let canonical_root = std_fs::canonicalize(&root)
-			.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))?;
+		let canonical_root = canonical_workspace_root(&root)?;
 		let use_document_host = path != canonical_root && path.starts_with(&canonical_root);
 		let uri = Url::from_file_path(&path)
 			.map_err(|()| "local:// path cannot be represented as a file URI".to_owned())?;
@@ -2097,8 +2097,7 @@ fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPla
 	if candidate == root {
 		return Err("document path must name a file".into());
 	}
-	let canonical_root = std_fs::canonicalize(root)
-		.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))?;
+	let canonical_root = canonical_workspace_root(root)?;
 	let mut ancestor = candidate.as_path();
 	let canonical_ancestor = loop {
 		match std_fs::canonicalize(ancestor) {
@@ -2124,6 +2123,11 @@ fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPla
 		.map_err(|()| "document path cannot be represented as a file URI".to_owned())?;
 	let display_path = display_write_path(&path, &canonical_root);
 	Ok(ResolvedPlainWrite { uri: Str::from(uri.as_str()), path, display_path, use_document_host })
+}
+
+fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
+	std_fs::canonicalize(root)
+		.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))
 }
 
 fn join_nonempty_suffix(mut base: PathBuf, suffix: &Path) -> PathBuf {
@@ -2396,6 +2400,11 @@ async fn commit_conflict_content(
 		snapshot_tag,
 		editor_sync: EditorSync::default(),
 	})
+}
+
+/// The invocation's write scope refused the target: nothing changed.
+fn scope_rejected(denied: write_scope::WriteScopeDenied) -> WriteCommitError {
+	WriteCommitError::Rejected(WriteFault::WriteScope(denied))
 }
 
 fn write_rejected(message: impl Into<Str>) -> WriteCommitError {
@@ -3479,9 +3488,7 @@ fn resolve_special_write_path(
 		.map_err(|_| special_fault("write path could not be resolved from its existing ancestor"))?;
 	let resolved = join_nonempty_suffix(canonical_ancestor, suffix);
 	if let Some(scope) = scope {
-		scope
-			.admit_path(&resolved)
-			.map_err(|denied| special_fault(denied.to_string()))?;
+		scope.admit_path(&resolved)?;
 	}
 	Ok(resolved)
 }
@@ -3522,7 +3529,7 @@ fn special_write_cancelled() -> backends::Fault {
 }
 
 fn special_fault(message: impl Into<Str>) -> backends::Fault {
-	backends::Fault { message: message.into() }
+	backends::Fault::new(message.into())
 }
 
 #[cfg(test)]
@@ -3585,8 +3592,7 @@ mod special_write_tests {
 		assert_eq!(
 			result
 				.expect_err("pre-effect cancellation rejects")
-				.message
-				.as_str(),
+				.to_string(),
 			"special write cancelled before mutation began"
 		);
 		assert!(!mutated.load(Ordering::Acquire));

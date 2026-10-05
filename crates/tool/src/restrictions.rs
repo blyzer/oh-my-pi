@@ -564,6 +564,35 @@ impl From<wire::ToolRestrictions> for ToolRestrictions {
 	}
 }
 
+/// A write the environment refused because the invocation's restrictions
+/// confine it: a plan file (plan mode) or a read-only ceiling (a subagent of
+/// a plan-mode session). Nothing was changed. Durable: a write tool journals
+/// it as its typed fault.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum WriteScopeDenied {
+	/// Plan mode is active and the target is not the plan file.
+	#[error(
+		"plan mode is active: the environment refused to change {target}; only the plan file \
+		 {plan_file} may change"
+	)]
+	OutsidePlanFile {
+		/// The only target that may change.
+		plan_file: Str,
+		/// The refused target.
+		target:    Str,
+	},
+	/// The caller is a read-only subagent of a plan-mode session.
+	#[error(
+		"this agent is a read-only subagent of a plan-mode session: the environment refused to \
+		 change {target}"
+	)]
+	ReadOnly {
+		/// The refused target.
+		target: Str,
+	},
+}
+
 #[cfg(test)]
 mod tests {
 	use serde_json::json;
