@@ -26,7 +26,16 @@ gh workflow run pr-labels.yml -f pr=<number>
 
 ## Ruleset on `omp2`
 
-**Settings > Rules > Rulesets > New branch ruleset**
+The ruleset below is also kept as importable JSON in
+[`.github/rulesets/omp2-protected.json`](../.github/rulesets/omp2-protected.json).
+To apply it: **Settings > Rules > Rulesets > New ruleset > Import a ruleset**, choose that file, review
+it and save. The JSON targets `refs/heads/omp2` only, lets the repository **Admin** role bypass it
+(`bypass_mode: always`, so the owner can still push to `omp2` directly and merge with failing or
+pending checks when a runner is down), allows only merge commits, requires the seven status checks
+listed below and resolved review threads, and leaves "up to date" and linear history off. Keep the file
+and the table below in sync.
+
+To apply it by hand instead: **Settings > Rules > Rulesets > New branch ruleset**
 
 - **Name**: `omp2-protected`
 - **Enforcement status**: Active

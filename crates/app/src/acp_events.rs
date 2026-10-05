@@ -68,7 +68,7 @@ impl AcpEventMapper {
 					continue;
 				};
 				match &node.tag {
-					Tag::Known(KnownTag::User | KnownTag::Developer) => {
+					Tag::Known(KnownTag::User) => {
 						let message_id = node_id(node, *handle);
 						if let Some(text) = node.content.as_deref().filter(|text| !text.is_empty()) {
 							updates.push(message_chunk("user_message_chunk", text, &message_id));
@@ -92,8 +92,8 @@ impl AcpEventMapper {
 					Tag::Known(KnownTag::Assistant) => {
 						self.replay_assistant(*handle, node, &mut updates);
 					},
-					Tag::Known(KnownTag::Notice) => {
-						if let Some(text) = stream_notice(node) {
+					Tag::Known(KnownTag::Notice | KnownTag::Developer) => {
+						if let Some(text) = harness_note(node) {
 							updates.push(message_chunk(
 								"agent_thought_chunk",
 								text,
@@ -345,7 +345,7 @@ impl AcpEventMapper {
 			let Some(node) = self.dom.get(handle) else {
 				continue;
 			};
-			if let Some(text) = stream_notice(node)
+			if let Some(text) = harness_note(node)
 				&& self
 					.dom
 					.parent(handle)
@@ -396,18 +396,34 @@ fn plan_update(dom: &Dom) -> JsonValue {
 	json!({"sessionUpdate": "plan", "entries": entries})
 }
 
-/// The text of a stream observer's host-visible notice (`<notice
-/// name=stream-rule|stream-redirect-cap|stream-watch>`). ACP has no notice
-/// update, so a redirect reaches the editor as a thought chunk rather than
-/// being silently dropped.
-fn stream_notice(node: &Node) -> Option<&str> {
-	if node.tag != Tag::Known(KnownTag::Notice) {
-		return None;
+/// The text of a harness-authored note that the editor should see but must not
+/// attribute to the user.
+///
+/// Only `<user>` elements are the person's own input and project as
+/// `user_message_chunk`. Everything the harness injects into a turn is shown as
+/// an `agent_thought_chunk` instead, on replay and live alike, because ACP has
+/// no notice or developer-message update and presenting it as a user message
+/// would put harness text in the person's mouth:
+///
+/// - `<developer>` elements (injected stream-rule text, steering and Director
+///   reminders, extension custom messages, late diagnostics) project their full
+///   text content;
+/// - `<notice name=stream-rule|stream-redirect-cap|stream-watch>` elements, the
+///   host-visible record of a stream redirect, project their text content.
+///
+/// Other `<notice>` elements (errors, retries, usage, cards) remain
+/// presentation-only and are not projected. Empty content projects nothing.
+fn harness_note(node: &Node) -> Option<&str> {
+	match &node.tag {
+		Tag::Known(KnownTag::Developer) => {},
+		Tag::Known(KnownTag::Notice) => {
+			node
+				.prop(&PropKey::Custom(Str::new_static("name")))
+				.and_then(Value::as_str)
+				.filter(|name| name.starts_with("stream-"))?;
+		},
+		_ => return None,
 	}
-	node
-		.prop(&PropKey::Custom(Str::new_static("name")))
-		.and_then(Value::as_str)
-		.filter(|name| name.starts_with("stream-"))?;
 	node.content.as_deref().filter(|text| !text.is_empty())
 }
 
@@ -924,5 +940,125 @@ mod tests {
 		};
 		assert_eq!(thoughts(&live), [json!("Stream rule no-unwrap matched the text output.")]);
 		assert_eq!(thoughts(&mapper.replay_updates().expect("replay")), thoughts(&live));
+	}
+
+	/// Appends one assistant reply with a single text block to the open turn.
+	fn push_assistant(session: &mut Session, text: &'static str) {
+		session.assistant_start("m", "p", "r").expect("assistant");
+		let turn = *session
+			.dom()
+			.children(session.dom().body())
+			.last()
+			.expect("turn");
+		let assistant = *session.dom().children(turn).last().expect("assistant");
+		session
+			.patch(Txn {
+				cause: session.head().expect("head"),
+				label: Some(Str::new_static("assistant.content")),
+				ops:   vec![Op::Ins {
+					parent: assistant,
+					after:  None,
+					node:   NodeSpec::new(Tag::Custom(Str::new_static(
+						omp_session::ASSISTANT_CONTENT_TAG,
+					)))
+					.with_prop(PropId::Kind, Value::Str(Str::new_static("text")))
+					.with_prop(PropId::Text, Value::Str(Str::new_static(text))),
+				}],
+			})
+			.expect("content node");
+	}
+
+	/// Appends one `<developer>` note to the open turn.
+	fn push_developer(session: &mut Session, text: &'static str) {
+		let turn = *session
+			.dom()
+			.children(session.dom().body())
+			.last()
+			.expect("turn");
+		let after = session.dom().children(turn).last().copied();
+		session
+			.patch(Txn {
+				cause: session.head().expect("head"),
+				label: Some(Str::new_static("director.stream-rule")),
+				ops:   vec![Op::Ins {
+					parent: turn,
+					after,
+					node: NodeSpec::new(KnownTag::Developer).with_content(Str::new_static(text)),
+				}],
+			})
+			.expect("developer note");
+	}
+
+	fn kinds(updates: &[JsonValue]) -> Vec<(&str, &str)> {
+		updates
+			.iter()
+			.map(|update| {
+				(
+					update["sessionUpdate"].as_str().expect("update kind"),
+					update["content"]["text"].as_str().expect("text content"),
+				)
+			})
+			.collect()
+	}
+
+	#[test]
+	fn developer_notes_replay_as_thoughts_and_only_user_text_is_a_user_message() {
+		let root = tempfile::tempdir().expect("tempdir");
+		let mut session = Session::create(root.path().join("acp.oms"), ComponentRegistry::standard())
+			.expect("session");
+		session.begin_turn().expect("turn");
+		session.user("fix the bug", Vec::new()).expect("user");
+		push_developer(&mut session, "Stream rule no-unwrap: avoid unwrap.");
+		push_assistant(&mut session, "done");
+		let (snapshot, _events) = session.subscribe();
+		let mapper =
+			AcpEventMapper::new(&snapshot, root.path().to_path_buf(), session.blobs().clone());
+		let replay = mapper.replay_updates().expect("replay");
+		assert_eq!(kinds(&replay), [
+			("user_message_chunk", "fix the bug"),
+			("agent_thought_chunk", "Stream rule no-unwrap: avoid unwrap."),
+			("agent_message_chunk", "done"),
+		]);
+	}
+
+	#[test]
+	fn developer_notes_reach_acp_live_as_thoughts_never_as_user_messages() {
+		let root = tempfile::tempdir().expect("tempdir");
+		let mut session = Session::create(root.path().join("acp.oms"), ComponentRegistry::standard())
+			.expect("session");
+		let (snapshot, events) = session.subscribe();
+		let mut mapper =
+			AcpEventMapper::new(&snapshot, root.path().to_path_buf(), session.blobs().clone());
+		session.begin_turn().expect("turn");
+		session.user("fix the bug", Vec::new()).expect("user");
+		push_developer(&mut session, "Stream rule no-unwrap: avoid unwrap.");
+		push_assistant(&mut session, "");
+		let content = {
+			let turn = *session
+				.dom()
+				.children(session.dom().body())
+				.last()
+				.expect("turn");
+			let assistant = *session.dom().children(turn).last().expect("assistant");
+			*session.dom().children(assistant).last().expect("content")
+		};
+		let sid = session
+			.stream_open(content, PropId::Text.into())
+			.expect("open");
+		session.stream_append(sid, "done").expect("append");
+		let live = events
+			.try_iter()
+			.flat_map(|event| mapper.map_event(&event).expect("map"))
+			.collect::<Vec<_>>();
+		assert!(
+			live
+				.iter()
+				.all(|update| update["sessionUpdate"] != "user_message_chunk"),
+			"harness text must never be attributed to the user: {live:#?}"
+		);
+		assert_eq!(kinds(&live), [
+			("agent_thought_chunk", "Stream rule no-unwrap: avoid unwrap."),
+			("agent_message_chunk", "done"),
+		]);
 	}
 }
