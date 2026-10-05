@@ -45,6 +45,7 @@
 use std::{fmt::Write as _, iter, ops::Range};
 
 use omp_core::{Str, StrMut};
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use strum::{Display, EnumString, IntoStaticStr};
 use thiserror::Error;
@@ -58,7 +59,9 @@ use crate::{
 };
 
 /// Why a selector string is not a valid [`SymbolQuery`].
-#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+///
+/// Serializable so a tool fault can carry it as a typed fact rather than text.
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolQueryError {
 	/// The selector is the empty string.
 	#[error("symbol query is empty")]
@@ -194,11 +197,29 @@ pub struct SymbolMatch {
 	pub start_byte: usize,
 	/// Byte offset one past the declaration's last content byte.
 	pub end_byte:   usize,
+	/// Byte offset of the first byte of the declaration's own name in the
+	/// searched source; [`Self::name_point`] turns it into a line and column.
+	pub name_byte:  usize,
 	name_start:     u32,
 }
 
+/// A position in source text: 1-based line, 0-based byte column.
+///
+/// The column counts bytes from the start of the line, the unit tree-sitter
+/// reports. Callers needing UTF-16 or UTF-32 columns convert from the line's
+/// text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourcePoint {
+	/// 1-based line.
+	pub line:   u32,
+	/// 0-based byte offset from the start of [`Self::line`].
+	pub column: u32,
+}
+
 // Pin the footprint: matches are cloned into candidate lists and diagnostics.
-const _: () = assert!(size_of::<SymbolMatch>() <= 112, "SymbolMatch must stay compact");
+// 112 bytes before `name_byte` (the declaration name's source offset, one word
+// that no field can absorb); a regression past 120 fails the build.
+const _: () = assert!(size_of::<SymbolMatch>() <= 120, "SymbolMatch must stay compact");
 
 impl SymbolMatch {
 	/// The declaration's own name (last path segment).
@@ -214,6 +235,23 @@ impl SymbolMatch {
 	/// The attached source text's byte range.
 	pub const fn byte_range(&self) -> Range<usize> {
 		self.start_byte..self.end_byte
+	}
+
+	/// Where the declaration's own name starts in `source`.
+	///
+	/// `source` must be the text this match was found in. A line is ended by
+	/// `\n` only, so `\r\n` sources keep their `\r` at the end of the previous
+	/// line and never inside a column. `None` when `source` is shorter than
+	/// [`Self::name_byte`] or the offset is not a character boundary, which
+	/// means it is not the searched text.
+	pub fn name_point(&self, source: &str) -> Option<SourcePoint> {
+		let before = source.get(..self.name_byte)?;
+		let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+		let newlines = before.bytes().filter(|byte| *byte == b'\n').count();
+		Some(SourcePoint {
+			line:   u32::try_from(newlines + 1).ok()?,
+			column: u32::try_from(before.len() - line_start).ok()?,
+		})
 	}
 }
 
@@ -320,6 +358,20 @@ impl<'a> Walker<'a, '_> {
 		&self.source[node.byte_range()]
 	}
 
+	/// Byte offset of `name` in the searched source.
+	///
+	/// Every declaration name is a slice of the source text (`text` of a
+	/// node), so its address locates it without carrying a node per name.
+	fn offset_of(&self, name: &str) -> usize {
+		let source = self.source.as_bytes().as_ptr_range();
+		let at = name.as_ptr();
+		debug_assert!(
+			source.contains(&at) && name.len() <= source.end.addr() - at.addr(),
+			"declaration names are slices of the searched source"
+		);
+		at.addr().saturating_sub(source.start.addr())
+	}
+
 	fn field_text(&self, node: Node<'_>, field: &str) -> Option<&'a str> {
 		node.child_by_field_name(field).map(|n| self.text(n))
 	}
@@ -421,6 +473,7 @@ impl<'a> Walker<'a, '_> {
 		let end_byte = self.source[..decl.outer.end_byte()]
 			.trim_end_matches(['\n', '\r'])
 			.len();
+		let name_byte = self.offset_of(decl.name);
 		self.out.push(SymbolMatch {
 			kind: decl.kind,
 			path: path.freeze(),
@@ -430,6 +483,7 @@ impl<'a> Walker<'a, '_> {
 			end_line: node_content_end_line(decl.outer),
 			start_byte: first.start_byte(),
 			end_byte,
+			name_byte,
 			name_start: name_start as u32,
 		});
 	}
@@ -1263,5 +1317,115 @@ interface Shape {
 		assert_eq!(SymbolKind::TypeAlias.to_string(), "type-alias");
 		assert_eq!(<&str>::from(SymbolKind::Method), "method");
 		assert_eq!("type-alias".parse(), Ok(SymbolKind::TypeAlias));
+	}
+	/// Every match's name offset must land on its own identifier, and the
+	/// derived point must index the same bytes through line and column.
+	fn assert_names_located(language: SupportLang, source: &str, selectors: &[&str]) {
+		for selector in selectors {
+			let found = find(language, source, selector);
+			assert!(!found.is_empty(), "`{selector}` must match");
+			for matched in &found {
+				let name = matched.name();
+				assert_eq!(
+					source.get(matched.name_byte..matched.name_byte + name.len()),
+					Some(name),
+					"`{selector}` -> {}",
+					matched.path
+				);
+				let point = matched.name_point(source).expect("same source");
+				let line = source
+					.split('\n')
+					.nth(point.line as usize - 1)
+					.expect("line exists");
+				assert!(
+					line
+						.get(point.column as usize..)
+						.is_some_and(|rest| rest.starts_with(name)),
+					"`{selector}` -> {} at {point:?} in {line:?}",
+					matched.path
+				);
+				assert!(
+					(matched.start_line..=matched.end_line).contains(&point.line),
+					"the name lies inside the declaration's range"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn name_point_marks_the_identifier_not_the_attached_attributes() {
+		let found = find(SupportLang::Rust, RUST, "Point.new");
+		let [matched] = found.as_slice() else {
+			panic!("one match: {found:?}");
+		};
+		// Doc comment and `#[inline]` start the range two lines above the name.
+		assert_eq!((matched.start_line, matched.end_line), (26, 30));
+		assert_eq!(matched.name_point(RUST), Some(SourcePoint { line: 28, column: 8 }));
+		assert_eq!(&RUST[matched.name_byte..][..3], "new");
+	}
+
+	#[test]
+	fn name_points_are_exact_in_every_supported_language() {
+		assert_names_located(SupportLang::Rust, RUST, &[
+			"Point",
+			"Point.new",
+			"ORIGIN",
+			"Draw",
+			"draw",
+			"fmt",
+			"Shape",
+		]);
+		assert_names_located(SupportLang::TypeScript, TYPESCRIPT, &[
+			"add",
+			"Greeter",
+			"Shape",
+			"Shape.area",
+			"Id",
+			"Color",
+			"NS",
+			"inner",
+			"LIMIT",
+			"counter",
+		]);
+		assert_names_located(SupportLang::Python, PYTHON, &["load", "size", "cond"]);
+		assert_names_located(SupportLang::Go, GO, &["Point", "Point.Area", "New", "Count", "A"]);
+		assert_names_located(SupportLang::Java, JAVA, &[
+			"Box",
+			"Box.Box",
+			"toString",
+			"Box.Inner",
+			"Box.Inner.run",
+			"Shape.area",
+		]);
+		assert_names_located(
+			SupportLang::Tsx,
+			"function App() {\n\treturn <div/>;\n}\nclass A {\n\tm() {}\n}\n",
+			&["App", "A.m"],
+		);
+	}
+
+	#[test]
+	fn name_points_count_bytes_after_wide_characters_and_survive_crlf() {
+		let source =
+			"// h\u{e9}llo \u{1F600}\r\nfn caf\u{e9}() {}\r\nconst \u{c9}: u8 = 1; fn after() {}\r\n";
+		let found = find(SupportLang::Rust, source, "after");
+		let [matched] = found.as_slice() else {
+			panic!("one match: {found:?}");
+		};
+		assert_eq!(
+			matched.name_point(source),
+			Some(SourcePoint { line: 3, column: 21 }),
+			"the column counts bytes, so the two-byte capital E acute widens it past 20 characters"
+		);
+		let accent = find(SupportLang::Rust, source, "caf\u{e9}");
+		assert_eq!(accent[0].name_point(source), Some(SourcePoint { line: 2, column: 3 }));
+		assert_names_located(SupportLang::Rust, source, &["after", "caf\u{e9}", "\u{c9}"]);
+	}
+
+	#[test]
+	fn name_point_rejects_text_that_is_not_the_searched_source() {
+		let found = find(SupportLang::Rust, RUST, "Point.new");
+		assert_eq!(found[0].name_point("fn x() {}"), None, "shorter than the name offset");
+		assert_eq!(found[0].name_point(""), None);
 	}
 }
