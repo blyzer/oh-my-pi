@@ -135,8 +135,6 @@ fn v1_settings_convert_legacy_value_encodings() {
 ",
 		"task:
   maxRuntimeMs: 0
-  isolation:
-    enabled: true
 ",
 		"irc:
   timeoutMs: 30000
@@ -169,7 +167,6 @@ fn v1_settings_convert_legacy_value_encodings() {
 	assert!(script.contains("cl_notify_ask false"), "{script}");
 	assert!(script.contains("ai_compact_threshold 0.8"), "{script}");
 	assert!(script.contains("ai_compaction_threshold_tokens -1"), "{script}");
-	assert!(script.contains("sv_task_isolation_mode auto"), "{script}");
 	assert!(script.contains("sv_task_max_runtime never"), "{script}");
 	assert!(script.contains("sv_irc_timeout 30000ms"), "{script}");
 	assert!(script.contains("sv_tools_max_timeout 60s"), "{script}");

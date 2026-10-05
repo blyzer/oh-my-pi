@@ -1972,8 +1972,9 @@ More than the assignment implies, which changes the shape of the work from
   `concurrency()` returns a hard-coded `{ limit: 4 }` (`chat.rs:660`). That
   rejection list is a precise inventory of the work.
 - **A one-shot completion bridge exists too, and keeps its name.**
-  `ParentSessionHost::completion` (`crates/app/src/envd/eval/bridge.rs:483`),
-  implemented by `ChatParentHost::completion` (`crates/app/src/chat.rs:511-577`),
+  `ParentSessionHost::completion` (`crates/envd/src/eval/bridge.rs`),
+  implemented by the driver's work-pool scheduler
+  (`crates/driver/src/subagent/workpool_scheduler.rs`),
   already runs a single stateless turn through the `TurnClient` and returns
   `{"text": …}`. `omp.agents.completion` is that method with the three things it
   lacks: an ordered `choices` ladder, budget accounting, and the caller-supplied
@@ -2541,7 +2542,9 @@ Three storage designs:
    docserver." Cost: one `stat` per candidate per snapshot, plus a content hash
    for anything whose `(mtime, size, inode)` changed. **Recommended.**
 3. **Filesystem-level CoW** (APFS clone, btrfs/zfs subvolume snapshot,
-   `reflink`) with an `rcopy` fallback — pi's `task.isolation.mode` ladder.
+   `reflink`) with an `rcopy` fallback — pi's isolation-backend ladder (omp
+   implements only per-file reflink with a copy fallback, for subagent
+   isolation; see ADR 0007).
    Near-free capture where supported, but the support matrix is the whole
    problem: eleven backends in pi, each with its own failure mode, and the
    fallback is a full copy. **Ship as an optimization behind design 2's

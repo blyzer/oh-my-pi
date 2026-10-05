@@ -63,8 +63,8 @@ pub struct ChildRequest {
 	/// Validation behavior for a caller-provided or inherited output schema.
 	#[serde(rename = "schemaMode")]
 	pub schema_mode:   Option<SchemaMode>,
-	/// Run this child in an isolated whole-workspace view; omitted selects the
-	/// configured default (`sv_task_isolation_mode`).
+	/// Isolation hint. Every child already runs in its own whole-workspace view
+	/// (ADR 0007), so this does not change whether a view is created.
 	pub isolated:      Option<bool>,
 }
 
