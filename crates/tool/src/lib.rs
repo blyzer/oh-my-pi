@@ -47,8 +47,7 @@ pub use registry::{
 };
 pub use restrictions::{
 	ROSTER_RESTRICTED, ROSTER_UNAVAILABLE, RosterDenial, RosterRule, ToolNameList, ToolRestrictions,
-	WriteScopeDenied,
-	plan_target_matches,
+	WriteScopeDenied, plan_target_matches,
 };
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize, de, de::DeserializeOwned};

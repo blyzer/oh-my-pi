@@ -78,6 +78,12 @@ function of the session's composition and the route's lowering capabilities only
   journaled with a typed `tool.roster.restricted` policy denial whose text lists the tools still
   callable. A tool the wire declared but the registry no longer resolves settles as
   `tool.roster.unavailable`.
+- A subagent spawned under plan mode carries a host-set read-only ceiling (`sv_tools_read_only`,
+  ADR 0006). It never changes for the life of that child session, so it is latched into the
+  child's wire roster at its first request (the read-only tools plus any mounts) and also refuses
+  at dispatch. This is the one case where a restriction shapes the wire, and it is legitimate
+  because the child's roster is fixed from its first request. The parent's own wire roster is
+  never narrowed by Plan.
 - Explicit, accepted boundaries: a model switch to a route with different lowering capabilities
   re-lowers the same names once (the cache is per model anyway); RPC `set_host_tools` is accepted
   only between turns and the next request re-lowers; workpool `yield` has a batch-independent

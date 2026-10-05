@@ -129,7 +129,9 @@ The owner decided four follow-ups to the nested-call amendment:
 - **Subagents of a plan-mode parent are read-only.** A child spawned while the parent runs under
   plan mode, or by a read-only parent, carries a read-only ceiling (`sv_tools_read_only`) that its
   own cfg cannot lift: inheritance is a ceiling, like the `task` recursion limit. The ceiling is
-  part of the same per-request `ToolRestrictions` snapshot the dispatch check uses.
+  part of the same per-request `ToolRestrictions` snapshot the dispatch check uses. The ceiling is
+  fixed for the child's life, so the child's latched wire roster (ADR 0024) is also capped at the
+  read-only tools from its first request; the parent's wire roster is never narrowed by Plan.
 - **The environment confines writes as well.** An invocation whose restrictions carry a plan file
   or a read-only ceiling runs inside a write scope, and the environment's writers refuse every
   change the scope does not admit, with a typed error. The dispatch check stays: it gives the
