@@ -125,6 +125,14 @@ prepare_tree() {
 		rm -rf "$BUNDLED"
 	fi
 
+	# A statement-level `case`: macOS ships bash 3.2, which cannot parse a `case` whose
+	# patterns close with `)` inside `$(...)`; the failed substitution left
+	# `build_flags=` empty in the generated config.
+	case "$LIB_NAME" in
+		*td) BUILD_FLAGS="Py_DEBUG,Py_GIL_DISABLED" ;;
+		*) BUILD_FLAGS="Py_GIL_DISABLED" ;;
+	esac
+
 	echo "generating ${VENDOR_NAME}/pyo3-config.txt..." >&2
 	cat > "$VENDOR/pyo3-config.txt" <<EOF
 implementation=CPython
@@ -135,7 +143,7 @@ lib_name=${LIB_NAME}
 lib_dir=${CONFIG_DIR}
 executable=${EXECUTABLE}
 pointer_width=64
-build_flags=$(case "$LIB_NAME" in *td) echo "Py_DEBUG,Py_GIL_DISABLED";; *) echo "Py_GIL_DISABLED";; esac)
+build_flags=${BUILD_FLAGS}
 suppress_build_script_link_lines=false
 EOF
 
