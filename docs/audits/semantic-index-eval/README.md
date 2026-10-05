@@ -34,4 +34,34 @@ reading by symbol instead of by line range, and references instead of repeated `
 
 ## Results
 
-Filled in from the workflow artifact (`semantic-index-eval-results/summary.txt`).
+Workflow run 37303224940 (rust-analyzer 1.99.0-nightly 2026-08-07, workspace load 118 s, peak RSS 9.8 GB),
+artifact `semantic-index-eval-results` (`summary.txt`, `references.json`).
+
+**A. References.** Of 144 usage-style searches that name at least one Rust file, 68 resolve to a
+symbol rust-analyzer can answer (44 to a single unique symbol); the rest are text, flags, keys or
+symbols that no longer exist at this commit.
+
+| | rg (history) | rust-analyzer |
+|---|---|---|
+| tokens, median | 294 | 73 as `path:line`, 33 grouped by file |
+| tokens summed over the recorded calls | 41 964 | 5 111 grouped by file (-88 %) |
+| recall of the Rust files rg returned | | median 0.65; >= 0.5 in 39/68; 0 in 10/68 (unique symbols: median 0.45) |
+| query time | | median 0.18 s |
+
+Recall is a lower bound (rg also matches comments and strings). Precision (median 0.67) is not
+meaningful: the recorded rg searches were often scoped to one crate directory.
+
+**B. Symbol slices.** 3 191 functions and methods in 120 sampled files: body median 92 tokens, mean
+161, p90 340. The history's `sed -n` range reads average 975 tokens and a whole file has a median of
+3 144.
+
+**What it is worth.** Usage searches are small in the history (about 109 k of 5.5 M exploration
+tokens), so even -88 % there is about 0.1 M tokens. The lever is reading by symbol: 2 842 `sed -n`
+reads cost 2.77 M tokens. If half of them could be replaced by a symbol body of 160-340 tokens,
+the saving is roughly 1.0-1.2 M tokens, about 20 % of the exploration tokens and a few percent of
+all cache-read volume once carry is counted. This is an estimate: a range read can span several
+items or non-function code, which a symbol slice does not replace.
+
+Compared with the Graphify evaluation (tree-sitter graph: `affected` found at least half of the
+files rg found in 8 of 48 cases), the compiler-backed index is far more accurate, but its value is
+in symbol slices, not references.
