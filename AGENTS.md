@@ -549,6 +549,19 @@ clone).
 - NEVER revert/`git checkout` user edits; user edits/renames in flight —
   adapt to the tree as is.
 
+### Code Navigation
+Pick the cheapest source of evidence before reading source.
+- Text (exact strings, literals, config keys, error messages, comments, regex,
+  discovering an unknown symbol name): `rg`/Grep, bounded — scope to a path or
+  glob, cap matches.
+- Semantics (definition, references, implementations, type info,
+  callers/callees): a language-server-backed tool, in omp `lsp` with `file` +
+  `symbol` (no `line` needed). Never infer these from text search when it can
+  answer; with no such tool, text hits are candidates, not proof.
+- Reading: only after the above narrowed file and range. Bounded
+  `read path:START-END` or `read path:@Type.method`, never a whole file when a
+  range suffices.
+
 ## Key Files
 `Cargo.toml`: members, shared deps, lints, release profile.
 `rust-toolchain.toml`/`rustfmt.toml`/`clippy.toml`/`rust-analyzer.toml`:
