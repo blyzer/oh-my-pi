@@ -465,14 +465,10 @@ pub async fn admit_child(
 fn subagent_spec(parent_ctx: &Ctx, child: &ChildRequest, model: &str) -> serde_json::Value {
 	let settings = TaskSettings::from_con(parent_ctx);
 	let depth = SV_TASK_RECURSION_DEPTH.get(parent_ctx);
-	let worktree = child
-		.isolated
-		.unwrap_or(settings.isolation.mode != super::settings::TaskIsolationMode::None);
-	let merge = if worktree {
-		<&'static str>::from(settings.isolation.merge)
-	} else {
-		"none"
-	};
+	// `run_child` isolates every composed child unconditionally (ADR 0007), so
+	// the payload reports the view that will exist, not the caller's hint.
+	let worktree = true;
+	let merge = <&'static str>::from(settings.isolation.merge);
 	serde_json::json!({
 		"task": child.task,
 		"name": child.name,
@@ -1537,6 +1533,8 @@ mod tests {
 		assert_eq!(spec["thinking"], "lo");
 		assert_eq!(spec["model"], "anthropic/claude");
 		assert_eq!(spec["schema_mode"], "permissive");
+		assert_eq!(spec["worktree"], true, "every child runs in an isolated view (ADR 0007)");
+		assert_eq!(spec["merge"], "patch");
 		for key in ["isolation", "worktree", "merge", "max_depth", "budget", "labels"] {
 			assert!(spec.get(key).is_some(), "SubagentSpec field {key} missing");
 		}
@@ -1569,7 +1567,6 @@ mod tests {
 			effective["name"] = "Scout2".into();
 			effective["agent"] = "task".into();
 			effective["thinking"] = "hi".into();
-			effective["worktree"] = true.into();
 			effective["output_schema"] = serde_json::json!({"type": "object"});
 			effective["schema_mode"] = "strict".into();
 			omp_agent::GateDecision::Modify(omp_agent::HookPatch {
@@ -1588,7 +1585,7 @@ mod tests {
 			effort:        Some(TaskEffort::Hi),
 			output_schema: Some(serde_json::json!({"type": "object"})),
 			schema_mode:   Some(SchemaMode::Strict),
-			isolated:      Some(true),
+			isolated:      None,
 		});
 		drop(gate);
 

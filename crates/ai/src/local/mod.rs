@@ -5,12 +5,11 @@
 pub mod applefm;
 /// Verified, root-confined model artifacts.
 pub mod artifact;
-/// FastEmbed local embeddings.
 /// Named tiny-model device preferences and fallback order.
 pub mod device;
+/// `FastEmbed` local embeddings.
 #[cfg(feature = "local-embedding")]
 pub mod embedding;
-/// llama.cpp GGUF text generation.
 /// Bounded tiny-message preprocessing and structural chat formatting.
 pub mod message_preproc;
 /// Candle Parakeet speech recognition.
@@ -25,8 +24,6 @@ pub mod speech_catalog;
 pub mod stt;
 /// Curated GGUF title, memory, and classifier artifacts.
 pub mod tiny_catalog;
-/// Tiny generated-title validation and casing reconciliation.
-pub mod title;
 /// Kokoro-82M speech synthesis.
 #[cfg(feature = "local-tts")]
 pub mod tts;

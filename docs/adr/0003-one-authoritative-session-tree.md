@@ -1,4 +1,4 @@
-# 0003. One authoritative session tree; the journal is its patch stream
+# 0003. One authoritative session tree, derived from the journal
 
 Status: accepted
 Date: 2026-09-02

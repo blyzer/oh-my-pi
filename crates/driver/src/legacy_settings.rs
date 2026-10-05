@@ -425,22 +425,10 @@ pub fn convert(
 		"compaction.thresholdTokens" if value.as_str() == Some("default") => {
 			return Ok(Some(Value::Int(-1)));
 		},
-		"task.isolation.enabled" => {
-			let enabled = value.as_bool().ok_or(LegacyValueError::ExpectedBool)?;
-			return Ok(Some(Value::Enum(Str::new_static(if enabled { "auto" } else { "none" }))));
-		},
 		"edit.mode" => {
 			if let Some(revision) = value.as_str().and_then(edit_mode_revision) {
 				return Ok(Some(Value::Str(Str::new_static(revision))));
 			}
-		},
-		"providers.tinyModel"
-		| "providers.memoryModel"
-		| "providers.autoThinkingModel"
-		| "providers.unexpectedStopModel"
-			if value.as_str() == Some("online") =>
-		{
-			return Ok(Some(Value::Str(Str::new_static("@tiny"))));
 		},
 		"providers.fireworksTier" if value.as_str() == Some("standard") => {
 			return Ok(Some(Value::Enum(Str::new_static("none"))));
