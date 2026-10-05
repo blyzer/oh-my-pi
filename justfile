@@ -296,10 +296,10 @@ inference-smoke:
 # Licensing & release packaging
 # ---------------------------------------------------------------------------
 
-# Verify .github/workflows/ci-skipped.yml mirrors ci.yml's pull_request paths and required-check names.
+# Verify ci.yml's push paths match .github/ci-paths.txt, its pull_request trigger has no path filter, and the ruleset's required checks are ci.yml jobs.
 [group('release')]
-check-ci-skipped:
-    python3 scripts/check-ci-skipped.py
+check-ci-paths:
+    python3 scripts/check-ci-paths.py
 
 # Verify locked Rust dependency licenses and sources with standard cargo-deny tooling.
 [group('release')]
