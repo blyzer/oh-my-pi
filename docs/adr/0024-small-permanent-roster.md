@@ -55,14 +55,43 @@ a long tail reachable through ordinary composition (0025).
   direct tool call would be, and the harness must synthesize good CLI ergonomics from schemas so
   that hop is cheap.
 
+## Amendment (2026-10-05)
+
+The owner decided how the one roster exception is bounded. Rule 2 stands as written for every
+tool, with one sanctioned, monotonic exception: the hidden `goal` tool is not in the roster until
+the user first engages a goal (`/goal`). It is mounted at the next turn boundary after that
+engagement and then stays in the roster, byte for byte, for the rest of the session, through
+completion, drop, pause, and resume (those become typed `goal` faults on an inactive goal, not an
+unmount). The model cannot mount it: a call to a mount the session never mounted is refused at
+dispatch, and `create` with no goal present is refused as `UserOnly`. The cost is at most one
+cache miss per session, instead of two or more per goal lifecycle. The roster is otherwise a
+function of the session's composition and the route's lowering capabilities only. The mechanism:
+
+- `omp-agent` latches a wire roster on the first request of a kernel/session pair: every slot
+  tool, intersected with the `sv_tools` the session was composed with (`--tools`, agent cfg),
+  plus `think` when `ai_external_thinking` was on at composition, plus `goal` once mounted, minus
+  session tools that withhold their declaration when it latches (`task` at the recursion ceiling).
+  It is lowered once per capability key (strict schema, grammar, tool-count budget) and shared by
+  every request.
+- Everything that used to be expressed by omitting a tool is a refusal at dispatch: Plan and Vibe
+  binds, later `sv_tools` writes, and the `turn_start` hook's `enabled_tools`. A refused call is
+  journaled with a typed `tool.roster.restricted` policy denial whose text lists the tools still
+  callable. A tool the wire declared but the registry no longer resolves settles as
+  `tool.roster.unavailable`.
+- Explicit, accepted boundaries: a model switch to a route with different lowering capabilities
+  re-lowers the same names once (the cache is per model anyway); RPC `set_host_tools` is accepted
+  only between turns and the next request re-lowers; workpool `yield` has a batch-independent
+  schema. `turn_start.toolset_changed` is true exactly at these boundaries.
+
 ## Status in omp
 
-**Status: Partially implemented.** The native roster is a fixed identity set with the long tail behind `dyn`, but the advertised roster is recomputed per request and does change mid-session. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+**Status: Implemented, with the prompt prefix not yet stable.** The tool array is stable for the life of a session (verified 2026-10-05 against the PR that latches the wire roster; see `docs/audits/tool-roster-stability.md` for the transition table T1-T9).
 
 - Fixed identity set: `builtin_tool_identities()` in `crates/tools/src/lib.rs` (32 families, 6 hidden); MCP, media and security devices ride `dyn` (0025).
-- Divergence from rule 2: `ProjectedRequest` assembly in `crates/agent/src/loop.rs` (around line 2213) re-derives the tool list on every request: it applies the `sv_tools` allowlist (so Plan/Vibe Director binds restrict it mid-session), mounts the hidden `goal` tool while a Goal Director is active, adds `think` when `AI_EXTERNAL_THINKING` is set, and withholds `task` at the recursion ceiling. Each change alters the tool prefix.
-- No test pins roster stability; `crates/e2e/tests/p5_prefix_stability.rs` covers prompt bands only. Owner decision: accept Director-driven roster changes (and say so in the ADR) or freeze the roster at composition.
-- Not verified: the 'wall-clock benchmark' acceptance test named in the ADR.
+- Latch: `crates/agent/src/roster.rs` (`WireRoster`), consulted by `Kernel::project_request` in `crates/agent/src/loop.rs`; restrictions in `crates/tool/src/restrictions.rs`.
+- Proof: `crates/e2e/tests/p5_prefix_stability.rs` drives a real kernel and compares the `tools` bytes of every request across Plan, Vibe, `sv_tools` writes, `think`, the `task` ceiling, a hook narrowing `enabled_tools`, goal engage/complete/drop/resume, and a model switch.
+- Not fixed by this work, so a green proof is not "Plan and Goal are cache-neutral": the Goal and prewalk Directors still prepend a system message at index 0 whose text changes, and mode prompts (`ai_prompt_mode`) are appended to the system prefix. Tool-conditional prompt sections still never render in production, and the Anthropic codec's `cache_control` breakpoint count is unreviewed.
+- Not verified: the 'wall-clock benchmark' acceptance test named in the ADR, before and after the full-roster grammar in Plan and Vibe.
 
 ## References
 

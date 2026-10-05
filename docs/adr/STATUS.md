@@ -29,7 +29,7 @@ Statuses: **Implemented** (decision realized in code; remaining limits are liste
 | [0021](0021-constrained-sampling-ownership.md) | Inference owns strict-schema budgets and grammar dialects | Partially implemented | Budget and grammar-dialect fallbacks not proved end to end; declaration-time `on_unsupported` error unverified. | - |
 | [0022](0022-corrective-inference.md) | An adapter is complete when it yields one canonical turn | Implemented | None found. | - |
 | [0023](0023-tiny-local-model.md) | An embedded tiny model handles harness chores | Partially implemented | Amended: the `tiny` role resolves to a configured (default online) model; an in-process generator is a future option. Open: only speech rewriting has a caller; stale comments and caller-less helpers await a code cleanup. | Decided 2026-10-04 |
-| [0024](0024-small-permanent-roster.md) | Every permanent tool taxes every turn; the roster stays small and fixed | Partially implemented | Roster varies mid-session (`sv_tools`, Goal, `think`, `task` ceiling); decision rule 2 says it never does. | Yes |
+| [0024](0024-small-permanent-roster.md) | Every permanent tool taxes every turn; the roster stays small and fixed | Implemented | Amended 2026-10-05: the wire roster is latched per session; restrictions refuse at dispatch; `goal` mounts once at the first user engagement. Open: Goal/prewalk/mode prompts still move the system prefix; wall-clock benchmark not re-run. | Decided 2026-10-05 |
 | [0025](0025-long-tail-behind-stable-surfaces.md) | `dyn` and code surfaces carry the long tail | Partially implemented | No Eval `dyn` binding; Bash does not parse kitty/sixel passthrough into attachments. | - |
 | [0026](0026-intent-and-versioned-tools.md) | Every tool carries `i`; every tool is versioned | Implemented | None found. | - |
 | [0027](0027-read-materializes-resources.md) | `Read` materializes any resource; internal URL schemes | Implemented | None found. | - |
@@ -50,7 +50,7 @@ Totals: 24 implemented, 15 partially implemented.
 
 ## Code departing from the decision text (owner decision needed)
 
-- [0024](0024-small-permanent-roster.md) Every permanent tool taxes every turn; the roster stays small and fixed: Roster varies mid-session (`sv_tools`, Goal, `think`, `task` ceiling); decision rule 2 says it never does.
+- [0024](0024-small-permanent-roster.md) Every permanent tool taxes every turn; the roster stays small and fixed: Wire roster latched per session (amended 2026-10-05); prompt prefix not yet stable.
 - [0034](0034-transcript-is-a-protocol.md) Blocks, exactly-once history, append-only scrollback; TLA+-checked: No full/compact/pulse geometry; `cl_resize_policy` convar still exists; TLC not run in CI.
 - [0035](0035-rust-for-the-engine.md) Language choice is architecture; Rust for the engine: About 175 error variants carry a bare `Str`/`String`; error text is formatted in many places.
 
@@ -62,12 +62,13 @@ The owner brought these decisions in line with the code. Each ADR's decision tex
 - [0006](0006-host-policy-sandbox-stub.md): the eval parent bridge (`ParentSessionHost`) is a bounded exception to 'the stub never calls the host'; the minimized stub for remote targets is deferred to 0039. Nested native-tool calls from eval obey explicit `deny` and the request's roster restrictions without prompting; eval-level approval stays the unit of prompts, and per-call admission is deferred until route- or session-scoped approvals exist. In production only `__workpool__` is bound; completion, agent, concurrency and budget have no production host.
 - [0007](0007-subagent-filesystem-isolation.md): only per-file reflink with a copy fallback is implemented; other backends are future targets and not selectable. Code follow-up: remove the unimplemented `sv_task_isolation_mode` options. Open gap kept in the ADR: gitignored files are not copied.
 - [0023](0023-tiny-local-model.md): the `tiny` role resolves to a configured model (default `commit`, then `smol`, an online model); an in-process tiny generator is a future option. Code follow-up: stale comments in `crates/ai/src/local/mod.rs`, caller-less title helpers, unread `ai_*_selector` convars.
+- [0024](0024-small-permanent-roster.md): the wire roster is latched per session and every restriction refuses at dispatch; the one exception is the hidden `goal` tool, mounted once (monotonically) at the first user-initiated goal engagement. Open: Goal/prewalk/mode prompts still move the system prefix.
 - [0028](0028-bash-is-an-in-process-interpreter.md): approval is the sandbox-denial-and-rerun model with a path or network fact as the unit; capability-level, pre-execution approval is not claimed.
 
 ## Status changes against the previous notes
 
-- Downgraded from Implemented: 0001 (remote-driver and factory modes only partly built), 0007 (isolation backends not wired), 0014 (no remote console-line channel), 0024 (roster changes mid-session), 0034 (viewport cutover not done, resize convar remains).
-- Upgraded from Partial: 0027 and 0030 (the prior notes named no reproducible gap; the unverified item is stated in each).
+- Downgraded from Implemented: 0001 (remote-driver and factory modes only partly built), 0007 (isolation backends not wired), 0014 (no remote console-line channel), 0034 (viewport cutover not done, resize convar remains).
+- Upgraded from Partial: 0024 (2026-10-05, roster latched), 0027 and 0030 (the prior notes named no reproducible gap; the unverified item is stated in each).
 - 0037: the note said the terminal cutover (step 4) was open; it landed in PR #126 and is verified in the tree.
 - 0039: the note said 'not yet implemented'; phase S0 is done (PR #129).
 - 0028: upgraded to Implemented by the 2026-10-04 amendment, which states the approval model that exists; the old gap note about network approval was stale and is removed.

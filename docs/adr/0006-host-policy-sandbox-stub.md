@@ -110,8 +110,9 @@ The owner closed the open gap with a middle path:
   so a nested prompt could be answered without interrupting the cell for every call.
 
 The roster restrictions are the agent's, not the environment's, so they travel with the call: the
-agent snapshots one `omp_tool::ToolRestrictions` per model request (from the same inputs the
-advertised roster is derived from), checks every call against it before any preview or execution,
+agent snapshots one `omp_tool::ToolRestrictions` per model request (the live `sv_tools`
+allowlist and Director binds, the hook filter, the hidden mounts the session never mounted; the
+advertised roster itself is latched per session, ADR 0024), checks every call against it before any preview or execution,
 and forwards it on `InvokeTool.restrictions` (`omp.env.v1.ToolRestrictions`). The environment hands
 it to the eval cell through `IncomingParams::restrictions` and `RuntimeSnapshot::restrictions`
 (host-only, never serialized to the child), and the parent side of the bridge applies it to each

@@ -1390,8 +1390,10 @@ the core refuses, journals the refusal, and settles.
 
 Mutable fields: `before_agent_start.{text, items}` (REPLACE, APPEND),
 `turn_start.enabled_tools` (INTERSECT), `turn_start.{model, route, thinking, deadline}` (REPLACE).
-`enabled_tools` narrows both the request's advertised tools and dispatch: a call to a tool the
-hook disabled settles as a journaled `tool.roster.restricted` policy denial, and nested
+`enabled_tools` narrows dispatch, not the advertised tools: the wire roster is latched for the
+session (ADR 0024) so the provider's cached prefix never changes, and the payload's
+`enabled_tools` lists the latched tools a call may use now. A call to a tool the hook disabled
+settles as a journaled `tool.roster.restricted` policy denial that names what is still callable, and nested
 `tool.<name>()` calls from an eval cell started by that request are refused the same way.
 
 **Resolved (2026-08-20 ruling): `turn_start.thinking` uses the portable `Effort` vocabulary and
@@ -1654,7 +1656,11 @@ array (`crates/tool/src/registry.rs::advertise`, `::advertise_matching`,
 [`01-devices.md`](01-devices.md): `Registry::slot_hash` covers policy-resolved model-visible slots,
 while `Registry::device_hash` covers device-catalog availability
 (`crates/tool/src/registry.rs::slot_hash`, `::device_hash`), with
-`TurnStartEvent.toolset_hash` carrying the former.
+`TurnStartEvent.toolset_hash` carrying the digest (`Hash32`) of the latched wire roster.
+`toolset_changed` is true only when that roster differs from the previous request's: the first
+request, a model switch to a route that lowers tools differently, a replaced RPC host tool
+roster, or the first goal engagement mounting `goal`. It is false otherwise, including when a
+Director bind or a hook narrows `enabled_tools`.
 
 Mutable fields: `tool_call.{target, args, cwd, deadline}` (REPLACE each),
 `tool_result.annotate` (APPEND), `tool_result.spill` (REPLACE), `device_list.devices` (INTERSECT).
@@ -2321,7 +2327,7 @@ The pi version calls `setActiveTools(PLAN_TOOLS)` on entry and `restoreIdleTools
 intercepts `tool_call` to deny dangerous bash during planning, filters stale messages through a
 `context` hook, and hosts a loopback HTTP viewer. Three of those four are structural problems:
 `setActiveTools` is a whole-set write that fights any other extension doing the same; re-registering
-the toolset costs a prompt-cache miss every transition; and the `context` hook rewrites history
+the toolset costs a prompt-cache miss every transition (omp latches the advertised roster and narrows at dispatch instead); and the `context` hook rewrites history
 client-side.
 
 In omp, plan mode is the built-in `plan` Director (`crates/agent/src/directors/plan.rs`, ADR 0015).

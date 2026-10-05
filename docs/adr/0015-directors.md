@@ -120,8 +120,9 @@ mode, and actor-local pending-input gate after an 800 ms idle boundary, then sub
 hidden continuation as a distinct session turn. Continuation arming, Goal identity, token
 accounting baselines, finite-budget state, pause, completion, and drop are durable Director
 properties; `crates/driver/src/headless/goal.rs` executes the hidden `goal@1` session tool directly
-against that selected-branch state, and `crates/agent/src/loop.rs` derives the model-visible Goal
-tool roster from it on every request. A prose-only continuation journals its hold, replay preserves
+against that selected-branch state, and `crates/agent/src/roster.rs` mounts the model-visible Goal
+tool at the first turn boundary that finds a goal engaged and keeps it for the session (ADR 0024
+amendment); complete, drop, pause, and resume on an inactive goal are typed faults. A prose-only continuation journals its hold, replay preserves
 it, tool progress or genuine user input re-arms it, interruption and session selection pause the
 Goal, and budget exhaustion holds as `budget-limited` rather than claiming completion. Separately,
 `crates/agent/src/loop.rs` treats canonical `pause_turn` completions as non-terminal only at the
