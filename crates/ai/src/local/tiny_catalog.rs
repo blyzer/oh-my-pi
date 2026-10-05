@@ -26,7 +26,7 @@ pub enum TinyWorkload {
 	Title,
 	/// Bounded Mnemopi extraction and consolidation completions.
 	Memory,
-	/// Closed-ladder difficulty classification.
+	/// Closed-ladder classification.
 	Classifier,
 }
 
@@ -176,7 +176,7 @@ pub const TITLE_MODELS: [TinyModelSpec; 5] = [
 	},
 ];
 
-/// Mnemopi registry, also used by the local difficulty classifier.
+/// Mnemopi registry, also used by the local classifier.
 pub const MEMORY_MODELS: [TinyModelSpec; 5] = [
 	TinyModelSpec {
 		id: "qwen3-1.7b",

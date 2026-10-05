@@ -74,8 +74,8 @@ existing required checks keep their names.
 
 `Error-formatting ratchet (lintx)` (ADR 0035) runs on a GitHub-hosted runner as
 well and is required (it reported green on a pull request before it was added).
-`ci-skipped.yml` reports it for pull requests that skip CI, so such pull requests
-are not blocked by it.
+It is a job of `ci.yml` like the others, so it is skipped, and passes, on pull
+requests that change no CI path.
 
 Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
@@ -90,34 +90,36 @@ when the pull request had the current base merged in before it was merged;
 otherwise the push runs the full job as before. It runs only on pushes, so do
 not require it either.
 
-`CI` only runs when a pull request touches the paths listed in `ci.yml`, so a
-pull request that changes only other files (for example, most of `docs/`)
-would never report these checks and, with them required, would wait forever.
-`.github/workflows/ci-skipped.yml` closes that gap with GitHub's documented
-pattern. It runs on the same pull requests (`branches: [main, omp2]`) with
-`paths-ignore` set to the same list as `ci.yml`'s `pull_request.paths`, and
-defines one job per required check under the byte-identical `name:`. Each job
-runs on a hosted Linux runner with read-only permissions and succeeds at once,
-printing that CI was not needed because no CI-relevant paths changed. A pull
-request that touches only non-CI paths therefore gets all eight checks green
-without running the real jobs; one that touches a CI path runs `ci.yml` as
-usual.
+CI is one workflow, `ci.yml`, and it runs on every pull request. It has no
+`paths` filter on `pull_request`: a workflow that a path filter keeps out of a
+pull request reports nothing, so its required checks would wait forever. A job
+named `changes` lists the pull request's files through the API and matches them
+against `.github/ci-paths.txt` (one glob per line, `**` crosses directories).
+When nothing matches, every other job is skipped, and GitHub counts a skipped
+required check as passing. A docs-only pull request therefore gets all eight
+checks without running them; one that touches a CI path runs them for real.
 
-Two things keep this honest:
+Why one workflow and not a second one that reports the same names for skipped
+pull requests: a pull request that touched both CI paths and other files (code
+plus an ADR, say) triggered both workflows, so each check name was reported
+twice, an instant pass and the real result, and `Pushed tree already verified`
+reads a check run by name. One workflow reports each name once.
 
-- The two path lists must match exactly, and every job name in
-  `ci-skipped.yml` must equal a job name in `ci.yml`, because a required check is
-  matched by name. Both files carry a comment saying so. `just check-ci-skipped`
-  (`scripts/check-ci-skipped.py`) verifies both; run it whenever either file
-  changes, and rename a required check in both workflows and in the ruleset
-  together.
-- A pull request that touches both CI paths and other paths runs both
-  workflows, so each check name reports twice: the instant pass from
-  `ci-skipped.yml` and the real result from `ci.yml`. A failing or pending real
-  run still blocks the merge; the instant pass never masks it.
+Things that keep this honest:
 
-`Package macOS`, `PR labels` and the P8 recorder are not in `ci-skipped.yml`
-because they are not required.
+- The decision fails closed. If `changes` errors, its output is empty and the
+  jobs run. Only an explicit `ci=false` skips them.
+- `push` in `ci.yml` still uses a native `paths` list (a push has no required
+  checks). It must equal `.github/ci-paths.txt`, `pull_request` must carry no
+  path filter, and every required check in the ruleset must be a `name:` of a
+  `ci.yml` job. `just check-ci-paths` (`scripts/check-ci-paths.py`) verifies all
+  three; run it whenever `ci.yml`, `ci-paths.txt` or the ruleset changes, and
+  rename a required check in `ci.yml` and the ruleset together.
+- `.github/ci-paths.txt` and `.github/workflows/ci.yml` are themselves in the
+  list, so editing the gate runs CI.
+
+`Package macOS`, `PR labels` and the P8 recorder are not required and are not
+gated by `changes`.
 
 If the ruleset requires `Rust workspace and acceptance proofs` while the
 `MACOS_RUNNER` variable points that job at a self-hosted Mac, an outage of that
