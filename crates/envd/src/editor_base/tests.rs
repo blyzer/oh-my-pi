@@ -933,7 +933,9 @@ async fn a_bound_composition_answers_reads_over_the_environment_wire() {
 		.invoke(omp_proto::env::v1::InvokeTool {
 			invocation_id: "read-1".to_owned(),
 			name: "read".to_owned(),
-			rev: "2".to_owned(),
+			rev: omp_tools::read::spec(omp_tools::read::ReadPolicy::default())
+				.rev
+				.to_string(),
 			..omp_proto::env::v1::InvokeTool::default()
 		})
 		.await

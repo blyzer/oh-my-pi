@@ -15,6 +15,14 @@ use serde_json::{Value, json};
 const FIXTURE_ROOT: &str =
 	concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/tests/fixtures/special-sources");
 
+/// The live `read` revision, taken from the tool's own spec so a revision bump
+/// cannot strand these invocations.
+fn read_rev() -> String {
+	omp_tools::read::spec(omp_tools::read::ReadPolicy::default())
+		.rev
+		.to_string()
+}
+
 async fn invoke_ok(
 	client: &EnvClient,
 	invocation_id: &str,
@@ -115,7 +123,7 @@ async fn production_env_reads_special_sources_and_shares_write_edit_snapshots() 
 		("read-image", "images/pixel.png"),
 		("read-profile", "profiles/run.cpuprofile"),
 	] {
-		let payload = invoke_ok(env.client(), id, "read", "3", json!({"path": path})).await?;
+		let payload = invoke_ok(env.client(), id, "read", &read_rev(), json!({"path": path})).await?;
 		assert!(payload.is_object(), "read payload for {path}: {payload}");
 	}
 

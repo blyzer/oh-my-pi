@@ -757,6 +757,14 @@ async fn collect_exec(run: &mut omp_env::ExecRun) -> (Vec<u8>, v1::ExecStatusMsg
 	}
 }
 
+/// The live `read` revision, taken from the tool's own spec so a revision bump
+/// cannot strand these invocations.
+fn read_rev() -> String {
+	omp_tools::read::spec(omp_tools::read::ReadPolicy::default())
+		.rev
+		.to_string()
+}
+
 async fn invoke_builtin(
 	client: &EnvClient,
 	invocation_id: &str,
@@ -830,7 +838,8 @@ fn ok_builtin_payload(verdict: v1::Verdict, operation: &str) -> Value {
 }
 
 async fn read_builtin_text(client: &EnvClient, invocation_id: &str, path: &str) -> String {
-	let verdict = invoke_builtin(client, invocation_id, "read", "3", json!({"path": path})).await;
+	let verdict =
+		invoke_builtin(client, invocation_id, "read", &read_rev(), json!({"path": path})).await;
 	let payload = ok_builtin_payload(verdict, "read");
 	payload["parts"][0]["text"]
 		.as_str()
@@ -899,7 +908,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		("edit", "hl.1".to_owned()),
 		("glob", "1".to_owned()),
 		("grep", "1".to_owned()),
-		("read", "3".to_owned()),
+		("read", read_rev()),
 	]);
 	for name in ["eval", "write"] {
 		assert_eq!(
@@ -1056,9 +1065,14 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		)
 	);
 
-	let read =
-		invoke_builtin(harness.client(), "builtin-read", "read", "3", json!({"path":"note.txt"}))
-			.await;
+	let read = invoke_builtin(
+		harness.client(),
+		"builtin-read",
+		"read",
+		&read_rev(),
+		json!({"path":"note.txt"}),
+	)
+	.await;
 	assert!(
 		!read.is_error,
 		"read adapter returned an error: {}",
@@ -1140,7 +1154,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		harness.client(),
 		"builtin-read-written",
 		"read",
-		"2",
+		&read_rev(),
 		json!({"path":"nested/written.txt:raw"}),
 	)
 	.await;
@@ -1947,7 +1961,7 @@ async fn uds_clients_invoke_owner_eval_and_retain_ordinary_tools() {
 		&remote,
 		"remote-read-allowed",
 		"read",
-		"2",
+		&read_rev(),
 		json!({"path":"uds-note.txt:raw"}),
 	)
 	.await;
