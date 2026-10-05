@@ -170,6 +170,7 @@ use crate::{
 		DynamicDeviceCatalogEntry, HookControlFactory, RegistryControlFactory,
 	},
 	worker::AgentsControlAuthorityBinding,
+	write_scope::{self, WriteScope},
 };
 
 const MIN_SCHEMA_REV: u32 = 4;
@@ -195,104 +196,94 @@ fn unknown_tool_message(name: &str) -> &'static str {
 	}
 }
 
+/// Execution facts of one invocation that the environment enforces itself.
 #[derive(Clone, Debug, Default)]
 struct InvocationExecutionPolicy {
 	tool:           Str,
-	plan:           bool,
-	plan_yolo:      bool,
+	/// Plan mode, or a read-only subagent of a plan-mode session, derived from
+	/// the invocation's typed roster restrictions (`InvokeTool.restrictions`).
+	/// The native executor runs inside it, so the environment's writers
+	/// refuse every change it does not admit.
+	write_scope:    Option<Arc<WriteScope>>,
 	core_admission: bool,
 }
 
+/// Tools whose every write goes through a writer that consults the
+/// invocation's [`WriteScope`]: the document host and the document
+/// authority behind it.
+const SCOPED_WRITERS: &[&str] = &["write", "edit", "lsp"];
+
+/// An invocation refused at the environment boundary because its tool could
+/// write around the writers its write scope confines.
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
+enum WriteBoundaryDenied {
+	/// Plan mode is active.
+	#[error(
+		"plan mode is active: the environment refused `{tool}`, which can change files outside the \
+		 plan file; no action was taken"
+	)]
+	Plan {
+		/// Refused tool.
+		tool: Str,
+	},
+	/// The caller is a read-only subagent of a plan-mode session.
+	#[error(
+		"this agent is a read-only subagent of a plan-mode session: the environment refused \
+		 `{tool}`, which can change files; no action was taken"
+	)]
+	ReadOnly {
+		/// Refused tool.
+		tool: Str,
+	},
+}
+
 impl InvocationExecutionPolicy {
-	fn from_request(request: &pb::InvokeTool) -> Self {
-		let props = request.props.as_ref();
-		let mode = props
-			.and_then(|props| props.fields.get("omp/execution-mode"))
-			.and_then(|value| value.kind.as_ref())
-			.and_then(|kind| match kind {
-				value::Kind::String(value) => Some(value.as_str()),
-				_ => None,
-			});
-		let plan_yolo = props
-			.and_then(|props| props.fields.get("omp/plan-yolo"))
-			.and_then(|value| value.kind.as_ref())
-			.is_some_and(|kind| matches!(kind, value::Kind::Bool(true)));
-		let core_admission = props
+	fn from_request(
+		request: &pb::InvokeTool,
+		restrictions: Option<&omp_tool::ToolRestrictions>,
+		workspace_root: &Path,
+		sessions_dir: &Path,
+		principal: Option<&str>,
+	) -> Self {
+		let core_admission = request
+			.props
+			.as_ref()
 			.and_then(|props| props.fields.get("omp/core-admission"))
 			.and_then(|value| value.kind.as_ref())
 			.is_some_and(|kind| matches!(kind, value::Kind::Bool(true)));
 		Self {
 			tool: Str::from(request.name.as_str()),
-			plan: mode == Some("plan"),
-			plan_yolo,
+			write_scope: restrictions
+				.and_then(|restrictions| {
+					WriteScope::for_invocation(restrictions, workspace_root, sessions_dir, principal)
+				})
+				.map(Arc::new),
 			core_admission,
 		}
 	}
 
-	fn denial(&self, effects: &Effects, raw: &[u8]) -> Option<Str> {
-		if !self.plan
-			|| !omp_tool::effects_mutate_environment(effects)
-			|| self.plan_yolo
-			|| plan_exempt_target(&self.tool, raw)
-		{
-			return None;
-		}
-		Some(sf!(
-			"plan mode denied a mutating tool call at the Environment boundary; write plan and \
-			 scratch artifacts under local:// (vault:// and sandbox:// are also exempt), or exit \
-			 plan mode before changing the workspace",
-		))
+	/// Refuses, before execution, a tool that could write around the
+	/// environment's scoped writers while a write scope applies: its envelope
+	/// runs commands, spawns subagents, or writes documents through anything
+	/// but the document host. Network-only and read-only tools pass, and so
+	/// do the scoped writers, whose writes the scope confines one by one.
+	fn denial(&self, effects: &Effects) -> Option<WriteBoundaryDenied> {
+		let scope = self.write_scope.as_deref()?;
+		let writes_around = effects
+			.exec
+			.as_ref()
+			.is_some_and(|exec| !exec.commands.is_empty())
+			|| effects.subagents != 0
+			|| (effects
+				.documents
+				.as_ref()
+				.is_some_and(|documents| !documents.write_globs.is_empty())
+				&& !SCOPED_WRITERS.contains(&self.tool.as_str()));
+		writes_around.then(|| match scope {
+			WriteScope::PlanFile { .. } => WriteBoundaryDenied::Plan { tool: self.tool.clone() },
+			WriteScope::ReadOnly => WriteBoundaryDenied::ReadOnly { tool: self.tool.clone() },
+		})
 	}
-}
-
-fn plan_exempt_target(tool: &str, raw: &[u8]) -> bool {
-	let Ok(value) = serde_json::from_slice::<serde_json::Value>(raw) else {
-		return false;
-	};
-	let mut targets = Vec::new();
-	collect_plan_targets(tool, &value, &mut targets);
-	!targets.is_empty() && targets.into_iter().all(exempt_plan_path)
-}
-
-fn collect_plan_targets<'a>(tool: &str, value: &'a serde_json::Value, targets: &mut Vec<&'a str>) {
-	match value {
-		serde_json::Value::Object(fields) => {
-			for (key, value) in fields {
-				if matches!(key.as_str(), "path" | "target" | "file" | "cwd")
-					&& let Some(path) = value.as_str()
-				{
-					targets.push(path);
-				} else if tool == "edit"
-					&& key == "input"
-					&& let Some(patch) = value.as_str()
-				{
-					for line in patch.lines() {
-						if let Some(header) = line
-							.strip_prefix('[')
-							.and_then(|line| line.split_once('#'))
-							.map(|(path, _)| path)
-						{
-							targets.push(header);
-						}
-					}
-				} else {
-					collect_plan_targets(tool, value, targets);
-				}
-			}
-		},
-		serde_json::Value::Array(values) => {
-			for value in values {
-				collect_plan_targets(tool, value, targets);
-			}
-		},
-		_ => {},
-	}
-}
-
-fn exempt_plan_path(path: &str) -> bool {
-	["local://", "vault://", "sandbox://"]
-		.iter()
-		.any(|prefix| path.starts_with(prefix))
 }
 
 /// Environment-daemon assembly or serving failure.
@@ -4821,8 +4812,7 @@ impl EnvServer {
 					},
 				}
 				let denial =
-					match connection.plan_denial(frame.request_id, &request.invocation_id, &request.raw)
-					{
+					match connection.write_boundary_denial(frame.request_id, &request.invocation_id) {
 						Ok(denial) => denial,
 						Err((code, message)) => {
 							send_error(responses, frame.request_id, code, message).await;
@@ -4835,7 +4825,7 @@ impl EnvServer {
 						responses,
 						frame.request_id,
 						pb::ProtocolErrorCode::PermissionDenied,
-						&denial,
+						&denial.to_string(),
 					)
 					.await;
 					connection.abandon_admission(frame.request_id, &invocation_id);
@@ -7379,7 +7369,20 @@ impl EnvServer {
 			.effects(&request.name)
 			.expect("a routed tool has a declared effect envelope")
 			.clone();
-		let execution = InvocationExecutionPolicy::from_request(&request);
+		// The client's roster snapshot for this call: tools that host nested
+		// calls apply it to each `tool.<name>()` (the eval bridge), and a plan
+		// file or read-only ceiling in it scopes every write the call makes.
+		let restrictions = request
+			.restrictions
+			.take()
+			.map(|restrictions| Arc::new(omp_tool::ToolRestrictions::from(restrictions)));
+		let execution = InvocationExecutionPolicy::from_request(
+			&request,
+			restrictions.as_deref(),
+			self.workspace.root(),
+			&self.state_dir.join("sessions"),
+			principal.map(|principal| principal.session_id.as_str()),
+		);
 		let approval_policy = if execution.core_admission {
 			ApprovalPolicy::Prompt
 		} else {
@@ -7413,14 +7416,7 @@ impl EnvServer {
 				connection.owner.clone()
 			};
 			let (feed, params) = IncomingParams::channel_for(Some(owner), Some(invocation_id.clone()));
-			// The client's roster snapshot for this call reaches tools that host
-			// nested calls (the eval bridge applies it to each `tool.<name>()`).
-			let params = params.with_restrictions(
-				request
-					.restrictions
-					.take()
-					.map(|restrictions| Arc::new(omp_tool::ToolRestrictions::from(restrictions))),
-			);
+			let params = params.with_restrictions(restrictions);
 			let lifecycle = Arc::new(NativeLifecycle::default());
 			let name = Str::from(request.name);
 			let edit_repair = connection
@@ -7489,6 +7485,7 @@ impl EnvServer {
 				name,
 				scope.is_some_and(|scope| scope.pty_denied),
 				principal.map(|principal| Str::from(principal.session_id.as_str())),
+				execution.write_scope.clone(),
 				edit_repair_context,
 				acp_context,
 				feed,
@@ -8578,19 +8575,20 @@ impl ConnectionState {
 		})
 	}
 
-	fn plan_denial(
+	/// The open invocation's refusal at the write boundary
+	/// ([`InvocationExecutionPolicy::denial`]), if any.
+	fn write_boundary_denial(
 		&self,
 		request_id: u64,
 		invocation_id: &str,
-		raw: &[u8],
-	) -> Result<Option<Str>, (pb::ProtocolErrorCode, &'static str)> {
+	) -> Result<Option<WriteBoundaryDenied>, (pb::ProtocolErrorCode, &'static str)> {
 		match self.requests.get(&request_id) {
 			Some(RequestState::Invocation(state)) if state.id() == invocation_id => {
 				let (execution, maximum_effects) = match state {
 					InvocationState::Native { execution, maximum_effects, .. }
 					| InvocationState::Worker { execution, maximum_effects, .. } => (execution, maximum_effects),
 				};
-				Ok(execution.denial(maximum_effects, raw))
+				Ok(execution.denial(maximum_effects))
 			},
 			Some(RequestState::Invocation(_)) => Err((
 				pb::ProtocolErrorCode::InvalidArgument,
@@ -8989,6 +8987,7 @@ async fn spawn_native_invocation(
 	name: Str,
 	pty_denied: bool,
 	session_id: Option<Str>,
+	write_scope: Option<Arc<WriteScope>>,
 	edit_repair: InvocationEditRepairContext,
 	acp: InvocationAcpBackends,
 	feed: omp_tool::InvocationFeed,
@@ -9002,167 +9001,179 @@ async fn spawn_native_invocation(
 	finished: flume::Sender<Finished>,
 ) {
 	let (started, start) = flume::bounded(1);
-	tokio::spawn(with_invocation_scope(
-		pty_denied,
-		with_output_request_scope(
-			delivery.output_request,
-			with_invocation_session_scope(
-				session_id,
-				with_edit_repair_scope(
-					edit_repair,
-					with_acp_scope(acp, async move {
-						let result = registry.invoke(&name, params);
-						let _ = started.send(());
-						match result {
-							Ok(mut stream) => {
-								let mut deadline = Box::pin(time::sleep(deadline));
-								let mut cancel_grace: Option<pin::Pin<Box<Sleep>>> = None;
-								let mut timed_out = false;
-								let mut grace_expired = false;
-								loop {
-									if lifecycle.is_terminal() {
-										break;
-									}
-									if let Some(grace) = cancel_grace.as_mut() {
-										tokio::select! {
-											biased;
-											() = grace.as_mut() => {
-												grace_expired = true;
+	// The invocation body is the large future here. It is boxed once so the
+	// task-local scope wrappers around it move a pointer, not the body: nested
+	// by value, six wrappers overflow a worker stack in debug builds.
+	tokio::spawn(write_scope::scoped(
+		write_scope,
+		with_invocation_scope(
+			pty_denied,
+			with_output_request_scope(
+				delivery.output_request,
+				with_invocation_session_scope(
+					session_id,
+					with_edit_repair_scope(
+						edit_repair,
+						with_acp_scope(
+							acp,
+							Box::pin(async move {
+								let result = registry.invoke(&name, params);
+								let _ = started.send(());
+								match result {
+									Ok(mut stream) => {
+										let mut deadline = Box::pin(time::sleep(deadline));
+										let mut cancel_grace: Option<pin::Pin<Box<Sleep>>> = None;
+										let mut timed_out = false;
+										let mut grace_expired = false;
+										loop {
+											if lifecycle.is_terminal() {
 												break;
-											},
-											event = stream.next() => {
-												let reason = if timed_out {
-													"native invocation ended without reporting timeout truth"
-												} else {
-													"native invocation ended without reporting cancellation truth"
-												};
-												if matches!(
-													forward_native_event(
-														event,
-														true,
-														reason,
-														request_id,
-														&invocation_id,
-														&lifecycle,
-														&delivery,
-														&responses,
-													)
-													.await,
-													NativeForward::Terminal
-												) {
-													break;
+											}
+											if let Some(grace) = cancel_grace.as_mut() {
+												tokio::select! {
+													biased;
+													() = grace.as_mut() => {
+														grace_expired = true;
+														break;
+													},
+													event = stream.next() => {
+														let reason = if timed_out {
+															"native invocation ended without reporting timeout truth"
+														} else {
+															"native invocation ended without reporting cancellation truth"
+														};
+														if matches!(
+															forward_native_event(
+																event,
+																true,
+																reason,
+																request_id,
+																&invocation_id,
+																&lifecycle,
+																&delivery,
+																&responses,
+															)
+															.await,
+															NativeForward::Terminal
+														) {
+															break;
+														}
+													},
 												}
-											},
-										}
-									} else {
-										tokio::select! {
-											biased;
-											() = deadline.as_mut() => {
-												let reason = sf!("native invocation deadline exceeded");
-												let _ = feed.interrupt(Interrupt {
-													class: sf!("deadline"),
-													reason: reason.clone(),
-												});
-												if lifecycle.is_committed() {
-													timed_out = true;
-													cancel_grace = Some(Box::pin(time::sleep(
-														NATIVE_CANCEL_GRACE,
-													)));
-												} else if lifecycle.claim_precommit_terminal() {
-													send_abort_verdict(
-														&responses,
-														request_id,
-														&invocation_id,
-														&delivery,
-														omp_tool::Abort::Interrupted { reason },
-													)
-													.await;
-													break;
-												} else {
-													break;
-												}
-											},
-											() = cancel.cancelled() => {
-												if lifecycle.is_committed() {
-													cancel_grace = Some(Box::pin(time::sleep(
-														NATIVE_CANCEL_GRACE,
-													)));
-												} else {
-													break;
-												}
-											},
-											event = stream.next() => {
-												match forward_native_event(
-													event,
-													false,
-													"",
-													request_id,
-													&invocation_id,
-													&lifecycle,
-													&delivery,
-													&responses,
-												)
-												.await
-												{
-													NativeForward::Continue => {},
-													NativeForward::Terminal => break,
-													NativeForward::Backpressure => {
+											} else {
+												tokio::select! {
+													biased;
+													() = deadline.as_mut() => {
+														let reason = sf!("native invocation deadline exceeded");
 														let _ = feed.interrupt(Interrupt {
-															class: sf!("backpressure"),
-															reason: sf!(
-																"invocation response consumer stopped reading",
-															),
+															class: sf!("deadline"),
+															reason: reason.clone(),
 														});
+														if lifecycle.is_committed() {
+															timed_out = true;
+															cancel_grace = Some(Box::pin(time::sleep(
+																NATIVE_CANCEL_GRACE,
+															)));
+														} else if lifecycle.claim_precommit_terminal() {
+															send_abort_verdict(
+																&responses,
+																request_id,
+																&invocation_id,
+																&delivery,
+																omp_tool::Abort::Interrupted { reason },
+															)
+															.await;
+															break;
+														} else {
+															break;
+														}
+													},
+													() = cancel.cancelled() => {
 														if lifecycle.is_committed() {
 															cancel_grace = Some(Box::pin(time::sleep(
 																NATIVE_CANCEL_GRACE,
 															)));
 														} else {
-															lifecycle.claim_terminal();
 															break;
 														}
 													},
+													event = stream.next() => {
+														match forward_native_event(
+															event,
+															false,
+															"",
+															request_id,
+															&invocation_id,
+															&lifecycle,
+															&delivery,
+															&responses,
+														)
+														.await
+														{
+															NativeForward::Continue => {},
+															NativeForward::Terminal => break,
+															NativeForward::Backpressure => {
+																let _ = feed.interrupt(Interrupt {
+																	class: sf!("backpressure"),
+																	reason: sf!(
+																		"invocation response consumer stopped reading",
+																	),
+																});
+																if lifecycle.is_committed() {
+																	cancel_grace = Some(Box::pin(time::sleep(
+																		NATIVE_CANCEL_GRACE,
+																	)));
+																} else {
+																	lifecycle.claim_terminal();
+																	break;
+																}
+															},
+														}
+													},
 												}
-											},
+											}
 										}
-									}
+										if grace_expired
+											&& lifecycle.is_committed()
+											&& lifecycle.claim_terminal()
+										{
+											drop(stream);
+											let reason = if timed_out {
+												sf!(
+													"native invocation exceeded its deadline and did not stop \
+													 within grace",
+												)
+											} else {
+												sf!("native invocation did not stop within cancellation grace")
+											};
+											send_abort_verdict(
+												&responses,
+												request_id,
+												&invocation_id,
+												&delivery,
+												omp_tool::Abort::EffectsUnknown { reason },
+											)
+											.await;
+										}
+									},
+									Err(error) => {
+										if lifecycle.claim_terminal() {
+											let _ = send_invocation_error(
+												&responses,
+												request_id,
+												pb::ProtocolErrorCode::NotFound,
+												&error.to_string(),
+											)
+											.await;
+										}
+									},
 								}
-								if grace_expired && lifecycle.is_committed() && lifecycle.claim_terminal() {
-									drop(stream);
-									let reason = if timed_out {
-										sf!(
-											"native invocation exceeded its deadline and did not stop within \
-											 grace",
-										)
-									} else {
-										sf!("native invocation did not stop within cancellation grace")
-									};
-									send_abort_verdict(
-										&responses,
-										request_id,
-										&invocation_id,
-										&delivery,
-										omp_tool::Abort::EffectsUnknown { reason },
-									)
+								let _ = finished
+									.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
 									.await;
-								}
-							},
-							Err(error) => {
-								if lifecycle.claim_terminal() {
-									let _ = send_invocation_error(
-										&responses,
-										request_id,
-										pb::ProtocolErrorCode::NotFound,
-										&error.to_string(),
-									)
-									.await;
-								}
-							},
-						}
-						let _ = finished
-							.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
-							.await;
-					}),
+							}),
+						),
+					),
 				),
 			),
 		),
@@ -11232,6 +11243,7 @@ async fn send_document_error(
 		DocumentError::Disconnected => pb::ProtocolErrorCode::Internal,
 		DocumentError::MalformedResponse(_) => pb::ProtocolErrorCode::InvalidArgument,
 		DocumentError::Wire(_) => pb::ProtocolErrorCode::Internal,
+		DocumentError::WriteScope(_) => pb::ProtocolErrorCode::PermissionDenied,
 	};
 	send_error(responses, request_id, code, &error.to_string()).await;
 }
@@ -14247,57 +14259,55 @@ mod tests {
 		serving.abort();
 	}
 
+	fn scoped_policy(tool: &'static str, scope: WriteScope) -> InvocationExecutionPolicy {
+		InvocationExecutionPolicy {
+			tool:           sf!(tool),
+			write_scope:    Some(Arc::new(scope)),
+			core_admission: false,
+		}
+	}
+
 	#[test]
-	fn plan_guard_denies_workspace_mutation_and_exempts_local_artifacts() {
-		let effects = Effects {
+	fn write_scopes_refuse_tools_that_write_around_the_scoped_writers() {
+		let documents = Effects {
 			documents: Some(omp_tool::DocEffects {
 				read:        true,
 				write_globs: Arc::from([sf!("**")]),
 			}),
 			..Effects::empty()
 		};
-		let policy = InvocationExecutionPolicy {
-			tool:           sf!("write"),
-			plan:           true,
-			plan_yolo:      false,
-			core_admission: false,
-		};
-		assert!(
-			policy
-				.denial(&effects, br#"{"path":"src/lib.rs","content":"x"}"#)
-				.is_some()
-		);
-		assert!(
-			policy
-				.denial(&effects, br#"{"path":"local://PLAN.md","content":"x"}"#)
-				.is_none()
-		);
-		assert!(
-			policy
-				.denial(&effects, br#"{"path":"vault://plans/x","content":"x"}"#)
-				.is_none()
-		);
-	}
-
-	#[test]
-	fn plan_yolo_authorizes_exactly_the_tagged_invocation() {
-		let effects = Effects {
-			exec: Some(omp_tool::ExecEffects { commands: Arc::from([sf!("*")]), network: false }),
+		let commands = Effects {
+			exec: Some(omp_tool::ExecEffects { commands: Arc::from([sf!("*")]), network: true }),
 			..Effects::empty()
 		};
-		let yolo = InvocationExecutionPolicy {
-			tool:           sf!("bash"),
-			plan:           true,
-			plan_yolo:      true,
-			core_admission: false,
+		let network = Effects {
+			exec: Some(omp_tool::ExecEffects { commands: Arc::default(), network: true }),
+			..Effects::empty()
 		};
-		let plan = InvocationExecutionPolicy {
-			tool:           sf!("bash"),
-			plan:           true,
-			plan_yolo:      false,
-			core_admission: false,
-		};
-		assert!(yolo.denial(&effects, br#"{"command":"touch x"}"#).is_none());
-		assert!(plan.denial(&effects, br#"{"command":"touch x"}"#).is_some());
+		let plan = || WriteScope::PlanFile { plan_file: sf!("local://PLAN.md"), target: None };
+		// The scoped writers proceed: the scope confines each of their writes.
+		for tool in ["write", "edit", "lsp"] {
+			assert_eq!(scoped_policy(tool, plan()).denial(&documents), None, "{tool}");
+		}
+		assert_eq!(scoped_policy("web_search", plan()).denial(&network), None);
+		assert_eq!(scoped_policy("read", WriteScope::ReadOnly).denial(&Effects::empty()), None);
+		let denial = scoped_policy("ast_edit", plan())
+			.denial(&documents)
+			.expect("direct writer");
+		assert_eq!(
+			denial.to_string(),
+			"plan mode is active: the environment refused `ast_edit`, which can change files outside \
+			 the plan file; no action was taken"
+		);
+		let denial = scoped_policy("bash", WriteScope::ReadOnly)
+			.denial(&commands)
+			.expect("commands");
+		assert_eq!(
+			denial.to_string(),
+			"this agent is a read-only subagent of a plan-mode session: the environment refused \
+			 `bash`, which can change files; no action was taken"
+		);
+		let unscoped = InvocationExecutionPolicy { tool: sf!("bash"), ..Default::default() };
+		assert_eq!(unscoped.denial(&commands), None, "no scope, no boundary refusal");
 	}
 }

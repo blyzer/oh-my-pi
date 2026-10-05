@@ -258,6 +258,107 @@ async fn vibe_bind_and_user_allowlist_refuse_with_their_own_reason() {
 	assert!(journal.contains("\"rules\":[\"sv_tools\"]"), "{journal}");
 }
 
+/// A subagent spawned under plan mode carries the read-only ceiling: it never
+/// sees or runs a mutating tool, even when its own allowlist names one, and
+/// its `hub` stays off processes. The plan file belongs to the parent alone.
+#[tokio::test]
+async fn a_read_only_subagent_cannot_write_whatever_its_allowlist_says() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let con = Arc::new(Ctx::new());
+	// Seeded from the parent's Plan bind, then widened by the child's cfg.
+	omp_agent::SV_TOOLS
+		.set(
+			&con,
+			["read", "write", "edit", "bash", "hub"]
+				.map(Str::new_static)
+				.to_vec(),
+		)
+		.expect("allowlist");
+	omp_agent::SV_TOOLS_READ_ONLY
+		.set(&con, true)
+		.expect("read-only ceiling");
+	let write = Probe::new();
+	let edit = Probe::new();
+	let hub = Probe::new();
+	let (inference, requests) = ScriptedInference::new([
+		tool_script("write-plan", "write", serde_json::json!({"path": PLAN_FILE, "content": "x"})),
+		tool_script("edit-1", "edit", serde_json::json!({"path": "src/lib.rs", "input": "x"})),
+		tool_script("hub-start", "hub", serde_json::json!({"op": "start", "name": "dev"})),
+		tool_script("hub-list", "hub", serde_json::json!({"op": "list"})),
+		tool_script("read-1", "read", serde_json::json!({})),
+		text_script("explored"),
+	]);
+	let mut kernel = kernel(
+		inference,
+		[
+			write.tool("write"),
+			edit.tool("edit"),
+			hub.tool("hub"),
+			spec("bash", 1, "bash ran"),
+			spec("read", 1, "read ran"),
+		],
+		&temp.path().join("blobs"),
+		&con,
+	);
+	let mut session = fresh_session(&temp.path().join("child.oms"));
+	run(&mut kernel, &mut session).await;
+
+	let roster = advertised(&requests, 0);
+	for hidden in ["write", "edit", "bash"] {
+		assert!(!roster.iter().any(|name| name == hidden), "{hidden} in {roster:?}");
+	}
+	assert!(roster.iter().any(|name| name == "read"), "{roster:?}");
+	let available = roster.join(", ");
+	for (call, tool) in [("write-plan", "write"), ("edit-1", "edit")] {
+		assert_eq!(result_text(&session, call), [format!(
+			"skipped: `{tool}` is not available to a subagent of a plan-mode session, which may only \
+			 read. No action was taken. Available now: {available}."
+		)]);
+	}
+	assert_eq!(result_text(&session, "hub-start"), ["skipped: `hub` cannot start, restart, or \
+	                                                 send input to a process while plan mode is \
+	                                                 active; no action was taken."]);
+	assert_eq!(result_text(&session, "hub-list"), ["hub ran"]);
+	assert_eq!(result_text(&session, "read-1"), ["read ran"]);
+	assert_eq!((write.opened(), edit.opened()), (0, 0), "refused calls never open a unit");
+	assert_eq!(hub.started(), 1, "only the process-free hub call ran");
+	let journal = journal(&session);
+	assert!(journal.contains("parent:plan/read_only"), "{journal}");
+	assert!(journal.contains("director:plan/processes"), "{journal}");
+}
+
+/// The planning session itself keeps `hub` off processes too: plan mode
+/// mutates nothing but its plan file.
+#[tokio::test]
+async fn plan_mode_keeps_hub_off_processes() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let con = Arc::new(Ctx::new());
+	let hub = Probe::new();
+	let (inference, _) = ScriptedInference::new([
+		tool_script("hub-start", "hub", serde_json::json!({"op": "start", "name": "x"})),
+		tool_script("hub-send", "hub", serde_json::json!({"op": "send", "name": "x"})),
+		tool_script("hub-peer", "hub", serde_json::json!({"op": "send", "to": "scout"})),
+		tool_script("write-plan", "write", serde_json::json!({"path": PLAN_FILE, "content": "p"})),
+		tool_script("ask-1", "ask", serde_json::json!({"question": "approve?"})),
+		text_script("planned"),
+	]);
+	let mut kernel = kernel(
+		inference,
+		[hub.tool("hub"), spec("write", 1, "write ran"), spec("ask", 1, "asked")],
+		&temp.path().join("blobs"),
+		&con,
+	);
+	let mut session = fresh_session(&temp.path().join("plan.oms"));
+	engage(&mut session, Box::new(Plan::new(PLAN_FILE)));
+	run(&mut kernel, &mut session).await;
+	let refused = "skipped: `hub` cannot start, restart, or send input to a process while plan \
+	               mode is active; no action was taken.";
+	assert_eq!(result_text(&session, "hub-start"), [refused]);
+	assert_eq!(result_text(&session, "hub-send"), [refused]);
+	assert_eq!(result_text(&session, "hub-peer"), ["hub ran"]);
+	assert_eq!(hub.started(), 1);
+}
+
 /// Writes `sv_tools` while a request streams, after its snapshot was taken.
 struct WritingInference {
 	inner:  ScriptedInference,

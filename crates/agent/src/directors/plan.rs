@@ -18,9 +18,10 @@ const CLAIMS: &[Slot] = &[Slot::Mode, Slot::Worktree];
 /// [`omp_tool::ToolRestrictions`] snapshot before any preview or execution, and
 /// a call outside this list settles as a journaled `tool.roster.restricted`
 /// policy denial. While plan mode is active the same snapshot confines `write`
-/// to [`Plan`]'s plan file ([`omp_tool::plan_target_matches`]); nested
-/// `tool.<name>()` calls from an eval cell obey the identical snapshot in the
-/// environment's bridge.
+/// to [`Plan`]'s plan file ([`omp_tool::plan_target_matches`]) and keeps `hub`
+/// off processes; nested `tool.<name>()` calls from an eval cell obey the
+/// identical snapshot in the environment's bridge, and the environment refuses
+/// every write outside the plan file.
 pub const PLAN_TOOLS: &[&str] = &[
 	"read",
 	"grep",
@@ -36,6 +37,38 @@ pub const PLAN_TOOLS: &[&str] = &[
 	"hub",
 	"yield",
 ];
+
+/// The read-only ceiling of a subagent spawned under plan mode
+/// ([`crate::SV_TOOLS_READ_ONLY`]): [`PLAN_TOOLS`] without the plan-file
+/// `write`, which belongs to the planning session alone.
+pub const PLAN_READ_ONLY_TOOLS: &[&str] = &[
+	"read",
+	"grep",
+	"glob",
+	"ast_grep",
+	"lsp",
+	"web_search",
+	"think",
+	"todo",
+	"ask",
+	"task",
+	"hub",
+	"yield",
+];
+
+/// Whether a subagent spawned from `con` must be read-only.
+///
+/// It must when `con` runs under plan mode (the plan Director owns its
+/// `sv_tools` engagement) or already carries the read-only ceiling.
+/// Inheritance is a ceiling, like the `task` recursion limit: a child's own
+/// cfg cannot lift it.
+#[must_use]
+pub fn spawns_read_only(con: &omp_con::Ctx) -> bool {
+	crate::SV_TOOLS_READ_ONLY.get(con)
+		|| con
+			.engagement_owner(crate::SV_TOOLS.name())
+			.is_some_and(|owner| owner.split_once('#').map_or(owner.as_str(), |(id, _)| id) == "plan")
+}
 
 /// Requires a durable plan followed by an explicit user decision request.
 pub struct Plan {
@@ -224,4 +257,19 @@ fn u32_value(value: Option<i64>) -> u32 {
 	value
 		.and_then(|value| u32::try_from(value).ok())
 		.unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn the_read_only_ceiling_is_the_plan_roster_without_its_write() {
+		let expected = PLAN_TOOLS
+			.iter()
+			.copied()
+			.filter(|name| *name != "write")
+			.collect::<Vec<_>>();
+		assert_eq!(PLAN_READ_ONLY_TOOLS, expected.as_slice());
+	}
 }

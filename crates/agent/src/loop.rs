@@ -2257,6 +2257,14 @@ impl<C: Inference> Kernel<C> {
 				.map(|roster| roster.into_iter().collect::<Arc<[Str]>>()),
 			withheld:  self.dispatcher.withheld_names().into(),
 			think:     self.think_mounted(),
+			// Host-set when a plan-mode session spawns this child and never
+			// changed afterwards, so the child's wire roster is its read-only
+			// roster from its first request (the same ceiling also refuses at
+			// dispatch).
+			read_only: self
+				.con
+				.as_deref()
+				.is_some_and(|con| crate::SV_TOOLS_READ_ONLY.get(con)),
 		}
 	}
 
@@ -2281,8 +2289,8 @@ impl<C: Inference> Kernel<C> {
 	/// The roster restrictions of a request projected now, before its
 	/// `turn_start` hook: the live `sv_tools` allowlist plus the hidden mounts
 	/// the wire carries (and the Director whose bind supplied it), the hidden
-	/// mounts it does not, the wire roster quoted in refusals, and the active
-	/// plan file.
+	/// mounts it does not, the wire roster quoted in refusals, the read-only
+	/// ceiling of a subagent spawned under plan mode, and the active plan file.
 	fn roster_basis(
 		&self,
 		dom: &omp_dom::Dom,
@@ -2291,17 +2299,30 @@ impl<C: Inference> Kernel<C> {
 	) -> ToolRestrictions {
 		let mut roster = ToolRestrictions::default().with_unmounted(Arc::clone(&wire.unmounted));
 		roster.set_available(Arc::clone(&wire.names));
+		let mounted = wire
+			.names
+			.iter()
+			.filter(|name| crate::roster::is_mount(name.as_str()))
+			.cloned()
+			.collect::<smallvec::SmallVec<Str, 2>>();
+		if self
+			.con
+			.as_deref()
+			.is_some_and(|con| crate::SV_TOOLS_READ_ONLY.get(con))
+		{
+			let ceiling = crate::directors::plan::PLAN_READ_ONLY_TOOLS
+				.iter()
+				.copied()
+				.map(Str::new_static)
+				.chain(mounted.iter().cloned())
+				.collect::<Arc<[Str]>>();
+			roster = roster.with_read_only_ceiling(ceiling);
+		}
 		if let Some(allowlist) = allowlist {
 			let names = allowlist
 				.iter()
 				.cloned()
-				.chain(
-					wire
-						.names
-						.iter()
-						.filter(|name| crate::roster::is_mount(name.as_str()))
-						.cloned(),
-				)
+				.chain(mounted)
 				.collect::<Arc<[Str]>>();
 			let director = self
 				.con

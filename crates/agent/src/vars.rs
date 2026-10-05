@@ -273,6 +273,15 @@ omp_con::var! {
 		default: Vec::new(),
 		flags: archive | session | replicated,
 	};
+	/// Read-only ceiling of a subagent spawned under plan mode: only plan
+	/// mode's read-only tools may run, whatever `sv_tools` allows, and the
+	/// environment refuses every write the subagent's calls attempt. The host
+	/// sets it when it spawns a child of a plan-mode session; the child's own
+	/// subagents inherit it. Scripts, cfgs, and the console cannot write it.
+	pub static SV_TOOLS_READ_ONLY = sv_tools_read_only: bool {
+		default: false,
+		flags: readonly,
+	};
 	/// Enables stream-time rule matching.
 	pub static AI_STREAM_RULES_ENABLED = ai_stream_rules_enabled: bool {
 		default: true,

@@ -468,6 +468,7 @@ fn map_document_error(error: DocumentError) -> Fault {
 	match error {
 		DocumentError::Cancelled => Fault::Cancelled,
 		DocumentError::Disconnected => Fault::Unavailable,
+		DocumentError::WriteScope(_) => Fault::Unauthorized,
 		DocumentError::Protocol { code, .. } => match pb::ProtocolErrorCode::try_from(code).ok() {
 			Some(pb::ProtocolErrorCode::PermissionDenied) => Fault::Unauthorized,
 			Some(

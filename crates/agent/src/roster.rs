@@ -34,6 +34,8 @@ use omp_catalog::GrammarBits;
 use omp_core::{Hash32, Str};
 use omp_tool::{LoweringCaps, Registry, RegistryError, ToolIdentity};
 
+use crate::directors::plan::PLAN_READ_ONLY_TOOLS;
+
 /// The hidden Goal lifecycle tool, mounted by the first goal engagement.
 pub(crate) const GOAL: &str = "goal";
 /// The hidden scratchpad tool, mounted at composition by
@@ -57,6 +59,9 @@ pub(crate) struct Composition {
 	pub withheld:  Arc<[Str]>,
 	/// Whether `think` was mounted at composition.
 	pub think:     bool,
+	/// Whether the session is a subagent of a plan-mode session: its wire
+	/// roster is capped at the read-only tools from its first request.
+	pub read_only: bool,
 }
 
 /// The route capabilities lowering depends on.
@@ -177,6 +182,9 @@ impl WireRoster {
 		tools.retain(|tool| !is_mount(tool.definition.name.as_str()));
 		if let Some(allowlist) = &composition.allowlist {
 			tools.retain(|tool| allowlist.contains(&tool.definition.name));
+		}
+		if composition.read_only {
+			tools.retain(|tool| PLAN_READ_ONLY_TOOLS.contains(&tool.definition.name.as_str()));
 		}
 		tools.retain(|tool| !composition.withheld.contains(&tool.definition.name));
 		let mut mounts = smallvec::SmallVec::<Str, 2>::new();

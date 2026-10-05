@@ -243,8 +243,10 @@ impl Session {
 	/// Stage and apply the finished arguments through `writer`.
 	///
 	/// Order: reread every target fresh, stage all files in memory (any
-	/// failure aborts before the first write), enforce the plan-mode guard
-	/// for every file, then write in payload order. A writer failure aborts
+	/// failure aborts before the first write), then write in payload order.
+	/// Plan mode is enforced by the host's writer (the environment's document
+	/// authority refuses every write outside the plan file). A writer failure
+	/// aborts
 	/// the loop; files already written stay written and the error is
 	/// returned verbatim.
 	pub async fn apply<W: EditWriter>(
@@ -258,13 +260,6 @@ impl Session {
 			return Err(EditError::parse("Edit arguments were incomplete"));
 		}
 		let staged = self.engine.stage(&snapshot, &mut self.files, &self.store)?;
-		for file in &staged {
-			self.config.policy.enforce_write(
-				&file.display,
-				file.op,
-				file.move_to.as_ref().map(|m| m.display.as_str()),
-			)?;
-		}
 
 		let last_write = staged.iter().rposition(|file| file.op != FileOp::Noop);
 		let mut files = Vec::with_capacity(staged.len());

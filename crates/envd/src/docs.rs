@@ -35,11 +35,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{ssh::SshService, vault::VaultService};
-use crate::docserver::{
-	client::{TerminalEventReceiver, terminal_event_channel},
-	connection::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
-	diagnostics::parse_push,
-	wire::{self, FrameConfig},
+use crate::{
+	docserver::{
+		client::{TerminalEventReceiver, terminal_event_channel},
+		connection::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
+		diagnostics::parse_push,
+		wire::{self, FrameConfig},
+	},
+	write_scope,
 };
 /// The ACP editor on the other end of a session, as the environment reaches
 /// it for document buffers and write-backs (ADR 0037).
@@ -473,6 +476,11 @@ pub enum DocumentError {
 	/// Server response frame was invalid or unexpected.
 	#[error("malformed document-server response: {0}")]
 	MalformedResponse(Str),
+	/// The calling invocation's write scope (plan mode, or a read-only
+	/// subagent of a plan-mode session) refused the mutation before it
+	/// reached the authority.
+	#[error(transparent)]
+	WriteScope(#[from] crate::write_scope::WriteScopeDenied),
 }
 #[derive(Clone, Debug)]
 enum DocumentEndpoint {
@@ -549,11 +557,13 @@ impl fmt::Debug for Inner {
 	}
 }
 
-/// App-owned SSH and vault authorities used by document resource writes.
+/// App-owned SSH and vault authorities used by document resource writes, and
+/// the sessions directory holding every session's `local://` scratch root.
 #[derive(Clone, Debug)]
 pub(super) struct ResourceMutationServices {
-	pub(super) ssh:   SshService,
-	pub(super) vault: VaultService,
+	pub(super) ssh:            SshService,
+	pub(super) vault:          VaultService,
+	pub(super) local_sessions: PathBuf,
 }
 
 /// Client connection to the project document server.
@@ -722,6 +732,17 @@ impl DocumentHost {
 
 	pub(super) fn resource_mutations(&self) -> Option<ResourceMutationServices> {
 		self.inner.resource_mutations.read().clone()
+	}
+
+	/// The sessions directory holding every session's `local://` scratch
+	/// root, once the composition installed its resource writers.
+	pub(super) fn local_sessions_dir(&self) -> Option<PathBuf> {
+		self
+			.inner
+			.resource_mutations
+			.read()
+			.as_ref()
+			.map(|services| services.local_sessions.clone())
 	}
 
 	/// Connects to an already-running document server and completes its hello.
@@ -1011,6 +1032,7 @@ impl DocumentHost {
 		cancel: &CancellationToken,
 	) -> Result<pb::CommitTransactionResponse, DocumentError> {
 		self.ensure_owned(lease)?;
+		admit_document(lease.head())?;
 		mutation.base_revision = Some(lease.revision()?);
 		let body = self
 			.request(
@@ -1066,6 +1088,9 @@ impl DocumentHost {
 		request: pb::CommitTransactionRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::CommitTransactionResponse, DocumentError> {
+		for operation in &request.operations {
+			admit_mutation(operation)?;
+		}
 		let body = self
 			.request(client_frame::Body::CommitTransaction(request), cancel)
 			.await?;
@@ -1127,6 +1152,7 @@ impl DocumentHost {
 		request: pb::CreateDirectoryRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::CreateDirectoryResponse, DocumentError> {
+		write_scope::admit_uri(&request.uri)?;
 		let body = self
 			.request(client_frame::Body::CreateDirectory(request), cancel)
 			.await?;
@@ -1142,6 +1168,7 @@ impl DocumentHost {
 		request: pb::RemovePathRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::RemovePathResponse, DocumentError> {
+		write_scope::admit_uri(&request.uri)?;
 		let body = self
 			.request(client_frame::Body::RemovePath(request), cancel)
 			.await?;
@@ -1157,6 +1184,8 @@ impl DocumentHost {
 		request: pb::RenamePathRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::RenamePathResponse, DocumentError> {
+		write_scope::admit_uri(&request.source_uri)?;
+		write_scope::admit_uri(&request.destination_uri)?;
 		let body = self
 			.request(client_frame::Body::RenamePath(request), cancel)
 			.await?;
@@ -1172,6 +1201,7 @@ impl DocumentHost {
 		request: pb::CopyPathRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::CopyPathResponse, DocumentError> {
+		write_scope::admit_uri(&request.destination_uri)?;
 		let body = self
 			.request(client_frame::Body::CopyPath(request), cancel)
 			.await?;
@@ -1202,6 +1232,7 @@ impl DocumentHost {
 		request: pb::CreateSymlinkRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::CreateSymlinkResponse, DocumentError> {
+		write_scope::admit_uri(&request.link_uri)?;
 		let body = self
 			.request(client_frame::Body::CreateSymlink(request), cancel)
 			.await?;
@@ -1217,6 +1248,7 @@ impl DocumentHost {
 		request: pb::CreateHardLinkRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::CreateHardLinkResponse, DocumentError> {
+		write_scope::admit_uri(&request.link_uri)?;
 		let body = self
 			.request(client_frame::Body::CreateHardLink(request), cancel)
 			.await?;
@@ -1232,6 +1264,7 @@ impl DocumentHost {
 		request: pb::SetPermissionsRequest,
 		cancel: &CancellationToken,
 	) -> Result<pb::SetPermissionsResponse, DocumentError> {
+		write_scope::admit_uri(&request.uri)?;
 		let body = self
 			.request(client_frame::Body::SetPermissions(request), cancel)
 			.await?;
@@ -2110,6 +2143,38 @@ fn ensure_requested_head(
 		)));
 	}
 	Ok(())
+}
+
+/// Admits a change to the document `head` names under the calling
+/// invocation's write scope.
+fn admit_document(head: &pb::DocumentHead) -> Result<(), write_scope::WriteScopeDenied> {
+	match head.document.as_ref().map(|document| document.uri.as_str()) {
+		Some(uri) if !uri.is_empty() => write_scope::admit_uri(uri),
+		_ => write_scope::admit_unresolved("an unnamed document"),
+	}
+}
+
+/// Admits one transaction operation under the calling invocation's write
+/// scope: its target, and a move's destination. Lease- and id-addressed
+/// targets carry no path here, so a scope refuses them.
+fn admit_mutation(mutation: &pb::DocumentMutation) -> Result<(), write_scope::WriteScopeDenied> {
+	match mutation
+		.document
+		.as_ref()
+		.and_then(|document| document.target.as_ref())
+	{
+		Some(document_target::Target::Uri(uri)) => write_scope::admit_uri(uri)?,
+		_ => write_scope::admit_unresolved("a lease-addressed document")?,
+	}
+	match &mutation.operation {
+		Some(pb::document_mutation::Operation::Move(moved)) => {
+			write_scope::admit_uri(&moved.destination_uri)
+		},
+		Some(pb::document_mutation::Operation::MoveWithContent(moved)) => {
+			write_scope::admit_uri(&moved.destination_uri)
+		},
+		_ => Ok(()),
+	}
 }
 
 pub(crate) fn lease_target(lease: &DocumentLease) -> pb::DocumentTarget {

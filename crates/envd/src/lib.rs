@@ -40,6 +40,8 @@ mod media_devices;
 mod media_tts;
 pub mod memory;
 pub mod model_discovery;
+#[cfg(test)]
+mod plan_writes;
 pub mod plugin_commands;
 pub mod policy;
 mod presence;
@@ -80,6 +82,7 @@ pub mod worker;
 pub mod worker_pool;
 pub mod workspace;
 pub mod workspace_roots;
+pub mod write_scope;
 use std::{
 	env,
 	fs::{self, OpenOptions},
