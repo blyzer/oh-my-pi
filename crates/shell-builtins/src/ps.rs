@@ -849,16 +849,35 @@ fn ps_process_selected(
 	if options.include_no_terminal {
 		return true;
 	}
-	if cfg!(target_os = "macos") {
-		return process.terminal_id().is_some();
+	shares_invoker_context(
+		process.pid(),
+		process.terminal_id(),
+		process.session_id(),
+		current_pid,
+		current_terminal,
+		current_session,
+	)
+}
+
+/// Default (selector-less) `ps` selection: the invoker's own terminal when it
+/// has one, otherwise its session, otherwise the invoker itself. The invoker
+/// always satisfies the chosen rule, so a terminal-less environment (CI runner,
+/// daemon) still lists at least the calling process instead of nothing.
+fn shares_invoker_context(
+	pid: i32,
+	terminal: Option<u64>,
+	session: Option<i32>,
+	current_pid: Option<i32>,
+	current_terminal: Option<u64>,
+	current_session: Option<i32>,
+) -> bool {
+	if let Some(current_terminal) = current_terminal {
+		return terminal == Some(current_terminal);
 	}
-	if let Some(terminal) = current_terminal {
-		return process.terminal_id() == Some(terminal);
+	if let Some(current_session) = current_session {
+		return session == Some(current_session);
 	}
-	if let Some(session) = current_session {
-		return process.session_id() == Some(session);
-	}
-	current_pid.is_none_or(|pid| process.pid() == pid)
+	current_pid.is_none_or(|current| pid == current)
 }
 
 fn ps_columns(options: &PsOptions) -> Vec<PsColumn> {
@@ -1508,5 +1527,41 @@ mod tests {
 			"Tue Jan  2 03:04:00 2024"
 		);
 		assert_eq!(format_ps_start(None, None, &TimeZone::UTC, false), "?");
+	}
+
+	#[test]
+	fn default_selection_without_terminal_falls_back_to_session_then_pid() {
+		// Invoker has no controlling terminal (hosted CI runner): same session wins.
+		assert!(shares_invoker_context(10, None, Some(7), Some(10), None, Some(7)));
+		assert!(shares_invoker_context(11, None, Some(7), Some(10), None, Some(7)));
+		assert!(!shares_invoker_context(12, Some(3), Some(8), Some(10), None, Some(7)));
+		// Invoker has neither terminal nor session: only the invoker itself.
+		assert!(shares_invoker_context(10, None, None, Some(10), None, None));
+		assert!(!shares_invoker_context(11, None, None, Some(10), None, None));
+		// Invoker has a terminal: processes on it, regardless of session.
+		assert!(shares_invoker_context(11, Some(3), Some(9), Some(10), Some(3), Some(7)));
+		assert!(!shares_invoker_context(12, None, Some(7), Some(10), Some(3), Some(7)));
+	}
+
+	#[test]
+	fn default_selection_always_includes_the_invoking_process() {
+		let current_pid = i32::try_from(process::id()).expect("pid fits i32");
+		let processes = ProcInfo::all();
+		let current = processes
+			.iter()
+			.find(|process| process.pid() == current_pid)
+			.expect("the invoking process is visible to its own snapshot");
+		let current_user = current
+			.effective_user_id()
+			.or_else(|| current.real_user_id());
+		let selected = ps_process_selected(
+			current,
+			&PsOptions::default(),
+			Some(current_pid),
+			current_user,
+			current.terminal_id(),
+			current.session_id(),
+		);
+		assert!(selected, "plain `ps` must list the invoker whether or not it has a tty");
 	}
 }
