@@ -1327,6 +1327,9 @@ impl<C: ArtifactCatalog, B: BlobAuthority> ArtifactResolver<C, B> {
 					"The ':img' selector only supports local .svg and .svgz files.",
 				),
 			}),
+			ParsedSelector::Symbol { .. } => Err(Fault::Invalid {
+				message: Str::new_static("The ':@symbol' selector only supports local source files."),
+			}),
 		}
 	}
 }

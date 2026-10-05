@@ -1,4 +1,4 @@
-//! Resource-owned local and special-source I/O for `read@1`.
+//! Resource-owned local and special-source I/O for `read@3`.
 
 use std::{
 	borrow::Cow,

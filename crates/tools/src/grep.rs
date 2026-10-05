@@ -655,6 +655,14 @@ fn parse_root(original: Str) -> Result<SearchRoot, Fault> {
 					),
 				});
 			},
+			ParsedSelector::Symbol { .. } => {
+				return Err(Fault::InvalidSelector {
+					message: sf!(
+						"path entry \"{original}\" — the read-only \":@symbol\" selector is not valid \
+						 for search"
+					),
+				});
+			},
 		}
 	}
 	let clean = split.path;

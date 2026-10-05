@@ -494,6 +494,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
 							.into(),
 						);
 					},
+					ParsedSelector::Symbol { .. } => return Err(symbol_selector_error().into()),
 				}
 			}
 		};
@@ -504,6 +505,9 @@ impl<R: Read + Seek> ArchiveReader<R> {
 				)
 				.into(),
 			);
+		}
+		if matches!(selector, ParsedSelector::Symbol { .. }) {
+			return Err(symbol_selector_error().into());
 		}
 		let content = if node.is_directory {
 			if selector.is_multi_range() {
@@ -678,6 +682,10 @@ fn normalize_lookup_path(path: &str) -> Option<String> {
 const fn is_windows_drive(component: &str) -> bool {
 	let bytes = component.as_bytes();
 	bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+fn symbol_selector_error() -> SelectorError {
+	SelectorError::from_message("The ':@symbol' selector only supports local source files.")
 }
 
 const fn root_node() -> ArchiveNode {

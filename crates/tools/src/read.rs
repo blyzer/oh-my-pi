@@ -36,6 +36,7 @@ pub mod profile;
 pub mod resolver;
 pub mod selector;
 pub mod sqlite;
+pub mod symbol;
 
 use std::time;
 
@@ -52,8 +53,9 @@ const DESCRIPTION: &str = r"Read files, directories, archives, SQLite, images, d
 - SHOULD use `read` (not browser) for web content; browser only when `read` can't deliver.
 </instruction>
 
-## Selectors — append `:<sel>` to `path` (e.g. `src/foo.ts:50-200`, `src/foo.ts:raw`, `db.sqlite:users:42`)
+## Selectors — append `:<sel>` to `path` (e.g. `src/foo.ts:50-200`, `src/foo.ts:@Config.load`, `src/foo.ts:raw`, `db.sqlite:users:42`)
 - `:50` / `:50-` — from line 50 | `:50-200` — inclusive | `:50+150` — 150 lines from 50 | `:5-16,960-973` — multiple ranges
+- `:@name` / `:@Type.method` — exactly that declaration, leading attributes and doc comments included, in Rust, TypeScript/TSX/JavaScript, Python, Go, Java files. Dots nest (`:@Type.method`); names are exact and case-sensitive. Prefer it to guessing a range when you know the name. No match, or several (`:@Type` matches the struct plus its impls), is an error listing candidates with `START-END` ranges — retry with `:START-END` or a longer query. Combines with `:raw`.
 - `:raw` — verbatim, no anchors/prefixes | `:2-4:raw` / `:raw:2-4` — range + verbatim
 - `:conflicts` — one line per unresolved git merge conflict block
 - `:img` — rasterize a local `.svg`/`.svgz` as a PNG image; use when visual layout matters
@@ -92,7 +94,7 @@ pub const SNAPSHOT_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// through [`is_probably_binary_header`] instead of reopening.
 pub const BINARY_SNIFF_BYTES: usize = 8192;
 
-/// Arguments accepted by `read@2`.
+/// Arguments accepted by `read@3`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[schemars(description = "")]
 #[serde(deny_unknown_fields)]
@@ -470,7 +472,7 @@ impl Default for ReadPolicy {
 	}
 }
 
-/// `read@2` executor over unboxed app resource adapters.
+/// `read@3` executor over unboxed app resource adapters.
 pub struct ReadTool<S, B, R = resolver::NoResolver> {
 	sources:      S,
 	blobs:        B,
@@ -575,7 +577,7 @@ impl Drop for InterruptSqliteOnDrop {
 	}
 }
 
-/// Returns the host-free `read@2` specification for a frozen projection policy.
+/// Returns the host-free `read@3` specification for a frozen projection policy.
 pub fn spec(policy: ReadPolicy) -> ToolSpec {
 	let description = if policy.hashline_headers {
 		sf!(DESCRIPTION)
@@ -596,7 +598,7 @@ pub fn spec(policy: ReadPolicy) -> ToolSpec {
 	};
 	ToolSpec {
 		name: sf!("read"),
-		rev: Rev { family: Default::default(), n: 2 },
+		rev: Rev { family: Default::default(), n: 3 },
 		description,
 		schema: omp_tool::schema::<Params>(),
 		constraint: Constraint::Schema {
@@ -619,7 +621,7 @@ pub fn spec(policy: ReadPolicy) -> ToolSpec {
 	}
 }
 
-/// Constructs the `read@2` tool without internal URL resolvers.
+/// Constructs the `read@3` tool without internal URL resolvers.
 pub fn tool<S: ReadSources, B: ReadBlobs>(
 	sources: S,
 	blobs: B,
@@ -632,7 +634,7 @@ pub fn tool<S: ReadSources, B: ReadBlobs>(
 	)
 }
 
-/// Constructs `read@2` with concrete, constructor-owned internal URL
+/// Constructs `read@3` with concrete, constructor-owned internal URL
 /// resolvers.
 pub fn tool_with_resolvers<S: ReadSources, B: ReadBlobs, R: resolver::Resolve>(
 	sources: S,
@@ -647,7 +649,7 @@ pub fn tool_with_resolvers<S: ReadSources, B: ReadBlobs, R: resolver::Resolve>(
 	)
 }
 
-/// Constructs `read@2` with internal URL resolvers and the session conflict
+/// Constructs `read@3` with internal URL resolvers and the session conflict
 /// registry shared with its `conflict://` resolver and splice writer.
 pub fn tool_with_resolvers_and_conflicts<S: ReadSources, B: ReadBlobs, R: resolver::Resolve>(
 	sources: S,
@@ -658,7 +660,7 @@ pub fn tool_with_resolvers_and_conflicts<S: ReadSources, B: ReadBlobs, R: resolv
 	tool_with_policy(sources, blobs, resolvers, conflicts, ReadPolicy::default())
 }
 
-/// Constructs `read@2` with one frozen registry-projection policy.
+/// Constructs `read@3` with one frozen registry-projection policy.
 pub fn tool_with_policy<S: ReadSources, B: ReadBlobs, R: resolver::Resolve>(
 	sources: S,
 	blobs: B,
@@ -777,12 +779,19 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> Tool for ReadTool<S, B,
 	}
 
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
-		lift_rev1(from, call)
+		lift_legacy_call(from, call)
 	}
 }
 
-fn lift_rev1(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
-	if !from.family.is_empty() || from.n != 1 {
+/// Lifts a recorded `read@1` or `read@2` call onto `read@3`.
+///
+/// Neither earlier revision's arguments nor its verdicts changed shape: `@3`
+/// only adds the `:@symbol` selector inside `path`, so a recorded call is
+/// re-expressed byte for byte once it still decodes under the live types. The
+/// registry hands this step every revision older than the live one that is not
+/// itself registered, so it is the only place that names them.
+fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
+	if !from.family.is_empty() || !matches!(from.n, 1 | 2) {
 		return None;
 	}
 	let mut raw_args = serde_json::from_slice::<serde_json::Value>(call.raw_args).ok()?;
@@ -1203,6 +1212,14 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		if stat.kind == SourceKind::Directory {
 			if matches!(parsed, selector::ParsedSelector::Image) {
 				return Err(svg_image_selector_fault());
+			}
+			if matches!(parsed, selector::ParsedSelector::Symbol { .. }) {
+				return Err(Fault::Invalid {
+					message: Str::new_static(
+						"The ':@symbol' selector reads one declaration of a source file, not a \
+						 directory.",
+					),
+				});
 			}
 			return self.read_directory(&stat, &parsed, suffix_from).await;
 		}
@@ -1628,6 +1645,15 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		pinned: Option<(&Str, &Str, &Bytes)>,
 		suffix_from: Option<&str>,
 	) -> Result<ReadSection, Fault> {
+		// A symbol selector becomes the equivalent line range here, against the
+		// exact text being projected, so every later step is the range read's.
+		let resolved;
+		let parsed = if let selector::ParsedSelector::Symbol { query, raw } = parsed {
+			resolved = symbol::resolve(&stat.display_path, text, query, *raw)?;
+			&resolved
+		} else {
+			parsed
+		};
 		let pinned = pinned.filter(|_| self.policy.hashline_headers);
 		let placeholder_tag = pinned.filter(|_| !parsed.is_raw()).map(|_| "0000");
 		let mut formatted =
@@ -1960,7 +1986,7 @@ const fn done(result: Result<Payload, Fault>) -> Ev<Update, Payload, Fault> {
 const fn args_issue() -> ArgIssue {
 	ArgIssue {
 		path:     Vec::new(),
-		expected: sf!("read@2 arguments"),
+		expected: sf!("read@3 arguments"),
 		kind:     ArgIssueKind::Malformed,
 		example:  None,
 		found:    None,

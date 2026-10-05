@@ -99,8 +99,8 @@ impl Fixture {
 		self.invoke(session, "write", id, args, restrictions).await
 	}
 
-	/// Invokes `name@2` as `session`'s kernel would and waits for its
-	/// terminal.
+	/// Invokes `name` at its live revision as `session`'s kernel would and waits
+	/// for its terminal.
 	async fn invoke(
 		&self,
 		session: &str,
@@ -118,7 +118,7 @@ impl Fixture {
 			.invoke(wire::InvokeTool {
 				invocation_id: id.to_owned(),
 				name: name.to_owned(),
-				rev: "2".to_owned(),
+				rev: live_revision(name),
 				restrictions: restrictions.map(Into::into),
 				..wire::InvokeTool::default()
 			})
@@ -151,6 +151,18 @@ impl Fixture {
 		})
 		.await
 		.expect("the invocation settles")
+	}
+}
+
+/// The revision `name` is live at: `read` from its own spec so a bump cannot
+/// strand these invocations, every other tool at `@2`.
+fn live_revision(name: &str) -> String {
+	if name == "read" {
+		omp_tools::read::spec(omp_tools::read::ReadPolicy::default())
+			.rev
+			.to_string()
+	} else {
+		"2".to_owned()
 	}
 }
 

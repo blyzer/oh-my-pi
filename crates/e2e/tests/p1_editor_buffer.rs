@@ -168,6 +168,14 @@ fn serve_editor(client: EnvClient, editor: Arc<Editor>) -> Result<tokio::task::J
 	}))
 }
 
+/// The live `read` revision, taken from the tool's own spec so a revision bump
+/// cannot strand these invocations.
+fn read_rev() -> String {
+	omp_tools::read::spec(omp_tools::read::ReadPolicy::default())
+		.rev
+		.to_string()
+}
+
 /// Runs one built-in tool to its verdict: `Ok(payload)` or `Err(fault)`.
 async fn invoke(
 	client: &EnvClient,
@@ -218,7 +226,7 @@ async fn invoke(
 }
 
 async fn read(client: &EnvClient, id: &str, path: &str) -> Result<String> {
-	let payload = invoke(client, id, "read", "2", json!({"path": path}))
+	let payload = invoke(client, id, "read", &read_rev(), json!({"path": path}))
 		.await?
 		.map_err(|fault| error(format!("read failed: {fault}")))?;
 	Ok(payload.to_string())

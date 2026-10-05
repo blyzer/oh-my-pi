@@ -61,7 +61,12 @@ pub struct WebRead {
 /// `/`, keeping ordinary filesystem names containing `:` out of URL dispatch.
 pub fn parse_target(input: &str) -> Result<Option<ParsedTarget>, WebError> {
 	let repaired = repair_collapsed_scheme(input);
-	let split = selector::split_path_and_selector(&repaired);
+	let mut split = selector::split_path_and_selector(&repaired);
+	// `:@symbol` reads a source declaration; in a URL a trailing `:@x` is just
+	// part of the address.
+	if split.selector.is_some_and(selector::selector_has_symbol) {
+		split = selector::SplitPath { path: &repaired, selector: None };
+	}
 	let path = split.path;
 	if !is_readable_url_path(path) {
 		return Ok(None);

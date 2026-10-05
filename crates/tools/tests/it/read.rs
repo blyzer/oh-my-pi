@@ -1,4 +1,4 @@
-//! Model-facing behavioral contracts for `read@2`.
+//! Model-facing behavioral contracts for `read@3`.
 
 use std::{
 	collections::VecDeque,
@@ -531,7 +531,7 @@ fn generated_schema_exposes_optional_image_question_without_a_new_tool() {
 	let tool = read::tool(Sources::default(), Blobs::default());
 	let actual: serde_json::Value =
 		serde_json::from_slice(&tool.spec().schema).expect("schema JSON");
-	assert_eq!(tool.spec().rev, Rev { family: Default::default(), n: 2 });
+	assert_eq!(tool.spec().rev, Rev { family: Default::default(), n: 3 });
 	assert_eq!(
 		tool.spec().schema.as_ref(),
 		omp_tool::schema::<read::Params>().as_ref(),
@@ -563,26 +563,39 @@ fn generated_schema_exposes_optional_image_question_without_a_new_tool() {
 			}
 		})
 	);
-	let rev1_args = br#"{"path":"src/lib.rs"}"#;
-	let rev1_verdict = serde_json::to_vec(&CallOutcome::<read::Payload, Fault>::Ok(read::Payload {
-		parts: vec![read::PayloadPart::Text { text: sf!("complete") }],
-	}))
-	.expect("rev 1 verdict serializes");
-	let lifted = tool
-		.lift(&Rev { family: Default::default(), n: 1 }, RecordedCall {
-			raw_args: rev1_args,
-			verdict:  &rev1_verdict,
-		})
-		.expect("read@1 lifts onto read@2");
-	assert_eq!(lifted.raw_args.as_ref(), rev1_args);
-	assert_eq!(lifted.verdict.as_ref(), rev1_verdict.as_slice());
+	let legacy_args = br#"{"path":"src/lib.rs"}"#;
+	let legacy_verdict =
+		serde_json::to_vec(&CallOutcome::<read::Payload, Fault>::Ok(read::Payload {
+			parts: vec![read::PayloadPart::Text { text: sf!("complete") }],
+		}))
+		.expect("legacy verdict serializes");
+	for legacy_rev in [1, 2] {
+		let lifted = tool
+			.lift(&Rev { family: Default::default(), n: legacy_rev }, RecordedCall {
+				raw_args: legacy_args,
+				verdict:  &legacy_verdict,
+			})
+			.unwrap_or_else(|| panic!("read@{legacy_rev} lifts onto read@3"));
+		assert_eq!(lifted.raw_args.as_ref(), legacy_args);
+		assert_eq!(lifted.verdict.as_ref(), legacy_verdict.as_slice());
+	}
+	assert!(
+		tool
+			.lift(&Rev { family: Default::default(), n: 3 }, RecordedCall {
+				raw_args: legacy_args,
+				verdict:  &legacy_verdict,
+			},)
+			.is_none(),
+		"the live revision is not a lift source"
+	);
 	assert!(
 		tool
 			.lift(&Rev { family: Default::default(), n: 2 }, RecordedCall {
-				raw_args: rev1_args,
-				verdict:  &rev1_verdict,
+				raw_args: br#"{"path":"src/lib.rs","ranges":[[1,2]]}"#,
+				verdict:  &legacy_verdict,
 			},)
-			.is_none()
+			.is_none(),
+		"a recorded call that no longer decodes stays raw data"
 	);
 
 	for legacy in [
@@ -2095,4 +2108,271 @@ async fn unknown_scheme_is_a_typed_fault() {
 		})
 		.unwrap_or_else(|| panic!("expected typed unknown-scheme fault: {events:?}"));
 	assert_eq!(scheme.as_str(), "custom");
+}
+
+const WIDGET_SOURCE: &str = "\
+use std::fmt;
+
+/// A widget.
+#[derive(Debug)]
+pub struct Widget {
+	size: u32,
+}
+
+impl Widget {
+	/// Make one.
+	#[inline]
+	pub fn new(size: u32) -> Self {
+		Self { size }
+	}
+}
+
+impl fmt::Display for Widget {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, \"{}\", self.size)
+	}
+}
+
+impl fmt::Debug for Gadget {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		Ok(())
+	}
+}
+";
+
+/// The typed fault of a read that must fail, with its exact model-facing text.
+async fn invalid_fault(sources: Sources, raw: &str) -> String {
+	let tool = read::tool(sources, Blobs::default());
+	let (feed, params) = IncomingParams::channel();
+	feed
+		.args_committed(Str::new(raw))
+		.expect("read invocation remains live");
+	let events = tool.call(params).collect::<Vec<_>>().await;
+	let fault = events
+		.into_iter()
+		.find_map(|event| match event {
+			Ev::Done(ToolTerminal::Done { result: Err(fault), .. }) => Some(fault),
+			_ => None,
+		})
+		.expect("the read faults");
+	let Fault::Invalid { message } = fault else {
+		panic!("symbol selector failures are invalid-selector faults: {fault:?}");
+	};
+	message.to_string()
+}
+
+fn seen_spans(sources: &Sources) -> Vec<(u64, u64)> {
+	let snapshots = sources.snapshots.lock();
+	let [snapshot] = snapshots.as_slice() else {
+		panic!("one snapshot must be recorded")
+	};
+	snapshot
+		.seen
+		.iter()
+		.map(|span| (span.start_line, span.end_line))
+		.collect()
+}
+
+#[tokio::test]
+async fn symbol_selector_reads_exactly_the_equivalent_line_range() {
+	let by_symbol = Sources::default();
+	by_symbol.file("src/widget.rs", WIDGET_SOURCE);
+	let by_range = Sources::default();
+	by_range.file("src/widget.rs", WIDGET_SOURCE);
+
+	let (symbol_text, symbol_diags) =
+		text_with_diags(by_symbol.clone(), r#"{"path":"src/widget.rs:@Widget.new"}"#).await;
+	let (range_text, range_diags) =
+		text_with_diags(by_range.clone(), r#"{"path":"src/widget.rs:10-14"}"#).await;
+
+	assert_eq!(symbol_text, range_text, "a symbol read is the range read of its declaration");
+	assert!(symbol_text.starts_with("[src/widget.rs#A1B2]\n"), "{symbol_text}");
+	for line in
+		["10:\t/// Make one.", "11:\t#[inline]", "12:\tpub fn new(size: u32) -> Self {", "14:\t}"]
+	{
+		assert!(symbol_text.contains(line), "missing {line:?}: {symbol_text}");
+	}
+	assert_eq!(symbol_diags, range_diags);
+	assert_eq!(seen_spans(&by_symbol), seen_spans(&by_range));
+	let snapshots = by_symbol.snapshots.lock();
+	assert_eq!(snapshots[0].revision, "revision-7");
+	assert_eq!(snapshots[0].bytes.as_ref(), WIDGET_SOURCE.as_bytes());
+}
+
+#[tokio::test]
+async fn symbol_selector_combines_with_raw_in_either_order() {
+	let sources = Sources::default();
+	sources.file("src/widget.rs", WIDGET_SOURCE);
+	let expected = text(sources.clone(), r#"{"path":"src/widget.rs:raw:10-14"}"#).await;
+	assert_eq!(
+		expected,
+		"\t/// Make one.\n\t#[inline]\n\tpub fn new(size: u32) -> Self {\n\t\tSelf { size }\n\t}"
+	);
+	for path in ["src/widget.rs:@Widget.new:raw", "src/widget.rs:raw:@Widget.new"] {
+		assert_eq!(
+			text(sources.clone(), &format!(r#"{{"path":"{path}"}}"#)).await,
+			expected,
+			"{path}"
+		);
+	}
+}
+
+#[tokio::test]
+async fn dotted_symbol_resolves_through_a_trait_impl() {
+	let sources = Sources::default();
+	sources.file("src/widget.rs", WIDGET_SOURCE);
+	let by_symbol = text(sources.clone(), r#"{"path":"src/widget.rs:@Widget.fmt"}"#).await;
+	let by_range = text(sources, r#"{"path":"src/widget.rs:18-20"}"#).await;
+	assert_eq!(by_symbol, by_range);
+	assert!(by_symbol.contains("18:\tfn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {"));
+}
+
+#[tokio::test]
+async fn ambiguous_symbol_lists_every_candidate_with_a_range_to_retry() {
+	let sources = Sources::default();
+	sources.file("src/widget.rs", WIDGET_SOURCE);
+	assert_eq!(
+		invalid_fault(sources.clone(), r#"{"path":"src/widget.rs:@Widget"}"#).await,
+		"Symbol ':@Widget' is ambiguous in 'src/widget.rs': 3 declarations match. Retry with a line \
+		 range ('src/widget.rs:START-END') or a longer dotted query (Type.method):\n- struct \
+		 Widget: src/widget.rs:3-7\n- impl Widget: src/widget.rs:9-15\n- impl Widget via Display: \
+		 src/widget.rs:17-21"
+	);
+	assert_eq!(
+		invalid_fault(sources.clone(), r#"{"path":"src/widget.rs:@fmt"}"#).await,
+		"Symbol ':@fmt' is ambiguous in 'src/widget.rs': 2 declarations match. Retry with a line \
+		 range ('src/widget.rs:START-END') or a longer dotted query (Type.method):\n- method \
+		 Widget.fmt via Display: src/widget.rs:18-20\n- method Gadget.fmt via Debug: \
+		 src/widget.rs:24-26"
+	);
+	assert!(sources.snapshots.lock().is_empty(), "an ambiguous read exposes no lines");
+}
+
+#[tokio::test]
+async fn missing_symbol_names_the_query_and_the_path() {
+	let sources = Sources::default();
+	sources.file("src/widget.rs", WIDGET_SOURCE);
+	assert_eq!(
+		invalid_fault(sources, r#"{"path":"src/widget.rs:@Widget.gone"}"#).await,
+		"No declaration matches symbol ':@Widget.gone' in 'src/widget.rs'. Names are exact and \
+		 case-sensitive; nest with dots (Type.method). Use a line range instead \
+		 ('src/widget.rs:START-END')."
+	);
+}
+
+#[tokio::test]
+async fn symbol_selector_on_an_unsupported_language_is_an_error() {
+	let sources = Sources::default();
+	sources.file("data.json", "{\n\t\"key\": 1\n}\n");
+	assert_eq!(
+		invalid_fault(sources, r#"{"path":"data.json:@key"}"#).await,
+		"Cannot resolve symbol ':@key' in 'data.json': symbol lookup is not supported for Json. Use \
+		 a line range instead ('data.json:START-END')."
+	);
+}
+
+#[tokio::test]
+async fn empty_or_malformed_symbol_queries_are_selector_errors() {
+	let sources = Sources::default();
+	sources.file("src/widget.rs", WIDGET_SOURCE);
+	for (path, message) in [
+		("src/widget.rs:@", "Invalid symbol selector ':@': symbol query is empty"),
+		(
+			"src/widget.rs:@Widget.",
+			"Invalid symbol selector ':@Widget.': symbol query segment 1 is empty",
+		),
+		("src/widget.rs:@.new", "Invalid symbol selector ':@.new': symbol query segment 0 is empty"),
+	] {
+		assert_eq!(invalid_fault(sources.clone(), &format!(r#"{{"path":"{path}"}}"#)).await, message);
+	}
+}
+
+#[tokio::test]
+async fn symbol_lookup_is_best_effort_on_source_with_syntax_errors() {
+	let sources = Sources::default();
+	let broken = format!("{WIDGET_SOURCE}\nfn broken( {{\n");
+	sources.file("src/widget.rs", broken);
+	let by_symbol = text(sources.clone(), r#"{"path":"src/widget.rs:@Widget.new"}"#).await;
+	let by_range = text(sources, r#"{"path":"src/widget.rs:10-14"}"#).await;
+	assert_eq!(by_symbol, by_range);
+}
+
+#[tokio::test]
+async fn symbol_selector_reads_typescript_class_members() {
+	let sources = Sources::default();
+	sources.file(
+		"src/config.ts",
+		"export class Config {\n\t/** Load it. */\n\tload(path: string): void {}\n\tsave(): void \
+		 {}\n}\n",
+	);
+	assert_eq!(
+		text(sources.clone(), r#"{"path":"src/config.ts:@Config.load:raw"}"#).await,
+		"\t/** Load it. */\n\tload(path: string): void {}"
+	);
+}
+
+#[tokio::test]
+async fn an_existing_literal_path_wins_over_a_symbol_selector() {
+	let sources = Sources::default();
+	sources.file("odd.rs:@Widget", "literal file named like a selector\n");
+	sources.file("odd.rs", WIDGET_SOURCE);
+	assert_eq!(
+		text(sources, r#"{"path":"odd.rs:@Widget"}"#).await,
+		"[odd.rs:@Widget#A1B2]\n1:literal file named like a selector"
+	);
+}
+
+#[tokio::test]
+async fn symbol_selector_on_a_directory_is_an_error() {
+	let sources = Sources::default();
+	sources.directory("src", Vec::new());
+	assert_eq!(
+		invalid_fault(sources, r#"{"path":"src:@Widget"}"#).await,
+		"The ':@symbol' selector reads one declaration of a source file, not a directory."
+	);
+}
+
+#[test]
+fn symbol_selectors_stay_out_of_urls() {
+	let target = read::web::parse_target("https://example.com/feed:@user")
+		.expect("URL parses")
+		.expect("URL is readable");
+	assert_eq!(target.selector, ParsedSelector::None);
+	assert!(target.url.as_str().contains(":@user"), "{}", target.url);
+}
+
+#[test]
+fn registry_lifts_every_earlier_read_revision_onto_the_live_one() {
+	use omp_tool::{
+		Claims, Precedence, Presentation, ProjectedCall, RecordedCallOwned, Registry, ToolIdentity,
+	};
+
+	let mut registry = Registry::new();
+	registry
+		.register(read::tool(Sources::default(), Blobs::default()), Presentation::Slot, Claims {
+			precedence: Precedence::CORE,
+			claimant:   sf!("omp/core"),
+			replaces:   None,
+		})
+		.expect("read registers");
+	let verdict = serde_json::to_vec(&CallOutcome::<read::Payload, Fault>::Ok(read::Payload {
+		parts: vec![read::PayloadPart::Text { text: sf!("complete") }],
+	}))
+	.expect("verdict serializes");
+	for earlier in [1, 2] {
+		let original = RecordedCallOwned {
+			identity: ToolIdentity {
+				name: sf!("read"),
+				rev:  Rev { family: Default::default(), n: earlier },
+			},
+			raw_args: Bytes::from_static(br#"{"i":"Reading","path":"src/lib.rs:50-60"}"#),
+			verdict:  Bytes::from(verdict.clone()),
+		};
+		let ProjectedCall::Live(lifted) = registry.project(original.clone()) else {
+			panic!("read@{earlier} must lift through the registry");
+		};
+		assert_eq!(lifted.identity.rev, Rev { family: Default::default(), n: 3 });
+		assert_eq!(lifted.raw_args, original.raw_args);
+		assert_eq!(lifted.verdict, original.verdict);
+	}
 }

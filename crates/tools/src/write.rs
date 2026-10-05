@@ -534,7 +534,7 @@ pub fn tool<D: WriteDocuments>(documents: D) -> WriteTool<D> {
 	tool_with_conflicts(documents, Arc::new(ConflictRegistry::default()))
 }
 
-/// Construct `write@2` sharing conflict registrations with `read@2`.
+/// Construct `write@2` sharing conflict registrations with `read@3`.
 pub fn tool_with_conflicts<D: WriteDocuments>(
 	documents: D,
 	conflicts: Arc<ConflictRegistry>,

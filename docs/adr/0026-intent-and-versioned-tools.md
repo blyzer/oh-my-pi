@@ -49,7 +49,7 @@ input, output, diagnostics, or usage is avoidable technical debt.
 **Status: Implemented.** Every native schema gets `i` and a durable `name@rev` identity. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
 
 - `i` injection (and `notrunc`) in `crates/tool/src/lib.rs`; `ToolIdentity { name, rev }` in the same file, recorded on every call.
-- Revision cutovers: `checkpoint@3`, `rewind@4`, and `web_search@2` with an explicit redacting `@1` journal lift (`crates/tools/src/web_search.rs`).
+- Revision cutovers: `checkpoint@3`, `rewind@4`, and `web_search@2` with an explicit redacting `@1` journal lift (`crates/tools/src/web_search.rs`). `read@3` (the `:@symbol` selector, 0027) lifts recorded `@1` and `@2` calls unchanged (`crates/tools/src/read.rs`).
 - Search found no tool-local `reason`/`purpose`/`why` argument fields in `crates/tools/src`.
 
 ### Implementation notes (carried over)
