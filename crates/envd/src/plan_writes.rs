@@ -41,6 +41,16 @@ impl Settled {
 		matches!(self, Self::Verdict(outcome) if outcome["kind"] == "ok")
 	}
 
+	/// The typed scope refusal the write tool journaled as its fault.
+	fn scope_denial(&self) -> Option<omp_tool::WriteScopeDenied> {
+		match self {
+			Self::Verdict(outcome) if outcome["kind"] == "faulted" => {
+				serde_json::from_value(outcome["value"].clone()).ok()
+			},
+			_ => None,
+		}
+	}
+
 	fn text(&self) -> String {
 		match self {
 			Self::Verdict(outcome) => outcome.to_string(),
@@ -292,17 +302,22 @@ async fn plan_mode_invocations_change_only_the_plan_file() {
 		.write(SESSION, "off-1", &json!({"path": "src/lib.rs", "content": "x"}), Some(&plan))
 		.await;
 	assert!(!off_plan.is_ok(), "{}", off_plan.text());
+	// The write tool journals the environment's typed refusal.
+	let denied = off_plan.scope_denial().expect("typed scope denial");
+	assert_eq!(denied, omp_tool::WriteScopeDenied::OutsidePlanFile {
+		plan_file: omp_core::Str::new_static("local://PLAN.md"),
+		target:    omp_core::Str::from(
+			fs::canonicalize(&fixture.root)
+				.expect("workspace")
+				.join("src/lib.rs")
+				.display()
+				.to_string()
+		),
+	});
 	assert!(
-		off_plan
-			.text()
-			.contains("plan mode is active: the environment refused to change"),
-		"{}",
-		off_plan.text()
-	);
-	assert!(
-		off_plan
-			.text()
-			.contains("only the plan file local://PLAN.md may change")
+		denied
+			.to_string()
+			.starts_with("plan mode is active: the environment refused to change")
 	);
 	assert!(!fixture.root.join("src").exists(), "not even the parent directory appeared");
 
@@ -313,7 +328,11 @@ async fn plan_mode_invocations_change_only_the_plan_file() {
 		let refused = fixture
 			.write(SESSION, id, &json!({"path": target, "content": "x"}), Some(&plan))
 			.await;
-		assert!(!refused.is_ok(), "{target}: {}", refused.text());
+		assert!(
+			matches!(refused.scope_denial(), Some(omp_tool::WriteScopeDenied::OutsidePlanFile { .. })),
+			"{target}: {}",
+			refused.text()
+		);
 	}
 	assert!(!fixture.local_root(SESSION).join("notes.md").exists());
 
@@ -369,10 +388,7 @@ async fn read_only_subagent_invocations_change_nothing() {
 			.await;
 		assert!(!refused.is_ok(), "{target}: {}", refused.text());
 		assert!(
-			refused.text().contains(
-				"this agent is a read-only subagent of a plan-mode session: the environment refused \
-				 to change"
-			),
+			matches!(refused.scope_denial(), Some(omp_tool::WriteScopeDenied::ReadOnly { .. })),
 			"{}",
 			refused.text()
 		);
