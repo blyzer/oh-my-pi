@@ -250,7 +250,8 @@ jobs:
     #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
     # Unset, and the expression falls back, so a repository with no runner
     # registered keeps the hosted behaviour rather than queueing forever.
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    # TRIAL, do not merge: pinned to the hosted runner regardless of MACOS_RUNNER.
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
