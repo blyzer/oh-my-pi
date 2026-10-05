@@ -18,8 +18,9 @@ No model or provider credentials are involved; it is an offline comparison.
 
 * **A. References.** For each search, `workspace/symbol` then `textDocument/references`; compare the
   tokens of the answer (`path:line` list, and grouped by file) with the `rg` result, and how many of
-  the files `rg` returned the index also names (recall; `rg` also matches comments and strings, so
-  recall is a lower bound).
+  the Rust files `rg` returned the index also names (recall; `rg` also matches comments and strings,
+  so recall is a lower bound). `workspace/symbol` is asked for every symbol kind (`allSymbols`);
+  rust-analyzer lists only types by default.
 * **B. Symbol slices.** Sample 120 source files, take every function and method body from
   `textDocument/documentSymbol`, and compare their size with the average `sed -n` range read in the
   history (975 tokens) and whole-file `cat` (1 797).

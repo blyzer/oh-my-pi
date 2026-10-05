@@ -80,7 +80,7 @@ init = ls.request("initialize", {
                      "window": {"workDoneProgress": True},
                      "workspace": {"configuration": True, "symbol": {}},
                      "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}},
-    "initializationOptions": {"checkOnSave": False, "cachePriming": {"enable": True},
+    "initializationOptions": {"checkOnSave": False, "workspace": {"symbol": {"search": {"kind": "allSymbols", "limit": 512}}}, "cachePriming": {"enable": True},
                               "cargo": {"buildScripts": {"enable": True}}, "procMacro": {"enable": True}},
 }, timeout=300)
 ls.notify("initialized", {})
@@ -98,8 +98,9 @@ print(f"rust-analyzer {server} ready after {load_s}s status={ls.status}", flush=
 usages = json.load(open(data / "usages.json"))
 rows = []
 for rec in usages:
-    cur = {f for f in rec["files"] if (root / f).exists()}
-    if len(cur) < 3: continue
+    cur_all = {f for f in rec["files"] if (root / f).exists()}
+    cur = {f for f in cur_all if f.endswith(".rs")}
+    if len(cur_all) < 3 or not cur: continue
     t1 = time.time()
     try:
         syms = [s for s in (ls.request("workspace/symbol", {"query": rec["symbol"]}) or []) if s["name"] == rec["symbol"]]
@@ -121,7 +122,7 @@ for rec in usages:
                       "tokens_lines": tokens("\n".join(lines)), "tokens_files": tokens("\n".join(f"{f} ({n})" for f, n in grouped.items())),
                       "recall": round(len(cur & files) / len(cur), 2), "precision": round(len(files & cur) / len(files), 2) if files else None})
     best = max(cands, key=lambda c: c["recall"]) if cands else None
-    rows.append({"symbol": rec["symbol"], "calls": rec["calls"], "hist_tokens": rec["avg_tokens"], "hist_files": len(cur),
+    rows.append({"symbol": rec["symbol"], "calls": rec["calls"], "hist_tokens": rec["avg_tokens"], "hist_files": len(cur_all), "hist_rs_files": len(cur),
                  "candidates": len(syms), "best": best, "first": cands[0] if cands else None, "secs": round(time.time() - t1, 2)})
 json.dump(rows, open(out / "references.json", "w"), indent=0)
 ok = [r for r in rows if r.get("best")]
