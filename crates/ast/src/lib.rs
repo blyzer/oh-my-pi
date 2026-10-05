@@ -12,6 +12,8 @@ pub mod ops;
 pub mod parse_cache;
 /// Structural source summarization.
 pub mod summary;
+/// Name-based declaration lookup.
+pub mod symbol;
 
 pub use error::{AstError, Result};
 pub use language::SupportLang;
