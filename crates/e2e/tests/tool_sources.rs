@@ -6,7 +6,7 @@
 
 use bytes::Bytes;
 use omp_e2e::{
-	Result, error,
+	Context as _, Result, error,
 	support::{DEFAULT_TIMEOUT, EnvHarness, Scratch, within},
 };
 use omp_env::{EnvClient, InvocationEvent};
@@ -53,7 +53,7 @@ async fn invoke_outcome<F: DeserializeOwned>(
 	match within("built-in acceptance", DEFAULT_TIMEOUT, invocation.next_event()).await?? {
 		Some(InvocationEvent::Accepted(_)) => {},
 		Some(event) => return Err(error(format!("expected accepted event, got {event:?}"))),
-		None => return Err(error(format!("built-in invocation closed before acceptance"))),
+		None => return Err(error("built-in invocation closed before acceptance")),
 	}
 	within(
 		"committing built-in arguments",
@@ -73,12 +73,12 @@ async fn invoke_outcome<F: DeserializeOwned>(
 			},
 			Some(InvocationEvent::Update(_)) => {},
 			Some(InvocationEvent::Accepted(_)) => {
-				return Err(error(format!("built-in invocation was accepted twice")));
+				return Err(error("built-in invocation was accepted twice"));
 			},
 			Some(InvocationEvent::Admission(_)) => {
-				return Err(error(format!("unexpected admission in built-in invocation")));
+				return Err(error("unexpected admission in built-in invocation"));
 			},
-			None => return Err(error(format!("built-in invocation closed before its verdict"))),
+			None => return Err(error("built-in invocation closed before its verdict")),
 		}
 	}
 }
