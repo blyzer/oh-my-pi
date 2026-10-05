@@ -250,10 +250,16 @@ jobs:
     #     gh variable set MACOS_RUNNER --body '["self-hosted","macOS","ARM64"]'
     # Unset, and the expression falls back, so a repository with no runner
     # registered keeps the hosted behaviour rather than queueing forever.
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    # TRIAL (do not merge): pinned to GitHub's hosted macos-15 so this pull request
+    # measures whether the job fits a hosted runner's disk and how long it takes,
+    # independent of the MACOS_RUNNER repository variable.
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Disk headroom before the build (trial)
+        run: df -h . "$HOME" | cat
 
       - name: Select pinned Rust toolchain
         run: |
@@ -362,6 +368,12 @@ jobs:
       # is recorded per omp2 commit by p8-baseline.yml, off the PR path.
       - name: Validate P8 baseline contract
         run: cargo nextest run --profile ci -p omp-e2e --test p8_baselines --locked
+
+      - name: Disk headroom after the build (trial)
+        if: always()
+        run: |
+          df -h . | cat
+          du -sh "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
 
   # The workspace lint runs on macOS, so until this job existed no
   # `#[cfg(target_os = "linux")]` code had ever been linted by anything: the
