@@ -8,7 +8,7 @@ use std::{
 use regex::Regex;
 
 use crate::{
-	engine::{FileOp, Resolved},
+	engine::Resolved,
 	error::{EditError, EditResult},
 };
 
@@ -39,8 +39,6 @@ pub struct PathPolicy {
 	pub local_sandbox_root:   Option<PathBuf>,
 	/// Cached `vault://` roots keyed by vault name (`_` = the active vault).
 	pub vault_roots:          Option<Vec<(String, PathBuf)>>,
-	/// Whether plan mode forbids ordinary workspace writes.
-	pub plan_active:          bool,
 	/// Whether detected generated files are rejected.
 	pub block_auto_generated: bool,
 }
@@ -147,30 +145,6 @@ impl PathPolicy {
 		}
 		let display = result.entries.into_iter().next()?.path;
 		Some(Resolved { absolute: self.cwd.join(&display), display })
-	}
-
-	/// Enforce plan-mode write restrictions.
-	pub fn enforce_write(&self, display: &str, op: FileOp, move_to: Option<&str>) -> EditResult<()> {
-		if !self.plan_active {
-			return Ok(());
-		}
-		if move_to.is_some() {
-			return Err(EditError::Plan("Plan mode: renaming files is not allowed.".into()));
-		}
-		if op == FileOp::Delete {
-			return Err(EditError::Plan("Plan mode: deleting files is not allowed.".into()));
-		}
-		if self
-			.resolve(display)
-			.is_ok_and(|resolved| self.targets_local_sandbox(&resolved.absolute))
-		{
-			return Ok(());
-		}
-		Err(EditError::Plan(
-			"Plan mode: the working tree is read-only. Write your plan to a local://<slug>-plan.md \
-			 file instead."
-				.into(),
-		))
 	}
 
 	/// True when `absolute` lies inside the `local://` sandbox.
@@ -583,7 +557,6 @@ mod tests {
 				("_".into(), root.join("vault")),
 				("notes".into(), root.join("named")),
 			]),
-			plan_active:          false,
 			block_auto_generated: true,
 		}
 	}
@@ -623,36 +596,6 @@ mod tests {
 		assert!(p.resolve("local://../x").is_err());
 		assert_eq!(p.resolve("vault://_/a.md").unwrap().absolute, tmp.path().join("vault/a.md"));
 		assert_eq!(p.resolve("vault://notes/a.md").unwrap().absolute, tmp.path().join("named/a.md"));
-	}
-
-	#[test]
-	fn plan_mode_allows_only_sandbox_updates() {
-		let tmp = tempfile::tempdir().unwrap();
-		std::fs::create_dir(tmp.path().join("local")).unwrap();
-		let mut p = policy(tmp.path());
-		p.plan_active = true;
-		assert!(
-			p.enforce_write("local://plan.md", FileOp::Update, None)
-				.is_ok()
-		);
-		assert_eq!(
-			p.enforce_write("a", FileOp::Delete, None)
-				.unwrap_err()
-				.to_string(),
-			"Plan mode: deleting files is not allowed."
-		);
-		assert_eq!(
-			p.enforce_write("a", FileOp::Update, Some("b"))
-				.unwrap_err()
-				.to_string(),
-			"Plan mode: renaming files is not allowed."
-		);
-		assert!(
-			p.enforce_write("a", FileOp::Update, None)
-				.unwrap_err()
-				.to_string()
-				.contains("working tree is read-only")
-		);
 	}
 
 	#[test]

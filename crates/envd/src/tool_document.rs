@@ -41,6 +41,7 @@ use omp_tools::{
 		RejectionReason, SnapshotFault, StalePolicy,
 	},
 	editor_sync::EditorSync,
+	path::local_resource,
 	read::{
 		Fault as ReadFault, ReadBlobs, SNAPSHOT_MAX_BYTES, StoredArtifact, archive,
 		conflicts::{splice_registered, splice_registered_bulk},
@@ -62,9 +63,15 @@ use super::{
 	blobs::BlobHost,
 	docs::{DocumentError, DocumentHost, DocumentLease, lease_target},
 	editor_base::{CommitAnchor, EditorConflict, start_write_backs},
-	tool_url::ssh,
+	tool_url::{
+		local::{self, LocalWriteError},
+		ssh,
+	},
 };
-use crate::docserver::fs::{self, LocalFs};
+use crate::{
+	docserver::fs::{self, LocalFs},
+	write_scope::{self, WriteScope},
+};
 
 static NEXT_TRANSACTION: AtomicU64 = AtomicU64::new(1);
 
@@ -1676,6 +1683,7 @@ impl WriteDocuments for DocumentHost {
 		let Some(services) = self.resource_mutations() else {
 			return Ok(None);
 		};
+		write_scope::admit_uri(&request.uri).map_err(scope_rejected)?;
 		let byte_len = request.content.len() as u64;
 		let revision = match request.capability {
 			MutationCapability::Ssh => {
@@ -1819,6 +1827,9 @@ impl WriteDocuments for DocumentHost {
 		request: PlainWriteRequest,
 	) -> Result<PlainWriteResult, WriteCommitError> {
 		let resolved = resolve_plain_write(self, &request.path).map_err(write_rejected)?;
+		// Before any effect (parent directories included): plan mode and a
+		// read-only subagent change nothing but the plan file.
+		write_scope::admit_path(&resolved.path).map_err(scope_rejected)?;
 		let existed = match std_fs::symlink_metadata(&resolved.path) {
 			Ok(_) => true,
 			Err(error)
@@ -1992,8 +2003,16 @@ impl WriteDocuments for DocumentHost {
 		control: SpecialWriteControl,
 	) -> Result<Option<backends::ResultPayload>, backends::Fault> {
 		let host = self.clone();
+		// The blocking worker carries no task-local scope: hand it over.
+		let scope = write_scope::current();
 		run_special_write_blocking(control, "archive", move |task_control| {
-			write_archive_member_blocking(&host, &display_path, content, task_control)
+			write_archive_member_blocking(
+				&host,
+				scope.as_deref(),
+				&display_path,
+				content,
+				task_control,
+			)
 		})
 		.await
 	}
@@ -2012,8 +2031,16 @@ impl WriteDocuments for DocumentHost {
 			wait_control.cancelled().await;
 			interrupt.interrupt();
 		});
+		let scope = write_scope::current();
 		let result = run_special_write_blocking(control, "SQLite", move |task_control| {
-			write_sqlite_row_blocking(&host, &display_path, &content, task_control, &task_interrupt)
+			write_sqlite_row_blocking(
+				&host,
+				scope.as_deref(),
+				&display_path,
+				&content,
+				task_control,
+				&task_interrupt,
+			)
 		})
 		.await;
 		interrupt_waiter.abort();
@@ -2032,7 +2059,32 @@ fn resolve_plain_write(host: &DocumentHost, input: &str) -> Result<ResolvedPlain
 			.to_file_path()
 			.map_err(|()| "document workspace root is not a local file URI".to_owned())?,
 	)?;
+	if let Some(resource) = local_resource(input) {
+		// Rendered once: this function's error is the WriteFault::Document text.
+		// lintx-allow: error-format model-facing write refusal text
+		let path = resolve_local_write(host, resource).map_err(|error| error.to_string())?;
+		let canonical_root = canonical_workspace_root(&root)?;
+		let use_document_host = path != canonical_root && path.starts_with(&canonical_root);
+		let uri = Url::from_file_path(&path)
+			.map_err(|()| "local:// path cannot be represented as a file URI".to_owned())?;
+		return Ok(ResolvedPlainWrite {
+			uri: Str::from(uri.as_str()),
+			path,
+			display_path: sf!("local://{resource}"),
+			use_document_host,
+		});
+	}
 	resolve_plain_write_from_root(&root, input)
+}
+
+/// Resolves a `local://` write target inside the invoking session's scratch
+/// root, the same root `local://` reads resolve against.
+fn resolve_local_write(host: &DocumentHost, resource: &str) -> Result<PathBuf, LocalWriteError> {
+	let sessions = host
+		.local_sessions_dir()
+		.ok_or(LocalWriteError::Unavailable)?;
+	let session = crate::tools::invocation_session_id().ok_or(LocalWriteError::NoSession)?;
+	local::resolve_write_target(&sessions, &session, resource)
 }
 
 fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPlainWrite, String> {
@@ -2045,8 +2097,7 @@ fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPla
 	if candidate == root {
 		return Err("document path must name a file".into());
 	}
-	let canonical_root = std_fs::canonicalize(root)
-		.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))?;
+	let canonical_root = canonical_workspace_root(root)?;
 	let mut ancestor = candidate.as_path();
 	let canonical_ancestor = loop {
 		match std_fs::canonicalize(ancestor) {
@@ -2072,6 +2123,11 @@ fn resolve_plain_write_from_root(root: &Path, input: &str) -> Result<ResolvedPla
 		.map_err(|()| "document path cannot be represented as a file URI".to_owned())?;
 	let display_path = display_write_path(&path, &canonical_root);
 	Ok(ResolvedPlainWrite { uri: Str::from(uri.as_str()), path, display_path, use_document_host })
+}
+
+fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
+	std_fs::canonicalize(root)
+		.map_err(|error| format!("cannot canonicalize document workspace root: {error}"))
 }
 
 fn join_nonempty_suffix(mut base: PathBuf, suffix: &Path) -> PathBuf {
@@ -2344,6 +2400,11 @@ async fn commit_conflict_content(
 		snapshot_tag,
 		editor_sync: EditorSync::default(),
 	})
+}
+
+/// The invocation's write scope refused the target: nothing changed.
+fn scope_rejected(denied: write_scope::WriteScopeDenied) -> WriteCommitError {
+	WriteCommitError::Rejected(WriteFault::WriteScope(denied))
 }
 
 fn write_rejected(message: impl Into<Str>) -> WriteCommitError {
@@ -3107,6 +3168,7 @@ mod tests {
 
 fn write_archive_member_blocking(
 	host: &DocumentHost,
+	scope: Option<&WriteScope>,
 	display_path: &str,
 	content: Bytes,
 	control: &SpecialWriteControl,
@@ -3122,7 +3184,7 @@ fn write_archive_member_blocking(
 	}
 	let mut resolved = Vec::with_capacity(candidates.len());
 	for candidate in candidates {
-		let absolute = resolve_special_write_path(host, &candidate.archive_path)?;
+		let absolute = resolve_special_write_path(host, scope, &candidate.archive_path)?;
 		match std_fs::metadata(&absolute) {
 			Ok(metadata) if metadata.is_file() => {
 				resolved.push((candidate, absolute, true));
@@ -3301,6 +3363,7 @@ fn archive_member_exists(
 
 fn write_sqlite_row_blocking(
 	host: &DocumentHost,
+	scope: Option<&WriteScope>,
 	display_path: &str,
 	content: &str,
 	control: &SpecialWriteControl,
@@ -3320,7 +3383,7 @@ fn write_sqlite_row_blocking(
 	let mut selected = None;
 	let mut saw_existing_non_sqlite = false;
 	for candidate in candidates {
-		let absolute = resolve_special_write_path(host, &candidate.sqlite_path)?;
+		let absolute = resolve_special_write_path(host, scope, &candidate.sqlite_path)?;
 		fallback = Some((candidate.clone(), absolute.clone()));
 		match std_fs::metadata(&absolute) {
 			Ok(metadata) if metadata.is_file() => {
@@ -3377,10 +3440,19 @@ fn write_sqlite_row_blocking(
 	}))
 }
 
+/// Resolves an archive or SQLite write target; the calling invocation's
+/// write `scope` must admit it.
 fn resolve_special_write_path(
 	host: &DocumentHost,
+	scope: Option<&WriteScope>,
 	input: &str,
 ) -> Result<PathBuf, backends::Fault> {
+	if local_resource(input).is_some() {
+		// Only whole-file plain writes resolve inside a session scratch root.
+		return Err(special_fault(
+			"archive member and SQLite row writes are not supported for local:// targets",
+		));
+	}
 	let root_url = Url::parse(host.hello().root_uri.as_str()).map_err(|error| {
 		special_fault(format!("document workspace root is not a valid URI: {error}"))
 	})?;
@@ -3414,7 +3486,11 @@ fn resolve_special_write_path(
 	let suffix = candidate
 		.strip_prefix(ancestor)
 		.map_err(|_| special_fault("write path could not be resolved from its existing ancestor"))?;
-	Ok(join_nonempty_suffix(canonical_ancestor, suffix))
+	let resolved = join_nonempty_suffix(canonical_ancestor, suffix);
+	if let Some(scope) = scope {
+		scope.admit_path(&resolved)?;
+	}
+	Ok(resolved)
 }
 
 fn atomic_replace(
@@ -3453,7 +3529,7 @@ fn special_write_cancelled() -> backends::Fault {
 }
 
 fn special_fault(message: impl Into<Str>) -> backends::Fault {
-	backends::Fault { message: message.into() }
+	backends::Fault::new(message.into())
 }
 
 #[cfg(test)]
@@ -3516,8 +3592,7 @@ mod special_write_tests {
 		assert_eq!(
 			result
 				.expect_err("pre-effect cancellation rejects")
-				.message
-				.as_str(),
+				.to_string(),
 			"special write cancelled before mutation began"
 		);
 		assert!(!mutated.load(Ordering::Acquire));

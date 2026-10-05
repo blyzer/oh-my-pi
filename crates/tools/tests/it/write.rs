@@ -425,6 +425,29 @@ fn unsupported_uri_is_rejected_before_any_document_probe() {
 	assert!(requests.lock().is_empty());
 }
 
+/// Plan mode's default plan file is `local://PLAN.md`: the tool hands both
+/// spellings to the environment's plain write, which resolves them inside
+/// the invoking session's scratch root.
+#[test]
+fn local_targets_reach_the_documents_as_plain_writes() {
+	for target in ["local://PLAN.md", "local:/PLAN.md"] {
+		let documents = FakeDocuments::success(
+			LiteralPathProbe::Missing,
+			committed(WriteDisposition::Created, 4, false, None),
+		);
+		let probed = Arc::clone(&documents.probed);
+		let requests = Arc::clone(&documents.requests);
+		let raw = serde_json::to_string(&json!({"path": target, "content": "plan"})).unwrap();
+		let invocation = invoke(documents, &raw);
+		assert!(invocation.result.is_ok(), "{target}: {}", invocation.text);
+		assert_eq!(probed.lock().as_slice(), [Str::new(target)]);
+		let requests = requests.lock();
+		assert_eq!(requests.len(), 1, "{target}");
+		assert_eq!(requests[0].path.as_str(), target);
+		assert_eq!(requests[0].content.as_str(), "plan");
+	}
+}
+
 #[test]
 fn uri_like_device_target_is_rejected_with_dyn_builtin_guidance() {
 	let target = "device:/custom_tool";

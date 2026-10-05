@@ -2263,20 +2263,33 @@ impl<C: Inference> Kernel<C> {
 	/// The roster restrictions of a request projected now, before its
 	/// `turn_start` hook: the effective `sv_tools` allowlist plus the hidden
 	/// mounts advertised beside it (and the Director whose bind supplied it),
-	/// and the active plan file.
+	/// the read-only ceiling of a subagent spawned under plan mode, and the
+	/// active plan file.
 	fn roster_basis(&self, dom: &omp_dom::Dom, allowlist: Option<&[Str]>) -> ToolRestrictions {
 		let mut roster = ToolRestrictions::default();
+		let mounts = [("goal", self.goal_visible(dom)), ("think", self.think_mounted())];
+		let mounted = mounts
+			.into_iter()
+			.filter(|&(_, mounted)| mounted)
+			.map(|(name, _)| Str::new_static(name));
+		if self
+			.con
+			.as_deref()
+			.is_some_and(|con| crate::SV_TOOLS_READ_ONLY.get(con))
+		{
+			let ceiling = crate::directors::plan::PLAN_READ_ONLY_TOOLS
+				.iter()
+				.copied()
+				.map(Str::new_static)
+				.chain(mounted.clone())
+				.collect::<Arc<[Str]>>();
+			roster = roster.with_read_only_ceiling(ceiling);
+		}
 		if let Some(allowlist) = allowlist {
-			let mounts = [("goal", self.goal_visible(dom)), ("think", self.think_mounted())];
 			let names = allowlist
 				.iter()
 				.cloned()
-				.chain(
-					mounts
-						.into_iter()
-						.filter(|&(_, mounted)| mounted)
-						.map(|(name, _)| Str::new_static(name)),
-				)
+				.chain(mounted)
 				.collect::<Arc<[Str]>>();
 			let director = self
 				.con
@@ -2358,6 +2371,11 @@ impl<C: Inference> Kernel<C> {
 			tools.retain(|tool| roster.contains(&tool.definition.name));
 		}
 		let roster = self.roster_basis(session.dom(), allowlist.as_deref());
+		// A subagent of a plan-mode session sees only the read-only tools its
+		// ceiling allows, whatever its own allowlist says.
+		if let Some(ceiling) = roster.read_only_ceiling() {
+			tools.retain(|tool| ceiling.contains(&tool.definition.name));
+		}
 		// A session tool may withhold its declaration for the session it
 		// presents (`task` at the recursion ceiling).
 		tools.retain(|tool| !self.dispatcher.withholds(tool.definition.name.as_str()));

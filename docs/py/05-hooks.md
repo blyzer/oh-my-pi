@@ -668,6 +668,16 @@ who forgets ships a guard that blocks `bash` and waves through the `dyn shell_ex
 dispatch.
 That is a privilege escalation, and splitting the event would be designing it in on purpose.
 
+**Not yet for nested eval calls.** Today the pre- and post-tool hooks (`tool_call`, `call_open`,
+`tool_execution_start`/`_end`, `tool_result`) fire only for the outer `eval` call. A nested
+`tool.<name>()` call inside a cell fires none of them, because the agent loop and its dispatcher
+fire tool hooks and `omp-envd`, which runs the nested call through the eval bridge, dispatches no
+tool hooks at all. A nested call still obeys explicit `deny` and the invoking request's roster
+restrictions, and its writes stay inside the invocation's plan-mode write scope
+([ADR 0006](../adr/0006-host-policy-sandbox-stub.md)). Hooks on nested calls will be addressed
+together with per-call admission (the proposed `sv_eval_nested_approval`), once route- or session-scoped
+approvals exist.
+
 The correct handling of an unrecognized variant is `Defer()`:
 
 ```python

@@ -146,6 +146,22 @@ impl NormalizedTarget {
 	}
 }
 
+/// The session-relative resource of a `local://` target, also accepting the
+/// `local:/` shorthand; `None` for every other target.
+///
+/// The scheme matches ASCII case-insensitively, as URI schemes do. The
+/// resource is returned verbatim: the environment that owns the invoking
+/// session's scratch root decodes and confines it.
+#[must_use]
+pub fn local_resource(target: &str) -> Option<&str> {
+	let scheme = target.get(..6)?;
+	if !scheme.eq_ignore_ascii_case("local:") {
+		return None;
+	}
+	let rest = &target[6..];
+	rest.strip_prefix("//").or_else(|| rest.strip_prefix('/'))
+}
+
 /// Normalizes one model-authored path before any selector parsing.
 ///
 /// The pass is deliberately lexical: it never stats the target and therefore
@@ -453,6 +469,16 @@ mod tests {
 			path:     sf!("C:\\repo\\a.rs"),
 			selector: Some(sf!("4-8")),
 		});
+	}
+	#[test]
+	fn local_resources_accept_both_spellings_and_nothing_else() {
+		assert_eq!(local_resource("local://PLAN.md"), Some("PLAN.md"));
+		assert_eq!(local_resource("local:/PLAN.md"), Some("PLAN.md"));
+		assert_eq!(local_resource("LOCAL://plans/a.md"), Some("plans/a.md"));
+		assert_eq!(local_resource("local:///PLAN.md"), Some("/PLAN.md"));
+		for other in ["PLAN.md", "local:PLAN.md", "locale://x", "vault://x", "lo", "", "/local/x"] {
+			assert_eq!(local_resource(other), None, "{other}");
+		}
 	}
 	#[test]
 	fn aggregates_every_write_target_and_preserves_writable_internal_tier() {
