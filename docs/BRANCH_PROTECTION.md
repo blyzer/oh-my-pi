@@ -127,6 +127,15 @@ runner leaves the check pending and blocks every merge that touches CI paths.
 The escape hatch is the ruleset's admin bypass: merge as an admin, or unset
 `MACOS_RUNNER` so the job falls back to the hosted `macos-15` runner.
 
+Measured on the hosted runner (run 37329841934, `macos-15-arm64`): the job builds and
+links the whole workspace in about 52 minutes (against about 15 on a warm self-hosted
+Mac) and ends with about 21 GiB of the 43 GiB free, so disk is not the limit. Three tests
+that pass on the self-hosted Mac failed there, so the hosted fallback is installable but
+not yet green: `docserver::actor::tests::active_permissions_require_current_revision_and_preserve_head`,
+`sandbox_proxy::tests::over_limit_rejections_never_stall_accept` and
+`omp-shell-builtins` `executes_unix_behavior_corpus` (`ps` returned nothing). The doctests and
+the acceptance proofs did not run after that failure.
+
 ## Auto-merge
 
 **Settings > General > Pull Requests**
