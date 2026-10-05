@@ -62,7 +62,7 @@ The owner brought these decisions in line with the code. Each ADR's decision tex
 - [0006](0006-host-policy-sandbox-stub.md): the eval parent bridge (`ParentSessionHost`) is a bounded exception to 'the stub never calls the host'; the minimized stub for remote targets is deferred to 0039. Nested native-tool calls from eval obey explicit `deny` and the request's roster restrictions without prompting; eval-level approval stays the unit of prompts, and per-call admission is deferred until route- or session-scoped approvals exist. In production only `__workpool__` is bound; completion, agent, concurrency and budget have no production host.
 - [0007](0007-subagent-filesystem-isolation.md): only per-file reflink with a copy fallback is implemented; other backends are future targets and not selectable. Code follow-up done: the inert `sv_task_isolation_mode` convar is deleted. Open gap kept in the ADR: gitignored files are not copied.
 - [0023](0023-tiny-local-model.md): the `tiny` role resolves to a configured model (default `commit`, then `smol`, an online model); an in-process tiny generator is a future option. Code follow-up done: stale comments, caller-less title helpers and the unread `ai_*_selector` convars are removed.
-- [0028](0028-bash-is-an-in-process-interpreter.md): approval is the sandbox-denial-and-rerun model with a path or network fact as the unit; capability-level, pre-execution approval is not claimed.
+- [0028](0028-bash-is-an-in-process-interpreter.md): approval is the sandbox-denial-and-rerun model with a path or network fact as the unit; capability-level, pre-execution approval is not claimed. The overstating comment on the `bash@2` effects declaration was rewritten.
 
 ## Status changes against the previous notes
 
