@@ -285,11 +285,13 @@ async fn rpc_set_host_tools_is_accepted_only_between_turns() {
 		"{{\"id\":\"prompt\",\"type\":\"prompt\",\"message\":\"wait\"}}\n{{\"id\":\"busy\",\"type\":\
 		 \"set_host_tools\",{tools}}}\n{{\"id\":\"cancel\",\"type\":\"cancel\"}}\n"
 	);
-	let idle = format!("{{\"id\":\"idle\",\"type\":\"set_host_tools\",{tools}}}\n");
+	// `converse` writes one `after_turns` entry per `agent_end`, and the cancelled
+	// prompt yields exactly one: the idle request and the quit travel together.
+	let idle = format!(r#"{{"id":"idle","type":"set_host_tools",{tools}}}"#);
+	let quit = r#"{"id":"quit","type":"quit"}"#;
+	let after = format!("{idle}\n{quit}\n");
 	let during: &'static str = Box::leak(during.into_boxed_str());
-	let idle: &'static str = Box::leak(idle.into_boxed_str());
-	let after: &'static [&'static str] =
-		Box::leak(Box::new([idle, "{\"id\":\"quit\",\"type\":\"quit\"}\n"]));
+	let after: &'static [&'static str] = Box::leak(Box::new([&*Box::leak(after.into_boxed_str())]));
 	let frames = converse(&temp, VecDeque::from([Script::Pending]), during, after).await;
 	let busy = response(&frames, "busy");
 	assert_eq!(busy["success"], false, "{busy}");
