@@ -1,4 +1,4 @@
-//! Typed card for `lsp@3`.
+//! Typed card for `lsp@4`.
 
 use omp_tui::{IntoComponent as _, UiContext, dom};
 use serde_json::Value;

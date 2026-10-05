@@ -6249,8 +6249,9 @@ mod tests {
 			.devices()
 			.find(|device| device.name.as_str() == "lsp")
 			.expect("LSP dynamic device");
-		assert_eq!(lsp.rev.n, 3);
-		assert_eq!(lsp.schema, omp_tools::lsp::spec().schema.as_ref());
+		let live_lsp = omp_tools::lsp::spec();
+		assert_eq!(*lsp.rev, live_lsp.rev);
+		assert_eq!(lsp.schema, live_lsp.schema.as_ref());
 		let devices = live
 			.devices()
 			.map(|device| device.name.clone())

@@ -22,6 +22,7 @@ pub mod diagnostics;
 pub mod navigation;
 pub mod refactor;
 pub mod render;
+pub mod symbol;
 
 /// One discoverable LSP operation.
 #[derive(
@@ -83,9 +84,24 @@ impl Action {
 			_ => false,
 		}
 	}
+
+	/// Whether `file` plus a dotted `symbol` may address the target without a
+	/// `line`: the position requests whose position is a declaration's name.
+	pub const fn symbol_addressable(self) -> bool {
+		matches!(
+			self,
+			Self::Definition
+				| Self::TypeDefinition
+				| Self::Implementation
+				| Self::References
+				| Self::Hover
+				| Self::IncomingCalls
+				| Self::OutgoingCalls
+		)
+	}
 }
 
-/// Arguments for `lsp@3`.
+/// Arguments for `lsp@4`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
@@ -94,11 +110,18 @@ pub struct Params {
 	/// Workspace-relative file, glob for diagnostics, or `*` workspace.
 	#[serde(default)]
 	pub file:     Option<Str>,
-	/// One-based source line.
+	/// One-based source line. Optional for `definition`, `type_definition`,
+	/// `implementation`, `references`, `hover`, `incoming_calls`, and
+	/// `outgoing_calls` when `symbol` is given; required for `code_actions` and
+	/// `rename`.
 	#[serde(default)]
 	pub line:     Option<u32>,
-	/// Identifier or `identifier#N` one-based occurrence target. Required for
-	/// project-aware definition, references, and rename requests.
+	/// Declaration to target. With `line`: an identifier or `identifier#N`
+	/// (one-based occurrence) located on that line. Without `line`, for the
+	/// position requests above: a dotted query (`name`, `Type.method`)
+	/// resolved against the file's current text to the declaration's name
+	/// (Rust, TypeScript/JavaScript, Python, Go, Java); an ambiguous query is
+	/// an error listing every candidate with its `line`. Required for `rename`.
 	#[serde(default)]
 	pub symbol:   Option<Str>,
 	/// Workspace symbol query, zero-based code-action index/title substring,
@@ -186,6 +209,11 @@ pub enum Fault {
 		/// Human-readable aggregate retaining every server name and detail.
 		message:  Str,
 	},
+	/// A `file` + `symbol` address matched no declaration, or several, or
+	/// could not be searched; the typed reason renders the model-facing text,
+	/// listing every candidate when the symbol is ambiguous.
+	#[error(transparent)]
+	Symbol(#[from] symbol::SymbolFault),
 	/// Transactional workspace edit was rejected or rolled back.
 	#[error("LSP workspace edit failed")]
 	WorkspaceEdit,
@@ -340,18 +368,24 @@ pub struct LspTool<C> {
 	spec:    ToolSpec,
 }
 
-/// Returns the host-free `lsp@3` specification.
+/// Returns the host-free `lsp@4` specification.
 pub fn spec() -> ToolSpec {
 	ToolSpec {
 		name:            sf!("lsp"),
-		rev:             Rev { family: Str::default(), n: 3 },
+		rev:             Rev { family: Str::default(), n: 4 },
 		description:     sf!(
 			"Symbol-aware language-server diagnostics, navigation, references, hover, symbols, \
 			 transactional symbol/path renames, code actions, raw requests, status, and reload. \
-			 Position requests use one-based line plus symbol (symbol#N selects an occurrence); \
-			 rename and rename_file apply by default, code_actions applies only with apply=true; \
-			 diagnostics accepts a path, glob, or * and symbols uses * plus query for workspace \
-			 search."
+			 definition, type_definition, implementation, references, hover, incoming_calls, and \
+			 outgoing_calls take file plus a dotted symbol (name or Type.method) with no line: it is \
+			 resolved in the current file text to the declaration's name (Rust, \
+			 TypeScript/JavaScript, Python, Go, Java), and an ambiguous name is an error listing \
+			 every candidate with the line to retry with. With a one-based line, symbol is an \
+			 identifier on that line (symbol#N selects an occurrence); code_actions and rename \
+			 always take line. rename and rename_file apply by default, code_actions applies only \
+			 with apply=true; diagnostics accepts a path, glob, or * and symbols uses * plus query \
+			 for workspace search. symbols on a file lists each symbol as kind, name, container, and \
+			 a START-END line range, ready for read path:START-END or read path:@Type.method."
 		),
 		schema:          omp_tool::schema::<Params>(),
 		constraint:      Constraint::Schema {
@@ -377,7 +411,7 @@ pub fn spec() -> ToolSpec {
 	}
 }
 
-/// Creates discoverable `lsp@3` with an environment-configured timeout ceiling.
+/// Creates discoverable `lsp@4` with an environment-configured timeout ceiling.
 pub fn tool<C: LspControl>(control: C, maximum: Duration) -> LspTool<C> {
 	LspTool {
 		control,
@@ -462,12 +496,17 @@ impl<C: LspControl> Tool for LspTool<C> {
 	}
 }
 
-/// Lifts durable `lsp@1` and `lsp@2` calls onto `lsp@3` only when both the
-/// historical arguments and verdict satisfy the current typed contract.
-/// Revision three adds schema bounds and semantic navigation projection; old
-/// successful navigation verdicts are re-projected from their structured data.
+/// Lifts durable `lsp@1`, `lsp@2`, and `lsp@3` calls onto `lsp@4` only when
+/// both the historical arguments and verdict satisfy the current typed
+/// contract. Revision three added schema bounds and semantic navigation
+/// projection; revision four widens the arguments (`file` + `symbol` without
+/// `line`) and projects document symbols with ranges and containers. Old
+/// successful navigation and document-symbol verdicts are re-projected from
+/// their structured data; recorded arguments are re-expressed byte for byte.
+/// The registry hands this step every revision older than the live one that is
+/// not itself registered, so it is the only place that names them.
 fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
-	if !from.family.is_empty() || !matches!(from.n, 1 | 2) {
+	if !from.family.is_empty() || !matches!(from.n, 1..=3) {
 		return None;
 	}
 	let mut raw_args = serde_json::from_slice::<Value>(call.raw_args).ok()?;
@@ -487,6 +526,7 @@ fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 			Action::References => navigation::render_references(&payload.data),
 			Action::IncomingCalls => navigation::render_calls("caller", "callers", &payload.data),
 			Action::OutgoingCalls => navigation::render_calls("callee", "callees", &payload.data),
+			Action::Symbols if params.query.is_none() => render::document_symbols(&payload.data),
 			_ => payload.output.clone(),
 		};
 	}
@@ -515,6 +555,9 @@ fn valid(params: &Params) -> bool {
 				&& params.new_name.is_some()
 		},
 		Action::RenameFile => params.file.is_some() && params.new_name.is_some(),
+		action if action.symbol_addressable() => {
+			params.file.is_some() && (params.line.is_some() || params.symbol.is_some())
+		},
 		_ => params.file.is_some() && params.line.is_some(),
 	}
 }
@@ -766,6 +809,211 @@ mod tests {
 			},)
 				.is_none()
 		);
+	}
+
+	fn params(raw: &str) -> Params {
+		serde_json::from_str(raw).expect("params decode")
+	}
+
+	#[test]
+	fn position_requests_accept_a_symbol_without_a_line() {
+		for action in [
+			"definition",
+			"type_definition",
+			"implementation",
+			"references",
+			"hover",
+			"incoming_calls",
+			"outgoing_calls",
+		] {
+			let by_name = params(&format!(
+				r#"{{"action":"{action}","file":"src/lib.rs","symbol":"Widget.new"}}"#
+			));
+			assert!(valid(&by_name), "{action} by symbol");
+			let by_line = params(&format!(r#"{{"action":"{action}","file":"src/lib.rs","line":4}}"#));
+			assert!(valid(&by_line), "{action} by line");
+			let both = params(&format!(
+				r#"{{"action":"{action}","file":"src/lib.rs","line":4,"symbol":"new#2"}}"#
+			));
+			assert!(valid(&both), "{action} by line and symbol");
+			let neither = params(&format!(r#"{{"action":"{action}","file":"src/lib.rs"}}"#));
+			assert!(!valid(&neither), "{action} needs a line or a symbol");
+			let no_file = params(&format!(r#"{{"action":"{action}","symbol":"Widget.new"}}"#));
+			assert!(!valid(&no_file), "{action} needs a file");
+			let zero = params(&format!(
+				r#"{{"action":"{action}","file":"src/lib.rs","line":0,"symbol":"new"}}"#
+			));
+			assert!(!valid(&zero), "{action} lines are one-based");
+		}
+	}
+
+	#[test]
+	fn code_actions_and_rename_still_require_a_line() {
+		let code_actions =
+			params(r#"{"action":"code_actions","file":"src/lib.rs","symbol":"Widget.new"}"#);
+		assert!(!valid(&code_actions));
+		assert!(valid(&params(
+			r#"{"action":"code_actions","file":"src/lib.rs","line":4,"symbol":"new"}"#
+		)));
+		let rename = params(
+			r#"{"action":"rename","file":"src/lib.rs","symbol":"Widget.new","new_name":"build"}"#,
+		);
+		assert!(!valid(&rename));
+		assert!(valid(&params(
+			r#"{"action":"rename","file":"src/lib.rs","line":4,"symbol":"new","new_name":"build"}"#
+		)));
+	}
+
+	#[test]
+	fn only_the_declaration_position_requests_are_symbol_addressable() {
+		let addressable = [
+			Action::Definition,
+			Action::TypeDefinition,
+			Action::Implementation,
+			Action::References,
+			Action::Hover,
+			Action::IncomingCalls,
+			Action::OutgoingCalls,
+		];
+		for action in addressable {
+			assert!(action.symbol_addressable(), "{action}");
+		}
+		for action in [
+			Action::Diagnostics,
+			Action::Symbols,
+			Action::Rename,
+			Action::RenameFile,
+			Action::CodeActions,
+			Action::Request,
+			Action::Capabilities,
+			Action::Status,
+			Action::Reload,
+		] {
+			assert!(!action.symbol_addressable(), "{action}");
+		}
+	}
+
+	#[tokio::test]
+	async fn a_symbol_only_call_reaches_the_host_and_a_bare_one_is_rejected() {
+		let control = RecordingControl::default();
+		let lsp = tool(control.clone(), Duration::from_secs(300));
+		let raw = r#"{"action":"references","file":"src/lib.rs","symbol":"Widget.new"}"#;
+		let (feed, incoming) = IncomingParams::channel();
+		feed.arg_text(raw.into()).expect("stream args");
+		feed.args_committed(raw.into()).expect("commit args");
+		let events = lsp.call(incoming).collect::<Vec<_>>().await;
+		assert!(matches!(events.last(), Some(Ev::Done(ToolTerminal::Done { result: Ok(_), .. }))));
+		{
+			let recorded = control.0.lock();
+			let reached = recorded.as_ref().expect("host executed");
+			assert_eq!((reached.line, reached.symbol.as_deref()), (None, Some("Widget.new")));
+		}
+
+		let bare = RecordingControl::default();
+		let lsp = tool(bare.clone(), Duration::from_secs(300));
+		let raw = r#"{"action":"references","file":"src/lib.rs"}"#;
+		let (feed, incoming) = IncomingParams::channel();
+		feed.arg_text(raw.into()).expect("stream args");
+		feed.args_committed(raw.into()).expect("commit args");
+		let events = lsp.call(incoming).collect::<Vec<_>>().await;
+		assert!(matches!(
+			events.last(),
+			Some(Ev::Done(ToolTerminal::Done { result: Err(Fault::InvalidArguments), .. }))
+		));
+		assert!(bare.0.lock().is_none(), "an invalid call never reaches the host");
+	}
+
+	#[test]
+	fn the_live_revision_is_four_and_the_schema_documents_symbol_addressing() {
+		let spec = spec();
+		assert_eq!(spec.rev, Rev { family: Str::default(), n: 4 });
+		let schema: Value = serde_json::from_slice(&spec.schema).expect("LSP schema JSON");
+		let line = schema["properties"]["line"]["description"]
+			.as_str()
+			.expect("line docs");
+		assert!(line.contains("Optional for"), "{line}");
+		let symbol = schema["properties"]["symbol"]["description"]
+			.as_str()
+			.expect("symbol docs");
+		assert!(symbol.contains("Type.method") && symbol.contains("ambiguous"), "{symbol}");
+		assert!(spec.description.contains("dotted symbol"), "{}", spec.description);
+		assert!(spec.description.contains("START-END"), "{}", spec.description);
+	}
+
+	#[test]
+	fn every_earlier_revision_lifts_and_document_symbols_gain_ranges() {
+		let lsp = tool(RecordingControl::default(), Duration::from_secs(300));
+		let args = br#"{"i":"Listing","action":"symbols","file":"src/lib.rs"}"#;
+		let verdict = serde_json::to_vec(&CallOutcome::<Payload, Fault>::Ok(Payload {
+			action:  Action::Symbols,
+			servers: vec![Str::new_static("rust-analyzer")],
+			output:  Str::new_static("struct Widget @ line 3\nmethod new @ line 10\n"),
+			data:    serde_json::json!([
+				{"name": "Widget", "kind": 23, "location": {"uri": "file:///w/src/lib.rs", "range": {"start": {"line": 2, "character": 0}, "end": {"line": 6, "character": 1}}}},
+				{"name": "new", "kind": 6, "containerName": "Widget", "location": {"uri": "file:///w/src/lib.rs", "range": {"start": {"line": 9, "character": 1}, "end": {"line": 13, "character": 2}}}}
+			]),
+			omitted: 0,
+		}))
+		.expect("verdict JSON");
+		for earlier in 1..=3 {
+			let lifted = lsp
+				.lift(&Rev { family: Str::default(), n: earlier }, RecordedCall {
+					raw_args: args,
+					verdict:  &verdict,
+				})
+				.unwrap_or_else(|| panic!("lsp@{earlier} lifts"));
+			assert_eq!(lifted.raw_args.as_ref(), args, "arguments are re-expressed byte for byte");
+			let CallOutcome::Ok(payload) =
+				serde_json::from_slice::<CallOutcome<Payload, Fault>>(&lifted.verdict).expect("lifted")
+			else {
+				panic!("a successful historical verdict stays successful");
+			};
+			assert_eq!(
+				payload.output, "struct Widget @ lines 3-7\nmethod new in Widget @ lines 10-14\n",
+				"lsp@{earlier} document symbols are re-projected with ranges and containers"
+			);
+		}
+		for unknown in [0, 4, 5] {
+			assert!(
+				lsp.lift(&Rev { family: Str::default(), n: unknown }, RecordedCall {
+					raw_args: args,
+					verdict:  &verdict,
+				})
+				.is_none(),
+				"lsp@{unknown} is not a revision this lift handles"
+			);
+		}
+		assert!(
+			lsp.lift(&Rev { family: Str::new_static("x"), n: 3 }, RecordedCall {
+				raw_args: args,
+				verdict:  &verdict,
+			})
+			.is_none(),
+			"a foreign family never lifts"
+		);
+	}
+
+	#[test]
+	fn workspace_symbol_verdicts_keep_their_recorded_projection_when_lifted() {
+		let lsp = tool(RecordingControl::default(), Duration::from_secs(300));
+		let args = br#"{"action":"symbols","file":"*","query":"Widget"}"#;
+		let verdict = serde_json::to_vec(&CallOutcome::<Payload, Fault>::Ok(Payload {
+			action:  Action::Symbols,
+			servers: vec![Str::new_static("rust-analyzer")],
+			output:  Str::new_static("Found 1 symbol(s) matching \"Widget\":\nstruct Widget @ line 3\n"),
+			data:    serde_json::json!([
+				{"name": "Widget", "kind": 23, "location": {"uri": "file:///w/src/lib.rs", "range": {"start": {"line": 2, "character": 0}, "end": {"line": 6, "character": 1}}}}
+			]),
+			omitted: 0,
+		}))
+		.expect("verdict JSON");
+		let lifted = lsp
+			.lift(&Rev { family: Str::default(), n: 3 }, RecordedCall {
+				raw_args: args,
+				verdict:  &verdict,
+			})
+			.expect("workspace search lifts");
+		assert_eq!(lifted.verdict.as_ref(), verdict.as_slice());
 	}
 
 	#[test]

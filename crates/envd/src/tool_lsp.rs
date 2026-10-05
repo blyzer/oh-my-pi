@@ -1,4 +1,4 @@
-//! Production bridge from `lsp@3` to the project document authority.
+//! Production bridge from `lsp@4` to the project document authority.
 
 use std::{
 	collections::HashMap,
@@ -25,7 +25,7 @@ use omp_tools::lsp::{
 	aggregate_workspace_symbols,
 	checkers::{self, CheckerExecutor, CheckerFault, CheckerOutput, CheckerRequest, Preset},
 	diagnostics::{DiagnosticResult, MAX_GLOB_TARGETS, render as render_diagnostics},
-	navigation, refactor, render,
+	navigation, refactor, render, symbol,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -1280,14 +1280,34 @@ impl LspControl for DocumentLspControl {
 			let content = read_whole(&self.documents, &lease)
 				.await
 				.map_err(|_| Fault::Server)?;
-			let line = params.line.unwrap_or(1);
-			let symbol_target = params
-				.symbol
+			// `file` + a dotted `symbol` without `line` addresses a declaration by
+			// name: tree-sitter resolves it in the document's current text to the
+			// line and byte column of the identifier, and everything below runs
+			// as if the caller had supplied that line.
+			let by_name = match params.symbol.as_deref() {
+				Some(query) if params.line.is_none() && params.action.symbol_addressable() => {
+					let text = str::from_utf8(&content).map_err(|_| Fault::InvalidArguments)?;
+					Some(symbol::resolve(file, text, query)?)
+				},
+				_ => None,
+			};
+			let line = by_name
 				.as_ref()
-				.map(|symbol| navigation::parse_symbol_target(symbol))
-				.transpose()
-				.map_err(|_| Fault::InvalidArguments)?;
-			let source_line = if symbol_target.is_some() {
+				.map_or_else(|| params.line.unwrap_or(1), |point| point.line);
+			let position_line = by_name
+				.as_ref()
+				.map_or(params.line, |point| Some(point.line));
+			let symbol_target = if by_name.is_some() {
+				None
+			} else {
+				params
+					.symbol
+					.as_ref()
+					.map(|symbol| navigation::parse_symbol_target(symbol))
+					.transpose()
+					.map_err(|_| Fault::InvalidArguments)?
+			};
+			let source_line = if symbol_target.is_some() || by_name.is_some() {
 				let text = str::from_utf8(&content).map_err(|_| Fault::InvalidArguments)?;
 				Some(
 					text
@@ -1318,9 +1338,13 @@ impl LspControl for DocumentLspControl {
 					.as_ref()
 					.map(|policy| PositionEncoding::from_lsp_name(Some(&policy.position_encoding)))
 					.unwrap_or_default();
-				let character = match (source_line, symbol_target.as_ref()) {
-					(Some(source_line), Some(target)) => {
+				let character = match (source_line, symbol_target.as_ref(), by_name.as_ref()) {
+					(Some(source_line), Some(target), _) => {
 						navigation::resolve_symbol_column(source_line, target, encoding)
+							.ok_or(Fault::InvalidArguments)?
+					},
+					(Some(source_line), None, Some(point)) => {
+						navigation::column_in_encoding(source_line, point.column as usize, encoding)
 							.ok_or(Fault::InvalidArguments)?
 					},
 					_ => 0,
@@ -1335,7 +1359,7 @@ impl LspControl for DocumentLspControl {
 					(_, supplied) => actions::auto_parameters(
 						supplied,
 						Some(uri.as_str()),
-						params.line,
+						position_line,
 						Some(character),
 					),
 				};
@@ -1662,6 +1686,7 @@ impl LspControl for DocumentLspControl {
 					&data,
 				)?,
 				Action::Rename => refactor::preview(&data),
+				Action::Symbols => render::document_symbols(&data),
 				_ => render::structured(&data, usize::MAX),
 			};
 			Ok(Payload { action: params.action, servers, output, data, omitted: 0 })
@@ -1779,6 +1804,250 @@ mod tests {
 			assert_eq!(notification.server_id, binding.server_id);
 			assert_eq!(notification.method, "workspace/didChangeConfiguration");
 			assert_eq!(notification.params_json, settings_json);
+		}
+	}
+	/// `lsp@4` addressed by symbol name, end to end through the document
+	/// authority and a real language-server process.
+	#[cfg(unix)]
+	mod by_symbol {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		use tokio::io::duplex;
+
+		use super::*;
+		use crate::docserver::{
+			Environment, NativeLspSupervisor, ServerConfig,
+			connection::{ConnectionConfig, serve_connection},
+		};
+
+		/// Answers `initialize` and echoes the position of each request, so the
+		/// test observes exactly what the server received.
+		const FAKE_SERVER: &str = r#"#!/usr/bin/env python3
+import json, sys
+
+def send(identifier, result):
+    payload = json.dumps({"jsonrpc": "2.0", "id": identifier, "result": result}).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(payload) + payload)
+    sys.stdout.buffer.flush()
+
+def read():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        if name.lower() == "content-length":
+            length = int(value.strip())
+    if length is None:
+        return None
+    return json.loads(sys.stdin.buffer.read(length))
+
+while True:
+    message = read()
+    if message is None:
+        break
+    method = message.get("method")
+    params = message.get("params") or {}
+    identifier = message.get("id")
+    if identifier is None:
+        continue
+    position = params.get("position")
+    uri = (params.get("textDocument") or {}).get("uri")
+    if method == "initialize":
+        send(identifier, {"capabilities": {"textDocumentSync": {"openClose": True, "change": 1}, "referencesProvider": True, "hoverProvider": True, "documentSymbolProvider": True}})
+    elif method == "textDocument/references":
+        end = {"line": position["line"], "character": position["character"] + 1}
+        send(identifier, [{"uri": uri, "range": {"start": position, "end": end}}])
+    elif method == "textDocument/hover":
+        send(identifier, {"contents": "position %d:%d" % (position["line"], position["character"])})
+    elif method == "textDocument/documentSymbol":
+        def at(start, end):
+            return {"uri": uri, "range": {"start": {"line": start[0], "character": start[1]}, "end": {"line": end[0], "character": end[1]}}}
+        send(identifier, [
+            {"name": "Widget", "kind": 23, "location": at((0, 0), (0, 14))},
+            {"name": "new", "kind": 6, "containerName": "Widget", "location": at((3, 1), (6, 2))},
+            {"name": "lone", "kind": 12, "location": at((9, 0), (9, 31))},
+        ])
+    else:
+        send(identifier, None)
+"#;
+
+		const LIB: &str = "struct Widget;\n\nimpl Widget {\n\t/// Make one.\n\tpub fn new() -> Self \
+		                   {\n\t\tWidget\n\t}\n}\n\nconst \u{c9}: u8 = 1; fn lone() {}\n";
+
+		struct Fixture {
+			control:     DocumentLspControl,
+			supervisor:  NativeLspSupervisor,
+			environment: Environment,
+			_scratch:    tempfile::TempDir,
+		}
+
+		impl Fixture {
+			async fn start() -> Self {
+				let scratch = tempfile::tempdir().expect("scratch");
+				let project = scratch.path().canonicalize().expect("canonical root");
+				let server = project.join("fake-lsp.py");
+				fs::write(&server, FAKE_SERVER).expect("write fake server");
+				fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).expect("chmod");
+				fs::write(project.join("foo.marker"), b"").expect("marker");
+				fs::create_dir_all(project.join("src")).expect("src");
+				fs::write(project.join("src/lib.rs"), LIB).expect("source");
+				fs::write(project.join("notes.md"), "# Notes\n").expect("notes");
+				fs::write(
+					project.join(".lsp.json"),
+					serde_json::to_vec(&json!({
+						"servers": {
+							"fake": {
+								"command": server,
+								"args": [],
+								"fileTypes": [".rs", ".md"],
+								"rootMarkers": ["foo.marker"],
+							}
+						}
+					}))
+					.expect("config"),
+				)
+				.expect("write config");
+				let environment =
+					Environment::new(ServerConfig::new(project.clone()).expect("config")).expect("env");
+				let supervisor = NativeLspSupervisor::discover(&environment, None, Default::default())
+					.expect("discover");
+				environment.install_lsp_supervisor(supervisor.clone());
+				for file in ["src/lib.rs", "notes.md"] {
+					supervisor.notify_open(&project.join(file));
+				}
+				supervisor.wait_idle(&CancellationToken::new()).await;
+				let (client, server_stream) = duplex(1 << 20);
+				tokio::spawn(serve_connection(
+					environment.clone(),
+					server_stream,
+					ConnectionConfig::default(),
+				));
+				let documents = DocumentHost::connect(client).await.expect("document host");
+				Self {
+					control: DocumentLspControl::new(documents, ExecHost::new()),
+					supervisor,
+					environment,
+					_scratch: scratch,
+				}
+			}
+
+			async fn run(&self, arguments: &str) -> Result<Payload, Fault> {
+				let params: Params = serde_json::from_str(arguments).expect("params decode");
+				self
+					.control
+					.execute(params, Duration::from_secs(20), CancellationToken::new())
+					.await
+			}
+
+			async fn finish(self) {
+				self.supervisor.shutdown().await;
+				self.environment.shutdown().await;
+			}
+		}
+
+		fn start_of(payload: &Payload) -> Value {
+			payload.data[0]["range"]["start"].clone()
+		}
+
+		#[tokio::test]
+		async fn references_by_symbol_name_reach_the_server_at_the_declaration_name() {
+			let fixture = Fixture::start().await;
+			let payload = fixture
+				.run(r#"{"action":"references","file":"src/lib.rs","symbol":"Widget.new"}"#)
+				.await
+				.expect("references resolve by name");
+			assert_eq!(payload.servers, [Str::new_static("fake")]);
+			// Doc comment on line 4 starts the declaration; the name is on line 5
+			// (zero-based 4), after a tab and `pub fn `.
+			assert_eq!(start_of(&payload), json!({"line": 4, "character": 8}));
+			assert!(
+				payload.output.contains("src/lib.rs:5:9"),
+				"the rendered reference is one-based: {}",
+				payload.output
+			);
+			fixture.finish().await;
+		}
+
+		#[tokio::test]
+		async fn hover_by_symbol_name_uses_the_negotiated_encoding_and_matches_the_line_form() {
+			let fixture = Fixture::start().await;
+			let by_name = fixture
+				.run(r#"{"action":"hover","file":"src/lib.rs","symbol":"lone"}"#)
+				.await
+				.expect("hover by name");
+			// `const \u{c9}: u8 = 1; fn lone` is 20 UTF-16 units (21 bytes) before the
+			// name.
+			assert_eq!(by_name.output, "position 9:20");
+			let by_line = fixture
+				.run(r#"{"action":"hover","file":"src/lib.rs","line":10,"symbol":"lone"}"#)
+				.await
+				.expect("hover by line and identifier");
+			assert_eq!(by_line.output, by_name.output, "an explicit line keeps its existing meaning");
+			fixture.finish().await;
+		}
+
+		#[tokio::test]
+		async fn unresolvable_symbols_are_typed_errors_and_never_reach_the_server() {
+			let fixture = Fixture::start().await;
+			let cases = [
+				(
+					r#"{"action":"references","file":"src/lib.rs","symbol":"Widget"}"#,
+					"Symbol 'Widget' is ambiguous in 'src/lib.rs': 2 declarations match. Retry with \
+					 'line' set to a candidate's name line (and 'symbol' set to its bare identifier) \
+					 or a longer dotted query (Type.method):\n- struct Widget: src/lib.rs:1-1 \
+					 (line=1)\n- impl Widget: src/lib.rs:3-8 (line=3)",
+				),
+				(
+					r#"{"action":"definition","file":"src/lib.rs","symbol":"Widget.missing"}"#,
+					"No declaration matches symbol 'Widget.missing' in 'src/lib.rs'. Names are exact \
+					 and case-sensitive; nest with dots (Type.method). Pass 'line' with an identifier \
+					 instead.",
+				),
+				(
+					r#"{"action":"hover","file":"src/lib.rs","symbol":"Widget..new"}"#,
+					"Invalid symbol 'Widget..new': symbol query segment 1 is empty. Use a dotted name \
+					 such as 'Type.method', or pass 'line' with an identifier.",
+				),
+			];
+			for (arguments, expected) in cases {
+				let fault = fixture
+					.run(arguments)
+					.await
+					.expect_err("typed symbol fault");
+				assert!(
+					matches!(&fault, Fault::Symbol(_)) && fault.to_string() == expected,
+					"{arguments}: {fault:?}"
+				);
+			}
+			let unsupported = fixture
+				.run(r#"{"action":"hover","file":"notes.md","symbol":"Notes"}"#)
+				.await
+				.expect_err("markdown has no declaration table");
+			assert!(matches!(&unsupported, Fault::Symbol(_)), "{unsupported:?}");
+			assert_eq!(
+				unsupported.to_string(),
+				"Cannot resolve symbol 'Notes' in 'notes.md': symbol lookup is not supported for \
+				 Markdown. Pass 'line' with an identifier instead."
+			);
+			fixture.finish().await;
+		}
+
+		#[tokio::test]
+		async fn document_symbols_report_kind_container_and_line_range() {
+			let fixture = Fixture::start().await;
+			let payload = fixture
+				.run(r#"{"action":"symbols","file":"src/lib.rs"}"#)
+				.await
+				.expect("document symbols");
+			assert_eq!(
+				payload.output,
+				"struct Widget @ line 1\nmethod new in Widget @ lines 4-7\nfunction lone @ line 10\n"
+			);
+			fixture.finish().await;
 		}
 	}
 }
