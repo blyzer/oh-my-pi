@@ -10,7 +10,7 @@ use std::{
 use bytes::BytesMut;
 use flume::Receiver;
 use omp_env::{Admitter, BlobDownloadEvent, EnvClient};
-use omp_envd::{EnvServer, RegistryBridges, worker::ExtHostConfig};
+use omp_envd::{EnvServer, RegistryBridges, exthost::ConvarControlFactory, worker::ExtHostConfig};
 use omp_proto::{
 	SCHEMA_REV,
 	blob::v1::GetRequest,
@@ -48,6 +48,21 @@ impl Admitter for AllowAdmission {
 	}
 }
 
+/// Worker-capable host configuration, control context and convar authority
+/// shared by every harness constructor.
+fn open_inputs() -> Result<(ExtHostConfig, Arc<omp_con::Ctx>, Arc<ConvarControlFactory>)> {
+	install_omp_binary_env().context("exposing worker-capable host")?;
+	let ext_host_config = ExtHostConfig::new(
+		omp_binary().context("resolving worker-capable host")?,
+		omp_core::Principal::new(omp_core::sf!("e2e-tester"), omp_core::sf!("E2E Tester")),
+		omp_core::sf!("e2e-session"),
+		1,
+	);
+	let con = Arc::new(omp_con::Ctx::new());
+	let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
+	Ok((ext_host_config, con, convars))
+}
+
 /// Real local environment authority with framed UDS transport and owned
 /// worker/process resources.
 pub struct EnvHarness {
@@ -63,29 +78,48 @@ impl EnvHarness {
 	/// Opens all real local environment resources and completes a framed client
 	/// hello.
 	pub async fn spawn(scratch: &Scratch, _registry: Registry) -> Result<Self> {
-		install_omp_binary_env().context("exposing worker-capable host")?;
+		let (ext_host_config, con, convars) = open_inputs()?;
+		let server = EnvServer::open_local(
+			scratch.project(),
+			scratch.state(),
+			Registry::new(),
+			ext_host_config,
+			&con,
+			convars,
+			RegistryBridges::default(),
+		)
+		.await
+		.context("opening local environment authority")?;
+		Self::serve(scratch, server).await
+	}
+
+	/// Opens the project-mode environment authority the production `envd` runs:
+	/// it starts the real document daemon on a private socket with native
+	/// language-server discovery enabled, so `.lsp.json` servers in the project
+	/// are started on first use and serve the `lsp` tool.
+	pub async fn spawn_project(scratch: &Scratch) -> Result<Self> {
+		let (ext_host_config, con, convars) = open_inputs()?;
+		let server = EnvServer::open_project(
+			scratch.project(),
+			scratch.state(),
+			&scratch.socket("docserver.sock"),
+			Registry::new(),
+			ext_host_config,
+			None,
+			false,
+			None,
+			&con,
+			convars,
+			RegistryBridges::default(),
+		)
+		.await
+		.context("opening project environment authority")?;
+		Self::serve(scratch, server).await
+	}
+
+	async fn serve(scratch: &Scratch, server: EnvServer) -> Result<Self> {
 		let socket = scratch.socket("env.sock");
-		let ext_host_config = ExtHostConfig::new(
-			omp_binary().context("resolving worker-capable host")?,
-			omp_core::Principal::new(omp_core::sf!("e2e-tester"), omp_core::sf!("E2E Tester")),
-			omp_core::sf!("e2e-session"),
-			1,
-		);
-		let con = Arc::new(omp_con::Ctx::new());
-		let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
-		let server = Arc::new(
-			EnvServer::open_local(
-				scratch.project(),
-				scratch.state(),
-				Registry::new(),
-				ext_host_config,
-				&con,
-				convars,
-				RegistryBridges::default(),
-			)
-			.await
-			.context("opening local environment authority")?,
-		);
+		let server = Arc::new(server);
 		let shutdown = CancellationToken::new();
 		let task_server = Arc::clone(&server);
 		let task_socket = socket.clone();
