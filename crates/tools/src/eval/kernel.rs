@@ -12,15 +12,22 @@
 //! with no context sink at all has no provenance and is discarded rather
 //! than risked across sessions. A cell's sink is sealed before its terminal
 //! event is sent, so
-//! `Completed` is always the last event on the channel.
+//! `Completed` is always the last event on the channel. A cell that replaces
+//! `sys.stdout`/`sys.stderr` replaces them for its own worker thread only; the
+//! routers in the real `sys` dictionary forward that thread's C-level writes
+//! (`print`) to the replacement.
 //!
 //! Timeouts are enforced solely by a Tokio watchdog task that first cancels
 //! host work, then raises `KeyboardInterrupt` in the worker after the
 //! configured interrupt grace through the shared `omp_py::interrupt` API.
+//! That interrupt can land inside asyncio's own plumbing, so every cell first
+//! repairs the session loop's idle invariants and an interrupted cell's task
+//! is cancelled with one non-blocking loop pass, never awaited.
 //! Python-side line tracing is deliberately absent because it deoptimizes the
 //! whole cell without covering anything the async interrupt cannot.
 
 use std::{
+	cell::Cell,
 	collections::{HashMap, HashSet},
 	ffi, future, io, mem, ptr,
 	sync::{
@@ -47,7 +54,9 @@ use pyo3::{
 	prelude::*,
 	pyclass, pymethods,
 	sync::PyOnceLock,
-	types::{PyAnyMethods, PyByteArray, PyBytes, PyDict, PyDictMethods, PyModule, PyTuple},
+	types::{
+		PyAnyMethods, PyByteArray, PyBytes, PyDict, PyDictMethods, PyModule, PyString, PyTuple,
+	},
 };
 use serde_json::Value;
 use tokio::{runtime::Handle, sync::Mutex as AsyncMutex, task::JoinHandle, time};
@@ -67,6 +76,8 @@ const BOOTSTRAP: &ffi::CStr = c_str!(
 	r#"
 import ast as _omp_ast
 import asyncio as _omp_asyncio
+import asyncio.base_events as _omp_asyncio_base_events
+import asyncio.events as _omp_asyncio_events
 import codecs as _omp_codecs
 import contextvars as _omp_contextvars
 import inspect as _omp_inspect
@@ -75,8 +86,6 @@ import os as _omp_os
 import re as _omp_re
 import subprocess as _omp_subprocess
 import sys as _omp_sys
-import threading as _omp_threading
-import types as _omp_types
 import time as _omp_time
 import traceback as _omp_traceback
 
@@ -84,44 +93,22 @@ _OMP_TLA = getattr(_omp_ast, "PyCF_ALLOW_TOP_LEVEL_AWAIT", 0x2000)
 
 # _OMP_SINK (a contextvars.ContextVar) is injected by the host after import;
 # it carries the active cell's output sink into threads and asyncio tasks.
-
-if not hasattr(_omp_sys, "__omp_thread_streams__"):
-    _omp_sys.__omp_thread_streams__ = _omp_threading.local()
-
-    class _OmpThreadLocalSys(_omp_types.ModuleType):
-        def __getattribute__(self, name):
-            if name in ("stdout", "stderr"):
-                streams = _omp_types.ModuleType.__getattribute__(
-                    self, "__omp_thread_streams__")
-                try:
-                    return getattr(streams, name)
-                except AttributeError:
-                    pass
-            return _omp_types.ModuleType.__getattribute__(self, name)
-
-        def __setattr__(self, name, value):
-            if name in ("stdout", "stderr"):
-                streams = _omp_types.ModuleType.__getattribute__(
-                    self, "__omp_thread_streams__")
-                setattr(streams, name, value)
-                return
-            _omp_types.ModuleType.__setattr__(self, name, value)
-
-        def __delattr__(self, name):
-            if name in ("stdout", "stderr"):
-                streams = _omp_types.ModuleType.__getattribute__(
-                    self, "__omp_thread_streams__")
-                delattr(streams, name)
-                return
-            _omp_types.ModuleType.__delattr__(self, name)
-
-    _omp_sys.__class__ = _OmpThreadLocalSys
+# The per-thread `sys.stdout`/`sys.stderr` proxy is installed once per process
+# by the host (STREAM_PROXY) before any worker can reach this module.
 
 def _omp_new_namespace():
+    # Create the session loop now rather than lazily inside the first cell.
+    # Its first creation also initializes asyncio's process-wide policy under
+    # a plain threading.Lock; an asynchronous KeyboardInterrupt landing right
+    # after that lock's acquisition leaks it, and every later loop creation
+    # then blocks forever where no interrupt can reach. The worker creates its
+    # first namespace before it accepts any cell, so nothing can interrupt it.
+    runner = _omp_asyncio.Runner()
+    runner.get_loop()
     return {
         "__name__": "__main__",
         "__builtins__": __builtins__,
-        "__omp_async_runner": _omp_asyncio.Runner(),
+        "__omp_async_runner": runner,
         "_omp_os": _omp_os,
         "_omp_sys": _omp_sys,
         "_omp_shell": _omp_shell,
@@ -353,27 +340,88 @@ async def _omp_run_async(code, ns, want_value, sink):
     exec(code, ns)
     return None
 
+def _omp_settle_loop(runner):
+    # Restores the idle invariants of the session's persistent loop. Cells
+    # are interrupted by an asynchronous KeyboardInterrupt that can land at
+    # any bytecode boundary, including inside asyncio's own plumbing: between
+    # run_forever's setup and its cleanup (the loop stays marked running and
+    # every later Runner.run() refuses to start), or after a completed task
+    # scheduled its run_until_complete stop callback (the stale callback then
+    # stops the next cell's run early). No loop is running when a cell
+    # starts, so any such state is a leftover and is repaired here.
+    loop = getattr(runner, "_loop", None)
+    if loop is None or loop.is_closed():
+        return
+    if loop.is_running() or _omp_asyncio_events._get_running_loop() is loop:
+        loop._run_forever_cleanup()
+    loop._stopping = False
+    stale = _omp_asyncio_base_events._run_until_complete_cb
+    for handle in [h for h in loop._ready if h._callback is stale]:
+        loop._ready.remove(handle)
+
+def _omp_recover_task(runner, coro, task):
+    # The interrupt may also have consumed the cell task's scheduled step, so
+    # the task can never run again. Waiting for it (run_until_complete) would
+    # block in the selector with no timeout, where no further asynchronous
+    # interrupt can reach the thread. Request cancellation and give the loop
+    # exactly one non-blocking pass instead: a task whose step is still
+    # scheduled observes the cancellation, and a task whose step was lost is
+    # abandoned rather than awaited.
+    #
+    # The task is never looked up through asyncio.all_tasks(): on the
+    # free-threaded build that takes every task's lock across all threads,
+    # and a task stepping on another thread holds its lock for the whole step,
+    # so recovery would block behind unrelated work (another worker's cell).
+    _omp_settle_loop(runner)
+    if coro is None:
+        return
+    loop = getattr(runner, "_loop", None)
+    if task is None and loop is not None and not loop.is_closed():
+        # Interrupted inside create_task: the scheduled first step is the only
+        # reference to the new task.
+        for handle in loop._ready:
+            owner = getattr(handle._callback, "__self__", None)
+            if isinstance(owner, _omp_asyncio.Task) and owner.get_coro() is coro:
+                task = owner
+                break
+    if task is None:
+        # Never wrapped in a task: close it so no "never awaited" warning
+        # surfaces in a later cell's stderr.
+        coro.close()
+        return
+    if task.done():
+        return
+    task.remove_done_callback(_omp_asyncio_base_events._run_until_complete_cb)
+    task._log_destroy_pending = False
+    task.cancel()
+    loop.call_soon(loop.stop)
+    loop.run_forever()
+    _omp_settle_loop(runner)
+    if (not task.done()
+            and _omp_inspect.getcoroutinestate(coro) == _omp_inspect.CORO_CREATED):
+        # The lost step never entered the coroutine; close it now so its
+        # "never awaited" warning cannot surface in a later cell's stderr.
+        coro.close()
+
 def _omp_run(code, ns, want_value, sink):
+    # Equivalent to runner.run(), which only adds a SIGINT handler on the main
+    # thread, but keeps the task reference for recovery.
     if code is None:
         return None
     runner = ns["__omp_async_runner"]
-    coro = _omp_run_async(code, ns, want_value, sink)
+    _omp_settle_loop(runner)
+    loop = runner.get_loop()
+    coro = None
+    task = None
     try:
-        return runner.run(coro)
+        coro = _omp_run_async(code, ns, want_value, sink)
+        task = loop.create_task(coro, context=runner._context)
+        return loop.run_until_complete(task)
     except BaseException:
-        # An asynchronously raised KeyboardInterrupt can land in the runner's
-        # own plumbing instead of the cell's frames. The cell task is then
-        # left scheduled on the persistent loop and the next cell would run
-        # it first; cancel and drain exactly that task before re-raising.
-        loop = getattr(runner, "_loop", None)
-        if loop is not None and not loop.is_closed():
-            for task in _omp_asyncio.all_tasks(loop):
-                if task.get_coro() is coro and not task.done():
-                    task.cancel()
-                    try:
-                        loop.run_until_complete(task)
-                    except BaseException:
-                        pass
+        try:
+            _omp_recover_task(runner, coro, task)
+        except Exception:
+            pass
         raise
 
 def _omp_apply_runtime(cwd, managed_env):
@@ -439,6 +487,53 @@ def _omp_run_cell(source, ns, timeout_control, sink):
         "error_traceback": error_traceback,
         "duration_ms": int((_omp_time.perf_counter() - started) * 1000),
     }
+"#
+);
+
+/// Per-thread `sys.stdout`/`sys.stderr` proxy, installed exactly once per
+/// process by [`stream_routing`].
+///
+/// Python-level reads and assignments of `sys.stdout`/`sys.stderr` resolve
+/// against a `threading.local`, so a cell replacing them affects only its own
+/// worker thread. C-level writers (`print`, `sys.displayhook`, unraisable
+/// hooks) bypass module attribute lookup and read the real `sys` dictionary;
+/// that dictionary therefore always holds the [`OutputRouter`]s, which forward
+/// to the calling thread's replacement. Every step completes before the
+/// installing caller returns, so no worker can observe a half-installed proxy.
+const STREAM_PROXY: &ffi::CStr = c_str!(
+	r#"
+import sys as _omp_sys
+import threading as _omp_threading
+import types as _omp_types
+
+def install(stdout, stderr):
+    overrides = _omp_threading.local()
+    _omp_types.ModuleType.__setattr__(_omp_sys, "stdout", stdout)
+    _omp_types.ModuleType.__setattr__(_omp_sys, "stderr", stderr)
+
+    class _OmpThreadLocalSys(_omp_types.ModuleType):
+        def __getattribute__(self, name):
+            if name in ("stdout", "stderr"):
+                try:
+                    return getattr(overrides, name)
+                except AttributeError:
+                    pass
+            return _omp_types.ModuleType.__getattribute__(self, name)
+
+        def __setattr__(self, name, value):
+            if name in ("stdout", "stderr"):
+                setattr(overrides, name, value)
+                return
+            _omp_types.ModuleType.__setattr__(self, name, value)
+
+        def __delattr__(self, name):
+            if name in ("stdout", "stderr"):
+                delattr(overrides, name)
+                return
+            _omp_types.ModuleType.__delattr__(self, name)
+
+    _omp_sys.__class__ = _OmpThreadLocalSys
+    return overrides
 "#
 );
 
@@ -586,7 +681,15 @@ impl Drop for Worker {
 	}
 }
 
-static OUTPUT_ROUTER_OBJECTS: PyOnceLock<(Py<OutputRouter>, Py<OutputRouter>)> = PyOnceLock::new();
+/// Process-wide stream routing installed by [`stream_routing`].
+struct StreamRouting {
+	stdout:    Py<OutputRouter>,
+	stderr:    Py<OutputRouter>,
+	/// `threading.local` holding each thread's `sys.stdout`/`sys.stderr`.
+	overrides: Py<PyAny>,
+}
+
+static STREAM_ROUTING: PyOnceLock<StreamRouting> = PyOnceLock::new();
 /// Routing context variable holding the active cell's [`CellSink`]; created
 /// once and injected into the bootstrap module as `_OMP_SINK`.
 static SINK_VAR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -710,19 +813,65 @@ struct CellSink {
 
 /// `sys.stdout`/`sys.stderr` replacement routing writes to the owning cell.
 ///
-/// Resolution order: the context sink (inherited by threads and asyncio tasks
-/// started inside a cell); if that sink is sealed, the same session's
-/// currently open cell; otherwise deliberate discard — a context with no sink
-/// has no provenance and must not be guessed at.
+/// A thread that replaced its own `sys.stdout`/`sys.stderr` (see
+/// [`STREAM_PROXY`]) has every write forwarded to that replacement, so C-level
+/// writers such as `print` honour `contextlib.redirect_stdout` and plain
+/// reassignment exactly as Python-level writes do — on that thread only.
+///
+/// Otherwise the resolution order is: the context sink (inherited by threads
+/// and asyncio tasks started inside a cell); if that sink is sealed, the same
+/// session's currently open cell; otherwise deliberate discard — a context
+/// with no sink has no provenance and must not be guessed at.
 #[pyclass(frozen, module = "_omp_eval")]
 struct OutputRouter {
 	channel:  OutputChannel,
 	registry: Arc<SinkRegistry>,
 }
 
-#[pymethods]
+thread_local! {
+	/// Set while a router forwards to the calling thread's replacement stream.
+	/// A replacement that writes back through a router (a tee wrapping the
+	/// stream it replaced, or `print` inside its `write`) then reaches the cell
+	/// sink instead of recursing into itself.
+	static FORWARDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Clears [`FORWARDING`] when the forwarded call returns or unwinds.
+struct ForwardingScope;
+
+impl ForwardingScope {
+	fn enter() -> Self {
+		FORWARDING.set(true);
+		Self
+	}
+}
+
+impl Drop for ForwardingScope {
+	fn drop(&mut self) {
+		FORWARDING.set(false);
+	}
+}
+
 impl OutputRouter {
-	fn write(&self, py: Python<'_>, text: &str) -> usize {
+	/// Returns the calling thread's replacement for this router's stream, if
+	/// that thread installed one and it is not this router.
+	fn replacement<'py>(slf: &Bound<'py, Self>) -> PyResult<Option<Bound<'py, PyAny>>> {
+		if FORWARDING.get() {
+			return Ok(None);
+		}
+		let py = slf.py();
+		let Some(routing) = STREAM_ROUTING.get(py) else {
+			return Ok(None);
+		};
+		let stream: &'static str = slf.get().channel.into();
+		Ok(routing
+			.overrides
+			.bind(py)
+			.getattr_opt(stream)?
+			.filter(|replacement| !replacement.is(slf)))
+	}
+
+	fn route(&self, py: Python<'_>, text: &str) -> usize {
 		if text.is_empty() {
 			return 0;
 		}
@@ -740,9 +889,39 @@ impl OutputRouter {
 		}
 		text.chars().count()
 	}
+}
 
-	#[staticmethod]
-	const fn flush() {}
+#[pymethods]
+impl OutputRouter {
+	fn write<'py>(slf: &Bound<'py, Self>, text: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+		let py = slf.py();
+		let text = text.cast::<PyString>()?;
+		match Self::replacement(slf)? {
+			// `sys.stdout = None` silences `print` in CPython; keep that here.
+			Some(replacement) if replacement.is_none() => {
+				Ok(text.to_str()?.chars().count().into_pyobject(py)?.into_any())
+			},
+			Some(replacement) => {
+				let _scope = ForwardingScope::enter();
+				replacement.call_method1("write", (text,))
+			},
+			None => Ok(slf
+				.get()
+				.route(py, text.to_str()?)
+				.into_pyobject(py)?
+				.into_any()),
+		}
+	}
+
+	fn flush(slf: &Bound<'_, Self>) -> PyResult<()> {
+		if let Some(replacement) = Self::replacement(slf)?
+			&& !replacement.is_none()
+		{
+			let _scope = ForwardingScope::enter();
+			replacement.call_method0("flush")?;
+		}
+		Ok(())
+	}
 }
 
 /// Returns the process-wide routing context variable, creating it on first
@@ -1618,23 +1797,39 @@ fn prepare_python(py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>, Py<PyAny>)>
 	))
 }
 
+/// Returns the process-wide stream routing, installing [`STREAM_PROXY`] on
+/// first use.
+///
+/// Installation runs inside the once-cell, so concurrent workers block until
+/// the real `sys` dictionary holds the routers and the per-thread proxy is in
+/// place; none can execute a cell against a half-installed `sys`.
+fn stream_routing(py: Python<'_>) -> PyResult<&StreamRouting> {
+	STREAM_ROUTING.get_or_try_init(py, || {
+		let router =
+			|channel| Py::new(py, OutputRouter { channel, registry: Arc::clone(&OPEN_SINKS) });
+		let stdout = router(OutputChannel::Stdout)?;
+		let stderr = router(OutputChannel::Stderr)?;
+		let overrides = PyModule::from_code(
+			py,
+			STREAM_PROXY,
+			c_str!("<omp-eval-streams>"),
+			c_str!("_omp_eval_streams"),
+		)?
+		.getattr("install")?
+		.call1((&stdout, &stderr))?
+		.unbind();
+		Ok::<_, PyErr>(StreamRouting { stdout, stderr, overrides })
+	})
+}
+
+/// Points the calling worker thread's `sys.stdout`/`sys.stderr` back at the
+/// routers, discarding a replacement left by an earlier cell.
 fn ensure_output_routers(py: Python<'_>) -> PyResult<()> {
 	sink_var(py)?;
-	let (stdout, stderr) = OUTPUT_ROUTER_OBJECTS.get_or_try_init(py, || {
-		Ok::<_, PyErr>((
-			Py::new(py, OutputRouter {
-				channel:  OutputChannel::Stdout,
-				registry: Arc::clone(&OPEN_SINKS),
-			})?,
-			Py::new(py, OutputRouter {
-				channel:  OutputChannel::Stderr,
-				registry: Arc::clone(&OPEN_SINKS),
-			})?,
-		))
-	})?;
-	let sys = PyModule::import(py, "sys")?;
-	sys.setattr("stdout", stdout.bind(py))?;
-	sys.setattr("stderr", stderr.bind(py))?;
+	let routing = stream_routing(py)?;
+	let overrides = routing.overrides.bind(py);
+	overrides.setattr("stdout", routing.stdout.bind(py))?;
+	overrides.setattr("stderr", routing.stderr.bind(py))?;
 	Ok(())
 }
 
@@ -1865,6 +2060,11 @@ fn format_python_error(py: Python<'_>, error: pyo3::PyErr) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+	clippy::await_holding_lock,
+	reason = "PROCESS_GLOBALS is held for a whole single-threaded test runtime to serialize \
+	          process-global interpreter state"
+)]
 mod tests {
 	use std::{
 		env,
@@ -1879,6 +2079,13 @@ mod tests {
 	static ENGINE: LazyLock<Arc<Engine>> =
 		LazyLock::new(|| Arc::new(Engine::builder().init().expect("embedded Python boots")));
 	const TEST_INTERRUPT_GRACE: Duration = Duration::new(1, omp_core::DurationUnit::Milliseconds);
+	/// Safety-net cell timeout. Tests that are not about timeouts end their
+	/// cells by completion or explicit cancellation; this only bounds a broken
+	/// kernel, so it must exceed any scheduling delay a loaded host can impose.
+	const CELL_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+	/// Deadlock breaker for cross-worker barrier handshakes, below
+	/// [`CELL_TIMEOUT`] so a missing peer surfaces as `BrokenBarrierError`.
+	const BARRIER_TIMEOUT_SECS: u64 = 30;
 	/// Every test worker shares one embedded interpreter, so SIGINT disposition
 	/// and delivery plus `sys.modules` are process-global. Cell-running tests
 	/// hold this shared; tests that mutate that global state hold it exclusively
@@ -1944,7 +2151,7 @@ mod tests {
 		let mut run = runtime
 			.run(session, RunRequest {
 				code: Str::new(code),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2143,19 +2350,19 @@ with ThreadPoolExecutor(max_workers=1) as pool:
 		let left_code = format!(
 			r#"import concurrent.futures, sys
 def emit():
-    sys.modules[{BARRIER_MODULE:?}].wait(timeout=1)
+    sys.modules[{BARRIER_MODULE:?}].wait(timeout={BARRIER_TIMEOUT_SECS})
     sys.stdout.write("left-background\n")
 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-    pool.submit(emit).result(timeout=1)
+    pool.submit(emit).result(timeout={BARRIER_TIMEOUT_SECS} * 2)
 print("left")"#
 		);
 		let right_code = format!(
 			r#"import concurrent.futures, sys
 def emit():
-    sys.modules[{BARRIER_MODULE:?}].wait(timeout=1)
+    sys.modules[{BARRIER_MODULE:?}].wait(timeout={BARRIER_TIMEOUT_SECS})
     sys.stdout.write("right-background\n")
 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-    pool.submit(emit).result(timeout=1)
+    pool.submit(emit).result(timeout={BARRIER_TIMEOUT_SECS} * 2)
 print("right")"#
 		);
 		let (left_result, right_result) = tokio::join!(
@@ -2187,13 +2394,19 @@ print("right")"#
 		let runtime = runtime();
 		let left = runtime.open_session().await.expect("left session opens");
 		let right = runtime.open_session().await.expect("right session opens");
+		// Two explicit handshakes order the workers: left has replaced
+		// `sys.stdout` before right prints, and right has printed before left
+		// reads its replacement.
 		let left_code = format!(
-			"import io, sys, time\nsys.stdout = \
-			 io.StringIO()\nsys.modules[{BARRIER_MODULE:?}].wait(timeout=1)\ntime.sleep(0.1)\nsys.\
-			 stdout.getvalue()"
+			"import io, sys\nbarrier = sys.modules[{BARRIER_MODULE:?}]\nsys.stdout = \
+			 io.StringIO()\nbarrier.wait(timeout={BARRIER_TIMEOUT_SECS})\nbarrier.\
+			 wait(timeout={BARRIER_TIMEOUT_SECS})\nsys.stdout.getvalue()"
 		);
-		let right_code =
-			format!("import sys\nsys.modules[{BARRIER_MODULE:?}].wait(timeout=1)\nprint('right')");
+		let right_code = format!(
+			"import sys\nbarrier = \
+			 sys.modules[{BARRIER_MODULE:?}]\nbarrier.wait(timeout={BARRIER_TIMEOUT_SECS})\nprint('\
+			 right')\nbarrier.wait(timeout={BARRIER_TIMEOUT_SECS})"
+		);
 		let ((_, left_done), (right_updates, right_done)) = tokio::join!(
 			run_to_completion(&runtime, &left, &left_code, false),
 			run_to_completion(&runtime, &right, &right_code, false),
@@ -2206,6 +2419,267 @@ print("right")"#
 			.flat_map(|update| update.data.to_vec())
 			.collect::<Vec<_>>();
 		assert_eq!(right_stdout, b"right\n");
+	}
+
+	fn stdout_bytes(updates: &[Update]) -> Vec<u8> {
+		updates
+			.iter()
+			.filter(|update| update.channel == OutputChannel::Stdout)
+			.flat_map(|update| update.data.iter().copied())
+			.collect()
+	}
+
+	#[tokio::test]
+	async fn print_follows_only_the_calling_workers_stream_replacement() {
+		let _globals = PROCESS_GLOBALS.read();
+		const BARRIER_MODULE: &str = "_omp_eval_print_barrier";
+		install_barrier(BARRIER_MODULE);
+
+		let runtime = runtime();
+		let left = runtime.open_session().await.expect("left session opens");
+		let right = runtime.open_session().await.expect("right session opens");
+		// Two explicit handshakes order the workers: left has replaced
+		// `sys.stdout` and printed into the replacement before right prints, and
+		// right has printed before left reads its capture. `print` resolves its
+		// stream in C from the real `sys` dictionary, not through the per-thread
+		// proxy, so this exercises the router forwarding on both sides.
+		let left_code = format!(
+			"import io, sys\nbarrier = sys.modules[{BARRIER_MODULE:?}]\ncapture = \
+			 io.StringIO()\nsys.stdout = \
+			 capture\nprint('left')\nbarrier.wait(timeout={BARRIER_TIMEOUT_SECS})\nbarrier.\
+			 wait(timeout={BARRIER_TIMEOUT_SECS})\ncapture.getvalue()"
+		);
+		let right_code = format!(
+			"import sys\nbarrier = \
+			 sys.modules[{BARRIER_MODULE:?}]\nbarrier.wait(timeout={BARRIER_TIMEOUT_SECS})\nprint('\
+			 right')\nbarrier.wait(timeout={BARRIER_TIMEOUT_SECS})"
+		);
+		let ((left_updates, left_done), (right_updates, right_done)) = tokio::join!(
+			run_to_completion(&runtime, &left, &left_code, false),
+			run_to_completion(&runtime, &right, &right_code, false),
+		);
+		assert_eq!(right_done.status.outcome, CellOutcome::Complete);
+		assert_eq!(
+			left_done
+				.result
+				.unwrap_or_else(|| panic!("left capture: {:?}", left_done.status))
+				.json,
+			Some(Value::String("left\n".to_owned()))
+		);
+		assert_eq!(stdout_bytes(&left_updates), b"");
+		assert_eq!(stdout_bytes(&right_updates), b"right\n");
+	}
+
+	#[tokio::test]
+	async fn print_honours_redirect_stdout_and_wrapping_replacements() {
+		let _globals = PROCESS_GLOBALS.read();
+		let runtime = runtime();
+		let session = runtime.open_session().await.expect("session opens");
+		let (updates, done) = run_to_completion(
+			&runtime,
+			&session,
+			concat!(
+				"import contextlib, io, sys\n",
+				"with contextlib.redirect_stdout(io.StringIO()) as redirected:\n",
+				"    print('hidden')\n",
+				"class Tee:\n",
+				"    def __init__(self, inner):\n",
+				"        self.inner = inner\n",
+				"        self.seen = []\n",
+				"    def write(self, text):\n",
+				"        self.seen.append(text)\n",
+				"        return self.inner.write(text)\n",
+				"    def flush(self):\n",
+				"        self.inner.flush()\n",
+				"tee = Tee(sys.stdout)\n",
+				"sys.stdout = tee\n",
+				"print('teed', flush=True)\n",
+				"sys.stdout = None\n",
+				"print('silenced', flush=True)\n",
+				"sys.stdout = tee.inner\n",
+				"(redirected.getvalue(), ''.join(tee.seen))",
+			),
+			false,
+		)
+		.await;
+		assert_eq!(
+			done
+				.result
+				.unwrap_or_else(|| panic!("captures: {:?}", done.status))
+				.json,
+			Some(serde_json::json!(["hidden\n", "teed\n"]))
+		);
+		// The tee wraps the router it replaced: its forwarded write reaches the
+		// cell exactly once instead of recursing back into the tee. A `None`
+		// stream silences `print`, as in CPython.
+		assert_eq!(stdout_bytes(&updates), b"teed\n");
+	}
+
+	#[tokio::test]
+	async fn interrupt_inside_event_loop_setup_does_not_poison_later_cells() {
+		let _globals = PROCESS_GLOBALS.write();
+		let runtime = runtime();
+		let session = runtime.open_session().await.expect("session opens");
+		// Deterministically lands the interrupt where an asynchronous one can:
+		// after `run_forever` marked the loop running, before the `try` whose
+		// `finally` would unmark it.
+		let (_, armed) = run_to_completion(
+			&runtime,
+			&session,
+			concat!(
+				"import asyncio.base_events as _base_events\n",
+				"_setup = _base_events.BaseEventLoop._run_forever_setup\n",
+				"def _interrupted_setup(self):\n",
+				"    _base_events.BaseEventLoop._run_forever_setup = _setup\n",
+				"    _setup(self)\n",
+				"    raise KeyboardInterrupt\n",
+				"_base_events.BaseEventLoop._run_forever_setup = _interrupted_setup",
+			),
+			false,
+		)
+		.await;
+		assert_eq!(armed.status.outcome, CellOutcome::Complete);
+		let (_, interrupted) = run_to_completion(&runtime, &session, "'unreached'", false).await;
+		assert_eq!(interrupted.status.outcome, CellOutcome::Cancelled);
+		let (_, next) = run_to_completion(&runtime, &session, "6 * 7", false).await;
+		assert_eq!(
+			next
+				.result
+				.unwrap_or_else(|| panic!("next cell result: {:?}", next.status))
+				.json,
+			Some(Value::from(42))
+		);
+	}
+
+	#[tokio::test]
+	async fn interrupt_that_consumes_the_cell_task_step_cannot_wedge_the_worker() {
+		let _globals = PROCESS_GLOBALS.write();
+		let runtime = runtime();
+		let session = runtime.open_session().await.expect("session opens");
+		// Deterministically lands the interrupt where an asynchronous one can:
+		// after `_run_once` dequeued the cell task's step, before it ran. The
+		// task can then never be scheduled again; waiting for it would block in
+		// the selector, where no later interrupt or timeout can reach.
+		let (_, armed) = run_to_completion(
+			&runtime,
+			&session,
+			concat!(
+				"import asyncio, asyncio.events as _events\n",
+				"_run = _events.Handle._run\n",
+				"def _consume_task_step(self):\n",
+				"    if isinstance(getattr(self._callback, '__self__', None), asyncio.Task):\n",
+				"        _events.Handle._run = _run\n",
+				"        raise KeyboardInterrupt\n",
+				"    return _run(self)\n",
+				"_events.Handle._run = _consume_task_step",
+			),
+			false,
+		)
+		.await;
+		assert_eq!(armed.status.outcome, CellOutcome::Complete);
+		let (interrupted_updates, interrupted) = time::timeout(
+			CELL_TIMEOUT * 2,
+			run_to_completion(&runtime, &session, "'unreached'", false),
+		)
+		.await
+		.expect("the interrupted cell completes instead of wedging its worker");
+		assert_eq!(interrupted.status.outcome, CellOutcome::Cancelled);
+		let (next_updates, next) = run_to_completion(&runtime, &session, "6 * 7", false).await;
+		assert_eq!(
+			next
+				.result
+				.unwrap_or_else(|| panic!("next cell result: {:?}", next.status))
+				.json,
+			Some(Value::from(42))
+		);
+		// The abandoned coroutine is closed during recovery, so its "never
+		// awaited" warning cannot surface on either cell's stderr.
+		assert!(
+			interrupted_updates
+				.iter()
+				.chain(&next_updates)
+				.all(|update| update.channel != OutputChannel::Stderr),
+			"recovery wrote to stderr: {interrupted_updates:?} {next_updates:?}",
+		);
+	}
+
+	#[tokio::test]
+	async fn interrupted_cell_recovery_never_waits_on_another_workers_task() {
+		let _globals = PROCESS_GLOBALS.write();
+		const BARRIER_MODULE: &str = "_omp_eval_recovery_barrier";
+		install_barrier(BARRIER_MODULE);
+
+		let runtime = runtime();
+		let busy_session = runtime.open_session().await.expect("busy session opens");
+		let interrupted_session = runtime
+			.open_session()
+			.await
+			.expect("interrupted session opens");
+		// The busy worker's cell runs inside its asyncio task step, which holds
+		// that task's lock for as long as the step runs.
+		let mut busy = runtime
+			.run(&busy_session, RunRequest {
+				code:    Str::new(format!(
+					concat!(
+						"import sys\n",
+						"sys.modules[{barrier:?}].wait(timeout={secs})\n",
+						"while True: pass",
+					),
+					barrier = BARRIER_MODULE,
+					secs = BARRIER_TIMEOUT_SECS,
+				)),
+				timeout: Some(CELL_TIMEOUT),
+				reset:   false,
+				runtime: RuntimeSnapshot::default(),
+			})
+			.await
+			.expect("busy cell starts");
+		// `asyncio.all_tasks()` locks every task of every thread on the
+		// free-threaded build, so it waits behind the busy step indefinitely
+		// (intermittently, depending on who re-takes the lock after its
+		// stop-the-world). The stand-in makes that hazard deterministic: any
+		// recovery consulting it fails the interrupted cell instead of
+		// completing it as cancelled.
+		let interrupted_code = format!(
+			concat!(
+				"import asyncio, sys\n",
+				"_all_tasks = asyncio.all_tasks\n",
+				"def _waits_on_every_thread(*args, **kwargs):\n",
+				"    raise AssertionError('asyncio.all_tasks() waits on running tasks of all \
+				 threads')\n",
+				"asyncio.all_tasks = _waits_on_every_thread\n",
+				"sys.modules[{barrier:?}].wait(timeout={secs})\n",
+				"raise KeyboardInterrupt",
+			),
+			barrier = BARRIER_MODULE,
+			secs = BARRIER_TIMEOUT_SECS,
+		);
+		let (_, interrupted) = time::timeout(
+			CELL_TIMEOUT * 2,
+			run_to_completion(&runtime, &interrupted_session, &interrupted_code, false),
+		)
+		.await
+		.expect("the interrupted cell completes while another worker's task is stepping");
+		let (_, restored) = run_to_completion(
+			&runtime,
+			&interrupted_session,
+			"import asyncio\nasyncio.all_tasks = _all_tasks",
+			false,
+		)
+		.await;
+		assert_eq!(restored.status.outcome, CellOutcome::Complete);
+		assert_eq!(interrupted.status.outcome, CellOutcome::Cancelled, "{:?}", interrupted.status);
+
+		busy.cancel().await.expect("busy cell cancels");
+		assert_eq!(completion(&mut busy).await.status.outcome, CellOutcome::Cancelled);
+		let (_, next) = run_to_completion(&runtime, &interrupted_session, "6 * 7", false).await;
+		assert_eq!(
+			next
+				.result
+				.unwrap_or_else(|| panic!("next cell result: {:?}", next.status))
+				.json,
+			Some(Value::from(42))
+		);
 	}
 
 	#[tokio::test]
@@ -2233,7 +2707,7 @@ print("right")"#
 		let mut run = runtime
 			.run(&session, RunRequest {
 				code:    sf!("print('running', flush=True)\nwhile True: pass"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2268,7 +2742,7 @@ print("right")"#
 		let mut active = runtime
 			.run(&session, RunRequest {
 				code:    sf!("while True: pass"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2279,7 +2753,7 @@ print("right")"#
 		let mut queued = runtime
 			.run(&session, RunRequest {
 				code:    sf!("queued_effect = True"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2310,7 +2784,7 @@ print("right")"#
 		let mut active = runtime
 			.run(&session, RunRequest {
 				code:    sf!("while True: pass"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2320,7 +2794,7 @@ print("right")"#
 		let mut stale = runtime
 			.run(&session, RunRequest {
 				code:    sf!("stale_effect = True"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2329,7 +2803,7 @@ print("right")"#
 		let mut reset = runtime
 			.run(&session, RunRequest {
 				code:    sf!("('kept' in globals(), 'stale_effect' in globals())"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   true,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2361,7 +2835,7 @@ print("right")"#
 		let mut dropped = runtime
 			.run(&session, RunRequest {
 				code:    sf!("while True: pass"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2408,7 +2882,7 @@ print("right")"#
 		let mut first_run = runtime
 			.run(&session, RunRequest {
 				code:    sf!("import os\n(os.getcwd(), os.environ.get('OMP_EVAL_LOCAL_ROOTS'))"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: snapshot(first.path(), Some(r#"{"local":"first"}"#)),
 			})
@@ -2432,7 +2906,7 @@ print("right")"#
 				code:    sf!(
 					"import os\n(os.getcwd(), os.environ.get('OMP_EVAL_LOCAL_ROOTS') is None)"
 				),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: snapshot(second.path(), None),
 			})
@@ -2454,7 +2928,7 @@ print("right")"#
 		let mut restore = runtime
 			.run(&session, RunRequest {
 				code:    sf!("None"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: snapshot(&original, None),
 			})
@@ -2664,7 +3138,7 @@ __omp_display(first)
 		let mut failed = runtime
 			.run(&session, RunRequest {
 				code:    sf!("1"),
-				timeout: Some(StdDuration::from_secs(1)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2686,7 +3160,7 @@ __omp_display(first)
 		let mut active = runtime
 			.run(&session, RunRequest {
 				code:    sf!("while True: pass"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   false,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2696,7 +3170,7 @@ __omp_display(first)
 		let mut reset = runtime
 			.run(&session, RunRequest {
 				code:    sf!("'old_state' in globals()"),
-				timeout: Some(StdDuration::from_secs(2)),
+				timeout: Some(CELL_TIMEOUT),
 				reset:   true,
 				runtime: RuntimeSnapshot::default(),
 			})
@@ -2718,7 +3192,7 @@ __omp_display(first)
 		let second_session = runtime.open_session().await.expect("second session opens");
 		let request = || RunRequest {
 			code:    sf!("while True: pass"),
-			timeout: Some(StdDuration::from_secs(2)),
+			timeout: Some(CELL_TIMEOUT),
 			reset:   false,
 			runtime: RuntimeSnapshot::default(),
 		};
