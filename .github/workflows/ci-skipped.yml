@@ -96,3 +96,11 @@ jobs:
     steps:
       - name: Report that CI was not needed
         run: 'echo "CI was not needed because no CI-relevant paths changed."'
+
+  lintx_ratchet:
+    name: Error-formatting ratchet (lintx)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report that CI was not needed
+        run: 'echo "CI was not needed because no CI-relevant paths changed."'

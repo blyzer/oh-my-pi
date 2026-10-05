@@ -41,7 +41,8 @@
           { "context": "Lint workspace (Linux)" },
           { "context": "Rust workspace and acceptance proofs" },
           { "context": "Terminal proof P7 (Linux PTY)" },
-          { "context": "Acceptance proofs P9, P10 and tool sources (Linux)" }
+          { "context": "Acceptance proofs P9, P10 and tool sources (Linux)" },
+          { "context": "Error-formatting ratchet (lintx)" }
         ]
       }
     }
