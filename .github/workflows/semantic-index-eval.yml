@@ -1,0 +1,69 @@
+name: Semantic index evaluation
+
+# Offline experiment, no model or provider credentials involved: drives rust-analyzer over this
+# checkout and compares its find-references / symbol-slice answers with the search results recorded
+# in the Claude session history (docs/audits/semantic-index-eval/data). Uploads the
+# `semantic-index-eval-results` artifact. Manual, or on a pull request that touches the evaluation.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [omp2]
+    paths:
+      - "docs/audits/semantic-index-eval/**"
+      - ".github/workflows/semantic-index-eval.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    name: Semantic index evaluation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain with rust-analyzer
+        run: |
+          test "$(uname -m)" = x86_64
+          rustup show active-toolchain
+          rustup component add rust-analyzer
+          rust-analyzer --version
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pipx zstd
+          command -v uv >/dev/null || pipx install uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache embedded Python
+        id: python-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vendor/python
+          key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+
+      - name: Prepare embedded Python
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        run: crates/py/scripts/fetch-python.sh
+
+      - name: Verify embedded Python toolchain
+        run: test -f vendor/python/pyo3-config.txt
+
+      - name: Evaluate rust-analyzer against the recorded history
+        env:
+          RA_LOAD_TIMEOUT: "5400"
+        run: |
+          mkdir -p results
+          python3 docs/audits/semantic-index-eval/scripts/lsp_eval.py docs/audits/semantic-index-eval/data results
+          df -h . | tee results/disk.txt
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semantic-index-eval-results
+          path: results/
+          if-no-files-found: warn
