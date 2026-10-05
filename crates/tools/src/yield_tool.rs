@@ -238,7 +238,7 @@ pub fn tool_for_workpool(items: Vec<WorkpoolItem>) -> Result<Yield, SchemaContra
 			return Err(SchemaContractError::DuplicateWorkpoolItem);
 		}
 	}
-	let spec = workpool_yield_spec(&items)?;
+	let spec = workpool_yield_spec()?;
 	Ok(Yield {
 		spec,
 		schema: None,
@@ -275,15 +275,17 @@ fn yield_spec(data_schema: Value, mode: SchemaMode) -> Result<ToolSpec, SchemaCo
 	})
 }
 
-fn workpool_yield_spec(items: &[WorkpoolItem]) -> Result<ToolSpec, SchemaContractError> {
-	let keys = items.iter().map(|item| item.index).collect::<Vec<_>>();
+fn workpool_yield_spec() -> Result<ToolSpec, SchemaContractError> {
+	// The schema must not depend on the batch (the tail batch is usually
+	// smaller): a different tool declaration is a different cached prefix. The
+	// key stays closed at runtime (`UnknownWorkpoolItem`).
 	let schema = serde_json::json!({
 		"type": "object",
 		"description": "Submit exactly one active workpool item outcome.",
 		"properties": {
 			"key": {
 				"type": "integer",
-				"enum": keys,
+				"minimum": 1,
 				"description": "One-based workpool item number."
 			},
 			"data": {
