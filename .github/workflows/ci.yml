@@ -1,12 +1,14 @@
 name: CI
 
 on:
+  # KEEP IN SYNC with .github/ci-paths.txt (`just check-ci-paths`).
   push:
     branches: [main, omp2]
     paths:
       - ".cargo/**"
       - ".config/**"
       - ".github/actions/**"
+      - ".github/ci-paths.txt"
       - ".github/workflows/ci.yml"
       - "about.toml"
       - "deny.toml"
@@ -24,33 +26,12 @@ on:
       - "clippy.toml"
       - "rust-toolchain.toml"
       - "rustfmt.toml"
+  # No `paths` filter here on purpose: a workflow that a path filter keeps out
+  # never reports its jobs, and the required checks would stay pending. The
+  # `changes` job below reads .github/ci-paths.txt instead, and every other
+  # job is skipped, which a required check counts as passing.
   pull_request:
     branches: [main, omp2]
-    # KEEP IN SYNC with `paths-ignore` in ci-skipped.yml: the two lists must
-    # match exactly (`just check-ci-skipped`). ci-skipped.yml reports the
-    # required checks, under the same names, for pull requests that this
-    # filter keeps out of CI.
-    paths:
-      - ".cargo/**"
-      - ".config/**"
-      - ".github/actions/**"
-      - ".github/workflows/ci.yml"
-      - "about.toml"
-      - "deny.toml"
-      - "justfile"
-      - "LICENSE*"
-      - "THIRD-PARTY-NOTICES.txt"
-      - "crates/**"
-      - "examples/**"
-      - "fixtures/**"
-      - "scripts/**"
-      - "tools/lintx/**"
-      - "docs/py/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "clippy.toml"
-      - "rust-toolchain.toml"
-      - "rustfmt.toml"
   workflow_dispatch:
 
 permissions:
@@ -65,8 +46,55 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  # Decides whether a pull request touches anything CI proves. Every required
+  # check is a job of this workflow; when no CI path changed, they are all
+  # skipped, and a skipped required check passes. The decision fails closed:
+  # if this job errors, `ci` is empty and the jobs run.
+  changes:
+    name: Detect CI-relevant changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      ci: ${{ steps.paths.outputs.ci }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Match the changed files against .github/ci-paths.txt
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PULL_REQUEST" ]; then
+            echo "Not a pull request; CI is needed"
+            echo "ci=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api --paginate "repos/$REPO/pulls/$PULL_REQUEST/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          while IFS= read -r file; do
+            while IFS= read -r pattern; do
+              case "$pattern" in ''|'#'*) continue ;; esac
+              # A `**` glob is a plain prefix match here; case patterns let `*` cross `/`.
+              # shellcheck disable=SC2254
+              case "$file" in ${pattern//\*\*/\*})
+                echo "$file matches $pattern; CI is needed"
+                echo "ci=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              ;; esac
+            done < .github/ci-paths.txt
+          done <<< "$files"
+          echo "No CI-relevant path changed; the CI jobs are skipped"
+          echo "ci=false" >> "$GITHUB_OUTPUT"
+
   format:
     name: Rust format
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -75,6 +103,8 @@ jobs:
         run: rustup show active-toolchain
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check the CI gate
+        run: python3 scripts/check-ci-paths.py
 
   # ADR 0035: lintx counts bare-string error variants and formatted error
   # values per crate and fails a crate whose count rose above
@@ -104,6 +134,8 @@ jobs:
 
   runtime_spec:
     name: Runtime symbol and dependency contracts
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -115,6 +147,8 @@ jobs:
 
   licenses:
     name: License policy and release notices
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
