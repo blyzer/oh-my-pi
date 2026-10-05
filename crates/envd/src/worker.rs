@@ -360,7 +360,11 @@ pub struct ExtHostConfig {
 	pub py_eval:            bool,
 	/// Typed launch values validated against the active extension manifests.
 	pub contributed_values: Vec<omp_ext::config::ContributedCliValue>,
-	/// Time allowed for the extension host to publish its frozen registry.
+	/// Time allowed for each lifecycle dispatch an extension host must answer
+	/// before its declarations exist: publishing the frozen registry and
+	/// running activation. The same budget bounds the outer wait and the
+	/// per-dispatch deadline, so a slow interpreter start is never cut short
+	/// by a shorter hidden constant.
 	pub spawn_timeout:      Duration,
 	/// Courtesy-interrupt grace period used by environment invocation policy.
 	pub interrupt_grace:    CoreDuration,
@@ -1123,6 +1127,9 @@ struct PendingControlActivation {
 	contributed_values:   Arc<[omp_ext::config::ContributedCliValue]>,
 	python_route:         PyCallbackRoute,
 	roots:                Box<[Str]>,
+	/// Per-dispatch budget for freeze and activation, from
+	/// [`ExtHostConfig::spawn_timeout`].
+	lifecycle_timeout:    Duration,
 }
 struct LiveControlRoute {
 	control:  RwLock<ControlHandle>,
@@ -1142,6 +1149,7 @@ struct FrozenControlLifecycleHost {
 	settings:           serde_json::Map<String, serde_json::Value>,
 	cli_contributions:  omp_ext::config::CliContributionSet,
 	contributed_values: Arc<[omp_ext::config::ContributedCliValue]>,
+	lifecycle_timeout:  Duration,
 }
 
 impl FrozenControlLifecycleHost {
@@ -1156,6 +1164,7 @@ impl FrozenControlLifecycleHost {
 		settings: serde_json::Map<String, serde_json::Value>,
 		cli_contributions: omp_ext::config::CliContributionSet,
 		contributed_values: Arc<[omp_ext::config::ContributedCliValue]>,
+		lifecycle_timeout: Duration,
 	) -> Self {
 		Self {
 			control,
@@ -1170,6 +1179,7 @@ impl FrozenControlLifecycleHost {
 			settings,
 			cli_contributions,
 			contributed_values,
+			lifecycle_timeout,
 		}
 	}
 
@@ -1213,7 +1223,7 @@ impl LifecycleHost for FrozenControlLifecycleHost {
 			arguments: serde_json::Map::new(),
 			authority: self.authority("freeze", InvocationPhase::Open, LifecyclePhase::Frozen),
 			policy:    CallbackConcurrency::Serialized,
-			deadline:  EventDeadline { at: Instant::now() + Duration::from_secs(10) },
+			deadline:  EventDeadline { at: Instant::now() + self.lifecycle_timeout },
 		};
 		async move {
 			let mut frozen = self
@@ -1272,6 +1282,7 @@ impl LifecycleHost for FrozenControlLifecycleHost {
 			.try_into()
 			.unwrap_or(u64::MAX);
 		let generation = event.generation;
+		let lifecycle_timeout = self.lifecycle_timeout;
 		let cli_values = ContributedValueDelivery::new(
 			self.extension.clone(),
 			generation,
@@ -1326,7 +1337,7 @@ impl LifecycleHost for FrozenControlLifecycleHost {
 					arguments,
 					authority,
 					policy: CallbackConcurrency::Serialized,
-					deadline: EventDeadline { at: Instant::now() + Duration::from_secs(10) },
+					deadline: EventDeadline { at: Instant::now() + lifecycle_timeout },
 				})
 				.await
 				.map_err(|error| Str::from(error.to_string()))?;
@@ -1386,6 +1397,7 @@ async fn freeze_control_registry(
 	session: Str,
 	manifest: &ExtensionManifest,
 	settings: &serde_json::Map<String, serde_json::Value>,
+	timeout: Duration,
 ) -> Result<Arc<SealedRegistryEvidence>, ExtHostError> {
 	let mut authority = python_registration_authority(
 		&HostKey::new(identity.layer.clone(), identity.tier.clone(), identity.extension.clone()),
@@ -1402,7 +1414,7 @@ async fn freeze_control_registry(
 			arguments: serde_json::Map::new(),
 			authority,
 			policy: CallbackConcurrency::Serialized,
-			deadline: EventDeadline { at: std::time::Instant::now() + Duration::from_secs(10) },
+			deadline: EventDeadline { at: std::time::Instant::now() + timeout },
 		})
 		.await
 		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
@@ -1752,6 +1764,7 @@ impl ExtHostSupervisor {
 					config.session_id.clone(),
 					&extension.manifest,
 					&extension.settings,
+					config.spawn_timeout,
 				),
 			)
 			.await
@@ -1818,6 +1831,7 @@ impl ExtHostSupervisor {
 				cli_contributions: extension.cli_contributions.clone(),
 				contributed_values: Arc::from(config.contributed_values.clone()),
 				python_route,
+				lifecycle_timeout: config.spawn_timeout,
 				roots: config
 					.workspace_root
 					.iter()
@@ -3219,6 +3233,7 @@ async fn activate_control_generation(
 		activation.settings.clone(),
 		activation.cli_contributions.clone(),
 		Arc::clone(&activation.contributed_values),
+		activation.lifecycle_timeout,
 	);
 	lifecycle
 		.activate_declared(
@@ -4005,6 +4020,7 @@ async fn refresh_control_generation(
 		activation.session_id.clone(),
 		&activation.manifest,
 		&activation.settings,
+		activation.lifecycle_timeout,
 	)
 	.await?;
 	if let Some(previous) = frozen_registry.lock().get(&(
@@ -4304,5 +4320,182 @@ mod tests {
 			.arg_text(ArgText { invocation_id: "call".to_owned(), ..Default::default() })
 			.expect_err("CONTROL invocation must reject argument fragments");
 		assert!(matches!(error, ExtHostError::Protocol(_)));
+	}
+
+	struct SilentControlAuthority;
+
+	#[async_trait::async_trait]
+	impl ControlAuthority for SilentControlAuthority {
+		fn handles(&self, _operation: &str) -> bool {
+			false
+		}
+
+		fn authorize(
+			&self,
+			_context: &ControlRequestContext,
+			_operation: &str,
+			_arguments: &serde_json::Map<String, serde_json::Value>,
+		) -> Result<(), ControlProtocolError> {
+			Ok(())
+		}
+
+		async fn request(
+			&self,
+			_context: ControlRequestContext,
+			_operation: Str,
+			_arguments: serde_json::Map<String, serde_json::Value>,
+		) -> Result<serde_json::Value, ControlProtocolError> {
+			Err(ControlProtocolError::new("unexpected", "freeze never issues child requests"))
+		}
+
+		async fn effect(
+			&self,
+			_context: ControlRequestContext,
+			_effect: ControlEffect,
+		) -> Result<(), ControlProtocolError> {
+			Ok(())
+		}
+	}
+
+	/// Answers the one FREEZE dispatch with an empty frozen registry, but only
+	/// after `delay`: the child's interpreter start and module import on a
+	/// slow, loaded host.
+	async fn answer_freeze_after(
+		mut peer: tokio::net::UnixStream,
+		delay: Duration,
+	) -> tokio::net::UnixStream {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let mut header = [0_u8; 4];
+		peer
+			.read_exact(&mut header)
+			.await
+			.expect("freeze frame header");
+		let mut payload = vec![0; u32::from_be_bytes(header) as usize];
+		peer
+			.read_exact(&mut payload)
+			.await
+			.expect("freeze frame body");
+		let frame: serde_json::Value = serde_json::from_slice(&payload).expect("freeze frame json");
+		assert_eq!(frame["kind"], "Dispatch");
+		assert_eq!(frame["body"]["operation"], "omp.lifecycle.freeze");
+		time::sleep(delay).await;
+		let reply = serde_json::to_vec(&serde_json::json!({
+			"kind": "DispatchResponse",
+			"correlation": frame["correlation"],
+			"body": {"result": {
+				"declaration_keys": [],
+				"tools": [],
+				"availability": [],
+				"hooks": [],
+				"services": [],
+				"prompt_slots": [],
+				"providers": [],
+				"directors": [],
+				"components": [],
+			}},
+		}))
+		.expect("freeze reply json");
+		peer
+			.write_all(
+				&u32::try_from(reply.len())
+					.expect("freeze reply size")
+					.to_be_bytes(),
+			)
+			.await
+			.expect("freeze reply header");
+		peer.write_all(&reply).await.expect("freeze reply body");
+		peer
+	}
+
+	/// Runs one registry freeze against a peer that answers after `delay`,
+	/// with `budget` as the configured lifecycle timeout.
+	async fn freeze_against_slow_peer(
+		delay: Duration,
+		budget: Duration,
+	) -> Result<Arc<SealedRegistryEvidence>, ExtHostError> {
+		let key = HostKey::new("project", "trusted", "slow-freeze");
+		let provenance = omp_core::Provenance::new(
+			sf!("publisher"),
+			key.extension().clone(),
+			sf!("1.0.0"),
+			omp_core::ArtifactDigest::new([7; 32]),
+			key.layer().clone(),
+			key.tier().clone(),
+			1,
+		);
+		let identity = ControlConnectionIdentity {
+			extension:          key.extension().clone(),
+			principal:          Principal::new(sf!("test"), sf!("Test")),
+			artifact_digest:    Str::from(provenance.artifact_digest().to_string()),
+			layer:              key.layer().clone(),
+			tier:               key.tier().clone(),
+			trust:              sf!("trusted"),
+			host_generation:    1,
+			session_generation: 1,
+			capabilities:       Arc::new(BTreeSet::new()),
+		};
+		let manifest = ExtensionManifest::new(
+			provenance,
+			"slow_freeze",
+			[],
+			crate::exthost::DeclarationSet::default(),
+			crate::exthost::ServiceManifest::default(),
+			[],
+			[ActivationTrigger::FirstReach],
+		);
+		let (host, peer) = tokio::net::UnixStream::pair().expect("CONTROL socketpair");
+		let (runtime, control) = crate::exthost::control::ControlRuntime::new(
+			host,
+			key,
+			identity.clone(),
+			Arc::new(SilentControlAuthority),
+		);
+		let pump = tokio::spawn(runtime.serve());
+		let peer = tokio::spawn(answer_freeze_after(peer, delay));
+		let frozen = freeze_control_registry(
+			control,
+			Arc::new(identity),
+			sf!("test-session"),
+			&manifest,
+			&serde_json::Map::new(),
+			budget,
+		)
+		.await;
+		peer.abort();
+		pump.abort();
+		frozen
+	}
+
+	/// The fake child is only a meaningful witness if it can be admitted:
+	/// a registry published inside the configured budget is accepted.
+	#[tokio::test]
+	async fn freeze_admits_a_child_that_answers_inside_the_budget() {
+		let frozen =
+			freeze_against_slow_peer(Duration::from_millis(200), Duration::from_secs(5)).await;
+		assert!(frozen.is_ok(), "a registry published inside the budget was dropped");
+	}
+
+	/// The freeze deadline is the configured lifecycle budget and nothing
+	/// else. A hidden constant shorter than the budget drops slow children
+	/// (an interpreter start on a loaded runner) with only a log line, which
+	/// leaves their prelude helpers, tools and hooks silently unregistered; a
+	/// longer one outlives the budget. A silent child must be abandoned at
+	/// the configured budget, far inside the guard.
+	#[tokio::test]
+	async fn freeze_deadline_is_the_configured_budget() {
+		let budget = Duration::from_millis(300);
+		let started = std::time::Instant::now();
+		let frozen = time::timeout(
+			Duration::from_secs(5),
+			freeze_against_slow_peer(Duration::from_secs(600), budget),
+		)
+		.await
+		.expect("freeze outlived its configured budget by a hidden deadline");
+		assert!(
+			matches!(frozen, Err(ExtHostError::Protocol(_))),
+			"a registry that never arrived was not rejected as a protocol failure"
+		);
+		assert!(started.elapsed() >= budget, "freeze gave up before its configured budget");
 	}
 }
