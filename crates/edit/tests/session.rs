@@ -124,27 +124,6 @@ async fn writer_failure_is_surfaced_verbatim() {
 }
 
 #[tokio::test]
-async fn plan_mode_rejects_working_tree_writes_before_writing() {
-	let mut ws = Workspace::new(EditMode::Replace);
-	ws.config.policy.plan_active = true;
-	ws.write("a.txt", "one\n");
-	let writer = DiskWriter::default();
-	let err = ws
-		.apply_json(
-			&serde_json::json!({ "path": "a.txt", "old_string": "one", "new_string": "two" }),
-			&writer,
-		)
-		.await
-		.expect_err("plan mode");
-	assert_eq!(
-		err.to_string(),
-		"Plan mode: the working tree is read-only. Write your plan to a local://<slug>-plan.md file \
-		 instead."
-	);
-	assert_eq!(writer.requests.lock().len(), 0);
-}
-
-#[tokio::test]
 async fn result_text_uses_compact_preview_and_header() {
 	let ws = Workspace::new(EditMode::Replace);
 	ws.write("a.txt", "one\ntwo\nthree\n");

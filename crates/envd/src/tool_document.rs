@@ -68,7 +68,10 @@ use super::{
 		ssh,
 	},
 };
-use crate::docserver::fs::{self, LocalFs};
+use crate::{
+	docserver::fs::{self, LocalFs},
+	write_scope::{self, WriteScope},
+};
 
 static NEXT_TRANSACTION: AtomicU64 = AtomicU64::new(1);
 
@@ -1680,6 +1683,7 @@ impl WriteDocuments for DocumentHost {
 		let Some(services) = self.resource_mutations() else {
 			return Ok(None);
 		};
+		write_scope::admit_uri(&request.uri).map_err(|denied| write_rejected(denied.to_string()))?;
 		let byte_len = request.content.len() as u64;
 		let revision = match request.capability {
 			MutationCapability::Ssh => {
@@ -1823,6 +1827,10 @@ impl WriteDocuments for DocumentHost {
 		request: PlainWriteRequest,
 	) -> Result<PlainWriteResult, WriteCommitError> {
 		let resolved = resolve_plain_write(self, &request.path).map_err(write_rejected)?;
+		// Before any effect (parent directories included): plan mode and a
+		// read-only subagent change nothing but the plan file.
+		write_scope::admit_path(&resolved.path)
+			.map_err(|denied| write_rejected(denied.to_string()))?;
 		let existed = match std_fs::symlink_metadata(&resolved.path) {
 			Ok(_) => true,
 			Err(error)
@@ -1996,8 +2004,16 @@ impl WriteDocuments for DocumentHost {
 		control: SpecialWriteControl,
 	) -> Result<Option<backends::ResultPayload>, backends::Fault> {
 		let host = self.clone();
+		// The blocking worker carries no task-local scope: hand it over.
+		let scope = write_scope::current();
 		run_special_write_blocking(control, "archive", move |task_control| {
-			write_archive_member_blocking(&host, &display_path, content, task_control)
+			write_archive_member_blocking(
+				&host,
+				scope.as_deref(),
+				&display_path,
+				content,
+				task_control,
+			)
 		})
 		.await
 	}
@@ -2016,8 +2032,16 @@ impl WriteDocuments for DocumentHost {
 			wait_control.cancelled().await;
 			interrupt.interrupt();
 		});
+		let scope = write_scope::current();
 		let result = run_special_write_blocking(control, "SQLite", move |task_control| {
-			write_sqlite_row_blocking(&host, &display_path, &content, task_control, &task_interrupt)
+			write_sqlite_row_blocking(
+				&host,
+				scope.as_deref(),
+				&display_path,
+				&content,
+				task_control,
+				&task_interrupt,
+			)
 		})
 		.await;
 		interrupt_waiter.abort();
@@ -3135,6 +3159,7 @@ mod tests {
 
 fn write_archive_member_blocking(
 	host: &DocumentHost,
+	scope: Option<&WriteScope>,
 	display_path: &str,
 	content: Bytes,
 	control: &SpecialWriteControl,
@@ -3150,7 +3175,7 @@ fn write_archive_member_blocking(
 	}
 	let mut resolved = Vec::with_capacity(candidates.len());
 	for candidate in candidates {
-		let absolute = resolve_special_write_path(host, &candidate.archive_path)?;
+		let absolute = resolve_special_write_path(host, scope, &candidate.archive_path)?;
 		match std_fs::metadata(&absolute) {
 			Ok(metadata) if metadata.is_file() => {
 				resolved.push((candidate, absolute, true));
@@ -3329,6 +3354,7 @@ fn archive_member_exists(
 
 fn write_sqlite_row_blocking(
 	host: &DocumentHost,
+	scope: Option<&WriteScope>,
 	display_path: &str,
 	content: &str,
 	control: &SpecialWriteControl,
@@ -3348,7 +3374,7 @@ fn write_sqlite_row_blocking(
 	let mut selected = None;
 	let mut saw_existing_non_sqlite = false;
 	for candidate in candidates {
-		let absolute = resolve_special_write_path(host, &candidate.sqlite_path)?;
+		let absolute = resolve_special_write_path(host, scope, &candidate.sqlite_path)?;
 		fallback = Some((candidate.clone(), absolute.clone()));
 		match std_fs::metadata(&absolute) {
 			Ok(metadata) if metadata.is_file() => {
@@ -3405,8 +3431,11 @@ fn write_sqlite_row_blocking(
 	}))
 }
 
+/// Resolves an archive or SQLite write target; the calling invocation's
+/// write `scope` must admit it.
 fn resolve_special_write_path(
 	host: &DocumentHost,
+	scope: Option<&WriteScope>,
 	input: &str,
 ) -> Result<PathBuf, backends::Fault> {
 	if local_resource(input).is_some() {
@@ -3448,7 +3477,13 @@ fn resolve_special_write_path(
 	let suffix = candidate
 		.strip_prefix(ancestor)
 		.map_err(|_| special_fault("write path could not be resolved from its existing ancestor"))?;
-	Ok(join_nonempty_suffix(canonical_ancestor, suffix))
+	let resolved = join_nonempty_suffix(canonical_ancestor, suffix);
+	if let Some(scope) = scope {
+		scope
+			.admit_path(&resolved)
+			.map_err(|denied| special_fault(denied.to_string()))?;
+	}
+	Ok(resolved)
 }
 
 fn atomic_replace(

@@ -160,6 +160,7 @@ fn document_error_detail(error: DocumentError) -> Str {
 			Str::from(format!("document server error {code}: {message}"))
 		},
 		DocumentError::MalformedResponse(message) => message,
+		DocumentError::WriteScope(denied) => Str::from(denied.to_string()),
 	}
 }
 

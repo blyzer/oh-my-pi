@@ -82,6 +82,7 @@ pub mod worker;
 pub mod worker_pool;
 pub mod workspace;
 pub mod workspace_roots;
+pub mod write_scope;
 use std::{
 	env,
 	fs::{self, OpenOptions},

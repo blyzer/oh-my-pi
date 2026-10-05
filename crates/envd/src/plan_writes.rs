@@ -262,3 +262,121 @@ async fn a_journaled_session_writes_its_plan_beside_its_journal() {
 	assert!(read_back.is_ok(), "{}", read_back.text());
 	assert!(read_back.text().contains("# Plan"), "{}", read_back.text());
 }
+
+fn plan_restrictions() -> omp_tool::ToolRestrictions {
+	omp_tool::ToolRestrictions::default()
+		.with_allowlist(
+			["read", "write", "lsp"]
+				.map(omp_core::Str::new_static)
+				.to_vec(),
+			Some(omp_core::Str::new_static("plan")),
+		)
+		.with_plan_file(omp_core::Str::new_static("local://PLAN.md"))
+}
+
+fn read_only_restrictions() -> omp_tool::ToolRestrictions {
+	omp_tool::ToolRestrictions::default()
+		.with_read_only_ceiling(["read", "lsp"].map(omp_core::Str::new_static).to_vec())
+}
+
+/// Defense in depth behind the agent's dispatch check, over the real wire:
+/// an invocation that carries plan mode's restrictions changes nothing but
+/// the plan file, whatever reaches the environment, and the confinement ends
+/// with plan mode (the next request carries no plan file).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_mode_invocations_change_only_the_plan_file() {
+	let fixture = Fixture::start().await;
+	let plan = plan_restrictions();
+
+	let off_plan = fixture
+		.write(SESSION, "off-1", &json!({"path": "src/lib.rs", "content": "x"}), Some(&plan))
+		.await;
+	assert!(!off_plan.is_ok(), "{}", off_plan.text());
+	assert!(
+		off_plan
+			.text()
+			.contains("plan mode is active: the environment refused to change"),
+		"{}",
+		off_plan.text()
+	);
+	assert!(
+		off_plan
+			.text()
+			.contains("only the plan file local://PLAN.md may change")
+	);
+	assert!(!fixture.root.join("src").exists(), "not even the parent directory appeared");
+
+	for (id, target) in [
+		("off-2", "local://notes.md".to_owned()),
+		("off-3", fixture.state.join("elsewhere.md").display().to_string()),
+	] {
+		let refused = fixture
+			.write(SESSION, id, &json!({"path": target, "content": "x"}), Some(&plan))
+			.await;
+		assert!(!refused.is_ok(), "{target}: {}", refused.text());
+	}
+	assert!(!fixture.local_root(SESSION).join("notes.md").exists());
+
+	let planned = fixture
+		.write(
+			SESSION,
+			"plan-1",
+			&json!({"path": "local://PLAN.md", "content": "# Plan\n"}),
+			Some(&plan),
+		)
+		.await;
+	assert!(planned.is_ok(), "{}", planned.text());
+	assert_eq!(read(&fixture.local_root(SESSION).join("PLAN.md")), "# Plan\n");
+
+	// A tool that could write around the scoped writers (`ast_edit` applies
+	// with `std::fs`) is refused at the boundary before it runs.
+	fs::write(fixture.root.join("a.ts"), "old(1);\n").expect("source");
+	let ast_edit = fixture
+		.invoke(
+			SESSION,
+			"ast_edit",
+			"ast-1",
+			&json!({"ops": [{"pat": "old($A)", "out": "new($A)"}], "paths": ["a.ts"]}),
+			Some(&plan),
+		)
+		.await;
+	assert!(
+		ast_edit
+			.text()
+			.contains("plan mode is active: the environment refused `ast_edit`"),
+		"{}",
+		ast_edit.text()
+	);
+	assert_eq!(read(&fixture.root.join("a.ts")), "old(1);\n");
+
+	// Plan mode ended: the next invocation carries no plan file.
+	let after = fixture
+		.write(SESSION, "after-1", &json!({"path": "src/lib.rs", "content": "x"}), None)
+		.await;
+	assert!(after.is_ok(), "{}", after.text());
+	assert_eq!(read(&fixture.root.join("src/lib.rs")), "x");
+}
+
+/// A subagent of a plan-mode session (its calls carry the read-only
+/// ceiling) changes nothing, not even the parent's plan file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_only_subagent_invocations_change_nothing() {
+	let fixture = Fixture::start().await;
+	let ceiling = read_only_restrictions();
+	for (id, target) in [("ro-1", "src/lib.rs"), ("ro-2", "local://PLAN.md")] {
+		let refused = fixture
+			.write(SESSION, id, &json!({"path": target, "content": "x"}), Some(&ceiling))
+			.await;
+		assert!(!refused.is_ok(), "{target}: {}", refused.text());
+		assert!(
+			refused.text().contains(
+				"this agent is a read-only subagent of a plan-mode session: the environment refused \
+				 to change"
+			),
+			"{}",
+			refused.text()
+		);
+	}
+	assert!(!fixture.root.join("src").exists());
+	assert!(!fixture.local_root(SESSION).join("PLAN.md").exists());
+}
