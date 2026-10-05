@@ -16,7 +16,6 @@ pub mod call;
 pub mod client;
 pub mod codec;
 pub mod debug_wire;
-pub mod difficulty;
 pub mod discovery;
 pub mod error;
 pub mod event;
@@ -51,7 +50,6 @@ pub use codec::{
 	ProviderRefreshReason, ProviderResponseHooks, ProviderResponseObservation,
 	ProviderResponseObserver, ProviderSignHookRequest, ProviderSignature,
 };
-pub use difficulty::*;
 pub use error::*;
 pub use event::*;
 pub use id::*;
