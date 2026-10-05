@@ -521,6 +521,15 @@ mod roster {
 				let changed = Arc::clone(&toolset_changed);
 				tokio::spawn(async move {
 					while let Ok(dispatch) = receiver.recv_async().await {
+						// The receiver also carries lossy Observe notifications (the
+						// echo of this very event, and every other lifecycle event);
+						// only the gate's Transform dispatch is one `turn_start` per
+						// request, and only it takes an answer.
+						if dispatch.event != HookEventId::HookEventTurnStart
+							|| dispatch.phase != HookPhase::Transform
+						{
+							continue;
+						}
 						let mut payload: Value =
 							serde_json::from_slice(&dispatch.payload).expect("hook payload");
 						changed.lock().push(
