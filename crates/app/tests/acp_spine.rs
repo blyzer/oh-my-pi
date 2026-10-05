@@ -516,6 +516,101 @@ async fn new_load_and_resume_switch_the_authoritative_durable_session() {
 	);
 }
 
+/// Loading a stored session replays a user message as `user_message_chunk` and
+/// the harness's `<developer>` note as `agent_thought_chunk`, in journal order,
+/// so injected text is never shown as if the person had typed it.
+#[tokio::test]
+async fn load_replays_developer_notes_as_thoughts_not_user_messages() {
+	use omp_dom::{KnownTag, NodeSpec, Op, PropId, Tag, Txn, Value as DomValue};
+
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let sessions = directory.path().join("sessions");
+	std::fs::create_dir_all(&sessions).expect("sessions directory");
+	{
+		let mut stored = Session::create(sessions.join("notes.oms"), ComponentRegistry::standard())
+			.expect("stored session");
+		stored.begin_turn().expect("turn");
+		stored.user("please refactor", Vec::new()).expect("user");
+		let turn = *stored
+			.dom()
+			.children(stored.dom().body())
+			.last()
+			.expect("turn");
+		let after = stored.dom().children(turn).last().copied();
+		stored
+			.patch(Txn {
+				cause: stored.head().expect("head"),
+				label: Some(Str::new_static("director.stream-rule")),
+				ops:   vec![Op::Ins {
+					parent: turn,
+					after,
+					node: NodeSpec::new(KnownTag::Developer)
+						.with_content(Str::new_static("Stream rule no-unwrap: avoid unwrap.")),
+				}],
+			})
+			.expect("developer note");
+		stored.assistant_start("m", "p", "r").expect("assistant");
+		let assistant = *stored.dom().children(turn).last().expect("assistant");
+		stored
+			.patch(Txn {
+				cause: stored.head().expect("head"),
+				label: Some(Str::new_static("assistant.content")),
+				ops:   vec![Op::Ins {
+					parent: assistant,
+					after:  None,
+					node:   NodeSpec::new(Tag::Custom(Str::new_static(
+						omp_session::ASSISTANT_CONTENT_TAG,
+					)))
+					.with_prop(PropId::Kind, DomValue::Str(Str::new_static("text")))
+					.with_prop(PropId::Text, DomValue::Str(Str::new_static("refactored"))),
+				}],
+			})
+			.expect("assistant text");
+	}
+	let (kernel, session, home) = harness(&directory, []);
+	let frames = exchange(
+		kernel,
+		session,
+		home,
+		br#"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1}}
+{"jsonrpc":"2.0","id":"load","method":"session/load","params":{"sessionId":"notes"}}
+{"jsonrpc":"2.0","id":"shutdown","method":"shutdown","params":{}}
+"#,
+	)
+	.await;
+
+	let replayed = frames
+		.iter()
+		.filter(|frame| {
+			frame["method"] == "session/update"
+				&& frame["params"]["sessionId"] == "notes"
+				&& frame["params"]["update"]["sessionUpdate"]
+					.as_str()
+					.is_some_and(|kind| {
+						kind.ends_with("_message_chunk") || kind == "agent_thought_chunk"
+					})
+		})
+		.map(|frame| {
+			let update = &frame["params"]["update"];
+			(
+				update["sessionUpdate"]
+					.as_str()
+					.unwrap_or_default()
+					.to_owned(),
+				update["content"]["text"]
+					.as_str()
+					.unwrap_or_default()
+					.to_owned(),
+			)
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(replayed, [
+		("user_message_chunk".to_owned(), "please refactor".to_owned()),
+		("agent_thought_chunk".to_owned(), "Stream rule no-unwrap: avoid unwrap.".to_owned()),
+		("agent_message_chunk".to_owned(), "refactored".to_owned()),
+	]);
+}
+
 /// `session/list` pages stored journals (newest first, offset cursor,
 /// `cwd` scoping) and
 /// `session/fork` copies a stored session into a fresh one that becomes the
