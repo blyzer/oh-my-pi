@@ -1,0 +1,24 @@
+# Paths whose change makes a pull request run CI (.github/workflows/ci.yml).
+# One glob per line; `**` matches across directories. `push` in ci.yml must list
+# the same paths (`just check-ci-paths`).
+.cargo/**
+.config/**
+.github/actions/**
+.github/ci-paths.txt
+.github/workflows/ci.yml
+Cargo.lock
+Cargo.toml
+LICENSE*
+THIRD-PARTY-NOTICES.txt
+about.toml
+clippy.toml
+crates/**
+deny.toml
+docs/py/**
+examples/**
+fixtures/**
+justfile
+rust-toolchain.toml
+rustfmt.toml
+scripts/**
+tools/lintx/**
