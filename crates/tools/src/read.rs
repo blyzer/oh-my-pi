@@ -1649,8 +1649,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		// exact text being projected, so every later step is the range read's.
 		let resolved;
 		let parsed = if let selector::ParsedSelector::Symbol { query, raw } = parsed {
-			resolved = symbol::resolve(&stat.display_path, text, query, *raw)
-				.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?;
+			resolved = symbol::resolve(&stat.display_path, text, query, *raw)?;
 			&resolved
 		} else {
 			parsed

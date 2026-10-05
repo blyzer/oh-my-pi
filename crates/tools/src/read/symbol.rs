@@ -19,7 +19,10 @@ use omp_ast::{
 use omp_core::Str;
 use thiserror::Error;
 
-use super::selector::{LineRange, ParsedSelector};
+use super::{
+	Fault,
+	selector::{LineRange, ParsedSelector},
+};
 
 /// One declaration a symbol selector matched, kept for an ambiguity report.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +104,14 @@ pub enum SymbolReadError {
 		/// Every match, ordered by start line.
 		candidates: Box<[Candidate]>,
 	},
+}
+
+/// A symbol read fails as an invalid selector; the typed error renders exactly
+/// once, here.
+impl From<SymbolReadError> for Fault {
+	fn from(error: SymbolReadError) -> Self {
+		Self::Invalid { message: Str::new(error.to_string()) }
+	}
 }
 
 // Pin the footprint: this is the error of every symbol read.
