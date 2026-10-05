@@ -278,7 +278,11 @@ jobs:
         if: runner.environment == 'github-hosted'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
-        run: brew install lld uv zstd ninja
+        run: |
+          brew install lld@22 uv zstd ninja
+          # .cargo/config.toml links through /opt/homebrew/bin/ld64.lld and the vendored CPython
+          # bitcode is LLVM 22: the unversioned lld formula is now 23 and cannot link it.
+          ln -sf "$(brew --prefix lld@22)/bin/ld64.lld" /opt/homebrew/bin/ld64.lld
       - name: Check provisioned native build tools
         if: runner.environment != 'github-hosted'
         run: |
