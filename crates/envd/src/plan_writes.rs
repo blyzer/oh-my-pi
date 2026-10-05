@@ -396,3 +396,31 @@ async fn read_only_subagent_invocations_change_nothing() {
 	assert!(!fixture.root.join("src").exists());
 	assert!(!fixture.local_root(SESSION).join("PLAN.md").exists());
 }
+
+/// An ordinary session (no plan file, no ceiling) runs no scope at all, and
+/// its invocations still settle on a small worker stack: a `write` and then a
+/// `bash` call, as the terminal proof's chat drives them. The invocation
+/// future is large and the per-invocation scope wrappers nest around it, so
+/// a worker with a 1 MiB stack overflowed in a debug
+/// build before the body was boxed once at the spawn site.
+#[test]
+fn unscoped_invocations_settle_on_a_small_worker_stack() {
+	let runtime = tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(2)
+		.thread_stack_size(1024 * 1024)
+		.enable_all()
+		.build()
+		.expect("runtime");
+	runtime.block_on(async {
+		let fixture = Fixture::start().await;
+		let written = fixture
+			.write(SESSION, "plain-1", &json!({"path": "src/lib.rs", "content": "x"}), None)
+			.await;
+		assert!(written.is_ok(), "{}", written.text());
+		let shell = fixture
+			.invoke(SESSION, "bash", "plain-2", &json!({"command": "printf 'shell-ok\\n'"}), None)
+			.await;
+		assert!(shell.is_ok(), "{}", shell.text());
+		assert!(shell.text().contains("shell-ok"), "{}", shell.text());
+	});
+}

@@ -9001,6 +9001,9 @@ async fn spawn_native_invocation(
 	finished: flume::Sender<Finished>,
 ) {
 	let (started, start) = flume::bounded(1);
+	// The invocation body is the large future here. It is boxed once so the
+	// task-local scope wrappers around it move a pointer, not the body: nested
+	// by value, six wrappers overflow a worker stack in debug builds.
 	tokio::spawn(write_scope::scoped(
 		write_scope,
 		with_invocation_scope(
@@ -9011,162 +9014,165 @@ async fn spawn_native_invocation(
 					session_id,
 					with_edit_repair_scope(
 						edit_repair,
-						with_acp_scope(acp, async move {
-							let result = registry.invoke(&name, params);
-							let _ = started.send(());
-							match result {
-								Ok(mut stream) => {
-									let mut deadline = Box::pin(time::sleep(deadline));
-									let mut cancel_grace: Option<pin::Pin<Box<Sleep>>> = None;
-									let mut timed_out = false;
-									let mut grace_expired = false;
-									loop {
-										if lifecycle.is_terminal() {
-											break;
-										}
-										if let Some(grace) = cancel_grace.as_mut() {
-											tokio::select! {
-												biased;
-												() = grace.as_mut() => {
-													grace_expired = true;
-													break;
-												},
-												event = stream.next() => {
-													let reason = if timed_out {
-														"native invocation ended without reporting timeout truth"
-													} else {
-														"native invocation ended without reporting cancellation truth"
-													};
-													if matches!(
-														forward_native_event(
+						with_acp_scope(
+							acp,
+							Box::pin(async move {
+								let result = registry.invoke(&name, params);
+								let _ = started.send(());
+								match result {
+									Ok(mut stream) => {
+										let mut deadline = Box::pin(time::sleep(deadline));
+										let mut cancel_grace: Option<pin::Pin<Box<Sleep>>> = None;
+										let mut timed_out = false;
+										let mut grace_expired = false;
+										loop {
+											if lifecycle.is_terminal() {
+												break;
+											}
+											if let Some(grace) = cancel_grace.as_mut() {
+												tokio::select! {
+													biased;
+													() = grace.as_mut() => {
+														grace_expired = true;
+														break;
+													},
+													event = stream.next() => {
+														let reason = if timed_out {
+															"native invocation ended without reporting timeout truth"
+														} else {
+															"native invocation ended without reporting cancellation truth"
+														};
+														if matches!(
+															forward_native_event(
+																event,
+																true,
+																reason,
+																request_id,
+																&invocation_id,
+																&lifecycle,
+																&delivery,
+																&responses,
+															)
+															.await,
+															NativeForward::Terminal
+														) {
+															break;
+														}
+													},
+												}
+											} else {
+												tokio::select! {
+													biased;
+													() = deadline.as_mut() => {
+														let reason = sf!("native invocation deadline exceeded");
+														let _ = feed.interrupt(Interrupt {
+															class: sf!("deadline"),
+															reason: reason.clone(),
+														});
+														if lifecycle.is_committed() {
+															timed_out = true;
+															cancel_grace = Some(Box::pin(time::sleep(
+																NATIVE_CANCEL_GRACE,
+															)));
+														} else if lifecycle.claim_precommit_terminal() {
+															send_abort_verdict(
+																&responses,
+																request_id,
+																&invocation_id,
+																&delivery,
+																omp_tool::Abort::Interrupted { reason },
+															)
+															.await;
+															break;
+														} else {
+															break;
+														}
+													},
+													() = cancel.cancelled() => {
+														if lifecycle.is_committed() {
+															cancel_grace = Some(Box::pin(time::sleep(
+																NATIVE_CANCEL_GRACE,
+															)));
+														} else {
+															break;
+														}
+													},
+													event = stream.next() => {
+														match forward_native_event(
 															event,
-															true,
-															reason,
+															false,
+															"",
 															request_id,
 															&invocation_id,
 															&lifecycle,
 															&delivery,
 															&responses,
 														)
-														.await,
-														NativeForward::Terminal
-													) {
-														break;
-													}
-												},
-											}
-										} else {
-											tokio::select! {
-												biased;
-												() = deadline.as_mut() => {
-													let reason = sf!("native invocation deadline exceeded");
-													let _ = feed.interrupt(Interrupt {
-														class: sf!("deadline"),
-														reason: reason.clone(),
-													});
-													if lifecycle.is_committed() {
-														timed_out = true;
-														cancel_grace = Some(Box::pin(time::sleep(
-															NATIVE_CANCEL_GRACE,
-														)));
-													} else if lifecycle.claim_precommit_terminal() {
-														send_abort_verdict(
-															&responses,
-															request_id,
-															&invocation_id,
-															&delivery,
-															omp_tool::Abort::Interrupted { reason },
-														)
-														.await;
-														break;
-													} else {
-														break;
-													}
-												},
-												() = cancel.cancelled() => {
-													if lifecycle.is_committed() {
-														cancel_grace = Some(Box::pin(time::sleep(
-															NATIVE_CANCEL_GRACE,
-														)));
-													} else {
-														break;
-													}
-												},
-												event = stream.next() => {
-													match forward_native_event(
-														event,
-														false,
-														"",
-														request_id,
-														&invocation_id,
-														&lifecycle,
-														&delivery,
-														&responses,
-													)
-													.await
-													{
-														NativeForward::Continue => {},
-														NativeForward::Terminal => break,
-														NativeForward::Backpressure => {
-															let _ = feed.interrupt(Interrupt {
-																class: sf!("backpressure"),
-																reason: sf!(
-																	"invocation response consumer stopped reading",
-																),
-															});
-															if lifecycle.is_committed() {
-																cancel_grace = Some(Box::pin(time::sleep(
-																	NATIVE_CANCEL_GRACE,
-																)));
-															} else {
-																lifecycle.claim_terminal();
-																break;
-															}
-														},
-													}
-												},
+														.await
+														{
+															NativeForward::Continue => {},
+															NativeForward::Terminal => break,
+															NativeForward::Backpressure => {
+																let _ = feed.interrupt(Interrupt {
+																	class: sf!("backpressure"),
+																	reason: sf!(
+																		"invocation response consumer stopped reading",
+																	),
+																});
+																if lifecycle.is_committed() {
+																	cancel_grace = Some(Box::pin(time::sleep(
+																		NATIVE_CANCEL_GRACE,
+																	)));
+																} else {
+																	lifecycle.claim_terminal();
+																	break;
+																}
+															},
+														}
+													},
+												}
 											}
 										}
-									}
-									if grace_expired
-										&& lifecycle.is_committed()
-										&& lifecycle.claim_terminal()
-									{
-										drop(stream);
-										let reason = if timed_out {
-											sf!(
-												"native invocation exceeded its deadline and did not stop \
-												 within grace",
+										if grace_expired
+											&& lifecycle.is_committed()
+											&& lifecycle.claim_terminal()
+										{
+											drop(stream);
+											let reason = if timed_out {
+												sf!(
+													"native invocation exceeded its deadline and did not stop \
+													 within grace",
+												)
+											} else {
+												sf!("native invocation did not stop within cancellation grace")
+											};
+											send_abort_verdict(
+												&responses,
+												request_id,
+												&invocation_id,
+												&delivery,
+												omp_tool::Abort::EffectsUnknown { reason },
 											)
-										} else {
-											sf!("native invocation did not stop within cancellation grace")
-										};
-										send_abort_verdict(
-											&responses,
-											request_id,
-											&invocation_id,
-											&delivery,
-											omp_tool::Abort::EffectsUnknown { reason },
-										)
-										.await;
-									}
-								},
-								Err(error) => {
-									if lifecycle.claim_terminal() {
-										let _ = send_invocation_error(
-											&responses,
-											request_id,
-											pb::ProtocolErrorCode::NotFound,
-											&error.to_string(),
-										)
-										.await;
-									}
-								},
-							}
-							let _ = finished
-								.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
-								.await;
-						}),
+											.await;
+										}
+									},
+									Err(error) => {
+										if lifecycle.claim_terminal() {
+											let _ = send_invocation_error(
+												&responses,
+												request_id,
+												pb::ProtocolErrorCode::NotFound,
+												&error.to_string(),
+											)
+											.await;
+										}
+									},
+								}
+								let _ = finished
+									.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
+									.await;
+							}),
+						),
 					),
 				),
 			),
