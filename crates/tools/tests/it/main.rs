@@ -6,6 +6,7 @@ mod edit;
 mod eval;
 mod glob;
 mod grep;
+mod lsp;
 mod markit_doc;
 mod markit_odf;
 mod markit_odp;

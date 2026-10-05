@@ -39,6 +39,23 @@ pub fn parse_symbol_target(value: &str) -> Result<SymbolTarget, &'static str> {
 	Ok(SymbolTarget { symbol: Str::from(symbol), occurrence })
 }
 
+/// Converts a byte offset on one source line to a zero-based column in the
+/// negotiated LSP position encoding. `None` when the offset is not a character
+/// boundary inside `line`.
+pub fn column_in_encoding(
+	line: &str,
+	byte_column: usize,
+	encoding: PositionEncoding,
+) -> Option<u32> {
+	let prefix = line.get(..byte_column)?;
+	let units = match encoding {
+		PositionEncoding::Utf8 => prefix.len(),
+		PositionEncoding::Utf16 => prefix.encode_utf16().count(),
+		PositionEncoding::Utf32 => prefix.chars().count(),
+	};
+	u32::try_from(units).ok()
+}
+
 /// Resolves a target's zero-based column in the negotiated LSP position
 /// encoding on one source line.
 pub fn resolve_symbol_column(
@@ -61,13 +78,7 @@ pub fn resolve_symbol_column(
 		if left_boundary && right_boundary {
 			occurrence += 1;
 			if occurrence == target.occurrence {
-				let prefix = line.get(..start)?;
-				let units = match encoding {
-					PositionEncoding::Utf8 => prefix.len(),
-					PositionEncoding::Utf16 => prefix.encode_utf16().count(),
-					PositionEncoding::Utf32 => prefix.chars().count(),
-				};
-				return u32::try_from(units).ok();
+				return column_in_encoding(line, start, encoding);
 			}
 		}
 		offset = end;
@@ -85,6 +96,18 @@ mod tests {
 		assert_eq!(resolve_symbol_column(line, &target, PositionEncoding::Utf8), Some(16));
 		assert_eq!(resolve_symbol_column(line, &target, PositionEncoding::Utf16), Some(14));
 		assert_eq!(resolve_symbol_column(line, &target, PositionEncoding::Utf32), Some(13));
+	}
+
+	#[test]
+	fn byte_columns_convert_to_each_encoding_and_reject_split_characters() {
+		let line = "\tconst \u{1F600}x = 1; fn lone() {}";
+		let name = line.find("lone").expect("name");
+		assert_eq!(column_in_encoding(line, name, PositionEncoding::Utf8), Some(name as u32));
+		assert_eq!(column_in_encoding(line, name, PositionEncoding::Utf16), Some(name as u32 - 2));
+		assert_eq!(column_in_encoding(line, name, PositionEncoding::Utf32), Some(name as u32 - 3));
+		let emoji = line.find('\u{1F600}').expect("emoji");
+		assert_eq!(column_in_encoding(line, emoji + 1, PositionEncoding::Utf16), None);
+		assert_eq!(column_in_encoding(line, line.len() + 1, PositionEncoding::Utf8), None);
 	}
 
 	#[test]
