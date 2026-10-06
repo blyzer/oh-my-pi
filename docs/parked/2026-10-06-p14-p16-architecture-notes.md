@@ -24,7 +24,7 @@ Recorded 2026-10-06 from the owner's design commentary (verbatim below).
   instead of polling, forge/VCS adapters. Integration options: A external CLI,
   B Rust library, C own UI.
 
-Only the token-efficiency angle is being pulled forward (separate report); the
+Token-efficiency findings are in `2026-10-06-omp2-token-efficiency-audit.md`; the
 rest waits until the owner schedules it.
 
 ---
