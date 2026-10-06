@@ -1715,3 +1715,25 @@ CodeIR → QueryIR → DecisionIR → ChangeIR
 De los últimos enlaces, tuicr sí descubre una pieza conceptual que yo considero faltante: hasta ahora habíamos formalizado cómo el agente entiende, decide, cambia y verifica código; no habíamos formalizado suficientemente cómo otro actor —humano o agente— revisa ese cambio y devuelve feedback estructurado antes de aceptarlo.
 
 ReviewIR llena exactamente ese hueco.
+---
+
+## Result of the mbx trial (draft PR #165, run 37419562659, macos-15, 2026-10-06)
+
+Evidence read from the job log. mbx 1.22.0, workload
+`cargo nextest run --profile ci -p omp-e2e --test p7_tui --no-run`, one repetition
+per arm, 3-CPU shared host (noisy).
+
+- Wall: none 703 s; mbx-cold 565 s; mbx-warm-same-path 758 s; mbx-second-path 793 s
+  (1.08x-1.13x slower than none once warm). Compiler time avoided: 146 ms of ~27 min.
+- Hits: warm 345/3, second path 207/141 (59.5% of lookups), but lookups cover only
+  ~18% of the 1974 compilations. sccache baseline: ~70% in a second worktree.
+- Bypassed: 1205 `unknown-flag` (22m57s of 24m27s of compiler time in cold), 232
+  `cc-compiler-query`, 116 `cc-missing-output`. The flag was never named; the repo's
+  `.cargo/config.toml` sets `-Z threads=8` and `--ld-path=ld64.lld` (INFERRED trigger).
+- Store 151 MB (11.8 MB saved compressed): small because little was cacheable.
+- Not measured: remote publish (PRs are read-only), restored-store arm, the test run
+  phase, release profile.
+- Verdict: do not adopt mbx in CI on this evidence. Optional bounded phase 2: re-run
+  cold/warm/second-path with `-Z threads=8` and `--ld-path` removed individually; if
+  `unknown-flag` does not fall far below 1205, stop for good. The P16 design ideas
+  above stand independently of mbx the tool.
