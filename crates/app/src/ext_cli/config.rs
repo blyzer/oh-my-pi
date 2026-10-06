@@ -6,7 +6,9 @@
 //! skill. The user scope persists to `~/.o2/config.cfg`, the workspace scope
 //! to `<project>/.omp/config.cfg`, through the same lenient load and dump
 //! `omp config set` uses (ADR 0012: one currency; ADR 0014: no second
-//! customization schema). A workspace list replaces the user list when the
+//! customization schema). The workspace file is a project overlay:
+//! `cl_disabled_extensions` is project-scoped, so it is read and rewritten
+//! under project authority. A workspace list replaces the user list when the
 //! project cfg runs after the user cfg, so the first workspace edit starts
 //! from the effective user list; `Delete` drops the override again. A cfg
 //! dump only carries values diverging from the default, so an empty
@@ -176,7 +178,7 @@ pub async fn run(project: &Path, layer: Option<Layer>, _args: ExtConfigArgs) -> 
 	let user_path = crate::config_path().into_diagnostic()?;
 	let workspace_path = crate::config_cmd::path(project, crate::cli::ConfigScope::Project)?;
 	let user_cfg = crate::config_cmd::load_cfg(&user_path)?;
-	let workspace_cfg = crate::config_cmd::load_cfg(&workspace_path)?;
+	let workspace_cfg = crate::config_cmd::load_project_cfg(&workspace_path)?;
 	let mut model = SelectorModel::new(
 		load_items(project)?,
 		disabled_list(&user_cfg),
@@ -236,10 +238,10 @@ pub async fn run(project: &Path, layer: Option<Layer>, _args: ExtConfigArgs) -> 
 	};
 	if accepted {
 		if model.dirty_user {
-			persist(&user_path, Some(&model.user))?;
+			persist(&user_path, WriteScope::User, Some(&model.user))?;
 		}
 		if model.dirty_workspace {
-			persist(&workspace_path, model.workspace.as_ref())?;
+			persist(&workspace_path, WriteScope::Workspace, model.workspace.as_ref())?;
 		}
 	}
 	Ok(())
@@ -248,21 +250,31 @@ pub async fn run(project: &Path, layer: Option<Layer>, _args: ExtConfigArgs) -> 
 /// Writes `list` into the latest on-disk cfg's `cl_disabled_extensions` (or
 /// resets it to the default when `None`). The fresh read and replacement share
 /// the config transaction, so changes made while the selector was open survive.
-fn persist(path: &Path, list: Option<&BTreeSet<Str>>) -> miette::Result<()> {
-	crate::config_cmd::update_cfg(path, |cfg| {
+fn persist(path: &Path, scope: WriteScope, list: Option<&BTreeSet<Str>>) -> miette::Result<()> {
+	let write = |cfg: &Ctx| {
 		let value = list.map_or_else(
 			|| (CL_DISABLED_EXTENSIONS.spec().default)(),
 			|list| Value::List(list.iter().cloned().map(Value::Str).collect()),
 		);
-		let origin = if list.is_some() {
-			Origin::Archive
-		} else {
-			Origin::Default
+		// The workspace file is a project overlay: its value lives in the
+		// project layer, which only a `PROJECT` convar may occupy.
+		let origin = match (scope, list.is_some()) {
+			(WriteScope::User, true) => Origin::Archive,
+			(WriteScope::User, false) => Origin::Default,
+			(WriteScope::Workspace, _) => Origin::Project,
 		};
-		cfg.set(CL_DISABLED_EXTENSIONS.name(), value, origin)
-			.map_err(|error| miette!("{error}"))?;
-		Ok(())
-	})
+		match (scope, list) {
+			(WriteScope::Workspace, None) => cfg.unset(CL_DISABLED_EXTENSIONS.name(), &origin),
+			_ => cfg
+				.set(CL_DISABLED_EXTENSIONS.name(), value, origin)
+				.map(drop),
+		}
+		.into_diagnostic()
+	};
+	match scope {
+		WriteScope::User => crate::config_cmd::update_cfg(path, write),
+		WriteScope::Workspace => crate::config_cmd::update_project_cfg(path, write),
+	}
 }
 
 fn disabled_list(cfg: &Ctx) -> BTreeSet<Str> {
@@ -433,15 +445,33 @@ mod tests {
 	fn persisted_list_round_trips_through_the_cfg_loader() {
 		let tree = tempfile::tempdir().unwrap();
 		let path = tree.path().join("config.cfg");
-		persist(&path, Some(&set(&["skill:review", "acme.reviewer"]))).unwrap();
+		persist(&path, WriteScope::User, Some(&set(&["skill:review", "acme.reviewer"]))).unwrap();
 		let script = std::fs::read_to_string(&path).unwrap();
 		assert!(script.contains("cl_disabled_extensions"), "{script}");
 		let reloaded = crate::config_cmd::load_cfg(&path).unwrap();
 		assert_eq!(disabled_list(&reloaded), set(&["acme.reviewer", "skill:review"]));
 		let policy = omp_driver::discovery::skills::SkillPolicy::from_con(&reloaded);
 		assert_eq!(policy.disabled, set(&["review"]));
-		persist(&path, None).unwrap();
+		persist(&path, WriteScope::User, None).unwrap();
 		let cleared = crate::config_cmd::load_cfg(&path).unwrap();
+		assert!(disabled_list(&cleared).is_empty());
+	}
+
+	/// The workspace scope writes a project overlay: `cl_disabled_extensions`
+	/// is project-scoped, so the same list round-trips through the project
+	/// loader, and `Delete` (inherit) removes it again.
+	#[test]
+	fn workspace_list_round_trips_through_the_project_overlay() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("config.cfg");
+		persist(&path, WriteScope::Workspace, Some(&set(&["acme.reviewer"]))).unwrap();
+		let script = std::fs::read_to_string(&path).unwrap();
+		assert!(script.contains("cl_disabled_extensions"), "{script}");
+		assert!(!script.contains("alias"), "a project overlay carries no alias table:\n{script}");
+		let reloaded = crate::config_cmd::load_project_cfg(&path).unwrap();
+		assert_eq!(disabled_list(&reloaded), set(&["acme.reviewer"]));
+		persist(&path, WriteScope::Workspace, None).unwrap();
+		let cleared = crate::config_cmd::load_project_cfg(&path).unwrap();
 		assert!(disabled_list(&cleared).is_empty());
 	}
 }

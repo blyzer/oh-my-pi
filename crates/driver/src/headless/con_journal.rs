@@ -203,9 +203,12 @@ fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom) {
 	if agent.as_str() != TASK_AGENT.as_str() {
 		let mut file = agent.as_str().to_owned();
 		file.push_str(".cfg");
-		match cfg.load(&file) {
-			Ok(Some(_)) => {},
-			Ok(None) => ctx.reply_fmt(
+		match cfg
+			.load(&file)
+			.and_then(|user| Ok(user.is_some() || cfg.load_project(&file)?.is_some()))
+		{
+			Ok(true) => {},
+			Ok(false) => ctx.reply_fmt(
 				Severity::Warn,
 				format_args!(
 					"agent `{agent}` has no definition ({file}) anymore; this session resumes with the \

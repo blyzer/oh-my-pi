@@ -26,16 +26,21 @@ impl LayerId {
 /// Provenance and destination of a convar write.
 ///
 /// Each variant names the layer a write commits to. Effective values resolve
-/// innermost first — engagement, session, class, inherited, archive, then the
-/// registration default — and `reset` removes a variable from the layer its
-/// statement commits to, so the value falls through to the next one.
+/// innermost first — engagement, session, class, inherited, project, archive,
+/// then the registration default — and `reset` removes a variable from the
+/// layer its statement commits to, so the value falls through to the next one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Origin {
 	/// Registration-time value. As a write destination it clears the archive
 	/// and session layers.
 	Default,
-	/// Profile value loaded from `config.cfg` (user, then project overlay).
+	/// Profile value loaded from the user's `config.cfg`.
 	Archive,
+	/// Value a project cfg overlay (`<project>/.omp/<name>.cfg`) supplies
+	/// under project authority. It overlays the archive layer but is never
+	/// persisted: `writecfg` records the user's own values only, so a
+	/// repository's settings do not become the user's.
+	Project,
 	/// Value a child scope inherits from its parent's live picture at spawn
 	/// (ADR 0013 seed).
 	Inherited,
@@ -124,6 +129,7 @@ pub struct EngagementLayer {
 #[derive(Default)]
 pub struct Layers {
 	pub(crate) archive:     FastHashMap<Str, Value>,
+	pub(crate) project:     FastHashMap<Str, Value>,
 	pub(crate) inherited:   FastHashMap<Str, Value>,
 	pub(crate) class:       FastHashMap<Str, Value>,
 	pub(crate) session:     FastHashMap<Str, Value>,
@@ -165,23 +171,25 @@ impl Layers {
 			.or_else(|| self.session.get(name))
 			.or_else(|| self.class.get(name))
 			.or_else(|| self.inherited.get(name))
+			.or_else(|| self.project.get(name))
 			.or_else(|| self.archive.get(name))
 	}
 
 	/// [`Self::effective`] with every engagement layer popped: what the user,
-	/// class, inherited, and archive layers say.
+	/// class, inherited, project, and archive layers say.
 	pub(crate) fn below_engagements(&self, name: &str) -> Option<&Value> {
 		self
 			.session
 			.get(name)
 			.or_else(|| self.class.get(name))
 			.or_else(|| self.inherited.get(name))
+			.or_else(|| self.project.get(name))
 			.or_else(|| self.archive.get(name))
 	}
 
 	/// The value persistence records for `name`: [`Self::effective`] without
-	/// the inherited and class layers, which a scope receives from its parent
-	/// and agent class rather than owning.
+	/// the inherited, class, and project layers, which a scope receives from
+	/// its parent, agent class, and repository rather than owning.
 	pub(crate) fn persisted(&self, name: &str) -> Option<&Value> {
 		self
 			.engagement_value(name)

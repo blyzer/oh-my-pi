@@ -63,8 +63,8 @@ pub use chord::{ChordError, normalize_chord};
 pub use complete::{CompleterFn, Suggestion};
 pub use ctx::{
 	Args, CfgLoader, CfgSaver, Ctx, CtxBuilder, DynamicCmdHandler, DynamicCmdSpec, DynamicVarSpec,
-	ExecOutcome, LoaderFn, ObserverFn, Output, SaverFn, SessionWrite, SetSource, Severity, SinkFn,
-	Source, VarView,
+	ExecOutcome, ObserverFn, Output, SaverFn, SessionWrite, SetSource, Severity, SinkFn, Source,
+	VarView,
 };
 pub use dump::{CFG_HEADER_PREFIX, CFG_SCHEMA_VERSION, DumpOptions};
 pub use error::{ConError, ConResult, ConfigIoError, ConfigOperation, ParseError};

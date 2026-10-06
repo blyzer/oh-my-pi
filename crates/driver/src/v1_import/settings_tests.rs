@@ -255,24 +255,36 @@ fn project_settings_import_once_per_project() {
 	let v2 = roots(root.path());
 	let project = root.path().join("repo");
 	let v1_file = project.join(".omp/config.yml");
-	write(&v1_file, "compaction:\n  thresholdPercent: 55\nsharpshooter:\n  model: x\n");
+	write(
+		&v1_file,
+		"disabledExtensions:\n  - acme.reviewer\ncompaction:\n  thresholdPercent: \
+		 55\nsharpshooter:\n  model: x\n",
+	);
 	let before = snapshot(root.path());
 
 	let dry = import_project_settings(&project, &v2, ImportMode::DryRun);
 	assert_eq!(snapshot(root.path()), before, "a dry run must not write");
 	assert_eq!(
-		kind_of(&settings(&dry), "compaction.thresholdPercent -> ai_compact_threshold"),
+		kind_of(&settings(&dry), "disabledExtensions -> cl_disabled_extensions"),
 		OutcomeKind::WouldImport
 	);
 
 	let applied = import_project_settings(&project, &v2, ImportMode::Apply);
 	assert_eq!(
-		kind_of(&settings(&applied), "compaction.thresholdPercent -> ai_compact_threshold"),
+		kind_of(&settings(&applied), "disabledExtensions -> cl_disabled_extensions"),
 		OutcomeKind::Imported
+	);
+	// A project cfg runs with project authority, so a convar that is not
+	// project-scoped is kept as a comment instead of a line every load rejects.
+	assert_eq!(
+		kind_of(&settings(&applied), "compaction.thresholdPercent -> ai_compact_threshold"),
+		OutcomeKind::NotMigratable
 	);
 	assert_eq!(kind_of(&settings(&applied), "sharpshooter.model"), OutcomeKind::NotMigratable);
 	let config = fs::read_to_string(project.join(".omp/config.cfg")).expect("project cfg");
-	assert!(config.contains("\nai_compact_threshold 0.55\n"), "{config}");
+	assert!(config.contains("\ncl_disabled_extensions [acme.reviewer]\n"), "{config}");
+	assert!(!config.contains("\nai_compact_threshold"), "{config}");
+	assert!(config.contains("\n// compaction.thresholdPercent = 55\n"), "{config}");
 	assert!(config.contains("\n// sharpshooter.model = \"x\"\n"), "{config}");
 	assert_eq!(fs::read(&v1_file).expect("v1 file"), before[&v1_file].clone().expect("bytes"));
 	// Nothing lands in the user roots, and the marker lives outside the repo.
@@ -289,7 +301,7 @@ fn project_settings_import_once_per_project() {
 	// Another project imports on its own, and one without v1 settings gets
 	// no marker.
 	let other = root.path().join("other");
-	write(&other.join(".omp/config.yml"), "compaction:\n  thresholdPercent: 60\n");
+	write(&other.join(".omp/config.yml"), "disabledExtensions:\n  - other.reviewer\n");
 	let imported = import_project_settings(&other, &v2, ImportMode::Apply);
 	assert_eq!(imported[0].outcome.kind(), OutcomeKind::Imported);
 	let bare = root.path().join("bare");
