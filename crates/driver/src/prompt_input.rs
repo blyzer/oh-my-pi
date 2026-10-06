@@ -5,8 +5,14 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::{Str, dirs::ProfileNameError};
+use omp_core::{
+	Str,
+	dirs::ProfileNameError,
+	project_file::{self, Containment, ProjectFileError, containment_root},
+};
 use thiserror::Error;
+
+use crate::discovery::rules::CONTEXT_FILE_LIMIT;
 
 /// A prompt customization file could not be read.
 #[derive(Debug, Error)]
@@ -46,21 +52,38 @@ pub fn resolve_prompt_input(input: Option<&str>) -> Result<Option<Str>, PromptIn
 
 /// Discovers one native Markdown prompt with project-over-user precedence.
 ///
-/// The project candidate is `<cwd>/.omp/<name>`; the user candidate lives in
-/// the selected profile's agent asset tree ([`user_prompt_path`]).
+/// The project candidate is `<cwd>/.omp/<name>`, read through the contained
+/// project-file reader ([`omp_core::project_file`]): a symlink out of the
+/// repository, a special file, or one over [`CONTEXT_FILE_LIMIT`] is skipped
+/// with a warning and discovery falls through to the user candidate, which
+/// lives in the selected profile's agent asset tree ([`user_prompt_path`]).
 pub fn discover_prompt_file(
 	cwd: &Path,
 	home: &Path,
 	name: &str,
 ) -> Result<Option<Str>, PromptInputError> {
-	for path in [cwd.join(".omp").join(name), user_prompt_path(home, name)?] {
-		match fs::read_to_string(&path) {
-			Ok(content) => return Ok(Some(content.into())),
-			Err(source) if tolerant_literal_error(&source) => {},
-			Err(source) => return Err(PromptInputError::Read { path, source }),
-		}
+	let project = cwd.join(".omp").join(name);
+	match project_file::read_text(
+		&project,
+		Containment::Within(containment_root(cwd)),
+		CONTEXT_FILE_LIMIT,
+	) {
+		Ok(Some(content)) => return Ok(Some(content.into())),
+		Ok(None) => {},
+		Err(ProjectFileError::Refused { path, reason }) => {
+			tracing::warn!(path = %path.display(), reason = <&str>::from(reason), "project prompt file skipped");
+		},
+		Err(ProjectFileError::Io { source, .. }) if tolerant_literal_error(&source) => {},
+		Err(ProjectFileError::Io { path, source }) => {
+			return Err(PromptInputError::Read { path, source });
+		},
 	}
-	Ok(None)
+	let path = user_prompt_path(home, name)?;
+	match fs::read_to_string(&path) {
+		Ok(content) => Ok(Some(content.into())),
+		Err(source) if tolerant_literal_error(&source) => Ok(None),
+		Err(source) => Err(PromptInputError::Read { path, source }),
+	}
 }
 
 /// Discovers one prompt only in the native user configuration root.
@@ -198,5 +221,45 @@ mod tests {
 				.as_deref(),
 			Some("user append")
 		);
+	}
+
+	/// A repository's `.omp/SYSTEM.md` that is a symlink out of the repository
+	/// or an oversize file is skipped (user guidance still applies); a link
+	/// that stays inside the repository is read.
+	#[cfg(unix)]
+	#[test]
+	fn project_system_prompt_must_stay_inside_the_repository_and_under_the_limit() {
+		use std::os::unix::fs::symlink;
+
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let home = scratch.path().join("home");
+		let project = scratch.path().join("repo");
+		let user_system = user_prompt_path(&home, "SYSTEM.md").expect("user prompt path");
+		fs::create_dir_all(user_system.parent().expect("agent dir")).expect("user agent directory");
+		fs::create_dir_all(project.join(".omp")).expect("project config directory");
+		fs::create_dir_all(project.join(".git")).expect("repository marker");
+		fs::write(&user_system, "user").expect("user system prompt");
+		fs::write(scratch.path().join("secret"), "TOP-SECRET").expect("outside file");
+		let system = project.join(".omp/SYSTEM.md");
+
+		symlink(scratch.path().join("secret"), &system).expect("outside link");
+		let found = discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery");
+		assert_eq!(
+			found.as_deref(),
+			Some("user"),
+			"an outside symlink falls through to the user prompt"
+		);
+		fs::remove_file(&system).expect("remove link");
+
+		fs::write(&system, vec![b'x'; usize::try_from(CONTEXT_FILE_LIMIT).unwrap() + 1])
+			.expect("oversize prompt");
+		let found = discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery");
+		assert_eq!(found.as_deref(), Some("user"), "an oversize prompt is skipped");
+		fs::remove_file(&system).expect("remove prompt");
+
+		fs::write(project.join("prompt.md"), "inside").expect("inside file");
+		symlink("../prompt.md", &system).expect("inside link");
+		let found = discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery");
+		assert_eq!(found.as_deref(), Some("inside"));
 	}
 }

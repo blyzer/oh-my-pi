@@ -233,6 +233,10 @@ pub enum ConError {
 	/// A cfg filesystem operation failed.
 	#[error(transparent)]
 	ConfigIo(#[from] ConfigIoError),
+	/// A project cfg was refused by the contained project-file reader or
+	/// writer (outside the project, special file, oversize, symlink target).
+	#[error(transparent)]
+	ProjectFile(#[from] omp_core::project_file::ProjectFileError),
 	/// A cfg script failed syntax validation.
 	#[error("failed to parse config `{path}`")]
 	ConfigParse {

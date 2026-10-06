@@ -61,7 +61,7 @@ and skills as data (containment exists).
 
 - PR0 (stopgaps, ~130 lines): default `sv_mcp_enable_project_config` to false; treat
   project-scoped MCP env/headers as literals (no `!cmd`, no env-name lookup).
-- PR1 (~300): contained project-file reader (regular file, no root escape, size cap) applied
+- PR1 (~300; implemented as `omp_core::project_file`, F5/F9 closed): contained project-file reader (regular file, no root escape, size cap) applied
   to cfg load/write, context files, SYSTEM/APPEND, whole-file rules, `secrets.yml`,
   `hosts.toml`, lsp configs. Fixes F5 and F9 without a trust decision.
 - PR2 (~250): `omp-ext` `WorkspaceTrust`, grants table, inventory digest, round-trip tests.

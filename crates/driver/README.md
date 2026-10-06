@@ -37,6 +37,12 @@ presentation adapter.
   `prompts` (Markdown prompt templates that become `/name` slash commands with
   `$1` / `$ARGUMENTS` substitution). `--no-context-files`, `--no-rules`,
   `--no-prompt-templates`, and `--prompt-template <path>` are their seams.
+  Project files (context files, whole-file rules, `.omp/SYSTEM.md`,
+  `.omp/secrets.yml`, the `.omp/*.cfg` overlay) are read through
+  `omp_core::project_file`: regular files under a size cap that resolve inside
+  the repository. A refused context file or rule is skipped with a
+  `Warning`; the cfg overlay is skipped as a whole and its write path
+  (`ConfigFileLock::acquire_project`) refuses symlink targets.
 - A rule's `agents:` frontmatter scopes it to agent classes (`main` for the
   top-level session, the spawned class such as `task` or `scout` for a
   subagent): case-insensitive globs, a list or a comma-separated string. A

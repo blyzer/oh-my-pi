@@ -457,7 +457,7 @@ impl CfgLoader for ProjectOverlay<'_> {
 /// may not run are reported and dropped, so an edit rewrites only what it may
 /// keep.
 pub(crate) fn load_project_cfg(path: &Path) -> miette::Result<Ctx> {
-	let script = omp_driver::cfg::read_config(path).into_diagnostic()?;
+	let script = omp_driver::cfg::read_project_config(path).into_diagnostic()?;
 	load_project_cfg_text(path, script.as_deref())
 }
 
@@ -529,8 +529,12 @@ fn update_cfg_as(
 	project: bool,
 	update: impl FnOnce(&Ctx) -> miette::Result<()>,
 ) -> miette::Result<()> {
-	let transaction =
-		omp_driver::cfg::ConfigFileLock::acquire(path.to_path_buf()).into_diagnostic()?;
+	let transaction = if project {
+		omp_driver::cfg::ConfigFileLock::acquire_project(path.to_path_buf())
+	} else {
+		omp_driver::cfg::ConfigFileLock::acquire(path.to_path_buf())
+	}
+	.into_diagnostic()?;
 	let current = transaction.read().into_diagnostic()?;
 	let migrated = current
 		.as_deref()

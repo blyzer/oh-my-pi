@@ -50,7 +50,10 @@ use std::{
 	sync::Arc,
 };
 
-use omp_core::{CowBytes, Str};
+use omp_core::{
+	CowBytes, Str,
+	project_file::{self, Containment, ProjectFileError, containment_root},
+};
 use omp_dom::Dom;
 use omp_envd::ContentResolver;
 use omp_ext::claude_plugin::{ClaudePlugins, PluginScope};
@@ -85,6 +88,37 @@ pub struct Warning {
 	pub path:    PathBuf,
 	/// Human-readable reason.
 	pub message: Str,
+}
+
+impl From<ProjectFileError> for Warning {
+	/// A refused file is the static [`Refusal`](project_file::Refusal) text,
+	/// never the file's content; an unreadable one keeps its I/O cause.
+	fn from(error: ProjectFileError) -> Self {
+		match error {
+			ProjectFileError::Refused { path, reason } => {
+				Self { path, message: Str::new_static(reason.into()) }
+			},
+			ProjectFileError::Io { path, source } => {
+				Self { path, message: Str::new(format!("Failed to read project file: {source}")) }
+			},
+		}
+	}
+}
+
+/// The most a context file, rule, or `SYSTEM.md`-class prompt file may hold
+/// (1 MiB): generous for hand-written guidance, far below a runaway file.
+pub const CONTEXT_FILE_LIMIT: u64 = 1024 * 1024;
+
+/// Containment for a project file found at `file`: the repository root for
+/// anything inside it. A file in an ancestor between the repository and the
+/// home directory belongs to that directory, so it may only resolve within
+/// its own directory.
+fn project_containment<'a>(file: &'a Path, repo_root: &'a Path) -> Containment<'a> {
+	if file.starts_with(repo_root) {
+		Containment::Within(repo_root)
+	} else {
+		Containment::Within(file.parent().unwrap_or(file))
+	}
 }
 
 /// One persistent-instruction file.
@@ -146,7 +180,8 @@ impl ContextFiles {
 			} else {
 				home.join(relative)
 			};
-			let Some(content) = read_non_empty(&path, &mut out.warnings) else {
+			let Some(content) = read_non_empty(&path, Containment::Unconfined, &mut out.warnings)
+			else {
 				continue;
 			};
 			out.files.push(ContextFile {
@@ -159,6 +194,7 @@ impl ContextFiles {
 			break;
 		}
 		let mut project = Vec::new();
+		let repo_root = containment_root(project_root);
 		let ancestors = walk_up(project_root, home);
 		// `.omp/AGENTS.md` is read from the
 		// nearest `.omp/` directory only; the standalone files walk every
@@ -173,7 +209,8 @@ impl ContextFiles {
 					continue;
 				}
 				let path = dir.join(relative);
-				let Some(content) = read_non_empty(&path, &mut out.warnings) else {
+				let containment = project_containment(&path, repo_root);
+				let Some(content) = read_non_empty(&path, containment, &mut out.warnings) else {
 					continue;
 				};
 				project.push(ContextFile {
@@ -354,6 +391,7 @@ impl ActiveRules {
 			}
 		};
 		let mut warnings = Vec::new();
+		let repo_root = containment_root(project_root);
 		let ancestors = walk_up(project_root, home);
 		let nearest_config = ancestors
 			.iter()
@@ -383,6 +421,7 @@ impl ActiveRules {
 		}
 		if let Some(rule) = whole_file_rule(
 			&config_root.join("agent/RULES.md"),
+			Containment::Unconfined,
 			"RULES",
 			"native",
 			Level::User,
@@ -390,15 +429,18 @@ impl ActiveRules {
 		) {
 			admit(rule, &mut warnings);
 		}
-		if let Some(config) = &nearest_config
-			&& let Some(rule) = whole_file_rule(
-				&config.join("RULES.md"),
+		if let Some(config) = &nearest_config {
+			let rules_file = config.join("RULES.md");
+			if let Some(rule) = whole_file_rule(
+				&rules_file,
+				project_containment(&rules_file, repo_root),
 				"RULES@project",
 				"native",
 				Level::Project,
 				&mut warnings,
 			) {
-			admit(rule, &mut warnings);
+				admit(rule, &mut warnings);
+			}
 		}
 		// agents: `.agent/rules` and `.agents/rules` (project walk-up + home).
 		for dir in &ancestors {
@@ -459,6 +501,7 @@ impl ActiveRules {
 		}
 		if let Some(rule) = whole_file_rule(
 			&project_root.join(".cursorrules"),
+			Containment::Within(repo_root),
 			"cursorrules",
 			"cursor",
 			Level::Project,
@@ -469,6 +512,7 @@ impl ActiveRules {
 		// windsurf: user memories precede project rules within the provider.
 		if let Some(rule) = whole_file_rule(
 			&home.join(".codeium/windsurf/memories/global_rules.md"),
+			Containment::Unconfined,
 			"global_rules",
 			"windsurf",
 			Level::User,
@@ -487,6 +531,7 @@ impl ActiveRules {
 		}
 		if let Some(rule) = whole_file_rule(
 			&project_root.join(".windsurfrules"),
+			Containment::Within(repo_root),
 			"windsurfrules",
 			"windsurf",
 			Level::Project,
@@ -504,9 +549,14 @@ impl ActiveRules {
 				for rule in rules_in_dir(&found, "cline", Level::Project, &["md"], &mut warnings) {
 					admit(rule, &mut warnings);
 				}
-			} else if let Some(rule) =
-				whole_file_rule(&found, "clinerules", "cline", Level::Project, &mut warnings)
-			{
+			} else if let Some(rule) = whole_file_rule(
+				&found,
+				project_containment(&found, repo_root),
+				"clinerules",
+				"cline",
+				Level::Project,
+				&mut warnings,
+			) {
 				admit(rule, &mut warnings);
 			}
 		}
@@ -718,20 +768,19 @@ fn walk_up(project_root: &Path, home: &Path) -> Vec<PathBuf> {
 	out
 }
 
-/// Reads `path` when it is a non-empty file outside a hidden directory
-/// Empty files contribute nothing and must not claim the depth scope.
-fn read_non_empty(path: &Path, warnings: &mut Vec<Warning>) -> Option<Str> {
-	if !path.is_file() {
-		return None;
-	}
-	match fs::read_to_string(path) {
-		Ok(text) if text.trim().is_empty() => None,
-		Ok(text) => Some(Str::new(text)),
+/// Reads `path` through the contained project-file reader when it is a
+/// non-empty regular file. Empty files contribute nothing and must not claim
+/// the depth scope; a refused or unreadable file is skipped with a warning.
+fn read_non_empty(
+	path: &Path,
+	containment: Containment<'_>,
+	warnings: &mut Vec<Warning>,
+) -> Option<Str> {
+	match project_file::read_text(path, containment, CONTEXT_FILE_LIMIT) {
+		Ok(Some(text)) if !text.trim().is_empty() => Some(Str::new(text)),
+		Ok(_) => None,
 		Err(error) => {
-			warnings.push(Warning {
-				path:    path.to_path_buf(),
-				message: Str::new(format!("Failed to read context file: {error}")),
-			});
+			warnings.push(error.into());
 			None
 		},
 	}
@@ -891,6 +940,7 @@ pub(crate) fn split_frontmatter(source: &str) -> (Option<&str>, &str) {
 /// Builds a rule from a Markdown document.
 fn load_rule(
 	path: &Path,
+	containment: Containment<'_>,
 	name: Str,
 	provider: &'static str,
 	level: Level,
@@ -906,13 +956,11 @@ fn load_rule(
 			return None;
 		},
 	};
-	let text = match fs::read_to_string(&canonical) {
-		Ok(text) => text,
+	let text = match project_file::read_text(&canonical, containment, CONTEXT_FILE_LIMIT) {
+		Ok(Some(text)) => text,
+		Ok(None) => return None,
 		Err(error) => {
-			warnings.push(Warning {
-				path:    canonical,
-				message: Str::new(format!("Failed to read rule file: {error}")),
-			});
+			warnings.push(error.into());
 			return None;
 		},
 	};
@@ -1027,7 +1075,7 @@ fn rules_in_dir(
 				},
 			};
 			let name = Str::new(canonical.file_stem()?.to_string_lossy());
-			load_rule(&canonical, name, provider, level, warnings)
+			load_rule(&canonical, Containment::Within(&canonical_dir), name, provider, level, warnings)
 		})
 		.collect()
 }
@@ -1040,15 +1088,16 @@ fn rules_in_dir(
 /// the rulebook with a description.
 fn whole_file_rule(
 	path: &Path,
+	containment: Containment<'_>,
 	name: &'static str,
 	provider: &'static str,
 	level: Level,
 	warnings: &mut Vec<Warning>,
 ) -> Option<Rule> {
-	if !path.is_file() {
+	if !path.exists() {
 		return None;
 	}
-	let mut rule = load_rule(path, Str::new_static(name), provider, level, warnings)?;
+	let mut rule = load_rule(path, containment, Str::new_static(name), provider, level, warnings)?;
 	if rule.content.trim().is_empty() {
 		return None;
 	}
@@ -1266,6 +1315,101 @@ mod tests {
 		let files = ContextFiles::discover(&project, &home, &config_root);
 		assert_eq!(files.files[0].provider, "claude");
 		assert_eq!(files.files.last().unwrap().provider, "claude");
+	}
+
+	/// Project context files are untrusted input: an outside symlink (the
+	/// `AGENTS.md -> ~/.aws/credentials` leak), a FIFO, and an oversize file
+	/// are each skipped with a static warning that never carries content,
+	/// the others still load, and an inside symlink is accepted.
+	#[cfg(unix)]
+	#[test]
+	fn context_files_refuse_escapes_special_files_and_oversize_without_blocking() {
+		use std::{os::unix::fs::symlink, process::Command, sync::mpsc, thread, time::Duration};
+
+		let (_temp, home, repo, project) = layout();
+		let config_root = home.join(".o2");
+		write(&home.join(".aws/credentials"), "AKIA-TOP-SECRET");
+		symlink(home.join(".aws/credentials"), repo.join("AGENTS.md")).unwrap();
+		assert!(
+			Command::new("mkfifo")
+				.arg(repo.join("crates/AGENTS.md"))
+				.status()
+				.unwrap()
+				.success()
+		);
+		let oversize = vec![b'x'; usize::try_from(CONTEXT_FILE_LIMIT).unwrap() + 1];
+		fs::create_dir_all(project.join(".claude")).unwrap();
+		fs::write(project.join(".claude/CLAUDE.md"), oversize).unwrap();
+		write(&repo.join("docs/guide.md"), "inside guide");
+		symlink("../../docs/guide.md", project.join("AGENTS.md")).unwrap();
+		write(&home.join("work/AGENTS.md"), "workspace level");
+
+		let (sender, receiver) = mpsc::channel();
+		thread::spawn(move || {
+			let _ = sender.send(ContextFiles::discover(&project, &home, &config_root));
+		});
+		let files = receiver
+			.recv_timeout(Duration::from_secs(10))
+			.expect("a FIFO context file must be refused, not read");
+		let contents = files
+			.files
+			.iter()
+			.map(|file| file.content.as_str())
+			.collect::<Vec<_>>();
+		assert_eq!(contents, ["workspace level", "inside guide"]);
+		let mut warnings = files
+			.warnings
+			.iter()
+			.map(|warning| {
+				(warning.path.file_name().unwrap().to_str().unwrap(), warning.message.as_str())
+			})
+			.collect::<Vec<_>>();
+		warnings.sort_unstable();
+		assert_eq!(warnings, [
+			("AGENTS.md", "refused: not a regular file"),
+			("AGENTS.md", "refused: resolves outside the project root"),
+			("CLAUDE.md", "refused: larger than the size limit"),
+		]);
+		assert!(
+			files
+				.prompt_facts()
+				.iter()
+				.all(|fact| !fact.to_string().contains("AKIA"))
+		);
+	}
+
+	/// The single-file rules (`.cursorrules`, `RULES.md`) resolve inside the
+	/// repository too: an outside symlink is refused with a warning and the
+	/// sibling rules still load.
+	#[cfg(unix)]
+	#[test]
+	fn whole_file_rules_refuse_symlinks_out_of_the_repository() {
+		use std::os::unix::fs::symlink;
+
+		let (_temp, home, repo, _project) = layout();
+		let config_root = home.join(".o2");
+		write(&home.join(".aws/credentials"), "AKIA-TOP-SECRET");
+		symlink(home.join(".aws/credentials"), repo.join(".cursorrules")).unwrap();
+		write(&repo.join(".windsurfrules"), "windsurf rule");
+		write(&repo.join("shared/rules.md"), "sticky inside");
+		write(&repo.join(".omp/placeholder"), "");
+		symlink("../shared/rules.md", repo.join(".omp/RULES.md")).unwrap();
+
+		let discovered = ActiveRules::discover(&repo, &home, &config_root, &ClaudePlugins::default());
+		assert!(discovered.get("cursorrules").is_none());
+		assert_eq!(discovered.get("windsurfrules").unwrap().content.as_str(), "windsurf rule");
+		assert_eq!(discovered.get("RULES@project").unwrap().content.as_str(), "sticky inside");
+		assert_eq!(discovered.warnings.len(), 1, "{:?}", discovered.warnings);
+		assert_eq!(
+			discovered.warnings[0].message.as_str(),
+			"refused: resolves outside the project root"
+		);
+		assert!(
+			discovered
+				.rules
+				.iter()
+				.all(|rule| !rule.content.contains("AKIA"))
+		);
 	}
 
 	#[cfg(unix)]
