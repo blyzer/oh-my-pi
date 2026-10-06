@@ -1865,7 +1865,9 @@ mod tests {
 		assert_eq!(spawned_model(&overridden, &files, "inheriting").as_str(), "override/model");
 	}
 
-	#[tokio::test]
+	/// Runs on the paused clock so the TTL boundary is exact: a wall-clock
+	/// sleep racing a real 1 ms timer on a loaded runner proves nothing.
+	#[tokio::test(start_paused = true)]
 	async fn idle_ttl_zero_keeps_child_live_and_nonzero_reaps_after_boundary() {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let session =
@@ -1896,17 +1898,21 @@ mod tests {
 			crate::sessions::SessionId::new(Str::new_static("reaped")),
 			1,
 		);
-		tokio::time::sleep(Duration::from_millis(10)).await;
-		assert!(
+		// Let the spawned park task start and arm its sleep before the clock moves.
+		tokio::task::yield_now().await;
+		let live = |id: &str| {
 			registry
-				.lookup(crate::sessions::SessionId::from_ref("kept"))
+				.lookup(crate::sessions::SessionId::from_ref(id))
 				.is_some()
-		);
-		assert!(
-			registry
-				.lookup(crate::sessions::SessionId::from_ref("reaped"))
-				.is_none()
-		);
+		};
+		assert!(live("kept"));
+		assert!(live("reaped"), "the timer must not fire before its TTL elapses");
+		// `advance` runs every timer due within the step, so the 1 ms park fires
+		// here and a zero TTL never scheduled one to begin with.
+		tokio::time::advance(Duration::from_millis(1)).await;
+		tokio::task::yield_now().await;
+		assert!(live("kept"));
+		assert!(!live("reaped"));
 		assert_eq!(idle_park_delay(420_000), Some(Duration::from_secs(420)));
 	}
 
