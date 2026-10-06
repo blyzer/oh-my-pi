@@ -769,50 +769,18 @@ fn wait_snapshot(
 	}
 }
 
-/// Polls `info` until `ready` accepts it. A transient debug-client error (a
-/// read that outlasted [`IO_TIMEOUT`] on a loaded host, a frame not yet
-/// painted) is retried like [`wait_snapshot`] does; only the checkpoint
-/// deadline fails the test, and the panic names the last error and answer.
 fn wait_info(debug: &mut DebugClient, label: &str, mut ready: impl FnMut(&Value) -> bool) -> Value {
 	let deadline = Instant::now() + CHECKPOINT_TIMEOUT;
-	let mut last = None;
-	let mut error = None;
 	loop {
-		match debug.op("info") {
-			Ok(info) if ready(&info) => return info,
-			Ok(info) => last = Some(info),
-			Err(problem) => error = Some(problem),
+		let info = debug
+			.op("info")
+			.unwrap_or_else(|error| panic!("{label}: {error}"));
+		if ready(&info) {
+			return info;
 		}
-		assert!(
-			Instant::now() < deadline,
-			"checkpoint {label:?} timed out\nlast error: {error:?}\nlast info: {last:?}",
-		);
+		assert!(Instant::now() < deadline, "checkpoint {label:?} timed out: {info}");
 		thread::sleep(Duration::from_millis(15));
 	}
-}
-
-/// Waits for a resize to land: first the settled geometry (`info` reports the
-/// size of the last paint, so it only matches once the host handled the
-/// resize and repainted), then a terminal surface that is non-blank, still
-/// carries the composer and satisfies `ready`. `frame` is the DOM replica, not
-/// the terminal, so only `Snapshot::text` proves the surface was repainted.
-fn wait_resized(
-	debug: &mut DebugClient,
-	raw: &Arc<Mutex<Vec<u8>>>,
-	label: &str,
-	rows: u64,
-	cols: u64,
-	mut ready: impl FnMut(&Snapshot) -> bool,
-) -> (Value, Snapshot) {
-	let info = wait_info(debug, &format!("settled {label}"), |info| {
-		info.get("rows").and_then(Value::as_u64) == Some(rows)
-			&& info.get("cols").and_then(Value::as_u64) == Some(cols)
-	});
-	let snapshot = wait_snapshot(debug, raw, label, |snapshot| {
-		!snapshot.text.trim().is_empty() && snapshot.text.contains(COMPOSER_PROMPT) && ready(snapshot)
-	});
-	assert_surface(&snapshot, label);
-	(info, snapshot)
 }
 
 fn assert_surface(snapshot: &Snapshot, label: &str) {
@@ -1105,11 +1073,17 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
 	// At 32 rows the settled cards retire into native scrollback; the live
 	// card, band, and composer must survive the rebuild.
-	let (info, _resized) =
-		wait_resized(&mut debug, &raw_capture, "streaming resize", 32, 92, |snapshot| {
-			let surface = snapshot.combined();
-			surface.contains("sleep 30") && surface.contains("interrupt the next tool")
-		});
+	let resized = wait_snapshot(&mut debug, &raw_capture, "streaming resize", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("sleep 30")
+			&& surface.contains("interrupt the next tool")
+			&& surface.contains(COMPOSER_PROMPT)
+	});
+	assert_surface(&resized, "resized");
+	let info = wait_info(&mut debug, "settled streaming resize", |info| {
+		info.get("rows").and_then(Value::as_u64) == Some(32)
+			&& info.get("cols").and_then(Value::as_u64) == Some(92)
+	});
 	assert_eq!(info.get("rows").and_then(Value::as_u64), Some(32), "resize rows: {info}");
 	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(92), "resize cols: {info}");
 	mark("resize settled");
@@ -1403,11 +1377,17 @@ async fn chat_tui_renders_a_stream_rule_redirect_through_resize_and_clean_quit()
 	debug
 		.op("resize")
 		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
-	let (info, _resized) =
-		wait_resized(&mut debug, &raw_capture, "redirect survives resize", 30, 96, |snapshot| {
-			let surface = snapshot.combined();
-			surface.contains(NOTICE) && surface.contains("Clean answer after the rule.")
-		});
+	let resized = wait_snapshot(&mut debug, &raw_capture, "redirect survives resize", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains(NOTICE)
+			&& surface.contains("Clean answer after the rule.")
+			&& surface.contains(COMPOSER_PROMPT)
+	});
+	assert_surface(&resized, "resized");
+	let info = wait_info(&mut debug, "settled resize", |info| {
+		info.get("rows").and_then(Value::as_u64) == Some(30)
+			&& info.get("cols").and_then(Value::as_u64) == Some(96)
+	});
 	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(96), "resize cols: {info}");
 	mark("resize settled");
 
