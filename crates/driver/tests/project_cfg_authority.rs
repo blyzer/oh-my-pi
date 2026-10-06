@@ -165,9 +165,14 @@ fn a_bad_project_line_skips_only_that_line() {
 	let (ctx, log) = capture();
 	let outcome = ctx.exec_configs(&fx.files, None).expect("lenient load");
 	assert_eq!(str_value(&ctx, "ai_thinking"), "high", "later project-scoped lines still apply");
+	// The repo's `off` is denied, so the value stays the registered default. It
+	// is read from the registration, and must differ from the repo's line for
+	// the assertion to prove anything.
+	let default = omp_envd::exec_settings::ExecSandboxMode::default();
+	assert_ne!(default, omp_envd::exec_settings::ExecSandboxMode::Off);
 	assert_eq!(
 		ctx.get("sv_sandbox_mode"),
-		enum_value("off"),
+		Some(Value::Enum(Str::new(<&'static str>::from(default)))),
 		"registration default, not the repo's"
 	);
 	assert!(outcome.failed >= 1 && outcome.denied >= 1, "{outcome:?}");
