@@ -1131,7 +1131,7 @@ omp_con::var! {
 	pub static AI_MODEL_ROLES = ai_model_roles: Kv {
 		default: roles_to_kv(&ModelSettings::default().roles),
 		validate: validate_roles,
-		flags: archive,
+		flags: archive | project,
 		meta: {
 			"legacy.path": "modelRoles",
 		},

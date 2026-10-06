@@ -115,7 +115,9 @@ pub fn config_path() -> std::result::Result<PathBuf, omp_core::dirs::DataDirErro
 ///
 /// The default bind cfg ([`omp_driver::keybindings::DEFAULT_BINDS`]) executes
 /// first, then user configuration, then `<project>/.omp/config.cfg` overlays
-/// it.
+/// it with project authority: only `set` and `reset` of convars that carry
+/// [`omp_con::VarFlags::PROJECT`], held in a layer `writecfg` never persists.
+/// Every other overlay statement is reported as a warning and skipped.
 pub fn process_ctx(project_root: &Path) -> Result<omp_con::Ctx> {
 	process_ctx_with(project_root, omp_con::Ctx::builder())
 }
@@ -125,14 +127,13 @@ pub fn process_ctx(project_root: &Path) -> Result<omp_con::Ctx> {
 /// The [`omp_driver::cfg::CfgFiles`] resolver stays installed as the
 /// context's loader and saver, so `exec <profile>` and `writecfg` (model
 /// picker, `/settings`, `omp config set`) work for the whole process life
-/// (ADR 0014), reading `<user>/<name>.cfg` plus the `<project>/.omp`
-/// overlay and writing the user file atomically.
+/// ADR 0014), reading `<user>/<name>.cfg` plus the `<project>/.omp`
+/// overlay (restricted as above) and writing the user file atomically.
 pub fn process_ctx_with(project_root: &Path, builder: omp_con::CtxBuilder) -> Result<omp_con::Ctx> {
 	let files = omp_driver::cfg::CfgFiles::new(Some(project_root)).into_diagnostic()?;
-	let loader = files.clone();
 	let saver = files.clone();
 	let ctx = builder
-		.loader(move |name: &str| loader.load(name))
+		.loader(files.clone())
 		.saver(move |name: &str, contents: &str| omp_con::CfgSaver::save(&saver, name, contents))
 		.build();
 	ctx.exec(
@@ -149,6 +150,14 @@ pub fn process_ctx_with(project_root: &Path, builder: omp_con::CtxBuilder) -> Re
 			failed = outcome.failed,
 			ran = outcome.ran,
 			"config.cfg contained statements this build does not understand; they were skipped"
+		);
+	}
+	if outcome.denied > 0 {
+		tracing::warn!(
+			denied = outcome.denied,
+			project = %project_root.display(),
+			"the project's .omp cfg overlay used statements project config may not run (only project-scoped \
+			 convars may be set or reset); they were skipped"
 		);
 	}
 	Ok(ctx)

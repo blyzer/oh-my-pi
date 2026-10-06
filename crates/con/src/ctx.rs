@@ -73,6 +73,15 @@ pub enum Source {
 	Agent(Str),
 	/// Replay of a session-tree convar.
 	Session,
+	/// A project overlay of a named archive config
+	/// (`<project>/.omp/<name>.cfg`): runs with project authority and commits
+	/// to the project layer.
+	Project(Str),
+	/// A project overlay of `subagent.cfg`: project authority, class layer.
+	ProjectSubagent,
+	/// A project overlay of an agent-class `<agent>.cfg`: project authority,
+	/// class layer.
+	ProjectAgent(Str),
 }
 
 impl Source {
@@ -81,9 +90,32 @@ impl Source {
 			Self::Config(_) => Origin::Archive,
 			Self::Session => Origin::Session,
 			Self::Console => Origin::Script(Str::new_static("console")),
-			Self::Subagent | Self::Agent(_) => Origin::Class,
+			Self::Subagent | Self::Agent(_) | Self::ProjectSubagent | Self::ProjectAgent(_) => {
+				Origin::Class
+			},
+			Self::Project(_) => Origin::Project,
 		}
 	}
+
+	const fn authority(&self) -> Authority {
+		match self {
+			Self::Project(_) | Self::ProjectSubagent | Self::ProjectAgent(_) => Authority::Project,
+			_ => Authority::User,
+		}
+	}
+}
+
+/// Whose authority a command stream runs with.
+///
+/// Project cfg overlays are repository content: the user did not write them
+/// and may never have read them, so they run restricted to `set` and `reset`
+/// of variables that carry [`VarFlags::PROJECT`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Authority {
+	/// The user's own input: console, cfg files, replay, host code.
+	User,
+	/// A project overlay: only project-scoped `set`/`reset`.
+	Project,
 }
 
 /// One successfully executed command-stream statement.
@@ -94,12 +126,25 @@ pub struct Output {
 }
 
 /// Loads cfg script text by name.
+///
+/// A cfg name resolves to at most two texts with different authority: the
+/// user's own ([`CfgLoader::load`]) and the project overlay
+/// ([`CfgLoader::load_project`]). They are never merged: the user text runs
+/// with user authority, the overlay restricted to project-scoped convars.
 pub trait CfgLoader: Send + Sync {
-	/// Returns cfg text, or `None` when the file is absent.
+	/// Returns the user's cfg text, or `None` when the file is absent. It runs
+	/// with user authority.
 	///
 	/// Filesystem and schema failures remain typed instead of being
 	/// indistinguishable from an absent optional cfg.
 	fn load(&self, name: &str) -> ConResult<Option<Str>>;
+
+	/// Returns the project overlay of the same cfg, or `None` when absent (the
+	/// default: a loader without a project). It runs with project authority;
+	/// a failure to read it is reported and never blocks the load.
+	fn load_project(&self, _name: &str) -> ConResult<Option<Str>> {
+		Ok(None)
+	}
 }
 
 impl<F> CfgLoader for F
@@ -133,12 +178,16 @@ pub struct ExecOutcome {
 	pub ran:    usize,
 	/// Statements that failed (reported through the sink).
 	pub failed: usize,
+	/// Project-overlay statements refused authority (reported through the
+	/// sink as warnings); not counted in `failed`.
+	pub denied: usize,
 }
 
 impl std::ops::AddAssign for ExecOutcome {
 	fn add_assign(&mut self, rhs: Self) {
 		self.ran += rhs.ran;
 		self.failed += rhs.failed;
+		self.denied += rhs.denied;
 	}
 }
 
@@ -148,8 +197,6 @@ pub type SessionWrite = (Str, Option<Value>);
 
 /// Reply sink: receives all console output.
 pub type SinkFn = dyn Fn(Severity, &str) + Send + Sync;
-/// Config source resolver for `exec`: name → script text.
-pub type LoaderFn = dyn Fn(&str) -> ConResult<Option<Str>> + Send + Sync;
 /// Config writer for `writecfg`: `(name, contents)`.
 pub type SaverFn = dyn Fn(&str, &str) -> ConResult<()> + Send + Sync;
 /// Value observer, called after each committed non-no-op variable change.
@@ -375,7 +422,7 @@ const DYNAMIC_INDEX: u32 = !(DYNAMIC_VAR | DYNAMIC_CMD);
 pub struct CtxBuilder {
 	role:     Role,
 	sink:     Option<Box<SinkFn>>,
-	loader:   Option<Box<LoaderFn>>,
+	loader:   Option<Box<dyn CfgLoader>>,
 	saver:    Option<Box<SaverFn>>,
 	isolated: bool,
 	user:     Vec<(TypeId, Arc<dyn Any + Send + Sync>)>,
@@ -396,12 +443,10 @@ impl CtxBuilder {
 		self
 	}
 
-	/// Installs the `exec` config loader.
+	/// Installs the `exec` config loader: a [`CfgLoader`], or a closure from
+	/// name to the user's cfg text (a loader without a project overlay).
 	#[must_use]
-	pub fn loader(
-		mut self,
-		loader: impl Fn(&str) -> ConResult<Option<Str>> + Send + Sync + 'static,
-	) -> Self {
+	pub fn loader(mut self, loader: impl CfgLoader + 'static) -> Self {
 		self.loader = Some(Box::new(loader));
 		self
 	}
@@ -498,7 +543,7 @@ pub struct Ctx {
 	layers:                RwLock<Layers>,
 	depth:                 AtomicU32,
 	sink:                  Option<Box<SinkFn>>,
-	loader:                Option<Box<LoaderFn>>,
+	loader:                Option<Box<dyn CfgLoader>>,
 	saver:                 Option<Box<SaverFn>>,
 	role:                  Role,
 }
@@ -810,13 +855,15 @@ impl Ctx {
 	/// override, so later changes beneath it keep flowing through.
 	///
 	/// Layers resolve innermost first: engagement, session, class, inherited,
-	/// archive, then the registration default. A console or host `reset`
-	/// clears the session layer (a child then shows its class value, else
-	/// what it inherited from its parent, else the user cfg, else the
+	/// project, archive, then the registration default. A console or host
+	/// `reset` clears the session layer (a child then shows its class value,
+	/// else what it inherited from its parent, else the user cfg, else the
 	/// default); inside `subagent.cfg`/`<agent>.cfg` it clears the class
 	/// layer (back to the parent's value); inside `config.cfg` it clears the
-	/// archive layer (back to the default). [`Origin::Default`] clears both
-	/// archive and session, as a default write does.
+	/// archive layer (back to the default), and inside a project overlay of
+	/// it only the project layer (back to the user's value).
+	/// [`Origin::Default`] clears both archive and session, as a default write
+	/// does.
 	///
 	/// Gates apply as for a statement with the same provenance: console and
 	/// class-cfg removals honor `READONLY`/`UNSAFE`. Removing a
@@ -832,6 +879,10 @@ impl Ctx {
 			match origin {
 				Origin::Archive => {
 					layers.archive.remove(name.as_str());
+					false
+				},
+				Origin::Project => {
+					layers.project.remove(name.as_str());
 					false
 				},
 				Origin::Inherited => {
@@ -937,6 +988,12 @@ impl Ctx {
 			let layers = self.layers.read();
 			let main = layers.parked.as_ref().unwrap_or(&layers.session);
 			let mut values = layers.archive.clone();
+			values.extend(
+				layers
+					.project
+					.iter()
+					.map(|(name, value)| (name.clone(), value.clone())),
+			);
 			values.extend(
 				main
 					.iter()
@@ -1194,6 +1251,19 @@ impl Ctx {
 		self.layers.read().archive.contains_key(name)
 	}
 
+	/// The project layer's values, sorted by name.
+	pub(crate) fn project_writes(&self) -> Vec<(Str, Value)> {
+		let mut writes: Vec<_> = self
+			.layers
+			.read()
+			.project
+			.iter()
+			.map(|(name, value)| (name.clone(), value.clone()))
+			.collect();
+		writes.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+		writes
+	}
+
 	pub(crate) fn has_session_write(&self, name: &str) -> bool {
 		self.layers.read().session.contains_key(name)
 	}
@@ -1246,6 +1316,10 @@ impl Ctx {
 				Origin::Archive => {
 					layers.archive.insert(name.clone(), value);
 					Origin::Archive
+				},
+				Origin::Project => {
+					layers.project.insert(name.clone(), value);
+					Origin::Project
 				},
 				Origin::Inherited => {
 					layers.inherited.insert(name.clone(), value);
@@ -1365,14 +1439,13 @@ impl Ctx {
 	/// Executes one interactive command stream strictly.
 	pub fn run(&self, src: &str) -> ConResult<Output> {
 		self
-			.eval(&src.to_str(), false, &Origin::Script(Str::new_static("console")))
+			.eval(&src.to_str(), false, &Origin::Script(Str::new_static("console")), Authority::User)
 			.map(|_| Output { line: 1 })
 	}
 
 	/// Executes a command stream strictly with explicit provenance.
 	pub fn exec(&self, src: &str, source: Source) -> ConResult<Vec<Output>> {
-		let origin = source.origin();
-		let outcome = self.eval(&src.to_str(), false, &origin)?;
+		let outcome = self.eval(&src.to_str(), false, &source.origin(), source.authority())?;
 		Ok((0..outcome.ran)
 			.map(|index| Output { line: u32::try_from(index + 1).unwrap_or(u32::MAX) })
 			.collect())
@@ -1382,16 +1455,20 @@ impl Ctx {
 	/// continues.
 	pub fn exec_lenient(&self, src: impl IntoStr) -> ExecOutcome {
 		self
-			.eval(&src.to_str(), true, &Origin::Script(Str::new_static("console")))
+			.eval(&src.to_str(), true, &Origin::Script(Str::new_static("console")), Authority::User)
 			.unwrap_or_else(|_| unreachable!("lenient eval never errors"))
 	}
 
-	/// Loads `config.cfg`, then child and agent-class cfgs in fixed order.
+	/// Loads `config.cfg` — the user's text, then its project overlay — then
+	/// child and agent-class cfgs in fixed order.
 	///
 	/// Cfg files are user data written by older builds: every statement runs
 	/// leniently, so a stale or unknown name is reported through the sink and
 	/// skipped instead of aborting startup. The aggregate outcome counts the
-	/// skipped statements.
+	/// skipped statements. A project overlay runs with project authority (see
+	/// [`VarFlags::PROJECT`]): its refused statements are reported as warnings
+	/// and counted in [`ExecOutcome::denied`], and an overlay that cannot be
+	/// read or parsed is reported and skipped whole.
 	pub fn exec_configs(
 		&self,
 		loader: &dyn CfgLoader,
@@ -1401,6 +1478,11 @@ impl Ctx {
 		if let Some(src) = loader.load("config.cfg")? {
 			total += self.run_lenient(&src, Source::Config(Str::new_static("config.cfg")));
 		}
+		total += self.run_project_overlay(
+			loader,
+			"config.cfg",
+			Source::Project(Str::new_static("config.cfg")),
+		);
 		if let Some(agent) = agent {
 			total += self.exec_spawn_configs(loader, agent)?;
 		}
@@ -1415,18 +1497,52 @@ impl Ctx {
 		if let Some(src) = loader.load("subagent.cfg")? {
 			total += self.run_lenient(&src, Source::Subagent);
 		}
+		total += self.run_project_overlay(loader, "subagent.cfg", Source::ProjectSubagent);
 		let mut name = StrMut::new(agent);
 		name.push_str(".cfg");
 		if let Some(src) = loader.load(name.as_str())? {
 			total += self.run_lenient(&src, Source::Agent(agent.to_str()));
 		}
+		total +=
+			self.run_project_overlay(loader, name.as_str(), Source::ProjectAgent(agent.to_str()));
 		Ok(total)
 	}
 
 	fn run_lenient(&self, src: &Str, source: Source) -> ExecOutcome {
 		self
-			.eval(src, true, &source.origin())
+			.eval(src, true, &source.origin(), source.authority())
 			.unwrap_or_else(|_| unreachable!("lenient eval never errors"))
+	}
+
+	/// Runs the project overlay of cfg `name`, leniently and with project
+	/// authority. A read or parse failure is reported and counted, never
+	/// returned: a repository's file must not be able to block startup.
+	fn run_project_overlay(
+		&self,
+		loader: &dyn CfgLoader,
+		name: &str,
+		source: Source,
+	) -> ExecOutcome {
+		match loader.load_project(name) {
+			Ok(Some(src)) => self.run_lenient(&src, source),
+			Ok(None) => ExecOutcome::default(),
+			Err(error) => {
+				self.report_project_load_failure(name, &error);
+				ExecOutcome { failed: 1, ..ExecOutcome::default() }
+			},
+		}
+	}
+
+	fn report_project_load_failure(&self, name: &str, error: &ConError) {
+		match std::error::Error::source(error) {
+			Some(cause) => self.reply_fmt(
+				Severity::Error,
+				format_args!("project cfg `{name}` skipped: {error}: {cause}"),
+			),
+			None => {
+				self.reply_fmt(Severity::Error, format_args!("project cfg `{name}` skipped: {error}"));
+			},
+		}
 	}
 
 	/// Restores one `<meta><con><var>` value into the session layer.
@@ -1450,6 +1566,8 @@ impl Ctx {
 	}
 
 	/// Loads and applies arbitrary named startup scripts in declaration order.
+	/// Each runs its user text, then its project overlay with project
+	/// authority.
 	pub fn exec_named_configs<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> ExecOutcome {
 		let mut total = ExecOutcome::default();
 		for name in names {
@@ -1462,23 +1580,11 @@ impl Ctx {
 				);
 				continue;
 			};
-			let src = match loader(name.as_str()) {
-				Ok(Some(src)) => src,
+			match self.run_named(loader, &name) {
+				Ok(Some(outcome)) => total += outcome,
 				Ok(None) => {
 					total.failed += 1;
 					self.reply_fmt(Severity::Error, format_args!("config `{name}` not found"));
-					continue;
-				},
-				Err(error) => {
-					total.failed += 1;
-					self.reply_fmt(Severity::Error, format_args!("{error}"));
-					continue;
-				},
-			};
-			match self.with_depth(&name, |ctx| ctx.eval(&src, true, &Origin::Script(name.clone()))) {
-				Ok(outcome) => {
-					total.ran += outcome.ran;
-					total.failed += outcome.failed;
 				},
 				Err(error) => {
 					total.failed += 1;
@@ -1489,22 +1595,72 @@ impl Ctx {
 		total
 	}
 
-	fn eval(&self, src: &Str, lenient: bool, origin: &Origin) -> ConResult<ExecOutcome> {
+	/// Runs cfg `name` through `loader`: the user text as console script, then
+	/// the project overlay restricted to project-scoped variables. `None` when
+	/// neither exists.
+	fn run_named(&self, loader: &dyn CfgLoader, name: &Str) -> ConResult<Option<ExecOutcome>> {
+		let user = loader.load(name.as_str())?;
+		let project = match loader.load_project(name.as_str()) {
+			Ok(project) => project,
+			Err(error) => {
+				self.report_project_load_failure(name.as_str(), &error);
+				None
+			},
+		};
+		if user.is_none() && project.is_none() {
+			return Ok(None);
+		}
+		let mut total = ExecOutcome::default();
+		if let Some(src) = user {
+			total += self.with_depth(name, |ctx| {
+				ctx.eval(&src, true, &Origin::Script(name.clone()), Authority::User)
+			})?;
+		}
+		if let Some(src) = project {
+			total += self
+				.with_depth(name, |ctx| ctx.eval(&src, true, &Origin::Project, Authority::Project))?;
+		}
+		Ok(Some(total))
+	}
+
+	fn eval(
+		&self,
+		src: &Str,
+		lenient: bool,
+		origin: &Origin,
+		authority: Authority,
+	) -> ConResult<ExecOutcome> {
+		let project = authority == Authority::Project;
 		let stmts = match script::parse(src) {
 			Ok(stmts) => stmts,
 			Err(err) if lenient => {
-				self.reply_fmt(Severity::Error, format_args!("{err}"));
-				return Ok(ExecOutcome { ran: 0, failed: 1 });
+				if project {
+					self.reply_fmt(Severity::Error, format_args!("project cfg skipped: {err}"));
+				} else {
+					self.reply_fmt(Severity::Error, format_args!("{err}"));
+				}
+				return Ok(ExecOutcome { failed: 1, ..ExecOutcome::default() });
 			},
 			Err(err) => return Err(err.into()),
 		};
 		let mut outcome = ExecOutcome::default();
 		for stmt in &stmts {
-			match self.dispatch(stmt, lenient, origin) {
+			match self.dispatch(stmt, lenient, origin, authority) {
 				Ok(()) => outcome.ran += 1,
 				Err(err) if lenient => {
-					outcome.failed += 1;
-					self.reply_fmt(Severity::Error, format_args!("line {}: {err}", stmt.line));
+					let denied = err.is_project_denial();
+					if denied {
+						outcome.denied += 1;
+					} else {
+						outcome.failed += 1;
+					}
+					let severity = if denied {
+						Severity::Warn
+					} else {
+						Severity::Error
+					};
+					let prefix = if project { "project cfg line" } else { "line" };
+					self.reply_fmt(severity, format_args!("{prefix} {}: {err}", stmt.line));
 				},
 				Err(err) => return Err(err),
 			}
@@ -1512,13 +1668,66 @@ impl Ctx {
 		Ok(outcome)
 	}
 
-	fn dispatch(&self, stmt: &Statement, lenient: bool, origin: &Origin) -> ConResult<()> {
+	/// Refuses a project-overlay statement that is not a `set` or `reset` of a
+	/// project-scoped variable. Names that resolve to nothing pass through to
+	/// the ordinary unknown-name failure.
+	fn vet_project_statement(&self, name: &Str, args: &[Arg]) -> ConResult<()> {
+		let command_denied = || ConError::ProjectCommandDenied { name: name.clone() };
+		if name.starts_with(['+', '-']) || self.aliases.read().contains_key(name.as_str()) {
+			return Err(command_denied());
+		}
+		let Some(idx) = self.lookup(name.as_str()) else {
+			return Ok(());
+		};
+		if idx & DYNAMIC_VAR != 0 {
+			return self.require_project_scoped(name.as_str());
+		}
+		if idx & DYNAMIC_CMD != 0 {
+			return Err(command_denied());
+		}
+		match self
+			.items
+			.get(idx as usize)
+			.expect("index from name table")
+			.spec
+		{
+			RegItem::Var(_) => self.require_project_scoped(name.as_str()),
+			RegItem::Cmd(spec) if spec.name == "reset" => match args.first().and_then(Arg::as_atom) {
+				Some(target) => self.require_project_scoped(target.as_str()),
+				None => Ok(()),
+			},
+			RegItem::Cmd(_) | RegItem::Action(_) => Err(command_denied()),
+		}
+	}
+
+	/// `Ok` when `name` is a variable carrying [`VarFlags::PROJECT`] (or no
+	/// variable at all, which the caller's normal dispatch reports).
+	fn require_project_scoped(&self, name: &str) -> ConResult<()> {
+		match self.var(name) {
+			Ok(var) if !var.flags.contains(VarFlags::PROJECT) => {
+				Err(ConError::ProjectVarDenied { name: var.name.to_str() })
+			},
+			_ => Ok(()),
+		}
+	}
+
+	fn dispatch(
+		&self,
+		stmt: &Statement,
+		lenient: bool,
+		origin: &Origin,
+		authority: Authority,
+	) -> ConResult<()> {
 		let Some(name) = stmt.args[0].as_atom() else {
 			return Err(ParseError::BadName { line: stmt.line }.into());
 		};
+		if authority == Authority::Project {
+			self.vet_project_statement(name, &stmt.args[1..])?;
+		}
 		let alias = self.aliases.read().get(name.as_str()).cloned();
 		if let Some(body) = alias {
-			return self.with_depth(name, |ctx| ctx.eval(&body, lenient, origin).map(|_| ()));
+			return self
+				.with_depth(name, |ctx| ctx.eval(&body, lenient, origin, authority).map(|_| ()));
 		}
 		if let Some(base) = name.as_str().strip_prefix('+') {
 			return self.dispatch_action(base, true);
@@ -1690,12 +1899,10 @@ impl Ctx {
 			.loader
 			.as_deref()
 			.ok_or_else(|| ConError::NoLoader { name: name.clone() })?;
-		let src =
-			loader(name.as_str())?.ok_or_else(|| ConError::MissingCfg { name: name.clone() })?;
-		self.with_depth(name, |ctx| {
-			ctx.eval(&src, true, &Origin::Script(name.clone()))
-				.map(|_| ())
-		})
+		self
+			.run_named(loader, name)?
+			.map(|_| ())
+			.ok_or_else(|| ConError::MissingCfg { name: name.clone() })
 	}
 
 	// ── aliases ─────────────────────────────────────────────────────────
@@ -1870,7 +2077,7 @@ impl Ctx {
 			if name.as_str().starts_with('+') {
 				continue;
 			}
-			self.dispatch(stmt, false, &origin)?;
+			self.dispatch(stmt, false, &origin, Authority::User)?;
 			output.push(Output { line: stmt.line });
 		}
 		Ok(output)
@@ -2051,11 +2258,11 @@ enum ScopeSession {
 }
 
 /// Permission provenance of a command-stream statement committing to
-/// `origin`: console input and agent-class cfgs pass the script gates; the
-/// user's own cfgs, replay, and host writes do not.
+/// `origin`: console input, agent-class cfgs, and project overlays pass the
+/// script gates; the user's own cfgs, replay, and host writes do not.
 const fn statement_source(origin: &Origin) -> SetSource {
 	match origin {
-		Origin::Script(_) | Origin::Class => SetSource::Script,
+		Origin::Script(_) | Origin::Class | Origin::Project => SetSource::Script,
 		_ => SetSource::Code,
 	}
 }

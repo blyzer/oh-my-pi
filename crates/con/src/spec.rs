@@ -27,6 +27,13 @@ impl VarFlags {
 	pub const NONE: Self = Self(0);
 	/// Every committed change is announced through the reply sink.
 	pub const NOTIFY: Self = Self(1 << 3);
+	/// A project cfg overlay (`<project>/.omp/<name>.cfg`) may `set` and
+	/// `reset` the variable. Repository content runs with project authority,
+	/// not the user's: a variable that does not opt in is unreachable from it,
+	/// so opt in only a preference a hostile repository could not turn into
+	/// code execution, a weaker sandbox or approval posture, a redirected
+	/// endpoint, or a path the user did not grant.
+	pub const PROJECT: Self = Self(1 << 6);
 	/// Scripts can read but never write; host code still can.
 	pub const READONLY: Self = Self(1 << 2);
 	/// Authority-owned: mirrored to replicas, locally immutable on them.

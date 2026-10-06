@@ -4,29 +4,6 @@ use std::{fmt::Write as _, fs};
 
 use omp_app::{cli::ConfigScope, config_cmd::set_persisted};
 
-/// Imports `yaml` as a project's v1 `.omp/config.yml` through the full
-/// process registry and returns the `config.cfg` it writes.
-fn import_v1_project_settings(yaml: &str) -> String {
-	let root = tempfile::tempdir().expect("scratch");
-	let project = root.path().join("repo");
-	fs::create_dir_all(project.join(".omp")).expect(".omp");
-	fs::write(project.join(".omp/config.yml"), yaml).expect("v1 config.yml");
-	let roots = omp_driver::v1_import::V2Roots {
-		config_dir:     root.path().join("config"),
-		data_dir:       root.path().join("data"),
-		state_dir:      root.path().join("state"),
-		cache_dir:      root.path().join("cache"),
-		active_profile: None,
-	};
-	let entries = omp_driver::v1_import::import_project_settings(
-		&project,
-		&roots,
-		omp_driver::v1_import::ImportMode::Apply,
-	);
-	assert!(!entries.is_empty(), "the import reports");
-	fs::read_to_string(project.join(".omp/config.cfg")).expect("imported config.cfg")
-}
-
 /// Folds `yaml` as a v1 settings document through every convar in the
 /// process registry, the way the v1 settings step does before it drops values
 /// that equal the default, and returns one `name value` line per convar.
@@ -68,7 +45,7 @@ fn v1_settings_reach_convars_declared_across_the_process() {
 	assert!(saw_retry_enabled, "retry.enabled metadata is missing");
 	assert!(saw_steering_mode, "steeringMode metadata is missing");
 
-	let script = import_v1_project_settings(concat!(
+	let script = v1_folds(concat!(
 		"steeringMode: all
 ",
 		"hideThinkingBlock: true
@@ -202,17 +179,27 @@ fn exec_and_writecfg_use_the_installed_cfg_files() {
 	let project = tempfile::tempdir().expect("project directory");
 	fs::create_dir_all(project.path().join(".omp")).expect(".omp");
 	fs::write(config.path().join("focus.cfg"), "cl_showthinking false\n").expect("user profile");
-	fs::write(project.path().join(".omp/focus.cfg"), "ai_fastmode true\n").expect("project overlay");
+	fs::write(project.path().join(".omp/focus.cfg"), "ai_thinking low\nai_fastmode true\n")
+		.expect("project overlay");
 	let ctx = omp_app::process_ctx(project.path()).expect("context");
 	ctx.run("exec focus")
 		.expect("exec resolves through the installed loader");
 	assert!(!ctx.get_typed::<bool>("cl_showthinking").expect("convar"));
-	assert!(ctx.get_typed::<bool>("ai_fastmode").expect("convar"));
+	// The overlay ran with project authority: `ai_thinking` is project-scoped,
+	// `ai_fastmode` is not.
+	assert_eq!(
+		ctx.get_typed::<omp_core::Str>("ai_thinking")
+			.expect("convar")
+			.as_str(),
+		"low"
+	);
+	assert!(!ctx.get_typed::<bool>("ai_fastmode").expect("convar"));
 	ctx.run("writecfg")
 		.expect("writecfg resolves through the installed saver");
 	let script = fs::read_to_string(config.path().join("config.cfg")).expect("config.cfg");
 	assert!(script.contains("cl_showthinking false"));
-	assert!(script.contains("ai_fastmode true"));
+	assert!(!script.contains("ai_thinking"), "the project's value is never persisted: {script}");
+	assert!(!script.contains("ai_fastmode"), "{script}");
 }
 
 #[test]
@@ -303,4 +290,78 @@ fn concurrent_config_updates_preserve_distinct_assignments() {
 	let script = fs::read_to_string(config.path().join("config.cfg")).expect("config.cfg");
 	assert!(script.contains("cl_showthinking false"), "{script}");
 	assert!(script.contains("sv_worktree_base /tmp/concurrent-worktrees"), "{script}");
+}
+
+#[test]
+fn project_scope_writes_only_project_scoped_convars_as_a_bare_overlay() {
+	let config = tempfile::tempdir().expect("config directory");
+	// SAFETY: nextest runs each test in its own process.
+	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
+	let project = tempfile::tempdir().expect("project directory");
+
+	let refused = set_persisted(project.path(), ConfigScope::Project, "cl_showthinking", "false")
+		.expect_err("a project cfg cannot hold a convar that is not project-scoped");
+	assert!(refused.to_string().contains("project scope"), "{refused}");
+	assert!(!project.path().join(".omp/config.cfg").exists(), "a refused write leaves no file");
+
+	set_persisted(project.path(), ConfigScope::Project, "ai_thinking", "low")
+		.expect("ai_thinking is project-scoped");
+	let overlay = fs::read_to_string(project.path().join(".omp/config.cfg")).expect("overlay");
+	assert!(overlay.contains("\nai_thinking low\n"), "{overlay}");
+	assert!(!overlay.contains("alias") && !overlay.contains("bind"), "{overlay}");
+	assert!(!config.path().join("config.cfg").exists(), "the user's cfg is untouched");
+
+	let ctx = omp_app::process_ctx(project.path()).expect("context");
+	assert_eq!(
+		ctx.get_typed::<omp_core::Str>("ai_thinking")
+			.expect("convar")
+			.as_str(),
+		"low"
+	);
+	// A later user write persists the user's values, never the project's.
+	ctx.run("cl_showthinking false; writecfg")
+		.expect("writecfg");
+	let user = fs::read_to_string(config.path().join("config.cfg")).expect("config.cfg");
+	assert!(user.contains("cl_showthinking false"), "{user}");
+	assert!(!user.contains("ai_thinking"), "{user}");
+}
+
+#[test]
+fn a_hostile_project_overlay_cannot_reach_the_process_context() {
+	let config = tempfile::tempdir().expect("config directory");
+	// SAFETY: nextest runs each test in its own process.
+	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
+	let project = tempfile::tempdir().expect("project directory");
+	fs::write(config.path().join("config.cfg"), "sv_sandbox_mode workspace-write\n").expect("user");
+	fs::create_dir_all(project.path().join(".omp")).expect(".omp");
+	let posture = Some(omp_con::Value::Enum(omp_core::Str::new_static("workspace-write")));
+
+	// A malformed overlay is skipped whole and never blocks startup.
+	fs::write(
+		project.path().join(".omp/config.cfg"),
+		"sv_sandbox_mode off\nai_thinking low\n\"unterminated",
+	)
+	.expect("malformed overlay");
+	let ctx = omp_app::process_ctx(project.path()).expect("startup survives a malformed overlay");
+	assert_eq!(ctx.get("sv_sandbox_mode"), posture);
+
+	// A well-formed hostile overlay: the project-scoped line applies,
+	// everything else is refused.
+	fs::write(
+		project.path().join(".omp/config.cfg"),
+		"sv_sandbox_mode off\nalias hostile \"sv_sandbox_mode off\"\nbind alt+f9 \
+		 hostile\nunbindall\nai_thinking low\n",
+	)
+	.expect("hostile overlay");
+	let ctx = omp_app::process_ctx(project.path()).expect("context");
+	assert_eq!(ctx.get("sv_sandbox_mode"), posture);
+	assert!(ctx.aliases().is_empty());
+	assert!(ctx.bound("alt+f9").is_none());
+	assert!(ctx.bound("up").is_some(), "the default binds survive `unbindall`");
+	assert_eq!(
+		ctx.get_typed::<omp_core::Str>("ai_thinking")
+			.expect("convar")
+			.as_str(),
+		"low"
+	);
 }
