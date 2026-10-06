@@ -495,9 +495,11 @@ struct RpcToolState {
 
 #[derive(Default)]
 struct RpcEventProjection {
-	users:      HashSet<String>,
-	assistants: HashMap<String, RpcAssistantState>,
-	tools:      HashMap<String, RpcToolState>,
+	users:       HashSet<String>,
+	assistants:  HashMap<String, RpcAssistantState>,
+	tools:       HashMap<String, RpcToolState>,
+	/// Journaled `account-pin` notices already forwarded.
+	pin_notices: HashSet<String>,
 }
 
 impl RpcEventProjection {
@@ -565,6 +567,24 @@ impl RpcEventProjection {
 						if ended && !state.ended {
 							state.ended = true;
 							events.push(json!({ "type": "message_end", "message": message }));
+						}
+					},
+					// A session account pin the turn could not honor is the one
+					// notice RPC forwards: clients need to tell it from a provider
+					// failure, since the fix is `/pin`, not a retry.
+					Tag::Known(KnownTag::Notice)
+						if node
+							.prop(&PropKey::Custom(Str::new_static("name")))
+							.and_then(DomValue::as_str)
+							== Some(omp_agent::ACCOUNT_PIN_NOTICE) =>
+					{
+						if self.pin_notices.insert(key) {
+							events.push(json!({
+								"type": "notice",
+								"level": if prop(node, PropId::Kind) == Some("error") { "error" } else { "warning" },
+								"message": node.content.as_deref().unwrap_or_default(),
+								"source": omp_agent::ACCOUNT_PIN_NOTICE,
+							}));
 						}
 					},
 					Tag::Custom(name) => {

@@ -2506,6 +2506,68 @@ mod tests {
 		assert_eq!(stop_reason_name(TurnStop::Failed), "error");
 	}
 
+	/// A session account pin the turn could not honor reaches `--mode json`
+	/// as a typed `notice` frame named `account-pin`, and the failed turn's
+	/// text is the stderr message.
+	#[test]
+	fn unavailable_account_pin_notice_is_a_typed_json_frame() {
+		let scratch = tempdir().expect("scratch");
+		let mut session = omp_session::Session::create(
+			scratch.path().join("pin.oms"),
+			omp_session::ComponentRegistry::standard(),
+		)
+		.expect("session");
+		let (snapshot, events) = session.subscribe();
+		let mut replica = Dom::from_snapshot(&snapshot);
+		session.begin_turn().expect("turn");
+		session.user("hi", Vec::new()).expect("user");
+		let turn = current_turn(&session);
+		let after = session.dom().children(turn).last().copied();
+		let cause = session.head().expect("head");
+		session
+			.patch(Txn {
+				cause,
+				label: Some(Str::new_static("kernel.notice")),
+				ops: vec![Op::Ins {
+					parent: turn,
+					after,
+					node: NodeSpec::new(KnownTag::Notice)
+						.with_prop(PropId::Kind, Value::Str(Str::new_static("error")))
+						.with_prop(
+							PropKey::Custom(Str::new_static("name")),
+							Value::Str(Str::new_static(omp_agent::ACCOUNT_PIN_NOTICE)),
+						)
+						.with_content(Str::new_static(
+							"the account pinned to this session is unavailable",
+						)),
+				}],
+			})
+			.expect("notice");
+
+		let options = PrintOptions { mode: "json".to_owned(), print_thoughts: false };
+		let mut state = JsonState::new(
+			Arc::new(Catalog::embedded().clone()),
+			session.blobs().clone(),
+			Str::new_static("test/model"),
+		);
+		let mut frames = Vec::new();
+		while let Ok(event) = events.try_recv() {
+			frames.extend(
+				project_print_event(&options, &mut replica, &mut state, event).expect("projects"),
+			);
+		}
+		let notice = frames
+			.iter()
+			.find(|frame| frame["type"] == "notice")
+			.expect("a notice frame");
+		assert_eq!(notice["level"], "error");
+		assert_eq!(notice["source"], "account-pin");
+		assert_eq!(
+			turn_error_message(session.dom(), 0).as_deref(),
+			Some("the account pinned to this session is unavailable"),
+		);
+	}
+
 	#[test]
 	fn json_stream_starts_with_resumable_session_header() {
 		assert_eq!(

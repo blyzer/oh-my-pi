@@ -297,6 +297,10 @@ impl Default for RunControl {
 	}
 }
 
+/// Name of the notice that reports a session account pin the turn could not
+/// honor (`<notice kind=error name=account-pin>`).
+pub const ACCOUNT_PIN_NOTICE: &str = "account-pin";
+
 /// Turn-loop construction, inference, dispatch, or session failure.
 #[derive(Debug, Error)]
 pub enum KernelError {
@@ -1282,7 +1286,25 @@ impl<C: Inference> Kernel<C> {
 				tracing::warn!(error = ?journal, "failed to close the assistant after a turn error");
 			},
 		}
-		if let Err(journal) = append_error_notice(session, turn, Str::new(error_chain(error))) {
+		let text = Str::new(error_chain(error));
+		// A pin the session cannot honor is a typed notice (`account-pin`), so
+		// print and RPC hosts report it by name instead of as a generic error.
+		let journaled = if matches!(
+			error,
+			KernelError::Inference(inference)
+				if matches!(inference.detail_ref(), Some(omp_ai::ErrorDetail::AccountPin { .. }))
+		) {
+			append_named_notice(
+				session,
+				turn,
+				Str::new_static("error"),
+				Some(Str::new_static(ACCOUNT_PIN_NOTICE)),
+				text,
+			)
+		} else {
+			append_error_notice(session, turn, text)
+		};
+		if let Err(journal) = journaled {
 			tracing::warn!(error = ?journal, "failed to journal the turn error notice");
 		}
 	}
