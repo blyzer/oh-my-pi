@@ -12,7 +12,10 @@ use std::{
 };
 
 use flume::Receiver;
-use omp_core::{CowBytes, Str};
+use omp_core::{
+	CowBytes, Str,
+	project_file::{self, Containment, ProjectFileError, containment_root},
+};
 use parking_lot::RwLock;
 use russh::{
 	client, keys,
@@ -111,6 +114,9 @@ pub struct HostPaths {
 	pub user:    PathBuf,
 	/// Project-owned `<project>/.omp/hosts.toml`.
 	pub project: PathBuf,
+	/// The repository root the project file must resolve inside: a symlink
+	/// out of it is refused rather than read.
+	pub root:    PathBuf,
 }
 
 impl HostPaths {
@@ -121,6 +127,7 @@ impl HostPaths {
 		Self {
 			user:    user_config_root.join("hosts.toml"),
 			project: project_root.join(".omp/hosts.toml"),
+			root:    containment_root(project_root).to_path_buf(),
 		}
 	}
 }
@@ -145,7 +152,10 @@ impl HostStore {
 
 	/// Loads `hosts.toml`. A missing file produces an empty store.
 	pub fn load(path: &Path) -> Result<Self, SshError> {
-		Ok(Self { hosts: Arc::new(RwLock::new(parse_hosts(path)?)), paths: None })
+		Ok(Self {
+			hosts: Arc::new(RwLock::new(parse_hosts(path, Containment::Unconfined)?)),
+			paths: None,
+		})
 	}
 
 	/// Atomically refreshes a layered store from both `hosts.toml` files.
@@ -202,17 +212,34 @@ impl HostStore {
 	}
 }
 
+/// Largest `hosts.toml` read: an alias table, never a document.
+const HOSTS_FILE_LIMIT: u64 = 256 * 1024;
+
+/// A project `hosts.toml` the contained reader refuses (outside the
+/// repository, not a regular file, oversize) is skipped with a warning: it
+/// can only add hosts, so dropping it fails closed.
 fn load_effective_hosts(paths: &HostPaths) -> Result<BTreeMap<Str, HostConfig>, SshError> {
-	let mut hosts = parse_hosts(&paths.user)?;
-	hosts.extend(parse_hosts(&paths.project)?);
+	let mut hosts = parse_hosts(&paths.user, Containment::Unconfined)?;
+	match parse_hosts(&paths.project, Containment::Within(&paths.root)) {
+		Ok(project) => hosts.extend(project),
+		Err(SshError::File(error @ ProjectFileError::Refused { .. })) => {
+			tracing::warn!(
+				path = %error.path().display(),
+				reason = error.refusal().map_or("unreadable", <&str>::from),
+				"project SSH host file skipped"
+			);
+		},
+		Err(error) => return Err(error),
+	}
 	Ok(hosts)
 }
 
-fn parse_hosts(path: &Path) -> Result<BTreeMap<Str, HostConfig>, SshError> {
-	let body = match fs::read_to_string(path) {
-		Ok(body) => body,
-		Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-		Err(source) => return Err(SshError::ConfigIo { path: path.to_path_buf(), source }),
+fn parse_hosts(
+	path: &Path,
+	containment: Containment<'_>,
+) -> Result<BTreeMap<Str, HostConfig>, SshError> {
+	let Some(body) = project_file::read_text(path, containment, HOSTS_FILE_LIMIT)? else {
+		return Ok(BTreeMap::new());
 	};
 	let parsed: HostFile = toml::from_str(&body).map_err(|source| SshError::ConfigParse {
 		path:   path.to_path_buf(),
@@ -965,6 +992,10 @@ async fn authenticate_agent(
 /// Native SSH operation failure.
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
+	/// A host configuration file was refused by the contained reader or could
+	/// not be read.
+	#[error(transparent)]
+	File(#[from] ProjectFileError),
 	/// Reading host configuration or private-key metadata failed.
 	#[error("cannot read SSH host configuration {path}")]
 	ConfigIo {
@@ -1231,6 +1262,74 @@ mod tests {
 				.aliases()
 				.is_empty()
 		);
+	}
+
+	/// A repository's `hosts.toml` is untrusted input: a symlink out of the
+	/// repository, a FIFO, or an oversize file is skipped (user hosts still
+	/// load) instead of being read, and a symlink inside the repository loads.
+	#[cfg(unix)]
+	#[test]
+	fn project_hosts_file_must_be_contained_regular_and_bounded() {
+		use std::{os::unix::fs::symlink, process::Command, sync::mpsc, thread};
+
+		let temp = tempfile::tempdir().expect("tempdir");
+		let user_root = temp.path().join("o2");
+		let project_root = temp.path().join("project");
+		fs::create_dir_all(&user_root).expect("user root");
+		fs::create_dir_all(project_root.join(".omp")).expect("project root");
+		fs::create_dir_all(project_root.join(".git")).expect("repository marker");
+		let paths = HostPaths::new(&user_root, &project_root);
+		let host = |user: &str| HostConfig {
+			address:      sf!("localhost"),
+			port:         22,
+			user:         Str::new(user),
+			host_key:     sf!("SHA256:test"),
+			auth:         AuthPolicy::Agent,
+			timeout_secs: 30,
+		};
+		let write = |path: &Path, alias: &str| {
+			HostStore::default()
+				.upsert(path, Str::new(alias), host(alias))
+				.expect("write host file");
+		};
+		write(&paths.user, "user-host");
+		let outside = temp.path().join("outside.toml");
+		write(&outside, "leaked");
+		let layered = |paths: &HostPaths| {
+			HostStore::load_layered(paths)
+				.expect("a refused project file never fails the load")
+				.aliases()
+		};
+
+		symlink(&outside, &paths.project).expect("outside link");
+		assert_eq!(layered(&paths), vec![sf!("user-host")], "an outside symlink is not read");
+		fs::remove_file(&paths.project).expect("remove link");
+
+		write(&project_root.join("shared.toml"), "inside");
+		symlink("../shared.toml", &paths.project).expect("inside link");
+		assert_eq!(layered(&paths), vec![sf!("inside"), sf!("user-host")]);
+		fs::remove_file(&paths.project).expect("remove link");
+
+		fs::write(&paths.project, vec![b'#'; usize::try_from(HOSTS_FILE_LIMIT).unwrap() + 1])
+			.expect("oversize file");
+		assert_eq!(layered(&paths), vec![sf!("user-host")], "an oversize file is not read");
+		fs::remove_file(&paths.project).expect("remove file");
+
+		assert!(
+			Command::new("mkfifo")
+				.arg(&paths.project)
+				.status()
+				.expect("mkfifo")
+				.success()
+		);
+		let (sender, receiver) = mpsc::channel();
+		thread::spawn(move || {
+			let _ = sender.send(layered(&paths));
+		});
+		let aliases = receiver
+			.recv_timeout(Duration::from_secs(10))
+			.expect("a FIFO must be refused, not read");
+		assert_eq!(aliases, vec![sf!("user-host")]);
 	}
 
 	#[tokio::test]

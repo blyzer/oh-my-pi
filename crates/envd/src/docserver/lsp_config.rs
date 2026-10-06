@@ -3,12 +3,15 @@
 
 use std::{
 	collections::BTreeMap,
-	fs, io,
+	io,
 	path::{Path, PathBuf},
 	sync::Arc,
 };
 
-use omp_core::Str;
+use omp_core::{
+	Str,
+	project_file::{self, Containment, ProjectFileError, containment_root},
+};
 use omp_ext::{
 	claude_plugin::{
 		ClaudePlugin, ConfigDeclaration, PluginComponent, PluginDiagnostic, expand_plugin_vars,
@@ -88,20 +91,30 @@ pub struct LspConfigSource {
 impl LspConfigSource {
 	/// Reads a bounded native JSON/YAML source.
 	pub fn read(kind: LspConfigSourceKind, path: &Path) -> Result<Self, LspConfigError> {
-		let metadata = fs::metadata(path)
-			.map_err(|source| LspConfigError::Read { path: path.to_owned(), source })?;
-		if metadata.len() > MAX_CONFIG_BYTES {
-			return Err(LspConfigError::TooLarge { path: path.to_owned(), limit: MAX_CONFIG_BYTES });
-		}
-		let bytes =
-			fs::read(path).map_err(|source| LspConfigError::Read { path: path.to_owned(), source })?;
+		Self::read_contained(kind, path, Containment::Unconfined)?.ok_or_else(|| {
+			ProjectFileError::Io { path: path.to_owned(), source: io::ErrorKind::NotFound.into() }
+				.into()
+		})
+	}
+
+	/// [`LspConfigSource::read`] through the contained project-file reader:
+	/// `None` when `path` is absent, an error when it is not a regular file
+	/// of at most one MiB resolving inside `containment`.
+	pub fn read_contained(
+		kind: LspConfigSourceKind,
+		path: &Path,
+		containment: Containment<'_>,
+	) -> Result<Option<Self>, LspConfigError> {
+		let Some(bytes) = project_file::read_bytes(path, containment, MAX_CONFIG_BYTES)? else {
+			return Ok(None);
+		};
 		let yaml = matches!(path.extension().and_then(|value| value.to_str()), Some("yaml" | "yml"));
-		Ok(Self {
+		Ok(Some(Self {
 			provenance: LspConfigProvenance { kind, source: Str::new(path.to_string_lossy()) },
 			bytes: bytes.into(),
 			yaml,
 			plugin_root: None,
-		})
+		}))
 	}
 
 	/// Reads one installed plugin's declaration: a root declaration file
@@ -378,17 +391,19 @@ pub fn discover_lsp_sources(
 	sources.extend(manifests);
 	let mut diagnostics = Vec::new();
 	append_plugin_sources(&mut sources, plugins, &mut diagnostics);
+	let user = Containment::Unconfined;
 	if let Some(user_root) = user_root {
-		append_existing(&mut sources, user_root, LspConfigSourceKind::User)?;
-		append_existing(&mut sources, &user_root.join("agent"), LspConfigSourceKind::User)?;
+		append_existing(&mut sources, user_root, LspConfigSourceKind::User, user)?;
+		append_existing(&mut sources, &user_root.join("agent"), LspConfigSourceKind::User, user)?;
 	}
-	append_existing(&mut sources, &project_root.join(".omp"), LspConfigSourceKind::Project)?;
-	for name in CONFIG_NAMES {
-		let path = project_root.join(name);
-		if path.is_file() {
-			sources.push(LspConfigSource::read(LspConfigSourceKind::Dotfile, &path)?);
-		}
-	}
+	let project = Containment::Within(containment_root(project_root));
+	append_existing(
+		&mut sources,
+		&project_root.join(".omp"),
+		LspConfigSourceKind::Project,
+		project,
+	)?;
+	append_existing(&mut sources, project_root, LspConfigSourceKind::Dotfile, project)?;
 	Ok(DiscoveredLspSources { sources, diagnostics })
 }
 
@@ -518,15 +533,29 @@ pub(crate) fn plugin_lsp_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
 		.collect()
 }
 
+/// Appends each present config file of `directory`. A file the contained
+/// reader refuses (outside the project, a special file, oversize) is skipped
+/// with a warning rather than failing the roster: dropping a source can only
+/// remove servers.
 fn append_existing(
 	sources: &mut Vec<LspConfigSource>,
 	directory: &Path,
 	kind: LspConfigSourceKind,
+	containment: Containment<'_>,
 ) -> Result<(), LspConfigError> {
 	for name in CONFIG_NAMES {
 		let path = directory.join(name);
-		if path.is_file() {
-			sources.push(LspConfigSource::read(kind, &path)?);
+		match LspConfigSource::read_contained(kind, &path, containment) {
+			Ok(Some(source)) => sources.push(source),
+			Ok(None) => {},
+			Err(LspConfigError::File(error @ ProjectFileError::Refused { .. })) => {
+				tracing::warn!(
+					path = %error.path().display(),
+					reason = error.refusal().map_or("unreadable", <&str>::from),
+					"LSP configuration file skipped"
+				);
+			},
+			Err(error) => return Err(error),
 		}
 	}
 	Ok(())
@@ -772,15 +801,9 @@ impl LspConfigCache {
 /// Native LSP configuration failure.
 #[derive(Debug, Error)]
 pub enum LspConfigError {
-	/// A source could not be read.
-	#[error("cannot read LSP configuration {}: {source}", path.display())]
-	Read {
-		/// Source path.
-		path:   PathBuf,
-		/// Filesystem failure.
-		#[source]
-		source: io::Error,
-	},
+	/// A source could not be read, or the contained reader refused it.
+	#[error(transparent)]
+	File(#[from] ProjectFileError),
 	/// A source exceeds the byte bound.
 	#[error("LSP configuration {} exceeds {limit} bytes", path.display())]
 	TooLarge {
@@ -858,11 +881,67 @@ pub enum LspConfigError {
 
 #[cfg(test)]
 pub(crate) mod tests {
+	use std::fs;
+
 	use omp_ext::claude_plugin::{
 		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
 	};
 
 	use super::*;
+
+	/// Project LSP files the reader must not follow or block on: an outside
+	/// symlink and a FIFO are skipped, an inside symlink loads, and the
+	/// bundled and user sources survive.
+	#[cfg(unix)]
+	#[test]
+	fn project_lsp_files_outside_the_repository_or_special_are_skipped() {
+		use std::{os::unix::fs::symlink, process::Command, sync::mpsc, thread, time::Duration};
+
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		fs::create_dir_all(project.join(".git")).unwrap();
+		fs::create_dir_all(project.join(".omp")).unwrap();
+		let body =
+			r#"{"servers":{"acme":{"command":"acme","fileTypes":[".a"],"rootMarkers":["."]}}}"#;
+		write(&temp.path().join("outside.json"), body);
+		symlink(temp.path().join("outside.json"), project.join(".omp/lsp.json")).unwrap();
+		assert!(
+			Command::new("mkfifo")
+				.arg(project.join(".lsp.json"))
+				.status()
+				.unwrap()
+				.success()
+		);
+		write(&project.join("real/lsp.json"), body);
+		symlink("real/lsp.json", project.join("lsp.json")).unwrap();
+		let (sender, receiver) = mpsc::channel();
+		let root = project.clone();
+		thread::spawn(move || {
+			let _ = sender.send(discover_lsp_sources(None, &root, Vec::new(), &[]));
+		});
+		let found = receiver
+			.recv_timeout(Duration::from_secs(10))
+			.expect("a FIFO must be refused, not read")
+			.unwrap();
+		let project_sources = found
+			.sources
+			.iter()
+			.filter(|source| {
+				matches!(
+					source.provenance.kind,
+					LspConfigSourceKind::Project | LspConfigSourceKind::Dotfile
+				)
+			})
+			.map(|source| source.provenance.source.to_string())
+			.collect::<Vec<_>>();
+		assert_eq!(project_sources, [project.join("lsp.json").to_string_lossy()]);
+		assert!(
+			load_lsp_config(&found.sources)
+				.unwrap()
+				.servers
+				.contains_key("acme")
+		);
+	}
 
 	pub fn write(path: &Path, body: &str) {
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
