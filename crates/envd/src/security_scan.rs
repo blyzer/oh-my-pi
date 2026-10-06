@@ -1931,6 +1931,8 @@ fn bounded_entries(
 mod tests {
 	use std::time::Duration;
 
+	use omp_vcs::testing::run as git;
+
 	use super::*;
 
 	fn fixture() -> (PathBuf, PathBuf) {
@@ -1938,33 +1940,12 @@ mod tests {
 		let root = std::env::temp_dir().join(format!("omp-security-{unique}"));
 		let state = std::env::temp_dir().join(format!("omp-security-state-{unique}"));
 		fs::create_dir_all(&root).expect("fixture root");
-		let initialized = Command::new("git")
-			.args(["init", "-q"])
-			.current_dir(&root)
-			.status()
-			.expect("git init");
-		assert!(initialized.success());
-		Command::new("git")
-			.args(["config", "user.email", "security@example.invalid"])
-			.current_dir(&root)
-			.status()
-			.expect("git config");
-		Command::new("git")
-			.args(["config", "user.name", "Security Test"])
-			.current_dir(&root)
-			.status()
-			.expect("git config");
+		git(&root, &["init", "-q"]);
+		git(&root, &["config", "user.email", "security@example.invalid"]);
+		git(&root, &["config", "user.name", "Security Test"]);
 		fs::write(root.join("README"), "fixture\n").expect("readme");
-		Command::new("git")
-			.args(["add", "."])
-			.current_dir(&root)
-			.status()
-			.expect("git add");
-		Command::new("git")
-			.args(["commit", "-qm", "fixture"])
-			.current_dir(&root)
-			.status()
-			.expect("git commit");
+		git(&root, &["add", "."]);
+		git(&root, &["commit", "-qm", "fixture"]);
 		(root, state)
 	}
 	fn empty(action: Action) -> Params {
@@ -2052,16 +2033,8 @@ mod tests {
 			})
 			.expect("lineage");
 		assert_eq!(lineage.data["unchanged"], 1);
-		Command::new("git")
-			.args(["add", "."])
-			.current_dir(&root)
-			.status()
-			.expect("git add");
-		Command::new("git")
-			.args(["commit", "-qm", "security fixture"])
-			.current_dir(&root)
-			.status()
-			.expect("git commit");
+		git(&root, &["add", "."]);
+		git(&root, &["commit", "-qm", "security fixture"]);
 		let remediation = service
 			.remediation_create(Params {
 				scan_id: Some(scan.id.clone()),

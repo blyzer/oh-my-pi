@@ -13349,16 +13349,7 @@ mod tests {
 	#[tokio::test]
 	async fn repository_snapshot_returns_only_granted_canonical_root_uris() {
 		let (requests, responses, root, _state) = test_connection(&["env.search"], false).await;
-		let initialized = process::Command::new("git")
-			.current_dir(root.path())
-			.args(["init", "-b", "main"])
-			.output()
-			.expect("fixture Git should launch");
-		assert!(
-			initialized.status.success(),
-			"fixture Git init failed: {}",
-			String::from_utf8_lossy(&initialized.stderr)
-		);
+		omp_vcs::testing::run(root.path(), &["init", "-b", "main"]);
 		requests
 			.send_async(data_frame(
 				1,

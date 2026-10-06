@@ -131,6 +131,8 @@ async-stream.workspace = true
 flume.workspace = true
 insta.workspace = true
 omp-ai.workspace = true
+# Hermetic `git` fixtures: tests never read the developer's git configuration.
+omp-vcs = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 tokio.workspace = true
 tonic-health.workspace = true

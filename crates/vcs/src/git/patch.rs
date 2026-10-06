@@ -2741,28 +2741,12 @@ fn assert_contained(root: &Path, rel: &str, probe: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
-
 	use tempfile::TempDir;
 
 	use super::*;
-
-	fn git(cwd: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(cwd)
-			.args(args)
-			.output()
-			.expect("run git");
-		assert!(
-			output.status.success(),
-			"git {} failed: {}",
-			args.join(" "),
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
-	}
+	use crate::testing::{self, run as git};
 	fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
+		let output = testing::command()
 			.current_dir(cwd)
 			.env("GIT_INDEX_FILE", index)
 			.args(args)
@@ -3773,7 +3757,7 @@ mod tests {
 		// `git()` panics on a non-zero status, and `--verify --quiet` exits 1
 		// when no stash exists — which is exactly the state under test.
 		let stash_ref = |cwd: &Path| -> Option<String> {
-			let output = Command::new("git")
+			let output = testing::command()
 				.current_dir(cwd)
 				.args(["rev-parse", "--verify", "--quiet", "refs/stash"])
 				.output()

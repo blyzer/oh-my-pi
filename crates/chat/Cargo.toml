@@ -50,5 +50,7 @@ nix.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# Hermetic `git` fixtures: tests never read the developer's git configuration.
+omp-vcs = { workspace = true, features = ["test-support"] }
 # The vocalizer tests play on the virtual speaker, never the host's device.
 omp-audio = { workspace = true, features = ["virtual-output"] }

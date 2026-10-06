@@ -1,6 +1,7 @@
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{fs, time::Duration};
 
 use bytes::Bytes;
+use omp_vcs::testing::run as fixture_git;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
@@ -16,20 +17,6 @@ use super::{
 	repo,
 };
 use crate::vcs::{self, RepositoryAvailability};
-
-fn fixture_git(cwd: &Path, arguments: &[&str]) {
-	let output = Command::new("git")
-		.current_dir(cwd)
-		.args(arguments)
-		.env("GIT_TERMINAL_PROMPT", "0")
-		.output()
-		.expect("fixture git should launch");
-	assert!(
-		output.status.success(),
-		"fixture git {arguments:?} failed: {}",
-		String::from_utf8_lossy(&output.stderr)
-	);
-}
 
 fn repository_fixture() -> tempfile::TempDir {
 	let root = tempfile::tempdir().expect("temporary repository root");
