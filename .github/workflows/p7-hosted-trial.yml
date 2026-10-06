@@ -1,0 +1,267 @@
+name: P7 hosted macOS trial
+
+# EXPERIMENT. NEVER MERGE. This workflow exists only on the draft pull request
+# that adds it, and only that pull request ever triggers it (the `paths` filter
+# names this file alone).
+#
+# Question: why do the P7 real-PTY proofs (crates/e2e/tests/p7_tui.rs, the four
+# `chat_tui_*` tests) fail on GitHub-hosted macos-15 (arm64, 3 cores) while they
+# pass on Linux CI and on Apple-silicon workstations? Evidence so far: CI run
+# 37362922871 (job 111972101103, head 504cbdd702) and run 37380453962 (job
+# 112001412838, head ffa60f1601).
+#
+# This runs ONLY P7, on a hard-pinned hosted macos-15 runner, with the same
+# toolchain, native tools, nextest, embedded Python and Cargo cache provisioning
+# as the `rust` job of ci.yml, and no product or test code changed. It runs the
+# P7 binary three times to measure flakiness and records host and PTY facts.
+
+on:
+  pull_request:
+    branches: [omp2]
+    paths:
+      - ".github/workflows/p7-hosted-trial.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Logs, samples and summaries land here; uploaded as one artifact.
+  TRIAL_OUT: p7-trial-out
+
+jobs:
+  p7_hosted_macos:
+    name: P7 on hosted macos-15
+    # Hard-pinned: ignores vars.MACOS_RUNNER on purpose, so a self-hosted runner
+    # can never answer this experiment.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+
+      # Same step as the hosted branch of ci.yml's `rust` job.
+      - name: Install native build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install lld@22 uv zstd ninja
+          # .cargo/config.toml links through /opt/homebrew/bin/ld64.lld and the vendored CPython
+          # bitcode is LLVM 22 (crates/py/scripts/ld64.lld): the unversioned lld formula tracks
+          # the newest major (23 today) and cannot link it.
+          ln -sf "$(brew --prefix lld@22)/bin/ld64.lld" /opt/homebrew/bin/ld64.lld
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+        with:
+          tool: nextest@0.9.146
+
+      # On a hosted runner this restores/prepares vendor/python (cache, then
+      # fetch-python.sh on a miss) and verifies the embedded Python toolchain.
+      - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+
+      # Read-only, as in p8-baseline.yml: ci.yml owns saving this cache, and a
+      # trial must not evict it from the 10 GB repository budget. Keys are the
+      # ones ci.yml's `rust` job writes, so an omp2 build seeds this restore.
+      - name: Restore Cargo cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      # Host facts before anything heavy runs. `continue-on-error` throughout:
+      # a diagnostic must never be the reason this job fails.
+      - name: Host facts (before)
+        continue-on-error: true
+        run: |
+          mkdir -p "$TRIAL_OUT"
+          {
+            echo "== uname"; uname -a
+            echo "== sw_vers"; sw_vers
+            echo "== cpu/mem"; sysctl -n hw.ncpu hw.memsize
+            echo "== loadavg"; sysctl -n vm.loadavg
+            echo "== disk"; df -h .
+          } 2>&1 | tee "$TRIAL_OUT/host-before.txt"
+
+      # A pty micro-probe with no omp in it: how fast does a master reader that
+      # polls the way crates/e2e/tests/p7_tui.rs does (O_NONBLOCK master, 16 KiB
+      # reads, a 5 ms sleep on EAGAIN) drain a writer that blocks on the slave?
+      # The omp host writes its history replay synchronously to that slave, so
+      # this bounds how long a large replay can hold the host event loop.
+      - name: PTY drain probe
+        continue-on-error: true
+        run: |
+          mkdir -p "$TRIAL_OUT"
+          python3 -I - <<'PY' 2>&1 | tee "$TRIAL_OUT/pty-probe.txt"
+          import fcntl, os, pty, signal, threading, time, tty
+
+          signal.alarm(120)
+
+          def drain(total, chunk, sleep_s):
+              master, slave = pty.openpty()
+              tty.setraw(slave)
+              flags = fcntl.fcntl(master, fcntl.F_GETFL)
+              fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+              got = [0]
+              eagain = [0]
+
+              def reader():
+                  while got[0] < total:
+                      try:
+                          data = os.read(master, 16 * 1024)
+                      except BlockingIOError:
+                          eagain[0] += 1
+                          time.sleep(sleep_s)
+                          continue
+                      if not data:
+                          time.sleep(sleep_s)
+                          continue
+                      got[0] += len(data)
+
+              worker = threading.Thread(target=reader)
+              worker.start()
+              payload = b"x" * chunk
+              sent = 0
+              start = time.perf_counter()
+              while sent < total:
+                  sent += os.write(slave, payload[: min(chunk, total - sent)])
+              worker.join()
+              elapsed = time.perf_counter() - start
+              os.close(master)
+              os.close(slave)
+              return elapsed, eagain[0]
+
+          total = 512 * 1024
+          for chunk in (16 * 1024, 2 * 1024):
+              for sleep_s in (0.005, 0.001, 0.0):
+                  elapsed, eagain = drain(total, chunk, sleep_s)
+                  print(
+                      f"write_chunk={chunk:>6} reader_sleep_on_eagain={sleep_s * 1000:>4.1f}ms "
+                      f"total={total // 1024} KiB elapsed={elapsed * 1000:8.1f} ms "
+                      f"rate={total / 1024 / elapsed:9.1f} KiB/s eagain_reads={eagain}"
+                  )
+          PY
+
+      # Build first so the timed runs below measure the proof, not the compile.
+      # Same cargo/nextest flags as ci.yml's 'Run terminal proof P7'.
+      - name: Build P7
+        timeout-minutes: 40
+        env:
+          TERM: xterm-256color
+        run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked --no-run
+
+      # The proof itself: same command as ci.yml's 'Run terminal proof P7' plus
+      # --no-fail-fast --retries 0, three times, each run's full output kept. A
+      # light sampler records load and the busiest processes every two seconds
+      # to show whether the runner's three cores are saturated when a test
+      # stalls. Failures are collected, not fatal, so every run happens; the
+      # step fails at the end if any run failed.
+      - name: Run terminal proof P7 (3 runs)
+        timeout-minutes: 25
+        env:
+          TERM: xterm-256color
+        run: |
+          set +e
+          mkdir -p "$TRIAL_OUT"
+          (
+            while true; do
+              echo "--- $(date -u +%H:%M:%S) load: $(sysctl -n vm.loadavg)"
+              ps -Ao pid,ppid,pcpu,pmem,etime,comm -r | head -9
+              sleep 2
+            done
+          ) > "$TRIAL_OUT/sampler.txt" 2>&1 &
+          sampler=$!
+          failed=0
+          for i in 1 2 3; do
+            echo "::group::P7 run $i"
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$TRIAL_OUT/run-$i.start"
+            cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked \
+              --no-fail-fast --retries 0 2>&1 | tee "$TRIAL_OUT/run-$i.log"
+            status=${PIPESTATUS[0]}
+            echo "$status" > "$TRIAL_OUT/run-$i.status"
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$TRIAL_OUT/run-$i.end"
+            echo "::endgroup::"
+            echo "P7 run $i exited with status $status"
+            [ "$status" -eq 0 ] || failed=$((failed + 1))
+          done
+          kill "$sampler" 2>/dev/null
+          echo "failed runs: $failed of 3"
+          [ "$failed" -eq 0 ]
+
+      - name: Diagnostics
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p "$TRIAL_OUT"
+          {
+            echo "== uname"; uname -a
+            echo "== sw_vers"; sw_vers
+            echo "== cpu/mem"; sysctl -n hw.ncpu hw.memsize
+            echo "== id"; id
+            echo "== who"; who
+            echo "== tty"; tty || true
+            echo "== ps (user, tty)"; ps -o pid,tty,comm -u "${USER:-$(id -un)}" | head -20
+            echo "== leftover omp/python processes"
+            ps -Ao pid,ppid,tty,etime,comm | grep -E 'omp|python' | grep -v grep || true
+            echo "== loadavg"; sysctl -n vm.loadavg
+            echo "== unix socket and pty limits"
+            sysctl net.local.stream.sendspace net.local.stream.recvspace kern.ipc.maxsockbuf kern.tty.ptmx_max 2>&1 || true
+            echo "== ulimit"; ulimit -a
+            echo "== disk"; df -h .
+          } 2>&1 | tee "$TRIAL_OUT/host-after.txt"
+
+      - name: Summarize
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo "## P7 on hosted macos-15"
+            echo
+            echo "Runner: \`$RUNNER_NAME\` ($RUNNER_ENVIRONMENT), $(sysctl -n hw.ncpu) CPUs, $(sw_vers -productVersion)"
+            echo
+            for i in 1 2 3; do
+              if [ -f "$TRIAL_OUT/run-$i.status" ]; then
+                echo "### Run $i: exit status $(cat "$TRIAL_OUT/run-$i.status")"
+                echo '```'
+                { grep -E '^ +(PASS|FAIL|SIGABRT|SIGKILL|TIMEOUT)|Summary|panicked at|checkpoint .* timed out|published terminal surface|Resource temporarily|gateway_turn_open_failed|provider was called|\[t\+' "$TRIAL_OUT/run-$i.log" | cut -c1-240 | head -60; } || true
+                echo '```'
+              else
+                echo "### Run $i: did not run"
+              fi
+            done
+            if [ -f "$TRIAL_OUT/pty-probe.txt" ]; then
+              echo "### PTY drain probe"
+              echo '```'
+              cat "$TRIAL_OUT/pty-probe.txt"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload trial output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: p7-hosted-trial-macos15-${{ github.run_attempt }}
+          path: |
+            p7-trial-out/
+            target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
