@@ -3876,7 +3876,8 @@ mod tests {
 			omp_driver::plugin_commands::blocked_launches(
 				&plugins,
 				&agent_plugins,
-				&omp_envd::mcp::McpSettings::default(),
+				// The project's `.agents/plugins` package loads only on opt-in.
+				&omp_envd::mcp::McpSettings { enable_project_config: true },
 			)
 			.into_iter()
 			.filter(|blocked| matches!(blocked.plugin.as_str(), "portable" | "outside"))

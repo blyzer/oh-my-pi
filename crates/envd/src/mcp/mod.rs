@@ -202,7 +202,7 @@ impl McpService {
 			}),
 			config_paths:          RwLock::new(None),
 			manager:               RwLock::new(None),
-			enable_project_config: AtomicBool::new(true),
+			enable_project_config: AtomicBool::new(false),
 			leaves:                LeafReplacementRegistry::new(),
 			cache:                 Arc::new(McpDefinitionCache::open(cache_path)?),
 			definition_epoch:      AtomicU64::new(0),
@@ -978,7 +978,7 @@ fn broadcast(state: &mut State, event: SubscriptionEvent) {
 
 #[cfg(test)]
 mod config_tests {
-	use std::{fs, future::Future, pin::Pin};
+	use std::{collections::BTreeMap, fs, future::Future, pin::Pin, time::Duration};
 
 	use super::*;
 	use crate::mcp::manager::{ConnectedClient, ManagerError, McpConnector, McpManager, MountSpec};
@@ -1063,6 +1063,8 @@ mod config_tests {
 			project.clone(),
 		);
 		service.bind_manager(&manager);
+		// The test writes a project-scoped server, which loads only on opt-in.
+		service.start_native_configs(true).await.expect("startup");
 		service
 			.config(pb::McpConfigRequest {
 				action:        pb::McpConfigAction::Add as i32,
@@ -1114,5 +1116,233 @@ mod config_tests {
 			McpServiceError::Config(config_store::ConfigStoreError::Json { path, .. })
 				if path == user_path
 		));
+	}
+
+	/// Every project-scoped file discovery reads, with the one server it
+	/// declares. Commands differ so no declaration is a duplicate connection.
+	fn project_fixtures() -> Vec<(&'static str, &'static str, String)> {
+		fn common(name: &str) -> String {
+			format!(r#"{{"mcpServers":{{"{name}":{{"command":"{name}-cmd"}}}}}}"#)
+		}
+		fn opencode(name: &str) -> String {
+			format!(r#"{{"mcp":{{"{name}":{{"type":"local","command":["{name}-cmd"]}}}}}}"#)
+		}
+		vec![
+			(".omp/mcp.json", "omp", common("omp")),
+			(".mcp.json", "root", common("root")),
+			(".claude/.mcp.json", "claude", common("claude")),
+			(
+				".codex/config.toml",
+				"codex",
+				"[mcp_servers.codex]\ncommand = \"codex-cmd\"\n".to_owned(),
+			),
+			(".gemini/settings.json", "gemini", common("gemini")),
+			("opencode.json", "opencode", opencode("opencode")),
+			("opencode.jsonc", "opencodec", opencode("opencodec")),
+			(".opencode/opencode.json", "dotopencode", opencode("dotopencode")),
+			(".opencode/opencode.jsonc", "dotopencodec", opencode("dotopencodec")),
+			(".cursor/mcp.json", "cursor", common("cursor")),
+			(".windsurf/mcp_config.json", "windsurf", common("windsurf")),
+			(
+				".vscode/mcp.json",
+				"vscode",
+				r#"{"servers":{"vscode":{"type":"stdio","command":"vscode-cmd"}}}"#.to_owned(),
+			),
+			("mcp.json", "standalone", common("standalone")),
+			("mcp.config.json", "standaloneconfig", common("standaloneconfig")),
+		]
+	}
+
+	fn write_all(project: &Path, fixtures: &[(&str, &str, String)]) {
+		for (path, _, body) in fixtures {
+			let path = project.join(path);
+			fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
+			fs::write(path, body).expect("fixture file");
+		}
+	}
+
+	#[test]
+	fn project_scoped_files_load_only_after_a_user_level_opt_in() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let user_root = scratch.path().join(".o2");
+		let project = scratch.path().join("project");
+		let fixtures = project_fixtures();
+		write_all(&project, &fixtures);
+		let paths = McpConfigPaths::new(&user_root, &project);
+
+		let default = McpSettings::default().enable_project_config;
+		let off = load_resolved_config(paths.clone(), default).expect("default load");
+		assert!(
+			off.servers.is_empty(),
+			"default settings must load no project file: {:?}",
+			off.servers.keys().collect::<Vec<_>>()
+		);
+
+		let on = load_resolved_config(paths, true).expect("opted-in load");
+		for (path, name, _) in &fixtures {
+			assert!(on.servers.contains_key(*name), "{path} loads once the user opts in");
+		}
+	}
+
+	#[tokio::test]
+	async fn an_unconfigured_service_loads_user_sources_but_no_project_source() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let user_root = scratch.path().join(".o2");
+		let project = scratch.path().join("project");
+		fs::create_dir_all(&user_root).expect("user config root");
+		fs::write(
+			user_root.join("mcp.json"),
+			br#"{"mcpServers":{"user-server":{"type":"stdio","command":"user"}}}"#,
+		)
+		.expect("user config");
+		write_all(&project, &project_fixtures());
+		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
+		service.bind_config_paths(McpConfigPaths::new(&user_root, &project));
+		let manager = McpManager::new(
+			Arc::clone(&service),
+			Arc::new(RejectConnector),
+			Arc::from([]),
+			project.clone(),
+		);
+		service.bind_manager(&manager);
+
+		// No `start_native_configs`: the retained policy is the unset default.
+		let snapshot = service.reload_native_configs().await.expect("reload");
+		let names = snapshot
+			.status
+			.servers
+			.iter()
+			.map(|status| status.server.as_ref().expect("server").name.as_str())
+			.collect::<Vec<_>>();
+		assert_eq!(names, ["user-server"]);
+	}
+
+	/// What the connector saw, per mounted server.
+	type SeenByServer = BTreeMap<Str, Seen>;
+
+	/// What the connector saw for one mount.
+	struct Seen {
+		env:     BTreeMap<String, String>,
+		headers: BTreeMap<String, String>,
+		notices: Vec<config_values::LiteralValueNotice>,
+	}
+
+	#[derive(Default)]
+	struct CaptureConnector {
+		seen: parking_lot::Mutex<SeenByServer>,
+	}
+
+	impl McpConnector for CaptureConnector {
+		fn connect<'a>(
+			&'a self,
+			spec: &'a MountSpec,
+			_roots: Arc<[Str]>,
+			_cancel: CancellationToken,
+		) -> Pin<Box<dyn Future<Output = Result<ConnectedClient, ManagerError>> + Send + 'a>> {
+			let exposed = |values: &BTreeMap<Str, config_values::ResolvedConfigValue>| {
+				values
+					.iter()
+					.map(|(key, value)| (key.to_string(), value.with_exposed(str::to_owned)))
+					.collect::<BTreeMap<_, _>>()
+			};
+			self.seen.lock().insert(spec.name.clone(), Seen {
+				env:     exposed(&spec.values.env),
+				headers: exposed(&spec.values.headers),
+				notices: spec.values.notices.clone(),
+			});
+			Box::pin(async { Err(ManagerError::InvalidConfig) })
+		}
+	}
+
+	/// Records every command the shared resolver is asked to execute.
+	struct CountingExecutor(parking_lot::Mutex<Vec<Str>>);
+
+	impl omp_ai::auth::command::CommandCredentialExecutor for CountingExecutor {
+		fn execute(
+			&self,
+			command: Str,
+			_cancellation: CancellationToken,
+		) -> omp_ai::auth::command::CommandExecutionFuture {
+			self.0.lock().push(command);
+			Box::pin(async { Ok(omp_core::SecretString::from("command-output")) })
+		}
+	}
+
+	/// A repository-authored `.mcp.json` must not execute commands or read the
+	/// process environment; the same declarations in the user's own file still
+	/// do.
+	#[tokio::test]
+	async fn project_declarations_resolve_literally_while_user_declarations_still_resolve() {
+		const SENTINEL: &str = "OMP_TEST_PROJECT_MCP_SENTINEL";
+		const SECRET: &str = "sentinel-secret-value";
+		// SAFETY: nextest runs each test in its own process, and nothing else
+		// reads or writes this uniquely named variable.
+		unsafe { std::env::set_var(SENTINEL, SECRET) };
+		let scratch = tempfile::tempdir().expect("scratch");
+		let user_root = scratch.path().join(".o2");
+		let project = scratch.path().join("project");
+		fs::create_dir_all(&user_root).expect("user config root");
+		fs::create_dir_all(&project).expect("project");
+		let declarations = |prefix: &str| {
+			format!(
+				r#"{{"mcpServers":{{
+					"{prefix}-stdio":{{"command":"{prefix}-cmd","env":{{"K":"!echo {prefix}","S":"{SENTINEL}"}}}},
+					"{prefix}-http":{{"type":"http","url":"https://{prefix}.example.test/mcp",
+						"headers":{{"Authorization":"{SENTINEL}","X-Cmd":"!echo {prefix}"}}}}}}}}"#
+			)
+		};
+		fs::write(project.join(".mcp.json"), declarations("project")).expect("project config");
+		fs::write(user_root.join("mcp.json"), declarations("user")).expect("user config");
+
+		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
+		service.bind_config_paths(McpConfigPaths::new(&user_root, &project));
+		let connector = Arc::new(CaptureConnector::default());
+		let manager =
+			McpManager::new(Arc::clone(&service), connector.clone(), Arc::from([]), project.clone());
+		let executor = Arc::new(CountingExecutor(parking_lot::Mutex::new(Vec::new())));
+		manager.bind_command_executor(executor.clone());
+		service.bind_manager(&manager);
+		service.start_native_configs(true).await.expect("startup");
+		for _ in 0..500 {
+			if connector.seen.lock().len() == 4 {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+
+		let seen = connector.seen.lock();
+		assert_eq!(seen.len(), 4, "{:?}", seen.keys().collect::<Vec<_>>());
+		// Only the user's `!command` values ran; the project's never did.
+		assert_eq!(*executor.0.lock(), [Str::from("echo user")]);
+
+		let stdio = &seen["project-stdio"];
+		assert_eq!(stdio.env["K"], "!echo project");
+		assert_eq!(stdio.env["S"], SENTINEL);
+		let http = &seen["project-http"];
+		assert_eq!(http.headers["Authorization"], SENTINEL);
+		assert_eq!(http.headers["X-Cmd"], "!echo project");
+		for value in stdio.env.values().chain(http.headers.values()) {
+			assert!(!value.contains(SECRET), "the process environment never reaches a project value");
+		}
+		let key = |name: &str| Str::from(name);
+		assert_eq!(stdio.notices, [
+			config_values::LiteralValueNotice::Command {
+				section: config_values::ValueSection::Env,
+				key:     key("K"),
+			},
+			config_values::LiteralValueNotice::EnvironmentName {
+				section: config_values::ValueSection::Env,
+				key:     key("S"),
+			},
+		]);
+		assert_eq!(http.notices.len(), 2);
+
+		let user_stdio = &seen["user-stdio"];
+		assert_eq!(user_stdio.env["K"], "command-output");
+		assert_eq!(user_stdio.env["S"], SECRET);
+		let user_http = &seen["user-http"];
+		assert_eq!(user_http.headers["Authorization"], SECRET);
+		assert_eq!(user_http.headers["X-Cmd"], "command-output");
+		assert!(user_stdio.notices.is_empty() && user_http.notices.is_empty());
 	}
 }

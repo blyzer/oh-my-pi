@@ -45,6 +45,24 @@ Their entry functions and runtime implementations remain owned by `omp-envd`;
 `omp-app` only performs process-level dispatch. Parent processes do not
 preflight-boot CPython: each Python child initializes its own interpreter.
 
+## Project MCP configuration (mcp module)
+
+MCP server definitions that a repository supplies (`.omp/mcp.json`, `.mcp.json`,
+and the foreign editor files such as `.cursor/mcp.json`, `.vscode/mcp.json`,
+`.codex/config.toml`, `opencode.json`) can start processes with the user's
+authority, so they are **off by default**. The user-level archive convar
+`sv_mcp_enable_project_config` opts in; it is deliberately not a project convar,
+so a repository's own cfg overlay can never enable it. User-level files and
+explicitly named or user-installed plugins always load.
+
+Even after opting in, a project-scoped declaration
+(`ConfigSourceKind::project_scoped`) resolves its `env` and `headers` values as
+literal data: a `!command` value never runs and a value naming a process
+environment variable is never substituted. Each such value is reported once as
+a typed `LiteralValueNotice` (section and key, never the value) through the
+`tracing` warning channel the other discovery diagnostics use. Move a
+declaration that needs dynamic values into the user-level `~/.o2/mcp.json`.
+
 ## Philosophy
 
 Each project and executable generation has one detached environment daemon.
