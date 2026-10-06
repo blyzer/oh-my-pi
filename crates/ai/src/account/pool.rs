@@ -12,10 +12,10 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 
 use super::{
-	AccountAffinity, AccountChangeEvidence, AccountStateStore, AccountStateStoreError,
-	AffinityScope, PersistedAccountState, PersistedCooldown, PersistedRejection, QuotaAvailability,
-	QuotaObservation, QuotaProvenance, QuotaState, QuotaWindowId, RateAvailability, RateObservation,
-	RateState, RateWindowId,
+	AccountAffinity, AccountChangeEvidence, AccountName, AccountSelectError, AccountStateStore,
+	AccountStateStoreError, AffinityScope, PersistedAccountState, PersistedCooldown,
+	PersistedRejection, QuotaAvailability, QuotaObservation, QuotaProvenance, QuotaState,
+	QuotaWindowId, RateAvailability, RateObservation, RateState, RateWindowId,
 };
 use crate::{
 	call::AccountRoutingContext,
@@ -346,6 +346,8 @@ struct PoolState {
 	quota:           BTreeMap<AccountId, QuotaState>,
 	quota_reserve:   QuotaReservePolicy,
 	affinities:      BTreeMap<AffinityScope, AccountAffinity>,
+	/// User-chosen names; unique within one provider.
+	names:           BTreeMap<AccountId, AccountName>,
 }
 
 /// Concurrent, durable-aware account metadata and eligibility state.
@@ -387,6 +389,7 @@ impl AccountPool {
 			state.accounts.insert(account.clone(), record);
 			hydrate_account_state(&mut state, account, persisted);
 		}
+		state.names = store.load_names()?.into_iter().collect();
 		let (changes, _) = broadcast::channel(64);
 		Ok(Self { state: Arc::new(RwLock::new(state)), store: Some(store), changes })
 	}
@@ -470,7 +473,10 @@ impl AccountPool {
 	/// Removes account metadata while retaining independent cooldown, rate, and
 	/// quota observations.
 	pub fn remove(&self, account: &AccountId<str>) -> Option<AccountRecord> {
-		let removed = self.state.write().accounts.remove(account);
+		let mut state = self.state.write();
+		let removed = state.accounts.remove(account);
+		state.names.remove(account);
+		drop(state);
 		if removed.is_some() {
 			let _ = self
 				.changes
@@ -491,6 +497,84 @@ impl AccountPool {
 	/// Returns every account metadata snapshot in stable account-ID order.
 	pub fn accounts(&self) -> Vec<AccountRecord> {
 		self.state.read().accounts.values().cloned().collect()
+	}
+
+	/// Names `account`; the name must be unused by every other account of the
+	/// same provider. Replaces any earlier name of the account.
+	pub fn set_name(
+		&self,
+		account: &AccountId<str>,
+		name: AccountName,
+	) -> Result<(), AccountStateStoreError> {
+		let mut state = self.state.write();
+		let record = state
+			.accounts
+			.get(account)
+			.ok_or(AccountStateStoreError::UnknownAccount)?;
+		let taken = state.names.iter().any(|(other, taken)| {
+			other.as_str() != account.as_str()
+				&& taken == &name
+				&& state
+					.accounts
+					.get(other)
+					.is_some_and(|other| other.provider == record.provider)
+		});
+		if taken {
+			return Err(AccountStateStoreError::NameTaken);
+		}
+		if let Some(store) = &self.store {
+			store.set_name(account, &name)?;
+		}
+		let event = record.clone();
+		state.names.insert(account.to_owned(), name);
+		drop(state);
+		let _ = self.changes.send(AccountPoolEvent::Upserted(event));
+		Ok(())
+	}
+
+	/// Removes the name of `account`; reports whether it had one.
+	pub fn clear_name(&self, account: &AccountId<str>) -> Result<bool, AccountStateStoreError> {
+		if let Some(store) = &self.store {
+			store.clear_name(account)?;
+		}
+		let mut state = self.state.write();
+		let cleared = state.names.remove(account).is_some();
+		let event = state.accounts.get(account).cloned();
+		drop(state);
+		if cleared && let Some(event) = event {
+			let _ = self.changes.send(AccountPoolEvent::Upserted(event));
+		}
+		Ok(cleared)
+	}
+
+	/// The name of `account`, if it has one.
+	pub fn name(&self, account: &AccountId<str>) -> Option<AccountName> {
+		self.state.read().names.get(account).cloned()
+	}
+
+	/// Resolves a user-typed selector to one stored account: an exact account
+	/// id, `provider/name`, or a bare name that is unique across providers.
+	pub fn resolve(&self, selector: &str) -> Result<AccountId, AccountSelectError> {
+		let state = self.state.read();
+		if let Some((id, _)) = state.accounts.get_key_value(AccountId::from_ref(selector)) {
+			return Ok(id.clone());
+		}
+		let (provider, name) = selector
+			.split_once('/')
+			.map_or((None, selector), |(provider, name)| (Some(provider), name));
+		let mut matches = state.names.iter().filter(|(account, named)| {
+			named.as_str() == name
+				&& state.accounts.get(*account).is_some_and(|record| {
+					provider.is_none_or(|provider| record.provider.as_str() == provider)
+				})
+		});
+		let Some((first, _)) = matches.next() else {
+			return Err(AccountSelectError::Unknown);
+		};
+		match matches.count() {
+			0 => Ok(first.clone()),
+			more => Err(AccountSelectError::Ambiguous { providers: more + 1 }),
+		}
 	}
 
 	/// Enables or disables a static account without deleting accounting history.

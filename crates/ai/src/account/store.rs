@@ -16,8 +16,8 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{
-	AccountRecord, CooldownReason, QuotaObservation, QuotaProvenance, QuotaState, QuotaWindowId,
-	RateObservation, RateState, RateWindowId,
+	AccountName, AccountRecord, CooldownReason, QuotaObservation, QuotaProvenance, QuotaState,
+	QuotaWindowId, RateObservation, RateState, RateWindowId,
 };
 use crate::{
 	call::AccountRoutingContext,
@@ -109,6 +109,12 @@ pub enum AccountStateStoreError {
 	/// Existing static ownership does not match the attempted account record.
 	#[error("account static ownership is immutable")]
 	IdentityConflict,
+	/// The account to name is not stored.
+	#[error("the account is not stored")]
+	UnknownAccount,
+	/// Another account of the same provider already has this name.
+	#[error("another account of the provider already has this name")]
+	NameTaken,
 }
 
 impl From<rusqlite::Error> for AccountStateStoreError {
@@ -686,6 +692,73 @@ impl AccountStateStore {
 			.transpose()
 	}
 
+	/// Names `account`, replacing any earlier name; the name must be unused by
+	/// every other account of the same provider.
+	pub fn set_name(
+		&self,
+		account: &AccountId<str>,
+		name: &AccountName,
+	) -> Result<(), AccountStateStoreError> {
+		let _guard = self.writes.lock();
+		let mut connection = self.connection()?;
+		let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+		let provider = transaction
+			.query_row(
+				"SELECT provider_id FROM account_state_accounts WHERE account_id = ?1",
+				[account.as_str()],
+				|row| row.get::<_, String>(0),
+			)
+			.optional()?
+			.ok_or(AccountStateStoreError::UnknownAccount)?;
+		let holder = transaction
+			.query_row(
+				"SELECT account_id FROM account_state_names WHERE provider_id = ?1 AND name = ?2",
+				params![provider, name.as_str()],
+				|row| row.get::<_, String>(0),
+			)
+			.optional()?;
+		if holder.is_some_and(|holder| holder != account.as_str()) {
+			return Err(AccountStateStoreError::NameTaken);
+		}
+		transaction.execute(
+			"INSERT INTO account_state_names (account_id, provider_id, name) VALUES (?1, ?2, ?3)
+			 ON CONFLICT(account_id) DO UPDATE SET name = excluded.name",
+			params![account.as_str(), provider, name.as_str()],
+		)?;
+		transaction.commit()?;
+		Ok(())
+	}
+
+	/// Removes the name of `account`; reports whether it had one.
+	pub fn clear_name(&self, account: &AccountId<str>) -> Result<bool, AccountStateStoreError> {
+		let _guard = self.writes.lock();
+		let changed = self
+			.connection()?
+			.execute("DELETE FROM account_state_names WHERE account_id = ?1", [account.as_str()])?;
+		Ok(changed != 0)
+	}
+
+	/// Loads every account name in stable account-ID order.
+	pub fn load_names(&self) -> Result<Vec<(AccountId, AccountName)>, AccountStateStoreError> {
+		let connection = self.connection()?;
+		let mut statement = connection
+			.prepare("SELECT account_id, name FROM account_state_names ORDER BY account_id")?;
+		let rows =
+			statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+		rows
+			.map(|row| {
+				let (account, name) = row?;
+				let name = AccountName::parse(&name).map_err(|_| {
+					AccountStateStoreError::InvalidVocabulary {
+						field: "account name",
+						value: Str::new(name),
+					}
+				})?;
+				Ok((AccountId::new(account), name))
+			})
+			.collect()
+	}
+
 	/// Explicitly purges secret-free account state; credential removal never
 	/// calls this.
 	pub fn purge_account(&self, account: &AccountId<str>) -> Result<(), AccountStateStoreError> {
@@ -706,6 +779,8 @@ impl AccountStateStore {
 		])?;
 		transaction
 			.execute("DELETE FROM account_state_affinity WHERE account_id = ?1", [account.as_str()])?;
+		transaction
+			.execute("DELETE FROM account_state_names WHERE account_id = ?1", [account.as_str()])?;
 		transaction.execute("DELETE FROM account_state_account_routes WHERE account_id = ?1", [
 			account.as_str(),
 		])?;
@@ -790,7 +865,13 @@ fn migrate(connection: &mut Connection) -> Result<(), AccountStateStoreError> {
 			updated_at_ms INTEGER NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS account_state_affinity_account
-			ON account_state_affinity(account_id);",
+			ON account_state_affinity(account_id);
+		CREATE TABLE IF NOT EXISTS account_state_names (
+			account_id TEXT PRIMARY KEY NOT NULL,
+			provider_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			UNIQUE(provider_id, name)
+		);",
 	)?;
 	transaction.commit()?;
 	Ok(())

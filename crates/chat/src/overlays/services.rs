@@ -367,6 +367,8 @@ pub struct AccountRow {
 	pub provider_name: Str,
 	/// Account label (email or account id).
 	pub label:         Str,
+	/// User-chosen name, unique within the provider, when one is set.
+	pub name:          Option<Str>,
 	/// Secondary detail (plan, expiry).
 	pub detail:        Str,
 	/// Credential kind (`oauth`, `api-key`).
@@ -375,6 +377,20 @@ pub struct AccountRow {
 	pub active:        bool,
 	/// Whether the live session is exclusively pinned to this account.
 	pub pinned:        bool,
+}
+
+impl AccountRow {
+	/// What the user calls the account: its name, else its label.
+	#[must_use]
+	pub fn display_name(&self) -> &str {
+		self.name.as_deref().unwrap_or(self.label.as_str())
+	}
+
+	/// Whether `selector` addresses this account: its name, label, or id.
+	#[must_use]
+	pub fn matches(&self, selector: &str) -> bool {
+		self.name.as_deref() == Some(selector) || self.label == selector || self.id == selector
+	}
 }
 
 /// One runtime-supplied option in the curated settings selector.

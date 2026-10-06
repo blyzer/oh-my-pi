@@ -33,8 +33,8 @@ use super::{
 };
 use crate::{
 	account::{
-		AccountPin, AccountPool, AccountPoolEvent, AccountRecord, CredentialFreshness, RateWindowId,
-		RefreshCoordinator, RefreshRequest, SessionAccountPins,
+		AccountName, AccountPin, AccountPool, AccountPoolEvent, AccountRecord, CredentialFreshness,
+		RateWindowId, RefreshCoordinator, RefreshRequest, SessionAccountPins,
 	},
 	answer::{
 		AccountState, AccountSummary, AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind,
@@ -136,6 +136,11 @@ impl AuthControlHandle {
 			.into_iter()
 			.filter(|record| provider.is_none_or(|provider| provider == &record.provider))
 			.collect()
+	}
+
+	/// The user-chosen name of `account`, if it has one.
+	pub fn account_name(&self, account: &AccountId<str>) -> Option<AccountName> {
+		self.manager.accounts.name(account)
 	}
 
 	/// Returns encrypted-store metadata without materializing secret bytes.
@@ -1622,10 +1627,13 @@ impl AuthManager {
 							.is_none_or(|provider| provider == &record.provider)
 					})
 					.map(|record| AccountSummary {
+						label:     self
+							.accounts
+							.name(&record.account)
+							.map(AccountName::into_inner),
 						account:   record.account,
 						provider:  record.provider,
 						principal: Some(record.principal),
-						label:     None,
 						state:     if record.enabled {
 							AccountState::Active
 						} else {
@@ -1646,6 +1654,10 @@ impl AuthManager {
 					.delete(&account)
 					.map_err(|_| auth_store_failure())?;
 				let pooled = self.accounts.remove(&account).is_some();
+				self
+					.accounts
+					.clear_name(&account)
+					.map_err(|_| auth_store_failure())?;
 				if !stored && !pooled {
 					return Err(auth_not_found());
 				}
@@ -2240,6 +2252,76 @@ mod tests {
 		);
 		let cleared = crate::account::without_pin(&recorded, &provider);
 		assert!(resolver.session_pins(&pool, &cleared).is_empty());
+	}
+
+	#[test]
+	fn naming_an_account_never_changes_its_pin_digest_or_reaches_the_recorded_pin() {
+		let pool = AccountPool::new();
+		let provider = ProviderId::from("provider");
+		let account = AccountRecord {
+			account:               AccountId::from("provider:raw"),
+			principal:             PrincipalId::from("raw"),
+			provider:              provider.clone(),
+			routes:                BTreeSet::new(),
+			enabled:               true,
+			credential_generation: 1,
+			routing:               AccountRoutingContext::default(),
+		};
+		pool.upsert(account.clone()).expect("register account");
+		let resolver = CredentialAffinityResolver::new([7; 32]);
+		let before = resolver.digest(&account);
+		pool
+			.set_name(&account.account, crate::account::AccountName::parse("work-name").unwrap())
+			.expect("name");
+		let digest = resolver.digest(&pool.account(&account.account).expect("account"));
+		assert_eq!(digest, before);
+		let recorded = crate::account::with_pin(&omp_con::Kv::new(), &provider, &digest);
+		assert!(!format!("{recorded:?}").contains("work-name"));
+		assert_eq!(
+			resolver
+				.session_pins(&pool, &recorded)
+				.for_provider(&provider),
+			Some(&AccountPin::Account(account.account))
+		);
+	}
+
+	#[tokio::test]
+	async fn logout_releases_the_account_name() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let database = directory.path().join("credentials.db");
+		let store = Arc::new(
+			CredentialStore::open(
+				&database,
+				Arc::new(HeadlessKeySource::new(KeyId::new("account-names"), [3; 32])),
+			)
+			.expect("credential store"),
+		);
+		let state = Arc::new(crate::account::AccountStateStore::open(&database).expect("state"));
+		let pool = AccountPool::with_store(Arc::clone(&state)).expect("pool");
+		let account = AccountId::from("provider:raw");
+		pool
+			.upsert(AccountRecord {
+				account:               account.clone(),
+				principal:             PrincipalId::from("raw"),
+				provider:              ProviderId::from("provider"),
+				routes:                BTreeSet::new(),
+				enabled:               true,
+				credential_generation: 1,
+				routing:               AccountRoutingContext::default(),
+			})
+			.expect("register account");
+		let name = crate::account::AccountName::parse("work").unwrap();
+		pool.set_name(&account, name.clone()).expect("name");
+		let control = super::AuthControlHandle::offline(
+			Arc::new(omp_catalog::Catalog::embedded().clone()),
+			store,
+			pool.clone(),
+		)
+		.expect("control");
+		assert_eq!(control.account_name(&account), Some(name));
+		control.delete(account.clone()).await.expect("logout");
+		assert_eq!(control.account_name(&account), None);
+		assert!(state.load_names().expect("names").is_empty(), "the stored name is released too");
 	}
 
 	#[test]

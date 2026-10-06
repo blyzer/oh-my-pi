@@ -4,6 +4,7 @@ use std::{
 	fs,
 	io::{self, IsTerminal as _, Write as _},
 	path::{Path, PathBuf},
+	sync::Arc,
 	time,
 };
 
@@ -11,6 +12,7 @@ use miette::{IntoDiagnostic as _, miette};
 use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
 use omp_ai::{
 	Client,
+	account::{AccountName, AccountPool, AccountSelectError, AccountStateStore},
 	answer::{
 		AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind as InferenceAuthPromptKind, AuthResponse,
 	},
@@ -35,6 +37,9 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 		.filter(|path| !path.as_os_str().is_empty())
 		.ok_or_else(|| miette!("HOME or OMP_DATA_DIR must be set"))?;
 	fs::create_dir_all(data_dir).into_diagnostic()?;
+	if let AuthCommand::Rename { account, name, .. } = &command {
+		return rename(&database, account, name.as_deref());
+	}
 	let store = omp_driver::registry::open_credential_store(&database).into_diagnostic()?;
 	if let AuthCommand::Audit { provider, extension, limit, json } = &command {
 		let entries = store
@@ -52,8 +57,8 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 		.map(|provider| provider.id.clone())
 		.ok_or_else(|| miette!("embedded catalog is unavailable"))?;
 	let (provider, operation) = match command {
-		AuthCommand::Audit { .. } => {
-			unreachable!("audit command returned before registry composition")
+		AuthCommand::Audit { .. } | AuthCommand::Rename { .. } => {
+			unreachable!("audit and rename commands returned before registry composition")
 		},
 		AuthCommand::Login { provider } => {
 			let provider = ProviderId::from(provider);
@@ -64,12 +69,12 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 			let target = requested.clone().unwrap_or(default_provider);
 			(target, AuthRequest::ListAccounts { provider: requested })
 		},
-		AuthCommand::Refresh { account } => {
-			(default_provider.clone(), AuthRequest::Refresh { account: AccountId::from(account) })
-		},
-		AuthCommand::Logout { account } => {
-			(default_provider.clone(), AuthRequest::Logout { account: AccountId::from(account) })
-		},
+		AuthCommand::Refresh { account } => (default_provider.clone(), AuthRequest::Refresh {
+			account: select(&open_accounts(&database)?, &account)?,
+		}),
+		AuthCommand::Logout { account } => (default_provider.clone(), AuthRequest::Logout {
+			account: select(&open_accounts(&database)?, &account)?,
+		}),
 	};
 	let meta = CallMeta {
 		id:             RequestId::from("omp-auth-cli"),
@@ -83,6 +88,49 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 	let planner = router::Router::new(registry.clone(), time::Duration::from_secs(30));
 	let mut client = Client::new(registry.service(), planner, meta);
 	print_auth(client.execute(operation).await.into_diagnostic()?, &database).await
+}
+
+fn open_accounts(database: &Path) -> miette::Result<AccountPool> {
+	AccountPool::with_store(Arc::new(AccountStateStore::open(database).into_diagnostic()?))
+		.into_diagnostic()
+}
+
+/// Resolves a typed account selector: an id, `provider/name`, or a unique
+/// name. A bare token that names no pooled account is still tried as an id,
+/// because credentials can outlive their pool record.
+fn select(accounts: &AccountPool, selector: &str) -> miette::Result<AccountId> {
+	match accounts.resolve(selector) {
+		Ok(account) => Ok(account),
+		Err(AccountSelectError::Unknown) if !selector.contains('/') => Ok(AccountId::from(selector)),
+		Err(error) => Err(error).into_diagnostic(),
+	}
+}
+
+/// Names, or with no `name` un-names, one account in the account state store.
+fn rename(database: &Path, selector: &str, name: Option<&str>) -> miette::Result<()> {
+	let accounts = open_accounts(database)?;
+	let account = accounts.resolve(selector).into_diagnostic()?;
+	match name {
+		Some(name) => {
+			let name = AccountName::parse(name).into_diagnostic()?;
+			accounts
+				.set_name(&account, name.clone())
+				.into_diagnostic()?;
+			println!("{account} is now named {}", name.as_str());
+		},
+		None => {
+			let cleared = accounts.clear_name(&account).into_diagnostic()?;
+			println!(
+				"{account} {}",
+				if cleared {
+					"name cleared"
+				} else {
+					"had no name"
+				}
+			);
+		},
+	}
+	Ok(())
 }
 
 fn print_audit(entries: &[CredentialAuditEntry], json: bool) -> miette::Result<()> {
@@ -160,8 +208,8 @@ async fn print_auth(answer: AuthAnswer, database: &Path) -> miette::Result<()> {
 				if let Some(principal) = account.principal {
 					print!(" principal={principal}");
 				}
-				if let Some(label) = account.label {
-					print!(" label={label}");
+				if let Some(name) = account.label {
+					print!(" name={name}");
 				}
 				println!();
 			}

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use flume::{Receiver, Sender};
 use omp_ai::{
-	account::{AI_ACCOUNT_PINS, AccountPin, with_pin, without_pin},
+	account::{AI_ACCOUNT_PINS, AccountName, AccountPin, with_pin, without_pin},
 	answer::{
 		AccountSummary, AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind, AuthResponse, AuthSession,
 	},
@@ -60,17 +60,21 @@ pub fn rows(state: &ServiceState) -> ServiceResult<Vec<AccountRow>> {
 				Ok(None) => (sf!("external"), sf!("environment or external authority")),
 				Err(_) => (sf!("unknown"), sf!("credential source unavailable")),
 			};
+			let name = control.account_name(&record.account);
+			let named = name.is_some();
 			AccountRow {
 				pinned: pins.for_provider(&record.provider)
 					== Some(&AccountPin::Account(record.account.clone())),
+				name: name.map(AccountName::into_inner),
 				id: record.account.as_inner().clone(),
 				provider: record.provider.as_inner().clone(),
 				provider_name: provider_name(state, &record.provider),
 				label: record.principal.as_inner().clone(),
-				detail: if record.enabled {
-					source
-				} else {
-					sf!("{source} · disabled")
+				detail: match (record.enabled, named) {
+					(true, false) => source,
+					(true, true) => sf!("{} · {source}", record.principal.as_str()),
+					(false, false) => sf!("{source} · disabled"),
+					(false, true) => sf!("{} · {source} · disabled", record.principal.as_str()),
 				},
 				kind,
 				active: record.enabled,
@@ -190,7 +194,7 @@ pub fn pin(state: &ServiceState, account: &AccountRow, pinned: bool) -> ServiceR
 			.map_err(ServiceError::failed)?;
 		return Ok(sf!(
 			"Unpinned {}; this session may use any {} account.",
-			account.label,
+			account.display_name(),
 			account.provider_name
 		));
 	}
@@ -199,7 +203,9 @@ pub fn pin(state: &ServiceState, account: &AccountRow, pinned: bool) -> ServiceR
 		.accounts(Some(&provider))
 		.into_iter()
 		.find(|record| record.account.as_str() == account.id.as_str())
-		.ok_or_else(|| ServiceError::Failed(sf!("{} is no longer stored.", account.label)))?;
+		.ok_or_else(|| {
+			ServiceError::Failed(sf!("{} is no longer stored.", account.display_name()))
+		})?;
 	let digest = handles
 		.auth
 		.affinity_digest(&record)
@@ -209,7 +215,7 @@ pub fn pin(state: &ServiceState, account: &AccountRow, pinned: bool) -> ServiceR
 		.map_err(ServiceError::failed)?;
 	Ok(sf!(
 		"Pinned {} for {}; requests in this session use only this account.",
-		account.label,
+		account.display_name(),
 		account.provider_name
 	))
 }
