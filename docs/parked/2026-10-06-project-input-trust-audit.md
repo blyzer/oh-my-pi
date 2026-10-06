@@ -76,7 +76,9 @@ and skills as data (containment exists).
 
 ## Open questions for the owner
 
-1. Are the global Yolo approval default and Off sandbox default intentional?
+1. Are the global Yolo approval default and Off sandbox default intentional? Answered 2026-10-06
+   (ADR 0028 amendment): the sandbox is now on by default (`workspace-write`) and `yolo` is honoured
+   only inside an active sandbox; without one, `write` is in force.
 2. Should Untrusted still load AGENTS.md, rules and skills (contained) or withhold them too?
 3. Trust per workspace, or per inputs digest (re-ask after `git pull`)? Proposal: both.
 4. Should `Subtree` trust exist (a trusted `~/src` trusts every clone below)?

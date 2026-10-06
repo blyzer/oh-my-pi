@@ -702,7 +702,7 @@ async fn environment_rpc(temp: &tempfile::TempDir, con: omp_con::Ctx) -> Environ
 			approvals,
 		)))
 		.with_tool_admission(Arc::new(omp_driver::headless::kernel::SettingsAdmission::new(
-			&con, None,
+			&con, None, &root,
 		)));
 	let mut home = session_home(temp, &kernel);
 	home.project_root.clone_from(&root);

@@ -7388,7 +7388,12 @@ impl EnvServer {
 		} else {
 			connection
 				.tool_settings
-				.approval_for(invocation_id.clone(), request.name.as_str(), &maximum_effects)
+				.approval_for(
+					invocation_id.clone(),
+					request.name.as_str(),
+					&maximum_effects,
+					connection.exec_host.sandbox_state(),
+				)
 				.policy
 		};
 		let cancel = CancellationToken::new();
@@ -13629,22 +13634,24 @@ mod tests {
 			..Effects::empty()
 		};
 
+		let sandbox = crate::admission::SandboxState::Active;
+
 		assert_eq!(
 			yolo
 				.tool_settings
-				.approval_for("yolo", "bash", &effects)
+				.approval_for("yolo", "bash", &effects, sandbox)
 				.policy,
 			crate::admission::ApprovalPolicy::Allow
 		);
 		assert_eq!(
 			inherited
 				.tool_settings
-				.approval_for("inherited", "bash", &effects)
+				.approval_for("inherited", "bash", &effects, sandbox)
 				.policy,
 			crate::admission::ApprovalPolicy::Prompt
 		);
 		assert_eq!(
-			base.approval_for("base", "bash", &effects).policy,
+			base.approval_for("base", "bash", &effects, sandbox).policy,
 			crate::admission::ApprovalPolicy::Prompt
 		);
 	}

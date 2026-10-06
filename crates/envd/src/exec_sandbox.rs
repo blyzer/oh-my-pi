@@ -20,6 +20,7 @@ use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
 use parking_lot::Mutex;
 
 use crate::{
+	admission::{SandboxState, SandboxUnavailable},
 	exec_settings::{
 		EnvironmentInheritance, ExecSandboxMode, ReadMode, SandboxNetworkMode, SandboxSettings,
 		UnscopedWrites,
@@ -1145,6 +1146,40 @@ fn carve_out_paths(root: &Path, resolved_root: &Path, name: &str) -> io::Result<
 		push_unique(&mut paths, resolved_target);
 	}
 	Ok(paths)
+}
+
+impl SandboxUnavailable {
+	/// Classifies a failed compile as a platform limit or a refused policy.
+	pub(crate) fn classify(error: &SandboxError) -> Self {
+		match error {
+			SandboxError::UnsupportedHost { .. } => Self::UnsupportedHost,
+			SandboxError::BackendUnavailable { .. } => Self::BackendUnavailable,
+			_ => Self::PolicyRejected,
+		}
+	}
+
+	/// Whether commands may still run, unsandboxed and under approval.
+	///
+	/// A refused policy is a configuration fault that keeps failing closed.
+	pub(crate) const fn runs_unsandboxed(self) -> bool {
+		!matches!(self, Self::PolicyRejected)
+	}
+}
+
+/// Constructs the sandbox `settings` ask for, once, and reports what applies.
+///
+/// Only a constructed filesystem sandbox is [`SandboxState::Active`]; a
+/// network- or environment-only wrapper keeps the host filesystem view and is
+/// not confinement.
+pub(crate) fn probe(settings: &SandboxSettings, workspace_root: &Path) -> SandboxState {
+	if settings.mode == ExecSandboxMode::Off {
+		return SandboxState::Off;
+	}
+	match ExecSandbox::compile(settings, workspace_root, true) {
+		Ok(Some(_)) => SandboxState::Active,
+		Ok(None) => SandboxState::Off,
+		Err(error) => SandboxState::Unavailable { cause: SandboxUnavailable::classify(&error) },
+	}
 }
 
 fn capability_failure(error: &SandboxError) -> bool {

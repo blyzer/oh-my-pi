@@ -41,7 +41,7 @@ variables, exit codes, and `$!` do not survive between calls.
 3. The console is stateful across calls: cwd, exports, variables, exit codes, `$!`, background
    jobs (0010).
 4. Approval follows enforcement; it is not predicted before execution. When the exec sandbox is
-   enabled (`sv_sandbox_mode` is `read-only` or `workspace-write`; the default is `off`), policy
+   enabled (`sv_sandbox_mode` is `read-only` or `workspace-write`; the default is `workspace-write`, see the 2026-10-06 amendment), policy
    is enforced as the command runs: the interpreter's in-process path policy for redirections and
    builtins, the OS sandbox for spawned processes, and, in `scoped` network mode, an egress broker
    for network. A denial
@@ -71,7 +71,7 @@ variables, exit codes, and `$!` do not survive between calls.
   engineering surface; incompatibilities with GNU/BSD edge behaviour are the harness's bugs.
 - Cost accepted: approval comes after a denial and the command reruns from its start, so side
   effects that completed before the denial can repeat. Whether the rerun is safe for a given
-  command is not checked. With the sandbox off (the default), no approval prompt exists at all.
+  command is not checked. With the sandbox off, no denial-and-rerun prompt exists, and under the 2026-10-06 amendment the shell itself then prompts under `write`.
 
 ## Amendment (2026-10-04)
 
@@ -85,12 +85,33 @@ what the sandbox can state precisely. Predicting capabilities before execution i
 claimed. The earlier gap note 'no distinct network-request approval' was stale and is removed:
 network amendments exist and are part of this model.
 
+## Amendment (2026-10-06)
+
+The owner decided that the approval mode `yolo` (never ask) is honoured only while a native sandbox
+confines the commands the agent runs. This is a deliberate change from omp 1.x, where `yolo` was
+unconditional.
+
+1. `sv_sandbox_mode` defaults to `workspace-write`. The default approval mode stays `yolo`, so a fresh
+   install runs unprompted inside the sandbox.
+2. The effective approval mode is one pure function of the configured mode and the sandbox state
+   (`effective_approval_mode`, `crates/envd/src/admission.rs`): `yolo` becomes `write` unless a sandbox
+   was actually constructed (`SandboxState::Active`). The state is `active`, `off` (mode `off`), or
+   `unavailable` (requested but not constructible on this host). The convar alone never counts.
+3. A platform that cannot construct the sandbox (no native backend, or the backend fails its live probe)
+   does not stop commands from running; it removes the confinement. Commands then run unsandboxed under
+   `write`, and the shell is process authority: with no sandbox in force `bash` resolves to the `exec`
+   tier (it still declares no effects), so it prompts. A refused policy (a configuration fault) still
+   fails the session open. A per-tool `sv_tools_approval` override stays authoritative either way.
+4. The downgrade is reported once per session as a typed notice, `<notice kind=warn
+   name=approval-downgrade>`, whose data carries the configured mode, the effective mode, and the
+   sandbox state with its cause.
+
 ## Status in omp
 
-**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: approval exists only when the sandbox is enabled, and a rerun can repeat side effects. (Verified 2026-10-04 against `omp2` at `9b2d91fe9d`.)
+**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: the denial-and-rerun prompt exists only while a sandbox is constructed, and a rerun can repeat side effects. `yolo` is honoured only inside an active sandbox (2026-10-06 amendment). (Verified 2026-10-06 against `omp2` at `f2ca37d533`, plus the changes of that amendment.)
 
 - In-process shell: `crates/shell` (parser/runtime) and `crates/shell-builtins` (about 80 builtins including `grep` and `rg` on the ripgrep libraries, `find`, `sed`, `sort`, `ln`, `jq`); persistent cwd and exports through `crates/envd/src/exec.rs`.
-- Enforcement: `ExecSandbox` and its per-attempt wrapper in `crates/envd/src/exec_sandbox.rs` implement the shell's `PathPolicy` and `SpawnWrapper`; `exec.rs` installs both on each run (`set_path_policy`, `set_spawn_wrapper`). The sandbox is off by default (`SV_SANDBOX_MODE`, `crates/envd/src/exec_settings/sandbox.rs`); network is `disabled` by default (`SV_SANDBOX_NETWORK_MODE`), and the scoped egress broker (`crates/envd/src/sandbox_proxy.rs`) is what produces a typed network fact.
+- Enforcement: `ExecSandbox` and its per-attempt wrapper in `crates/envd/src/exec_sandbox.rs` implement the shell's `PathPolicy` and `SpawnWrapper`; `exec.rs` installs both on each run (`set_path_policy`, `set_spawn_wrapper`). The sandbox is `workspace-write` by default (`SV_SANDBOX_MODE`, `crates/envd/src/exec_settings/sandbox.rs`), and `SandboxState::probe` reports whether it was constructed; network is `disabled` by default (`SV_SANDBOX_NETWORK_MODE`), and the scoped egress broker (`crates/envd/src/sandbox_proxy.rs`) is what produces a typed network fact.
 - Approval: `classify_sandbox_denial` in `crates/envd/src/exec.rs` types the denial (`SandboxDenialFact::{ReadPath, WritePath, Network, Unknown}`); `approve_sandbox_amendment` asks one `sandbox_amendment` ticket (scope `once`, human required, 120 s timeout, fail-closed, and false when no route is bound); on approval `run_session_command` reruns the command once with `amended_scope` or `amended_network` (guarded by `command.rerun`). `Unknown` denials are never amended. Path scopes are captured with identity checks before the rerun (`ApprovedPathScope` in `exec_sandbox.rs`).
 - Tool-level admission: `bash@2` declares `Effects::empty()` (`crates/tools/src/shell.rs`), so the tier derived in `crates/envd/src/admission.rs` is `read` and no mode prompts for it; only a per-tool `sv_tools_approval` override or a hook changes that. Nested `dyn` targets are admitted separately on their own effects (`DynamicAdmission`, `crates/envd/src/devices_host.rs`).
 - Not implemented, and no longer claimed: a git-push, `ln` or other capability unit; prediction of capabilities before execution (grep of `crates/shell`, `crates/envd/src/exec*`). The comment on `effects` in `crates/tools/src/shell.rs` once said the environment host admits exact filesystem, spawn and network effects as interpretation reaches those boundaries; it overstated the code and now describes the static empty declaration and the denial, single prompt and single rerun model.

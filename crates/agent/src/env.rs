@@ -156,4 +156,17 @@ pub enum EnvEvent {
 		/// Notice body.
 		body: Str,
 	},
+	/// A host notice whose identifying facts travel as a typed JSON payload,
+	/// journaled as `<notice kind=… name=…>` carrying that payload in its data
+	/// prop; `body` is only the fallback for projections that ignore it.
+	TypedNotice {
+		/// Notice kind (`warn`, …).
+		kind: Str,
+		/// Producer-chosen name.
+		name: Str,
+		/// Typed payload, serialized once by the producer.
+		data: Box<serde_json::value::RawValue>,
+		/// Fallback body.
+		body: Str,
+	},
 }

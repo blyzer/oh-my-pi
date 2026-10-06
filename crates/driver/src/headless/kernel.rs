@@ -700,20 +700,70 @@ fn admission_spec(
 /// approval mode, and per-tool overrides.
 pub struct SettingsAdmission {
 	settings: omp_envd::tool_settings::ToolSettings,
+	sandbox:  omp_envd::admission::SandboxState,
+	notice:   Option<DowngradeNotice>,
+}
+
+/// The one-per-session report that a configured approval mode is not in force.
+struct DowngradeNotice {
+	downgrade: omp_envd::admission::ApprovalDowngrade,
+	mailbox:   flume::Sender<omp_agent::Up>,
+	posted:    std::sync::atomic::AtomicBool,
 }
 
 impl SettingsAdmission {
 	/// Resolves the policy from the effective control plane plus the
-	/// invocation's `--approval-mode` override.
+	/// invocation's `--approval-mode` override, against the sandbox the control
+	/// plane constructs for `workspace_root`.
 	#[must_use]
 	pub fn new(
 		ctx: &omp_con::Ctx,
 		approval_mode: Option<omp_envd::tool_settings::ApprovalMode>,
+		workspace_root: &Path,
 	) -> Self {
 		Self {
 			settings: omp_envd::tool_settings::ToolSettings::from_con(ctx)
 				.with_approval_mode_override(approval_mode),
+			sandbox:  omp_envd::admission::SandboxState::probe(ctx, workspace_root),
+			notice:   None,
 		}
+	}
+
+	/// Reports a downgraded approval mode once, as a typed notice on `mailbox`,
+	/// when the first call is admitted.
+	#[must_use]
+	pub fn with_notices(mut self, mailbox: flume::Sender<omp_agent::Up>) -> Self {
+		self.notice =
+			omp_envd::admission::ApprovalDowngrade::resolve(self.settings.approval_mode, self.sandbox)
+				.map(|downgrade| DowngradeNotice {
+					downgrade,
+					mailbox,
+					posted: std::sync::atomic::AtomicBool::new(false),
+				});
+		self
+	}
+
+	fn report_downgrade(&self) {
+		let Some(notice) = &self.notice else {
+			return;
+		};
+		if notice
+			.posted
+			.swap(true, std::sync::atomic::Ordering::AcqRel)
+		{
+			return;
+		}
+		let Ok(data) = serde_json::value::to_raw_value(&notice.downgrade) else {
+			return;
+		};
+		let _ = notice
+			.mailbox
+			.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
+				kind: Str::new_static("warn"),
+				name: Str::new_static(omp_envd::admission::APPROVAL_DOWNGRADE_NOTICE),
+				data,
+				body: notice.downgrade.body(),
+			}));
 	}
 }
 
@@ -724,7 +774,10 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 		effects: &omp_tool::Effects,
 		args: &serde_json::value::RawValue,
 	) -> omp_agent::ToolAdmissionVerdict {
-		let resolved = self.settings.approval_for(name, name, effects);
+		self.report_downgrade();
+		let resolved = self
+			.settings
+			.approval_for(name, name, effects, self.sandbox);
 		match resolved.policy {
 			omp_envd::admission::ApprovalPolicy::Allow => omp_agent::ToolAdmissionVerdict::Allow,
 			omp_envd::admission::ApprovalPolicy::Deny => omp_agent::ToolAdmissionVerdict::Deny(sf!(
@@ -763,7 +816,10 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 					evidence: vec![sf!(
 						"{} tier under approval mode {}",
 						<&'static str>::from(resolved.tier),
-						<&'static str>::from(self.settings.approval_mode)
+						<&'static str>::from(omp_envd::admission::effective_approval_mode(
+							self.settings.approval_mode,
+							self.sandbox
+						))
 					)],
 				})
 			},
@@ -2302,13 +2358,17 @@ pub async fn compose_kernel(
 	// where each prompt is journaled under `<queues><prompts>` and answered
 	// by the host's `Up::Approve`.
 	let approvals = kernel.approval_route();
+	let notice_mailbox = kernel.mailbox();
 	kernel.inference().environment().bind_approval_authority(
 		Some(Arc::new(omp_agent::ApprovalBook::new())),
 		Some(approvals.clone()),
 	);
 	let mut kernel = kernel
 		.with_external_executor(Arc::new(EnvToolExecutor::new(tool_client, approvals)))
-		.with_tool_admission(Arc::new(SettingsAdmission::new(&ctx, options.approval_mode)));
+		.with_tool_admission(Arc::new(
+			SettingsAdmission::new(&ctx, options.approval_mode, &project_root)
+				.with_notices(notice_mailbox),
+		));
 	kernel.register_live_component(con_journal.live_component());
 	for component in live_python_components {
 		kernel.register_live_component(Box::new(component));

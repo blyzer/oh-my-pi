@@ -24,13 +24,14 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
 pub enum ExecSandboxMode {
-	/// Do not sandbox agent commands.
-	#[default]
+	/// Do not sandbox agent commands. Without a sandbox, `yolo` approval is not
+	/// honoured.
 	Off,
 	/// Prevent agent commands from writing anywhere.
 	ReadOnly,
 	/// Permit writes only to the workspace, temporary directories, and extra
 	/// roots.
+	#[default]
 	WorkspaceWrite,
 }
 
@@ -145,9 +146,10 @@ omp_con::con_enum!(ReadMode);
 omp_con::con_enum!(SandboxNetworkMode);
 
 omp_con::var! {
-	/// Choose the filesystem sandbox posture for agent commands.
+	/// Choose the filesystem sandbox posture for agent commands. On by default; where the
+	/// platform cannot construct it, commands run under `write` approval instead of `yolo`.
 	pub static SV_SANDBOX_MODE = sv_sandbox_mode: ExecSandboxMode {
-		default: ExecSandboxMode::Off,
+		default: ExecSandboxMode::WorkspaceWrite,
 		flags: archive,
 	};
 	/// Choose disabled, open, or scoped network access.
@@ -334,7 +336,7 @@ pub struct SandboxSettings {
 impl Default for SandboxSettings {
 	fn default() -> Self {
 		Self {
-			mode:               ExecSandboxMode::Off,
+			mode:               ExecSandboxMode::WorkspaceWrite,
 			network_mode:       SandboxNetworkMode::Disabled,
 			cpu_cores:          0.0,
 			memory_bytes:       0,
@@ -597,10 +599,26 @@ mod tests {
 	}
 
 	#[test]
-	fn default_sandbox_projects_off() {
+	fn default_sandbox_is_workspace_write_with_the_network_closed() {
 		let settings = SandboxSettings::from_con(&Ctx::new());
 		assert_eq!(settings, SandboxSettings::default());
-		assert_eq!(settings.mode, ExecSandboxMode::Off);
+		assert_eq!(settings.mode, ExecSandboxMode::WorkspaceWrite);
+		assert_eq!(ExecSandboxMode::default(), ExecSandboxMode::WorkspaceWrite);
+		assert_eq!(settings.network_mode, SandboxNetworkMode::Disabled);
+		assert_eq!(
+			SV_SANDBOX_MODE.get(&Ctx::new()),
+			ExecSandboxMode::WorkspaceWrite,
+			"the convar default is the shipped posture"
+		);
+	}
+
+	#[test]
+	fn an_explicit_off_survives_the_default_flip() {
+		let ctx = Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&ctx, ExecSandboxMode::Off)
+			.expect("set mode");
+		assert_eq!(SandboxSettings::from_con(&ctx).mode, ExecSandboxMode::Off);
 	}
 
 	#[test]

@@ -28,6 +28,12 @@ client and framing boundary; it does not contain an alternate host.
   children; they are not a legacy Python tool-child route.
 - `policy`, `admission`, `http_egress`, `vault`, and `recovery` enforce access
   decisions and manage durable runtime state.
+- `exec_sandbox` compiles the command sandbox (`sv_sandbox_mode`, on by
+  default as `workspace-write`). `admission::effective_approval_mode` is the
+  one rule that joins it to approval: `yolo` is honoured only while a sandbox
+  was actually constructed (`SandboxState::Active`); otherwise `write` is in
+  force, the unconfined `bash` tool resolves to the `exec` tier, and one typed
+  `approval-downgrade` notice reports the change.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 

@@ -13,6 +13,7 @@ use std::{
 use omp_adw::{ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, SelectedInput, WriteScope};
 use omp_core::{Str, StrMut, sf};
 use omp_envd::{
+	admission::{SandboxState, effective_approval_mode},
 	exec_settings::{ExecSandboxMode, SandboxNetworkMode},
 	tool_settings::ApprovalMode,
 };
@@ -149,18 +150,28 @@ impl AdwHost for ProductionAdwHost {
 	}
 
 	fn posture(&self) -> Result<Posture, Self::Error> {
+		let sandbox = SandboxState::probe(&self.ctx, &self.root);
+		let mode = omp_envd::exec_settings::SV_SANDBOX_MODE.get(&self.ctx);
+		// A requested sandbox that was not constructed confines nothing, so the
+		// posture is the host's, not the convar's.
+		let unconfined = mode != ExecSandboxMode::Off && !sandbox.confines();
 		Ok(Posture {
-			write:    match omp_envd::exec_settings::SV_SANDBOX_MODE.get(&self.ctx) {
+			write:    match mode {
+				_ if unconfined => WriteScope::Unconfined,
 				ExecSandboxMode::ReadOnly => WriteScope::ReadOnly,
 				ExecSandboxMode::WorkspaceWrite => WriteScope::WorkspaceWrite,
 				ExecSandboxMode::Off => WriteScope::Unconfined,
 			},
 			network:  match omp_envd::exec_settings::SV_SANDBOX_NETWORK_MODE.get(&self.ctx) {
+				_ if unconfined => NetworkScope::Unrestricted,
 				SandboxNetworkMode::Disabled => NetworkScope::Disabled,
 				SandboxNetworkMode::Scoped => NetworkScope::Scoped,
 				SandboxNetworkMode::Open => NetworkScope::Unrestricted,
 			},
-			approval: match omp_envd::tool_settings::SV_TOOLS_APPROVAL_MODE.get(&self.ctx) {
+			approval: match effective_approval_mode(
+				omp_envd::tool_settings::SV_TOOLS_APPROVAL_MODE.get(&self.ctx),
+				sandbox,
+			) {
 				ApprovalMode::AlwaysAsk => ApprovalScope::AlwaysAsk,
 				ApprovalMode::Write => ApprovalScope::Write,
 				ApprovalMode::Yolo => ApprovalScope::Yolo,

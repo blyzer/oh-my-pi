@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// Runtime posture for automatic tool-admission decisions.
 pub use super::admission::ApprovalMode;
-use super::admission::{ApprovalPolicy, ResolvedApproval, resolve_approval};
+use super::admission::{ApprovalPolicy, ResolvedApproval, SandboxState, resolve_approval};
 
 omp_con::con_enum!(ApprovalMode);
 
@@ -89,7 +89,8 @@ omp_con::var! {
 			"legacy.path": "edit.streamingAbort",
 		},
 	};
-	/// Default approval behavior for tool calls.
+	/// Default approval behavior for tool calls. `yolo` is honoured only while a sandbox
+	/// confines commands (`sv_sandbox_mode`); otherwise `write` is in force.
 	pub static SV_TOOLS_APPROVAL_MODE = sv_tools_approval_mode: ApprovalMode {
 		default: ApprovalMode::Yolo,
 		flags: archive,
@@ -102,7 +103,7 @@ omp_con::var! {
 			"ui.option.write": "Write",
 			"ui.option.write.desc": "Auto-approve read-only and write tools; require confirmation for exec tools.",
 			"ui.option.yolo": "Yolo",
-			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools; user policy can still prompt or block.",
+			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools inside an active sandbox; without one, Write is in force. User policy can still prompt or block.",
 			"legacy.path": "tools.approvalMode",
 		},
 	};
@@ -567,12 +568,14 @@ impl ToolSettings {
 		self.enabled.get(name).copied().unwrap_or(true)
 	}
 
-	/// Resolves and receipts one invocation against its live declared effects.
+	/// Resolves and receipts one invocation against its live declared effects
+	/// and the sandbox state that applies to it.
 	pub fn approval_for(
 		&self,
 		invocation_id: impl Into<Str>,
 		tool_name: impl Into<Str>,
 		effects: &Effects,
+		sandbox: SandboxState,
 	) -> ResolvedApproval {
 		let tool_name = tool_name.into();
 		resolve_approval(
@@ -580,6 +583,7 @@ impl ToolSettings {
 			tool_name.clone(),
 			effects,
 			self.approval_mode,
+			sandbox,
 			self.approval.get(&tool_name).copied(),
 		)
 	}
@@ -785,7 +789,7 @@ mod tests {
 			exec: Some(ExecEffects { commands: [sf!("*")].into(), network: true }),
 			..Effects::empty()
 		};
-		let decision = settings.approval_for("call-1", "bash", &effects);
+		let decision = settings.approval_for("call-1", "bash", &effects, SandboxState::Active);
 		assert_eq!(decision.tier, ApprovalTier::Exec);
 		assert_eq!(decision.policy, ApprovalPolicy::Deny);
 		assert_eq!(decision.source, ApprovalSource::User);
@@ -804,11 +808,15 @@ mod tests {
 			.clone()
 			.with_approval_mode_override(Some(ApprovalMode::Yolo));
 		assert_eq!(
-			overridden.approval_for("override", "bash", &effects).policy,
+			overridden
+				.approval_for("override", "bash", &effects, SandboxState::Active)
+				.policy,
 			ApprovalPolicy::Allow
 		);
 		assert_eq!(
-			persisted.approval_for("persisted", "bash", &effects).policy,
+			persisted
+				.approval_for("persisted", "bash", &effects, SandboxState::Active)
+				.policy,
 			ApprovalPolicy::Prompt
 		);
 

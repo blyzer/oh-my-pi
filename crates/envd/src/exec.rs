@@ -11,7 +11,7 @@ use std::{
 	path::{Path, PathBuf},
 	process::{self, Command, Stdio},
 	sync::{
-		Arc, Weak,
+		Arc, OnceLock, Weak,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	thread,
@@ -60,7 +60,8 @@ use url::Url;
 
 use super::{
 	admission,
-	admission::GithubMutationTarget,
+	admission::{GithubMutationTarget, SandboxUnavailable},
+	exec_sandbox,
 	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxDenialFact},
 	exec_settings::{ExecSandboxMode, SandboxNetworkMode, SandboxSettings},
 	process_identity::{IdentityError, ProcessIdentity},
@@ -301,6 +302,8 @@ struct HostInner {
 struct SandboxConfig {
 	settings:       SandboxSettings,
 	workspace_root: PathBuf,
+	/// What constructing `settings` yields on this host, probed on first use.
+	state:          OnceLock<admission::SandboxState>,
 }
 
 struct ProcessPersistence {
@@ -530,8 +533,21 @@ impl ExecHost {
 		.then(|| SandboxConfig {
 			settings:       settings.clone(),
 			workspace_root: workspace_root.to_path_buf(),
+			state:          OnceLock::new(),
 		});
 		*self.inner.sandbox.lock() = config;
+	}
+
+	/// Reports whether a constructed sandbox confines commands of this host.
+	pub(crate) fn sandbox_state(&self) -> admission::SandboxState {
+		let config = self.inner.sandbox.lock();
+		config
+			.as_ref()
+			.map_or(admission::SandboxState::Off, |config| {
+				*config
+					.state
+					.get_or_init(|| exec_sandbox::probe(&config.settings, &config.workspace_root))
+			})
 	}
 
 	pub(crate) fn active_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
@@ -550,8 +566,17 @@ impl ExecHost {
 			};
 			(config.settings.clone(), config.workspace_root.clone())
 		};
-		ExecSandbox::compile(&settings, &workspace_root, supervised)
-			.map_err(|source| ExecError::Sandbox { mode: settings.mode.into(), source })
+		match ExecSandbox::compile(&settings, &workspace_root, supervised) {
+			Ok(sandbox) => Ok(sandbox),
+			// A platform that cannot confine commands still runs them, but only
+			// under approval: the sandbox state resolves the mode to `write` and
+			// the shell to the `exec` tier.
+			Err(source) if SandboxUnavailable::classify(&source).runs_unsandboxed() => {
+				tracing::warn!(%source, "sandbox unavailable; commands run unsandboxed under approval");
+				Ok(None)
+			},
+			Err(source) => Err(ExecError::Sandbox { mode: settings.mode.into(), source }),
+		}
 	}
 
 	/// Binds the interactive approval route used for one-shot sandbox

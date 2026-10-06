@@ -1852,7 +1852,7 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 			approvals,
 		)))
 		.with_tool_admission(Arc::new(omp_driver::headless::kernel::SettingsAdmission::new(
-			&con, None,
+			&con, None, &root,
 		)));
 	let home = SessionHome {
 		sessions_dir:  sessions_dir.clone(),

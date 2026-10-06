@@ -4813,7 +4813,12 @@ pub(crate) fn production_registry<
 			Arc::clone(&hooks),
 			blobs.clone(),
 			mcp_manager,
-			DynamicAdmission::new(tool_settings.approval_mode, tool_settings.approval.clone(), None),
+			DynamicAdmission::new(
+				tool_settings.approval_mode,
+				exec.sandbox_state(),
+				tool_settings.approval.clone(),
+				None,
+			),
 		)));
 	}
 	if tool_settings.enabled("bash") && shell_settings.enabled {
