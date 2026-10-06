@@ -1063,8 +1063,9 @@ mod tests {
 			"the package root is part of the approval key: {local:?}"
 		);
 
-		let blocked =
-			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &McpSettings::default());
+		let blocked = crate::plugin_commands::blocked_agent_plugin_launches(&paths, &McpSettings {
+			enable_project_config: true,
+		});
 		assert_eq!(
 			blocked
 				.iter()

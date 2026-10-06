@@ -119,7 +119,11 @@ impl ConfigSourceKind {
 		enable_project_config || !self.project_scoped()
 	}
 
-	const fn project_scoped(self) -> bool {
+	/// Whether the declarations of this source kind are authored by the project
+	/// (a repository file or a plugin installed for the project), not by the
+	/// user or an explicitly named plugin. Their values are never dynamic.
+	#[must_use]
+	pub const fn project_scoped(self) -> bool {
 		matches!(
 			self,
 			Self::Project

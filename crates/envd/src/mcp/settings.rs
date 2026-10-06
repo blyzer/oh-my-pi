@@ -4,9 +4,12 @@ use omp_con::Ctx;
 use serde::{Deserialize, Serialize};
 
 omp_con::var! {
-	/// Load .mcp.json/mcp.json from project root.
+	/// Load project-scoped MCP server definitions (.omp/mcp.json, .mcp.json, and the
+	/// foreign editor files) from the project. Off by default: a project file can
+	/// start processes with your authority, so enable it only for projects you trust.
+	/// User-level only; a project cfg overlay can never set it.
 	pub static SV_MCP_ENABLE_PROJECT_CONFIG = sv_mcp_enable_project_config: bool {
-		default: true,
+		default: false,
 		flags: archive,
 		meta: {
 			"ui.tab": "tools",
@@ -18,17 +21,12 @@ omp_con::var! {
 }
 
 /// Native MCP discovery policy.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct McpSettings {
-	/// Whether project `.omp/mcp.json` and root `.mcp.json` sources participate.
+	/// Whether project-scoped sources (`.omp/mcp.json`, `.mcp.json`, and the
+	/// foreign editor files) participate. Off by default.
 	pub enable_project_config: bool,
-}
-
-impl Default for McpSettings {
-	fn default() -> Self {
-		Self { enable_project_config: true }
-	}
 }
 
 impl McpSettings {
@@ -41,10 +39,33 @@ impl McpSettings {
 
 #[cfg(test)]
 mod tests {
+	use omp_con::{ConError, Source};
+	use omp_core::Str;
+
 	use super::*;
 
 	#[test]
-	fn con_defaults_enabled() {
-		assert!(McpSettings::from_con(&Ctx::new()).enable_project_config);
+	fn con_defaults_disabled() {
+		assert!(!McpSettings::default().enable_project_config);
+		assert!(!McpSettings::from_con(&Ctx::new()).enable_project_config);
+	}
+
+	#[test]
+	fn user_level_opt_in_enables_project_config() {
+		let ctx = Ctx::new();
+		SV_MCP_ENABLE_PROJECT_CONFIG
+			.set(&ctx, true)
+			.expect("user-level set");
+		assert!(McpSettings::from_con(&ctx).enable_project_config);
+	}
+
+	#[test]
+	fn a_project_overlay_can_never_enable_it() {
+		let ctx = Ctx::new();
+		let denied = ctx
+			.exec("sv_mcp_enable_project_config true", Source::Project(Str::new_static("config.cfg")))
+			.expect_err("project overlay is denied");
+		assert!(matches!(denied, ConError::ProjectVarDenied { .. }), "{denied:?}");
+		assert!(!McpSettings::from_con(&ctx).enable_project_config);
 	}
 }

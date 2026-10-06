@@ -66,7 +66,8 @@ use super::{
 		RequestIdFormat as ConfigRequestIdFormat, ResolvedConfig, TransportKind, validate_server,
 	},
 	config_values::{
-		ConfigValueError, ResolvedConfigValue, ResolvedTransportValues, resolve_transport_values,
+		ConfigValueError, ResolvedConfigValue, ResolvedTransportValues, ValueResolution,
+		resolve_transport_values,
 	},
 	control::{ControlMountResolver, McpControlError},
 	device::{DeviceError, McpDeviceDefinitions, McpDeviceProjection},
@@ -206,7 +207,7 @@ impl ControlMountResolver for ManagerControlMountResolver {
 			let mut spec = declaration.resolve(Arc::clone(&self.identity), config_json)?;
 			spec.values = self
 				.manager
-				.resolve_values(&spec.config, &self.cancellation)
+				.resolve_values(&spec.config, &self.cancellation, ValueResolution::Dynamic)
 				.await
 				.map_err(McpControlError::Manager)?;
 			Ok(spec)
@@ -1045,11 +1046,18 @@ impl McpManager {
 		&self,
 		config: &McpServerConfig,
 		cancellation: &CancellationToken,
+		resolution: ValueResolution,
 	) -> Result<ResolvedTransportValues, ManagerError> {
 		let commands = self.commands.read().clone();
-		resolve_transport_values(config, &self.environment, commands.as_deref(), cancellation)
-			.await
-			.map_err(ManagerError::ConfigValues)
+		resolve_transport_values(
+			config,
+			&self.environment,
+			commands.as_deref(),
+			cancellation,
+			resolution,
+		)
+		.await
+		.map_err(ManagerError::ConfigValues)
 	}
 
 	/// Starts all declarations in parallel, waits at most 250 ms, and leaves
@@ -1137,13 +1145,26 @@ impl McpManager {
 				filtered_mount.suppressed_tools.clear();
 			}
 			let config = Arc::clone(&filtered_mount.server.config);
-			let values = match self.resolve_values(&config, &self.shutdown).await {
+			let source_kind = filtered_mount.server.source_kind;
+			let resolution = ValueResolution::for_source(source_kind);
+			let values = match self
+				.resolve_values(&config, &self.shutdown, resolution)
+				.await
+			{
 				Ok(values) => values,
 				Err(error) => {
 					tracing::warn!(server = %name, %error, "MCP config refresh skipped unresolved values");
 					continue;
 				},
 			};
+			for notice in &values.notices {
+				tracing::warn!(
+					server = %name,
+					source = <&'static str>::from(source_kind),
+					error = notice as &(dyn std::error::Error + 'static),
+					"project MCP value taken literally"
+				);
+			}
 			let Ok(config_json) = serde_json::to_vec(config.as_ref()).map(Bytes::from) else {
 				continue;
 			};
