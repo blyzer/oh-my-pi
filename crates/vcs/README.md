@@ -20,3 +20,12 @@ variants, never stderr regexes. The CLI escape hatch (`git/cli.rs`) is
 deliberately small, hardened (non-interactive env, stripped `GIT_DIR` family,
 bounded capture, deadline + SIGTERM→SIGKILL), and reserved for the two cases
 above.
+
+Test support: the `test-support` feature exposes `omp_vcs::testing`, the one
+place tests obtain a `git` command. It is hermetic with respect to the host
+(`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`, `HOME`,
+`XDG_CONFIG_HOME`, `GIT_CONFIG_COUNT`, identity and repository-location
+variables) and pins signing off and `main` as the initial branch, so a
+developer's `~/.gitconfig` can never change a fixture's outcome. Production
+git runs stay unisolated on purpose: the user's identity and credentials are
+wanted there. Dependents enable the feature from `[dev-dependencies]` only.

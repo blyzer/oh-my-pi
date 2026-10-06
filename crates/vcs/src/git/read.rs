@@ -1170,7 +1170,7 @@ fn cap_bytes(mut bytes: Vec<u8>, max: Option<usize>) -> ShowResult {
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, process::Command};
+	use std::fs;
 
 	use tempfile::TempDir;
 
@@ -1179,7 +1179,10 @@ mod tests {
 	type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 	fn git(cwd: &Path, args: &[&str]) -> std::result::Result<String, Box<dyn std::error::Error>> {
-		let output = Command::new("git").current_dir(cwd).args(args).output()?;
+		let output = crate::testing::command()
+			.current_dir(cwd)
+			.args(args)
+			.output()?;
 		if !output.status.success() {
 			return Err(
 				format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr))

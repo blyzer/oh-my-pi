@@ -396,19 +396,10 @@ fn strip_config_comment(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, process::Command};
+	use std::fs;
 
 	use super::*;
-	use crate::PushOptions;
-	fn run_git(root: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(root)
-			.args(args)
-			.output()
-			.unwrap();
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout).unwrap()
-	}
+	use crate::{PushOptions, testing::run as run_git};
 
 	#[test]
 	fn reftable_detection_honors_quotes_and_comments() {
