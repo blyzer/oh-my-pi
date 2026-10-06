@@ -61,7 +61,10 @@ use crate::{
 	gitwatch::{GitFacts, GitWatch},
 	media::read_attachments,
 	notices::{
-		error::{aborted_tool_tail, error_banner, pinned_error, retry_hint_row},
+		error::{
+			aborted_tool_tail, error_banner, pinned_error, retry_hint_row, unknown_effects_prompt,
+			unknown_effects_tail,
+		},
 		retry::{RetryLoader, RetryState, superseded_notice_keys},
 		voice::{SpeechSynth, Vocalizer},
 	},
@@ -441,8 +444,13 @@ pub enum HostCommand {
 	/// tool-calling assistant's tail (`Session::tool_tail_retry_target`) and
 	/// resumes the turn, re-dispatching the same calls without a model
 	/// round-trip. Emitted only while idle and [`aborted_tool_tail`] holds —
-	/// the exact predicate that shows the `<key> to Retry` status row.
-	Retry,
+	/// the exact predicate that shows the `<key> to Retry` status row. The
+	/// controller re-runs a call whose effects are unknown only when
+	/// `confirmation` says the user confirmed it.
+	Retry {
+		/// The user's answer to the unknown-effects confirmation.
+		confirmation: omp_agent::RetryConfirmation,
+	},
 	/// Answer (or dismiss, `None`) the `ask` dialog for the tool element
 	/// with call id `id`; the reply becomes that call's result.
 	AskAnswer {
@@ -738,6 +746,9 @@ pub(crate) struct Presenter {
 	pub(crate) cycle: Vec<(Str, Str, Option<Str>)>,
 	/// Last prompt sent as a turn, for `cl_retry`.
 	pub(crate) last_prompt: Option<Str>,
+	/// Call ids the last retry press asked the user to confirm; a second press
+	/// over the same calls confirms them.
+	pub(crate) retry_confirm: Vec<Str>,
 	/// Text the composer asked to copy; the terminal loop drains it into
 	/// the clipboard (OSC 52 / native).
 	pub(crate) clipboard: Option<Str>,
@@ -1211,6 +1222,7 @@ impl Presenter {
 			models: options.models,
 			cycle: options.cycle,
 			last_prompt: None,
+			retry_confirm: Vec::new(),
 			clipboard: None,
 			pending_editor: None,
 			git_watch,
@@ -1486,8 +1498,9 @@ impl Presenter {
 		}
 		if !self.turn_active && aborted_tool_tail(&self.replica) {
 			let label = self.retry_key_label();
+			let confirm = !unknown_effects_tail(&self.replica).is_empty();
 			return Some(
-				Ui::from_root(retry_hint_row(&label), width, self.ui.clone())
+				Ui::from_root(retry_hint_row(&label, confirm), width, self.ui.clone())
 					.frame()
 					.clone(),
 			);
@@ -3117,7 +3130,25 @@ impl Presenter {
 				// The hint row and the action share one predicate: a turn that
 				// died on a tool call replays that batch through the controller.
 				if aborted_tool_tail(&self.replica) {
-					let _ = self.commands.send(HostCommand::Retry);
+					// A call whose effects are unknown may already have run: the
+					// first press names them, a second press over the same calls
+					// confirms the re-run.
+					let unknown = unknown_effects_tail(&self.replica);
+					let ids = unknown
+						.iter()
+						.map(|call| call.call_id.clone())
+						.collect::<Vec<_>>();
+					let confirmation = if unknown.is_empty() {
+						omp_agent::RetryConfirmation::Unconfirmed
+					} else if self.retry_confirm == ids {
+						omp_agent::RetryConfirmation::EffectsUnknown
+					} else {
+						let key = self.retry_key_label();
+						self.retry_confirm = ids;
+						return Ok(self.notice(unknown_effects_prompt(&unknown, &key)));
+					};
+					self.retry_confirm.clear();
+					let _ = self.commands.send(HostCommand::Retry { confirmation });
 					return Ok(self.notice("Retrying the interrupted tool calls"));
 				}
 				match (self.last_turn_failed(), self.last_prompt.clone()) {

@@ -11,8 +11,8 @@ use std::{
 };
 
 use omp_agent::{
-	DispatchPolicy, Inference, Kernel, KernelEvent, RunControl, StaticPrompt, ToolScopedAbortReason,
-	TurnInput, TurnStop, Up,
+	DispatchPolicy, Inference, Kernel, KernelEvent, RetryConfirmation, RunControl, StaticPrompt,
+	ToolScopedAbortReason, TurnInput, TurnStop, Up,
 };
 use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, ContentPart, FinishReason, ProviderId, RequestId,
@@ -1031,9 +1031,10 @@ async fn retry_tool_tail_reruns_the_aborted_call_and_continues_the_turn() {
 		StaticPrompt(Str::new_static("test system")),
 	);
 	let outcome = kernel
-		.retry_tool_tail(&mut session, RunControl::default())
+		.retry_tool_tail(&mut session, RunControl::default(), RetryConfirmation::Unconfirmed)
 		.await
 		.expect("retry succeeds");
+	let outcome = ran(outcome);
 	assert_eq!(outcome.stop, TurnStop::Completed);
 	assert_eq!(outcome.assistant_text.as_str(), "after retry");
 	assert!(!omp_agent::aborted_tool_tail(session.dom(), turn));
@@ -1056,7 +1057,7 @@ async fn retry_tool_tail_reruns_the_aborted_call_and_continues_the_turn() {
 	);
 	assert!(matches!(
 		kernel
-			.retry_tool_tail(&mut session, RunControl::default())
+			.retry_tool_tail(&mut session, RunControl::default(), RetryConfirmation::Unconfirmed)
 			.await,
 		Err(omp_agent::KernelError::NothingToRetry)
 	));
@@ -1095,49 +1096,44 @@ fn recovered_abort(session: &omp_session::Session, call_id: &str) -> omp_tool::A
 	}
 }
 
-/// Journals one authorized-never-started call (`queued`) and one started call
-/// (`running`) in `queued_first` order, then drops the session as a crash
-/// would, reopens it, recovers it, and retries the tail on a fresh kernel.
-#[allow(
-	clippy::future_not_send,
-	reason = "awaited only from the single-threaded #[tokio::test] runtime; the scripted chat \
-	          stream is Send but not Sync"
-)]
-async fn retry_recovered_tail(queued_first: bool) {
-	let directory = tempfile::tempdir().expect("temporary directory");
-	let journal_path = directory.path().join("recovered-tail.oms");
-	let mut session = fresh_session(&journal_path);
+/// One call journaled before a simulated crash: `started` when it crossed into
+/// its execution unit, else authorized but never started.
+type CrashedCall = (&'static str, &'static str, bool);
+
+/// The intent a crashed call's arguments carry.
+fn crashed_intent(id: &str) -> String {
+	format!("intent of {id}")
+}
+
+/// Journals `calls` in order under one assistant, drops the session as a crash
+/// would, reopens it, and recovers it: every call settles as an `aborted`
+/// outcome typed by whether it started, and the tail stays retryable.
+fn recover_tail(journal_path: &std::path::Path, calls: &[CrashedCall]) -> omp_session::Session {
+	let mut session = fresh_session(journal_path);
 	session.begin_turn().expect("turn starts");
 	session.user("use both", Vec::new()).expect("user appends");
 	session
 		.assistant_start("test-model", "test-provider", "test-route")
 		.expect("assistant starts tool turn");
-	let authorize = |session: &mut omp_session::Session, name: &str, id: &str, started: bool| {
+	for (name, id, started) in calls.iter().copied() {
 		let (call, _) = session
 			.call_streaming(name, 1, id, None)
 			.expect("call streams");
 		session
-			.call_ready(call, raw(serde_json::json!({"command": id})))
+			.call_ready(call, raw(serde_json::json!({"command": id, "i": crashed_intent(id)})))
 			.expect("call authorized");
 		if started {
 			session
 				.call_started(call)
 				.expect("call crosses into execution");
 		}
-	};
-	if queued_first {
-		authorize(&mut session, "queued", "queued-call", false);
-		authorize(&mut session, "running", "running-call", true);
-	} else {
-		authorize(&mut session, "running", "running-call", true);
-		authorize(&mut session, "queued", "queued-call", false);
 	}
 	drop(session);
 
-	// Reopen: replay restores the execution boundary, recovery settles both
-	// calls as `aborted` with the typed split, and the tail stays retryable.
+	// Reopen: replay restores the execution boundary, recovery settles every
+	// call as `aborted` with the typed split.
 	let mut session =
-		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::default())
+		omp_session::Session::open(journal_path, omp_session::ComponentRegistry::default())
 			.expect("session reopens");
 	let boundaries = session
 		.unsettled_calls()
@@ -1146,18 +1142,23 @@ async fn retry_recovered_tail(queued_first: bool) {
 		.collect::<std::collections::BTreeMap<_, _>>();
 	assert_eq!(
 		boundaries,
-		[("queued-call".to_owned(), false), ("running-call".to_owned(), true)].into(),
+		calls
+			.iter()
+			.map(|(_, id, started)| ((*id).to_owned(), *started))
+			.collect(),
 		"replay restores which call started"
 	);
 	session
 		.recover_process_disappearance()
 		.expect("writable owner recovers calls");
-	assert!(session.unsettled_calls().is_empty(), "recovery settled both calls");
-	assert!(matches!(recovered_abort(&session, "queued-call"), omp_tool::Abort::Skipped { .. }));
-	assert!(matches!(
-		recovered_abort(&session, "running-call"),
-		omp_tool::Abort::EffectsUnknown { .. }
-	));
+	assert!(session.unsettled_calls().is_empty(), "recovery settled every call");
+	for (_, id, started) in calls {
+		match recovered_abort(&session, id) {
+			omp_tool::Abort::EffectsUnknown { .. } => assert!(started, "{id} never started"),
+			omp_tool::Abort::Skipped { .. } => assert!(!started, "{id} started"),
+			other => panic!("{id} recovered as {other:?}"),
+		}
+	}
 	let turn = *session
 		.dom()
 		.children(session.dom().body())
@@ -1167,10 +1168,53 @@ async fn retry_recovered_tail(queued_first: bool) {
 		omp_agent::aborted_tool_tail(session.dom(), turn),
 		"a recovered Skipped/EffectsUnknown tail is retryable"
 	);
+	session
+}
 
-	// Retry re-runs BOTH calls under their original call ids and arguments:
-	// the user's explicit retry authorizes re-running the started call too, so
-	// nothing is skipped or re-issued through the model.
+/// The recovered call that started, as the confirmation reports it.
+fn started_call() -> omp_agent::UnknownEffectsCall {
+	omp_agent::UnknownEffectsCall {
+		call_id: Str::new_static("running-call"),
+		name:    Str::new_static("running"),
+		intent:  Some(Str::new(crashed_intent("running-call"))),
+	}
+}
+
+/// The turn outcome of a retry that ran.
+fn ran(outcome: omp_agent::RetryOutcome) -> omp_agent::TurnOutcome {
+	match outcome {
+		omp_agent::RetryOutcome::Ran(outcome) => outcome,
+		other @ omp_agent::RetryOutcome::NeedsConfirmation { .. } => {
+			panic!("the retry asked for confirmation instead of running: {other:?}")
+		},
+	}
+}
+
+/// Crashes a `queued` (never started) and a `running` (started) call in
+/// `queued_first` order, then retries the recovered tail on a fresh kernel with
+/// the caller's explicit `confirmation`.
+#[allow(
+	clippy::future_not_send,
+	reason = "awaited only from the single-threaded #[tokio::test] runtime; the scripted chat \
+	          stream is Send but not Sync"
+)]
+async fn retry_recovered_tail(queued_first: bool) {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("recovered-tail.oms");
+	let calls: [CrashedCall; 2] = if queued_first {
+		[("queued", "queued-call", false), ("running", "running-call", true)]
+	} else {
+		[("running", "running-call", true), ("queued", "queued-call", false)]
+	};
+	let mut session = recover_tail(&journal_path, &calls);
+	let turn = *session
+		.dom()
+		.children(session.dom().body())
+		.last()
+		.expect("turn");
+
+	// A confirmed retry re-runs BOTH calls under their original call ids and
+	// arguments, so nothing is skipped or re-issued through the model.
 	let queued_runs = Arc::new(AtomicUsize::new(0));
 	let running_runs = Arc::new(AtomicUsize::new(0));
 	let one = || Arc::new(tokio::sync::Barrier::new(1));
@@ -1185,9 +1229,10 @@ async fn retry_recovered_tail(queued_first: bool) {
 		StaticPrompt(Str::new_static("test system")),
 	);
 	let outcome = kernel
-		.retry_tool_tail(&mut session, RunControl::default())
+		.retry_tool_tail(&mut session, RunControl::default(), RetryConfirmation::EffectsUnknown)
 		.await
 		.expect("retry succeeds on a recovered tail");
+	let outcome = ran(outcome);
 	assert_eq!(outcome.stop, TurnStop::Completed);
 	assert_eq!(outcome.assistant_text.as_str(), "after retry");
 	assert_eq!(queued_runs.load(Ordering::SeqCst), 1, "the never-started call ran");
@@ -1222,7 +1267,7 @@ async fn retry_recovered_tail(queued_first: bool) {
 	);
 	assert!(matches!(
 		kernel
-			.retry_tool_tail(&mut session, RunControl::default())
+			.retry_tool_tail(&mut session, RunControl::default(), RetryConfirmation::Unconfirmed)
 			.await,
 		Err(omp_agent::KernelError::NothingToRetry)
 	));
@@ -1231,13 +1276,148 @@ async fn retry_recovered_tail(queued_first: bool) {
 /// PR #168 split recovery of an unsettled call into `Abort::Skipped`
 /// (authorized, never started) and `Abort::EffectsUnknown` (started), both
 /// journaled with outcome kind `aborted`. A reopened-and-recovered session must
-/// still offer the retry: `aborted_tool_tail` holds and `retry_tool_tail`
-/// re-runs both calls with their original ids, in either authorization order,
-/// leaving one live result per call.
+/// still offer the retry: `aborted_tool_tail` holds and a CONFIRMED
+/// `retry_tool_tail` re-runs both calls with their original ids, in either
+/// authorization order, leaving one live result per call.
 #[tokio::test]
-async fn retry_tool_tail_reruns_a_recovered_skipped_and_started_tail() {
+async fn retry_tool_tail_reruns_a_confirmed_skipped_and_started_tail() {
 	retry_recovered_tail(true).await;
 	retry_recovered_tail(false).await;
+}
+
+/// A tail holding a call whose effects are unknown does nothing until the
+/// caller confirms: the typed outcome names only the started call (a mixed tail
+/// still requires confirmation), the journal is untouched, and nothing runs.
+/// The explicit confirmation then re-runs the whole tail.
+#[tokio::test]
+async fn unconfirmed_retry_of_an_effects_unknown_tail_reports_the_calls_and_runs_nothing() {
+	for queued_first in [true, false] {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let journal_path = directory.path().join("unconfirmed-tail.oms");
+		let calls: [CrashedCall; 2] = if queued_first {
+			[("queued", "queued-call", false), ("running", "running-call", true)]
+		} else {
+			[("running", "running-call", true), ("queued", "queued-call", false)]
+		};
+		let mut session = recover_tail(&journal_path, &calls);
+		let turn = *session
+			.dom()
+			.children(session.dom().body())
+			.last()
+			.expect("turn");
+		let queued_runs = Arc::new(AtomicUsize::new(0));
+		let running_runs = Arc::new(AtomicUsize::new(0));
+		let one = || Arc::new(tokio::sync::Barrier::new(1));
+		let (inference, requests) = ScriptedInference::new([text_script("after retry")]);
+		let mut kernel = Kernel::new(
+			inference,
+			registry([
+				spec("queued", 1, "queued settled").concurrency_probe(Arc::clone(&queued_runs), one()),
+				spec("running", 1, "running settled")
+					.concurrency_probe(Arc::clone(&running_runs), one()),
+			]),
+			policy(&directory.path().join("blobs")),
+			StaticPrompt(Str::new_static("test system")),
+		);
+		let journal_before = journal_entries(&journal_path).len();
+
+		// Both the explicit and the default answer are "not confirmed".
+		for confirmation in [RetryConfirmation::Unconfirmed, RetryConfirmation::default()] {
+			let outcome = kernel
+				.retry_tool_tail(&mut session, RunControl::default(), confirmation)
+				.await
+				.expect("an unconfirmed retry is an outcome, not an error");
+			assert_eq!(
+				outcome,
+				omp_agent::RetryOutcome::NeedsConfirmation { calls: [started_call()].into() },
+				"only the call that started may have run"
+			);
+		}
+		assert_eq!(queued_runs.load(Ordering::SeqCst), 0, "the never-started call did not run");
+		assert_eq!(running_runs.load(Ordering::SeqCst), 0, "the unknown-effects call did not run");
+		assert!(requests.lock().is_empty(), "no model round trip");
+		assert_eq!(
+			journal_entries(&journal_path).len(),
+			journal_before,
+			"an unconfirmed retry appends and rewinds nothing"
+		);
+		assert!(omp_agent::aborted_tool_tail(session.dom(), turn), "the tail is still retryable");
+		assert!(session.unsettled_calls().is_empty());
+		assert_eq!(omp_agent::unknown_effects_tail(session.dom(), turn), [started_call()]);
+
+		let outcome = ran(
+			kernel
+				.retry_tool_tail(&mut session, RunControl::default(), RetryConfirmation::EffectsUnknown)
+				.await
+				.expect("a confirmed retry runs"),
+		);
+		assert_eq!(outcome.stop, TurnStop::Completed);
+		assert_eq!(queued_runs.load(Ordering::SeqCst), 1, "the confirmed retry ran the queued call");
+		assert_eq!(running_runs.load(Ordering::SeqCst), 1, "and the unknown-effects call");
+		assert!(!omp_agent::aborted_tool_tail(session.dom(), turn));
+		assert!(omp_agent::unknown_effects_tail(session.dom(), turn).is_empty());
+	}
+}
+
+/// Every started call of the tail is reported, oldest first, and a tail of
+/// never-started calls retries without any confirmation.
+#[tokio::test]
+async fn retry_confirmation_covers_started_calls_and_spares_a_skipped_only_tail() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("two-started.oms");
+	let mut session = recover_tail(&journal_path, &[
+		("running", "first-call", true),
+		("queued", "skipped-call", false),
+		("running", "second-call", true),
+	]);
+	let (inference, _requests) = ScriptedInference::new([text_script("unused")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("queued", 1, "queued settled"), spec("running", 1, "running settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let outcome = kernel
+		.retry_tool_tail(&mut session, RunControl::default(), RetryConfirmation::Unconfirmed)
+		.await
+		.expect("an unconfirmed retry is an outcome");
+	let omp_agent::RetryOutcome::NeedsConfirmation { calls } = outcome else {
+		panic!("a started call requires confirmation");
+	};
+	assert_eq!(
+		calls
+			.iter()
+			.map(|call| (call.call_id.as_str(), call.name.as_str()))
+			.collect::<Vec<_>>(),
+		[("first-call", "running"), ("second-call", "running")]
+	);
+
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("skipped-only.oms");
+	let mut session = recover_tail(&journal_path, &[("queued", "queued-call", false)]);
+	let turn = *session
+		.dom()
+		.children(session.dom().body())
+		.last()
+		.expect("turn");
+	assert!(omp_agent::unknown_effects_tail(session.dom(), turn).is_empty());
+	let runs = Arc::new(AtomicUsize::new(0));
+	let (inference, _requests) = ScriptedInference::new([text_script("after retry")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("queued", 1, "queued settled")
+			.concurrency_probe(Arc::clone(&runs), Arc::new(tokio::sync::Barrier::new(1)))]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let outcome = ran(
+		kernel
+			.retry_tool_tail(&mut session, RunControl::default(), RetryConfirmation::Unconfirmed)
+			.await
+			.expect("a skipped-only tail retries unconfirmed"),
+	);
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(runs.load(Ordering::SeqCst), 1, "the never-started call ran");
 }
 
 /// A user image attachment reaches the provider with the blob's bytes inline

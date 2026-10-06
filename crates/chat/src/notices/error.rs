@@ -430,10 +430,44 @@ fn fault_is_abort(json: &str) -> bool {
 		.unwrap_or(false)
 }
 
-/// The idle `<loop> <key> to Retry` status row.
+/// The calls of the retryable tail that may already have run, as the kernel's
+/// `retry_tool_tail` confirmation reports them
+/// ([`omp_agent::unknown_effects_tail`]).
 #[must_use]
-pub fn retry_hint_row(key_label: &str) -> Component {
-	let text = sf!("{key_label} to Retry");
+pub fn unknown_effects_tail(dom: &Dom) -> Vec<omp_agent::UnknownEffectsCall> {
+	last_turn(dom).map_or_else(Vec::new, |turn| omp_agent::unknown_effects_tail(dom, turn))
+}
+
+/// The notice asking the user to confirm re-running `calls`, which may have
+/// already run.
+#[must_use]
+pub fn unknown_effects_prompt(calls: &[omp_agent::UnknownEffectsCall], key_label: &str) -> String {
+	use std::fmt::Write as _;
+
+	let mut text = String::from("These calls may have already run: ");
+	for (index, call) in calls.iter().enumerate() {
+		if index > 0 {
+			text.push_str(", ");
+		}
+		text.push_str(call.name.as_str());
+		if let Some(intent) = &call.intent {
+			let _ = write!(text, " ({intent})");
+		}
+	}
+	let _ =
+		write!(text, ". Re-running can repeat their effects; press {key_label} again to confirm");
+	text
+}
+
+/// The idle `<loop> <key> to Retry` status row; `confirm` when the retry
+/// first needs the user to confirm calls that may have already run.
+#[must_use]
+pub fn retry_hint_row(key_label: &str, confirm: bool) -> Component {
+	let text = if confirm {
+		sf!("{key_label} to Retry (asks to confirm: some calls may have run)")
+	} else {
+		sf!("{key_label} to Retry")
+	};
 	dom! {
 		<row pad-x=1 gap=1>
 			<icon name="loop" fg=muted/>
@@ -676,7 +710,23 @@ mod tests {
 
 	#[test]
 	fn retry_hint_row_names_the_key() {
-		let row = rows(retry_hint_row("f5"), 40);
+		let row = rows(retry_hint_row("f5", false), 40);
 		assert_eq!(row[0], format!(" {} f5 to Retry", Charset::default().icon(Icon::Loop)));
+		let row = rows(retry_hint_row("f5", true), 80);
+		assert!(row[0].contains("f5 to Retry (asks to confirm"), "{}", row[0]);
+	}
+
+	#[test]
+	fn unknown_effects_prompt_names_each_call_and_its_intent() {
+		let call = |name: &'static str, intent: Option<&'static str>| omp_agent::UnknownEffectsCall {
+			call_id: Str::new_static("id"),
+			name:    Str::new_static(name),
+			intent:  intent.map(Str::new_static),
+		};
+		assert_eq!(
+			unknown_effects_prompt(&[call("bash", Some("Deploying")), call("edit", None)], "f5"),
+			"These calls may have already run: bash (Deploying), edit. Re-running can repeat their \
+			 effects; press f5 again to confirm"
+		);
 	}
 }
