@@ -1,5 +1,11 @@
 # Hooks — the event and decision spine
 
+> **Status: design spec, code references predate the Kernel rewrite.** `AgentEvent`,
+> `AgentPhase`, `EventBus` and the `loop.rs` line numbers cited below no longer exist. The ephemeral
+> event type is now `KernelEvent` (`crates/agent/src/events.rs`) and its variants differ (for
+> example `ToolReady`, `JobsDelivered`, `TurnEnded`). For the live loop read
+> [`docs/architecture/agent-loop.md`](../architecture/agent-loop.md) and `crates/agent/src/loop.rs`.
+
 > Owner doc for `@omp.hook`, the event catalog, `omp.HookDecision` and its arms `omp.Allow` /
 > `omp.Deny` / `omp.Modify` / `omp.Defer` / `omp.RequireApproval`, `omp.CallTarget` and its
 > variants, `omp.HookPhase`, `omp.Composition`, `omp.OnFailure`, `omp.When`, the per-invocation
