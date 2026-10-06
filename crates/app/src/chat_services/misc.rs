@@ -9,8 +9,8 @@ use std::{
 };
 
 use omp_chat::overlays::services::{
-	CleanseOutcome, CleanseRequest, CleanseRun, MemoryOp, Pending, ServiceError, ServiceResult,
-	SshHostRow, SshHostSpec,
+	ApprovalPostureRow, CleanseOutcome, CleanseRequest, CleanseRun, MemoryOp, Pending, ServiceError,
+	ServiceResult, SshHostRow, SshHostSpec,
 };
 use omp_core::{Str, sf};
 use omp_driver::cleanse::{
@@ -29,6 +29,22 @@ const MEMORY_VIEW_TOKENS: usize = 4_000;
 
 fn failed(error: impl std::fmt::Display) -> ServiceError {
 	ServiceError::failed(error)
+}
+
+/// `/security`: the approval mode as configured and as enforced, through the
+/// same rule admission applies.
+pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
+	let settings = omp_envd::tool_settings::ToolSettings::from_con(&state.con)
+		.with_approval_mode_override(state.approval_override);
+	let sandbox = omp_envd::admission::SandboxState::probe(&state.con, &state.project);
+	let configured = settings.configured_approval();
+	let effective = omp_envd::admission::effective_approval_mode(configured, sandbox);
+	ApprovalPostureRow {
+		configured: Str::new_static(configured.mode.into()),
+		effective:  Str::new_static(effective.into()),
+		sandbox:    Str::new_static(sandbox.into()),
+		explicit:   configured.provenance == omp_envd::admission::Provenance::Explicit,
+	}
 }
 
 /// `/export [path]`: a standalone HTML projection of the live journal.

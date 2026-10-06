@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
 pub enum ExecSandboxMode {
-	/// Do not sandbox agent commands. Without a sandbox, `yolo` approval is not
-	/// honoured.
+	/// Do not sandbox agent commands. The default `yolo` approval then becomes
+	/// `write`.
 	Off,
 	/// Prevent agent commands from writing anywhere.
 	ReadOnly,
@@ -147,7 +147,8 @@ omp_con::con_enum!(SandboxNetworkMode);
 
 omp_con::var! {
 	/// Choose the filesystem sandbox posture for agent commands. On by default; where the
-	/// platform cannot construct it, commands run under `write` approval instead of `yolo`.
+	/// platform cannot construct it, commands run unsandboxed under `write` approval; a sandbox
+	/// you set yourself fails instead.
 	pub static SV_SANDBOX_MODE = sv_sandbox_mode: ExecSandboxMode {
 		default: ExecSandboxMode::WorkspaceWrite,
 		flags: archive,
@@ -331,6 +332,11 @@ pub struct SandboxSettings {
 	pub read_deny_globs:    Vec<Str>,
 	/// Additional absolute paths protected from writes in both policy lanes.
 	pub write_deny:         Vec<Str>,
+	/// Whether the user set any `sv_sandbox_*` convar, rather than leaving the
+	/// shipped posture. A sandbox the user asked for that cannot be built is a
+	/// hard error; the shipped default degrades to unsandboxed commands under
+	/// approval.
+	pub explicit:           bool,
 }
 
 impl Default for SandboxSettings {
@@ -359,6 +365,7 @@ impl Default for SandboxSettings {
 			read_mode:          ReadMode::Host,
 			read_deny_globs:    Vec::new(),
 			write_deny:         Vec::new(),
+			explicit:           false,
 		}
 	}
 }
@@ -409,6 +416,9 @@ impl SandboxSettings {
 			read_mode:          SV_SANDBOX_READ_MODE.get(ctx),
 			read_deny_globs:    SV_SANDBOX_READ_DENY_GLOBS.get(ctx),
 			write_deny:         SV_SANDBOX_WRITE_DENY.get(ctx),
+			explicit:           ctx
+				.vars()
+				.any(|var| var.name.starts_with("sv_sandbox_") && ctx.is_user_set(var.name)),
 		}
 	}
 }
@@ -605,6 +615,7 @@ mod tests {
 		assert_eq!(settings.mode, ExecSandboxMode::WorkspaceWrite);
 		assert_eq!(ExecSandboxMode::default(), ExecSandboxMode::WorkspaceWrite);
 		assert_eq!(settings.network_mode, SandboxNetworkMode::Disabled);
+		assert!(!settings.explicit, "an untouched sandbox is the shipped default, not a user choice");
 		assert_eq!(
 			SV_SANDBOX_MODE.get(&Ctx::new()),
 			ExecSandboxMode::WorkspaceWrite,
@@ -618,7 +629,18 @@ mod tests {
 		SV_SANDBOX_MODE
 			.set(&ctx, ExecSandboxMode::Off)
 			.expect("set mode");
-		assert_eq!(SandboxSettings::from_con(&ctx).mode, ExecSandboxMode::Off);
+		let settings = SandboxSettings::from_con(&ctx);
+		assert_eq!(settings.mode, ExecSandboxMode::Off);
+		assert!(settings.explicit);
+	}
+
+	#[test]
+	fn any_sandbox_convar_the_user_sets_makes_the_sandbox_explicit() {
+		let ctx = Ctx::new();
+		SV_SANDBOX_ALLOW_LOCALHOST
+			.set(&ctx, true)
+			.expect("set localhost");
+		assert!(SandboxSettings::from_con(&ctx).explicit);
 	}
 
 	#[test]

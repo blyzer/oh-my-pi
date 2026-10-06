@@ -1274,6 +1274,7 @@ pub(crate) async fn run(
 			Arc::new(crate::chat_services::AppServices::new(crate::chat_services::ServiceState {
 				data_dir: data_dir.clone(),
 				project: project.clone(),
+				approval_override: launch.options.approval_mode,
 				plugin_dirs: launch.options.extensions.native_roots.clone(),
 				sessions_dir: sessions_dir
 					.clone()

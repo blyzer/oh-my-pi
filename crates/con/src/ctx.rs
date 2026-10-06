@@ -1187,6 +1187,19 @@ impl Ctx {
 		self.layers.read().shadow(var.name).map(|(_, owner)| owner)
 	}
 
+	/// Whether the user's own configuration (`config.cfg`, the session, the
+	/// agent class, or a parent scope) sets `name`, as opposed to the
+	/// registration default, a project overlay, or a director bind. `false`
+	/// for an unknown name. Writing the default value back with
+	/// [`Origin::Default`] clears the layers, so it reads as not set.
+	#[must_use]
+	pub fn is_user_set(&self, name: &str) -> bool {
+		self
+			.var(name)
+			.ok()
+			.is_some_and(|var| self.layers.read().user_set(var.name))
+	}
+
 	/// Drops a variable's session-layer entry (a rewind re-deriving
 	/// `<meta><con>` from the live chain) without touching the archive layer
 	/// or publishing a session write; the effective value is refreshed.

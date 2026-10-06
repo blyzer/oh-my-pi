@@ -87,28 +87,36 @@ network amendments exist and are part of this model.
 
 ## Amendment (2026-10-06)
 
-The owner decided that the approval mode `yolo` (never ask) is honoured only while a native sandbox
+The owner decided that the shipped approval posture `yolo` (never ask) holds only while a native sandbox
 confines the commands the agent runs. This is a deliberate change from omp 1.x, where `yolo` was
 unconditional.
 
 1. `sv_sandbox_mode` defaults to `workspace-write`. The default approval mode stays `yolo`, so a fresh
    install runs unprompted inside the sandbox.
-2. The effective approval mode is one pure function of the configured mode and the sandbox state
-   (`effective_approval_mode`, `crates/envd/src/admission.rs`): `yolo` becomes `write` unless a sandbox
-   was actually constructed (`SandboxState::Active`). The state is `active`, `off` (mode `off`), or
-   `unavailable` (requested but not constructible on this host). The convar alone never counts.
-3. A platform that cannot construct the sandbox (no native backend, or the backend fails its live probe)
-   does not stop commands from running; it removes the confinement. Commands then run unsandboxed under
-   `write`, and the shell is process authority: with no sandbox in force `bash` resolves to the `exec`
-   tier (it still declares no effects), so it prompts. A refused policy (a configuration fault) still
-   fails the session open. A per-tool `sv_tools_approval` override stays authoritative either way.
-4. The downgrade is reported once per session as a typed notice, `<notice kind=warn
-   name=approval-downgrade>`, whose data carries the configured mode, the effective mode, and the
-   sandbox state with its cause.
+2. The effective approval mode is one pure function of the configured mode, who configured it, and the
+   sandbox state (`effective_approval_mode`, `crates/envd/src/admission.rs`). The state is `active` (a
+   sandbox was actually constructed), `off` (mode `off`), or `unavailable` (requested but not
+   constructible on this host); the convar alone never counts. A defaulted `yolo` without an active
+   sandbox becomes `write`. An explicit `yolo` (`--approval-mode yolo`, `--yolo`, `--auto-approve`, or a
+   user layer of `sv_tools_approval_mode`, read from the `omp-con` layers by `Ctx::is_user_set`) is
+   respected and runs unconfined; headless mode's denial message still points at it.
+3. A shipped-default sandbox on a platform that cannot construct it (no native backend, or the backend
+   fails its live probe) does not stop commands from running; it removes the confinement. Commands then
+   run unsandboxed under `write`. A sandbox the user asked for (any user-set `sv_sandbox_*` convar) that
+   cannot be constructed is a hard error, as before, and so is a refused policy.
+4. The shell is process authority when nothing confines it: with no active sandbox, `bash` (which
+   declares no effects) resolves to the `exec` tier, so `write` and `always-ask` prompt for it. With an
+   active sandbox it stays `read` and the denial-and-rerun flow above is unchanged. A per-tool
+   `sv_tools_approval` override stays authoritative in every case.
+5. A `yolo` that no sandbox confines is reported once per session as a typed notice, `<notice kind=warn
+   name=approval-posture>`, whose data carries the configured mode, who configured it, the effective
+   mode, and the sandbox state with its cause: downgraded to `write` when it was the default, respected
+   but unconfined when the user asked for it. `/security` shows the effective mode beside the configured
+   one.
 
 ## Status in omp
 
-**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: the denial-and-rerun prompt exists only while a sandbox is constructed, and a rerun can repeat side effects. `yolo` is honoured only inside an active sandbox (2026-10-06 amendment). (Verified 2026-10-06 against `omp2` at `f2ca37d533`, plus the changes of that amendment.)
+**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: the denial-and-rerun prompt exists only while a sandbox is constructed, and a rerun can repeat side effects. The default `yolo` holds only inside an active sandbox, an explicit one is respected (2026-10-06 amendment). (Verified 2026-10-06 against `omp2` at `f2ca37d533`, plus the changes of that amendment.)
 
 - In-process shell: `crates/shell` (parser/runtime) and `crates/shell-builtins` (about 80 builtins including `grep` and `rg` on the ripgrep libraries, `find`, `sed`, `sort`, `ln`, `jq`); persistent cwd and exports through `crates/envd/src/exec.rs`.
 - Enforcement: `ExecSandbox` and its per-attempt wrapper in `crates/envd/src/exec_sandbox.rs` implement the shell's `PathPolicy` and `SpawnWrapper`; `exec.rs` installs both on each run (`set_path_policy`, `set_spawn_wrapper`). The sandbox is `workspace-write` by default (`SV_SANDBOX_MODE`, `crates/envd/src/exec_settings/sandbox.rs`), and `SandboxState::probe` reports whether it was constructed; network is `disabled` by default (`SV_SANDBOX_NETWORK_MODE`), and the scoped egress broker (`crates/envd/src/sandbox_proxy.rs`) is what produces a typed network fact.

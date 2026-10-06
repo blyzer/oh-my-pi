@@ -169,7 +169,7 @@ impl AdwHost for ProductionAdwHost {
 				SandboxNetworkMode::Open => NetworkScope::Unrestricted,
 			},
 			approval: match effective_approval_mode(
-				omp_envd::tool_settings::SV_TOOLS_APPROVAL_MODE.get(&self.ctx),
+				omp_envd::tool_settings::ToolSettings::from_con(&self.ctx).configured_approval(),
 				sandbox,
 			) {
 				ApprovalMode::AlwaysAsk => ApprovalScope::AlwaysAsk,

@@ -170,11 +170,25 @@ pub(crate) fn security_report(cx: &PanelCx<'_>) -> Str {
 	let mut out = StrMut::new("**Security posture**\n\n");
 	let _ =
 		writeln!(out, "- Host approval: `sv_approval_mode {}`", var_text(cx, "sv_approval_mode"));
-	let _ = writeln!(
-		out,
-		"- Tool approval tier: `sv_tools_approval_mode {}`",
-		var_text(cx, "sv_tools_approval_mode")
-	);
+	match cx.services.approval_posture() {
+		Ok(posture) => {
+			let _ = writeln!(
+				out,
+				"- Tool approval tier: `sv_tools_approval_mode {}` ({}), in force: `{}` (sandbox {})",
+				posture.configured,
+				if posture.explicit { "set" } else { "default" },
+				posture.effective,
+				posture.sandbox
+			);
+		},
+		Err(_) => {
+			let _ = writeln!(
+				out,
+				"- Tool approval tier: `sv_tools_approval_mode {}`",
+				var_text(cx, "sv_tools_approval_mode")
+			);
+		},
+	}
 	let _ = writeln!(
 		out,
 		"- Per-tool overrides: `sv_tools_approval {}`",
@@ -692,6 +706,53 @@ mod tests {
 			services: &services,
 		});
 		(ctx, event)
+	}
+
+	/// A service feed that reports a fixed approval posture.
+	struct Posture(crate::overlays::services::ApprovalPostureRow);
+
+	impl crate::overlays::Services for Posture {
+		fn approval_posture(
+			&self,
+		) -> crate::overlays::services::ServiceResult<crate::overlays::services::ApprovalPostureRow>
+		{
+			Ok(self.0.clone())
+		}
+	}
+
+	fn security_text(services: std::sync::Arc<dyn crate::overlays::Services>) -> Str {
+		let ctx = omp_con::Ctx::new();
+		let dom = omp_dom::Dom::new();
+		let ui = omp_tui::UiContext::default();
+		security_report(&PanelCx {
+			dom:      &dom,
+			con:      &ctx,
+			ui:       &ui,
+			viewport: omp_tui::Size { width: 80, height: 24 },
+			services: &services,
+		})
+	}
+
+	#[test]
+	fn security_report_shows_the_effective_approval_mode_beside_the_configured_one() {
+		let report = security_text(std::sync::Arc::new(Posture(
+			crate::overlays::services::ApprovalPostureRow {
+				configured: Str::new_static("yolo"),
+				effective:  Str::new_static("write"),
+				sandbox:    Str::new_static("unavailable"),
+				explicit:   false,
+			},
+		)));
+		assert!(
+			report.contains(
+				"`sv_tools_approval_mode yolo` (default), in force: `write` (sandbox unavailable)"
+			),
+			"{report}"
+		);
+		// Without a feed the panel still reports what is configured.
+		let report = security_text(std::sync::Arc::new(crate::overlays::services::NoServices));
+		assert!(report.contains("`sv_tools_approval_mode "), "{report}");
+		assert!(!report.contains("in force"), "{report}");
 	}
 
 	#[test]

@@ -4814,7 +4814,7 @@ pub(crate) fn production_registry<
 			blobs.clone(),
 			mcp_manager,
 			DynamicAdmission::new(
-				tool_settings.approval_mode,
+				tool_settings.configured_approval(),
 				exec.sandbox_state(),
 				tool_settings.approval.clone(),
 				None,

@@ -1,9 +1,10 @@
 //! Production approval composition: a real project environment under
 //! `--approval-mode always-ask`, the kernel-bound approval route, and a
 //! `write` call whose admission prompt is journaled and answered by the host
-//! with `Up::Approve` (deny → skipped, allow → the file lands). An explicit
-//! `yolo` with no sandbox in force is downgraded to `write`, so a `bash` call
-//! prompts and one typed notice says why.
+//! with `Up::Approve` (deny → skipped, allow → the file lands). With no
+//! sandbox in force, the default `yolo` is downgraded to `write`, so a `bash`
+//! call prompts; an explicit `yolo` is respected and runs unconfined. Each
+//! says so in one typed notice.
 
 use std::{future::ready, path::Path, sync::Arc, time::Duration};
 
@@ -129,14 +130,15 @@ struct Turn {
 	landed:  bool,
 }
 
-/// Runs one turn calling `tool` under `mode`, with the sandbox `sandbox`;
-/// `approve` answers the prompt the kernel journals. `target` is the file the
+/// Runs one turn calling `tool` under `mode` (`None`: the shipped default
+/// posture, no flag), with the sandbox `sandbox`; `approve` answers the prompt
+/// the kernel journals. `target` is the file the
 /// call creates, relative to the workspace.
 async fn run(
 	tool: &'static str,
 	arguments: impl FnOnce(&Path) -> serde_json::Value,
 	target: &str,
-	mode: ApprovalMode,
+	mode: Option<ApprovalMode>,
 	sandbox: ExecSandboxMode,
 	approve: bool,
 ) -> Turn {
@@ -152,7 +154,7 @@ async fn run(
 	let con = Arc::new(con);
 	let environment = ProjectEnvironment::attach(&root, &state, AttachOptions {
 		py_eval:            false,
-		approval_mode:      Some(mode),
+		approval_mode:      mode,
 		trusted_extensions: Vec::new(),
 		contributed_values: Vec::new(),
 		con:                Arc::clone(&con),
@@ -181,7 +183,7 @@ async fn run(
 			approvals,
 		)))
 		.with_tool_admission(Arc::new(
-			SettingsAdmission::new(&con, Some(mode), &root).with_notices(notices),
+			SettingsAdmission::new(&con, mode, &root).with_notices(notices),
 		));
 	let events = kernel.subscribe();
 	let mailbox = kernel.mailbox();
@@ -245,7 +247,7 @@ async fn approval_always_ask_write_deny_journals_a_denied_result() {
 		"write",
 		write_call,
 		"approved.txt",
-		ApprovalMode::AlwaysAsk,
+		Some(ApprovalMode::AlwaysAsk),
 		ExecSandboxMode::Off,
 		false,
 	)
@@ -267,9 +269,15 @@ async fn approval_always_ask_write_deny_journals_a_denied_result() {
 
 #[tokio::test]
 async fn approval_always_ask_write_allow_runs_the_tool() {
-	let Turn { session, result, landed } =
-		run("write", write_call, "approved.txt", ApprovalMode::AlwaysAsk, ExecSandboxMode::Off, true)
-			.await;
+	let Turn { session, result, landed } = run(
+		"write",
+		write_call,
+		"approved.txt",
+		Some(ApprovalMode::AlwaysAsk),
+		ExecSandboxMode::Off,
+		true,
+	)
+	.await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 1);
 	assert_eq!(tickets[0].state, TicketState::Decided);
@@ -283,16 +291,39 @@ async fn approval_always_ask_write_allow_runs_the_tool() {
 	assert!(result.contains("\"kind\":\"ok\""), "approved write settled ok: {result}");
 }
 
-/// The downgrade, end to end: the user asked for `yolo`, no sandbox is on, so
-/// `write` is in force and the unconfined shell is process authority that
-/// prompts. Denial stops the command; one typed notice names what was asked,
-/// what holds, and why.
+/// The typed posture notice the session journaled, as JSON.
+fn posture_notice(session: &Session) -> serde_json::Value {
+	let notices = session
+		.dom()
+		.select("body turn notice")
+		.expect("selector")
+		.filter(|handle| {
+			session
+				.dom()
+				.get(*handle)
+				.and_then(|node| node.prop(&omp_dom::PropKey::Custom(Str::new_static("name"))))
+				.and_then(omp_dom::Value::as_str)
+				== Some("approval-posture")
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(notices.len(), 1, "exactly one posture notice per session");
+	let notice = session.dom().get(notices[0]).expect("notice node");
+	let Some(omp_dom::Value::Json(data)) = notice.prop(&omp_dom::PropId::Data.into()) else {
+		panic!("the notice carries its typed payload");
+	};
+	serde_json::from_str(data.get()).expect("payload")
+}
+
+/// The shipped default, end to end: `yolo` is the default posture, no sandbox
+/// is in force, so `write` holds and the unconfined shell is process authority
+/// that prompts. Denial stops the command; one typed notice names what the
+/// default asked for, what holds, and why.
 #[tokio::test]
-async fn explicit_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
+async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
 	let Turn { session, result, landed } =
-		run("bash", bash_call, "landed.txt", ApprovalMode::Yolo, ExecSandboxMode::Off, false).await;
+		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, false).await;
 	let tickets = prompts(&session);
-	assert_eq!(tickets.len(), 1, "yolo without a sandbox must prompt exactly once: {tickets:?}");
+	assert_eq!(tickets.len(), 1, "a defaulted yolo without a sandbox must prompt once: {tickets:?}");
 	assert_eq!(tickets[0].reasons[0].kind.as_str(), "exec");
 	assert_eq!(tickets[0].reasons[0].subject.as_str(), "touch landed.txt");
 	assert!(
@@ -303,33 +334,43 @@ async fn explicit_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
 	);
 	assert!(result.contains("denied by user: not today"), "denied bash must settle: {result}");
 	assert!(!landed, "a denied command never ran");
-
-	let notices = session
-		.dom()
-		.select("body turn notice[name=approval-downgrade]")
-		.expect("selector")
-		.collect::<Vec<_>>();
-	assert_eq!(notices.len(), 1, "one downgrade notice per session");
-	let notice = session.dom().get(notices[0]).expect("notice node");
-	let Some(omp_dom::Value::Json(data)) = notice.prop(&omp_dom::PropId::Data.into()) else {
-		panic!("the notice carries its typed payload");
-	};
 	assert_eq!(
-		serde_json::from_str::<serde_json::Value>(data.get()).expect("payload"),
+		posture_notice(&session),
 		serde_json::json!({
 			"configured": "yolo",
+			"provenance": "default",
 			"effective": "write",
 			"sandbox": { "state": "off" },
 		})
 	);
 }
 
-/// The same prompt, approved: the command runs, and the downgrade did not
-/// block the session.
+/// The same prompt, approved: the command runs.
 #[tokio::test]
-async fn explicit_yolo_without_a_sandbox_runs_bash_once_approved() {
+async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
 	let Turn { session, result, landed } =
-		run("bash", bash_call, "landed.txt", ApprovalMode::Yolo, ExecSandboxMode::Off, true).await;
+		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, true).await;
 	assert_eq!(prompts(&session).len(), 1);
 	assert!(landed, "approved bash ran: {result}");
+}
+
+/// An explicit `yolo` (`--approval-mode yolo`, `--yolo`, the user's config)
+/// is respected without a sandbox: the command runs with no prompt, and the
+/// session is told it is unconfined. This is the way out of headless denial.
+#[tokio::test]
+async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
+	let Turn { session, result, landed } =
+		run("bash", bash_call, "landed.txt", Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false)
+			.await;
+	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
+	assert!(landed, "bash ran unprompted: {result}");
+	assert_eq!(
+		posture_notice(&session),
+		serde_json::json!({
+			"configured": "yolo",
+			"provenance": "explicit",
+			"effective": "yolo",
+			"sandbox": { "state": "off" },
+		})
+	);
 }

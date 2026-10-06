@@ -11,7 +11,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// Runtime posture for automatic tool-admission decisions.
 pub use super::admission::ApprovalMode;
-use super::admission::{ApprovalPolicy, ResolvedApproval, SandboxState, resolve_approval};
+use super::admission::{
+	ApprovalPolicy, ConfiguredApproval, Provenance, ResolvedApproval, SandboxState, resolve_approval,
+};
 
 omp_con::con_enum!(ApprovalMode);
 
@@ -89,8 +91,9 @@ omp_con::var! {
 			"legacy.path": "edit.streamingAbort",
 		},
 	};
-	/// Default approval behavior for tool calls. `yolo` is honoured only while a sandbox
-	/// confines commands (`sv_sandbox_mode`); otherwise `write` is in force.
+	/// Default approval behavior for tool calls. The default `yolo` holds only while a sandbox
+	/// confines commands (`sv_sandbox_mode`); otherwise `write` is in force. Setting `yolo`
+	/// yourself (or `--yolo`) is respected without a sandbox.
 	pub static SV_TOOLS_APPROVAL_MODE = sv_tools_approval_mode: ApprovalMode {
 		default: ApprovalMode::Yolo,
 		flags: archive,
@@ -103,7 +106,7 @@ omp_con::var! {
 			"ui.option.write": "Write",
 			"ui.option.write.desc": "Auto-approve read-only and write tools; require confirmation for exec tools.",
 			"ui.option.yolo": "Yolo",
-			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools inside an active sandbox; without one, Write is in force. User policy can still prompt or block.",
+			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools. The default Yolo holds only inside an active sandbox (Write otherwise); choosing it yourself is respected. User policy can still prompt or block.",
 			"legacy.path": "tools.approvalMode",
 		},
 	};
@@ -415,6 +418,9 @@ pub struct ToolSettings {
 	pub diagnostic_dedup: bool,
 	/// Default approval posture, applied after effect-tier resolution.
 	pub approval_mode: ApprovalMode,
+	/// Whether the user chose [`Self::approval_mode`] or it is the shipped
+	/// default; an unconfined `yolo` is respected only when the user chose it.
+	pub approval_provenance: Provenance,
 	/// Authoritative per-tool approval policy overrides.
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
 	pub approval: BTreeMap<Str, ApprovalPolicy>,
@@ -471,6 +477,7 @@ impl Default for ToolSettings {
 			diagnostics_on_edit: false,
 			diagnostic_dedup: true,
 			approval_mode: ApprovalMode::Yolo,
+			approval_provenance: Provenance::Default,
 			approval: BTreeMap::new(),
 			edit_fuzzy: true,
 			edit_fuzzy_threshold: 0.95,
@@ -531,6 +538,7 @@ impl ToolSettings {
 			diagnostics_on_edit: lsp.diagnostics_on_edit,
 			diagnostic_dedup: lsp.diagnostics_deduplicate,
 			approval_mode: SV_TOOLS_APPROVAL_MODE.get(ctx),
+			approval_provenance: Provenance::of_convar(ctx, "sv_tools_approval_mode"),
 			approval: approval_map(SV_TOOLS_APPROVAL.get(ctx)),
 			edit_fuzzy: SV_TOOLS_EDIT_FUZZY.get(ctx),
 			edit_fuzzy_threshold: omp_tools::settings::SV_EDIT_FUZZY_THRESHOLD.get(ctx),
@@ -558,8 +566,15 @@ impl ToolSettings {
 	pub fn with_approval_mode_override(mut self, approval_mode: Option<ApprovalMode>) -> Self {
 		if let Some(approval_mode) = approval_mode {
 			self.approval_mode = approval_mode;
+			self.approval_provenance = Provenance::Explicit;
 		}
 		self
+	}
+
+	/// The configured approval mode with who asked for it.
+	#[must_use]
+	pub const fn configured_approval(&self) -> ConfiguredApproval {
+		ConfiguredApproval { mode: self.approval_mode, provenance: self.approval_provenance }
 	}
 
 	/// Whether a named tool is available after applying the default-enabled
@@ -582,7 +597,7 @@ impl ToolSettings {
 			invocation_id,
 			tool_name.clone(),
 			effects,
-			self.approval_mode,
+			self.configured_approval(),
 			sandbox,
 			self.approval.get(&tool_name).copied(),
 		)
@@ -695,9 +710,55 @@ mod tests {
 			.expect("set approval");
 		assert_eq!(ToolSettings::from_con(&ctx), ToolSettings {
 			approval_mode: ApprovalMode::Write,
+			approval_provenance: Provenance::Explicit,
 			approval: BTreeMap::from([(sf!("bash"), ApprovalPolicy::Deny)]),
 			..ToolSettings::default()
 		});
+	}
+
+	#[test]
+	fn approval_provenance_distinguishes_the_default_from_a_user_choice() {
+		let ctx = Ctx::new();
+		let defaulted = ToolSettings::from_con(&ctx);
+		assert_eq!(defaulted.approval_mode, ApprovalMode::Yolo);
+		assert_eq!(defaulted.approval_provenance, Provenance::Default);
+
+		// An explicit yolo equal to the default is still the user's choice.
+		SV_TOOLS_APPROVAL_MODE
+			.set(&ctx, ApprovalMode::Yolo)
+			.expect("set mode");
+		assert_eq!(ToolSettings::from_con(&ctx).approval_provenance, Provenance::Explicit);
+
+		// A flag override is explicit whatever the convar says.
+		let flagged = defaulted.with_approval_mode_override(Some(ApprovalMode::Yolo));
+		assert_eq!(flagged.approval_provenance, Provenance::Explicit);
+		let unflagged = ToolSettings::default().with_approval_mode_override(None);
+		assert_eq!(unflagged.approval_provenance, Provenance::Default);
+	}
+
+	#[test]
+	fn an_unconfined_yolo_is_downgraded_only_when_it_is_the_default() {
+		let effects = Effects::empty();
+		let defaulted = ToolSettings::default();
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
+		assert_eq!(
+			defaulted
+				.approval_for("c", "bash", &effects, SandboxState::Off)
+				.policy,
+			ApprovalPolicy::Prompt
+		);
+		assert_eq!(
+			explicit
+				.approval_for("c", "bash", &effects, SandboxState::Off)
+				.policy,
+			ApprovalPolicy::Allow
+		);
+		assert_eq!(
+			defaulted
+				.approval_for("c", "bash", &effects, SandboxState::Active)
+				.policy,
+			ApprovalPolicy::Allow
+		);
 	}
 
 	#[test]

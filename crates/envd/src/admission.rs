@@ -122,58 +122,128 @@ impl SandboxState {
 	}
 }
 
-/// The one rule for how a configured approval mode meets the sandbox.
-///
-/// `Yolo` (never ask) is honoured only while a sandbox confines the
-/// environment; without one it is downgraded to `Write`. Every other mode is
-/// returned unchanged.
-#[must_use]
-pub const fn effective_approval_mode(
-	configured: ApprovalMode,
-	sandbox: SandboxState,
-) -> ApprovalMode {
-	match configured {
-		ApprovalMode::Yolo if !sandbox.confines() => ApprovalMode::Write,
-		mode => mode,
+/// Whether the user chose a setting or it is the shipped default.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Deserialize,
+	Eq,
+	PartialEq,
+	Serialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum Provenance {
+	/// The registration default; nobody asked for it.
+	#[default]
+	Default,
+	/// Set by the user: a flag, `config.cfg`, the session, or the agent class.
+	Explicit,
+}
+
+impl Provenance {
+	/// Reads a convar's provenance from the layers that hold it.
+	#[must_use]
+	pub fn of_convar(ctx: &omp_con::Ctx, name: &str) -> Self {
+		if ctx.is_user_set(name) {
+			Self::Explicit
+		} else {
+			Self::Default
+		}
 	}
 }
 
-/// Name of the typed notice reporting an [`ApprovalDowngrade`].
-pub const APPROVAL_DOWNGRADE_NOTICE: &str = "approval-downgrade";
+/// An approval mode together with who asked for it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConfiguredApproval {
+	/// The mode configured.
+	pub mode:       ApprovalMode,
+	/// Whether the user chose it or it is the shipped default.
+	pub provenance: Provenance,
+}
 
-/// A configured approval mode that is not in force, and why.
+/// The one rule for how a configured approval mode meets the sandbox.
+///
+/// `Yolo` (never ask) inside a sandbox that confines the environment is
+/// honoured. Without one, a defaulted `Yolo` is downgraded to `Write`, while an
+/// explicit `Yolo` (a flag, the user's config) is respected and reported as
+/// unconfined. Every other mode is returned unchanged.
+#[must_use]
+pub const fn effective_approval_mode(
+	configured: ConfiguredApproval,
+	sandbox: SandboxState,
+) -> ApprovalMode {
+	match (configured.mode, configured.provenance) {
+		(ApprovalMode::Yolo, Provenance::Default) if !sandbox.confines() => ApprovalMode::Write,
+		(mode, _) => mode,
+	}
+}
+
+/// Name of the typed notice reporting an [`ApprovalPosture`].
+pub const APPROVAL_POSTURE_NOTICE: &str = "approval-posture";
+
+/// A `yolo` approval that no sandbox confines: either downgraded to `write`
+/// (the default) or respected and running unconfined (the user asked for it).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ApprovalDowngrade {
-	/// Mode the user or default configured.
+pub struct ApprovalPosture {
+	/// Mode configured.
 	pub configured: ApprovalMode,
+	/// Who configured it.
+	pub provenance: Provenance,
 	/// Mode actually enforced.
 	pub effective:  ApprovalMode,
-	/// Sandbox state that forced the downgrade.
+	/// Sandbox state that decided it.
 	pub sandbox:    SandboxState,
 }
 
-impl ApprovalDowngrade {
-	/// Reports the downgrade, if any, [`effective_approval_mode`] applies.
+impl ApprovalPosture {
+	/// Reports the posture [`effective_approval_mode`] yields for a `yolo`
+	/// with no confining sandbox; `None` when nothing needs saying.
 	#[must_use]
-	pub fn resolve(configured: ApprovalMode, sandbox: SandboxState) -> Option<Self> {
-		let effective = effective_approval_mode(configured, sandbox);
-		(effective != configured).then_some(Self { configured, effective, sandbox })
+	pub fn resolve(configured: ConfiguredApproval, sandbox: SandboxState) -> Option<Self> {
+		(configured.mode == ApprovalMode::Yolo && !sandbox.confines()).then(|| Self {
+			configured: configured.mode,
+			provenance: configured.provenance,
+			effective: effective_approval_mode(configured, sandbox),
+			sandbox,
+		})
+	}
+
+	/// Whether `yolo` was downgraded, rather than respected without a sandbox.
+	#[must_use]
+	pub fn downgraded(&self) -> bool {
+		self.effective != self.configured
 	}
 
 	/// Fallback prose for projections that do not read the typed fields.
 	#[must_use]
 	pub fn body(&self) -> Str {
-		let configured: &'static str = self.configured.into();
 		let effective: &'static str = self.effective.into();
 		let sandbox: &'static str = self.sandbox.into();
-		match self.sandbox {
-			SandboxState::Unavailable { cause } => sf!(
-				"Approval mode `{configured}` is only honoured inside an active sandbox; \
-				 `{effective}` is in force (sandbox {sandbox}: {cause})."
+		let cause = match self.sandbox {
+			SandboxState::Unavailable { cause } => Some(cause),
+			SandboxState::Active | SandboxState::Off => None,
+		};
+		match (self.downgraded(), cause) {
+			(true, Some(cause)) => sf!(
+				"Approval `yolo` is the default and needs an active sandbox; `{effective}` is in \
+				 force (sandbox {sandbox}: {cause})."
 			),
-			SandboxState::Active | SandboxState::Off => sf!(
-				"Approval mode `{configured}` is only honoured inside an active sandbox; \
-				 `{effective}` is in force (sandbox {sandbox})."
+			(true, None) => sf!(
+				"Approval `yolo` is the default and needs an active sandbox; `{effective}` is in \
+				 force (sandbox {sandbox})."
+			),
+			(false, Some(cause)) => sf!(
+				"Approval `yolo` was requested explicitly: commands run unconfined (sandbox \
+				 {sandbox}: {cause})."
+			),
+			(false, None) => sf!(
+				"Approval `yolo` was requested explicitly: commands run unconfined (sandbox \
+				 {sandbox})."
 			),
 		}
 	}
@@ -296,16 +366,17 @@ pub fn resolve_approval(
 	invocation_id: impl Into<Str>,
 	tool_name: impl Into<Str>,
 	effects: &Effects,
-	configured: ApprovalMode,
+	configured: ConfiguredApproval,
 	sandbox: SandboxState,
 	override_policy: Option<ApprovalPolicy>,
 ) -> ResolvedApproval {
 	let invocation_id = invocation_id.into();
 	let tool_name = tool_name.into();
-	let mut tier = ApprovalTier::from_effects(effects);
-	if tool_name.as_str() == SHELL_TOOL && !sandbox.confines() {
-		tier = ApprovalTier::Exec;
-	}
+	let tier = if tool_name.as_str() == SHELL_TOOL && !sandbox.confines() {
+		ApprovalTier::Exec
+	} else {
+		ApprovalTier::from_effects(effects)
+	};
 	let mode = effective_approval_mode(configured, sandbox);
 	let (policy, source, policy_key) = override_policy.map_or_else(
 		|| {
@@ -367,7 +438,7 @@ pub(crate) enum DynamicAdmissionError {
 /// target-specific decision.
 #[derive(Clone)]
 pub(crate) struct DynamicAdmission {
-	mode:      ApprovalMode,
+	mode:      ConfiguredApproval,
 	sandbox:   SandboxState,
 	overrides: Arc<BTreeMap<Str, ApprovalPolicy>>,
 	route:     Arc<RwLock<Option<ApprovalRoute>>>,
@@ -376,7 +447,7 @@ pub(crate) struct DynamicAdmission {
 impl DynamicAdmission {
 	/// Builds a cloneable nested admission authority from frozen tool policy.
 	pub(crate) fn new(
-		mode: ApprovalMode,
+		mode: ConfiguredApproval,
 		sandbox: SandboxState,
 		overrides: BTreeMap<Str, ApprovalPolicy>,
 		route: Option<ApprovalRoute>,
@@ -921,32 +992,47 @@ mod tests {
 	use tokio_util::sync::CancellationToken;
 
 	use super::{
-		AdmissionDecision, AdmissionGate, ApprovalDowngrade, ApprovalMode, ApprovalPolicy,
-		ApprovalSource, ApprovalTier, DynamicAdmission, DynamicAdmissionError,
-		DynamicInvocationSource, SandboxState, SandboxUnavailable, apply_admission_patch, bash_ir,
-		effective_approval_mode, effects_narrow_or_refuse, github_mutation_targets, resolve_approval,
+		AdmissionDecision, AdmissionGate, ApprovalMode, ApprovalPolicy, ApprovalPosture,
+		ApprovalSource, ApprovalTier, ConfiguredApproval, DynamicAdmission, DynamicAdmissionError,
+		DynamicInvocationSource, Provenance, SandboxState, SandboxUnavailable, apply_admission_patch,
+		bash_ir, effective_approval_mode, effects_narrow_or_refuse, github_mutation_targets,
+		resolve_approval,
 	};
 
 	const UNAVAILABLE: SandboxState =
 		SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };
 
+	const fn explicit(mode: ApprovalMode) -> ConfiguredApproval {
+		ConfiguredApproval { mode, provenance: Provenance::Explicit }
+	}
+
+	const fn defaulted(mode: ApprovalMode) -> ConfiguredApproval {
+		ConfiguredApproval { mode, provenance: Provenance::Default }
+	}
+
 	#[test]
-	fn yolo_is_honoured_only_while_a_sandbox_confines() {
+	fn yolo_needs_a_sandbox_unless_the_user_asked_for_it() {
+		use ApprovalMode::{AlwaysAsk, Write, Yolo};
 		for (configured, sandbox, effective) in [
-			(ApprovalMode::Yolo, SandboxState::Active, ApprovalMode::Yolo),
-			(ApprovalMode::Yolo, SandboxState::Off, ApprovalMode::Write),
-			(ApprovalMode::Yolo, UNAVAILABLE, ApprovalMode::Write),
-			(ApprovalMode::Write, SandboxState::Active, ApprovalMode::Write),
-			(ApprovalMode::Write, SandboxState::Off, ApprovalMode::Write),
-			(ApprovalMode::Write, UNAVAILABLE, ApprovalMode::Write),
-			(ApprovalMode::AlwaysAsk, SandboxState::Active, ApprovalMode::AlwaysAsk),
-			(ApprovalMode::AlwaysAsk, SandboxState::Off, ApprovalMode::AlwaysAsk),
-			(ApprovalMode::AlwaysAsk, UNAVAILABLE, ApprovalMode::AlwaysAsk),
+			(defaulted(Yolo), SandboxState::Active, Yolo),
+			(defaulted(Yolo), SandboxState::Off, Write),
+			(defaulted(Yolo), UNAVAILABLE, Write),
+			(explicit(Yolo), SandboxState::Active, Yolo),
+			(explicit(Yolo), SandboxState::Off, Yolo),
+			(explicit(Yolo), UNAVAILABLE, Yolo),
+			(explicit(Write), SandboxState::Active, Write),
+			(explicit(Write), SandboxState::Off, Write),
+			(explicit(Write), UNAVAILABLE, Write),
+			(defaulted(Write), SandboxState::Off, Write),
+			(explicit(AlwaysAsk), SandboxState::Active, AlwaysAsk),
+			(explicit(AlwaysAsk), SandboxState::Off, AlwaysAsk),
+			(explicit(AlwaysAsk), UNAVAILABLE, AlwaysAsk),
+			(defaulted(AlwaysAsk), UNAVAILABLE, AlwaysAsk),
 		] {
 			assert_eq!(
 				effective_approval_mode(configured, sandbox),
 				effective,
-				"{configured} under sandbox {sandbox}"
+				"{configured:?} under sandbox {sandbox}"
 			);
 		}
 	}
@@ -962,52 +1048,59 @@ mod tests {
 	}
 
 	#[test]
-	fn a_downgrade_is_reported_with_typed_facts_and_only_when_it_applies() {
-		let downgrade = ApprovalDowngrade::resolve(ApprovalMode::Yolo, UNAVAILABLE)
-			.expect("yolo without a sandbox is downgraded");
-		assert_eq!(downgrade, ApprovalDowngrade {
-			configured: ApprovalMode::Yolo,
-			effective:  ApprovalMode::Write,
-			sandbox:    UNAVAILABLE,
-		});
+	fn the_posture_is_reported_with_typed_facts_and_only_when_it_applies() {
+		let downgraded = ApprovalPosture::resolve(defaulted(ApprovalMode::Yolo), UNAVAILABLE)
+			.expect("a defaulted yolo without a sandbox is downgraded");
+		assert!(downgraded.downgraded());
 		assert_eq!(
-			serde_json::to_value(downgrade).expect("typed notice payload serializes"),
+			serde_json::to_value(downgraded).expect("typed notice payload serializes"),
 			serde_json::json!({
 				"configured": "yolo",
+				"provenance": "default",
 				"effective": "write",
 				"sandbox": { "state": "unavailable", "cause": "backend_unavailable" },
 			})
 		);
-		assert!(downgrade.body().contains("backend_unavailable"));
-		assert_eq!(
-			ApprovalDowngrade::resolve(ApprovalMode::Yolo, SandboxState::Off)
-				.expect("yolo with the sandbox off is downgraded")
-				.sandbox,
-			SandboxState::Off
-		);
-		for (mode, sandbox) in [
-			(ApprovalMode::Yolo, SandboxState::Active),
-			(ApprovalMode::Write, SandboxState::Off),
-			(ApprovalMode::AlwaysAsk, UNAVAILABLE),
+		assert!(downgraded.body().contains("backend_unavailable"));
+
+		let respected = ApprovalPosture::resolve(explicit(ApprovalMode::Yolo), SandboxState::Off)
+			.expect("an explicit yolo without a sandbox is reported");
+		assert!(!respected.downgraded());
+		assert_eq!(respected.effective, ApprovalMode::Yolo);
+		assert_eq!(respected.provenance, Provenance::Explicit);
+		assert!(respected.body().contains("unconfined"));
+
+		for (configured, sandbox) in [
+			(defaulted(ApprovalMode::Yolo), SandboxState::Active),
+			(explicit(ApprovalMode::Yolo), SandboxState::Active),
+			(explicit(ApprovalMode::Write), SandboxState::Off),
+			(explicit(ApprovalMode::AlwaysAsk), UNAVAILABLE),
 		] {
-			assert_eq!(ApprovalDowngrade::resolve(mode, sandbox), None, "{mode} under {sandbox}");
+			assert_eq!(
+				ApprovalPosture::resolve(configured, sandbox),
+				None,
+				"{configured:?} under {sandbox}"
+			);
 		}
 	}
 
 	#[test]
 	fn the_shell_is_exec_tier_unless_a_sandbox_confines_it() {
+		use ApprovalPolicy::{Allow, Prompt};
 		let none = Effects::empty();
-		for (sandbox, mode, policy) in [
-			(SandboxState::Active, ApprovalMode::Yolo, ApprovalPolicy::Allow),
-			(SandboxState::Active, ApprovalMode::Write, ApprovalPolicy::Allow),
-			(SandboxState::Active, ApprovalMode::AlwaysAsk, ApprovalPolicy::Allow),
-			(SandboxState::Off, ApprovalMode::Yolo, ApprovalPolicy::Prompt),
-			(UNAVAILABLE, ApprovalMode::Yolo, ApprovalPolicy::Prompt),
-			(SandboxState::Off, ApprovalMode::Write, ApprovalPolicy::Prompt),
-			(SandboxState::Off, ApprovalMode::AlwaysAsk, ApprovalPolicy::Prompt),
+		for (sandbox, configured, policy) in [
+			(SandboxState::Active, defaulted(ApprovalMode::Yolo), Allow),
+			(SandboxState::Active, explicit(ApprovalMode::Write), Allow),
+			(SandboxState::Active, explicit(ApprovalMode::AlwaysAsk), Allow),
+			(SandboxState::Off, defaulted(ApprovalMode::Yolo), Prompt),
+			(UNAVAILABLE, defaulted(ApprovalMode::Yolo), Prompt),
+			(SandboxState::Off, explicit(ApprovalMode::Yolo), Allow),
+			(UNAVAILABLE, explicit(ApprovalMode::Yolo), Allow),
+			(SandboxState::Off, explicit(ApprovalMode::Write), Prompt),
+			(SandboxState::Off, explicit(ApprovalMode::AlwaysAsk), Prompt),
 		] {
-			let decision = resolve_approval("shell", "bash", &none, mode, sandbox, None);
-			assert_eq!(decision.policy, policy, "bash under {mode} with sandbox {sandbox}");
+			let decision = resolve_approval("shell", "bash", &none, configured, sandbox, None);
+			assert_eq!(decision.policy, policy, "bash under {configured:?} with sandbox {sandbox}");
 			assert_eq!(
 				decision.tier,
 				if sandbox.confines() {
@@ -1018,19 +1111,29 @@ mod tests {
 			);
 		}
 		// Other effect-free tools stay read tier whatever the sandbox does.
-		let think =
-			resolve_approval("t", "think", &none, ApprovalMode::Yolo, SandboxState::Off, None);
-		assert_eq!((think.tier, think.policy), (ApprovalTier::Read, ApprovalPolicy::Allow));
-		// A per-tool override stays authoritative without a sandbox.
-		let allowed = resolve_approval(
-			"shell",
-			"bash",
+		let think = resolve_approval(
+			"t",
+			"think",
 			&none,
-			ApprovalMode::Yolo,
+			defaulted(ApprovalMode::Yolo),
 			SandboxState::Off,
-			Some(ApprovalPolicy::Allow),
+			None,
 		);
-		assert_eq!((allowed.policy, allowed.source), (ApprovalPolicy::Allow, ApprovalSource::User));
+		assert_eq!((think.tier, think.policy), (ApprovalTier::Read, Allow));
+		// A per-tool override stays authoritative without a sandbox, both ways.
+		for (override_policy, expected) in
+			[(ApprovalPolicy::Allow, Allow), (ApprovalPolicy::Deny, ApprovalPolicy::Deny)]
+		{
+			let decision = resolve_approval(
+				"shell",
+				"bash",
+				&none,
+				defaulted(ApprovalMode::Yolo),
+				SandboxState::Off,
+				Some(override_policy),
+			);
+			assert_eq!((decision.policy, decision.source), (expected, ApprovalSource::User));
+		}
 	}
 
 	#[tokio::test]
@@ -1160,23 +1263,35 @@ mod tests {
 			..Effects::empty()
 		};
 		let sandbox = SandboxState::Active;
-		let read_decision =
-			resolve_approval("read-1", "read", &read, ApprovalMode::AlwaysAsk, sandbox, None);
+		let read_decision = resolve_approval(
+			"read-1",
+			"read",
+			&read,
+			explicit(ApprovalMode::AlwaysAsk),
+			sandbox,
+			None,
+		);
 		assert_eq!(read_decision.tier, ApprovalTier::Read);
 		assert_eq!(read_decision.policy, ApprovalPolicy::Allow);
 		assert_eq!(read_decision.source, ApprovalSource::Mode);
 
-		let write_prompt =
-			resolve_approval("write-1", "write", &write, ApprovalMode::AlwaysAsk, sandbox, None);
+		let write_prompt = resolve_approval(
+			"write-1",
+			"write",
+			&write,
+			explicit(ApprovalMode::AlwaysAsk),
+			sandbox,
+			None,
+		);
 		assert_eq!(write_prompt.tier, ApprovalTier::Write);
 		assert_eq!(write_prompt.policy, ApprovalPolicy::Prompt);
 
 		let write_allowed =
-			resolve_approval("write-2", "write", &write, ApprovalMode::Write, sandbox, None);
+			resolve_approval("write-2", "write", &write, explicit(ApprovalMode::Write), sandbox, None);
 		assert_eq!(write_allowed.policy, ApprovalPolicy::Allow);
 
 		let exec_prompt =
-			resolve_approval("eval-1", "eval", &exec, ApprovalMode::Write, sandbox, None);
+			resolve_approval("eval-1", "eval", &exec, explicit(ApprovalMode::Write), sandbox, None);
 		assert_eq!(exec_prompt.tier, ApprovalTier::Exec);
 		assert_eq!(exec_prompt.policy, ApprovalPolicy::Prompt);
 		assert_eq!(ApprovalTier::from_effects(&desktop_read), ApprovalTier::Read);
@@ -1193,7 +1308,7 @@ mod tests {
 			"shell-7",
 			"bash",
 			&effects,
-			ApprovalMode::Yolo,
+			explicit(ApprovalMode::Yolo),
 			SandboxState::Active,
 			Some(ApprovalPolicy::Deny),
 		);
@@ -1228,7 +1343,8 @@ mod tests {
 			let overrides = override_policy
 				.map(|policy| BTreeMap::from([(sf!("github"), policy)]))
 				.unwrap_or_default();
-			let admission = DynamicAdmission::new(mode, SandboxState::Active, overrides, None);
+			let admission =
+				DynamicAdmission::new(explicit(mode), SandboxState::Active, overrides, None);
 			let result = admission
 				.admit(
 					sf!("dyn-1"),
@@ -1259,8 +1375,12 @@ mod tests {
 			..Effects::empty()
 		};
 		let (route, inbox) = ApprovalRoute::new(Arc::new(ApprovalBook::new()), None);
-		let admission =
-			DynamicAdmission::new(ApprovalMode::Write, SandboxState::Active, BTreeMap::new(), None);
+		let admission = DynamicAdmission::new(
+			explicit(ApprovalMode::Write),
+			SandboxState::Active,
+			BTreeMap::new(),
+			None,
+		);
 		admission.bind_route(Some(route.clone()));
 		let pending_admission = admission.clone();
 		let pending_network = network.clone();

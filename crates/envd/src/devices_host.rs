@@ -755,7 +755,10 @@ mod tests {
 			scratch.path().join("local"),
 		);
 		let admission = DynamicAdmission::new(
-			ApprovalMode::AlwaysAsk,
+			crate::admission::ConfiguredApproval {
+				mode:       ApprovalMode::AlwaysAsk,
+				provenance: crate::admission::Provenance::Explicit,
+			},
 			crate::admission::SandboxState::Off,
 			std::collections::BTreeMap::new(),
 			None,

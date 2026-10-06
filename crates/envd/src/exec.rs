@@ -568,10 +568,13 @@ impl ExecHost {
 		};
 		match ExecSandbox::compile(&settings, &workspace_root, supervised) {
 			Ok(sandbox) => Ok(sandbox),
-			// A platform that cannot confine commands still runs them, but only
-			// under approval: the sandbox state resolves the mode to `write` and
-			// the shell to the `exec` tier.
-			Err(source) if SandboxUnavailable::classify(&source).runs_unsandboxed() => {
+			// The shipped default sandbox on a platform that cannot confine
+			// commands still runs them, but only under approval: the sandbox
+			// state resolves a defaulted `yolo` to `write` and the shell to the
+			// `exec` tier. A sandbox the user asked for stays a hard error.
+			Err(source)
+				if !settings.explicit && SandboxUnavailable::classify(&source).runs_unsandboxed() =>
+			{
 				tracing::warn!(%source, "sandbox unavailable; commands run unsandboxed under approval");
 				Ok(None)
 			},
@@ -4596,6 +4599,7 @@ mod tests {
 		let host = ExecHost::new();
 		host.configure_sandbox(
 			&crate::exec_settings::SandboxSettings {
+				mode: crate::exec_settings::ExecSandboxMode::Off,
 				env_set: BTreeMap::from([(
 					Str::new_static("OMP_SANDBOX_POLICY"),
 					Str::new_static("1"),
@@ -4640,6 +4644,7 @@ mod tests {
 		let host = ExecHost::new();
 		host.configure_sandbox(
 			&crate::exec_settings::SandboxSettings {
+				mode: crate::exec_settings::ExecSandboxMode::Off,
 				env_set: BTreeMap::from([(
 					Str::new_static("OMP_SANDBOX_POLICY"),
 					Str::new_static("1"),

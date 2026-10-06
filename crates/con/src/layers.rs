@@ -197,6 +197,16 @@ impl Layers {
 			.or_else(|| self.archive.get(name))
 	}
 
+	/// Whether the user's own configuration supplies `name`: the session,
+	/// class, inherited, or archive layer. A project overlay, a director
+	/// engagement, and the registration default are not the user's choice.
+	pub(crate) fn user_set(&self, name: &str) -> bool {
+		self.session.contains_key(name)
+			|| self.class.contains_key(name)
+			|| self.inherited.contains_key(name)
+			|| self.archive.contains_key(name)
+	}
+
 	pub(crate) fn shadow(&self, name: &str) -> Option<(LayerId, Str)> {
 		self
 			.engagements

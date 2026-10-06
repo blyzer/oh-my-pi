@@ -997,6 +997,12 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 		session_path.display().to_string(),
 		"--envd-idle-timeout".to_owned(),
 		"2".to_owned(),
+		// Scripted `bash` calls must run on every host, with or without an OS
+		// sandbox. An explicit `yolo` is respected unconfined; the default one
+		// would prompt where the sandbox cannot be built (a Linux runner
+		// without bubblewrap), and nobody answers a prompt in this proof.
+		"--approval-mode".to_owned(),
+		"yolo".to_owned(),
 	];
 	let mut process = PtyChild::spawn(&binary, &args, &project, &debug_socket);
 	let raw_capture = process.raw.clone();
@@ -1645,6 +1651,12 @@ async fn chat_tui_approves_blocked_plugin_commands_on_a_real_pty() {
 		session_path.display().to_string(),
 		"--envd-idle-timeout".to_owned(),
 		"2".to_owned(),
+		// Scripted `bash` calls must run on every host, with or without an OS
+		// sandbox. An explicit `yolo` is respected unconfined; the default one
+		// would prompt where the sandbox cannot be built (a Linux runner
+		// without bubblewrap), and nobody answers a prompt in this proof.
+		"--approval-mode".to_owned(),
+		"yolo".to_owned(),
 	];
 	let mut process = PtyChild::spawn(&binary, &args, &project, &debug_socket);
 	let raw_capture = process.raw.clone();

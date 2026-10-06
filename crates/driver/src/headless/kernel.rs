@@ -701,14 +701,14 @@ fn admission_spec(
 pub struct SettingsAdmission {
 	settings: omp_envd::tool_settings::ToolSettings,
 	sandbox:  omp_envd::admission::SandboxState,
-	notice:   Option<DowngradeNotice>,
+	notice:   Option<PostureNotice>,
 }
 
-/// The one-per-session report that a configured approval mode is not in force.
-struct DowngradeNotice {
-	downgrade: omp_envd::admission::ApprovalDowngrade,
-	mailbox:   flume::Sender<omp_agent::Up>,
-	posted:    std::sync::atomic::AtomicBool,
+/// The one-per-session report that `yolo` runs without a confining sandbox.
+struct PostureNotice {
+	posture: omp_envd::admission::ApprovalPosture,
+	mailbox: flume::Sender<omp_agent::Up>,
+	posted:  std::sync::atomic::AtomicBool,
 }
 
 impl SettingsAdmission {
@@ -729,21 +729,24 @@ impl SettingsAdmission {
 		}
 	}
 
-	/// Reports a downgraded approval mode once, as a typed notice on `mailbox`,
-	/// when the first call is admitted.
+	/// Reports a `yolo` that no sandbox confines once, as a typed notice on
+	/// `mailbox`, when the first call is admitted: downgraded to `write` when
+	/// it is the default, respected but unconfined when the user asked for it.
 	#[must_use]
 	pub fn with_notices(mut self, mailbox: flume::Sender<omp_agent::Up>) -> Self {
-		self.notice =
-			omp_envd::admission::ApprovalDowngrade::resolve(self.settings.approval_mode, self.sandbox)
-				.map(|downgrade| DowngradeNotice {
-					downgrade,
-					mailbox,
-					posted: std::sync::atomic::AtomicBool::new(false),
-				});
+		self.notice = omp_envd::admission::ApprovalPosture::resolve(
+			self.settings.configured_approval(),
+			self.sandbox,
+		)
+		.map(|posture| PostureNotice {
+			posture,
+			mailbox,
+			posted: std::sync::atomic::AtomicBool::new(false),
+		});
 		self
 	}
 
-	fn report_downgrade(&self) {
+	fn report_posture(&self) {
 		let Some(notice) = &self.notice else {
 			return;
 		};
@@ -753,16 +756,16 @@ impl SettingsAdmission {
 		{
 			return;
 		}
-		let Ok(data) = serde_json::value::to_raw_value(&notice.downgrade) else {
+		let Ok(data) = serde_json::value::to_raw_value(&notice.posture) else {
 			return;
 		};
 		let _ = notice
 			.mailbox
 			.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
 				kind: Str::new_static("warn"),
-				name: Str::new_static(omp_envd::admission::APPROVAL_DOWNGRADE_NOTICE),
+				name: Str::new_static(omp_envd::admission::APPROVAL_POSTURE_NOTICE),
 				data,
-				body: notice.downgrade.body(),
+				body: notice.posture.body(),
 			}));
 	}
 }
@@ -774,7 +777,7 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 		effects: &omp_tool::Effects,
 		args: &serde_json::value::RawValue,
 	) -> omp_agent::ToolAdmissionVerdict {
-		self.report_downgrade();
+		self.report_posture();
 		let resolved = self
 			.settings
 			.approval_for(name, name, effects, self.sandbox);
@@ -817,7 +820,7 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 						"{} tier under approval mode {}",
 						<&'static str>::from(resolved.tier),
 						<&'static str>::from(omp_envd::admission::effective_approval_mode(
-							self.settings.approval_mode,
+							self.settings.configured_approval(),
 							self.sandbox
 						))
 					)],

@@ -1268,6 +1268,24 @@ mod tests {
 	}
 
 	#[test]
+	fn construction_failures_classify_as_platform_limits_or_refused_policy() {
+		let unsupported =
+			SandboxUnavailable::classify(&SandboxError::UnsupportedHost { os: "plan9" });
+		assert_eq!(unsupported, SandboxUnavailable::UnsupportedHost);
+		assert!(unsupported.runs_unsandboxed());
+		let refused = SandboxUnavailable::classify(&SandboxError::EmptyEnvironmentPattern);
+		assert_eq!(refused, SandboxUnavailable::PolicyRejected);
+		assert!(!refused.runs_unsandboxed(), "a refused policy keeps failing the session open");
+	}
+
+	#[test]
+	fn probing_an_off_sandbox_constructs_nothing_and_reports_off() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let settings = SandboxSettings { mode: ExecSandboxMode::Off, ..SandboxSettings::default() };
+		assert_eq!(probe(&settings, workspace.path()), SandboxState::Off);
+	}
+
+	#[test]
 	fn default_workspace_policy_has_roots_carve_outs_network_and_env_scrubbing() {
 		let workspace = tempfile::tempdir().expect("workspace");
 		for name in CARVE_OUTS {
@@ -1316,6 +1334,7 @@ mod tests {
 	fn off_mode_compiles_environment_only_policy_and_applies_overrides_last() {
 		let workspace = tempfile::tempdir().expect("workspace");
 		let settings = SandboxSettings {
+			mode: ExecSandboxMode::Off,
 			env_inherit: EnvironmentInheritance::None,
 			env_deny: vec![Str::new_static("*KEY*")],
 			env_set: std::collections::BTreeMap::from([(
@@ -1335,8 +1354,11 @@ mod tests {
 			]),
 			vec![(OsString::from("FIXED"), OsString::from("value"))],
 		);
-		let settings =
-			SandboxSettings { env_deny: vec![Str::new_static("*KEY*")], ..SandboxSettings::default() };
+		let settings = SandboxSettings {
+			mode: ExecSandboxMode::Off,
+			env_deny: vec![Str::new_static("*KEY*")],
+			..SandboxSettings::default()
+		};
 		let sandbox = ExecSandbox::compile(&settings, workspace.path(), true)
 			.expect("case-insensitive environment policy")
 			.expect("environment-only wrapper");
@@ -1372,8 +1394,11 @@ mod tests {
 	fn network_only_policy_keeps_the_host_write_view() {
 		let workspace = tempfile::tempdir().expect("workspace");
 		let external = tempfile::tempdir().expect("external");
-		let settings =
-			SandboxSettings { network_mode: SandboxNetworkMode::Scoped, ..SandboxSettings::default() };
+		let settings = SandboxSettings {
+			mode: ExecSandboxMode::Off,
+			network_mode: SandboxNetworkMode::Scoped,
+			..SandboxSettings::default()
+		};
 		let parts = policy_parts(&settings, workspace.path(), WriteMode::Scoped, None, None)
 			.expect("network-only policy");
 		assert_eq!(parts.file_policy.writable.as_ref(), [PathBuf::from("/")]);
@@ -1429,6 +1454,7 @@ mod tests {
 	fn read_deny_globs_fail_when_no_backend_can_enforce_future_matches() {
 		let workspace = tempfile::tempdir().expect("workspace");
 		let settings = SandboxSettings {
+			mode: ExecSandboxMode::Off,
 			read_deny_globs: vec![Str::new_static("/private/**")],
 			..SandboxSettings::default()
 		};

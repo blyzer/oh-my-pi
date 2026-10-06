@@ -672,6 +672,15 @@ async fn environment_rpc(temp: &tempfile::TempDir, con: omp_con::Ctx) -> Environ
 	let state = temp.path().join("state");
 	std::fs::create_dir_all(&root).expect("workspace");
 	std::fs::create_dir_all(&state).expect("state");
+	// A hermetic posture: the shell runs the same on a host with or without an
+	// OS sandbox. The user's explicit `yolo` is respected unconfined, so only a
+	// per-tool policy (`bash=deny`) can refuse a command.
+	omp_envd::exec_settings::SV_SANDBOX_MODE
+		.set(&con, omp_envd::exec_settings::ExecSandboxMode::Off)
+		.expect("sandbox off");
+	omp_envd::tool_settings::SV_TOOLS_APPROVAL_MODE
+		.set(&con, omp_envd::tool_settings::ApprovalMode::Yolo)
+		.expect("explicit yolo");
 	let con = Arc::new(con);
 	let environment = omp_envd::ProjectEnvironment::attach(&root, &state, omp_envd::AttachOptions {
 		py_eval:            false,

@@ -717,7 +717,7 @@ mod tests {
 			&mut session,
 			turn,
 			Str::new_static("warn"),
-			Str::new_static("approval-downgrade"),
+			Str::new_static("approval-posture"),
 			data,
 			Str::new_static("fallback"),
 		)
@@ -725,9 +725,16 @@ mod tests {
 
 		let handle = session
 			.dom()
-			.select("body turn notice[name=approval-downgrade]")
+			.select("body turn notice")
 			.expect("selector")
-			.next()
+			.find(|handle| {
+				session
+					.dom()
+					.get(*handle)
+					.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("name"))))
+					.and_then(Value::as_str)
+					== Some("approval-posture")
+			})
 			.expect("typed notice node");
 		let node = session.dom().get(handle).expect("notice node");
 		assert_eq!(node.content.as_deref(), Some("fallback"));

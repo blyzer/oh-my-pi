@@ -76,6 +76,17 @@ fn a_project_may_set_only_convars_that_opt_in() {
 }
 
 #[test]
+fn a_project_value_is_not_a_user_choice() {
+	let ctx = Ctx::new();
+	project(&ctx, "test_project_scoped 7").unwrap();
+	assert_eq!(ctx.get("test_project_scoped"), Some(Value::Int(7)));
+	assert!(!ctx.is_user_set("test_project_scoped"));
+	ctx.set("test_project_scoped", Value::Int(3), Origin::Archive)
+		.unwrap();
+	assert!(ctx.is_user_set("test_project_scoped"));
+}
+
+#[test]
 fn every_statement_other_than_set_and_reset_of_a_scoped_convar_is_denied() {
 	let ctx = Ctx::new();
 	ctx.run("alias keep \"test_project_user_only 5\"").unwrap();
