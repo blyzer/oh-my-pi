@@ -1,5 +1,7 @@
 //! DOM-only message projection laws.
 
+use std::collections::BTreeMap;
+
 use omp_core::{Hash32, Str};
 use omp_dom::{KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_journal::blob::{BlobRef, BlobStore};
@@ -732,6 +734,127 @@ fn reopen_journals_abort_results_for_ready_and_partial_calls() {
 		recovered_journal,
 		"second reopen appends no duplicate aborts"
 	);
+}
+
+/// The typed abort journaled for the tool call whose provider id is `call_id`.
+fn recovered_abort(session: &Session, call_id: &str) -> omp_tool::Abort {
+	let dom = session.dom();
+	let call = dom
+		.handles()
+		.find(|handle| {
+			dom.get(*handle).is_some_and(|node| {
+				matches!(node.tag, Tag::Custom(_))
+					&& node
+						.prop(&PropKey::from(PropId::Id))
+						.and_then(Value::as_str)
+						== Some(call_id)
+			})
+		})
+		.expect("call node");
+	let fault = dom
+		.children(call)
+		.iter()
+		.find_map(|child| match dom.get(*child)?.prop(&PropKey::from(PropId::Fault)) {
+			Some(Value::Json(raw)) => Some(raw.clone()),
+			_ => None,
+		})
+		.expect("fault diag");
+	match serde_json::from_str::<omp_tool::CallOutcome<serde_json::Value, serde_json::Value>>(
+		fault.get(),
+	)
+	.expect("journaled outcome decodes")
+	{
+		omp_tool::CallOutcome::Aborted { abort, .. } => abort,
+		other => panic!("call {call_id} did not abort: {other:?}"),
+	}
+}
+
+#[test]
+fn recovery_distinguishes_started_from_never_started_calls() {
+	let directory = tempfile::tempdir().expect("temporary session directory");
+	let path = directory.path().join("started-split.oms");
+	let mut session = Session::create(&path, ComponentRegistry::default()).expect("session creates");
+	session.begin_turn().expect("turn starts");
+	session
+		.assistant_start("test-model", "test-provider", "test-route")
+		.expect("assistant starts tool turn");
+	// Authorized but queued: the executor never received it.
+	let (queued, _) = session
+		.call_streaming("write", 1, "queued-call", None)
+		.expect("queued call streams");
+	session
+		.call_ready(queued, raw(serde_json::json!({"path":"a.txt"})))
+		.expect("queued call authorized");
+	// Crossed into its execution unit: effects may have landed.
+	let (running, _) = session
+		.call_streaming("bash", 1, "running-call", None)
+		.expect("running call streams");
+	session
+		.call_ready(running, raw(serde_json::json!({"command":"make deploy"})))
+		.expect("running call authorized");
+	session.call_started(running).expect("running call starts");
+	// Argument stream cut off before authorization.
+	session
+		.call_streaming("grep", 1, "partial-call", None)
+		.expect("partial call streams");
+	drop(session);
+
+	let mut restored = Session::open(&path, ComponentRegistry::default()).expect("session restores");
+	let boundaries: Vec<_> = restored
+		.unsettled_calls()
+		.iter()
+		.map(|call| (call.call_id.to_string(), call.committed, call.started))
+		.collect();
+	assert_eq!(
+		boundaries,
+		[
+			("queued-call".to_owned(), true, false),
+			("running-call".to_owned(), true, true),
+			("partial-call".to_owned(), false, false),
+		],
+		"replay restores the execution boundary"
+	);
+	restored
+		.recover_process_disappearance()
+		.expect("writable owner recovers calls");
+
+	let queued = recovered_abort(&restored, "queued-call");
+	assert!(
+		matches!(&queued, omp_tool::Abort::Skipped { reason } if reason.contains("before execution began")),
+		"a never-started call is safe to re-issue: {queued:?}"
+	);
+	assert_eq!(queued.kind(), omp_tool::AbortKind::Skipped);
+	let running = recovered_abort(&restored, "running-call");
+	assert!(
+		matches!(
+			&running,
+			omp_tool::Abort::EffectsUnknown { reason } if reason.contains("after execution began")
+		),
+		"a started call must not be blindly re-run: {running:?}"
+	);
+	assert_eq!(running.kind(), omp_tool::AbortKind::Cancelled);
+	assert!(matches!(recovered_abort(&restored, "partial-call"), omp_tool::Abort::InputDropped));
+
+	let texts: BTreeMap<_, _> = project_thread(restored.dom())
+		.iter()
+		.filter_map(|item| match &item.kind {
+			Some(item::Kind::ToolResult(result)) => Some((
+				result.call_id.clone(),
+				result
+					.parts
+					.iter()
+					.filter_map(|part| match &part.kind {
+						Some(part::Kind::Text(text)) => Some(text.as_str()),
+						_ => None,
+					})
+					.collect::<String>(),
+			)),
+			_ => None,
+		})
+		.collect();
+	assert_eq!(texts["queued-call"], queued.render().as_str());
+	assert_eq!(texts["running-call"], running.render().as_str());
+	assert_ne!(texts["queued-call"], texts["running-call"]);
 }
 
 #[test]
