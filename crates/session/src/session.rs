@@ -26,6 +26,15 @@ use crate::{
 	rewind::{LifecycleWork, diff},
 };
 
+/// Model-facing reason for a call that was authorized but never crossed
+/// [`Session::call_started`] before its owner disappeared: nothing ran.
+const NOT_STARTED_REASON: &str = "process disappeared before execution began; the call did not run";
+
+/// Model-facing reason for a call whose execution had begun when its owner
+/// disappeared: effects may have landed, and the call is not re-run.
+const STARTED_REASON: &str =
+	"process disappeared after execution began; outcome unknown, not re-run";
+
 /// What one tool call cost.
 ///
 /// Byte counts measure context exposure, not tokens: `source_bytes` is what
@@ -205,6 +214,11 @@ pub struct UnsettledCall {
 	/// Whether canonical arguments were committed (`running`) or the argument
 	/// stream never closed (`arguments`).
 	pub committed: bool,
+	/// Whether the call crossed into its execution unit
+	/// ([`Session::call_started`] is journaled). `false` means it is a
+	/// never-started placeholder: nothing ran, so re-issuing it is safe. `true`
+	/// means effects may have landed before the process disappeared.
+	pub started:   bool,
 	/// Canonical committed arguments, when `committed`.
 	pub args:      Option<Box<RawValue>>,
 }
@@ -430,6 +444,10 @@ impl Session {
 					continue;
 				}
 				let committed = status == "running";
+				let started = matches!(
+					node.prop(&PropKey::Custom(Str::new_static("execution-started"))),
+					Some(Value::Bool(true))
+				);
 				let args = committed
 					.then(|| {
 						dom.children(*child).iter().find_map(|grandchild| {
@@ -458,6 +476,7 @@ impl Session {
 						_ => 1,
 					},
 					committed,
+					started,
 					args,
 				});
 			}
@@ -466,6 +485,12 @@ impl Session {
 	}
 
 	/// Journals synthetic aborts for every call left without a terminal result.
+	///
+	/// The abort is typed by how far the call got. A call cut off while its
+	/// arguments streamed is [`Abort::InputDropped`]; an authorized call that
+	/// never crossed [`Self::call_started`] is [`Abort::Skipped`] (nothing ran,
+	/// safe to re-issue); a started call is [`Abort::EffectsUnknown`] (effects
+	/// may have landed, so the model must not blindly re-run it).
 	///
 	/// The writable session owner invokes process-disappearance recovery before
 	/// projecting the next provider request, so strict-provider projection
@@ -476,10 +501,10 @@ impl Session {
 	pub fn recover_unsettled_calls(&mut self) -> Result<usize, SessionError> {
 		let calls = self.unsettled_calls();
 		for call in &calls {
-			let abort = if call.committed {
-				Abort::MissingOutcome
-			} else {
-				Abort::InputDropped
+			let abort = match (call.committed, call.started) {
+				(false, _) => Abort::InputDropped,
+				(true, false) => Abort::Skipped { reason: Str::new_static(NOT_STARTED_REASON) },
+				(true, true) => Abort::EffectsUnknown { reason: Str::new_static(STARTED_REASON) },
 			};
 			if !call.committed {
 				self.call_ready(call.entry, RawValue::from_string("{}".to_owned())?)?;

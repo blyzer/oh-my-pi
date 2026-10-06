@@ -119,6 +119,23 @@ pub enum ConError {
 		/// The variable name.
 		name: Str,
 	},
+	/// A project cfg overlay named a variable that does not carry
+	/// `VarFlags::PROJECT`.
+	#[error("`{name}` is not project-scoped; a project cfg cannot set or reset it")]
+	ProjectVarDenied {
+		/// The variable name.
+		name: Str,
+	},
+	/// A project cfg overlay ran a statement other than `set` or `reset` of a
+	/// project-scoped variable (an alias, bind, `exec`, command, or action).
+	#[error(
+		"`{name}` is not allowed in a project cfg; only `set` and `reset` of project-scoped convars \
+		 are"
+	)]
+	ProjectCommandDenied {
+		/// The command, action, or alias name as written.
+		name: Str,
+	},
 	/// Var is replicated from the authority; replicas cannot write it.
 	#[error("`{name}` is replicated from the authority and cannot be set here")]
 	ReplicatedWrite {
@@ -243,4 +260,13 @@ pub enum ConError {
 	/// `bind`/`unbind` named a chord that has no canonical spelling.
 	#[error("invalid bind chord")]
 	Chord(#[source] ChordError),
+}
+
+impl ConError {
+	/// Whether a project cfg overlay was refused authority for the statement
+	/// (as opposed to the statement being malformed or failing).
+	#[must_use]
+	pub const fn is_project_denial(&self) -> bool {
+		matches!(self, Self::ProjectVarDenied { .. } | Self::ProjectCommandDenied { .. })
+	}
 }

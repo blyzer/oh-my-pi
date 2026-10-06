@@ -44,7 +44,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_con::{ConError, Ctx, Origin, ParseError, Value};
+use omp_con::{ConError, Ctx, Origin, ParseError, Value, VarFlags};
 use omp_core::{FastHashSet, Hash32, Str};
 use thiserror::Error;
 
@@ -132,7 +132,7 @@ pub enum SettingsImportError {
 pub(super) fn import_settings(cx: &StepContext<'_>) -> Result<Vec<ImportEntry>, ImportError> {
 	let root = &cx.pair.target.config_dir;
 	let entries = match cx.locate(V1Item::Settings) {
-		Some(source) => import_file(&source, root, cx.mode)?,
+		Some(source) => import_file(&source, root, cx.mode, Destination::User)?,
 		None => vec![entry(None, None, ImportOutcome::NothingToImport)],
 	};
 	if cx.mode == ImportMode::Apply {
@@ -165,7 +165,7 @@ pub fn import_project_settings(
 	if marker.exists() {
 		return vec![entry(Some(&source), None, ImportOutcome::Skipped(SkipReason::MarkerPresent))];
 	}
-	let imported = import_file(&source, &root, mode).and_then(|entries| {
+	let imported = import_file(&source, &root, mode, Destination::Project).and_then(|entries| {
 		if mode == ImportMode::Apply {
 			write_project_marker(&marker, project)?;
 		}
@@ -212,16 +212,29 @@ fn entry(source: Option<&Path>, subject: Option<Str>, outcome: ImportOutcome) ->
 	}
 }
 
+/// Whose authority the destination cfg files run with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Destination {
+	/// The profile's own cfgs: every convar.
+	User,
+	/// `<project>/.omp` overlays run with project authority, so only
+	/// project-scoped convars ([`VarFlags::PROJECT`]) can take effect there;
+	/// the rest stay comments instead of lines every load would reject.
+	Project,
+}
+
 /// Imports one v1 settings file into the cfg files under `root`.
 fn import_file(
 	source: &Path,
 	root: &Path,
 	mode: ImportMode,
+	destination: Destination,
 ) -> Result<Vec<ImportEntry>, SettingsImportError> {
 	let document = legacy_settings::read_yaml_document(source)?;
 	let targets = [root.join("config.cfg"), root.join("subagent.cfg")];
 	let [config, subagent] = targets.each_ref().map(|path| read_cfg(path));
-	let planned = plan_file(&document, source, config?.as_deref(), subagent?.as_deref(), mode)?;
+	let planned =
+		plan_file(&document, source, config?.as_deref(), subagent?.as_deref(), mode, destination)?;
 	if mode == ImportMode::DryRun || planned.blocks.iter().all(Option::is_none) {
 		return Ok(planned.entries);
 	}
@@ -240,7 +253,8 @@ fn import_file(
 		};
 	}
 	let [config, subagent] = &texts;
-	let planned = plan_file(&document, source, config.as_deref(), subagent.as_deref(), mode)?;
+	let planned =
+		plan_file(&document, source, config.as_deref(), subagent.as_deref(), mode, destination)?;
 	for (((block, lock), text), path) in planned
 		.blocks
 		.iter()
@@ -350,6 +364,7 @@ fn plan_file(
 	config_text: Option<&str>,
 	subagent_text: Option<&str>,
 	mode: ImportMode,
+	destination: Destination,
 ) -> Result<Plan, SettingsImportError> {
 	let config_assigned = assigned(Path::new("config.cfg"), config_text)?;
 	let subagent_assigned = assigned(Path::new("subagent.cfg"), subagent_text)?;
@@ -374,6 +389,14 @@ fn plan_file(
 			continue;
 		};
 		let paths = fold.paths.join(", ");
+		if destination == Destination::Project && !var.flags.contains(VarFlags::PROJECT) {
+			report(
+				format!("{paths} -> {}", var.name),
+				ImportOutcome::NotMigratable(NotMigratable::NotProjectScoped),
+			);
+			kept.extend(fold.paths);
+			continue;
+		}
 		let value = match fold.outcome {
 			Ok(value) => value,
 			Err((path, LegacyValueError::UnsupportedMemoryBackend { backend })) => {
@@ -421,6 +444,10 @@ fn plan_file(
 	if let Some(tier) = document.value_at("tier.subagent") {
 		let subject = || String::from("tier.subagent -> subagent.cfg");
 		match subagent_tiers(&ctx, tier) {
+			_ if destination == Destination::Project => {
+				report(subject(), ImportOutcome::NotMigratable(NotMigratable::NotProjectScoped));
+				kept.insert(Str::new_static("tier.subagent"));
+			},
 			None => {
 				report(subject(), ImportOutcome::NotMigratable(NotMigratable::ValueRejected));
 				kept.insert(Str::new_static("tier.subagent"));

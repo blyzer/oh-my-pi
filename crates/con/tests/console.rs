@@ -594,7 +594,7 @@ fn exec_uses_loader_and_writecfg_uses_saver() {
 	let saved: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
 	let saved_in = Arc::clone(&saved);
 	let ctx = Ctx::builder()
-		.loader(|name| Ok((name == "autoexec").then(|| Str::new_static("test::gravity 300"))))
+		.loader(|name: &str| Ok((name == "autoexec").then(|| Str::new_static("test::gravity 300"))))
 		.saver(move |name, contents| {
 			saved_in
 				.lock()
@@ -626,7 +626,7 @@ fn exec_uses_loader_and_writecfg_uses_saver() {
 #[test]
 fn settings_selected_scripts_apply_in_declared_order() {
 	let ctx = Ctx::builder()
-		.loader(|name| {
+		.loader(|name: &str| {
 			Ok(match name {
 				"base" => Some(Str::new_static("test::gravity 400")),
 				"project" => Some(Str::new_static("unknown::setting 1; test::gravity 650")),

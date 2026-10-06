@@ -143,7 +143,7 @@ omp_con::var! {
 	/// so `ai_task_model` applies, else the spawning session's model.
 	pub static AI_MODEL = ai_model: Str {
 		default: Str::new_static(""),
-		flags: session,
+		flags: session | project,
 	};
 	/// Model route for task subagents; empty inherits `ai_model`. It seeds a
 	/// child's `ai_model` before `subagent.cfg` and the agent class cfg run,
@@ -161,7 +161,7 @@ omp_con::var! {
 	pub static AI_THINKING = ai_thinking: Str {
 		default: Str::new_static("high"),
 		suggest: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-		flags: archive | session,
+		flags: archive | session | project,
 	};
 	/// Enables the low-latency model path.
 	pub static AI_FASTMODE = ai_fastmode: bool {
@@ -271,7 +271,7 @@ omp_con::var! {
 	/// allows every registered tool.
 	pub static SV_TOOLS = sv_tools: Vec<Str> {
 		default: Vec::new(),
-		flags: archive | session | replicated,
+		flags: archive | session | replicated | project,
 	};
 	/// Read-only ceiling of a subagent spawned under plan mode: only plan
 	/// mode's read-only tools may run, whatever `sv_tools` allows, and the

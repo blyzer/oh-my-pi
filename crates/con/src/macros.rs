@@ -40,6 +40,9 @@ macro_rules! __var_flag {
 	(session) => {
 		$crate::VarFlags::SESSION
 	};
+	(project) => {
+		$crate::VarFlags::PROJECT
+	};
 }
 
 /// Declares console variables and their typed handles.

@@ -100,6 +100,11 @@ pub enum NotMigratable {
 	/// v2 has the setting but rejects the v1 value.
 	#[strum(to_string = "v2 rejects the v1 value")]
 	ValueRejected,
+	/// v2 has the setting, but a project cfg may not set it: repository
+	/// content runs with project authority, which only convars flagged
+	/// `PROJECT` accept. Set it in the user config instead.
+	#[strum(to_string = "v2 does not take it from a project cfg; set it in your user config")]
+	NotProjectScoped,
 }
 
 /// What the owner has to do about an item.
