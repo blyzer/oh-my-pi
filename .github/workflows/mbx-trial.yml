@@ -1,0 +1,604 @@
+name: mbx trial
+
+# EXPERIMENT, NEVER FOR MERGE. Measures whether the shared Cargo compiler cache
+# `mbx` (Mr Boxington, https://mr-boxington.jdx.dev/) would speed up this
+# repository's hosted macOS builds and worktree builds.
+#
+# One job, sequential arms, the same workload in each: the P7 build,
+#   cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked --no-run
+# Every arm prints greppable `MBXRESULT arm=<name> wall_s=<n> ...` lines; the
+# final step tabulates them into the step summary. Compare with
+# docs/audits/sccache-mac-measurement.md (sccache: second worktree 70% hits).
+#
+# This workflow never uses the repository's normal Cargo cache keys: every key
+# it restores or saves starts with `mbx-trial-`. The one exception is the
+# embedded-CPython cache of ./.github/actions/macos-build-state, which is
+# content-addressed and, when saved from this pull request, is scoped to its ref.
+#
+# A pull request run is read-only for mbx's remote backends by policy, so this
+# trial only exercises the LOCAL store (persisted with actions/cache to make a
+# re-run measure `mbx-cold-from-restored-store`).
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/mbx-trial.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # bash -eo pipefail. The runner ships bash 3.2: no associative arrays,
+    # no ${var,,}, no `case` inside $(...).
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: "1"
+
+jobs:
+  trial:
+    name: mbx trial (macos-15)
+    # Hard-pinned on purpose: the trial must not follow vars.MACOS_RUNNER to a
+    # self-hosted machine.
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+
+      - name: Install native build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install lld@22 uv zstd ninja
+          # .cargo/config.toml links through /opt/homebrew/bin/ld64.lld and the vendored CPython
+          # bitcode is LLVM 22 (crates/py/scripts/ld64.lld): the unversioned lld formula tracks
+          # the newest major (23 today) and cannot link it.
+          ln -sf "$(brew --prefix lld@22)/bin/ld64.lld" /opt/homebrew/bin/ld64.lld
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+        with:
+          tool: nextest@0.9.146
+
+      # Embedded CPython into vendor/ (hosted runner: actions/cache + fetch script).
+      - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: "60"
+
+      # ------------------------------------------------------------------
+      # Harness: helper library sourced by every later step, parsing scripts.
+      # ------------------------------------------------------------------
+      - name: Trial harness
+        run: |
+          OUT="$RUNNER_TEMP/trial-out"
+          mkdir -p "$OUT"
+          echo "TRIAL_OUT=$OUT" >> "$GITHUB_ENV"
+          # The mbx store lives at a known path so actions/cache can persist it.
+          echo "MBX_CACHE_DIR=$HOME/mbx-trial-store" >> "$GITHUB_ENV"
+
+          cat > "$OUT/trial.sh" <<'EOF'
+          # Sourced by every step of the trial. bash 3.2 safe.
+          OUT="$RUNNER_TEMP/trial-out"
+          RES="$OUT/results.txt"
+          WL="nextest run --profile ci -p omp-e2e --test p7_tui --locked --no-run"
+          SHIM_DIR="$HOME/Library/Application Support/mbx/bin"
+          FIRST="$GITHUB_WORKSPACE"
+          SECOND="$RUNNER_TEMP/second/oh-my-pi"
+
+          emit() { echo "$*" | tee -a "$RES"; }
+
+          du_gb() {
+            if [ -e "$1" ]; then
+              du -sk "$1" 2>/dev/null | awk '{ printf "%.1f", $1 / 1048576 }'
+            else
+              echo 0.0
+            fi
+          }
+
+          free_gb() { df -Pk / | awk 'NR == 2 { print int($4 / 1048576) }'; }
+
+          facts() {
+            echo "::group::host facts ($1)"
+            {
+              sw_vers
+              echo "hw.ncpu=$(sysctl -n hw.ncpu) hw.memsize=$(sysctl -n hw.memsize)"
+              echo "loadavg=$(sysctl -n vm.loadavg)"
+              df -h / "$GITHUB_WORKSPACE"
+              uptime
+            } 2>&1 | tee -a "$OUT/host-facts.txt"
+            echo "::endgroup::"
+            la=$(sysctl -n vm.loadavg | tr -d '{}' | sed 's/^ *//;s/ *$//')
+            emit "MBXRESULT arm=host-$1 free_gb=$(free_gb) ncpu=$(sysctl -n hw.ncpu) loadavg=\"$la\""
+          }
+
+          mbx_env() {
+            # Plain target/ (the GitHub Action does the same): the trial deletes
+            # target/ between arms. Auto GC off so a budget sweep cannot evict
+            # entries mid-trial. Plain display for CI logs. Full summary line.
+            export MBX_TARGET_VIEWS=0
+            export MBX_GC_AUTO=false
+            export MBX_DISPLAY=plain
+            export MBX_SUMMARY=full
+            export MBX_STATS_REPORT="$OUT/stats-$1.json"
+          }
+
+          edit_core()   { printf '\n// mbx-trial edit\n' >> "$1/crates/core/src/lib.rs"; }
+          revert_core() { (cd "$1" && git checkout -- crates/core/src/lib.rs); }
+
+          store_report() {
+            local sz n
+            sz=$(du_gb "$MBX_CACHE_DIR")
+            n=$(find "$MBX_CACHE_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+            emit "MBXRESULT arm=store-after-$1 store_gb=$sz store_files=$n"
+          }
+
+          mbx_report() { # arm dir
+            local line
+            line=$({ grep -h 'mbx\[cache\]' "$OUT/build-$1.log" || true; } | tail -n 1 | tr '"' "'")
+            emit "MBXSTAT arm=$1 summary_line=\"$line\""
+            if [ -f "$OUT/stats-$1.json" ]; then
+              compact=$(python3 -I "$OUT/jsoncompact.py" "$OUT/stats-$1.json" 2>&1 || true)
+              echo "MBXJSON arm=$1 $compact" | tee -a "$OUT/stats-json.txt"
+            else
+              echo "MBXJSON arm=$1 absent" | tee -a "$OUT/stats-json.txt"
+            fi
+            (cd "$2" && mbx explain --last) > "$OUT/explain-$1.txt" 2>&1 || true
+            mbx cache stats > "$OUT/cache-stats-$1.txt" 2>&1 || true
+            mbx stats > "$OUT/stats-cli-$1.txt" 2>&1 || true
+            echo "::group::mbx explain --last ($1), first 150 lines"
+            head -n 150 "$OUT/explain-$1.txt" || true
+            echo "::endgroup::"
+            echo "::group::mbx cache stats and mbx stats ($1)"
+            cat "$OUT/cache-stats-$1.txt" "$OUT/stats-cli-$1.txt" || true
+            echo "::endgroup::"
+            store_report "$1"
+          }
+
+          # run_arm <arm> <none|mbx> <checkout dir>
+          run_arm() {
+            local arm="$1" mode="$2" dir="$3" log="$OUT/build-$1.log"
+            local t0 t1 rc wall tflag inv parsed tsz th
+            tflag=$(cat "$OUT/timings-flag" 2>/dev/null || true)
+            inv=-
+            if [ "$mode" = mbx ]; then inv=$(cat "$OUT/mbx-mode" 2>/dev/null || echo mbx); fi
+            echo "::group::arm $arm: $mode build in $dir"
+            t0=$(date +%s)
+            set +e
+            (
+              cd "$dir" || exit 97
+              if [ "$mode" = mbx ]; then
+                mbx_env "$arm"
+                if [ "$inv" = shim ]; then
+                  PATH="$SHIM_DIR:$PATH"
+                  export PATH
+                  cargo $WL $tflag
+                else
+                  mbx $WL $tflag
+                fi
+              else
+                cargo $WL $tflag
+              fi
+            ) 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            t1=$(date +%s)
+            echo "::endgroup::"
+            wall=$((t1 - t0))
+            parsed=$(python3 -I "$OUT/mbxparse.py" "$log" 2>/dev/null || echo "hits=na")
+            tsz=$(du_gb "$dir/target")
+            emit "MBXRESULT arm=$arm wall_s=$wall rc=$rc mode=$mode invoke=$inv timings=${tflag:-none} target_gb=$tsz free_gb=$(free_gb) $parsed"
+            th="$dir/target/cargo-timings/cargo-timing.html"
+            if [ -f "$th" ]; then
+              cp "$th" "$OUT/timings-$arm.html"
+              python3 -I "$OUT/units.py" "$OUT/timings-$arm.html" "$arm" 2>&1 | tee -a "$OUT/units.txt" || true
+            fi
+            if [ "$mode" = mbx ]; then mbx_report "$arm" "$dir"; fi
+            return "$rc"
+          }
+          EOF
+
+          cat > "$OUT/mbxparse.py" <<'EOF'
+          import re
+          import sys
+
+          text = open(sys.argv[1], errors="replace").read()
+          lines = [ln for ln in text.splitlines() if "mbx[cache]" in ln]
+          keys = (
+              ("hits", r"hits?"),
+              ("misses", r"misses|miss"),
+              ("notlooked", r"not looked up"),
+              ("incremental", r"incremental"),
+              ("bypassed", r"bypass(?:ed|es)?"),
+              ("remote_fail", r"remote failures?"),
+          )
+          out = []
+          for key, label in keys:
+              value = "na"
+              if lines:
+                  m = re.search(r"(\d+)\s+(?:%s)\b" % label, lines[-1])
+                  if m:
+                      value = m.group(1)
+              out.append("%s=%s" % (key, value))
+          out.append("summary_lines=%d" % len(lines))
+          print(" ".join(out))
+          EOF
+
+          cat > "$OUT/jsoncompact.py" <<'EOF'
+          import json
+          import sys
+
+          print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))
+          EOF
+
+          cat > "$OUT/units.py" <<'EOF'
+          import json
+          import sys
+
+          path, arm = sys.argv[1], sys.argv[2]
+          try:
+              text = open(path, errors="replace").read()
+              marker = "UNIT_DATA = "
+              start = text.index(marker) + len(marker)
+              units, _ = json.JSONDecoder().raw_decode(text[start:])
+              units.sort(key=lambda u: u.get("duration", 0), reverse=True)
+              total = sum(u.get("duration", 0) for u in units)
+              print("MBXUNIT arm=%s units=%d sum_unit_s=%.0f" % (arm, len(units), total))
+              for u in units[:8]:
+                  print(
+                      "MBXUNIT arm=%s dur_s=%.1f unit=%s mode=%s target=%s"
+                      % (
+                          arm,
+                          u.get("duration", 0),
+                          u.get("name", "?"),
+                          u.get("mode", "?"),
+                          (u.get("target") or "-").strip() or "-",
+                      )
+                  )
+          except Exception as exc:  # parse failure must never fail the trial
+              print("MBXUNIT arm=%s parse=failed reason=%s" % (arm, type(exc).__name__))
+          EOF
+
+          cat > "$OUT/summary.py" <<'EOF'
+          import os
+          import shlex
+          import sys
+
+          out = os.environ["TRIAL_OUT"]
+          rows, stats = [], []
+          try:
+              lines = open(os.path.join(out, "results.txt"), errors="replace").read().splitlines()
+          except OSError:
+              lines = []
+          for ln in lines:
+              try:
+                  parts = shlex.split(ln)
+              except ValueError:
+                  continue
+              if not parts:
+                  continue
+              kv = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+              if parts[0] == "MBXRESULT":
+                  rows.append(kv)
+              elif parts[0] == "MBXSTAT":
+                  stats.append(kv)
+
+          def mmss(value):
+              try:
+                  s = int(value)
+              except (TypeError, ValueError):
+                  return "-"
+              return "%dm%02ds" % (s // 60, s % 60)
+
+          timed = [r for r in rows if "mode" in r and "wall_s" in r]
+          base = None
+          for r in timed:
+              if r["arm"] == "none":
+                  base = int(r["wall_s"])
+          md = ["## mbx trial results (hosted macos-15)", ""]
+          md.append("Nothing here is a verdict until the numbers below are read against the "
+                    "sccache audit (docs/audits/sccache-mac-measurement.md).")
+          md.append("")
+          md.append("| arm | wall | vs none | rc | hits | misses | not looked up | bypassed | incr | target GB |")
+          md.append("|---|---|---|---|---|---|---|---|---|---|")
+          for r in timed:
+              ratio = "-"
+              if base and r["arm"] in ("none", "mbx-cold", "mbx-cold-from-restored-store", "mbx-warm-same-path", "mbx-second-path"):
+                  try:
+                      ratio = "%.2fx" % (int(r["wall_s"]) / base)
+                  except (ValueError, ZeroDivisionError):
+                      pass
+              md.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                  r["arm"], mmss(r.get("wall_s")), ratio, r.get("rc", "-"),
+                  r.get("hits", "-"), r.get("misses", "-"), r.get("notlooked", "-"),
+                  r.get("bypassed", "-"), r.get("incremental", "-"), r.get("target_gb", "-")))
+          md.append("")
+          md.append("`vs none` is wall time divided by the no-wrapper cold build (lower is faster).")
+          md.append("")
+          md.append("### Store and host")
+          md.append("")
+          md.append("| record | values |")
+          md.append("|---|---|")
+          for r in rows:
+              arm = r.get("arm", "")
+              if arm.startswith("store") or arm.startswith("host-") or arm in ("probe", "fetch", "second-path-setup", "mbx-install", "mbx-setup"):
+                  vals = " ".join("%s=%s" % (k, v) for k, v in r.items() if k != "arm")
+                  md.append("| %s | %s |" % (arm, vals))
+          md.append("")
+          md.append("### mbx summary lines")
+          md.append("")
+          for s in stats:
+              md.append("- `%s`: %s" % (s.get("arm"), s.get("summary_line") or "(none printed)"))
+          md.append("")
+          try:
+              units = open(os.path.join(out, "units.txt"), errors="replace").read().strip()
+          except OSError:
+              units = ""
+          if units:
+              md.append("### Longest units per arm (cargo --timings)")
+              md.append("")
+              md.append("```")
+              md.append(units)
+              md.append("```")
+          text = "\n".join(md) + "\n"
+          print(text)
+          target = os.environ.get("GITHUB_STEP_SUMMARY")
+          if target:
+              with open(target, "a") as fh:
+                  fh.write(text)
+          with open(os.path.join(out, "summary.md"), "w") as fh:
+              fh.write(text)
+          EOF
+          echo "harness written to $OUT"
+
+      - name: Host facts (before) and tool versions
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          facts before
+          cargo --version
+          rustc -vV
+          cargo nextest --version
+          echo "ld64.lld: $(/opt/homebrew/bin/ld64.lld --version)"
+          # mbx defers when RUSTC_WRAPPER is already set; it must be empty here.
+          echo "RUSTC_WRAPPER='${RUSTC_WRAPPER:-}' CARGO_BUILD_RUSTC_WRAPPER='${CARGO_BUILD_RUSTC_WRAPPER:-}' CARGO_INCREMENTAL='${CARGO_INCREMENTAL:-}'"
+          ls -la "$HOME/.cargo" || true
+          # Does `cargo nextest run` accept --timings? Skip it if not: it must never break the workload.
+          cargo nextest run --help > "$OUT/help.txt" 2>&1 || true
+          if grep -q -- '--timings' "$OUT/help.txt"; then
+            echo "--timings" > "$OUT/timings-flag"
+          else
+            : > "$OUT/timings-flag"
+          fi
+          emit "MBXRESULT arm=probe timings_flag=\"$(cat "$OUT/timings-flag")\""
+
+      # ------------------------------------------------------------------
+      # State that persists across re-runs: ONLY the mbx binary and the store.
+      # ------------------------------------------------------------------
+      - name: Restore mbx binary
+        id: mbxbin
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/mbx
+          key: mbx-trial-bin-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Restore mbx store
+        id: store
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/mbx-trial-store
+          key: mbx-trial-store-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            mbx-trial-store-${{ hashFiles('Cargo.lock') }}-
+            mbx-trial-store-
+
+      - name: Record store restore
+        env:
+          MATCHED_KEY: ${{ steps.store.outputs.cache-matched-key }}
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          if [ -n "$MATCHED_KEY" ] && [ -d "$MBX_CACHE_DIR" ]; then
+            echo true > "$OUT/store-restored"
+          else
+            echo false > "$OUT/store-restored"
+          fi
+          emit "MBXRESULT arm=store-restore restored=$(cat "$OUT/store-restored") size=$(du_gb "$MBX_CACHE_DIR")GB matched_key=${MATCHED_KEY:-none}"
+
+      - name: Install mbx
+        id: install
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          t0=$(date +%s)
+          if [ -x "$HOME/.cargo/bin/mbx" ]; then
+            echo "mbx binary restored from cache"
+            echo "restored" > "$OUT/mbx-install-source"
+          else
+            # Outside the checkout so rust-toolchain.toml (nightly) is not used for this.
+            # Needs Rust >= 1.91 as the active toolchain (mbx docs).
+            (cd "$RUNNER_TEMP" && cargo install mbx --locked)
+            echo "built" > "$OUT/mbx-install-source"
+          fi
+          t1=$(date +%s)
+          mbx --version
+          emit "MBXRESULT arm=mbx-install wall_s=$((t1 - t0)) source=$(cat "$OUT/mbx-install-source") version=\"$(mbx --version | tr -d '\"')\""
+
+      - name: Save mbx binary
+        if: ${{ steps.mbxbin.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/mbx
+          key: mbx-trial-bin-${{ runner.os }}-${{ runner.arch }}-v1
+
+      # Registry download is timed here and kept out of every arm: arm 0 would
+      # otherwise pay for the downloads that later arms get for free.
+      - name: Fetch crates (untimed for the arms)
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          t0=$(date +%s)
+          cargo fetch --locked
+          emit "MBXRESULT arm=fetch wall_s=$(($(date +%s) - t0))"
+
+      # ------------------------------------------------------------------
+      # Arm 0: no wrapper, cold target dir. mbx has not been set up yet.
+      # ------------------------------------------------------------------
+      - name: "Arm 0: none (no wrapper, cold target)"
+        timeout-minutes: 55
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          rm -rf "$FIRST/target"
+          run_arm none none "$FIRST"
+
+      # Control for mbx-edit: same edit, same warm target, no wrapper.
+      - name: "Arm 0b: none-edit (control for mbx-edit)"
+        timeout-minutes: 40
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          edit_core "$FIRST"
+          rc=0
+          run_arm none-edit none "$FIRST" || rc=$?
+          revert_core "$FIRST"
+          exit "$rc"
+
+      # ------------------------------------------------------------------
+      # mbx setup, doctor, and how to invoke it for nextest.
+      # ------------------------------------------------------------------
+      - name: mbx setup, doctor, invocation probe
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          echo "::group::before setup"
+          ls -la "$HOME/.cargo" "$HOME/Library/Application Support" 2>&1 || true
+          echo "::endgroup::"
+          export MBX_TARGET_VIEWS=0 MBX_GC_AUTO=false MBX_DISPLAY=plain
+          # Prefer the documented `mbx setup`; stdin closed so nothing can prompt.
+          mbx setup < /dev/null || echo "mbx setup exited $?"
+          mbx setup --status < /dev/null || true
+          echo "::group::after setup"
+          ls -la "$HOME/.cargo" "$SHIM_DIR" 2>&1 || true
+          echo "cargo config files:"; ls -la "$HOME/.cargo"/config* 2>&1 || true
+          echo "::endgroup::"
+          mbx doctor < /dev/null || echo "mbx doctor exited $?"
+          mbx cache dir || true
+          # `mbx` documents Cargo aliases and installed subcommands as supported.
+          # If `mbx nextest` does not work, fall back to the cargo shim on PATH.
+          if (cd "$FIRST" && mbx nextest --version) > "$OUT/probe-nextest.txt" 2>&1; then
+            echo mbx > "$OUT/mbx-mode"
+          else
+            echo "mbx nextest --version failed:"; cat "$OUT/probe-nextest.txt"
+            echo shim > "$OUT/mbx-mode"
+          fi
+          emit "MBXRESULT arm=mbx-setup invoke=$(cat "$OUT/mbx-mode") shim_present=$([ -x "$SHIM_DIR/cargo" ] && echo yes || echo no)"
+
+      # ------------------------------------------------------------------
+      # Arm 1: empty store (or the restored one on a re-run), fresh target.
+      # ------------------------------------------------------------------
+      - name: "Arm 1: mbx-cold"
+        timeout-minutes: 55
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          arm=mbx-cold
+          if [ "$(cat "$OUT/store-restored")" = true ]; then arm=mbx-cold-from-restored-store; fi
+          echo "$arm" > "$OUT/arm1-name"
+          rm -rf "$FIRST/target"
+          run_arm "$arm" mbx "$FIRST"
+
+      - name: "Arm 2: mbx-warm-same-path"
+        timeout-minutes: 55
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          rm -rf "$FIRST/target"
+          run_arm mbx-warm-same-path mbx "$FIRST"
+
+      # ------------------------------------------------------------------
+      # Arm 3: the worktree question. A second absolute path, empty target dir,
+      # the same store. cp -c clones with APFS clonefile, so vendor/ is cheap.
+      # ------------------------------------------------------------------
+      - name: "Arm 3: mbx-second-path"
+        timeout-minutes: 55
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          rm -rf "$FIRST/target" "$SECOND"
+          mkdir -p "$(dirname "$SECOND")"
+          t0=$(date +%s)
+          cp -cR "$FIRST" "$SECOND" || { rm -rf "$SECOND"; cp -R "$FIRST" "$SECOND"; }
+          # The pyo3 config records absolute paths into vendor/: point the copy at itself.
+          for f in vendor/python/pyo3-config.txt vendor/python-release/pyo3-config.txt; do
+            if [ -f "$SECOND/$f" ]; then
+              sed -i '' "s|$FIRST|$SECOND|g" "$SECOND/$f"
+              grep -nE 'lib_dir|executable' "$SECOND/$f" || true
+            fi
+          done
+          rm -rf "$SECOND/target"
+          emit "MBXRESULT arm=second-path-setup wall_s=$(($(date +%s) - t0)) second=$SECOND"
+          run_arm mbx-second-path mbx "$SECOND"
+
+      # ------------------------------------------------------------------
+      # Arm 4: the sccache audit's switch-to-change (~41 units), in the second
+      # path whose target is warm from arm 3; then switch-back.
+      # ------------------------------------------------------------------
+      - name: "Arm 4: mbx-edit and mbx-switch-back"
+        timeout-minutes: 55
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          edit_core "$SECOND"
+          rc=0
+          run_arm mbx-edit mbx "$SECOND" || rc=$?
+          revert_core "$SECOND"
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          run_arm mbx-switch-back mbx "$SECOND"
+
+      - name: Store size and persistence gate
+        id: storegate
+        if: ${{ always() }}
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          sz_kb=$(du -sk "$MBX_CACHE_DIR" 2>/dev/null | awk '{ print $1 }')
+          sz_kb=${sz_kb:-0}
+          n=$(find "$MBX_CACHE_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+          du -sh "$MBX_CACHE_DIR" || true
+          # GitHub Actions allows 10 GB per repository; do not evict the real caches over a trial.
+          limit_kb=$((7 * 1024 * 1024))
+          if [ "$sz_kb" -gt 0 ] && [ "$sz_kb" -le "$limit_kb" ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+            decision=save
+          else
+            echo "save=false" >> "$GITHUB_OUTPUT"
+            decision=skip-too-large-or-empty
+          fi
+          emit "MBXRESULT arm=store-final store_gb=$(du_gb "$MBX_CACHE_DIR") store_files=$n persist=$decision limit_gb=7"
+
+      # Saved even when an arm failed, so a re-run can measure the restored store.
+      - name: Save mbx store
+        if: ${{ always() && steps.storegate.outputs.save == 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/mbx-trial-store
+          key: mbx-trial-store-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Host facts (after) and summary
+        if: ${{ always() }}
+        run: |
+          source "$RUNNER_TEMP/trial-out/trial.sh"
+          facts after
+          export TRIAL_OUT="$OUT"
+          echo "===== all MBXRESULT lines ====="
+          grep -h '^MBXRESULT' "$RES" || true
+          echo "===== summary ====="
+          python3 -I "$OUT/summary.py"
+
+      - name: Upload trial artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mbx-trial-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trial-out
+          if-no-files-found: warn
+          retention-days: 14
