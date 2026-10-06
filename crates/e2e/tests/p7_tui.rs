@@ -30,6 +30,7 @@ use futures::StreamExt as _;
 use nix::{
 	errno::Errno,
 	fcntl::{FcntlArg, OFlag, fcntl},
+	poll::{PollFd, PollFlags, PollTimeout, poll},
 	pty::{Winsize, openpty},
 	sys::termios::{LocalFlags, Termios, cfgetispeed, cfgetospeed, tcgetattr},
 	unistd::ttyname,
@@ -658,17 +659,36 @@ impl PtyChild {
 		let reader_raw = raw.clone();
 		let reader_end = Arc::new(AtomicBool::new(false));
 		let reader_stop = reader_end.clone();
+		// Block in poll(2) until the master is readable instead of sleeping on EAGAIN:
+		// a sleeping reader drains one small kernel buffer per wake, which on macOS
+		// (tiny PTY buffers, loaded hosted runners) throttles the host's blocking
+		// terminal writes to tens of KiB/s. The bounded wait exists only so the
+		// reader observes `reader_end`.
 		let reader = thread::spawn(move || {
 			let mut buffer = [0_u8; 16 * 1024];
 			loop {
-				match nix::unistd::read(&reader_fd, &mut buffer) {
-					Ok(0) if reader_stop.load(Ordering::Acquire) => break,
-					Ok(0) => thread::sleep(Duration::from_millis(5)),
-					Ok(count) => reader_raw.lock().extend_from_slice(&buffer[..count]),
-					Err(Errno::EAGAIN) if reader_stop.load(Ordering::Acquire) => break,
-					Err(Errno::EAGAIN) => thread::sleep(Duration::from_millis(5)),
-					Err(Errno::EIO) => break,
-					Err(error) => panic!("PTY read failed: {error}"),
+				let mut ready = [PollFd::new(reader_fd.as_fd(), PollFlags::POLLIN)];
+				match poll(&mut ready, PollTimeout::from(50_u16)) {
+					Ok(_) | Err(Errno::EINTR) => {},
+					Err(error) => panic!("PTY poll failed: {error}"),
+				}
+				// Drain everything available before polling again.
+				loop {
+					match nix::unistd::read(&reader_fd, &mut buffer) {
+						Ok(0) if reader_stop.load(Ordering::Acquire) => return,
+						Ok(0) => {
+							thread::sleep(Duration::from_millis(5));
+							break;
+						},
+						Ok(count) => reader_raw.lock().extend_from_slice(&buffer[..count]),
+						Err(Errno::EAGAIN) => break,
+						Err(Errno::EINTR) => {},
+						Err(Errno::EIO) => return,
+						Err(error) => panic!("PTY read failed: {error}"),
+					}
+				}
+				if reader_stop.load(Ordering::Acquire) {
+					return;
 				}
 			}
 		});
@@ -748,7 +768,8 @@ fn wait_snapshot(
 	label: &str,
 	mut ready: impl FnMut(&Snapshot) -> bool,
 ) -> Snapshot {
-	let deadline = Instant::now() + CHECKPOINT_TIMEOUT;
+	let started = Instant::now();
+	let deadline = started + CHECKPOINT_TIMEOUT;
 	let mut last = None;
 	let mut error = None;
 	loop {
@@ -759,9 +780,17 @@ fn wait_snapshot(
 		}
 		if Instant::now() >= deadline {
 			let snapshot = last.map_or_else(|| "<none>".to_owned(), |value| format!("{value:#?}"));
+			// Geometry the host last published (cols, rows, window_top, doc_height) and how
+			// much terminal output the harness has drained: tells a host that never
+			// repainted at the new size from one that painted without the expected rows.
+			let info = debug
+				.op("info")
+				.map_or_else(|problem| format!("<info failed: {problem}>"), |value| value.to_string());
+			let drained = raw.lock().len();
 			panic!(
-				"checkpoint {label:?} timed out\nlast error: {error:?}\nlast \
-				 snapshot:\n{snapshot}\nraw PTY:\n{}",
+				"checkpoint {label:?} timed out after {:?}\nlast error: {error:?}\ninfo: {info}\nPTY \
+				 bytes drained: {drained}\nlast snapshot:\n{snapshot}\nraw PTY:\n{}",
+				started.elapsed(),
 				visible(&raw.lock()),
 			);
 		}

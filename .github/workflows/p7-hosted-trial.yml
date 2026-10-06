@@ -10,6 +10,10 @@ name: P7 hosted macOS trial
 # 37362922871 (job 111972101103, head 504cbdd702) and run 37380453962 (job
 # 112001412838, head ffa60f1601).
 #
+# Trial 2: the P7 harness's PTY master reader now blocks in poll(2) instead of
+# sleeping 5 ms on EAGAIN (run 37405209796 showed the sleep throttling the host's
+# blocking PTY writes to ~52 KiB/s), and a checkpoint timeout also dumps `info`.
+#
 # This runs ONLY P7, on a hard-pinned hosted macos-15 runner, with the same
 # toolchain, native tools, nextest, embedded Python and Cargo cache provisioning
 # as the `rust` job of ci.yml, and no product or test code changed. It runs the
