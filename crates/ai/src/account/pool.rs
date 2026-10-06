@@ -125,6 +125,8 @@ pub enum Eligibility {
 	PrincipalMismatch,
 	/// Explicit rotation excludes the preceding account.
 	PreviousAccount,
+	/// The session is exclusively pinned to a different account.
+	NotPinned,
 }
 
 /// Usage-aware reserve behavior applied before credential or network work.
@@ -220,6 +222,21 @@ impl Default for RotationPolicy {
 	}
 }
 
+/// Exclusive account constraint a session places on one provider.
+///
+/// A pinned selection never falls back: every other account is
+/// [`Eligibility::NotPinned`], and the pinned one is still subject to its own
+/// health, cooldown, and quota evidence, so a blocked pin fails the selection
+/// with that evidence instead of moving the session to another account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AccountPin {
+	/// Only this account may serve the request.
+	Account(AccountId),
+	/// The pinned account no longer resolves; no account may serve the
+	/// request.
+	Unresolved,
+}
+
 /// Inputs to deterministic account selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountSelectionRequest {
@@ -241,6 +258,8 @@ pub struct AccountSelectionRequest {
 	pub now:                SystemTime,
 	/// Catalog-resolved independent quota meter for this request.
 	pub quota_scope:        Option<Str>,
+	/// Exclusive session pin for this provider, if any.
+	pub pin:                Option<AccountPin>,
 }
 
 /// Failure selecting an eligible account; always carries partial decision
@@ -928,6 +947,13 @@ fn eligibility(
 	request: &AccountSelectionRequest,
 	previous_match: bool,
 ) -> Eligibility {
+	match &request.pin {
+		Some(AccountPin::Account(pinned)) if pinned != &record.account => {
+			return Eligibility::NotPinned;
+		},
+		Some(AccountPin::Unresolved) => return Eligibility::NotPinned,
+		Some(AccountPin::Account(_)) | None => {},
+	}
 	if !record.enabled {
 		return Eligibility::Disabled;
 	}

@@ -7,6 +7,7 @@ use std::path::Path;
 
 use flume::{Receiver, Sender};
 use omp_ai::{
+	account::{AI_ACCOUNT_PINS, AccountPin, with_pin, without_pin},
 	answer::{
 		AccountSummary, AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind, AuthResponse, AuthSession,
 	},
@@ -47,7 +48,9 @@ fn provider_name(state: &ServiceState, provider: &ProviderId<str>) -> Str {
 
 /// Every stored account, in the pool's stable account-id order.
 pub fn rows(state: &ServiceState) -> ServiceResult<Vec<AccountRow>> {
-	let control = &stack(state)?.auth_control;
+	let handles = stack(state)?;
+	let control = &handles.auth_control;
+	let pins = handles.auth.session_pins(&AI_ACCOUNT_PINS.get(&state.con));
 	Ok(control
 		.accounts(None)
 		.into_iter()
@@ -58,6 +61,8 @@ pub fn rows(state: &ServiceState) -> ServiceResult<Vec<AccountRow>> {
 				Err(_) => (sf!("unknown"), sf!("credential source unavailable")),
 			};
 			AccountRow {
+				pinned: pins.for_provider(&record.provider)
+					== Some(&AccountPin::Account(record.account.clone())),
 				id: record.account.as_inner().clone(),
 				provider: record.provider.as_inner().clone(),
 				provider_name: provider_name(state, &record.provider),
@@ -167,15 +172,45 @@ pub fn logout(state: &ServiceState, account: &AccountRow) -> ServiceResult<Pendi
 	Ok(rx)
 }
 
-/// `/pin <provider> [account]`: bind the session to one account identity.
+/// `/pin <provider> [account]`: pins the session to one account identity, or
+/// lifts the pin.
 ///
-/// The kernel derives session affinity from provider-side state bindings
-/// only; nothing on the route consumes a user-chosen
-/// `CredentialAffinityDigest`, so there is no seam to write the pin into.
-pub fn pin(state: &ServiceState, _account: &AccountRow, _pinned: bool) -> ServiceResult<Str> {
-	stack(state)?;
-	Err(ServiceError::Unavailable(
-		"session credential affinity (no consumer of CredentialAffinityDigest in the kernel route)",
+/// The pin is the session convar [`AI_ACCOUNT_PINS`]: the opaque
+/// credential-affinity digest of the account, journaled with the session and
+/// resolved by the live route on every request. Requests for the provider then
+/// use only that account and fail with a typed notice instead of falling back
+/// when it is unavailable.
+pub fn pin(state: &ServiceState, account: &AccountRow, pinned: bool) -> ServiceResult<Str> {
+	let handles = stack(state)?;
+	let provider = ProviderId::new(account.provider.clone());
+	let recorded = AI_ACCOUNT_PINS.get(&state.con);
+	if !pinned {
+		AI_ACCOUNT_PINS
+			.set(&state.con, without_pin(&recorded, &provider))
+			.map_err(ServiceError::failed)?;
+		return Ok(sf!(
+			"Unpinned {}; this session may use any {} account.",
+			account.label,
+			account.provider_name
+		));
+	}
+	let record = handles
+		.auth_control
+		.accounts(Some(&provider))
+		.into_iter()
+		.find(|record| record.account.as_str() == account.id.as_str())
+		.ok_or_else(|| ServiceError::Failed(sf!("{} is no longer stored.", account.label)))?;
+	let digest = handles
+		.auth
+		.affinity_digest(&record)
+		.ok_or(ServiceError::Unavailable("credential affinity key"))?;
+	AI_ACCOUNT_PINS
+		.set(&state.con, with_pin(&recorded, &provider, &digest))
+		.map_err(ServiceError::failed)?;
+	Ok(sf!(
+		"Pinned {} for {}; requests in this session use only this account.",
+		account.label,
+		account.provider_name
 	))
 }
 

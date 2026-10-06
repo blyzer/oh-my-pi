@@ -14,7 +14,7 @@ use std::{
 use omp_ai::{
 	AccountId, AccountRoutingContext, OrganizationId, PrincipalId, ProjectId, RegionId, TenantId,
 	account::{
-		AccountAffinity, AccountPool, AccountRecord, AccountRegistrationError,
+		AccountAffinity, AccountPin, AccountPool, AccountRecord, AccountRegistrationError,
 		AccountSelectionRequest, AccountStateStore, AffinityScope, CooldownReason,
 		CredentialFreshness, Eligibility, PersistentRefreshLease, ProcessRefreshRole,
 		QuotaAvailability, QuotaObservation, QuotaProvenance, QuotaWindowId, RateAvailability,
@@ -55,6 +55,7 @@ fn selection_request(route: &RouteId, now: SystemTime) -> AccountSelectionReques
 		rotation: RotationPolicy::default(),
 		now,
 		quota_scope: None,
+		pin: None,
 	}
 }
 
@@ -434,6 +435,7 @@ fn durable_account_state_survives_reopen_and_account_removal() {
 			rotation:           RotationPolicy::default(),
 			now:                at(180),
 			quota_scope:        None,
+			pin:                None,
 		})
 		.unwrap();
 	assert_eq!(selected_b.record.account, AccountId::new("durable-b"));
@@ -535,6 +537,7 @@ fn durable_account_state_survives_reopen_and_account_removal() {
 				rotation:           RotationPolicy::default(),
 				now:                at(181),
 				quota_scope:        None,
+				pin:                None,
 			})
 			.is_err()
 	);
@@ -885,4 +888,64 @@ async fn peer_process_waiters_receive_the_published_result_without_refreshing() 
 		.unwrap();
 	assert_eq!(calls.load(Ordering::SeqCst), 0);
 	assert_eq!(outcome.result, published);
+}
+
+#[test]
+fn pinned_selection_is_exclusive_and_ignores_affinity_and_quota_rank() {
+	let pool = AccountPool::new();
+	let route = RouteId::from("route");
+	pool.upsert(record("a", "principal-a", &route)).unwrap();
+	pool.upsert(record("b", "principal-b", &route)).unwrap();
+	let mut request = selection_request(&route, at(100));
+	request.affinity = Some(PrincipalId::new("principal-b"));
+	request.pin = Some(AccountPin::Account(AccountId::new("a")));
+	let selected = pool.select(&request).unwrap();
+	assert_eq!(selected.record.account, AccountId::new("a"));
+	assert!(selected.receipt.candidates.iter().any(|candidate| {
+		candidate.account == AccountId::new("b") && candidate.eligibility == Eligibility::NotPinned
+	}));
+}
+
+#[test]
+fn pinned_account_never_falls_back_when_it_is_blocked() {
+	let pool = AccountPool::new();
+	let route = RouteId::from("route");
+	pool.upsert(record("a", "principal-a", &route)).unwrap();
+	pool.upsert(record("b", "principal-b", &route)).unwrap();
+	pool
+		.cooldown(AccountId::new("a"), at(200), CooldownReason::Health)
+		.unwrap();
+	let mut request = selection_request(&route, at(100));
+	request.pin = Some(AccountPin::Account(AccountId::new("a")));
+	let error = pool.select(&request).unwrap_err();
+	assert_eq!(error.receipt.retry_at, Some(at(200)));
+	let evidence = |account: &str| {
+		error
+			.receipt
+			.candidates
+			.iter()
+			.find(|candidate| candidate.account == AccountId::new(account))
+			.unwrap()
+			.eligibility
+			.clone()
+	};
+	assert_eq!(evidence("a"), Eligibility::Cooldown {
+		until:  at(200),
+		reason: CooldownReason::Health,
+	});
+	assert_eq!(evidence("b"), Eligibility::NotPinned);
+}
+
+#[test]
+fn a_pin_whose_account_is_gone_selects_nothing() {
+	let pool = AccountPool::new();
+	let route = RouteId::from("route");
+	pool.upsert(record("b", "principal-b", &route)).unwrap();
+	let mut request = selection_request(&route, at(100));
+	request.pin = Some(AccountPin::Unresolved);
+	assert!(pool.select(&request).is_err());
+	request.pin = Some(AccountPin::Account(AccountId::new("removed")));
+	let error = pool.select(&request).unwrap_err();
+	assert_eq!(error.receipt.candidates.len(), 1);
+	assert_eq!(error.receipt.candidates[0].eligibility, Eligibility::NotPinned);
 }

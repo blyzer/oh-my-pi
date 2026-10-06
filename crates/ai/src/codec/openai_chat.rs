@@ -4890,8 +4890,8 @@ mod tests {
 		// Headless calls carry no provider conversation; the invocation key
 		// still has to reach `prompt_cache_key`.
 		let affinity = CallAffinity {
-			prompt_cache:     Some(omp_core::sf!("invocation-cache")),
-			provider_session: None,
+			prompt_cache: Some(omp_core::sf!("invocation-cache")),
+			..CallAffinity::none()
 		};
 		let wire = encode_embedded(
 			&policy::WirePolicy::baseline(),

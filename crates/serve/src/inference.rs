@@ -461,8 +461,8 @@ impl InferenceRpc {
 		// The invocation key rides on the call so it reaches the wire whether
 		// or not a provider conversation is bound.
 		.with_affinity(call::CallAffinity {
-			prompt_cache:     self.prompt_cache_affinity.clone(),
-			provider_session: None,
+			prompt_cache: self.prompt_cache_affinity.clone(),
+			..call::CallAffinity::none()
 		})
 	}
 

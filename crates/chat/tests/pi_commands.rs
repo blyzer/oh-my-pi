@@ -209,6 +209,7 @@ impl Services for Feed {
 			detail:        Str::new(format!("stored {kind}")),
 			kind:          Str::new_static(kind),
 			active:        true,
+			pinned:        false,
 		};
 		Ok(vec![row("sub", "oauth"), row("test", "api-key")])
 	}

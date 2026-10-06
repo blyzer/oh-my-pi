@@ -13,6 +13,7 @@ use serde_json::{Value, value::RawValue};
 use strum::IntoStaticStr;
 
 use crate::{
+	account::SessionAccountPins,
 	answer::ArtifactRef,
 	body::{BodySource, NativeBodySource},
 	catalog::{CodecId, ModelKey, OperationKind, ProviderId, ReasoningEffort, RouteId, ServiceTier},
@@ -204,7 +205,7 @@ impl InferenceAttribution {
 /// provider conversation is bound.
 ///
 /// Compatible codecs lower these opaque values to their native fields;
-/// incompatible codecs ignore them. Neither value is a secret.
+/// incompatible codecs ignore them. No value is a secret.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CallAffinity {
 	/// Invocation-scoped provider prompt-cache identity (`OpenAI`
@@ -213,12 +214,20 @@ pub struct CallAffinity {
 	/// Caller session identity for provider-side attribution (Claude Code
 	/// session header, Codex `session_id` metadata).
 	pub provider_session: Option<Str>,
+	/// Exclusive per-provider account pins of the calling session; the
+	/// account selector honors them and codecs ignore them. Carries no
+	/// identity beyond the resolved account id.
+	pub account_pins:     SessionAccountPins,
 }
 
 impl CallAffinity {
 	/// Affinity that names nothing.
 	pub const fn none() -> Self {
-		Self { prompt_cache: None, provider_session: None }
+		Self {
+			prompt_cache:     None,
+			provider_session: None,
+			account_pins:     SessionAccountPins::NONE,
+		}
 	}
 }
 

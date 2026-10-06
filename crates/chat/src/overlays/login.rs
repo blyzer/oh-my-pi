@@ -859,6 +859,7 @@ mod tests {
 			detail: sf!("stored oauth"),
 			kind: sf!("oauth"),
 			active,
+			pinned: false,
 		}
 	}
 

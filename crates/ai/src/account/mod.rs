@@ -1,5 +1,6 @@
 //! Account identity, selection, throttling, quota, and refresh coordination.
 
+mod pin;
 mod pool;
 mod quota;
 mod rate;
@@ -8,10 +9,13 @@ mod store;
 
 use std::time::SystemTime;
 
+pub use pin::{
+	AI_ACCOUNT_PINS, PinFailure, SessionAccountPins, recorded_pins, with_pin, without_pin,
+};
 pub use pool::{
-	AccountPool, AccountPoolError, AccountPoolEvent, AccountRecord, AccountRegistrationError,
-	AccountSelection, AccountSelectionRequest, CandidateEvidence, CooldownReason, Eligibility,
-	QuotaReservePolicy, RotationPolicy, SelectionReceipt,
+	AccountPin, AccountPool, AccountPoolError, AccountPoolEvent, AccountRecord,
+	AccountRegistrationError, AccountSelection, AccountSelectionRequest, CandidateEvidence,
+	CooldownReason, Eligibility, QuotaReservePolicy, RotationPolicy, SelectionReceipt,
 };
 pub use quota::{
 	QuotaAvailability, QuotaObservation, QuotaProvenance, QuotaState, QuotaWindow, QuotaWindowId,
