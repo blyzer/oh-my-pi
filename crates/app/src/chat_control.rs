@@ -5003,9 +5003,11 @@ mod tests {
 			next_event(&harness.events, |event| matches!(event, KernelEvent::TurnEnded { .. })).await;
 		assert_eq!(ended, KernelEvent::TurnEnded { stop: TurnStop::Cancelled });
 
+		// The interrupted bash call had started, so recovery treats its effects as
+		// unknown and the retry needs the user's confirmation to run it again.
 		harness
 			.commands
-			.send(HostCommand::Retry { confirmation: omp_agent::RetryConfirmation::Unconfirmed })
+			.send(HostCommand::Retry { confirmation: omp_agent::RetryConfirmation::EffectsUnknown })
 			.expect("retry");
 		let ready =
 			next_event(&harness.events, |event| matches!(event, KernelEvent::ToolReady { .. })).await;
