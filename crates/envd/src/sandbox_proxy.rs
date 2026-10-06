@@ -1779,9 +1779,13 @@ mod tests {
 		.expect("broker");
 		// Silent clients never end their input, so every lingering rejection holds
 		// its drain open; clients past the rejection cap must still be answered.
-		let started = Instant::now();
+		// A stalled accept delays one client by a full drain timeout, so each
+		// client is timed on its own against half of it. Bounding the whole loop
+		// by one timeout would instead fail on a slow runner where 40 sequential
+		// connects (each waiting out an accept poll) merely add up.
 		let mut clients = Vec::new();
-		for _ in 0..MAX_LINGERING_REJECTIONS + 8 {
+		for index in 0..MAX_LINGERING_REJECTIONS + 8 {
+			let started = Instant::now();
 			let mut client = TcpStream::connect(address).expect("connect proxy");
 			client
 				.set_read_timeout(Some(Duration::from_secs(5)))
@@ -1793,9 +1797,13 @@ mod tests {
 				response.push(byte[0]);
 			}
 			assert!(response.starts_with(b"HTTP/1.1 403"));
+			let elapsed = started.elapsed();
+			assert!(
+				elapsed < DENIAL_DRAIN_TIMEOUT / 2,
+				"accept waited on a lingering rejection: client {index} took {elapsed:?} to be denied"
+			);
 			clients.push(client);
 		}
-		assert!(started.elapsed() < DENIAL_DRAIN_TIMEOUT, "accept waited on a lingering rejection");
 		drop(clients);
 		shutdown.store(true, Ordering::Release);
 		broker.join().expect("broker");

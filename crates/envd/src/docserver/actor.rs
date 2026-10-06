@@ -1372,6 +1372,17 @@ impl ReloadCause {
 	}
 }
 
+/// A permission update held until a pending watch reload settles.
+///
+/// It is re-admitted through `DocumentActor::start_set_permissions` once the
+/// reload finishes, so the expected-revision check runs against the true head.
+struct QueuedPermissions {
+	expected:    Revision,
+	permissions: PortablePermissions,
+	follow:      FollowSymlinks,
+	reply:       oneshot::Sender<Result<PathMetadata>>,
+}
+
 struct DocumentActor {
 	document_id: DocumentId,
 	path: PathBuf,
@@ -1395,6 +1406,7 @@ struct DocumentActor {
 	queued_states: Vec<StateReply>,
 	queued_reserves: Vec<(TransactionId, Revision, ReserveReply)>,
 	queued_mutations: Vec<ReservedMutation>,
+	queued_permissions: Vec<QueuedPermissions>,
 	activation_in_flight: bool,
 	reload_in_flight: bool,
 	persist_in_flight: bool,
@@ -1450,6 +1462,7 @@ impl DocumentActor {
 			queued_states: Vec::new(),
 			queued_reserves: Vec::new(),
 			queued_mutations: Vec::new(),
+			queued_permissions: Vec::new(),
 			activation_in_flight: false,
 			reload_in_flight: false,
 			persist_in_flight: false,
@@ -1619,6 +1632,7 @@ impl DocumentActor {
 			&& self.queued_states.is_empty()
 			&& self.queued_reserves.is_empty()
 			&& self.queued_mutations.is_empty()
+			&& self.queued_permissions.is_empty()
 		{
 			self.idle_deadline = Some(Instant::now() + IDLE_EVICTION_DELAY);
 		}
@@ -1858,8 +1872,19 @@ impl DocumentActor {
 			}));
 			return;
 		}
-		if self.reads_are_queued() || self.activation_in_flight {
+		if self.persist_in_flight || self.activation_in_flight {
 			let _ = reply.send(Err(Error::ExternalInvalidation { path: self.path.clone() }));
+			return;
+		}
+		if self.reads_are_queued() {
+			// Only a watch invalidation or its reload is pending. A notification is
+			// a hint, and native backends (macOS `FSEvents`) echo this actor's own
+			// permission change late, so hold the request until the reload settles
+			// instead of failing it; `flush_queued` re-admits it against the true head.
+			self
+				.queued_permissions
+				.push(QueuedPermissions { expected, permissions, follow, reply });
+			self.ensure_reload();
 			return;
 		}
 
@@ -2055,6 +2080,10 @@ impl DocumentActor {
 		for mutation in mutations {
 			self.handle_mutation(mutation);
 		}
+		let permissions = mem::take(&mut self.queued_permissions);
+		for QueuedPermissions { expected, permissions, follow, reply } in permissions {
+			self.start_set_permissions(expected, permissions, follow, reply);
+		}
 	}
 
 	fn fail_queued_reads(&mut self) {
@@ -2073,6 +2102,11 @@ impl DocumentActor {
 		}
 		for mutation in self.queued_mutations.drain(..) {
 			mutation.fail(Error::ExternalInvalidation { path: path.clone() });
+		}
+		for queued in self.queued_permissions.drain(..) {
+			let _ = queued
+				.reply
+				.send(Err(Error::ExternalInvalidation { path: path.clone() }));
 		}
 	}
 
@@ -2998,6 +3032,92 @@ mod tests {
 			)
 			.await
 			.expect("restore writable fixture");
+	}
+
+	/// Injects the late native-watch notification (macOS `FSEvents` echoes a
+	/// chmod after the actor already reloaded) through the actor mailbox, ahead
+	/// of whatever the caller sends next. `epoch` must exceed every earlier one
+	/// or the actor treats the event as already seen.
+	async fn inject_watch_echo(actor: &ActorHandle, epoch: u64) {
+		actor
+			.send(Command::WatchEvent {
+				event: FileWatchEvent {
+					generation: INITIAL_WATCH_GENERATION,
+					kind:       FileWatchKind::Changed,
+				},
+				epoch,
+			})
+			.await
+			.expect("deliver watch echo");
+	}
+
+	#[tokio::test]
+	async fn permissions_wait_out_a_late_watch_echo_instead_of_failing() {
+		let root = TempDir::new().expect("temporary directory");
+		let path = root.path().join("echo.txt");
+		fs::write(&path, b"echo").expect("write fixture");
+		let store = store(&root, 4);
+		let opened = store.open(path).await.expect("open");
+		let actor = store.actor_handle(opened.lease_id()).expect("actor");
+		let revision = opened.head().revision();
+		let stale = Revision::for_content(revision.sequence() + 1, b"stale");
+
+		inject_watch_echo(&actor, 1 << 32).await;
+		let metadata = actor
+			.set_permissions(
+				revision,
+				PortablePermissions { read_only: Some(true), executable: None },
+				FollowSymlinks::Yes,
+			)
+			.await
+			.expect("a pending watch reload parks the request instead of invalidating it");
+		assert_eq!(metadata.permissions.read_only, Some(true));
+
+		inject_watch_echo(&actor, (1 << 32) + 1).await;
+		let error = actor
+			.set_permissions(stale, PortablePermissions::default(), FollowSymlinks::Yes)
+			.await
+			.expect_err("a stale revision is still rejected while a reload is pending");
+		assert!(matches!(
+			error,
+			Error::ContentModified { expected, current } if expected == stale && current == revision
+		));
+
+		inject_watch_echo(&actor, (1 << 32) + 2).await;
+		actor
+			.set_permissions(
+				revision,
+				PortablePermissions { read_only: Some(false), executable: None },
+				FollowSymlinks::Yes,
+			)
+			.await
+			.expect("restore writable fixture after a second echo");
+	}
+
+	#[tokio::test]
+	async fn parked_permissions_recheck_the_revision_after_the_reload() {
+		let root = TempDir::new().expect("temporary directory");
+		let path = root.path().join("changed.txt");
+		fs::write(&path, b"before").expect("write fixture");
+		let store = store(&root, 4);
+		let opened = store.open(path.clone()).await.expect("open");
+		let actor = store.actor_handle(opened.lease_id()).expect("actor");
+		let revision = opened.head().revision();
+
+		fs::write(&path, b"changed on disk").expect("external edit");
+		inject_watch_echo(&actor, (1 << 32) + 3).await;
+		let error = actor
+			.set_permissions(
+				revision,
+				PortablePermissions { read_only: Some(true), executable: None },
+				FollowSymlinks::Yes,
+			)
+			.await
+			.expect_err("the parked request sees the externally changed head");
+		assert!(matches!(
+			error,
+			Error::ContentModified { expected, current } if expected == revision && current != revision
+		));
 	}
 
 	#[tokio::test]
