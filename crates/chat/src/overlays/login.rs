@@ -404,7 +404,7 @@ impl LogoutSelector {
 			return PanelEvent::Consumed;
 		};
 		let mutation = Mutation::Logout { account: account.clone() };
-		self.status = Some(sf!("Logging out {}…", account.label));
+		self.status = Some(sf!("Logging out {}…", account.display_name()));
 		self.pending = Some((self.selected, mutation.clone()));
 		self.rebuild(self.width);
 		PanelEvent::Command(HostCommand::Service(mutation))
@@ -429,7 +429,7 @@ impl LogoutSelector {
 			.map(|(offset, account)| {
 				(
 					start + offset == self.selected,
-					account.label.clone(),
+					Str::new(account.display_name()),
 					account.active,
 					account.detail.clone(),
 				)
@@ -531,7 +531,7 @@ impl Panel for LogoutSelector {
 				self.selected = self.selected.min(self.accounts.len().saturating_sub(1));
 				self.status = None;
 				self.rebuild(self.width);
-				PanelEvent::Finish(sf!("echo \"Logged out {}\"", escape_quoted(&account.label)))
+				PanelEvent::Finish(sf!("echo \"Logged out {}\"", escape_quoted(account.display_name())))
 			},
 			Err(error) => {
 				self.status = Some(sf!("Logout failed: {error}"));
@@ -856,6 +856,7 @@ mod tests {
 			provider: sf!("anthropic"),
 			provider_name: sf!("Anthropic"),
 			label: sf!("{id}@example.com"),
+			name: None,
 			detail: sf!("stored oauth"),
 			kind: sf!("oauth"),
 			active,

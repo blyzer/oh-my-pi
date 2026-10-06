@@ -206,6 +206,7 @@ impl Services for Feed {
 			provider:      Str::new_static(provider),
 			provider_name: Str::new_static(provider),
 			label:         Str::new_static("owner@example.com"),
+			name:          None,
 			detail:        Str::new(format!("stored {kind}")),
 			kind:          Str::new_static(kind),
 			active:        true,

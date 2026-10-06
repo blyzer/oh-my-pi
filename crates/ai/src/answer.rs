@@ -1185,7 +1185,7 @@ pub struct AccountSummary {
 	pub provider:  ProviderId,
 	/// Authenticated principal identity when known.
 	pub principal: Option<PrincipalId>,
-	/// Caller-facing label.
+	/// Caller-facing label: the user-chosen account name when one is set.
 	pub label:     Option<Str>,
 	/// Current lifecycle state.
 	pub state:     AccountState,

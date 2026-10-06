@@ -14,14 +14,15 @@ use std::{
 use omp_ai::{
 	AccountId, AccountRoutingContext, OrganizationId, PrincipalId, ProjectId, RegionId, TenantId,
 	account::{
-		AccountAffinity, AccountPin, AccountPool, AccountRecord, AccountRegistrationError,
-		AccountSelectionRequest, AccountStateStore, AffinityScope, CooldownReason,
-		CredentialFreshness, Eligibility, PersistentRefreshLease, ProcessRefreshRole,
-		QuotaAvailability, QuotaObservation, QuotaProvenance, QuotaWindowId, RateAvailability,
-		RateObservation, RateWindowId, RefreshCoordinator, RefreshErrorKind, RefreshLeaseAcquire,
-		RefreshLeaseRequest, RefreshLeaseStore, RefreshLeaseWait, RefreshPolicy, RefreshPolicyError,
-		RefreshReceipt, RefreshRequest, RefreshResult, RefreshStep, RefreshStoreError,
-		RefreshedCredential, RetryAfterInput, RotationPolicy, parse_retry_after_inputs,
+		AccountAffinity, AccountName, AccountPin, AccountPool, AccountRecord,
+		AccountRegistrationError, AccountSelectError, AccountSelectionRequest, AccountStateStore,
+		AccountStateStoreError, AffinityScope, CooldownReason, CredentialFreshness, Eligibility,
+		PersistentRefreshLease, ProcessRefreshRole, QuotaAvailability, QuotaObservation,
+		QuotaProvenance, QuotaWindowId, RateAvailability, RateObservation, RateWindowId,
+		RefreshCoordinator, RefreshErrorKind, RefreshLeaseAcquire, RefreshLeaseRequest,
+		RefreshLeaseStore, RefreshLeaseWait, RefreshPolicy, RefreshPolicyError, RefreshReceipt,
+		RefreshRequest, RefreshResult, RefreshStep, RefreshStoreError, RefreshedCredential,
+		RetryAfterInput, RotationPolicy, parse_retry_after_inputs,
 	},
 };
 use omp_catalog::{ProviderId, RouteId};
@@ -948,4 +949,125 @@ fn a_pin_whose_account_is_gone_selects_nothing() {
 	let error = pool.select(&request).unwrap_err();
 	assert_eq!(error.receipt.candidates.len(), 1);
 	assert_eq!(error.receipt.candidates[0].eligibility, Eligibility::NotPinned);
+}
+
+fn name(text: &str) -> AccountName {
+	AccountName::parse(text).unwrap()
+}
+
+fn record_for(provider: &str, account: &str, principal: &str, route: &RouteId) -> AccountRecord {
+	let mut record = record(account, principal, route);
+	record.provider = ProviderId::from(provider);
+	record
+}
+
+#[test]
+fn names_are_unique_per_provider_and_reusable_across_providers() {
+	let pool = AccountPool::new();
+	let route = RouteId::from("route");
+	pool
+		.upsert(record_for("a", "a:one", "one", &route))
+		.unwrap();
+	pool
+		.upsert(record_for("a", "a:two", "two", &route))
+		.unwrap();
+	pool
+		.upsert(record_for("b", "b:one", "one", &route))
+		.unwrap();
+	pool
+		.set_name(&AccountId::new("a:one"), name("work"))
+		.unwrap();
+	assert_eq!(
+		pool.set_name(&AccountId::new("a:two"), name("work")),
+		Err(AccountStateStoreError::NameTaken)
+	);
+	// Another provider may reuse the name; renaming keeps one name per account.
+	pool
+		.set_name(&AccountId::new("b:one"), name("work"))
+		.unwrap();
+	pool
+		.set_name(&AccountId::new("a:one"), name("work"))
+		.unwrap();
+	pool
+		.set_name(&AccountId::new("a:one"), name("home"))
+		.unwrap();
+	pool
+		.set_name(&AccountId::new("a:two"), name("work"))
+		.unwrap();
+	assert_eq!(pool.name(&AccountId::new("a:one")), Some(name("home")));
+	assert_eq!(
+		pool.set_name(&AccountId::new("missing"), name("x")),
+		Err(AccountStateStoreError::UnknownAccount)
+	);
+}
+
+#[test]
+fn selectors_resolve_ids_qualified_names_and_unambiguous_bare_names() {
+	let pool = AccountPool::new();
+	let route = RouteId::from("route");
+	pool
+		.upsert(record_for("a", "a:one", "one", &route))
+		.unwrap();
+	pool
+		.upsert(record_for("b", "b:one", "one", &route))
+		.unwrap();
+	pool
+		.set_name(&AccountId::new("a:one"), name("work"))
+		.unwrap();
+	pool
+		.set_name(&AccountId::new("b:one"), name("work"))
+		.unwrap();
+	assert_eq!(pool.resolve("a:one"), Ok(AccountId::new("a:one")));
+	assert_eq!(pool.resolve("a/work"), Ok(AccountId::new("a:one")));
+	assert_eq!(pool.resolve("b/work"), Ok(AccountId::new("b:one")));
+	assert_eq!(pool.resolve("work"), Err(AccountSelectError::Ambiguous { providers: 2 }));
+	assert_eq!(pool.resolve("c/work"), Err(AccountSelectError::Unknown));
+	assert_eq!(pool.resolve("nope"), Err(AccountSelectError::Unknown));
+	pool.clear_name(&AccountId::new("b:one")).unwrap();
+	assert_eq!(pool.resolve("work"), Ok(AccountId::new("a:one")));
+}
+
+#[test]
+fn names_survive_reopen_and_are_released_by_removal_and_purge() {
+	let directory = tempfile::tempdir().unwrap();
+	let path = directory.path().join("app.sqlite");
+	let route = RouteId::from("route");
+	{
+		let pool =
+			AccountPool::with_store(Arc::new(AccountStateStore::open(&path).unwrap())).unwrap();
+		pool
+			.upsert(record_for("a", "a:one", "one", &route))
+			.unwrap();
+		pool
+			.upsert(record_for("a", "a:two", "two", &route))
+			.unwrap();
+		// A view hydrated before the name was taken cannot bypass the store's
+		// uniqueness.
+		let stale =
+			AccountPool::with_store(Arc::new(AccountStateStore::open(&path).unwrap())).unwrap();
+		pool
+			.set_name(&AccountId::new("a:one"), name("work"))
+			.unwrap();
+		assert_eq!(
+			stale.set_name(&AccountId::new("a:two"), name("work")),
+			Err(AccountStateStoreError::NameTaken)
+		);
+	}
+	let store = Arc::new(AccountStateStore::open(&path).unwrap());
+	let pool = AccountPool::with_store(Arc::clone(&store)).unwrap();
+	assert_eq!(pool.name(&AccountId::new("a:one")), Some(name("work")));
+	assert_eq!(pool.resolve("a/work"), Ok(AccountId::new("a:one")));
+	assert!(pool.clear_name(&AccountId::new("a:one")).unwrap());
+	assert!(!pool.clear_name(&AccountId::new("a:one")).unwrap());
+	pool
+		.set_name(&AccountId::new("a:one"), name("work"))
+		.unwrap();
+	pool.remove(&AccountId::new("a:one"));
+	assert_eq!(pool.name(&AccountId::new("a:one")), None);
+	assert_eq!(store.load_names().unwrap().len(), 1, "the store keeps it until purge or logout");
+	store.purge_account(&AccountId::new("a:one")).unwrap();
+	assert!(store.load_names().unwrap().is_empty());
+	pool
+		.set_name(&AccountId::new("a:two"), name("work"))
+		.unwrap();
 }

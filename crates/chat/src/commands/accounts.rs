@@ -159,6 +159,19 @@ fn pin_session(cx: &PanelCx<'_>, id: Option<&str>) -> PanelEvent {
 	}))
 }
 
+/// The account `selector` addresses among one provider's `candidates`, or the
+/// only candidate when no selector is given.
+fn choose_account<'a>(
+	candidates: &[&'a AccountRow],
+	selector: Option<&str>,
+) -> Option<&'a AccountRow> {
+	match selector {
+		Some(selector) => candidates.iter().copied().find(|row| row.matches(selector)),
+		None if candidates.len() == 1 => candidates.first().copied(),
+		None => None,
+	}
+}
+
 /// Toggles the session's pin on one provider account through the
 /// controller-owned mutation stream, like `/pin` on a session.
 fn pin_account(cx: &PanelCx<'_>, provider: &str, account: Option<&str>) -> PanelEvent {
@@ -170,14 +183,7 @@ fn pin_account(cx: &PanelCx<'_>, provider: &str, account: Option<&str>) -> Panel
 		.iter()
 		.filter(|row| row.provider == provider)
 		.collect();
-	let chosen = match account {
-		Some(account) => candidates
-			.iter()
-			.copied()
-			.find(|row| row.label == account || row.id == account),
-		None if candidates.len() == 1 => candidates.first().copied(),
-		None => None,
-	};
+	let chosen = choose_account(&candidates, account);
 	let Some(row) = chosen else {
 		return PanelEvent::Notice(match (account, candidates.len()) {
 			(_, 0) => sf!("No stored accounts for {provider}."),
@@ -278,6 +284,35 @@ mod tests {
 			oauth:     true,
 			logged_in: false,
 		}
+	}
+
+	fn row(id: &'static str, label: &'static str, name: Option<&'static str>) -> AccountRow {
+		AccountRow {
+			id:            Str::new_static(id),
+			provider:      Str::new_static("anthropic"),
+			provider_name: Str::new_static("Anthropic"),
+			label:         Str::new_static(label),
+			name:          name.map(Str::new_static),
+			detail:        Str::new_static("stored oauth"),
+			kind:          Str::new_static("oauth"),
+			active:        true,
+			pinned:        false,
+		}
+	}
+
+	#[test]
+	fn pin_addresses_an_account_by_name_label_or_id() {
+		let work = row("anthropic:a", "a@example.com", Some("work"));
+		let home = row("anthropic:b", "b@example.com", None);
+		let both = [&work, &home];
+		for selector in ["work", "a@example.com", "anthropic:a"] {
+			assert_eq!(choose_account(&both, Some(selector)).map(|row| &row.id), Some(&work.id));
+		}
+		assert_eq!(choose_account(&both, Some("home")), None);
+		assert_eq!(choose_account(&both, None), None);
+		assert_eq!(choose_account(&[&home], None).map(|row| &row.id), Some(&home.id));
+		assert_eq!(work.display_name(), "work");
+		assert_eq!(home.display_name(), "b@example.com");
 	}
 
 	#[test]

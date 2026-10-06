@@ -1,5 +1,6 @@
 //! Account identity, selection, throttling, quota, and refresh coordination.
 
+mod name;
 mod pin;
 mod pool;
 mod quota;
@@ -9,6 +10,7 @@ mod store;
 
 use std::time::SystemTime;
 
+pub use name::{AccountName, AccountNameError, AccountSelectError, MAX_ACCOUNT_NAME_LEN};
 pub use pin::{
 	AI_ACCOUNT_PINS, PinFailure, SessionAccountPins, recorded_pins, with_pin, without_pin,
 };

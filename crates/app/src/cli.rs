@@ -2135,13 +2135,26 @@ pub enum AuthCommand {
 	},
 	/// Refresh one account.
 	Refresh {
-		/// Target account identifier.
+		/// Account id, `provider/name`, or a name unique across providers.
 		account: Str,
 	},
 	/// Remove one account.
 	Logout {
-		/// Target account identifier.
+		/// Account id, `provider/name`, or a name unique across providers.
 		account: Str,
+	},
+	/// Give one account a name, or clear it. Names are unique per provider
+	/// (lowercase letters, digits, `-` and `_`) and address the account in
+	/// every other `omp auth` verb and in `/pin`.
+	Rename {
+		/// Account id, `provider/name`, or a name unique across providers.
+		account: Str,
+		/// The new name.
+		#[arg(required_unless_present = "clear", conflicts_with = "clear")]
+		name:    Option<Str>,
+		/// Remove the account's name instead.
+		#[arg(long)]
+		clear:   bool,
 	},
 }
 
@@ -4919,6 +4932,24 @@ mod tests {
 			parse(&["omp", "auth", "logout", "account"]).command,
 			Some(Command::Auth(AuthArgs { command: AuthCommand::Logout { .. }, .. }))
 		));
+		assert!(matches!(
+			parse(&["omp", "auth", "rename", "account", "work"]).command,
+			Some(Command::Auth(AuthArgs {
+				command: AuthCommand::Rename { name: Some(_), clear: false, .. },
+				..
+			}))
+		));
+		assert!(matches!(
+			parse(&["omp", "auth", "rename", "account", "--clear"]).command,
+			Some(Command::Auth(AuthArgs {
+				command: AuthCommand::Rename { name: None, clear: true, .. },
+				..
+			}))
+		));
+		assert!(OmpCli::try_parse_from(["omp", "auth", "rename", "account"]).is_err());
+		assert!(
+			OmpCli::try_parse_from(["omp", "auth", "rename", "account", "w", "--clear"]).is_err()
+		);
 	}
 
 	#[test]
