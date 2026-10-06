@@ -11,6 +11,10 @@ description = "In-process version control: gitoxide-backed git and jj-lib-backed
 [lints]
 workspace = true
 
+[features]
+# Hermetic `git` fixtures (`omp_vcs::testing`) for dependents' test suites.
+test-support = []
+
 [dependencies]
 omp-core.workspace = true
 gix.workspace = true

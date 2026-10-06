@@ -373,6 +373,8 @@ pub struct AccountRow {
 	pub kind:          Str,
 	/// Whether this account currently serves the provider.
 	pub active:        bool,
+	/// Whether the live session is exclusively pinned to this account.
+	pub pinned:        bool,
 }
 
 /// One runtime-supplied option in the curated settings selector.

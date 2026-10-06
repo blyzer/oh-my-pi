@@ -71,9 +71,10 @@ aliases, remote administration, and journal replay all address these declared va
 
 **Status: Implemented.** Typed convars carry their own policy flags and session-scoped ones are journaled DOM nodes. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
 
-- Declaration and flags: `VarFlags` in `crates/con/src/spec.rs` (`ARCHIVE`, `SESSION`, `REPLICATED`, `UNSAFE`, `READONLY`, `NOTIFY`); variables are declared where used (for example `omp_agent::vars`, `omp_catalog::settings`, `omp_chat::settings`).
+- Declaration and flags: `VarFlags` in `crates/con/src/spec.rs` (`ARCHIVE`, `SESSION`, `REPLICATED`, `UNSAFE`, `READONLY`, `NOTIFY`, `PROJECT`); variables are declared where used (for example `omp_agent::vars`, `omp_catalog::settings`, `omp_chat::settings`).
 - Journaled session writes: `crates/driver/src/headless/con_journal.rs` and the `<meta><con>` component in `crates/session/src/components/con.rs`.
 - Difference from the decision text: scope (process/user/project/session) is expressed by the layer an assignment lands in (`Origin` in `crates/con/src/layers.rs`) rather than a flag, and `REPLICATED` is authority-to-replica only; no client-owned value flows back up.
+- Project authority: a repository's `.omp/<name>.cfg` is content the user did not write, so it runs with project authority, not the user's (see 0013). The `PROJECT` flag is the opt-in: a convar without it is unreachable from a project cfg. Opt in only a preference a hostile repository could not turn into code execution, a weaker sandbox or approval posture, a redirected endpoint, or a path the user did not grant.
 
 ## References
 

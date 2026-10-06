@@ -4386,7 +4386,7 @@ mod tests {
 		// No provider conversation is bound: the invocation key must still
 		// reach the wire from the session-independent call affinity.
 		let affinity =
-			CallAffinity { prompt_cache: Some(sf!("invocation-cache")), provider_session: None };
+			CallAffinity { prompt_cache: Some(sf!("invocation-cache")), ..CallAffinity::none() };
 		let request_id = RequestId::new("responses-cache-encoding");
 		let context = EncodeContext {
 			request_id: &request_id,

@@ -1316,23 +1316,14 @@ fn sort_changes(changes: &mut [FileChange]) {
 }
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::Path, process::Command};
+	use std::{fs, path::Path};
 
 	use tempfile::TempDir;
 
 	use super::*;
-
-	fn git(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.args(args)
-			.current_dir(dir)
-			.output()
-			.unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
-	}
+	use crate::testing::{self, run as git};
 	fn git_diff(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
+		let output = testing::command()
 			.args(args)
 			.current_dir(dir)
 			.output()

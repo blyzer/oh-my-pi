@@ -2728,10 +2728,8 @@ pub(crate) fn project_root(dom: &Dom) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
-
 	use omp_tui::{Mods, Mouse, MouseButton, frame_text};
-	use omp_vcs::{ApplyOptions, CommitOptions, StatusOptions, UntrackedMode};
+	use omp_vcs::{ApplyOptions, CommitOptions, StatusOptions, UntrackedMode, testing::run as git};
 
 	use super::*;
 
@@ -2755,19 +2753,6 @@ mod tests {
 			mods: Mods::default(),
 			pressed: true,
 		}
-	}
-
-	fn git(root: &Path, args: &[&str]) {
-		let output = Command::new("git")
-			.args(args)
-			.current_dir(root)
-			.env("GIT_AUTHOR_NAME", "Ada")
-			.env("GIT_AUTHOR_EMAIL", "ada@example.com")
-			.env("GIT_COMMITTER_NAME", "Ada")
-			.env("GIT_COMMITTER_EMAIL", "ada@example.com")
-			.output()
-			.expect("git runs");
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
 	}
 
 	/// One commit, then `src/lib.rs` modified and `notes.txt` untracked.

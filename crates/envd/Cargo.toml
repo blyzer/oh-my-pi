@@ -115,6 +115,8 @@ flate2.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# Hermetic `git` fixtures: tests never read the developer's git configuration.
+omp-vcs = { workspace = true, features = ["test-support"] }
 proptest.workspace = true
 tempfile.workspace = true
 

@@ -1103,6 +1103,7 @@ fn quota_exhaustion_rotates_accounts_without_confusing_identity_or_rate_state() 
 			rotation: RotationPolicy::default(),
 			now,
 			quota_scope: None,
+			pin: None,
 		})
 		.unwrap();
 	assert_eq!(selected.record.account, AccountId::new("fixture-account-beta"));

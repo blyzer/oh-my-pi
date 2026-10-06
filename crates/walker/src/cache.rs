@@ -401,7 +401,12 @@ mod tests {
 				.expect("system time is after UNIX_EPOCH")
 				.as_nanos();
 			let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-			let path = env::temp_dir().join(format!("pi-fs-cache-test-{timestamp}-{counter}"));
+			// nextest runs every test in its own process, so the counter restarts at zero
+			// in each and a coarse clock can repeat the timestamp: the pid keeps the
+			// directories of concurrently running tests apart.
+			let pid = std::process::id();
+			let path =
+				env::temp_dir().join(format!("omp-walker-cache-test-{pid}-{timestamp}-{counter}"));
 			fs::create_dir_all(&path).expect("create temp test directory");
 			Self(path)
 		}

@@ -127,6 +127,11 @@ Two adjacent observations about how the roster relates to the prompt:
     tool-result block (`anthropic.rs:1408`, `:1531-1576`). That appears to exceed Anthropic's
     documented 4-breakpoint limit; I found no budgeting pass. **Adjacent suspected defect:
     verify against the live API.**
+    - **Update:** the Anthropic codec now budgets `cache_control` to at most four markers when
+      retention is `short`/`long` (tool tail, system tail, last two user-role messages; see
+      `budget_cache_breakpoints` in `anthropic.rs`), and `none` (`CacheRetention::Request`)
+      emits none. `auto` still emits none; whether it should is an open product decision. The
+      live-API behaviour for an over-limit request remains unverified.
 - **Bedrock Converse** (`crates/ai/src/codec/bedrock.rs:559-577`): explicit checkpoints. The
   catalog says `prompt-cache-mode "explicit"` with `prompt-cache-maximum-checkpoints 4`
   (`crates/catalog/compat/classes/anthropic.kdl:199-258`); the code caps them at 2, one after

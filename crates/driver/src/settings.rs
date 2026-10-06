@@ -241,8 +241,9 @@ pub fn current() -> Result<Settings, io::Error> {
 }
 
 /// Loads settings for one project, with `<project>/.omp/config.cfg` layered
-/// after the user cfg. Cfg files are user data: unknown statements are
-/// reported and skipped, never fatal.
+/// after the user cfg under project authority (only project-scoped convars
+/// take effect). Cfg files are user data: unknown statements are reported and
+/// skipped, never fatal.
 pub fn current_for_project(project: Option<&Path>) -> Result<Settings, io::Error> {
 	let files = crate::cfg::CfgFiles::new(project).map_err(io::Error::other)?;
 	let ctx = Ctx::new();

@@ -10,9 +10,14 @@
 //!   ([`omp_core::dirs::profile_config_dir`]);
 //! - `<project>/.omp/<name>.cfg`.
 //!
-//! [`CfgFiles::load`] concatenates both texts so the project overlay runs
-//! after the user script; [`CfgFiles::save`] always writes the user file
-//! atomically (the project overlay is edited by `omp config set`).
+//! The two texts are never merged. [`CfgFiles::load`] returns the user text,
+//! which runs with user authority; [`CfgFiles::load_project`] returns the
+//! overlay, which `omp-con` runs after it with project authority: only `set`
+//! and `reset` of convars that opt in with `VarFlags::PROJECT`, into a layer
+//! `writecfg` never persists. A repository's `.omp/*.cfg` is content the user
+//! did not write, so it must not run with the user's own power.
+//! [`CfgFiles::save`] always writes the user file atomically (the project
+//! overlay is edited by `omp config set --scope project`).
 
 use std::{
 	fs::{self, File, OpenOptions},
@@ -84,8 +89,8 @@ impl CfgFiles {
 		self.project.as_ref().map(|root| root.join(file_name(name)))
 	}
 
-	/// Concatenated user-then-project script text, `None` when neither
-	/// file exists. Generated files are migrated to the current schema in
+	/// The user's script text, `None` when the file is absent. It runs with
+	/// user authority. Generated files are migrated to the current schema in
 	/// memory before execution.
 	pub fn load(&self, name: &str) -> ConResult<Option<Str>> {
 		validate_name(name)?;
@@ -95,16 +100,20 @@ impl CfgFiles {
 			.observed
 			.lock()
 			.insert(Str::new(file_name(name)), user.as_deref().map(Str::new));
-		let mut script = user.unwrap_or_default();
-		if let Some(path) = self.project_path(name)
-			&& let Some(text) = read_config(&path)?
-		{
-			if !script.is_empty() && !script.ends_with('\n') {
-				script.push('\n');
-			}
-			script.push_str(&text);
-		}
-		Ok((!script.is_empty()).then(|| Str::new(script)))
+		Ok(user.filter(|script| !script.is_empty()).map(Str::new))
+	}
+
+	/// The project overlay's script text, `None` when no project is attached
+	/// or the file is absent. It runs with project authority, after the user
+	/// text, and is never written back by [`CfgFiles::save`].
+	pub fn load_project(&self, name: &str) -> ConResult<Option<Str>> {
+		validate_name(name)?;
+		let Some(path) = self.project_path(name) else {
+			return Ok(None);
+		};
+		Ok(read_config(&path)?
+			.filter(|script| !script.is_empty())
+			.map(Str::new))
 	}
 
 	/// Writes `contents` to the user file for `name` with a cross-process lock,
@@ -137,6 +146,10 @@ impl CfgFiles {
 impl CfgLoader for CfgFiles {
 	fn load(&self, name: &str) -> ConResult<Option<Str>> {
 		Self::load(self, name)
+	}
+
+	fn load_project(&self, name: &str) -> ConResult<Option<Str>> {
+		Self::load_project(self, name)
 	}
 }
 
@@ -476,7 +489,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn names_resolve_to_user_then_project_files_and_concatenate() {
+	fn names_resolve_to_user_and_project_files_that_stay_separate() {
 		let dir = tempfile::tempdir().unwrap();
 		let user = dir.path().join("o2");
 		let project = dir.path().join("proj/.omp");
@@ -487,13 +500,23 @@ mod tests {
 		assert_eq!(files.user_path("sonic.cfg"), user.join("sonic.cfg"));
 		assert_eq!(files.project_path("subagent"), Some(project.join("subagent.cfg")));
 		assert_eq!(files.load("subagent").unwrap(), None);
+		assert_eq!(files.load_project("subagent").unwrap(), None);
 		fs::write(user.join("subagent.cfg"), "ai_fastmode 0").unwrap();
 		assert_eq!(files.load("subagent").unwrap().unwrap().as_str(), "ai_fastmode 0");
+		assert_eq!(files.load_project("subagent").unwrap(), None);
 		fs::write(project.join("subagent.cfg"), "ai_thinking low\n").unwrap();
+		assert_eq!(files.load("subagent.cfg").unwrap().unwrap().as_str(), "ai_fastmode 0");
 		assert_eq!(
-			files.load("subagent.cfg").unwrap().unwrap().as_str(),
-			"ai_fastmode 0\nai_thinking low\n"
+			files
+				.load_project("subagent.cfg")
+				.unwrap()
+				.unwrap()
+				.as_str(),
+			"ai_thinking low\n",
+			"the overlay is never merged into the user text"
 		);
+		let detached = CfgFiles::with_roots(user, None);
+		assert_eq!(detached.load_project("subagent").unwrap(), None);
 	}
 
 	/// The subagent spawn path installs [`CfgFiles`] as its loader (kernel

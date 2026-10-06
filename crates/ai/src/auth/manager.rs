@@ -33,8 +33,8 @@ use super::{
 };
 use crate::{
 	account::{
-		AccountPool, AccountPoolEvent, AccountRecord, CredentialFreshness, RateWindowId,
-		RefreshCoordinator, RefreshRequest,
+		AccountPin, AccountPool, AccountPoolEvent, AccountRecord, CredentialFreshness, RateWindowId,
+		RefreshCoordinator, RefreshRequest, SessionAccountPins,
 	},
 	answer::{
 		AccountState, AccountSummary, AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind,
@@ -478,6 +478,19 @@ impl CredentialAffinityResolver {
 			&account.account,
 			&account.principal,
 		)
+	}
+
+	/// Resolves recorded session pins against the live account pool. A pin
+	/// whose digest no longer names exactly one account of its provider
+	/// (removed, ambiguous, or malformed) becomes [`AccountPin::Unresolved`],
+	/// which no account satisfies.
+	pub fn session_pins(&self, pool: &AccountPool, recorded: &omp_con::Kv) -> SessionAccountPins {
+		SessionAccountPins::new(crate::account::recorded_pins(recorded).map(|(provider, digest)| {
+			let pin = digest
+				.and_then(|digest| self.resolve(pool, &provider, &digest).ok())
+				.map_or(AccountPin::Unresolved, |record| AccountPin::Account(record.account));
+			(provider, pin)
+		}))
 	}
 
 	/// Restores exactly one live account from opaque journal evidence.
@@ -1547,6 +1560,30 @@ impl AuthManager {
 			.resolve(&self.accounts, provider, affinity)
 	}
 
+	/// The opaque journal-safe digest that pins `account` to a session, or
+	/// `None` when no resolver was installed.
+	pub fn affinity_digest(&self, account: &AccountRecord) -> Option<CredentialAffinityDigest> {
+		self
+			.affinity
+			.as_ref()
+			.map(|resolver| resolver.digest(account))
+	}
+
+	/// Resolves the session's recorded pins ([`AI_ACCOUNT_PINS`]) against the
+	/// live account pool; see [`CredentialAffinityResolver::session_pins`].
+	/// Without a resolver every recorded pin is unresolved.
+	///
+	/// [`AI_ACCOUNT_PINS`]: crate::account::AI_ACCOUNT_PINS
+	pub fn session_pins(&self, recorded: &omp_con::Kv) -> SessionAccountPins {
+		match &self.affinity {
+			Some(resolver) => resolver.session_pins(&self.accounts, recorded),
+			None => SessionAccountPins::new(
+				crate::account::recorded_pins(recorded)
+					.map(|(provider, _)| (provider, AccountPin::Unresolved)),
+			),
+		}
+	}
+
 	/// Executes one route-independent authentication operation.
 	pub async fn execute(&self, request: AuthRequest) -> Result<AuthAnswer, Error> {
 		match request {
@@ -2116,7 +2153,7 @@ mod tests {
 		auth_store_error, select_auth_spec, select_login_engine,
 	};
 	use crate::{
-		account::{AccountPool, AccountRecord, RefreshCoordinator, RefreshPolicy},
+		account::{AccountPin, AccountPool, AccountRecord, RefreshCoordinator, RefreshPolicy},
 		answer::{AccountState, AccountSummary, AuthEvent, AuthResponse as AnswerAuthResponse},
 		auth::{
 			AlibabaTokenPlanLoginEngine, AuthRejection, CredentialError, CredentialFuture,
@@ -2153,6 +2190,56 @@ mod tests {
 			CredentialAffinityResolver::new([8; 32]).resolve(&pool, &provider, &digest),
 			Err(CredentialAffinityError::NotFound)
 		);
+	}
+
+	#[test]
+	fn session_pins_resolve_to_live_accounts_and_fail_closed_otherwise() {
+		let pool = AccountPool::new();
+		let provider = ProviderId::from("provider");
+		let account = AccountRecord {
+			account:               AccountId::from("raw-account-uuid"),
+			principal:             PrincipalId::from("person@example.test"),
+			provider:              provider.clone(),
+			routes:                BTreeSet::new(),
+			enabled:               true,
+			credential_generation: 1,
+			routing:               AccountRoutingContext::default(),
+		};
+		pool.upsert(account.clone()).expect("register account");
+		let resolver = CredentialAffinityResolver::new([7; 32]);
+		let digest = resolver.digest(&account);
+		let recorded = crate::account::with_pin(&omp_con::Kv::new(), &provider, &digest);
+		assert!(
+			!format!("{recorded:?}").contains("raw-account-uuid"),
+			"the recorded pin carries no account identity"
+		);
+		assert_eq!(
+			resolver
+				.session_pins(&pool, &recorded)
+				.for_provider(&provider),
+			Some(&AccountPin::Account(account.account.clone()))
+		);
+		let malformed = omp_con::Kv(
+			recorded
+				.iter()
+				.map(|(key, _)| (key.clone(), omp_con::Value::Str(omp_core::Str::new("not-a-digest"))))
+				.collect(),
+		);
+		assert_eq!(
+			resolver
+				.session_pins(&pool, &malformed)
+				.for_provider(&provider),
+			Some(&AccountPin::Unresolved)
+		);
+		pool.remove(&account.account);
+		assert_eq!(
+			resolver
+				.session_pins(&pool, &recorded)
+				.for_provider(&provider),
+			Some(&AccountPin::Unresolved)
+		);
+		let cleared = crate::account::without_pin(&recorded, &provider);
+		assert!(resolver.session_pins(&pool, &cleared).is_empty());
 	}
 
 	#[test]

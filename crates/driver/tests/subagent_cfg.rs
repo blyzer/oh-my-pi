@@ -12,9 +12,13 @@ fn child_uses_parent_live_then_user_and_project_spawn_cfgs() {
 	fs::create_dir_all(&user).expect("user cfg root");
 	fs::create_dir_all(&project).expect("project cfg root");
 	fs::write(user.join("config.cfg"), "ai_model stale\n").expect("stale main cfg");
-	fs::write(user.join("subagent.cfg"), "ai_fastmode false\n").expect("user subagent cfg");
-	fs::write(project.join("subagent.cfg"), "ai_fastmode true\n").expect("project subagent cfg");
-	fs::write(user.join("sonic.cfg"), "ai_thinking low\n").expect("user class cfg");
+	fs::write(user.join("subagent.cfg"), "ai_fastmode false\nai_thinking low\n")
+		.expect("user subagent cfg");
+	// The project overlay runs after the user subagent cfg, with project
+	// authority: `ai_thinking` is project-scoped, `ai_fastmode` is not.
+	fs::write(project.join("subagent.cfg"), "ai_thinking medium\nai_fastmode true\n")
+		.expect("project subagent cfg");
+	fs::write(user.join("sonic.cfg"), "ai_model sonic/model\n").expect("user class cfg");
 
 	let parent = omp_con::Ctx::new();
 	parent
@@ -28,15 +32,18 @@ fn child_uses_parent_live_then_user_and_project_spawn_cfgs() {
 			.get_typed::<omp_core::Str>("ai_model")
 			.expect("model")
 			.as_str(),
-		"live"
+		"sonic/model"
 	);
-	assert!(child.get_typed::<bool>("ai_fastmode").expect("fast mode"));
+	assert!(
+		!child.get_typed::<bool>("ai_fastmode").expect("fast mode"),
+		"a project overlay cannot set a convar that is not project-scoped"
+	);
 	assert_eq!(
 		child
 			.get_typed::<omp_core::Str>("ai_thinking")
 			.expect("thinking")
 			.as_str(),
-		"low"
+		"medium"
 	);
 	assert_eq!(
 		parent

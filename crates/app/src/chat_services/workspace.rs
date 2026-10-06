@@ -160,7 +160,7 @@ mod tests {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let root = temp.path().join("repo");
 		fs::create_dir_all(&root).unwrap();
-		let run = |args: &[&str]| git(&root, args).expect(args[0]);
+		let run = |args: &[&str]| omp_vcs::testing::run(&root, args);
 		run(&["init", "-q", "-b", "main"]);
 		run(&["config", "user.email", "t@example.com"]);
 		run(&["config", "user.name", "t"]);

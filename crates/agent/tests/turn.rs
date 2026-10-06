@@ -24,7 +24,7 @@ use omp_journal::{blob::BlobStore, kind};
 
 mod support;
 use support::{
-	ScriptedInference, assert_all_entries_caused, completed, fresh_session, journal_entries,
+	ScriptedInference, assert_all_entries_caused, completed, fresh_session, journal_entries, raw,
 	registry, spec, text_script, tool_script,
 };
 
@@ -1060,6 +1060,184 @@ async fn retry_tool_tail_reruns_the_aborted_call_and_continues_the_turn() {
 			.await,
 		Err(omp_agent::KernelError::NothingToRetry)
 	));
+}
+
+/// The typed abort journaled for the tool call whose provider id is `call_id`.
+fn recovered_abort(session: &omp_session::Session, call_id: &str) -> omp_tool::Abort {
+	let dom = session.dom();
+	let call = dom
+		.handles()
+		.find(|handle| {
+			dom.get(*handle).is_some_and(|node| {
+				matches!(node.tag, omp_dom::Tag::Custom(_))
+					&& node
+						.prop(&PropKey::from(PropId::Id))
+						.and_then(omp_dom::Value::as_str)
+						== Some(call_id)
+			})
+		})
+		.expect("call node");
+	let fault = dom
+		.children(call)
+		.iter()
+		.find_map(|child| match dom.get(*child)?.prop(&PropKey::from(PropId::Fault)) {
+			Some(omp_dom::Value::Json(raw)) => Some(raw.clone()),
+			_ => None,
+		})
+		.expect("fault diag");
+	match serde_json::from_str::<omp_tool::CallOutcome<serde_json::Value, serde_json::Value>>(
+		fault.get(),
+	)
+	.expect("journaled outcome decodes")
+	{
+		omp_tool::CallOutcome::Aborted { abort, .. } => abort,
+		other => panic!("call {call_id} did not abort: {other:?}"),
+	}
+}
+
+/// Journals one authorized-never-started call (`queued`) and one started call
+/// (`running`) in `queued_first` order, then drops the session as a crash
+/// would, reopens it, recovers it, and retries the tail on a fresh kernel.
+#[allow(
+	clippy::future_not_send,
+	reason = "awaited only from the single-threaded #[tokio::test] runtime; the scripted chat \
+	          stream is Send but not Sync"
+)]
+async fn retry_recovered_tail(queued_first: bool) {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("recovered-tail.oms");
+	let mut session = fresh_session(&journal_path);
+	session.begin_turn().expect("turn starts");
+	session.user("use both", Vec::new()).expect("user appends");
+	session
+		.assistant_start("test-model", "test-provider", "test-route")
+		.expect("assistant starts tool turn");
+	let authorize = |session: &mut omp_session::Session, name: &str, id: &str, started: bool| {
+		let (call, _) = session
+			.call_streaming(name, 1, id, None)
+			.expect("call streams");
+		session
+			.call_ready(call, raw(serde_json::json!({"command": id})))
+			.expect("call authorized");
+		if started {
+			session
+				.call_started(call)
+				.expect("call crosses into execution");
+		}
+	};
+	if queued_first {
+		authorize(&mut session, "queued", "queued-call", false);
+		authorize(&mut session, "running", "running-call", true);
+	} else {
+		authorize(&mut session, "running", "running-call", true);
+		authorize(&mut session, "queued", "queued-call", false);
+	}
+	drop(session);
+
+	// Reopen: replay restores the execution boundary, recovery settles both
+	// calls as `aborted` with the typed split, and the tail stays retryable.
+	let mut session =
+		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::default())
+			.expect("session reopens");
+	let boundaries = session
+		.unsettled_calls()
+		.iter()
+		.map(|call| (call.call_id.to_string(), call.started))
+		.collect::<std::collections::BTreeMap<_, _>>();
+	assert_eq!(
+		boundaries,
+		[("queued-call".to_owned(), false), ("running-call".to_owned(), true)].into(),
+		"replay restores which call started"
+	);
+	session
+		.recover_process_disappearance()
+		.expect("writable owner recovers calls");
+	assert!(session.unsettled_calls().is_empty(), "recovery settled both calls");
+	assert!(matches!(recovered_abort(&session, "queued-call"), omp_tool::Abort::Skipped { .. }));
+	assert!(matches!(
+		recovered_abort(&session, "running-call"),
+		omp_tool::Abort::EffectsUnknown { .. }
+	));
+	let turn = *session
+		.dom()
+		.children(session.dom().body())
+		.last()
+		.expect("turn");
+	assert!(
+		omp_agent::aborted_tool_tail(session.dom(), turn),
+		"a recovered Skipped/EffectsUnknown tail is retryable"
+	);
+
+	// Retry re-runs BOTH calls under their original call ids and arguments:
+	// the user's explicit retry authorizes re-running the started call too, so
+	// nothing is skipped or re-issued through the model.
+	let queued_runs = Arc::new(AtomicUsize::new(0));
+	let running_runs = Arc::new(AtomicUsize::new(0));
+	let one = || Arc::new(tokio::sync::Barrier::new(1));
+	let (inference, requests) = ScriptedInference::new([text_script("after retry")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([
+			spec("queued", 1, "queued settled").concurrency_probe(Arc::clone(&queued_runs), one()),
+			spec("running", 1, "running settled").concurrency_probe(Arc::clone(&running_runs), one()),
+		]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let outcome = kernel
+		.retry_tool_tail(&mut session, RunControl::default())
+		.await
+		.expect("retry succeeds on a recovered tail");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(outcome.assistant_text.as_str(), "after retry");
+	assert_eq!(queued_runs.load(Ordering::SeqCst), 1, "the never-started call ran");
+	assert_eq!(running_runs.load(Ordering::SeqCst), 1, "the started call ran again");
+	assert_eq!(requests.lock().len(), 1, "no model round trip before the replay");
+	assert!(!omp_agent::aborted_tool_tail(session.dom(), turn));
+	assert!(session.unsettled_calls().is_empty());
+	assert_eq!(prop_text(&session, "body turn queued", PropId::Status), "ok");
+	assert_eq!(prop_text(&session, "body turn running", PropId::Status), "ok");
+	assert_eq!(prop_text(&session, "body turn queued", PropId::Id), "queued-call");
+	assert_eq!(prop_text(&session, "body turn running", PropId::Id), "running-call");
+
+	let entries = journal_entries(&journal_path);
+	let live = omp_journal::live_chain(&entries).collect::<Vec<_>>();
+	assert_eq!(
+		live
+			.iter()
+			.filter(|entry| entry.kind.name.as_str() == kind::TOOL_RESULT)
+			.count(),
+		2,
+		"the live chain carries exactly one result per call"
+	);
+	assert!(
+		!live
+			.iter()
+			.any(|entry| entry.data.contains("\"kind\":\"aborted\"")),
+		"the recovery aborts are abandoned from the live chain"
+	);
+	assert!(
+		live.len() < entries.len(),
+		"the recovery aborts are abandoned, not deleted from the journal"
+	);
+	assert!(matches!(
+		kernel
+			.retry_tool_tail(&mut session, RunControl::default())
+			.await,
+		Err(omp_agent::KernelError::NothingToRetry)
+	));
+}
+
+/// PR #168 split recovery of an unsettled call into `Abort::Skipped`
+/// (authorized, never started) and `Abort::EffectsUnknown` (started), both
+/// journaled with outcome kind `aborted`. A reopened-and-recovered session must
+/// still offer the retry: `aborted_tool_tail` holds and `retry_tool_tail`
+/// re-runs both calls with their original ids, in either authorization order,
+/// leaving one live result per call.
+#[tokio::test]
+async fn retry_tool_tail_reruns_a_recovered_skipped_and_started_tail() {
+	retry_recovered_tail(true).await;
+	retry_recovered_tail(false).await;
 }
 
 /// A user image attachment reaches the provider with the blob's bytes inline

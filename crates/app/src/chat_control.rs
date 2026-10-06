@@ -4111,15 +4111,7 @@ mod tests {
 		.expect("reply arrives in time")
 	}
 
-	fn git(root: &std::path::Path, args: &[&str]) -> String {
-		let output = std::process::Command::new("git")
-			.args(args)
-			.current_dir(root)
-			.output()
-			.expect("git runs");
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout).expect("utf-8 git output")
-	}
+	use omp_vcs::testing::run as git;
 
 	/// Initializes a repository with one committed `a.txt` at `root`.
 	fn init_repo(root: &std::path::Path) {

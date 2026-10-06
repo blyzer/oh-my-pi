@@ -203,9 +203,12 @@ fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom) {
 	if agent.as_str() != TASK_AGENT.as_str() {
 		let mut file = agent.as_str().to_owned();
 		file.push_str(".cfg");
-		match cfg.load(&file) {
-			Ok(Some(_)) => {},
-			Ok(None) => ctx.reply_fmt(
+		match cfg
+			.load(&file)
+			.and_then(|user| Ok(user.is_some() || cfg.load_project(&file)?.is_some()))
+		{
+			Ok(true) => {},
+			Ok(false) => ctx.reply_fmt(
 				Severity::Warn,
 				format_args!(
 					"agent `{agent}` has no definition ({file}) anymore; this session resumes with the \
@@ -409,6 +412,80 @@ mod tests {
 		let _journal =
 			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed);
 		assert_eq!(omp_agent::AI_THINKING.get(&restored), omp_agent::AI_THINKING.get(&Ctx::new()));
+	}
+
+	/// A session account pin is journaled as an opaque digest (no account id or
+	/// principal), restored on reopen so the pin survives the session, and
+	/// removed from the journal when it is cleared.
+	#[test]
+	fn account_pin_survives_reopen_as_an_opaque_digest() {
+		use std::collections::BTreeSet;
+
+		use omp_ai::{
+			AccountId, AccountRoutingContext, PrincipalId,
+			account::{
+				AI_ACCOUNT_PINS, AccountPin, AccountPool, AccountRecord, with_pin, without_pin,
+			},
+			auth::CredentialAffinityResolver,
+		};
+		use omp_catalog::ProviderId;
+
+		let provider = ProviderId::from("provider");
+		let record = AccountRecord {
+			account:               AccountId::from("raw-account-uuid"),
+			principal:             PrincipalId::from("person@example.test"),
+			provider:              provider.clone(),
+			routes:                BTreeSet::new(),
+			enabled:               true,
+			credential_generation: 1,
+			routing:               AccountRoutingContext::default(),
+		};
+		let pool = AccountPool::new();
+		pool.upsert(record.clone()).expect("account registers");
+		let resolver = CredentialAffinityResolver::new([5; 32]);
+		let directory = tempfile::tempdir().expect("tempdir");
+		let path = directory.path().join("pin.oms");
+		let ctx = Arc::new(Ctx::new());
+		let mut session = open(&path);
+		let journal = ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed);
+		let pinned = with_pin(&omp_con::Kv::new(), &provider, &resolver.digest(&record));
+		AI_ACCOUNT_PINS
+			.set(&ctx, pinned.clone())
+			.expect("pin writes");
+		journal.flush(&mut session).expect("flush journals the pin");
+		let writes = con_writes(session.dom());
+		let write = writes
+			.iter()
+			.find(|write| write.name == "ai_account_pins")
+			.expect("the pin is journaled");
+		assert!(!write.value.contains("raw-account-uuid"), "{}", write.value);
+		assert!(!write.value.contains("person@example.test"), "{}", write.value);
+		drop(session);
+
+		let restored = Arc::new(Ctx::new());
+		let mut reopened = open(&path);
+		let rejournal =
+			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed);
+		let recorded = AI_ACCOUNT_PINS.get(&restored);
+		assert_eq!(
+			resolver
+				.session_pins(&pool, &recorded)
+				.for_provider(&provider),
+			Some(&AccountPin::Account(record.account.clone())),
+			"the reopened session resolves the same account"
+		);
+
+		AI_ACCOUNT_PINS
+			.set(&restored, without_pin(&recorded, &provider))
+			.expect("pin clears");
+		rejournal
+			.flush(&mut reopened)
+			.expect("flush journals the unpin");
+		assert!(
+			resolver
+				.session_pins(&pool, &AI_ACCOUNT_PINS.get(&restored))
+				.is_empty()
+		);
 	}
 
 	type Replies = Arc<parking_lot::Mutex<Vec<String>>>;

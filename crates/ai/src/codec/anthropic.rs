@@ -9,6 +9,7 @@ use omp_catalog::{
 use omp_core::{Str, encoding::base64, sf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, value::RawValue};
+use smallvec::SmallVec;
 use strum::IntoStaticStr;
 
 use super::{
@@ -1179,7 +1180,6 @@ fn lower_count_tokens(
 	for message in request.messages.iter() {
 		let blocks = lower_parts(
 			&message.content,
-			None,
 			provider,
 			codec,
 			policy.image.strip_input == Some(true),
@@ -1360,7 +1360,7 @@ pub fn lower_chat(
 	if !matches!(request.verbosity, Setting::Unset) {
 		return Err(capability_error("anthropic.verbosity_unsupported"));
 	}
-	let cache = cache_control(&request.cache_retention);
+	let automatic_ttl = automatic_cache_ttl(&request.cache_retention);
 	// The Messages API requires `max_tokens`; use the route output limit or
 	// `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when the catalog
 	// carries no output limit for the route.
@@ -1383,7 +1383,6 @@ pub fn lower_chat(
 	for message in request.messages.iter() {
 		let blocks = lower_parts(
 			&message.content,
-			cache.clone(),
 			provider,
 			codec,
 			policy.image.strip_input == Some(true),
@@ -1406,7 +1405,7 @@ pub fn lower_chat(
 			input_schema:          plan.input_schema,
 			strict:                plan.strict.then_some(true),
 			eager_input_streaming: None,
-			cache_control:         cache.clone(),
+			cache_control:         None,
 		}));
 	}
 	for tool in request.hosted_tools.iter() {
@@ -1422,7 +1421,7 @@ pub fn lower_chat(
 					citations:       None,
 					allowed_domains: allowed_domains.iter().cloned().collect(),
 					blocked_domains: blocked_domains.iter().cloned().collect(),
-					cache_control:   cache.clone(),
+					cache_control:   None,
 				}));
 			},
 			HostedTool::CodeExecution => body.tools.push(Tool::Hosted(HostedToolDefinition {
@@ -1432,7 +1431,7 @@ pub fn lower_chat(
 				citations:       None,
 				allowed_domains: Vec::new(),
 				blocked_domains: Vec::new(),
-				cache_control:   cache.clone(),
+				cache_control:   None,
 			})),
 			HostedTool::Retrieval { .. } => {
 				return Err(capability_error("anthropic.hosted_retrieval.unsupported"));
@@ -1483,6 +1482,7 @@ pub fn lower_chat(
 	if let Some(tier) = setting_value(&request.service_tier) {
 		lower_service_tier(&mut body, tier)?;
 	}
+	budget_cache_breakpoints(&mut body, automatic_ttl);
 	Ok(body)
 }
 fn lower_service_tier(body: &mut MessagesRequest, tier: &ServiceTier) -> Result<(), Error> {
@@ -1507,7 +1507,6 @@ fn append_message(messages: &mut Vec<Message>, role: &'static str, mut blocks: V
 
 fn lower_parts(
 	parts: &[CanonicalPart],
-	cache: Option<CacheControl>,
 	provider: &ProviderId<str>,
 	codec: &CodecId<str>,
 	strip_images: bool,
@@ -1528,20 +1527,18 @@ fn lower_parts(
 						return Err(capability_error("anthropic.text.proof_unrepresentable"));
 					}
 				} else {
-					ContentBlock::Text { text: text.clone(), cache_control: cache.clone() }
+					ContentBlock::Text { text: text.clone(), cache_control: None }
 				}
 			},
 			CanonicalPart::Reasoning { text, proof } => ContentBlock::Thinking {
 				thinking:  text.clone(),
 				signature: proof_signature(proof.as_ref(), provider, codec)?,
 			},
-			CanonicalPart::Image(media) => ContentBlock::Image {
-				source:        media_source(media)?,
-				cache_control: cache.clone(),
+			CanonicalPart::Image(media) => {
+				ContentBlock::Image { source: media_source(media)?, cache_control: None }
 			},
-			CanonicalPart::Document(media) => ContentBlock::Document {
-				source:        media_source(media)?,
-				cache_control: cache.clone(),
+			CanonicalPart::Document(media) => {
+				ContentBlock::Document { source: media_source(media)?, cache_control: None }
 			},
 			CanonicalPart::Audio(_) => return Err(capability_error("anthropic.audio.unsupported")),
 			CanonicalPart::ToolCall { call, name, arguments, proof } => {
@@ -1553,7 +1550,7 @@ fn lower_parts(
 					id:            Str::new(call.as_str()),
 					name:          name.clone(),
 					input:         arguments.as_value().clone(),
-					cache_control: cache.clone(),
+					cache_control: None,
 				}
 			},
 			CanonicalPart::ToolResult { call, name: _, content, is_error } => {
@@ -1573,18 +1570,11 @@ fn lower_parts(
 					id: tool_result_id.then(|| Str::new(call.as_str())),
 					is_error: *is_error,
 					content,
-					cache_control: cache.clone(),
+					cache_control: None,
 				}
 			},
 			CanonicalPart::CachePoint(retention) => {
-				let marker = CacheControl {
-					kind:  CacheControlKind::Ephemeral,
-					ttl:   match *retention {
-						CacheRetention::Long => CacheTtl::OneHour,
-						_ => CacheTtl::FiveMinutes,
-					},
-					scope: None,
-				};
+				let marker = ephemeral(CacheTtl::from_retention(*retention));
 				let previous = blocks
 					.last_mut()
 					.ok_or_else(|| encoding_error("anthropic.cache_point.orphan"))?;
@@ -1680,25 +1670,172 @@ fn proof_signature(
 }
 
 fn apply_cache(block: &mut ContentBlock, marker: CacheControl) -> Result<(), Error> {
+	let slot = block_cache_slot(block)
+		.ok_or_else(|| capability_error("anthropic.cache_point.block_unsupported"))?;
+	*slot = Some(marker);
+	Ok(())
+}
+
+/// Anthropic's documented ceiling on `cache_control` breakpoints per request
+/// (tools, system, and message blocks together).
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+const fn ephemeral(ttl: CacheTtl) -> CacheControl {
+	CacheControl { kind: CacheControlKind::Ephemeral, ttl, scope: None }
+}
+
+/// The marker TTL the codec places on its own, or `None` when the request
+/// asks for no cross-request caching.
+///
+/// `ai_cache_retention auto` leaves the setting unset and `none` lowers to
+/// [`CacheRetention::Request`] (retain for this request only); neither
+/// produces automatic breakpoints. Explicit [`CanonicalPart::CachePoint`]
+/// parts are honoured regardless.
+fn automatic_cache_ttl(setting: &Setting<CacheRetention>) -> Option<CacheTtl> {
+	setting_value(setting)
+		.filter(|retention| !matches!(retention, CacheRetention::Request))
+		.map(|retention| CacheTtl::from_retention(*retention))
+}
+
+/// The `cache_control` slot of a block that may carry one.
+///
+/// Thinking, redacted thinking, hosted-tool replay blocks, and empty text
+/// blocks cannot be cached, so they have no slot.
+fn block_cache_slot(block: &mut ContentBlock) -> Option<&mut Option<CacheControl>> {
 	match block {
+		ContentBlock::Text { text, .. } if text.is_empty() => None,
 		ContentBlock::Text { cache_control, .. }
 		| ContentBlock::Image { cache_control, .. }
 		| ContentBlock::Document { cache_control, .. }
 		| ContentBlock::ToolUse { cache_control, .. }
-		| ContentBlock::ToolResult { cache_control, .. } => {
-			*cache_control = Some(marker);
-			Ok(())
-		},
-		_ => Err(capability_error("anthropic.cache_point.block_unsupported")),
+		| ContentBlock::ToolResult { cache_control, .. } => Some(cache_control),
+		_ => None,
 	}
 }
 
-fn cache_control(setting: &Setting<CacheRetention>) -> Option<CacheControl> {
-	setting_value(setting).map(|retention| CacheControl {
-		kind:  CacheControlKind::Ephemeral,
-		ttl:   CacheTtl::from_retention(*retention),
-		scope: None,
-	})
+const fn tool_cache_slot(tool: &mut Tool) -> &mut Option<CacheControl> {
+	match tool {
+		Tool::Client(tool) => &mut tool.cache_control,
+		Tool::Hosted(tool) => &mut tool.cache_control,
+	}
+}
+
+/// Where an automatic breakpoint may go, in wire (prefix) order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Anchor {
+	/// `tools[index]`.
+	Tool(usize),
+	/// `system[index]`.
+	System(usize),
+	/// `messages[message].content[block]`.
+	Block { message: usize, block: usize },
+}
+
+impl Anchor {
+	fn slot(self, body: &mut MessagesRequest) -> Option<&mut Option<CacheControl>> {
+		match self {
+			Self::Tool(index) => body.tools.get_mut(index).map(tool_cache_slot),
+			Self::System(index) => body.system.get_mut(index).and_then(block_cache_slot),
+			Self::Block { message, block } => body
+				.messages
+				.get_mut(message)
+				.and_then(|message| message.content.get_mut(block))
+				.and_then(block_cache_slot),
+		}
+	}
+}
+
+/// Enforces the four-breakpoint ceiling and places automatic breakpoints.
+///
+/// Anthropic caches the prefix `tools -> system -> messages` up to each
+/// marked block and documents at most four markers per request. Stamping every
+/// block (the previous behaviour) exceeds that as soon as a conversation has
+/// more than a few blocks. The budget is spent on the positions that give the
+/// longest *stable* prefixes:
+///
+/// 1. the tip of the conversation: the last cacheable block of the final
+///    user-role message (the agent loop's tool results land here);
+/// 2. the end of the system prompt, covering tools plus system;
+/// 3. the end of the tool array, so a system change still hits the tools;
+/// 4. the last cacheable block of the previous user-role message, which is
+///    where the previous request's tip sat, keeping the 20-block lookback
+///    window anchored on an entry that request already wrote.
+///
+/// Explicit markers (from [`CanonicalPart::CachePoint`]) are kept first and
+/// consume budget; if they alone exceed it the earliest are dropped.
+/// Placement is a pure function of the lowered body, so two encodings of the
+/// same request carry identical markers. `ttl == None` places none.
+fn budget_cache_breakpoints(body: &mut MessagesRequest, ttl: Option<CacheTtl>) {
+	let mut marked: SmallVec<Anchor, MAX_CACHE_BREAKPOINTS> = SmallVec::new();
+	for (index, tool) in body.tools.iter_mut().enumerate() {
+		if tool_cache_slot(tool).is_some() {
+			marked.push(Anchor::Tool(index));
+		}
+	}
+	for (index, block) in body.system.iter_mut().enumerate() {
+		if block_cache_slot(block).is_some_and(|slot| slot.is_some()) {
+			marked.push(Anchor::System(index));
+		}
+	}
+	for (message, entry) in body.messages.iter_mut().enumerate() {
+		for (block, content) in entry.content.iter_mut().enumerate() {
+			if block_cache_slot(content).is_some_and(|slot| slot.is_some()) {
+				marked.push(Anchor::Block { message, block });
+			}
+		}
+	}
+	// `marked` holds every explicit marker in wire order; clear the earliest
+	// beyond the ceiling.
+	let overflow = marked.len().saturating_sub(MAX_CACHE_BREAKPOINTS);
+	for anchor in &marked[..overflow] {
+		if let Some(slot) = anchor.slot(body) {
+			*slot = None;
+		}
+	}
+	marked.drain(..overflow);
+	let Some(ttl) = ttl else { return };
+	let free = MAX_CACHE_BREAKPOINTS - marked.len();
+	if free == 0 {
+		return;
+	}
+	let mut candidates: SmallVec<Anchor, MAX_CACHE_BREAKPOINTS> = SmallVec::new();
+	let mut user_blocks = body
+		.messages
+		.iter_mut()
+		.enumerate()
+		.rev()
+		.filter(|(_, message)| message.role.as_str() == "user")
+		.filter_map(|(message, entry)| {
+			entry
+				.content
+				.iter_mut()
+				.rposition(|block| block_cache_slot(block).is_some())
+				.map(|block| Anchor::Block { message, block })
+		});
+	let tip = user_blocks.next();
+	let previous = user_blocks.next();
+	drop(user_blocks);
+	candidates.extend(tip);
+	if let Some(index) = body
+		.system
+		.iter_mut()
+		.rposition(|block| block_cache_slot(block).is_some())
+	{
+		candidates.push(Anchor::System(index));
+	}
+	if let Some(index) = body.tools.len().checked_sub(1) {
+		candidates.push(Anchor::Tool(index));
+	}
+	candidates.extend(previous);
+	for anchor in candidates {
+		if marked.contains(&anchor) || marked.len() >= MAX_CACHE_BREAKPOINTS {
+			continue;
+		}
+		if let Some(slot) = anchor.slot(body).filter(|slot| slot.is_none()) {
+			*slot = Some(ephemeral(ttl));
+			marked.push(anchor);
+		}
+	}
 }
 
 fn lower_tool_choice(setting: &Setting<ToolChoice>) -> Option<WireToolChoice> {
@@ -3643,6 +3780,252 @@ mod tests {
 		.expect("policy request lowers")
 	}
 
+	fn message(role: Role, parts: Vec<CanonicalContentPart>) -> CanonicalMessage {
+		CanonicalMessage { role, content: Arc::from(parts), name: None }
+	}
+
+	fn text_part(text: &str) -> CanonicalContentPart {
+		CanonicalContentPart::Text { text: Str::new(text), proof: None }
+	}
+
+	/// An agent-shaped history: three system bands, one user prompt, then
+	/// `turns` rounds of an assistant text plus three parallel tool calls
+	/// answered by three tool results, over a roster of `tool_count` tools.
+	fn agent_chat(
+		turns: usize,
+		tool_count: usize,
+		retention: Setting<CacheRetention>,
+	) -> ChatRequest {
+		let mut request = thinking_chat();
+		let mut messages = vec![
+			message(Role::System, vec![text_part("frozen band")]),
+			message(Role::System, vec![text_part("stable band")]),
+			message(Role::System, vec![text_part("volatile band")]),
+			message(Role::User, vec![text_part("start")]),
+		];
+		for turn in 0..turns {
+			let ids: Vec<_> = (0..3)
+				.map(|n| ToolCallId::new(format!("toolu_{turn}_{n}")))
+				.collect();
+			let mut assistant = vec![text_part("working")];
+			assistant.extend(ids.iter().map(|id| CanonicalContentPart::ToolCall {
+				call:      id.clone(),
+				name:      sf!("read"),
+				arguments: OpaqueJson::new(serde_json::json!({"path": "a"})),
+				proof:     None,
+			}));
+			messages.push(message(Role::Assistant, assistant));
+			messages.push(message(
+				Role::Tool,
+				ids.into_iter()
+					.map(|call| CanonicalContentPart::ToolResult {
+						call,
+						name: None,
+						content: vec![ToolResultContent::Text(sf!("ok"))].into(),
+						is_error: false,
+					})
+					.collect(),
+			));
+		}
+		request.messages = messages.into();
+		request.tools = (0..tool_count)
+			.map(|n| ToolDefinition {
+				name:        Str::new(format!("tool_{n}")),
+				description: Some(sf!("A tool")),
+				input:       ToolInputConstraint::JsonSchema {
+					parameters: OpaqueJson::new(serde_json::json!({"type": "object", "properties": {}})),
+					strict:     true,
+				},
+			})
+			.collect::<Vec<_>>()
+			.into();
+		request.cache_retention = retention;
+		request
+	}
+
+	/// Every marker in wire order with its TTL.
+	fn markers(body: &mut MessagesRequest) -> Vec<(Anchor, CacheTtl)> {
+		let mut found = Vec::new();
+		for index in 0..body.tools.len() {
+			if let Some(control) = Anchor::Tool(index).slot(body).and_then(|slot| slot.clone()) {
+				found.push((Anchor::Tool(index), control.ttl));
+			}
+		}
+		for index in 0..body.system.len() {
+			if let Some(control) = Anchor::System(index)
+				.slot(body)
+				.and_then(|slot| slot.clone())
+			{
+				found.push((Anchor::System(index), control.ttl));
+			}
+		}
+		for message in 0..body.messages.len() {
+			for block in 0..body.messages[message].content.len() {
+				let anchor = Anchor::Block { message, block };
+				if let Some(control) = anchor.slot(body).and_then(|slot| slot.clone()) {
+					found.push((anchor, control.ttl));
+				}
+			}
+		}
+		found
+	}
+
+	fn wire_marker_count(body: &MessagesRequest) -> usize {
+		serde_json::to_string(body)
+			.expect("body serializes")
+			.matches("\"cache_control\"")
+			.count()
+	}
+
+	#[test]
+	fn cache_breakpoints_never_exceed_the_four_marker_ceiling() {
+		for retention in [CacheRetention::Short, CacheRetention::Long, CacheRetention::Session] {
+			let request = agent_chat(40, 60, Setting::Prefer(retention));
+			let mut body = lower_with_policy(&request, &WirePolicy::baseline(), None, None);
+			assert_eq!(wire_marker_count(&body), 4, "{retention:?}");
+			assert_eq!(markers(&mut body).len(), 4, "{retention:?}");
+		}
+	}
+
+	#[test]
+	fn cache_breakpoints_sit_on_the_tool_tail_system_tail_and_last_two_user_turns() {
+		let request = agent_chat(5, 7, Setting::Prefer(CacheRetention::Short));
+		let mut body = lower_with_policy(&request, &WirePolicy::baseline(), None, None);
+		// Messages: user, (assistant, user)x5 -> the final user message is the
+		// last tool-result batch, the previous one the batch before it.
+		let last = body.messages.len() - 1;
+		assert_eq!(body.messages[last].role.as_str(), "user");
+		let last_block = body.messages[last].content.len() - 1;
+		let previous_block = body.messages[last - 2].content.len() - 1;
+		let anchors: Vec<_> = markers(&mut body)
+			.into_iter()
+			.map(|(anchor, _)| anchor)
+			.collect();
+		assert_eq!(anchors, [
+			Anchor::Tool(6),
+			Anchor::System(body.system.len() - 1),
+			Anchor::Block { message: last - 2, block: previous_block },
+			Anchor::Block { message: last, block: last_block },
+		]);
+		assert!(matches!(body.messages[last].content[last_block], ContentBlock::ToolResult {
+			cache_control: Some(_),
+			..
+		}));
+	}
+
+	#[test]
+	fn cache_breakpoint_placement_is_deterministic_and_prefix_stable() {
+		let policy = WirePolicy::baseline();
+		let request = agent_chat(12, 30, Setting::Prefer(CacheRetention::Long));
+		let mut first = lower_with_policy(&request, &policy, None, None);
+		let mut second = lower_with_policy(&request, &policy, None, None);
+		assert_eq!(serde_json::to_vec(&first).unwrap(), serde_json::to_vec(&second).unwrap());
+		assert_eq!(markers(&mut first), markers(&mut second));
+
+		// One more agent round: tools, system and the shared history stay
+		// byte-identical, and the previous request's tip becomes the new
+		// request's second conversation marker, so its cache entry is re-read.
+		let grown = agent_chat(13, 30, Setting::Prefer(CacheRetention::Long));
+		let mut grown = lower_with_policy(&grown, &policy, None, None);
+		let before = markers(&mut first);
+		let after = markers(&mut grown);
+		assert_eq!(before.len(), 4);
+		assert_eq!(after.len(), 4);
+		assert_eq!(before[..2], after[..2], "tool and system markers do not move");
+		assert_eq!(before[3].0, after[2].0, "old tip is the new previous-turn marker");
+	}
+
+	#[test]
+	fn cache_breakpoints_are_absent_without_cross_request_retention() {
+		let policy = WirePolicy::baseline();
+		for retention in [Setting::Unset, Setting::Require(CacheRetention::Request)] {
+			let request = agent_chat(10, 20, retention);
+			let body = lower_with_policy(&request, &policy, None, None);
+			assert_eq!(wire_marker_count(&body), 0);
+		}
+	}
+
+	#[test]
+	fn cache_breakpoint_ttl_follows_retention() {
+		let policy = WirePolicy::baseline();
+		for (retention, ttl, wire) in [
+			(CacheRetention::Short, CacheTtl::FiveMinutes, "\"ttl\":\"5m\""),
+			(CacheRetention::Long, CacheTtl::OneHour, "\"ttl\":\"1h\""),
+		] {
+			let request = agent_chat(6, 10, Setting::Require(retention));
+			let mut body = lower_with_policy(&request, &policy, None, None);
+			assert!(markers(&mut body).iter().all(|(_, marker)| *marker == ttl));
+			let json = serde_json::to_string(&body).unwrap();
+			assert_eq!(json.matches(wire).count(), 4, "{json}");
+		}
+	}
+
+	#[test]
+	fn short_conversations_spend_only_the_positions_they_have() {
+		// No tools, no system, one user turn: a single tip marker.
+		let mut request = canonical_chat(&[]);
+		request.tools = Arc::from([]);
+		request.tool_choice = Setting::Unset;
+		request.cache_retention = Setting::Prefer(CacheRetention::Short);
+		let mut body = lower_with_policy(&request, &WirePolicy::baseline(), None, None);
+		assert_eq!(markers(&mut body), [(
+			Anchor::Block { message: 0, block: 0 },
+			CacheTtl::FiveMinutes
+		)]);
+
+		// Tools and one system block add two more; an empty trailing text
+		// block is skipped for the tip.
+		let mut request = canonical_chat(&["system"]);
+		request.cache_retention = Setting::Prefer(CacheRetention::Short);
+		let mut body = lower_with_policy(&request, &WirePolicy::baseline(), None, None);
+		assert_eq!(markers(&mut body).len(), 3);
+	}
+
+	#[test]
+	fn explicit_cache_points_are_kept_and_consume_the_budget() {
+		let policy = WirePolicy::baseline();
+		// Six explicit cache points, retention unset: the latest four survive
+		// and no automatic marker is added.
+		let mut request = agent_chat(0, 3, Setting::Unset);
+		let mut messages = request.messages.to_vec();
+		for n in 0..6 {
+			messages.push(message(Role::User, vec![
+				text_part(&format!("turn {n}")),
+				CanonicalContentPart::CachePoint(CacheRetention::Short),
+			]));
+			messages.push(message(Role::Assistant, vec![text_part("ok")]));
+		}
+		request.messages = messages.into();
+		let mut body = lower_with_policy(&request, &policy, None, None);
+		let kept = markers(&mut body);
+		assert_eq!(kept.len(), MAX_CACHE_BREAKPOINTS);
+		// Explicit points land in messages 0, 2, ..., 10 (the first merges with
+		// the opening prompt); the two earliest are cleared.
+		let kept: Vec<_> = kept
+			.into_iter()
+			.map(|(anchor, _)| match anchor {
+				Anchor::Block { message, .. } => message,
+				other => panic!("unexpected automatic marker {other:?}"),
+			})
+			.collect();
+		assert_eq!(kept, [4, 6, 8, 10]);
+
+		// One explicit marker leaves three slots: tip, system tail, tool tail.
+		let mut request = agent_chat(0, 3, Setting::Prefer(CacheRetention::Long));
+		let mut messages = request.messages.to_vec();
+		messages.push(message(Role::Assistant, vec![text_part("ok")]));
+		messages.push(message(Role::User, vec![
+			text_part("pinned"),
+			CanonicalContentPart::CachePoint(CacheRetention::Long),
+			text_part("tail"),
+		]));
+		messages.push(message(Role::Assistant, vec![text_part("ok")]));
+		messages.push(message(Role::User, vec![text_part("again")]));
+		request.messages = messages.into();
+		let mut body = lower_with_policy(&request, &policy, None, None);
+		assert_eq!(markers(&mut body).len(), 4);
+	}
+
 	#[test]
 	fn requires_tool_result_id_aliases_the_call_id_onto_the_result_block() {
 		// The compatibility axis makes Z.AI GLM tool results carry `id` next to
@@ -3947,7 +4330,7 @@ mod tests {
 		// Headless OAuth calls bind no provider conversation; the caller's
 		// session identity must still reach the Claude Code session header.
 		let affinity =
-			CallAffinity { prompt_cache: None, provider_session: Some(sf!("caller-session")) };
+			CallAffinity { provider_session: Some(sf!("caller-session")), ..CallAffinity::none() };
 		let encoded =
 			encoded_anthropic_with_affinity(CredentialKind::Bearer, &["caller system"], &affinity);
 		let header = encoded
@@ -4497,7 +4880,6 @@ mod tests {
 					is_error: false,
 				},
 			],
-			None,
 			&provider,
 			&codec,
 			false,
@@ -4884,7 +5266,6 @@ mod tests {
 		};
 		let blocks = lower_parts(
 			&[CanonicalPart::Text { text: Str::default(), proof: Some(proof) }],
-			None,
 			&provider,
 			&codec,
 			false,

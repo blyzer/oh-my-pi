@@ -9,7 +9,7 @@ administration all use one parser and one registry.
 - Variables are declared once with `var!`; their type, default, validation,
   completion, and policy flags stay together.
 - Effective values are derived from ordered layers: defaults, archived
-  `config.cfg` values (user, then project overlay), values a child inherits
+  `config.cfg` values, the project overlay's values, values a child inherits
   from its parent at spawn, its agent class values (`subagent.cfg`,
   `<agent>.cfg`, the spawner's route), journal-backed session writes, then
   engagement binds from outermost to innermost.
@@ -20,6 +20,16 @@ administration all use one parser and one registry.
   `config.cfg` to the default. A reset `SESSION` override leaves the journal,
   and persistence (`writecfg`) records only a scope's own values, so the line
   drops out.
+- A project cfg overlay (`<project>/.omp/<name>.cfg`) is repository content, so
+  it runs with project authority instead of the user's: `CfgLoader::load` is
+  the user's text, `CfgLoader::load_project` the overlay's, and they are never
+  merged. The overlay may only `set` and `reset` convars declared with the
+  `project` flag; aliases, binds, `exec`, every other command, and every other
+  convar are refused with `ConError::ProjectVarDenied`/`ProjectCommandDenied`
+  (reported as warnings, counted in `ExecOutcome::denied`, never fatal).
+  Overlay values for `config.cfg` live in the `Origin::Project` layer, which
+  `writecfg` never persists; `subagent.cfg`/`<agent>.cfg` overlays commit to
+  the class layer under the same restriction.
 - `SESSION` writes are projected into `<meta><con><var name value origin>` by
   `omp-session`. Replaying or rewinding the journal therefore reconstructs
   control state without a second settings database.

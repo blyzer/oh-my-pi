@@ -293,10 +293,29 @@ impl ProductionInference {
 		Some(route_facts(self.routes.catalog().as_ref(), spec, Some(&self.meta.target)))
 	}
 
+	/// Resolves the journaled session account pins (`ai_account_pins`)
+	/// against the live account pool and attaches them to the client's
+	/// affinity, so every call this session sends honors them. Resolved per
+	/// call: a login, logout, or `/pin` between requests takes effect on the
+	/// next one, and a pin whose account was removed fails closed.
+	fn apply_account_pins(&mut self) {
+		let pins = self
+			.stack
+			.auth_manager
+			.session_pins(&omp_ai::account::AI_ACCOUNT_PINS.get(&self.con));
+		let client = self.routes.client_mut();
+		if client.affinity().account_pins != pins {
+			let mut affinity = client.affinity().clone();
+			affinity.account_pins = pins;
+			client.set_affinity(affinity);
+		}
+	}
+
 	/// Applies the control plane to the next call: `ai_model` re-targets the
 	/// client when it names a different catalog model (ADR 0012: the convar
 	/// is the live route), and `ai_thinking` sets the reasoning effort.
 	fn apply_convars(&mut self, request: &mut ChatRequest) {
+		self.apply_account_pins();
 		let model = self.selected_model();
 		if model.as_str() != self.model.as_str() {
 			let key = omp_catalog::ModelKey::from(model.as_str());
@@ -1230,6 +1249,7 @@ impl omp_agent::Inference for ProductionInference {
 		selector: &str,
 		mut request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+		self.apply_account_pins();
 		let resolved =
 			resolve_model_selector(self.routes.catalog().as_ref(), selector).or_else(|_| {
 				let settings = omp_catalog::settings::ModelSettings::from_con(&self.con);
@@ -2080,6 +2100,7 @@ pub async fn compose_kernel(
 				PinnedRoutes::new(stack.registry.clone(), meta.clone(), omp_ai::CallAffinity {
 					prompt_cache:     options.prompt_cache_key.clone(),
 					provider_session: options.provider_session.clone(),
+					account_pins:     omp_ai::account::SessionAccountPins::NONE,
 				});
 			ComposedInference::Production(ProductionInference {
 				routes,

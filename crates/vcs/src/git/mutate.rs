@@ -1356,26 +1356,10 @@ fn write_loose_ref(git_dir: &Path, name: &str, id: gix::hash::ObjectId) -> Resul
 }
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
-
 	use tempfile::TempDir;
 
 	use super::*;
-	use crate::types::CommitAuthor;
-
-	fn git(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.arg("-C")
-			.arg(dir)
-			.args(args)
-			.output()
-			.unwrap();
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout)
-			.unwrap()
-			.trim_end()
-			.to_owned()
-	}
+	use crate::{testing::run_trimmed as git, types::CommitAuthor};
 
 	fn fixture() -> (TempDir, GitRepo) {
 		let temp = tempfile::tempdir().unwrap();

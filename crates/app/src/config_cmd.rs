@@ -6,7 +6,9 @@ use std::{
 };
 
 use miette::IntoDiagnostic as _;
-use omp_con::{Ctx, DumpOptions, Origin, Source, ValueKind, VarFlags};
+use omp_con::{
+	CfgLoader, ConResult, Ctx, DumpOptions, Origin, Severity, Source, ValueKind, VarFlags,
+};
 use omp_core::Str;
 use omp_envd::mcp::{
 	McpConfigPaths,
@@ -29,25 +31,34 @@ pub fn run(command: &ConfigCommand) -> miette::Result<()> {
 	}
 	match command {
 		ConfigCommand::Dump => {
-			print!("{}", crate::process_ctx(&project)?.dump());
+			print!("{}", reporting_ctx(&project)?.dump());
 			Ok(())
 		},
-		ConfigCommand::List { json } => list(&crate::process_ctx(&project)?, *json),
-		ConfigCommand::Get { key } => get(&crate::process_ctx(&project)?, key),
+		ConfigCommand::List { json } => list(&reporting_ctx(&project)?, *json),
+		ConfigCommand::Get { key } => get(&reporting_ctx(&project)?, key),
 		ConfigCommand::Set { key, value, scope } => set_persisted(&project, *scope, key, value),
 		ConfigCommand::Unset { key, scope } => {
 			let destination = path(&project, *scope)?;
-			update_cfg(&destination, |ctx| {
+			let unset = |ctx: &Ctx| {
 				let omp_con::RegItem::Var(spec) = ctx
 					.find(key)
 					.ok_or_else(|| miette::miette!("unknown convar `{key}`; run `omp config list`"))?
 				else {
 					return Err(miette::miette!("`{key}` is not a convar"));
 				};
-				ctx.set(spec.name, (spec.default)(), Origin::Default)
-					.into_diagnostic()?;
+				match scope {
+					ConfigScope::Global => ctx
+						.set(spec.name, (spec.default)(), Origin::Default)
+						.map(drop),
+					ConfigScope::Project => ctx.unset(spec.name, &Origin::Project),
+				}
+				.into_diagnostic()?;
 				Ok(())
-			})
+			};
+			match scope {
+				ConfigScope::Global => update_cfg(&destination, unset),
+				ConfigScope::Project => update_project_cfg(&destination, unset),
+			}
 		},
 		ConfigCommand::Path { scope } => {
 			println!("{}", path(&project, *scope)?.display());
@@ -413,6 +424,64 @@ pub(crate) fn load_cfg(path: &Path) -> miette::Result<Ctx> {
 	load_cfg_text(path, script.as_deref())
 }
 
+/// The process context with its cfg diagnostics on stderr: statements this
+/// build does not understand, and project overlay statements project config
+/// may not run.
+fn reporting_ctx(project: &Path) -> miette::Result<Ctx> {
+	crate::process_ctx_with(
+		project,
+		Ctx::builder().sink(|severity, text| {
+			if severity != Severity::Info {
+				eprintln!("{severity}: {text}");
+			}
+		}),
+	)
+}
+
+/// A project overlay presented as the project half of `config.cfg`, so a
+/// project file is read with exactly the authority it runs with.
+struct ProjectOverlay<'a>(Option<&'a str>);
+
+impl CfgLoader for ProjectOverlay<'_> {
+	fn load(&self, _name: &str) -> ConResult<Option<Str>> {
+		Ok(None)
+	}
+
+	fn load_project(&self, name: &str) -> ConResult<Option<Str>> {
+		Ok(self.0.filter(|_| name == "config.cfg").map(Str::new))
+	}
+}
+
+/// Loads an existing project overlay (`<project>/.omp/config.cfg`) into the
+/// context's project layer under project authority: statements a project cfg
+/// may not run are reported and dropped, so an edit rewrites only what it may
+/// keep.
+pub(crate) fn load_project_cfg(path: &Path) -> miette::Result<Ctx> {
+	let script = omp_driver::cfg::read_config(path).into_diagnostic()?;
+	load_project_cfg_text(path, script.as_deref())
+}
+
+fn load_project_cfg_text(path: &Path, script: Option<&str>) -> miette::Result<Ctx> {
+	let ctx = Ctx::builder()
+		.sink(|severity, text| {
+			if severity != Severity::Info {
+				eprintln!("{severity}: {text}");
+			}
+		})
+		.build();
+	let outcome = ctx
+		.exec_configs(&ProjectOverlay(script), None)
+		.into_diagnostic()?;
+	if outcome.failed + outcome.denied > 0 {
+		eprintln!(
+			"warning: {} skipped {} statement(s) a project cfg cannot run",
+			path.display(),
+			outcome.failed + outcome.denied
+		);
+	}
+	Ok(ctx)
+}
+
 fn load_cfg_text(path: &Path, script: Option<&str>) -> miette::Result<Ctx> {
 	let ctx = Ctx::new();
 	// The default bind cfg is the baseline the persisted script diffs
@@ -442,6 +511,24 @@ pub(crate) fn update_cfg(
 	path: &Path,
 	update: impl FnOnce(&Ctx) -> miette::Result<()>,
 ) -> miette::Result<()> {
+	update_cfg_as(path, false, update)
+}
+
+/// [`update_cfg`] for a project overlay (`<project>/.omp/config.cfg`): the
+/// file is read and rewritten as the project layer, never as the user's own
+/// values, so it holds only `name value` lines of project-scoped convars.
+pub(crate) fn update_project_cfg(
+	path: &Path,
+	update: impl FnOnce(&Ctx) -> miette::Result<()>,
+) -> miette::Result<()> {
+	update_cfg_as(path, true, update)
+}
+
+fn update_cfg_as(
+	path: &Path,
+	project: bool,
+	update: impl FnOnce(&Ctx) -> miette::Result<()>,
+) -> miette::Result<()> {
 	let transaction =
 		omp_driver::cfg::ConfigFileLock::acquire(path.to_path_buf()).into_diagnostic()?;
 	let current = transaction.read().into_diagnostic()?;
@@ -450,17 +537,21 @@ pub(crate) fn update_cfg(
 		.map(|script| omp_driver::cfg::migrate_config_script(path, script))
 		.transpose()
 		.into_diagnostic()?;
-	let ctx = load_cfg_text(path, migrated.as_deref())?;
+	let ctx = if project {
+		load_project_cfg_text(path, migrated.as_deref())?
+	} else {
+		load_cfg_text(path, migrated.as_deref())?
+	};
 	update(&ctx)?;
-	transaction
-		.replace(
-			ctx.dump_with_options(DumpOptions {
-				include_archived_defaults: true,
-				..DumpOptions::default()
-			})
-			.as_str(),
-		)
-		.into_diagnostic()
+	let dump = if project {
+		ctx.dump_project()
+	} else {
+		ctx.dump_with_options(DumpOptions {
+			include_archived_defaults: true,
+			..DumpOptions::default()
+		})
+	};
+	transaction.replace(dump.as_str()).into_diagnostic()
 }
 
 fn assignment(ctx: &Ctx, name: &str, input: &str) -> miette::Result<String> {
@@ -474,6 +565,23 @@ fn assignment(ctx: &Ctx, name: &str, input: &str) -> miette::Result<String> {
 		input.to_owned()
 	};
 	Ok(format!("{name} {value}"))
+}
+
+/// Refuses to write a convar into a project cfg that the project could not
+/// run: it would be rejected at every load.
+fn require_project_scoped(ctx: &Ctx, name: &str) -> miette::Result<()> {
+	let spec = ctx
+		.vars()
+		.find(|spec| spec.name.eq_ignore_ascii_case(name))
+		.ok_or_else(|| miette::miette!("unknown convar `{name}`; run `omp config list`"))?;
+	if spec.flags.contains(VarFlags::PROJECT) {
+		Ok(())
+	} else {
+		Err(miette::miette!(
+			"`{name}` cannot be set in project scope: a project cfg may only set convars flagged \
+			 PROJECT (see `omp config list`); use --scope global"
+		))
+	}
 }
 
 fn list(ctx: &Ctx, json: bool) -> miette::Result<()> {
@@ -518,6 +626,7 @@ fn flag_names(flags: VarFlags) -> Vec<&'static str> {
 	[
 		(VarFlags::ARCHIVE, "ARCHIVE"),
 		(VarFlags::SESSION, "SESSION"),
+		(VarFlags::PROJECT, "PROJECT"),
 		(VarFlags::REPLICATED, "REPLICATED"),
 		(VarFlags::READONLY, "READONLY"),
 		(VarFlags::NOTIFY, "NOTIFY"),
@@ -536,10 +645,19 @@ pub fn set_persisted(
 	value: &str,
 ) -> miette::Result<()> {
 	let destination = path(project, scope)?;
-	update_cfg(&destination, |ctx| {
-		let assignment = assignment(ctx, name, value)?;
-		ctx.exec(&assignment, Source::Config(Str::new_static("config.cfg")))
-			.into_diagnostic()?;
-		Ok(())
-	})
+	match scope {
+		ConfigScope::Global => update_cfg(&destination, |ctx| {
+			let assignment = assignment(ctx, name, value)?;
+			ctx.exec(&assignment, Source::Config(Str::new_static("config.cfg")))
+				.into_diagnostic()?;
+			Ok(())
+		}),
+		ConfigScope::Project => update_project_cfg(&destination, |ctx| {
+			let assignment = assignment(ctx, name, value)?;
+			require_project_scoped(ctx, name)?;
+			ctx.exec(&assignment, Source::Project(Str::new_static("config.cfg")))
+				.into_diagnostic()?;
+			Ok(())
+		}),
+	}
 }
