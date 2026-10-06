@@ -225,6 +225,48 @@ pub struct TurnOutcome {
 	pub tokens_out:     u64,
 }
 
+/// The caller's answer to the confirmation [`Kernel::retry_tool_tail`] asks
+/// for before re-running a call whose effects are unknown.
+///
+/// The answer is a call argument, never durable state: every retry starts
+/// [`Self::Unconfirmed`] unless its caller says otherwise.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RetryConfirmation {
+	/// No confirmation: a tail holding an [`UnknownEffectsCall`] is reported,
+	/// not re-run.
+	#[default]
+	Unconfirmed,
+	/// The caller saw the [`UnknownEffectsCall`]s and accepts re-running them.
+	EffectsUnknown,
+}
+
+/// A recovered tool call that may already have run: re-running it can repeat
+/// its side effects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnknownEffectsCall {
+	/// Provider call identity.
+	pub call_id: Str,
+	/// Tool name.
+	pub name:    Str,
+	/// The model-stated intent (the `i` argument), when the call carried one.
+	pub intent:  Option<Str>,
+}
+
+/// What [`Kernel::retry_tool_tail`] did with the aborted tool tail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetryOutcome {
+	/// The tail re-ran and the turn finished.
+	Ran(TurnOutcome),
+	/// Nothing ran and the journal is untouched: the tail holds calls whose
+	/// effects are unknown and the caller passed
+	/// [`RetryConfirmation::Unconfirmed`]. Retry again with
+	/// [`RetryConfirmation::EffectsUnknown`] to re-run them.
+	NeedsConfirmation {
+		/// Calls that may already have run, oldest first.
+		calls: Arc<[UnknownEffectsCall]>,
+	},
+}
+
 /// Caller-owned cancellation and optional deadline for one turn.
 #[derive(Clone, Debug)]
 pub struct RunControl {
@@ -1165,17 +1207,32 @@ impl<C: Inference> Kernel<C> {
 	/// `replay(journal) == state` still holds. The same call ids and arguments
 	/// are dispatched again, then the normal loop continues (steering,
 	/// Directors, yield).
+	///
+	/// A call that had started when the process disappeared settled as
+	/// [`Abort::EffectsUnknown`]: re-running it can repeat its side effects.
+	/// While the tail holds one, `confirmation` must be
+	/// [`RetryConfirmation::EffectsUnknown`]; otherwise nothing runs, the
+	/// journal is untouched, and the calls come back in
+	/// [`RetryOutcome::NeedsConfirmation`]. A tail of never-started
+	/// ([`Abort::Skipped`]) calls retries without confirmation.
 	pub async fn retry_tool_tail(
 		&mut self,
 		session: &mut Session,
 		control: RunControl,
-	) -> Result<TurnOutcome, KernelError> {
+		confirmation: RetryConfirmation,
+	) -> Result<RetryOutcome, KernelError> {
 		if control.is_expired() || self.cancel.is_session_cancelled() {
-			return Ok(cancelled_outcome());
+			return Ok(RetryOutcome::Ran(cancelled_outcome()));
 		}
 		let turn = current_turn(session).map_err(|_| KernelError::NothingToRetry)?;
 		if !aborted_tool_tail(session.dom(), turn) {
 			return Err(KernelError::NothingToRetry);
+		}
+		if confirmation == RetryConfirmation::Unconfirmed {
+			let calls = unknown_effects_tail(session.dom(), turn);
+			if !calls.is_empty() {
+				return Ok(RetryOutcome::NeedsConfirmation { calls: calls.into() });
+			}
 		}
 		let target = session
 			.tool_tail_retry_target()
@@ -1247,7 +1304,9 @@ impl<C: Inference> Kernel<C> {
 		let result = self
 			.run_turn_body(session, turn, &turn_cancel, &control, Some(calls))
 			.await;
-		self.finish_turn(session, turn, &submission_id, result)
+		self
+			.finish_turn(session, turn, &submission_id, result)
+			.map(RetryOutcome::Ran)
 	}
 
 	/// Records an interrupted turn in the tree (ADR 0004: lifecycle derives
@@ -4304,6 +4363,92 @@ pub fn aborted_tool_tail(dom: &omp_dom::Dom, turn: Handle) -> bool {
 		}),
 		_ => false,
 	}
+}
+
+/// The calls of the last tool batch that may already have run: those recovery
+/// or an interrupt settled as [`Abort::EffectsUnknown`], plus any still
+/// `running` that crossed into execution. These are what
+/// [`Kernel::retry_tool_tail`] asks the caller to confirm before re-running
+/// them; a never-started ([`Abort::Skipped`]) call is not listed. The batch is
+/// the run of tool elements after the turn's newest assistant, oldest first.
+#[must_use]
+pub fn unknown_effects_tail(dom: &omp_dom::Dom, turn: Handle) -> Vec<UnknownEffectsCall> {
+	let mut calls = Vec::new();
+	for handle in dom.children(turn).iter().rev() {
+		let Some(node) = dom.get(*handle) else {
+			continue;
+		};
+		match &node.tag {
+			Tag::Custom(name) => {
+				if call_may_have_run(dom, *handle, node) {
+					calls.push(UnknownEffectsCall {
+						call_id: node
+							.prop(&PropKey::from(PropId::Id))
+							.and_then(Value::as_str)
+							.map(Str::new)
+							.unwrap_or_default(),
+						name:    name.clone(),
+						intent:  call_intent(dom, *handle),
+					});
+				}
+			},
+			Tag::Known(KnownTag::Assistant | KnownTag::User) => break,
+			_ => {},
+		}
+	}
+	calls.reverse();
+	calls
+}
+
+/// Whether one tool element's journal says its effects may have landed.
+fn call_may_have_run(dom: &omp_dom::Dom, handle: Handle, node: &omp_dom::Node) -> bool {
+	match node
+		.prop(&PropKey::from(PropId::Status))
+		.and_then(Value::as_str)
+		.unwrap_or("running")
+	{
+		"running" => matches!(
+			node.prop(&PropKey::Custom(Str::new_static("execution-started"))),
+			Some(Value::Bool(true))
+		),
+		"error" => dom.children(handle).iter().any(|child| {
+			let fault = dom
+				.get(*child)
+				.filter(|diag| diag.tag == Tag::Known(KnownTag::Diag))
+				.and_then(|diag| diag.prop(&PropKey::from(PropId::Fault)));
+			let text = match fault {
+				Some(Value::Json(raw)) => raw.get(),
+				Some(Value::Str(text)) => text.as_str(),
+				_ => return false,
+			};
+			matches!(
+				serde_json::from_str::<omp_tool::CallOutcome<serde_json::Value, serde_json::Value>>(
+					text
+				),
+				Ok(omp_tool::CallOutcome::Aborted { abort: Abort::EffectsUnknown { .. }, .. })
+			)
+		}),
+		_ => false,
+	}
+}
+
+/// The `i` intent argument of a tool element's committed input.
+fn call_intent(dom: &omp_dom::Dom, handle: Handle) -> Option<Str> {
+	#[derive(serde::Deserialize)]
+	struct Intent {
+		i: Option<Str>,
+	}
+	dom.children(handle).iter().find_map(|child| {
+		let input = dom.get(*child)?;
+		if input.tag != Tag::Known(KnownTag::Input) {
+			return None;
+		}
+		let text = match input.prop(&PropKey::from(PropId::Data)) {
+			Some(Value::Json(raw)) => raw.get(),
+			_ => input.content.as_deref()?,
+		};
+		serde_json::from_str::<Intent>(text).ok()?.i
+	})
 }
 
 /// Assistant messages committed under one turn (`RunSummary.committed_turns`).
