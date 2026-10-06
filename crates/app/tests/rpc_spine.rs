@@ -22,6 +22,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 enum Script {
 	Events(Vec<ChatEvent>),
 	Pending,
+	Fail(omp_ai::Error),
 }
 
 struct ScriptedInference {
@@ -41,6 +42,7 @@ impl Inference for ScriptedInference {
 		{
 			Script::Events(events) => streaming(events),
 			Script::Pending => ChatStream::ordinary(Box::pin(futures::stream::pending())),
+			Script::Fail(error) => return ready(Err(error)),
 		};
 		ready(Ok(stream))
 	}
@@ -978,4 +980,46 @@ async fn rpc_handoff_compacts_in_place_and_returns_the_document() {
 		}),
 		"the handoff is journaled as a handoff compaction"
 	);
+}
+
+/// A session pin whose account is unavailable fails the turn with a typed
+/// `account-pin` notice frame before the terminal `agent_end`, so an RPC
+/// client can tell it from a provider failure and never sees another account
+/// used silently.
+#[tokio::test]
+async fn rpc_reports_an_unavailable_account_pin_as_a_typed_notice() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let error = omp_ai::Error::new(
+		omp_ai::ErrorKind::AccountDisabled,
+		omp_ai::ErrorPhase::Authentication,
+		omp_ai::RetryAction::Never,
+		ExecutionReceipt::default(),
+	)
+	.detail(omp_ai::ErrorDetail::AccountPin {
+		provider: ProviderId::from("scripted"),
+		reason:   omp_ai::account::PinFailure::Removed,
+	});
+	let frames = converse(
+		&temp,
+		VecDeque::from([Script::Fail(error)]),
+		"{\"id\":\"1\",\"type\":\"prompt\",\"message\":\"ping\"}\n",
+		&["{\"id\":\"2\",\"type\":\"quit\"}\n"],
+	)
+	.await;
+	let notices = frames
+		.iter()
+		.filter(|frame| frame["type"] == "notice")
+		.collect::<Vec<_>>();
+	assert_eq!(notices.len(), 1, "one typed notice: {frames:#?}");
+	assert_eq!(notices[0]["source"], "account-pin");
+	assert_eq!(notices[0]["level"], "error");
+	assert!(
+		notices[0]["message"]
+			.as_str()
+			.is_some_and(|message| message.contains("pinned to this session for scripted")),
+		"{notices:?}"
+	);
+	let ends = agent_ends(&frames);
+	assert_eq!(ends.len(), 1);
+	assert!(ends[0]["error"].is_string(), "the turn still ends in error");
 }

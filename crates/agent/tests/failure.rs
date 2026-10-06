@@ -9,7 +9,7 @@ use omp_agent::{
 use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, Error, ErrorDetail, ErrorKind, ErrorPhase,
 	ExecutionReceipt, ProviderId, ReasonId, RecoveryKind, RecoveryRecord, RequestId, ResponseMeta,
-	RetryAction, RouteId,
+	RetryAction, RouteId, account::PinFailure,
 };
 use omp_core::Str;
 use omp_dom::{PropId, PropKey, Value};
@@ -46,6 +46,27 @@ impl Inference for HandshakeFailure {
 		_request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, Error>> + Send {
 		std::future::ready(Err(truncated_handshake()))
+	}
+}
+
+/// Refuses the request because the session's pinned account is unavailable.
+struct PinnedAccountUnavailable;
+
+impl Inference for PinnedAccountUnavailable {
+	fn chat(
+		&mut self,
+		_request: ChatRequest,
+	) -> impl Future<Output = Result<ChatStream, Error>> + Send {
+		let provider = ProviderId::from("scripted");
+		std::future::ready(Err(
+			Error::new(
+				ErrorKind::AccountDisabled,
+				ErrorPhase::Authentication,
+				RetryAction::Never,
+				ExecutionReceipt::default(),
+			)
+			.detail(ErrorDetail::AccountPin { provider, reason: PinFailure::Removed }),
+		))
 	}
 }
 
@@ -393,4 +414,41 @@ async fn prompt_projection_failure_is_journaled_with_its_source_chain() {
 	assert!(notices[0].contains("system prompt projection failed"), "{}", notices[0]);
 	assert!(notices[0].contains("missing-slot"), "source chain names the template: {}", notices[0]);
 	assert_pre_inference_failure_journaled(session, &journal_path);
+}
+
+/// A pinned account that cannot serve the request is reported through the
+/// structured notices channel as a named `account-pin` error notice, which the
+/// print and RPC adapters project as a `notice` frame with that source.
+#[tokio::test]
+async fn unavailable_account_pin_is_journaled_as_a_named_notice() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("pin.oms");
+	let mut kernel = kernel(PinnedAccountUnavailable, directory.path());
+	let mut session = fresh_session(&journal_path);
+
+	kernel
+		.run_turn(&mut session, input("hi"), RunControl::default())
+		.await
+		.expect_err("an unavailable pin fails the turn instead of using another account");
+
+	let notices = session
+		.dom()
+		.select("body turn notice")
+		.expect("selector parses")
+		.collect::<Vec<_>>();
+	assert_eq!(notices.len(), 1, "exactly one notice");
+	assert_eq!(prop(&session, notices[0], PropId::Kind).as_deref(), Some("error"));
+	let name = session
+		.dom()
+		.get(notices[0])
+		.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("name"))))
+		.and_then(Value::as_str);
+	assert_eq!(name, Some("account-pin"));
+	let body = session
+		.dom()
+		.get(notices[0])
+		.and_then(|node| node.content.clone())
+		.expect("notice text");
+	assert!(body.contains("pinned to this session for scripted"), "{body}");
+	assert!(body.contains("no longer stored"), "{body}");
 }
