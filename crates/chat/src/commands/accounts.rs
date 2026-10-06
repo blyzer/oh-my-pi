@@ -159,7 +159,8 @@ fn pin_session(cx: &PanelCx<'_>, id: Option<&str>) -> PanelEvent {
 	}))
 }
 
-/// Pins one provider account through the controller-owned mutation stream.
+/// Toggles the session's pin on one provider account through the
+/// controller-owned mutation stream, like `/pin` on a session.
 fn pin_account(cx: &PanelCx<'_>, provider: &str, account: Option<&str>) -> PanelEvent {
 	let accounts = match cx.services.accounts() {
 		Ok(accounts) => accounts,
@@ -189,7 +190,7 @@ fn pin_account(cx: &PanelCx<'_>, provider: &str, account: Option<&str>) -> Panel
 	};
 	PanelEvent::Command(HostCommand::Service(Mutation::PinAccount {
 		account: row.clone(),
-		pinned:  true,
+		pinned:  !row.pinned,
 	}))
 }
 

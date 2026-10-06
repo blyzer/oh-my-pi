@@ -4330,7 +4330,7 @@ mod tests {
 		// Headless OAuth calls bind no provider conversation; the caller's
 		// session identity must still reach the Claude Code session header.
 		let affinity =
-			CallAffinity { prompt_cache: None, provider_session: Some(sf!("caller-session")) };
+			CallAffinity { provider_session: Some(sf!("caller-session")), ..CallAffinity::none() };
 		let encoded =
 			encoded_anthropic_with_affinity(CredentialKind::Bearer, &["caller system"], &affinity);
 		let header = encoded

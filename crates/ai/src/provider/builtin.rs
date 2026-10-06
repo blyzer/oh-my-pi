@@ -27,7 +27,8 @@ use url::Url;
 use crate::{
 	ProviderId,
 	account::{
-		AccountPool, AccountSelection, AccountSelectionRequest, RateAvailability, RotationPolicy,
+		AccountPool, AccountSelection, AccountSelectionRequest, PinFailure, RateAvailability,
+		RotationPolicy,
 	},
 	auth::{
 		AuthManager, AuthScheme, AwsCredentialError, AwsRegistryAvailability, CredentialApplyError,
@@ -2197,7 +2198,15 @@ impl AccountSelector<Call> for RouteAccountSelector {
 			AttemptAction::RotateAccount { previous_account } => (previous_account, true, false),
 		};
 		let affinity = context.session_affinity();
-		let preserve_principal = affinity.is_some();
+		let pin = call
+			.affinity
+			.account_pins
+			.for_provider(&self.provider)
+			.cloned();
+		// A pinned account may belong to another principal than the bound
+		// provider state: selection must reach it, and the session layer then
+		// reseeds the account-bound state instead of this selector refusing it.
+		let preserve_principal = affinity.is_some() && pin.is_none();
 		let quota_scope = omp_catalog::has_quota_tier_policy(self.provider.as_str()).then(|| {
 			let model = match &call.target {
 				Target::Model(model) | Target::Provider { model, .. } | Target::Route { model, .. } => {
@@ -2221,24 +2230,42 @@ impl AccountSelector<Call> for RouteAccountSelector {
 			rotation: RotationPolicy { allow_account_change: true, preserve_principal },
 			now: SystemTime::now(),
 			quota_scope,
+			pin: pin.clone(),
 		};
-		match self.pool.select(&request) {
-			Ok(selection) => Ok(RouteAccount::Authenticated(Box::new(selection))),
-			Err(error) if error.receipt.candidates.is_empty() && allow_brokered => {
-				Ok(RouteAccount::Brokered {
-					_account: BrokeredAccount {
-						_provider: self.provider.clone(),
-						_route:    self.route.clone(),
-					},
-				})
-			},
-			Err(_) => Err(Error::new(
-				ErrorKind::Authentication,
-				ErrorPhase::Authentication,
-				RetryAction::ReselectRoute,
-				context.receipt(),
-			)),
+		let failure = match self.pool.select(&request) {
+			Ok(selection) => return Ok(RouteAccount::Authenticated(Box::new(selection))),
+			Err(failure) => failure,
+		};
+		if let Some(pin) = &pin {
+			// A pin is exclusive: never the brokered or another account.
+			let reason = PinFailure::diagnose(pin, &failure.receipt);
+			return Err(
+				Error::new(
+					ErrorKind::AccountDisabled,
+					ErrorPhase::Authentication,
+					RetryAction::Never,
+					context.receipt(),
+				)
+				.provider(self.provider.clone())
+				.route(self.route.clone())
+				.code(Str::new_static(reason.into()))
+				.detail(ErrorDetail::AccountPin { provider: self.provider.clone(), reason }),
+			);
 		}
+		if failure.receipt.candidates.is_empty() && allow_brokered {
+			return Ok(RouteAccount::Brokered {
+				_account: BrokeredAccount {
+					_provider: self.provider.clone(),
+					_route:    self.route.clone(),
+				},
+			});
+		}
+		Err(Error::new(
+			ErrorKind::Authentication,
+			ErrorPhase::Authentication,
+			RetryAction::ReselectRoute,
+			context.receipt(),
+		))
 	}
 
 	fn routing(&self, account: &Self::Account) -> Option<AccountRoutingContext> {
@@ -2664,6 +2691,7 @@ mod tests {
 
 	use super::*;
 	use crate::{
+		account::{AccountPin, SessionAccountPins},
 		auth::{
 			AuthScheme, AuthSpec, CredentialLease, CredentialShaperRegistry, LeaseMeta,
 			ShapedCredential,
@@ -4162,5 +4190,101 @@ mod tests {
 		assert_eq!(encoded.method, crate::codec::RequestMethod::Get);
 		assert_eq!(encoded.framing, crate::transport::FramingProtocol::WebSocket);
 		assert!(encoded.uri.as_str().contains("/v1/realtime?model="));
+	}
+
+	fn pinned_selector(
+		accounts: &[&str],
+		pin: Option<AccountPin>,
+	) -> (RouteAccountSelector, Call, ExecutionContext) {
+		let (encoder, mut call, ..) = discovery_fixture();
+		let pool = AccountPool::new();
+		for account in accounts {
+			pool
+				.upsert(crate::account::AccountRecord {
+					account:               AccountId::new(*account),
+					principal:             PrincipalId::new(*account),
+					provider:              encoder.route.provider.clone(),
+					routes:                std::collections::BTreeSet::from([encoder.route.id.clone()]),
+					enabled:               true,
+					credential_generation: 1,
+					routing:               AccountRoutingContext::default(),
+				})
+				.expect("account registers");
+		}
+		call.affinity.account_pins =
+			SessionAccountPins::new(pin.map(|pin| (encoder.route.provider.clone(), pin)));
+		let selector = RouteAccountSelector {
+			pool,
+			provider: encoder.route.provider.clone(),
+			route: encoder.route.id,
+			authenticated: true,
+		};
+		let context = ExecutionContext::new(call.budget.clone());
+		(selector, call, context)
+	}
+
+	#[test]
+	fn pinned_route_selection_serves_only_the_pinned_account() {
+		let (selector, call, context) =
+			pinned_selector(&["alpha", "beta"], Some(AccountPin::Account(AccountId::new("beta"))));
+		let selected = selector
+			.select(&call, &context)
+			.expect("pinned account serves");
+		let RouteAccount::Authenticated(selection) = selected else {
+			panic!("a pinned selection is authenticated");
+		};
+		assert_eq!(selection.record.account, AccountId::new("beta"));
+	}
+
+	#[test]
+	fn unavailable_pin_is_a_typed_terminal_error_and_never_falls_back() {
+		let cases = [
+			(&["alpha"][..], AccountPin::Account(AccountId::new("gone")), PinFailure::Removed),
+			(&["alpha"][..], AccountPin::Unresolved, PinFailure::Removed),
+			(&[][..], AccountPin::Account(AccountId::new("gone")), PinFailure::Removed),
+		];
+		for (accounts, pin, reason) in cases {
+			let (selector, call, context) = pinned_selector(accounts, Some(pin));
+			let Err(error) = selector.select(&call, &context) else {
+				panic!("an unavailable pin must not select an account");
+			};
+			assert_eq!(error.kind, ErrorKind::AccountDisabled);
+			assert_eq!(error.action, RetryAction::Never);
+			assert_eq!(error.code.as_deref(), Some("removed"));
+			assert!(matches!(
+				error.detail_ref(),
+				Some(ErrorDetail::AccountPin { reason: found, .. }) if *found == reason
+			));
+		}
+	}
+
+	#[test]
+	fn blocked_pinned_account_reports_why_instead_of_rotating() {
+		let (selector, call, context) =
+			pinned_selector(&["alpha", "beta"], Some(AccountPin::Account(AccountId::new("alpha"))));
+		selector
+			.pool
+			.cooldown(
+				AccountId::new("alpha"),
+				SystemTime::now() + Duration::from_secs(600),
+				crate::account::CooldownReason::Health,
+			)
+			.expect("cooldown records");
+		let Err(error) = selector.select(&call, &context) else {
+			panic!("a cooling pinned account must not be replaced");
+		};
+		assert!(matches!(
+			error.detail_ref(),
+			Some(ErrorDetail::AccountPin { reason: PinFailure::CoolingDown, .. })
+		));
+		assert!(error.to_string().contains("pinned to this session"));
+	}
+
+	#[test]
+	fn unpinned_selection_keeps_its_fallback_behaviour() {
+		let (selector, call, context) = pinned_selector(&["alpha", "beta"], None);
+		assert!(selector.select(&call, &context).is_ok());
+		let (selector, call, context) = pinned_selector(&[], None);
+		assert!(matches!(selector.select(&call, &context), Ok(RouteAccount::Brokered { .. })));
 	}
 }

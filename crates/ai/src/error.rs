@@ -10,6 +10,7 @@ use std::{
 use omp_core::Str;
 
 use crate::{
+	account::PinFailure,
 	answer::{AnswerKind, SearchFailureKind, SearchProviderFailure},
 	auth::AwsCredentialError,
 	catalog::{OperationKind, ProviderId, RouteId},
@@ -406,6 +407,18 @@ pub enum ErrorDetail {
 		/// Typed local-availability reason.
 		reason: ReasonId,
 	},
+	/// The account the session is exclusively pinned to cannot serve the
+	/// request, and no other account may.
+	#[error(
+		"the account pinned to this session for {provider} is unavailable ({reason}); pin another \
+		 account or unpin it"
+	)]
+	AccountPin {
+		/// Provider whose pin failed.
+		provider: ProviderId,
+		/// Why the pinned account cannot serve the request.
+		reason:   PinFailure,
+	},
 }
 
 impl ErrorDetail {
@@ -531,6 +544,7 @@ impl fmt::Debug for Error {
 			ErrorDetail::Provider { .. } => "Provider",
 			ErrorDetail::SearchFailures { .. } => "SearchFailures",
 			ErrorDetail::LocalUnavailable { .. } => "LocalUnavailable",
+			ErrorDetail::AccountPin { .. } => "AccountPin",
 			ErrorDetail::StalePlan { .. } => "StalePlan",
 		});
 		formatter
