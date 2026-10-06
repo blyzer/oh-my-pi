@@ -531,6 +531,23 @@ pub(crate) fn append_named_notice(
 	append_turn_child(session, turn, node, Str::new_static("kernel.notice"))
 }
 
+/// Appends a producer-named notice whose typed payload rides in its data prop.
+pub(crate) fn append_typed_notice(
+	session: &mut Session,
+	turn: Handle,
+	kind: Str,
+	name: Str,
+	data: Box<serde_json::value::RawValue>,
+	body: Str,
+) -> Result<(), SessionError> {
+	let node = NodeSpec::new(KnownTag::Notice)
+		.with_prop(PropId::Kind, Value::Str(kind))
+		.with_prop(PropKey::Custom(Str::new_static("name")), Value::Str(name))
+		.with_prop(PropId::Data, Value::Json(data))
+		.with_content(body);
+	append_turn_child(session, turn, node, Str::new_static("kernel.notice"))
+}
+
 /// Appends the `<notice kind=warn>` that ends an interrupted turn.
 pub(crate) fn append_interrupt_notice(
 	session: &mut Session,
@@ -686,6 +703,50 @@ mod tests {
 
 		let restored =
 			Session::open(&path, ComponentRegistry::default()).expect("handoff compaction replays");
+		assert_eq!(restored.dom().snapshot(), live);
+	}
+
+	#[test]
+	fn a_typed_notice_journals_its_payload_beside_the_fallback_body_and_replays() {
+		let directory = tempfile::tempdir().expect("temporary session directory");
+		let path = directory.path().join("typed-notice.oms");
+		let (mut session, turn) = session_with_turn(&path);
+		let data = serde_json::value::to_raw_value(&serde_json::json!({ "configured": "yolo" }))
+			.expect("payload serializes");
+		append_typed_notice(
+			&mut session,
+			turn,
+			Str::new_static("warn"),
+			Str::new_static("approval-posture"),
+			data,
+			Str::new_static("fallback"),
+		)
+		.expect("typed notice journals");
+
+		let handle = session
+			.dom()
+			.select("body turn notice")
+			.expect("selector")
+			.find(|handle| {
+				session
+					.dom()
+					.get(*handle)
+					.and_then(|node| node.prop(&PropKey::Custom(Str::new_static("name"))))
+					.and_then(Value::as_str)
+					== Some("approval-posture")
+			})
+			.expect("typed notice node");
+		let node = session.dom().get(handle).expect("notice node");
+		assert_eq!(node.content.as_deref(), Some("fallback"));
+		assert!(matches!(
+			node.prop(&PropId::Data.into()),
+			Some(Value::Json(data)) if data.get() == r#"{"configured":"yolo"}"#
+		));
+		let live = session.dom().snapshot();
+		drop(session);
+
+		let restored =
+			Session::open(&path, ComponentRegistry::default()).expect("typed notice replays");
 		assert_eq!(restored.dom().snapshot(), live);
 	}
 

@@ -9,9 +9,9 @@ use std::{path::PathBuf, sync::Arc};
 use omp_chat::{
 	history::{HistoryEntry, HistoryStorage},
 	overlays::services::{
-		AccountRow, ActiveAccountUsage, ActiveUsageRequest, AgentRow, AgentView, CleanseRequest,
-		CleanseRun, ExtensionRow, ForeignSessionRow, ForeignSessionSource, LoginFlow, MemoryOp,
-		Mutation, Mutations, Pending, PluginsReport, ServiceError, ServiceResult, Services,
+		AccountRow, ActiveAccountUsage, ActiveUsageRequest, AgentRow, AgentView, ApprovalPostureRow,
+		CleanseRequest, CleanseRun, ExtensionRow, ForeignSessionRow, ForeignSessionSource, LoginFlow,
+		MemoryOp, Mutation, Mutations, Pending, PluginsReport, ServiceError, ServiceResult, Services,
 		SessionRow, SessionScope, SettingsChoice, SettingsInventory, SshHostRow, SshHostSpec,
 		ToolRow, UsageReport,
 	},
@@ -43,54 +43,57 @@ mod workspace;
 /// Everything the feeds need, captured once at chat launch.
 pub struct ServiceState {
 	/// User data directory (`credentials.db`, caches).
-	pub data_dir:      PathBuf,
+	pub data_dir:          PathBuf,
 	/// Canonical project root.
-	pub project:       PathBuf,
+	pub project:           PathBuf,
+	/// The invocation's `--approval-mode` / `--yolo` override, which outranks
+	/// the convar.
+	pub approval_override: Option<omp_envd::tool_settings::ApprovalMode>,
 	/// Agent Plugins roots the invocation named (`--plugin-dir`,
 	/// `--extension`): `/plugins approve` resolves their commands like the
 	/// session did.
-	pub plugin_dirs:   Vec<PathBuf>,
+	pub plugin_dirs:       Vec<PathBuf>,
 	/// Project state directory (`sessions/`).
-	pub state_dir:     PathBuf,
+	pub state_dir:         PathBuf,
 	/// Durable session directory.
-	pub sessions_dir:  PathBuf,
+	pub sessions_dir:      PathBuf,
 	/// Journal path at launch.
-	pub journal:       PathBuf,
+	pub journal:           PathBuf,
 	/// Current journal path: `/new`, `/resume`, and `/fork` swap sessions in
 	/// process, and the controller writes the new path here on every switch.
-	pub live_journal:  Arc<parking_lot::RwLock<PathBuf>>,
+	pub live_journal:      Arc<parking_lot::RwLock<PathBuf>>,
 	/// Resolved launch model key (child kernels for `/btw`).
-	pub model:         Str,
+	pub model:             Str,
 	/// The session's live catalog publication; `None` behind a remote
 	/// gateway.
-	pub catalog:       Option<omp_driver::registry::LiveCatalog>,
+	pub catalog:           Option<omp_driver::registry::LiveCatalog>,
 	/// Mid-session model discovery refresh (a successful `/login` re-probes
 	/// that provider); `None` behind a gateway or over a caller-owned catalog.
-	pub discovery:     Option<omp_driver::registry::DiscoveryRefreshSender>,
+	pub discovery:         Option<omp_driver::registry::DiscoveryRefreshSender>,
 	/// Kernel tool registry.
-	pub registry:      Arc<omp_tool::Registry>,
+	pub registry:          Arc<omp_tool::Registry>,
 	/// Process console.
-	pub con:           Arc<omp_con::Ctx>,
+	pub con:               Arc<omp_con::Ctx>,
 	/// Live-session routing index (`/hub` transcripts, agent steering).
-	pub sessions:      Arc<omp_driver::sessions::SessionRegistry>,
+	pub sessions:          Arc<omp_driver::sessions::SessionRegistry>,
 	/// Collaboration relay/session owner.
-	pub collab:        omp_driver::collab::session::CollabCommandHandle,
+	pub collab:            omp_driver::collab::session::CollabCommandHandle,
 	/// Environment client (isolated workspaces for revived agents).
-	pub env:           omp_env::EnvClient,
+	pub env:               omp_env::EnvClient,
 	/// MCP inspection authority.
-	pub mcp:           omp_envd::McpInspectorHandle,
+	pub mcp:               omp_envd::McpInspectorHandle,
 	/// Extension hot-reload authority.
-	pub reload:        omp_envd::ExtensionReloadHandle,
+	pub reload:            omp_envd::ExtensionReloadHandle,
 	/// The session's memory runtime (`/memory`).
-	pub memory:        Arc<omp_memory::MemoryRuntime>,
+	pub memory:            Arc<omp_memory::MemoryRuntime>,
 	/// Production auth + usage stack; `None` behind a remote gateway.
-	pub stack:         Option<StackHandles>,
+	pub stack:             Option<StackHandles>,
 	/// Kernel notifications recorded since launch (`/trace`).
-	pub trace:         Arc<trace::TraceLog>,
+	pub trace:             Arc<trace::TraceLog>,
 	/// Named palettes discovered at launch for settings choices and preview.
-	pub theme_catalog: Arc<omp_tui::ThemeCatalog>,
+	pub theme_catalog:     Arc<omp_tui::ThemeCatalog>,
 	/// Runtime the asynchronous feeds spawn onto.
-	pub runtime:       tokio::runtime::Handle,
+	pub runtime:           tokio::runtime::Handle,
 }
 
 /// Cloneable handles into the production authentication and usage stack.
@@ -253,6 +256,10 @@ impl Services for AppServices {
 
 	fn tools(&self) -> ServiceResult<Vec<ToolRow>> {
 		tools::roster(&self.state)
+	}
+
+	fn approval_posture(&self) -> ServiceResult<ApprovalPostureRow> {
+		Ok(misc::approval_posture(&self.state))
 	}
 
 	fn extensions(&self) -> ServiceResult<Vec<ExtensionRow>> {

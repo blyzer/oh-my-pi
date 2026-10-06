@@ -1,9 +1,12 @@
 //! Production approval composition: a real project environment under
 //! `--approval-mode always-ask`, the kernel-bound approval route, and a
 //! `write` call whose admission prompt is journaled and answered by the host
-//! with `Up::Approve` (deny → skipped, allow → the file lands).
+//! with `Up::Approve` (deny → skipped, allow → the file lands). With no
+//! sandbox in force, the default `yolo` is downgraded to `write`, so a `bash`
+//! call prompts; an explicit `yolo` is respected and runs unconfined. Each
+//! says so in one typed notice.
 
-use std::{future::ready, sync::Arc, time::Duration};
+use std::{future::ready, path::Path, sync::Arc, time::Duration};
 
 use futures::stream;
 use omp_agent::{
@@ -17,20 +20,25 @@ use omp_ai::{
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
 use omp_driver::headless::kernel::{EnvToolExecutor, SettingsAdmission};
-use omp_envd::{AttachOptions, ProjectEnvironment, RegistryBridges, tool_settings::ApprovalMode};
+use omp_envd::{
+	AttachOptions, ProjectEnvironment, RegistryBridges,
+	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
+	tool_settings::ApprovalMode,
+};
 use omp_journal::kind;
 use omp_session::{ComponentRegistry, Session};
 
-/// One `write` call, then a closing text turn. `write` declares document
+/// One scripted tool call, then a closing text turn. `write` declares document
 /// write effects, so its tier is `write` and always-ask prompts before it
-/// starts (`bash` declares no effects by design: its exact spawn/fs effects
-/// are admitted at the environment boundary through the same bound route).
-struct WriteThenText {
-	path:  String,
-	turns: usize,
+/// starts. `bash` declares no effects: its spawn/fs effects are confined by
+/// the sandbox, and without one it is process authority.
+struct ToolThenText {
+	tool:      &'static str,
+	arguments: serde_json::Value,
+	turns:     usize,
 }
 
-impl Inference for WriteThenText {
+impl Inference for ToolThenText {
 	fn chat(
 		&mut self,
 		_request: ChatRequest,
@@ -45,14 +53,10 @@ impl Inference for WriteThenText {
 			created_at:          std::time::SystemTime::UNIX_EPOCH,
 		};
 		let events = if self.turns == 1 {
-			let arguments = serde_json::json!({
-				"path": self.path,
-				"content": "approved content\n",
-				"i": "Proving approval routing",
-			});
+			let arguments = self.arguments.clone();
 			let call = ToolCall {
-				id:        ToolCallId::from("write-1"),
-				name:      Str::new_static("write"),
+				id:        ToolCallId::from("call-1"),
+				name:      Str::new_static(self.tool),
 				arguments: omp_ai::OpaqueJson::new(arguments.clone()),
 			};
 			vec![
@@ -117,23 +121,43 @@ fn prompts(session: &Session) -> Vec<omp_agent::ApprovalTicket> {
 		.collect()
 }
 
-/// Runs one turn writing `target` under always-ask; `approve` answers the
-/// prompt the kernel journals. Returns the session, the journaled tool
-/// result data, and whether the file exists afterwards.
-async fn run(approve: bool) -> (Session, String, bool) {
+/// What one scripted turn left behind.
+struct Turn {
+	session: Session,
+	/// Journaled tool-result data.
+	result:  String,
+	/// Whether `target` exists afterwards.
+	landed:  bool,
+}
+
+/// Runs one turn calling `tool` under `mode` (`None`: the shipped default
+/// posture, no flag), with the sandbox `sandbox`; `approve` answers the prompt
+/// the kernel journals. `target` is the file the
+/// call creates, relative to the workspace.
+async fn run(
+	tool: &'static str,
+	arguments: impl FnOnce(&Path) -> serde_json::Value,
+	target: &str,
+	mode: Option<ApprovalMode>,
+	sandbox: ExecSandboxMode,
+	approve: bool,
+) -> Turn {
 	let scratch = tempfile::tempdir().expect("scratch");
 	let root = scratch.path().join("workspace");
 	let state = scratch.path().join("state");
 	std::fs::create_dir_all(&root).expect("workspace");
 	std::fs::create_dir_all(&state).expect("state");
-	let target = root.join("approved.txt");
-	let target_text = target.to_string_lossy().into_owned();
+	let root = std::fs::canonicalize(&root).expect("canonical workspace");
+	let target = root.join(target);
+	let con = omp_con::Ctx::new();
+	SV_SANDBOX_MODE.set(&con, sandbox).expect("sandbox mode");
+	let con = Arc::new(con);
 	let environment = ProjectEnvironment::attach(&root, &state, AttachOptions {
 		py_eval:            false,
-		approval_mode:      Some(ApprovalMode::AlwaysAsk),
+		approval_mode:      mode,
 		trusted_extensions: Vec::new(),
 		contributed_values: Vec::new(),
-		con:                Arc::new(omp_con::Ctx::new()),
+		con:                Arc::clone(&con),
 		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
 	})
@@ -142,12 +166,13 @@ async fn run(approve: bool) -> (Session, String, bool) {
 	let registry = environment.registry();
 	let spill = omp_journal::blob::BlobStore::open(scratch.path().join("artifacts")).expect("spill");
 	let kernel = Kernel::new(
-		WriteThenText { path: target_text.clone(), turns: 0 },
+		ToolThenText { tool, arguments: arguments(&target), turns: 0 },
 		registry,
 		DispatchPolicy::new(spill.clone()),
 		StaticPrompt(Str::new_static("test")),
 	);
 	let approvals = kernel.approval_route();
+	let notices = kernel.mailbox();
 	environment.bind_approval_authority(
 		Some(Arc::new(omp_agent::ApprovalBook::new())),
 		Some(approvals.clone()),
@@ -157,18 +182,15 @@ async fn run(approve: bool) -> (Session, String, bool) {
 			environment.client().clone(),
 			approvals,
 		)))
-		.with_tool_admission(Arc::new(SettingsAdmission::new(
-			&omp_con::Ctx::new(),
-			Some(ApprovalMode::AlwaysAsk),
-		)));
+		.with_tool_admission(Arc::new(
+			SettingsAdmission::new(&con, mode, &root).with_notices(notices),
+		));
 	let events = kernel.subscribe();
 	let mailbox = kernel.mailbox();
 	let host = tokio::spawn(async move {
 		while let Ok(event) = events.recv_async().await {
 			if let KernelEvent::ApprovalRequested(ticket) = event {
-				assert_eq!(ticket.invocation_id.as_deref(), Some("write-1"));
-				assert_eq!(ticket.reasons[0].kind.as_str(), "tool");
-				assert_eq!(ticket.reasons[0].subject.as_str(), "write");
+				assert_eq!(ticket.invocation_id.as_deref(), Some("call-1"));
 				let _ = mailbox
 					.send(Up::Approve { id: ticket.ticket_id, decision: decision(approve) });
 			}
@@ -201,17 +223,39 @@ async fn run(approve: bool) -> (Session, String, bool) {
 		.filter(|line| line.contains("outcome") || line.contains("fault"))
 		.collect::<Vec<_>>()
 		.join("\n");
-	let written = target.exists();
+	let landed = target.exists();
 	drop(kernel);
 	drop(environment);
-	(session, result, written)
+	Turn { session, result, landed }
+}
+
+fn write_call(target: &Path) -> serde_json::Value {
+	serde_json::json!({
+		"path": target,
+		"content": "approved content\n",
+		"i": "Proving approval routing",
+	})
+}
+
+fn bash_call(_target: &Path) -> serde_json::Value {
+	serde_json::json!({ "command": "touch landed.txt", "i": "Proving approval routing" })
 }
 
 #[tokio::test]
 async fn approval_always_ask_write_deny_journals_a_denied_result() {
-	let (session, result, written) = run(false).await;
+	let Turn { session, result, landed } = run(
+		"write",
+		write_call,
+		"approved.txt",
+		Some(ApprovalMode::AlwaysAsk),
+		ExecSandboxMode::Off,
+		false,
+	)
+	.await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 1, "one journaled approval prompt: {tickets:?}");
+	assert_eq!(tickets[0].reasons[0].kind.as_str(), "tool");
+	assert_eq!(tickets[0].reasons[0].subject.as_str(), "write");
 	assert_eq!(tickets[0].state, TicketState::Decided);
 	assert!(
 		tickets[0]
@@ -219,16 +263,21 @@ async fn approval_always_ask_write_deny_journals_a_denied_result() {
 			.as_ref()
 			.is_some_and(|decision| !decision.approved)
 	);
-	assert!(
-		result.contains("denied by user: not today"),
-		"denied bash must settle with the denial: {result}"
-	);
-	assert!(!written, "denied write never ran");
+	assert!(result.contains("denied by user: not today"), "denied write must settle: {result}");
+	assert!(!landed, "denied write never ran");
 }
 
 #[tokio::test]
 async fn approval_always_ask_write_allow_runs_the_tool() {
-	let (session, result, written) = run(true).await;
+	let Turn { session, result, landed } = run(
+		"write",
+		write_call,
+		"approved.txt",
+		Some(ApprovalMode::AlwaysAsk),
+		ExecSandboxMode::Off,
+		true,
+	)
+	.await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 1);
 	assert_eq!(tickets[0].state, TicketState::Decided);
@@ -238,6 +287,90 @@ async fn approval_always_ask_write_allow_runs_the_tool() {
 			.as_ref()
 			.is_some_and(|decision| decision.approved)
 	);
-	assert!(written, "approved write ran: {result}");
+	assert!(landed, "approved write ran: {result}");
 	assert!(result.contains("\"kind\":\"ok\""), "approved write settled ok: {result}");
+}
+
+/// The typed posture notice the session journaled, as JSON.
+fn posture_notice(session: &Session) -> serde_json::Value {
+	let notices = session
+		.dom()
+		.select("body turn notice")
+		.expect("selector")
+		.filter(|handle| {
+			session
+				.dom()
+				.get(*handle)
+				.and_then(|node| node.prop(&omp_dom::PropKey::Custom(Str::new_static("name"))))
+				.and_then(omp_dom::Value::as_str)
+				== Some("approval-posture")
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(notices.len(), 1, "exactly one posture notice per session");
+	let notice = session.dom().get(notices[0]).expect("notice node");
+	let Some(omp_dom::Value::Json(data)) = notice.prop(&omp_dom::PropId::Data.into()) else {
+		panic!("the notice carries its typed payload");
+	};
+	serde_json::from_str(data.get()).expect("payload")
+}
+
+/// The shipped default, end to end: `yolo` is the default posture, no sandbox
+/// is in force, so `write` holds and the unconfined shell is process authority
+/// that prompts. Denial stops the command; one typed notice names what the
+/// default asked for, what holds, and why.
+#[tokio::test]
+async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
+	let Turn { session, result, landed } =
+		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, false).await;
+	let tickets = prompts(&session);
+	assert_eq!(tickets.len(), 1, "a defaulted yolo without a sandbox must prompt once: {tickets:?}");
+	assert_eq!(tickets[0].reasons[0].kind.as_str(), "exec");
+	assert_eq!(tickets[0].reasons[0].subject.as_str(), "touch landed.txt");
+	assert!(
+		tickets[0]
+			.decision
+			.as_ref()
+			.is_some_and(|decision| !decision.approved)
+	);
+	assert!(result.contains("denied by user: not today"), "denied bash must settle: {result}");
+	assert!(!landed, "a denied command never ran");
+	assert_eq!(
+		posture_notice(&session),
+		serde_json::json!({
+			"configured": "yolo",
+			"provenance": "default",
+			"effective": "write",
+			"sandbox": { "state": "off" },
+		})
+	);
+}
+
+/// The same prompt, approved: the command runs.
+#[tokio::test]
+async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
+	let Turn { session, result, landed } =
+		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, true).await;
+	assert_eq!(prompts(&session).len(), 1);
+	assert!(landed, "approved bash ran: {result}");
+}
+
+/// An explicit `yolo` (`--approval-mode yolo`, `--yolo`, the user's config)
+/// is respected without a sandbox: the command runs with no prompt, and the
+/// session is told it is unconfined. This is the way out of headless denial.
+#[tokio::test]
+async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
+	let Turn { session, result, landed } =
+		run("bash", bash_call, "landed.txt", Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false)
+			.await;
+	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
+	assert!(landed, "bash ran unprompted: {result}");
+	assert_eq!(
+		posture_notice(&session),
+		serde_json::json!({
+			"configured": "yolo",
+			"provenance": "explicit",
+			"effective": "yolo",
+			"sandbox": { "state": "off" },
+		})
+	);
 }

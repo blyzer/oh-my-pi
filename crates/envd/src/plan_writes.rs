@@ -59,6 +59,20 @@ impl Settled {
 	}
 }
 
+/// The control plane of these proofs: the shell runs the same on every host,
+/// with or without an OS sandbox. An explicit `yolo` is respected unconfined,
+/// so no approval prompt (nobody answers one here) decides the outcome.
+fn hermetic_con() -> Arc<omp_con::Ctx> {
+	let con = omp_con::Ctx::new();
+	crate::exec_settings::SV_SANDBOX_MODE
+		.set(&con, crate::exec_settings::ExecSandboxMode::Off)
+		.expect("sandbox off");
+	crate::tool_settings::SV_TOOLS_APPROVAL_MODE
+		.set(&con, crate::tool_settings::ApprovalMode::Yolo)
+		.expect("explicit yolo");
+	Arc::new(con)
+}
+
 impl Fixture {
 	async fn start() -> Self {
 		let directory = tempfile::tempdir().expect("scratch");
@@ -74,7 +88,7 @@ impl Fixture {
 			false,
 			&[],
 			&[],
-			Arc::new(omp_con::Ctx::new()),
+			hermetic_con(),
 			RegistryBridges::default(),
 		)
 		.await

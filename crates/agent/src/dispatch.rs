@@ -551,6 +551,10 @@ pub(crate) fn journal_env_event(
 			steering::append_named_notice(session, turn, kind, name, body)?;
 			Ok(None)
 		},
+		crate::EnvEvent::TypedNotice { kind, name, data, body } => {
+			steering::append_typed_notice(session, turn, kind, name, data, body)?;
+			Ok(None)
+		},
 	}
 }
 

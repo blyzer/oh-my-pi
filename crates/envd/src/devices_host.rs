@@ -754,8 +754,15 @@ mod tests {
 			Arc::from([]),
 			scratch.path().join("local"),
 		);
-		let admission =
-			DynamicAdmission::new(ApprovalMode::AlwaysAsk, std::collections::BTreeMap::new(), None);
+		let admission = DynamicAdmission::new(
+			crate::admission::ConfiguredApproval {
+				mode:       ApprovalMode::AlwaysAsk,
+				provenance: crate::admission::Provenance::Explicit,
+			},
+			crate::admission::SandboxState::Off,
+			std::collections::BTreeMap::new(),
+			None,
+		);
 		let host = DynHost::new(
 			catalog,
 			Arc::new(NoWorker),

@@ -303,3 +303,23 @@ fn reset_completes_variables_and_explains_itself() {
 	let help = replies.lock().join("\n");
 	assert!(help.contains("reset <var>") && help.contains("inherits"), "{help}");
 }
+
+#[test]
+fn user_set_reads_the_user_layers_and_not_default_project_or_engagement() {
+	let ctx = Ctx::new();
+	assert!(!ctx.is_user_set("test_layered"), "the registration default is not a user choice");
+	assert!(!ctx.is_user_set("test_no_such_var"), "an unknown name is not set");
+
+	let layer =
+		ctx.push_layer(Str::new_static("plan"), &[(Str::new_static("test_layered"), Value::Int(9))]);
+	assert!(!ctx.is_user_set("test_layered"), "a director bind is not a user choice");
+	ctx.pop_layer(layer);
+
+	for origin in [Origin::Archive, Origin::Session] {
+		ctx.set("test_layered", Value::Int(2), origin).unwrap();
+		assert!(ctx.is_user_set("test_layered"));
+		ctx.set("test_layered", Value::Int(1), Origin::Default)
+			.unwrap();
+		assert!(!ctx.is_user_set("test_layered"), "writing the default back clears the user layers");
+	}
+}

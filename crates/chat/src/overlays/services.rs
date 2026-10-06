@@ -275,6 +275,19 @@ pub struct ToolRow {
 	pub source:      Str,
 }
 
+/// The tool approval mode as configured and as enforced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalPostureRow {
+	/// Configured mode (`always-ask`, `write`, `yolo`).
+	pub configured: Str,
+	/// Mode in force once the sandbox state is applied.
+	pub effective:  Str,
+	/// Sandbox state that decided it (`active`, `off`, `unavailable`).
+	pub sandbox:    Str,
+	/// Whether the user chose the configured mode, rather than the default.
+	pub explicit:   bool,
+}
+
 /// One configured SSH host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshHostRow {
@@ -1234,6 +1247,11 @@ pub trait Services: Send + Sync {
 	/// The kernel's registered tools.
 	fn tools(&self) -> ServiceResult<Vec<ToolRow>> {
 		Err(ServiceError::Unavailable("tool roster"))
+	}
+
+	/// The tool approval mode configured and in force.
+	fn approval_posture(&self) -> ServiceResult<ApprovalPostureRow> {
+		Err(ServiceError::Unavailable("approval posture"))
 	}
 
 	/// Extension and MCP server status.

@@ -44,6 +44,27 @@ use omp_proto::toolhost::v1::HookEventId;
 use omp_session::{ComponentRegistry, Session};
 use parking_lot::Mutex;
 
+/// The control plane of a hook proof. `bash` is the hooks' subject, so it must
+/// run the same on every host: with the sandbox off and `bash` allowed per
+/// tool, neither the host's OS sandbox support nor the approval mode decides
+/// whether the hooks fire.
+fn hermetic_con() -> Arc<omp_con::Ctx> {
+	let con = omp_con::Ctx::new();
+	omp_envd::exec_settings::SV_SANDBOX_MODE
+		.set(&con, omp_envd::exec_settings::ExecSandboxMode::Off)
+		.expect("sandbox off");
+	omp_envd::tool_settings::SV_TOOLS_APPROVAL
+		.set(
+			&con,
+			omp_con::Kv(vec![(
+				Str::new_static("bash"),
+				omp_con::Value::Str(Str::new_static("allow")),
+			)]),
+		)
+		.expect("allow bash");
+	Arc::new(con)
+}
+
 /// One `bash` call, then a closing text turn; every request's messages are
 /// recorded so tests can see what reached the model. With `fail`, the first
 /// request fails with that provider error instead.
@@ -202,12 +223,13 @@ impl Fixture {
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		let state = self.scratch.path().join("state");
 		std::fs::create_dir_all(&state).expect("state");
+		let con = hermetic_con();
 		let environment = ProjectEnvironment::attach(&self.root, &state, AttachOptions {
 			py_eval:            false,
 			approval_mode:      Some(ApprovalMode::Yolo),
 			trusted_extensions: Vec::new(),
 			contributed_values: Vec::new(),
-			con:                Arc::new(omp_con::Ctx::new()),
+			con:                Arc::clone(&con),
 			bridges:            RegistryBridges::default(),
 			spawn_idle_timeout: Some(2),
 		})
@@ -236,8 +258,9 @@ impl Fixture {
 				approvals,
 			)))
 			.with_tool_admission(Arc::new(SettingsAdmission::new(
-				&omp_con::Ctx::new(),
+				&con,
 				Some(ApprovalMode::Yolo),
+				&self.root,
 			)));
 		let journal = self.scratch.path().join("hooks.oms");
 		let host = PluginHookHost::new(
