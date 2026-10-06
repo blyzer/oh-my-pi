@@ -1263,6 +1263,15 @@ async fn duplicate_runtime_enable_shares_root_failure() {
 	let root_disable = harness.ext.rpc("send").await;
 	cdp.send(json!({"id":second,"sessionId":session,"method":"Runtime.enable"}))
 		.await;
+	// The two sockets are read by independent relay tasks, so the nack could be
+	// processed before the second enable and the late enable would (correctly)
+	// start its own root cycle that nothing answers. The relay runs commands in
+	// arrival order on one thread, so the reply to a later command on this same
+	// socket proves the second enable already joined the in-flight cycle.
+	let barrier = next_id();
+	cdp.send(json!({"id":barrier,"method":"Browser.getVersion"}))
+		.await;
+	assert!(cdp.reply(barrier).await.get("result").is_some());
 	nack(&mut harness.ext, &root_disable, "root enable failed").await;
 	assert!(cdp.reply(first).await.get("error").is_some());
 	assert!(cdp.reply(second).await.get("error").is_some());
