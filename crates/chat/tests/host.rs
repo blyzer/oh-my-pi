@@ -1429,10 +1429,66 @@ fn idle_retry_hint_shows_after_a_turn_died_on_a_tool_call() {
 	// the controller, never a prompt resubmit.
 	host.key(Key::Function(5)).expect("retry key");
 	assert!(
-		matches!(commands.try_recv(), Ok(HostCommand::Retry)),
+		matches!(
+			commands.try_recv(),
+			Ok(HostCommand::Retry { confirmation: omp_agent::RetryConfirmation::Unconfirmed })
+		),
 		"the retry hint's key must emit HostCommand::Retry"
 	);
 	assert!(commands.try_recv().is_err(), "no resubmitted prompt");
+	assert_eq!(host.notice(), Some("Retrying the interrupted tool calls"));
+}
+
+/// A tail with a call whose effects are unknown asks before re-running: the
+/// first press names the calls and sends nothing, a second press over the same
+/// calls sends the confirmed retry.
+#[test]
+fn retry_of_an_effects_unknown_tail_asks_the_user_to_confirm() {
+	let (mut host, commands, _kernel, mut session) = kernel_host();
+	session.begin_turn().expect("begin turn");
+	session.user("run it", Vec::new()).expect("user");
+	session
+		.assistant_start("test/model", "test", "test/model")
+		.expect("assistant start");
+	let args = serde_json::value::to_raw_value(
+		&serde_json::json!({"command":"make deploy","i":"Deploying the build"}),
+	)
+	.expect("args");
+	let call = session
+		.call("bash", 1, "deploy-shell", None, Some(args), None)
+		.expect("tool call");
+	session.assistant_end("tool_calls").expect("assistant end");
+	let fault = serde_json::value::to_raw_value(&serde_json::json!({
+		"kind":"aborted",
+		"value":{"abort":{"kind":"effects_unknown","reason":"process disappeared"},"kind":"cancelled"}
+	}))
+	.expect("fault");
+	let parts = serde_json::value::to_raw_value(&serde_json::json!([
+		{"kind":"text","text":fault.get()}
+	]))
+	.expect("parts");
+	session
+		.fail_projected(call, fault, parts)
+		.expect("aborted result");
+	append_notice(&mut session, "warn", "Turn interrupted");
+	host.poll().expect("apply dom events");
+	let row = text_of(&host.status_frame().expect("retry hint row"));
+	assert!(row.contains("f5 to Retry (asks to confirm"), "{row}");
+
+	host.key(Key::Function(5)).expect("first retry press");
+	assert!(commands.try_recv().is_err(), "the first press re-runs nothing");
+	let notice = host.notice().expect("confirmation notice").to_owned();
+	assert!(notice.contains("bash (Deploying the build)"), "{notice}");
+	assert!(notice.contains("press f5 again to confirm"), "{notice}");
+
+	host.key(Key::Function(5)).expect("second retry press");
+	assert!(
+		matches!(
+			commands.try_recv(),
+			Ok(HostCommand::Retry { confirmation: omp_agent::RetryConfirmation::EffectsUnknown })
+		),
+		"the second press confirms the re-run"
+	);
 	assert_eq!(host.notice(), Some("Retrying the interrupted tool calls"));
 }
 

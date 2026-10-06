@@ -47,7 +47,7 @@ for how extension hooks, Directors, and Components reach the kernel.
 | `run_authored_turn` | The same, with an authenticated collaboration author recorded on the user node. |
 | `run_skill_turn` | A discovered skill invocation as one typed user turn. |
 | `run_custom_turn` | An extension-authored message as model-visible developer context. |
-| `retry_tool_tail` | Re-executes an aborted tool tail without a model round trip, after rewinding the journal to just after the batch was authorized. |
+| `retry_tool_tail(session, RunControl, RetryConfirmation)` | Re-executes an aborted tool tail without a model round trip, after rewinding the journal to just after the batch was authorized. A tail holding a call recovery settled as `Abort::EffectsUnknown` (it had started, so it may already have run) is not re-run unless the caller passes `RetryConfirmation::EffectsUnknown`: the default returns `RetryOutcome::NeedsConfirmation { calls }` (call id, name, intent) and touches nothing. A tail of never-started `Skipped` calls retries without confirmation. |
 | `compact`, `compact_with` | The manual compaction path between turns (`/compact`, `/handoff`). |
 
 `RunControl` carries the caller's `CancellationToken`, an optional deadline, and an optional request

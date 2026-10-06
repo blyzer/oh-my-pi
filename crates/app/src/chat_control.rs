@@ -10,6 +10,7 @@
 
 use std::{
 	fs::{self, OpenOptions},
+	future::Future,
 	io::{self, Write as _},
 	path::{Path, PathBuf},
 	sync::Arc,
@@ -19,7 +20,7 @@ use std::{
 use miette::{IntoDiagnostic as _, miette};
 use omp_agent::{
 	Kernel, KernelEvent, LifecycleHooks, SessionShutdown, SessionStart, ShutdownReason,
-	SwitchReason, TurnInput, TurnStop, Up,
+	SwitchReason, TurnInput, TurnOutcome, TurnStop, Up,
 };
 use omp_ai::realtime::transport::{
 	LiveDelegationAdmission, LiveDelegationRequest, LiveDelegationTerminal,
@@ -289,12 +290,19 @@ enum Flow {
 	/// Run one provider-authenticated live delegation as a durable custom
 	/// developer turn while retaining its transport correlation identity.
 	LiveTurn { id: Str, input: TurnInput },
-	/// Re-run the aborted tool tail of the last turn.
-	Retry,
+	/// Re-run the aborted tool tail of the last turn, confirmed or not.
+	Retry(omp_agent::RetryConfirmation),
 	/// Run one tool without inference (`!` / `$` prefix modes).
 	Local(omp_agent::LocalRun),
 	/// Leave the controller.
 	Quit,
+}
+
+/// A turn future's result as the retry-capable outcome.
+async fn ran(
+	turn: impl Future<Output = Result<TurnOutcome, omp_agent::KernelError>>,
+) -> Result<omp_agent::RetryOutcome, omp_agent::KernelError> {
+	turn.await.map(omp_agent::RetryOutcome::Ran)
 }
 
 enum TurnRequest {
@@ -308,6 +316,8 @@ enum TurnRequest {
 	Skill(omp_journal::data::SkillPrompt),
 	/// Extension-authored developer context with durable presentation metadata.
 	Custom(omp_session::custom_message::CustomMessage),
+	/// Re-run the last turn's aborted tool tail without a model round trip.
+	Retry(omp_agent::RetryConfirmation),
 }
 
 /// Builds the closed user-local execution request behind a `!` / `$`
@@ -750,7 +760,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			match flow {
 				Flow::Idle => {},
 				Flow::Turn(input) => {
-					let quit = self.run_turn(Some(input), &command_rx, None).await?
+					let quit = self.run_turn(input, &command_rx, None).await?
 						|| self.after_turn(&command_rx).await?;
 					if quit {
 						self.shutdown().await?;
@@ -762,16 +772,17 @@ impl<C: omp_agent::Inference> Controller<C> {
 					let message =
 						omp_session::custom_message::CustomMessage::live_delegation(input.text);
 					let quit = self
-						.run_turn(Some(TurnRequest::Custom(message)), &command_rx, Some(id))
+						.run_turn(TurnRequest::Custom(message), &command_rx, Some(id))
 						.await? || self.after_turn(&command_rx).await?;
 					if quit {
 						self.shutdown().await?;
 						return Ok(());
 					}
 				},
-				Flow::Retry => {
-					let quit = self.run_turn(None, &command_rx, None).await?
-						|| self.after_turn(&command_rx).await?;
+				Flow::Retry(confirmation) => {
+					let quit = self
+						.run_turn(TurnRequest::Retry(confirmation), &command_rx, None)
+						.await? || self.after_turn(&command_rx).await?;
 					if quit {
 						self.shutdown().await?;
 						return Ok(());
@@ -797,7 +808,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 				&& let Some(input) = self.pop_queued()?
 			{
 				let quit = self
-					.run_turn(Some(TurnRequest::User(input)), &command_rx, None)
+					.run_turn(TurnRequest::User(input), &command_rx, None)
 					.await? || self.after_turn(&command_rx).await?;
 				if quit {
 					self.shutdown().await?;
@@ -1115,12 +1126,12 @@ impl<C: omp_agent::Inference> Controller<C> {
 				self.answer_ask(&id, answers);
 				Flow::Idle
 			},
-			HostCommand::Retry => {
+			HostCommand::Retry { confirmation } => {
 				if self.is_paused() {
 					self.reply(Severity::Info, "Paused: resume before retrying");
 					Flow::Idle
 				} else {
-					Flow::Retry
+					Flow::Retry(confirmation)
 				}
 			},
 			HostCommand::Overlay { .. } => Flow::Idle,
@@ -1192,27 +1203,26 @@ impl<C: omp_agent::Inference> Controller<C> {
 		})
 	}
 
-	/// Runs one turn (`Some(input)`) or re-runs the last turn's aborted tool
-	/// tail (`None`), routing commands that arrive
+	/// Runs one turn or re-runs the last turn's aborted tool
+	/// tail ([`TurnRequest::Retry`]), routing commands that arrive
 	/// meanwhile: steering, interrupts, and approvals go to the kernel now;
 	/// session mutations wait for the turn to end (ADR 0004: one writer per
 	/// journal head). Returns whether the host asked to quit.
 	async fn run_turn(
 		&mut self,
-		input: Option<TurnRequest>,
+		input: TurnRequest,
 		command_rx: &flume::Receiver<HostCommand>,
 		live_id: Option<Str>,
 	) -> miette::Result<bool> {
 		let goal_continuation_turn = matches!(
-			input.as_ref(),
-			Some(TurnRequest::Custom(message))
-				if message.custom_type.as_str() == "goal-continuation"
+			&input,
+			TurnRequest::Custom(message) if message.custom_type.as_str() == "goal-continuation"
 		);
 		if goal_continuation_turn {
 			self.set_goal_continuation_armed(false)?;
 		} else if matches!(
-			input.as_ref(),
-			Some(TurnRequest::User(_) | TurnRequest::Authored { .. } | TurnRequest::Skill(_))
+			&input,
+			TurnRequest::User(_) | TurnRequest::Authored { .. } | TurnRequest::Skill(_)
 		) {
 			self.set_goal_continuation_armed(true)?;
 		}
@@ -1229,38 +1239,39 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let blobs = self.session.blobs().clone();
 		let result = {
 			let control = omp_agent::RunControl::default();
-			let turn =
-				match input {
-					Some(TurnRequest::User(input)) => futures::future::Either::Left(
-						futures::future::Either::Left(futures::future::Either::Left(
-							self.kernel.run_turn(&mut self.session, input, control),
-						)),
-					),
-					Some(TurnRequest::Authored { input, author }) => futures::future::Either::Left(
-						futures::future::Either::Left(futures::future::Either::Right(
-							self
-								.kernel
-								.run_authored_turn(&mut self.session, input, author, control),
-						)),
-					),
-					Some(TurnRequest::Skill(prompt)) => futures::future::Either::Left(
-						futures::future::Either::Right(futures::future::Either::Left(
-							self
-								.kernel
-								.run_skill_turn(&mut self.session, prompt, control),
-						)),
-					),
-					Some(TurnRequest::Custom(message)) => futures::future::Either::Left(
-						futures::future::Either::Right(futures::future::Either::Right(
-							self
-								.kernel
-								.run_custom_turn(&mut self.session, message, control),
-						)),
-					),
-					None => futures::future::Either::Right(
-						self.kernel.retry_tool_tail(&mut self.session, control),
-					),
-				};
+			let turn = match input {
+				TurnRequest::User(input) => futures::future::Either::Left(
+					futures::future::Either::Left(futures::future::Either::Left(ran(
+						self.kernel.run_turn(&mut self.session, input, control),
+					))),
+				),
+				TurnRequest::Authored { input, author } => futures::future::Either::Left(
+					futures::future::Either::Left(futures::future::Either::Right(ran(
+						self
+							.kernel
+							.run_authored_turn(&mut self.session, input, author, control),
+					))),
+				),
+				TurnRequest::Skill(prompt) => futures::future::Either::Left(
+					futures::future::Either::Right(futures::future::Either::Left(ran(
+						self
+							.kernel
+							.run_skill_turn(&mut self.session, prompt, control),
+					))),
+				),
+				TurnRequest::Custom(message) => futures::future::Either::Left(
+					futures::future::Either::Right(futures::future::Either::Right(ran(
+						self
+							.kernel
+							.run_custom_turn(&mut self.session, message, control),
+					))),
+				),
+				TurnRequest::Retry(confirmation) => futures::future::Either::Right(
+					self
+						.kernel
+						.retry_tool_tail(&mut self.session, control, confirmation),
+				),
+			};
 			tokio::pin!(turn);
 			loop {
 				tokio::select! {
@@ -1407,6 +1418,19 @@ impl<C: omp_agent::Inference> Controller<C> {
 				}
 			}
 		};
+		// An unconfirmed retry of calls that may already have run ran
+		// nothing: ask for the explicit confirmation instead of a turn.
+		let result = match result {
+			Ok(omp_agent::RetryOutcome::Ran(outcome)) => Ok(outcome),
+			Ok(omp_agent::RetryOutcome::NeedsConfirmation { calls }) => {
+				self.reply(
+					Severity::Warn,
+					omp_chat::notices::error::unknown_effects_prompt(&calls, "retry"),
+				);
+				return Ok(quit);
+			},
+			Err(error) => Err(error),
+		};
 		if let Some(id) = live_id.as_deref() {
 			while let Ok(event) = self.live_events.try_recv() {
 				match event {
@@ -1490,8 +1514,8 @@ impl<C: omp_agent::Inference> Controller<C> {
 			self.record_loop_prompt(&next.request)?;
 			if self
 				.run_turn(
-					Some(TurnRequest::Custom(
-						omp_session::custom_message::CustomMessage::live_delegation(next.request),
+					TurnRequest::Custom(omp_session::custom_message::CustomMessage::live_delegation(
+						next.request,
 					)),
 					command_rx,
 					Some(next.id),
@@ -1884,7 +1908,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			},
 			// A retry deferred behind a running turn has nothing to re-run
 			// once that turn settled; the idle path handles a live one.
-			HostCommand::Retry => {},
+			HostCommand::Retry { .. } => {},
 			// Deferred local runs are drained by `after_turn`, never applied
 			// as a plain session command.
 			HostCommand::RunLocal { .. }
@@ -4979,7 +5003,10 @@ mod tests {
 			next_event(&harness.events, |event| matches!(event, KernelEvent::TurnEnded { .. })).await;
 		assert_eq!(ended, KernelEvent::TurnEnded { stop: TurnStop::Cancelled });
 
-		harness.commands.send(HostCommand::Retry).expect("retry");
+		harness
+			.commands
+			.send(HostCommand::Retry { confirmation: omp_agent::RetryConfirmation::Unconfirmed })
+			.expect("retry");
 		let ready =
 			next_event(&harness.events, |event| matches!(event, KernelEvent::ToolReady { .. })).await;
 		assert_eq!(
@@ -5027,7 +5054,10 @@ mod tests {
 	#[tokio::test]
 	async fn retry_without_an_aborted_tail_posts_the_info_notice() {
 		let harness = harness(Duration::ZERO);
-		harness.commands.send(HostCommand::Retry).expect("retry");
+		harness
+			.commands
+			.send(HostCommand::Retry { confirmation: omp_agent::RetryConfirmation::Unconfirmed })
+			.expect("retry");
 		let (severity, text) = next_reply(&harness.mailbox()).await;
 		assert_eq!(severity, Severity::Info);
 		assert_eq!(text, "Nothing to retry");
@@ -5044,7 +5074,7 @@ mod tests {
 		.await;
 		harness
 			.commands
-			.send(HostCommand::Retry)
+			.send(HostCommand::Retry { confirmation: omp_agent::RetryConfirmation::Unconfirmed })
 			.expect("retry again");
 		let (severity, text) = next_reply(&harness.mailbox()).await;
 		assert_eq!(severity, Severity::Info);
