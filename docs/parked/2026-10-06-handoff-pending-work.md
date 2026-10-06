@@ -63,6 +63,17 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
   `crates/app/src/print_mode.rs`); with no sandbox, bash therefore needs
   `--approval-mode yolo` (explicit, honoured with a notice) or `tools.approval.bash allow`.
 - Check that the `/security` panel shows the effective mode, not only the configured one.
+- Open risks the #181 author recorded (reported by the implementing agent, not independently
+  verified): tools that run outside the exec sandbox (browser, web search, github, network eval)
+  stay auto-approved under `yolo` with an active sandbox because the sandbox state is
+  session-level, not per tool; the closed network and workspace-only writes may break real flows
+  such as `git push` and package installs, which would hit the denial-and-rerun prompt and were
+  not exercised; the posture notice is posted on the first tool admission, so a session that never
+  admits a tool never shows it; the bash tier rule is a name check (`"bash"`), and a typed marker
+  on the tool contract is the less intrusive alternative that was not imposed.
+- Five `omp-envd --lib` tests failed in the Linux container (frozen scope ancestor, `browser_relay`
+  ipv6, two `docserver::fs` tests that assume non-root, a `vcs` reftable test needing a newer git).
+  They were judged environmental and not baselined against `omp2`; CI is green.
 
 ## 3. Accounts
 
