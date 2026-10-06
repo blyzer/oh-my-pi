@@ -216,6 +216,7 @@ pub fn share(state: &ServiceState, snapshot: serde_json::Value) -> ServiceResult
 		0,
 		&user_secrets,
 		&project_secrets,
+		&state.project,
 		[],
 	)
 	.map_err(failed)?;

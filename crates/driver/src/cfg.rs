@@ -33,8 +33,16 @@ use omp_con::{
 	CFG_HEADER_PREFIX, CFG_SCHEMA_VERSION, CfgLoader, CfgSaver, ConError, ConResult, ConfigIoError,
 	ConfigOperation,
 };
-use omp_core::{FastHashMap, Str, dirs::DataDirError};
+use omp_core::{
+	FastHashMap, Str,
+	dirs::DataDirError,
+	project_file::{self, Containment},
+};
 use parking_lot::Mutex;
+
+/// Largest project cfg overlay the reader accepts: a handful of `set` lines,
+/// never a document.
+pub const PROJECT_CFG_LIMIT: u64 = 256 * 1024;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -111,7 +119,7 @@ impl CfgFiles {
 		let Some(path) = self.project_path(name) else {
 			return Ok(None);
 		};
-		Ok(read_config(&path)?
+		Ok(read_project_config(&path)?
 			.filter(|script| !script.is_empty())
 			.map(Str::new))
 	}
@@ -199,18 +207,69 @@ pub fn read_config(path: &Path) -> ConResult<Option<String>> {
 		.transpose()
 }
 
+/// The project directory above a project cfg's `<project>/.omp/` overlay
+/// directory: the root every project cfg read and write stays inside.
+fn project_root_of(cfg_path: &Path) -> &Path {
+	cfg_path
+		.parent()
+		.and_then(Path::parent)
+		.filter(|root| !root.as_os_str().is_empty())
+		.unwrap_or_else(|| Path::new("."))
+}
+
+/// Reads a project cfg overlay (`<project>/.omp/<name>.cfg`) through the
+/// contained project-file reader.
+///
+/// The file must be a regular file of at most [`PROJECT_CFG_LIMIT`] bytes
+/// whose canonical path stays inside the project. A repository's file is never
+/// trusted to be a symlink to somewhere else, a FIFO, or a device. Absence is
+/// `Ok(None)`.
+///
+/// # Errors
+///
+/// [`ConError::ProjectFile`] when the file is refused or unreadable, and the
+/// errors of [`migrate_config_script`].
+pub fn read_project_config(path: &Path) -> ConResult<Option<String>> {
+	project_file::read_text(path, Containment::Within(project_root_of(path)), PROJECT_CFG_LIMIT)?
+		.map(|text| migrate_config_script(path, &text))
+		.transpose()
+}
+
 /// A held cross-process transaction lock for one cfg path.
 ///
 /// Read-modify-write callers keep this value alive across both operations so
 /// independent processes cannot overwrite one another's updates.
 pub struct ConfigFileLock {
-	path:  PathBuf,
-	_lock: File,
+	path:    PathBuf,
+	/// Project cfgs are read and written without following links outside the
+	/// project; user cfgs may be symlinked by their owner.
+	project: bool,
+	_lock:   File,
 }
 
 impl ConfigFileLock {
-	/// Locks `path`, creating its parent and stable sibling lock file.
+	/// Locks a user-owned `path`, creating its parent and stable sibling lock
+	/// file. Writes follow a symlinked `path`, so a dotfile manager keeps
+	/// working.
 	pub fn acquire(path: PathBuf) -> ConResult<Self> {
+		Self::lock(path, false)
+	}
+
+	/// Locks a project cfg (`<project>/.omp/<name>.cfg`). Reads are contained
+	/// like [`read_project_config`], and the lock, and every later write,
+	/// refuses a symlink or non-regular `path` or a directory that resolves
+	/// outside the project, since the repository supplied it.
+	///
+	/// # Errors
+	///
+	/// [`ConError::ProjectFile`] when the target is refused, plus the errors
+	/// of [`ConfigFileLock::acquire`].
+	pub fn acquire_project(path: PathBuf) -> ConResult<Self> {
+		project_file::check_write_target(&path, project_root_of(&path))?;
+		Self::lock(path, true)
+	}
+
+	fn lock(path: PathBuf, project: bool) -> ConResult<Self> {
 		let parent = path.parent().unwrap_or_else(|| Path::new("."));
 		fs::create_dir_all(parent)
 			.map_err(|source| io_error(ConfigOperation::Create, parent, source))?;
@@ -223,7 +282,7 @@ impl ConfigFileLock {
 			.map_err(|source| io_error(ConfigOperation::Lock, &lock_path, source))?;
 		lock_exclusive(&lock)
 			.map_err(|source| io_error(ConfigOperation::Lock, &lock_path, source))?;
-		Ok(Self { path, _lock: lock })
+		Ok(Self { path, project, _lock: lock })
 	}
 
 	/// Logical cfg path protected by this transaction.
@@ -234,6 +293,13 @@ impl ConfigFileLock {
 
 	/// Reads the current cfg while retaining the transaction lock.
 	pub fn read(&self) -> ConResult<Option<String>> {
+		if self.project {
+			return Ok(project_file::read_text(
+				&self.path,
+				Containment::Within(project_root_of(&self.path)),
+				PROJECT_CFG_LIMIT,
+			)?);
+		}
 		read_optional(&self.path)
 	}
 
@@ -246,12 +312,17 @@ impl ConfigFileLock {
 	/// Crash-safely replaces non-cfg text protected by the same transaction
 	/// primitive (for example a shell profile alias block).
 	pub fn replace_raw(&self, contents: &[u8]) -> ConResult<()> {
-		atomic_replace(&self.path, contents)
+		atomic_replace(&self.path, contents, self.project)
 	}
 }
 
-fn atomic_replace(logical_path: &Path, contents: &[u8]) -> ConResult<()> {
-	let path = resolve_write_target(logical_path)?;
+fn atomic_replace(logical_path: &Path, contents: &[u8], project: bool) -> ConResult<()> {
+	let path = if project {
+		project_file::check_write_target(logical_path, project_root_of(logical_path))?;
+		logical_path.to_path_buf()
+	} else {
+		resolve_write_target(logical_path)?
+	};
 	let parent = path.parent().unwrap_or_else(|| Path::new("."));
 	fs::create_dir_all(parent)
 		.map_err(|source| io_error(ConfigOperation::Create, parent, source))?;
@@ -678,5 +749,102 @@ mod tests {
 				.is_symlink()
 		);
 		assert_eq!(fs::read_to_string(root.join("managed/config.cfg")).unwrap(), "ai_model @smol\n");
+	}
+
+	/// A repository's `.omp/*.cfg` is untrusted: an outside symlink, a FIFO,
+	/// `/dev/zero`-like special files, and oversize files are refused with a
+	/// typed error (and never hang or echo content), while a link that stays
+	/// inside the project loads.
+	#[cfg(unix)]
+	#[test]
+	fn project_cfg_reads_refuse_escapes_special_files_and_oversize() {
+		use std::{os::unix::fs::symlink, process::Command, sync::mpsc, thread, time::Duration};
+
+		use omp_core::project_file::{ProjectFileError, Refusal};
+
+		let dir = tempfile::tempdir().unwrap();
+		let project = dir.path().join("proj");
+		let omp = project.join(".omp");
+		fs::create_dir_all(&omp).unwrap();
+		fs::write(dir.path().join("secret.cfg"), "ai_model TOP-SECRET\n").unwrap();
+		symlink(dir.path().join("secret.cfg"), omp.join("escape.cfg")).unwrap();
+		assert!(
+			Command::new("mkfifo")
+				.arg(omp.join("pipe.cfg"))
+				.status()
+				.unwrap()
+				.success()
+		);
+		fs::write(omp.join("big.cfg"), vec![b'#'; usize::try_from(PROJECT_CFG_LIMIT).unwrap() + 1])
+			.unwrap();
+		fs::write(project.join("real.cfg"), "ai_thinking low\n").unwrap();
+		symlink("../real.cfg", omp.join("inside.cfg")).unwrap();
+		let files = CfgFiles::with_roots(dir.path().join("o2"), Some(omp));
+
+		let (sender, receiver) = mpsc::channel();
+		thread::spawn(move || {
+			let refused = ["escape", "pipe", "big"].map(|name| match files.load_project(name) {
+				Err(ConError::ProjectFile(ProjectFileError::Refused { reason, .. })) => reason,
+				other => panic!("{name} must be refused, got {other:?}"),
+			});
+			let _ = sender.send((refused, files.load_project("inside").unwrap()));
+		});
+		let (refused, inside) = receiver
+			.recv_timeout(Duration::from_secs(10))
+			.expect("a special project cfg must be refused, not read");
+		assert_eq!(refused, [Refusal::OutsideRoot, Refusal::NotRegular, Refusal::TooLarge]);
+		assert_eq!(inside.unwrap().as_str(), "ai_thinking low\n");
+	}
+
+	/// The project write path (`omp config set --scope project`) refuses a
+	/// symlink or non-regular target instead of writing through it, while a
+	/// user cfg symlink (a dotfile manager) keeps working.
+	#[cfg(unix)]
+	#[test]
+	fn project_cfg_writes_refuse_symlink_targets() {
+		use std::os::unix::fs::symlink;
+
+		use omp_core::project_file::Refusal;
+
+		let dir = tempfile::tempdir().unwrap();
+		let project = dir.path().join("proj");
+		fs::create_dir_all(project.join(".omp")).unwrap();
+		let victim = dir.path().join("victim");
+		fs::write(&victim, "keep").unwrap();
+		let target = project.join(".omp/config.cfg");
+		symlink(&victim, &target).unwrap();
+
+		let refused = ConfigFileLock::acquire_project(target.clone())
+			.err()
+			.expect("symlink refused");
+		assert!(matches!(
+			refused,
+			ConError::ProjectFile(ref error) if error.refusal() == Some(Refusal::Symlink)
+		));
+		assert_eq!(
+			fs::read_to_string(&victim).unwrap(),
+			"keep",
+			"nothing was written through the link"
+		);
+
+		fs::remove_file(&target).unwrap();
+		fs::create_dir(&target).unwrap();
+		let refused = ConfigFileLock::acquire_project(target.clone())
+			.err()
+			.expect("directory refused");
+		assert!(matches!(
+			refused,
+			ConError::ProjectFile(ref error) if error.refusal() == Some(Refusal::NotRegular)
+		));
+		fs::remove_dir(&target).unwrap();
+
+		let lock = ConfigFileLock::acquire_project(target.clone()).unwrap();
+		lock.replace("ai_thinking low\n").unwrap();
+		assert_eq!(fs::read_to_string(&target).unwrap(), "ai_thinking low\n");
+		// Swapped for a link after the lock was taken, the write still refuses.
+		fs::remove_file(&target).unwrap();
+		symlink(&victim, &target).unwrap();
+		assert!(matches!(lock.replace("ai_thinking high\n"), Err(ConError::ProjectFile(_))));
+		assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
 	}
 }

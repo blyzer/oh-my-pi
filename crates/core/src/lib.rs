@@ -31,6 +31,8 @@ pub mod open;
 pub mod path;
 pub mod phase;
 pub mod principal;
+/// Bounded, contained reads of project-supplied files.
+pub mod project_file;
 pub mod qr;
 pub mod secret;
 pub mod semver;

@@ -7,6 +7,7 @@
 - `append_vec` implements the thread-safe, segmented `AppendVec` and its borrowed `AppendSlice` views.
 - `cow_bytes` provides `CowBytes`, a borrowed-or-`Bytes` byte container with cheap owned clones and zero-copy slicing.
 - `encoding` contains generic base-N machinery and the public hex, Base32, Base32-Hex, Base32-DNS, Base64, and URL-safe Base64 interfaces.
+- `project_file` is the one reader for files a repository supplies (`AGENTS.md`, `.omp/*.cfg`, `.omp/hosts.toml`, LSP/DAP configs): a regular file under a size cap whose canonical path stays inside the project root, read once with `O_NOFOLLOW|O_NONBLOCK`, refused with a typed `ProjectFileError` that names the path and a static `Refusal` and never carries content. User-owned files use `Containment::Unconfined`.
 - `qr` implements a self-contained QR (ISO/IEC 18004) symbol encoder: mode selection, versions 1–40, Reed-Solomon error correction, and penalty-scored masking.
 - `str` provides immutable and mutable small-string types, clone-on-write strings, formatting helpers, and conversions.
 - `sparse_index`, `sparse_map`, and `sparse_set` implement the indexing machinery and public sparse map and set collections.

@@ -31,9 +31,10 @@ impl SecretSessionSnapshot {
 		generation: u64,
 		global_config: &Path,
 		project_config: &Path,
+		project_root: &Path,
 		sealed_extension_rules: impl IntoIterator<Item = SecretRule>,
 	) -> Result<Self, SecretSessionError> {
-		let mut configured = load_secret_rules(global_config, project_config)?;
+		let mut configured = load_secret_rules(global_config, project_config, project_root)?;
 		configured.extend(sealed_extension_rules);
 		configured.extend(collect_env_secret_rules());
 		let needs_key = rules_need_placeholder_key(&configured);

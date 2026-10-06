@@ -59,7 +59,7 @@ use super::{
 };
 use crate::{
 	discovery::{prompts::check_template, skills::managed_skills_root},
-	secrets::config::{SecretConfigError, load_secret_rules},
+	secrets::config::{SecretConfigError, load_secret_file},
 };
 
 /// Why an asset could not be read, checked, or written.
@@ -305,7 +305,7 @@ impl Check {
 					.try_for_each(|adapter| adapter.to_spec().map(drop))
 					.map_err(AssetError::Dap)
 			},
-			Self::Secrets => load_secret_rules(path, path)
+			Self::Secrets => load_secret_file(path)
 				.map(drop)
 				.map_err(AssetError::Secrets),
 		}

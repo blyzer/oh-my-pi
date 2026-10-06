@@ -300,8 +300,12 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 		assert!(agent.join("dap.yml").is_file());
 		// `secrets.yml` sits at the config root, not under `agent/`.
 		assert!(!agent.join("secrets.yml").exists());
-		let secrets = load_secret_rules(&config.join("secrets.yml"), &fixture.project.join("x"))
-			.expect("secrets");
+		let secrets = load_secret_rules(
+			&config.join("secrets.yml"),
+			&fixture.project.join("x"),
+			&fixture.project,
+		)
+		.expect("secrets");
 		assert_eq!(secrets.len(), 1);
 		// MCP and SSH, at the files v2's stores use.
 		let mcp = McpConfigPaths::new(config, &fixture.project);
