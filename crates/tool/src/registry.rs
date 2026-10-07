@@ -31,10 +31,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	Abort, ArgIssue, ArgIssueKind, ArgPath, ArgSpec, ArgSpecRegistry, ArgSpecRegistryError,
-	CallOutcome, Constraint, DeviceIssue, DevicePath, Effects, ExecutionMode, GrammarSyntax,
-	IncomingParams, JobRef, LiftedCall, Part, Presentation, ProjectionAuthorizationError,
-	ProjectionSpan, PromptCaps, RecordedCall, RecordedCallOwned, Rev, StreamMatchText, Tool,
-	ToolIdentity, ToolPromptExample, ToolSpec, VisibilityReceipt,
+	CallOutcome, Confinement, Constraint, DeviceIssue, DevicePath, Effects, ExecutionMode,
+	GrammarSyntax, IncomingParams, JobRef, LiftedCall, Part, Presentation,
+	ProjectionAuthorizationError, ProjectionSpan, PromptCaps, RecordedCall, RecordedCallOwned, Rev,
+	StreamMatchText, Tool, ToolIdentity, ToolPromptExample, ToolSpec, VisibilityReceipt,
 };
 
 /// Catalog capabilities needed for deterministic tool lowering.
@@ -357,15 +357,17 @@ pub struct DeviceMetadata {
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceTarget<'a> {
 	/// Stable root device token.
-	pub name:     &'a Str,
+	pub name:        &'a Str,
 	/// Semantic revision selected for this claimant.
-	pub rev:      &'a Rev,
+	pub rev:         &'a Rev,
 	/// Publisher-qualified implementation identity and worker extension key.
-	pub claimant: &'a Str,
+	pub claimant:    &'a Str,
 	/// Execution placement selected by the declaration.
-	pub route:    &'a ToolRoute,
+	pub route:       &'a ToolRoute,
 	/// Maximum effect envelope of the exact selected claimant and revision.
-	pub effects:  &'a Effects,
+	pub effects:     &'a Effects,
+	/// Where the selected revision's effects happen, as its host asserted.
+	pub confinement: Confinement,
 }
 
 impl DeviceTarget<'_> {
@@ -1923,6 +1925,8 @@ impl Registry {
 					on_unsupported: crate::Fallback::Unspecified,
 				},
 				effects: Effects::default(),
+				// Host tools run in the attached client, outside any sandbox.
+				confinement: Confinement::Host,
 				projection_code,
 			};
 			let cache_id = base_cache_id.saturating_add(u32::try_from(index).unwrap_or(u32::MAX));
@@ -2583,6 +2587,7 @@ impl Registry {
 			claimant: selected.claimant,
 			route: entry.tool.route(),
 			effects: &entry.tool.spec().effects,
+			confinement: entry.tool.spec().confinement,
 		})
 	}
 
@@ -3702,6 +3707,7 @@ mod tests {
 				schema:          Bytes::from_static(b"{}"),
 				constraint:      Constraint::None,
 				effects:         Effects::empty(),
+				confinement:     Confinement::Host,
 				projection_code: [n as u8; 32],
 			},
 		}
@@ -3766,6 +3772,7 @@ mod tests {
 			exec: Some(ExecEffects { commands: Arc::from([sf!("*")]), network: true }),
 			..Effects::empty()
 		};
+		high.spec.confinement = Confinement::ExecSandbox;
 		registry
 			.register(high, Presentation::Device, Claims {
 				precedence: Precedence::ENHANCEMENT,
@@ -3778,11 +3785,37 @@ mod tests {
 			.resolve_device(&DevicePath::parse("lift").expect("live path"))
 			.expect("live target");
 		assert!(!live.effects.is_empty());
+		assert_eq!(live.confinement, Confinement::ExecSandbox);
 		let shadow = registry
 			.resolve_device(&DevicePath::parse("lift@test/low").expect("shadow path"))
 			.expect("shadow target");
 		assert!(shadow.effects.is_empty());
+		assert_eq!(shadow.confinement, Confinement::Host);
 		assert_eq!(shadow.claimant, "test/low");
+	}
+
+	/// An RPC host tool runs in the attached client: its spec is `Host`, and
+	/// it has no native live spec, so admission takes the `Host` fallback.
+	#[test]
+	fn host_tools_are_host_confined() {
+		let registry = Registry::new();
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+		assert!(registry.live_spec("alpha").is_err());
+		let state = registry.host_tools.read();
+		let spec = state.rosters["rpc/client"].entries["alpha"].tool.spec();
+		assert_eq!(spec.confinement, Confinement::Host);
 	}
 
 	#[test]

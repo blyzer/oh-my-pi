@@ -1268,7 +1268,10 @@ pub fn py_eval_spec() -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		// Host although the Python child is sandboxed: inference, subagents,
+		// prelude helpers and nested `tool.<name>()` calls run host-side.
 		effects:         eval_effects(),
+		confinement: omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),
@@ -1299,7 +1302,10 @@ pub fn spec(description: Str) -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		// Host although the Python child is sandboxed: inference, subagents,
+		// prelude helpers and nested `tool.<name>()` calls run host-side.
 		effects: eval_effects(),
+		confinement: omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),

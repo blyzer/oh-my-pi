@@ -171,6 +171,10 @@ impl AdwHost for ProductionAdwHost {
 				NetworkConfinement::Disabled => NetworkScope::Disabled,
 				NetworkConfinement::Scoped => NetworkScope::Scoped,
 			},
+			// The session's posture, reported as the loosest scope: a defaulted
+			// `yolo` kept by an active sandbox covers only the tools that sandbox
+			// confines (`bash`, `hub`); every other tool follows `write` per call
+			// (`omp_envd::admission::resolve_approval`).
 			approval: match effective_approval_mode(
 				omp_envd::tool_settings::ToolSettings::from_con(&self.ctx).configured_approval(),
 				sandbox,

@@ -323,7 +323,11 @@ pub fn spec() -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		// Like the shell: the processes hub starts run under the environment's
+		// exec sandbox (attached and detached alike), which stands in for the
+		// empty declaration.
 		effects:         Effects::default(),
+		confinement:     omp_tool::Confinement::ExecSandbox,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),

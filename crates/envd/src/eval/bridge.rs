@@ -1742,6 +1742,7 @@ mod tests {
 					),
 					constraint:      Constraint::None,
 					effects:         Effects::empty(),
+					confinement:     omp_tool::Confinement::Host,
 					projection_code: [0; 32],
 				},
 				invalid,

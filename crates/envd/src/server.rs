@@ -39,8 +39,8 @@ use omp_proto::{
 	ui::v1::UiDispatchResult,
 };
 use omp_tool::{
-	Abort, ArgIssue, ArgPath, CallOutcome, Effects, ErasedEv, ErasedOutcome, IncomingParams,
-	Interrupt, Registry, RegistryError, ToolRoute, ToolTerminal,
+	Abort, ArgIssue, ArgPath, CallOutcome, Confinement, Effects, ErasedEv, ErasedOutcome,
+	IncomingParams, Interrupt, Registry, RegistryError, ToolRoute, ToolTerminal,
 };
 use omp_tools::{
 	ask::PresenterSlot,
@@ -264,16 +264,19 @@ impl InvocationExecutionPolicy {
 	}
 
 	/// Refuses, before execution, a tool that could write around the
-	/// environment's scoped writers while a write scope applies: its envelope
-	/// runs commands, spawns subagents, or writes documents through anything
-	/// but the document host. Network-only and read-only tools pass, and so
-	/// do the scoped writers, whose writes the scope confines one by one.
-	fn denial(&self, effects: &Effects) -> Option<WriteBoundaryDenied> {
+	/// environment's scoped writers while a write scope applies: it runs
+	/// processes under the exec sandbox ([`Confinement::ExecSandbox`], whose
+	/// declaration leaves those effects out), or its envelope runs commands,
+	/// spawns subagents, or writes documents through anything but the document
+	/// host. Network-only and read-only tools pass, and so do the scoped
+	/// writers, whose writes the scope confines one by one.
+	fn denial(&self, effects: &Effects, confinement: Confinement) -> Option<WriteBoundaryDenied> {
 		let scope = self.write_scope.as_deref()?;
-		let writes_around = effects
-			.exec
-			.as_ref()
-			.is_some_and(|exec| !exec.commands.is_empty())
+		let writes_around = confinement.sandboxed()
+			|| effects
+				.exec
+				.as_ref()
+				.is_some_and(|exec| !exec.commands.is_empty())
 			|| effects.subagents != 0
 			|| (effects
 				.documents
@@ -7419,10 +7422,11 @@ impl EnvServer {
 				omp_tool::OutputRequest::Bounded
 			},
 		};
-		let maximum_effects = registry
-			.effects(&request.name)
-			.expect("a routed tool has a declared effect envelope")
-			.clone();
+		let spec = registry
+			.live_spec(&request.name)
+			.expect("a routed tool has a live declaration");
+		let maximum_effects = spec.effects.clone();
+		let confinement = spec.confinement;
 		// The client's roster snapshot for this call: tools that host nested
 		// calls apply it to each `tool.<name>()` (the eval bridge), and a plan
 		// file or read-only ceiling in it scopes every write the call makes.
@@ -7446,6 +7450,7 @@ impl EnvServer {
 					invocation_id.clone(),
 					request.name.as_str(),
 					&maximum_effects,
+					confinement,
 					connection.exec_host.sandbox_state(),
 				)
 				.policy
@@ -7518,6 +7523,7 @@ impl EnvServer {
 					admission,
 					pending_commit: None,
 					maximum_effects: maximum_effects.clone(),
+					confinement,
 					execution: execution.clone(),
 					request_scope: scope.map(|scope| scope.pty_denied),
 					edit_repair,
@@ -7610,6 +7616,7 @@ impl EnvServer {
 					},
 					pending_commit: None,
 					maximum_effects,
+					confinement,
 					execution,
 					request_scope: scope.map(|scope| scope.pty_denied),
 					delivery,
@@ -8291,6 +8298,7 @@ enum InvocationState {
 		admission:       AdmissionGate,
 		pending_commit:  Option<pb::ArgsCommitted>,
 		maximum_effects: Effects,
+		confinement:     Confinement,
 		execution:       InvocationExecutionPolicy,
 		request_scope:   Option<bool>,
 		edit_repair:     Option<ConnectionEditRepairRoute>,
@@ -8306,6 +8314,7 @@ enum InvocationState {
 		admission:       AdmissionGate,
 		pending_commit:  Option<pb::ArgsCommitted>,
 		maximum_effects: Effects,
+		confinement:     Confinement,
 		execution:       InvocationExecutionPolicy,
 		request_scope:   Option<bool>,
 		delivery:        VerdictDelivery,
@@ -8673,11 +8682,13 @@ impl ConnectionState {
 	) -> Result<Option<WriteBoundaryDenied>, (pb::ProtocolErrorCode, &'static str)> {
 		match self.requests.get(&request_id) {
 			Some(RequestState::Invocation(state)) if state.id() == invocation_id => {
-				let (execution, maximum_effects) = match state {
-					InvocationState::Native { execution, maximum_effects, .. }
-					| InvocationState::Worker { execution, maximum_effects, .. } => (execution, maximum_effects),
+				let (execution, maximum_effects, confinement) = match state {
+					InvocationState::Native { execution, maximum_effects, confinement, .. }
+					| InvocationState::Worker { execution, maximum_effects, confinement, .. } => {
+						(execution, maximum_effects, *confinement)
+					},
 				};
-				Ok(execution.denial(maximum_effects))
+				Ok(execution.denial(maximum_effects, confinement))
 			},
 			Some(RequestState::Invocation(_)) => Err((
 				pb::ProtocolErrorCode::InvalidArgument,
@@ -12354,6 +12365,8 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
 }
 #[cfg(all(test, unix))]
 mod tests {
+	#[cfg(target_os = "macos")]
+	use std::sync::atomic::AtomicUsize;
 	use std::{fs, os::unix::fs::PermissionsExt as _, sync::Arc};
 
 	use flume::Receiver;
@@ -13915,19 +13928,21 @@ mod tests {
 		assert_eq!(
 			yolo
 				.tool_settings
-				.approval_for("yolo", "bash", &effects, sandbox)
+				.approval_for("yolo", "bash", &effects, Confinement::ExecSandbox, sandbox)
 				.policy,
 			crate::admission::ApprovalPolicy::Allow
 		);
 		assert_eq!(
 			inherited
 				.tool_settings
-				.approval_for("inherited", "bash", &effects, sandbox)
+				.approval_for("inherited", "bash", &effects, Confinement::ExecSandbox, sandbox)
 				.policy,
 			crate::admission::ApprovalPolicy::Prompt
 		);
 		assert_eq!(
-			base.approval_for("base", "bash", &effects, sandbox).policy,
+			base
+				.approval_for("base", "bash", &effects, Confinement::ExecSandbox, sandbox)
+				.policy,
 			crate::admission::ApprovalPolicy::Prompt
 		);
 	}
@@ -14665,6 +14680,15 @@ mod tests {
 	async fn relay_daemon_with(
 		sandbox: SandboxSettings,
 	) -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
+		relay_daemon_in(sandbox, Registry::new()).await
+	}
+
+	/// [`relay_daemon_with`], composing the production tools over `registry`.
+	#[cfg(target_os = "macos")]
+	async fn relay_daemon_in(
+		sandbox: SandboxSettings,
+		registry: Registry,
+	) -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
 		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
 			return None;
 		}
@@ -14677,7 +14701,7 @@ mod tests {
 			EnvServer::open_local(
 				root.path(),
 				state.path(),
-				Registry::new(),
+				registry,
 				ExtHostConfig::new(
 					PathBuf::from("unused"),
 					Principal::new(sf!("test-principal"), sf!("Test Principal")),
@@ -15071,6 +15095,221 @@ mod tests {
 		}
 	}
 
+	/// A native tool declaring network effects, run on the host (`Host`).
+	#[cfg(target_os = "macos")]
+	struct NetworkProbe {
+		spec: omp_tool::ToolSpec,
+		ran:  Arc<AtomicUsize>,
+	}
+
+	#[cfg(target_os = "macos")]
+	impl omp_tool::Tool for NetworkProbe {
+		type Fault = serde_json::Value;
+		type Params = serde_json::Value;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				params.whole::<serde_json::Value>().await.expect("probe arguments");
+				params.committed().await.expect("probe commitment");
+				self.ran.fetch_add(1, Ordering::AcqRel);
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "ran"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("ran") }]
+		}
+	}
+
+	/// Records every admission query and refuses it.
+	#[cfg(target_os = "macos")]
+	#[derive(Clone, Default)]
+	struct RecordingRefusal(Arc<Mutex<Vec<String>>>);
+
+	#[cfg(target_os = "macos")]
+	impl omp_env::Admitter for RecordingRefusal {
+		type Future<'client> = std::future::Ready<pb::Admission>;
+
+		fn admit(&self, query: pb::AdmitInvocation) -> Self::Future<'_> {
+			self.0.lock().push(query.invocation_id.clone());
+			std::future::ready(pb::Admission {
+				invocation_id: query.invocation_id,
+				allow: false,
+				..pb::Admission::default()
+			})
+		}
+	}
+
+	/// Invokes `name` with `args` and returns its terminal verdict.
+	#[cfg(target_os = "macos")]
+	async fn invoke_to_verdict(
+		client: &EnvClient,
+		server: &EnvServer,
+		invocation_id: &str,
+		name: &str,
+		args: serde_json::Value,
+	) -> pb::Verdict {
+		let rev = server
+			.registry()
+			.live_identity(name)
+			.map(|(_, rev)| rev.to_string())
+			.expect("tool is registered");
+		let mut invocation = client
+			.invoke(pb::InvokeTool {
+				invocation_id: invocation_id.to_owned(),
+				name: name.to_owned(),
+				rev,
+				..pb::InvokeTool::default()
+			})
+			.await
+			.expect("invoke");
+		assert!(matches!(
+			invocation.next_event().await.expect("accepted"),
+			Some(omp_env::InvocationEvent::Accepted(_))
+		));
+		invocation
+			.commit_args(
+				Bytes::from(serde_json::to_vec(&args).expect("arguments")),
+				Bytes::from_static(b"confinement-test-token"),
+				1_000,
+				None,
+			)
+			.await
+			.expect("commit arguments");
+		time::timeout(RELAY_WAIT, async {
+			loop {
+				match invocation.next_event().await.expect("invocation event") {
+					Some(omp_env::InvocationEvent::Verdict(verdict)) => break verdict,
+					Some(omp_env::InvocationEvent::Update(_)) => {},
+					other => panic!("unexpected {name} event: {other:?}"),
+				}
+			}
+		})
+		.await
+		.expect("the invocation did not settle")
+	}
+
+	/// Decision 4 over the wire, with Seatbelt really confining the
+	/// environment. Under the shipped (defaulted) `yolo`, kept alive only by
+	/// the active sandbox, `bash` runs unprompted because the sandbox confines
+	/// it, while a `Host` tool declaring network asks the client and, refused,
+	/// never runs. Under an explicit `yolo`, neither asks.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_sandbox_kept_default_yolo_covers_only_sandboxed_tools() {
+		let ran = Arc::new(AtomicUsize::new(0));
+		let mut registry = Registry::new();
+		registry
+			.register(
+				NetworkProbe {
+					spec: omp_tool::ToolSpec {
+						name:            sf!("net_probe"),
+						rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+						description:     sf!("host-side network probe"),
+						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						constraint:      omp_tool::Constraint::None,
+						effects:         Effects {
+							exec: Some(omp_tool::ExecEffects { commands: Arc::default(), network: true }),
+							..Effects::empty()
+						},
+						confinement:     Confinement::Host,
+						projection_code: [0; 32],
+					},
+					ran:  Arc::clone(&ran),
+				},
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the network probe");
+		let Some((server, _root, _state)) = relay_daemon_in(
+			SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
+			registry,
+		)
+		.await
+		else {
+			return;
+		};
+		assert_eq!(server.exec.sandbox_state(), crate::admission::SandboxState::Active);
+		assert_eq!(
+			server
+				.registry()
+				.live_spec("bash")
+				.expect("bash is registered")
+				.confinement,
+			Confinement::ExecSandbox
+		);
+
+		for (approval_mode, host_prompts) in
+			[(pb::ApprovalMode::Unspecified, true), (pb::ApprovalMode::Yolo, false)]
+		{
+			let (client, transport) = EnvClient::in_process(64);
+			let admissions = RecordingRefusal::default();
+			client.set_admitter(admissions.clone());
+			let host = Arc::clone(&server);
+			let serving = tokio::spawn(async move { host.serve_in_process(transport).await });
+			client
+				.hello(pb::ClientHello {
+					client: "confinement".to_owned(),
+					schema_rev: omp_proto::SCHEMA_REV,
+					approval_mode: approval_mode as i32,
+					..pb::ClientHello::default()
+				})
+				.await
+				.expect("hello");
+			let posture = approval_mode.as_str_name();
+
+			let bash = invoke_to_verdict(
+				&client,
+				&server,
+				"confined-bash",
+				"bash",
+				serde_json::json!({"command": "printf confined"}),
+			)
+			.await;
+			assert!(!bash.is_error, "{posture}: {}", String::from_utf8_lossy(&bash.json));
+			assert!(admissions.0.lock().is_empty(), "{posture}: bash must not prompt");
+
+			let before = ran.load(Ordering::Acquire);
+			let probe =
+				invoke_to_verdict(&client, &server, "host-network", "net_probe", serde_json::json!({}))
+					.await;
+			if host_prompts {
+				assert_eq!(*admissions.0.lock(), ["host-network"], "{posture}");
+				assert!(probe.is_error, "{posture}: the refused prompt denies the call");
+				assert_eq!(ran.load(Ordering::Acquire), before, "{posture}: never ran");
+			} else {
+				assert!(admissions.0.lock().is_empty(), "{posture}: an explicit yolo never asks");
+				assert!(!probe.is_error, "{posture}: {}", String::from_utf8_lossy(&probe.json));
+				assert_eq!(ran.load(Ordering::Acquire), before + 1, "{posture}");
+			}
+			drop(client);
+			serving.abort();
+		}
+	}
+
 	/// Bash invoked over the wire runs its command inside the invocation, so
 	/// the amendment reaches the invoking connection on the invocation's own
 	/// request, and the approved rerun completes the call.
@@ -15209,30 +15448,59 @@ mod tests {
 			exec: Some(omp_tool::ExecEffects { commands: Arc::default(), network: true }),
 			..Effects::empty()
 		};
+		let host = Confinement::Host;
 		let plan = || WriteScope::PlanFile { plan_file: sf!("local://PLAN.md"), target: None };
 		// The scoped writers proceed: the scope confines each of their writes.
 		for tool in ["write", "edit", "lsp"] {
-			assert_eq!(scoped_policy(tool, plan()).denial(&documents), None, "{tool}");
+			assert_eq!(scoped_policy(tool, plan()).denial(&documents, host), None, "{tool}");
 		}
-		assert_eq!(scoped_policy("web_search", plan()).denial(&network), None);
-		assert_eq!(scoped_policy("read", WriteScope::ReadOnly).denial(&Effects::empty()), None);
+		assert_eq!(scoped_policy("web_search", plan()).denial(&network, host), None);
+		assert_eq!(scoped_policy("read", WriteScope::ReadOnly).denial(&Effects::empty(), host), None);
 		let denial = scoped_policy("ast_edit", plan())
-			.denial(&documents)
+			.denial(&documents, host)
 			.expect("direct writer");
 		assert_eq!(
 			denial.to_string(),
 			"plan mode is active: the environment refused `ast_edit`, which can change files outside \
 			 the plan file; no action was taken"
 		);
+		let denial = scoped_policy("debug", plan())
+			.denial(&commands, host)
+			.expect("declared commands");
+		assert!(matches!(denial, WriteBoundaryDenied::Plan { .. }), "{denial}");
+		// The production shell declares no effects: its confinement marker, not
+		// an envelope, says its processes write around the scoped writers.
+		let bash = omp_tools::shell::spec(&omp_tools::shell::ShellPromptSnapshot {
+			sibling_tools:       Arc::default(),
+			platform:            sf!("macos"),
+			command_prefix:      false,
+			embedded_builtins:   true,
+			devices:             true,
+			interceptor_enabled: false,
+			interceptor_rules:   Arc::default(),
+		});
+		assert_eq!(
+			(bash.effects.clone(), bash.confinement),
+			(Effects::empty(), Confinement::ExecSandbox)
+		);
 		let denial = scoped_policy("bash", WriteScope::ReadOnly)
-			.denial(&commands)
-			.expect("commands");
+			.denial(&bash.effects, bash.confinement)
+			.expect("the shell's processes");
 		assert_eq!(
 			denial.to_string(),
 			"this agent is a read-only subagent of a plan-mode session: the environment refused \
 			 `bash`, which can change files; no action was taken"
 		);
+		assert!(
+			scoped_policy("bash", plan())
+				.denial(&bash.effects, bash.confinement)
+				.is_some()
+		);
 		let unscoped = InvocationExecutionPolicy { tool: sf!("bash"), ..Default::default() };
-		assert_eq!(unscoped.denial(&commands), None, "no scope, no boundary refusal");
+		assert_eq!(
+			unscoped.denial(&bash.effects, bash.confinement),
+			None,
+			"no scope, no boundary refusal"
+		);
 	}
 }

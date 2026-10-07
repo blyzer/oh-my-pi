@@ -24,10 +24,10 @@ use omp_tool::{
 	Abort, AbortKind, ArgIssue, ArgIssueKind, ArgPath, ArgSpec, ArgSpecRegistry,
 	ArgSpecRegistryError, ArtifactLifetime, AvailabilityDelta, BlobRef, CallOutcome,
 	CallOutcomeDetails, CallOutcomeDetailsError, CallOutcomeSpill, CapsBase, Claims, Coerce,
-	CommitError, Constraint, ConstraintDisposition, DesktopEffects, DocEffects, Effects, ErasedEv,
-	ErasedOutcome, Ev, ExecEffects, ExpectedArtifact, Fallback, GoalToolState, GrammarSyntax,
-	InclusionPolicy, IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, JobKind,
-	JobMetadata, JobOwner, JobRef, JobStatus, LeafOwner, LeafReplacementError,
+	CommitError, Confinement, Constraint, ConstraintDisposition, DesktopEffects, DocEffects,
+	Effects, ErasedEv, ErasedOutcome, Ev, ExecEffects, ExpectedArtifact, Fallback, GoalToolState,
+	GrammarSyntax, InclusionPolicy, IncomingParams, InferenceEffects, Interrupt, InterruptWaitError,
+	JobKind, JobMetadata, JobOwner, JobRef, JobStatus, LeafOwner, LeafReplacementError,
 	LeafReplacementRegistry, LeafVersion, LiftedCall, LoweringCaps, MemoryToolState, ModelClass,
 	ParamError, Part, PolicyDenied, Precedence, Presentation, ProjectedCall, PromptCaps, PullMode,
 	PulledKind, RecordedCall, RecordedCallOwned, Registry, RegistryError, RegistryLeaf, RepairKind,
@@ -77,6 +77,7 @@ impl FakeTool {
 				schema: Bytes::from_static(schema),
 				constraint,
 				effects: Effects::empty(),
+				confinement: Confinement::Host,
 				projection_code: [0; 32],
 			},
 			marker: Str::new(marker),
@@ -174,6 +175,7 @@ impl PullingTool {
 				),
 				constraint:      Constraint::None,
 				effects:         Effects::empty(),
+				confinement:     Confinement::Host,
 				projection_code: [0; 32],
 			},
 		}
@@ -238,6 +240,7 @@ impl AbortingTool {
 				schema:          Bytes::from_static(br#"{"type":"object"}"#),
 				constraint:      Constraint::None,
 				effects:         Effects::empty(),
+				confinement:     Confinement::Host,
 				projection_code: [0; 32],
 			},
 		}
@@ -300,6 +303,7 @@ fn worker_spec(name: &str, projection_code: [u8; 32]) -> ToolSpec {
 		schema: Bytes::from_static(br#"{"type":"object"}"#),
 		constraint: Constraint::None,
 		effects: Effects::empty(),
+		confinement: Confinement::Host,
 		projection_code,
 	}
 }
@@ -755,6 +759,50 @@ fn projection_code_moves_only_projection_identity() {
 	assert_eq!(first.slot_hash(), second.slot_hash());
 	assert_eq!(first.device_hash(), second.device_hash());
 	assert_ne!(first.projection_hash(), second.projection_hash());
+}
+
+/// The confinement marker defaults to the safe `Host`, names itself in
+/// `snake_case` for strum and serde alike, and stays off every projection: two
+/// registrations that differ only in confinement hash the same.
+#[test]
+fn confinement_defaults_to_host_and_stays_off_the_projection() {
+	assert_eq!(Confinement::default(), Confinement::Host);
+	for (confinement, name, sandboxed) in
+		[(Confinement::Host, "host", false), (Confinement::ExecSandbox, "exec_sandbox", true)]
+	{
+		assert_eq!(<&'static str>::from(confinement), name);
+		assert_eq!(confinement.to_string(), name);
+		assert_eq!(name.parse::<Confinement>(), Ok(confinement));
+		assert_eq!(serde_json::to_value(confinement).unwrap(), json!(name));
+		assert_eq!(serde_json::from_value::<Confinement>(json!(name)).unwrap(), confinement);
+		assert_eq!(confinement.sandboxed(), sandboxed);
+	}
+
+	let calls = Arc::new(AtomicUsize::new(0));
+	let mut host = Registry::new();
+	host
+		.register(
+			fake_tool(1, "same", Arc::clone(&calls)),
+			Presentation::Slot,
+			claims("omp/tests", Precedence::CORE),
+		)
+		.unwrap();
+	let mut sandboxed = fake_tool(1, "same", calls);
+	sandboxed.spec.confinement = Confinement::ExecSandbox;
+	let mut confined = Registry::new();
+	confined
+		.register(sandboxed, Presentation::Slot, claims("omp/tests", Precedence::CORE))
+		.unwrap();
+	assert_eq!(host.slot_hash(), confined.slot_hash());
+	assert_eq!(host.device_hash(), confined.device_hash());
+	assert_eq!(host.projection_hash(), confined.projection_hash());
+	assert_eq!(
+		confined
+			.live_spec("typed_fake")
+			.expect("live spec")
+			.confinement,
+		Confinement::ExecSandbox
+	);
 }
 
 #[test]

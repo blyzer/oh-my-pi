@@ -33,6 +33,7 @@ impl SlowTool {
 			schema:          Bytes::from_static(br#"{"type":"object","additionalProperties":false}"#),
 			constraint:      Constraint::None,
 			effects:         Effects::empty(),
+			confinement:     omp_tool::Confinement::Host,
 			projection_code: [1; 32],
 		})
 	}

@@ -8,7 +8,7 @@
 use omp_dom::{Dom, Op};
 use omp_journal::{Entry, Kind};
 use omp_session::{Component, ComponentRegistry};
-use omp_tool::ToolSpec;
+use omp_tool::{Confinement, ToolSpec};
 use thiserror::Error;
 
 use crate::{Director, DirectorRegistry, Up};
@@ -74,7 +74,12 @@ impl ExtensionRegistrar {
 	}
 
 	/// Registers a declaration for the existing versioned device path.
-	pub fn tool_spec(&mut self, spec: ToolSpec) {
+	///
+	/// Extension code runs with the user's authority, so the declaration is
+	/// stamped [`Confinement::Host`] whatever it claims: an extension can
+	/// never assert that the exec sandbox confines its tool.
+	pub fn tool_spec(&mut self, mut spec: ToolSpec) {
+		spec.confinement = Confinement::Host;
 		self.tool_specs.push(spec);
 	}
 
@@ -120,10 +125,12 @@ impl ExtensionRegistrar {
 
 #[cfg(test)]
 mod tests {
+	use bytes::Bytes;
 	use omp_core::Str;
 	use omp_dom::{NodeSpec, Tag};
 	use omp_journal::{Entry, Kind};
 	use omp_session::{Component, ComponentRegistry, Draft};
+	use omp_tool::{Confinement, Constraint, Effects, Rev, ToolSpec};
 
 	use super::ExtensionRegistrar;
 	use crate::{Director, DirectorRegistry, Verdict};
@@ -171,5 +178,21 @@ mod tests {
 		let installed = registrar.install(&mut directors, &mut components);
 		assert_eq!(installed.director_ids, ["extension-test"]);
 		assert!(installed.tool_specs.is_empty());
+	}
+
+	#[test]
+	fn extension_tools_cannot_claim_the_exec_sandbox() {
+		let mut registrar = ExtensionRegistrar::new();
+		registrar.tool_spec(ToolSpec {
+			name:            Str::new_static("ext_tool"),
+			rev:             Rev { family: Str::new_static("ext"), n: 1 },
+			description:     Str::new_static("extension tool"),
+			schema:          Bytes::from_static(br#"{"type":"object"}"#),
+			constraint:      Constraint::None,
+			effects:         Effects::empty(),
+			confinement:     Confinement::ExecSandbox,
+			projection_code: [0; 32],
+		});
+		assert_eq!(registrar.tool_specs()[0].confinement, Confinement::Host);
 	}
 }

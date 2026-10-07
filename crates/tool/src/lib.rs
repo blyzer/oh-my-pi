@@ -476,6 +476,54 @@ pub struct Effects {
 
 const _: () = assert!(size_of::<Effects>() <= 96, "Effects must stay compact");
 
+/// Where one tool revision's effects happen, relative to the environment's
+/// exec sandbox.
+///
+/// The host that registers a tool asserts this; the declaration a worker, an
+/// extension, or an MCP server sends never carries it. Approval reads it to
+/// decide whether an active sandbox counts as confinement for the call: a
+/// defaulted `yolo` that only an active sandbox keeps alive covers
+/// [`Confinement::ExecSandbox`] tools, and a [`Confinement::Host`] tool is
+/// admitted exactly as it would be with no sandbox at all.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Deserialize,
+	Eq,
+	Hash,
+	PartialEq,
+	Serialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum Confinement {
+	/// Effects run with the user's authority: in the environment host, the
+	/// session process, an attached client, an extension or MCP process, or a
+	/// child the host spawns without the exec sandbox. The declared effects are
+	/// the whole story, and an active sandbox confines none of them.
+	#[default]
+	Host,
+	/// Effects happen only in processes spawned under the environment's exec
+	/// sandbox, or in in-process shell builtins checked by that sandbox's path
+	/// policy. The declaration leaves out what the sandbox confines, so without
+	/// an active sandbox the tool is process authority. Nested `dyn` targets
+	/// leave the sandbox and are admitted on their own spec.
+	ExecSandbox,
+}
+
+impl Confinement {
+	/// Whether the environment's exec sandbox confines this tool's effects.
+	#[must_use]
+	pub const fn sandboxed(self) -> bool {
+		matches!(self, Self::ExecSandbox)
+	}
+}
+
 /// Returns whether an effect envelope may mutate environment-owned state.
 #[must_use]
 pub fn effects_mutate_environment(effects: &Effects) -> bool {
@@ -709,6 +757,10 @@ pub struct ToolSpec {
 	pub constraint:      Constraint,
 	/// Maximum declared effect envelope; empty grants no authority.
 	pub effects:         Effects,
+	/// Where the effects happen, asserted by the registering host and never by
+	/// a declaration a worker, extension, or MCP server sends. Off the model
+	/// projection and the wire, so it changes no `name@rev`.
+	pub confinement:     Confinement,
 	/// Content identity of the code that produces model-facing projections.
 	///
 	/// Native registrations use their crate/build identity. Supervised workers
