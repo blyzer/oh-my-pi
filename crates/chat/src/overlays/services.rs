@@ -286,6 +286,9 @@ pub struct ApprovalPostureRow {
 	pub sandbox:    Str,
 	/// Whether the user chose the configured mode, rather than the default.
 	pub explicit:   bool,
+	/// Network confinement commands actually get (`scoped`, `disabled`,
+	/// `unconfined`), which can differ from `sv_sandbox_network_mode`.
+	pub network:    Str,
 }
 
 /// One configured SSH host.

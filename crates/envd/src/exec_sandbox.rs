@@ -19,10 +19,12 @@ use omp_sandbox::{
 use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
 use parking_lot::Mutex;
 
+#[cfg(test)]
+use crate::exec_settings::SandboxNetworkMode;
 use crate::{
 	admission::{SandboxState, SandboxUnavailable},
 	exec_settings::{
-		EnvironmentInheritance, ExecSandboxMode, ReadMode, SandboxNetworkMode, SandboxSettings,
+		EnvironmentInheritance, ExecSandboxMode, NetworkConfinement, ReadMode, SandboxSettings,
 		UnscopedWrites,
 	},
 	sandbox_proxy::ScopedProxy,
@@ -135,6 +137,70 @@ impl PathIdentity {
 	}
 }
 
+/// What a compiled sandbox is for, which decides how a `scoped` network is
+/// realised.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SandboxConsumer {
+	/// A shell session. Each command attempt holds a broker capability token,
+	/// so a scoped network starts the session's egress broker.
+	Session,
+	/// An eval worker or a detached process. Neither ever holds an attempt
+	/// token, so the broker would refuse every request it made: a scoped
+	/// network compiles as disabled and starts no broker.
+	Child,
+	/// A construction probe. Nothing runs under it, so a scoped network
+	/// compiles without starting a broker.
+	Probe,
+}
+
+/// Where a compile takes its network from.
+enum NetworkSource {
+	/// A first compile: the settings and the consumer decide.
+	Fresh(SandboxConsumer),
+	/// A path amendment keeps the session's resolved network and its broker,
+	/// so a session that fell back to a disabled network stays disabled.
+	Reuse { confinement: NetworkConfinement, proxy: Option<Arc<ScopedProxy>> },
+}
+
+/// The network one compiled wrapper applies.
+struct ResolvedNetwork {
+	confinement:        NetworkConfinement,
+	mode:               NetworkMode,
+	proxy:              Option<Arc<ScopedProxy>>,
+	/// The scoped broker could not start under the shipped default, so the
+	/// network is disabled instead.
+	broker_unavailable: bool,
+}
+
+impl ResolvedNetwork {
+	const fn unconfined() -> Self {
+		Self {
+			confinement:        NetworkConfinement::Unconfined,
+			mode:               NetworkMode::Enabled,
+			proxy:              None,
+			broker_unavailable: false,
+		}
+	}
+
+	const fn disabled(broker_unavailable: bool) -> Self {
+		Self {
+			confinement: NetworkConfinement::Disabled,
+			mode: NetworkMode::Disabled,
+			proxy: None,
+			broker_unavailable,
+		}
+	}
+
+	const fn scoped(proxy: Option<Arc<ScopedProxy>>) -> Self {
+		Self {
+			confinement: NetworkConfinement::Scoped,
+			mode: NetworkMode::Outbound,
+			proxy,
+			broker_unavailable: false,
+		}
+	}
+}
+
 /// Precompiled kernel launcher and matching in-process file policy.
 pub(crate) struct ExecSandbox {
 	wrapper:      Arc<CommandWrapper>,
@@ -143,7 +209,10 @@ pub(crate) struct ExecSandbox {
 	settings:     Arc<SandboxSettings>,
 	workspace:    Arc<PathBuf>,
 	supervised:   bool,
-	_proxy:       Option<Arc<ScopedProxy>>,
+	/// The confinement this wrapper really applies: `disabled` after a broker
+	/// fallback even though the settings ask for `scoped`.
+	network:      NetworkConfinement,
+	proxy:        Option<Arc<ScopedProxy>>,
 }
 
 /// One unforgeable execution attempt within an [`ExecSandbox`] session.
@@ -180,17 +249,25 @@ impl ExecSandbox {
 		settings: &SandboxSettings,
 		workspace_root: &Path,
 		supervised: bool,
+		consumer: SandboxConsumer,
 	) -> Result<Option<Arc<Self>>, SandboxError> {
-		Self::compile_amended(settings, workspace_root, supervised, None, None, None)
+		Self::compile_amended(
+			settings,
+			workspace_root,
+			supervised,
+			NetworkSource::Fresh(consumer),
+			None,
+			None,
+		)
 	}
 
 	fn compile_amended(
 		settings: &SandboxSettings,
 		workspace_root: &Path,
 		supervised: bool,
+		network: NetworkSource,
 		amendment: Option<&SandboxDenialFact>,
 		approved_scope: Option<&ApprovedPathScope>,
-		reused_proxy: Option<Arc<ScopedProxy>>,
 	) -> Result<Option<Arc<Self>>, SandboxError> {
 		if let Some(scope) = approved_scope {
 			scope
@@ -200,9 +277,11 @@ impl ExecSandbox {
 					source,
 				})?;
 		}
-		if settings.mode == ExecSandboxMode::Off
-			&& settings.network_mode != SandboxNetworkMode::Scoped
-		{
+		let requested = match &network {
+			NetworkSource::Fresh(_) => settings.network_confinement(),
+			NetworkSource::Reuse { confinement, .. } => *confinement,
+		};
+		if settings.mode == ExecSandboxMode::Off && requested != NetworkConfinement::Scoped {
 			return if settings.environment_policy_is_default()
 				&& settings.read_mode == ReadMode::Host
 				&& settings.readable_roots.is_empty()
@@ -211,10 +290,13 @@ impl ExecSandbox {
 			{
 				Ok(None)
 			} else {
+				// No launcher applies this spec's network; only its environment
+				// and the in-process file policy are used.
 				let mut parts = policy_parts_with_approved_scope(
 					settings,
 					workspace_root,
 					WriteMode::Scoped,
+					NetworkMode::Enabled,
 					None,
 					amendment,
 					approved_scope,
@@ -233,32 +315,20 @@ impl ExecSandbox {
 					settings: Arc::new(settings.clone()),
 					workspace: Arc::new(workspace_root.to_path_buf()),
 					supervised,
-					_proxy: None,
+					network: NetworkConfinement::Unconfined,
+					proxy: None,
 				})))
 			};
 		}
 		let runner = Runner::native_command()?;
-		let proxy = if let Some(proxy) = reused_proxy {
-			Some(proxy)
-		} else if settings.network_mode == SandboxNetworkMode::Scoped {
-			let approved = match amendment {
-				Some(SandboxDenialFact::Network { host, port }) => Some((host, *port)),
-				_ => None,
-			};
-			Some(Arc::new(
-				match approved {
-					Some(approved) => ScopedProxy::start_with_amendment(settings, Some(approved)),
-					None => ScopedProxy::start(settings),
-				}
-				.map_err(|source| SandboxError::BackendIo {
-					backend: runner.backend(),
-					operation: omp_sandbox::SandboxOperation::Compile,
-					source,
-				})?,
-			))
-		} else {
-			None
-		};
+		let network = resolve_network(settings, requested, network, amendment).map_err(|source| {
+			SandboxError::BackendIo {
+				backend: runner.backend(),
+				operation: omp_sandbox::SandboxOperation::Compile,
+				source,
+			}
+		})?;
+		let proxy = network.proxy.clone();
 		let requested_write = if settings.mode == ExecSandboxMode::WorkspaceWrite
 			&& settings.unscoped_writes == UnscopedWrites::Overlay
 		{
@@ -276,6 +346,7 @@ impl ExecSandbox {
 			settings,
 			workspace_root,
 			requested_write,
+			network.mode,
 			proxy.as_deref(),
 			amendment,
 			approved_scope,
@@ -289,6 +360,7 @@ impl ExecSandbox {
 					settings,
 					workspace_root,
 					WriteMode::Scoped,
+					network.mode,
 					proxy.as_deref(),
 					amendment,
 					approved_scope,
@@ -306,7 +378,10 @@ impl ExecSandbox {
 		note.push_str(parts.roots_label.as_str());
 		note.push_str(" are denied");
 		note.push_str("; network=");
-		note.push_str(<&'static str>::from(settings.network_mode));
+		note.push_str(<&'static str>::from(network.confinement));
+		if network.broker_unavailable {
+			note.push_str(" (scoped broker unavailable)");
+		}
 		if degraded {
 			note.push_str("; overlay unavailable, using scoped writes");
 		}
@@ -325,7 +400,8 @@ impl ExecSandbox {
 			settings: Arc::new(settings.clone()),
 			workspace: Arc::new(workspace_root.to_path_buf()),
 			supervised,
-			_proxy: proxy,
+			network: network.confinement,
+			proxy,
 		})))
 	}
 
@@ -348,6 +424,9 @@ impl ExecSandbox {
 	}
 
 	/// Compiles a fresh one-shot policy using a previously frozen path scope.
+	///
+	/// The rerun keeps this session's resolved network and broker: a session
+	/// whose broker could not start stays network-disabled.
 	pub(crate) fn amended_scope(
 		&self,
 		scope: &ApprovedPathScope,
@@ -356,13 +435,16 @@ impl ExecSandbox {
 			&self.settings,
 			&self.workspace,
 			self.supervised,
+			NetworkSource::Reuse { confinement: self.network, proxy: self.proxy.clone() },
 			None,
 			Some(scope),
-			self._proxy.clone(),
 		)
 	}
 
 	/// Compiles a fresh one-shot policy allowing one broker endpoint.
+	///
+	/// Only a session that owns a broker can be amended this way; any other
+	/// session has no broker endpoint to widen.
 	pub(crate) fn amended_network(
 		&self,
 		amendment: &SandboxDenialFact,
@@ -370,19 +452,22 @@ impl ExecSandbox {
 		let SandboxDenialFact::Network { .. } = amendment else {
 			return Ok(None);
 		};
+		if self.proxy.is_none() {
+			return Ok(None);
+		}
 		Self::compile_amended(
 			&self.settings,
 			&self.workspace,
 			self.supervised,
+			NetworkSource::Fresh(SandboxConsumer::Session),
 			Some(amendment),
-			None,
 			None,
 		)
 	}
 
 	/// Opens one isolated denial collection interval for an execution attempt.
 	pub(crate) fn begin_attempt(self: &Arc<Self>) -> Arc<ExecSandboxAttempt> {
-		let token = self._proxy.as_ref().map(|proxy| proxy.begin_attempt());
+		let token = self.proxy.as_ref().map(|proxy| proxy.begin_attempt());
 		Arc::new(ExecSandboxAttempt {
 			sandbox: Arc::clone(self),
 			denial: Mutex::new(None),
@@ -429,7 +514,7 @@ impl ExecSandboxAttempt {
 				self
 					.token
 					.as_ref()
-					.and_then(|token| self.sandbox._proxy.as_ref()?.finish_attempt(token))
+					.and_then(|token| self.sandbox.proxy.as_ref()?.finish_attempt(token))
 			})
 			.flatten();
 		path_denial
@@ -449,7 +534,7 @@ impl ExecSandboxAttempt {
 	}
 
 	fn proxy_environment(&self, environment: &mut Vec<(OsString, OsString)>) {
-		let Some(proxy) = &self.sandbox._proxy else {
+		let Some(proxy) = &self.sandbox.proxy else {
 			return;
 		};
 		let Some(token) = &self.token else {
@@ -485,7 +570,7 @@ impl Drop for ExecSandboxAttempt {
 			if let Some(token) = &self.token {
 				let _ = self
 					.sandbox
-					._proxy
+					.proxy
 					.as_ref()
 					.and_then(|proxy| proxy.finish_attempt(token));
 			}
@@ -838,6 +923,17 @@ fn open_beneath_root(root: &Path, path: &Path, request: OpenRequest) -> io::Resu
 	Ok(unsafe { fs::File::from_raw_fd(opened) })
 }
 
+/// The kernel network mode `settings` name, before any consumer or
+/// provenance rule: what a policy-only test compiles.
+#[cfg(test)]
+const fn requested_network_mode(settings: &SandboxSettings) -> NetworkMode {
+	match settings.network_mode {
+		SandboxNetworkMode::Disabled => NetworkMode::Disabled,
+		SandboxNetworkMode::Open => NetworkMode::Enabled,
+		SandboxNetworkMode::Scoped => NetworkMode::Outbound,
+	}
+}
+
 #[cfg(test)]
 fn policy_parts(
 	settings: &SandboxSettings,
@@ -846,13 +942,22 @@ fn policy_parts(
 	proxy: Option<&ScopedProxy>,
 	amendment: Option<&SandboxDenialFact>,
 ) -> Result<PolicyParts, SandboxError> {
-	policy_parts_with_approved_scope(settings, workspace_root, write, proxy, amendment, None)
+	policy_parts_with_approved_scope(
+		settings,
+		workspace_root,
+		write,
+		requested_network_mode(settings),
+		proxy,
+		amendment,
+		None,
+	)
 }
 
 fn policy_parts_with_approved_scope(
 	settings: &SandboxSettings,
 	workspace_root: &Path,
 	write: WriteMode,
+	network: NetworkMode,
 	proxy: Option<&ScopedProxy>,
 	_amendment: Option<&SandboxDenialFact>,
 	approved_scope: Option<&ApprovedPathScope>,
@@ -868,11 +973,7 @@ fn policy_parts_with_approved_scope(
 	let mut spec = SandboxSpec::new(OsString::new());
 	spec
 		.set_write(write)
-		.set_network(match settings.network_mode {
-			SandboxNetworkMode::Disabled => NetworkMode::Disabled,
-			SandboxNetworkMode::Open => NetworkMode::Enabled,
-			SandboxNetworkMode::Scoped => NetworkMode::Outbound,
-		})
+		.set_network(network)
 		.set_degradation(DegradationPolicy::Reject);
 	// Validated here rather than at the call site: `ResourceLimits::new`
 	// rejects a nonfinite or negative core count, and a ceiling that cannot be
@@ -1088,11 +1189,7 @@ fn policy_parts_with_approved_scope(
 		#[cfg(test)]
 		spec_snapshot: {
 			let mut snapshot = StrMut::new("network=");
-			snapshot.push_str(<&'static str>::from(match settings.network_mode {
-				SandboxNetworkMode::Disabled => NetworkMode::Disabled,
-				SandboxNetworkMode::Open => NetworkMode::Enabled,
-				SandboxNetworkMode::Scoped => NetworkMode::Outbound,
-			}));
+			snapshot.push_str(<&'static str>::from(network));
 			snapshot.push_str(";write=");
 			snapshot.push_str(<&'static str>::from(write));
 			snapshot.push_str(";tmpdir=");
@@ -1234,10 +1331,79 @@ pub(crate) fn probe(settings: &SandboxSettings, workspace_root: &Path) -> Sandbo
 	if settings.mode == ExecSandboxMode::Off {
 		return SandboxState::Off;
 	}
-	match ExecSandbox::compile(settings, workspace_root, true) {
+	match ExecSandbox::compile(settings, workspace_root, true, SandboxConsumer::Probe) {
 		Ok(Some(_)) => SandboxState::Active,
 		Ok(None) => SandboxState::Off,
 		Err(error) => SandboxState::Unavailable { cause: SandboxUnavailable::classify(&error) },
+	}
+}
+
+/// Resolves the network one native compile applies.
+///
+/// Under `scoped`, a session starts its broker (a network amendment starts a
+/// one-shot broker that also allows the approved endpoint), a tokenless child
+/// gets a disabled network, and a probe compiles the scoped profile without a
+/// broker. When the session broker cannot start under the shipped default,
+/// the network falls back to disabled rather than failing every command; a
+/// sandbox the user configured, or an approved amendment, fails instead.
+fn resolve_network(
+	settings: &SandboxSettings,
+	requested: NetworkConfinement,
+	source: NetworkSource,
+	amendment: Option<&SandboxDenialFact>,
+) -> io::Result<ResolvedNetwork> {
+	let consumer = match source {
+		NetworkSource::Reuse { confinement, proxy } => {
+			return Ok(match (confinement, proxy) {
+				(NetworkConfinement::Scoped, Some(proxy)) => ResolvedNetwork::scoped(Some(proxy)),
+				// A scoped session always owns its broker; without one, fail closed.
+				(NetworkConfinement::Scoped | NetworkConfinement::Disabled, _) => {
+					ResolvedNetwork::disabled(false)
+				},
+				(NetworkConfinement::Unconfined, _) => ResolvedNetwork::unconfined(),
+			});
+		},
+		NetworkSource::Fresh(consumer) => consumer,
+	};
+	match (requested, consumer) {
+		(NetworkConfinement::Unconfined, _) => Ok(ResolvedNetwork::unconfined()),
+		(NetworkConfinement::Disabled, _) | (NetworkConfinement::Scoped, SandboxConsumer::Child) => {
+			Ok(ResolvedNetwork::disabled(false))
+		},
+		(NetworkConfinement::Scoped, SandboxConsumer::Probe) => Ok(ResolvedNetwork::scoped(None)),
+		(NetworkConfinement::Scoped, SandboxConsumer::Session) => {
+			let approved = match amendment {
+				Some(SandboxDenialFact::Network { host, port }) => Some((host, *port)),
+				_ => None,
+			};
+			match start_broker(settings, approved) {
+				Ok(proxy) => Ok(ResolvedNetwork::scoped(Some(Arc::new(proxy)))),
+				Err(source) if approved.is_none() && !settings.explicit => {
+					tracing::warn!(
+						%source,
+						"scoped egress broker unavailable; commands run with the network disabled"
+					);
+					Ok(ResolvedNetwork::disabled(true))
+				},
+				Err(source) => Err(source),
+			}
+		},
+	}
+}
+
+/// Starts a session egress broker, or a one-shot broker that also allows one
+/// approved endpoint.
+fn start_broker(
+	settings: &SandboxSettings,
+	approved: Option<(&Str, u16)>,
+) -> io::Result<ScopedProxy> {
+	#[cfg(test)]
+	if tests::BROKER_START_FAILS.with(std::cell::Cell::get) {
+		return Err(io::Error::other("injected broker start failure"));
+	}
+	match approved {
+		Some(approved) => ScopedProxy::start_with_amendment(settings, Some(approved)),
+		None => ScopedProxy::start(settings),
 	}
 }
 
@@ -1358,10 +1524,311 @@ pub(crate) fn homebrew_shaped_prefix(root: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+	use std::cell::Cell;
+
 	use super::*;
+	use crate::admission::Provenance;
+
+	thread_local! {
+		/// Makes [`start_broker`] fail on this thread, as a loopback bind, a
+		/// read-only temporary directory or a thread spawn can in production.
+		pub(super) static BROKER_START_FAILS: Cell<bool> = const { Cell::new(false) };
+	}
+
+	/// Fails every broker start on this thread until dropped.
+	struct BrokerStartFails;
+
+	impl BrokerStartFails {
+		fn arm() -> Self {
+			BROKER_START_FAILS.with(|fails| fails.set(true));
+			Self
+		}
+	}
+
+	impl Drop for BrokerStartFails {
+		fn drop(&mut self) {
+			BROKER_START_FAILS.with(|fails| fails.set(false));
+		}
+	}
 
 	fn workspace_settings() -> SandboxSettings {
 		SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() }
+	}
+
+	/// Whether this host builds native command wrappers; the compile proofs
+	/// below need one and return early elsewhere (Linux without bwrap).
+	fn native_backend() -> bool {
+		Runner::native_command().is_ok()
+	}
+
+	fn explicit_scoped(mode: ExecSandboxMode) -> SandboxSettings {
+		SandboxSettings {
+			mode,
+			network_mode: SandboxNetworkMode::Scoped,
+			network_provenance: Provenance::Explicit,
+			explicit: true,
+			..SandboxSettings::default()
+		}
+	}
+
+	#[test]
+	fn explicit_off_with_the_defaulted_network_stays_environment_only() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		// Mode `off` set by the user, network left at its scoped default: no
+		// native backend is consulted, so this holds where none exists.
+		let settings = SandboxSettings {
+			mode: ExecSandboxMode::Off,
+			explicit: true,
+			..SandboxSettings::default()
+		};
+		assert_eq!(settings.network_mode, SandboxNetworkMode::Scoped);
+		assert!(
+			ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Session)
+				.expect("no sandbox")
+				.is_none()
+		);
+		let settings = SandboxSettings {
+			env_set: std::collections::BTreeMap::from([(
+				Str::new_static("FIXED"),
+				Str::new_static("value"),
+			)]),
+			..settings
+		};
+		let sandbox =
+			ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Session)
+				.expect("environment policy")
+				.expect("environment-only wrapper");
+		assert!(sandbox.wrapper.launcher().is_none());
+		assert!(sandbox.proxy.is_none(), "no broker serves an unsandboxed session");
+		assert_eq!(sandbox.network, NetworkConfinement::Unconfined);
+	}
+
+	#[test]
+	fn explicit_off_with_an_explicit_scoped_network_compiles_a_network_only_wrapper() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let settings = explicit_scoped(ExecSandboxMode::Off);
+		let compiled =
+			ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Session);
+		if !native_backend() {
+			// The user asked for this network-only sandbox; without a backend it
+			// is a construction failure, never a silent unsandboxed run.
+			assert!(compiled.is_err());
+			return;
+		}
+		let sandbox = compiled
+			.expect("network-only policy")
+			.expect("network-only wrapper");
+		assert!(sandbox.wrapper.launcher().is_some());
+		assert!(sandbox.proxy.is_some(), "the session owns its broker");
+		assert_eq!(sandbox.network, NetworkConfinement::Scoped);
+		assert!(sandbox.session_note().contains("network=scoped"), "{}", sandbox.session_note());
+	}
+
+	#[test]
+	fn scoped_network_resolves_by_consumer() {
+		let settings = SandboxSettings::default();
+		let child = resolve_network(
+			&settings,
+			NetworkConfinement::Scoped,
+			NetworkSource::Fresh(SandboxConsumer::Child),
+			None,
+		)
+		.expect("child network");
+		assert_eq!(child.confinement, NetworkConfinement::Disabled);
+		assert_eq!(child.mode, NetworkMode::Disabled);
+		assert!(child.proxy.is_none(), "a tokenless child gets no broker");
+		assert!(!child.broker_unavailable);
+		let probe = resolve_network(
+			&settings,
+			NetworkConfinement::Scoped,
+			NetworkSource::Fresh(SandboxConsumer::Probe),
+			None,
+		)
+		.expect("probe network");
+		assert_eq!(probe.confinement, NetworkConfinement::Scoped);
+		assert_eq!(probe.mode, NetworkMode::Outbound);
+		assert!(probe.proxy.is_none(), "a probe starts no broker");
+		let session = resolve_network(
+			&settings,
+			NetworkConfinement::Scoped,
+			NetworkSource::Fresh(SandboxConsumer::Session),
+			None,
+		)
+		.expect("session network");
+		assert_eq!(session.confinement, NetworkConfinement::Scoped);
+		assert_eq!(session.mode, NetworkMode::Outbound);
+		let proxy = session.proxy.expect("the session starts its broker");
+		let reused = resolve_network(
+			&settings,
+			NetworkConfinement::Scoped,
+			NetworkSource::Reuse {
+				confinement: NetworkConfinement::Scoped,
+				proxy:       Some(Arc::clone(&proxy)),
+			},
+			None,
+		)
+		.expect("reused network");
+		assert!(
+			reused
+				.proxy
+				.is_some_and(|reused| Arc::ptr_eq(&reused, &proxy))
+		);
+		for (confinement, mode) in [
+			(NetworkConfinement::Disabled, NetworkMode::Disabled),
+			(NetworkConfinement::Unconfined, NetworkMode::Enabled),
+		] {
+			let resolved = resolve_network(
+				&settings,
+				confinement,
+				NetworkSource::Fresh(SandboxConsumer::Session),
+				None,
+			)
+			.expect("unscoped network");
+			assert_eq!((resolved.confinement, resolved.mode), (confinement, mode));
+			assert!(resolved.proxy.is_none());
+		}
+	}
+
+	#[test]
+	fn broker_start_failure_degrades_only_the_shipped_default() {
+		let _fails = BrokerStartFails::arm();
+		let degraded = resolve_network(
+			&SandboxSettings::default(),
+			NetworkConfinement::Scoped,
+			NetworkSource::Fresh(SandboxConsumer::Session),
+			None,
+		)
+		.expect("the shipped default degrades");
+		assert_eq!(degraded.confinement, NetworkConfinement::Disabled);
+		assert_eq!(degraded.mode, NetworkMode::Disabled);
+		assert!(degraded.proxy.is_none());
+		assert!(degraded.broker_unavailable);
+
+		// Any sandbox convar the user set makes the sandbox theirs: hard error.
+		for explicit in [
+			SandboxSettings { explicit: true, ..SandboxSettings::default() },
+			explicit_scoped(ExecSandboxMode::WorkspaceWrite),
+			explicit_scoped(ExecSandboxMode::Off),
+		] {
+			assert!(
+				resolve_network(
+					&explicit,
+					NetworkConfinement::Scoped,
+					NetworkSource::Fresh(SandboxConsumer::Session),
+					None,
+				)
+				.is_err()
+			);
+		}
+		// An approved network amendment cannot be honoured without its broker.
+		let approved = SandboxDenialFact::Network { host: Str::new_static("example.com"), port: 443 };
+		assert!(
+			resolve_network(
+				&SandboxSettings::default(),
+				NetworkConfinement::Scoped,
+				NetworkSource::Fresh(SandboxConsumer::Session),
+				Some(&approved),
+			)
+			.is_err()
+		);
+		// A scoped session without a broker fails closed rather than open.
+		let reused = resolve_network(
+			&SandboxSettings::default(),
+			NetworkConfinement::Scoped,
+			NetworkSource::Reuse { confinement: NetworkConfinement::Scoped, proxy: None },
+			None,
+		)
+		.expect("reused network");
+		assert_eq!(reused.mode, NetworkMode::Disabled);
+	}
+
+	#[test]
+	fn tokenless_children_and_probes_compile_without_a_broker() {
+		if !native_backend() {
+			return;
+		}
+		let workspace = tempfile::tempdir().expect("workspace");
+		let settings = SandboxSettings::default();
+		let child = ExecSandbox::compile(&settings, workspace.path(), false, SandboxConsumer::Child)
+			.expect("child policy")
+			.expect("child wrapper");
+		assert_eq!(child.network, NetworkConfinement::Disabled);
+		assert!(child.proxy.is_none());
+		assert!(child.session_note().contains("network=disabled"), "{}", child.session_note());
+		let probe = ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Probe)
+			.expect("probe policy")
+			.expect("probe wrapper");
+		assert_eq!(probe.network, NetworkConfinement::Scoped);
+		assert!(probe.proxy.is_none());
+		let session =
+			ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Session)
+				.expect("session policy")
+				.expect("session wrapper");
+		assert_eq!(session.network, NetworkConfinement::Scoped);
+		assert!(session.proxy.is_some());
+		assert!(session.session_note().contains("network=scoped"), "{}", session.session_note());
+	}
+
+	#[test]
+	fn a_path_amendment_after_the_broker_fallback_stays_network_disabled() {
+		if !native_backend() {
+			return;
+		}
+		let workspace = tempfile::tempdir().expect("workspace");
+		let outside = tempfile::tempdir().expect("outside");
+		let settings = SandboxSettings::default();
+		let degraded = {
+			let _fails = BrokerStartFails::arm();
+			ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Session)
+				.expect("the shipped default degrades")
+				.expect("session wrapper")
+		};
+		assert_eq!(degraded.network, NetworkConfinement::Disabled);
+		assert!(degraded.proxy.is_none());
+		assert!(
+			degraded
+				.session_note()
+				.contains("network=disabled (scoped broker unavailable)"),
+			"{}",
+			degraded.session_note()
+		);
+		{
+			// An explicitly scoped network keeps failing hard.
+			let _fails = BrokerStartFails::arm();
+			let explicit = ExecSandbox::compile(
+				&explicit_scoped(ExecSandboxMode::WorkspaceWrite),
+				workspace.path(),
+				true,
+				SandboxConsumer::Session,
+			);
+			assert!(matches!(explicit, Err(SandboxError::BackendIo { .. })));
+			assert_eq!(
+				probe(&explicit_scoped(ExecSandboxMode::WorkspaceWrite), workspace.path()),
+				SandboxState::Active,
+				"a probe starts no broker, so it cannot see this failure"
+			);
+		}
+		// The broker could start now; the approved rerun still keeps the
+		// session's disabled network instead of re-deriving scoped from settings.
+		let scope = ApprovedPathScope::capture(outside.path(), ApprovedPathAccess::Write)
+			.expect("approved scope");
+		let amended = degraded
+			.amended_scope(&scope)
+			.expect("amended policy")
+			.expect("amended wrapper");
+		assert_eq!(amended.network, NetworkConfinement::Disabled);
+		assert!(amended.proxy.is_none());
+		assert!(amended.session_note().contains("network=disabled"), "{}", amended.session_note());
+		assert!(
+			degraded
+				.amended_network(&SandboxDenialFact::Network {
+					host: Str::new_static("example.com"),
+					port: 443,
+				})
+				.expect("no network amendment")
+				.is_none(),
+			"a session without a broker has no endpoint to widen"
+		);
 	}
 
 	#[test]
@@ -1421,7 +1888,7 @@ mod tests {
 				.check_write(&std::env::temp_dir().join("omp-sandbox-test"))
 				.is_ok()
 		);
-		assert!(parts.spec_snapshot.contains("network=disable"));
+		assert!(parts.spec_snapshot.contains("network=outbound"));
 		assert!(parts.spec_snapshot.contains("write=scope"));
 		for pattern in ["*KEY*", "*SECRET*", "*TOKEN*"] {
 			assert!(parts.spec_snapshot.contains(pattern));
@@ -1440,9 +1907,10 @@ mod tests {
 			)]),
 			..SandboxSettings::default()
 		};
-		let sandbox = ExecSandbox::compile(&settings, workspace.path(), true)
-			.expect("environment policy")
-			.expect("environment-only wrapper");
+		let sandbox =
+			ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Session)
+				.expect("environment policy")
+				.expect("environment-only wrapper");
 		assert!(sandbox.wrapper.launcher().is_none());
 		assert_eq!(
 			sandbox.resolve_env([
@@ -1456,9 +1924,10 @@ mod tests {
 			env_deny: vec![Str::new_static("*KEY*")],
 			..SandboxSettings::default()
 		};
-		let sandbox = ExecSandbox::compile(&settings, workspace.path(), true)
-			.expect("case-insensitive environment policy")
-			.expect("environment-only wrapper");
+		let sandbox =
+			ExecSandbox::compile(&settings, workspace.path(), true, SandboxConsumer::Session)
+				.expect("case-insensitive environment policy")
+				.expect("environment-only wrapper");
 		assert_eq!(
 			sandbox.resolve_env([
 				(OsString::from("api_key"), OsString::from("secret")),
@@ -1525,6 +1994,7 @@ mod tests {
 			&settings,
 			workspace.path(),
 			WriteMode::Deny,
+			requested_network_mode(&settings),
 			None,
 			None,
 			Some(&scope),
@@ -1869,6 +2339,7 @@ mod tests {
 			&settings,
 			workspace.path(),
 			WriteMode::Scoped,
+			requested_network_mode(&settings),
 			None,
 			None,
 			Some(&scope),
