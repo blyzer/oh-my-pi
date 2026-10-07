@@ -66,18 +66,30 @@ client and framing boundary; it does not contain an alternate host.
   whose stderr shows a resolver or connection failure gets the mode's
   generic text once per session.
 - `approval_relay` carries a daemon command's one-time sandbox amendment
-  prompt to the connection that issued the command. Only an application
-  connection that advertises `approval-relay` to an environment host gets a
-  relay; extension connections never do, so extension code cannot approve its
-  own commands. Each Exec, and each native invocation (through a task-local
-  that `ShellExecHost::run` reads), captures the relay for its request, so the
-  query travels only on that request and only that connection's answer
-  decides it. The daemon builds the ticket from its own requirements. A
-  command's relay outranks the host route an in-process composition binds;
-  named processes carry none. Every unanswered path fails closed: the
-  backstop is the prompt's timeout plus a 10 s grace, a cancelled command
-  withdraws its query, and a closed connection denies its pending and later
-  prompts, including those of commands that outlive it.
+  prompt to the session that issued the command, and answers it there. The
+  daemon's host binds no approval route; an attached session advertises
+  `approval-relay` in its hello, and only such an application connection to
+  an environment host gets a relay. Extension connections never do, so
+  extension code cannot approve its own commands. Each Exec, and each native
+  invocation (through a task-local that `ShellExecHost::run` reads), captures
+  the relay for its request, so the query travels only on that request and
+  only that connection's answer decides it. The daemon builds the ticket from
+  its own requirements. A command's relay outranks the host route an
+  in-process composition binds; named processes carry none. Every unanswered
+  path fails closed: the backstop is the prompt's timeout plus a 10 s grace, a
+  cancelled command withdraws its query, and a closed connection denies its
+  pending and later prompts, including those of commands that outlive it. On
+  the session side, `pump_approval_queries` files each query on the route
+  `ProjectEnvironment::bind_approval_authority` binds (the driver's kernel
+  route, so the prompt is journaled and answered like an in-process one) with
+  `request_cancellable`, and answers with the decision. A withdrawal, a closed
+  transport or shutdown cancels the filed prompt without answering, and a
+  query that arrives while no route is bound is decided by its unreachable
+  rules, which deny a sandbox amendment.
+  Embedded and isolated compositions advertise nothing and keep prompting
+  through their in-process host. Only sandbox amendments are relayed: a
+  daemon command's `dyn` admissions and privileged mutations still fail
+  closed.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 
