@@ -5,6 +5,7 @@ use std::{path::Path, sync::Arc};
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
 use omp_driver::adw::{RunStatus, definition, production::ProductionAdwHost};
+use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::AdwCommand;
@@ -22,10 +23,7 @@ pub async fn run(command: AdwCommand) -> miette::Result<()> {
 fn list(project: &Path) -> miette::Result<()> {
 	let names = definition::available(project);
 	if names.is_empty() {
-		println!(
-			"No workflows declared. Add `{}/<name>.toml` under the project root.",
-			definition::WORKFLOW_DIR
-		);
+		println!("No workflows declared. Add `{WORKFLOWS_DIR}/<name>.toml` under the project root.");
 		return Ok(());
 	}
 	for name in names {

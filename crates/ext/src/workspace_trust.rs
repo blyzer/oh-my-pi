@@ -24,6 +24,11 @@
 //! operator was asked about
 //! ([`crate::trust::GrantsFile::persist_workspace_trust`]), so a stale answer
 //! never undoes a concurrent revoke.
+//!
+//! [`inventory`] owns the gated input paths every loader joins and computes
+//! the [`InputsDigest`] over them.
+
+pub mod inventory;
 
 use std::{
 	fmt::{self, Display},
@@ -33,12 +38,13 @@ use std::{
 };
 
 use jiff::Timestamp;
-use omp_core::{Hash32, Hash32ParseError, Str, sf};
+use omp_core::{Hash32, Hash32ParseError, Str, project_file::ProjectFileError, sf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use strum::{Display, EnumDiscriminants, EnumString, IntoStaticStr};
 use thiserror::Error;
 
-use crate::trust::GrantDuration;
+use self::inventory::BudgetLimit;
+use crate::{plugin_command::PluginId, trust::GrantDuration};
 
 /// Whether a workspace's project-sourced inputs load with the operator's
 /// authority.
@@ -604,7 +610,9 @@ where
 		})
 }
 
-/// Failure to build a [`WorkspaceTrustGrant`].
+/// Failure to build a [`WorkspaceTrustGrant`], or to take a workspace's
+/// [`inventory::InputsInventory`]. An inventory failure fails closed: the
+/// workspace has no digest, so no row can trust it.
 #[derive(Debug, Error)]
 pub enum WorkspaceTrustError {
 	/// A workspace or subtree path could not be canonicalized.
@@ -633,6 +641,47 @@ pub enum WorkspaceTrustError {
 		workspace: PathBuf,
 		/// The canonical subtree root.
 		under:     PathBuf,
+	},
+	/// The contained project-file reader refused a gated file (outside the
+	/// repository, not a regular file, over its cap) or could not read it.
+	#[error("a gated workspace input cannot be inventoried")]
+	Input(#[from] ProjectFileError),
+	/// A gated directory, or an entry inside one, could not be resolved or
+	/// listed.
+	#[error("gated workspace input {} cannot be read", path.display())]
+	Read {
+		/// The path as the inventory reached it.
+		path:   PathBuf,
+		/// Filesystem failure.
+		#[source]
+		source: io::Error,
+	},
+	/// A gated directory, or an entry inside one, resolves outside the
+	/// repository.
+	#[error("gated workspace input {} resolves outside the repository", path.display())]
+	Escapes {
+		/// The path as the inventory reached it.
+		path: PathBuf,
+	},
+	/// An enabled project plugin is installed outside both the repository
+	/// and the user plugin cache, so the digest cannot bind what it loads.
+	#[error(
+		"enabled project plugin `{plugin}` is installed at {}, outside the repository and the user plugin cache",
+		path.display()
+	)]
+	ExternalPluginRoot {
+		/// The plugin's registry id.
+		plugin: PluginId,
+		/// Its canonical install root.
+		path:   PathBuf,
+	},
+	/// The gated inputs overran an [`inventory::InventoryBudget`] bound.
+	#[error("gated workspace inputs overran the inventory {limit} budget at {}", path.display())]
+	Budget {
+		/// The path at which the bound was crossed.
+		path:  PathBuf,
+		/// The bound.
+		limit: BudgetLimit,
 	},
 }
 

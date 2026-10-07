@@ -64,7 +64,14 @@ and skills as data (containment exists).
 - PR1 (~300; implemented as `omp_core::project_file`, F5/F9 closed): contained project-file reader (regular file, no root escape, size cap) applied
   to cfg load/write, context files, SYSTEM/APPEND, whole-file rules, `secrets.yml`,
   `hosts.toml`, lsp configs. Fixes F5 and F9 without a trust decision.
-- PR2 (~250): `omp-ext` `WorkspaceTrust`, grants table, inventory digest, round-trip tests.
+- PR2 (~250; implemented in two parts): PR2a `omp-ext` `WorkspaceTrust`, the
+  `[[workspace_trust]]` grants table keyed by canonical workspace path, `evaluate`, the grant-file
+  lock; PR2b `omp_ext::workspace_trust::inventory`, the gated-input inventory and its
+  `omp.workspace-trust.inputs.v1` digest (gated and excluded inputs listed in `crates/ext/README.md`).
+  The inventory owns every gated path name and the envd/driver loaders import it. Found in code
+  beyond the findings above: `.omp/TITLE_SYSTEM.md`, `.omp/vaults.toml` (project vaults shadow user
+  vaults and may name any absolute root), `.agent/plugins`, `.agents/plugins`,
+  `.claude/settings.local.json`, and the YAML `lsp`/`dap` names.
 - PR3 (~400): driver plumbing, default Untrusted; gate native extensions, SYSTEM/APPEND,
   plugin registry, secrets override; update e2e/driver tests that rely on workspace extensions.
 - PR4 (~450): envd gating of MCP project kinds, LSP/DAP sources and local roots, hosts;
@@ -86,7 +93,8 @@ and skills as data (containment exists).
    an explicit link/lock record?
 6. Forbid `!cmd`/env-name substitution for project MCP files regardless of trust?
 7. Should `cl_disabled_extensions` lose its PROJECT flag?
-8. Gate all foreign-ecosystem MCP files, or only `.omp/mcp.json` and `.mcp.json`?
+8. Gate all foreign-ecosystem MCP files, or only `.omp/mcp.json` and `.mcp.json`? Answered
+   (PR2b): the digest covers every MCP kind envd classes as project-scoped.
 9. Is a new typed trust method acceptable on the `proto`/`rpc` wire contract?
 10. UNCONFIRMED follow-ups: whether chat startup installs a cfg reply sink (F9 echo); exact
     LSP lazy-start triggers; whether the extension-host sandbox env is filtered; whether any

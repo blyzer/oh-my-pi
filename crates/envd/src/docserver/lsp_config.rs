@@ -18,6 +18,7 @@ use omp_ext::{
 		resolve_plugin_command,
 	},
 	plugin_command::{PluginLaunch, PluginLaunchKind},
+	workspace_trust::inventory::{LSP_CONFIG_NAMES, PROJECT_DIR},
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -31,8 +32,6 @@ use crate::docserver::lsp_process::{
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_VALUE_DEPTH: usize = 64;
 const MAX_VALUE_NODES: usize = 100_000;
-const CONFIG_NAMES: [&str; 6] =
-	["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
 
 /// Origin class of one native LSP declaration.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, strum::IntoStaticStr)]
@@ -399,7 +398,7 @@ pub fn discover_lsp_sources(
 	let project = Containment::Within(containment_root(project_root));
 	append_existing(
 		&mut sources,
-		&project_root.join(".omp"),
+		&project_root.join(PROJECT_DIR),
 		LspConfigSourceKind::Project,
 		project,
 	)?;
@@ -543,7 +542,7 @@ fn append_existing(
 	kind: LspConfigSourceKind,
 	containment: Containment<'_>,
 ) -> Result<(), LspConfigError> {
-	for name in CONFIG_NAMES {
+	for name in LSP_CONFIG_NAMES {
 		let path = directory.join(name);
 		match LspConfigSource::read_contained(kind, &path, containment) {
 			Ok(Some(source)) => sources.push(source),
@@ -883,8 +882,11 @@ pub enum LspConfigError {
 pub(crate) mod tests {
 	use std::fs;
 
-	use omp_ext::claude_plugin::{
-		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
+	use omp_ext::{
+		claude_plugin::{
+			ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
+		},
+		workspace_trust::inventory::lsp_config_files,
 	};
 
 	use super::*;
@@ -941,6 +943,40 @@ pub(crate) mod tests {
 				.servers
 				.contains_key("acme")
 		);
+	}
+
+	/// The project files the loader reads are exactly the gated inventory's
+	/// ([`lsp_config_files`]), in the loader's order, so no project LSP file
+	/// loads outside the workspace trust digest.
+	#[test]
+	fn project_lsp_sources_are_exactly_the_gated_inventory_files() {
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		fs::create_dir_all(project.join(".git")).unwrap();
+		let gated = lsp_config_files()
+			.map(|file| file.under(&project))
+			.collect::<Vec<_>>();
+		for path in &gated {
+			write(path, "{}");
+		}
+		for near_miss in
+			["lsp.jsonc", ".omp/lsp.toml", ".omp/lsp/lsp.json", ".omp/.lsp.yml.bak", "dap.json"]
+		{
+			write(&project.join(near_miss), "{}");
+		}
+		let read = discover_lsp_sources(None, &project, Vec::new(), &[])
+			.unwrap()
+			.sources
+			.iter()
+			.filter(|source| {
+				matches!(
+					source.provenance.kind,
+					LspConfigSourceKind::Project | LspConfigSourceKind::Dotfile
+				)
+			})
+			.map(|source| PathBuf::from(source.provenance.source.as_str()))
+			.collect::<Vec<_>>();
+		assert_eq!(read, gated);
 	}
 
 	pub fn write(path: &Path, body: &str) {

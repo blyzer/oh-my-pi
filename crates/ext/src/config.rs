@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize, de};
 use strum::{Display, EnumString};
 
 use super::{ExtensionCode, ExtensionError, Layer};
+use crate::workspace_trust::inventory::{EXTENSIONS_DIR, PROJECT_DIR};
 
 /// The ordered configuration scopes used for extension precedence.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
@@ -1082,8 +1083,8 @@ pub fn ambient_paths(data_dir: &Path, workspace: Option<&Path>) -> AmbientPaths 
 		foreign_roots:   Vec::new(),
 	};
 	if let Some(workspace) = workspace {
-		let root = workspace.join(".omp");
-		paths.manifest_roots.push(root.join("extensions"));
+		let root = workspace.join(PROJECT_DIR);
+		paths.manifest_roots.push(workspace.join(EXTENSIONS_DIR));
 		paths.config_files.push(root.join("config.toml"));
 		paths.install_records.push(root.join("installed.toml"));
 		for name in [".claude", ".codex", ".gemini"] {

@@ -7,6 +7,7 @@ use omp_core::{
 	Str,
 	project_file::{self, Containment, ProjectFileError, containment_root},
 };
+use omp_ext::workspace_trust::inventory::{PROJECT_DIR, SECRETS_FILE};
 use omp_secrets::rule::{SecretKind, SecretMode, SecretRule, SecretRuleError};
 use serde::Deserialize;
 use thiserror::Error;
@@ -87,8 +88,8 @@ pub fn load_for_project(
 	agent_dir: &Path,
 ) -> Result<Vec<SecretRule>, SecretConfigError> {
 	load_secret_rules(
-		&agent_dir.join("secrets.yml"),
-		&project_root.join(".omp").join("secrets.yml"),
+		&agent_dir.join(SECRETS_FILE),
+		&project_root.join(PROJECT_DIR).join(SECRETS_FILE),
 		project_root,
 	)
 }

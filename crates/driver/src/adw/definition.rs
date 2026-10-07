@@ -7,7 +7,7 @@
 //! the host at dispatch keyed by phase name.
 
 use std::{
-	io,
+	fs, io,
 	path::{Path, PathBuf},
 };
 
@@ -15,10 +15,8 @@ use omp_adw::{
 	OnReject, Phase, PhaseKind, PhaseName, Requirement, Workflow, WorkflowError, WorkflowName,
 };
 use omp_core::{FastHashMap, Str};
+use omp_ext::workspace_trust::inventory::{WORKFLOW_EXTENSION, WORKFLOWS_DIR};
 use serde::Deserialize;
-
-/// Project directory holding workflow definitions.
-pub const WORKFLOW_DIR: &str = ".omp/workflows";
 
 /// How one phase produces its result.
 ///
@@ -71,7 +69,7 @@ impl WorkflowDefinition {
 #[derive(Debug, thiserror::Error)]
 pub enum DefinitionError {
 	/// No definition file exists for the requested name.
-	#[error("no workflow named `{name}` exists under `{WORKFLOW_DIR}`")]
+	#[error("no workflow named `{name}` exists under `{WORKFLOWS_DIR}`")]
 	Unknown {
 		/// The requested workflow name.
 		name: Str,
@@ -131,11 +129,13 @@ pub enum DefinitionError {
 /// declares an invalid phase graph, or declares a phase without the execution
 /// detail its kind requires.
 pub fn load(project_root: &Path, name: &str) -> Result<WorkflowDefinition, DefinitionError> {
-	let path = project_root.join(WORKFLOW_DIR).join(format!("{name}.toml"));
+	let path = project_root
+		.join(WORKFLOWS_DIR)
+		.join(format!("{name}.{WORKFLOW_EXTENSION}"));
 	if !path.is_file() {
 		return Err(DefinitionError::Unknown { name: Str::new(name) });
 	}
-	let text = std::fs::read_to_string(&path)
+	let text = fs::read_to_string(&path)
 		.map_err(|source| DefinitionError::Read { path: path.clone(), source })?;
 	let file: FileWorkflow =
 		toml::from_str(&text).map_err(|source| DefinitionError::Parse { path, source })?;
@@ -144,7 +144,7 @@ pub fn load(project_root: &Path, name: &str) -> Result<WorkflowDefinition, Defin
 
 /// Every workflow name declared by the project, sorted.
 pub fn available(project_root: &Path) -> Vec<Str> {
-	let Ok(entries) = std::fs::read_dir(project_root.join(WORKFLOW_DIR)) else {
+	let Ok(entries) = fs::read_dir(project_root.join(WORKFLOWS_DIR)) else {
 		return Vec::new();
 	};
 	let mut names: Vec<Str> = entries
@@ -153,7 +153,7 @@ pub fn available(project_root: &Path) -> Vec<Str> {
 			entry
 				.path()
 				.extension()
-				.is_some_and(|value| value == "toml")
+				.is_some_and(|value| value == WORKFLOW_EXTENSION)
 		})
 		.filter_map(|entry| {
 			entry
@@ -259,7 +259,7 @@ mod tests {
 	use super::*;
 
 	fn write(root: &Path, name: &str, body: &str) {
-		let directory = root.join(WORKFLOW_DIR);
+		let directory = root.join(WORKFLOWS_DIR);
 		std::fs::create_dir_all(&directory).expect("workflow directory");
 		std::fs::write(directory.join(format!("{name}.toml")), body).expect("workflow file");
 	}

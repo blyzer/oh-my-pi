@@ -16,6 +16,7 @@ use omp_core::{
 	CowBytes, Str,
 	project_file::{self, Containment, ProjectFileError, containment_root},
 };
+use omp_ext::workspace_trust::inventory::{HOSTS_FILE, PROJECT_DIR};
 use parking_lot::RwLock;
 use russh::{
 	client, keys,
@@ -125,8 +126,8 @@ impl HostPaths {
 	#[must_use]
 	pub fn new(user_config_root: &Path, project_root: &Path) -> Self {
 		Self {
-			user:    user_config_root.join("hosts.toml"),
-			project: project_root.join(".omp/hosts.toml"),
+			user:    user_config_root.join(HOSTS_FILE),
+			project: project_root.join(PROJECT_DIR).join(HOSTS_FILE),
 			root:    containment_root(project_root).to_path_buf(),
 		}
 	}

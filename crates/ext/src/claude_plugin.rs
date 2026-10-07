@@ -15,9 +15,9 @@
 //!   `hooks`, `mcpServers`, `outputStyles`, and `lspServers`;
 //! * `skills/<name>/SKILL.md`, `commands/*.md`, `rules/*.md` (an OMP v1
 //!   extension), `.mcp.json`;
-//! * language servers: the [`LSP_CONFIG_FILES`] at the root plus manifest
+//! * language servers: the [`LSP_CONFIG_NAMES`] at the root plus manifest
 //!   `lspServers` (an inline server map or contained file paths); debug
-//!   adapters: the [`DAP_CONFIG_FILES`] at the root. This module only locates
+//!   adapters: the [`DAP_CONFIG_NAMES`] at the root. This module only locates
 //!   them; the document authority validates each declaration with its own LSP
 //!   and DAP parsers and reports a rejected one as
 //!   [`PluginDiagnostic::InvalidComponent`];
@@ -57,7 +57,7 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	fs, io,
+	fs, io, iter,
 	path::{Path, PathBuf},
 	sync::Arc,
 };
@@ -73,6 +73,9 @@ use crate::{
 		CommandApprovals, PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest,
 	},
 	trust::{GrantsFile, GrantsFileError, grants_path},
+	workspace_trust::inventory::{
+		CLAUDE_SETTINGS_FILES, DAP_CONFIG_NAMES, LSP_CONFIG_NAMES, PROJECT_PLUGINS_DIR,
+	},
 };
 
 /// Registry file name inside a scope's plugin directory.
@@ -84,26 +87,24 @@ pub const INSTALLED_PLUGINS_VERSION: u32 = 2;
 /// Agent Plugins 1.0 root-manifest schema.
 pub const AGENT_PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 
-/// Language-server declaration files a plugin root may carry, lowest
-/// precedence first (the names OMP v1 probed at every plugin root).
-pub const LSP_CONFIG_FILES: [&str; 6] =
-	["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
-
-/// Debug-adapter declaration files a plugin root may carry, lowest precedence
-/// first (the names OMP v1 probed at every plugin root).
-pub const DAP_CONFIG_FILES: [&str; 6] =
-	["dap.json", ".dap.json", "dap.yaml", ".dap.yaml", "dap.yml", ".dap.yml"];
-
 /// The user-scope plugin directory beneath the data directory.
 #[must_use]
 pub fn user_plugins_dir(data_dir: &Path) -> PathBuf {
 	data_dir.join("plugins")
 }
 
+/// The materialized-plugin cache beneath the user-scope plugin directory
+/// ([`user_plugins_dir`]): `omp ext install` copies every plugin here,
+/// whichever scope's registry records it.
+#[must_use]
+pub fn plugin_cache_dir(user_plugins: &Path) -> PathBuf {
+	user_plugins.join("cache/plugins")
+}
+
 /// The project-scope plugin directory beneath a project root.
 #[must_use]
 pub fn project_plugins_dir(project_root: &Path) -> PathBuf {
-	project_root.join(".omp/plugins")
+	project_root.join(PROJECT_PLUGINS_DIR)
 }
 
 /// `installed_plugins.json`: plugin id (`name@marketplace`) to its installs.
@@ -140,7 +141,17 @@ impl InstalledPluginsRegistry {
 			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
 			Err(source) => return Err(RegistryError::Read { path: path.to_owned(), source }),
 		};
-		let registry: Self = serde_json::from_slice(&bytes)
+		Self::from_slice(path, &bytes)
+	}
+
+	/// Parses registry `bytes` read from `path`, which errors name.
+	///
+	/// # Errors
+	///
+	/// [`RegistryError`] when the bytes are malformed or written by an
+	/// unsupported schema version.
+	pub fn from_slice(path: &Path, bytes: &[u8]) -> Result<Self, RegistryError> {
+		let registry: Self = serde_json::from_slice(bytes)
 			.map_err(|source| RegistryError::Parse { path: path.to_owned(), source })?;
 		if registry.version != INSTALLED_PLUGINS_VERSION {
 			return Err(RegistryError::Version {
@@ -576,10 +587,10 @@ pub struct ClaudeComponents {
 	/// MCP server declarations.
 	pub mcp:      Box<[ConfigDeclaration]>,
 	/// Language-server declarations, lowest precedence first: the root
-	/// [`LSP_CONFIG_FILES`], then manifest `lspServers`.
+	/// [`LSP_CONFIG_NAMES`], then manifest `lspServers`.
 	pub lsp:      Box<[ConfigDeclaration]>,
 	/// Debug-adapter declarations, lowest precedence first: the root
-	/// [`DAP_CONFIG_FILES`].
+	/// [`DAP_CONFIG_NAMES`].
 	pub dap:      Box<[ConfigDeclaration]>,
 	/// Hooks from `hooks/hooks.json` then manifest `hooks`, in declaration
 	/// order.
@@ -906,23 +917,15 @@ impl ClaudePlugins {
 		project_root: &Path,
 	) -> BTreeMap<Str, bool> {
 		let mut overrides = BTreeMap::new();
-		for path in [
-			home.config_dir().join("settings.json"),
-			project_root.join(".claude").join("settings.json"),
-			project_root.join(".claude").join("settings.local.json"),
-		] {
+		let project = CLAUDE_SETTINGS_FILES
+			.iter()
+			.map(|settings| project_root.join(settings));
+		for path in iter::once(home.config_dir().join("settings.json")).chain(project) {
 			let Ok(bytes) = fs::read(&path) else {
 				continue;
 			};
-			match serde_json::from_slice::<ClaudeSettingsWire>(&bytes) {
-				Ok(ClaudeSettingsWire { enabled_plugins: Some(EnabledPluginsWire::Map(map)) }) => {
-					for (id, value) in map {
-						if let EnabledValueWire::Bool(enabled) = value {
-							overrides.insert(id, enabled);
-						}
-					}
-				},
-				Ok(_) => {},
+			match enabled_plugin_overrides(&bytes) {
+				Ok(declared) => overrides.extend(declared),
 				Err(source) => self
 					.diagnostics
 					.push(PluginDiagnostic::ClaudeSettings { path, source }),
@@ -940,10 +943,8 @@ impl ClaudePlugins {
 		candidates: impl Iterator<Item = Candidate>,
 		seen_roots: &mut BTreeSet<PathBuf>,
 	) {
-		let Some((name, marketplace)) = id
-			.rsplit_once('@')
-			.filter(|(name, marketplace)| !name.is_empty() && !marketplace.is_empty())
-			.map(|(name, marketplace)| (Str::new(name), Str::new(marketplace)))
+		let Some((name, marketplace)) =
+			split_plugin_id(&id).map(|(name, marketplace)| (Str::new(name), Str::new(marketplace)))
 		else {
 			self
 				.diagnostics
@@ -1031,6 +1032,32 @@ enum EnabledPluginsWire {
 enum EnabledValueWire {
 	Bool(bool),
 	Other(IgnoredAny),
+}
+
+/// The `enabledPlugins` overrides one Claude Code settings file declares:
+/// every plugin id with a boolean value. Another value, another shape, or no
+/// `enabledPlugins` key declares nothing.
+pub(crate) fn enabled_plugin_overrides(
+	bytes: &[u8],
+) -> Result<BTreeMap<Str, bool>, serde_json::Error> {
+	let ClaudeSettingsWire { enabled_plugins } = serde_json::from_slice(bytes)?;
+	let Some(EnabledPluginsWire::Map(map)) = enabled_plugins else {
+		return Ok(BTreeMap::new());
+	};
+	Ok(map
+		.into_iter()
+		.filter_map(|(id, value)| match value {
+			EnabledValueWire::Bool(enabled) => Some((id, enabled)),
+			EnabledValueWire::Other(_) => None,
+		})
+		.collect())
+}
+
+/// The `(name, marketplace)` halves of a registry id `name@marketplace`;
+/// `None` when either is empty, so the id never resolves.
+pub(crate) fn split_plugin_id(id: &str) -> Option<(&str, &str)> {
+	id.rsplit_once('@')
+		.filter(|(name, marketplace)| !name.is_empty() && !marketplace.is_empty())
 }
 
 fn open_root(
@@ -1164,7 +1191,7 @@ fn resolve_layout(
 
 	// LSP: the root declaration files, then manifest `lspServers` on top (OMP
 	// v1 loaded every root file; Claude's manifest key supplements them).
-	let mut lsp = resolver.existing_files(&LSP_CONFIG_FILES);
+	let mut lsp = resolver.existing_files(&LSP_CONFIG_NAMES);
 	if let Some(raw) = manifest.lsp_servers {
 		for declaration in
 			resolver.manifest_servers(PluginComponent::LspServers, &raw, manifest_file)?
@@ -1176,7 +1203,7 @@ fn resolve_layout(
 	}
 	components.lsp = lsp.into_boxed_slice();
 	components.dap = resolver
-		.existing_files(&DAP_CONFIG_FILES)
+		.existing_files(&DAP_CONFIG_NAMES)
 		.into_boxed_slice();
 
 	// Hooks: `hooks/hooks.json`, then whatever the manifest declares merges in

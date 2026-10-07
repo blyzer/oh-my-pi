@@ -17,6 +17,7 @@ use omp_ext::{
 		resolve_plugin_command,
 	},
 	plugin_command::{PluginLaunch, PluginLaunchKind},
+	workspace_trust::inventory::{DAP_CONFIG_NAMES, PROJECT_DIR},
 };
 use serde::Deserialize;
 use serde_json::Map;
@@ -26,8 +27,6 @@ use crate::docserver::dap_adapter::{
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-const CONFIG_NAMES: [&str; 6] =
-	["dap.json", ".dap.json", "dap.yaml", ".dap.yaml", "dap.yml", ".dap.yml"];
 
 /// Native DAP declaration origin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -327,7 +326,7 @@ pub fn discover_dap_sources(
 	let project = Containment::Within(containment_root(project_root));
 	append_existing(
 		&mut sources,
-		&project_root.join(".omp"),
+		&project_root.join(PROJECT_DIR),
 		DapConfigSourceKind::Project,
 		project,
 	)?;
@@ -384,7 +383,7 @@ fn append_existing(
 	kind: DapConfigSourceKind,
 	containment: Containment<'_>,
 ) -> Result<(), DapConfigError> {
-	for name in CONFIG_NAMES {
+	for name in DAP_CONFIG_NAMES {
 		let path = directory.join(name);
 		match DapConfigSource::read_contained(kind, &path, containment) {
 			Ok(Some(source)) => sources.push(source),
@@ -749,7 +748,44 @@ mod tests {
 
 	use std::{fs, iter::empty};
 
+	use omp_ext::workspace_trust::inventory::dap_config_files;
+
 	use super::*;
+	use crate::docserver::lsp_config::tests::write;
+
+	/// The project files the loader reads are exactly the gated inventory's
+	/// ([`dap_config_files`]), in the loader's order, so no project DAP file
+	/// loads outside the workspace trust digest.
+	#[test]
+	fn project_dap_sources_are_exactly_the_gated_inventory_files() {
+		let temp = tempfile::tempdir().unwrap();
+		let project = temp.path().join("project");
+		fs::create_dir_all(project.join(".git")).unwrap();
+		let gated = dap_config_files()
+			.map(|file| file.under(&project))
+			.collect::<Vec<_>>();
+		for path in &gated {
+			write(path, "{}");
+		}
+		for near_miss in
+			["dap.jsonc", ".omp/dap.toml", ".omp/dap/dap.json", ".omp/.dap.yml.bak", "lsp.json"]
+		{
+			write(&project.join(near_miss), "{}");
+		}
+		let read = discover_dap_sources(None, &project, Vec::new(), &[])
+			.unwrap()
+			.sources
+			.iter()
+			.filter(|source| {
+				matches!(
+					source.provenance.kind,
+					DapConfigSourceKind::Project | DapConfigSourceKind::Dotfile
+				)
+			})
+			.map(|source| PathBuf::from(source.provenance.source.as_str()))
+			.collect::<Vec<_>>();
+		assert_eq!(read, gated);
+	}
 
 	/// A project DAP file that is a symlink out of the repository or an
 	/// oversize file is skipped, not read; an inside symlink loads.
@@ -757,8 +793,6 @@ mod tests {
 	#[test]
 	fn project_dap_files_outside_the_repository_or_oversize_are_skipped() {
 		use std::os::unix::fs::symlink;
-
-		use crate::docserver::lsp_config::tests::write;
 
 		let temp = tempfile::tempdir().unwrap();
 		let project = temp.path().join("project");

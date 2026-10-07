@@ -7,6 +7,7 @@ use std::path::Path;
 
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
+use omp_ext::workspace_trust::inventory::APPEND_SYSTEM_PROMPT_FILE;
 pub use omp_tool::{
 	CallbackAbi, OperationSpec, PhaseLegalityRow, RuntimeDurationMetadata, RuntimeSymbolSpec,
 	operation_spec, phase_legality_matrix, runtime_duration_metadata, runtime_symbols,
@@ -48,7 +49,7 @@ pub fn resolve_prompt_slots(
 	let append = if explicit_append.is_some() {
 		explicit_append
 	} else {
-		omp_driver::prompt_input::discover_prompt_file(cwd, home, "APPEND_SYSTEM.md")
+		omp_driver::prompt_input::discover_prompt_file(cwd, home, APPEND_SYSTEM_PROMPT_FILE)
 			.into_diagnostic()?
 	};
 	Ok(PromptSlots { system, append })
