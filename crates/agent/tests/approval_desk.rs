@@ -3,7 +3,14 @@
 //! `KernelEvent::ApprovalRequested`, and answered by `Up::Approve` — the
 //! decision reaches the waiting policy only after the journal recorded it.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+	mem,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
+	time::Duration,
+};
 
 use async_stream::stream;
 use bytes::Bytes;
@@ -33,13 +40,14 @@ struct GatedTool {
 	route: Arc<Mutex<Option<ApprovalRoute>>>,
 }
 
-/// The requirement the gated tool files for `subject`, offering `offered`.
-fn spec(subject: &str, offered: Vec<Str>) -> ApprovalSpec {
+/// The requirement the gated tool files for `subject` of `kind`, offering
+/// `offered`.
+fn spec(kind: &str, subject: &str, offered: Vec<Str>) -> ApprovalSpec {
 	ApprovalSpec {
 		title:         sf!("Run bash"),
 		body:          sf!("$ {subject}"),
 		subject:       Str::new(subject),
-		kind:          sf!("exec"),
+		kind:          Str::new(kind),
 		scopes:        offered,
 		default:       Some(false),
 		route:         sf!("user"),
@@ -75,8 +83,11 @@ impl Tool for GatedTool {
 				|| vec![sf!("once"), sf!("session")],
 				|scopes| scopes.iter().filter_map(Value::as_str).map(Str::new).collect(),
 			);
+			// `exec`, like a tool admission prompt, unless the call names another.
+			let kind = args["kind"].as_str().unwrap_or("exec").to_owned();
 			let route = self.route.lock().clone().expect("route bound before the turn");
-			let ticket = route.request(Some(sf!("gated-1")), vec![spec(&command, scopes)], 1).await;
+			let ticket =
+				route.request(Some(sf!("gated-1")), vec![spec(&kind, &command, scopes)], 1).await;
 			let decision = ticket.decision.expect("route returns a decided ticket");
 			if decision.approved {
 				yield Ev::Done(ToolTerminal::Done {
@@ -109,7 +120,7 @@ fn gated_registry(route: Arc<Mutex<Option<ApprovalRoute>>>) -> Arc<Registry> {
 					rev: Rev { family: sf!("test"), n: 1 },
 					description: sf!("asks before acting"),
 					schema: Bytes::from_static(
-						br#"{"type":"object","properties":{"command":{"type":"string"},"scopes":{"type":"array","items":{"type":"string"}}},"required":["command"],"additionalProperties":false}"#,
+						br#"{"type":"object","properties":{"command":{"type":"string"},"kind":{"type":"string"},"scopes":{"type":"array","items":{"type":"string"}}},"required":["command"],"additionalProperties":false}"#,
 					),
 					constraint: Constraint::None,
 					effects: Effects::empty(),
@@ -177,17 +188,28 @@ struct Harness {
 
 fn harness(scripts: Vec<Vec<omp_ai::ChatEvent>>) -> Harness {
 	let temp = tempfile::tempdir().expect("tempdir");
+	let session = fresh_session(&temp.path().join("approvals.oms"));
+	harness_in(temp, session, scripts, |kernel| kernel)
+}
+
+/// A harness over `session`, whose journal lives in `temp`; `compose`
+/// finishes the kernel.
+fn harness_in(
+	temp: tempfile::TempDir,
+	session: Session,
+	scripts: Vec<Vec<omp_ai::ChatEvent>>,
+	compose: impl FnOnce(Kernel<ScriptedInference>) -> Kernel<ScriptedInference>,
+) -> Harness {
 	let route = Arc::new(Mutex::new(None));
 	let (inference, _) = ScriptedInference::new(scripts);
-	let mut kernel = Kernel::new(
+	let mut kernel = compose(Kernel::new(
 		inference,
 		gated_registry(Arc::clone(&route)),
 		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
 		StaticPrompt(sf!("system")),
-	);
+	));
 	*route.lock() = Some(kernel.approval_route());
 	let events = kernel.subscribe();
-	let session = fresh_session(&temp.path().join("approvals.oms"));
 	Harness { kernel, session, events, _temp: temp }
 }
 
@@ -375,4 +397,181 @@ async fn resumed_session_replays_the_decided_prompt() {
 	let journaled = prompts(&restored);
 	assert_eq!(journaled.len(), 1);
 	assert_eq!(journaled[0].state, TicketState::Decided);
+}
+
+/// A network sandbox amendment approved for the session is a journaled
+/// decision, so it outlives the process: after a resume from the journal the
+/// approval desk answers the same endpoint from it (source `config`) without
+/// asking, which is how the environment's grant cache refills, and still asks
+/// about any other endpoint.
+#[tokio::test]
+async fn a_resumed_session_answers_a_journaled_network_grant_and_asks_the_rest() {
+	let amendment = |call: &str, endpoint: &str| {
+		tool_script(
+			call,
+			"gated",
+			serde_json::json!({
+				"command": format!("network {endpoint}"),
+				"kind": "sandbox_amendment",
+				"scopes": ["once", "session"],
+			}),
+		)
+	};
+	let mut harness = harness(vec![amendment("gated-1", "pypi.org:443"), text_script("granted")]);
+	let seen = run(&mut harness, |_| Some(decision(true, ApprovalScope::Session))).await;
+	assert_eq!(seen.len(), 1);
+	let path = harness.session.journal_path().to_path_buf();
+	let Harness { kernel, session, events, _temp: temp } = harness;
+	drop((kernel, session, events));
+
+	let restored = Session::open(&path, omp_session::ComponentRegistry::default()).expect("resume");
+	let journaled = prompts(&restored);
+	assert_eq!(journaled.len(), 1);
+	assert_eq!(
+		journaled[0]
+			.decision
+			.as_ref()
+			.map(|decision| &decision.scope),
+		Some(&ApprovalScope::Session)
+	);
+	let mut resumed = harness_in(
+		temp,
+		restored,
+		vec![
+			amendment("gated-2", "pypi.org:443"),
+			text_script("replayed"),
+			amendment("gated-3", "files.pythonhosted.org:443"),
+			text_script("asked"),
+		],
+		|kernel| kernel,
+	);
+	let replayed = run(&mut resumed, |_| panic!("a journaled grant must not prompt again")).await;
+	assert!(replayed.is_empty());
+	let asked = run(&mut resumed, |_| Some(decision(false, ApprovalScope::Once))).await;
+	assert_eq!(asked.len(), 1, "another endpoint is asked");
+	assert_eq!(asked[0].reasons[0].subject.as_str(), "network files.pythonhosted.org:443");
+	let journaled = prompts(&resumed.session);
+	assert_eq!(journaled.len(), 3);
+	assert_eq!(
+		journaled[1]
+			.decision
+			.as_ref()
+			.map(|decision| decision.source),
+		Some(ApprovalSource::Config),
+		"the replay is journaled as the desk's answer"
+	);
+}
+
+/// Counts the rewinds and the session switches it is told about.
+#[derive(Default)]
+struct Transitions {
+	rewinds:  AtomicUsize,
+	switches: AtomicUsize,
+}
+
+impl Transitions {
+	/// `(rewinds, switches)` told so far.
+	fn seen(&self) -> (usize, usize) {
+		(self.rewinds.load(Ordering::SeqCst), self.switches.load(Ordering::SeqCst))
+	}
+}
+
+impl omp_agent::SessionObserver for Transitions {
+	fn rewound(&self) {
+		self.rewinds.fetch_add(1, Ordering::SeqCst);
+	}
+
+	fn switched(&self) {
+		self.switches.fetch_add(1, Ordering::SeqCst);
+	}
+}
+
+/// A harness over a fresh session whose kernel reports to `transitions`: the
+/// first turn files one `gated` prompt for `cargo test`, the second the same
+/// prompt again.
+fn observed_harness(transitions: &Arc<Transitions>) -> Harness {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let session = fresh_session(&temp.path().join("approvals.oms"));
+	let transitions = Arc::clone(transitions);
+	harness_in(
+		temp,
+		session,
+		vec![
+			tool_script("gated-1", "gated", serde_json::json!({"command": "cargo test"})),
+			text_script("granted"),
+			tool_script("gated-2", "gated", serde_json::json!({"command": "cargo test"})),
+			text_script("asked again"),
+		],
+		move |kernel| kernel.with_session_observer(transitions),
+	)
+}
+
+/// A rewind past a session grant takes the grant out of the journal, so the
+/// same subject is asked again, and it tells every session observer the kernel
+/// was composed with: the driver registers one through which the environment
+/// drops the network grants it cached from that journal.
+#[tokio::test]
+async fn a_rewind_past_a_session_grant_asks_again_and_tells_session_observers() {
+	let transitions = Arc::new(Transitions::default());
+	let mut harness = observed_harness(&transitions);
+	let before = harness.session.head().expect("head before the grant");
+	let seen = run(&mut harness, |_| Some(decision(true, ApprovalScope::Session))).await;
+	assert_eq!(seen.len(), 1);
+	assert_eq!(transitions.seen(), (0, 0));
+
+	let work = harness
+		.session
+		.rewind(before)
+		.expect("rewind past the grant");
+	harness
+		.kernel
+		.apply_lifecycle(&harness.session, &work)
+		.await;
+	assert_eq!(transitions.seen(), (1, 0), "the rewind was told, as a rewind");
+	assert!(prompts(&harness.session).is_empty(), "the rewound journal holds no grant");
+
+	let again = run(&mut harness, |_| Some(decision(false, ApprovalScope::Once))).await;
+	assert_eq!(again.len(), 1, "a grant the rewind dropped answers nothing");
+	assert_eq!(
+		prompts(&harness.session)[0]
+			.decision
+			.as_ref()
+			.map(|decision| decision.source),
+		Some(ApprovalSource::User)
+	);
+}
+
+/// The kernel outlives the session it served: when the host switches it to
+/// another session, a session grant of the previous journal answers nothing in
+/// the next one, and every session observer is told of the switch, so the
+/// environment drops the network grants it cached from the previous journal.
+#[tokio::test]
+async fn a_switch_away_from_a_session_grant_asks_again_and_tells_session_observers() {
+	let transitions = Arc::new(Transitions::default());
+	let mut harness = observed_harness(&transitions);
+	let seen = run(&mut harness, |_| Some(decision(true, ApprovalScope::Session))).await;
+	assert_eq!(seen.len(), 1);
+	assert_eq!(transitions.seen(), (0, 0));
+
+	// What a host does once a switch commits: the next session is live, the
+	// kernel is told, and its state is resynced from the next journal.
+	let elsewhere = tempfile::tempdir().expect("tempdir");
+	let next = fresh_session(&elsewhere.path().join("next.oms"));
+	let previous = mem::replace(&mut harness.session, next);
+	harness.kernel.session_switched();
+	harness.kernel.resync_session_state(&harness.session);
+	assert_eq!(transitions.seen(), (0, 1), "the switch was told, as a switch");
+	assert_eq!(prompts(&previous).len(), 1, "the previous journal keeps its grant");
+	drop(previous);
+
+	let again = run(&mut harness, |_| Some(decision(false, ApprovalScope::Once))).await;
+	assert_eq!(again.len(), 1, "the previous session's grant answers nothing here");
+	assert_eq!(
+		prompts(&harness.session)
+			.iter()
+			.map(|ticket| ticket.decision.as_ref().map(|decision| decision.source))
+			.collect::<Vec<_>>(),
+		[Some(ApprovalSource::User)],
+		"a human decided the next session's prompt"
+	);
 }

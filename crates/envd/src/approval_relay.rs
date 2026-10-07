@@ -19,6 +19,14 @@
 //! pending prompt as unreachable and refuses later prompts at once, including
 //! those of commands that outlive it (detached or auto-backgrounded).
 //!
+//! A relay is also an approval binding: the network endpoints its connection
+//! approves for the session are kept on it ([`EgressGrants`]) and admitted
+//! only for the commands that connection issues. They are cleared when the
+//! connection closes or asks for it (`RevokeApprovalGrants`, sent when its
+//! conversation is rewound or switches to another session), so no other
+//! session, attached to the same daemon or later served by the same
+//! connection, inherits them.
+//!
 //! The session half is [`pump_approval_queries`]: an attached composition
 //! advertises the capability and files each relayed query on the approval
 //! route the driver binds ([`ApprovalRelayBinding`]), the same kernel route
@@ -50,6 +58,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::sandbox_proxy::EgressGrants;
+
 /// How long the daemon waits past a prompt's own timeout before deciding it
 /// itself.
 ///
@@ -77,6 +87,8 @@ struct Relay {
 	responses:  Mutex<Option<flume::Sender<pb::ServerFrame>>>,
 	next_query: AtomicU64,
 	pending:    Mutex<FastHashMap<u64, PendingApproval>>,
+	/// The network endpoints this connection approved for its session.
+	grants:     EgressGrants,
 }
 
 struct PendingApproval {
@@ -105,6 +117,7 @@ impl ConnectionApprovals {
 				responses:  Mutex::new(Some(responses)),
 				next_query: AtomicU64::new(1),
 				pending:    Mutex::new(FastHashMap::default()),
+				grants:     EgressGrants::default(),
 			}),
 		}
 	}
@@ -141,11 +154,23 @@ impl ConnectionApprovals {
 		let _ = pending.reply.try_send(decision_from_wire(answer.decision));
 	}
 
+	/// Drops every network endpoint this connection approved for its session:
+	/// the session's conversation was rewound or switched to another session,
+	/// so the journal it now serves may not hold those grants. Its commands are
+	/// asked again, and the session's approval desk answers from the grants
+	/// that journal holds.
+	pub fn revoke_grants(&self) {
+		self.relay.grants.clear();
+	}
+
 	/// Ends the relay when its connection closes: every pending prompt is
-	/// decided as unreachable, every later prompt fails closed at once, and
-	/// the connection's response channel is released.
+	/// decided as unreachable, every later prompt fails closed at once, the
+	/// connection's session grants are dropped (a command that outlives the
+	/// connection keeps none of them), and the connection's response channel
+	/// is released.
 	pub fn disconnect(&self) {
 		drop(self.relay.responses.lock().take());
+		self.relay.grants.clear();
 		// Dropping the reply channels wakes every waiting prompt.
 		let pending = mem::take(&mut *self.relay.pending.lock());
 		drop(pending);
@@ -156,6 +181,11 @@ impl OwnedApprovals {
 	/// Whether the issuing connection can still answer a prompt.
 	pub fn is_live(&self) -> bool {
 		self.relay.responses.lock().is_some()
+	}
+
+	/// The network endpoints the issuing connection approved for its session.
+	pub fn grants(&self) -> &EgressGrants {
+		&self.relay.grants
 	}
 
 	/// Asks the issuing connection to decide one prompt and returns the
@@ -277,12 +307,34 @@ impl Drop for QueryGuard<'_> {
 	}
 }
 
-/// The approver that answers one environment-side prompt.
+/// The approval route an in-process composition binds on its host, with the
+/// network endpoints its session approved through it. Rebinding the route
+/// starts an empty set and clears the previous one.
+#[derive(Clone)]
+pub struct RouteBinding {
+	route:  ApprovalRoute,
+	grants: EgressGrants,
+}
+
+impl RouteBinding {
+	/// Binds `route` with no session grants yet.
+	pub fn new(route: ApprovalRoute) -> Self {
+		Self { route, grants: EgressGrants::default() }
+	}
+
+	/// The network endpoints this route's session approved for the session.
+	pub const fn grants(&self) -> &EgressGrants {
+		&self.grants
+	}
+}
+
+/// The approver that answers one environment-side prompt, and the approval
+/// binding whose session grants its answers extend.
 pub enum EnvApprover {
 	/// The connection that issued the command, over the wire.
 	Relay(OwnedApprovals),
 	/// The route an in-process composition bound on this host.
-	Route(ApprovalRoute),
+	Route(RouteBinding),
 }
 
 impl EnvApprover {
@@ -291,6 +343,14 @@ impl EnvApprover {
 		match self {
 			Self::Relay(relay) => relay.is_live(),
 			Self::Route(_) => true,
+		}
+	}
+
+	/// The network endpoints this approver's binding approved for the session.
+	pub fn grants(&self) -> &EgressGrants {
+		match self {
+			Self::Relay(relay) => relay.grants(),
+			Self::Route(binding) => binding.grants(),
 		}
 	}
 
@@ -303,7 +363,12 @@ impl EnvApprover {
 	) -> ApprovalTicket {
 		match self {
 			Self::Relay(relay) => relay.request(invocation_id, reasons, created_at_ms).await,
-			Self::Route(route) => route.request(invocation_id, reasons, created_at_ms).await,
+			Self::Route(binding) => {
+				binding
+					.route
+					.request(invocation_id, reasons, created_at_ms)
+					.await
+			},
 		}
 	}
 }

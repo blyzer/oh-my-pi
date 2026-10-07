@@ -43,12 +43,12 @@ use omp_proto::{
 			PresenceRegistered, PresenceReleased, ProcessCommandAccepted, ProcessInfo, ProcessList,
 			ProcessOutput, ProcessStarted, ProcessStateEvent, ProtocolError, ProtocolErrorCode,
 			RegisterPresence, ReleasePresence, ResourceCompletion, RestartProcess, Retire,
-			SearchComplete, SearchMatchMsg, SearchRequest, SendInput, ServerFrame, ServerHello,
-			SignalProcess, SignalRequest, SiteMaterialized, StartProcess, StdinFrame, StopProcess,
-			Update, Verdict, WalkComplete, WalkEntry, WalkRequest, WorktreeResult, cancel_request,
-			client_frame, data_event, data_request, data_response, document_op, document_result,
-			exec_session_op, exec_session_result, mcp_op, mcp_result, resource_op, server_frame,
-			stdin_frame, workspace_op, workspace_result, worktree_op,
+			RevokeApprovalGrants, SearchComplete, SearchMatchMsg, SearchRequest, SendInput,
+			ServerFrame, ServerHello, SignalProcess, SignalRequest, SiteMaterialized, StartProcess,
+			StdinFrame, StopProcess, Update, Verdict, WalkComplete, WalkEntry, WalkRequest,
+			WorktreeResult, cancel_request, client_frame, data_event, data_request, data_response,
+			document_op, document_result, exec_session_op, exec_session_result, mcp_op, mcp_result,
+			resource_op, server_frame, stdin_frame, workspace_op, workspace_result, worktree_op,
 		},
 	},
 };
@@ -1094,6 +1094,36 @@ impl EnvClient {
 			.try_send(ClientFrame {
 				request_id: 0,
 				body: Some(client_frame::Body::AcpBind(binding)),
+				..ClientFrame::default()
+			})
+			.map_err(|error| match error {
+				flume::TrySendError::Full(_) => ClientError::TransportBusy,
+				flume::TrySendError::Disconnected(_) => ClientError::TransportClosed,
+			})
+	}
+
+	/// Tells the environment that this connection's conversation was rewound
+	/// or switched to another session: it drops every network endpoint this
+	/// connection approved for the session, so the next commands are asked
+	/// again and the session answers from the grants the journal it now serves
+	/// holds.
+	///
+	/// An unsolicited request-id-zero control frame, valid only after the
+	/// protocol handshake. Frames on one connection are handled in order, so a
+	/// command issued after it never sees a revoked grant. The send never waits
+	/// for transport capacity.
+	pub fn revoke_approval_grants(&self) -> Result<(), ClientError> {
+		if self.inner.info.lock().is_none() {
+			return Err(ClientError::UnexpectedResponse {
+				expected: "a completed environment handshake before revoking approval grants",
+			});
+		}
+		self
+			.inner
+			.outgoing
+			.try_send(ClientFrame {
+				request_id: 0,
+				body: Some(client_frame::Body::RevokeApprovalGrants(RevokeApprovalGrants {})),
 				..ClientFrame::default()
 			})
 			.map_err(|error| match error {
@@ -5001,6 +5031,48 @@ mod tests {
 		let unbind = requests.recv_async().await.expect("receive ACP unbind");
 		assert_eq!(unbind.body, Some(client_frame::Body::AcpBind(AcpBind::default())));
 		assert!(client.inner.pending.lock().is_empty(), "bind opened a response correlation");
+	}
+
+	#[tokio::test]
+	async fn grant_revocation_is_request_zero_and_requires_hello() {
+		let (outgoing, requests) = flume::unbounded();
+		let (responses, incoming) = flume::unbounded();
+		let client = EnvClient::from_channels(outgoing, incoming);
+		assert!(matches!(
+			client.revoke_approval_grants(),
+			Err(ClientError::UnexpectedResponse { .. })
+		));
+		assert!(requests.is_empty(), "nothing is sent before the handshake");
+
+		let handshake = tokio::spawn({
+			let client = client.clone();
+			async move { client.hello(ClientHello::default()).await }
+		});
+		let _hello = requests.recv_async().await.expect("receive client hello");
+		responses
+			.send_async(ServerFrame {
+				request_id: 0,
+				body: Some(server_frame::Body::Hello(ServerHello::default())),
+				..ServerFrame::default()
+			})
+			.await
+			.expect("send server hello");
+		handshake
+			.await
+			.expect("hello task")
+			.expect("complete hello");
+
+		client
+			.revoke_approval_grants()
+			.expect("revoke approval grants");
+		let revoke = requests.recv_async().await.expect("receive the revocation");
+		assert_eq!(revoke.request_id, 0);
+		assert!(revoke.scope.is_none());
+		assert_eq!(
+			revoke.body,
+			Some(client_frame::Body::RevokeApprovalGrants(RevokeApprovalGrants {}))
+		);
+		assert!(client.inner.pending.lock().is_empty(), "the revocation opened a correlation");
 	}
 
 	#[tokio::test]

@@ -6,7 +6,9 @@
 //! call prompts; an explicit `yolo` is respected and runs unconfined. Each
 //! says so in one typed notice. On the attached path a project daemon served
 //! in this process runs the command, and its sandbox amendment reaches the
-//! issuing session only through the approval relay.
+//! issuing session only through the approval relay. A network endpoint approved
+//! for the session holds, on either path, until the conversation leaves the
+//! journal that approved it, by a rewind or a session switch.
 
 use std::{
 	future::ready,
@@ -26,7 +28,9 @@ use omp_ai::{
 };
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
-use omp_driver::headless::kernel::{EnvToolExecutor, SettingsAdmission};
+use omp_driver::headless::kernel::{
+	EnvToolExecutor, SettingsAdmission, bind_environment_approvals,
+};
 use omp_envd::{
 	AttachOptions, ProjectEnvironment, RegistryBridges,
 	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
@@ -35,10 +39,11 @@ use omp_envd::{
 use omp_journal::kind;
 use omp_session::{ComponentRegistry, Session};
 
-/// One scripted tool call, then a closing text turn. `write` declares document
-/// write effects, so its tier is `write` and always-ask prompts before it
-/// starts. `bash` declares no effects: its spawn/fs effects are confined by
-/// the sandbox, and without one it is process authority.
+/// One scripted tool call, then a closing text turn, for every turn the
+/// kernel runs: turn `n` calls `call-n`. `write` declares document write
+/// effects, so its tier is `write` and always-ask prompts before it starts.
+/// `bash` declares no effects: its spawn/fs effects are confined by the
+/// sandbox, and without one it is process authority.
 struct ToolThenText {
 	tool:      &'static str,
 	arguments: serde_json::Value,
@@ -59,10 +64,10 @@ impl Inference for ToolThenText {
 			provider_request_id: None,
 			created_at:          std::time::SystemTime::UNIX_EPOCH,
 		};
-		let events = if self.turns == 1 {
+		let events = if self.turns % 2 == 1 {
 			let arguments = self.arguments.clone();
 			let call = ToolCall {
-				id:        ToolCallId::from("call-1"),
+				id:        ToolCallId::from(format!("call-{}", self.turns.div_ceil(2)).as_str()),
 				name:      Str::new_static(self.tool),
 				arguments: omp_ai::OpaqueJson::new(arguments.clone()),
 			};
@@ -195,12 +200,8 @@ impl Project {
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
 		);
-		let approvals = kernel.approval_route();
+		let approvals = bind_environment_approvals(&kernel, &environment);
 		let notices = kernel.mailbox();
-		environment.bind_approval_authority(
-			Some(Arc::new(omp_agent::ApprovalBook::new())),
-			Some(approvals.clone()),
-		);
 		let mut kernel = kernel
 			.with_external_executor(Arc::new(EnvToolExecutor::new(
 				environment.client().clone(),
@@ -515,14 +516,18 @@ mod attached_daemon {
 	/// same executable and so has the same build id, joins it as a peer instead
 	/// of spawning a daemon or falling back to an embedded environment.
 	/// Dropping it stops serving.
-	struct InProcessDaemon {
+	pub struct InProcessDaemon {
 		shutdown: CancellationToken,
 		serving:  JoinHandle<Result<(), omp_envd::EnvdError>>,
 	}
 
 	impl InProcessDaemon {
 		async fn serve(project: &Project, sandbox: ExecSandboxMode) -> Self {
-			let con = context(sandbox);
+			Self::serve_with(project, context(sandbox)).await
+		}
+
+		/// [`Self::serve`] under the daemon's own control context `con`.
+		pub async fn serve_with(project: &Project, con: Arc<omp_con::Ctx>) -> Self {
 			let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
 			let server = EnvServer::open_project(
 				&project.root,
@@ -581,7 +586,7 @@ mod attached_daemon {
 
 	/// A session attached to the daemon, which must not have fallen back to an
 	/// embedded environment.
-	async fn attached(project: &Project) -> ProjectEnvironment {
+	pub async fn attached(project: &Project) -> ProjectEnvironment {
 		let environment = project.attach(None).await;
 		assert!(
 			environment.fallback_notice.is_none(),
@@ -652,5 +657,264 @@ mod attached_daemon {
 		amendment(&project, &session, false);
 		assert!(!landed, "a refused amendment wrote: {result}");
 		assert!(result.contains("\"outcome\":\"denied\""), "the command was not denied: {result}");
+	}
+}
+
+/// Network endpoints approved for the rest of the session, on both approval
+/// bindings the production composition uses: the relay of a session attached to
+/// a project daemon served in this process, and the in-process route of an
+/// embedded composition. The kernel is wired by the production
+/// `bind_environment_approvals`, so these prove that its session observer
+/// revokes the environment's grants when the conversation leaves the journal
+/// that approved them, by a rewind or by a switch to another session.
+#[cfg(target_os = "macos")]
+mod session_network_grants {
+	use std::{
+		fs,
+		io::{BufRead as _, BufReader, Write as _},
+		mem,
+		net::{Ipv4Addr, TcpListener},
+		thread,
+	};
+
+	use omp_journal::blob::BlobStore;
+	use tokio::time;
+
+	use super::{
+		attached_daemon::{InProcessDaemon, attached},
+		*,
+	};
+
+	/// A loopback HTTP server answering every request `200 ok`, standing in
+	/// for one package host the broker may reach under
+	/// `sv_sandbox_allow_localhost`. Its thread ends with the test process.
+	fn loopback_upstream() -> u16 {
+		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
+		let port = listener.local_addr().expect("upstream address").port();
+		thread::spawn(move || {
+			for stream in listener.incoming() {
+				let Ok(mut stream) = stream else { continue };
+				let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+				let Ok(reading) = stream.try_clone() else {
+					continue;
+				};
+				let mut reader = BufReader::new(reading);
+				let mut line = String::new();
+				while reader.read_line(&mut line).is_ok_and(|read| read > 0) && line != "\r\n" {
+					line.clear();
+				}
+				let _ = stream
+					.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n");
+			}
+		});
+		port
+	}
+
+	/// A control context with the workspace-write sandbox whose broker may
+	/// reach loopback.
+	fn loopback_context() -> Arc<omp_con::Ctx> {
+		let con = context(ExecSandboxMode::WorkspaceWrite);
+		con.run("sv_sandbox_allow_localhost 1")
+			.expect("the broker may reach loopback");
+		con
+	}
+
+	/// Runs one turn, whose scripted bash call the host answers.
+	async fn fetch_turn(kernel: &mut Kernel<ToolThenText>, session: &mut Session) {
+		time::timeout(
+			Duration::from_secs(60),
+			kernel.run_turn(
+				session,
+				TurnInput { text: Str::new_static("fetch it"), attachments: Vec::new() },
+				RunControl::default(),
+			),
+		)
+		.await
+		.expect("turn settles")
+		.expect("turn");
+	}
+
+	/// The journaled `sandbox_amendment` prompts, as `(source, scope)`.
+	fn amendments(session: &Session) -> Vec<(ApprovalSource, ApprovalScope)> {
+		prompts(session)
+			.into_iter()
+			.filter(|ticket| ticket.reasons[0].kind == "sandbox_amendment")
+			.filter_map(|ticket| ticket.decision)
+			.map(|decision| (decision.source, decision.scope))
+			.collect()
+	}
+
+	/// How the conversation leaves the journal that approved the endpoint.
+	#[derive(Clone, Copy)]
+	enum Leave {
+		/// The live session is rewound past the approval.
+		Rewind,
+		/// The host switches the kernel to a new session.
+		Switch,
+	}
+
+	/// An endpoint approved for the session through `environment` holds for
+	/// the session's later commands, which reach it without a prompt. Once the
+	/// conversation `leave`s the journal that approved it, the next command is
+	/// asked again, by a human, because the journal the kernel now serves holds
+	/// no grant the desk could replay.
+	async fn grants_follow_the_journal(
+		project: &Project,
+		environment: ProjectEnvironment,
+		port: u16,
+		leave: Leave,
+	) {
+		let spill = BlobStore::open(project.scratch.path().join("artifacts")).expect("spill");
+		// Each successful fetch appends one line the test counts.
+		let fetched = project.root.join("fetched.txt");
+		let fetch = format!(
+			"/usr/bin/curl --noproxy '' -sf http://localhost:{port}/ >> '{}'",
+			fetched.display()
+		);
+		let fetches = || {
+			fs::read_to_string(&fetched)
+				.unwrap_or_default()
+				.lines()
+				.count()
+		};
+		let kernel = Kernel::new(
+			ToolThenText {
+				tool:      "bash",
+				arguments: serde_json::json!({ "command": fetch, "i": "Fetching a package" }),
+				turns:     0,
+			},
+			environment.registry(),
+			DispatchPolicy::new(spill.clone()),
+			StaticPrompt(Str::new_static("test")),
+		);
+		let approvals = bind_environment_approvals(&kernel, &environment);
+		let mut kernel = kernel
+			.with_external_executor(Arc::new(EnvToolExecutor::new(
+				environment.client().clone(),
+				approvals,
+			)))
+			.with_tool_admission(Arc::new(SettingsAdmission::new(&project.con, None, &project.root)));
+		let events = kernel.subscribe();
+		let mailbox = kernel.mailbox();
+		let (asked, humans) = flume::unbounded();
+		let host = tokio::spawn(async move {
+			while let Ok(event) = events.recv_async().await {
+				if let KernelEvent::ApprovalRequested(ticket) = event {
+					let _ =
+						asked.send((ticket.reasons[0].subject.clone(), ticket.reasons[0].scopes.clone()));
+					let _ = mailbox.send(Up::Approve {
+						id:       ticket.ticket_id,
+						decision: ApprovalDecision {
+							approved:   true,
+							scope:      ApprovalScope::Session,
+							source:     ApprovalSource::User,
+							decided_by: None,
+							reason:     None,
+							audited:    false,
+						},
+					});
+				}
+			}
+		});
+		let session_at = |name: &str| {
+			Session::create_with_blob_store(
+				project.scratch.path().join(name),
+				ComponentRegistry::standard(),
+				spill.clone(),
+			)
+			.expect("session")
+		};
+		let mut session = session_at("grants.oms");
+		let before = session.head().expect("head before the grant");
+
+		fetch_turn(&mut kernel, &mut session).await;
+		let subject = Str::from(format!("network localhost:{port}"));
+		assert_eq!(humans.drain().collect::<Vec<_>>(), [(subject.clone(), vec![
+			Str::new_static("once"),
+			Str::new_static("session")
+		])]);
+		assert_eq!(amendments(&session), [(ApprovalSource::User, ApprovalScope::Session)]);
+		assert_eq!(fetches(), 1, "the approved rerun fetched");
+
+		fetch_turn(&mut kernel, &mut session).await;
+		assert!(humans.is_empty(), "a granted endpoint prompted again");
+		assert_eq!(amendments(&session).len(), 1, "the environment asked nothing");
+		assert_eq!(fetches(), 2, "the second command fetched unprompted");
+
+		match leave {
+			Leave::Rewind => {
+				let work = session.rewind(before).expect("rewind past the grant");
+				kernel.apply_lifecycle(&session, &work).await;
+			},
+			Leave::Switch => {
+				// What a host does once a switch commits: the next session is
+				// live, the kernel is told, and its state is resynced from the
+				// next journal.
+				let previous = mem::replace(&mut session, session_at("next.oms"));
+				kernel.session_switched();
+				kernel.resync_session_state(&session);
+				assert_eq!(amendments(&previous).len(), 1, "the previous journal keeps its grant");
+			},
+		}
+		fetch_turn(&mut kernel, &mut session).await;
+		assert_eq!(
+			humans
+				.drain()
+				.map(|(subject, _)| subject)
+				.collect::<Vec<_>>(),
+			[subject],
+			"the environment asks again, and the desk cannot answer it"
+		);
+		assert_eq!(amendments(&session), [(ApprovalSource::User, ApprovalScope::Session)]);
+		assert_eq!(fetches(), 3, "the newly approved rerun fetched");
+		host.abort();
+	}
+
+	/// A session attached to a daemon whose broker may reach loopback.
+	async fn attached_grants(leave: Leave) {
+		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let port = loopback_upstream();
+		let _daemon = InProcessDaemon::serve_with(&project, loopback_context()).await;
+		let environment = attached(&project).await;
+		grants_follow_the_journal(&project, environment, port, leave).await;
+	}
+
+	/// An embedded composition whose broker may reach loopback: no daemon
+	/// serves the project and this test binary cannot be spawned as one, so
+	/// the session falls back to an in-process environment, whose route keeps
+	/// the grants.
+	async fn embedded_grants(leave: Leave) {
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		project.con = loopback_context();
+		let port = loopback_upstream();
+		let environment = project.attach(None).await;
+		assert!(environment.fallback_notice.is_some(), "the session attached to a daemon");
+		grants_follow_the_journal(&project, environment, port, leave).await;
+	}
+
+	/// A rewind past the approval revokes the grant on the daemon
+	/// (`RevokeApprovalGrants`).
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_attached_grant_holds_until_a_rewind_revokes_it() {
+		attached_grants(Leave::Rewind).await;
+	}
+
+	/// A switch to another session revokes the grant on the daemon, so the
+	/// next conversation on the same connection never inherits it.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_attached_grant_never_reaches_the_next_session() {
+		attached_grants(Leave::Switch).await;
+	}
+
+	/// A rewind past the approval clears the in-process route's grants.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_embedded_grant_holds_until_a_rewind_revokes_it() {
+		embedded_grants(Leave::Rewind).await;
+	}
+
+	/// A switch to another session clears the in-process route's grants.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_embedded_grant_never_reaches_the_next_session() {
+		embedded_grants(Leave::Switch).await;
 	}
 }

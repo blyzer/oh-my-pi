@@ -53,11 +53,27 @@ client and framing boundary; it does not contain an alternate host.
   instead of failing every command. Every refusal from the broker's
   CONNECT/SOCKS authorization and upstream connect carries a typed cause
   (the TLS ClientHello gate and a request on an inactive attempt token
-  record none). Only a policy refusal is an amendable network fact and is
-  answered with the `X-Omp-Policy-Blocked` marker, so a loopback name or a
-  non-routable IP literal offers no approval the rerun would refuse again,
-  and a name that does not resolve stays an ordinary failure (answered `502`
-  with `X-Omp-Broker-Refused`, also when the client prints the headers).
+  record none). Only a policy refusal is an amendable network fact, so a
+  loopback name or a non-routable IP literal offers no approval the rerun
+  would refuse again, and a name that does not resolve stays an ordinary
+  failure (answered `502` with `X-Omp-Broker-Refused`, also when the client
+  prints the headers). An `sv_sandbox_deny_domains` entry beats every
+  approval: the broker records it as its own `deny-listed` refusal, which is
+  never amendable and never prompts. Both are answered with the
+  `X-Omp-Policy-Blocked` marker. A network amendment offers `once` or
+  `session`; a path amendment only `once`. A `session` answer admits the
+  endpoint for the rest of the session through the broker's attempt tokens:
+  each attempt carries the session grants (`EgressGrants`) of the approval
+  binding that issued its command, the in-process route or one daemon
+  connection's relay, and the broker consults them live, with no restart and
+  no recompiled profile. The grants are a cache of journaled decisions: a
+  rebound route, a closed connection, a rewind and a switch to another
+  session (`SessionGrants::revoke`, over the wire `RevokeApprovalGrants`)
+  clear them, and the session's approval desk refills them from the journal
+  it serves one refused attempt at a time.
+  A command whose session-approved endpoint was refused may rerun again only
+  for a new endpoint, at most `sv_sandbox_network_session_reruns` times
+  (default 4); a `once` approval still ends the chain after one rerun.
   Network trouble reaches the model as one `sandbox` diag
   (`exec_network_diag`): a refusal is explained in full (endpoint, mode,
   remedy) the first time the session meets its `host:port` and cause, with
@@ -65,8 +81,8 @@ client and framing boundary; it does not contain an alternate host.
   short line and a later success none. Without a refusal, a failed command
   whose stderr shows a resolver or connection failure gets the mode's
   generic text once per session.
-- `approval_relay` carries a daemon command's one-time sandbox amendment
-  prompt to the session that issued the command, and answers it there. The
+- `approval_relay` carries a daemon command's sandbox amendment prompt to the
+  session that issued the command, and answers it there. The
   daemon's host binds no approval route; an attached session advertises
   `approval-relay` in its hello, and only such an application connection to
   an environment host gets a relay. Extension connections never do, so
@@ -78,7 +94,11 @@ client and framing boundary; it does not contain an alternate host.
   in-process composition binds; named processes carry none. Every unanswered
   path fails closed: the backstop is the prompt's timeout plus a 10 s grace, a
   cancelled command withdraws its query, and a closed connection denies its
-  pending and later prompts, including those of commands that outlive it. On
+  pending and later prompts, including those of commands that outlive it.
+  Each relay is also an approval binding: the network endpoints its
+  connection approves for the session stay with it, for that connection's
+  commands only, and are cleared when it closes or sends
+  `RevokeApprovalGrants`. On
   the session side, `pump_approval_queries` files each query on the route
   `ProjectEnvironment::bind_approval_authority` binds (the driver's kernel
   route, so the prompt is journaled and answered like an in-process one) with

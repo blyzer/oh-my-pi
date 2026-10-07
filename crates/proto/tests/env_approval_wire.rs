@@ -3,12 +3,12 @@
 //!
 //! `ServerFrame` tags 40 and 41 are reserved for the removed ACP terminal
 //! execution, so the relay takes 42 and 43; `ClientFrame` 41 is reserved too,
-//! so the answer takes 42.
+//! so the answer takes 42 and the grant revocation 43.
 
 use omp_proto::{
 	env::v1::{
 		ApprovalAnswer, ApprovalDecision, ApprovalQuery, ApprovalSpec, ApprovalWithdrawn,
-		ClientFrame, ServerFrame, client_frame, server_frame,
+		ClientFrame, RevokeApprovalGrants, ServerFrame, client_frame, server_frame,
 	},
 	prost::Message,
 };
@@ -35,10 +35,16 @@ fn approval_frames_use_their_oneof_tags() {
 		..ClientFrame::default()
 	};
 	assert_eq!(answer.encode_to_vec(), EMPTY_FIELD_42);
+	let revoke = ClientFrame {
+		body: Some(client_frame::Body::RevokeApprovalGrants(RevokeApprovalGrants {})),
+		..ClientFrame::default()
+	};
+	assert_eq!(revoke.encode_to_vec(), EMPTY_FIELD_43);
 
 	assert_eq!(ServerFrame::decode(EMPTY_FIELD_42.as_slice()).expect("query frame"), query);
 	assert_eq!(ServerFrame::decode(EMPTY_FIELD_43.as_slice()).expect("withdrawn frame"), withdrawn);
 	assert_eq!(ClientFrame::decode(EMPTY_FIELD_42.as_slice()).expect("answer frame"), answer);
+	assert_eq!(ClientFrame::decode(EMPTY_FIELD_43.as_slice()).expect("revoke frame"), revoke);
 }
 
 #[test]

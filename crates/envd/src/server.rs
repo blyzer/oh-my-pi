@@ -3380,6 +3380,9 @@ impl EnvServer {
 	}
 
 	/// Binds the live durable approval authority used by Environment fallbacks.
+	///
+	/// Rebinding clears the network endpoints the previous route's session
+	/// approved for the session.
 	pub(crate) fn bind_approval_authority(
 		&self,
 		book: Option<Arc<ApprovalBook>>,
@@ -3388,6 +3391,13 @@ impl EnvServer {
 		self.approvals.bind(book, route.clone());
 		self.exec.bind_dynamic_approval_route(route.clone());
 		self.exec.bind_sandbox_approval_route(route);
+	}
+
+	/// Drops the network endpoints the bound route's session approved for the
+	/// session, because its conversation was rewound or switched to another
+	/// session.
+	pub(crate) fn revoke_approval_grants(&self) {
+		self.exec.revoke_route_grants();
 	}
 
 	/// Returns the session bridge binding retained by this environment.
@@ -4368,6 +4378,23 @@ impl EnvServer {
 			}
 			return;
 		}
+		// Handled in frame order, so a command this connection issues after it
+		// never sees a revoked grant. A connection that relays no approvals
+		// holds no grant to revoke.
+		if let client_frame::Body::RevokeApprovalGrants(_) = body {
+			if frame.request_id != 0 {
+				send_error(
+					responses,
+					frame.request_id,
+					pb::ProtocolErrorCode::InvalidArgument,
+					"approval grant revocations must use request_id 0",
+				)
+				.await;
+			} else if let Some(approvals) = &connection.approvals {
+				approvals.revoke_grants();
+			}
+			return;
+		}
 		if let client_frame::Body::Cancel(cancel) = body {
 			if frame.request_id != 0 {
 				send_error(
@@ -4455,6 +4482,9 @@ impl EnvServer {
 			},
 			client_frame::Body::AcpBind(_) => {
 				unreachable!("ACP binding handled before ordinary dispatch")
+			},
+			client_frame::Body::RevokeApprovalGrants(_) => {
+				unreachable!("approval grant revocation handled before ordinary dispatch")
 			},
 			client_frame::Body::Retire(_) => {
 				if policy.retire.is_some() {
@@ -12346,6 +12376,11 @@ mod tests {
 		Environment, ServerConfig,
 		connection::{ConnectionConfig, serve_connection},
 	};
+	#[cfg(target_os = "macos")]
+	use crate::{
+		exec_settings::ExecSandboxMode,
+		loopback_upstream::{BODY, LoopbackUpstream},
+	};
 
 	const TEST_DAP_SESSION_ID: [u8; 16] = [0x2a; 16];
 
@@ -14618,6 +14653,18 @@ mod tests {
 	/// without Seatbelt.
 	#[cfg(target_os = "macos")]
 	async fn relay_daemon() -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
+		relay_daemon_with(SandboxSettings {
+			mode: ExecSandboxMode::WorkspaceWrite,
+			..SandboxSettings::default()
+		})
+		.await
+	}
+
+	/// [`relay_daemon`] under `sandbox`.
+	#[cfg(target_os = "macos")]
+	async fn relay_daemon_with(
+		sandbox: SandboxSettings,
+	) -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
 		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
 			return None;
 		}
@@ -14644,13 +14691,7 @@ mod tests {
 			.await
 			.expect("daemon-shaped server"),
 		);
-		server.exec.configure_sandbox(
-			&SandboxSettings {
-				mode: crate::exec_settings::ExecSandboxMode::WorkspaceWrite,
-				..SandboxSettings::default()
-			},
-			root.path(),
-		);
+		server.exec.configure_sandbox(&sandbox, root.path());
 		Some((server, root, state))
 	}
 
@@ -14760,6 +14801,10 @@ mod tests {
 		}
 
 		async fn answer(&self, request_id: u64, query_id: u64, approved: bool) {
+			self.answer_in(request_id, query_id, approved, "once").await;
+		}
+
+		async fn answer_in(&self, request_id: u64, query_id: u64, approved: bool, scope: &str) {
 			self
 				.send(
 					request_id,
@@ -14767,7 +14812,7 @@ mod tests {
 						query_id,
 						decision: Some(pb::ApprovalDecision {
 							approved,
-							scope: "once".to_owned(),
+							scope: scope.to_owned(),
 							source: "user".to_owned(),
 							..pb::ApprovalDecision::default()
 						}),
@@ -14875,6 +14920,78 @@ mod tests {
 		assert!(!root.path().join(".git/silent.txt").exists());
 
 		assert!(other.responses.is_empty(), "another connection saw the owner's prompt");
+	}
+
+	/// A network endpoint approved for the session belongs to the connection
+	/// that approved it. Its later commands, in any of its shell sessions,
+	/// reach the endpoint unprompted; another connection to the same daemon is
+	/// asked as if nothing had been approved; and once the approving
+	/// connection revokes its grants (its conversation was rewound or switched
+	/// to another session), it is asked again. `exit` fails the test on any
+	/// query, so an unprompted command is proven by reading it to its exit.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn daemon_session_grants_belong_to_the_approving_connection() {
+		let Some((server, root, _state)) = relay_daemon_with(SandboxSettings {
+			mode: ExecSandboxMode::WorkspaceWrite,
+			allow_localhost: true,
+			..SandboxSettings::default()
+		})
+		.await
+		else {
+			return;
+		};
+		let upstream = LoopbackUpstream::serve();
+		let fetch = upstream.fetch();
+		let owner = RelayPeer::connect(&server, &[omp_env::APPROVAL_RELAY_CAPABILITY]).await;
+		let other = RelayPeer::connect(&server, &[omp_env::APPROVAL_RELAY_CAPABILITY]).await;
+		let session = owner.open_session(1, root.path()).await;
+
+		owner.exec(2, &session, &fetch).await;
+		let query = owner.query(2).await;
+		let reason = query.reasons.first().expect("amendment requirement");
+		assert_eq!(reason.subject, format!("network localhost:{}", upstream.port()));
+		assert_eq!(reason.scopes, ["once", "session"]);
+		owner.answer_in(2, query.query_id, true, "session").await;
+		let (status, output, _) = owner.exit(2).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Exited as i32, "{status:?}");
+		assert_eq!(output, BODY.as_bytes());
+
+		let second = owner.open_session(3, root.path()).await;
+		owner.exec(4, &second, &fetch).await;
+		let (status, output, _) = owner.exit(4).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Exited as i32, "{status:?}");
+		assert_eq!(output, BODY.as_bytes());
+
+		let elsewhere = other.open_session(1, root.path()).await;
+		other.exec(2, &elsewhere, &fetch).await;
+		let query = other.query(2).await;
+		other.answer(2, query.query_id, false).await;
+		let (status, ..) = other.exit(2).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Denied as i32, "{status:?}");
+
+		owner
+			.send(0, client_frame::Body::RevokeApprovalGrants(pb::RevokeApprovalGrants {}))
+			.await;
+		owner.exec(5, &session, &fetch).await;
+		let query = owner.query(5).await;
+		owner.answer(5, query.query_id, false).await;
+		let (status, ..) = owner.exit(5).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Denied as i32, "{status:?}");
+
+		// A revocation on any other request id is refused, and a connection that
+		// relays no approvals ignores one without a reply.
+		owner
+			.send(6, client_frame::Body::RevokeApprovalGrants(pb::RevokeApprovalGrants {}))
+			.await;
+		let refused = owner.next().await;
+		assert_eq!(refused.request_id, 6);
+		assert!(matches!(refused.body, Some(server_frame::Body::Error(_))), "{refused:?}");
+		let silent = RelayPeer::connect(&server, &[]).await;
+		silent
+			.send(0, client_frame::Body::RevokeApprovalGrants(pb::RevokeApprovalGrants {}))
+			.await;
+		silent.barrier(9).await;
 	}
 
 	/// Cancelling a command withdraws its open prompt before the command exits;

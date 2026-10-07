@@ -323,6 +323,9 @@ fn route_client_frame(
 		Some(client_frame::Body::ApprovalAnswer(_)) => {
 			(requests.get(&frame.request_id).copied().unwrap_or(remote), None)
 		},
+		// Only the environment relays approvals, so only it holds this
+		// connection's session grants.
+		Some(client_frame::Body::RevokeApprovalGrants(_)) => (remote, None),
 		Some(client_frame::Body::Cancel(cancel)) => match cancel.target.as_ref() {
 			Some(omp_proto::env::v1::cancel_request::Target::TargetRequestId(id)) => {
 				(requests.get(id).copied().unwrap_or(remote), None)
@@ -369,7 +372,11 @@ fn route_client_frame(
 const fn opens_response_route(frame: &ClientFrame) -> bool {
 	!matches!(
 		frame.body.as_ref(),
-		Some(client_frame::Body::AcpDocumentAnswer(_) | client_frame::Body::ApprovalAnswer(_))
+		Some(
+			client_frame::Body::AcpDocumentAnswer(_)
+				| client_frame::Body::ApprovalAnswer(_)
+				| client_frame::Body::RevokeApprovalGrants(_)
+		)
 	)
 }
 
@@ -462,7 +469,8 @@ mod tests {
 	use omp_proto::env::v1::{
 		AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, ApprovalAnswer, ApprovalDecision,
 		ApprovalQuery, ApprovalSpec, ArgText, ClientHello, DataRequest, DocumentOp, EditRepairAnswer,
-		EditRepairQuery, EvalResetRequest, InvokeTool, RegisterPresence, ServerHello, Update,
+		EditRepairQuery, EvalResetRequest, InvokeTool, RegisterPresence, RevokeApprovalGrants,
+		ServerHello, Update,
 	};
 
 	use super::*;
@@ -769,6 +777,20 @@ mod tests {
 		// The session host stayed open, so only the client's close ends it.
 		assert!(matches!(result, Err(PartitionError::ClientClosed)), "{result:?}");
 		drop(local_transport);
+	}
+
+	#[test]
+	fn grant_revocation_routes_to_the_environment_and_opens_no_route() {
+		let revoke = frame(0, client_frame::Body::RevokeApprovalGrants(RevokeApprovalGrants {}));
+		let (backend, invocation) = route_client_frame(
+			&revoke,
+			&FastHashSet::default(),
+			&FastHashMap::default(),
+			&FastHashMap::default(),
+		);
+		assert_eq!(backend, Backend::Remote);
+		assert!(invocation.is_none());
+		assert!(!opens_response_route(&revoke));
 	}
 
 	#[test]

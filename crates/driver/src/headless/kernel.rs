@@ -470,6 +470,54 @@ fn convar_reasoning(
 	})
 }
 
+/// Revokes the session's network approvals in the environment whenever the
+/// live session is rewound or the host switches to another session (ADR
+/// 0028): the environment's grants are a cache of journaled decisions, and the
+/// journal the kernel now serves stays the authority.
+struct RevokeSessionGrants(omp_envd::SessionGrants);
+
+impl omp_agent::SessionObserver for RevokeSessionGrants {
+	fn rewound(&self) {
+		self.0.revoke();
+	}
+
+	fn switched(&self) {
+		self.0.revoke();
+	}
+}
+
+/// Makes `kernel`'s approval route the one approval authority of
+/// `environment`, and returns the route for the session's other prompters
+/// (the tool executor's admission queries).
+///
+/// Every prompt filed on the route lands in the kernel mailbox, is journaled
+/// under `<queues><prompts>` and is answered by the host's `Up::Approve`. The
+/// environment binds it in two places: as the route of its in-process host,
+/// through which an embedded or isolated composition prompts sandbox
+/// amendments, privileged mutations and dynamic devices; and, when the session
+/// is attached to the project daemon, as the route that answers the sandbox
+/// amendments the daemon relays for the commands this session issued.
+///
+/// The network endpoints approved there for the session are journaled
+/// decisions the environment caches. A rewind may drop them from the journal
+/// and a session switch serves another journal, so the kernel's session
+/// observer revokes the cache on both, and the approval desk refills it from
+/// the grants the journal it now serves keeps (ADR 0028).
+pub fn bind_environment_approvals<C>(
+	kernel: &Kernel<C>,
+	environment: &omp_envd::ProjectEnvironment,
+) -> omp_agent::ApprovalRoute {
+	let approvals = kernel.approval_route();
+	environment.bind_approval_authority(
+		Some(Arc::new(omp_agent::ApprovalBook::new())),
+		Some(approvals.clone()),
+	);
+	kernel
+		.jobs()
+		.observe_sessions(Arc::new(RevokeSessionGrants(environment.session_grants())));
+	approvals
+}
+
 /// Environment-routed tool execution: opens the invocation on the project
 /// environment, commits the arguments, and answers the environment's
 /// admission query by prompting the session's approval authority.
@@ -2355,23 +2403,12 @@ pub async fn compose_kernel(
 		.with_hook_gate(Arc::clone(&admission_gate))
 		.with_session_state_bridge(con_journal.clone())
 		.with_session_state_bridge(Arc::clone(&rule_scope) as Arc<dyn omp_agent::SessionStateBridge>);
-	// The session's one approval authority. Every prompt filed on it lands in
-	// the kernel mailbox, is journaled under `<queues><prompts>` and is
-	// answered by the host's `Up::Approve`. The tool executor's admission
-	// queries use it, and the environment binds it in two places: as the route
-	// of its in-process host, through which an embedded or isolated
-	// composition prompts sandbox amendments, privileged mutations and
-	// dynamic devices; and, when the session is attached to the project
-	// daemon, as the route that answers the sandbox amendments the daemon
-	// relays for the commands this session issued. The daemon relays nothing
-	// else yet: its dynamic-device admissions and privileged mutations still
-	// fail closed.
-	let approvals = kernel.approval_route();
+	// The session's one approval authority, which the tool executor's admission
+	// queries use too. The daemon relays nothing but sandbox amendments yet:
+	// its dynamic-device admissions and privileged mutations still fail
+	// closed.
+	let approvals = bind_environment_approvals(&kernel, kernel.inference().environment());
 	let notice_mailbox = kernel.mailbox();
-	kernel.inference().environment().bind_approval_authority(
-		Some(Arc::new(omp_agent::ApprovalBook::new())),
-		Some(approvals.clone()),
-	);
 	let mut kernel = kernel
 		.with_external_executor(Arc::new(EnvToolExecutor::new(tool_client, approvals)))
 		.with_tool_admission(Arc::new(

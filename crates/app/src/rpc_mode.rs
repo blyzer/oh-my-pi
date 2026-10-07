@@ -2653,6 +2653,9 @@ where
 									};
 									match transition {
 										Ok((mut next, start)) => {
+											// The kernel outlives the session: state derived
+											// from the previous journal must not serve `next`.
+											idle_kernel.session_switched();
 											idle_kernel.resync_session_state(&next);
 											// Committed and resynced: `next` starts. A host
 											// refusing it cannot undo the switch; it is logged.

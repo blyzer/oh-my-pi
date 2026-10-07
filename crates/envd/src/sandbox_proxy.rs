@@ -16,7 +16,8 @@ use std::{
 };
 
 use omp_core::{FastHashMap, Str, Ulid, encoding::base64};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
+use smallvec::SmallVec;
 #[cfg(target_os = "linux")]
 use tempfile::TempDir;
 use url::Url;
@@ -35,18 +36,25 @@ const MAX_ATTEMPTS: usize = 64;
 const DENIAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DENIAL_DRAIN_BYTES: usize = 1024 * 1024;
 
-/// Why the egress broker refused one connection. Only [`Self::Policy`] is
-/// answered with the policy denial (`403` and `X-Omp-Policy-Blocked`); a
-/// fail-closed cause is answered `502` with `X-Omp-Broker-Refused: <cause>`,
-/// so a client that prints the broker's response headers never shows the
-/// policy marker for a refusal the sandbox's policy did not make.
+/// Why the egress broker refused one connection. Only the sandbox's own policy
+/// ([`Self::Policy`] and [`Self::DenyListed`]) is answered with the policy
+/// denial (`403` and `X-Omp-Policy-Blocked`); a fail-closed cause is answered
+/// `502` with `X-Omp-Broker-Refused: <cause>`, so a client that prints the
+/// broker's response headers never shows the policy marker for a refusal the
+/// sandbox's policy did not make.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::IntoStaticStr, thiserror::Error)]
 #[strum(serialize_all = "kebab-case")]
 pub(crate) enum BrokerRefusal {
-	/// The port, a deny rule or the allowlist refused the host. The only
-	/// cause the user can amend: an approval admits the host for one rerun.
+	/// The port or the allowlist refused the host. The only cause the user can
+	/// amend: an approval admits the endpoint for one rerun, or for the rest of
+	/// the session.
 	#[error("the scoped network policy does not allow the host")]
 	Policy,
+	/// An explicit `sv_sandbox_deny_domains` rule refused the host. It beats
+	/// every approval, once or for the session, so it is never amendable and
+	/// never prompts: only the user's configuration can lift it.
+	#[error("an sv_sandbox_deny_domains rule denies the host")]
+	DenyListed,
 	/// The host was allowed, but its name did not resolve to any address.
 	#[error("the allowed host did not resolve")]
 	Unresolved,
@@ -79,8 +87,67 @@ pub(crate) struct BrokerDenial {
 	pub(crate) cause: BrokerRefusal,
 }
 
-/// Live attempt capabilities, each with the refusal it recorded so far.
-type Attempts = Arc<Mutex<FastHashMap<Str, Option<BrokerDenial>>>>;
+/// The network endpoints one approval binding approved for the rest of its
+/// session, derived from its journaled session-scoped `sandbox_amendment`
+/// decisions. Clones share one set.
+///
+/// A binding is one relay connection on the project daemon, or the in-process
+/// route a composition binds; its grants never reach a command another binding
+/// issued. The set is a cache, never the authority: it is cleared when its
+/// connection closes, when the route is rebound, when the conversation is
+/// rewound and when the session switches to another one, and refills from the
+/// journal through the approval desk's session replay, one refused attempt per
+/// endpoint.
+///
+/// Keyed by the host as the broker records it (lowercase, trailing dots
+/// trimmed), so a lookup with that spelling allocates nothing.
+#[derive(Clone, Default)]
+pub struct EgressGrants(Arc<RwLock<FastHashMap<Str, SmallVec<u16, 2>>>>);
+
+impl EgressGrants {
+	/// Approves `host:port` for the rest of the binding's session. The host is
+	/// normalized as the broker normalizes requests.
+	pub fn insert(&self, host: &str, port: u16) {
+		let host = normalize_host(host);
+		let mut grants = self.0.write();
+		match grants.get_mut(host.as_str()) {
+			Some(ports) if ports.contains(&port) => {},
+			Some(ports) => ports.push(port),
+			None => {
+				let mut ports = SmallVec::new();
+				ports.push(port);
+				grants.insert(Str::from(host), ports);
+			},
+		}
+	}
+
+	/// Whether `host:port` was approved for the session. `host` is spelled as
+	/// the broker records it: lowercase, trailing dots trimmed.
+	pub fn covers(&self, host: &str, port: u16) -> bool {
+		self
+			.0
+			.read()
+			.get(host)
+			.is_some_and(|ports| ports.contains(&port))
+	}
+
+	/// Drops every grant: its connection closed, its route was rebound, or the
+	/// conversation that journaled it was rewound or switched to another
+	/// session.
+	pub fn clear(&self) {
+		self.0.write().clear();
+	}
+}
+
+/// One live attempt capability: the refusal it recorded so far, and the
+/// session grants of the approval binding whose command it runs.
+struct Attempt {
+	refusal: Option<BrokerDenial>,
+	grants:  Option<EgressGrants>,
+}
+
+/// Live attempt capabilities by token.
+type Attempts = Arc<Mutex<FastHashMap<Str, Attempt>>>;
 
 /// A session-owned scoped egress broker. It exposes a loopback listener on
 /// macOS and an owned Unix socket on Linux, so an untrusted command can reach
@@ -97,7 +164,10 @@ pub(crate) struct ScopedProxy {
 }
 
 impl ScopedProxy {
-	/// Starts a broker whose policy is immutable for this execution session.
+	/// Starts a broker whose base policy is immutable for this execution
+	/// session. The session grants an attempt carries are live: an endpoint
+	/// approved for the session passes every attempt of that binding at once,
+	/// with no new broker and no recompiled sandbox profile.
 	pub(crate) fn start(settings: &SandboxSettings) -> io::Result<Self> {
 		Self::start_with_amendment(settings, None)
 	}
@@ -151,8 +221,9 @@ impl ScopedProxy {
 	}
 
 	/// Registers a unique execution attempt capability and returns its opaque
-	/// token.
-	pub(crate) fn begin_attempt(&self) -> Str {
+	/// token. `grants` are the session grants of the approval binding whose
+	/// command the attempt runs, if any; the broker consults them live.
+	pub(crate) fn begin_attempt(&self, grants: Option<EgressGrants>) -> Str {
 		let token = Str::from(Ulid::generate().to_string());
 		let mut attempts = self.attempts.lock();
 		if attempts.len() >= MAX_ATTEMPTS
@@ -160,13 +231,17 @@ impl ScopedProxy {
 		{
 			attempts.remove(&expired);
 		}
-		attempts.insert(token.clone(), None);
+		attempts.insert(token.clone(), Attempt { refusal: None, grants });
 		token
 	}
 
 	/// Consumes this capability's refusal and invalidates it.
 	pub(crate) fn finish_attempt(&self, token: &Str) -> Option<BrokerDenial> {
-		self.attempts.lock().remove(token).flatten()
+		self
+			.attempts
+			.lock()
+			.remove(token)
+			.and_then(|attempt| attempt.refusal)
 	}
 
 	/// Returns an HTTP proxy URL carrying this attempt capability.
@@ -410,30 +485,43 @@ impl ProxyPolicy {
 	/// replaces one.
 	fn record(&self, token: &Str, host: &str, port: u16, cause: BrokerRefusal) {
 		let mut attempts = self.attempts.lock();
-		let Some(slot) = attempts.get_mut(token) else {
+		let Some(attempt) = attempts.get_mut(token) else {
 			return;
 		};
-		let replace = slot
+		let replace = attempt
+			.refusal
 			.as_ref()
 			.is_none_or(|recorded| recorded.cause.fails_closed() && !cause.fails_closed());
 		if replace {
-			*slot = Some(BrokerDenial { host: Str::from(host), port, cause });
+			attempt.refusal = Some(BrokerDenial { host: Str::from(host), port, cause });
 		}
 	}
 
 	/// Judges `host:port` for this attempt and returns the addresses to
 	/// connect to, or the refusal, which is recorded. An attempt that is no
 	/// longer active is refused as [`BrokerRefusal::Policy`] without a record.
+	///
+	/// An explicit deny rule is judged before any approval: neither the
+	/// one-shot amendment nor a session grant admits a deny-listed host. Either
+	/// approval admits its exact endpoint past the port list and the allowlist,
+	/// and the routability checks still apply to it.
 	fn authorize(
 		&self,
 		token: &Str,
 		host: &str,
 		port: u16,
 	) -> Result<Vec<SocketAddr>, BrokerRefusal> {
-		if !self.attempt_is_active(token) {
-			return Err(BrokerRefusal::Policy);
-		}
 		let host = normalize_host(host);
+		let granted = {
+			let attempts = self.attempts.lock();
+			let Some(attempt) = attempts.get(token) else {
+				return Err(BrokerRefusal::Policy);
+			};
+			attempt
+				.grants
+				.as_ref()
+				.is_some_and(|grants| grants.covers(&host, port))
+		};
 		// Refused as non-routable before the allowlist: approving it could not
 		// help, because the rerun would refuse the same address after
 		// resolution, so no amendable fact is recorded.
@@ -441,23 +529,31 @@ impl ProxyPolicy {
 			self.record(token, &host, port, BrokerRefusal::NonRoutable);
 			return Err(BrokerRefusal::NonRoutable);
 		}
+		if host.is_empty() {
+			self.record(token, &host, port, BrokerRefusal::Policy);
+			return Err(BrokerRefusal::Policy);
+		}
+		if self
+			.deny
+			.iter()
+			.any(|rule| domain_matches(rule.as_str(), &host))
+		{
+			self.record(token, &host, port, BrokerRefusal::DenyListed);
+			return Err(BrokerRefusal::DenyListed);
+		}
 		let amended = self
 			.amendment
 			.as_ref()
 			.is_some_and(|(allowed, allowed_port)| {
 				*allowed_port == port && allowed.trim_end_matches('.').eq_ignore_ascii_case(&host)
 			});
-		if host.is_empty()
-			|| !amended
-				&& (!self.ports.contains(&port)
-					|| self
-						.deny
-						.iter()
-						.any(|rule| domain_matches(rule.as_str(), &host))
-					|| !self
-						.allow
-						.iter()
-						.any(|rule| domain_matches(rule.as_str(), &host)))
+		if !amended
+			&& !granted
+			&& (!self.ports.contains(&port)
+				|| !self
+					.allow
+					.iter()
+					.any(|rule| domain_matches(rule.as_str(), &host)))
 		{
 			self.record(token, &host, port, BrokerRefusal::Policy);
 			return Err(BrokerRefusal::Policy);
@@ -688,7 +784,7 @@ fn http<S: ClientStream>(
 
 	let mut upstream = match policy.connect(&token, &host, port) {
 		Ok(stream) => stream,
-		Err(BrokerRefusal::Policy) => {
+		Err(BrokerRefusal::Policy | BrokerRefusal::DenyListed) => {
 			return http_reject(client, reader, |client| http_policy_deny(client, &host, port));
 		},
 		Err(refusal) => {
@@ -1250,8 +1346,13 @@ mod tests {
 	}
 
 	fn test_attempts() -> Attempts {
+		granted_attempts(None)
+	}
+
+	/// One live test attempt carrying `grants`.
+	fn granted_attempts(grants: Option<EgressGrants>) -> Attempts {
 		let mut attempts = FastHashMap::default();
-		attempts.insert(test_token(), None);
+		attempts.insert(test_token(), Attempt { refusal: None, grants });
 		Arc::new(Mutex::new(attempts))
 	}
 
@@ -1260,7 +1361,19 @@ mod tests {
 	}
 
 	fn recorded(policy: &ProxyPolicy) -> Option<BrokerDenial> {
-		policy.attempts.lock().get(&test_token()).cloned().flatten()
+		policy
+			.attempts
+			.lock()
+			.get(&test_token())
+			.and_then(|attempt| attempt.refusal.clone())
+	}
+
+	/// Clears the test attempt's recorded refusal, so the next judgment is
+	/// recorded on its own.
+	fn forget(policy: &ProxyPolicy) {
+		if let Some(attempt) = policy.attempts.lock().get_mut(&test_token()) {
+			attempt.refusal = None;
+		}
 	}
 
 	fn socks_auth(client: &mut TcpStream) {
@@ -1382,7 +1495,7 @@ mod tests {
 	#[test]
 	fn deny_rules_and_ports_precede_resolution() {
 		let policy = ProxyPolicy {
-			allow:     Arc::from([Str::from("example.test")]),
+			allow:     Arc::from([Str::from("example.test"), Str::from("other.test")]),
 			deny:      Arc::from([Str::from("example.test")]),
 			ports:     Arc::from([443]),
 			localhost: false,
@@ -1391,14 +1504,99 @@ mod tests {
 		};
 		assert_eq!(
 			policy.authorize(&test_token(), "example.test", 443),
-			Err(BrokerRefusal::Policy),
+			Err(BrokerRefusal::DenyListed),
 			"deny"
 		);
 		assert_eq!(
-			policy.authorize(&test_token(), "example.test", 80),
+			policy.authorize(&test_token(), "other.test", 80),
 			Err(BrokerRefusal::Policy),
 			"port"
 		);
+	}
+
+	/// An endpoint approved for the session passes a running broker at once,
+	/// without a restart, and only for the attempts of the binding that holds
+	/// the grant: the exact host (as the broker normalizes it) and port, never
+	/// another port, and never after the grants are cleared.
+	#[test]
+	fn session_grants_admit_their_exact_endpoint_on_a_running_policy() {
+		let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
+		let port = upstream.local_addr().expect("upstream address").port();
+		let grants = EgressGrants::default();
+		let policy = ProxyPolicy {
+			ports: Arc::from([443]),
+			attempts: granted_attempts(Some(grants.clone())),
+			..closed_broker(true)
+		};
+		assert_eq!(
+			policy.authorize(&test_token(), "localhost", port),
+			Err(BrokerRefusal::Policy),
+			"not yet granted"
+		);
+		assert_eq!(recorded(&policy), refusal("localhost", port, BrokerRefusal::Policy));
+		forget(&policy);
+
+		grants.insert("LOCALHOST.", port);
+		assert!(grants.covers("localhost", port), "the grant is kept as the broker spells the host");
+		let candidates = policy
+			.authorize(&test_token(), "localhost", port)
+			.expect("the granted endpoint passes the same running policy");
+		assert!(candidates.iter().all(|address| address.ip().is_loopback()), "{candidates:?}");
+		assert_eq!(recorded(&policy), None, "an admitted endpoint records nothing");
+		assert_eq!(
+			policy.authorize(&test_token(), "localhost", port + 1),
+			Err(BrokerRefusal::Policy),
+			"another port of a granted host"
+		);
+		forget(&policy);
+
+		// An attempt of another binding never sees these grants.
+		let other = ProxyPolicy { attempts: granted_attempts(None), ..policy.clone() };
+		assert_eq!(other.authorize(&test_token(), "localhost", port), Err(BrokerRefusal::Policy));
+
+		grants.clear();
+		assert_eq!(
+			policy.authorize(&test_token(), "localhost", port),
+			Err(BrokerRefusal::Policy),
+			"a cleared grant admits nothing"
+		);
+		drop(upstream);
+	}
+
+	/// An explicit deny rule beats every approval: neither the one-shot
+	/// amendment nor a session grant admits a deny-listed host, and its refusal
+	/// is the distinct, never amendable [`BrokerRefusal::DenyListed`]. A
+	/// session grant still never reaches an address scoped networking refuses.
+	#[test]
+	fn deny_rules_beat_every_approval() {
+		let grants = EgressGrants::default();
+		grants.insert("blocked.example", 443);
+		grants.insert("10.0.0.7", 443);
+		let policy = ProxyPolicy {
+			deny: Arc::from([Str::from("*.example"), Str::from("blocked.example")]),
+			amendment: Some((Str::from("blocked.example"), 443)),
+			attempts: granted_attempts(Some(grants)),
+			..closed_broker(false)
+		};
+		assert_eq!(
+			policy.authorize(&test_token(), "Blocked.Example.", 443),
+			Err(BrokerRefusal::DenyListed)
+		);
+		assert_eq!(recorded(&policy), refusal("blocked.example", 443, BrokerRefusal::DenyListed));
+		assert!(BrokerRefusal::DenyListed.fails_closed(), "a deny-listed host is never amendable");
+		forget(&policy);
+		assert_eq!(
+			policy.authorize(&test_token(), "10.0.0.7", 443),
+			Err(BrokerRefusal::NonRoutable),
+			"a grant never reaches a private address"
+		);
+
+		// A later amendable refusal in the same attempt replaces the deny-listed
+		// one, which fails closed like any other cause the user cannot amend.
+		forget(&policy);
+		assert!(policy.authorize(&test_token(), "api.example", 443).is_err());
+		assert!(policy.authorize(&test_token(), "other.test", 443).is_err());
+		assert_eq!(recorded(&policy), refusal("other.test", 443, BrokerRefusal::Policy));
 	}
 
 	#[test]
@@ -1622,10 +1820,11 @@ mod tests {
 		assert_eq!(resolved_refusal(&[at("8.8.8.8"), at("2001:4860:4860::8888")], false), None);
 	}
 
-	/// Only a policy refusal carries the policy marker header. A fail-closed
-	/// refusal is answered `502` with its cause, so a client that prints the
-	/// proxy's response headers (`curl -v`) never shows `X-Omp-Policy-Blocked`
-	/// for a refusal the policy did not make.
+	/// Only a refusal of the sandbox's own policy (the allowlist, the ports, a
+	/// deny rule) carries the policy marker header. A fail-closed refusal is
+	/// answered `502` with its cause, so a client that prints the proxy's
+	/// response headers (`curl -v`) never shows `X-Omp-Policy-Blocked` for a
+	/// refusal the policy did not make.
 	#[test]
 	fn only_policy_refusals_carry_the_policy_marker() {
 		let response = |policy: ProxyPolicy, target: &str| {
@@ -1653,6 +1852,18 @@ mod tests {
 		let policy = response(allowing("allowed.example"), "blocked.example:443");
 		assert!(policy.starts_with("HTTP/1.1 403"), "{policy}");
 		assert!(policy.contains("X-Omp-Policy-Blocked: blocked.example:443\r\n"), "{policy}");
+		let deny_listed = response(
+			ProxyPolicy {
+				deny: Arc::from([Str::from("denied.example")]),
+				..allowing("denied.example")
+			},
+			"denied.example:443",
+		);
+		assert!(deny_listed.starts_with("HTTP/1.1 403"), "{deny_listed}");
+		assert!(
+			deny_listed.contains("X-Omp-Policy-Blocked: denied.example:443\r\n"),
+			"{deny_listed}"
+		);
 
 		for (target, cause) in [
 			("unresolvable.invalid:443", "unresolved"),
@@ -2228,7 +2439,7 @@ mod tests {
 	fn attempt_registry_is_bounded_and_invalidates_evicted_capabilities() {
 		let proxy = ScopedProxy::start(&SandboxSettings::default()).expect("broker");
 		for _ in 0..=MAX_ATTEMPTS {
-			proxy.begin_attempt();
+			proxy.begin_attempt(None);
 		}
 		assert!(proxy.attempts.lock().len() <= MAX_ATTEMPTS);
 	}
@@ -2236,8 +2447,8 @@ mod tests {
 	#[test]
 	fn broker_denials_are_scoped_to_one_attempt() {
 		let proxy = ScopedProxy::start(&SandboxSettings::default()).expect("broker");
-		let first = proxy.begin_attempt();
-		let second = proxy.begin_attempt();
+		let first = proxy.begin_attempt(None);
+		let second = proxy.begin_attempt(None);
 		let policy =
 			ProxyPolicy::from_settings(&SandboxSettings::default(), None, Arc::clone(&proxy.attempts));
 		assert!(policy.authorize(&first, "blocked.example", 443).is_err());
