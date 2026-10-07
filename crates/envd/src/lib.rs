@@ -1178,7 +1178,7 @@ impl ProjectEnvironment {
 	}
 
 	/// Returns the handle through which the session's network approvals are
-	/// revoked when its conversation is rewound.
+	/// revoked when its conversation is rewound or switched to another session.
 	pub fn session_grants(&self) -> SessionGrants {
 		SessionGrants {
 			client: self.approval_relay.is_some().then(|| self.client.clone()),
@@ -1664,9 +1664,10 @@ impl EditorDocuments {
 /// binding that answered them: the in-process host route of an embedded or
 /// isolated composition, or this composition's connection to the project
 /// daemon when it is attached. [`Self::revoke`] drops both when the
-/// conversation is rewound, so no endpoint stays admitted that the rewound
-/// journal no longer approves; the approval desk refills them from the
-/// journal, one refused attempt per endpoint.
+/// conversation is rewound or switched to another session, so no endpoint
+/// stays admitted that the journal the session now serves does not approve;
+/// the approval desk refills them from that journal, one refused attempt per
+/// endpoint.
 #[derive(Clone)]
 pub struct SessionGrants {
 	/// The attached connection, whose daemon-side relay holds the grants of

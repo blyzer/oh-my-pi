@@ -1102,10 +1102,11 @@ impl EnvClient {
 			})
 	}
 
-	/// Tells the environment that this connection's session was rewound: it
-	/// drops every network endpoint this connection approved for the session,
-	/// so the next commands are asked again and the session answers from the
-	/// grants its journal still holds.
+	/// Tells the environment that this connection's conversation was rewound
+	/// or switched to another session: it drops every network endpoint this
+	/// connection approved for the session, so the next commands are asked
+	/// again and the session answers from the grants the journal it now serves
+	/// holds.
 	///
 	/// An unsolicited request-id-zero control frame, valid only after the
 	/// protocol handshake. Frames on one connection are handled in order, so a

@@ -166,16 +166,24 @@ pub const ORPHANED_TOOL_JOB: &str =
 pub const ORPHANED_SUBAGENT_JOB: &str =
 	"subagent execution was lost across a rewind or restart and can be revived";
 
-/// Host state outside the job board that a rewind of the session invalidates.
+/// Host state outside the job board derived from the live session's journal,
+/// which outlives that session because the kernel and its environment do.
 ///
-/// Every rewind (`Session::rewind`, from any path: a host command, a
-/// checkpoint rewind, a tool-tail retry) reaches the runtime through
-/// [`JobBoard::apply_lifecycle`], which tells each registered observer. An
-/// observer drops state that the rewound journal may no longer justify; it
-/// must not block.
-pub trait RewindObserver: Send + Sync {
-	/// The authoritative session was rewound.
+/// Two transitions invalidate it. Every rewind of the live session
+/// (`Session::rewind`, from any path: a host command, a checkpoint rewind, a
+/// tool-tail retry) reaches the runtime through [`JobBoard::apply_lifecycle`],
+/// which calls [`Self::rewound`]. A host that replaces the live session with
+/// another one (new, resumed, forked or branched, handed off) tells the kernel
+/// through [`crate::Kernel::session_switched`], which calls
+/// [`Self::switched`]. An observer drops state that the journal it now serves
+/// may no longer justify; it must not block.
+pub trait SessionObserver: Send + Sync {
+	/// The live session was rewound.
 	fn rewound(&self);
+
+	/// The host replaced the live session with another session, whose journal
+	/// never decided what this state was derived from.
+	fn switched(&self);
 }
 
 /// A disposable runtime index over the authoritative jobs subtree.
@@ -193,8 +201,8 @@ pub struct JobBoard {
 	/// Dispatcher spill namespace. A detached artifact is copied into the
 	/// session namespace before its durable job settlement references it.
 	artifact_store: Mutex<Option<BlobStore>>,
-	/// Host state told about every rewind.
-	rewinds:        Mutex<Vec<Arc<dyn RewindObserver>>>,
+	/// Host state told about every rewind and every session switch.
+	observers:      Mutex<Vec<Arc<dyn SessionObserver>>>,
 }
 
 impl Default for JobBoard {
@@ -205,7 +213,7 @@ impl Default for JobBoard {
 			hooks:          Mutex::default(),
 			output_bound:   AtomicUsize::new(crate::DispatchPolicy::DEFAULT_MAX_OUTPUT_BYTES),
 			artifact_store: Mutex::default(),
-			rewinds:        Mutex::default(),
+			observers:      Mutex::default(),
 		}
 	}
 }
@@ -234,10 +242,18 @@ impl JobBoard {
 		*self.hooks.lock() = Some(hooks);
 	}
 
-	/// Registers host state that every later rewind of the session
-	/// invalidates.
-	pub fn observe_rewinds(&self, observer: Arc<dyn RewindObserver>) {
-		self.rewinds.lock().push(observer);
+	/// Registers host state that every later rewind of the live session, and
+	/// every switch to another session, invalidates.
+	pub fn observe_sessions(&self, observer: Arc<dyn SessionObserver>) {
+		self.observers.lock().push(observer);
+	}
+
+	/// Tells every [`SessionObserver`] that the host replaced the live session
+	/// with another one.
+	pub fn session_switched(&self) {
+		for observer in self.observers.lock().iter() {
+			observer.switched();
+		}
 	}
 
 	fn notify_registered(&self, record: &JobRecord) {
@@ -695,13 +711,13 @@ impl JobBoard {
 	/// retained handles. Removed executions are cooperatively cancelled and
 	/// their owned tasks are force-aborted after a bounded grace. Added
 	/// records are re-derived from `session` rather than left invisible.
-	/// Every [`RewindObserver`] is told first.
+	/// Every [`SessionObserver`] is told first.
 	pub fn apply_lifecycle(
 		&self,
 		session: &Session,
 		work: &LifecycleWork,
 	) -> impl Future<Output = ()> + Send + 'static {
-		for observer in self.rewinds.lock().iter() {
+		for observer in self.observers.lock().iter() {
 			observer.rewound();
 		}
 		let mut terminated = Vec::new();

@@ -67,9 +67,10 @@ client and framing boundary; it does not contain an alternate host.
   binding that issued its command, the in-process route or one daemon
   connection's relay, and the broker consults them live, with no restart and
   no recompiled profile. The grants are a cache of journaled decisions: a
-  rebound route, a closed connection and a rewind (`SessionGrants::revoke`,
-  over the wire `RevokeApprovalGrants`) clear them, and the session's
-  approval desk refills them from the journal one refused attempt at a time.
+  rebound route, a closed connection, a rewind and a switch to another
+  session (`SessionGrants::revoke`, over the wire `RevokeApprovalGrants`)
+  clear them, and the session's approval desk refills them from the journal
+  it serves one refused attempt at a time.
   A command whose session-approved endpoint was refused may rerun again only
   for a new endpoint, at most `sv_sandbox_network_session_reruns` times
   (default 4); a `once` approval still ends the chain after one rerun.

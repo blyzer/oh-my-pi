@@ -41,7 +41,7 @@ use crate::{
 	DirectorStack, DispatchError, DispatchPolicy, Dispatcher, ExternalToolExecutor,
 	FileMentionService, FileMentionSource, KernelEvent, LiveComponent, LiveComponentError,
 	LoopDecision, MaterializedFileMention, MutDirectorCx, Prepared, PreparedCall, Received,
-	ReplyObligations, RewindObserver, RouteFacts, SessionTool, StreamEffect, StreamFragment,
+	ReplyObligations, RouteFacts, SessionObserver, SessionTool, StreamEffect, StreamFragment,
 	StreamInterrupt, StreamObserver, StreamSource, StreamVerdict, ToolCancellation, TurnView, Up,
 	directors::compaction::CompactionDirector,
 	parse_file_mentions,
@@ -782,12 +782,23 @@ impl<C> Kernel<C> {
 		self.reply_obligations.clone()
 	}
 
-	/// Registers host state that every later rewind of the session
-	/// invalidates, whichever path rewinds it (see [`crate::RewindObserver`]).
+	/// Registers host state that every later rewind of the live session,
+	/// whichever path rewinds it, and every switch to another session
+	/// invalidates (see [`crate::SessionObserver`]).
 	#[must_use]
-	pub fn with_rewind_observer(self, observer: Arc<dyn RewindObserver>) -> Self {
-		self.dispatcher.jobs().observe_rewinds(observer);
+	pub fn with_session_observer(self, observer: Arc<dyn SessionObserver>) -> Self {
+		self.dispatcher.jobs().observe_sessions(observer);
 		self
+	}
+
+	/// Tells every [`crate::SessionObserver`] that the host replaced the live
+	/// session with another one (new, resumed, forked or branched, handed off).
+	///
+	/// This kernel and the environment it composes outlive the session they
+	/// served, so a host calls this once per committed switch, before the next
+	/// session can run a command.
+	pub fn session_switched(&self) {
+		self.dispatcher.jobs().session_switched();
 	}
 
 	/// Applies rewind/resume lifecycle work to every runtime execution unit.

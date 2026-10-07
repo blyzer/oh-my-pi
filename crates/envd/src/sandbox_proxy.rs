@@ -94,9 +94,10 @@ pub(crate) struct BrokerDenial {
 /// A binding is one relay connection on the project daemon, or the in-process
 /// route a composition binds; its grants never reach a command another binding
 /// issued. The set is a cache, never the authority: it is cleared when its
-/// connection closes, when the route is rebound and when the conversation is
-/// rewound, and refills from the journal through the approval desk's session
-/// replay, one refused attempt per endpoint.
+/// connection closes, when the route is rebound, when the conversation is
+/// rewound and when the session switches to another one, and refills from the
+/// journal through the approval desk's session replay, one refused attempt per
+/// endpoint.
 ///
 /// Keyed by the host as the broker records it (lowercase, trailing dots
 /// trimmed), so a lookup with that spelling allocates nothing.
@@ -131,7 +132,8 @@ impl EgressGrants {
 	}
 
 	/// Drops every grant: its connection closed, its route was rebound, or the
-	/// conversation that journaled it was rewound.
+	/// conversation that journaled it was rewound or switched to another
+	/// session.
 	pub fn clear(&self) {
 		self.0.write().clear();
 	}

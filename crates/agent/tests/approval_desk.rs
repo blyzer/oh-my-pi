@@ -4,6 +4,7 @@
 //! decision reaches the waiting policy only after the journal recorded it.
 
 use std::{
+	mem,
 	sync::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
@@ -461,26 +462,38 @@ async fn a_resumed_session_answers_a_journaled_network_grant_and_asks_the_rest()
 	);
 }
 
-/// Counts the rewinds it is told about.
+/// Counts the rewinds and the session switches it is told about.
 #[derive(Default)]
-struct Rewinds(AtomicUsize);
+struct Transitions {
+	rewinds:  AtomicUsize,
+	switches: AtomicUsize,
+}
 
-impl omp_agent::RewindObserver for Rewinds {
-	fn rewound(&self) {
-		self.0.fetch_add(1, Ordering::SeqCst);
+impl Transitions {
+	/// `(rewinds, switches)` told so far.
+	fn seen(&self) -> (usize, usize) {
+		(self.rewinds.load(Ordering::SeqCst), self.switches.load(Ordering::SeqCst))
 	}
 }
 
-/// A rewind past a session grant takes the grant out of the journal, so the
-/// same subject is asked again, and it tells every rewind observer the kernel
-/// was composed with: the driver registers one through which the environment
-/// drops the network grants it cached from that journal.
-#[tokio::test]
-async fn a_rewind_past_a_session_grant_asks_again_and_tells_rewind_observers() {
-	let rewinds = Arc::new(Rewinds::default());
+impl omp_agent::SessionObserver for Transitions {
+	fn rewound(&self) {
+		self.rewinds.fetch_add(1, Ordering::SeqCst);
+	}
+
+	fn switched(&self) {
+		self.switches.fetch_add(1, Ordering::SeqCst);
+	}
+}
+
+/// A harness over a fresh session whose kernel reports to `transitions`: the
+/// first turn files one `gated` prompt for `cargo test`, the second the same
+/// prompt again.
+fn observed_harness(transitions: &Arc<Transitions>) -> Harness {
 	let temp = tempfile::tempdir().expect("tempdir");
 	let session = fresh_session(&temp.path().join("approvals.oms"));
-	let mut harness = harness_in(
+	let transitions = Arc::clone(transitions);
+	harness_in(
 		temp,
 		session,
 		vec![
@@ -489,15 +502,22 @@ async fn a_rewind_past_a_session_grant_asks_again_and_tells_rewind_observers() {
 			tool_script("gated-2", "gated", serde_json::json!({"command": "cargo test"})),
 			text_script("asked again"),
 		],
-		{
-			let rewinds = Arc::clone(&rewinds);
-			move |kernel| kernel.with_rewind_observer(rewinds)
-		},
-	);
+		move |kernel| kernel.with_session_observer(transitions),
+	)
+}
+
+/// A rewind past a session grant takes the grant out of the journal, so the
+/// same subject is asked again, and it tells every session observer the kernel
+/// was composed with: the driver registers one through which the environment
+/// drops the network grants it cached from that journal.
+#[tokio::test]
+async fn a_rewind_past_a_session_grant_asks_again_and_tells_session_observers() {
+	let transitions = Arc::new(Transitions::default());
+	let mut harness = observed_harness(&transitions);
 	let before = harness.session.head().expect("head before the grant");
 	let seen = run(&mut harness, |_| Some(decision(true, ApprovalScope::Session))).await;
 	assert_eq!(seen.len(), 1);
-	assert_eq!(rewinds.0.load(Ordering::SeqCst), 0);
+	assert_eq!(transitions.seen(), (0, 0));
 
 	let work = harness
 		.session
@@ -507,7 +527,7 @@ async fn a_rewind_past_a_session_grant_asks_again_and_tells_rewind_observers() {
 		.kernel
 		.apply_lifecycle(&harness.session, &work)
 		.await;
-	assert_eq!(rewinds.0.load(Ordering::SeqCst), 1, "the rewind was told");
+	assert_eq!(transitions.seen(), (1, 0), "the rewind was told, as a rewind");
 	assert!(prompts(&harness.session).is_empty(), "the rewound journal holds no grant");
 
 	let again = run(&mut harness, |_| Some(decision(false, ApprovalScope::Once))).await;
@@ -518,5 +538,40 @@ async fn a_rewind_past_a_session_grant_asks_again_and_tells_rewind_observers() {
 			.as_ref()
 			.map(|decision| decision.source),
 		Some(ApprovalSource::User)
+	);
+}
+
+/// The kernel outlives the session it served: when the host switches it to
+/// another session, a session grant of the previous journal answers nothing in
+/// the next one, and every session observer is told of the switch, so the
+/// environment drops the network grants it cached from the previous journal.
+#[tokio::test]
+async fn a_switch_away_from_a_session_grant_asks_again_and_tells_session_observers() {
+	let transitions = Arc::new(Transitions::default());
+	let mut harness = observed_harness(&transitions);
+	let seen = run(&mut harness, |_| Some(decision(true, ApprovalScope::Session))).await;
+	assert_eq!(seen.len(), 1);
+	assert_eq!(transitions.seen(), (0, 0));
+
+	// What a host does once a switch commits: the next session is live, the
+	// kernel is told, and its state is resynced from the next journal.
+	let elsewhere = tempfile::tempdir().expect("tempdir");
+	let next = fresh_session(&elsewhere.path().join("next.oms"));
+	let previous = mem::replace(&mut harness.session, next);
+	harness.kernel.session_switched();
+	harness.kernel.resync_session_state(&harness.session);
+	assert_eq!(transitions.seen(), (0, 1), "the switch was told, as a switch");
+	assert_eq!(prompts(&previous).len(), 1, "the previous journal keeps its grant");
+	drop(previous);
+
+	let again = run(&mut harness, |_| Some(decision(false, ApprovalScope::Once))).await;
+	assert_eq!(again.len(), 1, "the previous session's grant answers nothing here");
+	assert_eq!(
+		prompts(&harness.session)
+			.iter()
+			.map(|ticket| ticket.decision.as_ref().map(|decision| decision.source))
+			.collect::<Vec<_>>(),
+		[Some(ApprovalSource::User)],
+		"a human decided the next session's prompt"
 	);
 }

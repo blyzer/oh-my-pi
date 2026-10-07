@@ -23,8 +23,9 @@
 //! approves for the session are kept on it ([`EgressGrants`]) and admitted
 //! only for the commands that connection issues. They are cleared when the
 //! connection closes or asks for it (`RevokeApprovalGrants`, sent when its
-//! conversation is rewound), so another session attached to the same daemon
-//! never inherits them.
+//! conversation is rewound or switches to another session), so no other
+//! session, attached to the same daemon or later served by the same
+//! connection, inherits them.
 //!
 //! The session half is [`pump_approval_queries`]: an attached composition
 //! advertises the capability and files each relayed query on the approval
@@ -154,9 +155,10 @@ impl ConnectionApprovals {
 	}
 
 	/// Drops every network endpoint this connection approved for its session:
-	/// the session's conversation was rewound, so its journal may no longer
-	/// hold those grants. Its commands are asked again, and the session's
-	/// approval desk answers from the grants its journal still holds.
+	/// the session's conversation was rewound or switched to another session,
+	/// so the journal it now serves may not hold those grants. Its commands are
+	/// asked again, and the session's approval desk answers from the grants
+	/// that journal holds.
 	pub fn revoke_grants(&self) {
 		self.relay.grants.clear();
 	}

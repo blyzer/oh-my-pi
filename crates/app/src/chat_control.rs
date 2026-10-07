@@ -2361,6 +2361,10 @@ impl<C: omp_agent::Inference> Controller<C> {
 		self.home.unregister(&self.session);
 		let previous = std::mem::replace(&mut self.session, next);
 		drop(previous);
+		// The kernel and its environment outlive the session: host state derived
+		// from the previous journal (the network endpoints it approved for the
+		// session) must not serve the next one.
+		self.kernel.session_switched();
 		if let Some(forwarder) = self.forwarder.take() {
 			// The old DOM's sender is gone; the forwarder drains what it
 			// buffered and ends, so nothing from the old session lands after
@@ -3738,6 +3742,17 @@ mod tests {
 		}
 	}
 
+	/// Records the session transitions the kernel tells its observers.
+	impl omp_agent::SessionObserver for OrderBridge {
+		fn rewound(&self) {
+			let _ = self.order.send("rewound");
+		}
+
+		fn switched(&self) {
+			let _ = self.order.send("switched");
+		}
+	}
+
 	fn subscription(event: HookEventId, phase: HookPhase, id: u32) -> Subscription {
 		Subscription {
 			host: Str::new_static("controller-test"),
@@ -4182,7 +4197,8 @@ mod tests {
 			StaticPrompt(Str::new_static("test system")),
 		)
 		.with_hook_gate(Arc::clone(&gate))
-		.with_session_state_bridge(Arc::new(OrderBridge { order: order_tx.clone() }));
+		.with_session_state_bridge(Arc::new(OrderBridge { order: order_tx.clone() }))
+		.with_session_observer(Arc::new(OrderBridge { order: order_tx.clone() }));
 		let home = SessionHome {
 			sessions_dir:  dir.path().join("sessions"),
 			project_root:  dir.path().to_path_buf(),
@@ -4273,9 +4289,54 @@ mod tests {
 			.await
 			.expect("switch");
 		responder.await.expect("responder");
+		// The kernel is told of the committed switch before it resyncs from the
+		// next journal, so no state of the previous one serves it.
 		assert_eq!(order_rx.try_iter().collect::<Vec<_>>(), [
-			"before", "flush", "resync", "after", "start"
+			"before", "flush", "switched", "resync", "after", "start"
 		],);
+	}
+
+	/// A fork cut back to an earlier entry and a new session both replace the
+	/// live session, and the kernel outlives it: each tells the kernel's session
+	/// observers of a switch, so state the previous journal justified (the
+	/// network endpoints it approved for the session) never serves the next one.
+	/// Cutting the fork's copy is no rewind of the live session.
+	#[tokio::test]
+	async fn fork_to_an_entry_and_new_session_tell_the_kernel_of_a_switch() {
+		let (order, transitions) = flume::unbounded();
+		let mut before_turn = None;
+		let harness = HarnessSpec::new(Script::Text, Duration::ZERO).build_with(|session, kernel| {
+			before_turn = session.head();
+			kernel
+				.jobs()
+				.observe_sessions(Arc::new(OrderBridge { order }));
+		});
+		let mailbox = harness.mailbox();
+		harness
+			.commands
+			.send(HostCommand::Submit(Str::new_static("hello")))
+			.expect("submit");
+		next_event(&harness.events, |event| {
+			matches!(event, KernelEvent::TurnEnded { stop: TurnStop::Completed })
+		})
+		.await;
+
+		harness
+			.commands
+			.send(HostCommand::Fork { target: before_turn })
+			.expect("fork");
+		let (severity, reply) = next_reply(&mailbox).await;
+		assert!(reply.starts_with("✓ Session forked to "), "{severity:?}: {reply}");
+		assert_eq!(transitions.try_iter().collect::<Vec<_>>(), ["switched"]);
+
+		harness
+			.commands
+			.send(HostCommand::SessionNew { model: None })
+			.expect("new session");
+		let (severity, reply) = next_reply(&mailbox).await;
+		assert_eq!(reply.as_str(), "✓ New session started", "{severity:?}");
+		assert_eq!(transitions.try_iter().collect::<Vec<_>>(), ["switched"]);
+		let _ = harness.quit().await;
 	}
 
 	/// A host-admitted guest prompt reaches an idle controller as an authored

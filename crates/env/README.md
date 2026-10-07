@@ -27,8 +27,8 @@ provides the one client that routes between them.
   and drops late answers to it. `revoke_approval_grants` sends the
   request-id-zero `RevokeApprovalGrants` control frame (always to the
   environment backend), which drops the network endpoints the connection
-  approved for the session when its conversation is rewound.
-  `CLIENT_FEATURES` lists the `ClientHello`
+  approved for the session when its conversation is rewound or switched to
+  another session. `CLIENT_FEATURES` lists the `ClientHello`
   capabilities that name such client features; hosts never read them as DATA
   grant requests.
 - `ExtensionEnvClient` and `WorkerEnvClient` are capability-reduced DATA

@@ -3394,7 +3394,8 @@ impl EnvServer {
 	}
 
 	/// Drops the network endpoints the bound route's session approved for the
-	/// session, because its conversation was rewound.
+	/// session, because its conversation was rewound or switched to another
+	/// session.
 	pub(crate) fn revoke_approval_grants(&self) {
 		self.exec.revoke_route_grants();
 	}
@@ -14925,9 +14926,9 @@ mod tests {
 	/// that approved it. Its later commands, in any of its shell sessions,
 	/// reach the endpoint unprompted; another connection to the same daemon is
 	/// asked as if nothing had been approved; and once the approving
-	/// connection revokes its grants (its conversation was rewound), it is
-	/// asked again. `exit` fails the test on any query, so an unprompted
-	/// command is proven by reading it to its exit.
+	/// connection revokes its grants (its conversation was rewound or switched
+	/// to another session), it is asked again. `exit` fails the test on any
+	/// query, so an unprompted command is proven by reading it to its exit.
 	#[cfg(target_os = "macos")]
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn daemon_session_grants_belong_to_the_approving_connection() {

@@ -630,10 +630,10 @@ impl ExecHost {
 	}
 
 	/// Drops the network endpoints the bound route's session approved for the
-	/// session: its conversation was rewound, so its journal may no longer
-	/// hold them. The approval desk answers later prompts from the grants the
-	/// journal still holds, which refills the set one refused attempt at a
-	/// time.
+	/// session: its conversation was rewound or switched to another session,
+	/// so the journal it now serves may not hold them. The approval desk
+	/// answers later prompts from the grants that journal holds, which refills
+	/// the set one refused attempt at a time.
 	pub(crate) fn revoke_route_grants(&self) {
 		if let Some(binding) = self.inner.sandbox_approval_route.lock().as_ref() {
 			binding.grants().clear();

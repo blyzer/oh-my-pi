@@ -507,6 +507,20 @@ impl omp_agent::NativeHookHost for StartRecorder {
 	}
 }
 
+/// Records the session transitions the kernel tells its observers.
+#[derive(Default)]
+struct Transitions(Mutex<Vec<&'static str>>);
+
+impl omp_agent::SessionObserver for Transitions {
+	fn rewound(&self) {
+		self.0.lock().push("rewound");
+	}
+
+	fn switched(&self) {
+		self.0.lock().push("switched");
+	}
+}
+
 #[tokio::test]
 async fn rpc_session_commands_publish_reset_snapshots() {
 	let temp = tempfile::tempdir().expect("tempdir");
@@ -518,7 +532,10 @@ async fn rpc_session_commands_publish_reset_snapshots() {
 	gate.attach_native(Arc::clone(&recorder) as Arc<dyn omp_agent::NativeHookHost>, &[
 		omp_proto::toolhost::v1::HookEventId::HookEventSessionStart,
 	]);
-	let kernel = kernel.with_hook_gate(gate);
+	let transitions = Arc::new(Transitions::default());
+	let kernel = kernel
+		.with_hook_gate(gate)
+		.with_session_observer(Arc::clone(&transitions) as Arc<dyn omp_agent::SessionObserver>);
 	std::fs::create_dir_all(&home.sessions_dir).expect("sessions directory");
 	let source_path = home.sessions_dir.join("source.oms");
 	let mut session = Session::create(&source_path, ComponentRegistry::standard()).expect("session");
@@ -579,6 +596,10 @@ async fn rpc_session_commands_publish_reset_snapshots() {
 	assert_eq!(reasons, ["launch", "new", "resume", "fork"], "{starts:?}");
 	assert_eq!(starts[0].0, "source.oms");
 	assert_eq!(starts[2].0, "source.oms", "`switch_session` resumed the source");
+	// The kernel outlives each session it served, so every committed
+	// transition tells it of a switch; cutting the branch's copy back to its
+	// entry is no rewind of the live session.
+	assert_eq!(*transitions.0.lock(), ["switched"; 3]);
 	assert!(
 		!frames.iter().any(|frame| frame["type"] == "snapshot"),
 		"the controller's private DOM snapshot is not an RPC event",
