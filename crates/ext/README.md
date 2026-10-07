@@ -121,16 +121,26 @@ Excluded, with the reason:
 - Repo-local binary roots (`node_modules/.bin`, `.venv/bin`, `bin`, ...) that
   the LSP resolver searches: they are gated by the trust decision, not by the
   digest, so a trusted digest never vouches for them.
-- `.DS_Store`, `Thumbs.db` and nested `.git` entries inside trees: inert, no
-  loader reads them.
+- Inside a tree, a regular file named `.DS_Store` or `Thumbs.db`
+  (`OS_METADATA_FILES`), and, inside a package, a nested repository's `.git`
+  directory or `gitdir` file (`NESTED_REPOSITORY`): no loader discovers a file
+  by those names or reads a nested `.git`, and git never checks a `.git` path
+  out of a repository. Nothing else by those names is skipped: the native
+  extension, Agent Plugins MCP and skill loaders take every child directory of
+  a tree for a package whatever its name, so a directory or a link named
+  `.DS_Store`, `Thumbs.db` or `.git` is walked like any other entry, and so is
+  a `.git` directly under a tree root.
 
 Every read goes through `omp_core::project_file` (contained in the repository,
 regular files only, size-capped). A symbolic link inside a tree is followed
 while its canonical target stays in the repository (a link back to a
-directory being walked is not followed again); one that leaves is `Escapes`.
-Any refusal, unreadable directory, or `InventoryBudget` overrun (files, bytes,
-depth) is a typed `WorkspaceTrustError`: no digest, so nothing trusts the
-workspace.
+directory being walked is not followed again; a directory reached under
+several names is walked under each); one that leaves is `Escapes`. Every
+listed directory entry counts against the entry budget, so a web of
+directory links holding no file still fails closed instead of walking
+exponentially. Any refusal, unreadable directory, or `InventoryBudget`
+overrun (files, listed entries, bytes, depth) is a typed
+`WorkspaceTrustError`: no digest, so nothing trusts the workspace.
 
 ## Claude Code hook events
 

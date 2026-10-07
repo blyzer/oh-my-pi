@@ -26,15 +26,23 @@
 //!   `.omp/plugins/node_modules/<name>` into the user plugin cache;
 //! - the trees [`AGENT_PLUGIN_DIRS`] (native extensions and Agent Plugins
 //!   packages), walked in full, `__pycache__` and dotfiles included (an
-//!   unchecked-hash `.pyc` loads without its source), skipping only inert
-//!   `.DS_Store`, `Thumbs.db` and nested `.git` entries;
+//!   unchecked-hash `.pyc` loads without its source). Only inert entries are
+//!   skipped: a regular file named in [`OS_METADATA_FILES`], and, inside a
+//!   package, a nested repository's [`NESTED_REPOSITORY`] directory or `gitdir`
+//!   file. The loaders take every child directory of these trees for a package
+//!   whatever its name, so a directory or a link by one of those names is
+//!   walked like any other entry, and so is a `.git` directly under a tree
+//!   root;
 //! - the workflow files `.omp/workflows/*.toml`.
 //!
 //! Files are read through [`omp_core::project_file`]: contained in the
 //! repository, regular, and under a size cap. A symbolic link inside a tree is
 //! followed while its canonical target stays in the repository (a cycle is
-//! broken) and refused when it leaves ([`WorkspaceTrustError::Escapes`]). Any
-//! refusal or [`InventoryBudget`] overrun fails closed: no digest is produced.
+//! broken; a directory reached under several names is walked under each) and
+//! refused when it leaves ([`WorkspaceTrustError::Escapes`]). Every listed
+//! directory entry counts against [`InventoryBudget::tree_entries`], so a
+//! web of directory links holding no file still overruns a bound. Any refusal
+//! or [`InventoryBudget`] overrun fails closed: no digest is produced.
 //!
 //! The digest is SHA-256 over [`INVENTORY_DOMAIN`], the entry count (`u64`
 //! little-endian), then every entry in path-byte order: the length of its
@@ -45,7 +53,7 @@
 
 use std::{
 	collections::BTreeMap,
-	ffi::OsString,
+	ffi::{OsStr, OsString},
 	fs, io,
 	iter::FusedIterator,
 	path::{Component, Path, PathBuf},
@@ -169,9 +177,21 @@ pub const WORKFLOWS_DIR: &str = ".omp/workflows";
 /// The extension of a workflow definition file.
 pub const WORKFLOW_EXTENSION: &str = "toml";
 
-/// Entry names a tree walk skips: inert OS metadata no loader reads, and
-/// nested repositories.
-const SKIPPED_NAMES: [&str; 3] = [".DS_Store", "Thumbs.db", ".git"];
+/// Metadata files Finder and Explorer write on their own.
+///
+/// A tree walk skips one only when it is a regular file: no loader discovers
+/// a file by either name, but every loader takes a child directory of a gated
+/// tree for a package whatever its name, and git tracks both names.
+pub const OS_METADATA_FILES: [&str; 2] = [".DS_Store", "Thumbs.db"];
+
+/// A nested repository's metadata.
+///
+/// A tree walk skips it inside a package, where it is a directory or a
+/// `gitdir` file and no loader reads it; git never checks a `.git` path out
+/// of a repository, so it exists only where the operator nested a checkout.
+/// Directly under a gated tree root it is a package like any other child, and
+/// a link by this name is always followed.
+pub const NESTED_REPOSITORY: &str = ".git";
 
 /// A gated input's location under the workspace root: a directory (empty for
 /// the root) and a name, either of which may hold `/`-separated components.
@@ -266,6 +286,11 @@ pub struct InventoryBudget {
 	pub tree_file_bytes: u64,
 	/// Most files across every gated tree and the workflow directory.
 	pub tree_files:      usize,
+	/// Most directory entries listed across every gated tree and the workflow
+	/// directory: files, directories, links and skipped entries alike. A
+	/// directory reached under several names is listed once per name, so
+	/// this bounds the walk when links multiply directories that hold no file.
+	pub tree_entries:    usize,
 	/// Most bytes across every gated tree and the workflow directory.
 	pub tree_bytes:      u64,
 	/// Deepest directory nesting below a tree root (the root is depth 0).
@@ -278,6 +303,7 @@ impl Default for InventoryBudget {
 			file_bytes:      4 * 1024 * 1024,
 			tree_file_bytes: 32 * 1024 * 1024,
 			tree_files:      8192,
+			tree_entries:    32 * 1024,
 			tree_bytes:      256 * 1024 * 1024,
 			depth:           32,
 		}
@@ -290,6 +316,9 @@ pub enum BudgetLimit {
 	/// [`InventoryBudget::tree_files`].
 	#[strum(to_string = "file count")]
 	Files,
+	/// [`InventoryBudget::tree_entries`].
+	#[strum(to_string = "directory entry")]
+	Entries,
 	/// [`InventoryBudget::tree_bytes`].
 	#[strum(to_string = "byte")]
 	Bytes,
@@ -416,8 +445,15 @@ pub fn inventory(
 	let workspace = canonical(workspace)?;
 	let containment = containment_root(&workspace);
 	let cache = fs::canonicalize(plugin_cache_dir(&user_plugins_dir(data_dir))).ok();
-	let mut walk =
-		Walk { workspace: &workspace, containment, budget, files: 0, bytes: 0, entries: Vec::new() };
+	let mut walk = Walk {
+		workspace: &workspace,
+		containment,
+		budget,
+		files: 0,
+		listed: 0,
+		bytes: 0,
+		entries: Vec::new(),
+	};
 	for gated in gated_files() {
 		walk.file(&gated.relative())?;
 	}
@@ -441,14 +477,26 @@ struct Walk<'a> {
 	budget:      &'a InventoryBudget,
 	/// Tree and workflow files read so far.
 	files:       usize,
+	/// Tree and workflow directory entries listed so far.
+	listed:      usize,
 	/// Tree and workflow bytes read so far.
 	bytes:       u64,
 	entries:     Vec<InputEntry>,
 }
 
+/// What the entries of a walked directory are to the loaders.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Children {
+	/// Package roots: the children of an [`AGENT_PLUGIN_DIRS`] tree, each of
+	/// which a loader takes for a package whatever its name.
+	Packages,
+	/// One package's content.
+	Content,
+}
+
 /// What a directory entry resolves to.
 enum Resolved {
-	/// Absent (a dangling link) or inert: contributes nothing.
+	/// Absent (a dangling link): contributes nothing.
 	Skip,
 	/// A directory, at its canonical path.
 	Directory(PathBuf),
@@ -521,7 +569,8 @@ impl Walk<'_> {
 				}
 				if root.starts_with(self.containment) {
 					let mut relative = relative_to(self.workspace, &root);
-					self.directory(&root, &mut relative, &mut vec![root.clone()], 0)?;
+					let stack = &mut vec![root.clone()];
+					self.directory(&root, &mut relative, stack, 0, Children::Content)?;
 				} else if !cache.is_some_and(|cache| root.starts_with(cache)) {
 					return Err(WorkspaceTrustError::ExternalPluginRoot {
 						plugin: PluginId::from(id.clone()),
@@ -538,7 +587,8 @@ impl Walk<'_> {
 		let Some(root) = self.gated_directory(relative)? else {
 			return Ok(());
 		};
-		self.directory(&root, &mut relative.to_path_buf(), &mut vec![root.clone()], 0)
+		let stack = &mut vec![root.clone()];
+		self.directory(&root, &mut relative.to_path_buf(), stack, 0, Children::Packages)
 	}
 
 	/// The canonical directory at `relative`: `None` when absent or not a
@@ -572,14 +622,16 @@ impl Walk<'_> {
 	}
 
 	/// Every entry below the canonical directory `dir`, named under
-	/// `relative`. `stack` holds the canonical directories being walked, so a
-	/// link back to one of them is a cycle and is not followed.
+	/// `relative`; `children` says what its entries are to the loaders.
+	/// `stack` holds the canonical directories being walked, so a link back
+	/// to one of them is a cycle and is not followed.
 	fn directory(
 		&mut self,
 		dir: &Path,
 		relative: &mut PathBuf,
 		stack: &mut Vec<PathBuf>,
 		depth: usize,
+		children: Children,
 	) -> Result<(), WorkspaceTrustError> {
 		if depth > self.budget.depth {
 			return Err(WorkspaceTrustError::Budget {
@@ -587,18 +639,18 @@ impl Walk<'_> {
 				limit: BudgetLimit::Depth,
 			});
 		}
-		for name in sorted_names(dir)? {
-			if SKIPPED_NAMES.iter().any(|skipped| name == *skipped) {
+		for name in self.names(dir)? {
+			let path = dir.join(&name);
+			if inert(&path, &name, children)? {
 				continue;
 			}
-			let path = dir.join(&name);
 			relative.push(&name);
 			let walked = match self.resolve(&path)? {
 				Resolved::Skip => Ok(()),
 				Resolved::Directory(target) if stack.contains(&target) => Ok(()),
 				Resolved::Directory(target) => {
 					stack.push(target.clone());
-					let walked = self.directory(&target, relative, stack, depth + 1);
+					let walked = self.directory(&target, relative, stack, depth + 1, Children::Content);
 					stack.pop();
 					walked
 				},
@@ -608,6 +660,27 @@ impl Walk<'_> {
 			walked?;
 		}
 		Ok(())
+	}
+
+	/// The names in the tree or workflow directory `dir`, sorted so a budget
+	/// overrun is deterministic. Each counts against
+	/// [`InventoryBudget::tree_entries`] as it is listed, so an overrun stops
+	/// the listing itself.
+	fn names(&mut self, dir: &Path) -> Result<Vec<OsString>, WorkspaceTrustError> {
+		let read = |source| WorkspaceTrustError::Read { path: dir.to_path_buf(), source };
+		let mut names = Vec::new();
+		for entry in fs::read_dir(dir).map_err(read)? {
+			self.listed += 1;
+			if self.listed > self.budget.tree_entries {
+				return Err(WorkspaceTrustError::Budget {
+					path:  dir.to_path_buf(),
+					limit: BudgetLimit::Entries,
+				});
+			}
+			names.push(entry.map_err(read)?.file_name());
+		}
+		names.sort_unstable();
+		Ok(names)
 	}
 
 	/// Counts one tree or workflow file against the budget and reads it.
@@ -652,7 +725,7 @@ impl Walk<'_> {
 		let Some(dir) = self.gated_directory(relative)? else {
 			return Ok(());
 		};
-		for name in sorted_names(&dir)? {
+		for name in self.names(&dir)? {
 			if Path::new(&name)
 				.extension()
 				.is_none_or(|extension| extension != WORKFLOW_EXTENSION)
@@ -683,16 +756,25 @@ impl Walk<'_> {
 	}
 }
 
-/// The names in `dir`, sorted, so a budget overrun is deterministic.
-fn sorted_names(dir: &Path) -> Result<Vec<OsString>, WorkspaceTrustError> {
-	let read = |source| WorkspaceTrustError::Read { path: dir.to_path_buf(), source };
-	let mut names = fs::read_dir(dir)
-		.map_err(read)?
-		.map(|entry| entry.map(|entry| entry.file_name()))
-		.collect::<Result<Vec<_>, _>>()
-		.map_err(read)?;
-	names.sort_unstable();
-	Ok(names)
+/// Whether the tree entry `name` at `path` is inert and skipped: a regular
+/// file named in [`OS_METADATA_FILES`], or, inside a package, a
+/// [`NESTED_REPOSITORY`] directory or regular file. The entry's own type
+/// decides, so a link by either name is followed like any other entry.
+fn inert(path: &Path, name: &OsStr, children: Children) -> Result<bool, WorkspaceTrustError> {
+	let metadata = OS_METADATA_FILES
+		.iter()
+		.any(|file| name == OsStr::new(file));
+	let repository = children == Children::Content && name == NESTED_REPOSITORY;
+	if !metadata && !repository {
+		return Ok(false);
+	}
+	let kind = match fs::symlink_metadata(path) {
+		Ok(entry) => entry.file_type(),
+		// Gone since the listing: resolution records it absent.
+		Err(error) if absent(&error) => return Ok(false),
+		Err(source) => return Err(WorkspaceTrustError::Read { path: path.to_path_buf(), source }),
+	};
+	Ok(kind.is_file() || (repository && kind.is_dir()))
 }
 
 fn absent(error: &io::Error) -> bool {

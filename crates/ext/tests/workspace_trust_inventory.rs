@@ -325,12 +325,76 @@ fn every_gated_input_feeds_the_digest_and_excluded_files_do_not() {
 		".omp/extensions/.DS_Store",
 		".omp/extensions/pkg/Thumbs.db",
 		".omp/extensions/pkg/.git/HEAD",
+		".agents/plugins/sub/.git",
 		"node_modules/.bin/typescript-language-server",
 		"src/main.rs",
 	] {
 		fixture.write(excluded, "x");
 		assert_eq!(fixture.digest(), digest, "{excluded} stays out of the digest");
 	}
+}
+
+#[test]
+fn a_package_by_a_metadata_or_repository_name_feeds_the_digest() {
+	// Every loader takes each child directory of a gated tree for a package
+	// whatever its name: `.omp/extensions/.DS_Store/omp.toml` loads as a
+	// native extension, `.agents/plugins/Thumbs.db/mcp.json` as an Agent
+	// Plugins package. Inside a package, only a regular file by a metadata
+	// name is inert.
+	for package in [
+		".omp/extensions/.DS_Store/omp.toml",
+		".agents/plugins/Thumbs.db/mcp.json",
+		".agent/plugins/.git/plugin.json",
+		".omp/extensions/pkg/Thumbs.db/main.py",
+		".agents/plugins/pkg/skills/.DS_Store/SKILL.md",
+	] {
+		let fixture = fixture();
+		let empty = fixture.digest();
+		fixture.write(package, "{}");
+		let inventory = fixture.take();
+		assert_eq!(present(&inventory), [(package.to_owned(), InputKind::TreeFile)], "{package}");
+		let digest = *inventory.digest();
+		assert_ne!(digest, empty, "{package} feeds the digest");
+		fixture.write(package, r#"{"changed":true}"#);
+		assert_ne!(fixture.digest(), digest, "{package}'s content is bound");
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_by_a_metadata_or_repository_name_is_followed() {
+	use std::os::unix::fs::symlink;
+
+	let fixture = fixture();
+	write(&fixture.repo.join("shared/ext/omp.toml"), "id = 'shared'");
+	write(&fixture.repo.join("shared/data.json"), "{}");
+	fixture.write(".omp/extensions/pkg/main.py", "x = 1");
+	symlink("../../shared/ext", fixture.repo.join(".omp/extensions/.DS_Store"))
+		.expect("package link");
+	symlink("../../../shared/ext", fixture.repo.join(".omp/extensions/pkg/.git"))
+		.expect("repository link");
+	symlink("../../../shared/data.json", fixture.repo.join(".omp/extensions/pkg/Thumbs.db"))
+		.expect("file link");
+	assert_eq!(present(&fixture.take()), [
+		(".omp/extensions/.DS_Store/omp.toml".to_owned(), InputKind::TreeFile),
+		(".omp/extensions/pkg/.git/omp.toml".to_owned(), InputKind::TreeFile),
+		(".omp/extensions/pkg/Thumbs.db".to_owned(), InputKind::TreeFile),
+		(".omp/extensions/pkg/main.py".to_owned(), InputKind::TreeFile),
+	]);
+}
+
+#[test]
+fn an_install_root_is_a_package_so_its_checkout_metadata_stays_out() {
+	let fixture = fixture();
+	let vendored = fixture.repo.join("vendor/plugin");
+	write(&vendored.join(".claude-plugin/plugin.json"), "{}");
+	fixture.register(&[("vendored@m", &vendored, true)]);
+	let digest = fixture.digest();
+	write(&vendored.join(".git/HEAD"), "ref: refs/heads/main\n");
+	write(&vendored.join(".DS_Store"), "finder");
+	assert_eq!(fixture.digest(), digest, "a nested checkout and Finder metadata stay out");
+	write(&vendored.join("Thumbs.db/commands/c.md"), "command");
+	assert_ne!(fixture.digest(), digest, "a directory by a metadata name is walked");
 }
 
 #[test]
@@ -443,7 +507,7 @@ fn tree_links_inside_the_repository_are_followed_and_escapes_fail_closed() {
 #[cfg(unix)]
 #[test]
 fn special_files_are_refused_without_blocking() {
-	use std::{process::Command, sync::mpsc, thread, time::Duration};
+	use std::{process::Command, thread, time::Duration};
 
 	for fifo in [".omp/mcp.json", ".omp/extensions/x/pipe", ".omp/workflows/w.toml"] {
 		let fixture = fixture();
@@ -456,7 +520,7 @@ fn special_files_are_refused_without_blocking() {
 				.expect("mkfifo")
 				.success()
 		);
-		let (sender, receiver) = mpsc::channel();
+		let (sender, receiver) = flume::bounded(1);
 		thread::spawn(move || {
 			let _ = sender.send(fixture.take_with(&InventoryBudget::default()).map(drop));
 		});
@@ -601,8 +665,11 @@ fn budgets_fail_closed() {
 	fixture.write(".omp/extensions/a/deep/er/three.py", "333");
 	let budget = InventoryBudget::default();
 	fixture.take_with(&budget).expect("within budget");
+	// Listed entries: `a` in the tree root, `deep`, `one.py` and `two.py` in
+	// `a`, `er` in `deep`, `three.py` in `er`.
 	for (budget, limit) in [
 		(InventoryBudget { tree_files: 2, ..budget }, BudgetLimit::Files),
+		(InventoryBudget { tree_entries: 5, ..budget }, BudgetLimit::Entries),
 		(InventoryBudget { tree_bytes: 5, ..budget }, BudgetLimit::Bytes),
 		(InventoryBudget { depth: 2, ..budget }, BudgetLimit::Depth),
 	] {
@@ -628,7 +695,8 @@ fn budgets_fail_closed() {
 		);
 	}
 	// Every bound is inclusive: an exact fit passes.
-	let exact = InventoryBudget { tree_files: 3, tree_bytes: 6, depth: 2, ..budget };
+	let exact =
+		InventoryBudget { tree_files: 3, tree_entries: 6, tree_bytes: 6, depth: 2, ..budget };
 	assert!(matches!(
 		fixture.take_with(&exact),
 		Err(WorkspaceTrustError::Budget { limit: BudgetLimit::Depth, .. })
@@ -636,6 +704,47 @@ fn budgets_fail_closed() {
 	fixture
 		.take_with(&InventoryBudget { depth: 3, ..exact })
 		.expect("an exact fit passes");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_link_web_without_files_overruns_the_entry_budget() {
+	use std::{os::unix::fs::symlink, thread, time::Duration};
+
+	// `d0` to `d31`, each but the last holding two links to the next and no
+	// file: no link closes a cycle, no file or byte bound trips, the deepest
+	// level sits exactly at the default depth bound, and a full walk lists
+	// 2^32 entries.
+	const LEVELS: usize = 32;
+	let fixture = fixture();
+	let web = fixture.repo.join("web");
+	for level in 0..LEVELS {
+		let dir = web.join(format!("d{level}"));
+		fs::create_dir_all(&dir).expect("level");
+		if level + 1 < LEVELS {
+			for name in ["a", "b"] {
+				symlink(format!("../d{}", level + 1), dir.join(name)).expect("level link");
+			}
+		}
+	}
+	fs::create_dir_all(fixture.repo.join(EXTENSIONS_DIR)).expect("extensions");
+	symlink("../../web/d0", fixture.repo.join(".omp/extensions/web")).expect("package link");
+	assert_eq!(InventoryBudget::default().depth, LEVELS, "d31 is walked at depth 32");
+
+	// The default entry bound stops the walk within seconds; an unbounded one
+	// lists 2^32 entries, days of work, so a generous deadline still tells
+	// them apart on a loaded host.
+	let (sender, receiver) = flume::bounded(1);
+	thread::spawn(move || {
+		let _ = sender.send(fixture.take_with(&InventoryBudget::default()).map(drop));
+	});
+	let result = receiver
+		.recv_timeout(Duration::from_secs(60))
+		.expect("a link web must overrun a budget, not walk exponentially");
+	assert!(
+		matches!(result, Err(WorkspaceTrustError::Budget { limit: BudgetLimit::Entries, .. })),
+		"{result:?}"
+	);
 }
 
 #[test]
