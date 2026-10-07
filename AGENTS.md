@@ -48,7 +48,7 @@ rewrite of `pi`: port observable behavior, not TS shape.
   (`omp-macros`: `dom!`, `view!`, `cached`); `crates/chat`: terminal
   and native chat actor/projections; `crates/gui`: native window host.
   None owns agent/provider policy.
-- `crates/e2e/tests`: authoritative joined-system proofs P1-P11 plus
+- `crates/e2e/tests`: authoritative joined-system proofs P1-P12 plus
   `tool_sources` (`crates/e2e/README.md`).
 - `PLAN.md`: authoritative plan — locked decisions D1-D8, defect ledger, 8
   parts + checklists. Local-only: `/*PLAN.md` and `/.plan/` are gitignored, so
@@ -77,16 +77,17 @@ all recipes.
 - One-time before anything linking `omp-py`: `just setup-python`.
 - Iterate targeted (`just check-pkg <pkg>`, `just test-pkg <pkg>`); broaden
   (`check`, `test`, `lint`) after the changed contract passes.
-- E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-p9|e2e-p10|e2e-p11|e2e-baseline`;
-  `just e2e` runs P1-P7, P9, P10, P11, `tool_sources`, then the P8 recorder test).
+- E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-p9|e2e-p10|e2e-p11|e2e-p12|e2e-baseline`;
+  `just e2e` runs P1-P7, P9, P10, P11, P12, `tool_sources`, then the P8 recorder test).
 - `just ci` ≈ CI format+rust jobs locally.
 
 CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format,
 licences, runtime-symbol contracts and a second workspace lint on Linux;
 workspace tests and the e2e acceptance proofs on arm64 macOS and Linux (P7 also
-on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P11 and
+on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P12 and
 `tool_sources` (`ci.yml` says which job runs which; keep it and `just e2e` in
-step). P8 remains a non-gating recorder: only its metric schema/arithmetic test
+step). P12 needs Seatbelt (it skips elsewhere), so it gates on the macOS job.
+P8 remains a non-gating recorder: only its metric schema/arithmetic test
 gates. The measured performance baseline is recorded per omp2 push by
 `.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),
 never in a PR. The macOS jobs read `vars.MACOS_RUNNER` and fall back to
@@ -703,12 +704,13 @@ master stream to a VT emulator (e.g. `pyte`) for screen assertions.
   `crates/driver` for headless/session composition; `crates/app` for CLI,
   presentation, and protocol adapters. Prefer these seams over mocks of
   production authority.
-- `crates/e2e/tests/p1_doc_race.rs`…`p10_lift_idempotence.rs` and
+- `crates/e2e/tests/p1_doc_race.rs`…`p12_daemon_approvals.rs` and
   `tool_sources.rs`: authoritative for concurrency, cancellation, detached
   jobs, schema isolation, prefix stability, crash/replay, real-PTY lifecycle,
   recorded perf, isolated worktrees and extension Director/Component control,
-  tool-lift idempotence, environment tool-source routing. Bounded waits +
-  RAII-owned processes; preserve both.
+  tool-lift idempotence, collaboration spectators, daemon approval relay,
+  environment tool-source routing. Bounded waits + RAII-owned processes;
+  preserve both.
 - P8 = non-gating recorder (metric math/schema, p95 frame time, token-loop
   throughput). NEVER turn noisy host measurements into an unreviewed hard
   gate.

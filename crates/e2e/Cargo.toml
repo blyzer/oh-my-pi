@@ -50,6 +50,7 @@ omp-ai.workspace = true
 omp-journal.workspace = true
 omp-proto.workspace = true
 omp-rpc.workspace = true
+omp-sandbox.workspace = true
 omp-serve.workspace = true
 omp-session.workspace = true
 omp-scribe.workspace = true

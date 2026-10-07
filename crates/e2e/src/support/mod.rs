@@ -22,7 +22,8 @@ pub use builders::{assert_all_entries_caused, journal_entries};
 pub use docserver::DocServerTask;
 #[cfg(unix)]
 pub use envd::{
-	AllowAdmission, EnvHarness, FramedEnvConnection, ProcessEnvHarness, connect_env, read_blob,
+	AllowAdmission, EnvHarness, FramedEnvConnection, ProcessEnvHarness, RawEnvConnection,
+	connect_env, read_blob,
 };
 #[cfg(unix)]
 pub use extension::{ExtensionRegistrar, LiveComponent};

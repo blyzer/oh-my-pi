@@ -14,7 +14,9 @@ use omp_envd::{EnvServer, RegistryBridges, exthost::ConvarControlFactory, worker
 use omp_proto::{
 	SCHEMA_REV,
 	blob::v1::GetRequest,
-	env::v1::{Admission, AdmitInvocation, ClientFrame, ClientHello, ServerFrame},
+	env::v1::{
+		Admission, AdmitInvocation, ClientFrame, ClientHello, ServerFrame, client_frame, server_frame,
+	},
 	prost::Message,
 };
 use omp_tool::Registry;
@@ -152,13 +154,23 @@ impl EnvHarness {
 	}
 
 	/// Starts the production `envd` process attached to an existing real
-	/// docserver.
+	/// docserver, which must advertise the daemon's build
+	/// ([`super::DocServerTask::spawn_for_daemon`]).
+	///
+	/// The child's `HOME` and its user config, data, state and cache roots
+	/// live under `scratch`, so the developer's `~/.o2` configuration never
+	/// reaches it and the shipped defaults (such as the `workspace-write`
+	/// sandbox) apply.
 	pub async fn spawn_attached(
 		scratch: &Scratch,
 		docserver_socket: &Path,
 	) -> Result<ProcessEnvHarness> {
 		install_omp_binary_env().context("exposing worker-capable host")?;
 		let socket = scratch.socket("env-attached.sock");
+		let home = scratch.root().join("home");
+		for root in ["config", "data", "state", "cache"] {
+			fs::create_dir_all(home.join(root)).context("creating isolated daemon home")?;
+		}
 		let mut command = Command::new(omp_binary().context("resolving worker-capable host")?);
 		command
 			.arg("envd")
@@ -169,11 +181,16 @@ impl EnvHarness {
 			.arg("--docserver-socket")
 			.arg(docserver_socket)
 			.arg("--state-dir")
-			.arg(scratch.state());
+			.arg(scratch.state())
+			.env("HOME", &home)
+			.env("OMP_CONFIG_DIR", home.join("config"))
+			.env("OMP_DATA_DIR", home.join("data"))
+			.env("OMP_STATE_DIR", home.join("state"))
+			.env("OMP_CACHE_DIR", home.join("cache"));
 		let process = OwnedProcess::spawn(command).context("starting attached environment daemon")?;
 		wait_socket(&socket, PROCESS_START_TIMEOUT).await?;
 		let (client, client_task) = connect_env(&socket).await?;
-		hello_env(&client, "omp-e2e-attached").await?;
+		hello_env(&client, "omp-e2e-attached", &[]).await?;
 		Ok(ProcessEnvHarness {
 			client,
 			socket,
@@ -267,9 +284,30 @@ impl ProcessEnvHarness {
 		&self.socket
 	}
 
+	/// Returns the daemon child's process identifier while it runs.
+	pub fn pid(&self) -> Option<u32> {
+		self.process.as_ref().and_then(OwnedProcess::id)
+	}
+
 	/// Opens an independent framed connection and completes its hello.
 	pub async fn connect_client(&self, name: &str) -> Result<FramedEnvConnection> {
 		FramedEnvConnection::connect(&self.socket, name).await
+	}
+
+	/// Opens an independent framed connection whose hello advertises
+	/// `capabilities`, such as [`omp_env::APPROVAL_RELAY_CAPABILITY`].
+	pub async fn connect_client_with_capabilities(
+		&self,
+		name: &str,
+		capabilities: &[&str],
+	) -> Result<FramedEnvConnection> {
+		FramedEnvConnection::connect_with_capabilities(&self.socket, name, capabilities).await
+	}
+
+	/// Opens an independent raw-frame connection whose hello advertises
+	/// `capabilities`.
+	pub async fn connect_raw(&self, name: &str, capabilities: &[&str]) -> Result<RawEnvConnection> {
+		RawEnvConnection::connect(&self.socket, name, capabilities).await
 	}
 
 	/// Terminates the daemon process tree and removes the endpoint.
@@ -305,8 +343,18 @@ pub struct FramedEnvConnection {
 impl FramedEnvConnection {
 	/// Connects to `socket`, starts the frame bridge, and completes hello.
 	pub async fn connect(socket: &Path, name: &str) -> Result<Self> {
+		Self::connect_with_capabilities(socket, name, &[]).await
+	}
+
+	/// Connects to `socket`, starts the frame bridge, and completes a hello
+	/// that advertises `capabilities`.
+	pub async fn connect_with_capabilities(
+		socket: &Path,
+		name: &str,
+		capabilities: &[&str],
+	) -> Result<Self> {
 		let (client, task) = connect_env(socket).await?;
-		hello_env(&client, name).await?;
+		hello_env(&client, name, capabilities).await?;
 		Ok(Self { client, task: Some(task) })
 	}
 
@@ -329,6 +377,64 @@ impl Drop for FramedEnvConnection {
 	}
 }
 
+/// One framed environment connection that speaks raw frames.
+///
+/// A proof sends through it what a well-behaved client never would (a forged
+/// answer) and observes every frame the daemon sends it. Dropping it closes
+/// the connection.
+pub struct RawEnvConnection {
+	requests:  flume::Sender<ClientFrame>,
+	responses: Receiver<ServerFrame>,
+	task:      Option<JoinHandle<io::Result<()>>>,
+}
+
+impl RawEnvConnection {
+	/// Connects to `socket`, starts the frame bridge, and completes a hello
+	/// that advertises `capabilities`.
+	pub async fn connect(socket: &Path, name: &str, capabilities: &[&str]) -> Result<Self> {
+		let stream =
+			within("environment socket connection", DEFAULT_TIMEOUT, UnixStream::connect(socket))
+				.await??;
+		let (requests, outgoing) = flume::bounded(64);
+		let (incoming, responses) = flume::bounded(64);
+		let task = tokio::spawn(bridge_frames(stream, outgoing, incoming));
+		let connection = Self { requests, responses, task: Some(task) };
+		connection
+			.send(0, client_frame::Body::Hello(client_hello(name, capabilities)))
+			.await?;
+		let frame = connection.next(DEFAULT_TIMEOUT).await?;
+		if !matches!(frame.body, Some(server_frame::Body::Hello(_))) {
+			return Err(error(format!("environment hello was answered with {frame:?}")));
+		}
+		Ok(connection)
+	}
+
+	/// Sends one frame on `request_id`.
+	pub async fn send(&self, request_id: u64, body: client_frame::Body) -> Result<()> {
+		self
+			.requests
+			.send_async(ClientFrame { request_id, body: Some(body), ..ClientFrame::default() })
+			.await
+			.map_err(|_| error("environment connection closed before a send"))
+	}
+
+	/// Receives the next frame the daemon sent this connection, waiting at
+	/// most `limit`.
+	pub async fn next(&self, limit: Duration) -> Result<ServerFrame> {
+		within("environment frame", limit, self.responses.recv_async())
+			.await?
+			.map_err(|_| error("environment connection closed before a frame"))
+	}
+}
+
+impl Drop for RawEnvConnection {
+	fn drop(&mut self) {
+		if let Some(task) = self.task.take() {
+			task.abort();
+		}
+	}
+}
+
 /// Opens a decoded [`EnvClient`] over the production varint/protobuf byte
 /// framing.
 pub async fn connect_env(path: &Path) -> Result<(EnvClient, JoinHandle<io::Result<()>>)> {
@@ -342,18 +448,22 @@ pub async fn connect_env(path: &Path) -> Result<(EnvClient, JoinHandle<io::Resul
 	Ok((client, task))
 }
 
-async fn hello_env(client: &EnvClient, name: &str) -> Result<()> {
-	within(
-		"environment hello",
-		DEFAULT_TIMEOUT,
-		client.hello(ClientHello {
-			client: name.to_owned(),
-			schema_rev: SCHEMA_REV,
-			..Default::default()
-		}),
-	)
-	.await??;
+async fn hello_env(client: &EnvClient, name: &str, capabilities: &[&str]) -> Result<()> {
+	within("environment hello", DEFAULT_TIMEOUT, client.hello(client_hello(name, capabilities)))
+		.await??;
 	Ok(())
+}
+
+fn client_hello(name: &str, capabilities: &[&str]) -> ClientHello {
+	ClientHello {
+		client: name.to_owned(),
+		schema_rev: SCHEMA_REV,
+		capabilities: capabilities
+			.iter()
+			.map(|capability| (*capability).to_owned())
+			.collect(),
+		..Default::default()
+	}
 }
 
 /// Downloads one complete blob through the real environment blob plane.

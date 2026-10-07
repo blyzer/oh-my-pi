@@ -6,6 +6,7 @@ use std::{
 	time::Duration,
 };
 
+use omp_core::Str;
 use omp_envd::{
 	docs::DocumentHost,
 	docserver::daemon::{self, ServeOptions, Transport},
@@ -31,8 +32,32 @@ impl DocServerTask {
 		socket: impl Into<PathBuf>,
 		lsp_configs: Vec<PathBuf>,
 	) -> Result<Self> {
-		let project = project.into();
-		let socket = socket.into();
+		Self::start(project.into(), socket.into(), lsp_configs, Str::default()).await
+	}
+
+	/// Starts a real docserver rooted at `project` that a daemon started from
+	/// `daemon_executable` attaches to.
+	///
+	/// It advertises that executable's build identity. A daemon attaches only
+	/// to a live document authority of its own build and otherwise waits for
+	/// the authority to drain as stale, so the identity of the test process
+	/// (or none) would refuse it.
+	pub async fn spawn_for_daemon(
+		project: impl Into<PathBuf>,
+		socket: impl Into<PathBuf>,
+		daemon_executable: &Path,
+	) -> Result<Self> {
+		let build = omp_env::build_id::of_executable(daemon_executable)
+			.context("reading the daemon executable's build identity")?;
+		Self::start(project.into(), socket.into(), Vec::new(), Str::from(build.as_str())).await
+	}
+
+	async fn start(
+		project: PathBuf,
+		socket: PathBuf,
+		lsp_configs: Vec<PathBuf>,
+		server_build: Str,
+	) -> Result<Self> {
 		if let Some(parent) = socket.parent() {
 			fs::create_dir_all(parent).context("creating docserver socket directory")?;
 		}
@@ -40,15 +65,12 @@ impl DocServerTask {
 		let task = tokio::spawn(async move {
 			daemon::serve(project, Transport::Socket(task_socket), ServeOptions {
 				lsp_config_paths: lsp_configs,
-				lsp:              omp_envd::docserver::NativeLspOptions {
-					enabled: false,
-					lazy:    true,
-				},
+				lsp: omp_envd::docserver::NativeLspOptions { enabled: false, lazy: true },
 				user_config_root: None,
-				claude_plugins:   std::sync::Arc::default(),
-				shutdown:         None,
-				server_build:     Default::default(),
-				connections:      None,
+				claude_plugins: std::sync::Arc::default(),
+				shutdown: None,
+				server_build,
+				connections: None,
 			})
 			.await
 		});
@@ -60,7 +82,7 @@ impl DocServerTask {
 						.await
 						.context("joining docserver startup task")?;
 					result.context("docserver stopped during startup")?;
-					return Err(error(format!("docserver stopped without a startup error")));
+					return Err(error("docserver stopped without a startup error"));
 				}
 				match UnixStream::connect(&server.socket).await {
 					Ok(stream) => {
