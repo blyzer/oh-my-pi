@@ -37,11 +37,27 @@ pub fn is_stale(ours: &str, theirs: &str) -> bool {
 
 fn compute() -> ArrayStr<32> {
 	env::current_exe()
-		.and_then(|executable| fingerprint(&executable))
+		.and_then(|executable| of_executable(&executable))
 		.unwrap_or_default()
 }
 
-fn fingerprint(executable: &Path) -> io::Result<ArrayStr<32>> {
+/// Returns the local generation identity of the executable at `executable`,
+/// hashing the path exactly as spelled.
+///
+/// [`current`] hashes the path the running process's `current_exe` reports,
+/// so the two agree only for that spelling: on macOS the path the process was
+/// started from, on Linux its canonical path with every symlink resolved
+/// (`/proc/self/exe`). A process that is not that executable uses this to
+/// advertise the identity a daemon started from the file expects of a live
+/// owner, such as a test harness that hosts the document authority a spawned
+/// `omp envd` attaches to. Such a caller canonicalizes the executable path
+/// once and uses that one path both to start the daemon and here; the two
+/// identities then match on every platform.
+///
+/// # Errors
+///
+/// Returns the error reading the file's metadata.
+pub fn of_executable(executable: &Path) -> io::Result<ArrayStr<32>> {
 	let metadata = fs::metadata(executable)?;
 	let mut digest = Hash32::hasher();
 	digest.update(b"omp/executable-generation/v1");
@@ -99,23 +115,82 @@ mod tests {
 		assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
 	}
 
+	/// Where a child run of the test below writes the identity it computes
+	/// for itself.
+	const CHILD_REPORT: &str = "OMP_BUILD_ID_TEST_REPORT";
+
+	/// A process started from a path reports [`of_executable`] of the path its
+	/// `current_exe` names: the spelled path on macOS, the canonical one on
+	/// Linux. Each child is this test binary rerunning this test, which then
+	/// only reports.
 	#[test]
-	fn fingerprint_is_stable_and_changes_with_file_generation() {
+	fn a_started_process_reports_the_identity_of_its_reported_path() {
+		if let Some(report) = env::var_os(CHILD_REPORT) {
+			fs::write(report, current()).expect("report the child identity");
+			return;
+		}
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let started_from = |executable: &Path, report: &str| {
+			let report = scratch.path().join(report);
+			let status = std::process::Command::new(executable)
+				.args([
+					"--exact",
+					"build_id::tests::a_started_process_reports_the_identity_of_its_reported_path",
+					"--test-threads=1",
+				])
+				.env(CHILD_REPORT, &report)
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.status()
+				.expect("run the child");
+			assert!(status.success(), "the child run failed: {status}");
+			fs::read_to_string(&report).expect("the child reported its identity")
+		};
+		let identity = |executable: &Path| {
+			of_executable(executable)
+				.expect("executable identity")
+				.as_str()
+				.to_owned()
+		};
+
+		let canonical = fs::canonicalize(env::current_exe().expect("test executable"))
+			.expect("canonical test executable");
+		let reported = started_from(&canonical, "canonical");
+		assert!(!reported.is_empty(), "the child could not identify itself");
+		assert_eq!(reported, identity(&canonical));
+
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
+		{
+			let link = scratch.path().join("linked-test-binary");
+			std::os::unix::fs::symlink(&canonical, &link).expect("link the test binary");
+			assert_ne!(identity(&link), identity(&canonical), "the spelling is not hashed");
+			let expected = if cfg!(target_os = "linux") {
+				&canonical
+			} else {
+				&link
+			};
+			assert_eq!(started_from(&link, "linked"), identity(expected));
+		}
+	}
+
+	#[test]
+	fn executable_identity_is_stable_and_changes_with_file_generation() {
 		let directory = tempfile::tempdir().expect("temporary executable directory");
 		let executable = directory.path().join("omp");
 		fs::write(&executable, b"first generation").expect("write first generation");
 
-		let first = fingerprint(&executable).expect("fingerprint first generation");
+		let first = of_executable(&executable).expect("fingerprint first generation");
 		assert_eq!(
 			first.as_str(),
-			fingerprint(&executable)
+			of_executable(&executable)
 				.expect("fingerprint unchanged generation")
 				.as_str()
 		);
 
 		fs::write(&executable, b"replacement executable generation")
 			.expect("write replacement generation");
-		let replacement = fingerprint(&executable).expect("fingerprint replacement generation");
+		let replacement = of_executable(&executable).expect("fingerprint replacement generation");
 		assert_ne!(first.as_str(), replacement.as_str());
 	}
 

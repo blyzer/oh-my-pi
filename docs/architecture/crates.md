@@ -58,7 +58,7 @@ a convar declaration plus command stream, with archived values represented by cf
 | `omp-app` | CLI commands for chat, print, render, RPC, RPC-UI, ACP, daemon, and gallery. |
 | `omp-rpc` / `omp-serve` | Transport framing and service projections; neither owns canonical session semantics. |
 | `omp-sdk` | Stable native embedding facade over the production composition. |
-| `omp-e2e` | Joined-system acceptance proofs P1–P11 and `tool_sources`. |
+| `omp-e2e` | Joined-system acceptance proofs P1–P12 and `tool_sources`. |
 
 ## Supporting engines
 

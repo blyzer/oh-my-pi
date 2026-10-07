@@ -8194,6 +8194,7 @@ dependencies = [
  "omp-proto",
  "omp-py-link",
  "omp-rpc",
+ "omp-sandbox",
  "omp-scribe",
  "omp-serve",
  "omp-session",

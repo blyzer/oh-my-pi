@@ -33,8 +33,17 @@ pub fn install_omp_binary_env() -> io::Result<()> {
 }
 
 /// Resolves the worker-capable application binary Cargo builds with `omp-e2e`
-/// tests.
+/// tests, as its canonical path.
+///
+/// A child started from the canonical path reports that same spelling as its
+/// `current_exe` on every platform (Linux always reports the canonical one),
+/// so `omp_env::build_id::of_executable` of this path is the identity the
+/// child computes for itself.
 pub fn omp_binary() -> io::Result<PathBuf> {
+	locate_omp_binary()?.canonicalize()
+}
+
+fn locate_omp_binary() -> io::Result<PathBuf> {
 	if let Some(path) = env::var_os("CARGO_BIN_EXE_omp_e2e_host") {
 		let path = PathBuf::from(path);
 		if path.is_file() {
