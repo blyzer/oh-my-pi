@@ -1960,11 +1960,9 @@ mod tests {
 	fn network_only_policy_keeps_the_host_write_view() {
 		let workspace = tempfile::tempdir().expect("workspace");
 		let external = tempfile::tempdir().expect("external");
-		let settings = SandboxSettings {
-			mode: ExecSandboxMode::Off,
-			network_mode: SandboxNetworkMode::Scoped,
-			..SandboxSettings::default()
-		};
+		// Only a user-set `scoped` makes mode `off` compile a network-only policy.
+		let settings = explicit_scoped(ExecSandboxMode::Off);
+		assert_eq!(settings.network_confinement(), NetworkConfinement::Scoped);
 		let parts = policy_parts(&settings, workspace.path(), WriteMode::Scoped, None, None)
 			.expect("network-only policy");
 		assert_eq!(parts.file_policy.writable.as_ref(), [PathBuf::from("/")]);

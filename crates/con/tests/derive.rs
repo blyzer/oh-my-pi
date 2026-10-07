@@ -213,6 +213,31 @@ fn seed_child_carries_every_diverging_variable_regardless_of_flags() {
 }
 
 #[test]
+fn seed_child_carries_a_user_choice_that_equals_the_default() {
+	let parent = Ctx::new();
+	// A director bind at the default is no user choice and is not restated.
+	parent.derive_layers(&chain(&[("plan#1", &[("test_derived", 1)])]));
+	assert_eq!(parent.seed_child().get("test_derived"), None);
+	parent.derive_layers(&[]);
+
+	parent.run("test_archived_only false").unwrap();
+	assert!(parent.is_user_set("test_archived_only"));
+	let seed = parent.seed_child();
+	assert_eq!(seed.get("test_archived_only"), Some(&Value::Bool(false)));
+	let child = Ctx::new();
+	for (name, value) in seed.into_values() {
+		child.set(name.as_str(), value, Origin::Inherited).unwrap();
+	}
+	assert!(child.is_user_set("test_archived_only"), "the child keeps the user's provenance");
+	let grandchild_seed = child.seed_child();
+	assert_eq!(
+		grandchild_seed.get("test_archived_only"),
+		Some(&Value::Bool(false)),
+		"an inherited choice is carried one level further"
+	);
+}
+
+#[test]
 fn seed_child_carries_dynamic_declarations_before_values() {
 	let parent = Ctx::new();
 	parent

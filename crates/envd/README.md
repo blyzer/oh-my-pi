@@ -50,7 +50,9 @@ client and framing boundary; it does not contain an alternate host.
   network mode never sandboxes an explicit `sv_sandbox_mode off`, eval cells
   and detached processes (which hold no broker token) get `disabled`, and a
   broker that cannot start under the shipped default disables the network
-  instead of failing every command.
+  instead of failing every command. A loopback name or a non-routable IP
+  literal is refused without a network fact, so no approval is offered that
+  the rerun would refuse again.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 

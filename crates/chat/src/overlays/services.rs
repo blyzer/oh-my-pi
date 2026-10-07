@@ -286,8 +286,10 @@ pub struct ApprovalPostureRow {
 	pub sandbox:    Str,
 	/// Whether the user chose the configured mode, rather than the default.
 	pub explicit:   bool,
-	/// Network confinement commands actually get (`scoped`, `disabled`,
-	/// `unconfined`), which can differ from `sv_sandbox_network_mode`.
+	/// Network confinement shell sessions are configured for (`scoped`,
+	/// `disabled`, `unconfined`), which can differ from
+	/// `sv_sandbox_network_mode`. A session whose egress broker could not
+	/// start, and eval cells and detached processes, run `disabled`.
 	pub network:    Str,
 }
 

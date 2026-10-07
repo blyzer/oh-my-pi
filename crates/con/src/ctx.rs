@@ -1213,28 +1213,35 @@ impl Ctx {
 	}
 
 	/// Captures the effective value of every variable that diverges from its
-	/// default — the parent's live picture a spawned child starts from (ADR
-	/// 0013: inheritance is not a flag; every convar seeds the child).
+	/// default or that the user set — the parent's live picture a spawned
+	/// child starts from (ADR 0013: inheritance is not a flag; every convar
+	/// seeds the child).
 	///
-	/// Values at their default are omitted so the child's own defaults (and
-	/// its `subagent.cfg`/class cfg) govern them without a redundant write.
+	/// A value at its default that nobody set is omitted, so the child's own
+	/// defaults (and its `subagent.cfg`/class cfg) govern it without a
+	/// redundant write. A value the user set ([`Ctx::is_user_set`]) is carried
+	/// even when it equals the default: the child's inherited layer then
+	/// records the same choice, so code that tells a user's choice from the
+	/// shipped default reads the child as it reads the parent.
 	#[must_use]
 	pub fn seed_child(&self) -> Seed {
 		let mut values = FastHashMap::default();
+		let layers = self.layers.read();
 		for item in &self.items {
 			if let RegItem::Var(spec) = item.spec {
 				let value = item.state.value();
-				if value != *item.state.default_value() {
+				if value != *item.state.default_value() || layers.user_set(spec.name) {
 					values.insert(Str::new_static(spec.name), value);
 				}
 			}
 		}
 		for item in &self.dynamic_vars {
 			let value = item.state.value();
-			if value != *item.state.default_value() {
+			if value != *item.state.default_value() || layers.user_set(item.spec.name.as_str()) {
 				values.insert(item.spec.name.clone(), value);
 			}
 		}
+		drop(layers);
 		let dynamic_vars = self
 			.dynamic_vars
 			.iter()

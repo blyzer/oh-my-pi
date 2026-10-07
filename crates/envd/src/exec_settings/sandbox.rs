@@ -117,7 +117,7 @@ pub enum ReadMode {
 /// Network authority granted to sandboxed commands.
 ///
 /// While `sv_sandbox_mode` is `off`, only an explicitly set `scoped` confines
-/// anything; see [`SandboxSettings::network_confinement`].
+/// anything; see [`network_confinement`].
 #[derive(
 	Clone,
 	Copy,
@@ -147,12 +147,14 @@ pub enum SandboxNetworkMode {
 	Scoped,
 }
 
-/// The network confinement agent commands actually get.
+/// The network confinement agent shell sessions are configured for.
 ///
 /// One answer for the sandbox compiler, the workflow posture and `/security`.
-/// [`SandboxNetworkMode`] is what the user asked for; this is
-/// what applies once the filesystem mode and who set the network mode are
-/// taken into account.
+/// [`SandboxNetworkMode`] is what the user asked for; this is what applies
+/// once the filesystem mode and who set the network mode are taken into
+/// account. Two consumers run `disabled` whatever this says: a shell session
+/// whose egress broker could not start under the shipped default, and eval
+/// cells and detached processes, which never hold a broker token.
 #[derive(
 	Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq, strum::Display, strum::IntoStaticStr,
 )]
@@ -160,7 +162,8 @@ pub enum SandboxNetworkMode {
 #[strum(serialize_all = "kebab-case")]
 pub enum NetworkConfinement {
 	/// Nothing confines the network: `open`, the sandbox `off` with a defaulted
-	/// network mode, or a requested sandbox that was not constructed.
+	/// network mode or with an explicit `disabled` (no sandbox enforces it), or
+	/// a requested sandbox that was not constructed.
 	Unconfined,
 	/// IP networking is denied.
 	Disabled,
@@ -184,8 +187,8 @@ omp_con::var! {
 	};
 	/// Choose network access for sandboxed commands: scoped (default; HTTP(S) and SOCKS clients
 	/// go through an egress broker that admits sv_sandbox_allow_domains and asks before one rerun
-	/// for any other host), disabled, or open. While sv_sandbox_mode is off it applies only when
-	/// set explicitly.
+	/// for any other host), disabled, or open. While sv_sandbox_mode is off, only an explicitly set
+	/// scoped applies (a network-only sandbox); disabled and open then confine nothing.
 	pub static SV_SANDBOX_NETWORK_MODE = sv_sandbox_network_mode: SandboxNetworkMode {
 		default: SandboxNetworkMode::Scoped,
 		flags: archive,
@@ -421,10 +424,11 @@ impl SandboxSettings {
 	/// The network confinement these settings ask the sandbox compiler for.
 	///
 	/// `open` confines nothing. With `sv_sandbox_mode off`, only a `scoped`
-	/// mode the user set compiles a network-only sandbox: the shipped `scoped`
-	/// default does not turn an explicit `off` back into a sandbox, so hosts
-	/// without a native backend keep running commands. Whether a requested
-	/// sandbox was actually constructed is [`network_confinement`]'s business.
+	/// mode the user set compiles a network-only sandbox, and `disabled`
+	/// confines nothing: the shipped `scoped` default does not turn an explicit
+	/// `off` back into a sandbox, so hosts without a native backend keep
+	/// running commands. Whether a requested sandbox was actually constructed
+	/// is [`network_confinement`]'s business.
 	pub(crate) const fn network_confinement(&self) -> NetworkConfinement {
 		match (self.mode, self.network_mode, self.network_provenance) {
 			(_, SandboxNetworkMode::Open, _) => NetworkConfinement::Unconfined,
@@ -438,11 +442,15 @@ impl SandboxSettings {
 	}
 }
 
-/// Reports the network confinement agent commands get under `ctx`.
+/// Reports the network confinement agent shell sessions are configured for
+/// under `ctx`.
 ///
 /// `sandbox` is the state [`SandboxState::probe`] reports for the same
 /// context: a requested filesystem sandbox that was not constructed confines
-/// nothing, network included.
+/// nothing, network included. A probe starts no egress broker, so this cannot
+/// see a broker that fails to start: such a session runs `disabled` (and says
+/// so in its session note) while this reports `scoped`. Eval cells and
+/// detached processes always run `disabled`.
 #[must_use]
 pub fn network_confinement(ctx: &Ctx, sandbox: SandboxState) -> NetworkConfinement {
 	let settings = SandboxSettings::from_con(ctx);

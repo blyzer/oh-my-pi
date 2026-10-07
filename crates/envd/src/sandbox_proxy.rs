@@ -361,6 +361,11 @@ impl ProxyPolicy {
 			return Err(policy_blocked());
 		}
 		let host = host.trim_end_matches('.').to_ascii_lowercase();
+		// Refused before any fact is recorded: approving it could not help,
+		// because the rerun would refuse the same address after resolution.
+		if refused_after_resolution(&host, self.localhost) {
+			return Err(policy_blocked());
+		}
 		let amended = self
 			.amendment
 			.as_ref()
@@ -398,6 +403,26 @@ impl ProxyPolicy {
 
 fn policy_blocked() -> io::Error {
 	io::Error::new(io::ErrorKind::PermissionDenied, "scoped proxy policy blocked request")
+}
+
+/// Whether `host` (lowercased, trailing dots trimmed) names only addresses
+/// [`authorized_address`] refuses, so that no approval could ever admit it:
+/// an IP literal (bracketed or bare) outside the routable space, or, without
+/// the localhost grant, `localhost` and its RFC 6761 subdomains.
+///
+/// Only literals are judged here. A name that resolves to a private address
+/// still records a fact and is refused after resolution on the rerun: the
+/// broker never resolves a name it refuses, so a denied name cannot become a
+/// DNS lookup.
+fn refused_after_resolution(host: &str, allow_localhost: bool) -> bool {
+	let literal = host
+		.strip_prefix('[')
+		.and_then(|inner| inner.strip_suffix(']'))
+		.unwrap_or(host);
+	match literal.parse::<IpAddr>() {
+		Ok(ip) => !authorized_address(ip, allow_localhost),
+		Err(_) => !allow_localhost && (host == "localhost" || host.ends_with(".localhost")),
+	}
 }
 
 fn domain_matches(rule: &str, host: &str) -> bool {
@@ -1285,6 +1310,65 @@ mod tests {
 		assert!(authorized_address(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), true));
 		assert!(!authorized_address(IpAddr::V4(Ipv4Addr::LOCALHOST), false));
 		assert!(authorized_address(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), false));
+	}
+
+	/// Without the localhost grant, a loopback name or a non-routable literal
+	/// is refused without a fact: approving it would rerun the command into
+	/// the same refusal after resolution, so no approval may be offered.
+	#[test]
+	fn unreachable_literals_are_refused_without_an_amendable_fact() {
+		let broker = |localhost| ProxyPolicy {
+			allow: Arc::from([]),
+			deny: Arc::from([]),
+			ports: Arc::from([80, 443, 3000]),
+			localhost,
+			amendment: None,
+			attempts: test_attempts(),
+		};
+		let recorded =
+			|policy: &ProxyPolicy| policy.attempts.lock().get(&test_token()).cloned().flatten();
+
+		let closed = broker(false);
+		for host in [
+			"localhost",
+			"LocalHost.",
+			"api.localhost",
+			"127.0.0.1",
+			"[::1]",
+			"::1",
+			"10.0.0.7",
+			"192.168.1.10",
+			"169.254.169.254",
+			"[fd00::1]",
+		] {
+			let error = closed
+				.authorize(&test_token(), host, 3000)
+				.expect_err("unreachable literal");
+			assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{host}");
+			assert_eq!(recorded(&closed), None, "{host} must not offer an approval");
+		}
+		// The approved rerun would refuse it as well, so no amendment admits it.
+		let amended =
+			ProxyPolicy { amendment: Some((Str::from("localhost"), 3000)), ..broker(false) };
+		assert!(amended.authorize(&test_token(), "localhost", 3000).is_err());
+		assert_eq!(recorded(&amended), None);
+
+		// A routable name or literal outside the allowlist still records the
+		// fact the denial-and-rerun flow asks about, without being resolved.
+		for host in ["blocked.example", "8.8.8.8"] {
+			let open = broker(false);
+			assert!(open.authorize(&test_token(), host, 443).is_err());
+			assert_eq!(recorded(&open), Some((Str::from(host), 443)), "{host}");
+		}
+
+		// With the localhost grant an approval for `localhost` can succeed, so
+		// it records; a private literal stays refused either way.
+		let granted = broker(true);
+		assert!(granted.authorize(&test_token(), "localhost", 3000).is_err());
+		assert_eq!(recorded(&granted), Some((Str::from("localhost"), 3000)));
+		let granted = broker(true);
+		assert!(granted.authorize(&test_token(), "10.0.0.7", 3000).is_err());
+		assert_eq!(recorded(&granted), None);
 	}
 
 	#[test]

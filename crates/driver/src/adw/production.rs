@@ -162,9 +162,10 @@ impl AdwHost for ProductionAdwHost {
 				ExecSandboxMode::WorkspaceWrite => WriteScope::WorkspaceWrite,
 				ExecSandboxMode::Off => WriteScope::Unconfined,
 			},
-			// The confinement commands actually get: a defaulted network mode does
-			// not sandbox an explicit `off`, and an unconstructed sandbox confines
-			// nothing.
+			// The confinement shell sessions are configured for: a defaulted
+			// network mode does not sandbox an explicit `off`, and an unconstructed
+			// sandbox confines nothing. A session whose broker could not start, and
+			// eval cells and detached processes, run `disabled`.
 			network:  match network_confinement(&self.ctx, sandbox) {
 				NetworkConfinement::Unconfined => NetworkScope::Unrestricted,
 				NetworkConfinement::Disabled => NetworkScope::Disabled,
