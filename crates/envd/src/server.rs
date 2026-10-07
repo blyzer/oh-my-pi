@@ -14504,12 +14504,6 @@ mod tests {
 	#[test]
 	fn only_advertising_application_connections_relay_approvals() {
 		let authority = Arc::new(AuthorityTable::default());
-		let relay_hello = || AcceptedHello {
-			grants:        Grants::all(),
-			capabilities:  BTreeSet::from([Str::from(omp_env::APPROVAL_RELAY_CAPABILITY)]),
-			props:         None,
-			approval_mode: None,
-		};
 		let (responses, _frames) = flume::bounded(1);
 		let connection = |hello, policy: &ConnectionPolicy| {
 			let mut connection = ConnectionState::new(
@@ -14534,6 +14528,85 @@ mod tests {
 			]),
 		);
 		assert!(extension.owned_approvals(1).is_none());
+	}
+
+	fn relay_hello() -> AcceptedHello {
+		AcceptedHello {
+			grants:        Grants::all(),
+			capabilities:  BTreeSet::from([Str::from(omp_env::APPROVAL_RELAY_CAPABILITY)]),
+			props:         None,
+			approval_mode: None,
+		}
+	}
+
+	/// Closing a connection disconnects its relay, whether its serve loop
+	/// ends (`cancel_all`) or its state is dropped: a command that outlives
+	/// the connection, such as auto-backgrounded bash past its verdict (no
+	/// request left for `cancel_all` to cancel), fails its prompt closed at
+	/// once, and the relay stops holding the connection's response channel.
+	#[test]
+	fn closing_a_connection_disconnects_its_relay() {
+		let connection = |responses: &flume::Sender<pb::ServerFrame>| {
+			let mut connection = ConnectionState::new(
+				ExecHost::new(),
+				relay_hello(),
+				&ToolSettings::default(),
+				Arc::new(AuthorityTable::default()),
+				&ConnectionPolicy::external(None),
+			);
+			connection.relay_approvals(responses);
+			connection
+		};
+		let assert_closed = |outliving: &OwnedApprovals, frames: &Receiver<pb::ServerFrame>| {
+			assert!(!outliving.is_live(), "a closed connection's relay can still prompt");
+			assert!(frames.is_disconnected(), "the relay kept the connection's writer alive");
+			let prompt = outliving.request(
+				None,
+				vec![ApprovalSpec {
+					title:         sf!("Approve scoped sandbox amendment"),
+					body:          sf!("The sandbox denied a write."),
+					subject:       sf!("/workspace/.git"),
+					kind:          sf!("sandbox_amendment"),
+					scopes:        vec![sf!("once")],
+					default:       Some(false),
+					route:         sf!("local"),
+					approver:      None,
+					timeout_ms:    120_000,
+					unreachable:   sf!("fail_closed"),
+					require_human: true,
+					pattern:       Some(sf!("echo x > .git/a")),
+					evidence:      Vec::new(),
+				}],
+				1_000,
+			);
+			let ticket = futures::FutureExt::now_or_never(prompt)
+				.expect("a closed connection's prompt waited for an answer");
+			assert_eq!(ticket.state, TicketState::Decided);
+			let decision = ticket.decision.expect("decided ticket");
+			assert!(!decision.approved);
+			assert_eq!(decision.source, ApprovalSource::Unavailable);
+			assert!(frames.is_empty(), "a closed connection's relay sent a query");
+		};
+
+		// The serve loop's close path, while the state itself is still alive.
+		let (responses, frames) = flume::bounded(1);
+		let mut closed = connection(&responses);
+		drop(responses);
+		let outliving = closed.owned_approvals(1).expect("application relay");
+		assert!(outliving.is_live());
+		let exec = closed.exec_host.clone();
+		closed.cancel_all(&exec);
+		assert_closed(&outliving, &frames);
+		drop(closed);
+
+		// A state dropped without that close path.
+		let (responses, frames) = flume::bounded(1);
+		let dropped = connection(&responses);
+		drop(responses);
+		let outliving = dropped.owned_approvals(1).expect("application relay");
+		assert!(outliving.is_live());
+		drop(dropped);
+		assert_closed(&outliving, &frames);
 	}
 
 	#[cfg(target_os = "macos")]
@@ -14740,7 +14813,7 @@ mod tests {
 	/// connection that issued the command, on that command's request, and only
 	/// that connection's answer decides it.
 	#[cfg(target_os = "macos")]
-	#[tokio::test]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn daemon_relays_an_amendment_only_to_the_issuing_connection() {
 		let Some((server, root, _state)) = relay_daemon().await else {
 			return;
@@ -14807,8 +14880,12 @@ mod tests {
 	/// Cancelling a command withdraws its open prompt before the command exits;
 	/// closing the issuing connection fails its prompt closed and leaves the
 	/// daemon serving other connections.
+	///
+	/// The exit reaches the wire from its own forwarding task, so the ordering
+	/// holds only because the command drops its prompt before it reports the
+	/// exit. A multi-thread runtime, as the daemon runs, lets the two race.
 	#[cfg(target_os = "macos")]
-	#[tokio::test]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn daemon_withdraws_cancelled_prompts_and_fails_closed_on_disconnect() {
 		let Some((server, root, _state)) = relay_daemon().await else {
 			return;
@@ -14881,7 +14958,7 @@ mod tests {
 	/// the amendment reaches the invoking connection on the invocation's own
 	/// request, and the approved rerun completes the call.
 	#[cfg(target_os = "macos")]
-	#[tokio::test]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn native_bash_relays_its_amendment_on_the_invocation_request() {
 		let Some((server, root, _state)) = relay_daemon().await else {
 			return;

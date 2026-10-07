@@ -2562,26 +2562,34 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		{
 			let scope = amendment.scope_label();
 			let host = ExecHost { inner: host };
-			let approval = host.approve_sandbox_amendment(
-				command.approvals.as_ref(),
-				&command.source,
-				&denial.fact,
-				&scope,
-			);
-			tokio::pin!(approval);
+			// `select!` owns the prompt future and drops it as soon as one arm
+			// wins. A cancelled command therefore withdraws its relayed query
+			// (the guard inside the prompt future writes it straight to the
+			// connection) before its exit enters the event stream, so the
+			// connection sees the withdrawal first. Only a full response
+			// channel defers the withdrawal to a task; the client matches it
+			// by request and query id, so it still closes the prompt. Keep the
+			// future inside `select!`: the window is too narrow for a test to
+			// force, so a future pinned outside it would regress silently.
 			let approved = tokio::select! {
-							approved = &mut approval => approved,
-							_ = command.cancel_rx.recv_async() => {
-								finish_session_command(
-									&command,
-									RunTerminal::Cancelled,
-									started_at.elapsed(),
-									shell.working_dir(),
-								)
-			.await;
-								return true;
-							},
-						};
+				approved = host.approve_sandbox_amendment(
+					command.approvals.as_ref(),
+					&command.source,
+					&denial.fact,
+					&scope,
+				) => Some(approved),
+				_ = command.cancel_rx.recv_async() => None,
+			};
+			let Some(approved) = approved else {
+				finish_session_command(
+					&command,
+					RunTerminal::Cancelled,
+					started_at.elapsed(),
+					shell.working_dir(),
+				)
+				.await;
+				return true;
+			};
 			if approved {
 				let network_amendment = matches!(&amendment, ApprovedSandboxAmendment::Network(_));
 				let amended = match &amendment {
