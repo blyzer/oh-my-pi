@@ -526,3 +526,45 @@ async fn jobs_restart_adopts_terminal_artifact_and_settles_exactly_once() {
 		"the recovered terminal is journaled exactly once"
 	);
 }
+
+/// Counts the rewinds it is told about.
+#[derive(Default)]
+struct Rewinds(AtomicUsize);
+
+impl omp_agent::RewindObserver for Rewinds {
+	fn rewound(&self) {
+		self.0.fetch_add(1, Ordering::SeqCst);
+	}
+}
+
+/// Every rewind applied to the board tells each registered rewind observer
+/// once, whatever the rewind changed.
+#[tokio::test]
+async fn every_applied_rewind_tells_the_rewind_observers() {
+	let temp = tempdir().expect("temporary session directory");
+	let mut session = Session::create(temp.path().join("rewind.oms"), ComponentRegistry::standard())
+		.expect("create session");
+	let genesis = session.head().expect("genesis head");
+	let txn = jobs::insert(session.dom(), genesis, JobSpec {
+		id:      Str::new_static("job-1"),
+		kind:    Str::new_static("tool"),
+		owner:   Str::new_static("Main"),
+		started: Str::new_static("1"),
+		agent:   None,
+	})
+	.expect("jobs root");
+	session.patch(txn).expect("insert job");
+	let board = JobBoard::new();
+	let (first, second) = (Arc::new(Rewinds::default()), Arc::new(Rewinds::default()));
+	board.observe_rewinds(Arc::clone(&first) as Arc<dyn omp_agent::RewindObserver>);
+	board.observe_rewinds(Arc::clone(&second) as Arc<dyn omp_agent::RewindObserver>);
+
+	let work = session.rewind(genesis).expect("rewind to genesis");
+	board.apply_lifecycle(&session, &work).await;
+	let empty = session
+		.rewind(genesis)
+		.expect("rewind that changes nothing");
+	board.apply_lifecycle(&session, &empty).await;
+	assert_eq!(first.0.load(Ordering::SeqCst), 2);
+	assert_eq!(second.0.load(Ordering::SeqCst), 2);
+}

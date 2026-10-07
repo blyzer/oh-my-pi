@@ -41,8 +41,8 @@ use crate::{
 	DirectorStack, DispatchError, DispatchPolicy, Dispatcher, ExternalToolExecutor,
 	FileMentionService, FileMentionSource, KernelEvent, LiveComponent, LiveComponentError,
 	LoopDecision, MaterializedFileMention, MutDirectorCx, Prepared, PreparedCall, Received,
-	ReplyObligations, RouteFacts, SessionTool, StreamEffect, StreamFragment, StreamInterrupt,
-	StreamObserver, StreamSource, StreamVerdict, ToolCancellation, TurnView, Up,
+	ReplyObligations, RewindObserver, RouteFacts, SessionTool, StreamEffect, StreamFragment,
+	StreamInterrupt, StreamObserver, StreamSource, StreamVerdict, ToolCancellation, TurnView, Up,
 	directors::compaction::CompactionDirector,
 	parse_file_mentions,
 	steering::{
@@ -780,6 +780,14 @@ impl<C> Kernel<C> {
 	#[must_use]
 	pub fn reply_obligations(&self) -> ReplyObligations {
 		self.reply_obligations.clone()
+	}
+
+	/// Registers host state that every later rewind of the session
+	/// invalidates, whichever path rewinds it (see [`crate::RewindObserver`]).
+	#[must_use]
+	pub fn with_rewind_observer(self, observer: Arc<dyn RewindObserver>) -> Self {
+		self.dispatcher.jobs().observe_rewinds(observer);
+		self
 	}
 
 	/// Applies rewind/resume lifecycle work to every runtime execution unit.

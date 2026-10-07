@@ -6,7 +6,10 @@
 //! elements to kill boundaries owned by the runtime.
 
 use std::{
-	sync::atomic::{AtomicUsize, Ordering},
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
 	time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -163,13 +166,25 @@ pub const ORPHANED_TOOL_JOB: &str =
 pub const ORPHANED_SUBAGENT_JOB: &str =
 	"subagent execution was lost across a rewind or restart and can be revived";
 
+/// Host state outside the job board that a rewind of the session invalidates.
+///
+/// Every rewind (`Session::rewind`, from any path: a host command, a
+/// checkpoint rewind, a tool-tail retry) reaches the runtime through
+/// [`JobBoard::apply_lifecycle`], which tells each registered observer. An
+/// observer drops state that the rewound journal may no longer justify; it
+/// must not block.
+pub trait RewindObserver: Send + Sync {
+	/// The authoritative session was rewound.
+	fn rewound(&self);
+}
+
 /// A disposable runtime index over the authoritative jobs subtree.
 ///
 /// Rebuilding preserves a live execution unit by durable `id`, remaps it to
 /// the newly-derived handle, and cancels units absent from the new tree.
 pub struct JobBoard {
 	jobs:           Mutex<FastHashMap<Handle, RuntimeJob>>,
-	factories:      Mutex<FastHashMap<Str, std::sync::Arc<JobFactory>>>,
+	factories:      Mutex<FastHashMap<Str, Arc<JobFactory>>>,
 	hooks:          Mutex<Option<crate::LifecycleHooks>>,
 	/// Largest settlement output published inline on a job element; larger
 	/// outputs are spilled to the session blob store (ADR 0009: the DOM and
@@ -178,6 +193,8 @@ pub struct JobBoard {
 	/// Dispatcher spill namespace. A detached artifact is copied into the
 	/// session namespace before its durable job settlement references it.
 	artifact_store: Mutex<Option<BlobStore>>,
+	/// Host state told about every rewind.
+	rewinds:        Mutex<Vec<Arc<dyn RewindObserver>>>,
 }
 
 impl Default for JobBoard {
@@ -188,6 +205,7 @@ impl Default for JobBoard {
 			hooks:          Mutex::default(),
 			output_bound:   AtomicUsize::new(crate::DispatchPolicy::DEFAULT_MAX_OUTPUT_BYTES),
 			artifact_store: Mutex::default(),
+			rewinds:        Mutex::default(),
 		}
 	}
 }
@@ -214,6 +232,12 @@ impl JobBoard {
 	/// Installs the extension observer for `job_registered`/`job_settled`.
 	pub fn set_lifecycle_hooks(&self, hooks: crate::LifecycleHooks) {
 		*self.hooks.lock() = Some(hooks);
+	}
+
+	/// Registers host state that every later rewind of the session
+	/// invalidates.
+	pub fn observe_rewinds(&self, observer: Arc<dyn RewindObserver>) {
+		self.rewinds.lock().push(observer);
 	}
 
 	fn notify_registered(&self, record: &JobRecord) {
@@ -334,7 +358,7 @@ impl JobBoard {
 		let Some(record) = record(dom, handle) else {
 			return false;
 		};
-		let factory: std::sync::Arc<JobFactory> = std::sync::Arc::new(factory);
+		let factory: Arc<JobFactory> = Arc::new(factory);
 		let cancel = CancellationToken::new();
 		let task = factory(cancel.clone());
 		self.notify_registered(&record);
@@ -671,11 +695,15 @@ impl JobBoard {
 	/// retained handles. Removed executions are cooperatively cancelled and
 	/// their owned tasks are force-aborted after a bounded grace. Added
 	/// records are re-derived from `session` rather than left invisible.
+	/// Every [`RewindObserver`] is told first.
 	pub fn apply_lifecycle(
 		&self,
 		session: &Session,
 		work: &LifecycleWork,
 	) -> impl Future<Output = ()> + Send + 'static {
+		for observer in self.rewinds.lock().iter() {
+			observer.rewound();
+		}
 		let mut terminated = Vec::new();
 		{
 			let mut jobs = self.jobs.lock();
