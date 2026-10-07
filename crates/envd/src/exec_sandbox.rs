@@ -586,7 +586,8 @@ impl ExecSandboxAttempt {
 	}
 
 	/// Asks the session broker, with this attempt's capability, to tunnel to
-	/// `host:port`, and returns the broker's status line.
+	/// `host:port`, and returns the broker's response head: the status line and
+	/// headers, as `curl -v` prints them.
 	#[cfg(test)]
 	pub(crate) fn connect_through_broker(&self, host: &str, port: u16) -> String {
 		use std::io::{BufRead as _, Write as _};
@@ -605,11 +606,14 @@ impl ExecSandboxAttempt {
 			"CONNECT {host}:{port} HTTP/1.1\r\nProxy-Authorization: Basic {credential}\r\n\r\n"
 		)
 		.expect("request");
-		let mut status = String::new();
-		std::io::BufReader::new(stream)
-			.read_line(&mut status)
-			.expect("broker status");
-		status
+		let mut reader = std::io::BufReader::new(stream);
+		let mut head = String::new();
+		while !head.ends_with("\r\n\r\n") {
+			if reader.read_line(&mut head).expect("broker response head") == 0 {
+				break;
+			}
+		}
+		head
 	}
 
 	fn record_path_denial<T>(&self, result: Result<T, PathDenied>) -> Result<T, PathDenied> {

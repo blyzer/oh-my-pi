@@ -61,7 +61,10 @@ use url::Url;
 use super::{
 	admission,
 	admission::{GithubMutationTarget, SandboxUnavailable},
-	exec_network_diag::{CommandEnd, NetworkInForce, NetworkMarkerScan, find_marker, network_diag},
+	exec_network_diag::{
+		CommandEnd, NetworkAnnouncements, NetworkInForce, NetworkMarkerScan, find_marker,
+		network_diag,
+	},
 	exec_sandbox,
 	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxConsumer, SandboxDenialFact},
 	exec_settings::{ExecSandboxMode, NetworkConfinement, SandboxSettings},
@@ -322,8 +325,8 @@ struct SessionHandle {
 	sandbox:           Option<Arc<ExecSandbox>>,
 	process_scope:     Arc<SpawnBook>,
 	sandbox_announced: Arc<AtomicBool>,
-	/// The generic network diag was shown in this session.
-	network_announced: Arc<AtomicBool>,
+	/// The network diags already shown in this session.
+	network_announced: Arc<NetworkAnnouncements>,
 }
 
 struct NamedProcess {
@@ -487,7 +490,7 @@ struct SessionCommand {
 	github_targets: Vec<GithubMutationTarget>,
 	sandbox: Option<Arc<ExecSandbox>>,
 	sandbox_announced: Arc<AtomicBool>,
-	network_announced: Arc<AtomicBool>,
+	network_announced: Arc<NetworkAnnouncements>,
 	diags: Arc<Mutex<Vec<omp_tool::Diag>>>,
 	sequence: Arc<AtomicU64>,
 	rerun: bool,
@@ -831,7 +834,7 @@ impl ExecHost {
 				sandbox,
 				process_scope,
 				sandbox_announced: Arc::new(AtomicBool::new(false)),
-				network_announced: Arc::new(AtomicBool::new(false)),
+				network_announced: Arc::new(NetworkAnnouncements::default()),
 			});
 
 		Ok(OpenSessionResponse {
@@ -4192,7 +4195,10 @@ mod tests {
 	/// A broker refusal the user cannot amend never becomes a denial: an
 	/// allowlisted name that does not resolve leaves the command `Failed` with
 	/// its own exit status, while a policy refusal stays the amendable fact.
-	/// Runs on every host: the broker serves an environment-only wrapper.
+	/// The stderr fed to the classifier carries the broker's whole response
+	/// head, as `curl -v` prints it, so the fail-closed answer must not carry
+	/// the policy marker header. Runs on every host: the broker serves an
+	/// environment-only wrapper.
 	#[test]
 	fn fail_closed_broker_refusals_stay_ordinary_failures() {
 		let workspace = tempfile::tempdir().expect("workspace");
@@ -4201,26 +4207,32 @@ mod tests {
 			..SandboxSettings::default()
 		};
 		let sandbox = ExecSandbox::with_test_broker(&settings, workspace.path());
+		let verbose = |head: &str| {
+			let mut stderr = String::from("* Establish HTTP proxy tunnel\n");
+			for line in head.lines().filter(|line| !line.is_empty()) {
+				stderr.push_str("< ");
+				stderr.push_str(line);
+				stderr.push('\n');
+			}
+			stderr
+		};
 
 		let attempt = sandbox.begin_attempt();
-		let status = attempt.connect_through_broker("unresolvable.invalid", 443);
-		assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+		let head = attempt.connect_through_broker("unresolvable.invalid", 443);
+		assert!(head.starts_with("HTTP/1.1 502"), "{head}");
+		assert!(head.contains("X-Omp-Broker-Refused: unresolved\r\n"), "{head}");
 		let facts = attempt.take_facts();
 		assert_eq!(facts.denial, None);
 		assert_eq!(
 			facts.refusal.as_ref().map(|refusal| refusal.cause),
 			Some(crate::sandbox_proxy::BrokerRefusal::Unresolved)
 		);
+		let mut stderr = verbose(&head);
+		stderr.push_str("curl: (56) CONNECT tunnel failed, response 502\n");
 		let result = RunTerminal::Exited(56);
 		assert!(
-			classify_sandbox_denial(
-				true,
-				facts.denial,
-				&result,
-				None,
-				b"curl: (56) CONNECT tunnel failed, response 403\n",
-			)
-			.is_none()
+			classify_sandbox_denial(true, facts.denial, &result, None, stderr.as_bytes()).is_none(),
+			"{stderr}"
 		);
 		let status = result.status(Duration::ZERO, None);
 		assert_eq!(status.outcome, ExecOutcome::Failed as i32);
@@ -4228,13 +4240,20 @@ mod tests {
 		assert!(status.props.is_none(), "no denied-path label");
 
 		let attempt = sandbox.begin_attempt();
-		let status = attempt.connect_through_broker("blocked.example", 443);
-		assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+		let head = attempt.connect_through_broker("blocked.example", 443);
+		assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+		assert!(head.contains("X-Omp-Policy-Blocked: blocked.example:443\r\n"), "{head}");
 		let facts = attempt.take_facts();
 		let fact = SandboxDenialFact::Network { host: sf!("blocked.example"), port: 443 };
 		assert_eq!(facts.denial.as_ref(), Some(&fact));
-		let denial = classify_sandbox_denial(true, facts.denial, &RunTerminal::Exited(56), None, b"")
-			.expect("policy refusal is a denial");
+		let denial = classify_sandbox_denial(
+			true,
+			facts.denial,
+			&RunTerminal::Exited(56),
+			None,
+			verbose(&head).as_bytes(),
+		)
+		.expect("policy refusal is a denial");
 		assert_eq!(denial.fact, fact);
 	}
 
@@ -4583,7 +4602,10 @@ mod tests {
 	/// network reaches the model as `sandbox` diags, offline: the broker
 	/// refuses a host outside the allowlist before resolving it, and a
 	/// `.invalid` name never resolves. No approval route is bound, so a failed
-	/// refusal ends `Denied` and the remedy offers no prompt.
+	/// refusal ends `Denied` and the remedy offers no prompt. A refusal is
+	/// explained in full once; a repeat adds one line on failure and nothing
+	/// on success. An allowed name that does not resolve stays `Failed` even
+	/// when curl prints the broker's response headers.
 	#[cfg(target_os = "macos")]
 	#[tokio::test]
 	async fn scoped_network_trouble_reaches_the_model_as_sandbox_diags() {
@@ -4593,7 +4615,13 @@ mod tests {
 		let root = tempfile::tempdir().unwrap();
 		let workspace = root.path().canonicalize().unwrap();
 		let host = ExecHost::new();
-		host.configure_sandbox(&crate::exec_settings::SandboxSettings::default(), &workspace);
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				allow_domains: vec![Str::new_static("unresolvable.invalid")],
+				..crate::exec_settings::SandboxSettings::default()
+			},
+			&workspace,
+		);
 		let opened = host
 			.open_session(OpenSessionRequest {
 				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
@@ -4623,10 +4651,10 @@ mod tests {
 		assert_eq!(diags[1].kind, "sandbox");
 		assert_eq!(diags[1].severity, v1::ToolDiagSeverity::Info as i32);
 		assert!(diags[1].text.contains("blocked.invalid:80"), "{:?}", texts(&diags));
-		assert!(diags[1].text.contains("sv_sandbox_network_mode is scoped"));
+		assert!(diags[1].text.contains("sv_sandbox_network_mode scoped"));
 		assert!(diags[1].text.contains("no approval prompt"));
 
-		// The same refusal failing the command ends it `Denied`, with a warning.
+		// The same refusal failing the command ends it `Denied`, with one line.
 		let (outcome, _, output, diags) = run_failure(
 			&host,
 			script_request(session, "/usr/bin/curl -sSf -o /dev/null http://blocked.invalid/"),
@@ -4635,7 +4663,49 @@ mod tests {
 		assert_eq!(outcome, ExecOutcome::Denied as i32, "{}", String::from_utf8_lossy(&output));
 		assert_eq!(diags.len(), 1, "{:?}", texts(&diags));
 		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
-		assert!(diags[0].text.contains("blocked.invalid:80"), "{:?}", texts(&diags));
+		assert!(
+			diags[0]
+				.text
+				.contains("blocked.invalid:80 failed at the egress broker again")
+		);
+		assert!(!diags[0].text.contains("sv_sandbox_allow_domains"), "{:?}", texts(&diags));
+
+		// Succeeding on it again adds nothing.
+		let (outcome, exit, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sS -o /dev/null http://blocked.invalid/"),
+		)
+		.await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(exit, Some(0));
+		assert!(diags.is_empty(), "{:?}", texts(&diags));
+
+		// An allowed name that does not resolve: curl prints the broker's
+		// response headers, and the command still ends `Failed`, not `Denied`.
+		let (outcome, exit, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sSfv -o /dev/null http://unresolvable.invalid/"),
+		)
+		.await;
+		let printed = String::from_utf8_lossy(&output);
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{printed}");
+		assert_eq!(exit, Some(22), "{printed}");
+		assert!(printed.contains("X-Omp-Broker-Refused: unresolved"), "{printed}");
+		assert!(
+			!printed
+				.to_ascii_lowercase()
+				.contains("x-omp-policy-blocked"),
+			"{printed}"
+		);
+		assert_eq!(diags.len(), 1, "{:?}", texts(&diags));
+		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
+		assert!(
+			diags[0]
+				.text
+				.contains("could not resolve unresolvable.invalid:80"),
+			"{:?}",
+			texts(&diags)
+		);
 
 		// A client that ignores the proxy environment gets the generic text,
 		// once per session.

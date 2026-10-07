@@ -35,20 +35,28 @@ const MAX_ATTEMPTS: usize = 64;
 const DENIAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DENIAL_DRAIN_BYTES: usize = 1024 * 1024;
 
-/// Why the egress broker refused one connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+/// Why the egress broker refused one connection. Only [`Self::Policy`] is
+/// answered with the policy denial (`403` and `X-Omp-Policy-Blocked`); a
+/// fail-closed cause is answered `502` with `X-Omp-Broker-Refused: <cause>`,
+/// so a client that prints the broker's response headers never shows the
+/// policy marker for a refusal the sandbox's policy did not make.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::IntoStaticStr, thiserror::Error)]
 #[strum(serialize_all = "kebab-case")]
 pub(crate) enum BrokerRefusal {
 	/// The port, a deny rule or the allowlist refused the host. The only
 	/// cause the user can amend: an approval admits the host for one rerun.
+	#[error("the scoped network policy does not allow the host")]
 	Policy,
 	/// The host was allowed, but its name did not resolve to any address.
+	#[error("the allowed host did not resolve")]
 	Unresolved,
 	/// The host is, or resolves to, an address scoped networking never
 	/// reaches: loopback without the localhost grant, or a private, link-local
 	/// or otherwise non-public address. Approving it could not help.
+	#[error("the host is or resolves to an address scoped networking never reaches")]
 	NonRoutable,
 	/// The host was allowed and resolved, but every connection to it failed.
+	#[error("every connection to the allowed host failed")]
 	Upstream,
 }
 
@@ -60,7 +68,7 @@ impl BrokerRefusal {
 }
 
 /// The broker's refusal recorded for one execution attempt.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct BrokerDenial {
 	/// Requested host, lowercased with trailing dots trimmed. The sandboxed
 	/// client chose it, so it is untrusted text.
@@ -413,9 +421,17 @@ impl ProxyPolicy {
 		}
 	}
 
-	fn authorize(&self, token: &Str, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+	/// Judges `host:port` for this attempt and returns the addresses to
+	/// connect to, or the refusal, which is recorded. An attempt that is no
+	/// longer active is refused as [`BrokerRefusal::Policy`] without a record.
+	fn authorize(
+		&self,
+		token: &Str,
+		host: &str,
+		port: u16,
+	) -> Result<Vec<SocketAddr>, BrokerRefusal> {
 		if !self.attempt_is_active(token) {
-			return Err(policy_blocked());
+			return Err(BrokerRefusal::Policy);
 		}
 		let host = normalize_host(host);
 		// Refused as non-routable before the allowlist: approving it could not
@@ -423,7 +439,7 @@ impl ProxyPolicy {
 		// resolution, so no amendable fact is recorded.
 		if refused_after_resolution(&host, self.localhost) {
 			self.record(token, &host, port, BrokerRefusal::NonRoutable);
-			return Err(policy_blocked());
+			return Err(BrokerRefusal::NonRoutable);
 		}
 		let amended = self
 			.amendment
@@ -444,47 +460,52 @@ impl ProxyPolicy {
 						.any(|rule| domain_matches(rule.as_str(), &host)))
 		{
 			self.record(token, &host, port, BrokerRefusal::Policy);
-			return Err(policy_blocked());
+			return Err(BrokerRefusal::Policy);
 		}
-		let candidates = match (host.as_str(), port).to_socket_addrs() {
-			Ok(candidates) => candidates.collect::<Vec<_>>(),
-			Err(error) => {
-				self.record(token, &host, port, BrokerRefusal::Unresolved);
-				return Err(error);
-			},
-		};
-		if candidates.is_empty() {
-			self.record(token, &host, port, BrokerRefusal::Unresolved);
-			return Err(policy_blocked());
-		}
-		if candidates
-			.iter()
-			.any(|address| !authorized_address(address.ip(), self.localhost))
-		{
-			self.record(token, &host, port, BrokerRefusal::NonRoutable);
-			return Err(policy_blocked());
+		// A resolver error carries nothing the refusal does not: the broker
+		// answers every cause with a fixed response.
+		let candidates = (host.as_str(), port)
+			.to_socket_addrs()
+			.map(|addresses| addresses.collect::<Vec<_>>())
+			.unwrap_or_default();
+		if let Some(refusal) = resolved_refusal(&candidates, self.localhost) {
+			self.record(token, &host, port, refusal);
+			return Err(refusal);
 		}
 		Ok(candidates)
 	}
 
 	/// Opens the upstream connection for an authorized request, recording an
-	/// [`BrokerRefusal::Upstream`] refusal when every resolved address fails.
-	fn connect(&self, token: &Str, host: &str, port: u16) -> io::Result<TcpStream> {
-		let candidates = self.authorize(token, host, port)?;
-		let mut last = None;
-		for address in candidates {
-			match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-				Ok(stream) => {
-					stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
-					stream.set_write_timeout(Some(IDLE_TIMEOUT))?;
-					return Ok(stream);
-				},
-				Err(error) => last = Some(error),
+	/// [`BrokerRefusal::Upstream`] refusal when no resolved address yields a
+	/// usable connection.
+	fn connect(&self, token: &Str, host: &str, port: u16) -> Result<TcpStream, BrokerRefusal> {
+		for address in self.authorize(token, host, port)? {
+			let connected = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).and_then(|stream| {
+				stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
+				stream.set_write_timeout(Some(IDLE_TIMEOUT))?;
+				Ok(stream)
+			});
+			if let Ok(stream) = connected {
+				return Ok(stream);
 			}
 		}
 		self.record(token, &normalize_host(host), port, BrokerRefusal::Upstream);
-		Err(last.unwrap_or_else(policy_blocked))
+		Err(BrokerRefusal::Upstream)
 	}
+}
+
+/// Judges the addresses an allowed name resolved to: none is
+/// [`BrokerRefusal::Unresolved`], and a single address scoped networking never
+/// reaches refuses the whole name as [`BrokerRefusal::NonRoutable`], so a name
+/// cannot bring a private address in beside a public one.
+fn resolved_refusal(candidates: &[SocketAddr], allow_localhost: bool) -> Option<BrokerRefusal> {
+	if candidates.is_empty() {
+		return Some(BrokerRefusal::Unresolved);
+	}
+	candidates
+		.iter()
+		.any(|address| !authorized_address(address.ip(), allow_localhost))
+		.then_some(BrokerRefusal::NonRoutable)
 }
 
 fn policy_blocked() -> io::Error {
@@ -667,8 +688,11 @@ fn http<S: ClientStream>(
 
 	let mut upstream = match policy.connect(&token, &host, port) {
 		Ok(stream) => stream,
-		Err(_) => {
+		Err(BrokerRefusal::Policy) => {
 			return http_reject(client, reader, |client| http_policy_deny(client, &host, port));
+		},
+		Err(refusal) => {
+			return http_reject(client, reader, |client| http_broker_refused(client, refusal));
 		},
 	};
 	if origin.is_none() {
@@ -1202,6 +1226,17 @@ fn http_policy_deny(mut stream: impl Write, host: &str, port: u16) -> io::Result
 	)
 }
 
+/// Answers a fail-closed refusal: no policy marker, since the sandbox's
+/// policy did not refuse the host, and the cause for whoever reads headers.
+fn http_broker_refused(mut stream: impl Write, refusal: BrokerRefusal) -> io::Result<()> {
+	let cause: &'static str = refusal.into();
+	write!(
+		stream,
+		"HTTP/1.1 502 Bad Gateway\r\nX-Omp-Broker-Refused: {cause}\r\nContent-Length: \
+		 0\r\nConnection: close\r\n\r\n"
+	)
+}
+
 fn socks_deny(mut stream: impl Write) -> io::Result<()> {
 	stream.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0])
 }
@@ -1355,18 +1390,14 @@ mod tests {
 			attempts:  test_attempts(),
 		};
 		assert_eq!(
-			policy
-				.authorize(&test_token(), "example.test", 443)
-				.expect_err("deny")
-				.kind(),
-			io::ErrorKind::PermissionDenied
+			policy.authorize(&test_token(), "example.test", 443),
+			Err(BrokerRefusal::Policy),
+			"deny"
 		);
 		assert_eq!(
-			policy
-				.authorize(&test_token(), "example.test", 80)
-				.expect_err("port")
-				.kind(),
-			io::ErrorKind::PermissionDenied
+			policy.authorize(&test_token(), "example.test", 80),
+			Err(BrokerRefusal::Policy),
+			"port"
 		);
 	}
 
@@ -1426,10 +1457,11 @@ mod tests {
 			"[fd00::1]",
 		] {
 			let closed = closed_broker(false);
-			let error = closed
-				.authorize(&test_token(), host, 3000)
-				.expect_err("unreachable literal");
-			assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{host}");
+			assert_eq!(
+				closed.authorize(&test_token(), host, 3000),
+				Err(BrokerRefusal::NonRoutable),
+				"{host}"
+			);
 			let normalized = normalize_host(host);
 			assert_eq!(
 				recorded(&closed),
@@ -1462,10 +1494,12 @@ mod tests {
 	}
 
 	/// A refusal the user cannot amend is recorded with its cause, deterministic
-	/// offline: a reserved `.invalid` name never resolves, a loopback name the
-	/// allowlist admits is refused after resolution, and an allowed address
-	/// that accepts no connection fails upstream. The first policy refusal of
-	/// an attempt is never replaced by a later fail-closed one.
+	/// offline: a reserved `.invalid` name never resolves, a loopback name is
+	/// refused as non-routable by the literal check even when the allowlist
+	/// admits it, and an allowed address that accepts no connection fails
+	/// upstream. The first policy refusal of an attempt is never replaced by a
+	/// later fail-closed one. The non-routable judgment after resolution is
+	/// covered by `resolved_addresses_are_judged_as_a_whole`.
 	#[test]
 	fn fail_closed_refusals_are_recorded_per_attempt() {
 		let allowing = |host: &str, localhost| ProxyPolicy {
@@ -1544,6 +1578,93 @@ mod tests {
 				.is_err()
 		);
 		assert_eq!(recorded(&replaced), refusal("blocked.example", 443, BrokerRefusal::Policy));
+	}
+
+	/// What an allowed name resolved to is judged after resolution: a name the
+	/// literal check cannot see through, such as a corporate host with a
+	/// private address, is refused as non-routable when any one of its
+	/// addresses is outside the routable space, and an empty answer is
+	/// unresolved.
+	#[test]
+	fn resolved_addresses_are_judged_as_a_whole() {
+		let at = |ip: &str| SocketAddr::new(ip.parse().expect("test address"), 443);
+		assert_eq!(resolved_refusal(&[], false), Some(BrokerRefusal::Unresolved));
+		assert_eq!(resolved_refusal(&[], true), Some(BrokerRefusal::Unresolved));
+		for addresses in [
+			vec![at("10.0.0.7")],
+			vec![at("192.168.1.10")],
+			vec![at("172.16.0.1")],
+			vec![at("169.254.169.254")],
+			vec![at("100.64.0.1")],
+			vec![at("fd00::1")],
+			vec![at("fe80::1")],
+			vec![at("::ffff:10.0.0.7")],
+			vec![at("8.8.8.8"), at("10.0.0.7")],
+			vec![at("2001:4860:4860::8888"), at("fd00::1")],
+		] {
+			for localhost in [false, true] {
+				assert_eq!(
+					resolved_refusal(&addresses, localhost),
+					Some(BrokerRefusal::NonRoutable),
+					"{addresses:?} (localhost grant: {localhost})"
+				);
+			}
+		}
+		for loopback in [vec![at("127.0.0.1")], vec![at("::1")], vec![at("8.8.8.8"), at("127.0.0.1")]]
+		{
+			assert_eq!(
+				resolved_refusal(&loopback, false),
+				Some(BrokerRefusal::NonRoutable),
+				"{loopback:?}"
+			);
+			assert_eq!(resolved_refusal(&loopback, true), None, "{loopback:?}");
+		}
+		assert_eq!(resolved_refusal(&[at("8.8.8.8"), at("2001:4860:4860::8888")], false), None);
+	}
+
+	/// Only a policy refusal carries the policy marker header. A fail-closed
+	/// refusal is answered `502` with its cause, so a client that prints the
+	/// proxy's response headers (`curl -v`) never shows `X-Omp-Policy-Blocked`
+	/// for a refusal the policy did not make.
+	#[test]
+	fn only_policy_refusals_carry_the_policy_marker() {
+		let response = |policy: ProxyPolicy, target: &str| {
+			let (mut client, proxy) = serve_once(policy);
+			write!(
+				client,
+				"CONNECT {target} HTTP/1.1\r\nProxy-Authorization: Basic \
+				 b21wOnRlc3QtdG9rZW4=\r\nHost: {target}\r\n\r\n"
+			)
+			.expect("connect request");
+			client
+				.shutdown(std::net::Shutdown::Write)
+				.expect("request end");
+			let mut response = String::new();
+			client.read_to_string(&mut response).expect("broker answer");
+			proxy.join().expect("broker");
+			response
+		};
+		let allowing = |host: &str| ProxyPolicy {
+			allow: Arc::from([Str::from(host)]),
+			ports: Arc::from([443]),
+			..closed_broker(false)
+		};
+
+		let policy = response(allowing("allowed.example"), "blocked.example:443");
+		assert!(policy.starts_with("HTTP/1.1 403"), "{policy}");
+		assert!(policy.contains("X-Omp-Policy-Blocked: blocked.example:443\r\n"), "{policy}");
+
+		for (target, cause) in [
+			("unresolvable.invalid:443", "unresolved"),
+			("localhost:443", "non-routable"),
+			("10.0.0.7:443", "non-routable"),
+		] {
+			let host = target.rsplit_once(':').map_or(target, |(host, _)| host);
+			let answer = response(allowing(host), target);
+			assert!(answer.starts_with("HTTP/1.1 502"), "{target}: {answer}");
+			assert!(answer.contains(&format!("X-Omp-Broker-Refused: {cause}\r\n")), "{answer}");
+			assert!(!answer.to_ascii_lowercase().contains("x-omp-policy-blocked"), "{answer}");
+		}
 	}
 
 	#[test]

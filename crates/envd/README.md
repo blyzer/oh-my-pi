@@ -50,15 +50,21 @@ client and framing boundary; it does not contain an alternate host.
   network mode never sandboxes an explicit `sv_sandbox_mode off`, eval cells
   and detached processes (which hold no broker token) get `disabled`, and a
   broker that cannot start under the shipped default disables the network
-  instead of failing every command. Every broker refusal carries a typed
-  cause; only a policy refusal is an amendable network fact, so a loopback
-  name or a non-routable IP literal offers no approval the rerun would
-  refuse again, and a name that does not resolve stays an ordinary failure.
+  instead of failing every command. Every refusal from the broker's
+  CONNECT/SOCKS authorization and upstream connect carries a typed cause
+  (the TLS ClientHello gate and a request on an inactive attempt token
+  record none). Only a policy refusal is an amendable network fact and is
+  answered with the `X-Omp-Policy-Blocked` marker, so a loopback name or a
+  non-routable IP literal offers no approval the rerun would refuse again,
+  and a name that does not resolve stays an ordinary failure (answered `502`
+  with `X-Omp-Broker-Refused`, also when the client prints the headers).
   Network trouble reaches the model as one `sandbox` diag
-  (`exec_network_diag`): the refused `host:port` with the mode and remedy on
-  every command that records a refusal, or, for a failed command whose
-  stderr shows a resolver or connection failure, the mode's generic text
-  once per session.
+  (`exec_network_diag`): a refusal is explained in full (endpoint, mode,
+  remedy) the first time the session meets its `host:port` and cause, with
+  the host left out when it cannot be quoted; a later failure on it gets one
+  short line and a later success none. Without a refusal, a failed command
+  whose stderr shows a resolver or connection failure gets the mode's
+  generic text once per session.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 
