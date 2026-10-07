@@ -22,15 +22,15 @@ use std::{
 #[cfg(target_os = "linux")]
 use tempfile::{Builder, NamedTempFile};
 
+#[cfg(target_os = "linux")]
+use crate::{
+	AcceptBackoff, AcceptFailure, WriteMode,
+	paths::{insert_path, os_string_bytes, temp_roots},
+	runner::{COMMAND_WRAPPER_PLACEHOLDER, PreparedResource},
+};
 use crate::{
 	Backend, BackendStatus, Capability, CapabilitySet, Caveat, DegradationPolicy, NetworkMode, Plan,
 	ProbeFailure, SandboxError, SandboxOperation, SandboxSpec, runner::PreparedSandbox,
-};
-#[cfg(target_os = "linux")]
-use crate::{
-	WriteMode,
-	paths::{insert_path, os_string_bytes, temp_roots},
-	runner::{COMMAND_WRAPPER_PLACEHOLDER, PreparedResource},
 };
 
 /// Hidden same-binary child role which installs Linux confinement before exec.
@@ -793,7 +793,6 @@ fn relay_child(socket: &Path, port: u16, ready: &mut File) -> Result<(), Sandbox
 
 	bring_loopback_up().map_err(relay_launch_error)?;
 	let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(relay_launch_error)?;
-	listener.set_nonblocking(true).map_err(relay_launch_error)?;
 	install_relay_filter()?;
 	ready.write_all(&[1]).map_err(relay_launch_error)?;
 	proxy_relay(socket, listener).map_err(relay_launch_error)
@@ -827,13 +826,28 @@ fn install_relay_filter() -> Result<(), SandboxError> {
 	Ok(())
 }
 
+/// Bridges the namespace's loopback `port` to the broker's Unix `socket` until
+/// the listener fails.
+///
+/// The relay blocks in `accept`, so an idle relay costs no wakeups. It needs no
+/// stop signal of its own, because signals end it wherever it blocks:
+/// `PR_SET_PDEATHSIG` when its parent (the helper that became the target
+/// command) exits, and the kernel when Bubblewrap's private PID namespace ends
+/// with the sandbox. A failure that belongs to one connection never ends it,
+/// and descriptor or memory exhaustion only slows it down ([`AcceptFailure`]);
+/// only a failure of the listener itself returns.
 #[cfg(target_os = "linux")]
 fn proxy_relay(socket: &Path, listener: TcpListener) -> io::Result<()> {
 	const MAX_CONNECTIONS: usize = 32;
 	const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 	let live = Arc::new(AtomicUsize::new(0));
+	let mut backoff = AcceptBackoff::default();
 	loop {
-		match listener.accept() {
+		let accepted = listener.accept();
+		if accepted.is_ok() {
+			backoff.reset();
+		}
+		match accepted {
 			// Dropping the accepted socket is the rejection: the peer sees an
 			// immediate close rather than a hang against a full relay.
 			Ok((_client, _)) if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS => {
@@ -853,10 +867,11 @@ fn proxy_relay(socket: &Path, listener: TcpListener) -> io::Result<()> {
 					live.fetch_sub(1, Ordering::AcqRel);
 				}
 			},
-			Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-				thread::sleep(Duration::from_millis(10));
+			Err(error) => match AcceptFailure::of(&error) {
+				AcceptFailure::Transient => {},
+				AcceptFailure::Exhausted => thread::sleep(backoff.next_delay()),
+				AcceptFailure::Fatal => return Err(error),
 			},
-			Err(error) => return Err(error),
 		}
 	}
 }

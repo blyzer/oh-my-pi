@@ -5,6 +5,7 @@
 //! inspectable [`Plan`], and then materializes secrets and temporary resources
 //! in [`PreparedSandbox`] for either caller-owned launching or [`Runner::run`].
 
+mod accept;
 mod backends;
 mod capability;
 mod environment;
@@ -15,6 +16,7 @@ mod runner;
 mod runtime;
 mod spec;
 
+pub use accept::{AcceptBackoff, AcceptFailure};
 pub use backends::landlock::{HIDDEN_CHILD_ARG, abi as landlock_abi, run_child_entry};
 pub use capability::{Backend, Capability, CapabilitySet, portable_capabilities};
 pub use environment::{
