@@ -190,7 +190,11 @@ async fn run(
 	let host = tokio::spawn(async move {
 		while let Ok(event) = events.recv_async().await {
 			if let KernelEvent::ApprovalRequested(ticket) = event {
-				assert_eq!(ticket.invocation_id.as_deref(), Some("call-1"));
+				// A sandbox amendment is raised by the executor after the call, so it
+				// carries no invocation id; every admission ticket carries this one.
+				if ticket.invocation_id.is_some() {
+					assert_eq!(ticket.invocation_id.as_deref(), Some("call-1"));
+				}
 				let _ = mailbox
 					.send(Up::Approve { id: ticket.ticket_id, decision: decision(approve) });
 			}
@@ -373,4 +377,60 @@ async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
 			"sandbox": { "state": "off" },
 		})
 	);
+}
+
+/// A real Seatbelt sandbox is active: the default `yolo` is honoured, so bash
+/// runs unprompted and no posture notice is needed.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn default_yolo_inside_an_active_sandbox_runs_bash_unprompted_and_silent() {
+	let Turn { session, result, landed } =
+		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::WorkspaceWrite, false).await;
+	assert!(prompts(&session).is_empty(), "a confined yolo never prompts");
+	assert!(landed, "bash ran inside the workspace: {result}");
+	let posture = session
+		.dom()
+		.select("body turn notice")
+		.expect("selector")
+		.filter(|handle| {
+			session
+				.dom()
+				.get(*handle)
+				.and_then(|node| node.prop(&omp_dom::PropKey::Custom(Str::new_static("name"))))
+				.and_then(omp_dom::Value::as_str)
+				== Some("approval-posture")
+		})
+		.count();
+	assert_eq!(posture, 0, "an honoured yolo posts no posture notice");
+}
+
+/// The same sandbox refuses a write outside its roots: the denial becomes a
+/// one-time, path-scoped `sandbox_amendment` prompt (ADR 0028), and a refusal
+/// leaves the outside path untouched.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn active_sandbox_denied_write_prompts_an_amendment_and_refusal_writes_nothing() {
+	let outside = Path::new("/Users/Shared/omp-seatbelt-amendment-probe");
+	let _ = std::fs::remove_file(outside);
+	let Turn { session, landed, .. } = run(
+		"bash",
+		|_| {
+			serde_json::json!({
+				"command": format!("touch {}", outside.display()),
+				"i": "Proving sandbox amendment",
+			})
+		},
+		"landed.txt",
+		None,
+		ExecSandboxMode::WorkspaceWrite,
+		false,
+	)
+	.await;
+	let wrote = outside.exists();
+	let _ = std::fs::remove_file(outside);
+	let tickets = prompts(&session);
+	assert_eq!(tickets.len(), 1, "one amendment prompt: {tickets:?}");
+	assert_eq!(tickets[0].reasons[0].kind.as_str(), "sandbox_amendment");
+	assert_eq!(tickets[0].reasons[0].subject.as_str(), "write /Users/Shared");
+	assert!(!wrote && !landed, "a refused amendment writes nothing");
 }
