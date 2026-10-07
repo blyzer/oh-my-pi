@@ -4396,6 +4396,49 @@ mod tests {
 		host.close_session(&opened.session).expect("session closes");
 	}
 
+	/// Live Seatbelt proof that the default workspace-write sandbox runs a
+	/// program reached through a Homebrew-shaped PATH link, and from a cwd that
+	/// crosses a keg link, without asking for an amendment: no approval route
+	/// is bound, so a refused read would end the command as `Denied`.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn sandboxed_session_runs_programs_reached_through_symlinks() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().unwrap();
+		let workspace = root.path().canonicalize().unwrap();
+		let tools = tempfile::tempdir().unwrap();
+		let prefix = crate::exec_sandbox::homebrew_shaped_prefix(tools.path());
+		let host = ExecHost::new();
+		host.configure_sandbox(&crate::exec_settings::SandboxSettings::default(), &workspace);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
+				env_delta: Some(EnvironmentDelta {
+					set: BTreeMap::from([(
+						String::from("PATH"),
+						format!("{}:/usr/bin:/bin", prefix.join("bin").display()),
+					)]),
+					..EnvironmentDelta::default()
+				}),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+		let (outcome, exit, output, diags) =
+			run_failure(&host, script_request(session, "tool ok")).await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(exit, Some(0));
+		assert_eq!(output, b"ok\n");
+		assert_eq!(diags.len(), 1);
+		assert!(diags[0].text.contains("backend=seatbelt"), "{}", diags[0].text);
+		let linked_cwd = format!("cd {}/opt/tool/bin && echo * && ./tool linked", prefix.display());
+		assert_eq!(run_output(&host, script_request(session, &linked_cwd)).await, b"tool\nlinked\n");
+		host.close_session(session).expect("session closes");
+	}
+
 	/// ADR 0028: a detached script never reaches `/bin/sh`; it re-enters this
 	/// executable as the hidden in-process shell child.
 	#[test]
@@ -4634,6 +4677,182 @@ mod tests {
 			b"/persistent",
 		);
 		host.close_session(&opened.session).expect("session closes");
+	}
+
+	/// Mode `off` plus a `read_deny` root installs the in-shell file policy with
+	/// no kernel backend, so these proofs run on every unix host.
+	#[cfg(unix)]
+	fn environment_only_read_deny(denied: &Path) -> crate::exec_settings::SandboxSettings {
+		crate::exec_settings::SandboxSettings {
+			mode: crate::exec_settings::ExecSandboxMode::Off,
+			// Pinned: a scoped network compiles a native backend instead of the
+			// backend-free environment-only policy.
+			network_mode: crate::exec_settings::SandboxNetworkMode::Disabled,
+			read_deny: vec![Str::from(denied.to_string_lossy().as_ref())],
+			..Default::default()
+		}
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn environment_only_sandbox_execs_globs_and_redirects_through_symlinks() {
+		let root = tempfile::tempdir().expect("root");
+		let prefix = crate::exec_sandbox::homebrew_shaped_prefix(root.path());
+		let secret = root.path().join("secret");
+		fs::create_dir(&secret).expect("secret root");
+		fs::write(secret.join("key"), "omp-secret-marker\n").expect("secret file");
+		std::os::unix::fs::symlink(secret.join("key"), prefix.join("to-secret"))
+			.expect("link into read_deny");
+		let host = ExecHost::new();
+		host.configure_sandbox(&environment_only_read_deny(&secret), root.path());
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(root.path())
+					.expect("root URI")
+					.to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+		assert!(
+			host.inner.sessions.lock()[session].sandbox.is_some(),
+			"the in-shell file policy is installed"
+		);
+		let prefix = prefix.display();
+		// Exec lane: the program path as found, then through a PATH lookup.
+		assert_eq!(
+			run_output(&host, script_request(session, &format!("{prefix}/bin/tool exec"))).await,
+			b"exec\n"
+		);
+		assert_eq!(
+			run_output(
+				&host,
+				script_request(session, &format!("export PATH={prefix}/bin:/usr/bin:/bin; tool path"))
+			)
+			.await,
+			b"path\n"
+		);
+		// Glob lane: expansion walks through the linked keg directory.
+		assert_eq!(
+			run_output(&host, script_request(session, &format!("echo {prefix}/opt/tool/bin/*"))).await,
+			format!("{prefix}/opt/tool/bin/tool\n").as_bytes()
+		);
+		// Redirect lane: an in-shell read through a link.
+		assert_eq!(
+			run_output(
+				&host,
+				script_request(
+					session,
+					&format!("read -r line < {prefix}/bin/tool; printf '%s\\n' \"$line\"")
+				)
+			)
+			.await,
+			b"#!/bin/sh\n"
+		);
+		// A link into `read_deny` is still refused.
+		let (outcome, exit, output, _) =
+			run_failure(&host, script_request(session, &format!("read -r line < {prefix}/to-secret")))
+				.await;
+		assert_eq!(outcome, ExecOutcome::Denied as i32);
+		assert_ne!(exit, Some(0));
+		let output = String::from_utf8_lossy(&output);
+		assert!(output.contains("sandbox denied read"), "{output}");
+		assert!(!output.contains("omp-secret-marker"), "{output}");
+		host.close_session(session).expect("session closes");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn environment_only_sandbox_runs_from_a_cwd_reached_through_a_symlink() {
+		let root = tempfile::tempdir().expect("root");
+		let prefix = crate::exec_sandbox::homebrew_shaped_prefix(root.path());
+		let host = ExecHost::new();
+		host.configure_sandbox(&environment_only_read_deny(&root.path().join("secret")), root.path());
+		// `opt/tool` links to the keg, so the session cwd itself crosses a link.
+		let cwd = prefix.join("opt/tool/bin");
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&cwd).expect("cwd URI").to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+		assert!(
+			host.inner.sessions.lock()[session].sandbox.is_some(),
+			"the in-shell file policy is installed"
+		);
+		// Glob expansion checks the cwd itself before listing it.
+		assert_eq!(run_output(&host, script_request(session, "echo *")).await, b"tool\n");
+		assert_eq!(run_output(&host, script_request(session, "./tool linked")).await, b"linked\n");
+		host.close_session(session).expect("session closes");
+	}
+
+	/// `link/../name` reaches the link target's sibling, as the kernel walks it;
+	/// the redirect and glob lanes judge and read that same path, so a link into
+	/// a `read_deny` root cannot be stepped out of with `..`.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn environment_only_sandbox_judges_parent_components_after_a_link() {
+		use std::os::unix::fs::symlink;
+
+		let root = tempfile::tempdir().expect("root");
+		let secret = root.path().join("secret");
+		fs::create_dir_all(secret.join("sub")).expect("secret root");
+		fs::write(secret.join("key"), "omp-secret-marker\n").expect("secret file");
+		let public = root.path().join("public");
+		fs::create_dir_all(public.join("dir")).expect("public dir");
+		fs::write(public.join("sibling"), "physical\n").expect("physical sibling");
+		// What the `..`-collapsed spellings below would name instead.
+		fs::write(root.path().join("key"), "lexical\n").expect("lexical key");
+		fs::write(root.path().join("sibling"), "lexical\n").expect("lexical sibling");
+		symlink(secret.join("sub"), root.path().join("into-secret")).expect("directory link");
+		symlink(secret.join("missing"), root.path().join("dangling")).expect("dangling link");
+		symlink(public.join("dir"), root.path().join("into-public")).expect("public link");
+		let host = ExecHost::new();
+		host.configure_sandbox(&environment_only_read_deny(&secret), root.path());
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(root.path())
+					.expect("root URI")
+					.to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+		for script in [
+			"read -r line < into-secret/../key",
+			"read -r line < dangling/../key",
+			"echo into-secret/../*",
+		] {
+			let (outcome, exit, output, _) = run_failure(&host, script_request(session, script)).await;
+			let output = String::from_utf8_lossy(&output);
+			assert_eq!(outcome, ExecOutcome::Denied as i32, "{script}: {output}");
+			assert_ne!(exit, Some(0), "{script}");
+			assert!(output.contains("sandbox denied read"), "{script}: {output}");
+			assert!(!output.contains("omp-secret-marker"), "{script}: {output}");
+			assert!(!output.contains("lexical"), "{script}: {output}");
+		}
+		// Through a public link the same spelling reads and lists the target's
+		// directory, not the link's.
+		assert_eq!(
+			run_output(
+				&host,
+				script_request(
+					session,
+					"read -r line < into-public/../sibling; printf '%s\\n' \"$line\""
+				)
+			)
+			.await,
+			b"physical\n"
+		);
+		assert_eq!(
+			run_output(&host, script_request(session, "echo into-public/../s*")).await,
+			b"into-public/../sibling\n"
+		);
+		host.close_session(session).expect("session closes");
 	}
 
 	#[tokio::test]
