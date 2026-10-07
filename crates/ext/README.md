@@ -33,11 +33,19 @@ sits below both and can be reasoned about as data in, data out.
   is that answer, live only while the subtree row at exactly `under` is;
   `deny` is a revocation that outranks any covering subtree. A subtree at
   `/`, at the canonical home directory, or at an ancestor of it is refused,
-  and when home cannot be canonicalized every subtree is. `evaluate` is the
-  pure decision (`Trusted`, `PinUnderSubtree`, `DigestChanged`, `Untrusted`;
+  and when home cannot be canonicalized every subtree is. Containment is per
+  path component (`/w` never covers `/w2`). `evaluate` is the pure decision
+  (`Trusted`, `PinUnderSubtree`, `DigestChanged`, `Denied`, `Untrusted`;
   serializable for the journal). It takes the trust key separately from where
   the inputs are hashed, so a host can key an isolated worktree by its
-  primary checkout.
+  primary checkout. An operator's answer (`exact` or `pin`) is recorded by
+  `GrantsFile::persist_workspace_trust` only while `evaluate`, run again
+  under the grant file lock, still returns the decision the operator was
+  asked about; a stale answer is refused, so it never undoes a revoke made
+  after the ask. A pin also needs the live subtree row at exactly `under`
+  and never replaces a deny. Subtrees are granted through
+  `persist_workspace_subtree`; one granted anew drops the dormant pins naming
+  its root, so it asks once per workspace again.
 - `plugin_command`: the approval key (`Hash32` digest of plugin version,
   command, arguments, environment, working directory, a hook's event and
   matcher, and the contents of every plugin-root file the launch names, so a

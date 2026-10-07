@@ -19,7 +19,11 @@
 //!   while that subtree row is.
 //! - [`TrustBinding::Deny`]: a revocation that outranks every covering subtree.
 //!
-//! [`evaluate`] is the single pure decision over a set of rows.
+//! [`evaluate`] is the single pure decision over a set of rows. An operator's
+//! answer is recorded only while [`evaluate`] still returns the decision the
+//! operator was asked about
+//! ([`crate::trust::GrantsFile::persist_workspace_trust`]), so a stale answer
+//! never undoes a concurrent revoke.
 
 use std::{
 	fmt::{self, Display},
@@ -182,8 +186,14 @@ impl<'de> Deserialize<'de> for InputsDigest {
 ///
 /// Serialized inline in the row, tagged by `scope`, so invalid combinations
 /// (a subtree with a digest, an exact row without one) cannot be written.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, EnumDiscriminants, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
+#[strum_discriminants(
+	name(TrustScope),
+	derive(Display, IntoStaticStr),
+	strum(serialize_all = "snake_case"),
+	doc = "The `scope` tag of a [`TrustBinding`], as the grant file spells it."
+)]
 pub enum TrustBinding {
 	/// The workspace itself, while its inputs hash to `inputs_digest`.
 	Exact {
@@ -226,6 +236,12 @@ impl TrustBinding {
 			Self::Subtree => TrustSlot::Subtree,
 			Self::Exact { .. } | Self::Pin { .. } | Self::Deny => TrustSlot::Decision,
 		}
+	}
+
+	/// The binding's `scope` tag.
+	#[inline]
+	pub fn scope(&self) -> TrustScope {
+		self.into()
 	}
 }
 
@@ -344,6 +360,60 @@ impl WorkspaceTrustGrant {
 	pub fn same_slot(&self, other: &Self) -> bool {
 		self.workspace == other.workspace && self.binding.slot() == other.binding.slot()
 	}
+
+	/// Checks this [`TrustBinding::Exact`] or [`TrustBinding::Pin`] row as the
+	/// operator's answer to `answered`, against the durable `rows` read under
+	/// the grant file lock: a compare-and-set on the decision.
+	///
+	/// A pin also needs the live subtree row at exactly `under` covering its
+	/// workspace, and never replaces the workspace's [`TrustBinding::Deny`].
+	pub(crate) fn check_answer(
+		&self,
+		rows: &[Self],
+		answered: &TrustDecision,
+		home: &CanonicalHome,
+	) -> Result<(), WorkspaceTrustRefusal> {
+		let inputs_digest = match &self.binding {
+			TrustBinding::Exact { inputs_digest } => inputs_digest,
+			TrustBinding::Pin { under, inputs_digest } => {
+				if rows
+					.iter()
+					.any(|row| row.workspace == self.workspace && row.binding == TrustBinding::Deny)
+				{
+					return Err(WorkspaceTrustRefusal::Denied { workspace: self.workspace.clone() });
+				}
+				if !self.workspace.starts_with(under) || !live_subtree_at(rows, under, home) {
+					return Err(WorkspaceTrustRefusal::NoLiveSubtree {
+						workspace: self.workspace.clone(),
+						under:     under.clone(),
+					});
+				}
+				inputs_digest
+			},
+			TrustBinding::Subtree | TrustBinding::Deny => {
+				return Err(WorkspaceTrustRefusal::Scope { scope: self.binding.scope() });
+			},
+		};
+		let current = evaluate(rows, &self.workspace, inputs_digest, home);
+		if current == *answered {
+			Ok(())
+		} else {
+			Err(WorkspaceTrustRefusal::Stale { workspace: self.workspace.clone(), current })
+		}
+	}
+}
+
+/// Whether `rows` hold a [`TrustBinding::Subtree`] row rooted at exactly
+/// `root` that `home` admits.
+fn live_subtree_at<'g>(
+	rows: impl IntoIterator<Item = &'g WorkspaceTrustGrant>,
+	root: &Path,
+	home: &CanonicalHome,
+) -> bool {
+	!home.subtree_too_broad(root)
+		&& rows
+			.into_iter()
+			.any(|row| row.binding == TrustBinding::Subtree && row.workspace == root)
 }
 
 fn canonical(path: &Path) -> Result<PathBuf, WorkspaceTrustError> {
@@ -437,8 +507,11 @@ pub enum TrustDecision {
 		/// Digest of the current inputs.
 		current: InputsDigest,
 	},
-	/// No live row trusts the workspace, or a [`TrustBinding::Deny`] row
-	/// revokes it.
+	/// A [`TrustBinding::Deny`] row revokes the workspace, whatever covers
+	/// it. No subtree asks about it again; only an explicit
+	/// [`TrustBinding::Exact`] grant answering this decision trusts it.
+	Denied,
+	/// No live row trusts the workspace or asks about it.
 	Untrusted,
 }
 
@@ -448,9 +521,10 @@ impl TrustDecision {
 	pub const fn trust(&self) -> WorkspaceTrust {
 		match self {
 			Self::Trusted { .. } => WorkspaceTrust::Trusted,
-			Self::PinUnderSubtree { .. } | Self::DigestChanged { .. } | Self::Untrusted => {
-				WorkspaceTrust::Untrusted
-			},
+			Self::PinUnderSubtree { .. }
+			| Self::DigestChanged { .. }
+			| Self::Denied
+			| Self::Untrusted => WorkspaceTrust::Untrusted,
 		}
 	}
 
@@ -467,7 +541,7 @@ impl TrustDecision {
 /// Rules, most specific first:
 ///
 /// 1. A [`TrustBinding::Deny`] row at `trust_key` makes it
-///    [`TrustDecision::Untrusted`], whatever else covers it.
+///    [`TrustDecision::Denied`], whatever else covers it.
 /// 2. An [`TrustBinding::Exact`] row at `trust_key`, or a [`TrustBinding::Pin`]
 ///    row whose subtree row at exactly `under` is live, decides:
 ///    [`TrustDecision::Trusted`] when one carries `current`, else
@@ -478,8 +552,9 @@ impl TrustDecision {
 ///
 /// A subtree row is live only while `home` admits its root
 /// ([`CanonicalHome::subtree_too_broad`]), so a hand-edited row at `/` or
-/// home trusts nothing. `rows` may chain durable and session rows; it is
-/// walked more than once, hence the `Clone` bound.
+/// home trusts nothing. Containment is per path component: a subtree at
+/// `/w` covers `/w/x`, never `/w2`. `rows` may chain durable and session
+/// rows; it is walked more than once, hence the `Clone` bound.
 pub fn evaluate<'g, I>(
 	rows: I,
 	trust_key: &Path,
@@ -491,20 +566,14 @@ where
 	I::IntoIter: Clone,
 {
 	let rows = rows.into_iter();
-	let live_subtree_at = |root: &Path| {
-		!home.subtree_too_broad(root)
-			&& rows
-				.clone()
-				.any(|row| row.binding == TrustBinding::Subtree && row.workspace == root)
-	};
 	let mut trusted: Option<GrantDuration> = None;
 	let mut granted: Option<InputsDigest> = None;
 	for row in rows.clone().filter(|row| row.workspace == trust_key) {
 		let digest = match &row.binding {
-			TrustBinding::Deny => return TrustDecision::Untrusted,
+			TrustBinding::Deny => return TrustDecision::Denied,
 			TrustBinding::Exact { inputs_digest } => inputs_digest,
 			TrustBinding::Pin { under, inputs_digest }
-				if trust_key.starts_with(under) && live_subtree_at(under) =>
+				if trust_key.starts_with(under) && live_subtree_at(rows.clone(), under, home) =>
 			{
 				inputs_digest
 			},
@@ -564,6 +633,50 @@ pub enum WorkspaceTrustError {
 		workspace: PathBuf,
 		/// The canonical subtree root.
 		under:     PathBuf,
+	},
+}
+
+/// Why a workspace trust writer recorded nothing; the grant file is
+/// unchanged.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum WorkspaceTrustRefusal {
+	/// The writer does not record rows of this scope.
+	#[error("a `{scope}` workspace trust row cannot be recorded by this writer")]
+	Scope {
+		/// The refused row's scope.
+		scope: TrustScope,
+	},
+	/// The rows changed after the operator was asked, so the answer is stale:
+	/// ask again about `current`.
+	#[error(
+		"workspace trust for {} changed after the operator was asked: it is now `{}`",
+		workspace.display(),
+		current.kind()
+	)]
+	Stale {
+		/// The canonical workspace.
+		workspace: PathBuf,
+		/// The decision under the grant file lock.
+		current:   TrustDecision,
+	},
+	/// A pin names no live subtree row rooted at exactly `under` that covers
+	/// its workspace.
+	#[error(
+		"no live subtree trust rooted at {} covers workspace {}",
+		under.display(),
+		workspace.display()
+	)]
+	NoLiveSubtree {
+		/// The canonical workspace.
+		workspace: PathBuf,
+		/// The subtree root the pin names.
+		under:     PathBuf,
+	},
+	/// A pin never replaces the workspace's [`TrustBinding::Deny`] row.
+	#[error("workspace {} is revoked: only an exact grant trusts it again", workspace.display())]
+	Denied {
+		/// The canonical workspace.
+		workspace: PathBuf,
 	},
 }
 
@@ -657,6 +770,7 @@ mod tests {
 		);
 		assert_eq!(decision.kind(), TrustDecisionKind::DigestChanged);
 		assert_eq!(<&str>::from(TrustDecisionKind::PinUnderSubtree), "pin_under_subtree");
+		assert_eq!(TrustDecision::Denied.kind().to_string(), "denied");
 		assert_eq!("untrusted".parse::<TrustDecisionKind>(), Ok(TrustDecisionKind::Untrusted));
 		assert_eq!(
 			serde_json::to_value(TrustDecisionKind::Trusted).expect("serialize kind"),
@@ -748,7 +862,9 @@ mod tests {
 			exact(&tree.repo, "a"),
 			row(&tree.repo, TrustBinding::Deny),
 		];
-		assert_eq!(evaluate(&rows, &tree.repo, &digest("a"), &home), TrustDecision::Untrusted);
+		let denied = evaluate(&rows, &tree.repo, &digest("a"), &home);
+		assert_eq!(denied, TrustDecision::Denied);
+		assert_eq!(denied.trust(), WorkspaceTrust::Untrusted);
 		// The deny is exact: a sibling under the subtree still asks.
 		let sibling = team.join("sibling");
 		assert!(matches!(
@@ -890,5 +1006,150 @@ mod tests {
 		assert_eq!(evaluate([&session], &tree.repo, &digest("a"), &home), TrustDecision::Trusted {
 			duration: GrantDuration::Session,
 		});
+	}
+
+	#[test]
+	fn subtree_and_pin_containment_is_per_path_component() {
+		let tree = tree();
+		let home = resolved(&tree);
+		let team = tree.home.join("src/team");
+		let team2 = tree.home.join("src/team2");
+		let sibling = team2.join("repo");
+		fs::create_dir_all(&sibling).expect("sibling repository");
+		assert!(
+			team2
+				.as_os_str()
+				.as_encoded_bytes()
+				.starts_with(team.as_os_str().as_encoded_bytes()),
+			"`team` is a string prefix of `team2`"
+		);
+		let subtree = row(&team, TrustBinding::Subtree);
+		for workspace in [&team2, &sibling] {
+			assert_eq!(
+				evaluate([&subtree], workspace, &digest("a"), &home),
+				TrustDecision::Untrusted,
+				"{}",
+				workspace.display()
+			);
+		}
+		// A pin under `team` is dead for a workspace under `team2`, even beside
+		// the live `team` subtree, and only a subtree at `team2` asks about it.
+		let rows = [subtree.clone(), pin(&sibling, &team, "a")];
+		assert_eq!(evaluate(&rows, &sibling, &digest("a"), &home), TrustDecision::Untrusted);
+		let rows = [subtree, row(&team2, TrustBinding::Subtree), pin(&sibling, &team, "a")];
+		assert_eq!(evaluate(&rows, &sibling, &digest("a"), &home), TrustDecision::PinUnderSubtree {
+			root:     team2,
+			duration: GrantDuration::Persistent,
+		});
+		assert!(matches!(
+			WorkspaceTrustGrant::pin(
+				&sibling,
+				digest("a"),
+				&team,
+				TrustChannel::Interactive,
+				GrantDuration::Persistent,
+			),
+			Err(WorkspaceTrustError::NotUnderSubtree { .. })
+		));
+		// The answer check refuses such a pin as well.
+		let asked = TrustDecision::PinUnderSubtree {
+			root:     team.clone(),
+			duration: GrantDuration::Persistent,
+		};
+		assert_eq!(
+			pin(&sibling, &team, "a").check_answer(&rows, &asked, &home),
+			Err(WorkspaceTrustRefusal::NoLiveSubtree { workspace: sibling, under: team })
+		);
+	}
+
+	#[test]
+	fn an_answer_is_checked_against_the_decision_it_answered() {
+		let tree = tree();
+		let home = resolved(&tree);
+		let team = tree.home.join("src/team");
+		let subtree = row(&team, TrustBinding::Subtree);
+		let deny = row(&tree.repo, TrustBinding::Deny);
+		let asked = TrustDecision::PinUnderSubtree {
+			root:     team.clone(),
+			duration: GrantDuration::Persistent,
+		};
+		let answer = pin(&tree.repo, &team, "a");
+		assert_eq!(answer.check_answer(std::slice::from_ref(&subtree), &asked, &home), Ok(()));
+		// A revoke recorded a deny after the ask: the pin never replaces it.
+		assert_eq!(
+			answer.check_answer(&[subtree.clone(), deny.clone()], &asked, &home),
+			Err(WorkspaceTrustRefusal::Denied { workspace: tree.repo.clone() })
+		);
+		// The subtree was revoked after the ask: the pin would lie dormant until
+		// the subtree is granted again.
+		assert_eq!(
+			answer.check_answer(&[], &asked, &home),
+			Err(WorkspaceTrustRefusal::NoLiveSubtree {
+				workspace: tree.repo.clone(),
+				under:     team.clone(),
+			})
+		);
+		// A more specific subtree granted after the ask makes it stale.
+		let nested = row(&team.join("repo"), TrustBinding::Subtree);
+		let rows = [subtree.clone(), nested];
+		assert_eq!(
+			answer.check_answer(&rows, &asked, &home),
+			Err(WorkspaceTrustRefusal::Stale {
+				workspace: tree.repo.clone(),
+				current:   TrustDecision::PinUnderSubtree {
+					root:     tree.repo.clone(),
+					duration: GrantDuration::Persistent,
+				},
+			})
+		);
+
+		let reapproved = exact(&tree.repo, "b");
+		let asked = TrustDecision::DigestChanged { granted: digest("a"), current: digest("b") };
+		assert_eq!(reapproved.check_answer(&[exact(&tree.repo, "a")], &asked, &home), Ok(()));
+		// A revoke after the ask under a covering subtree (a deny), and without
+		// one (the exact row is gone).
+		let revoked = [subtree.clone(), deny.clone()];
+		assert_eq!(
+			reapproved.check_answer(&revoked, &asked, &home),
+			Err(WorkspaceTrustRefusal::Stale {
+				workspace: tree.repo,
+				current:   TrustDecision::Denied,
+			})
+		);
+		assert!(matches!(
+			reapproved.check_answer(&[], &asked, &home),
+			Err(WorkspaceTrustRefusal::Stale { current: TrustDecision::Untrusted, .. })
+		));
+		// An ask that saw no row is stale once a deny is recorded, but an
+		// explicit grant answering the deny itself re-trusts the workspace.
+		assert!(matches!(
+			reapproved.check_answer(&revoked, &TrustDecision::Untrusted, &home),
+			Err(WorkspaceTrustRefusal::Stale { current: TrustDecision::Denied, .. })
+		));
+		assert_eq!(reapproved.check_answer(&revoked, &TrustDecision::Denied, &home), Ok(()));
+
+		// Subtree and deny rows are not answers.
+		for refused in [subtree, deny] {
+			assert_eq!(
+				refused.check_answer(&[], &TrustDecision::Untrusted, &home),
+				Err(WorkspaceTrustRefusal::Scope { scope: refused.binding.scope() })
+			);
+		}
+	}
+
+	#[test]
+	fn scopes_name_the_serialized_scope_tag() {
+		let under = PathBuf::from("/w");
+		for (binding, scope) in [
+			(TrustBinding::Exact { inputs_digest: digest("a") }, "exact"),
+			(TrustBinding::Subtree, "subtree"),
+			(TrustBinding::Pin { under, inputs_digest: digest("a") }, "pin"),
+			(TrustBinding::Deny, "deny"),
+		] {
+			assert_eq!(<&str>::from(binding.scope()), scope);
+			let json =
+				serde_json::to_value(row(Path::new("/w/repo"), binding)).expect("serialize row");
+			assert_eq!(json["scope"], scope);
+		}
 	}
 }

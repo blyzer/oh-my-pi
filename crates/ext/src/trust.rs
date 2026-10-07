@@ -25,7 +25,10 @@ use super::{
 		CommandApprovals, PluginId, PluginLaunch, PluginLaunchKind, plugin_command_digest,
 	},
 	resolver::version_satisfies,
-	workspace_trust::{TrustBinding, TrustChannel, TrustSlot, WorkspaceTrustGrant},
+	workspace_trust::{
+		CanonicalHome, TrustBinding, TrustChannel, TrustDecision, TrustSlot, WorkspaceTrustGrant,
+		WorkspaceTrustRefusal,
+	},
 };
 
 /// The local grant file under an omp data directory:
@@ -562,28 +565,85 @@ impl GrantsFile {
 		}
 	}
 
-	/// Atomically records one operator decision about a workspace, replacing
-	/// the row in the same slot ([`WorkspaceTrustGrant::same_slot`]): a
-	/// workspace holds one decision (exact, pin, or deny) and one subtree
-	/// root.
+	/// Atomically records the operator's trust in one workspace, an
+	/// [`TrustBinding::Exact`] or [`TrustBinding::Pin`] row answering
+	/// `answered`, and returns the written state. The row replaces the
+	/// workspace's decision ([`WorkspaceTrustGrant::same_slot`]).
+	///
+	/// `answered` is what [`evaluate`](crate::workspace_trust::evaluate)
+	/// returned over the durable rows when the operator was asked. Under the
+	/// lock the rows are evaluated again, and the answer is refused unless the
+	/// decision is still `answered` ([`WorkspaceTrustRefusal::Stale`]): a
+	/// revoke or subtree change made after the ask is never undone by it. A
+	/// pin is also refused unless the subtree row at exactly `under` is live
+	/// and covers the workspace ([`WorkspaceTrustRefusal::NoLiveSubtree`]), and
+	/// never replaces a deny ([`WorkspaceTrustRefusal::Denied`]).
 	///
 	/// # Errors
 	///
 	/// [`GrantPersistenceError::SessionOnly`] for a row that is not
-	/// persistent; otherwise as [`Self::update`].
+	/// persistent; otherwise as [`Self::update`]. A refusal leaves the file
+	/// untouched and is the inner `Err`.
 	pub fn persist_workspace_trust(
 		path: &Path,
 		grant: WorkspaceTrustGrant,
-	) -> Result<Self, GrantPersistenceError> {
+		answered: &TrustDecision,
+		home: &CanonicalHome,
+	) -> Result<Result<Self, WorkspaceTrustRefusal>, GrantPersistenceError> {
 		if grant.duration != GrantDuration::Persistent {
 			return Err(GrantPersistenceError::SessionOnly);
 		}
-		Self::persisted(path, |grants| {
+		if !matches!(grant.binding, TrustBinding::Exact { .. } | TrustBinding::Pin { .. }) {
+			return Ok(Err(WorkspaceTrustRefusal::Scope { scope: grant.binding.scope() }));
+		}
+		let written = Self::locked(path, GRANTS_LOCK_WAIT, |grants| {
+			grant.check_answer(&grants.workspace_trust, answered, home)?;
 			grants
 				.workspace_trust
 				.retain(|existing| !existing.same_slot(&grant));
 			grants.workspace_trust.push(grant);
+			Ok(())
+		})?;
+		Ok(written.map(|(grants, ())| grants))
+	}
+
+	/// Atomically records an explicit operator grant over the subtree rooted
+	/// at `grant`'s workspace, replacing the subtree row at that root, and
+	/// returns the written state.
+	///
+	/// A subtree granted anew, with no row at its root yet, drops every pin
+	/// naming that root: such pins outlived an earlier grant, and the new one
+	/// asks once per workspace ([`TrustDecision::PinUnderSubtree`]) instead of
+	/// reviving them.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError::SessionOnly`] for a row that is not
+	/// persistent; otherwise as [`Self::update`]. A row that is not a
+	/// [`TrustBinding::Subtree`] is refused
+	/// ([`WorkspaceTrustRefusal::Scope`]) without touching the file.
+	pub fn persist_workspace_subtree(
+		path: &Path,
+		grant: WorkspaceTrustGrant,
+	) -> Result<Result<Self, WorkspaceTrustRefusal>, GrantPersistenceError> {
+		if grant.duration != GrantDuration::Persistent {
+			return Err(GrantPersistenceError::SessionOnly);
+		}
+		if grant.binding != TrustBinding::Subtree {
+			return Ok(Err(WorkspaceTrustRefusal::Scope { scope: grant.binding.scope() }));
+		}
+		Self::persisted(path, |grants| {
+			let rows = &mut grants.workspace_trust;
+			let anew = !rows.iter().any(|existing| existing.same_slot(&grant));
+			rows.retain(|existing| match &existing.binding {
+				TrustBinding::Pin { under, .. } => !anew || *under != grant.workspace,
+				TrustBinding::Exact { .. } | TrustBinding::Subtree | TrustBinding::Deny => {
+					!existing.same_slot(&grant)
+				},
+			});
+			rows.push(grant);
 		})
+		.map(Ok)
 	}
 
 	/// Atomically revokes the operator's trust in `workspace` (as recorded:
@@ -592,9 +652,13 @@ impl GrantsFile {
 	/// - [`GrantScope::Exact`] removes the workspace's exact or pinned row. When
 	///   a subtree row covers the workspace, a [`TrustBinding::Deny`] row
 	///   recorded through `revoked_by` takes its place, so the subtree neither
-	///   trusts nor asks about it again.
+	///   trusts nor asks about it again ([`TrustDecision::Denied`]).
 	/// - [`GrantScope::Subtree`] removes the subtree row rooted at `workspace`
 	///   and every pin it admitted.
+	///
+	/// A revoke is unconditional, and an answer recorded after it through
+	/// [`Self::persist_workspace_trust`] to an ask made before it is refused
+	/// as stale.
 	///
 	/// # Errors
 	///
@@ -1083,7 +1147,7 @@ fn read_toml_or_default<T: for<'de> Deserialize<'de> + Default>(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::workspace_trust::{CanonicalHome, InputsDigest, TrustDecision, evaluate};
+	use crate::workspace_trust::{InputsDigest, TrustScope, WorkspaceTrust, evaluate};
 
 	#[test]
 	fn stale_revocation_fails_open_unless_strict() {
@@ -1448,6 +1512,105 @@ mod tests {
 		assert_eq!(fs::read(&second).expect("rewritten plain grants"), text.as_bytes());
 	}
 
+	/// Records `workspace`'s exact trust as the answer to an ask about a
+	/// workspace that holds no row yet.
+	fn persist_exact(path: &Path, workspace: &Path, seed: &str) -> GrantsFile {
+		GrantsFile::persist_workspace_trust(
+			path,
+			exact_trust(workspace, seed),
+			&TrustDecision::Untrusted,
+			&CanonicalHome::Unresolved,
+		)
+		.expect("lock and read")
+		.expect("an answer to an untrusted workspace")
+	}
+
+	/// A grant file beside a canonical home holding `src/team/repo`.
+	struct TrustTree {
+		_directory: tempfile::TempDir,
+		path:       PathBuf,
+		home:       CanonicalHome,
+		team:       PathBuf,
+		repo:       PathBuf,
+	}
+
+	fn trust_tree() -> TrustTree {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		let home = directory.path().join("home");
+		let repo = home.join("src/team/repo");
+		fs::create_dir_all(&repo).expect("repository");
+		let home = CanonicalHome::resolve(Some(&home));
+		let repo = fs::canonicalize(repo).expect("canonical repository");
+		let team = repo.parent().expect("subtree root").to_path_buf();
+		TrustTree { _directory: directory, path, home, team, repo }
+	}
+
+	impl TrustTree {
+		/// Grants the `team` subtree.
+		fn grant_subtree(&self) {
+			let subtree = WorkspaceTrustGrant::subtree(
+				&self.team,
+				&self.home,
+				TrustChannel::Cli,
+				GrantDuration::Persistent,
+			)
+			.expect("subtree");
+			GrantsFile::persist_workspace_subtree(&self.path, subtree)
+				.expect("lock and read")
+				.expect("a subtree row");
+		}
+
+		/// The repository's pin under `team`.
+		fn pin(&self, seed: &str) -> WorkspaceTrustGrant {
+			WorkspaceTrustGrant::pin(
+				&self.repo,
+				inputs(seed),
+				&self.team,
+				TrustChannel::Interactive,
+				GrantDuration::Persistent,
+			)
+			.expect("pin")
+		}
+
+		/// The ask the `team` subtree makes about the repository.
+		fn asked(&self) -> TrustDecision {
+			TrustDecision::PinUnderSubtree {
+				root:     self.team.clone(),
+				duration: GrantDuration::Persistent,
+			}
+		}
+
+		/// Records `grant` as the operator's answer to `answered`.
+		fn answer(
+			&self,
+			grant: WorkspaceTrustGrant,
+			answered: &TrustDecision,
+		) -> Result<GrantsFile, WorkspaceTrustRefusal> {
+			GrantsFile::persist_workspace_trust(&self.path, grant, answered, &self.home)
+				.expect("lock and read")
+		}
+
+		/// The repository's decision over the durable rows.
+		fn decide(&self, seed: &str) -> TrustDecision {
+			evaluate(
+				&GrantsFile::read(&self.path).expect("read").workspace_trust,
+				&self.repo,
+				&inputs(seed),
+				&self.home,
+			)
+		}
+
+		fn revoke(&self, workspace: &Path, scope: GrantScope) -> usize {
+			GrantsFile::revoke_workspace_trust(&self.path, workspace, scope, TrustChannel::Cli)
+				.expect("revoke")
+		}
+
+		fn bytes(&self) -> Vec<u8> {
+			fs::read(&self.path).expect("grants")
+		}
+	}
+
 	#[test]
 	fn malformed_grant_file_is_a_typed_error() {
 		let directory = tempfile::tempdir().expect("grant directory");
@@ -1458,7 +1621,12 @@ mod tests {
 		assert!(matches!(&error, GrantsFileError::Toml { path: failed, .. } if *failed == path));
 		assert_eq!(error.code(), ExtensionCode::EIntegrity);
 		assert!(matches!(
-			GrantsFile::persist_workspace_trust(&path, exact_trust(Path::new("/w"), "w")),
+			GrantsFile::persist_workspace_trust(
+				&path,
+				exact_trust(Path::new("/w"), "w"),
+				&TrustDecision::Untrusted,
+				&CanonicalHome::Unresolved,
+			),
 			Err(GrantPersistenceError::Read(GrantsFileError::Toml { .. }))
 		));
 		assert_eq!(fs::read_to_string(&path).expect("untouched grants"), "workspace_trust = 3");
@@ -1485,7 +1653,20 @@ mod tests {
 				.is_empty()
 		);
 		assert!(matches!(
-			GrantsFile::persist_workspace_trust(&path, session),
+			GrantsFile::persist_workspace_trust(
+				&path,
+				session,
+				&TrustDecision::Untrusted,
+				&CanonicalHome::Unresolved,
+			),
+			Err(GrantPersistenceError::SessionOnly)
+		));
+		let subtree = WorkspaceTrustGrant {
+			duration: GrantDuration::Session,
+			..trust_row(Path::new("/w"), TrustBinding::Subtree)
+		};
+		assert!(matches!(
+			GrantsFile::persist_workspace_subtree(&path, subtree),
 			Err(GrantPersistenceError::SessionOnly)
 		));
 	}
@@ -1494,77 +1675,84 @@ mod tests {
 	fn persisted_workspace_trust_replaces_the_rows_slot() {
 		let directory = tempfile::tempdir().expect("grant directory");
 		let path = grants_path(directory.path());
+		let home = CanonicalHome::Unresolved;
 		let repo = Path::new("/work/repo");
-		GrantsFile::persist_workspace_trust(&path, exact_trust(repo, "old")).expect("trust");
-		GrantsFile::persist_workspace_trust(&path, trust_row(repo, TrustBinding::Subtree))
+		let subtree = trust_row(repo, TrustBinding::Subtree);
+		persist_exact(&path, repo, "old");
+		GrantsFile::persist_workspace_subtree(&path, subtree.clone())
+			.expect("lock and read")
 			.expect("subtree at the same root");
-		GrantsFile::persist_workspace_trust(&path, exact_trust(repo, "new")).expect("retrust");
+		let changed = TrustDecision::DigestChanged { granted: inputs("old"), current: inputs("new") };
+		GrantsFile::persist_workspace_trust(&path, exact_trust(repo, "new"), &changed, &home)
+			.expect("lock and read")
+			.expect("retrust");
 		assert_eq!(GrantsFile::read(&path).expect("read").workspace_trust, [
-			trust_row(repo, TrustBinding::Subtree),
+			subtree.clone(),
 			exact_trust(repo, "new"),
 		]);
-		// A deny replaces the decision, and trusting again replaces the deny.
-		GrantsFile::persist_workspace_trust(&path, trust_row(repo, TrustBinding::Deny))
-			.expect("deny");
-		assert_eq!(GrantsFile::read(&path).expect("read").workspace_trust, [
-			trust_row(repo, TrustBinding::Subtree),
-			trust_row(repo, TrustBinding::Deny),
-		]);
-		let persisted =
-			GrantsFile::persist_workspace_trust(&path, exact_trust(repo, "new")).expect("retrust");
-		assert_eq!(persisted.workspace_trust, [
-			trust_row(repo, TrustBinding::Subtree),
+		// A revoke under the subtree puts a deny in the decision slot, and an
+		// exact grant answering the deny replaces it.
+		assert_eq!(
+			GrantsFile::revoke_workspace_trust(&path, repo, GrantScope::Exact, TrustChannel::Cli)
+				.expect("revoke"),
+			1
+		);
+		let rows = GrantsFile::read(&path).expect("read").workspace_trust;
+		assert_eq!(
+			rows
+				.iter()
+				.map(|row| (row.workspace.as_path(), row.binding.scope()))
+				.collect::<Vec<_>>(),
+			[(repo, TrustScope::Subtree), (repo, TrustScope::Deny)]
+		);
+		let persisted = GrantsFile::persist_workspace_trust(
+			&path,
 			exact_trust(repo, "new"),
-		]);
+			&TrustDecision::Denied,
+			&home,
+		)
+		.expect("lock and read")
+		.expect("retrust the revoked workspace");
+		assert_eq!(persisted.workspace_trust, [subtree.clone(), exact_trust(repo, "new")]);
+
+		// Each writer refuses the other's rows without touching the file.
+		let before = fs::read(&path).expect("grants");
+		for refused in [subtree, trust_row(repo, TrustBinding::Deny)] {
+			let scope = refused.binding.scope();
+			assert_eq!(
+				GrantsFile::persist_workspace_trust(&path, refused, &TrustDecision::Untrusted, &home)
+					.expect("no lock taken"),
+				Err(WorkspaceTrustRefusal::Scope { scope })
+			);
+		}
+		assert_eq!(
+			GrantsFile::persist_workspace_subtree(&path, exact_trust(repo, "other"))
+				.expect("no lock taken"),
+			Err(WorkspaceTrustRefusal::Scope { scope: TrustScope::Exact })
+		);
+		assert_eq!(fs::read(&path).expect("grants"), before);
 	}
 
 	#[test]
 	fn revoke_under_a_live_subtree_stays_untrusted() {
-		let directory = tempfile::tempdir().expect("grant directory");
-		let path = grants_path(directory.path());
-		let home = directory.path().join("home");
-		let team = home.join("src/team");
-		let repo = team.join("repo");
-		fs::create_dir_all(&repo).expect("repository");
-		let home = CanonicalHome::resolve(Some(&home));
-		let team = fs::canonicalize(team).expect("canonical subtree");
-		let repo = fs::canonicalize(repo).expect("canonical repository");
-		let subtree =
-			WorkspaceTrustGrant::subtree(&team, &home, TrustChannel::Cli, GrantDuration::Persistent)
-				.expect("subtree");
-		let pin = WorkspaceTrustGrant::pin(
-			&repo,
-			inputs("repo"),
-			&team,
-			TrustChannel::Interactive,
-			GrantDuration::Persistent,
-		)
-		.expect("pin");
-		GrantsFile::persist_workspace_trust(&path, subtree).expect("persist subtree");
-		GrantsFile::persist_workspace_trust(&path, pin).expect("persist pin");
-		let decide = || {
-			evaluate(
-				&GrantsFile::read(&path).expect("read").workspace_trust,
-				&repo,
-				&inputs("repo"),
-				&home,
-			)
-		};
-		assert_eq!(decide(), TrustDecision::Trusted { duration: GrantDuration::Persistent });
+		let tree = trust_tree();
+		tree.grant_subtree();
+		assert_eq!(tree.decide("repo"), tree.asked());
+		tree
+			.answer(tree.pin("repo"), &tree.asked())
+			.expect("a pin answering the ask");
+		assert_eq!(tree.decide("repo"), TrustDecision::Trusted {
+			duration: GrantDuration::Persistent,
+		});
 
-		let removed =
-			GrantsFile::revoke_workspace_trust(&path, &repo, GrantScope::Exact, TrustChannel::Cli)
-				.expect("revoke");
-		assert_eq!(removed, 1);
-		assert_eq!(decide(), TrustDecision::Untrusted, "the subtree neither trusts nor asks");
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 1);
+		let decision = tree.decide("repo");
+		assert_eq!(decision, TrustDecision::Denied, "the subtree neither trusts nor asks");
+		assert_eq!(decision.trust(), WorkspaceTrust::Untrusted);
 		// Revoking again changes nothing.
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 0);
 		assert_eq!(
-			GrantsFile::revoke_workspace_trust(&path, &repo, GrantScope::Exact, TrustChannel::Cli)
-				.expect("revoke again"),
-			0
-		);
-		assert_eq!(
-			GrantsFile::read(&path)
+			GrantsFile::read(&tree.path)
 				.expect("read")
 				.workspace_trust
 				.iter()
@@ -1575,22 +1763,117 @@ mod tests {
 	}
 
 	#[test]
+	fn a_stale_answer_never_undoes_a_concurrent_revoke() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		// A host asks about the repository under the subtree, and another
+		// process revokes it before the operator answers.
+		let asked = tree.decide("repo");
+		assert_eq!(asked, tree.asked());
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 0);
+		let before = tree.bytes();
+		assert_eq!(
+			tree.answer(tree.pin("repo"), &asked),
+			Err(WorkspaceTrustRefusal::Denied { workspace: tree.repo.clone() })
+		);
+		assert_eq!(
+			tree.answer(exact_trust(&tree.repo, "repo"), &asked),
+			Err(WorkspaceTrustRefusal::Stale {
+				workspace: tree.repo.clone(),
+				current:   TrustDecision::Denied,
+			})
+		);
+		assert_eq!(tree.bytes(), before, "a refused answer writes nothing");
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
+
+		// The same for a digest re-ask: the pinned inputs changed, and the
+		// revoke lands while the operator is asked about the new ones.
+		let tree = trust_tree();
+		tree.grant_subtree();
+		tree.answer(tree.pin("old"), &tree.asked()).expect("pin");
+		let asked = tree.decide("new");
+		assert_eq!(asked, TrustDecision::DigestChanged {
+			granted: inputs("old"),
+			current: inputs("new"),
+		});
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 1);
+		let before = tree.bytes();
+		assert_eq!(
+			tree.answer(tree.pin("new"), &asked),
+			Err(WorkspaceTrustRefusal::Denied { workspace: tree.repo.clone() })
+		);
+		assert_eq!(
+			tree.answer(exact_trust(&tree.repo, "new"), &asked),
+			Err(WorkspaceTrustRefusal::Stale {
+				workspace: tree.repo.clone(),
+				current:   TrustDecision::Denied,
+			})
+		);
+		assert_eq!(tree.bytes(), before, "a refused answer writes nothing");
+		assert_eq!(tree.decide("new"), TrustDecision::Denied);
+		// Only an exact grant answering the deny itself trusts it again.
+		tree
+			.answer(exact_trust(&tree.repo, "new"), &TrustDecision::Denied)
+			.expect("explicit re-trust");
+		assert_eq!(tree.decide("new"), TrustDecision::Trusted {
+			duration: GrantDuration::Persistent,
+		});
+	}
+
+	#[test]
+	fn a_pin_answered_after_its_subtree_was_revoked_never_revives() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		let asked = tree.decide("repo");
+		assert_eq!(tree.revoke(&tree.team, GrantScope::Subtree), 1);
+		let before = tree.bytes();
+		assert_eq!(
+			tree.answer(tree.pin("repo"), &asked),
+			Err(WorkspaceTrustRefusal::NoLiveSubtree {
+				workspace: tree.repo.clone(),
+				under:     tree.team.clone(),
+			})
+		);
+		assert_eq!(tree.bytes(), before, "a refused answer writes nothing");
+		assert_eq!(tree.decide("repo"), TrustDecision::Untrusted);
+		// Granting the subtree again asks about the repository again.
+		tree.grant_subtree();
+		assert_eq!(tree.decide("repo"), tree.asked());
+
+		// A dormant pin (a hand edit) is dropped when its subtree is granted
+		// anew, and a refreshed grant keeps the pins it admitted.
+		let tree = trust_tree();
+		GrantsFile::update(&tree.path, |grants| grants.workspace_trust.push(tree.pin("repo")))
+			.expect("hand-edited pin");
+		assert_eq!(tree.decide("repo"), TrustDecision::Untrusted);
+		tree.grant_subtree();
+		assert_eq!(tree.decide("repo"), tree.asked(), "the new grant asks");
+		tree.answer(tree.pin("repo"), &tree.asked()).expect("pin");
+		tree.grant_subtree();
+		assert_eq!(
+			tree.decide("repo"),
+			TrustDecision::Trusted { duration: GrantDuration::Persistent },
+			"a refreshed subtree keeps its pins"
+		);
+	}
+
+	#[test]
 	fn revoking_a_workspace_without_a_subtree_records_no_deny() {
 		let directory = tempfile::tempdir().expect("grant directory");
 		let path = grants_path(directory.path());
 		let repo = Path::new("/work/repo");
-		GrantsFile::persist_workspace_trust(&path, exact_trust(repo, "repo")).expect("trust");
+		persist_exact(&path, repo, "repo");
+		// `/work/re` is a string prefix of the workspace, not an ancestor.
+		let prefix = trust_row(Path::new("/work/re"), TrustBinding::Subtree);
+		GrantsFile::persist_workspace_subtree(&path, prefix.clone())
+			.expect("lock and read")
+			.expect("subtree row");
 		assert_eq!(
 			GrantsFile::revoke_workspace_trust(&path, repo, GrantScope::Exact, TrustChannel::Cli)
 				.expect("revoke"),
 			1
 		);
-		assert!(
-			GrantsFile::read(&path)
-				.expect("read")
-				.workspace_trust
-				.is_empty()
-		);
+		assert_eq!(GrantsFile::read(&path).expect("read").workspace_trust, [prefix]);
 	}
 
 	#[test]
@@ -1605,16 +1888,15 @@ mod tests {
 				inputs_digest: inputs("pin"),
 			})
 		};
-		for row in [
+		let rows = [
 			trust_row(team, TrustBinding::Subtree),
 			trust_row(other, TrustBinding::Subtree),
 			pin(&team.join("a"), team),
 			pin(&other.join("b"), other),
 			exact_trust(&team.join("c"), "c"),
 			trust_row(&team.join("d"), TrustBinding::Deny),
-		] {
-			GrantsFile::persist_workspace_trust(&path, row).expect("persist");
-		}
+		];
+		GrantsFile::update(&path, |grants| grants.workspace_trust.extend(rows)).expect("seed rows");
 		assert_eq!(
 			GrantsFile::revoke_workspace_trust(&path, team, GrantScope::Subtree, TrustChannel::Cli)
 				.expect("revoke subtree"),
@@ -1637,7 +1919,7 @@ mod tests {
 		let directory = tempfile::tempdir().expect("grant directory");
 		let path = Arc::new(grants_path(directory.path()));
 		let target = Path::new("/work/target");
-		GrantsFile::persist_workspace_trust(&path, exact_trust(target, "target")).expect("trust");
+		persist_exact(&path, target, "target");
 		let start = Arc::new(Barrier::new(WRITERS + 1));
 		let writers = (0..WRITERS)
 			.map(|writer| {
@@ -1647,8 +1929,7 @@ mod tests {
 					start.wait();
 					for round in 0..ROUNDS {
 						let workspace = PathBuf::from(format!("/work/writer-{writer}/{round}"));
-						GrantsFile::persist_workspace_trust(&path, exact_trust(&workspace, "w"))
-							.expect("concurrent persist");
+						persist_exact(&path, &workspace, "w");
 					}
 				})
 			})
@@ -1674,7 +1955,7 @@ mod tests {
 	fn a_held_lock_times_out_with_a_typed_error_and_leaves_the_file() {
 		let directory = tempfile::tempdir().expect("grant directory");
 		let path = grants_path(directory.path());
-		GrantsFile::persist_workspace_trust(&path, exact_trust(Path::new("/w"), "w")).expect("trust");
+		persist_exact(&path, Path::new("/w"), "w");
 		let before = fs::read(&path).expect("grants");
 		let held = GrantsFileLock::acquire(&path, GRANTS_LOCK_WAIT).expect("hold the lock");
 		let wait = Duration::from_millis(30);
@@ -1705,7 +1986,7 @@ mod tests {
 	fn a_refused_try_update_leaves_the_file_untouched() {
 		let directory = tempfile::tempdir().expect("grant directory");
 		let path = grants_path(directory.path());
-		GrantsFile::persist_workspace_trust(&path, exact_trust(Path::new("/w"), "w")).expect("trust");
+		persist_exact(&path, Path::new("/w"), "w");
 		let before = fs::read(&path).expect("grants");
 		let refused = GrantsFile::try_update(&path, |grants| {
 			grants.workspace_trust.clear();
