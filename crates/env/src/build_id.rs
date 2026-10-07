@@ -37,11 +37,21 @@ pub fn is_stale(ours: &str, theirs: &str) -> bool {
 
 fn compute() -> ArrayStr<32> {
 	env::current_exe()
-		.and_then(|executable| fingerprint(&executable))
+		.and_then(|executable| of_executable(&executable))
 		.unwrap_or_default()
 }
 
-fn fingerprint(executable: &Path) -> io::Result<ArrayStr<32>> {
+/// Returns the local generation identity of the executable at `executable`:
+/// what [`current`] reports in a process started from that exact path.
+///
+/// A process that is not that executable uses it to advertise the identity a
+/// daemon started from the file expects of a live owner, such as a test
+/// harness that hosts the document authority a spawned `omp envd` attaches to.
+///
+/// # Errors
+///
+/// Returns the error reading the file's metadata.
+pub fn of_executable(executable: &Path) -> io::Result<ArrayStr<32>> {
 	let metadata = fs::metadata(executable)?;
 	let mut digest = Hash32::hasher();
 	digest.update(b"omp/executable-generation/v1");
@@ -100,22 +110,33 @@ mod tests {
 	}
 
 	#[test]
-	fn fingerprint_is_stable_and_changes_with_file_generation() {
+	fn the_running_executable_reports_its_own_file_identity() {
+		let executable = env::current_exe().expect("test executable path");
+		assert_eq!(
+			of_executable(&executable)
+				.expect("test executable identity")
+				.as_str(),
+			current()
+		);
+	}
+
+	#[test]
+	fn executable_identity_is_stable_and_changes_with_file_generation() {
 		let directory = tempfile::tempdir().expect("temporary executable directory");
 		let executable = directory.path().join("omp");
 		fs::write(&executable, b"first generation").expect("write first generation");
 
-		let first = fingerprint(&executable).expect("fingerprint first generation");
+		let first = of_executable(&executable).expect("fingerprint first generation");
 		assert_eq!(
 			first.as_str(),
-			fingerprint(&executable)
+			of_executable(&executable)
 				.expect("fingerprint unchanged generation")
 				.as_str()
 		);
 
 		fs::write(&executable, b"replacement executable generation")
 			.expect("write replacement generation");
-		let replacement = fingerprint(&executable).expect("fingerprint replacement generation");
+		let replacement = of_executable(&executable).expect("fingerprint replacement generation");
 		assert_ne!(first.as_str(), replacement.as_str());
 	}
 
