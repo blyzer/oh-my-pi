@@ -549,6 +549,25 @@ mod live {
 		assert_success(&command.output().expect("run TCP denial probe"));
 	}
 	#[test]
+	fn scoped_proxy_reaches_only_its_loopback_port() {
+		let Some(runner) = runner() else { return };
+		let broker = TcpListener::bind("127.0.0.1:0").expect("broker listener");
+		let other = TcpListener::bind("127.0.0.1:0").expect("other listener");
+		let mut spec = probe_spec();
+		// envd's `scoped` mode asks for outbound networking plus the broker.
+		spec.set_network(NetworkMode::Outbound);
+		spec
+			.set_proxy_endpoint(broker.local_addr().expect("broker address").port(), None)
+			.expect("proxy endpoint");
+		let mut command = command_for(runner, &spec, "tcp-proxy");
+		command
+			.command
+			.env("OMP_TCP_ALLOWED", broker.local_addr().expect("broker address").to_string())
+			.env("OMP_TCP", other.local_addr().expect("other address").to_string());
+		assert_success(&command.output().expect("run scoped proxy probe"));
+	}
+
+	#[test]
 	fn deny_default_runs_git_and_python_with_workspace_writes() {
 		let Some(runner) = runner() else { return };
 		let workspace = tempdir().expect("workspace");
@@ -739,6 +758,12 @@ mod live {
 				UnixStream::connect(required_path("OMP_SOCKET")).expect("allowed Unix socket");
 			},
 			"tcp-denied" => {
+				let address = std::env::var("OMP_TCP").expect("TCP address");
+				assert!(TcpStream::connect(address).is_err());
+			},
+			"tcp-proxy" => {
+				let allowed = std::env::var("OMP_TCP_ALLOWED").expect("broker address");
+				TcpStream::connect(allowed).expect("the broker port is reachable");
 				let address = std::env::var("OMP_TCP").expect("TCP address");
 				assert!(TcpStream::connect(address).is_err());
 			},
