@@ -1,5 +1,5 @@
 //! Relays the approval prompts a daemon-side command needs to the connection
-//! that issued the command.
+//! that issued the command, and answers them in the session that issued it.
 //!
 //! An attached session runs its commands on the project daemon, whose host has
 //! no in-process approval route: the session's kernel lives in another
@@ -18,6 +18,13 @@
 //! dropped request withdraws its query. A closed connection resolves every
 //! pending prompt as unreachable and refuses later prompts at once, including
 //! those of commands that outlive it (detached or auto-backgrounded).
+//!
+//! The session half is [`pump_approval_queries`]: an attached composition
+//! advertises the capability and files each relayed query on the approval
+//! route the driver binds ([`ApprovalRelayBinding`]), the same kernel route
+//! its in-process prompts use, so the prompt is journaled and answered like any
+//! other. A withdrawal or a closed transport cancels the filed prompt instead
+//! of answering it.
 
 use std::{
 	mem,
@@ -33,9 +40,15 @@ use omp_agent::{
 	TicketState,
 };
 use omp_core::{FastHashMap, Str, sf};
+use omp_env::{ApprovalQueryEvent, EnvClient};
 use omp_proto::env::v1::{self as pb, server_frame};
-use parking_lot::Mutex;
-use tokio::{runtime::Handle, time};
+use parking_lot::{Mutex, RwLock};
+use tokio::{
+	runtime::Handle,
+	task::{JoinHandle, JoinSet},
+	time,
+};
+use tokio_util::sync::CancellationToken;
 
 /// How long the daemon waits past a prompt's own timeout before deciding it
 /// itself.
@@ -295,6 +308,138 @@ impl EnvApprover {
 	}
 }
 
+/// The approval route an attached session answers relayed prompts with.
+///
+/// The driver binds the kernel's route through
+/// `ProjectEnvironment::bind_approval_authority`. While none is bound, a
+/// relayed prompt is decided by its unreachable rules at once.
+pub type ApprovalRelayBinding = Arc<RwLock<Option<ApprovalRoute>>>;
+
+/// Reason recorded for a relayed prompt that arrives while no route is bound.
+const UNBOUND: &str = "no approval route is bound to the session";
+
+/// Starts the task that answers the prompts the daemon relays to `client`,
+/// through the route bound in the binding it returns.
+pub fn spawn_approval_pump(
+	client: &EnvClient,
+	shutdown: &CancellationToken,
+	tasks: &mut Vec<JoinHandle<()>>,
+) -> ApprovalRelayBinding {
+	let route = ApprovalRelayBinding::default();
+	tasks.push(tokio::spawn(pump_approval_queries(
+		client.clone(),
+		Arc::clone(&route),
+		shutdown.clone(),
+	)));
+	route
+}
+
+/// Answers every approval query the daemon relays to `client`, until the
+/// queue closes with the transport or `shutdown` fires.
+///
+/// Each query is filed on the bound route with `request_cancellable`, so it is
+/// journaled, decided and timed out exactly as an in-process prompt is, and
+/// its decision goes back as an `ApprovalAnswer` on the query's request. A
+/// withdrawal cancels the filed prompt and sends nothing; a closed queue and
+/// shutdown do the same for every prompt still open.
+pub async fn pump_approval_queries(
+	client: EnvClient,
+	route: ApprovalRelayBinding,
+	shutdown: CancellationToken,
+) {
+	let queries = client.approval_queries();
+	// Withdrawal handles of the prompts still being decided, keyed as the
+	// client keys its open queries: `(request_id, query_id)`.
+	let mut open = FastHashMap::<(u64, u64), CancellationToken>::default();
+	let mut deciding = JoinSet::new();
+	loop {
+		tokio::select! {
+			() = shutdown.cancelled() => break,
+			event = queries.recv_async() => match event {
+				Ok(ApprovalQueryEvent::Requested { request_id, query }) => {
+					let key = (request_id, query.query_id);
+					let withdrawn = CancellationToken::new();
+					open.insert(key, withdrawn.clone());
+					let route = route.read().clone();
+					let client = client.clone();
+					deciding.spawn(async move {
+						answer_query(&client, route, request_id, query, &withdrawn).await;
+						key
+					});
+				},
+				Ok(ApprovalQueryEvent::Withdrawn { request_id, query_id }) => {
+					if let Some(withdrawn) = open.remove(&(request_id, query_id)) {
+						withdrawn.cancel();
+					}
+				},
+				Err(_) => break,
+			},
+			Some(decided) = deciding.join_next(), if !deciding.is_empty() => match decided {
+				Ok(key) => {
+					open.remove(&key);
+				},
+				Err(error) if !error.is_cancelled() => {
+					tracing::warn!(%error, "relayed approval task failed");
+				},
+				Err(_) => {},
+			},
+		}
+	}
+	// No answer can reach the daemon any more: withdraw every open prompt.
+	for withdrawn in open.into_values() {
+		withdrawn.cancel();
+	}
+	while deciding.join_next().await.is_some() {}
+}
+
+/// Decides one relayed query on `route` and answers it, unless it was
+/// withdrawn first.
+async fn answer_query(
+	client: &EnvClient,
+	route: Option<ApprovalRoute>,
+	request_id: u64,
+	query: pb::ApprovalQuery,
+	withdrawn: &CancellationToken,
+) {
+	let query_id = query.query_id;
+	let invocation_id = query.invocation_id.map(Str::from);
+	let reasons = query.reasons.into_iter().map(spec_from_wire).collect();
+	let mut ticket = match route {
+		Some(route) => {
+			route
+				.request_cancellable(invocation_id, reasons, query.created_at_ms, withdrawn.clone())
+				.await
+		},
+		None => ApprovalTicket {
+			ticket_id: Str::default(),
+			invocation_id,
+			reasons,
+			state: TicketState::Pending,
+			decision: None,
+			created_at_ms: query.created_at_ms,
+		},
+	};
+	if withdrawn.is_cancelled() {
+		return;
+	}
+	let decision = ticket
+		.decision
+		.take()
+		.unwrap_or_else(|| ticket.unreachable_decision(UNBOUND));
+	if let Err(error) = client
+		.answer_approval(request_id, query_id, wire_decision(decision))
+		.await
+	{
+		// The daemon withdrew the query meanwhile, or the transport closed.
+		tracing::debug!(
+			error = &error as &dyn std::error::Error,
+			request_id,
+			query_id,
+			"relayed approval answer was not sent"
+		);
+	}
+}
+
 const fn frame(request_id: u64, body: server_frame::Body) -> pb::ServerFrame {
 	pb::ServerFrame { request_id, body: Some(body), props: None }
 }
@@ -341,6 +486,38 @@ fn decision_from_wire(decision: Option<pb::ApprovalDecision>) -> ApprovalDecisio
 	}
 }
 
+/// The session's form of one relayed requirement, field for field.
+fn spec_from_wire(spec: pb::ApprovalSpec) -> ApprovalSpec {
+	ApprovalSpec {
+		title:         Str::from(spec.title),
+		body:          Str::from(spec.body),
+		subject:       Str::from(spec.subject),
+		kind:          Str::from(spec.kind),
+		scopes:        spec.scopes.into_iter().map(Str::from).collect(),
+		default:       spec.timeout_default,
+		route:         Str::from(spec.route),
+		approver:      spec.approver.map(Str::from),
+		timeout_ms:    spec.timeout_ms,
+		unreachable:   Str::from(spec.unreachable),
+		require_human: spec.require_human,
+		pattern:       spec.pattern.map(Str::from),
+		evidence:      spec.evidence.into_iter().map(Str::from).collect(),
+	}
+}
+
+/// The wire form of the session's decision; scope and source travel as their
+/// strum spellings.
+fn wire_decision(decision: ApprovalDecision) -> pb::ApprovalDecision {
+	pb::ApprovalDecision {
+		approved:   decision.approved,
+		scope:      decision.scope.as_str().to_owned(),
+		source:     <&'static str>::from(decision.source).to_owned(),
+		decided_by: decision.decided_by.as_ref().map(ToString::to_string),
+		reason:     decision.reason.as_ref().map(ToString::to_string),
+		audited:    decision.audited,
+	}
+}
+
 const fn malformed(reason: &'static str) -> ApprovalDecision {
 	ApprovalDecision {
 		approved:   false,
@@ -378,7 +555,7 @@ mod tests {
 		}
 	}
 
-	fn wire_decision(approved: bool, scope: &str, source: &str) -> pb::ApprovalDecision {
+	fn client_decision(approved: bool, scope: &str, source: &str) -> pb::ApprovalDecision {
 		pb::ApprovalDecision {
 			approved,
 			scope: scope.to_owned(),
@@ -451,7 +628,7 @@ mod tests {
 
 		approvals.answer(REQUEST, pb::ApprovalAnswer {
 			query_id: query.query_id,
-			decision: Some(wire_decision(true, "once", "user")),
+			decision: Some(client_decision(true, "once", "user")),
 		});
 		let ticket = request.await.expect("request task");
 		assert_eq!(decided(&ticket), &ApprovalDecision {
@@ -488,7 +665,7 @@ mod tests {
 
 		approvals.answer(REQUEST, pb::ApprovalAnswer {
 			query_id: query.query_id,
-			decision: Some(wire_decision(true, "once", "user")),
+			decision: Some(client_decision(true, "once", "user")),
 		});
 		assert!(frames.is_empty(), "a late answer draws no reply");
 	}
@@ -504,7 +681,7 @@ mod tests {
 		assert_eq!(withdrawn(frame), (REQUEST, query.query_id));
 		approvals.answer(REQUEST, pb::ApprovalAnswer {
 			query_id: query.query_id,
-			decision: Some(wire_decision(true, "once", "user")),
+			decision: Some(client_decision(true, "once", "user")),
 		});
 		assert!(frames.is_empty(), "an answer to a withdrawn query draws no reply");
 	}
@@ -556,9 +733,11 @@ mod tests {
 	async fn malformed_answers_deny() {
 		let (approvals, frames) = relay(8);
 		let owned = approvals.owned(REQUEST);
-		for answer in
-			[None, Some(wire_decision(true, "once", "robot")), Some(wire_decision(true, "", "user"))]
-		{
+		for answer in [
+			None,
+			Some(client_decision(true, "once", "robot")),
+			Some(client_decision(true, "", "user")),
+		] {
 			let request = spawn_request(&owned, amendment(120_000));
 			let (_, query) = next_query(&frames).await;
 			approvals
@@ -579,22 +758,252 @@ mod tests {
 		// An unknown query, and the right query on another request.
 		approvals.answer(REQUEST, pb::ApprovalAnswer {
 			query_id: query.query_id + 100,
-			decision: Some(wire_decision(true, "once", "user")),
+			decision: Some(client_decision(true, "once", "user")),
 		});
 		approvals.answer(REQUEST + 1, pb::ApprovalAnswer {
 			query_id: query.query_id,
-			decision: Some(wire_decision(true, "once", "user")),
+			decision: Some(client_decision(true, "once", "user")),
 		});
 		tokio::task::yield_now().await;
 		assert!(!request.is_finished(), "a mismatched answer decided the prompt");
 		approvals.answer(REQUEST, pb::ApprovalAnswer {
 			query_id: query.query_id,
-			decision: Some(wire_decision(false, "once", "user")),
+			decision: Some(client_decision(false, "once", "user")),
 		});
 		let ticket = request.await.expect("request task");
 		assert!(!decided(&ticket).approved);
 		assert_eq!(decided(&ticket).source, ApprovalSource::User);
 		assert!(frames.is_empty(), "ignored answers draw no reply");
+	}
+
+	/// The session half on a client whose frames the test plays: queries go in
+	/// as daemon frames, answers come out as client frames.
+	struct SessionPump {
+		route:     ApprovalRelayBinding,
+		responses: flume::Sender<pb::ServerFrame>,
+		answers:   flume::Receiver<pb::ClientFrame>,
+		shutdown:  CancellationToken,
+		pump:      JoinHandle<()>,
+	}
+
+	/// Bounded wait for the session half, which runs on real threads.
+	const PUMP_WAIT: Duration = Duration::from_secs(10);
+
+	impl SessionPump {
+		fn start(route: Option<ApprovalRoute>) -> Self {
+			let (outgoing, answers) = flume::unbounded();
+			let (responses, incoming) = flume::unbounded();
+			let client = EnvClient::from_channels(outgoing, incoming);
+			let shutdown = CancellationToken::new();
+			let mut tasks = Vec::new();
+			let bound = spawn_approval_pump(&client, &shutdown, &mut tasks);
+			*bound.write() = route;
+			let pump = tasks.pop().expect("pump task");
+			Self { route: bound, responses, answers, shutdown, pump }
+		}
+
+		fn query(&self, request_id: u64, query_id: u64) {
+			self
+				.responses
+				.send(frame(
+					request_id,
+					server_frame::Body::ApprovalQuery(pb::ApprovalQuery {
+						query_id,
+						invocation_id: None,
+						reasons: vec![wire_spec(&amendment(120_000))],
+						created_at_ms: 1_000,
+					}),
+				))
+				.expect("send approval query");
+		}
+
+		fn withdraw(&self, request_id: u64, query_id: u64) {
+			self
+				.responses
+				.send(frame(
+					request_id,
+					server_frame::Body::ApprovalWithdrawn(pb::ApprovalWithdrawn { query_id }),
+				))
+				.expect("send approval withdrawal");
+		}
+
+		async fn answer(&self) -> (u64, Option<pb::InvocationScope>, pb::ApprovalAnswer) {
+			let frame = time::timeout(PUMP_WAIT, self.answers.recv_async())
+				.await
+				.expect("approval answer timed out")
+				.expect("approval answer");
+			let Some(pb::client_frame::Body::ApprovalAnswer(answer)) = frame.body else {
+				panic!("expected an approval answer, got {:?}", frame.body);
+			};
+			(frame.request_id, frame.scope, answer)
+		}
+	}
+
+	async fn filed(inbox: &omp_agent::ApprovalInbox) -> omp_agent::ApprovalRequest {
+		time::timeout(PUMP_WAIT, inbox.recv())
+			.await
+			.expect("relayed prompt was not filed")
+			.expect("approval inbox")
+	}
+
+	async fn abandoned(request: &omp_agent::ApprovalRequest) {
+		time::timeout(PUMP_WAIT, async {
+			while !request.is_abandoned() {
+				time::sleep(Duration::from_millis(5)).await;
+			}
+		})
+		.await
+		.expect("the filed prompt was not withdrawn");
+	}
+
+	fn session_route() -> (ApprovalRoute, omp_agent::ApprovalInbox) {
+		ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None)
+	}
+
+	#[test]
+	fn relayed_requirements_and_decisions_survive_the_wire() {
+		let spec = amendment(120_000);
+		assert_eq!(spec_from_wire(wire_spec(&spec)), spec);
+		let bare = ApprovalSpec {
+			default: None,
+			approver: Some(sf!("ops")),
+			pattern: None,
+			evidence: Vec::new(),
+			..amendment(0)
+		};
+		assert_eq!(spec_from_wire(wire_spec(&bare)), bare);
+		for (scope, source) in [
+			(ApprovalScope::Once, ApprovalSource::User),
+			(ApprovalScope::Session, ApprovalSource::Config),
+			(ApprovalScope::Custom(sf!("lease")), ApprovalSource::Forwarded),
+			(ApprovalScope::Once, ApprovalSource::Timeout),
+			(ApprovalScope::Once, ApprovalSource::Unavailable),
+		] {
+			let decision = ApprovalDecision {
+				approved: matches!(source, ApprovalSource::User | ApprovalSource::Config),
+				scope,
+				source,
+				decided_by: Some(sf!("tester")),
+				reason: Some(sf!("because")),
+				audited: true,
+			};
+			assert_eq!(decision_from_wire(Some(wire_decision(decision.clone()))), decision);
+		}
+	}
+
+	#[tokio::test]
+	async fn the_session_answers_through_its_bound_route_on_the_query_request() {
+		let (route, inbox) = session_route();
+		let session = SessionPump::start(Some(route));
+		session.query(5, 1);
+		let request = filed(&inbox).await;
+		assert_eq!(request.ticket.invocation_id, None, "a sandbox amendment blocks no invocation");
+		assert_eq!(request.ticket.reasons, vec![amendment(120_000)]);
+		assert_eq!(request.ticket.created_at_ms, 1_000);
+		let decision = ApprovalDecision {
+			approved:   true,
+			scope:      ApprovalScope::Once,
+			source:     ApprovalSource::User,
+			decided_by: Some(sf!("tester")),
+			reason:     None,
+			audited:    false,
+		};
+		request
+			.respond(decision.clone())
+			.expect("the relayed prompt is waiting");
+		let (request_id, scope, answer) = session.answer().await;
+		assert_eq!((request_id, scope), (5, None), "the answer rides the query's request unscoped");
+		assert_eq!(answer.query_id, 1);
+		assert_eq!(decision_from_wire(answer.decision), decision);
+		session.shutdown.cancel();
+		time::timeout(PUMP_WAIT, session.pump)
+			.await
+			.expect("pump stopped on shutdown")
+			.expect("pump task");
+	}
+
+	#[tokio::test]
+	async fn a_withdrawn_query_cancels_its_prompt_and_is_never_answered() {
+		let (route, inbox) = session_route();
+		let session = SessionPump::start(Some(route.clone()));
+		session.query(5, 1);
+		let withdrawn = filed(&inbox).await;
+		session.withdraw(5, 1);
+		abandoned(&withdrawn).await;
+		assert!(route.pending().is_empty(), "the withdrawn prompt is still filed");
+		assert!(
+			withdrawn.respond(approve()).is_err(),
+			"a withdrawn prompt still accepted a decision"
+		);
+
+		// The next query is answered first: the withdrawn one never is.
+		session.query(6, 2);
+		filed(&inbox)
+			.await
+			.respond(approve())
+			.expect("the next prompt is waiting");
+		let (request_id, _, answer) = session.answer().await;
+		assert_eq!((request_id, answer.query_id), (6, 2));
+		assert!(session.answers.is_empty(), "the withdrawn query was answered");
+	}
+
+	#[tokio::test]
+	async fn a_closed_transport_cancels_open_prompts_without_answering() {
+		let (route, inbox) = session_route();
+		let session = SessionPump::start(Some(route.clone()));
+		session.query(5, 1);
+		let open = filed(&inbox).await;
+		let SessionPump { responses, answers, pump, .. } = session;
+		drop(responses);
+		time::timeout(PUMP_WAIT, pump)
+			.await
+			.expect("pump stopped when the transport closed")
+			.expect("pump task");
+		abandoned(&open).await;
+		assert!(route.pending().is_empty(), "a prompt outlived the transport");
+		assert!(answers.is_empty(), "a closed transport drew an answer");
+	}
+
+	#[tokio::test]
+	async fn an_unbound_session_denies_relayed_prompts_as_unreachable() {
+		let session = SessionPump::start(None);
+		session.query(5, 1);
+		let (request_id, _, answer) = session.answer().await;
+		assert_eq!((request_id, answer.query_id), (5, 1));
+		assert_eq!(
+			answer.decision,
+			Some(pb::ApprovalDecision {
+				approved:   false,
+				scope:      "once".to_owned(),
+				source:     "unavailable".to_owned(),
+				decided_by: None,
+				reason:     Some(UNBOUND.to_owned()),
+				audited:    false,
+			})
+		);
+
+		// Binding the route later answers the next prompt through it.
+		let (route, inbox) = session_route();
+		*session.route.write() = Some(route);
+		session.query(6, 2);
+		filed(&inbox)
+			.await
+			.respond(approve())
+			.expect("the bound route files the next prompt");
+		let (request_id, _, answer) = session.answer().await;
+		assert_eq!((request_id, answer.query_id), (6, 2));
+		assert!(answer.decision.expect("decision").approved);
+	}
+
+	fn approve() -> ApprovalDecision {
+		ApprovalDecision {
+			approved:   true,
+			scope:      ApprovalScope::Once,
+			source:     ApprovalSource::User,
+			decided_by: None,
+			reason:     None,
+			audited:    false,
+		}
 	}
 
 	#[tokio::test(start_paused = true)]

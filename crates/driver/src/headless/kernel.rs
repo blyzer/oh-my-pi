@@ -2355,11 +2355,17 @@ pub async fn compose_kernel(
 		.with_hook_gate(Arc::clone(&admission_gate))
 		.with_session_state_bridge(con_journal.clone())
 		.with_session_state_bridge(Arc::clone(&rule_scope) as Arc<dyn omp_agent::SessionStateBridge>);
-	// The session's one approval authority: environment policy (sandbox
-	// amendments, privileged mutations, dynamic devices) and the tool
-	// executor's admission queries all prompt through the kernel mailbox,
-	// where each prompt is journaled under `<queues><prompts>` and answered
-	// by the host's `Up::Approve`.
+	// The session's one approval authority. Every prompt filed on it lands in
+	// the kernel mailbox, is journaled under `<queues><prompts>` and is
+	// answered by the host's `Up::Approve`. The tool executor's admission
+	// queries use it, and the environment binds it in two places: as the route
+	// of its in-process host, through which an embedded or isolated
+	// composition prompts sandbox amendments, privileged mutations and
+	// dynamic devices; and, when the session is attached to the project
+	// daemon, as the route that answers the sandbox amendments the daemon
+	// relays for the commands this session issued. The daemon relays nothing
+	// else yet: its dynamic-device admissions and privileged mutations still
+	// fail closed.
 	let approvals = kernel.approval_route();
 	let notice_mailbox = kernel.mailbox();
 	kernel.inference().environment().bind_approval_authority(
