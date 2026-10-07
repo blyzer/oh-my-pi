@@ -545,9 +545,22 @@ impl FilePolicy {
 		PathDenied { path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()), access }
 	}
 
+	/// Admits a read when the path, under both its policy-lexical and its
+	/// symlink-resolved spelling, stays outside every `read_deny` root.
+	///
+	/// The `host` read view follows symlinks and stays no wider than the kernel
+	/// host view, narrowed by `read_deny` on both spellings, so PATH entries
+	/// that link into a toolchain store (Homebrew `bin` into `Cellar`, rustup
+	/// proxies, nix profiles) run. The restricted
+	/// views still refuse any symlink outside the runtime roots, because their
+	/// kernel profiles need the traversed link entries themselves granted.
+	/// Resolution failures (loops, unreadable links) are denials, and a dangling
+	/// link is judged by the target it would reach, so one aimed into a denied
+	/// root stays refused before that target exists.
 	fn check_read(&self, path: &Path) -> Result<(), PathDenied> {
 		let lexical = policy_lexical_path(path).map_err(|_| Self::denied(path, PathAccess::Read))?;
-		if has_symlink_component(&lexical).map_err(|_| Self::denied(&lexical, PathAccess::Read))?
+		if self.read_restricted
+			&& has_symlink_component(&lexical).map_err(|_| Self::denied(&lexical, PathAccess::Read))?
 			&& !is_runtime_baseline_path(&lexical)
 		{
 			return Err(Self::denied(&lexical, PathAccess::Read));
@@ -561,22 +574,25 @@ impl FilePolicy {
 		{
 			return Ok(());
 		}
+		// A link entry inside a denied root stays denied even when its target
+		// escapes: bubblewrap masks the whole root, so the entry never exists for
+		// a child either.
+		if self.read_denied_under(&lexical) {
+			return Err(Self::denied(&lexical, PathAccess::Read));
+		}
 		if resolved == Path::new("/dev/null")
-			|| !self.read_restricted
-				&& !self
-					.read_denied
-					.iter()
-					.any(|root| resolved.starts_with(root))
-			|| self.readable.iter().any(|root| resolved.starts_with(root))
-				&& !self
-					.read_denied
-					.iter()
-					.any(|root| resolved.starts_with(root))
+			|| !self.read_denied_under(&resolved)
+				&& (!self.read_restricted
+					|| self.readable.iter().any(|root| resolved.starts_with(root)))
 		{
 			Ok(())
 		} else {
 			Err(Self::denied(&resolved, PathAccess::Read))
 		}
+	}
+
+	fn read_denied_under(&self, path: &Path) -> bool {
+		self.read_denied.iter().any(|root| path.starts_with(root))
 	}
 
 	fn check_write(&self, path: &Path) -> Result<(), PathDenied> {
@@ -613,8 +629,14 @@ impl FilePolicy {
 			self.check_write(path)?;
 		}
 		let lexical = policy_lexical_path(path).map_err(|_| Self::denied(path, access))?;
-		if has_symlink_component(&lexical).map_err(|_| Self::denied(&lexical, access))?
-			&& (access != PathAccess::Read || !is_runtime_baseline_path(&lexical))
+		// A `host` read already passed the two-spelling `read_deny` check above
+		// and opens the resolved path from `/` with `O_NOFOLLOW` on every
+		// component, so a link swapped in after the check fails closed. Writes
+		// and restricted reads keep refusing symlink components.
+		let read_follows_links = access == PathAccess::Read
+			&& (!self.read_restricted || is_runtime_baseline_path(&lexical));
+		if !read_follows_links
+			&& has_symlink_component(&lexical).map_err(|_| Self::denied(&lexical, access))?
 		{
 			return Err(Self::denied(&lexical, access));
 		}
@@ -1259,6 +1281,27 @@ fn normalize_absolute(path: &Path) -> io::Result<PathBuf> {
 	Ok(normalized)
 }
 
+/// Builds a Homebrew-shaped prefix under `root` for symlinked-toolchain tests.
+///
+/// `Cellar/tool/1.0/bin/tool` is an executable script printing its arguments;
+/// `bin/tool` links to it and `opt/tool` links to its keg, both relatively.
+#[cfg(all(test, unix))]
+pub(crate) fn homebrew_shaped_prefix(root: &Path) -> PathBuf {
+	use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+	let prefix = root.join("prefix");
+	let keg = prefix.join("Cellar/tool/1.0");
+	fs::create_dir_all(keg.join("bin")).expect("keg bin");
+	fs::create_dir_all(prefix.join("bin")).expect("prefix bin");
+	fs::create_dir_all(prefix.join("opt")).expect("prefix opt");
+	let tool = keg.join("bin/tool");
+	fs::write(&tool, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n").expect("tool script");
+	fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).expect("tool mode");
+	symlink("../Cellar/tool/1.0/bin/tool", prefix.join("bin/tool")).expect("bin link");
+	symlink("../Cellar/tool/1.0", prefix.join("opt/tool")).expect("opt link");
+	prefix
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1489,6 +1532,206 @@ mod tests {
 		let arbitrary = external.path().join("unapproved-executable");
 		fs::write(&arbitrary, "#!/bin/sh\n").expect("arbitrary executable");
 		assert!(policy.check_read(&arbitrary).is_err());
+	}
+
+	#[cfg(unix)]
+	const READ: OpenRequest = OpenRequest { access: PathAccess::Read, create_mode: 0o666 };
+
+	#[cfg(unix)]
+	#[test]
+	fn host_read_mode_admits_programs_reached_through_symlinks() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let tools = tempfile::tempdir().expect("tools");
+		let prefix = homebrew_shaped_prefix(tools.path());
+		let policy =
+			policy_parts(&workspace_settings(), workspace.path(), WriteMode::Scoped, None, None)
+				.expect("policy")
+				.file_policy;
+		assert!(!policy.read_restricted, "the default read view is host");
+		// Exec lane (PATH hit as found), glob base through a linked keg, and the
+		// program reached through that keg link.
+		for path in ["bin/tool", "opt/tool/bin", "opt/tool/bin/tool"] {
+			assert!(policy.check_read(&prefix.join(path)).is_ok(), "{path} must be readable");
+		}
+		let mut opened = policy
+			.open(&prefix.join("bin/tool"), READ)
+			.expect("in-shell read through a link");
+		let mut contents = String::new();
+		io::Read::read_to_string(&mut opened, &mut contents).expect("linked contents");
+		assert!(contents.starts_with("#!/bin/sh\n"));
+		// The write lane keeps refusing symlink components even where the
+		// resolved target is writable.
+		let new = prefix.join("opt/tool/bin/new");
+		assert!(policy.check_write(&new).is_ok(), "the resolved target is writable");
+		for access in [PathAccess::Truncate, PathAccess::ReadWrite] {
+			assert!(
+				policy
+					.open(&new, OpenRequest { access, create_mode: 0o666 })
+					.is_err()
+			);
+		}
+		assert!(!prefix.join("Cellar/tool/1.0/bin/new").exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn host_read_mode_resolves_symlinks_into_read_deny() {
+		use std::os::unix::fs::symlink;
+
+		let workspace = tempfile::tempdir().expect("workspace");
+		let outside = tempfile::tempdir().expect("outside");
+		let secret = outside.path().join("secret");
+		fs::create_dir(&secret).expect("secret root");
+		fs::write(secret.join("key"), "private").expect("secret file");
+		fs::write(outside.path().join("public"), "public").expect("public file");
+		let links = outside.path().join("links");
+		fs::create_dir(&links).expect("links");
+		symlink(secret.join("key"), links.join("to-secret")).expect("secret link");
+		symlink(outside.path().join("public"), links.join("to-public")).expect("public link");
+		let settings = SandboxSettings {
+			read_deny: vec![Str::from(secret.to_string_lossy().as_ref())],
+			..workspace_settings()
+		};
+		let policy = policy_parts(&settings, workspace.path(), WriteMode::Scoped, None, None)
+			.expect("policy")
+			.file_policy;
+		let denied = policy
+			.check_read(&links.join("to-secret"))
+			.expect_err("a link into read_deny is refused");
+		assert_eq!(denied.access, PathAccess::Read);
+		assert_eq!(denied.path, fs::canonicalize(secret.join("key")).expect("canonical key"));
+		assert!(policy.open(&links.join("to-secret"), READ).is_err());
+		assert!(policy.check_read(&links.join("to-public")).is_ok());
+		assert!(policy.open(&links.join("to-public"), READ).is_ok());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn host_read_mode_refuses_links_inside_read_deny_roots() {
+		use std::os::unix::fs::symlink;
+
+		let workspace = tempfile::tempdir().expect("workspace");
+		let outside = tempfile::tempdir().expect("outside");
+		let denied_root = outside.path().join("denied");
+		fs::create_dir(&denied_root).expect("denied root");
+		let public = outside.path().join("public");
+		fs::write(&public, "public").expect("public file");
+		let link = denied_root.join("link");
+		symlink(&public, &link).expect("link escaping the denied root");
+		let settings = SandboxSettings {
+			read_deny: vec![Str::from(denied_root.to_string_lossy().as_ref())],
+			..workspace_settings()
+		};
+		let policy = policy_parts(&settings, workspace.path(), WriteMode::Scoped, None, None)
+			.expect("policy")
+			.file_policy;
+		let denied = policy
+			.check_read(&link)
+			.expect_err("an entry inside read_deny stays refused");
+		assert_eq!(denied.path, policy_lexical_path(&link).expect("lexical link"));
+		assert!(policy.open(&link, READ).is_err());
+		assert!(policy.check_read(&public).is_ok());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn host_read_resolution_errors_fail_closed() {
+		use std::os::unix::fs::symlink;
+
+		let workspace = tempfile::tempdir().expect("workspace");
+		let outside = tempfile::tempdir().expect("outside");
+		let denied_root = outside.path().join("denied");
+		fs::create_dir(&denied_root).expect("denied root");
+		symlink("loop", outside.path().join("loop")).expect("symlink loop");
+		symlink(denied_root.join("future"), outside.path().join("dangling-denied"))
+			.expect("dangling link into read_deny");
+		symlink(outside.path().join("missing"), outside.path().join("dangling"))
+			.expect("dangling link");
+		let settings = SandboxSettings {
+			read_deny: vec![Str::from(denied_root.to_string_lossy().as_ref())],
+			..workspace_settings()
+		};
+		let policy = policy_parts(&settings, workspace.path(), WriteMode::Scoped, None, None)
+			.expect("policy")
+			.file_policy;
+		assert!(policy.check_read(&outside.path().join("loop")).is_err());
+		assert!(
+			policy
+				.check_read(&outside.path().join("loop/file"))
+				.is_err()
+		);
+		assert!(
+			policy
+				.open(&outside.path().join("loop/file"), READ)
+				.is_err()
+		);
+		assert!(
+			policy
+				.check_read(&outside.path().join("dangling-denied"))
+				.is_err()
+		);
+		assert!(policy.open(&outside.path().join("dangling"), READ).is_err());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn restricted_read_mode_still_refuses_symlinks_outside_readable_roots() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let tools = tempfile::tempdir().expect("tools");
+		let prefix = homebrew_shaped_prefix(tools.path());
+		let settings = SandboxSettings {
+			mode: ExecSandboxMode::ReadOnly,
+			read_mode: ReadMode::Minimal,
+			..Default::default()
+		};
+		let policy = policy_parts(&settings, workspace.path(), WriteMode::Deny, None, None)
+			.expect("policy")
+			.file_policy;
+		let link = prefix.join("bin/tool");
+		let denied = policy
+			.check_read(&link)
+			.expect_err("restricted reads refuse symlinks");
+		// The symlink rule fires on the lexical spelling before resolution.
+		assert_eq!(denied.path, policy_lexical_path(&link).expect("lexical link"));
+		assert!(policy.open(&link, READ).is_err());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn approved_read_scope_admits_a_link_whose_target_is_read_denied() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let tools = tempfile::tempdir().expect("tools");
+		let prefix = homebrew_shaped_prefix(tools.path());
+		let keg = prefix.join("Cellar/tool/1.0");
+		fs::write(keg.join("bin/other"), "other").expect("sibling");
+		let settings = SandboxSettings {
+			read_deny: vec![Str::from(keg.to_string_lossy().as_ref())],
+			..workspace_settings()
+		};
+		let link = prefix.join("bin/tool");
+		let target = fs::canonicalize(&link).expect("canonical target");
+		let base = policy_parts(&settings, workspace.path(), WriteMode::Scoped, None, None)
+			.expect("base policy")
+			.file_policy;
+		let denied = base
+			.check_read(&link)
+			.expect_err("the linked target is read-denied");
+		assert_eq!(denied.path, target);
+		let scope = ApprovedPathScope::capture(&link, ApprovedPathAccess::Read).expect("scope");
+		assert_eq!(scope.label(), sf!("read {}", target.display()));
+		let amended = policy_parts_with_approved_scope(
+			&settings,
+			workspace.path(),
+			WriteMode::Scoped,
+			None,
+			None,
+			Some(&scope),
+		)
+		.expect("amended policy")
+		.file_policy;
+		assert!(amended.check_read(&link).is_ok());
+		assert!(amended.open(&link, READ).is_ok());
+		assert!(amended.check_read(&keg.join("bin/other")).is_err());
 	}
 
 	#[test]

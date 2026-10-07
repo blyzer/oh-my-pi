@@ -35,6 +35,11 @@ client and framing boundary; it does not contain an alternate host.
   is in force. An explicit `yolo` (flag or user config) is respected. With no
   active sandbox the `bash` tool resolves to the `exec` tier, and one typed
   `approval-posture` notice reports the downgrade or the unconfined `yolo`.
+  Its in-shell read check under the default `host` read mode follows
+  symlinks and is narrowed only by `read_deny` (literal and resolved
+  spelling), so toolchains reached through links (Homebrew, rustup, nix
+  profiles) run without an amendment; restricted read modes and every write
+  still refuse symlink components.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 
