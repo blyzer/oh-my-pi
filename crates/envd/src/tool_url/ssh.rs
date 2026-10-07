@@ -1,4 +1,8 @@
-//! Bounded `ssh://` direct-operation resolver.
+//! Bounded, read-only `ssh://` resolver.
+//!
+//! It reads remote files and directories over SFTP, lists configured hosts, and
+//! answers `?op=stat`. It never runs a remote command: `read` and `grep` reach
+//! it, and command execution belongs to `bash`.
 
 use omp_core::{CowBytes, Str};
 use omp_tools::read::{
@@ -9,7 +13,7 @@ use omp_tools::read::{
 	selector::ParsedSelector,
 };
 
-use crate::ssh::{SshError, SshService};
+use crate::ssh::{RemoteMetadata, SshError, SshService};
 
 pub(crate) struct SshResolver {
 	service: SshService,
@@ -58,65 +62,10 @@ impl Resolve for SshResolver {
 		let Some(query) = query else {
 			return self.read(resource, selector).await;
 		};
+		parse_stat_query(query)?;
 		let (alias, path) = parse_resource(resource)?;
-		let mut operation = None;
-		let mut command = None;
-		for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
-			match name.as_ref() {
-				"op" if operation.is_none() => operation = Some(value.into_owned()),
-				"command" if command.is_none() => command = Some(value.into_owned()),
-				_ => {
-					return Err(Fault::Invalid {
-						message: Str::new_static(
-							"ssh:// accepts one op and, for exec, one command query parameter.",
-						),
-					});
-				},
-			}
-		}
-		let bytes = match operation.as_deref() {
-			Some("stat") if command.is_none() => {
-				let metadata = self.service.stat(&alias, &path).await.map_err(ssh_fault)?;
-				CowBytes::from(
-					format!(
-						"kind: {}\\nsize: {}\\n",
-						if metadata.directory {
-							"directory"
-						} else {
-							"file"
-						},
-						metadata.size
-					)
-					.into_bytes(),
-				)
-			},
-			Some("exec") => {
-				let command = command.ok_or_else(|| Fault::Invalid {
-					message: Str::new_static("ssh://?op=exec requires command."),
-				})?;
-				let output = self
-					.service
-					.exec(&alias, &command, 1024 * 1024)
-					.await
-					.map_err(ssh_fault)?;
-				let mut body = Vec::with_capacity(output.stdout.len() + output.stderr.len() + 64);
-				body.extend_from_slice(output.stdout.as_ref());
-				if !output.stderr.is_empty() {
-					body.extend_from_slice(b"\\n[stderr]\\n");
-					body.extend_from_slice(output.stderr.as_ref());
-				}
-				if let Some(status) = output.exit_status {
-					body.extend_from_slice(format!("\\n[exit status: {status}]\\n").as_bytes());
-				}
-				CowBytes::from(body)
-			},
-			_ => {
-				return Err(Fault::Invalid {
-					message: Str::new_static("ssh:// query op must be stat or exec."),
-				});
-			},
-		};
-		select_bytes(&self.lines, resource, bytes, selector)
+		let metadata = self.service.stat(&alias, &path).await.map_err(ssh_fault)?;
+		select_bytes(&self.lines, resource, stat_report(metadata), selector)
 	}
 
 	async fn list(
@@ -191,6 +140,45 @@ impl Resolve for SshResolver {
 		values.truncate(max_results);
 		Ok(values)
 	}
+}
+
+/// Refusal for `?op=exec`: running a remote command is execution, which only
+/// `bash` performs.
+const REMOTE_EXEC_REFUSED: &str = "ssh:// never runs remote commands; use `bash` with a remote \
+                                   SSH command (`ssh <alias> <command>`).";
+
+/// Accepts exactly one `op=stat` query parameter.
+///
+/// `op=exec` is refused as [`Fault::Unsupported`] naming `bash`, wherever it
+/// appears in the query, before any connection is opened.
+fn parse_stat_query(query: &str) -> Result<(), Fault> {
+	let mut stat = false;
+	let mut malformed = false;
+	for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+		match (name.as_ref(), value.as_ref()) {
+			("op", "exec") => {
+				return Err(Fault::Unsupported { message: Str::new_static(REMOTE_EXEC_REFUSED) });
+			},
+			("op", "stat") if !stat => stat = true,
+			_ => malformed = true,
+		}
+	}
+	if malformed || !stat {
+		return Err(Fault::Invalid {
+			message: Str::new_static("ssh:// accepts only the `op=stat` query."),
+		});
+	}
+	Ok(())
+}
+
+/// Renders `?op=stat` metadata as `kind` and `size` lines.
+fn stat_report(metadata: RemoteMetadata) -> CowBytes<'static> {
+	let kind = if metadata.directory {
+		"directory"
+	} else {
+		"file"
+	};
+	CowBytes::from(format!("kind: {kind}\nsize: {}\n", metadata.size).into_bytes())
 }
 
 pub(crate) fn parse_resource(resource: &str) -> Result<(Str, Str), Fault> {
@@ -279,4 +267,81 @@ fn encode_component(value: &str) -> String {
 
 fn ssh_fault(error: SshError) -> Fault {
 	Fault::Source { message: Str::new(error.to_string()) }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::ssh::HostStore;
+
+	/// A resolver with no configured hosts: any operation that reaches the SSH
+	/// service fails with `SshError::UnknownHost` before opening a connection.
+	fn resolver() -> SshResolver {
+		SshResolver::new(SshService::new(HostStore::default()))
+	}
+
+	#[tokio::test]
+	async fn exec_query_is_refused_naming_bash_before_any_connection() {
+		let resolver = resolver();
+		for (resource, query) in [
+			("prod/etc/hosts", "op=exec&command=uname%20-a"),
+			("prod/etc/hosts", "command=id&op=exec"),
+			("prod/etc/hosts", "op=ex%65c&command=id"),
+			("prod/etc/hosts", "op=stat&op=exec"),
+			("prod/", "op=exec"),
+			("", "op=exec&command=id"),
+		] {
+			let fault = resolver
+				.read_query(resource, Some(query), &ParsedSelector::None)
+				.await
+				.expect_err(query);
+			let Fault::Unsupported { message } = &fault else {
+				panic!("{resource}?{query} must be refused as unsupported, got {fault:?}");
+			};
+			assert!(message.contains("`bash`"), "{resource}?{query}: {message}");
+			assert!(message.contains("never runs remote commands"), "{resource}?{query}: {message}");
+		}
+	}
+
+	#[tokio::test]
+	async fn stat_query_and_plain_reads_still_reach_the_host_authority() {
+		let resolver = resolver();
+		for query in [Some("op=stat"), Some("op=st%61t"), None] {
+			let fault = resolver
+				.read_query("prod/etc/hosts", query, &ParsedSelector::None)
+				.await
+				.expect_err("prod is not configured");
+			assert!(
+				matches!(&fault, Fault::Source { message } if message == "SSH host prod is not configured"),
+				"{query:?}: {fault:?}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn malformed_queries_are_invalid() {
+		let resolver = resolver();
+		for query in ["", "op=list", "op=stat&op=stat", "op=stat&command=id", "command=id", "op="] {
+			let fault = resolver
+				.read_query("prod/etc/hosts", Some(query), &ParsedSelector::None)
+				.await
+				.expect_err(query);
+			assert!(
+				matches!(&fault, Fault::Invalid { message } if message == "ssh:// accepts only the `op=stat` query."),
+				"{query:?}: {fault:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn stat_report_emits_kind_and_size_lines() {
+		assert_eq!(
+			stat_report(RemoteMetadata { directory: false, size: 42 }).as_ref(),
+			b"kind: file\nsize: 42\n"
+		);
+		assert_eq!(
+			stat_report(RemoteMetadata { directory: true, size: 0 }).as_ref(),
+			b"kind: directory\nsize: 0\n"
+		);
+	}
 }
