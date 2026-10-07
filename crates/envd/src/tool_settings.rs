@@ -701,7 +701,7 @@ mod tests {
 	use omp_tool::{Effects, ExecEffects};
 
 	use super::*;
-	use crate::admission::{ApprovalPolicy, ApprovalSource, ApprovalTier};
+	use crate::admission::{ApprovalPolicy, ApprovalSource, ApprovalTier, SandboxUnavailable};
 
 	#[test]
 	fn typed_con_projection_round_trips() {
@@ -793,6 +793,40 @@ mod tests {
 				.approval_for("c", "web_search", &network, Confinement::Host, SandboxState::Active)
 				.policy,
 			ApprovalPolicy::Allow
+		);
+	}
+
+	/// `reflect@2` declares one inference request, which is the `exec` tier,
+	/// and it runs in the host process: every posture but an explicit `yolo`
+	/// prompts for it, the default one whatever the sandbox does.
+	#[test]
+	fn reflect_is_exec_tier_and_only_explicit_yolo_runs_it_unprompted() {
+		let spec = omp_tools::memory::reflect_spec();
+		assert_eq!(spec.confinement, Confinement::Host);
+		let decide = |settings: &ToolSettings, sandbox| {
+			let decision =
+				settings.approval_for("c", "reflect", &spec.effects, spec.confinement, sandbox);
+			(decision.tier, decision.mode, decision.policy)
+		};
+		let unavailable = SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };
+		for sandbox in [SandboxState::Active, SandboxState::Off, unavailable] {
+			assert_eq!(
+				decide(&ToolSettings::default(), sandbox),
+				(ApprovalTier::Exec, ApprovalMode::Write, ApprovalPolicy::Prompt),
+				"default posture with sandbox {sandbox:?}"
+			);
+		}
+		for mode in [ApprovalMode::AlwaysAsk, ApprovalMode::Write] {
+			let settings = ToolSettings::default().with_approval_mode_override(Some(mode));
+			assert_eq!(
+				decide(&settings, SandboxState::Active),
+				(ApprovalTier::Exec, mode, ApprovalPolicy::Prompt)
+			);
+		}
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
+		assert_eq!(
+			decide(&explicit, SandboxState::Active),
+			(ApprovalTier::Exec, ApprovalMode::Yolo, ApprovalPolicy::Allow)
 		);
 	}
 

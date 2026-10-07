@@ -5,6 +5,7 @@ mod file_mentions;
 pub mod gateway;
 mod goal;
 pub mod kernel;
+pub mod reflection;
 mod todo;
 
 pub use ask::{AskReply, AskRoute};
@@ -38,6 +39,9 @@ pub enum HeadlessError {
 	/// The environment tool bridge already had a different inference owner.
 	#[error("environment inference binding failed")]
 	InferenceBridge(#[from] crate::bridges::InferenceBridgeError),
+	/// The environment's memory reflection already had an inference owner.
+	#[error("memory reflection binding failed")]
+	ReflectionBridge(#[from] omp_envd::memory::ReflectionBindingError),
 	/// The authenticated eval parent could not be bound.
 	#[error("eval parent binding failed")]
 	EvalParent(#[from] omp_envd::eval::BridgeHostError),

@@ -2,7 +2,8 @@
 //!
 //! The host starts and registers the Off/Mnemopi runtime from the immutable
 //! VCS snapshot it already owns, and exposes the late-bound bridge the memory
-//! device uses to reach the client's inference authority. Prompt sampling and
+//! device's `reflect` uses to reach the session's inference authority, which
+//! the driver binds once it has composed that authority. Prompt sampling and
 //! extraction lanes live above the environment, in
 //! the higher-level driver memory composition.
 
@@ -22,7 +23,7 @@ use omp_tools::memory::{ReflectionHost, ReflectionHostError};
 
 use super::vcs::RepositorySnapshot;
 
-/// Failure to bind the app inference authority more than once.
+/// Failure to bind the session's inference authority more than once.
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum ReflectionBindingError {
 	/// A host was already installed for this environment generation.
@@ -30,8 +31,9 @@ pub enum ReflectionBindingError {
 	AlreadyBound,
 }
 
-/// Late-bound bridge from the environment memory device to Chat's inference
-/// authority.
+/// Late-bound bridge from the environment memory device to the session's
+/// inference authority. Unbound, `reflect` answers with the recalled
+/// evidence.
 #[derive(Default)]
 pub struct ReflectionBridgeHost {
 	host: OnceLock<Arc<dyn ReflectionHost>>,
@@ -43,7 +45,7 @@ impl ReflectionBridgeHost {
 		Self { host: OnceLock::new() }
 	}
 
-	/// Installs the one app-owned reflection authority.
+	/// Installs the one driver-owned reflection authority.
 	pub fn bind(&self, host: Arc<dyn ReflectionHost>) -> Result<(), ReflectionBindingError> {
 		self
 			.host

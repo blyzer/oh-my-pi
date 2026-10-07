@@ -31,7 +31,7 @@ use parking_lot::{Mutex, RwLock};
 #[path = "con_journal.rs"]
 mod con_journal;
 
-use super::{HeadlessError, gateway::GatewayInference};
+use super::{HeadlessError, gateway::GatewayInference, reflection::bind_reflection};
 use crate::registry::{
 	InferenceSessionOverrides, PinnedRoutes, ProductionInference as ProductionStack,
 	production_inference_for_session,
@@ -380,6 +380,56 @@ fn select_model(
 			(Str::new(selected.model.as_str()), role)
 		},
 		Err(_) => (Str::new(launch), None),
+	}
+}
+
+/// Resolves the model of one isolated call on `selector` (a catalog model,
+/// alias, or `@role`). An unresolvable selector is a planning
+/// `TargetNotFound`.
+fn isolated_call_model(
+	catalog: &omp_catalog::snapshot::Catalog,
+	con: &omp_con::Ctx,
+	selector: &str,
+) -> Result<omp_catalog::ModelKey, omp_ai::Error> {
+	let model = resolve_model_selector(catalog, selector)
+		.ok()
+		.or_else(|| {
+			let settings = omp_catalog::settings::ModelSettings::from_con(con);
+			crate::discovery::roles::resolve_role_selector(catalog, &settings, selector)
+				.ok()
+				.map(|selected| Str::new(selected.model.as_str()))
+		})
+		.ok_or_else(|| {
+			omp_ai::Error::planning(
+				omp_ai::ErrorKind::TargetNotFound,
+				omp_ai::ErrorDetail::target(Str::new(selector)),
+				omp_ai::ExecutionReceipt::default(),
+			)
+		})?;
+	Ok(omp_catalog::ModelKey::from(model.as_str()))
+}
+
+/// Gives a request to `model` the `ai_thinking` reasoning it lacks, unless
+/// thinking runs through the hidden tool (`ai_external_thinking`).
+fn default_reasoning(
+	catalog: &omp_catalog::snapshot::Catalog,
+	con: &omp_con::Ctx,
+	model: &omp_catalog::ModelKey<str>,
+	request: &mut ChatRequest,
+) {
+	if matches!(request.reasoning, omp_ai::Setting::Unset)
+		&& !omp_ai::settings::AI_EXTERNAL_THINKING.get(con)
+	{
+		let thinking = omp_agent::AI_THINKING.get(con);
+		request.reasoning = convar_reasoning(catalog, model, &thinking);
+	}
+}
+
+/// `base` re-targeted at `model`, keeping an explicit provider constraint.
+fn retarget(base: &Target, model: omp_catalog::ModelKey) -> Target {
+	match base {
+		Target::Provider { provider, .. } => Target::Provider { provider: provider.clone(), model },
+		_ => Target::Model(model),
 	}
 }
 
@@ -1381,40 +1431,13 @@ impl omp_agent::Inference for ProductionInference {
 		mut request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.apply_account_pins();
-		let resolved =
-			resolve_model_selector(self.routes.catalog().as_ref(), selector).or_else(|_| {
-				let settings = omp_catalog::settings::ModelSettings::from_con(&self.con);
-				crate::discovery::roles::resolve_role_selector(
-					self.routes.catalog().as_ref(),
-					&settings,
-					selector,
-				)
-				.map(|selected| Str::new(selected.model.as_str()))
-				.map_err(|_| HeadlessError::UnknownModel { selector: Str::new(selector) })
-			});
+		let resolved = isolated_call_model(self.routes.catalog().as_ref(), &self.con, selector);
 		async move {
-			let model = resolved.map_err(|_| {
-				omp_ai::Error::planning(
-					omp_ai::ErrorKind::TargetNotFound,
-					omp_ai::ErrorDetail::target(Str::new(selector)),
-					omp_ai::ExecutionReceipt::default(),
-				)
-			})?;
-			let key = omp_catalog::ModelKey::from(model.as_str());
-			if matches!(request.reasoning, omp_ai::Setting::Unset)
-				&& !omp_ai::settings::AI_EXTERNAL_THINKING.get(&self.con)
-			{
-				let thinking = omp_agent::AI_THINKING.get(&self.con);
-				request.reasoning = convar_reasoning(self.routes.catalog().as_ref(), &key, &thinking);
-			}
+			let key = resolved?;
+			default_reasoning(self.routes.catalog().as_ref(), &self.con, &key, &mut request);
 			let live = self.routes.client_mut().call_meta().clone();
 			let mut meta = self.meta.clone();
-			meta.target = match &self.meta.target {
-				Target::Provider { provider, .. } => {
-					Target::Provider { provider: provider.clone(), model: key }
-				},
-				_ => Target::Model(key),
-			};
+			meta.target = retarget(&self.meta.target, key);
 			self.routes.client_mut().set_call_meta(meta);
 			let result = self.routes.client_mut().execute(request).await;
 			self.routes.client_mut().set_call_meta(live);
@@ -1581,6 +1604,100 @@ impl SpeechRewriteClient {
 	}
 }
 
+/// Cloneable side route over the session's inference authorities, for an
+/// auxiliary request issued while the kernel owns the primary route (memory
+/// reflection runs inside a tool call).
+///
+/// A direct production call pins the session's current registry publication
+/// and honors its journaled account pins; behind a gateway it rides the
+/// already-connected channel. It never builds a second provider stack, and a
+/// clone shares every authority.
+#[derive(Clone)]
+pub struct AuxiliaryInference {
+	route: AuxiliaryRoute,
+}
+
+#[derive(Clone)]
+enum AuxiliaryRoute {
+	Production(Arc<AuxiliaryProduction>),
+	Gateway(GatewayInference),
+}
+
+struct AuxiliaryProduction {
+	/// The session's registry publication point.
+	registry: omp_ai::RegistryHandle,
+	/// Authentication owner that resolves `ai_account_pins` per call.
+	auth:     omp_ai::auth::AuthManager,
+	/// The session's control context: `ai_model`, `ai_thinking`, roles, pins.
+	con:      Arc<omp_con::Ctx>,
+	/// Launch target; a selected model re-targets it and keeps its provider.
+	target:   Target,
+	/// Launch model the live `ai_model` selection falls back to.
+	launch:   Str,
+}
+
+impl AuxiliaryProduction {
+	/// Plans and starts one call on the current publication: `selector` when
+	/// given, else the live `ai_model` selection.
+	async fn chat(
+		&self,
+		selector: Option<&str>,
+		mut request: ChatRequest,
+	) -> Result<ChatStream, omp_ai::Error> {
+		let affinity = omp_ai::CallAffinity {
+			account_pins: self
+				.auth
+				.session_pins(&omp_ai::account::AI_ACCOUNT_PINS.get(&self.con)),
+			..omp_ai::CallAffinity::none()
+		};
+		let meta = CallMeta {
+			id:             RequestId::from(format!("omp-auxiliary-{}", Ulid::generate())),
+			target:         self.target.clone(),
+			deadline:       None,
+			budget:         ExecutionBudget::default(),
+			session:        None,
+			debug_session:  None,
+			response_hooks: Default::default(),
+		};
+		let mut routes = PinnedRoutes::new(self.registry.clone(), meta, affinity);
+		let key = if let Some(selector) = selector {
+			isolated_call_model(routes.catalog().as_ref(), &self.con, selector)?
+		} else {
+			let model = select_model(routes.catalog().as_ref(), &self.con, &self.launch).0;
+			omp_catalog::ModelKey::from(model.as_str())
+		};
+		default_reasoning(routes.catalog().as_ref(), &self.con, &key, &mut request);
+		let mut meta = routes.client().call_meta().clone();
+		meta.target = retarget(&self.target, key);
+		routes.client_mut().set_call_meta(meta);
+		routes.client_mut().execute(request).await
+	}
+}
+
+impl omp_agent::Inference for AuxiliaryInference {
+	/// One call on the session's live `ai_model` selection.
+	async fn chat(&mut self, request: ChatRequest) -> Result<ChatStream, omp_ai::Error> {
+		match &mut self.route {
+			AuxiliaryRoute::Production(production) => production.chat(None, request).await,
+			AuxiliaryRoute::Gateway(gateway) => gateway.chat(request).await,
+		}
+	}
+
+	/// One isolated call on `selector` (a catalog model, alias, or `@role`),
+	/// resolved like the kernel's own isolated calls; a gateway decides the
+	/// model itself.
+	async fn chat_on(
+		&mut self,
+		selector: &str,
+		request: ChatRequest,
+	) -> Result<ChatStream, omp_ai::Error> {
+		match &mut self.route {
+			AuxiliaryRoute::Production(production) => production.chat(Some(selector), request).await,
+			AuxiliaryRoute::Gateway(gateway) => gateway.chat_on(selector, request).await,
+		}
+	}
+}
+
 /// Inference selected by one headless invocation.
 pub enum ComposedInference {
 	/// Direct production provider stack.
@@ -1701,6 +1818,23 @@ impl ComposedInference {
 				Some(SpeechRewriteClient::Gateway { inference: inference.clone() })
 			},
 		}
+	}
+
+	/// Returns the cloneable side route over this composition's production
+	/// registry, credentials, and account pins, or its connected gateway.
+	#[must_use]
+	pub fn auxiliary_inference(&self) -> AuxiliaryInference {
+		let route = match self {
+			Self::Production(inference) => AuxiliaryRoute::Production(Arc::new(AuxiliaryProduction {
+				registry: inference.stack.registry.clone(),
+				auth:     inference.stack.auth_manager.clone(),
+				con:      Arc::clone(&inference.con),
+				target:   inference.meta.target.clone(),
+				launch:   inference.launch.model.clone(),
+			})),
+			Self::Gateway { inference, .. } => AuxiliaryRoute::Gateway(inference.clone()),
+		};
+		AuxiliaryInference { route }
 	}
 
 	/// Resolves the production target for a side-channel request without
@@ -2249,6 +2383,12 @@ pub async fn compose_kernel(
 			})
 		},
 	};
+	// A `reflect` this process hosts synthesizes through the session's own
+	// inference capability, one auxiliary request per call; an attached
+	// session's runs on the project daemon, which this binding cannot reach.
+	if tools_enabled {
+		bind_reflection(inference.environment(), inference.auxiliary_inference())?;
+	}
 
 	let terminal = terminal_identity();
 	let journal_path = select_journal_path(

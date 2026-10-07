@@ -1229,7 +1229,9 @@ impl ProjectEnvironment {
 		self.eval_bridge.bind_sdk_parent(owner, parent)
 	}
 
-	/// Returns the late-bound memory reflection bridge.
+	/// Returns the late-bound memory reflection bridge of the `reflect` this
+	/// composition hosts. An attached session's `reflect` runs on the project
+	/// daemon, which no binding here reaches.
 	pub fn reflection_bridge(&self) -> Arc<memory::ReflectionBridgeHost> {
 		Arc::clone(&self.reflection_bridge)
 	}

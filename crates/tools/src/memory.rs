@@ -15,8 +15,8 @@ use omp_memory::{
 };
 use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Effects, Ev,
-	IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec,
-	ToolTerminal,
+	IncomingParams, InferenceEffects, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev,
+	Tool, ToolSpec, ToolTerminal, Usd,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -125,7 +125,8 @@ pub enum Fault {
 	Synthesis,
 }
 
-/// Bounded reflection request crossing from the memory device to app inference.
+/// Bounded reflection request crossing from the memory device to the session's
+/// inference authority.
 #[derive(Clone, Debug)]
 pub struct ReflectionRequest {
 	/// Question to answer.
@@ -136,10 +137,10 @@ pub struct ReflectionRequest {
 	pub memories: Arc<[RecallResult]>,
 }
 
-/// Typed refusal from the app inference authority.
+/// Typed refusal from the session's inference authority.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ReflectionHostError {
-	/// No app inference authority is currently bound.
+	/// No inference authority is currently bound.
 	#[error("memory reflection host is unavailable")]
 	Unavailable,
 	/// Inference ended without a usable synthesis.
@@ -147,10 +148,11 @@ pub enum ReflectionHostError {
 	Inference,
 }
 
-/// App-owned auxiliary synthesis authority injected into the memory device.
+/// Driver-owned auxiliary synthesis authority injected into the memory device.
 #[async_trait::async_trait]
 pub trait ReflectionHost: Send + Sync + 'static {
-	/// Synthesizes an answer from bounded, relevance-ranked memories.
+	/// Synthesizes an answer from bounded, relevance-ranked memories with at
+	/// most one inference request, the ceiling [`reflect_spec`] declares.
 	async fn reflect(&self, request: ReflectionRequest) -> Result<Str, ReflectionHostError>;
 }
 
@@ -182,17 +184,28 @@ pub struct RetainTool {
 
 /// Builds the host-free `recall@2` declaration.
 pub fn recall_spec() -> ToolSpec {
-	memory_spec::<RecallParams>("recall", RECALL_DESCRIPTION)
+	memory_spec::<RecallParams>("recall", RECALL_DESCRIPTION, Effects::empty())
 }
 
 /// Builds the host-free `reflect@2` declaration.
+///
+/// A call that recalls evidence asks its [`ReflectionHost`] for one auxiliary
+/// synthesis, so the declaration carries one inference request with no spend
+/// ceiling of its own; the evidence fallback of an unbound host stays within
+/// it.
 pub fn reflect_spec() -> ToolSpec {
-	memory_spec::<ReflectParams>("reflect", REFLECT_DESCRIPTION)
+	memory_spec::<ReflectParams>("reflect", REFLECT_DESCRIPTION, Effects {
+		inference: Some(InferenceEffects {
+			max_requests: 1,
+			max_usd:      Usd::from_nanos(u64::MAX),
+		}),
+		..Effects::empty()
+	})
 }
 
 /// Builds the host-free `retain@2` declaration.
 pub fn retain_spec() -> ToolSpec {
-	memory_spec::<RetainParams>("retain", RETAIN_DESCRIPTION)
+	memory_spec::<RetainParams>("retain", RETAIN_DESCRIPTION, Effects::empty())
 }
 
 /// Creates the revisioned recall leaf.
@@ -474,18 +487,22 @@ impl Tool for RetainTool {
 	}
 }
 
-fn memory_spec<P: JsonSchema>(name: &'static str, description: &'static str) -> ToolSpec {
+fn memory_spec<P: JsonSchema>(
+	name: &'static str,
+	description: &'static str,
+	effects: Effects,
+) -> ToolSpec {
 	ToolSpec {
-		name:            Str::new_static(name),
-		rev:             Rev { family: Str::default(), n: 2 },
-		description:     Str::new_static(description),
-		schema:          omp_tool::schema::<P>(),
-		constraint:      Constraint::Schema {
+		name: Str::new_static(name),
+		rev: Rev { family: Str::default(), n: 2 },
+		description: Str::new_static(description),
+		schema: omp_tool::schema::<P>(),
+		constraint: Constraint::Schema {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		effects:         Effects::empty(),
-		confinement:     omp_tool::Confinement::Host,
+		effects,
+		confinement: omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),
@@ -596,3 +613,156 @@ const REFLECT_DESCRIPTION: &str = "Synthesize a coherent answer across relevant 
                                    facts; optional context focuses the synthesis.";
 const RETAIN_DESCRIPTION: &str = "Store one or more specific, self-contained durable facts in \
                                   long-term memory. Do not retain ephemeral task state.";
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		path::Path,
+		sync::atomic::{AtomicUsize, Ordering},
+	};
+
+	use futures::StreamExt as _;
+	use omp_memory::{
+		MemoryBackend, MnemopiSettings, config::EmbeddingVariant, runtime::RuntimeStart,
+	};
+
+	use super::*;
+
+	/// Counts every synthesis request and answers each with `answer`.
+	struct CountingHost {
+		requests: AtomicUsize,
+		answer:   Result<Str, ReflectionHostError>,
+	}
+
+	impl CountingHost {
+		const fn new(answer: Result<Str, ReflectionHostError>) -> Self {
+			Self { requests: AtomicUsize::new(0), answer }
+		}
+	}
+
+	#[async_trait::async_trait]
+	impl ReflectionHost for CountingHost {
+		async fn reflect(&self, request: ReflectionRequest) -> Result<Str, ReflectionHostError> {
+			self.requests.fetch_add(1, Ordering::SeqCst);
+			assert!(!request.memories.is_empty(), "a host is asked only with recalled evidence");
+			self.answer.clone()
+		}
+	}
+
+	/// A lexical Mnemopi bank in `scratch` holding one durable fact.
+	fn runtime(scratch: &Path, fact: Option<&str>) -> Arc<MemoryRuntime> {
+		let runtime = MemoryRuntime::start(RuntimeStart {
+			session_id:             Str::new_static("reflect-test"),
+			data_dir:               scratch.join("data"),
+			workspace_root:         scratch.to_path_buf(),
+			canonical_primary_root: Some(scratch.to_path_buf()),
+			backend:                MemoryBackend::Mnemopi,
+			mnemopi:                MnemopiSettings {
+				embedding_variant: EmbeddingVariant::Disabled,
+				..MnemopiSettings::default()
+			},
+		})
+		.expect("Mnemopi runtime");
+		if let Some(fact) = fact {
+			runtime
+				.save_batch(&[SaveRequest { content: fact, context: None }], "reflect-test", 0.75)
+				.expect("retain the fact");
+		}
+		runtime
+	}
+
+	async fn reflect<H: ReflectionHost>(
+		tool: &ReflectTool<H>,
+		query: &str,
+	) -> Result<ReflectPayload, Fault> {
+		let (feed, incoming) = IncomingParams::channel();
+		feed
+			.args_committed(Str::new(serde_json::json!({ "query": query }).to_string()))
+			.expect("commit the arguments");
+		let events = tool.call(incoming).collect::<Vec<_>>().await;
+		match events.into_iter().last() {
+			Some(Ev::Done(ToolTerminal::Done { result, .. })) => result,
+			other => panic!("reflect must settle with a verdict, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn reflect_declares_one_inference_request_and_its_siblings_declare_none() {
+		let reflect = reflect_spec();
+		assert_eq!(reflect.effects, Effects {
+			inference: Some(InferenceEffects {
+				max_requests: 1,
+				max_usd:      Usd::from_nanos(u64::MAX),
+			}),
+			..Effects::empty()
+		});
+		assert!(!reflect.effects.mutates_environment(), "synthesis touches no project state");
+		assert_eq!(recall_spec().effects, Effects::empty());
+		assert_eq!(retain_spec().effects, Effects::empty());
+	}
+
+	#[tokio::test(flavor = "current_thread")]
+	async fn reflect_asks_its_host_exactly_once_for_recalled_evidence() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let host = Arc::new(CountingHost::new(Ok(Str::new_static("The deploy target is fly.io."))));
+		let tool = reflect_tool(
+			runtime(scratch.path(), Some("The deploy target is fly.io")),
+			Arc::clone(&host),
+		);
+
+		let payload = reflect(&tool, "deploy target")
+			.await
+			.expect("synthesized answer");
+
+		assert_eq!(payload, ReflectPayload {
+			answer:   Str::new_static("The deploy target is fly.io."),
+			recalled: 1,
+		});
+		assert_eq!(host.requests.load(Ordering::SeqCst), 1);
+	}
+
+	#[tokio::test(flavor = "current_thread")]
+	async fn reflect_without_evidence_never_asks_its_host() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let host = Arc::new(CountingHost::new(Ok(Str::new_static("unused"))));
+		let tool = reflect_tool(runtime(scratch.path(), None), Arc::clone(&host));
+
+		let payload = reflect(&tool, "deploy target")
+			.await
+			.expect("empty reflection");
+
+		assert_eq!(payload.recalled, 0);
+		assert_eq!(host.requests.load(Ordering::SeqCst), 0);
+	}
+
+	#[tokio::test(flavor = "current_thread")]
+	async fn an_unbound_host_answers_with_the_recalled_evidence() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let host = Arc::new(CountingHost::new(Err(ReflectionHostError::Unavailable)));
+		let tool = reflect_tool(
+			runtime(scratch.path(), Some("The deploy target is fly.io")),
+			Arc::clone(&host),
+		);
+
+		let payload = reflect(&tool, "deploy target")
+			.await
+			.expect("evidence fallback");
+
+		assert!(payload.answer.starts_with("Based on recalled memories:"), "{payload:?}");
+		assert!(payload.answer.contains("The deploy target is fly.io"), "{payload:?}");
+		assert_eq!(payload.recalled, 1);
+	}
+
+	#[tokio::test(flavor = "current_thread")]
+	async fn a_failed_synthesis_is_a_typed_fault() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let host = Arc::new(CountingHost::new(Err(ReflectionHostError::Inference)));
+		let tool = reflect_tool(
+			runtime(scratch.path(), Some("The deploy target is fly.io")),
+			Arc::clone(&host),
+		);
+
+		assert_eq!(reflect(&tool, "deploy target").await, Err(Fault::Synthesis));
+		assert_eq!(host.requests.load(Ordering::SeqCst), 1);
+	}
+}
