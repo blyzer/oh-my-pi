@@ -75,7 +75,6 @@ impl ScopedProxy {
 			let listener = UnixListener::bind(&socket)?;
 			use std::os::unix::fs::PermissionsExt as _;
 			std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-			listener.set_nonblocking(true)?;
 			// A port is scoped to Bubblewrap's private network namespace. Reserving one
 			// on the host selects a nonzero port without granting host reachability.
 			let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
@@ -98,7 +97,6 @@ impl ScopedProxy {
 		{
 			let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
 			let port = listener.local_addr()?.port();
-			listener.set_nonblocking(true)?;
 			let listener =
 				spawn_listener("omp-scoped-proxy", listener, policy, live, Arc::clone(&shutdown))?;
 			Ok(Self { port, shutdown, attempts, listener: Some(listener) })
@@ -149,11 +147,16 @@ impl ScopedProxy {
 impl Drop for ScopedProxy {
 	fn drop(&mut self) {
 		self.shutdown.store(true, Ordering::Release);
+		// The listener thread blocks in `accept`; one connection wakes it to see
+		// the flag. Should that connection fail, joining could wait forever, so
+		// the thread is detached instead and exits if a connection ever reaches it.
 		#[cfg(target_os = "linux")]
-		let _ = UnixStream::connect(&self.socket);
+		let woke = UnixStream::connect(&self.socket).is_ok();
 		#[cfg(not(target_os = "linux"))]
-		let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
-		if let Some(listener) = self.listener.take() {
+		let woke = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port)).is_ok();
+		if let Some(listener) = self.listener.take()
+			&& woke
+		{
 			let _ = listener.join();
 		}
 	}
@@ -245,6 +248,11 @@ impl BrokerListener for UnixListener {
 	}
 }
 
+/// Serves `listener` on its own thread until `shutdown` is set.
+///
+/// The thread blocks in `accept`, so an idle broker costs no wakeups. Whoever
+/// stops it sets `shutdown` and then connects once, which wakes the blocked
+/// `accept` to see the flag.
 fn spawn_listener<L>(
 	name: &str,
 	listener: L,
@@ -260,8 +268,9 @@ where
 		while !shutdown.load(Ordering::Acquire) {
 			match listener.accept() {
 				Ok(_stream) if shutdown.load(Ordering::Acquire) => break,
-				// BSD accept() hands out sockets that inherit the listener's O_NONBLOCK;
-				// every path below reads with blocking calls bounded by socket timeouts.
+				// BSD accept() hands out sockets that inherit a nonblocking listener's
+				// O_NONBLOCK; every path below reads with blocking calls bounded by
+				// socket timeouts.
 				Ok(stream) if stream.set_blocking().is_err() => {},
 				Ok(stream) if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS => {
 					live.fetch_sub(1, Ordering::AcqRel);
@@ -281,9 +290,6 @@ where
 					{
 						live.fetch_sub(1, Ordering::AcqRel);
 					}
-				},
-				Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-					thread::sleep(Duration::from_millis(10));
 				},
 				Err(_) => break,
 			}
@@ -1645,8 +1651,16 @@ mod tests {
 		proxy.join().expect("denial proxy");
 	}
 
-	/// Accepts the way BSD and macOS do: the stream inherits the listener's
-	/// `O_NONBLOCK`, which Linux never passes on.
+	/// Stops a test broker the way [`ScopedProxy`]'s `Drop` does: raise the
+	/// flag, then connect once so the blocked `accept` returns and sees it.
+	fn stop_listener(address: SocketAddr, shutdown: &AtomicBool, broker: thread::JoinHandle<()>) {
+		shutdown.store(true, Ordering::Release);
+		TcpStream::connect(address).expect("wake the blocked accept");
+		broker.join().expect("broker");
+	}
+
+	/// Accepts the way BSD and macOS do for a nonblocking listener: the stream
+	/// inherits the listener's `O_NONBLOCK`, which Linux never passes on.
 	struct InheritingListener(TcpListener);
 
 	impl BrokerListener for InheritingListener {
@@ -1681,9 +1695,6 @@ mod tests {
 		});
 
 		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
-		listener
-			.set_nonblocking(true)
-			.expect("nonblocking listener");
 		let address = listener.local_addr().expect("proxy address");
 		let shutdown = Arc::new(AtomicBool::new(false));
 		let live = Arc::new(AtomicUsize::new(0));
@@ -1721,18 +1732,14 @@ mod tests {
 		assert!(response.starts_with("HTTP/1.1 204"), "response: {response:?}");
 		drop(client);
 		upstream_task.join().expect("upstream task");
-		shutdown.store(true, Ordering::Release);
-		broker.join().expect("broker");
+		stop_listener(address, &shutdown, broker);
 	}
 
 	#[test]
 	fn over_limit_denial_survives_unread_request_bytes() {
 		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
-		listener
-			.set_nonblocking(true)
-			.expect("nonblocking listener");
-		let mut client =
-			TcpStream::connect(listener.local_addr().expect("proxy address")).expect("connect proxy");
+		let address = listener.local_addr().expect("proxy address");
+		let mut client = TcpStream::connect(address).expect("connect proxy");
 		// The whole request is queued before the broker accepts, so closing right
 		// after the denial would close over unread input and reset.
 		let mut request = b"GET http://127.0.0.1:80/ HTTP/1.1\r\n\r\n".to_vec();
@@ -1756,16 +1763,12 @@ mod tests {
 			.read_to_string(&mut response)
 			.expect("over-limit denial is delivered before a clean close");
 		assert!(response.starts_with("HTTP/1.1 403"));
-		shutdown.store(true, Ordering::Release);
-		broker.join().expect("broker");
+		stop_listener(address, &shutdown, broker);
 	}
 
 	#[test]
 	fn over_limit_rejections_never_stall_accept() {
 		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
-		listener
-			.set_nonblocking(true)
-			.expect("nonblocking listener");
 		let address = listener.local_addr().expect("proxy address");
 		let shutdown = Arc::new(AtomicBool::new(false));
 		let saturated = Arc::new(AtomicUsize::new(MAX_CONNECTIONS));
@@ -1782,7 +1785,7 @@ mod tests {
 		// A stalled accept delays one client by a full drain timeout, so each
 		// client is timed on its own against half of it. Bounding the whole loop
 		// by one timeout would instead fail on a slow runner where 40 sequential
-		// connects (each waiting out an accept poll) merely add up.
+		// connects merely add up.
 		let mut clients = Vec::new();
 		for index in 0..MAX_LINGERING_REJECTIONS + 8 {
 			let started = Instant::now();
@@ -1805,8 +1808,7 @@ mod tests {
 			clients.push(client);
 		}
 		drop(clients);
-		shutdown.store(true, Ordering::Release);
-		broker.join().expect("broker");
+		stop_listener(address, &shutdown, broker);
 	}
 
 	#[test]
