@@ -40,7 +40,10 @@ Open, in the order the owner approved the sequence:
    should provide. Also: `omp config mcp add --scope project` and `/mcp add` write servers that do
    not load until the user opts in and print no hint; the literal-value notice goes only to
    `tracing`, not to the TUI.
-3. **F2** native `.omp/extensions` with self-declared grants. **F3** LSP and DAP project config
+3. **F11** (`omp adw run` workflows) was re-read on 2026-10-07 and re-rated Medium: code phases run
+   unsandboxed with the full environment, the reported posture is not applied to them, and the command
+   ignores operator configuration (detail in the audit, "F11 detail"). Not started.
+   **F2** native `.omp/extensions` with self-declared grants. **F3** LSP and DAP project config
    reading is now contained (#180) but launching repo-local binaries (`node_modules/.bin`,
    `.venv/bin`, `bin`) is not gated.
 4. **Not covered by #180:** `HostStore::upsert` and `persist_hosts` (hosts.toml writes, `ssh add`)
