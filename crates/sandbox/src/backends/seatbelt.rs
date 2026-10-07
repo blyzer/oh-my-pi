@@ -154,13 +154,26 @@ pub fn compile(
 		push_string(&mut profile, service);
 		profile.push_str("))\n");
 	}
-	match spec.network {
-		NetworkMode::Disabled => profile.push_str("(deny network*)\n"),
-		NetworkMode::Enabled => {
+	match (spec.network, spec.proxy_port) {
+		(_, Some(port)) => {
+			// Scoped egress never grants general networking: the only reachable
+			// TCP peer is the session-owned loopback broker, whatever the network
+			// mode. No broad grant may precede this: a wildcard `(deny network*)`
+			// does not override an earlier `(allow network-outbound)`, so emitting
+			// the outbound grant first left every direct connection open. SBPL
+			// accepts only `*` or `localhost` as the host of a network address; a
+			// literal `127.0.0.1` makes `sandbox-exec` reject the whole profile.
+			profile.push_str(NETWORK_SERVICE_POLICY);
+			profile.push_str("(deny network*)\n(allow network-outbound (remote tcp ");
+			push_string(&mut profile, &format!("localhost:{port}"));
+			profile.push_str("))\n");
+		},
+		(NetworkMode::Disabled, None) => profile.push_str("(deny network*)\n"),
+		(NetworkMode::Enabled, None) => {
 			profile.push_str(NETWORK_SERVICE_POLICY);
 			profile.push_str("(allow network-outbound)\n(allow network-inbound)\n");
 		},
-		NetworkMode::Outbound => {
+		(NetworkMode::Outbound, None) => {
 			profile.push_str(NETWORK_SERVICE_POLICY);
 			profile.push_str("(allow network-outbound)\n");
 			profile.push_str("(deny network-inbound)\n(deny network-bind)\n");
@@ -172,13 +185,6 @@ pub fn compile(
 				 \"/private/var/run/mDNSResponder\")))\n",
 			);
 		},
-	}
-	if let Some(port) = spec.proxy_port {
-		// Scoped egress never grants general networking: the only reachable TCP
-		// peer is the session-owned loopback broker.
-		profile.push_str("(deny network*)\n(allow network-outbound (remote tcp ");
-		push_string(&mut profile, &format!("127.0.0.1:{port}"));
-		profile.push_str("))\n");
 	}
 
 	if spec.readable.is_empty() {
@@ -606,6 +612,8 @@ mod tests {
 	#[test]
 	fn scoped_proxy_allows_only_its_exact_loopback_tcp_port() {
 		let mut spec = SandboxSpec::new("/bin/true");
+		// envd's `scoped` mode asks for outbound networking plus the broker.
+		spec.set_network(NetworkMode::Outbound);
 		spec
 			.set_proxy_endpoint(18443, None)
 			.expect("proxy endpoint");
@@ -619,7 +627,11 @@ mod tests {
 		.expect("seatbelt plan");
 		let profile = plan.profile().expect("seatbelt profile");
 		assert!(profile.contains("(deny network*)"));
-		assert!(profile.contains("(remote tcp \"127.0.0.1:18443\")"));
+		assert!(profile.contains("(remote tcp \"localhost:18443\")"));
+		assert!(
+			!profile.contains("(allow network-outbound)\n"),
+			"no broad outbound grant may precede the broker rule: {profile}"
+		);
 	}
 
 	#[test]
