@@ -864,7 +864,7 @@ impl ApprovalRoute {
 			.deliver(ApprovalRequest { ticket: ticket.clone(), reply })
 			.is_err()
 		{
-			let decision = unreachable_decision(&ticket, "approval host disconnected");
+			let decision = ticket.unreachable_decision("approval host disconnected");
 			self
 				.inner
 				.notify_resolved(&ticket, &decision, filed.elapsed());
@@ -878,13 +878,13 @@ impl ApprovalRoute {
 			tokio::select! {
 				biased;
 				() = cancellation.cancelled() => {
-					unreachable_decision(&ticket, "approval request cancelled")
+					ticket.unreachable_decision("approval request cancelled")
 				},
 				result = time::timeout(Duration::from_millis(timeout_ms), response.recv_async()) => {
 					match result {
 						Ok(Ok(decision)) => decision,
-						Ok(Err(_)) => unreachable_decision(&ticket, "approval host became unreachable"),
-						Err(_) => timeout_decision(&ticket),
+						Ok(Err(_)) => ticket.unreachable_decision("approval host became unreachable"),
+						Err(_) => ticket.timeout_decision(),
 					}
 				},
 			}
@@ -892,10 +892,10 @@ impl ApprovalRoute {
 			tokio::select! {
 				biased;
 				() = cancellation.cancelled() => {
-					unreachable_decision(&ticket, "approval request cancelled")
+					ticket.unreachable_decision("approval request cancelled")
 				},
 				result = response.recv_async() => result.unwrap_or_else(|_| {
-					unreachable_decision(&ticket, "approval host became unreachable")
+					ticket.unreachable_decision("approval host became unreachable")
 				}),
 			}
 		};
@@ -945,35 +945,46 @@ impl ApprovalRoute {
 	}
 }
 
-pub(crate) fn timeout_decision(ticket: &ApprovalTicket) -> ApprovalDecision {
-	let mut defaults = ticket.reasons.iter().map(|reason| reason.default);
-	let first = defaults.next().flatten();
-	let approved = first.is_some() && defaults.all(|value| value == first) && first == Some(true);
-	ApprovalDecision {
-		approved,
-		scope: ApprovalScope::Once,
-		source: ApprovalSource::Timeout,
-		decided_by: None,
-		reason: Some(sf!("approval request timed out")),
-		audited: approved,
+impl ApprovalTicket {
+	/// The decision applied when this prompt's timeout passes unanswered.
+	///
+	/// It approves, once and audited, only when every requirement declares the
+	/// same `true` timeout default; any absent or `false` default denies.
+	#[must_use]
+	pub fn timeout_decision(&self) -> ApprovalDecision {
+		let mut defaults = self.reasons.iter().map(|reason| reason.default);
+		let first = defaults.next().flatten();
+		let approved = first.is_some() && defaults.all(|value| value == first) && first == Some(true);
+		ApprovalDecision {
+			approved,
+			scope: ApprovalScope::Once,
+			source: ApprovalSource::Timeout,
+			decided_by: None,
+			reason: Some(sf!("approval request timed out")),
+			audited: approved,
+		}
 	}
-}
 
-pub(crate) fn unreachable_decision(
-	ticket: &ApprovalTicket,
-	reason: &'static str,
-) -> ApprovalDecision {
-	let approved = !ticket.reasons.is_empty()
-		&& ticket
-			.reasons
-			.iter()
-			.all(|spec| matches!(spec.unreachable.as_str(), "allow" | "approve" | "fail_open"));
-	ApprovalDecision {
-		approved,
-		scope: ApprovalScope::Once,
-		source: ApprovalSource::Unavailable,
-		decided_by: None,
-		reason: Some(Str::new_static(reason)),
-		audited: approved,
+	/// The decision applied when no approver can answer this prompt, for
+	/// `reason`.
+	///
+	/// It approves, once and audited, only when every requirement declares a
+	/// fail-open unreachable behavior (`allow`, `approve`, or `fail_open`);
+	/// otherwise it denies.
+	#[must_use]
+	pub fn unreachable_decision(&self, reason: &'static str) -> ApprovalDecision {
+		let approved = !self.reasons.is_empty()
+			&& self
+				.reasons
+				.iter()
+				.all(|spec| matches!(spec.unreachable.as_str(), "allow" | "approve" | "fail_open"));
+		ApprovalDecision {
+			approved,
+			scope: ApprovalScope::Once,
+			source: ApprovalSource::Unavailable,
+			decided_by: None,
+			reason: Some(Str::new_static(reason)),
+			audited: approved,
+		}
 	}
 }
