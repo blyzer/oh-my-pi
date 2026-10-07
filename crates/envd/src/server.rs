@@ -4415,6 +4415,7 @@ impl EnvServer {
 				| client_frame::Body::Admission(_)
 				| client_frame::Body::EditRepairAnswer(_)
 				| client_frame::Body::AcpDocumentAnswer(_)
+				| client_frame::Body::ApprovalAnswer(_)
 				| client_frame::Body::ArgsCommitted(_)
 				| client_frame::Body::Interrupt(_)
 				| client_frame::Body::Stdin(_)
@@ -4787,6 +4788,16 @@ impl EnvServer {
 				if let Err((code, message)) = connection.answer_acp_document(frame.request_id, answer) {
 					send_error(responses, frame.request_id, code, message).await;
 				}
+			},
+			// No connection relays approvals to its client yet. A stray answer is
+			// dropped without a reply: an error on its request_id would end the
+			// issuing command's stream.
+			client_frame::Body::ApprovalAnswer(answer) => {
+				tracing::debug!(
+					request_id = frame.request_id,
+					query_id = answer.query_id,
+					"ignored an approval answer on a connection that relays no approvals"
+				);
 			},
 			client_frame::Body::ArgsCommitted(request) => {
 				match connection.scope_authenticates(
@@ -12473,6 +12484,48 @@ mod tests {
 			Some(server_frame::Body::EvalReset(pb::EvalResetResponse {}))
 		));
 	}
+
+	/// An approval answer is a continuation of its query's request and is valid
+	/// on every host kind, so a session-only host never refuses it with an
+	/// error that would end the issuing request's stream.
+	#[test]
+	fn approval_answers_reach_every_host_kind() {
+		assert!(!requires_environment_host(&client_frame::Body::ApprovalAnswer(
+			pb::ApprovalAnswer::default(),
+		)));
+	}
+
+	#[tokio::test]
+	async fn stray_approval_answer_is_dropped_without_a_reply() {
+		let (requests, responses, _root, _state) = test_connection(&[], false).await;
+		let answer = pb::ApprovalAnswer {
+			query_id: 1,
+			decision: Some(pb::ApprovalDecision {
+				approved: true,
+				scope: "once".into(),
+				source: "user".into(),
+				..pb::ApprovalDecision::default()
+			}),
+		};
+		for frame in [
+			pb::ClientFrame {
+				request_id: 5,
+				body: Some(client_frame::Body::ApprovalAnswer(answer)),
+				..pb::ClientFrame::default()
+			},
+			pb::ClientFrame {
+				request_id: 6,
+				body: Some(client_frame::Body::EvalReset(pb::EvalResetRequest {})),
+				..pb::ClientFrame::default()
+			},
+		] {
+			requests.send_async(frame).await.expect("send frame");
+		}
+		let frame = responses.recv_async().await.expect("eval reset response");
+		assert_eq!(frame.request_id, 6, "the stray approval answer drew a reply: {:?}", frame.body);
+		assert!(matches!(frame.body, Some(server_frame::Body::EvalReset(pb::EvalResetResponse {}))));
+	}
+
 	/// Owner-local connections may run eval on this host; extension-host
 	/// connections are the one class the eval guard still rejects.
 	#[tokio::test]

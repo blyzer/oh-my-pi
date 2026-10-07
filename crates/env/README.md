@@ -18,6 +18,11 @@ provides the one client that routes between them.
   detached daemon from registry-stamped tool loci and exhaustive frame kinds.
 - `Invocation`, `RunGuard`, and the streaming handles retain request identity,
   cancellation, and server-event correlation.
+- Daemon-initiated queries bypass request streams. Admission goes to the
+  installed `Admitter`; edit-repair, ACP document, and relayed approval
+  queries go to single-consumer queues, and their answers open no response
+  stream. Approval queries reach only a client that advertised
+  `APPROVAL_RELAY_CAPABILITY`, for commands it issued.
 - `ExtensionEnvClient` and `WorkerEnvClient` are capability-reduced DATA
   clients for host-managed children; they are not host implementations.
 - `project_state` derives project-keyed state and transport paths shared by

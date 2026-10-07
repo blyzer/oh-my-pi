@@ -11,6 +11,7 @@ readme = "README.md"
 
 [dependencies]
 bytes.workspace = true
+dashmap.workspace = true
 flume.workspace = true
 omp-ar.workspace = true
 omp-core.workspace = true

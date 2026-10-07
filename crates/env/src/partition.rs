@@ -256,6 +256,11 @@ fn route_client_frame(
 		Some(client_frame::Body::AcpDocumentAnswer(value)) => {
 			invocation_route(&value.invocation_id, invocations)
 		},
+		// The backend that raised the query owns the issuing request; a request
+		// whose route ended (a detached command) defaults to the environment.
+		Some(client_frame::Body::ApprovalAnswer(_)) => {
+			(requests.get(&frame.request_id).copied().unwrap_or(remote), None)
+		},
 		Some(client_frame::Body::Cancel(cancel)) => match cancel.target.as_ref() {
 			Some(omp_proto::env::v1::cancel_request::Target::TargetRequestId(id)) => {
 				(requests.get(id).copied().unwrap_or(remote), None)
@@ -300,7 +305,10 @@ fn route_client_frame(
 }
 
 const fn opens_response_route(frame: &ClientFrame) -> bool {
-	!matches!(frame.body.as_ref(), Some(client_frame::Body::AcpDocumentAnswer(_)))
+	!matches!(
+		frame.body.as_ref(),
+		Some(client_frame::Body::AcpDocumentAnswer(_) | client_frame::Body::ApprovalAnswer(_))
+	)
 }
 
 fn invocation_route(id: &str, routes: &FastHashMap<Str, Backend>) -> (Backend, Option<Str>) {
@@ -381,9 +389,10 @@ mod tests {
 	use std::time::Duration;
 
 	use omp_proto::env::v1::{
-		AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, ArgText, ClientHello, DataRequest,
-		DocumentOp, EditRepairAnswer, EditRepairQuery, EvalResetRequest, InvokeTool,
-		RegisterPresence, ServerHello, Update,
+		AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, ApprovalAnswer, ApprovalQuery,
+		ApprovalSpec, ApprovalWithdrawn, ArgText, ClientHello, DataRequest, DocumentOp,
+		EditRepairAnswer, EditRepairQuery, EvalResetRequest, InvokeTool, RegisterPresence,
+		ServerHello, Update,
 	};
 
 	use super::*;
@@ -431,6 +440,84 @@ mod tests {
 			assert_eq!(actual, expected);
 			assert_eq!(pinned_invocation.as_deref(), Some(invocation_id));
 		}
+	}
+
+	#[test]
+	fn approval_answers_follow_the_owning_request_backend() {
+		let remote_tools = FastHashSet::default();
+		let mut invocations = FastHashMap::default();
+		invocations.insert(Str::from("local-call"), Backend::Local);
+		let mut requests = FastHashMap::default();
+		requests.insert(71, Backend::Local);
+		requests.insert(72, Backend::Remote);
+
+		for (request_id, expected) in
+			[(71, Backend::Local), (72, Backend::Remote), (73, Backend::Remote)]
+		{
+			let answer = frame(
+				request_id,
+				client_frame::Body::ApprovalAnswer(ApprovalAnswer { query_id: 1, decision: None }),
+			);
+			let (actual, pinned_invocation) =
+				route_client_frame(&answer, &remote_tools, &invocations, &requests);
+			assert_eq!(actual, expected);
+			assert!(pinned_invocation.is_none(), "an approval answer pinned an invocation");
+			assert!(!opens_response_route(&answer));
+		}
+	}
+
+	#[tokio::test]
+	async fn approval_queries_merge_without_rewriting_routes() {
+		let (client, merged) = flume::unbounded();
+		let mut invocations = FastHashMap::default();
+		invocations.insert(Str::from("bash-1"), Backend::Remote);
+		let mut requests = FastHashMap::default();
+		requests.insert(81, Backend::Remote);
+		let mut request_invocations = FastHashMap::default();
+		request_invocations.insert(81, Str::from("bash-1"));
+		let frames = [
+			ServerFrame {
+				request_id: 81,
+				body: Some(server_frame::Body::ApprovalQuery(ApprovalQuery {
+					query_id:      1,
+					invocation_id: None,
+					reasons:       vec![ApprovalSpec {
+						kind: "sandbox_amendment".into(),
+						subject: "echo x > .git/a".into(),
+						..ApprovalSpec::default()
+					}],
+					created_at_ms: 5,
+				})),
+				..ServerFrame::default()
+			},
+			ServerFrame {
+				request_id: 81,
+				body: Some(server_frame::Body::ApprovalWithdrawn(ApprovalWithdrawn { query_id: 1 })),
+				..ServerFrame::default()
+			},
+		];
+
+		for frame in frames {
+			forward_server_frame(
+				frame.clone(),
+				&client,
+				&mut invocations,
+				&mut requests,
+				&mut request_invocations,
+			)
+			.await
+			.expect("merge approval frame");
+			assert_eq!(
+				merged
+					.recv_async()
+					.await
+					.expect("receive merged approval frame"),
+				frame
+			);
+		}
+		assert_eq!(requests.get(&81), Some(&Backend::Remote));
+		assert_eq!(request_invocations.get(&81).map(Str::as_str), Some("bash-1"));
+		assert_eq!(invocations.get("bash-1"), Some(&Backend::Remote));
 	}
 
 	#[test]
