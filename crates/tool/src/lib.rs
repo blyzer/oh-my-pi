@@ -508,11 +508,17 @@ pub enum Confinement {
 	/// the whole story, and an active sandbox confines none of them.
 	#[default]
 	Host,
-	/// Effects happen only in processes spawned under the environment's exec
-	/// sandbox, or in in-process shell builtins checked by that sandbox's path
-	/// policy. The declaration leaves out what the sandbox confines, so without
-	/// an active sandbox the tool is process authority. Nested `dyn` targets
-	/// leave the sandbox and are admitted on their own spec.
+	/// Host effects happen only in processes spawned under the environment's
+	/// exec sandbox, or in in-process shell builtins checked by that sandbox's
+	/// path policy. The declaration leaves out what the sandbox confines, so
+	/// without an active sandbox the tool is process authority. Nested `dyn`
+	/// targets leave the sandbox and are admitted on their own spec.
+	///
+	/// Coordination inside the session itself is not a host effect, and the
+	/// marker says nothing about it: `hub` messages to the session's own live
+	/// agents (which can wake a peer's inference) and cancelling the session's
+	/// own jobs run unsandboxed in the session process, and neither variant
+	/// accounts for them.
 	ExecSandbox,
 }
 

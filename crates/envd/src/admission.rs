@@ -173,10 +173,9 @@ pub struct ConfiguredApproval {
 /// explicit `Yolo` (a flag, the user's config) is respected and reported as
 /// unconfined. Every other mode is returned unchanged.
 ///
-/// This is the session's posture. [`resolve_approval`] applies it per call,
-/// passing the sandbox only for a tool that sandbox confines: a
-/// [`Confinement::Host`] tool sees no sandbox, so a defaulted `Yolo` is `Write`
-/// for it even while the sandbox is active.
+/// This is the session's posture, and the mode in force for the tools the
+/// sandbox confines. [`call_approval_mode`] is the mode a call is admitted
+/// under.
 #[must_use]
 pub const fn effective_approval_mode(
 	configured: ConfiguredApproval,
@@ -186,6 +185,27 @@ pub const fn effective_approval_mode(
 		(ApprovalMode::Yolo, Provenance::Default) if !sandbox.confines() => ApprovalMode::Write,
 		(mode, _) => mode,
 	}
+}
+
+/// The mode a call to a tool of `confinement` is admitted under.
+///
+/// [`effective_approval_mode`] sees the sandbox only for a tool that sandbox
+/// confines ([`Confinement::ExecSandbox`]). A [`Confinement::Host`] tool sees
+/// none, so a defaulted `Yolo` is `Write` for it even while the sandbox is
+/// active, and its mode is the same under every sandbox state. An explicit
+/// `Yolo` is respected for both.
+#[must_use]
+pub const fn call_approval_mode(
+	configured: ConfiguredApproval,
+	sandbox: SandboxState,
+	confinement: Confinement,
+) -> ApprovalMode {
+	let sandbox_for_call = if confinement.sandboxed() {
+		sandbox
+	} else {
+		SandboxState::Off
+	};
+	effective_approval_mode(configured, sandbox_for_call)
 }
 
 /// Name of the typed notice reporting an [`ApprovalPosture`].
@@ -368,15 +388,13 @@ pub struct ResolvedApproval {
 /// and where those effects happen.
 ///
 /// Per-tool overrides remain authoritative in every mode. Without one, the
-/// call's mode approves tiers up to `read`, `write`, and `exec`, respectively.
-/// That mode is what [`effective_approval_mode`] yields for `sandbox` when the
-/// sandbox confines the tool ([`Confinement::ExecSandbox`]), and for no sandbox
-/// at all when it does not ([`Confinement::Host`]): a defaulted `yolo` that
-/// only an active sandbox keeps alive covers sandboxed tools, and a `Host` tool
-/// is admitted exactly as it would be with no sandbox, so its exec-tier calls
-/// prompt. An explicit `yolo` is respected either way. A sandboxed tool
-/// declares no effects the sandbox confines; with no sandbox in force it is
-/// process authority and resolves to the `exec` tier.
+/// call's mode ([`call_approval_mode`]) approves tiers up to `read`, `write`,
+/// and `exec`, respectively: a defaulted `yolo` that only an active sandbox
+/// keeps alive covers sandboxed tools ([`Confinement::ExecSandbox`]), and a
+/// [`Confinement::Host`] tool is admitted exactly as it would be with no
+/// sandbox, so its exec-tier calls prompt. An explicit `yolo` is respected
+/// either way. A sandboxed tool declares no effects the sandbox confines; with
+/// no sandbox in force it is process authority and resolves to the `exec` tier.
 pub fn resolve_approval(
 	invocation_id: impl Into<Str>,
 	tool_name: impl Into<Str>,
@@ -393,12 +411,7 @@ pub fn resolve_approval(
 	} else {
 		ApprovalTier::from_effects(effects)
 	};
-	let sandbox_for_call = if confinement.sandboxed() {
-		sandbox
-	} else {
-		SandboxState::Off
-	};
-	let mode = effective_approval_mode(configured, sandbox_for_call);
+	let mode = call_approval_mode(configured, sandbox, confinement);
 	let (policy, source, policy_key) = override_policy.map_or_else(
 		|| {
 			let allowed = match mode {
@@ -1033,8 +1046,8 @@ mod tests {
 		AdmissionDecision, AdmissionGate, ApprovalMode, ApprovalPolicy, ApprovalPosture,
 		ApprovalSource, ApprovalTier, ConfiguredApproval, DynamicAdmission, DynamicAdmissionError,
 		DynamicInvocationSource, Provenance, SandboxState, SandboxUnavailable, apply_admission_patch,
-		bash_ir, effective_approval_mode, effects_narrow_or_refuse, github_mutation_targets,
-		resolve_approval,
+		bash_ir, call_approval_mode, effective_approval_mode, effects_narrow_or_refuse,
+		github_mutation_targets, resolve_approval,
 	};
 
 	const UNAVAILABLE: SandboxState =
@@ -1306,6 +1319,12 @@ mod tests {
 						assert_eq!(decision.confinement, confinement, "{context}");
 						assert_eq!(decision.tier, tier, "{context}");
 						assert_eq!(decision.mode, mode, "{context}");
+						// `/security` reports the same per-call mode admission applies.
+						assert_eq!(
+							call_approval_mode(configured, sandbox, confinement),
+							mode,
+							"{context}"
+						);
 						assert_eq!(decision.policy, if allowed { Allow } else { Prompt }, "{context}");
 						assert_eq!(decision.source, ApprovalSource::Mode, "{context}");
 					}

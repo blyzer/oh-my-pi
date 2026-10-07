@@ -91,9 +91,10 @@ omp_con::var! {
 			"legacy.path": "edit.streamingAbort",
 		},
 	};
-	/// Default approval behavior for tool calls. The default `yolo` holds only while a sandbox
-	/// confines commands (`sv_sandbox_mode`); otherwise `write` is in force. Setting `yolo`
-	/// yourself (or `--yolo`) is respected without a sandbox.
+	/// Default approval behavior for tool calls. The default `yolo` auto-approves every tier only
+	/// for the tools an active sandbox (`sv_sandbox_mode`) confines (`bash`, `hub`); every other
+	/// tool follows `write`, and without an active sandbox `write` is in force for all of them.
+	/// Setting `yolo` yourself (or `--yolo`) is respected for every tool, sandbox or not.
 	pub static SV_TOOLS_APPROVAL_MODE = sv_tools_approval_mode: ApprovalMode {
 		default: ApprovalMode::Yolo,
 		flags: archive,
@@ -106,7 +107,7 @@ omp_con::var! {
 			"ui.option.write": "Write",
 			"ui.option.write.desc": "Auto-approve read-only and write tools; require confirmation for exec tools.",
 			"ui.option.yolo": "Yolo",
-			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools. The default Yolo holds only inside an active sandbox (Write otherwise); choosing it yourself is respected. User policy can still prompt or block.",
+			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools. The default Yolo covers only the tools an active sandbox confines (bash, hub); other tools follow Write, and without a sandbox Write is in force. Choosing Yolo yourself covers every tool. User policy can still prompt or block.",
 			"legacy.path": "tools.approvalMode",
 		},
 	};

@@ -279,18 +279,22 @@ pub struct ToolRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalPostureRow {
 	/// Configured mode (`always-ask`, `write`, `yolo`).
-	pub configured: Str,
-	/// Mode in force once the sandbox state is applied.
-	pub effective:  Str,
+	pub configured:      Str,
+	/// Mode in force for the tools the sandbox confines (`bash`, `hub`), once
+	/// the sandbox state is applied.
+	pub sandboxed_tools: Str,
+	/// Mode in force for every other tool, which an active sandbox never
+	/// loosens: `write` under a defaulted `yolo`, whatever the sandbox state.
+	pub host_tools:      Str,
 	/// Sandbox state that decided it (`active`, `off`, `unavailable`).
-	pub sandbox:    Str,
+	pub sandbox:         Str,
 	/// Whether the user chose the configured mode, rather than the default.
-	pub explicit:   bool,
+	pub explicit:        bool,
 	/// Network confinement shell sessions are configured for (`scoped`,
 	/// `disabled`, `unconfined`), which can differ from
 	/// `sv_sandbox_network_mode`. A session whose egress broker could not
 	/// start, and eval cells and detached processes, run `disabled`.
-	pub network:    Str,
+	pub network:         Str,
 }
 
 /// One configured SSH host.

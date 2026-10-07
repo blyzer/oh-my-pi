@@ -325,7 +325,11 @@ pub fn spec() -> ToolSpec {
 		},
 		// Like the shell: the processes hub starts run under the environment's
 		// exec sandbox (attached and detached alike), which stands in for the
-		// empty declaration.
+		// empty declaration. Its peer and job operations (`send` steering a
+		// live agent of this session, `cancel` of its own jobs) run in the
+		// session process and are no host effect. The peer inference a `send`
+		// can wake is undeclared; ADR 0028 lists it with the under-declared
+		// tools.
 		effects:         Effects::default(),
 		confinement:     omp_tool::Confinement::ExecSandbox,
 		projection_code: omp_tool::native_projection_code(
