@@ -515,7 +515,7 @@ pub struct ApprovalOverlay {
 	pub scope:   ApprovalScope,
 	/// Whether every requirement of the prompt offers a session-wide grant;
 	/// only then does `a` answer it. The policy behind a once-only prompt (a
-	/// sandbox amendment) refuses a session answer.
+	/// path sandbox amendment) refuses a session answer.
 	pub session: bool,
 	/// Controller-set deadline after which the kernel answers with the
 	/// prompt's default (`timeout-ms`); `None` waits indefinitely.

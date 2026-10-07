@@ -27,7 +27,7 @@ use crate::{
 		EnvironmentInheritance, ExecSandboxMode, NetworkConfinement, ReadMode, SandboxSettings,
 		UnscopedWrites,
 	},
-	sandbox_proxy::{BrokerDenial, BrokerRefusal, ScopedProxy},
+	sandbox_proxy::{BrokerDenial, BrokerRefusal, EgressGrants, ScopedProxy},
 };
 
 const CARVE_OUTS: [&str; 3] = [".git", ".omp", ".agents"];
@@ -40,9 +40,10 @@ pub(crate) enum SandboxDenialFact {
 	/// An in-process or kernel policy rejected a mutation.
 	WritePath(PathBuf),
 	/// The scoped egress broker's policy rejected this exact connection, which
-	/// the user can approve for one rerun. A refusal that no approval could
-	/// cure (the name did not resolve, it is not a public address, the
-	/// upstream failed) is never this fact; see [`AttemptFacts::refusal`].
+	/// the user can approve for one rerun or for the rest of the session. A
+	/// refusal that no approval could cure (an explicit deny rule, the name
+	/// did not resolve, it is not a public address, the upstream failed) is
+	/// never this fact; see [`AttemptFacts::refusal`].
 	Network {
 		/// Requested hostname.
 		host: Str,
@@ -431,6 +432,12 @@ impl ExecSandbox {
 		self.network
 	}
 
+	/// Most reruns one command may take on network endpoints approved for the
+	/// session (`sv_sandbox_network_session_reruns`).
+	pub(crate) fn network_reruns(&self) -> u32 {
+		self.settings.network_reruns
+	}
+
 	/// The network confinement the settings asked for. For a shell session it
 	/// differs from [`Self::network`] only when the egress broker could not
 	/// start under the shipped default and the network fell back to disabled.
@@ -521,8 +528,18 @@ impl ExecSandbox {
 	}
 
 	/// Opens one isolated denial collection interval for an execution attempt.
-	pub(crate) fn begin_attempt(self: &Arc<Self>) -> Arc<ExecSandboxAttempt> {
-		let token = self.proxy.as_ref().map(|proxy| proxy.begin_attempt());
+	///
+	/// `grants` are the session egress grants of the approval binding that
+	/// issued the command; the session's broker admits them live for this
+	/// attempt only.
+	pub(crate) fn begin_attempt(
+		self: &Arc<Self>,
+		grants: Option<&EgressGrants>,
+	) -> Arc<ExecSandboxAttempt> {
+		let token = self
+			.proxy
+			.as_ref()
+			.map(|proxy| proxy.begin_attempt(grants.cloned()));
 		Arc::new(ExecSandboxAttempt {
 			sandbox: Arc::clone(self),
 			denial: Mutex::new(None),

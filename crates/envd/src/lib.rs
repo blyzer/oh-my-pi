@@ -35,6 +35,8 @@ pub mod host_info;
 pub mod host_settings;
 mod http_egress;
 mod journal_runtime;
+#[cfg(test)]
+mod loopback_upstream;
 pub mod lsp_settings;
 mod managed_skills;
 pub mod managed_skills_domain;
@@ -94,7 +96,7 @@ use std::{
 	path::{Path, PathBuf},
 	process::{Stdio, id},
 	sync::{
-		Arc,
+		Arc, Weak,
 		atomic::{AtomicU64, Ordering},
 	},
 	time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1175,6 +1177,15 @@ impl ProjectEnvironment {
 		}
 	}
 
+	/// Returns the handle through which the session's network approvals are
+	/// revoked when its conversation is rewound.
+	pub fn session_grants(&self) -> SessionGrants {
+		SessionGrants {
+			client: self.approval_relay.is_some().then(|| self.client.clone()),
+			server: Arc::downgrade(&self.lifecycle.server),
+		}
+	}
+
 	/// Replaces the ask presenter for this environment composition.
 	pub fn bind_ask_presenter(&self, presenter: Arc<dyn omp_tools::ask::AskPresenter>) {
 		self.lifecycle.server.bind_ask_presenter(presenter);
@@ -1613,7 +1624,7 @@ pub struct EditorDocuments {
 	client:    EnvClient,
 	documents: AcpDocumentsBinding,
 	/// Held weakly: a binding kept past the composition reaches nothing.
-	server:    std::sync::Weak<EnvServer>,
+	server:    Weak<EnvServer>,
 }
 
 impl EditorDocuments {
@@ -1641,6 +1652,45 @@ impl EditorDocuments {
 				error = &error as &dyn std::error::Error,
 				documents,
 				"failed to update ACP connection binding"
+			);
+		}
+	}
+}
+
+/// Cloneable handle on the network endpoints a session approved for the rest
+/// of the session (sandbox amendments answered `session`, ADR 0028).
+///
+/// Those grants are a cache of journaled decisions, kept by the approval
+/// binding that answered them: the in-process host route of an embedded or
+/// isolated composition, or this composition's connection to the project
+/// daemon when it is attached. [`Self::revoke`] drops both when the
+/// conversation is rewound, so no endpoint stays admitted that the rewound
+/// journal no longer approves; the approval desk refills them from the
+/// journal, one refused attempt per endpoint.
+#[derive(Clone)]
+pub struct SessionGrants {
+	/// The attached connection, whose daemon-side relay holds the grants of
+	/// the commands it issues; `None` when nothing is attached.
+	client: Option<EnvClient>,
+	/// Held weakly: a handle kept past the composition reaches nothing.
+	server: Weak<EnvServer>,
+}
+
+impl SessionGrants {
+	/// Drops every network endpoint this session approved for the session.
+	pub fn revoke(&self) {
+		if let Some(server) = self.server.upgrade() {
+			server.revoke_approval_grants();
+		}
+		if let Some(client) = &self.client
+			&& let Err(error) = client.revoke_approval_grants()
+		{
+			// The attached client's queue is unbounded, so only a closed
+			// transport fails here, and the daemon dropped this connection's
+			// grants with its relay when it closed.
+			tracing::warn!(
+				error = &error as &dyn std::error::Error,
+				"failed to revoke the daemon's session approval grants"
 			);
 		}
 	}

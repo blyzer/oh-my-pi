@@ -470,6 +470,17 @@ fn convar_reasoning(
 	})
 }
 
+/// Revokes the session's network approvals in the environment whenever the
+/// session is rewound (ADR 0028): the environment's grants are a cache of
+/// journaled decisions, and the journal stays the authority.
+struct RevokeGrantsOnRewind(omp_envd::SessionGrants);
+
+impl omp_agent::RewindObserver for RevokeGrantsOnRewind {
+	fn rewound(&self) {
+		self.0.revoke();
+	}
+}
+
 /// Environment-routed tool execution: opens the invocation on the project
 /// environment, commits the arguments, and answers the environment's
 /// admission query by prompting the session's approval authority.
@@ -2372,7 +2383,12 @@ pub async fn compose_kernel(
 		Some(Arc::new(omp_agent::ApprovalBook::new())),
 		Some(approvals.clone()),
 	);
+	// Network endpoints approved for the session are journaled decisions the
+	// environment caches; a rewind may drop them from the journal, so it drops
+	// the cache, which the desk refills from the grants the journal keeps.
+	let session_grants = RevokeGrantsOnRewind(kernel.inference().environment().session_grants());
 	let mut kernel = kernel
+		.with_rewind_observer(Arc::new(session_grants))
 		.with_external_executor(Arc::new(EnvToolExecutor::new(tool_client, approvals)))
 		.with_tool_admission(Arc::new(
 			SettingsAdmission::new(&ctx, options.approval_mode, &project_root)

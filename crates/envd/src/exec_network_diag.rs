@@ -334,14 +334,21 @@ fn refusal_text(cause: BrokerRefusal, target: &Target<'_>, prompt: bool) -> Str 
 		(BrokerRefusal::Policy, true) => sf!(
 			"sandbox: the egress broker refused {target}: under sv_sandbox_network_mode scoped, \
 			 sv_sandbox_allow_domains (ports: sv_sandbox_allow_ports) does not allow it. Only the \
-			 user can allow it: by approving the one-time prompt offered when a command fails on it, \
-			 by adding it to the allowlist, or by switching the mode to open."
+			 user can allow it: by approving the prompt offered when a command fails on it (for that \
+			 command once, or for the rest of the session), by adding it to the allowlist, or by \
+			 switching the mode to open."
 		),
 		(BrokerRefusal::Policy, false) => sf!(
 			"sandbox: the egress broker refused {target}: under sv_sandbox_network_mode scoped, \
 			 sv_sandbox_allow_domains (ports: sv_sandbox_allow_ports) does not allow it. This \
 			 session has no approval prompt, so only the user can allow it, by adding it to the \
 			 allowlist or by switching the mode to open."
+		),
+		(BrokerRefusal::DenyListed, _) => sf!(
+			"sandbox: the egress broker refused {target}: under sv_sandbox_network_mode scoped, \
+			 sv_sandbox_deny_domains denies it, and an explicit deny beats every approval, so no \
+			 prompt is offered. Only the user can allow it, by removing the entry from \
+			 sv_sandbox_deny_domains."
 		),
 		(BrokerRefusal::Unresolved, _) => sf!(
 			"sandbox: the egress broker could not resolve {target}. The host is allowed under \
@@ -530,7 +537,8 @@ mod tests {
 			"example.com:443",
 			"sv_sandbox_network_mode scoped",
 			"sv_sandbox_allow_domains",
-			"approving the one-time prompt",
+			"approving the prompt",
+			"for the rest of the session",
 		] {
 			assert!(info.text.contains(needle), "{needle}: {}", info.text);
 		}
@@ -557,6 +565,7 @@ mod tests {
 		assert!(!warn.text.contains("approving"), "{}", warn.text);
 
 		for (cause, needle) in [
+			(BrokerRefusal::DenyListed, "sv_sandbox_deny_domains"),
 			(BrokerRefusal::Unresolved, "could not resolve"),
 			(BrokerRefusal::NonRoutable, "sv_sandbox_allow_localhost"),
 			(BrokerRefusal::Upstream, "could not connect"),
@@ -575,6 +584,17 @@ mod tests {
 			}
 			assert!(!diag.text.contains(&format!("({label})")), "{}", diag.text);
 		}
+		// An explicit deny is never offered for approval, whether or not the
+		// session could prompt.
+		let denied = refusal_diag(
+			&denial("denied.example.test", 443, BrokerRefusal::DenyListed),
+			CommandEnd::Failed,
+			true,
+			&announced,
+		)
+		.expect("deny-listed refusal");
+		assert!(denied.text.contains("no prompt is offered"), "{}", denied.text);
+		assert!(!denied.text.contains("approving"), "{}", denied.text);
 		let literal = refusal_diag(
 			&denial("2001:db8::1", 443, BrokerRefusal::NonRoutable),
 			CommandEnd::Failed,

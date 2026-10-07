@@ -142,7 +142,7 @@ pub enum SandboxNetworkMode {
 	/// Permit only policy-authorized egress through the session's egress broker.
 	/// HTTP(S) and SOCKS clients reach it through the proxy environment; a host
 	/// outside `sv_sandbox_allow_domains` is refused, and the user can approve
-	/// it for one rerun. The shipped default.
+	/// it for one rerun or for the rest of the session. The shipped default.
 	#[default]
 	Scoped,
 }
@@ -186,9 +186,10 @@ omp_con::var! {
 		flags: archive,
 	};
 	/// Choose network access for sandboxed commands: scoped (default; HTTP(S) and SOCKS clients
-	/// go through an egress broker that admits sv_sandbox_allow_domains and asks before one rerun
-	/// for any other host), disabled, or open. While sv_sandbox_mode is off, only an explicitly set
-	/// scoped applies (a network-only sandbox); disabled and open then confine nothing.
+	/// go through an egress broker that admits sv_sandbox_allow_domains and asks before a rerun
+	/// for any other host, once or for the rest of the session), disabled, or open. While
+	/// sv_sandbox_mode is off, only an explicitly set scoped applies (a network-only sandbox);
+	/// disabled and open then confine nothing.
 	pub static SV_SANDBOX_NETWORK_MODE = sv_sandbox_network_mode: SandboxNetworkMode {
 		default: SandboxNetworkMode::Scoped,
 		flags: archive,
@@ -216,10 +217,20 @@ omp_con::var! {
 		validate: |_ctx, values| validate_domains(values),
 		flags: archive,
 	};
-	/// Domains denied before scoped allow rules.
+	/// Domains denied before scoped allow rules. A deny beats every approval: a denied host is
+	/// never offered for approval, once or for the session.
 	pub static SV_SANDBOX_DENY_DOMAINS = sv_sandbox_deny_domains: Vec<Str> {
 		default: Vec::new(),
 		validate: |_ctx, values| validate_domains(values),
+		flags: archive,
+	};
+	/// Most reruns one sandboxed command may take on network endpoints approved for the rest of
+	/// the session. Each rerun follows the approval of a new host:port the command was refused,
+	/// so a multi-host install (pip, cargo, Homebrew) finishes in one call; a once approval still
+	/// ends the chain. At least 1.
+	pub static SV_SANDBOX_NETWORK_SESSION_RERUNS = sv_sandbox_network_session_reruns: u32 {
+		default: DEFAULT_NETWORK_SESSION_RERUNS,
+		validate: |_ctx, value| validate_session_reruns(*value),
 		flags: archive,
 	};
 	/// TCP ports allowed by scoped networking.
@@ -338,6 +349,9 @@ pub struct SandboxSettings {
 	pub deny_domains:       Vec<Str>,
 	/// TCP ports allowed in scoped mode.
 	pub allow_ports:        Vec<u16>,
+	/// Most reruns one command may take on network endpoints approved for the
+	/// session; at least 1.
+	pub network_reruns:     u32,
 	/// Whether scoped mode may connect to loopback addresses.
 	pub allow_localhost:    bool,
 	/// Existing absolute Unix-domain socket paths allowed independently of IP
@@ -389,6 +403,7 @@ impl Default for SandboxSettings {
 			allow_domains:      Vec::new(),
 			deny_domains:       Vec::new(),
 			allow_ports:        vec![80, 443],
+			network_reruns:     DEFAULT_NETWORK_SESSION_RERUNS,
 			allow_localhost:    false,
 			allow_unix_sockets: Vec::new(),
 			writable_roots:     Vec::new(),
@@ -474,6 +489,7 @@ impl SandboxSettings {
 			allow_domains:      SV_SANDBOX_ALLOW_DOMAINS.get(ctx),
 			deny_domains:       SV_SANDBOX_DENY_DOMAINS.get(ctx),
 			allow_ports:        SV_SANDBOX_ALLOW_PORTS.get(ctx),
+			network_reruns:     SV_SANDBOX_NETWORK_SESSION_RERUNS.get(ctx),
 			allow_localhost:    SV_SANDBOX_ALLOW_LOCALHOST.get(ctx),
 			allow_unix_sockets: SV_SANDBOX_ALLOW_UNIX_SOCKETS.get(ctx),
 			writable_roots:     SV_SANDBOX_WRITABLE_ROOTS.get(ctx),
@@ -524,6 +540,22 @@ fn validate_sockets(values: &[Str]) -> Result<(), Str> {
 		Ok(())
 	} else {
 		Err(validation_error("Unix socket paths must name existing sockets"))
+	}
+}
+
+/// Reruns a command may take on network endpoints approved for the session,
+/// unless `sv_sandbox_network_session_reruns` says otherwise: enough for the
+/// common multi-host toolchains (pip, cargo and go reach two hosts, Homebrew
+/// three) while bounding how often a command's earlier side effects repeat.
+const DEFAULT_NETWORK_SESSION_RERUNS: u32 = 4;
+
+/// Rejects a rerun bound below one: the first approval always reruns, so a
+/// bound of zero could not be honoured.
+fn validate_session_reruns(value: u32) -> Result<(), Str> {
+	if value == 0 {
+		Err(validation_error("a session-approved network endpoint reruns at least once"))
+	} else {
+		Ok(())
 	}
 }
 
@@ -859,6 +891,23 @@ mod tests {
 		assert_eq!(settings.network_mode, SandboxNetworkMode::Scoped);
 		assert_eq!(settings.allow_domains, vec![Str::new_static("*.example.com")]);
 		assert_eq!(settings.env_set.get("OMP_TEST").map(Str::as_str), Some("yes"));
+	}
+
+	#[test]
+	fn network_session_reruns_default_to_four_and_project_a_set_bound() {
+		assert_eq!(SandboxSettings::default().network_reruns, 4);
+		let ctx = Ctx::new();
+		assert_eq!(SandboxSettings::from_con(&ctx).network_reruns, 4);
+		assert!(
+			SV_SANDBOX_NETWORK_SESSION_RERUNS.set(&ctx, 0).is_err(),
+			"the first approval always reruns, so zero cannot be honoured"
+		);
+		SV_SANDBOX_NETWORK_SESSION_RERUNS
+			.set(&ctx, 2)
+			.expect("valid bound");
+		let settings = SandboxSettings::from_con(&ctx);
+		assert_eq!(settings.network_reruns, 2);
+		assert!(settings.explicit, "the bound is a sandbox setting the user chose");
 	}
 
 	#[test]

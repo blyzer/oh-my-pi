@@ -35,10 +35,11 @@ use omp_envd::{
 use omp_journal::kind;
 use omp_session::{ComponentRegistry, Session};
 
-/// One scripted tool call, then a closing text turn. `write` declares document
-/// write effects, so its tier is `write` and always-ask prompts before it
-/// starts. `bash` declares no effects: its spawn/fs effects are confined by
-/// the sandbox, and without one it is process authority.
+/// One scripted tool call, then a closing text turn, for every turn the
+/// kernel runs: turn `n` calls `call-n`. `write` declares document write
+/// effects, so its tier is `write` and always-ask prompts before it starts.
+/// `bash` declares no effects: its spawn/fs effects are confined by the
+/// sandbox, and without one it is process authority.
 struct ToolThenText {
 	tool:      &'static str,
 	arguments: serde_json::Value,
@@ -59,10 +60,10 @@ impl Inference for ToolThenText {
 			provider_request_id: None,
 			created_at:          std::time::SystemTime::UNIX_EPOCH,
 		};
-		let events = if self.turns == 1 {
+		let events = if self.turns % 2 == 1 {
 			let arguments = self.arguments.clone();
 			let call = ToolCall {
-				id:        ToolCallId::from("call-1"),
+				id:        ToolCallId::from(format!("call-{}", self.turns.div_ceil(2)).as_str()),
 				name:      Str::new_static(self.tool),
 				arguments: omp_ai::OpaqueJson::new(arguments.clone()),
 			};
@@ -496,10 +497,18 @@ async fn active_sandbox_denied_write_prompts_an_amendment_and_refusal_writes_not
 /// the command.
 #[cfg(target_os = "macos")]
 mod attached_daemon {
+	use std::{
+		fs,
+		io::{BufRead as _, BufReader, Write as _},
+		net::{Ipv4Addr, TcpListener},
+		thread,
+	};
+
 	use omp_core::{Principal, sf};
-	use omp_envd::{EnvServer, exthost::ConvarControlFactory, worker::ExtHostConfig};
+	use omp_envd::{EnvServer, SessionGrants, exthost::ConvarControlFactory, worker::ExtHostConfig};
+	use omp_journal::blob::BlobStore;
 	use omp_tool::Registry;
-	use tokio::{net::UnixStream, task::JoinHandle};
+	use tokio::{net::UnixStream, task::JoinHandle, time};
 	use tokio_util::sync::CancellationToken;
 
 	use super::*;
@@ -522,7 +531,11 @@ mod attached_daemon {
 
 	impl InProcessDaemon {
 		async fn serve(project: &Project, sandbox: ExecSandboxMode) -> Self {
-			let con = context(sandbox);
+			Self::serve_with(project, context(sandbox)).await
+		}
+
+		/// [`Self::serve`] under the daemon's own control context `con`.
+		async fn serve_with(project: &Project, con: Arc<omp_con::Ctx>) -> Self {
 			let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
 			let server = EnvServer::open_project(
 				&project.root,
@@ -652,5 +665,176 @@ mod attached_daemon {
 		amendment(&project, &session, false);
 		assert!(!landed, "a refused amendment wrote: {result}");
 		assert!(result.contains("\"outcome\":\"denied\""), "the command was not denied: {result}");
+	}
+
+	/// A loopback HTTP server answering every request `200 ok`, standing in
+	/// for one package host the daemon's broker may reach under
+	/// `sv_sandbox_allow_localhost`. Its thread ends with the test process.
+	fn loopback_upstream() -> u16 {
+		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
+		let port = listener.local_addr().expect("upstream address").port();
+		thread::spawn(move || {
+			for stream in listener.incoming() {
+				let Ok(mut stream) = stream else { continue };
+				let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+				let Ok(reading) = stream.try_clone() else {
+					continue;
+				};
+				let mut reader = BufReader::new(reading);
+				let mut line = String::new();
+				while reader.read_line(&mut line).is_ok_and(|read| read > 0) && line != "\r\n" {
+					line.clear();
+				}
+				let _ = stream
+					.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n");
+			}
+		});
+		port
+	}
+
+	/// Revokes the attached session's network grants on every rewind, as the
+	/// production composition does.
+	struct RevokeOnRewind(SessionGrants);
+
+	impl omp_agent::RewindObserver for RevokeOnRewind {
+		fn rewound(&self) {
+			self.0.revoke();
+		}
+	}
+
+	/// Runs one turn, whose scripted bash call the host answers.
+	async fn fetch_turn(kernel: &mut Kernel<ToolThenText>, session: &mut Session) {
+		time::timeout(
+			Duration::from_secs(60),
+			kernel.run_turn(
+				session,
+				TurnInput { text: Str::new_static("fetch it"), attachments: Vec::new() },
+				RunControl::default(),
+			),
+		)
+		.await
+		.expect("turn settles")
+		.expect("turn");
+	}
+
+	/// The journaled `sandbox_amendment` prompts, as `(source, scope)`.
+	fn amendments(session: &Session) -> Vec<(ApprovalSource, ApprovalScope)> {
+		prompts(session)
+			.into_iter()
+			.filter(|ticket| ticket.reasons[0].kind == "sandbox_amendment")
+			.filter_map(|ticket| ticket.decision)
+			.map(|decision| (decision.source, decision.scope))
+			.collect()
+	}
+
+	/// A network endpoint approved for the session through the daemon's relay
+	/// holds for the attached session's later commands, which reach it
+	/// without a prompt. Rewinding the conversation past the approval revokes
+	/// it on the daemon, so the next command is asked again, by a human,
+	/// because the rewound journal holds no grant the desk could replay.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_session_network_grant_holds_until_a_rewind_revokes_it() {
+		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let port = loopback_upstream();
+		let daemon = context(ExecSandboxMode::WorkspaceWrite);
+		daemon
+			.run("sv_sandbox_allow_localhost 1")
+			.expect("the daemon's broker may reach loopback");
+		let _daemon = InProcessDaemon::serve_with(&project, daemon).await;
+		let environment = attached(&project).await;
+
+		let spill = BlobStore::open(project.scratch.path().join("artifacts")).expect("spill");
+		// Each successful fetch appends one line the test counts.
+		let fetched = project.root.join("fetched.txt");
+		let fetch = format!(
+			"/usr/bin/curl --noproxy '' -sf http://localhost:{port}/ >> '{}'",
+			fetched.display()
+		);
+		let fetches = || {
+			fs::read_to_string(&fetched)
+				.unwrap_or_default()
+				.lines()
+				.count()
+		};
+		let kernel = Kernel::new(
+			ToolThenText {
+				tool:      "bash",
+				arguments: serde_json::json!({ "command": fetch, "i": "Fetching a package" }),
+				turns:     0,
+			},
+			environment.registry(),
+			DispatchPolicy::new(spill.clone()),
+			StaticPrompt(Str::new_static("test")),
+		);
+		let approvals = kernel.approval_route();
+		environment.bind_approval_authority(
+			Some(Arc::new(omp_agent::ApprovalBook::new())),
+			Some(approvals.clone()),
+		);
+		let mut kernel = kernel
+			.with_rewind_observer(Arc::new(RevokeOnRewind(environment.session_grants())))
+			.with_external_executor(Arc::new(EnvToolExecutor::new(
+				environment.client().clone(),
+				approvals,
+			)))
+			.with_tool_admission(Arc::new(SettingsAdmission::new(&project.con, None, &project.root)));
+		let events = kernel.subscribe();
+		let mailbox = kernel.mailbox();
+		let (asked, humans) = flume::unbounded();
+		let host = tokio::spawn(async move {
+			while let Ok(event) = events.recv_async().await {
+				if let KernelEvent::ApprovalRequested(ticket) = event {
+					let _ =
+						asked.send((ticket.reasons[0].subject.clone(), ticket.reasons[0].scopes.clone()));
+					let _ = mailbox.send(Up::Approve {
+						id:       ticket.ticket_id,
+						decision: ApprovalDecision {
+							approved:   true,
+							scope:      ApprovalScope::Session,
+							source:     ApprovalSource::User,
+							decided_by: None,
+							reason:     None,
+							audited:    false,
+						},
+					});
+				}
+			}
+		});
+		let mut session = Session::create_with_blob_store(
+			project.scratch.path().join("grants.oms"),
+			ComponentRegistry::standard(),
+			spill,
+		)
+		.expect("session");
+		let before = session.head().expect("head before the grant");
+
+		fetch_turn(&mut kernel, &mut session).await;
+		let subject = Str::from(format!("network localhost:{port}"));
+		assert_eq!(humans.drain().collect::<Vec<_>>(), [(subject.clone(), vec![
+			Str::new_static("once"),
+			Str::new_static("session")
+		])]);
+		assert_eq!(amendments(&session), [(ApprovalSource::User, ApprovalScope::Session)]);
+		assert_eq!(fetches(), 1, "the approved rerun fetched");
+
+		fetch_turn(&mut kernel, &mut session).await;
+		assert!(humans.is_empty(), "a granted endpoint prompted again");
+		assert_eq!(amendments(&session).len(), 1, "the daemon asked nothing");
+		assert_eq!(fetches(), 2, "the second command fetched unprompted");
+
+		let work = session.rewind(before).expect("rewind past the grant");
+		kernel.apply_lifecycle(&session, &work).await;
+		fetch_turn(&mut kernel, &mut session).await;
+		assert_eq!(
+			humans
+				.drain()
+				.map(|(subject, _)| subject)
+				.collect::<Vec<_>>(),
+			[subject],
+			"after the rewind the daemon asks again, and the desk cannot answer it"
+		);
+		assert_eq!(amendments(&session), [(ApprovalSource::User, ApprovalScope::Session)]);
+		assert_eq!(fetches(), 3, "the newly approved rerun fetched");
+		host.abort();
 	}
 }
