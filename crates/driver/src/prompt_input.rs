@@ -10,6 +10,9 @@ use omp_core::{
 	dirs::ProfileNameError,
 	project_file::{self, Containment, ProjectFileError, containment_root},
 };
+use omp_ext::workspace_trust::inventory::{
+	PROJECT_DIR, SYSTEM_PROMPT_FILE, TITLE_SYSTEM_PROMPT_FILE,
+};
 use thiserror::Error;
 
 use crate::discovery::rules::CONTEXT_FILE_LIMIT;
@@ -62,7 +65,7 @@ pub fn discover_prompt_file(
 	home: &Path,
 	name: &str,
 ) -> Result<Option<Str>, PromptInputError> {
-	let project = cwd.join(".omp").join(name);
+	let project = cwd.join(PROJECT_DIR).join(name);
 	match project_file::read_text(
 		&project,
 		Containment::Within(containment_root(cwd)),
@@ -125,7 +128,7 @@ pub fn resolve_system_inputs(
 ) -> Result<(Option<Str>, Option<Str>), PromptInputError> {
 	let custom = match resolve_prompt_input(custom)? {
 		Some(custom) => Some(custom),
-		None => discover_prompt_file(cwd, home, "SYSTEM.md")?,
+		None => discover_prompt_file(cwd, home, SYSTEM_PROMPT_FILE)?,
 	};
 	let append = resolve_prompt_input(append)?;
 	Ok((custom, append))
@@ -133,7 +136,7 @@ pub fn resolve_system_inputs(
 /// Resolves the title-generation system prompt with project-over-user
 /// `TITLE_SYSTEM.md` precedence and the embedded native prompt as fallback.
 pub fn resolve_title_system_prompt(cwd: &Path, home: &Path) -> Result<Str, PromptInputError> {
-	Ok(discover_prompt_file(cwd, home, "TITLE_SYSTEM.md")?
+	Ok(discover_prompt_file(cwd, home, TITLE_SYSTEM_PROMPT_FILE)?
 		.unwrap_or_else(|| Str::new_static("Generate a concise title for this coding session.")))
 }
 

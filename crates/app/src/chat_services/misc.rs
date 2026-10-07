@@ -18,6 +18,7 @@ use omp_driver::cleanse::{
 	production::{CleansePresentation, PresentationError, ProductionCleanseHost},
 };
 use omp_envd::ssh::{AuthPolicy, HostConfig, HostPaths, HostStore};
+use omp_ext::workspace_trust::inventory::{PROJECT_DIR, SECRETS_FILE};
 use tokio_util::sync::CancellationToken;
 
 use super::ServiceState;
@@ -219,8 +220,8 @@ pub fn ssh_remove(state: &ServiceState, alias: &str, project: bool) -> ServiceRe
 /// is set.
 pub fn secrets_files(project: &Path) -> Result<[PathBuf; 2], omp_core::dirs::DataDirError> {
 	Ok([
-		omp_core::dirs::user_config_root()?.join("secrets.yml"),
-		project.join(".omp").join("secrets.yml"),
+		omp_core::dirs::user_config_root()?.join(SECRETS_FILE),
+		project.join(PROJECT_DIR).join(SECRETS_FILE),
 	])
 }
 

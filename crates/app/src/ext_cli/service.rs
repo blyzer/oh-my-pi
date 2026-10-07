@@ -9,7 +9,9 @@ use miette::{IntoDiagnostic as _, miette};
 use omp_core::{Str, sf};
 use omp_ext::{
 	Layer as BackendLayer,
-	claude_plugin::{InstallScope, InstalledPluginEntry, InstalledPluginsRegistry},
+	claude_plugin::{
+		InstallScope, InstalledPluginEntry, InstalledPluginsRegistry, plugin_cache_dir,
+	},
 	index::SignedIndex,
 	lock::InstalledRecord,
 	marketplace::{
@@ -616,10 +618,8 @@ async fn materialize_plugin(
 	plugin: &MarketplacePlugin,
 	marketplace: &str,
 ) -> miette::Result<MaterializedPlugin> {
-	let staging_root = state
-		.user_plugins
-		.join("cache/plugins")
-		.join(format!(".tmp-{}", omp_core::Ulid::generate()));
+	let staging_root =
+		plugin_cache_dir(&state.user_plugins).join(format!(".tmp-{}", omp_core::Ulid::generate()));
 	let (source, git_sha) = match plugin.source_spec().map_err(|error| miette!("{error}"))? {
 		PluginSource::Relative(path) => {
 			if entry.source_type == "url" {
@@ -671,7 +671,7 @@ async fn materialize_plugin(
 		.or_else(|| package_version(&source))
 		.or_else(|| git_sha.clone())
 		.unwrap_or_else(|| Str::new_static("0.0.0"));
-	let cache_root = state.user_plugins.join("cache/plugins");
+	let cache_root = plugin_cache_dir(&state.user_plugins);
 	let destination = cache_root.join(format!(
 		"{marketplace}___{}___{}",
 		plugin.name,

@@ -43,6 +43,7 @@ use flume::Receiver;
 use futures::future::BoxFuture;
 use omp_cache::mcp_cache::{McpCacheError, McpDefinitionCache};
 use omp_core::Str;
+use omp_ext::workspace_trust::inventory::{MCP_FILE, PROJECT_DIR, ROOT_MCP_FILE};
 use omp_proto::env::v1 as pb;
 use omp_tool::{
 	LeafCatalogSnapshot, LeafOwner, LeafReplacementError, LeafReplacementRegistry, LeafVersion,
@@ -765,9 +766,9 @@ impl McpConfigPaths {
 					.to_path_buf()
 			});
 		Self {
-			user: user_config_root.join("mcp.json"),
-			project: project_root.join(".omp/mcp.json"),
-			root: project_root.join(".mcp.json"),
+			user: user_config_root.join(MCP_FILE),
+			project: project_root.join(PROJECT_DIR).join(MCP_FILE),
+			root: project_root.join(ROOT_MCP_FILE),
 			home,
 			agent_plugin_roots: Vec::new(),
 			claude_plugins: Arc::default(),
@@ -978,7 +979,15 @@ fn broadcast(state: &mut State, event: SubscriptionEvent) {
 
 #[cfg(test)]
 mod config_tests {
-	use std::{collections::BTreeMap, fs, future::Future, pin::Pin, time::Duration};
+	use std::{
+		collections::{BTreeMap, BTreeSet},
+		fs,
+		future::Future,
+		pin::Pin,
+		time::Duration,
+	};
+
+	use omp_ext::workspace_trust::inventory::MCP_PROJECT_FILES;
 
 	use super::*;
 	use crate::mcp::manager::{ConnectedClient, ManagerError, McpConnector, McpManager, MountSpec};
@@ -1182,6 +1191,40 @@ mod config_tests {
 		for (path, name, _) in &fixtures {
 			assert!(on.servers.contains_key(*name), "{path} loads once the user opts in");
 		}
+	}
+
+	/// The project MCP files discovery reads, native and foreign, are
+	/// exactly the gated inventory's ([`MCP_PROJECT_FILES`]), so no
+	/// project-scoped file loads outside the workspace trust digest.
+	#[test]
+	fn project_mcp_files_are_exactly_the_gated_inventory_files() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let user_root = scratch.path().join(".o2");
+		let project = scratch.path().join("project");
+		let gated = MCP_PROJECT_FILES
+			.iter()
+			.map(|file| file.under(&project))
+			.collect::<BTreeSet<_>>();
+		let fixtures = project_fixtures();
+		assert_eq!(
+			fixtures
+				.iter()
+				.map(|(path, ..)| project.join(path))
+				.collect::<BTreeSet<_>>(),
+			gated,
+			"one fixture per gated MCP file"
+		);
+		write_all(&project, &fixtures);
+		let paths = McpConfigPaths::new(&user_root, &project);
+		let foreign = discovery::sources(&paths)
+			.into_iter()
+			.filter(|source| source.kind.project_scoped())
+			.map(|source| source.path);
+		let read = [paths.project.clone(), paths.root.clone()]
+			.into_iter()
+			.chain(foreign)
+			.collect::<BTreeSet<_>>();
+		assert_eq!(read, gated);
 	}
 
 	#[tokio::test]

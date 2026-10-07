@@ -51,6 +51,10 @@ use omp_envd::{
 	mcp::{config::ConfigValidationError, config_store::ConfigStoreError},
 	ssh::SshError,
 };
+use omp_ext::workspace_trust::inventory::{
+	APPEND_SYSTEM_PROMPT_FILE, HOSTS_FILE, MCP_FILE, SECRETS_FILE, SYSTEM_PROMPT_FILE,
+	TITLE_SYSTEM_PROMPT_FILE,
+};
 use thiserror::Error;
 
 use super::{
@@ -196,9 +200,9 @@ pub(super) fn import(
 		},
 		ImportStep::SystemPrompts => {
 			for (item, name) in [
-				(V1Item::SystemMd, "SYSTEM.md"),
-				(V1Item::AppendSystemMd, "APPEND_SYSTEM.md"),
-				(V1Item::TitleSystemMd, "TITLE_SYSTEM.md"),
+				(V1Item::SystemMd, SYSTEM_PROMPT_FILE),
+				(V1Item::AppendSystemMd, APPEND_SYSTEM_PROMPT_FILE),
+				(V1Item::TitleSystemMd, TITLE_SYSTEM_PROMPT_FILE),
 			] {
 				out.file(item, source.locate(item), config, &agent.join(name), Check::Verbatim)?;
 			}
@@ -224,7 +228,7 @@ pub(super) fn import(
 				V1Item::Secrets,
 				source.locate(V1Item::Secrets),
 				config,
-				&config.join("secrets.yml"),
+				&config.join(SECRETS_FILE),
 				Check::Secrets,
 			)?;
 		},
@@ -233,7 +237,7 @@ pub(super) fn import(
 				.candidates(V1Item::Mcp)
 				.filter(|path| path.is_file())
 				.collect::<Vec<_>>();
-			mcp::merge(&mut out, V1Item::Mcp, &found, config, &config.join("mcp.json"))?;
+			mcp::merge(&mut out, V1Item::Mcp, &found, config, &config.join(MCP_FILE))?;
 		},
 		ImportStep::SshHosts => {
 			ssh::convert(
@@ -241,7 +245,7 @@ pub(super) fn import(
 				V1Item::Ssh,
 				source.locate(V1Item::Ssh),
 				config,
-				&config.join("hosts.toml"),
+				&config.join(HOSTS_FILE),
 				source.home(),
 				&mut std::collections::BTreeSet::new(),
 			)?;

@@ -17,6 +17,10 @@ use omp_ext::{
 		ClaudePlugin, ConfigDeclaration, PluginScope, expand_plugin_vars, resolve_plugin_command,
 	},
 	plugin_command::{CommandApprovals, PluginId, PluginLaunch, PluginLaunchKind},
+	workspace_trust::inventory::{
+		AGENT_PLUGIN_DIRS, CLAUDE_MCP_FILE, CODEX_CONFIG_FILE, CURSOR_MCP_FILE, GEMINI_SETTINGS_FILE,
+		OPENCODE_CONFIG_FILES, STANDALONE_MCP_FILES, VSCODE_MCP_FILE, WINDSURF_MCP_FILE,
+	},
 };
 use serde::Deserialize;
 
@@ -186,7 +190,7 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	// may carry both a global map and a map keyed by canonical project path.
 	push_json(
 		&mut sources,
-		project.join(".claude/.mcp.json"),
+		project.join(CLAUDE_MCP_FILE),
 		ConfigSourceKind::ClaudeProject,
 		JsonShape::Common,
 	);
@@ -219,11 +223,11 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	}
 	push_claude_plugins(&mut sources, &paths.claude_plugins);
 
-	push_codex(&mut sources, project.join(".codex/config.toml"), ConfigSourceKind::CodexProject);
+	push_codex(&mut sources, project.join(CODEX_CONFIG_FILE), ConfigSourceKind::CodexProject);
 	push_codex(&mut sources, home.join(".codex/config.toml"), ConfigSourceKind::CodexUser);
 	push_json(
 		&mut sources,
-		project.join(".gemini/settings.json"),
+		project.join(GEMINI_SETTINGS_FILE),
 		ConfigSourceKind::GeminiProject,
 		JsonShape::Common,
 	);
@@ -236,13 +240,13 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 
 	// OpenCode merges low-to-high; emit the high-precedence files first because
 	// the central resolver is first-wins within one provider.
-	for path in [
-		project.join(".opencode/opencode.jsonc"),
-		project.join(".opencode/opencode.json"),
-		project.join("opencode.jsonc"),
-		project.join("opencode.json"),
-	] {
-		push_json(&mut sources, path, ConfigSourceKind::OpenCodeProject, JsonShape::OpenCode);
+	for file in OPENCODE_CONFIG_FILES {
+		push_json(
+			&mut sources,
+			project.join(file),
+			ConfigSourceKind::OpenCodeProject,
+			JsonShape::OpenCode,
+		);
 	}
 	for path in
 		[home.join(".config/opencode/opencode.jsonc"), home.join(".config/opencode/opencode.json")]
@@ -251,7 +255,7 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	}
 	push_json(
 		&mut sources,
-		project.join(".cursor/mcp.json"),
+		project.join(CURSOR_MCP_FILE),
 		ConfigSourceKind::CursorProject,
 		JsonShape::Common,
 	);
@@ -263,7 +267,7 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	);
 	push_json(
 		&mut sources,
-		project.join(".windsurf/mcp_config.json"),
+		project.join(WINDSURF_MCP_FILE),
 		ConfigSourceKind::WindsurfProject,
 		JsonShape::Common,
 	);
@@ -275,12 +279,17 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	);
 	push_json(
 		&mut sources,
-		project.join(".vscode/mcp.json"),
+		project.join(VSCODE_MCP_FILE),
 		ConfigSourceKind::VsCodeProject,
 		JsonShape::VsCode,
 	);
-	for path in [project.join("mcp.json"), project.join("mcp.config.json")] {
-		push_json(&mut sources, path, ConfigSourceKind::StandaloneProject, JsonShape::Common);
+	for file in STANDALONE_MCP_FILES {
+		push_json(
+			&mut sources,
+			project.join(file),
+			ConfigSourceKind::StandaloneProject,
+			JsonShape::Common,
+		);
 	}
 	sources
 }
@@ -309,13 +318,14 @@ fn agent_plugins(paths: &McpConfigPaths) -> Vec<AgentPluginMcp> {
 	let user_config_root = paths.user.parent().unwrap_or(&paths.home);
 	let plugin_data_root = user_config_root.join("agent/plugin-data");
 	let mut plugins = Vec::new();
-	for (container, kind) in [
-		(project.join(".omp/extensions"), ConfigSourceKind::AgentPluginProject),
-		(project.join(".agent/plugins"), ConfigSourceKind::AgentPluginProject),
-		(project.join(".agents/plugins"), ConfigSourceKind::AgentPluginProject),
+	let project_dirs = AGENT_PLUGIN_DIRS
+		.iter()
+		.map(|dir| (project.join(dir), ConfigSourceKind::AgentPluginProject));
+	let user_dirs = [
 		(user_config_root.join("extensions"), ConfigSourceKind::AgentPluginUser),
 		(user_config_root.join("agent/plugins"), ConfigSourceKind::AgentPluginUser),
-	] {
+	];
+	for (container, kind) in project_dirs.chain(user_dirs) {
 		let Ok(container_root) = fs::canonicalize(&container) else {
 			continue;
 		};
@@ -1019,6 +1029,32 @@ mod tests {
 				r#"{{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{servers}}}"#
 			),
 		);
+	}
+
+	/// Project Agent Plugins packages load from exactly the gated inventory's
+	/// directories ([`AGENT_PLUGIN_DIRS`]), each of which the workspace
+	/// trust digest walks whole.
+	#[test]
+	fn project_agent_plugins_load_from_the_gated_inventory_directories() {
+		let temp = tempfile::tempdir().unwrap();
+		let home = temp.path().join("home");
+		let project = temp.path().join("project");
+		let servers = r#"{"s":{"type":"stdio","command":"./s"}}"#;
+		for (index, dir) in AGENT_PLUGIN_DIRS.iter().enumerate() {
+			agent_plugin(&project.join(dir).join("pkg"), &format!("pkg{index}"), servers);
+		}
+		agent_plugin(&project.join(".omp/plugins/pkg"), "ungated", servers);
+		let paths = McpConfigPaths::new(&home.join(".o2"), &project);
+		let roots = agent_plugin_launches(&paths)
+			.into_iter()
+			.filter(|package| package.kind == ConfigSourceKind::AgentPluginProject)
+			.map(|package| package.root)
+			.collect::<Vec<_>>();
+		let gated = AGENT_PLUGIN_DIRS
+			.iter()
+			.map(|dir| fs::canonicalize(project.join(dir).join("pkg")).unwrap())
+			.collect::<Vec<_>>();
+		assert_eq!(roots, gated);
 	}
 
 	#[test]

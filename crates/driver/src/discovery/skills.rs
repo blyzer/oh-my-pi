@@ -20,7 +20,10 @@ use std::{
 
 use omp_core::{CowBytes, Str};
 use omp_envd::{self as envd_settings, ContentResolver};
-use omp_ext::claude_plugin::{ClaudePlugins, PluginLayout, PluginScope};
+use omp_ext::{
+	claude_plugin::{ClaudePlugins, PluginLayout, PluginScope},
+	workspace_trust::inventory::AGENT_PLUGIN_DIRS,
+};
 use omp_tools::read::{
 	Fault,
 	resolver::{
@@ -448,10 +451,12 @@ pub fn sources(
 			push("claude", dir.join(".claude/skills"), SkillLevel::Project);
 		}
 	}
+	let [extensions, agent, agents] =
+		AGENT_PLUGIN_DIRS.map(|dir| (project_root.join(dir), SkillLevel::Project));
 	for root in agent_plugin_skill_roots(&[
-		(project_root.join(".omp/extensions"), SkillLevel::Project),
-		(project_root.join(".agent/plugins"), SkillLevel::Project),
-		(project_root.join(".agents/plugins"), SkillLevel::Project),
+		extensions,
+		agent,
+		agents,
 		(config_root.join("extensions"), SkillLevel::User),
 		(config_root.join("agent/plugins"), SkillLevel::User),
 	]) {

@@ -16,6 +16,7 @@ use std::{
 };
 
 use omp_core::{CowBytes, Str, fs::replace_file_atomically};
+use omp_ext::workspace_trust::inventory::{PROJECT_DIR, VAULTS_FILE};
 use serde::Deserialize;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
@@ -52,8 +53,8 @@ impl VaultPaths {
 	#[must_use]
 	pub fn new(user_config_root: &Path, project_root: &Path) -> Self {
 		Self {
-			user:    user_config_root.join("vaults.toml"),
-			project: project_root.join(".omp/vaults.toml"),
+			user:    user_config_root.join(VAULTS_FILE),
+			project: project_root.join(PROJECT_DIR).join(VAULTS_FILE),
 		}
 	}
 }
