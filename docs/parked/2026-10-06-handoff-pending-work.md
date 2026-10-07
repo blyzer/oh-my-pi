@@ -71,6 +71,13 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
   not exercised; the posture notice is posted on the first tool admission, so a session that never
   admits a tool never shows it; the bash tier rule is a name check (`"bash"`), and a typed marker
   on the tool contract is the less intrusive alternative that was not imposed.
+- In-process utility builtins never consult the read policy (verified in code on 2026-10-07,
+  predates branch `fix/sandbox-host-read-symlinks`): `cat_path` calls `File::open(resolved)`
+  (`crates/shell-builtins/src/cat.rs`), `head` and `grep` do the same, and `Host::resolve` only
+  joins the cwd. They run in the envd process with no kernel wrapper, so under `workspace-write`
+  with a `read_deny` root, `cat <root>/file` reads it. Fix: route builtin opens through
+  `PathPolicy::open(path, Read)` (mirroring `Host::ensure_writable` for writes) and add an envd
+  test that `cat <read_deny root>/file` ends `Denied`.
 - Five `omp-envd --lib` tests failed in the Linux container (frozen scope ancestor, `browser_relay`
   ipv6, two `docserver::fs` tests that assume non-root, a `vcs` reftable test needing a newer git).
   They were judged environmental and not baselined against `omp2`; CI is green.

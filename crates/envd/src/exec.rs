@@ -4789,6 +4789,72 @@ mod tests {
 		host.close_session(session).expect("session closes");
 	}
 
+	/// `link/../name` reaches the link target's sibling, as the kernel walks it;
+	/// the redirect and glob lanes judge and read that same path, so a link into
+	/// a `read_deny` root cannot be stepped out of with `..`.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn environment_only_sandbox_judges_parent_components_after_a_link() {
+		use std::os::unix::fs::symlink;
+
+		let root = tempfile::tempdir().expect("root");
+		let secret = root.path().join("secret");
+		fs::create_dir_all(secret.join("sub")).expect("secret root");
+		fs::write(secret.join("key"), "omp-secret-marker\n").expect("secret file");
+		let public = root.path().join("public");
+		fs::create_dir_all(public.join("dir")).expect("public dir");
+		fs::write(public.join("sibling"), "physical\n").expect("physical sibling");
+		// What the `..`-collapsed spellings below would name instead.
+		fs::write(root.path().join("key"), "lexical\n").expect("lexical key");
+		fs::write(root.path().join("sibling"), "lexical\n").expect("lexical sibling");
+		symlink(secret.join("sub"), root.path().join("into-secret")).expect("directory link");
+		symlink(secret.join("missing"), root.path().join("dangling")).expect("dangling link");
+		symlink(public.join("dir"), root.path().join("into-public")).expect("public link");
+		let host = ExecHost::new();
+		host.configure_sandbox(&environment_only_read_deny(&secret), root.path());
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(root.path())
+					.expect("root URI")
+					.to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+		for script in [
+			"read -r line < into-secret/../key",
+			"read -r line < dangling/../key",
+			"echo into-secret/../*",
+		] {
+			let (outcome, exit, output, _) = run_failure(&host, script_request(session, script)).await;
+			let output = String::from_utf8_lossy(&output);
+			assert_eq!(outcome, ExecOutcome::Denied as i32, "{script}: {output}");
+			assert_ne!(exit, Some(0), "{script}");
+			assert!(output.contains("sandbox denied read"), "{script}: {output}");
+			assert!(!output.contains("omp-secret-marker"), "{script}: {output}");
+			assert!(!output.contains("lexical"), "{script}: {output}");
+		}
+		// Through a public link the same spelling reads and lists the target's
+		// directory, not the link's.
+		assert_eq!(
+			run_output(
+				&host,
+				script_request(
+					session,
+					"read -r line < into-public/../sibling; printf '%s\\n' \"$line\""
+				)
+			)
+			.await,
+			b"physical\n"
+		);
+		assert_eq!(
+			run_output(&host, script_request(session, "echo into-public/../s*")).await,
+			b"into-public/../sibling\n"
+		);
+		host.close_session(session).expect("session closes");
+	}
+
 	#[tokio::test]
 	async fn concurrent_sessions_own_distinct_sandbox_denial_slots() {
 		use omp_shell::PathPolicy as _;
