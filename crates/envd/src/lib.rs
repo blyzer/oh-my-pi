@@ -3,6 +3,8 @@
 
 /// Approval-tier resolution and env-owned invocation admission.
 pub mod admission;
+/// Approval prompts relayed to the connection that issued a daemon command.
+mod approval_relay;
 pub mod blobs;
 pub mod browser_daemon;
 pub mod browser_fetch;

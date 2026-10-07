@@ -2046,8 +2046,7 @@ impl Dispatcher {
 								crate::approvals::epoch_millis(),
 							)
 							.map_err(|source| DispatchError::Approval { source })?;
-						let decision =
-							crate::approvals::unreachable_decision(&ticket, "approval host unavailable");
+						let decision = ticket.unreachable_decision("approval host unavailable");
 						book
 							.decide(session, ticket.ticket_id.as_str(), decision)
 							.map_err(|source| DispatchError::Approval { source })?
@@ -2079,10 +2078,7 @@ impl Dispatcher {
 							.filter(|timeout| *timeout != 0)
 							.min()
 							.map(|timeout| {
-								(
-									Instant::now() + Duration::from_millis(timeout),
-									crate::approvals::timeout_decision(&ticket),
-								)
+								(Instant::now() + Duration::from_millis(timeout), ticket.timeout_decision())
 							});
 						call.ticket = Some(ticket.ticket_id);
 						call.interrupted = Some(Box::pin(call.interrupt.clone().cancelled_owned()));

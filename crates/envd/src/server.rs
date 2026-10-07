@@ -81,6 +81,7 @@ use url::Url;
 
 use super::{
 	admission::{AdmissionDecision, AdmissionGate, ApprovalPolicy, effects_narrow_or_refuse},
+	approval_relay::{ConnectionApprovals, OwnedApprovals},
 	blobs::{BlobError, BlobHost, BlobId, BlobRead},
 	browser_daemon::BrowserSettings,
 	docs::{
@@ -125,8 +126,8 @@ use super::{
 	tools::{
 		AgentCheckpointControl, InvocationAcpBackends, InvocationEditRepairContext,
 		SessionRegistryBridges, build_environment_declaration_inputs, production_registry,
-		session_registry, with_acp_scope, with_edit_repair_scope, with_invocation_scope,
-		with_invocation_session_scope, with_output_request_scope,
+		session_registry, with_acp_scope, with_edit_repair_scope, with_invocation_approvals,
+		with_invocation_scope, with_invocation_session_scope, with_output_request_scope,
 	},
 	vcs::{self, RepositoryAvailability},
 	worker::{
@@ -3861,6 +3862,11 @@ impl EnvServer {
 			Arc::clone(&self.authority),
 			&policy,
 		);
+		// Only an environment host runs commands; a session-only host refuses
+		// Exec, so a relay there would never carry a prompt.
+		if self.environment_authorities().is_some() {
+			connection.relay_approvals(&responses);
+		}
 		loop {
 			let admission_deadline = connection.next_admission_deadline();
 			let next = tokio::select! {
@@ -4791,15 +4797,19 @@ impl EnvServer {
 					send_error(responses, frame.request_id, code, message).await;
 				}
 			},
-			// No connection relays approvals to its client yet. A stray answer is
-			// dropped without a reply: an error on its request_id would end the
-			// issuing command's stream.
+			// An answer that matches nothing is dropped without a reply on every
+			// host: an error on its request_id would end the issuing command's
+			// stream.
 			client_frame::Body::ApprovalAnswer(answer) => {
-				tracing::debug!(
-					request_id = frame.request_id,
-					query_id = answer.query_id,
-					"ignored an approval answer on a connection that relays no approvals"
-				);
+				if let Some(approvals) = &connection.approvals {
+					approvals.answer(frame.request_id, answer);
+				} else {
+					tracing::debug!(
+						request_id = frame.request_id,
+						query_id = answer.query_id,
+						"ignored an approval answer on a connection that relays no approvals"
+					);
+				}
 			},
 			client_frame::Body::ArgsCommitted(request) => {
 				match connection.scope_authenticates(
@@ -4930,7 +4940,8 @@ impl EnvServer {
 					send_policy_error(responses, frame.request_id, error).await;
 					return;
 				}
-				match self.exec.exec(request, None).await {
+				let approvals = connection.owned_approvals(frame.request_id);
+				match self.exec.exec_relayed(request, None, approvals).await {
 					Ok((started, run)) => {
 						let exec = Bytes::copy_from_slice(run.id());
 						let cancel = CancellationToken::new();
@@ -7452,6 +7463,7 @@ impl EnvServer {
 			);
 			let acp = connection.acp_routes(request_id, &invocation_id, responses);
 			let acp_context = acp.context();
+			let approvals = connection.owned_approvals(request_id);
 			let admission = if execution.core_admission {
 				AdmissionGate::with_deferred_policy(
 					invocation_id.clone(),
@@ -7506,6 +7518,7 @@ impl EnvServer {
 				execution.write_scope.clone(),
 				edit_repair_context,
 				acp_context,
+				approvals,
 				feed,
 				deadline,
 				params,
@@ -8217,6 +8230,10 @@ struct ConnectionState {
 	/// The editor binding this connection serves document queries for; a
 	/// fresh binding per `AcpBind` so anchors never outlive a session switch.
 	acp_documents:    Option<Arc<EditorSession>>,
+	/// Relays the approval prompts of the commands this connection issues;
+	/// present only for an application connection to an environment host
+	/// that advertised the capability.
+	approvals:        Option<ConnectionApprovals>,
 	host:             Option<HostKey>,
 	authority:        Arc<AuthorityTable>,
 	connection_owner: u64,
@@ -8376,6 +8393,7 @@ impl ConnectionState {
 			capabilities: hello.capabilities,
 			hello_props: hello.props,
 			acp_documents: None,
+			approvals: None,
 			host: policy.host.clone(),
 			authority,
 			connection_owner,
@@ -8419,6 +8437,29 @@ impl ConnectionState {
 
 	fn supports_edit_repair(&self) -> bool {
 		self.capabilities.contains(omp_env::EDIT_REPAIR_CAPABILITY)
+	}
+
+	/// Relays the approval prompts of this connection's commands to it, when
+	/// it is an application connection that advertised the capability.
+	///
+	/// Extension connections never get a relay: extension code would then
+	/// approve the amendments of its own commands.
+	fn relay_approvals(&mut self, responses: &flume::Sender<pb::ServerFrame>) {
+		if self.host.is_none()
+			&& self
+				.capabilities
+				.contains(omp_env::APPROVAL_RELAY_CAPABILITY)
+		{
+			self.approvals = Some(ConnectionApprovals::new(responses.clone()));
+		}
+	}
+
+	/// This connection's relay bound to the request that issues a command.
+	fn owned_approvals(&self, request_id: u64) -> Option<OwnedApprovals> {
+		self
+			.approvals
+			.as_ref()
+			.map(|approvals| approvals.owned(request_id))
 	}
 
 	fn edit_model(&self) -> Option<Str> {
@@ -8885,6 +8926,11 @@ impl ConnectionState {
 	}
 
 	fn cancel_all(&mut self, exec_host: &ExecHost) {
+		// Pending prompts fail closed, and commands that outlive the connection
+		// stop holding its response channel.
+		if let Some(approvals) = &self.approvals {
+			approvals.disconnect();
+		}
 		for (_, state) in mem::take(&mut self.requests) {
 			match state {
 				RequestState::Invocation(InvocationState::Native {
@@ -9008,6 +9054,7 @@ async fn spawn_native_invocation(
 	write_scope: Option<Arc<WriteScope>>,
 	edit_repair: InvocationEditRepairContext,
 	acp: InvocationAcpBackends,
+	approvals: Option<OwnedApprovals>,
 	feed: omp_tool::InvocationFeed,
 	deadline: Duration,
 	params: IncomingParams<'static>,
@@ -9021,7 +9068,8 @@ async fn spawn_native_invocation(
 	let (started, start) = flume::bounded(1);
 	// The invocation body is the large future here. It is boxed once so the
 	// task-local scope wrappers around it move a pointer, not the body: nested
-	// by value, six wrappers overflow a worker stack in debug builds.
+	// by value, six wrappers overflow a worker stack in debug builds. The
+	// approval relay scope sits inside the box for the same reason.
 	tokio::spawn(write_scope::scoped(
 		write_scope,
 		with_invocation_scope(
@@ -9034,7 +9082,7 @@ async fn spawn_native_invocation(
 						edit_repair,
 						with_acp_scope(
 							acp,
-							Box::pin(async move {
+							Box::pin(with_invocation_approvals(approvals, async move {
 								let result = registry.invoke(&name, params);
 								let _ = started.send(());
 								match result {
@@ -9189,7 +9237,7 @@ async fn spawn_native_invocation(
 								let _ = finished
 									.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
 									.await;
-							}),
+							})),
 						),
 					),
 				),
@@ -14447,6 +14495,575 @@ mod tests {
 		};
 		assert_eq!(restored.outcome, pb::ExecOutcome::Denied as i32);
 		assert!(!root.path().join(".git/blocked.txt").exists());
+		serving.abort();
+	}
+
+	/// Only an application connection that advertised the capability gets an
+	/// approval relay; an extension connection never does, even when it asks,
+	/// so extension code cannot approve its own commands' amendments.
+	#[test]
+	fn only_advertising_application_connections_relay_approvals() {
+		let authority = Arc::new(AuthorityTable::default());
+		let (responses, _frames) = flume::bounded(1);
+		let connection = |hello, policy: &ConnectionPolicy| {
+			let mut connection = ConnectionState::new(
+				ExecHost::new(),
+				hello,
+				&ToolSettings::default(),
+				Arc::clone(&authority),
+				policy,
+			);
+			connection.relay_approvals(&responses);
+			connection
+		};
+		let application = connection(relay_hello(), &ConnectionPolicy::external(None));
+		assert!(application.owned_approvals(1).is_some());
+		let silent =
+			connection(accepted_hello(Grants::all(), None), &ConnectionPolicy::external(None));
+		assert!(silent.owned_approvals(1).is_none());
+		let extension = connection(
+			relay_hello(),
+			&ConnectionPolicy::extension(HostKey::new("workspace", "sandboxed", "relay"), [
+				"env.exec",
+			]),
+		);
+		assert!(extension.owned_approvals(1).is_none());
+	}
+
+	fn relay_hello() -> AcceptedHello {
+		AcceptedHello {
+			grants:        Grants::all(),
+			capabilities:  BTreeSet::from([Str::from(omp_env::APPROVAL_RELAY_CAPABILITY)]),
+			props:         None,
+			approval_mode: None,
+		}
+	}
+
+	/// Closing a connection disconnects its relay, whether its serve loop
+	/// ends (`cancel_all`) or its state is dropped: a command that outlives
+	/// the connection, such as auto-backgrounded bash past its verdict (no
+	/// request left for `cancel_all` to cancel), fails its prompt closed at
+	/// once, and the relay stops holding the connection's response channel.
+	#[test]
+	fn closing_a_connection_disconnects_its_relay() {
+		let connection = |responses: &flume::Sender<pb::ServerFrame>| {
+			let mut connection = ConnectionState::new(
+				ExecHost::new(),
+				relay_hello(),
+				&ToolSettings::default(),
+				Arc::new(AuthorityTable::default()),
+				&ConnectionPolicy::external(None),
+			);
+			connection.relay_approvals(responses);
+			connection
+		};
+		let assert_closed = |outliving: &OwnedApprovals, frames: &Receiver<pb::ServerFrame>| {
+			assert!(!outliving.is_live(), "a closed connection's relay can still prompt");
+			assert!(frames.is_disconnected(), "the relay kept the connection's writer alive");
+			let prompt = outliving.request(
+				None,
+				vec![ApprovalSpec {
+					title:         sf!("Approve scoped sandbox amendment"),
+					body:          sf!("The sandbox denied a write."),
+					subject:       sf!("/workspace/.git"),
+					kind:          sf!("sandbox_amendment"),
+					scopes:        vec![sf!("once")],
+					default:       Some(false),
+					route:         sf!("local"),
+					approver:      None,
+					timeout_ms:    120_000,
+					unreachable:   sf!("fail_closed"),
+					require_human: true,
+					pattern:       Some(sf!("echo x > .git/a")),
+					evidence:      Vec::new(),
+				}],
+				1_000,
+			);
+			let ticket = futures::FutureExt::now_or_never(prompt)
+				.expect("a closed connection's prompt waited for an answer");
+			assert_eq!(ticket.state, TicketState::Decided);
+			let decision = ticket.decision.expect("decided ticket");
+			assert!(!decision.approved);
+			assert_eq!(decision.source, ApprovalSource::Unavailable);
+			assert!(frames.is_empty(), "a closed connection's relay sent a query");
+		};
+
+		// The serve loop's close path, while the state itself is still alive.
+		let (responses, frames) = flume::bounded(1);
+		let mut closed = connection(&responses);
+		drop(responses);
+		let outliving = closed.owned_approvals(1).expect("application relay");
+		assert!(outliving.is_live());
+		let exec = closed.exec_host.clone();
+		closed.cancel_all(&exec);
+		assert_closed(&outliving, &frames);
+		drop(closed);
+
+		// A state dropped without that close path.
+		let (responses, frames) = flume::bounded(1);
+		let dropped = connection(&responses);
+		drop(responses);
+		let outliving = dropped.owned_approvals(1).expect("application relay");
+		assert!(outliving.is_live());
+		drop(dropped);
+		assert_closed(&outliving, &frames);
+	}
+
+	#[cfg(target_os = "macos")]
+	const RELAY_WAIT: Duration = Duration::from_secs(30);
+
+	/// A project-daemon-shaped host for relay proofs: a workspace-write
+	/// sandbox and no in-process approval route, so a sandbox amendment can
+	/// reach a human only through the issuing connection's relay. `None`
+	/// without Seatbelt.
+	#[cfg(target_os = "macos")]
+	async fn relay_daemon() -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return None;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		fs::create_dir(root.path().join(".git")).expect("protected carve-out");
+		let con = Arc::new(Ctx::new());
+		let convars = Arc::new(crate::exthost::ConvarControlFactory::new(Arc::clone(&con)));
+		let server = Arc::new(
+			EnvServer::open_local(
+				root.path(),
+				state.path(),
+				Registry::new(),
+				ExtHostConfig::new(
+					PathBuf::from("unused"),
+					Principal::new(sf!("test-principal"), sf!("Test Principal")),
+					sf!("test-session"),
+					1,
+				),
+				&con,
+				convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.expect("daemon-shaped server"),
+		);
+		server.exec.configure_sandbox(
+			&SandboxSettings {
+				mode: crate::exec_settings::ExecSandboxMode::WorkspaceWrite,
+				..SandboxSettings::default()
+			},
+			root.path(),
+		);
+		Some((server, root, state))
+	}
+
+	/// One application connection speaking raw frames, so a test can send what
+	/// a well-behaved client never would (a forged answer). Dropping it closes
+	/// the connection.
+	#[cfg(target_os = "macos")]
+	struct RelayPeer {
+		requests:  flume::Sender<pb::ClientFrame>,
+		responses: Receiver<pb::ServerFrame>,
+		serving:   tokio::task::JoinHandle<()>,
+	}
+
+	#[cfg(target_os = "macos")]
+	impl RelayPeer {
+		async fn connect(server: &Arc<EnvServer>, capabilities: &[&str]) -> Self {
+			let (requests, request_rx) = flume::bounded(16);
+			let (response_tx, responses) = flume::bounded(64);
+			let host = Arc::clone(server);
+			let serving = tokio::spawn(async move {
+				host
+					.serve_frames(request_rx, response_tx, ConnectionPolicy::external(None))
+					.await;
+			});
+			let peer = Self { requests, responses, serving };
+			peer
+				.send(
+					0,
+					client_frame::Body::Hello(pb::ClientHello {
+						client: "relay-peer".to_owned(),
+						schema_rev: omp_proto::SCHEMA_REV,
+						capabilities: capabilities
+							.iter()
+							.map(|capability| (*capability).to_owned())
+							.collect(),
+						..pb::ClientHello::default()
+					}),
+				)
+				.await;
+			let hello = peer.next().await;
+			assert!(matches!(hello.body, Some(server_frame::Body::Hello(_))), "{hello:?}");
+			peer
+		}
+
+		async fn send(&self, request_id: u64, body: client_frame::Body) {
+			self
+				.requests
+				.send_async(pb::ClientFrame {
+					request_id,
+					body: Some(body),
+					..pb::ClientFrame::default()
+				})
+				.await
+				.expect("send frame");
+		}
+
+		async fn next(&self) -> pb::ServerFrame {
+			time::timeout(RELAY_WAIT, self.responses.recv_async())
+				.await
+				.expect("server frame timed out")
+				.expect("server frame")
+		}
+
+		async fn open_session(&self, request_id: u64, root: &Path) -> Bytes {
+			self
+				.send(
+					request_id,
+					client_frame::Body::OpenSession(pb::OpenSessionRequest {
+						cwd_uri: Url::from_directory_path(root)
+							.expect("workspace URI")
+							.to_string(),
+						..pb::OpenSessionRequest::default()
+					}),
+				)
+				.await;
+			let frame = self.next().await;
+			let Some(server_frame::Body::SessionOpened(opened)) = frame.body else {
+				panic!("session did not open: {frame:?}");
+			};
+			opened.session
+		}
+
+		async fn exec(&self, request_id: u64, session: &Bytes, text: &str) {
+			self
+				.send(
+					request_id,
+					client_frame::Body::Exec(pb::ExecRequest {
+						session: session.clone(),
+						source: Some(pb::Script { text: text.to_owned(), ..pb::Script::default() }),
+						..pb::ExecRequest::default()
+					}),
+				)
+				.await;
+		}
+
+		/// Reads `request_id`'s frames up to its approval query.
+		async fn query(&self, request_id: u64) -> pb::ApprovalQuery {
+			loop {
+				let frame = self.next().await;
+				assert_eq!(frame.request_id, request_id, "unexpected frame: {frame:?}");
+				match frame.body {
+					Some(server_frame::Body::ApprovalQuery(query)) => return query,
+					Some(server_frame::Body::ExecStarted(_) | server_frame::Body::Output(_)) => {},
+					other => panic!("expected an approval query on {request_id}, got {other:?}"),
+				}
+			}
+		}
+
+		async fn answer(&self, request_id: u64, query_id: u64, approved: bool) {
+			self
+				.send(
+					request_id,
+					client_frame::Body::ApprovalAnswer(pb::ApprovalAnswer {
+						query_id,
+						decision: Some(pb::ApprovalDecision {
+							approved,
+							scope: "once".to_owned(),
+							source: "user".to_owned(),
+							..pb::ApprovalDecision::default()
+						}),
+					}),
+				)
+				.await;
+		}
+
+		/// Reads `request_id`'s frames to its exit and returns the terminal
+		/// status, its output, and the query ids withdrawn on the way. Another
+		/// query, or any frame on another request, fails the test.
+		async fn exit(&self, request_id: u64) -> (pb::ExecStatusMsg, Vec<u8>, Vec<u64>) {
+			let mut output = Vec::new();
+			let mut withdrawn = Vec::new();
+			loop {
+				let frame = self.next().await;
+				assert_eq!(frame.request_id, request_id, "unexpected frame: {frame:?}");
+				match frame.body {
+					Some(server_frame::Body::Exit(exit)) => {
+						return (exit.status.expect("terminal status"), output, withdrawn);
+					},
+					Some(server_frame::Body::Output(chunk)) => output.extend_from_slice(&chunk.data),
+					Some(server_frame::Body::ApprovalWithdrawn(query)) => withdrawn.push(query.query_id),
+					Some(server_frame::Body::ExecStarted(_)) => {},
+					other => panic!("unexpected frame before {request_id} exited: {other:?}"),
+				}
+			}
+		}
+
+		/// One request round trip: every frame sent before it was handled, and
+		/// none drew a reply.
+		async fn barrier(&self, request_id: u64) {
+			self
+				.send(request_id, client_frame::Body::EvalReset(pb::EvalResetRequest {}))
+				.await;
+			let frame = self.next().await;
+			assert_eq!(frame.request_id, request_id, "an earlier frame drew a reply: {frame:?}");
+			assert!(matches!(frame.body, Some(server_frame::Body::EvalReset(_))), "{frame:?}");
+		}
+	}
+
+	/// The daemon has no in-process route: a sandbox amendment prompts only the
+	/// connection that issued the command, on that command's request, and only
+	/// that connection's answer decides it.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn daemon_relays_an_amendment_only_to_the_issuing_connection() {
+		let Some((server, root, _state)) = relay_daemon().await else {
+			return;
+		};
+		let owner = RelayPeer::connect(&server, &[omp_env::APPROVAL_RELAY_CAPABILITY]).await;
+		let other = RelayPeer::connect(&server, &[omp_env::APPROVAL_RELAY_CAPABILITY]).await;
+		let session = owner.open_session(1, root.path()).await;
+
+		owner
+			.exec(2, &session, "echo forged > .git/forged.txt")
+			.await;
+		let forged = owner.query(2).await;
+		assert_eq!(forged.invocation_id, None, "a sandbox amendment blocks no invocation");
+		let reason = forged.reasons.first().expect("amendment requirement");
+		assert_eq!(reason.kind, "sandbox_amendment");
+		assert_eq!(reason.timeout_ms, 120_000);
+		assert_eq!(reason.pattern.as_deref(), Some("echo forged > .git/forged.txt"));
+		assert!(Path::new(&reason.subject).ends_with(".git"), "{}", reason.subject);
+		// Another connection that names the owner's request and query cannot
+		// approve it, and its answer draws no reply.
+		other.answer(2, forged.query_id, true).await;
+		other.barrier(9).await;
+		owner.answer(2, forged.query_id, false).await;
+		let (status, _, withdrawn) = owner.exit(2).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Denied as i32);
+		assert!(withdrawn.is_empty(), "an answered query was withdrawn");
+		assert!(!root.path().join(".git/forged.txt").exists());
+
+		owner
+			.exec(3, &session, "echo approved > .git/approved.txt")
+			.await;
+		let approved = owner.query(3).await;
+		assert_ne!(approved.query_id, forged.query_id);
+		owner.answer(3, approved.query_id, true).await;
+		let (status, output, _) = owner.exit(3).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Exited as i32, "{status:?}");
+		assert_eq!(status.exit_code, Some(0));
+		assert_eq!(
+			fs::read(root.path().join(".git/approved.txt")).expect("approved write"),
+			b"approved\n"
+		);
+		assert!(!String::from_utf8_lossy(&output).contains("rerun with approved scope"));
+		assert!(
+			status.diags.iter().any(|diag| diag
+				.text
+				.contains("sandbox: rerun with approved scope: write")),
+			"{:?}",
+			status.diags
+		);
+
+		// A connection that relays no approvals keeps the fail-closed denial.
+		let silent = RelayPeer::connect(&server, &[]).await;
+		let silent_session = silent.open_session(1, root.path()).await;
+		silent
+			.exec(2, &silent_session, "echo silent > .git/silent.txt")
+			.await;
+		let (status, ..) = silent.exit(2).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Denied as i32);
+		assert!(!root.path().join(".git/silent.txt").exists());
+
+		assert!(other.responses.is_empty(), "another connection saw the owner's prompt");
+	}
+
+	/// Cancelling a command withdraws its open prompt before the command exits;
+	/// closing the issuing connection fails its prompt closed and leaves the
+	/// daemon serving other connections.
+	///
+	/// The exit reaches the wire from its own forwarding task, so the ordering
+	/// holds only because the command drops its prompt before it reports the
+	/// exit. A multi-thread runtime, as the daemon runs, lets the two race.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn daemon_withdraws_cancelled_prompts_and_fails_closed_on_disconnect() {
+		let Some((server, root, _state)) = relay_daemon().await else {
+			return;
+		};
+		let owner = RelayPeer::connect(&server, &[omp_env::APPROVAL_RELAY_CAPABILITY]).await;
+		let session = owner.open_session(1, root.path()).await;
+		owner
+			.exec(2, &session, "echo cancelled > .git/cancelled.txt")
+			.await;
+		let cancelled = owner.query(2).await;
+		owner
+			.send(
+				0,
+				client_frame::Body::Cancel(pb::CancelRequest {
+					target: Some(pb::cancel_request::Target::TargetRequestId(2)),
+					..pb::CancelRequest::default()
+				}),
+			)
+			.await;
+		let (status, _, withdrawn) = owner.exit(2).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Cancelled as i32, "{status:?}");
+		assert_eq!(withdrawn, [cancelled.query_id], "the prompt was not withdrawn before exit");
+		assert!(!root.path().join(".git/cancelled.txt").exists());
+		// An answer to the withdrawn query is ignored without a reply.
+		owner.answer(2, cancelled.query_id, true).await;
+		owner.barrier(9).await;
+
+		owner
+			.exec(3, &session, "echo dropped > .git/dropped.txt")
+			.await;
+		let dropped = owner.query(3).await;
+		let RelayPeer { requests, responses, serving } = owner;
+		drop(requests);
+		time::timeout(RELAY_WAIT, serving)
+			.await
+			.expect("the closed connection kept serving")
+			.expect("serving task");
+		drop(responses);
+
+		let next = RelayPeer::connect(&server, &[omp_env::APPROVAL_RELAY_CAPABILITY]).await;
+		// Approval state is per connection: naming the closed connection's
+		// query from another connection decides nothing.
+		next.answer(3, dropped.query_id, true).await;
+		next.barrier(9).await;
+		let next_session = next.open_session(1, root.path()).await;
+		next.exec(2, &next_session, "printf served").await;
+		let (status, output, _) = next.exit(2).await;
+		assert_eq!(status.outcome, pb::ExecOutcome::Exited as i32, "{status:?}");
+		assert_eq!(output, b"served");
+		assert!(!root.path().join(".git/dropped.txt").exists());
+	}
+
+	#[cfg(target_os = "macos")]
+	struct AllowAdmission;
+
+	#[cfg(target_os = "macos")]
+	impl omp_env::Admitter for AllowAdmission {
+		type Future<'client> = std::future::Ready<pb::Admission>;
+
+		fn admit(&self, query: pb::AdmitInvocation) -> Self::Future<'_> {
+			std::future::ready(pb::Admission {
+				invocation_id: query.invocation_id,
+				allow: true,
+				..pb::Admission::default()
+			})
+		}
+	}
+
+	/// Bash invoked over the wire runs its command inside the invocation, so
+	/// the amendment reaches the invoking connection on the invocation's own
+	/// request, and the approved rerun completes the call.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn native_bash_relays_its_amendment_on_the_invocation_request() {
+		let Some((server, root, _state)) = relay_daemon().await else {
+			return;
+		};
+		let (client, transport) = EnvClient::in_process(64);
+		client.set_admitter(AllowAdmission);
+		let host = Arc::clone(&server);
+		let serving = tokio::spawn(async move { host.serve_in_process(transport).await });
+		client
+			.hello(pb::ClientHello {
+				client: "native-relay".to_owned(),
+				schema_rev: omp_proto::SCHEMA_REV,
+				capabilities: vec![omp_env::APPROVAL_RELAY_CAPABILITY.to_owned()],
+				..pb::ClientHello::default()
+			})
+			.await
+			.expect("relay hello");
+		let queries = client.approval_queries();
+		let rev = server
+			.registry()
+			.live_identity("bash")
+			.map(|(_, rev)| rev.to_string())
+			.expect("bash is registered");
+		let mut invocation = client
+			.invoke(pb::InvokeTool {
+				invocation_id: "native-relay".into(),
+				name: "bash".into(),
+				rev,
+				..pb::InvokeTool::default()
+			})
+			.await
+			.expect("invoke bash");
+		assert!(matches!(
+			invocation.next_event().await.expect("bash accepted"),
+			Some(omp_env::InvocationEvent::Accepted(_))
+		));
+		invocation
+			.commit_args(
+				Bytes::from(
+					serde_json::to_vec(&serde_json::json!({
+						"command": "echo native > .git/native.txt"
+					}))
+					.expect("bash arguments"),
+				),
+				Bytes::from_static(b"relay-test-token"),
+				1_000,
+				None,
+			)
+			.await
+			.expect("commit bash arguments");
+		let (request_id, query) = time::timeout(RELAY_WAIT, async {
+			loop {
+				tokio::select! {
+					event = queries.recv_async() => match event.expect("approval queue") {
+						omp_env::ApprovalQueryEvent::Requested { request_id, query } => {
+							break (request_id, query);
+						},
+						withdrawn => panic!("unexpected withdrawal: {withdrawn:?}"),
+					},
+					event = invocation.next_event() => match event.expect("bash event") {
+						Some(omp_env::InvocationEvent::Update(_)) => {},
+						other => panic!("bash settled before its amendment was answered: {other:?}"),
+					},
+				}
+			}
+		})
+		.await
+		.expect("the amendment was not relayed");
+		// The invocation is this client's first request after the hello.
+		assert_eq!(request_id, 1);
+		let reason = query.reasons.first().expect("amendment requirement");
+		assert_eq!(reason.kind, "sandbox_amendment");
+		assert!(
+			reason
+				.pattern
+				.as_deref()
+				.is_some_and(|command| command.contains("echo native > .git/native.txt")),
+			"{:?}",
+			reason.pattern
+		);
+		client
+			.answer_approval(request_id, query.query_id, pb::ApprovalDecision {
+				approved: true,
+				scope: "once".to_owned(),
+				source: "user".to_owned(),
+				..pb::ApprovalDecision::default()
+			})
+			.await
+			.expect("answer the amendment");
+		let verdict = time::timeout(RELAY_WAIT, async {
+			loop {
+				match invocation.next_event().await.expect("bash event") {
+					Some(omp_env::InvocationEvent::Verdict(verdict)) => break verdict,
+					Some(omp_env::InvocationEvent::Update(_)) => {},
+					other => panic!("unexpected bash event: {other:?}"),
+				}
+			}
+		})
+		.await
+		.expect("bash did not settle");
+		assert!(!verdict.is_error, "{}", String::from_utf8_lossy(&verdict.json));
+		assert_eq!(
+			fs::read(root.path().join(".git/native.txt")).expect("approved native write"),
+			b"native\n"
+		);
 		serving.abort();
 	}
 
