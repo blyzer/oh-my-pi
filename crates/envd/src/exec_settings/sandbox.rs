@@ -607,7 +607,12 @@ fn default_env_deny() -> Vec<Str> {
 		.collect()
 }
 fn valid_domain_pattern(pattern: &str) -> bool {
-	let domain = pattern.strip_prefix("*.").unwrap_or(pattern);
+	valid_domain_name(pattern.strip_prefix("*.").unwrap_or(pattern))
+}
+
+/// Whether `domain` is a plain DNS name: dot-separated labels of ASCII
+/// letters, digits and hyphens, each 1 to 63 bytes long.
+pub(crate) fn valid_domain_name(domain: &str) -> bool {
 	!domain.is_empty()
 		&& domain.split('.').all(|label| {
 			!label.is_empty()

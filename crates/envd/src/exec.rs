@@ -61,6 +61,7 @@ use url::Url;
 use super::{
 	admission,
 	admission::{GithubMutationTarget, SandboxUnavailable},
+	exec_network_diag::{CommandEnd, NetworkInForce, NetworkMarkerScan, find_marker, network_diag},
 	exec_sandbox,
 	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxConsumer, SandboxDenialFact},
 	exec_settings::{ExecSandboxMode, NetworkConfinement, SandboxSettings},
@@ -71,6 +72,7 @@ use super::{
 		DaemonLease, LeaseError, ProcessPhase, ProcessRecord, ProcessStore, ProcessStoreSnapshot,
 		RestartRecord, StoreError,
 	},
+	sandbox_proxy::BrokerDenial,
 };
 
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
@@ -320,6 +322,8 @@ struct SessionHandle {
 	sandbox:           Option<Arc<ExecSandbox>>,
 	process_scope:     Arc<SpawnBook>,
 	sandbox_announced: Arc<AtomicBool>,
+	/// The generic network diag was shown in this session.
+	network_announced: Arc<AtomicBool>,
 }
 
 struct NamedProcess {
@@ -483,6 +487,7 @@ struct SessionCommand {
 	github_targets: Vec<GithubMutationTarget>,
 	sandbox: Option<Arc<ExecSandbox>>,
 	sandbox_announced: Arc<AtomicBool>,
+	network_announced: Arc<AtomicBool>,
 	diags: Arc<Mutex<Vec<omp_tool::Diag>>>,
 	sequence: Arc<AtomicU64>,
 	rerun: bool,
@@ -826,6 +831,7 @@ impl ExecHost {
 				sandbox,
 				process_scope,
 				sandbox_announced: Arc::new(AtomicBool::new(false)),
+				network_announced: Arc::new(AtomicBool::new(false)),
 			});
 
 		Ok(OpenSessionResponse {
@@ -1016,6 +1022,7 @@ impl ExecHost {
 			github_targets,
 			sandbox: session.sandbox,
 			sandbox_announced: session.sandbox_announced,
+			network_announced: session.network_announced,
 			diags: Arc::new(Mutex::new(Vec::new())),
 			sequence: Arc::new(AtomicU64::new(1)),
 			rerun: false,
@@ -2338,6 +2345,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	}
 	let cancel_rx = command.cancel_rx.clone();
 	let sandbox_active = command.sandbox.is_some();
+	let network = command.sandbox.as_deref().and_then(NetworkInForce::of);
 	let setup = setup_io(
 		command.pty.as_ref(),
 		command.control.clone(),
@@ -2346,6 +2354,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		command.output.clone(),
 		command.sequence.clone(),
 		sandbox_active,
+		network.is_some(),
 	);
 	let Ok((mut params, readers, sequencer)) = setup else {
 		finish_session_command(
@@ -2457,7 +2466,10 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	for reader in readers {
 		let _ = reader.await;
 	}
-	let broker_denial = attempt.as_ref().and_then(|attempt| attempt.take_denial());
+	let facts = attempt
+		.as_ref()
+		.map(|attempt| attempt.take_facts())
+		.unwrap_or_default();
 	let cancelled = result == RunTerminal::Cancelled;
 	let result = if environment_scoped
 		&& shell
@@ -2469,16 +2481,26 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	} else {
 		result
 	};
-	let denial = {
+	let (denial, network_marker) = {
 		let sequencer = sequencer.lock();
-		classify_sandbox_denial(
+		let denial = classify_sandbox_denial(
 			sandbox_active,
-			broker_denial,
+			facts.denial,
 			&result,
 			shell_error.as_ref(),
 			sequencer.sandbox_diagnostic.as_deref().unwrap_or_default(),
-		)
+		);
+		let marker = sequencer
+			.network_scan
+			.as_ref()
+			.is_some_and(NetworkMarkerScan::found);
+		(denial, marker)
 	};
+	let network_trouble = network.map(|network| NetworkTrouble {
+		network,
+		refusal: facts.refusal,
+		marker: network_marker,
+	});
 	if let Some(denial) = denial {
 		if !command.rerun
 			&& let Some(sandbox) = command.sandbox.as_deref()
@@ -2521,6 +2543,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 				}
 			}
 		}
+		push_network_diag(&command, network_trouble, CommandEnd::Failed);
 		finish_session_command(
 			&command,
 			RunTerminal::Denied { exit_code: denial.exit_code, fact: denial.fact },
@@ -2530,8 +2553,39 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		.await;
 		return cancelled;
 	}
+	push_network_diag(&command, network_trouble, result.command_end());
 	finish_session_command(&command, result, started_at.elapsed(), shell.working_dir()).await;
 	cancelled
+}
+
+/// What one sandboxed command met on the network, for its final diag.
+struct NetworkTrouble {
+	network: NetworkInForce,
+	refusal: Option<BrokerDenial>,
+	marker:  bool,
+}
+
+/// Adds the network diag for a command's final run. An approved rerun reports
+/// its own, so a command that reruns never reports its first attempt's.
+fn push_network_diag(command: &SessionCommand, trouble: Option<NetworkTrouble>, end: CommandEnd) {
+	let Some(trouble) = trouble else {
+		return;
+	};
+	let prompt = trouble.refusal.is_some()
+		&& command
+			.host
+			.upgrade()
+			.is_some_and(|host| host.sandbox_approval_route.lock().is_some());
+	if let Some(diag) = network_diag(
+		trouble.network,
+		trouble.refusal.as_ref(),
+		trouble.marker,
+		end,
+		prompt,
+		&command.network_announced,
+	) {
+		command.diags.lock().push(diag);
+	}
 }
 
 async fn finish_session_command(
@@ -2647,6 +2701,14 @@ pub(crate) fn wire_diag(diag: &omp_tool::Diag) -> v1::ToolDiag {
 }
 
 impl RunTerminal {
+	const fn command_end(&self) -> CommandEnd {
+		match self {
+			Self::Exited(0) => CommandEnd::Succeeded,
+			Self::Cancelled => CommandEnd::Cancelled,
+			Self::Exited(_) | Self::Failed | Self::Timeout | Self::Denied { .. } => CommandEnd::Failed,
+		}
+	}
+
 	fn status(self, elapsed: Duration, spilled_output: Option<WireBlob>) -> ExecStatusMsg {
 		self.status_with_projection(elapsed, spilled_output, None)
 	}
@@ -2794,36 +2856,7 @@ fn sandbox_denial_marker(stderr: &[u8]) -> Option<usize> {
 		b"read-only file system",
 	];
 	const ERRNOS: &[&[u8]] = &[b"eperm", b"eacces", b"erofs"];
-	for phrase in PHRASES {
-		if let Some(position) = stderr
-			.windows(phrase.len())
-			.position(|window| window.eq_ignore_ascii_case(phrase))
-		{
-			return Some(position);
-		}
-	}
-	for errno in ERRNOS {
-		if let Some(position) =
-			stderr
-				.windows(errno.len())
-				.enumerate()
-				.find_map(|(position, window)| {
-					if !window.eq_ignore_ascii_case(errno) {
-						return None;
-					}
-					let before = position
-						.checked_sub(1)
-						.and_then(|index| stderr.get(index))
-						.is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
-					let after = stderr
-						.get(position + errno.len())
-						.is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
-					(before && after).then_some(position)
-				}) {
-			return Some(position);
-		}
-	}
-	None
+	find_marker(stderr, None, true, PHRASES, ERRNOS)
 }
 
 fn write_input(control: &RunControl, data: Option<&[u8]>) -> Result<(), ExecError> {
@@ -2850,6 +2883,7 @@ fn setup_io(
 	output: Arc<Mutex<OutputCapture>>,
 	sequence: Arc<AtomicU64>,
 	capture_sandbox_diagnostic: bool,
+	scan_network_markers: bool,
 ) -> Result<(ExecutionParameters, Vec<task::JoinHandle<()>>, Arc<Mutex<OutputSequencer>>), ExecError>
 {
 	let mut params = ExecutionParameters::default();
@@ -2859,6 +2893,7 @@ fn setup_io(
 		events,
 		output,
 		sandbox_diagnostic: capture_sandbox_diagnostic.then(Vec::new),
+		network_scan: scan_network_markers.then(NetworkMarkerScan::new),
 	}));
 	if let Some(pty) = pty {
 		let winsize = nix::pty::Winsize {
@@ -3012,9 +3047,16 @@ struct OutputSequencer {
 	events:             flume::Sender<ExecEvent>,
 	output:             Arc<Mutex<OutputCapture>>,
 	sandbox_diagnostic: Option<Vec<u8>>,
+	/// Present while the sandbox confines the network: looks for network
+	/// failures in each chunk as it arrives, independently of the capture
+	/// above, which stops growing at a denial marker.
+	network_scan:       Option<NetworkMarkerScan>,
 }
 impl OutputSequencer {
 	fn capture_sandbox_diagnostic(&mut self, data: &[u8]) {
+		if let Some(scan) = self.network_scan.as_mut() {
+			scan.feed(data);
+		}
 		let Some(diagnostic) = self.sandbox_diagnostic.as_mut() else {
 			return;
 		};
@@ -4147,6 +4189,92 @@ mod tests {
 		);
 	}
 
+	/// A broker refusal the user cannot amend never becomes a denial: an
+	/// allowlisted name that does not resolve leaves the command `Failed` with
+	/// its own exit status, while a policy refusal stays the amendable fact.
+	/// Runs on every host: the broker serves an environment-only wrapper.
+	#[test]
+	fn fail_closed_broker_refusals_stay_ordinary_failures() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let settings = SandboxSettings {
+			allow_domains: vec![Str::new_static("unresolvable.invalid")],
+			..SandboxSettings::default()
+		};
+		let sandbox = ExecSandbox::with_test_broker(&settings, workspace.path());
+
+		let attempt = sandbox.begin_attempt();
+		let status = attempt.connect_through_broker("unresolvable.invalid", 443);
+		assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+		let facts = attempt.take_facts();
+		assert_eq!(facts.denial, None);
+		assert_eq!(
+			facts.refusal.as_ref().map(|refusal| refusal.cause),
+			Some(crate::sandbox_proxy::BrokerRefusal::Unresolved)
+		);
+		let result = RunTerminal::Exited(56);
+		assert!(
+			classify_sandbox_denial(
+				true,
+				facts.denial,
+				&result,
+				None,
+				b"curl: (56) CONNECT tunnel failed, response 403\n",
+			)
+			.is_none()
+		);
+		let status = result.status(Duration::ZERO, None);
+		assert_eq!(status.outcome, ExecOutcome::Failed as i32);
+		assert_eq!(status.exit_code, Some(56));
+		assert!(status.props.is_none(), "no denied-path label");
+
+		let attempt = sandbox.begin_attempt();
+		let status = attempt.connect_through_broker("blocked.example", 443);
+		assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+		let facts = attempt.take_facts();
+		let fact = SandboxDenialFact::Network { host: sf!("blocked.example"), port: 443 };
+		assert_eq!(facts.denial.as_ref(), Some(&fact));
+		let denial = classify_sandbox_denial(true, facts.denial, &RunTerminal::Exited(56), None, b"")
+			.expect("policy refusal is a denial");
+		assert_eq!(denial.fact, fact);
+	}
+
+	/// The network scan runs beside the denial capture without changing it:
+	/// a resolver failure followed by `Permission denied` still classifies as
+	/// an `Unknown` denial, and the network marker is still seen.
+	#[test]
+	fn network_markers_leave_denial_classification_unchanged() {
+		let (events, _receiver) = flume::unbounded();
+		let mut sequencer = OutputSequencer {
+			next: 1,
+			sequence: Arc::new(AtomicU64::new(1)),
+			events,
+			output: Arc::new(Mutex::new(
+				OutputCapture::new_with_request(None, omp_tool::OutputRequest::Bounded)
+					.expect("output capture"),
+			)),
+			sandbox_diagnostic: Some(Vec::new()),
+			network_scan: Some(NetworkMarkerScan::new()),
+		};
+		sequencer.capture_sandbox_diagnostic(b"curl: (6) Could not resolve ");
+		sequencer.capture_sandbox_diagnostic(b"host: example.com\n");
+		sequencer.capture_sandbox_diagnostic(b"touch: /private/blocked: Permission denied\n");
+		let diagnostic = sequencer.sandbox_diagnostic.as_deref().unwrap_or_default();
+		let denial = classify_sandbox_denial(true, None, &RunTerminal::Exited(1), None, diagnostic)
+			.expect("the denial marker still classifies");
+		assert_eq!(denial.fact, SandboxDenialFact::Unknown);
+		assert!(
+			sequencer
+				.network_scan
+				.as_ref()
+				.is_some_and(NetworkMarkerScan::found)
+		);
+		assert_eq!(
+			diagnostic,
+			b"curl: (6) Could not resolve host: example.com\ntouch: /private/blocked: Permission \
+			  denied\n"
+		);
+	}
+
 	#[tokio::test]
 	async fn jit_approval_names_only_the_detected_capability_and_exact_command() {
 		let host = ExecHost::new();
@@ -4448,6 +4576,78 @@ mod tests {
 		assert!(diags[0].text.contains("backend=seatbelt"), "{}", diags[0].text);
 		let linked_cwd = format!("cd {}/opt/tool/bin && echo * && ./tool linked", prefix.display());
 		assert_eq!(run_output(&host, script_request(session, &linked_cwd)).await, b"tool\nlinked\n");
+		host.close_session(session).expect("session closes");
+	}
+
+	/// Live Seatbelt proof that network trouble under the default scoped
+	/// network reaches the model as `sandbox` diags, offline: the broker
+	/// refuses a host outside the allowlist before resolving it, and a
+	/// `.invalid` name never resolves. No approval route is bound, so a failed
+	/// refusal ends `Denied` and the remedy offers no prompt.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn scoped_network_trouble_reaches_the_model_as_sandbox_diags() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().unwrap();
+		let workspace = root.path().canonicalize().unwrap();
+		let host = ExecHost::new();
+		host.configure_sandbox(&crate::exec_settings::SandboxSettings::default(), &workspace);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+		let texts = |diags: &[v1::ToolDiag]| {
+			diags
+				.iter()
+				.map(|diag| format!("{}/{}: {}", diag.kind, diag.severity, diag.text))
+				.collect::<Vec<_>>()
+		};
+
+		// Plain HTTP through the broker: curl without `-f` exits 0 on its 403,
+		// and the refusal is still reported, as information.
+		let (outcome, exit, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sS -o /dev/null http://blocked.invalid/"),
+		)
+		.await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(exit, Some(0));
+		assert_eq!(diags.len(), 2, "{:?}", texts(&diags));
+		assert!(diags[0].text.contains("sandbox: backend=seatbelt"), "{:?}", texts(&diags));
+		assert_eq!(diags[1].kind, "sandbox");
+		assert_eq!(diags[1].severity, v1::ToolDiagSeverity::Info as i32);
+		assert!(diags[1].text.contains("blocked.invalid:80"), "{:?}", texts(&diags));
+		assert!(diags[1].text.contains("sv_sandbox_network_mode is scoped"));
+		assert!(diags[1].text.contains("no approval prompt"));
+
+		// The same refusal failing the command ends it `Denied`, with a warning.
+		let (outcome, _, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sSf -o /dev/null http://blocked.invalid/"),
+		)
+		.await;
+		assert_eq!(outcome, ExecOutcome::Denied as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(diags.len(), 1, "{:?}", texts(&diags));
+		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
+		assert!(diags[0].text.contains("blocked.invalid:80"), "{:?}", texts(&diags));
+
+		// A client that ignores the proxy environment gets the generic text,
+		// once per session.
+		let nc = "/usr/bin/nc -z -G 2 blocked.invalid 80";
+		let (outcome, _, output, diags) = run_failure(&host, script_request(session, nc)).await;
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(diags.len(), 1, "{:?}", texts(&diags));
+		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
+		assert!(diags[0].text.contains("HTTP_PROXY"), "{:?}", texts(&diags));
+		let (outcome, _, _, diags) = run_failure(&host, script_request(session, nc)).await;
+		assert_eq!(outcome, ExecOutcome::Failed as i32);
+		assert!(diags.is_empty(), "{:?}", texts(&diags));
 		host.close_session(session).expect("session closes");
 	}
 
@@ -4955,11 +5155,11 @@ mod tests {
 		assert!(second_attempt.check_write(&second_path).is_err());
 		let canonical = fs::canonicalize(root.path()).expect("canonical root");
 		assert_eq!(
-			first_attempt.take_denial(),
+			first_attempt.take_facts().denial,
 			Some(SandboxDenialFact::WritePath(canonical.join("first-denied"))),
 		);
 		assert_eq!(
-			second_attempt.take_denial(),
+			second_attempt.take_facts().denial,
 			Some(SandboxDenialFact::WritePath(canonical.join("second-denied"))),
 		);
 		host

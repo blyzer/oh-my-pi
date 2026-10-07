@@ -21,6 +21,7 @@ mod editor_base;
 pub mod editor_sync;
 pub mod eval;
 pub mod exec;
+mod exec_network_diag;
 mod exec_sandbox;
 pub mod exec_settings;
 pub mod ext_git;

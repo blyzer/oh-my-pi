@@ -35,6 +35,45 @@ const MAX_ATTEMPTS: usize = 64;
 const DENIAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DENIAL_DRAIN_BYTES: usize = 1024 * 1024;
 
+/// Why the egress broker refused one connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+pub(crate) enum BrokerRefusal {
+	/// The port, a deny rule or the allowlist refused the host. The only
+	/// cause the user can amend: an approval admits the host for one rerun.
+	Policy,
+	/// The host was allowed, but its name did not resolve to any address.
+	Unresolved,
+	/// The host is, or resolves to, an address scoped networking never
+	/// reaches: loopback without the localhost grant, or a private, link-local
+	/// or otherwise non-public address. Approving it could not help.
+	NonRoutable,
+	/// The host was allowed and resolved, but every connection to it failed.
+	Upstream,
+}
+
+impl BrokerRefusal {
+	/// Fails closed: the user cannot amend the refusal for a rerun.
+	const fn fails_closed(self) -> bool {
+		!matches!(self, Self::Policy)
+	}
+}
+
+/// The broker's refusal recorded for one execution attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BrokerDenial {
+	/// Requested host, lowercased with trailing dots trimmed. The sandboxed
+	/// client chose it, so it is untrusted text.
+	pub(crate) host:  Str,
+	/// Requested TCP port.
+	pub(crate) port:  u16,
+	/// Why the broker refused it.
+	pub(crate) cause: BrokerRefusal,
+}
+
+/// Live attempt capabilities, each with the refusal it recorded so far.
+type Attempts = Arc<Mutex<FastHashMap<Str, Option<BrokerDenial>>>>;
+
 /// A session-owned scoped egress broker. It exposes a loopback listener on
 /// macOS and an owned Unix socket on Linux, so an untrusted command can reach
 /// it only through its platform-specific sandbox relay.
@@ -43,7 +82,7 @@ pub(crate) struct ScopedProxy {
 	#[cfg(target_os = "linux")]
 	socket:   PathBuf,
 	shutdown: Arc<AtomicBool>,
-	attempts: Arc<Mutex<FastHashMap<Str, Option<(Str, u16)>>>>,
+	attempts: Attempts,
 	listener: Option<JoinHandle<()>>,
 	#[cfg(target_os = "linux")]
 	_temp:    TempDir,
@@ -117,8 +156,8 @@ impl ScopedProxy {
 		token
 	}
 
-	/// Consumes this capability's denial and invalidates it.
-	pub(crate) fn finish_attempt(&self, token: &Str) -> Option<(Str, u16)> {
+	/// Consumes this capability's refusal and invalidates it.
+	pub(crate) fn finish_attempt(&self, token: &Str) -> Option<BrokerDenial> {
 		self.attempts.lock().remove(token).flatten()
 	}
 
@@ -333,14 +372,14 @@ struct ProxyPolicy {
 	ports:     Arc<[u16]>,
 	localhost: bool,
 	amendment: Option<(Str, u16)>,
-	attempts:  Arc<Mutex<FastHashMap<Str, Option<(Str, u16)>>>>,
+	attempts:  Attempts,
 }
 
 impl ProxyPolicy {
 	fn from_settings(
 		settings: &SandboxSettings,
 		amendment: Option<(&Str, u16)>,
-		attempts: Arc<Mutex<FastHashMap<Str, Option<(Str, u16)>>>>,
+		attempts: Attempts,
 	) -> Self {
 		Self {
 			allow: settings.allow_domains.clone().into(),
@@ -356,14 +395,34 @@ impl ProxyPolicy {
 		self.attempts.lock().contains_key(token)
 	}
 
+	/// Records why the broker refused `host:port` for this attempt. The first
+	/// policy refusal wins: a later refusal never replaces it, so the fact the
+	/// user can amend survives any fail-closed refusal that follows. Among
+	/// fail-closed refusals the first wins as well, and a policy refusal
+	/// replaces one.
+	fn record(&self, token: &Str, host: &str, port: u16, cause: BrokerRefusal) {
+		let mut attempts = self.attempts.lock();
+		let Some(slot) = attempts.get_mut(token) else {
+			return;
+		};
+		let replace = slot
+			.as_ref()
+			.is_none_or(|recorded| recorded.cause.fails_closed() && !cause.fails_closed());
+		if replace {
+			*slot = Some(BrokerDenial { host: Str::from(host), port, cause });
+		}
+	}
+
 	fn authorize(&self, token: &Str, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
 		if !self.attempt_is_active(token) {
 			return Err(policy_blocked());
 		}
-		let host = host.trim_end_matches('.').to_ascii_lowercase();
-		// Refused before any fact is recorded: approving it could not help,
-		// because the rerun would refuse the same address after resolution.
+		let host = normalize_host(host);
+		// Refused as non-routable before the allowlist: approving it could not
+		// help, because the rerun would refuse the same address after
+		// resolution, so no amendable fact is recorded.
 		if refused_after_resolution(&host, self.localhost) {
+			self.record(token, &host, port, BrokerRefusal::NonRoutable);
 			return Err(policy_blocked());
 		}
 		let amended = self
@@ -384,25 +443,58 @@ impl ProxyPolicy {
 						.iter()
 						.any(|rule| domain_matches(rule.as_str(), &host)))
 		{
-			if let Some(denial) = self.attempts.lock().get_mut(token) {
-				*denial = Some((Str::from(host.as_str()), port));
-			}
+			self.record(token, &host, port, BrokerRefusal::Policy);
 			return Err(policy_blocked());
 		}
-		let candidates = (host.as_str(), port).to_socket_addrs()?.collect::<Vec<_>>();
-		if candidates.is_empty()
-			|| candidates
-				.iter()
-				.any(|address| !authorized_address(address.ip(), self.localhost))
+		let candidates = match (host.as_str(), port).to_socket_addrs() {
+			Ok(candidates) => candidates.collect::<Vec<_>>(),
+			Err(error) => {
+				self.record(token, &host, port, BrokerRefusal::Unresolved);
+				return Err(error);
+			},
+		};
+		if candidates.is_empty() {
+			self.record(token, &host, port, BrokerRefusal::Unresolved);
+			return Err(policy_blocked());
+		}
+		if candidates
+			.iter()
+			.any(|address| !authorized_address(address.ip(), self.localhost))
 		{
+			self.record(token, &host, port, BrokerRefusal::NonRoutable);
 			return Err(policy_blocked());
 		}
 		Ok(candidates)
+	}
+
+	/// Opens the upstream connection for an authorized request, recording an
+	/// [`BrokerRefusal::Upstream`] refusal when every resolved address fails.
+	fn connect(&self, token: &Str, host: &str, port: u16) -> io::Result<TcpStream> {
+		let candidates = self.authorize(token, host, port)?;
+		let mut last = None;
+		for address in candidates {
+			match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+				Ok(stream) => {
+					stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
+					stream.set_write_timeout(Some(IDLE_TIMEOUT))?;
+					return Ok(stream);
+				},
+				Err(error) => last = Some(error),
+			}
+		}
+		self.record(token, &normalize_host(host), port, BrokerRefusal::Upstream);
+		Err(last.unwrap_or_else(policy_blocked))
 	}
 }
 
 fn policy_blocked() -> io::Error {
 	io::Error::new(io::ErrorKind::PermissionDenied, "scoped proxy policy blocked request")
+}
+
+/// The spelling the broker judges and records: lowercase, trailing dots
+/// trimmed.
+fn normalize_host(host: &str) -> String {
+	host.trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Whether `host` (lowercased, trailing dots trimmed) names only addresses
@@ -411,9 +503,9 @@ fn policy_blocked() -> io::Error {
 /// the localhost grant, `localhost` and its RFC 6761 subdomains.
 ///
 /// Only literals are judged here. A name that resolves to a private address
-/// still records a fact and is refused after resolution on the rerun: the
-/// broker never resolves a name it refuses, so a denied name cannot become a
-/// DNS lookup.
+/// still records an amendable policy refusal and is refused after resolution
+/// on the rerun: the broker never resolves a name it refuses, so a denied name
+/// cannot become a DNS lookup.
 fn refused_after_resolution(host: &str, allow_localhost: bool) -> bool {
 	let literal = host
 		.strip_prefix('[')
@@ -474,22 +566,6 @@ fn globally_routable(ip: IpAddr) -> bool {
 				|| value.is_unicast_link_local())
 		},
 	}
-}
-
-fn connect(policy: &ProxyPolicy, token: &Str, host: &str, port: u16) -> io::Result<TcpStream> {
-	let candidates = policy.authorize(token, host, port)?;
-	let mut last = None;
-	for address in candidates {
-		match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-			Ok(stream) => {
-				stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
-				stream.set_write_timeout(Some(IDLE_TIMEOUT))?;
-				return Ok(stream);
-			},
-			Err(error) => last = Some(error),
-		}
-	}
-	Err(last.unwrap_or_else(policy_blocked))
 }
 
 fn serve<S: ClientStream>(
@@ -589,7 +665,7 @@ fn http<S: ClientStream>(
 		return http_reject(client, reader, |client| http_deny(client));
 	};
 
-	let mut upstream = match connect(policy, &token, &host, port) {
+	let mut upstream = match policy.connect(&token, &host, port) {
 		Ok(stream) => stream,
 		Err(_) => {
 			return http_reject(client, reader, |client| http_policy_deny(client, &host, port));
@@ -765,7 +841,7 @@ fn socks<S: ClientStream>(
 	};
 	let mut port = [0_u8; 2];
 	client.read_exact(&mut port)?;
-	let mut upstream = match connect(policy, &token, &host, u16::from_be_bytes(port)) {
+	let mut upstream = match policy.connect(&token, &host, u16::from_be_bytes(port)) {
 		Ok(stream) => stream,
 		Err(_) => return socks_deny(client),
 	};
@@ -1138,10 +1214,18 @@ mod tests {
 		Str::new_static("test-token")
 	}
 
-	fn test_attempts() -> Arc<Mutex<FastHashMap<Str, Option<(Str, u16)>>>> {
+	fn test_attempts() -> Attempts {
 		let mut attempts = FastHashMap::default();
 		attempts.insert(test_token(), None);
 		Arc::new(Mutex::new(attempts))
+	}
+
+	fn refusal(host: &str, port: u16, cause: BrokerRefusal) -> Option<BrokerDenial> {
+		Some(BrokerDenial { host: Str::from(host), port, cause })
+	}
+
+	fn recorded(policy: &ProxyPolicy) -> Option<BrokerDenial> {
+		policy.attempts.lock().get(&test_token()).cloned().flatten()
 	}
 
 	fn socks_auth(client: &mut TcpStream) {
@@ -1312,23 +1396,23 @@ mod tests {
 		assert!(authorized_address(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), false));
 	}
 
-	/// Without the localhost grant, a loopback name or a non-routable literal
-	/// is refused without a fact: approving it would rerun the command into
-	/// the same refusal after resolution, so no approval may be offered.
-	#[test]
-	fn unreachable_literals_are_refused_without_an_amendable_fact() {
-		let broker = |localhost| ProxyPolicy {
+	fn closed_broker(localhost: bool) -> ProxyPolicy {
+		ProxyPolicy {
 			allow: Arc::from([]),
 			deny: Arc::from([]),
 			ports: Arc::from([80, 443, 3000]),
 			localhost,
 			amendment: None,
 			attempts: test_attempts(),
-		};
-		let recorded =
-			|policy: &ProxyPolicy| policy.attempts.lock().get(&test_token()).cloned().flatten();
+		}
+	}
 
-		let closed = broker(false);
+	/// Without the localhost grant, a loopback name or a non-routable literal
+	/// is refused as non-routable, never as an amendable policy refusal:
+	/// approving it would rerun the command into the same refusal after
+	/// resolution, so no approval may be offered.
+	#[test]
+	fn unreachable_literals_are_refused_without_an_amendable_fact() {
 		for host in [
 			"localhost",
 			"LocalHost.",
@@ -1341,34 +1425,125 @@ mod tests {
 			"169.254.169.254",
 			"[fd00::1]",
 		] {
+			let closed = closed_broker(false);
 			let error = closed
 				.authorize(&test_token(), host, 3000)
 				.expect_err("unreachable literal");
 			assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{host}");
-			assert_eq!(recorded(&closed), None, "{host} must not offer an approval");
+			let normalized = normalize_host(host);
+			assert_eq!(
+				recorded(&closed),
+				refusal(&normalized, 3000, BrokerRefusal::NonRoutable),
+				"{host} must not offer an approval"
+			);
 		}
 		// The approved rerun would refuse it as well, so no amendment admits it.
 		let amended =
-			ProxyPolicy { amendment: Some((Str::from("localhost"), 3000)), ..broker(false) };
+			ProxyPolicy { amendment: Some((Str::from("localhost"), 3000)), ..closed_broker(false) };
 		assert!(amended.authorize(&test_token(), "localhost", 3000).is_err());
-		assert_eq!(recorded(&amended), None);
+		assert_eq!(recorded(&amended), refusal("localhost", 3000, BrokerRefusal::NonRoutable));
 
 		// A routable name or literal outside the allowlist still records the
 		// fact the denial-and-rerun flow asks about, without being resolved.
 		for host in ["blocked.example", "8.8.8.8"] {
-			let open = broker(false);
+			let open = closed_broker(false);
 			assert!(open.authorize(&test_token(), host, 443).is_err());
-			assert_eq!(recorded(&open), Some((Str::from(host), 443)), "{host}");
+			assert_eq!(recorded(&open), refusal(host, 443, BrokerRefusal::Policy), "{host}");
 		}
 
 		// With the localhost grant an approval for `localhost` can succeed, so
-		// it records; a private literal stays refused either way.
-		let granted = broker(true);
+		// it records a policy refusal; a private literal stays non-routable.
+		let granted = closed_broker(true);
 		assert!(granted.authorize(&test_token(), "localhost", 3000).is_err());
-		assert_eq!(recorded(&granted), Some((Str::from("localhost"), 3000)));
-		let granted = broker(true);
+		assert_eq!(recorded(&granted), refusal("localhost", 3000, BrokerRefusal::Policy));
+		let granted = closed_broker(true);
 		assert!(granted.authorize(&test_token(), "10.0.0.7", 3000).is_err());
-		assert_eq!(recorded(&granted), None);
+		assert_eq!(recorded(&granted), refusal("10.0.0.7", 3000, BrokerRefusal::NonRoutable));
+	}
+
+	/// A refusal the user cannot amend is recorded with its cause, deterministic
+	/// offline: a reserved `.invalid` name never resolves, a loopback name the
+	/// allowlist admits is refused after resolution, and an allowed address
+	/// that accepts no connection fails upstream. The first policy refusal of
+	/// an attempt is never replaced by a later fail-closed one.
+	#[test]
+	fn fail_closed_refusals_are_recorded_per_attempt() {
+		let allowing = |host: &str, localhost| ProxyPolicy {
+			allow: Arc::from([Str::from(host)]),
+			ports: Arc::from([443, 3000]),
+			localhost,
+			..closed_broker(false)
+		};
+
+		let unresolved = allowing("unresolvable.invalid", false);
+		assert!(
+			unresolved
+				.connect(&test_token(), "Unresolvable.Invalid.", 443)
+				.is_err()
+		);
+		assert_eq!(
+			recorded(&unresolved),
+			refusal("unresolvable.invalid", 443, BrokerRefusal::Unresolved)
+		);
+
+		let private = allowing("localhost", false);
+		assert!(private.connect(&test_token(), "localhost", 443).is_err());
+		assert_eq!(recorded(&private), refusal("localhost", 443, BrokerRefusal::NonRoutable));
+
+		// Nothing listens on a port just released, so the authorized connect
+		// to loopback (granted) fails upstream.
+		let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+			.expect("reserve a port")
+			.local_addr()
+			.expect("reserved address")
+			.port();
+		let upstream = ProxyPolicy {
+			allow: Arc::from([Str::from("127.0.0.1")]),
+			ports: Arc::from([port]),
+			localhost: true,
+			..closed_broker(true)
+		};
+		assert!(upstream.connect(&test_token(), "127.0.0.1", port).is_err());
+		assert_eq!(recorded(&upstream), refusal("127.0.0.1", port, BrokerRefusal::Upstream));
+
+		// The amendable policy refusal survives the fail-closed refusals that
+		// follow it in the same attempt, and replaces one that preceded it.
+		let mixed = allowing("unresolvable.invalid", false);
+		assert!(
+			mixed
+				.authorize(&test_token(), "blocked.example", 443)
+				.is_err()
+		);
+		assert!(
+			mixed
+				.authorize(&test_token(), "unresolvable.invalid", 443)
+				.is_err()
+		);
+		assert!(mixed.authorize(&test_token(), "10.0.0.7", 443).is_err());
+		assert_eq!(recorded(&mixed), refusal("blocked.example", 443, BrokerRefusal::Policy));
+		let replaced = allowing("unresolvable.invalid", false);
+		assert!(
+			replaced
+				.authorize(&test_token(), "unresolvable.invalid", 443)
+				.is_err()
+		);
+		assert!(replaced.authorize(&test_token(), "10.0.0.7", 443).is_err());
+		assert_eq!(
+			recorded(&replaced),
+			refusal("unresolvable.invalid", 443, BrokerRefusal::Unresolved),
+			"the first fail-closed refusal wins over a later one"
+		);
+		assert!(
+			replaced
+				.authorize(&test_token(), "blocked.example", 443)
+				.is_err()
+		);
+		assert!(
+			replaced
+				.authorize(&test_token(), "second.example", 443)
+				.is_err()
+		);
+		assert_eq!(recorded(&replaced), refusal("blocked.example", 443, BrokerRefusal::Policy));
 	}
 
 	#[test]
@@ -1945,10 +2120,17 @@ mod tests {
 		let policy =
 			ProxyPolicy::from_settings(&SandboxSettings::default(), None, Arc::clone(&proxy.attempts));
 		assert!(policy.authorize(&first, "blocked.example", 443).is_err());
-		assert_eq!(proxy.finish_attempt(&first), Some((Str::from("blocked.example"), 443)));
+		assert_eq!(
+			proxy.finish_attempt(&first),
+			refusal("blocked.example", 443, BrokerRefusal::Policy)
+		);
 		assert!(policy.authorize(&first, "delayed.example", 443).is_err());
 		assert!(policy.authorize(&second, "current.example", 443).is_err());
-		assert_eq!(proxy.finish_attempt(&second), Some((Str::from("current.example"), 443)));
+		assert_eq!(
+			proxy.finish_attempt(&second),
+			refusal("current.example", 443, BrokerRefusal::Policy)
+		);
+		assert_eq!(proxy.finish_attempt(&second), None, "a refusal is consumed exactly once");
 	}
 
 	#[test]

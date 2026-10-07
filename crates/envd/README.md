@@ -50,9 +50,15 @@ client and framing boundary; it does not contain an alternate host.
   network mode never sandboxes an explicit `sv_sandbox_mode off`, eval cells
   and detached processes (which hold no broker token) get `disabled`, and a
   broker that cannot start under the shipped default disables the network
-  instead of failing every command. A loopback name or a non-routable IP
-  literal is refused without a network fact, so no approval is offered that
-  the rerun would refuse again.
+  instead of failing every command. Every broker refusal carries a typed
+  cause; only a policy refusal is an amendable network fact, so a loopback
+  name or a non-routable IP literal offers no approval the rerun would
+  refuse again, and a name that does not resolve stays an ordinary failure.
+  Network trouble reaches the model as one `sandbox` diag
+  (`exec_network_diag`): the refused `host:port` with the mode and remedy on
+  every command that records a refusal, or, for a failed command whose
+  stderr shows a resolver or connection failure, the mode's generic text
+  once per session.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 
