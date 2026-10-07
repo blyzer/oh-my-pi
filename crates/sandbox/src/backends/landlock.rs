@@ -5,17 +5,8 @@ use std::{ffi::OsString, path::Path};
 use std::{
 	fs::{self, File},
 	io::{self, Read as _, Write},
-	net::{Ipv4Addr, TcpListener, TcpStream},
-	os::{
-		fd::{AsRawFd as _, FromRawFd as _},
-		unix::net::UnixStream,
-	},
+	os::fd::{AsRawFd as _, FromRawFd as _},
 	path::PathBuf,
-	sync::{
-		Arc,
-		atomic::{AtomicUsize, Ordering},
-	},
-	thread,
 	time::Duration,
 };
 
@@ -23,14 +14,16 @@ use std::{
 use tempfile::{Builder, NamedTempFile};
 
 #[cfg(target_os = "linux")]
-use crate::{
-	AcceptBackoff, AcceptFailure, WriteMode,
-	paths::{insert_path, os_string_bytes, temp_roots},
-	runner::{COMMAND_WRAPPER_PLACEHOLDER, PreparedResource},
-};
+use super::relay;
 use crate::{
 	Backend, BackendStatus, Capability, CapabilitySet, Caveat, DegradationPolicy, NetworkMode, Plan,
 	ProbeFailure, SandboxError, SandboxOperation, SandboxSpec, runner::PreparedSandbox,
+};
+#[cfg(target_os = "linux")]
+use crate::{
+	WriteMode,
+	paths::{insert_path, os_string_bytes, temp_roots},
+	runner::{COMMAND_WRAPPER_PLACEHOLDER, PreparedResource},
 };
 
 /// Hidden same-binary child role which installs Linux confinement before exec.
@@ -792,10 +785,10 @@ fn relay_child(socket: &Path, port: u16, ready: &mut File) -> Result<(), Sandbox
 	configure_relay_process().map_err(relay_launch_error)?;
 
 	bring_loopback_up().map_err(relay_launch_error)?;
-	let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(relay_launch_error)?;
+	let listener = relay::bind(port).map_err(relay_launch_error)?;
 	install_relay_filter()?;
 	ready.write_all(&[1]).map_err(relay_launch_error)?;
-	proxy_relay(socket, listener).map_err(relay_launch_error)
+	relay::serve(socket, &listener).map_err(relay_launch_error)
 }
 
 #[cfg(target_os = "linux")]
@@ -824,56 +817,6 @@ fn install_relay_filter() -> Result<(), SandboxError> {
 	let filter = compile_relay_filter()?;
 	seccompiler::apply_filter(&filter)?;
 	Ok(())
-}
-
-/// Bridges the namespace's loopback `port` to the broker's Unix `socket` until
-/// the listener fails.
-///
-/// The relay blocks in `accept`, so an idle relay costs no wakeups. It needs no
-/// stop signal of its own, because signals end it wherever it blocks:
-/// `PR_SET_PDEATHSIG` when its parent (the helper that became the target
-/// command) exits, and the kernel when Bubblewrap's private PID namespace ends
-/// with the sandbox. A failure that belongs to one connection never ends it,
-/// and descriptor or memory exhaustion only slows it down ([`AcceptFailure`]);
-/// only a failure of the listener itself returns.
-#[cfg(target_os = "linux")]
-fn proxy_relay(socket: &Path, listener: TcpListener) -> io::Result<()> {
-	const MAX_CONNECTIONS: usize = 32;
-	const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-	let live = Arc::new(AtomicUsize::new(0));
-	let mut backoff = AcceptBackoff::default();
-	loop {
-		let accepted = listener.accept();
-		if accepted.is_ok() {
-			backoff.reset();
-		}
-		match accepted {
-			// Dropping the accepted socket is the rejection: the peer sees an
-			// immediate close rather than a hang against a full relay.
-			Ok((_client, _)) if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS => {
-				live.fetch_sub(1, Ordering::AcqRel);
-			},
-			Ok((client, _)) => {
-				let socket = socket.to_path_buf();
-				let worker_live = Arc::clone(&live);
-				if thread::Builder::new()
-					.name("omp-scoped-relay".into())
-					.spawn(move || {
-						let _ = relay_connection(client, &socket, IDLE_TIMEOUT);
-						worker_live.fetch_sub(1, Ordering::AcqRel);
-					})
-					.is_err()
-				{
-					live.fetch_sub(1, Ordering::AcqRel);
-				}
-			},
-			Err(error) => match AcceptFailure::of(&error) {
-				AcceptFailure::Transient => {},
-				AcceptFailure::Exhausted => thread::sleep(backoff.next_delay()),
-				AcceptFailure::Fatal => return Err(error),
-			},
-		}
-	}
 }
 
 #[cfg(target_os = "linux")]
@@ -905,27 +848,6 @@ fn bring_loopback_up() -> io::Result<()> {
 	// SAFETY: `fd` is owned by this function and is no longer used.
 	unsafe { libc::close(fd) };
 	result
-}
-
-#[cfg(target_os = "linux")]
-fn relay_connection(mut client: TcpStream, socket: &Path, timeout: Duration) -> io::Result<()> {
-	client.set_read_timeout(Some(timeout))?;
-	client.set_write_timeout(Some(timeout))?;
-	let mut broker = UnixStream::connect(socket)?;
-	broker.set_read_timeout(Some(timeout))?;
-	broker.set_write_timeout(Some(timeout))?;
-	let mut client_copy = client.try_clone()?;
-	let closer = client_copy.try_clone()?;
-	let mut broker_copy = broker.try_clone()?;
-	let copied = thread::Builder::new()
-		.name("omp-scoped-relay-copy".into())
-		.spawn(move || io::copy(&mut client_copy, &mut broker_copy));
-	let down = io::copy(&mut broker, &mut client);
-	let _ = closer.shutdown(std::net::Shutdown::Both);
-	if let Ok(copied) = copied {
-		let _ = copied.join();
-	}
-	down.map(|_| ())
 }
 
 #[cfg(target_os = "linux")]
