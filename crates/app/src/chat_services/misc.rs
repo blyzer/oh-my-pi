@@ -32,7 +32,8 @@ fn failed(error: impl std::fmt::Display) -> ServiceError {
 }
 
 /// `/security`: the approval mode as configured and as enforced, through the
-/// same rule admission applies.
+/// same rule admission applies, and the network confinement the sandbox
+/// compiler applies.
 pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
 	let settings = omp_envd::tool_settings::ToolSettings::from_con(&state.con)
 		.with_approval_mode_override(state.approval_override);
@@ -44,6 +45,9 @@ pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
 		effective:  Str::new_static(effective.into()),
 		sandbox:    Str::new_static(sandbox.into()),
 		explicit:   configured.provenance == omp_envd::admission::Provenance::Explicit,
+		network:    Str::new_static(
+			omp_envd::exec_settings::network_confinement(&state.con, sandbox).into(),
+		),
 	}
 }
 

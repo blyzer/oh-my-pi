@@ -6,6 +6,8 @@ use omp_con::{Ctx, Kv, Value};
 use omp_core::Str;
 use serde::{Deserialize, Serialize};
 
+use crate::admission::{Provenance, SandboxState};
+
 /// Exec sandbox posture selected by the user.
 #[derive(
 	Clone,
@@ -113,6 +115,9 @@ pub enum ReadMode {
 }
 
 /// Network authority granted to sandboxed commands.
+///
+/// While `sv_sandbox_mode` is `off`, only an explicitly set `scoped` confines
+/// anything; see [`network_confinement`].
 #[derive(
 	Clone,
 	Copy,
@@ -131,11 +136,38 @@ pub enum ReadMode {
 #[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
 pub enum SandboxNetworkMode {
 	/// Deny IP networking.
-	#[default]
 	Disabled,
 	/// Permit normal IP egress.
 	Open,
-	/// Permit only policy-authorized egress through the sandbox broker.
+	/// Permit only policy-authorized egress through the session's egress broker.
+	/// HTTP(S) and SOCKS clients reach it through the proxy environment; a host
+	/// outside `sv_sandbox_allow_domains` is refused, and the user can approve
+	/// it for one rerun. The shipped default.
+	#[default]
+	Scoped,
+}
+
+/// The network confinement agent shell sessions are configured for.
+///
+/// One answer for the sandbox compiler, the workflow posture and `/security`.
+/// [`SandboxNetworkMode`] is what the user asked for; this is what applies
+/// once the filesystem mode and who set the network mode are taken into
+/// account. Two consumers run `disabled` whatever this says: a shell session
+/// whose egress broker could not start under the shipped default, and eval
+/// cells and detached processes, which never hold a broker token.
+#[derive(
+	Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq, strum::Display, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum NetworkConfinement {
+	/// Nothing confines the network: `open`, the sandbox `off` with a defaulted
+	/// network mode or with an explicit `disabled` (no sandbox enforces it), or
+	/// a requested sandbox that was not constructed.
+	Unconfined,
+	/// IP networking is denied.
+	Disabled,
+	/// Egress goes only through the session's policy-enforcing broker.
 	Scoped,
 }
 
@@ -153,9 +185,12 @@ omp_con::var! {
 		default: ExecSandboxMode::WorkspaceWrite,
 		flags: archive,
 	};
-	/// Choose disabled, open, or scoped network access.
+	/// Choose network access for sandboxed commands: scoped (default; HTTP(S) and SOCKS clients
+	/// go through an egress broker that admits sv_sandbox_allow_domains and asks before one rerun
+	/// for any other host), disabled, or open. While sv_sandbox_mode is off, only an explicitly set
+	/// scoped applies (a network-only sandbox); disabled and open then confine nothing.
 	pub static SV_SANDBOX_NETWORK_MODE = sv_sandbox_network_mode: SandboxNetworkMode {
-		default: SandboxNetworkMode::Disabled,
+		default: SandboxNetworkMode::Scoped,
 		flags: archive,
 	};
 	/// Cap CPU cores available to one sandboxed command tree; 0 is unlimited.
@@ -287,6 +322,9 @@ pub struct SandboxSettings {
 	pub mode:               ExecSandboxMode,
 	/// Network authority granted to sandboxed commands.
 	pub network_mode:       SandboxNetworkMode,
+	/// Whether the user set `network_mode` or it is the shipped default. A
+	/// defaulted mode never sandboxes an explicit `sv_sandbox_mode off`.
+	pub network_provenance: Provenance,
 	/// CPU-core ceiling for one sandboxed command tree; zero is unlimited.
 	pub cpu_cores:          f64,
 	/// Resident-memory ceiling for one sandboxed command tree; zero is
@@ -343,7 +381,8 @@ impl Default for SandboxSettings {
 	fn default() -> Self {
 		Self {
 			mode:               ExecSandboxMode::WorkspaceWrite,
-			network_mode:       SandboxNetworkMode::Disabled,
+			network_mode:       SandboxNetworkMode::Scoped,
+			network_provenance: Provenance::Default,
 			cpu_cores:          0.0,
 			memory_bytes:       0,
 			pids:               0,
@@ -381,6 +420,44 @@ impl SandboxSettings {
 				.map(Str::as_str)
 				.eq(["*KEY*", "*SECRET*", "*TOKEN*"])
 	}
+
+	/// The network confinement these settings ask the sandbox compiler for.
+	///
+	/// `open` confines nothing. With `sv_sandbox_mode off`, only a `scoped`
+	/// mode the user set compiles a network-only sandbox, and `disabled`
+	/// confines nothing: the shipped `scoped` default does not turn an explicit
+	/// `off` back into a sandbox, so hosts without a native backend keep
+	/// running commands. Whether a requested sandbox was actually constructed
+	/// is [`network_confinement`]'s business.
+	pub(crate) const fn network_confinement(&self) -> NetworkConfinement {
+		match (self.mode, self.network_mode, self.network_provenance) {
+			(_, SandboxNetworkMode::Open, _) => NetworkConfinement::Unconfined,
+			(ExecSandboxMode::Off, SandboxNetworkMode::Scoped, Provenance::Explicit) => {
+				NetworkConfinement::Scoped
+			},
+			(ExecSandboxMode::Off, ..) => NetworkConfinement::Unconfined,
+			(_, SandboxNetworkMode::Disabled, _) => NetworkConfinement::Disabled,
+			(_, SandboxNetworkMode::Scoped, _) => NetworkConfinement::Scoped,
+		}
+	}
+}
+
+/// Reports the network confinement agent shell sessions are configured for
+/// under `ctx`.
+///
+/// `sandbox` is the state [`SandboxState::probe`] reports for the same
+/// context: a requested filesystem sandbox that was not constructed confines
+/// nothing, network included. A probe starts no egress broker, so this cannot
+/// see a broker that fails to start: such a session runs `disabled` (and says
+/// so in its session note) while this reports `scoped`. Eval cells and
+/// detached processes always run `disabled`.
+#[must_use]
+pub fn network_confinement(ctx: &Ctx, sandbox: SandboxState) -> NetworkConfinement {
+	let settings = SandboxSettings::from_con(ctx);
+	if settings.mode != ExecSandboxMode::Off && !sandbox.confines() {
+		return NetworkConfinement::Unconfined;
+	}
+	settings.network_confinement()
 }
 
 impl SandboxSettings {
@@ -390,6 +467,7 @@ impl SandboxSettings {
 		Self {
 			mode:               SV_SANDBOX_MODE.get(ctx),
 			network_mode:       SV_SANDBOX_NETWORK_MODE.get(ctx),
+			network_provenance: Provenance::of_convar(ctx, SV_SANDBOX_NETWORK_MODE.name()),
 			cpu_cores:          SV_SANDBOX_CPU_CORES.get(ctx),
 			memory_bytes:       SV_SANDBOX_MEMORY_BYTES.get(ctx),
 			pids:               SV_SANDBOX_PIDS.get(ctx),
@@ -609,17 +687,25 @@ mod tests {
 	}
 
 	#[test]
-	fn default_sandbox_is_workspace_write_with_the_network_closed() {
+	fn default_sandbox_is_workspace_write_with_scoped_network() {
 		let settings = SandboxSettings::from_con(&Ctx::new());
 		assert_eq!(settings, SandboxSettings::default());
 		assert_eq!(settings.mode, ExecSandboxMode::WorkspaceWrite);
 		assert_eq!(ExecSandboxMode::default(), ExecSandboxMode::WorkspaceWrite);
-		assert_eq!(settings.network_mode, SandboxNetworkMode::Disabled);
+		assert_eq!(settings.network_mode, SandboxNetworkMode::Scoped);
+		assert_eq!(SandboxNetworkMode::default(), SandboxNetworkMode::Scoped);
+		assert_eq!(settings.network_provenance, Provenance::Default);
+		assert_eq!(settings.network_confinement(), NetworkConfinement::Scoped);
 		assert!(!settings.explicit, "an untouched sandbox is the shipped default, not a user choice");
 		assert_eq!(
 			SV_SANDBOX_MODE.get(&Ctx::new()),
 			ExecSandboxMode::WorkspaceWrite,
 			"the convar default is the shipped posture"
+		);
+		assert_eq!(
+			SV_SANDBOX_NETWORK_MODE.get(&Ctx::new()),
+			SandboxNetworkMode::Scoped,
+			"the convar default is the shipped network posture"
 		);
 	}
 
@@ -632,6 +718,111 @@ mod tests {
 		let settings = SandboxSettings::from_con(&ctx);
 		assert_eq!(settings.mode, ExecSandboxMode::Off);
 		assert!(settings.explicit);
+		// The shipped `scoped` network does not sandbox an explicit `off`.
+		assert_eq!(settings.network_provenance, Provenance::Default);
+		assert_eq!(settings.network_confinement(), NetworkConfinement::Unconfined);
+		assert_eq!(network_confinement(&ctx, SandboxState::Off), NetworkConfinement::Unconfined);
+	}
+
+	#[test]
+	fn network_confinement_follows_mode_and_provenance() {
+		let settings = |mode, network_mode, network_provenance| SandboxSettings {
+			mode,
+			network_mode,
+			network_provenance,
+			..SandboxSettings::default()
+		};
+		let cases = [
+			(
+				ExecSandboxMode::Off,
+				SandboxNetworkMode::Scoped,
+				Provenance::Default,
+				NetworkConfinement::Unconfined,
+			),
+			(
+				ExecSandboxMode::Off,
+				SandboxNetworkMode::Scoped,
+				Provenance::Explicit,
+				NetworkConfinement::Scoped,
+			),
+			(
+				ExecSandboxMode::Off,
+				SandboxNetworkMode::Disabled,
+				Provenance::Explicit,
+				NetworkConfinement::Unconfined,
+			),
+			(
+				ExecSandboxMode::Off,
+				SandboxNetworkMode::Open,
+				Provenance::Explicit,
+				NetworkConfinement::Unconfined,
+			),
+			(
+				ExecSandboxMode::WorkspaceWrite,
+				SandboxNetworkMode::Scoped,
+				Provenance::Default,
+				NetworkConfinement::Scoped,
+			),
+			(
+				ExecSandboxMode::WorkspaceWrite,
+				SandboxNetworkMode::Open,
+				Provenance::Explicit,
+				NetworkConfinement::Unconfined,
+			),
+			(
+				ExecSandboxMode::ReadOnly,
+				SandboxNetworkMode::Disabled,
+				Provenance::Explicit,
+				NetworkConfinement::Disabled,
+			),
+			(
+				ExecSandboxMode::ReadOnly,
+				SandboxNetworkMode::Scoped,
+				Provenance::Explicit,
+				NetworkConfinement::Scoped,
+			),
+		];
+		for (mode, network, provenance, expected) in cases {
+			assert_eq!(
+				settings(mode, network, provenance).network_confinement(),
+				expected,
+				"{mode} with {provenance} {network}"
+			);
+		}
+
+		let ctx = Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&ctx, ExecSandboxMode::Off)
+			.expect("set mode");
+		SV_SANDBOX_NETWORK_MODE
+			.set(&ctx, SandboxNetworkMode::Scoped)
+			.expect("set network");
+		let explicit = SandboxSettings::from_con(&ctx);
+		assert_eq!(explicit.network_provenance, Provenance::Explicit);
+		assert_eq!(explicit.network_confinement(), NetworkConfinement::Scoped);
+		// A probe never compiles mode `off`; the explicit network-only sandbox
+		// still confines.
+		assert_eq!(network_confinement(&ctx, SandboxState::Off), NetworkConfinement::Scoped);
+	}
+
+	#[test]
+	fn a_requested_sandbox_that_was_not_constructed_confines_no_network() {
+		let ctx = Ctx::new();
+		assert_eq!(network_confinement(&ctx, SandboxState::Active), NetworkConfinement::Scoped);
+		for cause in [
+			crate::admission::SandboxUnavailable::UnsupportedHost,
+			crate::admission::SandboxUnavailable::BackendUnavailable,
+			crate::admission::SandboxUnavailable::PolicyRejected,
+		] {
+			assert_eq!(
+				network_confinement(&ctx, SandboxState::Unavailable { cause }),
+				NetworkConfinement::Unconfined
+			);
+		}
+		SV_SANDBOX_NETWORK_MODE
+			.set(&ctx, SandboxNetworkMode::Disabled)
+			.expect("set network");
+		assert_eq!(network_confinement(&ctx, SandboxState::Active), NetworkConfinement::Disabled);
 	}
 
 	#[test]

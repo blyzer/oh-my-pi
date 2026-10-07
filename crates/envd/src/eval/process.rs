@@ -301,7 +301,7 @@ impl ProcessEvalExec {
 		let sandbox = self
 			.inner
 			.exec
-			.active_sandbox()
+			.child_sandbox()
 			.map_err(|error| Fault::Resource {
 				operation: sf!("open_session"),
 				message:   Str::from(error.to_string()),

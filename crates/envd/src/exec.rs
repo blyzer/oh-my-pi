@@ -62,8 +62,8 @@ use super::{
 	admission,
 	admission::{GithubMutationTarget, SandboxUnavailable},
 	exec_sandbox,
-	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxDenialFact},
-	exec_settings::{ExecSandboxMode, SandboxNetworkMode, SandboxSettings},
+	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxConsumer, SandboxDenialFact},
+	exec_settings::{ExecSandboxMode, NetworkConfinement, SandboxSettings},
 	process_identity::{IdentityError, ProcessIdentity},
 	process_log,
 	process_log::{LogChunk, ProcessLog},
@@ -523,7 +523,7 @@ impl ExecHost {
 	/// processes.
 	pub(crate) fn configure_sandbox(&self, settings: &SandboxSettings, workspace_root: &Path) {
 		let config = (settings.mode != ExecSandboxMode::Off
-			|| settings.network_mode != SandboxNetworkMode::Disabled
+			|| settings.network_confinement() != NetworkConfinement::Unconfined
 			|| !settings.allow_unix_sockets.is_empty()
 			|| settings.read_mode != crate::exec_settings::ReadMode::Host
 			|| !settings.readable_roots.is_empty()
@@ -550,15 +550,27 @@ impl ExecHost {
 			})
 	}
 
+	/// Compiles the sandbox for one shell session, whose commands can use the
+	/// scoped egress broker.
 	pub(crate) fn active_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
-		self.compiled_sandbox(true)
+		self.compiled_sandbox(true, SandboxConsumer::Session)
+	}
+
+	/// Compiles the sandbox for one supervised child, such as an eval worker,
+	/// that never holds a broker capability: a scoped network is disabled.
+	pub(crate) fn child_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
+		self.compiled_sandbox(true, SandboxConsumer::Child)
 	}
 
 	fn detached_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
-		self.compiled_sandbox(false)
+		self.compiled_sandbox(false, SandboxConsumer::Child)
 	}
 
-	fn compiled_sandbox(&self, supervised: bool) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
+	fn compiled_sandbox(
+		&self,
+		supervised: bool,
+		consumer: SandboxConsumer,
+	) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
 		let (settings, workspace_root) = {
 			let config = self.inner.sandbox.lock();
 			let Some(config) = config.as_ref() else {
@@ -566,7 +578,7 @@ impl ExecHost {
 			};
 			(config.settings.clone(), config.workspace_root.clone())
 		};
-		match ExecSandbox::compile(&settings, &workspace_root, supervised) {
+		match ExecSandbox::compile(&settings, &workspace_root, supervised, consumer) {
 			Ok(sandbox) => Ok(sandbox),
 			// The shipped default sandbox on a platform that cannot confine
 			// commands still runs them, but only under approval: the sandbox
@@ -4636,6 +4648,46 @@ mod tests {
 		host.close_session(&opened.session).expect("session closes");
 	}
 
+	/// `sv_sandbox_mode off` set by the user with the network mode left at its
+	/// `scoped` default runs commands with no sandbox at all, so it works on
+	/// hosts with no native backend (Linux without bwrap, Windows).
+	#[tokio::test]
+	async fn explicit_off_with_the_default_network_runs_commands_unsandboxed() {
+		let root = tempfile::tempdir().expect("workspace");
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				mode: crate::exec_settings::ExecSandboxMode::Off,
+				explicit: true,
+				..Default::default()
+			},
+			root.path(),
+		);
+		assert_eq!(host.sandbox_state(), admission::SandboxState::Off);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(root.path())
+					.expect("workspace URI")
+					.to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("unsandboxed session opens");
+		assert!(
+			host.inner.sessions.lock()[&opened.session]
+				.sandbox
+				.is_none(),
+			"no wrapper and no broker"
+		);
+		let (outcome, exit, output, diags) =
+			run_failure(&host, script_request(&opened.session, "printf ok")).await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32);
+		assert_eq!(exit, Some(0));
+		assert_eq!(output, b"ok");
+		assert!(diags.is_empty(), "no sandbox note: {diags:?}");
+		host.close_session(&opened.session).expect("session closes");
+	}
+
 	#[tokio::test]
 	async fn sandboxed_session_preserves_ordinary_environment_mutations() {
 		let root = tempfile::tempdir().expect("workspace");
@@ -4680,14 +4732,12 @@ mod tests {
 	}
 
 	/// Mode `off` plus a `read_deny` root installs the in-shell file policy with
-	/// no kernel backend, so these proofs run on every unix host.
+	/// no kernel backend, so these proofs run on every unix host. The network
+	/// mode stays at its `scoped` default, which does not sandbox mode `off`.
 	#[cfg(unix)]
 	fn environment_only_read_deny(denied: &Path) -> crate::exec_settings::SandboxSettings {
 		crate::exec_settings::SandboxSettings {
 			mode: crate::exec_settings::ExecSandboxMode::Off,
-			// Pinned: a scoped network compiles a native backend instead of the
-			// backend-free environment-only policy.
-			network_mode: crate::exec_settings::SandboxNetworkMode::Disabled,
 			read_deny: vec![Str::from(denied.to_string_lossy().as_ref())],
 			..Default::default()
 		}

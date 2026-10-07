@@ -44,6 +44,15 @@ client and framing boundary; it does not contain an alternate host.
   amendment. Restricted read modes refuse a walk through a symlink outside
   the runtime roots, and redirections that write refuse any; builtin writes
   gated by `check_write` resolve links and judge the target.
+  The network defaults to `scoped` (`sv_sandbox_network_mode`): each shell
+  session owns an egress broker (`sandbox_proxy`) that proxy-aware clients
+  reach. `NetworkConfinement` is the one answer for what applies: a defaulted
+  network mode never sandboxes an explicit `sv_sandbox_mode off`, eval cells
+  and detached processes (which hold no broker token) get `disabled`, and a
+  broker that cannot start under the shipped default disables the network
+  instead of failing every command. A loopback name or a non-routable IP
+  literal is refused without a network fact, so no approval is offered that
+  the rerun would refuse again.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 

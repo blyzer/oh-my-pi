@@ -14,7 +14,7 @@ use omp_adw::{ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, SelectedIn
 use omp_core::{Str, StrMut, sf};
 use omp_envd::{
 	admission::{SandboxState, effective_approval_mode},
-	exec_settings::{ExecSandboxMode, SandboxNetworkMode},
+	exec_settings::{ExecSandboxMode, NetworkConfinement, network_confinement},
 	tool_settings::ApprovalMode,
 };
 use tokio::process::Command;
@@ -162,11 +162,14 @@ impl AdwHost for ProductionAdwHost {
 				ExecSandboxMode::WorkspaceWrite => WriteScope::WorkspaceWrite,
 				ExecSandboxMode::Off => WriteScope::Unconfined,
 			},
-			network:  match omp_envd::exec_settings::SV_SANDBOX_NETWORK_MODE.get(&self.ctx) {
-				_ if unconfined => NetworkScope::Unrestricted,
-				SandboxNetworkMode::Disabled => NetworkScope::Disabled,
-				SandboxNetworkMode::Scoped => NetworkScope::Scoped,
-				SandboxNetworkMode::Open => NetworkScope::Unrestricted,
+			// The confinement shell sessions are configured for: a defaulted
+			// network mode does not sandbox an explicit `off`, and an unconstructed
+			// sandbox confines nothing. A session whose broker could not start, and
+			// eval cells and detached processes, run `disabled`.
+			network:  match network_confinement(&self.ctx, sandbox) {
+				NetworkConfinement::Unconfined => NetworkScope::Unrestricted,
+				NetworkConfinement::Disabled => NetworkScope::Disabled,
+				NetworkConfinement::Scoped => NetworkScope::Scoped,
 			},
 			approval: match effective_approval_mode(
 				omp_envd::tool_settings::ToolSettings::from_con(&self.ctx).configured_approval(),
@@ -267,9 +270,121 @@ fn judge(kind: PhaseKind, answer: Str) -> PhaseResult {
 
 #[cfg(test)]
 mod tests {
-	use omp_adw::PhaseName;
+	use omp_adw::{PhaseName, PostureError};
+	use omp_envd::exec_settings::{SV_SANDBOX_MODE, SV_SANDBOX_NETWORK_MODE, SandboxNetworkMode};
 
 	use super::*;
+
+	fn host(project: &Path, ctx: omp_con::Ctx) -> ProductionAdwHost {
+		ProductionAdwHost::open(
+			project.to_path_buf(),
+			project.join("data"),
+			sf!("unused-model"),
+			Arc::new(ctx),
+		)
+		.expect("workflow host")
+	}
+
+	/// A user workflow phase that declares `requires.network = "disabled"`.
+	fn offline_phase(project: &Path) -> Arc<Phase> {
+		let directory = project.join(".omp/workflows");
+		std::fs::create_dir_all(&directory).expect("workflow directory");
+		std::fs::write(
+			directory.join("offline.toml"),
+			r#"
+[[phase]]
+name = "offline"
+kind = "code"
+command = ["true"]
+requires = { network = "disabled" }
+"#,
+		)
+		.expect("workflow file");
+		let definition = super::super::definition::load(project, "offline").expect("definition");
+		let phase = Arc::clone(&definition.workflow().phases()[0]);
+		assert_eq!(phase.requires.network, Some(NetworkScope::Disabled));
+		phase
+	}
+
+	#[test]
+	fn posture_reports_the_network_commands_actually_get_when_the_sandbox_is_off() {
+		let project = tempfile::tempdir().expect("project");
+		// The probe never compiles mode `off`, so these hold on every host.
+		let off = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&off, ExecSandboxMode::Off)
+			.expect("sandbox off");
+		let posture = host(project.path(), off).posture().expect("posture");
+		assert_eq!(posture.write, WriteScope::Unconfined);
+		assert_eq!(
+			posture.network,
+			NetworkScope::Unrestricted,
+			"the shipped scoped network does not sandbox an explicit off"
+		);
+
+		let off_disabled = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&off_disabled, ExecSandboxMode::Off)
+			.expect("sandbox off");
+		SV_SANDBOX_NETWORK_MODE
+			.set(&off_disabled, SandboxNetworkMode::Disabled)
+			.expect("network disabled");
+		assert_eq!(
+			host(project.path(), off_disabled)
+				.posture()
+				.expect("posture")
+				.network,
+			NetworkScope::Unrestricted,
+			"nothing enforces a disabled network while the sandbox is off"
+		);
+
+		let off_scoped = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&off_scoped, ExecSandboxMode::Off)
+			.expect("sandbox off");
+		SV_SANDBOX_NETWORK_MODE
+			.set(&off_scoped, SandboxNetworkMode::Scoped)
+			.expect("network scoped");
+		assert_eq!(
+			host(project.path(), off_scoped)
+				.posture()
+				.expect("posture")
+				.network,
+			NetworkScope::Scoped,
+			"an explicit scoped network keeps its network-only sandbox"
+		);
+	}
+
+	#[test]
+	fn a_phase_requiring_no_network_is_refused_under_the_default_posture() {
+		let project = tempfile::tempdir().expect("project");
+		let phase = offline_phase(project.path());
+
+		// Scoped where the default sandbox is constructed, unrestricted where it
+		// is not: looser than `disabled` on every host.
+		let posture = host(project.path(), omp_con::Ctx::new())
+			.posture()
+			.expect("posture");
+		assert_ne!(posture.network, NetworkScope::Disabled);
+		assert!(matches!(
+			phase.requires.check(&phase.name, &posture),
+			Err(PostureError::Network { required: NetworkScope::Disabled, .. })
+		));
+
+		let off = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&off, ExecSandboxMode::Off)
+			.expect("sandbox off");
+		let posture = host(project.path(), off).posture().expect("posture");
+		assert!(matches!(
+			phase.requires.check(&phase.name, &posture),
+			Err(PostureError::Network {
+				required: NetworkScope::Disabled,
+				resolved: NetworkScope::Unrestricted,
+				..
+			})
+		));
+	}
 
 	#[test]
 	fn a_reviewer_that_did_not_say_accept_has_not_accepted() {

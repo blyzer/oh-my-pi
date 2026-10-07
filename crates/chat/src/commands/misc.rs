@@ -170,7 +170,8 @@ pub(crate) fn security_report(cx: &PanelCx<'_>) -> Str {
 	let mut out = StrMut::new("**Security posture**\n\n");
 	let _ =
 		writeln!(out, "- Host approval: `sv_approval_mode {}`", var_text(cx, "sv_approval_mode"));
-	match cx.services.approval_posture() {
+	let posture = cx.services.approval_posture();
+	match &posture {
 		Ok(posture) => {
 			let _ = writeln!(
 				out,
@@ -196,11 +197,23 @@ pub(crate) fn security_report(cx: &PanelCx<'_>) -> Str {
 	);
 	let _ = writeln!(out, "- Tool roster enabled: `sv_tools {}`", var_text(cx, "sv_tools"));
 	let _ = writeln!(out, "- Sandbox: `sv_sandbox_mode {}`", var_text(cx, "sv_sandbox_mode"));
-	let _ = writeln!(
-		out,
-		"- Network: `sv_sandbox_network_mode {}`",
-		var_text(cx, "sv_sandbox_network_mode")
-	);
+	match &posture {
+		Ok(posture) => {
+			let _ = writeln!(
+				out,
+				"- Network: `sv_sandbox_network_mode {}`, in force: `{}`",
+				var_text(cx, "sv_sandbox_network_mode"),
+				posture.network
+			);
+		},
+		Err(_) => {
+			let _ = writeln!(
+				out,
+				"- Network: `sv_sandbox_network_mode {}`",
+				var_text(cx, "sv_sandbox_network_mode")
+			);
+		},
+	}
 	let _ = writeln!(
 		out,
 		"- Writable roots: `sv_sandbox_writable_roots {}`",
@@ -741,6 +754,7 @@ mod tests {
 				effective:  Str::new_static("write"),
 				sandbox:    Str::new_static("unavailable"),
 				explicit:   false,
+				network:    Str::new_static("unconfined"),
 			},
 		)));
 		assert!(
@@ -749,6 +763,9 @@ mod tests {
 			),
 			"{report}"
 		);
+		// The network row names the confinement in force, not only the convar.
+		assert!(report.contains("`sv_sandbox_network_mode "), "{report}");
+		assert!(report.contains(", in force: `unconfined`"), "{report}");
 		// Without a feed the panel still reports what is configured.
 		let report = security_text(std::sync::Arc::new(crate::overlays::services::NoServices));
 		assert!(report.contains("`sv_tools_approval_mode "), "{report}");

@@ -112,7 +112,10 @@ unconditional.
 3. A shipped-default sandbox on a platform that cannot construct it (no native backend, or the backend
    fails its live probe) does not stop commands from running; it removes the confinement. Commands then
    run unsandboxed under `write`. A sandbox the user asked for (any user-set `sv_sandbox_*` convar) that
-   cannot be constructed is a hard error, as before, and so is a refused policy.
+   cannot be constructed is a hard error, as before, and so is a refused policy. (2026-10-07: under an
+   explicit `off`, a defaulted network mode does not count as asking for a network-only sandbox, and an
+   egress broker that cannot start under the shipped default disables the network instead of failing;
+   see that amendment.)
 4. The shell is process authority when nothing confines it: with no active sandbox, `bash` (which
    declares no effects) resolves to the `exec` tier, so `write` and `always-ask` prompt for it. With an
    active sandbox it stays `read` and the denial-and-rerun flow above is unchanged. A per-tool
@@ -123,12 +126,63 @@ unconditional.
    but unconfined when the user asked for it. `/security` shows the effective mode beside the configured
    one.
 
+## Amendment (2026-10-07)
+
+The owner decided that the shipped network posture for agent commands is `scoped`, not `disabled`.
+
+1. `sv_sandbox_network_mode` defaults to `scoped`. Inside the sandbox, HTTP(S) and SOCKS clients that
+   honour `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` reach the session's egress broker
+   (`crates/envd/src/sandbox_proxy.rs`). It refuses every host that is not allowlisted
+   (`sv_sandbox_allow_domains` is empty by default) and records the typed network fact that the
+   denial-and-rerun flow above asks about, once per command. Clients that ignore the proxy environment
+   (ssh, nc, raw sockets) cannot connect, and commands have no DNS of their own. A request whose
+   approval could not help records no fact and so offers no prompt: `localhost` and its subdomains
+   (unless `sv_sandbox_allow_localhost` is set) and any IP literal outside the routable space, which the
+   approved rerun would refuse again after resolution. Known limit: a name that resolves only to
+   private addresses (a host on a corporate network) still records a fact, and its approved rerun is
+   refused after resolution, because the broker never resolves a name it refuses; resolving first would
+   turn every refused name into a DNS lookup.
+2. A defaulted network mode never sandboxes an explicit `sv_sandbox_mode off`: only a `scoped` mode the
+   user set compiles a network-only sandbox there. `off` therefore keeps meaning unsandboxed on hosts
+   with no native backend (Linux without bubblewrap, Windows). One typed answer, `NetworkConfinement`
+   (`unconfined`, `disabled`, `scoped`; `crates/envd/src/exec_settings/sandbox.rs`), feeds the sandbox
+   compiler, the workflow posture and `/security`. A requested sandbox that was not constructed confines
+   no network. It is the confinement shell sessions are configured for, not a measurement: a construction
+   probe starts no broker, so a session whose broker could not start (point 3) runs `disabled` while it
+   reports `scoped`, and eval cells and detached processes (point 4) always run `disabled`. A spawned
+   child keeps its parent's choice: `Ctx::seed_child` carries every value the user set, not only those
+   that differ from the default, so an explicit `scoped` under an explicit `off` still confines the
+   child, as it already did for a resumed child, whose seed copies the session and archive layers.
+3. When the egress broker cannot start under the shipped default (loopback bind, temporary directory,
+   thread spawn), the session keeps its filesystem confinement and runs with the network `disabled`. A
+   warning is logged and the session note says `network=disabled (scoped broker unavailable)`. A sandbox
+   the user configured (any user-set `sv_sandbox_*` convar, as in point 3 of the 2026-10-06 amendment)
+   still fails hard, and so does an approved network amendment whose one-shot broker cannot start. A path
+   amendment reruns with the session's resolved network and broker, so a session that fell back stays
+   disabled.
+4. Eval cells and detached processes compile with the network `disabled`. They never hold a broker
+   attempt token, so the broker would refuse every request they made. Construction probes compile the
+   scoped profile without starting a broker.
+5. Workflow phases: `ProductionAdwHost::posture` reports that confinement (point 2). A user
+   phase that declares `requires.network = "disabled"` (`.omp/workflows/<name>.toml`, loaded by
+   `crates/driver/src/adw/definition.rs`) is now refused under the default posture, which is `scoped`, or
+   `unrestricted` where the sandbox is not constructed. It is also refused under mode `off` even with an
+   explicit `disabled` network, which now reports `unrestricted` because nothing enforces it.
+6. Accepted costs. On macOS the scoped Seatbelt profile re-allows the Apple network mach services
+   (`com.apple.trustd`, `com.apple.SecurityServer`, `com.apple.ocspd`, the `SystemConfiguration`
+   services and others) for every default command, where the closed network denied them; a follow-up
+   should measure which of them proxy-aware TLS clients need. Every default shell session owns a broker
+   listener thread, which blocks in `accept` and is woken by a self-connect on drop rather than polling.
+   The first contact with each host prompts in interactive sessions, and headless print, which binds no
+   approval route, ends every refused network attempt as `Denied`; a multi-host install still fails
+   after its single rerun.
+
 ## Status in omp
 
-**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: the denial-and-rerun prompt exists only while a sandbox is constructed, and a rerun can repeat side effects. The default `yolo` holds only inside an active sandbox, an explicit one is respected (2026-10-06 amendment). (Verified 2026-10-06 against `omp2` at `f2ca37d533`, plus the changes of that amendment.)
+**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: the denial-and-rerun prompt exists only while a sandbox is constructed, and a rerun can repeat side effects. The default `yolo` holds only inside an active sandbox, an explicit one is respected (2026-10-06 amendment). The network is `scoped` by default, a defaulted network mode never sandboxes an explicit `off`, and a broker that cannot start under the default disables the network (2026-10-07 amendment). (Verified 2026-10-06 against `omp2` at `f2ca37d533`, plus the changes of the 2026-10-06 and 2026-10-07 amendments.)
 
 - In-process shell: `crates/shell` (parser/runtime) and `crates/shell-builtins` (about 80 builtins including `grep` and `rg` on the ripgrep libraries, `find`, `sed`, `sort`, `ln`, `jq`); persistent cwd and exports through `crates/envd/src/exec.rs`.
-- Enforcement: `ExecSandbox` and its per-attempt wrapper in `crates/envd/src/exec_sandbox.rs` implement the shell's `PathPolicy` and `SpawnWrapper`; `exec.rs` installs both on each run (`set_path_policy`, `set_spawn_wrapper`). The sandbox is `workspace-write` by default (`SV_SANDBOX_MODE`, `crates/envd/src/exec_settings/sandbox.rs`), and `SandboxState::probe` reports whether it was constructed; network is `disabled` by default (`SV_SANDBOX_NETWORK_MODE`), and the scoped egress broker (`crates/envd/src/sandbox_proxy.rs`) is what produces a typed network fact.
+- Enforcement: `ExecSandbox` and its per-attempt wrapper in `crates/envd/src/exec_sandbox.rs` implement the shell's `PathPolicy` and `SpawnWrapper`; `exec.rs` installs both on each run (`set_path_policy`, `set_spawn_wrapper`). The sandbox is `workspace-write` by default (`SV_SANDBOX_MODE`, `crates/envd/src/exec_settings/sandbox.rs`), and `SandboxState::probe` reports whether it was constructed; network is `scoped` by default (`SV_SANDBOX_NETWORK_MODE`, 2026-10-07), and the scoped egress broker (`crates/envd/src/sandbox_proxy.rs`) is what produces a typed network fact. `SandboxSettings::network_confinement` and `exec_settings::network_confinement` apply the provenance rule; `ExecSandbox` records the confinement it really applies (`resolve_network` in `exec_sandbox.rs`: a session starts its broker, a `SandboxConsumer::Child` such as an eval cell or a detached process gets `disabled`, a probe starts none) and `amended_scope` reuses it. Proofs: `network_confinement_*` and `an_explicit_off_survives_the_default_flip` in `exec_settings/sandbox.rs`; `explicit_off_*`, `scoped_network_resolves_by_consumer`, `broker_start_failure_degrades_only_the_shipped_default`, `tokenless_children_and_probes_compile_without_a_broker` and `a_path_amendment_after_the_broker_fallback_stays_network_disabled` in `exec_sandbox.rs`; `explicit_off_with_the_default_network_runs_commands_unsandboxed` in `exec.rs`; `unreachable_literals_are_refused_without_an_amendable_fact` in `sandbox_proxy.rs`; the posture tests in `crates/driver/src/adw/production.rs`; `children_keep_an_explicit_scoped_network_under_sandbox_mode_off` in `crates/driver/tests/subagent_cfg.rs`. Under the broker profile the Seatbelt caveats copied into the session note no longer claim unfiltered outbound egress and say commands have no DNS of their own (`crates/sandbox/src/backends/seatbelt.rs`). Checked live on macOS with Seatbelt and the default settings (a throwaway test, not kept): `/usr/bin/curl https://example.com` ended `Denied` with the fact `network example.com:443` (curl exit 56, `CONNECT tunnel failed, response 403`), and `/usr/bin/nc -z` to a raw IP on port 22 could not connect, while both succeeded outside the sandbox.
 - Read lane (2026-10-07): `FilePolicy::admit_read` walks the requested path physically (`resolve_physical_path`: links followed in place, `..` applied after them, as the kernel, `read_dir` and a spawned child resolve it), and `check_read` and `FilePolicy::open` both use its result; `open` opens exactly that path from its root with `O_NOFOLLOW` on every component, so `link/../key` is judged and read as the link target's sibling, not the link's. In `host` read mode it follows symlinks and denies when the walk enters or ends in a `read_deny` root or the `..`-collapsed spelling lies in one (a link entry inside a denied root stays denied, as under bubblewrap's mask); loops and other resolution errors deny. Known limits of the in-process lane: a missing directory followed by `..` resolves instead of failing with `ENOENT` as it does for the kernel, and `read_deny` roots are matched byte-wise, so a case variant of a denied root on a case-insensitive volume is not refused in process. Utility builtins that open files directly (`cat.rs`, `head.rs`, `grep.rs` in `crates/shell-builtins`) do not call `check_read`; that gap predates this lane and is tracked in `docs/parked/2026-10-06-handoff-pending-work.md`. A program reached through a link, such as Homebrew's `/opt/homebrew/bin/git` into `../Cellar`, a glob through a linked directory, or a cwd that crosses a link, now runs in the foreground as it already did in detached scripts, which re-enter the shell child under the kernel wrapper only (`detached_command` in `exec.rs`; `shell_child.rs` installs no path policy). The `minimal` and `scoped` read modes keep refusing symlinks until a follow-up grants the traversed link entries in both lanes: Seatbelt needs a read on each link it resolves, and bubblewrap's restricted view binds only canonical paths. Proofs: the `host_read_*`, `restricted_read_mode_*`, `approved_read_scope_*` and `protected_open_*` tests in `exec_sandbox.rs`; `environment_only_sandbox_*` (including `link/../key` through the redirect and glob lanes) and the live Seatbelt `sandboxed_session_runs_programs_reached_through_symlinks` in `exec.rs`.
 - Approval: `classify_sandbox_denial` in `crates/envd/src/exec.rs` types the denial (`SandboxDenialFact::{ReadPath, WritePath, Network, Unknown}`); `approve_sandbox_amendment` asks one `sandbox_amendment` ticket (scope `once`, human required, 120 s timeout, fail-closed, and false when no route is bound); on approval `run_session_command` reruns the command once with `amended_scope` or `amended_network` (guarded by `command.rerun`). `Unknown` denials are never amended. Path scopes are captured with identity checks before the rerun (`ApprovedPathScope` in `exec_sandbox.rs`).
 - Tool-level admission: `bash@2` declares `Effects::empty()` (`crates/tools/src/shell.rs`), so the tier derived in `crates/envd/src/admission.rs` is `read` and no mode prompts for it; only a per-tool `sv_tools_approval` override or a hook changes that. Nested `dyn` targets are admitted separately on their own effects (`DynamicAdmission`, `crates/envd/src/devices_host.rs`).
