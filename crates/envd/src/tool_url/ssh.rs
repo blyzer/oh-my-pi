@@ -144,8 +144,13 @@ impl Resolve for SshResolver {
 
 /// Refusal for `?op=exec`: running a remote command is execution, which only
 /// `bash` performs.
-const REMOTE_EXEC_REFUSED: &str = "ssh:// never runs remote commands; use `bash` with a remote \
-                                   SSH command (`ssh <alias> <command>`).";
+///
+/// An `ssh://` alias lives in omp's `hosts.toml`, which a system SSH client
+/// never reads, so the hint names only `omp ssh exec` as alias-keyed and asks
+/// for the configured address otherwise.
+const REMOTE_EXEC_REFUSED: &str = "ssh:// never runs remote commands; run remote commands with \
+                                   `bash` (an SSH client against the host's configured address, \
+                                   or `omp ssh exec <alias> <command>`).";
 
 /// Accepts exactly one `op=stat` query parameter.
 ///
@@ -300,6 +305,8 @@ mod tests {
 			};
 			assert!(message.contains("`bash`"), "{resource}?{query}: {message}");
 			assert!(message.contains("never runs remote commands"), "{resource}?{query}: {message}");
+			// The alias lives in omp's hosts.toml, so only `omp ssh exec` resolves it.
+			assert!(message.contains("omp ssh exec <alias>"), "{resource}?{query}: {message}");
 		}
 	}
 
