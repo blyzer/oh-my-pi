@@ -33,13 +33,14 @@ struct GatedTool {
 	route: Arc<Mutex<Option<ApprovalRoute>>>,
 }
 
-fn spec(subject: &str) -> ApprovalSpec {
+/// The requirement the gated tool files for `subject`, offering `offered`.
+fn spec(subject: &str, offered: Vec<Str>) -> ApprovalSpec {
 	ApprovalSpec {
 		title:         sf!("Run bash"),
 		body:          sf!("$ {subject}"),
 		subject:       Str::new(subject),
 		kind:          sf!("exec"),
-		scopes:        vec![sf!("once"), sf!("session")],
+		scopes:        offered,
 		default:       Some(false),
 		route:         sf!("user"),
 		approver:      None,
@@ -68,8 +69,14 @@ impl Tool for GatedTool {
 		stream! {
 			let args = params.whole::<Value>().await.expect("args");
 			let command = args["command"].as_str().unwrap_or("").to_owned();
+			// A call names the scopes its prompt offers; by default `once` and
+			// `session`, like a tool admission prompt.
+			let scopes = args["scopes"].as_array().map_or_else(
+				|| vec![sf!("once"), sf!("session")],
+				|scopes| scopes.iter().filter_map(Value::as_str).map(Str::new).collect(),
+			);
 			let route = self.route.lock().clone().expect("route bound before the turn");
-			let ticket = route.request(Some(sf!("gated-1")), vec![spec(&command)], 1).await;
+			let ticket = route.request(Some(sf!("gated-1")), vec![spec(&command, scopes)], 1).await;
 			let decision = ticket.decision.expect("route returns a decided ticket");
 			if decision.approved {
 				yield Ev::Done(ToolTerminal::Done {
@@ -102,7 +109,7 @@ fn gated_registry(route: Arc<Mutex<Option<ApprovalRoute>>>) -> Arc<Registry> {
 					rev: Rev { family: sf!("test"), n: 1 },
 					description: sf!("asks before acting"),
 					schema: Bytes::from_static(
-						br#"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}"#,
+						br#"{"type":"object","properties":{"command":{"type":"string"},"scopes":{"type":"array","items":{"type":"string"}}},"required":["command"],"additionalProperties":false}"#,
 					),
 					constraint: Constraint::None,
 					effects: Effects::empty(),
@@ -294,6 +301,63 @@ async fn session_grant_answers_a_repeated_subject_from_the_tree() {
 			.filter(|text| text.contains("\"ran\""))
 			.count()
 			>= 2
+	);
+}
+
+/// A prompt that offers only `once` (a sandbox amendment) is asked every
+/// time: an earlier session grant of the same subject never answers it.
+#[tokio::test]
+async fn a_session_grant_never_answers_a_prompt_that_offers_only_once() {
+	let mut harness = harness(vec![
+		tool_script("gated-1", "gated", serde_json::json!({"command": "git commit"})),
+		text_script("first"),
+		tool_script(
+			"gated-2",
+			"gated",
+			serde_json::json!({"command": "git commit", "scopes": ["once"]}),
+		),
+		text_script("second"),
+	]);
+	let seen = run(&mut harness, |_| Some(decision(true, ApprovalScope::Session))).await;
+	assert_eq!(seen.len(), 1);
+	let again = run(&mut harness, |_| Some(decision(false, ApprovalScope::Once))).await;
+	assert_eq!(again.len(), 1, "a once-only prompt is asked despite the session grant");
+	let journaled = prompts(&harness.session);
+	assert_eq!(journaled.len(), 2);
+	let asked = journaled[1]
+		.decision
+		.as_ref()
+		.expect("the repeat is decided");
+	assert_eq!(asked.source, ApprovalSource::User, "{asked:?}");
+	assert!(!asked.approved, "the user's answer, not the grant, decided the repeat");
+}
+
+/// A `session` answer to a prompt that offered only `once` grants nothing:
+/// the same subject is asked again even where a session grant is offered.
+#[tokio::test]
+async fn a_session_answer_the_prompt_never_offered_grants_nothing() {
+	let mut harness = harness(vec![
+		tool_script(
+			"gated-1",
+			"gated",
+			serde_json::json!({"command": "git commit", "scopes": ["once"]}),
+		),
+		text_script("first"),
+		tool_script("gated-2", "gated", serde_json::json!({"command": "git commit"})),
+		text_script("second"),
+	]);
+	let seen = run(&mut harness, |_| Some(decision(true, ApprovalScope::Session))).await;
+	assert_eq!(seen.len(), 1);
+	let again = run(&mut harness, |_| Some(decision(true, ApprovalScope::Once))).await;
+	assert_eq!(again.len(), 1, "an unoffered session answer must not answer the repeat");
+	let journaled = prompts(&harness.session);
+	assert_eq!(journaled.len(), 2);
+	assert_eq!(
+		journaled[1]
+			.decision
+			.as_ref()
+			.map(|decision| decision.source),
+		Some(ApprovalSource::User)
 	);
 }
 

@@ -13,7 +13,7 @@ use std::{
 		fd::{self, AsFd as _, AsRawFd as _},
 		unix::net::UnixStream,
 	},
-	path::Path,
+	path::{Path, PathBuf},
 	process::{self, Child, Command, Stdio},
 	sync::{
 		Arc, LazyLock,
@@ -637,6 +637,25 @@ fn lines(response: &Value) -> String {
 		.join("\n")
 }
 
+/// The state directory of every omp process a case starts under `home`.
+fn isolated_state_dir(home: &Path) -> PathBuf {
+	home.join("state")
+}
+
+/// `HOME` and every omp root (configuration, data, state, cache) under the
+/// isolated `home`. The explicit `OMP_*` roots win over any inherited
+/// `XDG_*` variable, so a process started with these resolves nothing
+/// outside `home`.
+fn isolated_roots(home: &Path) -> [(&'static str, PathBuf); 5] {
+	[
+		("HOME", home.to_path_buf()),
+		("OMP_CONFIG_DIR", home.join(omp_core::dirs::CONFIG_DIR_NAME)),
+		("OMP_DATA_DIR", home.join("data")),
+		("OMP_STATE_DIR", isolated_state_dir(home)),
+		("OMP_CACHE_DIR", home.join("cache")),
+	]
+}
+
 struct PtyChild {
 	child:      Child,
 	master:     fd::OwnedFd,
@@ -695,16 +714,17 @@ impl PtyChild {
 
 		let home = project.parent().expect("project has parent").join("home");
 		fs::create_dir_all(&home).expect("create isolated home");
-		// The configuration directory is pinned under the isolated home too, so
-		// an `OMP_CONFIG_DIR` in the developer's environment (say, one turning
-		// the sandbox off) never reaches chat or the daemon it spawns.
+		// Every omp root is pinned under the isolated home, and `OMP_LOG` is
+		// cleared, so nothing in the developer's or runner's environment (an
+		// `OMP_CONFIG_DIR` turning the sandbox off, an `XDG_STATE_HOME` sharing
+		// a log directory, an `OMP_LOG=off`) reaches chat or the daemon it
+		// spawns, and chat logs at its default filter.
 		let child = Command::new(binary)
 			.args(args)
 			.current_dir(project)
 			.env("TERM", "xterm-256color")
-			.env("HOME", &home)
-			.env("OMP_CONFIG_DIR", home.join(omp_core::dirs::CONFIG_DIR_NAME))
-			.env("OMP_DATA_DIR", home.join("data"))
+			.envs(isolated_roots(&home))
+			.env_remove("OMP_LOG")
 			.env("OMP_TTY", &device)
 			.env("OMP_TUI_CHARSET", CHARSET_ENV)
 			.env("OMP_TUI_DEBUG", debug)
@@ -1498,9 +1518,7 @@ async fn trust_status(binary: &Path, home: &Path, project: &Path, label: &str) -
 		.args(["ext", "trust", plugin, "--show", "--project"])
 		.arg(project)
 		.current_dir(project)
-		.env("HOME", home)
-		.env("OMP_CONFIG_DIR", home.join(omp_core::dirs::CONFIG_DIR_NAME))
-		.env("OMP_DATA_DIR", home.join("data"))
+		.envs(isolated_roots(home))
 		.env("NO_COLOR", "1");
 	let output = omp_e2e::support::OwnedProcess::output(command, READY_TIMEOUT)
 		.await
@@ -1981,8 +1999,6 @@ async fn chat_tui_approves_blocked_plugin_commands_on_a_real_pty() {
 /// Seatbelt fails it instead of skipping it.
 #[cfg(target_os = "macos")]
 mod daemon_amendment {
-	use std::path::PathBuf;
-
 	use omp_agent::{ApprovalSource, ApprovalTicket, TicketState};
 	use omp_envd::process_identity::ProcessIdentity;
 
@@ -1990,8 +2006,13 @@ mod daemon_amendment {
 
 	/// Title the daemon gives every sandbox amendment prompt.
 	const TITLE: &str = "Approve scoped sandbox amendment";
-	/// What an embedded fallback says when chat could not join its daemon.
+	/// What an embedded fallback says when chat could not join its daemon:
+	/// both `ProjectEnvironment::fallback_notice` and the WARN line chat logs
+	/// start with it.
 	const FALLBACK: &str = "project daemon unavailable";
+	/// The answers the overlay offers a once-only sandbox amendment: approve
+	/// and deny, and no `a` (approve for session), which the daemon refuses.
+	const AMENDMENT_ANSWERS: &str = "y approve n deny";
 	/// The non-PTY bash tool detaches a command that runs 15 s. Each prompt
 	/// must be painted within this long of releasing its call, which leaves
 	/// the answer time to land before the call detaches.
@@ -2055,9 +2076,12 @@ mod daemon_amendment {
 		assert_eq!(decision.scope.as_str(), "once", "{ticket:?}");
 	}
 
-	/// Every log file the chat and its daemon wrote under the isolated home.
+	/// Every log file the chat and its daemon wrote. `PtyChild::spawn` pins
+	/// their state directory (and so the log directory) under the isolated
+	/// home and clears `OMP_LOG`, so this reads only what this case's
+	/// processes wrote, at the default filter, which keeps WARN lines.
 	fn logs(home: &Path) -> Vec<(PathBuf, String)> {
-		let directory = omp_core::dirs::native_directories(home).state.join("logs");
+		let directory = isolated_state_dir(home).join("logs");
 		fs::read_dir(&directory)
 			.unwrap_or_else(|error| panic!("read log directory {}: {error}", directory.display()))
 			.map(|entry| entry.expect("log directory entry").path())
@@ -2089,22 +2113,33 @@ mod daemon_amendment {
 			"{label} took {waited:?}; the bash call detaches 15 s after it starts, so the answer \
 			 could no longer reach it in time"
 		);
-		assert!(
-			!prompt.combined().contains(FALLBACK),
-			"{label}: chat fell back to an embedded environment:\n{}",
-			prompt.combined()
-		);
+		assert_unpainted_fallback(&prompt, label);
 		prompt
+	}
+
+	/// No fallback notice is on screen. This guards a notice the app may paint
+	/// one day and proves nothing today: nothing in the app, chat or driver
+	/// reads `ProjectEnvironment::fallback_notice`, so a fallback is never
+	/// painted. The pid the rerun writes and chat's log decide it.
+	fn assert_unpainted_fallback(snapshot: &Snapshot, label: &str) {
+		assert!(
+			!snapshot.combined().contains(FALLBACK),
+			"{label}: chat fell back to an embedded environment:\n{}",
+			snapshot.combined()
+		);
 	}
 
 	/// The shipped default posture with chat attached to the project daemon it
 	/// spawned (no test-owned daemon: the environment socket is keyed by the
 	/// chat's own build). A scripted bash call writes `$$` into `.git`; the
 	/// sandbox denies it, the daemon relays the amendment to this chat only,
-	/// and the overlay answers it: `y` reruns the command once inside the
-	/// daemon, whose pid it writes, and `Esc` denies the second command, which
-	/// writes nothing. The journal holds both decided prompts, chat never fell
-	/// back to an embedded environment, and quitting restores the terminal.
+	/// and the overlay answers it. The overlay offers only approve and deny,
+	/// and `a` (approve for session) is no answer: `y` reruns the command once
+	/// inside the daemon, whose pid it writes, and `Esc` denies the second
+	/// command, which writes nothing. The journal holds both decided `once`
+	/// prompts and quitting restores the terminal. That chat never fell back to
+	/// an embedded environment rests on the written pid and on chat's log; the
+	/// app paints no fallback notice, so the screen cannot show one.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn chat_tui_answers_a_daemon_sandbox_amendment_from_its_overlay() {
 		use std::os::unix::fs::PermissionsExt;
@@ -2166,11 +2201,7 @@ mod daemon_amendment {
 				&& surface.contains(COMPOSER_PROMPT)
 		});
 		assert_surface(&ready, "ready");
-		assert!(
-			!ready.combined().contains(FALLBACK),
-			"chat fell back to an embedded environment:\n{}",
-			ready.combined()
-		);
+		assert_unpainted_fallback(&ready, "ready");
 
 		debug.keys("'answer two sandbox amendments' enter");
 		let started = Instant::now();
@@ -2182,11 +2213,23 @@ mod daemon_amendment {
 			&approved_command,
 			started,
 		);
+		// The amendment offers only `once`, so the overlay offers approve and
+		// deny and no session answer, which the daemon would refuse.
 		assert!(
-			prompt.text.contains("approve for session"),
+			prompt.text.contains("Scope: once") && prompt.text.contains(AMENDMENT_ANSWERS),
 			"the overlay hides its answers:\n{}",
 			prompt.text
 		);
+		assert!(
+			!prompt.text.contains("approve for session"),
+			"the overlay offers a session answer the amendment refuses:\n{}",
+			prompt.text
+		);
+		// `a` is no answer here: the prompt stays open for `y`. Had it decided,
+		// the command would end denied without writing, and the journal would
+		// hold a session-scoped decision instead of the `once` one asserted
+		// after quitting.
+		debug.keys("a");
 		debug.keys("y");
 		let approved = project.join(".git").join(APPROVED);
 		let settled = wait_snapshot(&mut debug, &raw_capture, "approved rerun settled", |snapshot| {
@@ -2243,11 +2286,7 @@ mod daemon_amendment {
 			surface.contains(DONE) && surface.contains(COMPOSER_PROMPT)
 		});
 		assert_surface(&finished, "turn complete");
-		assert!(
-			!finished.combined().contains(FALLBACK),
-			"chat fell back to an embedded environment:\n{}",
-			finished.combined()
-		);
+		assert_unpainted_fallback(&finished, "turn complete");
 		assert_journal_chain(&journal(&session_path));
 
 		debug.keys("ctrl+c ctrl+c");
@@ -2270,8 +2309,8 @@ mod daemon_amendment {
 		assert_decided(deny, &project, &denied_command, false);
 
 		// An embedded fallback is logged by chat, not painted: the app never
-		// shows `fallback_notice`. The screens above would catch it if it were;
-		// chat's own log is where its absence is decided today.
+		// shows `fallback_notice`, so the screen checks above prove nothing
+		// today. Besides the pid check, chat's own log decides its absence.
 		let log_files = logs(&home);
 		assert!(
 			log_files.iter().any(|(path, _)| path
