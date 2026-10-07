@@ -395,7 +395,12 @@ jobs:
           rustup show active-toolchain
 
       - name: Install native build tools
+        # A stalled package mirror once held this step until the whole job timed out. Bounded
+        # per-request timeouts and retries move apt to the next mirror, and the step fails fast.
+        timeout-minutes: 10
         run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y pipx zstd
           command -v uv >/dev/null || pipx install uv
@@ -455,7 +460,12 @@ jobs:
           rustup show active-toolchain
 
       - name: Install native build tools
+        # A stalled package mirror once held this step until the whole job timed out. Bounded
+        # per-request timeouts and retries move apt to the next mirror, and the step fails fast.
+        timeout-minutes: 10
         run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y pipx zstd
           command -v uv >/dev/null || pipx install uv
@@ -525,7 +535,12 @@ jobs:
           rustup show active-toolchain
 
       - name: Install native build tools
+        # A stalled package mirror once held this step until the whole job timed out. Bounded
+        # per-request timeouts and retries move apt to the next mirror, and the step fails fast.
+        timeout-minutes: 10
         run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y pipx zstd
           command -v uv >/dev/null || pipx install uv
