@@ -13,7 +13,7 @@ use std::{
 		fd::{self, AsFd as _, AsRawFd as _},
 		unix::net::UnixStream,
 	},
-	path::Path,
+	path::{Path, PathBuf},
 	process::{self, Child, Command, Stdio},
 	sync::{
 		Arc, LazyLock,
@@ -637,6 +637,25 @@ fn lines(response: &Value) -> String {
 		.join("\n")
 }
 
+/// The state directory of every omp process a case starts under `home`.
+fn isolated_state_dir(home: &Path) -> PathBuf {
+	home.join("state")
+}
+
+/// `HOME` and every omp root (configuration, data, state, cache) under the
+/// isolated `home`. The explicit `OMP_*` roots win over any inherited
+/// `XDG_*` variable, so a process started with these resolves nothing
+/// outside `home`.
+fn isolated_roots(home: &Path) -> [(&'static str, PathBuf); 5] {
+	[
+		("HOME", home.to_path_buf()),
+		("OMP_CONFIG_DIR", home.join(omp_core::dirs::CONFIG_DIR_NAME)),
+		("OMP_DATA_DIR", home.join("data")),
+		("OMP_STATE_DIR", isolated_state_dir(home)),
+		("OMP_CACHE_DIR", home.join("cache")),
+	]
+}
+
 struct PtyChild {
 	child:      Child,
 	master:     fd::OwnedFd,
@@ -695,12 +714,17 @@ impl PtyChild {
 
 		let home = project.parent().expect("project has parent").join("home");
 		fs::create_dir_all(&home).expect("create isolated home");
+		// Every omp root is pinned under the isolated home, and `OMP_LOG` is
+		// cleared, so nothing in the developer's or runner's environment (an
+		// `OMP_CONFIG_DIR` turning the sandbox off, an `XDG_STATE_HOME` sharing
+		// a log directory, an `OMP_LOG=off`) reaches chat or the daemon it
+		// spawns, and chat logs at its default filter.
 		let child = Command::new(binary)
 			.args(args)
 			.current_dir(project)
 			.env("TERM", "xterm-256color")
-			.env("HOME", &home)
-			.env("OMP_DATA_DIR", home.join("data"))
+			.envs(isolated_roots(&home))
+			.env_remove("OMP_LOG")
 			.env("OMP_TTY", &device)
 			.env("OMP_TUI_CHARSET", CHARSET_ENV)
 			.env("OMP_TUI_DEBUG", debug)
@@ -759,6 +783,22 @@ impl PtyChild {
 		}
 		let after = tcgetattr(&self.slave).expect("final PTY termios");
 		(status, self.raw(), stdout, stderr, after)
+	}
+}
+
+/// Kills a chat the proof never saw exit, so a failing case leaves no chat
+/// running, and with it no project daemon: a daemon chat spawned idles out
+/// once chat's connection closes (`--envd-idle-timeout`).
+impl Drop for PtyChild {
+	fn drop(&mut self) {
+		if matches!(self.child.try_wait(), Ok(None)) {
+			let _ = self.child.kill();
+			let _ = self.child.wait();
+		}
+		self.reader_end.store(true, Ordering::Release);
+		if let Some(reader) = self.reader.take() {
+			let _ = reader.join();
+		}
 	}
 }
 
@@ -1469,8 +1509,8 @@ fn install_plugins(data: &Path, plugins: &[(&'static str, &Path)]) {
 }
 
 /// The approval state `omp ext trust <plugin> --show` reports for the
-/// command it leads with `label`, run against the chat's own home, data
-/// directory, and project.
+/// command it leads with `label`, run against the chat's own home,
+/// configuration and data directories, and project.
 async fn trust_status(binary: &Path, home: &Path, project: &Path, label: &str) -> &'static str {
 	let plugin = label.split(' ').next().expect("label names its plugin");
 	let mut command = tokio::process::Command::new(binary);
@@ -1478,8 +1518,7 @@ async fn trust_status(binary: &Path, home: &Path, project: &Path, label: &str) -
 		.args(["ext", "trust", plugin, "--show", "--project"])
 		.arg(project)
 		.current_dir(project)
-		.env("HOME", home)
-		.env("OMP_DATA_DIR", home.join("data"))
+		.envs(isolated_roots(home))
 		.env("NO_COLOR", "1");
 	let output = omp_e2e::support::OwnedProcess::output(command, READY_TIMEOUT)
 		.await
@@ -1950,4 +1989,348 @@ async fn chat_tui_approves_blocked_plugin_commands_on_a_real_pty() {
 		"approved",
 		"{target} after quit"
 	);
+}
+
+/// P7 on the default production path: chat attaches to the project daemon it
+/// spawns, and a bash command that daemon runs asks this chat, through the
+/// approval relay, for its sandbox amendment.
+///
+/// The proof needs Seatbelt, so it exists only on macOS, where an unavailable
+/// Seatbelt fails it instead of skipping it.
+#[cfg(target_os = "macos")]
+mod daemon_amendment {
+	use omp_agent::{ApprovalSource, ApprovalTicket, TicketState};
+	use omp_envd::process_identity::ProcessIdentity;
+
+	use super::*;
+
+	/// Title the daemon gives every sandbox amendment prompt.
+	const TITLE: &str = "Approve scoped sandbox amendment";
+	/// What an embedded fallback says when chat could not join its daemon:
+	/// both `ProjectEnvironment::fallback_notice` and the WARN line chat logs
+	/// start with it.
+	const FALLBACK: &str = "project daemon unavailable";
+	/// The answers the overlay offers a once-only sandbox amendment: approve
+	/// and deny, and no `a` (approve for session), which the daemon refuses.
+	const AMENDMENT_ANSWERS: &str = "y approve n deny";
+	/// The non-PTY bash tool detaches a command that runs 15 s. Each prompt
+	/// must be painted within this long of releasing its call, which leaves
+	/// the answer time to land before the call detaches.
+	const PROMPT_DEADLINE: Duration = Duration::from_secs(12);
+	/// The file the approved command writes into the protected carve-out.
+	const APPROVED: &str = "omp-approved";
+	/// The file the denied command would have written.
+	const DENIED: &str = "omp-denied";
+	/// The closing answer of the turn.
+	const DONE: &str = "Both sandbox amendments were answered.";
+
+	/// A command whose redirection lands in `.git`, which the shipped
+	/// `workspace-write` sandbox protects. The in-process shell expands `$$` to
+	/// the process id of the host that runs it.
+	fn protected_write(name: &str) -> String {
+		format!("printf '%s' \"$$\" > .git/{name}")
+	}
+
+	/// The journaled data of the result the call `entry` settled with.
+	fn tool_result<'j>(text: &'j str, entry: &str) -> Option<&'j str> {
+		journal_frames(text)
+			.filter(|frame| frame.contains("event: tool.result@1"))
+			.find(|frame| frame_field(frame, "by: ") == Some(entry))
+			.and_then(|frame| frame_field(frame, "data: "))
+	}
+
+	/// The approval tickets the session journal folds into its prompts queue.
+	fn journaled_tickets(path: &Path) -> Vec<ApprovalTicket> {
+		let session = Session::open(path, ComponentRegistry::standard()).expect("replay the journal");
+		let dom = session.dom();
+		let prompts = omp_session::components::prompts::prompts_handle(dom).expect("prompts queue");
+		dom.children(prompts)
+			.iter()
+			.filter_map(|handle| dom.get(*handle))
+			.filter_map(|node| {
+				node
+					.prop(&omp_dom::PropKey::Custom(Str::new_static("ticket")))
+					.and_then(omp_dom::Value::as_str)
+			})
+			.map(|encoded| serde_json::from_str(encoded).expect("ticket JSON"))
+			.collect()
+	}
+
+	/// The ticket is the daemon's decided one-time amendment of `command`.
+	fn assert_decided(ticket: &ApprovalTicket, project: &Path, command: &str, approved: bool) {
+		assert_eq!(ticket.invocation_id, None, "a sandbox amendment blocks no invocation");
+		assert_eq!(ticket.state, TicketState::Decided, "{ticket:?}");
+		let [reason] = ticket.reasons.as_slice() else {
+			panic!("expected one amendment requirement: {ticket:?}");
+		};
+		assert_eq!(reason.kind.as_str(), "sandbox_amendment");
+		assert_eq!(reason.title.as_str(), TITLE);
+		assert_eq!(reason.pattern.as_deref(), Some(command));
+		assert_eq!(reason.subject.as_str(), format!("write {}", project.join(".git").display()));
+		let decision = ticket
+			.decision
+			.as_ref()
+			.expect("a decided ticket carries its decision");
+		assert_eq!(decision.approved, approved, "{ticket:?}");
+		assert_eq!(decision.source, ApprovalSource::User, "{ticket:?}");
+		assert_eq!(decision.scope.as_str(), "once", "{ticket:?}");
+	}
+
+	/// Every log file the chat and its daemon wrote. `PtyChild::spawn` pins
+	/// their state directory (and so the log directory) under the isolated
+	/// home and clears `OMP_LOG`, so this reads only what this case's
+	/// processes wrote, at the default filter, which keeps WARN lines.
+	fn logs(home: &Path) -> Vec<(PathBuf, String)> {
+		let directory = isolated_state_dir(home).join("logs");
+		fs::read_dir(&directory)
+			.unwrap_or_else(|error| panic!("read log directory {}: {error}", directory.display()))
+			.map(|entry| entry.expect("log directory entry").path())
+			.filter(|path| path.is_file())
+			.map(|path| {
+				let text = fs::read_to_string(&path)
+					.unwrap_or_else(|error| panic!("read log {}: {error}", path.display()));
+				(path, text)
+			})
+			.collect()
+	}
+
+	/// Waits for the amendment prompt of `command` painted over the chat, then
+	/// checks it arrived in time to be answered before the call detaches.
+	fn await_prompt(
+		debug: &mut DebugClient,
+		raw: &Arc<Mutex<Vec<u8>>>,
+		label: &str,
+		command: &str,
+		started: Instant,
+	) -> Snapshot {
+		let prompt = wait_snapshot(debug, raw, label, |snapshot| {
+			snapshot.text.contains(TITLE) && snapshot.combined().contains(command)
+		});
+		let waited = started.elapsed();
+		mark(&format!("{label} after {waited:?}"));
+		assert!(
+			waited < PROMPT_DEADLINE,
+			"{label} took {waited:?}; the bash call detaches 15 s after it starts, so the answer \
+			 could no longer reach it in time"
+		);
+		assert_unpainted_fallback(&prompt, label);
+		prompt
+	}
+
+	/// No fallback notice is on screen. This guards a notice the app may paint
+	/// one day and proves nothing today: nothing in the app, chat or driver
+	/// reads `ProjectEnvironment::fallback_notice`, so a fallback is never
+	/// painted. The pid the rerun writes and chat's log decide it.
+	fn assert_unpainted_fallback(snapshot: &Snapshot, label: &str) {
+		assert!(
+			!snapshot.combined().contains(FALLBACK),
+			"{label}: chat fell back to an embedded environment:\n{}",
+			snapshot.combined()
+		);
+	}
+
+	/// The shipped default posture with chat attached to the project daemon it
+	/// spawned (no test-owned daemon: the environment socket is keyed by the
+	/// chat's own build). A scripted bash call writes `$$` into `.git`; the
+	/// sandbox denies it, the daemon relays the amendment to this chat only,
+	/// and the overlay answers it. The overlay offers only approve and deny,
+	/// and `a` (approve for session) is no answer: `y` reruns the command once
+	/// inside the daemon, whose pid it writes, and `Esc` denies the second
+	/// command, which writes nothing. The journal holds both decided `once`
+	/// prompts and quitting restores the terminal. That chat never fell back to
+	/// an embedded environment rests on the written pid and on chat's log; the
+	/// app paints no fallback notice, so the screen cannot show one.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn chat_tui_answers_a_daemon_sandbox_amendment_from_its_overlay() {
+		use std::os::unix::fs::PermissionsExt;
+		if let Some(failure) = omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).failure() {
+			panic!("this P7 case needs the Seatbelt sandbox backend, and its probe failed: {failure}");
+		}
+		omp_e2e::support::install_omp_binary_env().expect("install Cargo-built omp binary");
+		let scratch = tempfile::tempdir().expect("scratch root");
+		fs::set_permissions(scratch.path(), <fs::Permissions>::from_mode(0o700))
+			.expect("secure scratch root");
+		let project = scratch.path().join("project");
+		fs::create_dir(&project).expect("project directory");
+		let project = fs::canonicalize(&project).expect("canonical project root");
+		let metadata_dir = project.join(".omp");
+		fs::create_dir(&metadata_dir).expect("project metadata directory");
+		fs::set_permissions(&metadata_dir, <fs::Permissions>::from_mode(0o755))
+			.expect("use standard project metadata permissions");
+		fs::create_dir(project.join(".git")).expect("protected .git carve-out");
+
+		let approved_command = protected_write(APPROVED);
+		let denied_command = protected_write(DENIED);
+		let gateway_socket = scratch.path().join("gateway.sock");
+		let debug_socket = scratch.path().join("tui-debug.sock");
+		let gateway = ScriptedGateway::start_with_scripts(scratch.path(), &gateway_socket, vec![
+			tool_script(&[("amend-approve", "bash", json!({ "command": approved_command }))]),
+			tool_script(&[("amend-deny", "bash", json!({ "command": denied_command }))]),
+			text_script(DONE),
+		])
+		.await;
+		let session_path = scratch.path().join("p7-amendment.oms");
+		seed_session(&session_path);
+
+		let binary = omp_e2e::support::omp_binary().expect("locate omp binary");
+		// No `--approval-mode`: the shipped default `yolo` holds inside the
+		// active sandbox, so the denial, not an admission, is what prompts.
+		let args = vec![
+			"chat".to_owned(),
+			"--model".to_owned(),
+			gateway.model.clone(),
+			"--project".to_owned(),
+			project.display().to_string(),
+			"--gateway".to_owned(),
+			gateway_socket.display().to_string(),
+			"--session".to_owned(),
+			session_path.display().to_string(),
+			"--envd-idle-timeout".to_owned(),
+			"2".to_owned(),
+		];
+		let mut process = PtyChild::spawn(&binary, &args, &project, &debug_socket);
+		let chat_pid = process.child.id();
+		let home = scratch.path().join("home");
+		let raw_capture = process.raw.clone();
+		let mut debug =
+			DebugClient::connect(&debug_socket, Instant::now() + READY_TIMEOUT, &mut process);
+		let ready = wait_snapshot(&mut debug, &raw_capture, "chat shell ready", |snapshot| {
+			let surface = snapshot.combined();
+			surface.contains("Welcome back!")
+				&& surface.contains(&gateway.model)
+				&& surface.contains(COMPOSER_PROMPT)
+		});
+		assert_surface(&ready, "ready");
+		assert_unpainted_fallback(&ready, "ready");
+
+		debug.keys("'answer two sandbox amendments' enter");
+		let started = Instant::now();
+		gateway.release(0);
+		let prompt = await_prompt(
+			&mut debug,
+			&raw_capture,
+			"approve prompt painted",
+			&approved_command,
+			started,
+		);
+		// The amendment offers only `once`, so the overlay offers approve and
+		// deny and no session answer, which the daemon would refuse.
+		assert!(
+			prompt.text.contains("Scope: once") && prompt.text.contains(AMENDMENT_ANSWERS),
+			"the overlay hides its answers:\n{}",
+			prompt.text
+		);
+		assert!(
+			!prompt.text.contains("approve for session"),
+			"the overlay offers a session answer the amendment refuses:\n{}",
+			prompt.text
+		);
+		// `a` is no answer here: the prompt stays open for `y`. Had it decided,
+		// the command would end denied without writing, and the journal would
+		// hold a session-scoped decision instead of the `once` one asserted
+		// after quitting.
+		debug.keys("a");
+		debug.keys("y");
+		let approved = project.join(".git").join(APPROVED);
+		let settled = wait_snapshot(&mut debug, &raw_capture, "approved rerun settled", |snapshot| {
+			let text = journal(&session_path);
+			!snapshot.combined().contains(TITLE)
+				&& approved.is_file()
+				&& tool_call_id(&text, "amend-approve")
+					.is_some_and(|call| tool_result(&text, call).is_some())
+		});
+		assert_surface(&settled, "approved rerun");
+		let written = fs::read_to_string(&approved).expect("approved rerun write");
+		let writer = written
+			.parse::<u32>()
+			.unwrap_or_else(|error| panic!("`$$` wrote {written:?}: {error}"));
+		// `$$` names the host whose in-process shell ran the command. Embedded,
+		// that is chat itself; here it is another live process of the same
+		// executable, the daemon chat spawned, which outlives the command.
+		assert_ne!(writer, chat_pid, "the approved rerun ran inside chat, not its project daemon");
+		assert_ne!(writer, std::process::id(), "the approved rerun ran inside the test process");
+		let identity = ProcessIdentity::capture(writer).unwrap_or_else(|error| {
+			panic!("the process that ran the rerun ({writer}) is gone: {error}")
+		});
+		assert_eq!(
+			fs::canonicalize(&identity.executable).expect("canonical daemon executable"),
+			binary,
+			"pid {writer} is not an omp process: {identity:?}"
+		);
+
+		let started = Instant::now();
+		gateway.release(1);
+		// The scripted route holds the second provider call's stream after its
+		// first argument delta (the edit-preview checkpoint of the first P7
+		// case); this case has nothing to observe there.
+		gateway.await_preview().await;
+		gateway.release_preview();
+		await_prompt(&mut debug, &raw_capture, "deny prompt painted", &denied_command, started);
+		debug.keys("escape");
+		let denied = wait_snapshot(&mut debug, &raw_capture, "denied command settled", |snapshot| {
+			let text = journal(&session_path);
+			!snapshot.combined().contains(TITLE)
+				&& tool_call_id(&text, "amend-deny")
+					.is_some_and(|call| tool_result(&text, call).is_some())
+		});
+		assert_surface(&denied, "denied command");
+		let settled_journal = journal(&session_path);
+		let call = tool_call_id(&settled_journal, "amend-deny").expect("the denied bash call");
+		let result = tool_result(&settled_journal, call).expect("the denied bash result");
+		assert!(result.contains("\"outcome\":\"denied\""), "Esc did not deny the command: {result}");
+		assert!(!project.join(".git").join(DENIED).exists(), "the denied command wrote");
+
+		gateway.release(2);
+		let finished = wait_snapshot(&mut debug, &raw_capture, "turn complete", |snapshot| {
+			let surface = snapshot.combined();
+			surface.contains(DONE) && surface.contains(COMPOSER_PROMPT)
+		});
+		assert_surface(&finished, "turn complete");
+		assert_unpainted_fallback(&finished, "turn complete");
+		assert_journal_chain(&journal(&session_path));
+
+		debug.keys("ctrl+c ctrl+c");
+		drop(debug);
+		let before = process.before.clone();
+		let (status, raw, stdout, stderr, after) = process.wait(READY_TIMEOUT);
+		let diagnostics = format!(
+			"status={status}\nstdout={stdout}\nstderr={stderr}\nlast frame={}\nraw={}",
+			finished.frame,
+			visible(&raw),
+		);
+		assert!(status.success(), "omp chat did not exit cleanly\n{diagnostics}");
+		assert_restored(&raw, &before, &after, &diagnostics);
+
+		let tickets = journaled_tickets(&session_path);
+		let [approve, deny] = tickets.as_slice() else {
+			panic!("expected two journaled amendment prompts: {tickets:?}");
+		};
+		assert_decided(approve, &project, &approved_command, true);
+		assert_decided(deny, &project, &denied_command, false);
+
+		// An embedded fallback is logged by chat, not painted: the app never
+		// shows `fallback_notice`, so the screen checks above prove nothing
+		// today. Besides the pid check, chat's own log decides its absence.
+		let log_files = logs(&home);
+		assert!(
+			log_files.iter().any(|(path, _)| path
+				.file_name()
+				.and_then(|name| name.to_str())
+				.is_some_and(|name| name.contains(&format!(".{chat_pid}.log")))),
+			"chat wrote no log under its isolated home: {:?}",
+			log_files.iter().map(|(path, _)| path).collect::<Vec<_>>()
+		);
+		for (path, text) in &log_files {
+			let fallback = text
+				.lines()
+				.filter(|line| line.contains(FALLBACK))
+				.collect::<Vec<_>>();
+			assert!(
+				fallback.is_empty(),
+				"{} records an embedded fallback:\n{}",
+				path.display(),
+				fallback.join("\n")
+			);
+		}
+	}
 }

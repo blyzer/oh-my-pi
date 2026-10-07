@@ -5831,6 +5831,7 @@ fn approval_frame(
 	let title = approval.title.clone();
 	let reason = approval.reason.clone();
 	let scope = Str::new(approval.scope.as_str());
+	let session = approval.session;
 	// `CountdownTimer`: the modal shows `(Ns remaining)` ticking once a
 	// second until the kernel answers with the prompt's default.
 	let remaining =
@@ -5847,8 +5848,10 @@ fn approval_frame(
 				<row gap=1>
 					<text fg=accent attr=bold>{"y"}</text>
 					<text>{"approve"}</text>
-					<text fg=accent attr=bold>{"a"}</text>
-					<text>{"approve for session"}</text>
+					if session {
+						<text fg=accent attr=bold>{"a"}</text>
+						<text>{"approve for session"}</text>
+					}
 					<text fg=error attr=bold>{"n"}</text>
 					<text>{"deny"}</text>
 				</row>
