@@ -288,6 +288,28 @@ impl GrantsFileLock {
 	}
 }
 
+/// The spelling a workspace trust revoke applies to: the first of the
+/// workspace's `canonical` path and its `given` spelling that names a row (a
+/// row's workspace, or a pin's subtree root), else `canonical`. `None` for a
+/// missing workspace that names no row.
+fn revoked_spelling<'p>(
+	rows: &[WorkspaceTrustGrant],
+	canonical: Option<&'p Path>,
+	given: &'p Path,
+) -> Option<&'p Path> {
+	let names = |spelling: &Path| {
+		rows.iter().any(|row| {
+			row.workspace == spelling
+				|| matches!(&row.binding, TrustBinding::Pin { under, .. } if under == spelling)
+		})
+	};
+	canonical
+		.into_iter()
+		.chain([given])
+		.find(|&spelling| names(spelling))
+		.or(canonical)
+}
+
 /// Returns whether the most-specific applicable operator grant admits an
 /// extension.
 ///
@@ -646,8 +668,15 @@ impl GrantsFile {
 		.map(Ok)
 	}
 
-	/// Atomically revokes the operator's trust in `workspace` (as recorded:
-	/// its canonical path) and returns how many trusting rows were removed.
+	/// Atomically revokes the operator's trust in `workspace` and returns how
+	/// many trusting rows were removed.
+	///
+	/// Rows hold canonical paths, so `workspace` is revoked under the first of
+	/// its canonical path and the path as given that names a row: a workspace
+	/// deleted since is still revoked by the spelling it was recorded under.
+	/// When neither names a row, an existing workspace is revoked under its
+	/// canonical path; a missing one revokes and records nothing, since no
+	/// spelling of it is known to be the one rows are keyed by.
 	///
 	/// - [`GrantScope::Exact`] removes the workspace's exact or pinned row. When
 	///   a subtree row covers the workspace, a [`TrustBinding::Deny`] row
@@ -669,7 +698,13 @@ impl GrantsFile {
 		scope: GrantScope,
 		revoked_by: TrustChannel,
 	) -> Result<usize, GrantPersistenceError> {
+		let canonical = fs::canonicalize(workspace).ok();
 		Self::update(path, |grants| {
+			let Some(workspace) =
+				revoked_spelling(&grants.workspace_trust, canonical.as_deref(), workspace)
+			else {
+				return 0;
+			};
 			let before = grants.workspace_trust.len();
 			match scope {
 				GrantScope::Exact => {
@@ -1609,6 +1644,22 @@ mod tests {
 		fn bytes(&self) -> Vec<u8> {
 			fs::read(&self.path).expect("grants")
 		}
+
+		fn rows(&self) -> Vec<WorkspaceTrustGrant> {
+			GrantsFile::read(&self.path).expect("read").workspace_trust
+		}
+
+		/// `path` spelled through `team/../team`.
+		fn respelled(&self, path: &Path) -> PathBuf {
+			let team = self.team.file_name().expect("subtree root name");
+			let respelled = self
+				.team
+				.join("..")
+				.join(team)
+				.join(path.strip_prefix(&self.team).expect("under the subtree"));
+			assert_ne!(respelled, path, "a different spelling");
+			respelled
+		}
 	}
 
 	#[test]
@@ -1908,6 +1959,73 @@ mod tests {
 			exact_trust(&team.join("c"), "c"),
 			trust_row(&team.join("d"), TrustBinding::Deny),
 		]);
+	}
+
+	#[test]
+	fn a_revoke_matches_the_canonical_workspace_then_the_recorded_spelling() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		tree.answer(tree.pin("repo"), &tree.asked()).expect("pin");
+		// Another spelling of an existing workspace revokes its canonical row,
+		// and the deny lands where evaluation looks for it.
+		assert_eq!(tree.revoke(&tree.respelled(&tree.repo), GrantScope::Exact), 1);
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
+		assert_eq!(
+			tree
+				.rows()
+				.iter()
+				.map(|row| (row.workspace.as_path(), row.binding.scope()))
+				.collect::<Vec<_>>(),
+			[(tree.team.as_path(), TrustScope::Subtree), (tree.repo.as_path(), TrustScope::Deny)]
+		);
+		assert_eq!(tree.revoke(&tree.respelled(&tree.team), GrantScope::Subtree), 1);
+		assert!(
+			tree
+				.rows()
+				.iter()
+				.all(|row| row.binding != TrustBinding::Subtree),
+			"the subtree row is revoked"
+		);
+
+		// A deleted workspace cannot be canonicalized: its recorded spelling
+		// still revokes it.
+		let tree = trust_tree();
+		tree.grant_subtree();
+		tree.answer(tree.pin("repo"), &tree.asked()).expect("pin");
+		fs::remove_dir(&tree.repo).expect("delete the repository");
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 1);
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
+		assert_eq!(tree.revoke(&tree.team, GrantScope::Subtree), 1);
+	}
+
+	#[test]
+	fn a_revoke_naming_no_row_under_no_subtree_records_no_deny() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		let rows = tree.rows();
+		// A missing workspace spelled under the subtree: no row names it, and
+		// it has no canonical path a deny could be keyed by.
+		let missing = tree.team.join("gone").join("..").join("ghost");
+		assert_eq!(tree.revoke(&missing, GrantScope::Exact), 0);
+		assert_eq!(tree.rows(), rows, "no deny for a missing workspace no row names");
+		assert_eq!(tree.revoke(&missing, GrantScope::Subtree), 0);
+		assert_eq!(tree.rows(), rows);
+
+		// A link under the subtree to a workspace outside it: its canonical
+		// workspace is covered by no subtree.
+		#[cfg(unix)]
+		{
+			let outside = tempfile::tempdir().expect("workspace outside the subtree");
+			let link = tree.team.join("escape");
+			std::os::unix::fs::symlink(outside.path(), &link).expect("link into the subtree");
+			assert_eq!(tree.revoke(&link, GrantScope::Exact), 0);
+			assert_eq!(tree.rows(), rows, "no deny for a workspace no subtree covers");
+		}
+
+		// An existing workspace under the subtree, by another spelling, is
+		// denied at its canonical path.
+		assert_eq!(tree.revoke(&tree.respelled(&tree.repo), GrantScope::Exact), 0);
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
 	}
 
 	#[test]

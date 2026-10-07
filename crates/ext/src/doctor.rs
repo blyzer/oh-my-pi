@@ -1,19 +1,19 @@
 //! Integrity and runtime-health diagnostics for `omp ext doctor`.
 
 use std::{
-	fmt::Write as _,
 	fs,
 	path::{Path, PathBuf},
 };
 
-use omp_core::{Str, StrMut, encoding::hex};
+use omp_core::{Str, encoding::hex};
 use sha2::{Digest as _, Sha256};
+use thiserror::Error;
 
 use super::{
 	ExtensionCode, Layer, WorkspaceUri,
 	lock::{InstalledRecord, LockFile, LockedExtension},
 	trust::{
-		GrantsFile, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
+		GrantsFile, GrantsFileError, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
 		verify_artifact_signature,
 	},
 };
@@ -30,7 +30,7 @@ pub enum DoctorSeverity {
 }
 
 /// One stable doctor finding with repair evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct DoctorFinding {
 	/// Stable extension diagnostic code when applicable.
 	pub code:         Option<ExtensionCode>,
@@ -40,8 +40,19 @@ pub struct DoctorFinding {
 	pub extension_id: Option<Str>,
 	/// Human-readable evidence.
 	pub detail:       Str,
+	/// The typed failure behind the finding, when there is one. The report's
+	/// presenter renders it and its source chain after `detail`.
+	pub cause:        Option<DoctorCause>,
 	/// Whether this invocation repaired deterministic local state.
 	pub repaired:     bool,
+}
+
+/// A typed failure behind a [`DoctorFinding`].
+#[derive(Debug, Error)]
+pub enum DoctorCause {
+	/// The local operator grant file cannot be read or decoded.
+	#[error(transparent)]
+	Grants(#[from] GrantsFileError),
 }
 
 /// Paths and policy consumed by one doctor pass.
@@ -128,13 +139,17 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 	let grants = match GrantsFile::read(request.grants_path) {
 		Ok(grants) => Some(grants),
 		Err(error) => {
-			findings.push(finding(
-				Some(error.code()),
-				DoctorSeverity::Error,
-				None,
-				evidence(&error),
-				false,
-			));
+			let code = error.code();
+			findings.push(DoctorFinding {
+				cause: Some(DoctorCause::Grants(error)),
+				..finding(
+					Some(code),
+					DoctorSeverity::Error,
+					None,
+					Str::new_static("operator grants are unreadable, so no extension counts as granted"),
+					false,
+				)
+			});
 			None
 		},
 	};
@@ -365,23 +380,7 @@ const fn finding(
 	detail: Str,
 	repaired: bool,
 ) -> DoctorFinding {
-	DoctorFinding { code, severity, extension_id, detail, repaired }
-}
-
-/// Renders a typed failure and its source chain as finding evidence: the
-/// doctor's report is where the error is presented.
-fn evidence(error: &dyn std::error::Error) -> Str {
-	let mut detail = StrMut::with_capacity(128);
-	let mut cause = Some(error);
-	while let Some(error) = cause {
-		if !detail.is_empty() {
-			detail.push_str(": ");
-		}
-		// Writing into an in-memory buffer cannot fail.
-		let _ = write!(detail, "{error}");
-		cause = error.source();
-	}
-	detail.freeze()
+	DoctorFinding { code, severity, extension_id, detail, cause: None, repaired }
 }
 
 /// Returns paths referenced by the active lock/install generation. GC callers
@@ -485,7 +484,20 @@ mod tests {
 			.find(|finding| finding.code == Some(ExtensionCode::EIntegrity))
 			.expect("grant file finding");
 		assert_eq!(finding.severity, DoctorSeverity::Error);
-		assert!(finding.detail.contains(&*grants_path.to_string_lossy()), "{}", finding.detail);
-		assert!(finding.detail.contains("workspace_trust"), "the TOML cause: {}", finding.detail);
+		// The finding carries the typed failure, with the grant file path and
+		// the TOML cause, for the report's presenter to render.
+		let Some(DoctorCause::Grants(GrantsFileError::Toml { path, source })) = &finding.cause else {
+			panic!("a typed grant file cause: {finding:?}");
+		};
+		assert_eq!(*path, grants_path);
+		assert!(source.to_string().contains("workspace_trust"), "the TOML cause: {source}");
+		let cause = finding
+			.cause
+			.as_ref()
+			.map(|cause| cause as &dyn std::error::Error);
+		assert!(
+			cause.and_then(std::error::Error::source).is_some(),
+			"the cause chain reaches the TOML failure"
+		);
 	}
 }

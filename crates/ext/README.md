@@ -45,7 +45,10 @@ sits below both and can be reasoned about as data in, data out.
   after the ask. A pin also needs the live subtree row at exactly `under`
   and never replaces a deny. Subtrees are granted through
   `persist_workspace_subtree`; one granted anew drops the dormant pins naming
-  its root, so it asks once per workspace again.
+  its root, so it asks once per workspace again. `revoke_workspace_trust`
+  matches the workspace's canonical path, then its spelling as given (a
+  workspace deleted since), and records a deny only at a spelling rows are
+  keyed by: never for a missing workspace no row names.
 - `plugin_command`: the approval key (`Hash32` digest of plugin version,
   command, arguments, environment, working directory, a hook's event and
   matcher, and the contents of every plugin-root file the launch names, so a
@@ -58,7 +61,8 @@ sits below both and can be reasoned about as data in, data out.
   digest domain is `omp.plugin-command.v2`: approvals recorded before files
   were bound match nothing, so plugin commands are approved once more.
 - `index`, `upgrade`, `doctor`: index metadata, generation commits, and
-  integrity diagnostics.
+  integrity diagnostics. A doctor finding carries its typed cause; the
+  report's presenter renders it.
 - `marketplace`, `claude_plugin`: Claude-compatible marketplace catalogs, the
   `installed_plugins.json` registry `omp ext install` writes, and the
   resolution of enabled installs into contained plugin roots whose skills,

@@ -20,7 +20,9 @@ use omp_ext::{
 		DeploymentManifest, ExtensionEnvironment, FeatureSelection, MissingSourceOutcome,
 		MissingSourcePolicy, OfflineMode, SourceSpec, effective_missing_source,
 	},
-	doctor::{CredentialHealth, DoctorRequest, DoctorSeverity, RuntimeHealth, diagnose},
+	doctor::{
+		CredentialHealth, DoctorFinding, DoctorRequest, DoctorSeverity, RuntimeHealth, diagnose,
+	},
 	index::SignedIndex,
 	lock::{
 		InstalledExtension, InstalledRecord, LockFile, LockedExtension, LockedPackage, Wheel,
@@ -1933,11 +1935,9 @@ fn doctor(state: &StatePaths, args: ExtDoctorArgs) -> miette::Result<()> {
 		fix:                   args.fix,
 	};
 	let findings = diagnose(&request, &CliHealth);
+	let mut out = std::io::stdout().lock();
 	for finding in &findings {
-		match finding.code {
-			Some(code) => println!("{:?} {code}: {}", finding.severity, finding.detail),
-			None => println!("{:?}: {}", finding.severity, finding.detail),
-		}
+		write_finding(&mut out, finding).into_diagnostic()?;
 	}
 	if findings
 		.iter()
@@ -1947,6 +1947,26 @@ fn doctor(state: &StatePaths, args: ExtDoctorArgs) -> miette::Result<()> {
 	}
 	Ok(())
 }
+
+/// Writes one `omp ext doctor` report line: the finding's severity, code and
+/// detail, then its typed cause and that cause's source chain.
+fn write_finding(out: &mut impl std::io::Write, finding: &DoctorFinding) -> std::io::Result<()> {
+	write!(out, "{:?}", finding.severity)?;
+	if let Some(code) = finding.code {
+		write!(out, " {code}")?;
+	}
+	write!(out, ": {}", finding.detail)?;
+	let mut cause = finding
+		.cause
+		.as_ref()
+		.map(|cause| cause as &dyn std::error::Error);
+	while let Some(error) = cause {
+		write!(out, ": {error}")?;
+		cause = error.source();
+	}
+	writeln!(out)
+}
+
 async fn bundle(state: &StatePaths, args: ExtBundleArgs) -> miette::Result<()> {
 	let lock = fs::read(&state.client_lock).into_diagnostic()?;
 	let files = vec![BundleFile {
@@ -2005,20 +2025,10 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 		.map_err(grants_update_failure)?;
 		return Ok(());
 	}
-	let pickle_refused = |grants: &GrantsFile| {
-		let tier_after = args.tier.map(tier);
-		args.ship == Some(Ship::Pickle)
-			&& !grants
-				.grants
-				.iter()
-				.filter(|grant| grant.id == args.id)
-				.all(|grant| tier_after.unwrap_or(grant.tier) == omp_ext::TrustTier::Trusted)
-	};
-	let pickle_refusal = || miette!("pickle shipping requires the trusted extension tier");
-	if pickle_refused(&grants) {
-		return Err(pickle_refusal());
-	}
-	let mut changed = false;
+	// Every refusal comes before the first write: the install records, locks
+	// and keys are rewritten in memory first, and written only once the grant
+	// file update has accepted the mutation under its lock.
+	let mut tier_rewrites = Vec::new();
 	if let Some(selected_tier) = args.tier {
 		for (installed_path, lock_path, layer) in [
 			(&state.client_installed, &state.client_lock, BackendLayer::Client),
@@ -2034,21 +2044,22 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 				entry.tier = tier(selected_tier);
 				installed_changed = true;
 			}
-			if installed_changed {
-				installed.write(installed_path).into_diagnostic()?;
-				if lock_path.exists() {
-					let mut lock = LockFile::read(lock_path, layer).map_err(extension_failure)?;
-					if let Some(extension) = lock.extensions.iter_mut().find(|entry| entry.id == args.id)
-					{
-						extension.tier = tier(selected_tier);
-						lock.write(lock_path).into_diagnostic()?;
-					}
-				}
-				changed = true;
+			if !installed_changed {
+				continue;
 			}
+			let mut lock_rewrite = None;
+			if lock_path.exists() {
+				let mut lock = LockFile::read(lock_path, layer).map_err(extension_failure)?;
+				if let Some(extension) = lock.extensions.iter_mut().find(|entry| entry.id == args.id) {
+					extension.tier = tier(selected_tier);
+					lock_rewrite = Some((lock_path, lock));
+				}
+			}
+			tier_rewrites.push((installed_path, installed, lock_rewrite));
 		}
 	}
-	if let Some(key) = args.key {
+	let mut keys_rewrite = None;
+	if let Some(key) = &args.key {
 		let version = [&state.client_lock, &state.workspace_lock]
 			.into_iter()
 			.filter(|path| path.exists())
@@ -2070,21 +2081,32 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 			})
 			.unwrap_or_else(|| Str::new_static("manual"));
 		let mut keys = KeysFile::read(&state.keys).map_err(extension_failure)?;
-		changed |= keys
+		if keys
 			.accept_operator_key(
 				&args.id,
-				&key,
+				key,
 				&version,
 				&Str::new(jiff::Timestamp::now().to_string()),
 			)
-			.map_err(extension_failure)?;
-		keys.write(&state.keys).into_diagnostic()?;
+			.map_err(extension_failure)?
+		{
+			keys_rewrite = Some(keys);
+		}
 	}
 	GrantsFile::try_update(&state.grants, |grants| {
-		// Checked again under the lock: another writer may have changed a tier.
-		if pickle_refused(grants) {
-			return Err(pickle_refusal());
+		// Checked under the lock, where another writer cannot change a tier
+		// before the grant file is written.
+		let tier_after = args.tier.map(tier);
+		if args.ship == Some(Ship::Pickle)
+			&& !grants
+				.grants
+				.iter()
+				.filter(|grant| grant.id == args.id)
+				.all(|grant| tier_after.unwrap_or(grant.tier) == omp_ext::TrustTier::Trusted)
+		{
+			return Err(miette!("pickle shipping requires the trusted extension tier"));
 		}
+		let mut changed = !tier_rewrites.is_empty() || keys_rewrite.is_some();
 		for grant in grants.grants.iter_mut().filter(|grant| grant.id == args.id) {
 			if let Some(selected_tier) = args.tier {
 				grant.tier = tier(selected_tier);
@@ -2095,11 +2117,21 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 				changed = true;
 			}
 		}
-		if changed {
-			Ok(())
-		} else {
-			Err(miette!("no trust mutation was requested for {}", args.id))
+		if !changed {
+			return Err(miette!("no trust mutation was requested for {}", args.id));
 		}
+		// Accepted: the other files are written before the grant file, still
+		// under its lock, so a refusal above has written nothing.
+		for (installed_path, installed, lock) in &tier_rewrites {
+			installed.write(installed_path).into_diagnostic()?;
+			if let Some((lock_path, lock)) = lock {
+				lock.write(lock_path).into_diagnostic()?;
+			}
+		}
+		if let Some(keys) = &keys_rewrite {
+			keys.write(&state.keys).into_diagnostic()?;
+		}
+		Ok(())
 	})
 	.map_err(grants_update_failure)?
 }
@@ -4119,6 +4151,52 @@ mod tests {
 			fs::read(&self.state.grants).expect("grant file")
 		}
 
+		/// Records `demo` 1.0.0 as installed and locked in the client layer
+		/// at the trusted tier.
+		fn record_trusted_demo(&self) {
+			InstalledRecord {
+				version:    2,
+				extensions: vec![InstalledExtension {
+					id:       Str::new_static(DEMO),
+					features: Vec::new(),
+					source:   index_source("test", &Str::new_static(DEMO)),
+					tier:     omp_ext::TrustTier::Trusted,
+					enabled:  true,
+				}],
+			}
+			.write(&self.state.client_installed)
+			.expect("install record");
+			let digest = |prefix: &str| Str::new(format!("{prefix}{}", "0".repeat(64)));
+			let mut lock =
+				read_lock_or_empty(&self.state.client_lock, BackendLayer::Client).expect("empty lock");
+			lock.targets = vec![Str::new_static("any")];
+			lock.indexes = vec!["test".to_owned()];
+			lock.extensions.push(LockedExtension {
+				id: Str::new_static(DEMO),
+				version: Str::new_static("1.0.0"),
+				tier: omp_ext::TrustTier::Trusted,
+				pool: None,
+				features: Vec::new(),
+				source: index_source("test", &Str::new_static(DEMO)),
+				manifest_digest: digest("b3:"),
+				declaration_digest: digest("b3:"),
+				capability_digest: digest("b3:"),
+				manifest_capability_digest: digest("b3:"),
+				publisher: self.publisher_key.clone(),
+				signature: Str::new_static("unchecked"),
+				ship: Str::new_static("installed"),
+				requires: Vec::new(),
+				wheel: Wheel {
+					file:   Str::new_static("demo.whl"),
+					tag:    Str::new_static("py3-none-any"),
+					size:   5,
+					blake3: digest("b3:"),
+					sha256: digest("sha256:"),
+				},
+			});
+			lock.write(&self.state.client_lock).expect("lock");
+		}
+
 		async fn install(&self, yes: bool, dry_run: bool) -> miette::Result<()> {
 			install(
 				&self.state,
@@ -4227,6 +4305,79 @@ mod tests {
 		let granted = GrantsFile::read(&fixture.state.grants).expect("grants");
 		assert_eq!(granted.grants[0].tier, omp_ext::TrustTier::Trusted);
 		assert_eq!(granted.grants[0].ship, "pickle");
+	}
+
+	#[test]
+	fn a_pickle_refusal_writes_no_trust_file() {
+		let fixture = grant_fixture();
+		fixture.grant_demo();
+		fixture.pin_publisher();
+		fixture.record_trusted_demo();
+		let state = &fixture.state;
+		let files = [&state.client_installed, &state.client_lock, &state.keys, &state.grants];
+		let contents = || files.map(|path| fs::read(path).expect("trust state file"));
+		let before = contents();
+		let rotated = Str::new(base64::encode(&[3_u8; 32]).into_string());
+		let mutation = |ship| ExtTrustArgs {
+			tier: Some(Tier::Sandboxed),
+			ship: Some(ship),
+			key: Some(rotated.clone()),
+			..trust_args(DEMO)
+		};
+
+		// Pickle shipping at the sandboxed tier is refused under the grant
+		// file lock, before the tier and key rewrites reach any file.
+		let refused = fixture
+			.trust(mutation(Ship::Pickle))
+			.expect_err("pickle at the sandboxed tier");
+		assert_eq!(exit_status(&refused), 1, "{refused:?}");
+		assert!(mentions(&refused, "pickle shipping requires the trusted"), "{refused:?}");
+		for (path, (before, after)) in files.iter().zip(before.iter().zip(&contents())) {
+			assert_eq!(before, after, "{} was written by a refused trust", path.display());
+		}
+
+		// The same mutation shipping source is admitted and rewrites them all.
+		fixture
+			.trust(mutation(Ship::Source))
+			.expect("source at the sandboxed tier");
+		for (path, (before, after)) in files.iter().zip(before.iter().zip(&contents())) {
+			assert_ne!(before, after, "{} is part of the trust mutation", path.display());
+		}
+		let installed = InstalledRecord::read(&state.client_installed).expect("install record");
+		assert_eq!(installed.extensions[0].tier, omp_ext::TrustTier::Sandboxed);
+		let keys = KeysFile::read(&state.keys).expect("keys");
+		assert_eq!(keys.keys[0].key, rotated);
+	}
+
+	#[test]
+	fn a_doctor_finding_renders_its_typed_cause_chain() {
+		let tree = tempfile::tempdir().expect("temporary tree");
+		let grants = tree.path().join("grants.toml");
+		fs::write(&grants, "workspace_trust = 3").expect("malformed grant file");
+		let error = GrantsFile::read(&grants).expect_err("malformed grant file");
+		let finding = DoctorFinding {
+			code:         Some(error.code()),
+			severity:     DoctorSeverity::Error,
+			extension_id: None,
+			detail:       Str::new_static("operator grants are unreadable"),
+			cause:        Some(omp_ext::doctor::DoctorCause::Grants(error)),
+			repaired:     false,
+		};
+		let mut out = Vec::new();
+		write_finding(&mut out, &finding).expect("render the finding");
+		let line = String::from_utf8(out).expect("UTF-8 report");
+		let head = format!(
+			"Error E-INTEGRITY: operator grants are unreadable: grant file {} is malformed: ",
+			grants.display()
+		);
+		assert!(line.starts_with(&head), "{line}");
+		assert!(line.contains("workspace_trust"), "the TOML cause: {line}");
+		assert!(line.ends_with('\n'), "{line:?}");
+
+		let mut out = Vec::new();
+		write_finding(&mut out, &DoctorFinding { code: None, cause: None, ..finding })
+			.expect("render the finding");
+		assert_eq!(out, b"Error: operator grants are unreadable\n");
 	}
 
 	#[test]
