@@ -17,8 +17,12 @@ use omp_driver::cleanse::{
 	CleanseArgs, CleanseStatus, TargetChoice,
 	production::{CleansePresentation, PresentationError, ProductionCleanseHost},
 };
-use omp_envd::ssh::{AuthPolicy, HostConfig, HostPaths, HostStore};
+use omp_envd::{
+	admission::{Provenance, SandboxState, call_approval_mode},
+	ssh::{AuthPolicy, HostConfig, HostPaths, HostStore},
+};
 use omp_ext::workspace_trust::inventory::{PROJECT_DIR, SECRETS_FILE};
+use omp_tool::Confinement;
 use tokio_util::sync::CancellationToken;
 
 use super::ServiceState;
@@ -33,20 +37,23 @@ fn failed(error: impl std::fmt::Display) -> ServiceError {
 }
 
 /// `/security`: the approval mode as configured and as enforced, through the
-/// same rule admission applies, and the network confinement the sandbox
-/// compiler applies.
+/// same per-call rule admission applies (one mode for the tools the sandbox
+/// confines, one for every other tool), and the network confinement the
+/// sandbox compiler applies.
 pub fn approval_posture(state: &ServiceState) -> ApprovalPostureRow {
 	let settings = omp_envd::tool_settings::ToolSettings::from_con(&state.con)
 		.with_approval_mode_override(state.approval_override);
-	let sandbox = omp_envd::admission::SandboxState::probe(&state.con, &state.project);
+	let sandbox = SandboxState::probe(&state.con, &state.project);
 	let configured = settings.configured_approval();
-	let effective = omp_envd::admission::effective_approval_mode(configured, sandbox);
+	let in_force =
+		|confinement| -> &'static str { call_approval_mode(configured, sandbox, confinement).into() };
 	ApprovalPostureRow {
-		configured: Str::new_static(configured.mode.into()),
-		effective:  Str::new_static(effective.into()),
-		sandbox:    Str::new_static(sandbox.into()),
-		explicit:   configured.provenance == omp_envd::admission::Provenance::Explicit,
-		network:    Str::new_static(
+		configured:      Str::new_static(configured.mode.into()),
+		sandboxed_tools: Str::new_static(in_force(Confinement::ExecSandbox)),
+		host_tools:      Str::new_static(in_force(Confinement::Host)),
+		sandbox:         Str::new_static(sandbox.into()),
+		explicit:        configured.provenance == Provenance::Explicit,
+		network:         Str::new_static(
 			omp_envd::exec_settings::network_confinement(&state.con, sandbox).into(),
 		),
 	}

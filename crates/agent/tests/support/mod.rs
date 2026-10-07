@@ -64,6 +64,7 @@ pub fn tool_spec(name: &str, revision: u16) -> ToolSpec {
 		schema:          Bytes::from_static(br#"{"type":"object","additionalProperties":false}"#),
 		constraint:      Constraint::None,
 		effects:         Effects::empty(),
+		confinement:     omp_tool::Confinement::Host,
 		projection_code: [revision as u8; 32],
 	}
 }

@@ -32,9 +32,16 @@ client and framing boundary; it does not contain an alternate host.
   default as `workspace-write`). `admission::effective_approval_mode` is the
   one rule that joins it to approval: the default `yolo` holds only while a
   sandbox was actually constructed (`SandboxState::Active`); otherwise `write`
-  is in force. An explicit `yolo` (flag or user config) is respected. With no
-  active sandbox the `bash` tool resolves to the `exec` tier, and one typed
-  `approval-posture` notice reports the downgrade or the unconfined `yolo`.
+  is in force. An explicit `yolo` (flag or user config) is respected.
+  `admission::resolve_approval` applies it per call with the tool's typed
+  `omp_tool::Confinement` (`admission::call_approval_mode`, which `/security`
+  also reports per confinement): the sandbox counts only for an `ExecSandbox`
+  tool (`bash@2`, `hub@2`), so the default `yolo` covers just those, and a
+  `Host` tool is admitted as if no sandbox existed (`write` for that call, so
+  its exec tier prompts). With no active sandbox an `ExecSandbox` tool resolves
+  to the `exec` tier, and one typed `approval-posture` notice reports the
+  downgrade or the unconfined `yolo`. The host that registers a tool asserts
+  its confinement; worker, extension and MCP declarations are always `Host`.
   The sandbox's in-shell path check walks each path as the kernel does
   (links followed in place, `..` applied after them) and a redirection opens
   exactly the path it judged. Under the default `host` read mode reads follow

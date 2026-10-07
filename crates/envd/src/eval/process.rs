@@ -2339,6 +2339,7 @@ mod tests {
 				schema:          Bytes::from_static(br#"{"type":"object"}"#),
 				constraint:      Constraint::None,
 				effects:         Effects::empty(),
+				confinement:     omp_tool::Confinement::Host,
 				projection_code: [0; 32],
 			};
 			registry
@@ -2482,6 +2483,7 @@ mod tests {
 						schema:          Bytes::from_static(br#"{"type":"object"}"#),
 						constraint:      Constraint::None,
 						effects:         Effects::empty(),
+						confinement:     omp_tool::Confinement::Host,
 						projection_code: [0; 32],
 					},
 				},

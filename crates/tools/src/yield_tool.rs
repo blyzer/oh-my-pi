@@ -266,6 +266,7 @@ fn yield_spec(data_schema: Value, mode: SchemaMode) -> Result<ToolSpec, SchemaCo
 			Constraint::None
 		},
 		effects: Effects::empty(),
+		confinement: omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),
@@ -316,6 +317,7 @@ fn workpool_yield_spec() -> Result<ToolSpec, SchemaContractError> {
 		// keys, envelopes, duplicates, and final assembled ids.
 		constraint: Constraint::None,
 		effects: Effects::empty(),
+		confinement: omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),

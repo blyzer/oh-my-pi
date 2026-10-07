@@ -165,6 +165,7 @@ pub fn spec() -> ToolSpec {
 			}),
 			..Effects::empty()
 		},
+		confinement:     omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),

@@ -20,7 +20,7 @@ use omp_shell::{
 	analysis,
 	parser::{Parser, ParserOptions},
 };
-use omp_tool::Effects;
+use omp_tool::{Confinement, Effects};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,7 +57,7 @@ pub enum ApprovalMode {
 	Yolo,
 }
 
-/// Name of the tool whose child processes the exec sandbox confines.
+/// Name of the tool whose `command` argument is parsed into [`BashIr`].
 const SHELL_TOOL: &str = "bash";
 
 /// Why a requested sandbox could not be constructed.
@@ -172,6 +172,10 @@ pub struct ConfiguredApproval {
 /// honoured. Without one, a defaulted `Yolo` is downgraded to `Write`, while an
 /// explicit `Yolo` (a flag, the user's config) is respected and reported as
 /// unconfined. Every other mode is returned unchanged.
+///
+/// This is the session's posture, and the mode in force for the tools the
+/// sandbox confines. [`call_approval_mode`] is the mode a call is admitted
+/// under.
 #[must_use]
 pub const fn effective_approval_mode(
 	configured: ConfiguredApproval,
@@ -181,6 +185,27 @@ pub const fn effective_approval_mode(
 		(ApprovalMode::Yolo, Provenance::Default) if !sandbox.confines() => ApprovalMode::Write,
 		(mode, _) => mode,
 	}
+}
+
+/// The mode a call to a tool of `confinement` is admitted under.
+///
+/// [`effective_approval_mode`] sees the sandbox only for a tool that sandbox
+/// confines ([`Confinement::ExecSandbox`]). A [`Confinement::Host`] tool sees
+/// none, so a defaulted `Yolo` is `Write` for it even while the sandbox is
+/// active, and its mode is the same under every sandbox state. An explicit
+/// `Yolo` is respected for both.
+#[must_use]
+pub const fn call_approval_mode(
+	configured: ConfiguredApproval,
+	sandbox: SandboxState,
+	confinement: Confinement,
+) -> ApprovalMode {
+	let sandbox_for_call = if confinement.sandboxed() {
+		sandbox
+	} else {
+		SandboxState::Off
+	};
+	effective_approval_mode(configured, sandbox_for_call)
 }
 
 /// Name of the typed notice reporting an [`ApprovalPosture`].
@@ -345,8 +370,12 @@ pub struct ResolvedApproval {
 	pub invocation_id: Str,
 	/// Exact live tool name evaluated.
 	pub tool_name:     Str,
+	/// Where the live revision's effects happen, as its host asserted.
+	pub confinement:   Confinement,
 	/// Tier derived from the live revision's declared effects.
 	pub tier:          ApprovalTier,
+	/// Approval mode in force for this call.
+	pub mode:          ApprovalMode,
 	/// Effective policy.
 	pub policy:        ApprovalPolicy,
 	/// Authority which selected the policy.
@@ -355,29 +384,34 @@ pub struct ResolvedApproval {
 	pub policy_key:    Option<Str>,
 }
 
-/// Resolves a durable invocation decision from the declared effect ceiling.
+/// Resolves a durable invocation decision from the declared effect ceiling
+/// and where those effects happen.
 ///
 /// Per-tool overrides remain authoritative in every mode. Without one, the
-/// mode [`effective_approval_mode`] yields for `sandbox` approves tiers up to
-/// `read`, `write`, and `exec`, respectively. `bash` declares no effects
-/// because the sandbox is its confinement; with none in force it is process
-/// authority and resolves to the `exec` tier.
+/// call's mode ([`call_approval_mode`]) approves tiers up to `read`, `write`,
+/// and `exec`, respectively: a defaulted `yolo` that only an active sandbox
+/// keeps alive covers sandboxed tools ([`Confinement::ExecSandbox`]), and a
+/// [`Confinement::Host`] tool is admitted exactly as it would be with no
+/// sandbox, so its exec-tier calls prompt. An explicit `yolo` is respected
+/// either way. A sandboxed tool declares no effects the sandbox confines; with
+/// no sandbox in force it is process authority and resolves to the `exec` tier.
 pub fn resolve_approval(
 	invocation_id: impl Into<Str>,
 	tool_name: impl Into<Str>,
 	effects: &Effects,
+	confinement: Confinement,
 	configured: ConfiguredApproval,
 	sandbox: SandboxState,
 	override_policy: Option<ApprovalPolicy>,
 ) -> ResolvedApproval {
 	let invocation_id = invocation_id.into();
 	let tool_name = tool_name.into();
-	let tier = if tool_name.as_str() == SHELL_TOOL && !sandbox.confines() {
+	let tier = if confinement.sandboxed() && !sandbox.confines() {
 		ApprovalTier::Exec
 	} else {
 		ApprovalTier::from_effects(effects)
 	};
-	let mode = effective_approval_mode(configured, sandbox);
+	let mode = call_approval_mode(configured, sandbox, confinement);
 	let (policy, source, policy_key) = override_policy.map_or_else(
 		|| {
 			let allowed = match mode {
@@ -397,7 +431,16 @@ pub fn resolve_approval(
 		},
 		|policy| (policy, ApprovalSource::User, Some(tool_name.clone())),
 	);
-	ResolvedApproval { invocation_id, tool_name, tier, policy, source, policy_key }
+	ResolvedApproval {
+		invocation_id,
+		tool_name,
+		confinement,
+		tier,
+		mode,
+		policy,
+		source,
+		policy_key,
+	}
 }
 
 /// Origin of a nested invocation admitted through the environment host.
@@ -433,9 +476,9 @@ pub(crate) enum DynamicAdmissionError {
 
 /// Shared admission authority for targets resolved inside another tool.
 ///
-/// Dynamic and native routes pass the resolved target's own [`Effects`] here;
-/// the containing tool's broader declaration never substitutes for the
-/// target-specific decision.
+/// Dynamic and native routes pass the resolved target's own [`Effects`] and
+/// [`Confinement`] here; the containing tool's broader declaration and its
+/// sandbox never substitute for the target-specific decision.
 #[derive(Clone)]
 pub(crate) struct DynamicAdmission {
 	mode:      ConfiguredApproval,
@@ -466,6 +509,7 @@ impl DynamicAdmission {
 		invocation_id: Str,
 		target: Str,
 		effects: &Effects,
+		confinement: Confinement,
 		source: DynamicInvocationSource,
 		cancellation: CancellationToken,
 	) -> Result<ResolvedApproval, DynamicAdmissionError> {
@@ -476,6 +520,7 @@ impl DynamicAdmission {
 			invocation_id.clone(),
 			target.clone(),
 			effects,
+			confinement,
 			self.mode,
 			self.sandbox,
 			self.overrides.get(&target).copied(),
@@ -492,6 +537,7 @@ impl DynamicAdmission {
 		};
 		let tier: &'static str = resolved.tier.into();
 		let origin: &'static str = source.into();
+		let confinement: &'static str = confinement.into();
 		let ticket = route
 			.request_cancellable(
 				Some(invocation_id),
@@ -508,7 +554,10 @@ impl DynamicAdmission {
 					unreachable:   sf!("fail_closed"),
 					require_human: false,
 					pattern:       None,
-					evidence:      vec![sf!("invocation_source={origin}")],
+					evidence:      vec![
+						sf!("invocation_source={origin}"),
+						sf!("confinement={confinement}"),
+					],
 				}],
 				epoch_millis(),
 				cancellation.clone(),
@@ -986,8 +1035,10 @@ mod tests {
 		policy::v1::{EffectEnvelope, ExecEffects},
 	};
 	use omp_tool::{
-		DesktopEffects, DocEffects, Effects, ExecEffects as ToolExecEffects, InferenceEffects, Usd,
+		Confinement, DesktopEffects, DocEffects, Effects, ExecEffects as ToolExecEffects,
+		InferenceEffects, Usd,
 	};
+	use proptest::prelude::*;
 	use tokio::time;
 	use tokio_util::sync::CancellationToken;
 
@@ -995,8 +1046,8 @@ mod tests {
 		AdmissionDecision, AdmissionGate, ApprovalMode, ApprovalPolicy, ApprovalPosture,
 		ApprovalSource, ApprovalTier, ConfiguredApproval, DynamicAdmission, DynamicAdmissionError,
 		DynamicInvocationSource, Provenance, SandboxState, SandboxUnavailable, apply_admission_patch,
-		bash_ir, effective_approval_mode, effects_narrow_or_refuse, github_mutation_targets,
-		resolve_approval,
+		bash_ir, call_approval_mode, effective_approval_mode, effects_narrow_or_refuse,
+		github_mutation_targets, resolve_approval,
 	};
 
 	const UNAVAILABLE: SandboxState =
@@ -1085,7 +1136,7 @@ mod tests {
 	}
 
 	#[test]
-	fn the_shell_is_exec_tier_unless_a_sandbox_confines_it() {
+	fn exec_sandboxed_tools_are_exec_tier_unless_a_sandbox_confines_them() {
 		use ApprovalPolicy::{Allow, Prompt};
 		let none = Effects::empty();
 		for (sandbox, configured, policy) in [
@@ -1099,27 +1150,47 @@ mod tests {
 			(SandboxState::Off, explicit(ApprovalMode::Write), Prompt),
 			(SandboxState::Off, explicit(ApprovalMode::AlwaysAsk), Prompt),
 		] {
-			let decision = resolve_approval("shell", "bash", &none, configured, sandbox, None);
-			assert_eq!(decision.policy, policy, "bash under {configured:?} with sandbox {sandbox}");
-			assert_eq!(
-				decision.tier,
-				if sandbox.confines() {
-					ApprovalTier::Read
-				} else {
-					ApprovalTier::Exec
-				}
-			);
+			// The marker decides, not the name: any sandboxed tool escalates.
+			for name in ["bash", "hub", "sandboxed_probe"] {
+				let decision = resolve_approval(
+					"shell",
+					name,
+					&none,
+					Confinement::ExecSandbox,
+					configured,
+					sandbox,
+					None,
+				);
+				assert_eq!(
+					decision.policy, policy,
+					"{name} under {configured:?} with sandbox {sandbox}"
+				);
+				assert_eq!(
+					decision.tier,
+					if sandbox.confines() {
+						ApprovalTier::Read
+					} else {
+						ApprovalTier::Exec
+					}
+				);
+			}
 		}
-		// Other effect-free tools stay read tier whatever the sandbox does.
-		let think = resolve_approval(
-			"t",
-			"think",
-			&none,
-			defaulted(ApprovalMode::Yolo),
-			SandboxState::Off,
-			None,
-		);
-		assert_eq!((think.tier, think.policy), (ApprovalTier::Read, Allow));
+		// An effect-free `Host` tool stays read tier whatever its name and the
+		// sandbox: a tool called `bash` is not escalated by its name.
+		for name in ["bash", "think"] {
+			for sandbox in [SandboxState::Active, SandboxState::Off, UNAVAILABLE] {
+				let decision = resolve_approval(
+					"t",
+					name,
+					&none,
+					Confinement::Host,
+					defaulted(ApprovalMode::Yolo),
+					sandbox,
+					None,
+				);
+				assert_eq!((decision.tier, decision.policy), (ApprovalTier::Read, Allow), "{name}");
+			}
+		}
 		// A per-tool override stays authoritative without a sandbox, both ways.
 		for (override_policy, expected) in
 			[(ApprovalPolicy::Allow, Allow), (ApprovalPolicy::Deny, ApprovalPolicy::Deny)]
@@ -1128,11 +1199,261 @@ mod tests {
 				"shell",
 				"bash",
 				&none,
+				Confinement::ExecSandbox,
 				defaulted(ApprovalMode::Yolo),
 				SandboxState::Off,
 				Some(override_policy),
 			);
 			assert_eq!((decision.policy, decision.source), (expected, ApprovalSource::User));
+		}
+	}
+
+	/// One envelope per tier-deciding effect domain.
+	fn tier_envelopes() -> [(&'static str, Effects, ApprovalTier); 6] {
+		[
+			(
+				"document read",
+				Effects {
+					documents: Some(DocEffects { read: true, write_globs: Arc::from([]) }),
+					..Effects::empty()
+				},
+				ApprovalTier::Read,
+			),
+			(
+				"document write",
+				Effects {
+					documents: Some(DocEffects {
+						read:        true,
+						write_globs: Arc::from([sf!("**")]),
+					}),
+					..Effects::empty()
+				},
+				ApprovalTier::Write,
+			),
+			(
+				"network",
+				Effects {
+					exec: Some(ToolExecEffects { commands: Arc::from([]), network: true }),
+					..Effects::empty()
+				},
+				ApprovalTier::Exec,
+			),
+			(
+				"commands",
+				Effects {
+					exec: Some(ToolExecEffects { commands: Arc::from([sf!("*")]), network: false }),
+					..Effects::empty()
+				},
+				ApprovalTier::Exec,
+			),
+			(
+				"inference",
+				Effects {
+					inference: Some(InferenceEffects {
+						max_requests: 1,
+						max_usd:      Usd::from_nanos(1),
+					}),
+					..Effects::empty()
+				},
+				ApprovalTier::Exec,
+			),
+			(
+				"desktop input",
+				Effects {
+					desktop: Some(DesktopEffects {
+						capture:       false,
+						accessibility: false,
+						input:         true,
+					}),
+					..Effects::empty()
+				},
+				ApprovalTier::Exec,
+			),
+		]
+	}
+
+	/// The decision-4 rule: a defaulted `yolo` that only an active sandbox
+	/// keeps alive covers the tools that sandbox confines. A `Host` tool runs
+	/// under `write` for that call, so its read and write tiers proceed and its
+	/// exec tier prompts; an explicit `yolo` is respected for every tool.
+	#[test]
+	fn a_defaulted_yolo_covers_only_sandboxed_tools() {
+		use ApprovalMode::{AlwaysAsk, Write, Yolo};
+		use ApprovalPolicy::{Allow, Prompt};
+		let sandboxes = [SandboxState::Active, SandboxState::Off, UNAVAILABLE];
+		let modes = [defaulted(Yolo), explicit(Yolo), explicit(Write), explicit(AlwaysAsk)];
+		for (domain, effects, declared_tier) in tier_envelopes() {
+			for confinement in [Confinement::Host, Confinement::ExecSandbox] {
+				for configured in modes {
+					for sandbox in sandboxes {
+						let decision = resolve_approval(
+							"call",
+							"tool",
+							&effects,
+							confinement,
+							configured,
+							sandbox,
+							None,
+						);
+						let tier = if confinement.sandboxed() && !sandbox.confines() {
+							ApprovalTier::Exec
+						} else {
+							declared_tier
+						};
+						// A defaulted yolo survives only where a sandbox confines
+						// this very tool; every other configuration is unchanged.
+						let mode = match (configured.mode, configured.provenance) {
+							(Yolo, Provenance::Default)
+								if !(confinement.sandboxed() && sandbox.confines()) =>
+							{
+								Write
+							},
+							(mode, _) => mode,
+						};
+						let allowed = match mode {
+							AlwaysAsk => tier <= ApprovalTier::Read,
+							Write => tier <= ApprovalTier::Write,
+							Yolo => true,
+						};
+						let context = format!("{domain} {confinement} {configured:?} {sandbox}");
+						assert_eq!(decision.confinement, confinement, "{context}");
+						assert_eq!(decision.tier, tier, "{context}");
+						assert_eq!(decision.mode, mode, "{context}");
+						// `/security` reports the same per-call mode admission applies.
+						assert_eq!(
+							call_approval_mode(configured, sandbox, confinement),
+							mode,
+							"{context}"
+						);
+						assert_eq!(decision.policy, if allowed { Allow } else { Prompt }, "{context}");
+						assert_eq!(decision.source, ApprovalSource::Mode, "{context}");
+					}
+				}
+			}
+		}
+		// The headline rows, spelled out.
+		let [read, write, network, ..] = tier_envelopes().map(|(_, effects, _)| effects);
+		let host = |effects: &Effects, configured| {
+			resolve_approval(
+				"call",
+				"web_search",
+				effects,
+				Confinement::Host,
+				configured,
+				SandboxState::Active,
+				None,
+			)
+			.policy
+		};
+		assert_eq!(host(&network, defaulted(Yolo)), Prompt);
+		assert_eq!(host(&read, defaulted(Yolo)), Allow);
+		assert_eq!(host(&write, defaulted(Yolo)), Allow);
+		assert_eq!(host(&network, explicit(Yolo)), Allow);
+		let bash = resolve_approval(
+			"call",
+			"bash",
+			&Effects::empty(),
+			Confinement::ExecSandbox,
+			defaulted(Yolo),
+			SandboxState::Active,
+			None,
+		);
+		assert_eq!((bash.mode, bash.policy), (Yolo, Allow));
+	}
+
+	fn sandbox_states() -> [SandboxState; 5] {
+		[
+			SandboxState::Active,
+			SandboxState::Off,
+			SandboxState::Unavailable { cause: SandboxUnavailable::UnsupportedHost },
+			SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable },
+			SandboxState::Unavailable { cause: SandboxUnavailable::PolicyRejected },
+		]
+	}
+
+	fn any_effects() -> impl Strategy<Value = Effects> {
+		(
+			proptest::option::of((any::<bool>(), any::<bool>())),
+			proptest::option::of((any::<bool>(), any::<bool>())),
+			proptest::option::of((0_u32..3, 0_u64..3)),
+			proptest::option::of((any::<bool>(), any::<bool>(), any::<bool>())),
+			0_u32..3,
+		)
+			.prop_map(|(documents, exec, inference, desktop, subagents)| Effects {
+				documents: documents.map(|(read, write)| DocEffects {
+					read,
+					write_globs: if write {
+						Arc::from([sf!("**")])
+					} else {
+						Arc::from([])
+					},
+				}),
+				exec: exec.map(|(commands, network)| ToolExecEffects {
+					commands: if commands {
+						Arc::from([sf!("*")])
+					} else {
+						Arc::from([])
+					},
+					network,
+				}),
+				inference: inference.map(|(max_requests, nanos)| InferenceEffects {
+					max_requests,
+					max_usd: Usd::from_nanos(nanos),
+				}),
+				desktop: desktop.map(|(capture, accessibility, input)| DesktopEffects {
+					capture,
+					accessibility,
+					input,
+				}),
+				subagents,
+			})
+	}
+
+	fn any_configured() -> impl Strategy<Value = ConfiguredApproval> {
+		(
+			prop_oneof![
+				Just(ApprovalMode::AlwaysAsk),
+				Just(ApprovalMode::Write),
+				Just(ApprovalMode::Yolo),
+			],
+			prop_oneof![Just(Provenance::Default), Just(Provenance::Explicit)],
+		)
+			.prop_map(|(mode, provenance)| ConfiguredApproval { mode, provenance })
+	}
+
+	fn any_override() -> impl Strategy<Value = Option<ApprovalPolicy>> {
+		proptest::option::of(prop_oneof![
+			Just(ApprovalPolicy::Allow),
+			Just(ApprovalPolicy::Deny),
+			Just(ApprovalPolicy::Prompt),
+		])
+	}
+
+	proptest! {
+		/// "Not auto-approved merely because the sandbox is active", made
+		/// exact: a `Host` tool gets the same decision under every sandbox
+		/// state, for every mode, provenance, override and effect envelope.
+		#[test]
+		fn host_tools_are_admitted_as_if_no_sandbox_existed(
+			effects in any_effects(),
+			configured in any_configured(),
+			override_policy in any_override(),
+		) {
+			let decide = |sandbox| {
+				resolve_approval(
+					"call",
+					"host_tool",
+					&effects,
+					Confinement::Host,
+					configured,
+					sandbox,
+					override_policy,
+				)
+			};
+			let unconfined = decide(SandboxState::Off);
+			for sandbox in sandbox_states() {
+				prop_assert_eq!(&decide(sandbox), &unconfined, "{}", sandbox);
+			}
 		}
 	}
 
@@ -1267,6 +1588,7 @@ mod tests {
 			"read-1",
 			"read",
 			&read,
+			Confinement::Host,
 			explicit(ApprovalMode::AlwaysAsk),
 			sandbox,
 			None,
@@ -1279,6 +1601,7 @@ mod tests {
 			"write-1",
 			"write",
 			&write,
+			Confinement::Host,
 			explicit(ApprovalMode::AlwaysAsk),
 			sandbox,
 			None,
@@ -1286,12 +1609,26 @@ mod tests {
 		assert_eq!(write_prompt.tier, ApprovalTier::Write);
 		assert_eq!(write_prompt.policy, ApprovalPolicy::Prompt);
 
-		let write_allowed =
-			resolve_approval("write-2", "write", &write, explicit(ApprovalMode::Write), sandbox, None);
+		let write_allowed = resolve_approval(
+			"write-2",
+			"write",
+			&write,
+			Confinement::Host,
+			explicit(ApprovalMode::Write),
+			sandbox,
+			None,
+		);
 		assert_eq!(write_allowed.policy, ApprovalPolicy::Allow);
 
-		let exec_prompt =
-			resolve_approval("eval-1", "eval", &exec, explicit(ApprovalMode::Write), sandbox, None);
+		let exec_prompt = resolve_approval(
+			"eval-1",
+			"eval",
+			&exec,
+			Confinement::Host,
+			explicit(ApprovalMode::Write),
+			sandbox,
+			None,
+		);
 		assert_eq!(exec_prompt.tier, ApprovalTier::Exec);
 		assert_eq!(exec_prompt.policy, ApprovalPolicy::Prompt);
 		assert_eq!(ApprovalTier::from_effects(&desktop_read), ApprovalTier::Read);
@@ -1308,6 +1645,7 @@ mod tests {
 			"shell-7",
 			"bash",
 			&effects,
+			Confinement::ExecSandbox,
 			explicit(ApprovalMode::Yolo),
 			SandboxState::Active,
 			Some(ApprovalPolicy::Deny),
@@ -1320,7 +1658,9 @@ mod tests {
 			serde_json::json!({
 				"invocation_id": "shell-7",
 				"tool_name": "bash",
+				"confinement": "exec_sandbox",
 				"tier": "exec",
+				"mode": "yolo",
 				"policy": "deny",
 				"source": "user",
 				"policy_key": "bash"
@@ -1350,6 +1690,7 @@ mod tests {
 					sf!("dyn-1"),
 					sf!("github"),
 					&network,
+					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
 					CancellationToken::new(),
 				)
@@ -1366,6 +1707,95 @@ mod tests {
 				_ => unreachable!("table contains only known outcomes"),
 			}
 		}
+	}
+
+	/// A `dyn` target running outside the sandbox gets no help from it: under
+	/// a defaulted `yolo` with an active sandbox, a `Host` network target
+	/// prompts (once, naming its confinement) or, with no route, is refused;
+	/// a sandboxed target is allowed without a ticket.
+	#[tokio::test]
+	async fn dynamic_admission_prompts_for_host_targets_under_a_defaulted_yolo() {
+		let network = Effects {
+			exec: Some(ToolExecEffects { commands: Arc::from([]), network: true }),
+			..Effects::empty()
+		};
+		let unrouted = DynamicAdmission::new(
+			defaulted(ApprovalMode::Yolo),
+			SandboxState::Active,
+			BTreeMap::new(),
+			None,
+		);
+		assert!(matches!(
+			unrouted
+				.admit(
+					sf!("dyn-host"),
+					sf!("github"),
+					&network,
+					Confinement::Host,
+					DynamicInvocationSource::ShellDyn,
+					CancellationToken::new(),
+				)
+				.await,
+			Err(DynamicAdmissionError::ApprovalUnavailable { .. })
+		));
+		let sandboxed = unrouted
+			.admit(
+				sf!("dyn-sandboxed"),
+				sf!("probe"),
+				&Effects::empty(),
+				Confinement::ExecSandbox,
+				DynamicInvocationSource::ShellDyn,
+				CancellationToken::new(),
+			)
+			.await
+			.expect("a sandboxed target needs no route");
+		assert_eq!((sandboxed.mode, sandboxed.policy), (ApprovalMode::Yolo, ApprovalPolicy::Allow));
+
+		let (route, inbox) = ApprovalRoute::new(Arc::new(ApprovalBook::new()), None);
+		unrouted.bind_route(Some(route.clone()));
+		let pending_admission = unrouted.clone();
+		let pending = tokio::spawn(async move {
+			pending_admission
+				.admit(
+					sf!("dyn-host-routed"),
+					sf!("github"),
+					&network,
+					Confinement::Host,
+					DynamicInvocationSource::ShellDyn,
+					CancellationToken::new(),
+				)
+				.await
+		});
+		let request = inbox.recv().await.expect("host target prompts");
+		assert_eq!(request.ticket.reasons.len(), 1);
+		assert_eq!(request.ticket.reasons[0].kind, "exec");
+		assert!(
+			request.ticket.reasons[0]
+				.evidence
+				.iter()
+				.any(|line| line == "confinement=host"),
+			"{:?}",
+			request.ticket.reasons[0].evidence
+		);
+		request
+			.respond(ApprovalDecision {
+				approved:   true,
+				scope:      ApprovalScope::Once,
+				source:     DecisionSource::User,
+				decided_by: None,
+				reason:     None,
+				audited:    false,
+			})
+			.expect("approval response accepted");
+		let resolved = pending
+			.await
+			.expect("dynamic admission task")
+			.expect("human approved the host target");
+		assert_eq!(
+			(resolved.confinement, resolved.mode, resolved.policy),
+			(Confinement::Host, ApprovalMode::Write, ApprovalPolicy::Prompt)
+		);
+		assert!(inbox.try_recv().is_err(), "exactly one ticket was filed");
 	}
 
 	#[tokio::test]
@@ -1390,6 +1820,7 @@ mod tests {
 					sf!("dyn-approval"),
 					sf!("github"),
 					&pending_network,
+					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
 					CancellationToken::new(),
 				)
@@ -1402,7 +1833,10 @@ mod tests {
 		assert_eq!(request.ticket.invocation_id.as_deref(), Some("dyn-approval"));
 		assert_eq!(request.ticket.reasons[0].subject, "github");
 		assert_eq!(request.ticket.reasons[0].kind, "exec");
-		assert_eq!(request.ticket.reasons[0].evidence.as_slice(), ["invocation_source=shell_dyn"]);
+		assert_eq!(request.ticket.reasons[0].evidence.as_slice(), [
+			"invocation_source=shell_dyn",
+			"confinement=host"
+		]);
 		request
 			.respond(ApprovalDecision {
 				approved:   true,
@@ -1428,6 +1862,7 @@ mod tests {
 					sf!("dyn-cancelled"),
 					sf!("github"),
 					&cancel_network,
+					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
 					cancel_token,
 				)

@@ -313,6 +313,7 @@ pub fn spec() -> ToolSpec {
 			desktop:   None,
 			subagents: 0,
 		},
+		confinement:     omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),

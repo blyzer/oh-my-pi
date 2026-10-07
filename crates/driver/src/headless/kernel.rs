@@ -819,16 +819,21 @@ impl SettingsAdmission {
 }
 
 impl omp_agent::ToolAdmission for SettingsAdmission {
+	/// The probed sandbox counts only for a tool it confines. Over an attached
+	/// daemon every tool admitted here is session-process host code (session
+	/// base, RPC host tools) and `Host`; an embedded or isolated composition
+	/// also runs the environment's native tools here, `bash` among them.
 	fn admit(
 		&self,
 		name: &str,
 		effects: &omp_tool::Effects,
+		confinement: omp_tool::Confinement,
 		args: &serde_json::value::RawValue,
 	) -> omp_agent::ToolAdmissionVerdict {
 		self.report_posture();
 		let resolved = self
 			.settings
-			.approval_for(name, name, effects, self.sandbox);
+			.approval_for(name, name, effects, confinement, self.sandbox);
 		match resolved.policy {
 			omp_envd::admission::ApprovalPolicy::Allow => omp_agent::ToolAdmissionVerdict::Allow,
 			omp_envd::admission::ApprovalPolicy::Deny => omp_agent::ToolAdmissionVerdict::Deny(sf!(
@@ -864,18 +869,37 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 					unreachable: Str::new_static("deny"),
 					require_human: true,
 					pattern: None,
-					evidence: vec![sf!(
-						"{} tier under approval mode {}",
-						<&'static str>::from(resolved.tier),
-						<&'static str>::from(omp_envd::admission::effective_approval_mode(
+					evidence: admission_evidence(
+						&resolved,
+						omp_envd::admission::effective_approval_mode(
 							self.settings.configured_approval(),
-							self.sandbox
-						))
-					)],
+							self.sandbox,
+						),
+					),
 				})
 			},
 		}
 	}
+}
+
+/// Why a native call needs approval: its tier and confinement under the mode
+/// in force for it, and, when the session's `yolo` holds only inside the
+/// sandbox, that this tool runs outside it.
+fn admission_evidence(
+	resolved: &omp_envd::admission::ResolvedApproval,
+	session_mode: omp_envd::tool_settings::ApprovalMode,
+) -> Vec<Str> {
+	let tier: &'static str = resolved.tier.into();
+	let confinement: &'static str = resolved.confinement.into();
+	let mode: &'static str = resolved.mode.into();
+	let mut evidence =
+		vec![sf!("{tier} tier, {confinement} confinement, under approval mode {mode}")];
+	if resolved.mode != session_mode {
+		evidence.push(Str::new_static(
+			"the default `yolo` covers only tools the sandbox confines; this tool runs outside it",
+		));
+	}
+	evidence
 }
 
 /// The structured denial the environment journals when the prompt refused
@@ -3394,6 +3418,67 @@ mod tests {
 	};
 
 	const GPT5: &str = "openai/gpt-5";
+
+	/// The kernel admission point applies decision 4 with an injected active
+	/// sandbox (Linux CI never constructs one): under the shipped `yolo`, a
+	/// `Host` network tool prompts and says why, while `bash` and `Host` read
+	/// tools proceed; an explicit `yolo` prompts for neither.
+	#[test]
+	fn settings_admission_prompts_for_host_tools_under_a_sandboxed_default_yolo() {
+		use omp_agent::{ToolAdmission, ToolAdmissionVerdict};
+		use omp_envd::{admission::SandboxState, tool_settings::ToolSettings};
+		use omp_tool::{Confinement, DocEffects, Effects, ExecEffects, InferenceEffects, Usd};
+
+		let args = serde_json::value::RawValue::from_string(String::from("{}")).expect("raw args");
+		let web_search = Effects {
+			exec: Some(ExecEffects { commands: std::sync::Arc::from([]), network: true }),
+			inference: Some(InferenceEffects { max_requests: 1, max_usd: Usd::from_nanos(1) }),
+			..Effects::empty()
+		};
+		let read = Effects {
+			documents: Some(DocEffects { read: true, write_globs: std::sync::Arc::from([]) }),
+			..Effects::empty()
+		};
+		let admission = |settings| super::SettingsAdmission {
+			settings,
+			sandbox: SandboxState::Active,
+			notice: None,
+		};
+
+		let defaulted = admission(ToolSettings::default());
+		let ToolAdmissionVerdict::Prompt(spec) =
+			defaulted.admit("web_search", &web_search, Confinement::Host, &args)
+		else {
+			panic!("a host network tool must prompt under a sandbox-kept default yolo");
+		};
+		assert_eq!(spec.evidence, [
+			sf!("exec tier, host confinement, under approval mode write"),
+			sf!(
+				"the default `yolo` covers only tools the sandbox confines; this tool runs outside it"
+			),
+		]);
+		assert_eq!(
+			defaulted.admit("bash", &Effects::empty(), Confinement::ExecSandbox, &args),
+			ToolAdmissionVerdict::Allow
+		);
+		assert_eq!(
+			defaulted.admit("read", &read, Confinement::Host, &args),
+			ToolAdmissionVerdict::Allow
+		);
+
+		let explicit = admission(
+			ToolSettings::default()
+				.with_approval_mode_override(Some(omp_envd::tool_settings::ApprovalMode::Yolo)),
+		);
+		assert_eq!(
+			explicit.admit("web_search", &web_search, Confinement::Host, &args),
+			ToolAdmissionVerdict::Allow
+		);
+		assert_eq!(
+			explicit.admit("bash", &Effects::empty(), Confinement::ExecSandbox, &args),
+			ToolAdmissionVerdict::Allow
+		);
+	}
 
 	#[tokio::test]
 	async fn remote_outcome_replication_resumes_with_stable_session_provenance() {

@@ -4042,6 +4042,7 @@ mod tests {
 							on_unsupported: pb::Fallback::Unspecified,
 						},
 						effects:         Effects::empty(),
+						confinement:     omp_tool::Confinement::Host,
 						projection_code: [0; 32],
 					},
 				},

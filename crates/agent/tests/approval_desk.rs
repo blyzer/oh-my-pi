@@ -124,6 +124,7 @@ fn gated_registry(route: Arc<Mutex<Option<ApprovalRoute>>>) -> Arc<Registry> {
 					),
 					constraint: Constraint::None,
 					effects: Effects::empty(),
+					confinement: omp_tool::Confinement::Host,
 					projection_code: [9; 32],
 				},
 				route,

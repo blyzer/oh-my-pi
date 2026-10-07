@@ -411,6 +411,15 @@ declares `Tier.READ` while writing files is denied by the sandbox exactly as if 
 declared nothing. `omp.tier_of(target)` returns the effective tier for a `CallTarget`,
 defaulting to `Tier.EXEC` for a device that declared none — the conservative direction.
 
+Confinement is asserted by the host, never by the extension. The environment records every
+worker device as `Host` confinement (`omp_tool::Confinement`), whatever the extension host's
+own tier, because its effects run outside the exec sandbox that confines `bash`. So the shipped
+`yolo`, which an active sandbox keeps alive, does not cover a device's calls: they are admitted
+as if no sandbox existed, and an exec-tier call prompts even inside the sandbox (ADR 0028,
+typed confinement marker amendment). Open discrepancy: the native admission derives a worker's
+tier from its declared effects, and a device that declares no effects resolves to `read`
+there, not to the `Tier.EXEC` default `omp.tier_of` documents above.
+
 ### Effect envelopes and capability tokens
 
 A tier is one word; an envelope is the sentence. Every device declares a maximum

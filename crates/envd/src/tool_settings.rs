@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use omp_cache::github_cache::GithubCachePolicy;
 use omp_con::{Ctx, Kv, Span, Value};
 use omp_core::{Duration, Str};
-use omp_tool::Effects;
+use omp_tool::{Confinement, Effects};
 use omp_tools::edit::FormatPolicy;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -91,9 +91,10 @@ omp_con::var! {
 			"legacy.path": "edit.streamingAbort",
 		},
 	};
-	/// Default approval behavior for tool calls. The default `yolo` holds only while a sandbox
-	/// confines commands (`sv_sandbox_mode`); otherwise `write` is in force. Setting `yolo`
-	/// yourself (or `--yolo`) is respected without a sandbox.
+	/// Default approval behavior for tool calls. The default `yolo` auto-approves every tier only
+	/// for the tools an active sandbox (`sv_sandbox_mode`) confines (`bash`, `hub`); every other
+	/// tool follows `write`, and without an active sandbox `write` is in force for all of them.
+	/// Setting `yolo` yourself (or `--yolo`) is respected for every tool, sandbox or not.
 	pub static SV_TOOLS_APPROVAL_MODE = sv_tools_approval_mode: ApprovalMode {
 		default: ApprovalMode::Yolo,
 		flags: archive,
@@ -106,7 +107,7 @@ omp_con::var! {
 			"ui.option.write": "Write",
 			"ui.option.write.desc": "Auto-approve read-only and write tools; require confirmation for exec tools.",
 			"ui.option.yolo": "Yolo",
-			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools. The default Yolo holds only inside an active sandbox (Write otherwise); choosing it yourself is respected. User policy can still prompt or block.",
+			"ui.option.yolo.desc": "Auto-approve read, write, and exec tools. The default Yolo covers only the tools an active sandbox confines (bash, hub); other tools follow Write, and without a sandbox Write is in force. Choosing Yolo yourself covers every tool. User policy can still prompt or block.",
 			"legacy.path": "tools.approvalMode",
 		},
 	};
@@ -583,13 +584,15 @@ impl ToolSettings {
 		self.enabled.get(name).copied().unwrap_or(true)
 	}
 
-	/// Resolves and receipts one invocation against its live declared effects
-	/// and the sandbox state that applies to it.
+	/// Resolves and receipts one invocation against its live declared effects,
+	/// where those effects happen, and the sandbox state that applies to it
+	/// ([`resolve_approval`]).
 	pub fn approval_for(
 		&self,
 		invocation_id: impl Into<Str>,
 		tool_name: impl Into<Str>,
 		effects: &Effects,
+		confinement: Confinement,
 		sandbox: SandboxState,
 	) -> ResolvedApproval {
 		let tool_name = tool_name.into();
@@ -597,6 +600,7 @@ impl ToolSettings {
 			invocation_id,
 			tool_name.clone(),
 			effects,
+			confinement,
 			self.configured_approval(),
 			sandbox,
 			self.approval.get(&tool_name).copied(),
@@ -741,21 +745,52 @@ mod tests {
 		let effects = Effects::empty();
 		let defaulted = ToolSettings::default();
 		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
+		let sandboxed = Confinement::ExecSandbox;
 		assert_eq!(
 			defaulted
-				.approval_for("c", "bash", &effects, SandboxState::Off)
+				.approval_for("c", "bash", &effects, sandboxed, SandboxState::Off)
 				.policy,
 			ApprovalPolicy::Prompt
 		);
 		assert_eq!(
 			explicit
-				.approval_for("c", "bash", &effects, SandboxState::Off)
+				.approval_for("c", "bash", &effects, sandboxed, SandboxState::Off)
 				.policy,
 			ApprovalPolicy::Allow
 		);
 		assert_eq!(
 			defaulted
-				.approval_for("c", "bash", &effects, SandboxState::Active)
+				.approval_for("c", "bash", &effects, sandboxed, SandboxState::Active)
+				.policy,
+			ApprovalPolicy::Allow
+		);
+	}
+
+	/// The sandbox keeps a defaulted `yolo` only for the tools it confines:
+	/// a `Host` network tool prompts under the shipped settings even while the
+	/// sandbox is active, and an explicit `yolo` still allows it.
+	#[test]
+	fn approval_for_threads_confinement() {
+		let network = Effects {
+			exec: Some(ExecEffects { commands: [].into(), network: true }),
+			..Effects::empty()
+		};
+		let defaulted = ToolSettings::default();
+		let decision = defaulted.approval_for(
+			"c",
+			"web_search",
+			&network,
+			Confinement::Host,
+			SandboxState::Active,
+		);
+		assert_eq!(
+			(decision.confinement, decision.mode, decision.policy),
+			(Confinement::Host, ApprovalMode::Write, ApprovalPolicy::Prompt)
+		);
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
+		assert_eq!(
+			explicit
+				.approval_for("c", "web_search", &network, Confinement::Host, SandboxState::Active)
 				.policy,
 			ApprovalPolicy::Allow
 		);
@@ -850,7 +885,13 @@ mod tests {
 			exec: Some(ExecEffects { commands: [sf!("*")].into(), network: true }),
 			..Effects::empty()
 		};
-		let decision = settings.approval_for("call-1", "bash", &effects, SandboxState::Active);
+		let decision = settings.approval_for(
+			"call-1",
+			"bash",
+			&effects,
+			Confinement::ExecSandbox,
+			SandboxState::Active,
+		);
 		assert_eq!(decision.tier, ApprovalTier::Exec);
 		assert_eq!(decision.policy, ApprovalPolicy::Deny);
 		assert_eq!(decision.source, ApprovalSource::User);
@@ -870,13 +911,25 @@ mod tests {
 			.with_approval_mode_override(Some(ApprovalMode::Yolo));
 		assert_eq!(
 			overridden
-				.approval_for("override", "bash", &effects, SandboxState::Active)
+				.approval_for(
+					"override",
+					"bash",
+					&effects,
+					Confinement::ExecSandbox,
+					SandboxState::Active
+				)
 				.policy,
 			ApprovalPolicy::Allow
 		);
 		assert_eq!(
 			persisted
-				.approval_for("persisted", "bash", &effects, SandboxState::Active)
+				.approval_for(
+					"persisted",
+					"bash",
+					&effects,
+					Confinement::ExecSandbox,
+					SandboxState::Active
+				)
 				.policy,
 			ApprovalPolicy::Prompt
 		);
