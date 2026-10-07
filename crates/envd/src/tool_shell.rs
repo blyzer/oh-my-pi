@@ -435,9 +435,15 @@ impl ShellExec for ShellExecHost {
 			..Default::default()
 		};
 		super::exec::set_run_environment(&mut exec_request, environment);
+		// A command bash runs for a connection's invocation prompts that
+		// connection; an in-process call has no relay and uses the host route.
 		let (_, run) = self
 			.host
-			.exec(exec_request, request.timeout_ms.map(Duration::from_millis))
+			.exec_relayed(
+				exec_request,
+				request.timeout_ms.map(Duration::from_millis),
+				tools::invocation_approvals(),
+			)
 			.await
 			.map_err(|error| resource_fault("run", error))?;
 		Ok(HostShellRun::new(self.host.clone(), run))

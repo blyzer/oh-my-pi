@@ -82,6 +82,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
 	EnvdError,
 	admission::DynamicAdmission,
+	approval_relay::OwnedApprovals,
 	blobs::BlobHost,
 	computer::ComputerSessionHost,
 	devices_host::DynHost,
@@ -140,6 +141,7 @@ tokio::task_local! {
 	static OUTPUT_REQUEST: omp_tool::OutputRequest;
 	static EDIT_REPAIR_CONTEXT: InvocationEditRepairContext;
 	static ACP_BACKENDS: InvocationAcpBackends;
+	static INVOCATION_APPROVALS: Option<OwnedApprovals>;
 }
 /// Session-owned edit repair capability scoped to one native invocation.
 #[derive(Clone, Default)]
@@ -3494,6 +3496,15 @@ pub(super) async fn with_acp_scope<T>(
 	ACP_BACKENDS.scope(context, future).await
 }
 
+/// Runs one native tool stream with its invoking connection's approval relay,
+/// so the commands it issues prompt that connection.
+pub async fn with_invocation_approvals<T>(
+	approvals: Option<OwnedApprovals>,
+	future: impl Future<Output = T>,
+) -> T {
+	INVOCATION_APPROVALS.scope(approvals, future).await
+}
+
 /// Which editor binding governs the current call.
 pub enum InvocationEditor {
 	/// An invocation over an environment connection: only that connection's
@@ -3517,6 +3528,13 @@ pub(super) fn invocation_output_request() -> omp_tool::OutputRequest {
 	OUTPUT_REQUEST
 		.try_with(|request| *request)
 		.unwrap_or(omp_tool::OutputRequest::Bounded)
+}
+
+/// Returns the approval relay of the connection that issued the current
+/// native invocation; `None` outside one, or when that connection relays no
+/// approvals.
+pub fn invocation_approvals() -> Option<OwnedApprovals> {
+	INVOCATION_APPROVALS.try_with(Clone::clone).ok().flatten()
 }
 
 /// Returns the durable session principal for the current native invocation.

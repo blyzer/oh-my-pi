@@ -65,6 +65,19 @@ client and framing boundary; it does not contain an alternate host.
   short line and a later success none. Without a refusal, a failed command
   whose stderr shows a resolver or connection failure gets the mode's
   generic text once per session.
+- `approval_relay` carries a daemon command's one-time sandbox amendment
+  prompt to the connection that issued the command. Only an application
+  connection that advertises `approval-relay` to an environment host gets a
+  relay; extension connections never do, so extension code cannot approve its
+  own commands. Each Exec, and each native invocation (through a task-local
+  that `ShellExecHost::run` reads), captures the relay for its request, so the
+  query travels only on that request and only that connection's answer
+  decides it. The daemon builds the ticket from its own requirements. A
+  command's relay outranks the host route an in-process composition binds;
+  named processes carry none. Every unanswered path fails closed: the
+  backstop is the prompt's timeout plus a 10 s grace, a cancelled command
+  withdraws its query, and a closed connection denies its pending and later
+  prompts, including those of commands that outlive it.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 

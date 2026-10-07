@@ -61,6 +61,7 @@ use url::Url;
 use super::{
 	admission,
 	admission::{GithubMutationTarget, SandboxUnavailable},
+	approval_relay::{EnvApprover, OwnedApprovals},
 	exec_network_diag::{
 		CommandEnd, NetworkAnnouncements, NetworkInForce, NetworkMarkerScan, find_marker,
 		network_diag,
@@ -495,6 +496,9 @@ struct SessionCommand {
 	sequence: Arc<AtomicU64>,
 	rerun: bool,
 	sandbox_environment_update: bool,
+	/// The relay of the connection that issued the command, which answers
+	/// its sandbox amendment; an approved rerun keeps it.
+	approvals: Option<OwnedApprovals>,
 }
 
 impl Default for ExecHost {
@@ -603,9 +607,32 @@ impl ExecHost {
 	}
 
 	/// Binds the interactive approval route used for one-shot sandbox
-	/// amendments.
+	/// amendments of commands that carry no connection relay.
+	///
+	/// Only an in-process composition (embedded or isolated), whose kernel
+	/// shares this host's process, binds it. A project daemon serves sessions
+	/// in other processes and leaves it unbound: there each command prompts
+	/// the connection that issued it (see [`Self::amendment_approver`]).
 	pub(crate) fn bind_sandbox_approval_route(&self, route: Option<ApprovalRoute>) {
 		*self.inner.sandbox_approval_route.lock() = route;
+	}
+
+	/// Who decides a command's sandbox amendment: the relay of the connection
+	/// that issued the command, else the in-process route bound on this host.
+	///
+	/// A relay whose connection closed never falls back to the host route, so
+	/// a command that outlives its connection fails closed instead of
+	/// prompting another session.
+	fn amendment_approver(&self, relay: Option<&OwnedApprovals>) -> Option<EnvApprover> {
+		match relay {
+			Some(relay) => Some(EnvApprover::Relay(relay.clone())),
+			None => self
+				.inner
+				.sandbox_approval_route
+				.lock()
+				.clone()
+				.map(EnvApprover::Route),
+		}
 	}
 
 	/// Forwards the invocation-scoped approval route to installed dynamic
@@ -618,16 +645,17 @@ impl ExecHost {
 
 	async fn approve_sandbox_amendment(
 		&self,
+		relay: Option<&OwnedApprovals>,
 		command: &str,
 		fact: &SandboxDenialFact,
 		scope: &str,
 	) -> bool {
-		let Some(route) = self.inner.sandbox_approval_route.lock().clone() else {
+		let Some(approver) = self.amendment_approver(relay) else {
 			return false;
 		};
 		let fact_label = sandbox_fact_label(fact);
 		let scope = Str::from(scope);
-		let ticket = route
+		let ticket = approver
 			.request(
 				None,
 				vec![ApprovalSpec {
@@ -945,18 +973,34 @@ impl ExecHost {
 	}
 
 	/// Starts a script in a session. A session serializes its scripts.
+	///
+	/// The command carries no connection relay: a sandbox amendment it needs
+	/// prompts through the in-process route bound on this host, if any.
 	pub async fn exec(
 		&self,
 		request: ExecRequest,
 		timeout: Option<Duration>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
-		self.exec_controlled(request, timeout).await
+		self.exec_controlled(request, timeout, None).await
+	}
+
+	/// Starts a script for the connection whose relay is `approvals`: a
+	/// sandbox amendment the command needs prompts that connection, and fails
+	/// closed once it closed.
+	pub(crate) async fn exec_relayed(
+		&self,
+		request: ExecRequest,
+		timeout: Option<Duration>,
+		approvals: Option<OwnedApprovals>,
+	) -> Result<(ExecStarted, ExecRun), ExecError> {
+		self.exec_controlled(request, timeout, approvals).await
 	}
 
 	async fn exec_controlled(
 		&self,
 		mut request: ExecRequest,
 		timeout: Option<Duration>,
+		approvals: Option<OwnedApprovals>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
 		let session = self
 			.inner
@@ -1030,6 +1074,7 @@ impl ExecHost {
 			sequence: Arc::new(AtomicU64::new(1)),
 			rerun: false,
 			sandbox_environment_update: false,
+			approvals,
 		};
 		session
 			.tx
@@ -1165,8 +1210,12 @@ impl ExecHost {
 			})
 			.await?;
 		let private_session = opened.session;
+		// A named process (StartProcess, async bash, restart generations)
+		// outlives any one request, so it carries no connection relay: on a
+		// project daemon its sandbox amendments fail closed, and only an
+		// in-process composition's host route can prompt for them.
 		let executed = self
-			.exec(
+			.exec_controlled(
 				ExecRequest {
 					session:        private_session.clone(),
 					source:         spec.source.clone(),
@@ -1174,6 +1223,7 @@ impl ExecHost {
 					props:          Default::default(),
 				},
 				timeout,
+				None,
 			)
 			.await;
 		let (started, run) = match executed {
@@ -2512,7 +2562,12 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		{
 			let scope = amendment.scope_label();
 			let host = ExecHost { inner: host };
-			let approval = host.approve_sandbox_amendment(&command.source, &denial.fact, &scope);
+			let approval = host.approve_sandbox_amendment(
+				command.approvals.as_ref(),
+				&command.source,
+				&denial.fact,
+				&scope,
+			);
 			tokio::pin!(approval);
 			let approved = tokio::select! {
 							approved = &mut approval => approved,
@@ -2575,10 +2630,11 @@ fn push_network_diag(command: &SessionCommand, trouble: Option<NetworkTrouble>, 
 		return;
 	};
 	let prompt = trouble.refusal.is_some()
-		&& command
-			.host
-			.upgrade()
-			.is_some_and(|host| host.sandbox_approval_route.lock().is_some());
+		&& command.host.upgrade().is_some_and(|inner| {
+			ExecHost { inner }
+				.amendment_approver(command.approvals.as_ref())
+				.is_some_and(|approver| approver.is_reachable())
+		});
 	if let Some(diag) = network_diag(
 		trouble.network,
 		trouble.refusal.as_ref(),
@@ -4301,7 +4357,7 @@ mod tests {
 		host.bind_sandbox_approval_route(Some(route));
 		let command = "printf ready; touch /private/blocked";
 		let fact = SandboxDenialFact::WritePath(PathBuf::from("/private/blocked"));
-		let approval = host.approve_sandbox_amendment(command, &fact, "/private");
+		let approval = host.approve_sandbox_amendment(None, command, &fact, "/private");
 		tokio::pin!(approval);
 		let request = tokio::select! {
 			request = inbox.recv() => request.expect("scoped approval request"),
@@ -4326,7 +4382,8 @@ mod tests {
 
 		let command = "curl https://api.example.test/data";
 		let fact = SandboxDenialFact::Network { host: sf!("api.example.test"), port: 443 };
-		let approval = host.approve_sandbox_amendment(command, &fact, "network api.example.test:443");
+		let approval =
+			host.approve_sandbox_amendment(None, command, &fact, "network api.example.test:443");
 		tokio::pin!(approval);
 		let request = tokio::select! {
 			request = inbox.recv() => request.expect("network approval request"),
@@ -4354,6 +4411,54 @@ mod tests {
 			})
 			.expect("network approval response");
 		assert!(approval.await);
+	}
+
+	/// A command's connection relay decides its amendment ahead of the host
+	/// route, and once that connection closed the command fails closed
+	/// instead of prompting through the host route.
+	#[tokio::test]
+	async fn a_command_relay_outranks_the_host_route_and_never_falls_back() {
+		let host = ExecHost::new();
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		host.bind_sandbox_approval_route(Some(route));
+		let (responses, frames) = flume::bounded(4);
+		let approvals = crate::approval_relay::ConnectionApprovals::new(responses);
+		let relay = approvals.owned(9);
+		let command = "touch .git/relayed";
+		let fact = SandboxDenialFact::WritePath(PathBuf::from("/workspace/.git/relayed"));
+		let approval =
+			host.approve_sandbox_amendment(Some(&relay), command, &fact, "/workspace/.git");
+		tokio::pin!(approval);
+		let query = tokio::select! {
+			frame = frames.recv_async() => frame.expect("relayed query"),
+			approved = &mut approval => panic!("relayed approval settled early: {approved}"),
+		};
+		assert_eq!(query.request_id, 9);
+		let Some(v1::server_frame::Body::ApprovalQuery(query)) = query.body else {
+			panic!("the relay sent no approval query: {:?}", query.body);
+		};
+		assert_eq!(query.invocation_id, None);
+		assert_eq!(query.reasons[0].kind, "sandbox_amendment");
+		assert_eq!(query.reasons[0].subject, "/workspace/.git");
+		approvals.answer(9, v1::ApprovalAnswer {
+			query_id: query.query_id,
+			decision: Some(v1::ApprovalDecision {
+				approved: true,
+				scope: "once".to_owned(),
+				source: "user".to_owned(),
+				..v1::ApprovalDecision::default()
+			}),
+		});
+		assert!(approval.await);
+		assert!(inbox.try_recv().is_err(), "the host route was asked although a relay exists");
+
+		approvals.disconnect();
+		assert!(
+			!host
+				.approve_sandbox_amendment(Some(&relay), command, &fact, "/workspace/.git")
+				.await
+		);
+		assert!(inbox.try_recv().is_err(), "a closed relay fell back to the host route");
 	}
 
 	#[test]
