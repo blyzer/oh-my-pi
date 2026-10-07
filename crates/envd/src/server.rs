@@ -3982,10 +3982,12 @@ impl EnvServer {
 				return None;
 			},
 		};
+		// Client features name what the client can answer, not DATA it may
+		// reach; requesting only features keeps the connection's default grants.
 		let data_capabilities = hello
 			.capabilities
 			.iter()
-			.filter(|capability| capability.as_str() != "edit-repair")
+			.filter(|capability| !omp_env::CLIENT_FEATURES.contains(&capability.as_str()))
 			.cloned()
 			.collect::<Vec<_>>();
 		let grants = if data_capabilities.is_empty() && policy.host.is_none() {
@@ -8416,7 +8418,7 @@ impl ConnectionState {
 	}
 
 	fn supports_edit_repair(&self) -> bool {
-		self.capabilities.contains("edit-repair")
+		self.capabilities.contains(omp_env::EDIT_REPAIR_CAPABILITY)
 	}
 
 	fn edit_model(&self) -> Option<Str> {
@@ -12524,6 +12526,144 @@ mod tests {
 		let frame = responses.recv_async().await.expect("eval reset response");
 		assert_eq!(frame.request_id, 6, "the stray approval answer drew a reply: {:?}", frame.body);
 		assert!(matches!(frame.body, Some(server_frame::Body::EvalReset(pb::EvalResetResponse {}))));
+	}
+
+	/// An approval answer rides the live request of the command that raised the
+	/// query, so it is a continuation of that request: it must not be refused
+	/// as a duplicate open, whose error would end the command's stream.
+	#[tokio::test]
+	async fn approval_answer_on_an_open_request_draws_no_reply() {
+		const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+		let (requests, responses, root, _state) = test_external_connection(&[], false).await;
+		let next = async || {
+			tokio::time::timeout(WAIT, responses.recv_async())
+				.await
+				.expect("server frame timed out")
+				.expect("server frame")
+		};
+		requests
+			.send_async(pb::ClientFrame {
+				request_id: 1,
+				body: Some(client_frame::Body::OpenSession(pb::OpenSessionRequest {
+					cwd_uri: Url::from_directory_path(root.path())
+						.expect("workspace URI")
+						.to_string(),
+					..pb::OpenSessionRequest::default()
+				})),
+				..pb::ClientFrame::default()
+			})
+			.await
+			.expect("send open session");
+		let opened = next().await;
+		let Some(server_frame::Body::SessionOpened(opened)) = opened.body else {
+			panic!("session did not open: {:?}", opened.body);
+		};
+		requests
+			.send_async(pb::ClientFrame {
+				request_id: 2,
+				body: Some(client_frame::Body::Exec(pb::ExecRequest {
+					session: opened.session,
+					source: Some(pb::Script { text: "sleep 30".to_owned(), ..pb::Script::default() }),
+					..pb::ExecRequest::default()
+				})),
+				..pb::ClientFrame::default()
+			})
+			.await
+			.expect("send exec");
+		let started = next().await;
+		assert_eq!(started.request_id, 2);
+		assert!(
+			matches!(started.body, Some(server_frame::Body::ExecStarted(_))),
+			"exec did not start: {:?}",
+			started.body
+		);
+
+		for frame in [
+			pb::ClientFrame {
+				request_id: 2,
+				body: Some(client_frame::Body::ApprovalAnswer(pb::ApprovalAnswer {
+					query_id: 1,
+					decision: Some(pb::ApprovalDecision {
+						approved: true,
+						scope: "once".into(),
+						source: "user".into(),
+						..pb::ApprovalDecision::default()
+					}),
+				})),
+				..pb::ClientFrame::default()
+			},
+			pb::ClientFrame {
+				request_id: 3,
+				body: Some(client_frame::Body::EvalReset(pb::EvalResetRequest {})),
+				..pb::ClientFrame::default()
+			},
+		] {
+			requests.send_async(frame).await.expect("send frame");
+		}
+		loop {
+			let frame = next().await;
+			assert!(
+				!matches!(frame.body, Some(server_frame::Body::Error(_))),
+				"the approval answer on the open exec drew an error: {frame:?}"
+			);
+			if frame.request_id == 3 {
+				assert!(matches!(
+					frame.body,
+					Some(server_frame::Body::EvalReset(pb::EvalResetResponse {}))
+				));
+				break;
+			}
+		}
+
+		requests
+			.send_async(pb::ClientFrame {
+				request_id: 0,
+				body: Some(client_frame::Body::Cancel(pb::CancelRequest {
+					target: Some(pb::cancel_request::Target::TargetRequestId(2)),
+					..pb::CancelRequest::default()
+				})),
+				..pb::ClientFrame::default()
+			})
+			.await
+			.expect("send exec cancel");
+		loop {
+			let frame = next().await;
+			if frame.request_id == 2 && matches!(frame.body, Some(server_frame::Body::Exit(_))) {
+				break;
+			}
+			assert!(
+				!matches!(frame.body, Some(server_frame::Body::Error(_))),
+				"cancelling the exec drew an error: {frame:?}"
+			);
+		}
+	}
+
+	/// The approval-relay capability is a client feature: an application
+	/// connection that advertises only it keeps its default grants and can
+	/// still dispatch invocations.
+	#[tokio::test]
+	async fn approval_relay_capability_keeps_application_grants() {
+		let (requests, responses, _root, _state) =
+			test_external_connection(&[omp_env::APPROVAL_RELAY_CAPABILITY], false).await;
+		requests
+			.send_async(pb::ClientFrame {
+				request_id: 7,
+				body: Some(client_frame::Body::InvokeTool(pb::InvokeTool {
+					invocation_id: "relay-client-invoke".into(),
+					name: "no-such-tool".into(),
+					rev: "1".into(),
+					..pb::InvokeTool::default()
+				})),
+				..pb::ClientFrame::default()
+			})
+			.await
+			.expect("send invoke");
+		let frame = responses.recv_async().await.expect("invoke response");
+		let Some(server_frame::Body::Error(error)) = frame.body else {
+			panic!("an unknown tool was not refused: {:?}", frame.body);
+		};
+		// The invocation grant gate passed; tool lookup refused the name.
+		assert_eq!(error.code, pb::ProtocolErrorCode::NotFound as i32, "{}", error.message);
 	}
 
 	/// Owner-local connections may run eval on this host; extension-host

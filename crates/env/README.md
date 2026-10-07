@@ -22,7 +22,11 @@ provides the one client that routes between them.
   installed `Admitter`; edit-repair, ACP document, and relayed approval
   queries go to single-consumer queues, and their answers open no response
   stream. Approval queries reach only a client that advertised
-  `APPROVAL_RELAY_CAPABILITY`, for commands it issued.
+  `APPROVAL_RELAY_CAPABILITY`, for commands it issued. When one partition
+  backend closes, the router withdraws that backend's open approval queries
+  and drops late answers to it. `CLIENT_FEATURES` lists the `ClientHello`
+  capabilities that name such client features; hosts never read them as DATA
+  grant requests.
 - `ExtensionEnvClient` and `WorkerEnvClient` are capability-reduced DATA
   clients for host-managed children; they are not host implementations.
 - `project_state` derives project-keyed state and transport paths shared by

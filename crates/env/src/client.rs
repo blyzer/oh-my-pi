@@ -13,9 +13,8 @@ use std::{
 use bytes::Bytes;
 #[cfg(unix)]
 use bytes::BytesMut;
-use dashmap::DashSet;
 use flume::{Receiver, Sender};
-use omp_core::{EnvPath, FastState, Hash32, Str, hash32::Hasher, sf};
+use omp_core::{EnvPath, FastHashSet, Hash32, Str, hash32::Hasher, sf};
 #[cfg(unix)]
 use omp_proto::prost::Message as _;
 use omp_proto::{
@@ -162,12 +161,25 @@ pub enum ClientError {
 	},
 }
 
+/// `ClientHello` capability that asks the host to send syntax-repair queries.
+///
+/// Such a client drains [`EnvClient::edit_repair_requests`]. It is one of the
+/// [`CLIENT_FEATURES`], not a DATA grant.
+pub const EDIT_REPAIR_CAPABILITY: &str = "edit-repair";
+
 /// `ClientHello` capability that asks the daemon to relay approval prompts.
 ///
 /// The daemon relays only the prompts of commands this connection issued, and
-/// such a client drains [`EnvClient::approval_queries`]. It is a client
-/// feature, not a data grant.
+/// such a client drains [`EnvClient::approval_queries`]. It is one of the
+/// [`CLIENT_FEATURES`], not a DATA grant.
 pub const APPROVAL_RELAY_CAPABILITY: &str = "approval-relay";
+
+/// `ClientHello` capabilities that name client features rather than DATA
+/// grants.
+///
+/// A host strips them before it resolves the grants a hello requests, so a
+/// connection that advertises only client features keeps its default grants.
+pub const CLIENT_FEATURES: &[&str] = &[EDIT_REPAIR_CAPABILITY, APPROVAL_RELAY_CAPABILITY];
 
 /// A terminal loss of event-stream continuity.
 #[derive(Clone, Debug)]
@@ -422,8 +434,9 @@ struct ClientInner {
 	edit_repair_scopes:     Mutex<HashMap<u64, InvocationScope>>,
 	acp_request_scopes:     Mutex<HashMap<u64, InvocationScope>>,
 	/// Relayed approval queries delivered and not yet answered or withdrawn,
-	/// keyed by `(request_id, query_id)`.
-	open_approvals:         DashSet<(u64, u64), FastState>,
+	/// keyed by `(request_id, query_id)`. Usually empty; only the response
+	/// router and `answer_approval` touch it, so one lock never contends.
+	open_approvals:         Mutex<FastHashSet<(u64, u64)>>,
 	hello_waiter:           Mutex<Option<Sender<ServerFrame>>>,
 	info:                   Mutex<Option<ServerHello>>,
 	owner_last_transaction: Mutex<Option<TransactionId>>,
@@ -915,7 +928,7 @@ impl EnvClient {
 			request_scopes: Mutex::new(HashMap::new()),
 			edit_repair_scopes: Mutex::new(HashMap::new()),
 			acp_request_scopes: Mutex::new(HashMap::new()),
-			open_approvals: DashSet::with_hasher(FastState::default()),
+			open_approvals: Mutex::new(FastHashSet::default()),
 			hello_waiter: Mutex::new(None),
 			info: Mutex::new(None),
 			owner_last_transaction: Mutex::new(None),
@@ -1125,7 +1138,9 @@ impl EnvClient {
 	/// issued. Every clone receives work from the same single-consumer queue.
 	/// Queries bypass the issuing request's stream, so they still arrive after
 	/// that stream ended (a detached command). The queue closes when the
-	/// environment response transport disconnects.
+	/// environment response transport disconnects. A partitioned client's
+	/// transport outlives one backend: when a backend closes, the router
+	/// withdraws that backend's open queries instead.
 	pub fn approval_queries(&self) -> Receiver<ApprovalQueryEvent> {
 		self.inner.approval_queries.clone()
 	}
@@ -1143,11 +1158,11 @@ impl EnvClient {
 		query_id: u64,
 		decision: ApprovalDecision,
 	) -> Result<(), ClientError> {
-		if self
+		if !self
 			.inner
 			.open_approvals
+			.lock()
 			.remove(&(request_id, query_id))
-			.is_none()
 		{
 			return Err(ClientError::ApprovalQueryClosed { request_id, query_id });
 		}
@@ -4429,7 +4444,7 @@ fn route_responses(
 		client.pending.lock().clear();
 		client.edit_repair_scopes.lock().clear();
 		client.acp_request_scopes.lock().clear();
-		client.open_approvals.clear();
+		client.open_approvals.lock().clear();
 		client.hello_waiter.lock().take();
 	}
 }
@@ -4447,17 +4462,16 @@ fn divert_approval_frame(
 	let request_id = frame.request_id;
 	match frame.body {
 		Some(server_frame::Body::ApprovalQuery(query)) => {
-			client.open_approvals.insert((request_id, query.query_id));
+			client
+				.open_approvals
+				.lock()
+				.insert((request_id, query.query_id));
 			let _ = approval_queries.send(ApprovalQueryEvent::Requested { request_id, query });
 			None
 		},
 		Some(server_frame::Body::ApprovalWithdrawn(withdrawn)) => {
 			let query_id = withdrawn.query_id;
-			if client
-				.open_approvals
-				.remove(&(request_id, query_id))
-				.is_some()
-			{
+			if client.open_approvals.lock().remove(&(request_id, query_id)) {
 				let _ = approval_queries.send(ApprovalQueryEvent::Withdrawn { request_id, query_id });
 			}
 			None
