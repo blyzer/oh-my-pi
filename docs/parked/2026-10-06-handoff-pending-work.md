@@ -66,12 +66,16 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
 - Open risks the #181 author recorded (reported by the implementing agent, not independently
   verified): tools that run outside the exec sandbox (browser, web search, github, network eval)
   stay auto-approved under `yolo` with an active sandbox because the sandbox state is
-  session-level, not per tool; the closed network (superseded 2026-10-07: the default network is
+  session-level, not per tool (resolved 2026-10-07 by the typed confinement marker, ADR 0028
+  amendment of that date: a sandbox-kept default `yolo` covers only `ExecSandbox` tools, and
+  `Host` tools are admitted as if no sandbox existed; still open there: under-declared host
+  effects such as `read@3` URL fetch, `lsp` spawns, memory `reflect` inference, RPC host tools
+  and effect-less Python devices resolving to `read`, and `read`-tier MCP servers); the closed network (superseded 2026-10-07: the default network is
   now `scoped`, see the ADR 0028 amendment of that date) and workspace-only writes may break real
   flows such as `git push` and package installs, which would hit the denial-and-rerun prompt and
   were not exercised; the posture notice is posted on the first tool admission, so a session that never
-  admits a tool never shows it; the bash tier rule is a name check (`"bash"`), and a typed marker
-  on the tool contract is the less intrusive alternative that was not imposed.
+  admits a tool never shows it; the bash tier rule was a name check (`"bash"`), now replaced by the
+  typed `Confinement` marker on the tool contract (2026-10-07).
 - In-process utility builtins never consult the read policy (verified in code on 2026-10-07,
   predates branch `fix/sandbox-host-read-symlinks`): `cat_path` calls `File::open(resolved)`
   (`crates/shell-builtins/src/cat.rs`), `head` and `grep` do the same, and `Host::resolve` only
