@@ -14,7 +14,7 @@ use bytes::Bytes;
 #[cfg(unix)]
 use bytes::BytesMut;
 use flume::{Receiver, Sender};
-use omp_core::{EnvPath, Hash32, Str, hash32::Hasher, sf};
+use omp_core::{EnvPath, FastHashSet, Hash32, Str, hash32::Hasher, sf};
 #[cfg(unix)]
 use omp_proto::prost::Message as _;
 use omp_proto::{
@@ -32,23 +32,23 @@ use omp_proto::{
 		v1,
 		v1::{
 			self as env_wire, AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, Admission,
-			AdmitInvocation, ArgText, ArgsCommitted, AttachOutput, BlobGetComplete, CancelRequest,
-			ClientFrame, ClientHello, CloseSessionRequest, CloseSessionResponse, CommitBlobPut,
-			CreateWorktree, CurrentWorktree, CurrentWorktreeResult, DataEvent, DataRequest,
-			DataResponse, DestroyWorktree, DetachExec, EditRepairAnswer, EditRepairQuery,
-			EvalResetRequest, EventStreamError, EventStreamKind, ExecRequest, ExecStarted, ExitEvent,
-			GetProcess, HttpRequest, HttpResponse, Interrupt, InvocationScope, InvokeAccepted,
-			InvokeTool, ListProcesses, MaterializeSite, MergeWorktree, OpenSessionRequest,
-			OpenSessionResponse, OutputAttached, OutputFrame, PresenceRegistered, PresenceReleased,
-			ProcessCommandAccepted, ProcessInfo, ProcessList, ProcessOutput, ProcessStarted,
-			ProcessStateEvent, ProtocolError, ProtocolErrorCode, RegisterPresence, ReleasePresence,
-			ResourceCompletion, RestartProcess, Retire, SearchComplete, SearchMatchMsg, SearchRequest,
-			SendInput, ServerFrame, ServerHello, SignalProcess, SignalRequest, SiteMaterialized,
-			StartProcess, StdinFrame, StopProcess, Update, Verdict, WalkComplete, WalkEntry,
-			WalkRequest, WorktreeResult, cancel_request, client_frame, data_event, data_request,
-			data_response, document_op, document_result, exec_session_op, exec_session_result, mcp_op,
-			mcp_result, resource_op, server_frame, stdin_frame, workspace_op, workspace_result,
-			worktree_op,
+			AdmitInvocation, ApprovalAnswer, ApprovalDecision, ApprovalQuery, ArgText, ArgsCommitted,
+			AttachOutput, BlobGetComplete, CancelRequest, ClientFrame, ClientHello,
+			CloseSessionRequest, CloseSessionResponse, CommitBlobPut, CreateWorktree, CurrentWorktree,
+			CurrentWorktreeResult, DataEvent, DataRequest, DataResponse, DestroyWorktree, DetachExec,
+			EditRepairAnswer, EditRepairQuery, EvalResetRequest, EventStreamError, EventStreamKind,
+			ExecRequest, ExecStarted, ExitEvent, GetProcess, HttpRequest, HttpResponse, Interrupt,
+			InvocationScope, InvokeAccepted, InvokeTool, ListProcesses, MaterializeSite,
+			MergeWorktree, OpenSessionRequest, OpenSessionResponse, OutputAttached, OutputFrame,
+			PresenceRegistered, PresenceReleased, ProcessCommandAccepted, ProcessInfo, ProcessList,
+			ProcessOutput, ProcessStarted, ProcessStateEvent, ProtocolError, ProtocolErrorCode,
+			RegisterPresence, ReleasePresence, ResourceCompletion, RestartProcess, Retire,
+			SearchComplete, SearchMatchMsg, SearchRequest, SendInput, ServerFrame, ServerHello,
+			SignalProcess, SignalRequest, SiteMaterialized, StartProcess, StdinFrame, StopProcess,
+			Update, Verdict, WalkComplete, WalkEntry, WalkRequest, WorktreeResult, cancel_request,
+			client_frame, data_event, data_request, data_response, document_op, document_result,
+			exec_session_op, exec_session_result, mcp_op, mcp_result, resource_op, server_frame,
+			stdin_frame, workspace_op, workspace_result, worktree_op,
 		},
 	},
 };
@@ -150,7 +150,36 @@ pub enum ClientError {
 		#[source]
 		source: io::Error,
 	},
+	/// An approval answer named a query this client no longer holds open: it
+	/// was already answered, the daemon withdrew it, or the transport closed.
+	#[error("approval query {query_id} on request {request_id} is no longer open")]
+	ApprovalQueryClosed {
+		/// Request that carried the query.
+		request_id: u64,
+		/// Connection-unique query identifier assigned by the daemon.
+		query_id:   u64,
+	},
 }
+
+/// `ClientHello` capability that asks the host to send syntax-repair queries.
+///
+/// Such a client drains [`EnvClient::edit_repair_requests`]. It is one of the
+/// [`CLIENT_FEATURES`], not a DATA grant.
+pub const EDIT_REPAIR_CAPABILITY: &str = "edit-repair";
+
+/// `ClientHello` capability that asks the daemon to relay approval prompts.
+///
+/// The daemon relays only the prompts of commands this connection issued, and
+/// such a client drains [`EnvClient::approval_queries`]. It is one of the
+/// [`CLIENT_FEATURES`], not a DATA grant.
+pub const APPROVAL_RELAY_CAPABILITY: &str = "approval-relay";
+
+/// `ClientHello` capabilities that name client features rather than DATA
+/// grants.
+///
+/// A host strips them before it resolves the grants a hello requests, so a
+/// connection that advertises only client features keeps its default grants.
+pub const CLIENT_FEATURES: &[&str] = &[EDIT_REPAIR_CAPABILITY, APPROVAL_RELAY_CAPABILITY];
 
 /// A terminal loss of event-stream continuity.
 #[derive(Clone, Debug)]
@@ -404,12 +433,17 @@ struct ClientInner {
 	request_scopes:         Mutex<HashMap<u64, InvocationScope>>,
 	edit_repair_scopes:     Mutex<HashMap<u64, InvocationScope>>,
 	acp_request_scopes:     Mutex<HashMap<u64, InvocationScope>>,
+	/// Relayed approval queries delivered and not yet answered or withdrawn,
+	/// keyed by `(request_id, query_id)`. Usually empty; only the response
+	/// router and `answer_approval` touch it, so one lock never contends.
+	open_approvals:         Mutex<FastHashSet<(u64, u64)>>,
 	hello_waiter:           Mutex<Option<Sender<ServerFrame>>>,
 	info:                   Mutex<Option<ServerHello>>,
 	owner_last_transaction: Mutex<Option<TransactionId>>,
 	events:                 Receiver<ServerFrame>,
 	edit_repair_requests:   Receiver<EditRepairRequest>,
 	acp_requests:           Receiver<AcpRequest>,
+	approval_queries:       Receiver<ApprovalQueryEvent>,
 	next_id:                AtomicU64,
 	cancel:                 Sender<u64>,
 	lease_close:            Sender<LeaseClose>,
@@ -483,6 +517,27 @@ pub enum AcpRequest {
 		request_id: u64,
 		/// Typed document write query.
 		query:      AcpWriteQuery,
+	},
+}
+
+/// One approval-relay event the daemon sent this client.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApprovalQueryEvent {
+	/// The daemon asks this client to decide one approval prompt of a command
+	/// it issued; answer with [`EnvClient::answer_approval`].
+	Requested {
+		/// Request that issued the command; the answer echoes it.
+		request_id: u64,
+		/// Typed prompt and the requester's invocation attribution.
+		query:      ApprovalQuery,
+	},
+	/// The daemon stopped waiting for an open query: withdraw its prompt and do
+	/// not answer it.
+	Withdrawn {
+		/// Request that carried the query.
+		request_id: u64,
+		/// Connection-unique query identifier.
+		query_id:   u64,
 	},
 }
 
@@ -864,6 +919,7 @@ impl EnvClient {
 		let (events_tx, events) = flume::unbounded();
 		let (edit_repair_tx, edit_repair_requests) = flume::unbounded();
 		let (acp_tx, acp_requests) = flume::unbounded();
+		let (approval_tx, approval_queries) = flume::unbounded();
 		let (cancel, cancellations) = flume::unbounded();
 		let (lease_close, lease_closes) = flume::unbounded();
 		let inner = Arc::new(ClientInner {
@@ -872,12 +928,14 @@ impl EnvClient {
 			request_scopes: Mutex::new(HashMap::new()),
 			edit_repair_scopes: Mutex::new(HashMap::new()),
 			acp_request_scopes: Mutex::new(HashMap::new()),
+			open_approvals: Mutex::new(FastHashSet::default()),
 			hello_waiter: Mutex::new(None),
 			info: Mutex::new(None),
 			owner_last_transaction: Mutex::new(None),
 			events,
 			edit_repair_requests,
 			acp_requests,
+			approval_queries,
 			next_id: AtomicU64::new(1),
 			cancel,
 			lease_close,
@@ -885,7 +943,7 @@ impl EnvClient {
 		});
 		let router = Arc::downgrade(&inner);
 		let _ = thread::spawn(move || {
-			route_responses(router, incoming, events_tx, edit_repair_tx, acp_tx);
+			route_responses(router, incoming, events_tx, edit_repair_tx, acp_tx, approval_tx);
 		});
 		let canceller = Arc::downgrade(&inner);
 		let _ = thread::spawn(move || route_cancellations(canceller, cancellations));
@@ -1067,6 +1125,56 @@ impl EnvClient {
 				request_id,
 				body: Some(client_frame::Body::AcpDocumentAnswer(answer)),
 				scope: Some(scope),
+				..ClientFrame::default()
+			})
+			.await
+			.map_err(|_| ClientError::TransportClosed)
+	}
+
+	/// Subscribes to the approval prompts the daemon relays to this connection.
+	///
+	/// Only a connection whose `ClientHello` advertised
+	/// [`APPROVAL_RELAY_CAPABILITY`] receives them, and only for commands it
+	/// issued. Every clone receives work from the same single-consumer queue.
+	/// Queries bypass the issuing request's stream, so they still arrive after
+	/// that stream ended (a detached command). The queue closes when the
+	/// environment response transport disconnects. A partitioned client's
+	/// transport outlives one backend: when a backend closes, the router
+	/// withdraws that backend's open queries instead.
+	pub fn approval_queries(&self) -> Receiver<ApprovalQueryEvent> {
+		self.inner.approval_queries.clone()
+	}
+
+	/// Answers one relayed approval query without opening a correlated
+	/// response route.
+	///
+	/// The answer rides the query's `request_id` and carries no invocation
+	/// scope. Returns [`ClientError::ApprovalQueryClosed`] when the query was
+	/// already answered, the daemon withdrew it, or the transport closed
+	/// first; nothing is sent then.
+	pub async fn answer_approval(
+		&self,
+		request_id: u64,
+		query_id: u64,
+		decision: ApprovalDecision,
+	) -> Result<(), ClientError> {
+		if !self
+			.inner
+			.open_approvals
+			.lock()
+			.remove(&(request_id, query_id))
+		{
+			return Err(ClientError::ApprovalQueryClosed { request_id, query_id });
+		}
+		self
+			.inner
+			.outgoing
+			.send_async(ClientFrame {
+				request_id,
+				body: Some(client_frame::Body::ApprovalAnswer(ApprovalAnswer {
+					query_id,
+					decision: Some(decision),
+				})),
 				..ClientFrame::default()
 			})
 			.await
@@ -4243,6 +4351,7 @@ fn route_responses(
 	events: Sender<ServerFrame>,
 	edit_repair_requests: Sender<EditRepairRequest>,
 	acp_requests: Sender<AcpRequest>,
+	approval_queries: Sender<ApprovalQueryEvent>,
 ) {
 	while let Ok(frame) = incoming.recv() {
 		let Some(client) = client.upgrade() else {
@@ -4263,6 +4372,9 @@ fn route_responses(
 			}
 			continue;
 		}
+		let Some(frame) = divert_approval_frame(&client, frame, &approval_queries) else {
+			continue;
+		};
 		if let Some(server_frame::Body::EditRepairQuery(query)) = frame.body.as_ref() {
 			let scope = {
 				let scopes = client.request_scopes.lock();
@@ -4332,7 +4444,39 @@ fn route_responses(
 		client.pending.lock().clear();
 		client.edit_repair_scopes.lock().clear();
 		client.acp_request_scopes.lock().clear();
+		client.open_approvals.lock().clear();
 		client.hello_waiter.lock().take();
+	}
+}
+
+/// Moves relayed approval frames onto the approval queue and returns every
+/// other frame for ordinary routing.
+///
+/// A withdrawal reaches the queue only while its query is open: one already
+/// answered has no prompt left to withdraw.
+fn divert_approval_frame(
+	client: &ClientInner,
+	frame: ServerFrame,
+	approval_queries: &Sender<ApprovalQueryEvent>,
+) -> Option<ServerFrame> {
+	let request_id = frame.request_id;
+	match frame.body {
+		Some(server_frame::Body::ApprovalQuery(query)) => {
+			client
+				.open_approvals
+				.lock()
+				.insert((request_id, query.query_id));
+			let _ = approval_queries.send(ApprovalQueryEvent::Requested { request_id, query });
+			None
+		},
+		Some(server_frame::Body::ApprovalWithdrawn(withdrawn)) => {
+			let query_id = withdrawn.query_id;
+			if client.open_approvals.lock().remove(&(request_id, query_id)) {
+				let _ = approval_queries.send(ApprovalQueryEvent::Withdrawn { request_id, query_id });
+			}
+			None
+		},
+		body => Some(ServerFrame { body, ..frame }),
 	}
 }
 
@@ -4492,6 +4636,10 @@ async fn read_extension_frame_length<R: AsyncRead + Unpin>(
 }
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
+	use tokio::time::timeout;
+
 	use super::*;
 
 	#[tokio::test]
@@ -4678,6 +4826,136 @@ mod tests {
 			.await
 			.expect("repair request disconnect timed out")
 			.expect_err("repair request channel remained open");
+	}
+
+	#[tokio::test]
+	async fn approval_queries_bypass_request_streams_and_answer_unscoped() {
+		const WAIT: Duration = Duration::from_secs(1);
+		let (outgoing, requests) = flume::unbounded();
+		let (responses, incoming) = flume::unbounded();
+		let client = EnvClient::from_channels(outgoing, incoming);
+		let scope = InvocationScope {
+			invocation_id: "bash-1".into(),
+			effect_token: Bytes::from_static(b"authority"),
+			..InvocationScope::default()
+		};
+		// 42 is a scoped bash invocation, 43 an unscoped exec, and 44 a request
+		// whose stream already ended (a detached command).
+		client.inner.request_scopes.lock().insert(42, scope);
+		let invocation = client.register(42);
+		let exec = client.register(43);
+		let approvals = client.approval_queries();
+		let query = |query_id| ApprovalQuery {
+			query_id,
+			invocation_id: None,
+			reasons: vec![env_wire::ApprovalSpec {
+				title: "Approve scoped sandbox amendment".into(),
+				subject: "echo x > .git/a".into(),
+				kind: "sandbox_amendment".into(),
+				scopes: vec!["once".into()],
+				timeout_default: Some(false),
+				timeout_ms: 120_000,
+				unreachable: "fail_closed".into(),
+				require_human: true,
+				..env_wire::ApprovalSpec::default()
+			}],
+			created_at_ms: 9,
+		};
+		let server =
+			|request_id, body| ServerFrame { request_id, body: Some(body), ..ServerFrame::default() };
+		let next = async || {
+			timeout(WAIT, approvals.recv_async())
+				.await
+				.expect("approval event timed out")
+		};
+		for (request_id, query_id) in [(42, 1), (43, 2)] {
+			responses
+				.send_async(server(request_id, server_frame::Body::ApprovalQuery(query(query_id))))
+				.await
+				.expect("send approval query");
+		}
+		for (request_id, query_id) in [(42, 1), (43, 2)] {
+			assert_eq!(next().await.expect("approval queue open"), ApprovalQueryEvent::Requested {
+				request_id,
+				query: query(query_id)
+			});
+		}
+		assert!(invocation.receiver.try_recv().is_err(), "query entered the invocation stream");
+		assert!(exec.receiver.try_recv().is_err(), "query entered the exec stream");
+
+		let decision = ApprovalDecision {
+			approved: true,
+			scope: "once".into(),
+			source: "user".into(),
+			..ApprovalDecision::default()
+		};
+		client
+			.answer_approval(42, 1, decision.clone())
+			.await
+			.expect("answer approval query");
+		let answer = timeout(WAIT, requests.recv_async())
+			.await
+			.expect("approval answer timed out")
+			.expect("receive approval answer");
+		assert_eq!(answer.request_id, 42);
+		assert_eq!(answer.scope, None, "approval answers carry no invocation scope");
+		assert_eq!(
+			answer.body,
+			Some(client_frame::Body::ApprovalAnswer(ApprovalAnswer {
+				query_id: 1,
+				decision: Some(decision.clone()),
+			}))
+		);
+		assert_eq!(client.inner.pending.lock().len(), 2, "answer opened a response waiter");
+		assert!(matches!(
+			client.answer_approval(42, 1, decision.clone()).await,
+			Err(ClientError::ApprovalQueryClosed { request_id: 42, query_id: 1 })
+		));
+		// The query id is keyed by its request: the same id on another request
+		// is not open.
+		assert!(matches!(
+			client.answer_approval(43, 1, decision.clone()).await,
+			Err(ClientError::ApprovalQueryClosed { request_id: 43, query_id: 1 })
+		));
+
+		// A withdrawal of the answered query has no prompt left to withdraw and
+		// is dropped; the open one reaches the queue and closes its query.
+		for (request_id, query_id) in [(42, 1), (43, 2)] {
+			responses
+				.send_async(server(
+					request_id,
+					server_frame::Body::ApprovalWithdrawn(env_wire::ApprovalWithdrawn { query_id }),
+				))
+				.await
+				.expect("send approval withdrawal");
+		}
+		assert_eq!(next().await.expect("approval queue open"), ApprovalQueryEvent::Withdrawn {
+			request_id: 43,
+			query_id:   2,
+		});
+		assert!(matches!(
+			client.answer_approval(43, 2, decision.clone()).await,
+			Err(ClientError::ApprovalQueryClosed { request_id: 43, query_id: 2 })
+		));
+		assert!(exec.receiver.try_recv().is_err(), "withdrawal entered the exec stream");
+
+		responses
+			.send_async(server(44, server_frame::Body::ApprovalQuery(query(3))))
+			.await
+			.expect("send detached approval query");
+		assert_eq!(next().await.expect("approval queue open"), ApprovalQueryEvent::Requested {
+			request_id: 44,
+			query:      query(3),
+		});
+		assert!(requests.try_recv().is_err(), "a closed query sent an answer");
+
+		drop(responses);
+		assert!(next().await.is_err(), "approval queue stayed open after transport close");
+		assert!(matches!(
+			client.answer_approval(44, 3, decision).await,
+			Err(ClientError::ApprovalQueryClosed { request_id: 44, query_id: 3 })
+		));
+		assert!(requests.try_recv().is_err(), "an answer was sent after transport close");
 	}
 
 	#[tokio::test]

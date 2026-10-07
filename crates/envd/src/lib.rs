@@ -1546,7 +1546,7 @@ fn client_hello(
 		Some(ApprovalMode::Yolo) => ProtoApprovalMode::Yolo,
 	};
 	let capabilities = edit_repair
-		.then_some("edit-repair".to_owned())
+		.then_some(omp_env::EDIT_REPAIR_CAPABILITY.to_owned())
 		.into_iter()
 		.collect();
 	let props = edit_model.map(|model| ValueMap {

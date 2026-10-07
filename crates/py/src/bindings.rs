@@ -1265,6 +1265,9 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 		ClientError::ScopedOperationDenied => environment_exception(py, "Denied", &error.to_string()),
 		ClientError::StreamLost(_) => environment_exception(py, "StreamLost", &error.to_string()),
 		ClientError::IncompleteBlob => environment_exception(py, "Disconnected", &error.to_string()),
+		ClientError::ApprovalQueryClosed { .. } => {
+			environment_exception(py, "NotFound", &error.to_string())
+		},
 		ClientError::TransportBusy
 		| ClientError::RequestIdExhausted
 		| ClientError::UnexpectedResponse { .. }
