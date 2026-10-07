@@ -27,7 +27,7 @@ use crate::{
 		EnvironmentInheritance, ExecSandboxMode, NetworkConfinement, ReadMode, SandboxSettings,
 		UnscopedWrites,
 	},
-	sandbox_proxy::ScopedProxy,
+	sandbox_proxy::{BrokerDenial, BrokerRefusal, ScopedProxy},
 };
 
 const CARVE_OUTS: [&str; 3] = [".git", ".omp", ".agents"];
@@ -39,7 +39,10 @@ pub(crate) enum SandboxDenialFact {
 	ReadPath(PathBuf),
 	/// An in-process or kernel policy rejected a mutation.
 	WritePath(PathBuf),
-	/// The scoped egress broker rejected this exact connection.
+	/// The scoped egress broker's policy rejected this exact connection, which
+	/// the user can approve for one rerun. A refusal that no approval could
+	/// cure (the name did not resolve, it is not a public address, the
+	/// upstream failed) is never this fact; see [`AttemptFacts::refusal`].
 	Network {
 		/// Requested hostname.
 		host: Str,
@@ -213,6 +216,19 @@ pub(crate) struct ExecSandbox {
 	/// fallback even though the settings ask for `scoped`.
 	network:      NetworkConfinement,
 	proxy:        Option<Arc<ScopedProxy>>,
+}
+
+/// What one finished execution attempt established.
+#[derive(Debug, Default)]
+pub(crate) struct AttemptFacts {
+	/// The typed denial the denial-and-rerun flow judges: a refused path, or
+	/// the broker's policy refusal as [`SandboxDenialFact::Network`]. A
+	/// fail-closed broker refusal is never one, so a name that does not
+	/// resolve stays an ordinary command failure rather than a denial.
+	pub(crate) denial:  Option<SandboxDenialFact>,
+	/// The egress broker's refusal of any cause, for the model-visible
+	/// network diag. It is kept even when a path denial takes precedence.
+	pub(crate) refusal: Option<BrokerDenial>,
 }
 
 /// One unforgeable execution attempt within an [`ExecSandbox`] session.
@@ -410,6 +426,18 @@ impl ExecSandbox {
 		&self.failure_note
 	}
 
+	/// The network confinement this wrapper really applies.
+	pub(crate) const fn network(&self) -> NetworkConfinement {
+		self.network
+	}
+
+	/// The network confinement the settings asked for. For a shell session it
+	/// differs from [`Self::network`] only when the egress broker could not
+	/// start under the shipped default and the network fell back to disabled.
+	pub(crate) fn requested_network(&self) -> NetworkConfinement {
+		self.settings.network_confinement()
+	}
+
 	/// Captures the immutable filesystem authority implicated by `denial`.
 	///
 	/// The caller must capture this before asking for approval and pass the
@@ -465,6 +493,33 @@ impl ExecSandbox {
 		)
 	}
 
+	/// An environment-only session wrapper that owns a started egress broker,
+	/// so broker refusals can be exercised on hosts with no native backend.
+	#[cfg(test)]
+	pub(crate) fn with_test_broker(settings: &SandboxSettings, workspace_root: &Path) -> Arc<Self> {
+		let proxy = Arc::new(ScopedProxy::start(settings).expect("test broker starts"));
+		let parts = policy_parts_with_approved_scope(
+			settings,
+			workspace_root,
+			WriteMode::Scoped,
+			NetworkMode::Outbound,
+			Some(&proxy),
+			None,
+			None,
+		)
+		.expect("test policy");
+		Arc::new(Self {
+			wrapper:      Arc::new(CommandWrapper::environment_only(&parts.spec)),
+			file_policy:  parts.file_policy,
+			failure_note: Str::new_static("sandbox: backend=environment-only; network=scoped"),
+			settings:     Arc::new(settings.clone()),
+			workspace:    Arc::new(workspace_root.to_path_buf()),
+			supervised:   true,
+			network:      NetworkConfinement::Scoped,
+			proxy:        Some(proxy),
+		})
+	}
+
 	/// Opens one isolated denial collection interval for an execution attempt.
 	pub(crate) fn begin_attempt(self: &Arc<Self>) -> Arc<ExecSandboxAttempt> {
 		let token = self.proxy.as_ref().map(|proxy| proxy.begin_attempt());
@@ -505,11 +560,12 @@ impl ExecSandbox {
 }
 
 impl ExecSandboxAttempt {
-	/// Consumes this attempt's path or proxy denial and invalidates its proxy
-	/// capability.
-	pub(crate) fn take_denial(&self) -> Option<SandboxDenialFact> {
+	/// Consumes this attempt's path denial and broker refusal, and invalidates
+	/// its proxy capability. A path denial takes precedence over a policy
+	/// refusal as the attempt's denial.
+	pub(crate) fn take_facts(&self) -> AttemptFacts {
 		let path_denial = self.denial.lock().take();
-		let proxy_denial = (!self.finished.swap(true, Ordering::AcqRel))
+		let refusal = (!self.finished.swap(true, Ordering::AcqRel))
 			.then(|| {
 				self
 					.token
@@ -517,8 +573,47 @@ impl ExecSandboxAttempt {
 					.and_then(|token| self.sandbox.proxy.as_ref()?.finish_attempt(token))
 			})
 			.flatten();
-		path_denial
-			.or_else(|| proxy_denial.map(|(host, port)| SandboxDenialFact::Network { host, port }))
+		let denial = path_denial.or_else(|| {
+			refusal
+				.as_ref()
+				.filter(|refusal| refusal.cause == BrokerRefusal::Policy)
+				.map(|refusal| SandboxDenialFact::Network {
+					host: refusal.host.clone(),
+					port: refusal.port,
+				})
+		});
+		AttemptFacts { denial, refusal }
+	}
+
+	/// Asks the session broker, with this attempt's capability, to tunnel to
+	/// `host:port`, and returns the broker's response head: the status line and
+	/// headers, as `curl -v` prints them.
+	#[cfg(test)]
+	pub(crate) fn connect_through_broker(&self, host: &str, port: u16) -> String {
+		use std::io::{BufRead as _, Write as _};
+
+		let proxy = self.sandbox.proxy.as_ref().expect("session broker");
+		let token = self.token.as_ref().expect("attempt capability");
+		let credential =
+			omp_core::encoding::base64::encode(format!("omp:{token}").as_bytes()).into_string();
+		#[cfg(target_os = "linux")]
+		let mut stream = std::os::unix::net::UnixStream::connect(proxy.socket()).expect("broker socket");
+		#[cfg(not(target_os = "linux"))]
+		let mut stream = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, proxy.port()))
+			.expect("broker port");
+		write!(
+			stream,
+			"CONNECT {host}:{port} HTTP/1.1\r\nProxy-Authorization: Basic {credential}\r\n\r\n"
+		)
+		.expect("request");
+		let mut reader = std::io::BufReader::new(stream);
+		let mut head = String::new();
+		while !head.ends_with("\r\n\r\n") {
+			if reader.read_line(&mut head).expect("broker response head") == 0 {
+				break;
+			}
+		}
+		head
 	}
 
 	fn record_path_denial<T>(&self, result: Result<T, PathDenied>) -> Result<T, PathDenied> {
