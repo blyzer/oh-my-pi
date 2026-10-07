@@ -15,8 +15,40 @@ sits below both and can be reasoned about as data in, data out.
   contributions.
 - `lock`: reproducible lockfiles and local installed/enabled records.
 - `resolver`: the `uv` resolution driver and R1-R12 policy checks.
-- `trust`: signature verification, trust tiers, and the local grant file,
-  including operator approvals of plugin-launched commands.
+- `trust`: signature verification, trust tiers, and the local grant file
+  (`<data>/ext/grants.toml`), including operator approvals of plugin-launched
+  commands and workspace trust rows. Every write is a locked read-modify-write
+  (`GrantsFile::update`/`try_update`, and the `persist*`/`revoke*` writers
+  built on it) under the sibling `grants.toml.lock`, waited on for a bounded
+  time, so a concurrent writer's stale read never brings back a revoked row.
+  Only persistent rows are read or written.
+- `workspace_trust`: operator trust in a workspace's own project-sourced
+  inputs. `WorkspaceTrust` is `untrusted` by default and only the host sets
+  it, never a convar. A `[[workspace_trust]]` row is keyed by the canonical
+  workspace root and bound, by its `scope`, to an `InputsDigest`
+  (`sha256:<hex>` of the gated inputs): `exact` trusts the workspace while
+  its inputs keep that digest; `subtree` is an explicit grant over a root
+  that never trusts a workspace on first use but asks once per workspace
+  (`PinUnderSubtree`; a non-interactive host treats it as untrusted); `pin`
+  is that answer, live only while the subtree row at exactly `under` is;
+  `deny` is a revocation that outranks any covering subtree. A subtree at
+  `/`, at the canonical home directory, or at an ancestor of it is refused,
+  and when home cannot be canonicalized every subtree is. Containment is per
+  path component (`/w` never covers `/w2`). `evaluate` is the pure decision
+  (`Trusted`, `PinUnderSubtree`, `DigestChanged`, `Denied`, `Untrusted`;
+  serializable for the journal). It takes the trust key separately from where
+  the inputs are hashed, so a host can key an isolated worktree by its
+  primary checkout. An operator's answer (`exact` or `pin`) is recorded by
+  `GrantsFile::persist_workspace_trust` only while `evaluate`, run again
+  under the grant file lock, still returns the decision the operator was
+  asked about; a stale answer is refused, so it never undoes a revoke made
+  after the ask. A pin also needs the live subtree row at exactly `under`
+  and never replaces a deny. Subtrees are granted through
+  `persist_workspace_subtree`; one granted anew drops the dormant pins naming
+  its root, so it asks once per workspace again. `revoke_workspace_trust`
+  matches the workspace's canonical path, then its spelling as given (a
+  workspace deleted since), and records a deny only at a spelling rows are
+  keyed by: never for a missing workspace no row names.
 - `plugin_command`: the approval key (`Hash32` digest of plugin version,
   command, arguments, environment, working directory, a hook's event and
   matcher, and the contents of every plugin-root file the launch names, so a
@@ -29,7 +61,8 @@ sits below both and can be reasoned about as data in, data out.
   digest domain is `omp.plugin-command.v2`: approvals recorded before files
   were bound match nothing, so plugin commands are approved once more.
 - `index`, `upgrade`, `doctor`: index metadata, generation commits, and
-  integrity diagnostics.
+  integrity diagnostics. A doctor finding carries its typed cause; the
+  report's presenter renders it.
 - `marketplace`, `claude_plugin`: Claude-compatible marketplace catalogs, the
   `installed_plugins.json` registry `omp ext install` writes, and the
   resolution of enabled installs into contained plugin roots whose skills,

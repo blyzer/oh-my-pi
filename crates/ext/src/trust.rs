@@ -2,9 +2,14 @@
 
 use std::{
 	collections::BTreeSet,
-	fs, io,
+	convert::Infallible,
+	ffi::OsString,
+	fs::{self, File, OpenOptions, TryLockError},
+	io,
 	path::{Path, PathBuf},
 	str::FromStr as _,
+	thread,
+	time::{Duration, Instant},
 };
 
 use jiff::Timestamp;
@@ -20,6 +25,10 @@ use super::{
 		CommandApprovals, PluginId, PluginLaunch, PluginLaunchKind, plugin_command_digest,
 	},
 	resolver::version_satisfies,
+	workspace_trust::{
+		CanonicalHome, TrustBinding, TrustChannel, TrustDecision, TrustSlot, WorkspaceTrustGrant,
+		WorkspaceTrustRefusal,
+	},
 };
 
 /// The local grant file under an omp data directory:
@@ -40,8 +49,9 @@ pub enum GrantScope {
 	Subtree,
 }
 
-/// Lifetime of an interactive operator grant.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Lifetime of an interactive operator grant, ordered from shortest to
+/// longest.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantDuration {
 	/// Admit only the current interactive attempt.
@@ -147,6 +157,42 @@ pub struct GrantsFile {
 	/// Approved plugin-launched commands.
 	#[serde(rename = "plugin_command", default, skip_serializing_if = "Vec::is_empty")]
 	pub plugin_commands: Vec<PluginCommandGrant>,
+	/// Operator trust in workspaces' project-sourced inputs
+	/// ([`crate::workspace_trust`]).
+	#[serde(rename = "workspace_trust", default, skip_serializing_if = "Vec::is_empty")]
+	pub workspace_trust: Vec<WorkspaceTrustGrant>,
+}
+
+/// Failure reading the local grant file.
+#[derive(Debug, Error)]
+pub enum GrantsFileError {
+	/// The grant file exists but could not be read.
+	#[error("grant file {} could not be read", path.display())]
+	Io {
+		/// Grant file path.
+		path:   PathBuf,
+		/// Read failure.
+		#[source]
+		source: io::Error,
+	},
+	/// The grant file is not valid grant TOML.
+	#[error("grant file {} is malformed", path.display())]
+	Toml {
+		/// Grant file path.
+		path:   PathBuf,
+		/// Decoding failure.
+		#[source]
+		source: toml::de::Error,
+	},
+}
+
+impl GrantsFileError {
+	/// The extension diagnostic class: local trust state is unreadable or
+	/// corrupt.
+	#[inline]
+	pub const fn code(&self) -> ExtensionCode {
+		ExtensionCode::EIntegrity
+	}
 }
 
 /// Failure while committing an operator grant through the canonical grant
@@ -155,13 +201,113 @@ pub struct GrantsFile {
 pub enum GrantPersistenceError {
 	/// Existing grant state could not be decoded.
 	#[error("existing extension grants could not be read")]
-	Read(#[source] ExtensionError),
+	Read(#[from] GrantsFileError),
 	/// The atomically replaced grant file could not be written.
 	#[error("extension grants could not be persisted")]
 	Write(#[source] io::Error),
 	/// A process-local grant was passed to the durable grant writer.
 	#[error("session-only extension grants cannot be persisted")]
 	SessionOnly,
+	/// The grant file lock could not be opened or taken.
+	#[error("grant file lock {} could not be acquired", path.display())]
+	Lock {
+		/// Lock file path.
+		path:   PathBuf,
+		/// Open or lock failure.
+		#[source]
+		source: io::Error,
+	},
+	/// Another writer held the grant file lock for the whole bounded wait.
+	#[error("grant file lock {} is still held after {waited:?}", path.display())]
+	LockTimeout {
+		/// Lock file path.
+		path:   PathBuf,
+		/// How long the writer waited.
+		waited: Duration,
+	},
+}
+
+/// How long a grant file writer waits for another writer's lock. Writers hold
+/// it only across one read-modify-write, and one runs on an interactive
+/// approval path, so a longer hold means a stuck process.
+const GRANTS_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// Pause between attempts to take a contended grant file lock.
+const GRANTS_LOCK_POLL: Duration = Duration::from_millis(10);
+
+/// Exclusive hold on a grant file's sibling `<name>.lock`, released on drop.
+///
+/// The lock file is never renamed or removed, so every writer contends on the
+/// same file even though the grant file itself is atomically replaced.
+struct GrantsFileLock {
+	_file: File,
+}
+
+impl GrantsFileLock {
+	fn path(grants: &Path) -> PathBuf {
+		let mut name = grants
+			.file_name()
+			.map_or_else(|| OsString::from("grants.toml"), ToOwned::to_owned);
+		name.push(".lock");
+		grants.with_file_name(name)
+	}
+
+	fn acquire(grants: &Path, wait: Duration) -> Result<Self, GrantPersistenceError> {
+		let path = Self::path(grants);
+		let file = grants
+			.parent()
+			.map_or(Ok(()), fs::create_dir_all)
+			.and_then(|()| {
+				OpenOptions::new()
+					.create(true)
+					.read(true)
+					.write(true)
+					.truncate(false)
+					.open(&path)
+			});
+		let file = match file {
+			Ok(file) => file,
+			Err(source) => return Err(GrantPersistenceError::Lock { path, source }),
+		};
+		let started = Instant::now();
+		loop {
+			match file.try_lock() {
+				Ok(()) => return Ok(Self { _file: file }),
+				Err(TryLockError::WouldBlock) => {
+					let waited = started.elapsed();
+					if waited >= wait {
+						return Err(GrantPersistenceError::LockTimeout { path, waited });
+					}
+					thread::sleep(GRANTS_LOCK_POLL.min(wait.saturating_sub(waited)));
+				},
+				Err(TryLockError::Error(source)) => {
+					return Err(GrantPersistenceError::Lock { path, source });
+				},
+			}
+		}
+	}
+}
+
+/// The spelling a workspace trust revoke applies to: the first of the
+/// workspace's `canonical` path and its `given` spelling that names a row (a
+/// row's workspace, or a pin's subtree root), else `canonical`. `None` for a
+/// missing workspace that names no row.
+fn revoked_spelling<'p>(
+	rows: &[WorkspaceTrustGrant],
+	canonical: Option<&'p Path>,
+	given: &'p Path,
+) -> Option<&'p Path> {
+	let names = |spelling: &Path| {
+		rows.iter().any(|row| {
+			row.workspace == spelling
+				|| matches!(&row.binding, TrustBinding::Pin { under, .. } if under == spelling)
+		})
+	};
+	canonical
+		.into_iter()
+		.chain([given])
+		.find(|&spelling| names(spelling))
+		.or(canonical)
 }
 
 /// Returns whether the most-specific applicable operator grant admits an
@@ -300,16 +446,32 @@ impl GrantsFile {
 	///
 	/// Process-local entries are ignored even if a hand-edited file contains
 	/// one, so a session decision cannot become durable by serialization.
-	pub fn read(path: &Path) -> Result<Self, ExtensionError> {
-		let mut grants: Self = read_toml_or_default(path)?;
+	///
+	/// # Errors
+	///
+	/// [`GrantsFileError`] when the file exists but cannot be read or decoded.
+	pub fn read(path: &Path) -> Result<Self, GrantsFileError> {
+		let text = match fs::read_to_string(path) {
+			Ok(text) => text,
+			Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+			Err(source) => return Err(GrantsFileError::Io { path: path.to_path_buf(), source }),
+		};
+		let mut grants: Self = toml::from_str(&text)
+			.map_err(|source| GrantsFileError::Toml { path: path.to_path_buf(), source })?;
 		grants
 			.grants
 			.retain(|grant| grant.duration == GrantDuration::Persistent);
+		grants
+			.workspace_trust
+			.retain(|row| row.duration == GrantDuration::Persistent);
 		Ok(grants)
 	}
 
 	/// Atomically writes only durable grants to the local grant file.
-	pub fn write(&self, path: &Path) -> io::Result<()> {
+	///
+	/// Unlocked: only a holder of the grant file lock calls it, through
+	/// [`Self::update`] and the persisting writers built on it.
+	pub(crate) fn write(&self, path: &Path) -> io::Result<()> {
 		let durable = Self {
 			version:         self.version,
 			grants:          self
@@ -319,8 +481,65 @@ impl GrantsFile {
 				.cloned()
 				.collect(),
 			plugin_commands: self.plugin_commands.clone(),
+			workspace_trust: self
+				.workspace_trust
+				.iter()
+				.filter(|row| row.duration == GrantDuration::Persistent)
+				.cloned()
+				.collect(),
 		};
 		atomic_toml(path, &durable)
+	}
+
+	/// Locked read-modify-write of the grant file at `path`: takes the
+	/// sibling `<name>.lock`, reads the durable state, applies `mutate`, and
+	/// atomically writes the result before releasing the lock.
+	///
+	/// The only writer of the grant file: a concurrent writer's change is
+	/// never lost to a stale read, so a revoked row cannot come back.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError`] when the lock cannot be taken within its
+	/// bounded wait, or the file cannot be read or written.
+	pub fn update<T>(
+		path: &Path,
+		mutate: impl FnOnce(&mut Self) -> T,
+	) -> Result<T, GrantPersistenceError> {
+		match Self::locked(path, GRANTS_LOCK_WAIT, |grants| Ok::<_, Infallible>(mutate(grants)))? {
+			Ok((_, value)) => Ok(value),
+			Err(never) => match never {},
+		}
+	}
+
+	/// [`Self::update`] whose `mutate` may refuse: an `Err` leaves the file
+	/// untouched and is returned as the inner result.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError`] as [`Self::update`].
+	pub fn try_update<T, E>(
+		path: &Path,
+		mutate: impl FnOnce(&mut Self) -> Result<T, E>,
+	) -> Result<Result<T, E>, GrantPersistenceError> {
+		Ok(Self::locked(path, GRANTS_LOCK_WAIT, mutate)?.map(|(_, value)| value))
+	}
+
+	/// The locked read-modify-write behind every writer, waiting at most
+	/// `wait` for the lock; yields the written state beside `mutate`'s value.
+	fn locked<T, E>(
+		path: &Path,
+		wait: Duration,
+		mutate: impl FnOnce(&mut Self) -> Result<T, E>,
+	) -> Result<Result<(Self, T), E>, GrantPersistenceError> {
+		let _lock = GrantsFileLock::acquire(path, wait)?;
+		let mut grants = Self::read(path)?;
+		let value = match mutate(&mut grants) {
+			Ok(value) => value,
+			Err(error) => return Ok(Err(error)),
+		};
+		grants.write(path).map_err(GrantPersistenceError::Write)?;
+		Ok(Ok((grants, value)))
 	}
 
 	/// Every approved plugin launch, as the gate checks them.
@@ -336,22 +555,199 @@ impl GrantsFile {
 
 	/// Atomically records the operator's approval of one plugin launch,
 	/// replacing an earlier approval of the same plugin and digest.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError`] as [`Self::update`].
 	pub fn persist_plugin_command(
 		path: &Path,
 		grant: PluginCommandGrant,
 	) -> Result<Self, GrantPersistenceError> {
-		let mut grants = Self::read(path).map_err(GrantPersistenceError::Read)?;
-		grants
-			.plugin_commands
-			.retain(|existing| existing.plugin != grant.plugin || existing.digest != grant.digest);
-		grants.plugin_commands.push(grant);
-		grants.write(path).map_err(GrantPersistenceError::Write)?;
-		Ok(grants)
+		Self::persisted(path, |grants| {
+			grants
+				.plugin_commands
+				.retain(|existing| existing.plugin != grant.plugin || existing.digest != grant.digest);
+			grants.plugin_commands.push(grant);
+		})
+	}
+
+	/// [`Self::locked`] with an infallible `mutate`, yielding the written
+	/// state.
+	fn persisted(
+		path: &Path,
+		mutate: impl FnOnce(&mut Self),
+	) -> Result<Self, GrantPersistenceError> {
+		let mutate = |grants: &mut Self| {
+			mutate(grants);
+			Ok::<_, Infallible>(())
+		};
+		match Self::locked(path, GRANTS_LOCK_WAIT, mutate)? {
+			Ok((grants, ())) => Ok(grants),
+			Err(never) => match never {},
+		}
+	}
+
+	/// Atomically records the operator's trust in one workspace, an
+	/// [`TrustBinding::Exact`] or [`TrustBinding::Pin`] row answering
+	/// `answered`, and returns the written state. The row replaces the
+	/// workspace's decision ([`WorkspaceTrustGrant::same_slot`]).
+	///
+	/// `answered` is what [`evaluate`](crate::workspace_trust::evaluate)
+	/// returned over the durable rows when the operator was asked. Under the
+	/// lock the rows are evaluated again, and the answer is refused unless the
+	/// decision is still `answered` ([`WorkspaceTrustRefusal::Stale`]): a
+	/// revoke or subtree change made after the ask is never undone by it. A
+	/// pin is also refused unless the subtree row at exactly `under` is live
+	/// and covers the workspace ([`WorkspaceTrustRefusal::NoLiveSubtree`]), and
+	/// never replaces a deny ([`WorkspaceTrustRefusal::Denied`]).
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError::SessionOnly`] for a row that is not
+	/// persistent; otherwise as [`Self::update`]. A refusal leaves the file
+	/// untouched and is the inner `Err`.
+	pub fn persist_workspace_trust(
+		path: &Path,
+		grant: WorkspaceTrustGrant,
+		answered: &TrustDecision,
+		home: &CanonicalHome,
+	) -> Result<Result<Self, WorkspaceTrustRefusal>, GrantPersistenceError> {
+		if grant.duration != GrantDuration::Persistent {
+			return Err(GrantPersistenceError::SessionOnly);
+		}
+		if !matches!(grant.binding, TrustBinding::Exact { .. } | TrustBinding::Pin { .. }) {
+			return Ok(Err(WorkspaceTrustRefusal::Scope { scope: grant.binding.scope() }));
+		}
+		let written = Self::locked(path, GRANTS_LOCK_WAIT, |grants| {
+			grant.check_answer(&grants.workspace_trust, answered, home)?;
+			grants
+				.workspace_trust
+				.retain(|existing| !existing.same_slot(&grant));
+			grants.workspace_trust.push(grant);
+			Ok(())
+		})?;
+		Ok(written.map(|(grants, ())| grants))
+	}
+
+	/// Atomically records an explicit operator grant over the subtree rooted
+	/// at `grant`'s workspace, replacing the subtree row at that root, and
+	/// returns the written state.
+	///
+	/// A subtree granted anew, with no row at its root yet, drops every pin
+	/// naming that root: such pins outlived an earlier grant, and the new one
+	/// asks once per workspace ([`TrustDecision::PinUnderSubtree`]) instead of
+	/// reviving them.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError::SessionOnly`] for a row that is not
+	/// persistent; otherwise as [`Self::update`]. A row that is not a
+	/// [`TrustBinding::Subtree`] is refused
+	/// ([`WorkspaceTrustRefusal::Scope`]) without touching the file.
+	pub fn persist_workspace_subtree(
+		path: &Path,
+		grant: WorkspaceTrustGrant,
+	) -> Result<Result<Self, WorkspaceTrustRefusal>, GrantPersistenceError> {
+		if grant.duration != GrantDuration::Persistent {
+			return Err(GrantPersistenceError::SessionOnly);
+		}
+		if grant.binding != TrustBinding::Subtree {
+			return Ok(Err(WorkspaceTrustRefusal::Scope { scope: grant.binding.scope() }));
+		}
+		Self::persisted(path, |grants| {
+			let rows = &mut grants.workspace_trust;
+			let anew = !rows.iter().any(|existing| existing.same_slot(&grant));
+			rows.retain(|existing| match &existing.binding {
+				TrustBinding::Pin { under, .. } => !anew || *under != grant.workspace,
+				TrustBinding::Exact { .. } | TrustBinding::Subtree | TrustBinding::Deny => {
+					!existing.same_slot(&grant)
+				},
+			});
+			rows.push(grant);
+		})
+		.map(Ok)
+	}
+
+	/// Atomically revokes the operator's trust in `workspace` and returns how
+	/// many trusting rows were removed.
+	///
+	/// Rows hold canonical paths, so `workspace` is revoked under the first of
+	/// its canonical path and the path as given that names a row: a workspace
+	/// deleted since is still revoked by the spelling it was recorded under.
+	/// When neither names a row, an existing workspace is revoked under its
+	/// canonical path; a missing one revokes and records nothing, since no
+	/// spelling of it is known to be the one rows are keyed by.
+	///
+	/// - [`GrantScope::Exact`] removes the workspace's exact or pinned row. When
+	///   a subtree row covers the workspace, a [`TrustBinding::Deny`] row
+	///   recorded through `revoked_by` takes its place, so the subtree neither
+	///   trusts nor asks about it again ([`TrustDecision::Denied`]).
+	/// - [`GrantScope::Subtree`] removes the subtree row rooted at `workspace`
+	///   and every pin it admitted.
+	///
+	/// A revoke is unconditional, and an answer recorded after it through
+	/// [`Self::persist_workspace_trust`] to an ask made before it is refused
+	/// as stale.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError`] as [`Self::update`].
+	pub fn revoke_workspace_trust(
+		path: &Path,
+		workspace: &Path,
+		scope: GrantScope,
+		revoked_by: TrustChannel,
+	) -> Result<usize, GrantPersistenceError> {
+		let canonical = fs::canonicalize(workspace).ok();
+		Self::update(path, |grants| {
+			let Some(workspace) =
+				revoked_spelling(&grants.workspace_trust, canonical.as_deref(), workspace)
+			else {
+				return 0;
+			};
+			let before = grants.workspace_trust.len();
+			match scope {
+				GrantScope::Exact => {
+					grants.workspace_trust.retain(|row| {
+						row.workspace != workspace
+							|| !matches!(
+								row.binding,
+								TrustBinding::Exact { .. } | TrustBinding::Pin { .. }
+							)
+					});
+					let removed = before - grants.workspace_trust.len();
+					let covered = grants.workspace_trust.iter().any(|row| {
+						row.binding.slot() == TrustSlot::Subtree && workspace.starts_with(&row.workspace)
+					});
+					let denied = grants
+						.workspace_trust
+						.iter()
+						.any(|row| row.workspace == workspace && row.binding == TrustBinding::Deny);
+					if covered && !denied {
+						grants.workspace_trust.push(WorkspaceTrustGrant::stamped(
+							workspace.to_path_buf(),
+							TrustBinding::Deny,
+							revoked_by,
+							GrantDuration::Persistent,
+						));
+					}
+					removed
+				},
+				GrantScope::Subtree => {
+					grants.workspace_trust.retain(|row| match &row.binding {
+						TrustBinding::Subtree => row.workspace != workspace,
+						TrustBinding::Pin { under, .. } => under != workspace,
+						TrustBinding::Exact { .. } | TrustBinding::Deny => true,
+					});
+					before - grants.workspace_trust.len()
+				},
+			}
+		})
 	}
 
 	/// Drops every approved launch of `plugin`, or only the one with
 	/// `digest`; returns how many approvals were removed. The caller commits
-	/// the change with [`Self::write`].
+	/// the change inside [`Self::update`].
 	pub fn revoke_plugin_commands(
 		&mut self,
 		plugin: &PluginId<str>,
@@ -369,20 +765,24 @@ impl GrantsFile {
 	///
 	/// This is the sole read-modify-write entry point for interactive consent;
 	/// callers cannot accidentally update an in-memory copy without committing
-	/// it through the trust domain's atomic writer.
+	/// it through the trust domain's locked atomic writer.
+	///
+	/// # Errors
+	///
+	/// [`GrantPersistenceError::SessionOnly`] for a grant that is not
+	/// persistent; otherwise as [`Self::update`].
 	pub fn persist(path: &Path, grant: Grant) -> Result<Self, GrantPersistenceError> {
 		if grant.duration != GrantDuration::Persistent {
 			return Err(GrantPersistenceError::SessionOnly);
 		}
-		let mut grants = Self::read(path).map_err(GrantPersistenceError::Read)?;
-		grants.grants.retain(|existing| {
-			existing.id != grant.id
-				|| existing.layer != grant.layer
-				|| existing.workspace != grant.workspace
-		});
-		grants.grants.push(grant);
-		grants.write(path).map_err(GrantPersistenceError::Write)?;
-		Ok(grants)
+		Self::persisted(path, |grants| {
+			grants.grants.retain(|existing| {
+				existing.id != grant.id
+					|| existing.layer != grant.layer
+					|| existing.workspace != grant.workspace
+			});
+			grants.grants.push(grant);
+		})
 	}
 }
 
@@ -782,6 +1182,7 @@ fn read_toml_or_default<T: for<'de> Deserialize<'de> + Default>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::workspace_trust::{InputsDigest, TrustScope, WorkspaceTrust, evaluate};
 
 	#[test]
 	fn stale_revocation_fails_open_unless_strict() {
@@ -957,11 +1358,21 @@ mod tests {
 		);
 		// An extension grant persisted afterwards keeps the approvals.
 		GrantsFile::persist(&path, extension).expect("re-persist extension grant");
-		let mut read = GrantsFile::read(&path).expect("read grants");
-		assert_eq!(read.plugin_commands.len(), 3);
-		assert_eq!(read.revoke_plugin_commands(PluginId::from_ref("p@m"), Some(&tcp.digest)), 1);
-		assert_eq!(read.revoke_plugin_commands(PluginId::from_ref("p@m"), None), 1);
-		read.write(&path).expect("write grants");
+		assert_eq!(
+			GrantsFile::read(&path)
+				.expect("read grants")
+				.plugin_commands
+				.len(),
+			3
+		);
+		let removed = GrantsFile::update(&path, |grants| {
+			[
+				grants.revoke_plugin_commands(PluginId::from_ref("p@m"), Some(&tcp.digest)),
+				grants.revoke_plugin_commands(PluginId::from_ref("p@m"), None),
+			]
+		})
+		.expect("revoke approvals");
+		assert_eq!(removed, [1, 1]);
 		assert_eq!(
 			GrantsFile::read(&path)
 				.expect("read grants")
@@ -1069,6 +1480,639 @@ mod tests {
 				.grants
 				.is_empty()
 		);
+	}
+
+	fn trust_row(workspace: &Path, binding: TrustBinding) -> WorkspaceTrustGrant {
+		WorkspaceTrustGrant {
+			workspace: workspace.to_path_buf(),
+			binding,
+			granted_at: sf!("2026-10-07T00:00:00Z"),
+			granted_by: TrustChannel::Cli,
+			duration: GrantDuration::Persistent,
+		}
+	}
+
+	fn inputs(seed: &str) -> InputsDigest {
+		InputsDigest::new(Hash32::sum(seed))
+	}
+
+	fn exact_trust(workspace: &Path, seed: &str) -> WorkspaceTrustGrant {
+		trust_row(workspace, TrustBinding::Exact { inputs_digest: inputs(seed) })
+	}
+
+	#[test]
+	fn grant_file_written_by_write_round_trips_byte_identically() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let first = directory.path().join("first.toml");
+		let second = directory.path().join("second.toml");
+		let team = Path::new("/work/team");
+		let repo = Path::new("/work/team/repo");
+		let grants = GrantsFile {
+			version:         1,
+			grants:          vec![workspace_grant(
+				workspace("file:///work/"),
+				GrantScope::Subtree,
+				"b3:capabilities",
+			)],
+			plugin_commands: vec![plugin_command_grant("p@m", &["--stdio"])],
+			workspace_trust: vec![
+				exact_trust(Path::new("/work/solo"), "solo"),
+				trust_row(team, TrustBinding::Subtree),
+				trust_row(repo, TrustBinding::Pin {
+					under:         team.to_path_buf(),
+					inputs_digest: inputs("repo"),
+				}),
+				trust_row(Path::new("/work/team/hostile"), TrustBinding::Deny),
+			],
+		};
+		grants.write(&first).expect("write grants");
+		let text = fs::read_to_string(&first).expect("written grants");
+		assert!(text.contains("[[workspace_trust]]"), "{text}");
+		assert!(text.contains("scope = \"pin\""), "{text}");
+		assert!(text.contains(&format!("inputs_digest = \"{}\"", inputs("repo"))), "{text}");
+		let read = GrantsFile::read(&first).expect("read grants");
+		assert_eq!(read, grants);
+		read.write(&second).expect("rewrite grants");
+		assert_eq!(fs::read(&second).expect("rewritten grants"), text.as_bytes());
+
+		// A file without workspace trust has no table and round-trips too.
+		let plain = GrantsFile { workspace_trust: Vec::new(), ..grants };
+		plain.write(&first).expect("write plain grants");
+		let text = fs::read_to_string(&first).expect("written plain grants");
+		assert!(!text.contains("workspace_trust"), "{text}");
+		GrantsFile::read(&first)
+			.expect("read plain grants")
+			.write(&second)
+			.expect("rewrite plain grants");
+		assert_eq!(fs::read(&second).expect("rewritten plain grants"), text.as_bytes());
+	}
+
+	/// Records `workspace`'s exact trust as the answer to an ask about a
+	/// workspace that holds no row yet.
+	fn persist_exact(path: &Path, workspace: &Path, seed: &str) -> GrantsFile {
+		GrantsFile::persist_workspace_trust(
+			path,
+			exact_trust(workspace, seed),
+			&TrustDecision::Untrusted,
+			&CanonicalHome::Unresolved,
+		)
+		.expect("lock and read")
+		.expect("an answer to an untrusted workspace")
+	}
+
+	/// A grant file beside a canonical home holding `src/team/repo`.
+	struct TrustTree {
+		_directory: tempfile::TempDir,
+		path:       PathBuf,
+		home:       CanonicalHome,
+		team:       PathBuf,
+		repo:       PathBuf,
+	}
+
+	fn trust_tree() -> TrustTree {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		let home = directory.path().join("home");
+		let repo = home.join("src/team/repo");
+		fs::create_dir_all(&repo).expect("repository");
+		let home = CanonicalHome::resolve(Some(&home));
+		let repo = fs::canonicalize(repo).expect("canonical repository");
+		let team = repo.parent().expect("subtree root").to_path_buf();
+		TrustTree { _directory: directory, path, home, team, repo }
+	}
+
+	impl TrustTree {
+		/// Grants the `team` subtree.
+		fn grant_subtree(&self) {
+			let subtree = WorkspaceTrustGrant::subtree(
+				&self.team,
+				&self.home,
+				TrustChannel::Cli,
+				GrantDuration::Persistent,
+			)
+			.expect("subtree");
+			GrantsFile::persist_workspace_subtree(&self.path, subtree)
+				.expect("lock and read")
+				.expect("a subtree row");
+		}
+
+		/// The repository's pin under `team`.
+		fn pin(&self, seed: &str) -> WorkspaceTrustGrant {
+			WorkspaceTrustGrant::pin(
+				&self.repo,
+				inputs(seed),
+				&self.team,
+				TrustChannel::Interactive,
+				GrantDuration::Persistent,
+			)
+			.expect("pin")
+		}
+
+		/// The ask the `team` subtree makes about the repository.
+		fn asked(&self) -> TrustDecision {
+			TrustDecision::PinUnderSubtree {
+				root:     self.team.clone(),
+				duration: GrantDuration::Persistent,
+			}
+		}
+
+		/// Records `grant` as the operator's answer to `answered`.
+		fn answer(
+			&self,
+			grant: WorkspaceTrustGrant,
+			answered: &TrustDecision,
+		) -> Result<GrantsFile, WorkspaceTrustRefusal> {
+			GrantsFile::persist_workspace_trust(&self.path, grant, answered, &self.home)
+				.expect("lock and read")
+		}
+
+		/// The repository's decision over the durable rows.
+		fn decide(&self, seed: &str) -> TrustDecision {
+			evaluate(
+				&GrantsFile::read(&self.path).expect("read").workspace_trust,
+				&self.repo,
+				&inputs(seed),
+				&self.home,
+			)
+		}
+
+		fn revoke(&self, workspace: &Path, scope: GrantScope) -> usize {
+			GrantsFile::revoke_workspace_trust(&self.path, workspace, scope, TrustChannel::Cli)
+				.expect("revoke")
+		}
+
+		fn bytes(&self) -> Vec<u8> {
+			fs::read(&self.path).expect("grants")
+		}
+
+		fn rows(&self) -> Vec<WorkspaceTrustGrant> {
+			GrantsFile::read(&self.path).expect("read").workspace_trust
+		}
+
+		/// `path` spelled through `team/../team`.
+		fn respelled(&self, path: &Path) -> PathBuf {
+			let team = self.team.file_name().expect("subtree root name");
+			let respelled = self
+				.team
+				.join("..")
+				.join(team)
+				.join(path.strip_prefix(&self.team).expect("under the subtree"));
+			assert_ne!(respelled, path, "a different spelling");
+			respelled
+		}
+	}
+
+	#[test]
+	fn malformed_grant_file_is_a_typed_error() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = directory.path().join("grants.toml");
+		assert_eq!(GrantsFile::read(&path).expect("absent grants"), GrantsFile::default());
+		fs::write(&path, "workspace_trust = 3").expect("malformed grants");
+		let error = GrantsFile::read(&path).expect_err("malformed grants");
+		assert!(matches!(&error, GrantsFileError::Toml { path: failed, .. } if *failed == path));
+		assert_eq!(error.code(), ExtensionCode::EIntegrity);
+		assert!(matches!(
+			GrantsFile::persist_workspace_trust(
+				&path,
+				exact_trust(Path::new("/w"), "w"),
+				&TrustDecision::Untrusted,
+				&CanonicalHome::Unresolved,
+			),
+			Err(GrantPersistenceError::Read(GrantsFileError::Toml { .. }))
+		));
+		assert_eq!(fs::read_to_string(&path).expect("untouched grants"), "workspace_trust = 3");
+		let unreadable = directory.path().join("directory.toml");
+		fs::create_dir(&unreadable).expect("directory in place of the grant file");
+		assert!(matches!(GrantsFile::read(&unreadable), Err(GrantsFileError::Io { .. })));
+	}
+
+	#[test]
+	fn session_workspace_trust_never_persists() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = directory.path().join("grants.toml");
+		let session = WorkspaceTrustGrant {
+			duration: GrantDuration::Session,
+			..exact_trust(Path::new("/w"), "w")
+		};
+		GrantsFile { workspace_trust: vec![session.clone()], ..GrantsFile::default() }
+			.write(&path)
+			.expect("write durable subset");
+		assert!(
+			GrantsFile::read(&path)
+				.expect("read grants")
+				.workspace_trust
+				.is_empty()
+		);
+		assert!(matches!(
+			GrantsFile::persist_workspace_trust(
+				&path,
+				session,
+				&TrustDecision::Untrusted,
+				&CanonicalHome::Unresolved,
+			),
+			Err(GrantPersistenceError::SessionOnly)
+		));
+		let subtree = WorkspaceTrustGrant {
+			duration: GrantDuration::Session,
+			..trust_row(Path::new("/w"), TrustBinding::Subtree)
+		};
+		assert!(matches!(
+			GrantsFile::persist_workspace_subtree(&path, subtree),
+			Err(GrantPersistenceError::SessionOnly)
+		));
+	}
+
+	#[test]
+	fn persisted_workspace_trust_replaces_the_rows_slot() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		let home = CanonicalHome::Unresolved;
+		let repo = Path::new("/work/repo");
+		let subtree = trust_row(repo, TrustBinding::Subtree);
+		persist_exact(&path, repo, "old");
+		GrantsFile::persist_workspace_subtree(&path, subtree.clone())
+			.expect("lock and read")
+			.expect("subtree at the same root");
+		let changed = TrustDecision::DigestChanged { granted: inputs("old"), current: inputs("new") };
+		GrantsFile::persist_workspace_trust(&path, exact_trust(repo, "new"), &changed, &home)
+			.expect("lock and read")
+			.expect("retrust");
+		assert_eq!(GrantsFile::read(&path).expect("read").workspace_trust, [
+			subtree.clone(),
+			exact_trust(repo, "new"),
+		]);
+		// A revoke under the subtree puts a deny in the decision slot, and an
+		// exact grant answering the deny replaces it.
+		assert_eq!(
+			GrantsFile::revoke_workspace_trust(&path, repo, GrantScope::Exact, TrustChannel::Cli)
+				.expect("revoke"),
+			1
+		);
+		let rows = GrantsFile::read(&path).expect("read").workspace_trust;
+		assert_eq!(
+			rows
+				.iter()
+				.map(|row| (row.workspace.as_path(), row.binding.scope()))
+				.collect::<Vec<_>>(),
+			[(repo, TrustScope::Subtree), (repo, TrustScope::Deny)]
+		);
+		let persisted = GrantsFile::persist_workspace_trust(
+			&path,
+			exact_trust(repo, "new"),
+			&TrustDecision::Denied,
+			&home,
+		)
+		.expect("lock and read")
+		.expect("retrust the revoked workspace");
+		assert_eq!(persisted.workspace_trust, [subtree.clone(), exact_trust(repo, "new")]);
+
+		// Each writer refuses the other's rows without touching the file.
+		let before = fs::read(&path).expect("grants");
+		for refused in [subtree, trust_row(repo, TrustBinding::Deny)] {
+			let scope = refused.binding.scope();
+			assert_eq!(
+				GrantsFile::persist_workspace_trust(&path, refused, &TrustDecision::Untrusted, &home)
+					.expect("no lock taken"),
+				Err(WorkspaceTrustRefusal::Scope { scope })
+			);
+		}
+		assert_eq!(
+			GrantsFile::persist_workspace_subtree(&path, exact_trust(repo, "other"))
+				.expect("no lock taken"),
+			Err(WorkspaceTrustRefusal::Scope { scope: TrustScope::Exact })
+		);
+		assert_eq!(fs::read(&path).expect("grants"), before);
+	}
+
+	#[test]
+	fn revoke_under_a_live_subtree_stays_untrusted() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		assert_eq!(tree.decide("repo"), tree.asked());
+		tree
+			.answer(tree.pin("repo"), &tree.asked())
+			.expect("a pin answering the ask");
+		assert_eq!(tree.decide("repo"), TrustDecision::Trusted {
+			duration: GrantDuration::Persistent,
+		});
+
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 1);
+		let decision = tree.decide("repo");
+		assert_eq!(decision, TrustDecision::Denied, "the subtree neither trusts nor asks");
+		assert_eq!(decision.trust(), WorkspaceTrust::Untrusted);
+		// Revoking again changes nothing.
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 0);
+		assert_eq!(
+			GrantsFile::read(&tree.path)
+				.expect("read")
+				.workspace_trust
+				.iter()
+				.filter(|row| row.binding == TrustBinding::Deny)
+				.count(),
+			1
+		);
+	}
+
+	#[test]
+	fn a_stale_answer_never_undoes_a_concurrent_revoke() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		// A host asks about the repository under the subtree, and another
+		// process revokes it before the operator answers.
+		let asked = tree.decide("repo");
+		assert_eq!(asked, tree.asked());
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 0);
+		let before = tree.bytes();
+		assert_eq!(
+			tree.answer(tree.pin("repo"), &asked),
+			Err(WorkspaceTrustRefusal::Denied { workspace: tree.repo.clone() })
+		);
+		assert_eq!(
+			tree.answer(exact_trust(&tree.repo, "repo"), &asked),
+			Err(WorkspaceTrustRefusal::Stale {
+				workspace: tree.repo.clone(),
+				current:   TrustDecision::Denied,
+			})
+		);
+		assert_eq!(tree.bytes(), before, "a refused answer writes nothing");
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
+
+		// The same for a digest re-ask: the pinned inputs changed, and the
+		// revoke lands while the operator is asked about the new ones.
+		let tree = trust_tree();
+		tree.grant_subtree();
+		tree.answer(tree.pin("old"), &tree.asked()).expect("pin");
+		let asked = tree.decide("new");
+		assert_eq!(asked, TrustDecision::DigestChanged {
+			granted: inputs("old"),
+			current: inputs("new"),
+		});
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 1);
+		let before = tree.bytes();
+		assert_eq!(
+			tree.answer(tree.pin("new"), &asked),
+			Err(WorkspaceTrustRefusal::Denied { workspace: tree.repo.clone() })
+		);
+		assert_eq!(
+			tree.answer(exact_trust(&tree.repo, "new"), &asked),
+			Err(WorkspaceTrustRefusal::Stale {
+				workspace: tree.repo.clone(),
+				current:   TrustDecision::Denied,
+			})
+		);
+		assert_eq!(tree.bytes(), before, "a refused answer writes nothing");
+		assert_eq!(tree.decide("new"), TrustDecision::Denied);
+		// Only an exact grant answering the deny itself trusts it again.
+		tree
+			.answer(exact_trust(&tree.repo, "new"), &TrustDecision::Denied)
+			.expect("explicit re-trust");
+		assert_eq!(tree.decide("new"), TrustDecision::Trusted {
+			duration: GrantDuration::Persistent,
+		});
+	}
+
+	#[test]
+	fn a_pin_answered_after_its_subtree_was_revoked_never_revives() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		let asked = tree.decide("repo");
+		assert_eq!(tree.revoke(&tree.team, GrantScope::Subtree), 1);
+		let before = tree.bytes();
+		assert_eq!(
+			tree.answer(tree.pin("repo"), &asked),
+			Err(WorkspaceTrustRefusal::NoLiveSubtree {
+				workspace: tree.repo.clone(),
+				under:     tree.team.clone(),
+			})
+		);
+		assert_eq!(tree.bytes(), before, "a refused answer writes nothing");
+		assert_eq!(tree.decide("repo"), TrustDecision::Untrusted);
+		// Granting the subtree again asks about the repository again.
+		tree.grant_subtree();
+		assert_eq!(tree.decide("repo"), tree.asked());
+
+		// A dormant pin (a hand edit) is dropped when its subtree is granted
+		// anew, and a refreshed grant keeps the pins it admitted.
+		let tree = trust_tree();
+		GrantsFile::update(&tree.path, |grants| grants.workspace_trust.push(tree.pin("repo")))
+			.expect("hand-edited pin");
+		assert_eq!(tree.decide("repo"), TrustDecision::Untrusted);
+		tree.grant_subtree();
+		assert_eq!(tree.decide("repo"), tree.asked(), "the new grant asks");
+		tree.answer(tree.pin("repo"), &tree.asked()).expect("pin");
+		tree.grant_subtree();
+		assert_eq!(
+			tree.decide("repo"),
+			TrustDecision::Trusted { duration: GrantDuration::Persistent },
+			"a refreshed subtree keeps its pins"
+		);
+	}
+
+	#[test]
+	fn revoking_a_workspace_without_a_subtree_records_no_deny() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		let repo = Path::new("/work/repo");
+		persist_exact(&path, repo, "repo");
+		// `/work/re` is a string prefix of the workspace, not an ancestor.
+		let prefix = trust_row(Path::new("/work/re"), TrustBinding::Subtree);
+		GrantsFile::persist_workspace_subtree(&path, prefix.clone())
+			.expect("lock and read")
+			.expect("subtree row");
+		assert_eq!(
+			GrantsFile::revoke_workspace_trust(&path, repo, GrantScope::Exact, TrustChannel::Cli)
+				.expect("revoke"),
+			1
+		);
+		assert_eq!(GrantsFile::read(&path).expect("read").workspace_trust, [prefix]);
+	}
+
+	#[test]
+	fn revoking_a_subtree_drops_the_pins_it_admitted() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		let team = Path::new("/work/team");
+		let other = Path::new("/work/other");
+		let pin = |workspace: &Path, under: &Path| {
+			trust_row(workspace, TrustBinding::Pin {
+				under:         under.to_path_buf(),
+				inputs_digest: inputs("pin"),
+			})
+		};
+		let rows = [
+			trust_row(team, TrustBinding::Subtree),
+			trust_row(other, TrustBinding::Subtree),
+			pin(&team.join("a"), team),
+			pin(&other.join("b"), other),
+			exact_trust(&team.join("c"), "c"),
+			trust_row(&team.join("d"), TrustBinding::Deny),
+		];
+		GrantsFile::update(&path, |grants| grants.workspace_trust.extend(rows)).expect("seed rows");
+		assert_eq!(
+			GrantsFile::revoke_workspace_trust(&path, team, GrantScope::Subtree, TrustChannel::Cli)
+				.expect("revoke subtree"),
+			2
+		);
+		assert_eq!(GrantsFile::read(&path).expect("read").workspace_trust, [
+			trust_row(other, TrustBinding::Subtree),
+			pin(&other.join("b"), other),
+			exact_trust(&team.join("c"), "c"),
+			trust_row(&team.join("d"), TrustBinding::Deny),
+		]);
+	}
+
+	#[test]
+	fn a_revoke_matches_the_canonical_workspace_then_the_recorded_spelling() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		tree.answer(tree.pin("repo"), &tree.asked()).expect("pin");
+		// Another spelling of an existing workspace revokes its canonical row,
+		// and the deny lands where evaluation looks for it.
+		assert_eq!(tree.revoke(&tree.respelled(&tree.repo), GrantScope::Exact), 1);
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
+		assert_eq!(
+			tree
+				.rows()
+				.iter()
+				.map(|row| (row.workspace.as_path(), row.binding.scope()))
+				.collect::<Vec<_>>(),
+			[(tree.team.as_path(), TrustScope::Subtree), (tree.repo.as_path(), TrustScope::Deny)]
+		);
+		assert_eq!(tree.revoke(&tree.respelled(&tree.team), GrantScope::Subtree), 1);
+		assert!(
+			tree
+				.rows()
+				.iter()
+				.all(|row| row.binding != TrustBinding::Subtree),
+			"the subtree row is revoked"
+		);
+
+		// A deleted workspace cannot be canonicalized: its recorded spelling
+		// still revokes it.
+		let tree = trust_tree();
+		tree.grant_subtree();
+		tree.answer(tree.pin("repo"), &tree.asked()).expect("pin");
+		fs::remove_dir(&tree.repo).expect("delete the repository");
+		assert_eq!(tree.revoke(&tree.repo, GrantScope::Exact), 1);
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
+		assert_eq!(tree.revoke(&tree.team, GrantScope::Subtree), 1);
+	}
+
+	#[test]
+	fn a_revoke_naming_no_row_under_no_subtree_records_no_deny() {
+		let tree = trust_tree();
+		tree.grant_subtree();
+		let rows = tree.rows();
+		// A missing workspace spelled under the subtree: no row names it, and
+		// it has no canonical path a deny could be keyed by.
+		let missing = tree.team.join("gone").join("..").join("ghost");
+		assert_eq!(tree.revoke(&missing, GrantScope::Exact), 0);
+		assert_eq!(tree.rows(), rows, "no deny for a missing workspace no row names");
+		assert_eq!(tree.revoke(&missing, GrantScope::Subtree), 0);
+		assert_eq!(tree.rows(), rows);
+
+		// A link under the subtree to a workspace outside it: its canonical
+		// workspace is covered by no subtree.
+		#[cfg(unix)]
+		{
+			let outside = tempfile::tempdir().expect("workspace outside the subtree");
+			let link = tree.team.join("escape");
+			std::os::unix::fs::symlink(outside.path(), &link).expect("link into the subtree");
+			assert_eq!(tree.revoke(&link, GrantScope::Exact), 0);
+			assert_eq!(tree.rows(), rows, "no deny for a workspace no subtree covers");
+		}
+
+		// An existing workspace under the subtree, by another spelling, is
+		// denied at its canonical path.
+		assert_eq!(tree.revoke(&tree.respelled(&tree.repo), GrantScope::Exact), 0);
+		assert_eq!(tree.decide("repo"), TrustDecision::Denied);
+	}
+
+	#[test]
+	fn concurrent_persist_and_revoke_never_resurrect_a_revoked_row() {
+		use std::sync::{Arc, Barrier};
+
+		const WRITERS: usize = 4;
+		const ROUNDS: usize = 25;
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = Arc::new(grants_path(directory.path()));
+		let target = Path::new("/work/target");
+		persist_exact(&path, target, "target");
+		let start = Arc::new(Barrier::new(WRITERS + 1));
+		let writers = (0..WRITERS)
+			.map(|writer| {
+				let path = Arc::clone(&path);
+				let start = Arc::clone(&start);
+				thread::spawn(move || {
+					start.wait();
+					for round in 0..ROUNDS {
+						let workspace = PathBuf::from(format!("/work/writer-{writer}/{round}"));
+						persist_exact(&path, &workspace, "w");
+					}
+				})
+			})
+			.collect::<Vec<_>>();
+		start.wait();
+		thread::sleep(Duration::from_millis(5));
+		let removed =
+			GrantsFile::revoke_workspace_trust(&path, target, GrantScope::Exact, TrustChannel::Cli)
+				.expect("revoke during writes");
+		assert_eq!(removed, 1);
+		for writer in writers {
+			writer.join().expect("writer thread");
+		}
+		let rows = GrantsFile::read(&path).expect("read").workspace_trust;
+		assert!(
+			rows.iter().all(|row| row.workspace != target),
+			"a stale writer resurrected the revoked row"
+		);
+		assert_eq!(rows.len(), WRITERS * ROUNDS, "no concurrent write was lost");
+	}
+
+	#[test]
+	fn a_held_lock_times_out_with_a_typed_error_and_leaves_the_file() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		persist_exact(&path, Path::new("/w"), "w");
+		let before = fs::read(&path).expect("grants");
+		let held = GrantsFileLock::acquire(&path, GRANTS_LOCK_WAIT).expect("hold the lock");
+		let wait = Duration::from_millis(30);
+		let result = GrantsFile::locked(&path, wait, |grants| {
+			grants.workspace_trust.clear();
+			Ok::<_, Infallible>(())
+		});
+		match result {
+			Err(GrantPersistenceError::LockTimeout { path: lock, waited }) => {
+				assert_eq!(lock, directory.path().join("ext/grants.toml.lock"));
+				assert!(waited >= wait, "{waited:?}");
+			},
+			other => panic!("expected a lock timeout, got {other:?}"),
+		}
+		drop(held);
+		assert_eq!(fs::read(&path).expect("grants"), before);
+		// Released, the lock admits the next writer at once.
+		GrantsFile::update(&path, |grants| grants.workspace_trust.clear()).expect("update");
+		assert!(
+			GrantsFile::read(&path)
+				.expect("read")
+				.workspace_trust
+				.is_empty()
+		);
+	}
+
+	#[test]
+	fn a_refused_try_update_leaves_the_file_untouched() {
+		let directory = tempfile::tempdir().expect("grant directory");
+		let path = grants_path(directory.path());
+		persist_exact(&path, Path::new("/w"), "w");
+		let before = fs::read(&path).expect("grants");
+		let refused = GrantsFile::try_update(&path, |grants| {
+			grants.workspace_trust.clear();
+			Err::<(), _>("refused")
+		})
+		.expect("lock and read");
+		assert_eq!(refused, Err("refused"));
+		assert_eq!(fs::read(&path).expect("grants"), before);
 	}
 
 	#[test]

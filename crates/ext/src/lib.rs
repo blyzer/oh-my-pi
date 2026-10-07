@@ -16,6 +16,7 @@ pub mod plugin_command;
 pub mod resolver;
 pub mod trust;
 pub mod upgrade;
+pub mod workspace_trust;
 
 use omp_core::Str;
 use serde::{Deserialize, Serialize};

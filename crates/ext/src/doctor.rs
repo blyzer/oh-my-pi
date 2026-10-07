@@ -7,12 +7,13 @@ use std::{
 
 use omp_core::{Str, encoding::hex};
 use sha2::{Digest as _, Sha256};
+use thiserror::Error;
 
 use super::{
 	ExtensionCode, Layer, WorkspaceUri,
 	lock::{InstalledRecord, LockFile, LockedExtension},
 	trust::{
-		GrantsFile, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
+		GrantsFile, GrantsFileError, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
 		verify_artifact_signature,
 	},
 };
@@ -29,7 +30,7 @@ pub enum DoctorSeverity {
 }
 
 /// One stable doctor finding with repair evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct DoctorFinding {
 	/// Stable extension diagnostic code when applicable.
 	pub code:         Option<ExtensionCode>,
@@ -39,8 +40,19 @@ pub struct DoctorFinding {
 	pub extension_id: Option<Str>,
 	/// Human-readable evidence.
 	pub detail:       Str,
+	/// The typed failure behind the finding, when there is one. The report's
+	/// presenter renders it and its source chain after `detail`.
+	pub cause:        Option<DoctorCause>,
 	/// Whether this invocation repaired deterministic local state.
 	pub repaired:     bool,
+}
+
+/// A typed failure behind a [`DoctorFinding`].
+#[derive(Debug, Error)]
+pub enum DoctorCause {
+	/// The local operator grant file cannot be read or decoded.
+	#[error(transparent)]
+	Grants(#[from] GrantsFileError),
 }
 
 /// Paths and policy consumed by one doctor pass.
@@ -127,7 +139,17 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 	let grants = match GrantsFile::read(request.grants_path) {
 		Ok(grants) => Some(grants),
 		Err(error) => {
-			findings.push(finding(Some(error.code), DoctorSeverity::Error, None, error.detail, false));
+			let code = error.code();
+			findings.push(DoctorFinding {
+				cause: Some(DoctorCause::Grants(error)),
+				..finding(
+					Some(code),
+					DoctorSeverity::Error,
+					None,
+					Str::new_static("operator grants are unreadable, so no extension counts as granted"),
+					false,
+				)
+			});
 			None
 		},
 	};
@@ -358,7 +380,7 @@ const fn finding(
 	detail: Str,
 	repaired: bool,
 ) -> DoctorFinding {
-	DoctorFinding { code, severity, extension_id, detail, repaired }
+	DoctorFinding { code, severity, extension_id, detail, cause: None, repaired }
 }
 
 /// Returns paths referenced by the active lock/install generation. GC callers
@@ -435,5 +457,47 @@ mod tests {
 				&& finding.detail.contains("linked source")
 				&& finding.detail.contains("unsigned")
 		}));
+	}
+
+	#[test]
+	fn malformed_grant_file_is_an_integrity_finding_naming_its_cause() {
+		let tree = tempfile::tempdir().expect("doctor tree");
+		let grants_path = tree.path().join("grants.toml");
+		fs::write(&grants_path, "workspace_trust = 3").expect("malformed grants");
+		let request = DoctorRequest {
+			layer:                 Layer::Client,
+			lock_path:             &tree.path().join("omp.lock"),
+			installed_path:        &tree.path().join("installed.toml"),
+			keys_path:             &tree.path().join("keys.toml"),
+			grants_path:           &grants_path,
+			workspace:             None,
+			revocations_path:      None,
+			site_root:             &tree.path().join("sites"),
+			artifact_store:        &tree.path().join("artifacts"),
+			ambient_site_override: None,
+			foreign_roots:         &[],
+			fix:                   false,
+		};
+		let findings = diagnose(&request, &Healthy);
+		let finding = findings
+			.iter()
+			.find(|finding| finding.code == Some(ExtensionCode::EIntegrity))
+			.expect("grant file finding");
+		assert_eq!(finding.severity, DoctorSeverity::Error);
+		// The finding carries the typed failure, with the grant file path and
+		// the TOML cause, for the report's presenter to render.
+		let Some(DoctorCause::Grants(GrantsFileError::Toml { path, source })) = &finding.cause else {
+			panic!("a typed grant file cause: {finding:?}");
+		};
+		assert_eq!(*path, grants_path);
+		assert!(source.to_string().contains("workspace_trust"), "the TOML cause: {source}");
+		let cause = finding
+			.cause
+			.as_ref()
+			.map(|cause| cause as &dyn std::error::Error);
+		assert!(
+			cause.and_then(std::error::Error::source).is_some(),
+			"the cause chain reaches the TOML failure"
+		);
 	}
 }
