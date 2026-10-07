@@ -86,7 +86,8 @@ licences, runtime-symbol contracts and a second workspace lint on Linux;
 workspace tests and the e2e acceptance proofs on arm64 macOS and Linux (P7 also
 on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P12 and
 `tool_sources` (`ci.yml` says which job runs which; keep it and `just e2e` in
-step). P12 needs Seatbelt (it skips elsewhere), so it gates on the macOS job.
+step). P12 needs Seatbelt, so it gates on the macOS job: it skips off macOS,
+and on macOS a failed Seatbelt probe fails it.
 P8 remains a non-gating recorder: only its metric schema/arithmetic test
 gates. The measured performance baseline is recorded per omp2 push by
 `.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),

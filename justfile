@@ -215,7 +215,7 @@ e2e-p10:
 e2e-p11:
     cargo nextest run -p omp-e2e --test p11_collab_spectator --locked
 
-# Run proof P12: the real `omp envd` relays a sandbox amendment prompt only to the issuing connection (needs Seatbelt; skips elsewhere).
+# Run proof P12: the real `omp envd` relays a sandbox amendment prompt only to the issuing connection (needs Seatbelt: skips off macOS, fails on macOS without it).
 [group('e2e')]
 e2e-p12:
     cargo nextest run -p omp-e2e --test p12_daemon_approvals --locked

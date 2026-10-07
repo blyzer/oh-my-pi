@@ -10,7 +10,9 @@
 //! write into the protected `.git` carve-out is denied and files the prompt.
 //! The approved rerun writes `$$`, which the in-process shell expands to its
 //! host's process id, so the file proves the command ran inside the daemon.
-//! The proof needs Seatbelt and skips where it is unavailable.
+//! The proof needs Seatbelt, so it skips off macOS. On macOS an unavailable
+//! Seatbelt fails it instead: the macOS CI job is its only gate, which must
+//! never pass without running it.
 
 #![cfg(unix)]
 
@@ -34,8 +36,8 @@ use omp_env::{
 	APPROVAL_RELAY_CAPABILITY, ApprovalQueryEvent, ClientError, EnvClient, ExecEvent, ExecRun,
 };
 use omp_proto::env::v1::{
-	ApprovalAnswer, ApprovalDecision, ApprovalQuery, ExecOutcome, ExecRequest, ExecStatusMsg,
-	OpenSessionRequest, Script, client_frame, server_frame,
+	ApprovalAnswer, ApprovalDecision, ApprovalQuery, CloseSessionRequest, ExecOutcome, ExecRequest,
+	ExecStatusMsg, OpenSessionRequest, Script, client_frame, server_frame,
 };
 use url::Url;
 
@@ -54,21 +56,30 @@ struct Daemon {
 }
 
 impl Daemon {
-	/// Starts the daemon, or returns `None` where Seatbelt is unavailable.
+	/// Starts the daemon, or returns `None` off macOS. On macOS a failed
+	/// Seatbelt probe is an error naming the failure, never a skip.
 	async fn start() -> Result<Option<Self>> {
-		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
-			eprintln!("P12 skipped: the Seatbelt sandbox backend is unavailable on this host");
+		if !cfg!(target_os = "macos") {
+			eprintln!("P12 skipped: it needs the Seatbelt sandbox backend, which only macOS has");
 			return Ok(None);
+		}
+		if let Some(failure) = omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).failure() {
+			return Err(error(format!(
+				"P12 needs the Seatbelt sandbox backend, and its probe failed: {failure} ({failure:?})"
+			)));
 		}
 		let scratch = Scratch::new()?;
 		fs::create_dir(scratch.project().join(".git")).context("creating the .git carve-out")?;
+		// One canonical path both starts the daemon and names the build its
+		// docserver advertises, so the daemon recognizes the docserver as its own.
+		let executable = omp_binary().context("resolving the daemon executable")?;
 		let docserver = DocServerTask::spawn_for_daemon(
 			scratch.project(),
 			scratch.socket("attached-docserver.sock"),
-			&omp_binary()?,
+			&executable,
 		)
 		.await?;
-		let process = EnvHarness::spawn_attached(&scratch, docserver.socket()).await?;
+		let process = EnvHarness::spawn_attached(&scratch, &executable, docserver.socket()).await?;
 		let project = fs::canonicalize(scratch.project()).context("canonical project root")?;
 		Ok(Some(Self { process, docserver, project, _scratch: scratch }))
 	}
@@ -227,8 +238,26 @@ async fn round_trip(
 	}
 }
 
-/// Reads a raw exec's frames to its exit; a prompt or another request's frame
-/// fails the proof.
+/// Reads a raw exec's frames up to its relayed prompt; any other frame fails
+/// the proof.
+async fn raw_query(connection: &RawEnvConnection, request_id: u64) -> Result<ApprovalQuery> {
+	loop {
+		let frame = connection.next(RELAY_WAIT).await?;
+		if frame.request_id != request_id {
+			return Err(error(format!("unexpected frame before {request_id}'s prompt: {frame:?}")));
+		}
+		match frame.body {
+			Some(server_frame::Body::ApprovalQuery(query)) => return Ok(query),
+			Some(server_frame::Body::ExecStarted(_) | server_frame::Body::Output(_)) => {},
+			body => {
+				return Err(error(format!("expected a prompt on {request_id}, got {body:?}")));
+			},
+		}
+	}
+}
+
+/// Reads a raw exec's frames to its exit. A prompt, a withdrawal, or another
+/// request's frame fails the proof.
 async fn raw_exit(
 	connection: &RawEnvConnection,
 	request_id: u64,
@@ -255,7 +284,9 @@ async fn raw_exit(
 /// A daemon command's amendment prompt reaches only the connection that
 /// issued it, on the issuing request. Another relay-capable connection that
 /// names the same request and query decides nothing; the owner's denial
-/// denies, and its approval reruns the command once inside the daemon.
+/// denies, and its approval reruns the command once inside the daemon. The
+/// approving owner reads raw frames, so it sees that the daemon never
+/// withdraws the prompt it answered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p12_amendment_prompts_only_the_issuing_connection() -> Result<()> {
 	let Some(daemon) = Daemon::start().await? else {
@@ -285,17 +316,21 @@ async fn p12_amendment_prompts_only_the_issuing_connection() -> Result<()> {
 	assert_eq!(status.outcome, ExecOutcome::Denied as i32, "{status:?}");
 	assert!(!daemon.protected("omp-forged").exists(), "the forged approval wrote");
 
+	// The typed client drops a withdrawal of a query it already answered, so
+	// the approved command runs from a raw connection that sees every frame:
+	// after the answer, its request carries nothing but output and the exit.
+	let approver = daemon.relay_raw("p12-approver").await?;
+	let approver_session = round_trip(&approver, 1, &daemon.project).await?;
 	let approved_command = protected_write("omp-amend");
-	let mut approved = exec(owner.client(), &session, &approved_command).await?;
-	let (request_id, approved_query) = next_query(&queries).await?;
-	assert_eq!(request_id, approved.guard().request_id());
-	assert_ne!(approved_query.query_id, forged_query.query_id);
-	assert_amendment(&approved_query, &approved_command);
-	owner
-		.client()
-		.answer_approval(request_id, approved_query.query_id, decision(true))
+	approver
+		.send(2, client_frame::Body::Exec(exec_request(&approver_session, &approved_command)))
 		.await?;
-	let (status, _) = exit(&mut approved).await?;
+	let approved_query = raw_query(&approver, 2).await?;
+	assert_amendment(&approved_query, &approved_command);
+	approver
+		.send(2, answer(approved_query.query_id, true))
+		.await?;
+	let (status, _) = raw_exit(&approver, 2).await?;
 	assert_eq!(status.outcome, ExecOutcome::Exited as i32, "{status:?}");
 	assert_eq!(status.exit_code, Some(0), "{status:?}");
 	assert!(
@@ -309,20 +344,38 @@ async fn p12_amendment_prompts_only_the_issuing_connection() -> Result<()> {
 	assert_eq!(written, daemon_pid.to_string(), "the approved rerun ran outside the daemon");
 	assert_ne!(written, std::process::id().to_string());
 
-	assert!(queries.is_empty(), "an answered prompt was withdrawn: {:?}", queries.try_recv());
-	// The approved prompt never reached `other` either.
+	// The approver's prompt reached neither other connection. Each one's
+	// round trip is answered after anything the daemon sent it earlier, and
+	// the owner's client queues every prompt it receives, whatever request
+	// carries it.
+	owner
+		.client()
+		.close_session(CloseSessionRequest { session, ..CloseSessionRequest::default() })
+		.await?;
+	assert!(
+		queries.is_empty(),
+		"another connection's prompt reached the owner: {:?}",
+		queries.try_recv()
+	);
 	round_trip(&other, 2, &daemon.project).await?;
+	drop(approver);
 	drop(other);
 	drop(owner);
 	daemon.shutdown().await
 }
 
 /// Cancelling a command withdraws its open prompt before the command exits.
-/// Closing the issuing connection fails its open prompt closed: nothing is
-/// written, no other connection can decide it, and the session it held runs
-/// the next command well before any prompt timeout.
+/// Closing the issuing connection while its prompt is open ends the command
+/// without writing, and the session it held runs the next command well
+/// before any prompt timeout.
+///
+/// The close also cancels every command the connection still streams, so
+/// this case cannot tell the relay failing the prompt closed from that
+/// cancel. The relay's own disconnect, for a command that outlives its
+/// connection, is proven by `closing_a_connection_disconnects_its_relay` in
+/// `crates/envd/src/server.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn p12_cancel_withdraws_and_disconnect_fails_closed() -> Result<()> {
+async fn p12_cancel_withdraws_and_a_closed_owner_frees_its_session() -> Result<()> {
 	let Some(daemon) = Daemon::start().await? else {
 		return Ok(());
 	};
@@ -366,8 +419,8 @@ async fn p12_cancel_withdraws_and_disconnect_fails_closed() -> Result<()> {
 	.await?;
 
 	let next = daemon.relay_raw("p12-next").await?;
-	// Relay state is per connection: naming the closed connection's prompt
-	// decides nothing and draws no reply.
+	// Naming the closed connection's prompt from another connection draws no
+	// reply.
 	next
 		.send(dropped_request, answer(dropped_query.query_id, true))
 		.await?;

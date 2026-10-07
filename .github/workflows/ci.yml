@@ -364,8 +364,8 @@ jobs:
         run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked
 
       # P12 drives the real `omp envd` child through a Seatbelt sandbox
-      # amendment and skips where Seatbelt is unavailable, so it gates here:
-      # the Linux e2e job installs no sandbox backend and would only skip it.
+      # amendment, so it gates here: it skips off macOS, and on macOS a failed
+      # Seatbelt probe fails it rather than skipping it.
       - name: Run daemon approval relay proof P12
         run: cargo nextest run --profile ci -p omp-e2e --test p12_daemon_approvals --locked
 

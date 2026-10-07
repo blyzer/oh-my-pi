@@ -41,7 +41,10 @@ impl DocServerTask {
 	/// It advertises that executable's build identity. A daemon attaches only
 	/// to a live document authority of its own build and otherwise waits for
 	/// the authority to drain as stale, so the identity of the test process
-	/// (or none) would refuse it.
+	/// (or none) would refuse it. The identity hashes the path as spelled, so
+	/// `daemon_executable` must be the canonical path the daemon is started
+	/// from ([`super::omp_binary`]): that is the spelling the daemon's own
+	/// `current_exe` reports, on Linux whatever path started it.
 	pub async fn spawn_for_daemon(
 		project: impl Into<PathBuf>,
 		socket: impl Into<PathBuf>,

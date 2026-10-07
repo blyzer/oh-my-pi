@@ -153,9 +153,10 @@ impl EnvHarness {
 		})
 	}
 
-	/// Starts the production `envd` process attached to an existing real
-	/// docserver, which must advertise the daemon's build
-	/// ([`super::DocServerTask::spawn_for_daemon`]).
+	/// Starts the production `envd` process from `executable` attached to an
+	/// existing real docserver, which must advertise the daemon's build
+	/// ([`super::DocServerTask::spawn_for_daemon`] given this same
+	/// `executable`, the canonical [`omp_binary`]).
 	///
 	/// The child's `HOME` and its user config, data, state and cache roots
 	/// live under `scratch`, so the developer's `~/.o2` configuration never
@@ -163,6 +164,7 @@ impl EnvHarness {
 	/// sandbox) apply.
 	pub async fn spawn_attached(
 		scratch: &Scratch,
+		executable: &Path,
 		docserver_socket: &Path,
 	) -> Result<ProcessEnvHarness> {
 		install_omp_binary_env().context("exposing worker-capable host")?;
@@ -171,7 +173,7 @@ impl EnvHarness {
 		for root in ["config", "data", "state", "cache"] {
 			fs::create_dir_all(home.join(root)).context("creating isolated daemon home")?;
 		}
-		let mut command = Command::new(omp_binary().context("resolving worker-capable host")?);
+		let mut command = Command::new(executable);
 		command
 			.arg("envd")
 			.arg("--root")
