@@ -1,11 +1,12 @@
 //! Integrity and runtime-health diagnostics for `omp ext doctor`.
 
 use std::{
+	fmt::Write as _,
 	fs,
 	path::{Path, PathBuf},
 };
 
-use omp_core::{Str, encoding::hex};
+use omp_core::{Str, StrMut, encoding::hex};
 use sha2::{Digest as _, Sha256};
 
 use super::{
@@ -127,7 +128,13 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 	let grants = match GrantsFile::read(request.grants_path) {
 		Ok(grants) => Some(grants),
 		Err(error) => {
-			findings.push(finding(Some(error.code), DoctorSeverity::Error, None, error.detail, false));
+			findings.push(finding(
+				Some(error.code()),
+				DoctorSeverity::Error,
+				None,
+				evidence(&error),
+				false,
+			));
 			None
 		},
 	};
@@ -361,6 +368,22 @@ const fn finding(
 	DoctorFinding { code, severity, extension_id, detail, repaired }
 }
 
+/// Renders a typed failure and its source chain as finding evidence: the
+/// doctor's report is where the error is presented.
+fn evidence(error: &dyn std::error::Error) -> Str {
+	let mut detail = StrMut::with_capacity(128);
+	let mut cause = Some(error);
+	while let Some(error) = cause {
+		if !detail.is_empty() {
+			detail.push_str(": ");
+		}
+		// Writing into an in-memory buffer cannot fail.
+		let _ = write!(detail, "{error}");
+		cause = error.source();
+	}
+	detail.freeze()
+}
+
 /// Returns paths referenced by the active lock/install generation. GC callers
 /// retain these even when their version cache is otherwise unreachable.
 pub fn active_paths(request: &DoctorRequest<'_>) -> Vec<PathBuf> {
@@ -435,5 +458,34 @@ mod tests {
 				&& finding.detail.contains("linked source")
 				&& finding.detail.contains("unsigned")
 		}));
+	}
+
+	#[test]
+	fn malformed_grant_file_is_an_integrity_finding_naming_its_cause() {
+		let tree = tempfile::tempdir().expect("doctor tree");
+		let grants_path = tree.path().join("grants.toml");
+		fs::write(&grants_path, "workspace_trust = 3").expect("malformed grants");
+		let request = DoctorRequest {
+			layer:                 Layer::Client,
+			lock_path:             &tree.path().join("omp.lock"),
+			installed_path:        &tree.path().join("installed.toml"),
+			keys_path:             &tree.path().join("keys.toml"),
+			grants_path:           &grants_path,
+			workspace:             None,
+			revocations_path:      None,
+			site_root:             &tree.path().join("sites"),
+			artifact_store:        &tree.path().join("artifacts"),
+			ambient_site_override: None,
+			foreign_roots:         &[],
+			fix:                   false,
+		};
+		let findings = diagnose(&request, &Healthy);
+		let finding = findings
+			.iter()
+			.find(|finding| finding.code == Some(ExtensionCode::EIntegrity))
+			.expect("grant file finding");
+		assert_eq!(finding.severity, DoctorSeverity::Error);
+		assert!(finding.detail.contains(&*grants_path.to_string_lossy()), "{}", finding.detail);
+		assert!(finding.detail.contains("workspace_trust"), "the TOML cause: {}", finding.detail);
 	}
 }

@@ -29,8 +29,9 @@ use omp_ext::{
 	plugin_command::CommandApprovals,
 	resolver::{ResolvePlan, ResolveRequirement, SystemUv, compare_versions, minimal_unsat_core},
 	trust::{
-		Grant, GrantsFile, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
-		parse_grant_requests, validate_grant_request, verify_artifact_signature,
+		Grant, GrantPersistenceError, GrantsFile, GrantsFileError, KeysFile, RevocationFreshness,
+		RevocationsFile, grant_covers, parse_grant_requests, validate_grant_request,
+		verify_artifact_signature,
 	},
 	upgrade::{
 		Generation, PinsFile, apply_uninstall, concrete_features, gc_generations, plan_uninstall,
@@ -49,22 +50,42 @@ const MAX_WHEEL_BYTES: usize = 256 * 1024 * 1024;
 #[error("extension operation failed")]
 pub struct ExtensionCliFailure {
 	#[source]
-	source: omp_ext::ExtensionError,
+	source: ExtensionCliCause,
+}
+
+/// The typed extension failure behind an [`ExtensionCliFailure`].
+#[derive(Debug, thiserror::Error)]
+enum ExtensionCliCause {
+	/// An extension diagnostic.
+	#[error(transparent)]
+	Extension(#[from] omp_ext::ExtensionError),
+	/// The local grant file could not be read.
+	#[error(transparent)]
+	Grants(#[from] GrantsFileError),
 }
 
 impl ExtensionCliFailure {
-	fn new(source: omp_ext::ExtensionError) -> Self {
-		Self { source }
-	}
-
 	/// Uniform `omp ext` exit status for the stable diagnostic code.
 	pub const fn exit_code(&self) -> u8 {
-		self.source.exit_code()
+		match &self.source {
+			ExtensionCliCause::Extension(error) => error.exit_code(),
+			ExtensionCliCause::Grants(error) => error.code().exit_code(),
+		}
 	}
 }
 
-fn extension_failure(error: omp_ext::ExtensionError) -> miette::Report {
-	miette::Report::new(ExtensionCliFailure::new(error))
+fn extension_failure(error: impl Into<ExtensionCliCause>) -> miette::Report {
+	miette::Report::new(ExtensionCliFailure { source: error.into() })
+}
+
+/// A failed locked grant file update: an unreadable grant file keeps its
+/// extension diagnostic status; a lock or write failure is an ordinary
+/// failure.
+fn grants_update_failure(error: GrantPersistenceError) -> miette::Report {
+	match error {
+		GrantPersistenceError::Read(source) => extension_failure(source),
+		error => miette::Report::from_err(error),
+	}
 }
 
 /// Ctrl+C observed while an extension installer-owned child or network stream
@@ -1215,14 +1236,15 @@ fn uninstall(state: &StatePaths, args: ExtUninstallArgs) -> miette::Result<()> {
 	installed.write(&state.client_installed).into_diagnostic()?;
 	lock.write(&state.client_lock).into_diagnostic()?;
 	if !args.keep_grant {
-		let mut grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
 		let removed = plan
 			.installed
 			.iter()
 			.chain(&plan.locked)
 			.collect::<std::collections::BTreeSet<_>>();
-		grants.grants.retain(|grant| !removed.contains(&grant.id));
-		grants.write(&state.grants).into_diagnostic()?;
+		GrantsFile::update(&state.grants, |grants| {
+			grants.grants.retain(|grant| !removed.contains(&grant.id));
+		})
+		.map_err(grants_update_failure)?;
 	}
 	Ok(())
 }
@@ -1941,7 +1963,8 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 	if args.approve_commands || !args.approve_command.is_empty() {
 		return approve_plugin_commands(state, data_dir, &args);
 	}
-	let mut grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
+	// Read before any mutation, so an unreadable grant file changes nothing.
+	let grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
 	if args.show {
 		show_plugin_commands(state, data_dir, &args, &mut std::io::stdout().lock())?;
 		let keys = KeysFile::read(&state.keys).map_err(extension_failure)?;
@@ -1975,21 +1998,25 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 		return Ok(());
 	}
 	if args.revoke {
-		grants.grants.retain(|grant| grant.id != args.id);
-		grants.revoke_plugin_commands(omp_ext::plugin_command::PluginId::from_ref(&args.id), None);
-		grants.write(&state.grants).into_diagnostic()?;
+		GrantsFile::update(&state.grants, |grants| {
+			grants.grants.retain(|grant| grant.id != args.id);
+			grants.revoke_plugin_commands(omp_ext::plugin_command::PluginId::from_ref(&args.id), None);
+		})
+		.map_err(grants_update_failure)?;
 		return Ok(());
 	}
-	if args.ship == Some(Ship::Pickle) {
+	let pickle_refused = |grants: &GrantsFile| {
 		let tier_after = args.tier.map(tier);
-		if !grants
-			.grants
-			.iter()
-			.filter(|grant| grant.id == args.id)
-			.all(|grant| tier_after.unwrap_or(grant.tier) == omp_ext::TrustTier::Trusted)
-		{
-			return Err(miette!("pickle shipping requires the trusted extension tier"));
-		}
+		args.ship == Some(Ship::Pickle)
+			&& !grants
+				.grants
+				.iter()
+				.filter(|grant| grant.id == args.id)
+				.all(|grant| tier_after.unwrap_or(grant.tier) == omp_ext::TrustTier::Trusted)
+	};
+	let pickle_refusal = || miette!("pickle shipping requires the trusted extension tier");
+	if pickle_refused(&grants) {
+		return Err(pickle_refusal());
 	}
 	let mut changed = false;
 	if let Some(selected_tier) = args.tier {
@@ -2019,16 +2046,6 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 				}
 				changed = true;
 			}
-		}
-	}
-	for grant in grants.grants.iter_mut().filter(|grant| grant.id == args.id) {
-		if let Some(selected_tier) = args.tier {
-			grant.tier = tier(selected_tier);
-			changed = true;
-		}
-		if let Some(ship) = args.ship {
-			grant.ship = Str::new(<&'static str>::from(ship));
-			changed = true;
 		}
 	}
 	if let Some(key) = args.key {
@@ -2063,10 +2080,28 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 			.map_err(extension_failure)?;
 		keys.write(&state.keys).into_diagnostic()?;
 	}
-	if !changed {
-		return Err(miette!("no trust mutation was requested for {}", args.id));
-	}
-	grants.write(&state.grants).into_diagnostic()
+	GrantsFile::try_update(&state.grants, |grants| {
+		// Checked again under the lock: another writer may have changed a tier.
+		if pickle_refused(grants) {
+			return Err(pickle_refusal());
+		}
+		for grant in grants.grants.iter_mut().filter(|grant| grant.id == args.id) {
+			if let Some(selected_tier) = args.tier {
+				grant.tier = tier(selected_tier);
+				changed = true;
+			}
+			if let Some(ship) = args.ship {
+				grant.ship = Str::new(<&'static str>::from(ship));
+				changed = true;
+			}
+		}
+		if changed {
+			Ok(())
+		} else {
+			Err(miette!("no trust mutation was requested for {}", args.id))
+		}
+	})
+	.map_err(grants_update_failure)?
 }
 
 /// Every command the plugin identity `id` launches as a session in the
@@ -3018,51 +3053,56 @@ async fn install_index_source(
 	}
 	let ship = Str::new_static("installed");
 	let workspace = (state.layer == BackendLayer::Workspace).then_some(&state.workspace);
-	let mut grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
-	if consented {
-		grants.grants.retain(|grant| {
-			grant.id != extension.id
-				|| grant.layer != state.layer
-				|| grant.workspace.as_ref() != workspace
-		});
-		grants.grants.push(Grant {
-			id:                extension.id.clone(),
-			publisher:         extension.publisher_key.clone(),
-			layer:             state.layer,
-			workspace:         workspace.cloned(),
-			scope:             omp_ext::trust::GrantScope::Exact,
-			capability_digest: effective_capability_digest.clone(),
-			tier:              tier(args.tier),
-			ship:              ship.clone(),
-			granted_at:        Str::new(jiff::Timestamp::now().to_string()),
-			granted_by:        if environment_consent {
-				Str::new_static("environment")
-			} else {
-				Str::new_static("explicit-install")
-			},
-			duration:          omp_ext::trust::GrantDuration::Persistent,
-		});
-	}
-	if !grant_covers(
-		&grants,
-		&extension.id,
-		&extension.publisher_key,
-		state.layer,
-		workspace,
-		&effective_capability_digest,
-		tier(args.tier),
-		&ship,
-	) {
-		return Err(extension_failure(omp_ext::ExtensionError::new(
-			omp_ext::ExtensionCode::EConsent,
-			format!(
-				"no exact operator grant admits {} at {:?} tier with {} shipping",
-				extension.id, args.tier, ship
-			),
-		)));
-	}
-	if !args.dry_run {
-		grants.write(&state.grants).into_diagnostic()?;
+	let admit = |grants: &mut GrantsFile| {
+		if consented {
+			grants.grants.retain(|grant| {
+				grant.id != extension.id
+					|| grant.layer != state.layer
+					|| grant.workspace.as_ref() != workspace
+			});
+			grants.grants.push(Grant {
+				id:                extension.id.clone(),
+				publisher:         extension.publisher_key.clone(),
+				layer:             state.layer,
+				workspace:         workspace.cloned(),
+				scope:             omp_ext::trust::GrantScope::Exact,
+				capability_digest: effective_capability_digest.clone(),
+				tier:              tier(args.tier),
+				ship:              ship.clone(),
+				granted_at:        Str::new(jiff::Timestamp::now().to_string()),
+				granted_by:        if environment_consent {
+					Str::new_static("environment")
+				} else {
+					Str::new_static("explicit-install")
+				},
+				duration:          omp_ext::trust::GrantDuration::Persistent,
+			});
+		}
+		if grant_covers(
+			grants,
+			&extension.id,
+			&extension.publisher_key,
+			state.layer,
+			workspace,
+			&effective_capability_digest,
+			tier(args.tier),
+			&ship,
+		) {
+			Ok(())
+		} else {
+			Err(extension_failure(omp_ext::ExtensionError::new(
+				omp_ext::ExtensionCode::EConsent,
+				format!(
+					"no exact operator grant admits {} at {:?} tier with {} shipping",
+					extension.id, args.tier, ship
+				),
+			)))
+		}
+	};
+	if args.dry_run {
+		admit(&mut GrantsFile::read(&state.grants).map_err(extension_failure)?)?;
+	} else {
+		GrantsFile::try_update(&state.grants, admit).map_err(grants_update_failure)??;
 	}
 
 	lock.indexes = vec![if index.is_empty() {

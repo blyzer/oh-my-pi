@@ -15,8 +15,29 @@ sits below both and can be reasoned about as data in, data out.
   contributions.
 - `lock`: reproducible lockfiles and local installed/enabled records.
 - `resolver`: the `uv` resolution driver and R1-R12 policy checks.
-- `trust`: signature verification, trust tiers, and the local grant file,
-  including operator approvals of plugin-launched commands.
+- `trust`: signature verification, trust tiers, and the local grant file
+  (`<data>/ext/grants.toml`), including operator approvals of plugin-launched
+  commands and workspace trust rows. Every write is a locked read-modify-write
+  (`GrantsFile::update`/`try_update`, and the `persist*`/`revoke*` writers
+  built on it) under the sibling `grants.toml.lock`, waited on for a bounded
+  time, so a concurrent writer's stale read never brings back a revoked row.
+  Only persistent rows are read or written.
+- `workspace_trust`: operator trust in a workspace's own project-sourced
+  inputs. `WorkspaceTrust` is `untrusted` by default and only the host sets
+  it, never a convar. A `[[workspace_trust]]` row is keyed by the canonical
+  workspace root and bound, by its `scope`, to an `InputsDigest`
+  (`sha256:<hex>` of the gated inputs): `exact` trusts the workspace while
+  its inputs keep that digest; `subtree` is an explicit grant over a root
+  that never trusts a workspace on first use but asks once per workspace
+  (`PinUnderSubtree`; a non-interactive host treats it as untrusted); `pin`
+  is that answer, live only while the subtree row at exactly `under` is;
+  `deny` is a revocation that outranks any covering subtree. A subtree at
+  `/`, at the canonical home directory, or at an ancestor of it is refused,
+  and when home cannot be canonicalized every subtree is. `evaluate` is the
+  pure decision (`Trusted`, `PinUnderSubtree`, `DigestChanged`, `Untrusted`;
+  serializable for the journal). It takes the trust key separately from where
+  the inputs are hashed, so a host can key an isolated worktree by its
+  primary checkout.
 - `plugin_command`: the approval key (`Hash32` digest of plugin version,
   command, arguments, environment, working directory, a hook's event and
   matcher, and the contents of every plugin-root file the launch names, so a

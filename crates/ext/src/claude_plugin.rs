@@ -68,12 +68,11 @@ use serde_json::value::RawValue;
 use strum::{Display, IntoStaticStr};
 
 use crate::{
-	ExtensionError,
 	claude_hooks::{ClaudeHookEvent, HookHandlerGap, PluginHook},
 	plugin_command::{
 		CommandApprovals, PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest,
 	},
-	trust::{GrantsFile, grants_path},
+	trust::{GrantsFile, GrantsFileError, grants_path},
 };
 
 /// Registry file name inside a scope's plugin directory.
@@ -525,16 +524,10 @@ pub enum PluginDiagnostic {
 	/// The local grant file could not be read, so no plugin launch counts as
 	/// approved.
 	#[error(
-		"plugin command approvals in {} cannot be read; plugin servers and hooks that run commands do not start",
-		path.display()
+		"plugin command approvals cannot be read; plugin servers and hooks that run commands do not \
+		 start"
 	)]
-	CommandApprovals {
-		/// Grant file path.
-		path:   PathBuf,
-		/// Decoding failure.
-		#[source]
-		source: ExtensionError,
-	},
+	CommandApprovals(#[source] GrantsFileError),
 }
 
 /// One enabled, resolved plugin install.
@@ -753,11 +746,10 @@ impl ClaudePlugins {
 		let project = out.read_registry(&project_path);
 		let user = out.read_registry(&user_path);
 		let claude = claude.and_then(|home| out.read_claude_code(home, &project_root));
-		let approvals_path = grants_path(data_dir);
-		let approvals = GrantsFile::read(&approvals_path).map_or_else(
+		let approvals = GrantsFile::read(&grants_path(data_dir)).map_or_else(
 			|source| {
 				out.diagnostics
-					.push(PluginDiagnostic::CommandApprovals { path: approvals_path, source });
+					.push(PluginDiagnostic::CommandApprovals(source));
 				CommandApprovals::default()
 			},
 			|grants| grants.command_approvals(),
@@ -1535,7 +1527,7 @@ mod tests {
 
 		let resolved = ClaudePlugins::resolve(&data, &project, None);
 		assert!(
-			matches!(&resolved.diagnostics[..], [PluginDiagnostic::CommandApprovals { .. }]),
+			matches!(&resolved.diagnostics[..], [PluginDiagnostic::CommandApprovals(_)]),
 			"{:?}",
 			resolved.diagnostics
 		);
