@@ -49,6 +49,13 @@ sits below both and can be reasoned about as data in, data out.
   matches the workspace's canonical path, then its spelling as given (a
   workspace deleted since), and records a deny only at a spelling rows are
   keyed by: never for a missing workspace no row names.
+- `workspace_trust::inventory`: the gated project inputs and the
+  `InputsDigest` over them. It is the single owner of every gated path name:
+  envd's MCP, LSP/DAP, SSH host and vault loaders, the driver's native
+  extension, skill, prompt, secret and workflow loaders, and
+  `claude_plugin` import these constants, so a loader cannot read a gated
+  input the digest misses (envd tests assert its loaders read exactly these
+  names). See "Workspace trust inventory" below.
 - `plugin_command`: the approval key (`Hash32` digest of plugin version,
   command, arguments, environment, working directory, a hook's event and
   matcher, and the contents of every plugin-root file the launch names, so a
@@ -72,6 +79,58 @@ sits below both and can be reasoned about as data in, data out.
 - `claude_hooks`: Claude Code hook declarations (`hooks/hooks.json`, manifest
   `hooks`) parsed into typed hooks, plus the data tables mapping Claude events
   onto omp hook seams and Claude tool names onto omp tool families.
+
+## Workspace trust inventory
+
+`inventory(workspace, data_dir, budget)` reads a workspace's gated inputs and
+digests them. The digest is SHA-256 over the domain tag
+`omp.workspace-trust.inputs.v1\0`, the entry count (`u64` little-endian), then
+each entry in path-byte order: the length of its `/`-joined relative path
+(`u64` little-endian), the path, a `#[repr(u8)]` kind tag (`0` absent, `1`
+bytes, `2` `enabledPlugins` projection, `3` tree file, `4` executable tree
+file), and a 32-byte content hash (zero when absent). A golden test pins the
+encoding; bumping the domain version asks about every workspace once more.
+
+Gated (any change asks again):
+
+| Input | Recorded as |
+| --- | --- |
+| Every MCP file envd classes as project-scoped: `.omp/mcp.json`, `.mcp.json`, `.claude/.mcp.json`, `.codex/config.toml`, `.gemini/settings.json`, `.opencode/opencode.json{c,}`, `opencode.json{c,}`, `.cursor/mcp.json`, `.windsurf/mcp_config.json`, `.vscode/mcp.json`, `mcp.json`, `mcp.config.json` | whole file, or absent |
+| `lsp`/`dap` `.json`/`.yaml`/`.yml`, with and without a leading dot, in `.omp/` and at the root | whole file, or absent |
+| `.omp/hosts.toml`, `.omp/vaults.toml`, `.omp/secrets.yml`, `.omp/SYSTEM.md`, `.omp/APPEND_SYSTEM.md`, `.omp/TITLE_SYSTEM.md` | whole file, or absent |
+| `.claude/settings.json`, `.claude/settings.local.json` | only the `enabledPlugins` boolean entries plugin resolution reads (a permission edit does not ask again); the whole file when it is not JSON. The Claude Code installs they opt in live under the operator's Claude Code home and are not walked |
+| `.omp/plugins/installed_plugins.json` | whole file, or absent |
+| The root of every enabled install that registry records | inside the repository: walked as a tree; in the user plugin cache (`<data>/plugins/cache/plugins`): nothing, since the operator materialized it and its launches stay gated by `plugin_command`; anywhere else: refused (`ExternalPluginRoot`) |
+| `.omp/extensions`, `.agent/plugins`, `.agents/plugins` | every file, walked whole (`__pycache__` and dotfiles included: an unchecked-hash `.pyc` loads without its source), with its execute bit |
+| `.omp/workflows/*.toml` | whole file |
+
+Excluded, with the reason:
+
+- Context files (`AGENTS.md`, `CLAUDE.md`, ...), rules and skills outside the
+  walked trees: data the model reads, never authority; they load contained
+  (`omp_core::project_file`), and digesting them would ask again on every
+  documentation edit.
+- `.omp/config.cfg`: a project overlay may only `set`/`reset` the five
+  PROJECT-flag convars; every other command is denied.
+- `.omp/omp.lock` and `.omp/installed.toml`: inert records (audit F13) that
+  load nothing by themselves.
+- The `.omp/plugins` tree: a project-scope install links
+  `.omp/plugins/node_modules/<name>` to the user plugin cache, so walking it
+  would refuse every such workspace; the registry and in-repository install
+  roots are what bind project plugins.
+- Repo-local binary roots (`node_modules/.bin`, `.venv/bin`, `bin`, ...) that
+  the LSP resolver searches: they are gated by the trust decision, not by the
+  digest, so a trusted digest never vouches for them.
+- `.DS_Store`, `Thumbs.db` and nested `.git` entries inside trees: inert, no
+  loader reads them.
+
+Every read goes through `omp_core::project_file` (contained in the repository,
+regular files only, size-capped). A symbolic link inside a tree is followed
+while its canonical target stays in the repository (a link back to a
+directory being walked is not followed again); one that leaves is `Escapes`.
+Any refusal, unreadable directory, or `InventoryBudget` overrun (files, bytes,
+depth) is a typed `WorkspaceTrustError`: no digest, so nothing trusts the
+workspace.
 
 ## Claude Code hook events
 
