@@ -1,7 +1,10 @@
 //! Session-owned, policy-enforcing forward proxy for scoped sandbox networking.
 
 #[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::{
+	fd::{AsFd as _, AsRawFd as _, BorrowedFd},
+	unix::net::{UnixListener, UnixStream},
+};
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 use std::{
@@ -16,6 +19,7 @@ use std::{
 };
 
 use omp_core::{FastHashMap, Str, Ulid, encoding::base64};
+use omp_sandbox::{AcceptBackoff, AcceptFailure};
 use parking_lot::{Mutex, RwLock};
 use smallvec::SmallVec;
 #[cfg(target_os = "linux")]
@@ -153,14 +157,16 @@ type Attempts = Arc<Mutex<FastHashMap<Str, Attempt>>>;
 /// macOS and an owned Unix socket on Linux, so an untrusted command can reach
 /// it only through its platform-specific sandbox relay.
 pub(crate) struct ScopedProxy {
-	port:     u16,
+	port:      u16,
 	#[cfg(target_os = "linux")]
-	socket:   PathBuf,
-	shutdown: Arc<AtomicBool>,
-	attempts: Attempts,
-	listener: Option<JoinHandle<()>>,
+	socket:    PathBuf,
+	attempts:  Attempts,
+	/// Stops and joins the listener thread when the broker drops. Declared
+	/// before `_temp`, so on Linux the thread ends before its socket's
+	/// directory is removed.
+	_listener: ListenerThread,
 	#[cfg(target_os = "linux")]
-	_temp:    TempDir,
+	_temp:     TempDir,
 }
 
 impl ScopedProxy {
@@ -178,7 +184,6 @@ impl ScopedProxy {
 		settings: &SandboxSettings,
 		amendment: Option<(&Str, u16)>,
 	) -> io::Result<Self> {
-		let shutdown = Arc::new(AtomicBool::new(false));
 		let attempts = Arc::new(Mutex::new(FastHashMap::default()));
 		let policy = ProxyPolicy::from_settings(settings, amendment, Arc::clone(&attempts));
 		let live = Arc::new(AtomicUsize::new(0));
@@ -197,26 +202,16 @@ impl ScopedProxy {
 			let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
 				.local_addr()?
 				.port();
-			let stop = Arc::clone(&shutdown);
-			let wake = socket.clone();
-			let listener = spawn_listener("omp-scoped-proxy", listener, policy, live, stop)?;
-			return Ok(Self {
-				port,
-				socket: wake,
-				shutdown,
-				attempts,
-				listener: Some(listener),
-				_temp: temp,
-			});
+			let listener = spawn_listener("omp-scoped-proxy", listener, policy, live)?;
+			return Ok(Self { port, socket, attempts, _listener: listener, _temp: temp });
 		}
 
 		#[cfg(not(target_os = "linux"))]
 		{
 			let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
 			let port = listener.local_addr()?.port();
-			let listener =
-				spawn_listener("omp-scoped-proxy", listener, policy, live, Arc::clone(&shutdown))?;
-			Ok(Self { port, shutdown, attempts, listener: Some(listener) })
+			let listener = spawn_listener("omp-scoped-proxy", listener, policy, live)?;
+			Ok(Self { port, attempts, _listener: listener })
 		}
 	}
 
@@ -263,24 +258,6 @@ impl ScopedProxy {
 	#[cfg(target_os = "linux")]
 	pub(crate) fn socket(&self) -> &Path {
 		&self.socket
-	}
-}
-
-impl Drop for ScopedProxy {
-	fn drop(&mut self) {
-		self.shutdown.store(true, Ordering::Release);
-		// The listener thread blocks in `accept`; one connection wakes it to see
-		// the flag. Should that connection fail, joining could wait forever, so
-		// the thread is detached instead and exits if a connection ever reaches it.
-		#[cfg(target_os = "linux")]
-		let woke = UnixStream::connect(&self.socket).is_ok();
-		#[cfg(not(target_os = "linux"))]
-		let woke = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port)).is_ok();
-		if let Some(listener) = self.listener.take()
-			&& woke
-		{
-			let _ = listener.join();
-		}
 	}
 }
 
@@ -351,6 +328,18 @@ impl ClientStream for UnixStream {
 trait BrokerListener: Send + 'static {
 	type Stream: ClientStream;
 	fn accept(&self) -> io::Result<Self::Stream>;
+	/// Makes `accept` report `WouldBlock` instead of waiting. The listener
+	/// thread waits in `poll` first, and a connection its peer abandons
+	/// between that wait and `accept` must not leave the thread blocked where
+	/// its stop signal cannot reach it.
+	#[cfg(unix)]
+	fn make_nonblocking(&self) -> io::Result<()>;
+	/// The descriptor `poll` watches for a pending connection.
+	#[cfg(unix)]
+	fn descriptor(&self) -> BorrowedFd<'_>;
+	/// The address one connection to which wakes a blocked `accept`.
+	#[cfg(not(unix))]
+	fn address(&self) -> io::Result<SocketAddr>;
 }
 
 impl BrokerListener for TcpListener {
@@ -358,6 +347,21 @@ impl BrokerListener for TcpListener {
 
 	fn accept(&self) -> io::Result<Self::Stream> {
 		TcpListener::accept(self).map(|(stream, _)| stream)
+	}
+
+	#[cfg(unix)]
+	fn make_nonblocking(&self) -> io::Result<()> {
+		self.set_nonblocking(true)
+	}
+
+	#[cfg(unix)]
+	fn descriptor(&self) -> BorrowedFd<'_> {
+		self.as_fd()
+	}
+
+	#[cfg(not(unix))]
+	fn address(&self) -> io::Result<SocketAddr> {
+		self.local_addr()
 	}
 }
 
@@ -368,55 +372,230 @@ impl BrokerListener for UnixListener {
 	fn accept(&self) -> io::Result<Self::Stream> {
 		UnixListener::accept(self).map(|(stream, _)| stream)
 	}
+
+	fn make_nonblocking(&self) -> io::Result<()> {
+		self.set_nonblocking(true)
+	}
+
+	fn descriptor(&self) -> BorrowedFd<'_> {
+		self.as_fd()
+	}
 }
 
-/// Serves `listener` on its own thread until `shutdown` is set.
+/// A running broker listener thread and the means to stop it. Dropping it
+/// raises the shutdown flag, wakes the thread and joins it.
+struct ListenerThread {
+	/// Raised before the thread is woken. Client workers read it too.
+	shutdown: Arc<AtomicBool>,
+	/// The owner's end of a socket pair made with the thread. Closing it ends
+	/// the thread's `poll`, so stopping needs no new descriptor and cannot
+	/// fail, even while the process has no descriptor left.
+	#[cfg(unix)]
+	wake:     Option<UnixStream>,
+	/// The listener's address: one connection to it wakes the blocked
+	/// `accept`.
+	#[cfg(not(unix))]
+	address:  SocketAddr,
+	thread:   Option<JoinHandle<()>>,
+}
+
+impl Drop for ListenerThread {
+	fn drop(&mut self) {
+		self.shutdown.store(true, Ordering::Release);
+		#[cfg(unix)]
+		let woke = {
+			drop(self.wake.take());
+			true
+		};
+		// Should the wake connection fail, joining could wait forever, so the
+		// thread is detached instead and exits if a connection ever reaches it.
+		#[cfg(not(unix))]
+		let woke = TcpStream::connect(self.address).is_ok();
+		if let Some(thread) = self.thread.take()
+			&& woke
+		{
+			let _ = thread.join();
+		}
+	}
+}
+
+/// The listener thread's side of [`ListenerThread`]: its shutdown flag and,
+/// on Unix, the end of the wake pair that turns readable once the owner's end
+/// closes.
+struct StopSignal {
+	shutdown: Arc<AtomicBool>,
+	#[cfg(unix)]
+	woken:    UnixStream,
+}
+
+impl StopSignal {
+	fn raised(&self) -> bool {
+		self.shutdown.load(Ordering::Acquire)
+	}
+
+	/// Blocks until `listener` may have a pending connection. `Ok(false)`
+	/// means the owner stopped the thread.
+	#[cfg(unix)]
+	fn wait<L: BrokerListener>(&self, listener: &L) -> io::Result<bool> {
+		let mut descriptors = [poll_in(self.woken.as_fd()), poll_in(listener.descriptor())];
+		// SAFETY: both entries are initialized and name descriptors that `self`
+		// and `listener` keep open for the whole call.
+		if unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) } < 0 {
+			return Err(io::Error::last_os_error());
+		}
+		Ok(descriptors[0].revents == 0)
+	}
+
+	/// The listener's own blocking `accept` is the wait: the owner's wake
+	/// connection ends it.
+	#[cfg(not(unix))]
+	fn wait<L: BrokerListener>(&self, _listener: &L) -> io::Result<bool> {
+		Ok(!self.raised())
+	}
+
+	/// Waits out one exhausted-accept backoff. Returns whether the owner
+	/// stopped the thread meanwhile; on Unix that ends the wait at once.
+	#[cfg(unix)]
+	fn pause(&self, delay: Duration) -> bool {
+		let mut descriptor = poll_in(self.woken.as_fd());
+		let timeout = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
+		// SAFETY: `descriptor` is initialized and names the wake socket `self`
+		// keeps open for the whole call.
+		let polled = unsafe { libc::poll(&raw mut descriptor, 1, timeout) };
+		polled > 0 || self.raised()
+	}
+
+	/// Waits out one exhausted-accept backoff. Returns whether the owner
+	/// stopped the thread meanwhile.
+	#[cfg(not(unix))]
+	fn pause(&self, delay: Duration) -> bool {
+		thread::sleep(delay);
+		self.raised()
+	}
+}
+
+/// A `poll` entry waiting for `descriptor` to turn readable.
+#[cfg(unix)]
+fn poll_in(descriptor: BorrowedFd<'_>) -> libc::pollfd {
+	libc::pollfd { fd: descriptor.as_raw_fd(), events: libc::POLLIN, revents: 0 }
+}
+
+/// Serves `listener` on its own thread until the returned handle drops.
 ///
-/// The thread blocks in `accept`, so an idle broker costs no wakeups. Whoever
-/// stops it sets `shutdown` and then connects once, which wakes the blocked
-/// `accept` to see the flag.
+/// On Unix the thread waits in `poll` on the listener and on a wake socket
+/// pair made here, so an idle broker costs no wakeups and stopping it needs no
+/// new descriptor. Elsewhere it blocks in `accept`, and stopping it connects
+/// once to wake it.
 fn spawn_listener<L>(
 	name: &str,
 	listener: L,
 	policy: ProxyPolicy,
 	live: Arc<AtomicUsize>,
-	shutdown: Arc<AtomicBool>,
-) -> io::Result<JoinHandle<()>>
+) -> io::Result<ListenerThread>
 where
 	L: BrokerListener,
 {
-	thread::Builder::new().name(name.into()).spawn(move || {
-		let rejecting = Arc::new(AtomicUsize::new(0));
-		while !shutdown.load(Ordering::Acquire) {
-			match listener.accept() {
-				Ok(_stream) if shutdown.load(Ordering::Acquire) => break,
-				// BSD accept() hands out sockets that inherit a nonblocking listener's
-				// O_NONBLOCK; every path below reads with blocking calls bounded by
-				// socket timeouts.
-				Ok(stream) if stream.set_blocking().is_err() => {},
-				Ok(stream) if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS => {
-					live.fetch_sub(1, Ordering::AcqRel);
-					reject_over_limit(stream, &rejecting);
-				},
-				Ok(stream) => {
-					let policy = policy.clone();
-					let worker_live = Arc::clone(&live);
-					let stop = Arc::clone(&shutdown);
-					if thread::Builder::new()
-						.name("omp-scoped-proxy-client".into())
-						.spawn(move || {
-							let _ = serve(stream, &policy, &stop);
-							worker_live.fetch_sub(1, Ordering::AcqRel);
-						})
-						.is_err()
-					{
-						live.fetch_sub(1, Ordering::AcqRel);
+	let shutdown = Arc::new(AtomicBool::new(false));
+	#[cfg(unix)]
+	let (wake, woken) = UnixStream::pair()?;
+	#[cfg(unix)]
+	listener.make_nonblocking()?;
+	#[cfg(not(unix))]
+	let address = listener.address()?;
+	let stop = StopSignal {
+		shutdown: Arc::clone(&shutdown),
+		#[cfg(unix)]
+		woken,
+	};
+	let thread = thread::Builder::new()
+		.name(name.into())
+		.spawn(move || accept_until_stopped(&listener, &stop, &policy, &live))?;
+	Ok(ListenerThread {
+		shutdown,
+		#[cfg(unix)]
+		wake: Some(wake),
+		#[cfg(not(unix))]
+		address,
+		thread: Some(thread),
+	})
+}
+
+/// Accepts on `listener` until `stop` is raised or the listener itself fails.
+///
+/// A failure that belongs to one connection is skipped, and descriptor or
+/// memory exhaustion backs off ([`AcceptFailure`]), so neither ends the broker
+/// for the rest of its session.
+fn accept_until_stopped<L>(
+	listener: &L,
+	stop: &StopSignal,
+	policy: &ProxyPolicy,
+	live: &Arc<AtomicUsize>,
+) where
+	L: BrokerListener,
+{
+	let rejecting = Arc::new(AtomicUsize::new(0));
+	let mut backoff = AcceptBackoff::default();
+	loop {
+		let accepted = match stop.wait(listener) {
+			Ok(false) => break,
+			Ok(true) => listener.accept(),
+			Err(error) => Err(error),
+		};
+		match accepted {
+			Ok(_stream) if stop.raised() => break,
+			Ok(stream) => {
+				backoff.reset();
+				admit(stream, policy, live, &rejecting, &stop.shutdown);
+			},
+			Err(error) => match AcceptFailure::of(&error) {
+				AcceptFailure::Transient => {},
+				AcceptFailure::Exhausted => {
+					if stop.pause(backoff.next_delay()) {
+						break;
 					}
 				},
-				Err(_) => break,
-			}
+				AcceptFailure::Fatal => {
+					tracing::warn!(%error, "scoped egress broker stopped: its listener failed");
+					break;
+				},
+			},
 		}
-	})
+	}
+}
+
+/// Hands one accepted connection to its own worker thread, or refuses it past
+/// [`MAX_CONNECTIONS`].
+fn admit<S: ClientStream>(
+	stream: S,
+	policy: &ProxyPolicy,
+	live: &Arc<AtomicUsize>,
+	rejecting: &Arc<AtomicUsize>,
+	shutdown: &Arc<AtomicBool>,
+) {
+	// BSD accept() hands out sockets that inherit the nonblocking listener's
+	// O_NONBLOCK; every path below reads with blocking calls bounded by socket
+	// timeouts.
+	if stream.set_blocking().is_err() {
+		return;
+	}
+	if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+		live.fetch_sub(1, Ordering::AcqRel);
+		reject_over_limit(stream, rejecting);
+		return;
+	}
+	let policy = policy.clone();
+	let worker_live = Arc::clone(live);
+	let stop = Arc::clone(shutdown);
+	if thread::Builder::new()
+		.name("omp-scoped-proxy-client".into())
+		.spawn(move || {
+			let _ = serve(stream, &policy, &stop);
+			worker_live.fetch_sub(1, Ordering::AcqRel);
+		})
+		.is_err()
+	{
+		live.fetch_sub(1, Ordering::AcqRel);
+	}
 }
 
 /// Refuses a connection past [`MAX_CONNECTIONS`] without stalling `accept`: a
@@ -2242,14 +2421,6 @@ mod tests {
 		proxy.join().expect("denial proxy");
 	}
 
-	/// Stops a test broker the way [`ScopedProxy`]'s `Drop` does: raise the
-	/// flag, then connect once so the blocked `accept` returns and sees it.
-	fn stop_listener(address: SocketAddr, shutdown: &AtomicBool, broker: thread::JoinHandle<()>) {
-		shutdown.store(true, Ordering::Release);
-		TcpStream::connect(address).expect("wake the blocked accept");
-		broker.join().expect("broker");
-	}
-
 	/// Accepts the way BSD and macOS do for a nonblocking listener: the stream
 	/// inherits the listener's `O_NONBLOCK`, which Linux never passes on.
 	struct InheritingListener(TcpListener);
@@ -2261,6 +2432,21 @@ mod tests {
 			let (stream, _) = self.0.accept()?;
 			stream.set_nonblocking(true)?;
 			Ok(stream)
+		}
+
+		#[cfg(unix)]
+		fn make_nonblocking(&self) -> io::Result<()> {
+			self.0.make_nonblocking()
+		}
+
+		#[cfg(unix)]
+		fn descriptor(&self) -> BorrowedFd<'_> {
+			self.0.descriptor()
+		}
+
+		#[cfg(not(unix))]
+		fn address(&self) -> io::Result<SocketAddr> {
+			self.0.address()
 		}
 	}
 
@@ -2287,14 +2473,12 @@ mod tests {
 
 		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
 		let address = listener.local_addr().expect("proxy address");
-		let shutdown = Arc::new(AtomicBool::new(false));
 		let live = Arc::new(AtomicUsize::new(0));
 		let broker = spawn_listener(
 			"omp-scoped-proxy-test",
 			InheritingListener(listener),
 			policy(port),
 			Arc::clone(&live),
-			Arc::clone(&shutdown),
 		)
 		.expect("broker");
 
@@ -2323,7 +2507,7 @@ mod tests {
 		assert!(response.starts_with("HTTP/1.1 204"), "response: {response:?}");
 		drop(client);
 		upstream_task.join().expect("upstream task");
-		stop_listener(address, &shutdown, broker);
+		drop(broker);
 	}
 
 	#[test]
@@ -2339,38 +2523,24 @@ mod tests {
 		client
 			.shutdown(std::net::Shutdown::Write)
 			.expect("request end");
-		let shutdown = Arc::new(AtomicBool::new(false));
 		let saturated = Arc::new(AtomicUsize::new(MAX_CONNECTIONS));
-		let broker = spawn_listener(
-			"omp-scoped-proxy-test",
-			listener,
-			policy(80),
-			saturated,
-			Arc::clone(&shutdown),
-		)
-		.expect("broker");
+		let broker =
+			spawn_listener("omp-scoped-proxy-test", listener, policy(80), saturated).expect("broker");
 		let mut response = String::new();
 		client
 			.read_to_string(&mut response)
 			.expect("over-limit denial is delivered before a clean close");
 		assert!(response.starts_with("HTTP/1.1 403"));
-		stop_listener(address, &shutdown, broker);
+		drop(broker);
 	}
 
 	#[test]
 	fn over_limit_rejections_never_stall_accept() {
 		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
 		let address = listener.local_addr().expect("proxy address");
-		let shutdown = Arc::new(AtomicBool::new(false));
 		let saturated = Arc::new(AtomicUsize::new(MAX_CONNECTIONS));
-		let broker = spawn_listener(
-			"omp-scoped-proxy-test",
-			listener,
-			policy(80),
-			saturated,
-			Arc::clone(&shutdown),
-		)
-		.expect("broker");
+		let broker =
+			spawn_listener("omp-scoped-proxy-test", listener, policy(80), saturated).expect("broker");
 		// Silent clients never end their input, so every lingering rejection holds
 		// its drain open; clients past the rejection cap must still be answered.
 		// A stalled accept delays one client by a full drain timeout, so each
@@ -2399,7 +2569,159 @@ mod tests {
 			clients.push(client);
 		}
 		drop(clients);
-		stop_listener(address, &shutdown, broker);
+		drop(broker);
+	}
+
+	/// Wraps a real listener and fails its first accepts with scripted errnos,
+	/// and every later one with `EMFILE` while `exhausted`, counting each
+	/// call. A failed accept leaves the pending connection queued, as the
+	/// kernel does for exhaustion, so the listener stays readable.
+	#[cfg(unix)]
+	struct ScriptedListener {
+		inner:     TcpListener,
+		failures:  &'static [i32],
+		exhausted: bool,
+		calls:     Arc<AtomicUsize>,
+	}
+
+	#[cfg(unix)]
+	impl BrokerListener for ScriptedListener {
+		type Stream = TcpStream;
+
+		fn accept(&self) -> io::Result<Self::Stream> {
+			let call = self.calls.fetch_add(1, Ordering::AcqRel);
+			if let Some(&code) = self.failures.get(call) {
+				return Err(io::Error::from_raw_os_error(code));
+			}
+			if self.exhausted {
+				return Err(io::Error::from_raw_os_error(libc::EMFILE));
+			}
+			self.inner.accept().map(|(stream, _)| stream)
+		}
+
+		fn make_nonblocking(&self) -> io::Result<()> {
+			self.inner.make_nonblocking()
+		}
+
+		fn descriptor(&self) -> BorrowedFd<'_> {
+			self.inner.descriptor()
+		}
+	}
+
+	/// A scripted loopback listener, its address and its accept counter.
+	#[cfg(unix)]
+	fn scripted(
+		failures: &'static [i32],
+		exhausted: bool,
+	) -> (ScriptedListener, SocketAddr, Arc<AtomicUsize>) {
+		let inner = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
+		let address = inner.local_addr().expect("proxy address");
+		let calls = Arc::new(AtomicUsize::new(0));
+		(ScriptedListener { inner, failures, exhausted, calls: Arc::clone(&calls) }, address, calls)
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn an_idle_broker_waits_without_calling_accept() {
+		let (listener, _, calls) = scripted(&[], false);
+		let broker = spawn_listener(
+			"omp-scoped-proxy-test",
+			listener,
+			policy(80),
+			Arc::new(AtomicUsize::new(0)),
+		)
+		.expect("broker");
+		thread::sleep(Duration::from_millis(200));
+		assert_eq!(calls.load(Ordering::Acquire), 0, "an idle broker polled accept");
+		drop(broker);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn transient_and_exhausted_accept_failures_keep_the_broker_serving() {
+		let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
+		let port = upstream.local_addr().expect("upstream address").port();
+		let upstream_task = thread::spawn(move || {
+			let (mut stream, _) = upstream.accept().expect("upstream client");
+			let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+			let mut line = String::new();
+			while line != "\r\n" {
+				line.clear();
+				reader.read_line(&mut line).expect("request head");
+			}
+			stream
+				.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+				.expect("response");
+		});
+
+		let failures = &[libc::ECONNABORTED, libc::EMFILE, libc::EINTR, libc::ENOBUFS, libc::EPROTO];
+		let (listener, address, calls) = scripted(failures, false);
+		let broker = spawn_listener(
+			"omp-scoped-proxy-test",
+			listener,
+			policy(port),
+			Arc::new(AtomicUsize::new(0)),
+		)
+		.expect("broker");
+		let started = Instant::now();
+		let mut client = TcpStream::connect(address).expect("connect proxy");
+		write!(
+			client,
+			"GET http://127.0.0.1:{port}/ HTTP/1.1\r\nProxy-Authorization: Basic \
+			 b21wOnRlc3QtdG9rZW4=\r\n\r\n"
+		)
+		.expect("request");
+		client
+			.set_read_timeout(Some(Duration::from_secs(5)))
+			.expect("read timeout");
+		let mut response = String::new();
+		client.read_to_string(&mut response).expect("response");
+		assert!(response.starts_with("HTTP/1.1 204"), "response: {response:?}");
+		assert_eq!(calls.load(Ordering::Acquire), failures.len() + 1);
+		// The two exhausted accepts waited out the first two backoff steps.
+		assert!(started.elapsed() >= AcceptBackoff::FIRST * 3);
+		upstream_task.join().expect("upstream task");
+		drop(broker);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn persistent_exhaustion_backs_off_instead_of_spinning() {
+		let (listener, address, calls) = scripted(&[], true);
+		let broker = spawn_listener(
+			"omp-scoped-proxy-test",
+			listener,
+			policy(80),
+			Arc::new(AtomicUsize::new(0)),
+		)
+		.expect("broker");
+		// The pending connection keeps the listener readable while every accept
+		// fails.
+		let _client = TcpStream::connect(address).expect("connect proxy");
+		thread::sleep(Duration::from_millis(300));
+		// Waits of 5, 10, 20, 40, 80 and 160 ms fit at most seven accepts in
+		// 300 ms; a spinning listener makes thousands.
+		let made = calls.load(Ordering::Acquire);
+		assert!((2..=8).contains(&made), "{made} accepts in 300 ms of exhaustion");
+		drop(broker);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn stopping_ends_an_exhaustion_backoff_at_once() {
+		let shutdown = Arc::new(AtomicBool::new(false));
+		let (wake, woken) = UnixStream::pair().expect("wake pair");
+		let stop = StopSignal { shutdown: Arc::clone(&shutdown), woken };
+		let pausing = thread::spawn(move || {
+			let started = Instant::now();
+			(stop.pause(Duration::from_secs(30)), started.elapsed())
+		});
+		thread::sleep(Duration::from_millis(50));
+		shutdown.store(true, Ordering::Release);
+		drop(wake);
+		let (stopped, waited) = pausing.join().expect("pause");
+		assert!(stopped, "the pause did not report the stop");
+		assert!(waited < Duration::from_secs(10), "the backoff outlived its stop: {waited:?}");
 	}
 
 	#[test]

@@ -177,7 +177,10 @@ The owner decided that the shipped network posture for agent commands is `scoped
    (`com.apple.trustd`, `com.apple.SecurityServer`, `com.apple.ocspd`, the `SystemConfiguration`
    services and others) for every default command, where the closed network denied them; a follow-up
    should measure which of them proxy-aware TLS clients need. Every default shell session owns a broker
-   listener thread, which blocks in `accept` and is woken by a self-connect on drop rather than polling.
+   listener thread, which waits in `poll` on its listener and on a wake socket pair made with it, so an
+   idle broker costs no wakeups and stopping it needs no new descriptor. The Linux in-namespace relay
+   blocks in `accept`. Neither stops on a failure that belongs to one connection, and descriptor or
+   memory exhaustion only backs them off (`omp_sandbox::AcceptFailure`).
    The first contact with each host prompts in interactive sessions, and headless print, which binds no
    approval route, ends every refused network attempt as `Denied`; a multi-host install still fails
    after its single rerun unless each host is approved for the session (amendment 2026-10-07,
