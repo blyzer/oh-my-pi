@@ -7,6 +7,7 @@
 mod device_path;
 mod diag;
 mod incoming;
+mod pins;
 mod registry;
 pub mod render;
 mod restrictions;
@@ -36,6 +37,7 @@ pub use omp_core::slopjson::{PullMode, Pulled, PulledKind, PulledValueKind};
 use omp_core::{Hash32, InvocationPhase, SparseMap, Str, sf};
 pub use omp_proto::inference::v1::{Fallback, InvokeInput};
 use omp_proto::policy::v1;
+pub use pins::{InvocationPins, ResolutionPin};
 pub use registry::{
 	AvailabilityDelta, Claim, Claims, ConstraintDisposition, DeviceMetadata, DeviceTarget, ErasedEv,
 	ErasedOutcome, ErasedStream, GoalToolState, HostToolExecutor, HostToolInvocation,
@@ -1424,7 +1426,9 @@ pub trait Tool: Send + Sync + 'static {
 	/// than its envelope admits; the registry refuses a call whose envelope is
 	/// not a subset ([`RegistryError::InvocationEffectsExceedMaximum`])
 	/// rather than substituting the maximum. Approval and the environment's
-	/// write boundary both judge the call by this envelope.
+	/// write boundary both judge the call by this envelope. A judgment that
+	/// reads live state (which server answers a resource) pins what it read
+	/// ([`InvocationPins`]), and the executor reaches only that.
 	fn invocation_effects(&self, _params: &Self::Params) -> Option<Effects> {
 		None
 	}

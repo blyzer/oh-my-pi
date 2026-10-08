@@ -5,7 +5,7 @@ mod attachment;
 pub(crate) mod docs;
 pub mod host;
 pub(super) mod local;
-mod mcp;
+pub(crate) mod mcp;
 mod memory;
 pub(super) mod ssh;
 pub(super) mod vault;
@@ -405,7 +405,8 @@ impl Resolve for UrlResolver {
 	/// credentials it is configured with: `ssh://` for a resource naming one
 	/// host alias (any other is refused before a connection), `issue://` and
 	/// `pr://` through the GitHub API, and an `mcp://` resource as its server
-	/// is mounted (`McpUrlResolver`'s own `read_fetch`).
+	/// is mounted (`McpUrlResolver`'s own `read_fetch`, which pins that server
+	/// for the call's execution).
 	///
 	/// Every other resolver reads local or environment-owned state. A vault
 	/// read may ask the Obsidian CLI (`?op=read`, `?op=search`, the active
@@ -442,8 +443,9 @@ impl Resolve for UrlResolver {
 impl UrlResolver {
 	/// Names the host a read of `resource` reaches when this resolver fetches
 	/// it: the GitHub host of `issue://` and `pr://`, the `ssh://` alias, the
-	/// MCP server advertising an `mcp://` resource. `None` for a resolver that
-	/// fetches nothing and for a resource it cannot name a host for.
+	/// MCP server the call's judgment pinned for an `mcp://` resource, the one
+	/// its read asks. `None` for a resolver that fetches nothing and for a
+	/// resource it cannot name a host for.
 	pub(super) fn fetch_host(&self, resource: &str, query: Option<&str>) -> Option<FetchHost> {
 		match self {
 			Self::Issue(resolver) | Self::Pr(resolver) => {

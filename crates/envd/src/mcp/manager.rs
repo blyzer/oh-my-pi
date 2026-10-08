@@ -30,7 +30,7 @@ use omp_shell_builtins::{
 };
 use omp_tool::{
 	DocEffects, Effects, ExecEffects, FetchEffects, LeafCatalogSnapshot, LeafOwner, LeafVersion,
-	PublishedLeaf,
+	PublishedLeaf, ResolutionPin,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
@@ -1736,45 +1736,12 @@ impl McpManager {
 	/// Concrete resources precede templates; template ties are stable by
 	/// template text and then server name.
 	pub(crate) fn resolve_resource_server(&self, uri: &str) -> Option<Str> {
-		let state = self.state.lock();
-		for (name, mount) in &state.mounts {
-			if mount.connection.as_ref().is_some_and(|connection| {
-				connection
-					.resources
-					.read()
-					.iter()
-					.any(|resource| resource.uri == uri)
-			}) {
-				return Some(name.clone());
-			}
-		}
-		let mut best: Option<(usize, Str, Str)> = None;
-		for (name, mount) in &state.mounts {
-			let Some(connection) = mount.connection.as_ref() else {
-				continue;
-			};
-			for template in connection.templates.read().iter() {
-				let Some(score) = template_match_score(template.uri_template.as_str(), uri) else {
-					continue;
-				};
-				let replace = best
-					.as_ref()
-					.is_none_or(|(best_score, best_template, best_name)| {
-						score > *best_score
-							|| (score == *best_score
-								&& (template.uri_template < *best_template
-									|| (template.uri_template == *best_template && name < best_name)))
-					});
-				if replace {
-					best = Some((score, template.uri_template.clone(), name.clone()));
-				}
-			}
-		}
-		best.map(|(_, _, name)| name)
+		resolve_resource_in(&self.state.lock(), uri)
 	}
 
-	/// Whether reading the opaque resource `uri` is a fetch, judged from the
-	/// mount of the server advertising it ([`Self::resolve_resource_server`]).
+	/// The server a read of the opaque resource `uri` asks and the fetch that
+	/// is, resolved together from one view of the mounts
+	/// ([`Self::resolve_resource_server`]), for a read's judgment to pin.
 	///
 	/// A remote server (`http`, `sse`) is reached over the network with the
 	/// credentials it is configured with. A local (`stdio`) server is a
@@ -1782,18 +1749,42 @@ impl McpManager {
 	/// language servers under theirs; reading its resource is a fetch only
 	/// when the tier it is mounted at says it reaches the network (`fetch`,
 	/// `exec`, `privileged`), and not at the `read` or `write` tier. A
-	/// resource no mounted server advertises is a fetch: a remote server may
-	/// advertise it by the time the read runs.
-	pub(crate) fn resource_read_fetches(&self, uri: &str) -> bool {
-		let Some(name) = self.resolve_resource_server(uri) else {
-			return true;
+	/// resource no mounted server advertises names no server and is a fetch:
+	/// a remote server may advertise it by the time the read runs.
+	pub(crate) fn resource_read_pin(&self, uri: &str) -> ResolutionPin {
+		let state = self.state.lock();
+		let Some(server) = resolve_resource_in(&state, uri) else {
+			return ResolutionPin { target: None, fetch: Some(RESOURCE_READ_FETCH) };
 		};
-		self
+		let fetch = state
+			.mounts
+			.get(&server)
+			.map_or(Some(RESOURCE_READ_FETCH), |mount| mount_read_fetch(&mount.spec));
+		ResolutionPin { target: Some(server), fetch }
+	}
+
+	/// Admits reading a resource from `server`, the server `pin` names, as the
+	/// read was judged ([`Self::resource_read_pin`]): refused when it is no
+	/// longer mounted, and when reading it now performs a fetch beyond the
+	/// judged one (its mount was replaced by a remote one, or by one at a tier
+	/// that reaches the network).
+	pub(crate) fn admit_pinned_read(
+		&self,
+		server: &str,
+		pin: &ResolutionPin,
+	) -> Result<(), PinnedReadError> {
+		let fetch = self
 			.state
 			.lock()
 			.mounts
-			.get(&name)
-			.is_none_or(|mount| mount_reads_fetch(&mount.spec))
+			.get(server)
+			.map(|mount| mount_read_fetch(&mount.spec))
+			.ok_or_else(|| PinnedReadError::Unmounted { server: Str::from(server) })?;
+		if pin.admits(fetch) {
+			Ok(())
+		} else {
+			Err(PinnedReadError::Fetches { server: Str::from(server) })
+		}
 	}
 
 	pub(crate) async fn connection(
@@ -3094,17 +3085,61 @@ fn mcp_dyn_definition(leaf: &PublishedLeaf<McpLeaf>) -> Option<(Str, Value)> {
 	Some((Str::new(format!("{}/{tool}", leaf.value.server)), definition))
 }
 
-/// Whether a resource read from the server `spec` mounts reaches the network:
-/// always for a remote transport, and for a local one when the effects of its
+/// The fetch a resource read performs when it reaches the network: the
+/// server is asked with the credentials it is configured with.
+pub(crate) const RESOURCE_READ_FETCH: FetchEffects = FetchEffects { credentials: true };
+
+/// The fetch a resource read from the server `spec` mounts performs: always
+/// one for a remote transport, and for a local one when the effects of its
 /// declared tier fetch or reach the network.
-fn mount_reads_fetch(spec: &MountSpec) -> bool {
-	match spec.config.resolved_transport() {
+fn mount_read_fetch(spec: &MountSpec) -> Option<FetchEffects> {
+	let fetches = match spec.config.resolved_transport() {
 		TransportKind::Http | TransportKind::Sse => true,
 		TransportKind::Stdio => {
 			let effects = mcp_tier_effects(spec.projection.tier.as_str());
 			effects.fetch.is_some() || effects.exec.is_some_and(|exec| exec.network)
 		},
+	};
+	fetches.then_some(RESOURCE_READ_FETCH)
+}
+
+/// Resolves the opaque advertised resource `uri` to its owning server among
+/// the live mounts in `state` ([`McpManager::resolve_resource_server`]).
+fn resolve_resource_in(state: &ManagerState, uri: &str) -> Option<Str> {
+	for (name, mount) in &state.mounts {
+		if mount.connection.as_ref().is_some_and(|connection| {
+			connection
+				.resources
+				.read()
+				.iter()
+				.any(|resource| resource.uri == uri)
+		}) {
+			return Some(name.clone());
+		}
 	}
+	let mut best: Option<(usize, Str, Str)> = None;
+	for (name, mount) in &state.mounts {
+		let Some(connection) = mount.connection.as_ref() else {
+			continue;
+		};
+		for template in connection.templates.read().iter() {
+			let Some(score) = template_match_score(template.uri_template.as_str(), uri) else {
+				continue;
+			};
+			let replace = best
+				.as_ref()
+				.is_none_or(|(best_score, best_template, best_name)| {
+					score > *best_score
+						|| (score == *best_score
+							&& (template.uri_template < *best_template
+								|| (template.uri_template == *best_template && name < best_name)))
+				});
+			if replace {
+				best = Some((score, template.uri_template.clone(), name.clone()));
+			}
+		}
+	}
+	best.map(|(_, _, name)| name)
 }
 
 fn mcp_tier_effects(tier: &str) -> Effects {
@@ -3562,6 +3597,30 @@ fn is_unauthorized(result: &Result<Arc<LiveConnection>, ManagerError>) -> bool {
 		},
 		_ => false,
 	}
+}
+
+/// A judged resource read refused at the server its judgment pinned
+/// ([`McpManager::admit_pinned_read`]), before anything is sent.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PinnedReadError {
+	/// The server is no longer mounted.
+	#[error(
+		"MCP server '{server}' answered this resource when the read was judged and is no longer \
+		 mounted; the read was not sent to another server"
+	)]
+	Unmounted {
+		/// The pinned server.
+		server: Str,
+	},
+	/// Reading the server now reaches the network beyond what was judged.
+	#[error(
+		"MCP server '{server}' now reaches the network, which this read was not judged or approved \
+		 to do; the read was not sent"
+	)]
+	Fetches {
+		/// The pinned server.
+		server: Str,
+	},
 }
 
 /// Lifecycle, transport, or definition publication failure.
@@ -4316,14 +4375,20 @@ mod tests {
 	/// Reading a resource is a fetch by how its server is mounted: a remote
 	/// (`http`, `sse`) server always, a local (`stdio`) one only at a tier
 	/// whose effects reach the network (`fetch`, `exec`, `privileged`), never
-	/// at `read` or `write`, where it is an environment-ambient process. A
-	/// resource no mounted server advertises is a fetch, as is every resource
-	/// while no manager is bound to tell.
+	/// at `read` or `write`, where it is an environment-ambient process. The
+	/// pin names that server. A resource no mounted server advertises names
+	/// none and is a fetch, as is every resource while no manager is bound to
+	/// tell.
 	#[tokio::test]
 	async fn resource_reads_fetch_by_transport_and_declared_tier() {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
-		assert!(service.resource_read_fetches("remote-http://doc"), "no manager is bound");
+		let unadvertised = ResolutionPin { target: None, fetch: Some(RESOURCE_READ_FETCH) };
+		assert_eq!(
+			service.resource_read_pin("remote-http://doc"),
+			unadvertised,
+			"no manager is bound"
+		);
 		let transport = Arc::new(CatalogTransport { methods: Mutex::new(Vec::new()) });
 		let manager = McpManager::new(
 			Arc::clone(&service),
@@ -4372,11 +4437,233 @@ mod tests {
 		}
 		for (name, _, tier, fetches) in &mounts {
 			let uri = format!("{name}://doc");
+			let pin = ResolutionPin {
+				target: Some(Str::new(*name)),
+				fetch:  fetches.then_some(RESOURCE_READ_FETCH),
+			};
 			assert_eq!(manager.resolve_resource_server(&uri).as_deref(), Some(*name));
-			assert_eq!(manager.resource_read_fetches(&uri), *fetches, "{name} at {tier}");
-			assert_eq!(service.resource_read_fetches(&uri), *fetches, "{name} at {tier}");
+			assert_eq!(manager.resource_read_pin(&uri), pin, "{name} at {tier}");
+			assert_eq!(service.resource_read_pin(&uri), pin, "{name} at {tier}");
 		}
-		assert!(manager.resource_read_fetches("unadvertised://doc"));
+		assert_eq!(manager.resource_read_pin("unadvertised://doc"), unadvertised);
+	}
+
+	/// A server that answers `resources/read` with its own mount name, and
+	/// records every read it answers.
+	struct NamingTransport {
+		server: Str,
+		reads:  Arc<Mutex<Vec<Str>>>,
+	}
+
+	impl McpTransport for NamingTransport {
+		fn request<'a>(
+			&'a self,
+			method: &'a str,
+			params: Value,
+			_cancellation: CancellationToken,
+		) -> TransportFuture<'a, Result<TransportResponse, TransportError>> {
+			let result = match method {
+				"resources/list" => json!({ "resources": [] }),
+				"resources/templates/list" => json!({ "resourceTemplates": [] }),
+				"prompts/list" => json!({ "prompts": [] }),
+				"resources/read" => {
+					self.reads.lock().push(self.server.clone());
+					json!({ "contents": [{ "uri": params["uri"], "text": self.server.as_str() }] })
+				},
+				_ => panic!("unexpected method {method}"),
+			};
+			Box::pin(async move {
+				Ok(TransportResponse {
+					id: RequestId::Number(1),
+					result,
+					dispatch: DispatchState::Responded,
+				})
+			})
+		}
+
+		fn notify<'a>(
+			&'a self,
+			_method: &'a str,
+			_params: Value,
+			_cancellation: CancellationToken,
+		) -> TransportFuture<'a, Result<DispatchState, TransportError>> {
+			Box::pin(async { Ok(DispatchState::Dispatched) })
+		}
+
+		fn next_message(
+			&self,
+			cancellation: CancellationToken,
+		) -> TransportFuture<'_, Result<IncomingMessage, TransportError>> {
+			Box::pin(async move {
+				cancellation.cancelled().await;
+				Err(TransportError::pre_dispatch(TransportFailure::Cancelled))
+			})
+		}
+
+		fn respond(
+			&self,
+			_id: RequestId,
+			_result: Result<Value, ServerResponseError>,
+			_cancellation: CancellationToken,
+		) -> TransportFuture<'_, Result<DispatchState, TransportError>> {
+			Box::pin(async { Ok(DispatchState::Dispatched) })
+		}
+
+		fn close(&self) -> TransportFuture<'_, Result<(), TransportError>> {
+			Box::pin(async { Ok(()) })
+		}
+	}
+
+	/// Connects every mount to a [`NamingTransport`] sharing one read log.
+	struct NamingConnector {
+		reads: Arc<Mutex<Vec<Str>>>,
+	}
+
+	impl McpConnector for NamingConnector {
+		fn connect<'a>(
+			&'a self,
+			spec: &'a MountSpec,
+			roots: Arc<[Str]>,
+			_cancel: CancellationToken,
+		) -> Pin<Box<dyn Future<Output = Result<ConnectedClient, ManagerError>> + Send + 'a>> {
+			let transport: Arc<dyn McpTransport> = Arc::new(NamingTransport {
+				server: spec.name.clone(),
+				reads:  Arc::clone(&self.reads),
+			});
+			Box::pin(async move {
+				Ok(ConnectedClient {
+					client:      Arc::new(McpClient::new(transport, roots)),
+					initialized: InitializedServer {
+						protocol_version: Str::from("2025-11-25"),
+						name:             Str::from("resource-only"),
+						version:          None,
+						title:            None,
+						description:      None,
+						capabilities:     json!({ "resources": {}, "prompts": {} }),
+						instructions:     None,
+					},
+				})
+			})
+		}
+	}
+
+	/// A read is judged and run against one server. The server advertising
+	/// the resource when the read is judged is pinned with the fetch reading
+	/// it is, and the approval names it: a remote server that starts
+	/// advertising the same resource before the read runs, one a live
+	/// resolution would now ask, is never asked. Once the pinned server is
+	/// unmounted, or remounted so that reading it reaches the network, the read
+	/// is refused rather than sent elsewhere. A read judged as a fetch from a
+	/// remote server asks that server, the one its approval named, whichever
+	/// server would answer by then.
+	#[tokio::test]
+	async fn a_judged_resource_read_asks_only_the_server_its_judgment_pinned() {
+		use omp_tool::InvocationPins;
+		use omp_tools::read::{resolver::Resolve as _, selector::ParsedSelector};
+
+		use crate::tool_url::mcp::McpUrlResolver;
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
+		let reads = Arc::new(Mutex::new(Vec::new()));
+		let manager = McpManager::new(
+			Arc::clone(&service),
+			Arc::new(NamingConnector { reads: Arc::clone(&reads) }),
+			Arc::from([]),
+			scratch.path().to_path_buf(),
+		);
+		service.bind_manager(&manager);
+		let resolver = &McpUrlResolver::new(Arc::clone(&service));
+		let advertise = |name: &str, uris: &[&str]| {
+			let connection = manager
+				.state
+				.lock()
+				.mounts
+				.get(name)
+				.and_then(|mount| mount.connection.clone())
+				.expect("connected");
+			*connection.resources.write() = uris
+				.iter()
+				.map(|uri| ResourceDefinition {
+					uri:         Str::new(*uri),
+					name:        sf!("doc"),
+					description: None,
+					mime_type:   None,
+				})
+				.collect();
+		};
+		let remote =
+			|kind: &str| json!({ "type": kind, "url": format!("https://example.test/{kind}") });
+		let read = |pins: &Arc<InvocationPins>, uri: &'static str| {
+			InvocationPins::scope(Some(Arc::clone(pins)), async move {
+				resolver.read(uri, &ParsedSelector::None).await
+			})
+		};
+		let shared = "shared://doc";
+		manager
+			.start(vec![tiered_mount("local", json!({ "command": "server" }), "read")])
+			.await;
+		advertise("local", &[shared]);
+
+		// Judged while only the local `read`-tier server advertises it: no
+		// fetch, and the pin holds that server.
+		let local = Arc::new(InvocationPins::default());
+		assert_eq!(
+			InvocationPins::judge(Some(&local), || {
+				(resolver.read_fetch(shared, None), resolver.fetch_server(shared))
+			}),
+			(None, Some(sf!("local")))
+		);
+
+		// Before it runs, a remote server sorting first advertises it too.
+		manager
+			.mount(tiered_mount("a-remote", remote("http"), "read"))
+			.await;
+		advertise("a-remote", &[shared]);
+		assert_eq!(manager.resolve_resource_server(shared).as_deref(), Some("a-remote"));
+		assert_eq!(
+			resolver.read_fetch(shared, None),
+			Some(RESOURCE_READ_FETCH),
+			"judged now, the read would fetch from the remote server"
+		);
+
+		let bytes = read(&local, shared).await.expect("the judged read runs");
+		assert_eq!(&*bytes, b"local");
+		assert_eq!(*reads.lock(), [sf!("local")], "only the pinned server is asked");
+
+		manager.unmount("local").await.expect("unmount");
+		let refused = read(&local, shared).await.expect_err("an unmounted pin");
+		assert!(refused.message().contains("no longer mounted"), "{}", refused.message());
+		manager
+			.mount(tiered_mount("local", remote("sse"), "read"))
+			.await;
+		advertise("local", &[shared]);
+		let refused = read(&local, shared)
+			.await
+			.expect_err("a pin now reaching the network");
+		assert!(refused.message().contains("now reaches the network"), "{}", refused.message());
+		assert_eq!(*reads.lock(), [sf!("local")], "a refused read is sent nowhere");
+
+		// Judged as a fetch from the only remote server advertising it, whose
+		// host the approval names; another remote server sorting first by the
+		// time it runs is not asked.
+		let keyed = "keyed://doc";
+		manager
+			.mount(tiered_mount("remote-b", remote("http"), "read"))
+			.await;
+		advertise("remote-b", &[keyed]);
+		let fetching = Arc::new(InvocationPins::default());
+		assert_eq!(
+			InvocationPins::judge(Some(&fetching), || {
+				(resolver.read_fetch(keyed, None), resolver.fetch_server(keyed))
+			}),
+			(Some(RESOURCE_READ_FETCH), Some(sf!("remote-b")))
+		);
+		advertise("a-remote", &[shared, keyed]);
+		assert_eq!(manager.resolve_resource_server(keyed).as_deref(), Some("a-remote"));
+		let bytes = read(&fetching, keyed).await.expect("the judged fetch runs");
+		assert_eq!(&*bytes, b"remote-b");
+		assert_eq!(*reads.lock(), [sf!("local"), sf!("remote-b")]);
 	}
 
 	/// A control declaration's tier becomes the effects its devices are

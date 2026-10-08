@@ -30,10 +30,10 @@ use omp_session::{Session, SessionError, ToolReceipt};
 use omp_tool::{
 	Abort, ArtifactLifetime, BlobRef as ToolBlobRef, CallOutcome, CallOutcomeDetails, CapsBase,
 	Confinement, Diag, DiagEnvelope, DiagKind, Effects, ErasedEv, ErasedOutcome, ExpectedArtifact,
-	IncomingParams, Interrupt, InvocationFeed, JobKind, JobMetadata, JobOwner, JobRef, ModelClass,
-	OutputProjection, OutputRequest, Part, PolicyDenied, ProjectionSpan, PromptCaps, Registry,
-	RegistryError, Rev, RosterDenial, Severity, ToolIdentity, ToolRestrictions, ToolRoute, ToolSpec,
-	Unit as ToolUnit, VisibilityReceipt, VisibleSourceLine,
+	IncomingParams, Interrupt, InvocationFeed, InvocationPins, JobKind, JobMetadata, JobOwner,
+	JobRef, ModelClass, OutputProjection, OutputRequest, Part, PolicyDenied, ProjectionSpan,
+	PromptCaps, Registry, RegistryError, Rev, RosterDenial, Severity, ToolIdentity,
+	ToolRestrictions, ToolRoute, ToolSpec, Unit as ToolUnit, VisibilityReceipt, VisibleSourceLine,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -1152,7 +1152,14 @@ pub struct Dispatcher {
 /// Where a prepared call executes.
 enum Unit {
 	/// In-process registry tool fed live argument fragments.
-	Native { feed: InvocationFeed },
+	Native {
+		/// The live argument feed.
+		feed: InvocationFeed,
+		/// What the call's judgment resolved from live state, which its
+		/// executor reaches ([`InvocationPins`]); present for a tool whose
+		/// calls are judged by their arguments.
+		pins: Option<Arc<InvocationPins>>,
+	},
 	/// Worker/remote tool started at commit with complete arguments.
 	External {
 		executor: Arc<dyn ExternalToolExecutor>,
@@ -1250,7 +1257,7 @@ impl PreparedCall {
 	/// Feeds one streamed argument fragment to the executor as it arrives
 	/// (ADR 0008: preview work happens once, while arguments stream).
 	pub fn arg_delta(&self, fragment: &str) {
-		if let Unit::Native { feed } = &self.unit {
+		if let Unit::Native { feed, .. } = &self.unit {
 			// A closed feed means the unit already ended (e.g. it rejected the
 			// call); commitment reports that as the terminal.
 			let _ = feed.arg_text(Str::new(fragment));
@@ -1512,7 +1519,12 @@ impl Dispatcher {
 				let (feed, params) = IncomingParams::channel_for(None, Some(call_id.clone()));
 				let params = params.with_restrictions(self.restrictions.clone());
 				let registry = Arc::clone(&self.committer.registry);
-				let task = tokio::spawn(async move {
+				// A call judged by its arguments runs inside the pins its
+				// judgment fixes, so it reaches what was judged.
+				let pins = registry
+					.scopes_invocation_effects(name.as_str())
+					.then(Arc::default);
+				let task = tokio::spawn(InvocationPins::scope(pins.clone(), async move {
 					let mut stream = registry.invoke(name.as_str(), params)?;
 					while let Some(event) = stream.next().await {
 						if event_tx.send(DispatchEvent::Native(event)).is_err() {
@@ -1520,8 +1532,8 @@ impl Dispatcher {
 						}
 					}
 					Ok::<_, RegistryError>(())
-				});
-				(Unit::Native { feed }, Some(task))
+				}));
+				(Unit::Native { feed, pins }, Some(task))
 			},
 			route => {
 				let executor = self
@@ -1841,7 +1853,7 @@ impl Dispatcher {
 					}
 					call.phase = Phase::Interrupting;
 					call.grace_until = Some(Instant::now() + policy.interrupt_grace);
-					if let Unit::Native { feed } = &call.unit {
+					if let Unit::Native { feed, .. } = &call.unit {
 						let _ = feed.interrupt(Interrupt {
 							class:  Str::new_static(Interrupt::ESCAPE),
 							reason: call
@@ -2020,7 +2032,7 @@ impl Dispatcher {
 				let mut specs = std::mem::take(&mut call.approval_specs);
 				// Worker/remote calls are admitted by their environment;
 				// session tools are trusted host code.
-				if matches!(call.unit, Unit::Native { .. })
+				if let Unit::Native { pins, .. } = &call.unit
 					&& let Some(admission) = &self.admission
 				{
 					let registry = &self.committer.registry;
@@ -2032,30 +2044,34 @@ impl Dispatcher {
 						.map_or(Confinement::Host, |spec| spec.confinement);
 					// The call is judged by what its arguments do, and a fetch
 					// by the URLs they name; a name that resolves nowhere fails
-					// closed.
-					let verdict = match registry.invocation_effects(name, args.get()) {
-						Ok(effects) => {
-							let locators = if effects.fetch.is_some() {
-								registry.fetch_locators(name, args.get())
-							} else {
-								Vec::new()
-							};
-							admission.admit(name, &effects, confinement, &args, &locators)
-						},
-						Err(RegistryError::UnknownTool(_)) => {
-							admission.admit(name, &Effects::unknown(), confinement, &args, &[])
-						},
-						Err(error) => {
-							tracing::warn!(
-								%error,
-								call_id = %call.call_id,
-								"refused a call judged beyond its tool's declared effects"
-							);
-							ToolAdmissionVerdict::Deny(Str::new_static(
-								"the call's effects exceed its tool's declared maximum; it was not started",
-							))
-						},
-					};
+					// closed. The judgment runs inside the pins its execution
+					// runs in, so the call reaches what was judged and approved.
+					let verdict = InvocationPins::judge(pins.as_ref(), || {
+						match registry.invocation_effects(name, args.get()) {
+							Ok(effects) => {
+								let locators = if effects.fetch.is_some() {
+									registry.fetch_locators(name, args.get())
+								} else {
+									Vec::new()
+								};
+								admission.admit(name, &effects, confinement, &args, &locators)
+							},
+							Err(RegistryError::UnknownTool(_)) => {
+								admission.admit(name, &Effects::unknown(), confinement, &args, &[])
+							},
+							Err(error) => {
+								tracing::warn!(
+									%error,
+									call_id = %call.call_id,
+									"refused a call judged beyond its tool's declared effects"
+								);
+								ToolAdmissionVerdict::Deny(Str::new_static(
+									"the call's effects exceed its tool's declared maximum; it was not \
+									 started",
+								))
+							},
+						}
+					});
 					let verdict = match verdict {
 						// Nothing to approve is never an approval.
 						ToolAdmissionVerdict::Prompt(requirements) if requirements.is_empty() => {
@@ -2146,7 +2162,7 @@ impl Dispatcher {
 			session.call_started(call.call)?;
 			call.started = Some(Instant::now());
 			match &mut call.unit {
-				Unit::Native { feed } => {
+				Unit::Native { feed, .. } => {
 					feed
 						.args_committed(Str::new(args.get()))
 						.map_err(|_| DispatchError::InputClosed)?;
@@ -2359,7 +2375,7 @@ impl Dispatcher {
 			events: call.events.clone(),
 			task: call.task.take(),
 			feed: match &call.unit {
-				Unit::Native { feed } => Some(feed.clone()),
+				Unit::Native { feed, .. } => Some(feed.clone()),
 				Unit::External { .. } | Unit::Session(_) | Unit::Detached { .. } => None,
 			},
 			output,
@@ -2744,7 +2760,7 @@ impl Committer {
 		output: &mut OutputStream,
 	) -> Result<(), DispatchError> {
 		let feed = match &call.unit {
-			Unit::Native { feed } => feed,
+			Unit::Native { feed, .. } => feed,
 			Unit::Detached { feed: Some(feed) } => feed,
 			Unit::External { .. } | Unit::Session(_) | Unit::Detached { feed: None } => return Ok(()),
 		};
