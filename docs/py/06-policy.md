@@ -409,17 +409,24 @@ configuration entry for the tier pre-answers the request and surfaces as
 `ApprovalSpec.kind` a missing decision would raise. A tier is a **default, never an
 enforcement**: it cannot widen a rulebook, it cannot suppress a `Deny`, and a device that
 declares `Tier.READ` while writing files is denied by the sandbox exactly as if it had
-declared nothing. `omp.tier_of(target)` returns the effective tier for a `CallTarget`,
-defaulting to `Tier.EXEC` for a device that declared none — the conservative direction.
+declared nothing. `omp.tier_of(target)` returns the effective tier for a `CallTarget`. A
+device that declares no effects resolves to its host's ceiling, the conservative direction:
+`Tier.EXEC` under a `trusted` extension host (and any tier the environment does not
+recognize), `Tier.WRITE` under a `sandboxed` one, whose process can only read documents and
+write the workspace.
 
 Confinement is asserted by the host, never by the extension. The environment records every
 worker device as `Host` confinement (`omp_tool::Confinement`), whatever the extension host's
 own tier, because its effects run outside the exec sandbox that confines `bash`. So the shipped
 `yolo`, which an active sandbox keeps alive, does not cover a device's calls: they are admitted
 as if no sandbox existed, and an exec-tier call prompts even inside the sandbox (ADR 0028,
-typed confinement marker amendment). Open discrepancy: the native admission derives a worker's
-tier from its declared effects, and a device that declares no effects resolves to `read`
-there, not to the `Tier.EXEC` default `omp.tier_of` documents above.
+typed confinement marker amendment). Undeclared effects resolve to the host's ceiling at every
+point that reads them (ADR 0028, undeclared effects amendment): the native admission, the
+extension host's route maximum, and the CONTROL snapshot `omp.tier_of` reads all use
+`omp.Effects` for a `sandboxed` host of document reads and `**` writes, and process authority
+with the network (`omp_tool::Effects::unknown`) for a `trusted` one. A declared envelope, even an
+empty one, replaces the ceiling, so a device that only reads should say so to stay `read`. RPC
+host tools and eval-defined tools follow the same rule with the `exec` ceiling.
 
 ### Effect envelopes and capability tokens
 

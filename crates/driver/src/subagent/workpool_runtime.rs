@@ -105,6 +105,9 @@ impl KernelWorkpoolLauncher {
 							family: sf!("eval-{}-{}", registration.generation, registration.handler),
 							n:      registration.rev,
 						}),
+						// An eval-defined tool declares no envelope: it registers
+						// the unknown ceiling, so its calls are the exec tier.
+						effects:     None,
 					}],
 					Arc::clone(&executor),
 				)

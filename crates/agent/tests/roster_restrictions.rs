@@ -552,6 +552,7 @@ async fn a_declared_tool_that_no_longer_resolves_settles_as_typed_unavailable() 
 				description: sf!("Fetch a ticket"),
 				parameters:  serde_json::json!({"type": "object"}),
 				rev:         None,
+				effects:     None,
 			}],
 			Arc::new(NoHost),
 		)
