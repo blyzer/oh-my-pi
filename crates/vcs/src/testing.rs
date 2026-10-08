@@ -125,6 +125,29 @@ pub fn run_trimmed(cwd: &Path, args: &[&str]) -> String {
 	output
 }
 
+/// Whether the `git` on `PATH` can create a reftable repository
+/// (`git init --ref-format=reftable`, git 2.45 and later).
+///
+/// A fixture that needs a reftable repository checks this first. An older git
+/// cannot create one, and the product reads reftable refs through that same
+/// CLI, so such a host has no reftable behavior to test; every other variant
+/// still runs.
+#[must_use]
+pub fn supports_reftable() -> bool {
+	let nanos = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map_or(0, |elapsed| elapsed.as_nanos());
+	let scratch =
+		std::env::temp_dir().join(format!("omp-vcs-reftable-probe-{}-{nanos}", std::process::id()));
+	let supported = command()
+		.args(["init", "--quiet", "--ref-format=reftable"])
+		.arg(&scratch)
+		.output()
+		.is_ok_and(|output| output.status.success());
+	let _ = std::fs::remove_dir_all(&scratch);
+	supported
+}
+
 #[cfg(all(test, unix))]
 mod tests {
 	use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};

@@ -68,14 +68,41 @@ pub(crate) struct ApprovedPathScope {
 	scope:         PathBuf,
 	display_scope: PathBuf,
 	identity:      PathIdentity,
+	/// A handle on the captured scope, held while the approval is pending so
+	/// its inode stays allocated: ext4 and tmpfs hand a removed directory's
+	/// inode number to the next one created, so a replacement would otherwise
+	/// carry the same identity. Absent only when the scope could not be
+	/// opened; `verify` then has the identity alone.
+	#[cfg(unix)]
+	_anchor:       Option<Arc<rustix::fd::OwnedFd>>,
 }
 
 impl ApprovedPathScope {
 	fn capture(path: &Path, access: ApprovedPathAccess) -> io::Result<Self> {
 		let requested = normalize_absolute(&std::path::absolute(path)?)?;
 		let scope = nearest_existing_scope(&requested)?;
-		let identity = PathIdentity::capture(&scope)?;
-		Ok(Self { access, display_scope: scope.clone(), scope, identity })
+		#[cfg(unix)]
+		{
+			// The identity is read from the held handle, so it describes exactly
+			// the object the anchor keeps alive.
+			let anchor = PathIdentity::anchor(&scope);
+			let identity = match &anchor {
+				Some(anchor) => PathIdentity::of_handle(anchor)?,
+				None => PathIdentity::capture(&scope)?,
+			};
+			Ok(Self {
+				access,
+				display_scope: scope.clone(),
+				scope,
+				identity,
+				_anchor: anchor.map(Arc::new),
+			})
+		}
+		#[cfg(not(unix))]
+		{
+			let identity = PathIdentity::capture(&scope)?;
+			Ok(Self { access, display_scope: scope.clone(), scope, identity })
+		}
 	}
 
 	/// Formats the immutable access and path shown in approval prompts.
@@ -106,6 +133,25 @@ impl PathIdentity {
 		use std::os::unix::fs::MetadataExt as _;
 
 		let metadata = fs::metadata(path)?;
+		Ok(Self { device: metadata.dev(), inode: metadata.ino() })
+	}
+
+	/// Opens a handle that keeps `path`'s inode allocated without needing read
+	/// permission on it where the platform allows (`O_PATH` on Linux).
+	fn anchor(path: &Path) -> Option<rustix::fd::OwnedFd> {
+		use rustix::fs::{Mode, OFlags};
+
+		#[cfg(any(target_os = "linux", target_os = "android"))]
+		let flags = OFlags::PATH | OFlags::CLOEXEC;
+		#[cfg(not(any(target_os = "linux", target_os = "android")))]
+		let flags = OFlags::RDONLY | OFlags::CLOEXEC;
+		rustix::fs::open(path, flags, Mode::empty()).ok()
+	}
+
+	fn of_handle(handle: &rustix::fd::OwnedFd) -> io::Result<Self> {
+		use std::os::unix::fs::MetadataExt as _;
+
+		let metadata = fs::File::from(handle.try_clone()?).metadata()?;
 		Ok(Self { device: metadata.dev(), inode: metadata.ino() })
 	}
 }
