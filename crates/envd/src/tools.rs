@@ -5839,7 +5839,7 @@ fn is_prelude_declaration(declaration: &ToolDecl) -> Result<bool, EnvdError> {
 /// effect ceiling of a declaration that carries no envelope
 /// ([`HostKey::undeclared_effects`]), so an undeclared tool is never the
 /// auto-approved `read` tier.
-pub(crate) fn worker_spec(declaration: &ToolDecl, owner: &HostKey) -> Result<ToolSpec, EnvdError> {
+pub fn worker_spec(declaration: &ToolDecl, owner: &HostKey) -> Result<ToolSpec, EnvdError> {
 	let definition = declaration.definition.as_ref().ok_or_else(|| {
 		EnvdError::WorkerDeclaration(sf!("worker tool declaration has no definition"))
 	})?;
