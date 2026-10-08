@@ -761,24 +761,24 @@ async fn replicate_verdict_parts(
 	Ok(projected)
 }
 
-/// An admission query presents the exact `bash` command, or the tool name and
-/// its committed arguments for other tools.
-fn admission_spec(
-	request: &ExternalDispatchRequest,
+/// The requirements of one environment admission query for the call of `name`
+/// with committed arguments `args`.
+///
+/// A `bash` call presents its exact command. Any other call presents the tool
+/// itself at the tier its envelope was judged by, unless that tier is a fetch,
+/// and, when the envelope fetches, one `network` requirement per distinct
+/// host the environment named for its fetches, or the tool's own
+/// ([`omp_envd::fetch_host::tool_fetch_subject`]) when it named none or sent
+/// targets that name no host. Every requirement offers `once` and `session`,
+/// and a session grant covers a later prompt only when it covers each of that
+/// prompt's requirements, so a grant for one host never covers another.
+fn admission_specs(
+	name: &str,
+	args: &str,
 	query: &omp_env::frame::AdmitInvocation,
-) -> omp_agent::ApprovalSpec {
-	let name = request.identity.name.as_str();
-	let (kind, subject) = match query.bash.as_ref() {
-		Some(bash) => ("exec", Str::new(bash.source.as_str())),
-		None => ("tool", Str::new(name)),
-	};
-	let args = request.args.get();
-	let body = match query.bash.as_ref() {
-		Some(bash) => sf!("$ {}", bash.source),
-		None => sf!("{name} {}", args.chars().take(512).collect::<String>()),
-	};
-	omp_agent::ApprovalSpec {
-		title: sf!("Run {name}"),
+) -> Vec<omp_agent::ApprovalSpec> {
+	let requirement = |title, body, subject, kind: &'static str, evidence| omp_agent::ApprovalSpec {
+		title,
 		body,
 		subject,
 		kind: Str::new_static(kind),
@@ -790,8 +790,63 @@ fn admission_spec(
 		unreachable: Str::new_static("deny"),
 		require_human: true,
 		pattern: None,
-		evidence: vec![sf!("tool `{name}` requires approval under the session approval mode")],
+		evidence: vec![evidence],
+	};
+	if let Some(bash) = query.bash.as_ref() {
+		return vec![requirement(
+			sf!("Run {name}"),
+			sf!("$ {}", bash.source),
+			Str::new(bash.source.as_str()),
+			"exec",
+			sf!("tool `{name}` requires approval under the session approval mode"),
+		)];
 	}
+	let effects = query
+		.effects
+		.as_ref()
+		.and_then(|envelope| omp_tool::Effects::try_from(envelope).ok());
+	let fetches = effects
+		.as_ref()
+		.is_some_and(|effects| effects.fetch.is_some());
+	let tier = effects
+		.as_ref()
+		.map(omp_envd::admission::ApprovalTier::from_effects);
+	let shown = args.chars().take(512).collect::<String>();
+	let tool = (tier != Some(omp_envd::admission::ApprovalTier::Fetch)).then(|| {
+		requirement(
+			sf!("Run {name}"),
+			sf!("{name} {shown}"),
+			Str::new(name),
+			"tool",
+			sf!("tool `{name}` requires approval under the session approval mode"),
+		)
+	});
+	let mut hosts = if fetches {
+		query
+			.fetch
+			.iter()
+			.map(omp_envd::fetch_host::FetchHost::try_from)
+			.collect::<Result<Vec<_>, _>>()
+			.unwrap_or_default()
+	} else {
+		Vec::new()
+	};
+	hosts.sort_unstable();
+	hosts.dedup();
+	let network = fetches
+		.then(|| omp_envd::fetch_host::fetch_subjects(name, &hosts))
+		.into_iter()
+		.flatten()
+		.map(|(subject, about)| {
+			requirement(
+				sf!("Allow {name} to fetch"),
+				sf!("{name} fetches from {about}.\n{name} {shown}"),
+				subject,
+				omp_envd::fetch_host::NETWORK_APPROVAL_KIND,
+				sf!("`{name}` fetches from {about}, which the session approval mode asks for"),
+			)
+		});
+	tool.into_iter().chain(network).collect()
 }
 
 /// Resolves native-tool approval from the declared effect tier, session
@@ -898,13 +953,21 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 							.and_then(serde_json::Value::as_str)
 							.map(str::to_owned)
 					});
+				// Session-process code names no hosts: a call whose tier is a
+				// fetch is asked as the tool's own fetch, never as a host's.
+				let shown = || args.get().chars().take(512).collect::<String>();
 				let (kind, subject, body) = match &command {
 					Some(command) => ("exec", Str::new(command.as_str()), sf!("$ {command}")),
-					None => (
-						"tool",
-						Str::new(name),
-						sf!("{name} {}", args.get().chars().take(512).collect::<String>()),
+					None if resolved.tier == omp_envd::admission::ApprovalTier::Fetch => (
+						omp_envd::fetch_host::NETWORK_APPROVAL_KIND,
+						omp_envd::fetch_host::tool_fetch_subject(name),
+						sf!(
+							"{name} fetches from the hosts it reaches, which are not known before it \
+							 runs.\n{name} {}",
+							shown()
+						),
 					),
+					None => ("tool", Str::new(name), sf!("{name} {}", shown())),
 				};
 				omp_agent::ToolAdmissionVerdict::Prompt(omp_agent::ApprovalSpec {
 					title: sf!("Run {name}"),
@@ -1068,11 +1131,11 @@ impl ExternalToolExecutor for EnvToolExecutor {
 				match next {
 					Ok(Some(omp_env::InvocationEvent::Accepted(_))) => {},
 					Ok(Some(omp_env::InvocationEvent::Admission(query))) => {
-						let spec = admission_spec(&request, &query);
+						let specs = admission_specs(request.identity.name.as_str(), request.args.get(), &query);
 						let ticket = approvals
 							.request_cancellable(
 								Some(request.call_id.clone()),
-								vec![spec],
+								specs,
 								authorized_at_ms,
 								request.cancellation.clone(),
 							)
@@ -3558,6 +3621,257 @@ mod tests {
 	};
 
 	const GPT5: &str = "openai/gpt-5";
+
+	/// A fetch envelope, fetching with credentials when `credentials`.
+	fn fetching(credentials: bool) -> omp_tool::Effects {
+		omp_tool::Effects {
+			documents: Some(omp_tool::DocEffects {
+				read:        true,
+				write_globs: std::sync::Arc::from([]),
+			}),
+			fetch: Some(omp_tool::FetchEffects { credentials }),
+			..omp_tool::Effects::empty()
+		}
+	}
+
+	/// The admission query the environment sends for a call judged by
+	/// `effects`, whose fetches reach `hosts`.
+	fn admission_query(
+		effects: Option<&omp_tool::Effects>,
+		hosts: &[omp_envd::fetch_host::FetchHost],
+	) -> omp_env::frame::AdmitInvocation {
+		omp_env::frame::AdmitInvocation {
+			invocation_id: "call".to_owned(),
+			deadline_ms: 30_000,
+			effects: effects.map(Into::into),
+			fetch: hosts.iter().map(Into::into).collect(),
+			..omp_env::frame::AdmitInvocation::default()
+		}
+	}
+
+	/// `(kind, subject)` of each requirement, in filing order.
+	fn keyed(specs: &[omp_agent::ApprovalSpec]) -> Vec<(&str, &str)> {
+		specs
+			.iter()
+			.map(|spec| (spec.kind.as_str(), spec.subject.as_str()))
+			.collect()
+	}
+
+	/// A fetch is asked per host: one `network` requirement for each distinct
+	/// host the environment named, and the tool itself only for what its tier
+	/// adds beyond the fetch. Without named hosts, or with targets that name
+	/// none, the fetch is asked as the tool's own. Every requirement offers the
+	/// session; `bash` keeps its exact command.
+	#[test]
+	fn admission_queries_key_each_fetch_on_its_host() {
+		use omp_envd::fetch_host::FetchHost;
+
+		let args = r#"{"path":"https://docs.rs/serde"}"#;
+		let docs = FetchHost::http("docs.rs", 443);
+		let forge = FetchHost::github("github.com");
+		let specs = super::admission_specs(
+			"read",
+			args,
+			&admission_query(Some(&fetching(true)), &[docs.clone(), forge, docs.clone()]),
+		);
+		assert_eq!(keyed(&specs), [
+			("network", "http:docs.rs:443"),
+			("network", "github:github.com")
+		]);
+		for spec in &specs {
+			assert_eq!(spec.scopes, [sf!("once"), sf!("session")]);
+			assert_eq!(spec.timeout_ms, 30_000);
+			assert!(spec.require_human);
+		}
+		assert!(specs[0].body.contains("the authored host docs.rs:443"), "{}", specs[0].body);
+		assert!(specs[1].body.contains("stored GitHub credentials"), "{}", specs[1].body);
+
+		// A fetch beside a write is asked for the tool and for each host.
+		let fetch_and_write = omp_tool::Effects {
+			documents: Some(omp_tool::DocEffects {
+				read:        true,
+				write_globs: std::sync::Arc::from([sf!("**")]),
+			}),
+			..fetching(false)
+		};
+		assert_eq!(
+			keyed(&super::admission_specs(
+				"download",
+				args,
+				&admission_query(Some(&fetch_and_write), std::slice::from_ref(&docs)),
+			)),
+			[("tool", "download"), ("network", "http:docs.rs:443")]
+		);
+
+		// No named host, or a target that names none: the tool's own fetch.
+		let malformed = omp_env::frame::AdmitInvocation {
+			fetch: vec![omp_proto::policy::v1::FetchTarget {
+				resolver: omp_proto::policy::v1::FetchResolver::Http as i32,
+				host:     "docs.rs".to_owned(),
+				port:     None,
+				props:    None,
+			}],
+			..admission_query(Some(&fetching(false)), &[])
+		};
+		for query in [admission_query(Some(&fetching(false)), &[]), malformed] {
+			assert_eq!(keyed(&super::admission_specs("read", args, &query)), [(
+				"network",
+				"tool:read"
+			)]);
+		}
+
+		// No fetch: the tool, whatever hosts were sent; no envelope: the tool.
+		let write = omp_tool::Effects {
+			documents: Some(omp_tool::DocEffects {
+				read:        true,
+				write_globs: std::sync::Arc::from([sf!("**")]),
+			}),
+			..omp_tool::Effects::empty()
+		};
+		for query in
+			[admission_query(Some(&write), std::slice::from_ref(&docs)), admission_query(None, &[])]
+		{
+			assert_eq!(keyed(&super::admission_specs("write", "{}", &query)), [("tool", "write")]);
+		}
+
+		let bash = omp_env::frame::AdmitInvocation {
+			bash: Some(omp_proto::policy::v1::BashIr {
+				source: "cargo test".to_owned(),
+				..omp_proto::policy::v1::BashIr::default()
+			}),
+			..admission_query(Some(&omp_tool::Effects::empty()), &[])
+		};
+		let specs = super::admission_specs("bash", r#"{"command":"cargo test"}"#, &bash);
+		assert_eq!(keyed(&specs), [("exec", "cargo test")]);
+		assert_eq!(specs[0].body, "$ cargo test");
+	}
+
+	/// Under `always-ask` a fetch is asked once per host per session: a
+	/// session grant for one host answers every later fetch from that host,
+	/// whatever the path, while a fetch from another host, a fetch that also
+	/// reaches another host, and the tool's own non-fetch requirement are
+	/// asked again.
+	#[test]
+	fn a_session_fetch_grant_covers_its_host_and_no_other() {
+		use omp_agent::{
+			ApprovalDecision, ApprovalDesk, ApprovalScope, ApprovalSource, KernelEvents, TicketState,
+		};
+		use omp_envd::fetch_host::FetchHost;
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let blobs = omp_journal::blob::BlobStore::open(scratch.path().join("blobs")).expect("blobs");
+		let mut session = omp_session::Session::create_with_blob_store(
+			scratch.path().join("fetch.oms"),
+			omp_session::ComponentRegistry::standard(),
+			blobs,
+		)
+		.expect("session");
+		let desk = ApprovalDesk::new(KernelEvents::default());
+		let docs = FetchHost::http("docs.rs", 443);
+		let crates = FetchHost::http("crates.io", 443);
+		let ask = |session: &mut omp_session::Session,
+		           call: &str,
+		           path: &str,
+		           hosts: &[FetchHost]| {
+			let args = format!(r#"{{"path":"{path}"}}"#);
+			let specs =
+				super::admission_specs("read", &args, &admission_query(Some(&fetching(false)), hosts));
+			desk
+				.file_specs(session, omp_core::Str::new(call), specs)
+				.expect("prompt files")
+		};
+
+		let first = ask(&mut session, "call-1", "https://docs.rs/serde", std::slice::from_ref(&docs));
+		assert_eq!(first.state, TicketState::Pending, "the first fetch from a host asks");
+		let docs_again =
+			ask(&mut session, "call-2", "https://docs.rs/tokio", std::slice::from_ref(&docs));
+		assert_eq!(docs_again.state, TicketState::Pending, "an undecided host still asks");
+
+		desk
+			.decide(&mut session, first.ticket_id.as_str(), ApprovalDecision {
+				approved:   true,
+				scope:      ApprovalScope::Session,
+				source:     ApprovalSource::User,
+				decided_by: None,
+				reason:     None,
+				audited:    false,
+			})
+			.expect("the session grant is journaled");
+
+		let granted =
+			ask(&mut session, "call-3", "https://docs.rs/bytes", std::slice::from_ref(&docs));
+		assert_eq!(granted.state, TicketState::Decided, "the granted host is not asked again");
+		let decision = granted.decision.as_ref().expect("decided by the grant");
+		assert!(decision.approved);
+		assert_eq!(decision.source, ApprovalSource::Config);
+
+		let other = ask(
+			&mut session,
+			"call-4",
+			"https://crates.io/crates/serde",
+			std::slice::from_ref(&crates),
+		);
+		assert_eq!(other.state, TicketState::Pending, "a grant for one host never covers another");
+		let both =
+			ask(&mut session, "call-5", "https://docs.rs/serde;https://crates.io", &[crates, docs]);
+		assert_eq!(both.state, TicketState::Pending, "every host of a fetch must be granted");
+		let unnamed = ask(&mut session, "call-6", "https://docs.rs/serde", &[]);
+		assert_eq!(unnamed.state, TicketState::Pending, "the tool's own fetch is not a host's");
+
+		let write = omp_tool::Effects {
+			documents: Some(omp_tool::DocEffects {
+				read:        true,
+				write_globs: std::sync::Arc::from([sf!("**")]),
+			}),
+			..omp_tool::Effects::empty()
+		};
+		let tool = desk
+			.file_specs(
+				&mut session,
+				omp_core::Str::new("call-7"),
+				super::admission_specs("read", "{}", &admission_query(Some(&write), &[])),
+			)
+			.expect("prompt files");
+		assert_eq!(tool.state, TicketState::Pending, "a host grant never covers the tool");
+	}
+
+	/// Session-process code names no hosts, so a kernel-admitted call whose
+	/// tier is a fetch is asked as the tool's own fetch, offering the session,
+	/// and a call above the fetch tier is asked as the tool.
+	#[test]
+	fn settings_admission_asks_a_kernel_fetch_as_the_tools_own() {
+		use omp_agent::{ToolAdmission, ToolAdmissionVerdict};
+		use omp_envd::{admission::SandboxState, tool_settings::ToolSettings};
+
+		let args = serde_json::value::RawValue::from_string(String::from(r#"{"url":"x"}"#))
+			.expect("raw args");
+		let admission = super::SettingsAdmission {
+			settings: ToolSettings::default()
+				.with_approval_mode_override(Some(omp_envd::tool_settings::ApprovalMode::AlwaysAsk)),
+			sandbox:  SandboxState::Off,
+			notice:   None,
+		};
+		let ToolAdmissionVerdict::Prompt(spec) =
+			admission.admit("host_fetch", &fetching(true), omp_tool::Confinement::Host, &args)
+		else {
+			panic!("always-ask asks for a fetch");
+		};
+		assert_eq!((spec.kind.as_str(), spec.subject.as_str()), ("network", "tool:host_fetch"));
+		assert_eq!(spec.scopes, [sf!("once"), sf!("session")]);
+		let write = omp_tool::Effects {
+			documents: Some(omp_tool::DocEffects {
+				read:        true,
+				write_globs: std::sync::Arc::from([sf!("**")]),
+			}),
+			..fetching(false)
+		};
+		let ToolAdmissionVerdict::Prompt(spec) =
+			admission.admit("host_fetch", &write, omp_tool::Confinement::Host, &args)
+		else {
+			panic!("always-ask asks for a write");
+		};
+		assert_eq!((spec.kind.as_str(), spec.subject.as_str()), ("tool", "host_fetch"));
+	}
 
 	/// The kernel admission point applies decision 4 with an injected active
 	/// sandbox (Linux CI never constructs one): under the shipped `yolo`, a

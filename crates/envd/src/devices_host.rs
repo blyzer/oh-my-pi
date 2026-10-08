@@ -26,6 +26,7 @@ use super::{
 	admission::{DynamicAdmission, DynamicInvocationSource},
 	approval_relay::OwnedApprovals,
 	blobs::{BlobHost, BlobId},
+	fetch_host::FetchHost,
 	mcp::manager::McpManager,
 	reflection_relay::OwnedReflection,
 };
@@ -254,9 +255,10 @@ impl DynHost {
 		cancellation: CancellationToken,
 		approvals: Option<&OwnedApprovals>,
 	) -> Result<DynCallOutput, DynFault> {
-		if let Some(effects) = self.mcp.dynamic_effects(name.as_str()) {
+		if let Some((effects, server)) = self.mcp.dynamic_effects(name.as_str()) {
 			// MCP servers run outside the sandbox: stdio servers are spawned
-			// unconfined and HTTP servers are reached from this host.
+			// unconfined and HTTP servers are reached from this host. A fetch
+			// is asked per server.
 			self
 				.admission
 				.admit(
@@ -264,6 +266,7 @@ impl DynHost {
 					name.clone(),
 					&effects,
 					Confinement::Host,
+					&[FetchHost::mcp(server)],
 					DynamicInvocationSource::ShellDyn,
 					approvals,
 					cancellation.clone(),
@@ -471,6 +474,8 @@ impl DynHost {
 						target.name.clone(),
 						&effects,
 						target.confinement,
+						// A device names no hosts: its fetch is asked as its own.
+						&[],
 						DynamicInvocationSource::ShellDyn,
 						approvals.as_ref(),
 						cancellation.clone(),
@@ -1048,7 +1053,7 @@ mod tests {
 			};
 			assert_eq!(query.reasons[0].subject, "danger");
 			assert_eq!(query.reasons[0].kind, "exec");
-			assert_eq!(query.reasons[0].scopes, ["once"]);
+			assert_eq!(query.reasons[0].scopes, ["once", "session"]);
 			approvals.answer(9, omp_proto::env::v1::ApprovalAnswer {
 				query_id: query.query_id,
 				decision: Some(omp_proto::env::v1::ApprovalDecision {

@@ -1420,7 +1420,12 @@ class ApprovalSpec:
 
 `omp.ApprovalKind` is a `StrEnum`: `EXEC`, `WRITE`, `READ`, `NETWORK`, `PRIVILEGE`, `DEVICE`,
 `SPAWN`. It selects presentation and the configuration key that may pre-answer the request; it
-is not itself a decision.
+is not itself a decision. The host raises a fetch (`Tier.FETCH`) as one `NETWORK` requirement per
+host the fetch reaches, named by the resolver that performs it: `http:<host>:<port>` for the
+authored host of an http(s) URL, `github:<host>` for `issue://` and `pr://`, `ssh:<alias>`,
+`mcp:<server>`, or `tool:<name>` when the host cannot name them. A `SESSION` grant covers a later
+request only when it covers every one of its requirements, so a grant for one host never covers
+another.
 
 `scopes` are the buttons. `(ONCE, SESSION)` is pi's "allow once / allow always"
 (`.plan/feature-map/ROADMAP.md:278`); adding `PERSIST` offers to write the grant to project

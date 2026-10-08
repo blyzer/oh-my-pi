@@ -1321,12 +1321,13 @@ impl McpManager {
 		self.service.leaf_snapshot()
 	}
 
-	/// Returns the declared approval envelope for one live dynamic MCP target.
-	pub(crate) fn dynamic_effects(&self, name: &str) -> Option<Effects> {
+	/// Returns the declared approval envelope for one live dynamic MCP target,
+	/// beside the server the call reaches.
+	pub(crate) fn dynamic_effects(&self, name: &str) -> Option<(Effects, Str)> {
 		self.catalog_snapshot().leaves.iter().find_map(|leaf| {
 			mcp_dyn_definition(leaf)
 				.filter(|(candidate, _)| candidate == name)
-				.map(|_| mcp_tier_effects(leaf.value.tier.as_str()))
+				.map(|_| (mcp_tier_effects(leaf.value.tier.as_str()), leaf.value.server.clone()))
 		})
 	}
 

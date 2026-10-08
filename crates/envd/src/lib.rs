@@ -28,6 +28,8 @@ mod exec_sandbox;
 pub mod exec_settings;
 pub mod ext_git;
 pub mod exthost;
+/// The hosts a fetch reaches and the approval subjects keyed on them.
+pub mod fetch_host;
 mod github;
 pub mod github_url;
 pub mod grep;

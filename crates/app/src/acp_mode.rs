@@ -930,6 +930,21 @@ fn permission_decision(answer: Answer) -> ApprovalDecision {
 	}
 }
 
+/// The ACP `ToolKind` of a permission request for an approval requirement of
+/// `kind`; a `network` requirement is a host-keyed fetch
+/// (`omp_envd::fetch_host`).
+fn acp_tool_kind(kind: &str) -> &'static str {
+	match kind {
+		"exec" | "execute" | "bash" | "shell" => "execute",
+		"write" | "edit" => "edit",
+		"delete" => "delete",
+		"move" => "move",
+		"read" => "read",
+		"network" => "fetch",
+		_ => "other",
+	}
+}
+
 /// Sends one `session/request_permission` per kernel approval ticket through
 /// the connection's request table. Ends when the kernel's event stream or
 /// the transport does.
@@ -953,14 +968,7 @@ fn request_permissions(
 				},
 			});
 			if let Some(spec) = first {
-				let kind = match spec.kind.as_str() {
-					"exec" | "execute" | "bash" | "shell" => "execute",
-					"write" | "edit" => "edit",
-					"delete" => "delete",
-					"move" => "move",
-					"read" => "read",
-					_ => "other",
-				};
+				let kind = acp_tool_kind(spec.kind.as_str());
 				tool_call["kind"] = Value::String(kind.to_owned());
 				if kind == "execute" {
 					tool_call["content"] = json!([{
@@ -1656,6 +1664,22 @@ mod tests {
 				.as_deref(),
 			Some("rejected by ACP client")
 		);
+	}
+
+	/// A host-keyed fetch prompt reaches the editor as a `fetch` tool call;
+	/// the other approval kinds keep their ACP kinds.
+	#[test]
+	fn approval_kinds_map_to_acp_tool_kinds() {
+		for (kind, acp) in [
+			("network", "fetch"),
+			("exec", "execute"),
+			("write", "edit"),
+			("read", "read"),
+			("tool", "other"),
+			("sandbox_amendment", "other"),
+		] {
+			assert_eq!(acp_tool_kind(kind), acp, "{kind}");
+		}
 	}
 
 	#[test]
