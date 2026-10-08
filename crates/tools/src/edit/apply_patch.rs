@@ -285,6 +285,7 @@ fn freeform_spec<P: JsonSchema>(kind: FreeformKind, revision: u16) -> ToolSpec {
 			exec:      None,
 			inference: None,
 			desktop:   None,
+			fetch:     None,
 			subagents: 0,
 		},
 		confinement:     omp_tool::Confinement::Host,

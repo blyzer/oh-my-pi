@@ -397,6 +397,7 @@ because a tier is a policy default and nothing else.
 ```python
 class Tier(enum.StrEnum):
     READ = "read"               # observes state, no effects
+    FETCH = "fetch"             # reads a remote resource, changes nothing locally
     WRITE = "write"             # mutates workspace state
     EXEC = "exec"               # runs code, spawns processes, or reaches the network
     PRIVILEGED = "privileged"   # touches credentials, policy, or the host outside the workspace
@@ -424,7 +425,7 @@ there, not to the `Tier.EXEC` default `omp.tier_of` documents above.
 
 A tier is one word; an envelope is the sentence. Every device declares a maximum
 `omp.Effects` envelope — document reads and write globs, permitted commands and network use,
-inference request and spend ceilings, subagent count — at declaration time
+read-only fetches, inference request and spend ceilings, subagent count — at declaration time
 (`docs/py/01-devices.md` owns the type). Policy's half of the contract is enforcement:
 
 1. **Hooks narrow, never widen.** A `TRANSFORM` hook may shrink the envelope for one

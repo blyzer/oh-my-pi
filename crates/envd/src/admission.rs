@@ -28,6 +28,8 @@ use thiserror::Error;
 use tokio::{time, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+use crate::approval_relay::OwnedApprovals;
+
 /// Default approval posture applied before one invocation reaches interactive
 /// admission.
 #[derive(
@@ -47,9 +49,10 @@ use tokio_util::sync::CancellationToken;
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum ApprovalMode {
-	/// Read-only effects proceed; writes and execution require confirmation.
+	/// Read-only effects proceed; fetches, writes and execution require
+	/// confirmation.
 	AlwaysAsk,
-	/// Read and workspace-write effects proceed; execution requires
+	/// Read, fetch and workspace-write effects proceed; execution requires
 	/// confirmation.
 	Write,
 	/// Every declared tier proceeds unless a per-tool policy overrides it.
@@ -315,8 +318,10 @@ pub enum ApprovalPolicy {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ApprovalTier {
-	/// No mutation, process, inference, or subagent effects.
+	/// No mutation, process, inference, egress, or subagent effects.
 	Read,
+	/// Read-only network egress (a fetch) and nothing above it.
+	Fetch,
 	/// Declared document mutation without execution-class effects.
 	Write,
 	/// Process, network, inference, or subagent authority.
@@ -344,6 +349,8 @@ impl ApprovalTier {
 			.is_some_and(|effect| !effect.write_globs.is_empty())
 		{
 			Self::Write
+		} else if effects.fetch.is_some() {
+			Self::Fetch
 		} else {
 			Self::Read
 		}
@@ -504,6 +511,15 @@ impl DynamicAdmission {
 	}
 
 	/// Resolves and enforces one target's live effect declaration.
+	///
+	/// A prompt asks `relay`, the connection that issued the containing
+	/// command, when there is one, and never falls back to the host route: a
+	/// relay whose connection closed decides the prompt as unreachable. Without
+	/// a relay the route the host bound answers, if any.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "one admission joins the target, its declaration, its origin and its approver"
+	)]
 	pub(crate) async fn admit(
 		&self,
 		invocation_id: Str,
@@ -511,6 +527,7 @@ impl DynamicAdmission {
 		effects: &Effects,
 		confinement: Confinement,
 		source: DynamicInvocationSource,
+		relay: Option<&OwnedApprovals>,
 		cancellation: CancellationToken,
 	) -> Result<ResolvedApproval, DynamicAdmissionError> {
 		if cancellation.is_cancelled() {
@@ -532,37 +549,53 @@ impl DynamicAdmission {
 			},
 			ApprovalPolicy::Prompt => {},
 		}
-		let Some(route) = self.route.read().clone() else {
-			return Err(DynamicAdmissionError::ApprovalUnavailable { target });
+		// A relay outranks the host route and never falls back to it.
+		let route = if relay.is_some() {
+			None
+		} else {
+			self.route.read().clone()
 		};
 		let tier: &'static str = resolved.tier.into();
 		let origin: &'static str = source.into();
 		let confinement: &'static str = confinement.into();
-		let ticket = route
-			.request_cancellable(
-				Some(invocation_id),
-				vec![ApprovalSpec {
-					title:         sf!("Approve dynamic target"),
-					body:          sf!("Allow dynamic target `{target}`?"),
-					subject:       target.clone(),
-					kind:          Str::new_static(tier),
-					scopes:        vec![sf!("once")],
-					default:       None,
-					route:         sf!("user"),
-					approver:      None,
-					timeout_ms:    0,
-					unreachable:   sf!("fail_closed"),
-					require_human: false,
-					pattern:       None,
-					evidence:      vec![
-						sf!("invocation_source={origin}"),
-						sf!("confinement={confinement}"),
-					],
-				}],
-				epoch_millis(),
-				cancellation.clone(),
-			)
-			.await;
+		let reasons = vec![ApprovalSpec {
+			title:         sf!("Approve dynamic target"),
+			body:          sf!("Allow dynamic target `{target}`?"),
+			subject:       target.clone(),
+			kind:          Str::new_static(tier),
+			scopes:        vec![sf!("once")],
+			default:       None,
+			route:         sf!("user"),
+			approver:      None,
+			timeout_ms:    0,
+			unreachable:   sf!("fail_closed"),
+			require_human: false,
+			pattern:       None,
+			evidence:      vec![sf!("invocation_source={origin}"), sf!("confinement={confinement}")],
+		}];
+		let ticket = match (relay, route) {
+			(Some(relay), _) => {
+				// Dropping the relayed prompt withdraws its query.
+				tokio::select! {
+					biased;
+					() = cancellation.cancelled() => {
+						return Err(DynamicAdmissionError::Cancelled { target });
+					},
+					ticket = relay.request(Some(invocation_id), reasons, epoch_millis()) => ticket,
+				}
+			},
+			(None, Some(route)) => {
+				route
+					.request_cancellable(
+						Some(invocation_id),
+						reasons,
+						epoch_millis(),
+						cancellation.clone(),
+					)
+					.await
+			},
+			(None, None) => return Err(DynamicAdmissionError::ApprovalUnavailable { target }),
+		};
 		let Some(decision) = ticket.decision else {
 			return Err(DynamicAdmissionError::ApprovalUnavailable { target });
 		};
@@ -1036,7 +1069,7 @@ mod tests {
 	};
 	use omp_tool::{
 		Confinement, DesktopEffects, DocEffects, Effects, ExecEffects as ToolExecEffects,
-		InferenceEffects, Usd,
+		FetchEffects, InferenceEffects, Usd,
 	};
 	use proptest::prelude::*;
 	use tokio::time;
@@ -1059,6 +1092,66 @@ mod tests {
 
 	const fn defaulted(mode: ApprovalMode) -> ConfiguredApproval {
 		ConfiguredApproval { mode, provenance: Provenance::Default }
+	}
+
+	/// A fetch is its own tier between read and write: `always-ask` prompts
+	/// for it, `write`, the default and an explicit `yolo` allow it, and a
+	/// fetch beside a write or an exec effect takes the higher tier. A fetch
+	/// is never empty and never mutates the environment.
+	#[test]
+	fn a_fetch_sits_between_read_and_write() {
+		let fetch = Effects { fetch: Some(FetchEffects { credentials: true }), ..Effects::empty() };
+		assert_eq!(ApprovalTier::from_effects(&fetch), ApprovalTier::Fetch);
+		assert!(!fetch.is_empty());
+		assert!(!fetch.mutates_environment());
+		for (configured, policy) in [
+			(explicit(ApprovalMode::AlwaysAsk), ApprovalPolicy::Prompt),
+			(explicit(ApprovalMode::Write), ApprovalPolicy::Allow),
+			(defaulted(ApprovalMode::Yolo), ApprovalPolicy::Allow),
+			(explicit(ApprovalMode::Yolo), ApprovalPolicy::Allow),
+		] {
+			let decision = resolve_approval(
+				"fetch-1",
+				"read",
+				&fetch,
+				Confinement::Host,
+				configured,
+				SandboxState::Off,
+				None,
+			);
+			assert_eq!(
+				(decision.tier, decision.policy),
+				(ApprovalTier::Fetch, policy),
+				"{configured:?}"
+			);
+		}
+		let fetch_and_write = Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::from([sf!("**")]) }),
+			..fetch.clone()
+		};
+		assert_eq!(ApprovalTier::from_effects(&fetch_and_write), ApprovalTier::Write);
+		let fetch_and_exec = Effects {
+			exec: Some(ToolExecEffects { commands: Arc::from([]), network: true }),
+			..fetch
+		};
+		assert_eq!(ApprovalTier::from_effects(&fetch_and_exec), ApprovalTier::Exec);
+	}
+
+	/// A requested fetch narrows a declared fetch only when it asks for no
+	/// credentials the maximum withholds, and never when the maximum denies
+	/// fetching; the envelope survives the policy wire.
+	#[test]
+	fn fetch_narrowing_and_wire_round_trip() {
+		let anonymous =
+			Effects { fetch: Some(FetchEffects { credentials: false }), ..Effects::empty() };
+		let credentialed =
+			Effects { fetch: Some(FetchEffects { credentials: true }), ..Effects::empty() };
+		assert!(anonymous.is_subset_of(&credentialed));
+		assert!(!credentialed.is_subset_of(&anonymous));
+		assert!(!anonymous.is_subset_of(&Effects::empty()));
+		assert!(Effects::empty().is_subset_of(&anonymous));
+		let wire = EffectEnvelope::from(&credentialed);
+		assert_eq!(Effects::try_from(&wire).expect("decodes"), credentialed);
 	}
 
 	#[test]
@@ -1405,6 +1498,7 @@ mod tests {
 					accessibility,
 					input,
 				}),
+				fetch: None,
 				subagents,
 			})
 	}
@@ -1692,6 +1786,7 @@ mod tests {
 					&network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await;
@@ -1733,6 +1828,7 @@ mod tests {
 					&network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await,
@@ -1745,6 +1841,7 @@ mod tests {
 				&Effects::empty(),
 				Confinement::ExecSandbox,
 				DynamicInvocationSource::ShellDyn,
+				None,
 				CancellationToken::new(),
 			)
 			.await
@@ -1762,6 +1859,7 @@ mod tests {
 					&network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await
@@ -1822,6 +1920,7 @@ mod tests {
 					&pending_network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await
@@ -1864,6 +1963,7 @@ mod tests {
 					&cancel_network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					cancel_token,
 				)
 				.await

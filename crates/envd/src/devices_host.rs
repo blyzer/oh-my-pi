@@ -24,8 +24,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
 	admission::{DynamicAdmission, DynamicInvocationSource},
+	approval_relay::OwnedApprovals,
 	blobs::{BlobHost, BlobId},
 	mcp::manager::McpManager,
+	reflection_relay::OwnedReflection,
 };
 
 tokio::task_local! {
@@ -45,6 +47,91 @@ fn capture_exec_diags(diags: &[Diag]) {
 		return;
 	}
 	let _ = EXEC_DIAGS.try_with(|sink| sink.lock().extend_from_slice(diags));
+}
+
+/// The relays of the connection that issued the command a session shell is
+/// running, which a nested `dyn` call answers to.
+///
+/// A project daemon's host binds no approval route or reflection authority:
+/// a `dyn` target that needs a prompt asks the issuing connection, and a
+/// `dyn reflect` synthesizes on its session. Without them (an in-process
+/// composition's command, or one issued by no relaying connection) the host's
+/// own bindings answer.
+#[derive(Clone, Default)]
+pub(crate) struct CommandIssuer {
+	/// The approval relay of the connection that issued the command.
+	pub(crate) approvals:  Option<OwnedApprovals>,
+	/// The reflection relay of the connection that issued the command.
+	pub(crate) reflection: Option<OwnedReflection>,
+}
+
+/// One session shell's record of the command it is running.
+///
+/// The shell runs one command at a time, and every builtin of that command,
+/// in a pipeline stage or a subshell too, reads the same record, so a nested
+/// call answers to the command that issued it. A background job still running
+/// after its command finished reads whatever command runs next in the same
+/// shell, or nothing between commands.
+#[derive(Clone, Default)]
+pub(crate) struct IssuerCell(Arc<Mutex<CommandIssuer>>);
+
+impl IssuerCell {
+	/// Records `issuer` as the running command's until the returned guard
+	/// drops.
+	pub(crate) fn enter(&self, issuer: CommandIssuer) -> IssuedCommand<'_> {
+		*self.0.lock() = issuer;
+		IssuedCommand { cell: self }
+	}
+
+	fn current(&self) -> CommandIssuer {
+		self.0.lock().clone()
+	}
+}
+
+/// Clears the running command's relays when the command's run ends.
+pub(crate) struct IssuedCommand<'c> {
+	cell: &'c IssuerCell,
+}
+
+impl Drop for IssuedCommand<'_> {
+	fn drop(&mut self) {
+		*self.cell.0.lock() = CommandIssuer::default();
+	}
+}
+
+/// One session shell's `dyn` builtin: the environment's device host, called
+/// with the relays of the command that shell is running.
+pub(crate) struct CommandDevices {
+	host:   Arc<DynHost>,
+	issuer: IssuerCell,
+}
+
+impl CommandDevices {
+	/// Serves `host` to a shell whose running command `issuer` records.
+	pub(crate) const fn new(host: Arc<DynHost>, issuer: IssuerCell) -> Self {
+		Self { host, issuer }
+	}
+}
+
+impl ShellDynHost for CommandDevices {
+	fn list(&self) -> DynFuture<'_, Vec<DynDevice>> {
+		self.host.list()
+	}
+
+	fn schema(&self, name: &str) -> DynFuture<'_, DynSchema> {
+		self.host.schema(name)
+	}
+
+	fn call(
+		&self,
+		name: &str,
+		args: Value,
+		cancellation: CancellationToken,
+	) -> DynFuture<'_, DynCallOutput> {
+		self
+			.host
+			.call_issued(name, args, cancellation, self.issuer.current())
+	}
 }
 
 /// Envd-owned loopback bridge behind the `dyn` shell builtin.
@@ -165,6 +252,7 @@ impl DynHost {
 		name: Str,
 		args: Value,
 		cancellation: CancellationToken,
+		approvals: Option<&OwnedApprovals>,
 	) -> Result<DynCallOutput, DynFault> {
 		if let Some(effects) = self.mcp.dynamic_effects(name.as_str()) {
 			// MCP servers run outside the sandbox: stdio servers are spawned
@@ -177,6 +265,7 @@ impl DynHost {
 					&effects,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					approvals,
 					cancellation.clone(),
 				)
 				.await
@@ -260,7 +349,7 @@ fn recovery_snapshot_diag(payload: &Value) -> Option<Diag> {
 	})
 }
 
-impl ShellDynHost for DynHost {
+impl DynHost {
 	fn list(&self) -> DynFuture<'_, Vec<DynDevice>> {
 		Box::pin(async move {
 			let registry = self
@@ -323,14 +412,20 @@ impl ShellDynHost for DynHost {
 		})
 	}
 
-	fn call(
+	/// Invokes one target for the command `issuer` records: its admission
+	/// prompt asks the issuing connection when that connection relays
+	/// approvals, and a reflection it needs synthesizes on that connection's
+	/// session.
+	pub(crate) fn call_issued(
 		&self,
 		name: &str,
 		args: Value,
 		cancellation: CancellationToken,
+		issuer: CommandIssuer,
 	) -> DynFuture<'_, DynCallOutput> {
 		let name = Str::new(name);
 		Box::pin(async move {
+			let CommandIssuer { approvals, reflection } = issuer;
 			let result = async {
 				if matches!(name.as_str(), "resolve" | "reject") {
 					if cancellation.is_cancelled() {
@@ -345,7 +440,9 @@ impl ShellDynHost for DynHost {
 					.registry()
 					.ok_or_else(|| DynFault::new("device catalog is not available in this session"))?;
 				let Ok(path) = DevicePath::parse(name.as_str()) else {
-					return self.call_mcp(name, args, cancellation).await;
+					return self
+						.call_mcp(name, args, cancellation, approvals.as_ref())
+						.await;
 				};
 				let target = match registry.resolve_device(&path) {
 					Ok(target) => target,
@@ -358,7 +455,11 @@ impl ShellDynHost for DynHost {
 							"device `{name}` rejected its path arguments"
 						)));
 					},
-					Err(_) => return self.call_mcp(name, args, cancellation).await,
+					Err(_) => {
+						return self
+							.call_mcp(name, args, cancellation, approvals.as_ref())
+							.await;
+					},
 				};
 				let identity = target.identity();
 				let effects = target.effects.clone();
@@ -371,19 +472,25 @@ impl ShellDynHost for DynHost {
 						&effects,
 						target.confinement,
 						DynamicInvocationSource::ShellDyn,
+						approvals.as_ref(),
 						cancellation.clone(),
 					)
 					.await
 					.map_err(|error| DynFault::new(error.to_string()))?;
 				let raw = Str::new(args.to_string());
 				let args_json = Bytes::from(raw.clone());
+				// The registry reads a dropped feed as an aborted invocation, so a
+				// native target's feed must outlive its stream; otherwise any target
+				// that awaits loses the race to `InputDropped`.
+				let mut feed = None;
 				let mut stream = match target.route.clone() {
 					ToolRoute::Native => {
-						let (feed, params) =
+						let (committed, params) =
 							IncomingParams::channel_for(None, Some(invocation_id.clone()));
-						feed.args_committed(raw).map_err(|_| {
+						committed.args_committed(raw).map_err(|_| {
 							DynFault::new("device argument channel closed before dispatch")
 						})?;
+						feed = Some(committed);
 						registry
 							.invoke_device(&path, params)
 							.map_err(|error| DynFault::new(format!("device dispatch failed: {error}")))?
@@ -408,7 +515,15 @@ impl ShellDynHost for DynHost {
 							.await
 					},
 				};
-				consume(&registry, &self.blobs, &identity, &mut stream, cancellation).await
+				// A native target runs on this task: a reflection it needs
+				// synthesizes on the issuing connection's session.
+				let output = crate::tools::with_invocation_reflection(
+					reflection,
+					consume(&registry, &self.blobs, &identity, &mut stream, cancellation),
+				)
+				.await;
+				drop(feed);
+				output
 			}
 			.await;
 			if let Ok(call) = &result {
@@ -749,14 +864,27 @@ mod tests {
 	) -> (DynHost, Arc<Registry>) {
 		let mut registry = Registry::new();
 		for device in devices {
-			registry
-				.register(device, Presentation::Device, Claims {
-					precedence: Precedence::ENHANCEMENT,
-					claimant:   sf!("omp/test"),
-					replaces:   None,
-				})
-				.expect("register target");
+			register_device(&mut registry, device);
 		}
+		dyn_host_over(scratch, registry, admission)
+	}
+
+	fn register_device<T: Tool>(registry: &mut Registry, device: T) {
+		registry
+			.register(device, Presentation::Device, Claims {
+				precedence: Precedence::ENHANCEMENT,
+				claimant:   sf!("omp/test"),
+				replaces:   None,
+			})
+			.expect("register target");
+	}
+
+	/// A `dyn` host over `registry`'s devices.
+	fn dyn_host_over(
+		scratch: &Path,
+		registry: Registry,
+		admission: DynamicAdmission,
+	) -> (DynHost, Arc<Registry>) {
 		let registry = Arc::new(registry);
 		let catalog = DeviceCatalog::default();
 		catalog
@@ -808,7 +936,8 @@ mod tests {
 			admission,
 		);
 
-		let refused = ShellDynHost::call(&host, "danger", json!({}), CancellationToken::new())
+		let refused = host
+			.call_issued("danger", json!({}), CancellationToken::new(), CommandIssuer::default())
 			.await
 			.expect_err("an always-ask exec-tier target needs a prompt");
 		assert!(
@@ -854,7 +983,8 @@ mod tests {
 			admission,
 		);
 
-		let refused = ShellDynHost::call(&host, "net", json!({}), CancellationToken::new())
+		let refused = host
+			.call_issued("net", json!({}), CancellationToken::new(), CommandIssuer::default())
 			.await
 			.expect_err("a host exec-tier target needs a prompt");
 		assert!(
@@ -864,13 +994,159 @@ mod tests {
 			"{refused:?}"
 		);
 		assert_eq!(network.load(Ordering::Relaxed), 0);
-		ShellDynHost::call(&host, "peek", json!({}), CancellationToken::new())
+		host
+			.call_issued("peek", json!({}), CancellationToken::new(), CommandIssuer::default())
 			.await
 			.expect("a host read-tier target proceeds");
 		assert_eq!(peek.load(Ordering::Relaxed), 1);
-		ShellDynHost::call(&host, "confined", json!({}), CancellationToken::new())
+		host
+			.call_issued("confined", json!({}), CancellationToken::new(), CommandIssuer::default())
 			.await
 			.expect("a sandboxed target keeps the sandbox-kept yolo");
 		assert_eq!(sandboxed.load(Ordering::Relaxed), 1);
+	}
+
+	fn admission(mode: ApprovalMode) -> DynamicAdmission {
+		DynamicAdmission::new(
+			crate::admission::ConfiguredApproval {
+				mode,
+				provenance: crate::admission::Provenance::Explicit,
+			},
+			crate::admission::SandboxState::Off,
+			std::collections::BTreeMap::new(),
+			None,
+		)
+	}
+
+	/// A command's connection relay decides its `dyn` admission: the prompt
+	/// travels on the command's request, an approval runs the target once, a
+	/// refusal never runs it, and the host binds no route at all.
+	#[tokio::test]
+	async fn a_command_relay_decides_its_dyn_admission() {
+		use crate::approval_relay::ConnectionApprovals;
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let calls = Arc::new(AtomicUsize::new(0));
+		let (host, _registry) = dyn_host(
+			scratch.path(),
+			[counting_device("danger", commands_and_network(), Confinement::Host, &calls)],
+			admission(ApprovalMode::AlwaysAsk),
+		);
+		let (responses, frames) = flume::bounded(4);
+		let approvals = ConnectionApprovals::new(responses);
+		let issuer = CommandIssuer { approvals: Some(approvals.owned(9)), reflection: None };
+		for (approved, expected_calls) in [(true, 1), (false, 1)] {
+			let call = host.call_issued("danger", json!({}), CancellationToken::new(), issuer.clone());
+			tokio::pin!(call);
+			let frame = tokio::select! {
+				frame = frames.recv_async() => frame.expect("relayed admission prompt"),
+				result = &mut call => panic!("the admission settled unasked: {result:?}"),
+			};
+			assert_eq!(frame.request_id, 9, "the prompt rides the command's request");
+			let Some(omp_proto::env::v1::server_frame::Body::ApprovalQuery(query)) = frame.body else {
+				panic!("expected an approval query, got {:?}", frame.body);
+			};
+			assert_eq!(query.reasons[0].subject, "danger");
+			assert_eq!(query.reasons[0].kind, "exec");
+			assert_eq!(query.reasons[0].scopes, ["once"]);
+			approvals.answer(9, omp_proto::env::v1::ApprovalAnswer {
+				query_id: query.query_id,
+				decision: Some(omp_proto::env::v1::ApprovalDecision {
+					approved,
+					scope: "once".to_owned(),
+					source: "user".to_owned(),
+					..omp_proto::env::v1::ApprovalDecision::default()
+				}),
+			});
+			let result = call.await;
+			assert_eq!(result.is_ok(), approved, "{result:?}");
+			assert_eq!(calls.load(Ordering::Relaxed), expected_calls);
+		}
+		// A closed connection fails the prompt closed; no host route answers.
+		approvals.disconnect();
+		let refused = host
+			.call_issued("danger", json!({}), CancellationToken::new(), issuer)
+			.await
+			.expect_err("a closed relay never falls back");
+		assert!(refused.message.contains("denied"), "{refused:?}");
+		assert_eq!(calls.load(Ordering::Relaxed), 1);
+	}
+
+	/// A `dyn reflect` synthesizes on the issuing connection's session: the
+	/// recalled evidence travels on the command's request and the answer
+	/// becomes the call's output. Without a relay, and with nothing bound in
+	/// process, it answers with the evidence.
+	#[tokio::test]
+	async fn a_dyn_reflect_synthesizes_on_the_issuing_connection() {
+		use omp_memory::{
+			MemoryBackend, MemoryRuntime, MnemopiSettings,
+			config::EmbeddingVariant,
+			runtime::{RuntimeStart, SaveRequest},
+		};
+		use omp_proto::env::v1::{self as pb, reflection_answer, server_frame};
+
+		use crate::reflection_relay::ConnectionReflection;
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let runtime = MemoryRuntime::start(RuntimeStart {
+			session_id:             sf!("dyn-reflect"),
+			data_dir:               scratch.path().join("data"),
+			workspace_root:         scratch.path().to_path_buf(),
+			canonical_primary_root: Some(scratch.path().to_path_buf()),
+			backend:                MemoryBackend::Mnemopi,
+			mnemopi:                MnemopiSettings {
+				embedding_variant: EmbeddingVariant::Disabled,
+				..MnemopiSettings::default()
+			},
+		})
+		.expect("Mnemopi runtime");
+		runtime
+			.save_batch(
+				&[SaveRequest { content: "The deploy target is fly.io", context: None }],
+				"dyn-reflect",
+				0.75,
+			)
+			.expect("retain the fact");
+		let mut registry = Registry::new();
+		register_device(
+			&mut registry,
+			omp_tools::memory::reflect_tool(
+				runtime,
+				Arc::new(crate::memory::ReflectionBridgeHost::new()),
+			),
+		);
+		let (host, _registry) =
+			dyn_host_over(scratch.path(), registry, admission(ApprovalMode::Yolo));
+		let args = || json!({ "query": "deploy target", "i": "Proving the relay" });
+
+		let fallback = host
+			.call_issued("reflect", args(), CancellationToken::new(), CommandIssuer::default())
+			.await
+			.expect("evidence fallback");
+		let fallback = format!("{:?}", fallback.output);
+		assert!(fallback.contains("Based on recalled memories"), "{fallback}");
+
+		let (responses, frames) = flume::bounded(4);
+		let reflection = ConnectionReflection::new(responses);
+		let issuer = CommandIssuer { approvals: None, reflection: Some(reflection.owned(9)) };
+		let call = host.call_issued("reflect", args(), CancellationToken::new(), issuer);
+		tokio::pin!(call);
+		let frame = tokio::select! {
+			frame = frames.recv_async() => frame.expect("relayed reflection"),
+			result = &mut call => panic!("the reflection settled unasked: {result:?}"),
+		};
+		assert_eq!(frame.request_id, 9, "the reflection rides the command's request");
+		let Some(server_frame::Body::ReflectionQuery(query)) = frame.body else {
+			panic!("expected a reflection query, got {:?}", frame.body);
+		};
+		assert_eq!(query.question, "deploy target");
+		assert_eq!(query.evidence, ["The deploy target is fly.io"]);
+		reflection.answer(9, pb::ReflectionAnswer {
+			query_id: query.query_id,
+			body:     Some(reflection_answer::Body::Answer("Deploys go to fly.io.".to_owned())),
+		});
+		let synthesized = format!("{:?}", call.await.expect("synthesized answer").output);
+		assert!(synthesized.contains("Deploys go to fly.io."), "{synthesized}");
+		assert!(!synthesized.contains("Based on recalled memories"), "{synthesized}");
 	}
 }

@@ -96,12 +96,24 @@ class InferenceEffects:
 
 
 @dataclass(frozen=True, slots=True)
+class FetchEffects:
+    """Bound a device's read-only network fetches.
+
+    A fetch reads a remote resource and changes nothing locally; ``credentials``
+    says whether it may present the user's stored credentials.
+    """
+
+    credentials: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Effects:
     """Declare a device's maximum static effect envelope."""
 
     documents: DocEffects | None = None
     exec: ExecEffects | None = None
     inference: InferenceEffects | None = None
+    fetch: FetchEffects | None = None
     subagents: int = 0
 
 
@@ -413,12 +425,15 @@ def _effects_from_wire(value: object) -> Effects | None:
     documents = value.get("documents")
     execution = value.get("exec")
     inference = value.get("inference")
+    fetch = value.get("fetch")
     if documents is not None and not isinstance(documents, Mapping):
         raise DeviceError("device catalog document effects must be a mapping")
     if execution is not None and not isinstance(execution, Mapping):
         raise DeviceError("device catalog exec effects must be a mapping")
     if inference is not None and not isinstance(inference, Mapping):
         raise DeviceError("device catalog inference effects must be a mapping")
+    if fetch is not None and not isinstance(fetch, Mapping):
+        raise DeviceError("device catalog fetch effects must be a mapping")
     return Effects(
         documents=DocEffects(
             read=bool(documents.get("read", False)),
@@ -432,6 +447,9 @@ def _effects_from_wire(value: object) -> Effects | None:
             max_requests=int(inference.get("max_requests", 0)),
             max_usd=float(inference.get("max_usd", 0.0)),
         ) if inference is not None else None,
+        fetch=FetchEffects(
+            credentials=bool(fetch.get("credentials", False)),
+        ) if fetch is not None else None,
         subagents=int(value.get("subagents", 0)),
     )
 

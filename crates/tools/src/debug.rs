@@ -319,6 +319,7 @@ pub fn spec() -> ToolSpec {
 			}),
 			inference: None,
 			desktop:   None,
+			fetch:     None,
 			subagents: 0,
 		},
 		confinement:     omp_tool::Confinement::Host,

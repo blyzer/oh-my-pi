@@ -1530,7 +1530,7 @@ fn initial_authority_snapshot(config: &ExtHostConfig) -> ControlAuthoritySnapsho
 			let tier = row
 				.and_then(|row| row.properties.get("tier"))
 				.and_then(serde_json::Value::as_str)
-				.filter(|tier| matches!(*tier, "read" | "write" | "exec" | "privileged"))
+				.filter(|tier| matches!(*tier, "read" | "fetch" | "write" | "exec" | "privileged"))
 				.map(Str::from)
 				.or_else(|| {
 					row.and_then(|row| row.properties.get("effects"))

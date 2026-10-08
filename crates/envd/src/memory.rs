@@ -2,9 +2,11 @@
 //!
 //! The host starts and registers the Off/Mnemopi runtime from the immutable
 //! VCS snapshot it already owns, and exposes the late-bound bridge the memory
-//! device uses to reach the client's inference authority. Prompt sampling and
-//! extraction lanes live above the environment, in
-//! the higher-level driver memory composition.
+//! device's `reflect` uses to reach the inference of the session that issued
+//! the call: over the issuing connection's reflection relay on a project
+//! daemon, else the authority the driver binds in this process once it has
+//! composed it. Prompt sampling and extraction lanes live above the
+//! environment, in the higher-level driver memory composition.
 
 use std::{
 	fmt,
@@ -22,7 +24,7 @@ use omp_tools::memory::{ReflectionHost, ReflectionHostError};
 
 use super::vcs::RepositorySnapshot;
 
-/// Failure to bind the app inference authority more than once.
+/// Failure to bind the session's inference authority more than once.
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum ReflectionBindingError {
 	/// A host was already installed for this environment generation.
@@ -30,8 +32,13 @@ pub enum ReflectionBindingError {
 	AlreadyBound,
 }
 
-/// Late-bound bridge from the environment memory device to Chat's inference
-/// authority.
+/// Late-bound bridge from the environment memory device to the inference of
+/// the session that issued the call.
+///
+/// A call whose connection relays reflections (an attached session's call on
+/// the project daemon) synthesizes there, through that session's own bridge;
+/// any other call uses the authority bound here. Neither present, `reflect`
+/// answers with the recalled evidence.
 #[derive(Default)]
 pub struct ReflectionBridgeHost {
 	host: OnceLock<Arc<dyn ReflectionHost>>,
@@ -43,7 +50,7 @@ impl ReflectionBridgeHost {
 		Self { host: OnceLock::new() }
 	}
 
-	/// Installs the one app-owned reflection authority.
+	/// Installs the one driver-owned reflection authority.
 	pub fn bind(&self, host: Arc<dyn ReflectionHost>) -> Result<(), ReflectionBindingError> {
 		self
 			.host
@@ -58,6 +65,9 @@ impl ReflectionHost for ReflectionBridgeHost {
 		&self,
 		request: omp_tools::memory::ReflectionRequest,
 	) -> Result<Str, ReflectionHostError> {
+		if let Some(relay) = crate::tools::invocation_reflection() {
+			return relay.reflect(request).await;
+		}
 		let host = self.host.get().ok_or(ReflectionHostError::Unavailable)?;
 		host.reflect(request).await
 	}

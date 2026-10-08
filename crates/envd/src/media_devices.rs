@@ -453,6 +453,7 @@ fn media_device(
 				exec:      None,
 				inference: Some(InferenceEffects { max_requests: 1, max_usd: Default::default() }),
 				desktop:   None,
+				fetch:     None,
 				subagents: 0,
 			},
 			confinement:     omp_tool::Confinement::Host,

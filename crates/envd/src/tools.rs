@@ -113,6 +113,7 @@ use super::{
 	media_devices,
 	media_tts::{SpeechConfig, SpeechPreference},
 	memory::ReflectionBridgeHost,
+	reflection_relay::OwnedReflection,
 	report_issue,
 	search_backend::SearchBridgeHost,
 	security_scan::SecurityScanService,
@@ -142,6 +143,7 @@ tokio::task_local! {
 	static EDIT_REPAIR_CONTEXT: InvocationEditRepairContext;
 	static ACP_BACKENDS: InvocationAcpBackends;
 	static INVOCATION_APPROVALS: Option<OwnedApprovals>;
+	static INVOCATION_REFLECTION: Option<OwnedReflection>;
 }
 /// Session-owned edit repair capability scoped to one native invocation.
 #[derive(Clone, Default)]
@@ -3505,6 +3507,15 @@ pub async fn with_invocation_approvals<T>(
 	INVOCATION_APPROVALS.scope(approvals, future).await
 }
 
+/// Runs one tool stream with the reflection relay of the connection that
+/// issued it, so a `reflect` it runs synthesizes on that connection's session.
+pub(crate) async fn with_invocation_reflection<T>(
+	reflection: Option<OwnedReflection>,
+	future: impl Future<Output = T>,
+) -> T {
+	INVOCATION_REFLECTION.scope(reflection, future).await
+}
+
 /// Which editor binding governs the current call.
 pub enum InvocationEditor {
 	/// An invocation over an environment connection: only that connection's
@@ -3535,6 +3546,12 @@ pub(super) fn invocation_output_request() -> omp_tool::OutputRequest {
 /// approvals.
 pub fn invocation_approvals() -> Option<OwnedApprovals> {
 	INVOCATION_APPROVALS.try_with(Clone::clone).ok().flatten()
+}
+
+/// Returns the reflection relay of the connection that issued the current
+/// call; `None` outside one, or when that connection relays no reflections.
+pub(crate) fn invocation_reflection() -> Option<OwnedReflection> {
+	INVOCATION_REFLECTION.try_with(Clone::clone).ok().flatten()
 }
 
 /// Returns the durable session principal for the current native invocation.

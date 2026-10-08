@@ -116,6 +116,7 @@ use super::{
 	},
 	presence::{PresenceError, PresenceLease, PresenceRegistry},
 	process_store::{ProcessStore, ShutdownAcknowledgement},
+	reflection_relay::{ConnectionReflection, OwnedReflection},
 	resource_materializer::{MaterializationError, ResourceMaterializer},
 	schedules::{DurableScheduleError, ScheduleDeliveryBackend},
 	search_backend::SearchBridgeHost,
@@ -127,7 +128,8 @@ use super::{
 		AgentCheckpointControl, InvocationAcpBackends, InvocationEditRepairContext,
 		SessionRegistryBridges, build_environment_declaration_inputs, production_registry,
 		session_registry, with_acp_scope, with_edit_repair_scope, with_invocation_approvals,
-		with_invocation_scope, with_invocation_session_scope, with_output_request_scope,
+		with_invocation_reflection, with_invocation_scope, with_invocation_session_scope,
+		with_output_request_scope,
 	},
 	vcs::{self, RepositoryAvailability},
 	worker::{
@@ -3875,10 +3877,11 @@ impl EnvServer {
 			Arc::clone(&self.authority),
 			&policy,
 		);
-		// Only an environment host runs commands; a session-only host refuses
-		// Exec, so a relay there would never carry a prompt.
+		// Only an environment host runs commands and `reflect`; a session-only
+		// host refuses Exec and hosts no memory device, so a relay there would
+		// never carry a query.
 		if self.environment_authorities().is_some() {
-			connection.relay_approvals(&responses);
+			connection.bind_relays(&responses);
 		}
 		loop {
 			let admission_deadline = connection.next_admission_deadline();
@@ -4454,6 +4457,7 @@ impl EnvServer {
 				| client_frame::Body::EditRepairAnswer(_)
 				| client_frame::Body::AcpDocumentAnswer(_)
 				| client_frame::Body::ApprovalAnswer(_)
+				| client_frame::Body::ReflectionAnswer(_)
 				| client_frame::Body::ArgsCommitted(_)
 				| client_frame::Body::Interrupt(_)
 				| client_frame::Body::Stdin(_)
@@ -4844,6 +4848,17 @@ impl EnvServer {
 					);
 				}
 			},
+			client_frame::Body::ReflectionAnswer(answer) => {
+				if let Some(reflection) = &connection.reflection {
+					reflection.answer(frame.request_id, answer);
+				} else {
+					tracing::debug!(
+						request_id = frame.request_id,
+						query_id = answer.query_id,
+						"ignored a reflection answer on a connection that relays no reflections"
+					);
+				}
+			},
 			client_frame::Body::ArgsCommitted(request) => {
 				match connection.scope_authenticates(
 					frame.request_id,
@@ -4974,7 +4989,12 @@ impl EnvServer {
 					return;
 				}
 				let approvals = connection.owned_approvals(frame.request_id);
-				match self.exec.exec_relayed(request, None, approvals).await {
+				let reflection = connection.owned_reflection(frame.request_id);
+				match self
+					.exec
+					.exec_relayed(request, None, approvals, reflection)
+					.await
+				{
 					Ok((started, run)) => {
 						let exec = Bytes::copy_from_slice(run.id());
 						let cancel = CancellationToken::new();
@@ -7499,6 +7519,7 @@ impl EnvServer {
 			let acp = connection.acp_routes(request_id, &invocation_id, responses);
 			let acp_context = acp.context();
 			let approvals = connection.owned_approvals(request_id);
+			let reflection = connection.owned_reflection(request_id);
 			let admission = if execution.core_admission {
 				AdmissionGate::with_deferred_policy(
 					invocation_id.clone(),
@@ -7555,6 +7576,7 @@ impl EnvServer {
 				edit_repair_context,
 				acp_context,
 				approvals,
+				reflection,
 				feed,
 				deadline,
 				params,
@@ -8271,6 +8293,10 @@ struct ConnectionState {
 	/// present only for an application connection to an environment host
 	/// that advertised the capability.
 	approvals:        Option<ConnectionApprovals>,
+	/// Relays the memory reflections of the `reflect` calls this connection
+	/// issues, directly or through its commands' `dyn`; present under the
+	/// same conditions for its own capability.
+	reflection:       Option<ConnectionReflection>,
 	host:             Option<HostKey>,
 	authority:        Arc<AuthorityTable>,
 	connection_owner: u64,
@@ -8433,6 +8459,7 @@ impl ConnectionState {
 			hello_props: hello.props,
 			acp_documents: None,
 			approvals: None,
+			reflection: None,
 			host: policy.host.clone(),
 			authority,
 			connection_owner,
@@ -8478,18 +8505,28 @@ impl ConnectionState {
 		self.capabilities.contains(omp_env::EDIT_REPAIR_CAPABILITY)
 	}
 
-	/// Relays the approval prompts of this connection's commands to it, when
-	/// it is an application connection that advertised the capability.
+	/// Relays the approval prompts of this connection's commands, and the
+	/// memory reflections of its `reflect` calls, to it: each when it is an
+	/// application connection that advertised that capability.
 	///
 	/// Extension connections never get a relay: extension code would then
-	/// approve the amendments of its own commands.
-	fn relay_approvals(&mut self, responses: &flume::Sender<pb::ServerFrame>) {
-		if self.host.is_none()
-			&& self
-				.capabilities
-				.contains(omp_env::APPROVAL_RELAY_CAPABILITY)
+	/// approve the amendments of its own commands, or answer its own
+	/// reflections.
+	fn bind_relays(&mut self, responses: &flume::Sender<pb::ServerFrame>) {
+		if self.host.is_some() {
+			return;
+		}
+		if self
+			.capabilities
+			.contains(omp_env::APPROVAL_RELAY_CAPABILITY)
 		{
 			self.approvals = Some(ConnectionApprovals::new(responses.clone()));
+		}
+		if self
+			.capabilities
+			.contains(omp_env::REFLECTION_RELAY_CAPABILITY)
+		{
+			self.reflection = Some(ConnectionReflection::new(responses.clone()));
 		}
 	}
 
@@ -8499,6 +8536,15 @@ impl ConnectionState {
 			.approvals
 			.as_ref()
 			.map(|approvals| approvals.owned(request_id))
+	}
+
+	/// This connection's reflection relay bound to the request that issues a
+	/// call or a command.
+	fn owned_reflection(&self, request_id: u64) -> Option<OwnedReflection> {
+		self
+			.reflection
+			.as_ref()
+			.map(|reflection| reflection.owned(request_id))
 	}
 
 	fn edit_model(&self) -> Option<Str> {
@@ -8967,10 +9013,14 @@ impl ConnectionState {
 	}
 
 	fn cancel_all(&mut self, exec_host: &ExecHost) {
-		// Pending prompts fail closed, and commands that outlive the connection
-		// stop holding its response channel.
+		// Pending prompts fail closed, pending reflections fall back to their
+		// evidence, and calls and commands that outlive the connection stop
+		// holding its response channel.
 		if let Some(approvals) = &self.approvals {
 			approvals.disconnect();
+		}
+		if let Some(reflection) = &self.reflection {
+			reflection.disconnect();
 		}
 		for (_, state) in mem::take(&mut self.requests) {
 			match state {
@@ -9096,6 +9146,7 @@ async fn spawn_native_invocation(
 	edit_repair: InvocationEditRepairContext,
 	acp: InvocationAcpBackends,
 	approvals: Option<OwnedApprovals>,
+	reflection: Option<OwnedReflection>,
 	feed: omp_tool::InvocationFeed,
 	deadline: Duration,
 	params: IncomingParams<'static>,
@@ -9110,7 +9161,8 @@ async fn spawn_native_invocation(
 	// The invocation body is the large future here. It is boxed once so the
 	// task-local scope wrappers around it move a pointer, not the body: nested
 	// by value, six wrappers overflow a worker stack in debug builds. The
-	// approval relay scope sits inside the box for the same reason.
+	// approval and reflection relay scopes sit inside the box for the same
+	// reason.
 	tokio::spawn(write_scope::scoped(
 		write_scope,
 		with_invocation_scope(
@@ -9123,162 +9175,171 @@ async fn spawn_native_invocation(
 						edit_repair,
 						with_acp_scope(
 							acp,
-							Box::pin(with_invocation_approvals(approvals, async move {
-								let result = registry.invoke(&name, params);
-								let _ = started.send(());
-								match result {
-									Ok(mut stream) => {
-										let mut deadline = Box::pin(time::sleep(deadline));
-										let mut cancel_grace: Option<pin::Pin<Box<Sleep>>> = None;
-										let mut timed_out = false;
-										let mut grace_expired = false;
-										loop {
-											if lifecycle.is_terminal() {
-												break;
-											}
-											if let Some(grace) = cancel_grace.as_mut() {
-												tokio::select! {
-													biased;
-													() = grace.as_mut() => {
-														grace_expired = true;
-														break;
-													},
-													event = stream.next() => {
-														let reason = if timed_out {
-															"native invocation ended without reporting timeout truth"
-														} else {
-															"native invocation ended without reporting cancellation truth"
-														};
-														if matches!(
-															forward_native_event(
+							Box::pin(with_invocation_approvals(
+								approvals,
+								with_invocation_reflection(reflection, async move {
+									let result = registry.invoke(&name, params);
+									let _ = started.send(());
+									match result {
+										Ok(mut stream) => {
+											let mut deadline = Box::pin(time::sleep(deadline));
+											let mut cancel_grace: Option<pin::Pin<Box<Sleep>>> = None;
+											let mut timed_out = false;
+											let mut grace_expired = false;
+											loop {
+												if lifecycle.is_terminal() {
+													break;
+												}
+												if let Some(grace) = cancel_grace.as_mut() {
+													tokio::select! {
+														biased;
+														() = grace.as_mut() => {
+															grace_expired = true;
+															break;
+														},
+														event = stream.next() => {
+															let reason = if timed_out {
+																"native invocation ended without reporting timeout truth"
+															} else {
+																"native invocation ended without reporting cancellation truth"
+															};
+															if matches!(
+																forward_native_event(
+																	event,
+																	true,
+																	reason,
+																	request_id,
+																	&invocation_id,
+																	&lifecycle,
+																	&delivery,
+																	&responses,
+																)
+																.await,
+																NativeForward::Terminal
+															) {
+																break;
+															}
+														},
+													}
+												} else {
+													tokio::select! {
+														biased;
+														() = deadline.as_mut() => {
+															let reason = sf!("native invocation deadline exceeded");
+															let _ = feed.interrupt(Interrupt {
+																class: sf!("deadline"),
+																reason: reason.clone(),
+															});
+															if lifecycle.is_committed() {
+																timed_out = true;
+																cancel_grace = Some(Box::pin(time::sleep(
+																	NATIVE_CANCEL_GRACE,
+																)));
+															} else if lifecycle.claim_precommit_terminal() {
+																send_abort_verdict(
+																	&responses,
+																	request_id,
+																	&invocation_id,
+																	&delivery,
+																	omp_tool::Abort::Interrupted { reason },
+																)
+																.await;
+																break;
+															} else {
+																break;
+															}
+														},
+														() = cancel.cancelled() => {
+															if lifecycle.is_committed() {
+																cancel_grace = Some(Box::pin(time::sleep(
+																	NATIVE_CANCEL_GRACE,
+																)));
+															} else {
+																break;
+															}
+														},
+														event = stream.next() => {
+															match forward_native_event(
 																event,
-																true,
-																reason,
+																false,
+																"",
 																request_id,
 																&invocation_id,
 																&lifecycle,
 																&delivery,
 																&responses,
 															)
-															.await,
-															NativeForward::Terminal
-														) {
-															break;
-														}
-													},
-												}
-											} else {
-												tokio::select! {
-													biased;
-													() = deadline.as_mut() => {
-														let reason = sf!("native invocation deadline exceeded");
-														let _ = feed.interrupt(Interrupt {
-															class: sf!("deadline"),
-															reason: reason.clone(),
-														});
-														if lifecycle.is_committed() {
-															timed_out = true;
-															cancel_grace = Some(Box::pin(time::sleep(
-																NATIVE_CANCEL_GRACE,
-															)));
-														} else if lifecycle.claim_precommit_terminal() {
-															send_abort_verdict(
-																&responses,
-																request_id,
-																&invocation_id,
-																&delivery,
-																omp_tool::Abort::Interrupted { reason },
-															)
-															.await;
-															break;
-														} else {
-															break;
-														}
-													},
-													() = cancel.cancelled() => {
-														if lifecycle.is_committed() {
-															cancel_grace = Some(Box::pin(time::sleep(
-																NATIVE_CANCEL_GRACE,
-															)));
-														} else {
-															break;
-														}
-													},
-													event = stream.next() => {
-														match forward_native_event(
-															event,
-															false,
-															"",
-															request_id,
-															&invocation_id,
-															&lifecycle,
-															&delivery,
-															&responses,
-														)
-														.await
-														{
-															NativeForward::Continue => {},
-															NativeForward::Terminal => break,
-															NativeForward::Backpressure => {
-																let _ = feed.interrupt(Interrupt {
-																	class: sf!("backpressure"),
-																	reason: sf!(
-																		"invocation response consumer stopped reading",
-																	),
-																});
-																if lifecycle.is_committed() {
-																	cancel_grace = Some(Box::pin(time::sleep(
-																		NATIVE_CANCEL_GRACE,
-																	)));
-																} else {
-																	lifecycle.claim_terminal();
-																	break;
-																}
-															},
-														}
-													},
+															.await
+															{
+																NativeForward::Continue => {},
+																NativeForward::Terminal => break,
+																NativeForward::Backpressure => {
+																	let _ = feed.interrupt(Interrupt {
+																		class: sf!("backpressure"),
+																		reason: sf!(
+																			"invocation response consumer stopped reading",
+																		),
+																	});
+																	if lifecycle.is_committed() {
+																		cancel_grace = Some(Box::pin(time::sleep(
+																			NATIVE_CANCEL_GRACE,
+																		)));
+																	} else {
+																		lifecycle.claim_terminal();
+																		break;
+																	}
+																},
+															}
+														},
+													}
 												}
 											}
-										}
-										if grace_expired
-											&& lifecycle.is_committed()
-											&& lifecycle.claim_terminal()
-										{
-											drop(stream);
-											let reason = if timed_out {
-												sf!(
-													"native invocation exceeded its deadline and did not stop \
-													 within grace",
+											if grace_expired
+												&& lifecycle.is_committed()
+												&& lifecycle.claim_terminal()
+											{
+												drop(stream);
+												let reason = if timed_out {
+													sf!(
+														"native invocation exceeded its deadline and did not \
+														 stop within grace",
+													)
+												} else {
+													sf!(
+														"native invocation did not stop within cancellation \
+														 grace"
+													)
+												};
+												send_abort_verdict(
+													&responses,
+													request_id,
+													&invocation_id,
+													&delivery,
+													omp_tool::Abort::EffectsUnknown { reason },
 												)
-											} else {
-												sf!("native invocation did not stop within cancellation grace")
-											};
-											send_abort_verdict(
-												&responses,
-												request_id,
-												&invocation_id,
-												&delivery,
-												omp_tool::Abort::EffectsUnknown { reason },
-											)
-											.await;
-										}
-									},
-									Err(error) => {
-										if lifecycle.claim_terminal() {
-											let _ = send_invocation_error(
-												&responses,
-												request_id,
-												pb::ProtocolErrorCode::NotFound,
-												&error.to_string(),
-											)
-											.await;
-										}
-									},
-								}
-								let _ = finished
-									.send_async(Finished { request_id, invocation_id: Some(invocation_id) })
-									.await;
-							})),
+												.await;
+											}
+										},
+										Err(error) => {
+											if lifecycle.claim_terminal() {
+												let _ = send_invocation_error(
+													&responses,
+													request_id,
+													pb::ProtocolErrorCode::NotFound,
+													&error.to_string(),
+												)
+												.await;
+											}
+										},
+									}
+									let _ = finished
+										.send_async(Finished {
+											request_id,
+											invocation_id: Some(invocation_id),
+										})
+										.await;
+								}),
+							)),
 						),
 					),
 				),
@@ -12583,13 +12644,16 @@ mod tests {
 		));
 	}
 
-	/// An approval answer is a continuation of its query's request and is valid
-	/// on every host kind, so a session-only host never refuses it with an
-	/// error that would end the issuing request's stream.
+	/// An approval or reflection answer is a continuation of its query's
+	/// request and is valid on every host kind, so a session-only host never
+	/// refuses it with an error that would end the issuing request's stream.
 	#[test]
-	fn approval_answers_reach_every_host_kind() {
+	fn relayed_answers_reach_every_host_kind() {
 		assert!(!requires_environment_host(&client_frame::Body::ApprovalAnswer(
 			pb::ApprovalAnswer::default(),
+		)));
+		assert!(!requires_environment_host(&client_frame::Body::ReflectionAnswer(
+			pb::ReflectionAnswer::default(),
 		)));
 	}
 
@@ -12609,6 +12673,14 @@ mod tests {
 			pb::ClientFrame {
 				request_id: 5,
 				body: Some(client_frame::Body::ApprovalAnswer(answer)),
+				..pb::ClientFrame::default()
+			},
+			pb::ClientFrame {
+				request_id: 4,
+				body: Some(client_frame::Body::ReflectionAnswer(pb::ReflectionAnswer {
+					query_id: 1,
+					body:     Some(pb::reflection_answer::Body::Answer("stray".into())),
+				})),
 				..pb::ClientFrame::default()
 			},
 			pb::ClientFrame {
@@ -14548,11 +14620,12 @@ mod tests {
 		serving.abort();
 	}
 
-	/// Only an application connection that advertised the capability gets an
-	/// approval relay; an extension connection never does, even when it asks,
-	/// so extension code cannot approve its own commands' amendments.
+	/// Only an application connection that advertised a capability gets its
+	/// relay; an extension connection never does, even when it asks, so
+	/// extension code cannot approve its own commands' amendments or answer its
+	/// own reflections.
 	#[test]
-	fn only_advertising_application_connections_relay_approvals() {
+	fn only_advertising_application_connections_get_relays() {
 		let authority = Arc::new(AuthorityTable::default());
 		let (responses, _frames) = flume::bounded(1);
 		let connection = |hello, policy: &ConnectionPolicy| {
@@ -14563,21 +14636,41 @@ mod tests {
 				Arc::clone(&authority),
 				policy,
 			);
-			connection.relay_approvals(&responses);
+			connection.bind_relays(&responses);
 			connection
 		};
+		let relays = |connection: &ConnectionState| {
+			(connection.owned_approvals(1).is_some(), connection.owned_reflection(1).is_some())
+		};
 		let application = connection(relay_hello(), &ConnectionPolicy::external(None));
-		assert!(application.owned_approvals(1).is_some());
+		assert_eq!(relays(&application), (true, false));
+		let reflecting = connection(
+			AcceptedHello {
+				capabilities: BTreeSet::from([
+					Str::from(omp_env::APPROVAL_RELAY_CAPABILITY),
+					Str::from(omp_env::REFLECTION_RELAY_CAPABILITY),
+				]),
+				..relay_hello()
+			},
+			&ConnectionPolicy::external(None),
+		);
+		assert_eq!(relays(&reflecting), (true, true));
 		let silent =
 			connection(accepted_hello(Grants::all(), None), &ConnectionPolicy::external(None));
-		assert!(silent.owned_approvals(1).is_none());
+		assert_eq!(relays(&silent), (false, false));
 		let extension = connection(
-			relay_hello(),
+			AcceptedHello {
+				capabilities: BTreeSet::from([
+					Str::from(omp_env::APPROVAL_RELAY_CAPABILITY),
+					Str::from(omp_env::REFLECTION_RELAY_CAPABILITY),
+				]),
+				..relay_hello()
+			},
 			&ConnectionPolicy::extension(HostKey::new("workspace", "sandboxed", "relay"), [
 				"env.exec",
 			]),
 		);
-		assert!(extension.owned_approvals(1).is_none());
+		assert_eq!(relays(&extension), (false, false));
 	}
 
 	fn relay_hello() -> AcceptedHello {
@@ -14604,7 +14697,7 @@ mod tests {
 				Arc::new(AuthorityTable::default()),
 				&ConnectionPolicy::external(None),
 			);
-			connection.relay_approvals(responses);
+			connection.bind_relays(responses);
 			connection
 		};
 		let assert_closed = |outliving: &OwnedApprovals, frames: &Receiver<pb::ServerFrame>| {

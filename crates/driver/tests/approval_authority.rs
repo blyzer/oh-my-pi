@@ -10,6 +10,8 @@
 //! for the session holds, on either path, until the conversation leaves the
 //! journal that approved it, by a rewind or a session switch.
 
+mod support;
+
 use std::{
 	future::ready,
 	path::{Path, PathBuf},
@@ -504,74 +506,11 @@ mod attached_daemon {
 	use tokio_util::sync::CancellationToken;
 
 	use super::*;
-
-	/// Bounded wait for the daemon's listener.
-	const LISTEN_WAIT: Duration = Duration::from_secs(30);
-
-	/// A project daemon this test process serves on the production socket of
-	/// the project's state directory, opened by `EnvServer::open_project` as
-	/// `omp envd` opens it; like it, its host binds no approval route.
-	///
-	/// `ProjectEnvironment::attach` finds it there and, because it runs the
-	/// same executable and so has the same build id, joins it as a peer instead
-	/// of spawning a daemon or falling back to an embedded environment.
-	/// Dropping it stops serving.
-	pub struct InProcessDaemon {
-		shutdown: CancellationToken,
-		serving:  JoinHandle<Result<(), omp_envd::EnvdError>>,
-	}
+	pub use crate::support::InProcessDaemon;
 
 	impl InProcessDaemon {
-		async fn serve(project: &Project, sandbox: ExecSandboxMode) -> Self {
-			Self::serve_with(project, context(sandbox)).await
-		}
-
-		/// [`Self::serve`] under the daemon's own control context `con`.
-		pub async fn serve_with(project: &Project, con: Arc<omp_con::Ctx>) -> Self {
-			let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
-			let server = EnvServer::open_project(
-				&project.root,
-				&project.state,
-				&omp_env::project_state::document_socket(&project.state),
-				Registry::new(),
-				ExtHostConfig::current(
-					Principal::new(sf!("daemon-tester"), sf!("Daemon Tester")),
-					sf!("daemon-session"),
-					1,
-				)
-				.expect("daemon host configuration"),
-				None,
-				false,
-				None,
-				&con,
-				convars,
-				RegistryBridges::default(),
-			)
-			.await
-			.expect("project daemon");
-			let socket = omp_env::project_state::environment_socket(&project.state);
-			let shutdown = CancellationToken::new();
-			let serving = tokio::spawn({
-				let server = Arc::new(server);
-				let socket = socket.clone();
-				let shutdown = shutdown.clone();
-				async move { server.serve_uds(&socket, shutdown, None).await }
-			});
-			tokio::time::timeout(LISTEN_WAIT, async {
-				while UnixStream::connect(&socket).await.is_err() {
-					tokio::time::sleep(Duration::from_millis(10)).await;
-				}
-			})
-			.await
-			.expect("the project daemon never listened");
-			Self { shutdown, serving }
-		}
-	}
-
-	impl Drop for InProcessDaemon {
-		fn drop(&mut self) {
-			self.shutdown.cancel();
-			self.serving.abort();
+		async fn for_project(project: &Project, sandbox: ExecSandboxMode) -> Self {
+			Self::serve(&project.root, &project.state, context(sandbox)).await
 		}
 	}
 
@@ -623,7 +562,7 @@ mod attached_daemon {
 	async fn an_approved_daemon_amendment_reruns_the_command() {
 		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
 		std::fs::create_dir(project.root.join(".git")).expect("protected carve-out");
-		let _daemon = InProcessDaemon::serve(&project, ExecSandboxMode::WorkspaceWrite).await;
+		let _daemon = InProcessDaemon::for_project(&project, ExecSandboxMode::WorkspaceWrite).await;
 		let bystander = attached(&project).await;
 		let (bystander_route, bystander_inbox) =
 			omp_agent::ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
@@ -649,7 +588,7 @@ mod attached_daemon {
 	async fn a_refused_daemon_amendment_denies_the_command() {
 		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
 		std::fs::create_dir(project.root.join(".git")).expect("protected carve-out");
-		let _daemon = InProcessDaemon::serve(&project, ExecSandboxMode::WorkspaceWrite).await;
+		let _daemon = InProcessDaemon::for_project(&project, ExecSandboxMode::WorkspaceWrite).await;
 		let environment = attached(&project).await;
 		let Turn { session, result, landed } = project
 			.turn(environment, "bash", protected_write, ".git/amended.txt", None, false)
@@ -874,7 +813,7 @@ mod session_network_grants {
 	async fn attached_grants(leave: Leave) {
 		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
 		let port = loopback_upstream();
-		let _daemon = InProcessDaemon::serve_with(&project, loopback_context()).await;
+		let _daemon = InProcessDaemon::serve(&project.root, &project.state, loopback_context()).await;
 		let environment = attached(&project).await;
 		grants_follow_the_journal(&project, environment, port, leave).await;
 	}

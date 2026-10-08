@@ -501,6 +501,7 @@ pub fn spec() -> ToolSpec {
 				accessibility: true,
 				input:         true,
 			}),
+			fetch:     None,
 			subagents: 0,
 		},
 		confinement:     omp_tool::Confinement::Host,

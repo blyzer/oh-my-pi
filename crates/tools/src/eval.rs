@@ -1327,6 +1327,7 @@ fn eval_effects() -> Effects {
 			max_usd:      Usd::from_nanos(u64::MAX),
 		}),
 		desktop:   None,
+		fetch:     None,
 		subagents: u32::MAX,
 	}
 }

@@ -81,13 +81,20 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
   session-level, not per tool (resolved 2026-10-07 by the typed confinement marker, ADR 0028
   amendment of that date: a sandbox-kept default `yolo` covers only `ExecSandbox` tools, and
   `Host` tools are admitted as if no sandbox existed; still open there: under-declared host
-  effects such as `read@3` URL fetch, `lsp` spawns, memory `reflect` inference, RPC host tools
+  effects such as `read@3` URL fetch, `lsp` spawns, RPC host tools
   and effect-less Python devices resolving to `read`, and `read`-tier MCP servers); the closed network (superseded 2026-10-07: the default network is
   now `scoped`, see the ADR 0028 amendment of that date) and workspace-only writes may break real
   flows such as `git push` and package installs, which would hit the denial-and-rerun prompt and
   were not exercised; the posture notice is posted on the first tool admission, so a session that never
   admits a tool never shows it; the bash tier rule was a name check (`"bash"`), now replaced by the
   typed `Confinement` marker on the tool contract (2026-10-07).
+- Memory `reflect` on the project daemon (2026-10-07, ADR 0028 memory reflect inference
+  amendment): `reflect@2` now declares one inference request and the driver binds an embedded
+  environment's reflection to the session's inference, but on the default attached path the
+  daemon runs `reflect` and cannot reach the issuing session, so it still answers with the
+  recalled evidence. Fix: relay the synthesis the way `EditRepairQuery` relays an edit repair (a
+  server query on the issuing connection, answered by the attached session through its bound
+  `reflection_bridge`), with a `SCHEMA_REV` bump and an attached-daemon test.
 - In-process utility builtins never consult the read policy (verified in code on 2026-10-07,
   predates branch `fix/sandbox-host-read-symlinks`): `cat_path` calls `File::open(resolved)`
   (`crates/shell-builtins/src/cat.rs`), `head` and `grep` do the same, and `Host::resolve` only
