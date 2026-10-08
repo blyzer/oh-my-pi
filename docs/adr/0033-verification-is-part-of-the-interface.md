@@ -56,6 +56,7 @@ through that protocol.
 **Status: Implemented.** A named, off-screen debug protocol serves both the terminal and the native host. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
 
 - Terminal: `crates/tui/src/debug.rs` (`OMP_TUI_DEBUG`, `OMP_TTY`) with `tree`, `keys`, `paste`, `mouse`, `resize`, text and values ops; driven by `.omp/tools/tui.ts`.
+- Clean quit through the tool (decision 5): `.omp/tools/tui.ts` `stop` sends one `keys "C-c C-c"` request (`\x03\x03` without a socket), because `omp chat` quits only on a second `C-c` within 500 ms (pi parity) and the debug `quit` op injects one. Before 2026-10-08 `stop` sent `quit`, so every `omp chat` session it stopped ended in SIGKILL without running the quit/restore path. `.omp/tools/tests/tui.test.ts` (`bun test`) pins the contract.
 - Native: `crates/app/src/gui.rs` serves the same wire off-screen, including frame PNG and clean quit; `crates/chat/tests/host.rs` compares terminal and native projections.
 - Real-PTY lifecycle proof: `crates/e2e/tests/p7_tui.rs`.
 

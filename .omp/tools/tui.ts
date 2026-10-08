@@ -790,17 +790,29 @@ function sleep(ms: number): Promise<null> {
 	return promise;
 }
 
+/**
+ * The quit chord `stop` delivers, doubled. A host that quits on the first
+ * `C-c` ignores the repeat; `omp chat` quits only on a second `C-c` within
+ * 500 ms (`omp_chat::ctrl_c_action`), so the debug `quit` op's single `C-c`
+ * merely clears its draft. One `keys` request lands both chords in the
+ * host's mailbox back to back, inside that window whatever the socket
+ * latency or host load — two `quit` requests would race it.
+ */
+const QUIT_KEYS = "C-c C-c";
+
 async function stopSession(session: Session): Promise<number | null> {
 	try {
 		if (session.sock) {
-			await request(session, { op: "quit" }, 2_000);
+			await request(session, { op: "keys", keys: QUIT_KEYS }, 2_000);
 		} else if (session.exit === null) {
 			// Non-omp-tui apps have no debug socket; Ctrl-C is the
-			// conventional quit chord.
-			session.proc.terminal.write("\x03");
+			// conventional quit chord, doubled in one write for hosts that
+			// quit only on a repeat.
+			session.proc.terminal.write("\x03\x03");
 		}
 	} catch {
-		// Fall through to signals.
+		// A host that quits on the first chord may close the socket before
+		// answering; the exit wait and signals below settle it either way.
 	}
 	const exited = await Promise.race([session.proc.exited, sleep(2_000)]);
 	if (exited === null) {
@@ -1098,7 +1110,9 @@ const factory = (omp: ToolHost) => {
 			"(cols,rows delivered via SIGWINCH), raw (exact captured byte stream: " +
 			"escape-sequence stats + escaped tail — prefer text/screen unless " +
 			"auditing escapes), shot (pixel screenshot of the emulated screen — real " +
-			"colors/styles as a PNG image, rasterized in-process), stop, list. " +
+			"colors/styles as a PNG image, rasterized in-process), stop (sends " +
+			"C-c C-c — omp chat quits only on a repeat — then SIGKILL after 2 s), " +
+			"list. " +
 			"Input ops (keys/type/paste/mouse/send/" +
 			"resize) return an after-screenshot of the resulting display (quiet:true " +
 			"skips it). Sessions persist across calls; injected input rides the " +
