@@ -531,8 +531,20 @@ impl Tool for Computer {
 	type Payload = Payload;
 	type Update = Update;
 
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
 	fn spec(&self) -> &ToolSpec {
 		&self.spec
+	}
+
+	/// A `read_only` call can capture and read the accessibility tree but
+	/// never deliver input: the session host refuses every operation whose
+	/// [`NativeParams::required_effects`] needs input in such a program. Any
+	/// other call keeps the declared maximum.
+	fn invocation_effects(&self, params: &Params) -> Option<Effects> {
+		params
+			.read_only
+			.then(|| read_only_effects(&self.spec.effects))
 	}
 
 	fn call<'c>(
@@ -607,6 +619,16 @@ impl Tool for Computer {
 			},
 			Err(fault) => vec![Part::Text { text: fault.message.clone() }],
 		}
+	}
+}
+
+/// `maximum` without desktop input, the authority a `read_only` program keeps.
+fn read_only_effects(maximum: &Effects) -> Effects {
+	Effects {
+		desktop: maximum
+			.desktop
+			.map(|desktop| DesktopEffects { input: false, ..desktop }),
+		..maximum.clone()
 	}
 }
 
@@ -697,11 +719,17 @@ fn protocol_issue(message: Str) -> ArgIssue {
 
 #[cfg(test)]
 mod tests {
-	use omp_core::Str;
-	use omp_tool::{CallOutcome, RecordedCall, Rev};
-	use serde_json::{Value, json};
+	use std::sync::Arc;
 
-	use super::{Action, Fault, FaultCode, Params, Payload, lift_legacy_call, spec};
+	use async_trait::async_trait;
+	use omp_core::Str;
+	use omp_tool::{CallOutcome, DesktopEffects, Effects, RecordedCall, Rev};
+	use serde_json::{Value, json};
+	use tokio_util::sync::CancellationToken;
+
+	use super::{
+		Action, ComputerHost, Fault, FaultCode, Params, Payload, Update, lift_legacy_call, spec, tool,
+	};
 
 	#[test]
 	fn computer_schema_exposes_only_lifecycle_code_surface() {
@@ -764,6 +792,68 @@ mod tests {
 		.expect("lift");
 		let args: Value = serde_json::from_slice(&lifted.raw_args).expect("lifted args");
 		assert_eq!(args["action"], "run");
+	}
+
+	struct IdleHost;
+
+	#[async_trait]
+	impl ComputerHost for IdleHost {
+		async fn execute(
+			&self,
+			_params: Params,
+			_cancellation: CancellationToken,
+			_updates: flume::Sender<Update>,
+		) -> Result<Payload, Fault> {
+			Err(Fault {
+				code:      FaultCode::Internal,
+				message:   Str::new_static("idle test host"),
+				operation: None,
+			})
+		}
+
+		fn release(&self) {}
+	}
+
+	/// A `read_only` program keeps capture and accessibility reads but loses
+	/// input, the authority its session host refuses it; any other call, and
+	/// arguments the executor would refuse, keep the declared maximum.
+	#[test]
+	fn read_only_calls_are_scoped_to_capture_and_accessibility() {
+		let mut registry = omp_tool::Registry::new();
+		registry
+			.register(tool(Arc::new(IdleHost)), omp_tool::Presentation::Slot, omp_tool::Claims {
+				precedence: omp_tool::Precedence::DEFAULT,
+				claimant:   Str::new_static("test/computer"),
+				replaces:   None,
+			})
+			.expect("computer registers");
+		assert!(registry.scopes_invocation_effects("computer"));
+		let maximum = spec().effects;
+		let read_only = registry
+			.invocation_effects(
+				"computer",
+				r#"{"i":"Look","action":"run","code":"await desktop.capture()","read_only":true}"#,
+			)
+			.expect("a read-only envelope");
+		assert_eq!(
+			read_only.desktop,
+			Some(DesktopEffects { capture: true, accessibility: true, input: false })
+		);
+		assert!(read_only.is_subset_of(&maximum));
+		assert_eq!(Effects { desktop: maximum.desktop, ..read_only }, maximum);
+		for arguments in [
+			r#"{"action":"run","code":"await desktop.click(1, 1)"}"#,
+			r#"{"action":"run","code":"x","read_only":false}"#,
+			r#"{"action":"run","code":"x","read_only":"yes"}"#,
+		] {
+			assert_eq!(
+				registry
+					.invocation_effects("computer", arguments)
+					.expect("the declared maximum"),
+				maximum,
+				"{arguments}"
+			);
+		}
 	}
 
 	#[test]

@@ -80,7 +80,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-	admission::{AdmissionDecision, AdmissionGate, ApprovalPolicy, effects_narrow_or_refuse},
+	admission::{
+		AdmissionDecision, AdmissionGate, ApprovalPolicy, effects_narrow_or_refuse,
+		widened_effects_denial,
+	},
 	approval_relay::{ConnectionApprovals, OwnedApprovals},
 	blobs::{BlobError, BlobHost, BlobId, BlobRead},
 	browser_daemon::BrowserSettings,
@@ -240,6 +243,24 @@ enum WriteBoundaryDenied {
 	},
 }
 
+/// An invocation refused once its committed arguments are judged, before its
+/// executor sees them.
+#[derive(Debug, Error)]
+enum InvocationRefused {
+	/// The call could write around the writers its write scope confines.
+	#[error(transparent)]
+	WriteBoundary {
+		/// The boundary's refusal.
+		source: WriteBoundaryDenied,
+	},
+	/// The tool judged the call's effects to exceed its declared maximum.
+	#[error(transparent)]
+	Effects {
+		/// The registry's refusal.
+		source: RegistryError,
+	},
+}
+
 impl InvocationExecutionPolicy {
 	fn from_request(
 		request: &pb::InvokeTool,
@@ -265,12 +286,13 @@ impl InvocationExecutionPolicy {
 		}
 	}
 
-	/// Refuses, before execution, a tool that could write around the
-	/// environment's scoped writers while a write scope applies: it runs
+	/// Refuses, before execution, a call that could write around the
+	/// environment's scoped writers while a write scope applies: its tool runs
 	/// processes under the exec sandbox ([`Confinement::ExecSandbox`], whose
-	/// declaration leaves those effects out), or its envelope runs commands,
+	/// declaration leaves those effects out), or the call's envelope (its
+	/// argument-scoped effects, else the declared maximum) runs commands,
 	/// spawns subagents, or writes documents through anything but the document
-	/// host. Network-only and read-only tools pass, and so do the scoped
+	/// host. Network-only and read-only calls pass, and so do the scoped
 	/// writers, whose writes the scope confines one by one.
 	fn denial(&self, effects: &Effects, confinement: Confinement) -> Option<WriteBoundaryDenied> {
 		let scope = self.write_scope.as_deref()?;
@@ -4882,21 +4904,25 @@ impl EnvServer {
 						return;
 					},
 				}
-				let denial =
-					match connection.write_boundary_denial(frame.request_id, &request.invocation_id) {
-						Ok(denial) => denial,
-						Err((code, message)) => {
-							send_error(responses, frame.request_id, code, message).await;
-							return;
-						},
-					};
-				if let Some(denial) = denial {
+				let refused = match connection.scope_committed(
+					frame.request_id,
+					&request.invocation_id,
+					&self.registry,
+					&request.raw,
+				) {
+					Ok(refused) => refused,
+					Err((code, message)) => {
+						send_error(responses, frame.request_id, code, message).await;
+						return;
+					},
+				};
+				if let Some(refused) = refused {
 					let invocation_id = Str::from(request.invocation_id.as_str());
 					send_invocation_error(
 						responses,
 						frame.request_id,
 						pb::ProtocolErrorCode::PermissionDenied,
-						&denial.to_string(),
+						&refused.to_string(),
 					)
 					.await;
 					connection.abandon_admission(frame.request_id, &invocation_id);
@@ -7475,6 +7501,23 @@ impl EnvServer {
 				)
 				.policy
 		};
+		// A tool that scopes its effects to each call is judged on the
+		// committed arguments: its gate waits for them.
+		let argument_scoped = registry.scopes_invocation_effects(&request.name);
+		let gate = |name: Str| {
+			if execution.core_admission {
+				AdmissionGate::with_deferred_policy(
+					invocation_id.clone(),
+					name,
+					deadline,
+					approval_policy,
+				)
+			} else if argument_scoped {
+				AdmissionGate::argument_scoped(invocation_id.clone(), name, deadline, approval_policy)
+			} else {
+				AdmissionGate::with_policy(invocation_id.clone(), name, deadline, approval_policy)
+			}
+		};
 		let cancel = CancellationToken::new();
 		let delivery = VerdictDelivery {
 			blobs: self.blobs.clone(),
@@ -7520,21 +7563,7 @@ impl EnvServer {
 			let acp_context = acp.context();
 			let approvals = connection.owned_approvals(request_id);
 			let reflection = connection.owned_reflection(request_id);
-			let admission = if execution.core_admission {
-				AdmissionGate::with_deferred_policy(
-					invocation_id.clone(),
-					name.clone(),
-					deadline,
-					approval_policy,
-				)
-			} else {
-				AdmissionGate::with_policy(
-					invocation_id.clone(),
-					name.clone(),
-					deadline,
-					approval_policy,
-				)
-			};
+			let admission = gate(name.clone());
 			connection.requests.insert(
 				request_id,
 				RequestState::Invocation(InvocationState::Native {
@@ -7543,7 +7572,7 @@ impl EnvServer {
 					lifecycle: Arc::clone(&lifecycle),
 					admission,
 					pending_commit: None,
-					maximum_effects: maximum_effects.clone(),
+					effects: maximum_effects.clone(),
 					confinement,
 					execution: execution.clone(),
 					request_scope: scope.map(|scope| scope.pty_denied),
@@ -7626,18 +7655,9 @@ impl EnvServer {
 					owner,
 					invocation: Some(invocation),
 					committed: false,
-					admission: if execution.core_admission {
-						AdmissionGate::with_deferred_policy(
-							invocation_id.clone(),
-							name,
-							deadline,
-							approval_policy,
-						)
-					} else {
-						AdmissionGate::with_policy(invocation_id.clone(), name, deadline, approval_policy)
-					},
+					admission: gate(name),
 					pending_commit: None,
-					maximum_effects,
+					effects: maximum_effects,
 					confinement,
 					execution,
 					request_scope: scope.map(|scope| scope.pty_denied),
@@ -7722,16 +7742,17 @@ impl EnvServer {
 			},
 		}
 
-		let (admission, maximum_effects, delivery) =
+		let (admission, admitted_effects, tool, delivery) =
 			match connection.invocation_mut(request_id, &request.invocation_id) {
 				Ok(
-					InvocationState::Native { admission, maximum_effects, delivery, .. }
-					| InvocationState::Worker { admission, maximum_effects, delivery, .. },
+					InvocationState::Native { admission, effects, execution, delivery, .. }
+					| InvocationState::Worker { admission, effects, execution, delivery, .. },
 				) => (
 					admission
 						.decide(self.workspace.root(), self.workspace.root())
 						.await,
-					maximum_effects.clone(),
+					effects.clone(),
+					execution.tool.clone(),
 					delivery.clone(),
 				),
 				Err((code, message)) => {
@@ -7739,12 +7760,20 @@ impl EnvServer {
 					return;
 				},
 			};
-		request.raw = match admission {
+		let decision = match admission {
 			AdmissionDecision::Allowed { raw, bash } => {
 				let _effective_bash = bash;
-				raw
+				// The answer may have rewritten the arguments: judge the
+				// effective call again, and never past what was admitted.
+				effective_effects(&self.registry, &tool, &raw, &admitted_effects)
+					.map(|effects| (raw, effects))
+					.ok_or_else(|| widened_effects_denial(&request.invocation_id))
 			},
-			AdmissionDecision::Denied(policy) => {
+			AdmissionDecision::Denied(policy) => Err(policy),
+		};
+		let (raw, call_effects) = match decision {
+			Ok(effective) => effective,
+			Err(policy) => {
 				let invocation_id = Str::from(request.invocation_id.as_str());
 				connection.abandon_admission(request_id, &invocation_id);
 				send_policy_denied_verdict(responses, request_id, &invocation_id, &delivery, policy)
@@ -7752,11 +7781,10 @@ impl EnvServer {
 				return;
 			},
 		};
-		let narrowed_effects = if let Some(effects) =
-			effects_narrow_or_refuse(request.effects.as_ref(), &maximum_effects)
-		{
-			effects
-		} else {
+		request.raw = raw;
+		let Some(narrowed_effects) =
+			effects_narrow_or_refuse(request.effects.as_ref(), &call_effects)
+		else {
 			send_error(
 				responses,
 				request_id,
@@ -8316,37 +8344,40 @@ enum RequestState {
 	LspEvents { cancel: CancellationToken },
 }
 
+/// One open tool invocation. `effects` is the envelope it is admitted under:
+/// the declared maximum until its arguments commit, then the call's
+/// argument-scoped effects ([`ConnectionState::scope_committed`]).
 enum InvocationState {
 	Native {
-		id:              Str,
-		feed:            omp_tool::InvocationFeed,
-		lifecycle:       Arc<NativeLifecycle>,
-		admission:       AdmissionGate,
-		pending_commit:  Option<pb::ArgsCommitted>,
-		maximum_effects: Effects,
-		confinement:     Confinement,
-		execution:       InvocationExecutionPolicy,
-		request_scope:   Option<bool>,
-		edit_repair:     Option<ConnectionEditRepairRoute>,
-		acp:             InvocationAcpRoutes,
-		delivery:        VerdictDelivery,
-		cancel:          CancellationToken,
+		id:             Str,
+		feed:           omp_tool::InvocationFeed,
+		lifecycle:      Arc<NativeLifecycle>,
+		admission:      AdmissionGate,
+		pending_commit: Option<pb::ArgsCommitted>,
+		effects:        Effects,
+		confinement:    Confinement,
+		execution:      InvocationExecutionPolicy,
+		request_scope:  Option<bool>,
+		edit_repair:    Option<ConnectionEditRepairRoute>,
+		acp:            InvocationAcpRoutes,
+		delivery:       VerdictDelivery,
+		cancel:         CancellationToken,
 	},
 	Worker {
-		id:              Str,
-		owner:           HostKey,
-		invocation:      Option<ExtHostInvocation>,
-		committed:       bool,
-		admission:       AdmissionGate,
-		pending_commit:  Option<pb::ArgsCommitted>,
-		maximum_effects: Effects,
-		confinement:     Confinement,
-		execution:       InvocationExecutionPolicy,
-		request_scope:   Option<bool>,
-		delivery:        VerdictDelivery,
-		interrupt:       flume::Sender<pb::Interrupt>,
-		interrupts:      Option<Receiver<pb::Interrupt>>,
-		cancel:          CancellationToken,
+		id:             Str,
+		owner:          HostKey,
+		invocation:     Option<ExtHostInvocation>,
+		committed:      bool,
+		admission:      AdmissionGate,
+		pending_commit: Option<pb::ArgsCommitted>,
+		effects:        Effects,
+		confinement:    Confinement,
+		execution:      InvocationExecutionPolicy,
+		request_scope:  Option<bool>,
+		delivery:       VerdictDelivery,
+		interrupt:      flume::Sender<pb::Interrupt>,
+		interrupts:     Option<Receiver<pb::Interrupt>>,
+		cancel:         CancellationToken,
 	},
 }
 
@@ -8719,33 +8750,71 @@ impl ConnectionState {
 		})
 	}
 
-	/// The open invocation's refusal at the write boundary
-	/// ([`InvocationExecutionPolicy::denial`]), if any.
-	fn write_boundary_denial(
-		&self,
+	/// Judges the open invocation by its committed arguments `raw`, once,
+	/// before they are finalized: narrows its envelope to the call's
+	/// argument-scoped effects ([`Registry::invocation_effects`]), resolves a
+	/// pending approval policy from that envelope, and returns the call's
+	/// refusal at the write boundary ([`InvocationExecutionPolicy::denial`]),
+	/// or of an envelope beyond the declared maximum, if any.
+	///
+	/// Arguments that are not UTF-8 keep the declared maximum; finalizing
+	/// refuses them.
+	fn scope_committed(
+		&mut self,
 		request_id: u64,
 		invocation_id: &str,
-	) -> Result<Option<WriteBoundaryDenied>, (pb::ProtocolErrorCode, &'static str)> {
-		match self.requests.get(&request_id) {
-			Some(RequestState::Invocation(state)) if state.id() == invocation_id => {
-				let (execution, maximum_effects, confinement) = match state {
-					InvocationState::Native { execution, maximum_effects, confinement, .. }
-					| InvocationState::Worker { execution, maximum_effects, confinement, .. } => {
-						(execution, maximum_effects, *confinement)
-					},
-				};
-				Ok(execution.denial(maximum_effects, confinement))
+		registry: &Registry,
+		raw: &[u8],
+	) -> Result<Option<InvocationRefused>, (pb::ProtocolErrorCode, &'static str)> {
+		let sandbox = self.exec_host.sandbox_state();
+		let settings = &self.tool_settings;
+		let (id, admission, effects, confinement, execution) = match self
+			.requests
+			.get_mut(&request_id)
+		{
+			Some(RequestState::Invocation(state)) if state.id() == invocation_id => match state {
+				InvocationState::Native { id, admission, effects, confinement, execution, .. }
+				| InvocationState::Worker { id, admission, effects, confinement, execution, .. } => {
+					(id, admission, effects, *confinement, execution)
+				},
 			},
-			Some(RequestState::Invocation(_)) => Err((
-				pb::ProtocolErrorCode::InvalidArgument,
-				"invocation_id does not match the open request",
-			)),
-			Some(_) => Err((
-				pb::ProtocolErrorCode::PreconditionFailed,
-				"request_id is not an invocation stream",
-			)),
-			None => Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
+			Some(RequestState::Invocation(_)) => {
+				return Err((
+					pb::ProtocolErrorCode::InvalidArgument,
+					"invocation_id does not match the open request",
+				));
+			},
+			Some(_) => {
+				return Err((
+					pb::ProtocolErrorCode::PreconditionFailed,
+					"request_id is not an invocation stream",
+				));
+			},
+			None => return Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
+		};
+		// Only the arguments that finalize the gate scope the call: a repeated
+		// commit is refused later and never rescopes it.
+		if admission.awaits_arguments() {
+			if let Ok(raw) = str::from_utf8(raw) {
+				match registry.invocation_effects(&execution.tool, raw) {
+					Ok(scoped) => *effects = scoped,
+					Err(source) => return Ok(Some(InvocationRefused::Effects { source })),
+				}
+			}
+			if admission.is_pending() {
+				let resolved = settings.approval_for(
+					id.clone(),
+					execution.tool.clone(),
+					effects,
+					confinement,
+					sandbox,
+				);
+				admission.resolve_pending(resolved.policy);
+			}
 		}
+		Ok(execution
+			.denial(effects, confinement)
+			.map(|source| InvocationRefused::WriteBoundary { source }))
 	}
 
 	/// Removes a denied pre-authorization invocation before its executor sees
@@ -9930,6 +9999,21 @@ async fn send_policy_denied_verdict(
 		false,
 	)
 	.await;
+}
+
+/// The effects of the call its executor will run, judged from the effective
+/// arguments `raw`; `None` when they are not a subset of the envelope the call
+/// was admitted under.
+fn effective_effects(
+	registry: &Registry,
+	tool: &str,
+	raw: &[u8],
+	admitted: &Effects,
+) -> Option<Effects> {
+	let effects = registry
+		.invocation_effects(tool, str::from_utf8(raw).ok()?)
+		.ok()?;
+	effects.is_subset_of(admitted).then_some(effects)
 }
 
 async fn send_invocation_error(
@@ -12446,9 +12530,12 @@ mod tests {
 	};
 
 	use super::*;
-	use crate::docserver::{
-		Environment, ServerConfig,
-		connection::{ConnectionConfig, serve_connection},
+	use crate::{
+		docserver::{
+			Environment, ServerConfig,
+			connection::{ConnectionConfig, serve_connection},
+		},
+		exthost::ConvarControlFactory,
 	};
 	#[cfg(target_os = "macos")]
 	use crate::{
@@ -15646,5 +15733,367 @@ mod tests {
 			None,
 			"no scope, no boundary refusal"
 		);
+	}
+
+	/// Arguments of [`ScopedProbe`]: the effects one call asks for.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct ScopedProbeParams {
+		level: Str,
+	}
+
+	/// A native tool scoping each call's effects to its `level`: `read` reads
+	/// documents and `write` also writes them; any other level keeps the
+	/// declared maximum, which runs commands as well. `widen` lies, judging
+	/// the call beyond that maximum.
+	struct ScopedProbe {
+		spec: omp_tool::ToolSpec,
+		ran:  Arc<Mutex<Vec<serde_json::Value>>>,
+	}
+
+	impl omp_tool::Tool for ScopedProbe {
+		type Fault = serde_json::Value;
+		type Params = ScopedProbeParams;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, params: &ScopedProbeParams) -> Option<Effects> {
+			let documents = |write_globs| Effects {
+				documents: Some(omp_tool::DocEffects { read: true, write_globs }),
+				..Effects::empty()
+			};
+			match params.level.as_str() {
+				"read" => Some(documents(Arc::from([]))),
+				"write" => Some(documents(Arc::from([sf!("**")]))),
+				"widen" => Some(Effects { subagents: 1, ..Effects::empty() }),
+				_ => None,
+			}
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				let committed = params.committed().await.expect("probe commitment");
+				self.ran.lock().push(serde_json::from_str(&committed).expect("committed JSON"));
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "ran"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("ran") }]
+		}
+	}
+
+	/// Records every admission query and answers each one as scripted.
+	#[derive(Clone, Default)]
+	struct ScriptedAdmission {
+		queries: Arc<Mutex<Vec<String>>>,
+		allow:   bool,
+		patch:   Bytes,
+	}
+
+	impl omp_env::Admitter for ScriptedAdmission {
+		type Future<'client> = future::Ready<pb::Admission>;
+
+		fn admit(&self, query: pb::AdmitInvocation) -> Self::Future<'_> {
+			self.queries.lock().push(query.invocation_id.clone());
+			future::ready(pb::Admission {
+				invocation_id: query.invocation_id,
+				allow: self.allow,
+				args_patch: self.patch.clone(),
+				..pb::Admission::default()
+			})
+		}
+	}
+
+	/// A local daemon whose registry holds [`ScopedProbe`], whose runs land
+	/// in `ran`.
+	async fn scoped_probe_daemon(
+		ran: &Arc<Mutex<Vec<serde_json::Value>>>,
+	) -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
+		let mut registry = Registry::new();
+		registry
+			.register(
+				ScopedProbe {
+					spec: omp_tool::ToolSpec {
+						name:            sf!("scoped_probe"),
+						rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+						description:     sf!("argument-scoped probe"),
+						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						constraint:      omp_tool::Constraint::None,
+						effects:         Effects {
+							documents: Some(omp_tool::DocEffects {
+								read:        true,
+								write_globs: Arc::from([sf!("**")]),
+							}),
+							exec: Some(omp_tool::ExecEffects {
+								commands: Arc::from([sf!("*")]),
+								network:  false,
+							}),
+							..Effects::empty()
+						},
+						confinement:     Confinement::Host,
+						projection_code: [0; 32],
+					},
+					ran:  Arc::clone(ran),
+				},
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the scoped probe");
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let con = Arc::new(Ctx::new());
+		let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
+		let server = Arc::new(
+			EnvServer::open_local(
+				root.path(),
+				state.path(),
+				registry,
+				ExtHostConfig::new(
+					PathBuf::from("unused"),
+					Principal::new(sf!("test-principal"), sf!("Test Principal")),
+					sf!("test-session"),
+					1,
+				),
+				&con,
+				convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.expect("local environment"),
+		);
+		(server, root, state)
+	}
+
+	/// Connects a client to `server` under `approval_mode`, answering
+	/// admission queries with `admission`.
+	async fn scoped_probe_client(
+		server: &Arc<EnvServer>,
+		approval_mode: pb::ApprovalMode,
+		admission: ScriptedAdmission,
+	) -> (EnvClient, JoinHandle<()>) {
+		let (client, transport) = EnvClient::in_process(64);
+		client.set_admitter(admission);
+		let host = Arc::clone(server);
+		let serving = tokio::spawn(async move { host.serve_in_process(transport).await });
+		client
+			.hello(pb::ClientHello {
+				client: "scoped-effects".to_owned(),
+				schema_rev: omp_proto::SCHEMA_REV,
+				approval_mode: approval_mode as i32,
+				..pb::ClientHello::default()
+			})
+			.await
+			.expect("hello");
+		(client, serving)
+	}
+
+	/// Invokes the scoped probe with `args` under `restrictions` and returns
+	/// its verdict, or the environment's refusal of the committed call.
+	async fn invoke_scoped_probe(
+		client: &EnvClient,
+		server: &EnvServer,
+		invocation_id: &str,
+		args: serde_json::Value,
+		restrictions: Option<pb::ToolRestrictions>,
+	) -> Result<pb::Verdict, omp_env::ClientError> {
+		let rev = server
+			.registry()
+			.live_identity("scoped_probe")
+			.map(|(_, rev)| rev.to_string())
+			.expect("the scoped probe is registered");
+		let mut invocation = client
+			.invoke(pb::InvokeTool {
+				invocation_id: invocation_id.to_owned(),
+				name: "scoped_probe".to_owned(),
+				rev,
+				restrictions,
+				..pb::InvokeTool::default()
+			})
+			.await
+			.expect("invoke");
+		assert!(matches!(
+			invocation.next_event().await.expect("accepted"),
+			Some(omp_env::InvocationEvent::Accepted(_))
+		));
+		invocation
+			.commit_args(
+				Bytes::from(serde_json::to_vec(&args).expect("arguments")),
+				Bytes::from_static(b"scoped-effects-token"),
+				1_000,
+				None,
+			)
+			.await
+			.expect("commit arguments");
+		time::timeout(Duration::from_secs(30), async {
+			loop {
+				match invocation.next_event().await? {
+					Some(omp_env::InvocationEvent::Verdict(verdict)) => break Ok(verdict),
+					Some(omp_env::InvocationEvent::Update(_)) => {},
+					other => panic!("unexpected scoped probe event: {other:?}"),
+				}
+			}
+		})
+		.await
+		.expect("the scoped probe did not settle")
+	}
+
+	/// Approval follows what each call does, judged at commit: under
+	/// `always-ask` a reading call runs unasked while a writing or executing
+	/// one asks; under `write` only the executing call asks. A refused
+	/// prompt never runs the call.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn argument_scoped_calls_are_approved_by_their_committed_effects() {
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let (server, _root, _state) = scoped_probe_daemon(&ran).await;
+		for (mode, level, prompts) in [
+			(pb::ApprovalMode::AlwaysAsk, "read", false),
+			(pb::ApprovalMode::AlwaysAsk, "write", true),
+			(pb::ApprovalMode::AlwaysAsk, "exec", true),
+			(pb::ApprovalMode::Write, "read", false),
+			(pb::ApprovalMode::Write, "write", false),
+			(pb::ApprovalMode::Write, "exec", true),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			let context = format!("{} {level}", mode.as_str_name());
+			let before = ran.lock().len();
+			let verdict = invoke_scoped_probe(
+				&client,
+				&server,
+				"scoped",
+				serde_json::json!({"i": "probe", "level": level}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			if prompts {
+				assert_eq!(*refusing.queries.lock(), ["scoped"], "{context}");
+				assert!(verdict.is_error, "{context}: the refused prompt denies the call");
+				assert_eq!(ran.lock().len(), before, "{context}: never ran");
+			} else {
+				assert!(refusing.queries.lock().is_empty(), "{context}: never asks");
+				assert!(!verdict.is_error, "{context}: {}", String::from_utf8_lossy(&verdict.json));
+				assert_eq!(ran.lock().len(), before + 1, "{context}");
+			}
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// Plan mode refuses a call by what it does: a reading call of a tool
+	/// that can run commands proceeds, while its writing and executing calls
+	/// are refused before they run. A call judged beyond its tool's declared
+	/// maximum is refused too, never admitted on that maximum, and an answer
+	/// that rewrites a call to do more than was admitted is denied while one
+	/// that narrows it runs the narrowed call.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn argument_scoped_calls_meet_the_write_boundary_by_their_effects() {
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let (server, _root, _state) = scoped_probe_daemon(&ran).await;
+		let plan = || pb::ToolRestrictions {
+			plan_file: Some("local://PLAN.md".to_owned()),
+			..pb::ToolRestrictions::default()
+		};
+		let (client, serving) =
+			scoped_probe_client(&server, pb::ApprovalMode::Yolo, ScriptedAdmission::default()).await;
+		let read = invoke_scoped_probe(
+			&client,
+			&server,
+			"plan-read",
+			serde_json::json!({"level": "read"}),
+			Some(plan()),
+		)
+		.await
+		.expect("a reading call passes plan mode");
+		assert!(!read.is_error, "{}", String::from_utf8_lossy(&read.json));
+		assert_eq!(ran.lock().len(), 1);
+		for (invocation_id, level, restrictions) in [
+			("plan-write", "write", Some(plan())),
+			("plan-exec", "exec", Some(plan())),
+			("widened", "widen", None),
+		] {
+			let refused = invoke_scoped_probe(
+				&client,
+				&server,
+				invocation_id,
+				serde_json::json!({"level": level}),
+				restrictions,
+			)
+			.await
+			.expect_err("the environment refuses the committed call");
+			let omp_env::ClientError::Protocol(error) = refused else {
+				panic!("{invocation_id}: unexpected refusal {refused:?}");
+			};
+			assert_eq!(
+				error.code,
+				pb::ProtocolErrorCode::PermissionDenied as i32,
+				"{invocation_id}: {}",
+				error.message
+			);
+		}
+		assert_eq!(ran.lock().len(), 1, "no refused call ran");
+		drop(client);
+		serving.abort();
+
+		for (patch, admitted) in
+			[(br#"{"level":"exec"}"#.as_slice(), None), (br#"{"level":"read"}"#, Some("read"))]
+		{
+			let rewriting = ScriptedAdmission {
+				allow: true,
+				patch: Bytes::copy_from_slice(patch),
+				..ScriptedAdmission::default()
+			};
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, rewriting.clone()).await;
+			let before = ran.lock().len();
+			let verdict = invoke_scoped_probe(
+				&client,
+				&server,
+				"rewritten",
+				serde_json::json!({"level": "write"}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert_eq!(*rewriting.queries.lock(), ["rewritten"], "the writing call asks");
+			if let Some(level) = admitted {
+				assert!(!verdict.is_error, "{}", String::from_utf8_lossy(&verdict.json));
+				assert_eq!(ran.lock().last().map(|args| args["level"].clone()), Some(level.into()));
+			} else {
+				assert!(verdict.is_error);
+				assert!(
+					String::from_utf8_lossy(&verdict.json).contains("admission_effects_widened"),
+					"{}",
+					String::from_utf8_lossy(&verdict.json)
+				);
+				assert_eq!(ran.lock().len(), before, "the widened call never ran");
+			}
+			drop(client);
+			serving.abort();
+		}
 	}
 }

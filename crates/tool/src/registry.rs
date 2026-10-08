@@ -35,6 +35,7 @@ use crate::{
 	GrammarSyntax, IncomingParams, JobRef, LiftedCall, Part, Presentation,
 	ProjectionAuthorizationError, ProjectionSpan, PromptCaps, RecordedCall, RecordedCallOwned, Rev,
 	StreamMatchText, Tool, ToolIdentity, ToolPromptExample, ToolSpec, VisibilityReceipt,
+	decode_params,
 };
 
 /// Catalog capabilities needed for deterministic tool lowering.
@@ -1154,6 +1155,15 @@ pub enum RegistryError {
 	/// Tool name is not registered.
 	#[error("unknown tool: {0}")]
 	UnknownTool(Str),
+	/// A call's argument-scoped effects ([`Tool::invocation_effects`]) are not
+	/// a subset of its revision's declared maximum, so the call is refused.
+	#[error("tool {name}@{rev} judged a call's effects to exceed its declared maximum")]
+	InvocationEffectsExceedMaximum {
+		/// Tool name.
+		name: Str,
+		/// Exact registered revision.
+		rev:  Rev,
+	},
 	/// Host roster revision did not advance monotonically.
 	#[error("stale host tool roster for {claimant}: current {current}, received {received}")]
 	StaleHostRoster {
@@ -1295,7 +1305,27 @@ trait ErasedTool: Send + Sync {
 	fn stream_match_text(&self, _arguments: &Value) -> Option<Vec<StreamMatchText>> {
 		None
 	}
+	fn scopes_invocation_effects(&self) -> bool {
+		false
+	}
+	fn invocation_effects(&self, _arguments: &str) -> Option<Effects> {
+		None
+	}
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall>;
+}
+
+/// The effects one call of `tool` may have: its argument-scoped envelope, or
+/// the declared maximum when the tool does not narrow this call.
+fn scoped_effects(tool: &dyn ErasedTool, arguments: &str) -> Result<Effects, RegistryError> {
+	let spec = tool.spec();
+	match tool.invocation_effects(arguments) {
+		None => Ok(spec.effects.clone()),
+		Some(effects) if effects.is_subset_of(&spec.effects) => Ok(effects),
+		Some(_) => Err(RegistryError::InvocationEffectsExceedMaximum {
+			name: spec.name.clone(),
+			rev:  spec.rev.clone(),
+		}),
+	}
 }
 static NATIVE_TOOL_ROUTE: ToolRoute = ToolRoute::Native;
 
@@ -1717,6 +1747,21 @@ impl<T: Tool> ErasedTool for Registered<T> {
 
 	fn stream_match_text(&self, arguments: &Value) -> Option<Vec<StreamMatchText>> {
 		self.tool.stream_match_text(arguments)
+	}
+
+	fn scopes_invocation_effects(&self) -> bool {
+		T::ARGUMENT_SCOPED_EFFECTS
+	}
+
+	/// Decodes the call's arguments exactly as the executor's
+	/// [`IncomingParams::whole`] does; arguments that do not decode keep the
+	/// declared maximum, since the executor refuses them too.
+	fn invocation_effects(&self, arguments: &str) -> Option<Effects> {
+		if !T::ARGUMENT_SCOPED_EFFECTS {
+			return None;
+		}
+		let params = decode_params::<T::Params>(arguments).ok()?;
+		self.tool.invocation_effects(&params)
 	}
 
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
@@ -2461,6 +2506,39 @@ impl Registry {
 			.and_then(|roster| roster.entries.get(name))
 			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
 		Ok(entry.tool.spec().effects.clone())
+	}
+
+	/// Whether calls of `name`'s live typed revision narrow their effects to
+	/// their arguments ([`Tool::ARGUMENT_SCOPED_EFFECTS`]). Host, worker and
+	/// unknown tools never do.
+	#[must_use]
+	pub fn scopes_invocation_effects(&self, name: &str) -> bool {
+		self
+			.live_entry(name)
+			.is_ok_and(|entry| entry.tool.scopes_invocation_effects())
+	}
+
+	/// Returns the effects one call of `name` may have, judged from its
+	/// canonical argument JSON: the tool's argument-scoped envelope
+	/// ([`Tool::invocation_effects`]), or the declared maximum of a native or
+	/// host tool that does not narrow the call, mirroring
+	/// [`Self::effects_owned`].
+	///
+	/// An envelope that is not a subset of the declared maximum is refused
+	/// ([`RegistryError::InvocationEffectsExceedMaximum`]), never replaced by
+	/// the maximum.
+	pub fn invocation_effects(&self, name: &str, arguments: &str) -> Result<Effects, RegistryError> {
+		if let Ok(entry) = self.live_entry(name) {
+			return scoped_effects(entry.tool.as_ref(), arguments);
+		}
+		let state = self.host_tools.read();
+		let entry = state
+			.live
+			.get(name)
+			.and_then(|claimant| state.rosters.get(claimant))
+			.and_then(|roster| roster.entries.get(name))
+			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+		scoped_effects(entry.tool.as_ref(), arguments)
 	}
 
 	/// Iterates winning native identities in deterministic name order.
@@ -3874,6 +3952,169 @@ mod tests {
 		};
 		assert!(declared.is_subset_of(&unknown));
 		assert!(!unknown.is_subset_of(&declared));
+	}
+
+	/// Arguments of [`ScopedTool`]: the envelope each `level` asks for.
+	#[derive(Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct ScopedParams {
+		level: Str,
+	}
+
+	/// A tool narrowing its calls by `level` when `SCOPED` declares it.
+	struct ScopedTool<const SCOPED: bool> {
+		spec: ToolSpec,
+	}
+
+	impl<const SCOPED: bool> Tool for ScopedTool<SCOPED> {
+		type Fault = Value;
+		type Params = ScopedParams;
+		type Payload = Value;
+		type Update = Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = SCOPED;
+
+		fn spec(&self) -> &ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			_params: IncomingParams<'c>,
+		) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+			futures::stream::empty()
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&Self::Payload, &Self::Fault>,
+			_caps: &PromptCaps,
+		) -> Vec<Part> {
+			Vec::new()
+		}
+
+		fn invocation_effects(&self, params: &ScopedParams) -> Option<Effects> {
+			match params.level.as_str() {
+				"read" => Some(read_only()),
+				// Outside the declared maximum: the classifier lies.
+				"widen" => Some(Effects { subagents: 1, ..Effects::empty() }),
+				_ => None,
+			}
+		}
+	}
+
+	fn read_only() -> Effects {
+		Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::from([]) }),
+			..Effects::empty()
+		}
+	}
+
+	fn scoped_maximum() -> Effects {
+		Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::from([sf!("**")]) }),
+			exec: Some(ExecEffects { commands: Arc::from([sf!("*")]), network: false }),
+			..Effects::empty()
+		}
+	}
+
+	fn scoped_registry<const SCOPED: bool>() -> Registry {
+		let mut registry = Registry::new();
+		let mut spec = tool(1).spec;
+		spec.name = sf!("scoped");
+		spec.effects = scoped_maximum();
+		registry
+			.register(ScopedTool::<SCOPED> { spec }, Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/scoped"),
+				replaces:   None,
+			})
+			.expect("scoped tool registers");
+		registry
+	}
+
+	/// A declared classifier narrows a call to its envelope after the
+	/// protocol fields are stripped, as the executor decodes it; no override,
+	/// or arguments the executor would refuse too, keep the declared maximum;
+	/// an envelope beyond the maximum is refused, never replaced by it.
+	#[test]
+	fn invocation_effects_narrow_and_fail_closed() {
+		let registry = scoped_registry::<true>();
+		assert!(registry.scopes_invocation_effects("scoped"));
+		assert_eq!(
+			registry
+				.invocation_effects("scoped", r#"{"i":"look","notrunc":true,"level":"read"}"#)
+				.expect("a subset envelope"),
+			read_only()
+		);
+		for maximum in [
+			r#"{"level":"everything"}"#,
+			r#"{"level":7}"#,
+			r#"{"level":"read","extra":1}"#,
+			"not json",
+		] {
+			assert_eq!(
+				registry
+					.invocation_effects("scoped", maximum)
+					.expect("the declared maximum"),
+				scoped_maximum(),
+				"{maximum}"
+			);
+		}
+		let refused = registry
+			.invocation_effects("scoped", r#"{"level":"widen"}"#)
+			.expect_err("a widening envelope is refused");
+		assert!(
+			matches!(
+				&refused,
+				RegistryError::InvocationEffectsExceedMaximum { name, rev }
+					if name == "scoped" && *rev == identity(1).rev
+			),
+			"{refused:?}"
+		);
+		assert!(matches!(
+			registry.invocation_effects("absent", "{}"),
+			Err(RegistryError::UnknownTool(_))
+		));
+	}
+
+	/// A tool that does not declare argument-scoped effects is judged by its
+	/// declared maximum, whatever its arguments; host tools too.
+	#[test]
+	fn undeclared_scoping_keeps_the_declared_maximum() {
+		let registry = scoped_registry::<false>();
+		assert!(!registry.scopes_invocation_effects("scoped"));
+		for arguments in [r#"{"level":"read"}"#, r#"{"level":"widen"}"#] {
+			assert_eq!(
+				registry
+					.invocation_effects("scoped", arguments)
+					.expect("the declared maximum"),
+				scoped_maximum(),
+				"{arguments}"
+			);
+		}
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+		assert!(!registry.scopes_invocation_effects("alpha"));
+		assert_eq!(
+			registry
+				.invocation_effects("alpha", "{}")
+				.expect("a host tool's declaration"),
+			registry
+				.effects_owned("alpha")
+				.expect("a host tool's declaration")
+		);
 	}
 
 	#[test]

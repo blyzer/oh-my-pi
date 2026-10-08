@@ -1303,6 +1303,15 @@ pub trait Tool: Send + Sync + 'static {
 	/// Durable typed failure.
 	type Fault: Serialize + DeserializeOwned + Send;
 
+	/// Whether this tool narrows each call's effects to its arguments through
+	/// [`Tool::invocation_effects`].
+	///
+	/// Declared beside that method: the environment fixes such a call's
+	/// approval only once its arguments are committed, and the registry decodes
+	/// a call's arguments for the classifier only for tools that declare it.
+	/// A tool that leaves it `false` is admitted on its declared maximum.
+	const ARGUMENT_SCOPED_EFFECTS: bool = false;
+
 	/// Returns this implementation's immutable specification.
 	fn spec(&self) -> &ToolSpec;
 
@@ -1376,6 +1385,20 @@ pub trait Tool: Send + Sync + 'static {
 	/// introduced by this call. Tools that do not implement this contract keep
 	/// the default JSON string-value matching behavior.
 	fn stream_match_text(&self, _arguments: &serde_json::Value) -> Option<Vec<StreamMatchText>> {
+		None
+	}
+
+	/// Returns the effects this one call can have, judged from its decoded
+	/// arguments; `None` keeps the declared maximum ([`ToolSpec::effects`]).
+	///
+	/// Only consulted when [`Tool::ARGUMENT_SCOPED_EFFECTS`] is set. The
+	/// envelope must be a subset of the declared maximum and must follow the
+	/// same classification the executor enforces, so a call never does more
+	/// than its envelope admits; the registry refuses a call whose envelope is
+	/// not a subset ([`RegistryError::InvocationEffectsExceedMaximum`])
+	/// rather than substituting the maximum. Approval and the environment's
+	/// write boundary both judge the call by this envelope.
+	fn invocation_effects(&self, _params: &Self::Params) -> Option<Effects> {
 		None
 	}
 
