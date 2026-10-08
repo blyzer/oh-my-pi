@@ -56,6 +56,10 @@ pub enum ImportStep {
 	/// v1 `agent.db` logins (API keys, OAuth, MCP OAuth) into the encrypted
 	/// credential store.
 	Credentials,
+	/// Keys earlier imports (`agent.db` and `models.yml`) stored as `api-key`
+	/// for a provider that authenticates with another kind, re-stored under
+	/// that kind ([`super::auth_credentials::repair_credential_kinds`]).
+	CredentialKinds,
 	/// User assets copied file by file into the v2 `agent/` tree, keeping any
 	/// v2 file already there ([`super::assets`]): `skills/` and
 	/// `managed-skills/`, `rules/` with `RULES.md` and `AGENTS.md`,
@@ -116,7 +120,7 @@ impl ImportStep {
 		match self {
 			Self::Models | Self::ModelsKeys => V1Item::Models,
 			Self::Settings => V1Item::Settings,
-			Self::Credentials => V1Item::AgentDb,
+			Self::Credentials | Self::CredentialKinds => V1Item::AgentDb,
 			Self::Skills => V1Item::Skills,
 			Self::Rules => V1Item::Rules,
 			Self::Prompts => V1Item::Prompts,
@@ -149,7 +153,7 @@ impl ImportStep {
 	/// Whether applying this step writes credentials.
 	#[must_use]
 	pub const fn needs_credentials(self) -> bool {
-		matches!(self, Self::ModelsKeys | Self::Credentials)
+		matches!(self, Self::ModelsKeys | Self::Credentials | Self::CredentialKinds)
 	}
 
 	/// Whether the runner skips this step once its marker is set.
@@ -179,6 +183,7 @@ impl ImportStep {
 			Self::ModelsKeys => super::models::import_keys(cx),
 			Self::Settings => super::settings::import_settings(cx),
 			Self::Credentials => super::auth_credentials::import_credentials(cx),
+			Self::CredentialKinds => super::auth_credentials::repair_credential_kinds(cx),
 			Self::Skills
 			| Self::Rules
 			| Self::Prompts

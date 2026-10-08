@@ -16,9 +16,11 @@ pub enum OutcomeKind {
 	/// A dry run found something a real run would copy.
 	WouldImport,
 	/// Copied into v2 again because the v1 source changed since its earlier
-	/// import, which v2 keeps.
+	/// import, which v2 keeps, or stored again because an earlier import
+	/// stored it under a credential kind its provider rejects.
 	Reimported,
-	/// A dry run found a changed source a real run would copy again.
+	/// A dry run found a changed source a real run would copy again, or stored
+	/// keys a real run checks for a credential kind to repair.
 	WouldReimport,
 	/// Obsolete files an earlier v2 import wrote were deleted.
 	Removed,
@@ -173,9 +175,11 @@ pub enum ImportOutcome {
 	/// A dry run found something a real run would copy.
 	WouldImport,
 	/// Copied into v2 again because the v1 source changed since its earlier
-	/// import, which v2 keeps.
+	/// import, which v2 keeps, or stored again because an earlier import
+	/// stored it under a credential kind its provider rejects.
 	Reimported,
-	/// A dry run found a changed source a real run would copy again.
+	/// A dry run found a changed source a real run would copy again, or stored
+	/// keys a real run checks for a credential kind to repair.
 	WouldReimport,
 	/// Obsolete files an earlier v2 import wrote were deleted.
 	Removed,

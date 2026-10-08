@@ -10,9 +10,13 @@
 //! # Mapping
 //!
 //! - An `api_key` row is stored through
-//!   [`omp_ai::auth::AuthControlHandle::store`] as an `api-key` credential. Its
-//!   identity is v1's `identity_key` when set, else `api-key` for a key v1's
-//!   `/login` stored (the account v2's own `/login` writes), else `agent-db`.
+//!   [`omp_ai::auth::AuthControlHandle::store`] under the kind its provider's
+//!   routes lease an API key as ([`omp_ai::auth::api_key_kind`]): `bearer` for
+//!   a provider that authenticates with a bearer token (Hugging Face, Kilo,
+//!   GitHub Copilot), `api-key` for one that takes a key header, and `api-key`
+//!   for a provider the catalog does not know. Its identity is v1's
+//!   `identity_key` when set, else `api-key` for a key v1's `/login` stored
+//!   (the account v2's own `/login` writes), else `agent-db`.
 //! - An `oauth` row is imported through
 //!   [`omp_ai::auth::AuthControlHandle::import_oauth`] (access, refresh,
 //!   expiry) under its v1 identity (`email:…|org:…`). Per v1 extra, checked
@@ -34,8 +38,11 @@
 //!     token.
 //!   - `authorizedAt`: v2 has no grant-deadline warning.
 //! - A login whose v2 provider takes only a static key (a v1 `oauth` row
-//!   without a refresh token, such as Kilo's) is stored as an `api-key` with
-//!   its v1 expiry.
+//!   without a refresh token, such as Kilo's) is stored as a static key of that
+//!   kind with its v1 expiry.
+//! - Keys an earlier importer stored as `api-key` for a provider that rejects
+//!   that kind are re-stored under the right one by the `credential-kinds` step
+//!   ([`repair_credential_kinds`]).
 //! - A disabled row is imported, then disabled in the v2 account pool.
 //! - An MCP grant goes to the MCP host's store record for its server URL (from
 //!   the credential id, or v1 `mcp.json` for legacy random ids), with the v1
@@ -53,7 +60,10 @@ use std::{
 
 use omp_ai::{
 	PrincipalId, ProjectId,
-	auth::{CredentialControlWrite, OAuthControlImport, StoreError, normalize_enterprise_domain},
+	auth::{
+		CredentialControlWrite, CredentialKind, OAuthControlImport, StoreError,
+		normalize_enterprise_domain,
+	},
 };
 use omp_catalog::{
 	ProviderId,
@@ -130,6 +140,9 @@ pub enum CredentialsImportError {
 	/// The step's marker could not be written.
 	#[error("could not record the credentials import")]
 	Marker(#[source] io::Error),
+	/// Stored keys could not be re-stored under their provider's kind.
+	#[error("could not re-store the stored keys under their providers' credential kinds")]
+	RepairKinds(#[source] StoreError),
 }
 
 /// The shape of a reported credential.
@@ -311,6 +324,59 @@ pub(super) fn import_credentials(cx: &StepContext<'_>) -> Result<Vec<ImportEntry
 	Ok(entries)
 }
 
+/// The `credential-kinds` step: re-stores the keys an earlier import wrote as
+/// `api-key` for a provider that authenticates with another kind
+/// ([`omp_ai::auth::AuthControlHandle::repair_static_secret_kinds`]), which
+/// the provider's routes otherwise reject on every request.
+///
+/// Only a profile with a credential database is opened. A dry run reads
+/// nothing and reports that a real run checks the stored keys. A key that
+/// must be repaired but cannot be decrypted (the key source is unavailable to
+/// this process) fails the step, which retries on the next run.
+pub(super) fn repair_credential_kinds(
+	cx: &StepContext<'_>,
+) -> Result<Vec<ImportEntry>, ImportError> {
+	let database = cx.pair.target.data_dir.join("credentials.db");
+	let entry = |subject, outcome| ImportEntry {
+		step: ImportStep::CredentialKinds,
+		item: V1Item::AgentDb,
+		path: Some(database.clone()),
+		subject,
+		outcome,
+	};
+	if !database.is_file() {
+		if cx.mode == ImportMode::Apply {
+			ImportStep::CredentialKinds
+				.marker(&cx.pair.target.config_dir)
+				.set(None)
+				.map_err(CredentialsImportError::Marker)?;
+		}
+		return Ok(vec![entry(None, ImportOutcome::NothingToImport)]);
+	}
+	if cx.mode == ImportMode::DryRun {
+		return Ok(vec![entry(None, ImportOutcome::WouldReimport)]);
+	}
+	let repairs = cx
+		.credentials
+		.get()?
+		.repair_static_secret_kinds()
+		.map_err(CredentialsImportError::RepairKinds)?;
+	ImportStep::CredentialKinds
+		.marker(&cx.pair.target.config_dir)
+		.set(None)
+		.map_err(CredentialsImportError::Marker)?;
+	if repairs.is_empty() {
+		return Ok(vec![entry(None, ImportOutcome::NothingToImport)]);
+	}
+	Ok(repairs
+		.into_iter()
+		.map(|repair| {
+			let subject = sf!("{} ({} -> {})", repair.account, repair.stored, repair.repaired);
+			entry(Some(subject), ImportOutcome::Reimported)
+		})
+		.collect())
+}
+
 /// Writes one planned row, keeping any v2 account of the same identity. The
 /// target store opens on the first row that writes.
 fn apply(
@@ -375,14 +441,19 @@ fn apply(
 				audit: None,
 			})
 		},
-		AccountWrite::Key { secret, expires_at_ms } => control.store(CredentialControlWrite {
-			provider: provider_id,
-			principal,
-			identity: Some(identity),
-			kind: Str::new_static(Kind::ApiKey.into()),
-			secret,
-			expires_at_ms,
-		}),
+		AccountWrite::Key { secret, expires_at_ms } => {
+			let kind = control
+				.api_key_kind(&provider_id)
+				.unwrap_or(CredentialKind::ApiKey);
+			control.store(CredentialControlWrite {
+				provider: provider_id,
+				principal,
+				identity: Some(identity),
+				kind: Str::new_static(kind.into()),
+				secret,
+				expires_at_ms,
+			})
+		},
 	};
 	let (_, record) = written.map_err(store_error)?;
 	if let Some(cause) = disabled {

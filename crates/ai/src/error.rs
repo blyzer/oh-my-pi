@@ -12,7 +12,7 @@ use omp_core::Str;
 use crate::{
 	account::PinFailure,
 	answer::{AnswerKind, SearchFailureKind, SearchProviderFailure},
-	auth::AwsCredentialError,
+	auth::{AwsCredentialError, CredentialKind},
 	catalog::{OperationKind, ProviderId, RouteId},
 	id::RequestId,
 	operation::{MediaOperationError, discovery::CatalogDiscoveryProjectorError},
@@ -292,8 +292,41 @@ pub enum RetryAction {
 	SemanticRetry,
 }
 
+/// Why a route could not authenticate a request with a provider credential.
+///
+/// The snake-case variant name is the stable error code, as for
+/// [`PinFailure`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum CredentialFailure {
+	/// Account selection found no eligible account: rotation has no other one
+	/// to move to, or every stored account is disabled or cooling down.
+	#[error("no eligible account is left to try")]
+	NoRotationCandidate,
+	/// No credential source (environment, stored account) produced a
+	/// credential.
+	#[error("no credential is configured")]
+	NoSource,
+	/// The stored credential has another kind than the catalog authentication
+	/// requires; it was stored by an earlier importer and is repaired by
+	/// `omp config import-v1` (the `credential-kinds` step).
+	#[error("the stored credential is {actual} but the provider requires {expected}")]
+	KindMismatch {
+		/// Kind the catalog authentication requires.
+		expected: CredentialKind,
+		/// Kind the stored credential has.
+		actual:   CredentialKind,
+	},
+	/// The encrypted credential store cannot be decrypted by this process.
+	#[error("credential storage is locked")]
+	StorageLocked,
+	/// The rejected credential cannot be refreshed.
+	#[error("the credential cannot be renewed")]
+	NotRenewable,
+}
+
 /// Typed supplemental evidence that contains no secret-bearing source text.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error, strum::IntoStaticStr)]
 pub enum ErrorDetail {
 	/// Erased answer variant did not match the typed operation contract.
 	#[error("expected {expected:?} answer, got {actual:?}")]
@@ -419,6 +452,14 @@ pub enum ErrorDetail {
 		/// Why the pinned account cannot serve the request.
 		reason:   PinFailure,
 	},
+	/// No usable credential could authenticate the request.
+	#[error("no usable {provider} credential: {reason}")]
+	Credential {
+		/// Provider whose credential failed.
+		provider: ProviderId,
+		/// Why no credential could be used.
+		reason:   CredentialFailure,
+	},
 }
 
 impl ErrorDetail {
@@ -529,24 +570,7 @@ pub struct Error {
 
 impl fmt::Debug for Error {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let detail_kind = self.detail_ref().map(|detail| match detail {
-			ErrorDetail::BodyVariantMismatch { .. } => "BodyVariantMismatch",
-			ErrorDetail::NamedToolUnavailable { .. } => "NamedToolUnavailable",
-			ErrorDetail::Budget { .. } => "Budget",
-			ErrorDetail::Context { .. } => "Context",
-			ErrorDetail::Target { .. } => "Target",
-			ErrorDetail::Capability { .. } => "Capability",
-			ErrorDetail::Replay { .. } => "Replay",
-			ErrorDetail::Protocol { .. } => "Protocol",
-			ErrorDetail::Timeout { .. } => "Timeout",
-			ErrorDetail::StreamEnded { .. } => "StreamEnded",
-			ErrorDetail::CassetteMiss { .. } => "CassetteMiss",
-			ErrorDetail::Provider { .. } => "Provider",
-			ErrorDetail::SearchFailures { .. } => "SearchFailures",
-			ErrorDetail::LocalUnavailable { .. } => "LocalUnavailable",
-			ErrorDetail::AccountPin { .. } => "AccountPin",
-			ErrorDetail::StalePlan { .. } => "StalePlan",
-		});
+		let detail_kind = self.detail_ref().map(<&'static str>::from);
 		formatter
 			.debug_struct("Error")
 			.field("kind", &self.kind)
@@ -863,6 +887,29 @@ mod tests {
 		assert!(rendered.contains("(model_archived)"));
 		assert!(rendered.contains("[http 404]"));
 		assert!(rendered.contains("model does not exist"));
+	}
+
+	#[test]
+	fn credential_detail_names_the_provider_and_the_reason() {
+		let error = Error::new(
+			ErrorKind::Authentication,
+			ErrorPhase::Authentication,
+			RetryAction::ReselectRoute,
+			ExecutionReceipt::default(),
+		)
+		.detail(SuperErrorDetail::Credential {
+			provider: crate::catalog::ProviderId::from("huggingface"),
+			reason:   super::CredentialFailure::KindMismatch {
+				expected: crate::auth::CredentialKind::Bearer,
+				actual:   crate::auth::CredentialKind::ApiKey,
+			},
+		});
+		assert_eq!(
+			error.to_string(),
+			"inference Authentication error during Authentication: no usable huggingface credential: \
+			 the stored credential is api-key but the provider requires bearer"
+		);
+		assert!(format!("{error:?}").contains("detail_kind: Some(\"Credential\")"));
 	}
 
 	#[test]

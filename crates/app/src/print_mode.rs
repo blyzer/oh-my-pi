@@ -79,6 +79,10 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	let ctx = Arc::new(crate::process_ctx(&project)?);
 	let env = LaunchEnv::production(&project, launch.gateway.is_some())?;
 	let mut launch = Launch::prepare(launch, ctx, env).await?;
+	ensure_stored_logins_unlockable(
+		&launch,
+		omp_driver::registry::credential_key_mode(&launch.ctx),
+	)?;
 	let inputs = crate::chat_cmd::launch_input::prepare(&launch, piped_input, follow_ups)?;
 	if inputs.first.is_none() {
 		return Err(
@@ -318,6 +322,39 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 		let _ = fs::remove_file(path);
 	}
 	Ok(())
+}
+
+/// Fails before any session or inference stack exists when the launch's
+/// provider would authenticate with stored logins `mode` cannot decrypt:
+/// without a terminal the default key source is unavailable, and the request
+/// would otherwise fail later with an authentication error. An invocation
+/// `--api-key` and a gateway use no stored login; a model that does not
+/// resolve is left to the composition, which reports it.
+fn ensure_stored_logins_unlockable(
+	launch: &Launch,
+	mode: omp_driver::registry::CredentialKeyMode,
+) -> miette::Result<()> {
+	if launch.options.api_key.is_some() || launch.options.gateway.is_some() {
+		return Ok(());
+	}
+	let provider = match &launch.options.provider {
+		Some(provider) => provider.clone(),
+		None => match omp_driver::discovery::roles::resolve_role_selector(
+			&launch.catalog,
+			&launch.settings,
+			launch.model.as_str(),
+		) {
+			Ok(selected) => selected.provider,
+			Err(_) => return Ok(()),
+		},
+	};
+	omp_driver::registry::ensure_stored_logins_unlockable(
+		mode,
+		&launch.data_dir,
+		&launch.catalog,
+		&provider,
+	)
+	.into_diagnostic()
 }
 
 /// Reaches the end of the run's session on the lifecycle surface, within the
@@ -2692,5 +2729,101 @@ mod tests {
 		let long = "x".repeat(200);
 		assert_eq!(one_line(&long, 120).chars().count(), 120);
 		assert!(one_line(&long, 120).ends_with('…'));
+	}
+
+	/// Print refuses before composing anything when the target provider's
+	/// stored logins cannot be decrypted, naming the key-source settings; a
+	/// key source, or an invocation `--api-key`, lets it through.
+	#[tokio::test]
+	async fn print_fails_early_when_stored_logins_are_locked() {
+		let dir = tempdir().expect("scratch");
+		let data_dir = dir.path().join("data");
+		// Discovery during `Launch::prepare` reads only the scratch tree.
+		// SAFETY: nextest runs each test in its own process; nothing else in
+		// this one reads the environment concurrently.
+		unsafe {
+			std::env::set_var("HOME", dir.path().join("home"));
+			std::env::set_var("CLAUDE_CONFIG_DIR", dir.path().join("claude"));
+			std::env::set_var("OMP_CONFIG_DIR", dir.path().join("config"));
+			std::env::set_var("OMP_DATA_DIR", &data_dir);
+			std::env::set_var("OMP_STATE_DIR", dir.path().join("state"));
+			std::env::set_var("OMP_CACHE_DIR", dir.path().join("cache"));
+			std::env::remove_var("OMP_POOLSIDE_API_KEY");
+		}
+		fs::create_dir_all(&data_dir).expect("data dir");
+		omp_ai::account::AccountPool::with_store(Arc::new(
+			omp_ai::account::AccountStateStore::open(data_dir.join("credentials.db"))
+				.expect("account state"),
+		))
+		.expect("accounts")
+		.upsert(omp_ai::account::AccountRecord {
+			account:               omp_ai::AccountId::from("poolside:agent-db"),
+			principal:             omp_ai::PrincipalId::from("agent-db"),
+			provider:              omp_catalog::ProviderId::from("poolside"),
+			routes:                std::collections::BTreeSet::new(),
+			enabled:               true,
+			credential_generation: 1,
+			routing:               omp_ai::call::AccountRoutingContext::default(),
+		})
+		.expect("stored login");
+		let mut args = crate::cli::ChatArgs::default_interactive();
+		args.model = Some(Str::new_static("poolside/laguna"));
+		args.provider = Some(Str::new_static("poolside"));
+		args.project = dir.path().to_path_buf();
+		args.prompt = vec![Str::new_static("hello")];
+		let prepare = |args| {
+			Launch::prepare(args, Arc::new(omp_con::Ctx::new()), crate::chat_cmd::LaunchEnv {
+				data_dir: data_dir.clone(),
+				home:     dir.path().join("home"),
+				catalog:  Arc::new(Catalog::embedded().clone()),
+			})
+		};
+		let launch = prepare(args.clone()).await.expect("launch lowers");
+
+		let error = ensure_stored_logins_unlockable(
+			&launch,
+			omp_driver::registry::CredentialKeyMode::Unavailable,
+		)
+		.expect_err("locked stored logins fail the print");
+		let message = error.to_string();
+		assert!(message.starts_with("poolside has stored logins."), "{message}");
+		assert!(message.contains("OMP_LLM_KEY_SOURCE=local-file"), "{message}");
+		assert!(message.contains("sv_credential_key_source"), "{message}");
+		assert!(
+			ensure_stored_logins_unlockable(
+				&launch,
+				omp_driver::registry::CredentialKeyMode::LocalFile
+			)
+			.is_ok()
+		);
+
+		let locked = args.clone();
+		args.api_key = Some(omp_core::SecretString::from("fake-invocation-key"));
+		let keyed = prepare(args).await.expect("keyed launch lowers");
+		assert!(
+			ensure_stored_logins_unlockable(
+				&keyed,
+				omp_driver::registry::CredentialKeyMode::Unavailable
+			)
+			.is_ok(),
+			"an invocation key uses no stored login"
+		);
+
+		// The production print path makes the check before it composes a
+		// session, with the key source this process resolves.
+		// SAFETY: as above.
+		unsafe { std::env::set_var("OMP_LLM_KEY_SOURCE", "unavailable") };
+		let error = run(
+			crate::cli::PrintArgs {
+				launch:         locked,
+				mode:           "text".to_owned(),
+				print_thoughts: false,
+				follow_ups:     Vec::new(),
+			},
+			None,
+		)
+		.await
+		.expect_err("print refuses before composing");
+		assert!(error.to_string().starts_with("poolside has stored logins."), "{error}");
 	}
 }

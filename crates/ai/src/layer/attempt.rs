@@ -10,8 +10,8 @@ use tower::{Layer, Service};
 
 use crate::{
 	body::RetryDecision,
-	error::{Error, ErrorPhase, RetryAction},
-	layer::{AttemptAction, LayerCall},
+	error::{Error, ErrorKind, ErrorPhase, RetryAction},
+	layer::{AttemptAction, ExecutionContext, LayerCall},
 };
 
 /// Marks the complete attempt sub-stack without rebuilding it per call.
@@ -50,15 +50,23 @@ where
 		async move {
 			let mut reentries = 0_u32;
 			let mut refresh_once_replay_used = false;
+			// The provider failure that caused the current re-entry.
+			let mut cause: Option<Error> = None;
 			request.context.set_attempt_action(AttemptAction::Initial);
 			loop {
 				request.context.clear_body_evidence();
 				let attempted_action = request.context.attempt_action();
+				let reserved = request.context.attempts();
 				let result = service.call(request.clone()).await;
 				let mut error = match result {
 					Ok(response) => return Ok(response),
 					Err(error) => error,
 				};
+				if let Some(cause) = cause.take()
+					&& let Some(cause) = unsent_reentry(cause, &error, reserved, &request.context)
+				{
+					return Err(cause);
+				}
 				if let Some(attempt) = error.receipt().attempts.last() {
 					request.context.set_body_evidence(attempt.body);
 				}
@@ -141,10 +149,61 @@ where
 				}
 				reentries += 1;
 				request.context.set_attempt_action(action);
+				cause = Some(error);
 				future::poll_fn(|cx| service.poll_ready(cx)).await?;
 			}
 		}
 	}
+}
+
+/// The provider failure `cause` to report instead of `error` when the
+/// re-entry `cause` started (a refresh or an account rotation) failed in
+/// authentication before anything was sent: it reserved no wire attempt and
+/// records none `cause` did not. That is a rotation with no other account, or
+/// a refresh of a credential that cannot be renewed.
+///
+/// The caller then sees the provider's answer (a 402, a 401) rather than the
+/// credential failure its retry ran into. `cause` is final: its action is
+/// `Never`, or `ReselectRoute` when `error` asked for it, so a planned
+/// fallback to another provider still runs. Its last attempt, hidden when the
+/// re-entry began, is visible again.
+fn unsent_reentry(
+	mut cause: Error,
+	error: &Error,
+	reserved: u32,
+	context: &ExecutionContext,
+) -> Option<Error> {
+	let recorded_new_attempt = error.receipt().attempts.iter().any(|attempt| {
+		!cause
+			.receipt()
+			.attempts
+			.iter()
+			.any(|known| known.index == attempt.index)
+	});
+	if context.attempts() != reserved
+		|| recorded_new_attempt
+		|| error.phase != ErrorPhase::Authentication
+		|| error.kind != ErrorKind::Authentication
+		|| error.committed
+	{
+		return None;
+	}
+	cause.action = if error.action == RetryAction::ReselectRoute {
+		RetryAction::ReselectRoute
+	} else {
+		RetryAction::Never
+	};
+	if let Some(index) = cause.receipt().attempts.last().map(|attempt| attempt.index) {
+		context.with_receipt(|receipt| {
+			for attempt in &mut receipt.attempts {
+				if attempt.index == index {
+					attempt.hidden = false;
+				}
+			}
+		});
+	}
+	context.finalize_error(&mut cause);
+	Some(cause)
 }
 
 #[cfg(test)]
@@ -419,6 +478,102 @@ mod tests {
 			AttemptAction::RotateAccount { previous_account: Some(AccountId::from("account")) },
 		]);
 	}
+	/// Fails its first call with `provider` after reserving a wire attempt,
+	/// then every re-entry in authentication before sending anything, as a
+	/// rotation with no other account or a refresh of a static key does.
+	#[derive(Clone)]
+	struct ProviderThenUnsent {
+		calls:    Arc<AtomicUsize>,
+		provider: (ErrorKind, u16, RetryAction),
+		unsent:   RetryAction,
+	}
+	impl Service<LayerCall<()>> for ProviderThenUnsent {
+		type Error = Error;
+		type Future = Ready<Result<(), Error>>;
+		type Response = ();
+
+		fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn call(&mut self, request: LayerCall<()>) -> Self::Future {
+			if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+				let index = request.context.reserve_attempt().expect("attempt");
+				let (kind, status, action) = self.provider.clone();
+				let mut error = refresh_error(index, action);
+				error.kind = kind;
+				return ready(Err(error.status(Some(status))));
+			}
+			ready(Err(Error::new(
+				ErrorKind::Authentication,
+				ErrorPhase::Authentication,
+				self.unsent.clone(),
+				request.context.receipt(),
+			)))
+		}
+	}
+
+	/// A rotation (402) or refresh (401) that cannot start reports the
+	/// provider's answer, not the credential failure the retry ran into.
+	#[tokio::test]
+	async fn unsent_reentry_reports_the_provider_failure_that_caused_it() {
+		for (kind, status, action, unsent) in [
+			(ErrorKind::PaymentRequired, 402, RetryAction::RotateAccount, RetryAction::ReselectRoute),
+			(ErrorKind::Authentication, 401, RetryAction::RefreshCredential, RetryAction::Never),
+		] {
+			let calls = Arc::new(AtomicUsize::new(0));
+			let context = ExecutionContext::new(ExecutionBudget {
+				max_attempts: 3,
+				..ExecutionBudget::default()
+			});
+			let mut service = AttemptService {
+				inner: ProviderThenUnsent {
+					calls:    calls.clone(),
+					provider: (kind, status, action),
+					unsent:   unsent.clone(),
+				},
+			};
+			futures::future::poll_fn(|cx| service.poll_ready(cx))
+				.await
+				.expect("ready");
+			let error = service
+				.call(LayerCall { payload: (), context })
+				.await
+				.expect_err("the provider failure surfaces");
+			assert_eq!(calls.load(Ordering::SeqCst), 2, "one re-entry ran");
+			assert_eq!(error.kind, kind);
+			assert_eq!(error.status, Some(status));
+			// Route reselection stays open when the re-entry asked for it, so a
+			// planned fallback to another provider still runs.
+			assert_eq!(error.action, unsent);
+			assert_eq!(error.receipt().attempts.len(), 1);
+			assert!(!error.receipt().attempts[0].hidden, "the failing attempt is the visible one");
+		}
+	}
+
+	/// A re-entry that reached the wire reports its own failure.
+	#[tokio::test]
+	async fn sent_reentry_reports_its_own_failure() {
+		let calls = Arc::new(AtomicUsize::new(0));
+		let failures: Arc<[RetryAction]> =
+			Arc::from([RetryAction::RotateAccount, RetryAction::Never]);
+		let context =
+			ExecutionContext::new(ExecutionBudget { max_attempts: 3, ..ExecutionBudget::default() });
+		let mut service = AttemptService {
+			inner: RefreshSequence { calls: calls.clone(), actions: Arc::default(), failures },
+		};
+		futures::future::poll_fn(|cx| service.poll_ready(cx))
+			.await
+			.expect("ready");
+		let error = service
+			.call(LayerCall { payload: (), context })
+			.await
+			.expect_err("second failure surfaces");
+		assert_eq!(calls.load(Ordering::SeqCst), 2);
+		assert_eq!(error.action, RetryAction::Never);
+		assert_eq!(error.receipt().attempts.last().map(|attempt| attempt.index), Some(1));
+	}
+
 	#[tokio::test]
 	async fn prebody_auth_reselection_reaches_registry_unchanged() {
 		let inner = service_fn(|_: LayerCall<()>| async {

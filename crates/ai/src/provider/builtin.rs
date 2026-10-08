@@ -96,7 +96,7 @@ use crate::{
 		search_tavily::TavilySearchCodec,
 		search_tinyfish::TinyfishSearchCodec,
 	},
-	error::{Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
+	error::{CredentialFailure, Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
 	gate::GateCondition,
 	layer::{
 		AttemptAction, ExecutionContext,
@@ -2260,12 +2260,7 @@ impl AccountSelector<Call> for RouteAccountSelector {
 				},
 			});
 		}
-		Err(Error::new(
-			ErrorKind::Authentication,
-			ErrorPhase::Authentication,
-			RetryAction::ReselectRoute,
-			context.receipt(),
-		))
+		Err(credential_failure(context, &self.provider, CredentialFailure::NoRotationCandidate))
 	}
 
 	fn routing(&self, account: &Self::Account) -> Option<AccountRoutingContext> {
@@ -2317,6 +2312,10 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 				},
 			};
 			let mut resolved = None;
+			// Why the specs tried so far produced nothing, kept instead of
+			// discarded: a locked store outranks a stored credential of the wrong
+			// kind, which outranks an absent source.
+			let mut failure = None;
 			let refreshing =
 				matches!(context.attempt_action(), AttemptAction::RefreshCredential { .. });
 			for spec in &self.specs {
@@ -2336,6 +2335,19 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 						break;
 					},
 					Err(CredentialError::Unavailable | CredentialError::InvalidSource) => {},
+					Err(CredentialError::KindMismatch { expected, actual }) => {
+						failure.get_or_insert(CredentialFailure::KindMismatch { expected, actual });
+					},
+					Err(CredentialError::StorageLocked) => {
+						failure = Some(CredentialFailure::StorageLocked);
+					},
+					Err(_) if refreshing => {
+						return Err(credential_failure(
+							context,
+							&self.provider,
+							CredentialFailure::NotRenewable,
+						));
+					},
 					Err(_) => {
 						return Err(Error::new(
 							ErrorKind::Authentication,
@@ -2347,15 +2359,17 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 				}
 			}
 			let Some(lease) = resolved else {
-				if !self.required && !refreshing {
-					return Ok(None);
-				}
-				return Err(Error::new(
-					ErrorKind::Authentication,
-					ErrorPhase::Authentication,
-					RetryAction::ReselectRoute,
-					context.receipt(),
-				));
+				// A locked store fails even an optional route, as any store
+				// failure did; a wrong-kind credential there still falls back
+				// to an anonymous request.
+				let reason = match failure {
+					Some(CredentialFailure::StorageLocked) => CredentialFailure::StorageLocked,
+					_ if !self.required && !refreshing => return Ok(None),
+					Some(reason) => reason,
+					None if refreshing => CredentialFailure::NotRenewable,
+					None => CredentialFailure::NoSource,
+				};
+				return Err(credential_failure(context, &self.provider, reason));
 			};
 			let Some(shaper) = self.shapers.get(&self.provider) else {
 				return Ok(Some(lease));
@@ -2369,6 +2383,28 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 			Ok(Some(shape_scalar_lease(shaper, lease, &self.route_base_url, deadline).await))
 		}
 	}
+}
+
+/// The pre-send authentication failure a route reports when no credential
+/// could be used, naming why: the reason's snake-case name is the error code
+/// and the detail carries it typed. A locked store is
+/// [`ErrorKind::CredentialStorageUnavailable`]; route reselection stays open
+/// as before, so a planned fallback with its own credential still runs.
+fn credential_failure(
+	context: &ExecutionContext,
+	provider: &ProviderId,
+	reason: CredentialFailure,
+) -> Error {
+	let kind = match reason {
+		CredentialFailure::StorageLocked => ErrorKind::CredentialStorageUnavailable,
+		CredentialFailure::NoRotationCandidate
+		| CredentialFailure::NoSource
+		| CredentialFailure::KindMismatch { .. }
+		| CredentialFailure::NotRenewable => ErrorKind::Authentication,
+	};
+	Error::new(kind, ErrorPhase::Authentication, RetryAction::ReselectRoute, context.receipt())
+		.code(Str::new_static(reason.into()))
+		.detail(ErrorDetail::Credential { provider: provider.clone(), reason })
 }
 
 async fn shape_scalar_lease(
@@ -4286,5 +4322,181 @@ mod tests {
 		assert!(selector.select(&call, &context).is_ok());
 		let (selector, call, context) = pinned_selector(&[], None);
 		assert!(matches!(selector.select(&call, &context), Ok(RouteAccount::Brokered { .. })));
+	}
+
+	#[test]
+	fn rotation_without_another_account_names_why() {
+		let (selector, call, context) = pinned_selector(&["alpha"], None);
+		context.set_attempt_action(AttemptAction::RotateAccount {
+			previous_account: Some(AccountId::new("alpha")),
+		});
+		let Err(error) = selector.select(&call, &context) else {
+			panic!("the only account cannot rotate to itself");
+		};
+		assert_eq!(error.kind, ErrorKind::Authentication);
+		assert_eq!(error.action, RetryAction::ReselectRoute);
+		assert!(matches!(
+			error.detail_ref(),
+			Some(ErrorDetail::Credential { reason: CredentialFailure::NoRotationCandidate, .. })
+		));
+	}
+
+	/// A process environment with no credential variable set.
+	struct NoEnvironment;
+
+	impl crate::auth::CredentialEnvironment for NoEnvironment {
+		fn read(&self, _: &str) -> Result<Option<SecretString>, CredentialError> {
+			Ok(None)
+		}
+	}
+
+	/// Leases the GitHub Copilot route (a bearer authentication) for one stored
+	/// account whose row has `kind`, through a store `locked` holds no key for.
+	async fn lease_stored_account(
+		kind: &str,
+		locked: bool,
+		action: AttemptAction,
+	) -> Result<Option<CredentialLease>, Error> {
+		use crate::auth::{
+			CredentialBrokerEngines, CredentialOrigin, CredentialStore, CredentialWrite,
+			HeadlessKeySource, KeyId, StoredCredentialSource, UnavailableKeySource,
+		};
+		let (encoder, call, ..) = discovery_fixture();
+		let route = encoder.route;
+		let directory = tempfile::tempdir().expect("data dir");
+		let path = directory.path().join("credentials.db");
+		let account = AccountId::new("github-copilot:agent-db");
+		let principal = PrincipalId::new("agent-db");
+		let secret = omp_core::SecretBox::new(Box::new(b"fake-stored-token".to_vec()));
+		CredentialStore::open(&path, Arc::new(HeadlessKeySource::new(KeyId::new("route"), [9; 32])))
+			.expect("store")
+			.put(CredentialWrite {
+				account_id: &account,
+				principal_id: &principal,
+				kind,
+				secret: &secret,
+				expires_at_ms: None,
+				origin: CredentialOrigin::Persistent,
+				now_ms: 1,
+				expected_generation: None,
+			})
+			.expect("stored account");
+		let store = if locked {
+			CredentialStore::open(&path, Arc::new(UnavailableKeySource)).expect("locked store")
+		} else {
+			CredentialStore::open(
+				&path,
+				Arc::new(HeadlessKeySource::new(KeyId::new("route"), [9; 32])),
+			)
+			.expect("store")
+		};
+		let catalog = Catalog::try_embedded().expect("embedded catalog");
+		let source = CredentialBroker::from_catalog(
+			catalog,
+			Arc::new(NoEnvironment),
+			CredentialBrokerEngines {
+				stored: Some(Arc::new(StoredCredentialSource::new(Arc::new(store)))),
+				..CredentialBrokerEngines::default()
+			},
+		)
+		.expect("broker");
+		let pool = AccountPool::new();
+		pool
+			.upsert(crate::account::AccountRecord {
+				account:               account.clone(),
+				principal:             principal.clone(),
+				provider:              route.provider.clone(),
+				routes:                std::collections::BTreeSet::from([route.id.clone()]),
+				enabled:               true,
+				credential_generation: 1,
+				routing:               AccountRoutingContext::default(),
+			})
+			.expect("account registers");
+		let selector = RouteAccountSelector {
+			pool,
+			provider: route.provider.clone(),
+			route: route.id.clone(),
+			authenticated: true,
+		};
+		let leases = RouteLeaseProvider {
+			source,
+			shapers: Arc::new(CredentialShaperRegistry::default()),
+			provider: route.provider.clone(),
+			route_base_url: route.endpoint.base_url.clone(),
+			specs: Box::new([route.auth.clone()]),
+			authenticated: true,
+			required: true,
+		};
+		let context = ExecutionContext::new(call.budget.clone());
+		context.set_attempt_action(action);
+		let selected = selector
+			.select(&call, &context)
+			.expect("stored account selected");
+		leases.acquire(&call, &selected, &context).await
+	}
+
+	/// A stored row of the kind the route's bearer authentication leases
+	/// authenticates; an `api-key` row is a typed kind mismatch naming both
+	/// kinds, not a silently skipped source.
+	#[tokio::test]
+	async fn a_wrong_kind_stored_row_is_a_typed_kind_mismatch() {
+		assert!(
+			lease_stored_account("bearer", false, AttemptAction::Initial)
+				.await
+				.expect("a bearer row leases")
+				.is_some()
+		);
+
+		let mismatch = lease_stored_account("api-key", false, AttemptAction::Initial)
+			.await
+			.expect_err("an api-key row cannot authenticate a bearer route");
+		assert_eq!(mismatch.kind, ErrorKind::Authentication);
+		assert_eq!(mismatch.code.as_deref(), Some("kind_mismatch"));
+		assert!(matches!(
+			mismatch.detail_ref(),
+			Some(ErrorDetail::Credential {
+				reason: CredentialFailure::KindMismatch {
+					expected: CredentialKind::Bearer,
+					actual:   CredentialKind::ApiKey,
+				},
+				..
+			})
+		));
+		assert!(
+			mismatch
+				.to_string()
+				.contains("the stored credential is api-key but the provider requires bearer"),
+			"{mismatch}"
+		);
+	}
+
+	/// A stored row this process holds no key for is credential storage
+	/// unavailable, not an anonymous authentication failure.
+	#[tokio::test]
+	async fn a_locked_store_is_credential_storage_unavailable() {
+		let locked = lease_stored_account("bearer", true, AttemptAction::Initial)
+			.await
+			.expect_err("no key decrypts the row");
+		assert_eq!(locked.kind, ErrorKind::CredentialStorageUnavailable);
+		assert_eq!(locked.code.as_deref(), Some("storage_locked"));
+		assert!(matches!(
+			locked.detail_ref(),
+			Some(ErrorDetail::Credential { reason: CredentialFailure::StorageLocked, .. })
+		));
+	}
+
+	/// Refreshing a stored static key names it as not renewable.
+	#[tokio::test]
+	async fn refreshing_a_static_key_is_not_renewable() {
+		let renewal = lease_stored_account("bearer", false, AttemptAction::RefreshCredential {
+			previous_account: Some(AccountId::new("github-copilot:agent-db")),
+		})
+		.await
+		.expect_err("a static key cannot be refreshed");
+		assert_eq!(renewal.kind, ErrorKind::Authentication);
+		assert!(matches!(
+			renewal.detail_ref(),
+			Some(ErrorDetail::Credential { reason: CredentialFailure::NotRenewable, .. })
+		));
 	}
 }
