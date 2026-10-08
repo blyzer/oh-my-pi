@@ -10,7 +10,8 @@
 //! for the session holds, on either path, until the conversation leaves the
 //! journal that approved it, by a rewind or a session switch. A fetch is asked
 //! once per host the environment names for it, and a session grant for one
-//! host never covers another.
+//! host never covers another. A command the daemon runs reaches the model with
+//! its own output.
 
 mod support;
 
@@ -27,8 +28,8 @@ use omp_agent::{
 	RunControl, StaticPrompt, TicketState, TurnInput, Up,
 };
 use omp_ai::{
-	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
-	RequestId, ResponseMeta, ToolCall, ToolCallId, Usage,
+	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ContentPart, ExecutionReceipt,
+	FinishReason, RequestId, ResponseMeta, ToolCall, ToolCallId, ToolResultContent, Usage,
 };
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
@@ -47,18 +48,55 @@ use omp_session::{ComponentRegistry, Session};
 /// kernel runs: turn `n` calls `call-n`. `write` declares document write
 /// effects, so its tier is `write` and always-ask prompts before it starts.
 /// `bash` declares no effects: its spawn/fs effects are confined by the
-/// sandbox, and without one it is process authority.
+/// sandbox, and without one it is process authority. Each request's tool
+/// results land in `shown`, replacing the previous request's.
 struct ToolThenText {
 	tool:      &'static str,
 	arguments: serde_json::Value,
 	turns:     usize,
+	shown:     Shown,
+}
+
+/// The tool results the scripted model was last shown.
+type Shown = Arc<parking_lot::Mutex<Vec<ShownResult>>>;
+
+/// One tool result as a request presented it to the model.
+#[derive(Debug)]
+struct ShownResult {
+	/// Every text part of the result, in order.
+	text:     String,
+	/// Whether the result was presented as an error.
+	is_error: bool,
+}
+
+/// The tool results `request` presents to the model, in order.
+fn shown_results(request: &ChatRequest) -> Vec<ShownResult> {
+	request
+		.messages
+		.iter()
+		.flat_map(|message| message.content.iter())
+		.filter_map(|part| match part {
+			ContentPart::ToolResult { content, is_error, .. } => Some(ShownResult {
+				text:     content
+					.iter()
+					.filter_map(|content| match content {
+						ToolResultContent::Text(text) => Some(text.as_str()),
+						_ => None,
+					})
+					.collect(),
+				is_error: *is_error,
+			}),
+			_ => None,
+		})
+		.collect()
 }
 
 impl Inference for ToolThenText {
 	fn chat(
 		&mut self,
-		_request: ChatRequest,
+		request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+		*self.shown.lock() = shown_results(&request);
 		self.turns += 1;
 		ready(Ok(tool_then_text(self.turns, self.tool, &self.arguments)))
 	}
@@ -145,6 +183,8 @@ struct Turn {
 	result:  String,
 	/// Whether `target` exists afterwards.
 	landed:  bool,
+	/// The tool results the model was shown in the closing request.
+	shown:   Vec<ShownResult>,
 }
 
 /// One scratch project: its workspace, its project state directory, and the
@@ -199,8 +239,9 @@ impl Project {
 		let registry = environment.registry();
 		let spill =
 			omp_journal::blob::BlobStore::open(self.scratch.path().join("artifacts")).expect("spill");
+		let shown = Shown::default();
 		let kernel = Kernel::new(
-			ToolThenText { tool, arguments: arguments(&target), turns: 0 },
+			ToolThenText { tool, arguments: arguments(&target), turns: 0, shown: Arc::clone(&shown) },
 			registry,
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
@@ -261,7 +302,8 @@ impl Project {
 		let landed = target.exists();
 		drop(kernel);
 		drop(environment);
-		Turn { session, result, landed }
+		let shown = std::mem::take(&mut *shown.lock());
+		Turn { session, result, landed, shown }
 	}
 }
 
@@ -307,7 +349,7 @@ fn bash_call(_target: &Path) -> serde_json::Value {
 
 #[tokio::test]
 async fn approval_always_ask_write_deny_journals_a_denied_result() {
-	let Turn { session, result, landed } = run(
+	let Turn { session, result, landed, .. } = run(
 		"write",
 		write_call,
 		"approved.txt",
@@ -333,7 +375,7 @@ async fn approval_always_ask_write_deny_journals_a_denied_result() {
 
 #[tokio::test]
 async fn approval_always_ask_write_allow_runs_the_tool() {
-	let Turn { session, result, landed } = run(
+	let Turn { session, result, landed, .. } = run(
 		"write",
 		write_call,
 		"approved.txt",
@@ -384,7 +426,7 @@ fn posture_notice(session: &Session) -> serde_json::Value {
 /// default asked for, what holds, and why.
 #[tokio::test]
 async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, false).await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 1, "a defaulted yolo without a sandbox must prompt once: {tickets:?}");
@@ -412,7 +454,7 @@ async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
 /// The same prompt, approved: the command runs.
 #[tokio::test]
 async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, true).await;
 	assert_eq!(prompts(&session).len(), 1);
 	assert!(landed, "approved bash ran: {result}");
@@ -423,7 +465,7 @@ async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
 /// session is told it is unconfined. This is the way out of headless denial.
 #[tokio::test]
 async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false)
 			.await;
 	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
@@ -439,12 +481,56 @@ async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
 	);
 }
 
+/// Runs one bash `command` under an explicit `yolo` in a session attached to a
+/// project daemon served in this process, the production path, where the
+/// daemon runs the command and the session's registry only declares bash.
+/// Returns the tool result the model's closing request showed.
+async fn attached_bash_result(command: &str) -> ShownResult {
+	let project = Project::new(ExecSandboxMode::Off);
+	let _daemon =
+		support::InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off))
+			.await;
+	let environment = project.attach(Some(ApprovalMode::Yolo)).await;
+	assert!(
+		environment.fallback_notice.is_none(),
+		"the session fell back to an embedded environment: {:?}",
+		environment.fallback_notice
+	);
+	let arguments = serde_json::json!({ "command": command, "i": "Proving tool results" });
+	let Turn { mut shown, .. } = project
+		.turn(environment, "bash", |_| arguments, "unused.txt", Some(ApprovalMode::Yolo), false)
+		.await;
+	assert_eq!(shown.len(), 1, "the closing request shows one tool result: {shown:?}");
+	shown.remove(0)
+}
+
+/// The daemon runs bash, and the model's follow-up request carries the
+/// command's own projection: its status line and its stdout, not an empty
+/// tool message the model would have to make up output for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_environment_bash_result_reaches_the_model() {
+	let result = attached_bash_result("printf env-tool-marker").await;
+	assert!(!result.is_error, "{result:?}");
+	assert!(result.text.contains("[status="), "the status line reaches the model: {result:?}");
+	assert!(result.text.contains("env-tool-marker"), "stdout reaches the model: {result:?}");
+}
+
+/// A failed command reaches the model as an error that still carries what it
+/// printed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_environment_bash_result_reaches_the_model() {
+	let result = attached_bash_result("printf env-tool-stderr >&2; exit 3").await;
+	assert!(result.is_error, "{result:?}");
+	assert!(result.text.contains("bash command failed"), "the fault reaches the model: {result:?}");
+	assert!(result.text.contains("env-tool-stderr"), "stderr reaches the model: {result:?}");
+}
+
 /// A real Seatbelt sandbox is active: the default `yolo` is honoured, so bash
 /// runs unprompted and no posture notice is needed.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn default_yolo_inside_an_active_sandbox_runs_bash_unprompted_and_silent() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::WorkspaceWrite, false).await;
 	assert!(prompts(&session).is_empty(), "a confined yolo never prompts");
 	assert!(landed, "bash ran inside the workspace: {result}");
@@ -571,7 +657,7 @@ mod attached_daemon {
 			omp_agent::ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
 		bystander.bind_approval_authority(None, Some(bystander_route));
 		let environment = attached(&project).await;
-		let Turn { session, result, landed } = project
+		let Turn { session, result, landed, .. } = project
 			.turn(environment, "bash", protected_write, ".git/amended.txt", None, true)
 			.await;
 		amendment(&project, &session, true);
@@ -593,7 +679,7 @@ mod attached_daemon {
 		std::fs::create_dir(project.root.join(".git")).expect("protected carve-out");
 		let _daemon = InProcessDaemon::for_project(&project, ExecSandboxMode::WorkspaceWrite).await;
 		let environment = attached(&project).await;
-		let Turn { session, result, landed } = project
+		let Turn { session, result, landed, .. } = project
 			.turn(environment, "bash", protected_write, ".git/amended.txt", None, false)
 			.await;
 		amendment(&project, &session, false);
@@ -724,6 +810,7 @@ mod session_network_grants {
 				tool:      "bash",
 				arguments: serde_json::json!({ "command": fetch, "i": "Fetching a package" }),
 				turns:     0,
+				shown:     Shown::default(),
 			},
 			environment.registry(),
 			DispatchPolicy::new(spill.clone()),
