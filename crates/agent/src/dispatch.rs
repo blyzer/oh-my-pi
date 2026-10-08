@@ -337,8 +337,10 @@ pub trait ToolAdmission: Send + Sync {
 	/// Decides one committed call before its unit starts.
 	///
 	/// `effects` and `confinement` come from the live spec of the called
-	/// revision; a name with no native live spec (an RPC host tool) is
-	/// admitted with no effects and [`omp_tool::Confinement::Host`].
+	/// revision. A name with no native live spec is an RPC host tool: it is
+	/// admitted with the envelope its host declared, or
+	/// [`omp_tool::Effects::unknown`] when it declared none (and when the name
+	/// resolves to nothing at all), and always [`omp_tool::Confinement::Host`].
 	fn admit(
 		&self,
 		name: &str,
@@ -2013,14 +2015,21 @@ impl Dispatcher {
 				if matches!(call.unit, Unit::Native { .. })
 					&& let Some(admission) = &self.admission
 				{
-					let (effects, confinement) = self
-						.committer
-						.registry
-						.live_spec(call.identity.name.as_str())
-						.map_or_else(
-							|_| (Effects::empty(), Confinement::Host),
-							|spec| (spec.effects.clone(), spec.confinement),
-						);
+					let registry = &self.committer.registry;
+					let name = call.identity.name.as_str();
+					let (effects, confinement) = registry.live_spec(name).map_or_else(
+						// Host tools live outside the native table and run in the
+						// attached client; a name that resolves nowhere fails closed.
+						|_| {
+							(
+								registry
+									.effects_owned(name)
+									.unwrap_or_else(|_| Effects::unknown()),
+								Confinement::Host,
+							)
+						},
+						|spec| (spec.effects.clone(), spec.confinement),
+					);
 					match admission.admit(call.identity.name.as_str(), &effects, confinement, &args) {
 						ToolAdmissionVerdict::Allow => {},
 						ToolAdmissionVerdict::Deny(reason) => {

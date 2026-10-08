@@ -313,9 +313,11 @@ pub fn spec() -> ToolSpec {
 		},
 		effects:         Effects {
 			documents: None,
+			// Adapters are arbitrary programs, and a configured remote adapter
+			// (`host`, `port`) is reached over TCP: the network is in the envelope.
 			exec:      Some(ExecEffects {
 				commands: [sf!("*")].into_iter().collect(),
-				network:  false,
+				network:  true,
 			}),
 			inference: None,
 			desktop:   None,

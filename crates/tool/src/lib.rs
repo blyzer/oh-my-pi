@@ -561,6 +561,25 @@ impl Effects {
 		}
 	}
 
+	/// The ceiling of a tool that declares no effects: any command, with the
+	/// network.
+	///
+	/// A host that registers a tool without an envelope (an RPC host tool, an
+	/// eval-defined tool, a trusted extension's worker) knows nothing about
+	/// what it does, so it assumes everything process authority can do. This
+	/// is the `exec` tier: every approval mode except an explicit `yolo`
+	/// prompts for it, and the environment's write boundary refuses it while
+	/// a write scope applies (plan mode). A host that confines the tool
+	/// itself may assert a narrower ceiling instead; a declared envelope always
+	/// replaces it.
+	#[must_use]
+	pub fn unknown() -> Self {
+		Self {
+			exec: Some(ExecEffects { commands: Arc::from([Str::new_static("*")]), network: true }),
+			..Self::empty()
+		}
+	}
+
 	/// Returns whether `self` grants no authority.
 	pub fn is_empty(&self) -> bool {
 		self.documents.as_ref().is_none_or(DocEffects::is_empty)

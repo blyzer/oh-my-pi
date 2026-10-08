@@ -42,6 +42,18 @@ class HostToolContext(Generic[TDetails]):
 
 @dataclass(slots=True, frozen=True)
 class HostTool(Generic[TParams, TDetails]):
+    """A tool the embedding host executes on the agent's behalf.
+
+    ``effects`` is the tool's maximum effect envelope, which sets its approval
+    tier: ``{"documents": {"read": True, "writeGlobs": [...]}, "exec":
+    {"commands": [...], "network": bool}, "inference": {"maxRequests": int,
+    "maxUsd": "0.25"}, "desktop": {...}, "fetch": {"credentials": bool},
+    "subagents": int}``, each domain optional. ``None`` means undeclared: the
+    agent assumes the tool may run any command with the network and asks
+    before every call unless approvals are an explicit ``yolo``. Pass ``{}``
+    for a tool with no effects.
+    """
+
     name: str
     description: str
     parameters: JsonObject
@@ -49,6 +61,7 @@ class HostTool(Generic[TParams, TDetails]):
     label: str | None = None
     hidden: bool = False
     decode: Callable[[JsonObject], TParams] | None = None
+    effects: JsonObject | None = None
 
     def parse_params(self, payload: JsonObject) -> TParams:
         if self.decode is not None:
@@ -68,6 +81,7 @@ def host_tool(
     label: str | None = None,
     hidden: bool = False,
     decode: Callable[[JsonObject], TParams] | None = None,
+    effects: JsonObject | None = None,
 ) -> HostTool[TParams, TDetails]:
     return HostTool(
         name=name,
@@ -77,4 +91,5 @@ def host_tool(
         label=label,
         hidden=hidden,
         decode=decode,
+        effects=None if effects is None else dict(effects),
     )

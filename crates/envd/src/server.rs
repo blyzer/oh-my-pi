@@ -15524,6 +15524,57 @@ mod tests {
 		}
 	}
 
+	/// A Python worker tool that declares no envelope gets its host's ceiling,
+	/// which writes around the scoped writers under either trust tier, so plan
+	/// mode and read-only subagents refuse it before it runs. A worker that
+	/// declares a read-only envelope still passes.
+	#[test]
+	fn write_scopes_refuse_undeclared_worker_tools() {
+		let declaration = |effects: Option<omp_proto::policy::v1::EffectEnvelope>| {
+			omp_proto::toolhost::v1::ToolDecl {
+				definition: Some(omp_proto::inference::v1::ToolDef {
+					name:        "ext_tool".to_owned(),
+					description: "extension tool".to_owned(),
+					input:       Some(omp_proto::inference::v1::tool_def::Input::JsonSchema(
+						omp_proto::inference::v1::tool_def::JsonSchema {
+							schema_json: bytes::Bytes::from_static(
+								br#"{"type":"object","properties":{}}"#,
+							),
+							strict:      Some(true),
+						},
+					)),
+				}),
+				rev: "1".to_owned(),
+				extension_id: "test.extension".to_owned(),
+				effects,
+				..Default::default()
+			}
+		};
+		let plan = || WriteScope::PlanFile { plan_file: sf!("local://PLAN.md"), target: None };
+		for tier in ["trusted", "sandboxed"] {
+			let owner = crate::worker::HostKey::new("project", tier, "test.extension");
+			let spec = crate::tools::worker_spec(&declaration(None), &owner).expect("undeclared");
+			for scope in [plan(), WriteScope::ReadOnly] {
+				assert!(
+					scoped_policy("ext_tool", scope)
+						.denial(&spec.effects, spec.confinement)
+						.is_some(),
+					"{tier}"
+				);
+			}
+			let read_only = omp_proto::policy::v1::EffectEnvelope {
+				documents: Some(omp_proto::policy::v1::DocEffects { read: true, ..Default::default() }),
+				..Default::default()
+			};
+			let spec = crate::tools::worker_spec(&declaration(Some(read_only)), &owner).expect("read");
+			assert_eq!(
+				scoped_policy("ext_tool", plan()).denial(&spec.effects, spec.confinement),
+				None,
+				"{tier}"
+			);
+		}
+	}
+
 	#[test]
 	fn write_scopes_refuse_tools_that_write_around_the_scoped_writers() {
 		let documents = Effects {

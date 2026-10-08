@@ -128,7 +128,7 @@ use super::{
 	tool_shell::ShellExecHost,
 	tool_url::{UrlResolver, production_url_resolvers},
 	vault::{VaultPaths, VaultService},
-	worker::ExtHostSupervisor,
+	worker::{ExtHostSupervisor, HostKey},
 	workspace::{WorkspaceHost, WorkspaceOperationError, WorkspaceOperations},
 };
 use crate::{
@@ -3881,7 +3881,7 @@ fn register_session_workers(
 		if is_prelude_declaration(declaration)? {
 			continue;
 		}
-		let mut spec = worker_spec(declaration)?;
+		let mut spec = worker_spec(declaration, &registration.owner)?;
 		if flattened_slots.is_some() {
 			spec.name = Str::from(spec.name.as_str().replace('/', "_"));
 		}
@@ -5833,7 +5833,13 @@ fn is_prelude_declaration(declaration: &ToolDecl) -> Result<bool, EnvdError> {
 	Ok(worker_revision(declaration)?.family == "prelude")
 }
 
-fn worker_spec(declaration: &ToolDecl) -> Result<ToolSpec, EnvdError> {
+/// Lowers one worker declaration into its registry spec.
+///
+/// `owner` is the extension host that registered it: its trust tier is the
+/// effect ceiling of a declaration that carries no envelope
+/// ([`HostKey::undeclared_effects`]), so an undeclared tool is never the
+/// auto-approved `read` tier.
+pub fn worker_spec(declaration: &ToolDecl, owner: &HostKey) -> Result<ToolSpec, EnvdError> {
 	let definition = declaration.definition.as_ref().ok_or_else(|| {
 		EnvdError::WorkerDeclaration(sf!("worker tool declaration has no definition"))
 	})?;
@@ -5853,13 +5859,9 @@ fn worker_spec(declaration: &ToolDecl) -> Result<ToolSpec, EnvdError> {
 		// claim that the exec sandbox confines its tool, whatever its host tier.
 		confinement:     omp_tool::Confinement::Host,
 		projection_code: worker_projection_code(declaration),
-		effects:         declaration
-			.effects
-			.as_ref()
-			.map(omp_tool::Effects::try_from)
-			.transpose()
-			.map_err(|error| EnvdError::WorkerDeclaration(Str::from(error.to_string())))?
-			.unwrap_or_default(),
+		effects:         owner
+			.declared_or_undeclared_effects(declaration.effects.as_ref())
+			.map_err(|error| EnvdError::WorkerDeclaration(Str::from(error.to_string())))?,
 	})
 }
 
@@ -6148,12 +6150,78 @@ mod tests {
 		}
 	}
 
+	fn trusted_host() -> HostKey {
+		HostKey::new("project", "trusted", "test.extension")
+	}
+
+	fn undeclared_worker() -> ToolDecl {
+		worker_declaration_with_schema(br#"{"type":"object","properties":{}}"#)
+	}
+
+	fn admit(
+		spec: &ToolSpec,
+		mode: crate::admission::ApprovalMode,
+	) -> crate::admission::ResolvedApproval {
+		crate::admission::resolve_approval(
+			"call-1",
+			spec.name.clone(),
+			&spec.effects,
+			spec.confinement,
+			crate::admission::ConfiguredApproval {
+				mode,
+				provenance: crate::admission::Provenance::Explicit,
+			},
+			crate::admission::SandboxState::Active,
+			None,
+		)
+	}
+
+	/// A worker tool that declares no envelope resolves to its host's ceiling,
+	/// never to the auto-approved `read` tier: `exec` under a trusted host (and
+	/// any tier this build does not know), `write` under a sandboxed one. A
+	/// declared envelope, even an empty one, is taken as declared.
+	#[test]
+	fn undeclared_worker_effects_follow_the_host_trust_tier() {
+		use crate::admission::{ApprovalMode, ApprovalPolicy, ApprovalTier};
+		let trusted = worker_spec(&undeclared_worker(), &trusted_host()).expect("trusted");
+		assert_eq!(trusted.effects, omp_tool::Effects::unknown());
+		assert_eq!(trusted.confinement, omp_tool::Confinement::Host);
+		let resolved = admit(&trusted, ApprovalMode::Write);
+		assert_eq!((resolved.tier, resolved.policy), (ApprovalTier::Exec, ApprovalPolicy::Prompt));
+
+		let sandboxed_host = HostKey::new("project", "sandboxed", "test.extension");
+		let sandboxed = worker_spec(&undeclared_worker(), &sandboxed_host).expect("sandboxed");
+		assert_eq!(sandboxed.effects, sandboxed_host.undeclared_effects());
+		assert_eq!(
+			sandboxed.effects.documents,
+			Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([sf!("**")]) })
+		);
+		let resolved = admit(&sandboxed, ApprovalMode::Write);
+		assert_eq!((resolved.tier, resolved.policy), (ApprovalTier::Write, ApprovalPolicy::Allow));
+		let resolved = admit(&sandboxed, ApprovalMode::AlwaysAsk);
+		assert_eq!(resolved.policy, ApprovalPolicy::Prompt);
+
+		let unknown_tier = HostKey::new("project", "experimental", "test.extension");
+		let spec = worker_spec(&undeclared_worker(), &unknown_tier).expect("unrecognized tier");
+		assert_eq!(spec.effects, omp_tool::Effects::unknown());
+
+		// Explicit envelopes are respected under either host.
+		let mut declared = undeclared_worker();
+		declared.effects = Some(omp_proto::policy::v1::EffectEnvelope::default());
+		for host in [trusted_host(), sandboxed_host] {
+			let spec = worker_spec(&declared, &host).expect("declared");
+			assert_eq!(spec.effects, omp_tool::Effects::empty());
+			let resolved = admit(&spec, ApprovalMode::AlwaysAsk);
+			assert_eq!((resolved.tier, resolved.policy), (ApprovalTier::Read, ApprovalPolicy::Allow));
+		}
+	}
+
 	#[test]
 	fn worker_schema_injects_exact_protocol_fields() {
 		let declaration = worker_declaration_with_schema(
 			br#"{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}"#,
 		);
-		let spec = worker_spec(&declaration).expect("valid worker schema");
+		let spec = worker_spec(&declaration, &trusted_host()).expect("valid worker schema");
 		let schema: JsonValue = serde_json::from_slice(&spec.schema).expect("injected schema");
 		assert_eq!(schema["required"], json!(["i", "value"]));
 		assert_eq!(schema["properties"]["i"]["type"], "string");
@@ -6171,7 +6239,7 @@ mod tests {
 		] {
 			assert!(
 				matches!(
-					worker_spec(&worker_declaration_with_schema(schema)),
+					worker_spec(&worker_declaration_with_schema(schema), &trusted_host()),
 					Err(EnvdError::WorkerProtocolSchema(_))
 				),
 				"schema should be rejected: {}",

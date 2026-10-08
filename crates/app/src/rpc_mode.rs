@@ -1409,6 +1409,47 @@ fn bounded_artifact(dom: &Dom, call: Handle) -> Option<&str> {
 }
 
 /// Durable call outcome of the `bash` tool.
+/// Lowers a host tool's declared wire envelope into the registry's effect
+/// envelope. The only invalid input is a spend that is not decimal USD.
+fn host_tool_effects(
+	effects: omp_rpc::protocol::HostToolEffects,
+) -> Result<omp_tool::Effects, omp_tool::UsdParseError> {
+	let inference = effects
+		.inference
+		.map(|inference| {
+			Ok::<_, omp_tool::UsdParseError>(omp_tool::InferenceEffects {
+				max_requests: inference.max_requests,
+				max_usd:      inference
+					.max_usd
+					.as_deref()
+					.map(str::parse)
+					.transpose()?
+					.unwrap_or_default(),
+			})
+		})
+		.transpose()?;
+	Ok(omp_tool::Effects {
+		documents: effects.documents.map(|documents| omp_tool::DocEffects {
+			read:        documents.read,
+			write_globs: documents.write_globs.into_iter().map(Str::from).collect(),
+		}),
+		exec: effects.exec.map(|exec| omp_tool::ExecEffects {
+			commands: exec.commands.into_iter().map(Str::from).collect(),
+			network:  exec.network,
+		}),
+		inference,
+		desktop: effects.desktop.map(|desktop| omp_tool::DesktopEffects {
+			capture:       desktop.capture,
+			accessibility: desktop.accessibility,
+			input:         desktop.input,
+		}),
+		fetch: effects
+			.fetch
+			.map(|fetch| omp_tool::FetchEffects { credentials: fetch.credentials }),
+		subagents: effects.subagents,
+	})
+}
+
 type BashOutcome = omp_tool::CallOutcome<shell::Payload, shell::Fault>;
 
 /// Decodes the journaled `bash` call outcome. An outcome the dispatcher moved
@@ -1878,24 +1919,35 @@ where
 								let response = match definitions {
 									Ok(Some(definitions)) => {
 										let names = definitions.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>();
-										let specs = definitions.into_iter().map(|tool| HostToolSpec {
+										let specs = definitions.into_iter().map(|tool| Ok(HostToolSpec {
 											name: Str::new(tool.name),
 											description: Str::new(tool.description),
 											parameters: tool.parameters,
 											rev: None,
-										}).collect();
-										host_tool_revision = host_tool_revision.saturating_add(1);
-										match tool_registry.replace_host_tools(
-											Str::new_static("rpc"),
-											host_tool_revision,
-											specs,
-											Arc::new(host_tools.clone()),
-										) {
-											Ok(()) => RpcResponse::success(
-												id,
-												command.as_str(),
-												json!({ "toolNames": names }),
-											).into_diagnostic()?,
+											effects: tool.effects.map(host_tool_effects).transpose()?,
+										})).collect::<Result<Vec<_>, omp_tool::UsdParseError>>();
+										match specs {
+											Ok(specs) => {
+												host_tool_revision = host_tool_revision.saturating_add(1);
+												match tool_registry.replace_host_tools(
+													Str::new_static("rpc"),
+													host_tool_revision,
+													specs,
+													Arc::new(host_tools.clone()),
+												) {
+													Ok(()) => RpcResponse::success(
+														id,
+														command.as_str(),
+														json!({ "toolNames": names }),
+													).into_diagnostic()?,
+													Err(source) => RpcResponse::error(
+														id,
+														command.as_str(),
+														source.to_string(),
+														Some(RpcErrorCode::new("invalid_host_tools")),
+													),
+												}
+											},
 											Err(source) => RpcResponse::error(
 												id,
 												command.as_str(),

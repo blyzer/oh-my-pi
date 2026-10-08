@@ -382,6 +382,21 @@ class _PendingRequest:
     response_queue: queue.Queue[JsonObject | BaseException]
 
 
+def _host_tool_definition(tool: HostTool[Any, Any]) -> JsonObject:
+    definition: JsonObject = {
+        "name": tool.name,
+        "label": tool.label,
+        "description": tool.description,
+        "parameters": tool.parameters,
+        "hidden": tool.hidden,
+    }
+    # An omitted envelope is undeclared, which the agent admits at the exec
+    # tier; only a declared one (even ``{}``) is sent.
+    if tool.effects is not None:
+        definition["effects"] = tool.effects
+    return definition
+
+
 @dataclass(slots=True)
 class _PendingHostToolCall:
     cancel_event: threading.Event
@@ -1094,16 +1109,7 @@ class RpcClient:
             "set_host_tools",
             tools=cast(
                 JsonValue,
-                [
-                    {
-                        "name": tool.name,
-                        "label": tool.label,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                        "hidden": tool.hidden,
-                    }
-                    for tool in self._custom_tools
-                ],
+                [_host_tool_definition(tool) for tool in self._custom_tools],
             ),
         )
         tool_names = payload.get("toolNames") or []

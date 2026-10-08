@@ -392,8 +392,10 @@ struct FrozenTool {
 	source_module: String,
 	kind:          String,
 	place:         String,
+	/// The declared maximum envelope; absent means undeclared, which the
+	/// registering host resolves to its trust tier's ceiling.
 	#[serde(default)]
-	effects:       Option<JsonValue>,
+	effects:       Option<omp_tool::Effects>,
 	#[serde(default)]
 	constraint:    Option<JsonValue>,
 	#[serde(default)]
@@ -943,14 +945,7 @@ fn seal_tool(
 		}
 		serde_json::to_vec(&row.schema).map_err(|_| SealedRegistryEvidenceError::Malformed)?
 	};
-	let effects = row
-		.effects
-		.map(|effects| {
-			serde_json::from_value::<omp_tool::Effects>(effects)
-				.map(|effects| EffectEnvelope::from(&effects))
-				.map_err(|_| SealedRegistryEvidenceError::Malformed)
-		})
-		.transpose()?;
+	let effects = row.effects.as_ref().map(EffectEnvelope::from);
 	let constraint = row
 		.constraint
 		.as_ref()

@@ -303,6 +303,44 @@ async fn rpc_set_host_tools_is_accepted_only_between_turns() {
 	assert_eq!(idle["data"]["toolNames"], json!(["fetch_ticket"]));
 }
 
+/// A host tool's declared envelope is lowered when the roster is installed: a
+/// spend that is not decimal USD is refused with `invalid_host_tools`, a
+/// misspelled effect field fails the whole request instead of being dropped,
+/// and a valid declaration or an omitted one (undeclared) is accepted.
+#[tokio::test]
+async fn rpc_set_host_tools_validates_declared_effects() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let frames = converse(
+		&temp,
+		VecDeque::new(),
+		concat!(
+			r#"{"id":"spend","type":"set_host_tools","tools":[{"name":"t","description":"d","parameters":{"type":"object"},"effects":{"inference":{"maxRequests":1,"maxUsd":"lots"}}}]}"#,
+			"\n",
+			r#"{"id":"typo","type":"set_host_tools","tools":[{"name":"t","description":"d","parameters":{"type":"object"},"effects":{"exec":{"command":["git"]}}}]}"#,
+			"\n",
+			r#"{"id":"declared","type":"set_host_tools","tools":[{"name":"t","description":"d","parameters":{"type":"object"},"effects":{"documents":{"read":true},"inference":{"maxRequests":1,"maxUsd":"0.25"}}}]}"#,
+			"\n",
+			r#"{"id":"undeclared","type":"set_host_tools","tools":[{"name":"t","description":"d","parameters":{"type":"object"}}]}"#,
+			"\n",
+			r#"{"id":"quit","type":"quit"}"#,
+			"\n",
+		),
+		&[],
+	)
+	.await;
+	let spend = response(&frames, "spend");
+	assert_eq!(spend["success"], false, "{spend}");
+	assert_eq!(spend["code"], "invalid_host_tools", "{spend}");
+	let typo = response(&frames, "typo");
+	assert_eq!(typo["success"], false, "{typo}");
+	assert_eq!(typo["code"], "invalid_params", "{typo}");
+	for id in ["declared", "undeclared"] {
+		let accepted = response(&frames, id);
+		assert_eq!(accepted["success"], true, "{accepted}");
+		assert_eq!(accepted["data"]["toolNames"], json!(["t"]), "{accepted}");
+	}
+}
+
 /// `follow_up`: behind a running turn the message is queued (not
 /// steering) and runs as its own turn once the agent yields; idle, it runs
 /// immediately. Each follow-up produces a `turn_start` and one `agent_end`.
