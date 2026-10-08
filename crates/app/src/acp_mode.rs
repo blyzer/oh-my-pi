@@ -945,6 +945,60 @@ fn acp_tool_kind(kind: &str) -> &'static str {
 	}
 }
 
+/// The ACP `ToolCall` a `session/request_permission` presents for `ticket`.
+///
+/// `allow_always` answers every requirement of the prompt for the session
+/// ([`permission_decision`]), so the request shows each one: the title of a
+/// prompt with several names every subject, the content lists every
+/// requirement (a command as `$ <command>`, any other as its title and
+/// subject), and `rawInput.requirements` carries them whole. The kind is the
+/// first requirement's that has a specific ACP kind.
+fn permission_tool_call(ticket: &omp_agent::ApprovalTicket) -> Value {
+	let reasons = ticket.reasons.as_slice();
+	let title = match reasons {
+		[] => String::from("Approval required"),
+		[only] => only.title.to_string(),
+		[first, ..] => {
+			let mut title = format!("{}: ", first.title);
+			for (index, spec) in reasons.iter().enumerate() {
+				if index > 0 {
+					title.push_str(", ");
+				}
+				title.push_str(&spec.subject);
+			}
+			title
+		},
+	};
+	let content = reasons
+		.iter()
+		.map(|spec| {
+			let text = match acp_tool_kind(spec.kind.as_str()) {
+				"execute" => format!("$ {}", spec.subject),
+				_ => format!("{}: {}", spec.title, spec.subject),
+			};
+			json!({"type": "content", "content": {"type": "text", "text": text}})
+		})
+		.collect::<Vec<_>>();
+	let mut tool_call = json!({
+		"toolCallId": ticket.invocation_id.as_deref().unwrap_or(ticket.ticket_id.as_str()),
+		"title": title,
+		"status": "pending",
+		"rawInput": {"requirements": reasons},
+	});
+	if let Some(kind) = reasons
+		.iter()
+		.map(|spec| acp_tool_kind(spec.kind.as_str()))
+		.find(|kind| *kind != "other")
+		.or_else(|| (!reasons.is_empty()).then_some("other"))
+	{
+		tool_call["kind"] = Value::String(kind.to_owned());
+	}
+	if !content.is_empty() {
+		tool_call["content"] = Value::Array(content);
+	}
+	tool_call
+}
+
 /// Sends one `session/request_permission` per kernel approval ticket through
 /// the connection's request table. Ends when the kernel's event stream or
 /// the transport does.
@@ -957,26 +1011,7 @@ fn request_permissions(
 			let omp_agent::KernelEvent::ApprovalRequested(ticket) = event else {
 				continue;
 			};
-			let first = ticket.reasons.first();
-			let mut tool_call = json!({
-				"toolCallId": ticket.invocation_id.as_deref().unwrap_or(ticket.ticket_id.as_str()),
-				"title": first.map_or("Approval required", |spec| spec.title.as_str()),
-				"status": "pending",
-				"rawInput": {
-					"subject": first.map(|spec| spec.subject.as_str()),
-					"body": first.map(|spec| spec.body.as_str()),
-				},
-			});
-			if let Some(spec) = first {
-				let kind = acp_tool_kind(spec.kind.as_str());
-				tool_call["kind"] = Value::String(kind.to_owned());
-				if kind == "execute" {
-					tool_call["content"] = json!([{
-						"type": "content",
-						"content": {"type": "text", "text": format!("$ {}", spec.subject)},
-					}]);
-				}
-			}
+			let tool_call = permission_tool_call(&ticket);
 			if let Err(error) = client.request_permission(ticket.ticket_id.clone(), tool_call) {
 				tracing::debug!(
 					error = &error as &dyn std::error::Error,
@@ -1680,6 +1715,74 @@ mod tests {
 		] {
 			assert_eq!(acp_tool_kind(kind), acp, "{kind}");
 		}
+	}
+
+	/// A permission request shows every requirement its `allow_always`
+	/// grants: a prompt raising a tool and its fetch's hosts names each
+	/// subject in its title and content and carries them all in `rawInput`,
+	/// and takes its kind from the first requirement with a specific ACP kind.
+	/// A lone command keeps its title and shows as `$ <command>`.
+	#[test]
+	fn permission_requests_show_every_requirement() {
+		let requirement = |title: &str, subject: &str, kind: &str| omp_agent::ApprovalSpec {
+			title:         Str::new(title),
+			body:          Str::new("body"),
+			subject:       Str::new(subject),
+			kind:          Str::new(kind),
+			scopes:        vec![Str::new_static("once"), Str::new_static("session")],
+			default:       Some(false),
+			route:         Str::new_static("user"),
+			approver:      None,
+			timeout_ms:    0,
+			unreachable:   Str::new_static("deny"),
+			require_human: true,
+			pattern:       None,
+			evidence:      Vec::new(),
+		};
+		let ticket = |reasons| omp_agent::ApprovalTicket {
+			ticket_id: Str::new_static("approval-1"),
+			invocation_id: Some(Str::new_static("call-1")),
+			reasons,
+			created_at_ms: 0,
+			state: omp_agent::TicketState::Pending,
+			decision: None,
+		};
+		let tool_call = permission_tool_call(&ticket(vec![
+			requirement("Run download", "download", "tool"),
+			requirement("Allow download to fetch", "http:docs.rs:443", "network"),
+			requirement("Allow download to fetch", "tool:download", "network"),
+		]));
+		assert_eq!(tool_call["title"], "Run download: download, http:docs.rs:443, tool:download");
+		assert_eq!(tool_call["kind"], "fetch");
+		assert_eq!(tool_call["toolCallId"], "call-1");
+		let texts = tool_call["content"]
+			.as_array()
+			.expect("content")
+			.iter()
+			.map(|block| block["content"]["text"].as_str().expect("text"))
+			.collect::<Vec<_>>();
+		assert_eq!(texts, [
+			"Run download: download",
+			"Allow download to fetch: http:docs.rs:443",
+			"Allow download to fetch: tool:download",
+		]);
+		let subjects = tool_call["rawInput"]["requirements"]
+			.as_array()
+			.expect("requirements")
+			.iter()
+			.map(|spec| spec["subject"].as_str().expect("subject"))
+			.collect::<Vec<_>>();
+		assert_eq!(subjects, ["download", "http:docs.rs:443", "tool:download"]);
+
+		let command = permission_tool_call(&ticket(vec![requirement("Run bash", "ls", "exec")]));
+		assert_eq!(command["title"], "Run bash");
+		assert_eq!(command["kind"], "execute");
+		assert_eq!(command["content"][0]["content"]["text"], "$ ls");
+		let tool = permission_tool_call(&ticket(vec![requirement("Run write", "write", "tool")]));
+		assert_eq!(tool["kind"], "other");
+		let empty = permission_tool_call(&ticket(Vec::new()));
+		assert_eq!(empty["title"], "Approval required");
+		assert!(empty.get("kind").is_none() && empty.get("content").is_none());
 	}
 
 	#[test]

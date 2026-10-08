@@ -384,6 +384,117 @@ async fn a_session_answer_the_prompt_never_offered_grants_nothing() {
 	);
 }
 
+/// Requirements granted for the session on separate prompts answer a later
+/// prompt that raises them together, each covered by its own grant: two hosts
+/// granted one at a time, a tool and a host granted on different prompts. A
+/// requirement no grant covers, or one offering only `once`, still asks; the
+/// answer is persisted only when every covering grant is.
+#[test]
+fn grants_from_separate_prompts_cover_a_prompt_raising_them_together() {
+	use omp_agent::{ApprovalDesk, ApprovalTicket, KernelEvents};
+
+	/// Files one prompt raising `reasons`, each offering every grant scope.
+	fn file(
+		desk: &ApprovalDesk,
+		session: &mut Session,
+		call: &str,
+		reasons: &[(&str, &str)],
+	) -> ApprovalTicket {
+		let offered = || vec![sf!("once"), sf!("session"), sf!("persist")];
+		desk
+			.file_specs(
+				session,
+				Str::new(call),
+				reasons
+					.iter()
+					.map(|(kind, subject)| spec(kind, subject, offered()))
+					.collect(),
+			)
+			.expect("prompt files")
+	}
+
+	/// Answers a prompt that asked, approving it for `scope`.
+	fn answer(
+		desk: &ApprovalDesk,
+		session: &mut Session,
+		ticket: &ApprovalTicket,
+		scope: ApprovalScope,
+	) {
+		assert_eq!(ticket.state, TicketState::Pending, "{} asks", ticket.ticket_id);
+		desk
+			.decide(session, ticket.ticket_id.as_str(), decision(true, scope))
+			.expect("the answer is journaled");
+	}
+
+	let temp = tempfile::tempdir().expect("tempdir");
+	let mut session = fresh_session(&temp.path().join("grants.oms"));
+	let desk = ApprovalDesk::new(KernelEvents::default());
+	let docs = ("network", "http:docs.rs:443");
+	let crates = ("network", "http:crates.io:443");
+	let evil = ("network", "http:evil.example:443");
+	let download = ("tool", "download");
+	let first = file(&desk, &mut session, "call-1", &[docs]);
+	answer(&desk, &mut session, &first, ApprovalScope::Session);
+	let second = file(&desk, &mut session, "call-2", &[crates]);
+	answer(&desk, &mut session, &second, ApprovalScope::Session);
+	let once = file(&desk, &mut session, "call-3", &[download, evil]);
+	answer(&desk, &mut session, &once, ApprovalScope::Once);
+
+	let both = file(&desk, &mut session, "call-4", &[docs, crates]);
+	assert_eq!(both.state, TicketState::Decided, "each host was granted on its own prompt");
+	let granted = both.decision.as_ref().expect("decided by the grants");
+	assert!(granted.approved);
+	assert_eq!(granted.source, ApprovalSource::Config);
+	assert_eq!(granted.scope, ApprovalScope::Session);
+	assert_eq!(
+		granted.reason.as_deref(),
+		Some(
+			format!("granted by {}, {} for this session", first.ticket_id, second.ticket_id).as_str()
+		)
+	);
+
+	let ungranted = file(&desk, &mut session, "call-5", &[docs, evil]);
+	assert_eq!(ungranted.state, TicketState::Pending, "a host granted only once still asks");
+	let tool_and_host = file(&desk, &mut session, "call-6", &[download, docs]);
+	assert_eq!(tool_and_host.state, TicketState::Pending, "an ungranted tool still asks");
+	answer(&desk, &mut session, &tool_and_host, ApprovalScope::Session);
+	let tool_and_other_host = file(&desk, &mut session, "call-7", &[download, crates]);
+	assert_eq!(
+		tool_and_other_host.state,
+		TicketState::Decided,
+		"the tool's grant and the host's grant answer together"
+	);
+	let once_only = desk
+		.file_specs(&mut session, sf!("call-8"), vec![
+			spec(docs.0, docs.1, vec![sf!("once"), sf!("session")]),
+			spec(crates.0, crates.1, vec![sf!("once")]),
+		])
+		.expect("prompt files");
+	assert_eq!(once_only.state, TicketState::Pending, "a once-only requirement is always asked");
+
+	let forge = ("network", "github:github.com");
+	let persisted = file(&desk, &mut session, "call-9", &[forge]);
+	answer(&desk, &mut session, &persisted, ApprovalScope::Persist);
+	let again = file(&desk, &mut session, "call-10", &[forge]);
+	assert_eq!(
+		again
+			.decision
+			.as_ref()
+			.map(|decision| decision.scope.clone()),
+		Some(ApprovalScope::Persist),
+		"a requirement covered only by a persisted grant stays persisted"
+	);
+	let mixed = file(&desk, &mut session, "call-11", &[forge, docs]);
+	assert_eq!(
+		mixed
+			.decision
+			.as_ref()
+			.map(|decision| decision.scope.clone()),
+		Some(ApprovalScope::Session),
+		"a session grant among the covering ones lasts the session"
+	);
+}
+
 #[tokio::test]
 async fn resumed_session_replays_the_decided_prompt() {
 	let mut harness = harness(vec![

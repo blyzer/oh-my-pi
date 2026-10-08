@@ -342,13 +342,17 @@ pub trait ToolAdmission: Send + Sync {
 	/// RPC host tool's host declared ([`omp_tool::Effects::unknown`] when it
 	/// declared none, and when the name resolves to nothing at all).
 	/// `confinement` comes from the live spec; a name with no native live spec
-	/// (an RPC host tool) is [`omp_tool::Confinement::Host`].
+	/// (an RPC host tool) is [`omp_tool::Confinement::Host`]. `fetch_locators`
+	/// are the URLs the call fetches when its envelope fetches
+	/// ([`omp_tool::Registry::fetch_locators`]), empty otherwise and for a
+	/// tool that names none.
 	fn admit(
 		&self,
 		name: &str,
 		effects: &omp_tool::Effects,
 		confinement: omp_tool::Confinement,
 		args: &RawValue,
+		fetch_locators: &[Str],
 	) -> ToolAdmissionVerdict;
 }
 
@@ -359,8 +363,10 @@ pub enum ToolAdmissionVerdict {
 	Allow,
 	/// Never start; the call settles as a policy denial.
 	Deny(Str),
-	/// Journal this prompt and start only once it is approved.
-	Prompt(crate::ApprovalSpec),
+	/// Journal these requirements in the call's one prompt and start only
+	/// once it is approved. A prompt without a requirement is refused, never
+	/// started.
+	Prompt(Vec<crate::ApprovalSpec>),
 }
 
 impl CallControl {
@@ -2024,12 +2030,20 @@ impl Dispatcher {
 					let confinement = registry
 						.live_spec(name)
 						.map_or(Confinement::Host, |spec| spec.confinement);
-					// The call is judged by what its arguments do; a name that
-					// resolves nowhere fails closed.
+					// The call is judged by what its arguments do, and a fetch
+					// by the URLs they name; a name that resolves nowhere fails
+					// closed.
 					let verdict = match registry.invocation_effects(name, args.get()) {
-						Ok(effects) => admission.admit(name, &effects, confinement, &args),
+						Ok(effects) => {
+							let locators = if effects.fetch.is_some() {
+								registry.fetch_locators(name, args.get())
+							} else {
+								Vec::new()
+							};
+							admission.admit(name, &effects, confinement, &args, &locators)
+						},
 						Err(RegistryError::UnknownTool(_)) => {
-							admission.admit(name, &Effects::unknown(), confinement, &args)
+							admission.admit(name, &Effects::unknown(), confinement, &args, &[])
 						},
 						Err(error) => {
 							tracing::warn!(
@@ -2041,6 +2055,16 @@ impl Dispatcher {
 								"the call's effects exceed its tool's declared maximum; it was not started",
 							))
 						},
+					};
+					let verdict = match verdict {
+						// Nothing to approve is never an approval.
+						ToolAdmissionVerdict::Prompt(requirements) if requirements.is_empty() => {
+							ToolAdmissionVerdict::Deny(Str::new_static(
+								"admission asked for approval without a requirement; the call was not \
+								 started",
+							))
+						},
+						verdict => verdict,
 					};
 					match verdict {
 						ToolAdmissionVerdict::Allow => {},
@@ -2056,7 +2080,7 @@ impl Dispatcher {
 							call.report = Some(report);
 							continue;
 						},
-						ToolAdmissionVerdict::Prompt(spec) => specs.push(spec),
+						ToolAdmissionVerdict::Prompt(requirements) => specs.extend(requirements),
 					}
 				}
 				if !specs.is_empty() {

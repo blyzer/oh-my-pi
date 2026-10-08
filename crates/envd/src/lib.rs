@@ -1180,6 +1180,17 @@ impl ProjectEnvironment {
 		Arc::clone(&self.registry)
 	}
 
+	/// Returns the namer of the hosts the fetches of this composition's
+	/// in-process native tools reach ([`Self::registry`]'s native routes: every
+	/// environment tool of an embedded or isolated composition, an attached
+	/// session's session tools), by the resolvers of the in-process host that
+	/// performs them. The kernel admits those tools itself and keys their
+	/// fetch approval on these hosts.
+	#[must_use]
+	pub fn fetch_hosts(&self) -> fetch_host::FetchHostNamer {
+		self.lifecycle.server.fetch_hosts()
+	}
+
 	/// Returns the handle through which an ACP adapter binds its editor as the
 	/// document base of this composition (ADR 0037 §1.2).
 	pub fn editor_documents(&self) -> EditorDocuments {

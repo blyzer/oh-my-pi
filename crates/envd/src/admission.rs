@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	approval_relay::OwnedApprovals,
-	fetch_host::{FetchHost, NETWORK_APPROVAL_KIND, fetch_subjects},
+	fetch_host::{FetchHost, NETWORK_APPROVAL_KIND, NamedFetches, fetch_subjects},
 };
 
 /// Default approval posture applied before one invocation reaches interactive
@@ -532,10 +532,10 @@ impl DynamicAdmission {
 	///
 	/// The prompt holds one requirement for the target's tier, unless that
 	/// tier is a fetch, and, when the target fetches, one `network`
-	/// requirement per host in `fetches` (distinct hosts the target reaches),
-	/// or the target's own when the environment names none. Every requirement
-	/// offers `once` and `session`, so a session grant covers the target, or
-	/// the one host, it names.
+	/// requirement per host in `fetches` (distinct hosts the target reaches,
+	/// every one named), or the target's own when the environment names none.
+	/// Every requirement offers `once` and `session`, so a session grant
+	/// covers the target, or the one host, it names.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "one admission joins the target, its declaration, its origin and its approver"
@@ -597,7 +597,7 @@ impl DynamicAdmission {
 		let fetched = effects
 			.fetch
 			.is_some()
-			.then(|| fetch_subjects(target.as_str(), fetches))
+			.then(|| fetch_subjects(target.as_str(), fetches, false))
 			.into_iter()
 			.flatten()
 			.map(|(subject, about)| {
@@ -790,10 +790,9 @@ pub struct AdmissionGate {
 	/// ([`Self::argument_scoped`]); [`Self::resolve_pending`] fixes it.
 	policy:             Option<ApprovalPolicy>,
 	defer_until_commit: bool,
-	/// Distinct hosts the staged call's fetches reach
-	/// ([`Self::name_fetch_hosts`]); empty when it does not fetch or the
-	/// environment cannot name them all.
-	fetch_hosts:        Vec<FetchHost>,
+	/// What the environment named of the staged call's fetches
+	/// ([`Self::name_fetch_hosts`]); empty when it does not fetch.
+	fetches:            NamedFetches,
 	answer_tx:          Option<flume::Sender<Admission>>,
 	answer_rx:          Receiver<Admission>,
 }
@@ -861,7 +860,7 @@ impl AdmissionGate {
 			query_emitted: false,
 			policy,
 			defer_until_commit,
-			fetch_hosts: Vec::new(),
+			fetches: NamedFetches::default(),
 			answer_tx: Some(answer_tx),
 			answer_rx,
 		}
@@ -921,8 +920,8 @@ impl AdmissionGate {
 	/// emitted, or with nothing staged.
 	///
 	/// `effects` is the envelope the staged call was judged by, which the
-	/// query reports beside the hosts its fetches reach
-	/// ([`Self::name_fetch_hosts`]).
+	/// query reports beside the hosts its fetches reach and whether some
+	/// reach a host left unnamed ([`Self::name_fetch_hosts`]).
 	pub(crate) fn emit(
 		&mut self,
 		cwd: &Path,
@@ -948,15 +947,15 @@ impl AdmissionGate {
 		Ok(self.emit(cwd, root, &Effects::empty()))
 	}
 
-	/// Records the distinct hosts the staged call's fetches reach, as the
-	/// environment's resolvers name them, for its query; empty when the call
-	/// does not fetch or not every host could be named, so its fetch is asked
-	/// as the tool's own. Only a staged call is named: like
+	/// Records what the environment's resolvers named of the staged call's
+	/// fetches, for its query: every host they could name, each asked on its
+	/// own, and whether some fetch reaches a host they could not, which is
+	/// asked as the tool's own. Only a staged call is named: like
 	/// [`Self::resolve_pending`], nothing is recorded from arguments the gate
 	/// did not accept, nor after the query was emitted.
-	pub(crate) fn name_fetch_hosts(&mut self, hosts: Vec<FetchHost>) {
+	pub(crate) fn name_fetch_hosts(&mut self, fetches: NamedFetches) {
 		if self.is_staged() {
-			self.fetch_hosts = hosts;
+			self.fetches = fetches;
 		}
 	}
 
@@ -982,7 +981,8 @@ impl AdmissionGate {
 					.try_into()
 					.unwrap_or(u64::MAX),
 				effects: Some(EffectEnvelope::from(effects)),
-				fetch: self.fetch_hosts.iter().map(Into::into).collect(),
+				fetch: self.fetches.hosts().iter().map(Into::into).collect(),
+				fetch_unnamed: self.fetches.is_partly_unnamed(),
 				props: Default::default(),
 			}),
 			Some(ApprovalPolicy::Allow) => {
@@ -1251,7 +1251,7 @@ mod tests {
 		apply_admission_patch, bash_ir, call_approval_mode, effective_approval_mode,
 		effects_narrow_or_refuse, github_mutation_targets, resolve_approval,
 	};
-	use crate::fetch_host::FetchHost;
+	use crate::fetch_host::{FetchHost, NamedFetches};
 
 	const UNAVAILABLE: SandboxState =
 		SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };
@@ -1992,9 +1992,10 @@ mod tests {
 		assert_eq!(denial.code, "approval_policy_denied");
 	}
 
-	/// The query reports the envelope the staged call was judged by and the
-	/// hosts named for its fetches; hosts named before the arguments were
-	/// staged, or after the query, are never reported.
+	/// The query reports the envelope the staged call was judged by, the
+	/// hosts named for its fetches and whether some fetch reaches a host left
+	/// unnamed; what was named before the arguments were staged, or after the
+	/// query, is never reported.
 	#[test]
 	fn the_query_reports_the_judged_envelope_and_named_hosts() {
 		let (cwd, root) = (Path::new("/work"), Path::new("/work"));
@@ -2006,17 +2007,37 @@ mod tests {
 			Duration::from_secs(1),
 			ApprovalPolicy::Prompt,
 		);
-		gate.name_fetch_hosts(vec![FetchHost::ssh("early")]);
+		gate.name_fetch_hosts(NamedFetches::named([FetchHost::ssh("early")]));
 		gate
 			.stage(br#"{"path":"https://docs.rs/serde"}"#)
 			.expect("valid arguments");
-		gate.name_fetch_hosts(vec![docs.clone()]);
+		gate.name_fetch_hosts(NamedFetches::named([docs.clone()]));
 		gate.resolve_pending(ApprovalPolicy::Prompt);
 		let query = gate.emit(cwd, root, &fetch).expect("a prompting call asks");
 		assert_eq!(query.effects, Some(EffectEnvelope::from(&fetch)));
 		assert_eq!(query.fetch, [omp_proto::policy::v1::FetchTarget::from(&docs)]);
-		gate.name_fetch_hosts(vec![FetchHost::ssh("late")]);
+		assert!(!query.fetch_unnamed, "every host was named");
+		gate.name_fetch_hosts(NamedFetches::named([FetchHost::ssh("late")]));
 		assert!(gate.emit(cwd, root, &fetch).is_none(), "one query per call");
+
+		// A call that also reaches a host left unnamed keeps its named hosts.
+		let mut gate = AdmissionGate::argument_scoped(
+			sf!("call"),
+			sf!("read"),
+			Duration::from_secs(1),
+			ApprovalPolicy::Prompt,
+		);
+		gate
+			.stage(br#"{"path":"https://docs.rs/serde;issue://5"}"#)
+			.expect("valid arguments");
+		gate.name_fetch_hosts(NamedFetches::from_wire(
+			&[omp_proto::policy::v1::FetchTarget::from(&docs)],
+			true,
+		));
+		gate.resolve_pending(ApprovalPolicy::Prompt);
+		let query = gate.emit(cwd, root, &fetch).expect("a prompting call asks");
+		assert_eq!(query.fetch, [omp_proto::policy::v1::FetchTarget::from(&docs)]);
+		assert!(query.fetch_unnamed, "the unnamed remainder is reported beside the host");
 
 		// A call that does not fetch reports its envelope and no host.
 		let mut gate = AdmissionGate::new(sf!("call"), sf!("write"), Duration::from_secs(1));
@@ -2026,6 +2047,7 @@ mod tests {
 			.expect("a prompting call asks");
 		assert_eq!(query.effects, Some(EffectEnvelope::from(&Effects::empty())));
 		assert!(query.fetch.is_empty());
+		assert!(!query.fetch_unnamed);
 	}
 
 	#[test]

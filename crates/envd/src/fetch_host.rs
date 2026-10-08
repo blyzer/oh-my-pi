@@ -9,6 +9,12 @@
 //! host its arguments name; the redirects the client follows and the site
 //! readers that re-target a fetch to a mirror or an API host are known only
 //! once it runs, and the authored host's grant covers them.
+//!
+//! A call's fetches are named host by host: a locator the environment cannot
+//! name never drops the hosts it can, which are each still approved on their
+//! own. Only the unnamed remainder is approved as the tool's own fetch.
+
+use std::sync::{Arc, Weak};
 
 use omp_core::{Str, sf};
 use omp_proto::policy::v1 as pb;
@@ -136,23 +142,120 @@ pub fn tool_fetch_subject(tool: &str) -> Str {
 	sf!("tool:{tool}")
 }
 
-/// The `(subject, description)` of each requirement a fetch by `tool` raises:
-/// one per host in `hosts`, which must be distinct, or the tool's own when the
-/// environment named none.
+/// The `(subject, description)` of each requirement a fetch by `tool` raises.
+///
+/// One per host in `hosts`, which must be distinct, and the tool's own
+/// ([`tool_fetch_subject`]) for the remainder when `unnamed` (some fetch
+/// reaches a host the environment could not name) or no host was named. A
+/// host's requirement is raised whatever else the call fetches, so a grant
+/// for the tool's own fetch never stands in for a host it names.
 pub fn fetch_subjects<'a>(
 	tool: &'a str,
 	hosts: &'a [FetchHost],
+	unnamed: bool,
 ) -> impl Iterator<Item = (Str, Str)> + 'a {
-	let fallback = hosts.is_empty().then(|| {
+	let remainder = (unnamed || hosts.is_empty()).then(|| {
 		(
 			tool_fetch_subject(tool),
-			sf!("the hosts `{tool}` reaches, which the environment cannot name before it runs"),
+			sf!("the hosts `{tool}` reaches that the environment cannot name before it runs"),
 		)
 	});
 	hosts
 		.iter()
 		.map(|host| (host.subject(), host.describe()))
-		.chain(fallback)
+		.chain(remainder)
+}
+
+/// What the environment named of one call's fetches: every distinct host it
+/// could name, and whether some fetch reaches a host it could not.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NamedFetches {
+	/// Distinct named hosts, sorted.
+	hosts:   Vec<FetchHost>,
+	/// Some fetch reaches a host left unnamed.
+	unnamed: bool,
+}
+
+impl NamedFetches {
+	/// Fetches whose hosts, `hosts`, were all named.
+	#[must_use]
+	pub fn named(hosts: impl IntoIterator<Item = FetchHost>) -> Self {
+		let mut hosts = hosts.into_iter().collect::<Vec<_>>();
+		hosts.sort_unstable();
+		hosts.dedup();
+		Self { hosts, unnamed: false }
+	}
+
+	/// Fetches the environment names no host for, such as those of a tool
+	/// that names no locators.
+	#[must_use]
+	pub const fn unnamed() -> Self {
+		Self { hosts: Vec::new(), unnamed: true }
+	}
+
+	/// The hosts the query `targets` name, beside its `unnamed` remainder. A
+	/// target that does not name exactly one host ([`FetchTargetError`]) is
+	/// part of that remainder; it never drops the targets that do.
+	#[must_use]
+	pub fn from_wire(targets: &[pb::FetchTarget], unnamed: bool) -> Self {
+		let mut malformed = false;
+		let hosts = targets
+			.iter()
+			.filter_map(|target| {
+				let host = FetchHost::try_from(target).ok();
+				malformed |= host.is_none();
+				host
+			})
+			.collect::<Vec<_>>();
+		Self { unnamed: unnamed || malformed, ..Self::named(hosts) }
+	}
+
+	/// Every distinct named host, sorted.
+	#[must_use]
+	pub fn hosts(&self) -> &[FetchHost] {
+		&self.hosts
+	}
+
+	/// Whether some fetch reaches a host the environment could not name.
+	#[must_use]
+	pub const fn is_partly_unnamed(&self) -> bool {
+		self.unnamed
+	}
+
+	/// The `(subject, description)` of each requirement these fetches by
+	/// `tool` raise ([`fetch_subjects`]).
+	pub fn subjects<'a>(&'a self, tool: &'a str) -> impl Iterator<Item = (Str, Str)> + 'a {
+		fetch_subjects(tool, &self.hosts, self.unnamed)
+	}
+}
+
+/// Names the hosts the fetches of one environment's in-process native tools
+/// reach, with the resolvers that perform them.
+///
+/// The kernel admits the native tools a composition runs in its own process
+/// (every native tool of an embedded or isolated environment, an attached
+/// session's session tools) and names their fetches' hosts through this,
+/// as the environment's admission gate names those of the tools it runs. It
+/// holds the resolvers weakly: once the environment is gone, an internal
+/// locator is left unnamed, while an http(s) URL is still named by its
+/// authored host.
+#[derive(Clone)]
+pub struct FetchHostNamer {
+	resources: Weak<ResolverTable<UrlResolver>>,
+}
+
+impl FetchHostNamer {
+	pub(crate) fn new(resources: &Arc<ResolverTable<UrlResolver>>) -> Self {
+		Self { resources: Arc::downgrade(resources) }
+	}
+
+	/// Names every distinct host the fetch `locators` of one call reach
+	/// ([`resolve_locators`]).
+	#[must_use]
+	pub fn name(&self, locators: &[Str]) -> NamedFetches {
+		let resources = self.resources.upgrade();
+		resolve_locators(resources.as_deref(), locators)
+	}
 }
 
 /// A wire [`pb::FetchTarget`] that does not name exactly one host.
@@ -229,53 +332,65 @@ impl TryFrom<&pb::FetchTarget> for FetchHost {
 	}
 }
 
-/// Names every distinct host the fetch `locators` reach, sorted.
+/// Names every distinct host the fetch `locators` of one call reach, with the
+/// environment `resources` when they are still live.
 ///
-/// `None` when any locator is not a fetch the environment can name (an
-/// unparsable URL, `issue://5` in a workspace without a GitHub remote, an
-/// `mcp://` resource no mounted server advertises, a scheme no fetching
-/// resolver serves). The resolver performing such a fetch fails the same way,
-/// but the call is still approved as the tool's own rather than on the hosts
-/// that could be named.
+/// A locator the environment cannot name (an unparsable URL, `issue://5` in a
+/// workspace without a GitHub remote, an `mcp://` resource no mounted server
+/// advertises, a scheme no fetching resolver serves, an internal URL once the
+/// resources are gone) marks the call partly unnamed and keeps every host the
+/// others name, so each of those is still approved on its own. The resolver
+/// performing such a fetch fails the same way. A call with no locators at all
+/// is unnamed.
 ///
 /// Naming reads no network; an `issue://` or `pr://` locator without a host
 /// reads the workspace's git config, as the resolver does when it runs.
 pub(crate) fn resolve_locators(
-	resources: &ResolverTable<UrlResolver>,
+	resources: Option<&ResolverTable<UrlResolver>>,
 	locators: &[Str],
-) -> Option<Vec<FetchHost>> {
-	let mut hosts = locators
+) -> NamedFetches {
+	let mut unnamed = locators.is_empty();
+	let hosts = locators
 		.iter()
-		.map(|locator| resolve_locator(resources, locator))
-		.collect::<Option<Vec<_>>>()?;
-	hosts.sort_unstable();
-	hosts.dedup();
-	Some(hosts)
+		.filter_map(|locator| {
+			let host = resolve_locator(resources, locator);
+			unnamed |= host.is_none();
+			host
+		})
+		.collect::<Vec<_>>();
+	NamedFetches { unnamed, ..NamedFetches::named(hosts) }
 }
 
 /// Names the host one fetch locator reaches: an http(s) URL as `read`
 /// recognizes it, else an internal URL by the resolver its scheme routes to.
-fn resolve_locator(resources: &ResolverTable<UrlResolver>, locator: &str) -> Option<FetchHost> {
+fn resolve_locator(
+	resources: Option<&ResolverTable<UrlResolver>>,
+	locator: &str,
+) -> Option<FetchHost> {
 	if let Some(target) = web::parse_target(locator).ok()? {
 		let host = target.url.host_str()?;
 		let port = target.url.port_or_known_default()?;
 		return Some(FetchHost::http(host, port));
 	}
 	let uri = selector::parse_uri(locator).ok()??;
-	resources
+	resources?
 		.get(uri.scheme)?
 		.fetch_host(uri.resource, uri.query)
 }
 
 #[cfg(test)]
 mod tests {
+	use omp_core::Str;
 	use omp_proto::policy::v1 as pb;
 
-	use super::{FetchHost, FetchResolver, FetchTargetError, fetch_subjects, tool_fetch_subject};
+	use super::{
+		FetchHost, FetchResolver, FetchTargetError, NamedFetches, fetch_subjects, resolve_locators,
+		tool_fetch_subject,
+	};
 
 	/// Each resolver keys its own subject; a port distinguishes http(s)
-	/// endpoints and nothing else carries one; the tool fallback never
-	/// collides with a host.
+	/// endpoints and nothing else carries one; the tool's own subject never
+	/// collides with a host, and asks only for the remainder no host names.
 	#[test]
 	fn subjects_are_keyed_by_resolver_and_host() {
 		for (host, subject) in [
@@ -294,18 +409,77 @@ mod tests {
 				.contains("authored host docs.rs:443")
 		);
 		let named = [FetchHost::http("a.example", 443), FetchHost::ssh("prod")];
+		let subjects = |hosts: &[FetchHost], unnamed| {
+			fetch_subjects("read", hosts, unnamed)
+				.map(|(subject, _)| subject)
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(subjects(&named, false), ["http:a.example:443", "ssh:prod"]);
+		assert_eq!(subjects(&named, true), ["http:a.example:443", "ssh:prod", "tool:read"]);
+		assert_eq!(subjects(&[], false), ["tool:read"]);
+		assert_eq!(subjects(&[], true), ["tool:read"]);
+	}
+
+	/// A locator the environment cannot name never drops the hosts the others
+	/// name: the call is partly unnamed and keeps every named host, distinct
+	/// and sorted. A call with no locators is unnamed; with no resources left,
+	/// an http(s) URL is still named by its authored host and an internal URL
+	/// is not.
+	#[test]
+	fn an_unnameable_locator_keeps_the_named_hosts() {
+		let locators = |texts: &[&str]| texts.iter().copied().map(Str::new).collect::<Vec<_>>();
+		let named = resolve_locators(
+			None,
+			&locators(&[
+				"https://docs.rs/serde",
+				"issue://owner",
+				"http://localhost:8080/x",
+				"https://docs.rs/tokio",
+			]),
+		);
+		assert_eq!(named.hosts(), [
+			FetchHost::http("docs.rs", 443),
+			FetchHost::http("localhost", 8080)
+		]);
+		assert!(named.is_partly_unnamed());
 		assert_eq!(
-			fetch_subjects("read", &named)
+			named
+				.subjects("read")
 				.map(|(subject, _)| subject)
 				.collect::<Vec<_>>(),
-			["http:a.example:443", "ssh:prod"]
+			["http:docs.rs:443", "http:localhost:8080", "tool:read"]
 		);
+
+		let every =
+			resolve_locators(None, &locators(&["https://crates.io/x", "https://crates.io/y"]));
+		assert_eq!(every, NamedFetches::named([FetchHost::http("crates.io", 443)]));
+		assert!(!every.is_partly_unnamed());
+		assert_eq!(resolve_locators(None, &[]), NamedFetches::unnamed());
+	}
+
+	/// The query's targets are named as sent, and a malformed one joins the
+	/// unnamed remainder without dropping the well-formed ones.
+	#[test]
+	fn wire_targets_keep_every_named_host() {
+		let docs = FetchHost::http("docs.rs", 443);
+		let prod = FetchHost::ssh("prod");
+		let wire = [pb::FetchTarget::from(&prod), pb::FetchTarget::from(&docs)];
 		assert_eq!(
-			fetch_subjects("read", &[])
-				.map(|(subject, _)| subject)
-				.collect::<Vec<_>>(),
-			["tool:read"]
+			NamedFetches::from_wire(&wire, false),
+			NamedFetches::named([docs.clone(), prod.clone()])
 		);
+		let partly = NamedFetches::from_wire(&wire, true);
+		assert_eq!(partly.hosts(), [docs.clone(), prod]);
+		assert!(partly.is_partly_unnamed());
+		let malformed = pb::FetchTarget {
+			resolver: pb::FetchResolver::Http as i32,
+			host:     "evil.example".to_owned(),
+			port:     None,
+			props:    None,
+		};
+		let partly = NamedFetches::from_wire(&[malformed, pb::FetchTarget::from(&docs)], false);
+		assert_eq!(partly.hosts(), [docs]);
+		assert!(partly.is_partly_unnamed());
 	}
 
 	/// The wire form round-trips, and a target that does not name exactly one

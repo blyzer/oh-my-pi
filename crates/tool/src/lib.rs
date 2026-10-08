@@ -1439,8 +1439,9 @@ pub trait Tool: Send + Sync + 'static {
 	/// call's envelope fetches. The environment names the host each locator
 	/// reaches with the resolver that performs the fetch, and keys the call's
 	/// fetch approval on those hosts, so a grant for one host never covers
-	/// another. A fetch whose locators it cannot all name, or that names none,
-	/// is approved as the tool's own.
+	/// another. Every host it names is approved on its own; a locator it
+	/// cannot name, or a fetch that names none, is approved as the tool's own
+	/// beside them.
 	fn fetch_locators(&self, _params: &Self::Params) -> Vec<Str> {
 		Vec::new()
 	}

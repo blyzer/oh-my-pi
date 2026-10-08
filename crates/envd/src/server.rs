@@ -99,7 +99,7 @@ use super::{
 	exec::{ExecError, ExecEvent, ExecHost, ExecRun, ProcessEvent},
 	exec_settings::{SandboxSettings, ShellSettings},
 	exthost::{ExtensionManifest, control::CompositeControlAuthority, lifecycle::EscapeCapability},
-	fetch_host::resolve_locators,
+	fetch_host::{FetchHostNamer, resolve_locators},
 	github_url::GithubCredentialBridge,
 	host_info::HostInfoHost,
 	host_settings::HostSettings,
@@ -3252,6 +3252,15 @@ impl EnvServer {
 	/// Returns the exact registry shared by this server's dispatch paths.
 	pub fn registry(&self) -> Arc<Registry> {
 		Arc::clone(&self.registry)
+	}
+
+	/// Returns the namer of the hosts this server's native tools fetch from,
+	/// by the resolvers that perform those fetches. A composition that runs
+	/// these tools in its own process, outside this server's admission gate,
+	/// keys their fetch approval on it.
+	#[must_use]
+	pub fn fetch_hosts(&self) -> FetchHostNamer {
+		FetchHostNamer::new(&self.resources)
 	}
 
 	/// Binds the production router for one authenticated extension-host
@@ -8773,7 +8782,8 @@ impl ConnectionState {
 	/// ([`InvocationExecutionPolicy::denial`]), or of an envelope beyond the
 	/// declared maximum, if any. When that envelope fetches, the hosts the
 	/// call's fetch locators reach ([`Registry::fetch_locators`]) are named by
-	/// the resolvers in `resources` that perform them, for the query.
+	/// the resolvers in `resources` that perform them, for the query: every
+	/// host they can name, and whether some locator reaches one they cannot.
 	///
 	/// Staged arguments are one JSON object, so they are UTF-8; were they not,
 	/// the call would keep its declared maximum.
@@ -8822,8 +8832,7 @@ impl ConnectionState {
 				}
 				if effects.fetch.is_some() {
 					let locators = registry.fetch_locators(&execution.tool, raw);
-					admission
-						.name_fetch_hosts(resolve_locators(resources, &locators).unwrap_or_default());
+					admission.name_fetch_hosts(resolve_locators(Some(resources), &locators));
 				}
 			}
 			if admission.is_pending() {
@@ -16317,8 +16326,8 @@ mod tests {
 	/// resolver that performs each: an http(s) URL by its authored host and
 	/// port, `ssh://` by its alias, `issue://` and `pr://` by the GitHub host
 	/// the URL or the workspace's git remote names. A locator the environment
-	/// cannot name leaves the call with no hosts, so it is asked as the tool's
-	/// own. A local read never asks, and `write` asks for no fetch.
+	/// cannot name marks the call partly unnamed and never drops the hosts the
+	/// others name. A local read never asks, and `write` asks for no fetch.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn fetch_queries_name_every_host_the_resolvers_reach() {
 		use crate::fetch_host::FetchHost;
@@ -16337,19 +16346,28 @@ mod tests {
 				.map(|target| FetchHost::try_from(target).expect("a named host"))
 				.collect::<Vec<_>>()
 		};
-		for (invocation_id, targets, named) in [
+		for (invocation_id, targets, named, unnamed) in [
 			(
 				"web",
 				vec!["https://docs.rs/serde", "https://docs.rs/tokio:10-20", "http://localhost:8080/x"],
 				vec![FetchHost::http("docs.rs", 443), FetchHost::http("localhost", 8080)],
+				false,
 			),
-			("ssh", vec!["ssh://prod/etc/hosts"], vec![FetchHost::ssh("prod")]),
-			("remote-issue", vec!["issue://5"], vec![FetchHost::github("ghe.example.com")]),
-			("named-pr", vec!["pr://Owner/Repo/7/diff", "notes.txt"], vec![FetchHost::github(
-				"github.com",
-			)]),
-			("unadvertised-mcp", vec!["mcp://unadvertised/resource"], Vec::new()),
-			("one-unnamed", vec!["https://docs.rs/serde", "issue://owner"], Vec::new()),
+			("ssh", vec!["ssh://prod/etc/hosts"], vec![FetchHost::ssh("prod")], false),
+			("remote-issue", vec!["issue://5"], vec![FetchHost::github("ghe.example.com")], false),
+			(
+				"named-pr",
+				vec!["pr://Owner/Repo/7/diff", "notes.txt"],
+				vec![FetchHost::github("github.com")],
+				false,
+			),
+			("unadvertised-mcp", vec!["mcp://unadvertised/resource"], Vec::new(), true),
+			(
+				"one-unnamed",
+				vec!["https://docs.rs/serde", "issue://owner"],
+				vec![FetchHost::http("docs.rs", 443)],
+				true,
+			),
 		] {
 			let refusing = ScriptedAdmission::default();
 			let (client, serving) =
@@ -16378,6 +16396,7 @@ mod tests {
 				"{invocation_id}"
 			);
 			assert_eq!(hosts(&seen[0]), named, "{invocation_id}");
+			assert_eq!(seen[0].fetch_unnamed, unnamed, "{invocation_id}");
 			drop(client);
 			serving.abort();
 		}
