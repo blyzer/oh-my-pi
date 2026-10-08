@@ -28,6 +28,8 @@ mod exec_sandbox;
 pub mod exec_settings;
 pub mod ext_git;
 pub mod exthost;
+/// The hosts a fetch reaches and the approval subjects keyed on them.
+pub mod fetch_host;
 mod github;
 pub mod github_url;
 pub mod grep;
@@ -1176,6 +1178,17 @@ impl ProjectEnvironment {
 	/// Returns the immutable production tool registry.
 	pub fn registry(&self) -> Arc<Registry> {
 		Arc::clone(&self.registry)
+	}
+
+	/// Returns the namer of the hosts the fetches of this composition's
+	/// in-process native tools reach ([`Self::registry`]'s native routes: every
+	/// environment tool of an embedded or isolated composition, an attached
+	/// session's session tools), by the resolvers of the in-process host that
+	/// performs them. The kernel admits those tools itself and keys their
+	/// fetch approval on these hosts.
+	#[must_use]
+	pub fn fetch_hosts(&self) -> fetch_host::FetchHostNamer {
+		self.lifecycle.server.fetch_hosts()
 	}
 
 	/// Returns the handle through which an ACP adapter binds its editor as the

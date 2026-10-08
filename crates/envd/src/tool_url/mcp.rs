@@ -23,6 +23,16 @@ impl McpUrlResolver {
 		Self { service }
 	}
 
+	/// Names the mounted server advertising `resource`, the one a read of it
+	/// asks; `None` when no mounted server advertises it.
+	pub(super) fn fetch_server(&self, resource: &str) -> Option<Str> {
+		let uri = self.parse(resource).ok()?;
+		self
+			.service
+			.resolve_resource_server(uri)
+			.map(|server| Str::new(server.name))
+	}
+
 	fn parse<'a>(&self, resource: &'a str) -> Result<&'a str, Fault> {
 		if resource.is_empty() {
 			return Err(Fault::Invalid {

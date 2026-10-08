@@ -35,7 +35,7 @@ use super::{
 	ssh::SshService,
 	vault::VaultService,
 };
-use crate::{ContentResolver, HostResources};
+use crate::{ContentResolver, HostResources, fetch_host::FetchHost};
 
 #[derive(Clone, Copy, Debug)]
 enum RegistryResource {
@@ -397,6 +397,36 @@ impl Resolve for UrlResolver {
 			Self::Content(resolver) => resolver.complete(query, max_results).await,
 			Self::Docs(resolver) => resolver.complete(query, max_results).await,
 			Self::Issue(_) | Self::Pr(_) | Self::Conflict(_) => Ok(Vec::new()),
+		}
+	}
+}
+
+impl UrlResolver {
+	/// Names the host a read of `resource` reaches when this resolver fetches
+	/// it: the GitHub host of `issue://` and `pr://`, the `ssh://` alias, the
+	/// MCP server advertising an `mcp://` resource. `None` for a resolver that
+	/// fetches nothing and for a resource it cannot name a host for.
+	pub(super) fn fetch_host(&self, resource: &str, query: Option<&str>) -> Option<FetchHost> {
+		match self {
+			Self::Issue(resolver) | Self::Pr(resolver) => {
+				resolver.fetch_host(resource, query).map(FetchHost::github)
+			},
+			Self::Ssh(_) => ssh::parse_resource(resource)
+				.ok()
+				.map(|(alias, _)| FetchHost::ssh(alias)),
+			Self::Mcp(resolver) => resolver.fetch_server(resource).map(FetchHost::mcp),
+			Self::Host(_)
+			| Self::Artifact(_)
+			| Self::Attachment(_)
+			| Self::Agent(_)
+			| Self::History(_)
+			| Self::Local(_)
+			| Self::Memory(_)
+			| Self::Security(_)
+			| Self::Vault(_)
+			| Self::Content(_)
+			| Self::Conflict(_)
+			| Self::Docs(_) => None,
 		}
 	}
 }

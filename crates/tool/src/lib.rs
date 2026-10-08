@@ -1429,6 +1429,23 @@ pub trait Tool: Send + Sync + 'static {
 		None
 	}
 
+	/// Returns the remote locators (URLs) this one call fetches, judged from
+	/// its decoded arguments by the classification behind
+	/// [`Tool::invocation_effects`]: every target that contributes its
+	/// envelope's [`Effects::fetch`], in the canonical form the executor
+	/// resolves.
+	///
+	/// Only consulted when [`Tool::ARGUMENT_SCOPED_EFFECTS`] is set and the
+	/// call's envelope fetches. The environment names the host each locator
+	/// reaches with the resolver that performs the fetch, and keys the call's
+	/// fetch approval on those hosts, so a grant for one host never covers
+	/// another. Every host it names is approved on its own; a locator it
+	/// cannot name, or a fetch that names none, is approved as the tool's own
+	/// beside them.
+	fn fetch_locators(&self, _params: &Self::Params) -> Vec<Str> {
+		Vec::new()
+	}
+
 	/// Deterministically migrates one historical call toward this revision.
 	fn lift(&self, _from: &Rev, _call: RecordedCall<'_>) -> Option<LiftedCall> {
 		None

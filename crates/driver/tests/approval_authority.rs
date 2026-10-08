@@ -8,7 +8,9 @@
 //! in this process runs the command, and its sandbox amendment reaches the
 //! issuing session only through the approval relay. A network endpoint approved
 //! for the session holds, on either path, until the conversation leaves the
-//! journal that approved it, by a rewind or a session switch.
+//! journal that approved it, by a rewind or a session switch. A fetch is asked
+//! once per host the environment names for it, and a session grant for one
+//! host never covers another.
 
 mod support;
 
@@ -58,55 +60,56 @@ impl Inference for ToolThenText {
 		_request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.turns += 1;
-		let meta = ResponseMeta {
-			request_id:          RequestId::from("approval-test"),
-			provider:            ProviderId::from("test"),
-			route:               RouteId::from("test/route"),
-			model:               None,
-			provider_request_id: None,
-			created_at:          std::time::SystemTime::UNIX_EPOCH,
-		};
-		let events = if self.turns % 2 == 1 {
-			let arguments = self.arguments.clone();
-			let call = ToolCall {
-				id:        ToolCallId::from(format!("call-{}", self.turns.div_ceil(2)).as_str()),
-				name:      Str::new_static(self.tool),
-				arguments: omp_ai::OpaqueJson::new(arguments.clone()),
-			};
-			vec![
-				ChatEvent::Started(meta),
-				ChatEvent::ToolCallStarted {
-					index: 0,
-					id:    call.id.clone(),
-					name:  call.name.clone(),
-				},
-				ChatEvent::ToolArgumentsDelta {
-					index: 0,
-					bytes: bytes::Bytes::from(serde_json::to_vec(&arguments).expect("args")),
-				},
-				ChatEvent::ToolCallReady { index: 0, call },
-				ChatEvent::Completed(Completion {
-					reason:  FinishReason::ToolCalls,
-					blocks:  1,
-					usage:   Usage::default(),
-					receipt: ExecutionReceipt::default().into(),
-				}),
-			]
-		} else {
-			vec![
-				ChatEvent::Started(meta),
-				ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text },
-				ChatEvent::TextDelta { index: 0, text: Str::new_static("done") },
-				ChatEvent::Completed(Completion {
-					reason:  FinishReason::Stop,
-					blocks:  1,
-					usage:   Usage::default(),
-					receipt: ExecutionReceipt::default().into(),
-				}),
-			]
-		};
-		ready(Ok(ChatStream::ordinary(Box::pin(stream::iter(events.into_iter().map(Ok))))))
+		ready(Ok(tool_then_text(self.turns, self.tool, &self.arguments)))
 	}
+}
+
+/// The `turn`th scripted response: an odd turn calls `tool` with `arguments`
+/// as `call-n` (`n` counting the calls), an even turn closes with text.
+fn tool_then_text(turn: usize, tool: &'static str, arguments: &serde_json::Value) -> ChatStream {
+	let meta = ResponseMeta {
+		request_id:          RequestId::from("approval-test"),
+		provider:            ProviderId::from("test"),
+		route:               RouteId::from("test/route"),
+		model:               None,
+		provider_request_id: None,
+		created_at:          std::time::SystemTime::UNIX_EPOCH,
+	};
+	let events = if turn % 2 == 1 {
+		let call = ToolCall {
+			id:        ToolCallId::from(format!("call-{}", turn.div_ceil(2)).as_str()),
+			name:      Str::new_static(tool),
+			arguments: omp_ai::OpaqueJson::new(arguments.clone()),
+		};
+		vec![
+			ChatEvent::Started(meta),
+			ChatEvent::ToolCallStarted { index: 0, id: call.id.clone(), name: call.name.clone() },
+			ChatEvent::ToolArgumentsDelta {
+				index: 0,
+				bytes: bytes::Bytes::from(serde_json::to_vec(arguments).expect("args")),
+			},
+			ChatEvent::ToolCallReady { index: 0, call },
+			ChatEvent::Completed(Completion {
+				reason:  FinishReason::ToolCalls,
+				blocks:  1,
+				usage:   Usage::default(),
+				receipt: ExecutionReceipt::default().into(),
+			}),
+		]
+	} else {
+		vec![
+			ChatEvent::Started(meta),
+			ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text },
+			ChatEvent::TextDelta { index: 0, text: Str::new_static("done") },
+			ChatEvent::Completed(Completion {
+				reason:  FinishReason::Stop,
+				blocks:  1,
+				usage:   Usage::default(),
+				receipt: ExecutionReceipt::default().into(),
+			}),
+		]
+	};
+	ChatStream::ordinary(Box::pin(stream::iter(events.into_iter().map(Ok))))
 }
 
 fn decision(approved: bool) -> ApprovalDecision {
@@ -855,5 +858,470 @@ mod session_network_grants {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn an_embedded_grant_never_reaches_the_next_session() {
 		embedded_grants(Leave::Switch).await;
+	}
+}
+
+/// Host-keyed fetch approval through the production environment executor:
+/// a project environment served in this process admits an argument-scoped
+/// fetching tool under `always-ask`, `EnvToolExecutor` turns each admission
+/// query into the session's prompt on a kernel-shaped route, and the approval
+/// desk answers a repeated host from the session grant the journal holds.
+mod fetch_host_grants {
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	use futures::StreamExt as _;
+	use omp_agent::{
+		ApprovalDesk, ApprovalRoute, ExternalDispatchEvent, ExternalDispatchRequest,
+		ExternalToolExecutor as _, KernelEvents,
+	};
+	use omp_core::{Principal, sf};
+	use omp_envd::{EnvServer, exthost::ConvarControlFactory, worker::ExtHostConfig};
+	use omp_journal::blob::BlobStore;
+	use omp_proto::env::v1 as pb;
+	use omp_tool::{Effects, IncomingParams, Registry, ToolIdentity, ToolTerminal};
+
+	use super::*;
+
+	/// Arguments of [`FetchProbe`]: the targets one call reads.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct FetchProbeParams {
+		targets: Vec<Str>,
+	}
+
+	/// A native tool reading local paths and fetching every URL target, as
+	/// an argument-scoped `read` classifies its targets.
+	struct FetchProbe {
+		spec: omp_tool::ToolSpec,
+		ran:  Arc<AtomicUsize>,
+	}
+
+	impl omp_tool::Tool for FetchProbe {
+		type Fault = serde_json::Value;
+		type Params = FetchProbeParams;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, params: &FetchProbeParams) -> Option<Effects> {
+			let fetches = params.targets.iter().any(|target| target.contains("://"));
+			Some(Effects {
+				documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+				fetch: fetches.then_some(omp_tool::FetchEffects { credentials: false }),
+				..Effects::empty()
+			})
+		}
+
+		fn fetch_locators(&self, params: &FetchProbeParams) -> Vec<Str> {
+			params
+				.targets
+				.iter()
+				.filter(|target| target.contains("://"))
+				.cloned()
+				.collect()
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				params.committed().await.expect("probe commitment");
+				self.ran.fetch_add(1, Ordering::Relaxed);
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "fetched"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("fetched") }]
+		}
+	}
+
+	/// The session side of the production executor: the kernel's route and
+	/// approval desk, and a human who answers every prompt for the session.
+	struct Host {
+		executor: EnvToolExecutor,
+		up:       flume::Receiver<Up>,
+		desk:     ApprovalDesk,
+		session:  Session,
+		blobs:    BlobStore,
+		identity: ToolIdentity,
+	}
+
+	impl Host {
+		/// Runs one call reading `targets` to a successful outcome and returns
+		/// the subjects of each prompt a human was asked.
+		async fn call(&mut self, call_id: &str, targets: &[&str]) -> Vec<Vec<Str>> {
+			let request = ExternalDispatchRequest {
+				identity:       self.identity.clone(),
+				session_id:     sf!("fetch-session"),
+				blobs:          self.blobs.clone(),
+				call_id:        Str::new(call_id),
+				args:           serde_json::value::to_raw_value(
+					&serde_json::json!({"targets": targets}),
+				)
+				.expect("arguments"),
+				route:          omp_tool::ToolRoute::Remote,
+				blocking_limit: Duration::from_secs(30),
+				output_request: omp_tool::OutputRequest::Bounded,
+				cancellation:   tokio_util::sync::CancellationToken::new(),
+				restrictions:   None,
+			};
+			let mut stream = self.executor.invoke(request);
+			let mut asked = Vec::new();
+			let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+				loop {
+					tokio::select! {
+						event = stream.next() => match event {
+							Some(
+								ExternalDispatchEvent::Done { is_error, parts, .. }
+								| ExternalDispatchEvent::DoneProjected { is_error, parts, .. },
+							) => {
+								break (!is_error).then_some(()).ok_or_else(|| format!("{parts:?}"));
+							},
+							Some(ExternalDispatchEvent::Aborted(abort)) => break Err(format!("{abort:?}")),
+							None => break Err(String::from("the stream ended without an outcome")),
+							Some(_) => {},
+						},
+						request = self.up.recv_async() => {
+							let Ok(Up::Approval(request)) = request else { continue };
+							let ticket =
+								self.desk.file(&mut self.session, request).expect("prompt files");
+							if ticket.state == TicketState::Pending {
+								asked.push(
+									ticket.reasons.iter().map(|reason| reason.subject.clone()).collect(),
+								);
+								self
+									.desk
+									.decide(&mut self.session, ticket.ticket_id.as_str(), ApprovalDecision {
+										approved:   true,
+										scope:      ApprovalScope::Session,
+										source:     ApprovalSource::User,
+										decided_by: None,
+										reason:     None,
+										audited:    false,
+									})
+									.expect("the human answers for the session");
+							}
+						},
+					}
+				}
+			})
+			.await
+			.expect("the call settles");
+			assert_eq!(outcome, Ok(()), "{call_id} ran to a successful outcome");
+			asked
+		}
+	}
+
+	/// A local environment served in this process whose registry holds the
+	/// fetch probe as a native tool, and how often the probe ran.
+	struct ProbeEnvironment {
+		server: Arc<EnvServer>,
+		con:    Arc<omp_con::Ctx>,
+		root:   PathBuf,
+		rev:    omp_tool::Rev,
+		ran:    Arc<AtomicUsize>,
+	}
+
+	impl ProbeEnvironment {
+		async fn open(scratch: &Path) -> Self {
+			let (root, state) = (scratch.join("workspace"), scratch.join("state"));
+			std::fs::create_dir_all(&root).expect("workspace");
+			std::fs::create_dir_all(&state).expect("state");
+			let ran = Arc::new(AtomicUsize::new(0));
+			let mut registry = Registry::new();
+			registry
+				.register(
+					FetchProbe {
+						spec: omp_tool::ToolSpec {
+							name:            sf!("fetch_probe"),
+							rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+							description:     sf!("argument-scoped fetch probe"),
+							schema:          bytes::Bytes::from_static(br#"{"type":"object"}"#),
+							constraint:      omp_tool::Constraint::None,
+							effects:         Effects {
+								documents: Some(omp_tool::DocEffects {
+									read:        true,
+									write_globs: Arc::from([]),
+								}),
+								fetch: Some(omp_tool::FetchEffects { credentials: false }),
+								..Effects::empty()
+							},
+							confinement:     omp_tool::Confinement::Host,
+							projection_code: [0; 32],
+						},
+						ran:  Arc::clone(&ran),
+					},
+					omp_tool::Presentation::Slot,
+					omp_tool::Claims {
+						precedence: omp_tool::Precedence::DEFAULT,
+						claimant:   sf!("omp/test"),
+						replaces:   None,
+					},
+				)
+				.expect("register the fetch probe");
+			let con = Arc::new(omp_con::Ctx::new());
+			let server = Arc::new(
+				EnvServer::open_local(
+					&root,
+					&state,
+					registry,
+					ExtHostConfig::new(
+						PathBuf::from("unused"),
+						Principal::new(sf!("test-principal"), sf!("Test Principal")),
+						sf!("test-session"),
+						1,
+					),
+					&con,
+					Arc::new(ConvarControlFactory::new(Arc::clone(&con))),
+					RegistryBridges::default(),
+				)
+				.await
+				.expect("local environment"),
+			);
+			let rev = server
+				.registry()
+				.live_identity("fetch_probe")
+				.map(|(_, rev)| rev.clone())
+				.expect("the fetch probe is registered");
+			Self { server, con, root, rev, ran }
+		}
+	}
+
+	/// Under `always-ask` a fetch is asked once per host per session: the
+	/// first fetch from a host asks, a `session` answer lets every later fetch
+	/// from that host run unasked, a fetch from another host asks again, a
+	/// fetch reaching hosts granted one at a time runs unasked, and a local
+	/// read never asks. A locator the environment cannot name never drops the
+	/// hosts named beside it: a grant for the tool's own unnamed fetch never
+	/// answers a fetch from a host no one granted.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn always_ask_asks_once_per_fetched_host_per_session() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let probe = ProbeEnvironment::open(scratch.path()).await;
+		let (client, transport) = omp_env::EnvClient::in_process(64);
+		let serving = tokio::spawn({
+			let server = Arc::clone(&probe.server);
+			async move { server.serve_in_process(transport).await }
+		});
+		client
+			.hello(pb::ClientHello {
+				client: "fetch-host-grants".to_owned(),
+				schema_rev: omp_proto::SCHEMA_REV,
+				approval_mode: pb::ApprovalMode::AlwaysAsk as i32,
+				..pb::ClientHello::default()
+			})
+			.await
+			.expect("hello");
+
+		// The kernel's route and desk: prompts land in the mailbox, the desk
+		// journals them and answers a granted subject from the tree.
+		let (mailbox, up) = flume::unbounded();
+		let blobs = BlobStore::open(scratch.path().join("blobs")).expect("blobs");
+		let mut host = Host {
+			executor: EnvToolExecutor::new(client, ApprovalRoute::to_kernel(mailbox, None)),
+			up,
+			desk: ApprovalDesk::new(KernelEvents::default()),
+			session: Session::create_with_blob_store(
+				scratch.path().join("fetch.oms"),
+				ComponentRegistry::standard(),
+				blobs.clone(),
+			)
+			.expect("session"),
+			blobs,
+			identity: ToolIdentity { name: sf!("fetch_probe"), rev: probe.rev.clone() },
+		};
+
+		assert_eq!(host.call("call-1", &["https://docs.rs/serde"]).await, [vec![sf!(
+			"http:docs.rs:443"
+		)]]);
+		assert!(
+			host
+				.call("call-2", &["https://docs.rs/tokio", "https://docs.rs/bytes"])
+				.await
+				.is_empty(),
+			"the granted host is not asked again"
+		);
+		assert_eq!(
+			host
+				.call("call-3", &["https://crates.io/crates/serde"])
+				.await,
+			[vec![sf!("http:crates.io:443")]],
+			"a grant for one host never covers another"
+		);
+		assert!(host.call("call-4", &["notes.txt"]).await.is_empty(), "a local read never asks");
+		assert!(
+			host
+				.call("call-5", &["https://docs.rs/x", "https://crates.io/y"])
+				.await
+				.is_empty(),
+			"hosts granted one at a time answer a fetch reaching both"
+		);
+		assert_eq!(
+			host
+				.call("call-6", &["https://evil.example/x", "mcp://unadvertised/resource"])
+				.await,
+			[vec![sf!("http:evil.example:443"), sf!("tool:fetch_probe")]],
+			"an unnamed locator keeps the host named beside it"
+		);
+		assert!(
+			host
+				.call("call-7", &["https://docs.rs/z", "mcp://unadvertised/resource"])
+				.await
+				.is_empty(),
+			"the granted host and the granted remainder answer"
+		);
+		assert_eq!(
+			host
+				.call("call-8", &["https://other.example/x", "mcp://unadvertised/resource"])
+				.await,
+			[vec![sf!("http:other.example:443"), sf!("tool:fetch_probe")]],
+			"the remainder's grant never covers a host no one granted"
+		);
+		assert_eq!(probe.ran.load(Ordering::Relaxed), 8);
+		serving.abort();
+	}
+
+	/// Scripted turns calling the fetch probe: turn `2n - 1` calls `call-n`
+	/// reading the `n`th target list, turn `2n` closes with text.
+	struct FetchTurns {
+		targets: Vec<Vec<&'static str>>,
+		turns:   usize,
+	}
+
+	impl Inference for FetchTurns {
+		fn chat(
+			&mut self,
+			_request: ChatRequest,
+		) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+			self.turns += 1;
+			let targets = &self.targets[self.turns.div_ceil(2) - 1];
+			ready(Ok(tool_then_text(
+				self.turns,
+				"fetch_probe",
+				&serde_json::json!({ "targets": targets }),
+			)))
+		}
+	}
+
+	/// An embedded or isolated composition runs the environment's native tools
+	/// in the kernel, outside the environment's admission gate: the kernel's
+	/// `SettingsAdmission`, given the environment's fetch hosts namer, asks a
+	/// fetch once per host per session exactly as the environment's gate does,
+	/// and keeps every named host beside an unnamed locator.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_embedded_kernel_asks_its_native_fetches_once_per_host() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let probe = ProbeEnvironment::open(scratch.path()).await;
+		let registry = probe.server.registry();
+		assert_eq!(
+			registry.route("fetch_probe").expect("routed"),
+			omp_tool::ToolRoute::Native,
+			"the kernel runs the probe itself"
+		);
+		let targets = vec![
+			vec!["https://docs.rs/serde"],
+			vec!["https://docs.rs/tokio"],
+			vec!["https://crates.io/crates/serde"],
+			vec!["https://docs.rs/x", "https://crates.io/y"],
+			vec!["https://evil.example/x", "mcp://unadvertised/resource"],
+			vec!["https://docs.rs/z", "mcp://unadvertised/resource"],
+			vec!["https://other.example/x", "mcp://unadvertised/resource"],
+			vec!["notes.txt"],
+		];
+		let calls = targets.len();
+		let spill = BlobStore::open(scratch.path().join("artifacts")).expect("spill");
+		let mut kernel = Kernel::new(
+			FetchTurns { targets, turns: 0 },
+			registry,
+			DispatchPolicy::new(spill.clone()),
+			StaticPrompt(Str::new_static("test")),
+		)
+		.with_tool_admission(Arc::new(
+			SettingsAdmission::new(&probe.con, Some(ApprovalMode::AlwaysAsk), &probe.root)
+				.with_fetch_hosts(probe.server.fetch_hosts()),
+		));
+		let events = kernel.subscribe();
+		let mailbox = kernel.mailbox();
+		let asked = Arc::new(parking_lot::Mutex::new(Vec::<Vec<Str>>::new()));
+		let host = tokio::spawn({
+			let asked = Arc::clone(&asked);
+			async move {
+				while let Ok(event) = events.recv_async().await {
+					if let KernelEvent::ApprovalRequested(ticket) = event {
+						asked.lock().push(
+							ticket
+								.reasons
+								.iter()
+								.map(|reason| reason.subject.clone())
+								.collect(),
+						);
+						let _ = mailbox.send(Up::Approve {
+							id:       ticket.ticket_id,
+							decision: ApprovalDecision {
+								approved:   true,
+								scope:      ApprovalScope::Session,
+								source:     ApprovalSource::User,
+								decided_by: None,
+								reason:     None,
+								audited:    false,
+							},
+						});
+					}
+				}
+			}
+		});
+		let mut session = Session::create_with_blob_store(
+			scratch.path().join("embedded-fetch.oms"),
+			ComponentRegistry::standard(),
+			spill,
+		)
+		.expect("session");
+		let mut each = Vec::new();
+		for _ in 0..calls {
+			tokio::time::timeout(
+				Duration::from_secs(60),
+				kernel.run_turn(
+					&mut session,
+					TurnInput { text: Str::new_static("fetch"), attachments: Vec::new() },
+					RunControl::default(),
+				),
+			)
+			.await
+			.expect("turn settles")
+			.expect("turn");
+			each.push(std::mem::take(&mut *asked.lock()));
+		}
+		host.abort();
+		let host_subject = |subjects: &[&str]| -> Vec<Vec<Str>> {
+			vec![subjects.iter().copied().map(Str::new).collect()]
+		};
+		assert_eq!(each, [
+			host_subject(&["http:docs.rs:443"]),
+			Vec::new(),
+			host_subject(&["http:crates.io:443"]),
+			Vec::new(),
+			host_subject(&["http:evil.example:443", "tool:fetch_probe"]),
+			Vec::new(),
+			host_subject(&["http:other.example:443", "tool:fetch_probe"]),
+			Vec::new(),
+		]);
+		assert_eq!(probe.ran.load(Ordering::Relaxed), calls, "every approved call ran");
 	}
 }

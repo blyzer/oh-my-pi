@@ -1,6 +1,7 @@
 //! Durable approval prompts backed by the authoritative session DOM.
 
 use std::{
+	iter,
 	str::FromStr,
 	sync::{
 		Arc,
@@ -9,11 +10,12 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::{Str, sf};
+use omp_core::{Str, StrMut, sf};
 use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_session::{Session, SessionError, components::prompts::prompts_handle};
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use smallvec::SmallVec;
 use thiserror::Error;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -743,36 +745,94 @@ impl ApprovalDesk {
 	}
 }
 
-/// A decided prompt in the tree whose session-wide (or persisted) approval
-/// covers every reason of `ticket`: same kind and subject, and both the
-/// granting reason and the new one offer the granted scope. A wider answer to
-/// a prompt that never offered it (a `session` answer to a once-only sandbox
-/// amendment) grants nothing, and a prompt that offers only `once` is always
-/// asked.
+/// The session-wide (or persisted) approvals in the tree that together cover
+/// every reason of `ticket`. A reason is covered by a decided prompt approved
+/// for the session (or persisted) that holds a reason of the same kind and
+/// subject, when both that reason and the new one offer the granted scope.
+/// Each reason may be covered by a different prompt, so requirements granted
+/// one prompt at a time (a fetch's hosts, a tool and the host it fetches from)
+/// answer a later prompt that raises them together. A wider answer to a
+/// prompt that never offered it (a `session` answer to a once-only sandbox
+/// amendment) grants nothing, and a requirement that offers only `once` is
+/// always asked.
+///
+/// The answer is persisted only when every covering grant is; otherwise it
+/// lasts the session, and it applies only when the whole prompt offers it.
 fn session_grant(session: &Session, ticket: &ApprovalTicket) -> Option<ApprovalDecision> {
-	let covered = |decided: &ApprovalTicket, scope: &ApprovalScope, spec: &ApprovalSpec| {
-		decided.reasons.iter().any(|granted| {
-			granted.kind == spec.kind && granted.subject == spec.subject && granted.offers(scope)
-		})
+	if ticket.reasons.is_empty() {
+		return None;
+	}
+	// The grant covering each reason, in reason order.
+	let mut covering = iter::repeat_n(None, ticket.reasons.len())
+		.collect::<SmallVec<Option<(Str, ApprovalScope, Option<Str>)>, 4>>();
+	for (_, decided) in tickets(session) {
+		let Some(decision) = decided.decision.as_ref() else {
+			continue;
+		};
+		if !decision.approved
+			|| !matches!(decision.scope, ApprovalScope::Session | ApprovalScope::Persist)
+			|| decided.ticket_id == ticket.ticket_id
+		{
+			continue;
+		}
+		for (spec, slot) in ticket.reasons.iter().zip(covering.iter_mut()) {
+			if slot.is_none()
+				&& spec.offers(&decision.scope)
+				&& decided.reasons.iter().any(|granted| {
+					granted.kind == spec.kind
+						&& granted.subject == spec.subject
+						&& granted.offers(&decision.scope)
+				}) {
+				*slot = Some((
+					decided.ticket_id.clone(),
+					decision.scope.clone(),
+					decision.decided_by.clone(),
+				));
+			}
+		}
+		if covering.iter().all(Option::is_some) {
+			break;
+		}
+	}
+	let grants = covering.into_iter().collect::<Option<SmallVec<_, 4>>>()?;
+	let scope = if grants
+		.iter()
+		.all(|(_, scope, _)| *scope == ApprovalScope::Persist)
+	{
+		ApprovalScope::Persist
+	} else {
+		ApprovalScope::Session
 	};
-	tickets(session).find_map(|(_, decided)| {
-		let decision = decided.decision.as_ref()?;
-		let granted = decision.approved
-			&& matches!(decision.scope, ApprovalScope::Session | ApprovalScope::Persist)
-			&& decided.ticket_id != ticket.ticket_id
-			&& ticket.offers(&decision.scope)
-			&& ticket
-				.reasons
-				.iter()
-				.all(|spec| covered(&decided, &decision.scope, spec));
-		granted.then(|| ApprovalDecision {
-			approved:   true,
-			scope:      decision.scope.clone(),
-			source:     ApprovalSource::Config,
-			decided_by: decision.decided_by.clone(),
-			reason:     Some(sf!("granted by {} for this session", decided.ticket_id)),
-			audited:    false,
-		})
+	if !ticket.offers(&scope) {
+		return None;
+	}
+	let decided_by = grants
+		.iter()
+		.all(|(_, _, by)| *by == grants[0].2)
+		.then(|| grants[0].2.clone())
+		.flatten();
+	let mut reason = StrMut::default();
+	reason.push_str("granted by ");
+	for (index, (ticket_id, ..)) in grants.iter().enumerate() {
+		if grants[..index]
+			.iter()
+			.any(|(earlier, ..)| earlier == ticket_id)
+		{
+			continue;
+		}
+		if index > 0 {
+			reason.push_str(", ");
+		}
+		reason.push_str(ticket_id);
+	}
+	reason.push_str(" for this session");
+	Some(ApprovalDecision {
+		approved: true,
+		scope,
+		source: ApprovalSource::Config,
+		decided_by,
+		reason: Some(reason.freeze()),
+		audited: false,
 	})
 }
 

@@ -215,6 +215,15 @@ impl GithubResolver {
 		Self { scheme, root, cache, credentials, client: omp_http::no_redirect_client() }
 	}
 
+	/// Names the GitHub host a read of `resource` reaches, as a read resolves
+	/// it: the host the resource names or, without one, the workspace's git
+	/// remote, in ASCII lowercase. `None` when neither names one, which fails
+	/// the read the same way.
+	pub(crate) fn fetch_host(&self, resource: &str, query: Option<&str>) -> Option<Str> {
+		let target = Target::parse(self.scheme, resource, query, &self.root).ok()?;
+		Some(Str::new(target.repo.host().to_ascii_lowercase()))
+	}
+
 	#[tracing::instrument(
 		name = "github_resource_resolve",
 		level = "debug",

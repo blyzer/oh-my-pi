@@ -3245,7 +3245,8 @@ fn kernel_event_value(event: KernelEvent) -> Option<Value> {
 		})),
 		// The wrapper's approval `select` becomes an extension UI
 		// request; the journal-first host names the durable prompt so the
-		// client answers with `approve`.
+		// client answers with `approve`. One answer decides every
+		// requirement, so `requirements` carries them all beside the first.
 		KernelEvent::ApprovalRequested(ticket) => {
 			let first = ticket.reasons.first();
 			Some(json!({
@@ -3258,6 +3259,7 @@ fn kernel_event_value(event: KernelEvent) -> Option<Value> {
 				"kind": first.map(|spec| spec.kind.as_str()),
 				"scopes": first.map(|spec| spec.scopes.clone()),
 				"timeoutMs": first.map(|spec| spec.timeout_ms),
+				"requirements": ticket.reasons,
 			}))
 		},
 		KernelEvent::TurnEnded { .. } => None,
@@ -3340,4 +3342,57 @@ pub(crate) fn stream_observation_frame(
 	let name = name.strip_prefix("HOOK_EVENT_").unwrap_or(name);
 	fields.insert("type".to_owned(), Value::from(name.to_ascii_lowercase()));
 	Some(Value::Object(fields))
+}
+
+#[cfg(test)]
+mod tests {
+	use omp_agent::{ApprovalSpec, ApprovalTicket, KernelEvent, TicketState};
+	use omp_core::Str;
+
+	use super::kernel_event_value;
+
+	/// One answer to `approve` decides every requirement of the prompt, so
+	/// the request carries them all beside the first one's summary.
+	#[test]
+	fn approval_requests_carry_every_requirement() {
+		let requirement = |subject: &str, kind: &str| ApprovalSpec {
+			title:         Str::new_static("Allow read to fetch"),
+			body:          Str::new_static("body"),
+			subject:       Str::new(subject),
+			kind:          Str::new(kind),
+			scopes:        vec![Str::new_static("once"), Str::new_static("session")],
+			default:       Some(false),
+			route:         Str::new_static("user"),
+			approver:      None,
+			timeout_ms:    0,
+			unreachable:   Str::new_static("deny"),
+			require_human: true,
+			pattern:       None,
+			evidence:      Vec::new(),
+		};
+		let event = kernel_event_value(KernelEvent::ApprovalRequested(ApprovalTicket {
+			ticket_id:     Str::new_static("approval-1"),
+			invocation_id: Some(Str::new_static("call-1")),
+			reasons:       vec![
+				requirement("http:docs.rs:443", "network"),
+				requirement("tool:read", "network"),
+			],
+			state:         TicketState::Pending,
+			decision:      None,
+			created_at_ms: 0,
+		}))
+		.expect("an approval request frame");
+		assert_eq!(event["type"], "tool_approval_request");
+		assert_eq!(event["subject"], "http:docs.rs:443");
+		let subjects = event["requirements"]
+			.as_array()
+			.expect("requirements")
+			.iter()
+			.map(|spec| (spec["kind"].as_str(), spec["subject"].as_str()))
+			.collect::<Vec<_>>();
+		assert_eq!(subjects, [
+			(Some("network"), Some("http:docs.rs:443")),
+			(Some("network"), Some("tool:read"))
+		]);
+	}
 }

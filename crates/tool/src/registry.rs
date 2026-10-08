@@ -1311,6 +1311,9 @@ trait ErasedTool: Send + Sync {
 	fn invocation_effects(&self, _arguments: &str) -> Option<Effects> {
 		None
 	}
+	fn fetch_locators(&self, _arguments: &str) -> Vec<Str> {
+		Vec::new()
+	}
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall>;
 }
 
@@ -1767,6 +1770,17 @@ impl<T: Tool> ErasedTool for Registered<T> {
 		}
 		let params = decode_params::<T::Params>(arguments).ok()?;
 		self.tool.invocation_effects(&params)
+	}
+
+	/// Decodes the call's arguments as [`Self::invocation_effects`] does;
+	/// arguments that do not decode name no locators.
+	fn fetch_locators(&self, arguments: &str) -> Vec<Str> {
+		if !T::ARGUMENT_SCOPED_EFFECTS {
+			return Vec::new();
+		}
+		decode_params::<T::Params>(arguments)
+			.map(|params| self.tool.fetch_locators(&params))
+			.unwrap_or_default()
 	}
 
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
@@ -2544,6 +2558,19 @@ impl Registry {
 			.and_then(|roster| roster.entries.get(name))
 			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
 		scoped_effects(entry.tool.as_ref(), arguments)
+	}
+
+	/// Returns the remote locators one call of `name` fetches, judged from its
+	/// canonical argument JSON ([`Tool::fetch_locators`]). Empty for a tool
+	/// that does not scope its effects to its arguments, for arguments that do
+	/// not decode, and for host, worker and unknown tools: their fetches are
+	/// approved as the tool's own.
+	#[must_use]
+	pub fn fetch_locators(&self, name: &str, arguments: &str) -> Vec<Str> {
+		self
+			.live_entry(name)
+			.map(|entry| entry.tool.fetch_locators(arguments))
+			.unwrap_or_default()
 	}
 
 	/// Iterates winning native identities in deterministic name order.
@@ -4006,6 +4033,14 @@ mod tests {
 				_ => None,
 			}
 		}
+
+		fn fetch_locators(&self, params: &ScopedParams) -> Vec<Str> {
+			if params.level.contains("://") {
+				vec![params.level.clone()]
+			} else {
+				Vec::new()
+			}
+		}
 	}
 
 	fn read_only() -> Effects {
@@ -4123,6 +4158,40 @@ mod tests {
 				.effects_owned("alpha")
 				.expect("a host tool's declaration")
 		);
+	}
+
+	/// A declaring tool names the locators its call fetches, decoded as its
+	/// envelope is; a tool that does not declare argument-scoped effects,
+	/// arguments that do not decode, host and unknown tools name none, so
+	/// their fetches are approved as the tool's own.
+	#[test]
+	fn fetch_locators_follow_the_declared_classifier() {
+		let url = r#"{"i":"look","level":"https://docs.example/a"}"#;
+		let registry = scoped_registry::<true>();
+		assert_eq!(registry.fetch_locators("scoped", url), [sf!("https://docs.example/a")]);
+		for nothing in
+			[r#"{"level":"read"}"#, r#"{"level":7}"#, r#"["https://x.example"]"#, "not json"]
+		{
+			assert!(registry.fetch_locators("scoped", nothing).is_empty(), "{nothing}");
+		}
+		assert!(registry.fetch_locators("absent", url).is_empty());
+		let undeclared = scoped_registry::<false>();
+		assert!(undeclared.fetch_locators("scoped", url).is_empty());
+		undeclared
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
+					effects:     None,
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+		assert!(undeclared.fetch_locators("alpha", url).is_empty());
 	}
 
 	#[test]

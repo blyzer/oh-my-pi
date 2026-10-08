@@ -99,6 +99,7 @@ use super::{
 	exec::{ExecError, ExecEvent, ExecHost, ExecRun, ProcessEvent},
 	exec_settings::{SandboxSettings, ShellSettings},
 	exthost::{ExtensionManifest, control::CompositeControlAuthority, lifecycle::EscapeCapability},
+	fetch_host::{FetchHostNamer, resolve_locators},
 	github_url::GithubCredentialBridge,
 	host_info::HostInfoHost,
 	host_settings::HostSettings,
@@ -3253,6 +3254,15 @@ impl EnvServer {
 		Arc::clone(&self.registry)
 	}
 
+	/// Returns the namer of the hosts this server's native tools fetch from,
+	/// by the resolvers that perform those fetches. A composition that runs
+	/// these tools in its own process, outside this server's admission gate,
+	/// keys their fetch approval on it.
+	#[must_use]
+	pub fn fetch_hosts(&self) -> FetchHostNamer {
+		FetchHostNamer::new(&self.resources)
+	}
+
 	/// Binds the production router for one authenticated extension-host
 	/// connection.
 	pub fn extension_control_authority(
@@ -4745,13 +4755,14 @@ impl EnvServer {
 			client_frame::Body::ArgText(request) => {
 				let result = connection.invocation_mut(frame.request_id, &request.invocation_id);
 				let query = match result {
-					Ok(InvocationState::Native { feed, lifecycle, admission, .. })
+					Ok(InvocationState::Native { feed, lifecycle, admission, effects, .. })
 						if !lifecycle.is_committed() && !lifecycle.is_terminal() =>
 					{
 						let query = admission.push_fragment(
 							&request.fragment,
 							self.workspace.root(),
 							self.workspace.root(),
+							effects,
 						);
 						if !admission.requires_external_answer()
 							&& feed.arg_text(Str::from(request.fragment)).is_err()
@@ -4772,12 +4783,14 @@ impl EnvServer {
 						invocation: Some(invocation),
 						committed,
 						admission,
+						effects,
 						..
 					}) if !*committed => {
 						let query = admission.push_fragment(
 							&request.fragment,
 							self.workspace.root(),
 							self.workspace.root(),
+							effects,
 						);
 						if invocation.streams_args()
 							&& !admission.requires_external_answer()
@@ -4931,6 +4944,7 @@ impl EnvServer {
 					frame.request_id,
 					&request.invocation_id,
 					&self.registry,
+					&self.resources,
 					&request.raw,
 				) {
 					Ok(refused) => refused,
@@ -4953,9 +4967,9 @@ impl EnvServer {
 				}
 				let query = match connection.invocation_mut(frame.request_id, &request.invocation_id) {
 					Ok(
-						InvocationState::Native { admission, .. }
-						| InvocationState::Worker { admission, .. },
-					) => admission.emit(self.workspace.root(), self.workspace.root()),
+						InvocationState::Native { admission, effects, .. }
+						| InvocationState::Worker { admission, effects, .. },
+					) => admission.emit(self.workspace.root(), self.workspace.root(), effects),
 					Err((code, message)) => {
 						send_error(responses, frame.request_id, code, message).await;
 						return;
@@ -8766,7 +8780,10 @@ impl ConnectionState {
 	/// ([`Registry::invocation_effects`]), resolves a pending approval policy
 	/// from that envelope, and returns the call's refusal at the write boundary
 	/// ([`InvocationExecutionPolicy::denial`]), or of an envelope beyond the
-	/// declared maximum, if any.
+	/// declared maximum, if any. When that envelope fetches, the hosts the
+	/// call's fetch locators reach ([`Registry::fetch_locators`]) are named by
+	/// the resolvers in `resources` that perform them, for the query: every
+	/// host they can name, and whether some locator reaches one they cannot.
 	///
 	/// Staged arguments are one JSON object, so they are UTF-8; were they not,
 	/// the call would keep its declared maximum.
@@ -8775,6 +8792,7 @@ impl ConnectionState {
 		request_id: u64,
 		invocation_id: &str,
 		registry: &Registry,
+		resources: &ProductionResolverTable,
 		raw: &[u8],
 	) -> Result<Option<InvocationRefused>, (pb::ProtocolErrorCode, &'static str)> {
 		let sandbox = self.exec_host.sandbox_state();
@@ -8811,6 +8829,10 @@ impl ConnectionState {
 				match registry.invocation_effects(&execution.tool, raw) {
 					Ok(scoped) => *effects = scoped,
 					Err(source) => return Ok(Some(InvocationRefused::Effects { source })),
+				}
+				if effects.fetch.is_some() {
+					let locators = registry.fetch_locators(&execution.tool, raw);
+					admission.name_fetch_hosts(resolve_locators(Some(resources), &locators));
 				}
 			}
 			if admission.is_pending() {
@@ -15818,6 +15840,8 @@ mod tests {
 	#[derive(Clone, Default)]
 	struct ScriptedAdmission {
 		queries: Arc<Mutex<Vec<String>>>,
+		/// Every query as it arrived.
+		seen:    Arc<Mutex<Vec<pb::AdmitInvocation>>>,
 		allow:   bool,
 		patch:   Bytes,
 	}
@@ -15827,6 +15851,7 @@ mod tests {
 
 		fn admit(&self, query: pb::AdmitInvocation) -> Self::Future<'_> {
 			self.queries.lock().push(query.invocation_id.clone());
+			self.seen.lock().push(query.clone());
 			future::ready(pb::Admission {
 				invocation_id: query.invocation_id,
 				allow: self.allow,
@@ -15875,6 +15900,14 @@ mod tests {
 				},
 			)
 			.expect("register the scoped probe");
+		probe_daemon(registry).await
+	}
+
+	/// A local daemon serving `registry` on a fresh workspace and state
+	/// directory.
+	async fn probe_daemon(
+		registry: Registry,
+	) -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
 		let root = tempfile::tempdir().expect("workspace");
 		let state = tempfile::tempdir().expect("state");
 		let con = Arc::new(Ctx::new());
@@ -15923,24 +15956,26 @@ mod tests {
 		(client, serving)
 	}
 
-	/// Invokes the scoped probe with `args` under `restrictions` and returns
-	/// its verdict, or the environment's refusal of the committed call.
-	async fn invoke_scoped_probe(
+	/// Invokes the probe tool `name` with `args` under `restrictions` and
+	/// returns its verdict, or the environment's refusal of the committed
+	/// call.
+	async fn invoke_probe(
 		client: &EnvClient,
 		server: &EnvServer,
+		name: &str,
 		invocation_id: &str,
 		args: serde_json::Value,
 		restrictions: Option<pb::ToolRestrictions>,
 	) -> Result<pb::Verdict, omp_env::ClientError> {
 		let rev = server
 			.registry()
-			.live_identity("scoped_probe")
+			.live_identity(name)
 			.map(|(_, rev)| rev.to_string())
-			.expect("the scoped probe is registered");
+			.expect("the probe is registered");
 		let mut invocation = client
 			.invoke(pb::InvokeTool {
 				invocation_id: invocation_id.to_owned(),
-				name: "scoped_probe".to_owned(),
+				name: name.to_owned(),
 				rev,
 				restrictions,
 				..pb::InvokeTool::default()
@@ -15993,9 +16028,10 @@ mod tests {
 			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
 			let context = format!("{} {level}", mode.as_str_name());
 			let before = ran.lock().len();
-			let verdict = invoke_scoped_probe(
+			let verdict = invoke_probe(
 				&client,
 				&server,
+				"scoped_probe",
 				"scoped",
 				serde_json::json!({"i": "probe", "level": level}),
 				None,
@@ -16032,9 +16068,10 @@ mod tests {
 		};
 		let (client, serving) =
 			scoped_probe_client(&server, pb::ApprovalMode::Yolo, ScriptedAdmission::default()).await;
-		let read = invoke_scoped_probe(
+		let read = invoke_probe(
 			&client,
 			&server,
+			"scoped_probe",
 			"plan-read",
 			serde_json::json!({"level": "read"}),
 			Some(plan()),
@@ -16048,9 +16085,10 @@ mod tests {
 			("plan-exec", "exec", Some(plan())),
 			("widened", "widen", None),
 		] {
-			let refused = invoke_scoped_probe(
+			let refused = invoke_probe(
 				&client,
 				&server,
+				"scoped_probe",
 				invocation_id,
 				serde_json::json!({"level": level}),
 				restrictions,
@@ -16082,9 +16120,10 @@ mod tests {
 			let (client, serving) =
 				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, rewriting.clone()).await;
 			let before = ran.lock().len();
-			let verdict = invoke_scoped_probe(
+			let verdict = invoke_probe(
 				&client,
 				&server,
+				"scoped_probe",
 				"rewritten",
 				serde_json::json!({"level": "write"}),
 				None,
@@ -16173,6 +16212,213 @@ mod tests {
 				assert_eq!(ran.lock().last().map(|args| args["level"].clone()), Some("read".into()));
 			}
 			drop(invocation);
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// Arguments of [`FetchProbe`]: the targets one call reads.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct FetchProbeParams {
+		targets: Vec<Str>,
+	}
+
+	/// A native tool reading local paths and fetching every URL target, the
+	/// way an argument-scoped `read` classifies its targets: a call fetches
+	/// only when a target is a URL, and names those URLs as its locators.
+	struct FetchProbe {
+		spec: omp_tool::ToolSpec,
+	}
+
+	impl omp_tool::Tool for FetchProbe {
+		type Fault = serde_json::Value;
+		type Params = FetchProbeParams;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, params: &FetchProbeParams) -> Option<Effects> {
+			let fetches = params.targets.iter().any(|target| target.contains("://"));
+			Some(Effects {
+				documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+				fetch: fetches.then_some(omp_tool::FetchEffects { credentials: true }),
+				..Effects::empty()
+			})
+		}
+
+		fn fetch_locators(&self, params: &FetchProbeParams) -> Vec<Str> {
+			params
+				.targets
+				.iter()
+				.filter(|target| target.contains("://"))
+				.cloned()
+				.collect()
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				params.committed().await.expect("probe commitment");
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "fetched"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("fetched") }]
+		}
+	}
+
+	/// A local daemon whose registry holds [`FetchProbe`].
+	async fn fetch_probe_daemon() -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
+		let mut registry = Registry::new();
+		registry
+			.register(
+				FetchProbe {
+					spec: omp_tool::ToolSpec {
+						name:            sf!("fetch_probe"),
+						rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+						description:     sf!("argument-scoped fetch probe"),
+						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						constraint:      omp_tool::Constraint::None,
+						effects:         Effects {
+							documents: Some(omp_tool::DocEffects {
+								read:        true,
+								write_globs: Arc::from([]),
+							}),
+							fetch: Some(omp_tool::FetchEffects { credentials: true }),
+							..Effects::empty()
+						},
+						confinement:     Confinement::Host,
+						projection_code: [0; 32],
+					},
+				},
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the fetch probe");
+		probe_daemon(registry).await
+	}
+
+	/// Under `always-ask` a fetching call's query reports the envelope it was
+	/// judged by and every distinct host its fetches reach, named by the
+	/// resolver that performs each: an http(s) URL by its authored host and
+	/// port, `ssh://` by its alias, `issue://` and `pr://` by the GitHub host
+	/// the URL or the workspace's git remote names. A locator the environment
+	/// cannot name marks the call partly unnamed and never drops the hosts the
+	/// others name. A local read never asks, and `write` asks for no fetch.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn fetch_queries_name_every_host_the_resolvers_reach() {
+		use crate::fetch_host::FetchHost;
+
+		let (server, root, _state) = fetch_probe_daemon().await;
+		std::fs::create_dir(root.path().join(".git")).expect("git directory");
+		std::fs::write(
+			root.path().join(".git/config"),
+			"[remote \"origin\"]\n\turl = git@GHE.example.com:Owner/Repo.git\n",
+		)
+		.expect("git config");
+		let hosts = |query: &pb::AdmitInvocation| {
+			query
+				.fetch
+				.iter()
+				.map(|target| FetchHost::try_from(target).expect("a named host"))
+				.collect::<Vec<_>>()
+		};
+		for (invocation_id, targets, named, unnamed) in [
+			(
+				"web",
+				vec!["https://docs.rs/serde", "https://docs.rs/tokio:10-20", "http://localhost:8080/x"],
+				vec![FetchHost::http("docs.rs", 443), FetchHost::http("localhost", 8080)],
+				false,
+			),
+			("ssh", vec!["ssh://prod/etc/hosts"], vec![FetchHost::ssh("prod")], false),
+			("remote-issue", vec!["issue://5"], vec![FetchHost::github("ghe.example.com")], false),
+			(
+				"named-pr",
+				vec!["pr://Owner/Repo/7/diff", "notes.txt"],
+				vec![FetchHost::github("github.com")],
+				false,
+			),
+			("unadvertised-mcp", vec!["mcp://unadvertised/resource"], Vec::new(), true),
+			(
+				"one-unnamed",
+				vec!["https://docs.rs/serde", "issue://owner"],
+				vec![FetchHost::http("docs.rs", 443)],
+				true,
+			),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"fetch_probe",
+				invocation_id,
+				serde_json::json!({"targets": targets}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(verdict.is_error, "{invocation_id}: the refused prompt denies the call");
+			let seen = refusing.seen.lock().clone();
+			assert_eq!(seen.len(), 1, "{invocation_id}: one query");
+			let effects = seen[0]
+				.effects
+				.as_ref()
+				.map(|envelope| Effects::try_from(envelope).expect("a typed envelope"))
+				.expect("the query reports the envelope");
+			assert_eq!(
+				effects.fetch,
+				Some(omp_tool::FetchEffects { credentials: true }),
+				"{invocation_id}"
+			);
+			assert_eq!(hosts(&seen[0]), named, "{invocation_id}");
+			assert_eq!(seen[0].fetch_unnamed, unnamed, "{invocation_id}");
+			drop(client);
+			serving.abort();
+		}
+
+		for (mode, invocation_id, targets) in [
+			(pb::ApprovalMode::AlwaysAsk, "local", vec!["notes.txt"]),
+			(pb::ApprovalMode::Write, "write-fetch", vec!["https://docs.rs/serde"]),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"fetch_probe",
+				invocation_id,
+				serde_json::json!({"targets": targets}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(refusing.seen.lock().is_empty(), "{invocation_id}: never asks");
+			assert!(!verdict.is_error, "{invocation_id}: {}", String::from_utf8_lossy(&verdict.json));
 			drop(client);
 			serving.abort();
 		}

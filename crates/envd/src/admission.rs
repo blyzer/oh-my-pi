@@ -28,7 +28,10 @@ use thiserror::Error;
 use tokio::{time, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::approval_relay::OwnedApprovals;
+use crate::{
+	approval_relay::OwnedApprovals,
+	fetch_host::{FetchHost, NETWORK_APPROVAL_KIND, NamedFetches, fetch_subjects},
+};
 
 /// Default approval posture applied before one invocation reaches interactive
 /// admission.
@@ -526,6 +529,13 @@ impl DynamicAdmission {
 	/// command, when there is one, and never falls back to the host route: a
 	/// relay whose connection closed decides the prompt as unreachable. Without
 	/// a relay the route the host bound answers, if any.
+	///
+	/// The prompt holds one requirement for the target's tier, unless that
+	/// tier is a fetch, and, when the target fetches, one `network`
+	/// requirement per host in `fetches` (distinct hosts the target reaches,
+	/// every one named), or the target's own when the environment names none.
+	/// Every requirement offers `once` and `session`, so a session grant
+	/// covers the target, or the one host, it names.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "one admission joins the target, its declaration, its origin and its approver"
@@ -536,6 +546,7 @@ impl DynamicAdmission {
 		target: Str,
 		effects: &Effects,
 		confinement: Confinement,
+		fetches: &[FetchHost],
 		source: DynamicInvocationSource,
 		relay: Option<&OwnedApprovals>,
 		cancellation: CancellationToken,
@@ -568,21 +579,47 @@ impl DynamicAdmission {
 		let tier: &'static str = resolved.tier.into();
 		let origin: &'static str = source.into();
 		let confinement: &'static str = confinement.into();
-		let reasons = vec![ApprovalSpec {
-			title:         sf!("Approve dynamic target"),
-			body:          sf!("Allow dynamic target `{target}`?"),
-			subject:       target.clone(),
-			kind:          Str::new_static(tier),
-			scopes:        vec![sf!("once")],
-			default:       None,
-			route:         sf!("user"),
-			approver:      None,
-			timeout_ms:    0,
-			unreachable:   sf!("fail_closed"),
+		let requirement = |title: Str, body: Str, subject: Str, kind: &'static str| ApprovalSpec {
+			title,
+			body,
+			subject,
+			kind: Str::new_static(kind),
+			scopes: vec![sf!("once"), sf!("session")],
+			default: None,
+			route: sf!("user"),
+			approver: None,
+			timeout_ms: 0,
+			unreachable: sf!("fail_closed"),
 			require_human: false,
-			pattern:       None,
-			evidence:      vec![sf!("invocation_source={origin}"), sf!("confinement={confinement}")],
-		}];
+			pattern: None,
+			evidence: vec![sf!("invocation_source={origin}"), sf!("confinement={confinement}")],
+		};
+		let fetched = effects
+			.fetch
+			.is_some()
+			.then(|| fetch_subjects(target.as_str(), fetches, false))
+			.into_iter()
+			.flatten()
+			.map(|(subject, about)| {
+				requirement(
+					sf!("Approve dynamic fetch"),
+					sf!("Allow dynamic target `{target}` to fetch from {about}?"),
+					subject,
+					NETWORK_APPROVAL_KIND,
+				)
+			});
+		let reasons = (resolved.tier != ApprovalTier::Fetch)
+			.then(|| {
+				requirement(
+					sf!("Approve dynamic target"),
+					sf!("Allow dynamic target `{target}`?"),
+					target.clone(),
+					tier,
+				)
+			})
+			.into_iter()
+			.chain(fetched)
+			.collect::<Vec<_>>();
 		let ticket = match (relay, route) {
 			(Some(relay), _) => {
 				// Dropping the relayed prompt withdraws its query.
@@ -753,6 +790,9 @@ pub struct AdmissionGate {
 	/// ([`Self::argument_scoped`]); [`Self::resolve_pending`] fixes it.
 	policy:             Option<ApprovalPolicy>,
 	defer_until_commit: bool,
+	/// What the environment named of the staged call's fetches
+	/// ([`Self::name_fetch_hosts`]); empty when it does not fetch.
+	fetches:            NamedFetches,
 	answer_tx:          Option<flume::Sender<Admission>>,
 	answer_rx:          Receiver<Admission>,
 }
@@ -820,6 +860,7 @@ impl AdmissionGate {
 			query_emitted: false,
 			policy,
 			defer_until_commit,
+			fetches: NamedFetches::default(),
 			answer_tx: Some(answer_tx),
 			answer_rx,
 		}
@@ -827,11 +868,15 @@ impl AdmissionGate {
 
 	/// Appends one raw argument fragment and emits a query once it is one JSON
 	/// document. Further fragments remain the caller's protocol violation.
+	///
+	/// `effects` is the envelope the call is judged by, which the query
+	/// reports.
 	pub(crate) fn push_fragment(
 		&mut self,
 		fragment: &str,
 		cwd: &Path,
 		root: &Path,
+		effects: &Effects,
 	) -> Option<AdmitInvocation> {
 		if self.query_emitted {
 			return None;
@@ -844,7 +889,7 @@ impl AdmissionGate {
 		if !value.is_object() {
 			return None;
 		}
-		self.finish_query(value, cwd, root)
+		self.finish_query(value, cwd, root, effects)
 	}
 
 	/// Accepts the `ArgsCommitted` arguments `raw` as this call's one argument
@@ -873,12 +918,21 @@ impl AdmissionGate {
 	/// Emits the one query for the staged arguments ([`Self::stage`]), or
 	/// answers it internally under a fixed policy. `None` once the query was
 	/// emitted, or with nothing staged.
-	pub(crate) fn emit(&mut self, cwd: &Path, root: &Path) -> Option<AdmitInvocation> {
+	///
+	/// `effects` is the envelope the staged call was judged by, which the
+	/// query reports beside the hosts its fetches reach and whether some
+	/// reach a host left unnamed ([`Self::name_fetch_hosts`]).
+	pub(crate) fn emit(
+		&mut self,
+		cwd: &Path,
+		root: &Path,
+		effects: &Effects,
+	) -> Option<AdmitInvocation> {
 		if self.query_emitted {
 			return None;
 		}
 		let value = self.requested.take()?;
-		self.finish_query(value, cwd, root)
+		self.finish_query(value, cwd, root, effects)
 	}
 
 	/// Stages the committed arguments and emits their query in one step.
@@ -890,27 +944,47 @@ impl AdmissionGate {
 		root: &Path,
 	) -> Result<Option<AdmitInvocation>, AdmissionError> {
 		self.stage(raw)?;
-		Ok(self.emit(cwd, root))
+		Ok(self.emit(cwd, root, &Effects::empty()))
 	}
 
-	fn finish_query(&mut self, value: Value, cwd: &Path, root: &Path) -> Option<AdmitInvocation> {
+	/// Records what the environment's resolvers named of the staged call's
+	/// fetches, for its query: every host they could name, each asked on its
+	/// own, and whether some fetch reaches a host they could not, which is
+	/// asked as the tool's own. Only a staged call is named: like
+	/// [`Self::resolve_pending`], nothing is recorded from arguments the gate
+	/// did not accept, nor after the query was emitted.
+	pub(crate) fn name_fetch_hosts(&mut self, fetches: NamedFetches) {
+		if self.is_staged() {
+			self.fetches = fetches;
+		}
+	}
+
+	fn finish_query(
+		&mut self,
+		value: Value,
+		cwd: &Path,
+		root: &Path,
+		effects: &Effects,
+	) -> Option<AdmitInvocation> {
 		let bash = bash_ir(&self.tool_name, &value, cwd, root);
 		self.requested = Some(value);
 		self.query_emitted = true;
-		let query = AdmitInvocation {
-			invocation_id: self.invocation_id.to_string(),
-			bash,
-			deadline_ms: self
-				.deadline
-				.saturating_duration_since(Instant::now())
-				.as_millis()
-				.try_into()
-				.unwrap_or(u64::MAX),
-			props: Default::default(),
-		};
 		match self.policy {
 			// A policy still pending at this point asks rather than allows.
-			Some(ApprovalPolicy::Prompt) | None => Some(query),
+			Some(ApprovalPolicy::Prompt) | None => Some(AdmitInvocation {
+				invocation_id: self.invocation_id.to_string(),
+				bash,
+				deadline_ms: self
+					.deadline
+					.saturating_duration_since(Instant::now())
+					.as_millis()
+					.try_into()
+					.unwrap_or(u64::MAX),
+				effects: Some(EffectEnvelope::from(effects)),
+				fetch: self.fetches.hosts().iter().map(Into::into).collect(),
+				fetch_unnamed: self.fetches.is_partly_unnamed(),
+				props: Default::default(),
+			}),
 			Some(ApprovalPolicy::Allow) => {
 				self
 					.answer(Admission {
@@ -1177,6 +1251,7 @@ mod tests {
 		apply_admission_patch, bash_ir, call_approval_mode, effective_approval_mode,
 		effects_narrow_or_refuse, github_mutation_targets, resolve_approval,
 	};
+	use crate::fetch_host::{FetchHost, NamedFetches};
 
 	const UNAVAILABLE: SandboxState =
 		SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };
@@ -1830,7 +1905,7 @@ mod tests {
 		assert!(gate.requires_external_answer(), "a pending gate streams nothing");
 		assert!(
 			gate
-				.push_fragment(r#"{"read_only":true}"#, cwd, root)
+				.push_fragment(r#"{"read_only":true}"#, cwd, root, &Effects::empty())
 				.is_none()
 		);
 		assert!(!gate.is_staged(), "fragments never stage a scoped gate");
@@ -1851,7 +1926,10 @@ mod tests {
 		gate.resolve_pending(ApprovalPolicy::Allow);
 		assert!(!gate.is_pending());
 		assert!(!gate.requires_external_answer());
-		assert!(gate.emit(cwd, root).is_none(), "an allowed call is answered internally");
+		assert!(
+			gate.emit(cwd, root, &Effects::empty()).is_none(),
+			"an allowed call is answered internally"
+		);
 		assert!(!gate.is_staged());
 		// A repeated commit after the query is ignored, never rescoped.
 		gate
@@ -1869,7 +1947,7 @@ mod tests {
 		gate.resolve_pending(ApprovalPolicy::Prompt);
 		gate.resolve_pending(ApprovalPolicy::Allow);
 		assert!(gate.requires_external_answer(), "a fixed policy is kept");
-		assert!(gate.emit(cwd, root).is_some());
+		assert!(gate.emit(cwd, root, &Effects::empty()).is_some());
 
 		let mut unresolved = scoped(ApprovalPolicy::Prompt);
 		assert!(
@@ -1887,7 +1965,7 @@ mod tests {
 		assert!(!allowed.requires_external_answer());
 		assert!(
 			allowed
-				.push_fragment(r#"{"read_only":false}"#, cwd, root)
+				.push_fragment(r#"{"read_only":false}"#, cwd, root, &Effects::empty())
 				.is_none()
 		);
 		assert!(
@@ -1912,6 +1990,64 @@ mod tests {
 			panic!("a denied maximum refuses");
 		};
 		assert_eq!(denial.code, "approval_policy_denied");
+	}
+
+	/// The query reports the envelope the staged call was judged by, the
+	/// hosts named for its fetches and whether some fetch reaches a host left
+	/// unnamed; what was named before the arguments were staged, or after the
+	/// query, is never reported.
+	#[test]
+	fn the_query_reports_the_judged_envelope_and_named_hosts() {
+		let (cwd, root) = (Path::new("/work"), Path::new("/work"));
+		let fetch = Effects { fetch: Some(FetchEffects { credentials: false }), ..Effects::empty() };
+		let docs = FetchHost::http("docs.rs", 443);
+		let mut gate = AdmissionGate::argument_scoped(
+			sf!("call"),
+			sf!("read"),
+			Duration::from_secs(1),
+			ApprovalPolicy::Prompt,
+		);
+		gate.name_fetch_hosts(NamedFetches::named([FetchHost::ssh("early")]));
+		gate
+			.stage(br#"{"path":"https://docs.rs/serde"}"#)
+			.expect("valid arguments");
+		gate.name_fetch_hosts(NamedFetches::named([docs.clone()]));
+		gate.resolve_pending(ApprovalPolicy::Prompt);
+		let query = gate.emit(cwd, root, &fetch).expect("a prompting call asks");
+		assert_eq!(query.effects, Some(EffectEnvelope::from(&fetch)));
+		assert_eq!(query.fetch, [omp_proto::policy::v1::FetchTarget::from(&docs)]);
+		assert!(!query.fetch_unnamed, "every host was named");
+		gate.name_fetch_hosts(NamedFetches::named([FetchHost::ssh("late")]));
+		assert!(gate.emit(cwd, root, &fetch).is_none(), "one query per call");
+
+		// A call that also reaches a host left unnamed keeps its named hosts.
+		let mut gate = AdmissionGate::argument_scoped(
+			sf!("call"),
+			sf!("read"),
+			Duration::from_secs(1),
+			ApprovalPolicy::Prompt,
+		);
+		gate
+			.stage(br#"{"path":"https://docs.rs/serde;issue://5"}"#)
+			.expect("valid arguments");
+		gate.name_fetch_hosts(NamedFetches::from_wire(
+			&[omp_proto::policy::v1::FetchTarget::from(&docs)],
+			true,
+		));
+		gate.resolve_pending(ApprovalPolicy::Prompt);
+		let query = gate.emit(cwd, root, &fetch).expect("a prompting call asks");
+		assert_eq!(query.fetch, [omp_proto::policy::v1::FetchTarget::from(&docs)]);
+		assert!(query.fetch_unnamed, "the unnamed remainder is reported beside the host");
+
+		// A call that does not fetch reports its envelope and no host.
+		let mut gate = AdmissionGate::new(sf!("call"), sf!("write"), Duration::from_secs(1));
+		let query = gate
+			.finalize(br#"{"path":"a.txt"}"#, cwd, root)
+			.expect("valid arguments")
+			.expect("a prompting call asks");
+		assert_eq!(query.effects, Some(EffectEnvelope::from(&Effects::empty())));
+		assert!(query.fetch.is_empty());
+		assert!(!query.fetch_unnamed);
 	}
 
 	#[test]
@@ -2078,6 +2214,7 @@ mod tests {
 					sf!("github"),
 					&network,
 					Confinement::Host,
+					&[],
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2120,6 +2257,7 @@ mod tests {
 					sf!("github"),
 					&network,
 					Confinement::Host,
+					&[],
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2133,6 +2271,7 @@ mod tests {
 				sf!("probe"),
 				&Effects::empty(),
 				Confinement::ExecSandbox,
+				&[],
 				DynamicInvocationSource::ShellDyn,
 				None,
 				CancellationToken::new(),
@@ -2151,6 +2290,7 @@ mod tests {
 					sf!("github"),
 					&network,
 					Confinement::Host,
+					&[],
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2212,6 +2352,7 @@ mod tests {
 					sf!("github"),
 					&pending_network,
 					Confinement::Host,
+					&[],
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2255,6 +2396,7 @@ mod tests {
 					sf!("github"),
 					&cancel_network,
 					Confinement::Host,
+					&[],
 					DynamicInvocationSource::ShellDyn,
 					None,
 					cancel_token,
@@ -2268,6 +2410,82 @@ mod tests {
 			Err(DynamicAdmissionError::Cancelled { .. })
 		));
 		assert!(route.pending().is_empty(), "cancelled prompt is withdrawn");
+	}
+
+	/// A `dyn` prompt offers the session for every requirement: one for the
+	/// target at its tier unless that tier is a fetch, and one `network`
+	/// requirement per host its fetches reach (the MCP server), or the
+	/// target's own when no host is named.
+	#[tokio::test]
+	async fn dynamic_prompts_offer_the_session_and_key_fetches_on_their_hosts() {
+		let fetch = Effects { fetch: Some(FetchEffects { credentials: true }), ..Effects::empty() };
+		let fetch_and_exec = Effects {
+			exec: Some(ToolExecEffects { commands: Arc::from([]), network: true }),
+			..fetch.clone()
+		};
+		let exec = Effects {
+			exec: Some(ToolExecEffects { commands: Arc::from([]), network: true }),
+			..Effects::empty()
+		};
+		let linear = [FetchHost::mcp("linear")];
+		let (route, inbox) = ApprovalRoute::new(Arc::new(ApprovalBook::new()), None);
+		let admission = DynamicAdmission::new(
+			explicit(ApprovalMode::AlwaysAsk),
+			SandboxState::Active,
+			BTreeMap::new(),
+			Some(route),
+		);
+		for (effects, hosts, expected) in [
+			(&fetch, &linear[..], vec![("network", "mcp:linear")]),
+			(&fetch, &[][..], vec![("network", "tool:linear/search")]),
+			(&fetch_and_exec, &linear[..], vec![("exec", "linear/search"), ("network", "mcp:linear")]),
+			(&exec, &linear[..], vec![("exec", "linear/search")]),
+		] {
+			let pending_admission = admission.clone();
+			let effects = effects.clone();
+			let hosts = hosts.to_vec();
+			let pending = tokio::spawn(async move {
+				pending_admission
+					.admit(
+						sf!("dyn-fetch"),
+						sf!("linear/search"),
+						&effects,
+						Confinement::Host,
+						&hosts,
+						DynamicInvocationSource::ShellDyn,
+						None,
+						CancellationToken::new(),
+					)
+					.await
+			});
+			let request = inbox.recv().await.expect("the target prompts");
+			assert_eq!(
+				request
+					.ticket
+					.reasons
+					.iter()
+					.map(|reason| (reason.kind.as_str(), reason.subject.as_str()))
+					.collect::<Vec<_>>(),
+				expected
+			);
+			for reason in &request.ticket.reasons {
+				assert_eq!(reason.scopes, [sf!("once"), sf!("session")]);
+			}
+			request
+				.respond(ApprovalDecision {
+					approved:   true,
+					scope:      ApprovalScope::Session,
+					source:     DecisionSource::User,
+					decided_by: None,
+					reason:     None,
+					audited:    false,
+				})
+				.expect("approval response accepted");
+			pending
+				.await
+				.expect("dynamic admission task")
+				.expect("approved target");
+		}
 	}
 
 	#[test]
