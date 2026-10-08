@@ -10,8 +10,13 @@ reasoned, UNCONFIRMED = not determined. Paths are under `crates/`. Not authorita
 
 - PR #167 holds: a project cfg overlay can only `set`/`reset` the five PROJECT convars;
   `bind`, `alias`, `exec` and all other commands are denied (`con/src/ctx.rs:1674-1721`).
-- No workspace trust exists. The only trust machinery (`ext/src/trust.rs`) covers installed
-  or plugin-packaged code, not bare repo files.
+- Workspace trust exists as data only (status at `705788b466`, 2026-10-08). `omp-ext` now has
+  `WorkspaceTrust`, the `[[workspace_trust]]` grant rows, `evaluate` and the gated-input
+  inventory with its digest (PR2, #191 and #196). Nothing outside `omp-ext` reads a trust
+  decision or the digest: the loaders in envd, driver and app import only the path names
+  from the inventory. No input is gated yet, so every finding below is still open. The other
+  trust machinery (`ext/src/trust.rs`) covers installed or plugin-packaged code, not bare repo
+  files.
 - A cloned repo can run code with the user's authority when `omp` starts in it, with no
   prompt: project MCP config (F1), repo-local LSP binaries and `lsp.json` (F3), native
   `.omp/extensions` with self-declared grants (F2), and model tool calls driven by repo
@@ -83,6 +88,13 @@ Static read of `driver/src/adw/{definition,production,mod}.rs`, `adw/src/profile
   invalid file echoes its parse error). The operator names the workflow, which is closer to
   running `make` in a clone than to F1-F3. Runs are not journaled and cannot resume (ADR 0001,
   ADR 0039), so nothing durable records what ran.
+- **Re-checked 2026-10-08 at `705788b466`.** F11a, F11b and F11d are unchanged: `run_command`
+  still spawns with a bare `Command::new(resolved)` and `adw_cmd::execute` still builds
+  `Ctx::new()`. F11c is narrower but not closed: `posture()` now takes the network scope from
+  `network_confinement` (what shell sessions get; an explicit sandbox `off` reports
+  `Unrestricted`), with tests, but a code phase is still not run under that confinement. The
+  workflow directory moved into the trust inventory (`WORKFLOWS_DIR`, `WORKFLOW_EXTENSION`), so
+  the digest covers `.omp/workflows`; `omp adw run` does not consult trust.
 - **Proposed fixes (not decided).** (1) Route command phases through the envd exec authority or
   `omp-sandbox` with the resolved posture, so the check describes what runs. (2) Resolve code-phase
   binaries from `$PATH` only, or give repo-local roots the F3 treatment. (3) Build the context with

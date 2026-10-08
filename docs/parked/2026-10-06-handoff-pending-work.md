@@ -20,6 +20,11 @@ verified in code or is only a recorded decision or intention.
 - #180 one contained reader for project files (`omp_core::project_file`).
 - #181 `Yolo` is honoured only inside an active sandbox unless the user chose it explicitly; the
   sandbox is on by default with `workspace-write`.
+- #187-#199 (2026-10-07, landed after this list was written; titles read, not re-verified): sandbox
+  network defaults to `scoped` (#187), network trouble is reported to the model (#188), env/v1 approval
+  relay frames and the daemon relay (#189, #190, #192, e2e #193), session-scoped network amendments
+  (#195, e2e #194), workspace trust rows and the gated-input inventory (#191, #196), the typed tool
+  confinement marker (#197), and `ssh://` `?op=exec` refused for read and grep (#199).
 
 ## 1. Security: project-sourced inputs
 
@@ -34,7 +39,10 @@ Open, in the order the owner approved the sequence:
    `inputs_digest` changes, driver plumbing, envd gating, `omp trust` and `--trust-workspace`, a
    TUI overlay (needs real-PTY proof through `.omp/tools/tui.ts`) and an approval floor.
    Subtree trust, if added, needs three rules: an explicit `omp trust --subtree`, refusing `/` and
-   `$HOME`, and a per-repo digest re-ask. Not started; design only.
+   `$HOME`, and a per-repo digest re-ask. Status at `705788b466` (2026-10-08): PR2 landed (#191 rows,
+   `evaluate` and a locked grant writer; #196 the gated-input inventory and digest). PR3 onward
+   (driver plumbing, envd gating, `omp trust`, the overlay, the approval floor) is not started: no
+   code outside `omp-ext` reads a trust decision, so nothing is gated.
 2. **Explicit MCP approval per workspace.** #178 is a single user-level switch. The owner asked
    that project MCP stay blocked until the user approves it explicitly, which the trust model above
    should provide. Also: `omp config mcp add --scope project` and `/mcp add` write servers that do
@@ -42,7 +50,8 @@ Open, in the order the owner approved the sequence:
    `tracing`, not to the TUI.
 3. **F11** (`omp adw run` workflows) was re-read on 2026-10-07 and re-rated Medium: code phases run
    unsandboxed with the full environment, the reported posture is not applied to them, and the command
-   ignores operator configuration (detail in the audit, "F11 detail"). Not started.
+   ignores operator configuration (detail in the audit, "F11 detail"). Still open at `705788b466`; `.omp/workflows` is in the trust
+   inventory, but `omp adw run` does not consult trust.
    **F2** native `.omp/extensions` with self-declared grants. **F3** LSP and DAP project config
    reading is now contained (#180) but launching repo-local binaries (`node_modules/.bin`,
    `.venv/bin`, `bin`) is not gated.
