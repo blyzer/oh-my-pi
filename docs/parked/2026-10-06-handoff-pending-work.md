@@ -38,6 +38,15 @@ verified in code or is only a recorded decision or intention.
   unknown, `exec` tier) in routes and CONTROL snapshots; a name with neither a live spec nor
   registry effects dispatches as unknown and `Host`-confined. ADR 0028 amendment (2026-10-08, undeclared
   effects); `docs/py/06-policy.md` closes its open discrepancy.
+- #207 (2026-10-08, implemented and tested in this session): the Linux `omp-envd --lib` and
+  `omp-vcs` failures. Two were real bugs: `docserver::fs` fsynced a cap-std `O_PATH` directory
+  handle (EBADF on Linux; it now reopens `.` read-only to sync), and a frozen write scope compared
+  a dev/inode pair the filesystem could reuse after the directory was removed (the scope now holds
+  an anchor descriptor). The rest were host assumptions made honest: the IPv6 relay test returns
+  on `EAFNOSUPPORT`, the reftable variant is skipped when git cannot create a reftable repository
+  (`omp_vcs::testing::supports_reftable`, git < 2.45), the detach test forces its index failure
+  with a directory instead of `chmod`, and the unreadable-directory patch test returns when
+  running as root can still list it.
 
 ## 1. Security: project-sourced inputs
 
@@ -112,9 +121,6 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
   with a `read_deny` root, `cat <root>/file` reads it. Fix: route builtin opens through
   `PathPolicy::open(path, Read)` (mirroring `Host::ensure_writable` for writes) and add an envd
   test that `cat <read_deny root>/file` ends `Denied`.
-- Five `omp-envd --lib` tests failed in the Linux container (frozen scope ancestor, `browser_relay`
-  ipv6, two `docserver::fs` tests that assume non-root, a `vcs` reftable test needing a newer git).
-  They were judged environmental and not baselined against `omp2`; CI is green.
 
 ## 3. Accounts
 
