@@ -25,6 +25,12 @@ verified in code or is only a recorded decision or intention.
   relay frames and the daemon relay (#189, #190, #192, e2e #193), session-scoped network amendments
   (#195, e2e #194), workspace trust rows and the gated-input inventory (#191, #196), the typed tool
   confinement marker (#197), and `ssh://` `?op=exec` refused for read and grep (#199).
+- #200-#204 (2026-10-07/08; titles read, not re-verified): the egress broker and the Linux relay
+  survive accept errors (#200), a `dyn` target's argument feed stays alive while it runs (#201),
+  memory `reflect` declares its inference and the daemon relays its synthesis to the issuing
+  session (#202, `crates/envd/src/reflection_relay.rs`), a `fetch` effect class with its own
+  approval tier between `read` and `write` (#203, ADR 0028 fetch tier amendment), and the parked
+  trust notes re-checked against `705788b466` with F11 re-rated Medium (#204).
 
 ## 1. Security: project-sourced inputs
 
@@ -88,13 +94,10 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
   were not exercised; the posture notice is posted on the first tool admission, so a session that never
   admits a tool never shows it; the bash tier rule was a name check (`"bash"`), now replaced by the
   typed `Confinement` marker on the tool contract (2026-10-07).
-- Memory `reflect` on the project daemon (2026-10-07, ADR 0028 memory reflect inference
-  amendment): `reflect@2` now declares one inference request and the driver binds an embedded
-  environment's reflection to the session's inference, but on the default attached path the
-  daemon runs `reflect` and cannot reach the issuing session, so it still answers with the
-  recalled evidence. Fix: relay the synthesis the way `EditRepairQuery` relays an edit repair (a
-  server query on the issuing connection, answered by the attached session through its bound
-  `reflection_bridge`), with a `SCHEMA_REV` bump and an attached-daemon test.
+- Memory `reflect` on the project daemon: done in #202. The daemon relays the synthesis to the
+  connection that issued the call (`reflection-relay`, `SCHEMA_REV` 21) and falls back to the
+  recalled evidence when that connection cannot answer (ADR 0028, memory reflect inference
+  amendment). Not covered there: `MnemopiSettings.llm_mode` is not consulted.
 - In-process utility builtins never consult the read policy (verified in code on 2026-10-07,
   predates branch `fix/sandbox-host-read-symlinks`): `cat_path` calls `File::open(resolved)`
   (`crates/shell-builtins/src/cat.rs`), `head` and `grep` do the same, and `Host::resolve` only
