@@ -6,7 +6,6 @@ use std::{
 	iter,
 	mem::size_of,
 	pin::Pin,
-	slice,
 	sync::Arc,
 	task::{Context, Poll},
 };
@@ -1044,7 +1043,10 @@ impl ProjectionCache {
 		Some(Arc::clone(&entry.value))
 	}
 
-	fn insert(&self, device_id: u32, key: &ProjectionKey, value: ProjectedVerdict) {
+	/// Retains `value` under `key` when it fits the cache budget. The cache is
+	/// an optimization only: it may decline a value, or evict it before the
+	/// next read, so callers keep their own handle to a value they need.
+	fn insert(&self, device_id: u32, key: &ProjectionKey, value: Arc<ProjectedVerdict>) {
 		let bytes = projected_part_bytes(&value.parts).saturating_add(value.visibility.iter().fold(
 			0,
 			|bytes, span| {
@@ -1056,7 +1058,6 @@ impl ProjectionCache {
 		if bytes > Self::MAX_PART_BYTES {
 			return;
 		}
-		let value = Arc::new(value);
 		let mut inner = self.inner.lock();
 		inner.clock = inner.clock.wrapping_add(1);
 		let used = inner.clock;
@@ -1116,13 +1117,6 @@ impl ProjectionWarm {
 	const fn ready(result: Result<(), RegistryError>) -> Self {
 		Self { result: Some(result) }
 	}
-
-	fn into_ready(mut self) -> Result<(), RegistryError> {
-		self
-			.result
-			.take()
-			.expect("projection warm future is consumed once")
-	}
 }
 
 impl Future for ProjectionWarm {
@@ -1148,10 +1142,6 @@ pub enum RegistryError {
 	/// space.
 	#[error("too many registered tool revisions for the projection cache")]
 	ProjectionCacheIdLimit,
-	/// A synchronous caller requested a projection which failed to warm its
-	/// cache entry.
-	#[error("projection cache remained cold for {0:?}")]
-	ProjectionCacheMiss(ToolIdentity),
 	/// Tool name is not registered.
 	#[error("unknown tool: {0}")]
 	UnknownTool(Str),
@@ -1291,6 +1281,13 @@ trait ErasedTool: Send + Sync {
 	fn call<'a>(&'a self, params: IncomingParams<'a>) -> ErasedStream<'a>;
 	fn project_cached(&self, key: &ProjectionKey) -> Option<Arc<ProjectedVerdict>>;
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict);
+	/// Returns the projection for `request`: the cached value, or one
+	/// rendered now. A rendered value is offered to the cache but returned
+	/// whether or not the cache keeps it.
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError>;
 	fn warm(&self, requests: &[ProjectionRequest<'_>]) -> ProjectionWarm;
 	fn authorize_visibility(
 		&self,
@@ -1408,7 +1405,21 @@ impl ErasedTool for HostTool {
 	}
 
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict) {
-		self.cache.insert(self.cache_id, key, projected);
+		self.cache.insert(self.cache_id, key, Arc::new(projected));
+	}
+
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
+		if let Some(projected) = self.cache.get(self.cache_id, &request.key) {
+			return Ok(projected);
+		}
+		let projected = Arc::new(self.project_fresh(request.verdict, request.recorded_useless)?);
+		self
+			.cache
+			.insert(self.cache_id, &request.key, Arc::clone(&projected));
+		Ok(projected)
 	}
 
 	fn warm(&self, requests: &[ProjectionRequest<'_>]) -> ProjectionWarm {
@@ -1416,12 +1427,7 @@ impl ErasedTool for HostTool {
 		let result = requests
 			.iter()
 			.filter(|request| request.key.identity == identity)
-			.filter(|request| self.cache.get(self.cache_id, &request.key).is_none())
-			.try_for_each(|request| {
-				let value = self.project_fresh(request.verdict, request.recorded_useless)?;
-				self.cache.insert(self.cache_id, &request.key, value);
-				Ok(())
-			});
+			.try_for_each(|request| self.project(request).map(drop));
 		ProjectionWarm::ready(result)
 	}
 
@@ -1502,7 +1508,17 @@ impl ErasedTool for Worker {
 	}
 
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict) {
-		self.cache.insert(self.cache_id, key, projected);
+		self.cache.insert(self.cache_id, key, Arc::new(projected));
+	}
+
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
+		self
+			.cache
+			.get(self.cache_id, &request.key)
+			.ok_or_else(|| external_error(&self.spec, "warm"))
 	}
 
 	fn warm(&self, _requests: &[ProjectionRequest<'_>]) -> ProjectionWarm {
@@ -1695,7 +1711,22 @@ impl<T: Tool> ErasedTool for Registered<T> {
 	}
 
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict) {
-		self.cache.insert(self.cache_id, key, projected);
+		self.cache.insert(self.cache_id, key, Arc::new(projected));
+	}
+
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
+		if let Some(projected) = self.cache.get(self.cache_id, &request.key) {
+			return Ok(projected);
+		}
+		let projected =
+			Arc::new(self.project_fresh(request.verdict, request.recorded_useless, request.caps)?);
+		self
+			.cache
+			.insert(self.cache_id, &request.key, Arc::clone(&projected));
+		Ok(projected)
 	}
 
 	fn warm(&self, requests: &[ProjectionRequest<'_>]) -> ProjectionWarm {
@@ -1703,13 +1734,7 @@ impl<T: Tool> ErasedTool for Registered<T> {
 		let result = requests
 			.iter()
 			.filter(|request| request.key.identity == identity)
-			.filter(|request| self.cache.get(self.cache_id, &request.key).is_none())
-			.try_for_each(|request| {
-				let value =
-					self.project_fresh(request.verdict, request.recorded_useless, request.caps)?;
-				self.cache.insert(self.cache_id, &request.key, value);
-				Ok(())
-			});
+			.try_for_each(|request| self.project(request).map(drop));
 		ProjectionWarm::ready(result)
 	}
 
@@ -3092,6 +3117,9 @@ impl Registry {
 	/// The durable `recorded_useless` hint is preserved for tool-owned `Ok` and
 	/// `Fault` branches. Harness-owned `Args` and `Aborted` branches always
 	/// force it false.
+	///
+	/// The projection cache only spares re-rendering: a projection it declines
+	/// (larger than its budget) or evicts concurrently is still returned.
 	pub fn project_verdict(
 		&self,
 		identity: &ToolIdentity,
@@ -3100,14 +3128,7 @@ impl Registry {
 		caps: &PromptCaps,
 	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
 		let request = self.projection_request(identity, verdict, recorded_useless, caps)?;
-		let entry = self.projection_tool(identity)?;
-		if let Some(projected) = entry.project_cached(&request.key) {
-			return Ok(projected);
-		}
-		entry.warm(slice::from_ref(&request)).into_ready()?;
-		entry
-			.project_cached(&request.key)
-			.ok_or_else(|| RegistryError::ProjectionCacheMiss(identity.clone()))
+		self.projection_tool(identity)?.project(&request)
 	}
 
 	/// Returns the live dispatcher's final source visibility receipt to the
@@ -3863,15 +3884,95 @@ mod tests {
 		let different =
 			ProjectionKey::new(&identity(1), b"{\"kind\":\"ok\"}", &caps(), [2; 32].into());
 		assert!(cache.get(0, &key).is_none());
-		cache.insert(0, &key, ProjectedVerdict {
-			parts:      Arc::<[Part]>::from([]),
-			visibility: Arc::from([]),
-			is_error:   false,
-			useless:    false,
-		});
+		cache.insert(
+			0,
+			&key,
+			Arc::new(ProjectedVerdict {
+				parts:      Arc::<[Part]>::from([]),
+				visibility: Arc::from([]),
+				is_error:   false,
+				useless:    false,
+			}),
+		);
 		let hit = cache.get(0, &key).expect("matching key hits");
 		assert!(Arc::ptr_eq(&hit, &cache.get(0, &key).expect("second matching key hits")));
 		assert!(cache.get(0, &different).is_none());
+	}
+
+	/// Projects every verdict as one text part of `bytes` bytes.
+	struct SizedProjection {
+		spec:  ToolSpec,
+		bytes: usize,
+	}
+
+	impl Tool for SizedProjection {
+		type Fault = Value;
+		type Params = Value;
+		type Payload = Value;
+		type Update = Value;
+
+		fn spec(&self) -> &ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			_params: IncomingParams<'c>,
+		) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+			futures::stream::empty()
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&Self::Payload, &Self::Fault>,
+			_caps: &PromptCaps,
+		) -> Vec<Part> {
+			vec![Part::Text { text: Str::new("x".repeat(self.bytes)) }]
+		}
+	}
+
+	/// The projection cache is an optimization, never the carrier: a
+	/// projection larger than its whole budget, which it declines to keep,
+	/// is still returned, and stays correct when rendered again.
+	#[test]
+	fn project_verdict_returns_projections_the_cache_declines() {
+		let bytes = ProjectionCache::MAX_PART_BYTES + 1;
+		let mut registry = Registry::new();
+		registry
+			.register(SizedProjection { spec: tool(1).spec, bytes }, Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/sized"),
+				replaces:   None,
+			})
+			.expect("sized projection registers");
+		let caps = PromptCaps {
+			maximum_parts:      u16::MAX,
+			maximum_text_bytes: u32::MAX,
+			media:              true,
+			dialect:            Dialect::Native,
+			model_class:        ModelClass::Standard,
+		};
+		let verdict = br#"{"kind":"ok","value":null}"#;
+		let request = registry
+			.projection_request(&identity(1), verdict, true, &caps)
+			.expect("projection request");
+		for attempt in ["first", "repeated"] {
+			let projected = registry
+				.project_verdict(&identity(1), verdict, true, &caps)
+				.unwrap_or_else(|error| panic!("{attempt} projection: {error}"));
+			let [Part::Text { text }] = projected.parts.as_ref() else {
+				panic!("{attempt} projection carries one text part: {:?}", projected.parts);
+			};
+			assert_eq!(text.len(), bytes, "{attempt} projection is whole");
+			assert!(!projected.is_error && projected.useless, "{attempt} projection keeps its branch");
+			assert!(
+				registry
+					.project_cached(&request.key)
+					.expect("cache probe")
+					.is_none(),
+				"the cache declined the {attempt} projection"
+			);
+		}
 	}
 
 	#[test]

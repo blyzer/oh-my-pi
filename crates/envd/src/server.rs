@@ -10000,10 +10000,17 @@ fn native_wire_parts(
 	wire
 }
 
+/// Model-facing text for a native verdict its tool could not project. The
+/// verdict itself is still the tool's own and is published unchanged.
+const UNPROJECTED_NATIVE_RESULT: &str =
+	"The tool finished, but its result could not be rendered for the model.";
+
 /// Publishes a native tool's terminal with the model-facing parts its own
 /// projection renders, as an in-process dispatch would (`Dispatcher::finish`),
 /// so an environment-run tool reaches the model with its result. A verdict its
-/// tool cannot project is published as an effects-unknown abort.
+/// tool cannot project is still published as the tool's own outcome, with a
+/// harness note in place of the parts: the call completed, so it is never
+/// reported as an abort with unknown effects.
 async fn send_native_outcome(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
@@ -10023,23 +10030,29 @@ async fn send_native_outcome(
 			) {
 				Ok(projected) => projected,
 				Err(error) => {
-					// The tool ran, but its verdict does not decode as its own
-					// outcome: what it did cannot be told to the model, as with
-					// worker media that cannot be published.
 					tracing::error!(
 						%error,
 						invocation_id = %invocation_id,
 						tool = %identity.name,
-						"could not project the native verdict before publication"
+						"could not project the native verdict; publishing it with a harness note"
 					);
-					send_abort_verdict(
+					// The client checks the error flag against the outcome's own
+					// branch, so it comes from the verdict, not the failure.
+					let is_error = !matches!(
+						serde_json::from_slice::<CallOutcome<serde::de::IgnoredAny, serde::de::IgnoredAny>>(
+							&verdict
+						),
+						Ok(CallOutcome::Ok(_))
+					);
+					send_verdict_json(
 						responses,
 						request_id,
 						invocation_id,
 						delivery,
-						omp_tool::Abort::EffectsUnknown {
-							reason: sf!("native verdict could not be projected"),
-						},
+						verdict,
+						vec![wire_text(UNPROJECTED_NATIVE_RESULT.to_owned())],
+						is_error,
+						false,
 					)
 					.await;
 					return;
@@ -12923,6 +12936,162 @@ mod tests {
 					serde_json::from_slice(&verdict.json).expect("inline CallOutcome");
 				assert!(!matches!(outcome, CallOutcome::Ok(_)));
 			}
+		}
+	}
+
+	const OK_VERDICT: &[u8] = br#"{"kind":"ok","value":null}"#;
+	const FAULTED_VERDICT: &[u8] = br#"{"kind":"faulted","value":null}"#;
+
+	/// A native tool whose projection is one text part of `bytes` bytes.
+	struct SizedProjection {
+		spec:  omp_tool::ToolSpec,
+		bytes: usize,
+	}
+
+	impl omp_tool::Tool for SizedProjection {
+		type Fault = serde_json::Value;
+		type Params = serde_json::Value;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			_params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			futures::stream::empty()
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: Str::new("x".repeat(self.bytes)) }]
+		}
+	}
+
+	/// A registry holding one [`SizedProjection`], and its identity.
+	fn sized_projection(bytes: usize) -> (Registry, ToolIdentity) {
+		let spec = omp_tool::ToolSpec {
+			name:            sf!("sized"),
+			rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+			description:     sf!("projects one sized text part"),
+			schema:          Bytes::from_static(br#"{"type":"object"}"#),
+			constraint:      omp_tool::Constraint::None,
+			effects:         Effects::empty(),
+			confinement:     Confinement::Host,
+			projection_code: [0; 32],
+		};
+		let identity = spec.identity();
+		let mut registry = Registry::new();
+		registry
+			.register(
+				SizedProjection { spec, bytes },
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the sized projection");
+		(registry, identity)
+	}
+
+	/// Publishes `json` as the native outcome of `identity` and returns the
+	/// verdict frame.
+	async fn publish_native_outcome(
+		blobs: &BlobHost,
+		registry: &Registry,
+		identity: &ToolIdentity,
+		output_request: omp_tool::OutputRequest,
+		json: &'static [u8],
+	) -> pb::Verdict {
+		let delivery = VerdictDelivery {
+			blobs: blobs.clone(),
+			retention_session: Some(Str::new_static("session-1")),
+			output_request,
+		};
+		let (responses, frames) = flume::unbounded();
+		send_native_outcome(
+			&responses,
+			7,
+			&Str::new_static("call-1"),
+			identity,
+			registry,
+			&delivery,
+			ErasedOutcome::Done { verdict: Bytes::from_static(json), useless: false },
+		)
+		.await;
+		let frame = frames.recv_async().await.expect("verdict frame");
+		let Some(server_frame::Body::Verdict(verdict)) = frame.body else {
+			panic!("expected a verdict frame");
+		};
+		verdict
+	}
+
+	/// The registry's shared projection cache keeps at most 4 MiB and declines
+	/// a larger projection. A native result that large still reaches the model:
+	/// whole under a complete output request, bounded under a bounded one. Its
+	/// completed call is never republished as an effects-unknown abort.
+	#[tokio::test]
+	async fn native_projections_the_cache_declines_still_reach_the_model() {
+		const PROJECTION_CACHE_BYTES: usize = 4 * 1024 * 1024;
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let (registry, identity) = sized_projection(PROJECTION_CACHE_BYTES + 1);
+		for output_request in [omp_tool::OutputRequest::Complete, omp_tool::OutputRequest::Bounded] {
+			let verdict =
+				publish_native_outcome(&blobs, &registry, &identity, output_request, OK_VERDICT).await;
+			assert_eq!(verdict.json.as_ref(), OK_VERDICT, "the tool's own outcome is published");
+			assert!(!verdict.is_error, "{output_request:?}: the verdict agrees with its outcome");
+			let text = verdict_text(&verdict);
+			assert!(text.bytes().all(|byte| byte == b'x'), "{output_request:?}: the tool's text");
+			match output_request {
+				omp_tool::OutputRequest::Complete => assert_eq!(
+					text.len(),
+					PROJECTION_CACHE_BYTES + 1,
+					"the whole projection reaches the model"
+				),
+				omp_tool::OutputRequest::Bounded => assert!(
+					!text.is_empty() && text.len() <= DEFAULT_RESULT_PROJECTION_BYTES,
+					"a bounded projection reaches the model: {} bytes",
+					text.len()
+				),
+			}
+		}
+	}
+
+	/// A native verdict its tool cannot project (here, one published under a
+	/// revision the registry does not hold) is still the tool's own completed
+	/// outcome: it is published unchanged, with its own error flag and a
+	/// harness note for the model, never as an effects-unknown abort.
+	#[tokio::test]
+	async fn unprojectable_native_verdicts_keep_their_own_outcome() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let (registry, identity) = sized_projection(1);
+		let unregistered =
+			ToolIdentity { name: identity.name, rev: omp_tool::Rev { family: Str::default(), n: 2 } };
+		for (json, is_error) in [(OK_VERDICT, false), (FAULTED_VERDICT, true)] {
+			let verdict = publish_native_outcome(
+				&blobs,
+				&registry,
+				&unregistered,
+				omp_tool::OutputRequest::Bounded,
+				json,
+			)
+			.await;
+			assert_eq!(verdict.json.as_ref(), json, "the tool's own outcome is published");
+			assert_eq!(verdict.is_error, is_error, "the error flag follows the outcome");
+			assert_eq!(verdict_text(&verdict), UNPROJECTED_NATIVE_RESULT);
 		}
 	}
 
