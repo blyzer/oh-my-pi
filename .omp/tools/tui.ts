@@ -790,19 +790,47 @@ function sleep(ms: number): Promise<null> {
 	return promise;
 }
 
+/**
+ * The quit chord `stop` delivers, doubled. A host that quits on the first
+ * `C-c` ignores the repeat; `omp chat` quits only on a second `C-c` within
+ * 500 ms (`omp_chat::ctrl_c_action`), so the debug `quit` op's single `C-c`
+ * merely clears its draft. One `keys` request lands both chords in the
+ * host's mailbox back to back, inside that window whatever the socket
+ * latency or host load — two `quit` requests would race it.
+ */
+const QUIT_KEYS = "C-c C-c";
+
+/** How long `stop` waits on each quit rung before the next (SIGKILL last). */
+const STOP_RUNG_MS = 1_000;
+
 async function stopSession(session: Session): Promise<number | null> {
+	const settle = (ms: number) => Promise.race([session.proc.exited, sleep(ms)]);
 	try {
 		if (session.sock) {
-			await request(session, { op: "quit" }, 2_000);
+			await request(session, { op: "keys", keys: QUIT_KEYS }, 2_000);
 		} else if (session.exit === null) {
 			// Non-omp-tui apps have no debug socket; Ctrl-C is the
-			// conventional quit chord.
-			session.proc.terminal.write("\x03");
+			// conventional quit chord, doubled in one write for hosts that
+			// quit only on a repeat.
+			session.proc.terminal.write("\x03\x03");
 		}
 	} catch {
-		// Fall through to signals.
+		// A host that quits on the first chord may close the socket before
+		// answering; the exit wait and signals below settle it either way.
 	}
-	const exited = await Promise.race([session.proc.exited, sleep(2_000)]);
+	let exited = await settle(session.sock ? STOP_RUNG_MS : 2 * STOP_RUNG_MS);
+	if (exited === null && session.sock) {
+		// Second rung, the debug `quit` op. The native host (`omp --gui`,
+		// `crates/app/src/gui.rs`) takes it as a lifecycle close, which also
+		// leaves past a modal overlay that swallows `C-c`; a terminal host
+		// takes it as one more `C-c`.
+		try {
+			await request(session, { op: "quit" }, STOP_RUNG_MS);
+		} catch {
+			// As above: a closing host may drop the socket unanswered.
+		}
+		exited = await settle(STOP_RUNG_MS);
+	}
 	if (exited === null) {
 		session.proc.kill("SIGKILL");
 		await session.proc.exited.catch(() => {});
@@ -1098,7 +1126,10 @@ const factory = (omp: ToolHost) => {
 			"(cols,rows delivered via SIGWINCH), raw (exact captured byte stream: " +
 			"escape-sequence stats + escaped tail — prefer text/screen unless " +
 			"auditing escapes), shot (pixel screenshot of the emulated screen — real " +
-			"colors/styles as a PNG image, rasterized in-process), stop, list. " +
+			"colors/styles as a PNG image, rasterized in-process), stop (sends " +
+			"C-c C-c — omp chat quits only on a repeat — then after 1 s the debug " +
+			"quit op, which closes the native --gui host, then SIGKILL after 2 s), " +
+			"list. " +
 			"Input ops (keys/type/paste/mouse/send/" +
 			"resize) return an after-screenshot of the resulting display (quiet:true " +
 			"skips it). Sessions persist across calls; injected input rides the " +
