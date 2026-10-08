@@ -377,13 +377,18 @@ impl ShellDynHost for DynHost {
 					.map_err(|error| DynFault::new(error.to_string()))?;
 				let raw = Str::new(args.to_string());
 				let args_json = Bytes::from(raw.clone());
+				// The registry reads a dropped feed as an aborted invocation, so a
+				// native target's feed must outlive its stream; otherwise a target
+				// that awaits its committed arguments aborts with `InputDropped`.
+				let mut feed = None;
 				let mut stream = match target.route.clone() {
 					ToolRoute::Native => {
-						let (feed, params) =
+						let (committed, params) =
 							IncomingParams::channel_for(None, Some(invocation_id.clone()));
-						feed.args_committed(raw).map_err(|_| {
+						committed.args_committed(raw).map_err(|_| {
 							DynFault::new("device argument channel closed before dispatch")
 						})?;
+						feed = Some(committed);
 						registry
 							.invoke_device(&path, params)
 							.map_err(|error| DynFault::new(format!("device dispatch failed: {error}")))?
@@ -408,7 +413,10 @@ impl ShellDynHost for DynHost {
 							.await
 					},
 				};
-				consume(&registry, &self.blobs, &identity, &mut stream, cancellation).await
+				let output =
+					consume(&registry, &self.blobs, &identity, &mut stream, cancellation).await;
+				drop(feed);
+				output
 			}
 			.await;
 			if let Ok(call) = &result {
@@ -757,6 +765,16 @@ mod tests {
 				})
 				.expect("register target");
 		}
+		dyn_host_over(scratch, registry, admission)
+	}
+
+	/// A `dyn` host over `registry`'s devices; the caller keeps the returned
+	/// registry alive.
+	fn dyn_host_over(
+		scratch: &Path,
+		registry: Registry,
+		admission: DynamicAdmission,
+	) -> (DynHost, Arc<Registry>) {
 		let registry = Arc::new(registry);
 		let catalog = DeviceCatalog::default();
 		catalog
@@ -872,5 +890,74 @@ mod tests {
 			.await
 			.expect("a sandboxed target keeps the sandbox-kept yolo");
 		assert_eq!(sandboxed.load(Ordering::Relaxed), 1);
+	}
+
+	/// A real native target that awaits its committed arguments settles
+	/// through `dyn`: `reflect` with nothing bound answers with the recalled
+	/// evidence instead of aborting because its feed was dropped.
+	#[tokio::test]
+	async fn a_dyn_reflect_answers_instead_of_aborting() {
+		use omp_memory::{
+			MemoryBackend, MemoryRuntime, MnemopiSettings,
+			config::EmbeddingVariant,
+			runtime::{RuntimeStart, SaveRequest},
+		};
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let runtime = MemoryRuntime::start(RuntimeStart {
+			session_id:             sf!("dyn-reflect"),
+			data_dir:               scratch.path().join("data"),
+			workspace_root:         scratch.path().to_path_buf(),
+			canonical_primary_root: Some(scratch.path().to_path_buf()),
+			backend:                MemoryBackend::Mnemopi,
+			mnemopi:                MnemopiSettings {
+				embedding_variant: EmbeddingVariant::Disabled,
+				..MnemopiSettings::default()
+			},
+		})
+		.expect("Mnemopi runtime");
+		runtime
+			.save_batch(
+				&[SaveRequest { content: "The deploy target is fly.io", context: None }],
+				"dyn-reflect",
+				0.75,
+			)
+			.expect("retain the fact");
+		let mut registry = Registry::new();
+		registry
+			.register(
+				omp_tools::memory::reflect_tool(
+					runtime,
+					Arc::new(crate::memory::ReflectionBridgeHost::new()),
+				),
+				Presentation::Device,
+				Claims {
+					precedence: Precedence::ENHANCEMENT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register reflect");
+		let admission = DynamicAdmission::new(
+			crate::admission::ConfiguredApproval {
+				mode:       ApprovalMode::Yolo,
+				provenance: crate::admission::Provenance::Explicit,
+			},
+			crate::admission::SandboxState::Off,
+			std::collections::BTreeMap::new(),
+			None,
+		);
+		let (host, _registry) = dyn_host_over(scratch.path(), registry, admission);
+		let output = ShellDynHost::call(
+			&host,
+			"reflect",
+			json!({ "query": "deploy target", "i": "Proving dyn settles" }),
+			CancellationToken::new(),
+		)
+		.await
+		.expect("reflect answers");
+		let output = format!("{:?}", output.output);
+		assert!(!output.contains("aborted"), "{output}");
+		assert!(output.contains("Based on recalled memories"), "{output}");
 	}
 }
