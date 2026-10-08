@@ -67,9 +67,14 @@ Static read of `driver/src/adw/{definition,production,mod}.rs`, `adw/src/profile
 - **F11c (VERIFIED) The reported posture is not applied to code phases.** `posture()` derives
   write, network and approval scope from the sandbox convars and the sandbox probe, and the
   domain compares each phase's `requires` against it (`Requirement::check`, `adw/src/profile.rs`).
-  A code phase never goes through the sandbox, so a phase that declares `requires` of
-  `workspace-write` or `network = "disabled"` passes the check on a default host and then runs
-  unconfined. That is the outcome the module doc rules out ("a workflow that believes it ran
+  A code phase never goes through the sandbox, so whatever the check admits runs unconfined. On
+  a default host where the sandbox is constructed the posture is `workspace-write` with
+  `scoped` network, so a phase that declares `write = "workspace-write"` or
+  `network = "scoped"` passes and then runs unconfined; with `sv_sandbox_network_mode disabled`
+  set, `network = "disabled"` passes too. Under the defaults `network = "disabled"` is refused
+  (`a_phase_requiring_no_network_is_refused_under_the_default_posture`,
+  `driver/src/adw/production.rs`), and on a host where the sandbox cannot be constructed the
+  posture is unconfined, so every declared requirement is refused. That is the outcome the module doc rules out ("a workflow that believes it ran
   confined when it did not"). `requires` is itself declared in the project file, and an unset
   field means no check. ADR 0039 B5 states the intended rule: admissibility uses the sandbox the
   worker actually enforced, "never self-described intentions".
