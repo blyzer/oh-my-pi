@@ -209,14 +209,25 @@ impl Project {
 
 	/// Attaches one session composition the way the application does.
 	async fn attach(&self, mode: Option<ApprovalMode>) -> ProjectEnvironment {
+		self.attach_spawning(mode, None).await
+	}
+
+	/// Attaches like [`Self::attach`], knowing that a daemon spawned for the
+	/// project would enforce `spawn_policy`.
+	async fn attach_spawning(
+		&self,
+		mode: Option<ApprovalMode>,
+		spawn_policy: Option<omp_env::project_state::DaemonPolicy>,
+	) -> ProjectEnvironment {
 		ProjectEnvironment::attach(&self.root, &self.state, AttachOptions {
-			py_eval:            false,
-			approval_mode:      mode,
+			py_eval: false,
+			approval_mode: mode,
 			trusted_extensions: Vec::new(),
 			contributed_values: Vec::new(),
-			con:                Arc::clone(&self.con),
-			bridges:            RegistryBridges::default(),
+			con: Arc::clone(&self.con),
+			bridges: RegistryBridges::default(),
 			spawn_idle_timeout: Some(2),
+			spawn_policy,
 		})
 		.await
 		.expect("environment")
@@ -588,12 +599,6 @@ async fn active_sandbox_denied_write_prompts_an_amendment_and_refusal_writes_not
 /// the command.
 #[cfg(target_os = "macos")]
 mod attached_daemon {
-	use omp_core::{Principal, sf};
-	use omp_envd::{EnvServer, exthost::ConvarControlFactory, worker::ExtHostConfig};
-	use omp_tool::Registry;
-	use tokio::{net::UnixStream, task::JoinHandle};
-	use tokio_util::sync::CancellationToken;
-
 	use super::*;
 	pub use crate::support::InProcessDaemon;
 
@@ -899,9 +904,11 @@ mod session_network_grants {
 		host.abort();
 	}
 
-	/// A session attached to a daemon whose broker may reach loopback.
+	/// A session attached to a daemon whose broker may reach loopback; the
+	/// session resolves the same policy, or it would not join that daemon.
 	async fn attached_grants(leave: Leave) {
-		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		project.con = loopback_context();
 		let port = loopback_upstream();
 		let _daemon = InProcessDaemon::serve(&project.root, &project.state, loopback_context()).await;
 		let environment = attached(&project).await;
@@ -1410,5 +1417,170 @@ mod fetch_host_grants {
 			Vec::new(),
 		]);
 		assert_eq!(probe.ran.load(Ordering::Relaxed), calls, "every approved call ran");
+	}
+}
+
+/// A project daemon fixes its sandbox and approval policy when it starts, so a
+/// session never runs its tools on a daemon whose policy differs from the one
+/// its own control context resolves: the environment socket is keyed by that
+/// policy, and the session checks the policy every daemon reports in its hello
+/// before attaching. A session with no daemon of its policy (this test binary
+/// cannot be spawned as one) runs an embedded environment under its own
+/// policy instead.
+mod policy_keyed_daemons {
+	use omp_env::project_state::DaemonPolicy;
+	use omp_envd::daemon_policy;
+
+	use super::*;
+	use crate::support::InProcessDaemon;
+
+	/// The policy the daemon an attached session joined reported in its hello.
+	fn joined_policy(environment: &ProjectEnvironment) -> Option<DaemonPolicy> {
+		let hello = environment
+			.client()
+			.info()
+			.expect("the session completed its hello");
+		DaemonPolicy::from_wire(&hello.policy_digest)
+	}
+
+	/// Daemons of two policies serve one project side by side, and a session
+	/// of each policy joins the one that enforces it.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn each_policy_joins_its_own_daemon_of_one_project() {
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let _sandboxed = InProcessDaemon::serve(
+			&project.root,
+			&project.state,
+			context(ExecSandboxMode::WorkspaceWrite),
+		)
+		.await;
+		let _unconfined =
+			InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off)).await;
+
+		for sandbox in [ExecSandboxMode::WorkspaceWrite, ExecSandboxMode::Off] {
+			project.con = context(sandbox);
+			let environment = project.attach(None).await;
+			assert!(
+				environment.fallback_notice.is_none(),
+				"the {sandbox} session did not join its daemon: {:?}",
+				environment.fallback_notice
+			);
+			assert_eq!(
+				joined_policy(&environment),
+				Some(daemon_policy::from_con(&project.con)),
+				"the {sandbox} session joined a daemon enforcing another policy"
+			);
+		}
+	}
+
+	/// A daemon reached on the session's own socket that reports another
+	/// policy is refused: the session runs embedded, and the notice names both
+	/// policies.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_daemon_reporting_another_policy_is_never_joined() {
+		let project = Project::new(ExecSandboxMode::Off);
+		let session = daemon_policy::from_con(&project.con);
+		let daemon = context(ExecSandboxMode::WorkspaceWrite);
+		let served = daemon_policy::from_con(&daemon);
+		assert_ne!(session, served);
+		let _misplaced = InProcessDaemon::serve_at(
+			&project.root,
+			&project.state,
+			daemon,
+			omp_env::project_state::environment_socket(&project.state, &session)
+				.expect("environment socket"),
+		)
+		.await;
+
+		let environment = project.attach(None).await;
+		let notice = environment
+			.fallback_notice
+			.expect("the session joined a daemon enforcing another policy");
+		assert!(
+			notice.contains(&format!(
+				"enforces sandbox and approval policy {served}, not this session's {session}"
+			)),
+			"the refusal names both policies: {notice}"
+		);
+	}
+
+	/// A session whose policy comes from settings no configuration file holds
+	/// (`--add-dir` roots, an agent class) spawns no daemon: one would resolve
+	/// the configured policy, so the session could never join it, and it runs
+	/// embedded at once with a notice naming both policies.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_session_spawns_no_daemon_it_could_never_join() {
+		let project = Project::new(ExecSandboxMode::Off);
+		let session = daemon_policy::from_con(&project.con);
+		let configured = daemon_policy::from_con(&context(ExecSandboxMode::WorkspaceWrite));
+		assert_ne!(session, configured);
+		let spawn_log = project.state.join("envd.log");
+
+		let environment = project.attach_spawning(None, Some(configured)).await;
+		let notice = environment
+			.fallback_notice
+			.expect("no daemon enforces the session's policy");
+		assert!(
+			notice.contains(&format!(
+				"policy {configured} from the configuration files, not this session's {session}"
+			)),
+			"the notice names both policies: {notice}"
+		);
+		assert!(!spawn_log.exists(), "a daemon the session could never join was spawned");
+
+		// When the configuration files hold the session's own policy a daemon
+		// is spawned (this test binary cannot serve as one, so the session
+		// still runs embedded).
+		let environment = project.attach_spawning(None, Some(session)).await;
+		assert!(environment.fallback_notice.is_some());
+		assert!(spawn_log.exists(), "the session spawned no daemon of its own policy");
+	}
+
+	/// The reported case: a daemon started under the shipped `workspace-write`
+	/// keeps serving the project, and a session configured with
+	/// `sv_sandbox_mode off` must not have `bash` confined and auto-approved
+	/// there. Its own posture holds: the default `yolo` without a sandbox is
+	/// `write`, so the command prompts and, refused, never runs.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_sandbox_off_session_never_runs_on_a_sandboxed_daemon() {
+		let project = Project::new(ExecSandboxMode::Off);
+		let _daemon = InProcessDaemon::serve(
+			&project.root,
+			&project.state,
+			context(ExecSandboxMode::WorkspaceWrite),
+		)
+		.await;
+		let environment = project.attach(None).await;
+		let joined = environment.fallback_notice.is_none();
+		let Turn { session, result, landed, .. } = project
+			.turn(environment, "bash", bash_call, "landed.txt", None, false)
+			.await;
+		let tickets = prompts(&session);
+		assert_eq!(tickets.len(), 1, "the unconfined shell must prompt once: {tickets:?}");
+		assert_eq!(tickets[0].reasons[0].kind.as_str(), "exec");
+		assert!(!landed, "a refused command never ran: {result}");
+		assert!(!joined, "the session joined the sandboxed daemon");
+	}
+
+	/// The reverse: a session expecting the shipped sandbox never runs its
+	/// commands unconfined on a daemon started with `sv_sandbox_mode off`. Its
+	/// own active sandbox keeps the default `yolo`, so the command runs
+	/// confined without a prompt.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_sandboxed_session_never_runs_on_an_unconfined_daemon() {
+		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let _daemon =
+			InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off)).await;
+		let environment = project.attach(None).await;
+		let joined = environment.fallback_notice.is_none();
+		let Turn { session, result, landed, .. } = project
+			.turn(environment, "bash", bash_call, "landed.txt", None, false)
+			.await;
+		let tickets = prompts(&session);
+		assert!(tickets.is_empty(), "a confined default yolo never prompts: {tickets:?}");
+		assert!(landed, "bash ran inside the session's own sandbox: {result}");
+		assert!(!joined, "the session joined the unconfined daemon");
 	}
 }

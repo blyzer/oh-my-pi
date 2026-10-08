@@ -213,7 +213,7 @@ OS Host
 
 | Channel / Boundary | Transport | Wire Format / Serialization | Address Convention |
 |---|---|---|---|
-| **Client ↔ `envd`** | UDS / Named Pipe | Varint length-delimited Protobuf (`omp.env.v1`) | `<state_dir>/<build_id>-env` (build-keyed) |
+| **Client ↔ `envd`** | UDS / Named Pipe | Varint length-delimited Protobuf (`omp.env.v1`) | `/tmp/omp-<uid>-<state>-<build>-<key>-env.sock` (build- and policy-keyed; the policy enters `<key>` under a project-private key) |
 | **Client/Envd ↔ `docserver`** | UDS / Named Pipe | Length-delimited Protobuf | `<state_dir>/doc` (build-stable) |
 | **Client ↔ `omp serve`** | UDS / TCP | gRPC via Tonic (`prost`) | `<data_dir>/omp.sock` or `http://<addr>:<port>` |
 | **IDE ↔ `omp rpc`** | Stdio Pipes | JSON-RPC 2.0 (newline-delimited JSON) | Child process stdin/stdout |
@@ -229,7 +229,7 @@ OS Host
 | Relationship | Cardinality | Discovery / Lifecycle | Architectural Rationale |
 |---|---|---|---|
 | **Client ↔ `envd` Daemon** | **N - 1** | Clients connect via canonical root-hash UDS. | Centralizes authority over workspace files and persistent processes; prevents lock contention across concurrent terminals. |
-| **Project Root ↔ `envd`** | **1 - 1** *(per build)* | Derived from canonical root directory (`Hash32::sum`). | Strict workspace isolation. Build-keyed sockets allow zero-downtime compiler upgrades. |
+| **Project Root ↔ `envd`** | **1 - 1** *(per build and sandbox/approval policy)* | Derived from canonical root directory (`Hash32::sum`). | Strict workspace isolation. Build-keyed sockets allow zero-downtime compiler upgrades; policy-keyed sockets keep a client off a daemon whose sandbox or approval configuration differs. |
 | **Client Session ↔ `Kernel`** | **1 - 1** | 1 active turn loop per interactive session. | Encapsulates turn lifecycle, prompt token budgets, and local conversation context. |
 | **Kernel ↔ Subagents (`task`)** | **1 - N** | Driver spawns child `Kernel` instances tracked in DOM `<job>` tags. | Parallel execution of decoupled coding slices without polluting parent context. |
 | **Subagent ↔ Subagent (`hub`)** | **N - N** | Peer-to-peer message routing via `SessionHub`. | Direct coordination and workpool synchronization between concurrent subagents. |

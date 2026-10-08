@@ -1842,6 +1842,7 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 		con:                Arc::clone(&con),
 		bridges:            omp_envd::RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
+		spawn_policy:       None,
 	})
 	.await
 	.expect("environment");

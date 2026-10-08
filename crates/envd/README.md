@@ -118,7 +118,11 @@ client and framing boundary; it does not contain an alternate host.
   daemon command's `dyn` admissions and privileged mutations still fail
   closed.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
-  build-keyed detached daemon and composes session-only tools locally.
+  detached daemon keyed by its build and by the session's sandbox and approval
+  policy (`daemon_policy`), checks the policy that daemon reports in its hello,
+  and composes session-only tools locally. It spawns no daemon whose
+  configured policy (`AttachOptions::spawn_policy`) differs from the session's,
+  and a spawn forwards the session's profile.
 
 ## Document authority (docserver module)
 
@@ -154,7 +158,15 @@ declaration that needs dynamic values into the user-level `~/.o2/mcp.json`.
 
 ## Philosophy
 
-Each project and executable generation has one detached environment daemon.
+Each project, executable generation and daemon policy has one detached
+environment daemon. A daemon compiles its command sandbox, egress broker and
+approval posture from the control context it starts under and keeps them, so
+the policy digest (`daemon_policy`: every `sv_sandbox_*` setting,
+`sv_tools_approval_mode` with its provenance, `sv_tools_approval`,
+`sv_shell_command_prefix` and `sv_fetch_enabled`) keys its socket, under a key
+private to the project so the name never reveals the policy, and rides every
+`ServerHello`; a client never joins a daemon that reports another policy and
+runs an embedded host under its own instead.
 Environment-locus tools — including opt-in `py_eval` — and filesystem,
 process, document, browser, debugger, and memory effects execute there.
 Session-locus tools, client-layer extension hosts, MCP, presenters, and agent
@@ -163,7 +175,8 @@ controls stay in the attaching process behind the same partitioned
 embedded full host is used only as a loud spawn fallback or by explicitly
 isolated compositions.
 
-The document socket is build-stable while environment sockets are build-keyed.
+The document socket is build- and policy-stable while environment sockets are
+build- and policy-keyed.
 `DocumentHost` reconnects after a server restart, and a surviving current-build
 environment may rehost the document authority without invalidating its clones.
 A stale-build daemon drains without rehosting and releases authority as soon as

@@ -22,7 +22,9 @@ use omp_agent::{
 use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
 use omp_con::Ctx;
 use omp_core::{Hash32, Str, Ulid, sf};
-use omp_env::{EnvClient, InProcessEnvTransport, partition::FramePipe};
+use omp_env::{
+	EnvClient, InProcessEnvTransport, partition::FramePipe, project_state::DaemonPolicy,
+};
 use omp_journal::blob;
 use omp_proto::{
 	blob::v1 as blob_pb,
@@ -399,6 +401,42 @@ pub enum EnvdError {
 		/// Canonical project path whose authority is held.
 		path: PathBuf,
 	},
+	/// The project daemon on the environment socket enforces a different
+	/// sandbox and approval policy than the client resolved, so the client
+	/// must not run its tools there.
+	#[error(
+		"the project daemon at {socket:?} enforces sandbox and approval policy {served}, not this \
+		 session's {expected}"
+	)]
+	DaemonPolicyMismatch {
+		/// Environment socket the daemon answered on.
+		socket:   PathBuf,
+		/// Policy the client resolved from its own control context.
+		expected: DaemonPolicy,
+		/// Policy the daemon reported in its hello.
+		served:   DaemonPolicy,
+	},
+	/// The project daemon on the environment socket reported no sandbox and
+	/// approval policy, so the client cannot tell what it enforces.
+	#[error("the project daemon at {socket:?} reports no sandbox and approval policy")]
+	DaemonPolicyUnreported {
+		/// Environment socket the daemon answered on.
+		socket: PathBuf,
+	},
+	/// A project daemon spawned now would resolve another sandbox and approval
+	/// policy from the configuration files than the client's own, which holds
+	/// in-process settings the daemon never sees, so none was spawned.
+	#[error(
+		"a project daemon spawned for this session would enforce sandbox and approval policy \
+		 {spawnable} from the configuration files, not this session's {expected}, which also holds \
+		 settings made in this process (such as `--add-dir` roots, a cfg script or an agent class)"
+	)]
+	DaemonPolicyNotSpawnable {
+		/// Policy the client resolved from its own control context.
+		expected:  DaemonPolicy,
+		/// Policy `omp envd` resolves from the configuration files alone.
+		spawnable: DaemonPolicy,
+	},
 }
 
 impl From<DocumentError> for EnvdError {
@@ -438,6 +476,8 @@ pub struct ServerIdentity {
 	pub server_version: Str,
 	/// Executable-generation identity of the serving environment.
 	pub server_build:   Str,
+	/// Sandbox and approval policy the serving environment enforces.
+	pub policy:         DaemonPolicy,
 }
 
 /// Per-connection transport and exact DATA grant bounds.
@@ -2548,6 +2588,8 @@ impl EnvServer {
 		)?;
 		let (host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
+		let enforced =
+			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		let mcp_settings = McpSettings::from_con(con);
 		mcp.start_native_configs(mcp_settings.enable_project_config)
@@ -2616,6 +2658,7 @@ impl EnvServer {
 			server_epoch:   hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
 			server_build:   Str::from(omp_env::build_id::current()),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -2836,6 +2879,8 @@ impl EnvServer {
 		)?;
 		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
+		let enforced =
+			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		host_settings.tools = host_settings
 			.tools
@@ -2907,6 +2952,7 @@ impl EnvServer {
 			server_epoch:   hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
 			server_build:   Str::from(omp_env::build_id::current()),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -3058,8 +3104,10 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, _sandbox_settings) =
+		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
+		let enforced =
+			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
 		host_settings.tools = host_settings
 			.tools
 			.with_approval_mode_override(approval_mode);
@@ -3132,6 +3180,7 @@ impl EnvServer {
 			server_epoch:   owner_info.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
 			server_build:   Str::from(owner_info.server_build),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -4069,6 +4118,7 @@ impl EnvServer {
 					root_uri:       self.identity.root_uri.to_string(),
 					server_epoch:   self.identity.server_epoch.clone(),
 					server_build:   self.identity.server_build.to_string(),
+					policy_digest:  Bytes::copy_from_slice(self.identity.policy.digest().as_bytes()),
 					props:          Default::default(),
 				}),
 			))
@@ -12212,9 +12262,13 @@ pub async fn run_with_registry(
 		omp_env::project_state::directory(&data_dir, &root)?
 	};
 	ensure_directory(&state_dir)?;
-	let socket = args
-		.socket
-		.unwrap_or_else(|| omp_env::project_state::environment_socket(&state_dir));
+	let socket = match args.socket {
+		Some(socket) => socket,
+		None => omp_env::project_state::environment_socket(
+			&state_dir,
+			&crate::daemon_policy::from_con(&con),
+		)?,
+	};
 	let require_document_ownership = args.docserver_socket.is_none();
 	let docserver_socket = if let Some(socket) = args.docserver_socket {
 		socket
@@ -13516,6 +13570,7 @@ mod tests {
 				server_epoch:   hello.server_epoch,
 				server_version: sf!("test"),
 				server_build:   sf!("envd-test"),
+				policy:         crate::daemon_policy::from_con(&Ctx::new()),
 			},
 			Some(EnvironmentAuthorities {
 				documents,

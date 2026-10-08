@@ -125,6 +125,12 @@ impl ProductionCompressHost {
 				con:                Arc::clone(&ctx),
 				bridges:            omp_envd::RegistryBridges::default(),
 				spawn_idle_timeout: None,
+				// This host's own context loads no configuration, so under a
+				// configured policy it runs embedded rather than spawn a daemon
+				// it could never join.
+				spawn_policy:       crate::cfg::CfgFiles::new(Some(&root))
+					.ok()
+					.and_then(|files| files.daemon_policy().ok()),
 			})
 			.await?;
 		let documents = environment.client().clone();

@@ -1989,6 +1989,7 @@ async fn opt_in_py_eval_is_environment_routed_and_uses_a_fresh_namespace() {
 		con:                Arc::new(omp_con::Ctx::new()),
 		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
+		spawn_policy:       None,
 	})
 	.await
 	.expect("start py_eval environment");
@@ -2535,6 +2536,7 @@ async fn python_extension_data_reads_and_writes_live_workspace_only_during_invoc
 		con:                Arc::new(omp_con::Ctx::new()),
 		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
+		spawn_policy:       None,
 	})
 	.await
 	.expect("start extension DATA environment");
@@ -3480,6 +3482,7 @@ async fn owner_client_lsp_status_reports_discovered_workspace_roster() {
 		con:                Arc::new(omp_con::Ctx::new()),
 		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
+		spawn_policy:       None,
 	})
 	.await
 	.expect("start project environment");

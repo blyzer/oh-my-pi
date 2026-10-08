@@ -182,6 +182,7 @@ async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 		con:                Arc::clone(&con),
 		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
+		spawn_policy:       None,
 	})
 	.await
 	.expect("environment");
@@ -357,6 +358,7 @@ async fn an_attached_session_synthesizes_a_daemon_reflect_with_one_request() {
 		con:                Arc::clone(&con),
 		bridges:            RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
+		spawn_policy:       None,
 	})
 	.await
 	.expect("environment");

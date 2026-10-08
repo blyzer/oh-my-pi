@@ -16,6 +16,7 @@ omp-ar.workspace = true
 omp-core.workspace = true
 omp-proto.workspace = true
 parking_lot.workspace = true
+rand.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
