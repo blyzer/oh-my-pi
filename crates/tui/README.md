@@ -1257,9 +1257,11 @@ terminal, so SIGWINCH resizes and immediate-mode hosts work) with
 resizes, and raw byte-stream statistics as one session-based tool. Its `stop`
 op sends one `keys` request of `"C-c C-c"` (`\x03\x03` to an app with no debug
 socket), so a host that quits only on a repeated `C-c` — `omp chat` exits on a
-second press within 500 ms — leaves through its own clean quit path; the tool
-SIGKILLs only an app still running 2 s later. `bun test` in `.omp/tools`
-(after `bun install`) runs its contract tests.
+second press within 500 ms — leaves through its own clean quit path. A host
+still running 1 s later gets the `quit` op, which the native host
+(`crates/app/src/gui.rs`) takes as a lifecycle close even behind a modal
+overlay; the tool SIGKILLs only an app still running 2 s after the chords.
+`just tools-test` runs its contract tests (local only; CI is the Cargo gate).
 
 ## Common mistakes
 

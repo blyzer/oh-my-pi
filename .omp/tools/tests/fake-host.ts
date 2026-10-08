@@ -2,17 +2,24 @@
 // `OMP_TUI_DEBUG` wire the `tui` tool's `start`/`stop` ops touch and reads
 // raw Ctrl-C bytes from its PTY, then quits the way argv selects:
 //
-//   fake-host <repeat|first|never> [no-socket]
+//   fake-host <repeat|first|never|quit-op> [no-socket]
 //
 // `repeat` mirrors `omp chat` (`omp_chat::ctrl_c_action`): only a second
 // `C-c` within 500 ms quits. `first` mirrors the examples, which quit on one
 // `C-c`. `never` ignores `C-c`, like a chat host behind a modal overlay.
-// `no-socket` skips the debug socket, like an app that is not an omp-tui host.
+// `quit-op` ignores `C-c` too, but the debug `quit` op closes it, like the
+// native host (`crates/app/src/gui.rs`) behind a modal overlay. `no-socket`
+// skips the debug socket, like an app that is not an omp-tui host.
 
 import * as net from "node:net";
 
 const mode = process.argv[2];
-if (mode !== "repeat" && mode !== "first" && mode !== "never") {
+if (
+	mode !== "repeat" &&
+	mode !== "first" &&
+	mode !== "never" &&
+	mode !== "quit-op"
+) {
 	throw new Error(`fake-host: unknown mode ${JSON.stringify(mode)}`);
 }
 const socketPath =
@@ -58,19 +65,26 @@ if (socketPath) {
 }
 
 /**
- * Answers one request the way `crates/tui/src/debug.rs` does: the reply is
- * written before the injected chords reach the host.
+ * Answers one request the way `crates/tui/src/debug.rs` does (`quit` in
+ * `quit-op` mode: the way `crates/app/src/gui.rs` does): the reply is written
+ * before the injected chords or the close reach the host.
  */
 function answer(sock: net.Socket, request: { op?: string; keys?: string }) {
 	let presses = 0;
+	let close = false;
 	let reply: Record<string, unknown>;
 	switch (request.op) {
 		case "text":
 			reply = { ok: true, lines: ["fake host ready"], window_top: 0 };
 			break;
 		case "quit":
-			presses = 1;
-			reply = { ok: true, injected: "C-c" };
+			if (mode === "quit-op") {
+				close = true;
+				reply = { ok: true, closed: true };
+			} else {
+				presses = 1;
+				reply = { ok: true, injected: "C-c" };
+			}
 			break;
 		case "keys": {
 			const chords = (request.keys ?? "").split(/\s+/).filter(Boolean);
@@ -82,6 +96,10 @@ function answer(sock: net.Socket, request: { op?: string; keys?: string }) {
 			reply = { ok: false, error: `fake host: unsupported op ${request.op}` };
 	}
 	sock.write(`${JSON.stringify(reply)}\n`, () => {
+		if (close) {
+			process.stdin.setRawMode?.(false);
+			process.exit(0);
+		}
 		for (let index = 0; index < presses; index++) press();
 	});
 }

@@ -109,6 +109,11 @@ lintx-ratchet-update:
 lintx-test:
     cargo test --locked --manifest-path tools/lintx/Cargo.toml
 
+# The `.omp/tools` agent tools' Bun contract tests (local only: CI is the Cargo gate, so neither CI nor `just test` runs them).
+[group('test')]
+tools-test:
+    cd .omp/tools && bun install --frozen-lockfile && bun test
+
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
 lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet

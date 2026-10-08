@@ -800,7 +800,11 @@ function sleep(ms: number): Promise<null> {
  */
 const QUIT_KEYS = "C-c C-c";
 
+/** How long `stop` waits on each quit rung before the next (SIGKILL last). */
+const STOP_RUNG_MS = 1_000;
+
 async function stopSession(session: Session): Promise<number | null> {
+	const settle = (ms: number) => Promise.race([session.proc.exited, sleep(ms)]);
 	try {
 		if (session.sock) {
 			await request(session, { op: "keys", keys: QUIT_KEYS }, 2_000);
@@ -814,7 +818,19 @@ async function stopSession(session: Session): Promise<number | null> {
 		// A host that quits on the first chord may close the socket before
 		// answering; the exit wait and signals below settle it either way.
 	}
-	const exited = await Promise.race([session.proc.exited, sleep(2_000)]);
+	let exited = await settle(session.sock ? STOP_RUNG_MS : 2 * STOP_RUNG_MS);
+	if (exited === null && session.sock) {
+		// Second rung, the debug `quit` op. The native host (`omp --gui`,
+		// `crates/app/src/gui.rs`) takes it as a lifecycle close, which also
+		// leaves past a modal overlay that swallows `C-c`; a terminal host
+		// takes it as one more `C-c`.
+		try {
+			await request(session, { op: "quit" }, STOP_RUNG_MS);
+		} catch {
+			// As above: a closing host may drop the socket unanswered.
+		}
+		exited = await settle(STOP_RUNG_MS);
+	}
 	if (exited === null) {
 		session.proc.kill("SIGKILL");
 		await session.proc.exited.catch(() => {});
@@ -1111,7 +1127,8 @@ const factory = (omp: ToolHost) => {
 			"escape-sequence stats + escaped tail — prefer text/screen unless " +
 			"auditing escapes), shot (pixel screenshot of the emulated screen — real " +
 			"colors/styles as a PNG image, rasterized in-process), stop (sends " +
-			"C-c C-c — omp chat quits only on a repeat — then SIGKILL after 2 s), " +
+			"C-c C-c — omp chat quits only on a repeat — then after 1 s the debug " +
+			"quit op, which closes the native --gui host, then SIGKILL after 2 s), " +
 			"list. " +
 			"Input ops (keys/type/paste/mouse/send/" +
 			"resize) return an after-screenshot of the resulting display (quiet:true " +
