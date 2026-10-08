@@ -489,12 +489,17 @@ impl HostToolExecutor for AnsweringHost {
 }
 
 /// Native admission reads the called revision's live spec: its effects and
-/// the confinement its host asserted. A name with no native live spec (an
-/// RPC host tool) is admitted as `Host` with no effects.
+/// the confinement its host asserted. An RPC host tool has no native live
+/// spec: it is admitted as `Host` with the envelope its host declared, and
+/// one that declared none gets the unknown ceiling, never an empty envelope.
 #[tokio::test]
 async fn native_admission_receives_the_live_spec_confinement() {
 	let network = Effects {
 		exec: Some(ExecEffects { commands: Arc::from([]), network: true }),
+		..Effects::empty()
+	};
+	let read = Effects {
+		documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
 		..Effects::empty()
 	};
 	let mut registry = Registry::new();
@@ -523,12 +528,22 @@ async fn native_admission_receives_the_live_spec_confinement() {
 		.replace_host_tools(
 			sf!("rpc/client"),
 			1,
-			vec![HostToolSpec {
-				name:        sf!("fetch_ticket"),
-				description: sf!("Fetch a ticket"),
-				parameters:  serde_json::json!({"type": "object"}),
-				rev:         None,
-			}],
+			vec![
+				HostToolSpec {
+					name:        sf!("fetch_ticket"),
+					description: sf!("Fetch a ticket"),
+					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
+					effects:     None,
+				},
+				HostToolSpec {
+					name:        sf!("list_tickets"),
+					description: sf!("List tickets"),
+					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
+					effects:     Some(read.clone()),
+				},
+			],
 			Arc::new(AnsweringHost),
 		)
 		.expect("host roster installs");
@@ -537,6 +552,7 @@ async fn native_admission_receives_the_live_spec_confinement() {
 	let (inference, _) = ScriptedInference::new([
 		tool_script("capture-1", "capture", serde_json::json!({"value": 1})),
 		tool_script("ticket-1", "fetch_ticket", serde_json::json!({})),
+		tool_script("tickets-1", "list_tickets", serde_json::json!({})),
 		text_script("done"),
 	]);
 	let mut kernel = Kernel::new(
@@ -557,7 +573,8 @@ async fn native_admission_receives_the_live_spec_confinement() {
 		.expect("turn");
 	assert_eq!(*admitted.lock(), [
 		(String::from("capture"), network, Confinement::ExecSandbox),
-		(String::from("fetch_ticket"), Effects::empty(), Confinement::Host),
+		(String::from("fetch_ticket"), Effects::unknown(), Confinement::Host),
+		(String::from("list_tickets"), read, Confinement::Host),
 	]);
 }
 

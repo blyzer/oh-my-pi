@@ -127,6 +127,11 @@ pub struct HostToolSpec {
 	/// Exact semantic revision when the host contract declares one.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub rev:         Option<Rev>,
+	/// Maximum effect envelope the host declares for the tool. Absent means
+	/// undeclared, which registers [`Effects::unknown`]: the tool's calls are
+	/// the `exec` tier. A declared envelope, even an empty one, is taken as is.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub effects:     Option<Effects>,
 }
 
 /// One correlated invocation delivered to an attached RPC host.
@@ -1924,7 +1929,9 @@ impl Registry {
 					priority:       100,
 					on_unsupported: crate::Fallback::Unspecified,
 				},
-				effects: Effects::default(),
+				// Fail closed: a host that declared nothing gets the ceiling of
+				// what process authority can do, never the empty `read` envelope.
+				effects: declared.effects.unwrap_or_else(Effects::unknown),
 				// Host tools run in the attached client, outside any sandbox.
 				confinement: Confinement::Host,
 				projection_code,
@@ -1999,6 +2006,7 @@ impl Registry {
 					description: spec.description.clone(),
 					parameters:  serde_json::from_slice(&spec.schema).ok()?,
 					rev:         Some(spec.rev.clone()),
+					effects:     Some(spec.effects.clone()),
 				})
 			})
 			.collect()
@@ -3641,7 +3649,7 @@ fn dropped(name: &Str, feature: &str, reason: &'static str) -> Adjustment {
 mod tests {
 
 	use super::*;
-	use crate::{Dialect, Effects, Ev, ExecEffects, ModelClass, ToolSpec};
+	use crate::{Dialect, DocEffects, Effects, Ev, ExecEffects, ModelClass, ToolSpec};
 
 	struct LiftTool {
 		spec: ToolSpec,
@@ -3794,28 +3802,78 @@ mod tests {
 		assert_eq!(shadow.claimant, "test/low");
 	}
 
-	/// An RPC host tool runs in the attached client: its spec is `Host`, and
-	/// it has no native live spec, so admission takes the `Host` fallback.
+	/// An RPC host tool runs in the attached client: its spec is `Host`, it has
+	/// no native live spec, and its envelope is what the host declared. One
+	/// that declared nothing gets [`Effects::unknown`], the `exec` ceiling,
+	/// and a declared envelope, even an empty one, is kept exactly.
 	#[test]
-	fn host_tools_are_host_confined() {
+	fn host_tools_are_host_confined_and_fail_closed_when_undeclared() {
+		let read = Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::from([]) }),
+			..Effects::empty()
+		};
+		let host = |name: &'static str, effects: Option<Effects>| HostToolSpec {
+			name: sf!(name),
+			description: sf!("host tool"),
+			parameters: serde_json::json!({"type": "object"}),
+			rev: None,
+			effects,
+		};
 		let registry = Registry::new();
 		registry
 			.replace_host_tools(
 				sf!("rpc/client"),
 				1,
-				vec![HostToolSpec {
-					name:        sf!("alpha"),
-					description: sf!("alpha host tool"),
-					parameters:  serde_json::json!({"type": "object"}),
-					rev:         None,
-				}],
+				vec![
+					host("alpha", None),
+					host("beta", Some(read.clone())),
+					host("gamma", Some(Effects::empty())),
+				],
 				Arc::new(HostExecutor),
 			)
 			.expect("host roster installs");
 		assert!(registry.live_spec("alpha").is_err());
-		let state = registry.host_tools.read();
-		let spec = state.rosters["rpc/client"].entries["alpha"].tool.spec();
-		assert_eq!(spec.confinement, Confinement::Host);
+		{
+			let state = registry.host_tools.read();
+			for name in ["alpha", "beta", "gamma"] {
+				let spec = state.rosters["rpc/client"].entries[name].tool.spec();
+				assert_eq!(spec.confinement, Confinement::Host, "{name}");
+			}
+		}
+		assert_eq!(registry.effects_owned("alpha").expect("alpha"), Effects::unknown());
+		assert_eq!(registry.effects_owned("beta").expect("beta"), read);
+		assert_eq!(registry.effects_owned("gamma").expect("gamma"), Effects::empty());
+		// The declarations round-trip with their envelopes, so a re-installed
+		// roster keeps the tiers it was admitted under.
+		let specs = registry.host_tool_specs();
+		assert_eq!(
+			specs
+				.iter()
+				.map(|spec| (spec.name.as_str(), spec.effects.clone()))
+				.collect::<Vec<_>>(),
+			[
+				("alpha", Some(Effects::unknown())),
+				("beta", Some(read)),
+				("gamma", Some(Effects::empty())),
+			]
+		);
+	}
+
+	/// The unknown ceiling is process authority: any command, with the network.
+	#[test]
+	fn unknown_effects_are_any_command_with_the_network() {
+		let unknown = Effects::unknown();
+		assert_eq!(
+			unknown.exec,
+			Some(ExecEffects { commands: Arc::from([sf!("*")]), network: true })
+		);
+		assert!(unknown.mutates_environment());
+		let declared = Effects {
+			exec: Some(ExecEffects { commands: Arc::from([sf!("git")]), network: false }),
+			..Effects::empty()
+		};
+		assert!(declared.is_subset_of(&unknown));
+		assert!(!unknown.is_subset_of(&declared));
 	}
 
 	#[test]
@@ -3984,6 +4042,7 @@ mod tests {
 					description: sf!("Score a candidate"),
 					parameters:  serde_json::json!({"type":"object"}),
 					rev:         Some(Rev { family: Str::default(), n: 9 }),
+					effects:     None,
 				}],
 				Arc::new(HostExecutor),
 			)
@@ -4018,6 +4077,7 @@ mod tests {
 					description: sf!("alpha host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
 					rev:         Some(Rev { family: Str::default(), n: 7 }),
+					effects:     None,
 				}],
 				Arc::clone(&executor),
 			)
@@ -4039,6 +4099,7 @@ mod tests {
 					description: sf!("beta host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
 					rev:         None,
+					effects:     None,
 				}],
 				executor,
 			)
@@ -4084,12 +4145,14 @@ mod tests {
 						description: sf!("alpha host tool"),
 						parameters:  serde_json::json!({"type": "object"}),
 						rev:         None,
+						effects:     None,
 					},
 					HostToolSpec {
 						name:        sf!("beta"),
 						description: sf!("beta host tool"),
 						parameters:  serde_json::json!({"type": "object"}),
 						rev:         None,
+						effects:     None,
 					},
 				],
 				Arc::new(HostExecutor),

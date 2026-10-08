@@ -50,3 +50,52 @@ assert notification.assistant_message_event["delta"] == "hello"
 		})
 		.expect("remote shipping and RPC SDK contract");
 }
+
+/// `set_custom_tools` sends a host tool's effect envelope only when it declared
+/// one: an omitted envelope is undeclared, which the agent admits at the exec
+/// tier, while `{}` declares a tool with no effects.
+#[test]
+fn host_tools_send_effects_only_when_declared() {
+	let engine = Engine::builder().init().expect("embedded Python boots");
+	engine
+		.attach(|py| {
+			py.run(
+				c_str!(
+					r#"
+from omp_rpc import RpcClient, host_tool
+
+sent = []
+client = RpcClient(command=("omp", "--mode", "rpc"))
+client._process = object()
+def fake_request(command, **payload):
+    sent.append((command, payload))
+    return {"toolNames": [tool["name"] for tool in payload["tools"]]}
+client._request = fake_request
+
+execute = lambda params, context: "ok"
+names = client.set_custom_tools([
+    host_tool(name="undeclared", description="d", parameters={"type": "object"}, execute=execute),
+    host_tool(name="pure", description="d", parameters={"type": "object"}, execute=execute, effects={}),
+    host_tool(
+        name="reader",
+        description="d",
+        parameters={"type": "object"},
+        execute=execute,
+        effects={"documents": {"read": True}},
+    ),
+])
+assert names == ("undeclared", "pure", "reader")
+(command, payload), = sent
+assert command == "set_host_tools"
+tools = {tool["name"]: tool for tool in payload["tools"]}
+assert "effects" not in tools["undeclared"]
+assert tools["pure"]["effects"] == {}
+assert tools["reader"]["effects"] == {"documents": {"read": True}}
+"#
+				),
+				None,
+				None,
+			)
+		})
+		.expect("host tool effects contract");
+}

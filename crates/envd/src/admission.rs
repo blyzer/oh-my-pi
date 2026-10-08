@@ -1094,6 +1094,48 @@ mod tests {
 		ConfiguredApproval { mode, provenance: Provenance::Default }
 	}
 
+	/// The unknown ceiling an undeclared host tool registers is the `exec`
+	/// tier: it prompts under `write`, `always-ask` and a sandbox-kept default
+	/// `yolo` (a `Host` tool), and only an explicit `yolo` admits it. A host
+	/// tool that declares a read-only envelope is admitted even under
+	/// `always-ask`.
+	#[test]
+	fn undeclared_host_tools_are_exec_and_declared_reads_are_not() {
+		let unknown = Effects::unknown();
+		assert_eq!(ApprovalTier::from_effects(&unknown), ApprovalTier::Exec);
+		for (configured, policy) in [
+			(explicit(ApprovalMode::AlwaysAsk), ApprovalPolicy::Prompt),
+			(explicit(ApprovalMode::Write), ApprovalPolicy::Prompt),
+			(defaulted(ApprovalMode::Yolo), ApprovalPolicy::Prompt),
+			(explicit(ApprovalMode::Yolo), ApprovalPolicy::Allow),
+		] {
+			let resolved = resolve_approval(
+				"call",
+				"host_tool",
+				&unknown,
+				Confinement::Host,
+				configured,
+				SandboxState::Active,
+				None,
+			);
+			assert_eq!(resolved.policy, policy, "{configured:?}");
+		}
+		let read = Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::from([]) }),
+			..Effects::empty()
+		};
+		let resolved = resolve_approval(
+			"call",
+			"host_tool",
+			&read,
+			Confinement::Host,
+			explicit(ApprovalMode::AlwaysAsk),
+			SandboxState::Active,
+			None,
+		);
+		assert_eq!((resolved.tier, resolved.policy), (ApprovalTier::Read, ApprovalPolicy::Allow));
+	}
+
 	/// A fetch is its own tier between read and write: `always-ask` prompts
 	/// for it, `write`, the default and an explicit `yolo` allow it, and a
 	/// fetch beside a write or an exec effect takes the higher tier. A fetch

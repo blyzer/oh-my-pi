@@ -574,9 +574,13 @@ error; a session never runs with a half-registered device set.
 - `effects` — the device's maximum declared effect envelope, an
   [`omp.Effects`](#ompeffects). Hooks may narrow it per invocation; nothing
   may widen it; escalation beyond it fails inside the call rather than
-  re-prompting the user. Omitted, the device is bounded only by its `tier`,
-  which approves coarsely — declaring an envelope is what buys one approval
-  per logical action. Semantics under [`omp.Effects`](#ompeffects).
+  re-prompting the user. Omitted, admission assumes the host's ceiling: any
+  command with the network under a `trusted` host (the `exec` tier, which
+  prompts outside an explicit `yolo`), document reads and workspace writes
+  under a `sandboxed` one (the `write` tier). Declaring an envelope, even
+  `omp.Effects()` for a device with no effects, is what buys the matching tier
+  and one approval per logical action. Semantics under
+  [`omp.Effects`](#ompeffects).
 - `tier` — the approval tier the dispatch is gated at. Values and their
   semantics belong to [docs/py/06-policy.md](06-policy.md). Declared on the
   device rather than inferred from `place`, because where code runs says

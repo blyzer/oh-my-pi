@@ -795,6 +795,105 @@ pub struct HostToolDefinition {
 	/// Optional application-defined load mode.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub load_mode:   Option<String>,
+	/// Maximum effects the tool may have, which set its approval tier.
+	///
+	/// Absent means undeclared: the agent assumes the tool may run any command
+	/// with the network (the `exec` tier), so every approval mode except an
+	/// explicit `yolo` asks before each call. Declare an envelope, even an empty
+	/// one for a tool with no effects, to be admitted at the matching tier.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub effects:     Option<HostToolEffects>,
+}
+
+/// Maximum effect envelope of one host tool: each present domain is permitted
+/// up to its fields, and an absent domain is denied.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostToolEffects {
+	/// Workspace document reads and writes.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub documents: Option<HostToolDocEffects>,
+	/// Process execution and outbound network.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub exec:      Option<HostToolExecEffects>,
+	/// Model inference requests and spend.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub inference: Option<HostToolInferenceEffects>,
+	/// Native desktop capture, accessibility, and input.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub desktop:   Option<HostToolDesktopEffects>,
+	/// Read-only network egress that changes nothing locally.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fetch:     Option<HostToolFetchEffects>,
+	/// Maximum subagents the tool may spawn.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub subagents: u32,
+}
+
+/// Document authority of a host tool.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostToolDocEffects {
+	/// Whether document reads are permitted.
+	#[serde(default)]
+	pub read:        bool,
+	/// Workspace-relative globs the tool may write.
+	#[serde(default)]
+	pub write_globs: Vec<String>,
+}
+
+/// Process authority of a host tool.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostToolExecEffects {
+	/// Executable names the tool may run; `*` permits any.
+	#[serde(default)]
+	pub commands: Vec<String>,
+	/// Whether outbound network access is permitted.
+	#[serde(default)]
+	pub network:  bool,
+}
+
+/// Inference authority of a host tool.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostToolInferenceEffects {
+	/// Maximum provider requests.
+	#[serde(default)]
+	pub max_requests: u32,
+	/// Maximum provider spend in decimal US dollars, such as `"0.25"`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub max_usd:      Option<String>,
+}
+
+/// Native desktop authority of a host tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostToolDesktopEffects {
+	/// Whether screen capture and display or window enumeration are permitted.
+	#[serde(default)]
+	pub capture:       bool,
+	/// Whether accessibility-tree reads are permitted.
+	#[serde(default)]
+	pub accessibility: bool,
+	/// Whether pointer, keyboard, focus, and accessibility mutation are
+	/// permitted.
+	#[serde(default)]
+	pub input:         bool,
+}
+
+/// Read-only network egress of a host tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostToolFetchEffects {
+	/// Whether the fetch may present the user's stored credentials.
+	#[serde(default)]
+	pub credentials: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde skip predicate signature")]
+const fn is_zero(value: &u32) -> bool {
+	*value == 0
 }
 
 /// Server request to execute a host-owned tool.
@@ -921,3 +1020,54 @@ pub struct ExtensionUiResponse {
 
 /// Ordered environment overrides used when spawning the RPC child.
 pub type Environment = BTreeMap<String, String>;
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+
+	use super::*;
+
+	/// An omitted envelope stays distinguishable from a declared empty one,
+	/// and a misspelled effect field is refused rather than dropped.
+	#[test]
+	fn host_tool_effects_keep_undeclared_apart_from_empty() {
+		let tool = |effects: Option<Value>| {
+			let mut definition = json!({
+				"name": "fetch_ticket",
+				"description": "Fetch a ticket",
+				"parameters": {"type": "object"},
+			});
+			if let Some(effects) = effects {
+				definition["effects"] = effects;
+			}
+			serde_json::from_value::<HostToolDefinition>(definition)
+		};
+		assert_eq!(tool(None).expect("undeclared").effects, None);
+		assert_eq!(tool(Some(json!({}))).expect("empty").effects, Some(HostToolEffects::default()));
+		let declared = tool(Some(json!({
+			"documents": {"read": true, "writeGlobs": ["notes/**"]},
+			"inference": {"maxRequests": 2, "maxUsd": "0.25"},
+			"fetch": {"credentials": true},
+		})))
+		.expect("declared")
+		.effects
+		.expect("present");
+		assert_eq!(
+			declared.documents,
+			Some(HostToolDocEffects {
+				read:        true,
+				write_globs: vec![String::from("notes/**")],
+			})
+		);
+		assert_eq!(
+			declared.inference,
+			Some(HostToolInferenceEffects {
+				max_requests: 2,
+				max_usd:      Some(String::from("0.25")),
+			})
+		);
+		assert_eq!(declared.fetch, Some(HostToolFetchEffects { credentials: true }));
+		assert!(tool(Some(json!({"exec": {"command": ["git"]}}))).is_err());
+		assert!(tool(Some(json!({"network": true}))).is_err());
+	}
+}

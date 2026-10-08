@@ -133,6 +133,40 @@ impl HostKey {
 	pub fn fields(&self) -> [&str; 3] {
 		[self.layer().as_str(), self.tier().as_str(), self.extension().as_str()]
 	}
+
+	/// The effect ceiling of a tool this host registers without an envelope.
+	///
+	/// A tool that declares nothing can do whatever its host process can, so
+	/// the ceiling is the host's own confinement: a `sandboxed` host reads
+	/// documents and writes the workspace (the `write` tier), and a `trusted`
+	/// host, like any tier this build does not recognize, is
+	/// [`omp_tool::Effects::unknown`] (the `exec` tier). A declared envelope,
+	/// even an empty one, always replaces it.
+	#[must_use]
+	pub fn undeclared_effects(&self) -> omp_tool::Effects {
+		match self.tier().parse::<omp_ext::TrustTier>() {
+			Ok(omp_ext::TrustTier::Sandboxed) => omp_tool::Effects {
+				documents: Some(omp_tool::DocEffects {
+					read:        true,
+					write_globs: Arc::from([Str::new_static("**")]),
+				}),
+				..omp_tool::Effects::empty()
+			},
+			Ok(omp_ext::TrustTier::Trusted) | Err(_) => omp_tool::Effects::unknown(),
+		}
+	}
+
+	/// The effect envelope a tool this host registered resolves to: its
+	/// declaration when it sent one, else [`Self::undeclared_effects`].
+	///
+	/// # Errors
+	/// Returns the wire error when the declared envelope is invalid.
+	pub fn declared_or_undeclared_effects(
+		&self,
+		declared: Option<&omp_proto::policy::v1::EffectEnvelope>,
+	) -> Result<omp_tool::Effects, omp_tool::EffectsWireError> {
+		declared.map_or_else(|| Ok(self.undeclared_effects()), omp_tool::Effects::try_from)
+	}
 }
 
 /// Configuration of one active extension.
@@ -1527,19 +1561,7 @@ fn initial_authority_snapshot(config: &ExtHostConfig) -> ControlAuthoritySnapsho
 				.tools
 				.iter()
 				.find(|row| row.key.as_str() == format!("{}@{}.{}", tool.name, tool.family, tool.rev));
-			let tier = row
-				.and_then(|row| row.properties.get("tier"))
-				.and_then(serde_json::Value::as_str)
-				.filter(|tier| matches!(*tier, "read" | "fetch" | "write" | "exec" | "privileged"))
-				.map(Str::from)
-				.or_else(|| {
-					row.and_then(|row| row.properties.get("effects"))
-						.and_then(|value| serde_json::from_value::<omp_tool::Effects>(value.clone()).ok())
-						.map(|effects| {
-							Str::from(<&'static str>::from(ApprovalTier::from_effects(&effects)))
-						})
-				})
-				.unwrap_or_else(|| sf!("exec"));
+			let tier = device_snapshot_tier(row, &extension.key);
 			snapshot
 				.tiers
 				.entry(ControlTierTarget::Device {
@@ -1551,6 +1573,26 @@ fn initial_authority_snapshot(config: &ExtHostConfig) -> ControlAuthoritySnapsho
 		}
 	}
 	snapshot
+}
+
+/// The tier the CONTROL snapshot reports for one manifest tool: the tier its
+/// static declaration names, else the tier of its declared envelope, else the
+/// tier of its host's undeclared ceiling, which is what admission applies to
+/// a declaration without an envelope ([`HostKey::undeclared_effects`]).
+fn device_snapshot_tier(row: Option<&omp_ext::config::StaticDeclaration>, owner: &HostKey) -> Str {
+	row.and_then(|row| row.properties.get("tier"))
+		.and_then(serde_json::Value::as_str)
+		.filter(|tier| matches!(*tier, "read" | "fetch" | "write" | "exec" | "privileged"))
+		.map_or_else(
+			|| {
+				let effects = row
+					.and_then(|row| row.properties.get("effects"))
+					.and_then(|value| serde_json::from_value::<omp_tool::Effects>(value.clone()).ok())
+					.unwrap_or_else(|| owner.undeclared_effects());
+				Str::from(<&'static str>::from(ApprovalTier::from_effects(&effects)))
+			},
+			Str::from,
+		)
 }
 
 fn ensure_committed_argument_tools(tools: &[ToolDecl]) -> Result<(), ExtHostError> {
@@ -1855,13 +1897,10 @@ impl ExtHostSupervisor {
 					.definition
 					.as_ref()
 					.ok_or_else(|| ExtHostError::Protocol(sf!("registered tool has no definition")))?;
-				let maximum_effects = declaration
-					.effects
-					.as_ref()
-					.map(omp_tool::Effects::try_from)
-					.transpose()
-					.map_err(|_| ExtHostError::Protocol(sf!("registered tool effects are invalid")))?
-					.unwrap_or_default();
+				let maximum_effects = extension
+					.key
+					.declared_or_undeclared_effects(declaration.effects.as_ref())
+					.map_err(|_| ExtHostError::Protocol(sf!("registered tool effects are invalid")))?;
 				let route = (Str::from(definition.name.as_str()), Str::from(declaration.rev.as_str()));
 				if routes
 					.insert(route, HostRoute {
@@ -4217,6 +4256,54 @@ async fn dispatch_control_service(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The route ceiling a registered tool gets and the tier the CONTROL
+	/// snapshot reports agree with admission for every declaration shape: an
+	/// undeclared tool takes its host's ceiling (`exec` trusted, `write`
+	/// sandboxed), a declared envelope is kept, and a declared tier wins.
+	#[test]
+	fn undeclared_tools_take_the_host_ceiling_in_routes_and_snapshots() {
+		let trusted = HostKey::new("project", "trusted", "fixture");
+		let sandboxed = HostKey::new("project", "sandboxed", "fixture");
+		let fetch = omp_proto::policy::v1::EffectEnvelope {
+			fetch: Some(omp_proto::policy::v1::FetchEffects::default()),
+			..Default::default()
+		};
+		for (owner, undeclared_tier) in
+			[(&trusted, ApprovalTier::Exec), (&sandboxed, ApprovalTier::Write)]
+		{
+			let route = owner
+				.declared_or_undeclared_effects(None)
+				.expect("undeclared ceiling");
+			assert_eq!(route, owner.undeclared_effects());
+			assert_eq!(ApprovalTier::from_effects(&route), undeclared_tier);
+			assert_eq!(
+				device_snapshot_tier(None, owner).as_str(),
+				<&'static str>::from(undeclared_tier)
+			);
+			let bare = omp_ext::config::StaticDeclaration::default();
+			assert_eq!(
+				device_snapshot_tier(Some(&bare), owner).as_str(),
+				<&'static str>::from(undeclared_tier)
+			);
+
+			let declared = owner
+				.declared_or_undeclared_effects(Some(&fetch))
+				.expect("declared fetch");
+			assert_eq!(ApprovalTier::from_effects(&declared), ApprovalTier::Fetch);
+			let mut row = omp_ext::config::StaticDeclaration::default();
+			row.properties
+				.insert(sf!("effects"), serde_json::to_value(&declared).expect("effects serialize"));
+			assert_eq!(device_snapshot_tier(Some(&row), owner).as_str(), "fetch");
+			row.properties
+				.insert(sf!("tier"), serde_json::json!("read"));
+			assert_eq!(device_snapshot_tier(Some(&row), owner).as_str(), "read");
+		}
+		assert_eq!(
+			HostKey::new("project", "experimental", "fixture").undeclared_effects(),
+			omp_tool::Effects::unknown()
+		);
+	}
 
 	#[test]
 	fn control_tools_reject_streamed_argument_declarations() {

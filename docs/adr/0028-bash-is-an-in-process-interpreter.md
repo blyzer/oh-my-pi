@@ -382,7 +382,8 @@ host spawns without the sandbox (browsers, language servers, debug adapters).
    auto-approved: `read@3` fetches URLs, the document host reaches `ssh://` and vault resources,
    `lsp` spawns language servers, RPC host tools and effect-less Python workers resolve to `read`,
    and MCP servers at the `read` tier declare nothing. (Memory `reflect` was on this list until it
-   declared its one inference request, 2026-10-07: see the amendment of that date.) Session
+   declared its one inference request, 2026-10-07: see the amendment of that date. RPC host tools
+   and effect-less Python workers were on it until the 2026-10-08 undeclared effects amendment.) Session
    tools (`task`, `hub`, `todo`, `goal`) bypass tool admission. Closing that bypass would surface
    two `hub` gaps. First, a sandbox-kept default `yolo` would auto-approve its peer steering: a
    `send` can wake a peer agent's inference, which `hub` does not declare.
@@ -451,9 +452,53 @@ posture once a confinement marker applies. The owner chose a distinct class.
 4. Not yet: no tool declares a fetch. `read@3`, `grep`, `glob` and `ast_grep` adopt it with
    argument-scoped invocation effects in later changes, so a local read stays `read`.
 
+## Amendment (2026-10-08, undeclared effects)
+
+The owner decided that a tool which declares no effects can no longer resolve to the auto-approved
+`read` tier. An empty envelope was the default for every host that registers tools it did not
+write: RPC host tools (`set_host_tools`), Python worker and frozen extension tools, and eval-defined
+tools forwarded into workpool children. Each of them could run anything its host process could and
+was admitted as if it only read.
+
+1. `omp_tool::Effects::unknown()` is the ceiling of what is not declared: any command (`*`) with
+   the network, the `exec` tier. A declared envelope, even an empty one, always replaces it, so an
+   effect-free tool must say so to stay `read`.
+2. RPC host tools. `HostToolDefinition` (`crates/rpc/src/protocol.rs`) carries an optional typed
+   `effects` (`HostToolEffects`, mirroring `omp_tool::Effects` in camelCase, unknown fields
+   refused); `crates/app/src/rpc_mode.rs` lowers it into `HostToolSpec::effects`, and
+   `Registry::replace_host_tools` (`crates/tool/src/registry.rs`) registers an absent one as
+   `Effects::unknown()`. `host_tool_specs` round-trips the envelope. The kernel dispatcher, which
+   used to admit every name with no native live spec with an empty envelope, now admits a host tool
+   with its registered envelope, and a name that resolves nowhere with `Effects::unknown()`
+   (`crates/agent/src/dispatch.rs`).
+3. Python workers and frozen extension tools. With no envelope, a tool gets its host's ceiling,
+   `HostKey::undeclared_effects` (`crates/envd/src/worker.rs`): a `sandboxed` extension host,
+   whose process can only read and write the workspace, gives document reads and `**` writes (the
+   `write` tier); a `trusted` host, and any tier the build does not recognize, gives
+   `Effects::unknown()`. The same ceiling is the registry spec (`worker_spec`,
+   `crates/envd/src/tools.rs`), the extension host route's maximum, against which `ArgsCommitted`
+   narrowing and the DATA grants are checked, and the tier the CONTROL snapshot reports to
+   `omp.tier_of` (`device_snapshot_tier`), so the three cannot disagree. `FrozenTool.effects`
+   (`crates/envd/src/exthost/extensions.rs`) is typed as `Option<omp_tool::Effects>`. For a
+   trusted host the widened route maximum grants nothing the host process could not already do;
+   for a sandboxed one it is exactly what its sandbox permits.
+4. Eval-defined tools forwarded into workpool children (`crates/driver/src/subagent/workpool_runtime.rs`)
+   declare no envelope and register `Effects::unknown()`.
+5. `debug@2` declares `network: true`: a configured remote adapter is reached over TCP.
+6. Consequences. Under the shipped default posture, `write` and `always-ask`, an undeclared RPC host
+   tool, eval-defined tool or trusted extension tool now prompts before each call, and envd's write
+   boundary refuses an undeclared worker tool under plan mode and in a read-only subagent. An
+   undeclared sandboxed extension tool is `write` tier: allowed under `write` and the default
+   posture, prompted under `always-ask`. Authors of extensions and RPC hosts should declare their
+   envelopes; an explicit `yolo`, or `tools.approval.<name> allow`, still admits without prompting.
+7. Not covered. Prelude helpers (`crates/envd/src/tools.rs`) keep their own handling. Native Rust
+   extensions (`ExtensionRegistrar::tool_spec`) register a full `ToolSpec` and are unchanged, as
+   are MCP servers at the `read` tier and the other under-declared host tools item 6 of the typed
+   confinement marker amendment lists.
+
 ## Status in omp
 
-**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: the denial-and-rerun prompt exists only while a sandbox is constructed, and a rerun can repeat side effects. The default `yolo` holds only inside an active sandbox, an explicit one is respected (2026-10-06 amendment). The network is `scoped` by default, a defaulted network mode never sandboxes an explicit `off`, a broker that cannot start under the default disables the network, and network trouble reaches the model as a `sandbox` diag (2026-10-07 amendment). A command on the project daemon asks the session that issued it for its amendment (2026-10-07 approval relay amendment). A network amendment may be approved for the rest of the session, chaining a bounded number of reruns, and an explicit deny beats every approval (2026-10-07 session network grants amendment). The default `yolo` an active sandbox keeps covers only the tools that sandbox confines, keyed on the typed `Confinement` marker (2026-10-07 typed confinement marker amendment). Memory `reflect` declares its one inference request and synthesizes through the session's inference, in an embedded environment directly and on an attached session's daemon through the reflection relay (2026-10-07 memory reflect inference amendment). (Verified 2026-10-06 against `omp2` at `f2ca37d533`, plus the changes of the 2026-10-06 and 2026-10-07 amendments; the amendment approver re-verified 2026-10-07 on `feat/envd-approval-relay-daemon` from `omp2` at `1b648d0f74`, and the session half of the relay on `feat/envd-approval-relay-session` from `4b833b0b21`; the session network grants verified 2026-10-07 on `feat/sandbox-network-session-scope` from `omp2` at `1cbea4d0ea`, and their revocation on a session switch on the same branch after `4312bbfc5a`; by reading and by the tests named below.)
+**Status: Implemented.** Parser, interpreter and coreutils run in process with persistent state, and approval is the sandbox-denial-and-rerun model in the amended decision. Limits: the denial-and-rerun prompt exists only while a sandbox is constructed, and a rerun can repeat side effects. The default `yolo` holds only inside an active sandbox, an explicit one is respected (2026-10-06 amendment). The network is `scoped` by default, a defaulted network mode never sandboxes an explicit `off`, a broker that cannot start under the default disables the network, and network trouble reaches the model as a `sandbox` diag (2026-10-07 amendment). A command on the project daemon asks the session that issued it for its amendment (2026-10-07 approval relay amendment). A network amendment may be approved for the rest of the session, chaining a bounded number of reruns, and an explicit deny beats every approval (2026-10-07 session network grants amendment). The default `yolo` an active sandbox keeps covers only the tools that sandbox confines, keyed on the typed `Confinement` marker (2026-10-07 typed confinement marker amendment). Memory `reflect` declares its one inference request and synthesizes through the session's inference, in an embedded environment directly and on an attached session's daemon through the reflection relay (2026-10-07 memory reflect inference amendment). A tool that declares no effects is no longer `read`: RPC host tools and eval-defined tools register `Effects::unknown()` (the `exec` tier), and Python worker tools take their extension host's ceiling, `write` under a `sandboxed` host and `exec` under a `trusted` one (2026-10-08 undeclared effects amendment). (Verified 2026-10-06 against `omp2` at `f2ca37d533`, plus the changes of the 2026-10-06 and 2026-10-07 amendments; the amendment approver re-verified 2026-10-07 on `feat/envd-approval-relay-daemon` from `omp2` at `1b648d0f74`, and the session half of the relay on `feat/envd-approval-relay-session` from `4b833b0b21`; the session network grants verified 2026-10-07 on `feat/sandbox-network-session-scope` from `omp2` at `1cbea4d0ea`, and their revocation on a session switch on the same branch after `4312bbfc5a`; by reading and by the tests named below.)
 
 - In-process shell: `crates/shell` (parser/runtime) and `crates/shell-builtins` (about 80 builtins including `grep` and `rg` on the ripgrep libraries, `find`, `sed`, `sort`, `ln`, `jq`); persistent cwd and exports through `crates/envd/src/exec.rs`.
 - Enforcement: `ExecSandbox` and its per-attempt wrapper in `crates/envd/src/exec_sandbox.rs` implement the shell's `PathPolicy` and `SpawnWrapper`; `exec.rs` installs both on each run (`set_path_policy`, `set_spawn_wrapper`). The sandbox is `workspace-write` by default (`SV_SANDBOX_MODE`, `crates/envd/src/exec_settings/sandbox.rs`), and `SandboxState::probe` reports whether it was constructed; network is `scoped` by default (`SV_SANDBOX_NETWORK_MODE`, 2026-10-07), and the scoped egress broker (`crates/envd/src/sandbox_proxy.rs`) is what produces a typed network fact. `SandboxSettings::network_confinement` and `exec_settings::network_confinement` apply the provenance rule; `ExecSandbox` records the confinement it really applies (`resolve_network` in `exec_sandbox.rs`: a session starts its broker, a `SandboxConsumer::Child` such as an eval cell or a detached process gets `disabled`, a probe starts none) and `amended_scope` reuses it. Proofs: `network_confinement_*` and `an_explicit_off_survives_the_default_flip` in `exec_settings/sandbox.rs`; `explicit_off_*`, `scoped_network_resolves_by_consumer`, `broker_start_failure_degrades_only_the_shipped_default`, `tokenless_children_and_probes_compile_without_a_broker` and `a_path_amendment_after_the_broker_fallback_stays_network_disabled` in `exec_sandbox.rs`; `explicit_off_with_the_default_network_runs_commands_unsandboxed` in `exec.rs`; `unreachable_literals_are_refused_without_an_amendable_fact` in `sandbox_proxy.rs`; the posture tests in `crates/driver/src/adw/production.rs`; `children_keep_an_explicit_scoped_network_under_sandbox_mode_off` in `crates/driver/tests/subagent_cfg.rs`. Under the broker profile the Seatbelt caveats copied into the session note no longer claim unfiltered outbound egress and say commands have no DNS of their own (`crates/sandbox/src/backends/seatbelt.rs`). Checked live on macOS with Seatbelt and the default settings (a throwaway test, not kept): `/usr/bin/curl https://example.com` ended `Denied` with the fact `network example.com:443` (curl exit 56, `CONNECT tunnel failed, response 403`), and `/usr/bin/nc -z` to a raw IP on port 22 could not connect, while both succeeded outside the sandbox.
