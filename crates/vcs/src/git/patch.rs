@@ -5550,6 +5550,15 @@ mod tests {
 		fs::create_dir(&secret).expect("mkdir secret");
 		git(temp.path(), &["init", "-q", "--separate-git-dir=secret/meta", "secret/sub"]);
 		fs::set_permissions(&secret, fs::Permissions::from_mode(0o300)).expect("chmod 0300");
+		// A process that bypasses permission checks (root, `CAP_DAC_OVERRIDE`)
+		// can still list the directory, so the unlistable state this test needs
+		// cannot be built here; the scan's own incomplete-walk handling is pinned
+		// by `a_failed_scan_item_is_not_an_absent_entry`.
+		if fs::read_dir(&secret).is_ok() {
+			fs::set_permissions(&secret, fs::Permissions::from_mode(0o700)).expect("restore mode");
+			eprintln!("skipping: this process can list a mode-0300 directory");
+			return;
+		}
 
 		let patch = concat!(
 			"diff --git a/other.txt b/other.txt\n",
