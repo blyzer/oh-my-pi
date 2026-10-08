@@ -157,6 +157,13 @@ async fn vcs_snapshots_cover_normal_linked_bare_detached_unborn_packed_and_refta
 	assert_eq!(bare_snapshot.primary_root.as_deref(), Some(canonical_bare.as_path()));
 	assert_eq!(bare_snapshot.status_counts, StatusCounts::default());
 
+	// Reftable needs git 2.45 or later to create the fixture, and the product
+	// reads reftable refs through that same CLI; an older host has nothing to
+	// prove here, so it says so and the other variants above still ran.
+	if !omp_vcs::testing::supports_reftable() {
+		eprintln!("skipping the reftable variant: this git cannot create reftable repositories");
+		return;
+	}
 	let reftable = tempfile::tempdir().expect("reftable fixture");
 	fixture_git(reftable.path(), &["init", "--ref-format=reftable", "-b", "table"]);
 	fixture_git(reftable.path(), &["config", "user.name", "OMP Test"]);

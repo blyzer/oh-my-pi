@@ -3091,8 +3091,12 @@ mod tests {
 			..RelayOptions::default()
 		}) {
 			Ok(relay) => relay,
+			// A host without IPv6 has no `::1` to bind: the address is not
+			// configured (`EADDRNOTAVAIL`) or the kernel has no IPv6 at all, so
+			// the socket cannot even be created (`EAFNOSUPPORT`).
 			Err(RelayError::Bind { source, .. })
-				if source.kind() == std::io::ErrorKind::AddrNotAvailable =>
+				if source.kind() == std::io::ErrorKind::AddrNotAvailable
+					|| source.raw_os_error() == Some(libc::EAFNOSUPPORT) =>
 			{
 				return;
 			},

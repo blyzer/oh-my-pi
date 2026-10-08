@@ -2745,10 +2745,7 @@ impl LocalFs {
 	}
 
 	fn flush_directory(directory: &Dir, path: &Path) -> Result<()> {
-		let clone = directory
-			.try_clone()
-			.map_err(|source| Self::io_error("clone parent directory handle", path, source))?;
-		match clone.into_std_file().sync_all() {
+		match Self::sync_directory(directory, path)? {
 			Ok(()) => Ok(()),
 			Err(source)
 				if matches!(
@@ -2760,6 +2757,36 @@ impl LocalFs {
 			},
 			Err(source) => Err(Self::io_error("flush parent directory", path, source)),
 		}
+	}
+
+	/// Syncs one directory's entries to disk.
+	///
+	/// On Linux `cap-std` holds directories as `O_PATH` handles, and `fsync`
+	/// on such a handle fails with `EBADF`, so the directory is reopened
+	/// readable through the handle first (on every Unix, for one code path).
+	/// The reopen is relative to the held handle, so it names the same
+	/// directory even if its path was replaced since.
+	#[cfg(unix)]
+	fn sync_directory(directory: &Dir, path: &Path) -> Result<io::Result<()>> {
+		use rustix::fs::{Mode, OFlags};
+
+		let readable = rustix::fs::openat(
+			directory,
+			".",
+			OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+			Mode::empty(),
+		)
+		.map_err(|source| Self::io_error("reopen parent directory", path, source.into()))?;
+		Ok(rustix::fs::fsync(&readable).map_err(io::Error::from))
+	}
+
+	/// Syncs one directory's entries to disk.
+	#[cfg(not(unix))]
+	fn sync_directory(directory: &Dir, path: &Path) -> Result<io::Result<()>> {
+		let clone = directory
+			.try_clone()
+			.map_err(|source| Self::io_error("clone parent directory handle", path, source))?;
+		Ok(clone.into_std_file().sync_all())
 	}
 
 	fn path_metadata(path: PathBuf, metadata: &Metadata) -> PathMetadata {
@@ -2917,6 +2944,23 @@ mod tests {
 			DiskState::Present { fingerprint, .. } => DiskExpectation::Present(fingerprint),
 			DiskState::Missing => panic!("fixture should be present"),
 		}
+	}
+
+	/// Directory handles from `cap-std` are `O_PATH` on Linux, which cannot be
+	/// `fsync`ed directly; flushing a parent must still succeed there.
+	#[test]
+	fn parent_directory_flush_succeeds_on_capability_handles() {
+		let (_root, filesystem) = create_filesystem();
+		fs::create_dir(filesystem.root_path().join("tree")).expect("fixture directory");
+		let parent = filesystem
+			.inner
+			.root
+			.open_dir("tree")
+			.expect("capability handle");
+		LocalFs::flush_directory(&parent, &filesystem.root_path().join("tree"))
+			.expect("flush through a capability handle");
+		LocalFs::flush_directory(&filesystem.inner.root, filesystem.root_path())
+			.expect("flush the root handle");
 	}
 
 	#[test]
