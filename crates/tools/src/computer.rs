@@ -44,8 +44,21 @@ pub enum Action {
 }
 
 /// One native operation available to the computer program.
+///
+/// Every operation is enumerable ([`strum::IntoEnumIterator`]), so the
+/// authority each one needs ([`NativeParams::required_effects`]) is checked
+/// for all of them.
 #[derive(
-	Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::Display, strum::IntoStaticStr,
+	Clone,
+	Copy,
+	Debug,
+	Deserialize,
+	Eq,
+	PartialEq,
+	Serialize,
+	strum::Display,
+	strum::EnumIter,
+	strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -184,20 +197,24 @@ pub struct NativeParams {
 
 impl NativeParams {
 	/// Exact desktop authority required by this invocation.
+	///
+	/// The session host refuses every operation that needs
+	/// [`DesktopEffects::input`] in a `read_only` program, so this is also the
+	/// classification [`Tool::invocation_effects`] relies on for such a call.
 	pub const fn required_effects(&self) -> DesktopEffects {
+		const NONE: DesktopEffects = DesktopEffects {
+			capture:       false,
+			accessibility: false,
+			clipboard:     false,
+			input:         false,
+		};
 		match self.operation {
-			Operation::Capabilities
-			| Operation::Close
-			| Operation::ListDisplays
+			Operation::Capabilities | Operation::Close => NONE,
+			Operation::ListDisplays
 			| Operation::ListWindows
 			| Operation::ResolveWindow
 			| Operation::FocusedWindow
-			| Operation::ClipboardRead => {
-				DesktopEffects { capture: false, accessibility: false, input: false }
-			},
-			Operation::Capture => {
-				DesktopEffects { capture: true, accessibility: false, input: false }
-			},
+			| Operation::Capture => DesktopEffects { capture: true, ..NONE },
 			Operation::AxSnapshot
 			| Operation::AxQuery
 			| Operation::AxElementAt
@@ -208,11 +225,10 @@ impl NativeParams {
 			| Operation::AxActions
 			| Operation::AxAttributes
 			| Operation::AxChildren
-			| Operation::AxParent => {
-				DesktopEffects { capture: false, accessibility: true, input: false }
-			},
+			| Operation::AxParent => DesktopEffects { accessibility: true, ..NONE },
+			Operation::ClipboardRead => DesktopEffects { clipboard: true, ..NONE },
 			Operation::AxPerform | Operation::AxSetValue | Operation::AxFocus | Operation::AxClick => {
-				DesktopEffects { capture: false, accessibility: true, input: true }
+				DesktopEffects { accessibility: true, input: true, ..NONE }
 			},
 			Operation::Click
 			| Operation::MoveMouse
@@ -221,9 +237,7 @@ impl NativeParams {
 			| Operation::TypeText
 			| Operation::KeyChord
 			| Operation::RaiseWindow
-			| Operation::ClipboardWrite => {
-				DesktopEffects { capture: false, accessibility: false, input: true }
-			},
+			| Operation::ClipboardWrite => DesktopEffects { input: true, ..NONE },
 		}
 	}
 }
@@ -499,6 +513,7 @@ pub fn spec() -> ToolSpec {
 			desktop:   Some(DesktopEffects {
 				capture:       true,
 				accessibility: true,
+				clipboard:     true,
 				input:         true,
 			}),
 			fetch:     None,
@@ -537,10 +552,14 @@ impl Tool for Computer {
 		&self.spec
 	}
 
-	/// A `read_only` call can capture and read the accessibility tree but
-	/// never deliver input: the session host refuses every operation whose
-	/// [`NativeParams::required_effects`] needs input in such a program. Any
-	/// other call keeps the declared maximum.
+	/// A `read_only` call can capture, read the accessibility tree and read the
+	/// clipboard, but never deliver input: the session host refuses every
+	/// operation whose [`NativeParams::required_effects`] needs input in such a
+	/// program. Any other call keeps the declared maximum.
+	///
+	/// Desktop reads still rank as `exec` for approval
+	/// (`ApprovalTier::from_effects` in `omp-envd`), so this envelope changes
+	/// no prompt until the owner decides how desktop reads are approved.
 	fn invocation_effects(&self, params: &Params) -> Option<Effects> {
 		params
 			.read_only
@@ -725,10 +744,12 @@ mod tests {
 	use omp_core::Str;
 	use omp_tool::{CallOutcome, DesktopEffects, Effects, RecordedCall, Rev};
 	use serde_json::{Value, json};
+	use strum::IntoEnumIterator as _;
 	use tokio_util::sync::CancellationToken;
 
 	use super::{
-		Action, ComputerHost, Fault, FaultCode, Params, Payload, Update, lift_legacy_call, spec, tool,
+		Action, ComputerHost, Fault, FaultCode, NativeParams, Operation, Params, Payload, Update,
+		lift_legacy_call, read_only_effects, spec, tool,
 	};
 
 	#[test]
@@ -814,11 +835,12 @@ mod tests {
 		fn release(&self) {}
 	}
 
-	/// A `read_only` program keeps capture and accessibility reads but loses
-	/// input, the authority its session host refuses it; any other call, and
-	/// arguments the executor would refuse, keep the declared maximum.
+	/// A `read_only` program keeps capture, accessibility and clipboard reads
+	/// but loses input, the authority its session host refuses it; any other
+	/// call, and arguments the executor would refuse, keep the declared
+	/// maximum.
 	#[test]
-	fn read_only_calls_are_scoped_to_capture_and_accessibility() {
+	fn read_only_calls_are_scoped_to_desktop_reads() {
 		let mut registry = omp_tool::Registry::new();
 		registry
 			.register(tool(Arc::new(IdleHost)), omp_tool::Presentation::Slot, omp_tool::Claims {
@@ -837,7 +859,12 @@ mod tests {
 			.expect("a read-only envelope");
 		assert_eq!(
 			read_only.desktop,
-			Some(DesktopEffects { capture: true, accessibility: true, input: false })
+			Some(DesktopEffects {
+				capture:       true,
+				accessibility: true,
+				clipboard:     true,
+				input:         false,
+			})
 		);
 		assert!(read_only.is_subset_of(&maximum));
 		assert_eq!(Effects { desktop: maximum.desktop, ..read_only }, maximum);
@@ -845,6 +872,8 @@ mod tests {
 			r#"{"action":"run","code":"await desktop.click(1, 1)"}"#,
 			r#"{"action":"run","code":"x","read_only":false}"#,
 			r#"{"action":"run","code":"x","read_only":"yes"}"#,
+			// Serde's sequence form of `Params`, which the executor refuses.
+			r#"["run","x",true,null]"#,
 		] {
 			assert_eq!(
 				registry
@@ -854,6 +883,80 @@ mod tests {
 				"{arguments}"
 			);
 		}
+	}
+
+	/// Whether `operation` changes the desktop: pointer, keyboard, focus,
+	/// window order, accessibility actions and values, or the clipboard.
+	/// Exhaustive, so a new operation must be classified here before the
+	/// tests below accept it.
+	const fn mutates(operation: Operation) -> bool {
+		match operation {
+			Operation::Click
+			| Operation::MoveMouse
+			| Operation::Drag
+			| Operation::Scroll
+			| Operation::TypeText
+			| Operation::KeyChord
+			| Operation::RaiseWindow
+			| Operation::ClipboardWrite
+			| Operation::AxPerform
+			| Operation::AxSetValue
+			| Operation::AxFocus
+			| Operation::AxClick => true,
+			Operation::Capabilities
+			| Operation::Close
+			| Operation::ListDisplays
+			| Operation::ListWindows
+			| Operation::ResolveWindow
+			| Operation::FocusedWindow
+			| Operation::Capture
+			| Operation::AxSnapshot
+			| Operation::AxQuery
+			| Operation::AxElementAt
+			| Operation::AxFocused
+			| Operation::AxNode
+			| Operation::AxValue
+			| Operation::AxBounds
+			| Operation::AxActions
+			| Operation::AxAttributes
+			| Operation::AxChildren
+			| Operation::AxParent
+			| Operation::ClipboardRead => false,
+		}
+	}
+
+	fn native(operation: Operation) -> NativeParams {
+		serde_json::from_value(json!({ "operation": operation })).expect("a bare native operation")
+	}
+
+	/// The classifier and the executor agree per operation: exactly the
+	/// operations that change the desktop need input, which a `read_only`
+	/// program is refused, and every other operation, the clipboard read
+	/// included, needs only authority inside the `read_only` envelope.
+	#[test]
+	fn read_only_envelope_covers_exactly_the_operations_a_read_only_program_runs() {
+		let maximum = spec().effects;
+		let read_only = read_only_effects(&maximum)
+			.desktop
+			.expect("a read-only program keeps desktop reads");
+		let maximum = maximum
+			.desktop
+			.expect("computer declares desktop authority");
+		for operation in Operation::iter() {
+			let required = native(operation).required_effects();
+			assert_eq!(required.input, mutates(operation), "{operation}");
+			let within = |ceiling: DesktopEffects| {
+				Effects { desktop: Some(required), ..Effects::empty() }
+					.is_subset_of(&Effects { desktop: Some(ceiling), ..Effects::empty() })
+			};
+			assert!(within(maximum), "{operation} needs more than computer declares");
+			assert_eq!(within(read_only), !mutates(operation), "{operation}");
+		}
+		assert_eq!(
+			native(Operation::ClipboardRead).required_effects(),
+			DesktopEffects { clipboard: true, ..DesktopEffects::default() },
+			"a clipboard read is declared desktop authority"
+		);
 	}
 
 	#[test]

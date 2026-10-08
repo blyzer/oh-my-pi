@@ -701,7 +701,11 @@ mod tests {
 	use omp_tool::{Effects, ExecEffects};
 
 	use super::*;
-	use crate::admission::{ApprovalPolicy, ApprovalSource, ApprovalTier, SandboxUnavailable};
+	use crate::{
+		admission::{ApprovalPolicy, ApprovalSource, ApprovalTier, SandboxUnavailable},
+		blobs::BlobHost,
+		computer::ComputerSessionHost,
+	};
 
 	#[test]
 	fn typed_con_projection_round_trips() {
@@ -806,6 +810,63 @@ mod tests {
 		let decide = |settings: &ToolSettings, sandbox| {
 			let decision =
 				settings.approval_for("c", "reflect", &spec.effects, spec.confinement, sandbox);
+			(decision.tier, decision.mode, decision.policy)
+		};
+		let unavailable = SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };
+		for sandbox in [SandboxState::Active, SandboxState::Off, unavailable] {
+			assert_eq!(
+				decide(&ToolSettings::default(), sandbox),
+				(ApprovalTier::Exec, ApprovalMode::Write, ApprovalPolicy::Prompt),
+				"default posture with sandbox {sandbox:?}"
+			);
+		}
+		for mode in [ApprovalMode::AlwaysAsk, ApprovalMode::Write] {
+			let settings = ToolSettings::default().with_approval_mode_override(Some(mode));
+			assert_eq!(
+				decide(&settings, SandboxState::Active),
+				(ApprovalTier::Exec, mode, ApprovalPolicy::Prompt)
+			);
+		}
+		let explicit = ToolSettings::default().with_approval_mode_override(Some(ApprovalMode::Yolo));
+		assert_eq!(
+			decide(&explicit, SandboxState::Active),
+			(ApprovalTier::Exec, ApprovalMode::Yolo, ApprovalPolicy::Allow)
+		);
+	}
+
+	/// A `read_only` `computer` call is judged by its narrowed envelope, which
+	/// keeps capture, accessibility and clipboard reads and loses input, and
+	/// still asks exactly as every `computer` call did: desktop reads rank as
+	/// `exec` until the owner decides how they are approved. Only an explicit
+	/// `yolo` runs it unprompted.
+	#[test]
+	fn a_read_only_computer_call_keeps_the_exec_tier() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let host =
+			ComputerSessionHost::new(BlobHost::open(scratch.path()).expect("blobs"), &Ctx::new());
+		let mut registry = omp_tool::Registry::new();
+		registry
+			.register(
+				omp_tools::computer::tool(host),
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("test/computer"),
+					replaces:   None,
+				},
+			)
+			.expect("computer registers");
+		let effects = registry
+			.invocation_effects(
+				"computer",
+				r#"{"action":"run","code":"await desktop.clipboardRead()","read_only":true}"#,
+			)
+			.expect("a read-only envelope");
+		let desktop = effects.desktop.expect("desktop reads");
+		assert!(desktop.capture && desktop.accessibility && desktop.clipboard && !desktop.input);
+		let decide = |settings: &ToolSettings, sandbox| {
+			let decision =
+				settings.approval_for("c", "computer", &effects, Confinement::Host, sandbox);
 			(decision.tier, decision.mode, decision.policy)
 		};
 		let unavailable = SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };

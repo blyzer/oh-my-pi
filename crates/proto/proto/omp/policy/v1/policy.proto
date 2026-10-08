@@ -141,7 +141,10 @@ message InferenceEffects {
 message DesktopEffects {
   bool capture = 1;
   bool accessibility = 2;
+  // Pointer, keyboard, focus, accessibility mutation and clipboard writes.
   bool input = 3;
+  // Host clipboard reads; a clipboard write is `input`.
+  bool clipboard = 4;
   omp.inference.v1.ValueMap props = 15;
 }
 

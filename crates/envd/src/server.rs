@@ -4904,6 +4904,29 @@ impl EnvServer {
 						return;
 					},
 				}
+				// The gate accepts the committed arguments before anything is
+				// judged from them: a commit it refuses leaves the call unjudged,
+				// its policy still pending and its stream still withheld.
+				let staged = match connection.invocation_mut(frame.request_id, &request.invocation_id) {
+					Ok(
+						InvocationState::Native { admission, .. }
+						| InvocationState::Worker { admission, .. },
+					) => admission.stage(&request.raw),
+					Err((code, message)) => {
+						send_error(responses, frame.request_id, code, message).await;
+						return;
+					},
+				};
+				if let Err(error) = staged {
+					send_error(
+						responses,
+						frame.request_id,
+						pb::ProtocolErrorCode::InvalidArgument,
+						&error.to_string(),
+					)
+					.await;
+					return;
+				}
 				let refused = match connection.scope_committed(
 					frame.request_id,
 					&request.invocation_id,
@@ -4932,25 +4955,7 @@ impl EnvServer {
 					Ok(
 						InvocationState::Native { admission, .. }
 						| InvocationState::Worker { admission, .. },
-					) => {
-						match admission.finalize(
-							&request.raw,
-							self.workspace.root(),
-							self.workspace.root(),
-						) {
-							Ok(query) => query,
-							Err(error) => {
-								send_error(
-									responses,
-									frame.request_id,
-									pb::ProtocolErrorCode::InvalidArgument,
-									&error.to_string(),
-								)
-								.await;
-								return;
-							},
-						}
-					},
+					) => admission.emit(self.workspace.root(), self.workspace.root()),
 					Err((code, message)) => {
 						send_error(responses, frame.request_id, code, message).await;
 						return;
@@ -7761,13 +7766,18 @@ impl EnvServer {
 				},
 			};
 		let decision = match admission {
-			AdmissionDecision::Allowed { raw, bash } => {
+			AdmissionDecision::Allowed { raw, bash, rewritten } => {
 				let _effective_bash = bash;
-				// The answer may have rewritten the arguments: judge the
-				// effective call again, and never past what was admitted.
-				effective_effects(&self.registry, &tool, &raw, &admitted_effects)
-					.map(|effects| (raw, effects))
-					.ok_or_else(|| widened_effects_denial(&request.invocation_id))
+				// An answer that rewrote the arguments is judged again, never
+				// past what was admitted; unchanged arguments keep the envelope
+				// they were judged under.
+				if rewritten {
+					effective_effects(&self.registry, &tool, &raw, &admitted_effects)
+						.map(|effects| (raw, effects))
+						.ok_or_else(|| widened_effects_denial(&request.invocation_id))
+				} else {
+					Ok((raw, admitted_effects))
+				}
 			},
 			AdmissionDecision::Denied(policy) => Err(policy),
 		};
@@ -8750,15 +8760,16 @@ impl ConnectionState {
 		})
 	}
 
-	/// Judges the open invocation by its committed arguments `raw`, once,
-	/// before they are finalized: narrows its envelope to the call's
-	/// argument-scoped effects ([`Registry::invocation_effects`]), resolves a
-	/// pending approval policy from that envelope, and returns the call's
-	/// refusal at the write boundary ([`InvocationExecutionPolicy::denial`]),
-	/// or of an envelope beyond the declared maximum, if any.
+	/// Judges the open invocation by its committed arguments `raw`, once, after
+	/// its gate staged them ([`AdmissionGate::stage`]) and before their query
+	/// is emitted: narrows its envelope to the call's argument-scoped effects
+	/// ([`Registry::invocation_effects`]), resolves a pending approval policy
+	/// from that envelope, and returns the call's refusal at the write boundary
+	/// ([`InvocationExecutionPolicy::denial`]), or of an envelope beyond the
+	/// declared maximum, if any.
 	///
-	/// Arguments that are not UTF-8 keep the declared maximum; finalizing
-	/// refuses them.
+	/// Staged arguments are one JSON object, so they are UTF-8; were they not,
+	/// the call would keep its declared maximum.
 	fn scope_committed(
 		&mut self,
 		request_id: u64,
@@ -8792,9 +8803,10 @@ impl ConnectionState {
 			},
 			None => return Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
 		};
-		// Only the arguments that finalize the gate scope the call: a repeated
-		// commit is refused later and never rescopes it.
-		if admission.awaits_arguments() {
+		// Only the arguments the gate staged scope the call. A commit the gate
+		// refused never reaches here, and a repeated commit after the query
+		// stages nothing, so it never rescopes the call; it is refused later.
+		if admission.is_staged() {
 			if let Ok(raw) = str::from_utf8(raw) {
 				match registry.invocation_effects(&execution.tool, raw) {
 					Ok(scoped) => *effects = scoped,
@@ -16092,6 +16104,75 @@ mod tests {
 				);
 				assert_eq!(ran.lock().len(), before, "the widened call never ran");
 			}
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// A commit the gate refuses judges nothing, so the call is admitted on
+	/// the policy its next, accepted commit resolves to. Under `always-ask`, a
+	/// reading call in serde's sequence form, refused, then an executing call
+	/// asks and never runs; an executing call so refused, then a reading call,
+	/// runs unasked.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_refused_commit_leaves_the_call_unjudged() {
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let (server, _root, _state) = scoped_probe_daemon(&ran).await;
+		let rev = server
+			.registry()
+			.live_identity("scoped_probe")
+			.map(|(_, rev)| rev.to_string())
+			.expect("the scoped probe is registered");
+		for (invocation_id, refused, accepted, asks) in [
+			("exec-after-refusal", r#"["read"]"#, r#"{"level":"exec"}"#, true),
+			("read-after-refusal", r#"["exec"]"#, r#"{"level":"read"}"#, false),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, refusing.clone()).await;
+			let before = ran.lock().len();
+			let mut invocation = client
+				.invoke(pb::InvokeTool {
+					invocation_id: invocation_id.to_owned(),
+					name: "scoped_probe".to_owned(),
+					rev: rev.clone(),
+					..pb::InvokeTool::default()
+				})
+				.await
+				.expect("invoke");
+			assert!(matches!(
+				invocation.next_event().await.expect("accepted"),
+				Some(omp_env::InvocationEvent::Accepted(_))
+			));
+			for raw in [refused, accepted] {
+				invocation
+					.commit_args(
+						Bytes::copy_from_slice(raw.as_bytes()),
+						Bytes::from_static(b"scoped-effects-token"),
+						1_000,
+						None,
+					)
+					.await
+					.expect("commit arguments");
+			}
+			// The refused commit's error ends this client's view of the
+			// invocation, so the outcome shows in what was asked and what ran.
+			time::timeout(Duration::from_secs(30), async {
+				while refusing.queries.lock().is_empty() && ran.lock().len() == before {
+					time::sleep(Duration::from_millis(5)).await;
+				}
+			})
+			.await
+			.expect("the accepted commit was neither asked nor run");
+			if asks {
+				assert_eq!(*refusing.queries.lock(), [invocation_id], "the executing call asks");
+				assert_eq!(ran.lock().len(), before, "the refused prompt never ran it");
+			} else {
+				assert!(refusing.queries.lock().is_empty(), "the reading call never asks");
+				assert_eq!(ran.lock().len(), before + 1);
+				assert_eq!(ran.lock().last().map(|args| args["level"].clone()), Some("read".into()));
+			}
+			drop(invocation);
 			drop(client);
 			serving.abort();
 		}

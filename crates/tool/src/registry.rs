@@ -1753,9 +1753,14 @@ impl<T: Tool> ErasedTool for Registered<T> {
 		T::ARGUMENT_SCOPED_EFFECTS
 	}
 
-	/// Decodes the call's arguments exactly as the executor's
-	/// [`IncomingParams::whole`] does; arguments that do not decode keep the
-	/// declared maximum, since the executor refuses them too.
+	/// Decodes the call's arguments with [`decode_params`], the decoder
+	/// [`IncomingParams::whole`] applies once the executor has finalized them:
+	/// one JSON object, protocol fields stripped. That finalization is not
+	/// repeated here, and the two differ only where it is safe. Arguments that
+	/// do not decode strictly (not one object, malformed JSON the executor
+	/// would repair, an argument-spec alias or coercion it would canonicalize)
+	/// keep the declared maximum. A key given twice decodes last-wins here, and
+	/// the executor's finalization refuses it.
 	fn invocation_effects(&self, arguments: &str) -> Option<Effects> {
 		if !T::ARGUMENT_SCOPED_EFFECTS {
 			return None;
@@ -4052,6 +4057,8 @@ mod tests {
 			r#"{"level":7}"#,
 			r#"{"level":"read","extra":1}"#,
 			"not json",
+			// Serde's sequence form of the struct: no executor accepts it.
+			r#"["read"]"#,
 		] {
 			assert_eq!(
 				registry

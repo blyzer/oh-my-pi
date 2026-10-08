@@ -256,14 +256,7 @@ impl ComputerSessionHost {
 					{
 						return Err(invalid("computer programs are limited to 32 screenshots"));
 					}
-					if read_only && params.required_effects().input {
-						return Err(fault(
-							FaultCode::ReadOnly,
-							"read_only computer programs cannot perform input, focus, accessibility, or \
-							 clipboard mutation",
-							Some(params.operation),
-						));
-					}
+					refuse_input_in_read_only(read_only, &params)?;
 					let (result, created) = self
 						.execute_native(params, cancellation.clone(), &updates)
 						.await?;
@@ -1692,6 +1685,22 @@ fn required<'a>(value: Option<&'a str>, message: &'static str) -> Result<&'a str
 	value.ok_or_else(|| invalid(message))
 }
 
+/// Refuses, in a `read_only` program, an operation that needs desktop input
+/// ([`NativeParams::required_effects`]) before it runs: the gate the
+/// `read_only` envelope `computer` declares for such a call relies on.
+fn refuse_input_in_read_only(read_only: bool, params: &NativeParams) -> Result<(), Fault> {
+	if read_only && params.required_effects().input {
+		Err(fault(
+			FaultCode::ReadOnly,
+			"read_only computer programs cannot perform input, focus, accessibility, or clipboard \
+			 mutation",
+			Some(params.operation),
+		))
+	} else {
+		Ok(())
+	}
+}
+
 fn validate_non_run(params: &Params) -> Result<(), Fault> {
 	if params.code.is_some() || params.read_only || params.timeout.is_some() {
 		Err(invalid("capabilities and close accept only `action`"))
@@ -1745,12 +1754,90 @@ fn native_fault(operation: Operation, error: omp_desktop::DesktopError) -> Fault
 mod tests {
 	use omp_con::Ctx;
 	use omp_core::Str;
+	use omp_tools::computer::{FaultCode, NativeParams};
 	use serde_json::{Map, json};
+	use strum::IntoEnumIterator as _;
+	use tokio_util::sync::CancellationToken;
 
 	use super::{
-		ComputerSettings, Operation, SV_COMPUTER_DISPLAY, SV_COMPUTER_MAX_HEIGHT,
-		SV_COMPUTER_MAX_WIDTH, Statement, bounded_cap, evaluate_assertion, parse_program,
+		ComputerSessionHost, ComputerSettings, Operation, SV_COMPUTER_DISPLAY,
+		SV_COMPUTER_MAX_HEIGHT, SV_COMPUTER_MAX_WIDTH, Statement, bounded_cap, evaluate_assertion,
+		parse_program, refuse_input_in_read_only,
 	};
+	use crate::blobs::BlobHost;
+
+	/// Every operation that needs desktop input, and only those.
+	const INPUT_OPERATIONS: [Operation; 12] = [
+		Operation::Click,
+		Operation::MoveMouse,
+		Operation::Drag,
+		Operation::Scroll,
+		Operation::TypeText,
+		Operation::KeyChord,
+		Operation::RaiseWindow,
+		Operation::AxPerform,
+		Operation::AxSetValue,
+		Operation::AxFocus,
+		Operation::AxClick,
+		Operation::ClipboardWrite,
+	];
+
+	fn native(operation: Operation) -> NativeParams {
+		serde_json::from_value(json!({ "operation": operation })).expect("a bare native operation")
+	}
+
+	/// The `read_only` gate refuses exactly the operations that need desktop
+	/// input, naming the operation, and refuses nothing outside a `read_only`
+	/// program: the `read_only` envelope `computer` declares relies on it.
+	#[test]
+	fn the_read_only_gate_refuses_exactly_the_input_operations() {
+		for operation in Operation::iter() {
+			let params = native(operation);
+			let input = INPUT_OPERATIONS.contains(&operation);
+			assert_eq!(params.required_effects().input, input, "{operation}");
+			assert_eq!(refuse_input_in_read_only(false, &params), Ok(()), "{operation}");
+			match refuse_input_in_read_only(true, &params) {
+				Ok(()) => assert!(!input, "{operation} is input"),
+				Err(fault) => {
+					assert!(input, "{operation} is not input");
+					assert_eq!((fault.code, fault.operation), (FaultCode::ReadOnly, Some(operation)));
+				},
+			}
+		}
+	}
+
+	/// A `read_only` program runs the gate before each operation: every input
+	/// operation fails as read-only before it reaches the desktop. The native
+	/// session is closed first, so an operation that got past the gate would
+	/// fail as closed (or, for a clipboard write without text, as invalid)
+	/// instead of acting on the desktop.
+	#[tokio::test]
+	async fn read_only_programs_refuse_every_input_operation_before_it_runs() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let host =
+			ComputerSessionHost::new(BlobHost::open(scratch.path()).expect("blobs"), &Ctx::new());
+		host
+			.session
+			.close()
+			.await
+			.expect("an unstarted session closes");
+		for operation in INPUT_OPERATIONS {
+			let (updates, _received) = flume::unbounded();
+			let fault = host
+				.execute_program(
+					vec![Statement::Value { expression: Str::new_static("1") }, Statement::Desktop {
+						bind:   None,
+						params: native(operation),
+					}],
+					true,
+					CancellationToken::new(),
+					updates,
+				)
+				.await
+				.expect_err("a read-only program refuses input");
+			assert_eq!((fault.code, fault.operation), (FaultCode::ReadOnly, Some(operation)));
+		}
+	}
 
 	#[test]
 	fn computer_settings_project_from_typed_convars() {

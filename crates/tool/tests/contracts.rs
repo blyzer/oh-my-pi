@@ -1889,6 +1889,7 @@ fn effects_are_exact_deny_safe_and_wire_stable() {
 		desktop:   Some(DesktopEffects {
 			capture:       true,
 			accessibility: true,
+			clipboard:     true,
 			input:         false,
 		}),
 		fetch:     None,
@@ -1910,6 +1911,7 @@ fn effects_are_exact_deny_safe_and_wire_stable() {
 		desktop:   Some(DesktopEffects {
 			capture:       true,
 			accessibility: false,
+			clipboard:     true,
 			input:         false,
 		}),
 		fetch:     None,
@@ -1932,6 +1934,19 @@ fn effects_are_exact_deny_safe_and_wire_stable() {
 	widened.documents = narrowed.documents.clone();
 	widened.desktop.as_mut().unwrap().input = true;
 	assert!(!widened.is_subset_of(&maximum));
+	let clipboard_read = Effects {
+		desktop: Some(DesktopEffects { clipboard: true, ..DesktopEffects::default() }),
+		..Effects::empty()
+	};
+	assert!(!clipboard_read.is_empty(), "a clipboard read is desktop authority");
+	assert!(!clipboard_read.is_subset_of(&Effects {
+		desktop: Some(DesktopEffects {
+			capture: true,
+			accessibility: true,
+			..DesktopEffects::default()
+		}),
+		..Effects::empty()
+	}));
 	assert!(!maximum.is_subset_of(&Effects::empty()));
 
 	let wire = v1::EffectEnvelope::from(&narrowed);

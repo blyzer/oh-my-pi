@@ -156,13 +156,34 @@ pub fn schema<T: schemars::JsonSchema>() -> Bytes {
 /// `i` and `notrunc` remain in the canonical invocation arguments for
 /// journaling and dispatch policy, but are not fields each executor must
 /// duplicate in its domain-specific parameter type.
+///
+/// Tool arguments are one JSON object, as [`IncomingParams::whole`] requires
+/// before it decodes them; any other document is refused here too, never
+/// decoded in serde's sequence form of a struct.
 pub fn decode_params<T: DeserializeOwned>(json: &str) -> Result<T, serde_json::Error> {
 	let mut value = serde_json::from_str::<serde_json::Value>(json)?;
-	if let Some(object) = value.as_object_mut() {
-		object.remove("i");
-		object.remove("notrunc");
-	}
+	let Some(object) = value.as_object_mut() else {
+		return Err(<serde_json::Error as serde::de::Error>::invalid_type(
+			unexpected_json(&value),
+			&"an argument object",
+		));
+	};
+	object.remove("i");
+	object.remove("notrunc");
 	serde_json::from_value(value)
+}
+
+/// The [`serde::de::Unexpected`] description of a non-object argument document.
+fn unexpected_json(value: &serde_json::Value) -> serde::de::Unexpected<'_> {
+	use serde::de::Unexpected;
+	match value {
+		serde_json::Value::Null => Unexpected::Unit,
+		serde_json::Value::Bool(value) => Unexpected::Bool(*value),
+		serde_json::Value::Number(_) => Unexpected::Other("a number"),
+		serde_json::Value::String(value) => Unexpected::Str(value),
+		serde_json::Value::Array(_) => Unexpected::Seq,
+		serde_json::Value::Object(_) => Unexpected::Map,
+	}
 }
 
 /// Namespaced thread-item property carrying a committed tool revision.
@@ -447,15 +468,18 @@ pub struct DesktopEffects {
 	pub capture:       bool,
 	/// Whether accessibility-tree reads are permitted.
 	pub accessibility: bool,
-	/// Whether pointer, keyboard, focus, and accessibility mutation are
-	/// permitted.
+	/// Whether host clipboard reads are permitted. A clipboard write is
+	/// [`Self::input`].
+	pub clipboard:     bool,
+	/// Whether pointer, keyboard, focus, accessibility mutation, and clipboard
+	/// writes are permitted.
 	pub input:         bool,
 }
 
 impl DesktopEffects {
 	/// Returns whether this desktop domain grants no authority.
 	pub const fn is_empty(&self) -> bool {
-		!self.capture && !self.accessibility && !self.input
+		!self.capture && !self.accessibility && !self.clipboard && !self.input
 	}
 }
 
@@ -646,6 +670,7 @@ impl Effects {
 			|value, max| {
 				(!value.capture || max.capture)
 					&& (!value.accessibility || max.accessibility)
+					&& (!value.clipboard || max.clipboard)
 					&& (!value.input || max.input)
 			},
 		) && optional_subset(
@@ -729,6 +754,7 @@ impl From<&Effects> for v1::EffectEnvelope {
 			desktop:   value.desktop.as_ref().map(|desktop| v1::DesktopEffects {
 				capture:       desktop.capture,
 				accessibility: desktop.accessibility,
+				clipboard:     desktop.clipboard,
 				input:         desktop.input,
 				props:         None,
 			}),
@@ -779,6 +805,7 @@ impl TryFrom<&v1::EffectEnvelope> for Effects {
 			desktop:   value.desktop.as_ref().map(|desktop| DesktopEffects {
 				capture:       desktop.capture,
 				accessibility: desktop.accessibility,
+				clipboard:     desktop.clipboard,
 				input:         desktop.input,
 			}),
 			fetch:     value
@@ -2411,6 +2438,21 @@ mod tests {
 		let params = decode_params::<Params>(r#"{"path":"Cargo.toml","i":"reading","notrunc":true}"#)
 			.expect("protocol fields are stripped before domain decode");
 		assert_eq!(params, Params { path: "Cargo.toml".to_owned() });
+	}
+
+	/// Arguments are one JSON object: serde would decode a derived struct from
+	/// an array in sequence form, which no executor accepts, so it is refused.
+	#[test]
+	fn decode_params_refuses_documents_that_are_not_objects() {
+		#[derive(Debug, Deserialize)]
+		struct Params {
+			_path: String,
+		}
+
+		for document in [r#"["Cargo.toml"]"#, r#""Cargo.toml""#, "7", "null", "true"] {
+			let error = decode_params::<Params>(document).expect_err("not an argument object");
+			assert!(error.to_string().contains("expected an argument object"), "{document}: {error}");
+		}
 	}
 
 	#[test]
