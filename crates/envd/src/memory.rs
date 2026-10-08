@@ -2,10 +2,11 @@
 //!
 //! The host starts and registers the Off/Mnemopi runtime from the immutable
 //! VCS snapshot it already owns, and exposes the late-bound bridge the memory
-//! device's `reflect` uses to reach the session's inference authority, which
-//! the driver binds once it has composed that authority. Prompt sampling and
-//! extraction lanes live above the environment, in
-//! the higher-level driver memory composition.
+//! device's `reflect` uses to reach the inference of the session that issued
+//! the call: over the issuing connection's reflection relay on a project
+//! daemon, else the authority the driver binds in this process once it has
+//! composed it. Prompt sampling and extraction lanes live above the
+//! environment, in the higher-level driver memory composition.
 
 use std::{
 	fmt,
@@ -31,9 +32,13 @@ pub enum ReflectionBindingError {
 	AlreadyBound,
 }
 
-/// Late-bound bridge from the environment memory device to the session's
-/// inference authority. Unbound, `reflect` answers with the recalled
-/// evidence.
+/// Late-bound bridge from the environment memory device to the inference of
+/// the session that issued the call.
+///
+/// A call whose connection relays reflections (an attached session's call on
+/// the project daemon) synthesizes there, through that session's own bridge;
+/// any other call uses the authority bound here. Neither present, `reflect`
+/// answers with the recalled evidence.
 #[derive(Default)]
 pub struct ReflectionBridgeHost {
 	host: OnceLock<Arc<dyn ReflectionHost>>,
@@ -60,6 +65,9 @@ impl ReflectionHost for ReflectionBridgeHost {
 		&self,
 		request: omp_tools::memory::ReflectionRequest,
 	) -> Result<Str, ReflectionHostError> {
+		if let Some(relay) = crate::tools::invocation_reflection() {
+			return relay.reflect(request).await;
+		}
 		let host = self.host.get().ok_or(ReflectionHostError::Unavailable)?;
 		host.reflect(request).await
 	}

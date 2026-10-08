@@ -3552,9 +3552,9 @@ mod tests {
 	use super::{
 		EphemeralJournal, HeadlessError, KernelOptions, PromptOverrides, apply_model_override,
 		convar_reasoning, install_prompt_facts, install_workpool_yield_contract,
-		install_yield_contract, remember_terminal_session, replicate_outcome_blob,
-		replicate_verdict_parts, route_facts, select_journal_path, session_local_tree,
-		validate_tool_names,
+		install_yield_contract, isolated_call_model, remember_terminal_session,
+		replicate_outcome_blob, replicate_verdict_parts, retarget, route_facts, select_journal_path,
+		session_local_tree, validate_tool_names,
 	};
 
 	const GPT5: &str = "openai/gpt-5";
@@ -4514,5 +4514,43 @@ mod tests {
 			..KernelOptions::default()
 		};
 		assert_eq!(options.approval_mode, Some(omp_envd::tool_settings::ApprovalMode::AlwaysAsk));
+	}
+
+	/// An auxiliary call moved to its selected model keeps an explicit
+	/// provider constraint; any other launch target becomes the model alone.
+	#[test]
+	fn an_auxiliary_retarget_keeps_an_explicit_provider() {
+		let selected = ModelKey::from(GPT5);
+		let constrained = omp_ai::Target::Provider {
+			provider: omp_catalog::ProviderId::from("openai"),
+			model:    ModelKey::from("openai/launch"),
+		};
+		assert_eq!(retarget(&constrained, selected.clone()), omp_ai::Target::Provider {
+			provider: omp_catalog::ProviderId::from("openai"),
+			model:    selected.clone(),
+		});
+		let unconstrained = omp_ai::Target::Model(ModelKey::from("openai/launch"));
+		assert_eq!(retarget(&unconstrained, selected.clone()), omp_ai::Target::Model(selected));
+	}
+
+	/// Reflection's `@memory` selector resolves through the catalog's role
+	/// chain (configured memory selectors, then `@commit`, then `@smol`) like
+	/// any isolated call, and an unknown selector is a planning
+	/// `TargetNotFound`.
+	#[test]
+	fn isolated_calls_resolve_the_memory_role_and_refuse_unknown_selectors() {
+		let catalog = Catalog::embedded();
+		let con = omp_con::Ctx::new();
+		let memory = isolated_call_model(catalog, &con, "@memory").expect("@memory resolves");
+		let commit = isolated_call_model(catalog, &con, "@commit").ok();
+		let smol = isolated_call_model(catalog, &con, "@smol").ok();
+		assert!(
+			Some(&memory) == commit.as_ref() || Some(&memory) == smol.as_ref(),
+			"with no memory selectors configured, @memory falls back to @commit or @smol: \
+			 {memory:?}, commit {commit:?}, smol {smol:?}"
+		);
+		let unknown = isolated_call_model(catalog, &con, "no-such-model-for-reflection")
+			.expect_err("an unknown selector is refused");
+		assert_eq!(unknown.kind, omp_ai::ErrorKind::TargetNotFound);
 	}
 }

@@ -5,7 +5,8 @@ use std::sync::Arc;
 use flume::{Receiver, Sender};
 use omp_core::{FastHashMap, FastHashSet, Str};
 use omp_proto::env::v1::{
-	ApprovalWithdrawn, ClientFrame, ServerFrame, client_frame, data_request, server_frame,
+	ApprovalWithdrawn, ClientFrame, ReflectionWithdrawn, ServerFrame, client_frame, data_request,
+	server_frame,
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -169,7 +170,7 @@ async fn route(
 		tokio::select! {
 			frame = client_rx.recv_async() => {
 				let frame = frame.map_err(|_| PartitionError::ClientClosed)?;
-				let (backend, invocation) = route_client_frame(&frame, &remote_tools, &routes.invocations, &routes.requests);
+				let (backend, invocation) = route_client_frame(&frame, &remote_tools, &routes);
 				if let Some(client_frame::Body::InvokeTool(invoke)) = frame.body.as_ref() {
 					routes.invocations.insert(Str::from(invoke.invocation_id.clone()), backend);
 				}
@@ -179,17 +180,28 @@ async fn route(
 						routes.request_invocations.insert(frame.request_id, invocation);
 					}
 				}
-				if let Some(client_frame::Body::ApprovalAnswer(answer)) = frame.body.as_ref() {
-					routes.approvals.remove(&(frame.request_id, answer.query_id));
+				let relayed = match frame.body.as_ref() {
+					Some(client_frame::Body::ApprovalAnswer(answer)) => {
+						routes.approvals.remove(&(frame.request_id, answer.query_id));
+						Some(("approval", answer.query_id))
+					},
+					Some(client_frame::Body::ReflectionAnswer(answer)) => {
+						routes.reflections.remove(&(frame.request_id, answer.query_id));
+						Some(("reflection", answer.query_id))
+					},
+					_ => None,
+				};
+				if let Some((relay, query_id)) = relayed {
 					let open = match backend { Backend::Local => local_open, Backend::Remote => remote_open };
 					if !open {
 						// The query closed with its backend and the router already
-						// withdrew it from the client; nothing is left to decide it.
+						// withdrew it from the client; nothing is left to answer it.
 						tracing::debug!(
 							request_id = frame.request_id,
-							query_id = answer.query_id,
+							query_id,
+							relay,
 							backend = backend.name(),
-							"dropped an approval answer for a closed backend"
+							"dropped a relayed answer for a closed backend"
 						);
 						continue;
 					}
@@ -202,7 +214,7 @@ async fn route(
 					forward_server_frame(frame, Backend::Local, &client_tx, &mut routes).await?;
 				} else {
 					local_open = false;
-					withdraw_approvals(Backend::Local, &client_tx, &mut routes.approvals).await?;
+					withdraw_relayed(Backend::Local, &client_tx, &mut routes).await?;
 				}
 			},
 			frame = remote_rx.recv_async(), if remote_open => {
@@ -210,7 +222,7 @@ async fn route(
 					forward_server_frame(frame, Backend::Remote, &client_tx, &mut routes).await?;
 				} else {
 					remote_open = false;
-					withdraw_approvals(Backend::Remote, &client_tx, &mut routes.approvals).await?;
+					withdraw_relayed(Backend::Remote, &client_tx, &mut routes).await?;
 				}
 			},
 		}
@@ -234,25 +246,36 @@ struct Routes {
 	/// that raised them. They outlive their request route, because a detached
 	/// command keeps its prompt open after the issuing request ended.
 	approvals:           FastHashMap<(u64, u64), Backend>,
+	/// Relayed reflection queries forwarded to the client and not yet
+	/// answered or withdrawn, keyed and owned like `approvals`.
+	reflections:         FastHashMap<(u64, u64), Backend>,
 }
 
-/// Withdraws every open approval query that `backend` raised.
+/// Withdraws every open approval and reflection query that `backend` raised.
 ///
 /// The merged client transport outlives one backend, so the client would
-/// otherwise hold the prompts of a backend that can neither decide nor
-/// withdraw them.
-async fn withdraw_approvals(
+/// otherwise hold the queries of a backend that can neither take their
+/// answers nor withdraw them.
+async fn withdraw_relayed(
 	backend: Backend,
 	client: &Sender<ServerFrame>,
-	approvals: &mut FastHashMap<(u64, u64), Backend>,
+	routes: &mut Routes,
 ) -> Result<(), PartitionError> {
-	for ((request_id, query_id), _) in approvals.extract_if(|_, owner| *owner == backend) {
+	let approvals = routes
+		.approvals
+		.extract_if(|_, owner| *owner == backend)
+		.map(|((request_id, query_id), _)| {
+			(request_id, server_frame::Body::ApprovalWithdrawn(ApprovalWithdrawn { query_id }))
+		});
+	let reflections = routes
+		.reflections
+		.extract_if(|_, owner| *owner == backend)
+		.map(|((request_id, query_id), _)| {
+			(request_id, server_frame::Body::ReflectionWithdrawn(ReflectionWithdrawn { query_id }))
+		});
+	for (request_id, body) in approvals.chain(reflections) {
 		client
-			.send_async(ServerFrame {
-				request_id,
-				body: Some(server_frame::Body::ApprovalWithdrawn(ApprovalWithdrawn { query_id })),
-				..ServerFrame::default()
-			})
+			.send_async(ServerFrame { request_id, body: Some(body), ..ServerFrame::default() })
 			.await
 			.map_err(|_| PartitionError::ClientClosed)?;
 	}
@@ -283,9 +306,9 @@ async fn receive_hello(
 fn route_client_frame(
 	frame: &ClientFrame,
 	remote_tools: &FastHashSet<Str>,
-	invocations: &FastHashMap<Str, Backend>,
-	requests: &FastHashMap<u64, Backend>,
+	routes: &Routes,
 ) -> (Backend, Option<Str>) {
+	let Routes { invocations, requests, reflections, .. } = routes;
 	let remote = Backend::Remote;
 	let local = Backend::Local;
 	match frame.body.as_ref() {
@@ -323,6 +346,16 @@ fn route_client_frame(
 		Some(client_frame::Body::ApprovalAnswer(_)) => {
 			(requests.get(&frame.request_id).copied().unwrap_or(remote), None)
 		},
+		// Only the backend that raised a reflection query can take its answer;
+		// the query outlives its request route as an approval's does.
+		Some(client_frame::Body::ReflectionAnswer(answer)) => (
+			reflections
+				.get(&(frame.request_id, answer.query_id))
+				.or_else(|| requests.get(&frame.request_id))
+				.copied()
+				.unwrap_or(remote),
+			None,
+		),
 		// Only the environment relays approvals, so only it holds this
 		// connection's session grants.
 		Some(client_frame::Body::RevokeApprovalGrants(_)) => (remote, None),
@@ -375,6 +408,7 @@ const fn opens_response_route(frame: &ClientFrame) -> bool {
 		Some(
 			client_frame::Body::AcpDocumentAnswer(_)
 				| client_frame::Body::ApprovalAnswer(_)
+				| client_frame::Body::ReflectionAnswer(_)
 				| client_frame::Body::RevokeApprovalGrants(_)
 		)
 	)
@@ -447,6 +481,16 @@ async fn forward_server_frame(
 				.approvals
 				.remove(&(frame.request_id, withdrawn.query_id));
 		},
+		Some(server_frame::Body::ReflectionQuery(query)) => {
+			routes
+				.reflections
+				.insert((frame.request_id, query.query_id), backend);
+		},
+		Some(server_frame::Body::ReflectionWithdrawn(withdrawn)) => {
+			routes
+				.reflections
+				.remove(&(frame.request_id, withdrawn.query_id));
+		},
 		_ => {},
 	}
 	client
@@ -469,12 +513,12 @@ mod tests {
 	use omp_proto::env::v1::{
 		AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, ApprovalAnswer, ApprovalDecision,
 		ApprovalQuery, ApprovalSpec, ArgText, ClientHello, DataRequest, DocumentOp, EditRepairAnswer,
-		EditRepairQuery, EvalResetRequest, InvokeTool, RegisterPresence, RevokeApprovalGrants,
-		ServerHello, Update,
+		EditRepairQuery, EvalResetRequest, InvokeTool, ReflectionAnswer, ReflectionQuery,
+		RegisterPresence, RevokeApprovalGrants, ServerHello, Update, reflection_answer,
 	};
 
 	use super::*;
-	use crate::ApprovalQueryEvent;
+	use crate::{ApprovalQueryEvent, ReflectionQueryEvent};
 
 	async fn receive(transport: &InProcessEnvTransport) -> ClientFrame {
 		tokio::time::timeout(Duration::from_secs(2), transport.recv())
@@ -514,8 +558,11 @@ mod tests {
 					..EditRepairAnswer::default()
 				}),
 			);
-			let (actual, pinned_invocation) =
-				route_client_frame(&answer, &remote_tools, &invocations, &requests);
+			let (actual, pinned_invocation) = route_client_frame(&answer, &remote_tools, &Routes {
+				invocations: invocations.clone(),
+				requests: requests.clone(),
+				..Routes::default()
+			});
 			assert_eq!(actual, expected);
 			assert_eq!(pinned_invocation.as_deref(), Some(invocation_id));
 		}
@@ -537,8 +584,11 @@ mod tests {
 				request_id,
 				client_frame::Body::ApprovalAnswer(ApprovalAnswer { query_id: 1, decision: None }),
 			);
-			let (actual, pinned_invocation) =
-				route_client_frame(&answer, &remote_tools, &invocations, &requests);
+			let (actual, pinned_invocation) = route_client_frame(&answer, &remote_tools, &Routes {
+				invocations: invocations.clone(),
+				requests: requests.clone(),
+				..Routes::default()
+			});
 			assert_eq!(actual, expected);
 			assert!(pinned_invocation.is_none(), "an approval answer pinned an invocation");
 			assert!(!opens_response_route(&answer));
@@ -782,12 +832,8 @@ mod tests {
 	#[test]
 	fn grant_revocation_routes_to_the_environment_and_opens_no_route() {
 		let revoke = frame(0, client_frame::Body::RevokeApprovalGrants(RevokeApprovalGrants {}));
-		let (backend, invocation) = route_client_frame(
-			&revoke,
-			&FastHashSet::default(),
-			&FastHashMap::default(),
-			&FastHashMap::default(),
-		);
+		let (backend, invocation) =
+			route_client_frame(&revoke, &FastHashSet::default(), &Routes::default());
 		assert_eq!(backend, Backend::Remote);
 		assert!(invocation.is_none());
 		assert!(!opens_response_route(&revoke));
@@ -804,12 +850,8 @@ mod tests {
 				write_text:    true,
 			}),
 		);
-		let (backend, invocation) = route_client_frame(
-			&bind,
-			&FastHashSet::default(),
-			&FastHashMap::default(),
-			&FastHashMap::default(),
-		);
+		let (backend, invocation) =
+			route_client_frame(&bind, &FastHashSet::default(), &Routes::default());
 		assert_eq!(backend, Backend::Remote);
 		assert!(invocation.is_none());
 	}
@@ -835,7 +877,11 @@ mod tests {
 				}),
 			);
 			let (actual, pinned_invocation) =
-				route_client_frame(&document_answer, &remote_tools, &invocations, &requests);
+				route_client_frame(&document_answer, &remote_tools, &Routes {
+					invocations: invocations.clone(),
+					requests: requests.clone(),
+					..Routes::default()
+				});
 			assert_eq!(actual, expected);
 			assert_eq!(pinned_invocation.as_deref(), Some(invocation_id));
 			assert!(!opens_response_route(&document_answer));
@@ -845,12 +891,8 @@ mod tests {
 	#[test]
 	fn eval_reset_always_routes_to_the_environment_backend() {
 		let reset = frame(91, client_frame::Body::EvalReset(EvalResetRequest {}));
-		let (backend, invocation) = route_client_frame(
-			&reset,
-			&FastHashSet::default(),
-			&FastHashMap::default(),
-			&FastHashMap::default(),
-		);
+		let (backend, invocation) =
+			route_client_frame(&reset, &FastHashSet::default(), &Routes::default());
 		assert_eq!(backend, Backend::Remote);
 		assert!(invocation.is_none());
 	}
@@ -1128,5 +1170,116 @@ mod tests {
 			.expect("router shutdown timed out")
 			.expect("router task panicked");
 		assert!(result.is_err());
+	}
+
+	fn reflection_answer(request_id: u64, query_id: u64) -> ClientFrame {
+		frame(
+			request_id,
+			client_frame::Body::ReflectionAnswer(ReflectionAnswer {
+				query_id,
+				body: Some(reflection_answer::Body::Answer("Deploys go to fly.io.".into())),
+			}),
+		)
+	}
+
+	/// A reflection answer goes to the backend that raised its query, even
+	/// after the issuing request's route ended; it opens no route of its own.
+	#[test]
+	fn reflection_answers_follow_the_backend_that_raised_the_query() {
+		let mut routes = Routes::default();
+		routes.reflections.insert((71, 1), Backend::Local);
+		routes.requests.insert(72, Backend::Local);
+		for (request_id, expected) in
+			[(71, Backend::Local), (72, Backend::Local), (73, Backend::Remote)]
+		{
+			let answer = reflection_answer(request_id, 1);
+			let (actual, pinned_invocation) =
+				route_client_frame(&answer, &FastHashSet::default(), &routes);
+			assert_eq!(actual, expected, "request {request_id}");
+			assert!(pinned_invocation.is_none(), "a reflection answer pinned an invocation");
+			assert!(!opens_response_route(&answer));
+		}
+	}
+
+	/// The daemon's reflection query reaches the partitioned client's queue,
+	/// its answer reaches the daemon on the query's request, and a query still
+	/// open when the daemon closes is withdrawn and can no longer be answered.
+	#[tokio::test]
+	async fn reflection_queries_round_trip_and_close_with_their_backend() {
+		const WAIT: Duration = Duration::from_secs(2);
+		let (local_pipe, local_transport) = in_process_frames(8);
+		let (remote_pipe, remote_transport) = in_process_frames(8);
+		let (client, router) =
+			PartitionedEnvTransport::spawn(local_pipe, remote_pipe, Arc::new(FastHashSet::default()));
+		let (hello, (), ()) = tokio::join!(
+			client.hello(ClientHello::default()),
+			accept_hello(&local_transport),
+			accept_hello(&remote_transport),
+		);
+		hello.expect("partitioned hello");
+		let reflections = client.reflection_queries();
+		let query = |request_id, query_id| ServerFrame {
+			request_id,
+			body: Some(server_frame::Body::ReflectionQuery(ReflectionQuery {
+				query_id,
+				question: "deploy target".into(),
+				context: None,
+				evidence: vec!["The deploy target is fly.io".into()],
+			})),
+			..ServerFrame::default()
+		};
+
+		remote_transport
+			.send(query(81, 1))
+			.await
+			.expect("send daemon reflection query");
+		let Ok(ReflectionQueryEvent::Requested { request_id: 81, query: received }) =
+			tokio::time::timeout(WAIT, reflections.recv_async())
+				.await
+				.expect("reflection query timed out")
+		else {
+			panic!("the daemon's reflection query did not reach the client");
+		};
+		assert_eq!(received.evidence, ["The deploy target is fly.io"]);
+		let Some(client_frame::Body::ReflectionAnswer(answer)) = reflection_answer(81, 1).body else {
+			unreachable!("built as a reflection answer");
+		};
+		client
+			.answer_reflection(81, answer)
+			.await
+			.expect("answer the open query");
+		assert_eq!(receive(&remote_transport).await, reflection_answer(81, 1));
+
+		remote_transport
+			.send(query(82, 2))
+			.await
+			.expect("send a second reflection query");
+		assert!(matches!(
+			tokio::time::timeout(WAIT, reflections.recv_async())
+				.await
+				.expect("second reflection query timed out"),
+			Ok(ReflectionQueryEvent::Requested { request_id: 82, .. })
+		));
+		drop(remote_transport);
+		assert_eq!(
+			tokio::time::timeout(WAIT, reflections.recv_async())
+				.await
+				.expect("reflection withdrawal timed out"),
+			Ok(ReflectionQueryEvent::Withdrawn { request_id: 82, query_id: 2 })
+		);
+		assert!(matches!(
+			client
+				.answer_reflection(82, ReflectionAnswer { query_id: 2, body: None })
+				.await,
+			Err(ClientError::ReflectionQueryClosed { request_id: 82, query_id: 2 })
+		));
+
+		drop(client);
+		let result = tokio::time::timeout(WAIT, router)
+			.await
+			.expect("router shutdown timed out")
+			.expect("router task panicked");
+		assert!(matches!(result, Err(PartitionError::ClientClosed)), "{result:?}");
+		drop(local_transport);
 	}
 }

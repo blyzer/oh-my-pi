@@ -54,6 +54,8 @@ pub mod process_identity;
 pub mod process_log;
 pub mod process_store;
 pub mod recovery;
+/// Memory reflections relayed to the connection that issued a daemon `reflect`.
+mod reflection_relay;
 mod report_issue;
 mod resource_materializer;
 mod sandbox_proxy;
@@ -1035,6 +1037,15 @@ impl ProjectEnvironment {
 		// The daemon's host binds no approval route: it relays its commands'
 		// prompts to this connection, which answers them through the session's.
 		let approval_relay = approval_relay::spawn_approval_pump(&client, &shutdown, &mut tasks);
+		// Nor does it own a model: the reflections its `reflect` calls need are
+		// relayed here and synthesized through this composition's bridge, the
+		// one the driver binds to the session's inference.
+		reflection_relay::spawn_reflection_pump(
+			&client,
+			Arc::clone(&reflection_bridge) as Arc<dyn omp_tools::memory::ReflectionHost>,
+			&shutdown,
+			&mut tasks,
+		);
 		spawn_extension_data_servers(&server, data_bindings, &shutdown, &mut tasks);
 		let lifecycle = ProjectLifecycle { shutdown: Some(shutdown), tasks, abort_tasks, server };
 		if let Err(error) =
@@ -1229,9 +1240,11 @@ impl ProjectEnvironment {
 		self.eval_bridge.bind_sdk_parent(owner, parent)
 	}
 
-	/// Returns the late-bound memory reflection bridge of the `reflect` this
-	/// composition hosts. An attached session's `reflect` runs on the project
-	/// daemon, which no binding here reaches.
+	/// Returns the late-bound memory reflection bridge: the inference the
+	/// `reflect` calls this composition issues synthesize on. An embedded
+	/// composition's own `reflect` uses it in process; an attached session's
+	/// runs on the project daemon, which relays each synthesis back to this
+	/// composition's bridge.
 	pub fn reflection_bridge(&self) -> Arc<memory::ReflectionBridgeHost> {
 		Arc::clone(&self.reflection_bridge)
 	}
@@ -1568,14 +1581,21 @@ async fn hello_attached_session(
 /// The client features an attached session advertises.
 ///
 /// It always answers the approval prompts the daemon relays for its commands
-/// (`approval_relay::pump_approval_queries`), and repairs edits when the
+/// (`approval_relay::pump_approval_queries`) and synthesizes the memory
+/// reflections the daemon relays for its `reflect` calls
+/// (`reflection_relay::pump_reflection_queries`), and repairs edits when the
 /// application supplied a repair client. Embedded and isolated compositions
-/// advertise none: their host prompts through its in-process route.
+/// advertise none: their host prompts through its in-process route and
+/// reflects through the bridge bound in-process.
 const fn attached_features(edit_repair: bool) -> &'static [&'static str] {
 	if edit_repair {
-		&[omp_env::APPROVAL_RELAY_CAPABILITY, omp_env::EDIT_REPAIR_CAPABILITY]
+		&[
+			omp_env::APPROVAL_RELAY_CAPABILITY,
+			omp_env::REFLECTION_RELAY_CAPABILITY,
+			omp_env::EDIT_REPAIR_CAPABILITY,
+		]
 	} else {
-		&[omp_env::APPROVAL_RELAY_CAPABILITY]
+		&[omp_env::APPROVAL_RELAY_CAPABILITY, omp_env::REFLECTION_RELAY_CAPABILITY]
 	}
 }
 
@@ -2195,23 +2215,24 @@ mod tests {
 	}
 
 	#[test]
-	fn attached_hello_relays_approvals_and_advertises_only_supplied_edit_repair_facts() {
+	fn attached_hello_relays_approvals_and_reflections_and_advertises_only_supplied_edit_repair_facts()
+	 {
 		let plain = client_hello(None, &[], None);
 		assert!(plain.capabilities.is_empty(), "embedded and isolated hellos advertise nothing");
 		assert!(plain.props.is_none());
 
 		let attached = client_hello(None, attached_features(false), None);
-		assert_eq!(attached.capabilities, ["approval-relay"]);
+		assert_eq!(attached.capabilities, ["approval-relay", "reflection-relay"]);
 		assert!(attached.props.is_none());
 
 		let repair = client_hello(None, attached_features(true), None);
-		assert_eq!(repair.capabilities, ["approval-relay", "edit-repair"]);
+		assert_eq!(repair.capabilities, ["approval-relay", "reflection-relay", "edit-repair"]);
 		assert!(repair.props.is_none());
 
 		let model = sf!("smol");
 		let model_only =
 			client_hello(Some(ApprovalMode::Write), attached_features(false), Some(&model));
-		assert_eq!(model_only.capabilities, ["approval-relay"]);
+		assert_eq!(model_only.capabilities, ["approval-relay", "reflection-relay"]);
 		assert_eq!(model_only.approval_mode, ProtoApprovalMode::Write as i32);
 		let model = model_only
 			.props

@@ -2,7 +2,11 @@
 //! the driver's `bind_reflection` as `compose_kernel` binds it: the kernel
 //! admits the call at the `exec` tier its declared inference request gives
 //! it, and an admitted call synthesizes with exactly one request through the
-//! session's inference capability. A refused call makes none.
+//! session's inference capability. A refused call makes none. A session
+//! attached to a project daemon gets the same synthesis: the daemon runs
+//! `reflect` and relays its synthesis back to the issuing session.
+
+mod support;
 
 use std::{
 	fs,
@@ -37,12 +41,24 @@ use omp_session::{ComponentRegistry, Session, components::prompts::prompts_handl
 use parking_lot::Mutex;
 use tokio::time::timeout;
 
-/// The session model: one `reflect` call, then a closing text turn.
-struct ReflectThenText {
+/// The session model: one tool call per turn from `calls`, then a closing
+/// text turn.
+struct Script {
+	calls: Vec<(&'static str, serde_json::Value)>,
 	turns: usize,
 }
 
-impl Inference for ReflectThenText {
+impl Script {
+	fn reflect() -> Self {
+		Self { calls: vec![reflect_call()], turns: 0 }
+	}
+}
+
+fn reflect_call() -> (&'static str, serde_json::Value) {
+	("reflect", serde_json::json!({ "query": "deploy target", "i": "Proving memory reflection" }))
+}
+
+impl Inference for Script {
 	fn chat(
 		&mut self,
 		_request: ChatRequest,
@@ -56,14 +72,10 @@ impl Inference for ReflectThenText {
 			provider_request_id: None,
 			created_at:          SystemTime::UNIX_EPOCH,
 		};
-		let events = if self.turns == 1 {
-			let arguments = serde_json::json!({
-				"query": "deploy target",
-				"i": "Proving memory reflection",
-			});
+		let events = if let Some((name, arguments)) = self.calls.get(self.turns - 1).cloned() {
 			let call = ToolCall {
-				id:        ToolCallId::from("call-1"),
-				name:      Str::new_static("reflect"),
+				id:        ToolCallId::from(format!("call-{}", self.turns)),
+				name:      Str::new_static(name),
 				arguments: OpaqueJson::new(arguments.clone()),
 			};
 			vec![
@@ -184,21 +196,37 @@ async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 		.expect("retain the fact");
 	let synthesis = Synthesis::default();
 	bind_reflection(&environment, synthesis.clone()).expect("bind reflection");
+	drive(&environment, &con, &root, scratch.path(), mode, approve, Script::reflect(), &synthesis)
+		.await
+}
 
-	let spill = BlobStore::open(scratch.path().join("artifacts")).expect("spill");
+/// Runs one turn of `script` on `environment` under `mode`; `approve`
+/// answers every prompt the kernel journals.
+#[expect(clippy::too_many_arguments, reason = "one scripted turn's whole fixture")]
+async fn drive(
+	environment: &ProjectEnvironment,
+	con: &Arc<omp_con::Ctx>,
+	root: &std::path::Path,
+	scratch: &std::path::Path,
+	mode: Option<ApprovalMode>,
+	approve: bool,
+	script: Script,
+	synthesis: &Synthesis,
+) -> Turn {
+	let spill = BlobStore::open(scratch.join("artifacts")).expect("spill");
 	let kernel = Kernel::new(
-		ReflectThenText { turns: 0 },
+		script,
 		environment.registry(),
 		DispatchPolicy::new(spill.clone()),
 		StaticPrompt(Str::new_static("test")),
 	);
-	let approvals = bind_environment_approvals(&kernel, &environment);
+	let approvals = bind_environment_approvals(&kernel, environment);
 	let mut kernel = kernel
 		.with_external_executor(Arc::new(EnvToolExecutor::new(
 			environment.client().clone(),
 			approvals,
 		)))
-		.with_tool_admission(Arc::new(SettingsAdmission::new(&con, mode, &root)));
+		.with_tool_admission(Arc::new(SettingsAdmission::new(con, mode, root)));
 	let events = kernel.subscribe();
 	let mailbox = kernel.mailbox();
 	let host = tokio::spawn(async move {
@@ -219,7 +247,7 @@ async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 		}
 	});
 	let mut session = Session::create_with_blob_store(
-		scratch.path().join("reflect.oms"),
+		scratch.join("reflect.oms"),
 		ComponentRegistry::standard(),
 		spill,
 	)
@@ -246,7 +274,6 @@ async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 		.join("\n");
 	let tickets = prompts(&session);
 	drop(kernel);
-	drop(environment);
 	let selectors = synthesis.selectors.lock().clone();
 	Turn { tickets, result, selectors }
 }
@@ -304,4 +331,69 @@ async fn explicit_yolo_runs_reflect_unprompted_with_one_request() {
 	assert!(tickets.is_empty(), "explicit yolo prompts for nothing: {tickets:?}");
 	assert_eq!(selectors, [Some(Str::new_static(REFLECTION_SELECTOR))]);
 	assert!(result.contains("Deploys go to fly.io."), "the synthesized answer settles: {result}");
+}
+
+/// A session attached to a project daemon: the daemon runs `retain` and
+/// `reflect` over its own memory bank and relays the synthesis to the issuing
+/// session, whose bound inference answers it with exactly one request.
+#[tokio::test]
+async fn an_attached_session_synthesizes_a_daemon_reflect_with_one_request() {
+	let scratch = tempfile::tempdir().expect("scratch");
+	let root = scratch.path().join("workspace");
+	let state = scratch.path().join("state");
+	fs::create_dir_all(&root).expect("workspace");
+	fs::create_dir_all(&state).expect("state");
+	let root = fs::canonicalize(&root).expect("canonical workspace");
+	let con = Arc::new(omp_con::Ctx::new());
+	AI_MEMORY_BACKEND
+		.set(&con, MemoryBackendSetting::Mnemopi)
+		.expect("memory backend");
+	let _daemon = support::InProcessDaemon::serve(&root, &state, Arc::clone(&con)).await;
+	let environment = ProjectEnvironment::attach(&root, &state, AttachOptions {
+		py_eval:            false,
+		approval_mode:      Some(ApprovalMode::Yolo),
+		trusted_extensions: Vec::new(),
+		contributed_values: Vec::new(),
+		con:                Arc::clone(&con),
+		bridges:            RegistryBridges::default(),
+		spawn_idle_timeout: Some(2),
+	})
+	.await
+	.expect("environment");
+	assert!(
+		environment.fallback_notice.is_none(),
+		"the session fell back to an embedded environment: {:?}",
+		environment.fallback_notice
+	);
+	let synthesis = Synthesis::default();
+	bind_reflection(&environment, synthesis.clone()).expect("bind reflection");
+	let script = Script {
+		calls: vec![
+			(
+				"retain",
+				serde_json::json!({
+					"items": [{ "content": "The deploy target is fly.io" }],
+					"i": "Remembering the deploy target",
+				}),
+			),
+			reflect_call(),
+		],
+		turns: 0,
+	};
+	let Turn { tickets, result, selectors } = drive(
+		&environment,
+		&con,
+		&root,
+		scratch.path(),
+		Some(ApprovalMode::Yolo),
+		true,
+		script,
+		&synthesis,
+	)
+	.await;
+
+	assert!(tickets.is_empty(), "explicit yolo prompts for nothing: {tickets:?}");
+	assert_eq!(selectors, [Some(Str::new_static(REFLECTION_SELECTOR))]);
+	assert!(result.contains("Deploys go to fly.io."), "the relayed synthesis settles: {result}");
+	assert!(!result.contains("Based on recalled memories"), "no evidence fallback: {result}");
 }

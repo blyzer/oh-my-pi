@@ -126,15 +126,15 @@ pub enum Fault {
 }
 
 /// Bounded reflection request crossing from the memory device to the session's
-/// inference authority.
-#[derive(Clone, Debug)]
+/// inference authority, possibly over the wire: exactly what synthesis reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReflectionRequest {
 	/// Question to answer.
 	pub query:    Str,
 	/// Optional current context.
 	pub context:  Option<Str>,
-	/// Bounded relevance-ranked evidence.
-	pub memories: Arc<[RecallResult]>,
+	/// The recalled memory contents in relevance order; never empty.
+	pub evidence: Arc<[Str]>,
 }
 
 /// Typed refusal from the session's inference authority.
@@ -357,13 +357,13 @@ impl<H: ReflectionHost> Tool for ReflectTool<H> {
 				);
 				return;
 			}
+			let recalled = outcome.items.len();
+			let fallback = render_reflection_evidence(&outcome.items);
 			let request = ReflectionRequest {
 				query: params.query,
 				context: params.context,
-				memories: Arc::from(outcome.items),
+				evidence: outcome.items.iter().map(|item| item.memory.content.clone()).collect(),
 			};
-			let recalled = request.memories.len();
-			let fallback = render_reflection_evidence(&request.memories);
 			let reflection = self.host.reflect(request);
 			tokio::pin!(reflection);
 			tokio::select! {
@@ -644,7 +644,7 @@ mod tests {
 	impl ReflectionHost for CountingHost {
 		async fn reflect(&self, request: ReflectionRequest) -> Result<Str, ReflectionHostError> {
 			self.requests.fetch_add(1, Ordering::SeqCst);
-			assert!(!request.memories.is_empty(), "a host is asked only with recalled evidence");
+			assert!(!request.evidence.is_empty(), "a host is asked only with recalled evidence");
 			self.answer.clone()
 		}
 	}

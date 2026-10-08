@@ -18,9 +18,10 @@ use omp_core::{Str, StrMut};
 use omp_envd::{ProjectEnvironment, memory::ReflectionBindingError};
 use omp_tools::memory::{ReflectionHost, ReflectionHostError, ReflectionRequest};
 
-/// Model selector reflection synthesizes on: the configured small role, the
-/// memory lane's default (`MemoryLlmMode::Smol`).
-pub const REFLECTION_SELECTOR: &str = "@smol";
+/// Model selector reflection synthesizes on: the catalog's `memory` role,
+/// which resolves the configured memory selectors, then `@commit`, then
+/// `@smol`.
+pub const REFLECTION_SELECTOR: &str = "@memory";
 
 /// Output ceiling for one synthesized answer.
 const MAX_OUTPUT_TOKENS: u64 = 2_048;
@@ -35,9 +36,9 @@ const INSTRUCTION: &str = "Synthesize a concise answer using only the recalled e
 ///
 /// `inference` is a cloneable handle on that capability: each synthesis is one
 /// isolated [`omp_agent::Inference::chat_on`] request on
-/// [`REFLECTION_SELECTOR`]. Only a `reflect` this process hosts reaches the
-/// binding; the one a project daemon runs for an attached session keeps
-/// answering with the recalled evidence.
+/// [`REFLECTION_SELECTOR`]. A `reflect` this process hosts uses the binding
+/// directly; one a project daemon runs for an attached session reaches it
+/// through the daemon's reflection relay.
 ///
 /// # Errors
 ///
@@ -117,9 +118,9 @@ fn synthesis_request(request: &ReflectionRequest) -> ChatRequest {
 		prompt.push_str(context);
 	}
 	prompt.push_str("\n\nRecalled evidence:\n");
-	for item in request.memories.iter() {
+	for content in request.evidence.iter() {
 		prompt.push_str("- ");
-		prompt.push_str(item.memory.content.as_str());
+		prompt.push_str(content.as_str());
 		prompt.push_str("\n");
 	}
 	let message = |role, text| Message {
