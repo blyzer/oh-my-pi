@@ -39,8 +39,9 @@ use omp_proto::{
 	ui::v1::UiDispatchResult,
 };
 use omp_tool::{
-	Abort, ArgIssue, ArgPath, CallOutcome, Confinement, Effects, ErasedEv, ErasedOutcome,
-	IncomingParams, Interrupt, Registry, RegistryError, ToolRoute, ToolTerminal,
+	Abort, ArgIssue, ArgPath, CallOutcome, CapsBase, Confinement, Effects, ErasedEv, ErasedOutcome,
+	IncomingParams, Interrupt, ModelClass, PromptCaps, Registry, RegistryError, ToolIdentity,
+	ToolRoute, ToolTerminal,
 };
 use omp_tools::{
 	ask::PresenterSlot,
@@ -7453,7 +7454,7 @@ impl EnvServer {
 			connection.invocation_ids.remove(&invocation_id);
 		}
 		let registry = self.registry();
-		let Some((_, revision)) = registry.live_identity(&request.name) else {
+		let Some((live_name, revision)) = registry.live_identity(&request.name) else {
 			send_error(
 				responses,
 				request_id,
@@ -7473,6 +7474,9 @@ impl EnvServer {
 			.await;
 			return;
 		}
+		// The exact tool revision that runs a native call also renders its
+		// verdict for the model.
+		let identity = ToolIdentity { name: live_name.clone(), rev: revision.clone() };
 		let route = registry
 			.route(&request.name)
 			.expect("a live registry identity always has an execution route");
@@ -7618,6 +7622,7 @@ impl EnvServer {
 				request_id,
 				invocation_id,
 				name,
+				identity,
 				scope.is_some_and(|scope| scope.pty_denied),
 				principal.map(|principal| Str::from(principal.session_id.as_str())),
 				execution.write_scope.clone(),
@@ -9243,6 +9248,7 @@ async fn spawn_native_invocation(
 	request_id: u64,
 	invocation_id: Str,
 	name: Str,
+	identity: ToolIdentity,
 	pty_denied: bool,
 	session_id: Option<Str>,
 	write_scope: Option<Arc<WriteScope>>,
@@ -9313,6 +9319,8 @@ async fn spawn_native_invocation(
 																	reason,
 																	request_id,
 																	&invocation_id,
+																	&identity,
+																	&registry,
 																	&lifecycle,
 																	&delivery,
 																	&responses,
@@ -9368,6 +9376,8 @@ async fn spawn_native_invocation(
 																"",
 																request_id,
 																&invocation_id,
+																&identity,
+																&registry,
 																&lifecycle,
 																&delivery,
 																&responses,
@@ -9545,6 +9555,8 @@ async fn forward_native_event(
 	fallback_reason: &str,
 	request_id: u64,
 	invocation_id: &Str,
+	identity: &ToolIdentity,
+	registry: &Registry,
 	lifecycle: &NativeLifecycle,
 	delivery: &VerdictDelivery,
 	responses: &flume::Sender<pb::ServerFrame>,
@@ -9571,15 +9583,14 @@ async fn forward_native_event(
 		},
 		Some(Ok(ErasedEv::Done(outcome))) => {
 			if lifecycle.claim_terminal() {
-				let (json, is_error, useless) = erased_outcome_wire(outcome);
-				send_verdict_json(
+				send_native_outcome(
 					responses,
 					request_id,
 					invocation_id,
+					identity,
+					registry,
 					delivery,
-					json,
-					is_error,
-					useless,
+					outcome,
 				)
 				.await;
 			}
@@ -9884,16 +9895,205 @@ struct VerdictDelivery {
 	output_request:    omp_tool::OutputRequest,
 }
 
-/// Publishes one terminal verdict. Every terminal, including aborts and
-/// policy denials, stores its serialized `CallOutcome` in the environment CAS
-/// and carries the projection facts; the client refuses a verdict without
-/// them as an invalid outcome artifact.
+/// Why one native media part cannot travel with its verdict.
+#[derive(Debug, Error)]
+enum NativeMediaError {
+	/// The part names a media type a client refuses.
+	#[error("media type {media_type:?} is not a valid MIME type")]
+	MediaType {
+		/// The refused media type.
+		media_type: Str,
+	},
+	/// The part's hash is not a SHA-256 digest in lowercase hex.
+	#[error("media blob hash is not a SHA-256 hex digest")]
+	Hash(#[source] blob::Error),
+	/// The blob could not be copied into the verdict store or leased there.
+	#[error("media blob could not be retained for delivery")]
+	Retain(#[source] BlobError),
+}
+
+/// The projection budget an in-process dispatch hands a native tool
+/// (`Dispatcher::finish`): every part, all text and media. The parts are
+/// bounded afterwards, once here by the caller's output request and again by
+/// the client's dispatcher.
+fn native_prompt_caps(rev: &omp_tool::Rev) -> PromptCaps {
+	PromptCaps::for_tool(
+		CapsBase {
+			maximum_parts:      u16::MAX,
+			maximum_text_bytes: u32::MAX,
+			media:              true,
+			model_class:        ModelClass::Standard,
+		},
+		rev,
+	)
+}
+
+/// One model-visible text part.
+const fn wire_text(text: String) -> thread_pb::Part {
+	thread_pb::Part { kind: Some(thread_pb::part::Kind::Text(text)) }
+}
+
+/// Retains one native media blob for this invocation's delivery, so the
+/// client can replicate it under the verdict's lease, and returns its wire
+/// reference. `retained` dedupes blobs a projection names twice.
+fn retain_native_media(
+	delivery: &VerdictDelivery,
+	invocation_id: &str,
+	media: &omp_tool::BlobRef,
+	retained: &mut BTreeSet<([u8; 32], u64)>,
+) -> Result<thread_pb::Blob, NativeMediaError> {
+	if !valid_blob_media_type(&media.media_type) {
+		return Err(NativeMediaError::MediaType { media_type: media.media_type.clone() });
+	}
+	let id = BlobId::from(
+		blob::BlobRef::parse_hex(media.hash.as_str(), media.byte_len)
+			.map_err(NativeMediaError::Hash)?,
+	);
+	if retained.insert((id.hash, id.size)) {
+		delivery
+			.blobs
+			.retain_verdict_blob(delivery.retention_session.as_deref(), invocation_id, id)
+			.map_err(NativeMediaError::Retain)?;
+	}
+	Ok(thread_pb::Blob {
+		hash: Bytes::copy_from_slice(&id.hash),
+		mime: media.media_type.to_string(),
+		size: id.size,
+		..thread_pb::Blob::default()
+	})
+}
+
+/// Converts a native tool's projected parts to the thread parts `Verdict`
+/// carries, the way the session renders tool parts for a model: JSON as its
+/// text, and media as its alternative text followed by the blob. A blob that
+/// cannot be retained is left out, with a warning; its alternative text stays.
+fn native_wire_parts(
+	parts: &[omp_tool::Part],
+	delivery: &VerdictDelivery,
+	invocation_id: &str,
+) -> Vec<thread_pb::Part> {
+	let mut wire = Vec::with_capacity(parts.len());
+	let mut retained = BTreeSet::new();
+	for part in parts {
+		match part {
+			omp_tool::Part::Text { text } => wire.push(wire_text(text.as_str().to_owned())),
+			omp_tool::Part::Json { json } => {
+				wire.push(wire_text(String::from_utf8_lossy(json).into_owned()));
+			},
+			omp_tool::Part::Blob { blob, alt } => {
+				if let Some(alt) = alt {
+					wire.push(wire_text(alt.as_str().to_owned()));
+				}
+				match retain_native_media(delivery, invocation_id, blob, &mut retained) {
+					Ok(media) => {
+						wire.push(thread_pb::Part { kind: Some(thread_pb::part::Kind::Blob(media)) });
+					},
+					Err(error) => tracing::warn!(
+						%error,
+						invocation_id,
+						"native verdict media is unavailable; publishing the verdict without it"
+					),
+				}
+			},
+		}
+	}
+	wire
+}
+
+/// Publishes a native tool's terminal with the model-facing parts its own
+/// projection renders, as an in-process dispatch would (`Dispatcher::finish`),
+/// so an environment-run tool reaches the model with its result. A verdict its
+/// tool cannot project is published as an effects-unknown abort.
+async fn send_native_outcome(
+	responses: &flume::Sender<pb::ServerFrame>,
+	request_id: u64,
+	invocation_id: &Str,
+	identity: &ToolIdentity,
+	registry: &Registry,
+	delivery: &VerdictDelivery,
+	outcome: ErasedOutcome,
+) {
+	match outcome {
+		ErasedOutcome::Done { verdict, useless } => {
+			let projected = match registry.project_verdict(
+				identity,
+				&verdict,
+				useless,
+				&native_prompt_caps(&identity.rev),
+			) {
+				Ok(projected) => projected,
+				Err(error) => {
+					// The tool ran, but its verdict does not decode as its own
+					// outcome: what it did cannot be told to the model, as with
+					// worker media that cannot be published.
+					tracing::error!(
+						%error,
+						invocation_id = %invocation_id,
+						tool = %identity.name,
+						"could not project the native verdict before publication"
+					);
+					send_abort_verdict(
+						responses,
+						request_id,
+						invocation_id,
+						delivery,
+						omp_tool::Abort::EffectsUnknown {
+							reason: sf!("native verdict could not be projected"),
+						},
+					)
+					.await;
+					return;
+				},
+			};
+			let mut parts = native_wire_parts(&projected.parts, delivery, invocation_id);
+			let _ = project_wire_parts(&mut parts, delivery.output_request);
+			send_verdict_json(
+				responses,
+				request_id,
+				invocation_id,
+				delivery,
+				verdict,
+				parts,
+				projected.is_error,
+				projected.useless,
+			)
+			.await;
+		},
+		ErasedOutcome::Detached(job) => {
+			let parts = vec![wire_text(format!("detached job {}", job.id))];
+			let json = serde_json::to_vec(
+				&ToolTerminal::<serde_json::Value, serde_json::Value>::Detached(job),
+			)
+			.map(Bytes::from)
+			.unwrap_or_default();
+			send_verdict_json(
+				responses,
+				request_id,
+				invocation_id,
+				delivery,
+				json,
+				parts,
+				false,
+				false,
+			)
+			.await;
+		},
+	}
+}
+
+/// Publishes one terminal verdict with its model-facing `parts`. Every
+/// terminal, including aborts and policy denials, stores its serialized
+/// `CallOutcome` in the environment CAS and carries the projection facts; the
+/// client refuses a verdict without them as an invalid outcome artifact. Aborts
+/// and policy denials carry no parts: the client renders those harness-owned
+/// branches from the verdict itself.
 async fn send_verdict_json(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
 	invocation_id: &Str,
 	delivery: &VerdictDelivery,
 	json: Bytes,
+	parts: Vec<thread_pb::Part>,
 	is_error: bool,
 	useless: bool,
 ) {
@@ -9941,7 +10141,7 @@ async fn send_verdict_json(
 			invocation_id: invocation_id.to_string(),
 			json: inline,
 			details_blob: Some(details_blob),
-			parts: Vec::new(),
+			parts,
 			is_error,
 			useless,
 			terminate: None,
@@ -9976,6 +10176,7 @@ async fn send_abort_verdict(
 		invocation_id,
 		delivery,
 		Bytes::from(json),
+		Vec::new(),
 		true,
 		false,
 	)
@@ -10029,6 +10230,7 @@ async fn send_policy_denied_verdict(
 		invocation_id,
 		delivery,
 		Bytes::from(json),
+		Vec::new(),
 		true,
 		false,
 	)
@@ -11229,24 +11431,6 @@ fn worker_verdict_json(details: Bytes, is_error: bool) -> Result<Bytes, serde_js
 	Ok(verdict.freeze())
 }
 
-fn erased_outcome_wire(outcome: ErasedOutcome) -> (Bytes, bool, bool) {
-	match outcome {
-		ErasedOutcome::Done { verdict, useless } => {
-			let is_error =
-				serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(&verdict)
-					.map_or(true, |verdict| !matches!(verdict, CallOutcome::Ok(_)));
-			(verdict, is_error, useless)
-		},
-		ErasedOutcome::Detached(job) => {
-			let json = serde_json::to_vec(
-				&ToolTerminal::<serde_json::Value, serde_json::Value>::Detached(job),
-			)
-			.map(Bytes::from)
-			.unwrap_or_default();
-			(json, false, false)
-		},
-	}
-}
 async fn send_workspace_operation_error(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
@@ -12564,17 +12748,15 @@ mod tests {
 	};
 
 	use super::*;
+	#[cfg(target_os = "macos")]
+	use crate::loopback_upstream::{BODY, LoopbackUpstream};
 	use crate::{
 		docserver::{
 			Environment, ServerConfig,
 			connection::{ConnectionConfig, serve_connection},
 		},
-		exthost::ConvarControlFactory,
-	};
-	#[cfg(target_os = "macos")]
-	use crate::{
 		exec_settings::ExecSandboxMode,
-		loopback_upstream::{BODY, LoopbackUpstream},
+		exthost::ConvarControlFactory,
 	};
 
 	const TEST_DAP_SESSION_ID: [u8; 16] = [0x2a; 16];
@@ -14873,7 +15055,6 @@ mod tests {
 		assert_closed(&outliving, &frames);
 	}
 
-	#[cfg(target_os = "macos")]
 	const RELAY_WAIT: Duration = Duration::from_secs(30);
 
 	/// A project-daemon-shaped host for relay proofs: a workspace-write
@@ -15293,10 +15474,8 @@ mod tests {
 		assert!(!root.path().join(".git/dropped.txt").exists());
 	}
 
-	#[cfg(target_os = "macos")]
 	struct AllowAdmission;
 
-	#[cfg(target_os = "macos")]
 	impl omp_env::Admitter for AllowAdmission {
 		type Future<'client> = std::future::Ready<pb::Admission>;
 
@@ -15374,7 +15553,6 @@ mod tests {
 	}
 
 	/// Invokes `name` with `args` and returns its terminal verdict.
-	#[cfg(target_os = "macos")]
 	async fn invoke_to_verdict(
 		client: &EnvClient,
 		server: &EnvServer,
@@ -15420,6 +15598,177 @@ mod tests {
 		})
 		.await
 		.expect("the invocation did not settle")
+	}
+
+	/// The text parts a verdict carries for the model, in order.
+	fn verdict_text(verdict: &pb::Verdict) -> String {
+		verdict
+			.parts
+			.iter()
+			.filter_map(|part| match part.kind.as_ref() {
+				Some(thread_pb::part::Kind::Text(text)) => Some(text.as_str()),
+				_ => None,
+			})
+			.collect()
+	}
+
+	/// The production tools on an unsandboxed host, served to one application
+	/// connection whose explicit `yolo` admits every call.
+	async fn unconfined_tools() -> (EnvClient, Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)
+	{
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let con = Arc::new(Ctx::new());
+		let convars = Arc::new(crate::exthost::ConvarControlFactory::new(Arc::clone(&con)));
+		let server = Arc::new(
+			EnvServer::open_local(
+				root.path(),
+				state.path(),
+				Registry::new(),
+				ExtHostConfig::new(
+					PathBuf::from("unused"),
+					Principal::new(sf!("test-principal"), sf!("Test Principal")),
+					sf!("test-session"),
+					1,
+				),
+				&con,
+				convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.expect("tool host"),
+		);
+		server.exec.configure_sandbox(
+			&SandboxSettings { mode: ExecSandboxMode::Off, ..SandboxSettings::default() },
+			root.path(),
+		);
+		let (client, transport) = EnvClient::in_process(64);
+		client.set_admitter(AllowAdmission);
+		let host = Arc::clone(&server);
+		tokio::spawn(async move { host.serve_in_process(transport).await });
+		client
+			.hello(pb::ClientHello {
+				client: "native-parts".to_owned(),
+				schema_rev: omp_proto::SCHEMA_REV,
+				approval_mode: pb::ApprovalMode::Yolo as i32,
+				..pb::ClientHello::default()
+			})
+			.await
+			.expect("hello");
+		(client, server, root, state)
+	}
+
+	/// A native tool's verdict carries the model-facing parts its own
+	/// projection renders, on the ok and the faulted branch alike, and they
+	/// agree with the verdict's error flag. Without them the client journals
+	/// an empty tool message and the model never sees the command's output.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn native_verdicts_carry_the_tools_own_projection() {
+		let (client, server, root, _state) = unconfined_tools().await;
+
+		let ok = invoke_to_verdict(
+			&client,
+			&server,
+			"bash-ok",
+			"bash",
+			serde_json::json!({"command": "printf native-parts-marker"}),
+		)
+		.await;
+		let text = verdict_text(&ok);
+		assert!(!ok.is_error, "{}", String::from_utf8_lossy(&ok.json));
+		assert!(text.contains("[status="), "bash status line reaches the model: {text:?}");
+		assert!(text.contains("native-parts-marker"), "bash stdout reaches the model: {text:?}");
+
+		let faulted = invoke_to_verdict(
+			&client,
+			&server,
+			"bash-faulted",
+			"bash",
+			serde_json::json!({"command": "printf native-parts-stderr >&2; exit 3"}),
+		)
+		.await;
+		let text = verdict_text(&faulted);
+		assert!(faulted.is_error, "a failed command is a fault");
+		assert!(text.contains("bash command failed"), "the fault reaches the model: {text:?}");
+		assert!(text.contains("native-parts-stderr"), "stderr reaches the model: {text:?}");
+
+		fs::write(root.path().join("present.txt"), "native-parts-file\n").expect("fixture");
+		let read = invoke_to_verdict(
+			&client,
+			&server,
+			"read-ok",
+			"read",
+			serde_json::json!({"path": "present.txt"}),
+		)
+		.await;
+		let text = verdict_text(&read);
+		assert!(!read.is_error, "{}", String::from_utf8_lossy(&read.json));
+		assert!(text.contains("native-parts-file"), "the file reaches the model: {text:?}");
+
+		let missing = invoke_to_verdict(
+			&client,
+			&server,
+			"read-missing",
+			"read",
+			serde_json::json!({"path": "absent.txt"}),
+		)
+		.await;
+		assert!(missing.is_error, "a missing file is a fault");
+		assert!(!verdict_text(&missing).is_empty(), "the read fault reaches the model");
+	}
+
+	/// A native tool's media part travels as its alternative text and a blob
+	/// reference, and the blob is retained in the verdict store for the
+	/// invocation's delivery, so the client can replicate it.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn native_media_parts_are_retained_for_delivery() {
+		let (client, server, root, _state) = unconfined_tools().await;
+		fs::write(
+			root.path().join("pixel.png"),
+			include_bytes!(concat!(
+				env!("CARGO_MANIFEST_DIR"),
+				"/../tools/tests/fixtures/special-sources/images/pixel.png"
+			)),
+		)
+		.expect("image fixture");
+		let read = invoke_to_verdict(
+			&client,
+			&server,
+			"read-image",
+			"read",
+			serde_json::json!({"path": "pixel.png"}),
+		)
+		.await;
+		assert!(!read.is_error, "{}", String::from_utf8_lossy(&read.json));
+		let media = read
+			.parts
+			.iter()
+			.position(|part| matches!(part.kind, Some(thread_pb::part::Kind::Blob(_))))
+			.expect("the image reaches the model as a blob part");
+		let alt = media
+			.checked_sub(1)
+			.and_then(|before| match read.parts[before].kind.as_ref() {
+				Some(thread_pb::part::Kind::Text(alt)) => Some(alt.as_str()),
+				_ => None,
+			});
+		assert!(
+			alt.is_some_and(|alt| !alt.is_empty()),
+			"its alternative text precedes it: {:?}",
+			read.parts
+		);
+		let Some(thread_pb::part::Kind::Blob(image)) = &read.parts[media].kind else {
+			unreachable!("located above");
+		};
+		assert!(image.mime.starts_with("image/"), "{image:?}");
+		assert!(image.inline.is_empty(), "media travels by reference: {image:?}");
+		let hash = <[u8; 32]>::try_from(image.hash.as_ref()).expect("a SHA-256 blob reference");
+		assert!(
+			server
+				.blobs
+				.worker_verdict_store()
+				.has(&blob::BlobRef { hash: Hash32::new(hash), size: image.size }),
+			"the image is retained for delivery"
+		);
 	}
 
 	/// Decision 4 over the wire, with Seatbelt really confining the

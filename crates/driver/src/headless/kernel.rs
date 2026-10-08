@@ -1360,7 +1360,7 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							},
 						};
 						if parts.is_empty() {
-							parts = structured_parts(&outcome);
+							parts = harness_parts(&outcome);
 						}
 						yield ExternalDispatchEvent::DoneProjected {
 							outcome,
@@ -1393,32 +1393,19 @@ fn raw_json(bytes: Bytes) -> Result<Box<serde_json::value::RawValue>, ()> {
 	serde_json::value::RawValue::from_string(text).map_err(|_| ())
 }
 
-fn structured_parts(outcome: &CallOutcome<serde_json::Value, serde_json::Value>) -> Vec<ToolPart> {
-	let value = match outcome {
-		CallOutcome::Ok(value) | CallOutcome::Faulted(value) => value,
+/// Model-facing text for a verdict the environment published without parts:
+/// the harness-owned branches it authors itself (aborts and policy denials)
+/// or a worker left unprojected (rejected arguments). A tool-owned `Ok` or
+/// `Faulted` branch carries the tool's own projection from the environment
+/// and is never reconstructed from its payload here.
+fn harness_parts(outcome: &CallOutcome<serde_json::Value, serde_json::Value>) -> Vec<ToolPart> {
+	match outcome {
 		CallOutcome::ArgsRejected(_) => {
-			return vec![ToolPart::Text { text: Str::new_static("Tool arguments were rejected") }];
+			vec![ToolPart::Text { text: Str::new_static("Tool arguments were rejected") }]
 		},
-		CallOutcome::Aborted { abort, .. } => {
-			return vec![ToolPart::Text { text: abort.render() }];
-		},
-	};
-	value
-		.get("parts")
-		.and_then(serde_json::Value::as_array)
-		.into_iter()
-		.flatten()
-		.filter_map(|part| match part.get("kind").and_then(serde_json::Value::as_str) {
-			Some("text") => part
-				.get("text")
-				.and_then(serde_json::Value::as_str)
-				.map(|text| ToolPart::Text { text: Str::new(text) }),
-			Some("json") => part
-				.get("json")
-				.map(|json| ToolPart::Json { json: Bytes::from(json.to_string()) }),
-			_ => None,
-		})
-		.collect()
+		CallOutcome::Aborted { abort, .. } => vec![ToolPart::Text { text: abort.render() }],
+		CallOutcome::Ok(_) | CallOutcome::Faulted(_) => Vec::new(),
+	}
 }
 
 fn tool_output_projection(
