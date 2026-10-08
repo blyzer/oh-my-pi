@@ -28,6 +28,8 @@ use thiserror::Error;
 use tokio::{time, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+use crate::approval_relay::OwnedApprovals;
+
 /// Default approval posture applied before one invocation reaches interactive
 /// admission.
 #[derive(
@@ -504,6 +506,15 @@ impl DynamicAdmission {
 	}
 
 	/// Resolves and enforces one target's live effect declaration.
+	///
+	/// A prompt asks `relay`, the connection that issued the containing
+	/// command, when there is one, and never falls back to the host route: a
+	/// relay whose connection closed decides the prompt as unreachable. Without
+	/// a relay the route the host bound answers, if any.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "one admission joins the target, its declaration, its origin and its approver"
+	)]
 	pub(crate) async fn admit(
 		&self,
 		invocation_id: Str,
@@ -511,6 +522,7 @@ impl DynamicAdmission {
 		effects: &Effects,
 		confinement: Confinement,
 		source: DynamicInvocationSource,
+		relay: Option<&OwnedApprovals>,
 		cancellation: CancellationToken,
 	) -> Result<ResolvedApproval, DynamicAdmissionError> {
 		if cancellation.is_cancelled() {
@@ -532,37 +544,53 @@ impl DynamicAdmission {
 			},
 			ApprovalPolicy::Prompt => {},
 		}
-		let Some(route) = self.route.read().clone() else {
-			return Err(DynamicAdmissionError::ApprovalUnavailable { target });
+		// A relay outranks the host route and never falls back to it.
+		let route = if relay.is_some() {
+			None
+		} else {
+			self.route.read().clone()
 		};
 		let tier: &'static str = resolved.tier.into();
 		let origin: &'static str = source.into();
 		let confinement: &'static str = confinement.into();
-		let ticket = route
-			.request_cancellable(
-				Some(invocation_id),
-				vec![ApprovalSpec {
-					title:         sf!("Approve dynamic target"),
-					body:          sf!("Allow dynamic target `{target}`?"),
-					subject:       target.clone(),
-					kind:          Str::new_static(tier),
-					scopes:        vec![sf!("once")],
-					default:       None,
-					route:         sf!("user"),
-					approver:      None,
-					timeout_ms:    0,
-					unreachable:   sf!("fail_closed"),
-					require_human: false,
-					pattern:       None,
-					evidence:      vec![
-						sf!("invocation_source={origin}"),
-						sf!("confinement={confinement}"),
-					],
-				}],
-				epoch_millis(),
-				cancellation.clone(),
-			)
-			.await;
+		let reasons = vec![ApprovalSpec {
+			title:         sf!("Approve dynamic target"),
+			body:          sf!("Allow dynamic target `{target}`?"),
+			subject:       target.clone(),
+			kind:          Str::new_static(tier),
+			scopes:        vec![sf!("once")],
+			default:       None,
+			route:         sf!("user"),
+			approver:      None,
+			timeout_ms:    0,
+			unreachable:   sf!("fail_closed"),
+			require_human: false,
+			pattern:       None,
+			evidence:      vec![sf!("invocation_source={origin}"), sf!("confinement={confinement}")],
+		}];
+		let ticket = match (relay, route) {
+			(Some(relay), _) => {
+				// Dropping the relayed prompt withdraws its query.
+				tokio::select! {
+					biased;
+					() = cancellation.cancelled() => {
+						return Err(DynamicAdmissionError::Cancelled { target });
+					},
+					ticket = relay.request(Some(invocation_id), reasons, epoch_millis()) => ticket,
+				}
+			},
+			(None, Some(route)) => {
+				route
+					.request_cancellable(
+						Some(invocation_id),
+						reasons,
+						epoch_millis(),
+						cancellation.clone(),
+					)
+					.await
+			},
+			(None, None) => return Err(DynamicAdmissionError::ApprovalUnavailable { target }),
+		};
 		let Some(decision) = ticket.decision else {
 			return Err(DynamicAdmissionError::ApprovalUnavailable { target });
 		};
@@ -1692,6 +1720,7 @@ mod tests {
 					&network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await;
@@ -1733,6 +1762,7 @@ mod tests {
 					&network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await,
@@ -1745,6 +1775,7 @@ mod tests {
 				&Effects::empty(),
 				Confinement::ExecSandbox,
 				DynamicInvocationSource::ShellDyn,
+				None,
 				CancellationToken::new(),
 			)
 			.await
@@ -1762,6 +1793,7 @@ mod tests {
 					&network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await
@@ -1822,6 +1854,7 @@ mod tests {
 					&pending_network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					CancellationToken::new(),
 				)
 				.await
@@ -1864,6 +1897,7 @@ mod tests {
 					&cancel_network,
 					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
+					None,
 					cancel_token,
 				)
 				.await

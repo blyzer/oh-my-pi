@@ -62,6 +62,7 @@ use super::{
 	admission,
 	admission::{GithubMutationTarget, SandboxUnavailable},
 	approval_relay::{EnvApprover, OwnedApprovals, RouteBinding},
+	devices_host::{CommandDevices, CommandIssuer, IssuerCell},
 	exec_network_diag::{
 		CommandEnd, NetworkAnnouncements, NetworkInForce, NetworkMarkerScan, find_marker,
 		network_diag,
@@ -76,6 +77,7 @@ use super::{
 		DaemonLease, LeaseError, ProcessPhase, ProcessRecord, ProcessStore, ProcessStoreSnapshot,
 		RestartRecord, StoreError,
 	},
+	reflection_relay::OwnedReflection,
 	sandbox_proxy::{BrokerDenial, EgressGrants},
 };
 
@@ -500,8 +502,12 @@ struct SessionCommand {
 	reruns: AmendmentReruns,
 	sandbox_environment_update: bool,
 	/// The relay of the connection that issued the command, which answers
-	/// its sandbox amendment; an approved rerun keeps it.
+	/// its sandbox amendment and its `dyn` admissions; an approved rerun
+	/// keeps it.
 	approvals: Option<OwnedApprovals>,
+	/// The reflection relay of the connection that issued the command, on
+	/// whose session a `dyn reflect` it runs synthesizes.
+	reflection: Option<OwnedReflection>,
 }
 
 impl Default for ExecHost {
@@ -872,8 +878,14 @@ impl ExecHost {
 					.into_iter()
 					.map(|(name, registration)| (name.to_owned(), registration)),
 			);
+		// The shell's `dyn` answers to the connection that issued the command
+		// the shell is running, which the session loop records here.
+		let issuer = IssuerCell::default();
 		if let Some(host) = self.inner.devices.lock().clone() {
-			builder = builder.builtin("dyn", omp_shell_builtins::dyn_builtin(host));
+			builder = builder.builtin(
+				"dyn",
+				omp_shell_builtins::dyn_builtin(Arc::new(CommandDevices::new(host, issuer.clone()))),
+			);
 		}
 		for (name, value) in &variables {
 			let Some(name) = name.to_str() else { continue };
@@ -916,7 +928,7 @@ impl ExecHost {
 		let sessions = Arc::downgrade(&self.inner);
 		let session_for_task = session.clone();
 		tokio::spawn(async move {
-			session_loop(shell, rx).await;
+			session_loop(shell, rx, issuer).await;
 			if let Some(host) = sessions.upgrade() {
 				host.sessions.lock().remove(&session_for_task);
 			}
@@ -1051,26 +1063,32 @@ impl ExecHost {
 		request: ExecRequest,
 		timeout: Option<Duration>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
-		self.exec_controlled(request, timeout, None).await
+		self
+			.exec_controlled(request, timeout, CommandIssuer::default())
+			.await
 	}
 
-	/// Starts a script for the connection whose relay is `approvals`: a
-	/// sandbox amendment the command needs prompts that connection, and fails
-	/// closed once it closed.
+	/// Starts a script for the connection whose relays are `approvals` and
+	/// `reflection`: a sandbox amendment or a `dyn` admission the command needs
+	/// prompts that connection, and fails closed once it closed, and a
+	/// `dyn reflect` synthesizes on that connection's session.
 	pub(crate) async fn exec_relayed(
 		&self,
 		request: ExecRequest,
 		timeout: Option<Duration>,
 		approvals: Option<OwnedApprovals>,
+		reflection: Option<OwnedReflection>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
-		self.exec_controlled(request, timeout, approvals).await
+		self
+			.exec_controlled(request, timeout, CommandIssuer { approvals, reflection })
+			.await
 	}
 
 	async fn exec_controlled(
 		&self,
 		mut request: ExecRequest,
 		timeout: Option<Duration>,
-		approvals: Option<OwnedApprovals>,
+		issuer: CommandIssuer,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
 		let session = self
 			.inner
@@ -1144,7 +1162,8 @@ impl ExecHost {
 			sequence: Arc::new(AtomicU64::new(1)),
 			reruns: AmendmentReruns::Fresh,
 			sandbox_environment_update: false,
-			approvals,
+			approvals: issuer.approvals,
+			reflection: issuer.reflection,
 		};
 		session
 			.tx
@@ -1293,7 +1312,7 @@ impl ExecHost {
 					props:          Default::default(),
 				},
 				timeout,
-				None,
+				CommandIssuer::default(),
 			)
 			.await;
 		let (started, run) = match executed {
@@ -2407,7 +2426,7 @@ impl SpawnBook {
 	}
 }
 
-async fn session_loop(mut shell: Shell, commands: Receiver<SessionCommand>) {
+async fn session_loop(mut shell: Shell, commands: Receiver<SessionCommand>, issuer: IssuerCell) {
 	use tokio::time::Instant;
 	let mut cancellation_deadline = None;
 	loop {
@@ -2445,13 +2464,17 @@ async fn session_loop(mut shell: Shell, commands: Receiver<SessionCommand>) {
 				Err(_) => cancellation_deadline = None,
 			}
 		}
-		if run_session_command(&mut shell, command).await {
+		if run_session_command(&mut shell, command, &issuer).await {
 			cancellation_deadline = Some(Instant::now() + CANCEL_GRACE);
 		}
 	}
 }
 
-async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool {
+async fn run_session_command(
+	shell: &mut Shell,
+	command: SessionCommand,
+	issuer: &IssuerCell,
+) -> bool {
 	let started_at = Instant::now();
 	match command.cancel_rx.try_recv() {
 		Ok(_) | Err(flume::TryRecvError::Disconnected) => {
@@ -2562,6 +2585,11 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 			}
 		};
 		tokio::pin!(timeout);
+		// Every `dyn` call of this attempt answers to the command's issuer.
+		let _issued = issuer.enter(CommandIssuer {
+			approvals:  command.approvals.clone(),
+			reflection: command.reflection.clone(),
+		});
 		let execution = crate::devices_host::scope_exec_diags(
 			Arc::clone(&command.diags),
 			shell.run_string(command.source.to_string(), &source_info, &params),
@@ -2699,7 +2727,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 						));
 						let mut rerun = command.clone();
 						rerun.reruns = reruns;
-						return Box::pin(run_session_command(shell, rerun)).await;
+						return Box::pin(run_session_command(shell, rerun, issuer)).await;
 					},
 					Some(AmendmentGrant::Once) => {
 						let network_amendment =
@@ -2717,7 +2745,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 							rerun.sandbox = Some(sandbox);
 							rerun.reruns = AmendmentReruns::Spent;
 							rerun.sandbox_environment_update = network_amendment;
-							return Box::pin(run_session_command(shell, rerun)).await;
+							return Box::pin(run_session_command(shell, rerun, issuer)).await;
 						}
 					},
 					None => {},

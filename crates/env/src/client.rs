@@ -42,13 +42,14 @@ use omp_proto::{
 			MergeWorktree, OpenSessionRequest, OpenSessionResponse, OutputAttached, OutputFrame,
 			PresenceRegistered, PresenceReleased, ProcessCommandAccepted, ProcessInfo, ProcessList,
 			ProcessOutput, ProcessStarted, ProcessStateEvent, ProtocolError, ProtocolErrorCode,
-			RegisterPresence, ReleasePresence, ResourceCompletion, RestartProcess, Retire,
-			RevokeApprovalGrants, SearchComplete, SearchMatchMsg, SearchRequest, SendInput,
-			ServerFrame, ServerHello, SignalProcess, SignalRequest, SiteMaterialized, StartProcess,
-			StdinFrame, StopProcess, Update, Verdict, WalkComplete, WalkEntry, WalkRequest,
-			WorktreeResult, cancel_request, client_frame, data_event, data_request, data_response,
-			document_op, document_result, exec_session_op, exec_session_result, mcp_op, mcp_result,
-			resource_op, server_frame, stdin_frame, workspace_op, workspace_result, worktree_op,
+			ReflectionAnswer, ReflectionQuery, RegisterPresence, ReleasePresence, ResourceCompletion,
+			RestartProcess, Retire, RevokeApprovalGrants, SearchComplete, SearchMatchMsg,
+			SearchRequest, SendInput, ServerFrame, ServerHello, SignalProcess, SignalRequest,
+			SiteMaterialized, StartProcess, StdinFrame, StopProcess, Update, Verdict, WalkComplete,
+			WalkEntry, WalkRequest, WorktreeResult, cancel_request, client_frame, data_event,
+			data_request, data_response, document_op, document_result, exec_session_op,
+			exec_session_result, mcp_op, mcp_result, resource_op, server_frame, stdin_frame,
+			workspace_op, workspace_result, worktree_op,
 		},
 	},
 };
@@ -159,6 +160,15 @@ pub enum ClientError {
 		/// Connection-unique query identifier assigned by the daemon.
 		query_id:   u64,
 	},
+	/// A reflection answer named a query this client no longer holds open: it
+	/// was already answered, the daemon withdrew it, or the transport closed.
+	#[error("reflection query {query_id} on request {request_id} is no longer open")]
+	ReflectionQueryClosed {
+		/// Request that carried the query.
+		request_id: u64,
+		/// Connection-unique query identifier assigned by the daemon.
+		query_id:   u64,
+	},
 }
 
 /// `ClientHello` capability that asks the host to send syntax-repair queries.
@@ -174,12 +184,21 @@ pub const EDIT_REPAIR_CAPABILITY: &str = "edit-repair";
 /// [`CLIENT_FEATURES`], not a DATA grant.
 pub const APPROVAL_RELAY_CAPABILITY: &str = "approval-relay";
 
+/// `ClientHello` capability that asks the daemon to relay memory reflections.
+///
+/// The daemon asks such a connection to synthesize the `reflect` calls it
+/// issued on its own session's inference, and the client drains
+/// [`EnvClient::reflection_queries`]. It is one of the [`CLIENT_FEATURES`],
+/// not a DATA grant.
+pub const REFLECTION_RELAY_CAPABILITY: &str = "reflection-relay";
+
 /// `ClientHello` capabilities that name client features rather than DATA
 /// grants.
 ///
 /// A host strips them before it resolves the grants a hello requests, so a
 /// connection that advertises only client features keeps its default grants.
-pub const CLIENT_FEATURES: &[&str] = &[EDIT_REPAIR_CAPABILITY, APPROVAL_RELAY_CAPABILITY];
+pub const CLIENT_FEATURES: &[&str] =
+	&[EDIT_REPAIR_CAPABILITY, APPROVAL_RELAY_CAPABILITY, REFLECTION_RELAY_CAPABILITY];
 
 /// A terminal loss of event-stream continuity.
 #[derive(Clone, Debug)]
@@ -437,6 +456,9 @@ struct ClientInner {
 	/// keyed by `(request_id, query_id)`. Usually empty; only the response
 	/// router and `answer_approval` touch it, so one lock never contends.
 	open_approvals:         Mutex<FastHashSet<(u64, u64)>>,
+	/// Relayed reflection queries delivered and not yet answered or
+	/// withdrawn, keyed by `(request_id, query_id)` like `open_approvals`.
+	open_reflections:       Mutex<FastHashSet<(u64, u64)>>,
 	hello_waiter:           Mutex<Option<Sender<ServerFrame>>>,
 	info:                   Mutex<Option<ServerHello>>,
 	owner_last_transaction: Mutex<Option<TransactionId>>,
@@ -444,6 +466,7 @@ struct ClientInner {
 	edit_repair_requests:   Receiver<EditRepairRequest>,
 	acp_requests:           Receiver<AcpRequest>,
 	approval_queries:       Receiver<ApprovalQueryEvent>,
+	reflection_queries:     Receiver<ReflectionQueryEvent>,
 	next_id:                AtomicU64,
 	cancel:                 Sender<u64>,
 	lease_close:            Sender<LeaseClose>,
@@ -532,6 +555,28 @@ pub enum ApprovalQueryEvent {
 		query:      ApprovalQuery,
 	},
 	/// The daemon stopped waiting for an open query: withdraw its prompt and do
+	/// not answer it.
+	Withdrawn {
+		/// Request that carried the query.
+		request_id: u64,
+		/// Connection-unique query identifier.
+		query_id:   u64,
+	},
+}
+
+/// One reflection-relay event the daemon sent this client.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReflectionQueryEvent {
+	/// The daemon asks this client to synthesize one memory reflection a call
+	/// it issued recalled evidence for; answer with
+	/// [`EnvClient::answer_reflection`].
+	Requested {
+		/// Request that issued the call; the answer echoes it.
+		request_id: u64,
+		/// The question, its context and the recalled evidence.
+		query:      ReflectionQuery,
+	},
+	/// The daemon stopped waiting for an open query: stop its synthesis and do
 	/// not answer it.
 	Withdrawn {
 		/// Request that carried the query.
@@ -920,6 +965,7 @@ impl EnvClient {
 		let (edit_repair_tx, edit_repair_requests) = flume::unbounded();
 		let (acp_tx, acp_requests) = flume::unbounded();
 		let (approval_tx, approval_queries) = flume::unbounded();
+		let (reflection_tx, reflection_queries) = flume::unbounded();
 		let (cancel, cancellations) = flume::unbounded();
 		let (lease_close, lease_closes) = flume::unbounded();
 		let inner = Arc::new(ClientInner {
@@ -929,6 +975,7 @@ impl EnvClient {
 			edit_repair_scopes: Mutex::new(HashMap::new()),
 			acp_request_scopes: Mutex::new(HashMap::new()),
 			open_approvals: Mutex::new(FastHashSet::default()),
+			open_reflections: Mutex::new(FastHashSet::default()),
 			hello_waiter: Mutex::new(None),
 			info: Mutex::new(None),
 			owner_last_transaction: Mutex::new(None),
@@ -936,6 +983,7 @@ impl EnvClient {
 			edit_repair_requests,
 			acp_requests,
 			approval_queries,
+			reflection_queries,
 			next_id: AtomicU64::new(1),
 			cancel,
 			lease_close,
@@ -943,7 +991,10 @@ impl EnvClient {
 		});
 		let router = Arc::downgrade(&inner);
 		let _ = thread::spawn(move || {
-			route_responses(router, incoming, events_tx, edit_repair_tx, acp_tx, approval_tx);
+			route_responses(router, incoming, events_tx, edit_repair_tx, acp_tx, RelayQueues {
+				approvals:   approval_tx,
+				reflections: reflection_tx,
+			});
 		});
 		let canceller = Arc::downgrade(&inner);
 		let _ = thread::spawn(move || route_cancellations(canceller, cancellations));
@@ -1205,6 +1256,53 @@ impl EnvClient {
 					query_id,
 					decision: Some(decision),
 				})),
+				..ClientFrame::default()
+			})
+			.await
+			.map_err(|_| ClientError::TransportClosed)
+	}
+
+	/// Subscribes to the memory reflections the daemon relays to this
+	/// connection.
+	///
+	/// Only a connection whose `ClientHello` advertised
+	/// [`REFLECTION_RELAY_CAPABILITY`] receives them, and only for the
+	/// `reflect` calls it issued (directly, or through `dyn` in a command it
+	/// issued). Every clone receives work from the same single-consumer queue.
+	/// The queue closes when the environment response transport disconnects; a
+	/// partitioned client's router withdraws a closed backend's open queries
+	/// instead.
+	pub fn reflection_queries(&self) -> Receiver<ReflectionQueryEvent> {
+		self.inner.reflection_queries.clone()
+	}
+
+	/// Answers one relayed reflection query without opening a correlated
+	/// response route.
+	///
+	/// The answer rides the query's `request_id` and carries no invocation
+	/// scope. Returns [`ClientError::ReflectionQueryClosed`] when the query was
+	/// already answered, the daemon withdrew it, or the transport closed
+	/// first; nothing is sent then.
+	pub async fn answer_reflection(
+		&self,
+		request_id: u64,
+		answer: ReflectionAnswer,
+	) -> Result<(), ClientError> {
+		let query_id = answer.query_id;
+		if !self
+			.inner
+			.open_reflections
+			.lock()
+			.remove(&(request_id, query_id))
+		{
+			return Err(ClientError::ReflectionQueryClosed { request_id, query_id });
+		}
+		self
+			.inner
+			.outgoing
+			.send_async(ClientFrame {
+				request_id,
+				body: Some(client_frame::Body::ReflectionAnswer(answer)),
 				..ClientFrame::default()
 			})
 			.await
@@ -4375,13 +4473,19 @@ const fn ensure_worker_data(request: &DataRequest) -> Result<(), ClientError> {
 	}
 }
 
+/// The queues that take daemon-relayed queries off ordinary routing.
+struct RelayQueues {
+	approvals:   Sender<ApprovalQueryEvent>,
+	reflections: Sender<ReflectionQueryEvent>,
+}
+
 fn route_responses(
 	client: Weak<ClientInner>,
 	incoming: Receiver<ServerFrame>,
 	events: Sender<ServerFrame>,
 	edit_repair_requests: Sender<EditRepairRequest>,
 	acp_requests: Sender<AcpRequest>,
-	approval_queries: Sender<ApprovalQueryEvent>,
+	relays: RelayQueues,
 ) {
 	while let Ok(frame) = incoming.recv() {
 		let Some(client) = client.upgrade() else {
@@ -4402,7 +4506,7 @@ fn route_responses(
 			}
 			continue;
 		}
-		let Some(frame) = divert_approval_frame(&client, frame, &approval_queries) else {
+		let Some(frame) = divert_relay_frame(&client, frame, &relays) else {
 			continue;
 		};
 		if let Some(server_frame::Body::EditRepairQuery(query)) = frame.body.as_ref() {
@@ -4475,19 +4579,20 @@ fn route_responses(
 		client.edit_repair_scopes.lock().clear();
 		client.acp_request_scopes.lock().clear();
 		client.open_approvals.lock().clear();
+		client.open_reflections.lock().clear();
 		client.hello_waiter.lock().take();
 	}
 }
 
-/// Moves relayed approval frames onto the approval queue and returns every
-/// other frame for ordinary routing.
+/// Moves relayed approval and reflection frames onto their queues and returns
+/// every other frame for ordinary routing.
 ///
-/// A withdrawal reaches the queue only while its query is open: one already
-/// answered has no prompt left to withdraw.
-fn divert_approval_frame(
+/// A withdrawal reaches its queue only while its query is open: one already
+/// answered has nothing left to withdraw.
+fn divert_relay_frame(
 	client: &ClientInner,
 	frame: ServerFrame,
-	approval_queries: &Sender<ApprovalQueryEvent>,
+	relays: &RelayQueues,
 ) -> Option<ServerFrame> {
 	let request_id = frame.request_id;
 	match frame.body {
@@ -4496,13 +4601,40 @@ fn divert_approval_frame(
 				.open_approvals
 				.lock()
 				.insert((request_id, query.query_id));
-			let _ = approval_queries.send(ApprovalQueryEvent::Requested { request_id, query });
+			let _ = relays
+				.approvals
+				.send(ApprovalQueryEvent::Requested { request_id, query });
 			None
 		},
 		Some(server_frame::Body::ApprovalWithdrawn(withdrawn)) => {
 			let query_id = withdrawn.query_id;
 			if client.open_approvals.lock().remove(&(request_id, query_id)) {
-				let _ = approval_queries.send(ApprovalQueryEvent::Withdrawn { request_id, query_id });
+				let _ = relays
+					.approvals
+					.send(ApprovalQueryEvent::Withdrawn { request_id, query_id });
+			}
+			None
+		},
+		Some(server_frame::Body::ReflectionQuery(query)) => {
+			client
+				.open_reflections
+				.lock()
+				.insert((request_id, query.query_id));
+			let _ = relays
+				.reflections
+				.send(ReflectionQueryEvent::Requested { request_id, query });
+			None
+		},
+		Some(server_frame::Body::ReflectionWithdrawn(withdrawn)) => {
+			let query_id = withdrawn.query_id;
+			if client
+				.open_reflections
+				.lock()
+				.remove(&(request_id, query_id))
+			{
+				let _ = relays
+					.reflections
+					.send(ReflectionQueryEvent::Withdrawn { request_id, query_id });
 			}
 			None
 		},
@@ -5031,6 +5163,95 @@ mod tests {
 		let unbind = requests.recv_async().await.expect("receive ACP unbind");
 		assert_eq!(unbind.body, Some(client_frame::Body::AcpBind(AcpBind::default())));
 		assert!(client.inner.pending.lock().is_empty(), "bind opened a response correlation");
+	}
+
+	/// Reflection queries leave the issuing request's stream for their own
+	/// queue, an answer rides the query's request once without opening a
+	/// route, and a withdrawn or closed query can no longer be answered.
+	#[tokio::test]
+	async fn reflection_queries_bypass_request_streams_and_answer_once() {
+		const WAIT: Duration = Duration::from_secs(1);
+		let (outgoing, requests) = flume::unbounded();
+		let (responses, incoming) = flume::unbounded();
+		let client = EnvClient::from_channels(outgoing, incoming);
+		let invocation = client.register(42);
+		let reflections = client.reflection_queries();
+		let query = |query_id| ReflectionQuery {
+			query_id,
+			question: "deploy target".into(),
+			context: Some("Preparing the release".into()),
+			evidence: vec!["The deploy target is fly.io".into()],
+		};
+		let server =
+			|request_id, body| ServerFrame { request_id, body: Some(body), ..ServerFrame::default() };
+		let next = async || {
+			timeout(WAIT, reflections.recv_async())
+				.await
+				.expect("reflection event timed out")
+		};
+		for query_id in [1, 2] {
+			responses
+				.send_async(server(42, server_frame::Body::ReflectionQuery(query(query_id))))
+				.await
+				.expect("send reflection query");
+		}
+		for query_id in [1, 2] {
+			assert_eq!(
+				next().await.expect("reflection queue open"),
+				ReflectionQueryEvent::Requested { request_id: 42, query: query(query_id) }
+			);
+		}
+		assert!(invocation.receiver.try_recv().is_err(), "query entered the invocation stream");
+
+		let answer = ReflectionAnswer {
+			query_id: 1,
+			body:     Some(env_wire::reflection_answer::Body::Answer("fly.io".into())),
+		};
+		client
+			.answer_reflection(42, answer.clone())
+			.await
+			.expect("answer the reflection");
+		let sent = timeout(WAIT, requests.recv_async())
+			.await
+			.expect("reflection answer timed out")
+			.expect("receive reflection answer");
+		assert_eq!(sent.request_id, 42);
+		assert_eq!(sent.scope, None, "reflection answers carry no invocation scope");
+		assert_eq!(sent.body, Some(client_frame::Body::ReflectionAnswer(answer.clone())));
+		assert_eq!(client.inner.pending.lock().len(), 1, "the answer opened a response waiter");
+		assert!(matches!(
+			client.answer_reflection(42, answer.clone()).await,
+			Err(ClientError::ReflectionQueryClosed { request_id: 42, query_id: 1 })
+		));
+		assert!(matches!(
+			client.answer_reflection(43, answer).await,
+			Err(ClientError::ReflectionQueryClosed { request_id: 43, query_id: 1 })
+		));
+
+		// The answered query has nothing left to withdraw; the open one does.
+		for query_id in [1, 2] {
+			responses
+				.send_async(server(
+					42,
+					server_frame::Body::ReflectionWithdrawn(env_wire::ReflectionWithdrawn { query_id }),
+				))
+				.await
+				.expect("send reflection withdrawal");
+		}
+		assert_eq!(next().await.expect("reflection queue open"), ReflectionQueryEvent::Withdrawn {
+			request_id: 42,
+			query_id:   2,
+		});
+		assert!(matches!(
+			client
+				.answer_reflection(42, ReflectionAnswer { query_id: 2, body: None })
+				.await,
+			Err(ClientError::ReflectionQueryClosed { request_id: 42, query_id: 2 })
+		));
+		assert!(requests.try_recv().is_err(), "a closed query sent an answer");
+
+		drop(responses);
+		assert!(next().await.is_err(), "reflection queue stayed open after transport close");
 	}
 
 	#[tokio::test]
