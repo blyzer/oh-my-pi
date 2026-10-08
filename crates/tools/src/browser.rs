@@ -311,6 +311,7 @@ pub fn spec() -> ToolSpec {
 			exec:      Some(ExecEffects { commands: Arc::default(), network: true }),
 			inference: None,
 			desktop:   None,
+			fetch:     None,
 			subagents: 0,
 		},
 		confinement:     omp_tool::Confinement::Host,

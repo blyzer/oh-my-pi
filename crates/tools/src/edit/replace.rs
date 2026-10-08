@@ -196,6 +196,7 @@ fn replace_spec_for<P: JsonSchema>(revision: u16) -> ToolSpec {
 			exec:      None,
 			inference: None,
 			desktop:   None,
+			fetch:     None,
 			subagents: 0,
 		},
 		confinement:     omp_tool::Confinement::Host,

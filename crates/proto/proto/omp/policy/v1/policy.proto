@@ -145,11 +145,20 @@ message DesktopEffects {
   omp.inference.v1.ValueMap props = 15;
 }
 
+// Read-only network egress: a fetch reads a remote resource and changes
+// nothing locally. Presence permits the fetch.
+message FetchEffects {
+  // Whether the fetch may present the user's stored credentials.
+  bool credentials = 1;
+  omp.inference.v1.ValueMap props = 15;
+}
+
 message EffectEnvelope {
   optional DocEffects documents = 1;
   optional ExecEffects exec = 2;
   optional InferenceEffects inference = 3;
   uint32 subagents = 4;
   optional DesktopEffects desktop = 5;
+  optional FetchEffects fetch = 6;
   omp.inference.v1.ValueMap props = 15;
 }

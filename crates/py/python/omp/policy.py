@@ -146,6 +146,7 @@ class OpaqueReason(StrEnum):
 class Tier(StrEnum):
     """Select a device's default approval tier."""
     READ = "read"
+    FETCH = "fetch"
     WRITE = "write"
     EXEC = "exec"
     PRIVILEGED = "privileged"

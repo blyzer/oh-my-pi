@@ -817,6 +817,7 @@ class Effects:
     documents: DocEffects | None = None
     exec: ExecEffects | None = None
     inference: InferenceEffects | None = None
+    fetch: FetchEffects | None = None
     subagents: int = 0
 
 
@@ -836,7 +837,16 @@ class ExecEffects:
 class InferenceEffects:
     max_requests: int = 0
     max_usd: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class FetchEffects:
+    credentials: bool = False   # may present the user's stored credentials
 ```
+
+A `fetch` is read-only network egress: it reads a remote resource and changes nothing locally.
+It resolves to the `fetch` approval tier, between `read` and `write`: `always-ask` prompts for
+it, while `write`, the default posture and `yolo` allow it.
 
 A device's maximum declared effect envelope: the static answer to "what can
 this call do to me", written where policy can read it before anything runs.

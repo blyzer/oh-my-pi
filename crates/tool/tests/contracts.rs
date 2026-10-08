@@ -1891,6 +1891,7 @@ fn effects_are_exact_deny_safe_and_wire_stable() {
 			accessibility: true,
 			input:         false,
 		}),
+		fetch:     None,
 		subagents: 2,
 	};
 	let narrowed = Effects {
@@ -1911,6 +1912,7 @@ fn effects_are_exact_deny_safe_and_wire_stable() {
 			accessibility: false,
 			input:         false,
 		}),
+		fetch:     None,
 		subagents: 0,
 	};
 	assert!(narrowed.is_subset_of(&maximum));

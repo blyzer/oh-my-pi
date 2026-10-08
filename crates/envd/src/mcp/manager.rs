@@ -29,7 +29,8 @@ use omp_shell_builtins::{
 	DynCallOutput, DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema,
 };
 use omp_tool::{
-	DocEffects, Effects, ExecEffects, LeafCatalogSnapshot, LeafOwner, LeafVersion, PublishedLeaf,
+	DocEffects, Effects, ExecEffects, FetchEffects, LeafCatalogSnapshot, LeafOwner, LeafVersion,
+	PublishedLeaf,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
@@ -324,7 +325,7 @@ impl ControlMountDeclaration {
 				.chain(&self.exclude)
 				.any(|pattern| pattern.contains('/'))
 			|| !matches!(self.precedence, -500 | 0 | 500 | 700 | 1000)
-			|| !matches!(self.tier.as_str(), "read" | "write" | "exec" | "privileged")
+			|| !matches!(self.tier.as_str(), "read" | "fetch" | "write" | "exec" | "privileged")
 		{
 			return Err(McpControlError::DeclarationRejected);
 		}
@@ -3072,6 +3073,8 @@ fn mcp_dyn_definition(leaf: &PublishedLeaf<McpLeaf>) -> Option<(Str, Value)> {
 fn mcp_tier_effects(tier: &str) -> Effects {
 	match tier {
 		"read" => Effects::empty(),
+		// A server's fetches may use the credentials it was configured with.
+		"fetch" => Effects { fetch: Some(FetchEffects { credentials: true }), ..Effects::empty() },
 		"write" => Effects {
 			documents: Some(DocEffects { read: true, write_globs: Arc::from([sf!("**")]) }),
 			..Effects::empty()
@@ -4243,5 +4246,27 @@ mod tests {
 			.expect("changed diff");
 		assert_eq!(changed.resources.changed.len(), 1);
 		assert_eq!(changed.prompts.changed.len(), 1);
+	}
+
+	/// A control declaration's tier becomes the effects its devices are
+	/// admitted on: `fetch` is read-only egress with the server's
+	/// credentials, between `read` and `write`.
+	#[test]
+	fn declared_tiers_map_to_their_admission_tiers() {
+		use crate::admission::ApprovalTier;
+
+		for (tier, expected) in [
+			("read", ApprovalTier::Read),
+			("fetch", ApprovalTier::Fetch),
+			("write", ApprovalTier::Write),
+			("exec", ApprovalTier::Exec),
+			("privileged", ApprovalTier::Exec),
+		] {
+			assert_eq!(ApprovalTier::from_effects(&super::mcp_tier_effects(tier)), expected, "{tier}");
+		}
+		assert_eq!(
+			super::mcp_tier_effects("fetch").fetch,
+			Some(omp_tool::FetchEffects { credentials: true })
+		);
 	}
 }
