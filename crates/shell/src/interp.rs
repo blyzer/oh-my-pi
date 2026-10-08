@@ -161,6 +161,13 @@ pub trait SpawnWrapper: Send + Sync {
 	fn resolve_env(&self, env: &mut Vec<(OsString, OsString)>) {
 		env.retain(|(key, _)| key.to_str().is_some_and(|key| self.env_allowed(key)));
 	}
+
+	/// Observes the arguments of one external program the shell composes
+	/// through this wrapper: after expansion, without the program itself, once
+	/// per launch. A wrapper can record what it launches, such as a network
+	/// address handed to a program its sandbox cuts off. The default ignores
+	/// them.
+	fn observe_args(&self, _args: &mut dyn Iterator<Item = &OsStr>) {}
 }
 /// Scopes process-directed authority (signals, observation, and process
 /// metadata) for one execution.

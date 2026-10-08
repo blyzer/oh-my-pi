@@ -87,7 +87,11 @@ client and framing boundary; it does not contain an alternate host.
   the host left out when it cannot be quoted; a later failure on it gets one
   short line and a later success none. Without a refusal, a failed command
   whose stderr shows a resolver or connection failure gets the mode's
-  generic text once per session.
+  generic text once per session. A disabled network has no broker to record
+  anything, so there a failed command that launched a program with a network
+  URL among its arguments (seen through `SpawnWrapper::observe_args`) gets
+  that text from the same once-per-session slot, which covers a quiet client
+  such as `curl -s`.
 - `approval_relay` carries a daemon command's sandbox amendment prompt to the
   session that issued the command, and answers it there. The
   daemon's host binds no approval route; an attached session advertises

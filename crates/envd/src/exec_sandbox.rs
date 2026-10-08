@@ -23,6 +23,7 @@ use parking_lot::Mutex;
 use crate::exec_settings::SandboxNetworkMode;
 use crate::{
 	admission::{SandboxState, SandboxUnavailable},
+	exec_network_diag::is_network_url,
 	exec_settings::{
 		EnvironmentInheritance, ExecSandboxMode, NetworkConfinement, ReadMode, SandboxSettings,
 		UnscopedWrites,
@@ -272,18 +273,23 @@ pub(crate) struct AttemptFacts {
 	/// the broker's policy refusal as [`SandboxDenialFact::Network`]. A
 	/// fail-closed broker refusal is never one, so a name that does not
 	/// resolve stays an ordinary command failure rather than a denial.
-	pub(crate) denial:  Option<SandboxDenialFact>,
+	pub(crate) denial:          Option<SandboxDenialFact>,
 	/// The egress broker's refusal of any cause, for the model-visible
 	/// network diag. It is kept even when a path denial takes precedence.
-	pub(crate) refusal: Option<BrokerDenial>,
+	pub(crate) refusal:         Option<BrokerDenial>,
+	/// A program the attempt launched was given a network URL while the
+	/// attempt had no network at all, the only sign a quiet client leaves
+	/// there: no backend records a connection its kernel refuses.
+	pub(crate) network_locator: bool,
 }
 
 /// One unforgeable execution attempt within an [`ExecSandbox`] session.
 pub(crate) struct ExecSandboxAttempt {
-	sandbox:  Arc<ExecSandbox>,
-	denial:   Mutex<Option<SandboxDenialFact>>,
-	token:    Option<Str>,
-	finished: AtomicBool,
+	sandbox:         Arc<ExecSandbox>,
+	denial:          Mutex<Option<SandboxDenialFact>>,
+	token:           Option<Str>,
+	finished:        AtomicBool,
+	network_locator: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -573,6 +579,38 @@ impl ExecSandbox {
 		})
 	}
 
+	/// An environment-only session wrapper that reports a disabled network,
+	/// so what a session with no network records and reports can be exercised
+	/// on hosts with no native backend. Nothing enforces that network: only
+	/// the wrapper's own account of it is under test. `settings` decide whether
+	/// it reads as `disabled` or as a scoped broker that could not start.
+	#[cfg(test)]
+	pub(crate) fn with_test_disabled_network(
+		settings: &SandboxSettings,
+		workspace_root: &Path,
+	) -> Arc<Self> {
+		let parts = policy_parts_with_approved_scope(
+			settings,
+			workspace_root,
+			WriteMode::Scoped,
+			NetworkMode::Disabled,
+			None,
+			None,
+			None,
+		)
+		.expect("test policy");
+		Arc::new(Self {
+			wrapper:      Arc::new(CommandWrapper::environment_only(&parts.spec)),
+			file_policy:  parts.file_policy,
+			failure_note: Str::new_static("sandbox: backend=environment-only; network=disabled"),
+			settings:     Arc::new(settings.clone()),
+			workspace:    Arc::new(workspace_root.to_path_buf()),
+			supervised:   true,
+			network:      NetworkConfinement::Disabled,
+			proxy:        None,
+		})
+	}
+
 	/// Opens one isolated denial collection interval for an execution attempt.
 	///
 	/// `grants` are the session egress grants of the approval binding that
@@ -591,6 +629,7 @@ impl ExecSandbox {
 			denial: Mutex::new(None),
 			token,
 			finished: AtomicBool::new(false),
+			network_locator: AtomicBool::new(false),
 		})
 	}
 
@@ -623,9 +662,9 @@ impl ExecSandbox {
 }
 
 impl ExecSandboxAttempt {
-	/// Consumes this attempt's path denial and broker refusal, and invalidates
-	/// its proxy capability. A path denial takes precedence over a policy
-	/// refusal as the attempt's denial.
+	/// Consumes this attempt's path denial, broker refusal and network
+	/// locator, and invalidates its proxy capability. A path denial takes
+	/// precedence over a policy refusal as the attempt's denial.
 	pub(crate) fn take_facts(&self) -> AttemptFacts {
 		let path_denial = self.denial.lock().take();
 		let refusal = (!self.finished.swap(true, Ordering::AcqRel))
@@ -645,7 +684,8 @@ impl ExecSandboxAttempt {
 					port: refusal.port,
 				})
 		});
-		AttemptFacts { denial, refusal }
+		let network_locator = self.network_locator.swap(false, Ordering::AcqRel);
+		AttemptFacts { denial, refusal, network_locator }
 	}
 
 	/// Asks the session broker, with this attempt's capability, to tunnel to
@@ -780,6 +820,24 @@ impl SpawnWrapper for ExecSandboxAttempt {
 	fn resolve_env(&self, environment: &mut Vec<(OsString, OsString)>) {
 		*environment = self.sandbox.wrapper.resolve_env(environment.drain(..));
 		self.proxy_environment(environment);
+	}
+
+	/// Records a network URL handed to a program while this attempt has no
+	/// network. Under `scoped` the broker records what a client asks for, so
+	/// nothing is scanned there; once one URL is recorded, later launches are
+	/// not scanned either.
+	fn observe_args(&self, args: &mut dyn Iterator<Item = &OsStr>) {
+		if self.sandbox.network != NetworkConfinement::Disabled
+			|| self.network_locator.load(Ordering::Acquire)
+		{
+			return;
+		}
+		for arg in args {
+			if is_network_url(arg.as_encoded_bytes()) {
+				self.network_locator.store(true, Ordering::Release);
+				return;
+			}
+		}
 	}
 }
 
@@ -1925,6 +1983,63 @@ mod tests {
 		assert_eq!(session.network, NetworkConfinement::Scoped);
 		assert!(session.proxy.is_some());
 		assert!(session.session_note().contains("network=scoped"), "{}", session.session_note());
+	}
+
+	fn observe(attempt: &ExecSandboxAttempt, args: &[&str]) {
+		SpawnWrapper::observe_args(attempt, &mut args.iter().map(OsStr::new));
+	}
+
+	/// An attempt with no network records that a program it launched was
+	/// given a network URL, once, consumed with its other facts; a URL that is
+	/// only text never counts. Under `scoped` the broker records what clients
+	/// ask for, so arguments are not scanned at all.
+	#[test]
+	fn attempts_record_network_urls_only_without_a_network() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let explicit_disabled = SandboxSettings {
+			network_mode: SandboxNetworkMode::Disabled,
+			network_provenance: Provenance::Explicit,
+			explicit: true,
+			..workspace_settings()
+		};
+		let mut disabled = vec![
+			ExecSandbox::with_test_disabled_network(&explicit_disabled, workspace.path()),
+			// A scoped broker that could not start leaves no network either.
+			ExecSandbox::with_test_disabled_network(&SandboxSettings::default(), workspace.path()),
+		];
+		if native_backend() {
+			disabled.push(
+				ExecSandbox::compile(
+					&explicit_disabled,
+					workspace.path(),
+					true,
+					SandboxConsumer::Session,
+				)
+				.expect("disabled policy")
+				.expect("disabled wrapper"),
+			);
+		}
+		for sandbox in &disabled {
+			assert_eq!(sandbox.network, NetworkConfinement::Disabled);
+			let attempt = sandbox.begin_attempt(None);
+			observe(&attempt, &["-sS", "-o", "/dev/null"]);
+			observe(&attempt, &["see https://example.com", "file:///etc/hosts", "--url=https://x"]);
+			assert!(!attempt.take_facts().network_locator, "text is not a fetch");
+
+			let attempt = sandbox.begin_attempt(None);
+			observe(&attempt, &["-sI", "--max-time", "20", "https://example.com"]);
+			observe(&attempt, &["git+ssh://git@github.com/org/repo.git"]);
+			let facts = attempt.take_facts();
+			assert!(facts.network_locator);
+			assert_eq!(facts.denial, None);
+			assert!(facts.refusal.is_none());
+			assert!(!attempt.take_facts().network_locator, "taken once");
+		}
+
+		let scoped = ExecSandbox::with_test_broker(&SandboxSettings::default(), workspace.path());
+		let attempt = scoped.begin_attempt(None);
+		observe(&attempt, &["-sI", "https://example.com"]);
+		assert!(!attempt.take_facts().network_locator);
 	}
 
 	#[test]

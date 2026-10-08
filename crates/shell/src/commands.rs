@@ -203,6 +203,9 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 	empty_env: bool,
 ) -> Result<process::Command, error::Error> {
 	let wrapper = context.params.spawn_wrapper();
+	if let Some(wrapper) = wrapper {
+		wrapper.observe_args(&mut args.iter().map(AsRef::as_ref));
+	}
 	let mut cmd = if let Some((launcher, prefix_args)) = wrapper.and_then(|w| w.launcher()) {
 		let mut cmd = process::Command::new(launcher);
 		cmd.args(prefix_args);
@@ -1142,8 +1145,10 @@ mod sandbox_tests {
 	use super::*;
 	use crate::SpawnWrapper;
 
+	#[derive(Default)]
 	struct EnvWrapper {
-		prefix: Vec<OsString>,
+		prefix:   Vec<OsString>,
+		observed: parking_lot::Mutex<Vec<Vec<OsString>>>,
 	}
 
 	impl SpawnWrapper for EnvWrapper {
@@ -1154,22 +1159,87 @@ mod sandbox_tests {
 		fn env_allowed(&self, key: &str) -> bool {
 			key != "FILTERED"
 		}
+
+		fn observe_args(&self, args: &mut dyn Iterator<Item = &OsStr>) {
+			self
+				.observed
+				.lock()
+				.push(args.map(OsStr::to_os_string).collect());
+		}
 	}
 
+	/// The wrapper sees each launch's arguments once, without the launcher
+	/// prefix or the program itself.
 	#[test]
 	fn compose_std_command_prefixes_spawn_wrapper() -> crate::TestResult<()> {
 		let mut shell: Shell = Shell::default();
 		let mut params = ExecutionParameters::default();
-		params.set_spawn_wrapper(Arc::new(EnvWrapper { prefix: vec![OsString::from("--")] }));
+		let wrapper =
+			Arc::new(EnvWrapper { prefix: vec![OsString::from("--")], ..EnvWrapper::default() });
+		params.set_spawn_wrapper(wrapper.clone());
 		let context = ExecutionContext { shell: &mut shell, command_name: "echo".into(), params };
 
-		let cmd = compose_std_command(&context, "/bin/echo", "custom-argv0", &["hello"], true)?;
+		let cmd = compose_std_command(
+			&context,
+			"/bin/echo",
+			"custom-argv0",
+			&["hello", "https://example.com"],
+			true,
+		)?;
 		assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/env"));
 		assert_eq!(cmd.get_args().collect::<Vec<_>>(), [
 			OsStr::new("--"),
 			OsStr::new("/bin/echo"),
-			OsStr::new("hello")
+			OsStr::new("hello"),
+			OsStr::new("https://example.com")
 		]);
+		assert_eq!(*wrapper.observed.lock(), [vec![
+			OsString::from("hello"),
+			OsString::from("https://example.com")
+		]]);
+
+		Ok(())
+	}
+
+	struct ArgsRecorder(parking_lot::Mutex<Vec<Vec<OsString>>>);
+
+	impl SpawnWrapper for ArgsRecorder {
+		fn launcher(&self) -> Option<(&OsStr, &[OsString])> {
+			None
+		}
+
+		fn env_allowed(&self, _key: &str) -> bool {
+			true
+		}
+
+		fn observe_args(&self, args: &mut dyn Iterator<Item = &OsStr>) {
+			self.0.lock().push(args.map(OsStr::to_os_string).collect());
+		}
+	}
+
+	/// A running script hands the wrapper the expanded arguments of each
+	/// external program it launches, and nothing for a builtin.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn spawn_wrappers_observe_expanded_external_arguments() -> crate::TestResult<()> {
+		let mut shell: Shell = Shell::builder()
+			.builtins(builtins::default_builtins())
+			.build()
+			.await?;
+		let recorder = Arc::new(ArgsRecorder(parking_lot::Mutex::default()));
+		let mut params = shell.default_exec_params();
+		params.set_spawn_wrapper(recorder.clone());
+		let script =
+			"url=https://example.com; echo \"$url\" >/dev/null; /bin/echo -n \"$url\" x >/dev/null";
+		let result = shell
+			.run_string(script, &SourceInfo::from("(spawn wrapper test)"), &params)
+			.await?;
+		assert!(result.is_success());
+		assert_eq!(*recorder.0.lock(), [vec![
+			OsString::from("-n"),
+			OsString::from("https://example.com"),
+			OsString::from("x")
+		]]);
 
 		Ok(())
 	}
