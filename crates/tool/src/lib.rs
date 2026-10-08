@@ -459,6 +459,15 @@ impl DesktopEffects {
 	}
 }
 
+/// Maximum declared read-only network egress for one tool revision: a fetch
+/// reads a remote resource and changes nothing locally.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FetchEffects {
+	/// Whether the fetch may present the user's stored credentials (an SSH
+	/// key, a forge token); anonymous fetches leave it false.
+	pub credentials: bool,
+}
+
 /// Maximum declared effect envelope for one tool revision.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Effects {
@@ -470,6 +479,9 @@ pub struct Effects {
 	pub inference: Option<InferenceEffects>,
 	/// Native desktop authority, absent when the domain is denied.
 	pub desktop:   Option<DesktopEffects>,
+	/// Read-only network egress, absent when the domain is denied. Present
+	/// means a fetch is permitted, so it is never empty.
+	pub fetch:     Option<FetchEffects>,
 	/// Maximum spawned subagents.
 	pub subagents: u32,
 }
@@ -539,7 +551,14 @@ pub fn effects_mutate_environment(effects: &Effects) -> bool {
 impl Effects {
 	/// Empty deny-all envelope for an explicitly effect-free tool.
 	pub const fn empty() -> Self {
-		Self { documents: None, exec: None, inference: None, desktop: None, subagents: 0 }
+		Self {
+			documents: None,
+			exec:      None,
+			inference: None,
+			desktop:   None,
+			fetch:     None,
+			subagents: 0,
+		}
 	}
 
 	/// Returns whether `self` grants no authority.
@@ -551,6 +570,7 @@ impl Effects {
 				.as_ref()
 				.is_none_or(InferenceEffects::is_empty)
 			&& self.desktop.as_ref().is_none_or(DesktopEffects::is_empty)
+			&& self.fetch.is_none()
 			&& self.subagents == 0
 	}
 
@@ -609,6 +629,11 @@ impl Effects {
 					&& (!value.accessibility || max.accessibility)
 					&& (!value.input || max.input)
 			},
+		) && optional_subset(
+			self.fetch.as_ref(),
+			maximum.fetch.as_ref(),
+			|_| false,
+			|value, max| !value.credentials || max.credentials,
 		)
 	}
 
@@ -688,6 +713,9 @@ impl From<&Effects> for v1::EffectEnvelope {
 				input:         desktop.input,
 				props:         None,
 			}),
+			fetch:     value
+				.fetch
+				.map(|fetch| v1::FetchEffects { credentials: fetch.credentials, props: None }),
 			subagents: value.subagents,
 			props:     None,
 		}
@@ -734,6 +762,10 @@ impl TryFrom<&v1::EffectEnvelope> for Effects {
 				accessibility: desktop.accessibility,
 				input:         desktop.input,
 			}),
+			fetch:     value
+				.fetch
+				.as_ref()
+				.map(|fetch| FetchEffects { credentials: fetch.credentials }),
 			subagents: value.subagents,
 		})
 	}

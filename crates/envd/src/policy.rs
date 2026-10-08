@@ -132,6 +132,10 @@ impl Grants {
 				grants.push("env.net");
 			}
 		}
+		// A fetch is network egress, so it needs the network grant.
+		if envelope.fetch.is_some() {
+			grants.push("env.net");
+		}
 		if let Some(desktop) = &envelope.desktop {
 			if desktop.capture {
 				grants.extend(["env.desktop.capture", "env.blob"]);
@@ -1957,6 +1961,21 @@ mod tests {
 			let grants = Grants::from_effect_envelope(&envelope);
 			assert_eq!(grants.contains("env.net"), expected_net);
 			assert_eq!(grants.contains("env.exec"), expected_exec);
+		}
+	}
+
+	/// A fetch is network egress: it derives `env.net` and nothing that would
+	/// let the worker execute or write.
+	#[test]
+	fn fetch_effects_derive_only_the_network_grant() {
+		let envelope = v1::EffectEnvelope {
+			fetch: Some(v1::FetchEffects { credentials: true, props: None }),
+			..v1::EffectEnvelope::default()
+		};
+		let grants = Grants::from_effect_envelope(&envelope);
+		assert!(grants.contains("env.net"));
+		for denied in ["env.exec", "env.fs.write", "env.doc.write"] {
+			assert!(!grants.contains(denied), "{denied}");
 		}
 	}
 

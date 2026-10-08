@@ -261,6 +261,7 @@ pub fn tool<B: SearchBackend>(backend: Arc<B>) -> WebSearch<B> {
 					max_usd:      Usd::from_nanos(u64::MAX),
 				}),
 				desktop:   None,
+				fetch:     None,
 				subagents: 0,
 			},
 			confinement:     omp_tool::Confinement::Host,

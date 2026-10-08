@@ -707,6 +707,7 @@ pub fn hashline_spec() -> ToolSpec {
 			exec:      None,
 			inference: None,
 			desktop:   None,
+			fetch:     None,
 			subagents: 0,
 		},
 		confinement:     omp_tool::Confinement::Host,

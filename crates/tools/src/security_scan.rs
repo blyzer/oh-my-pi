@@ -283,6 +283,7 @@ pub fn spec() -> ToolSpec {
 			exec:      Some(ExecEffects { commands: Arc::from([sf!("git")]), network: true }),
 			inference: None,
 			desktop:   None,
+			fetch:     None,
 			subagents: 0,
 		},
 		confinement:     omp_tool::Confinement::Host,
