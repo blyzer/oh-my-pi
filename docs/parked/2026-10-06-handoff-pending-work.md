@@ -31,6 +31,13 @@ verified in code or is only a recorded decision or intention.
   session (#202, `crates/envd/src/reflection_relay.rs`), a `fetch` effect class with its own
   approval tier between `read` and `write` (#203, ADR 0028 fetch tier amendment), and the parked
   trust notes re-checked against `705788b466` with F11 re-rated Medium (#204).
+- #205 (2026-10-08, implemented and tested in this session): undeclared effects fail closed. An RPC
+  host tool without `effects` resolves to `Effects::unknown()` (any command plus network, `exec`
+  tier) and `set_host_tools` validates declared effects; a Python worker tool without effects
+  takes its host's trust ceiling (sandboxed: docs read plus `**` writes, `write` tier; trusted:
+  unknown, `exec` tier) in routes and CONTROL snapshots; a name with neither a live spec nor
+  registry effects dispatches as unknown and `Host`-confined. ADR 0028 amendment (2026-10-08, undeclared
+  effects); `docs/py/06-policy.md` closes its open discrepancy.
 
 ## 1. Security: project-sourced inputs
 
@@ -87,8 +94,8 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
   session-level, not per tool (resolved 2026-10-07 by the typed confinement marker, ADR 0028
   amendment of that date: a sandbox-kept default `yolo` covers only `ExecSandbox` tools, and
   `Host` tools are admitted as if no sandbox existed; still open there: under-declared host
-  effects such as `read@3` URL fetch, `lsp` spawns, RPC host tools
-  and effect-less Python devices resolving to `read`, and `read`-tier MCP servers); the closed network (superseded 2026-10-07: the default network is
+  effects such as `read@3` URL fetch, `lsp` spawns, and `read`-tier MCP servers; RPC host tools
+  and effect-less Python devices no longer resolve to `read` since #205); the closed network (superseded 2026-10-07: the default network is
   now `scoped`, see the ADR 0028 amendment of that date) and workspace-only writes may break real
   flows such as `git push` and package installs, which would hit the denial-and-rerun prompt and
   were not exercised; the posture notice is posted on the first tool admission, so a session that never
