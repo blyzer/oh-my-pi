@@ -74,8 +74,9 @@ Static read of `driver/src/adw/{definition,production,mod}.rs`, `adw/src/profile
   set, `network = "disabled"` passes too. Under the defaults `network = "disabled"` is refused
   (`a_phase_requiring_no_network_is_refused_under_the_default_posture`,
   `driver/src/adw/production.rs`), and on a host where the sandbox cannot be constructed the
-  posture is unconfined, so every declared requirement is refused. That is the outcome the module doc rules out ("a workflow that believes it ran
-  confined when it did not"). `requires` is itself declared in the project file, and an unset
+  posture is unconfined, so any write or network requirement tighter than that is refused. That
+  is the outcome the module doc rules out ("a workflow that believes it ran confined when it did
+  not"). `requires` is itself declared in the project file, and an unset
   field means no check. ADR 0039 B5 states the intended rule: admissibility uses the sandbox the
   worker actually enforced, "never self-described intentions".
 - **F11d (VERIFIED) `omp adw run` ignores operator configuration.** `adw_cmd::execute` builds
