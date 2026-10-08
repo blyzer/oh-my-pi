@@ -315,6 +315,9 @@ pub fn spec() -> ToolSpec {
 			documents: None,
 			// Adapters are arbitrary programs, and a configured remote adapter
 			// (`host`, `port`) is reached over TCP: the network is in the envelope.
+			// Which adapter a language gets is the environment's trusted DAP
+			// configuration, environment-ambient as its language servers are; a
+			// call only starts or attaches one, which this envelope declares.
 			exec:      Some(ExecEffects {
 				commands: [sf!("*")].into_iter().collect(),
 				network:  true,

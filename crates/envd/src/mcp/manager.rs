@@ -1773,6 +1773,29 @@ impl McpManager {
 		best.map(|(_, _, name)| name)
 	}
 
+	/// Whether reading the opaque resource `uri` is a fetch, judged from the
+	/// mount of the server advertising it ([`Self::resolve_resource_server`]).
+	///
+	/// A remote server (`http`, `sse`) is reached over the network with the
+	/// credentials it is configured with. A local (`stdio`) server is a
+	/// process the environment runs under its MCP configuration, as it runs
+	/// language servers under theirs; reading its resource is a fetch only
+	/// when the tier it is mounted at says it reaches the network (`fetch`,
+	/// `exec`, `privileged`), and not at the `read` or `write` tier. A
+	/// resource no mounted server advertises is a fetch: a remote server may
+	/// advertise it by the time the read runs.
+	pub(crate) fn resource_read_fetches(&self, uri: &str) -> bool {
+		let Some(name) = self.resolve_resource_server(uri) else {
+			return true;
+		};
+		self
+			.state
+			.lock()
+			.mounts
+			.get(&name)
+			.is_none_or(|mount| mount_reads_fetch(&mount.spec))
+	}
+
 	pub(crate) async fn connection(
 		&self,
 		name: &str,
@@ -3071,6 +3094,19 @@ fn mcp_dyn_definition(leaf: &PublishedLeaf<McpLeaf>) -> Option<(Str, Value)> {
 	Some((Str::new(format!("{}/{tool}", leaf.value.server)), definition))
 }
 
+/// Whether a resource read from the server `spec` mounts reaches the network:
+/// always for a remote transport, and for a local one when the effects of its
+/// declared tier fetch or reach the network.
+fn mount_reads_fetch(spec: &MountSpec) -> bool {
+	match spec.config.resolved_transport() {
+		TransportKind::Http | TransportKind::Sse => true,
+		TransportKind::Stdio => {
+			let effects = mcp_tier_effects(spec.projection.tier.as_str());
+			effects.fetch.is_some() || effects.exec.is_some_and(|exec| exec.network)
+		},
+	}
+}
+
 fn mcp_tier_effects(tier: &str) -> Effects {
 	match tier {
 		"read" => Effects::empty(),
@@ -4247,6 +4283,100 @@ mod tests {
 			.expect("changed diff");
 		assert_eq!(changed.resources.changed.len(), 1);
 		assert_eq!(changed.prompts.changed.len(), 1);
+	}
+
+	/// A mount of `config` named `name` at `tier`.
+	fn tiered_mount(name: &str, config: Value, tier: &'static str) -> MountSpec {
+		let config = Arc::new(serde_json::from_value::<McpServerConfig>(config).expect("config"));
+		let config_json = Bytes::from(serde_json::to_vec(config.as_ref()).expect("config JSON"));
+		MountSpec {
+			name: Str::from(name),
+			config,
+			config_json,
+			values: ResolvedTransportValues::default(),
+			auth_headers: None,
+			suppressed_tools: BTreeSet::new(),
+			projection: Arc::new(
+				McpDeviceProjection::new(
+					&[sf!("*")],
+					&[],
+					BTreeMap::new(),
+					BTreeMap::new(),
+					0,
+					Str::new_static(tier),
+				)
+				.expect("projection"),
+			),
+			auth: ControlMountAuth::None,
+			restart: McpRestartPolicy::Never,
+			owner: None,
+		}
+	}
+
+	/// Reading a resource is a fetch by how its server is mounted: a remote
+	/// (`http`, `sse`) server always, a local (`stdio`) one only at a tier
+	/// whose effects reach the network (`fetch`, `exec`, `privileged`), never
+	/// at `read` or `write`, where it is an environment-ambient process. A
+	/// resource no mounted server advertises is a fetch, as is every resource
+	/// while no manager is bound to tell.
+	#[tokio::test]
+	async fn resource_reads_fetch_by_transport_and_declared_tier() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
+		assert!(service.resource_read_fetches("remote-http://doc"), "no manager is bound");
+		let transport = Arc::new(CatalogTransport { methods: Mutex::new(Vec::new()) });
+		let manager = McpManager::new(
+			Arc::clone(&service),
+			Arc::new(CatalogConnector { transport }),
+			Arc::from([]),
+			scratch.path().to_path_buf(),
+		);
+		service.bind_manager(&manager);
+		let stdio = || json!({ "command": "server" });
+		let mounts = [
+			(
+				"remote-http",
+				json!({ "type": "http", "url": "https://example.test/mcp" }),
+				"read",
+				true,
+			),
+			("remote-sse", json!({ "type": "sse", "url": "https://example.test/sse" }), "read", true),
+			("local-read", stdio(), "read", false),
+			("local-write", stdio(), "write", false),
+			("local-fetch", stdio(), "fetch", true),
+			("local-exec", stdio(), "exec", true),
+			("local-privileged", stdio(), "privileged", true),
+		];
+		manager
+			.start(
+				mounts
+					.iter()
+					.map(|(name, config, tier, _)| tiered_mount(name, config.clone(), tier))
+					.collect(),
+			)
+			.await;
+		for (name, ..) in &mounts {
+			let connection = manager
+				.state
+				.lock()
+				.mounts
+				.get(*name)
+				.and_then(|mount| mount.connection.clone())
+				.expect("connected");
+			*connection.resources.write() = Arc::from([ResourceDefinition {
+				uri:         Str::from(format!("{name}://doc")),
+				name:        sf!("doc"),
+				description: None,
+				mime_type:   None,
+			}]);
+		}
+		for (name, _, tier, fetches) in &mounts {
+			let uri = format!("{name}://doc");
+			assert_eq!(manager.resolve_resource_server(&uri).as_deref(), Some(*name));
+			assert_eq!(manager.resource_read_fetches(&uri), *fetches, "{name} at {tier}");
+			assert_eq!(service.resource_read_fetches(&uri), *fetches, "{name} at {tier}");
+		}
+		assert!(manager.resource_read_fetches("unadvertised://doc"));
 	}
 
 	/// A control declaration's tier becomes the effects its devices are

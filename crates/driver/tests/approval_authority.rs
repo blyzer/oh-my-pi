@@ -346,6 +346,38 @@ fn context(sandbox: ExecSandboxMode) -> Arc<omp_con::Ctx> {
 	Arc::new(con)
 }
 
+/// A loopback HTTP server answering every request `200 ok`, standing in for
+/// one remote host: a package host the sandbox broker may reach under
+/// `sv_sandbox_allow_localhost`, or a site `read` fetches. Its thread ends
+/// with the test process.
+fn loopback_upstream() -> u16 {
+	use std::{
+		io::{BufRead as _, BufReader, Write as _},
+		net::{Ipv4Addr, TcpListener},
+		thread,
+	};
+
+	let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
+	let port = listener.local_addr().expect("upstream address").port();
+	thread::spawn(move || {
+		for stream in listener.incoming() {
+			let Ok(mut stream) = stream else { continue };
+			let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+			let Ok(reading) = stream.try_clone() else {
+				continue;
+			};
+			let mut reader = BufReader::new(reading);
+			let mut line = String::new();
+			while reader.read_line(&mut line).is_ok_and(|read| read > 0) && line != "\r\n" {
+				line.clear();
+			}
+			let _ = stream
+				.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n");
+		}
+	});
+	port
+}
+
 fn write_call(target: &Path) -> serde_json::Value {
 	serde_json::json!({
 		"path": target,
@@ -702,13 +734,7 @@ mod attached_daemon {
 /// that approved them, by a rewind or by a switch to another session.
 #[cfg(target_os = "macos")]
 mod session_network_grants {
-	use std::{
-		fs,
-		io::{BufRead as _, BufReader, Write as _},
-		mem,
-		net::{Ipv4Addr, TcpListener},
-		thread,
-	};
+	use std::{fs, mem};
 
 	use omp_journal::blob::BlobStore;
 	use tokio::time;
@@ -717,31 +743,6 @@ mod session_network_grants {
 		attached_daemon::{InProcessDaemon, attached},
 		*,
 	};
-
-	/// A loopback HTTP server answering every request `200 ok`, standing in
-	/// for one package host the broker may reach under
-	/// `sv_sandbox_allow_localhost`. Its thread ends with the test process.
-	fn loopback_upstream() -> u16 {
-		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("upstream");
-		let port = listener.local_addr().expect("upstream address").port();
-		thread::spawn(move || {
-			for stream in listener.incoming() {
-				let Ok(mut stream) = stream else { continue };
-				let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-				let Ok(reading) = stream.try_clone() else {
-					continue;
-				};
-				let mut reader = BufReader::new(reading);
-				let mut line = String::new();
-				while reader.read_line(&mut line).is_ok_and(|read| read > 0) && line != "\r\n" {
-					line.clear();
-				}
-				let _ = stream
-					.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n");
-			}
-		});
-		port
-	}
 
 	/// A control context with the workspace-write sandbox whose broker may
 	/// reach loopback.
@@ -1061,15 +1062,20 @@ mod fetch_host_grants {
 		/// Runs one call reading `targets` to a successful outcome and returns
 		/// the subjects of each prompt a human was asked.
 		async fn call(&mut self, call_id: &str, targets: &[&str]) -> Vec<Vec<Str>> {
+			self
+				.invoke(call_id, &serde_json::json!({ "targets": targets }))
+				.await
+		}
+
+		/// Runs one call of the host's tool with `arguments` to a successful
+		/// outcome and returns the subjects of each prompt a human was asked.
+		async fn invoke(&mut self, call_id: &str, arguments: &serde_json::Value) -> Vec<Vec<Str>> {
 			let request = ExternalDispatchRequest {
 				identity:       self.identity.clone(),
 				session_id:     sf!("fetch-session"),
 				blobs:          self.blobs.clone(),
 				call_id:        Str::new(call_id),
-				args:           serde_json::value::to_raw_value(
-					&serde_json::json!({"targets": targets}),
-				)
-				.expect("arguments"),
+				args:           serde_json::value::to_raw_value(arguments).expect("arguments"),
 				route:          omp_tool::ToolRoute::Remote,
 				blocking_limit: Duration::from_secs(30),
 				output_request: omp_tool::OutputRequest::Bounded,
@@ -1196,6 +1202,51 @@ mod fetch_host_grants {
 				.expect("the fetch probe is registered");
 			Self { server, con, root, rev, ran }
 		}
+
+		/// Serves this environment under `always-ask` to the production
+		/// executor of a session journaled at `scratch/<journal>`, whose
+		/// prompts land on its kernel route and approval desk, calling `tool`
+		/// at `rev`; and the task serving it.
+		async fn always_ask_host(
+			&self,
+			scratch: &Path,
+			journal: &str,
+			tool: &'static str,
+			rev: omp_tool::Rev,
+		) -> (Host, tokio::task::JoinHandle<()>) {
+			let (client, transport) = omp_env::EnvClient::in_process(64);
+			let serving = tokio::spawn({
+				let server = Arc::clone(&self.server);
+				async move { server.serve_in_process(transport).await }
+			});
+			client
+				.hello(pb::ClientHello {
+					client: "fetch-host-grants".to_owned(),
+					schema_rev: omp_proto::SCHEMA_REV,
+					approval_mode: pb::ApprovalMode::AlwaysAsk as i32,
+					..pb::ClientHello::default()
+				})
+				.await
+				.expect("hello");
+			// The kernel's route and desk: prompts land in the mailbox, the desk
+			// journals them and answers a granted subject from the tree.
+			let (mailbox, up) = flume::unbounded();
+			let blobs = BlobStore::open(scratch.join(format!("{journal}-blobs"))).expect("blobs");
+			let host = Host {
+				executor: EnvToolExecutor::new(client, ApprovalRoute::to_kernel(mailbox, None)),
+				up,
+				desk: ApprovalDesk::new(KernelEvents::default()),
+				session: Session::create_with_blob_store(
+					scratch.join(journal),
+					ComponentRegistry::standard(),
+					blobs.clone(),
+				)
+				.expect("session"),
+				blobs,
+				identity: ToolIdentity { name: Str::new_static(tool), rev },
+			};
+			(host, serving)
+		}
 	}
 
 	/// Under `always-ask` a fetch is asked once per host per session: the
@@ -1209,38 +1260,9 @@ mod fetch_host_grants {
 	async fn always_ask_asks_once_per_fetched_host_per_session() {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let probe = ProbeEnvironment::open(scratch.path()).await;
-		let (client, transport) = omp_env::EnvClient::in_process(64);
-		let serving = tokio::spawn({
-			let server = Arc::clone(&probe.server);
-			async move { server.serve_in_process(transport).await }
-		});
-		client
-			.hello(pb::ClientHello {
-				client: "fetch-host-grants".to_owned(),
-				schema_rev: omp_proto::SCHEMA_REV,
-				approval_mode: pb::ApprovalMode::AlwaysAsk as i32,
-				..pb::ClientHello::default()
-			})
-			.await
-			.expect("hello");
-
-		// The kernel's route and desk: prompts land in the mailbox, the desk
-		// journals them and answers a granted subject from the tree.
-		let (mailbox, up) = flume::unbounded();
-		let blobs = BlobStore::open(scratch.path().join("blobs")).expect("blobs");
-		let mut host = Host {
-			executor: EnvToolExecutor::new(client, ApprovalRoute::to_kernel(mailbox, None)),
-			up,
-			desk: ApprovalDesk::new(KernelEvents::default()),
-			session: Session::create_with_blob_store(
-				scratch.path().join("fetch.oms"),
-				ComponentRegistry::standard(),
-				blobs.clone(),
-			)
-			.expect("session"),
-			blobs,
-			identity: ToolIdentity { name: sf!("fetch_probe"), rev: probe.rev.clone() },
-		};
+		let (mut host, serving) = probe
+			.always_ask_host(scratch.path(), "fetch.oms", "fetch_probe", probe.rev.clone())
+			.await;
 
 		assert_eq!(host.call("call-1", &["https://docs.rs/serde"]).await, [vec![sf!(
 			"http:docs.rs:443"
@@ -1292,58 +1314,94 @@ mod fetch_host_grants {
 		serving.abort();
 	}
 
-	/// Scripted turns calling the fetch probe: turn `2n - 1` calls `call-n`
-	/// reading the `n`th target list, turn `2n` closes with text.
-	struct FetchTurns {
-		targets: Vec<Vec<&'static str>>,
-		turns:   usize,
+	/// `read@3` itself, on an environment served in process under
+	/// `always-ask`: the first read of a URL asks for its host, a `session`
+	/// answer lets later reads from that host run unasked, a read from another
+	/// host (another port) asks again, a local read never asks, and a read
+	/// reaching both granted hosts runs unasked. Every admitted read fetches
+	/// from a loopback upstream and succeeds.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn always_ask_asks_read_urls_once_per_host_per_session() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let probe = ProbeEnvironment::open(scratch.path()).await;
+		std::fs::write(probe.root.join("notes.txt"), "alpha\n").expect("local file");
+		let read_rev = probe
+			.server
+			.registry()
+			.live_identity("read")
+			.map(|(_, rev)| rev.clone())
+			.expect("read is live");
+		let (mut host, serving) = probe
+			.always_ask_host(scratch.path(), "read.oms", "read", read_rev)
+			.await;
+		let (first, second) = (loopback_upstream(), loopback_upstream());
+		let read = |path: String| serde_json::json!({ "path": path, "i": "Reading" });
+		let url = |port: u16, page: &str| format!("http://127.0.0.1:{port}/{page}");
+		let subject = |port: u16| vec![Str::new(format!("http:127.0.0.1:{port}"))];
+
+		assert_eq!(host.invoke("call-1", &read(url(first, "a"))).await, [subject(first)]);
+		assert!(
+			host
+				.invoke("call-2", &read(url(first, "b")))
+				.await
+				.is_empty(),
+			"the granted host is not asked again"
+		);
+		assert_eq!(
+			host.invoke("call-3", &read(url(second, "a"))).await,
+			[subject(second)],
+			"a grant for one host never covers another"
+		);
+		assert!(
+			host
+				.invoke("call-4", &read("notes.txt".to_owned()))
+				.await
+				.is_empty(),
+			"a local read never asks"
+		);
+		let both = serde_json::to_string(&[url(first, "c"), url(second, "c")]).expect("path list");
+		assert!(
+			host.invoke("call-5", &read(both)).await.is_empty(),
+			"hosts granted one at a time answer a read reaching both"
+		);
+		serving.abort();
 	}
 
-	impl Inference for FetchTurns {
+	/// Scripted turns calling `tool`: turn `2n - 1` calls `call-n` with the
+	/// `n`th arguments, turn `2n` closes with text.
+	struct ScriptedCalls {
+		tool:      &'static str,
+		arguments: Vec<serde_json::Value>,
+		turns:     usize,
+	}
+
+	impl Inference for ScriptedCalls {
 		fn chat(
 			&mut self,
 			_request: ChatRequest,
 		) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 			self.turns += 1;
-			let targets = &self.targets[self.turns.div_ceil(2) - 1];
-			ready(Ok(tool_then_text(
-				self.turns,
-				"fetch_probe",
-				&serde_json::json!({ "targets": targets }),
-			)))
+			let arguments = &self.arguments[self.turns.div_ceil(2) - 1];
+			ready(Ok(tool_then_text(self.turns, self.tool, arguments)))
 		}
 	}
 
-	/// An embedded or isolated composition runs the environment's native tools
-	/// in the kernel, outside the environment's admission gate: the kernel's
-	/// `SettingsAdmission`, given the environment's fetch hosts namer, asks a
-	/// fetch once per host per session exactly as the environment's gate does,
-	/// and keeps every named host beside an unnamed locator.
-	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-	async fn an_embedded_kernel_asks_its_native_fetches_once_per_host() {
-		let scratch = tempfile::tempdir().expect("scratch");
-		let probe = ProbeEnvironment::open(scratch.path()).await;
-		let registry = probe.server.registry();
-		assert_eq!(
-			registry.route("fetch_probe").expect("routed"),
-			omp_tool::ToolRoute::Native,
-			"the kernel runs the probe itself"
-		);
-		let targets = vec![
-			vec!["https://docs.rs/serde"],
-			vec!["https://docs.rs/tokio"],
-			vec!["https://crates.io/crates/serde"],
-			vec!["https://docs.rs/x", "https://crates.io/y"],
-			vec!["https://evil.example/x", "mcp://unadvertised/resource"],
-			vec!["https://docs.rs/z", "mcp://unadvertised/resource"],
-			vec!["https://other.example/x", "mcp://unadvertised/resource"],
-			vec!["notes.txt"],
-		];
-		let calls = targets.len();
-		let spill = BlobStore::open(scratch.path().join("artifacts")).expect("spill");
+	/// A kernel running the native tools of `probe`'s environment itself,
+	/// admitted by `SettingsAdmission` under `always-ask` with the
+	/// environment's fetch hosts namer, whose host approves every prompt for
+	/// the session. Runs one turn per call of `tool` with each of `arguments`
+	/// and returns the subjects each turn asked.
+	async fn embedded_turns(
+		probe: &ProbeEnvironment,
+		scratch: &Path,
+		tool: &'static str,
+		arguments: Vec<serde_json::Value>,
+	) -> Vec<Vec<Vec<Str>>> {
+		let calls = arguments.len();
+		let spill = BlobStore::open(scratch.join(format!("{tool}-artifacts"))).expect("spill");
 		let mut kernel = Kernel::new(
-			FetchTurns { targets, turns: 0 },
-			registry,
+			ScriptedCalls { tool, arguments, turns: 0 },
+			probe.server.registry(),
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
 		)
@@ -1382,7 +1440,7 @@ mod fetch_host_grants {
 			}
 		});
 		let mut session = Session::create_with_blob_store(
-			scratch.path().join("embedded-fetch.oms"),
+			scratch.join(format!("embedded-{tool}.oms")),
 			ComponentRegistry::standard(),
 			spill,
 		)
@@ -1403,6 +1461,43 @@ mod fetch_host_grants {
 			each.push(std::mem::take(&mut *asked.lock()));
 		}
 		host.abort();
+		each
+	}
+
+	/// An embedded or isolated composition runs the environment's native tools
+	/// in the kernel, outside the environment's admission gate: the kernel's
+	/// `SettingsAdmission`, given the environment's fetch hosts namer, asks a
+	/// fetch once per host per session exactly as the environment's gate does,
+	/// and keeps every named host beside an unnamed locator.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_embedded_kernel_asks_its_native_fetches_once_per_host() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let probe = ProbeEnvironment::open(scratch.path()).await;
+		assert_eq!(
+			probe
+				.server
+				.registry()
+				.route("fetch_probe")
+				.expect("routed"),
+			omp_tool::ToolRoute::Native,
+			"the kernel runs the probe itself"
+		);
+		let targets = [
+			vec!["https://docs.rs/serde"],
+			vec!["https://docs.rs/tokio"],
+			vec!["https://crates.io/crates/serde"],
+			vec!["https://docs.rs/x", "https://crates.io/y"],
+			vec!["https://evil.example/x", "mcp://unadvertised/resource"],
+			vec!["https://docs.rs/z", "mcp://unadvertised/resource"],
+			vec!["https://other.example/x", "mcp://unadvertised/resource"],
+			vec!["notes.txt"],
+		];
+		let calls = targets.len();
+		let arguments = targets
+			.iter()
+			.map(|targets| serde_json::json!({ "targets": targets }))
+			.collect();
+		let each = embedded_turns(&probe, scratch.path(), "fetch_probe", arguments).await;
 		let host_subject = |subjects: &[&str]| -> Vec<Vec<Str>> {
 			vec![subjects.iter().copied().map(Str::new).collect()]
 		};
@@ -1417,6 +1512,37 @@ mod fetch_host_grants {
 			Vec::new(),
 		]);
 		assert_eq!(probe.ran.load(Ordering::Relaxed), calls, "every approved call ran");
+	}
+
+	/// `read@3` run by an embedded kernel as a native tool is asked the same
+	/// way: once per URL host per session, never for a local read, and a read
+	/// reaching hosts granted one at a time runs unasked.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_embedded_kernel_asks_read_urls_once_per_host() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let probe = ProbeEnvironment::open(scratch.path()).await;
+		std::fs::write(probe.root.join("notes.txt"), "alpha\n").expect("local file");
+		assert_eq!(
+			probe.server.registry().route("read").expect("routed"),
+			omp_tool::ToolRoute::Native,
+			"the kernel runs read itself"
+		);
+		let (first, second) = (loopback_upstream(), loopback_upstream());
+		let url = |port: u16, page: &str| format!("http://127.0.0.1:{port}/{page}");
+		let both = serde_json::to_string(&[url(first, "c"), url(second, "c")]).expect("path list");
+		let arguments =
+			[url(first, "a"), url(first, "b"), url(second, "a"), "notes.txt".to_owned(), both]
+				.into_iter()
+				.map(|path| serde_json::json!({ "path": path, "i": "Reading" }))
+				.collect();
+		let subject = |port: u16| vec![vec![Str::new(format!("http:127.0.0.1:{port}"))]];
+		assert_eq!(embedded_turns(&probe, scratch.path(), "read", arguments).await, [
+			subject(first),
+			Vec::new(),
+			subject(second),
+			Vec::new(),
+			Vec::new(),
+		]);
 	}
 }
 

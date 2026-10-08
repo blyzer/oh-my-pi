@@ -284,6 +284,19 @@ impl McpService {
 		})
 	}
 
+	/// Whether reading the opaque resource `uri` is a fetch
+	/// ([`manager::McpManager::resource_read_fetches`]); true while no live
+	/// manager can tell, since a server mounted by the time the read runs may
+	/// be remote.
+	pub(crate) fn resource_read_fetches(&self, uri: &str) -> bool {
+		self
+			.manager
+			.read()
+			.as_ref()
+			.and_then(Weak::upgrade)
+			.is_none_or(|manager| manager.resource_read_fetches(uri))
+	}
+
 	/// Builds one extension-scoped MCP CONTROL projection over the live manager.
 	pub(crate) fn control(
 		self: &Arc<Self>,

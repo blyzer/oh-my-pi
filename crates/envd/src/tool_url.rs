@@ -17,6 +17,7 @@ use omp_cache::github_cache::GithubCache;
 use omp_core::{CowBytes, Str};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value as DomValue};
 use omp_journal::blob::{BlobRef, BlobStore};
+use omp_tool::FetchEffects;
 use omp_tools::read::{
 	Fault,
 	conflicts::{ConflictRegistry, ConflictResolver},
@@ -397,6 +398,43 @@ impl Resolve for UrlResolver {
 			Self::Content(resolver) => resolver.complete(query, max_results).await,
 			Self::Docs(resolver) => resolver.complete(query, max_results).await,
 			Self::Issue(_) | Self::Pr(_) | Self::Conflict(_) => Ok(Vec::new()),
+		}
+	}
+
+	/// Only the resolvers that reach a remote host fetch, each with the
+	/// credentials it is configured with: `ssh://` for a resource naming one
+	/// host alias (any other is refused before a connection), `issue://` and
+	/// `pr://` through the GitHub API, and an `mcp://` resource as its server
+	/// is mounted (`McpUrlResolver`'s own `read_fetch`).
+	///
+	/// Every other resolver reads local or environment-owned state. A vault
+	/// read may ask the Obsidian CLI (`?op=read`, `?op=search`, the active
+	/// vault `_`, an unconfigured vault's discovery): that is an
+	/// environment-ambient host program, run only while `sv_vault_enabled`
+	/// resolves it and governed by that setting, not by the call, as the
+	/// environment's language and debug adapter servers are by theirs. A
+	/// scheme outside the built-in vocabulary (`Host`) is read from the
+	/// resources the attached RPC host declared and serves itself; the
+	/// environment fetches nothing for it.
+	fn read_fetch(&self, resource: &str, query: Option<&str>) -> Option<FetchEffects> {
+		match self {
+			Self::Ssh(_) => ssh::parse_resource(resource)
+				.is_ok()
+				.then_some(FetchEffects { credentials: true }),
+			Self::Issue(_) | Self::Pr(_) => Some(FetchEffects { credentials: true }),
+			Self::Mcp(resolver) => resolver.read_fetch(resource, query),
+			Self::Host(_)
+			| Self::Artifact(_)
+			| Self::Attachment(_)
+			| Self::Agent(_)
+			| Self::History(_)
+			| Self::Local(_)
+			| Self::Memory(_)
+			| Self::Security(_)
+			| Self::Vault(_)
+			| Self::Content(_)
+			| Self::Conflict(_)
+			| Self::Docs(_) => None,
 		}
 	}
 }

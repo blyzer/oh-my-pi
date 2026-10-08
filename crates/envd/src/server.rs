@@ -16996,4 +16996,250 @@ mod tests {
 			serving.abort();
 		}
 	}
+
+	/// Document reads plus `fetch`, the envelope of one `read@3` call.
+	fn read_effects(fetch: Option<omp_tool::FetchEffects>) -> Effects {
+		Effects {
+			documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+			fetch,
+			..Effects::empty()
+		}
+	}
+
+	/// A loopback port nothing listens on: a fetch from it is refused at once.
+	fn closed_loopback_port() -> u16 {
+		std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+			.and_then(|listener| listener.local_addr())
+			.expect("a free loopback port")
+			.port()
+	}
+
+	/// The production `read@3` declares the most its resolvers can fetch, a
+	/// credentialed fetch, and judges each call by the resolver that reads
+	/// each target: a local path, an internal URI that reads local state, a
+	/// vault read that asks the Obsidian CLI and a scheme only the RPC host
+	/// serves are document reads; an http(s) URL is an anonymous fetch; an
+	/// `ssh://` host, `issue://`, `pr://` and an `mcp://` resource no mounted
+	/// server advertises yet are credentialed fetches. A local read is `read`
+	/// tier and runs unasked in every mode and sandbox state; a fetch asks
+	/// only under `always-ask`. With URL reads disabled the maximum keeps the
+	/// credentialed fetch and a URL read fetches nothing.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn production_read_declares_its_fetches_and_local_reads_stay_read() {
+		use crate::{
+			admission::{
+				ApprovalMode, ApprovalPolicy, ApprovalTier, SandboxState, SandboxUnavailable,
+			},
+			tool_settings::ToolSettings,
+		};
+
+		let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+		let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+		let (server, _root, _state) = probe_daemon(Registry::new()).await;
+		let registry = server.registry();
+		assert_eq!(registry.effects_owned("read").expect("read is live"), read_effects(credentialed));
+		let sandboxes = [SandboxState::Active, SandboxState::Off, SandboxState::Unavailable {
+			cause: SandboxUnavailable::BackendUnavailable,
+		}];
+		for (path, fetch) in [
+			("notes.txt", None),
+			("src/lib.rs:1-5", None),
+			("file:///tmp/notes.txt", None),
+			("artifact://1", None),
+			("local://scratch.md", None),
+			("vault://notes/a.md", None),
+			("vault://_/a.md?op=read", None),
+			("vault://notes?op=search&q=todo", None),
+			("custom://thing", None),
+			("ssh://", None),
+			("https://docs.rs/serde", anonymous),
+			("docs.rs:443/", anonymous),
+			("ssh://prod/etc/hosts", credentialed),
+			("issue://5", credentialed),
+			("pr://owner/repo/7", credentialed),
+			("mcp://unadvertised/resource", credentialed),
+			("notes.txt;https://docs.rs/x", anonymous),
+		] {
+			let effects = registry
+				.invocation_effects("read", &serde_json::json!({ "path": path }).to_string())
+				.expect(path);
+			assert_eq!(effects, read_effects(fetch), "{path}");
+			let tier = if fetch.is_some() {
+				ApprovalTier::Fetch
+			} else {
+				ApprovalTier::Read
+			};
+			for mode in [
+				None,
+				Some(ApprovalMode::AlwaysAsk),
+				Some(ApprovalMode::Write),
+				Some(ApprovalMode::Yolo),
+			] {
+				for sandbox in sandboxes {
+					let decision = ToolSettings::default()
+						.with_approval_mode_override(mode)
+						.approval_for("c", "read", &effects, Confinement::Host, sandbox);
+					let asks = fetch.is_some() && mode == Some(ApprovalMode::AlwaysAsk);
+					assert_eq!(
+						(decision.tier, decision.policy),
+						(
+							tier,
+							if asks {
+								ApprovalPolicy::Prompt
+							} else {
+								ApprovalPolicy::Allow
+							}
+						),
+						"{path} under {mode:?} with sandbox {sandbox:?}"
+					);
+				}
+			}
+		}
+		drop(server);
+
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let con = Arc::new(Ctx::new());
+		con.run("sv_fetch_enabled false")
+			.expect("disable URL reads");
+		let disabled = EnvServer::open_local(
+			root.path(),
+			state.path(),
+			Registry::new(),
+			ExtHostConfig::new(
+				PathBuf::from("unused"),
+				Principal::new(sf!("test-principal"), sf!("Test Principal")),
+				sf!("test-session"),
+				1,
+			),
+			&con,
+			Arc::new(ConvarControlFactory::new(Arc::clone(&con))),
+			RegistryBridges::default(),
+		)
+		.await
+		.expect("local environment");
+		let registry = disabled.registry();
+		assert_eq!(registry.effects_owned("read").expect("read is live"), read_effects(credentialed));
+		for (path, fetch) in [
+			("notes.txt", None),
+			("https://docs.rs/serde", None),
+			("ssh://prod/etc/hosts", credentialed),
+		] {
+			assert_eq!(
+				registry
+					.invocation_effects("read", &serde_json::json!({ "path": path }).to_string())
+					.expect(path),
+				read_effects(fetch),
+				"{path} with URL reads disabled"
+			);
+		}
+	}
+
+	/// The production `read@3` over a connection. Under `always-ask` a URL,
+	/// `ssh://` or `issue://` read asks once, its query reporting the fetch the
+	/// call was judged by and every host its targets reach, named by the
+	/// resolver that reads each, and a refused prompt reads nothing. A local
+	/// read never asks in any mode. Under `write` a URL read runs unasked, and
+	/// plan mode lets it through: a fetch writes nothing.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn read_queries_name_the_hosts_its_targets_fetch() {
+		use crate::fetch_host::FetchHost;
+
+		let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+		let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+		let (server, root, _state) = probe_daemon(Registry::new()).await;
+		std::fs::write(root.path().join("notes.txt"), "alpha\n").expect("local file");
+		std::fs::create_dir(root.path().join(".git")).expect("git directory");
+		std::fs::write(
+			root.path().join(".git/config"),
+			"[remote \"origin\"]\n\turl = git@GHE.example.com:Owner/Repo.git\n",
+		)
+		.expect("git config");
+		for (invocation_id, path, fetch, named) in [
+			("url", "https://docs.rs/serde", anonymous, vec![FetchHost::http("docs.rs", 443)]),
+			("ssh", "ssh://prod/etc/hosts", credentialed, vec![FetchHost::ssh("prod")]),
+			("issue", "issue://5", credentialed, vec![FetchHost::github("ghe.example.com")]),
+			("listed", r#"["https://docs.rs/a","notes.txt","https://crates.io/b"]"#, anonymous, vec![
+				FetchHost::http("crates.io", 443),
+				FetchHost::http("docs.rs", 443),
+			]),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"read",
+				invocation_id,
+				serde_json::json!({ "path": path }),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(verdict.is_error, "{invocation_id}: the refused prompt denies the read");
+			let seen = refusing.seen.lock().clone();
+			assert_eq!(seen.len(), 1, "{invocation_id}: one query");
+			let effects = seen[0]
+				.effects
+				.as_ref()
+				.map(|envelope| Effects::try_from(envelope).expect("a typed envelope"))
+				.expect("the query reports the envelope");
+			assert_eq!(effects, read_effects(fetch), "{invocation_id}");
+			let hosts = seen[0]
+				.fetch
+				.iter()
+				.map(|target| FetchHost::try_from(target).expect("a named host"))
+				.collect::<Vec<_>>();
+			assert_eq!(hosts, named, "{invocation_id}");
+			assert!(!seen[0].fetch_unnamed, "{invocation_id}: every host is named");
+			drop(client);
+			serving.abort();
+		}
+
+		for mode in [pb::ApprovalMode::AlwaysAsk, pb::ApprovalMode::Write, pb::ApprovalMode::Yolo] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"read",
+				"local",
+				serde_json::json!({ "path": "notes.txt" }),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(refusing.seen.lock().is_empty(), "{mode:?}: a local read never asks");
+			assert!(!verdict.is_error, "{mode:?}: {}", String::from_utf8_lossy(&verdict.json));
+			assert!(String::from_utf8_lossy(&verdict.json).contains("alpha"), "{mode:?}");
+			drop(client);
+			serving.abort();
+		}
+
+		let unreachable = format!("http://127.0.0.1:{}/x", closed_loopback_port());
+		let plan = pb::ToolRestrictions {
+			plan_file: Some("local://PLAN.md".to_owned()),
+			..pb::ToolRestrictions::default()
+		};
+		for (mode, restrictions) in
+			[(pb::ApprovalMode::Write, None), (pb::ApprovalMode::Yolo, Some(plan))]
+		{
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			invoke_probe(
+				&client,
+				&server,
+				"read",
+				"unasked-fetch",
+				serde_json::json!({ "path": unreachable }),
+				restrictions,
+			)
+			.await
+			.expect("the fetch is admitted and runs");
+			assert!(refusing.seen.lock().is_empty(), "{mode:?}: a fetch is not asked");
+			drop(client);
+			serving.abort();
+		}
+	}
 }

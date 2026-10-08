@@ -165,6 +165,11 @@ impl VaultService {
 
 	/// Enables Obsidian CLI discovery and operations for the active settings
 	/// profile. PATH takes precedence over the macOS application bundle.
+	///
+	/// The CLI is an environment-ambient host program: `sv_vault_enabled`
+	/// decides whether it runs at all, and a vault read that asks it
+	/// (`?op=read`, `?op=search`, the active vault `_`, discovering an
+	/// unconfigured vault) stays a read; no call declares it as a process.
 	#[must_use]
 	pub fn with_obsidian_enabled(mut self, enabled: bool) -> Self {
 		self.obsidian.binary = enabled.then(resolve_obsidian_binary).flatten();

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use omp_core::{CowBytes, Str};
 use omp_proto::env::v1::McpResourceRequest;
+use omp_tool::FetchEffects;
 use omp_tools::read::{
 	Fault,
 	resolver::{Resolve, ResourceCompletion, fuzzy_score},
@@ -44,6 +45,20 @@ impl McpUrlResolver {
 }
 
 impl Resolve for McpUrlResolver {
+	/// The fetch a read of `resource` performs, judged from the server
+	/// advertising it now ([`McpService::resource_read_fetches`]): a remote
+	/// server is reached with its configured credentials, a local one only
+	/// when its declared tier says it reaches the network. A resource no
+	/// mounted server advertises yet may be advertised by a remote one by the
+	/// time the read runs, so it fetches; an empty one is refused before.
+	fn read_fetch(&self, resource: &str, _query: Option<&str>) -> Option<FetchEffects> {
+		let uri = self.parse(resource).ok()?;
+		self
+			.service
+			.resource_read_fetches(uri)
+			.then_some(FetchEffects { credentials: true })
+	}
+
 	async fn read<'a>(
 		&'a self,
 		resource: &'a str,
