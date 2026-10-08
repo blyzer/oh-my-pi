@@ -1461,8 +1461,8 @@ sources, and every finding that held was applied above. Two points were not appl
   run` must compose an envd environment, and agent-initiated runs need operator approval
   (Part A.3, PR 1c and 1d).
 
-One correct finding is still open: `docs/adr/README.md` lists 0039 (`:59`) but not 0040. This
-change was limited to this record and its STATUS.md row, so the index line is a follow-up.
+The remaining finding (`docs/adr/README.md` listed 0039 but not 0040) was applied in the same
+change: 0040 is indexed under Runtime.
 
 ## References
 
