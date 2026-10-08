@@ -4186,6 +4186,7 @@ mod tests {
 					description: sf!("alpha host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
 					rev:         None,
+					effects:     None,
 				}],
 				Arc::new(HostExecutor),
 			)
