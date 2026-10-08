@@ -10,7 +10,7 @@ use super::{
 	aws::AwsCredentialSource,
 	lease::{
 		AuthRejection, CredentialError, CredentialFuture, CredentialKind, CredentialLease,
-		CredentialNeed, CredentialSource, LeaseMeta, credential_ready,
+		CredentialNeed, CredentialSource, ExtensionCredentialKind, LeaseMeta, credential_ready,
 	},
 };
 use crate::{AccountId, PrincipalId};
@@ -634,6 +634,38 @@ pub fn provider_accepts_kind(
 	provider_auth_specs(catalog, provider).any(|spec| credential_kind(spec.kind) == Some(kind))
 }
 
+/// The kind a static secret written as `kind` for `provider` is stored
+/// under, or `None` when `kind` names no static secret (OAuth or AWS
+/// material, or a kind neither vocabulary knows).
+///
+/// `kind` is spelled as the store spells it (`api-key`, `bearer`,
+/// `session-token`) or as extensions do (`api_key`, `bearer`, `session`). An
+/// API key is stored under the provider's API-key kind ([`api_key_kind`])
+/// when no authentication of the provider leases an `api-key`, so a bearer
+/// provider's key is stored as `bearer`; every other kind is kept. This is
+/// the normalization every control-plane write applies and the stored-kind
+/// repair re-applies to rows written before it.
+pub(crate) fn stored_static_secret_kind(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+	kind: &str,
+) -> Option<CredentialKind> {
+	let kind = match kind.parse::<CredentialKind>() {
+		Ok(kind) => kind,
+		Err(_) => kind
+			.parse::<ExtensionCredentialKind>()
+			.ok()?
+			.static_secret()?,
+	};
+	match kind {
+		CredentialKind::ApiKey if !provider_accepts_kind(catalog, provider, kind) => {
+			Some(api_key_kind(catalog, provider).unwrap_or(kind))
+		},
+		CredentialKind::ApiKey | CredentialKind::Bearer | CredentialKind::SessionToken => Some(kind),
+		CredentialKind::Basic | CredentialKind::AwsSigV4 => None,
+	}
+}
+
 /// Every catalog authentication a request for `provider` may lease under:
 /// its routes' own, in catalog route order, then the provider's declared
 /// ones. An authentication several routes share repeats.
@@ -1074,6 +1106,31 @@ mod tests {
 		assert!(accepts("anthropic", CredentialKind::Bearer));
 		assert_eq!("api-key".parse::<CredentialKind>(), Ok(CredentialKind::ApiKey));
 		assert_eq!(<&'static str>::from(CredentialKind::SessionToken), "session-token");
+	}
+
+	/// A written static secret is stored under the kind its provider leases:
+	/// an API key the provider takes only as a bearer token becomes `bearer`,
+	/// the extension spellings become the store's, and anything else is kept
+	/// or is no static secret at all.
+	#[test]
+	fn written_static_secrets_take_the_kind_their_provider_leases() {
+		let catalog = Catalog::embedded();
+		let stored =
+			|provider, kind| stored_static_secret_kind(catalog, ProviderId::from_ref(provider), kind);
+		assert_eq!(stored("huggingface", "api-key"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("huggingface", "api_key"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("huggingface", "bearer"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("anthropic", "api-key"), Some(CredentialKind::ApiKey));
+		assert_eq!(stored("anthropic", "api_key"), Some(CredentialKind::ApiKey));
+		// A kind some authentication of the provider leases is kept.
+		assert_eq!(stored("anthropic", "bearer"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("anthropic", "session"), Some(CredentialKind::SessionToken));
+		assert_eq!(stored("anthropic", "session-token"), Some(CredentialKind::SessionToken));
+		// An unknown provider keeps the key as written.
+		assert_eq!(stored("v1-only-provider", "api_key"), Some(CredentialKind::ApiKey));
+		for kind in ["oauth", "aws", "oauth-renewable-v1", "basic", "aws-sigv4", "API_KEY"] {
+			assert_eq!(stored("huggingface", kind), None, "{kind}");
+		}
 	}
 
 	/// Environment, invocation, and encrypted-store sources answer without

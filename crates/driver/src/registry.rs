@@ -339,12 +339,14 @@ pub struct StoredLoginsLocked {
 /// this process cannot decrypt.
 ///
 /// That is when `mode` is [`CredentialKeyMode::Unavailable`] and `data_dir`'s
-/// account state holds an enabled account of `provider`, while no catalog
-/// authentication of the provider ([`omp_ai::auth::provider_auth_specs`]) can
-/// lease without the store: none is anonymous, none resolves from
-/// application-default, AWS, or session sources, and none of the credential
-/// environment variables they name is set (the broker leases those before any
-/// stored login).
+/// account state holds an enabled account of `provider`, while no request the
+/// launch's plan may send can authenticate without the store: no catalog
+/// authentication of `provider` ([`omp_ai::auth::provider_auth_specs`]) is
+/// anonymous, resolves from application-default, AWS, or session sources, or
+/// names a credential environment variable that is set (the broker leases
+/// those before any stored login), and neither does one of another provider
+/// that `model`'s other routes or its planned fallbacks (`retry`, as the
+/// router walks them) would use.
 ///
 /// Without a credential database there is nothing to unlock. Account state
 /// that cannot be read is left to the composition, which reports it.
@@ -357,29 +359,44 @@ pub fn ensure_stored_logins_unlockable(
 	mode: CredentialKeyMode,
 	data_dir: &Path,
 	catalog: &snapshot::Catalog,
+	retry: &omp_ai::settings::RetrySettings,
 	provider: &omp_catalog::ProviderId<str>,
+	model: Option<&omp_catalog::ModelKey<str>>,
 ) -> Result<(), StoredLoginsLocked> {
 	let database = data_dir.join("credentials.db");
-	if mode != CredentialKeyMode::Unavailable || !database.is_file() {
+	if mode != CredentialKeyMode::Unavailable
+		|| !database.is_file()
+		|| leases_without_store(catalog, provider)
+	{
 		return Ok(());
 	}
-	let set = |names: &[Str]| {
-		names
-			.iter()
-			.any(|name| env::var_os(name.as_str()).is_some_and(|value| !value.is_empty()))
+	// Providers serving `model` on its other routes, then its planned
+	// fallbacks' providers.
+	let route_providers = |model: &omp_catalog::ModelKey<str>| {
+		catalog
+			.model(model)
+			.into_iter()
+			.flat_map(|spec| spec.routes.iter())
+			.filter_map(|route| catalog.route(route))
+			.map(|route| route.provider.clone())
+			.collect::<Vec<_>>()
 	};
-	let leases_without_store = omp_ai::auth::provider_auth_specs(catalog, provider).any(|spec| {
-		spec.kind == AuthSpecKind::None
-			|| spec.credential_sources.iter().any(|source| match source {
-				CredentialSourceSpec::Environment { ordered_names } => set(ordered_names),
-				CredentialSourceSpec::BasicEnvironment { password_names, .. } => set(password_names),
-				CredentialSourceSpec::ApplicationDefault { .. }
-				| CredentialSourceSpec::AwsChain
-				| CredentialSourceSpec::Session => true,
-				CredentialSourceSpec::Stored | CredentialSourceSpec::Oauth { .. } => false,
-			})
+	let fallbacks = model.map_or_else(Vec::new, |model| {
+		let mut providers = route_providers(model);
+		if retry.model_fallback {
+			let budget = usize::try_from(retry.max_attempts().saturating_sub(1)).unwrap_or(usize::MAX);
+			for fallback in retry.fallback_walk(model, Some(provider), budget, |candidate| {
+				route_providers(candidate).into_iter().next()
+			}) {
+				providers.extend(route_providers(&fallback));
+			}
+		}
+		providers
 	});
-	if leases_without_store {
+	if fallbacks
+		.iter()
+		.any(|other| other.as_str() != provider.as_str() && leases_without_store(catalog, other))
+	{
 		return Ok(());
 	}
 	let stored = AccountStateStore::open(&database)
@@ -394,6 +411,31 @@ pub fn ensure_stored_logins_unlockable(
 		return Err(StoredLoginsLocked { provider: provider.to_owned() });
 	}
 	Ok(())
+}
+
+/// Whether some catalog authentication of `provider` can lease without the
+/// credential store: it is anonymous, resolves from application-default,
+/// AWS, or session sources, or names a credential variable that is set.
+fn leases_without_store(
+	catalog: &snapshot::Catalog,
+	provider: &omp_catalog::ProviderId<str>,
+) -> bool {
+	let set = |names: &[Str]| {
+		names
+			.iter()
+			.any(|name| env::var_os(name.as_str()).is_some_and(|value| !value.is_empty()))
+	};
+	omp_ai::auth::provider_auth_specs(catalog, provider).any(|spec| {
+		spec.kind == AuthSpecKind::None
+			|| spec.credential_sources.iter().any(|source| match source {
+				CredentialSourceSpec::Environment { ordered_names } => set(ordered_names),
+				CredentialSourceSpec::BasicEnvironment { password_names, .. } => set(password_names),
+				CredentialSourceSpec::ApplicationDefault { .. }
+				| CredentialSourceSpec::AwsChain
+				| CredentialSourceSpec::Session => true,
+				CredentialSourceSpec::Stored | CredentialSourceSpec::Oauth { .. } => false,
+			})
+	})
 }
 
 /// Returns the immutable production catalog with configured and fresh
@@ -1723,7 +1765,11 @@ mod tests {
 		let data_dir = directory.path();
 		let catalog = snapshot::Catalog::embedded();
 		let poolside = omp_catalog::ProviderId::from_ref("poolside");
-		let check = |mode| ensure_stored_logins_unlockable(mode, data_dir, catalog, poolside);
+		let laguna = omp_catalog::ModelKey::from_ref("poolside/laguna");
+		let no_fallbacks = omp_ai::settings::RetrySettings::default();
+		let check = |mode| {
+			ensure_stored_logins_unlockable(mode, data_dir, catalog, &no_fallbacks, poolside, None)
+		};
 		// SAFETY: nextest runs each test in its own process; nothing else in
 		// this one reads the environment concurrently.
 		unsafe { env::remove_var("OMP_POOLSIDE_API_KEY") };
@@ -1761,11 +1807,72 @@ mod tests {
 				CredentialKeyMode::Unavailable,
 				data_dir,
 				catalog,
+				&no_fallbacks,
 				omp_catalog::ProviderId::from_ref("huggingface"),
+				None,
 			)
 			.is_ok(),
 			"another provider's stored login does not block this one"
 		);
+
+		// A planned fallback to a provider keyed only by an environment
+		// variable can serve the request once that variable is set.
+		let (fallback, variable) = catalog
+			.models()
+			.iter()
+			.find_map(|spec| {
+				let mut providers = spec
+					.routes
+					.iter()
+					.filter_map(|route| catalog.route(route))
+					.map(|route| route.provider.clone());
+				let provider = providers.next()?;
+				if provider.as_str() == "poolside" || providers.any(|other| other != provider) {
+					return None;
+				}
+				let variable =
+					omp_ai::auth::provider_auth_specs(catalog, &provider).find_map(|auth| {
+						auth
+							.credential_sources
+							.iter()
+							.find_map(|source| match source {
+								CredentialSourceSpec::Environment { ordered_names } => {
+									ordered_names.first().cloned()
+								},
+								_ => None,
+							})
+					})?;
+				// SAFETY: as above.
+				unsafe { env::remove_var(variable.as_str()) };
+				(!leases_without_store(catalog, &provider)).then(|| (spec.key.clone(), variable))
+			})
+			.expect("a model of a provider keyed by an environment variable");
+		let chained = omp_ai::settings::RetrySettings {
+			fallback_chains: BTreeMap::from([(Str::new(laguna.as_str()), vec![Str::new(
+				fallback.as_str(),
+			)])]),
+			..omp_ai::settings::RetrySettings::default()
+		};
+		let planned = |retry: &omp_ai::settings::RetrySettings| {
+			ensure_stored_logins_unlockable(
+				CredentialKeyMode::Unavailable,
+				data_dir,
+				catalog,
+				retry,
+				poolside,
+				Some(laguna),
+			)
+		};
+		assert!(planned(&chained).is_err(), "the fallback {fallback} has no credential either");
+		// SAFETY: as above.
+		unsafe { env::set_var(variable.as_str(), "fake-fallback-key") };
+		assert!(planned(&chained).is_ok(), "the fallback {fallback} authenticates from {variable}");
+		assert!(planned(&no_fallbacks).is_err(), "no fallback is planned without a chain");
+		let disabled = omp_ai::settings::RetrySettings { model_fallback: false, ..chained };
+		assert!(planned(&disabled).is_err(), "model fallback is off");
+		// SAFETY: as above.
+		unsafe { env::remove_var(variable.as_str()) };
+
 		// SAFETY: as above.
 		unsafe { env::set_var("OMP_POOLSIDE_API_KEY", "fake-environment-key") };
 		assert!(

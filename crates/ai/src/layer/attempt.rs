@@ -10,7 +10,7 @@ use tower::{Layer, Service};
 
 use crate::{
 	body::RetryDecision,
-	error::{Error, ErrorKind, ErrorPhase, RetryAction},
+	error::{CredentialFailure, Error, ErrorDetail, ErrorPhase, RetryAction},
 	layer::{AttemptAction, ExecutionContext, LayerCall},
 };
 
@@ -157,16 +157,19 @@ where
 }
 
 /// The provider failure `cause` to report instead of `error` when the
-/// re-entry `cause` started (a refresh or an account rotation) failed in
-/// authentication before anything was sent: it reserved no wire attempt and
-/// records none `cause` did not. That is a rotation with no other account, or
-/// a refresh of a credential that cannot be renewed.
+/// re-entry `cause` started could not start at all: a rotation found no other
+/// account ([`CredentialFailure::NoRotationCandidate`]) or a refresh found
+/// the credential cannot be renewed ([`CredentialFailure::NotRenewable`]),
+/// in authentication, before anything was sent: it reserved no wire attempt
+/// and records none `cause` did not.
 ///
 /// The caller then sees the provider's answer (a 402, a 401) rather than the
-/// credential failure its retry ran into. `cause` is final: its action is
-/// `Never`, or `ReselectRoute` when `error` asked for it, so a planned
-/// fallback to another provider still runs. Its last attempt, hidden when the
-/// re-entry began, is visible again.
+/// credential failure its retry ran into. Any other failure of the re-entry
+/// (another account's own stored credential, a refresh that ran and failed)
+/// names something the provider's answer does not, so it is reported as is.
+/// `cause` is final: its action is `Never`, or `ReselectRoute` when `error`
+/// asked for it, so a planned fallback to another provider still runs. Its
+/// last attempt, hidden when the re-entry began, is visible again.
 fn unsent_reentry(
 	mut cause: Error,
 	error: &Error,
@@ -180,14 +183,27 @@ fn unsent_reentry(
 			.iter()
 			.any(|known| known.index == attempt.index)
 	});
-	if context.attempts() != reserved
+	let unstartable = matches!(
+		error.detail_ref(),
+		Some(ErrorDetail::Credential {
+			reason: CredentialFailure::NoRotationCandidate | CredentialFailure::NotRenewable,
+			..
+		})
+	);
+	if !unstartable
+		|| context.attempts() != reserved
 		|| recorded_new_attempt
 		|| error.phase != ErrorPhase::Authentication
-		|| error.kind != ErrorKind::Authentication
 		|| error.committed
 	{
 		return None;
 	}
+	// Every pre-send credential failure a route reports today asks for route
+	// reselection (`credential_failure` in `provider/builtin.rs`), which the
+	// opaque error this replaces carried too: keeping it lets a planned
+	// fallback to another provider's credentials still run. `cause`'s own
+	// action (a rotation or a refresh) already ran, so any other answer ends
+	// the request.
 	cause.action = if error.action == RetryAction::ReselectRoute {
 		RetryAction::ReselectRoute
 	} else {
@@ -224,7 +240,7 @@ mod tests {
 	use super::AttemptService;
 	use crate::{
 		body::{AttemptBodyEvidence, Replayability, RetryDecision, RetryDecisionReason},
-		error::{Error, ErrorKind, ErrorPhase, RetryAction},
+		error::{CredentialFailure, Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
 		id::AccountId,
 		layer::{AttemptAction, ExecutionContext, LayerCall},
 		receipt::{
@@ -479,12 +495,14 @@ mod tests {
 		]);
 	}
 	/// Fails its first call with `provider` after reserving a wire attempt,
-	/// then every re-entry in authentication before sending anything, as a
-	/// rotation with no other account or a refresh of a static key does.
+	/// then every re-entry in authentication before sending anything, for
+	/// `reason`: a rotation with no other account or a refresh of a static key
+	/// cannot start, any other reason is the re-entry's own failure.
 	#[derive(Clone)]
 	struct ProviderThenUnsent {
 		calls:    Arc<AtomicUsize>,
 		provider: (ErrorKind, u16, RetryAction),
+		reason:   CredentialFailure,
 		unsent:   RetryAction,
 	}
 	impl Service<LayerCall<()>> for ProviderThenUnsent {
@@ -504,42 +522,58 @@ mod tests {
 				error.kind = kind;
 				return ready(Err(error.status(Some(status))));
 			}
-			ready(Err(Error::new(
-				ErrorKind::Authentication,
-				ErrorPhase::Authentication,
+			ready(Err(Error::credential(
+				crate::catalog::ProviderId::from("provider"),
+				self.reason,
 				self.unsent.clone(),
 				request.context.receipt(),
 			)))
 		}
 	}
 
+	/// Calls `service` once and returns its failure.
+	async fn failure(mut service: AttemptService<ProviderThenUnsent>) -> Error {
+		let context =
+			ExecutionContext::new(ExecutionBudget { max_attempts: 3, ..ExecutionBudget::default() });
+		futures::future::poll_fn(|cx| service.poll_ready(cx))
+			.await
+			.expect("ready");
+		service
+			.call(LayerCall { payload: (), context })
+			.await
+			.expect_err("the request fails")
+	}
+
 	/// A rotation (402) or refresh (401) that cannot start reports the
 	/// provider's answer, not the credential failure the retry ran into.
 	#[tokio::test]
 	async fn unsent_reentry_reports_the_provider_failure_that_caused_it() {
-		for (kind, status, action, unsent) in [
-			(ErrorKind::PaymentRequired, 402, RetryAction::RotateAccount, RetryAction::ReselectRoute),
-			(ErrorKind::Authentication, 401, RetryAction::RefreshCredential, RetryAction::Never),
+		for (kind, status, action, reason, unsent) in [
+			(
+				ErrorKind::PaymentRequired,
+				402,
+				RetryAction::RotateAccount,
+				CredentialFailure::NoRotationCandidate,
+				RetryAction::ReselectRoute,
+			),
+			(
+				ErrorKind::Authentication,
+				401,
+				RetryAction::RefreshCredential,
+				CredentialFailure::NotRenewable,
+				RetryAction::Never,
+			),
 		] {
 			let calls = Arc::new(AtomicUsize::new(0));
-			let context = ExecutionContext::new(ExecutionBudget {
-				max_attempts: 3,
-				..ExecutionBudget::default()
-			});
-			let mut service = AttemptService {
+			let error = failure(AttemptService {
 				inner: ProviderThenUnsent {
-					calls:    calls.clone(),
+					calls: calls.clone(),
 					provider: (kind, status, action),
-					unsent:   unsent.clone(),
+					reason,
+					unsent: unsent.clone(),
 				},
-			};
-			futures::future::poll_fn(|cx| service.poll_ready(cx))
-				.await
-				.expect("ready");
-			let error = service
-				.call(LayerCall { payload: (), context })
-				.await
-				.expect_err("the provider failure surfaces");
+			})
+			.await;
 			assert_eq!(calls.load(Ordering::SeqCst), 2, "one re-entry ran");
 			assert_eq!(error.kind, kind);
 			assert_eq!(error.status, Some(status));
@@ -548,6 +582,39 @@ mod tests {
 			assert_eq!(error.action, unsent);
 			assert_eq!(error.receipt().attempts.len(), 1);
 			assert!(!error.receipt().attempts[0].hidden, "the failing attempt is the visible one");
+		}
+	}
+
+	/// A re-entry that started and failed for a reason of its own (the next
+	/// account's stored credential has the wrong kind, a refresh that ran
+	/// failed) reports that reason, which the provider's answer does not name.
+	#[tokio::test]
+	async fn reentry_failing_for_its_own_reason_reports_it() {
+		for (action, reason) in [
+			(RetryAction::RotateAccount, CredentialFailure::KindMismatch {
+				expected: crate::auth::CredentialKind::Bearer,
+				actual:   crate::auth::CredentialKind::ApiKey,
+			}),
+			(RetryAction::RefreshCredential, CredentialFailure::RefreshFailed),
+		] {
+			let error = failure(AttemptService {
+				inner: ProviderThenUnsent {
+					calls: Arc::new(AtomicUsize::new(0)),
+					provider: (ErrorKind::PaymentRequired, 402, action),
+					reason,
+					unsent: RetryAction::ReselectRoute,
+				},
+			})
+			.await;
+			assert_eq!(error.kind, ErrorKind::Authentication, "{reason:?}");
+			assert_eq!(error.status, None, "{reason:?}");
+			assert!(
+				matches!(
+					error.detail_ref(),
+					Some(ErrorDetail::Credential { reason: surfaced, .. }) if *surfaced == reason
+				),
+				"{reason:?}"
+			);
 		}
 	}
 

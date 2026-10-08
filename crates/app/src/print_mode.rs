@@ -325,11 +325,17 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 }
 
 /// Fails before any session or inference stack exists when the launch's
-/// provider would authenticate with stored logins `mode` cannot decrypt:
-/// without a terminal the default key source is unavailable, and the request
-/// would otherwise fail later with an authentication error. An invocation
-/// `--api-key` and a gateway use no stored login; a model that does not
-/// resolve is left to the composition, which reports it.
+/// provider would authenticate with stored logins `mode` cannot decrypt and
+/// nothing the request may fall back to authenticates without them
+/// ([`omp_driver::registry::ensure_stored_logins_unlockable`]): without a
+/// terminal the default key source is unavailable, and the request would
+/// otherwise fail later with an authentication error. An invocation
+/// `--api-key` and a gateway use no stored login.
+///
+/// The provider is `--provider`, else the one the model selector resolves
+/// to in the launch catalog, else the selector's `provider/` prefix when it
+/// names a catalog provider (a model only discovery lists, whose cache is
+/// stale); any other selector is left to the composition, which reports it.
 fn ensure_stored_logins_unlockable(
 	launch: &Launch,
 	mode: omp_driver::registry::CredentialKeyMode,
@@ -337,22 +343,37 @@ fn ensure_stored_logins_unlockable(
 	if launch.options.api_key.is_some() || launch.options.gateway.is_some() {
 		return Ok(());
 	}
-	let provider = match &launch.options.provider {
-		Some(provider) => provider.clone(),
-		None => match omp_driver::discovery::roles::resolve_role_selector(
-			&launch.catalog,
-			&launch.settings,
-			launch.model.as_str(),
-		) {
-			Ok(selected) => selected.provider,
-			Err(_) => return Ok(()),
-		},
+	let selected = omp_driver::discovery::roles::resolve_role_selector(
+		&launch.catalog,
+		&launch.settings,
+		launch.model.as_str(),
+	)
+	.ok();
+	let prefix = || {
+		let (provider, _) = launch.model.split_once('/')?;
+		let provider = omp_catalog::ProviderId::from_ref(provider);
+		launch
+			.catalog
+			.provider(provider)
+			.is_some()
+			.then(|| provider.to_owned())
+	};
+	let Some(provider) = launch
+		.options
+		.provider
+		.clone()
+		.or_else(|| selected.as_ref().map(|selected| selected.provider.clone()))
+		.or_else(prefix)
+	else {
+		return Ok(());
 	};
 	omp_driver::registry::ensure_stored_logins_unlockable(
 		mode,
 		&launch.data_dir,
 		&launch.catalog,
+		&omp_ai::settings::RetrySettings::from_con(&launch.ctx),
 		&provider,
+		selected.as_ref().map(|selected| &*selected.model),
 	)
 	.into_diagnostic()
 }
@@ -2796,6 +2817,19 @@ mod tests {
 			)
 			.is_ok()
 		);
+
+		// Without `--provider`, a model the launch catalog does not list (only
+		// discovery lists Poolside's) names its provider by its prefix.
+		let mut unflagged = args.clone();
+		unflagged.provider = None;
+		let unflagged = prepare(unflagged).await.expect("unflagged launch lowers");
+		assert!(unflagged.options.provider.is_none());
+		let error = ensure_stored_logins_unlockable(
+			&unflagged,
+			omp_driver::registry::CredentialKeyMode::Unavailable,
+		)
+		.expect_err("the selector's prefix names the provider");
+		assert!(error.to_string().starts_with("poolside has stored logins."), "{error}");
 
 		let locked = args.clone();
 		args.api_key = Some(omp_core::SecretString::from("fake-invocation-key"));

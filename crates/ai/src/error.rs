@@ -308,21 +308,70 @@ pub enum CredentialFailure {
 	#[error("no credential is configured")]
 	NoSource,
 	/// The stored credential has another kind than the catalog authentication
-	/// requires; it was stored by an earlier importer and is repaired by
-	/// `omp config import-v1` (the `credential-kinds` step).
-	#[error("the stored credential is {actual} but the provider requires {expected}")]
+	/// requires.
+	///
+	/// Every control-plane write stores a static secret under the kind its
+	/// provider leases. A row stored under another kind (by an earlier writer,
+	/// or left behind when a catalog update changed the provider's
+	/// authentication) is re-stored by the `credential-kinds` import step:
+	/// once on the first run after upgrading, and again on every explicit
+	/// `omp config import-v1`. A row of a provider that takes no static key
+	/// cannot be re-stored; `omp auth logout` removes it.
+	#[error(
+		"the stored credential is {actual} but the provider requires {expected}; `omp config \
+		 import-v1` re-stores it under the provider's kind, or `omp auth logout` removes it"
+	)]
 	KindMismatch {
 		/// Kind the catalog authentication requires.
 		expected: CredentialKind,
 		/// Kind the stored credential has.
 		actual:   CredentialKind,
 	},
+	/// Account selection chose a stored credential no authentication of the
+	/// route can lease: its stored kind is no static secret the store leases
+	/// (OAuth or AWS material an extension wrote as one, or a kind neither
+	/// vocabulary knows), or the source answered for another account or
+	/// principal than the selected one.
+	#[error("the selected stored credential cannot be used for this provider")]
+	UnusableStoredCredential,
 	/// The encrypted credential store cannot be decrypted by this process.
 	#[error("credential storage is locked")]
 	StorageLocked,
-	/// The rejected credential cannot be refreshed.
+	/// The stored credential expired and its source cannot renew it.
+	#[error("the stored credential has expired")]
+	Expired,
+	/// The rejected credential cannot be refreshed: it is a static key, or no
+	/// installed source renews it.
 	#[error("the credential cannot be renewed")]
 	NotRenewable,
+	/// Refreshing a renewable credential failed (the token endpoint, the
+	/// network, or a concurrent refresh).
+	#[error("the credential could not be refreshed")]
+	RefreshFailed,
+	/// The credential source failed without a more specific reason (a stored
+	/// row that cannot be decrypted or read, or an external source error).
+	#[error("the credential source failed")]
+	SourceFailed,
+}
+
+impl CredentialFailure {
+	/// The error kind a request that fails for this reason reports: a locked
+	/// store is [`ErrorKind::CredentialStorageUnavailable`], every other
+	/// reason [`ErrorKind::Authentication`].
+	#[must_use]
+	pub const fn error_kind(self) -> ErrorKind {
+		match self {
+			Self::StorageLocked => ErrorKind::CredentialStorageUnavailable,
+			Self::NoRotationCandidate
+			| Self::NoSource
+			| Self::KindMismatch { .. }
+			| Self::UnusableStoredCredential
+			| Self::Expired
+			| Self::NotRenewable
+			| Self::RefreshFailed
+			| Self::SourceFailed => ErrorKind::Authentication,
+		}
+	}
 }
 
 /// Typed supplemental evidence that contains no secret-bearing source text.
@@ -621,6 +670,21 @@ impl Error {
 		}
 	}
 
+	/// The authentication-phase failure of a request no credential of
+	/// `provider` could authenticate, for `reason`: its kind is
+	/// [`CredentialFailure::error_kind`], its code the reason's snake-case
+	/// name, and its detail [`ErrorDetail::Credential`].
+	pub fn credential(
+		provider: ProviderId,
+		reason: CredentialFailure,
+		action: RetryAction,
+		receipt: ExecutionReceipt,
+	) -> Self {
+		Self::new(reason.error_kind(), ErrorPhase::Authentication, action, receipt)
+			.code(Str::new_static(reason.into()))
+			.detail(ErrorDetail::Credential { provider, reason })
+	}
+
 	/// Borrows partial accounting through the failure point.
 	pub fn receipt(&self) -> &ExecutionReceipt {
 		&self.evidence.receipt
@@ -891,25 +955,38 @@ mod tests {
 
 	#[test]
 	fn credential_detail_names_the_provider_and_the_reason() {
-		let error = Error::new(
-			ErrorKind::Authentication,
-			ErrorPhase::Authentication,
-			RetryAction::ReselectRoute,
-			ExecutionReceipt::default(),
-		)
-		.detail(SuperErrorDetail::Credential {
-			provider: crate::catalog::ProviderId::from("huggingface"),
-			reason:   super::CredentialFailure::KindMismatch {
+		let error = Error::credential(
+			crate::catalog::ProviderId::from("huggingface"),
+			super::CredentialFailure::KindMismatch {
 				expected: crate::auth::CredentialKind::Bearer,
 				actual:   crate::auth::CredentialKind::ApiKey,
 			},
-		});
+			RetryAction::ReselectRoute,
+			ExecutionReceipt::default(),
+		);
 		assert_eq!(
 			error.to_string(),
-			"inference Authentication error during Authentication: no usable huggingface credential: \
-			 the stored credential is api-key but the provider requires bearer"
+			"inference Authentication error during Authentication (kind_mismatch): no usable \
+			 huggingface credential: the stored credential is api-key but the provider requires \
+			 bearer; `omp config import-v1` re-stores it under the provider's kind, or `omp auth \
+			 logout` removes it"
 		);
+		assert_eq!(error.code.as_deref(), Some("kind_mismatch"));
+		assert_eq!(error.phase, ErrorPhase::Authentication);
 		assert!(format!("{error:?}").contains("detail_kind: Some(\"Credential\")"));
+		let locked = Error::credential(
+			crate::catalog::ProviderId::from("huggingface"),
+			super::CredentialFailure::StorageLocked,
+			RetryAction::Never,
+			ExecutionReceipt::default(),
+		);
+		assert_eq!(locked.kind, ErrorKind::CredentialStorageUnavailable);
+		assert_eq!(locked.code.as_deref(), Some("storage_locked"));
+		assert_eq!(
+			<&'static str>::from(super::CredentialFailure::RefreshFailed),
+			"refresh_failed",
+			"the reason's snake-case name is the code"
+		);
 	}
 
 	#[test]

@@ -37,7 +37,7 @@ use crate::{
 
 const SCHEMA_VERSION: u32 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const OAUTH_RENEWABLE_KIND: &str = "oauth-renewable-v1";
+pub(crate) const OAUTH_RENEWABLE_KIND: &str = "oauth-renewable-v1";
 
 /// Origin of credential material presented to persistence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

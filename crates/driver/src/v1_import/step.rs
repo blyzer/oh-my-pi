@@ -56,9 +56,11 @@ pub enum ImportStep {
 	/// v1 `agent.db` logins (API keys, OAuth, MCP OAuth) into the encrypted
 	/// credential store.
 	Credentials,
-	/// Keys earlier imports (`agent.db` and `models.yml`) stored as `api-key`
-	/// for a provider that authenticates with another kind, re-stored under
-	/// that kind ([`super::auth_credentials::repair_credential_kinds`]).
+	/// Static secrets stored under a kind their provider does not lease (keys
+	/// earlier `agent.db` and `models.yml` imports stored as `api-key` for a
+	/// provider that authenticates with another kind, extension SDK spellings),
+	/// re-stored under that kind
+	/// ([`super::auth_credentials::repair_credential_kinds`]).
 	CredentialKinds,
 	/// User assets copied file by file into the v2 `agent/` tree, keeping any
 	/// v2 file already there ([`super::assets`]): `skills/` and
@@ -166,6 +168,17 @@ impl ImportStep {
 	#[must_use]
 	pub const fn gated_by_marker(self) -> bool {
 		!matches!(self, Self::Sessions)
+	}
+
+	/// Whether an explicit `omp config import-v1` (offline credential access)
+	/// runs this step even with its marker set, while the first-run import
+	/// keeps skipping it. That is the stored-kind repair
+	/// ([`Self::CredentialKinds`]): a catalog update can leave rows under a
+	/// kind their provider no longer leases after its first run, and the
+	/// command is the remedy the resulting error names.
+	#[must_use]
+	pub const fn rerun_on_request(self) -> bool {
+		matches!(self, Self::CredentialKinds)
 	}
 
 	/// This step's marker in a v2 profile configuration root.
@@ -353,9 +366,11 @@ impl StepContext<'_> {
 /// Runs every registered step for each pair, in order.
 ///
 /// Per step: a set marker skips it (unless the step is not
-/// [gated by it](ImportStep::gated_by_marker)); otherwise the step runs and, in
-/// [`ImportMode::Apply`], sets its own marker once finished. A failure is
-/// reported as [`Attention::Failed`] and leaves the marker unset. Nothing
+/// [gated by it](ImportStep::gated_by_marker), or `credentials` is offline
+/// access, an explicit `omp config import-v1`, and the step
+/// [reruns on request](ImportStep::rerun_on_request)); otherwise the step runs
+/// and, in [`ImportMode::Apply`], sets its own marker once finished. A failure
+/// is reported as [`Attention::Failed`] and leaves the marker unset. Nothing
 /// under the v1 roots is ever written, moved, or deleted.
 pub fn run(
 	pairs: &[ImportPair],
@@ -402,7 +417,8 @@ fn run_pair(
 	let mut entries = Vec::new();
 	for step in steps {
 		let marker = step.marker(&pair.target.config_dir);
-		if step.gated_by_marker() && marker.is_set() {
+		let requested = step.rerun_on_request() && matches!(access, CredentialAccess::Offline(_));
+		if step.gated_by_marker() && marker.is_set() && !requested {
 			entries.push(ImportEntry::new(
 				step,
 				step.item(),

@@ -61,7 +61,7 @@ use std::{
 use omp_ai::{
 	PrincipalId, ProjectId,
 	auth::{
-		CredentialControlWrite, CredentialKind, OAuthControlImport, StoreError,
+		CredentialControlWrite, CredentialKind, OAuthControlImport, SecretKindRepair, StoreError,
 		normalize_enterprise_domain,
 	},
 };
@@ -324,15 +324,22 @@ pub(super) fn import_credentials(cx: &StepContext<'_>) -> Result<Vec<ImportEntry
 	Ok(entries)
 }
 
-/// The `credential-kinds` step: re-stores the keys an earlier import wrote as
-/// `api-key` for a provider that authenticates with another kind
-/// ([`omp_ai::auth::AuthControlHandle::repair_static_secret_kinds`]), which
-/// the provider's routes otherwise reject on every request.
+/// The `credential-kinds` step: re-stores every static secret whose stored
+/// kind is not the one a control write stores for its provider now
+/// ([`omp_ai::auth::AuthControlHandle::repair_static_secret_kinds`]): keys an
+/// earlier import wrote as `api-key` for a provider that authenticates with
+/// another kind, and the extension SDK's spellings (`api_key`, `session`),
+/// which the provider's routes otherwise reject on every request.
 ///
-/// Only a profile with a credential database is opened. A dry run reads
-/// nothing and reports that a real run checks the stored keys. A key that
-/// must be repaired but cannot be decrypted (the key source is unavailable to
-/// this process) fails the step, which retries on the next run.
+/// Only a profile with a credential database is opened. A dry run reads its
+/// plaintext metadata through a store opened with no key source, so nothing
+/// is decrypted or created, and reports each row a real run would re-store. A
+/// row that must be repaired but cannot be decrypted (the key source is
+/// unavailable to this process) fails the step, which retries on the next
+/// run. The first-run import runs the step until it succeeds once; an
+/// explicit `omp config import-v1` runs it every time
+/// ([`ImportStep::rerun_on_request`]), so rows a catalog update left under a
+/// kind their provider no longer leases are repaired too.
 pub(super) fn repair_credential_kinds(
 	cx: &StepContext<'_>,
 ) -> Result<Vec<ImportEntry>, ImportError> {
@@ -344,6 +351,18 @@ pub(super) fn repair_credential_kinds(
 		subject,
 		outcome,
 	};
+	let entries = |repairs: Vec<SecretKindRepair>, outcome: fn() -> ImportOutcome| {
+		if repairs.is_empty() {
+			return vec![entry(None, ImportOutcome::NothingToImport)];
+		}
+		repairs
+			.into_iter()
+			.map(|repair| {
+				let subject = sf!("{} ({} -> {})", repair.account, repair.stored, repair.repaired);
+				entry(Some(subject), outcome())
+			})
+			.collect()
+	};
 	if !database.is_file() {
 		if cx.mode == ImportMode::Apply {
 			ImportStep::CredentialKinds
@@ -354,7 +373,10 @@ pub(super) fn repair_credential_kinds(
 		return Ok(vec![entry(None, ImportOutcome::NothingToImport)]);
 	}
 	if cx.mode == ImportMode::DryRun {
-		return Ok(vec![entry(None, ImportOutcome::WouldReimport)]);
+		let pending = super::credentials::locked_control(&cx.pair.target)?
+			.static_secret_kind_repairs()
+			.map_err(CredentialsImportError::RepairKinds)?;
+		return Ok(entries(pending, || ImportOutcome::WouldReimport));
 	}
 	let repairs = cx
 		.credentials
@@ -365,16 +387,7 @@ pub(super) fn repair_credential_kinds(
 		.marker(&cx.pair.target.config_dir)
 		.set(None)
 		.map_err(CredentialsImportError::Marker)?;
-	if repairs.is_empty() {
-		return Ok(vec![entry(None, ImportOutcome::NothingToImport)]);
-	}
-	Ok(repairs
-		.into_iter()
-		.map(|repair| {
-			let subject = sf!("{} ({} -> {})", repair.account, repair.stored, repair.repaired);
-			entry(Some(subject), ImportOutcome::Reimported)
-		})
-		.collect())
+	Ok(entries(repairs, || ImportOutcome::Reimported))
 }
 
 /// Writes one planned row, keeping any v2 account of the same identity. The
