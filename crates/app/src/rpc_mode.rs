@@ -1441,6 +1441,7 @@ fn host_tool_effects(
 		desktop: effects.desktop.map(|desktop| omp_tool::DesktopEffects {
 			capture:       desktop.capture,
 			accessibility: desktop.accessibility,
+			clipboard:     desktop.clipboard,
 			input:         desktop.input,
 		}),
 		fetch: effects

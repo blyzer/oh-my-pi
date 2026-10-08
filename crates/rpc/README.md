@@ -29,7 +29,7 @@ declare its maximum effects (`effects`, a `HostToolEffects`):
     "documents": {"read": true, "writeGlobs": []},
     "exec": {"commands": ["git"], "network": false},
     "inference": {"maxRequests": 1, "maxUsd": "0.25"},
-    "desktop": {"capture": false, "accessibility": false, "input": false},
+    "desktop": {"capture": false, "accessibility": false, "clipboard": false, "input": false},
     "fetch": {"credentials": false},
     "subagents": 0
   }
@@ -38,7 +38,8 @@ declare its maximum effects (`effects`, a `HostToolEffects`):
 
 Every domain is optional and an absent one is denied; unknown fields are refused. The envelope
 sets the tool's approval tier: reads are `read`, read-only egress (`fetch`) is `fetch`, document
-writes are `write`, and commands, network, inference, desktop input and subagents are `exec`.
+writes are `write`, and commands, network, inference, any desktop authority (capture, accessibility,
+clipboard or input) and subagents are `exec`.
 A tool without `effects` is undeclared and is registered with the unknown ceiling (any command,
 with the network), so it is `exec` tier: every approval mode except an explicit `yolo` prompts
 before each call. Declare `"effects": {}` for a tool with no effects.

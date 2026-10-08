@@ -324,12 +324,18 @@ pub enum ApprovalTier {
 	Fetch,
 	/// Declared document mutation without execution-class effects.
 	Write,
-	/// Process, network, inference, or subagent authority.
+	/// Process, network, inference, subagent, or desktop authority.
 	Exec,
 }
 
 impl ApprovalTier {
 	/// Resolves the highest approval tier present in `effects`.
+	///
+	/// Every desktop authority is `exec`, the reads (capture, accessibility,
+	/// clipboard) as well as input: how desktop reads should be approved is an
+	/// open owner question, and until it is answered a call that only reads
+	/// the desktop asks exactly as every `computer` call did before calls were
+	/// judged by their arguments.
 	pub fn from_effects(effects: &Effects) -> Self {
 		if effects.subagents != 0
 			|| effects
@@ -340,7 +346,10 @@ impl ApprovalTier {
 				.inference
 				.as_ref()
 				.is_some_and(|effect| !effect.is_empty())
-			|| effects.desktop.as_ref().is_some_and(|effect| effect.input)
+			|| effects
+				.desktop
+				.as_ref()
+				.is_some_and(|effect| !effect.is_empty())
 		{
 			Self::Exec
 		} else if effects
@@ -379,7 +388,8 @@ pub struct ResolvedApproval {
 	pub tool_name:     Str,
 	/// Where the live revision's effects happen, as its host asserted.
 	pub confinement:   Confinement,
-	/// Tier derived from the live revision's declared effects.
+	/// Tier derived from the call's effects: its argument-scoped envelope, else
+	/// the live revision's declared maximum.
 	pub tier:          ApprovalTier,
 	/// Approval mode in force for this call.
 	pub mode:          ApprovalMode,
@@ -621,9 +631,12 @@ pub enum AdmissionDecision {
 	/// The effective canonical arguments and regenerated shell facts.
 	Allowed {
 		/// RFC 8785-compatible serde canonical argument bytes for the executor.
-		raw:  Bytes,
+		raw:       Bytes,
 		/// Shell facts regenerated from the effective command, when applicable.
-		bash: Option<BashIr>,
+		bash:      Option<BashIr>,
+		/// Whether the answer carried an argument patch, so the effective
+		/// arguments may differ from the committed ones the call was judged on.
+		rewritten: bool,
 	},
 	/// A refusal carrying the one wire vocabulary for policy denial.
 	Denied(PolicyDenied),
@@ -736,7 +749,9 @@ pub struct AdmissionGate {
 	fragments:          BytesMut,
 	requested:          Option<Value>,
 	query_emitted:      bool,
-	policy:             ApprovalPolicy,
+	/// Absent while the policy waits on the committed arguments' effects
+	/// ([`Self::argument_scoped`]); [`Self::resolve_pending`] fixes it.
+	policy:             Option<ApprovalPolicy>,
 	defer_until_commit: bool,
 	answer_tx:          Option<flume::Sender<Admission>>,
 	answer_rx:          Receiver<Admission>,
@@ -756,7 +771,7 @@ impl AdmissionGate {
 		deadline: Duration,
 		policy: ApprovalPolicy,
 	) -> Self {
-		Self::with_policy_mode(invocation_id, tool_name, deadline, policy, false)
+		Self::with_policy_mode(invocation_id, tool_name, deadline, Some(policy), false)
 	}
 
 	/// Starts a caller-composed gate whose query uses only committed arguments.
@@ -766,6 +781,25 @@ impl AdmissionGate {
 		deadline: Duration,
 		policy: ApprovalPolicy,
 	) -> Self {
+		Self::with_policy_mode(invocation_id, tool_name, deadline, Some(policy), true)
+	}
+
+	/// Starts the gate of a tool whose effects are scoped to each call's
+	/// arguments, given the policy its declared maximum resolves to.
+	///
+	/// The query uses only committed arguments. A maximum that is allowed or
+	/// denied fixes the policy now: approval is monotonic in the envelope, so
+	/// every narrower call resolves the same way. A maximum that prompts
+	/// leaves the policy pending until [`Self::resolve_pending`] judges the
+	/// committed call, and until then the caller withholds every speculative
+	/// fragment from the executor ([`Self::requires_external_answer`]).
+	pub(crate) fn argument_scoped(
+		invocation_id: Str,
+		tool_name: Str,
+		deadline: Duration,
+		maximum: ApprovalPolicy,
+	) -> Self {
+		let policy = (maximum != ApprovalPolicy::Prompt).then_some(maximum);
 		Self::with_policy_mode(invocation_id, tool_name, deadline, policy, true)
 	}
 
@@ -773,7 +807,7 @@ impl AdmissionGate {
 		invocation_id: Str,
 		tool_name: Str,
 		deadline: Duration,
-		policy: ApprovalPolicy,
+		policy: Option<ApprovalPolicy>,
 		defer_until_commit: bool,
 	) -> Self {
 		let (answer_tx, answer_rx) = flume::bounded(1);
@@ -813,16 +847,17 @@ impl AdmissionGate {
 		self.finish_query(value, cwd, root)
 	}
 
-	/// Finalizes a call that supplied its complete arguments only with
-	/// `ArgsCommitted`, replacing any incomplete speculative fragments.
-	pub(crate) fn finalize(
-		&mut self,
-		raw: &[u8],
-		cwd: &Path,
-		root: &Path,
-	) -> Result<Option<AdmitInvocation>, AdmissionError> {
+	/// Accepts the `ArgsCommitted` arguments `raw` as this call's one argument
+	/// document, replacing any incomplete speculative fragments, before
+	/// anything is decided from them: they must be one JSON object. A gate
+	/// that has already emitted its query keeps it and ignores `raw`.
+	///
+	/// Nothing is judged from arguments the gate refuses: a pending policy
+	/// stays pending ([`Self::resolve_pending`]), so the call keeps withholding
+	/// what it streams until a commit the gate accepts is judged.
+	pub(crate) fn stage(&mut self, raw: &[u8]) -> Result<(), AdmissionError> {
 		if self.query_emitted {
-			return Ok(None);
+			return Ok(());
 		}
 		let value =
 			serde_json::from_slice::<Value>(raw).map_err(|_| AdmissionError::ArgumentsNotObject)?;
@@ -831,7 +866,31 @@ impl AdmissionGate {
 		}
 		self.fragments.clear();
 		self.fragments.extend_from_slice(raw);
-		Ok(self.finish_query(value, cwd, root))
+		self.requested = Some(value);
+		Ok(())
+	}
+
+	/// Emits the one query for the staged arguments ([`Self::stage`]), or
+	/// answers it internally under a fixed policy. `None` once the query was
+	/// emitted, or with nothing staged.
+	pub(crate) fn emit(&mut self, cwd: &Path, root: &Path) -> Option<AdmitInvocation> {
+		if self.query_emitted {
+			return None;
+		}
+		let value = self.requested.take()?;
+		self.finish_query(value, cwd, root)
+	}
+
+	/// Stages the committed arguments and emits their query in one step.
+	#[cfg(test)]
+	pub(crate) fn finalize(
+		&mut self,
+		raw: &[u8],
+		cwd: &Path,
+		root: &Path,
+	) -> Result<Option<AdmitInvocation>, AdmissionError> {
+		self.stage(raw)?;
+		Ok(self.emit(cwd, root))
 	}
 
 	fn finish_query(&mut self, value: Value, cwd: &Path, root: &Path) -> Option<AdmitInvocation> {
@@ -850,8 +909,9 @@ impl AdmissionGate {
 			props: Default::default(),
 		};
 		match self.policy {
-			ApprovalPolicy::Prompt => Some(query),
-			ApprovalPolicy::Allow => {
+			// A policy still pending at this point asks rather than allows.
+			Some(ApprovalPolicy::Prompt) | None => Some(query),
+			Some(ApprovalPolicy::Allow) => {
 				self
 					.answer(Admission {
 						invocation_id: self.invocation_id.to_string(),
@@ -861,7 +921,7 @@ impl AdmissionGate {
 					.expect("an internally resolved admission is answered exactly once");
 				None
 			},
-			ApprovalPolicy::Deny => {
+			Some(ApprovalPolicy::Deny) => {
 				self
 					.answer(Admission {
 						invocation_id: self.invocation_id.to_string(),
@@ -897,8 +957,31 @@ impl AdmissionGate {
 	}
 
 	/// Returns whether the caller must answer before effective arguments commit.
+	///
+	/// A pending policy counts: until the committed call is judged, nothing
+	/// the call streams may reach its executor.
 	pub(crate) const fn requires_external_answer(&self) -> bool {
-		matches!(self.policy, ApprovalPolicy::Prompt)
+		!matches!(self.policy, Some(ApprovalPolicy::Allow | ApprovalPolicy::Deny))
+	}
+
+	/// Whether committed arguments are staged ([`Self::stage`]) and their query
+	/// is not yet emitted: the one moment the call is judged from them.
+	pub(crate) const fn is_staged(&self) -> bool {
+		!self.query_emitted && self.requested.is_some()
+	}
+
+	/// Fixes a pending policy from the staged call's effects. A policy already
+	/// fixed is kept, and a gate with no staged arguments stays pending, so a
+	/// policy is only ever resolved from arguments the gate accepted.
+	pub(crate) const fn resolve_pending(&mut self, policy: ApprovalPolicy) {
+		if self.policy.is_none() && self.is_staged() {
+			self.policy = Some(policy);
+		}
+	}
+
+	/// Whether the policy still waits on the committed call's effects.
+	pub(crate) const fn is_pending(&self) -> bool {
+		self.policy.is_none()
 	}
 
 	/// Returns the deadline for a query that is waiting on Core.
@@ -946,7 +1029,7 @@ impl AdmissionGate {
 		else {
 			return AdmissionDecision::Denied(invalid_patch_denial(&self.invocation_id));
 		};
-		AdmissionDecision::Allowed { raw, bash }
+		AdmissionDecision::Allowed { raw, bash, rewritten: !admission.args_patch.is_empty() }
 	}
 }
 
@@ -1043,6 +1126,18 @@ fn invalid_patch_denial(invocation_id: &str) -> PolicyDenied {
 	}
 }
 
+/// The denial for an admission transformation whose effective arguments need
+/// effects beyond the envelope the call was admitted under.
+pub(crate) fn widened_effects_denial(invocation_id: &str) -> PolicyDenied {
+	PolicyDenied {
+		reason:      "admission transformation widened the call's effects".into(),
+		code:        "admission_effects_widened".into(),
+		decision_id: invocation_id.to_owned(),
+		rules:       Vec::new(),
+		props:       Default::default(),
+	}
+}
+
 fn approval_denial(invocation_id: &str, tool_name: &str) -> PolicyDenied {
 	PolicyDenied {
 		reason:      format!("tool `{tool_name}` is denied by approval policy"),
@@ -1076,11 +1171,11 @@ mod tests {
 	use tokio_util::sync::CancellationToken;
 
 	use super::{
-		AdmissionDecision, AdmissionGate, ApprovalMode, ApprovalPolicy, ApprovalPosture,
-		ApprovalSource, ApprovalTier, ConfiguredApproval, DynamicAdmission, DynamicAdmissionError,
-		DynamicInvocationSource, Provenance, SandboxState, SandboxUnavailable, apply_admission_patch,
-		bash_ir, call_approval_mode, effective_approval_mode, effects_narrow_or_refuse,
-		github_mutation_targets, resolve_approval,
+		AdmissionDecision, AdmissionError, AdmissionGate, ApprovalMode, ApprovalPolicy,
+		ApprovalPosture, ApprovalSource, ApprovalTier, ConfiguredApproval, DynamicAdmission,
+		DynamicAdmissionError, DynamicInvocationSource, Provenance, SandboxState, SandboxUnavailable,
+		apply_admission_patch, bash_ir, call_approval_mode, effective_approval_mode,
+		effects_narrow_or_refuse, github_mutation_targets, resolve_approval,
 	};
 
 	const UNAVAILABLE: SandboxState =
@@ -1344,7 +1439,7 @@ mod tests {
 	}
 
 	/// One envelope per tier-deciding effect domain.
-	fn tier_envelopes() -> [(&'static str, Effects, ApprovalTier); 6] {
+	fn tier_envelopes() -> [(&'static str, Effects, ApprovalTier); 7] {
 		[
 			(
 				"document read",
@@ -1398,7 +1493,22 @@ mod tests {
 					desktop: Some(DesktopEffects {
 						capture:       false,
 						accessibility: false,
+						clipboard:     false,
 						input:         true,
+					}),
+					..Effects::empty()
+				},
+				ApprovalTier::Exec,
+			),
+			// Until the owner decides how desktop reads are approved.
+			(
+				"desktop read",
+				Effects {
+					desktop: Some(DesktopEffects {
+						capture:       true,
+						accessibility: true,
+						clipboard:     true,
+						input:         false,
 					}),
 					..Effects::empty()
 				},
@@ -1511,7 +1621,7 @@ mod tests {
 			proptest::option::of((any::<bool>(), any::<bool>())),
 			proptest::option::of((any::<bool>(), any::<bool>())),
 			proptest::option::of((0_u32..3, 0_u64..3)),
-			proptest::option::of((any::<bool>(), any::<bool>(), any::<bool>())),
+			proptest::option::of((any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>())),
 			0_u32..3,
 		)
 			.prop_map(|(documents, exec, inference, desktop, subagents)| Effects {
@@ -1535,9 +1645,10 @@ mod tests {
 					max_requests,
 					max_usd: Usd::from_nanos(nanos),
 				}),
-				desktop: desktop.map(|(capture, accessibility, input)| DesktopEffects {
+				desktop: desktop.map(|(capture, accessibility, clipboard, input)| DesktopEffects {
 					capture,
 					accessibility,
+					clipboard,
 					input,
 				}),
 				fetch: None,
@@ -1669,8 +1780,138 @@ mod tests {
 			.expect("prompt answer");
 		assert!(matches!(
 			gate.decide(Path::new("/work"), Path::new("/work")).await,
-			AdmissionDecision::Allowed { .. }
+			AdmissionDecision::Allowed { rewritten: false, .. }
 		));
+
+		// Only an answer that carries a patch reports rewritten arguments.
+		let mut gate = AdmissionGate::new(sf!("call"), sf!("bash"), Duration::from_secs(1));
+		assert!(
+			gate
+				.finalize(br#"{"command":"echo prompt"}"#, Path::new("/work"), Path::new("/work"))
+				.expect("valid arguments")
+				.is_some()
+		);
+		gate
+			.answer(Admission {
+				invocation_id: "call".into(),
+				allow: true,
+				args_patch: Bytes::from_static(br#"{"command":"echo patched"}"#),
+				..Admission::default()
+			})
+			.expect("prompt answer");
+		let AdmissionDecision::Allowed { raw, rewritten: true, .. } =
+			gate.decide(Path::new("/work"), Path::new("/work")).await
+		else {
+			panic!("a patched answer admits rewritten arguments");
+		};
+		assert_eq!(raw, Bytes::from_static(br#"{"command":"echo patched"}"#));
+	}
+
+	/// A gate whose tool scopes effects to its arguments, and whose maximum
+	/// prompts, decides nothing before the committed call: it withholds every
+	/// fragment from the executor and emits no early query, resolves nothing
+	/// from a commit it refuses, then follows the policy the staged call's
+	/// effects resolve to. Left unresolved, it asks.
+	#[tokio::test]
+	async fn an_argument_scoped_gate_waits_for_the_committed_call() {
+		let (cwd, root) = (Path::new("/work"), Path::new("/work"));
+		let committed = br#"{"action":"run","code":"x","read_only":true}"#;
+		let scoped = |maximum| {
+			AdmissionGate::argument_scoped(
+				sf!("call"),
+				sf!("computer"),
+				Duration::from_secs(1),
+				maximum,
+			)
+		};
+
+		let mut gate = scoped(ApprovalPolicy::Prompt);
+		assert!(gate.is_pending());
+		assert!(gate.requires_external_answer(), "a pending gate streams nothing");
+		assert!(
+			gate
+				.push_fragment(r#"{"read_only":true}"#, cwd, root)
+				.is_none()
+		);
+		assert!(!gate.is_staged(), "fragments never stage a scoped gate");
+		gate.resolve_pending(ApprovalPolicy::Allow);
+		assert!(gate.is_pending(), "nothing is resolved before arguments are staged");
+		// Serde's sequence form, malformed JSON, a scalar: a commit the gate
+		// refuses stages nothing, so nothing is resolved from it and the call
+		// keeps withholding what it streams.
+		for refused in [br#"["run","x",true,null]"#.as_slice(), br#"{"action":"#, b"7"] {
+			assert!(matches!(gate.stage(refused), Err(AdmissionError::ArgumentsNotObject)));
+			assert!(!gate.is_staged());
+			gate.resolve_pending(ApprovalPolicy::Allow);
+			assert!(gate.is_pending(), "{}", String::from_utf8_lossy(refused));
+			assert!(gate.requires_external_answer());
+		}
+		gate.stage(committed).expect("valid arguments");
+		assert!(gate.is_staged());
+		gate.resolve_pending(ApprovalPolicy::Allow);
+		assert!(!gate.is_pending());
+		assert!(!gate.requires_external_answer());
+		assert!(gate.emit(cwd, root).is_none(), "an allowed call is answered internally");
+		assert!(!gate.is_staged());
+		// A repeated commit after the query is ignored, never rescoped.
+		gate
+			.stage(br#"{"action":"run","code":"y"}"#)
+			.expect("a repeated commit is ignored");
+		assert!(!gate.is_staged());
+		let AdmissionDecision::Allowed { raw, rewritten, .. } = gate.decide(cwd, root).await else {
+			panic!("a call resolved to allow is admitted");
+		};
+		assert_eq!(raw, Bytes::from_static(committed));
+		assert!(!rewritten, "an answer without a patch rewrites nothing");
+
+		let mut gate = scoped(ApprovalPolicy::Prompt);
+		gate.stage(committed).expect("valid arguments");
+		gate.resolve_pending(ApprovalPolicy::Prompt);
+		gate.resolve_pending(ApprovalPolicy::Allow);
+		assert!(gate.requires_external_answer(), "a fixed policy is kept");
+		assert!(gate.emit(cwd, root).is_some());
+
+		let mut unresolved = scoped(ApprovalPolicy::Prompt);
+		assert!(
+			unresolved
+				.finalize(committed, cwd, root)
+				.expect("valid arguments")
+				.is_some(),
+			"an unresolved policy asks"
+		);
+
+		// A maximum that is allowed or denied fixes every narrower call now,
+		// and still finalizes only from the committed arguments.
+		let mut allowed = scoped(ApprovalPolicy::Allow);
+		assert!(!allowed.is_pending());
+		assert!(!allowed.requires_external_answer());
+		assert!(
+			allowed
+				.push_fragment(r#"{"read_only":false}"#, cwd, root)
+				.is_none()
+		);
+		assert!(
+			allowed
+				.finalize(committed, cwd, root)
+				.expect("valid arguments")
+				.is_none()
+		);
+		let AdmissionDecision::Allowed { raw, .. } = allowed.decide(cwd, root).await else {
+			panic!("an allowed maximum admits");
+		};
+		assert_eq!(raw, Bytes::from_static(committed));
+		let mut denied = scoped(ApprovalPolicy::Deny);
+		assert!(!denied.requires_external_answer());
+		assert!(
+			denied
+				.finalize(committed, cwd, root)
+				.expect("valid arguments")
+				.is_none()
+		);
+		let AdmissionDecision::Denied(denial) = denied.decide(cwd, root).await else {
+			panic!("a denied maximum refuses");
+		};
+		assert_eq!(denial.code, "approval_policy_denied");
 	}
 
 	#[test]
@@ -1703,18 +1944,12 @@ mod tests {
 			..Effects::empty()
 		};
 
-		let desktop_read = Effects {
-			desktop: Some(DesktopEffects {
-				capture:       true,
-				accessibility: true,
-				input:         false,
-			}),
-			..Effects::empty()
-		};
+		let desktop_read = |desktop| Effects { desktop: Some(desktop), ..Effects::empty() };
 		let desktop_input = Effects {
 			desktop: Some(DesktopEffects {
 				capture:       false,
 				accessibility: false,
+				clipboard:     false,
 				input:         true,
 			}),
 			..Effects::empty()
@@ -1767,7 +2002,23 @@ mod tests {
 		);
 		assert_eq!(exec_prompt.tier, ApprovalTier::Exec);
 		assert_eq!(exec_prompt.policy, ApprovalPolicy::Prompt);
-		assert_eq!(ApprovalTier::from_effects(&desktop_read), ApprovalTier::Read);
+		// Every desktop read is exec until the owner decides how desktop reads
+		// are approved; an empty desktop domain grants nothing.
+		for read in [
+			DesktopEffects { capture: true, ..DesktopEffects::default() },
+			DesktopEffects { accessibility: true, ..DesktopEffects::default() },
+			DesktopEffects { clipboard: true, ..DesktopEffects::default() },
+		] {
+			assert_eq!(
+				ApprovalTier::from_effects(&desktop_read(read)),
+				ApprovalTier::Exec,
+				"{read:?}"
+			);
+		}
+		assert_eq!(
+			ApprovalTier::from_effects(&desktop_read(DesktopEffects::default())),
+			ApprovalTier::Read
+		);
 		assert_eq!(ApprovalTier::from_effects(&desktop_input), ApprovalTier::Exec);
 	}
 

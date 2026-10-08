@@ -578,6 +578,131 @@ async fn native_admission_receives_the_live_spec_confinement() {
 	]);
 }
 
+/// Arguments of [`ScopedTool`].
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedParams {
+	value: i64,
+}
+
+/// A tool judging each call by `value`: `0` only reads documents, `1` keeps
+/// the declared maximum, and anything else claims more than that maximum.
+struct ScopedTool {
+	spec: ToolSpec,
+	runs: Arc<Mutex<Vec<i64>>>,
+}
+
+impl Tool for ScopedTool {
+	type Fault = Value;
+	type Params = ScopedParams;
+	type Payload = Value;
+	type Update = Value;
+
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+	fn spec(&self) -> &ToolSpec {
+		&self.spec
+	}
+
+	fn invocation_effects(&self, params: &ScopedParams) -> Option<Effects> {
+		match params.value {
+			0 => Some(read_documents()),
+			1 => None,
+			_ => Some(Effects { subagents: 1, ..Effects::empty() }),
+		}
+	}
+
+	fn call<'c>(
+		&'c self,
+		mut params: IncomingParams<'c>,
+	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		stream! {
+			let args = params.whole::<Value>().await.expect("scoped args decode");
+			self.runs.lock().push(args["value"].as_i64().expect("an integer value"));
+			yield Ev::Done(ToolTerminal::Done { result: Ok(args), useless: false });
+		}
+	}
+
+	fn prompt(&self, view: Result<&Value, &Value>, _: &PromptCaps) -> Vec<Part> {
+		vec![Part::Json {
+			json: Bytes::from(serde_json::to_vec(view.unwrap_or_else(|fault| fault)).expect("JSON")),
+		}]
+	}
+}
+
+fn read_documents() -> Effects {
+	Effects {
+		documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+		..Effects::empty()
+	}
+}
+
+/// Native admission judges each call by its arguments: a call the tool
+/// narrows is admitted on that envelope, one it does not keeps the declared
+/// maximum, and one judged beyond the maximum is refused before admission is
+/// asked and never runs.
+#[tokio::test]
+async fn native_admission_judges_each_call_by_its_arguments() {
+	let maximum = Effects {
+		exec: Some(ExecEffects { commands: Arc::from([]), network: true }),
+		..read_documents()
+	};
+	let runs = Arc::new(Mutex::new(Vec::new()));
+	let mut registry = Registry::new();
+	registry
+		.register(
+			ScopedTool {
+				spec: ToolSpec {
+					name: sf!("scoped"),
+					rev: Rev { family: sf!("test"), n: 1 },
+					description: sf!("judge each call by its value"),
+					schema: Bytes::from_static(
+						br#"{"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false}"#,
+					),
+					constraint: Constraint::None,
+					effects: maximum.clone(),
+					confinement: Confinement::Host,
+					projection_code: [9; 32],
+				},
+				runs: Arc::clone(&runs),
+			},
+			Presentation::Slot,
+			Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+		)
+		.expect("scoped tool registers");
+	let admitted = Arc::new(Mutex::new(Vec::new()));
+	let temp = tempfile::tempdir().expect("tempdir");
+	let (inference, _) = ScriptedInference::new([
+		tool_script("narrow", "scoped", serde_json::json!({"value": 0})),
+		tool_script("maximum", "scoped", serde_json::json!({"value": 1})),
+		tool_script("widened", "scoped", serde_json::json!({"value": 2})),
+		text_script("done"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(registry),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_tool_admission(Arc::new(RecordingAdmission(Arc::clone(&admitted))));
+	let mut session = fresh_session(&temp.path().join("scoped.oms"));
+	kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: sf!("scope"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("turn");
+	assert_eq!(*admitted.lock(), [
+		(String::from("scoped"), read_documents(), Confinement::Host),
+		(String::from("scoped"), maximum, Confinement::Host),
+	]);
+	let mut ran = runs.lock().clone();
+	ran.sort_unstable();
+	assert_eq!(ran, [0, 1], "the call judged beyond the maximum never ran");
+}
+
 #[tokio::test]
 async fn lifecycle_approval_timeout_denies_before_execution_and_replays() {
 	let (gate, receiver) = HookGate::channel();

@@ -819,7 +819,7 @@ pub struct HostToolEffects {
 	/// Model inference requests and spend.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub inference: Option<HostToolInferenceEffects>,
-	/// Native desktop capture, accessibility, and input.
+	/// Native desktop capture, accessibility, clipboard, and input.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub desktop:   Option<HostToolDesktopEffects>,
 	/// Read-only network egress that changes nothing locally.
@@ -876,8 +876,12 @@ pub struct HostToolDesktopEffects {
 	/// Whether accessibility-tree reads are permitted.
 	#[serde(default)]
 	pub accessibility: bool,
-	/// Whether pointer, keyboard, focus, and accessibility mutation are
-	/// permitted.
+	/// Whether host clipboard reads are permitted. A clipboard write is
+	/// `input`.
+	#[serde(default)]
+	pub clipboard:     bool,
+	/// Whether pointer, keyboard, focus, accessibility mutation, and clipboard
+	/// writes are permitted.
 	#[serde(default)]
 	pub input:         bool,
 }
@@ -1047,6 +1051,7 @@ mod tests {
 		let declared = tool(Some(json!({
 			"documents": {"read": true, "writeGlobs": ["notes/**"]},
 			"inference": {"maxRequests": 2, "maxUsd": "0.25"},
+			"desktop": {"clipboard": true},
 			"fetch": {"credentials": true},
 		})))
 		.expect("declared")
@@ -1065,6 +1070,10 @@ mod tests {
 				max_requests: 2,
 				max_usd:      Some(String::from("0.25")),
 			})
+		);
+		assert_eq!(
+			declared.desktop,
+			Some(HostToolDesktopEffects { clipboard: true, ..HostToolDesktopEffects::default() })
 		);
 		assert_eq!(declared.fetch, Some(HostToolFetchEffects { credentials: true }));
 		assert!(tool(Some(json!({"exec": {"command": ["git"]}}))).is_err());
