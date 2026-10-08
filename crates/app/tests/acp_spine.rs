@@ -427,6 +427,20 @@ async fn content_block_prompts_journal_text_and_image_attachments() {
 	);
 }
 
+/// Records the session transitions the kernel tells its observers.
+#[derive(Default)]
+struct Transitions(Mutex<Vec<&'static str>>);
+
+impl omp_agent::SessionObserver for Transitions {
+	fn rewound(&self) {
+		self.0.lock().push("rewound");
+	}
+
+	fn switched(&self) {
+		self.0.lock().push("switched");
+	}
+}
+
 #[tokio::test]
 async fn new_load_and_resume_switch_the_authoritative_durable_session() {
 	let directory = tempfile::tempdir().expect("temporary directory");
@@ -448,6 +462,9 @@ async fn new_load_and_resume_switch_the_authoritative_durable_session() {
 		Session::create(&resumed_path, ComponentRegistry::standard()).expect("durable resume target"),
 	);
 	let (kernel, session, home) = harness(&directory, [Script::Text("written")]);
+	let transitions = Arc::new(Transitions::default());
+	let kernel =
+		kernel.with_session_observer(Arc::clone(&transitions) as Arc<dyn omp_agent::SessionObserver>);
 	let frames = exchange(
 		kernel,
 		session,
@@ -461,6 +478,9 @@ async fn new_load_and_resume_switch_the_authoritative_durable_session() {
 "#,
 	)
 	.await;
+	// The kernel outlives each session it served, so every committed switch
+	// tells it: state the previous journal justified never serves the next.
+	assert_eq!(*transitions.0.lock(), ["switched"; 3]);
 
 	let new_id = response(&frames, "new")["result"]["sessionId"]
 		.as_str()
@@ -1397,6 +1417,7 @@ fn gated_registry(route: Arc<Mutex<Option<omp_agent::ApprovalRoute>>>) -> Arc<Re
 					),
 					constraint: omp_tool::Constraint::None,
 					effects: omp_tool::Effects::empty(),
+					confinement: omp_tool::Confinement::Host,
 					projection_code: [9; 32],
 				},
 				route,

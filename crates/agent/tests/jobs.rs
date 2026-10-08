@@ -526,3 +526,63 @@ async fn jobs_restart_adopts_terminal_artifact_and_settles_exactly_once() {
 		"the recovered terminal is journaled exactly once"
 	);
 }
+
+/// Counts the rewinds and the session switches it is told about.
+#[derive(Default)]
+struct Transitions {
+	rewinds:  AtomicUsize,
+	switches: AtomicUsize,
+}
+
+impl Transitions {
+	fn seen(&self) -> (usize, usize) {
+		(self.rewinds.load(Ordering::SeqCst), self.switches.load(Ordering::SeqCst))
+	}
+}
+
+impl omp_agent::SessionObserver for Transitions {
+	fn rewound(&self) {
+		self.rewinds.fetch_add(1, Ordering::SeqCst);
+	}
+
+	fn switched(&self) {
+		self.switches.fetch_add(1, Ordering::SeqCst);
+	}
+}
+
+/// Every rewind applied to the board tells each registered session observer
+/// once, whatever the rewind changed, and every session switch tells each one
+/// once as a switch.
+#[tokio::test]
+async fn every_rewind_and_switch_tells_the_session_observers() {
+	let temp = tempdir().expect("temporary session directory");
+	let mut session = Session::create(temp.path().join("rewind.oms"), ComponentRegistry::standard())
+		.expect("create session");
+	let genesis = session.head().expect("genesis head");
+	let txn = jobs::insert(session.dom(), genesis, JobSpec {
+		id:      Str::new_static("job-1"),
+		kind:    Str::new_static("tool"),
+		owner:   Str::new_static("Main"),
+		started: Str::new_static("1"),
+		agent:   None,
+	})
+	.expect("jobs root");
+	session.patch(txn).expect("insert job");
+	let board = JobBoard::new();
+	let (first, second) = (Arc::new(Transitions::default()), Arc::new(Transitions::default()));
+	board.observe_sessions(Arc::clone(&first) as Arc<dyn omp_agent::SessionObserver>);
+	board.observe_sessions(Arc::clone(&second) as Arc<dyn omp_agent::SessionObserver>);
+
+	let work = session.rewind(genesis).expect("rewind to genesis");
+	board.apply_lifecycle(&session, &work).await;
+	let empty = session
+		.rewind(genesis)
+		.expect("rewind that changes nothing");
+	board.apply_lifecycle(&session, &empty).await;
+	assert_eq!(first.seen(), (2, 0));
+	assert_eq!(second.seen(), (2, 0));
+
+	board.session_switched();
+	assert_eq!(first.seen(), (2, 1), "a switch is told as a switch, never as a rewind");
+	assert_eq!(second.seen(), (2, 1));
+}

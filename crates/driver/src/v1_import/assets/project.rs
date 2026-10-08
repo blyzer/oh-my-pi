@@ -26,6 +26,7 @@ use std::{
 };
 
 use omp_core::{Hash32, StrMut};
+use omp_ext::workspace_trust::inventory::{HOSTS_FILE, MCP_FILE};
 
 use super::{AssetError, Entries, mcp, ssh, write};
 use crate::v1_import::{
@@ -117,7 +118,7 @@ fn import_home_hosts(
 	let hosts = roots
 		.target(roots.active_profile.as_deref())
 		.config_dir
-		.join("hosts.toml");
+		.join(HOSTS_FILE);
 	let mut out = Entries { step: ImportStep::SshHosts, mode, list: Vec::new() };
 	let converted = convert_host_files(&mut out, project, &omp, &hosts, &layout).and_then(|()| {
 		if mode == ImportMode::Apply {
@@ -178,8 +179,7 @@ fn convert(
 	result?;
 	let mut out = Entries { step: ImportStep::Mcp, mode, list: Vec::new() };
 	let hidden = file(".mcp.json");
-	let result =
-		mcp::merge(&mut out, V1Item::Mcp, hidden.as_slice(), project, &omp.join("mcp.json"));
+	let result = mcp::merge(&mut out, V1Item::Mcp, hidden.as_slice(), project, &omp.join(MCP_FILE));
 	entries.append(&mut out.list);
 	result?;
 	let mut out = Entries { step: ImportStep::Commands, mode, list: Vec::new() };
@@ -199,7 +199,7 @@ fn convert_hosts(
 	omp: &Path,
 	layout: &V1Layout,
 ) -> Result<(), AssetError> {
-	convert_host_files(out, project, omp, &omp.join("hosts.toml"), layout)
+	convert_host_files(out, project, omp, &omp.join(HOSTS_FILE), layout)
 }
 
 /// [`convert_hosts`] into `hosts`.

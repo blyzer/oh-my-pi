@@ -3,6 +3,8 @@
 
 /// Approval-tier resolution and env-owned invocation admission.
 pub mod admission;
+/// Approval prompts relayed to the connection that issued a daemon command.
+mod approval_relay;
 pub mod blobs;
 pub mod browser_daemon;
 pub mod browser_fetch;
@@ -21,6 +23,7 @@ mod editor_base;
 pub mod editor_sync;
 pub mod eval;
 pub mod exec;
+mod exec_network_diag;
 mod exec_sandbox;
 pub mod exec_settings;
 pub mod ext_git;
@@ -32,6 +35,8 @@ pub mod host_info;
 pub mod host_settings;
 mod http_egress;
 mod journal_runtime;
+#[cfg(test)]
+mod loopback_upstream;
 pub mod lsp_settings;
 mod managed_skills;
 pub mod managed_skills_domain;
@@ -91,7 +96,7 @@ use std::{
 	path::{Path, PathBuf},
 	process::{Stdio, id},
 	sync::{
-		Arc,
+		Arc, Weak,
 		atomic::{AtomicU64, Ordering},
 	},
 	time::{Duration, SystemTime, UNIX_EPOCH},
@@ -597,6 +602,10 @@ pub struct ProjectEnvironment {
 	search_bridge:       Arc<search_backend::SearchBridgeHost>,
 	github_credentials:  Arc<GithubCredentialBridge>,
 	acp_documents:       AcpDocumentsBinding,
+	/// The route an attached session answers the daemon's relayed approval
+	/// prompts with; `None` for embedded and isolated compositions, whose host
+	/// prompts through its own in-process route.
+	approval_relay:      Option<approval_relay::ApprovalRelayBinding>,
 	lifecycle:           ProjectLifecycle,
 }
 /// Cloneable authority for replacing the Environment's extension worker
@@ -908,6 +917,7 @@ impl ProjectEnvironment {
 			search_bridge,
 			github_credentials,
 			acp_documents,
+			approval_relay: None,
 			lifecycle,
 		})
 	}
@@ -1022,6 +1032,9 @@ impl ProjectEnvironment {
 				pump_edit_repair_requests(repair_client, edit_repair, repair_shutdown).await;
 			}));
 		}
+		// The daemon's host binds no approval route: it relays its commands'
+		// prompts to this connection, which answers them through the session's.
+		let approval_relay = approval_relay::spawn_approval_pump(&client, &shutdown, &mut tasks);
 		spawn_extension_data_servers(&server, data_bindings, &shutdown, &mut tasks);
 		let lifecycle = ProjectLifecycle { shutdown: Some(shutdown), tasks, abort_tasks, server };
 		if let Err(error) =
@@ -1040,6 +1053,7 @@ impl ProjectEnvironment {
 			search_bridge,
 			github_credentials,
 			acp_documents,
+			approval_relay: Some(approval_relay),
 			lifecycle,
 		})
 	}
@@ -1109,6 +1123,7 @@ impl ProjectEnvironment {
 			search_bridge,
 			github_credentials,
 			acp_documents,
+			approval_relay: None,
 			lifecycle,
 		})
 	}
@@ -1162,6 +1177,15 @@ impl ProjectEnvironment {
 		}
 	}
 
+	/// Returns the handle through which the session's network approvals are
+	/// revoked when its conversation is rewound or switched to another session.
+	pub fn session_grants(&self) -> SessionGrants {
+		SessionGrants {
+			client: self.approval_relay.is_some().then(|| self.client.clone()),
+			server: Arc::downgrade(&self.lifecycle.server),
+		}
+	}
+
 	/// Replaces the ask presenter for this environment composition.
 	pub fn bind_ask_presenter(&self, presenter: Arc<dyn omp_tools::ask::AskPresenter>) {
 		self.lifecycle.server.bind_ask_presenter(presenter);
@@ -1169,11 +1193,19 @@ impl ProjectEnvironment {
 
 	/// Binds or clears the durable approval authority for Environment
 	/// fallbacks.
+	///
+	/// The in-process host prompts through `route`. An attached session also
+	/// answers the approval prompts the project daemon relays for the commands
+	/// it issued through `route`; while it is cleared, those prompts are
+	/// decided by their unreachable rules, which deny a sandbox amendment.
 	pub fn bind_approval_authority(
 		&self,
 		book: Option<Arc<omp_agent::ApprovalBook>>,
 		route: Option<omp_agent::ApprovalRoute>,
 	) {
+		if let Some(relay) = &self.approval_relay {
+			relay.write().clone_from(&route);
+		}
 		self.lifecycle.server.bind_approval_authority(book, route);
 	}
 
@@ -1517,9 +1549,7 @@ async fn hello_with_approval_mode(
 	client: &EnvClient,
 	approval_mode: Option<ApprovalMode>,
 ) -> Result<ServerHello, EnvdError> {
-	Ok(client
-		.hello(client_hello(approval_mode, false, None))
-		.await?)
+	Ok(client.hello(client_hello(approval_mode, &[], None)).await?)
 }
 
 async fn hello_attached_session(
@@ -1529,13 +1559,27 @@ async fn hello_attached_session(
 	edit_model: Option<&Str>,
 ) -> Result<ServerHello, EnvdError> {
 	Ok(client
-		.hello(client_hello(approval_mode, edit_repair, edit_model))
+		.hello(client_hello(approval_mode, attached_features(edit_repair), edit_model))
 		.await?)
+}
+
+/// The client features an attached session advertises.
+///
+/// It always answers the approval prompts the daemon relays for its commands
+/// (`approval_relay::pump_approval_queries`), and repairs edits when the
+/// application supplied a repair client. Embedded and isolated compositions
+/// advertise none: their host prompts through its in-process route.
+const fn attached_features(edit_repair: bool) -> &'static [&'static str] {
+	if edit_repair {
+		&[omp_env::APPROVAL_RELAY_CAPABILITY, omp_env::EDIT_REPAIR_CAPABILITY]
+	} else {
+		&[omp_env::APPROVAL_RELAY_CAPABILITY]
+	}
 }
 
 fn client_hello(
 	approval_mode: Option<ApprovalMode>,
-	edit_repair: bool,
+	features: &[&str],
 	edit_model: Option<&Str>,
 ) -> ClientHello {
 	let approval_mode = match approval_mode {
@@ -1544,9 +1588,9 @@ fn client_hello(
 		Some(ApprovalMode::Write) => ProtoApprovalMode::Write,
 		Some(ApprovalMode::Yolo) => ProtoApprovalMode::Yolo,
 	};
-	let capabilities = edit_repair
-		.then_some("edit-repair".to_owned())
-		.into_iter()
+	let capabilities = features
+		.iter()
+		.map(|feature| (*feature).to_owned())
 		.collect();
 	let props = edit_model.map(|model| ValueMap {
 		fields: std::iter::once(("edit-model".to_owned(), Value {
@@ -1580,7 +1624,7 @@ pub struct EditorDocuments {
 	client:    EnvClient,
 	documents: AcpDocumentsBinding,
 	/// Held weakly: a binding kept past the composition reaches nothing.
-	server:    std::sync::Weak<EnvServer>,
+	server:    Weak<EnvServer>,
 }
 
 impl EditorDocuments {
@@ -1608,6 +1652,46 @@ impl EditorDocuments {
 				error = &error as &dyn std::error::Error,
 				documents,
 				"failed to update ACP connection binding"
+			);
+		}
+	}
+}
+
+/// Cloneable handle on the network endpoints a session approved for the rest
+/// of the session (sandbox amendments answered `session`, ADR 0028).
+///
+/// Those grants are a cache of journaled decisions, kept by the approval
+/// binding that answered them: the in-process host route of an embedded or
+/// isolated composition, or this composition's connection to the project
+/// daemon when it is attached. [`Self::revoke`] drops both when the
+/// conversation is rewound or switched to another session, so no endpoint
+/// stays admitted that the journal the session now serves does not approve;
+/// the approval desk refills them from that journal, one refused attempt per
+/// endpoint.
+#[derive(Clone)]
+pub struct SessionGrants {
+	/// The attached connection, whose daemon-side relay holds the grants of
+	/// the commands it issues; `None` when nothing is attached.
+	client: Option<EnvClient>,
+	/// Held weakly: a handle kept past the composition reaches nothing.
+	server: Weak<EnvServer>,
+}
+
+impl SessionGrants {
+	/// Drops every network endpoint this session approved for the session.
+	pub fn revoke(&self) {
+		if let Some(server) = self.server.upgrade() {
+			server.revoke_approval_grants();
+		}
+		if let Some(client) = &self.client
+			&& let Err(error) = client.revoke_approval_grants()
+		{
+			// The attached client's queue is unbounded, so only a closed
+			// transport fails here, and the daemon dropped this connection's
+			// grants with its relay when it closed.
+			tracing::warn!(
+				error = &error as &dyn std::error::Error,
+				"failed to revoke the daemon's session approval grants"
 			);
 		}
 	}
@@ -2109,18 +2193,23 @@ mod tests {
 	}
 
 	#[test]
-	fn attached_hello_advertises_only_supplied_edit_repair_facts() {
-		let plain = client_hello(None, false, None);
-		assert!(plain.capabilities.is_empty());
+	fn attached_hello_relays_approvals_and_advertises_only_supplied_edit_repair_facts() {
+		let plain = client_hello(None, &[], None);
+		assert!(plain.capabilities.is_empty(), "embedded and isolated hellos advertise nothing");
 		assert!(plain.props.is_none());
 
-		let repair_only = client_hello(None, true, None);
-		assert_eq!(repair_only.capabilities, ["edit-repair"]);
-		assert!(repair_only.props.is_none());
+		let attached = client_hello(None, attached_features(false), None);
+		assert_eq!(attached.capabilities, ["approval-relay"]);
+		assert!(attached.props.is_none());
+
+		let repair = client_hello(None, attached_features(true), None);
+		assert_eq!(repair.capabilities, ["approval-relay", "edit-repair"]);
+		assert!(repair.props.is_none());
 
 		let model = sf!("smol");
-		let model_only = client_hello(Some(ApprovalMode::Write), false, Some(&model));
-		assert!(model_only.capabilities.is_empty());
+		let model_only =
+			client_hello(Some(ApprovalMode::Write), attached_features(false), Some(&model));
+		assert_eq!(model_only.capabilities, ["approval-relay"]);
 		assert_eq!(model_only.approval_mode, ProtoApprovalMode::Write as i32);
 		let model = model_only
 			.props

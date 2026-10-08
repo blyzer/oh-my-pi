@@ -435,9 +435,15 @@ impl ShellExec for ShellExecHost {
 			..Default::default()
 		};
 		super::exec::set_run_environment(&mut exec_request, environment);
+		// A command bash runs for a connection's invocation prompts that
+		// connection; an in-process call has no relay and uses the host route.
 		let (_, run) = self
 			.host
-			.exec(exec_request, request.timeout_ms.map(Duration::from_millis))
+			.exec_relayed(
+				exec_request,
+				request.timeout_ms.map(Duration::from_millis),
+				tools::invocation_approvals(),
+			)
 			.await
 			.map_err(|error| resource_fault("run", error))?;
 		Ok(HostShellRun::new(self.host.clone(), run))
@@ -623,8 +629,15 @@ fn protocol_fault(operation: &'static str, message: impl Into<Str>) -> Fault {
 mod tests {
 	use std::pin::Pin;
 
+	#[cfg(target_os = "macos")]
+	use flume::Receiver;
+	#[cfg(target_os = "macos")]
+	use tokio::task::JoinHandle;
+
 	use super::*;
 	use crate::exec_settings::ExecSandboxMode;
+	#[cfg(target_os = "macos")]
+	use crate::loopback_upstream::{BODY, LoopbackUpstream};
 
 	#[test]
 	fn exec_diagnostics_preserve_typed_recovery_fields_across_the_wire() {
@@ -916,6 +929,257 @@ mod tests {
 		assert_eq!(restored.outcome, ExecOutcome::Denied);
 		assert!(!root.path().join(".git/blocked-again.txt").exists());
 		host.close_session(&session).await.expect("close session");
+	}
+
+	/// What one command run to its exit produced.
+	#[cfg(target_os = "macos")]
+	struct Settled {
+		starts: usize,
+		status: ExecStatus,
+		output: String,
+	}
+
+	#[cfg(target_os = "macos")]
+	async fn run_to_exit(host: &ShellExecHost, session: &Session, command: &str) -> Settled {
+		let mut run = host
+			.run(session, RunRequest {
+				command:     Str::from(command),
+				environment: BTreeMap::new(),
+				timeout_ms:  Some(30_000),
+			})
+			.await
+			.expect("sandboxed command starts");
+		let mut output = Vec::new();
+		let mut starts = 0;
+		let status = loop {
+			match run.next_event().await.expect("shell event") {
+				Some(RunEvent::Started { .. }) => starts += 1,
+				Some(RunEvent::Output(update)) => output.extend_from_slice(update.data.as_ref()),
+				Some(RunEvent::Exit(status)) => break status,
+				None => panic!("shell event stream closed before exit"),
+			}
+		};
+		Settled { starts, status, output: String::from_utf8_lossy(&output).into_owned() }
+	}
+
+	/// A host whose bound route answers every sandbox amendment.
+	#[cfg(target_os = "macos")]
+	struct AmendingHost {
+		host:     ShellExecHost,
+		/// Each prompt's subject and offered scopes, in order.
+		prompts:  Receiver<(Str, Vec<Str>)>,
+		approver: JoinHandle<()>,
+	}
+
+	/// A host whose bound route answers every sandbox amendment with `scope`,
+	/// under a workspace-write sandbox whose scoped broker may reach loopback
+	/// and refuses the hosts in `deny`.
+	#[cfg(target_os = "macos")]
+	fn network_amendment_host(
+		root: &Path,
+		scope: omp_agent::ApprovalScope,
+		deny: &[&'static str],
+	) -> AmendingHost {
+		let exec = ExecHost::new();
+		let (route, inbox) =
+			omp_agent::ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		exec.bind_sandbox_approval_route(Some(route));
+		let (asked, prompts) = flume::unbounded();
+		let approver = tokio::spawn(async move {
+			while let Ok(request) = inbox.recv().await {
+				let reason = request.ticket.reasons.first().expect("amendment reason");
+				assert_eq!(reason.kind, "sandbox_amendment");
+				let _ = asked.send((reason.subject.clone(), reason.scopes.clone()));
+				request
+					.respond(omp_agent::ApprovalDecision {
+						approved:   true,
+						scope:      scope.clone(),
+						source:     omp_agent::ApprovalSource::User,
+						decided_by: Some(sf!("test approver")),
+						reason:     None,
+						audited:    false,
+					})
+					.expect("answer the amendment");
+			}
+		});
+		let root_uri = Url::from_directory_path(root)
+			.expect("workspace URI")
+			.to_string();
+		let host = ShellExecHost::new(
+			exec,
+			BlobHost::open(root.join(".omp-test-blobs")).expect("blob host"),
+			Str::from(root_uri),
+			Arc::new(ResolverTable::default()),
+			ShellSettings::default(),
+			&SandboxSettings {
+				mode: ExecSandboxMode::WorkspaceWrite,
+				allow_localhost: true,
+				deny_domains: deny.iter().copied().map(Str::new_static).collect(),
+				..SandboxSettings::default()
+			},
+		);
+		AmendingHost { host, prompts, approver }
+	}
+
+	/// The pip pattern under Seatbelt: one command needs host A and then host
+	/// B, neither allowlisted. Approving each for the session finishes it in
+	/// one call, two prompts and three runs, and later commands, in this shell
+	/// or another of the same host, reach both without a prompt.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn session_network_grants_chain_reruns_and_outlive_the_command() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		let (first, second) = (LoopbackUpstream::serve(), LoopbackUpstream::serve());
+		let command = format!("{} && {}", first.fetch(), second.fetch());
+		let AmendingHost { host, prompts, approver } =
+			network_amendment_host(root.path(), omp_agent::ApprovalScope::Session, &[]);
+		let session = host
+			.open_session(SessionOptions::default())
+			.await
+			.expect("sandbox session");
+
+		let pip = run_to_exit(&host, &session, &command).await;
+		let asked = prompts.drain().collect::<Vec<_>>();
+		let session_scopes = vec![sf!("once"), sf!("session")];
+		assert_eq!(
+			asked,
+			[
+				(sf!("network localhost:{}", first.port()), session_scopes.clone()),
+				(sf!("network localhost:{}", second.port()), session_scopes),
+			],
+			"one prompt per new host, in order: {}",
+			pip.output
+		);
+		assert_eq!(pip.starts, 3, "one call, three runs: {}", pip.output);
+		assert_eq!(pip.status.outcome, ExecOutcome::Exited, "{}", pip.output);
+		assert_eq!(pip.status.exit_code, Some(0));
+		// The second run printed host A's answer before host B was refused, so
+		// a rerun repeats what ran before the refusal.
+		assert_eq!(pip.output, BODY.repeat(3), "{}", pip.output);
+		let approved = pip
+			.status
+			.diags
+			.iter()
+			.filter(|diag| diag.text.contains("approved for this session"))
+			.map(|diag| diag.text.as_str())
+			.collect::<Vec<_>>();
+		assert_eq!(approved.len(), 2, "{approved:?}");
+		assert!(approved[1].contains("rerun 2 of at most 4"), "{approved:?}");
+
+		let again = run_to_exit(&host, &session, &command).await;
+		assert_eq!(again.starts, 1, "{}", again.output);
+		assert_eq!(again.status.exit_code, Some(0), "{}", again.output);
+		let other = host
+			.open_session(SessionOptions::default())
+			.await
+			.expect("second sandbox session");
+		let elsewhere = run_to_exit(&host, &other, &command).await;
+		assert_eq!(elsewhere.starts, 1, "{}", elsewhere.output);
+		assert_eq!(elsewhere.status.exit_code, Some(0), "{}", elsewhere.output);
+		assert!(
+			prompts.is_empty(),
+			"a granted endpoint prompted again: {:?}",
+			prompts.drain().collect::<Vec<_>>()
+		);
+
+		host.close_session(&other).await.expect("close session");
+		host.close_session(&session).await.expect("close session");
+		approver.abort();
+	}
+
+	/// The same command with each prompt answered `once`: the approved rerun
+	/// reaches host A, but its refusal of host B is final, as a once approval
+	/// ends the chain.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn once_network_grants_still_end_the_chain_after_one_rerun() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		let (first, second) = (LoopbackUpstream::serve(), LoopbackUpstream::serve());
+		let command = format!("{} && {}", first.fetch(), second.fetch());
+		let AmendingHost { host, prompts, approver } =
+			network_amendment_host(root.path(), omp_agent::ApprovalScope::Once, &[]);
+		let session = host
+			.open_session(SessionOptions::default())
+			.await
+			.expect("sandbox session");
+
+		let once = run_to_exit(&host, &session, &command).await;
+		let asked = prompts
+			.drain()
+			.map(|(subject, _)| subject)
+			.collect::<Vec<_>>();
+		assert_eq!(asked, [sf!("network localhost:{}", first.port())], "{}", once.output);
+		assert_eq!(once.starts, 2, "{}", once.output);
+		assert_eq!(once.status.outcome, ExecOutcome::Denied, "{}", once.output);
+		let refused = sf!("localhost:{}", second.port());
+		assert!(
+			once
+				.status
+				.diags
+				.iter()
+				.any(|diag| diag.text.contains(refused.as_str())),
+			"the final denial names host B: {:?}",
+			once.status.diags
+		);
+		assert!(
+			!once
+				.status
+				.diags
+				.iter()
+				.any(|diag| diag.text.contains("approved for this session")),
+			"{:?}",
+			once.status.diags
+		);
+		host.close_session(&session).await.expect("close session");
+		approver.abort();
+	}
+
+	/// An explicit `sv_sandbox_deny_domains` entry beats every approval: the
+	/// refused host is never offered for approval, even to a binding that
+	/// approves everything for the session, and the network diag names the deny
+	/// list as the cause.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn deny_listed_hosts_are_never_offered_for_approval() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		let upstream = LoopbackUpstream::serve();
+		let AmendingHost { host, prompts, approver } =
+			network_amendment_host(root.path(), omp_agent::ApprovalScope::Session, &["localhost"]);
+		let session = host
+			.open_session(SessionOptions::default())
+			.await
+			.expect("sandbox session");
+
+		let denied = run_to_exit(&host, &session, &upstream.fetch()).await;
+		assert!(
+			prompts.is_empty(),
+			"a deny-listed host was offered: {:?}",
+			prompts.drain().collect::<Vec<_>>()
+		);
+		assert_eq!(denied.starts, 1, "{}", denied.output);
+		// curl fails on the broker's 403; no amendable fact makes it a denial.
+		assert_eq!(denied.status.outcome, ExecOutcome::Failed, "{}", denied.output);
+		let endpoint = sf!("localhost:{}", upstream.port());
+		assert!(
+			denied.status.diags.iter().any(|diag| {
+				diag.text.contains(endpoint.as_str())
+					&& diag.text.contains("sv_sandbox_deny_domains")
+					&& diag.text.contains("no prompt is offered")
+			}),
+			"{:?}",
+			denied.status.diags
+		);
+		host.close_session(&session).await.expect("close session");
+		approver.abort();
 	}
 
 	/// Editor peer that fails the test if the shell ever reaches it.

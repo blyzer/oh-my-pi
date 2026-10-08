@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use flume::{Receiver, Sender};
 use omp_core::{FastHashMap, FastHashSet, Str};
-use omp_proto::env::v1::{ClientFrame, ServerFrame, client_frame, data_request, server_frame};
+use omp_proto::env::v1::{
+	ApprovalWithdrawn, ClientFrame, ServerFrame, client_frame, data_request, server_frame,
+};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 
@@ -159,9 +161,7 @@ async fn route(
 		.await
 		.map_err(|_| PartitionError::ClientClosed)?;
 
-	let mut invocation_routes = FastHashMap::<Str, Backend>::default();
-	let mut request_routes = FastHashMap::<u64, Backend>::default();
-	let mut request_invocations = FastHashMap::<u64, Str>::default();
+	let mut routes = Routes::default();
 	let mut local_open = true;
 	let mut remote_open = true;
 
@@ -169,32 +169,94 @@ async fn route(
 		tokio::select! {
 			frame = client_rx.recv_async() => {
 				let frame = frame.map_err(|_| PartitionError::ClientClosed)?;
-				let (backend, invocation) = route_client_frame(&frame, &remote_tools, &invocation_routes, &request_routes);
+				let (backend, invocation) = route_client_frame(&frame, &remote_tools, &routes.invocations, &routes.requests);
 				if let Some(client_frame::Body::InvokeTool(invoke)) = frame.body.as_ref() {
-					invocation_routes.insert(Str::from(invoke.invocation_id.clone()), backend);
+					routes.invocations.insert(Str::from(invoke.invocation_id.clone()), backend);
 				}
 				if frame.request_id != 0 && opens_response_route(&frame) {
-					request_routes.insert(frame.request_id, backend);
+					routes.requests.insert(frame.request_id, backend);
 					if let Some(invocation) = invocation {
-						request_invocations.insert(frame.request_id, invocation);
+						routes.request_invocations.insert(frame.request_id, invocation);
+					}
+				}
+				if let Some(client_frame::Body::ApprovalAnswer(answer)) = frame.body.as_ref() {
+					routes.approvals.remove(&(frame.request_id, answer.query_id));
+					let open = match backend { Backend::Local => local_open, Backend::Remote => remote_open };
+					if !open {
+						// The query closed with its backend and the router already
+						// withdrew it from the client; nothing is left to decide it.
+						tracing::debug!(
+							request_id = frame.request_id,
+							query_id = answer.query_id,
+							backend = backend.name(),
+							"dropped an approval answer for a closed backend"
+						);
+						continue;
 					}
 				}
 				let target = match backend { Backend::Local => &local_tx, Backend::Remote => &remote_tx };
 				target.send_async(frame).await.map_err(|_| PartitionError::BackendClosed { backend: backend.name() })?;
 			}
-			frame = local_rx.recv_async(), if local_open => match frame {
-				Ok(frame) => forward_server_frame(frame, &client_tx, &mut invocation_routes, &mut request_routes, &mut request_invocations).await?,
-				Err(_) => local_open = false,
+			frame = local_rx.recv_async(), if local_open => {
+				if let Ok(frame) = frame {
+					forward_server_frame(frame, Backend::Local, &client_tx, &mut routes).await?;
+				} else {
+					local_open = false;
+					withdraw_approvals(Backend::Local, &client_tx, &mut routes.approvals).await?;
+				}
 			},
-			frame = remote_rx.recv_async(), if remote_open => match frame {
-				Ok(frame) => forward_server_frame(frame, &client_tx, &mut invocation_routes, &mut request_routes, &mut request_invocations).await?,
-				Err(_) => remote_open = false,
+			frame = remote_rx.recv_async(), if remote_open => {
+				if let Ok(frame) = frame {
+					forward_server_frame(frame, Backend::Remote, &client_tx, &mut routes).await?;
+				} else {
+					remote_open = false;
+					withdraw_approvals(Backend::Remote, &client_tx, &mut routes.approvals).await?;
+				}
 			},
 		}
 		if !local_open && !remote_open {
 			return Err(PartitionError::BackendClosed { backend: "local and remote" });
 		}
 	}
+}
+
+/// Router-owned correlation tables.
+#[derive(Default)]
+struct Routes {
+	/// Backend serving each open invocation.
+	invocations:         FastHashMap<Str, Backend>,
+	/// Backend serving each request that opened a response route.
+	requests:            FastHashMap<u64, Backend>,
+	/// Invocation pinned by each request route.
+	request_invocations: FastHashMap<u64, Str>,
+	/// Relayed approval queries forwarded to the client and not yet answered
+	/// or withdrawn, keyed by `(request_id, query_id)` and owned by the backend
+	/// that raised them. They outlive their request route, because a detached
+	/// command keeps its prompt open after the issuing request ended.
+	approvals:           FastHashMap<(u64, u64), Backend>,
+}
+
+/// Withdraws every open approval query that `backend` raised.
+///
+/// The merged client transport outlives one backend, so the client would
+/// otherwise hold the prompts of a backend that can neither decide nor
+/// withdraw them.
+async fn withdraw_approvals(
+	backend: Backend,
+	client: &Sender<ServerFrame>,
+	approvals: &mut FastHashMap<(u64, u64), Backend>,
+) -> Result<(), PartitionError> {
+	for ((request_id, query_id), _) in approvals.extract_if(|_, owner| *owner == backend) {
+		client
+			.send_async(ServerFrame {
+				request_id,
+				body: Some(server_frame::Body::ApprovalWithdrawn(ApprovalWithdrawn { query_id })),
+				..ServerFrame::default()
+			})
+			.await
+			.map_err(|_| PartitionError::ClientClosed)?;
+	}
+	Ok(())
 }
 
 async fn receive_hello(
@@ -256,6 +318,14 @@ fn route_client_frame(
 		Some(client_frame::Body::AcpDocumentAnswer(value)) => {
 			invocation_route(&value.invocation_id, invocations)
 		},
+		// The backend that raised the query owns the issuing request; a request
+		// whose route ended (a detached command) defaults to the environment.
+		Some(client_frame::Body::ApprovalAnswer(_)) => {
+			(requests.get(&frame.request_id).copied().unwrap_or(remote), None)
+		},
+		// Only the environment relays approvals, so only it holds this
+		// connection's session grants.
+		Some(client_frame::Body::RevokeApprovalGrants(_)) => (remote, None),
 		Some(client_frame::Body::Cancel(cancel)) => match cancel.target.as_ref() {
 			Some(omp_proto::env::v1::cancel_request::Target::TargetRequestId(id)) => {
 				(requests.get(id).copied().unwrap_or(remote), None)
@@ -300,7 +370,14 @@ fn route_client_frame(
 }
 
 const fn opens_response_route(frame: &ClientFrame) -> bool {
-	!matches!(frame.body.as_ref(), Some(client_frame::Body::AcpDocumentAnswer(_)))
+	!matches!(
+		frame.body.as_ref(),
+		Some(
+			client_frame::Body::AcpDocumentAnswer(_)
+				| client_frame::Body::ApprovalAnswer(_)
+				| client_frame::Body::RevokeApprovalGrants(_)
+		)
+	)
 }
 
 fn invocation_route(id: &str, routes: &FastHashMap<Str, Backend>) -> (Backend, Option<Str>) {
@@ -338,28 +415,37 @@ const fn route_data(body: Option<&data_request::Body>) -> Backend {
 
 async fn forward_server_frame(
 	frame: ServerFrame,
+	backend: Backend,
 	client: &Sender<ServerFrame>,
-	invocations: &mut FastHashMap<Str, Backend>,
-	requests: &mut FastHashMap<u64, Backend>,
-	request_invocations: &mut FastHashMap<u64, Str>,
+	routes: &mut Routes,
 ) -> Result<(), PartitionError> {
 	match frame.body.as_ref() {
 		Some(server_frame::Body::Verdict(verdict)) => {
 			let id = Str::from(verdict.invocation_id.clone());
-			invocations.remove(&id);
-			request_invocations.retain(|request, invocation| {
+			routes.invocations.remove(&id);
+			routes.request_invocations.retain(|request, invocation| {
 				let keep = invocation != &id;
 				if !keep {
-					requests.remove(request);
+					routes.requests.remove(request);
 				}
 				keep
 			});
 		},
 		Some(server_frame::Body::Error(_)) => {
-			requests.remove(&frame.request_id);
-			if let Some(invocation) = request_invocations.remove(&frame.request_id) {
-				invocations.remove(&invocation);
+			routes.requests.remove(&frame.request_id);
+			if let Some(invocation) = routes.request_invocations.remove(&frame.request_id) {
+				routes.invocations.remove(&invocation);
 			}
+		},
+		Some(server_frame::Body::ApprovalQuery(query)) => {
+			routes
+				.approvals
+				.insert((frame.request_id, query.query_id), backend);
+		},
+		Some(server_frame::Body::ApprovalWithdrawn(withdrawn)) => {
+			routes
+				.approvals
+				.remove(&(frame.request_id, withdrawn.query_id));
 		},
 		_ => {},
 	}
@@ -381,12 +467,14 @@ mod tests {
 	use std::time::Duration;
 
 	use omp_proto::env::v1::{
-		AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, ArgText, ClientHello, DataRequest,
-		DocumentOp, EditRepairAnswer, EditRepairQuery, EvalResetRequest, InvokeTool,
-		RegisterPresence, ServerHello, Update,
+		AcpBind, AcpDocumentAnswer, AcpReadQuery, AcpWriteQuery, ApprovalAnswer, ApprovalDecision,
+		ApprovalQuery, ApprovalSpec, ArgText, ClientHello, DataRequest, DocumentOp, EditRepairAnswer,
+		EditRepairQuery, EvalResetRequest, InvokeTool, RegisterPresence, RevokeApprovalGrants,
+		ServerHello, Update,
 	};
 
 	use super::*;
+	use crate::ApprovalQueryEvent;
 
 	async fn receive(transport: &InProcessEnvTransport) -> ClientFrame {
 		tokio::time::timeout(Duration::from_secs(2), transport.recv())
@@ -431,6 +519,278 @@ mod tests {
 			assert_eq!(actual, expected);
 			assert_eq!(pinned_invocation.as_deref(), Some(invocation_id));
 		}
+	}
+
+	#[test]
+	fn approval_answers_follow_the_owning_request_backend() {
+		let remote_tools = FastHashSet::default();
+		let mut invocations = FastHashMap::default();
+		invocations.insert(Str::from("local-call"), Backend::Local);
+		let mut requests = FastHashMap::default();
+		requests.insert(71, Backend::Local);
+		requests.insert(72, Backend::Remote);
+
+		for (request_id, expected) in
+			[(71, Backend::Local), (72, Backend::Remote), (73, Backend::Remote)]
+		{
+			let answer = frame(
+				request_id,
+				client_frame::Body::ApprovalAnswer(ApprovalAnswer { query_id: 1, decision: None }),
+			);
+			let (actual, pinned_invocation) =
+				route_client_frame(&answer, &remote_tools, &invocations, &requests);
+			assert_eq!(actual, expected);
+			assert!(pinned_invocation.is_none(), "an approval answer pinned an invocation");
+			assert!(!opens_response_route(&answer));
+		}
+	}
+
+	#[tokio::test]
+	async fn approval_queries_merge_without_rewriting_routes() {
+		let (client, merged) = flume::unbounded();
+		let mut routes = Routes::default();
+		routes
+			.invocations
+			.insert(Str::from("bash-1"), Backend::Remote);
+		routes.requests.insert(81, Backend::Remote);
+		routes.request_invocations.insert(81, Str::from("bash-1"));
+		let frames = [
+			ServerFrame {
+				request_id: 81,
+				body: Some(server_frame::Body::ApprovalQuery(ApprovalQuery {
+					query_id:      1,
+					invocation_id: None,
+					reasons:       vec![ApprovalSpec {
+						kind: "sandbox_amendment".into(),
+						subject: "echo x > .git/a".into(),
+						..ApprovalSpec::default()
+					}],
+					created_at_ms: 5,
+				})),
+				..ServerFrame::default()
+			},
+			ServerFrame {
+				request_id: 81,
+				body: Some(server_frame::Body::ApprovalWithdrawn(ApprovalWithdrawn { query_id: 1 })),
+				..ServerFrame::default()
+			},
+		];
+
+		let open = [Some(Backend::Remote), None];
+		for (frame, open) in frames.into_iter().zip(open) {
+			forward_server_frame(frame.clone(), Backend::Remote, &client, &mut routes)
+				.await
+				.expect("merge approval frame");
+			assert_eq!(
+				merged
+					.recv_async()
+					.await
+					.expect("receive merged approval frame"),
+				frame
+			);
+			assert_eq!(routes.approvals.get(&(81, 1)).copied(), open);
+		}
+		assert_eq!(routes.requests.get(&81), Some(&Backend::Remote));
+		assert_eq!(routes.request_invocations.get(&81).map(Str::as_str), Some("bash-1"));
+		assert_eq!(routes.invocations.get("bash-1"), Some(&Backend::Remote));
+	}
+
+	fn approval_query(request_id: u64, query_id: u64) -> ServerFrame {
+		ServerFrame {
+			request_id,
+			body: Some(server_frame::Body::ApprovalQuery(ApprovalQuery {
+				query_id,
+				..ApprovalQuery::default()
+			})),
+			..ServerFrame::default()
+		}
+	}
+
+	fn approval_withdrawn(request_id: u64, query_id: u64) -> ServerFrame {
+		ServerFrame {
+			request_id,
+			body: Some(server_frame::Body::ApprovalWithdrawn(ApprovalWithdrawn { query_id })),
+			..ServerFrame::default()
+		}
+	}
+
+	fn approval_answer(request_id: u64, query_id: u64) -> ClientFrame {
+		frame(
+			request_id,
+			client_frame::Body::ApprovalAnswer(ApprovalAnswer { query_id, decision: None }),
+		)
+	}
+
+	async fn merged(pipe: &FramePipe) -> ServerFrame {
+		tokio::time::timeout(Duration::from_secs(2), pipe.incoming().recv_async())
+			.await
+			.expect("merged frame timed out")
+			.expect("router closed final responses")
+	}
+
+	async fn accept_hello(backend: &InProcessEnvTransport) {
+		assert!(matches!(receive(backend).await.body, Some(client_frame::Body::Hello(_))));
+		backend
+			.send(ServerFrame {
+				body: Some(server_frame::Body::Hello(ServerHello::default())),
+				..ServerFrame::default()
+			})
+			.await
+			.expect("send backend hello");
+	}
+
+	/// A closed backend can neither decide nor withdraw the prompts it raised,
+	/// so the router withdraws exactly its unanswered queries, keeps the other
+	/// backend's open, and drops a late answer instead of ending the client.
+	#[tokio::test]
+	async fn closing_a_backend_withdraws_only_its_open_approval_queries() {
+		let (final_pipe, final_transport) = in_process_frames(8);
+		let (local_pipe, local_transport) = in_process_frames(8);
+		let (remote_pipe, remote_transport) = in_process_frames(8);
+		let mut tools = FastHashSet::default();
+		tools.insert(Str::from("bash"));
+		let router = tokio::spawn(route(final_transport, local_pipe, remote_pipe, Arc::new(tools)));
+
+		send(&final_pipe, frame(0, client_frame::Body::Hello(ClientHello::default()))).await;
+		accept_hello(&local_transport).await;
+		accept_hello(&remote_transport).await;
+		assert!(matches!(merged(&final_pipe).await.body, Some(server_frame::Body::Hello(_))));
+
+		// Requests 81 and 82 run the daemon's bash; 90 runs a local tool.
+		for (request_id, name) in [(81, "bash"), (82, "bash"), (90, "ask")] {
+			let invoke = InvokeTool {
+				invocation_id: format!("call-{request_id}"),
+				name: name.into(),
+				..InvokeTool::default()
+			};
+			send(&final_pipe, frame(request_id, client_frame::Body::InvokeTool(invoke))).await;
+		}
+		for (backend, request_id) in
+			[(&remote_transport, 81), (&remote_transport, 82), (&local_transport, 90)]
+		{
+			assert_eq!(receive(backend).await.request_id, request_id);
+		}
+		for (backend, request_id, query_id) in
+			[(&remote_transport, 81, 1), (&remote_transport, 82, 2), (&local_transport, 90, 1)]
+		{
+			backend
+				.send(approval_query(request_id, query_id))
+				.await
+				.expect("send approval query");
+		}
+		let mut queried = Vec::new();
+		for _ in 0..3 {
+			let query = merged(&final_pipe).await;
+			assert!(matches!(query.body, Some(server_frame::Body::ApprovalQuery(_))));
+			queried.push(query.request_id);
+		}
+		queried.sort_unstable();
+		assert_eq!(queried, [81, 82, 90]);
+
+		send(&final_pipe, approval_answer(82, 2)).await;
+		assert_eq!(receive(&remote_transport).await, approval_answer(82, 2));
+
+		drop(remote_transport);
+		assert_eq!(merged(&final_pipe).await, approval_withdrawn(81, 1));
+
+		// The late answer to the closed daemon is dropped; the router still
+		// carries the local backend's answer that follows it.
+		send(&final_pipe, approval_answer(81, 1)).await;
+		send(&final_pipe, approval_answer(90, 1)).await;
+		assert_eq!(receive(&local_transport).await, approval_answer(90, 1));
+
+		// Only (81, 1) was withdrawn: the answered daemon query and the local
+		// query produce nothing ahead of the next local frame.
+		let sentinel = ServerFrame {
+			request_id: 90,
+			body: Some(server_frame::Body::Update(Update {
+				invocation_id: "call-90".into(),
+				..Update::default()
+			})),
+			..ServerFrame::default()
+		};
+		local_transport
+			.send(sentinel.clone())
+			.await
+			.expect("send local update");
+		assert_eq!(merged(&final_pipe).await, sentinel);
+
+		drop(final_pipe);
+		let result = tokio::time::timeout(Duration::from_secs(2), router)
+			.await
+			.expect("router shutdown timed out")
+			.expect("router task panicked");
+		assert!(matches!(result, Err(PartitionError::ClientClosed)), "{result:?}");
+	}
+
+	/// A partitioned client's response transport outlives the daemon, so the
+	/// daemon's open prompt reaches the client's queue as a withdrawal and can
+	/// no longer be answered.
+	#[tokio::test]
+	async fn partitioned_client_loses_daemon_queries_when_the_daemon_closes() {
+		const WAIT: Duration = Duration::from_secs(2);
+		let (local_pipe, local_transport) = in_process_frames(8);
+		let (remote_pipe, remote_transport) = in_process_frames(8);
+		let (client, router) =
+			PartitionedEnvTransport::spawn(local_pipe, remote_pipe, Arc::new(FastHashSet::default()));
+		let (hello, (), ()) = tokio::join!(
+			client.hello(ClientHello::default()),
+			accept_hello(&local_transport),
+			accept_hello(&remote_transport),
+		);
+		hello.expect("partitioned hello");
+		let approvals = client.approval_queries();
+
+		remote_transport
+			.send(approval_query(81, 1))
+			.await
+			.expect("send daemon approval query");
+		assert!(matches!(
+			tokio::time::timeout(WAIT, approvals.recv_async())
+				.await
+				.expect("approval query timed out"),
+			Ok(ApprovalQueryEvent::Requested { request_id: 81, .. })
+		));
+
+		drop(remote_transport);
+		assert_eq!(
+			tokio::time::timeout(WAIT, approvals.recv_async())
+				.await
+				.expect("approval withdrawal timed out"),
+			Ok(ApprovalQueryEvent::Withdrawn { request_id: 81, query_id: 1 })
+		);
+		assert!(matches!(
+			client
+				.answer_approval(81, 1, ApprovalDecision {
+					approved: true,
+					..ApprovalDecision::default()
+				})
+				.await,
+			Err(ClientError::ApprovalQueryClosed { request_id: 81, query_id: 1 })
+		));
+
+		drop(client);
+		let result = tokio::time::timeout(WAIT, router)
+			.await
+			.expect("router shutdown timed out")
+			.expect("router task panicked");
+		// The session host stayed open, so only the client's close ends it.
+		assert!(matches!(result, Err(PartitionError::ClientClosed)), "{result:?}");
+		drop(local_transport);
+	}
+
+	#[test]
+	fn grant_revocation_routes_to_the_environment_and_opens_no_route() {
+		let revoke = frame(0, client_frame::Body::RevokeApprovalGrants(RevokeApprovalGrants {}));
+		let (backend, invocation) = route_client_frame(
+			&revoke,
+			&FastHashSet::default(),
+			&FastHashMap::default(),
+			&FastHashMap::default(),
+		);
+		assert_eq!(backend, Backend::Remote);
+		assert!(invocation.is_none());
+		assert!(!opens_response_route(&revoke));
 	}
 
 	#[test]
@@ -498,9 +858,7 @@ mod tests {
 	#[tokio::test]
 	async fn acp_queries_merge_without_rewriting() {
 		let (client, merged) = flume::unbounded();
-		let mut invocations = FastHashMap::default();
-		let mut requests = FastHashMap::default();
-		let mut request_invocations = FastHashMap::default();
+		let mut routes = Routes::default();
 		let frames = [
 			ServerFrame {
 				request_id: 81,
@@ -525,15 +883,9 @@ mod tests {
 		];
 
 		for frame in frames {
-			forward_server_frame(
-				frame.clone(),
-				&client,
-				&mut invocations,
-				&mut requests,
-				&mut request_invocations,
-			)
-			.await
-			.expect("merge ACP request");
+			forward_server_frame(frame.clone(), Backend::Remote, &client, &mut routes)
+				.await
+				.expect("merge ACP request");
 			assert_eq!(
 				merged
 					.recv_async()
@@ -547,9 +899,7 @@ mod tests {
 	#[tokio::test]
 	async fn edit_repair_queries_merge_without_rewriting() {
 		let (client, merged) = flume::unbounded();
-		let mut invocations = FastHashMap::default();
-		let mut requests = FastHashMap::default();
-		let mut request_invocations = FastHashMap::default();
+		let mut routes = Routes::default();
 		let query = ServerFrame {
 			request_id: 91,
 			body: Some(server_frame::Body::EditRepairQuery(EditRepairQuery {
@@ -559,15 +909,9 @@ mod tests {
 			..ServerFrame::default()
 		};
 
-		forward_server_frame(
-			query.clone(),
-			&client,
-			&mut invocations,
-			&mut requests,
-			&mut request_invocations,
-		)
-		.await
-		.expect("merge repair query");
+		forward_server_frame(query.clone(), Backend::Remote, &client, &mut routes)
+			.await
+			.expect("merge repair query");
 		assert_eq!(merged.recv_async().await.expect("receive merged query"), query);
 	}
 

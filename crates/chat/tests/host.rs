@@ -174,19 +174,18 @@ fn ctrl_c_during_an_active_turn_clears_without_interrupting() {
 	assert!(idle_commands.try_recv().is_err());
 }
 
-#[test]
-fn pending_approval_projects_overlay_and_hotkeys() {
-	let directory = tempdir().expect("temp directory");
-	let path = directory.path().join("approval.oms");
-	let mut session =
-		Session::create(path, ComponentRegistry::standard()).expect("create approval session");
+/// A session holding one pending approval prompt that offers `scopes`, and
+/// the prompt's ticket id.
+fn approval_session(directory: &std::path::Path, scopes: &[&str]) -> (Session, omp_core::Str) {
+	let mut session = Session::create(directory.join("approval.oms"), ComponentRegistry::standard())
+		.expect("create approval session");
 	let ticket = ApprovalBook::default()
 		.open(&mut session, ApprovalSpec {
 			title:         "Run command".into(),
 			body:          "The command changes the project.".into(),
 			subject:       "cargo fix".into(),
 			kind:          "exec".into(),
-			scopes:        vec!["once".into()],
+			scopes:        scopes.iter().map(|scope| (*scope).into()).collect(),
 			default:       None,
 			route:         "user".into(),
 			approver:      None,
@@ -197,20 +196,16 @@ fn pending_approval_projects_overlay_and_hotkeys() {
 			evidence:      Vec::new(),
 		})
 		.expect("open approval");
-	let mut overlays = Overlays::default();
-	overlays.sync_approval(session.dom());
-	let approval = overlays.approval().expect("approval overlay");
-	assert_eq!(approval.id, ticket.ticket_id);
-	assert_eq!(approval.title, "Run command");
-	assert!(!approval.decision('n').expect("deny").approved);
-	assert_eq!(approval.decision('a').expect("session approval").scope, ApprovalScope::Session);
-	assert!(approval.decision('y').expect("approve").approved);
+	(session, ticket.ticket_id)
+}
 
+/// The native host over `session`, with the approval overlay it projects.
+fn approval_host(session: &mut Session) -> (NativeHost, flume::Receiver<HostCommand>) {
 	let (snapshot, dom_events) = session.subscribe();
 	let (_, kernel_events) = flume::unbounded();
 	let (commands, command_rx) = flume::unbounded();
 	let (up, _) = flume::unbounded();
-	let mut host = NativeHost::new(
+	let host = NativeHost::new(
 		HostOptions {
 			model: omp_chat::ModelBadge::from_identifier("test/model"),
 			snapshot,
@@ -232,19 +227,75 @@ fn pending_approval_projects_overlay_and_hotkeys() {
 		},
 		Size::new(80, 24),
 	);
+	(host, command_rx)
+}
+
+/// The answers the painted approval layer offers.
+fn approval_text(host: &NativeHost) -> String {
+	omp_tui::frame_text(host.approval_frame().expect("approval layer painted"))
+}
+
+#[test]
+fn pending_approval_projects_overlay_and_hotkeys() {
+	let directory = tempdir().expect("temp directory");
+	// Only `once` is offered, as for a sandbox amendment: `a` is no answer.
+	let (mut session, ticket_id) = approval_session(directory.path(), &["once"]);
+	let mut overlays = Overlays::default();
+	overlays.sync_approval(session.dom());
+	let approval = overlays.approval().expect("approval overlay");
+	assert_eq!(approval.id, ticket_id);
+	assert_eq!(approval.title, "Run command");
+	assert!(!approval.session, "a once-only prompt offers no session grant");
+	assert!(!approval.decision('n').expect("deny").approved);
+	assert_eq!(approval.decision('a'), None, "a once-only prompt has no session answer");
+	let approved = approval.decision('y').expect("approve");
+	assert!(approved.approved);
+	assert_eq!(approved.scope, ApprovalScope::Once);
+
+	let (mut host, command_rx) = approval_host(&mut session);
+	let painted = approval_text(&host);
+	assert!(painted.contains("approve") && painted.contains("deny"), "{painted}");
+	assert!(!painted.contains("approve for session"), "{painted}");
 	assert_eq!(host.key(Key::Char('x')).expect("non-choice approval key"), NativeEffect::Consumed);
+	assert_eq!(host.key(Key::Char('a')).expect("unoffered session key"), NativeEffect::Consumed);
 	assert_eq!(host.composer_text(), "", "non-choice keys never reach the hidden composer");
-	assert!(command_rx.try_recv().is_err(), "non-choice key does not decide");
+	assert!(command_rx.try_recv().is_err(), "non-choice keys do not decide");
+	assert!(host.overlay_open(), "an unoffered answer leaves the prompt open");
 	assert_eq!(host.key(Key::Esc).expect("deny approval"), NativeEffect::Consumed);
 	match command_rx.recv().expect("approval command") {
 		HostCommand::Approve { id, decision } => {
-			assert_eq!(id, ticket.ticket_id);
+			assert_eq!(id, ticket_id);
 			assert!(!decision.approved);
 			assert_eq!(decision.scope, ApprovalScope::Once);
 		},
 		other => panic!("unexpected host command: {other:?}"),
 	}
 	assert!(!host.overlay_open(), "Escape resolves instead of merely hiding approval");
+}
+
+#[test]
+fn a_session_offering_approval_answers_a_for_the_session() {
+	let directory = tempdir().expect("temp directory");
+	let (mut session, ticket_id) = approval_session(directory.path(), &["once", "session"]);
+	let mut overlays = Overlays::default();
+	overlays.sync_approval(session.dom());
+	let approval = overlays.approval().expect("approval overlay");
+	assert!(approval.session, "every requirement offers a session grant");
+	assert_eq!(approval.decision('a').expect("session approval").scope, ApprovalScope::Session);
+
+	let (mut host, command_rx) = approval_host(&mut session);
+	let painted = approval_text(&host);
+	assert!(painted.contains("approve for session"), "{painted}");
+	assert_eq!(host.key(Key::Char('a')).expect("approve for session"), NativeEffect::Consumed);
+	match command_rx.recv().expect("approval command") {
+		HostCommand::Approve { id, decision } => {
+			assert_eq!(id, ticket_id);
+			assert!(decision.approved);
+			assert_eq!(decision.scope, ApprovalScope::Session);
+		},
+		other => panic!("unexpected host command: {other:?}"),
+	}
+	assert!(!host.overlay_open(), "the session answer resolves the prompt");
 }
 
 fn bound_host(models: Vec<omp_chat::ModelRow>) -> (NativeHost, flume::Receiver<HostCommand>) {

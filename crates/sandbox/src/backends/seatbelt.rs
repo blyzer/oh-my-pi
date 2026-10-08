@@ -373,17 +373,24 @@ pub fn compile(
 			 to the same inode",
 		));
 	}
-	match spec.network {
-		NetworkMode::Disabled => plan.add_caveat(Caveat::capability(
+	// The caveats follow the profile above: a proxy endpoint selects the
+	// broker-only profile whatever the network mode.
+	match (spec.network, spec.proxy_port) {
+		(_, Some(_)) => plan.add_caveat(Caveat::general(
+			"Seatbelt scoped egress reaches only the loopback broker, which enforces the destination \
+			 policy; names resolve only in the broker, so commands have no DNS of their own, while \
+			 the Apple TLS trust and network-configuration services stay reachable",
+		)),
+		(NetworkMode::Disabled, None) => plan.add_caveat(Caveat::capability(
 			Capability::NetDisable,
 			"Seatbelt network denial also blocks loopback IP sockets",
 		)),
-		NetworkMode::Enabled | NetworkMode::Outbound => plan.add_caveat(Caveat::general(
+		(NetworkMode::Enabled | NetworkMode::Outbound, None) => plan.add_caveat(Caveat::general(
 			"Seatbelt re-allows the Apple TLS trust, DNS, and network-configuration services needed \
 			 by network clients",
 		)),
 	}
-	if spec.network == NetworkMode::Outbound {
+	if spec.network == NetworkMode::Outbound && spec.proxy_port.is_none() {
 		plan.add_caveat(Caveat::capability(
 			Capability::NetOutbound,
 			"net.outbound is not an egress filter or domain/CIDR allowlist; permitted connections \
@@ -631,6 +638,54 @@ mod tests {
 		assert!(
 			!profile.contains("(allow network-outbound)\n"),
 			"no broad outbound grant may precede the broker rule: {profile}"
+		);
+		// The caveats reach the model through the session note, so they must
+		// describe the broker profile: no unfiltered-egress claim, no DNS.
+		assert!(
+			!plan
+				.caveats()
+				.iter()
+				.any(|caveat| caveat.capability == Some(Capability::NetOutbound)),
+			"the broker profile is an egress filter"
+		);
+		let broker = plan
+			.caveats()
+			.iter()
+			.find(|caveat| caveat.message.contains("loopback broker"))
+			.expect("broker caveat");
+		assert!(broker.capability.is_none());
+		assert!(broker.message.contains("no DNS"), "{}", broker.message);
+		assert!(
+			!plan.caveats().iter().any(|caveat| caveat
+				.message
+				.contains("re-allows the Apple TLS trust, DNS")),
+			"commands get no DNS under the broker profile"
+		);
+	}
+
+	#[test]
+	fn unproxied_outbound_keeps_the_unfiltered_egress_caveat() {
+		let mut spec = SandboxSpec::new("/bin/true");
+		spec.set_network(NetworkMode::Outbound);
+		let requested = spec.requested_capabilities();
+		let plan = compile(
+			&spec,
+			Path::new("/bin/true"),
+			requested,
+			requested.intersection(Backend::Seatbelt.capabilities()),
+		)
+		.expect("seatbelt plan");
+		assert!(
+			plan
+				.caveats()
+				.iter()
+				.any(|caveat| caveat.capability == Some(Capability::NetOutbound))
+		);
+		assert!(
+			!plan
+				.caveats()
+				.iter()
+				.any(|caveat| caveat.message.contains("loopback broker"))
 		);
 	}
 

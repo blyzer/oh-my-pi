@@ -231,7 +231,7 @@ jobs:
     name: Rust workspace and acceptance proofs
     # Deliberately NOT gated on runtime_spec. That check is cheap and reports
     # in two minutes; this one is the expensive proof and the only place the
-    # suite and P1-P8 ever run on macOS (P9-P11 and tool_sources run in
+    # suite, P1-P8 and P12 ever run on macOS (P9-P11 and tool_sources run in
     # p9_p10_linux). Chaining them meant a red spec gate skipped
     # the suite entirely, so the branch could not learn whether it passed. They are independent questions and now answer in parallel.
     # This does not weaken the gate: runtime_spec still reports its own
@@ -363,6 +363,12 @@ jobs:
           TERM: xterm-256color
         run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked
 
+      # P12 drives the real `omp envd` child through a Seatbelt sandbox
+      # amendment, so it gates here: it skips off macOS, and on macOS a failed
+      # Seatbelt probe fails it rather than skipping it.
+      - name: Run daemon approval relay proof P12
+        run: cargo nextest run --profile ci -p omp-e2e --test p12_daemon_approvals --locked
+
       # Only the metric contract gates a pull request. The measurement itself
       # is recorded per omp2 commit by p8-baseline.yml, off the PR path.
       - name: Validate P8 baseline contract
@@ -389,7 +395,12 @@ jobs:
           rustup show active-toolchain
 
       - name: Install native build tools
+        # A stalled package mirror once held this step until the whole job timed out. Bounded
+        # per-request timeouts and retries move apt to the next mirror, and the step fails fast.
+        timeout-minutes: 10
         run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y pipx zstd
           command -v uv >/dev/null || pipx install uv
@@ -449,7 +460,12 @@ jobs:
           rustup show active-toolchain
 
       - name: Install native build tools
+        # A stalled package mirror once held this step until the whole job timed out. Bounded
+        # per-request timeouts and retries move apt to the next mirror, and the step fails fast.
+        timeout-minutes: 10
         run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y pipx zstd
           command -v uv >/dev/null || pipx install uv
@@ -519,7 +535,12 @@ jobs:
           rustup show active-toolchain
 
       - name: Install native build tools
+        # A stalled package mirror once held this step until the whole job timed out. Bounded
+        # per-request timeouts and retries move apt to the next mirror, and the step fails fast.
+        timeout-minutes: 10
         run: |
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-fail-fast >/dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y pipx zstd
           command -v uv >/dev/null || pipx install uv

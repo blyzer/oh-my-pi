@@ -10,7 +10,7 @@
 
 use std::{fmt, sync::Arc, time::Duration};
 
-use omp_agent::{ApprovalDecision, ApprovalScope, ApprovalSource};
+use omp_agent::{ApprovalDecision, ApprovalScope, ApprovalSource, ApprovalTicket};
 use omp_con::Ctx;
 use omp_core::{FastHashSet, Str, sf};
 use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value};
@@ -513,18 +513,23 @@ pub struct ApprovalOverlay {
 	pub reason:  Str,
 	/// Default scope offered by the controller.
 	pub scope:   ApprovalScope,
+	/// Whether every requirement of the prompt offers a session-wide grant;
+	/// only then does `a` answer it. The policy behind a once-only prompt (a
+	/// path sandbox amendment) refuses a session answer.
+	pub session: bool,
 	/// Controller-set deadline after which the kernel answers with the
 	/// prompt's default (`timeout-ms`); `None` waits indefinitely.
 	pub timeout: Option<Duration>,
 }
 
 impl ApprovalOverlay {
-	/// Builds the decision represented by an approval hotkey.
+	/// Builds the decision represented by an approval hotkey; `a` is no
+	/// answer when the prompt offers no session-wide grant.
 	#[must_use]
 	pub fn decision(&self, key: char) -> Option<ApprovalDecision> {
 		let (approved, scope) = match key {
 			'y' => (true, self.scope.clone()),
-			'a' => (true, ApprovalScope::Session),
+			'a' if self.session => (true, ApprovalScope::Session),
 			'n' => (false, ApprovalScope::Once),
 			_ => return None,
 		};
@@ -984,11 +989,17 @@ impl Overlays {
 					})
 					.filter(|ms| *ms > 0)
 					.map(Duration::from_millis);
+				// The journaled ticket is the one record of what each merged
+				// requirement offers; an unreadable one offers no session grant.
+				let session = custom_text(node, "ticket")
+					.and_then(|ticket| serde_json::from_str::<ApprovalTicket>(ticket).ok())
+					.is_some_and(|ticket| ticket.offers(&ApprovalScope::Session));
 				Some(ApprovalOverlay {
 					id: Str::new(id),
 					title: Str::new(text_prop(node, PropId::Label).unwrap_or("Approval required")),
 					reason: Str::new(text_prop(node, PropId::Detail).unwrap_or_default()),
 					scope,
+					session,
 					timeout,
 				})
 			});

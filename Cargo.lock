@@ -8194,6 +8194,7 @@ dependencies = [
  "omp-proto",
  "omp-py-link",
  "omp-rpc",
+ "omp-sandbox",
  "omp-scribe",
  "omp-serve",
  "omp-session",
@@ -8355,6 +8356,7 @@ name = "omp-ext"
 version = "2.0.0"
 dependencies = [
  "blake3",
+ "flume",
  "futures",
  "jiff",
  "omp-core",

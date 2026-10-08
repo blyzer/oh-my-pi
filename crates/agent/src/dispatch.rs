@@ -29,7 +29,7 @@ use omp_journal::{
 use omp_session::{Session, SessionError, ToolReceipt};
 use omp_tool::{
 	Abort, ArtifactLifetime, BlobRef as ToolBlobRef, CallOutcome, CallOutcomeDetails, CapsBase,
-	Diag, DiagEnvelope, DiagKind, Effects, ErasedEv, ErasedOutcome, ExpectedArtifact,
+	Confinement, Diag, DiagEnvelope, DiagKind, Effects, ErasedEv, ErasedOutcome, ExpectedArtifact,
 	IncomingParams, Interrupt, InvocationFeed, JobKind, JobMetadata, JobOwner, JobRef, ModelClass,
 	OutputProjection, OutputRequest, Part, PolicyDenied, ProjectionSpan, PromptCaps, Registry,
 	RegistryError, Rev, RosterDenial, Severity, ToolIdentity, ToolRestrictions, ToolRoute, ToolSpec,
@@ -331,13 +331,19 @@ pub enum Received {
 }
 
 /// Host policy deciding whether a native call may start from its declared
-/// effect tier, the session approval mode, and per-tool overrides.
+/// effect tier, where those effects happen, the session approval mode, and
+/// per-tool overrides.
 pub trait ToolAdmission: Send + Sync {
 	/// Decides one committed call before its unit starts.
+	///
+	/// `effects` and `confinement` come from the live spec of the called
+	/// revision; a name with no native live spec (an RPC host tool) is
+	/// admitted with no effects and [`omp_tool::Confinement::Host`].
 	fn admit(
 		&self,
 		name: &str,
 		effects: &omp_tool::Effects,
+		confinement: omp_tool::Confinement,
 		args: &RawValue,
 	) -> ToolAdmissionVerdict;
 }
@@ -2007,13 +2013,15 @@ impl Dispatcher {
 				if matches!(call.unit, Unit::Native { .. })
 					&& let Some(admission) = &self.admission
 				{
-					let effects = self
+					let (effects, confinement) = self
 						.committer
 						.registry
-						.effects(call.identity.name.as_str())
-						.cloned()
-						.unwrap_or_else(|_| Effects::empty());
-					match admission.admit(call.identity.name.as_str(), &effects, &args) {
+						.live_spec(call.identity.name.as_str())
+						.map_or_else(
+							|_| (Effects::empty(), Confinement::Host),
+							|spec| (spec.effects.clone(), spec.confinement),
+						);
+					match admission.admit(call.identity.name.as_str(), &effects, confinement, &args) {
 						ToolAdmissionVerdict::Allow => {},
 						ToolAdmissionVerdict::Deny(reason) => {
 							let mut output = std::mem::take(call.output(&self.committer.policy));
@@ -2046,8 +2054,7 @@ impl Dispatcher {
 								crate::approvals::epoch_millis(),
 							)
 							.map_err(|source| DispatchError::Approval { source })?;
-						let decision =
-							crate::approvals::unreachable_decision(&ticket, "approval host unavailable");
+						let decision = ticket.unreachable_decision("approval host unavailable");
 						book
 							.decide(session, ticket.ticket_id.as_str(), decision)
 							.map_err(|source| DispatchError::Approval { source })?
@@ -2079,10 +2086,7 @@ impl Dispatcher {
 							.filter(|timeout| *timeout != 0)
 							.min()
 							.map(|timeout| {
-								(
-									Instant::now() + Duration::from_millis(timeout),
-									crate::approvals::timeout_decision(&ticket),
-								)
+								(Instant::now() + Duration::from_millis(timeout), ticket.timeout_decision())
 							});
 						call.ticket = Some(ticket.ticket_id);
 						call.interrupted = Some(Box::pin(call.interrupt.clone().cancelled_owned()));

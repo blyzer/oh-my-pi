@@ -11,8 +11,8 @@ use omp_shell_builtins::{
 	DynCallOutput, DynDevice, DynFault, DynFuture, DynHost as ShellDynHost, DynOutput, DynSchema,
 };
 use omp_tool::{
-	DevicePath, Diag, DiagEnvelope, DiagKind, ErasedEv, ErasedOutcome, ErasedStream, IncomingParams,
-	Part, PromptCaps, Registry, RegistryError, ToolIdentity, ToolRoute,
+	Confinement, DevicePath, Diag, DiagEnvelope, DiagKind, ErasedEv, ErasedOutcome, ErasedStream,
+	IncomingParams, Part, PromptCaps, Registry, RegistryError, ToolIdentity, ToolRoute,
 };
 use omp_tools::{
 	device::{DeviceCatalog, DeviceInvokeRequest, ErasedDeviceInvoker},
@@ -167,12 +167,15 @@ impl DynHost {
 		cancellation: CancellationToken,
 	) -> Result<DynCallOutput, DynFault> {
 		if let Some(effects) = self.mcp.dynamic_effects(name.as_str()) {
+			// MCP servers run outside the sandbox: stdio servers are spawned
+			// unconfined and HTTP servers are reached from this host.
 			self
 				.admission
 				.admit(
 					self.invocation_id(),
 					name.clone(),
 					&effects,
+					Confinement::Host,
 					DynamicInvocationSource::ShellDyn,
 					cancellation.clone(),
 				)
@@ -366,6 +369,7 @@ impl ShellDynHost for DynHost {
 						invocation_id.clone(),
 						target.name.clone(),
 						&effects,
+						target.confinement,
 						DynamicInvocationSource::ShellDyn,
 						cancellation.clone(),
 					)
@@ -603,12 +607,14 @@ fn device_event_json(device: omp_tool::MountedDevice<'_>) -> Value {
 mod tests {
 	use std::{
 		future::Future,
+		path::Path,
 		sync::atomic::{AtomicUsize, Ordering},
 	};
 
 	use futures::Stream;
 	use omp_tool::{
-		Claims, Constraint, Effects, Ev, ExecEffects, Precedence, Presentation, Rev, Tool, ToolSpec,
+		Claims, Confinement, Constraint, Effects, Ev, ExecEffects, Precedence, Presentation, Rev,
+		Tool, ToolSpec, ToolTerminal,
 	};
 	use omp_tools::device::{DeviceInvokeRequest, DeviceInvoker};
 
@@ -638,7 +644,9 @@ mod tests {
 			_incoming: IncomingParams<'c>,
 		) -> impl Stream<Item = Ev<Value, Value, Value>> + Send + 'c {
 			self.calls.fetch_add(1, Ordering::Relaxed);
-			futures::stream::empty()
+			futures::stream::once(async {
+				Ev::Done(ToolTerminal::Done { result: Ok(json!({"ok": true})), useless: false })
+			})
 		}
 
 		fn prompt(&self, _view: Result<&Value, &Value>, _caps: &PromptCaps) -> Vec<Part> {
@@ -711,57 +719,56 @@ mod tests {
 		});
 	}
 
-	#[tokio::test]
-	async fn denied_dynamic_effects_never_invoke_native_target() {
-		let scratch = tempfile::tempdir().expect("scratch");
-		let calls = Arc::new(AtomicUsize::new(0));
+	fn counting_device(
+		name: &'static str,
+		effects: Effects,
+		confinement: Confinement,
+		calls: &Arc<AtomicUsize>,
+	) -> CountingDevice {
+		CountingDevice {
+			spec:  ToolSpec {
+				name: sf!(name),
+				rev: Rev { family: sf!("test"), n: 1 },
+				description: sf!("test device"),
+				schema: Bytes::from_static(br#"{"type":"object","properties":{}}"#),
+				constraint: Constraint::None,
+				effects,
+				confinement,
+				projection_code: [1; 32],
+			},
+			calls: Arc::clone(calls),
+		}
+	}
+
+	/// A `dyn` host over `devices`; the catalog holds the registry weakly, so
+	/// the caller keeps the returned registry alive.
+	fn dyn_host(
+		scratch: &Path,
+		devices: impl IntoIterator<Item = CountingDevice>,
+		admission: DynamicAdmission,
+	) -> (DynHost, Arc<Registry>) {
 		let mut registry = Registry::new();
-		registry
-			.register(
-				CountingDevice {
-					spec:  ToolSpec {
-						name:            sf!("danger"),
-						rev:             Rev { family: sf!("test"), n: 1 },
-						description:     sf!("mutating test device"),
-						schema:          Bytes::from_static(br#"{"type":"object","properties":{}}"#),
-						constraint:      Constraint::None,
-						effects:         Effects {
-							exec: Some(ExecEffects { commands: Arc::from([sf!("*")]), network: true }),
-							..Effects::empty()
-						},
-						projection_code: [1; 32],
-					},
-					calls: Arc::clone(&calls),
-				},
-				Presentation::Device,
-				Claims {
+		for device in devices {
+			registry
+				.register(device, Presentation::Device, Claims {
 					precedence: Precedence::ENHANCEMENT,
 					claimant:   sf!("omp/test"),
 					replaces:   None,
-				},
-			)
-			.expect("register target");
+				})
+				.expect("register target");
+		}
 		let registry = Arc::new(registry);
 		let catalog = DeviceCatalog::default();
 		catalog
 			.install_registry(Arc::clone(&registry))
 			.expect("install catalog");
-		let blobs = BlobHost::open(scratch.path().join("blobs")).expect("blobs");
-		let mcp_service = McpService::open(scratch.path().join("mcp.sqlite3")).expect("MCP service");
+		let blobs = BlobHost::open(scratch.join("blobs")).expect("blobs");
+		let mcp_service = McpService::open(scratch.join("mcp.sqlite3")).expect("MCP service");
 		let mcp = McpManager::new(
 			Arc::clone(&mcp_service),
-			Arc::new(ProductionConnector::new(scratch.path().to_path_buf())),
+			Arc::new(ProductionConnector::new(scratch.to_path_buf())),
 			Arc::from([]),
-			scratch.path().join("local"),
-		);
-		let admission = DynamicAdmission::new(
-			crate::admission::ConfiguredApproval {
-				mode:       ApprovalMode::AlwaysAsk,
-				provenance: crate::admission::Provenance::Explicit,
-			},
-			crate::admission::SandboxState::Off,
-			std::collections::BTreeMap::new(),
-			None,
+			scratch.join("local"),
 		);
 		let host = DynHost::new(
 			catalog,
@@ -772,9 +779,98 @@ mod tests {
 			mcp,
 			admission,
 		);
+		(host, registry)
+	}
 
-		let result = ShellDynHost::call(&host, "danger", json!({}), CancellationToken::new()).await;
-		assert!(result.is_err());
+	fn commands_and_network() -> Effects {
+		Effects {
+			exec: Some(ExecEffects { commands: Arc::from([sf!("*")]), network: true }),
+			..Effects::empty()
+		}
+	}
+
+	#[tokio::test]
+	async fn denied_dynamic_effects_never_invoke_native_target() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let calls = Arc::new(AtomicUsize::new(0));
+		let admission = DynamicAdmission::new(
+			crate::admission::ConfiguredApproval {
+				mode:       ApprovalMode::AlwaysAsk,
+				provenance: crate::admission::Provenance::Explicit,
+			},
+			crate::admission::SandboxState::Off,
+			std::collections::BTreeMap::new(),
+			None,
+		);
+		let (host, _registry) = dyn_host(
+			scratch.path(),
+			[counting_device("danger", commands_and_network(), Confinement::Host, &calls)],
+			admission,
+		);
+
+		let refused = ShellDynHost::call(&host, "danger", json!({}), CancellationToken::new())
+			.await
+			.expect_err("an always-ask exec-tier target needs a prompt");
+		assert!(
+			refused
+				.message
+				.contains("requires an unavailable approval route"),
+			"{refused:?}"
+		);
 		assert_eq!(calls.load(Ordering::Relaxed), 0);
+	}
+
+	/// Under the shipped (defaulted) `yolo` with an active sandbox, a `dyn`
+	/// target that runs on the host is admitted as if no sandbox existed: its
+	/// exec tier needs a prompt (refused here, with no route), its read tier
+	/// proceeds, and only a target the sandbox confines inherits the `yolo`.
+	#[tokio::test]
+	async fn host_dyn_devices_are_not_auto_approved_inside_a_sandbox() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let network = Arc::new(AtomicUsize::new(0));
+		let peek = Arc::new(AtomicUsize::new(0));
+		let sandboxed = Arc::new(AtomicUsize::new(0));
+		let admission = DynamicAdmission::new(
+			crate::admission::ConfiguredApproval {
+				mode:       ApprovalMode::Yolo,
+				provenance: crate::admission::Provenance::Default,
+			},
+			crate::admission::SandboxState::Active,
+			std::collections::BTreeMap::new(),
+			None,
+		);
+		let (host, _registry) = dyn_host(
+			scratch.path(),
+			[
+				counting_device("net", commands_and_network(), Confinement::Host, &network),
+				counting_device("peek", Effects::empty(), Confinement::Host, &peek),
+				counting_device(
+					"confined",
+					commands_and_network(),
+					Confinement::ExecSandbox,
+					&sandboxed,
+				),
+			],
+			admission,
+		);
+
+		let refused = ShellDynHost::call(&host, "net", json!({}), CancellationToken::new())
+			.await
+			.expect_err("a host exec-tier target needs a prompt");
+		assert!(
+			refused
+				.message
+				.contains("requires an unavailable approval route"),
+			"{refused:?}"
+		);
+		assert_eq!(network.load(Ordering::Relaxed), 0);
+		ShellDynHost::call(&host, "peek", json!({}), CancellationToken::new())
+			.await
+			.expect("a host read-tier target proceeds");
+		assert_eq!(peek.load(Ordering::Relaxed), 1);
+		ShellDynHost::call(&host, "confined", json!({}), CancellationToken::new())
+			.await
+			.expect("a sandboxed target keeps the sandbox-kept yolo");
+		assert_eq!(sandboxed.load(Ordering::Relaxed), 1);
 	}
 }

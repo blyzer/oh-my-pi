@@ -1,6 +1,6 @@
 //! Joined production lifecycle-hook integration over one real kernel tool turn.
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use async_stream::stream;
 use bytes::Bytes;
@@ -11,15 +11,17 @@ use omp_agent::{
 	Kernel, KernelEvent, LifecycleHooks, OnFailure, RunControl, SourceRef, StaticPrompt,
 	TicketState, ToolAdmission, ToolAdmissionVerdict, TurnInput, TurnStop, Up, When,
 };
-use omp_core::sf;
+use omp_core::{Str, sf};
 use omp_journal::{blob::BlobStore, kind};
 use omp_proto::toolhost::v1::HookEventId;
 use omp_tool::{
-	Claims, Constraint, Effects, Ev, IncomingParams, Part, Precedence, Presentation, PromptCaps,
-	Registry, Rev, Tool, ToolSpec, ToolTerminal,
+	Claims, Confinement, Constraint, Effects, Ev, ExecEffects, HostToolExecutor, HostToolInvocation,
+	HostToolResult, HostToolSpec, HostToolUpdateSink, IncomingParams, Part, Precedence,
+	Presentation, PromptCaps, Registry, Rev, Tool, ToolSpec, ToolTerminal,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 mod support;
 
@@ -73,6 +75,7 @@ fn capture_registry(seen: Arc<Mutex<Option<Value>>>) -> Arc<Registry> {
 					),
 					constraint: Constraint::None,
 					effects: Effects::empty(),
+					confinement: Confinement::Host,
 					projection_code: [7; 32],
 				},
 				seen,
@@ -113,6 +116,7 @@ impl ToolAdmission for PromptAdmission {
 		&self,
 		_name: &str,
 		_effects: &Effects,
+		_confinement: Confinement,
 		_args: &serde_json::value::RawValue,
 	) -> ToolAdmissionVerdict {
 		ToolAdmissionVerdict::Prompt(approval_spec(
@@ -446,6 +450,115 @@ async fn lifecycle_and_native_approval_share_one_durable_ticket_and_replay() {
 	let replayed =
 		omp_session::Session::open(&path, omp_session::ComponentRegistry::default()).expect("replay");
 	assert_eq!(replayed.dom().snapshot(), live);
+}
+
+/// Records what the dispatcher hands native admission, and allows.
+struct RecordingAdmission(Arc<Mutex<Vec<(String, Effects, Confinement)>>>);
+
+impl ToolAdmission for RecordingAdmission {
+	fn admit(
+		&self,
+		name: &str,
+		effects: &Effects,
+		confinement: Confinement,
+		_args: &serde_json::value::RawValue,
+	) -> ToolAdmissionVerdict {
+		self
+			.0
+			.lock()
+			.push((name.to_owned(), effects.clone(), confinement));
+		ToolAdmissionVerdict::Allow
+	}
+}
+
+/// An RPC host tool that answers every call.
+struct AnsweringHost;
+
+impl HostToolExecutor for AnsweringHost {
+	fn execute(
+		&self,
+		_invocation: HostToolInvocation,
+		_updates: HostToolUpdateSink,
+		_cancellation: CancellationToken,
+	) -> Pin<Box<dyn Future<Output = Result<HostToolResult, Str>> + Send + 'static>> {
+		Box::pin(std::future::ready(Ok(HostToolResult {
+			result:   serde_json::json!({"ok": true}),
+			is_error: false,
+		})))
+	}
+}
+
+/// Native admission reads the called revision's live spec: its effects and
+/// the confinement its host asserted. A name with no native live spec (an
+/// RPC host tool) is admitted as `Host` with no effects.
+#[tokio::test]
+async fn native_admission_receives_the_live_spec_confinement() {
+	let network = Effects {
+		exec: Some(ExecEffects { commands: Arc::from([]), network: true }),
+		..Effects::empty()
+	};
+	let mut registry = Registry::new();
+	registry
+		.register(
+			CaptureTool {
+				spec: ToolSpec {
+					name: sf!("capture"),
+					rev: Rev { family: sf!("test"), n: 1 },
+					description: sf!("capture arguments inside the sandbox"),
+					schema: Bytes::from_static(
+						br#"{"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false}"#,
+					),
+					constraint: Constraint::None,
+					effects: network.clone(),
+					confinement: Confinement::ExecSandbox,
+					projection_code: [7; 32],
+				},
+				seen: Arc::new(Mutex::new(None)),
+			},
+			Presentation::Slot,
+			Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+		)
+		.expect("capture tool registers");
+	registry
+		.replace_host_tools(
+			sf!("rpc/client"),
+			1,
+			vec![HostToolSpec {
+				name:        sf!("fetch_ticket"),
+				description: sf!("Fetch a ticket"),
+				parameters:  serde_json::json!({"type": "object"}),
+				rev:         None,
+			}],
+			Arc::new(AnsweringHost),
+		)
+		.expect("host roster installs");
+	let admitted = Arc::new(Mutex::new(Vec::new()));
+	let temp = tempfile::tempdir().expect("tempdir");
+	let (inference, _) = ScriptedInference::new([
+		tool_script("capture-1", "capture", serde_json::json!({"value": 1})),
+		tool_script("ticket-1", "fetch_ticket", serde_json::json!({})),
+		text_script("done"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(registry),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_tool_admission(Arc::new(RecordingAdmission(Arc::clone(&admitted))));
+	let mut session = fresh_session(&temp.path().join("confinement.oms"));
+	kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: sf!("capture"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("turn");
+	assert_eq!(*admitted.lock(), [
+		(String::from("capture"), network, Confinement::ExecSandbox),
+		(String::from("fetch_ticket"), Effects::empty(), Confinement::Host),
+	]);
 }
 
 #[tokio::test]

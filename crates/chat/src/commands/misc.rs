@@ -170,16 +170,27 @@ pub(crate) fn security_report(cx: &PanelCx<'_>) -> Str {
 	let mut out = StrMut::new("**Security posture**\n\n");
 	let _ =
 		writeln!(out, "- Host approval: `sv_approval_mode {}`", var_text(cx, "sv_approval_mode"));
-	match cx.services.approval_posture() {
+	let posture = cx.services.approval_posture();
+	match &posture {
 		Ok(posture) => {
-			let _ = writeln!(
+			let _ = write!(
 				out,
-				"- Tool approval tier: `sv_tools_approval_mode {}` ({}), in force: `{}` (sandbox {})",
+				"- Tool approval tier: `sv_tools_approval_mode {}` ({}), in force: ",
 				posture.configured,
 				if posture.explicit { "set" } else { "default" },
-				posture.effective,
-				posture.sandbox
 			);
+			// A defaulted `yolo` an active sandbox keeps covers only the tools
+			// that sandbox confines; every other tool is admitted under `write`.
+			if posture.sandboxed_tools == posture.host_tools {
+				let _ = write!(out, "`{}`", posture.host_tools);
+			} else {
+				let _ = write!(
+					out,
+					"`{}` for sandboxed tools, `{}` for host tools",
+					posture.sandboxed_tools, posture.host_tools
+				);
+			}
+			let _ = writeln!(out, " (sandbox {})", posture.sandbox);
 		},
 		Err(_) => {
 			let _ = writeln!(
@@ -196,11 +207,23 @@ pub(crate) fn security_report(cx: &PanelCx<'_>) -> Str {
 	);
 	let _ = writeln!(out, "- Tool roster enabled: `sv_tools {}`", var_text(cx, "sv_tools"));
 	let _ = writeln!(out, "- Sandbox: `sv_sandbox_mode {}`", var_text(cx, "sv_sandbox_mode"));
-	let _ = writeln!(
-		out,
-		"- Network: `sv_sandbox_network_mode {}`",
-		var_text(cx, "sv_sandbox_network_mode")
-	);
+	match &posture {
+		Ok(posture) => {
+			let _ = writeln!(
+				out,
+				"- Network: `sv_sandbox_network_mode {}`, in force: `{}`",
+				var_text(cx, "sv_sandbox_network_mode"),
+				posture.network
+			);
+		},
+		Err(_) => {
+			let _ = writeln!(
+				out,
+				"- Network: `sv_sandbox_network_mode {}`",
+				var_text(cx, "sv_sandbox_network_mode")
+			);
+		},
+	}
 	let _ = writeln!(
 		out,
 		"- Writable roots: `sv_sandbox_writable_roots {}`",
@@ -733,22 +756,50 @@ mod tests {
 		})
 	}
 
+	fn posture_text(
+		sandboxed_tools: &'static str,
+		host_tools: &'static str,
+		sandbox: &'static str,
+		explicit: bool,
+	) -> Str {
+		security_text(std::sync::Arc::new(Posture(crate::overlays::services::ApprovalPostureRow {
+			configured: Str::new_static("yolo"),
+			sandboxed_tools: Str::new_static(sandboxed_tools),
+			host_tools: Str::new_static(host_tools),
+			sandbox: Str::new_static(sandbox),
+			explicit,
+			network: Str::new_static("unconfined"),
+		})))
+	}
+
 	#[test]
 	fn security_report_shows_the_effective_approval_mode_beside_the_configured_one() {
-		let report = security_text(std::sync::Arc::new(Posture(
-			crate::overlays::services::ApprovalPostureRow {
-				configured: Str::new_static("yolo"),
-				effective:  Str::new_static("write"),
-				sandbox:    Str::new_static("unavailable"),
-				explicit:   false,
-			},
-		)));
+		let report = posture_text("write", "write", "unavailable", false);
 		assert!(
 			report.contains(
 				"`sv_tools_approval_mode yolo` (default), in force: `write` (sandbox unavailable)"
 			),
 			"{report}"
 		);
+		// A defaulted yolo an active sandbox keeps covers only sandboxed tools;
+		// the panel never claims it for host tools.
+		let report = posture_text("yolo", "write", "active", false);
+		assert!(
+			report.contains(
+				"`sv_tools_approval_mode yolo` (default), in force: `yolo` for sandboxed tools, \
+				 `write` for host tools (sandbox active)"
+			),
+			"{report}"
+		);
+		// An explicit yolo is respected for every tool.
+		let report = posture_text("yolo", "yolo", "active", true);
+		assert!(
+			report.contains("`sv_tools_approval_mode yolo` (set), in force: `yolo` (sandbox active)"),
+			"{report}"
+		);
+		// The network row names the confinement in force, not only the convar.
+		assert!(report.contains("`sv_sandbox_network_mode "), "{report}");
+		assert!(report.contains(", in force: `unconfined`"), "{report}");
 		// Without a feed the panel still reports what is configured.
 		let report = security_text(std::sync::Arc::new(crate::overlays::services::NoServices));
 		assert!(report.contains("`sv_tools_approval_mode "), "{report}");

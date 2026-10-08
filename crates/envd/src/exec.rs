@@ -6,7 +6,7 @@ use std::{
 	ffi::{OsStr, OsString},
 	fs, future,
 	io::{self, Read, Write as _},
-	net,
+	mem, net,
 	os::fd::{self, AsFd as _, AsRawFd as _},
 	path::{Path, PathBuf},
 	process::{self, Command, Stdio},
@@ -61,9 +61,14 @@ use url::Url;
 use super::{
 	admission,
 	admission::{GithubMutationTarget, SandboxUnavailable},
+	approval_relay::{EnvApprover, OwnedApprovals, RouteBinding},
+	exec_network_diag::{
+		CommandEnd, NetworkAnnouncements, NetworkInForce, NetworkMarkerScan, find_marker,
+		network_diag,
+	},
 	exec_sandbox,
-	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxDenialFact},
-	exec_settings::{ExecSandboxMode, SandboxNetworkMode, SandboxSettings},
+	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxConsumer, SandboxDenialFact},
+	exec_settings::{ExecSandboxMode, NetworkConfinement, SandboxSettings},
 	process_identity::{IdentityError, ProcessIdentity},
 	process_log,
 	process_log::{LogChunk, ProcessLog},
@@ -71,6 +76,7 @@ use super::{
 		DaemonLease, LeaseError, ProcessPhase, ProcessRecord, ProcessStore, ProcessStoreSnapshot,
 		RestartRecord, StoreError,
 	},
+	sandbox_proxy::{BrokerDenial, EgressGrants},
 };
 
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
@@ -296,7 +302,9 @@ struct HostInner {
 	persistence:            Mutex<Option<ProcessPersistence>>,
 	next_order:             AtomicU64,
 	sandbox:                Mutex<Option<SandboxConfig>>,
-	sandbox_approval_route: Mutex<Option<ApprovalRoute>>,
+	/// The in-process approval route and the network grants its session
+	/// approved through it.
+	sandbox_approval_route: Mutex<Option<RouteBinding>>,
 }
 
 struct SandboxConfig {
@@ -320,6 +328,8 @@ struct SessionHandle {
 	sandbox:           Option<Arc<ExecSandbox>>,
 	process_scope:     Arc<SpawnBook>,
 	sandbox_announced: Arc<AtomicBool>,
+	/// The network diags already shown in this session.
+	network_announced: Arc<NetworkAnnouncements>,
 }
 
 struct NamedProcess {
@@ -483,10 +493,15 @@ struct SessionCommand {
 	github_targets: Vec<GithubMutationTarget>,
 	sandbox: Option<Arc<ExecSandbox>>,
 	sandbox_announced: Arc<AtomicBool>,
+	network_announced: Arc<NetworkAnnouncements>,
 	diags: Arc<Mutex<Vec<omp_tool::Diag>>>,
 	sequence: Arc<AtomicU64>,
-	rerun: bool,
+	/// The amended reruns this command may still take.
+	reruns: AmendmentReruns,
 	sandbox_environment_update: bool,
+	/// The relay of the connection that issued the command, which answers
+	/// its sandbox amendment; an approved rerun keeps it.
+	approvals: Option<OwnedApprovals>,
 }
 
 impl Default for ExecHost {
@@ -523,7 +538,7 @@ impl ExecHost {
 	/// processes.
 	pub(crate) fn configure_sandbox(&self, settings: &SandboxSettings, workspace_root: &Path) {
 		let config = (settings.mode != ExecSandboxMode::Off
-			|| settings.network_mode != SandboxNetworkMode::Disabled
+			|| settings.network_confinement() != NetworkConfinement::Unconfined
 			|| !settings.allow_unix_sockets.is_empty()
 			|| settings.read_mode != crate::exec_settings::ReadMode::Host
 			|| !settings.readable_roots.is_empty()
@@ -550,15 +565,27 @@ impl ExecHost {
 			})
 	}
 
+	/// Compiles the sandbox for one shell session, whose commands can use the
+	/// scoped egress broker.
 	pub(crate) fn active_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
-		self.compiled_sandbox(true)
+		self.compiled_sandbox(true, SandboxConsumer::Session)
+	}
+
+	/// Compiles the sandbox for one supervised child, such as an eval worker,
+	/// that never holds a broker capability: a scoped network is disabled.
+	pub(crate) fn child_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
+		self.compiled_sandbox(true, SandboxConsumer::Child)
 	}
 
 	fn detached_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
-		self.compiled_sandbox(false)
+		self.compiled_sandbox(false, SandboxConsumer::Child)
 	}
 
-	fn compiled_sandbox(&self, supervised: bool) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
+	fn compiled_sandbox(
+		&self,
+		supervised: bool,
+		consumer: SandboxConsumer,
+	) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
 		let (settings, workspace_root) = {
 			let config = self.inner.sandbox.lock();
 			let Some(config) = config.as_ref() else {
@@ -566,7 +593,7 @@ impl ExecHost {
 			};
 			(config.settings.clone(), config.workspace_root.clone())
 		};
-		match ExecSandbox::compile(&settings, &workspace_root, supervised) {
+		match ExecSandbox::compile(&settings, &workspace_root, supervised, consumer) {
 			Ok(sandbox) => Ok(sandbox),
 			// The shipped default sandbox on a platform that cannot confine
 			// commands still runs them, but only under approval: the sandbox
@@ -582,10 +609,69 @@ impl ExecHost {
 		}
 	}
 
-	/// Binds the interactive approval route used for one-shot sandbox
-	/// amendments.
+	/// Binds the interactive approval route used for sandbox amendments of
+	/// commands that carry no connection relay.
+	///
+	/// Only an in-process composition (embedded or isolated), whose kernel
+	/// shares this host's process, binds it. A project daemon serves sessions
+	/// in other processes and leaves it unbound: there each command prompts
+	/// the connection that issued it (see [`Self::amendment_approver`]).
+	///
+	/// The route is an approval binding: the network endpoints its session
+	/// approves for the session are kept with it. Binding again starts an empty
+	/// set and clears the previous route's grants, so no grant outlives the
+	/// authority, and the journal, that issued it.
 	pub(crate) fn bind_sandbox_approval_route(&self, route: Option<ApprovalRoute>) {
-		*self.inner.sandbox_approval_route.lock() = route;
+		let previous =
+			mem::replace(&mut *self.inner.sandbox_approval_route.lock(), route.map(RouteBinding::new));
+		if let Some(previous) = previous {
+			previous.grants().clear();
+		}
+	}
+
+	/// Drops the network endpoints the bound route's session approved for the
+	/// session: its conversation was rewound or switched to another session,
+	/// so the journal it now serves may not hold them. The approval desk
+	/// answers later prompts from the grants that journal holds, which refills
+	/// the set one refused attempt at a time.
+	pub(crate) fn revoke_route_grants(&self) {
+		if let Some(binding) = self.inner.sandbox_approval_route.lock().as_ref() {
+			binding.grants().clear();
+		}
+	}
+
+	/// Who decides a command's sandbox amendment: the relay of the connection
+	/// that issued the command, else the in-process route bound on this host.
+	/// It is also the approval binding whose session grants the command's
+	/// attempts carry.
+	///
+	/// A relay whose connection closed never falls back to the host route, so
+	/// a command that outlives its connection fails closed instead of
+	/// prompting another session.
+	fn amendment_approver(&self, relay: Option<&OwnedApprovals>) -> Option<EnvApprover> {
+		match relay {
+			Some(relay) => Some(EnvApprover::Relay(relay.clone())),
+			None => self
+				.inner
+				.sandbox_approval_route
+				.lock()
+				.clone()
+				.map(EnvApprover::Route),
+		}
+	}
+
+	/// The session egress grants of the approval binding that issued a
+	/// command: its connection relay's, else the bound route's.
+	fn egress_grants(&self, relay: Option<&OwnedApprovals>) -> Option<EgressGrants> {
+		match relay {
+			Some(relay) => Some(relay.grants().clone()),
+			None => self
+				.inner
+				.sandbox_approval_route
+				.lock()
+				.as_ref()
+				.map(|binding| binding.grants().clone()),
+		}
 	}
 
 	/// Forwards the invocation-scoped approval route to installed dynamic
@@ -596,29 +682,50 @@ impl ExecHost {
 		}
 	}
 
+	/// Asks the command's approver to amend the sandbox for one denied fact,
+	/// and returns the lifetime it granted, or `None` when it was refused or
+	/// nobody can be asked.
+	///
+	/// A network fact offers `once` and `session`; a path fact offers only
+	/// `once`. A decision is honoured only in a scope its requirement offered,
+	/// whoever made it (a human, or the approval desk replaying a journaled
+	/// session grant). An approved `session` answer admits the endpoint for
+	/// every later attempt of the deciding approver's binding.
 	async fn approve_sandbox_amendment(
 		&self,
+		relay: Option<&OwnedApprovals>,
 		command: &str,
 		fact: &SandboxDenialFact,
 		scope: &str,
-	) -> bool {
-		let Some(route) = self.inner.sandbox_approval_route.lock().clone() else {
-			return false;
-		};
+	) -> Option<AmendmentGrant> {
+		let approver = self.amendment_approver(relay)?;
 		let fact_label = sandbox_fact_label(fact);
 		let scope = Str::from(scope);
-		let ticket = route
+		let (offered, prompt) = match fact {
+			SandboxDenialFact::Network { .. } => (
+				vec![sf!("once"), sf!("session")],
+				sf!(
+					"The sandbox denied {fact_label}. Allow it for this command once, or for the rest \
+					 of this session?\n\n{command}"
+				),
+			),
+			_ => (
+				vec![sf!("once")],
+				sf!(
+					"The sandbox denied {fact_label}. Approve {scope} for this exact command one \
+					 time?\n\n{command}"
+				),
+			),
+		};
+		let ticket = approver
 			.request(
 				None,
 				vec![ApprovalSpec {
 					title:         sf!("Approve scoped sandbox amendment"),
-					body:          sf!(
-						"The sandbox denied {fact_label}. Approve {scope} for this exact command one \
-						 time?\n\n{command}"
-					),
+					body:          prompt,
 					subject:       scope.clone(),
 					kind:          sf!("sandbox_amendment"),
-					scopes:        vec![sf!("once")],
+					scopes:        offered,
 					default:       Some(false),
 					route:         sf!("local"),
 					approver:      None,
@@ -631,15 +738,26 @@ impl ExecHost {
 				unix_time_ms(),
 			)
 			.await;
-		ticket.state == TicketState::Decided
-			&& ticket
-				.decision
-				.as_ref()
-				.is_some_and(|decision| decision.approved && decision.scope == ApprovalScope::Once)
-			&& ticket
-				.reasons
-				.iter()
-				.any(|reason| reason.kind == "sandbox_amendment" && reason.subject == scope)
+		let decision = ticket
+			.decision
+			.as_ref()
+			.filter(|decision| ticket.state == TicketState::Decided && decision.approved)?;
+		let honoured = ticket.reasons.iter().any(|reason| {
+			reason.kind == "sandbox_amendment"
+				&& reason.subject == scope
+				&& reason.offers(&decision.scope)
+		});
+		if !honoured {
+			return None;
+		}
+		match (&decision.scope, fact) {
+			(ApprovalScope::Once, _) => Some(AmendmentGrant::Once),
+			(ApprovalScope::Session, SandboxDenialFact::Network { host, port }) => {
+				approver.grants().insert(host, *port);
+				Some(AmendmentGrant::Session)
+			},
+			_ => None,
+		}
 	}
 
 	/// Enables durable named-process metadata and recovers verified detached
@@ -814,6 +932,7 @@ impl ExecHost {
 				sandbox,
 				process_scope,
 				sandbox_announced: Arc::new(AtomicBool::new(false)),
+				network_announced: Arc::new(NetworkAnnouncements::default()),
 			});
 
 		Ok(OpenSessionResponse {
@@ -924,18 +1043,34 @@ impl ExecHost {
 	}
 
 	/// Starts a script in a session. A session serializes its scripts.
+	///
+	/// The command carries no connection relay: a sandbox amendment it needs
+	/// prompts through the in-process route bound on this host, if any.
 	pub async fn exec(
 		&self,
 		request: ExecRequest,
 		timeout: Option<Duration>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
-		self.exec_controlled(request, timeout).await
+		self.exec_controlled(request, timeout, None).await
+	}
+
+	/// Starts a script for the connection whose relay is `approvals`: a
+	/// sandbox amendment the command needs prompts that connection, and fails
+	/// closed once it closed.
+	pub(crate) async fn exec_relayed(
+		&self,
+		request: ExecRequest,
+		timeout: Option<Duration>,
+		approvals: Option<OwnedApprovals>,
+	) -> Result<(ExecStarted, ExecRun), ExecError> {
+		self.exec_controlled(request, timeout, approvals).await
 	}
 
 	async fn exec_controlled(
 		&self,
 		mut request: ExecRequest,
 		timeout: Option<Duration>,
+		approvals: Option<OwnedApprovals>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
 		let session = self
 			.inner
@@ -1004,10 +1139,12 @@ impl ExecHost {
 			github_targets,
 			sandbox: session.sandbox,
 			sandbox_announced: session.sandbox_announced,
+			network_announced: session.network_announced,
 			diags: Arc::new(Mutex::new(Vec::new())),
 			sequence: Arc::new(AtomicU64::new(1)),
-			rerun: false,
+			reruns: AmendmentReruns::Fresh,
 			sandbox_environment_update: false,
+			approvals,
 		};
 		session
 			.tx
@@ -1143,8 +1280,12 @@ impl ExecHost {
 			})
 			.await?;
 		let private_session = opened.session;
+		// A named process (StartProcess, async bash, restart generations)
+		// outlives any one request, so it carries no connection relay: on a
+		// project daemon its sandbox amendments fail closed, and only an
+		// in-process composition's host route can prompt for them.
 		let executed = self
-			.exec(
+			.exec_controlled(
 				ExecRequest {
 					session:        private_session.clone(),
 					source:         spec.source.clone(),
@@ -1152,6 +1293,7 @@ impl ExecHost {
 					props:          Default::default(),
 				},
 				timeout,
+				None,
 			)
 			.await;
 		let (started, run) = match executed {
@@ -2326,6 +2468,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	}
 	let cancel_rx = command.cancel_rx.clone();
 	let sandbox_active = command.sandbox.is_some();
+	let network = command.sandbox.as_deref().and_then(NetworkInForce::of);
 	let setup = setup_io(
 		command.pty.as_ref(),
 		command.control.clone(),
@@ -2334,6 +2477,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		command.output.clone(),
 		command.sequence.clone(),
 		sandbox_active,
+		network.is_some(),
 	);
 	let Ok((mut params, readers, sequencer)) = setup else {
 		finish_session_command(
@@ -2353,7 +2497,16 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 			.lock()
 			.push(omp_tool::Diag::info(omp_tool::DiagKind::Sandbox, sandbox.session_note().clone()));
 	}
-	let attempt = command.sandbox.as_ref().map(ExecSandbox::begin_attempt);
+	// The broker admits the endpoints the command's approval binding approved
+	// for the session, live, for this attempt only.
+	let grants = command
+		.host
+		.upgrade()
+		.and_then(|inner| ExecHost { inner }.egress_grants(command.approvals.as_ref()));
+	let attempt = command
+		.sandbox
+		.as_ref()
+		.map(|sandbox| sandbox.begin_attempt(grants.as_ref()));
 	let environment_scoped =
 		command.environment.is_some() || command.sandbox_environment_update || attempt.is_some();
 	if environment_scoped {
@@ -2445,7 +2598,10 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	for reader in readers {
 		let _ = reader.await;
 	}
-	let broker_denial = attempt.as_ref().and_then(|attempt| attempt.take_denial());
+	let facts = attempt
+		.as_ref()
+		.map(|attempt| attempt.take_facts())
+		.unwrap_or_default();
 	let cancelled = result == RunTerminal::Cancelled;
 	let result = if environment_scoped
 		&& shell
@@ -2457,58 +2613,118 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	} else {
 		result
 	};
-	let denial = {
+	let (denial, network_marker) = {
 		let sequencer = sequencer.lock();
-		classify_sandbox_denial(
+		let denial = classify_sandbox_denial(
 			sandbox_active,
-			broker_denial,
+			facts.denial,
 			&result,
 			shell_error.as_ref(),
 			sequencer.sandbox_diagnostic.as_deref().unwrap_or_default(),
-		)
+		);
+		let marker = sequencer
+			.network_scan
+			.as_ref()
+			.is_some_and(NetworkMarkerScan::found);
+		(denial, marker)
 	};
+	let network_trouble = network.map(|network| NetworkTrouble {
+		network,
+		refusal: facts.refusal,
+		marker: network_marker,
+	});
 	if let Some(denial) = denial {
-		if !command.rerun
-			&& let Some(sandbox) = command.sandbox.as_deref()
-			&& let Some(amendment) = approved_amendment(sandbox, &denial.fact)
+		if let Some(sandbox) = command.sandbox.as_deref()
 			&& let Some(host) = command.host.upgrade()
 		{
-			let scope = amendment.scope_label();
 			let host = ExecHost { inner: host };
-			let approval = host.approve_sandbox_amendment(&command.source, &denial.fact, &scope);
-			tokio::pin!(approval);
-			let approved = tokio::select! {
-							approved = &mut approval => approved,
-							_ = command.cancel_rx.recv_async() => {
-								finish_session_command(
-									&command,
-									RunTerminal::Cancelled,
-									started_at.elapsed(),
-									shell.working_dir(),
-								)
-			.await;
-								return true;
-							},
-						};
-			if approved {
-				let network_amendment = matches!(&amendment, ApprovedSandboxAmendment::Network(_));
-				let amended = match &amendment {
-					ApprovedSandboxAmendment::Path(scope) => sandbox.amended_scope(scope),
-					ApprovedSandboxAmendment::Network(fact) => sandbox.amended_network(fact),
+			let bound = sandbox.network_reruns();
+			// Approved for the session by the command's binding after this
+			// attempt was refused: a concurrent command asked first.
+			let covered = match &denial.fact {
+				SandboxDenialFact::Network { host: name, port } => host
+					.egress_grants(command.approvals.as_ref())
+					.is_some_and(|grants| grants.covers(name, *port)),
+				_ => false,
+			};
+			if command.reruns.admits(&denial.fact, covered, bound)
+				&& let Some(amendment) = approved_amendment(sandbox, &denial.fact)
+			{
+				let scope = amendment.scope_label();
+				let granted = if covered {
+					Some(AmendmentGrant::Session)
+				} else {
+					// `select!` owns the prompt future and drops it as soon as one
+					// arm wins. A cancelled command therefore withdraws its relayed
+					// query (the guard inside the prompt future writes it straight
+					// to the connection) before its exit enters the event stream,
+					// so the connection sees the withdrawal first. Only a full
+					// response channel defers the withdrawal to a task; the client
+					// matches it by request and query id, so it still closes the
+					// prompt. Keep the future inside `select!`: the window is too
+					// narrow for a test to force, so a future pinned outside it
+					// would regress silently.
+					let granted = tokio::select! {
+						granted = host.approve_sandbox_amendment(
+							command.approvals.as_ref(),
+							&command.source,
+							&denial.fact,
+							&scope,
+						) => Some(granted),
+						_ = command.cancel_rx.recv_async() => None,
+					};
+					let Some(granted) = granted else {
+						finish_session_command(
+							&command,
+							RunTerminal::Cancelled,
+							started_at.elapsed(),
+							shell.working_dir(),
+						)
+						.await;
+						return true;
+					};
+					granted
 				};
-				if let Ok(Some(sandbox)) = amended {
-					command.diags.lock().push(omp_tool::Diag::info(
-						omp_tool::DiagKind::Sandbox,
-						sf!("sandbox: rerun with approved scope: {scope}"),
-					));
-					let mut rerun = command.clone();
-					rerun.sandbox = Some(sandbox);
-					rerun.rerun = true;
-					rerun.sandbox_environment_update = network_amendment;
-					return Box::pin(run_session_command(shell, rerun)).await;
+				match granted {
+					// The endpoint passes the session's own broker from now on, so
+					// the command reruns under the same sandbox.
+					Some(AmendmentGrant::Session) => {
+						let reruns = command.reruns.after_session();
+						command.diags.lock().push(omp_tool::Diag::info(
+							omp_tool::DiagKind::Sandbox,
+							sf!(
+								"sandbox: {scope} approved for this session; rerun {} of at most {bound}",
+								reruns.taken()
+							),
+						));
+						let mut rerun = command.clone();
+						rerun.reruns = reruns;
+						return Box::pin(run_session_command(shell, rerun)).await;
+					},
+					Some(AmendmentGrant::Once) => {
+						let network_amendment =
+							matches!(&amendment, ApprovedSandboxAmendment::Network(_));
+						let amended = match &amendment {
+							ApprovedSandboxAmendment::Path(scope) => sandbox.amended_scope(scope),
+							ApprovedSandboxAmendment::Network(fact) => sandbox.amended_network(fact),
+						};
+						if let Ok(Some(sandbox)) = amended {
+							command.diags.lock().push(omp_tool::Diag::info(
+								omp_tool::DiagKind::Sandbox,
+								sf!("sandbox: rerun with approved scope: {scope}"),
+							));
+							let mut rerun = command.clone();
+							rerun.sandbox = Some(sandbox);
+							rerun.reruns = AmendmentReruns::Spent;
+							rerun.sandbox_environment_update = network_amendment;
+							return Box::pin(run_session_command(shell, rerun)).await;
+						}
+					},
+					None => {},
 				}
 			}
 		}
+		push_network_diag(&command, network_trouble, CommandEnd::Failed);
 		finish_session_command(
 			&command,
 			RunTerminal::Denied { exit_code: denial.exit_code, fact: denial.fact },
@@ -2518,8 +2734,40 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		.await;
 		return cancelled;
 	}
+	push_network_diag(&command, network_trouble, result.command_end());
 	finish_session_command(&command, result, started_at.elapsed(), shell.working_dir()).await;
 	cancelled
+}
+
+/// What one sandboxed command met on the network, for its final diag.
+struct NetworkTrouble {
+	network: NetworkInForce,
+	refusal: Option<BrokerDenial>,
+	marker:  bool,
+}
+
+/// Adds the network diag for a command's final run. An approved rerun reports
+/// its own, so a command that reruns never reports its first attempt's.
+fn push_network_diag(command: &SessionCommand, trouble: Option<NetworkTrouble>, end: CommandEnd) {
+	let Some(trouble) = trouble else {
+		return;
+	};
+	let prompt = trouble.refusal.is_some()
+		&& command.host.upgrade().is_some_and(|inner| {
+			ExecHost { inner }
+				.amendment_approver(command.approvals.as_ref())
+				.is_some_and(|approver| approver.is_reachable())
+		});
+	if let Some(diag) = network_diag(
+		trouble.network,
+		trouble.refusal.as_ref(),
+		trouble.marker,
+		end,
+		prompt,
+		&command.network_announced,
+	) {
+		command.diags.lock().push(diag);
+	}
 }
 
 async fn finish_session_command(
@@ -2635,6 +2883,14 @@ pub(crate) fn wire_diag(diag: &omp_tool::Diag) -> v1::ToolDiag {
 }
 
 impl RunTerminal {
+	const fn command_end(&self) -> CommandEnd {
+		match self {
+			Self::Exited(0) => CommandEnd::Succeeded,
+			Self::Cancelled => CommandEnd::Cancelled,
+			Self::Exited(_) | Self::Failed | Self::Timeout | Self::Denied { .. } => CommandEnd::Failed,
+		}
+	}
+
 	fn status(self, elapsed: Duration, spilled_output: Option<WireBlob>) -> ExecStatusMsg {
 		self.status_with_projection(elapsed, spilled_output, None)
 	}
@@ -2698,6 +2954,65 @@ impl ApprovedSandboxAmendment {
 		match self {
 			Self::Path(scope) => scope.label(),
 			Self::Network(fact) => sandbox_fact_label(fact),
+		}
+	}
+}
+
+/// The lifetime an approved sandbox amendment was granted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AmendmentGrant {
+	/// One rerun with the sandbox amended by exactly the denied fact; a
+	/// further denial is final.
+	Once,
+	/// A network endpoint, admitted for every later attempt of the approval
+	/// binding that granted it; the command reruns under its own sandbox.
+	Session,
+}
+
+/// The amended reruns one command may still take (ADR 0028).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AmendmentReruns {
+	/// Nothing was amended yet: the first denial of any amendable fact may be
+	/// asked about.
+	Fresh,
+	/// This many reruns followed endpoints approved for the session. A further
+	/// denial may be asked about only when it names a network endpoint the
+	/// command's binding has not approved, while fewer reruns than the bound
+	/// (`sv_sandbox_network_session_reruns`) were taken.
+	SessionNetwork(u32),
+	/// A once approval reran the command: a further denial is final.
+	Spent,
+}
+
+impl AmendmentReruns {
+	/// Whether a denial of `fact` may still be amended. `covered` says whether
+	/// the command's binding already approved the network fact for the
+	/// session; `bound` is the session rerun budget.
+	const fn admits(self, fact: &SandboxDenialFact, covered: bool, bound: u32) -> bool {
+		match self {
+			Self::Fresh => true,
+			Self::SessionNetwork(taken) => {
+				taken < bound && matches!(fact, SandboxDenialFact::Network { .. }) && !covered
+			},
+			Self::Spent => false,
+		}
+	}
+
+	/// The budget after one more rerun on an endpoint approved for the
+	/// session.
+	const fn after_session(self) -> Self {
+		match self {
+			Self::Fresh => Self::SessionNetwork(1),
+			Self::SessionNetwork(taken) => Self::SessionNetwork(taken.saturating_add(1)),
+			Self::Spent => Self::Spent,
+		}
+	}
+
+	/// Reruns taken on endpoints approved for the session.
+	const fn taken(self) -> u32 {
+		match self {
+			Self::SessionNetwork(taken) => taken,
+			Self::Fresh | Self::Spent => 0,
 		}
 	}
 }
@@ -2782,36 +3097,7 @@ fn sandbox_denial_marker(stderr: &[u8]) -> Option<usize> {
 		b"read-only file system",
 	];
 	const ERRNOS: &[&[u8]] = &[b"eperm", b"eacces", b"erofs"];
-	for phrase in PHRASES {
-		if let Some(position) = stderr
-			.windows(phrase.len())
-			.position(|window| window.eq_ignore_ascii_case(phrase))
-		{
-			return Some(position);
-		}
-	}
-	for errno in ERRNOS {
-		if let Some(position) =
-			stderr
-				.windows(errno.len())
-				.enumerate()
-				.find_map(|(position, window)| {
-					if !window.eq_ignore_ascii_case(errno) {
-						return None;
-					}
-					let before = position
-						.checked_sub(1)
-						.and_then(|index| stderr.get(index))
-						.is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
-					let after = stderr
-						.get(position + errno.len())
-						.is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
-					(before && after).then_some(position)
-				}) {
-			return Some(position);
-		}
-	}
-	None
+	find_marker(stderr, None, true, PHRASES, ERRNOS)
 }
 
 fn write_input(control: &RunControl, data: Option<&[u8]>) -> Result<(), ExecError> {
@@ -2838,6 +3124,7 @@ fn setup_io(
 	output: Arc<Mutex<OutputCapture>>,
 	sequence: Arc<AtomicU64>,
 	capture_sandbox_diagnostic: bool,
+	scan_network_markers: bool,
 ) -> Result<(ExecutionParameters, Vec<task::JoinHandle<()>>, Arc<Mutex<OutputSequencer>>), ExecError>
 {
 	let mut params = ExecutionParameters::default();
@@ -2847,6 +3134,7 @@ fn setup_io(
 		events,
 		output,
 		sandbox_diagnostic: capture_sandbox_diagnostic.then(Vec::new),
+		network_scan: scan_network_markers.then(NetworkMarkerScan::new),
 	}));
 	if let Some(pty) = pty {
 		let winsize = nix::pty::Winsize {
@@ -3000,9 +3288,16 @@ struct OutputSequencer {
 	events:             flume::Sender<ExecEvent>,
 	output:             Arc<Mutex<OutputCapture>>,
 	sandbox_diagnostic: Option<Vec<u8>>,
+	/// Present while the sandbox confines the network: looks for network
+	/// failures in each chunk as it arrives, independently of the capture
+	/// above, which stops growing at a denial marker.
+	network_scan:       Option<NetworkMarkerScan>,
 }
 impl OutputSequencer {
 	fn capture_sandbox_diagnostic(&mut self, data: &[u8]) {
+		if let Some(scan) = self.network_scan.as_mut() {
+			scan.feed(data);
+		}
 		let Some(diagnostic) = self.sandbox_diagnostic.as_mut() else {
 			return;
 		};
@@ -4135,6 +4430,148 @@ mod tests {
 		);
 	}
 
+	/// A broker refusal the user cannot amend never becomes a denial: an
+	/// allowlisted name that does not resolve leaves the command `Failed` with
+	/// its own exit status, while a policy refusal stays the amendable fact.
+	/// The stderr fed to the classifier carries the broker's whole response
+	/// head, as `curl -v` prints it, so the fail-closed answer must not carry
+	/// the policy marker header. Runs on every host: the broker serves an
+	/// environment-only wrapper.
+	#[test]
+	fn fail_closed_broker_refusals_stay_ordinary_failures() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let settings = SandboxSettings {
+			allow_domains: vec![Str::new_static("unresolvable.invalid")],
+			..SandboxSettings::default()
+		};
+		let sandbox = ExecSandbox::with_test_broker(&settings, workspace.path());
+		let verbose = |head: &str| {
+			let mut stderr = String::from("* Establish HTTP proxy tunnel\n");
+			for line in head.lines().filter(|line| !line.is_empty()) {
+				stderr.push_str("< ");
+				stderr.push_str(line);
+				stderr.push('\n');
+			}
+			stderr
+		};
+
+		let attempt = sandbox.begin_attempt(None);
+		let head = attempt.connect_through_broker("unresolvable.invalid", 443);
+		assert!(head.starts_with("HTTP/1.1 502"), "{head}");
+		assert!(head.contains("X-Omp-Broker-Refused: unresolved\r\n"), "{head}");
+		let facts = attempt.take_facts();
+		assert_eq!(facts.denial, None);
+		assert_eq!(
+			facts.refusal.as_ref().map(|refusal| refusal.cause),
+			Some(crate::sandbox_proxy::BrokerRefusal::Unresolved)
+		);
+		let mut stderr = verbose(&head);
+		stderr.push_str("curl: (56) CONNECT tunnel failed, response 502\n");
+		let result = RunTerminal::Exited(56);
+		assert!(
+			classify_sandbox_denial(true, facts.denial, &result, None, stderr.as_bytes()).is_none(),
+			"{stderr}"
+		);
+		let status = result.status(Duration::ZERO, None);
+		assert_eq!(status.outcome, ExecOutcome::Failed as i32);
+		assert_eq!(status.exit_code, Some(56));
+		assert!(status.props.is_none(), "no denied-path label");
+
+		let attempt = sandbox.begin_attempt(None);
+		let head = attempt.connect_through_broker("blocked.example", 443);
+		assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+		assert!(head.contains("X-Omp-Policy-Blocked: blocked.example:443\r\n"), "{head}");
+		let facts = attempt.take_facts();
+		let fact = SandboxDenialFact::Network { host: sf!("blocked.example"), port: 443 };
+		assert_eq!(facts.denial.as_ref(), Some(&fact));
+		let denial = classify_sandbox_denial(
+			true,
+			facts.denial,
+			&RunTerminal::Exited(56),
+			None,
+			verbose(&head).as_bytes(),
+		)
+		.expect("policy refusal is a denial");
+		assert_eq!(denial.fact, fact);
+	}
+
+	/// The network scan runs beside the denial capture without changing it:
+	/// a resolver failure followed by `Permission denied` still classifies as
+	/// an `Unknown` denial, and the network marker is still seen.
+	#[test]
+	fn network_markers_leave_denial_classification_unchanged() {
+		let (events, _receiver) = flume::unbounded();
+		let mut sequencer = OutputSequencer {
+			next: 1,
+			sequence: Arc::new(AtomicU64::new(1)),
+			events,
+			output: Arc::new(Mutex::new(
+				OutputCapture::new_with_request(None, omp_tool::OutputRequest::Bounded)
+					.expect("output capture"),
+			)),
+			sandbox_diagnostic: Some(Vec::new()),
+			network_scan: Some(NetworkMarkerScan::new()),
+		};
+		sequencer.capture_sandbox_diagnostic(b"curl: (6) Could not resolve ");
+		sequencer.capture_sandbox_diagnostic(b"host: example.com\n");
+		sequencer.capture_sandbox_diagnostic(b"touch: /private/blocked: Permission denied\n");
+		let diagnostic = sequencer.sandbox_diagnostic.as_deref().unwrap_or_default();
+		let denial = classify_sandbox_denial(true, None, &RunTerminal::Exited(1), None, diagnostic)
+			.expect("the denial marker still classifies");
+		assert_eq!(denial.fact, SandboxDenialFact::Unknown);
+		assert!(
+			sequencer
+				.network_scan
+				.as_ref()
+				.is_some_and(NetworkMarkerScan::found)
+		);
+		assert_eq!(
+			diagnostic,
+			b"curl: (6) Could not resolve host: example.com\ntouch: /private/blocked: Permission \
+			  denied\n"
+		);
+	}
+
+	fn decision(
+		scope: ApprovalScope,
+		source: omp_agent::ApprovalSource,
+	) -> omp_agent::ApprovalDecision {
+		omp_agent::ApprovalDecision {
+			approved: true,
+			scope,
+			source,
+			decided_by: Some(sf!("test approver")),
+			reason: None,
+			audited: false,
+		}
+	}
+
+	/// Asks `host` to amend one fact through its bound route, answers the
+	/// prompt with `answer`, and returns the filed requirement and the grant.
+	async fn amend_through_route(
+		host: &ExecHost,
+		inbox: &omp_agent::ApprovalInbox,
+		command: &str,
+		fact: &SandboxDenialFact,
+		scope: &str,
+		answer: omp_agent::ApprovalDecision,
+	) -> (ApprovalSpec, Option<AmendmentGrant>) {
+		let approval = host.approve_sandbox_amendment(None, command, fact, scope);
+		tokio::pin!(approval);
+		let request = tokio::select! {
+			request = inbox.recv() => request.expect("amendment request"),
+			granted = &mut approval => panic!("approval settled before a decision: {granted:?}"),
+		};
+		let reason = request
+			.ticket
+			.reasons
+			.first()
+			.cloned()
+			.expect("approval reason");
+		request.respond(answer).expect("approval response");
+		(reason, approval.await)
+	}
+
 	#[tokio::test]
 	async fn jit_approval_names_only_the_detected_capability_and_exact_command() {
 		let host = ExecHost::new();
@@ -4142,59 +4579,298 @@ mod tests {
 		host.bind_sandbox_approval_route(Some(route));
 		let command = "printf ready; touch /private/blocked";
 		let fact = SandboxDenialFact::WritePath(PathBuf::from("/private/blocked"));
-		let approval = host.approve_sandbox_amendment(command, &fact, "/private");
-		tokio::pin!(approval);
-		let request = tokio::select! {
-			request = inbox.recv() => request.expect("scoped approval request"),
-			approved = &mut approval => panic!("approval settled before a decision: {approved}"),
-		};
-		let reason = request.ticket.reasons.first().expect("approval reason");
+		let (reason, granted) = amend_through_route(
+			&host,
+			&inbox,
+			command,
+			&fact,
+			"/private",
+			decision(ApprovalScope::Once, omp_agent::ApprovalSource::User),
+		)
+		.await;
 		assert_eq!(reason.kind, "sandbox_amendment");
 		assert_eq!(reason.subject, "/private");
 		assert_eq!(reason.pattern.as_deref(), Some(command));
 		assert_eq!(reason.evidence, [sf!("write /private/blocked"), sf!("/private")],);
-		request
-			.respond(omp_agent::ApprovalDecision {
-				approved:   true,
-				scope:      ApprovalScope::Once,
-				source:     omp_agent::ApprovalSource::User,
-				decided_by: Some(sf!("test approver")),
-				reason:     None,
-				audited:    false,
-			})
-			.expect("approval response");
-		assert!(approval.await);
+		assert_eq!(granted, Some(AmendmentGrant::Once));
 
 		let command = "curl https://api.example.test/data";
 		let fact = SandboxDenialFact::Network { host: sf!("api.example.test"), port: 443 };
-		let approval = host.approve_sandbox_amendment(command, &fact, "network api.example.test:443");
-		tokio::pin!(approval);
-		let request = tokio::select! {
-			request = inbox.recv() => request.expect("network approval request"),
-			approved = &mut approval => panic!("network approval settled early: {approved}"),
-		};
-		let reason = request
-			.ticket
-			.reasons
-			.first()
-			.expect("network approval reason");
+		let (reason, granted) = amend_through_route(
+			&host,
+			&inbox,
+			command,
+			&fact,
+			"network api.example.test:443",
+			decision(ApprovalScope::Once, omp_agent::ApprovalSource::User),
+		)
+		.await;
 		assert_eq!(reason.subject, "network api.example.test:443");
 		assert_eq!(reason.pattern.as_deref(), Some(command));
 		assert_eq!(reason.evidence, [
 			sf!("network api.example.test:443"),
 			sf!("network api.example.test:443"),
 		],);
-		request
-			.respond(omp_agent::ApprovalDecision {
-				approved:   true,
-				scope:      ApprovalScope::Once,
-				source:     omp_agent::ApprovalSource::User,
-				decided_by: Some(sf!("test approver")),
-				reason:     None,
-				audited:    false,
-			})
-			.expect("network approval response");
-		assert!(approval.await);
+		assert_eq!(granted, Some(AmendmentGrant::Once));
+	}
+
+	/// A network amendment offers `once` and `session`; a path amendment
+	/// offers only `once`. A decision is honoured only in a scope its prompt
+	/// offered, whether a human made it or the desk replayed a journaled
+	/// session grant (source `config`). Only an approved `session` answer on a
+	/// network fact extends the binding's grants.
+	#[tokio::test]
+	async fn network_amendments_offer_the_session_and_paths_stay_once() {
+		use omp_agent::ApprovalSource;
+		let host = ExecHost::new();
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		host.bind_sandbox_approval_route(Some(route));
+		let grants = host.egress_grants(None).expect("the bound route's grants");
+		let network = SandboxDenialFact::Network { host: sf!("pypi.org"), port: 443 };
+		let path = SandboxDenialFact::WritePath(PathBuf::from("/private/blocked"));
+
+		let (reason, granted) = amend_through_route(
+			&host,
+			&inbox,
+			"pip install x",
+			&network,
+			"network pypi.org:443",
+			decision(ApprovalScope::Session, ApprovalSource::User),
+		)
+		.await;
+		assert_eq!(reason.scopes, [sf!("once"), sf!("session")]);
+		assert_eq!(reason.kind, "sandbox_amendment");
+		assert_eq!(reason.subject, "network pypi.org:443");
+		assert_eq!(reason.pattern.as_deref(), Some("pip install x"));
+		assert!(reason.body.contains("for the rest of this session"), "{}", reason.body);
+		assert_eq!(granted, Some(AmendmentGrant::Session));
+		assert!(grants.covers("pypi.org", 443), "a session answer extends the binding's grants");
+
+		let replayed = SandboxDenialFact::Network { host: sf!("files.pythonhosted.org"), port: 443 };
+		let (_, granted) = amend_through_route(
+			&host,
+			&inbox,
+			"pip install x",
+			&replayed,
+			"network files.pythonhosted.org:443",
+			decision(ApprovalScope::Session, ApprovalSource::Config),
+		)
+		.await;
+		assert_eq!(granted, Some(AmendmentGrant::Session), "a desk replay is honoured");
+		assert!(grants.covers("files.pythonhosted.org", 443));
+
+		let once = SandboxDenialFact::Network { host: sf!("once.example"), port: 443 };
+		let (_, granted) = amend_through_route(
+			&host,
+			&inbox,
+			"curl https://once.example",
+			&once,
+			"network once.example:443",
+			decision(ApprovalScope::Once, ApprovalSource::User),
+		)
+		.await;
+		assert_eq!(granted, Some(AmendmentGrant::Once));
+		assert!(!grants.covers("once.example", 443), "a once answer grants nothing beyond its rerun");
+
+		let (reason, granted) = amend_through_route(
+			&host,
+			&inbox,
+			"touch /private/blocked",
+			&path,
+			"write /private",
+			decision(ApprovalScope::Session, ApprovalSource::User),
+		)
+		.await;
+		assert_eq!(reason.scopes, [sf!("once")]);
+		assert_eq!(granted, None, "a path amendment never honours a scope it did not offer");
+		let (_, granted) = amend_through_route(
+			&host,
+			&inbox,
+			"touch /private/blocked",
+			&path,
+			"write /private",
+			decision(ApprovalScope::Once, ApprovalSource::User),
+		)
+		.await;
+		assert_eq!(granted, Some(AmendmentGrant::Once));
+
+		for scope in
+			[ApprovalScope::Persist, ApprovalScope::Turn, ApprovalScope::Custom(sf!("lease"))]
+		{
+			let (_, granted) = amend_through_route(
+				&host,
+				&inbox,
+				"curl https://other.example",
+				&SandboxDenialFact::Network { host: sf!("other.example"), port: 443 },
+				"network other.example:443",
+				decision(scope.clone(), ApprovalSource::User),
+			)
+			.await;
+			assert_eq!(granted, None, "{scope:?} was never offered");
+		}
+		assert!(!grants.covers("other.example", 443));
+	}
+
+	/// The rerun budget: a fresh command may be amended for any fact, a
+	/// session-approved endpoint lets the command ask again only about a new
+	/// network endpoint its binding has not approved, while fewer reruns than
+	/// the bound were taken, and a once approval ends the chain.
+	#[test]
+	fn amendment_reruns_admit_only_new_session_network_endpoints() {
+		let network = SandboxDenialFact::Network { host: sf!("pypi.org"), port: 443 };
+		let path = SandboxDenialFact::WritePath(PathBuf::from("/private/blocked"));
+		let unknown = SandboxDenialFact::Unknown;
+		let fresh = AmendmentReruns::Fresh;
+		assert!(fresh.admits(&path, false, 4));
+		assert!(fresh.admits(&network, false, 4));
+		assert!(fresh.admits(&network, true, 4), "a concurrent grant reruns a fresh command");
+
+		let chained = fresh.after_session();
+		assert_eq!(chained, AmendmentReruns::SessionNetwork(1));
+		assert_eq!(chained.taken(), 1);
+		assert!(chained.admits(&network, false, 4));
+		assert!(!chained.admits(&network, true, 4), "only an endpoint not yet approved");
+		assert!(!chained.admits(&path, false, 4), "a session chain amends no path");
+		assert!(!chained.admits(&unknown, false, 4));
+		assert!(!chained.admits(&network, false, 1), "a bound of one reruns like once");
+
+		let mut budget = fresh;
+		for _ in 0..4 {
+			budget = budget.after_session();
+		}
+		assert_eq!(budget, AmendmentReruns::SessionNetwork(4));
+		assert!(!budget.admits(&network, false, 4), "the budget is spent");
+		assert!(budget.admits(&network, false, 5));
+
+		assert!(!AmendmentReruns::Spent.admits(&network, false, 4));
+		assert!(!AmendmentReruns::Spent.admits(&path, false, 4));
+		assert_eq!(AmendmentReruns::Spent.after_session(), AmendmentReruns::Spent);
+	}
+
+	/// Rebinding the in-process route starts an empty grant set and clears
+	/// the previous one, so a command still holding it loses the grants too.
+	/// Revoking clears the bound route's grants and keeps the route.
+	#[test]
+	fn rebinding_or_revoking_the_route_clears_its_egress_grants() {
+		let host = ExecHost::new();
+		assert!(host.egress_grants(None).is_none(), "no route, no binding");
+		let (route, _inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		host.bind_sandbox_approval_route(Some(route.clone()));
+		let first = host.egress_grants(None).expect("bound grants");
+		first.insert("pypi.org", 443);
+		assert!(
+			host
+				.egress_grants(None)
+				.is_some_and(|grants| grants.covers("pypi.org", 443))
+		);
+
+		host.revoke_route_grants();
+		assert!(!first.covers("pypi.org", 443), "a rewind revokes the route's grants");
+		assert!(host.amendment_approver(None).is_some(), "revoking keeps the route");
+
+		first.insert("pypi.org", 443);
+		host.bind_sandbox_approval_route(Some(route));
+		assert!(!first.covers("pypi.org", 443), "the previous binding's grants are cleared");
+		let second = host.egress_grants(None).expect("rebound grants");
+		assert!(!second.covers("pypi.org", 443), "a new binding starts empty");
+		second.insert("pypi.org", 443);
+		host.bind_sandbox_approval_route(None);
+		assert!(!second.covers("pypi.org", 443));
+		assert!(host.egress_grants(None).is_none());
+	}
+
+	/// A command's connection relay decides its amendment ahead of the host
+	/// route, and once that connection closed the command fails closed
+	/// instead of prompting through the host route. A session answer on the
+	/// relay extends that connection's grants, never the host route's.
+	#[tokio::test]
+	async fn a_command_relay_outranks_the_host_route_and_never_falls_back() {
+		use v1::server_frame::Body;
+
+		let host = ExecHost::new();
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		host.bind_sandbox_approval_route(Some(route));
+		let (responses, frames) = flume::bounded(4);
+		let approvals = crate::approval_relay::ConnectionApprovals::new(responses);
+		let relay = approvals.owned(9);
+		let command = "touch .git/relayed";
+		let fact = SandboxDenialFact::WritePath(PathBuf::from("/workspace/.git/relayed"));
+		let approval =
+			host.approve_sandbox_amendment(Some(&relay), command, &fact, "/workspace/.git");
+		tokio::pin!(approval);
+		let query = tokio::select! {
+			frame = frames.recv_async() => frame.expect("relayed query"),
+			granted = &mut approval => panic!("relayed approval settled early: {granted:?}"),
+		};
+		assert_eq!(query.request_id, 9);
+		let Some(Body::ApprovalQuery(query)) = query.body else {
+			panic!("the relay sent no approval query: {:?}", query.body);
+		};
+		assert_eq!(query.invocation_id, None);
+		assert_eq!(query.reasons[0].kind, "sandbox_amendment");
+		assert_eq!(query.reasons[0].subject, "/workspace/.git");
+		assert_eq!(query.reasons[0].scopes, ["once"]);
+		approvals.answer(9, v1::ApprovalAnswer {
+			query_id: query.query_id,
+			decision: Some(v1::ApprovalDecision {
+				approved: true,
+				scope: "once".to_owned(),
+				source: "user".to_owned(),
+				..v1::ApprovalDecision::default()
+			}),
+		});
+		assert_eq!(approval.await, Some(AmendmentGrant::Once));
+		assert!(inbox.try_recv().is_err(), "the host route was asked although a relay exists");
+
+		let network = SandboxDenialFact::Network { host: sf!("pypi.org"), port: 443 };
+		let approval = host.approve_sandbox_amendment(
+			Some(&relay),
+			"pip install x",
+			&network,
+			"network pypi.org:443",
+		);
+		tokio::pin!(approval);
+		let query = tokio::select! {
+			frame = frames.recv_async() => frame.expect("relayed network query"),
+			granted = &mut approval => panic!("relayed approval settled early: {granted:?}"),
+		};
+		let Some(Body::ApprovalQuery(query)) = query.body else {
+			panic!("the relay sent no approval query: {:?}", query.body);
+		};
+		assert_eq!(query.reasons[0].scopes, ["once", "session"]);
+		approvals.answer(9, v1::ApprovalAnswer {
+			query_id: query.query_id,
+			decision: Some(v1::ApprovalDecision {
+				approved: true,
+				scope: "session".to_owned(),
+				source: "user".to_owned(),
+				..v1::ApprovalDecision::default()
+			}),
+		});
+		assert_eq!(approval.await, Some(AmendmentGrant::Session));
+		assert!(relay.grants().covers("pypi.org", 443), "the connection holds the grant");
+		assert!(
+			host
+				.egress_grants(None)
+				.is_some_and(|grants| !grants.covers("pypi.org", 443)),
+			"the host route never inherits a connection's grant"
+		);
+		assert!(
+			host
+				.egress_grants(Some(&approvals.owned(10)))
+				.is_some_and(|grants| grants.covers("pypi.org", 443)),
+			"every command of the connection carries its grants"
+		);
+
+		approvals.disconnect();
+		assert!(!relay.grants().covers("pypi.org", 443), "a closed connection keeps no grant");
+		assert_eq!(
+			host
+				.approve_sandbox_amendment(Some(&relay), command, &fact, "/workspace/.git")
+				.await,
+			None
+		);
+		assert!(inbox.try_recv().is_err(), "a closed relay fell back to the host route");
 	}
 
 	#[test]
@@ -4439,6 +5115,129 @@ mod tests {
 		host.close_session(session).expect("session closes");
 	}
 
+	/// Live Seatbelt proof that network trouble under the default scoped
+	/// network reaches the model as `sandbox` diags, offline: the broker
+	/// refuses a host outside the allowlist before resolving it, and a
+	/// `.invalid` name never resolves. No approval route is bound, so a failed
+	/// refusal ends `Denied` and the remedy offers no prompt. A refusal is
+	/// explained in full once; a repeat adds one line on failure and nothing
+	/// on success. An allowed name that does not resolve stays `Failed` even
+	/// when curl prints the broker's response headers.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn scoped_network_trouble_reaches_the_model_as_sandbox_diags() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().unwrap();
+		let workspace = root.path().canonicalize().unwrap();
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				allow_domains: vec![Str::new_static("unresolvable.invalid")],
+				..crate::exec_settings::SandboxSettings::default()
+			},
+			&workspace,
+		);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+		let texts = |diags: &[v1::ToolDiag]| {
+			diags
+				.iter()
+				.map(|diag| format!("{}/{}: {}", diag.kind, diag.severity, diag.text))
+				.collect::<Vec<_>>()
+		};
+
+		// Plain HTTP through the broker: curl without `-f` exits 0 on its 403,
+		// and the refusal is still reported, as information.
+		let (outcome, exit, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sS -o /dev/null http://blocked.invalid/"),
+		)
+		.await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(exit, Some(0));
+		assert_eq!(diags.len(), 2, "{:?}", texts(&diags));
+		assert!(diags[0].text.contains("sandbox: backend=seatbelt"), "{:?}", texts(&diags));
+		assert_eq!(diags[1].kind, "sandbox");
+		assert_eq!(diags[1].severity, v1::ToolDiagSeverity::Info as i32);
+		assert!(diags[1].text.contains("blocked.invalid:80"), "{:?}", texts(&diags));
+		assert!(diags[1].text.contains("sv_sandbox_network_mode scoped"));
+		assert!(diags[1].text.contains("no approval prompt"));
+
+		// The same refusal failing the command ends it `Denied`, with one line.
+		let (outcome, _, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sSf -o /dev/null http://blocked.invalid/"),
+		)
+		.await;
+		assert_eq!(outcome, ExecOutcome::Denied as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(diags.len(), 1, "{:?}", texts(&diags));
+		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
+		assert!(
+			diags[0]
+				.text
+				.contains("blocked.invalid:80 failed at the egress broker again")
+		);
+		assert!(!diags[0].text.contains("sv_sandbox_allow_domains"), "{:?}", texts(&diags));
+
+		// Succeeding on it again adds nothing.
+		let (outcome, exit, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sS -o /dev/null http://blocked.invalid/"),
+		)
+		.await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(exit, Some(0));
+		assert!(diags.is_empty(), "{:?}", texts(&diags));
+
+		// An allowed name that does not resolve: curl prints the broker's
+		// response headers, and the command still ends `Failed`, not `Denied`.
+		let (outcome, exit, output, diags) = run_failure(
+			&host,
+			script_request(session, "/usr/bin/curl -sSfv -o /dev/null http://unresolvable.invalid/"),
+		)
+		.await;
+		let printed = String::from_utf8_lossy(&output);
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{printed}");
+		assert_eq!(exit, Some(22), "{printed}");
+		assert!(printed.contains("X-Omp-Broker-Refused: unresolved"), "{printed}");
+		assert!(
+			!printed
+				.to_ascii_lowercase()
+				.contains("x-omp-policy-blocked"),
+			"{printed}"
+		);
+		assert_eq!(diags.len(), 1, "{:?}", texts(&diags));
+		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
+		assert!(
+			diags[0]
+				.text
+				.contains("could not resolve unresolvable.invalid:80"),
+			"{:?}",
+			texts(&diags)
+		);
+
+		// A client that ignores the proxy environment gets the generic text,
+		// once per session.
+		let nc = "/usr/bin/nc -z -G 2 blocked.invalid 80";
+		let (outcome, _, output, diags) = run_failure(&host, script_request(session, nc)).await;
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(diags.len(), 1, "{:?}", texts(&diags));
+		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
+		assert!(diags[0].text.contains("HTTP_PROXY"), "{:?}", texts(&diags));
+		let (outcome, _, _, diags) = run_failure(&host, script_request(session, nc)).await;
+		assert_eq!(outcome, ExecOutcome::Failed as i32);
+		assert!(diags.is_empty(), "{:?}", texts(&diags));
+		host.close_session(session).expect("session closes");
+	}
+
 	/// ADR 0028: a detached script never reaches `/bin/sh`; it re-enters this
 	/// executable as the hidden in-process shell child.
 	#[test]
@@ -4636,6 +5435,46 @@ mod tests {
 		host.close_session(&opened.session).expect("session closes");
 	}
 
+	/// `sv_sandbox_mode off` set by the user with the network mode left at its
+	/// `scoped` default runs commands with no sandbox at all, so it works on
+	/// hosts with no native backend (Linux without bwrap, Windows).
+	#[tokio::test]
+	async fn explicit_off_with_the_default_network_runs_commands_unsandboxed() {
+		let root = tempfile::tempdir().expect("workspace");
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				mode: crate::exec_settings::ExecSandboxMode::Off,
+				explicit: true,
+				..Default::default()
+			},
+			root.path(),
+		);
+		assert_eq!(host.sandbox_state(), admission::SandboxState::Off);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(root.path())
+					.expect("workspace URI")
+					.to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("unsandboxed session opens");
+		assert!(
+			host.inner.sessions.lock()[&opened.session]
+				.sandbox
+				.is_none(),
+			"no wrapper and no broker"
+		);
+		let (outcome, exit, output, diags) =
+			run_failure(&host, script_request(&opened.session, "printf ok")).await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32);
+		assert_eq!(exit, Some(0));
+		assert_eq!(output, b"ok");
+		assert!(diags.is_empty(), "no sandbox note: {diags:?}");
+		host.close_session(&opened.session).expect("session closes");
+	}
+
 	#[tokio::test]
 	async fn sandboxed_session_preserves_ordinary_environment_mutations() {
 		let root = tempfile::tempdir().expect("workspace");
@@ -4680,14 +5519,12 @@ mod tests {
 	}
 
 	/// Mode `off` plus a `read_deny` root installs the in-shell file policy with
-	/// no kernel backend, so these proofs run on every unix host.
+	/// no kernel backend, so these proofs run on every unix host. The network
+	/// mode stays at its `scoped` default, which does not sandbox mode `off`.
 	#[cfg(unix)]
 	fn environment_only_read_deny(denied: &Path) -> crate::exec_settings::SandboxSettings {
 		crate::exec_settings::SandboxSettings {
 			mode: crate::exec_settings::ExecSandboxMode::Off,
-			// Pinned: a scoped network compiles a native backend instead of the
-			// backend-free environment-only policy.
-			network_mode: crate::exec_settings::SandboxNetworkMode::Disabled,
 			read_deny: vec![Str::from(denied.to_string_lossy().as_ref())],
 			..Default::default()
 		}
@@ -4897,19 +5734,19 @@ mod tests {
 			)
 		};
 		assert!(!Arc::ptr_eq(&first_sandbox, &second_sandbox));
-		let first_attempt = first_sandbox.begin_attempt();
-		let second_attempt = second_sandbox.begin_attempt();
+		let first_attempt = first_sandbox.begin_attempt(None);
+		let second_attempt = second_sandbox.begin_attempt(None);
 		let first_path = root.path().join("first-denied");
 		let second_path = root.path().join("second-denied");
 		assert!(first_attempt.check_write(&first_path).is_err());
 		assert!(second_attempt.check_write(&second_path).is_err());
 		let canonical = fs::canonicalize(root.path()).expect("canonical root");
 		assert_eq!(
-			first_attempt.take_denial(),
+			first_attempt.take_facts().denial,
 			Some(SandboxDenialFact::WritePath(canonical.join("first-denied"))),
 		);
 		assert_eq!(
-			second_attempt.take_denial(),
+			second_attempt.take_facts().denial,
 			Some(SandboxDenialFact::WritePath(canonical.join("second-denied"))),
 		);
 		host

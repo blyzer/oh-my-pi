@@ -485,10 +485,14 @@ fn spec_described(description: Str) -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		// The shell string is not an approval capability. The environment host
-		// admits exact filesystem, spawn, and network effects as interpretation
-		// reaches those boundaries.
+		// The shell string is not an approval capability, and the empty
+		// declaration holds only because `ExecSandbox` stands in for it: every
+		// child runs under the environment's exec sandbox and every in-process
+		// builtin is checked by that sandbox's path policy. Without an active
+		// sandbox, admission treats the shell as process authority. Nested `dyn`
+		// targets are admitted on their own spec.
 		effects: Effects::empty(),
+		confinement: omp_tool::Confinement::ExecSandbox,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),

@@ -37,6 +37,7 @@ impl RevisionedTool {
 			schema:          Bytes::from(schema),
 			constraint:      Constraint::None,
 			effects:         Effects::empty(),
+			confinement:     omp_tool::Confinement::Host,
 			projection_code: [revision as u8; 32],
 		})
 	}

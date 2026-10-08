@@ -82,6 +82,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
 	EnvdError,
 	admission::DynamicAdmission,
+	approval_relay::OwnedApprovals,
 	blobs::BlobHost,
 	computer::ComputerSessionHost,
 	devices_host::DynHost,
@@ -140,6 +141,7 @@ tokio::task_local! {
 	static OUTPUT_REQUEST: omp_tool::OutputRequest;
 	static EDIT_REPAIR_CONTEXT: InvocationEditRepairContext;
 	static ACP_BACKENDS: InvocationAcpBackends;
+	static INVOCATION_APPROVALS: Option<OwnedApprovals>;
 }
 /// Session-owned edit repair capability scoped to one native invocation.
 #[derive(Clone, Default)]
@@ -3494,6 +3496,15 @@ pub(super) async fn with_acp_scope<T>(
 	ACP_BACKENDS.scope(context, future).await
 }
 
+/// Runs one native tool stream with its invoking connection's approval relay,
+/// so the commands it issues prompt that connection.
+pub async fn with_invocation_approvals<T>(
+	approvals: Option<OwnedApprovals>,
+	future: impl Future<Output = T>,
+) -> T {
+	INVOCATION_APPROVALS.scope(approvals, future).await
+}
+
 /// Which editor binding governs the current call.
 pub enum InvocationEditor {
 	/// An invocation over an environment connection: only that connection's
@@ -3517,6 +3528,13 @@ pub(super) fn invocation_output_request() -> omp_tool::OutputRequest {
 	OUTPUT_REQUEST
 		.try_with(|request| *request)
 		.unwrap_or(omp_tool::OutputRequest::Bounded)
+}
+
+/// Returns the approval relay of the connection that issued the current
+/// native invocation; `None` outside one, or when that connection relays no
+/// approvals.
+pub fn invocation_approvals() -> Option<OwnedApprovals> {
+	INVOCATION_APPROVALS.try_with(Clone::clone).ok().flatten()
 }
 
 /// Returns the durable session principal for the current native invocation.
@@ -5814,6 +5832,9 @@ fn worker_spec(declaration: &ToolDecl) -> Result<ToolSpec, EnvdError> {
 		description:     Str::from(definition.description.as_str()),
 		schema:          omp_tool::inject_protocol_schema(&json_schema.schema_json)?,
 		constraint:      worker_constraint(declaration)?,
+		// Asserted here, never read from the declaration: an extension cannot
+		// claim that the exec sandbox confines its tool, whatever its host tier.
+		confinement:     omp_tool::Confinement::Host,
 		projection_code: worker_projection_code(declaration),
 		effects:         declaration
 			.effects
@@ -6264,6 +6285,144 @@ mod tests {
 		for expected in ["ast_edit", "ast_grep", "debug", "eval", "lsp", "write"] {
 			assert!(devices.contains(expected), "{expected} must remain reachable through dyn");
 		}
+	}
+
+	/// Only tools whose processes run under the exec sandbox claim it: `bash@2`
+	/// and `hub@2`. Every environment declaration (all of them enabled), the
+	/// session base, and the kernel's session tools are `Host`; a new tool
+	/// that claims `ExecSandbox` without spawning through `ExecHost` fails here.
+	#[test]
+	fn only_sandbox_spawning_tools_are_exec_sandboxed() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let con = Ctx::new();
+		let mut tool_settings = ToolSettings::default();
+		for name in [
+			"ast_edit",
+			"ast_grep",
+			"bash",
+			"browser",
+			"computer",
+			"debug",
+			"edit",
+			"eval",
+			"github",
+			"glob",
+			"grep",
+			"image_gen",
+			"lsp",
+			"read",
+			"security_scan",
+			"tts",
+			"web_search",
+			"write",
+		] {
+			tool_settings.enabled.insert(Str::new_static(name), true);
+		}
+		let browser_settings = BrowserSettings { enabled: true, ..BrowserSettings::default() };
+		let inputs = EnvironmentDeclarationInputs {
+			read_policy:      omp_tools::read::ReadPolicy::default(),
+			selected_edit:    omp_tools::edit::hashline_spec().rev,
+			eval_description: Some(sf!("Evaluate code.")),
+			shell_snapshot:   Some(omp_tools::shell::ShellPromptSnapshot {
+				sibling_tools:       Arc::default(),
+				platform:            sf!("linux"),
+				command_prefix:      false,
+				embedded_builtins:   true,
+				devices:             true,
+				interceptor_enabled: false,
+				interceptor_rules:   Arc::default(),
+			}),
+			memory:           omp_memory::Capabilities {
+				writable: true,
+				searchable: true,
+				resolvable: true,
+				editable: true,
+				..omp_memory::Capabilities::default()
+			},
+			managed_skills:   true,
+		};
+		let mut specs = environment_declarations(
+			&tool_settings,
+			&browser_settings,
+			&inputs,
+			true,
+			ToolsPolicy::Auto,
+		)
+		.into_iter()
+		.map(|declaration| declaration.spec)
+		.collect::<Vec<_>>();
+
+		let mut session = Registry::new();
+		register_session_base(
+			&mut session,
+			Vec::new(),
+			Vec::new(),
+			None,
+			None,
+			None,
+			None,
+			&BlobHost::open(scratch.path().join("blobs")).expect("blob host"),
+			scratch.path(),
+			scratch.path(),
+			&Arc::new(
+				TelemetryIndex::open(
+					&scratch.path().join("telemetry"),
+					&scratch.path().join("telemetry.sqlite3"),
+				)
+				.expect("telemetry index"),
+			),
+			Arc::new(
+				GithubCache::open(
+					scratch.path().join("github-cache.sqlite3"),
+					crate::tool_settings::GithubCacheSettings::from_con(&con).policy(),
+				)
+				.expect("GitHub cache"),
+			),
+			&tool_settings,
+			image_config(&con),
+			speech_config(&con),
+			ToolsPolicy::Auto,
+		)
+		.expect("session base registers");
+		specs.extend(
+			session
+				.live_identities()
+				.map(|(name, _)| session.live_spec(name).expect("live spec").clone()),
+		);
+		// The kernel's session tools run in the session process.
+		specs.extend([
+			omp_tools::task::spec(),
+			omp_tools::hub::spec(),
+			omp_tools::todo::spec(),
+			omp_tools::goal::spec(),
+		]);
+
+		let names = specs
+			.iter()
+			.map(|spec| spec.name.as_str())
+			.collect::<BTreeSet<_>>();
+		for expected in [
+			"bash",
+			"browser",
+			"computer",
+			"eval",
+			"py_eval",
+			"read",
+			"write",
+			"web_search",
+			"github",
+			"task",
+			"hub",
+			"reflect",
+		] {
+			assert!(names.contains(expected), "{expected} must be covered");
+		}
+		let sandboxed = specs
+			.iter()
+			.filter(|spec| spec.confinement.sandboxed())
+			.map(|spec| (spec.name.as_str(), spec.rev.n))
+			.collect::<BTreeSet<_>>();
+		assert_eq!(sandboxed, BTreeSet::from([("bash", 2), ("hub", 2)]));
 	}
 
 	#[test]

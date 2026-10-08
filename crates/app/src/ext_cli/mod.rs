@@ -20,7 +20,9 @@ use omp_ext::{
 		DeploymentManifest, ExtensionEnvironment, FeatureSelection, MissingSourceOutcome,
 		MissingSourcePolicy, OfflineMode, SourceSpec, effective_missing_source,
 	},
-	doctor::{CredentialHealth, DoctorRequest, DoctorSeverity, RuntimeHealth, diagnose},
+	doctor::{
+		CredentialHealth, DoctorFinding, DoctorRequest, DoctorSeverity, RuntimeHealth, diagnose,
+	},
 	index::SignedIndex,
 	lock::{
 		InstalledExtension, InstalledRecord, LockFile, LockedExtension, LockedPackage, Wheel,
@@ -29,8 +31,9 @@ use omp_ext::{
 	plugin_command::CommandApprovals,
 	resolver::{ResolvePlan, ResolveRequirement, SystemUv, compare_versions, minimal_unsat_core},
 	trust::{
-		Grant, GrantsFile, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
-		parse_grant_requests, validate_grant_request, verify_artifact_signature,
+		Grant, GrantPersistenceError, GrantsFile, GrantsFileError, KeysFile, RevocationFreshness,
+		RevocationsFile, grant_covers, parse_grant_requests, validate_grant_request,
+		verify_artifact_signature,
 	},
 	upgrade::{
 		Generation, PinsFile, apply_uninstall, concrete_features, gc_generations, plan_uninstall,
@@ -49,22 +52,42 @@ const MAX_WHEEL_BYTES: usize = 256 * 1024 * 1024;
 #[error("extension operation failed")]
 pub struct ExtensionCliFailure {
 	#[source]
-	source: omp_ext::ExtensionError,
+	source: ExtensionCliCause,
+}
+
+/// The typed extension failure behind an [`ExtensionCliFailure`].
+#[derive(Debug, thiserror::Error)]
+enum ExtensionCliCause {
+	/// An extension diagnostic.
+	#[error(transparent)]
+	Extension(#[from] omp_ext::ExtensionError),
+	/// The local grant file could not be read.
+	#[error(transparent)]
+	Grants(#[from] GrantsFileError),
 }
 
 impl ExtensionCliFailure {
-	fn new(source: omp_ext::ExtensionError) -> Self {
-		Self { source }
-	}
-
 	/// Uniform `omp ext` exit status for the stable diagnostic code.
 	pub const fn exit_code(&self) -> u8 {
-		self.source.exit_code()
+		match &self.source {
+			ExtensionCliCause::Extension(error) => error.exit_code(),
+			ExtensionCliCause::Grants(error) => error.code().exit_code(),
+		}
 	}
 }
 
-fn extension_failure(error: omp_ext::ExtensionError) -> miette::Report {
-	miette::Report::new(ExtensionCliFailure::new(error))
+fn extension_failure(error: impl Into<ExtensionCliCause>) -> miette::Report {
+	miette::Report::new(ExtensionCliFailure { source: error.into() })
+}
+
+/// A failed locked grant file update: an unreadable grant file keeps its
+/// extension diagnostic status; a lock or write failure is an ordinary
+/// failure.
+fn grants_update_failure(error: GrantPersistenceError) -> miette::Report {
+	match error {
+		GrantPersistenceError::Read(source) => extension_failure(source),
+		error => miette::Report::from_err(error),
+	}
 }
 
 /// Ctrl+C observed while an extension installer-owned child or network stream
@@ -1215,14 +1238,15 @@ fn uninstall(state: &StatePaths, args: ExtUninstallArgs) -> miette::Result<()> {
 	installed.write(&state.client_installed).into_diagnostic()?;
 	lock.write(&state.client_lock).into_diagnostic()?;
 	if !args.keep_grant {
-		let mut grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
 		let removed = plan
 			.installed
 			.iter()
 			.chain(&plan.locked)
 			.collect::<std::collections::BTreeSet<_>>();
-		grants.grants.retain(|grant| !removed.contains(&grant.id));
-		grants.write(&state.grants).into_diagnostic()?;
+		GrantsFile::update(&state.grants, |grants| {
+			grants.grants.retain(|grant| !removed.contains(&grant.id));
+		})
+		.map_err(grants_update_failure)?;
 	}
 	Ok(())
 }
@@ -1911,11 +1935,9 @@ fn doctor(state: &StatePaths, args: ExtDoctorArgs) -> miette::Result<()> {
 		fix:                   args.fix,
 	};
 	let findings = diagnose(&request, &CliHealth);
+	let mut out = std::io::stdout().lock();
 	for finding in &findings {
-		match finding.code {
-			Some(code) => println!("{:?} {code}: {}", finding.severity, finding.detail),
-			None => println!("{:?}: {}", finding.severity, finding.detail),
-		}
+		write_finding(&mut out, finding).into_diagnostic()?;
 	}
 	if findings
 		.iter()
@@ -1925,6 +1947,26 @@ fn doctor(state: &StatePaths, args: ExtDoctorArgs) -> miette::Result<()> {
 	}
 	Ok(())
 }
+
+/// Writes one `omp ext doctor` report line: the finding's severity, code and
+/// detail, then its typed cause and that cause's source chain.
+fn write_finding(out: &mut impl std::io::Write, finding: &DoctorFinding) -> std::io::Result<()> {
+	write!(out, "{:?}", finding.severity)?;
+	if let Some(code) = finding.code {
+		write!(out, " {code}")?;
+	}
+	write!(out, ": {}", finding.detail)?;
+	let mut cause = finding
+		.cause
+		.as_ref()
+		.map(|cause| cause as &dyn std::error::Error);
+	while let Some(error) = cause {
+		write!(out, ": {error}")?;
+		cause = error.source();
+	}
+	writeln!(out)
+}
+
 async fn bundle(state: &StatePaths, args: ExtBundleArgs) -> miette::Result<()> {
 	let lock = fs::read(&state.client_lock).into_diagnostic()?;
 	let files = vec![BundleFile {
@@ -1941,7 +1983,8 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 	if args.approve_commands || !args.approve_command.is_empty() {
 		return approve_plugin_commands(state, data_dir, &args);
 	}
-	let mut grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
+	// Read before any mutation, so an unreadable grant file changes nothing.
+	let grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
 	if args.show {
 		show_plugin_commands(state, data_dir, &args, &mut std::io::stdout().lock())?;
 		let keys = KeysFile::read(&state.keys).map_err(extension_failure)?;
@@ -1975,23 +2018,17 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 		return Ok(());
 	}
 	if args.revoke {
-		grants.grants.retain(|grant| grant.id != args.id);
-		grants.revoke_plugin_commands(omp_ext::plugin_command::PluginId::from_ref(&args.id), None);
-		grants.write(&state.grants).into_diagnostic()?;
+		GrantsFile::update(&state.grants, |grants| {
+			grants.grants.retain(|grant| grant.id != args.id);
+			grants.revoke_plugin_commands(omp_ext::plugin_command::PluginId::from_ref(&args.id), None);
+		})
+		.map_err(grants_update_failure)?;
 		return Ok(());
 	}
-	if args.ship == Some(Ship::Pickle) {
-		let tier_after = args.tier.map(tier);
-		if !grants
-			.grants
-			.iter()
-			.filter(|grant| grant.id == args.id)
-			.all(|grant| tier_after.unwrap_or(grant.tier) == omp_ext::TrustTier::Trusted)
-		{
-			return Err(miette!("pickle shipping requires the trusted extension tier"));
-		}
-	}
-	let mut changed = false;
+	// Every refusal comes before the first write: the install records, locks
+	// and keys are rewritten in memory first, and written only once the grant
+	// file update has accepted the mutation under its lock.
+	let mut tier_rewrites = Vec::new();
 	if let Some(selected_tier) = args.tier {
 		for (installed_path, lock_path, layer) in [
 			(&state.client_installed, &state.client_lock, BackendLayer::Client),
@@ -2007,31 +2044,22 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 				entry.tier = tier(selected_tier);
 				installed_changed = true;
 			}
-			if installed_changed {
-				installed.write(installed_path).into_diagnostic()?;
-				if lock_path.exists() {
-					let mut lock = LockFile::read(lock_path, layer).map_err(extension_failure)?;
-					if let Some(extension) = lock.extensions.iter_mut().find(|entry| entry.id == args.id)
-					{
-						extension.tier = tier(selected_tier);
-						lock.write(lock_path).into_diagnostic()?;
-					}
-				}
-				changed = true;
+			if !installed_changed {
+				continue;
 			}
+			let mut lock_rewrite = None;
+			if lock_path.exists() {
+				let mut lock = LockFile::read(lock_path, layer).map_err(extension_failure)?;
+				if let Some(extension) = lock.extensions.iter_mut().find(|entry| entry.id == args.id) {
+					extension.tier = tier(selected_tier);
+					lock_rewrite = Some((lock_path, lock));
+				}
+			}
+			tier_rewrites.push((installed_path, installed, lock_rewrite));
 		}
 	}
-	for grant in grants.grants.iter_mut().filter(|grant| grant.id == args.id) {
-		if let Some(selected_tier) = args.tier {
-			grant.tier = tier(selected_tier);
-			changed = true;
-		}
-		if let Some(ship) = args.ship {
-			grant.ship = Str::new(<&'static str>::from(ship));
-			changed = true;
-		}
-	}
-	if let Some(key) = args.key {
+	let mut keys_rewrite = None;
+	if let Some(key) = &args.key {
 		let version = [&state.client_lock, &state.workspace_lock]
 			.into_iter()
 			.filter(|path| path.exists())
@@ -2053,20 +2081,59 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 			})
 			.unwrap_or_else(|| Str::new_static("manual"));
 		let mut keys = KeysFile::read(&state.keys).map_err(extension_failure)?;
-		changed |= keys
+		if keys
 			.accept_operator_key(
 				&args.id,
-				&key,
+				key,
 				&version,
 				&Str::new(jiff::Timestamp::now().to_string()),
 			)
-			.map_err(extension_failure)?;
-		keys.write(&state.keys).into_diagnostic()?;
+			.map_err(extension_failure)?
+		{
+			keys_rewrite = Some(keys);
+		}
 	}
-	if !changed {
-		return Err(miette!("no trust mutation was requested for {}", args.id));
-	}
-	grants.write(&state.grants).into_diagnostic()
+	GrantsFile::try_update(&state.grants, |grants| {
+		// Checked under the lock, where another writer cannot change a tier
+		// before the grant file is written.
+		let tier_after = args.tier.map(tier);
+		if args.ship == Some(Ship::Pickle)
+			&& !grants
+				.grants
+				.iter()
+				.filter(|grant| grant.id == args.id)
+				.all(|grant| tier_after.unwrap_or(grant.tier) == omp_ext::TrustTier::Trusted)
+		{
+			return Err(miette!("pickle shipping requires the trusted extension tier"));
+		}
+		let mut changed = !tier_rewrites.is_empty() || keys_rewrite.is_some();
+		for grant in grants.grants.iter_mut().filter(|grant| grant.id == args.id) {
+			if let Some(selected_tier) = args.tier {
+				grant.tier = tier(selected_tier);
+				changed = true;
+			}
+			if let Some(ship) = args.ship {
+				grant.ship = Str::new(<&'static str>::from(ship));
+				changed = true;
+			}
+		}
+		if !changed {
+			return Err(miette!("no trust mutation was requested for {}", args.id));
+		}
+		// Accepted: the other files are written before the grant file, still
+		// under its lock, so a refusal above has written nothing.
+		for (installed_path, installed, lock) in &tier_rewrites {
+			installed.write(installed_path).into_diagnostic()?;
+			if let Some((lock_path, lock)) = lock {
+				lock.write(lock_path).into_diagnostic()?;
+			}
+		}
+		if let Some(keys) = &keys_rewrite {
+			keys.write(&state.keys).into_diagnostic()?;
+		}
+		Ok(())
+	})
+	.map_err(grants_update_failure)?
 }
 
 /// Every command the plugin identity `id` launches as a session in the
@@ -3018,51 +3085,56 @@ async fn install_index_source(
 	}
 	let ship = Str::new_static("installed");
 	let workspace = (state.layer == BackendLayer::Workspace).then_some(&state.workspace);
-	let mut grants = GrantsFile::read(&state.grants).map_err(extension_failure)?;
-	if consented {
-		grants.grants.retain(|grant| {
-			grant.id != extension.id
-				|| grant.layer != state.layer
-				|| grant.workspace.as_ref() != workspace
-		});
-		grants.grants.push(Grant {
-			id:                extension.id.clone(),
-			publisher:         extension.publisher_key.clone(),
-			layer:             state.layer,
-			workspace:         workspace.cloned(),
-			scope:             omp_ext::trust::GrantScope::Exact,
-			capability_digest: effective_capability_digest.clone(),
-			tier:              tier(args.tier),
-			ship:              ship.clone(),
-			granted_at:        Str::new(jiff::Timestamp::now().to_string()),
-			granted_by:        if environment_consent {
-				Str::new_static("environment")
-			} else {
-				Str::new_static("explicit-install")
-			},
-			duration:          omp_ext::trust::GrantDuration::Persistent,
-		});
-	}
-	if !grant_covers(
-		&grants,
-		&extension.id,
-		&extension.publisher_key,
-		state.layer,
-		workspace,
-		&effective_capability_digest,
-		tier(args.tier),
-		&ship,
-	) {
-		return Err(extension_failure(omp_ext::ExtensionError::new(
-			omp_ext::ExtensionCode::EConsent,
-			format!(
-				"no exact operator grant admits {} at {:?} tier with {} shipping",
-				extension.id, args.tier, ship
-			),
-		)));
-	}
-	if !args.dry_run {
-		grants.write(&state.grants).into_diagnostic()?;
+	let admit = |grants: &mut GrantsFile| {
+		if consented {
+			grants.grants.retain(|grant| {
+				grant.id != extension.id
+					|| grant.layer != state.layer
+					|| grant.workspace.as_ref() != workspace
+			});
+			grants.grants.push(Grant {
+				id:                extension.id.clone(),
+				publisher:         extension.publisher_key.clone(),
+				layer:             state.layer,
+				workspace:         workspace.cloned(),
+				scope:             omp_ext::trust::GrantScope::Exact,
+				capability_digest: effective_capability_digest.clone(),
+				tier:              tier(args.tier),
+				ship:              ship.clone(),
+				granted_at:        Str::new(jiff::Timestamp::now().to_string()),
+				granted_by:        if environment_consent {
+					Str::new_static("environment")
+				} else {
+					Str::new_static("explicit-install")
+				},
+				duration:          omp_ext::trust::GrantDuration::Persistent,
+			});
+		}
+		if grant_covers(
+			grants,
+			&extension.id,
+			&extension.publisher_key,
+			state.layer,
+			workspace,
+			&effective_capability_digest,
+			tier(args.tier),
+			&ship,
+		) {
+			Ok(())
+		} else {
+			Err(extension_failure(omp_ext::ExtensionError::new(
+				omp_ext::ExtensionCode::EConsent,
+				format!(
+					"no exact operator grant admits {} at {:?} tier with {} shipping",
+					extension.id, args.tier, ship
+				),
+			)))
+		}
+	};
+	if args.dry_run {
+		admit(&mut GrantsFile::read(&state.grants).map_err(extension_failure)?)?;
+	} else {
+		GrantsFile::try_update(&state.grants, admit).map_err(grants_update_failure)??;
 	}
 
 	lock.indexes = vec![if index.is_empty() {
@@ -3920,6 +3992,427 @@ mod tests {
 		})
 		.expect("approve the explicit package's servers");
 		assert!(blocked(vec![outside_root]).is_empty());
+	}
+
+	/// The status `omp` exits with for an `omp ext` failure (`main.rs`): the
+	/// extension diagnostic's own, otherwise 1.
+	fn exit_status(failure: &miette::Report) -> u8 {
+		failure
+			.downcast_ref::<ExtensionCliFailure>()
+			.map_or(1, ExtensionCliFailure::exit_code)
+	}
+
+	/// Whether any error in `failure`'s chain renders `text`.
+	fn mentions(failure: &miette::Report, text: &str) -> bool {
+		failure
+			.chain()
+			.any(|cause| cause.to_string().contains(text))
+	}
+
+	const DEMO: &str = "demo";
+
+	/// A grant file state beside a signed index offering `demo` 1.0.0, a pure
+	/// wheel signed by a fixed publisher key.
+	struct GrantFixture {
+		_tree:         tempfile::TempDir,
+		data:          PathBuf,
+		state:         StatePaths,
+		publisher_key: Str,
+	}
+
+	fn grant_fixture() -> GrantFixture {
+		use omp_ext::index::{
+			INDEX_VERSION, IndexArtifact, IndexExtension, IndexRelease, SignedIndex,
+		};
+		use ring::signature::{Ed25519KeyPair, KeyPair as _};
+
+		/// The signed bytes of a [`SignedIndex`]: every field but `signature`.
+		#[derive(serde::Serialize)]
+		struct Unsigned<'a> {
+			version:     u32,
+			name:        &'a str,
+			issued_at:   &'a str,
+			valid_until: &'a str,
+			extensions:  &'a [IndexExtension],
+		}
+
+		let tree = tempfile::tempdir().expect("temporary tree");
+		let data = tree.path().join("data");
+		let project = tree.path().join("project");
+		fs::create_dir_all(data.join("ext")).expect("extension state");
+		fs::create_dir_all(&project).expect("project");
+		let state = StatePaths::new(&data, &project);
+		let encode = |bytes: &[u8]| Str::new(base64::encode(bytes).into_string());
+		let index_key = Ed25519KeyPair::from_seed_unchecked(&[1; 32]).expect("index key");
+		let publisher = Ed25519KeyPair::from_seed_unchecked(&[2; 32]).expect("publisher key");
+		let publisher_key = encode(publisher.public_key().as_ref());
+		let wheel = b"wheel";
+		let blake3 = blake3::hash(wheel);
+		let sha256 = Sha256::digest(wheel);
+		let capability_digest = omp_ext::trust::capability_digest([], []);
+		let mut signed = blake3.as_bytes().to_vec();
+		signed.extend_from_slice(&sha256);
+		signed.extend(
+			hex::decode(capability_digest.trim_start_matches("b3:"))
+				.into_vec()
+				.expect("hex capability digest"),
+		);
+		let extensions = vec![IndexExtension {
+			id:            Str::new_static(DEMO),
+			distribution:  Str::new_static(DEMO),
+			description:   Str::new_static(""),
+			publisher_key: publisher_key.clone(),
+			key_rotation:  None,
+			releases:      vec![IndexRelease {
+				version: Str::new_static("1.0.0"),
+				manifest_digest: Str::new_static("b3:manifest"),
+				manifest_capability_digest: Str::new_static(""),
+				capability_digest,
+				requires: Vec::new(),
+				capabilities: Vec::new(),
+				features: std::collections::BTreeMap::new(),
+				declarations: Vec::new(),
+				attested: true,
+				yanked: false,
+				shadows: Vec::new(),
+				artifacts: vec![IndexArtifact {
+					target:    Str::new_static("any"),
+					url:       "file:///demo.whl".to_owned(),
+					file:      Str::new_static("demo.whl"),
+					tag:       Str::new_static("py3-none-any"),
+					size:      wheel.len() as u64,
+					blake3:    Str::from(format!("b3:{}", blake3.to_hex())),
+					sha256:    Str::from(format!("sha256:{}", hex::encode(&sha256))),
+					signature: encode(publisher.sign(&signed).as_ref()),
+				}],
+			}],
+		}];
+		let (issued_at, valid_until) = ("2000-01-01T00:00:00Z", "2999-01-01T00:00:00Z");
+		let payload = serde_json::to_vec(&Unsigned {
+			version: INDEX_VERSION,
+			name: "test",
+			issued_at,
+			valid_until,
+			extensions: &extensions,
+		})
+		.expect("unsigned index");
+		let index = SignedIndex {
+			version: INDEX_VERSION,
+			name: Str::new_static("test"),
+			issued_at: Str::new_static(issued_at),
+			valid_until: Str::new_static(valid_until),
+			extensions,
+			signature: encode(index_key.sign(&payload).as_ref()),
+		};
+		fs::write(&state.index_key, encode(index_key.public_key().as_ref()).as_str())
+			.expect("index key");
+		fs::write(&state.index_snapshot, serde_json::to_vec(&index).expect("signed index"))
+			.expect("signed index");
+		GrantFixture { _tree: tree, data, state, publisher_key }
+	}
+
+	impl GrantFixture {
+		/// Records a sandboxed grant for `demo` through the locked writer.
+		fn grant_demo(&self) {
+			GrantsFile::update(&self.state.grants, |grants| {
+				grants.grants.push(Grant {
+					id:                Str::new_static(DEMO),
+					publisher:         self.publisher_key.clone(),
+					layer:             BackendLayer::Client,
+					workspace:         None,
+					scope:             omp_ext::trust::GrantScope::Exact,
+					capability_digest: Str::new_static("b3:other"),
+					tier:              omp_ext::TrustTier::Sandboxed,
+					ship:              Str::new_static("installed"),
+					granted_at:        Str::new_static("2026-10-07T00:00:00Z"),
+					granted_by:        Str::new_static("cli"),
+					duration:          omp_ext::trust::GrantDuration::Persistent,
+				});
+			})
+			.expect("grant demo");
+		}
+
+		/// Pins the publisher key, so an install of `demo` is not first-seen.
+		fn pin_publisher(&self) {
+			KeysFile {
+				version: 1,
+				keys:    vec![omp_ext::trust::KeyPin {
+					id:                 Str::new_static(DEMO),
+					key:                self.publisher_key.clone(),
+					introduced_version: Str::new_static("1.0.0"),
+					introduced_at:      Str::new_static("2026-10-07T00:00:00Z"),
+				}],
+			}
+			.write(&self.state.keys)
+			.expect("pin publisher key");
+		}
+
+		fn grant_bytes(&self) -> Vec<u8> {
+			fs::read(&self.state.grants).expect("grant file")
+		}
+
+		/// Records `demo` 1.0.0 as installed and locked in the client layer
+		/// at the trusted tier.
+		fn record_trusted_demo(&self) {
+			InstalledRecord {
+				version:    2,
+				extensions: vec![InstalledExtension {
+					id:       Str::new_static(DEMO),
+					features: Vec::new(),
+					source:   index_source("test", &Str::new_static(DEMO)),
+					tier:     omp_ext::TrustTier::Trusted,
+					enabled:  true,
+				}],
+			}
+			.write(&self.state.client_installed)
+			.expect("install record");
+			let digest = |prefix: &str| Str::new(format!("{prefix}{}", "0".repeat(64)));
+			let mut lock =
+				read_lock_or_empty(&self.state.client_lock, BackendLayer::Client).expect("empty lock");
+			lock.targets = vec![Str::new_static("any")];
+			lock.indexes = vec!["test".to_owned()];
+			lock.extensions.push(LockedExtension {
+				id: Str::new_static(DEMO),
+				version: Str::new_static("1.0.0"),
+				tier: omp_ext::TrustTier::Trusted,
+				pool: None,
+				features: Vec::new(),
+				source: index_source("test", &Str::new_static(DEMO)),
+				manifest_digest: digest("b3:"),
+				declaration_digest: digest("b3:"),
+				capability_digest: digest("b3:"),
+				manifest_capability_digest: digest("b3:"),
+				publisher: self.publisher_key.clone(),
+				signature: Str::new_static("unchecked"),
+				ship: Str::new_static("installed"),
+				requires: Vec::new(),
+				wheel: Wheel {
+					file:   Str::new_static("demo.whl"),
+					tag:    Str::new_static("py3-none-any"),
+					size:   5,
+					blake3: digest("b3:"),
+					sha256: digest("sha256:"),
+				},
+			});
+			lock.write(&self.state.client_lock).expect("lock");
+		}
+
+		async fn install(&self, yes: bool, dry_run: bool) -> miette::Result<()> {
+			install(
+				&self.state,
+				ExtInstallArgs {
+					specs: vec![Str::new_static(DEMO)],
+					tier: Tier::Sandboxed,
+					pool: None,
+					features: None,
+					capabilities: None,
+					yes,
+					dry_run,
+					no_preresolved: false,
+					target: Vec::new(),
+					no_lock: false,
+					force: false,
+				},
+				None,
+				None,
+				false,
+			)
+			.await
+		}
+
+		fn trust(&self, args: ExtTrustArgs) -> miette::Result<()> {
+			trust(&self.state, &self.data, args)
+		}
+
+		fn uninstall(&self) -> miette::Result<()> {
+			uninstall(&self.state, ExtUninstallArgs {
+				ids:        vec![Str::new_static(DEMO)],
+				keep_grant: false,
+				keep_lock:  false,
+				purge:      false,
+				dry_run:    false,
+			})
+		}
+	}
+
+	#[tokio::test]
+	async fn an_unreadable_grant_file_fails_every_grant_writer_with_status_4() {
+		let fixture = grant_fixture();
+		// The fixture reaches the grant check: with a readable grant file and
+		// consent, a dry-run install succeeds.
+		fixture.install(true, true).await.expect("dry-run install");
+		fs::write(&fixture.state.grants, "grant = 3").expect("malformed grant file");
+		let failures = [
+			("install", fixture.install(true, false).await),
+			("dry-run install", fixture.install(true, true).await),
+			("trust", fixture.trust(ExtTrustArgs { tier: Some(Tier::Trusted), ..trust_args(DEMO) })),
+			("revoke", fixture.trust(ExtTrustArgs { revoke: true, ..trust_args(DEMO) })),
+			("uninstall", fixture.uninstall()),
+		];
+		for (command, result) in failures {
+			let failure = result.expect_err(command);
+			assert_eq!(exit_status(&failure), 4, "{command}: {failure:?}");
+			assert!(mentions(&failure, "is malformed"), "{command}: {failure:?}");
+		}
+		assert_eq!(
+			fixture.grant_bytes(),
+			b"grant = 3",
+			"an unreadable grant file is never rewritten"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_refused_grant_update_leaves_the_grant_file_byte_identical() {
+		let fixture = grant_fixture();
+		fixture.grant_demo();
+		fixture.pin_publisher();
+		let before = fixture.grant_bytes();
+
+		// No consent: the grant check under the lock refuses the install.
+		let refused = fixture
+			.install(false, false)
+			.await
+			.expect_err("install without a grant");
+		assert_eq!(exit_status(&refused), 5, "{refused:?}");
+		assert!(mentions(&refused, "no exact operator grant admits demo"), "{refused:?}");
+		assert_eq!(fixture.grant_bytes(), before);
+
+		let refused = fixture
+			.trust(ExtTrustArgs { ship: Some(Ship::Pickle), ..trust_args(DEMO) })
+			.expect_err("pickle without the trusted tier");
+		assert_eq!(exit_status(&refused), 1, "{refused:?}");
+		assert!(mentions(&refused, "pickle shipping requires the trusted"), "{refused:?}");
+		assert_eq!(fixture.grant_bytes(), before);
+
+		let refused = fixture
+			.trust(trust_args("unknown"))
+			.expect_err("nothing to change");
+		assert_eq!(exit_status(&refused), 1, "{refused:?}");
+		assert!(mentions(&refused, "no trust mutation was requested for unknown"), "{refused:?}");
+		assert_eq!(fixture.grant_bytes(), before);
+
+		// A dry run never writes, even with consent.
+		fixture.install(true, true).await.expect("dry-run install");
+		assert_eq!(fixture.grant_bytes(), before);
+		// The pickle check passes once the tier is trusted.
+		fixture
+			.trust(ExtTrustArgs {
+				tier: Some(Tier::Trusted),
+				ship: Some(Ship::Pickle),
+				..trust_args(DEMO)
+			})
+			.expect("pickle at the trusted tier");
+		let granted = GrantsFile::read(&fixture.state.grants).expect("grants");
+		assert_eq!(granted.grants[0].tier, omp_ext::TrustTier::Trusted);
+		assert_eq!(granted.grants[0].ship, "pickle");
+	}
+
+	#[test]
+	fn a_pickle_refusal_writes_no_trust_file() {
+		let fixture = grant_fixture();
+		fixture.grant_demo();
+		fixture.pin_publisher();
+		fixture.record_trusted_demo();
+		let state = &fixture.state;
+		let files = [&state.client_installed, &state.client_lock, &state.keys, &state.grants];
+		let contents = || files.map(|path| fs::read(path).expect("trust state file"));
+		let before = contents();
+		let rotated = Str::new(base64::encode(&[3_u8; 32]).into_string());
+		let mutation = |ship| ExtTrustArgs {
+			tier: Some(Tier::Sandboxed),
+			ship: Some(ship),
+			key: Some(rotated.clone()),
+			..trust_args(DEMO)
+		};
+
+		// Pickle shipping at the sandboxed tier is refused under the grant
+		// file lock, before the tier and key rewrites reach any file.
+		let refused = fixture
+			.trust(mutation(Ship::Pickle))
+			.expect_err("pickle at the sandboxed tier");
+		assert_eq!(exit_status(&refused), 1, "{refused:?}");
+		assert!(mentions(&refused, "pickle shipping requires the trusted"), "{refused:?}");
+		for (path, (before, after)) in files.iter().zip(before.iter().zip(&contents())) {
+			assert_eq!(before, after, "{} was written by a refused trust", path.display());
+		}
+
+		// The same mutation shipping source is admitted and rewrites them all.
+		fixture
+			.trust(mutation(Ship::Source))
+			.expect("source at the sandboxed tier");
+		for (path, (before, after)) in files.iter().zip(before.iter().zip(&contents())) {
+			assert_ne!(before, after, "{} is part of the trust mutation", path.display());
+		}
+		let installed = InstalledRecord::read(&state.client_installed).expect("install record");
+		assert_eq!(installed.extensions[0].tier, omp_ext::TrustTier::Sandboxed);
+		let keys = KeysFile::read(&state.keys).expect("keys");
+		assert_eq!(keys.keys[0].key, rotated);
+	}
+
+	#[test]
+	fn a_doctor_finding_renders_its_typed_cause_chain() {
+		let tree = tempfile::tempdir().expect("temporary tree");
+		let grants = tree.path().join("grants.toml");
+		fs::write(&grants, "workspace_trust = 3").expect("malformed grant file");
+		let error = GrantsFile::read(&grants).expect_err("malformed grant file");
+		let finding = DoctorFinding {
+			code:         Some(error.code()),
+			severity:     DoctorSeverity::Error,
+			extension_id: None,
+			detail:       Str::new_static("operator grants are unreadable"),
+			cause:        Some(omp_ext::doctor::DoctorCause::Grants(error)),
+			repaired:     false,
+		};
+		let mut out = Vec::new();
+		write_finding(&mut out, &finding).expect("render the finding");
+		let line = String::from_utf8(out).expect("UTF-8 report");
+		let head = format!(
+			"Error E-INTEGRITY: operator grants are unreadable: grant file {} is malformed: ",
+			grants.display()
+		);
+		assert!(line.starts_with(&head), "{line}");
+		assert!(line.contains("workspace_trust"), "the TOML cause: {line}");
+		assert!(line.ends_with('\n'), "{line:?}");
+
+		let mut out = Vec::new();
+		write_finding(&mut out, &DoctorFinding { code: None, cause: None, ..finding })
+			.expect("render the finding");
+		assert_eq!(out, b"Error: operator grants are unreadable\n");
+	}
+
+	#[test]
+	fn a_grant_lock_failure_exits_with_status_1_and_changes_nothing() {
+		let fixture = grant_fixture();
+		fixture.grant_demo();
+		let before = fixture.grant_bytes();
+		let lock_path = fixture.state.grants.with_file_name("grants.toml.lock");
+
+		// Another writer holds the lock for the whole bounded wait.
+		let held = fs::OpenOptions::new()
+			.create(true)
+			.read(true)
+			.write(true)
+			.truncate(false)
+			.open(&lock_path)
+			.expect("lock file");
+		held.lock().expect("hold the grant file lock");
+		let failure = fixture
+			.trust(ExtTrustArgs { revoke: true, ..trust_args(DEMO) })
+			.expect_err("revoke behind a held lock");
+		assert_eq!(exit_status(&failure), 1, "{failure:?}");
+		assert!(mentions(&failure, "is still held"), "{failure:?}");
+		assert_eq!(fixture.grant_bytes(), before);
+		drop(held);
+
+		// The lock file cannot be opened at all.
+		fs::remove_file(&lock_path).expect("remove lock file");
+		fs::create_dir(&lock_path).expect("directory in place of the lock file");
+		let failure = fixture
+			.uninstall()
+			.expect_err("uninstall behind an unopenable lock");
+		assert_eq!(exit_status(&failure), 1, "{failure:?}");
+		assert!(mentions(&failure, "could not be acquired"), "{failure:?}");
+		assert_eq!(fixture.grant_bytes(), before);
 	}
 
 	#[test]

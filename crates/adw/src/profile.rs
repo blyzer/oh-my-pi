@@ -88,7 +88,10 @@ pub enum ApprovalScope {
 	AlwaysAsk,
 	/// Read and write are automatic; exec is confirmed.
 	Write,
-	/// Read, write, and exec are automatic.
+	/// Read, write, and exec are automatic. A host reports this as the
+	/// loosest scope it grants: a `yolo` it keeps only because a sandbox is
+	/// active covers just the tools that sandbox confines, and its other tools
+	/// follow [`ApprovalScope::Write`].
 	Yolo,
 }
 

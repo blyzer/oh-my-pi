@@ -49,6 +49,19 @@ pub struct ApprovalSpec {
 	pub evidence:      Vec<Str>,
 }
 
+impl ApprovalSpec {
+	/// Whether this requirement offers a grant of `scope`. A policy that
+	/// offers only `once` honours nothing longer, so a wider answer neither
+	/// applies to it nor grants a later prompt of its subject.
+	#[must_use]
+	pub fn offers(&self, scope: &ApprovalScope) -> bool {
+		self
+			.scopes
+			.iter()
+			.any(|offered| offered.as_str() == scope.as_str())
+	}
+}
+
 /// Granted lifetime of an approval decision.
 #[derive(Clone, Debug, Eq, PartialEq, strum::Display, strum::EnumString, strum::IntoStaticStr)]
 #[strum(serialize_all = "lowercase")]
@@ -731,21 +744,27 @@ impl ApprovalDesk {
 }
 
 /// A decided prompt in the tree whose session-wide (or persisted) approval
-/// covers every reason of `ticket`: same kind and subject.
+/// covers every reason of `ticket`: same kind and subject, and both the
+/// granting reason and the new one offer the granted scope. A wider answer to
+/// a prompt that never offered it (a `session` answer to a once-only sandbox
+/// amendment) grants nothing, and a prompt that offers only `once` is always
+/// asked.
 fn session_grant(session: &Session, ticket: &ApprovalTicket) -> Option<ApprovalDecision> {
-	let covered = |decided: &ApprovalTicket, spec: &ApprovalSpec| {
-		decided
-			.reasons
-			.iter()
-			.any(|granted| granted.kind == spec.kind && granted.subject == spec.subject)
+	let covered = |decided: &ApprovalTicket, scope: &ApprovalScope, spec: &ApprovalSpec| {
+		decided.reasons.iter().any(|granted| {
+			granted.kind == spec.kind && granted.subject == spec.subject && granted.offers(scope)
+		})
 	};
 	tickets(session).find_map(|(_, decided)| {
 		let decision = decided.decision.as_ref()?;
 		let granted = decision.approved
 			&& matches!(decision.scope, ApprovalScope::Session | ApprovalScope::Persist)
 			&& decided.ticket_id != ticket.ticket_id
-			&& !ticket.reasons.is_empty()
-			&& ticket.reasons.iter().all(|spec| covered(&decided, spec));
+			&& ticket.offers(&decision.scope)
+			&& ticket
+				.reasons
+				.iter()
+				.all(|spec| covered(&decided, &decision.scope, spec));
 		granted.then(|| ApprovalDecision {
 			approved:   true,
 			scope:      decision.scope.clone(),
@@ -864,7 +883,7 @@ impl ApprovalRoute {
 			.deliver(ApprovalRequest { ticket: ticket.clone(), reply })
 			.is_err()
 		{
-			let decision = unreachable_decision(&ticket, "approval host disconnected");
+			let decision = ticket.unreachable_decision("approval host disconnected");
 			self
 				.inner
 				.notify_resolved(&ticket, &decision, filed.elapsed());
@@ -878,13 +897,13 @@ impl ApprovalRoute {
 			tokio::select! {
 				biased;
 				() = cancellation.cancelled() => {
-					unreachable_decision(&ticket, "approval request cancelled")
+					ticket.unreachable_decision("approval request cancelled")
 				},
 				result = time::timeout(Duration::from_millis(timeout_ms), response.recv_async()) => {
 					match result {
 						Ok(Ok(decision)) => decision,
-						Ok(Err(_)) => unreachable_decision(&ticket, "approval host became unreachable"),
-						Err(_) => timeout_decision(&ticket),
+						Ok(Err(_)) => ticket.unreachable_decision("approval host became unreachable"),
+						Err(_) => ticket.timeout_decision(),
 					}
 				},
 			}
@@ -892,10 +911,10 @@ impl ApprovalRoute {
 			tokio::select! {
 				biased;
 				() = cancellation.cancelled() => {
-					unreachable_decision(&ticket, "approval request cancelled")
+					ticket.unreachable_decision("approval request cancelled")
 				},
 				result = response.recv_async() => result.unwrap_or_else(|_| {
-					unreachable_decision(&ticket, "approval host became unreachable")
+					ticket.unreachable_decision("approval host became unreachable")
 				}),
 			}
 		};
@@ -945,35 +964,54 @@ impl ApprovalRoute {
 	}
 }
 
-pub(crate) fn timeout_decision(ticket: &ApprovalTicket) -> ApprovalDecision {
-	let mut defaults = ticket.reasons.iter().map(|reason| reason.default);
-	let first = defaults.next().flatten();
-	let approved = first.is_some() && defaults.all(|value| value == first) && first == Some(true);
-	ApprovalDecision {
-		approved,
-		scope: ApprovalScope::Once,
-		source: ApprovalSource::Timeout,
-		decided_by: None,
-		reason: Some(sf!("approval request timed out")),
-		audited: approved,
+impl ApprovalTicket {
+	/// Whether every merged requirement offers a grant of `scope`, so an
+	/// answer of that scope is one the whole prompt honours. A prompt with no
+	/// requirement offers nothing.
+	#[must_use]
+	pub fn offers(&self, scope: &ApprovalScope) -> bool {
+		!self.reasons.is_empty() && self.reasons.iter().all(|reason| reason.offers(scope))
 	}
-}
 
-pub(crate) fn unreachable_decision(
-	ticket: &ApprovalTicket,
-	reason: &'static str,
-) -> ApprovalDecision {
-	let approved = !ticket.reasons.is_empty()
-		&& ticket
-			.reasons
-			.iter()
-			.all(|spec| matches!(spec.unreachable.as_str(), "allow" | "approve" | "fail_open"));
-	ApprovalDecision {
-		approved,
-		scope: ApprovalScope::Once,
-		source: ApprovalSource::Unavailable,
-		decided_by: None,
-		reason: Some(Str::new_static(reason)),
-		audited: approved,
+	/// The decision applied when this prompt's timeout passes unanswered.
+	///
+	/// It approves, once and audited, only when every requirement declares the
+	/// same `true` timeout default; any absent or `false` default denies.
+	#[must_use]
+	pub fn timeout_decision(&self) -> ApprovalDecision {
+		let mut defaults = self.reasons.iter().map(|reason| reason.default);
+		let first = defaults.next().flatten();
+		let approved = first.is_some() && defaults.all(|value| value == first) && first == Some(true);
+		ApprovalDecision {
+			approved,
+			scope: ApprovalScope::Once,
+			source: ApprovalSource::Timeout,
+			decided_by: None,
+			reason: Some(sf!("approval request timed out")),
+			audited: approved,
+		}
+	}
+
+	/// The decision applied when no approver can answer this prompt, for
+	/// `reason`.
+	///
+	/// It approves, once and audited, only when every requirement declares a
+	/// fail-open unreachable behavior (`allow`, `approve`, or `fail_open`);
+	/// otherwise it denies.
+	#[must_use]
+	pub fn unreachable_decision(&self, reason: &'static str) -> ApprovalDecision {
+		let approved = !self.reasons.is_empty()
+			&& self
+				.reasons
+				.iter()
+				.all(|spec| matches!(spec.unreachable.as_str(), "allow" | "approve" | "fail_open"));
+		ApprovalDecision {
+			approved,
+			scope: ApprovalScope::Once,
+			source: ApprovalSource::Unavailable,
+			decided_by: None,
+			reason: Some(Str::new_static(reason)),
+			audited: approved,
+		}
 	}
 }

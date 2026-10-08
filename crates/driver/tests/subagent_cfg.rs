@@ -120,3 +120,56 @@ fn children_of_a_plan_mode_parent_inherit_a_read_only_ceiling() {
 	let (free, _) = configure_child(&ordinary, &files, "writer", None).expect("ordinary child");
 	assert!(!SV_TOOLS_READ_ONLY.get(&free), "a non-plan parent's children are unaffected");
 }
+
+/// A parent that set `sv_sandbox_mode off` and `sv_sandbox_network_mode
+/// scoped` runs a network-only sandbox. Its children must too, although
+/// `scoped` is also the shipped default: the seed carries the user's choice,
+/// so the child does not read it as a defaulted network that leaves an
+/// explicit `off` unsandboxed.
+#[test]
+fn children_keep_an_explicit_scoped_network_under_sandbox_mode_off() {
+	use omp_driver::subagent::spawn::configure_child;
+	use omp_envd::{
+		admission::SandboxState,
+		exec_settings::{NetworkConfinement, network_confinement},
+	};
+
+	let root = tempfile::tempdir().expect("scratch root");
+	let plain_user = root.path().join("plain");
+	fs::create_dir_all(&plain_user).expect("plain cfg root");
+	let plain = CfgFiles::with_roots(plain_user, None);
+
+	let parent = omp_con::Ctx::new();
+	parent
+		.run("sv_sandbox_mode off; sv_sandbox_network_mode scoped")
+		.expect("parent sandbox settings");
+	assert_eq!(network_confinement(&parent, SandboxState::Off), NetworkConfinement::Scoped);
+	let (child, _) = configure_child(&parent, &plain, "writer", None).expect("child");
+	assert_eq!(
+		network_confinement(&child, SandboxState::Off),
+		NetworkConfinement::Scoped,
+		"the child keeps the parent's network-only sandbox"
+	);
+	let (grandchild, _) = configure_child(&child, &plain, "writer", None).expect("grandchild");
+	assert_eq!(network_confinement(&grandchild, SandboxState::Off), NetworkConfinement::Scoped);
+
+	// `subagent.cfg` turning the filesystem sandbox off keeps the parent's
+	// explicit network as well.
+	let off_user = root.path().join("off");
+	fs::create_dir_all(&off_user).expect("off cfg root");
+	fs::write(off_user.join("subagent.cfg"), "sv_sandbox_mode off\n").expect("subagent cfg");
+	let off = CfgFiles::with_roots(off_user, None);
+	let scoped_parent = omp_con::Ctx::new();
+	scoped_parent
+		.run("sv_sandbox_network_mode scoped")
+		.expect("parent network");
+	let (child, _) = configure_child(&scoped_parent, &off, "writer", None).expect("cfg-off child");
+	assert_eq!(network_confinement(&child, SandboxState::Off), NetworkConfinement::Scoped);
+
+	// A parent that left the network at its default spawns children whose
+	// explicit `off` stays unsandboxed.
+	let defaulted = omp_con::Ctx::new();
+	defaulted.run("sv_sandbox_mode off").expect("parent mode");
+	let (child, _) = configure_child(&defaulted, &plain, "writer", None).expect("defaulted child");
+	assert_eq!(network_confinement(&child, SandboxState::Off), NetworkConfinement::Unconfined);
+}

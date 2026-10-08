@@ -21,8 +21,11 @@ use omp_envd::{
 	policy::Grants,
 	worker::{ExtHostSpec, HostKey},
 };
-use omp_ext::config::{
-	CliSettingOverride, DeploymentManifest, StaticDeclarations, resolve_extension_settings,
+use omp_ext::{
+	config::{
+		CliSettingOverride, DeploymentManifest, StaticDeclarations, resolve_extension_settings,
+	},
+	workspace_trust::inventory::EXTENSIONS_DIR,
 };
 use thiserror::Error;
 
@@ -285,7 +288,7 @@ pub fn admit_native_extensions_contained(
 		}
 		if options.include_workspace {
 			collect_automatic_contained(
-				&project_root.join(".omp/extensions"),
+				&project_root.join(EXTENSIONS_DIR),
 				RootOrigin::Workspace,
 				&mut candidates,
 				&mut report.errors,

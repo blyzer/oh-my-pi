@@ -301,7 +301,7 @@ impl ProcessEvalExec {
 		let sandbox = self
 			.inner
 			.exec
-			.active_sandbox()
+			.child_sandbox()
 			.map_err(|error| Fault::Resource {
 				operation: sf!("open_session"),
 				message:   Str::from(error.to_string()),
@@ -2339,6 +2339,7 @@ mod tests {
 				schema:          Bytes::from_static(br#"{"type":"object"}"#),
 				constraint:      Constraint::None,
 				effects:         Effects::empty(),
+				confinement:     omp_tool::Confinement::Host,
 				projection_code: [0; 32],
 			};
 			registry
@@ -2482,6 +2483,7 @@ mod tests {
 						schema:          Bytes::from_static(br#"{"type":"object"}"#),
 						constraint:      Constraint::None,
 						effects:         Effects::empty(),
+						confinement:     omp_tool::Confinement::Host,
 						projection_code: [0; 32],
 					},
 				},

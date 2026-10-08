@@ -32,9 +32,16 @@ client and framing boundary; it does not contain an alternate host.
   default as `workspace-write`). `admission::effective_approval_mode` is the
   one rule that joins it to approval: the default `yolo` holds only while a
   sandbox was actually constructed (`SandboxState::Active`); otherwise `write`
-  is in force. An explicit `yolo` (flag or user config) is respected. With no
-  active sandbox the `bash` tool resolves to the `exec` tier, and one typed
-  `approval-posture` notice reports the downgrade or the unconfined `yolo`.
+  is in force. An explicit `yolo` (flag or user config) is respected.
+  `admission::resolve_approval` applies it per call with the tool's typed
+  `omp_tool::Confinement` (`admission::call_approval_mode`, which `/security`
+  also reports per confinement): the sandbox counts only for an `ExecSandbox`
+  tool (`bash@2`, `hub@2`), so the default `yolo` covers just those, and a
+  `Host` tool is admitted as if no sandbox existed (`write` for that call, so
+  its exec tier prompts). With no active sandbox an `ExecSandbox` tool resolves
+  to the `exec` tier, and one typed `approval-posture` notice reports the
+  downgrade or the unconfined `yolo`. The host that registers a tool asserts
+  its confinement; worker, extension and MCP declarations are always `Host`.
   The sandbox's in-shell path check walks each path as the kernel does
   (links followed in place, `..` applied after them) and a redirection opens
   exactly the path it judged. Under the default `host` read mode reads follow
@@ -44,6 +51,72 @@ client and framing boundary; it does not contain an alternate host.
   amendment. Restricted read modes refuse a walk through a symlink outside
   the runtime roots, and redirections that write refuse any; builtin writes
   gated by `check_write` resolve links and judge the target.
+  The network defaults to `scoped` (`sv_sandbox_network_mode`): each shell
+  session owns an egress broker (`sandbox_proxy`) that proxy-aware clients
+  reach. `NetworkConfinement` is the one answer for what applies: a defaulted
+  network mode never sandboxes an explicit `sv_sandbox_mode off`, eval cells
+  and detached processes (which hold no broker token) get `disabled`, and a
+  broker that cannot start under the shipped default disables the network
+  instead of failing every command. Every refusal from the broker's
+  CONNECT/SOCKS authorization and upstream connect carries a typed cause
+  (the TLS ClientHello gate and a request on an inactive attempt token
+  record none). Only a policy refusal is an amendable network fact, so a
+  loopback name or a non-routable IP literal offers no approval the rerun
+  would refuse again, and a name that does not resolve stays an ordinary
+  failure (answered `502` with `X-Omp-Broker-Refused`, also when the client
+  prints the headers). An `sv_sandbox_deny_domains` entry beats every
+  approval: the broker records it as its own `deny-listed` refusal, which is
+  never amendable and never prompts. Both are answered with the
+  `X-Omp-Policy-Blocked` marker. A network amendment offers `once` or
+  `session`; a path amendment only `once`. A `session` answer admits the
+  endpoint for the rest of the session through the broker's attempt tokens:
+  each attempt carries the session grants (`EgressGrants`) of the approval
+  binding that issued its command, the in-process route or one daemon
+  connection's relay, and the broker consults them live, with no restart and
+  no recompiled profile. The grants are a cache of journaled decisions: a
+  rebound route, a closed connection, a rewind and a switch to another
+  session (`SessionGrants::revoke`, over the wire `RevokeApprovalGrants`)
+  clear them, and the session's approval desk refills them from the journal
+  it serves one refused attempt at a time.
+  A command whose session-approved endpoint was refused may rerun again only
+  for a new endpoint, at most `sv_sandbox_network_session_reruns` times
+  (default 4); a `once` approval still ends the chain after one rerun.
+  Network trouble reaches the model as one `sandbox` diag
+  (`exec_network_diag`): a refusal is explained in full (endpoint, mode,
+  remedy) the first time the session meets its `host:port` and cause, with
+  the host left out when it cannot be quoted; a later failure on it gets one
+  short line and a later success none. Without a refusal, a failed command
+  whose stderr shows a resolver or connection failure gets the mode's
+  generic text once per session.
+- `approval_relay` carries a daemon command's sandbox amendment prompt to the
+  session that issued the command, and answers it there. The
+  daemon's host binds no approval route; an attached session advertises
+  `approval-relay` in its hello, and only such an application connection to
+  an environment host gets a relay. Extension connections never do, so
+  extension code cannot approve its own commands. Each Exec, and each native
+  invocation (through a task-local that `ShellExecHost::run` reads), captures
+  the relay for its request, so the query travels only on that request and
+  only that connection's answer decides it. The daemon builds the ticket from
+  its own requirements. A command's relay outranks the host route an
+  in-process composition binds; named processes carry none. Every unanswered
+  path fails closed: the backstop is the prompt's timeout plus a 10 s grace, a
+  cancelled command withdraws its query, and a closed connection denies its
+  pending and later prompts, including those of commands that outlive it.
+  Each relay is also an approval binding: the network endpoints its
+  connection approves for the session stay with it, for that connection's
+  commands only, and are cleared when it closes or sends
+  `RevokeApprovalGrants`. On
+  the session side, `pump_approval_queries` files each query on the route
+  `ProjectEnvironment::bind_approval_authority` binds (the driver's kernel
+  route, so the prompt is journaled and answered like an in-process one) with
+  `request_cancellable`, and answers with the decision. A withdrawal, a closed
+  transport or shutdown cancels the filed prompt without answering, and a
+  query that arrives while no route is bound is decided by its unreachable
+  rules, which deny a sandbox amendment.
+  Embedded and isolated compositions advertise nothing and keep prompting
+  through their in-process host. Only sandbox amendments are relayed: a
+  daemon command's `dyn` admissions and privileged mutations still fail
+  closed.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 

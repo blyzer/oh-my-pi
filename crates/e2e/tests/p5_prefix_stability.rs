@@ -270,6 +270,7 @@ mod roster {
 					Constraint::None
 				},
 				effects:         Effects::empty(),
+				confinement:     omp_tool::Confinement::Host,
 				projection_code: [1; 32],
 			})
 		}

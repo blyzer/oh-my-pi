@@ -470,6 +470,54 @@ fn convar_reasoning(
 	})
 }
 
+/// Revokes the session's network approvals in the environment whenever the
+/// live session is rewound or the host switches to another session (ADR
+/// 0028): the environment's grants are a cache of journaled decisions, and the
+/// journal the kernel now serves stays the authority.
+struct RevokeSessionGrants(omp_envd::SessionGrants);
+
+impl omp_agent::SessionObserver for RevokeSessionGrants {
+	fn rewound(&self) {
+		self.0.revoke();
+	}
+
+	fn switched(&self) {
+		self.0.revoke();
+	}
+}
+
+/// Makes `kernel`'s approval route the one approval authority of
+/// `environment`, and returns the route for the session's other prompters
+/// (the tool executor's admission queries).
+///
+/// Every prompt filed on the route lands in the kernel mailbox, is journaled
+/// under `<queues><prompts>` and is answered by the host's `Up::Approve`. The
+/// environment binds it in two places: as the route of its in-process host,
+/// through which an embedded or isolated composition prompts sandbox
+/// amendments, privileged mutations and dynamic devices; and, when the session
+/// is attached to the project daemon, as the route that answers the sandbox
+/// amendments the daemon relays for the commands this session issued.
+///
+/// The network endpoints approved there for the session are journaled
+/// decisions the environment caches. A rewind may drop them from the journal
+/// and a session switch serves another journal, so the kernel's session
+/// observer revokes the cache on both, and the approval desk refills it from
+/// the grants the journal it now serves keeps (ADR 0028).
+pub fn bind_environment_approvals<C>(
+	kernel: &Kernel<C>,
+	environment: &omp_envd::ProjectEnvironment,
+) -> omp_agent::ApprovalRoute {
+	let approvals = kernel.approval_route();
+	environment.bind_approval_authority(
+		Some(Arc::new(omp_agent::ApprovalBook::new())),
+		Some(approvals.clone()),
+	);
+	kernel
+		.jobs()
+		.observe_sessions(Arc::new(RevokeSessionGrants(environment.session_grants())));
+	approvals
+}
+
 /// Environment-routed tool execution: opens the invocation on the project
 /// environment, commits the arguments, and answers the environment's
 /// admission query by prompting the session's approval authority.
@@ -771,16 +819,21 @@ impl SettingsAdmission {
 }
 
 impl omp_agent::ToolAdmission for SettingsAdmission {
+	/// The probed sandbox counts only for a tool it confines. Over an attached
+	/// daemon every tool admitted here is session-process host code (session
+	/// base, RPC host tools) and `Host`; an embedded or isolated composition
+	/// also runs the environment's native tools here, `bash` among them.
 	fn admit(
 		&self,
 		name: &str,
 		effects: &omp_tool::Effects,
+		confinement: omp_tool::Confinement,
 		args: &serde_json::value::RawValue,
 	) -> omp_agent::ToolAdmissionVerdict {
 		self.report_posture();
 		let resolved = self
 			.settings
-			.approval_for(name, name, effects, self.sandbox);
+			.approval_for(name, name, effects, confinement, self.sandbox);
 		match resolved.policy {
 			omp_envd::admission::ApprovalPolicy::Allow => omp_agent::ToolAdmissionVerdict::Allow,
 			omp_envd::admission::ApprovalPolicy::Deny => omp_agent::ToolAdmissionVerdict::Deny(sf!(
@@ -816,18 +869,37 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 					unreachable: Str::new_static("deny"),
 					require_human: true,
 					pattern: None,
-					evidence: vec![sf!(
-						"{} tier under approval mode {}",
-						<&'static str>::from(resolved.tier),
-						<&'static str>::from(omp_envd::admission::effective_approval_mode(
+					evidence: admission_evidence(
+						&resolved,
+						omp_envd::admission::effective_approval_mode(
 							self.settings.configured_approval(),
-							self.sandbox
-						))
-					)],
+							self.sandbox,
+						),
+					),
 				})
 			},
 		}
 	}
+}
+
+/// Why a native call needs approval: its tier and confinement under the mode
+/// in force for it, and, when the session's `yolo` holds only inside the
+/// sandbox, that this tool runs outside it.
+fn admission_evidence(
+	resolved: &omp_envd::admission::ResolvedApproval,
+	session_mode: omp_envd::tool_settings::ApprovalMode,
+) -> Vec<Str> {
+	let tier: &'static str = resolved.tier.into();
+	let confinement: &'static str = resolved.confinement.into();
+	let mode: &'static str = resolved.mode.into();
+	let mut evidence =
+		vec![sf!("{tier} tier, {confinement} confinement, under approval mode {mode}")];
+	if resolved.mode != session_mode {
+		evidence.push(Str::new_static(
+			"the default `yolo` covers only tools the sandbox confines; this tool runs outside it",
+		));
+	}
+	evidence
 }
 
 /// The structured denial the environment journals when the prompt refused
@@ -2355,17 +2427,12 @@ pub async fn compose_kernel(
 		.with_hook_gate(Arc::clone(&admission_gate))
 		.with_session_state_bridge(con_journal.clone())
 		.with_session_state_bridge(Arc::clone(&rule_scope) as Arc<dyn omp_agent::SessionStateBridge>);
-	// The session's one approval authority: environment policy (sandbox
-	// amendments, privileged mutations, dynamic devices) and the tool
-	// executor's admission queries all prompt through the kernel mailbox,
-	// where each prompt is journaled under `<queues><prompts>` and answered
-	// by the host's `Up::Approve`.
-	let approvals = kernel.approval_route();
+	// The session's one approval authority, which the tool executor's admission
+	// queries use too. The daemon relays nothing but sandbox amendments yet:
+	// its dynamic-device admissions and privileged mutations still fail
+	// closed.
+	let approvals = bind_environment_approvals(&kernel, kernel.inference().environment());
 	let notice_mailbox = kernel.mailbox();
-	kernel.inference().environment().bind_approval_authority(
-		Some(Arc::new(omp_agent::ApprovalBook::new())),
-		Some(approvals.clone()),
-	);
 	let mut kernel = kernel
 		.with_external_executor(Arc::new(EnvToolExecutor::new(tool_client, approvals)))
 		.with_tool_admission(Arc::new(
@@ -3351,6 +3418,67 @@ mod tests {
 	};
 
 	const GPT5: &str = "openai/gpt-5";
+
+	/// The kernel admission point applies decision 4 with an injected active
+	/// sandbox (Linux CI never constructs one): under the shipped `yolo`, a
+	/// `Host` network tool prompts and says why, while `bash` and `Host` read
+	/// tools proceed; an explicit `yolo` prompts for neither.
+	#[test]
+	fn settings_admission_prompts_for_host_tools_under_a_sandboxed_default_yolo() {
+		use omp_agent::{ToolAdmission, ToolAdmissionVerdict};
+		use omp_envd::{admission::SandboxState, tool_settings::ToolSettings};
+		use omp_tool::{Confinement, DocEffects, Effects, ExecEffects, InferenceEffects, Usd};
+
+		let args = serde_json::value::RawValue::from_string(String::from("{}")).expect("raw args");
+		let web_search = Effects {
+			exec: Some(ExecEffects { commands: std::sync::Arc::from([]), network: true }),
+			inference: Some(InferenceEffects { max_requests: 1, max_usd: Usd::from_nanos(1) }),
+			..Effects::empty()
+		};
+		let read = Effects {
+			documents: Some(DocEffects { read: true, write_globs: std::sync::Arc::from([]) }),
+			..Effects::empty()
+		};
+		let admission = |settings| super::SettingsAdmission {
+			settings,
+			sandbox: SandboxState::Active,
+			notice: None,
+		};
+
+		let defaulted = admission(ToolSettings::default());
+		let ToolAdmissionVerdict::Prompt(spec) =
+			defaulted.admit("web_search", &web_search, Confinement::Host, &args)
+		else {
+			panic!("a host network tool must prompt under a sandbox-kept default yolo");
+		};
+		assert_eq!(spec.evidence, [
+			sf!("exec tier, host confinement, under approval mode write"),
+			sf!(
+				"the default `yolo` covers only tools the sandbox confines; this tool runs outside it"
+			),
+		]);
+		assert_eq!(
+			defaulted.admit("bash", &Effects::empty(), Confinement::ExecSandbox, &args),
+			ToolAdmissionVerdict::Allow
+		);
+		assert_eq!(
+			defaulted.admit("read", &read, Confinement::Host, &args),
+			ToolAdmissionVerdict::Allow
+		);
+
+		let explicit = admission(
+			ToolSettings::default()
+				.with_approval_mode_override(Some(omp_envd::tool_settings::ApprovalMode::Yolo)),
+		);
+		assert_eq!(
+			explicit.admit("web_search", &web_search, Confinement::Host, &args),
+			ToolAdmissionVerdict::Allow
+		);
+		assert_eq!(
+			explicit.admit("bash", &Effects::empty(), Confinement::ExecSandbox, &args),
+			ToolAdmissionVerdict::Allow
+		);
+	}
 
 	#[tokio::test]
 	async fn remote_outcome_replication_resumes_with_stable_session_provenance() {
