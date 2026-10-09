@@ -5273,6 +5273,17 @@ mod tests {
 			.collect()
 	}
 
+	/// The network diags among `diags`: every generic or locator text names
+	/// `sv_sandbox_network_mode`, while the session note and other diags do
+	/// not.
+	fn network_diags(diags: &[v1::ToolDiag]) -> Vec<String> {
+		diags
+			.iter()
+			.filter(|diag| diag.text.contains("sv_sandbox_network_mode"))
+			.map(|diag| format!("{}/{}: {}", diag.kind, diag.severity, diag.text))
+			.collect()
+	}
+
 	/// Opens an unsandboxed session and gives it `sandbox`, which commands
 	/// issued from then on run under.
 	async fn session_under(host: &ExecHost, root: &Path, sandbox: Arc<ExecSandbox>) -> Bytes {
@@ -5301,17 +5312,27 @@ mod tests {
 	/// network URL among its arguments gets the mode's locator text, once per
 	/// session. A success (a pipeline whose last stage succeeds included), a
 	/// failure without a URL, a URL that is only text, a builtin given one, a
-	/// program that cannot run and a `scoped` session report nothing.
+	/// program that cannot run, one the sandbox's own view hides and a
+	/// `scoped` session report nothing.
 	/// Runs on every unix host: the sandbox is an environment-only wrapper that
 	/// reports a disabled network, and `/usr/bin/false` stands in for a client
 	/// failing quietly on a host it cannot reach.
 	#[cfg(unix)]
 	#[tokio::test]
 	async fn silent_network_failures_without_a_network_get_one_sandbox_diag() {
+		use std::os::unix::fs::PermissionsExt as _;
+
 		let root = tempfile::tempdir().expect("workspace");
+		let hidden = root.path().join("hidden");
+		std::fs::create_dir(&hidden).expect("hidden root");
+		let hidden_client = hidden.join("fetch");
+		std::fs::write(&hidden_client, "#!/bin/sh\nexit 1\n").expect("hidden client");
+		std::fs::set_permissions(&hidden_client, std::fs::Permissions::from_mode(0o755))
+			.expect("hidden client is executable");
 		let host = ExecHost::new();
 		let disabled = crate::exec_settings::SandboxSettings {
 			network_mode: crate::exec_settings::SandboxNetworkMode::Disabled,
+			read_deny: vec![Str::from(hidden.to_string_lossy().as_ref())],
 			..crate::exec_settings::SandboxSettings::default()
 		};
 		let session = session_under(
@@ -5341,19 +5362,35 @@ mod tests {
 		}
 		// A program that cannot run never reached the network: a missing one
 		// (127), an `exec` of a bare name no `PATH` directory holds (127) and a
-		// script without its exec bit (126, whose `Permission denied` reads as a
-		// sandbox denial, a failure all the same) report nothing.
+		// script without its exec bit (126) fail with no network diag. Only the
+		// exit and the absent diag are this rule's; how the failure is
+		// classified is not.
 		std::fs::write(root.path().join("fetch.sh"), "#!/bin/sh\nexit 1\n").expect("script");
-		for (script, ending, code) in [
-			("/nonexistent/wget -q https://example.invalid", ExecOutcome::Failed, 127),
-			("exec omp-no-such-client -q https://example.invalid", ExecOutcome::Failed, 127),
-			("./fetch.sh -q https://example.invalid", ExecOutcome::Denied, 126),
+		for (script, code) in [
+			("/nonexistent/wget -q https://example.invalid", 127),
+			("exec omp-no-such-client -q https://example.invalid", 127),
+			("./fetch.sh -q https://example.invalid", 126),
 		] {
 			let (outcome, exit, output, diags) = run(script).await;
-			assert_eq!(outcome, ending as i32, "{script}: {}", String::from_utf8_lossy(&output));
+			assert_ne!(
+				outcome,
+				ExecOutcome::Exited as i32,
+				"{script}: {}",
+				String::from_utf8_lossy(&output)
+			);
 			assert_eq!(exit, Some(code), "{script}");
-			assert!(diags.is_empty(), "{script}: {:?}", diag_texts(&diags));
+			assert!(network_diags(&diags).is_empty(), "{script}: {:?}", diag_texts(&diags));
 		}
+		// Nor does a program the sandbox's own view hides count: `exec` reaches
+		// the launch without the shell's read check, and a real backend refuses
+		// such a program only after the launcher's spawn. The environment-only
+		// wrapper enforces nothing, so here the client runs and fails, which
+		// shows the judgment follows the sandbox's view and not envd's.
+		let hidden_exec = format!("exec {} -q https://example.invalid", hidden_client.display());
+		let (outcome, exit, output, diags) = run(&hidden_exec).await;
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(exit, Some(1));
+		assert!(network_diags(&diags).is_empty(), "{:?}", diag_texts(&diags));
 		// A pipeline whose last stage succeeds ends `Succeeded`, so a quiet
 		// client that failed before it reports nothing (ADR 0028, 2026-10-08
 		// amendment, point 4).

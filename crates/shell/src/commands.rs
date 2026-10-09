@@ -204,21 +204,24 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 ) -> Result<process::Command, error::Error> {
 	let wrapper = context.params.spawn_wrapper();
 	if let Some(wrapper) = wrapper {
-		// A simple command arrives already found on `PATH`, so only a relative
-		// path (`./tool`) pays for a join, and only `exec` hands over a bare name,
-		// which the launch finds on `PATH` as the shell would.
-		let program = Path::new(command_name);
-		let program = if program.is_absolute() {
-			Some(Cow::Borrowed(program))
-		} else if sys::fs::contains_path_separator(command_name) {
-			Some(Cow::Owned(context.shell.absolute_path(program)))
-		} else {
-			context
-				.shell
-				.find_first_executable_in_path(command_name)
-				.map(Cow::Owned)
+		// Resolved only when the wrapper asks. A simple command arrives already
+		// found on `PATH`, so only a relative path (`./tool`) pays for a join,
+		// and only `exec` hands over a bare name, which the launch finds on
+		// `PATH` as the shell would.
+		let program = || {
+			let program = Path::new(command_name);
+			if program.is_absolute() {
+				Some(Cow::Borrowed(program))
+			} else if sys::fs::contains_path_separator(command_name) {
+				Some(Cow::Owned(context.shell.absolute_path(program)))
+			} else {
+				context
+					.shell
+					.find_first_executable_in_path(command_name)
+					.map(Cow::Owned)
+			}
 		};
-		wrapper.observe_launch(program.as_deref(), &mut args.iter().map(AsRef::as_ref));
+		wrapper.observe_launch(&program, &mut args.iter().map(AsRef::as_ref));
 	}
 	let mut cmd = if let Some((launcher, prefix_args)) = wrapper.and_then(|w| w.launcher()) {
 		let mut cmd = process::Command::new(launcher);
@@ -1163,10 +1166,16 @@ mod sandbox_tests {
 	/// arguments.
 	type Launches = parking_lot::Mutex<Vec<(Option<PathBuf>, Vec<OsString>)>>;
 
-	fn record(launches: &Launches, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+	/// Records one launch, resolving its program as a wrapper that keeps it
+	/// would.
+	fn record<'p>(
+		launches: &Launches,
+		program: &dyn Fn() -> Option<Cow<'p, Path>>,
+		args: &mut dyn Iterator<Item = &OsStr>,
+	) {
 		launches
 			.lock()
-			.push((program.map(Path::to_path_buf), args.map(OsStr::to_os_string).collect()));
+			.push((program().map(Cow::into_owned), args.map(OsStr::to_os_string).collect()));
 	}
 
 	fn launch(program: &str, args: &[&str]) -> (Option<PathBuf>, Vec<OsString>) {
@@ -1188,7 +1197,11 @@ mod sandbox_tests {
 			key != "FILTERED"
 		}
 
-		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+		fn observe_launch<'p>(
+			&self,
+			program: &dyn Fn() -> Option<Cow<'p, Path>>,
+			args: &mut dyn Iterator<Item = &OsStr>,
+		) {
 			record(&self.observed, program, args);
 		}
 	}
@@ -1246,7 +1259,11 @@ mod sandbox_tests {
 			true
 		}
 
-		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+		fn observe_launch<'p>(
+			&self,
+			program: &dyn Fn() -> Option<Cow<'p, Path>>,
+			args: &mut dyn Iterator<Item = &OsStr>,
+		) {
 			record(&self.0, program, args);
 		}
 	}

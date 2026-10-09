@@ -1,6 +1,7 @@
 //! Sandboxing policy compiled per execution owner.
 
 use std::{
+	borrow::Cow,
 	collections::VecDeque,
 	ffi::{OsStr, OsString},
 	fs, io,
@@ -831,9 +832,14 @@ impl SpawnWrapper for ExecSandboxAttempt {
 	/// not scanned either. A program that does not exist or cannot run never
 	/// reached the network, whether the shell fails to spawn it (exit 127 or
 	/// 126) or a launcher fails to exec it after its own spawn succeeded, so
-	/// only a launchable program counts, and none counts when the shell found
-	/// no program for a bare name. It is checked once a URL is found.
-	fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+	/// only a program [`FilePolicy::launchable`] admits counts, and none counts
+	/// when the shell found no program for a bare name. The program is
+	/// resolved and judged only once a URL is found.
+	fn observe_launch<'p>(
+		&self,
+		program: &dyn Fn() -> Option<Cow<'p, Path>>,
+		args: &mut dyn Iterator<Item = &OsStr>,
+	) {
 		if self.sandbox.network != NetworkConfinement::Disabled
 			|| self.network_locator.load(Ordering::Acquire)
 		{
@@ -841,7 +847,7 @@ impl SpawnWrapper for ExecSandboxAttempt {
 		}
 		for arg in args {
 			if is_network_url(arg.as_encoded_bytes()) {
-				if launchable(program) {
+				if program().is_some_and(|program| self.sandbox.file_policy.launchable(&program)) {
 					self.network_locator.store(true, Ordering::Release);
 				}
 				return;
@@ -850,14 +856,18 @@ impl SpawnWrapper for ExecSandboxAttempt {
 	}
 }
 
-/// Whether `program` can run, as the shell's path search judges it: one the
-/// shell found, not a directory, and executable by this user. It is judged in
-/// envd's own view of the filesystem, before the launch.
-fn launchable(program: Option<&Path>) -> bool {
-	program.is_some_and(|program| !program.is_dir() && program.executable())
-}
-
 impl FilePolicy {
+	/// Whether `program` can run in this policy's view: its read is admitted
+	/// (judged here, so a refusal records no denial), and only then, as the
+	/// shell's path search judges it, it is not a directory and is executable
+	/// by this user. A program the sandbox hides never counts, so a diag never
+	/// claims it ran and never tells what lies behind the sandbox: `exec`
+	/// reaches the launch without the shell's own read check, and the sandbox
+	/// refuses such a program only after the launcher's spawn succeeded.
+	fn launchable(&self, program: &Path) -> bool {
+		self.check_read(program).is_ok() && !program.is_dir() && program.executable()
+	}
+
 	fn denied(path: &Path, access: PathAccess) -> PathDenied {
 		PathDenied { path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()), access }
 	}
@@ -2002,36 +2012,61 @@ mod tests {
 	}
 
 	fn observe(attempt: &ExecSandboxAttempt, program: Option<&Path>, args: &[&str]) {
-		SpawnWrapper::observe_launch(attempt, program, &mut args.iter().map(OsStr::new));
+		SpawnWrapper::observe_launch(
+			attempt,
+			&|| program.map(Cow::Borrowed),
+			&mut args.iter().map(OsStr::new),
+		);
 	}
 
 	/// An attempt with no network records that a program it launched was
 	/// given a network URL, once, consumed with its other facts; a URL that is
 	/// only text never counts, and neither does one handed to a program that
 	/// cannot run (a bare name the shell found nowhere, a missing path, a
-	/// directory, a file without its exec bit), which leaves later launches
-	/// free to count. Under `scoped` the broker records
-	/// what clients ask for, so arguments are not scanned at all.
+	/// directory, a file without its exec bit) or one the sandbox's own view
+	/// hides (an executable under `read_deny`), which leaves later launches
+	/// free to count. Under `scoped` the broker records what clients ask for,
+	/// so arguments are not scanned at all.
+	#[cfg(unix)]
 	#[test]
 	fn attempts_record_network_urls_only_without_a_network() {
+		use std::os::unix::fs::PermissionsExt as _;
+
 		let workspace = tempfile::tempdir().expect("workspace");
 		let program = std::env::current_exe().expect("the test binary runs");
 		let program = Some(program.as_path());
 		let missing = workspace.path().join("missing/wget");
 		let script = workspace.path().join("script.sh");
 		fs::write(&script, "#!/bin/sh\n").expect("script without its exec bit");
-		let unlaunchable =
-			[None, Some(missing.as_path()), Some(workspace.path()), Some(script.as_path())];
+		let hidden = workspace.path().join("hidden");
+		fs::create_dir(&hidden).expect("hidden root");
+		let hidden_program = hidden.join("curl");
+		fs::write(&hidden_program, "#!/bin/sh\n").expect("hidden program");
+		fs::set_permissions(&hidden_program, fs::Permissions::from_mode(0o755))
+			.expect("hidden program is executable");
+		assert!(launchable_outside_any_sandbox(&hidden_program));
+		let unlaunchable = [
+			None,
+			Some(missing.as_path()),
+			Some(workspace.path()),
+			Some(script.as_path()),
+			Some(hidden_program.as_path()),
+		];
+		let read_deny = vec![Str::from(hidden.to_string_lossy().as_ref())];
 		let explicit_disabled = SandboxSettings {
 			network_mode: SandboxNetworkMode::Disabled,
 			network_provenance: Provenance::Explicit,
 			explicit: true,
+			read_deny: read_deny.clone(),
 			..workspace_settings()
 		};
 		let mut disabled = vec![
 			ExecSandbox::with_test_disabled_network(&explicit_disabled, workspace.path()),
 			// A scoped broker that could not start leaves no network either.
-			ExecSandbox::with_test_disabled_network(&SandboxSettings::default(), workspace.path()),
+			ExecSandbox::with_test_disabled_network(
+				&SandboxSettings { read_deny, ..SandboxSettings::default() },
+				workspace.path(),
+			),
 		];
 		if native_backend() {
 			disabled.push(
@@ -2079,6 +2114,45 @@ mod tests {
 		let attempt = scoped.begin_attempt(None);
 		observe(&attempt, program, &["-sI", "https://example.com"]);
 		assert!(!attempt.take_facts().network_locator);
+	}
+
+	/// What the shell's path search alone would say of `program`.
+	#[cfg(unix)]
+	fn launchable_outside_any_sandbox(program: &Path) -> bool {
+		!program.is_dir() && program.executable()
+	}
+
+	/// A launch's program is resolved only when it could count: never under
+	/// `scoped`, never for a launch with no network URL, and never once the
+	/// attempt has recorded one, so the default posture pays nothing for it.
+	#[test]
+	fn programs_are_resolved_only_for_a_url_without_a_network() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let program = std::env::current_exe().expect("the test binary runs");
+		let resolved = std::cell::Cell::new(0_u32);
+		let observe = |attempt: &ExecSandboxAttempt, args: &[&str]| {
+			let program = || {
+				resolved.set(resolved.get() + 1);
+				Some(Cow::Borrowed(program.as_path()))
+			};
+			SpawnWrapper::observe_launch(attempt, &program, &mut args.iter().map(OsStr::new));
+		};
+
+		let scoped = ExecSandbox::with_test_broker(&SandboxSettings::default(), workspace.path());
+		let attempt = scoped.begin_attempt(None);
+		observe(&attempt, &["-sI", "https://example.com"]);
+		assert_eq!(resolved.get(), 0, "scoped never resolves");
+
+		let disabled =
+			ExecSandbox::with_test_disabled_network(&SandboxSettings::default(), workspace.path());
+		let attempt = disabled.begin_attempt(None);
+		observe(&attempt, &["-sI", "--max-time", "20", "see https://example.com"]);
+		assert_eq!(resolved.get(), 0, "no URL, no resolution");
+		observe(&attempt, &["-sI", "https://example.com"]);
+		assert_eq!(resolved.get(), 1, "a URL resolves its program once");
+		observe(&attempt, &["https://other.example"]);
+		assert_eq!(resolved.get(), 1, "a recorded attempt stops resolving");
+		assert!(attempt.take_facts().network_locator);
 	}
 
 	#[test]
