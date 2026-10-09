@@ -329,7 +329,10 @@ pub fn credential_key_mode(ctx: &omp_con::Ctx) -> CredentialKeyMode {
 
 /// A provider's stored logins cannot be decrypted by this process.
 #[derive(Debug, thiserror::Error)]
-#[error("{provider} has stored logins. {}", crate::auth_flow::CREDENTIAL_STORAGE_LOCKED_MESSAGE)]
+#[error(
+	"{provider} has stored logins. Credential storage is locked: {}.",
+	omp_ai::CREDENTIAL_STORAGE_LOCKED_REMEDY
+)]
 pub struct StoredLoginsLocked {
 	/// Provider whose stored logins are locked.
 	pub provider: omp_catalog::ProviderId,
@@ -378,23 +381,24 @@ pub fn ensure_stored_logins_unlockable(
 			.into_iter()
 			.flat_map(|spec| spec.routes.iter())
 			.filter_map(|route| catalog.route(route))
-			.map(|route| route.provider.clone())
-			.collect::<Vec<_>>()
+			.map(|route| &route.provider)
 	};
-	let fallbacks = model.map_or_else(Vec::new, |model| {
-		let mut providers = route_providers(model);
-		if retry.model_fallback {
+	let mut others = model.into_iter().flat_map(|model| {
+		let fallbacks = if retry.model_fallback {
 			let budget = usize::try_from(retry.max_attempts().saturating_sub(1)).unwrap_or(usize::MAX);
-			for fallback in retry.fallback_walk(model, Some(provider), budget, |candidate| {
-				route_providers(candidate).into_iter().next()
-			}) {
-				providers.extend(route_providers(&fallback));
-			}
-		}
-		providers
+			retry.fallback_walk(model, Some(provider), budget, |candidate| {
+				route_providers(candidate).next().cloned()
+			})
+		} else {
+			Vec::new()
+		};
+		route_providers(model).chain(
+			fallbacks
+				.into_iter()
+				.flat_map(move |fallback| route_providers(&fallback)),
+		)
 	});
-	if fallbacks
-		.iter()
+	if others
 		.any(|other| other.as_str() != provider.as_str() && leases_without_store(catalog, other))
 	{
 		return Ok(());
@@ -1496,6 +1500,8 @@ async fn production_assembly_with_catalog(
 	.with_affinity_resolver(CredentialAffinityResolver::new(
 		Hash32::sum(placeholder_affinity_key().as_bytes()).into_bytes(),
 	));
+	// Before any request or discovery refresh leases a stored row.
+	repair_stored_secret_kinds(&auth_manager.control_handle());
 	let catalog = if refresh_discovery {
 		refresh_model_discovery_cache(data_dir, catalog, &discovery_credentials, None)
 			.await?
@@ -1628,6 +1634,36 @@ async fn production_assembly_with_catalog(
 		usage_manager: exposed_usage_manager,
 		builtins,
 	})
+}
+
+/// Re-stores every static secret stored under a kind its provider's routes
+/// do not lease ([`AuthControlHandle::repair_static_secret_kinds`]) in the
+/// catalog this composition authenticates with, so a row an earlier writer
+/// stored under another kind, or one a catalog or `models.toml` change left
+/// behind, is usable by the time the first request leases it.
+///
+/// Composition never fails for it: a row this process cannot decrypt (a key
+/// source unavailable without a terminal) or a write another process won is
+/// logged and left for a later launch, and its requests report why it cannot
+/// be used. Nothing is decrypted unless some row needs re-storing.
+fn repair_stored_secret_kinds(control: &AuthControlHandle) {
+	match control.repair_static_secret_kinds() {
+		Ok(repairs) => {
+			for repair in repairs {
+				let repaired: &'static str = repair.repaired.into();
+				tracing::info!(
+					account = repair.account.as_str(),
+					stored = repair.stored.as_str(),
+					repaired,
+					"re-stored a credential under the kind its provider's routes lease"
+				);
+			}
+		},
+		Err(error) => tracing::warn!(
+			error = &error as &dyn std::error::Error,
+			"could not re-store credentials under the kind their provider's routes lease"
+		),
+	}
 }
 
 /// Resolves the Antigravity client version without blocking assembly work:

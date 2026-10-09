@@ -670,10 +670,9 @@ impl RouteComposer for ProductionRouteComposer {
 				source,
 			})?;
 		let mut auth_specs = vec![(route.auth.clone(), runtime_auth)];
-		if matches!(
-			route.codec.as_str(),
-			"anthropic" | "bedrock-converse" | "bedrock-mantle" | "search-perplexity"
-		) {
+		// The provider-declared authentications the route also leases; the
+		// stored-kind decisions read the same table.
+		if let Some(declared) = crate::auth::broker::declared_auth_lease(route.codec.as_str()) {
 			let provider = catalog
 				.provider(&route.provider)
 				.ok_or_else(|| unavailable(route, "catalog-provider-missing"))?;
@@ -684,19 +683,7 @@ impl RouteComposer for ProductionRouteComposer {
 				let Some(auth) = catalog.auth_spec(auth_id) else {
 					return Err(unavailable(route, "catalog-auth-spec-missing"));
 				};
-				let accepted = match route.codec.as_str() {
-					"anthropic" => matches!(
-						auth.kind,
-						AuthSpecKind::Oauth | AuthSpecKind::Bearer | AuthSpecKind::OptionalBearer
-					),
-					"bedrock-converse" => {
-						matches!(auth.kind, AuthSpecKind::Bearer | AuthSpecKind::OptionalBearer)
-					},
-					"search-perplexity" => auth.kind == AuthSpecKind::Oauth,
-					"bedrock-mantle" => auth.kind == AuthSpecKind::AwsSigv4,
-					_ => false,
-				};
-				if !accepted {
+				if !(declared.accepts)(auth.kind) {
 					continue;
 				}
 				let oauth = auth.oauth.as_ref().and_then(|id| catalog.oauth_spec(id));
@@ -708,7 +695,7 @@ impl RouteComposer for ProductionRouteComposer {
 						operation: None,
 						source,
 					})?;
-				if matches!(route.codec.as_str(), "bedrock-converse" | "search-perplexity") {
+				if declared.first {
 					auth_specs.insert(0, (auth_id.clone(), runtime));
 				} else {
 					auth_specs.push((auth_id.clone(), runtime));
@@ -4578,7 +4565,7 @@ mod tests {
 		assert!(
 			mismatch
 				.to_string()
-				.contains("the stored credential is api-key but the provider requires bearer"),
+				.contains("the stored credential is api-key but this route requires bearer"),
 			"{mismatch}"
 		);
 	}

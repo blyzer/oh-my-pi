@@ -2133,11 +2133,24 @@ fn inference_turn_error(error: Error) -> pb::TurnEvent {
 				)
 			},
 		);
-		if let Some(ErrorDetail::Provider { sanitized_message }) = error.detail_ref()
-			&& !sanitized_message.trim().is_empty()
-		{
-			detail.push_str(" Provider detail: ");
-			detail.push_str(sanitized_message.as_str());
+		match error.detail_ref() {
+			Some(ErrorDetail::Provider { sanitized_message })
+				if !sanitized_message.trim().is_empty() =>
+			{
+				detail.push_str(" Provider detail: ");
+				detail.push_str(sanitized_message.as_str());
+			},
+			// Why no credential could be used (a wrong stored kind, a key that
+			// cannot be renewed, no account left to rotate to), with its code.
+			Some(credential @ ErrorDetail::Credential { .. }) => {
+				use std::fmt::Write as _;
+				detail.push_str(" Credential detail");
+				if let Some(code) = &error.code {
+					let _ = write!(detail, " ({code})");
+				}
+				let _ = write!(detail, ": {credential}.");
+			},
+			_ => {},
 		}
 		detail
 	} else {
@@ -4421,6 +4434,43 @@ mod tests {
 		assert!(error.detail.contains("/login kimi-code"));
 		assert!(error.detail.contains("omp auth login kimi-code"));
 		assert!(error.detail.contains("device authorization expired"));
+	}
+
+	/// A credential failure keeps its typed reason and code through the
+	/// gateway: a client sees why no credential could be used, not only that
+	/// authentication failed.
+	#[test]
+	fn authentication_turn_error_names_the_credential_failure() {
+		let mismatch = Error::credential(
+			ProviderId::from("huggingface"),
+			omp_ai::CredentialFailure::KindMismatch {
+				expected: omp_ai::auth::CredentialKind::Bearer,
+				actual:   omp_ai::auth::CredentialKind::ApiKey,
+			},
+			RetryAction::ReselectRoute,
+			ExecutionReceipt::default(),
+		)
+		.provider(ProviderId::from("huggingface"));
+		let error = expect_turn_error(inference_turn_error(mismatch));
+		assert_eq!(error.kind, turn_error::Kind::Auth as i32);
+		assert!(error.detail.contains("omp auth login huggingface"), "{}", error.detail);
+		assert!(
+			error.detail.contains(
+				"Credential detail (kind_mismatch): no usable huggingface credential: the stored \
+				 credential is api-key but this route requires bearer"
+			),
+			"{}",
+			error.detail
+		);
+		let not_renewable = Error::credential(
+			ProviderId::from("huggingface"),
+			omp_ai::CredentialFailure::NotRenewable,
+			RetryAction::Never,
+			ExecutionReceipt::default(),
+		);
+		let error = expect_turn_error(inference_turn_error(not_renewable));
+		assert!(error.detail.contains("(not_renewable)"), "{}", error.detail);
+		assert!(error.detail.contains("the credential cannot be renewed"), "{}", error.detail);
 	}
 
 	#[test]

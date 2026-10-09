@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use omp_ai::{
 	account::{AccountPool, AccountStateStore},
-	auth::{AuthControlHandle, CredentialStore, UnavailableKeySource},
+	auth::{AuthControlHandle, CredentialStore},
 };
 use omp_catalog::{OverlaySource, OverlayStack, UnsafeTrustScope, snapshot};
 
@@ -46,18 +46,6 @@ pub(super) fn offline_control(
 	let store =
 		crate::registry::open_credential_store_from_con(target.data_dir.join("credentials.db"), ctx)
 			.map_err(ImportError::CredentialStore)?;
-	control_over(target, store)
-}
-
-/// A control-only handle over the target profile's existing stores that
-/// cannot decrypt: its store has no key source, so a dry run reads plaintext
-/// metadata through it without creating a key or touching a keychain.
-pub(super) fn locked_control(target: &V2Target) -> Result<AuthControlHandle, ImportError> {
-	let store = crate::registry::open_credential_store_with_key_source(
-		target.data_dir.join("credentials.db"),
-		Arc::new(UnavailableKeySource),
-	)
-	.map_err(ImportError::CredentialStore)?;
 	control_over(target, store)
 }
 

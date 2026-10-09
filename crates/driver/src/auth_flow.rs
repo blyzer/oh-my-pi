@@ -9,15 +9,6 @@ use flume::Receiver;
 use omp_ai::call::AuthInput;
 use omp_core::Str;
 
-/// Explanation shown when encrypted credential storage is unavailable: the
-/// default key source (`sv_credential_key_source auto`) unlocks the store only
-/// for an interactive process.
-pub const CREDENTIAL_STORAGE_LOCKED_MESSAGE: &str =
-	"Credential storage is locked: no credential key source is available to this process (the \
-	 default `sv_credential_key_source auto` unlocks stored logins only when run interactively). \
-	 Set OMP_LLM_KEY_SOURCE=local-file (or `sv_credential_key_source local-file` in config.cfg) to \
-	 use the owner-only local key file, or OMP_LLM_KEY_SOURCE=os-keychain for the OS keychain.";
-
 /// Kind of caller response requested by an authentication provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthPromptKind {
