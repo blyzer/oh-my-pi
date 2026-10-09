@@ -496,9 +496,8 @@ impl DynHost {
 				});
 				let invocation_id = self.invocation_id();
 				async {
-					let (effects, fetches) = judged.map_err(|source| {
-						DynamicAdmissionError::Unjudged { target: target.name.clone(), source }
-					})?;
+					let (effects, fetches) =
+						judged.map_err(|source| DynamicAdmissionError::Unjudged { source })?;
 					self
 						.admission
 						.admit(
@@ -1344,7 +1343,7 @@ mod tests {
 	/// judgment resolved from live state is what its executor reaches, though
 	/// that state moved while the user was asked. A call judged beyond the
 	/// device's declared maximum is refused before anyone is asked, never
-	/// admitted on that maximum, and never runs.
+	/// admitted on that maximum, and never runs; its refusal says why.
 	#[tokio::test]
 	async fn a_dyn_call_runs_inside_the_pins_its_judgment_fixed() {
 		use crate::approval_relay::ConnectionApprovals;
@@ -1387,7 +1386,14 @@ mod tests {
 			.call_issued("pinning", json!({ "widen": true }), CancellationToken::new(), issuer)
 			.await
 			.expect_err("a call beyond the maximum is refused");
-		assert!(refused.message.contains("could not be judged"), "{refused:?}");
+		// The refusal names the reason and the revision whose maximum the
+		// call exceeds, in the text a slot call's refusal renders.
+		let exceeds = RegistryError::InvocationEffectsExceedMaximum {
+			name: sf!("pinning"),
+			rev:  Rev { family: sf!("test"), n: 1 },
+		};
+		assert_eq!(refused.message, exceeds.to_string(), "{refused:?}");
+		assert!(refused.message.contains("exceed its declared maximum"), "{refused:?}");
 		assert!(frames.is_empty(), "the refused call asked no one");
 		assert_eq!(*ran.lock(), [Some(judged)], "the refused call never ran");
 	}

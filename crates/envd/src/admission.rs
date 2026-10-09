@@ -494,13 +494,12 @@ pub(crate) enum DynamicAdmissionError {
 	},
 	/// The target's call could not be judged by its arguments: the envelope
 	/// they scope reaches beyond the target's declared maximum, which is
-	/// refused rather than admitted on that maximum.
-	#[error("dynamic target `{target}` could not be judged by its arguments")]
+	/// refused rather than admitted on that maximum, or its path no longer
+	/// resolves a device. Rendered as the registry's refusal, which names the
+	/// target's revision and the reason, as a slot call's refusal is.
+	#[error(transparent)]
 	Unjudged {
-		/// Exact resolved dynamic target.
-		target: Str,
 		/// The registry's refusal of the judgment.
-		#[source]
 		source: RegistryError,
 	},
 }

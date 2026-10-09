@@ -211,11 +211,27 @@ struct PayloadV2 {
 /// Empty update type because structural search emits only a terminal result.
 pub enum Update {}
 
+/// Durable terminal `ast_grep@3` failure.
+///
+/// Untagged, so the journaled shape of the historical diagnostic stays
+/// `{"message": …}` and every recorded verdict decodes unchanged; each typed
+/// case is told apart by its own named fields.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error)]
-#[error("{message}")]
-/// Terminal argument, target-discovery, or search failure.
-pub struct Fault {
-	message: Str,
+#[serde(untagged)]
+pub enum Fault {
+	/// An http(s) root while `tools.fetch.enabled` disables URL fetches,
+	/// refused before anything is resolved or fetched.
+	#[error("URL search roots are disabled by tools.fetch.enabled: {root}")]
+	UrlRootDisabled {
+		/// The refused root as authored.
+		root: Str,
+	},
+	/// Terminal argument, target-discovery, or search failure.
+	#[error("{message}")]
+	Diagnostic {
+		/// Exact model-facing diagnostic.
+		message: Str,
+	},
 }
 
 /// Inputs resolved by the environment authority after argument commitment.
@@ -539,16 +555,14 @@ impl<R: AstSearchResolver> Tool for AstGrep<R> {
 					.iter()
 					.find(|root| matches!(classify_root(root), Ok(RootClass::Web(_))))
 			{
-				yield done(Err(Fault {
-					message: sf!("URL search roots are disabled by tools.fetch.enabled: {root}"),
-				}));
+				yield done(Err(Fault::UrlRootDisabled { root: root.clone() }));
 				return;
 			}
 			let explicit_lang = params.lang.as_deref().map(str::trim).filter(|value| !value.is_empty());
 			if let Some(lang) = explicit_lang
 				&& omp_ast::ops::resolve_supported_lang(lang).is_err()
 			{
-				yield done(Err(Fault { message: sf!(
+				yield done(Err(Fault::Diagnostic { message: sf!(
 					"unsupported language `{lang}`; supported aliases: {}",
 					omp_ast::ops::supported_lang_list()
 				) }));
@@ -575,14 +589,14 @@ impl<R: AstSearchResolver> Tool for AstGrep<R> {
 					result = resolution => match result {
 						Ok(files) => files,
 						Err(error) => {
-							yield done(Err(Fault { message: Str::new(error.to_string()) }));
+							yield done(Err(Fault::Diagnostic { message: Str::new(error.to_string()) }));
 							return;
 						},
 					},
 				}
 			};
 			if files.len() > MAX_FILES {
-				yield done(Err(Fault { message: sf!(
+				yield done(Err(Fault::Diagnostic { message: sf!(
 					"AST search selected {} files; narrow `path` or `glob` below the {MAX_FILES}-file safety bound",
 					files.len()
 				) }));
@@ -761,11 +775,15 @@ fn normalize_integer(
 		return Ok(default);
 	};
 	if !value.is_finite() || value < 0.0 {
-		return Err(Fault { message: sf!("{name} must be a non-negative finite number") });
+		return Err(Fault::Diagnostic {
+			message: sf!("{name} must be a non-negative finite number"),
+		});
 	}
 	let value = value.floor();
 	if value > maximum as f64 {
-		return Err(Fault { message: sf!("{name} exceeds the safety bound of {maximum}") });
+		return Err(Fault::Diagnostic {
+			message: sf!("{name} exceeds the safety bound of {maximum}"),
+		});
 	}
 	Ok(value as usize)
 }
@@ -1078,7 +1096,7 @@ fn protocol_issue(message: Str) -> ArgIssue {
 }
 
 const fn fault(message: &'static str) -> Fault {
-	Fault { message: Str::new_static(message) }
+	Fault::Diagnostic { message: Str::new_static(message) }
 }
 
 #[cfg(test)]
@@ -1448,7 +1466,34 @@ mod tests {
 			.expect("commit args");
 		let refused = result(&block_on(disabled.call(incoming).collect::<Vec<_>>()))
 			.expect_err("a URL root is refused while URL fetches are disabled");
-		assert!(refused.to_string().contains("tools.fetch.enabled"), "{refused}");
+		assert_eq!(refused, Fault::UrlRootDisabled { root: sf!("https://a.example/y.rs") });
+		assert_eq!(
+			refused.to_string(),
+			"URL search roots are disabled by tools.fetch.enabled: https://a.example/y.rs"
+		);
 		assert_eq!(resolver.resolutions.load(Ordering::Relaxed), 0, "nothing was resolved");
+	}
+
+	/// The fault is journaled untagged: a recorded diagnostic keeps its
+	/// historical `{"message": …}` shape and decodes unchanged, and the URL
+	/// refusal round-trips as its own case, told apart by its named root.
+	#[test]
+	fn faults_keep_the_journaled_diagnostic_shape_beside_typed_cases() {
+		let recorded = br#"{"kind":"faulted","value":{"message":"limit must be at least 1"}}"#;
+		let outcome: CallOutcome<Payload, Fault> =
+			serde_json::from_slice(recorded).expect("a recorded diagnostic decodes");
+		let CallOutcome::Faulted(diagnostic) = outcome else {
+			panic!("expected a recorded fault")
+		};
+		assert_eq!(diagnostic, fault("limit must be at least 1"));
+		assert_eq!(
+			serde_json::to_value(&diagnostic).expect("encode"),
+			serde_json::json!({ "message": "limit must be at least 1" })
+		);
+
+		let refused = Fault::UrlRootDisabled { root: sf!("https://a.example/y.rs") };
+		let encoded = serde_json::to_value(&refused).expect("encode");
+		assert_eq!(encoded, serde_json::json!({ "root": "https://a.example/y.rs" }));
+		assert_eq!(serde_json::from_value::<Fault>(encoded).expect("decode"), refused);
 	}
 }
