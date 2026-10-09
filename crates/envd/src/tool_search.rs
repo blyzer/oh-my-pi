@@ -17,6 +17,7 @@ use std::{
 use bytes::Bytes;
 use omp_core::Str;
 use omp_edit::store::file_hash;
+use omp_tool::FetchEffects;
 use omp_tools::{
 	glob::{self, WalkMatch, WalkResult},
 	grep::{
@@ -25,7 +26,7 @@ use omp_tools::{
 	read::{
 		ReadSources as _, archive,
 		resolver::{ResolverTable, Scheme},
-		selector::{ParsedSelector, parse_uri},
+		selector::{ParsedSelector, ParsedUri, parse_uri},
 		web,
 	},
 };
@@ -189,14 +190,47 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 		let resolvers = sync::Arc::clone(&self.resolvers);
 		let host = self.host.clone();
 		async move {
-			if !split_top_level_semicolons(request.path.as_str())
-				.into_iter()
-				.any(is_resource_glob_target)
-			{
+			if !walks_resources(request.path.as_str()) {
 				return None;
 			}
 			Some(resource_glob(&resolvers, &host, request, &cancellation).await)
 		}
+	}
+
+	/// A resolver-backed root is read through [`ResolverTable::read_query`]
+	/// by `materialize_internal_root`, so it fetches what that resolver's
+	/// [`ResolverTable::read_fetch`] reports for the same URI.
+	fn internal_root_fetch(&self, root: &SearchRoot) -> Option<FetchEffects> {
+		let parsed = parse_uri(root.path.as_str()).ok()??;
+		self
+			.resolvers
+			.read_fetch(parsed.scheme, parsed.resource, parsed.query)
+	}
+
+	/// Judged by the routing `glob_resource` walks the path by: nothing unless
+	/// some target is a resource glob; then every target `resource_glob` would
+	/// walk through a resolver, by what that resolver reports for a walk from
+	/// the base it lists first ([`ResolverTable::walk_fetch`]).
+	///
+	/// Each is named by that base, the one resource the walk descends from:
+	/// `ssh://prod/src` for `ssh://prod/src/**/*.rs`, which reaches `prod`
+	/// alone, and `ssh://` for a walk whose base is the alias list
+	/// (`ssh:///**`, `ssh:///pr*/**`), which descends into every configured
+	/// host and so names none. A wildcard in the first segment of a resource
+	/// with no leading slash (`ssh://pr*/**`) is listed as the alias it spells,
+	/// so it is named as that alias.
+	fn walk_fetches(&self, path: &str) -> Vec<(Str, FetchEffects)> {
+		if !walks_resources(path) {
+			return Vec::new();
+		}
+		glob_targets(path)
+			.filter_map(|target| {
+				let uri = resource_walk_target(target).ok()??;
+				let base = walk_base(uri.resource);
+				let fetch = self.resolvers.walk_fetch(uri.scheme, base)?;
+				Some((Str::from(format!("{}://{base}", uri.raw_scheme)), fetch))
+			})
+			.collect()
 	}
 }
 
@@ -205,6 +239,54 @@ fn is_resource_glob_target(target: &str) -> bool {
 		return false;
 	};
 	matches!(Scheme::parse(scheme), Scheme::Ssh | Scheme::Vault | Scheme::Memory)
+}
+
+/// Whether `glob_resource` walks `path` at all: some target is a resource
+/// glob.
+fn walks_resources(path: &str) -> bool {
+	split_top_level_semicolons(path)
+		.into_iter()
+		.any(is_resource_glob_target)
+}
+
+/// The trimmed, non-empty targets of a resource-walked glob `path`, in order.
+fn glob_targets(path: &str) -> impl Iterator<Item = &str> {
+	split_top_level_semicolons(path)
+		.into_iter()
+		.map(str::trim)
+		.filter(|target| !target.is_empty())
+}
+
+/// How `resource_glob` walks one trimmed target: `None` for a workspace path
+/// walked locally, else the resource URI it lists through that scheme's
+/// resolver. Both the walk and its judgment (`walk_fetches`) route by it.
+fn resource_walk_target(target: &str) -> Result<Option<ParsedUri<'_>>, glob::Fault> {
+	if !target.contains("://") {
+		return Ok(None);
+	}
+	let parsed = parse_uri(target)
+		.map_err(|error| glob::Fault::Workspace { message: Str::new(error.to_string()) })?
+		.ok_or_else(|| glob::Fault::UnsupportedScheme { scheme: Str::new_static("file") })?;
+	if !matches!(parsed.scheme, Scheme::Ssh | Scheme::Vault | Scheme::Memory) {
+		return Err(glob::Fault::UnsupportedScheme {
+			scheme: Str::new(parsed.raw_scheme.to_ascii_lowercase()),
+		});
+	}
+	if parsed.selector_text.is_some() || parsed.query.is_some() {
+		return Err(glob::Fault::Workspace {
+			message: Str::new_static("resource glob targets do not accept read selectors or queries"),
+		});
+	}
+	Ok(Some(parsed))
+}
+
+/// The resource a walk of the resource glob `resource` lists first: the
+/// directory before its first wildcard, or before its last segment when it
+/// has none.
+fn walk_base(resource: &str) -> &str {
+	let end = resource.find(['*', '?', '[']).unwrap_or(resource.len());
+	let slash = resource[..end].rfind('/').unwrap_or(resource.len());
+	&resource[..slash]
 }
 
 async fn resource_glob(
@@ -219,11 +301,7 @@ async fn resource_glob(
 	let mut found_target = false;
 	let mut truncated = false;
 	let mut timed_out = false;
-	'targets: for target in split_top_level_semicolons(request.path.as_str())
-		.into_iter()
-		.map(str::trim)
-		.filter(|target| !target.is_empty())
-	{
+	'targets: for target in glob_targets(request.path.as_str()) {
 		if cancellation.is_cancelled() {
 			return Err(cancelled_glob());
 		}
@@ -231,7 +309,7 @@ async fn resource_glob(
 			timed_out = true;
 			break;
 		}
-		if !target.contains("://") {
+		let Some(parsed) = resource_walk_target(target)? else {
 			let remaining = deadline.saturating_duration_since(time::Instant::now());
 			let local_request = glob::WalkRequest {
 				path:       Str::new(target),
@@ -264,31 +342,9 @@ async fn resource_glob(
 				Err(fault) => return Err(fault),
 			}
 			continue;
-		}
-		let parsed = parse_uri(target)
-			.map_err(|error| glob::Fault::Workspace { message: Str::new(error.to_string()) })?
-			.ok_or_else(|| glob::Fault::UnsupportedScheme { scheme: Str::new_static("file") })?;
-		if !matches!(parsed.scheme, Scheme::Ssh | Scheme::Vault | Scheme::Memory) {
-			return Err(glob::Fault::UnsupportedScheme {
-				scheme: Str::new(parsed.raw_scheme.to_ascii_lowercase()),
-			});
-		}
-		if parsed.selector_text.is_some() || parsed.query.is_some() {
-			return Err(glob::Fault::Workspace {
-				message: Str::new_static(
-					"resource glob targets do not accept read selectors or queries",
-				),
-			});
-		}
-		let resource = parsed.resource;
-		let wildcard = resource.find(['*', '?', '[']);
-		let (base, pattern) = if let Some(index) = wildcard {
-			let slash = resource[..index].rfind('/').unwrap_or(resource.len());
-			(&resource[..slash], resource)
-		} else {
-			let slash = resource.rfind('/').unwrap_or(resource.len());
-			(&resource[..slash], resource)
 		};
+		let pattern = parsed.resource;
+		let base = walk_base(pattern);
 		let compiled =
 			CompiledWalkGlob::new([pattern]).map_err(|error| glob::Fault::InvalidPattern {
 				pattern: Str::new(pattern),

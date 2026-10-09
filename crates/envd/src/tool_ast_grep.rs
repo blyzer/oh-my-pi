@@ -12,12 +12,10 @@ use std::{
 
 use omp_core::{Hash32, Str};
 use omp_tools::{
-	ast_grep::{AstSearchResolver, ResolveFault, ResolveRequest, ResolvedFile},
-	read::{
-		resolver::{ResolverTable, Scheme},
-		selector::{ParsedSelector, parse_uri},
-		web,
+	ast_grep::{
+		AstSearchResolver, ResolveFault, ResolveRequest, ResolvedFile, RootClass, classify_root,
 	},
+	read::{resolver::ResolverTable, selector::ParsedSelector, web},
 };
 use omp_walker::{
 	FileType, FollowLinks, WalkDecision, WalkDetail, WalkError, WalkOrder, WalkRequest,
@@ -77,18 +75,18 @@ impl AstSearchAuthority {
 			if authored.is_empty() {
 				return Err(ResolveFault::InvalidTarget { target: root.clone() });
 			}
-			let parsed = parse_uri(authored.as_str())
+			let class = classify_root(authored.as_str())
 				.map_err(|_| ResolveFault::InvalidTarget { target: root.clone() })?;
-			match parsed {
-				None => local_roots.push(root.clone()),
-				Some(uri) if uri.scheme == Scheme::File => {
+			match class {
+				RootClass::Local => local_roots.push(root.clone()),
+				RootClass::File => {
 					let path = Url::parse(authored.as_str())
 						.ok()
 						.and_then(|url| url.to_file_path().ok())
 						.ok_or_else(|| ResolveFault::InvalidTarget { target: root.clone() })?;
 					local_roots.push(Str::from(path.to_string_lossy().into_owned()));
 				},
-				Some(uri) if uri.scheme == Scheme::Http => {
+				RootClass::Web(uri) => {
 					if has_glob_syntax(uri.resource)
 						|| !matches!(uri.selector, ParsedSelector::None | ParsedSelector::Raw)
 					{
@@ -102,10 +100,10 @@ impl AstSearchAuthority {
 						resolved.push(file);
 					}
 				},
-				Some(uri) => {
-					if uri.scheme == Scheme::Unknown {
-						return Err(ResolveFault::UnsupportedTarget { target: root.clone() });
-					}
+				RootClass::Foreign => {
+					return Err(ResolveFault::UnsupportedTarget { target: root.clone() });
+				},
+				RootClass::Internal(uri) => {
 					if has_glob_syntax(uri.resource) {
 						return Err(ResolveFault::InvalidTarget { target: root.clone() });
 					}

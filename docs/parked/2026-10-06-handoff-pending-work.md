@@ -103,10 +103,11 @@ Verified in the PR; list is what a reviewer should still check on a Mac:
   session-level, not per tool (resolved 2026-10-07 by the typed confinement marker, ADR 0028
   amendment of that date: a sandbox-kept default `yolo` covers only `ExecSandbox` tools, and
   `Host` tools are admitted as if no sandbox existed; still open there: under-declared host
-  effects such as `grep`/`glob`/`ast_grep` remote roots and `read`-tier MCP servers; RPC host tools
-  and effect-less Python devices no longer resolve to `read` since #205; `read@3` declares its
-  fetches per target since the ADR 0028 read fetch amendment, which records `lsp` spawns and the
-  vault CLI as environment-ambient); the closed network (superseded 2026-10-07: the default network is
+  effects such as `read`-tier MCP servers; RPC host tools and effect-less Python devices no
+  longer resolve to `read` since #205; `read@3` declares its fetches per target since the ADR 0028
+  read fetch amendment, which records `lsp` spawns and the vault CLI as environment-ambient, and
+  `grep`/`glob`/`ast_grep` declare their remote roots since the 2026-10-09 search fetch
+  amendment); the closed network (superseded 2026-10-07: the default network is
   now `scoped`, see the ADR 0028 amendment of that date) and workspace-only writes may break real
   flows such as `git push` and package installs, which would hit the denial-and-rerun prompt and
   were not exercised; the posture notice is posted on the first tool admission, so a session that never

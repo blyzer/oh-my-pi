@@ -809,7 +809,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> Tool for ReadTool<S, B,
 	fn invocation_effects(&self, params: &Params) -> Option<Effects> {
 		let fetch = target_candidates(&params.path)
 			.filter_map(|target| self.target_fetch(&normalize_read_target(&target).canonical))
-			.reduce(|left, right| FetchEffects { credentials: left.credentials || right.credentials });
+			.reduce(FetchEffects::union);
 		Some(Effects { fetch, ..local_read_effects() })
 	}
 

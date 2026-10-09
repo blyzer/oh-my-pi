@@ -438,6 +438,36 @@ impl Resolve for UrlResolver {
 			| Self::Docs(_) => None,
 		}
 	}
+
+	/// Only `ssh://` reaches a remote host while listing, with the host's
+	/// configured credentials, and it does for every walk: a walk from the
+	/// alias list (an empty resource) descends into every configured host,
+	/// and one from a resource naming an alias lists that host. `issue://`,
+	/// `pr://` and `mcp://` are not listed at all (`glob` refuses them).
+	///
+	/// Every other listing reads local or environment-owned state; listing a
+	/// vault may ask the Obsidian CLI, the environment-ambient program
+	/// [`Self::read_fetch`] describes.
+	fn walk_fetch(&self, _resource: &str) -> Option<FetchEffects> {
+		match self {
+			Self::Ssh(_) => Some(FetchEffects { credentials: true }),
+			Self::Host(_)
+			| Self::Artifact(_)
+			| Self::Attachment(_)
+			| Self::Agent(_)
+			| Self::History(_)
+			| Self::Local(_)
+			| Self::Memory(_)
+			| Self::Security(_)
+			| Self::Vault(_)
+			| Self::Mcp(_)
+			| Self::Content(_)
+			| Self::Docs(_)
+			| Self::Issue(_)
+			| Self::Pr(_)
+			| Self::Conflict(_) => None,
+		}
+	}
 }
 
 impl UrlResolver {

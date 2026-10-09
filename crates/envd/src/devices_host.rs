@@ -12,7 +12,8 @@ use omp_shell_builtins::{
 };
 use omp_tool::{
 	Confinement, DevicePath, Diag, DiagEnvelope, DiagKind, ErasedEv, ErasedOutcome, ErasedStream,
-	IncomingParams, Part, PromptCaps, Registry, RegistryError, ToolIdentity, ToolRoute,
+	IncomingParams, InvocationPins, Part, PromptCaps, Registry, RegistryError, ToolIdentity,
+	ToolRoute,
 };
 use omp_tools::{
 	device::{DeviceCatalog, DeviceInvokeRequest, ErasedDeviceInvoker},
@@ -23,10 +24,10 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	admission::{DynamicAdmission, DynamicInvocationSource},
+	admission::{DynamicAdmission, DynamicAdmissionError, DynamicInvocationSource},
 	approval_relay::OwnedApprovals,
 	blobs::{BlobHost, BlobId},
-	fetch_host::FetchHost,
+	fetch_host::{FetchHost, FetchHostNamer, NamedFetches},
 	mcp::manager::McpManager,
 	reflection_relay::OwnedReflection,
 };
@@ -144,12 +145,18 @@ pub struct DynHost {
 	blobs:              BlobHost,
 	mcp:                Arc<McpManager>,
 	admission:          DynamicAdmission,
+	fetch_hosts:        FetchHostNamer,
 	next_invocation_id: std::sync::atomic::AtomicU64,
 }
 
 impl DynHost {
-	/// Binds one live device catalog, worker dispatcher, proposal registry, and
-	/// session hook gate.
+	/// Binds one live device catalog, worker dispatcher, proposal registry,
+	/// session hook gate, and the environment resolvers that name the hosts a
+	/// device call fetches from.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "the device host joins every authority a nested call reaches"
+	)]
 	pub(crate) fn new(
 		catalog: DeviceCatalog,
 		invoker: Arc<dyn ErasedDeviceInvoker>,
@@ -158,6 +165,7 @@ impl DynHost {
 		blobs: BlobHost,
 		mcp: Arc<McpManager>,
 		admission: DynamicAdmission,
+		fetch_hosts: FetchHostNamer,
 	) -> Self {
 		Self {
 			catalog,
@@ -167,6 +175,7 @@ impl DynHost {
 			blobs,
 			mcp,
 			admission,
+			fetch_hosts,
 			next_invocation_id: std::sync::atomic::AtomicU64::new(1),
 		}
 	}
@@ -266,7 +275,7 @@ impl DynHost {
 					name.clone(),
 					&effects,
 					Confinement::Host,
-					&[FetchHost::mcp(server)],
+					&NamedFetches::named([FetchHost::mcp(server)]),
 					DynamicInvocationSource::ShellDyn,
 					approvals,
 					cancellation.clone(),
@@ -465,24 +474,46 @@ impl DynHost {
 					},
 				};
 				let identity = target.identity();
-				let effects = target.effects.clone();
-				let invocation_id = self.invocation_id();
-				self
-					.admission
-					.admit(
-						invocation_id.clone(),
-						target.name.clone(),
-						&effects,
-						target.confinement,
-						// A device names no hosts: its fetch is asked as its own.
-						&[],
-						DynamicInvocationSource::ShellDyn,
-						approvals.as_ref(),
-						cancellation.clone(),
-					)
-					.await
-					.map_err(|error| DynFault::new(error.to_string()))?;
 				let raw = Str::new(args.to_string());
+				// A call is judged by its arguments, as a slot's is at commit: a
+				// device that scopes its effects to them is admitted on that
+				// envelope (a local search is a read, never asked under any
+				// mode), and its fetches ask for the hosts they reach. It is
+				// judged inside the pins its executor runs in, so the hosts asked
+				// for are the ones it reaches. An envelope beyond the declared
+				// maximum is refused, never admitted on that maximum.
+				let pins = Arc::new(InvocationPins::default());
+				let judged = InvocationPins::judge(Some(&pins), || {
+					let effects = registry.device_invocation_effects(&path, &raw)?;
+					let fetches = if effects.fetch.is_some() {
+						self
+							.fetch_hosts
+							.name(&registry.device_fetch_locators(&path, &raw))
+					} else {
+						NamedFetches::default()
+					};
+					Ok::<_, RegistryError>((effects, fetches))
+				});
+				let invocation_id = self.invocation_id();
+				async {
+					let (effects, fetches) =
+						judged.map_err(|source| DynamicAdmissionError::Unjudged { source })?;
+					self
+						.admission
+						.admit(
+							invocation_id.clone(),
+							target.name.clone(),
+							&effects,
+							target.confinement,
+							&fetches,
+							DynamicInvocationSource::ShellDyn,
+							approvals.as_ref(),
+							cancellation.clone(),
+						)
+						.await
+				}
+				.await
+				.map_err(|error| DynFault::new(error.to_string()))?;
 				let args_json = Bytes::from(raw.clone());
 				// The registry reads a dropped feed as an aborted invocation, so a
 				// native target's feed must outlive its stream; otherwise any target
@@ -521,10 +552,14 @@ impl DynHost {
 					},
 				};
 				// A native target runs on this task: a reflection it needs
-				// synthesizes on the issuing connection's session.
-				let output = crate::tools::with_invocation_reflection(
-					reflection,
-					consume(&registry, &self.blobs, &identity, &mut stream, cancellation),
+				// synthesizes on the issuing connection's session, and it
+				// reaches what its judgment pinned.
+				let output = InvocationPins::scope(
+					Some(pins),
+					crate::tools::with_invocation_reflection(
+						reflection,
+						consume(&registry, &self.blobs, &identity, &mut stream, cancellation),
+					),
 				)
 				.await;
 				drop(feed);
@@ -903,6 +938,9 @@ mod tests {
 			Arc::from([]),
 			scratch.join("local"),
 		);
+		// No internal resolvers: an http(s) fetch is still named by its
+		// authored host, an internal one is left unnamed.
+		let resources = Arc::new(omp_tools::read::resolver::ResolverTable::default());
 		let host = DynHost::new(
 			catalog,
 			Arc::new(NoWorker),
@@ -911,6 +949,7 @@ mod tests {
 			blobs,
 			mcp,
 			admission,
+			FetchHostNamer::new(&resources),
 		);
 		(host, registry)
 	}
@@ -1153,5 +1192,209 @@ mod tests {
 		let synthesized = format!("{:?}", call.await.expect("synthesized answer").output);
 		assert!(synthesized.contains("Deploys go to fly.io."), "{synthesized}");
 		assert!(!synthesized.contains("Based on recalled memories"), "{synthesized}");
+	}
+
+	/// Waits for the admission prompt `call` relays, which must not settle
+	/// first, and returns its `(kind, subject)` requirements and query id.
+	async fn relayed_prompt(
+		frames: &flume::Receiver<omp_proto::env::v1::ServerFrame>,
+		call: impl Future<Output = Result<DynCallOutput, DynFault>>,
+	) -> (Vec<(String, String)>, u64) {
+		tokio::pin!(call);
+		let frame = tokio::select! {
+			frame = frames.recv_async() => frame.expect("relayed admission prompt"),
+			result = &mut call => panic!("the admission settled unasked: {:?}", result.map(|call| call.output)),
+		};
+		let Some(omp_proto::env::v1::server_frame::Body::ApprovalQuery(query)) = frame.body else {
+			panic!("expected an approval query, got {:?}", frame.body);
+		};
+		let reasons = query
+			.reasons
+			.iter()
+			.map(|reason| (reason.kind.clone(), reason.subject.clone()))
+			.collect();
+		(reasons, query.query_id)
+	}
+
+	/// Answers the relayed query `query_id` on request 9.
+	fn answer(
+		approvals: &crate::approval_relay::ConnectionApprovals,
+		query_id: u64,
+		approved: bool,
+	) {
+		approvals.answer(9, omp_proto::env::v1::ApprovalAnswer {
+			query_id,
+			decision: Some(omp_proto::env::v1::ApprovalDecision {
+				approved,
+				scope: "once".to_owned(),
+				source: "user".to_owned(),
+				..omp_proto::env::v1::ApprovalDecision::default()
+			}),
+		});
+	}
+
+	/// A `dyn` call of a device that scopes its effects to its arguments is
+	/// admitted on what that call does, as a slot's call is at commit. Under
+	/// `always-ask` an `ast_grep` of local roots is a read and runs unasked;
+	/// one with a URL root asks once, for the host it fetches from and for
+	/// nothing else (its tier is a fetch), and a refusal searches nothing.
+	#[tokio::test]
+	async fn a_dyn_search_is_admitted_on_the_roots_it_reaches() {
+		use crate::approval_relay::ConnectionApprovals;
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let workspace = scratch.path().join("workspace");
+		std::fs::create_dir(&workspace).expect("workspace");
+		std::fs::write(workspace.join("lib.rs"), "fn main() { call(1); }\n").expect("source");
+		let mut registry = Registry::new();
+		register_device(
+			&mut registry,
+			omp_tools::ast_grep::tool(workspace, omp_tools::grep::SearchPolicy {
+				fetch_enabled:      true,
+				credentialed_fetch: true,
+			}),
+		);
+		let (host, _registry) =
+			dyn_host_over(scratch.path(), registry, admission(ApprovalMode::AlwaysAsk));
+		let (responses, frames) = flume::bounded(4);
+		let approvals = ConnectionApprovals::new(responses);
+		let issuer = CommandIssuer { approvals: Some(approvals.owned(9)), reflection: None };
+
+		let local = host
+			.call_issued(
+				"ast_grep",
+				json!({ "pat": "call($A)", "path": "lib.rs" }),
+				CancellationToken::new(),
+				issuer.clone(),
+			)
+			.await
+			.expect("a local search runs unasked");
+		assert!(frames.is_empty(), "a local search never asks");
+		let output = format!("{:?}", local.output);
+		assert!(output.contains("call(1)"), "{output}");
+
+		let call = host.call_issued(
+			"ast_grep",
+			json!({ "pat": "call($A)", "path": "lib.rs; https://docs.rs/a.rs" }),
+			CancellationToken::new(),
+			issuer,
+		);
+		tokio::pin!(call);
+		let (reasons, query_id) = relayed_prompt(&frames, &mut call).await;
+		assert_eq!(reasons, [("network".to_owned(), "http:docs.rs:443".to_owned())]);
+		answer(&approvals, query_id, false);
+		let refused = call.await.expect_err("a refused prompt searches nothing");
+		assert!(refused.message.contains("denied"), "{refused:?}");
+	}
+
+	/// A device whose judgment reads live state, as `read` reads which MCP
+	/// server advertises a resource: judging a call pins what `live` names
+	/// then. Its calls write documents, so `always-ask` asks, and a call with
+	/// `{"widen": true}` is judged beyond its maximum. Its executor records
+	/// what it finds pinned.
+	struct PinningDevice {
+		spec: ToolSpec,
+		live: Arc<Mutex<Str>>,
+		ran:  Arc<Mutex<Vec<Option<omp_tool::ResolutionPin>>>>,
+	}
+
+	impl Tool for PinningDevice {
+		type Fault = Value;
+		type Params = Value;
+		type Payload = Value;
+		type Update = Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, params: &Value) -> Option<Effects> {
+			if params["widen"] == true {
+				return Some(Effects { subagents: 1, ..Effects::empty() });
+			}
+			InvocationPins::pin("probe", "target", || omp_tool::ResolutionPin {
+				target: Some(self.live.lock().clone()),
+				fetch:  None,
+			});
+			Some(self.spec.effects.clone())
+		}
+
+		fn call<'c>(
+			&'c self,
+			_incoming: IncomingParams<'c>,
+		) -> impl Stream<Item = Ev<Value, Value, Value>> + Send + 'c {
+			futures::stream::once(async {
+				self
+					.ran
+					.lock()
+					.push(InvocationPins::pinned("probe", "target"));
+				Ev::Done(ToolTerminal::Done { result: Ok(json!({"ok": true})), useless: false })
+			})
+		}
+
+		fn prompt(&self, _view: Result<&Value, &Value>, _caps: &PromptCaps) -> Vec<Part> {
+			Vec::new()
+		}
+	}
+
+	/// A `dyn` device call runs inside the pins its judgment fixed: what the
+	/// judgment resolved from live state is what its executor reaches, though
+	/// that state moved while the user was asked. A call judged beyond the
+	/// device's declared maximum is refused before anyone is asked, never
+	/// admitted on that maximum, and never runs; its refusal says why.
+	#[tokio::test]
+	async fn a_dyn_call_runs_inside_the_pins_its_judgment_fixed() {
+		use crate::approval_relay::ConnectionApprovals;
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let live = Arc::new(Mutex::new(sf!("judged")));
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let calls = Arc::new(AtomicUsize::new(0));
+		let mut spec = counting_device("pinning", Effects::empty(), Confinement::Host, &calls).spec;
+		spec.effects = Effects {
+			documents: Some(omp_tool::DocEffects {
+				read:        true,
+				write_globs: Arc::from([sf!("**")]),
+			}),
+			..Effects::empty()
+		};
+		let mut registry = Registry::new();
+		register_device(&mut registry, PinningDevice {
+			spec,
+			live: Arc::clone(&live),
+			ran: Arc::clone(&ran),
+		});
+		let (host, _registry) =
+			dyn_host_over(scratch.path(), registry, admission(ApprovalMode::AlwaysAsk));
+		let (responses, frames) = flume::bounded(4);
+		let approvals = ConnectionApprovals::new(responses);
+		let issuer = CommandIssuer { approvals: Some(approvals.owned(9)), reflection: None };
+
+		let call = host.call_issued("pinning", json!({}), CancellationToken::new(), issuer.clone());
+		tokio::pin!(call);
+		let (reasons, query_id) = relayed_prompt(&frames, &mut call).await;
+		assert_eq!(reasons, [("write".to_owned(), "pinning".to_owned())]);
+		*live.lock() = sf!("moved");
+		answer(&approvals, query_id, true);
+		call.await.expect("the approved call runs");
+		let judged = omp_tool::ResolutionPin { target: Some(sf!("judged")), fetch: None };
+		assert_eq!(*ran.lock(), [Some(judged.clone())]);
+
+		let refused = host
+			.call_issued("pinning", json!({ "widen": true }), CancellationToken::new(), issuer)
+			.await
+			.expect_err("a call beyond the maximum is refused");
+		// The refusal names the reason and the revision whose maximum the
+		// call exceeds, in the text a slot call's refusal renders.
+		let exceeds = RegistryError::InvocationEffectsExceedMaximum {
+			name: sf!("pinning"),
+			rev:  Rev { family: sf!("test"), n: 1 },
+		};
+		assert_eq!(refused.message, exceeds.to_string(), "{refused:?}");
+		assert!(refused.message.contains("exceed its declared maximum"), "{refused:?}");
+		assert!(frames.is_empty(), "the refused call asked no one");
+		assert_eq!(*ran.lock(), [Some(judged)], "the refused call never ran");
 	}
 }

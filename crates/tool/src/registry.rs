@@ -2947,19 +2947,55 @@ impl Registry {
 		path: &DevicePath,
 		mut params: IncomingParams<'a>,
 	) -> Result<ErasedStream<'a>, RegistryError> {
-		let target = self
-			.resolve_device(path)
-			.map_err(|_| RegistryError::UnknownTool(Str::new(path.to_string())))?;
-		let entry = self
-			.versions
-			.get(target.name)
-			.and_then(|versions| versions.get(target.rev))
-			.expect("resolved device target must retain its registered entry");
+		let entry = self.device_entry(path)?;
 		if !matches!(entry.tool.route(), ToolRoute::Native) {
 			return Err(external_error(entry.tool.spec(), "invoke_device"));
 		}
 		params.bind_arg_specs(&entry.tool.spec().rev, &self.arg_specs);
 		Ok(entry.tool.call(params))
+	}
+
+	/// Returns the effects one call of the device at `path` may have, judged
+	/// from its canonical argument JSON as [`Self::invocation_effects`] judges
+	/// a slot's, on the exact claimant and revision [`Self::invoke_device`]
+	/// runs: its argument-scoped envelope ([`Tool::invocation_effects`]), or
+	/// its declared maximum when it does not narrow the call.
+	///
+	/// An envelope that is not a subset of the declared maximum is refused
+	/// ([`RegistryError::InvocationEffectsExceedMaximum`]), never replaced by
+	/// the maximum.
+	pub fn device_invocation_effects(
+		&self,
+		path: &DevicePath,
+		arguments: &str,
+	) -> Result<Effects, RegistryError> {
+		scoped_effects(self.device_entry(path)?.tool.as_ref(), arguments)
+	}
+
+	/// Returns the remote locators one call of the device at `path` fetches,
+	/// judged from its canonical argument JSON ([`Tool::fetch_locators`]) on
+	/// the exact claimant and revision [`Self::invoke_device`] runs. Empty for
+	/// a device that does not scope its effects to its arguments, for
+	/// arguments that do not decode, and for a path that resolves no device.
+	#[must_use]
+	pub fn device_fetch_locators(&self, path: &DevicePath, arguments: &str) -> Vec<Str> {
+		self
+			.device_entry(path)
+			.map(|entry| entry.tool.fetch_locators(arguments))
+			.unwrap_or_default()
+	}
+
+	/// The registered entry of the claimant and revision the device at `path`
+	/// resolves to ([`Self::resolve_device`]).
+	fn device_entry(&self, path: &DevicePath) -> Result<&RegistryEntry, RegistryError> {
+		let target = self
+			.resolve_device(path)
+			.map_err(|_| RegistryError::UnknownTool(Str::new(path.to_string())))?;
+		Ok(self
+			.versions
+			.get(target.name)
+			.and_then(|versions| versions.get(target.rev))
+			.expect("resolved device target must retain its registered entry"))
 	}
 
 	/// Lowers policy-resolved model-visible slots in priority order.
@@ -4259,6 +4295,69 @@ mod tests {
 				.effects_owned("alpha")
 				.expect("a host tool's declaration")
 		);
+	}
+
+	/// A device is judged as a slot is, on the claimant and revision its path
+	/// resolves to: its envelope narrows to the call, a widening envelope is
+	/// refused, its locators follow its classifier, and a path that resolves
+	/// no device (an unknown claimant, a tool presented as a slot) is judged
+	/// by nothing.
+	#[test]
+	fn devices_are_judged_on_the_target_their_path_resolves() {
+		let mut registry = Registry::new();
+		let mut spec = tool(1).spec;
+		spec.name = sf!("scoped");
+		spec.effects = scoped_maximum();
+		registry
+			.register(ScopedTool::<true> { spec }, Presentation::Device, Claims {
+				precedence: Precedence::ENHANCEMENT,
+				claimant:   sf!("test/scoped"),
+				replaces:   None,
+			})
+			.expect("scoped device registers");
+		let url = r#"{"level":"https://docs.example/a"}"#;
+		for path in ["scoped", "scoped@test/scoped"] {
+			let path = DevicePath::parse(path).expect("device path");
+			assert_eq!(
+				registry
+					.device_invocation_effects(&path, r#"{"i":"look","level":"read"}"#)
+					.expect("a subset envelope"),
+				read_only(),
+				"{path}"
+			);
+			assert_eq!(
+				registry
+					.device_invocation_effects(&path, r#"{"level":"everything"}"#)
+					.expect("the declared maximum"),
+				scoped_maximum(),
+				"{path}"
+			);
+			assert!(
+				matches!(
+					registry.device_invocation_effects(&path, r#"{"level":"widen"}"#),
+					Err(RegistryError::InvocationEffectsExceedMaximum { .. })
+				),
+				"{path}"
+			);
+			assert_eq!(
+				registry.device_fetch_locators(&path, url),
+				[sf!("https://docs.example/a")],
+				"{path}"
+			);
+		}
+		let other = DevicePath::parse("scoped@other/claimant").expect("device path");
+		assert!(matches!(
+			registry.device_invocation_effects(&other, r#"{"level":"read"}"#),
+			Err(RegistryError::UnknownTool(_))
+		));
+		assert!(registry.device_fetch_locators(&other, url).is_empty());
+		let slot = scoped_registry::<true>();
+		let path = DevicePath::parse("scoped").expect("device path");
+		assert!(matches!(
+			slot.device_invocation_effects(&path, r#"{"level":"read"}"#),
+			Err(RegistryError::UnknownTool(_))
+		));
+		assert!(slot.device_fetch_locators(&path, url).is_empty());
 	}
 
 	/// A declaring tool names the locators its call fetches, decoded as its

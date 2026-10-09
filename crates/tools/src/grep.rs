@@ -14,9 +14,9 @@ use omp_core::{Str, sf};
 use omp_edit::modes::hashline::format::format_hashline_header;
 use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
-	IncomingParams, InterruptWaitError, ParamError, Part, ProjectionAuthorizationError,
-	ProjectionSpan, PromptCaps, PromptProjection, Rev, Tool, ToolSpec, ToolTerminal, Unit,
-	VisibilityReceipt,
+	FetchEffects, IncomingParams, InterruptWaitError, ParamError, Part,
+	ProjectionAuthorizationError, ProjectionSpan, PromptCaps, PromptProjection, Rev, Tool, ToolSpec,
+	ToolTerminal, Unit, VisibilityReceipt,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -78,7 +78,67 @@ pub struct Params {
 	pub skip:      Option<f64>,
 }
 
+/// What a deployment lets its search tools fetch.
+///
+/// The production registry freezes it once for both their declarations and
+/// their executors, so the effects a search tool declares are the ones its
+/// calls are judged by.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SearchPolicy {
+	/// `tools.fetch.enabled`: permit the anonymous fetch of an http(s) root,
+	/// which `grep@1` and `ast_grep` read through the environment's web
+	/// reader. Off, such a root is refused before anything is fetched, and
+	/// no declared maximum holds the anonymous fetch.
+	pub fetch_enabled:      bool,
+	/// The workspace's resolvers fetch remote resources with stored
+	/// credentials (an `ssh://` host, the GitHub API behind `issue://` and
+	/// `pr://`, a remote `mcp://` server), whatever `fetch_enabled` says:
+	/// `grep@1` reads them as resolver-backed roots and `glob@1` walks
+	/// `ssh://` hosts. It puts a credentialed fetch in those tools' declared
+	/// maxima ([`ToolSpec::effects`]); a call whose resolver reports a
+	/// credentialed fetch a maximum withholds is refused, never run.
+	pub credentialed_fetch: bool,
+}
+
+impl Default for SearchPolicy {
+	/// URL roots enabled, as `tools.fetch.enabled` defaults; no credentialed
+	/// resolvers, as a host-free workspace has none.
+	fn default() -> Self {
+		Self { fetch_enabled: true, credentialed_fetch: false }
+	}
+}
+
+/// What every search call may do whatever it targets: read documents. The
+/// declared maximum of a search tool and each call's envelope add `fetch`.
+pub(crate) fn search_effects(fetch: Option<FetchEffects>) -> Effects {
+	Effects {
+		documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
+		fetch,
+		..Effects::empty()
+	}
+}
+
+/// The most a `grep@1` call can fetch under `policy`: an anonymous URL root
+/// while `fetch_enabled`, a credentialed resolver-backed root while the
+/// workspace's resolvers fetch with stored credentials, nothing otherwise.
+const fn grep_fetch_ceiling(policy: SearchPolicy) -> Option<FetchEffects> {
+	if policy.fetch_enabled || policy.credentialed_fetch {
+		Some(FetchEffects { credentials: policy.credentialed_fetch })
+	} else {
+		None
+	}
+}
+
 /// Kind of target supplied to the workspace search resource.
+///
+/// `grep@1` decides it once per root, for both the workspace, which routes
+/// each root by it, and the call's effects ([`Tool::invocation_effects`]), so
+/// the two cannot diverge: a [`Self::Url`] root is an anonymous fetch, an
+/// [`Self::Internal`] root fetches as the resolver the workspace reads it
+/// through reports ([`WorkspaceSearch::internal_root_fetch`]), and the others
+/// read local files. Only an `http(s)://` URL is a [`Self::Url`]: unlike a
+/// `read@3` target ([`crate::read::classify_target`]), a `www.` host or a bare
+/// `host:port/` is a workspace path here, and is searched as one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SearchRootKind {
 	/// A local file, directory, or glob.
@@ -302,6 +362,13 @@ pub enum Fault {
 		/// Parser detail without the `Invalid regex:` prefix.
 		message: Str,
 	},
+	/// An http(s) root while `tools.fetch.enabled` disables URL fetches,
+	/// refused before anything is fetched.
+	#[error("URL search roots are disabled by tools.fetch.enabled: {root}")]
+	UrlRootDisabled {
+		/// The refused root as authored.
+		root: Str,
+	},
 	/// The fixed 30-second native deadline elapsed.
 	#[error("Grep timed out after 30s; narrow paths or pattern, or scope with `glob` first")]
 	TimedOut,
@@ -371,6 +438,29 @@ pub trait WorkspaceSearch: Send + Sync + 'static {
 	) -> impl Future<Output = Option<Result<WalkResult, GlobFault>>> + Send + '_ {
 		future::ready(None)
 	}
+
+	/// The read-only network egress materializing the resolver-backed `root`
+	/// ([`SearchRootKind::Internal`]) performs, judged before the search runs
+	/// by the resolver [`Self::search`] reads it through
+	/// ([`crate::read::resolver::Resolve::read_fetch`]); `None` when that
+	/// resolver reads local or environment-owned state, or none serves the
+	/// root.
+	///
+	/// `grep@1` declares each call's fetch from it, so a workspace that
+	/// materializes resolver-backed roots answers for every resolver it reads
+	/// them through.
+	fn internal_root_fetch(&self, root: &SearchRoot) -> Option<FetchEffects>;
+
+	/// Every target of the `glob@1` `path` that [`Self::glob_resource`] walks
+	/// over a remote host, as a locator naming what the walk can reach (the
+	/// resource it descends from), with the read-only egress its walk performs
+	/// ([`crate::read::resolver::Resolve::walk_fetch`]), judged by the routing
+	/// that method walks the path by. Empty when it walks nothing remote.
+	///
+	/// `glob@1` declares each call's fetch and names its hosts from it, so a
+	/// workspace that walks resource globs answers for every resolver it lists
+	/// them through.
+	fn walk_fetches(&self, path: &str) -> Vec<(Str, FetchEffects)>;
 }
 
 /// Generic `grep@1` executor over an environment-owned workspace resource.
@@ -378,11 +468,13 @@ pub struct Grep<W> {
 	workspace:      W,
 	context_before: u32,
 	context_after:  u32,
+	policy:         SearchPolicy,
 	spec:           ToolSpec,
 }
 
-/// Returns the host-free `grep@1` specification.
-pub fn spec() -> ToolSpec {
+/// Returns the host-free `grep@1` specification under `policy`: document
+/// reads, plus the most its URL and resolver-backed roots can fetch.
+pub fn spec(policy: SearchPolicy) -> ToolSpec {
 	ToolSpec {
 		name:            sf!("grep"),
 		rev:             Rev { family: Str::new(""), n: 1 },
@@ -399,14 +491,7 @@ pub fn spec() -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		effects:         Effects {
-			documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
-			exec:      None,
-			inference: None,
-			desktop:   None,
-			fetch:     None,
-			subagents: 0,
-		},
+		effects:         search_effects(grep_fetch_ceiling(policy)),
 		confinement:     omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
@@ -417,9 +502,40 @@ pub fn spec() -> ToolSpec {
 	}
 }
 
-/// Construct `grep@1` over `workspace`.
-pub fn tool<W: WorkspaceSearch>(workspace: W, context_before: u32, context_after: u32) -> Grep<W> {
-	Grep { workspace, context_before, context_after, spec: spec() }
+/// Construct `grep@1` over `workspace` under `policy`.
+pub fn tool<W: WorkspaceSearch>(
+	workspace: W,
+	context_before: u32,
+	context_after: u32,
+	policy: SearchPolicy,
+) -> Grep<W> {
+	Grep { workspace, context_before, context_after, policy, spec: spec(policy) }
+}
+
+impl<W: WorkspaceSearch> Grep<W> {
+	/// Every root a call of `path` may search that fetches, with its fetch, by
+	/// the kind the workspace routes it by: a URL root while the policy lets
+	/// the web reader fetch it (the executor refuses it otherwise, before
+	/// fetching), a resolver-backed root as the workspace reports. The
+	/// unsplit spelling of a `;` list is left out: the workspace searches it
+	/// only as an existing local path. A path whose roots do not parse is
+	/// refused before anything is searched, and fetches nothing.
+	fn fetching_roots(&self, path: Option<&str>) -> impl Iterator<Item = (Str, FetchEffects)> + '_ {
+		let roots = parse_roots(path)
+			.map(|(roots, _)| roots)
+			.unwrap_or_default();
+		roots.into_iter().filter_map(|root| {
+			let fetch = match root.kind {
+				SearchRootKind::Url => self
+					.policy
+					.fetch_enabled
+					.then_some(FetchEffects { credentials: false }),
+				SearchRootKind::Internal => self.workspace.internal_root_fetch(&root),
+				SearchRootKind::Filesystem | SearchRootKind::Archive => None,
+			}?;
+			Some((root.path, fetch))
+		})
+	}
 }
 
 impl<W: WorkspaceSearch> Tool for Grep<W> {
@@ -428,8 +544,34 @@ impl<W: WorkspaceSearch> Tool for Grep<W> {
 	type Payload = Payload;
 	type Update = Update;
 
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
 	fn spec(&self) -> &ToolSpec {
 		&self.spec
+	}
+
+	/// Every call reads documents; it fetches only when one of its roots is a
+	/// URL the policy lets the web reader fetch, or a resolver-backed root
+	/// whose resolver reaches a remote host. A search of local roots is never
+	/// more than a document read, in any mode.
+	fn invocation_effects(&self, params: &Params) -> Option<Effects> {
+		let fetch = self
+			.fetching_roots(params.path.as_deref())
+			.map(|(_, fetch)| fetch)
+			.reduce(FetchEffects::union);
+		Some(search_effects(fetch))
+	}
+
+	/// The selector-peeled spelling of every root that fetches, which the
+	/// environment resolves to the host it reaches.
+	fn fetch_locators(&self, params: &Params) -> Vec<Str> {
+		let mut locators = self
+			.fetching_roots(params.path.as_deref())
+			.map(|(root, _)| root)
+			.collect::<Vec<_>>();
+		locators.sort_unstable();
+		locators.dedup();
+		locators
 	}
 
 	fn call<'c>(
@@ -489,6 +631,11 @@ impl<W: WorkspaceSearch> Tool for Grep<W> {
 			};
 			let operation = async {
 				let roots = self.workspace.prepare_roots(roots, unsplit).await?;
+				if !self.policy.fetch_enabled
+					&& let Some(root) = roots.iter().find(|root| root.kind == SearchRootKind::Url)
+				{
+					return Err(Fault::UrlRootDisabled { root: root.original.clone() });
+				}
 				let request =
 					build_request(arguments, &roots, self.context_before, self.context_after);
 				let result = self.workspace.search(request).await?;
