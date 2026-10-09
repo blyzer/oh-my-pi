@@ -370,6 +370,7 @@ impl builtins::Command for TimeoutCommand {
 #[cfg(test)]
 mod tests {
 	use std::{
+		borrow::Cow,
 		ffi::{OsStr, OsString},
 		io::{Read, Seek, SeekFrom},
 		path::{Path, PathBuf},
@@ -520,11 +521,15 @@ mod tests {
 			true
 		}
 
-		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+		fn observe_launch<'p>(
+			&self,
+			program: &dyn Fn() -> Option<Cow<'p, Path>>,
+			args: &mut dyn Iterator<Item = &OsStr>,
+		) {
 			self
 				.0
 				.lock()
-				.push((program.map(Path::to_path_buf), args.map(OsStr::to_os_string).collect()));
+				.push((program().map(Cow::into_owned), args.map(OsStr::to_os_string).collect()));
 		}
 	}
 

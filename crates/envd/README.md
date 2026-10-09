@@ -88,13 +88,21 @@ client and framing boundary; it does not contain an alternate host.
   short line and a later success none. Without a refusal, a failed command
   whose stderr shows a resolver or connection failure gets the mode's
   generic text once per session. A disabled network has no broker to record
-  anything, so there a failed command that launched a program able to run
-  with a network URL among its arguments (seen through
-  `SpawnWrapper::observe_launch`) gets the mode's locator text instead, which
-  names the URL handed to a program rather than an output marker, from the
-  same once-per-session slot. That covers a quiet client such as `curl -s`,
-  but not one failing before a pipeline stage that succeeds
-  (`curl -s URL | head`), nor a quiet client that bypasses the proxy under
+  anything, so there a failed command that launched a program with a network
+  URL among its arguments (seen through `SpawnWrapper::observe_launch`; the
+  program must be one the session's file policy lets the shell read, and
+  executable) gets the mode's locator text instead, from the same
+  once-per-session slot. The shell reads every program it launches through
+  that policy first, `exec` included, so one a `read_deny` root hides ends
+  in a read denial and is never launched; Seatbelt's `read_deny` refuses
+  only reads, so a hidden native binary that a utility builtin (`xargs`) or
+  another program (`env`) launches still runs there. That text
+  reports that a program was given a network URL, rather than an output
+  marker; it does not quote the URL or its host. It covers a quiet client
+  such as `curl -s`, but not a command whose final status is 0 after a quiet
+  client failed (`curl -s URL | head`, `curl -s URL || true`,
+  `body=$(curl -s URL); echo "$body"`), a scheme-less host argument
+  (`curl -s example.com`), nor a quiet client that bypasses the proxy under
   `scoped`.
 - `approval_relay` carries a daemon command's sandbox amendment prompt to the
   session that issued the command, and answers it there. The
