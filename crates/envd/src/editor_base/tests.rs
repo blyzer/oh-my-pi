@@ -198,6 +198,38 @@ impl Fixture {
 			.await
 	}
 
+	/// Writes `content` to `name` behind the authority's back, as another host
+	/// or a `git checkout` would, and returns once the authority has adopted
+	/// it as the document's head.
+	///
+	/// The authority adopts an external write only when its native file
+	/// watcher reports it, from the watcher's own thread: an open that reaches
+	/// the document actor first is served the cached head (a commit still
+	/// checks disk). A lease held across the write sees the adopted head
+	/// arrive on its event stream.
+	async fn change_on_disk(&self, name: &str, content: &str) {
+		let mut lease = self.lease(name).await;
+		let events = lease
+			.take_events()
+			.expect("a fresh lease streams its events");
+		fs::write(self.path(name), content).expect("disk change");
+		let adopted = Hash32::sum(content);
+		time::timeout(Duration::from_secs(5), async {
+			loop {
+				let event = events.next_event().await.expect("document event stream");
+				if event
+					.head
+					.and_then(|head| head.revision)
+					.is_some_and(|revision| revision.content_hash[..] == adopted.as_bytes()[..])
+				{
+					return;
+				}
+			}
+		})
+		.await
+		.expect("the authority adopts the disk change");
+	}
+
 	fn reads(&self) -> usize {
 		self.editor.reads.load(Ordering::SeqCst)
 	}
@@ -431,7 +463,9 @@ async fn a_disk_change_after_first_contact_is_merged_not_reverted() {
 		kind(DiagKind::Provenance)
 	]);
 	// Another writer changes line 1 on disk after the read.
-	fs::write(fixture.path("doc.txt"), "ONE\ntwo\nthree\nfour\nfive\n").expect("disk change");
+	fixture
+		.change_on_disk("doc.txt", "ONE\ntwo\nthree\nfour\nfive\n")
+		.await;
 	let second = fixture.base("doc.txt").await.expect("merged");
 	assert_eq!(
 		second.bytes.as_deref(),
