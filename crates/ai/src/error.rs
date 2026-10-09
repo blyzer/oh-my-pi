@@ -292,6 +292,16 @@ pub enum RetryAction {
 	SemanticRetry,
 }
 
+/// Why a process cannot decrypt credential storage, and what unlocks it.
+///
+/// [`CredentialFailure::StorageLocked`] and the launch-time refusal of locked
+/// stored logins both show it.
+pub const CREDENTIAL_STORAGE_LOCKED_REMEDY: &str =
+	"no credential key source is available to this process (the default `sv_credential_key_source \
+	 auto` unlocks stored logins only when run interactively); set OMP_LLM_KEY_SOURCE=local-file \
+	 (or `sv_credential_key_source local-file` in config.cfg) to use the owner-only local key \
+	 file, or OMP_LLM_KEY_SOURCE=os-keychain for the OS keychain";
+
 /// Why a route could not authenticate a request with a provider credential.
 ///
 /// The snake-case variant name is the stable error code, as for
@@ -311,15 +321,16 @@ pub enum CredentialFailure {
 	/// requires.
 	///
 	/// Every control-plane write stores a static secret under the kind its
-	/// provider leases. A row stored under another kind (by an earlier writer,
-	/// or left behind when a catalog update changed the provider's
-	/// authentication) is re-stored by the `credential-kinds` import step:
-	/// once on the first run after upgrading, and again on every explicit
-	/// `omp config import-v1`. A row of a provider that takes no static key
-	/// cannot be re-stored; `omp auth logout` removes it.
+	/// provider's routes lease, and the production composition re-stores a
+	/// row stored under another kind (by an earlier writer, or left behind
+	/// when a catalog or `models.toml` change replaced the routes'
+	/// authentication) each time it starts with a store it can decrypt. A row
+	/// still reported here cannot be re-stored for this route: its provider
+	/// takes no static key, or another of its routes leases the stored kind.
+	/// Logging out the account and logging in again replaces it.
 	#[error(
-		"the stored credential is {actual} but the provider requires {expected}; `omp config \
-		 import-v1` re-stores it under the provider's kind, or `omp auth logout` removes it"
+		"the stored credential is {actual} but this route requires {expected}; `omp auth logout` \
+		 removes it and `omp auth login` stores a new one"
 	)]
 	KindMismatch {
 		/// Kind the catalog authentication requires.
@@ -335,7 +346,10 @@ pub enum CredentialFailure {
 	#[error("the selected stored credential cannot be used for this provider")]
 	UnusableStoredCredential,
 	/// The encrypted credential store cannot be decrypted by this process.
-	#[error("credential storage is locked")]
+	/// The message names the key-source settings that unlock it
+	/// ([`CREDENTIAL_STORAGE_LOCKED_REMEDY`]), so every frontend that renders
+	/// the failure shows them.
+	#[error("credential storage is locked: {}", CREDENTIAL_STORAGE_LOCKED_REMEDY)]
 	StorageLocked,
 	/// The stored credential expired and its source cannot renew it.
 	#[error("the stored credential has expired")]
@@ -967,9 +981,8 @@ mod tests {
 		assert_eq!(
 			error.to_string(),
 			"inference Authentication error during Authentication (kind_mismatch): no usable \
-			 huggingface credential: the stored credential is api-key but the provider requires \
-			 bearer; `omp config import-v1` re-stores it under the provider's kind, or `omp auth \
-			 logout` removes it"
+			 huggingface credential: the stored credential is api-key but this route requires \
+			 bearer; `omp auth logout` removes it and `omp auth login` stores a new one"
 		);
 		assert_eq!(error.code.as_deref(), Some("kind_mismatch"));
 		assert_eq!(error.phase, ErrorPhase::Authentication);
@@ -982,6 +995,17 @@ mod tests {
 		);
 		assert_eq!(locked.kind, ErrorKind::CredentialStorageUnavailable);
 		assert_eq!(locked.code.as_deref(), Some("storage_locked"));
+		// Every frontend that renders a locked store shows what unlocks it.
+		let rendered = locked.to_string();
+		assert!(
+			rendered.contains(
+				"no usable huggingface credential: credential storage is locked: no credential key \
+				 source is available"
+			),
+			"{rendered}"
+		);
+		assert!(rendered.contains("OMP_LLM_KEY_SOURCE=local-file"), "{rendered}");
+		assert!(rendered.contains("sv_credential_key_source"), "{rendered}");
 		assert_eq!(
 			<&'static str>::from(super::CredentialFailure::RefreshFailed),
 			"refresh_failed",

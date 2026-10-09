@@ -833,8 +833,8 @@ fn stored_kind(store: &CredentialStore, account: &str) -> Str {
 
 /// A v1 key for a provider that authenticates with a bearer token is stored
 /// as `bearer` (the kind `/login` stores), so its routes can lease it; a key
-/// header provider keeps `api-key`. The importer writes the right kind
-/// itself: the `credential-kinds` step after it has nothing to repair.
+/// header provider keeps `api-key`. The import's own write stores the right
+/// kind: no later repair is needed for the row to lease.
 #[tokio::test]
 async fn a_bearer_provider_key_imports_under_the_bearer_kind() {
 	let fixture = Fixture::new();
@@ -844,15 +844,8 @@ async fn a_bearer_provider_key_imports_under_the_bearer_kind() {
 	]);
 	let (_, store) = control(&fixture.data_dir());
 
-	let report = fixture.apply(&store);
+	fixture.apply(&store);
 
-	assert!(
-		report
-			.entries()
-			.filter(|entry| entry.step == ImportStep::CredentialKinds)
-			.all(|entry| entry.outcome.kind() == OutcomeKind::NothingToImport),
-		"the importer stored every key under its provider's kind"
-	);
 	assert_eq!(stored_kind(&store, "huggingface:agent-db").as_str(), "bearer");
 	assert_eq!(stored_kind(&store, "anthropic:api-key").as_str(), "api-key");
 	let lease = lease_stored(&store, "huggingface", "huggingface:agent-db")
@@ -860,149 +853,4 @@ async fn a_bearer_provider_key_imports_under_the_bearer_kind() {
 		.expect("the imported key leases on the bearer authentication");
 	assert_eq!(lease.kind(), omp_ai::auth::CredentialKind::Bearer);
 	assert_eq!(reveal(&store, "huggingface:agent-db"), b"hf-fake-import-token");
-}
-
-/// The `credential-kinds` step re-stores a key the earlier importer wrote as
-/// `api-key` for a bearer provider: the first-run import once, an explicit
-/// `omp config import-v1` on every run. A locked store fails it and leaves it
-/// to retry; a dry run names the rows it would re-store.
-#[tokio::test]
-async fn the_credential_kinds_step_repairs_an_earlier_import_once() {
-	let fixture = Fixture::new();
-	fs::create_dir_all(fixture.agent()).expect("agent dir");
-	let (_, store) = control(&fixture.data_dir());
-	let accounts = AccountPool::with_store(Arc::new(
-		AccountStateStore::open(fixture.data_dir().join("credentials.db")).expect("account state"),
-	))
-	.expect("accounts");
-	// What `omp config import-v1` wrote before the fix (every key as
-	// `api-key`), next to a key whose kind its provider accepts. Written
-	// straight to the stores: a control write now stores the right kind.
-	let earlier = |provider: &str, identity: &str, secret: &[u8]| {
-		let account = AccountId::from(format!("{provider}:{identity}"));
-		let principal = omp_ai::PrincipalId::from(identity);
-		let metadata = store
-			.put(omp_ai::auth::CredentialWrite {
-				account_id:          &account,
-				principal_id:        &principal,
-				kind:                "api-key",
-				secret:              &omp_core::SecretBox::new(Box::new(secret.to_vec())),
-				expires_at_ms:       None,
-				origin:              omp_ai::auth::CredentialOrigin::Persistent,
-				now_ms:              1,
-				expected_generation: None,
-			})
-			.expect("earlier import");
-		accounts
-			.upsert(omp_ai::account::AccountRecord {
-				account,
-				principal,
-				provider: ProviderId::from(provider),
-				routes: std::collections::BTreeSet::new(),
-				enabled: true,
-				credential_generation: metadata.generation,
-				routing: omp_ai::call::AccountRoutingContext::default(),
-			})
-			.expect("earlier account");
-		metadata
-	};
-	let hf = earlier("huggingface", "agent-db", b"hf-fake-repair-token");
-	let anthropic = earlier("anthropic", "api-key", b"sk-ant-fake-kept");
-	assert_eq!(
-		lease_stored(&store, "huggingface", "huggingface:agent-db")
-			.await
-			.expect_err("the earlier row cannot lease"),
-		omp_ai::auth::CredentialError::KindMismatch {
-			expected: omp_ai::auth::CredentialKind::Bearer,
-			actual:   omp_ai::auth::CredentialKind::ApiKey,
-		}
-	);
-	let kinds = |report: &ImportReport| {
-		report
-			.entries()
-			.filter(|entry| entry.step == ImportStep::CredentialKinds)
-			.map(|entry| (entry.subject.as_deref().map(str::to_owned), entry.outcome.kind()))
-			.collect::<Vec<_>>()
-	};
-	let config = fixture.root.path().join("o2");
-
-	// A dry run names each row a real run re-stores, from plaintext metadata
-	// alone: it decrypts nothing and creates no key.
-	let dry = run(&fixture.default_pairs(), ImportMode::DryRun, CredentialAccess::Live {
-		data_dir: &fixture.data_dir(),
-		store:    &store,
-	});
-	assert_eq!(kinds(&dry), [(
-		Some("huggingface:agent-db (api-key -> bearer)".to_owned()),
-		OutcomeKind::WouldReimport
-	)]);
-	assert_eq!(stored_kind(&store, "huggingface:agent-db").as_str(), "api-key");
-	assert!(!fixture.data_dir().join("credentials.key").exists(), "a dry run creates no key");
-
-	// Without the key (a non-interactive first run) the row cannot be
-	// decrypted: the step fails and stays unmarked.
-	let locked = Arc::new(
-		CredentialStore::open(
-			fixture.data_dir().join("credentials.db"),
-			Arc::new(omp_ai::auth::UnavailableKeySource),
-		)
-		.expect("locked store"),
-	);
-	let failed = fixture.apply(&locked);
-	assert!(matches!(
-		failed
-			.entries()
-			.find(|entry| entry.step == ImportStep::CredentialKinds)
-			.map(|entry| &entry.outcome),
-		Some(ImportOutcome::NeedsAttention(Attention::Failed(_)))
-	));
-	assert!(!ImportStep::CredentialKinds.marker(&config).is_set());
-
-	let report = fixture.apply(&store);
-
-	assert_eq!(kinds(&report), [(
-		Some("huggingface:agent-db (api-key -> bearer)".to_owned()),
-		OutcomeKind::Reimported
-	)]);
-	assert!(ImportStep::CredentialKinds.marker(&config).is_set());
-	let repaired = store
-		.metadata(&hf.account_id)
-		.expect("metadata")
-		.expect("stored");
-	assert_eq!(repaired.kind.as_str(), "bearer");
-	assert_eq!(repaired.generation, hf.generation + 1);
-	assert_eq!(reveal(&store, "huggingface:agent-db"), b"hf-fake-repair-token");
-	assert_eq!(store.metadata(&anthropic.account_id).expect("metadata"), Some(anthropic));
-	let lease = lease_stored(&store, "huggingface", "huggingface:agent-db")
-		.await
-		.expect("the repaired row leases");
-	assert_eq!(lease.kind(), omp_ai::auth::CredentialKind::Bearer);
-
-	// The first-run import does it once, through the marker.
-	let again = fixture.apply(&store);
-	assert!(matches!(
-		again
-			.entries()
-			.find(|entry| entry.step == ImportStep::CredentialKinds)
-			.map(|entry| &entry.outcome),
-		Some(ImportOutcome::Skipped(SkipReason::MarkerPresent))
-	));
-	assert_eq!(store.metadata(&hf.account_id).expect("metadata"), Some(repaired));
-
-	// An explicit `omp config import-v1` checks again despite the marker, so
-	// a row left under a kind its provider no longer leases (as after a
-	// catalog update) is still found; a nothing-to-do check says so.
-	let explicit = || {
-		run(
-			&fixture.default_pairs(),
-			ImportMode::DryRun,
-			CredentialAccess::Offline(&omp_con::Ctx::new()),
-		)
-	};
-	assert_eq!(kinds(&explicit()), [(None, OutcomeKind::NothingToImport)]);
-	earlier("huggingface", "later", b"hf-fake-later-token");
-	assert_eq!(kinds(&explicit()), [(
-		Some("huggingface:later (api-key -> bearer)".to_owned()),
-		OutcomeKind::WouldReimport
-	)]);
 }

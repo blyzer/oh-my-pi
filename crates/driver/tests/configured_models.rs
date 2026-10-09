@@ -4,25 +4,40 @@
 //! The file names models by the provider's own id; lowering scopes them, and
 //! references between them (`compactionModel`, `contextPromotionTarget`)
 //! resolve inside the declaring provider before any catalog-wide selection.
+//! A configured `auth` replaces the routes' authentication, and with it the
+//! kind a stored credential of the provider must have.
 
 use std::{
 	fs,
+	path::Path,
+	sync::Arc,
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use omp_ai::discovery::{DiscoveryCacheKey, DiscoveryStore};
+use omp_ai::{
+	AuthEvent, AuthResponse,
+	account::{AccountPool, AccountRecord, AccountStateStore},
+	auth::{
+		AuthControlHandle, AuthLoginEngine as _, CredentialBroker, CredentialBrokerEngines,
+		CredentialControlWrite, CredentialEnvironment, CredentialError, CredentialKind,
+		CredentialMetadata, CredentialNeed, CredentialOrigin, CredentialSource as _, CredentialStore,
+		CredentialWrite, HeadlessKeySource, KeyId, SecretLoginEngine, StoredCredentialSource,
+	},
+	call::{AccountRoutingContext, AuthInput, AuthMethod, LoginRequest},
+	discovery::{DiscoveryCacheKey, DiscoveryStore},
+};
 use omp_catalog::{
-	DiscoveredModel, ModelKey, ModelLimits, OperationBits, OperationKind, OverlaySource,
-	OverlayStack, RouteId, UnsafeTrustScope, WireModelId, settings::ModelSettings,
+	AuthSpecId, DiscoveredModel, ModelKey, ModelLimits, OperationBits, OperationKind, OverlaySource,
+	OverlayStack, ProviderId, RouteId, UnsafeTrustScope, WireModelId, settings::ModelSettings,
 	snapshot::Catalog,
 };
-use omp_core::Str;
+use omp_core::{SecretString, Str};
 use omp_driver::{
 	discovery::{
 		models::{ModelsConfig, discovery_probes, load_models_config, lower_user_overlay},
 		roles::resolve_role_selector,
 	},
-	registry::production_catalog,
+	registry::{production_catalog, production_registry},
 };
 
 /// Lowers `models_toml` over the embedded catalog, as the production registry
@@ -223,4 +238,269 @@ fn a_configured_model_wins_over_its_providers_discovered_row() {
 		1,
 		"the listing adds no second record for the configured model"
 	);
+}
+
+/// Hugging Face declares a bearer token, but `auth = 'apiKey'` (what the v1
+/// importer writes for a keyed `models.yml` provider) makes its routes lease
+/// an API key. The base URL is a closed local port, so a composition that
+/// refreshes discovery never leaves the machine.
+const HUGGINGFACE_API_KEY_ROUTES: &str =
+	"[providers.huggingface]\nbaseUrl='http://127.0.0.1:9/v1'\nauth='apiKey'\n";
+
+/// The authentication `HUGGINGFACE_API_KEY_ROUTES` gives every Hugging Face
+/// route.
+fn configured_auth() -> AuthSpecId {
+	AuthSpecId::from("huggingface-configured-auth")
+}
+
+/// The credential store and account pool of `data_dir`.
+fn stores(data_dir: &Path) -> (Arc<CredentialStore>, AccountPool) {
+	let database = data_dir.join("credentials.db");
+	let store = Arc::new(
+		CredentialStore::open(
+			&database,
+			Arc::new(HeadlessKeySource::new(KeyId::new("configured-kind"), [5; 32])),
+		)
+		.expect("credential store"),
+	);
+	let accounts =
+		AccountPool::with_store(Arc::new(AccountStateStore::open(&database).expect("state")))
+			.expect("account pool");
+	(store, accounts)
+}
+
+/// Stores `secret` as the `bearer` row `/login` wrote for Hugging Face from
+/// its declared authentication before it followed the routes' kind, and
+/// registers its account.
+fn earlier_bearer_login(
+	store: &CredentialStore,
+	accounts: &AccountPool,
+	secret: &[u8],
+) -> CredentialMetadata {
+	let account = omp_ai::AccountId::from("huggingface:api-key");
+	let principal = omp_ai::PrincipalId::from("api-key");
+	let metadata = store
+		.put(CredentialWrite {
+			account_id:          &account,
+			principal_id:        &principal,
+			kind:                "bearer",
+			secret:              &omp_core::SecretBox::new(Box::new(secret.to_vec())),
+			expires_at_ms:       None,
+			origin:              CredentialOrigin::Persistent,
+			now_ms:              1,
+			expected_generation: None,
+		})
+		.expect("earlier login");
+	accounts
+		.upsert(AccountRecord {
+			account,
+			principal,
+			provider: ProviderId::from("huggingface"),
+			routes: std::collections::BTreeSet::new(),
+			enabled: true,
+			credential_generation: metadata.generation,
+			routing: AccountRoutingContext::default(),
+		})
+		.expect("earlier account");
+	metadata
+}
+
+/// A process environment with no credential variable set.
+struct NoEnvironment;
+
+impl CredentialEnvironment for NoEnvironment {
+	fn read(&self, _: &str) -> Result<Option<SecretString>, CredentialError> {
+		Ok(None)
+	}
+}
+
+/// Leases `account` from `store` on the configured Hugging Face
+/// authentication.
+async fn lease_configured(
+	catalog: &Catalog,
+	store: &Arc<CredentialStore>,
+	account: &str,
+) -> Result<omp_ai::auth::CredentialLease, CredentialError> {
+	let broker =
+		CredentialBroker::from_catalog(catalog, Arc::new(NoEnvironment), CredentialBrokerEngines {
+			stored: Some(Arc::new(StoredCredentialSource::new(Arc::clone(store)))),
+			..CredentialBrokerEngines::default()
+		})
+		.expect("broker");
+	broker
+		.lease(CredentialNeed {
+			spec:        configured_auth(),
+			account:     Some(omp_ai::AccountId::from(account)),
+			principal:   None,
+			valid_after: SystemTime::now(),
+		})
+		.await
+}
+
+/// The `authorization` header `lease` puts on a request under the configured
+/// authentication.
+fn authorization(catalog: &Catalog, lease: &omp_ai::auth::CredentialLease) -> String {
+	let spec = catalog
+		.auth_spec(&configured_auth())
+		.expect("configured auth");
+	let runtime = omp_ai::auth::AuthSpec::from_catalog(spec, None, None).expect("runtime auth");
+	let mut request = http::Request::builder()
+		.uri("http://127.0.0.1:9/v1/chat/completions")
+		.body(bytes::Bytes::new())
+		.expect("request");
+	lease
+		.prepare(&runtime, SystemTime::now())
+		.expect("the lease prepares")
+		.finalize_buffered(&mut request)
+		.expect("the lease applies");
+	request.headers()["authorization"]
+		.to_str()
+		.expect("ASCII header")
+		.to_owned()
+}
+
+/// A configured auth decides the kind a Hugging Face credential is stored
+/// under: a `bearer` row stored before is re-stored as `api-key`, and an
+/// extension's bearer token and a `/login` key (which picks the provider's
+/// declared bearer authentication) are stored as `api-key`. Each then leases
+/// on the configured authentication.
+#[tokio::test]
+async fn a_configured_auth_decides_the_stored_credential_kind() {
+	let catalog = Arc::new(configured(HUGGINGFACE_API_KEY_ROUTES));
+	let data_dir = tempfile::tempdir().expect("scratch data dir");
+	let (store, accounts) = stores(data_dir.path());
+	let control =
+		AuthControlHandle::offline(Arc::clone(&catalog), Arc::clone(&store), accounts.clone())
+			.expect("control");
+
+	let earlier = earlier_bearer_login(&store, &accounts, b"hf-fake-earlier");
+	assert_eq!(
+		lease_configured(&catalog, &store, "huggingface:api-key")
+			.await
+			.expect_err("a bearer row cannot lease on the configured auth"),
+		CredentialError::KindMismatch {
+			expected: CredentialKind::ApiKey,
+			actual:   CredentialKind::Bearer,
+		}
+	);
+	let repairs = control.repair_static_secret_kinds().expect("repair");
+	assert_eq!(
+		repairs
+			.iter()
+			.map(|repair| (repair.account.as_str(), repair.stored.as_str(), repair.repaired))
+			.collect::<Vec<_>>(),
+		[("huggingface:api-key", "bearer", CredentialKind::ApiKey)]
+	);
+	let repaired = store
+		.metadata(&earlier.account_id)
+		.expect("metadata")
+		.expect("row");
+	assert_eq!(repaired.kind.as_str(), "api-key");
+	assert_eq!(repaired.generation, earlier.generation + 1);
+	let lease = lease_configured(&catalog, &store, "huggingface:api-key")
+		.await
+		.expect("the re-stored row leases");
+	assert_eq!(authorization(&catalog, &lease), "Bearer hf-fake-earlier");
+	assert!(
+		control
+			.repair_static_secret_kinds()
+			.expect("again")
+			.is_empty()
+	);
+
+	let (extension, _) = control
+		.store(CredentialControlWrite {
+			provider:      ProviderId::from("huggingface"),
+			principal:     omp_ai::PrincipalId::from("extension"),
+			identity:      Some(Str::new_static("extension")),
+			kind:          Str::new_static("bearer"),
+			secret:        omp_core::Secret::from(b"hf-fake-extension".to_vec()),
+			expires_at_ms: None,
+		})
+		.expect("extension store");
+	assert_eq!(extension.kind.as_str(), "api-key");
+
+	let declared = catalog
+		.provider(ProviderId::from_ref("huggingface"))
+		.expect("huggingface")
+		.auth[0]
+		.clone();
+	assert_eq!(
+		catalog.auth_spec(&declared).expect("declared auth").kind,
+		omp_catalog::provider::AuthSpecKind::Bearer
+	);
+	let engine = SecretLoginEngine::new(
+		AuthMethod::ApiKey,
+		Str::new_static("login"),
+		Arc::clone(&catalog),
+		Arc::clone(&store),
+		accounts,
+	)
+	.expect("API-key login engine");
+	let session = engine
+		.begin(LoginRequest { provider: ProviderId::from("huggingface"), method: None }, declared)
+		.await
+		.expect("login starts");
+	loop {
+		let event = tokio::time::timeout(Duration::from_secs(5), session.events.recv_async())
+			.await
+			.expect("login event in time")
+			.expect("login channel")
+			.expect("login event");
+		match event {
+			AuthEvent::Prompt(_) => session
+				.responses
+				.send_async(AuthResponse {
+					session: session.id.clone(),
+					input:   AuthInput::ApiKey(SecretString::from("hf-fake-login".to_owned())),
+				})
+				.await
+				.expect("answer the prompt"),
+			AuthEvent::Complete(account) => {
+				assert_eq!(account.account.as_str(), "huggingface:login");
+				break;
+			},
+			AuthEvent::OpenUrl { .. } | AuthEvent::ShowDeviceCode { .. } | AuthEvent::Waiting => {},
+		}
+	}
+	let login = lease_configured(&catalog, &store, "huggingface:login")
+		.await
+		.expect("the login leases on the configured auth");
+	assert_eq!(login.kind(), CredentialKind::ApiKey);
+	assert_eq!(authorization(&catalog, &login), "Bearer hf-fake-login");
+}
+
+/// The production composition re-stores a row stored under a kind its
+/// provider's routes do not lease before any request leases it, and a second
+/// composition finds nothing left to re-store.
+#[tokio::test]
+async fn composition_restores_a_row_its_routes_do_not_lease() {
+	// SAFETY: nextest runs each test in its own process, and this runs before
+	// the composition spawns anything that reads the environment.
+	unsafe { std::env::set_var("OMP_ANTIGRAVITY_VERSION", "1.0.0") };
+	let data_dir = tempfile::tempdir().expect("scratch data dir");
+	fs::write(data_dir.path().join("models.toml"), HUGGINGFACE_API_KEY_ROUTES).expect("models.toml");
+	let (store, accounts) = stores(data_dir.path());
+	let earlier = earlier_bearer_login(&store, &accounts, b"hf-fake-composed");
+
+	production_registry(data_dir.path(), Arc::clone(&store))
+		.await
+		.expect("production composition");
+
+	let repaired = store
+		.metadata(&earlier.account_id)
+		.expect("metadata")
+		.expect("row");
+	assert_eq!(repaired.kind.as_str(), "api-key");
+	assert_eq!(repaired.generation, earlier.generation + 1);
+	let catalog = production_catalog(data_dir.path()).expect("production catalog");
+	let lease = lease_configured(&catalog, &store, "huggingface:api-key")
+		.await
+		.expect("the re-stored row leases");
+	assert_eq!(authorization(&catalog, &lease), "Bearer hf-fake-composed");
+
+	production_registry(data_dir.path(), Arc::clone(&store))
+		.await
+		.expect("second composition");
+	assert_eq!(store.metadata(&earlier.account_id).expect("metadata"), Some(repaired));
 }

@@ -3,7 +3,10 @@
 use std::{collections::BTreeMap, env, fmt, sync::Arc};
 
 use futures::future::{Either, FutureExt as _};
-use omp_catalog::{AuthSpecId, Catalog, ProviderId, provider::AuthSpecKind};
+use omp_catalog::{
+	AuthSpecId, Catalog, ProviderId,
+	provider::{AuthSpec, AuthSpecKind, RouteDef},
+};
 use omp_core::{SecretString, Str, sf};
 
 use super::{
@@ -589,11 +592,10 @@ fn map_credential<'a, T: Send + 'a, U: Send + 'a>(
 /// leased as under a catalog authentication of `spec`, or `None` when `spec`
 /// takes no static secret.
 ///
-/// This is the one mapping native login, the v1 importer, and the stored-kind
-/// repair share: a stored row whose kind differs from it is rejected by the
-/// broker as [`CredentialError::KindMismatch`].
+/// A stored row whose kind differs from the one its lease's authentication
+/// maps to is rejected by the broker as [`CredentialError::KindMismatch`].
 #[must_use]
-pub const fn static_secret_kind(spec: AuthSpecKind) -> Option<CredentialKind> {
+pub(crate) const fn static_secret_kind(spec: AuthSpecKind) -> Option<CredentialKind> {
 	match spec {
 		AuthSpecKind::ApiKey => Some(CredentialKind::ApiKey),
 		AuthSpecKind::Bearer | AuthSpecKind::OptionalBearer => Some(CredentialKind::Bearer),
@@ -608,25 +610,20 @@ pub const fn static_secret_kind(spec: AuthSpecKind) -> Option<CredentialKind> {
 	}
 }
 
-/// The kind an API key for `provider` is stored under.
-///
-/// That is the kind of the first catalog authentication of the provider an
-/// API key satisfies, its routes' own authentications first (a configured
-/// `models.toml` auth replaces those) and then the ones the provider declares.
-/// `None` when the catalog does not know the provider or none of its
-/// authentications takes an API key.
-#[must_use]
-pub fn api_key_kind(catalog: &Catalog, provider: &ProviderId<str>) -> Option<CredentialKind> {
+/// The kind an API key for `provider` is stored under: the kind of the first
+/// authentication its routes lease ([`provider_auth_specs`]) that takes a
+/// static key or bearer token. `None` when the catalog does not know the
+/// provider or none of those authentications takes one.
+fn api_key_kind(catalog: &Catalog, provider: &ProviderId<str>) -> Option<CredentialKind> {
 	provider_auth_specs(catalog, provider)
 		.filter_map(|spec| static_secret_kind(spec.kind))
 		.find(|kind| matches!(kind, CredentialKind::ApiKey | CredentialKind::Bearer))
 }
 
-/// Whether some catalog authentication of `provider` (of one of its routes,
-/// or declared by the provider) leases a credential of `kind`, so a stored
-/// row of that kind is usable on at least one of its routes.
-#[must_use]
-pub fn provider_accepts_kind(
+/// Whether some authentication a route of `provider` leases
+/// ([`provider_auth_specs`]) takes a credential of `kind`, so a stored row of
+/// that kind is usable on at least one of its routes.
+fn provider_accepts_kind(
 	catalog: &Catalog,
 	provider: &ProviderId<str>,
 	kind: CredentialKind,
@@ -639,12 +636,10 @@ pub fn provider_accepts_kind(
 /// material, or a kind neither vocabulary knows).
 ///
 /// `kind` is spelled as the store spells it (`api-key`, `bearer`,
-/// `session-token`) or as extensions do (`api_key`, `bearer`, `session`). An
-/// API key is stored under the provider's API-key kind ([`api_key_kind`])
-/// when no authentication of the provider leases an `api-key`, so a bearer
-/// provider's key is stored as `bearer`; every other kind is kept. This is
-/// the normalization every control-plane write applies and the stored-kind
-/// repair re-applies to rows written before it.
+/// `session-token`) or as extensions do (`api_key`, `bearer`, `session`).
+/// The spelling is parsed, then normalized by [`leased_static_secret_kind`].
+/// This is the normalization every control-plane write applies and the
+/// stored-kind repair re-applies to rows written before it.
 pub(crate) fn stored_static_secret_kind(
 	catalog: &Catalog,
 	provider: &ProviderId<str>,
@@ -657,8 +652,26 @@ pub(crate) fn stored_static_secret_kind(
 			.ok()?
 			.static_secret()?,
 	};
+	leased_static_secret_kind(catalog, provider, kind)
+}
+
+/// The kind a static secret of `kind` for `provider` is stored under so its
+/// routes can lease it, or `None` when `kind` is no static secret.
+///
+/// An API key or bearer token that no authentication of the provider's routes
+/// leases ([`provider_auth_specs`]) takes the provider's API-key kind
+/// instead, when it has one: a bearer provider's API key is stored as
+/// `bearer`, and a key-header provider's bearer token as `api-key`. Any other
+/// kind, and a kind some route leases, is kept.
+pub(crate) fn leased_static_secret_kind(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+	kind: CredentialKind,
+) -> Option<CredentialKind> {
 	match kind {
-		CredentialKind::ApiKey if !provider_accepts_kind(catalog, provider, kind) => {
+		CredentialKind::ApiKey | CredentialKind::Bearer
+			if !provider_accepts_kind(catalog, provider, kind) =>
+		{
 			Some(api_key_kind(catalog, provider).unwrap_or(kind))
 		},
 		CredentialKind::ApiKey | CredentialKind::Bearer | CredentialKind::SessionToken => Some(kind),
@@ -666,25 +679,88 @@ pub(crate) fn stored_static_secret_kind(
 	}
 }
 
-/// Every catalog authentication a request for `provider` may lease under:
-/// its routes' own, in catalog route order, then the provider's declared
-/// ones. An authentication several routes share repeats.
+/// Every catalog authentication a request for `provider` may lease under.
+///
+/// That is, for each of its routes in catalog route order, the route's own
+/// authentication and the provider-declared ones its codec also leases (those
+/// leased before it first); an authentication several routes share
+/// repeats. A provider-declared authentication no route leases is left out: a
+/// `models.toml` auth replaces the routes' own, and a credential only the
+/// declared one takes is never leased.
 pub fn provider_auth_specs<'c>(
 	catalog: &'c Catalog,
 	provider: &'c ProviderId<str>,
-) -> impl Iterator<Item = &'c omp_catalog::provider::AuthSpec> + Clone + 'c {
-	let routes = catalog
+) -> impl Iterator<Item = &'c AuthSpec> + Clone + 'c {
+	catalog
 		.routes()
 		.iter()
 		.filter(move |route| route.provider.as_str() == provider.as_str())
-		.map(|route| &route.auth);
-	let declared = catalog
-		.provider(provider)
-		.into_iter()
-		.flat_map(|definition| definition.auth.iter());
-	routes
-		.chain(declared)
-		.filter_map(|id| catalog.auth_spec(id))
+		.flat_map(move |route| route_auth_specs(catalog, route))
+}
+
+/// The catalog authentications a request on `route` leases under: the
+/// route's own and the provider-declared ones its codec also leases
+/// ([`declared_auth_lease`]), those leased before it first.
+fn route_auth_specs<'c>(
+	catalog: &'c Catalog,
+	route: &'c RouteDef,
+) -> impl Iterator<Item = &'c AuthSpec> + Clone + 'c {
+	let lease = declared_auth_lease(route.codec.as_str());
+	let declared = move |first: bool| {
+		lease
+			.filter(move |lease| lease.first == first)
+			.into_iter()
+			.flat_map(move |lease| {
+				catalog
+					.provider(&route.provider)
+					.into_iter()
+					.flat_map(|provider| provider.auth.iter())
+					.filter(move |id| *id != &route.auth)
+					.filter_map(move |id| catalog.auth_spec(id))
+					.filter(move |spec| (lease.accepts)(spec.kind))
+			})
+	};
+	declared(true)
+		.chain(catalog.auth_spec(&route.auth))
+		.chain(declared(false))
+}
+
+/// How a route leases the authentications its provider declares besides
+/// the route's own ([`declared_auth_lease`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeclaredAuthLease {
+	/// Whether the route also leases a declared authentication of this kind.
+	pub accepts: fn(AuthSpecKind) -> bool,
+	/// Whether it leases those before its own authentication.
+	pub first:   bool,
+}
+
+/// How a route of `codec` leases its provider's declared authentications,
+/// or `None` when it leases only its own.
+///
+/// Anthropic routes also take an OAuth or bearer token after their key
+/// header, Bedrock Converse a bearer token before `SigV4`, Bedrock Mantle
+/// `SigV4` after its own, and Perplexity search an OAuth token first. The
+/// route lease plan and every stored-kind decision read this one table.
+pub(crate) fn declared_auth_lease(codec: &str) -> Option<DeclaredAuthLease> {
+	let (accepts, first): (fn(AuthSpecKind) -> bool, bool) = match codec {
+		"anthropic" => (
+			|kind| {
+				matches!(
+					kind,
+					AuthSpecKind::Oauth | AuthSpecKind::Bearer | AuthSpecKind::OptionalBearer
+				)
+			},
+			false,
+		),
+		"bedrock-converse" => {
+			(|kind| matches!(kind, AuthSpecKind::Bearer | AuthSpecKind::OptionalBearer), true)
+		},
+		"bedrock-mantle" => (|kind| kind == AuthSpecKind::AwsSigv4, false),
+		"search-perplexity" => (|kind| kind == AuthSpecKind::Oauth, true),
+		_ => return None,
+	};
+	Some(DeclaredAuthLease { accepts, first })
 }
 
 const fn credential_kind(kind: AuthSpecKind) -> Option<CredentialKind> {
@@ -1104,8 +1180,64 @@ mod tests {
 		// Anthropic takes a key header and an OAuth bearer token.
 		assert!(accepts("anthropic", CredentialKind::ApiKey));
 		assert!(accepts("anthropic", CredentialKind::Bearer));
+		// Google takes only a key.
+		assert!(accepts("google", CredentialKind::ApiKey));
+		assert!(!accepts("google", CredentialKind::Bearer));
 		assert_eq!("api-key".parse::<CredentialKind>(), Ok(CredentialKind::ApiKey));
 		assert_eq!(<&'static str>::from(CredentialKind::SessionToken), "session-token");
+	}
+
+	/// A provider's authentications are the ones its routes lease: each
+	/// route's own and the declared ones its codec leases too. A declared
+	/// authentication no route leases takes no part in a stored kind.
+	#[test]
+	fn provider_authentications_are_the_ones_its_routes_lease() {
+		let catalog = Catalog::embedded();
+		for provider in catalog.providers() {
+			let leased = provider_auth_specs(catalog, &provider.id)
+				.map(|spec| spec.id.clone())
+				.collect::<std::collections::BTreeSet<_>>();
+			let mut expected = std::collections::BTreeSet::new();
+			for route in catalog
+				.routes()
+				.iter()
+				.filter(|route| route.provider == provider.id)
+			{
+				expected.insert(route.auth.clone());
+				let Some(lease) = declared_auth_lease(route.codec.as_str()) else {
+					continue;
+				};
+				expected.extend(
+					provider
+						.auth
+						.iter()
+						.filter(|id| {
+							catalog
+								.auth_spec(id)
+								.is_some_and(|spec| (lease.accepts)(spec.kind))
+						})
+						.cloned(),
+				);
+			}
+			assert_eq!(leased, expected, "{}", provider.id);
+		}
+		// Every static-key provider can store an API key or bearer token
+		// under a kind one of its routes leases.
+		for provider in catalog.providers() {
+			let Some(kind) = api_key_kind(catalog, &provider.id) else {
+				continue;
+			};
+			assert!(provider_accepts_kind(catalog, &provider.id, kind), "{}", provider.id);
+			for written in [CredentialKind::ApiKey, CredentialKind::Bearer] {
+				let stored =
+					leased_static_secret_kind(catalog, &provider.id, written).expect("a static secret");
+				assert!(
+					provider_accepts_kind(catalog, &provider.id, stored),
+					"{}: {written} is stored as {stored}, which no route leases",
+					provider.id
+				);
+			}
+		}
 	}
 
 	/// A written static secret is stored under the kind its provider leases:
@@ -1122,6 +1254,10 @@ mod tests {
 		assert_eq!(stored("huggingface", "bearer"), Some(CredentialKind::Bearer));
 		assert_eq!(stored("anthropic", "api-key"), Some(CredentialKind::ApiKey));
 		assert_eq!(stored("anthropic", "api_key"), Some(CredentialKind::ApiKey));
+		// A bearer token for a provider whose routes take only a key is stored
+		// as its key.
+		assert_eq!(stored("google", "bearer"), Some(CredentialKind::ApiKey));
+		assert_eq!(stored("google", "api_key"), Some(CredentialKind::ApiKey));
 		// A kind some authentication of the provider leases is kept.
 		assert_eq!(stored("anthropic", "bearer"), Some(CredentialKind::Bearer));
 		assert_eq!(stored("anthropic", "session"), Some(CredentialKind::SessionToken));

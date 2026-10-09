@@ -46,8 +46,7 @@ pub use aws::{
 };
 pub use broker::{
 	CredentialBroker, CredentialBrokerEngines, CredentialBrokerError, CredentialEnvironment,
-	SystemCredentialEnvironment, api_key_kind, provider_accepts_kind, provider_auth_specs,
-	static_secret_kind,
+	SystemCredentialEnvironment, provider_auth_specs,
 };
 pub use command::{
 	CommandCredentialError, CommandCredentialExecutor, CommandCredentialResolver,

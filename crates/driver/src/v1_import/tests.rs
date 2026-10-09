@@ -619,8 +619,7 @@ fn a_profile_without_keys_never_opens_a_credential_store() {
 /// A `models.yml` key imports under the kind its configured route leases:
 /// `models.toml` gives a keyed provider the `apiKey` auth unless `models.yml`
 /// names another, so the built-in bearer provider's row is `api-key` and the
-/// proxy configured with `auth: bearer` stores `bearer`. Neither needs the
-/// `credential-kinds` step afterwards.
+/// proxy configured with `auth: bearer` stores `bearer`.
 #[test]
 fn a_models_yml_key_follows_its_configured_route_auth() {
 	let root = tempfile::tempdir().expect("scratch");
@@ -644,18 +643,11 @@ fn a_models_yml_key_follows_its_configured_route_auth() {
 		plan(&V1Source::new(inputs(&home)), &v2, &ProfileSelection::Named(None)).expect("plan");
 	let store = store(&v2.data_dir);
 
-	let report = run(&pairs, ImportMode::Apply, CredentialAccess::Live {
+	run(&pairs, ImportMode::Apply, CredentialAccess::Live {
 		data_dir: &v2.data_dir,
 		store:    &store,
 	});
 
-	assert!(
-		report
-			.entries()
-			.filter(|entry| entry.step == ImportStep::CredentialKinds)
-			.all(|entry| entry.outcome.kind() == OutcomeKind::NothingToImport),
-		"the configured rows need no repair"
-	);
 	let rows = store.list_metadata().expect("metadata");
 	let mut kinds = rows
 		.iter()

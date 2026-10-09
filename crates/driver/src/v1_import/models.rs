@@ -418,10 +418,10 @@ pub enum LegacyKeyTarget<'a> {
 /// The v1 value resolved as `!command`, then an environment variable of that
 /// exact name, then the literal. Only a literal can be carried over: the
 /// others are reported so the owner can set `OMP_<PROVIDER>_API_KEY`. A
-/// literal is stored under the kind its provider's routes lease an API key as
-/// (`api-key` under the `apiKey` auth `models.toml` gives a keyed provider,
-/// `bearer` under a `bearer` one). A provider that already has a stored
-/// account keeps it. Secrets never pass
+/// literal is stored as an `api-key`, which the store keeps under the kind its
+/// provider's routes lease (`api-key` under the `apiKey` auth `models.toml`
+/// gives a keyed provider, `bearer` under a `bearer` one). A provider that
+/// already has a stored account keeps it. Secrets never pass
 /// through `models.toml`. A dry run neither stores keys nor sets the marker.
 pub fn import_legacy_api_keys(
 	location: &ModelsConfigLocation,
@@ -469,17 +469,11 @@ pub fn import_legacy_api_keys(
 			report.push(LegacyApiKeyImport::NeedsEnvironment { provider });
 			continue;
 		}
-		// The kind this provider's routes lease an API key as, in the catalog
-		// with the `models.toml` the `models` step wrote (its `apiKey` auth
-		// makes a configured route take `api-key`).
-		let kind = control
-			.api_key_kind(ProviderId::from_ref(provider.as_str()))
-			.unwrap_or(omp_ai::auth::CredentialKind::ApiKey);
 		control.store(omp_ai::auth::CredentialControlWrite {
 			provider:      ProviderId::from(provider.as_str()),
 			principal:     omp_ai::PrincipalId::from("models-yml"),
 			identity:      Some(Str::new_static("models-yml")),
-			kind:          Str::new_static(kind.into()),
+			kind:          Str::new_static("api-key"),
 			secret:        omp_core::Secret::from(key.as_bytes().to_vec()),
 			expires_at_ms: None,
 		})?;

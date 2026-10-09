@@ -214,6 +214,8 @@ async def store(
 
 Atomically persists credential material through the host and returns secret-free metadata.
 
+An `API_KEY` or `BEARER` credential is stored under the kind its provider's routes lease, so the returned metadata, and later `list()` results, can carry another `kind` than `cred.kind`: an API key for a provider whose routes take only a bearer token is stored and reported as `BEARER`, and a bearer token for one whose routes take only a key header as `API_KEY`. A `models.toml` `auth` for the provider decides which kind its routes lease. Find a stored credential again by its `id` or `identity`, not by the kind you passed. Other kinds are stored as given.
+
 **Parameters**
 
 : **`cred`** (`Credential`) — Credential to seal and store.
@@ -221,7 +223,7 @@ Atomically persists credential material through the host and returns secret-free
 
 **Returns**
 
-: `CredentialMeta` — Stored record metadata.
+: `CredentialMeta` — Stored record metadata, with the kind the host stored.
 
 **Raises**
 
