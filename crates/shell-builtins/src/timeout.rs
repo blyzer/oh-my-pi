@@ -370,15 +370,19 @@ impl builtins::Command for TimeoutCommand {
 #[cfg(test)]
 mod tests {
 	use std::{
+		ffi::{OsStr, OsString},
 		io::{Read, Seek, SeekFrom},
+		path::{Path, PathBuf},
+		sync::Arc,
 		time::Duration,
 	};
 
 	use clap::Parser;
 	use omp_shell::{
-		ExecutionContext, ExecutionResult, Shell, SourceInfo, builtins,
+		ExecutionContext, ExecutionResult, Shell, SourceInfo, SpawnWrapper, builtins,
 		extensions::DefaultShellExtensions, openfiles::OpenFiles,
 	};
+	use parking_lot::Mutex;
 	use tokio::time;
 
 	use super::{TimeoutArgs, TimeoutCommand, parse_signal, signal_display};
@@ -501,6 +505,59 @@ mod tests {
 
 		assert_eq!(u8::from(result.exit_code), 125);
 		assert_eq!(diagnostic, "timeout: invalid time interval 'invalid'\n");
+	}
+
+	/// Records each program a command launches, with its arguments.
+	#[derive(Default)]
+	struct LaunchRecorder(Mutex<Vec<(Option<PathBuf>, Vec<OsString>)>>);
+
+	impl SpawnWrapper for LaunchRecorder {
+		fn launcher(&self) -> Option<(&OsStr, &[OsString])> {
+			None
+		}
+
+		fn env_allowed(&self, _key: &str) -> bool {
+			true
+		}
+
+		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+			self
+				.0
+				.lock()
+				.push((program.map(Path::to_path_buf), args.map(OsStr::to_os_string).collect()));
+		}
+	}
+
+	/// `timeout` runs its operand through the shell with the caller's
+	/// parameters, so the spawn wrapper observes the program the operand
+	/// launches and its arguments, as it observes a simple command.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn timed_commands_reach_the_spawn_wrapper() {
+		let mut shell = test_shell().await;
+		let recorder = Arc::new(LaunchRecorder::default());
+		let mut params = shell.default_exec_params();
+		params.set_spawn_wrapper(recorder.clone());
+		for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
+			params.set_fd(fd, omp_shell::openfiles::null().expect("null device"));
+		}
+		let result = time::timeout(
+			Duration::from_secs(5),
+			shell.run_string(
+				"timeout 5 /bin/echo -n https://example.com",
+				&SourceInfo::default(),
+				&params,
+			),
+		)
+		.await
+		.expect("timed launch test exceeded its safety deadline")
+		.expect("execute timed launch");
+
+		assert_eq!(u8::from(result.exit_code), 0);
+		assert_eq!(*recorder.0.lock(), [(Some(PathBuf::from("/bin/echo")), vec![
+			OsString::from("-n"),
+			OsString::from("https://example.com")
+		])]);
 	}
 
 	#[tokio::test]

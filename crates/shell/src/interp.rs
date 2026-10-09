@@ -162,12 +162,17 @@ pub trait SpawnWrapper: Send + Sync {
 		env.retain(|(key, _)| key.to_str().is_some_and(|key| self.env_allowed(key)));
 	}
 
-	/// Observes the arguments of one external program the shell composes
-	/// through this wrapper: after expansion, without the program itself, once
-	/// per launch. A wrapper can record what it launches, such as a network
-	/// address handed to a program its sandbox cuts off. The default ignores
-	/// them.
-	fn observe_args(&self, _args: &mut dyn Iterator<Item = &OsStr>) {}
+	/// Observes one external program the shell composes through this wrapper,
+	/// once per launch and before it starts: `program` is the file the launch
+	/// starts, a name with a path separator made absolute against the shell's
+	/// working directory and a bare name (`exec curl`) as found on the shell's
+	/// `PATH`, or `None` when no `PATH` directory holds it; `args` are its
+	/// arguments after expansion, without the program itself. Nothing has
+	/// checked that a path-qualified `program` exists or can run, and a
+	/// launcher only fails to start it after its own spawn has succeeded. A
+	/// wrapper can record what it launches, such as a network address handed
+	/// to a program its sandbox cuts off. The default ignores both.
+	fn observe_launch(&self, _program: Option<&Path>, _args: &mut dyn Iterator<Item = &OsStr>) {}
 }
 /// Scopes process-directed authority (signals, observation, and process
 /// metadata) for one execution.

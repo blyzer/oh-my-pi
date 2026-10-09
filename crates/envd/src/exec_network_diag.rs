@@ -15,8 +15,8 @@
 //!
 //! A disabled network has no broker to record anything, and a client told to
 //! be quiet (`curl -s`) fails with no marker at all. There, a failed command
-//! that launched a program with a network URL among its arguments gets the
-//! generic text instead; see [`NetworkSign::Locator`].
+//! that launched a program able to run with a network URL among its arguments
+//! gets the mode's locator text instead; see [`NetworkSign::Locator`].
 
 use std::{
 	fmt,
@@ -311,10 +311,10 @@ impl NetworkInForce {
 pub(crate) enum NetworkSign {
 	/// Its stderr carried a resolver or connection-failure marker.
 	Marker,
-	/// It launched a program with a network URL among its arguments
-	/// ([`is_network_url`]) while its sandbox left it no network. No backend
-	/// records a connection the kernel refuses, and a quiet client prints
-	/// nothing, so this is the one sign such a failure leaves.
+	/// It launched a program able to run with a network URL among its
+	/// arguments ([`is_network_url`]) while its sandbox left it no network. No
+	/// backend records a connection the kernel refuses, and a quiet client
+	/// prints nothing, so this is the one sign such a failure leaves.
 	Locator,
 }
 

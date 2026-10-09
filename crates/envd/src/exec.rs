@@ -5298,9 +5298,10 @@ mod tests {
 	/// ADR 0028 (2026-10-08, disabled-network diag): a session with no network
 	/// has no broker to record a refused fetch, and a quiet client (`curl -s`)
 	/// prints no marker, so a failed command that launched a program with a
-	/// network URL among its arguments gets the generic text of the mode,
-	/// once per session. A success, a failure without a URL, a URL that is
-	/// only text, a builtin given one and a `scoped` session report nothing.
+	/// network URL among its arguments gets the mode's locator text, once per
+	/// session. A success (a pipeline whose last stage succeeds included), a
+	/// failure without a URL, a URL that is only text, a builtin given one, a
+	/// program that cannot run and a `scoped` session report nothing.
 	/// Runs on every unix host: the sandbox is an environment-only wrapper that
 	/// reports a disabled network, and `/usr/bin/false` stands in for a client
 	/// failing quietly on a host it cannot reach.
@@ -5338,6 +5339,29 @@ mod tests {
 			assert_eq!(exit, Some(1), "{script}");
 			assert!(diags.is_empty(), "{script}: {:?}", diag_texts(&diags));
 		}
+		// A program that cannot run never reached the network: a missing one
+		// (127), an `exec` of a bare name no `PATH` directory holds (127) and a
+		// script without its exec bit (126, whose `Permission denied` reads as a
+		// sandbox denial, a failure all the same) report nothing.
+		std::fs::write(root.path().join("fetch.sh"), "#!/bin/sh\nexit 1\n").expect("script");
+		for (script, ending, code) in [
+			("/nonexistent/wget -q https://example.invalid", ExecOutcome::Failed, 127),
+			("exec omp-no-such-client -q https://example.invalid", ExecOutcome::Failed, 127),
+			("./fetch.sh -q https://example.invalid", ExecOutcome::Denied, 126),
+		] {
+			let (outcome, exit, output, diags) = run(script).await;
+			assert_eq!(outcome, ending as i32, "{script}: {}", String::from_utf8_lossy(&output));
+			assert_eq!(exit, Some(code), "{script}");
+			assert!(diags.is_empty(), "{script}: {:?}", diag_texts(&diags));
+		}
+		// A pipeline whose last stage succeeds ends `Succeeded`, so a quiet
+		// client that failed before it reports nothing (ADR 0028, 2026-10-08
+		// amendment, point 4).
+		let (outcome, exit, _, diags) =
+			run("/usr/bin/false -s https://example.invalid | /bin/cat").await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32);
+		assert_eq!(exit, Some(0));
+		assert!(diags.is_empty(), "{:?}", diag_texts(&diags));
 
 		// A quiet failure after launching a program with a URL, expanded from a
 		// variable, is explained once.
@@ -5392,8 +5416,10 @@ mod tests {
 
 	/// Live Seatbelt proof of the observed case: under
 	/// `sv_sandbox_network_mode disabled`, `curl -sI` fails without a word (no
-	/// DNS, exit 6), and the session still tells the model why, once. Offline:
-	/// `.invalid` names never resolve.
+	/// DNS, exit 6), and the session still tells the model why, once, while a
+	/// program that does not exist, which `sandbox-exec` fails to exec after
+	/// its own spawn succeeded, gets nothing. Offline: `.invalid` names never
+	/// resolve.
 	#[cfg(target_os = "macos")]
 	#[tokio::test]
 	async fn quiet_clients_under_a_disabled_network_reach_the_model_as_a_sandbox_diag() {
@@ -5418,19 +5444,29 @@ mod tests {
 			.await
 			.expect("sandboxed session opens");
 		let session = &opened.session;
+		// A program that does not exist never reached the network. The
+		// launcher's own spawn succeeds and only its exec of the program fails,
+		// so the session note is all this failure gets.
+		let missing = "/nonexistent/curl -sI --max-time 20 https://example.invalid";
+		let (outcome, exit, output, diags) =
+			run_failure(&host, script_request(session, missing)).await;
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{}", String::from_utf8_lossy(&output));
+		assert_ne!(exit, Some(0));
+		assert_eq!(diags.len(), 1, "{:?}", diag_texts(&diags));
+		assert!(diags[0].text.contains("backend=seatbelt"), "{:?}", diag_texts(&diags));
+		assert!(diags[0].text.contains("network=disabled"), "{:?}", diag_texts(&diags));
+
 		let curl = "/usr/bin/curl -sI --max-time 20 https://example.invalid";
 		let (outcome, exit, output, diags) = run_failure(&host, script_request(session, curl)).await;
 		assert_eq!(outcome, ExecOutcome::Failed as i32, "{}", String::from_utf8_lossy(&output));
 		assert_eq!(exit, Some(6));
 		assert!(output.is_empty(), "{}", String::from_utf8_lossy(&output));
-		assert_eq!(diags.len(), 2, "{:?}", diag_texts(&diags));
-		assert!(diags[0].text.contains("backend=seatbelt"), "{:?}", diag_texts(&diags));
-		assert!(diags[0].text.contains("network=disabled"), "{:?}", diag_texts(&diags));
-		assert_eq!(diags[1].kind, "sandbox");
-		assert_eq!(diags[1].severity, v1::ToolDiagSeverity::Warn as i32);
-		assert!(diags[1].text.contains("network URL"), "{:?}", diag_texts(&diags));
+		assert_eq!(diags.len(), 1, "{:?}", diag_texts(&diags));
+		assert_eq!(diags[0].kind, "sandbox");
+		assert_eq!(diags[0].severity, v1::ToolDiagSeverity::Warn as i32);
+		assert!(diags[0].text.contains("network URL"), "{:?}", diag_texts(&diags));
 		assert!(
-			diags[1]
+			diags[0]
 				.text
 				.contains("sv_sandbox_network_mode is disabled"),
 			"{:?}",

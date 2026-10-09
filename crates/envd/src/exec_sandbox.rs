@@ -16,7 +16,9 @@ use omp_sandbox::{
 	Capability, CommandWrapper, DegradationPolicy, EnvironmentSource, NetworkMode,
 	RUNTIME_READ_ROOTS, ResourceLimits, Runner, SandboxError, SandboxSpec, WriteMode,
 };
-use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
+use omp_shell::{
+	OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper, sys::fs::PathExt as _,
+};
 use parking_lot::Mutex;
 
 #[cfg(test)]
@@ -277,9 +279,10 @@ pub(crate) struct AttemptFacts {
 	/// The egress broker's refusal of any cause, for the model-visible
 	/// network diag. It is kept even when a path denial takes precedence.
 	pub(crate) refusal:         Option<BrokerDenial>,
-	/// A program the attempt launched was given a network URL while the
-	/// attempt had no network at all, the only sign a quiet client leaves
-	/// there: no backend records a connection its kernel refuses.
+	/// A program the attempt launched, one that exists and can run, was given
+	/// a network URL while the attempt had no network at all, the only sign a
+	/// quiet client leaves there: no backend records a connection its kernel
+	/// refuses.
 	pub(crate) network_locator: bool,
 }
 
@@ -825,8 +828,12 @@ impl SpawnWrapper for ExecSandboxAttempt {
 	/// Records a network URL handed to a program while this attempt has no
 	/// network. Under `scoped` the broker records what a client asks for, so
 	/// nothing is scanned there; once one URL is recorded, later launches are
-	/// not scanned either.
-	fn observe_args(&self, args: &mut dyn Iterator<Item = &OsStr>) {
+	/// not scanned either. A program that does not exist or cannot run never
+	/// reached the network, whether the shell fails to spawn it (exit 127 or
+	/// 126) or a launcher fails to exec it after its own spawn succeeded, so
+	/// only a launchable program counts, and none counts when the shell found
+	/// no program for a bare name. It is checked once a URL is found.
+	fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
 		if self.sandbox.network != NetworkConfinement::Disabled
 			|| self.network_locator.load(Ordering::Acquire)
 		{
@@ -834,11 +841,20 @@ impl SpawnWrapper for ExecSandboxAttempt {
 		}
 		for arg in args {
 			if is_network_url(arg.as_encoded_bytes()) {
-				self.network_locator.store(true, Ordering::Release);
+				if launchable(program) {
+					self.network_locator.store(true, Ordering::Release);
+				}
 				return;
 			}
 		}
 	}
+}
+
+/// Whether `program` can run, as the shell's path search judges it: one the
+/// shell found, not a directory, and executable by this user. It is judged in
+/// envd's own view of the filesystem, before the launch.
+fn launchable(program: Option<&Path>) -> bool {
+	program.is_some_and(|program| !program.is_dir() && program.executable())
 }
 
 impl FilePolicy {
@@ -1985,17 +2001,27 @@ mod tests {
 		assert!(session.session_note().contains("network=scoped"), "{}", session.session_note());
 	}
 
-	fn observe(attempt: &ExecSandboxAttempt, args: &[&str]) {
-		SpawnWrapper::observe_args(attempt, &mut args.iter().map(OsStr::new));
+	fn observe(attempt: &ExecSandboxAttempt, program: Option<&Path>, args: &[&str]) {
+		SpawnWrapper::observe_launch(attempt, program, &mut args.iter().map(OsStr::new));
 	}
 
 	/// An attempt with no network records that a program it launched was
 	/// given a network URL, once, consumed with its other facts; a URL that is
-	/// only text never counts. Under `scoped` the broker records what clients
-	/// ask for, so arguments are not scanned at all.
+	/// only text never counts, and neither does one handed to a program that
+	/// cannot run (a bare name the shell found nowhere, a missing path, a
+	/// directory, a file without its exec bit), which leaves later launches
+	/// free to count. Under `scoped` the broker records
+	/// what clients ask for, so arguments are not scanned at all.
 	#[test]
 	fn attempts_record_network_urls_only_without_a_network() {
 		let workspace = tempfile::tempdir().expect("workspace");
+		let program = std::env::current_exe().expect("the test binary runs");
+		let program = Some(program.as_path());
+		let missing = workspace.path().join("missing/wget");
+		let script = workspace.path().join("script.sh");
+		fs::write(&script, "#!/bin/sh\n").expect("script without its exec bit");
+		let unlaunchable =
+			[None, Some(missing.as_path()), Some(workspace.path()), Some(script.as_path())];
 		let explicit_disabled = SandboxSettings {
 			network_mode: SandboxNetworkMode::Disabled,
 			network_provenance: Provenance::Explicit,
@@ -2022,13 +2048,26 @@ mod tests {
 		for sandbox in &disabled {
 			assert_eq!(sandbox.network, NetworkConfinement::Disabled);
 			let attempt = sandbox.begin_attempt(None);
-			observe(&attempt, &["-sS", "-o", "/dev/null"]);
-			observe(&attempt, &["see https://example.com", "file:///etc/hosts", "--url=https://x"]);
+			observe(&attempt, program, &["-sS", "-o", "/dev/null"]);
+			observe(&attempt, program, &[
+				"see https://example.com",
+				"file:///etc/hosts",
+				"--url=https://x",
+			]);
 			assert!(!attempt.take_facts().network_locator, "text is not a fetch");
 
 			let attempt = sandbox.begin_attempt(None);
-			observe(&attempt, &["-sI", "--max-time", "20", "https://example.com"]);
-			observe(&attempt, &["git+ssh://git@github.com/org/repo.git"]);
+			for cannot_run in unlaunchable {
+				observe(&attempt, cannot_run, &["-q", "https://example.com"]);
+			}
+			assert!(!attempt.take_facts().network_locator, "nothing ran");
+
+			let attempt = sandbox.begin_attempt(None);
+			for cannot_run in unlaunchable {
+				observe(&attempt, cannot_run, &["-q", "https://example.com"]);
+			}
+			observe(&attempt, program, &["-sI", "--max-time", "20", "https://example.com"]);
+			observe(&attempt, program, &["git+ssh://git@github.com/org/repo.git"]);
 			let facts = attempt.take_facts();
 			assert!(facts.network_locator);
 			assert_eq!(facts.denial, None);
@@ -2038,7 +2077,7 @@ mod tests {
 
 		let scoped = ExecSandbox::with_test_broker(&SandboxSettings::default(), workspace.path());
 		let attempt = scoped.begin_attempt(None);
-		observe(&attempt, &["-sI", "https://example.com"]);
+		observe(&attempt, program, &["-sI", "https://example.com"]);
 		assert!(!attempt.take_facts().network_locator);
 	}
 
