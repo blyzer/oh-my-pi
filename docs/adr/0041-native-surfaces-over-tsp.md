@@ -217,7 +217,15 @@ The owner accepted the recommendations for the six decisions left open:
 
 ## Status in omp
 
-Not started. No TSP or Tern code exists in `omp2` at `6427fb648c`.
+Phase 0 done (`crates/tui/src/tsp/`):
+- typed wire messages, framing and chunking with Tern's cut rule, a reply and event reader;
+- the reference document applier, used as the test oracle;
+- the `OMP_TSP_RECORD` recorder and the `OMP_TSP=0` opt-out;
+- the `hello` query in the startup probe before DA1, with the reply in `ProbeResults::tsp`;
+- `tsp;` replies and events (APC and OSC 877) consumed by `Terminal::handle_response` and queued for
+  `Terminal::take_tsp`.
+
+No presenter exists yet, so nothing draws a surface: phases 1 to 4 are not started.
 
 ## Not verified
 
