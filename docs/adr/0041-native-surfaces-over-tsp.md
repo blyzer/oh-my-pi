@@ -123,18 +123,19 @@ Its wire format, chunking rule and examples are useful as conformance vectors.
    - `action`, `change` and `toggle` events route to the owning block or card by id.
    - Native editing (`edit`, `undo`, `send`) waits for phase 3: its UTF-16 offsets must go
      through `xutf`.
-6. **Opt-out and debugging.** `OMP_TSP=0` forces cell rendering. `OMP_TSP_RECORD=<file>`
-   records messages as JSONL for Tern's `surface-play`. No `PI_*` or `TERN_*` names.
+6. **Opt-out and debugging.** TSP is on whenever Tern answers; `OMP_TSP=0` forces cell
+   rendering. `OMP_TSP_RECORD=<file>` records messages as JSONL for Tern's `surface-play`. No
+   `PI_*` or `TERN_*` names.
 
 ### Phases
 
 | Phase | Scope | Exit criterion |
 | --- | --- | --- |
 | 0 | Wire module, probe arm, input routing, a port of v1's reference applier (`apply.ts`) as a test oracle, opt-out and recording | Unit tests: chunk cut rule (property), framing round-trip, probe demux; no user-visible change |
-| 1 | Handshake; inline surface; transcript blocks as `card`/`md` (append)/`section`/generic `tool`/`rows`; `settle`; credits and ack; composer and status band as `rows` (or a minimal `editor` with a caret); overlays fall back to cell rendering; close/adopt across epochs | Real-PTY e2e against a scripted fake Tern (hello before DA1, acks, document assertions) plus the fallback paths (DA1 first, multiplexer, `OMP_TSP=0`) |
-| 2 | Per-card descriptions (bash `ansi`+`follow`, edit `diff`, read `code`, todo `checklist`, task `agent`), status as `status`/`seg`, toasts, palette `t` from the theme, images via blobs | Each card's description checked against the applier; `rows` count per frame logged |
+| 1 | Handshake, with the optimistic start on `TERM_PROGRAM=tern` (revoked after 1 s without a reply); inline surface; transcript blocks as `card`/`md` (append)/`section`/generic `tool`/`rows`; `settle`; credits and ack; composer and status band as `rows` (or a minimal `editor` with a caret); overlays fall back to cell rendering; close/adopt across epochs | Real-PTY e2e against a scripted fake Tern (hello before DA1, acks, document assertions) plus the fallback paths (DA1 first, multiplexer, `OMP_TSP=0`) |
+| 2 | Per-card descriptions (bash `ansi`+`follow`, edit `diff`, read `code`, todo `checklist`, task `agent`), status as `status`/`seg`, toasts, images via blobs (no palette `t`: Tern's theme applies) | Each card's description checked against the applier; `rows` count per frame logged |
 | 3 | `editor` with `edit`/`undo`/`send`, autocomplete overlay at the caret, pickers and settings as `picker`/`prefs`, modal approvals in `layer`, `screen` surfaces for full-screen apps | Editor edits round-trip through UTF-16 offsets; picker selection drives the same commands as the cell UI |
-| 4 (optional) | `flow` surfaces for print-mode output, stylesheets and `el`, Windows ConPTY input, optimistic start on `TERM_PROGRAM=tern`, `TERN_BLOB_DIR` | Owner decision per item |
+| 4 (optional) | `flow` surfaces for print-mode output, stylesheets and `el`, Windows ConPTY input, `TERN_BLOB_DIR` | Owner decision per item |
 
 ## Consequences
 
@@ -145,7 +146,7 @@ Its wire format, chunking rule and examples are useful as conformance vectors.
   this). Needs an amendment of 0034 when phase 1 lands.
 - **0032 (presentation policy in the renderer).** Tern animates spinners, shimmer, elapsed timers
   and streamed Markdown. omp stops its own ticks for nodes Tern animates. Stream pacing becomes a
-  choice: raw appends, or appends paced at the reveal cadence and bounded by credits.
+  convar (`tsp_stream_pacing`), settled by the test in the owner decisions below.
 - **0030 (one-pass rendering).** `ansi` and `rows` need ANSI bytes in frame bodies. That is a
   second materialization point, from spans or cells to bytes, at the TSP output boundary. Text
   is still decoded once at entry, and no component stores escapes.
@@ -163,23 +164,46 @@ Its wire format, chunking rule and examples are useful as conformance vectors.
   - A third presenter can drift from the other two unless overlay, approval and composer state
     stay in `Presenter`.
 
-## Open owner decisions
+## Owner decisions (2026-10-09)
+
+1. **Default: on.** TSP is used whenever Tern answers the handshake. `OMP_TSP=0` is the only
+   switch, and it only turns TSP off.
+2. **Optimistic start: yes.** With `TERM_PROGRAM=tern` and no multiplexer, omp opens the inline
+   surface and sends its first frame without waiting for the reply, on the assumed v1 hello (every
+   kind, `apc` 65536, `credits` 2). If DA1 answers first or no reply arrives within 1 s, the
+   surface is closed with `keep:false` and omp paints cells. This moves from phase 4 into phase 1.
+3. **Theme: Tern's.** omp never sends a palette (`t`). Nodes carry roles and tones only; colours
+   come from Tern's theme.
+4. **Node kinds: all of omp's.** omp uses `tool`, `agent`, `checklist`, `picker`, `prefs` and
+   `effort` wherever they fit. A kind missing from `hello.kinds` (an older Tern) still falls back
+   per kind to its generic equivalent (`tool` to `card`, `picker` to a `list` composition).
+5. **Stream pacing: decided by a test.** Tern does not animate arriving text: an `md` node
+   re-renders from its last open block on each `text append`. So the choice is between:
+   - raw appends: each provider delta goes out as it arrives, coalesced only by credits (v1);
+   - paced appends: omp releases the text at its reveal cadence (`cl_smooth_streaming`).
+
+   Both ship behind a convar (`tsp_stream_pacing raw|paced`); `raw` is the default until the test
+   says otherwise.
+
+   **The test:**
+   1. Record the same scripted response in both modes with `OMP_TSP_RECORD`, once with a
+      fine-grained stream (small deltas) and once with a coarse one (large chunks).
+   2. The owner replays each recording in Tern with `surface-play <file> paced` and judges it by
+      eye.
+   3. Measure from the recordings: time to first text, frames per second, largest append, and
+      how often credits ran out.
+   4. If the coarse stream looks jumpy under `raw`, the default becomes `paced`.
+
+### Still open
 
 1. Where the presenter lives: `omp-chat` beside `Host` (recommended), or an app adapter. Whether
    the wire module stays in `omp-tui` (recommended) or becomes an `omp-tsp` crate.
 2. Node source: the semantic projection first (recommended), or component-tree lowering first.
-3. Default: on whenever Tern answers (recommended), or opt-in during pre-release.
-4. Optimistic start when `TERM_PROGRAM=tern` (v1 does it; it hides the 120 ms fence and adds
-   revoke logic).
-5. Who paces streamed text: Tern (raw appends) or omp (paced appends).
-6. Send omp's palette (`t`) so the transcript keeps omp's theme, or let Tern's theme apply.
-7. Use the omp-specific kinds (`tool`, `agent`, `checklist`, `picker`, `prefs`, `effort`) or
-   only the generic ones (`card`, `section`, `list`).
-8. Bash output as `ansi` (re-encoded SGR), or as `code`/`text` spans.
-9. Phase 1 composer: `rows` (no caret) or a minimal `editor` node.
-10. Phase 1 overlays: fall back to cell rendering while one is open, or `rows` inside `overlay`.
-11. Whether the GUI window host should later consume the same semantic description instead of
-    cells.
+3. Bash output as `ansi` (re-encoded SGR), or as `code`/`text` spans.
+4. Phase 1 composer: `rows` (no caret) or a minimal `editor` node.
+5. Phase 1 overlays: fall back to cell rendering while one is open, or `rows` inside `overlay`.
+6. Whether the GUI window host should later consume the same semantic description instead of
+   cells.
 
 ## Status in omp
 
