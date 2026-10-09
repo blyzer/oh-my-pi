@@ -949,6 +949,16 @@ impl Composer {
 			.unwrap_or_default()
 	}
 
+	/// Current draft cursor measured in UTF-8 bytes.
+	#[must_use]
+	pub fn cursor(&self) -> usize {
+		self
+			.ui
+			.with_component::<EditorPane, _>(COMPOSER_ID, EditorPane::cursor)
+			.flatten()
+			.unwrap_or_default()
+	}
+
 	/// Replaces the draft with text edited outside the composer (
 	/// `handleExternalEditor`): the chips were expanded into `text`, so the
 	/// staged attachment cards are dropped rather than re-collapsed, and the

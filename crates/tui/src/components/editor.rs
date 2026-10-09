@@ -700,6 +700,12 @@ impl EditInput {
 		self.editor.buffer()
 	}
 
+	/// Returns the current cursor as a UTF-8 byte offset.
+	#[must_use]
+	pub const fn cursor(&self) -> usize {
+		self.editor.buffer().cursor()
+	}
+
 	/// Returns the composer line containing the cursor, for host copy-line
 	/// actions.
 	pub fn current_line(&self) -> &str {
@@ -2797,6 +2803,17 @@ impl EditorPane {
 			.comp()
 			.downcast_ref::<EditInput>()
 			.is_some_and(EditInput::cursor_on_last_line)
+	}
+
+	/// Returns the editable leaf cursor as a UTF-8 byte offset.
+	///
+	/// Returns `None` when a custom child replaces the default editable leaf.
+	#[must_use]
+	pub fn cursor(&self) -> Option<usize> {
+		self.children[0]
+			.comp()
+			.downcast_ref::<EditInput>()
+			.map(EditInput::cursor)
 	}
 
 	#[cfg(test)]
