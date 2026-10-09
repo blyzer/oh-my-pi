@@ -33,7 +33,7 @@ use crate::{
 	auth::{
 		AuthManager, AuthScheme, AwsCredentialError, AwsRegistryAvailability, CredentialApplyError,
 		CredentialBroker, CredentialError, CredentialKind, CredentialLease, CredentialNeed,
-		CredentialShaperRegistry, CredentialSource, OAuthHttpClient, OAuthHttpRequest,
+		CredentialShaperRegistry, CredentialSource, LeaseOrigin, OAuthHttpClient, OAuthHttpRequest,
 		ProviderShaper, sigv4::endpoint_scope, spec::AuthSpec,
 	},
 	body::BodySource,
@@ -2277,7 +2277,8 @@ struct RouteLeaseProvider {
 	specs:          Box<[AuthSpecId]>,
 	/// The kind of a stored static secret the next launch re-stores as one
 	/// `specs` lease ([`crate::auth::broker::restored_static_secret_kind`]),
-	/// which decides a kind mismatch's remedy.
+	/// which decides the remedy of a kind mismatch on a stored static secret
+	/// ([`LeaseOrigin::StoredSecret`]).
 	restored_kind:  Option<CredentialKind>,
 	authenticated:  bool,
 	required:       bool,
@@ -2344,12 +2345,16 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 							keep_significant(&mut failure, CredentialFailure::UnusableStoredCredential);
 						}
 					},
-					Err(CredentialError::KindMismatch { expected, actual }) => {
-						let remedy = if self.restored_kind == Some(actual) {
-							KindMismatchRemedy::Restart
-						} else {
-							KindMismatchRemedy::StoreRequiredKind
-						};
+					Err(CredentialError::KindMismatch { expected, actual, origin }) => {
+						// Only a stored static secret is ever re-stored: an OAuth
+						// access token leases as `bearer` too, and its row never
+						// moves.
+						let remedy =
+							if origin == LeaseOrigin::StoredSecret && self.restored_kind == Some(actual) {
+								KindMismatchRemedy::Restart
+							} else {
+								KindMismatchRemedy::StoreRequiredKind
+							};
 						keep_significant(&mut failure, CredentialFailure::KindMismatch {
 							expected,
 							actual,
@@ -4670,6 +4675,159 @@ mod tests {
 		}
 	}
 
+	/// An OAuth account leases as `bearer`, as a stored bearer token does, but
+	/// no repair ever moves its row. On a GitHub Copilot route whose
+	/// authentication a `models.toml` `auth = "apiKey"` replaced (a key sent as
+	/// `Authorization: Bearer`), the next launch re-stores a stored bearer
+	/// token as a key, so that token's kind mismatch says a restart repairs
+	/// it; a selected OAuth account fails with the same kinds and is told the
+	/// route needs a credential of its own kind instead.
+	#[tokio::test]
+	async fn an_oauth_account_is_never_told_a_restart_repairs_it() {
+		use crate::auth::{
+			CredentialBrokerEngines, CredentialOrigin, CredentialStore, CredentialWrite,
+			HeadlessKeySource, KeyId, OAuthCredentialImport, StoredCredentialSource,
+		};
+		let (encoder, call, ..) = discovery_fixture();
+		let route = encoder.route;
+		let embedded = Catalog::try_embedded().expect("embedded catalog");
+		assert_eq!(
+			embedded
+				.auth_spec(&route.auth)
+				.expect("Copilot's authentication")
+				.kind,
+			omp_catalog::provider::AuthSpecKind::Bearer
+		);
+		// Every authentication Copilot's routes lease (a static bearer token,
+		// and OAuth) becomes a key sent as `Authorization: Bearer`, as the one
+		// authentication a `models.toml` auth gives every route.
+		let mut configured = omp_catalog::CatalogOverlayBuilder::new(omp_catalog::ProvenanceSource {
+			kind:           omp_catalog::ProvenanceKind::Configured,
+			origin:         "test".into(),
+			revision:       None,
+			confidence:     omp_catalog::EvidenceConfidence::Declared,
+			observed_at_ms: None,
+		});
+		for spec in crate::auth::provider_auth_specs(embedded, &route.provider) {
+			configured = configured.with_auth_spec(omp_catalog::provider::AuthSpec {
+				kind: omp_catalog::provider::AuthSpecKind::ApiKey,
+				header_name: Some(Str::new_static("authorization")),
+				prefix: Some(Str::new_static("Bearer ")),
+				query_parameter: None,
+				sealed_body: None,
+				oauth: None,
+				..spec.clone()
+			});
+		}
+		let catalog = embedded
+			.with_overlay_stack(
+				&omp_catalog::OverlayStack::from_layers([(
+					omp_catalog::OverlaySource::UserConfig,
+					configured.build(),
+				)]),
+				omp_catalog::UnsafeTrustScope::ALL,
+			)
+			.expect("configured catalog");
+		let specs = [route.auth.clone()];
+		let restored = restored_kind(&catalog, &route.provider, &specs);
+		assert_eq!(restored, Some(CredentialKind::Bearer), "a restart re-stores a bearer token here");
+
+		let directory = tempfile::tempdir().expect("data dir");
+		let store = Arc::new(
+			CredentialStore::open(
+				directory.path().join("credentials.db"),
+				Arc::new(HeadlessKeySource::new(KeyId::new("route"), [9; 32])),
+			)
+			.expect("store"),
+		);
+		let oauth = AccountId::new("github-copilot:oauth");
+		let oauth_generation = store
+			.import_oauth_bundle(OAuthCredentialImport {
+				account_id:    oauth.clone(),
+				principal_id:  PrincipalId::new("oauth"),
+				access_token:  SecretString::from("fake-oauth-access".to_owned()),
+				refresh_token: SecretString::from("fake-oauth-refresh".to_owned()),
+				expires_at:    SystemTime::now() + Duration::from_hours(1),
+				imported_at:   SystemTime::now(),
+				origin:        CredentialOrigin::Persistent,
+			})
+			.expect("OAuth account")
+			.generation;
+		let bearer = AccountId::new("github-copilot:token");
+		let bearer_generation = store
+			.put(CredentialWrite {
+				account_id:          &bearer,
+				principal_id:        &PrincipalId::new("token"),
+				kind:                "bearer",
+				secret:              &omp_core::SecretBox::new(Box::new(b"fake-stored-token".to_vec())),
+				expires_at_ms:       None,
+				origin:              CredentialOrigin::Persistent,
+				now_ms:              1,
+				expected_generation: None,
+			})
+			.expect("bearer account")
+			.generation;
+
+		for (account, principal, generation, remedy) in [
+			(oauth, "oauth", oauth_generation, KindMismatchRemedy::StoreRequiredKind),
+			(bearer, "token", bearer_generation, KindMismatchRemedy::Restart),
+		] {
+			let pool = AccountPool::new();
+			pool
+				.upsert(crate::account::AccountRecord {
+					account:               account.clone(),
+					principal:             PrincipalId::new(principal),
+					provider:              route.provider.clone(),
+					routes:                std::collections::BTreeSet::from([route.id.clone()]),
+					enabled:               true,
+					credential_generation: generation,
+					routing:               AccountRoutingContext::default(),
+				})
+				.expect("account registers");
+			let selector = RouteAccountSelector {
+				pool,
+				provider: route.provider.clone(),
+				route: route.id.clone(),
+				authenticated: true,
+			};
+			let leases = RouteLeaseProvider {
+				source:         CredentialBroker::from_catalog(
+					&catalog,
+					Arc::new(NoEnvironment),
+					CredentialBrokerEngines {
+						stored: Some(Arc::new(StoredCredentialSource::new(Arc::clone(&store)))),
+						..CredentialBrokerEngines::default()
+					},
+				)
+				.expect("broker"),
+				shapers:        Arc::new(CredentialShaperRegistry::default()),
+				provider:       route.provider.clone(),
+				route_base_url: route.endpoint.base_url.clone(),
+				specs:          Box::new(specs.clone()),
+				restored_kind:  restored,
+				authenticated:  true,
+				required:       true,
+			};
+			let context = ExecutionContext::new(call.budget.clone());
+			let selected = selector
+				.select(&call, &context)
+				.expect("stored account selected");
+			let error = leases
+				.acquire(&call, &selected, &context)
+				.await
+				.expect_err("a bearer lease cannot authenticate a key route");
+			assert_eq!(
+				credential_reason(&error),
+				Some(CredentialFailure::KindMismatch {
+					expected: CredentialKind::ApiKey,
+					actual: CredentialKind::Bearer,
+					remedy,
+				}),
+				"{account}"
+			);
+		}
+	}
+
 	/// A stored row this process holds no key for is credential storage
 	/// unavailable, not an anonymous authentication failure.
 	#[tokio::test]
@@ -4756,7 +4914,8 @@ mod tests {
 	}
 
 	/// Answers each authentication's lease from a fixed table: `locked` specs
-	/// fail as a locked store, every other spec with an API key.
+	/// fail as a locked store, every other spec with an API key read from a
+	/// stored row.
 	#[derive(Debug)]
 	struct PerSpecStore {
 		locked: Box<[AuthSpecId]>,
@@ -4783,7 +4942,8 @@ mod tests {
 			crate::auth::credential_ready(Ok(CredentialLease::api_key(
 				meta,
 				SecretString::from("fake-api-key"),
-			)))
+			)
+			.with_origin(LeaseOrigin::StoredSecret)))
 		}
 
 		fn reject<'a>(

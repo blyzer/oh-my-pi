@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, env, fmt, sync::Arc};
 use futures::future::{Either, FutureExt as _};
 use omp_catalog::{
 	AuthSpecId, Catalog, ProviderId,
-	provider::{AuthSpec, AuthSpecKind, RouteDef},
+	provider::{AuthSpec, AuthSpecKind, CredentialSourceSpec, RouteDef},
 };
 use omp_core::{SecretString, Str, sf};
 
@@ -16,7 +16,7 @@ use super::{
 		CredentialNeed, CredentialSource, ExtensionCredentialKind, LeaseMeta, credential_ready,
 	},
 };
-use crate::{AccountId, PrincipalId};
+use crate::{AccountId, PrincipalId, UnleasedLoginRemedy};
 
 const ENVIRONMENT_TAG: &str = "environment";
 const STORED_TAG: &str = "stored";
@@ -444,7 +444,11 @@ impl CredentialBroker {
 		tag: &'static str,
 	) -> Result<CredentialLease, CredentialError> {
 		if lease.kind() != expected {
-			return Err(CredentialError::KindMismatch { expected, actual: lease.kind() });
+			return Err(CredentialError::KindMismatch {
+				expected,
+				actual: lease.kind(),
+				origin: lease.origin(),
+			});
 		}
 		if need
 			.account
@@ -623,12 +627,54 @@ fn api_key_kind(catalog: &Catalog, provider: &ProviderId<str>) -> Option<Credent
 /// Whether some authentication a route of `provider` leases
 /// ([`provider_auth_specs`]) takes a credential of `kind`, so a stored row of
 /// that kind is usable on at least one of its routes.
-fn provider_accepts_kind(
+pub(crate) fn provider_accepts_kind(
 	catalog: &Catalog,
 	provider: &ProviderId<str>,
 	kind: CredentialKind,
 ) -> bool {
 	provider_auth_specs(catalog, provider).any(|spec| credential_kind(spec.kind) == Some(kind))
+}
+
+/// What gives the routes of `provider` a credential when a login would store
+/// a static secret of `kind` none of them leases, or `None` when one leases
+/// `kind`.
+///
+/// The remedy names the first route authentication that takes a static
+/// secret and an environment variable it reads, so a `models.toml` auth (whose
+/// authentication reads `OMP_<PROVIDER>_API_KEY`) names that variable.
+pub(crate) fn unleased_login_remedy(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+	kind: CredentialKind,
+) -> Option<UnleasedLoginRemedy> {
+	if provider_accepts_kind(catalog, provider, kind) {
+		return None;
+	}
+	let mut statics = provider_auth_specs(catalog, provider)
+		.filter_map(|spec| Some((static_secret_kind(spec.kind)?, spec)));
+	let Some((first, _)) = statics.clone().next() else {
+		return Some(UnleasedLoginRemedy::NoStaticSecret);
+	};
+	Some(
+		statics
+			.find_map(|(kind, spec)| {
+				spec
+					.credential_sources
+					.iter()
+					.find_map(|source| match source {
+						CredentialSourceSpec::Environment { ordered_names } => {
+							ordered_names
+								.first()
+								.map(|variable| UnleasedLoginRemedy::Variable {
+									kind,
+									variable: variable.clone(),
+								})
+						},
+						_ => None,
+					})
+			})
+			.unwrap_or(UnleasedLoginRemedy::NoVariable { kind: first }),
+	)
 }
 
 /// The kind a static secret written as `kind` for `provider` is stored
@@ -1220,7 +1266,8 @@ mod tests {
 				generation: 1,
 				expires_at: None,
 			};
-			credential_ready(Ok(CredentialLease::api_key(meta, SecretString::from("fake-key"))))
+			credential_ready(Ok(CredentialLease::api_key(meta, SecretString::from("fake-key"))
+				.with_origin(crate::auth::LeaseOrigin::StoredSecret)))
 		}
 
 		fn reject<'a>(
@@ -1261,6 +1308,7 @@ mod tests {
 		assert_eq!(error, CredentialError::KindMismatch {
 			expected: CredentialKind::Bearer,
 			actual:   CredentialKind::ApiKey,
+			origin:   crate::auth::LeaseOrigin::StoredSecret,
 		});
 		assert_eq!(error.to_string(), "credential is api-key but the authentication requires bearer");
 	}
@@ -1410,6 +1458,65 @@ mod tests {
 		let huggingface = ProviderId::from_ref("huggingface");
 		let no_specs = std::iter::empty::<&omp_catalog::provider::AuthSpec>();
 		assert_eq!(restored_static_secret_kind(catalog, huggingface, no_specs), None);
+	}
+
+	/// A login of a kind no route leases is told what gives the routes a
+	/// credential: the environment variable the first authentication taking a
+	/// static secret reads, that authentication's kind when it reads none, or
+	/// that the routes take no stored key or token.
+	#[test]
+	fn an_unleased_login_names_what_the_routes_take() {
+		let catalog = Catalog::embedded();
+		let huggingface = ProviderId::from_ref("huggingface");
+		assert_eq!(unleased_login_remedy(catalog, huggingface, CredentialKind::Bearer), None);
+		let token = provider_auth_specs(catalog, huggingface)
+			.next()
+			.expect("Hugging Face's authentication")
+			.clone();
+		let variable = token
+			.credential_sources
+			.iter()
+			.find_map(|source| match source {
+				CredentialSourceSpec::Environment { ordered_names } => ordered_names.first().cloned(),
+				_ => None,
+			})
+			.expect("Hugging Face's variable");
+		assert_eq!(
+			unleased_login_remedy(catalog, huggingface, CredentialKind::ApiKey),
+			Some(UnleasedLoginRemedy::Variable { kind: CredentialKind::Bearer, variable })
+		);
+		assert_eq!(
+			unleased_login_remedy(catalog, ProviderId::from_ref("duckduckgo"), CredentialKind::ApiKey),
+			Some(UnleasedLoginRemedy::NoStaticSecret)
+		);
+
+		// Hugging Face's authentication reading only the store.
+		let stored_only = omp_catalog::provider::AuthSpec {
+			credential_sources: Box::new([CredentialSourceSpec::Stored]),
+			..token
+		};
+		let overlay = omp_catalog::CatalogOverlayBuilder::new(omp_catalog::ProvenanceSource {
+			kind:           omp_catalog::ProvenanceKind::Configured,
+			origin:         "test".into(),
+			revision:       None,
+			confidence:     omp_catalog::EvidenceConfidence::Declared,
+			observed_at_ms: None,
+		})
+		.with_auth_spec(stored_only)
+		.build();
+		let catalog = catalog
+			.with_overlay_stack(
+				&omp_catalog::OverlayStack::from_layers([(
+					omp_catalog::OverlaySource::UserConfig,
+					overlay,
+				)]),
+				omp_catalog::UnsafeTrustScope::ALL,
+			)
+			.expect("overlaid catalog");
+		assert_eq!(
+			unleased_login_remedy(&catalog, huggingface, CredentialKind::ApiKey),
+			Some(UnleasedLoginRemedy::NoVariable { kind: CredentialKind::Bearer })
+		);
 	}
 
 	/// A bearer token becomes an API key only where the key authentication

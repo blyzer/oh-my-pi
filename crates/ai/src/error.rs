@@ -325,19 +325,46 @@ pub enum CredentialStorageLock {
 /// kind ([`CredentialFailure::KindMismatch`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
 pub enum KindMismatchRemedy {
-	/// The stored-kind repair the next launch runs re-stores the row under a
-	/// kind the route leases. This process did not: another process wrote the
-	/// row first, or the catalog or `models.toml` changed while it ran.
+	/// The stored-kind repair the next launch runs re-stores the row, a stored
+	/// static secret, under a kind the route leases. This process did not:
+	/// another process wrote the row first, or the catalog or `models.toml`
+	/// changed while it ran.
 	#[strum(to_string = "restarting omp re-stores it under a kind this route takes")]
 	Restart,
 	/// omp keeps the row's kind: another route of its provider leases it, its
 	/// provider's bundled routes take a key (a `models.toml` auth does not move
-	/// it), or moving it would send it in a key header, query parameter,
-	/// cookie, or OAuth request. The route needs a credential of its own kind;
-	/// logging the row out would not give it one.
+	/// it), moving it would send it in a key header, query parameter, cookie,
+	/// or OAuth request, or it is no static secret at all (an OAuth account's
+	/// access token, which leases as `bearer`). The route needs a credential of
+	/// its own kind; logging the row out would not give it one.
 	#[strum(to_string = "omp keeps it as stored, so this route needs a credential of the kind it \
 	                     requires, from its environment variable or a login method that stores one")]
 	StoreRequiredKind,
+}
+
+/// What gives a provider's routes a credential when a login would store a
+/// secret of a kind they do not take ([`ErrorDetail::LoginKindNotLeased`]).
+#[derive(Clone, Debug, Eq, PartialEq, strum::Display)]
+pub enum UnleasedLoginRemedy {
+	/// The first route authentication that takes a static secret reads it
+	/// from `variable`.
+	#[strum(to_string = "set {variable} to give them the {kind} they take")]
+	Variable {
+		/// Kind of static secret that authentication takes.
+		kind:     CredentialKind,
+		/// The first environment variable it reads.
+		variable: Str,
+	},
+	/// The routes take a static secret of `kind`, and none of their
+	/// authentications reads one from the environment.
+	#[strum(to_string = "they take a {kind}, which none of their environment variables supplies")]
+	NoVariable {
+		/// Kind of static secret they take.
+		kind: CredentialKind,
+	},
+	/// The routes take no static secret at all.
+	#[strum(to_string = "they take no stored key or token")]
+	NoStaticSecret,
 }
 
 /// Why a route could not authenticate a request with a provider credential.
@@ -562,6 +589,23 @@ pub enum ErrorDetail {
 		provider: ProviderId,
 		/// Why no credential could be used.
 		reason:   CredentialFailure,
+	},
+	/// A login refused to store a static secret of a kind no route of its
+	/// provider leases under the current catalog and `models.toml`, which omp
+	/// would keep under that kind: every request would fail with
+	/// [`CredentialFailure::KindMismatch`].
+	#[error(
+		"the routes of {provider} take no stored {kind} under the current configuration, and omp \
+		 would keep this one as {kind} rather than send it another way, so the login stored \
+		 nothing; {remedy}"
+	)]
+	LoginKindNotLeased {
+		/// Provider the login was for.
+		provider: ProviderId,
+		/// Kind the secret would be stored under.
+		kind:     CredentialKind,
+		/// What gives the routes a credential they take.
+		remedy:   UnleasedLoginRemedy,
 	},
 }
 

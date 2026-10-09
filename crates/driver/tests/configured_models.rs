@@ -394,6 +394,30 @@ fn applied_header(
 		.to_owned()
 }
 
+/// Answers an API-key login's prompt with `key` and returns the account it
+/// completes with.
+async fn answer_key_login(session: omp_ai::answer::AuthSession, key: &str) -> omp_ai::AccountId {
+	loop {
+		let event = tokio::time::timeout(Duration::from_secs(5), session.events.recv_async())
+			.await
+			.expect("login event in time")
+			.expect("login channel")
+			.expect("login event");
+		match event {
+			AuthEvent::Prompt(_) => session
+				.responses
+				.send_async(AuthResponse {
+					session: session.id.clone(),
+					input:   AuthInput::ApiKey(SecretString::from(key.to_owned())),
+				})
+				.await
+				.expect("answer the prompt"),
+			AuthEvent::Complete(account) => return account.account,
+			AuthEvent::OpenUrl { .. } | AuthEvent::ShowDeviceCode { .. } | AuthEvent::Waiting => {},
+		}
+	}
+}
+
 /// A configured auth decides the kind a Hugging Face credential is stored
 /// under: a `bearer` row stored before is re-stored as `api-key`, and an
 /// extension's bearer token and a `/login` key (which picks the provider's
@@ -416,6 +440,7 @@ async fn a_configured_auth_decides_the_stored_credential_kind() {
 		CredentialError::KindMismatch {
 			expected: CredentialKind::ApiKey,
 			actual:   CredentialKind::Bearer,
+			origin:   omp_ai::auth::LeaseOrigin::StoredSecret,
 		}
 	);
 	let repairs = control.repair_static_secret_kinds().expect("repair");
@@ -474,28 +499,7 @@ async fn a_configured_auth_decides_the_stored_credential_kind() {
 		.begin(LoginRequest { provider: ProviderId::from("huggingface"), method: None }, declared)
 		.await
 		.expect("login starts");
-	loop {
-		let event = tokio::time::timeout(Duration::from_secs(5), session.events.recv_async())
-			.await
-			.expect("login event in time")
-			.expect("login channel")
-			.expect("login event");
-		match event {
-			AuthEvent::Prompt(_) => session
-				.responses
-				.send_async(AuthResponse {
-					session: session.id.clone(),
-					input:   AuthInput::ApiKey(SecretString::from("hf-fake-login".to_owned())),
-				})
-				.await
-				.expect("answer the prompt"),
-			AuthEvent::Complete(account) => {
-				assert_eq!(account.account.as_str(), "huggingface:login");
-				break;
-			},
-			AuthEvent::OpenUrl { .. } | AuthEvent::ShowDeviceCode { .. } | AuthEvent::Waiting => {},
-		}
-	}
+	assert_eq!(answer_key_login(session, "hf-fake-login").await.as_str(), "huggingface:login");
 	let login = lease_configured(&catalog, &store, "huggingface:login")
 		.await
 		.expect("the login leases on the configured auth");
@@ -592,6 +596,84 @@ async fn a_configured_auth_never_moves_a_key_its_bundled_routes_take() {
 	assert_eq!(lease.kind(), CredentialKind::ApiKey);
 	let name = header.header_name.clone().expect("a header authentication");
 	assert_eq!(applied_header(&catalog, &header.id, &lease, name.as_str()), "sk-ant-fake-kept");
+}
+
+/// Under `[providers.anthropic] auth = 'bearer'` no route of Anthropic takes
+/// an API key, and omp keeps an Anthropic key's kind, so an API-key `/login`
+/// (Anthropic's declared `x-api-key` authentication) is refused before it
+/// prompts and stores nothing, naming the variable the configured auth reads.
+/// Without the auth the same login stores the key its routes take.
+#[tokio::test]
+async fn a_login_no_route_would_take_is_refused() {
+	let configured =
+		Arc::new(configured("[providers.anthropic]\nbaseUrl='http://127.0.0.1:9'\nauth='bearer'\n"));
+	let data_dir = tempfile::tempdir().expect("scratch data dir");
+	let (store, accounts) = stores(data_dir.path());
+	let anthropic = ProviderId::from("anthropic");
+	let key_auth = configured
+		.provider(&anthropic)
+		.expect("anthropic")
+		.auth
+		.iter()
+		.find(|id| {
+			configured.auth_spec(id).expect("declared auth").kind
+				== omp_catalog::provider::AuthSpecKind::ApiKey
+		})
+		.expect("Anthropic's key authentication")
+		.clone();
+	let engine = |catalog: Arc<Catalog>| {
+		SecretLoginEngine::new(
+			AuthMethod::ApiKey,
+			Str::new_static("login"),
+			catalog,
+			Arc::clone(&store),
+			accounts.clone(),
+		)
+		.expect("API-key login engine")
+	};
+	let login = LoginRequest { provider: anthropic.clone(), method: None };
+
+	let Err(refused) = engine(Arc::clone(&configured))
+		.begin(login.clone(), key_auth.clone())
+		.await
+	else {
+		panic!("a key no route takes is refused");
+	};
+	assert_eq!(refused.code.as_deref(), Some("login_kind_not_leased"));
+	assert_eq!(
+		refused.detail_ref(),
+		Some(&omp_ai::ErrorDetail::LoginKindNotLeased {
+			provider: anthropic.clone(),
+			kind:     CredentialKind::ApiKey,
+			remedy:   omp_ai::UnleasedLoginRemedy::Variable {
+				kind:     CredentialKind::Bearer,
+				variable: Str::new_static("OMP_ANTHROPIC_API_KEY"),
+			},
+		})
+	);
+	let rendered = refused.to_string();
+	assert!(
+		rendered.contains(
+			"the routes of anthropic take no stored api-key under the current configuration"
+		) && rendered.contains("set OMP_ANTHROPIC_API_KEY to give them the bearer they take"),
+		"{rendered}"
+	);
+	assert!(store.list_metadata().expect("rows").is_empty(), "the login stored nothing");
+
+	let session = engine(Arc::new(Catalog::embedded().clone()))
+		.begin(login, key_auth)
+		.await
+		.expect("the bundled routes take a key");
+	let account = answer_key_login(session, "sk-ant-fake-login").await;
+	assert_eq!(
+		store
+			.metadata(&account)
+			.expect("metadata")
+			.expect("row")
+			.kind
+			.as_str(),
+		"api-key"
+	);
 }
 
 /// A composition whose key source is unavailable (no terminal) cannot

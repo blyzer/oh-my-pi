@@ -418,11 +418,17 @@ pub enum LegacyKeyTarget<'a> {
 /// The v1 value resolved as `!command`, then an environment variable of that
 /// exact name, then the literal. Only a literal can be carried over: the
 /// others are reported so the owner can set `OMP_<PROVIDER>_API_KEY`. A
-/// literal is stored as an `api-key`, which the store keeps under the kind its
-/// provider's routes lease (`api-key` under the `apiKey` auth `models.toml`
-/// gives a keyed provider, `bearer` under a `bearer` one). A provider that
-/// already has a stored account keeps it. Secrets never pass
-/// through `models.toml`. A dry run neither stores keys nor sets the marker.
+/// literal is stored as an `api-key` through the control-plane write
+/// ([`omp_ai::auth::AuthControlHandle::store`]): it stays an `api-key` under
+/// the `apiKey` auth `models.toml` gives a keyed provider, and becomes `bearer`
+/// under a `bearer` auth only for a provider whose bundled routes take a key
+/// as a bearer token (Hugging Face, Z.ai, GitHub Copilot, a provider only
+/// `models.toml` defines). Any other provider's key stays an `api-key`, which
+/// the routes of a `bearer` auth do not take: its requests report
+/// `kind_mismatch` until `OMP_<PROVIDER>_API_KEY` is set or the auth is
+/// removed, so removing the auth never sends the key another way. A provider
+/// that already has a stored account keeps it. Secrets never pass through
+/// `models.toml`. A dry run neither stores keys nor sets the marker.
 pub fn import_legacy_api_keys(
 	location: &ModelsConfigLocation,
 	target: LegacyKeyTarget<'_>,

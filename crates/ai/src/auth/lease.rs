@@ -156,6 +156,23 @@ pub struct CredentialLease {
 	inner:             Arc<LeaseInner>,
 	source_tag:        Option<Str>,
 	endpoint_override: Option<Str>,
+	origin:            LeaseOrigin,
+}
+
+/// Where a lease's material comes from, as far as the launch-time stored-kind
+/// repair ([`crate::auth::AuthControlHandle::repair_static_secret_kinds`]) can
+/// change the kind it leases as.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LeaseOrigin {
+	/// A static secret (an API key, bearer token, or session token) read from
+	/// a row of the encrypted credential store, leased as the kind the row is
+	/// stored under. The repair may re-store such a row under another kind.
+	StoredSecret,
+	/// Any other material, which no repair re-stores under another kind: an
+	/// OAuth access token (also one the store holds in a renewable bundle),
+	/// application-default, AWS, or provider-session credentials, an
+	/// environment variable, or an invocation override.
+	Other,
 }
 
 impl CredentialLease {
@@ -165,6 +182,7 @@ impl CredentialLease {
 			inner:             Arc::new(LeaseInner { meta, material: LeaseMaterial::ApiKey(secret) }),
 			source_tag:        None,
 			endpoint_override: None,
+			origin:            LeaseOrigin::Other,
 		}
 	}
 
@@ -177,6 +195,7 @@ impl CredentialLease {
 			}),
 			source_tag:        None,
 			endpoint_override: None,
+			origin:            LeaseOrigin::Other,
 		}
 	}
 
@@ -186,6 +205,7 @@ impl CredentialLease {
 			inner:             Arc::new(LeaseInner { meta, material: LeaseMaterial::Bearer(secret) }),
 			source_tag:        None,
 			endpoint_override: None,
+			origin:            LeaseOrigin::Other,
 		}
 	}
 
@@ -198,6 +218,7 @@ impl CredentialLease {
 			}),
 			source_tag:        None,
 			endpoint_override: None,
+			origin:            LeaseOrigin::Other,
 		}
 	}
 
@@ -219,6 +240,7 @@ impl CredentialLease {
 			}),
 			source_tag:        None,
 			endpoint_override: None,
+			origin:            LeaseOrigin::Other,
 		}
 	}
 
@@ -250,31 +272,43 @@ impl CredentialLease {
 		self.source_tag.as_deref()
 	}
 
+	/// Records where the lease's material comes from; a lease is
+	/// [`LeaseOrigin::Other`] until the source that read it says otherwise.
+	pub(crate) const fn with_origin(mut self, origin: LeaseOrigin) -> Self {
+		self.origin = origin;
+		self
+	}
+
+	/// Where the lease's material comes from.
+	pub const fn origin(&self) -> LeaseOrigin {
+		self.origin
+	}
+
 	pub(crate) fn scalar_secret(&self) -> Option<&SecretString> {
 		self.inner.material.scalar().ok()
 	}
 
 	pub(crate) fn with_shape(self, shaped: ShapedCredential) -> Self {
 		let kind = self.kind();
-		let Self { inner, source_tag, .. } = self;
+		let Self { inner, source_tag, origin, .. } = self;
 		let inner = match shaped.secret {
 			None => inner,
 			Some(secret) => {
 				let material = match kind {
 					CredentialKind::ApiKey => LeaseMaterial::ApiKey(secret),
 					CredentialKind::Basic => {
-						return Self { inner, source_tag, endpoint_override: None };
+						return Self { inner, source_tag, endpoint_override: None, origin };
 					},
 					CredentialKind::Bearer => LeaseMaterial::Bearer(secret),
 					CredentialKind::SessionToken => LeaseMaterial::SessionToken(secret),
 					CredentialKind::AwsSigV4 => {
-						return Self { inner, source_tag, endpoint_override: None };
+						return Self { inner, source_tag, endpoint_override: None, origin };
 					},
 				};
 				Arc::new(LeaseInner { meta: inner.meta.clone(), material })
 			},
 		};
-		Self { inner, source_tag, endpoint_override: shaped.endpoint_override }
+		Self { inner, source_tag, endpoint_override: shaped.endpoint_override, origin }
 	}
 
 	pub(crate) const fn endpoint_override(&self) -> Option<&Str> {
@@ -470,6 +504,7 @@ impl fmt::Debug for CredentialLease {
 			.field("kind", &self.kind())
 			.field("material", &"[REDACTED]")
 			.field("endpoint_override", &self.endpoint_override)
+			.field("origin", &self.origin)
 			.finish()
 	}
 }
@@ -766,6 +801,9 @@ pub enum CredentialError {
 		expected: CredentialKind,
 		/// Kind of the credential the source produced.
 		actual:   CredentialKind,
+		/// Where the credential came from: only a stored static secret can be
+		/// re-stored under another kind.
+		origin:   LeaseOrigin,
 	},
 	/// The encrypted credential store cannot decrypt because this process has
 	/// no usable key: none is configured, or the OS keychain refused it. The

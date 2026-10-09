@@ -1356,14 +1356,15 @@ impl StoredCredentialSource {
 			expires_at,
 		};
 		let material = SecretString::from(material);
-		match stored.metadata.kind.parse::<CredentialKind>() {
-			Ok(CredentialKind::ApiKey) => Ok(CredentialLease::api_key(meta, material)),
-			Ok(CredentialKind::Bearer) => Ok(CredentialLease::bearer(meta, material)),
-			Ok(CredentialKind::SessionToken) => Ok(CredentialLease::session_token(meta, material)),
+		let lease = match stored.metadata.kind.parse::<CredentialKind>() {
+			Ok(CredentialKind::ApiKey) => CredentialLease::api_key(meta, material),
+			Ok(CredentialKind::Bearer) => CredentialLease::bearer(meta, material),
+			Ok(CredentialKind::SessionToken) => CredentialLease::session_token(meta, material),
 			Ok(CredentialKind::Basic | CredentialKind::AwsSigV4) | Err(_) => {
-				Err(CredentialError::InvalidSource)
+				return Err(CredentialError::InvalidSource);
 			},
-		}
+		};
+		Ok(lease.with_origin(crate::auth::LeaseOrigin::StoredSecret))
 	}
 
 	fn reject_now(&self, lease: &CredentialLease) -> Result<(), CredentialError> {

@@ -1643,11 +1643,14 @@ async fn production_assembly_with_catalog(
 /// stored under another kind, or one a catalog or `models.toml` change left
 /// behind, is usable by the time the first request leases it.
 ///
-/// Composition never fails for it. Each row is repaired on its own: a row
-/// this process cannot decrypt (a key source unavailable without a terminal,
-/// or a row sealed under a key it does not hold) or a write another process
-/// won is logged with its account and left for a later launch, the rows after
-/// it are still repaired, and its requests report why it cannot be used.
+/// Composition never fails for it. Each row is repaired on its own, and every
+/// failure is logged with its account and what it left the row as
+/// ([`omp_ai::auth::SecretKindRepairError`]): a row this process cannot
+/// decrypt (a key source unavailable without a terminal, or a row sealed under
+/// a key it does not hold) keeps its kind for a later launch, and its requests
+/// report why it cannot be used; a row re-stored whose new generation the
+/// account pool did not take is not tried again. The rows after a failure are
+/// still repaired, and a row another launch re-stored first is no failure.
 /// Nothing is decrypted unless some row needs re-storing.
 fn repair_stored_secret_kinds(control: &AuthControlHandle) {
 	let outcome = match control.repair_static_secret_kinds() {
@@ -1670,6 +1673,15 @@ fn repair_stored_secret_kinds(control: &AuthControlHandle) {
 			"re-stored a credential under the kind its provider's routes lease"
 		);
 	}
+	for repair in outcome.restored_elsewhere {
+		let repaired: &'static str = repair.repaired.into();
+		tracing::debug!(
+			account = repair.account.as_str(),
+			stored = repair.stored.as_str(),
+			repaired,
+			"another launch re-stored a credential under the kind its provider's routes lease first"
+		);
+	}
 	for failure in outcome.failed {
 		let repaired: &'static str = failure.repair.repaired.into();
 		tracing::warn!(
@@ -1677,8 +1689,7 @@ fn repair_stored_secret_kinds(control: &AuthControlHandle) {
 			stored = failure.repair.stored.as_str(),
 			repaired,
 			error = &failure.error as &dyn std::error::Error,
-			"could not re-store a credential under the kind its provider's routes lease; a later \
-			 launch retries"
+			"could not finish re-storing a credential under the kind its provider's routes lease"
 		);
 	}
 }
