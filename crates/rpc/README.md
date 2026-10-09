@@ -45,6 +45,41 @@ with the network), so it is `exec` tier: every approval mode except an explicit 
 before each call. Declare `"effects": {}` for a tool with no effects.
 Host tools always run with the host's authority; an active sandbox never confines them.
 
+## History, session and event-filter commands
+
+These follow the v1 (`pi`) RPC commands of the same names. Where omp's journal differs from
+v1's session file, the payload says so instead of imitating v1.
+
+- `get_entries` (`since?`) returns `{ entries, leafId }`: every journal entry in append order,
+  across all branches, as `{ type, rev, id, parentId, causeId?, label?, data }`. `type` is the
+  journal kind (`msg.user`, `stream`, `tool.call`, ...), `parentId` the branch parent, `data` the
+  entry's JSON payload, and `leafId` the selected head. With `since`, only the entries strictly
+  after that id; an id the journal does not hold fails with `code: "unknown_since"`. While a turn
+  runs it fails with `session_busy`.
+- `get_tree` returns `{ tree, leafId }`: the message tree (user messages, assistant message
+  starts and compactions) over every branch, as a **flat** list in append order of
+  `{ entry, children }`. `entry.parentId` is the nearest message ancestor (null for a root) and
+  `children` lists the ids of the message children. v1 nests the nodes instead; a nested tree is
+  as deep as the conversation, and serializing nested JSON recurses per level (a 1 000-level tree
+  overflowed a 2 MiB stack when measured), so hosts rebuild nesting from `children`.
+- `get_available_thinking_levels` returns `{ levels }`: `off`, then the efforts the active model's
+  catalog reasoning policy supports, least to most intensive. A model without a reasoning
+  policy offers only `off`.
+- `open_session` (`sessionDir`, optional `provider` + `modelId`) binds the process to a
+  host-keyed directory, relative to the project when not absolute: it resumes the newest journal
+  there, or starts a fresh one when there is none, and returns
+  `{ cancelled, resumed, sessionId, sessionFile }`. When the newest journal is already active
+  nothing switches. `provider` and `modelId` go together, are checked against the catalog before
+  anything switches (`model_not_found`), and select the model as `set_model` does. Unlike v1, a
+  resumed journal does not restore a saved model.
+- `set_event_filter` (`events: string[] | null`, `messageUpdates?: "full" | "delta"`) replaces
+  the whole filter and echoes `{ events, messageUpdates }`. `events` lists the session event
+  types to forward (`null` forwards all); `"delta"` narrows each `message_update` to
+  `message: { role }` and drops `assistantMessageEvent.partial`. It applies to the session event
+  stream (message, tool and kernel events, `turn_end`, `agent_end`); responses, requests,
+  `available_commands_update`, `session_start` and subagent frames are never filtered. An
+  invalid request fails with `invalid_params` and changes neither setting.
+
 ## Philosophy
 
 Transport concerns stay separate from service behavior while local and network clients share the same protocol. Connections negotiate compatibility before exchanging application data so protobuf unknown-field behavior cannot silently discard data from a newer client. Health reporting uses the standard `grpc.health.v1` protocol rather than a project-specific alternative.
