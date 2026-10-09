@@ -361,7 +361,7 @@ jobs:
       - name: Run terminal proof P7
         env:
           TERM: xterm-256color
-        run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked
+        run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
 
       # P12 drives the real `omp envd` child through a Seatbelt sandbox
       # amendment, so it gates here: it skips off macOS, and on macOS a failed
@@ -585,4 +585,4 @@ jobs:
       - name: Run terminal proof P7 on Linux PTY
         env:
           TERM: xterm-256color
-        run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --locked
+        run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
