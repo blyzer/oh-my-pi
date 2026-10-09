@@ -4,7 +4,9 @@
 
 # Vendored CPython: ~290 MB of build/install trees plus the derived
 # stdlib.bin and pyo3-config.txt. Regenerate with crates/py/scripts/fetch-python.sh.
-/vendor/
+# No trailing slash: a worktree's `vendor` is a symlink to the main checkout's, which `/vendor/`
+# would not ignore (and `bb remote` would mirror as a dangling link).
+/vendor
 
 # Node / JS
 node_modules/

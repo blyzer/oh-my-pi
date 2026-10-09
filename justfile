@@ -114,6 +114,21 @@ lintx-test:
 tools-test:
     cd .omp/tools && bun install --frozen-lockfile && bun test
 
+# Run a `just` recipe on a BuildBuddy remote Linux runner over this checkout, uncommitted changes included (ADR 0040 Slice 0; optional: needs `bb` and a BuildBuddy API key, see scripts/remote-verify.sh).
+[group('remote')]
+remote +recipe:
+    scripts/remote-verify.sh {{ recipe }}
+
+# `just test-pkg <pkg>` on a BuildBuddy remote Linux runner (see `remote`).
+[group('remote')]
+remote-test-pkg pkg:
+    scripts/remote-verify.sh test-pkg {{ pkg }}
+
+# Save the BuildBuddy runner snapshot every branch resumes from, built from the default branch's head (one snapshot upload, ~56 GB; see scripts/remote-verify.sh).
+[group('remote')]
+remote-seed:
+    scripts/remote-verify.sh --seed test-pkg omp-envd
+
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
 lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet
