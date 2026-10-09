@@ -1,6 +1,7 @@
 //! Process-wide terminal lifecycle, raw-mode ownership, and emergency restore.
 
 use std::{
+	collections::VecDeque,
 	fs::{File, OpenOptions},
 	io::{self, Write as _},
 	panic,
@@ -938,6 +939,7 @@ use crate::{
 	paste::{PasteEvents, PasteProgress, Pasted},
 	pump,
 	pump::{Input, Pump, TerminalEvent},
+	tsp::frame,
 };
 
 mod resize_watch {
@@ -1324,6 +1326,8 @@ pub struct Terminal {
 	progress: Option<ProgressWorker>,
 	paste_events: PasteEvents,
 	pending_paste: Option<Pasted>,
+	tsp_reader: frame::Reader,
+	pending_tsp: VecDeque<frame::Incoming>,
 }
 
 impl Terminal {
@@ -1443,6 +1447,8 @@ impl Terminal {
 			progress: None,
 			paste_events: PasteEvents::default(),
 			pending_paste: None,
+			tsp_reader: frame::Reader::new(),
+			pending_tsp: VecDeque::new(),
 		})
 	}
 
@@ -1796,6 +1802,19 @@ impl Terminal {
 	}
 
 	fn handle_response_state(&mut self, response: &TerminalResponse) -> io::Result<bool> {
+		// TSP replies and events arrive as APC strings (OSC 877 through a
+		// Windows ConPTY). They are never input: decoded ones wait for the
+		// host, malformed ones are dropped.
+		if let TerminalResponse::ApplicationProgramCommand(payload) | TerminalResponse::Osc(payload) =
+			response
+			&& (payload.as_bytes().starts_with(frame::PREFIX)
+				|| payload.as_bytes().starts_with(frame::OSC_PREFIX))
+		{
+			if let Some(incoming) = self.tsp_reader.feed(payload.as_bytes()) {
+				self.pending_tsp.push_back(incoming);
+			}
+			return Ok(true);
+		}
 		// OSC replies may carry an enhanced-paste (OSC 5522) conversation
 		// step; everything else falls through to the copy-friendly match.
 		if let TerminalResponse::Osc(payload) = response {
@@ -1864,6 +1883,16 @@ impl Terminal {
 	/// [`Terminal::take_resize`].
 	pub const fn take_paste(&mut self) -> Option<Pasted> {
 		self.pending_paste.take()
+	}
+
+	/// Takes the oldest decoded TSP reply or event.
+	///
+	/// [`Terminal::handle_response`] consumes every `tsp;` APC string (and
+	/// OSC 877 through a Windows `ConPTY`), so none reaches key handling;
+	/// decoded messages wait here for the host, oldest first — mirroring
+	/// [`Terminal::take_paste`].
+	pub fn take_tsp(&mut self) -> Option<frame::Incoming> {
+		self.pending_tsp.pop_front()
 	}
 
 	/// Copies `text` to the system clipboard.
@@ -2479,10 +2508,10 @@ mod tests {
 		APPEARANCE_NOTIFICATIONS_MODE, AltScreenUse, ConsoleCodepage, CursorStyle,
 		IN_BAND_RESIZE_MODE, INPUT_REPORTS_OFF, KeyboardMode, MAX_TTY_WRITE_CHUNK_BYTES,
 		MOUSE_TRACKING_ON, OSC11_QUERY, Progress, RESIZE_GENERATION, ResizeWatch, TITLE_POP,
-		TITLE_PUSH, Terminal, UTF8_CODEPAGE, XTERM_SCROLL_ON_KEY_PRESS, XTERM_SCROLL_ON_OUTPUT,
-		ansi_mode_restore_modes, ansi_mode_restore_payload, base64, compose_enter,
-		compose_input_reports_off, compose_leave, compose_progress, compose_title,
-		emergency_restore_payload, ensure_console_utf8, ensure_restore_hooks, keyboard_mode,
+		TITLE_PUSH, Terminal, UTF8_CODEPAGE, VecDeque, XTERM_SCROLL_ON_KEY_PRESS,
+		XTERM_SCROLL_ON_OUTPUT, ansi_mode_restore_modes, ansi_mode_restore_payload, base64,
+		compose_enter, compose_input_reports_off, compose_leave, compose_progress, compose_title,
+		emergency_restore_payload, ensure_console_utf8, ensure_restore_hooks, frame, keyboard_mode,
 		notification_modes_off_payload, owned_notification_modes, platform, progress_state,
 		reconcile_in_band_geometry, rounded_cell_pixels, terminal_write_all,
 	};
@@ -3277,6 +3306,51 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn tsp_replies_and_events_are_consumed_and_queued_for_the_host() {
+		use omp_core::Str;
+
+		use crate::tsp::{frame::Incoming, wire::Event};
+
+		let (reader, writer) = pipe().expect("pipe opens");
+		drop(reader);
+		let mut terminal = test_terminal(File::from(writer));
+		let mut renderer = Renderer::new(Vec::new());
+		let ack = TerminalResponse::ApplicationProgramCommand(Str::new(
+			r#"tsp;e;{"ev":"ack","sf":"s1","s":4}"#,
+		));
+		assert!(
+			terminal
+				.handle_response(&ack, &mut renderer)
+				.expect("handled")
+		);
+		let conpty = TerminalResponse::Osc(Str::new(r#"877;tsp;e;{"ev":"theme","dark":false}"#));
+		assert!(
+			terminal
+				.handle_response(&conpty, &mut renderer)
+				.expect("handled")
+		);
+		let malformed = TerminalResponse::ApplicationProgramCommand(Str::new("tsp;e;{oops"));
+		assert!(
+			terminal
+				.handle_response(&malformed, &mut renderer)
+				.expect("handled"),
+			"a malformed TSP string is still never input"
+		);
+		let other = TerminalResponse::ApplicationProgramCommand(Str::new("custom;payload"));
+		assert!(
+			!terminal
+				.handle_response(&other, &mut renderer)
+				.expect("handled")
+		);
+		assert_eq!(
+			terminal.take_tsp(),
+			Some(Incoming::Event(Event::Ack { sf: Str::new("s1"), s: 4 }))
+		);
+		assert_eq!(terminal.take_tsp(), Some(Incoming::Event(Event::Theme { dark: false })));
+		assert_eq!(terminal.take_tsp(), None);
+	}
+
+	#[tokio::test]
 	async fn appearance_callback_only_fires_on_a_classification_flip() {
 		let (reader, writer) = pipe().expect("pipe opens");
 		drop(reader);
@@ -3495,6 +3569,8 @@ mod tests {
 			progress: None,
 			paste_events: PasteEvents::default(),
 			pending_paste: None,
+			tsp_reader: frame::Reader::new(),
+			pending_tsp: VecDeque::new(),
 		}
 	}
 }

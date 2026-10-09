@@ -26,7 +26,17 @@ use strum::Display;
 
 #[cfg(unix)]
 use crate::tty::open;
-use crate::{Charset, Graphics, escape::esc, tty::overridden};
+use crate::{
+	Charset, Graphics,
+	escape::esc,
+	tsp::{
+		self, VERSION,
+		frame::{self, Incoming},
+		hello_query,
+		wire::{Hello, Reply},
+	},
+	tty::overridden,
+};
 
 const FORCE_IMAGE_PROTOCOL: &str = "OMP_FORCE_IMAGE_PROTOCOL";
 /// Explicit glyph-tier override: `ascii`, `unicode`, or `nerd`.
@@ -278,6 +288,9 @@ pub struct ProbeResults {
 	///
 	/// Status 3 is permanently set, so it is deliberately not changed.
 	pub xterm_scroll_to_bottom_on_key_press: bool,
+	/// The TSP `hello` reply, when it arrived before the DA1 fence: the
+	/// terminal draws native surfaces (ADR 0041).
+	pub tsp: Option<Hello>,
 	/// Non-probe bytes read while negotiation was active, in original order.
 	pub preserved_input: Vec<u8>,
 	/// Whether negotiation ended at the deadline rather than at the DA1 fence.
@@ -334,6 +347,24 @@ impl ProbeParser {
 						break;
 					}
 					if self.pending[cursor + 2] != b'G' {
+						let rest = &self.pending[cursor + 2..];
+						let tsp = frame::PREFIX;
+						if rest.len() < tsp.len() && tsp.starts_with(rest) {
+							break;
+						}
+						if rest.starts_with(tsp) {
+							let Some(relative_end) =
+								rest.windows(2).position(|window| window == b"\x1b\\")
+							else {
+								break;
+							};
+							let end = cursor + 2 + relative_end;
+							if !self.parse_tsp(cursor + 2, end) {
+								preserved.extend_from_slice(&self.pending[cursor..end + 2]);
+							}
+							cursor = end + 2;
+							continue;
+						}
 						preserved.push(0x1b);
 						cursor += 1;
 						continue;
@@ -410,6 +441,22 @@ impl ProbeParser {
 	/// Flushes an incomplete or unrecognized suffix as application input.
 	pub fn finish(&mut self, preserved: &mut Vec<u8>) {
 		preserved.append(&mut self.pending);
+	}
+
+	/// Consumes a TSP `hello` reply (`pending[start..end]` is the APC
+	/// payload); anything else stays application input.
+	fn parse_tsp(&mut self, start: usize, end: usize) -> bool {
+		let payload = &self.pending[start..end];
+		let Some(raw) = frame::split(payload) else {
+			return false;
+		};
+		match frame::decode(raw.verb, raw.body) {
+			Some(Incoming::Reply(Reply::Hello(hello))) if hello.v == VERSION => {
+				self.results.tsp = Some(hello);
+				true
+			},
+			_ => false,
+		}
 	}
 
 	fn parse_kitty(&mut self, payload: &[u8]) -> bool {
@@ -666,12 +713,32 @@ const PROBE_BATCH_NO_OSC99: &[u8] = esc!(
 )
 .as_bytes();
 
-fn materialize_probe_batch(inside_tmux: bool, include_osc99: bool) -> borrow::Cow<'static, [u8]> {
+/// The DA1 request that fences every probe batch.
+const DA1_QUERY: &[u8] = esc!(primary_device_attributes_query).as_bytes();
+
+fn materialize_probe_batch(
+	inside_tmux: bool,
+	include_osc99: bool,
+	include_tsp: bool,
+) -> borrow::Cow<'static, [u8]> {
 	let batch = if include_osc99 {
 		PROBE_BATCH
 	} else {
 		PROBE_BATCH_NO_OSC99
 	};
+	if include_tsp && !inside_tmux {
+		// The TSP `hello` goes just before the DA1 fence: a terminal that
+		// speaks TSP answers it before DA1.
+		let body = batch
+			.strip_suffix(DA1_QUERY)
+			.expect("the probe batch ends with the DA1 request");
+		let hello = hello_query();
+		let mut batch = Vec::with_capacity(body.len() + hello.len() + DA1_QUERY.len());
+		batch.extend_from_slice(body);
+		batch.extend_from_slice(&hello);
+		batch.extend_from_slice(DA1_QUERY);
+		return borrow::Cow::Owned(batch);
+	}
 	if !inside_tmux {
 		return borrow::Cow::Borrowed(batch);
 	}
@@ -700,6 +767,7 @@ pub fn probe_terminal(tty: &mut (impl Read + Write), timeout: Duration) -> Probe
 	let batch = materialize_probe_batch(
 		caps.inside_tmux,
 		caps.notify == NotifyProtocol::Osc99 && !caps.inside_multiplexer,
+		tsp_probe_wanted(&caps),
 	);
 	if tty.write_all(&batch).and_then(|()| tty.flush()).is_err() {
 		return ProbeResults { timed_out: true, ..ProbeResults::default() };
@@ -742,6 +810,7 @@ pub fn negotiate(timeout: Duration) -> (TerminalCaps, ProbeResults) {
 		timeout,
 		env_caps.inside_tmux,
 		env_caps.notify == NotifyProtocol::Osc99 && !env_caps.inside_multiplexer,
+		tsp_probe_wanted(&env_caps),
 	);
 	#[cfg(not(unix))]
 	let probe: Option<ProbeResults> = None;
@@ -756,6 +825,12 @@ pub async fn negotiate_async(timeout: Duration) -> (TerminalCaps, ProbeResults) 
 	tokio::task::spawn_blocking(move || negotiate(timeout))
 		.await
 		.unwrap_or_else(|_| (detect(), ProbeResults::default()))
+}
+
+/// Whether the probe asks for TSP: allowed by `OMP_TSP` and outside every
+/// multiplexer, which swallows APC strings.
+fn tsp_probe_wanted(caps: &TerminalCaps) -> bool {
+	tsp::probe_wanted(caps.inside_multiplexer, |name| env::var(name).ok())
 }
 
 fn forced_graphics_from_environment(caps: TerminalCaps) -> Option<Graphics> {
@@ -776,6 +851,7 @@ fn probe_controlling_terminal(
 	timeout: Duration,
 	inside_tmux: bool,
 	include_osc99: bool,
+	include_tsp: bool,
 ) -> Option<ProbeResults> {
 	let mut tty = open(OpenOptions::new().read(true).write(true)).ok()?;
 	let original_termios = tcgetattr(&tty).ok()?;
@@ -792,7 +868,7 @@ fn probe_controlling_terminal(
 		return None;
 	}
 
-	let result = probe_polled(&mut tty, timeout, inside_tmux, include_osc99);
+	let result = probe_polled(&mut tty, timeout, inside_tmux, include_osc99, include_tsp);
 	let _ = fcntl(&tty, FcntlArg::F_SETFL(flags));
 	let _ = tcsetattr(&tty, SetArg::TCSANOW, &original_termios);
 	Some(result)
@@ -804,8 +880,9 @@ fn probe_polled(
 	timeout: Duration,
 	inside_tmux: bool,
 	include_osc99: bool,
+	include_tsp: bool,
 ) -> ProbeResults {
-	let batch = materialize_probe_batch(inside_tmux, include_osc99);
+	let batch = materialize_probe_batch(inside_tmux, include_osc99, include_tsp);
 	if tty.write_all(&batch).and_then(|()| tty.flush()).is_err() {
 		return ProbeResults { timed_out: true, ..ProbeResults::default() };
 	}
@@ -1296,7 +1373,7 @@ mod tests {
 
 	use super::{
 		NotifyProtocol, ProbeParser, ProbeResults, TerminalCaps, TerminalPlatform,
-		detect as detect_runtime, detect_from, materialize_probe_batch, probe_terminal,
+		detect as detect_runtime, detect_from, hello_query, materialize_probe_batch, probe_terminal,
 	};
 	use crate::{Color, Graphics, InputDecoder, InputEvent, Key, TerminalId, Theme, UiContext};
 
@@ -1799,8 +1876,61 @@ mod tests {
 	}
 
 	#[test]
+	fn the_tsp_hello_goes_just_before_the_da1_fence_and_never_through_tmux() {
+		let batch = materialize_probe_batch(false, false, true);
+		let hello = hello_query();
+		assert!(batch.ends_with(&[&hello[..], super::DA1_QUERY].concat()));
+		assert_eq!(
+			batch
+				.windows(super::DA1_QUERY.len())
+				.filter(|window| *window == super::DA1_QUERY)
+				.count(),
+			1,
+			"one DA1 fence"
+		);
+		let tmux = materialize_probe_batch(true, false, true);
+		assert!(!tmux.windows(4).any(|window| window == b"tsp;"));
+		let plain = materialize_probe_batch(false, false, false);
+		assert!(!plain.windows(4).any(|window| window == b"tsp;"));
+	}
+
+	#[test]
+	fn a_tsp_hello_reply_before_da1_is_consumed_even_split_across_reads() {
+		let reply = [
+			&b"\x1b_tsp;r;"[..],
+			br#"{"r":"hello","v":1,"term":"tern","kinds":["col","md"],"apc":32768}"#,
+			b"\x1b\\",
+		]
+		.concat();
+		let mut stream = reply;
+		stream.extend_from_slice(b"\x1b[?62;4c");
+		for split in [1, 3, 5, stream.len() / 2] {
+			let (results, preserved) = parse([stream[..split].to_vec(), stream[split..].to_vec()]);
+			let hello = results.tsp.as_ref().expect("hello recorded");
+			assert_eq!(hello.term.as_str(), "tern");
+			assert_eq!(hello.apc_limit(), 32768);
+			assert!(preserved.is_empty(), "split at {split}: {preserved:?}");
+			assert_eq!(results.da1_attributes, Some(vec![62, 4]));
+		}
+	}
+
+	#[test]
+	fn tsp_messages_other_than_a_v1_hello_stay_application_input() {
+		let event = [&b"\x1b_tsp;e;"[..], br#"{"ev":"ack","sf":"s1","s":1}"#, b"\x1b\\"].concat();
+		let (results, preserved) = parse([event.clone(), b"\x1b[?62c".to_vec()]);
+		assert!(results.tsp.is_none());
+		assert_eq!(preserved, event);
+		let wrong_version =
+			[&b"\x1b_tsp;r;"[..], br#"{"r":"hello","v":2,"term":"tern","kinds":[]}"#, b"\x1b\\"]
+				.concat();
+		let (results, preserved) = parse([wrong_version.clone(), b"\x1b[?62c".to_vec()]);
+		assert!(results.tsp.is_none(), "only v1 is spoken");
+		assert_eq!(preserved, wrong_version);
+	}
+
+	#[test]
 	fn osc99_probe_is_omitted_inside_multiplexers() {
-		let direct = materialize_probe_batch(false, true);
+		let direct = materialize_probe_batch(false, true, false);
 		assert!(
 			direct
 				.windows(b"]99;".len())
@@ -1811,7 +1941,9 @@ mod tests {
 				.windows(b"\x1b[?5522$p".len())
 				.any(|window| window == b"\x1b[?5522$p")
 		);
-		for batch in [materialize_probe_batch(true, false), materialize_probe_batch(false, false)] {
+		for batch in
+			[materialize_probe_batch(true, false, false), materialize_probe_batch(false, false, false)]
+		{
 			assert!(!batch.windows(b"]99;".len()).any(|window| window == b"]99;"));
 		}
 	}
@@ -1911,6 +2043,7 @@ mod tests {
 			materialize_probe_batch(
 				detected.inside_tmux,
 				detected.notify == NotifyProtocol::Osc99 && !detected.inside_multiplexer,
+				super::tsp_probe_wanted(&detected),
 			)
 			.as_ref()
 		);

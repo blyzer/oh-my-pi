@@ -56,6 +56,8 @@ mod terminal;
 #[doc(hidden)]
 pub mod test_support;
 mod theme;
+/// Tern Surface Protocol: native surfaces in Tern (ADR 0041).
+pub mod tsp;
 mod tty;
 /// Stable controlling-terminal identity helpers.
 pub mod ttyid;
