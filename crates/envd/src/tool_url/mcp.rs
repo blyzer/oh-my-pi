@@ -94,7 +94,7 @@ impl Resolve for McpUrlResolver {
 			self
 				.service
 				.pinned_resource_server(server, pin)
-				.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?
+				.map_err(|error| Fault::source(error.diagnostic()))?
 		} else {
 			self
 				.service

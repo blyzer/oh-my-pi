@@ -3604,23 +3604,44 @@ fn is_unauthorized(result: &Result<Arc<LiveConnection>, ManagerError>) -> bool {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PinnedReadError {
 	/// The server is no longer mounted.
-	#[error(
-		"MCP server '{server}' answered this resource when the read was judged and is no longer \
-		 mounted; the read was not sent to another server"
-	)]
+	#[error("{}", unmounted_read(.server))]
 	Unmounted {
 		/// The pinned server.
 		server: Str,
 	},
 	/// Reading the server now reaches the network beyond what was judged.
-	#[error(
-		"MCP server '{server}' now reaches the network, which this read was not judged or approved \
-		 to do; the read was not sent"
-	)]
+	#[error("{}", fetching_read(.server))]
 	Fetches {
 		/// The pinned server.
 		server: Str,
 	},
+}
+
+impl PinnedReadError {
+	/// The diagnostic the refused read reports to the model, rendered from the
+	/// pinned server rather than by formatting the error.
+	pub(crate) fn diagnostic(&self) -> Str {
+		match self {
+			Self::Unmounted { server } => unmounted_read(server),
+			Self::Fetches { server } => fetching_read(server),
+		}
+	}
+}
+
+/// Text of [`PinnedReadError::Unmounted`].
+fn unmounted_read(server: &str) -> Str {
+	sf!(
+		"MCP server '{server}' answered this resource when the read was judged and is no longer \
+		 mounted; the read was not sent to another server"
+	)
+}
+
+/// Text of [`PinnedReadError::Fetches`].
+fn fetching_read(server: &str) -> Str {
+	sf!(
+		"MCP server '{server}' now reaches the network, which this read was not judged or approved \
+		 to do; the read was not sent"
+	)
 }
 
 /// Lifecycle, transport, or definition publication failure.
