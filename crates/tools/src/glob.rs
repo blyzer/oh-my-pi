@@ -1,14 +1,14 @@
 //! Workspace path matching with mtime-ranked grouped output.
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use async_stream::stream;
 use futures::Stream;
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
-	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec,
-	ToolTerminal, Unit,
+	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, Effects, Ev,
+	FetchEffects, IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool,
+	ToolSpec, ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::{
-	grep::WorkspaceSearch,
+	grep::{SearchPolicy, WorkspaceSearch, search_effects},
 	path::tracing_path_metadata,
 	render::{TextProjection, paths::format_grouped_paths},
 };
@@ -199,8 +199,21 @@ pub struct Glob<W> {
 	spec:      ToolSpec,
 }
 
-/// Returns the host-free `glob@1` specification.
-pub fn spec() -> ToolSpec {
+/// The most a `glob@1` call can fetch under `policy`: a credentialed walk
+/// while the workspace's resolvers list remote hosts with stored credentials
+/// (`ssh://`), nothing otherwise. A glob never fetches a URL, so
+/// `fetch_enabled` plays no part.
+const fn glob_fetch_ceiling(policy: SearchPolicy) -> Option<FetchEffects> {
+	if policy.credentialed_fetch {
+		Some(FetchEffects { credentials: true })
+	} else {
+		None
+	}
+}
+
+/// Returns the host-free `glob@1` specification under `policy`: document
+/// reads, plus the most its resource walks can fetch.
+pub fn spec(policy: SearchPolicy) -> ToolSpec {
 	ToolSpec {
 		name:            sf!("glob"),
 		rev:             Rev { family: Str::new(""), n: 1 },
@@ -217,14 +230,7 @@ pub fn spec() -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		effects:         Effects {
-			documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
-			exec:      None,
-			inference: None,
-			desktop:   None,
-			fetch:     None,
-			subagents: 0,
-		},
+		effects:         search_effects(glob_fetch_ceiling(policy)),
 		confinement:     omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
@@ -235,9 +241,25 @@ pub fn spec() -> ToolSpec {
 	}
 }
 
-/// Constructs `glob@1` over `workspace`.
-pub fn tool<W: WorkspaceSearch>(workspace: W) -> Glob<W> {
-	Glob { workspace, spec: spec() }
+/// Constructs `glob@1` over `workspace` under `policy`.
+pub fn tool<W: WorkspaceSearch>(workspace: W, policy: SearchPolicy) -> Glob<W> {
+	Glob { workspace, spec: spec(policy) }
+}
+
+impl<W: WorkspaceSearch> Glob<W> {
+	/// Every target of a call of `path` that walks a remote host, with its
+	/// fetch: only a path the executor routes to the workspace's resource walk
+	/// ([`WorkspaceSearch::glob_resource`]) can, and the workspace judges each
+	/// of its targets by the routing that walk takes
+	/// ([`WorkspaceSearch::walk_fetches`]). A workspace path list is walked
+	/// locally and fetches nothing.
+	fn fetching_targets(&self, path: Option<&str>) -> Vec<(Str, FetchEffects)> {
+		let path = path.unwrap_or(".");
+		if unsupported_scheme(path).is_none() {
+			return Vec::new();
+		}
+		self.workspace.walk_fetches(path)
+	}
 }
 
 impl<W: WorkspaceSearch> Tool for Glob<W> {
@@ -246,8 +268,36 @@ impl<W: WorkspaceSearch> Tool for Glob<W> {
 	type Payload = Payload;
 	type Update = Update;
 
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
 	fn spec(&self) -> &ToolSpec {
 		&self.spec
+	}
+
+	/// Every call reads documents; it fetches only when it walks a resource
+	/// glob whose resolver reaches a remote host (`ssh://`). A walk of local
+	/// paths is never more than a document read, in any mode.
+	fn invocation_effects(&self, params: &Params) -> Option<Effects> {
+		let fetch = self
+			.fetching_targets(params.path.as_deref())
+			.into_iter()
+			.map(|(_, fetch)| fetch)
+			.reduce(FetchEffects::union);
+		Some(search_effects(fetch))
+	}
+
+	/// The locator of every target that walks a remote host, as the workspace
+	/// names it ([`WorkspaceSearch::walk_fetches`]), which the environment
+	/// resolves to the host it reaches.
+	fn fetch_locators(&self, params: &Params) -> Vec<Str> {
+		let mut locators = self
+			.fetching_targets(params.path.as_deref())
+			.into_iter()
+			.map(|(target, _)| target)
+			.collect::<Vec<_>>();
+		locators.sort_unstable();
+		locators.dedup();
+		locators
 	}
 
 	fn call<'c>(

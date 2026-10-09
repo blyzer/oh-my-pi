@@ -370,11 +370,26 @@ pub trait Resolve: Send + Sync + 'static {
 	///
 	/// `read@3` declares each call's fetch from it: the target is routed here
 	/// by the same classification the executor dispatches on
-	/// ([`crate::read::classify_target`]). A resolver that reaches a remote
-	/// host reports the fetch, with [`FetchEffects::credentials`] when it
-	/// presents stored credentials, and one whose answer depends on state that
-	/// can change before the read runs reports the fetch the read may perform.
+	/// ([`crate::read::classify_target`]), and `grep@1` declares the fetch of
+	/// each resolver-backed root ([`crate::grep::SearchRootKind::Internal`])
+	/// from it. A resolver that reaches a remote host reports the fetch, with
+	/// [`FetchEffects::credentials`] when it presents stored credentials, and
+	/// one whose answer depends on state that can change before the read runs
+	/// reports the fetch the read may perform.
 	fn read_fetch(&self, _resource: &str, _query: Option<&str>) -> Option<FetchEffects> {
+		None
+	}
+
+	/// The read-only network egress a walk from `resource` performs through
+	/// this resolver: listing it and, recursively, every directory its
+	/// listings name, as `glob@1` walks a resource glob. `None` when every
+	/// such listing stays in local or environment-owned state.
+	///
+	/// Unlike [`Self::read_fetch`] it answers for the resources a listing
+	/// names, not only for `resource`: a walk from a root that lists remote
+	/// hosts reaches every one of them, so a resolver that reaches any remote
+	/// host while listing reports the fetch for every walk it serves.
+	fn walk_fetch(&self, _resource: &str) -> Option<FetchEffects> {
 		None
 	}
 }
@@ -758,6 +773,15 @@ impl<R: Resolve> ResolverTable<R> {
 	/// without a fallback.
 	pub fn read_unknown_fetch(&self, uri: &str) -> Option<FetchEffects> {
 		self.unknown_fallback.as_ref()?.read_fetch(uri, None)
+	}
+
+	/// The fetch a walk listing `resource` through the resolver `scheme` routes
+	/// to performs, the resources its listings name included
+	/// ([`Resolve::walk_fetch`]); `None` when this deployment lists no such
+	/// scheme, whose walk is refused before it reaches anything.
+	pub fn walk_fetch(&self, scheme: Scheme, resource: &str) -> Option<FetchEffects> {
+		self.entry(scheme)?.listable.then_some(())?;
+		self.get(scheme)?.walk_fetch(resource)
 	}
 
 	/// Dispatches one raw-scheme read through the separately installed
@@ -1475,6 +1499,75 @@ mod tests {
 		let (completed, truncated) = table.complete(Scheme::Skill, "", 1).await.unwrap().unwrap();
 		assert_eq!(completed[0].value, "skill://alpha");
 		assert!(truncated);
+	}
+
+	/// A resolver that reaches a remote host whatever it reads or lists.
+	#[derive(Debug)]
+	struct RemoteResolver;
+
+	impl Resolve for RemoteResolver {
+		fn read<'a>(
+			&'a self,
+			_resource: &'a str,
+			_selector: &'a ParsedSelector,
+		) -> impl Future<Output = Result<CowBytes<'static>, Fault>> + Send + 'a {
+			std::future::ready(Ok(CowBytes::default()))
+		}
+
+		fn read_fetch(&self, _resource: &str, _query: Option<&str>) -> Option<FetchEffects> {
+			Some(FetchEffects { credentials: true })
+		}
+
+		fn walk_fetch(&self, _resource: &str) -> Option<FetchEffects> {
+			Some(FetchEffects { credentials: true })
+		}
+	}
+
+	/// The table reports a resolver's fetch only for the operation the
+	/// deployment lets that scheme serve: a walk only through a listable
+	/// scheme, a read only through a readable one, nothing for a scheme it
+	/// does not route; a resolver that keeps the defaults fetches nothing.
+	#[test]
+	fn fetches_follow_the_capability_the_scheme_serves() {
+		let fetch = Some(FetchEffects { credentials: true });
+		let mut builder = ResolverTable::builder();
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Ssh, true, false, "listed remote")
+					.with_capabilities(true, false, false),
+				RemoteResolver,
+			)
+			.unwrap();
+		builder
+			.register(SchemeEntry::new(Scheme::Mcp, true, false, "unlisted remote"), RemoteResolver)
+			.unwrap();
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Issue, false, false, "unreadable remote")
+					.with_capabilities(true, false, false),
+				RemoteResolver,
+			)
+			.unwrap();
+		let remote = builder.build();
+		assert_eq!(remote.walk_fetch(Scheme::Ssh, "prod"), fetch);
+		assert_eq!(remote.read_fetch(Scheme::Ssh, "prod/x", None), fetch);
+		assert_eq!(remote.walk_fetch(Scheme::Mcp, "server/x"), None);
+		assert_eq!(remote.read_fetch(Scheme::Mcp, "server/x", None), fetch);
+		assert_eq!(remote.walk_fetch(Scheme::Issue, "5"), fetch);
+		assert_eq!(remote.read_fetch(Scheme::Issue, "5", None), None);
+		assert_eq!(remote.walk_fetch(Scheme::Vault, "notes"), None);
+
+		let mut builder = ResolverTable::builder();
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Skill, true, false, "local")
+					.with_capabilities(true, false, false),
+				TestResolver,
+			)
+			.unwrap();
+		let local = builder.build();
+		assert_eq!(local.walk_fetch(Scheme::Skill, ""), None);
+		assert_eq!(local.read_fetch(Scheme::Skill, "alpha", None), None);
 	}
 
 	#[test]

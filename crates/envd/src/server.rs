@@ -16516,9 +16516,21 @@ mod tests {
 	async fn probe_daemon(
 		registry: Registry,
 	) -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
+		configured_probe_daemon(registry, &[]).await
+	}
+
+	/// A local daemon serving `registry` on a fresh workspace and state
+	/// directory, configured by the cfg `commands` first.
+	async fn configured_probe_daemon(
+		registry: Registry,
+		commands: &[&str],
+	) -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
 		let root = tempfile::tempdir().expect("workspace");
 		let state = tempfile::tempdir().expect("state");
 		let con = Arc::new(Ctx::new());
+		for command in commands {
+			con.run(command).expect(command);
+		}
 		let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
 		let server = Arc::new(
 			EnvServer::open_local(
@@ -17275,6 +17287,348 @@ mod tests {
 			assert!(refusing.seen.lock().is_empty(), "{mode:?}: a fetch is not asked");
 			drop(client);
 			serving.abort();
+		}
+	}
+
+	/// The production `grep@1`, `glob@1` and `ast_grep` declare the most their
+	/// roots can fetch and judge each call by the route its executor takes for
+	/// each root. grep: a local path, an archive member, `file://` and every
+	/// resolver-backed root that reads local state (`local://`, `omp://`, a
+	/// vault search, an unknown scheme) are document reads; an http(s) root is
+	/// an anonymous fetch; `ssh://` naming a host alias, `issue://` and an
+	/// `mcp://` resource no mounted server advertises are credentialed ones.
+	/// glob: a local glob and a vault walk are document reads, any walk over
+	/// `ssh://` a credentialed fetch (from the alias list it reaches every
+	/// configured host), and it never fetches a URL. `ast_grep`: only an
+	/// http(s) root fetches. Each fetch names the hosts the resolvers reach, and
+	/// the remainder they cannot name. A local search is `read` tier and runs
+	/// unasked in every mode and sandbox state; a fetch asks only under
+	/// `always-ask`. With `sv_fetch_enabled false` no URL root fetches and
+	/// the credentialed maxima stay.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn production_search_tools_declare_their_remote_roots_and_local_roots_stay_read() {
+		use crate::{
+			admission::{
+				ApprovalMode, ApprovalPolicy, ApprovalTier, SandboxState, SandboxUnavailable,
+			},
+			fetch_host::FetchHost,
+			tool_settings::ToolSettings,
+		};
+
+		let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+		let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+		let (server, root, _state) =
+			configured_probe_daemon(Registry::new(), &["sv_ast_grep_enabled true"]).await;
+		std::fs::create_dir(root.path().join(".git")).expect("git directory");
+		std::fs::write(
+			root.path().join(".git/config"),
+			"[remote \"origin\"]\n\turl = git@GHE.example.com:Owner/Repo.git\n",
+		)
+		.expect("git config");
+		let registry = server.registry();
+		for (tool, maximum) in
+			[("grep", credentialed), ("glob", credentialed), ("ast_grep", anonymous)]
+		{
+			assert_eq!(registry.effects_owned(tool).expect(tool), read_effects(maximum), "{tool}");
+		}
+		let names = server.fetch_hosts();
+		let sandboxes = [SandboxState::Active, SandboxState::Off, SandboxState::Unavailable {
+			cause: SandboxUnavailable::BackendUnavailable,
+		}];
+		let docs = || FetchHost::http("docs.rs", 443);
+		let prod = || FetchHost::ssh("prod");
+		for (tool, arguments, fetch, hosts, unnamed) in [
+			("grep", serde_json::json!({ "pattern": "x" }), None, vec![], false),
+			("grep", serde_json::json!({ "pattern": "x", "path": "src" }), None, vec![], false),
+			("grep", serde_json::json!({ "pattern": "x", "path": "a.zip:docs" }), None, vec![], false),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "file:///tmp/a" }),
+				None,
+				vec![],
+				false,
+			),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "local://a.md" }),
+				None,
+				vec![],
+				false,
+			),
+			("grep", serde_json::json!({ "pattern": "x", "path": "omp://" }), None, vec![], false),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "vault://notes?op=search&q=todo" }),
+				None,
+				vec![],
+				false,
+			),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "custom://thing" }),
+				None,
+				vec![],
+				false,
+			),
+			("grep", serde_json::json!({ "pattern": "x", "path": "ssh://" }), None, vec![], false),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "https://docs.rs/serde:1-5" }),
+				anonymous,
+				vec![docs()],
+				false,
+			),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "ssh://prod/etc/hosts" }),
+				credentialed,
+				vec![prod()],
+				false,
+			),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "issue://5" }),
+				credentialed,
+				vec![FetchHost::github("ghe.example.com")],
+				false,
+			),
+			(
+				"grep",
+				serde_json::json!({ "pattern": "x", "path": "mcp://unadvertised/resource" }),
+				credentialed,
+				vec![],
+				true,
+			),
+			(
+				"grep",
+				serde_json::json!({
+					"pattern": "x",
+					"path": "src; https://docs.rs/x; ssh://prod/etc",
+				}),
+				credentialed,
+				vec![docs(), prod()],
+				false,
+			),
+			("glob", serde_json::json!({}), None, vec![], false),
+			("glob", serde_json::json!({ "path": "src/**/*.rs" }), None, vec![], false),
+			("glob", serde_json::json!({ "path": "vault://notes/**" }), None, vec![], false),
+			("glob", serde_json::json!({ "path": "https://docs.rs/**" }), None, vec![], false),
+			(
+				"glob",
+				serde_json::json!({ "path": "ssh://prod/src/**/*.rs" }),
+				credentialed,
+				vec![prod()],
+				false,
+			),
+			("glob", serde_json::json!({ "path": "ssh:///**" }), credentialed, vec![], true),
+			("glob", serde_json::json!({ "path": "ssh:///pr*/**" }), credentialed, vec![], true),
+			(
+				"glob",
+				serde_json::json!({ "path": "ssh://pr*/**" }),
+				credentialed,
+				vec![FetchHost::ssh("pr*")],
+				false,
+			),
+			(
+				"glob",
+				serde_json::json!({ "path": "src/**; ssh://prod/**" }),
+				credentialed,
+				vec![prod()],
+				false,
+			),
+			("ast_grep", serde_json::json!({ "pat": "x", "path": "src" }), None, vec![], false),
+			(
+				"ast_grep",
+				serde_json::json!({ "pat": "x", "path": "local://a.rs" }),
+				None,
+				vec![],
+				false,
+			),
+			(
+				"ast_grep",
+				serde_json::json!({ "pat": "x", "path": "ssh://prod/a.rs" }),
+				None,
+				vec![],
+				false,
+			),
+			(
+				"ast_grep",
+				serde_json::json!({ "pat": "x", "path": "src; https://docs.rs/a.rs" }),
+				anonymous,
+				vec![docs()],
+				false,
+			),
+		] {
+			let raw = arguments.to_string();
+			let effects = registry.invocation_effects(tool, &raw).expect(&raw);
+			assert_eq!(effects, read_effects(fetch), "{tool} {raw}");
+			if fetch.is_some() {
+				let named = names.name(&registry.fetch_locators(tool, &raw));
+				assert_eq!(named.hosts(), hosts, "{tool} {raw}");
+				assert_eq!(named.is_partly_unnamed(), unnamed, "{tool} {raw}");
+			} else {
+				assert!(registry.fetch_locators(tool, &raw).is_empty(), "{tool} {raw}");
+			}
+			let tier = if fetch.is_some() {
+				ApprovalTier::Fetch
+			} else {
+				ApprovalTier::Read
+			};
+			for mode in [
+				None,
+				Some(ApprovalMode::AlwaysAsk),
+				Some(ApprovalMode::Write),
+				Some(ApprovalMode::Yolo),
+			] {
+				for sandbox in sandboxes {
+					let decision = ToolSettings::default()
+						.with_approval_mode_override(mode)
+						.approval_for("c", tool, &effects, Confinement::Host, sandbox);
+					let asks = fetch.is_some() && mode == Some(ApprovalMode::AlwaysAsk);
+					assert_eq!(
+						(decision.tier, decision.policy),
+						(
+							tier,
+							if asks {
+								ApprovalPolicy::Prompt
+							} else {
+								ApprovalPolicy::Allow
+							}
+						),
+						"{tool} {raw} under {mode:?} with sandbox {sandbox:?}"
+					);
+				}
+			}
+		}
+		drop(server);
+
+		let (disabled, _root, _state) = configured_probe_daemon(Registry::new(), &[
+			"sv_fetch_enabled false",
+			"sv_ast_grep_enabled true",
+		])
+		.await;
+		let registry = disabled.registry();
+		for (tool, maximum) in [("grep", credentialed), ("glob", credentialed), ("ast_grep", None)] {
+			assert_eq!(registry.effects_owned(tool).expect(tool), read_effects(maximum), "{tool}");
+		}
+		for (tool, arguments, fetch) in [
+			("grep", serde_json::json!({ "pattern": "x", "path": "src" }), None),
+			("grep", serde_json::json!({ "pattern": "x", "path": "https://docs.rs/serde" }), None),
+			("grep", serde_json::json!({ "pattern": "x", "path": "ssh://prod/etc" }), credentialed),
+			("glob", serde_json::json!({ "path": "ssh://prod/**" }), credentialed),
+			("ast_grep", serde_json::json!({ "pat": "x", "path": "https://docs.rs/a.rs" }), None),
+		] {
+			let raw = arguments.to_string();
+			assert_eq!(
+				registry.invocation_effects(tool, &raw).expect(&raw),
+				read_effects(fetch),
+				"{tool} {raw} with URL fetches disabled"
+			);
+		}
+	}
+
+	/// The production search tools over a connection. Under `always-ask` a
+	/// grep of a URL or an `ssh://` host, a glob walking an `ssh://` host (one
+	/// it names, or every one from the alias list) and an `ast_grep` of a URL
+	/// each ask once, the query reporting the fetch the call was judged by and
+	/// every host its roots reach, and a refused prompt runs nothing. A search
+	/// of local roots never asks in any mode, and runs.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn search_queries_name_the_hosts_their_roots_reach() {
+		use crate::fetch_host::FetchHost;
+
+		let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+		let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+		let (server, root, _state) =
+			configured_probe_daemon(Registry::new(), &["sv_ast_grep_enabled true"]).await;
+		std::fs::write(root.path().join("notes.txt"), "alpha\n").expect("local file");
+		std::fs::write(root.path().join("lib.rs"), "fn main() { call(1); }\n").expect("source");
+		for (tool, invocation_id, arguments, fetch, named, unnamed) in [
+			(
+				"grep",
+				"grep-url",
+				serde_json::json!({ "pattern": "alpha", "path": "notes.txt; https://docs.rs/serde" }),
+				anonymous,
+				vec![FetchHost::http("docs.rs", 443)],
+				false,
+			),
+			(
+				"grep",
+				"grep-ssh",
+				serde_json::json!({ "pattern": "alpha", "path": "ssh://prod/etc/hosts" }),
+				credentialed,
+				vec![FetchHost::ssh("prod")],
+				false,
+			),
+			(
+				"glob",
+				"glob-ssh",
+				serde_json::json!({ "path": "ssh://prod/**/*.rs" }),
+				credentialed,
+				vec![FetchHost::ssh("prod")],
+				false,
+			),
+			(
+				"glob",
+				"glob-aliases",
+				serde_json::json!({ "path": "ssh:///**" }),
+				credentialed,
+				vec![],
+				true,
+			),
+			(
+				"ast_grep",
+				"ast-url",
+				serde_json::json!({ "pat": "call($A)", "path": "https://docs.rs/a.rs" }),
+				anonymous,
+				vec![FetchHost::http("docs.rs", 443)],
+				false,
+			),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, refusing.clone()).await;
+			let verdict = invoke_probe(&client, &server, tool, invocation_id, arguments, None)
+				.await
+				.expect("a verdict");
+			assert!(verdict.is_error, "{invocation_id}: the refused prompt denies the search");
+			let seen = refusing.seen.lock().clone();
+			assert_eq!(seen.len(), 1, "{invocation_id}: one query");
+			let effects = seen[0]
+				.effects
+				.as_ref()
+				.map(|envelope| Effects::try_from(envelope).expect("a typed envelope"))
+				.expect("the query reports the envelope");
+			assert_eq!(effects, read_effects(fetch), "{invocation_id}");
+			let hosts = seen[0]
+				.fetch
+				.iter()
+				.map(|target| FetchHost::try_from(target).expect("a named host"))
+				.collect::<Vec<_>>();
+			assert_eq!(hosts, named, "{invocation_id}");
+			assert_eq!(seen[0].fetch_unnamed, unnamed, "{invocation_id}");
+			drop(client);
+			serving.abort();
+		}
+
+		for mode in [pb::ApprovalMode::AlwaysAsk, pb::ApprovalMode::Write, pb::ApprovalMode::Yolo] {
+			for (tool, arguments, expected) in [
+				("grep", serde_json::json!({ "pattern": "alpha", "path": "notes.txt" }), "alpha"),
+				("glob", serde_json::json!({ "path": "*.txt" }), "notes.txt"),
+				("ast_grep", serde_json::json!({ "pat": "call($A)", "path": "lib.rs" }), "call(1)"),
+			] {
+				let refusing = ScriptedAdmission::default();
+				let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+				let verdict = invoke_probe(&client, &server, tool, "local", arguments, None)
+					.await
+					.expect("a verdict");
+				assert!(refusing.seen.lock().is_empty(), "{tool} under {mode:?}: never asks");
+				let json = String::from_utf8_lossy(&verdict.json);
+				assert!(!verdict.is_error, "{tool} under {mode:?}: {json}");
+				assert!(json.contains(expected), "{tool} under {mode:?}: {json}");
+				drop(client);
+				serving.abort();
+			}
 		}
 	}
 

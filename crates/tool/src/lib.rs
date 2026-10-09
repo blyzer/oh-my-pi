@@ -494,6 +494,15 @@ pub struct FetchEffects {
 	pub credentials: bool,
 }
 
+impl FetchEffects {
+	/// One fetch covering both `self` and `other`, as a call that performs
+	/// both is judged: credentialed when either is.
+	#[must_use]
+	pub const fn union(self, other: Self) -> Self {
+		Self { credentials: self.credentials || other.credentials }
+	}
+}
+
 /// Maximum declared effect envelope for one tool revision.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Effects {

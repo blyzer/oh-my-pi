@@ -104,6 +104,7 @@ use super::{
 		dispatch::{CallbackDispatcher, EventDeadline, NestedCallbackDispatcher},
 		extensions::{SealedRegistryEvidence, SealedRegistryEvidenceError, seal_registry_evidence},
 	},
+	fetch_host::FetchHostNamer,
 	github::GithubService,
 	managed_skills::ManagedSkills,
 	mcp::{
@@ -4052,6 +4053,22 @@ fn production_read_policy(
 	}
 }
 
+/// The search policy of a production environment (`grep@1`, `glob@1`,
+/// `ast_grep`), the one both its declarations and its executors are built
+/// from, so the effects the environment declares for them are the ones their
+/// calls are judged by.
+///
+/// As for [`production_read_policy`], the credentialed resolvers grep reads
+/// and glob walks are registered whatever `tools.fetch.enabled` says, so the
+/// credentialed fetch is always declared; the setting only removes the
+/// anonymous fetch of URL roots.
+const fn production_search_policy(tool_settings: &ToolSettings) -> omp_tools::grep::SearchPolicy {
+	omp_tools::grep::SearchPolicy {
+		fetch_enabled:      tool_settings.fetch_enabled,
+		credentialed_fetch: true,
+	}
+}
+
 #[derive(Clone)]
 struct EnvironmentDeclaration {
 	spec:         ToolSpec,
@@ -4142,14 +4159,19 @@ fn environment_declarations(
 	if tool_settings.enabled("debug") {
 		push(omp_tools::debug::spec(), long_tail_presentation(policy), long_tail_claims(policy));
 	}
+	let search_policy = production_search_policy(tool_settings);
 	if tool_settings.enabled("grep") {
-		push(omp_tools::grep::spec(), essential_presentation(policy), core_claims());
+		push(omp_tools::grep::spec(search_policy), essential_presentation(policy), core_claims());
 	}
 	if tool_settings.enabled("glob") {
-		push(omp_tools::glob::spec(), essential_presentation(policy), core_claims());
+		push(omp_tools::glob::spec(search_policy), essential_presentation(policy), core_claims());
 	}
 	if tool_settings.enabled("ast_grep") {
-		push(omp_tools::ast_grep::spec(), long_tail_presentation(policy), long_tail_claims(policy));
+		push(
+			omp_tools::ast_grep::spec(search_policy),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		);
 	}
 	if tool_settings.enabled("ast_edit") {
 		push(omp_tools::ast_edit::spec(), long_tail_presentation(policy), long_tail_claims(policy));
@@ -4771,15 +4793,17 @@ pub(crate) fn production_registry<
 		read_sources.clone(),
 		Arc::clone(&resolvers),
 	);
+	let search_policy = production_search_policy(tool_settings);
 	let grep = omp_tools::grep::tool(
 		search.clone(),
 		u32::from(tool_settings.grep_context_before),
 		u32::from(tool_settings.grep_context_after),
+		search_policy,
 	);
 	if tool_settings.enabled("grep") {
 		environment_registry(&mut registry, grep, essential_presentation(policy), core_claims())?;
 	}
-	let glob = omp_tools::glob::tool(search);
+	let glob = omp_tools::glob::tool(search, search_policy);
 	if tool_settings.enabled("glob") {
 		environment_registry(&mut registry, glob, essential_presentation(policy), core_claims())?;
 	}
@@ -4792,7 +4816,7 @@ pub(crate) fn production_registry<
 		);
 		environment_registry(
 			&mut registry,
-			omp_tools::ast_grep::tool(ast_search),
+			omp_tools::ast_grep::tool(ast_search, search_policy),
 			long_tail_presentation(policy),
 			long_tail_claims(policy),
 		)?;
@@ -4873,6 +4897,7 @@ pub(crate) fn production_registry<
 				tool_settings.approval.clone(),
 				None,
 			),
+			FetchHostNamer::new(&resolvers),
 		)));
 	}
 	if tool_settings.enabled("bash") && shell_settings.enabled {
@@ -6541,7 +6566,10 @@ mod tests {
 		.expect("session tool");
 		environment_registry(
 			&mut registry,
-			omp_tools::ast_grep::tool(PathBuf::from(".")),
+			omp_tools::ast_grep::tool(
+				PathBuf::from("."),
+				production_search_policy(&ToolSettings::default()),
+			),
 			Presentation::Slot,
 			core_claims(),
 		)

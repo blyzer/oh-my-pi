@@ -59,6 +59,21 @@ impl grep::WorkspaceSearch for FakeWorkspace {
 			result
 		}
 	}
+
+	fn internal_root_fetch(&self, _root: &grep::SearchRoot) -> Option<omp_tool::FetchEffects> {
+		None
+	}
+
+	/// Walks `ssh://` targets over a remote host with stored credentials,
+	/// as the production workspace does; every other target stays local.
+	fn walk_fetches(&self, path: &str) -> Vec<(Str, omp_tool::FetchEffects)> {
+		path
+			.split(';')
+			.map(str::trim)
+			.filter(|target| target.starts_with("ssh://"))
+			.map(|target| (Str::new(target), omp_tool::FetchEffects { credentials: true }))
+			.collect()
+	}
 }
 
 struct Invocation {
@@ -97,7 +112,7 @@ const fn directory(path: &'static str, modified_ms: u64) -> glob::WalkMatch {
 }
 
 fn invoke(workspace: FakeWorkspace, raw: &str) -> Invocation {
-	let tool = glob::tool(workspace);
+	let tool = glob::tool(workspace, grep::SearchPolicy::default());
 	let (feed, params) = IncomingParams::channel();
 	feed
 		.args_committed(Str::new(raw))
@@ -142,7 +157,7 @@ fn invoke(workspace: FakeWorkspace, raw: &str) -> Invocation {
 fn schema_and_defaults_are_exact() {
 	let workspace = fake(walk(Vec::new()));
 	let seen = Arc::clone(&workspace.seen);
-	let tool = glob::tool(workspace.clone());
+	let tool = glob::tool(workspace.clone(), grep::SearchPolicy::default());
 	let actual: serde_json::Value =
 		serde_json::from_slice(&tool.spec().schema).expect("glob schema is JSON");
 	assert_eq!(tool.spec().name, "glob");
@@ -269,7 +284,7 @@ fn interrupt_waits_until_the_workspace_traversal_has_stopped() {
 		stopped_on_cancel: Some(Arc::clone(&stopped)),
 	};
 	let started = Arc::clone(&workspace.seen);
-	let tool = glob::tool(workspace);
+	let tool = glob::tool(workspace, grep::SearchPolicy::default());
 	let (feed, params) = IncomingParams::channel();
 	feed
 		.args_committed(Str::new_static(r#"{"path":"**/*"}"#))
@@ -415,7 +430,7 @@ fn oversized_projection_remains_complete_for_central_dispatch() {
 	assert!(!invocation.text.contains("[truncated"));
 	assert_eq!(payload.matches.len(), 200);
 
-	let zero_tool = glob::tool(fake(walk(Vec::new())));
+	let zero_tool = glob::tool(fake(walk(Vec::new())), grep::SearchPolicy::default());
 	let zero = zero_tool.prompt(
 		Ok(payload),
 		&PromptCaps::for_tool(
@@ -429,4 +444,98 @@ fn oversized_projection_remains_complete_for_central_dispatch() {
 		),
 	);
 	assert!(zero.is_empty());
+}
+
+/// Document reads plus `fetch`, the envelope of one search call.
+fn search_effects(fetch: Option<omp_tool::FetchEffects>) -> omp_tool::Effects {
+	omp_tool::Effects {
+		documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::default() }),
+		fetch,
+		..omp_tool::Effects::empty()
+	}
+}
+
+/// A registry holding `glob@1` over the fake workspace under `policy`, which
+/// judges each call as the environment does.
+fn judging_registry(policy: grep::SearchPolicy) -> omp_tool::Registry {
+	let mut registry = omp_tool::Registry::new();
+	registry
+		.register(
+			glob::tool(fake(walk(Vec::new())), policy),
+			omp_tool::Presentation::Slot,
+			omp_tool::Claims {
+				precedence: omp_tool::Precedence::CORE,
+				claimant:   sf!("omp/core"),
+				replaces:   None,
+			},
+		)
+		.expect("glob registers");
+	registry
+}
+
+/// The declared maximum holds a credentialed walk exactly while the
+/// workspace's resolvers list remote hosts with stored credentials, whatever
+/// URL fetches say: a glob never fetches a URL. Each call is judged by the
+/// workspace for the targets its path routes to a resource walk: a local
+/// glob is a document read, a walk over an `ssh://` host a credentialed
+/// fetch, every such target named once in its authored spelling. A walk the
+/// maximum withholds is refused, never judged by the maximum.
+#[test]
+fn glob_declares_the_remote_walks_its_resource_targets_take() {
+	let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+	for (fetch_enabled, credentialed_fetch) in
+		[(true, true), (false, true), (true, false), (false, false)]
+	{
+		let policy = grep::SearchPolicy { fetch_enabled, credentialed_fetch };
+		assert_eq!(
+			glob::spec(policy).effects,
+			search_effects(credentialed.filter(|_| credentialed_fetch)),
+			"{policy:?}"
+		);
+	}
+
+	let registry =
+		judging_registry(grep::SearchPolicy { fetch_enabled: true, credentialed_fetch: true });
+	for (path, fetch, locators) in [
+		(None, None, &[][..]),
+		(Some("src/**/*.rs"), None, &[]),
+		(Some("src/**/*.ts; test/**/*.ts"), None, &[]),
+		(Some("vault://notes/**/*.md"), None, &[]),
+		(Some("ssh://prod/src/**/*.rs"), credentialed, &["ssh://prod/src/**/*.rs"]),
+		(Some("src/**; ssh://b/x/** ;ssh://a/**"), credentialed, &["ssh://a/**", "ssh://b/x/**"]),
+		(Some("ssh://a/**;ssh://a/**"), credentialed, &["ssh://a/**"]),
+	] {
+		let arguments = match path {
+			Some(path) => json!({ "path": path }),
+			None => json!({}),
+		}
+		.to_string();
+		assert_eq!(
+			registry
+				.invocation_effects("glob", &arguments)
+				.expect("judged"),
+			search_effects(fetch),
+			"{path:?}"
+		);
+		assert_eq!(
+			registry.fetch_locators("glob", &arguments),
+			locators.iter().copied().map(Str::new).collect::<Vec<_>>(),
+			"{path:?}"
+		);
+	}
+
+	let withheld =
+		judging_registry(grep::SearchPolicy { fetch_enabled: true, credentialed_fetch: false });
+	assert_eq!(
+		withheld
+			.invocation_effects("glob", &json!({ "path": "src/**" }).to_string())
+			.expect("a local glob"),
+		search_effects(None)
+	);
+	let refused =
+		withheld.invocation_effects("glob", &json!({ "path": "ssh://prod/**" }).to_string());
+	assert!(
+		matches!(refused, Err(omp_tool::RegistryError::InvocationEffectsExceedMaximum { .. })),
+		"{refused:?}"
+	);
 }

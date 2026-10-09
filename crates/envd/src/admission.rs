@@ -20,7 +20,7 @@ use omp_shell::{
 	analysis,
 	parser::{Parser, ParserOptions},
 };
-use omp_tool::{Confinement, Effects};
+use omp_tool::{Confinement, Effects, RegistryError};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	approval_relay::OwnedApprovals,
-	fetch_host::{FetchHost, NETWORK_APPROVAL_KIND, NamedFetches, fetch_subjects},
+	fetch_host::{NETWORK_APPROVAL_KIND, NamedFetches},
 };
 
 /// Default approval posture applied before one invocation reaches interactive
@@ -492,6 +492,17 @@ pub(crate) enum DynamicAdmissionError {
 		/// Exact resolved dynamic target.
 		target: Str,
 	},
+	/// The target's call could not be judged by its arguments: the envelope
+	/// they scope reaches beyond the target's declared maximum, which is
+	/// refused rather than admitted on that maximum.
+	#[error("dynamic target `{target}` could not be judged by its arguments")]
+	Unjudged {
+		/// Exact resolved dynamic target.
+		target: Str,
+		/// The registry's refusal of the judgment.
+		#[source]
+		source: RegistryError,
+	},
 }
 
 /// Shared admission authority for targets resolved inside another tool.
@@ -532,10 +543,11 @@ impl DynamicAdmission {
 	///
 	/// The prompt holds one requirement for the target's tier, unless that
 	/// tier is a fetch, and, when the target fetches, one `network`
-	/// requirement per host in `fetches` (distinct hosts the target reaches,
-	/// every one named), or the target's own when the environment names none.
-	/// Every requirement offers `once` and `session`, so a session grant
-	/// covers the target, or the one host, it names.
+	/// requirement per host `fetches` names (the distinct hosts the target
+	/// reaches), plus the target's own for the remainder when some host is
+	/// left unnamed or none is named ([`NamedFetches::subjects`]). Every
+	/// requirement offers `once` and `session`, so a session grant covers the
+	/// target, or the one host, it names.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "one admission joins the target, its declaration, its origin and its approver"
@@ -546,7 +558,7 @@ impl DynamicAdmission {
 		target: Str,
 		effects: &Effects,
 		confinement: Confinement,
-		fetches: &[FetchHost],
+		fetches: &NamedFetches,
 		source: DynamicInvocationSource,
 		relay: Option<&OwnedApprovals>,
 		cancellation: CancellationToken,
@@ -597,7 +609,7 @@ impl DynamicAdmission {
 		let fetched = effects
 			.fetch
 			.is_some()
-			.then(|| fetch_subjects(target.as_str(), fetches, false))
+			.then(|| fetches.subjects(target.as_str()))
 			.into_iter()
 			.flatten()
 			.map(|(subject, about)| {
@@ -2214,7 +2226,7 @@ mod tests {
 					sf!("github"),
 					&network,
 					Confinement::Host,
-					&[],
+					&NamedFetches::default(),
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2257,7 +2269,7 @@ mod tests {
 					sf!("github"),
 					&network,
 					Confinement::Host,
-					&[],
+					&NamedFetches::default(),
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2271,7 +2283,7 @@ mod tests {
 				sf!("probe"),
 				&Effects::empty(),
 				Confinement::ExecSandbox,
-				&[],
+				&NamedFetches::default(),
 				DynamicInvocationSource::ShellDyn,
 				None,
 				CancellationToken::new(),
@@ -2290,7 +2302,7 @@ mod tests {
 					sf!("github"),
 					&network,
 					Confinement::Host,
-					&[],
+					&NamedFetches::default(),
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2352,7 +2364,7 @@ mod tests {
 					sf!("github"),
 					&pending_network,
 					Confinement::Host,
-					&[],
+					&NamedFetches::default(),
 					DynamicInvocationSource::ShellDyn,
 					None,
 					CancellationToken::new(),
@@ -2396,7 +2408,7 @@ mod tests {
 					sf!("github"),
 					&cancel_network,
 					Confinement::Host,
-					&[],
+					&NamedFetches::default(),
 					DynamicInvocationSource::ShellDyn,
 					None,
 					cancel_token,
@@ -2414,8 +2426,8 @@ mod tests {
 
 	/// A `dyn` prompt offers the session for every requirement: one for the
 	/// target at its tier unless that tier is a fetch, and one `network`
-	/// requirement per host its fetches reach (the MCP server), or the
-	/// target's own when no host is named.
+	/// requirement per host its fetches reach (the MCP server), plus the
+	/// target's own when some host is left unnamed or none is named.
 	#[tokio::test]
 	async fn dynamic_prompts_offer_the_session_and_key_fetches_on_their_hosts() {
 		let fetch = Effects { fetch: Some(FetchEffects { credentials: true }), ..Effects::empty() };
@@ -2427,7 +2439,11 @@ mod tests {
 			exec: Some(ToolExecEffects { commands: Arc::from([]), network: true }),
 			..Effects::empty()
 		};
-		let linear = [FetchHost::mcp("linear")];
+		let linear = NamedFetches::named([FetchHost::mcp("linear")]);
+		// An http(s) locator is named by its authored host; an internal one
+		// with no environment resources is left unnamed.
+		let partly =
+			crate::fetch_host::resolve_locators(None, &[sf!("https://docs.rs/a"), sf!("issue://5")]);
 		let (route, inbox) = ApprovalRoute::new(Arc::new(ApprovalBook::new()), None);
 		let admission = DynamicAdmission::new(
 			explicit(ApprovalMode::AlwaysAsk),
@@ -2436,14 +2452,18 @@ mod tests {
 			Some(route),
 		);
 		for (effects, hosts, expected) in [
-			(&fetch, &linear[..], vec![("network", "mcp:linear")]),
-			(&fetch, &[][..], vec![("network", "tool:linear/search")]),
-			(&fetch_and_exec, &linear[..], vec![("exec", "linear/search"), ("network", "mcp:linear")]),
-			(&exec, &linear[..], vec![("exec", "linear/search")]),
+			(&fetch, &linear, vec![("network", "mcp:linear")]),
+			(&fetch, &NamedFetches::default(), vec![("network", "tool:linear/search")]),
+			(&fetch, &partly, vec![
+				("network", "http:docs.rs:443"),
+				("network", "tool:linear/search"),
+			]),
+			(&fetch_and_exec, &linear, vec![("exec", "linear/search"), ("network", "mcp:linear")]),
+			(&exec, &linear, vec![("exec", "linear/search")]),
 		] {
 			let pending_admission = admission.clone();
 			let effects = effects.clone();
-			let hosts = hosts.to_vec();
+			let hosts = hosts.clone();
 			let pending = tokio::spawn(async move {
 				pending_admission
 					.admit(

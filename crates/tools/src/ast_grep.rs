@@ -6,7 +6,6 @@ use std::{
 	fs,
 	future::Future,
 	path::PathBuf,
-	sync::Arc,
 	time::{Duration, Instant},
 };
 
@@ -15,12 +14,20 @@ use bytes::Bytes;
 use futures::{FutureExt as _, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Diag, DiagKind, DocEffects,
-	Effects, Ev, IncomingParams, InterruptWaitError, LiftedCall, ParamError, Part, PromptCaps,
+	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Diag, DiagKind, Effects,
+	Ev, FetchEffects, IncomingParams, InterruptWaitError, LiftedCall, ParamError, Part, PromptCaps,
 	RecordedCall, Rev, Tool, ToolSpec, ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::{
+	grep::{SearchPolicy, search_effects},
+	read::{
+		resolver::Scheme,
+		selector::{ParsedUri, SelectorError, parse_uri},
+	},
+};
 
 const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 200;
@@ -331,15 +338,73 @@ impl AstSearchResolver for PathBuf {
 	}
 }
 
+/// How `ast_grep` routes one search root.
+///
+/// [`classify_root`] decides it once for both the environment's resolver
+/// ([`AstSearchResolver`]), which dispatches on it, and the call's effects
+/// ([`Tool::invocation_effects`]), so the two cannot diverge.
+///
+/// Only [`Self::Web`] reaches the network: an internal URI resolves to the
+/// local path its resolver materializes, and reads nothing remote.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RootClass<'a> {
+	/// A workspace path, directory or glob.
+	Local,
+	/// A `file://` URL, searched as the local path it names.
+	File,
+	/// An http(s) URL: fetched anonymously through the environment's web
+	/// reader and searched as one file, while `tools.fetch.enabled` allows it.
+	Web(ParsedUri<'a>),
+	/// A URI with a built-in scheme, searched at the local path its resolver
+	/// materializes.
+	Internal(ParsedUri<'a>),
+	/// A URI whose scheme is outside the built-in vocabulary: refused.
+	Foreign,
+}
+
+/// Classifies one trimmed search root the way `ast_grep` routes it: a URI by
+/// its scheme, else a workspace path. Purely lexical; a root that does not
+/// parse is refused before anything is searched.
+///
+/// Unlike a `read@3` target ([`crate::read::classify_target`]), a `www.` host
+/// or a bare `host:port/` is a workspace path here, and is searched as one:
+/// only an `http(s)://` URL is [`RootClass::Web`].
+pub fn classify_root(root: &str) -> Result<RootClass<'_>, SelectorError> {
+	let Some(uri) = parse_uri(root)? else {
+		return Ok(RootClass::Local);
+	};
+	Ok(match uri.scheme {
+		Scheme::File => RootClass::File,
+		Scheme::Http => RootClass::Web(uri),
+		Scheme::Unknown => RootClass::Foreign,
+		_ => RootClass::Internal(uri),
+	})
+}
+
+/// The most an `ast_grep` call can fetch under `policy`: an anonymous URL
+/// root while `fetch_enabled`, nothing otherwise. Its internal roots resolve
+/// to local paths, so the deployment's credentialed resolvers play no part.
+const fn ast_grep_fetch_ceiling(policy: SearchPolicy) -> Option<FetchEffects> {
+	if policy.fetch_enabled {
+		Some(FetchEffects { credentials: false })
+	} else {
+		None
+	}
+}
+
 /// Workspace-scoped structural-search tool exposed as `ast_grep`.
 pub struct AstGrep<R> {
 	resolver: R,
+	policy:   SearchPolicy,
 	spec:     ToolSpec,
 }
 
-/// Returns the host-free `ast_grep@3` specification used by both the native
-/// registry and the generated `dyn ast_grep --help` surface.
-pub fn spec() -> ToolSpec {
+/// Returns the host-free `ast_grep@3` specification under `policy`.
+///
+/// Both the native registry and the generated `dyn ast_grep --help` surface
+/// use it. Its effects are document reads, plus the anonymous fetch of its URL
+/// roots while URL fetches are enabled.
+pub fn spec(policy: SearchPolicy) -> ToolSpec {
 	ToolSpec {
 		name:            sf!("ast_grep"),
 		rev:             Rev { family: Default::default(), n: 3 },
@@ -354,14 +419,7 @@ pub fn spec() -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		effects:         Effects {
-			documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
-			exec:      None,
-			inference: None,
-			desktop:   None,
-			fetch:     None,
-			subagents: 0,
-		},
+		effects:         search_effects(ast_grep_fetch_ceiling(policy)),
 		confinement:     omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
@@ -372,9 +430,28 @@ pub fn spec() -> ToolSpec {
 	}
 }
 
-/// Builds an `ast_grep` tool over the supplied environment search authority.
-pub fn tool<R: AstSearchResolver>(resolver: R) -> AstGrep<R> {
-	AstGrep { resolver, spec: spec() }
+/// Builds an `ast_grep` tool over the supplied environment search authority
+/// under `policy`.
+pub fn tool<R: AstSearchResolver>(resolver: R, policy: SearchPolicy) -> AstGrep<R> {
+	AstGrep { resolver, policy, spec: spec(policy) }
+}
+
+impl<R: AstSearchResolver> AstGrep<R> {
+	/// Every root of a call of `path` that fetches: a URL root while the
+	/// policy lets the web reader fetch it (the executor refuses it
+	/// otherwise, before resolving any root). A path whose roots do not parse
+	/// is refused before anything is resolved, and fetches nothing.
+	fn fetching_roots(&self, path: Option<&str>) -> impl Iterator<Item = Str> + '_ {
+		let roots = self
+			.policy
+			.fetch_enabled
+			.then(|| parse_targets(path).ok())
+			.flatten()
+			.unwrap_or_default();
+		roots
+			.into_iter()
+			.filter(|root| matches!(classify_root(root), Ok(RootClass::Web(_))))
+	}
 }
 
 impl<R: AstSearchResolver> Tool for AstGrep<R> {
@@ -383,8 +460,32 @@ impl<R: AstSearchResolver> Tool for AstGrep<R> {
 	type Payload = Payload;
 	type Update = Update;
 
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
 	fn spec(&self) -> &ToolSpec {
 		&self.spec
+	}
+
+	/// Every call reads documents; it fetches only when one of its roots is a
+	/// URL the policy lets the web reader fetch. A search of local or
+	/// internal roots is never more than a document read, in any mode.
+	fn invocation_effects(&self, params: &Params) -> Option<Effects> {
+		let fetch = self
+			.fetching_roots(params.path.as_deref())
+			.next()
+			.map(|_| FetchEffects { credentials: false });
+		Some(search_effects(fetch))
+	}
+
+	/// The authored spelling of every URL root, which the environment resolves
+	/// to the host it reaches.
+	fn fetch_locators(&self, params: &Params) -> Vec<Str> {
+		let mut locators = self
+			.fetching_roots(params.path.as_deref())
+			.collect::<Vec<_>>();
+		locators.sort_unstable();
+		locators.dedup();
+		locators
 	}
 
 	fn call<'c>(
@@ -433,6 +534,16 @@ impl<R: AstSearchResolver> Tool for AstGrep<R> {
 					return;
 				},
 			};
+			if !self.policy.fetch_enabled
+				&& let Some(root) = targets
+					.iter()
+					.find(|root| matches!(classify_root(root), Ok(RootClass::Web(_))))
+			{
+				yield done(Err(Fault {
+					message: sf!("URL search roots are disabled by tools.fetch.enabled: {root}"),
+				}));
+				return;
+			}
 			let explicit_lang = params.lang.as_deref().map(str::trim).filter(|value| !value.is_empty());
 			if let Some(lang) = explicit_lang
 				&& omp_ast::ops::resolve_supported_lang(lang).is_err()
@@ -972,6 +1083,11 @@ const fn fault(message: &'static str) -> Fault {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	};
+
 	use futures::{StreamExt as _, executor::block_on};
 	use omp_ast::ops::AstBinding;
 	use omp_tool::{Interrupt, Severity};
@@ -979,7 +1095,7 @@ mod tests {
 	use super::*;
 
 	fn search_events(root: PathBuf, raw: &str) -> Vec<Ev<Update, Payload, Fault>> {
-		let tool = tool(root);
+		let tool = tool(root, SearchPolicy::default());
 		let (feed, params) = IncomingParams::channel();
 		feed
 			.args_committed(Str::new(raw))
@@ -1003,7 +1119,7 @@ mod tests {
 
 	#[test]
 	fn revision_three_schema_is_the_generated_dyn_contract() {
-		let spec = spec();
+		let spec = spec(SearchPolicy::default());
 		assert_eq!(spec.rev, Rev { family: Str::default(), n: 3 });
 		let schema: serde_json::Value = serde_json::from_slice(&spec.schema).expect("JSON schema");
 		for field in
@@ -1164,7 +1280,7 @@ mod tests {
 	fn committed_search_observes_runtime_interrupts() {
 		let dir = tempfile::tempdir().expect("tempdir");
 		fs::write(dir.path().join("source.ts"), "call(1);\n").expect("write source");
-		let tool = tool(dir.path().to_path_buf());
+		let tool = tool(dir.path().to_path_buf(), SearchPolicy::default());
 		let (feed, params) = IncomingParams::channel();
 		feed
 			.args_committed(Str::new_static(r#"{"pat":"call($A)"}"#))
@@ -1181,7 +1297,7 @@ mod tests {
 
 	#[test]
 	fn lifts_both_historical_pagination_wires() {
-		let tool = tool(PathBuf::from("."));
+		let tool = tool(PathBuf::from("."), SearchPolicy::default());
 		let v1_args = br#"{"i":"Finding calls","notrunc":true,"pat":"$F($A)","cursor":7,"limit":3}"#;
 		let v1_verdict =
 			br#"{"kind":"ok","value":{"matches":[],"advisories":[],"total":12,"next_cursor":10}}"#;
@@ -1222,5 +1338,117 @@ mod tests {
 			value: sf!("42"),
 		}];
 		assert_eq!(render_bindings(&bindings), "$NAME=answer, $VALUE=42");
+	}
+
+	/// An authority that counts resolutions and resolves nothing.
+	#[derive(Clone, Default)]
+	struct CountingResolver {
+		resolutions: Arc<AtomicUsize>,
+	}
+
+	impl AstSearchResolver for CountingResolver {
+		fn resolve(
+			&self,
+			request: ResolveRequest,
+		) -> impl Future<Output = Result<Vec<ResolvedFile>, ResolveFault>> + Send + '_ {
+			self.resolutions.fetch_add(1, Ordering::Relaxed);
+			std::future::ready(Err(ResolveFault::AllTargetsMissing { targets: request.roots }))
+		}
+	}
+
+	fn params(path: &str) -> Params {
+		serde_json::from_value(serde_json::json!({ "pat": "call($A)", "path": path }))
+			.expect("ast_grep params")
+	}
+
+	/// Each root is classified the way the environment's resolver routes it:
+	/// only an http(s) URL is fetched; a `file://` URL and a workspace path are
+	/// local, a built-in scheme resolves to a local path, and a scheme outside
+	/// the vocabulary is refused. A `www.` spelling is a workspace path here.
+	#[test]
+	fn roots_are_classified_the_way_the_resolver_routes_them() {
+		for (root, class) in [
+			("src", "local"),
+			("src/**/*.rs", "local"),
+			("www.example.com/a.rs", "local"),
+			("file:///tmp/a.rs", "file"),
+			("https://example.com/a.rs", "web"),
+			("http://localhost:8080/a.rs", "web"),
+			("local://scratch.rs", "internal"),
+			("skill://review", "internal"),
+			("ssh://prod/src/a.rs", "internal"),
+			("custom://thing", "foreign"),
+		] {
+			let actual = match classify_root(root).expect(root) {
+				RootClass::Local => "local",
+				RootClass::File => "file",
+				RootClass::Web(_) => "web",
+				RootClass::Internal(_) => "internal",
+				RootClass::Foreign => "foreign",
+			};
+			assert_eq!(actual, class, "{root}");
+		}
+	}
+
+	/// The declared maximum holds the anonymous URL fetch exactly while URL
+	/// fetches are enabled, and each call is judged by its roots: only a URL
+	/// root fetches, named once in its authored spelling; local and internal
+	/// roots never do, under any policy. With URL fetches disabled a URL root
+	/// fetches nothing and the call is refused before any root is resolved.
+	#[test]
+	fn url_roots_are_the_only_fetches_and_follow_the_fetch_policy() {
+		let anonymous = Some(FetchEffects { credentials: false });
+		for fetch_enabled in [true, false] {
+			let policy = SearchPolicy { fetch_enabled, credentialed_fetch: true };
+			let tool = tool(CountingResolver::default(), policy);
+			assert_eq!(
+				tool.spec().effects,
+				search_effects(fetch_enabled.then_some(FetchEffects { credentials: false })),
+				"fetch_enabled {fetch_enabled}"
+			);
+			for (path, fetch, locators) in [
+				("src", None, &[][..]),
+				("file:///tmp/a.rs", None, &[]),
+				("local://scratch.rs; skill://review", None, &[]),
+				("ssh://prod/src/a.rs", None, &[]),
+				("custom://thing", None, &[]),
+				("https://example.com/a.rs", anonymous, &["https://example.com/a.rs"]),
+				("src; https://b.example/x.rs ;https://a.example/y.rs", anonymous, &[
+					"https://a.example/y.rs",
+					"https://b.example/x.rs",
+				]),
+				("https://a.example/y.rs;https://a.example/y.rs", anonymous, &[
+					"https://a.example/y.rs",
+				]),
+				("src;;https://a.example/y.rs", None, &[]),
+			] {
+				let context = format!("{path} (fetch_enabled {fetch_enabled})");
+				let params = params(path);
+				let judged = tool.invocation_effects(&params).expect("judged");
+				assert_eq!(judged, search_effects(fetch.filter(|_| fetch_enabled)), "{context}");
+				let expected = if fetch_enabled { locators } else { &[][..] };
+				assert_eq!(
+					tool.fetch_locators(&params),
+					expected.iter().copied().map(Str::new).collect::<Vec<_>>(),
+					"{context}"
+				);
+			}
+		}
+
+		let resolver = CountingResolver::default();
+		let disabled = tool(resolver.clone(), SearchPolicy {
+			fetch_enabled:      false,
+			credentialed_fetch: true,
+		});
+		let (feed, incoming) = IncomingParams::channel();
+		feed
+			.args_committed(Str::new_static(
+				r#"{"pat":"call($A)","path":"src;https://a.example/y.rs"}"#,
+			))
+			.expect("commit args");
+		let refused = result(&block_on(disabled.call(incoming).collect::<Vec<_>>()))
+			.expect_err("a URL root is refused while URL fetches are disabled");
+		assert!(refused.to_string().contains("tools.fetch.enabled"), "{refused}");
+		assert_eq!(resolver.resolutions.load(Ordering::Relaxed), 0, "nothing was resolved");
 	}
 }
