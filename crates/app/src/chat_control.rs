@@ -2364,7 +2364,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 		// The kernel and its environment outlive the session: host state derived
 		// from the previous journal (the network endpoints it approved for the
 		// session) must not serve the next one.
-		self.kernel.session_switched();
+		self.kernel.session_switched(&self.session);
 		if let Some(forwarder) = self.forwarder.take() {
 			// The old DOM's sender is gone; the forwarder drains what it
 			// buffered and ends, so nothing from the old session lands after
@@ -3745,11 +3745,11 @@ mod tests {
 
 	/// Records the session transitions the kernel tells its observers.
 	impl omp_agent::SessionObserver for OrderBridge {
-		fn rewound(&self) {
+		fn rewound(&self, _session: &Session) {
 			let _ = self.order.send("rewound");
 		}
 
-		fn switched(&self) {
+		fn switched(&self, _next: &Session) {
 			let _ = self.order.send("switched");
 		}
 	}

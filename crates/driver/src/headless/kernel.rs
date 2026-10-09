@@ -528,11 +528,11 @@ fn convar_reasoning(
 struct RevokeSessionGrants(omp_envd::SessionGrants);
 
 impl omp_agent::SessionObserver for RevokeSessionGrants {
-	fn rewound(&self) {
+	fn rewound(&self, _session: &Session) {
 		self.0.revoke();
 	}
 
-	fn switched(&self) {
+	fn switched(&self, _next: &Session) {
 		self.0.revoke();
 	}
 }
@@ -583,39 +583,60 @@ impl EnvToolExecutor {
 	/// Executes environment tools for `client`; every admission query the
 	/// environment raises (an `--approval-mode` tier above the call's
 	/// policy) becomes one prompt on `approvals`.
+	///
+	/// It reports the session's approval posture only once
+	/// [`install_tool_authority`] installs it.
 	#[must_use]
 	pub const fn new(client: omp_env::EnvClient, approvals: omp_agent::ApprovalRoute) -> Self {
 		Self { client, approvals, posture: PostureNotice(None) }
 	}
 }
 
-/// Installs the session's tool authority on `kernel`: `executor` runs the
-/// calls the environment admits, and `admission` admits the native calls the
-/// kernel runs itself.
+/// Installs the session's tool authority on `kernel`, which serves `session`
+/// first: `executor` runs the calls the environment admits, and `admission`
+/// admits the native calls the kernel runs itself.
 ///
-/// Both report the session's approval posture
-/// ([`SettingsAdmission::with_notices`]) from one shared report, so the live
-/// session is told once, at whichever admission comes first: over an attached
-/// project daemon every environment tool is admitted there, never by the
-/// kernel. A switch to another session ([`Kernel::session_switched`]) re-arms
-/// the report for the next session. A rewind does not: the session stays the
-/// same (a tool-tail retry rewinds too), even when the rewind drops the turn
-/// that holds the notice.
+/// When `admission` resolves a `yolo` that no sandbox confines
+/// ([`omp_envd::admission::ApprovalPosture`]), both report it from one shared
+/// report, a typed `approval-posture` notice on the kernel mailbox, at
+/// whichever admission comes first: over an attached project daemon every
+/// environment tool is admitted there, never by the kernel. The journal
+/// decides whether the report is due. It is due while the live branch of the
+/// session the kernel serves holds no notice of this posture: `session`
+/// decides it here, and the session the kernel serves decides it again after
+/// every rewind (a tool-tail retry included) and every switch to another
+/// session, through the session observer this registers.
+///
+/// Only this function wires the report: an executor or an admission installed
+/// on its own reports nothing.
 #[must_use]
 pub fn install_tool_authority<C>(
 	kernel: Kernel<C>,
+	session: &Session,
 	executor: EnvToolExecutor,
 	admission: SettingsAdmission,
 ) -> Kernel<C> {
-	let posture = admission.posture.clone();
-	if let Some(pending) = &posture.0 {
-		kernel
-			.jobs()
-			.observe_sessions(Arc::clone(pending) as Arc<dyn omp_agent::SessionObserver>);
+	let pending = omp_envd::admission::ApprovalPosture::resolve(
+		admission.settings.configured_approval(),
+		admission.sandbox,
+	)
+	.map(|posture| {
+		let pending = Arc::new(PendingPosture {
+			posture,
+			mailbox: kernel.mailbox(),
+			posted: std::sync::atomic::AtomicBool::new(false),
+		});
+		pending.sync(session);
+		pending
+	});
+	let posture = PostureNotice(pending.clone());
+	let kernel = kernel
+		.with_external_executor(Arc::new(EnvToolExecutor { posture: posture.clone(), ..executor }))
+		.with_tool_admission(Arc::new(SettingsAdmission { posture, ..admission }));
+	match pending {
+		Some(pending) => kernel.with_session_observer(pending),
+		None => kernel,
 	}
-	kernel
-		.with_external_executor(Arc::new(EnvToolExecutor { posture, ..executor }))
-		.with_tool_admission(Arc::new(admission))
 }
 
 const OUTCOME_REPLICATION_ATTEMPTS: usize = 3;
@@ -873,6 +894,9 @@ fn admission_specs(
 /// Resolves native-tool approval from the declared effect tier, session
 /// approval mode, and per-tool overrides, and keys a fetch on the hosts it
 /// reaches.
+///
+/// It reports the session's approval posture only once
+/// [`install_tool_authority`] installs it.
 pub struct SettingsAdmission {
 	settings:    omp_envd::tool_settings::ToolSettings,
 	sandbox:     omp_envd::admission::SandboxState,
@@ -898,23 +922,52 @@ pub struct SettingsAdmission {
 #[derive(Clone, Default)]
 struct PostureNotice(Option<Arc<PendingPosture>>);
 
-/// A posture that still has to be reported, and where to.
+/// A posture to report, where to, and whether the session the kernel serves
+/// has been told.
 struct PendingPosture {
 	posture: omp_envd::admission::ApprovalPosture,
 	mailbox: flume::Sender<omp_agent::Up>,
+	/// Set when an admission posts the report, and re-derived from the live
+	/// branch of the session the kernel serves ([`Self::sync`]).
 	posted:  std::sync::atomic::AtomicBool,
 }
 
-/// The kernel outlives the session it serves, so a switch to another session
-/// re-arms the report for that session's first admission.
-impl omp_agent::SessionObserver for PendingPosture {
-	/// A rewind keeps the session, and the report it was given.
-	fn rewound(&self) {}
-
-	fn switched(&self) {
+impl PendingPosture {
+	/// Marks the report spent exactly when the live branch of `session` holds
+	/// an `approval-posture` notice of this posture, whichever process
+	/// journaled it. A notice of another posture leaves this one due.
+	fn sync(&self, session: &Session) {
+		let dom = session.dom();
+		let name = PropKey::Custom(Str::new_static("name"));
+		let data = PropKey::from(omp_dom::PropId::Data);
+		let told = dom
+			.handles()
+			.filter_map(|handle| dom.get(handle))
+			.any(|node| {
+				node.tag == omp_dom::Tag::Known(omp_dom::KnownTag::Notice)
+					&& node.prop(&name).and_then(Value::as_str)
+						== Some(omp_envd::admission::APPROVAL_POSTURE_NOTICE)
+					&& matches!(node.prop(&data), Some(Value::Json(payload))
+						if serde_json::from_str::<omp_envd::admission::ApprovalPosture>(payload.get())
+							.is_ok_and(|told| told == self.posture))
+			});
 		self
 			.posted
-			.store(false, std::sync::atomic::Ordering::Release);
+			.store(told, std::sync::atomic::Ordering::Release);
+	}
+}
+
+/// The kernel outlives the session it serves, and a rewind can drop the turn
+/// that holds the notice (a tool-tail retry rewinds past it to the call's
+/// authorization), so the journal the kernel serves afterwards decides again
+/// whether the report is due.
+impl omp_agent::SessionObserver for PendingPosture {
+	fn rewound(&self, session: &Session) {
+		self.sync(session);
+	}
+
+	fn switched(&self, next: &Session) {
+		self.sync(next);
 	}
 }
 
@@ -977,29 +1030,6 @@ impl SettingsAdmission {
 	#[must_use]
 	pub fn with_fetch_hosts(mut self, namer: FetchHostNamer) -> Self {
 		self.fetch_hosts = Some(namer);
-		self
-	}
-
-	/// Reports a `yolo` that no sandbox confines once per session, as a typed
-	/// notice on `mailbox`, when the first call is admitted: downgraded to
-	/// `write` when it is the default, respected but unconfined when the user
-	/// asked for it. The calls the environment admits report it too once
-	/// [`install_tool_authority`] installs this admission.
-	#[must_use]
-	pub fn with_notices(mut self, mailbox: flume::Sender<omp_agent::Up>) -> Self {
-		self.posture = PostureNotice(
-			omp_envd::admission::ApprovalPosture::resolve(
-				self.settings.configured_approval(),
-				self.sandbox,
-			)
-			.map(|posture| {
-				Arc::new(PendingPosture {
-					posture,
-					mailbox,
-					posted: std::sync::atomic::AtomicBool::new(false),
-				})
-			}),
-		);
 		self
 	}
 }
@@ -2755,20 +2785,24 @@ pub async fn compose_kernel(
 	// its dynamic-device admissions and privileged mutations still fail
 	// closed.
 	let approvals = bind_environment_approvals(&kernel, kernel.inference().environment());
-	let notice_mailbox = kernel.mailbox();
 	// The native tools this kernel runs (every environment tool of an
 	// embedded fallback, an attached session's session tools) are admitted
 	// here, outside the environment's gate, so their fetches are keyed on the
 	// hosts that environment's resolvers name.
 	let fetch_hosts = kernel.inference().environment().fetch_hosts();
 	let admission = SettingsAdmission::new(&ctx, options.approval_mode, &project_root)
-		.with_notices(notice_mailbox)
 		.with_fetch_hosts(fetch_hosts);
-	// The calls the environment admits (every environment tool of a session
-	// attached to the project daemon, worker tools everywhere) report the
-	// session's approval posture too, once whichever admission comes first.
-	let mut kernel =
-		install_tool_authority(kernel, EnvToolExecutor::new(tool_client, approvals), admission);
+	// The kernel's admission and the calls the environment admits (every
+	// environment tool of a session attached to the project daemon, worker
+	// tools everywhere) report the session's approval posture, once, at
+	// whichever admission comes first; a resumed session already told of it
+	// is not told again.
+	let mut kernel = install_tool_authority(
+		kernel,
+		&session,
+		EnvToolExecutor::new(tool_client, approvals),
+		admission,
+	);
 	kernel.register_live_component(con_journal.live_component());
 	for component in live_python_components {
 		kernel.register_live_component(Box::new(component));
@@ -4146,29 +4180,49 @@ mod tests {
 
 	/// The session's one posture report is shared by the kernel's admission
 	/// and the environment executor ([`super::install_tool_authority`]): the
-	/// first admission at either posts the typed notice, a later one at either
-	/// adds nothing, a rewind keeps the live session's report spent, and a
-	/// switch to another session re-arms it for that session.
+	/// first admission at either posts the typed notice and a later one at
+	/// either adds nothing, until a rewind or a switch leaves the kernel on a
+	/// live branch without the notice, which makes it due again. (The notice
+	/// posted here reaches no journal, so every session below lacks it; the
+	/// driver's `approval_authority` tests journal it through a kernel.)
 	#[test]
-	fn the_posture_report_posts_once_per_session_served() {
+	fn the_posture_report_posts_once_until_the_journal_lacks_it() {
 		use omp_agent::{EnvEvent, SessionObserver as _, ToolAdmission as _, Up};
-		use omp_envd::{admission::SandboxState, tool_settings::ToolSettings};
+		use omp_envd::{
+			admission::{ApprovalPosture, SandboxState},
+			tool_settings::ToolSettings,
+		};
 		use omp_tool::{Confinement, Effects};
 
+		let scratch = tempfile::tempdir().expect("scratch");
+		let session = super::Session::create(
+			scratch.path().join("posture.oms"),
+			super::ComponentRegistry::standard(),
+		)
+		.expect("session");
 		let args = serde_json::value::RawValue::from_string(String::from("{}")).expect("raw args");
 		let (mailbox, notices) = flume::unbounded();
-		let admission = super::SettingsAdmission {
-			settings:    ToolSettings::default(),
-			sandbox:     SandboxState::Off,
-			posture:     super::PostureNotice::default(),
-			fetch_hosts: None,
-		}
-		.with_notices(mailbox);
-		// What `install_tool_authority` hands the executor and the session
-		// observers.
-		let executor = admission.posture.clone();
-		let Some(observer) = executor.0.clone() else {
+		let settings = ToolSettings::default();
+		let Some(posture) =
+			ApprovalPosture::resolve(settings.configured_approval(), SandboxState::Off)
+		else {
 			panic!("a defaulted yolo without a sandbox is reported");
+		};
+		// What `install_tool_authority` builds and hands the executor, the
+		// admission and the session observers, here marked spent so that only
+		// the journal can make it due.
+		let observer = Arc::new(super::PendingPosture {
+			posture,
+			mailbox,
+			posted: std::sync::atomic::AtomicBool::new(true),
+		});
+		observer.sync(&session);
+		let executor = super::PostureNotice(Some(Arc::clone(&observer)));
+		let admission = super::SettingsAdmission {
+			settings,
+			sandbox: SandboxState::Off,
+			posture: executor.clone(),
+			fetch_hosts: None,
 		};
 		let admit = || {
 			let _ = admission.admit("bash", &Effects::empty(), Confinement::ExecSandbox, &args, &[]);
@@ -4198,15 +4252,15 @@ mod tests {
 			 (sandbox off)."
 		);
 
-		observer.rewound();
+		observer.rewound(&session);
 		executor.post();
 		admit();
-		assert!(notices.is_empty(), "a rewind keeps the session, and its spent report");
+		assert_eq!(notices.drain().count(), 1, "a rewound branch without the notice is told once");
 
-		observer.switched();
+		observer.switched(&session);
 		executor.post();
 		admit();
-		assert_eq!(notices.drain().count(), 1, "the next session is told once");
+		assert_eq!(notices.drain().count(), 1, "a next session without the notice is told once");
 	}
 
 	#[tokio::test]

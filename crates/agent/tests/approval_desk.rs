@@ -589,11 +589,11 @@ impl Transitions {
 }
 
 impl omp_agent::SessionObserver for Transitions {
-	fn rewound(&self) {
+	fn rewound(&self, _session: &Session) {
 		self.rewinds.fetch_add(1, Ordering::SeqCst);
 	}
 
-	fn switched(&self) {
+	fn switched(&self, _next: &Session) {
 		self.switches.fetch_add(1, Ordering::SeqCst);
 	}
 }
@@ -670,7 +670,7 @@ async fn a_switch_away_from_a_session_grant_asks_again_and_tells_session_observe
 	let elsewhere = tempfile::tempdir().expect("tempdir");
 	let next = fresh_session(&elsewhere.path().join("next.oms"));
 	let previous = mem::replace(&mut harness.session, next);
-	harness.kernel.session_switched();
+	harness.kernel.session_switched(&harness.session);
 	harness.kernel.resync_session_state(&harness.session);
 	assert_eq!(transitions.seen(), (0, 1), "the switch was told, as a switch");
 	assert_eq!(prompts(&previous).len(), 1, "the previous journal keeps its grant");

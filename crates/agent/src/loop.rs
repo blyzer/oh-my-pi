@@ -792,13 +792,13 @@ impl<C> Kernel<C> {
 	}
 
 	/// Tells every [`crate::SessionObserver`] that the host replaced the live
-	/// session with another one (new, resumed, forked or branched, handed off).
+	/// session with `next` (new, resumed, forked or branched, handed off).
 	///
 	/// This kernel and the environment it composes outlive the session they
-	/// served, so a host calls this once per committed switch, before the next
-	/// session can run a command.
-	pub fn session_switched(&self) {
-		self.dispatcher.jobs().session_switched();
+	/// served, so a host calls this once per committed switch, before `next`
+	/// can run a command.
+	pub fn session_switched(&self, next: &Session) {
+		self.dispatcher.jobs().session_switched(next);
 	}
 
 	/// Applies rewind/resume lifecycle work to every runtime execution unit.
