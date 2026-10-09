@@ -47,7 +47,7 @@ use omp_ext::workspace_trust::inventory::{MCP_FILE, PROJECT_DIR, ROOT_MCP_FILE};
 use omp_proto::env::v1 as pb;
 use omp_tool::{
 	LeafCatalogSnapshot, LeafOwner, LeafReplacementError, LeafReplacementRegistry, LeafVersion,
-	RegistryLeaf, Rev,
+	RegistryLeaf, ResolutionPin, Rev,
 };
 use parking_lot::RwLock;
 use tokio::task;
@@ -282,6 +282,42 @@ impl McpService {
 			name:             name.to_string(),
 			definition_epoch: self.definition_epoch(),
 		})
+	}
+
+	/// The server a read of the opaque resource `uri` asks and the fetch that
+	/// is, for a read's judgment to pin
+	/// ([`manager::McpManager::resource_read_pin`]); no server and a fetch
+	/// while no live manager can tell, since a server mounted by the time the
+	/// read runs may be remote.
+	pub(crate) fn resource_read_pin(&self, uri: &str) -> ResolutionPin {
+		self.manager.read().as_ref().and_then(Weak::upgrade).map_or(
+			ResolutionPin { target: None, fetch: Some(manager::RESOURCE_READ_FETCH) },
+			|manager| manager.resource_read_pin(uri),
+		)
+	}
+
+	/// The server `pin` names, `server`, to read a resource from as the read
+	/// was judged ([`manager::McpManager::admit_pinned_read`]): refused when it
+	/// is no longer mounted (no live manager mounts it either), or when reading
+	/// it now performs a fetch beyond the judged one.
+	///
+	/// The reference carries the definition epoch read before the mount was
+	/// checked, so a remount between that check and the request is fenced
+	/// rather than asked ([`Self::resource`]).
+	pub(crate) fn pinned_resource_server(
+		&self,
+		server: &str,
+		pin: &ResolutionPin,
+	) -> Result<pb::McpServerRef, manager::PinnedReadError> {
+		let definition_epoch = self.definition_epoch();
+		self
+			.manager
+			.read()
+			.as_ref()
+			.and_then(Weak::upgrade)
+			.ok_or_else(|| manager::PinnedReadError::Unmounted { server: Str::from(server) })?
+			.admit_pinned_read(server, pin)?;
+		Ok(pb::McpServerRef { name: server.to_owned(), definition_epoch })
 	}
 
 	/// Builds one extension-scoped MCP CONTROL projection over the live manager.

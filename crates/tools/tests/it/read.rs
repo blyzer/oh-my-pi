@@ -53,6 +53,8 @@ struct Sources {
 	suffixes:  Arc<DashMap<String, SourceStat>>,
 	snapshots: Arc<Mutex<Vec<SnapshotRecord>>>,
 	responses: Arc<Mutex<VecDeque<Result<HttpResponse, WebError>>>>,
+	/// HTTP requests the web reader sent, answered or not.
+	requests:  Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -148,6 +150,7 @@ impl HttpClient for Sources {
 		&self,
 		_request: HttpRequest,
 	) -> impl Future<Output = Result<HttpResponse, WebError>> + Send + '_ {
+		self.requests.fetch_add(1, Ordering::Relaxed);
 		ready(
 			self
 				.responses
@@ -2374,5 +2377,278 @@ fn registry_lifts_every_earlier_read_revision_onto_the_live_one() {
 		assert_eq!(lifted.identity.rev, Rev { family: Default::default(), n: 3 });
 		assert_eq!(lifted.raw_args, original.raw_args);
 		assert_eq!(lifted.verdict, original.verdict);
+	}
+}
+
+/// A resolver standing in for a production one: it reads every resource as
+/// one fixed line and reports the same fetch for each, as a resolver that
+/// reaches a remote host (an `ssh://` alias, the GitHub API, a remote MCP
+/// server) does, or none, as one that reads local state does.
+#[derive(Clone)]
+struct EgressResolver {
+	fetch: Option<omp_tool::FetchEffects>,
+	reads: Arc<AtomicU64>,
+}
+
+impl Resolve for EgressResolver {
+	fn read<'a>(
+		&'a self,
+		_resource: &'a str,
+		_selector: &'a ParsedSelector,
+	) -> impl Future<Output = Result<CowBytes<'static>, Fault>> + Send + 'a {
+		self.reads.fetch_add(1, Ordering::Relaxed);
+		ready(Ok(CowBytes::from_static(b"resolved\n")))
+	}
+
+	fn read_fetch(&self, _resource: &str, _query: Option<&str>) -> Option<omp_tool::FetchEffects> {
+		self.fetch
+	}
+}
+
+/// A deployment's resolvers as production registers them: `ssh://`,
+/// `issue://`, `pr://` and `mcp://` fetch with stored credentials; session
+/// scratch, artifacts, memory, skills, vaults and the unknown-scheme fallback
+/// read local state. Returns the table and how many reads reached a resolver
+/// that fetches.
+fn egress_resolvers() -> (Arc<ResolverTable<EgressResolver>>, Arc<AtomicU64>) {
+	let remote_reads = Arc::new(AtomicU64::new(0));
+	let remote = EgressResolver {
+		fetch: Some(omp_tool::FetchEffects { credentials: true }),
+		reads: Arc::clone(&remote_reads),
+	};
+	let local = EgressResolver { fetch: None, reads: Arc::new(AtomicU64::new(0)) };
+	let mut builder = ResolverTable::builder();
+	for scheme in [Scheme::Ssh, Scheme::Issue, Scheme::Pr, Scheme::Mcp] {
+		builder
+			.register(SchemeEntry::new(scheme, true, false, "remote fixture"), remote.clone())
+			.expect("register a remote resolver");
+	}
+	for scheme in [Scheme::Local, Scheme::Artifact, Scheme::Memory, Scheme::Skill, Scheme::Vault] {
+		builder
+			.register(SchemeEntry::new(scheme, true, false, "local fixture"), local.clone())
+			.expect("register a local resolver");
+	}
+	builder
+		.install_unknown_fallback(local)
+		.expect("install the unknown-scheme fallback");
+	(Arc::new(builder.build()), remote_reads)
+}
+
+/// `read@3` over `sources` and [`egress_resolvers`] under `policy`, and how
+/// many reads reached a resolver that fetches.
+fn egress_read(
+	sources: Sources,
+	policy: read::ReadPolicy,
+) -> (read::ReadTool<Sources, Blobs, EgressResolver>, Arc<AtomicU64>) {
+	let (resolvers, remote_reads) = egress_resolvers();
+	let tool = read::tool_with_policy(
+		sources,
+		Blobs::default(),
+		resolvers,
+		Arc::new(read::conflicts::ConflictRegistry::default()),
+		policy,
+	);
+	(tool, remote_reads)
+}
+
+/// A registry holding [`egress_read`] under `policy`, which judges each call
+/// as the environment does.
+fn egress_registry(policy: read::ReadPolicy) -> omp_tool::Registry {
+	let mut registry = omp_tool::Registry::new();
+	registry
+		.register(
+			egress_read(Sources::default(), policy).0,
+			omp_tool::Presentation::Slot,
+			omp_tool::Claims {
+				precedence: omp_tool::Precedence::CORE,
+				claimant:   sf!("omp/core"),
+				replaces:   None,
+			},
+		)
+		.expect("read registers");
+	registry
+}
+
+/// The production policy shape: URL reads enabled and credentialed resolvers
+/// registered.
+fn credentialed_policy() -> read::ReadPolicy {
+	read::ReadPolicy { credentialed_fetch: true, ..read::ReadPolicy::default() }
+}
+
+/// Document reads plus `fetch`.
+fn read_effects(fetch: Option<omp_tool::FetchEffects>) -> omp_tool::Effects {
+	omp_tool::Effects {
+		documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::default() }),
+		fetch,
+		..omp_tool::Effects::empty()
+	}
+}
+
+/// Each call is judged by what its targets fetch, with the classification
+/// the executor dispatches on: a local path, a `file://` URL and every
+/// internal URI whose resolver reads local state (vault reads that ask the
+/// Obsidian CLI and unknown schemes included) only read documents; an http(s)
+/// URL, a `www.` host or a bare `host:port/` is an anonymous fetch; an
+/// `ssh://`, `issue://`, `pr://` or `mcp://` read fetches with credentials.
+/// Every spelling the executor may split the path into counts (a JSON array,
+/// a `;` or `,` list, quoted or `@`-prefixed targets), and the fetching
+/// targets are named in their canonical spelling, once each.
+#[test]
+fn read_judges_each_call_by_what_its_targets_fetch() {
+	let registry = egress_registry(credentialed_policy());
+	let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+	let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+	for (path, fetch, locators) in [
+		("notes.txt", None, &[][..]),
+		("src/lib.rs:10-20", None, &[]),
+		("src/lib.rs:@Widget.size", None, &[]),
+		("@notes.txt", None, &[]),
+		("\"notes.txt\"", None, &[]),
+		("file:///tmp/notes.txt", None, &[]),
+		("local://scratch.md", None, &[]),
+		("artifact://7", None, &[]),
+		("memory://root", None, &[]),
+		("skill://review", None, &[]),
+		("vault://notes/a.md", None, &[]),
+		("vault://_/a.md?op=read", None, &[]),
+		("vault://notes?op=search&q=todo", None, &[]),
+		("custom://thing", None, &[]),
+		("history://", None, &[]),
+		("https://docs.rs/serde", anonymous, &["https://docs.rs/serde"]),
+		("https://docs.rs/tokio:10-20", anonymous, &["https://docs.rs/tokio:10-20"]),
+		("  \"https://docs.rs/quoted\"  ", anonymous, &["https://docs.rs/quoted"]),
+		("www.example.com/page", anonymous, &["www.example.com/page"]),
+		("localhost:8080/", anonymous, &["localhost:8080/"]),
+		("ssh://prod/etc/hosts", credentialed, &["ssh://prod/etc/hosts"]),
+		("issue://5", credentialed, &["issue://5"]),
+		("pr://owner/repo/7/diff", credentialed, &["pr://owner/repo/7/diff"]),
+		("mcp://linear/issue/1", credentialed, &["mcp://linear/issue/1"]),
+		("notes.txt;https://docs.rs/x", anonymous, &["https://docs.rs/x"]),
+		(r#"["notes.txt","ssh://prod/x"]"#, credentialed, &["ssh://prod/x"]),
+		("a.txt,https://docs.rs/y,issue://9", credentialed, &["https://docs.rs/y", "issue://9"]),
+		("https://docs.rs/a;https://docs.rs/a", anonymous, &[
+			"https://docs.rs/a",
+			"https://docs.rs/a;https://docs.rs/a",
+		]),
+	] {
+		let arguments = json!({"i": "Reading", "path": path}).to_string();
+		assert_eq!(
+			registry.invocation_effects("read", &arguments).expect(path),
+			read_effects(fetch),
+			"{path}"
+		);
+		assert_eq!(
+			registry.fetch_locators("read", &arguments),
+			locators.iter().copied().map(Str::new).collect::<Vec<_>>(),
+			"{path}"
+		);
+	}
+}
+
+/// The declared maximum is what the policy lets a call fetch: the anonymous
+/// URL fetch while `fetch_enabled`, a credentialed one while the deployment's
+/// resolvers fetch with stored credentials, whatever `fetch_enabled` says. A
+/// local read is a document read under every policy; a URL read fetches only
+/// while URL reads are enabled (the executor refuses it otherwise); a
+/// credentialed read beyond the maximum is refused, never judged by it.
+#[test]
+fn read_maximum_holds_the_fetches_its_policy_permits() {
+	let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+	let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+	assert_eq!(read::spec(read::ReadPolicy::default()).effects, read_effects(anonymous));
+	for (fetch_enabled, credentialed_fetch, ceiling) in [
+		(true, false, anonymous),
+		(true, true, credentialed),
+		(false, true, credentialed),
+		(false, false, None),
+	] {
+		let context =
+			format!("fetch_enabled {fetch_enabled}, credentialed_fetch {credentialed_fetch}");
+		let policy =
+			read::ReadPolicy { fetch_enabled, credentialed_fetch, ..read::ReadPolicy::default() };
+		assert_eq!(read::spec(policy).effects, read_effects(ceiling), "{context}");
+		let registry = egress_registry(policy);
+		let judge =
+			|path: &str| registry.invocation_effects("read", &json!({ "path": path }).to_string());
+		assert_eq!(judge("notes.txt").expect("a local read"), read_effects(None), "{context}");
+		assert_eq!(
+			judge("https://docs.rs/serde").expect("a URL read"),
+			read_effects(fetch_enabled.then_some(omp_tool::FetchEffects { credentials: false })),
+			"{context}"
+		);
+		let ssh = judge("ssh://prod/etc/hosts");
+		if credentialed_fetch {
+			assert_eq!(ssh.expect("a credentialed read"), read_effects(credentialed), "{context}");
+		} else {
+			assert!(
+				matches!(ssh, Err(omp_tool::RegistryError::InvocationEffectsExceedMaximum { .. })),
+				"{context}: {ssh:?}"
+			);
+		}
+	}
+}
+
+/// The executor takes the route each target was judged by: a target judged
+/// to fetch reaches the web reader or a resolver that fetches, and one judged
+/// not to reaches neither. A path the executor may split is judged by every
+/// spelling, so whatever it runs is covered.
+#[tokio::test]
+async fn the_executor_takes_the_route_each_target_was_judged_by() {
+	let single = [
+		"notes.txt",
+		"file:///notes.txt",
+		"local://scratch.md",
+		"artifact://7",
+		"vault://notes?op=search&q=todo",
+		"custom://thing",
+		"https://fixture.invalid/page",
+		"www.fixture.invalid/page",
+		"ssh://prod/etc/hosts",
+		"issue://5",
+		"pr://owner/repo/7",
+		"mcp://linear/issue/1",
+	];
+	let listed = [
+		"notes.txt;https://fixture.invalid/x",
+		r#"["notes.txt","ssh://prod/x"]"#,
+		r#"["https://fixture.invalid/a","notes.txt"]"#,
+	];
+	for policy in
+		[credentialed_policy(), read::ReadPolicy { fetch_enabled: false, ..credentialed_policy() }]
+	{
+		for path in single.iter().chain(&listed) {
+			let sources = Sources::default();
+			sources.file("notes.txt", "alpha\n");
+			sources.responses.lock().push_back(Ok(HttpResponse {
+				final_url:    sf!("https://fixture.invalid/page"),
+				status:       200,
+				content_type: Some(sf!("text/plain")),
+				headers:      vec![(sf!("content-type"), sf!("text/plain"))].into(),
+				body:         Bytes::from_static(b"fetched\n"),
+			}));
+			let requests = Arc::clone(&sources.requests);
+			let (tool, remote_reads) = egress_read(sources, policy);
+			let judged = tool
+				.invocation_effects(&read::Params { path: Str::new(*path), question: None })
+				.expect("read judges every call");
+			let (feed, params) = IncomingParams::channel();
+			feed
+				.args_committed(Str::new(json!({ "path": path }).to_string()))
+				.expect("read invocation remains live");
+			let events = tool.call(params).collect::<Vec<_>>().await;
+			assert!(
+				events
+					.iter()
+					.any(|event| matches!(event, Ev::Done(ToolTerminal::Done { .. }))),
+				"{path}: {events:?}"
+			);
+			let fetched = requests.load(Ordering::Relaxed) + remote_reads.load(Ordering::Relaxed) != 0;
+			let context = format!("{path} (fetch_enabled {})", policy.fetch_enabled);
+			if single.contains(path) {
+				assert_eq!(fetched, judged.fetch.is_some(), "{context}");
+			} else {
+				assert!(!fetched || judged.fetch.is_some(), "{context}");
+			}
+		}
 	}
 }

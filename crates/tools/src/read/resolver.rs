@@ -18,7 +18,7 @@ use omp_core::{
 	CowBytes, Hash32, Str, sf, sparse_index::TrySparseIndex, sparse_map::SparseMap,
 	sparse_set::SparseSet,
 };
-use omp_tool::{ArtifactLifetime, Diag};
+use omp_tool::{ArtifactLifetime, Diag, FetchEffects};
 use smallvec::{SmallVec, smallvec};
 use strum::{EnumString, FromRepr, IntoStaticStr, VariantArray};
 
@@ -361,6 +361,21 @@ pub trait Resolve: Send + Sync + 'static {
 		_max_results: usize,
 	) -> impl Future<Output = Result<Vec<ResourceCompletion>, Fault>> + Send + 'a {
 		async { Ok(Vec::new()) }
+	}
+
+	/// The read-only network egress a read of `resource` (with `query`)
+	/// performs through this resolver, judged before the read runs from the
+	/// address it will resolve; `None` when the read stays in local or
+	/// environment-owned state.
+	///
+	/// `read@3` declares each call's fetch from it: the target is routed here
+	/// by the same classification the executor dispatches on
+	/// ([`crate::read::classify_target`]). A resolver that reaches a remote
+	/// host reports the fetch, with [`FetchEffects::credentials`] when it
+	/// presents stored credentials, and one whose answer depends on state that
+	/// can change before the read runs reports the fetch the read may perform.
+	fn read_fetch(&self, _resource: &str, _query: Option<&str>) -> Option<FetchEffects> {
+		None
 	}
 }
 
@@ -725,6 +740,26 @@ impl<R> ResolverTable<R> {
 }
 
 impl<R: Resolve> ResolverTable<R> {
+	/// The fetch a read of `resource` performs through the resolver `scheme`
+	/// routes to ([`Resolve::read_fetch`]); `None` when this deployment reads
+	/// no such scheme, whose read is refused before it reaches anything.
+	pub fn read_fetch(
+		&self,
+		scheme: Scheme,
+		resource: &str,
+		query: Option<&str>,
+	) -> Option<FetchEffects> {
+		self.entry(scheme)?.readable.then_some(())?;
+		self.get(scheme)?.read_fetch(resource, query)
+	}
+
+	/// The fetch a read of the raw-scheme `uri` performs through the
+	/// unknown-scheme fallback ([`Self::read_unknown_with_diags`]); `None`
+	/// without a fallback.
+	pub fn read_unknown_fetch(&self, uri: &str) -> Option<FetchEffects> {
+		self.unknown_fallback.as_ref()?.read_fetch(uri, None)
+	}
+
 	/// Dispatches one raw-scheme read through the separately installed
 	/// fallback. The complete authored URI is preserved for the host.
 	pub async fn read_unknown(

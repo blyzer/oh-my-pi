@@ -42,8 +42,8 @@ use omp_proto::{
 };
 use omp_tool::{
 	Abort, ArgIssue, ArgPath, CallOutcome, CapsBase, Confinement, Effects, ErasedEv, ErasedOutcome,
-	IncomingParams, Interrupt, ModelClass, PromptCaps, Registry, RegistryError, ToolIdentity,
-	ToolRoute, ToolTerminal,
+	IncomingParams, Interrupt, InvocationPins, ModelClass, PromptCaps, Registry, RegistryError,
+	ToolIdentity, ToolRoute, ToolTerminal,
 };
 use omp_tools::{
 	ask::PresenterSlot,
@@ -7637,6 +7637,7 @@ impl EnvServer {
 			let approvals = connection.owned_approvals(request_id);
 			let reflection = connection.owned_reflection(request_id);
 			let admission = gate(name.clone());
+			let pins = argument_scoped.then(Arc::default);
 			connection.requests.insert(
 				request_id,
 				RequestState::Invocation(InvocationState::Native {
@@ -7646,6 +7647,7 @@ impl EnvServer {
 					admission,
 					pending_commit: None,
 					effects: maximum_effects.clone(),
+					pins: pins.clone(),
 					confinement,
 					execution: execution.clone(),
 					request_scope: scope.map(|scope| scope.pty_denied),
@@ -7676,6 +7678,7 @@ impl EnvServer {
 				scope.is_some_and(|scope| scope.pty_denied),
 				principal.map(|principal| Str::from(principal.session_id.as_str())),
 				execution.write_scope.clone(),
+				pins,
 				edit_repair_context,
 				acp_context,
 				approvals,
@@ -7816,24 +7819,32 @@ impl EnvServer {
 			},
 		}
 
-		let (admission, admitted_effects, tool, delivery) =
-			match connection.invocation_mut(request_id, &request.invocation_id) {
-				Ok(
-					InvocationState::Native { admission, effects, execution, delivery, .. }
-					| InvocationState::Worker { admission, effects, execution, delivery, .. },
-				) => (
-					admission
-						.decide(self.workspace.root(), self.workspace.root())
-						.await,
-					effects.clone(),
-					execution.tool.clone(),
-					delivery.clone(),
-				),
-				Err((code, message)) => {
-					send_error(responses, request_id, code, message).await;
-					return;
-				},
-			};
+		let (admission, admitted_effects, tool, delivery, pins) = match connection
+			.invocation_mut(request_id, &request.invocation_id)
+		{
+			Ok(InvocationState::Native { admission, effects, execution, delivery, pins, .. }) => (
+				admission
+					.decide(self.workspace.root(), self.workspace.root())
+					.await,
+				effects.clone(),
+				execution.tool.clone(),
+				delivery.clone(),
+				pins.clone(),
+			),
+			Ok(InvocationState::Worker { admission, effects, execution, delivery, .. }) => (
+				admission
+					.decide(self.workspace.root(), self.workspace.root())
+					.await,
+				effects.clone(),
+				execution.tool.clone(),
+				delivery.clone(),
+				None,
+			),
+			Err((code, message)) => {
+				send_error(responses, request_id, code, message).await;
+				return;
+			},
+		};
 		let decision = match admission {
 			AdmissionDecision::Allowed { raw, bash, rewritten } => {
 				let _effective_bash = bash;
@@ -7841,7 +7852,7 @@ impl EnvServer {
 				// past what was admitted; unchanged arguments keep the envelope
 				// they were judged under.
 				if rewritten {
-					effective_effects(&self.registry, &tool, &raw, &admitted_effects)
+					effective_effects(&self.registry, &tool, &raw, &admitted_effects, pins.as_ref())
 						.map(|effects| (raw, effects))
 						.ok_or_else(|| widened_effects_denial(&request.invocation_id))
 				} else {
@@ -8425,7 +8436,9 @@ enum RequestState {
 
 /// One open tool invocation. `effects` is the envelope it is admitted under:
 /// the declared maximum until its arguments commit, then the call's
-/// argument-scoped effects ([`ConnectionState::scope_committed`]).
+/// argument-scoped effects ([`ConnectionState::scope_committed`]). A native
+/// call of a tool judged by its arguments is judged and run inside `pins`, so
+/// what its judgment resolved from live state is what its executor reaches.
 enum InvocationState {
 	Native {
 		id:             Str,
@@ -8434,6 +8447,7 @@ enum InvocationState {
 		admission:      AdmissionGate,
 		pending_commit: Option<pb::ArgsCommitted>,
 		effects:        Effects,
+		pins:           Option<Arc<InvocationPins>>,
 		confinement:    Confinement,
 		execution:      InvocationExecutionPolicy,
 		request_scope:  Option<bool>,
@@ -8839,6 +8853,9 @@ impl ConnectionState {
 	/// call's fetch locators reach ([`Registry::fetch_locators`]) are named by
 	/// the resolvers in `resources` that perform them, for the query: every
 	/// host they can name, and whether some locator reaches one they cannot.
+	/// A native call is judged inside the pins its executor runs in
+	/// ([`InvocationPins`]), so the hosts named and the envelope judged are the
+	/// ones it reaches.
 	///
 	/// Staged arguments are one JSON object, so they are UTF-8; were they not,
 	/// the call would keep its declared maximum.
@@ -8852,42 +8869,57 @@ impl ConnectionState {
 	) -> Result<Option<InvocationRefused>, (pb::ProtocolErrorCode, &'static str)> {
 		let sandbox = self.exec_host.sandbox_state();
 		let settings = &self.tool_settings;
-		let (id, admission, effects, confinement, execution) = match self
-			.requests
-			.get_mut(&request_id)
-		{
-			Some(RequestState::Invocation(state)) if state.id() == invocation_id => match state {
-				InvocationState::Native { id, admission, effects, confinement, execution, .. }
-				| InvocationState::Worker { id, admission, effects, confinement, execution, .. } => {
-					(id, admission, effects, *confinement, execution)
+		let (id, admission, effects, confinement, execution, pins) =
+			match self.requests.get_mut(&request_id) {
+				Some(RequestState::Invocation(state)) if state.id() == invocation_id => match state {
+					InvocationState::Native {
+						id,
+						admission,
+						effects,
+						confinement,
+						execution,
+						pins,
+						..
+					} => (id, admission, effects, *confinement, execution, pins.as_ref()),
+					InvocationState::Worker {
+						id, admission, effects, confinement, execution, ..
+					} => (id, admission, effects, *confinement, execution, None),
 				},
-			},
-			Some(RequestState::Invocation(_)) => {
-				return Err((
-					pb::ProtocolErrorCode::InvalidArgument,
-					"invocation_id does not match the open request",
-				));
-			},
-			Some(_) => {
-				return Err((
-					pb::ProtocolErrorCode::PreconditionFailed,
-					"request_id is not an invocation stream",
-				));
-			},
-			None => return Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
-		};
+				Some(RequestState::Invocation(_)) => {
+					return Err((
+						pb::ProtocolErrorCode::InvalidArgument,
+						"invocation_id does not match the open request",
+					));
+				},
+				Some(_) => {
+					return Err((
+						pb::ProtocolErrorCode::PreconditionFailed,
+						"request_id is not an invocation stream",
+					));
+				},
+				None => return Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
+			};
 		// Only the arguments the gate staged scope the call. A commit the gate
 		// refused never reaches here, and a repeated commit after the query
 		// stages nothing, so it never rescopes the call; it is refused later.
 		if admission.is_staged() {
 			if let Ok(raw) = str::from_utf8(raw) {
-				match registry.invocation_effects(&execution.tool, raw) {
-					Ok(scoped) => *effects = scoped,
+				let judged = InvocationPins::judge(pins, || {
+					let scoped = registry.invocation_effects(&execution.tool, raw)?;
+					let named = scoped.fetch.is_some().then(|| {
+						let locators = registry.fetch_locators(&execution.tool, raw);
+						resolve_locators(Some(resources), &locators)
+					});
+					Ok((scoped, named))
+				});
+				match judged {
+					Ok((scoped, named)) => {
+						*effects = scoped;
+						if let Some(named) = named {
+							admission.name_fetch_hosts(named);
+						}
+					},
 					Err(source) => return Ok(Some(InvocationRefused::Effects { source })),
-				}
-				if effects.fetch.is_some() {
-					let locators = registry.fetch_locators(&execution.tool, raw);
-					admission.name_fetch_hosts(resolve_locators(Some(resources), &locators));
 				}
 			}
 			if admission.is_pending() {
@@ -9302,6 +9334,7 @@ async fn spawn_native_invocation(
 	pty_denied: bool,
 	session_id: Option<Str>,
 	write_scope: Option<Arc<WriteScope>>,
+	pins: Option<Arc<InvocationPins>>,
 	edit_repair: InvocationEditRepairContext,
 	acp: InvocationAcpBackends,
 	approvals: Option<OwnedApprovals>,
@@ -9321,8 +9354,9 @@ async fn spawn_native_invocation(
 	// task-local scope wrappers around it move a pointer, not the body: nested
 	// by value, six wrappers overflow a worker stack in debug builds. The
 	// approval and reflection relay scopes sit inside the box for the same
-	// reason.
-	tokio::spawn(write_scope::scoped(
+	// reason. The pins the call's judgment fixed wrap it all, so the executor
+	// reaches what was judged.
+	let invocation = write_scope::scoped(
 		write_scope,
 		with_invocation_scope(
 			pty_denied,
@@ -9508,7 +9542,8 @@ async fn spawn_native_invocation(
 				),
 			),
 		),
-	));
+	);
+	tokio::spawn(InvocationPins::scope(pins, invocation));
 	let _ = start.recv_async().await;
 }
 
@@ -10301,17 +10336,17 @@ async fn send_policy_denied_verdict(
 }
 
 /// The effects of the call its executor will run, judged from the effective
-/// arguments `raw`; `None` when they are not a subset of the envelope the call
-/// was admitted under.
+/// arguments `raw` inside the call's `pins`; `None` when they are not a subset
+/// of the envelope the call was admitted under.
 fn effective_effects(
 	registry: &Registry,
 	tool: &str,
 	raw: &[u8],
 	admitted: &Effects,
+	pins: Option<&Arc<InvocationPins>>,
 ) -> Option<Effects> {
-	let effects = registry
-		.invocation_effects(tool, str::from_utf8(raw).ok()?)
-		.ok()?;
+	let raw = str::from_utf8(raw).ok()?;
+	let effects = InvocationPins::judge(pins, || registry.invocation_effects(tool, raw)).ok()?;
 	effects.is_subset_of(admitted).then_some(effects)
 }
 
@@ -16511,7 +16546,7 @@ mod tests {
 	async fn scoped_probe_client(
 		server: &Arc<EnvServer>,
 		approval_mode: pb::ApprovalMode,
-		admission: ScriptedAdmission,
+		admission: impl omp_env::Admitter,
 	) -> (EnvClient, JoinHandle<()>) {
 		let (client, transport) = EnvClient::in_process(64);
 		client.set_admitter(admission);
@@ -16992,6 +17027,406 @@ mod tests {
 			.expect("a verdict");
 			assert!(refusing.seen.lock().is_empty(), "{invocation_id}: never asks");
 			assert!(!verdict.is_error, "{invocation_id}: {}", String::from_utf8_lossy(&verdict.json));
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// Document reads plus `fetch`, the envelope of one `read@3` call.
+	fn read_effects(fetch: Option<omp_tool::FetchEffects>) -> Effects {
+		Effects {
+			documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+			fetch,
+			..Effects::empty()
+		}
+	}
+
+	/// A loopback port nothing listens on: a fetch from it is refused at once.
+	fn closed_loopback_port() -> u16 {
+		std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+			.and_then(|listener| listener.local_addr())
+			.expect("a free loopback port")
+			.port()
+	}
+
+	/// The production `read@3` declares the most its resolvers can fetch, a
+	/// credentialed fetch, and judges each call by the resolver that reads
+	/// each target: a local path, an internal URI that reads local state, a
+	/// vault read that asks the Obsidian CLI and a scheme only the RPC host
+	/// serves are document reads; an http(s) URL is an anonymous fetch; an
+	/// `ssh://` host, `issue://`, `pr://` and an `mcp://` resource no mounted
+	/// server advertises yet are credentialed fetches. A local read is `read`
+	/// tier and runs unasked in every mode and sandbox state; a fetch asks
+	/// only under `always-ask`. With URL reads disabled the maximum keeps the
+	/// credentialed fetch and a URL read fetches nothing.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn production_read_declares_its_fetches_and_local_reads_stay_read() {
+		use crate::{
+			admission::{
+				ApprovalMode, ApprovalPolicy, ApprovalTier, SandboxState, SandboxUnavailable,
+			},
+			tool_settings::ToolSettings,
+		};
+
+		let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+		let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+		let (server, _root, _state) = probe_daemon(Registry::new()).await;
+		let registry = server.registry();
+		assert_eq!(registry.effects_owned("read").expect("read is live"), read_effects(credentialed));
+		let sandboxes = [SandboxState::Active, SandboxState::Off, SandboxState::Unavailable {
+			cause: SandboxUnavailable::BackendUnavailable,
+		}];
+		for (path, fetch) in [
+			("notes.txt", None),
+			("src/lib.rs:1-5", None),
+			("file:///tmp/notes.txt", None),
+			("artifact://1", None),
+			("local://scratch.md", None),
+			("vault://notes/a.md", None),
+			("vault://_/a.md?op=read", None),
+			("vault://notes?op=search&q=todo", None),
+			("custom://thing", None),
+			("ssh://", None),
+			("https://docs.rs/serde", anonymous),
+			("docs.rs:443/", anonymous),
+			("ssh://prod/etc/hosts", credentialed),
+			("issue://5", credentialed),
+			("pr://owner/repo/7", credentialed),
+			("mcp://unadvertised/resource", credentialed),
+			("notes.txt;https://docs.rs/x", anonymous),
+		] {
+			let effects = registry
+				.invocation_effects("read", &serde_json::json!({ "path": path }).to_string())
+				.expect(path);
+			assert_eq!(effects, read_effects(fetch), "{path}");
+			let tier = if fetch.is_some() {
+				ApprovalTier::Fetch
+			} else {
+				ApprovalTier::Read
+			};
+			for mode in [
+				None,
+				Some(ApprovalMode::AlwaysAsk),
+				Some(ApprovalMode::Write),
+				Some(ApprovalMode::Yolo),
+			] {
+				for sandbox in sandboxes {
+					let decision = ToolSettings::default()
+						.with_approval_mode_override(mode)
+						.approval_for("c", "read", &effects, Confinement::Host, sandbox);
+					let asks = fetch.is_some() && mode == Some(ApprovalMode::AlwaysAsk);
+					assert_eq!(
+						(decision.tier, decision.policy),
+						(
+							tier,
+							if asks {
+								ApprovalPolicy::Prompt
+							} else {
+								ApprovalPolicy::Allow
+							}
+						),
+						"{path} under {mode:?} with sandbox {sandbox:?}"
+					);
+				}
+			}
+		}
+		drop(server);
+
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let con = Arc::new(Ctx::new());
+		con.run("sv_fetch_enabled false")
+			.expect("disable URL reads");
+		let disabled = EnvServer::open_local(
+			root.path(),
+			state.path(),
+			Registry::new(),
+			ExtHostConfig::new(
+				PathBuf::from("unused"),
+				Principal::new(sf!("test-principal"), sf!("Test Principal")),
+				sf!("test-session"),
+				1,
+			),
+			&con,
+			Arc::new(ConvarControlFactory::new(Arc::clone(&con))),
+			RegistryBridges::default(),
+		)
+		.await
+		.expect("local environment");
+		let registry = disabled.registry();
+		assert_eq!(registry.effects_owned("read").expect("read is live"), read_effects(credentialed));
+		for (path, fetch) in [
+			("notes.txt", None),
+			("https://docs.rs/serde", None),
+			("ssh://prod/etc/hosts", credentialed),
+		] {
+			assert_eq!(
+				registry
+					.invocation_effects("read", &serde_json::json!({ "path": path }).to_string())
+					.expect(path),
+				read_effects(fetch),
+				"{path} with URL reads disabled"
+			);
+		}
+	}
+
+	/// The production `read@3` over a connection. Under `always-ask` a URL,
+	/// `ssh://` or `issue://` read asks once, its query reporting the fetch the
+	/// call was judged by and every host its targets reach, named by the
+	/// resolver that reads each, and a refused prompt reads nothing. A local
+	/// read never asks in any mode. Under `write` a URL read runs unasked, and
+	/// plan mode lets it through: a fetch writes nothing.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn read_queries_name_the_hosts_its_targets_fetch() {
+		use crate::fetch_host::FetchHost;
+
+		let anonymous = Some(omp_tool::FetchEffects { credentials: false });
+		let credentialed = Some(omp_tool::FetchEffects { credentials: true });
+		let (server, root, _state) = probe_daemon(Registry::new()).await;
+		std::fs::write(root.path().join("notes.txt"), "alpha\n").expect("local file");
+		std::fs::create_dir(root.path().join(".git")).expect("git directory");
+		std::fs::write(
+			root.path().join(".git/config"),
+			"[remote \"origin\"]\n\turl = git@GHE.example.com:Owner/Repo.git\n",
+		)
+		.expect("git config");
+		for (invocation_id, path, fetch, named) in [
+			("url", "https://docs.rs/serde", anonymous, vec![FetchHost::http("docs.rs", 443)]),
+			("ssh", "ssh://prod/etc/hosts", credentialed, vec![FetchHost::ssh("prod")]),
+			("issue", "issue://5", credentialed, vec![FetchHost::github("ghe.example.com")]),
+			("listed", r#"["https://docs.rs/a","notes.txt","https://crates.io/b"]"#, anonymous, vec![
+				FetchHost::http("crates.io", 443),
+				FetchHost::http("docs.rs", 443),
+			]),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"read",
+				invocation_id,
+				serde_json::json!({ "path": path }),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(verdict.is_error, "{invocation_id}: the refused prompt denies the read");
+			let seen = refusing.seen.lock().clone();
+			assert_eq!(seen.len(), 1, "{invocation_id}: one query");
+			let effects = seen[0]
+				.effects
+				.as_ref()
+				.map(|envelope| Effects::try_from(envelope).expect("a typed envelope"))
+				.expect("the query reports the envelope");
+			assert_eq!(effects, read_effects(fetch), "{invocation_id}");
+			let hosts = seen[0]
+				.fetch
+				.iter()
+				.map(|target| FetchHost::try_from(target).expect("a named host"))
+				.collect::<Vec<_>>();
+			assert_eq!(hosts, named, "{invocation_id}");
+			assert!(!seen[0].fetch_unnamed, "{invocation_id}: every host is named");
+			drop(client);
+			serving.abort();
+		}
+
+		for mode in [pb::ApprovalMode::AlwaysAsk, pb::ApprovalMode::Write, pb::ApprovalMode::Yolo] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"read",
+				"local",
+				serde_json::json!({ "path": "notes.txt" }),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(refusing.seen.lock().is_empty(), "{mode:?}: a local read never asks");
+			assert!(!verdict.is_error, "{mode:?}: {}", String::from_utf8_lossy(&verdict.json));
+			assert!(String::from_utf8_lossy(&verdict.json).contains("alpha"), "{mode:?}");
+			drop(client);
+			serving.abort();
+		}
+
+		let unreachable = format!("http://127.0.0.1:{}/x", closed_loopback_port());
+		let plan = pb::ToolRestrictions {
+			plan_file: Some("local://PLAN.md".to_owned()),
+			..pb::ToolRestrictions::default()
+		};
+		for (mode, restrictions) in
+			[(pb::ApprovalMode::Write, None), (pb::ApprovalMode::Yolo, Some(plan))]
+		{
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			invoke_probe(
+				&client,
+				&server,
+				"read",
+				"unasked-fetch",
+				serde_json::json!({ "path": unreachable }),
+				restrictions,
+			)
+			.await
+			.expect("the fetch is admitted and runs");
+			assert!(refusing.seen.lock().is_empty(), "{mode:?}: a fetch is not asked");
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// Arguments of [`PinningProbe`]: none.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct PinningProbeParams {}
+
+	/// What one [`PinningProbe`] call's executor found pinned, beside what the
+	/// live state named by the time it ran.
+	type PinnedRun = (Option<omp_tool::ResolutionPin>, Str);
+
+	/// A native tool whose judgment reads live state, as `read` reads which
+	/// MCP server advertises a resource: judging a call pins the target `live`
+	/// names then. Its calls write documents, so `always-ask` asks. Its
+	/// executor records what it finds pinned beside what `live` names by the
+	/// time it runs.
+	struct PinningProbe {
+		spec: omp_tool::ToolSpec,
+		live: Arc<Mutex<Str>>,
+		ran:  Arc<Mutex<Vec<PinnedRun>>>,
+	}
+
+	impl omp_tool::Tool for PinningProbe {
+		type Fault = serde_json::Value;
+		type Params = PinningProbeParams;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, _params: &PinningProbeParams) -> Option<Effects> {
+			InvocationPins::pin("probe", "target", || omp_tool::ResolutionPin {
+				target: Some(self.live.lock().clone()),
+				fetch:  None,
+			});
+			Some(self.spec.effects.clone())
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				params.committed().await.expect("probe commitment");
+				let pinned = InvocationPins::pinned("probe", "target");
+				self.ran.lock().push((pinned, self.live.lock().clone()));
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "ran"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("ran") }]
+		}
+	}
+
+	/// Allows every admission query once the live state has moved on, as it
+	/// may while the user is asked.
+	struct MovingAdmission {
+		live: Arc<Mutex<Str>>,
+	}
+
+	impl omp_env::Admitter for MovingAdmission {
+		type Future<'client> = future::Ready<pb::Admission>;
+
+		fn admit(&self, query: pb::AdmitInvocation) -> Self::Future<'_> {
+			*self.live.lock() = sf!("moved");
+			future::ready(pb::Admission {
+				invocation_id: query.invocation_id,
+				allow: true,
+				..pb::Admission::default()
+			})
+		}
+	}
+
+	/// A native call is judged and run inside one set of pins: what its
+	/// judgment at commit resolved from live state is what its executor
+	/// reaches, though that state moved while the user was asked. Each call
+	/// judges afresh.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_native_call_runs_inside_the_pins_its_judgment_fixed() {
+		let live = Arc::new(Mutex::new(sf!("judged")));
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let mut registry = Registry::new();
+		registry
+			.register(
+				PinningProbe {
+					spec: omp_tool::ToolSpec {
+						name:            sf!("pinning_probe"),
+						rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+						description:     sf!("judges each call by live state"),
+						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						constraint:      omp_tool::Constraint::None,
+						effects:         Effects {
+							documents: Some(omp_tool::DocEffects {
+								read:        true,
+								write_globs: Arc::from([sf!("**")]),
+							}),
+							..Effects::empty()
+						},
+						confinement:     Confinement::Host,
+						projection_code: [0; 32],
+					},
+					live: Arc::clone(&live),
+					ran:  Arc::clone(&ran),
+				},
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the pinning probe");
+		let (server, _root, _state) = probe_daemon(registry).await;
+		let judged = |target: &'static str| omp_tool::ResolutionPin {
+			target: Some(Str::new_static(target)),
+			fetch:  None,
+		};
+		for (invocation_id, expected) in [
+			("first", (Some(judged("judged")), sf!("moved"))),
+			("second", (Some(judged("moved")), sf!("moved"))),
+		] {
+			let admission = MovingAdmission { live: Arc::clone(&live) };
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, admission).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"pinning_probe",
+				invocation_id,
+				serde_json::json!({}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(!verdict.is_error, "{invocation_id}: {}", String::from_utf8_lossy(&verdict.json));
+			assert_eq!(ran.lock().pop(), Some(expected), "{invocation_id}");
 			drop(client);
 			serving.abort();
 		}

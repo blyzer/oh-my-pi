@@ -392,6 +392,10 @@ pub fn spec() -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		// Language servers are environment-ambient processes: the environment
+		// starts them at warm-up and when any document opens (a `read` too),
+		// under the `lsp` configuration it trusts, not per call. Neither this
+		// envelope nor `read@3`'s declares their spawn.
 		effects:         Effects {
 			documents: Some(DocEffects {
 				read:        true,

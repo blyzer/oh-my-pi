@@ -265,12 +265,22 @@ where
 	type Payload = T::Payload;
 	type Update = T::Update;
 
+	const ARGUMENT_SCOPED_EFFECTS: bool = T::ARGUMENT_SCOPED_EFFECTS;
+
 	fn spec(&self) -> &ToolSpec {
 		self.inner.spec()
 	}
 
 	fn execution_mode(&self) -> ExecutionMode {
 		self.inner.execution_mode()
+	}
+
+	fn invocation_effects(&self, params: &Self::Params) -> Option<omp_tool::Effects> {
+		self.inner.invocation_effects(params)
+	}
+
+	fn fetch_locators(&self, params: &Self::Params) -> Vec<Str> {
+		self.inner.fetch_locators(params)
 	}
 
 	fn prompt_examples(&self) -> &[omp_tool::ToolPromptExample] {
@@ -4010,20 +4020,36 @@ pub(crate) fn build_environment_declaration_inputs(
 		}
 	};
 	Ok(EnvironmentDeclarationInputs {
-		read_policy: omp_tools::read::ReadPolicy {
-			fetch_enabled:      tool_settings.fetch_enabled,
-			render_markdown:    tool_settings.render_markdown,
-			auto_resize_images: tool_settings.auto_resize_images,
-			hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
-			summarize:          tool_settings.read_summarize,
-			line_numbers:       tool_settings.read_line_numbers,
-		},
+		read_policy: production_read_policy(tool_settings, &selected_edit),
 		selected_edit,
 		eval_description,
 		shell_snapshot,
 		memory,
 		managed_skills: autolearn_settings.enabled && content.managed_skills_root.is_some(),
 	})
+}
+
+/// The `read@3` policy of a production environment, the one both its
+/// declaration and its executor are built from, so the effects the
+/// environment declares for `read` are the ones its calls are judged by.
+///
+/// [`production_url_resolvers`] registers the resolvers that fetch with stored
+/// credentials (`ssh://`, `issue://`, `pr://`, `mcp://`) whatever
+/// `tools.fetch.enabled` says, so the maximum always holds a credentialed
+/// fetch; the setting only removes the anonymous URL fetch.
+fn production_read_policy(
+	tool_settings: &ToolSettings,
+	selected_edit: &Rev,
+) -> omp_tools::read::ReadPolicy {
+	omp_tools::read::ReadPolicy {
+		fetch_enabled:      tool_settings.fetch_enabled,
+		credentialed_fetch: true,
+		render_markdown:    tool_settings.render_markdown,
+		auto_resize_images: tool_settings.auto_resize_images,
+		hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
+		summarize:          tool_settings.read_summarize,
+		line_numbers:       tool_settings.read_line_numbers,
+	}
 }
 
 #[derive(Clone)]
@@ -4522,14 +4548,7 @@ pub(crate) fn production_registry<
 		read_blobs.clone(),
 		Arc::clone(&resolvers),
 		Arc::clone(&conflicts),
-		omp_tools::read::ReadPolicy {
-			fetch_enabled:      tool_settings.fetch_enabled,
-			render_markdown:    tool_settings.render_markdown,
-			auto_resize_images: tool_settings.auto_resize_images,
-			hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
-			summarize:          tool_settings.read_summarize,
-			line_numbers:       tool_settings.read_line_numbers,
-		},
+		production_read_policy(tool_settings, &selected_edit),
 	);
 	if tool_settings.enabled("read") {
 		environment_registry(&mut registry, read, essential_presentation(policy), core_claims())?;

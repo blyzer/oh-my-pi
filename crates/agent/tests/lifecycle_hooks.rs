@@ -16,8 +16,9 @@ use omp_journal::{blob::BlobStore, kind};
 use omp_proto::toolhost::v1::HookEventId;
 use omp_tool::{
 	Claims, Confinement, Constraint, Effects, Ev, ExecEffects, HostToolExecutor, HostToolInvocation,
-	HostToolResult, HostToolSpec, HostToolUpdateSink, IncomingParams, Part, Precedence,
-	Presentation, PromptCaps, Registry, Rev, Tool, ToolSpec, ToolTerminal,
+	HostToolResult, HostToolSpec, HostToolUpdateSink, IncomingParams, InvocationPins, Part,
+	Precedence, Presentation, PromptCaps, Registry, ResolutionPin, Rev, Tool, ToolSpec,
+	ToolTerminal,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -727,6 +728,149 @@ async fn native_admission_judges_each_call_by_its_arguments() {
 	let mut ran = runs.lock().clone();
 	ran.sort_unstable();
 	assert_eq!(ran, [0, 1, 3], "the call judged beyond the maximum never ran");
+}
+
+/// What one [`PinningTool`] call's executor found pinned, beside what the live
+/// state named by the time it ran.
+type PinnedRun = (Option<ResolutionPin>, Str);
+
+/// A tool whose judgment reads live state, as `read` reads which MCP server
+/// advertises a resource: judging a call pins the target `live` names then.
+/// Its executor records what it finds pinned beside what `live` names by the
+/// time it runs.
+struct PinningTool {
+	spec: ToolSpec,
+	live: Arc<Mutex<Str>>,
+	ran:  Arc<Mutex<Vec<PinnedRun>>>,
+}
+
+impl Tool for PinningTool {
+	type Fault = Value;
+	type Params = Value;
+	type Payload = Value;
+	type Update = Value;
+
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+	fn spec(&self) -> &ToolSpec {
+		&self.spec
+	}
+
+	fn invocation_effects(&self, _params: &Value) -> Option<Effects> {
+		InvocationPins::pin("probe", "target", || ResolutionPin {
+			target: Some(self.live.lock().clone()),
+			fetch:  None,
+		});
+		Some(read_documents())
+	}
+
+	fn call<'c>(
+		&'c self,
+		mut params: IncomingParams<'c>,
+	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		stream! {
+			let args = params.whole::<Value>().await.expect("pinning args decode");
+			let pinned = InvocationPins::pinned("probe", "target");
+			self.ran.lock().push((pinned, self.live.lock().clone()));
+			yield Ev::Done(ToolTerminal::Done { result: Ok(args), useless: false });
+		}
+	}
+
+	fn prompt(&self, view: Result<&Value, &Value>, _: &PromptCaps) -> Vec<Part> {
+		vec![Part::Json {
+			json: Bytes::from(serde_json::to_vec(view.unwrap_or_else(|fault| fault)).expect("JSON")),
+		}]
+	}
+}
+
+/// Records what each call's judgment pinned as admission sees it, then
+/// allows the call once the live state has moved on, as it may while the
+/// user is asked.
+struct MovingAdmission {
+	live: Arc<Mutex<Str>>,
+	seen: Arc<Mutex<Vec<Option<ResolutionPin>>>>,
+}
+
+impl ToolAdmission for MovingAdmission {
+	fn admit(
+		&self,
+		_name: &str,
+		_effects: &Effects,
+		_confinement: Confinement,
+		_args: &serde_json::value::RawValue,
+		_fetch_locators: &[Str],
+	) -> ToolAdmissionVerdict {
+		self
+			.seen
+			.lock()
+			.push(InvocationPins::pinned("probe", "target"));
+		*self.live.lock() = sf!("moved");
+		ToolAdmissionVerdict::Allow
+	}
+}
+
+/// A native call is judged, admitted and run inside one set of pins: what
+/// its judgment resolved from live state is what admission names and what
+/// its executor reaches, though that state moved before it ran. Each call
+/// judges afresh.
+#[tokio::test]
+async fn a_native_call_runs_inside_the_pins_its_judgment_fixed() {
+	let live = Arc::new(Mutex::new(sf!("judged")));
+	let ran = Arc::new(Mutex::new(Vec::new()));
+	let seen = Arc::new(Mutex::new(Vec::new()));
+	let mut registry = Registry::new();
+	registry
+		.register(
+			PinningTool {
+				spec: ToolSpec {
+					name:            sf!("pinning"),
+					rev:             Rev { family: sf!("test"), n: 1 },
+					description:     sf!("judge each call by live state"),
+					schema:          Bytes::from_static(br#"{"type":"object"}"#),
+					constraint:      Constraint::None,
+					effects:         read_documents(),
+					confinement:     Confinement::Host,
+					projection_code: [11; 32],
+				},
+				live: Arc::clone(&live),
+				ran:  Arc::clone(&ran),
+			},
+			Presentation::Slot,
+			Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+		)
+		.expect("pinning tool registers");
+	let temp = tempfile::tempdir().expect("tempdir");
+	let (inference, _) = ScriptedInference::new([
+		tool_script("first", "pinning", serde_json::json!({})),
+		tool_script("second", "pinning", serde_json::json!({})),
+		text_script("done"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(registry),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_tool_admission(Arc::new(MovingAdmission {
+		live: Arc::clone(&live),
+		seen: Arc::clone(&seen),
+	}));
+	let mut session = fresh_session(&temp.path().join("pinning.oms"));
+	kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: sf!("pin"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("turn");
+	let judged =
+		|target: &'static str| ResolutionPin { target: Some(Str::new_static(target)), fetch: None };
+	assert_eq!(*seen.lock(), [Some(judged("judged")), Some(judged("moved"))]);
+	assert_eq!(*ran.lock(), [
+		(Some(judged("judged")), sf!("moved")),
+		(Some(judged("moved")), sf!("moved")),
+	]);
 }
 
 #[tokio::test]

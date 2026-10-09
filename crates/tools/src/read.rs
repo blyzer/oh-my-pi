@@ -8,8 +8,8 @@ use futures::{FutureExt as _, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
 use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, BlobRef, CallOutcome, CommitError, Constraint, Diag, DiagKind,
-	DocEffects, Effects, Ev, IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall,
-	Rev, Tool, ToolSpec, ToolTerminal,
+	DocEffects, Effects, Ev, FetchEffects, IncomingParams, LiftedCall, ParamError, Part, PromptCaps,
+	RecordedCall, Rev, Tool, ToolSpec, ToolTerminal,
 };
 use parking_lot::Mutex;
 use schemars::JsonSchema;
@@ -18,7 +18,7 @@ use smallvec::SmallVec;
 use tracing::Instrument as _;
 
 use crate::{
-	path::{HostPaths, normalize_target, tracing_path_metadata},
+	path::{HostPaths, NormalizedTarget, normalize_target, tracing_path_metadata},
 	render::TextProjection,
 };
 
@@ -445,8 +445,15 @@ impl Fault {
 /// Invocation-frozen read behavior selected by the production registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReadPolicy {
-	/// Permit HTTP(S) dispatch.
+	/// Permit HTTP(S) dispatch: the anonymous fetch of a URL target.
 	pub fetch_enabled:      bool,
+	/// The deployment's resolvers fetch remote resources with the user's
+	/// stored credentials (an `ssh://` host, the GitHub API behind `issue://`
+	/// and `pr://`, a remote `mcp://` server), whatever `fetch_enabled` says.
+	/// It puts a credentialed fetch in the declared maximum
+	/// ([`ToolSpec::effects`]); a call whose resolver reports a credentialed
+	/// fetch the maximum withholds is refused, never run.
+	pub credentialed_fetch: bool,
 	/// Convert supported documents into Markdown.
 	pub render_markdown:    bool,
 	/// Decode and resize images for model bounds.
@@ -463,6 +470,7 @@ impl Default for ReadPolicy {
 	fn default() -> Self {
 		Self {
 			fetch_enabled:      true,
+			credentialed_fetch: false,
 			render_markdown:    true,
 			auto_resize_images: true,
 			summarize:          true,
@@ -605,14 +613,7 @@ pub fn spec(policy: ReadPolicy) -> ToolSpec {
 			priority:       10,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		effects: Effects {
-			documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
-			exec:      None,
-			inference: None,
-			desktop:   None,
-			fetch:     None,
-			subagents: 0,
-		},
+		effects: Effects { fetch: fetch_ceiling(policy), ..local_read_effects() },
 		confinement: omp_tool::Confinement::Host,
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
@@ -621,6 +622,114 @@ pub fn spec(policy: ReadPolicy) -> ToolSpec {
 		)
 		.into(),
 	}
+}
+
+/// What every `read@3` call may do whatever it targets: read documents.
+fn local_read_effects() -> Effects {
+	Effects {
+		documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
+		..Effects::empty()
+	}
+}
+
+/// The most a `read@3` call can fetch under `policy`: an anonymous URL fetch
+/// while `fetch_enabled`, a credentialed one while the deployment's resolvers
+/// fetch with stored credentials, nothing otherwise.
+const fn fetch_ceiling(policy: ReadPolicy) -> Option<FetchEffects> {
+	if policy.fetch_enabled || policy.credentialed_fetch {
+		Some(FetchEffects { credentials: policy.credentialed_fetch })
+	} else {
+		None
+	}
+}
+
+/// Recovers the canonical spelling `read@3` resolves one authored target by.
+///
+/// Outer quotes, an `@` shorthand prefix, `file://` URLs and shell escapes
+/// are repaired before the target is classified ([`classify_target`]).
+#[must_use]
+pub fn normalize_read_target(authored: &str) -> NormalizedTarget {
+	normalize_target(authored, None, HostPaths::current())
+}
+
+/// How `read@3` routes one target, decided once by [`classify_target`] for
+/// both the executor, which dispatches on it, and the call's effects
+/// ([`Tool::invocation_effects`]), so the two cannot diverge.
+///
+/// Only [`Self::Web`] and the URIs whose resolver reports a fetch
+/// ([`resolver::Resolve::read_fetch`]) reach the network. Every other class is
+/// a read of local or environment-owned state. That includes the
+/// environment-ambient processes the environment runs under configuration it
+/// trusts rather than per call, which no `read` declares: the language
+/// servers it starts when a document opens (debug adapters are configured
+/// the same way, and only `debug` starts them), the Obsidian CLI a vault read
+/// may ask (only while `sv_vault_enabled` resolves it), and a local (`stdio`)
+/// MCP server mounted at a tier that does not reach the network.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TargetClass<'a> {
+	/// An http(s) URL, a `www.` host, or a bare `host:port/`: the web reader
+	/// fetches it anonymously while `tools.fetch.enabled` allows it.
+	Web(web::ParsedTarget),
+	/// A `file://` URI, read as the local path it names with its selector
+	/// reattached.
+	File(String),
+	/// A URI with a built-in scheme, read by the resolver registered for it.
+	Internal(selector::ParsedUri<'a>),
+	/// A URI whose scheme is outside the built-in vocabulary, read by the
+	/// deployment's unknown-scheme fallback.
+	Foreign(selector::ParsedUri<'a>),
+	/// A local path.
+	Local,
+}
+
+/// Classifies one canonical target ([`normalize_read_target`]) the way
+/// `read@3` routes it.
+///
+/// A web URL first, then a URI by its scheme, else a local path. Purely
+/// lexical; a target that cannot be parsed is the fault the executor reports
+/// for it, and reads nothing.
+pub fn classify_target(target: &str) -> Result<TargetClass<'_>, Fault> {
+	if let Some(target) = web::parse_target(target).map_err(|error| match error {
+		WebError::InvalidUrl(message) => Fault::Invalid { message },
+		other => Fault::Web { message: other.message() },
+	})? {
+		return Ok(TargetClass::Web(target));
+	}
+	let Some(uri) = selector::parse_uri(target)
+		.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?
+	else {
+		return Ok(TargetClass::Local);
+	};
+	Ok(match uri.scheme {
+		resolver::Scheme::File => {
+			let mut path = uri.resource.to_owned();
+			if let Some(selector) = uri.selector_text {
+				path.push(':');
+				path.push_str(selector);
+			}
+			TargetClass::File(path)
+		},
+		resolver::Scheme::Unknown => TargetClass::Foreign(uri),
+		_ => TargetClass::Internal(uri),
+	})
+}
+
+/// Every target one `read@3` call of `path` can resolve, in each spelling
+/// the executor may split it into: the whole text, a JSON path array's
+/// members, and the members of a `;`/`,` list. Which spelling the executor
+/// takes depends on what exists locally, so the call is judged by all of
+/// them.
+fn target_candidates(path: &str) -> impl Iterator<Item = Str> {
+	let listed = selector::parse_json_path_array(path)
+		.ok()
+		.flatten()
+		.unwrap_or_default();
+	let split = if path.contains([';', ',']) {
+		selector::split_delimited_targets(path)
+	} else {
+		Vec::new()
+	};
+	std::iter::once(Str::new(path)).chain(listed).chain(split)
 }
 
 /// Constructs the `read@3` tool without internal URL resolvers.
@@ -687,8 +796,33 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> Tool for ReadTool<S, B,
 	type Payload = Payload;
 	type Update = Update;
 
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
 	fn spec(&self) -> &ToolSpec {
 		&self.spec
+	}
+
+	/// Every call reads documents; it fetches only when one of its targets is
+	/// a URL the policy lets the web reader fetch, or an internal URI whose
+	/// resolver reaches a remote host ([`resolver::Resolve::read_fetch`]).
+	/// A local read is never more than a document read, in any mode.
+	fn invocation_effects(&self, params: &Params) -> Option<Effects> {
+		let fetch = target_candidates(&params.path)
+			.filter_map(|target| self.target_fetch(&normalize_read_target(&target).canonical))
+			.reduce(|left, right| FetchEffects { credentials: left.credentials || right.credentials });
+		Some(Effects { fetch, ..local_read_effects() })
+	}
+
+	/// The canonical spelling of every candidate target that fetches, which
+	/// the environment resolves to the host it reaches.
+	fn fetch_locators(&self, params: &Params) -> Vec<Str> {
+		let mut locators = target_candidates(&params.path)
+			.map(|target| normalize_read_target(&target).canonical)
+			.filter(|target| self.target_fetch(target).is_some())
+			.collect::<Vec<_>>();
+		locators.sort_unstable();
+		locators.dedup();
+		locators
 	}
 
 	fn call<'c>(
@@ -807,6 +941,26 @@ fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 }
 
 impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
+	/// The fetch a read of the canonical `target` performs, by the class
+	/// [`Self::execute_target`] dispatches on: a URL only while the policy
+	/// lets the web reader fetch it (otherwise the executor refuses it before
+	/// it fetches), an internal or foreign URI as its resolver reports.
+	fn target_fetch(&self, target: &str) -> Option<FetchEffects> {
+		match classify_target(target).ok()? {
+			TargetClass::Web(_) => self
+				.policy
+				.fetch_enabled
+				.then_some(FetchEffects { credentials: false }),
+			TargetClass::Internal(uri) => {
+				self
+					.resolvers
+					.read_fetch(uri.scheme, uri.resource, uri.query)
+			},
+			TargetClass::Foreign(_) => self.resolvers.read_unknown_fetch(target),
+			TargetClass::File(_) | TargetClass::Local => None,
+		}
+	}
+
 	fn repeat_read_diag(&self, path: &str, payload: &Payload) -> Option<Diag> {
 		let text = payload.parts.iter().find_map(|part| match part {
 			PayloadPart::Text { text } if !text.is_empty() => Some(text),
@@ -948,36 +1102,23 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 	}
 
 	async fn execute_target(&self, authored: &str) -> Result<ReadSection, Fault> {
-		let normalized = normalize_target(authored, None, HostPaths::current());
+		let normalized = normalize_read_target(authored);
 		let normalization_from = normalized
 			.recovered()
 			.then_some(normalized.authored.as_str());
 		let recovery_candidates = normalized.recovery_candidates();
 		let authored = normalized.canonical.as_str();
-		if let Some(target) = web::parse_target(authored).map_err(|error| match error {
-			WebError::InvalidUrl(message) => Fault::Invalid { message },
-			other => Fault::Web { message: other.message() },
-		})? {
-			if !self.policy.fetch_enabled {
-				return Err(Fault::Unsupported {
-					message: sf!("URL reads are disabled by tools.fetch.enabled"),
-				});
-			}
-			return self.read_web(target).await;
-		}
-
-		let file_authored = match selector::parse_uri(authored)
-			.map_err(|error| Fault::Invalid { message: Str::new(error.to_string()) })?
-		{
-			Some(uri) if uri.scheme == resolver::Scheme::File => {
-				let mut path = uri.resource.to_owned();
-				if let Some(selector) = uri.selector_text {
-					path.push(':');
-					path.push_str(selector);
+		let file_authored = match classify_target(authored)? {
+			TargetClass::Web(target) => {
+				if !self.policy.fetch_enabled {
+					return Err(Fault::Unsupported {
+						message: sf!("URL reads are disabled by tools.fetch.enabled"),
+					});
 				}
-				Some(path)
+				return self.read_web(target).await;
 			},
-			Some(uri) if uri.scheme == resolver::Scheme::Unknown => {
+			TargetClass::File(path) => Some(path),
+			TargetClass::Foreign(uri) => {
 				let Some(result) = self
 					.resolvers
 					.read_unknown_with_diags(authored, &uri.selector)
@@ -1013,7 +1154,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				})?;
 				return Ok(ReadSection::text(text).with_diags(resolved.diags));
 			},
-			Some(uri) => {
+			TargetClass::Internal(uri) => {
 				if matches!(uri.selector, selector::ParsedSelector::Image)
 					&& uri.scheme != resolver::Scheme::Local
 				{
@@ -1065,7 +1206,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				})?;
 				return Ok(ReadSection::text(text).with_diags(resolved.diags));
 			},
-			None => None,
+			TargetClass::Local => None,
 		};
 		let authored = file_authored.as_deref().unwrap_or(authored);
 
