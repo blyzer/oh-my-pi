@@ -49,6 +49,7 @@ windows-sys.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 insta.workspace = true
+parking_lot.workspace = true
 pretty_assertions.workspace = true
 serde.workspace = true
 tempfile.workspace = true

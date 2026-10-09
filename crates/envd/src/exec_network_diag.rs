@@ -12,6 +12,11 @@
 //! succeeds gets none. The generic texts appear once per session. Network
 //! markers in stderr are found incrementally, chunk by chunk, so a command's
 //! captured output is never rescanned whole.
+//!
+//! A disabled network has no broker to record anything, and a client told to
+//! be quiet (`curl -s`) fails with no marker at all. There, a failed command
+//! that launched a program able to run with a network URL among its arguments
+//! gets the mode's locator text instead; see [`NetworkSign::Locator`].
 
 use std::{
 	fmt,
@@ -22,7 +27,7 @@ use std::{
 use omp_core::{FastHashSet, Str, sf};
 use omp_tool::{Diag, DiagKind, Severity};
 use parking_lot::Mutex;
-use strum::EnumMessage as _;
+use strum::{EnumMessage as _, EnumProperty as _};
 
 use crate::{
 	exec_sandbox::ExecSandbox,
@@ -127,6 +132,35 @@ fn network_marker(window: &[u8], before: Option<u8>, closed: bool) -> bool {
 	find_marker(window, before, closed, NETWORK_PHRASES, NETWORK_TOKENS).is_some()
 }
 
+/// Whether a program argument is a network URL: the whole argument is
+/// `scheme://authority…` with a host, as curl, wget, git and pip take one, and
+/// the scheme is not `file`. A loopback host counts, since a disabled network
+/// cuts off the host's loopback too. A URL inside a longer argument
+/// (`--url=…`, a message, a script for `-c`) does not count, which keeps a URL
+/// that is only text from being taken for a fetch.
+pub(crate) fn is_network_url(arg: &[u8]) -> bool {
+	let scheme_len = arg
+		.iter()
+		.position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')))
+		.unwrap_or(arg.len());
+	let (scheme, rest) = arg.split_at(scheme_len);
+	let Some(rest) = rest.strip_prefix(b"://") else {
+		return false;
+	};
+	if !scheme.first().is_some_and(u8::is_ascii_alphabetic) || scheme.eq_ignore_ascii_case(b"file") {
+		return false;
+	}
+	let authority = rest
+		.split(|byte| matches!(byte, b'/' | b'?' | b'#'))
+		.next()
+		.unwrap_or_default();
+	let host = authority
+		.rsplit(|byte| *byte == b'@')
+		.next()
+		.unwrap_or_default();
+	host.first().is_some_and(|byte| *byte != b':')
+}
+
 /// Incremental search for network-failure markers in a command's stderr.
 ///
 /// Each chunk is scanned once on its own and once through a short seam with
@@ -200,7 +234,13 @@ impl NetworkMarkerScan {
 /// variant's message is the generic text for a failed command whose output
 /// carried a network marker. The marker is only a phrase in the output, so
 /// the text reports it as such and does not claim the sandbox caused it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumMessage)]
+///
+/// The `locator` property is the generic text for a failed command that
+/// launched a program with a network URL among its arguments
+/// ([`NetworkSign::Locator`]). Only the modes with no network at all have one:
+/// under `scoped` the broker records what a client asked for, and a URL there
+/// says nothing about why a command failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumMessage, strum::EnumProperty)]
 #[cfg_attr(test, derive(strum::EnumIter))]
 pub(crate) enum NetworkInForce {
 	/// `sv_sandbox_network_mode scoped`: only the egress broker.
@@ -213,18 +253,31 @@ pub(crate) enum NetworkInForce {
 	                   allowlist or with sv_sandbox_network_mode open.")]
 	Scoped,
 	/// `sv_sandbox_network_mode disabled`.
-	#[strum(message = "sandbox: the output shows a resolver or connection failure, which the \
-	                   sandbox may cause: sv_sandbox_network_mode is disabled, so commands have \
-	                   no network access. Only the user can change it: scoped admits proxy-aware \
-	                   clients to the hosts in sv_sandbox_allow_domains, and open admits \
-	                   everything.")]
+	#[strum(
+		message = "sandbox: the output shows a resolver or connection failure, which the sandbox \
+		           may cause: sv_sandbox_network_mode is disabled, so commands have no network \
+		           access. Only the user can change it: scoped admits proxy-aware clients to the \
+		           hosts in sv_sandbox_allow_domains, and open admits everything.",
+		props(locator = "sandbox: the command failed after running a program given a network URL, \
+		                 which the sandbox may cause: sv_sandbox_network_mode is disabled, so \
+		                 commands have no network access. Only the user can change it: scoped \
+		                 admits proxy-aware clients to the hosts in sv_sandbox_allow_domains, and \
+		                 open admits everything.")
+	)]
 	Disabled,
 	/// `scoped` was asked for, but the egress broker could not start, so the
 	/// session runs with the network disabled.
-	#[strum(message = "sandbox: the output shows a resolver or connection failure, which the \
-	                   sandbox may cause: sv_sandbox_network_mode is scoped, but the egress \
-	                   broker could not start, so this session runs with the network disabled. \
-	                   Only the user can change it, for example with sv_sandbox_network_mode open.")]
+	#[strum(
+		message = "sandbox: the output shows a resolver or connection failure, which the sandbox \
+		           may cause: sv_sandbox_network_mode is scoped, but the egress broker could not \
+		           start, so this session runs with the network disabled. Only the user can change \
+		           it, for example with sv_sandbox_network_mode open.",
+		props(locator = "sandbox: the command failed after running a program given a network URL, \
+		                 which the sandbox may cause: sv_sandbox_network_mode is scoped, but the \
+		                 egress broker could not start, so this session runs with the network \
+		                 disabled. Only the user can change it, for example with \
+		                 sv_sandbox_network_mode open.")
+	)]
 	BrokerUnavailable,
 }
 
@@ -242,8 +295,40 @@ impl NetworkInForce {
 		}
 	}
 
-	fn generic_text(self) -> Str {
-		Str::new_static(self.get_message().unwrap_or_default())
+	/// The generic text for a failed command that showed `sign`, if this mode
+	/// has one.
+	fn generic_text(self, sign: NetworkSign) -> Option<Str> {
+		match sign {
+			NetworkSign::Marker => self.get_message(),
+			NetworkSign::Locator => self.get_str("locator"),
+		}
+		.map(Str::new_static)
+	}
+}
+
+/// Why a failed command without a broker refusal may have met the network.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NetworkSign {
+	/// Its stderr carried a resolver or connection-failure marker.
+	Marker,
+	/// It launched a program able to run with a network URL among its
+	/// arguments ([`is_network_url`]) while its sandbox left it no network. No
+	/// backend records a connection the kernel refuses, and a quiet client
+	/// prints nothing, so this is the one sign such a failure leaves.
+	Locator,
+}
+
+impl NetworkSign {
+	/// The sign a command showed: a marker outranks a locator, since it names
+	/// the failure itself.
+	pub(crate) const fn of(marker: bool, locator: bool) -> Option<Self> {
+		if marker {
+			Some(Self::Marker)
+		} else if locator {
+			Some(Self::Locator)
+		} else {
+			None
+		}
 	}
 }
 
@@ -291,14 +376,16 @@ impl NetworkAnnouncements {
 /// tool that keeps reaching a refused host in the background (an update
 /// check, telemetry) does not repeat the remedy on every command. A host that
 /// cannot be quoted is left out of the text, which keeps its cause and
-/// remedy. Without a refusal, a failed command whose output carried a
-/// network marker gets the generic text of the mode in force, once per
-/// session. `prompt` says whether the session has an approval route, which
-/// decides the remedy a policy refusal offers.
+/// remedy. Without a refusal, a failed command that showed a [`NetworkSign`]
+/// gets the generic text of the mode in force for that sign, once per session:
+/// one slot serves both signs, so a session hears the generic text once
+/// whichever comes first. A locator has no text under `scoped` and leaves the
+/// slot unspent. `prompt` says whether the session has an approval route,
+/// which decides the remedy a policy refusal offers.
 pub(crate) fn network_diag(
 	network: NetworkInForce,
 	refusal: Option<&BrokerDenial>,
-	marker: bool,
+	sign: Option<NetworkSign>,
 	end: CommandEnd,
 	prompt: bool,
 	announced: &NetworkAnnouncements,
@@ -325,8 +412,13 @@ pub(crate) fn network_diag(
 			)
 		});
 	}
-	(marker && end == CommandEnd::Failed && announced.claim_generic())
-		.then(|| Diag::warn(DiagKind::Sandbox, network.generic_text()))
+	if end != CommandEnd::Failed {
+		return None;
+	}
+	let text = network.generic_text(sign?)?;
+	announced
+		.claim_generic()
+		.then(|| Diag::warn(DiagKind::Sandbox, text))
 }
 
 fn refusal_text(cause: BrokerRefusal, target: &Target<'_>, prompt: bool) -> Str {
@@ -516,7 +608,7 @@ mod tests {
 		prompt: bool,
 		announced: &NetworkAnnouncements,
 	) -> Option<Diag> {
-		network_diag(NetworkInForce::Scoped, Some(refusal), false, end, prompt, announced)
+		network_diag(NetworkInForce::Scoped, Some(refusal), None, end, prompt, announced)
 	}
 
 	/// The first refusal of an endpoint and cause is explained in full, even
@@ -652,16 +744,28 @@ mod tests {
 		);
 
 		assert!(!announced.generic.load(Ordering::Acquire));
-		let generic =
-			network_diag(NetworkInForce::Scoped, None, true, CommandEnd::Failed, true, &announced)
-				.expect("the generic slot is still unspent");
+		let generic = network_diag(
+			NetworkInForce::Scoped,
+			None,
+			Some(NetworkSign::Marker),
+			CommandEnd::Failed,
+			true,
+			&announced,
+		)
+		.expect("the generic slot is still unspent");
 		assert!(generic.text.contains("HTTP_PROXY"), "{}", generic.text);
+	}
+
+	fn marker_text(network: NetworkInForce) -> Str {
+		network
+			.generic_text(NetworkSign::Marker)
+			.expect("every mode has a marker text")
 	}
 
 	#[test]
 	fn generic_texts_name_the_mode_and_appear_once_per_session() {
 		for network in NetworkInForce::iter() {
-			let text = network.generic_text();
+			let text = marker_text(network);
 			assert!(text.contains("sv_sandbox_network_mode"), "{network:?}: {text}");
 			// A marker is a phrase in the output, not proof the sandbox caused it.
 			assert!(
@@ -670,25 +774,17 @@ mod tests {
 			);
 			assert!(!text.contains("could not reach the network"), "{network:?}: {text}");
 		}
-		assert!(NetworkInForce::Scoped.generic_text().contains("HTTP_PROXY"));
+		assert!(marker_text(NetworkInForce::Scoped).contains("HTTP_PROXY"));
+		assert!(marker_text(NetworkInForce::Scoped).contains("sv_sandbox_allow_domains"));
 		assert!(
-			NetworkInForce::Scoped
-				.generic_text()
-				.contains("sv_sandbox_allow_domains")
+			marker_text(NetworkInForce::Disabled).contains("sv_sandbox_network_mode is disabled")
 		);
-		assert!(
-			NetworkInForce::Disabled
-				.generic_text()
-				.contains("sv_sandbox_network_mode is disabled")
-		);
-		assert!(
-			NetworkInForce::BrokerUnavailable
-				.generic_text()
-				.contains("could not start")
-		);
+		assert!(marker_text(NetworkInForce::BrokerUnavailable).contains("could not start"));
 
 		let announced = NetworkAnnouncements::default();
-		let diag = |network, marker, end| network_diag(network, None, marker, end, true, &announced);
+		let diag = |network, marker: bool, end| {
+			network_diag(network, None, marker.then_some(NetworkSign::Marker), end, true, &announced)
+		};
 		// No marker, a success or a cancellation never reports.
 		assert!(diag(NetworkInForce::Scoped, false, CommandEnd::Failed).is_none());
 		assert!(diag(NetworkInForce::Scoped, true, CommandEnd::Succeeded).is_none());
@@ -697,5 +793,98 @@ mod tests {
 		assert_eq!(first.severity, Severity::Warn);
 		assert!(first.text.contains("sv_sandbox_network_mode is disabled"), "{}", first.text);
 		assert!(diag(NetworkInForce::Disabled, true, CommandEnd::Failed).is_none(), "once");
+	}
+
+	/// Only a whole argument that is a URL naming a host counts, whatever its
+	/// scheme but `file`; a URL that is only text inside a longer argument,
+	/// a socket path and a scheme with no host never do.
+	#[test]
+	fn network_urls_name_a_host() {
+		for arg in [
+			"https://example.com",
+			"HTTP://example.com:8080/path?q#f",
+			"https://user:secret@example.com/",
+			"http://127.0.0.1:8080/",
+			"http://[::1]:8080/",
+			"git+ssh://git@github.com/org/repo.git",
+			"s3://bucket/key",
+			"postgres://localhost/db",
+		] {
+			assert!(is_network_url(arg.as_bytes()), "{arg}");
+		}
+		for arg in [
+			"",
+			"-sI",
+			"example.com",
+			"file:///etc/hosts",
+			"FILE://host/share",
+			"unix:///var/run/docker.sock",
+			"http://",
+			"http://:8080/",
+			"https://user@/",
+			"--url=https://example.com",
+			"see https://example.com",
+			"import urllib; urllib.request.urlopen('https://example.com')",
+			"jdbc:postgresql://host/db",
+			"1http://example.com",
+			"://example.com",
+			"git@github.com:org/repo.git",
+		] {
+			assert!(!is_network_url(arg.as_bytes()), "{arg}");
+		}
+	}
+
+	/// A disabled network records nothing a quiet client could leave: a failed
+	/// command that launched a program with a network URL gets the mode's
+	/// generic text, once per session and from the slot a marker would use. A
+	/// success or a cancellation never reports, and under `scoped` a locator
+	/// has no text and leaves the slot to a later marker.
+	#[test]
+	fn silent_failures_without_a_network_are_explained_once_per_session() {
+		let announced = NetworkAnnouncements::default();
+		let diag = |network, sign, end| network_diag(network, None, sign, end, true, &announced);
+		let locator = Some(NetworkSign::Locator);
+		assert!(diag(NetworkInForce::Disabled, locator, CommandEnd::Succeeded).is_none());
+		assert!(diag(NetworkInForce::Disabled, locator, CommandEnd::Cancelled).is_none());
+		assert!(diag(NetworkInForce::Disabled, None, CommandEnd::Failed).is_none());
+		assert!(diag(NetworkInForce::Scoped, locator, CommandEnd::Failed).is_none());
+		assert!(!announced.generic.load(Ordering::Acquire), "scoped spends nothing");
+
+		let first =
+			diag(NetworkInForce::Disabled, locator, CommandEnd::Failed).expect("silent failure");
+		assert_eq!(first.severity, Severity::Warn);
+		assert_eq!(first.kind.as_str(), "sandbox");
+		assert!(
+			first
+				.text
+				.starts_with("sandbox: the command failed after running a program given a network URL"),
+			"{}",
+			first.text
+		);
+		assert!(first.text.contains("sv_sandbox_network_mode is disabled"), "{}", first.text);
+		assert!(!first.text.contains("the output shows"), "{}", first.text);
+		assert!(diag(NetworkInForce::Disabled, locator, CommandEnd::Failed).is_none(), "once");
+		assert!(
+			diag(NetworkInForce::Disabled, Some(NetworkSign::Marker), CommandEnd::Failed).is_none(),
+			"one slot serves both signs"
+		);
+
+		let announced = NetworkAnnouncements::default();
+		let fallback = network_diag(
+			NetworkInForce::BrokerUnavailable,
+			None,
+			locator,
+			CommandEnd::Failed,
+			true,
+			&announced,
+		)
+		.expect("a broker that could not start leaves no network either");
+		assert!(fallback.text.contains("could not start"), "{}", fallback.text);
+		assert!(fallback.text.contains("network URL"), "{}", fallback.text);
+
+		// A marker outranks a locator: it names the failure itself.
+		assert_eq!(NetworkSign::of(true, true), Some(NetworkSign::Marker));
+		assert_eq!(NetworkSign::of(false, true), Some(NetworkSign::Locator));
+		assert_eq!(NetworkSign::of(false, false), None);
 	}
 }

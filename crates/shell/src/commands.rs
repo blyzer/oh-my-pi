@@ -203,6 +203,23 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 	empty_env: bool,
 ) -> Result<process::Command, error::Error> {
 	let wrapper = context.params.spawn_wrapper();
+	if let Some(wrapper) = wrapper {
+		// A simple command arrives already found on `PATH`, so only a relative
+		// path (`./tool`) pays for a join, and only `exec` hands over a bare name,
+		// which the launch finds on `PATH` as the shell would.
+		let program = Path::new(command_name);
+		let program = if program.is_absolute() {
+			Some(Cow::Borrowed(program))
+		} else if sys::fs::contains_path_separator(command_name) {
+			Some(Cow::Owned(context.shell.absolute_path(program)))
+		} else {
+			context
+				.shell
+				.find_first_executable_in_path(command_name)
+				.map(Cow::Owned)
+		};
+		wrapper.observe_launch(program.as_deref(), &mut args.iter().map(AsRef::as_ref));
+	}
 	let mut cmd = if let Some((launcher, prefix_args)) = wrapper.and_then(|w| w.launcher()) {
 		let mut cmd = process::Command::new(launcher);
 		cmd.args(prefix_args);
@@ -1142,8 +1159,24 @@ mod sandbox_tests {
 	use super::*;
 	use crate::SpawnWrapper;
 
+	/// Each observed launch: its program, if the shell found one, and its
+	/// arguments.
+	type Launches = parking_lot::Mutex<Vec<(Option<PathBuf>, Vec<OsString>)>>;
+
+	fn record(launches: &Launches, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+		launches
+			.lock()
+			.push((program.map(Path::to_path_buf), args.map(OsStr::to_os_string).collect()));
+	}
+
+	fn launch(program: &str, args: &[&str]) -> (Option<PathBuf>, Vec<OsString>) {
+		(Some(PathBuf::from(program)), args.iter().map(OsString::from).collect())
+	}
+
+	#[derive(Default)]
 	struct EnvWrapper {
-		prefix: Vec<OsString>,
+		prefix:   Vec<OsString>,
+		observed: Launches,
 	}
 
 	impl SpawnWrapper for EnvWrapper {
@@ -1154,21 +1187,111 @@ mod sandbox_tests {
 		fn env_allowed(&self, key: &str) -> bool {
 			key != "FILTERED"
 		}
+
+		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+			record(&self.observed, program, args);
+		}
 	}
 
+	/// The wrapper sees each launch once: its program, a relative path made
+	/// absolute against the shell's working directory and a bare name found on
+	/// `PATH` (none when no `PATH` directory holds it), and its arguments
+	/// without the launcher prefix or the program itself.
 	#[test]
 	fn compose_std_command_prefixes_spawn_wrapper() -> crate::TestResult<()> {
 		let mut shell: Shell = Shell::default();
+		shell.set_working_dir("/")?;
+		shell.set_env_global("PATH", crate::ShellVariable::new("/nonexistent:/bin"))?;
 		let mut params = ExecutionParameters::default();
-		params.set_spawn_wrapper(Arc::new(EnvWrapper { prefix: vec![OsString::from("--")] }));
+		let wrapper =
+			Arc::new(EnvWrapper { prefix: vec![OsString::from("--")], ..EnvWrapper::default() });
+		params.set_spawn_wrapper(wrapper.clone());
 		let context = ExecutionContext { shell: &mut shell, command_name: "echo".into(), params };
 
-		let cmd = compose_std_command(&context, "/bin/echo", "custom-argv0", &["hello"], true)?;
+		let cmd = compose_std_command(
+			&context,
+			"/bin/echo",
+			"custom-argv0",
+			&["hello", "https://example.com"],
+			true,
+		)?;
 		assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/env"));
 		assert_eq!(cmd.get_args().collect::<Vec<_>>(), [
 			OsStr::new("--"),
 			OsStr::new("/bin/echo"),
-			OsStr::new("hello")
+			OsStr::new("hello"),
+			OsStr::new("https://example.com")
+		]);
+		compose_std_command(&context, "./bin/tool", "tool", &["-q"], true)?;
+		compose_std_command(&context, "echo", "echo", &["-n"], true)?;
+		compose_std_command(&context, "nosuch", "nosuch", &["https://example.com"], true)?;
+		assert_eq!(*wrapper.observed.lock(), [
+			launch("/bin/echo", &["hello", "https://example.com"]),
+			launch("/bin/tool", &["-q"]),
+			launch("/bin/echo", &["-n"]),
+			(None, vec![OsString::from("https://example.com")]),
+		]);
+
+		Ok(())
+	}
+
+	struct ArgsRecorder(Launches);
+
+	impl SpawnWrapper for ArgsRecorder {
+		fn launcher(&self) -> Option<(&OsStr, &[OsString])> {
+			None
+		}
+
+		fn env_allowed(&self, _key: &str) -> bool {
+			true
+		}
+
+		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+			record(&self.0, program, args);
+		}
+	}
+
+	/// A running script hands the wrapper each external program it launches,
+	/// with the expanded arguments, wherever the interpreter composes the
+	/// launch: a simple command, each pipeline stage, a command substitution,
+	/// a relative path made absolute against the working directory, and
+	/// `exec`, whose bare name is found on `PATH` (none in a subshell whose
+	/// `exec` names a program no `PATH` directory holds). A builtin hands it
+	/// nothing. As in envd, the root shell is protected, so its `exec` runs a
+	/// child and ends the script.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn spawn_wrappers_observe_expanded_external_arguments() -> crate::TestResult<()> {
+		let mut shell: Shell = Shell::builder()
+			.builtins(builtins::default_builtins())
+			.build()
+			.await?;
+		let recorder = Arc::new(ArgsRecorder(Launches::default()));
+		let mut params = shell.default_exec_params();
+		params.set_spawn_wrapper(recorder.clone());
+		params.set_protect_host_process(true);
+		let script = "PATH=/nonexistent:/bin
+			url=https://example.com
+			echo \"$url\" >/dev/null
+			/bin/echo -n \"$url\" x >/dev/null
+			/bin/echo -n \"$url\" p | /bin/cat >/dev/null
+			subst=$(/bin/echo -n \"$url\" s)
+			(exec -a fetch nosuch -q \"$url\") 2>/dev/null
+			(cd /bin && ./echo -n y >/dev/null)
+			exec echo -n \"$url\" e >/dev/null
+			/bin/echo never";
+		let result = shell
+			.run_string(script, &SourceInfo::from("(spawn wrapper test)"), &params)
+			.await?;
+		assert!(result.is_success());
+		assert_eq!(*recorder.0.lock(), [
+			launch("/bin/echo", &["-n", "https://example.com", "x"]),
+			launch("/bin/echo", &["-n", "https://example.com", "p"]),
+			launch("/bin/cat", &[]),
+			launch("/bin/echo", &["-n", "https://example.com", "s"]),
+			(None, vec![OsString::from("-q"), OsString::from("https://example.com")]),
+			launch("/bin/echo", &["-n", "y"]),
+			launch("/bin/echo", &["-n", "https://example.com", "e"]),
 		]);
 
 		Ok(())
