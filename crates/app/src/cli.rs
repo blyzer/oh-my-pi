@@ -1626,7 +1626,10 @@ pub struct EnvdArgs {
 	/// Workspace root exposed by the environment.
 	#[arg(long, value_name = "PATH", default_value = ".")]
 	pub root:             PathBuf,
-	/// Owner-only environment socket. Defaults to `<state-dir>/env.sock`.
+	/// Owner-only environment socket. Defaults to
+	/// `/tmp/omp-<uid>-<state>-<build>-<key>-env.sock`, keyed by the state
+	/// directory, the executable build and the sandbox and approval policy this
+	/// daemon resolves (`omp_env::project_state::environment_socket`).
 	#[arg(long, value_name = "PATH")]
 	pub socket:           Option<PathBuf>,
 	/// Document-server socket. An explicit live socket is attached; the default

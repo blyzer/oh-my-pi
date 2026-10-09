@@ -749,6 +749,7 @@ async fn environment_rpc(temp: &tempfile::TempDir, con: omp_con::Ctx) -> Environ
 		con:                Arc::clone(&con),
 		bridges:            omp_envd::RegistryBridges::default(),
 		spawn_idle_timeout: Some(2),
+		spawn_policy:       None,
 	})
 	.await
 	.expect("environment");

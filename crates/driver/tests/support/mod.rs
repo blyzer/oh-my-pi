@@ -17,8 +17,9 @@ const LISTEN_WAIT: Duration = Duration::from_secs(30);
 ///
 /// `ProjectEnvironment::attach` finds it there and, because it runs the same
 /// executable and so has the same build id, joins it as a peer instead of
-/// spawning a daemon or falling back to an embedded environment. Dropping it
-/// stops serving.
+/// spawning a daemon or falling back to an embedded environment, provided the
+/// session's control context resolves the daemon's sandbox and approval policy:
+/// the socket is keyed by that policy. Dropping it stops serving.
 pub struct InProcessDaemon {
 	shutdown: CancellationToken,
 	serving:  JoinHandle<Result<(), omp_envd::EnvdError>>,
@@ -26,8 +27,26 @@ pub struct InProcessDaemon {
 
 impl InProcessDaemon {
 	/// Serves the daemon for the project at `root` with state under `state`,
-	/// under the daemon's own control context `con`.
+	/// under the daemon's own control context `con`, on the socket its policy
+	/// keys.
 	pub async fn serve(root: &Path, state: &Path, con: Arc<omp_con::Ctx>) -> Self {
+		let socket = omp_env::project_state::environment_socket(
+			state,
+			&omp_envd::daemon_policy::from_con(&con),
+		)
+		.expect("environment socket");
+		Self::serve_at(root, state, con, socket).await
+	}
+
+	/// Serves the daemon like [`Self::serve`], but on `socket` whatever policy
+	/// it keys: a daemon a session reaches though it enforces another policy.
+	#[allow(dead_code, reason = "only some test crates sharing this module misplace a daemon")]
+	pub async fn serve_at(
+		root: &Path,
+		state: &Path,
+		con: Arc<omp_con::Ctx>,
+		socket: std::path::PathBuf,
+	) -> Self {
 		let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
 		let server = EnvServer::open_project(
 			root,
@@ -49,7 +68,6 @@ impl InProcessDaemon {
 		)
 		.await
 		.expect("project daemon");
-		let socket = omp_env::project_state::environment_socket(state);
 		let shutdown = CancellationToken::new();
 		let serving = tokio::spawn({
 			let server = Arc::new(server);

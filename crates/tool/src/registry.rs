@@ -6,7 +6,6 @@ use std::{
 	iter,
 	mem::size_of,
 	pin::Pin,
-	slice,
 	sync::Arc,
 	task::{Context, Poll},
 };
@@ -35,6 +34,7 @@ use crate::{
 	GrammarSyntax, IncomingParams, JobRef, LiftedCall, Part, Presentation,
 	ProjectionAuthorizationError, ProjectionSpan, PromptCaps, RecordedCall, RecordedCallOwned, Rev,
 	StreamMatchText, Tool, ToolIdentity, ToolPromptExample, ToolSpec, VisibilityReceipt,
+	decode_params,
 };
 
 /// Catalog capabilities needed for deterministic tool lowering.
@@ -1043,7 +1043,10 @@ impl ProjectionCache {
 		Some(Arc::clone(&entry.value))
 	}
 
-	fn insert(&self, device_id: u32, key: &ProjectionKey, value: ProjectedVerdict) {
+	/// Retains `value` under `key` when it fits the cache budget. The cache is
+	/// an optimization only: it may decline a value, or evict it before the
+	/// next read, so callers keep their own handle to a value they need.
+	fn insert(&self, device_id: u32, key: &ProjectionKey, value: Arc<ProjectedVerdict>) {
 		let bytes = projected_part_bytes(&value.parts).saturating_add(value.visibility.iter().fold(
 			0,
 			|bytes, span| {
@@ -1055,7 +1058,6 @@ impl ProjectionCache {
 		if bytes > Self::MAX_PART_BYTES {
 			return;
 		}
-		let value = Arc::new(value);
 		let mut inner = self.inner.lock();
 		inner.clock = inner.clock.wrapping_add(1);
 		let used = inner.clock;
@@ -1115,13 +1117,6 @@ impl ProjectionWarm {
 	const fn ready(result: Result<(), RegistryError>) -> Self {
 		Self { result: Some(result) }
 	}
-
-	fn into_ready(mut self) -> Result<(), RegistryError> {
-		self
-			.result
-			.take()
-			.expect("projection warm future is consumed once")
-	}
 }
 
 impl Future for ProjectionWarm {
@@ -1147,13 +1142,18 @@ pub enum RegistryError {
 	/// space.
 	#[error("too many registered tool revisions for the projection cache")]
 	ProjectionCacheIdLimit,
-	/// A synchronous caller requested a projection which failed to warm its
-	/// cache entry.
-	#[error("projection cache remained cold for {0:?}")]
-	ProjectionCacheMiss(ToolIdentity),
 	/// Tool name is not registered.
 	#[error("unknown tool: {0}")]
 	UnknownTool(Str),
+	/// A call's argument-scoped effects ([`Tool::invocation_effects`]) are not
+	/// a subset of its revision's declared maximum, so the call is refused.
+	#[error("tool {name}@{rev} judged a call's effects to exceed its declared maximum")]
+	InvocationEffectsExceedMaximum {
+		/// Tool name.
+		name: Str,
+		/// Exact registered revision.
+		rev:  Rev,
+	},
 	/// Host roster revision did not advance monotonically.
 	#[error("stale host tool roster for {claimant}: current {current}, received {received}")]
 	StaleHostRoster {
@@ -1281,6 +1281,13 @@ trait ErasedTool: Send + Sync {
 	fn call<'a>(&'a self, params: IncomingParams<'a>) -> ErasedStream<'a>;
 	fn project_cached(&self, key: &ProjectionKey) -> Option<Arc<ProjectedVerdict>>;
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict);
+	/// Returns the projection for `request`: the cached value, or one
+	/// rendered now. A rendered value is offered to the cache but returned
+	/// whether or not the cache keeps it.
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError>;
 	fn warm(&self, requests: &[ProjectionRequest<'_>]) -> ProjectionWarm;
 	fn authorize_visibility(
 		&self,
@@ -1295,7 +1302,30 @@ trait ErasedTool: Send + Sync {
 	fn stream_match_text(&self, _arguments: &Value) -> Option<Vec<StreamMatchText>> {
 		None
 	}
+	fn scopes_invocation_effects(&self) -> bool {
+		false
+	}
+	fn invocation_effects(&self, _arguments: &str) -> Option<Effects> {
+		None
+	}
+	fn fetch_locators(&self, _arguments: &str) -> Vec<Str> {
+		Vec::new()
+	}
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall>;
+}
+
+/// The effects one call of `tool` may have: its argument-scoped envelope, or
+/// the declared maximum when the tool does not narrow this call.
+fn scoped_effects(tool: &dyn ErasedTool, arguments: &str) -> Result<Effects, RegistryError> {
+	let spec = tool.spec();
+	match tool.invocation_effects(arguments) {
+		None => Ok(spec.effects.clone()),
+		Some(effects) if effects.is_subset_of(&spec.effects) => Ok(effects),
+		Some(_) => Err(RegistryError::InvocationEffectsExceedMaximum {
+			name: spec.name.clone(),
+			rev:  spec.rev.clone(),
+		}),
+	}
 }
 static NATIVE_TOOL_ROUTE: ToolRoute = ToolRoute::Native;
 
@@ -1375,7 +1405,21 @@ impl ErasedTool for HostTool {
 	}
 
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict) {
-		self.cache.insert(self.cache_id, key, projected);
+		self.cache.insert(self.cache_id, key, Arc::new(projected));
+	}
+
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
+		if let Some(projected) = self.cache.get(self.cache_id, &request.key) {
+			return Ok(projected);
+		}
+		let projected = Arc::new(self.project_fresh(request.verdict, request.recorded_useless)?);
+		self
+			.cache
+			.insert(self.cache_id, &request.key, Arc::clone(&projected));
+		Ok(projected)
 	}
 
 	fn warm(&self, requests: &[ProjectionRequest<'_>]) -> ProjectionWarm {
@@ -1383,12 +1427,7 @@ impl ErasedTool for HostTool {
 		let result = requests
 			.iter()
 			.filter(|request| request.key.identity == identity)
-			.filter(|request| self.cache.get(self.cache_id, &request.key).is_none())
-			.try_for_each(|request| {
-				let value = self.project_fresh(request.verdict, request.recorded_useless)?;
-				self.cache.insert(self.cache_id, &request.key, value);
-				Ok(())
-			});
+			.try_for_each(|request| self.project(request).map(drop));
 		ProjectionWarm::ready(result)
 	}
 
@@ -1469,7 +1508,17 @@ impl ErasedTool for Worker {
 	}
 
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict) {
-		self.cache.insert(self.cache_id, key, projected);
+		self.cache.insert(self.cache_id, key, Arc::new(projected));
+	}
+
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
+		self
+			.cache
+			.get(self.cache_id, &request.key)
+			.ok_or_else(|| external_error(&self.spec, "warm"))
 	}
 
 	fn warm(&self, _requests: &[ProjectionRequest<'_>]) -> ProjectionWarm {
@@ -1662,7 +1711,22 @@ impl<T: Tool> ErasedTool for Registered<T> {
 	}
 
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict) {
-		self.cache.insert(self.cache_id, key, projected);
+		self.cache.insert(self.cache_id, key, Arc::new(projected));
+	}
+
+	fn project(
+		&self,
+		request: &ProjectionRequest<'_>,
+	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
+		if let Some(projected) = self.cache.get(self.cache_id, &request.key) {
+			return Ok(projected);
+		}
+		let projected =
+			Arc::new(self.project_fresh(request.verdict, request.recorded_useless, request.caps)?);
+		self
+			.cache
+			.insert(self.cache_id, &request.key, Arc::clone(&projected));
+		Ok(projected)
 	}
 
 	fn warm(&self, requests: &[ProjectionRequest<'_>]) -> ProjectionWarm {
@@ -1670,13 +1734,7 @@ impl<T: Tool> ErasedTool for Registered<T> {
 		let result = requests
 			.iter()
 			.filter(|request| request.key.identity == identity)
-			.filter(|request| self.cache.get(self.cache_id, &request.key).is_none())
-			.try_for_each(|request| {
-				let value =
-					self.project_fresh(request.verdict, request.recorded_useless, request.caps)?;
-				self.cache.insert(self.cache_id, &request.key, value);
-				Ok(())
-			});
+			.try_for_each(|request| self.project(request).map(drop));
 		ProjectionWarm::ready(result)
 	}
 
@@ -1717,6 +1775,37 @@ impl<T: Tool> ErasedTool for Registered<T> {
 
 	fn stream_match_text(&self, arguments: &Value) -> Option<Vec<StreamMatchText>> {
 		self.tool.stream_match_text(arguments)
+	}
+
+	fn scopes_invocation_effects(&self) -> bool {
+		T::ARGUMENT_SCOPED_EFFECTS
+	}
+
+	/// Decodes the call's arguments with [`decode_params`], the decoder
+	/// [`IncomingParams::whole`] applies once the executor has finalized them:
+	/// one JSON object, protocol fields stripped. That finalization is not
+	/// repeated here, and the two differ only where it is safe. Arguments that
+	/// do not decode strictly (not one object, malformed JSON the executor
+	/// would repair, an argument-spec alias or coercion it would canonicalize)
+	/// keep the declared maximum. A key given twice decodes last-wins here, and
+	/// the executor's finalization refuses it.
+	fn invocation_effects(&self, arguments: &str) -> Option<Effects> {
+		if !T::ARGUMENT_SCOPED_EFFECTS {
+			return None;
+		}
+		let params = decode_params::<T::Params>(arguments).ok()?;
+		self.tool.invocation_effects(&params)
+	}
+
+	/// Decodes the call's arguments as [`Self::invocation_effects`] does;
+	/// arguments that do not decode name no locators.
+	fn fetch_locators(&self, arguments: &str) -> Vec<Str> {
+		if !T::ARGUMENT_SCOPED_EFFECTS {
+			return Vec::new();
+		}
+		decode_params::<T::Params>(arguments)
+			.map(|params| self.tool.fetch_locators(&params))
+			.unwrap_or_default()
 	}
 
 	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
@@ -2463,6 +2552,52 @@ impl Registry {
 		Ok(entry.tool.spec().effects.clone())
 	}
 
+	/// Whether calls of `name`'s live typed revision narrow their effects to
+	/// their arguments ([`Tool::ARGUMENT_SCOPED_EFFECTS`]). Host, worker and
+	/// unknown tools never do.
+	#[must_use]
+	pub fn scopes_invocation_effects(&self, name: &str) -> bool {
+		self
+			.live_entry(name)
+			.is_ok_and(|entry| entry.tool.scopes_invocation_effects())
+	}
+
+	/// Returns the effects one call of `name` may have, judged from its
+	/// canonical argument JSON: the tool's argument-scoped envelope
+	/// ([`Tool::invocation_effects`]), or the declared maximum of a native or
+	/// host tool that does not narrow the call, mirroring
+	/// [`Self::effects_owned`].
+	///
+	/// An envelope that is not a subset of the declared maximum is refused
+	/// ([`RegistryError::InvocationEffectsExceedMaximum`]), never replaced by
+	/// the maximum.
+	pub fn invocation_effects(&self, name: &str, arguments: &str) -> Result<Effects, RegistryError> {
+		if let Ok(entry) = self.live_entry(name) {
+			return scoped_effects(entry.tool.as_ref(), arguments);
+		}
+		let state = self.host_tools.read();
+		let entry = state
+			.live
+			.get(name)
+			.and_then(|claimant| state.rosters.get(claimant))
+			.and_then(|roster| roster.entries.get(name))
+			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+		scoped_effects(entry.tool.as_ref(), arguments)
+	}
+
+	/// Returns the remote locators one call of `name` fetches, judged from its
+	/// canonical argument JSON ([`Tool::fetch_locators`]). Empty for a tool
+	/// that does not scope its effects to its arguments, for arguments that do
+	/// not decode, and for host, worker and unknown tools: their fetches are
+	/// approved as the tool's own.
+	#[must_use]
+	pub fn fetch_locators(&self, name: &str, arguments: &str) -> Vec<Str> {
+		self
+			.live_entry(name)
+			.map(|entry| entry.tool.fetch_locators(arguments))
+			.unwrap_or_default()
+	}
+
 	/// Iterates winning native identities in deterministic name order.
 	pub fn live_identities(
 		&self,
@@ -2982,6 +3117,9 @@ impl Registry {
 	/// The durable `recorded_useless` hint is preserved for tool-owned `Ok` and
 	/// `Fault` branches. Harness-owned `Args` and `Aborted` branches always
 	/// force it false.
+	///
+	/// The projection cache only spares re-rendering: a projection it declines
+	/// (larger than its budget) or evicts concurrently is still returned.
 	pub fn project_verdict(
 		&self,
 		identity: &ToolIdentity,
@@ -2990,14 +3128,7 @@ impl Registry {
 		caps: &PromptCaps,
 	) -> Result<Arc<ProjectedVerdict>, RegistryError> {
 		let request = self.projection_request(identity, verdict, recorded_useless, caps)?;
-		let entry = self.projection_tool(identity)?;
-		if let Some(projected) = entry.project_cached(&request.key) {
-			return Ok(projected);
-		}
-		entry.warm(slice::from_ref(&request)).into_ready()?;
-		entry
-			.project_cached(&request.key)
-			.ok_or_else(|| RegistryError::ProjectionCacheMiss(identity.clone()))
+		self.projection_tool(identity)?.project(&request)
 	}
 
 	/// Returns the live dispatcher's final source visibility receipt to the
@@ -3753,15 +3884,95 @@ mod tests {
 		let different =
 			ProjectionKey::new(&identity(1), b"{\"kind\":\"ok\"}", &caps(), [2; 32].into());
 		assert!(cache.get(0, &key).is_none());
-		cache.insert(0, &key, ProjectedVerdict {
-			parts:      Arc::<[Part]>::from([]),
-			visibility: Arc::from([]),
-			is_error:   false,
-			useless:    false,
-		});
+		cache.insert(
+			0,
+			&key,
+			Arc::new(ProjectedVerdict {
+				parts:      Arc::<[Part]>::from([]),
+				visibility: Arc::from([]),
+				is_error:   false,
+				useless:    false,
+			}),
+		);
 		let hit = cache.get(0, &key).expect("matching key hits");
 		assert!(Arc::ptr_eq(&hit, &cache.get(0, &key).expect("second matching key hits")));
 		assert!(cache.get(0, &different).is_none());
+	}
+
+	/// Projects every verdict as one text part of `bytes` bytes.
+	struct SizedProjection {
+		spec:  ToolSpec,
+		bytes: usize,
+	}
+
+	impl Tool for SizedProjection {
+		type Fault = Value;
+		type Params = Value;
+		type Payload = Value;
+		type Update = Value;
+
+		fn spec(&self) -> &ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			_params: IncomingParams<'c>,
+		) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+			futures::stream::empty()
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&Self::Payload, &Self::Fault>,
+			_caps: &PromptCaps,
+		) -> Vec<Part> {
+			vec![Part::Text { text: Str::new("x".repeat(self.bytes)) }]
+		}
+	}
+
+	/// The projection cache is an optimization, never the carrier: a
+	/// projection larger than its whole budget, which it declines to keep,
+	/// is still returned, and stays correct when rendered again.
+	#[test]
+	fn project_verdict_returns_projections_the_cache_declines() {
+		let bytes = ProjectionCache::MAX_PART_BYTES + 1;
+		let mut registry = Registry::new();
+		registry
+			.register(SizedProjection { spec: tool(1).spec, bytes }, Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/sized"),
+				replaces:   None,
+			})
+			.expect("sized projection registers");
+		let caps = PromptCaps {
+			maximum_parts:      u16::MAX,
+			maximum_text_bytes: u32::MAX,
+			media:              true,
+			dialect:            Dialect::Native,
+			model_class:        ModelClass::Standard,
+		};
+		let verdict = br#"{"kind":"ok","value":null}"#;
+		let request = registry
+			.projection_request(&identity(1), verdict, true, &caps)
+			.expect("projection request");
+		for attempt in ["first", "repeated"] {
+			let projected = registry
+				.project_verdict(&identity(1), verdict, true, &caps)
+				.unwrap_or_else(|error| panic!("{attempt} projection: {error}"));
+			let [Part::Text { text }] = projected.parts.as_ref() else {
+				panic!("{attempt} projection carries one text part: {:?}", projected.parts);
+			};
+			assert_eq!(text.len(), bytes, "{attempt} projection is whole");
+			assert!(!projected.is_error && projected.useless, "{attempt} projection keeps its branch");
+			assert!(
+				registry
+					.project_cached(&request.key)
+					.expect("cache probe")
+					.is_none(),
+				"the cache declined the {attempt} projection"
+			);
+		}
 	}
 
 	#[test]
@@ -3874,6 +4085,214 @@ mod tests {
 		};
 		assert!(declared.is_subset_of(&unknown));
 		assert!(!unknown.is_subset_of(&declared));
+	}
+
+	/// Arguments of [`ScopedTool`]: the envelope each `level` asks for.
+	#[derive(Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct ScopedParams {
+		level: Str,
+	}
+
+	/// A tool narrowing its calls by `level` when `SCOPED` declares it.
+	struct ScopedTool<const SCOPED: bool> {
+		spec: ToolSpec,
+	}
+
+	impl<const SCOPED: bool> Tool for ScopedTool<SCOPED> {
+		type Fault = Value;
+		type Params = ScopedParams;
+		type Payload = Value;
+		type Update = Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = SCOPED;
+
+		fn spec(&self) -> &ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			_params: IncomingParams<'c>,
+		) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+			futures::stream::empty()
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&Self::Payload, &Self::Fault>,
+			_caps: &PromptCaps,
+		) -> Vec<Part> {
+			Vec::new()
+		}
+
+		fn invocation_effects(&self, params: &ScopedParams) -> Option<Effects> {
+			match params.level.as_str() {
+				"read" => Some(read_only()),
+				// Outside the declared maximum: the classifier lies.
+				"widen" => Some(Effects { subagents: 1, ..Effects::empty() }),
+				_ => None,
+			}
+		}
+
+		fn fetch_locators(&self, params: &ScopedParams) -> Vec<Str> {
+			if params.level.contains("://") {
+				vec![params.level.clone()]
+			} else {
+				Vec::new()
+			}
+		}
+	}
+
+	fn read_only() -> Effects {
+		Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::from([]) }),
+			..Effects::empty()
+		}
+	}
+
+	fn scoped_maximum() -> Effects {
+		Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::from([sf!("**")]) }),
+			exec: Some(ExecEffects { commands: Arc::from([sf!("*")]), network: false }),
+			..Effects::empty()
+		}
+	}
+
+	fn scoped_registry<const SCOPED: bool>() -> Registry {
+		let mut registry = Registry::new();
+		let mut spec = tool(1).spec;
+		spec.name = sf!("scoped");
+		spec.effects = scoped_maximum();
+		registry
+			.register(ScopedTool::<SCOPED> { spec }, Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/scoped"),
+				replaces:   None,
+			})
+			.expect("scoped tool registers");
+		registry
+	}
+
+	/// A declared classifier narrows a call to its envelope after the
+	/// protocol fields are stripped, as the executor decodes it; no override,
+	/// or arguments the executor would refuse too, keep the declared maximum;
+	/// an envelope beyond the maximum is refused, never replaced by it.
+	#[test]
+	fn invocation_effects_narrow_and_fail_closed() {
+		let registry = scoped_registry::<true>();
+		assert!(registry.scopes_invocation_effects("scoped"));
+		assert_eq!(
+			registry
+				.invocation_effects("scoped", r#"{"i":"look","notrunc":true,"level":"read"}"#)
+				.expect("a subset envelope"),
+			read_only()
+		);
+		for maximum in [
+			r#"{"level":"everything"}"#,
+			r#"{"level":7}"#,
+			r#"{"level":"read","extra":1}"#,
+			"not json",
+			// Serde's sequence form of the struct: no executor accepts it.
+			r#"["read"]"#,
+		] {
+			assert_eq!(
+				registry
+					.invocation_effects("scoped", maximum)
+					.expect("the declared maximum"),
+				scoped_maximum(),
+				"{maximum}"
+			);
+		}
+		let refused = registry
+			.invocation_effects("scoped", r#"{"level":"widen"}"#)
+			.expect_err("a widening envelope is refused");
+		assert!(
+			matches!(
+				&refused,
+				RegistryError::InvocationEffectsExceedMaximum { name, rev }
+					if name == "scoped" && *rev == identity(1).rev
+			),
+			"{refused:?}"
+		);
+		assert!(matches!(
+			registry.invocation_effects("absent", "{}"),
+			Err(RegistryError::UnknownTool(_))
+		));
+	}
+
+	/// A tool that does not declare argument-scoped effects is judged by its
+	/// declared maximum, whatever its arguments; host tools too.
+	#[test]
+	fn undeclared_scoping_keeps_the_declared_maximum() {
+		let registry = scoped_registry::<false>();
+		assert!(!registry.scopes_invocation_effects("scoped"));
+		for arguments in [r#"{"level":"read"}"#, r#"{"level":"widen"}"#] {
+			assert_eq!(
+				registry
+					.invocation_effects("scoped", arguments)
+					.expect("the declared maximum"),
+				scoped_maximum(),
+				"{arguments}"
+			);
+		}
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
+					effects:     None,
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+		assert!(!registry.scopes_invocation_effects("alpha"));
+		assert_eq!(
+			registry
+				.invocation_effects("alpha", "{}")
+				.expect("a host tool's declaration"),
+			registry
+				.effects_owned("alpha")
+				.expect("a host tool's declaration")
+		);
+	}
+
+	/// A declaring tool names the locators its call fetches, decoded as its
+	/// envelope is; a tool that does not declare argument-scoped effects,
+	/// arguments that do not decode, host and unknown tools name none, so
+	/// their fetches are approved as the tool's own.
+	#[test]
+	fn fetch_locators_follow_the_declared_classifier() {
+		let url = r#"{"i":"look","level":"https://docs.example/a"}"#;
+		let registry = scoped_registry::<true>();
+		assert_eq!(registry.fetch_locators("scoped", url), [sf!("https://docs.example/a")]);
+		for nothing in
+			[r#"{"level":"read"}"#, r#"{"level":7}"#, r#"["https://x.example"]"#, "not json"]
+		{
+			assert!(registry.fetch_locators("scoped", nothing).is_empty(), "{nothing}");
+		}
+		assert!(registry.fetch_locators("absent", url).is_empty());
+		let undeclared = scoped_registry::<false>();
+		assert!(undeclared.fetch_locators("scoped", url).is_empty());
+		undeclared
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("alpha"),
+					description: sf!("alpha host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
+					effects:     None,
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+		assert!(undeclared.fetch_locators("alpha", url).is_empty());
 	}
 
 	#[test]

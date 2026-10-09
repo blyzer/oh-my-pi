@@ -118,11 +118,12 @@ impl ToolAdmission for PromptAdmission {
 		_effects: &Effects,
 		_confinement: Confinement,
 		_args: &serde_json::value::RawValue,
+		_fetch_locators: &[Str],
 	) -> ToolAdmissionVerdict {
-		ToolAdmissionVerdict::Prompt(approval_spec(
+		ToolAdmissionVerdict::Prompt(vec![approval_spec(
 			"Native capability approval",
 			"native admission policy",
-		))
+		)])
 	}
 }
 
@@ -452,8 +453,12 @@ async fn lifecycle_and_native_approval_share_one_durable_ticket_and_replay() {
 	assert_eq!(replayed.dom().snapshot(), live);
 }
 
+/// What the dispatcher handed native admission for one call: its name,
+/// envelope, confinement and fetch locators.
+type Admitted = (String, Effects, Confinement, Vec<Str>);
+
 /// Records what the dispatcher hands native admission, and allows.
-struct RecordingAdmission(Arc<Mutex<Vec<(String, Effects, Confinement)>>>);
+struct RecordingAdmission(Arc<Mutex<Vec<Admitted>>>);
 
 impl ToolAdmission for RecordingAdmission {
 	fn admit(
@@ -462,11 +467,12 @@ impl ToolAdmission for RecordingAdmission {
 		effects: &Effects,
 		confinement: Confinement,
 		_args: &serde_json::value::RawValue,
+		fetch_locators: &[Str],
 	) -> ToolAdmissionVerdict {
 		self
 			.0
 			.lock()
-			.push((name.to_owned(), effects.clone(), confinement));
+			.push((name.to_owned(), effects.clone(), confinement, fetch_locators.to_vec()));
 		ToolAdmissionVerdict::Allow
 	}
 }
@@ -572,10 +578,155 @@ async fn native_admission_receives_the_live_spec_confinement() {
 		.await
 		.expect("turn");
 	assert_eq!(*admitted.lock(), [
-		(String::from("capture"), network, Confinement::ExecSandbox),
-		(String::from("fetch_ticket"), Effects::unknown(), Confinement::Host),
-		(String::from("list_tickets"), read, Confinement::Host),
+		(String::from("capture"), network, Confinement::ExecSandbox, Vec::new()),
+		(String::from("fetch_ticket"), Effects::unknown(), Confinement::Host, Vec::new()),
+		(String::from("list_tickets"), read, Confinement::Host, Vec::new()),
 	]);
+}
+
+/// Arguments of [`ScopedTool`].
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedParams {
+	value: i64,
+}
+
+/// A tool judging each call by `value`: `0` only reads documents, `1` keeps
+/// the declared maximum, `3` reads and fetches `https://docs.rs/serde`, and
+/// anything else claims more than that maximum.
+struct ScopedTool {
+	spec: ToolSpec,
+	runs: Arc<Mutex<Vec<i64>>>,
+}
+
+impl Tool for ScopedTool {
+	type Fault = Value;
+	type Params = ScopedParams;
+	type Payload = Value;
+	type Update = Value;
+
+	const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+	fn spec(&self) -> &ToolSpec {
+		&self.spec
+	}
+
+	fn invocation_effects(&self, params: &ScopedParams) -> Option<Effects> {
+		match params.value {
+			0 => Some(read_documents()),
+			1 => None,
+			3 => Some(Effects {
+				fetch: Some(omp_tool::FetchEffects { credentials: false }),
+				..read_documents()
+			}),
+			_ => Some(Effects { subagents: 1, ..Effects::empty() }),
+		}
+	}
+
+	/// Asked only for a call whose envelope fetches: the maximum's fetch names
+	/// a host no call of `3` reaches.
+	fn fetch_locators(&self, params: &ScopedParams) -> Vec<Str> {
+		match params.value {
+			3 => vec![sf!("https://docs.rs/serde")],
+			_ => vec![sf!("https://maximum.example/")],
+		}
+	}
+
+	fn call<'c>(
+		&'c self,
+		mut params: IncomingParams<'c>,
+	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		stream! {
+			let args = params.whole::<Value>().await.expect("scoped args decode");
+			self.runs.lock().push(args["value"].as_i64().expect("an integer value"));
+			yield Ev::Done(ToolTerminal::Done { result: Ok(args), useless: false });
+		}
+	}
+
+	fn prompt(&self, view: Result<&Value, &Value>, _: &PromptCaps) -> Vec<Part> {
+		vec![Part::Json {
+			json: Bytes::from(serde_json::to_vec(view.unwrap_or_else(|fault| fault)).expect("JSON")),
+		}]
+	}
+}
+
+fn read_documents() -> Effects {
+	Effects {
+		documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+		..Effects::empty()
+	}
+}
+
+/// Native admission judges each call by its arguments: a call the tool
+/// narrows is admitted on that envelope, one it does not keeps the declared
+/// maximum, and one judged beyond the maximum is refused before admission is
+/// asked and never runs. A call whose envelope fetches hands admission the
+/// URLs it fetches, and only such a call asks the tool for them.
+#[tokio::test]
+async fn native_admission_judges_each_call_by_its_arguments() {
+	let maximum = Effects {
+		exec: Some(ExecEffects { commands: Arc::from([]), network: true }),
+		fetch: Some(omp_tool::FetchEffects { credentials: false }),
+		..read_documents()
+	};
+	let runs = Arc::new(Mutex::new(Vec::new()));
+	let mut registry = Registry::new();
+	registry
+		.register(
+			ScopedTool {
+				spec: ToolSpec {
+					name: sf!("scoped"),
+					rev: Rev { family: sf!("test"), n: 1 },
+					description: sf!("judge each call by its value"),
+					schema: Bytes::from_static(
+						br#"{"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false}"#,
+					),
+					constraint: Constraint::None,
+					effects: maximum.clone(),
+					confinement: Confinement::Host,
+					projection_code: [9; 32],
+				},
+				runs: Arc::clone(&runs),
+			},
+			Presentation::Slot,
+			Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+		)
+		.expect("scoped tool registers");
+	let admitted = Arc::new(Mutex::new(Vec::new()));
+	let temp = tempfile::tempdir().expect("tempdir");
+	let (inference, _) = ScriptedInference::new([
+		tool_script("narrow", "scoped", serde_json::json!({"value": 0})),
+		tool_script("maximum", "scoped", serde_json::json!({"value": 1})),
+		tool_script("widened", "scoped", serde_json::json!({"value": 2})),
+		tool_script("fetching", "scoped", serde_json::json!({"value": 3})),
+		text_script("done"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(registry),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_tool_admission(Arc::new(RecordingAdmission(Arc::clone(&admitted))));
+	let mut session = fresh_session(&temp.path().join("scoped.oms"));
+	kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: sf!("scope"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("turn");
+	let fetching =
+		Effects { fetch: Some(omp_tool::FetchEffects { credentials: false }), ..read_documents() };
+	assert_eq!(*admitted.lock(), [
+		(String::from("scoped"), read_documents(), Confinement::Host, Vec::new()),
+		(String::from("scoped"), maximum, Confinement::Host, vec![sf!("https://maximum.example/")]),
+		(String::from("scoped"), fetching, Confinement::Host, vec![sf!("https://docs.rs/serde")]),
+	]);
+	let mut ran = runs.lock().clone();
+	ran.sort_unstable();
+	assert_eq!(ran, [0, 1, 3], "the call judged beyond the maximum never ran");
 }
 
 #[tokio::test]

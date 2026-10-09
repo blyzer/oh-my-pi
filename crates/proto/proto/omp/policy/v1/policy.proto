@@ -141,7 +141,10 @@ message InferenceEffects {
 message DesktopEffects {
   bool capture = 1;
   bool accessibility = 2;
+  // Pointer, keyboard, focus, accessibility mutation and clipboard writes.
   bool input = 3;
+  // Host clipboard reads; a clipboard write is `input`.
+  bool clipboard = 4;
   omp.inference.v1.ValueMap props = 15;
 }
 
@@ -150,6 +153,37 @@ message DesktopEffects {
 message FetchEffects {
   // Whether the fetch may present the user's stored credentials.
   bool credentials = 1;
+  omp.inference.v1.ValueMap props = 15;
+}
+
+// The environment resolver that performs a fetch, and so names the host it
+// reaches. Unlike NetRef, which a shell command's text implies, the resolver
+// that will carry the request names this host.
+enum FetchResolver {
+  FETCH_RESOLVER_UNSPECIFIED = 0;
+  // An http(s) URL: the host and port the arguments name (the authored host).
+  // Redirects the client follows and site readers that re-target the fetch
+  // reach hosts known only once it runs; the authored host's grant covers
+  // them.
+  FETCH_RESOLVER_HTTP = 1;
+  // `issue://` and `pr://`: the GitHub host the URL names or, without one, the
+  // workspace's git remote, reached through its API with the user's stored
+  // credentials.
+  FETCH_RESOLVER_GITHUB = 2;
+  // `ssh://`: a configured SSH host alias, reached with its configured
+  // credentials.
+  FETCH_RESOLVER_SSH = 3;
+  // A mounted MCP server: `mcp://` resources and the server's devices.
+  FETCH_RESOLVER_MCP = 4;
+}
+
+// One host a fetch reaches, as the resolver that performs it names it.
+message FetchTarget {
+  FetchResolver resolver = 1;
+  // Host name, SSH alias, or MCP server name.
+  string host = 2;
+  // Port, present exactly for FETCH_RESOLVER_HTTP.
+  optional uint32 port = 3;
   omp.inference.v1.ValueMap props = 15;
 }
 

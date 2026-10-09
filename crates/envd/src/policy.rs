@@ -143,6 +143,9 @@ impl Grants {
 			if desktop.accessibility {
 				grants.push("env.desktop.accessibility");
 			}
+			if desktop.clipboard {
+				grants.push("env.desktop.clipboard");
+			}
 			if desktop.input {
 				grants.push("env.desktop.input");
 			}

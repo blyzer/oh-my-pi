@@ -1241,7 +1241,7 @@ Each request is `{"op": ...}`; each response is one JSON line with `"ok"`:
 | `paste` | `text` | inject a bracketed paste |
 | `mouse` | `x`, `y`, `action` | inject a gesture (`click`, `drag`, `release`, `move`, `wheel-up`, ...) |
 | `resize` | | re-read tty geometry, then run the normal resize/settle flow |
-| `quit` | | inject `C-c`, the conventional quit chord |
+| `quit` | | inject one `C-c`, the conventional quit chord (`omp chat` quits only on a repeat: send `keys` `"C-c C-c"`) |
 
 Injected input lands in the ordinary event mailbox, so the host observes it
 exactly like terminal input — quit chords, focus routing, and overlay
@@ -1254,7 +1254,14 @@ Inside this repository the `.omp/tools/tui.ts` agent tool wraps the whole
 loop: it spawns an example or bin on a Bun-native PTY (a real controlling
 terminal, so SIGWINCH resizes and immediate-mode hosts work) with
 `OMP_TUI_DEBUG` set, then exposes screenshots, tree dumps, input injection,
-resizes, and raw byte-stream statistics as one session-based tool.
+resizes, and raw byte-stream statistics as one session-based tool. Its `stop`
+op sends one `keys` request of `"C-c C-c"` (`\x03\x03` to an app with no debug
+socket), so a host that quits only on a repeated `C-c` — `omp chat` exits on a
+second press within 500 ms — leaves through its own clean quit path. A host
+still running 1 s later gets the `quit` op, which the native host
+(`crates/app/src/gui.rs`) takes as a lifecycle close even behind a modal
+overlay; the tool SIGKILLs only an app still running 2 s after the chords.
+`just tools-test` runs its contract tests (local only; CI is the Cargo gate).
 
 ## Common mistakes
 

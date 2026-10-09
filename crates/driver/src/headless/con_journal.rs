@@ -22,15 +22,16 @@
 //! the parked layer ([`Ctx::drop_scope`]). Neither class layer is journaled
 //! or persisted, so the child's definition is re-read on every resume.
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use omp_agent::{LiveComponent, LiveComponentError};
 use omp_con::{CfgLoader, Ctx, Severity, Value};
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Op, Txn};
+use omp_env::project_state::DaemonPolicy;
 use omp_journal::{Entry, Kind, KindName};
 use omp_session::{
-	Session, SessionError,
+	ComponentRegistry, Session, SessionError,
 	components::con::{ConWrite, con_remove_txn, con_write_txn, con_writes},
 };
 use parking_lot::Mutex;
@@ -58,12 +59,16 @@ pub enum ClassScope {
 
 /// The one console-to-journal channel for a composed session.
 pub struct ConJournal {
-	ctx:     Arc<Ctx>,
-	scope:   ClassScope,
-	writes:  flume::Receiver<omp_con::SessionWrite>,
+	ctx:      Arc<Ctx>,
+	scope:    ClassScope,
+	writes:   flume::Receiver<omp_con::SessionWrite>,
 	/// Writes observed but not yet journaled, last value per name; `None`
 	/// drops the journaled value.
-	pending: Mutex<FastHashMap<Str, Option<Value>>>,
+	pending:  Mutex<FastHashMap<Str, Option<Value>>>,
+	/// The sandbox and approval policy the console presented when the session
+	/// was attached, which the composition's environment enforces for its
+	/// whole life (`compose_kernel` refuses a session that presents another).
+	composed: DaemonPolicy,
 }
 
 impl ConJournal {
@@ -75,10 +80,11 @@ impl ConJournal {
 	/// warning rather than aborting composition: cfg and journal data from
 	/// older builds is user data (ADR 0013).
 	pub fn attach(ctx: Arc<Ctx>, dom: &Dom, scope: ClassScope) -> Self {
-		apply_class(&ctx, &scope, dom);
+		apply_class(&ctx, &scope, dom, Report::Console);
 		hydrate(&ctx, dom);
 		let writes = ctx.subscribe_session_writes();
-		Self { ctx, scope, writes, pending: Mutex::new(FastHashMap::default()) }
+		let composed = omp_envd::daemon_policy::from_con(&ctx);
+		Self { ctx, scope, writes, pending: Mutex::new(FastHashMap::default()), composed }
 	}
 
 	/// Re-derives the session layer after the tree changed underneath the
@@ -86,11 +92,22 @@ impl ConJournal {
 	/// are cleared, the class configuration follows the session's journaled
 	/// class, the rest are restored, and pending writes are dropped because
 	/// they described the abandoned branch.
+	///
+	/// A switch to a session whose class sets another sandbox and approval
+	/// policy than the composition's environment enforces is reported through
+	/// the console: the environment keeps the policy it started with.
 	pub fn resync(&self, dom: &Dom) {
+		// Only a journaled class moves the policy: no sandbox or approval
+		// convar is `SESSION`-flagged, so hydration never does.
+		let before = matches!(self.scope, ClassScope::Journaled(_))
+			.then(|| omp_envd::daemon_policy::from_con(&self.ctx));
 		// The class goes first: returning to a main session restores its
 		// parked session layer, which the stale sweep then aligns with the
 		// journal of the session actually presented.
-		apply_class(&self.ctx, &self.scope, dom);
+		apply_class(&self.ctx, &self.scope, dom, Report::Console);
+		if let Some(before) = before {
+			self.report_policy_drift(before);
+		}
 		let live = con_writes(dom);
 		let stale = self
 			.ctx
@@ -106,6 +123,32 @@ impl ConJournal {
 		hydrate(&self.ctx, dom);
 		self.pending.lock().clear();
 		while self.writes.try_recv().is_ok() {}
+	}
+
+	/// Reports a class presentation that moved the console's sandbox and
+	/// approval policy from `before` to one the environment does not enforce.
+	/// A presentation that keeps the policy, such as the resync at every
+	/// command boundary, or that returns to the composed one says nothing.
+	fn report_policy_drift(&self, before: DaemonPolicy) {
+		let presented = omp_envd::daemon_policy::from_con(&self.ctx);
+		if presented == before || presented == self.composed {
+			return;
+		}
+		let composed = self.composed;
+		tracing::warn!(
+			%presented,
+			%composed,
+			"the presented session's class sets another sandbox and approval policy than its \
+			 environment enforces"
+		);
+		self.ctx.reply_fmt(
+			Severity::Warn,
+			format_args!(
+				"this session's agent class sets sandbox and approval policy {presented}, but its \
+				 tools keep running in this process's environment, which enforces {composed}; resume \
+				 the session in a new process (`omp --resume`) to run them under its own policy"
+			),
+		);
 	}
 
 	/// Drains the console channel into the pending map.
@@ -182,6 +225,41 @@ impl ConJournal {
 	}
 }
 
+/// Presents the class journaled on the session at `journal` before the
+/// composition opens that session for good, when the composition follows the
+/// session's class.
+///
+/// A composition attaches its project environment before it opens the
+/// session, and a project daemon or an embedded host fixes its sandbox and
+/// approval policy when it starts. Without this a resumed child's environment
+/// would enforce the main configuration while the session presents its class
+/// configuration. The journal is materialized once with the standard
+/// components (the class is a plain `<meta>` property) and closed again;
+/// [`ConJournal::attach`] then presents the same class and reports what this
+/// leaves unsaid. A journal that cannot be read here is left to that open.
+pub fn present_journaled_class(ctx: &Ctx, scope: &ClassScope, journal: &Path) {
+	if !matches!(scope, ClassScope::Journaled(_)) || !journal.exists() {
+		return;
+	}
+	match Session::open(journal, ComponentRegistry::standard()) {
+		Ok(session) => apply_class(ctx, scope, session.dom(), Report::Quiet),
+		Err(error) => tracing::warn!(
+			%error,
+			journal = %journal.display(),
+			"the journaled agent class could not be read before the environment started"
+		),
+	}
+}
+
+/// Whether presenting a class reports what it could not apply.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Report {
+	/// Through the console sink.
+	Console,
+	/// Not at all: a later presentation of the same session reports it.
+	Quiet,
+}
+
 /// Presents the class configuration of the session `dom` journals, when the
 /// composition follows it. For a child session it builds the child exactly
 /// as the spawn path does ([`configure_resumed_child`]) — over the main
@@ -192,7 +270,7 @@ impl ConJournal {
 /// adopted scope, restoring the parked layer. A class whose definition
 /// (`<agent>.cfg`) is gone, or that fails to configure, is reported through
 /// the console sink, never skipped silently.
-fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom) {
+fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom, report: Report) {
 	let ClassScope::Journaled(cfg) = scope else {
 		return;
 	};
@@ -200,7 +278,7 @@ fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom) {
 		ctx.drop_scope();
 		return;
 	};
-	if agent.as_str() != TASK_AGENT.as_str() {
+	if report == Report::Console && agent.as_str() != TASK_AGENT.as_str() {
 		let mut file = agent.as_str().to_owned();
 		file.push_str(".cfg");
 		match cfg
@@ -231,6 +309,9 @@ fn apply_class(ctx: &Ctx, scope: &ClassScope, dom: &Dom) {
 		Ok((child, _)) => ctx.adopt_scope(&child),
 		Err(error) => {
 			ctx.drop_scope();
+			if report == Report::Quiet {
+				return;
+			}
 			ctx.reply_fmt(
 				Severity::Warn,
 				format_args!(
@@ -770,5 +851,227 @@ mod tests {
 		journal.resync(main.dom());
 		assert!(tool.advertised());
 		assert_eq!(crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&ctx), 0);
+	}
+
+	/// A composition attaches its environment before it opens the session,
+	/// and the environment fixes its sandbox and approval policy when it
+	/// starts. The early presentation puts a resumed child's class policy in
+	/// force first, without a word, and attaching the session afterwards
+	/// presents the same policy and reports what could not be applied once.
+	#[test]
+	fn the_journaled_class_is_presented_before_the_environment_starts() {
+		use omp_envd::{
+			daemon_policy,
+			exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
+		};
+
+		let directory = tempfile::tempdir().expect("tempdir");
+		let cfg = class_files(directory.path(), &[("reviewer.cfg", "sv_sandbox_mode read-only\n")]);
+		let child_path = directory.path().join("child.oms");
+		drop(child_session(&child_path, "reviewer", 1));
+		let (ctx, replies) = console();
+		let main = daemon_policy::from_con(&ctx);
+		let scope = ClassScope::Journaled(Arc::clone(&cfg));
+
+		super::present_journaled_class(&ctx, &scope, &child_path);
+		assert_eq!(SV_SANDBOX_MODE.get(&ctx), ExecSandboxMode::ReadOnly);
+		let early = daemon_policy::from_con(&ctx);
+		assert_ne!(early, main, "the class policy is in force before the environment starts");
+		let child = open(&child_path);
+		let _journal = ConJournal::attach(Arc::clone(&ctx), child.dom(), scope);
+		assert_eq!(daemon_policy::from_con(&ctx), early, "the session presents the same policy");
+		assert!(replies.lock().is_empty(), "{:?}", replies.lock());
+
+		// A new session, a main session and a composed child keep the console.
+		let (fresh, _) = console();
+		let journaled = ClassScope::Journaled(Arc::clone(&cfg));
+		super::present_journaled_class(&fresh, &journaled, &directory.path().join("new.oms"));
+		assert_eq!(daemon_policy::from_con(&fresh), main);
+		let main_path = directory.path().join("main.oms");
+		drop(open(&main_path));
+		super::present_journaled_class(&fresh, &journaled, &main_path);
+		assert_eq!(daemon_policy::from_con(&fresh), main);
+		super::present_journaled_class(&fresh, &ClassScope::Composed, &child_path);
+		assert_eq!(daemon_policy::from_con(&fresh), main);
+
+		// A class gone from its definitions is reported once, by the attach.
+		let retired_path = directory.path().join("retired.oms");
+		drop(child_session(&retired_path, "retired", 1));
+		let (retired, replies) = console();
+		super::present_journaled_class(&retired, &journaled, &retired_path);
+		assert!(replies.lock().is_empty(), "the early presentation is quiet");
+		let session = open(&retired_path);
+		let _journal = ConJournal::attach(Arc::clone(&retired), session.dom(), journaled);
+		let reported = replies.lock().join("\n");
+		assert_eq!(
+			reported
+				.matches("agent `retired` has no definition")
+				.count(),
+			1,
+			"{reported}"
+		);
+	}
+
+	/// A chat keeps the environment it was composed with, so switching to a
+	/// child whose class sets another sandbox policy (`/resume` from the main
+	/// chat) says so once, naming both policies. The resync at every later
+	/// command boundary and the switch back to the main session say nothing.
+	#[test]
+	fn switching_to_a_class_of_another_policy_is_reported_once() {
+		use omp_envd::daemon_policy;
+
+		let directory = tempfile::tempdir().expect("tempdir");
+		let cfg = class_files(directory.path(), &[
+			("reviewer.cfg", "sv_sandbox_mode read-only\n"),
+			("scout.cfg", "ai_thinking low\n"),
+		]);
+		let (ctx, replies) = console();
+		let main = open(&directory.path().join("main.oms"));
+		let journal =
+			ConJournal::attach(Arc::clone(&ctx), main.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
+		let composed = daemon_policy::from_con(&ctx);
+
+		// A class that keeps the policy says nothing.
+		let scout = child_session(&directory.path().join("scout.oms"), "scout", 1);
+		journal.resync(scout.dom());
+		assert!(replies.lock().is_empty(), "{:?}", replies.lock());
+
+		let reviewer = child_session(&directory.path().join("reviewer.oms"), "reviewer", 1);
+		journal.resync(reviewer.dom());
+		let presented = daemon_policy::from_con(&ctx);
+		assert_ne!(presented, composed);
+		journal.resync(reviewer.dom());
+		journal.resync(main.dom());
+		assert_eq!(daemon_policy::from_con(&ctx), composed);
+		let reported = replies.lock().join("\n");
+		assert_eq!(
+			reported
+				.matches(&format!(
+					"sets sandbox and approval policy {presented}, but its tools keep running in this \
+					 process's environment, which enforces {composed}"
+				))
+				.count(),
+			1,
+			"{reported}"
+		);
+		assert_eq!(replies.lock().len(), 1, "{reported}");
+	}
+
+	/// The reported gap: `--resume` of a child whose class sets
+	/// `sv_sandbox_mode read-only` composed its environment from the main
+	/// configuration and joined that configuration's project daemon, where
+	/// `bash` may write the workspace, while the session presented the class.
+	/// Presented first, the class keys the environment: the session never
+	/// joins that daemon, spawns none it could not join, and runs embedded
+	/// under the class policy.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_resumed_child_never_joins_the_main_configurations_daemon() {
+		use std::time::Duration;
+
+		use omp_core::{Principal, sf};
+		use omp_env::project_state::{DaemonPolicy, document_socket, environment_socket};
+		use omp_envd::{
+			AttachOptions, EnvServer, ProjectEnvironment, RegistryBridges, daemon_policy,
+			exthost::ConvarControlFactory, worker::ExtHostConfig,
+		};
+		use tokio_util::sync::CancellationToken;
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("workspace");
+		let state = scratch.path().join("state");
+		let classes = scratch.path().join("o2");
+		for directory in [&root, &state, &classes] {
+			std::fs::create_dir_all(directory).expect("directory");
+		}
+		let root = std::fs::canonicalize(&root).expect("canonical workspace");
+		let cfg = class_files(&classes, &[("reviewer.cfg", "sv_sandbox_mode read-only\n")]);
+		let child_path = scratch.path().join("child.oms");
+		drop(child_session(&child_path, "reviewer", 1));
+
+		// A daemon started under the main configuration serves the project.
+		let main = Arc::new(Ctx::new());
+		let main_policy = daemon_policy::from_con(&main);
+		let socket = environment_socket(&state, &main_policy).expect("environment socket");
+		let server = EnvServer::open_project(
+			&root,
+			&state,
+			&document_socket(&state),
+			omp_tool::Registry::new(),
+			ExtHostConfig::current(
+				Principal::new(sf!("daemon-tester"), sf!("Daemon Tester")),
+				sf!("daemon-session"),
+				1,
+			)
+			.expect("daemon host configuration"),
+			None,
+			false,
+			None,
+			&main,
+			Arc::new(ConvarControlFactory::new(Arc::clone(&main))),
+			RegistryBridges::default(),
+		)
+		.await
+		.expect("project daemon");
+		let shutdown = CancellationToken::new();
+		let serving = tokio::spawn({
+			let server = Arc::new(server);
+			let socket = socket.clone();
+			let shutdown = shutdown.clone();
+			async move { server.serve_uds(&socket, shutdown, None).await }
+		});
+		tokio::time::timeout(Duration::from_secs(30), async {
+			while tokio::net::UnixStream::connect(&socket).await.is_err() {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the project daemon never listened");
+		let attach = |con: Arc<Ctx>| {
+			ProjectEnvironment::attach(&root, &state, AttachOptions {
+				py_eval: false,
+				approval_mode: None,
+				trusted_extensions: Vec::new(),
+				contributed_values: Vec::new(),
+				con,
+				bridges: RegistryBridges::default(),
+				spawn_idle_timeout: Some(2),
+				spawn_policy: Some(main_policy),
+			})
+		};
+
+		// The main configuration joins its daemon.
+		let joined = attach(Arc::clone(&main)).await.expect("environment");
+		assert!(joined.fallback_notice.is_none(), "{:?}", joined.fallback_notice);
+		drop(joined);
+
+		let (session, _) = console();
+		super::present_journaled_class(&session, &ClassScope::Journaled(cfg), &child_path);
+		let environment = attach(Arc::clone(&session)).await.expect("environment");
+		let notice = environment
+			.fallback_notice
+			.clone()
+			.expect("the resumed child joined the main configuration's daemon");
+		let class_policy = daemon_policy::from_con(&session);
+		assert_ne!(class_policy, main_policy);
+		assert!(
+			notice.contains(&format!(
+				"policy {main_policy} from the configuration files, not this session's {class_policy}"
+			)),
+			"the notice names both policies: {notice}"
+		);
+		let hello = environment.client().info().expect("hello");
+		assert_eq!(
+			DaemonPolicy::from_wire(&hello.policy_digest),
+			Some(class_policy),
+			"the embedded environment enforces the class policy"
+		);
+		assert!(
+			!state.join("envd.log").exists(),
+			"no daemon the session could never join was spawned"
+		);
+		drop(environment);
+		shutdown.cancel();
+		serving.abort();
 	}
 }

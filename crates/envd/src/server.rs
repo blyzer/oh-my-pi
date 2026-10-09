@@ -22,7 +22,9 @@ use omp_agent::{
 use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
 use omp_con::Ctx;
 use omp_core::{Hash32, Str, Ulid, sf};
-use omp_env::{EnvClient, InProcessEnvTransport, partition::FramePipe};
+use omp_env::{
+	EnvClient, InProcessEnvTransport, partition::FramePipe, project_state::DaemonPolicy,
+};
 use omp_journal::blob;
 use omp_proto::{
 	blob::v1 as blob_pb,
@@ -39,8 +41,9 @@ use omp_proto::{
 	ui::v1::UiDispatchResult,
 };
 use omp_tool::{
-	Abort, ArgIssue, ArgPath, CallOutcome, Confinement, Effects, ErasedEv, ErasedOutcome,
-	IncomingParams, Interrupt, Registry, RegistryError, ToolRoute, ToolTerminal,
+	Abort, ArgIssue, ArgPath, CallOutcome, CapsBase, Confinement, Effects, ErasedEv, ErasedOutcome,
+	IncomingParams, Interrupt, ModelClass, PromptCaps, Registry, RegistryError, ToolIdentity,
+	ToolRoute, ToolTerminal,
 };
 use omp_tools::{
 	ask::PresenterSlot,
@@ -80,7 +83,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
-	admission::{AdmissionDecision, AdmissionGate, ApprovalPolicy, effects_narrow_or_refuse},
+	admission::{
+		AdmissionDecision, AdmissionGate, ApprovalPolicy, effects_narrow_or_refuse,
+		widened_effects_denial,
+	},
 	approval_relay::{ConnectionApprovals, OwnedApprovals},
 	blobs::{BlobError, BlobHost, BlobId, BlobRead},
 	browser_daemon::BrowserSettings,
@@ -96,6 +102,7 @@ use super::{
 	exec::{ExecError, ExecEvent, ExecHost, ExecRun, ProcessEvent},
 	exec_settings::{SandboxSettings, ShellSettings},
 	exthost::{ExtensionManifest, control::CompositeControlAuthority, lifecycle::EscapeCapability},
+	fetch_host::{FetchHostNamer, resolve_locators},
 	github_url::GithubCredentialBridge,
 	host_info::HostInfoHost,
 	host_settings::HostSettings,
@@ -240,6 +247,24 @@ enum WriteBoundaryDenied {
 	},
 }
 
+/// An invocation refused once its committed arguments are judged, before its
+/// executor sees them.
+#[derive(Debug, Error)]
+enum InvocationRefused {
+	/// The call could write around the writers its write scope confines.
+	#[error(transparent)]
+	WriteBoundary {
+		/// The boundary's refusal.
+		source: WriteBoundaryDenied,
+	},
+	/// The tool judged the call's effects to exceed its declared maximum.
+	#[error(transparent)]
+	Effects {
+		/// The registry's refusal.
+		source: RegistryError,
+	},
+}
+
 impl InvocationExecutionPolicy {
 	fn from_request(
 		request: &pb::InvokeTool,
@@ -265,12 +290,13 @@ impl InvocationExecutionPolicy {
 		}
 	}
 
-	/// Refuses, before execution, a tool that could write around the
-	/// environment's scoped writers while a write scope applies: it runs
+	/// Refuses, before execution, a call that could write around the
+	/// environment's scoped writers while a write scope applies: its tool runs
 	/// processes under the exec sandbox ([`Confinement::ExecSandbox`], whose
-	/// declaration leaves those effects out), or its envelope runs commands,
+	/// declaration leaves those effects out), or the call's envelope (its
+	/// argument-scoped effects, else the declared maximum) runs commands,
 	/// spawns subagents, or writes documents through anything but the document
-	/// host. Network-only and read-only tools pass, and so do the scoped
+	/// host. Network-only and read-only calls pass, and so do the scoped
 	/// writers, whose writes the scope confines one by one.
 	fn denial(&self, effects: &Effects, confinement: Confinement) -> Option<WriteBoundaryDenied> {
 		let scope = self.write_scope.as_deref()?;
@@ -375,6 +401,42 @@ pub enum EnvdError {
 		/// Canonical project path whose authority is held.
 		path: PathBuf,
 	},
+	/// The project daemon on the environment socket enforces a different
+	/// sandbox and approval policy than the client resolved, so the client
+	/// must not run its tools there.
+	#[error(
+		"the project daemon at {socket:?} enforces sandbox and approval policy {served}, not this \
+		 session's {expected}"
+	)]
+	DaemonPolicyMismatch {
+		/// Environment socket the daemon answered on.
+		socket:   PathBuf,
+		/// Policy the client resolved from its own control context.
+		expected: DaemonPolicy,
+		/// Policy the daemon reported in its hello.
+		served:   DaemonPolicy,
+	},
+	/// The project daemon on the environment socket reported no sandbox and
+	/// approval policy, so the client cannot tell what it enforces.
+	#[error("the project daemon at {socket:?} reports no sandbox and approval policy")]
+	DaemonPolicyUnreported {
+		/// Environment socket the daemon answered on.
+		socket: PathBuf,
+	},
+	/// A project daemon spawned now would resolve another sandbox and approval
+	/// policy from the configuration files than the client's own, which holds
+	/// in-process settings the daemon never sees, so none was spawned.
+	#[error(
+		"a project daemon spawned for this session would enforce sandbox and approval policy \
+		 {spawnable} from the configuration files, not this session's {expected}, which also holds \
+		 settings made in this process (such as `--add-dir` roots, a cfg script or an agent class)"
+	)]
+	DaemonPolicyNotSpawnable {
+		/// Policy the client resolved from its own control context.
+		expected:  DaemonPolicy,
+		/// Policy `omp envd` resolves from the configuration files alone.
+		spawnable: DaemonPolicy,
+	},
 }
 
 impl From<DocumentError> for EnvdError {
@@ -414,6 +476,8 @@ pub struct ServerIdentity {
 	pub server_version: Str,
 	/// Executable-generation identity of the serving environment.
 	pub server_build:   Str,
+	/// Sandbox and approval policy the serving environment enforces.
+	pub policy:         DaemonPolicy,
 }
 
 /// Per-connection transport and exact DATA grant bounds.
@@ -2524,6 +2588,8 @@ impl EnvServer {
 		)?;
 		let (host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
+		let enforced =
+			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		let mcp_settings = McpSettings::from_con(con);
 		mcp.start_native_configs(mcp_settings.enable_project_config)
@@ -2592,6 +2658,7 @@ impl EnvServer {
 			server_epoch:   hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
 			server_build:   Str::from(omp_env::build_id::current()),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -2812,6 +2879,8 @@ impl EnvServer {
 		)?;
 		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
+		let enforced =
+			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		host_settings.tools = host_settings
 			.tools
@@ -2883,6 +2952,7 @@ impl EnvServer {
 			server_epoch:   hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
 			server_build:   Str::from(omp_env::build_id::current()),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -3034,8 +3104,10 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (mut host_settings, browser_settings, shell_settings, _sandbox_settings) =
+		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
+		let enforced =
+			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
 		host_settings.tools = host_settings
 			.tools
 			.with_approval_mode_override(approval_mode);
@@ -3108,6 +3180,7 @@ impl EnvServer {
 			server_epoch:   owner_info.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
 			server_build:   Str::from(owner_info.server_build),
+			policy:         enforced,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -3229,6 +3302,15 @@ impl EnvServer {
 	/// Returns the exact registry shared by this server's dispatch paths.
 	pub fn registry(&self) -> Arc<Registry> {
 		Arc::clone(&self.registry)
+	}
+
+	/// Returns the namer of the hosts this server's native tools fetch from,
+	/// by the resolvers that perform those fetches. A composition that runs
+	/// these tools in its own process, outside this server's admission gate,
+	/// keys their fetch approval on it.
+	#[must_use]
+	pub fn fetch_hosts(&self) -> FetchHostNamer {
+		FetchHostNamer::new(&self.resources)
 	}
 
 	/// Binds the production router for one authenticated extension-host
@@ -4036,6 +4118,7 @@ impl EnvServer {
 					root_uri:       self.identity.root_uri.to_string(),
 					server_epoch:   self.identity.server_epoch.clone(),
 					server_build:   self.identity.server_build.to_string(),
+					policy_digest:  Bytes::copy_from_slice(self.identity.policy.digest().as_bytes()),
 					props:          Default::default(),
 				}),
 			))
@@ -4723,13 +4806,14 @@ impl EnvServer {
 			client_frame::Body::ArgText(request) => {
 				let result = connection.invocation_mut(frame.request_id, &request.invocation_id);
 				let query = match result {
-					Ok(InvocationState::Native { feed, lifecycle, admission, .. })
+					Ok(InvocationState::Native { feed, lifecycle, admission, effects, .. })
 						if !lifecycle.is_committed() && !lifecycle.is_terminal() =>
 					{
 						let query = admission.push_fragment(
 							&request.fragment,
 							self.workspace.root(),
 							self.workspace.root(),
+							effects,
 						);
 						if !admission.requires_external_answer()
 							&& feed.arg_text(Str::from(request.fragment)).is_err()
@@ -4750,12 +4834,14 @@ impl EnvServer {
 						invocation: Some(invocation),
 						committed,
 						admission,
+						effects,
 						..
 					}) if !*committed => {
 						let query = admission.push_fragment(
 							&request.fragment,
 							self.workspace.root(),
 							self.workspace.root(),
+							effects,
 						);
 						if invocation.streams_args()
 							&& !admission.requires_external_answer()
@@ -4882,21 +4968,49 @@ impl EnvServer {
 						return;
 					},
 				}
-				let denial =
-					match connection.write_boundary_denial(frame.request_id, &request.invocation_id) {
-						Ok(denial) => denial,
-						Err((code, message)) => {
-							send_error(responses, frame.request_id, code, message).await;
-							return;
-						},
-					};
-				if let Some(denial) = denial {
+				// The gate accepts the committed arguments before anything is
+				// judged from them: a commit it refuses leaves the call unjudged,
+				// its policy still pending and its stream still withheld.
+				let staged = match connection.invocation_mut(frame.request_id, &request.invocation_id) {
+					Ok(
+						InvocationState::Native { admission, .. }
+						| InvocationState::Worker { admission, .. },
+					) => admission.stage(&request.raw),
+					Err((code, message)) => {
+						send_error(responses, frame.request_id, code, message).await;
+						return;
+					},
+				};
+				if let Err(error) = staged {
+					send_error(
+						responses,
+						frame.request_id,
+						pb::ProtocolErrorCode::InvalidArgument,
+						&error.to_string(),
+					)
+					.await;
+					return;
+				}
+				let refused = match connection.scope_committed(
+					frame.request_id,
+					&request.invocation_id,
+					&self.registry,
+					&self.resources,
+					&request.raw,
+				) {
+					Ok(refused) => refused,
+					Err((code, message)) => {
+						send_error(responses, frame.request_id, code, message).await;
+						return;
+					},
+				};
+				if let Some(refused) = refused {
 					let invocation_id = Str::from(request.invocation_id.as_str());
 					send_invocation_error(
 						responses,
 						frame.request_id,
 						pb::ProtocolErrorCode::PermissionDenied,
-						&denial.to_string(),
+						&refused.to_string(),
 					)
 					.await;
 					connection.abandon_admission(frame.request_id, &invocation_id);
@@ -4904,27 +5018,9 @@ impl EnvServer {
 				}
 				let query = match connection.invocation_mut(frame.request_id, &request.invocation_id) {
 					Ok(
-						InvocationState::Native { admission, .. }
-						| InvocationState::Worker { admission, .. },
-					) => {
-						match admission.finalize(
-							&request.raw,
-							self.workspace.root(),
-							self.workspace.root(),
-						) {
-							Ok(query) => query,
-							Err(error) => {
-								send_error(
-									responses,
-									frame.request_id,
-									pb::ProtocolErrorCode::InvalidArgument,
-									&error.to_string(),
-								)
-								.await;
-								return;
-							},
-						}
-					},
+						InvocationState::Native { admission, effects, .. }
+						| InvocationState::Worker { admission, effects, .. },
+					) => admission.emit(self.workspace.root(), self.workspace.root(), effects),
 					Err((code, message)) => {
 						send_error(responses, frame.request_id, code, message).await;
 						return;
@@ -7408,7 +7504,7 @@ impl EnvServer {
 			connection.invocation_ids.remove(&invocation_id);
 		}
 		let registry = self.registry();
-		let Some((_, revision)) = registry.live_identity(&request.name) else {
+		let Some((live_name, revision)) = registry.live_identity(&request.name) else {
 			send_error(
 				responses,
 				request_id,
@@ -7428,6 +7524,9 @@ impl EnvServer {
 			.await;
 			return;
 		}
+		// The exact tool revision that runs a native call also renders its
+		// verdict for the model.
+		let identity = ToolIdentity { name: live_name.clone(), rev: revision.clone() };
 		let route = registry
 			.route(&request.name)
 			.expect("a live registry identity always has an execution route");
@@ -7475,6 +7574,23 @@ impl EnvServer {
 				)
 				.policy
 		};
+		// A tool that scopes its effects to each call is judged on the
+		// committed arguments: its gate waits for them.
+		let argument_scoped = registry.scopes_invocation_effects(&request.name);
+		let gate = |name: Str| {
+			if execution.core_admission {
+				AdmissionGate::with_deferred_policy(
+					invocation_id.clone(),
+					name,
+					deadline,
+					approval_policy,
+				)
+			} else if argument_scoped {
+				AdmissionGate::argument_scoped(invocation_id.clone(), name, deadline, approval_policy)
+			} else {
+				AdmissionGate::with_policy(invocation_id.clone(), name, deadline, approval_policy)
+			}
+		};
 		let cancel = CancellationToken::new();
 		let delivery = VerdictDelivery {
 			blobs: self.blobs.clone(),
@@ -7520,21 +7636,7 @@ impl EnvServer {
 			let acp_context = acp.context();
 			let approvals = connection.owned_approvals(request_id);
 			let reflection = connection.owned_reflection(request_id);
-			let admission = if execution.core_admission {
-				AdmissionGate::with_deferred_policy(
-					invocation_id.clone(),
-					name.clone(),
-					deadline,
-					approval_policy,
-				)
-			} else {
-				AdmissionGate::with_policy(
-					invocation_id.clone(),
-					name.clone(),
-					deadline,
-					approval_policy,
-				)
-			};
+			let admission = gate(name.clone());
 			connection.requests.insert(
 				request_id,
 				RequestState::Invocation(InvocationState::Native {
@@ -7543,7 +7645,7 @@ impl EnvServer {
 					lifecycle: Arc::clone(&lifecycle),
 					admission,
 					pending_commit: None,
-					maximum_effects: maximum_effects.clone(),
+					effects: maximum_effects.clone(),
 					confinement,
 					execution: execution.clone(),
 					request_scope: scope.map(|scope| scope.pty_denied),
@@ -7570,6 +7672,7 @@ impl EnvServer {
 				request_id,
 				invocation_id,
 				name,
+				identity,
 				scope.is_some_and(|scope| scope.pty_denied),
 				principal.map(|principal| Str::from(principal.session_id.as_str())),
 				execution.write_scope.clone(),
@@ -7626,18 +7729,9 @@ impl EnvServer {
 					owner,
 					invocation: Some(invocation),
 					committed: false,
-					admission: if execution.core_admission {
-						AdmissionGate::with_deferred_policy(
-							invocation_id.clone(),
-							name,
-							deadline,
-							approval_policy,
-						)
-					} else {
-						AdmissionGate::with_policy(invocation_id.clone(), name, deadline, approval_policy)
-					},
+					admission: gate(name),
 					pending_commit: None,
-					maximum_effects,
+					effects: maximum_effects,
 					confinement,
 					execution,
 					request_scope: scope.map(|scope| scope.pty_denied),
@@ -7722,16 +7816,17 @@ impl EnvServer {
 			},
 		}
 
-		let (admission, maximum_effects, delivery) =
+		let (admission, admitted_effects, tool, delivery) =
 			match connection.invocation_mut(request_id, &request.invocation_id) {
 				Ok(
-					InvocationState::Native { admission, maximum_effects, delivery, .. }
-					| InvocationState::Worker { admission, maximum_effects, delivery, .. },
+					InvocationState::Native { admission, effects, execution, delivery, .. }
+					| InvocationState::Worker { admission, effects, execution, delivery, .. },
 				) => (
 					admission
 						.decide(self.workspace.root(), self.workspace.root())
 						.await,
-					maximum_effects.clone(),
+					effects.clone(),
+					execution.tool.clone(),
 					delivery.clone(),
 				),
 				Err((code, message)) => {
@@ -7739,12 +7834,25 @@ impl EnvServer {
 					return;
 				},
 			};
-		request.raw = match admission {
-			AdmissionDecision::Allowed { raw, bash } => {
+		let decision = match admission {
+			AdmissionDecision::Allowed { raw, bash, rewritten } => {
 				let _effective_bash = bash;
-				raw
+				// An answer that rewrote the arguments is judged again, never
+				// past what was admitted; unchanged arguments keep the envelope
+				// they were judged under.
+				if rewritten {
+					effective_effects(&self.registry, &tool, &raw, &admitted_effects)
+						.map(|effects| (raw, effects))
+						.ok_or_else(|| widened_effects_denial(&request.invocation_id))
+				} else {
+					Ok((raw, admitted_effects))
+				}
 			},
-			AdmissionDecision::Denied(policy) => {
+			AdmissionDecision::Denied(policy) => Err(policy),
+		};
+		let (raw, call_effects) = match decision {
+			Ok(effective) => effective,
+			Err(policy) => {
 				let invocation_id = Str::from(request.invocation_id.as_str());
 				connection.abandon_admission(request_id, &invocation_id);
 				send_policy_denied_verdict(responses, request_id, &invocation_id, &delivery, policy)
@@ -7752,11 +7860,10 @@ impl EnvServer {
 				return;
 			},
 		};
-		let narrowed_effects = if let Some(effects) =
-			effects_narrow_or_refuse(request.effects.as_ref(), &maximum_effects)
-		{
-			effects
-		} else {
+		request.raw = raw;
+		let Some(narrowed_effects) =
+			effects_narrow_or_refuse(request.effects.as_ref(), &call_effects)
+		else {
 			send_error(
 				responses,
 				request_id,
@@ -8316,37 +8423,40 @@ enum RequestState {
 	LspEvents { cancel: CancellationToken },
 }
 
+/// One open tool invocation. `effects` is the envelope it is admitted under:
+/// the declared maximum until its arguments commit, then the call's
+/// argument-scoped effects ([`ConnectionState::scope_committed`]).
 enum InvocationState {
 	Native {
-		id:              Str,
-		feed:            omp_tool::InvocationFeed,
-		lifecycle:       Arc<NativeLifecycle>,
-		admission:       AdmissionGate,
-		pending_commit:  Option<pb::ArgsCommitted>,
-		maximum_effects: Effects,
-		confinement:     Confinement,
-		execution:       InvocationExecutionPolicy,
-		request_scope:   Option<bool>,
-		edit_repair:     Option<ConnectionEditRepairRoute>,
-		acp:             InvocationAcpRoutes,
-		delivery:        VerdictDelivery,
-		cancel:          CancellationToken,
+		id:             Str,
+		feed:           omp_tool::InvocationFeed,
+		lifecycle:      Arc<NativeLifecycle>,
+		admission:      AdmissionGate,
+		pending_commit: Option<pb::ArgsCommitted>,
+		effects:        Effects,
+		confinement:    Confinement,
+		execution:      InvocationExecutionPolicy,
+		request_scope:  Option<bool>,
+		edit_repair:    Option<ConnectionEditRepairRoute>,
+		acp:            InvocationAcpRoutes,
+		delivery:       VerdictDelivery,
+		cancel:         CancellationToken,
 	},
 	Worker {
-		id:              Str,
-		owner:           HostKey,
-		invocation:      Option<ExtHostInvocation>,
-		committed:       bool,
-		admission:       AdmissionGate,
-		pending_commit:  Option<pb::ArgsCommitted>,
-		maximum_effects: Effects,
-		confinement:     Confinement,
-		execution:       InvocationExecutionPolicy,
-		request_scope:   Option<bool>,
-		delivery:        VerdictDelivery,
-		interrupt:       flume::Sender<pb::Interrupt>,
-		interrupts:      Option<Receiver<pb::Interrupt>>,
-		cancel:          CancellationToken,
+		id:             Str,
+		owner:          HostKey,
+		invocation:     Option<ExtHostInvocation>,
+		committed:      bool,
+		admission:      AdmissionGate,
+		pending_commit: Option<pb::ArgsCommitted>,
+		effects:        Effects,
+		confinement:    Confinement,
+		execution:      InvocationExecutionPolicy,
+		request_scope:  Option<bool>,
+		delivery:       VerdictDelivery,
+		interrupt:      flume::Sender<pb::Interrupt>,
+		interrupts:     Option<Receiver<pb::Interrupt>>,
+		cancel:         CancellationToken,
 	},
 }
 
@@ -8719,33 +8829,81 @@ impl ConnectionState {
 		})
 	}
 
-	/// The open invocation's refusal at the write boundary
-	/// ([`InvocationExecutionPolicy::denial`]), if any.
-	fn write_boundary_denial(
-		&self,
+	/// Judges the open invocation by its committed arguments `raw`, once, after
+	/// its gate staged them ([`AdmissionGate::stage`]) and before their query
+	/// is emitted: narrows its envelope to the call's argument-scoped effects
+	/// ([`Registry::invocation_effects`]), resolves a pending approval policy
+	/// from that envelope, and returns the call's refusal at the write boundary
+	/// ([`InvocationExecutionPolicy::denial`]), or of an envelope beyond the
+	/// declared maximum, if any. When that envelope fetches, the hosts the
+	/// call's fetch locators reach ([`Registry::fetch_locators`]) are named by
+	/// the resolvers in `resources` that perform them, for the query: every
+	/// host they can name, and whether some locator reaches one they cannot.
+	///
+	/// Staged arguments are one JSON object, so they are UTF-8; were they not,
+	/// the call would keep its declared maximum.
+	fn scope_committed(
+		&mut self,
 		request_id: u64,
 		invocation_id: &str,
-	) -> Result<Option<WriteBoundaryDenied>, (pb::ProtocolErrorCode, &'static str)> {
-		match self.requests.get(&request_id) {
-			Some(RequestState::Invocation(state)) if state.id() == invocation_id => {
-				let (execution, maximum_effects, confinement) = match state {
-					InvocationState::Native { execution, maximum_effects, confinement, .. }
-					| InvocationState::Worker { execution, maximum_effects, confinement, .. } => {
-						(execution, maximum_effects, *confinement)
-					},
-				};
-				Ok(execution.denial(maximum_effects, confinement))
+		registry: &Registry,
+		resources: &ProductionResolverTable,
+		raw: &[u8],
+	) -> Result<Option<InvocationRefused>, (pb::ProtocolErrorCode, &'static str)> {
+		let sandbox = self.exec_host.sandbox_state();
+		let settings = &self.tool_settings;
+		let (id, admission, effects, confinement, execution) = match self
+			.requests
+			.get_mut(&request_id)
+		{
+			Some(RequestState::Invocation(state)) if state.id() == invocation_id => match state {
+				InvocationState::Native { id, admission, effects, confinement, execution, .. }
+				| InvocationState::Worker { id, admission, effects, confinement, execution, .. } => {
+					(id, admission, effects, *confinement, execution)
+				},
 			},
-			Some(RequestState::Invocation(_)) => Err((
-				pb::ProtocolErrorCode::InvalidArgument,
-				"invocation_id does not match the open request",
-			)),
-			Some(_) => Err((
-				pb::ProtocolErrorCode::PreconditionFailed,
-				"request_id is not an invocation stream",
-			)),
-			None => Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
+			Some(RequestState::Invocation(_)) => {
+				return Err((
+					pb::ProtocolErrorCode::InvalidArgument,
+					"invocation_id does not match the open request",
+				));
+			},
+			Some(_) => {
+				return Err((
+					pb::ProtocolErrorCode::PreconditionFailed,
+					"request_id is not an invocation stream",
+				));
+			},
+			None => return Err((pb::ProtocolErrorCode::NotFound, "invocation is not open")),
+		};
+		// Only the arguments the gate staged scope the call. A commit the gate
+		// refused never reaches here, and a repeated commit after the query
+		// stages nothing, so it never rescopes the call; it is refused later.
+		if admission.is_staged() {
+			if let Ok(raw) = str::from_utf8(raw) {
+				match registry.invocation_effects(&execution.tool, raw) {
+					Ok(scoped) => *effects = scoped,
+					Err(source) => return Ok(Some(InvocationRefused::Effects { source })),
+				}
+				if effects.fetch.is_some() {
+					let locators = registry.fetch_locators(&execution.tool, raw);
+					admission.name_fetch_hosts(resolve_locators(Some(resources), &locators));
+				}
+			}
+			if admission.is_pending() {
+				let resolved = settings.approval_for(
+					id.clone(),
+					execution.tool.clone(),
+					effects,
+					confinement,
+					sandbox,
+				);
+				admission.resolve_pending(resolved.policy);
+			}
 		}
+		Ok(execution
+			.denial(effects, confinement)
+			.map(|source| InvocationRefused::WriteBoundary { source }))
 	}
 
 	/// Removes a denied pre-authorization invocation before its executor sees
@@ -9140,6 +9298,7 @@ async fn spawn_native_invocation(
 	request_id: u64,
 	invocation_id: Str,
 	name: Str,
+	identity: ToolIdentity,
 	pty_denied: bool,
 	session_id: Option<Str>,
 	write_scope: Option<Arc<WriteScope>>,
@@ -9210,6 +9369,8 @@ async fn spawn_native_invocation(
 																	reason,
 																	request_id,
 																	&invocation_id,
+																	&identity,
+																	&registry,
 																	&lifecycle,
 																	&delivery,
 																	&responses,
@@ -9265,6 +9426,8 @@ async fn spawn_native_invocation(
 																"",
 																request_id,
 																&invocation_id,
+																&identity,
+																&registry,
 																&lifecycle,
 																&delivery,
 																&responses,
@@ -9442,6 +9605,8 @@ async fn forward_native_event(
 	fallback_reason: &str,
 	request_id: u64,
 	invocation_id: &Str,
+	identity: &ToolIdentity,
+	registry: &Registry,
 	lifecycle: &NativeLifecycle,
 	delivery: &VerdictDelivery,
 	responses: &flume::Sender<pb::ServerFrame>,
@@ -9468,15 +9633,14 @@ async fn forward_native_event(
 		},
 		Some(Ok(ErasedEv::Done(outcome))) => {
 			if lifecycle.claim_terminal() {
-				let (json, is_error, useless) = erased_outcome_wire(outcome);
-				send_verdict_json(
+				send_native_outcome(
 					responses,
 					request_id,
 					invocation_id,
+					identity,
+					registry,
 					delivery,
-					json,
-					is_error,
-					useless,
+					outcome,
 				)
 				.await;
 			}
@@ -9781,16 +9945,218 @@ struct VerdictDelivery {
 	output_request:    omp_tool::OutputRequest,
 }
 
-/// Publishes one terminal verdict. Every terminal, including aborts and
-/// policy denials, stores its serialized `CallOutcome` in the environment CAS
-/// and carries the projection facts; the client refuses a verdict without
-/// them as an invalid outcome artifact.
+/// Why one native media part cannot travel with its verdict.
+#[derive(Debug, Error)]
+enum NativeMediaError {
+	/// The part names a media type a client refuses.
+	#[error("media type {media_type:?} is not a valid MIME type")]
+	MediaType {
+		/// The refused media type.
+		media_type: Str,
+	},
+	/// The part's hash is not a SHA-256 digest in lowercase hex.
+	#[error("media blob hash is not a SHA-256 hex digest")]
+	Hash(#[source] blob::Error),
+	/// The blob could not be copied into the verdict store or leased there.
+	#[error("media blob could not be retained for delivery")]
+	Retain(#[source] BlobError),
+}
+
+/// The projection budget an in-process dispatch hands a native tool
+/// (`Dispatcher::finish`): every part, all text and media. The parts are
+/// bounded afterwards, once here by the caller's output request and again by
+/// the client's dispatcher.
+fn native_prompt_caps(rev: &omp_tool::Rev) -> PromptCaps {
+	PromptCaps::for_tool(
+		CapsBase {
+			maximum_parts:      u16::MAX,
+			maximum_text_bytes: u32::MAX,
+			media:              true,
+			model_class:        ModelClass::Standard,
+		},
+		rev,
+	)
+}
+
+/// One model-visible text part.
+const fn wire_text(text: String) -> thread_pb::Part {
+	thread_pb::Part { kind: Some(thread_pb::part::Kind::Text(text)) }
+}
+
+/// Retains one native media blob for this invocation's delivery, so the
+/// client can replicate it under the verdict's lease, and returns its wire
+/// reference. `retained` dedupes blobs a projection names twice.
+fn retain_native_media(
+	delivery: &VerdictDelivery,
+	invocation_id: &str,
+	media: &omp_tool::BlobRef,
+	retained: &mut BTreeSet<([u8; 32], u64)>,
+) -> Result<thread_pb::Blob, NativeMediaError> {
+	if !valid_blob_media_type(&media.media_type) {
+		return Err(NativeMediaError::MediaType { media_type: media.media_type.clone() });
+	}
+	let id = BlobId::from(
+		blob::BlobRef::parse_hex(media.hash.as_str(), media.byte_len)
+			.map_err(NativeMediaError::Hash)?,
+	);
+	if retained.insert((id.hash, id.size)) {
+		delivery
+			.blobs
+			.retain_verdict_blob(delivery.retention_session.as_deref(), invocation_id, id)
+			.map_err(NativeMediaError::Retain)?;
+	}
+	Ok(thread_pb::Blob {
+		hash: Bytes::copy_from_slice(&id.hash),
+		mime: media.media_type.to_string(),
+		size: id.size,
+		..thread_pb::Blob::default()
+	})
+}
+
+/// Converts a native tool's projected parts to the thread parts `Verdict`
+/// carries, the way the session renders tool parts for a model: JSON as its
+/// text, and media as its alternative text followed by the blob. A blob that
+/// cannot be retained is left out, with a warning; its alternative text stays.
+fn native_wire_parts(
+	parts: &[omp_tool::Part],
+	delivery: &VerdictDelivery,
+	invocation_id: &str,
+) -> Vec<thread_pb::Part> {
+	let mut wire = Vec::with_capacity(parts.len());
+	let mut retained = BTreeSet::new();
+	for part in parts {
+		match part {
+			omp_tool::Part::Text { text } => wire.push(wire_text(text.as_str().to_owned())),
+			omp_tool::Part::Json { json } => {
+				wire.push(wire_text(String::from_utf8_lossy(json).into_owned()));
+			},
+			omp_tool::Part::Blob { blob, alt } => {
+				if let Some(alt) = alt {
+					wire.push(wire_text(alt.as_str().to_owned()));
+				}
+				match retain_native_media(delivery, invocation_id, blob, &mut retained) {
+					Ok(media) => {
+						wire.push(thread_pb::Part { kind: Some(thread_pb::part::Kind::Blob(media)) });
+					},
+					Err(error) => tracing::warn!(
+						%error,
+						invocation_id,
+						"native verdict media is unavailable; publishing the verdict without it"
+					),
+				}
+			},
+		}
+	}
+	wire
+}
+
+/// Model-facing text for a native verdict its tool could not project. The
+/// verdict itself is still the tool's own and is published unchanged.
+const UNPROJECTED_NATIVE_RESULT: &str =
+	"The tool finished, but its result could not be rendered for the model.";
+
+/// Publishes a native tool's terminal with the model-facing parts its own
+/// projection renders, as an in-process dispatch would (`Dispatcher::finish`),
+/// so an environment-run tool reaches the model with its result. A verdict its
+/// tool cannot project is still published as the tool's own outcome, with a
+/// harness note in place of the parts: the call completed, so it is never
+/// reported as an abort with unknown effects.
+async fn send_native_outcome(
+	responses: &flume::Sender<pb::ServerFrame>,
+	request_id: u64,
+	invocation_id: &Str,
+	identity: &ToolIdentity,
+	registry: &Registry,
+	delivery: &VerdictDelivery,
+	outcome: ErasedOutcome,
+) {
+	match outcome {
+		ErasedOutcome::Done { verdict, useless } => {
+			let projected = match registry.project_verdict(
+				identity,
+				&verdict,
+				useless,
+				&native_prompt_caps(&identity.rev),
+			) {
+				Ok(projected) => projected,
+				Err(error) => {
+					tracing::error!(
+						%error,
+						invocation_id = %invocation_id,
+						tool = %identity.name,
+						"could not project the native verdict; publishing it with a harness note"
+					);
+					// The client checks the error flag against the outcome's own
+					// branch, so it comes from the verdict, not the failure.
+					let is_error = !matches!(
+						serde_json::from_slice::<CallOutcome<serde::de::IgnoredAny, serde::de::IgnoredAny>>(
+							&verdict
+						),
+						Ok(CallOutcome::Ok(_))
+					);
+					send_verdict_json(
+						responses,
+						request_id,
+						invocation_id,
+						delivery,
+						verdict,
+						vec![wire_text(UNPROJECTED_NATIVE_RESULT.to_owned())],
+						is_error,
+						false,
+					)
+					.await;
+					return;
+				},
+			};
+			let mut parts = native_wire_parts(&projected.parts, delivery, invocation_id);
+			let _ = project_wire_parts(&mut parts, delivery.output_request);
+			send_verdict_json(
+				responses,
+				request_id,
+				invocation_id,
+				delivery,
+				verdict,
+				parts,
+				projected.is_error,
+				projected.useless,
+			)
+			.await;
+		},
+		ErasedOutcome::Detached(job) => {
+			let parts = vec![wire_text(format!("detached job {}", job.id))];
+			let json = serde_json::to_vec(
+				&ToolTerminal::<serde_json::Value, serde_json::Value>::Detached(job),
+			)
+			.map(Bytes::from)
+			.unwrap_or_default();
+			send_verdict_json(
+				responses,
+				request_id,
+				invocation_id,
+				delivery,
+				json,
+				parts,
+				false,
+				false,
+			)
+			.await;
+		},
+	}
+}
+
+/// Publishes one terminal verdict with its model-facing `parts`. Every
+/// terminal, including aborts and policy denials, stores its serialized
+/// `CallOutcome` in the environment CAS and carries the projection facts; the
+/// client refuses a verdict without them as an invalid outcome artifact. Aborts
+/// and policy denials carry no parts: the client renders those harness-owned
+/// branches from the verdict itself.
 async fn send_verdict_json(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
 	invocation_id: &Str,
 	delivery: &VerdictDelivery,
 	json: Bytes,
+	parts: Vec<thread_pb::Part>,
 	is_error: bool,
 	useless: bool,
 ) {
@@ -9838,7 +10204,7 @@ async fn send_verdict_json(
 			invocation_id: invocation_id.to_string(),
 			json: inline,
 			details_blob: Some(details_blob),
-			parts: Vec::new(),
+			parts,
 			is_error,
 			useless,
 			terminate: None,
@@ -9873,6 +10239,7 @@ async fn send_abort_verdict(
 		invocation_id,
 		delivery,
 		Bytes::from(json),
+		Vec::new(),
 		true,
 		false,
 	)
@@ -9926,10 +10293,26 @@ async fn send_policy_denied_verdict(
 		invocation_id,
 		delivery,
 		Bytes::from(json),
+		Vec::new(),
 		true,
 		false,
 	)
 	.await;
+}
+
+/// The effects of the call its executor will run, judged from the effective
+/// arguments `raw`; `None` when they are not a subset of the envelope the call
+/// was admitted under.
+fn effective_effects(
+	registry: &Registry,
+	tool: &str,
+	raw: &[u8],
+	admitted: &Effects,
+) -> Option<Effects> {
+	let effects = registry
+		.invocation_effects(tool, str::from_utf8(raw).ok()?)
+		.ok()?;
+	effects.is_subset_of(admitted).then_some(effects)
 }
 
 async fn send_invocation_error(
@@ -11111,24 +11494,6 @@ fn worker_verdict_json(details: Bytes, is_error: bool) -> Result<Bytes, serde_js
 	Ok(verdict.freeze())
 }
 
-fn erased_outcome_wire(outcome: ErasedOutcome) -> (Bytes, bool, bool) {
-	match outcome {
-		ErasedOutcome::Done { verdict, useless } => {
-			let is_error =
-				serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(&verdict)
-					.map_or(true, |verdict| !matches!(verdict, CallOutcome::Ok(_)));
-			(verdict, is_error, useless)
-		},
-		ErasedOutcome::Detached(job) => {
-			let json = serde_json::to_vec(
-				&ToolTerminal::<serde_json::Value, serde_json::Value>::Detached(job),
-			)
-			.map(Bytes::from)
-			.unwrap_or_default();
-			(json, false, false)
-		},
-	}
-}
 async fn send_workspace_operation_error(
 	responses: &flume::Sender<pb::ServerFrame>,
 	request_id: u64,
@@ -11897,9 +12262,13 @@ pub async fn run_with_registry(
 		omp_env::project_state::directory(&data_dir, &root)?
 	};
 	ensure_directory(&state_dir)?;
-	let socket = args
-		.socket
-		.unwrap_or_else(|| omp_env::project_state::environment_socket(&state_dir));
+	let socket = match args.socket {
+		Some(socket) => socket,
+		None => omp_env::project_state::environment_socket(
+			&state_dir,
+			&crate::daemon_policy::from_con(&con),
+		)?,
+	};
 	let require_document_ownership = args.docserver_socket.is_none();
 	let docserver_socket = if let Some(socket) = args.docserver_socket {
 		socket
@@ -12446,14 +12815,15 @@ mod tests {
 	};
 
 	use super::*;
-	use crate::docserver::{
-		Environment, ServerConfig,
-		connection::{ConnectionConfig, serve_connection},
-	};
 	#[cfg(target_os = "macos")]
+	use crate::loopback_upstream::{BODY, LoopbackUpstream};
 	use crate::{
+		docserver::{
+			Environment, ServerConfig,
+			connection::{ConnectionConfig, serve_connection},
+		},
 		exec_settings::ExecSandboxMode,
-		loopback_upstream::{BODY, LoopbackUpstream},
+		exthost::ConvarControlFactory,
 	};
 
 	const TEST_DAP_SESSION_ID: [u8; 16] = [0x2a; 16];
@@ -12620,6 +12990,162 @@ mod tests {
 					serde_json::from_slice(&verdict.json).expect("inline CallOutcome");
 				assert!(!matches!(outcome, CallOutcome::Ok(_)));
 			}
+		}
+	}
+
+	const OK_VERDICT: &[u8] = br#"{"kind":"ok","value":null}"#;
+	const FAULTED_VERDICT: &[u8] = br#"{"kind":"faulted","value":null}"#;
+
+	/// A native tool whose projection is one text part of `bytes` bytes.
+	struct SizedProjection {
+		spec:  omp_tool::ToolSpec,
+		bytes: usize,
+	}
+
+	impl omp_tool::Tool for SizedProjection {
+		type Fault = serde_json::Value;
+		type Params = serde_json::Value;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			_params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			futures::stream::empty()
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: Str::new("x".repeat(self.bytes)) }]
+		}
+	}
+
+	/// A registry holding one [`SizedProjection`], and its identity.
+	fn sized_projection(bytes: usize) -> (Registry, ToolIdentity) {
+		let spec = omp_tool::ToolSpec {
+			name:            sf!("sized"),
+			rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+			description:     sf!("projects one sized text part"),
+			schema:          Bytes::from_static(br#"{"type":"object"}"#),
+			constraint:      omp_tool::Constraint::None,
+			effects:         Effects::empty(),
+			confinement:     Confinement::Host,
+			projection_code: [0; 32],
+		};
+		let identity = spec.identity();
+		let mut registry = Registry::new();
+		registry
+			.register(
+				SizedProjection { spec, bytes },
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the sized projection");
+		(registry, identity)
+	}
+
+	/// Publishes `json` as the native outcome of `identity` and returns the
+	/// verdict frame.
+	async fn publish_native_outcome(
+		blobs: &BlobHost,
+		registry: &Registry,
+		identity: &ToolIdentity,
+		output_request: omp_tool::OutputRequest,
+		json: &'static [u8],
+	) -> pb::Verdict {
+		let delivery = VerdictDelivery {
+			blobs: blobs.clone(),
+			retention_session: Some(Str::new_static("session-1")),
+			output_request,
+		};
+		let (responses, frames) = flume::unbounded();
+		send_native_outcome(
+			&responses,
+			7,
+			&Str::new_static("call-1"),
+			identity,
+			registry,
+			&delivery,
+			ErasedOutcome::Done { verdict: Bytes::from_static(json), useless: false },
+		)
+		.await;
+		let frame = frames.recv_async().await.expect("verdict frame");
+		let Some(server_frame::Body::Verdict(verdict)) = frame.body else {
+			panic!("expected a verdict frame");
+		};
+		verdict
+	}
+
+	/// The registry's shared projection cache keeps at most 4 MiB and declines
+	/// a larger projection. A native result that large still reaches the model:
+	/// whole under a complete output request, bounded under a bounded one. Its
+	/// completed call is never republished as an effects-unknown abort.
+	#[tokio::test]
+	async fn native_projections_the_cache_declines_still_reach_the_model() {
+		const PROJECTION_CACHE_BYTES: usize = 4 * 1024 * 1024;
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let (registry, identity) = sized_projection(PROJECTION_CACHE_BYTES + 1);
+		for output_request in [omp_tool::OutputRequest::Complete, omp_tool::OutputRequest::Bounded] {
+			let verdict =
+				publish_native_outcome(&blobs, &registry, &identity, output_request, OK_VERDICT).await;
+			assert_eq!(verdict.json.as_ref(), OK_VERDICT, "the tool's own outcome is published");
+			assert!(!verdict.is_error, "{output_request:?}: the verdict agrees with its outcome");
+			let text = verdict_text(&verdict);
+			assert!(text.bytes().all(|byte| byte == b'x'), "{output_request:?}: the tool's text");
+			match output_request {
+				omp_tool::OutputRequest::Complete => assert_eq!(
+					text.len(),
+					PROJECTION_CACHE_BYTES + 1,
+					"the whole projection reaches the model"
+				),
+				omp_tool::OutputRequest::Bounded => assert!(
+					!text.is_empty() && text.len() <= DEFAULT_RESULT_PROJECTION_BYTES,
+					"a bounded projection reaches the model: {} bytes",
+					text.len()
+				),
+			}
+		}
+	}
+
+	/// A native verdict its tool cannot project (here, one published under a
+	/// revision the registry does not hold) is still the tool's own completed
+	/// outcome: it is published unchanged, with its own error flag and a
+	/// harness note for the model, never as an effects-unknown abort.
+	#[tokio::test]
+	async fn unprojectable_native_verdicts_keep_their_own_outcome() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let (registry, identity) = sized_projection(1);
+		let unregistered =
+			ToolIdentity { name: identity.name, rev: omp_tool::Rev { family: Str::default(), n: 2 } };
+		for (json, is_error) in [(OK_VERDICT, false), (FAULTED_VERDICT, true)] {
+			let verdict = publish_native_outcome(
+				&blobs,
+				&registry,
+				&unregistered,
+				omp_tool::OutputRequest::Bounded,
+				json,
+			)
+			.await;
+			assert_eq!(verdict.json.as_ref(), json, "the tool's own outcome is published");
+			assert_eq!(verdict.is_error, is_error, "the error flag follows the outcome");
+			assert_eq!(verdict_text(&verdict), UNPROJECTED_NATIVE_RESULT);
 		}
 	}
 
@@ -13044,6 +13570,7 @@ mod tests {
 				server_epoch:   hello.server_epoch,
 				server_version: sf!("test"),
 				server_build:   sf!("envd-test"),
+				policy:         crate::daemon_policy::from_con(&Ctx::new()),
 			},
 			Some(EnvironmentAuthorities {
 				documents,
@@ -14752,7 +15279,6 @@ mod tests {
 		assert_closed(&outliving, &frames);
 	}
 
-	#[cfg(target_os = "macos")]
 	const RELAY_WAIT: Duration = Duration::from_secs(30);
 
 	/// A project-daemon-shaped host for relay proofs: a workspace-write
@@ -15172,10 +15698,8 @@ mod tests {
 		assert!(!root.path().join(".git/dropped.txt").exists());
 	}
 
-	#[cfg(target_os = "macos")]
 	struct AllowAdmission;
 
-	#[cfg(target_os = "macos")]
 	impl omp_env::Admitter for AllowAdmission {
 		type Future<'client> = std::future::Ready<pb::Admission>;
 
@@ -15253,7 +15777,6 @@ mod tests {
 	}
 
 	/// Invokes `name` with `args` and returns its terminal verdict.
-	#[cfg(target_os = "macos")]
 	async fn invoke_to_verdict(
 		client: &EnvClient,
 		server: &EnvServer,
@@ -15299,6 +15822,177 @@ mod tests {
 		})
 		.await
 		.expect("the invocation did not settle")
+	}
+
+	/// The text parts a verdict carries for the model, in order.
+	fn verdict_text(verdict: &pb::Verdict) -> String {
+		verdict
+			.parts
+			.iter()
+			.filter_map(|part| match part.kind.as_ref() {
+				Some(thread_pb::part::Kind::Text(text)) => Some(text.as_str()),
+				_ => None,
+			})
+			.collect()
+	}
+
+	/// The production tools on an unsandboxed host, served to one application
+	/// connection whose explicit `yolo` admits every call.
+	async fn unconfined_tools() -> (EnvClient, Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)
+	{
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let con = Arc::new(Ctx::new());
+		let convars = Arc::new(crate::exthost::ConvarControlFactory::new(Arc::clone(&con)));
+		let server = Arc::new(
+			EnvServer::open_local(
+				root.path(),
+				state.path(),
+				Registry::new(),
+				ExtHostConfig::new(
+					PathBuf::from("unused"),
+					Principal::new(sf!("test-principal"), sf!("Test Principal")),
+					sf!("test-session"),
+					1,
+				),
+				&con,
+				convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.expect("tool host"),
+		);
+		server.exec.configure_sandbox(
+			&SandboxSettings { mode: ExecSandboxMode::Off, ..SandboxSettings::default() },
+			root.path(),
+		);
+		let (client, transport) = EnvClient::in_process(64);
+		client.set_admitter(AllowAdmission);
+		let host = Arc::clone(&server);
+		tokio::spawn(async move { host.serve_in_process(transport).await });
+		client
+			.hello(pb::ClientHello {
+				client: "native-parts".to_owned(),
+				schema_rev: omp_proto::SCHEMA_REV,
+				approval_mode: pb::ApprovalMode::Yolo as i32,
+				..pb::ClientHello::default()
+			})
+			.await
+			.expect("hello");
+		(client, server, root, state)
+	}
+
+	/// A native tool's verdict carries the model-facing parts its own
+	/// projection renders, on the ok and the faulted branch alike, and they
+	/// agree with the verdict's error flag. Without them the client journals
+	/// an empty tool message and the model never sees the command's output.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn native_verdicts_carry_the_tools_own_projection() {
+		let (client, server, root, _state) = unconfined_tools().await;
+
+		let ok = invoke_to_verdict(
+			&client,
+			&server,
+			"bash-ok",
+			"bash",
+			serde_json::json!({"command": "printf native-parts-marker"}),
+		)
+		.await;
+		let text = verdict_text(&ok);
+		assert!(!ok.is_error, "{}", String::from_utf8_lossy(&ok.json));
+		assert!(text.contains("[status="), "bash status line reaches the model: {text:?}");
+		assert!(text.contains("native-parts-marker"), "bash stdout reaches the model: {text:?}");
+
+		let faulted = invoke_to_verdict(
+			&client,
+			&server,
+			"bash-faulted",
+			"bash",
+			serde_json::json!({"command": "printf native-parts-stderr >&2; exit 3"}),
+		)
+		.await;
+		let text = verdict_text(&faulted);
+		assert!(faulted.is_error, "a failed command is a fault");
+		assert!(text.contains("bash command failed"), "the fault reaches the model: {text:?}");
+		assert!(text.contains("native-parts-stderr"), "stderr reaches the model: {text:?}");
+
+		fs::write(root.path().join("present.txt"), "native-parts-file\n").expect("fixture");
+		let read = invoke_to_verdict(
+			&client,
+			&server,
+			"read-ok",
+			"read",
+			serde_json::json!({"path": "present.txt"}),
+		)
+		.await;
+		let text = verdict_text(&read);
+		assert!(!read.is_error, "{}", String::from_utf8_lossy(&read.json));
+		assert!(text.contains("native-parts-file"), "the file reaches the model: {text:?}");
+
+		let missing = invoke_to_verdict(
+			&client,
+			&server,
+			"read-missing",
+			"read",
+			serde_json::json!({"path": "absent.txt"}),
+		)
+		.await;
+		assert!(missing.is_error, "a missing file is a fault");
+		assert!(!verdict_text(&missing).is_empty(), "the read fault reaches the model");
+	}
+
+	/// A native tool's media part travels as its alternative text and a blob
+	/// reference, and the blob is retained in the verdict store for the
+	/// invocation's delivery, so the client can replicate it.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn native_media_parts_are_retained_for_delivery() {
+		let (client, server, root, _state) = unconfined_tools().await;
+		fs::write(
+			root.path().join("pixel.png"),
+			include_bytes!(concat!(
+				env!("CARGO_MANIFEST_DIR"),
+				"/../tools/tests/fixtures/special-sources/images/pixel.png"
+			)),
+		)
+		.expect("image fixture");
+		let read = invoke_to_verdict(
+			&client,
+			&server,
+			"read-image",
+			"read",
+			serde_json::json!({"path": "pixel.png"}),
+		)
+		.await;
+		assert!(!read.is_error, "{}", String::from_utf8_lossy(&read.json));
+		let media = read
+			.parts
+			.iter()
+			.position(|part| matches!(part.kind, Some(thread_pb::part::Kind::Blob(_))))
+			.expect("the image reaches the model as a blob part");
+		let alt = media
+			.checked_sub(1)
+			.and_then(|before| match read.parts[before].kind.as_ref() {
+				Some(thread_pb::part::Kind::Text(alt)) => Some(alt.as_str()),
+				_ => None,
+			});
+		assert!(
+			alt.is_some_and(|alt| !alt.is_empty()),
+			"its alternative text precedes it: {:?}",
+			read.parts
+		);
+		let Some(thread_pb::part::Kind::Blob(image)) = &read.parts[media].kind else {
+			unreachable!("located above");
+		};
+		assert!(image.mime.starts_with("image/"), "{image:?}");
+		assert!(image.inline.is_empty(), "media travels by reference: {image:?}");
+		let hash = <[u8; 32]>::try_from(image.hash.as_ref()).expect("a SHA-256 blob reference");
+		assert!(
+			server
+				.blobs
+				.worker_verdict_store()
+				.has(&blob::BlobRef { hash: Hash32::new(hash), size: image.size }),
+			"the image is retained for delivery"
+		);
 	}
 
 	/// Decision 4 over the wire, with Seatbelt really confining the
@@ -15646,5 +16340,660 @@ mod tests {
 			None,
 			"no scope, no boundary refusal"
 		);
+	}
+
+	/// Arguments of [`ScopedProbe`]: the effects one call asks for.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct ScopedProbeParams {
+		level: Str,
+	}
+
+	/// A native tool scoping each call's effects to its `level`: `read` reads
+	/// documents and `write` also writes them; any other level keeps the
+	/// declared maximum, which runs commands as well. `widen` lies, judging
+	/// the call beyond that maximum.
+	struct ScopedProbe {
+		spec: omp_tool::ToolSpec,
+		ran:  Arc<Mutex<Vec<serde_json::Value>>>,
+	}
+
+	impl omp_tool::Tool for ScopedProbe {
+		type Fault = serde_json::Value;
+		type Params = ScopedProbeParams;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, params: &ScopedProbeParams) -> Option<Effects> {
+			let documents = |write_globs| Effects {
+				documents: Some(omp_tool::DocEffects { read: true, write_globs }),
+				..Effects::empty()
+			};
+			match params.level.as_str() {
+				"read" => Some(documents(Arc::from([]))),
+				"write" => Some(documents(Arc::from([sf!("**")]))),
+				"widen" => Some(Effects { subagents: 1, ..Effects::empty() }),
+				_ => None,
+			}
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				let committed = params.committed().await.expect("probe commitment");
+				self.ran.lock().push(serde_json::from_str(&committed).expect("committed JSON"));
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "ran"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("ran") }]
+		}
+	}
+
+	/// Records every admission query and answers each one as scripted.
+	#[derive(Clone, Default)]
+	struct ScriptedAdmission {
+		queries: Arc<Mutex<Vec<String>>>,
+		/// Every query as it arrived.
+		seen:    Arc<Mutex<Vec<pb::AdmitInvocation>>>,
+		allow:   bool,
+		patch:   Bytes,
+	}
+
+	impl omp_env::Admitter for ScriptedAdmission {
+		type Future<'client> = future::Ready<pb::Admission>;
+
+		fn admit(&self, query: pb::AdmitInvocation) -> Self::Future<'_> {
+			self.queries.lock().push(query.invocation_id.clone());
+			self.seen.lock().push(query.clone());
+			future::ready(pb::Admission {
+				invocation_id: query.invocation_id,
+				allow: self.allow,
+				args_patch: self.patch.clone(),
+				..pb::Admission::default()
+			})
+		}
+	}
+
+	/// A local daemon whose registry holds [`ScopedProbe`], whose runs land
+	/// in `ran`.
+	async fn scoped_probe_daemon(
+		ran: &Arc<Mutex<Vec<serde_json::Value>>>,
+	) -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
+		let mut registry = Registry::new();
+		registry
+			.register(
+				ScopedProbe {
+					spec: omp_tool::ToolSpec {
+						name:            sf!("scoped_probe"),
+						rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+						description:     sf!("argument-scoped probe"),
+						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						constraint:      omp_tool::Constraint::None,
+						effects:         Effects {
+							documents: Some(omp_tool::DocEffects {
+								read:        true,
+								write_globs: Arc::from([sf!("**")]),
+							}),
+							exec: Some(omp_tool::ExecEffects {
+								commands: Arc::from([sf!("*")]),
+								network:  false,
+							}),
+							..Effects::empty()
+						},
+						confinement:     Confinement::Host,
+						projection_code: [0; 32],
+					},
+					ran:  Arc::clone(ran),
+				},
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the scoped probe");
+		probe_daemon(registry).await
+	}
+
+	/// A local daemon serving `registry` on a fresh workspace and state
+	/// directory.
+	async fn probe_daemon(
+		registry: Registry,
+	) -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let con = Arc::new(Ctx::new());
+		let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
+		let server = Arc::new(
+			EnvServer::open_local(
+				root.path(),
+				state.path(),
+				registry,
+				ExtHostConfig::new(
+					PathBuf::from("unused"),
+					Principal::new(sf!("test-principal"), sf!("Test Principal")),
+					sf!("test-session"),
+					1,
+				),
+				&con,
+				convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.expect("local environment"),
+		);
+		(server, root, state)
+	}
+
+	/// Connects a client to `server` under `approval_mode`, answering
+	/// admission queries with `admission`.
+	async fn scoped_probe_client(
+		server: &Arc<EnvServer>,
+		approval_mode: pb::ApprovalMode,
+		admission: ScriptedAdmission,
+	) -> (EnvClient, JoinHandle<()>) {
+		let (client, transport) = EnvClient::in_process(64);
+		client.set_admitter(admission);
+		let host = Arc::clone(server);
+		let serving = tokio::spawn(async move { host.serve_in_process(transport).await });
+		client
+			.hello(pb::ClientHello {
+				client: "scoped-effects".to_owned(),
+				schema_rev: omp_proto::SCHEMA_REV,
+				approval_mode: approval_mode as i32,
+				..pb::ClientHello::default()
+			})
+			.await
+			.expect("hello");
+		(client, serving)
+	}
+
+	/// Invokes the probe tool `name` with `args` under `restrictions` and
+	/// returns its verdict, or the environment's refusal of the committed
+	/// call.
+	async fn invoke_probe(
+		client: &EnvClient,
+		server: &EnvServer,
+		name: &str,
+		invocation_id: &str,
+		args: serde_json::Value,
+		restrictions: Option<pb::ToolRestrictions>,
+	) -> Result<pb::Verdict, omp_env::ClientError> {
+		let rev = server
+			.registry()
+			.live_identity(name)
+			.map(|(_, rev)| rev.to_string())
+			.expect("the probe is registered");
+		let mut invocation = client
+			.invoke(pb::InvokeTool {
+				invocation_id: invocation_id.to_owned(),
+				name: name.to_owned(),
+				rev,
+				restrictions,
+				..pb::InvokeTool::default()
+			})
+			.await
+			.expect("invoke");
+		assert!(matches!(
+			invocation.next_event().await.expect("accepted"),
+			Some(omp_env::InvocationEvent::Accepted(_))
+		));
+		invocation
+			.commit_args(
+				Bytes::from(serde_json::to_vec(&args).expect("arguments")),
+				Bytes::from_static(b"scoped-effects-token"),
+				1_000,
+				None,
+			)
+			.await
+			.expect("commit arguments");
+		time::timeout(Duration::from_secs(30), async {
+			loop {
+				match invocation.next_event().await? {
+					Some(omp_env::InvocationEvent::Verdict(verdict)) => break Ok(verdict),
+					Some(omp_env::InvocationEvent::Update(_)) => {},
+					other => panic!("unexpected scoped probe event: {other:?}"),
+				}
+			}
+		})
+		.await
+		.expect("the scoped probe did not settle")
+	}
+
+	/// Approval follows what each call does, judged at commit: under
+	/// `always-ask` a reading call runs unasked while a writing or executing
+	/// one asks; under `write` only the executing call asks. A refused
+	/// prompt never runs the call.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn argument_scoped_calls_are_approved_by_their_committed_effects() {
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let (server, _root, _state) = scoped_probe_daemon(&ran).await;
+		for (mode, level, prompts) in [
+			(pb::ApprovalMode::AlwaysAsk, "read", false),
+			(pb::ApprovalMode::AlwaysAsk, "write", true),
+			(pb::ApprovalMode::AlwaysAsk, "exec", true),
+			(pb::ApprovalMode::Write, "read", false),
+			(pb::ApprovalMode::Write, "write", false),
+			(pb::ApprovalMode::Write, "exec", true),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			let context = format!("{} {level}", mode.as_str_name());
+			let before = ran.lock().len();
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"scoped_probe",
+				"scoped",
+				serde_json::json!({"i": "probe", "level": level}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			if prompts {
+				assert_eq!(*refusing.queries.lock(), ["scoped"], "{context}");
+				assert!(verdict.is_error, "{context}: the refused prompt denies the call");
+				assert_eq!(ran.lock().len(), before, "{context}: never ran");
+			} else {
+				assert!(refusing.queries.lock().is_empty(), "{context}: never asks");
+				assert!(!verdict.is_error, "{context}: {}", String::from_utf8_lossy(&verdict.json));
+				assert_eq!(ran.lock().len(), before + 1, "{context}");
+			}
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// Plan mode refuses a call by what it does: a reading call of a tool
+	/// that can run commands proceeds, while its writing and executing calls
+	/// are refused before they run. A call judged beyond its tool's declared
+	/// maximum is refused too, never admitted on that maximum, and an answer
+	/// that rewrites a call to do more than was admitted is denied while one
+	/// that narrows it runs the narrowed call.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn argument_scoped_calls_meet_the_write_boundary_by_their_effects() {
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let (server, _root, _state) = scoped_probe_daemon(&ran).await;
+		let plan = || pb::ToolRestrictions {
+			plan_file: Some("local://PLAN.md".to_owned()),
+			..pb::ToolRestrictions::default()
+		};
+		let (client, serving) =
+			scoped_probe_client(&server, pb::ApprovalMode::Yolo, ScriptedAdmission::default()).await;
+		let read = invoke_probe(
+			&client,
+			&server,
+			"scoped_probe",
+			"plan-read",
+			serde_json::json!({"level": "read"}),
+			Some(plan()),
+		)
+		.await
+		.expect("a reading call passes plan mode");
+		assert!(!read.is_error, "{}", String::from_utf8_lossy(&read.json));
+		assert_eq!(ran.lock().len(), 1);
+		for (invocation_id, level, restrictions) in [
+			("plan-write", "write", Some(plan())),
+			("plan-exec", "exec", Some(plan())),
+			("widened", "widen", None),
+		] {
+			let refused = invoke_probe(
+				&client,
+				&server,
+				"scoped_probe",
+				invocation_id,
+				serde_json::json!({"level": level}),
+				restrictions,
+			)
+			.await
+			.expect_err("the environment refuses the committed call");
+			let omp_env::ClientError::Protocol(error) = refused else {
+				panic!("{invocation_id}: unexpected refusal {refused:?}");
+			};
+			assert_eq!(
+				error.code,
+				pb::ProtocolErrorCode::PermissionDenied as i32,
+				"{invocation_id}: {}",
+				error.message
+			);
+		}
+		assert_eq!(ran.lock().len(), 1, "no refused call ran");
+		drop(client);
+		serving.abort();
+
+		for (patch, admitted) in
+			[(br#"{"level":"exec"}"#.as_slice(), None), (br#"{"level":"read"}"#, Some("read"))]
+		{
+			let rewriting = ScriptedAdmission {
+				allow: true,
+				patch: Bytes::copy_from_slice(patch),
+				..ScriptedAdmission::default()
+			};
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, rewriting.clone()).await;
+			let before = ran.lock().len();
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"scoped_probe",
+				"rewritten",
+				serde_json::json!({"level": "write"}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert_eq!(*rewriting.queries.lock(), ["rewritten"], "the writing call asks");
+			if let Some(level) = admitted {
+				assert!(!verdict.is_error, "{}", String::from_utf8_lossy(&verdict.json));
+				assert_eq!(ran.lock().last().map(|args| args["level"].clone()), Some(level.into()));
+			} else {
+				assert!(verdict.is_error);
+				assert!(
+					String::from_utf8_lossy(&verdict.json).contains("admission_effects_widened"),
+					"{}",
+					String::from_utf8_lossy(&verdict.json)
+				);
+				assert_eq!(ran.lock().len(), before, "the widened call never ran");
+			}
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// A commit the gate refuses judges nothing, so the call is admitted on
+	/// the policy its next, accepted commit resolves to. Under `always-ask`, a
+	/// reading call in serde's sequence form, refused, then an executing call
+	/// asks and never runs; an executing call so refused, then a reading call,
+	/// runs unasked.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_refused_commit_leaves_the_call_unjudged() {
+		let ran = Arc::new(Mutex::new(Vec::new()));
+		let (server, _root, _state) = scoped_probe_daemon(&ran).await;
+		let rev = server
+			.registry()
+			.live_identity("scoped_probe")
+			.map(|(_, rev)| rev.to_string())
+			.expect("the scoped probe is registered");
+		for (invocation_id, refused, accepted, asks) in [
+			("exec-after-refusal", r#"["read"]"#, r#"{"level":"exec"}"#, true),
+			("read-after-refusal", r#"["exec"]"#, r#"{"level":"read"}"#, false),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, refusing.clone()).await;
+			let before = ran.lock().len();
+			let mut invocation = client
+				.invoke(pb::InvokeTool {
+					invocation_id: invocation_id.to_owned(),
+					name: "scoped_probe".to_owned(),
+					rev: rev.clone(),
+					..pb::InvokeTool::default()
+				})
+				.await
+				.expect("invoke");
+			assert!(matches!(
+				invocation.next_event().await.expect("accepted"),
+				Some(omp_env::InvocationEvent::Accepted(_))
+			));
+			for raw in [refused, accepted] {
+				invocation
+					.commit_args(
+						Bytes::copy_from_slice(raw.as_bytes()),
+						Bytes::from_static(b"scoped-effects-token"),
+						1_000,
+						None,
+					)
+					.await
+					.expect("commit arguments");
+			}
+			// The refused commit's error ends this client's view of the
+			// invocation, so the outcome shows in what was asked and what ran.
+			time::timeout(Duration::from_secs(30), async {
+				while refusing.queries.lock().is_empty() && ran.lock().len() == before {
+					time::sleep(Duration::from_millis(5)).await;
+				}
+			})
+			.await
+			.expect("the accepted commit was neither asked nor run");
+			if asks {
+				assert_eq!(*refusing.queries.lock(), [invocation_id], "the executing call asks");
+				assert_eq!(ran.lock().len(), before, "the refused prompt never ran it");
+			} else {
+				assert!(refusing.queries.lock().is_empty(), "the reading call never asks");
+				assert_eq!(ran.lock().len(), before + 1);
+				assert_eq!(ran.lock().last().map(|args| args["level"].clone()), Some("read".into()));
+			}
+			drop(invocation);
+			drop(client);
+			serving.abort();
+		}
+	}
+
+	/// Arguments of [`FetchProbe`]: the targets one call reads.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct FetchProbeParams {
+		targets: Vec<Str>,
+	}
+
+	/// A native tool reading local paths and fetching every URL target, the
+	/// way an argument-scoped `read` classifies its targets: a call fetches
+	/// only when a target is a URL, and names those URLs as its locators.
+	struct FetchProbe {
+		spec: omp_tool::ToolSpec,
+	}
+
+	impl omp_tool::Tool for FetchProbe {
+		type Fault = serde_json::Value;
+		type Params = FetchProbeParams;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, params: &FetchProbeParams) -> Option<Effects> {
+			let fetches = params.targets.iter().any(|target| target.contains("://"));
+			Some(Effects {
+				documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+				fetch: fetches.then_some(omp_tool::FetchEffects { credentials: true }),
+				..Effects::empty()
+			})
+		}
+
+		fn fetch_locators(&self, params: &FetchProbeParams) -> Vec<Str> {
+			params
+				.targets
+				.iter()
+				.filter(|target| target.contains("://"))
+				.cloned()
+				.collect()
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				params.committed().await.expect("probe commitment");
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "fetched"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("fetched") }]
+		}
+	}
+
+	/// A local daemon whose registry holds [`FetchProbe`].
+	async fn fetch_probe_daemon() -> (Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir) {
+		let mut registry = Registry::new();
+		registry
+			.register(
+				FetchProbe {
+					spec: omp_tool::ToolSpec {
+						name:            sf!("fetch_probe"),
+						rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+						description:     sf!("argument-scoped fetch probe"),
+						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						constraint:      omp_tool::Constraint::None,
+						effects:         Effects {
+							documents: Some(omp_tool::DocEffects {
+								read:        true,
+								write_globs: Arc::from([]),
+							}),
+							fetch: Some(omp_tool::FetchEffects { credentials: true }),
+							..Effects::empty()
+						},
+						confinement:     Confinement::Host,
+						projection_code: [0; 32],
+					},
+				},
+				omp_tool::Presentation::Slot,
+				omp_tool::Claims {
+					precedence: omp_tool::Precedence::DEFAULT,
+					claimant:   sf!("omp/test"),
+					replaces:   None,
+				},
+			)
+			.expect("register the fetch probe");
+		probe_daemon(registry).await
+	}
+
+	/// Under `always-ask` a fetching call's query reports the envelope it was
+	/// judged by and every distinct host its fetches reach, named by the
+	/// resolver that performs each: an http(s) URL by its authored host and
+	/// port, `ssh://` by its alias, `issue://` and `pr://` by the GitHub host
+	/// the URL or the workspace's git remote names. A locator the environment
+	/// cannot name marks the call partly unnamed and never drops the hosts the
+	/// others name. A local read never asks, and `write` asks for no fetch.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn fetch_queries_name_every_host_the_resolvers_reach() {
+		use crate::fetch_host::FetchHost;
+
+		let (server, root, _state) = fetch_probe_daemon().await;
+		std::fs::create_dir(root.path().join(".git")).expect("git directory");
+		std::fs::write(
+			root.path().join(".git/config"),
+			"[remote \"origin\"]\n\turl = git@GHE.example.com:Owner/Repo.git\n",
+		)
+		.expect("git config");
+		let hosts = |query: &pb::AdmitInvocation| {
+			query
+				.fetch
+				.iter()
+				.map(|target| FetchHost::try_from(target).expect("a named host"))
+				.collect::<Vec<_>>()
+		};
+		for (invocation_id, targets, named, unnamed) in [
+			(
+				"web",
+				vec!["https://docs.rs/serde", "https://docs.rs/tokio:10-20", "http://localhost:8080/x"],
+				vec![FetchHost::http("docs.rs", 443), FetchHost::http("localhost", 8080)],
+				false,
+			),
+			("ssh", vec!["ssh://prod/etc/hosts"], vec![FetchHost::ssh("prod")], false),
+			("remote-issue", vec!["issue://5"], vec![FetchHost::github("ghe.example.com")], false),
+			(
+				"named-pr",
+				vec!["pr://Owner/Repo/7/diff", "notes.txt"],
+				vec![FetchHost::github("github.com")],
+				false,
+			),
+			("unadvertised-mcp", vec!["mcp://unadvertised/resource"], Vec::new(), true),
+			(
+				"one-unnamed",
+				vec!["https://docs.rs/serde", "issue://owner"],
+				vec![FetchHost::http("docs.rs", 443)],
+				true,
+			),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) =
+				scoped_probe_client(&server, pb::ApprovalMode::AlwaysAsk, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"fetch_probe",
+				invocation_id,
+				serde_json::json!({"targets": targets}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(verdict.is_error, "{invocation_id}: the refused prompt denies the call");
+			let seen = refusing.seen.lock().clone();
+			assert_eq!(seen.len(), 1, "{invocation_id}: one query");
+			let effects = seen[0]
+				.effects
+				.as_ref()
+				.map(|envelope| Effects::try_from(envelope).expect("a typed envelope"))
+				.expect("the query reports the envelope");
+			assert_eq!(
+				effects.fetch,
+				Some(omp_tool::FetchEffects { credentials: true }),
+				"{invocation_id}"
+			);
+			assert_eq!(hosts(&seen[0]), named, "{invocation_id}");
+			assert_eq!(seen[0].fetch_unnamed, unnamed, "{invocation_id}");
+			drop(client);
+			serving.abort();
+		}
+
+		for (mode, invocation_id, targets) in [
+			(pb::ApprovalMode::AlwaysAsk, "local", vec!["notes.txt"]),
+			(pb::ApprovalMode::Write, "write-fetch", vec!["https://docs.rs/serde"]),
+		] {
+			let refusing = ScriptedAdmission::default();
+			let (client, serving) = scoped_probe_client(&server, mode, refusing.clone()).await;
+			let verdict = invoke_probe(
+				&client,
+				&server,
+				"fetch_probe",
+				invocation_id,
+				serde_json::json!({"targets": targets}),
+				None,
+			)
+			.await
+			.expect("a verdict");
+			assert!(refusing.seen.lock().is_empty(), "{invocation_id}: never asks");
+			assert!(!verdict.is_error, "{invocation_id}: {}", String::from_utf8_lossy(&verdict.json));
+			drop(client);
+			serving.abort();
+		}
 	}
 }

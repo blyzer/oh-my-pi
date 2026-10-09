@@ -8,7 +8,10 @@
 //! in this process runs the command, and its sandbox amendment reaches the
 //! issuing session only through the approval relay. A network endpoint approved
 //! for the session holds, on either path, until the conversation leaves the
-//! journal that approved it, by a rewind or a session switch.
+//! journal that approved it, by a rewind or a session switch. A fetch is asked
+//! once per host the environment names for it, and a session grant for one
+//! host never covers another. A command the daemon runs reaches the model with
+//! its own output.
 
 mod support;
 
@@ -25,8 +28,8 @@ use omp_agent::{
 	RunControl, StaticPrompt, TicketState, TurnInput, Up,
 };
 use omp_ai::{
-	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
-	RequestId, ResponseMeta, ToolCall, ToolCallId, Usage,
+	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ContentPart, ExecutionReceipt,
+	FinishReason, RequestId, ResponseMeta, ToolCall, ToolCallId, ToolResultContent, Usage,
 };
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
@@ -45,68 +48,106 @@ use omp_session::{ComponentRegistry, Session};
 /// kernel runs: turn `n` calls `call-n`. `write` declares document write
 /// effects, so its tier is `write` and always-ask prompts before it starts.
 /// `bash` declares no effects: its spawn/fs effects are confined by the
-/// sandbox, and without one it is process authority.
+/// sandbox, and without one it is process authority. Each request's tool
+/// results land in `shown`, replacing the previous request's.
 struct ToolThenText {
 	tool:      &'static str,
 	arguments: serde_json::Value,
 	turns:     usize,
+	shown:     Shown,
+}
+
+/// The tool results the scripted model was last shown.
+type Shown = Arc<parking_lot::Mutex<Vec<ShownResult>>>;
+
+/// One tool result as a request presented it to the model.
+#[derive(Debug)]
+struct ShownResult {
+	/// Every text part of the result, in order.
+	text:     String,
+	/// Whether the result was presented as an error.
+	is_error: bool,
+}
+
+/// The tool results `request` presents to the model, in order.
+fn shown_results(request: &ChatRequest) -> Vec<ShownResult> {
+	request
+		.messages
+		.iter()
+		.flat_map(|message| message.content.iter())
+		.filter_map(|part| match part {
+			ContentPart::ToolResult { content, is_error, .. } => Some(ShownResult {
+				text:     content
+					.iter()
+					.filter_map(|content| match content {
+						ToolResultContent::Text(text) => Some(text.as_str()),
+						_ => None,
+					})
+					.collect(),
+				is_error: *is_error,
+			}),
+			_ => None,
+		})
+		.collect()
 }
 
 impl Inference for ToolThenText {
 	fn chat(
 		&mut self,
-		_request: ChatRequest,
+		request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+		*self.shown.lock() = shown_results(&request);
 		self.turns += 1;
-		let meta = ResponseMeta {
-			request_id:          RequestId::from("approval-test"),
-			provider:            ProviderId::from("test"),
-			route:               RouteId::from("test/route"),
-			model:               None,
-			provider_request_id: None,
-			created_at:          std::time::SystemTime::UNIX_EPOCH,
-		};
-		let events = if self.turns % 2 == 1 {
-			let arguments = self.arguments.clone();
-			let call = ToolCall {
-				id:        ToolCallId::from(format!("call-{}", self.turns.div_ceil(2)).as_str()),
-				name:      Str::new_static(self.tool),
-				arguments: omp_ai::OpaqueJson::new(arguments.clone()),
-			};
-			vec![
-				ChatEvent::Started(meta),
-				ChatEvent::ToolCallStarted {
-					index: 0,
-					id:    call.id.clone(),
-					name:  call.name.clone(),
-				},
-				ChatEvent::ToolArgumentsDelta {
-					index: 0,
-					bytes: bytes::Bytes::from(serde_json::to_vec(&arguments).expect("args")),
-				},
-				ChatEvent::ToolCallReady { index: 0, call },
-				ChatEvent::Completed(Completion {
-					reason:  FinishReason::ToolCalls,
-					blocks:  1,
-					usage:   Usage::default(),
-					receipt: ExecutionReceipt::default().into(),
-				}),
-			]
-		} else {
-			vec![
-				ChatEvent::Started(meta),
-				ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text },
-				ChatEvent::TextDelta { index: 0, text: Str::new_static("done") },
-				ChatEvent::Completed(Completion {
-					reason:  FinishReason::Stop,
-					blocks:  1,
-					usage:   Usage::default(),
-					receipt: ExecutionReceipt::default().into(),
-				}),
-			]
-		};
-		ready(Ok(ChatStream::ordinary(Box::pin(stream::iter(events.into_iter().map(Ok))))))
+		ready(Ok(tool_then_text(self.turns, self.tool, &self.arguments)))
 	}
+}
+
+/// The `turn`th scripted response: an odd turn calls `tool` with `arguments`
+/// as `call-n` (`n` counting the calls), an even turn closes with text.
+fn tool_then_text(turn: usize, tool: &'static str, arguments: &serde_json::Value) -> ChatStream {
+	let meta = ResponseMeta {
+		request_id:          RequestId::from("approval-test"),
+		provider:            ProviderId::from("test"),
+		route:               RouteId::from("test/route"),
+		model:               None,
+		provider_request_id: None,
+		created_at:          std::time::SystemTime::UNIX_EPOCH,
+	};
+	let events = if turn % 2 == 1 {
+		let call = ToolCall {
+			id:        ToolCallId::from(format!("call-{}", turn.div_ceil(2)).as_str()),
+			name:      Str::new_static(tool),
+			arguments: omp_ai::OpaqueJson::new(arguments.clone()),
+		};
+		vec![
+			ChatEvent::Started(meta),
+			ChatEvent::ToolCallStarted { index: 0, id: call.id.clone(), name: call.name.clone() },
+			ChatEvent::ToolArgumentsDelta {
+				index: 0,
+				bytes: bytes::Bytes::from(serde_json::to_vec(arguments).expect("args")),
+			},
+			ChatEvent::ToolCallReady { index: 0, call },
+			ChatEvent::Completed(Completion {
+				reason:  FinishReason::ToolCalls,
+				blocks:  1,
+				usage:   Usage::default(),
+				receipt: ExecutionReceipt::default().into(),
+			}),
+		]
+	} else {
+		vec![
+			ChatEvent::Started(meta),
+			ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text },
+			ChatEvent::TextDelta { index: 0, text: Str::new_static("done") },
+			ChatEvent::Completed(Completion {
+				reason:  FinishReason::Stop,
+				blocks:  1,
+				usage:   Usage::default(),
+				receipt: ExecutionReceipt::default().into(),
+			}),
+		]
+	};
+	ChatStream::ordinary(Box::pin(stream::iter(events.into_iter().map(Ok))))
 }
 
 fn decision(approved: bool) -> ApprovalDecision {
@@ -142,6 +183,8 @@ struct Turn {
 	result:  String,
 	/// Whether `target` exists afterwards.
 	landed:  bool,
+	/// The tool results the model was shown in the closing request.
+	shown:   Vec<ShownResult>,
 }
 
 /// One scratch project: its workspace, its project state directory, and the
@@ -166,14 +209,25 @@ impl Project {
 
 	/// Attaches one session composition the way the application does.
 	async fn attach(&self, mode: Option<ApprovalMode>) -> ProjectEnvironment {
+		self.attach_spawning(mode, None).await
+	}
+
+	/// Attaches like [`Self::attach`], knowing that a daemon spawned for the
+	/// project would enforce `spawn_policy`.
+	async fn attach_spawning(
+		&self,
+		mode: Option<ApprovalMode>,
+		spawn_policy: Option<omp_env::project_state::DaemonPolicy>,
+	) -> ProjectEnvironment {
 		ProjectEnvironment::attach(&self.root, &self.state, AttachOptions {
-			py_eval:            false,
-			approval_mode:      mode,
+			py_eval: false,
+			approval_mode: mode,
 			trusted_extensions: Vec::new(),
 			contributed_values: Vec::new(),
-			con:                Arc::clone(&self.con),
-			bridges:            RegistryBridges::default(),
+			con: Arc::clone(&self.con),
+			bridges: RegistryBridges::default(),
 			spawn_idle_timeout: Some(2),
+			spawn_policy,
 		})
 		.await
 		.expect("environment")
@@ -196,8 +250,9 @@ impl Project {
 		let registry = environment.registry();
 		let spill =
 			omp_journal::blob::BlobStore::open(self.scratch.path().join("artifacts")).expect("spill");
+		let shown = Shown::default();
 		let kernel = Kernel::new(
-			ToolThenText { tool, arguments: arguments(&target), turns: 0 },
+			ToolThenText { tool, arguments: arguments(&target), turns: 0, shown: Arc::clone(&shown) },
 			registry,
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
@@ -258,7 +313,8 @@ impl Project {
 		let landed = target.exists();
 		drop(kernel);
 		drop(environment);
-		Turn { session, result, landed }
+		let shown = std::mem::take(&mut *shown.lock());
+		Turn { session, result, landed, shown }
 	}
 }
 
@@ -304,7 +360,7 @@ fn bash_call(_target: &Path) -> serde_json::Value {
 
 #[tokio::test]
 async fn approval_always_ask_write_deny_journals_a_denied_result() {
-	let Turn { session, result, landed } = run(
+	let Turn { session, result, landed, .. } = run(
 		"write",
 		write_call,
 		"approved.txt",
@@ -330,7 +386,7 @@ async fn approval_always_ask_write_deny_journals_a_denied_result() {
 
 #[tokio::test]
 async fn approval_always_ask_write_allow_runs_the_tool() {
-	let Turn { session, result, landed } = run(
+	let Turn { session, result, landed, .. } = run(
 		"write",
 		write_call,
 		"approved.txt",
@@ -381,7 +437,7 @@ fn posture_notice(session: &Session) -> serde_json::Value {
 /// default asked for, what holds, and why.
 #[tokio::test]
 async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, false).await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 1, "a defaulted yolo without a sandbox must prompt once: {tickets:?}");
@@ -409,7 +465,7 @@ async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
 /// The same prompt, approved: the command runs.
 #[tokio::test]
 async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, true).await;
 	assert_eq!(prompts(&session).len(), 1);
 	assert!(landed, "approved bash ran: {result}");
@@ -420,7 +476,7 @@ async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
 /// session is told it is unconfined. This is the way out of headless denial.
 #[tokio::test]
 async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false)
 			.await;
 	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
@@ -436,12 +492,56 @@ async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
 	);
 }
 
+/// Runs one bash `command` under an explicit `yolo` in a session attached to a
+/// project daemon served in this process, the production path, where the
+/// daemon runs the command and the session's registry only declares bash.
+/// Returns the tool result the model's closing request showed.
+async fn attached_bash_result(command: &str) -> ShownResult {
+	let project = Project::new(ExecSandboxMode::Off);
+	let _daemon =
+		support::InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off))
+			.await;
+	let environment = project.attach(Some(ApprovalMode::Yolo)).await;
+	assert!(
+		environment.fallback_notice.is_none(),
+		"the session fell back to an embedded environment: {:?}",
+		environment.fallback_notice
+	);
+	let arguments = serde_json::json!({ "command": command, "i": "Proving tool results" });
+	let Turn { mut shown, .. } = project
+		.turn(environment, "bash", |_| arguments, "unused.txt", Some(ApprovalMode::Yolo), false)
+		.await;
+	assert_eq!(shown.len(), 1, "the closing request shows one tool result: {shown:?}");
+	shown.remove(0)
+}
+
+/// The daemon runs bash, and the model's follow-up request carries the
+/// command's own projection: its status line and its stdout, not an empty
+/// tool message the model would have to make up output for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_environment_bash_result_reaches_the_model() {
+	let result = attached_bash_result("printf env-tool-marker").await;
+	assert!(!result.is_error, "{result:?}");
+	assert!(result.text.contains("[status="), "the status line reaches the model: {result:?}");
+	assert!(result.text.contains("env-tool-marker"), "stdout reaches the model: {result:?}");
+}
+
+/// A failed command reaches the model as an error that still carries what it
+/// printed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_environment_bash_result_reaches_the_model() {
+	let result = attached_bash_result("printf env-tool-stderr >&2; exit 3").await;
+	assert!(result.is_error, "{result:?}");
+	assert!(result.text.contains("bash command failed"), "the fault reaches the model: {result:?}");
+	assert!(result.text.contains("env-tool-stderr"), "stderr reaches the model: {result:?}");
+}
+
 /// A real Seatbelt sandbox is active: the default `yolo` is honoured, so bash
 /// runs unprompted and no posture notice is needed.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn default_yolo_inside_an_active_sandbox_runs_bash_unprompted_and_silent() {
-	let Turn { session, result, landed } =
+	let Turn { session, result, landed, .. } =
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::WorkspaceWrite, false).await;
 	assert!(prompts(&session).is_empty(), "a confined yolo never prompts");
 	assert!(landed, "bash ran inside the workspace: {result}");
@@ -499,12 +599,6 @@ async fn active_sandbox_denied_write_prompts_an_amendment_and_refusal_writes_not
 /// the command.
 #[cfg(target_os = "macos")]
 mod attached_daemon {
-	use omp_core::{Principal, sf};
-	use omp_envd::{EnvServer, exthost::ConvarControlFactory, worker::ExtHostConfig};
-	use omp_tool::Registry;
-	use tokio::{net::UnixStream, task::JoinHandle};
-	use tokio_util::sync::CancellationToken;
-
 	use super::*;
 	pub use crate::support::InProcessDaemon;
 
@@ -568,7 +662,7 @@ mod attached_daemon {
 			omp_agent::ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
 		bystander.bind_approval_authority(None, Some(bystander_route));
 		let environment = attached(&project).await;
-		let Turn { session, result, landed } = project
+		let Turn { session, result, landed, .. } = project
 			.turn(environment, "bash", protected_write, ".git/amended.txt", None, true)
 			.await;
 		amendment(&project, &session, true);
@@ -590,7 +684,7 @@ mod attached_daemon {
 		std::fs::create_dir(project.root.join(".git")).expect("protected carve-out");
 		let _daemon = InProcessDaemon::for_project(&project, ExecSandboxMode::WorkspaceWrite).await;
 		let environment = attached(&project).await;
-		let Turn { session, result, landed } = project
+		let Turn { session, result, landed, .. } = project
 			.turn(environment, "bash", protected_write, ".git/amended.txt", None, false)
 			.await;
 		amendment(&project, &session, false);
@@ -721,6 +815,7 @@ mod session_network_grants {
 				tool:      "bash",
 				arguments: serde_json::json!({ "command": fetch, "i": "Fetching a package" }),
 				turns:     0,
+				shown:     Shown::default(),
 			},
 			environment.registry(),
 			DispatchPolicy::new(spill.clone()),
@@ -809,9 +904,11 @@ mod session_network_grants {
 		host.abort();
 	}
 
-	/// A session attached to a daemon whose broker may reach loopback.
+	/// A session attached to a daemon whose broker may reach loopback; the
+	/// session resolves the same policy, or it would not join that daemon.
 	async fn attached_grants(leave: Leave) {
-		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		project.con = loopback_context();
 		let port = loopback_upstream();
 		let _daemon = InProcessDaemon::serve(&project.root, &project.state, loopback_context()).await;
 		let environment = attached(&project).await;
@@ -855,5 +952,635 @@ mod session_network_grants {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn an_embedded_grant_never_reaches_the_next_session() {
 		embedded_grants(Leave::Switch).await;
+	}
+}
+
+/// Host-keyed fetch approval through the production environment executor:
+/// a project environment served in this process admits an argument-scoped
+/// fetching tool under `always-ask`, `EnvToolExecutor` turns each admission
+/// query into the session's prompt on a kernel-shaped route, and the approval
+/// desk answers a repeated host from the session grant the journal holds.
+mod fetch_host_grants {
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	use futures::StreamExt as _;
+	use omp_agent::{
+		ApprovalDesk, ApprovalRoute, ExternalDispatchEvent, ExternalDispatchRequest,
+		ExternalToolExecutor as _, KernelEvents,
+	};
+	use omp_core::{Principal, sf};
+	use omp_envd::{EnvServer, exthost::ConvarControlFactory, worker::ExtHostConfig};
+	use omp_journal::blob::BlobStore;
+	use omp_proto::env::v1 as pb;
+	use omp_tool::{Effects, IncomingParams, Registry, ToolIdentity, ToolTerminal};
+
+	use super::*;
+
+	/// Arguments of [`FetchProbe`]: the targets one call reads.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct FetchProbeParams {
+		targets: Vec<Str>,
+	}
+
+	/// A native tool reading local paths and fetching every URL target, as
+	/// an argument-scoped `read` classifies its targets.
+	struct FetchProbe {
+		spec: omp_tool::ToolSpec,
+		ran:  Arc<AtomicUsize>,
+	}
+
+	impl omp_tool::Tool for FetchProbe {
+		type Fault = serde_json::Value;
+		type Params = FetchProbeParams;
+		type Payload = serde_json::Value;
+		type Update = serde_json::Value;
+
+		const ARGUMENT_SCOPED_EFFECTS: bool = true;
+
+		fn spec(&self) -> &omp_tool::ToolSpec {
+			&self.spec
+		}
+
+		fn invocation_effects(&self, params: &FetchProbeParams) -> Option<Effects> {
+			let fetches = params.targets.iter().any(|target| target.contains("://"));
+			Some(Effects {
+				documents: Some(omp_tool::DocEffects { read: true, write_globs: Arc::from([]) }),
+				fetch: fetches.then_some(omp_tool::FetchEffects { credentials: false }),
+				..Effects::empty()
+			})
+		}
+
+		fn fetch_locators(&self, params: &FetchProbeParams) -> Vec<Str> {
+			params
+				.targets
+				.iter()
+				.filter(|target| target.contains("://"))
+				.cloned()
+				.collect()
+		}
+
+		fn call<'c>(
+			&'c self,
+			mut params: IncomingParams<'c>,
+		) -> impl futures::Stream<
+			Item = omp_tool::Ev<serde_json::Value, serde_json::Value, serde_json::Value>,
+		> + Send
+		+ 'c {
+			async_stream::stream! {
+				params.committed().await.expect("probe commitment");
+				self.ran.fetch_add(1, Ordering::Relaxed);
+				yield omp_tool::Ev::Done(ToolTerminal::Done {
+					result: Ok(serde_json::json!({"text": "fetched"})),
+					useless: false,
+				});
+			}
+		}
+
+		fn prompt(
+			&self,
+			_view: Result<&serde_json::Value, &serde_json::Value>,
+			_caps: &omp_tool::PromptCaps,
+		) -> Vec<omp_tool::Part> {
+			vec![omp_tool::Part::Text { text: sf!("fetched") }]
+		}
+	}
+
+	/// The session side of the production executor: the kernel's route and
+	/// approval desk, and a human who answers every prompt for the session.
+	struct Host {
+		executor: EnvToolExecutor,
+		up:       flume::Receiver<Up>,
+		desk:     ApprovalDesk,
+		session:  Session,
+		blobs:    BlobStore,
+		identity: ToolIdentity,
+	}
+
+	impl Host {
+		/// Runs one call reading `targets` to a successful outcome and returns
+		/// the subjects of each prompt a human was asked.
+		async fn call(&mut self, call_id: &str, targets: &[&str]) -> Vec<Vec<Str>> {
+			let request = ExternalDispatchRequest {
+				identity:       self.identity.clone(),
+				session_id:     sf!("fetch-session"),
+				blobs:          self.blobs.clone(),
+				call_id:        Str::new(call_id),
+				args:           serde_json::value::to_raw_value(
+					&serde_json::json!({"targets": targets}),
+				)
+				.expect("arguments"),
+				route:          omp_tool::ToolRoute::Remote,
+				blocking_limit: Duration::from_secs(30),
+				output_request: omp_tool::OutputRequest::Bounded,
+				cancellation:   tokio_util::sync::CancellationToken::new(),
+				restrictions:   None,
+			};
+			let mut stream = self.executor.invoke(request);
+			let mut asked = Vec::new();
+			let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+				loop {
+					tokio::select! {
+						event = stream.next() => match event {
+							Some(
+								ExternalDispatchEvent::Done { is_error, parts, .. }
+								| ExternalDispatchEvent::DoneProjected { is_error, parts, .. },
+							) => {
+								break (!is_error).then_some(()).ok_or_else(|| format!("{parts:?}"));
+							},
+							Some(ExternalDispatchEvent::Aborted(abort)) => break Err(format!("{abort:?}")),
+							None => break Err(String::from("the stream ended without an outcome")),
+							Some(_) => {},
+						},
+						request = self.up.recv_async() => {
+							let Ok(Up::Approval(request)) = request else { continue };
+							let ticket =
+								self.desk.file(&mut self.session, request).expect("prompt files");
+							if ticket.state == TicketState::Pending {
+								asked.push(
+									ticket.reasons.iter().map(|reason| reason.subject.clone()).collect(),
+								);
+								self
+									.desk
+									.decide(&mut self.session, ticket.ticket_id.as_str(), ApprovalDecision {
+										approved:   true,
+										scope:      ApprovalScope::Session,
+										source:     ApprovalSource::User,
+										decided_by: None,
+										reason:     None,
+										audited:    false,
+									})
+									.expect("the human answers for the session");
+							}
+						},
+					}
+				}
+			})
+			.await
+			.expect("the call settles");
+			assert_eq!(outcome, Ok(()), "{call_id} ran to a successful outcome");
+			asked
+		}
+	}
+
+	/// A local environment served in this process whose registry holds the
+	/// fetch probe as a native tool, and how often the probe ran.
+	struct ProbeEnvironment {
+		server: Arc<EnvServer>,
+		con:    Arc<omp_con::Ctx>,
+		root:   PathBuf,
+		rev:    omp_tool::Rev,
+		ran:    Arc<AtomicUsize>,
+	}
+
+	impl ProbeEnvironment {
+		async fn open(scratch: &Path) -> Self {
+			let (root, state) = (scratch.join("workspace"), scratch.join("state"));
+			std::fs::create_dir_all(&root).expect("workspace");
+			std::fs::create_dir_all(&state).expect("state");
+			let ran = Arc::new(AtomicUsize::new(0));
+			let mut registry = Registry::new();
+			registry
+				.register(
+					FetchProbe {
+						spec: omp_tool::ToolSpec {
+							name:            sf!("fetch_probe"),
+							rev:             omp_tool::Rev { family: Str::default(), n: 1 },
+							description:     sf!("argument-scoped fetch probe"),
+							schema:          bytes::Bytes::from_static(br#"{"type":"object"}"#),
+							constraint:      omp_tool::Constraint::None,
+							effects:         Effects {
+								documents: Some(omp_tool::DocEffects {
+									read:        true,
+									write_globs: Arc::from([]),
+								}),
+								fetch: Some(omp_tool::FetchEffects { credentials: false }),
+								..Effects::empty()
+							},
+							confinement:     omp_tool::Confinement::Host,
+							projection_code: [0; 32],
+						},
+						ran:  Arc::clone(&ran),
+					},
+					omp_tool::Presentation::Slot,
+					omp_tool::Claims {
+						precedence: omp_tool::Precedence::DEFAULT,
+						claimant:   sf!("omp/test"),
+						replaces:   None,
+					},
+				)
+				.expect("register the fetch probe");
+			let con = Arc::new(omp_con::Ctx::new());
+			let server = Arc::new(
+				EnvServer::open_local(
+					&root,
+					&state,
+					registry,
+					ExtHostConfig::new(
+						PathBuf::from("unused"),
+						Principal::new(sf!("test-principal"), sf!("Test Principal")),
+						sf!("test-session"),
+						1,
+					),
+					&con,
+					Arc::new(ConvarControlFactory::new(Arc::clone(&con))),
+					RegistryBridges::default(),
+				)
+				.await
+				.expect("local environment"),
+			);
+			let rev = server
+				.registry()
+				.live_identity("fetch_probe")
+				.map(|(_, rev)| rev.clone())
+				.expect("the fetch probe is registered");
+			Self { server, con, root, rev, ran }
+		}
+	}
+
+	/// Under `always-ask` a fetch is asked once per host per session: the
+	/// first fetch from a host asks, a `session` answer lets every later fetch
+	/// from that host run unasked, a fetch from another host asks again, a
+	/// fetch reaching hosts granted one at a time runs unasked, and a local
+	/// read never asks. A locator the environment cannot name never drops the
+	/// hosts named beside it: a grant for the tool's own unnamed fetch never
+	/// answers a fetch from a host no one granted.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn always_ask_asks_once_per_fetched_host_per_session() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let probe = ProbeEnvironment::open(scratch.path()).await;
+		let (client, transport) = omp_env::EnvClient::in_process(64);
+		let serving = tokio::spawn({
+			let server = Arc::clone(&probe.server);
+			async move { server.serve_in_process(transport).await }
+		});
+		client
+			.hello(pb::ClientHello {
+				client: "fetch-host-grants".to_owned(),
+				schema_rev: omp_proto::SCHEMA_REV,
+				approval_mode: pb::ApprovalMode::AlwaysAsk as i32,
+				..pb::ClientHello::default()
+			})
+			.await
+			.expect("hello");
+
+		// The kernel's route and desk: prompts land in the mailbox, the desk
+		// journals them and answers a granted subject from the tree.
+		let (mailbox, up) = flume::unbounded();
+		let blobs = BlobStore::open(scratch.path().join("blobs")).expect("blobs");
+		let mut host = Host {
+			executor: EnvToolExecutor::new(client, ApprovalRoute::to_kernel(mailbox, None)),
+			up,
+			desk: ApprovalDesk::new(KernelEvents::default()),
+			session: Session::create_with_blob_store(
+				scratch.path().join("fetch.oms"),
+				ComponentRegistry::standard(),
+				blobs.clone(),
+			)
+			.expect("session"),
+			blobs,
+			identity: ToolIdentity { name: sf!("fetch_probe"), rev: probe.rev.clone() },
+		};
+
+		assert_eq!(host.call("call-1", &["https://docs.rs/serde"]).await, [vec![sf!(
+			"http:docs.rs:443"
+		)]]);
+		assert!(
+			host
+				.call("call-2", &["https://docs.rs/tokio", "https://docs.rs/bytes"])
+				.await
+				.is_empty(),
+			"the granted host is not asked again"
+		);
+		assert_eq!(
+			host
+				.call("call-3", &["https://crates.io/crates/serde"])
+				.await,
+			[vec![sf!("http:crates.io:443")]],
+			"a grant for one host never covers another"
+		);
+		assert!(host.call("call-4", &["notes.txt"]).await.is_empty(), "a local read never asks");
+		assert!(
+			host
+				.call("call-5", &["https://docs.rs/x", "https://crates.io/y"])
+				.await
+				.is_empty(),
+			"hosts granted one at a time answer a fetch reaching both"
+		);
+		assert_eq!(
+			host
+				.call("call-6", &["https://evil.example/x", "mcp://unadvertised/resource"])
+				.await,
+			[vec![sf!("http:evil.example:443"), sf!("tool:fetch_probe")]],
+			"an unnamed locator keeps the host named beside it"
+		);
+		assert!(
+			host
+				.call("call-7", &["https://docs.rs/z", "mcp://unadvertised/resource"])
+				.await
+				.is_empty(),
+			"the granted host and the granted remainder answer"
+		);
+		assert_eq!(
+			host
+				.call("call-8", &["https://other.example/x", "mcp://unadvertised/resource"])
+				.await,
+			[vec![sf!("http:other.example:443"), sf!("tool:fetch_probe")]],
+			"the remainder's grant never covers a host no one granted"
+		);
+		assert_eq!(probe.ran.load(Ordering::Relaxed), 8);
+		serving.abort();
+	}
+
+	/// Scripted turns calling the fetch probe: turn `2n - 1` calls `call-n`
+	/// reading the `n`th target list, turn `2n` closes with text.
+	struct FetchTurns {
+		targets: Vec<Vec<&'static str>>,
+		turns:   usize,
+	}
+
+	impl Inference for FetchTurns {
+		fn chat(
+			&mut self,
+			_request: ChatRequest,
+		) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+			self.turns += 1;
+			let targets = &self.targets[self.turns.div_ceil(2) - 1];
+			ready(Ok(tool_then_text(
+				self.turns,
+				"fetch_probe",
+				&serde_json::json!({ "targets": targets }),
+			)))
+		}
+	}
+
+	/// An embedded or isolated composition runs the environment's native tools
+	/// in the kernel, outside the environment's admission gate: the kernel's
+	/// `SettingsAdmission`, given the environment's fetch hosts namer, asks a
+	/// fetch once per host per session exactly as the environment's gate does,
+	/// and keeps every named host beside an unnamed locator.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn an_embedded_kernel_asks_its_native_fetches_once_per_host() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let probe = ProbeEnvironment::open(scratch.path()).await;
+		let registry = probe.server.registry();
+		assert_eq!(
+			registry.route("fetch_probe").expect("routed"),
+			omp_tool::ToolRoute::Native,
+			"the kernel runs the probe itself"
+		);
+		let targets = vec![
+			vec!["https://docs.rs/serde"],
+			vec!["https://docs.rs/tokio"],
+			vec!["https://crates.io/crates/serde"],
+			vec!["https://docs.rs/x", "https://crates.io/y"],
+			vec!["https://evil.example/x", "mcp://unadvertised/resource"],
+			vec!["https://docs.rs/z", "mcp://unadvertised/resource"],
+			vec!["https://other.example/x", "mcp://unadvertised/resource"],
+			vec!["notes.txt"],
+		];
+		let calls = targets.len();
+		let spill = BlobStore::open(scratch.path().join("artifacts")).expect("spill");
+		let mut kernel = Kernel::new(
+			FetchTurns { targets, turns: 0 },
+			registry,
+			DispatchPolicy::new(spill.clone()),
+			StaticPrompt(Str::new_static("test")),
+		)
+		.with_tool_admission(Arc::new(
+			SettingsAdmission::new(&probe.con, Some(ApprovalMode::AlwaysAsk), &probe.root)
+				.with_fetch_hosts(probe.server.fetch_hosts()),
+		));
+		let events = kernel.subscribe();
+		let mailbox = kernel.mailbox();
+		let asked = Arc::new(parking_lot::Mutex::new(Vec::<Vec<Str>>::new()));
+		let host = tokio::spawn({
+			let asked = Arc::clone(&asked);
+			async move {
+				while let Ok(event) = events.recv_async().await {
+					if let KernelEvent::ApprovalRequested(ticket) = event {
+						asked.lock().push(
+							ticket
+								.reasons
+								.iter()
+								.map(|reason| reason.subject.clone())
+								.collect(),
+						);
+						let _ = mailbox.send(Up::Approve {
+							id:       ticket.ticket_id,
+							decision: ApprovalDecision {
+								approved:   true,
+								scope:      ApprovalScope::Session,
+								source:     ApprovalSource::User,
+								decided_by: None,
+								reason:     None,
+								audited:    false,
+							},
+						});
+					}
+				}
+			}
+		});
+		let mut session = Session::create_with_blob_store(
+			scratch.path().join("embedded-fetch.oms"),
+			ComponentRegistry::standard(),
+			spill,
+		)
+		.expect("session");
+		let mut each = Vec::new();
+		for _ in 0..calls {
+			tokio::time::timeout(
+				Duration::from_secs(60),
+				kernel.run_turn(
+					&mut session,
+					TurnInput { text: Str::new_static("fetch"), attachments: Vec::new() },
+					RunControl::default(),
+				),
+			)
+			.await
+			.expect("turn settles")
+			.expect("turn");
+			each.push(std::mem::take(&mut *asked.lock()));
+		}
+		host.abort();
+		let host_subject = |subjects: &[&str]| -> Vec<Vec<Str>> {
+			vec![subjects.iter().copied().map(Str::new).collect()]
+		};
+		assert_eq!(each, [
+			host_subject(&["http:docs.rs:443"]),
+			Vec::new(),
+			host_subject(&["http:crates.io:443"]),
+			Vec::new(),
+			host_subject(&["http:evil.example:443", "tool:fetch_probe"]),
+			Vec::new(),
+			host_subject(&["http:other.example:443", "tool:fetch_probe"]),
+			Vec::new(),
+		]);
+		assert_eq!(probe.ran.load(Ordering::Relaxed), calls, "every approved call ran");
+	}
+}
+
+/// A project daemon fixes its sandbox and approval policy when it starts, so a
+/// session never runs its tools on a daemon whose policy differs from the one
+/// its own control context resolves: the environment socket is keyed by that
+/// policy, and the session checks the policy every daemon reports in its hello
+/// before attaching. A session with no daemon of its policy (this test binary
+/// cannot be spawned as one) runs an embedded environment under its own
+/// policy instead.
+mod policy_keyed_daemons {
+	use omp_env::project_state::DaemonPolicy;
+	use omp_envd::daemon_policy;
+
+	use super::*;
+	use crate::support::InProcessDaemon;
+
+	/// The policy the daemon an attached session joined reported in its hello.
+	fn joined_policy(environment: &ProjectEnvironment) -> Option<DaemonPolicy> {
+		let hello = environment
+			.client()
+			.info()
+			.expect("the session completed its hello");
+		DaemonPolicy::from_wire(&hello.policy_digest)
+	}
+
+	/// Daemons of two policies serve one project side by side, and a session
+	/// of each policy joins the one that enforces it.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn each_policy_joins_its_own_daemon_of_one_project() {
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let _sandboxed = InProcessDaemon::serve(
+			&project.root,
+			&project.state,
+			context(ExecSandboxMode::WorkspaceWrite),
+		)
+		.await;
+		let _unconfined =
+			InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off)).await;
+
+		for sandbox in [ExecSandboxMode::WorkspaceWrite, ExecSandboxMode::Off] {
+			project.con = context(sandbox);
+			let environment = project.attach(None).await;
+			assert!(
+				environment.fallback_notice.is_none(),
+				"the {sandbox} session did not join its daemon: {:?}",
+				environment.fallback_notice
+			);
+			assert_eq!(
+				joined_policy(&environment),
+				Some(daemon_policy::from_con(&project.con)),
+				"the {sandbox} session joined a daemon enforcing another policy"
+			);
+		}
+	}
+
+	/// A daemon reached on the session's own socket that reports another
+	/// policy is refused: the session runs embedded, and the notice names both
+	/// policies.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_daemon_reporting_another_policy_is_never_joined() {
+		let project = Project::new(ExecSandboxMode::Off);
+		let session = daemon_policy::from_con(&project.con);
+		let daemon = context(ExecSandboxMode::WorkspaceWrite);
+		let served = daemon_policy::from_con(&daemon);
+		assert_ne!(session, served);
+		let _misplaced = InProcessDaemon::serve_at(
+			&project.root,
+			&project.state,
+			daemon,
+			omp_env::project_state::environment_socket(&project.state, &session)
+				.expect("environment socket"),
+		)
+		.await;
+
+		let environment = project.attach(None).await;
+		let notice = environment
+			.fallback_notice
+			.expect("the session joined a daemon enforcing another policy");
+		assert!(
+			notice.contains(&format!(
+				"enforces sandbox and approval policy {served}, not this session's {session}"
+			)),
+			"the refusal names both policies: {notice}"
+		);
+	}
+
+	/// A session whose policy comes from settings no configuration file holds
+	/// (`--add-dir` roots, an agent class) spawns no daemon: one would resolve
+	/// the configured policy, so the session could never join it, and it runs
+	/// embedded at once with a notice naming both policies.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_session_spawns_no_daemon_it_could_never_join() {
+		let project = Project::new(ExecSandboxMode::Off);
+		let session = daemon_policy::from_con(&project.con);
+		let configured = daemon_policy::from_con(&context(ExecSandboxMode::WorkspaceWrite));
+		assert_ne!(session, configured);
+		let spawn_log = project.state.join("envd.log");
+
+		let environment = project.attach_spawning(None, Some(configured)).await;
+		let notice = environment
+			.fallback_notice
+			.expect("no daemon enforces the session's policy");
+		assert!(
+			notice.contains(&format!(
+				"policy {configured} from the configuration files, not this session's {session}"
+			)),
+			"the notice names both policies: {notice}"
+		);
+		assert!(!spawn_log.exists(), "a daemon the session could never join was spawned");
+
+		// When the configuration files hold the session's own policy a daemon
+		// is spawned (this test binary cannot serve as one, so the session
+		// still runs embedded).
+		let environment = project.attach_spawning(None, Some(session)).await;
+		assert!(environment.fallback_notice.is_some());
+		assert!(spawn_log.exists(), "the session spawned no daemon of its own policy");
+	}
+
+	/// The reported case: a daemon started under the shipped `workspace-write`
+	/// keeps serving the project, and a session configured with
+	/// `sv_sandbox_mode off` must not have `bash` confined and auto-approved
+	/// there. Its own posture holds: the default `yolo` without a sandbox is
+	/// `write`, so the command prompts and, refused, never runs.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_sandbox_off_session_never_runs_on_a_sandboxed_daemon() {
+		let project = Project::new(ExecSandboxMode::Off);
+		let _daemon = InProcessDaemon::serve(
+			&project.root,
+			&project.state,
+			context(ExecSandboxMode::WorkspaceWrite),
+		)
+		.await;
+		let environment = project.attach(None).await;
+		let joined = environment.fallback_notice.is_none();
+		let Turn { session, result, landed, .. } = project
+			.turn(environment, "bash", bash_call, "landed.txt", None, false)
+			.await;
+		let tickets = prompts(&session);
+		assert_eq!(tickets.len(), 1, "the unconfined shell must prompt once: {tickets:?}");
+		assert_eq!(tickets[0].reasons[0].kind.as_str(), "exec");
+		assert!(!landed, "a refused command never ran: {result}");
+		assert!(!joined, "the session joined the sandboxed daemon");
+	}
+
+	/// The reverse: a session expecting the shipped sandbox never runs its
+	/// commands unconfined on a daemon started with `sv_sandbox_mode off`. Its
+	/// own active sandbox keeps the default `yolo`, so the command runs
+	/// confined without a prompt.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn a_sandboxed_session_never_runs_on_an_unconfined_daemon() {
+		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let _daemon =
+			InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off)).await;
+		let environment = project.attach(None).await;
+		let joined = environment.fallback_notice.is_none();
+		let Turn { session, result, landed, .. } = project
+			.turn(environment, "bash", bash_call, "landed.txt", None, false)
+			.await;
+		let tickets = prompts(&session);
+		assert!(tickets.is_empty(), "a confined default yolo never prompts: {tickets:?}");
+		assert!(landed, "bash ran inside the session's own sandbox: {result}");
+		assert!(!joined, "the session joined the unconfined daemon");
 	}
 }

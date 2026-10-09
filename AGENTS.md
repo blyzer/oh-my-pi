@@ -670,7 +670,9 @@ PTY:
   `crates/tui/README.md`. Wire speaks `TerminalEvent`: injected input rides
   the same mailbox as decoded terminal bytes; `text`/`info` answer from the
   last paint on every host; `frame`/`tree`/`values` = mailbox queries only
-  `App` hosts answer (server times out elsewhere); `quit` injects `C-c`.
+  `App` hosts answer (server times out elsewhere); `quit` injects one `C-c`.
+  `omp chat` quits only on a second `C-c` within 500 ms (pi parity): send
+  `keys "C-c C-c"` (the tool's `stop` does), not two `quit` ops.
 - `OMP_TTY=<pty-slave-path>`: reroutes ALL terminal I/O (input, rendered
   frames, capability probes, terminal identity) to that device; hold the
   master side to script the UI + capture the exact byte stream a terminal
@@ -687,6 +689,7 @@ proc = subprocess.Popen(
 os.read(master, 65536)          # frames + control sequences
 os.write(master, b"\x1b[C")     # keys (write escape sequences)
 os.write(master, b"\x03")       # Ctrl-C quits the examples
+os.write(master, b"\x03\x03")   # omp chat: a repeat within 500 ms quits
 ```
 
 Caveats: set winsize via `TIOCSWINSZ` before spawn (`SIGWINCH` only reaches

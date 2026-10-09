@@ -151,6 +151,25 @@ impl CfgFiles {
 	}
 }
 
+impl CfgFiles {
+	/// The sandbox and approval policy a project daemon spawned under these
+	/// files enforces: the one `omp envd` resolves from `config.cfg` and its
+	/// project overlay alone, with nothing set in-process (no flag, cfg
+	/// profile script or agent class). A session whose own policy differs
+	/// can never join such a daemon, so it does not spawn one
+	/// (`omp_envd::AttachOptions::spawn_policy`).
+	///
+	/// # Errors
+	///
+	/// Fails when a cfg file cannot be read.
+	pub fn daemon_policy(&self) -> ConResult<omp_env::project_state::DaemonPolicy> {
+		let files = Self::with_roots(self.user.clone(), self.project.clone());
+		let ctx = omp_con::Ctx::builder().loader(files.clone()).build();
+		ctx.exec_configs(&files, None)?;
+		Ok(omp_envd::daemon_policy::from_con(&ctx))
+	}
+}
+
 impl CfgLoader for CfgFiles {
 	fn load(&self, name: &str) -> ConResult<Option<Str>> {
 		Self::load(self, name)
@@ -588,6 +607,39 @@ mod tests {
 		);
 		let detached = CfgFiles::with_roots(user, None);
 		assert_eq!(detached.load_project("subagent").unwrap(), None);
+	}
+
+	/// A project daemon spawned for the project resolves its sandbox and
+	/// approval policy from `config.cfg` and the project overlay alone, which
+	/// is what [`CfgFiles::daemon_policy`] reports, without touching the
+	/// loader's own observations.
+	#[test]
+	fn the_spawned_daemon_policy_comes_from_the_configuration_files_alone() {
+		use omp_envd::{
+			daemon_policy,
+			exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
+		};
+
+		let dir = tempfile::tempdir().unwrap();
+		let user = dir.path().join("o2");
+		let project = dir.path().join("proj/.omp");
+		fs::create_dir_all(&user).unwrap();
+		fs::create_dir_all(&project).unwrap();
+		let files = CfgFiles::with_roots(user.clone(), Some(project));
+		let shipped = daemon_policy::from_con(&omp_con::Ctx::new());
+		assert_eq!(files.daemon_policy().unwrap(), shipped);
+
+		fs::write(user.join("config.cfg"), "sv_sandbox_mode off\n").unwrap();
+		let configured = files.daemon_policy().unwrap();
+		let unconfined = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&unconfined, ExecSandboxMode::Off)
+			.unwrap();
+		assert_eq!(configured, daemon_policy::from_con(&unconfined));
+		assert!(
+			files.observed.lock().is_empty(),
+			"resolving the policy records no observation a later save checks"
+		);
 	}
 
 	/// The subagent spawn path installs [`CfgFiles`] as its loader (kernel

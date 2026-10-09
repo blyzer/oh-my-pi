@@ -155,9 +155,13 @@ pub(crate) async fn run(
 		omp_env::project_state::directory(&data_dir, &root)?
 	};
 	fs::create_dir_all(&state_dir)?;
-	let socket = args
-		.socket
-		.unwrap_or_else(|| omp_env::project_state::environment_socket(&state_dir));
+	let socket = match args.socket {
+		Some(socket) => socket,
+		None => omp_env::project_state::environment_socket(
+			&state_dir,
+			&crate::daemon_policy::from_con(&con),
+		)?,
+	};
 	let require_document_ownership = args.docserver_socket.is_none();
 	let docserver_socket = args
 		.docserver_socket

@@ -78,4 +78,17 @@ pub enum HeadlessError {
 		/// Stable id or routing name supplied by the spawning host.
 		parent: Str,
 	},
+	/// The session presents a sandbox and approval policy (its journaled agent
+	/// class) other than the one its environment was composed under, which
+	/// fixes the policy when it starts.
+	#[error(
+		"the session presents sandbox and approval policy {presented}, but its environment enforces \
+		 {composed}"
+	)]
+	EnvironmentPolicyDrift {
+		/// Policy the environment was composed under.
+		composed:  omp_env::project_state::DaemonPolicy,
+		/// Policy the session presents once its journal is open.
+		presented: omp_env::project_state::DaemonPolicy,
+	},
 }

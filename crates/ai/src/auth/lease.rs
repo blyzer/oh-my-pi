@@ -36,7 +36,14 @@ pub struct LeaseMeta {
 }
 
 /// Non-secret category of credential material held by a lease.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Its kebab-case name (`api-key`, `bearer`, `session-token`) is also the
+/// `kind` a static secret is stored under in the encrypted credential store,
+/// where it is authenticated with the ciphertext.
+#[derive(
+	Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum CredentialKind {
 	/// Provider API key.
 	ApiKey,
@@ -47,7 +54,39 @@ pub enum CredentialKind {
 	/// Provider session token.
 	SessionToken,
 	/// AWS access-key tuple used only by `SigV4`.
+	#[strum(serialize = "aws-sigv4")]
 	AwsSigV4,
+}
+
+/// A credential kind as extensions name it: `omp.CredentialKind` in the
+/// Python SDK, which an extension `provider_login` answer and an `omp.creds`
+/// store request carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum ExtensionCredentialKind {
+	/// Provider API key.
+	ApiKey,
+	/// Bearer token.
+	Bearer,
+	/// Renewable OAuth material.
+	Oauth,
+	/// AWS credentials.
+	Aws,
+	/// Provider session token.
+	Session,
+}
+
+impl ExtensionCredentialKind {
+	/// The kind a static secret of this kind is stored under; `None` for
+	/// OAuth and AWS material, which is not a static secret.
+	pub(crate) const fn static_secret(self) -> Option<CredentialKind> {
+		match self {
+			Self::ApiKey => Some(CredentialKind::ApiKey),
+			Self::Bearer => Some(CredentialKind::Bearer),
+			Self::Session => Some(CredentialKind::SessionToken),
+			Self::Oauth | Self::Aws => None,
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -715,6 +754,23 @@ pub enum CredentialError {
 	/// Credential source failed without retaining secret-bearing detail.
 	#[error("credential source failed")]
 	SourceFailure,
+	/// Renewing a renewable credential failed: the token endpoint, the
+	/// network, or the refresh bookkeeping did not produce a new generation.
+	#[error("credential refresh failed")]
+	RefreshFailed,
+	/// A source produced a credential of another kind than the catalog
+	/// authentication it was leased for.
+	#[error("credential is {actual} but the authentication requires {expected}")]
+	KindMismatch {
+		/// Kind the catalog authentication specification requires.
+		expected: CredentialKind,
+		/// Kind of the credential the source produced.
+		actual:   CredentialKind,
+	},
+	/// The encrypted credential store cannot decrypt because its key source is
+	/// unavailable to this process.
+	#[error("credential storage is locked")]
+	StorageLocked,
 }
 
 /// Future returned across the `dyn CredentialSource` boundary.

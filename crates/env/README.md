@@ -34,7 +34,13 @@ provides the one client that routes between them.
 - `ExtensionEnvClient` and `WorkerEnvClient` are capability-reduced DATA
   clients for host-managed children; they are not host implementations.
 - `project_state` derives project-keyed state and transport paths shared by
-  clients that need to find the owning daemon.
+  clients that need to find the owning daemon. The environment socket is keyed
+  by executable generation and by `DaemonPolicy`, the digest of the sandbox
+  and approval policy a daemon enforces, which every `ServerHello` also
+  reports (`policy_digest`). The name carries the policy only through a keyed
+  digest under a random key private to the project (`SOCKET_KEY_FILE` in the
+  state directory), so other local users listing `/tmp` cannot confirm a
+  guessed policy.
 - `frame`, `document_frame`, and `blob_frame` re-export the generated wire
   contracts used at transport boundaries.
 
@@ -43,7 +49,8 @@ provides the one client that routes between them.
 The crate deliberately owns no world resources. Files, processes, document
 leases, workspace search, and blob storage remain behind the detached
 environment service. Session tools use an in-process backend under the same
-client; environment tools and DATA effects route to the build-keyed daemon.
+client; environment tools and DATA effects route to the daemon keyed by build
+and by sandbox and approval policy (`project_state::DaemonPolicy`).
 Per-invocation and per-command `RunGuard`s provide nonblocking, request-scoped
 cancellation without ending server-owned sessions. Detached work must
 relinquish its guard explicitly.

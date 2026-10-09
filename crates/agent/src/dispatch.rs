@@ -336,17 +336,23 @@ pub enum Received {
 pub trait ToolAdmission: Send + Sync {
 	/// Decides one committed call before its unit starts.
 	///
-	/// `effects` and `confinement` come from the live spec of the called
-	/// revision. A name with no native live spec is an RPC host tool: it is
-	/// admitted with the envelope its host declared, or
-	/// [`omp_tool::Effects::unknown`] when it declared none (and when the name
-	/// resolves to nothing at all), and always [`omp_tool::Confinement::Host`].
+	/// `effects` is the call's envelope judged from its arguments
+	/// ([`omp_tool::Registry::invocation_effects`]): the called revision's
+	/// declared maximum unless its tool narrows the call, or the envelope an
+	/// RPC host tool's host declared ([`omp_tool::Effects::unknown`] when it
+	/// declared none, and when the name resolves to nothing at all).
+	/// `confinement` comes from the live spec; a name with no native live spec
+	/// (an RPC host tool) is [`omp_tool::Confinement::Host`]. `fetch_locators`
+	/// are the URLs the call fetches when its envelope fetches
+	/// ([`omp_tool::Registry::fetch_locators`]), empty otherwise and for a
+	/// tool that names none.
 	fn admit(
 		&self,
 		name: &str,
 		effects: &omp_tool::Effects,
 		confinement: omp_tool::Confinement,
 		args: &RawValue,
+		fetch_locators: &[Str],
 	) -> ToolAdmissionVerdict;
 }
 
@@ -357,8 +363,10 @@ pub enum ToolAdmissionVerdict {
 	Allow,
 	/// Never start; the call settles as a policy denial.
 	Deny(Str),
-	/// Journal this prompt and start only once it is approved.
-	Prompt(crate::ApprovalSpec),
+	/// Journal these requirements in the call's one prompt and start only
+	/// once it is approved. A prompt without a requirement is refused, never
+	/// started.
+	Prompt(Vec<crate::ApprovalSpec>),
 }
 
 impl CallControl {
@@ -2017,20 +2025,48 @@ impl Dispatcher {
 				{
 					let registry = &self.committer.registry;
 					let name = call.identity.name.as_str();
-					let (effects, confinement) = registry.live_spec(name).map_or_else(
-						// Host tools live outside the native table and run in the
-						// attached client; a name that resolves nowhere fails closed.
-						|_| {
-							(
-								registry
-									.effects_owned(name)
-									.unwrap_or_else(|_| Effects::unknown()),
-								Confinement::Host,
-							)
+					// Host tools live outside the native table and run in the
+					// attached client.
+					let confinement = registry
+						.live_spec(name)
+						.map_or(Confinement::Host, |spec| spec.confinement);
+					// The call is judged by what its arguments do, and a fetch
+					// by the URLs they name; a name that resolves nowhere fails
+					// closed.
+					let verdict = match registry.invocation_effects(name, args.get()) {
+						Ok(effects) => {
+							let locators = if effects.fetch.is_some() {
+								registry.fetch_locators(name, args.get())
+							} else {
+								Vec::new()
+							};
+							admission.admit(name, &effects, confinement, &args, &locators)
 						},
-						|spec| (spec.effects.clone(), spec.confinement),
-					);
-					match admission.admit(call.identity.name.as_str(), &effects, confinement, &args) {
+						Err(RegistryError::UnknownTool(_)) => {
+							admission.admit(name, &Effects::unknown(), confinement, &args, &[])
+						},
+						Err(error) => {
+							tracing::warn!(
+								%error,
+								call_id = %call.call_id,
+								"refused a call judged beyond its tool's declared effects"
+							);
+							ToolAdmissionVerdict::Deny(Str::new_static(
+								"the call's effects exceed its tool's declared maximum; it was not started",
+							))
+						},
+					};
+					let verdict = match verdict {
+						// Nothing to approve is never an approval.
+						ToolAdmissionVerdict::Prompt(requirements) if requirements.is_empty() => {
+							ToolAdmissionVerdict::Deny(Str::new_static(
+								"admission asked for approval without a requirement; the call was not \
+								 started",
+							))
+						},
+						verdict => verdict,
+					};
+					match verdict {
 						ToolAdmissionVerdict::Allow => {},
 						ToolAdmissionVerdict::Deny(reason) => {
 							let mut output = std::mem::take(call.output(&self.committer.policy));
@@ -2044,7 +2080,7 @@ impl Dispatcher {
 							call.report = Some(report);
 							continue;
 						},
-						ToolAdmissionVerdict::Prompt(spec) => specs.push(spec),
+						ToolAdmissionVerdict::Prompt(requirements) => specs.extend(requirements),
 					}
 				}
 				if !specs.is_empty() {

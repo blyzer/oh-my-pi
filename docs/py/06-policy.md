@@ -1420,7 +1420,14 @@ class ApprovalSpec:
 
 `omp.ApprovalKind` is a `StrEnum`: `EXEC`, `WRITE`, `READ`, `NETWORK`, `PRIVILEGE`, `DEVICE`,
 `SPAWN`. It selects presentation and the configuration key that may pre-answer the request; it
-is not itself a decision.
+is not itself a decision. The host raises a fetch (`Tier.FETCH`) as one `NETWORK` requirement per
+host the fetch reaches, named by the resolver that performs it: `http:<host>:<port>` for the
+authored host of an http(s) URL, `github:<host>` for `issue://` and `pr://`, `ssh:<alias>`,
+`mcp:<server>`, and `tool:<name>` beside them for any fetch whose host it cannot name. A later
+request is answered without asking only when each of its requirements is covered by a `SESSION`
+grant of the same kind and subject, from one prompt or several, so hosts granted one at a time
+cover a fetch reaching them all, while a grant for one host never covers another and a grant for
+`tool:<name>` never covers a named host.
 
 `scopes` are the buttons. `(ONCE, SESSION)` is pi's "allow once / allow always"
 (`.plan/feature-map/ROADMAP.md:278`); adding `PERSIST` offers to write the grant to project
@@ -2212,9 +2219,10 @@ sharing optimization with no meaning on a wire.
 
 `OpenSessionRequest` gains `omp.policy.v1.SandboxProfile sandbox = 5` (tags 1-4 and 15 used,
 `env.proto:126-132`). `ExecRequest` gains `SandboxProfile sandbox_override = 3` (tags 1-2 and 15
-used, `:156-160`). `ServerHello` gains `SandboxCapabilities sandbox_capabilities = 9` (tags 1-8
-and 15 used, `:29-41`); its existing `repeated string capabilities = 3` also gains the
-`policy/v1` capability token, which is how a client learns admission is available at all.
+used, `:156-160`). `ServerHello` gains `SandboxCapabilities sandbox_capabilities = 10` (tags 1-9
+and 15 used, `:29-41`; 9 is the daemon `policy_digest`); its existing
+`repeated string capabilities = 3` also gains the `policy/v1` capability token, which is how a
+client learns admission is available at all.
 
 Two new admission messages, and one violation event:
 

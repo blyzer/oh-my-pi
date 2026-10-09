@@ -10,6 +10,7 @@ pub mod browser_daemon;
 pub mod browser_fetch;
 pub mod browser_relay;
 mod computer;
+pub mod daemon_policy;
 mod devices_host;
 mod direnv;
 pub mod docs;
@@ -28,6 +29,8 @@ mod exec_sandbox;
 pub mod exec_settings;
 pub mod ext_git;
 pub mod exthost;
+/// The hosts a fetch reaches and the approval subjects keyed on them.
+pub mod fetch_host;
 mod github;
 pub mod github_url;
 pub mod grep;
@@ -127,7 +130,9 @@ use omp_agent::KernelSender;
 use omp_ai::auth::AuthControlHandle;
 use omp_con::Ctx;
 use omp_core::{Str, Ulid, sf};
-use omp_env::{AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames};
+use omp_env::{
+	AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames, project_state::DaemonPolicy,
+};
 use omp_ext::config::ContributedCliValue;
 use omp_proto::{
 	env::v1::{
@@ -438,7 +443,8 @@ impl Drop for ClientPresenceLease {
 	}
 }
 
-/// Registers one launch-shaped application process with its project daemon.
+/// Registers one launch-shaped application process with the project daemon
+/// that enforces the sandbox and approval policy `con` resolves.
 #[cfg(any(unix, windows))]
 #[tracing::instrument(
 	name = "project_presence_register",
@@ -450,11 +456,13 @@ pub async fn register_project_presence(
 	project_root: &Path,
 	data_dir: &Path,
 	kind: &'static str,
+	con: &Ctx,
 ) -> Result<ClientPresenceLease, EnvdError> {
 	let root = fs::canonicalize(project_root)?;
 	let state_dir = omp_env::project_state::directory(data_dir, &root)?;
 	publish_launcher_build(&state_dir)?;
-	let socket = omp_env::project_state::environment_socket(&state_dir);
+	let policy = daemon_policy::from_con(con);
+	let socket = omp_env::project_state::environment_socket(&state_dir, &policy)?;
 	let (client, bridge) = match connect_presence_owner(&socket).await {
 		Ok(connection) => connection,
 		Err(EnvdError::Io(error))
@@ -467,13 +475,17 @@ pub async fn register_project_presence(
 				&omp_env::project_state::document_socket(&state_dir),
 				false,
 				None,
+				&policy,
 			)
 			.await?;
 			connect_presence_owner(&socket).await?
 		},
 		Err(error) => return Err(error),
 	};
-	if let Err(error) = hello(&client).await {
+	if let Err(error) = hello(&client)
+		.await
+		.and_then(|served| verify_daemon_policy(&served, &socket, &policy))
+	{
 		bridge.abort();
 		return Err(error);
 	}
@@ -504,6 +516,7 @@ pub async fn register_project_presence(
 	_project_root: &Path,
 	_data_dir: &Path,
 	_kind: &'static str,
+	_con: &Ctx,
 ) -> Result<ClientPresenceLease, EnvdError> {
 	Err(
 		io::Error::new(
@@ -587,6 +600,13 @@ pub struct AttachOptions {
 	pub bridges:            RegistryBridges,
 	/// Optional idle timeout forwarded only when this attach spawns the daemon.
 	pub spawn_idle_timeout: Option<u64>,
+	/// The sandbox and approval policy a project daemon spawned now would
+	/// enforce: the one `omp envd` resolves from the configuration files
+	/// alone. When it differs from the policy `con` resolves (in-process
+	/// settings such as `--add-dir` roots, a cfg profile or an agent class),
+	/// no daemon is spawned, because none could be joined, and the session
+	/// runs embedded at once. `None` spawns one and checks its hello.
+	pub spawn_policy:       Option<DaemonPolicy>,
 }
 
 /// Client-side ownership of one project environment composition.
@@ -759,7 +779,8 @@ impl ProjectEnvironment {
 		options: AttachOptions,
 	) -> Result<Self, EnvdError> {
 		publish_launcher_build(state_dir)?;
-		let socket = omp_env::project_state::environment_socket(state_dir);
+		let policy = daemon_policy::from_con(&options.con);
+		let socket = omp_env::project_state::environment_socket(state_dir, &policy)?;
 		let docserver_socket = omp_env::project_state::document_socket(state_dir);
 		let interrupt_grace = host_settings::SV_INTERRUPT_GRACE.get(&options.con);
 		match attach_owner(
@@ -769,6 +790,8 @@ impl ProjectEnvironment {
 			&docserver_socket,
 			options.py_eval,
 			options.spawn_idle_timeout,
+			&policy,
+			options.spawn_policy.as_ref(),
 		)
 		.await
 		{
@@ -781,11 +804,13 @@ impl ProjectEnvironment {
 					con,
 					bridges,
 					spawn_idle_timeout: _,
+					spawn_policy: _,
 				} = options;
 				Self::connect_peer(
 					root,
 					state_dir,
 					&socket,
+					&policy,
 					py_eval,
 					approval_mode,
 					&trusted_extensions,
@@ -944,6 +969,7 @@ impl ProjectEnvironment {
 		root: &Path,
 		state_dir: &Path,
 		socket: &Path,
+		policy: &DaemonPolicy,
 		py_eval: bool,
 		approval_mode: Option<ApprovalMode>,
 		trusted_extensions: &[ExtHostSpec],
@@ -1048,8 +1074,13 @@ impl ProjectEnvironment {
 		);
 		spawn_extension_data_servers(&server, data_bindings, &shutdown, &mut tasks);
 		let lifecycle = ProjectLifecycle { shutdown: Some(shutdown), tasks, abort_tasks, server };
+		// The connection that runs this session's environment tools must
+		// itself reach a daemon enforcing the session's policy, whatever the
+		// owner connection saw.
 		if let Err(error) =
-			hello_attached_session(&client, approval_mode, has_edit_repair, edit_model.as_ref()).await
+			hello_attached_session(&client, approval_mode, has_edit_repair, edit_model.as_ref())
+				.await
+				.and_then(|served| verify_daemon_policy(&served, socket, policy))
 		{
 			drop(lifecycle);
 			return Err(error);
@@ -1176,6 +1207,17 @@ impl ProjectEnvironment {
 	/// Returns the immutable production tool registry.
 	pub fn registry(&self) -> Arc<Registry> {
 		Arc::clone(&self.registry)
+	}
+
+	/// Returns the namer of the hosts the fetches of this composition's
+	/// in-process native tools reach ([`Self::registry`]'s native routes: every
+	/// environment tool of an embedded or isolated composition, an attached
+	/// session's session tools), by the resolvers of the in-process host that
+	/// performs them. The kernel admits those tools itself and keys their
+	/// fetch approval on these hosts.
+	#[must_use]
+	pub fn fetch_hosts(&self) -> fetch_host::FetchHostNamer {
+		self.lifecycle.server.fetch_hosts()
 	}
 
 	/// Returns the handle through which an ACP adapter binds its editor as the
@@ -1917,6 +1959,8 @@ async fn attach_owner(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	policy: &DaemonPolicy,
+	spawnable: Option<&DaemonPolicy>,
 ) -> Result<(EnvClient, JoinHandle<()>), EnvdError> {
 	match EnvServer::connect_owner_uds(socket).await {
 		Ok((owner, bridge)) => {
@@ -1928,6 +1972,10 @@ async fn attach_owner(
 				},
 			};
 			if !omp_env::build_id::is_stale(omp_env::build_id::current(), &owner_hello.server_build) {
+				if let Err(error) = verify_daemon_policy(&owner_hello, socket, policy) {
+					bridge.abort();
+					return Err(error);
+				}
 				let bridge = tokio::spawn(async move {
 					let _ = bridge.await;
 				});
@@ -1967,10 +2015,22 @@ async fn attach_owner(
 		Err(error) => return Err(error),
 	}
 
-	spawn_project_daemon(root, state_dir, socket, docserver_socket, py_eval, spawn_idle_timeout)
-		.await?;
+	refuse_unjoinable_spawn(policy, spawnable)?;
+	spawn_project_daemon(
+		root,
+		state_dir,
+		socket,
+		docserver_socket,
+		py_eval,
+		spawn_idle_timeout,
+		policy,
+	)
+	.await?;
 	let (owner, bridge) = EnvServer::connect_owner_uds(socket).await?;
-	if let Err(error) = hello(&owner).await {
+	if let Err(error) = hello(&owner)
+		.await
+		.and_then(|served| verify_daemon_policy(&served, socket, policy))
+	{
 		bridge.abort();
 		return Err(error);
 	}
@@ -1988,6 +2048,8 @@ async fn attach_owner(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	policy: &DaemonPolicy,
+	spawnable: Option<&DaemonPolicy>,
 ) -> Result<(EnvClient, JoinHandle<()>), EnvdError> {
 	use crate::windows::{connect_owner_pipe, open_owner_pipe};
 
@@ -2001,6 +2063,10 @@ async fn attach_owner(
 				},
 			};
 			if !omp_env::build_id::is_stale(omp_env::build_id::current(), &owner_hello.server_build) {
+				if let Err(error) = verify_daemon_policy(&owner_hello, socket, policy) {
+					bridge.abort();
+					return Err(error);
+				}
 				let bridge = tokio::spawn(async move {
 					let _ = bridge.await;
 				});
@@ -2031,10 +2097,22 @@ async fn attach_owner(
 		Err(error) => return Err(error.into()),
 	}
 
-	spawn_project_daemon(root, state_dir, socket, docserver_socket, py_eval, spawn_idle_timeout)
-		.await?;
+	refuse_unjoinable_spawn(policy, spawnable)?;
+	spawn_project_daemon(
+		root,
+		state_dir,
+		socket,
+		docserver_socket,
+		py_eval,
+		spawn_idle_timeout,
+		policy,
+	)
+	.await?;
 	let (owner, bridge) = connect_owner_pipe(socket)?;
-	if let Err(error) = hello(&owner).await {
+	if let Err(error) = hello(&owner)
+		.await
+		.and_then(|served| verify_daemon_policy(&served, socket, policy))
+	{
 		bridge.abort();
 		return Err(error);
 	}
@@ -2044,8 +2122,25 @@ async fn attach_owner(
 	Ok((owner, bridge))
 }
 
+/// Refuses to spawn a project daemon that resolves the `spawnable` policy from
+/// the configuration files when the session needs `policy`: the session could
+/// never join it, so spawning it would only start and stop a whole
+/// environment (its MCP servers and extension hosts) before the session runs
+/// embedded anyway.
+fn refuse_unjoinable_spawn(
+	policy: &DaemonPolicy,
+	spawnable: Option<&DaemonPolicy>,
+) -> Result<(), EnvdError> {
+	match spawnable {
+		Some(spawnable) if spawnable != policy => {
+			Err(EnvdError::DaemonPolicyNotSpawnable { expected: *policy, spawnable: *spawnable })
+		},
+		_ => Ok(()),
+	}
+}
+
 /// Launches a detached `omp envd` for this project and waits until its
-/// environment socket answers a hello.
+/// environment socket answers a hello reporting `policy`.
 async fn spawn_project_daemon(
 	root: &Path,
 	state_dir: &Path,
@@ -2053,6 +2148,7 @@ async fn spawn_project_daemon(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	policy: &DaemonPolicy,
 ) -> Result<(), EnvdError> {
 	let executable = env::current_exe()?;
 	spawn_project_daemon_with(
@@ -2063,6 +2159,7 @@ async fn spawn_project_daemon(
 		docserver_socket,
 		py_eval,
 		spawn_idle_timeout,
+		policy,
 		Duration::from_secs(10),
 	)
 	.await
@@ -2074,7 +2171,10 @@ async fn spawn_project_daemon(
 /// The daemon runs in its own process group with output appended to
 /// `envd.log` in the state directory. A daemon that fails to become ready is
 /// killed so it cannot linger half-initialized while the caller falls back
-/// to an embedded environment.
+/// to an embedded environment. So is a ready daemon that reports another
+/// policy than `policy`: it inherited this process's configuration files but
+/// not the in-process overrides of the caller's control context (such as
+/// `--add-dir` roots), and no client keyed to its socket could ever use it.
 async fn spawn_project_daemon_with(
 	executable: &Path,
 	root: &Path,
@@ -2083,6 +2183,7 @@ async fn spawn_project_daemon_with(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	policy: &DaemonPolicy,
 	deadline: Duration,
 ) -> Result<(), EnvdError> {
 	fs::create_dir_all(state_dir)?;
@@ -2108,6 +2209,17 @@ async fn spawn_project_daemon_with(
 	if let Some(idle_timeout) = spawn_idle_timeout {
 		command.arg("--idle-timeout").arg(idle_timeout.to_string());
 	}
+	// The daemon resolves its configuration from the same profile as this
+	// process, so a `--profile` session can spawn a daemon it may join.
+	match omp_core::dirs::active_profile() {
+		Ok(Some(profile)) => {
+			command.env("OMP_PROFILE", profile.as_str());
+		},
+		Ok(None) => {
+			command.env_remove("OMP_PROFILE");
+		},
+		Err(_) => {},
+	}
 	command
 		.stdin(Stdio::null())
 		.stdout(log)
@@ -2128,7 +2240,16 @@ async fn spawn_project_daemon_with(
 				io::Error::other(format!("project daemon exited during startup: {status}")).into(),
 			);
 		}
-		if owner_endpoint_ready(socket).await {
+		if let Some(served) = owner_endpoint_hello(socket).await {
+			if let Err(error) = verify_daemon_policy(&served, socket, policy) {
+				tracing::warn!(
+					%error,
+					"stopping the project daemon this client spawned: it does not enforce the \
+					 client's sandbox and approval policy"
+				);
+				terminate_spawned_daemon(&mut child, process_group).await;
+				return Err(error);
+			}
 			// Reap in the background; the daemon's lifetime is its own.
 			tokio::spawn(async move {
 				let _ = child.wait().await;
@@ -2164,25 +2285,48 @@ async fn terminate_spawned_daemon(child: &mut tokio::process::Child, _process_gr
 	let _ = child.wait().await;
 }
 
+/// The hello of the daemon listening on `socket`, once it answers one.
 #[cfg(unix)]
-async fn owner_endpoint_ready(socket: &Path) -> bool {
-	let Ok((probe, bridge)) = EnvServer::connect_owner_uds(socket).await else {
-		return false;
-	};
-	let ready = hello(&probe).await.is_ok();
+async fn owner_endpoint_hello(socket: &Path) -> Option<ServerHello> {
+	let (probe, bridge) = EnvServer::connect_owner_uds(socket).await.ok()?;
+	let served = hello(&probe).await.ok();
 	bridge.abort();
-	ready
+	served
 }
 
+/// The hello of the daemon listening on `socket`, once it answers one.
 #[cfg(windows)]
-async fn owner_endpoint_ready(socket: &Path) -> bool {
+async fn owner_endpoint_hello(socket: &Path) -> Option<ServerHello> {
 	use crate::windows::connect_owner_pipe;
-	let Ok((probe, bridge)) = connect_owner_pipe(socket) else {
-		return false;
-	};
-	let ready = hello(&probe).await.is_ok();
+	let (probe, bridge) = connect_owner_pipe(socket).ok()?;
+	let served = hello(&probe).await.ok();
 	bridge.abort();
-	ready
+	served
+}
+
+/// Admits the daemon that answered `served` on `socket` only when it enforces
+/// the `expected` sandbox and approval policy.
+///
+/// A daemon fixes its sandbox, egress broker and approval posture when it
+/// starts, so attaching to one that resolved another policy would run this
+/// client's commands confined or unconfined, admitted or prompted, by
+/// someone else's configuration.
+fn verify_daemon_policy(
+	served: &ServerHello,
+	socket: &Path,
+	expected: &DaemonPolicy,
+) -> Result<(), EnvdError> {
+	let served = DaemonPolicy::from_wire(&served.policy_digest)
+		.ok_or_else(|| EnvdError::DaemonPolicyUnreported { socket: socket.to_path_buf() })?;
+	if served == *expected {
+		Ok(())
+	} else {
+		Err(EnvdError::DaemonPolicyMismatch {
+			socket: socket.to_path_buf(),
+			expected: *expected,
+			served,
+		})
+	}
 }
 
 #[cfg(all(test, unix))]
@@ -2326,6 +2470,7 @@ mod tests {
 			&scratch.path().join("doc.sock"),
 			false,
 			None,
+			&daemon_policy::from_con(&Ctx::new()),
 			Duration::from_millis(deadline_ms),
 		)
 		.await
@@ -2411,5 +2556,164 @@ mod tests {
 		})
 		.await;
 		assert!(reaped.is_ok(), "startup timeout left a daemon descendant alive");
+	}
+
+	/// A daemon is admitted only when its hello reports the client's policy; one
+	/// reporting no policy is refused by name, as is one reporting another.
+	#[test]
+	fn the_hello_admits_only_the_clients_policy() {
+		use crate::exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE};
+
+		let socket = Path::new("/tmp/omp-test-env.sock");
+		let expected = daemon_policy::from_con(&Ctx::new());
+		let reporting = |policy: &DaemonPolicy| ServerHello {
+			policy_digest: Bytes::copy_from_slice(policy.digest().as_bytes()),
+			..ServerHello::default()
+		};
+		verify_daemon_policy(&reporting(&expected), socket, &expected).expect("admitted");
+
+		let error = verify_daemon_policy(&ServerHello::default(), socket, &expected)
+			.expect_err("a daemon reporting no policy is refused");
+		assert!(
+			matches!(&error, EnvdError::DaemonPolicyUnreported { socket: refused } if refused == socket),
+			"unexpected error: {error}"
+		);
+
+		let unconfined = Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&unconfined, ExecSandboxMode::Off)
+			.expect("sandbox mode");
+		let served = daemon_policy::from_con(&unconfined);
+		let error = verify_daemon_policy(&reporting(&served), socket, &expected)
+			.expect_err("a daemon reporting another policy is refused");
+		assert!(
+			matches!(
+				&error,
+				EnvdError::DaemonPolicyMismatch { socket: refused, expected: wanted, served: reported }
+					if refused == socket && *wanted == expected && *reported == served
+			),
+			"unexpected error: {error}"
+		);
+	}
+
+	/// A daemon this client spawned that answers with another sandbox and
+	/// approval policy than the client resolved is refused and stopped, so it
+	/// never lingers on a socket no client of that policy could use. The
+	/// script stands for the spawned process; the environment this test serves
+	/// on its socket answers the hello, and only once the script has recorded
+	/// the descendant whose end proves the process group was stopped.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn spawn_stops_a_daemon_reporting_another_policy() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		use omp_core::Principal;
+
+		use crate::exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE};
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let root = scratch.path().join("workspace");
+		let state = scratch.path().join("state");
+		fs::create_dir_all(&root).expect("workspace");
+		fs::create_dir_all(&state).expect("state");
+		let socket = scratch.path().join("env.sock");
+		let docserver_socket = scratch.path().join("doc.sock");
+
+		let unconfined = Arc::new(Ctx::new());
+		SV_SANDBOX_MODE
+			.set(&unconfined, ExecSandboxMode::Off)
+			.expect("sandbox mode");
+		let served = daemon_policy::from_con(&unconfined);
+		let expected = daemon_policy::from_con(&Ctx::new());
+		assert_ne!(served, expected);
+		let server = EnvServer::open_project(
+			&root,
+			&state,
+			&docserver_socket,
+			Registry::new(),
+			ExtHostConfig::current(Principal::new(sf!("tester"), sf!("Tester")), sf!("session"), 1)
+				.expect("host configuration"),
+			None,
+			false,
+			None,
+			&unconfined,
+			Arc::new(exthost::ConvarControlFactory::new(Arc::clone(&unconfined))),
+			RegistryBridges::default(),
+		)
+		.await
+		.expect("environment");
+
+		// The pid file appears whole (renamed into place), so the environment
+		// never answers before the descendant is recorded.
+		let child_pid_path = scratch.path().join("child.pid");
+		let staged_pid_path = scratch.path().join("child.pid.staged");
+		let script = scratch.path().join("daemon.sh");
+		fs::write(
+			&script,
+			format!(
+				"#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{staged}'\nmv '{staged}' '{pid}'\nwait\n",
+				staged = staged_pid_path.display(),
+				pid = child_pid_path.display()
+			),
+		)
+		.expect("write daemon script");
+		fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+			.expect("mark script executable");
+
+		let shutdown = CancellationToken::new();
+		let serving = tokio::spawn({
+			let server = Arc::new(server);
+			let socket = socket.clone();
+			let shutdown = shutdown.clone();
+			let child_pid_path = child_pid_path.clone();
+			async move {
+				while !child_pid_path.exists() {
+					time::sleep(Duration::from_millis(10)).await;
+				}
+				server.serve_uds(&socket, shutdown, None).await
+			}
+		});
+
+		let error = spawn_project_daemon_with(
+			&script,
+			&root,
+			&state,
+			&socket,
+			&docserver_socket,
+			false,
+			None,
+			&expected,
+			Duration::from_secs(30),
+		)
+		.await
+		.expect_err("a daemon reporting another policy must be refused");
+		let EnvdError::DaemonPolicyMismatch { socket: refused, expected: wanted, served: reported } =
+			&error
+		else {
+			panic!("unexpected error: {error}");
+		};
+		assert_eq!(refused, &socket);
+		assert_eq!(*wanted, expected);
+		assert_eq!(*reported, served);
+		assert!(
+			error
+				.to_string()
+				.contains(&format!("policy {served}, not this session's {expected}")),
+			"the refusal names both policies: {error}"
+		);
+
+		let child_pid = fs::read_to_string(&child_pid_path)
+			.expect("the daemon recorded its descendant before the environment answered")
+			.parse::<i32>()
+			.expect("numeric daemon descendant pid");
+		let child = Pid::from_raw(child_pid);
+		let reaped = time::timeout(Duration::from_secs(2), async {
+			while signal::kill(child, None).is_ok() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		assert!(reaped.is_ok(), "the refused daemon kept running");
+		shutdown.cancel();
+		serving.abort();
 	}
 }

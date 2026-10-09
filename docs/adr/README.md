@@ -57,6 +57,7 @@ same change that moves the code.
 - [0010](0010-one-job-primitive.md) — One job primitive for tools, subagents, daemons, and background work
 - [0011](0011-cancellation-needs-a-kill-boundary.md) — Cancellation is a runtime guarantee, not cooperative etiquette
 - [0039](0039-remote-control-and-factory-modes.md) — Remote control is a session-control projection; the factory is a leased fleet over the one job primitive (proposed)
+- [0040](0040-remote-build-and-test-execution.md) — Build and test commands are placed by an omp-owned execution router; BuildBuddy is one replaceable REAPI backend (proposed)
 
 ### Control plane
 - [0012](0012-convars.md) — Settings are convars: policy declared with the variable
@@ -90,7 +91,7 @@ same change that moves the code.
 - [0033](0033-verification-is-part-of-the-interface.md) — A debug protocol defines what the UI is
 - [0034](0034-transcript-is-a-protocol.md) — Blocks, exactly-once history, append-only scrollback; TLA+-checked
 - [0037](0037-acp-editor-io.md) — ACP editors supply the document base; writes commit through the authority, then sync back
-- [0040](0040-native-surfaces-over-tsp.md) — The chat draws natively in Tern over TSP; cell rendering stays the fallback (proposed)
+- [0041](0041-native-surfaces-over-tsp.md) — The chat draws natively in Tern over TSP; cell rendering stays the fallback (proposed)
 
 ### Stack
 - [0035](0035-rust-for-the-engine.md) — Language choice is architecture; Rust for the engine

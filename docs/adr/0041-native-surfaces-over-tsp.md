@@ -1,4 +1,4 @@
-# 0040. The chat draws natively in Tern over TSP; cell rendering stays the fallback
+# 0041. The chat draws natively in Tern over TSP; cell rendering stays the fallback
 
 Status: proposed
 Date: 2026-10-09

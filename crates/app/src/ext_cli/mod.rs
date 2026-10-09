@@ -3318,6 +3318,7 @@ async fn materialize_signed_wheel(
 			con,
 			bridges: omp_envd::RegistryBridges::default(),
 			spawn_idle_timeout: None,
+			spawn_policy: None,
 		},
 	)
 	.await

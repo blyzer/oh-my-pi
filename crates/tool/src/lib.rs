@@ -156,13 +156,34 @@ pub fn schema<T: schemars::JsonSchema>() -> Bytes {
 /// `i` and `notrunc` remain in the canonical invocation arguments for
 /// journaling and dispatch policy, but are not fields each executor must
 /// duplicate in its domain-specific parameter type.
+///
+/// Tool arguments are one JSON object, as [`IncomingParams::whole`] requires
+/// before it decodes them; any other document is refused here too, never
+/// decoded in serde's sequence form of a struct.
 pub fn decode_params<T: DeserializeOwned>(json: &str) -> Result<T, serde_json::Error> {
 	let mut value = serde_json::from_str::<serde_json::Value>(json)?;
-	if let Some(object) = value.as_object_mut() {
-		object.remove("i");
-		object.remove("notrunc");
-	}
+	let Some(object) = value.as_object_mut() else {
+		return Err(<serde_json::Error as serde::de::Error>::invalid_type(
+			unexpected_json(&value),
+			&"an argument object",
+		));
+	};
+	object.remove("i");
+	object.remove("notrunc");
 	serde_json::from_value(value)
+}
+
+/// The [`serde::de::Unexpected`] description of a non-object argument document.
+fn unexpected_json(value: &serde_json::Value) -> serde::de::Unexpected<'_> {
+	use serde::de::Unexpected;
+	match value {
+		serde_json::Value::Null => Unexpected::Unit,
+		serde_json::Value::Bool(value) => Unexpected::Bool(*value),
+		serde_json::Value::Number(_) => Unexpected::Other("a number"),
+		serde_json::Value::String(value) => Unexpected::Str(value),
+		serde_json::Value::Array(_) => Unexpected::Seq,
+		serde_json::Value::Object(_) => Unexpected::Map,
+	}
 }
 
 /// Namespaced thread-item property carrying a committed tool revision.
@@ -447,15 +468,18 @@ pub struct DesktopEffects {
 	pub capture:       bool,
 	/// Whether accessibility-tree reads are permitted.
 	pub accessibility: bool,
-	/// Whether pointer, keyboard, focus, and accessibility mutation are
-	/// permitted.
+	/// Whether host clipboard reads are permitted. A clipboard write is
+	/// [`Self::input`].
+	pub clipboard:     bool,
+	/// Whether pointer, keyboard, focus, accessibility mutation, and clipboard
+	/// writes are permitted.
 	pub input:         bool,
 }
 
 impl DesktopEffects {
 	/// Returns whether this desktop domain grants no authority.
 	pub const fn is_empty(&self) -> bool {
-		!self.capture && !self.accessibility && !self.input
+		!self.capture && !self.accessibility && !self.clipboard && !self.input
 	}
 }
 
@@ -646,6 +670,7 @@ impl Effects {
 			|value, max| {
 				(!value.capture || max.capture)
 					&& (!value.accessibility || max.accessibility)
+					&& (!value.clipboard || max.clipboard)
 					&& (!value.input || max.input)
 			},
 		) && optional_subset(
@@ -729,6 +754,7 @@ impl From<&Effects> for v1::EffectEnvelope {
 			desktop:   value.desktop.as_ref().map(|desktop| v1::DesktopEffects {
 				capture:       desktop.capture,
 				accessibility: desktop.accessibility,
+				clipboard:     desktop.clipboard,
 				input:         desktop.input,
 				props:         None,
 			}),
@@ -779,6 +805,7 @@ impl TryFrom<&v1::EffectEnvelope> for Effects {
 			desktop:   value.desktop.as_ref().map(|desktop| DesktopEffects {
 				capture:       desktop.capture,
 				accessibility: desktop.accessibility,
+				clipboard:     desktop.clipboard,
 				input:         desktop.input,
 			}),
 			fetch:     value
@@ -1303,6 +1330,15 @@ pub trait Tool: Send + Sync + 'static {
 	/// Durable typed failure.
 	type Fault: Serialize + DeserializeOwned + Send;
 
+	/// Whether this tool narrows each call's effects to its arguments through
+	/// [`Tool::invocation_effects`].
+	///
+	/// Declared beside that method: the environment fixes such a call's
+	/// approval only once its arguments are committed, and the registry decodes
+	/// a call's arguments for the classifier only for tools that declare it.
+	/// A tool that leaves it `false` is admitted on its declared maximum.
+	const ARGUMENT_SCOPED_EFFECTS: bool = false;
+
 	/// Returns this implementation's immutable specification.
 	fn spec(&self) -> &ToolSpec;
 
@@ -1377,6 +1413,37 @@ pub trait Tool: Send + Sync + 'static {
 	/// the default JSON string-value matching behavior.
 	fn stream_match_text(&self, _arguments: &serde_json::Value) -> Option<Vec<StreamMatchText>> {
 		None
+	}
+
+	/// Returns the effects this one call can have, judged from its decoded
+	/// arguments; `None` keeps the declared maximum ([`ToolSpec::effects`]).
+	///
+	/// Only consulted when [`Tool::ARGUMENT_SCOPED_EFFECTS`] is set. The
+	/// envelope must be a subset of the declared maximum and must follow the
+	/// same classification the executor enforces, so a call never does more
+	/// than its envelope admits; the registry refuses a call whose envelope is
+	/// not a subset ([`RegistryError::InvocationEffectsExceedMaximum`])
+	/// rather than substituting the maximum. Approval and the environment's
+	/// write boundary both judge the call by this envelope.
+	fn invocation_effects(&self, _params: &Self::Params) -> Option<Effects> {
+		None
+	}
+
+	/// Returns the remote locators (URLs) this one call fetches, judged from
+	/// its decoded arguments by the classification behind
+	/// [`Tool::invocation_effects`]: every target that contributes its
+	/// envelope's [`Effects::fetch`], in the canonical form the executor
+	/// resolves.
+	///
+	/// Only consulted when [`Tool::ARGUMENT_SCOPED_EFFECTS`] is set and the
+	/// call's envelope fetches. The environment names the host each locator
+	/// reaches with the resolver that performs the fetch, and keys the call's
+	/// fetch approval on those hosts, so a grant for one host never covers
+	/// another. Every host it names is approved on its own; a locator it
+	/// cannot name, or a fetch that names none, is approved as the tool's own
+	/// beside them.
+	fn fetch_locators(&self, _params: &Self::Params) -> Vec<Str> {
+		Vec::new()
 	}
 
 	/// Deterministically migrates one historical call toward this revision.
@@ -2388,6 +2455,21 @@ mod tests {
 		let params = decode_params::<Params>(r#"{"path":"Cargo.toml","i":"reading","notrunc":true}"#)
 			.expect("protocol fields are stripped before domain decode");
 		assert_eq!(params, Params { path: "Cargo.toml".to_owned() });
+	}
+
+	/// Arguments are one JSON object: serde would decode a derived struct from
+	/// an array in sequence form, which no executor accepts, so it is refused.
+	#[test]
+	fn decode_params_refuses_documents_that_are_not_objects() {
+		#[derive(Debug, Deserialize)]
+		struct Params {
+			_path: String,
+		}
+
+		for document in [r#"["Cargo.toml"]"#, r#""Cargo.toml""#, "7", "null", "true"] {
+			let error = decode_params::<Params>(document).expect_err("not an argument object");
+			assert!(error.to_string().contains("expected an argument object"), "{document}: {error}");
+		}
 	}
 
 	#[test]

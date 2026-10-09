@@ -3,14 +3,14 @@
 use std::{collections::BTreeMap, env, fmt, sync::Arc};
 
 use futures::future::{Either, FutureExt as _};
-use omp_catalog::{AuthSpecId, Catalog, provider::AuthSpecKind};
+use omp_catalog::{AuthSpecId, Catalog, ProviderId, provider::AuthSpecKind};
 use omp_core::{SecretString, Str, sf};
 
 use super::{
 	aws::AwsCredentialSource,
 	lease::{
 		AuthRejection, CredentialError, CredentialFuture, CredentialKind, CredentialLease,
-		CredentialNeed, CredentialSource, LeaseMeta, credential_ready,
+		CredentialNeed, CredentialSource, ExtensionCredentialKind, LeaseMeta, credential_ready,
 	},
 };
 use crate::{AccountId, PrincipalId};
@@ -441,7 +441,7 @@ impl CredentialBroker {
 		tag: &'static str,
 	) -> Result<CredentialLease, CredentialError> {
 		if lease.kind() != expected {
-			return Err(CredentialError::InvalidSource);
+			return Err(CredentialError::KindMismatch { expected, actual: lease.kind() });
 		}
 		if need
 			.account
@@ -583,6 +583,108 @@ fn map_credential<'a, T: Send + 'a, U: Send + 'a>(
 		Either::Left(ready) => credential_ready(map(ready.into_inner())),
 		Either::Right(pending) => Either::Right(pending.map(map).boxed()),
 	}
+}
+
+/// The kind a static secret (an API key or a session token) is stored and
+/// leased as under a catalog authentication of `spec`, or `None` when `spec`
+/// takes no static secret.
+///
+/// This is the one mapping native login, the v1 importer, and the stored-kind
+/// repair share: a stored row whose kind differs from it is rejected by the
+/// broker as [`CredentialError::KindMismatch`].
+#[must_use]
+pub const fn static_secret_kind(spec: AuthSpecKind) -> Option<CredentialKind> {
+	match spec {
+		AuthSpecKind::ApiKey => Some(CredentialKind::ApiKey),
+		AuthSpecKind::Bearer | AuthSpecKind::OptionalBearer => Some(CredentialKind::Bearer),
+		AuthSpecKind::OmpSession => Some(CredentialKind::SessionToken),
+		AuthSpecKind::None
+		| AuthSpecKind::Basic
+		| AuthSpecKind::Oauth
+		| AuthSpecKind::GcpAdc
+		| AuthSpecKind::AzureAd
+		| AuthSpecKind::GithubApp
+		| AuthSpecKind::AwsSigv4 => None,
+	}
+}
+
+/// The kind an API key for `provider` is stored under.
+///
+/// That is the kind of the first catalog authentication of the provider an
+/// API key satisfies, its routes' own authentications first (a configured
+/// `models.toml` auth replaces those) and then the ones the provider declares.
+/// `None` when the catalog does not know the provider or none of its
+/// authentications takes an API key.
+#[must_use]
+pub fn api_key_kind(catalog: &Catalog, provider: &ProviderId<str>) -> Option<CredentialKind> {
+	provider_auth_specs(catalog, provider)
+		.filter_map(|spec| static_secret_kind(spec.kind))
+		.find(|kind| matches!(kind, CredentialKind::ApiKey | CredentialKind::Bearer))
+}
+
+/// Whether some catalog authentication of `provider` (of one of its routes,
+/// or declared by the provider) leases a credential of `kind`, so a stored
+/// row of that kind is usable on at least one of its routes.
+#[must_use]
+pub fn provider_accepts_kind(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+	kind: CredentialKind,
+) -> bool {
+	provider_auth_specs(catalog, provider).any(|spec| credential_kind(spec.kind) == Some(kind))
+}
+
+/// The kind a static secret written as `kind` for `provider` is stored
+/// under, or `None` when `kind` names no static secret (OAuth or AWS
+/// material, or a kind neither vocabulary knows).
+///
+/// `kind` is spelled as the store spells it (`api-key`, `bearer`,
+/// `session-token`) or as extensions do (`api_key`, `bearer`, `session`). An
+/// API key is stored under the provider's API-key kind ([`api_key_kind`])
+/// when no authentication of the provider leases an `api-key`, so a bearer
+/// provider's key is stored as `bearer`; every other kind is kept. This is
+/// the normalization every control-plane write applies and the stored-kind
+/// repair re-applies to rows written before it.
+pub(crate) fn stored_static_secret_kind(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+	kind: &str,
+) -> Option<CredentialKind> {
+	let kind = match kind.parse::<CredentialKind>() {
+		Ok(kind) => kind,
+		Err(_) => kind
+			.parse::<ExtensionCredentialKind>()
+			.ok()?
+			.static_secret()?,
+	};
+	match kind {
+		CredentialKind::ApiKey if !provider_accepts_kind(catalog, provider, kind) => {
+			Some(api_key_kind(catalog, provider).unwrap_or(kind))
+		},
+		CredentialKind::ApiKey | CredentialKind::Bearer | CredentialKind::SessionToken => Some(kind),
+		CredentialKind::Basic | CredentialKind::AwsSigV4 => None,
+	}
+}
+
+/// Every catalog authentication a request for `provider` may lease under:
+/// its routes' own, in catalog route order, then the provider's declared
+/// ones. An authentication several routes share repeats.
+pub fn provider_auth_specs<'c>(
+	catalog: &'c Catalog,
+	provider: &'c ProviderId<str>,
+) -> impl Iterator<Item = &'c omp_catalog::provider::AuthSpec> + Clone + 'c {
+	let routes = catalog
+		.routes()
+		.iter()
+		.filter(move |route| route.provider.as_str() == provider.as_str())
+		.map(|route| &route.auth);
+	let declared = catalog
+		.provider(provider)
+		.into_iter()
+		.flat_map(|definition| definition.auth.iter());
+	routes
+		.chain(declared)
+		.filter_map(|id| catalog.auth_spec(id))
 }
 
 const fn credential_kind(kind: AuthSpecKind) -> Option<CredentialKind> {
@@ -916,6 +1018,119 @@ mod tests {
 			sf!("OMP_ANTHROPIC_API_KEY"),
 			sf!("ANTHROPIC_API_KEY")
 		]);
+	}
+
+	/// A stored source answering an API key for a bearer authentication.
+	#[derive(Debug)]
+	struct ApiKeyStore;
+
+	impl CredentialSource for ApiKeyStore {
+		fn lease(
+			&self,
+			need: CredentialNeed,
+		) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
+			let meta = LeaseMeta {
+				account:    need.account.unwrap_or_else(|| AccountId::from("account")),
+				principal:  need
+					.principal
+					.unwrap_or_else(|| PrincipalId::from("principal")),
+				generation: 1,
+				expires_at: None,
+			};
+			credential_ready(Ok(CredentialLease::api_key(meta, SecretString::from("fake-key"))))
+		}
+
+		fn reject<'a>(
+			&'a self,
+			_: &'a CredentialLease,
+			_: AuthRejection,
+		) -> CredentialFuture<'a, Result<(), CredentialError>> {
+			credential_ready(Ok(()))
+		}
+	}
+
+	/// A stored credential whose kind is not the one the authentication
+	/// requires names both kinds instead of an opaque invalid source.
+	#[tokio::test]
+	async fn wrong_kind_stored_credential_is_a_typed_kind_mismatch() {
+		let spec = AuthSpecId::new("bearer-only");
+		let broker = CredentialBroker {
+			plans:       Arc::new(BTreeMap::from([(spec.clone(), BrokerPlan {
+				kind:    CredentialKind::Bearer,
+				sources: vec![BrokerSource::Engine(EngineKind::Stored)].into_boxed_slice(),
+			})])),
+			environment: Arc::new(EmptyEnvironment),
+			engines:     CredentialBrokerEngines {
+				stored: Some(Arc::new(ApiKeyStore)),
+				..Default::default()
+			},
+			invocation:  None,
+		};
+		let error = broker
+			.lease(CredentialNeed {
+				spec,
+				account: Some(AccountId::from("huggingface:agent-db")),
+				principal: None,
+				valid_after: SystemTime::UNIX_EPOCH,
+			})
+			.await
+			.expect_err("an API key cannot satisfy a bearer authentication");
+		assert_eq!(error, CredentialError::KindMismatch {
+			expected: CredentialKind::Bearer,
+			actual:   CredentialKind::ApiKey,
+		});
+		assert_eq!(error.to_string(), "credential is api-key but the authentication requires bearer");
+	}
+
+	/// The stored kind of a static secret follows the catalog authentication
+	/// kind, and a provider's API key takes the kind of its first
+	/// authentication an API key satisfies.
+	#[test]
+	fn static_secret_kinds_follow_the_catalog_authentication() {
+		assert_eq!(static_secret_kind(AuthSpecKind::ApiKey), Some(CredentialKind::ApiKey));
+		assert_eq!(static_secret_kind(AuthSpecKind::Bearer), Some(CredentialKind::Bearer));
+		assert_eq!(static_secret_kind(AuthSpecKind::OptionalBearer), Some(CredentialKind::Bearer));
+		assert_eq!(static_secret_kind(AuthSpecKind::OmpSession), Some(CredentialKind::SessionToken));
+		assert_eq!(static_secret_kind(AuthSpecKind::Oauth), None);
+		let catalog = Catalog::embedded();
+		let kind = |provider| api_key_kind(catalog, ProviderId::from_ref(provider));
+		assert_eq!(kind("huggingface"), Some(CredentialKind::Bearer));
+		assert_eq!(kind("anthropic"), Some(CredentialKind::ApiKey));
+		assert_eq!(kind("v1-only-provider"), None);
+		let accepts =
+			|provider, kind| provider_accepts_kind(catalog, ProviderId::from_ref(provider), kind);
+		assert!(!accepts("huggingface", CredentialKind::ApiKey));
+		assert!(accepts("huggingface", CredentialKind::Bearer));
+		// Anthropic takes a key header and an OAuth bearer token.
+		assert!(accepts("anthropic", CredentialKind::ApiKey));
+		assert!(accepts("anthropic", CredentialKind::Bearer));
+		assert_eq!("api-key".parse::<CredentialKind>(), Ok(CredentialKind::ApiKey));
+		assert_eq!(<&'static str>::from(CredentialKind::SessionToken), "session-token");
+	}
+
+	/// A written static secret is stored under the kind its provider leases:
+	/// an API key the provider takes only as a bearer token becomes `bearer`,
+	/// the extension spellings become the store's, and anything else is kept
+	/// or is no static secret at all.
+	#[test]
+	fn written_static_secrets_take_the_kind_their_provider_leases() {
+		let catalog = Catalog::embedded();
+		let stored =
+			|provider, kind| stored_static_secret_kind(catalog, ProviderId::from_ref(provider), kind);
+		assert_eq!(stored("huggingface", "api-key"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("huggingface", "api_key"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("huggingface", "bearer"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("anthropic", "api-key"), Some(CredentialKind::ApiKey));
+		assert_eq!(stored("anthropic", "api_key"), Some(CredentialKind::ApiKey));
+		// A kind some authentication of the provider leases is kept.
+		assert_eq!(stored("anthropic", "bearer"), Some(CredentialKind::Bearer));
+		assert_eq!(stored("anthropic", "session"), Some(CredentialKind::SessionToken));
+		assert_eq!(stored("anthropic", "session-token"), Some(CredentialKind::SessionToken));
+		// An unknown provider keeps the key as written.
+		assert_eq!(stored("v1-only-provider", "api_key"), Some(CredentialKind::ApiKey));
+		for kind in ["oauth", "aws", "oauth-renewable-v1", "basic", "aws-sigv4", "API_KEY"] {
+			assert_eq!(stored("huggingface", kind), None, "{kind}");
+		}
 	}
 
 	/// Environment, invocation, and encrypted-store sources answer without
