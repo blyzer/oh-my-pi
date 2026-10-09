@@ -13,7 +13,7 @@ use flume::Receiver;
 use omp_agent::{ApprovalRoute, ApprovalSource as DecisionSource, ApprovalSpec};
 use omp_core::{Str, sf};
 use omp_proto::{
-	env::v1::{Admission, AdmitInvocation},
+	env::v1::{Admission, AdmitInvocation, SandboxState as WireSandboxState},
 	policy::v1::{BashIr, EffectEnvelope, PolicyDenied},
 };
 use omp_shell::{
@@ -125,6 +125,43 @@ impl SandboxState {
 			&crate::exec_settings::SandboxSettings::from_con(ctx),
 			workspace_root,
 		)
+	}
+
+	/// The state as a `ServerHello` reports it (`sandbox_state`).
+	#[must_use]
+	pub const fn to_wire(self) -> WireSandboxState {
+		match self {
+			Self::Active => WireSandboxState::Active,
+			Self::Off => WireSandboxState::Off,
+			Self::Unavailable { cause: SandboxUnavailable::UnsupportedHost } => {
+				WireSandboxState::UnsupportedHost
+			},
+			Self::Unavailable { cause: SandboxUnavailable::BackendUnavailable } => {
+				WireSandboxState::BackendUnavailable
+			},
+			Self::Unavailable { cause: SandboxUnavailable::PolicyRejected } => {
+				WireSandboxState::PolicyRejected
+			},
+		}
+	}
+
+	/// The state a `ServerHello` reports; `None` when it reports none.
+	#[must_use]
+	pub const fn from_wire(state: WireSandboxState) -> Option<Self> {
+		match state {
+			WireSandboxState::Unspecified => None,
+			WireSandboxState::Active => Some(Self::Active),
+			WireSandboxState::Off => Some(Self::Off),
+			WireSandboxState::UnsupportedHost => {
+				Some(Self::Unavailable { cause: SandboxUnavailable::UnsupportedHost })
+			},
+			WireSandboxState::BackendUnavailable => {
+				Some(Self::Unavailable { cause: SandboxUnavailable::BackendUnavailable })
+			},
+			WireSandboxState::PolicyRejected => {
+				Some(Self::Unavailable { cause: SandboxUnavailable::PolicyRejected })
+			},
+		}
 	}
 }
 
@@ -1244,7 +1281,7 @@ mod tests {
 	};
 	use omp_core::sf;
 	use omp_proto::{
-		env::v1::Admission,
+		env::v1::{Admission, SandboxState as WireSandboxState},
 		policy::v1::{EffectEnvelope, ExecEffects},
 	};
 	use omp_tool::{
@@ -1700,6 +1737,21 @@ mod tests {
 			SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable },
 			SandboxState::Unavailable { cause: SandboxUnavailable::PolicyRejected },
 		]
+	}
+
+	/// Every state, its cause included, survives the `ServerHello` wire, each
+	/// as its own value, and a hello that reports none reads as none.
+	#[test]
+	fn every_sandbox_state_round_trips_the_hello_wire() {
+		let states = sandbox_states();
+		for (index, state) in states.iter().enumerate() {
+			assert_eq!(SandboxState::from_wire(state.to_wire()), Some(*state));
+			assert_ne!(state.to_wire(), WireSandboxState::Unspecified);
+			for other in &states[index + 1..] {
+				assert_ne!(state.to_wire(), other.to_wire(), "{state:?} and {other:?} share a value");
+			}
+		}
+		assert_eq!(SandboxState::from_wire(WireSandboxState::Unspecified), None);
 	}
 
 	fn any_effects() -> impl Strategy<Value = Effects> {

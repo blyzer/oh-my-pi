@@ -590,22 +590,33 @@ impl EnvToolExecutor {
 	pub const fn new(client: omp_env::EnvClient, approvals: omp_agent::ApprovalRoute) -> Self {
 		Self { client, approvals, posture: PostureNotice(None) }
 	}
+
+	/// The sandbox state the environment that admits this executor's calls
+	/// reported in its handshake (`ServerHello.sandbox_state`); `None` before
+	/// a handshake or when it reported none.
+	fn reported_sandbox(&self) -> Option<omp_envd::admission::SandboxState> {
+		self
+			.client
+			.info()
+			.and_then(|hello| omp_envd::admission::SandboxState::from_wire(hello.sandbox_state()))
+	}
 }
 
 /// Installs the session's tool authority on `kernel`, which serves `session`
 /// first: `executor` runs the calls the environment admits, and `admission`
 /// admits the native calls the kernel runs itself.
 ///
-/// When `admission` resolves a `yolo` that no sandbox confines
-/// ([`omp_envd::admission::ApprovalPosture`]), both report it from one shared
-/// report, a typed `approval-posture` notice on the kernel mailbox, at
-/// whichever admission comes first: over an attached project daemon every
-/// environment tool is admitted there, never by the kernel. The journal
-/// decides whether the report is due. It is due while the live branch of the
-/// session the kernel serves holds no notice of this posture: `session`
-/// decides it here, and the session the kernel serves decides it again after
-/// every rewind (a tool-tail retry included) and every switch to another
-/// session, through the session observer this registers.
+/// When the session's approval mode is a `yolo` that no sandbox confines
+/// ([`session_posture`]), both report it from one shared report, a typed
+/// `approval-posture` notice on the kernel mailbox, at whichever admission
+/// comes first: over an attached project daemon every environment tool is
+/// admitted there, never by the kernel.
+///
+/// The journal decides whether the report is due. It is due while the live
+/// branch of the session the kernel serves holds no notice of this posture:
+/// `session` decides it here, and the session the kernel serves decides it
+/// again after every rewind (a tool-tail retry included) and every switch to
+/// another session, through the session observer this registers.
 ///
 /// Only this function wires the report: an executor or an admission installed
 /// on its own reports nothing.
@@ -616,11 +627,7 @@ pub fn install_tool_authority<C>(
 	executor: EnvToolExecutor,
 	admission: SettingsAdmission,
 ) -> Kernel<C> {
-	let pending = omp_envd::admission::ApprovalPosture::resolve(
-		admission.settings.configured_approval(),
-		admission.sandbox,
-	)
-	.map(|posture| {
+	let pending = session_posture(&admission, &executor).map(|posture| {
 		let pending = Arc::new(PendingPosture {
 			posture,
 			mailbox: kernel.mailbox(),
@@ -637,6 +644,28 @@ pub fn install_tool_authority<C>(
 		Some(pending) => kernel.with_session_observer(pending),
 		None => kernel,
 	}
+}
+
+/// The approval posture the session reports: `admission`'s configured
+/// approval mode against the sandbox state the environment `executor` runs
+/// reported in its handshake.
+///
+/// That is the state every call the environment admits is resolved against,
+/// and the one that confines the tools the sandbox covers: an attached
+/// session's environment tools run on the project daemon, which probed its
+/// host once, when it started, and may have found otherwise than this process
+/// under equal settings (a backend installed since, or an outer sandbox around
+/// either process). The state `admission` probed counts only when the
+/// environment reported none; an embedded environment probes the same
+/// settings in this process.
+fn session_posture(
+	admission: &SettingsAdmission,
+	executor: &EnvToolExecutor,
+) -> Option<omp_envd::admission::ApprovalPosture> {
+	omp_envd::admission::ApprovalPosture::resolve(
+		admission.settings.configured_approval(),
+		executor.reported_sandbox().unwrap_or(admission.sandbox),
+	)
 }
 
 const OUTCOME_REPLICATION_ATTEMPTS: usize = 3;
@@ -1002,11 +1031,11 @@ impl SettingsAdmission {
 	/// invocation's `--approval-mode` override, against the sandbox the control
 	/// plane constructs for `workspace_root`.
 	///
-	/// That sandbox is also the one an attached project daemon enforces: a
-	/// session joins only a daemon whose sandbox and approval policy equals its
-	/// own (`omp_envd::daemon_policy`), so the environment admits the calls it
-	/// runs against the same settings. The daemon probes them on its own, and
-	/// nothing checks that both probes agree (ADR 0028, 2026-10-09 amendment).
+	/// That probe decides only the calls admitted here. A session joins only a
+	/// project daemon whose sandbox and approval policy equals its own
+	/// (`omp_envd::daemon_policy`), but the daemon probed the same settings on
+	/// its own, so the session's approval posture is reported from the state
+	/// the environment reports instead ([`install_tool_authority`]).
 	#[must_use]
 	pub fn new(
 		ctx: &omp_con::Ctx,
@@ -4261,6 +4290,89 @@ mod tests {
 		executor.post();
 		admit();
 		assert_eq!(notices.drain().count(), 1, "a next session without the notice is told once");
+	}
+
+	/// An executor whose environment answered its handshake reporting
+	/// `reported` as its sandbox state.
+	async fn executor_reporting(reported: omp_env::frame::SandboxState) -> super::EnvToolExecutor {
+		let (client, transport) = omp_env::EnvClient::in_process(1);
+		let server = tokio::spawn(async move {
+			let hello = transport.recv().await.expect("client hello");
+			transport
+				.send(omp_env::frame::ServerFrame {
+					request_id: hello.request_id,
+					body: Some(omp_env::frame::server_frame::Body::Hello(omp_env::frame::ServerHello {
+						sandbox_state: reported.into(),
+						..Default::default()
+					})),
+					..Default::default()
+				})
+				.await
+				.expect("server hello");
+			transport
+		});
+		client
+			.hello(omp_env::frame::ClientHello::default())
+			.await
+			.expect("handshake");
+		drop(server.await.expect("server task"));
+		let (approvals, _inbox) =
+			omp_agent::ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		super::EnvToolExecutor::new(client, approvals)
+	}
+
+	/// The session's posture is resolved against the sandbox state the
+	/// environment reported in its handshake, the state its admissions and the
+	/// sandboxed tools run under, whatever this process probed under the same
+	/// settings; the probe counts only when the environment reported none.
+	#[tokio::test]
+	async fn the_session_posture_follows_the_sandbox_the_environment_reports() {
+		use omp_env::frame::SandboxState as Reported;
+		use omp_envd::{
+			admission::{ApprovalMode, ApprovalPosture, Provenance, SandboxState, SandboxUnavailable},
+			tool_settings::ToolSettings,
+		};
+
+		let probed = |sandbox| super::SettingsAdmission {
+			settings: ToolSettings::default(),
+			sandbox,
+			posture: super::PostureNotice::default(),
+			fetch_hosts: None,
+		};
+		let downgraded = |sandbox| ApprovalPosture {
+			configured: ApprovalMode::Yolo,
+			provenance: Provenance::Default,
+			effective: ApprovalMode::Write,
+			sandbox,
+		};
+
+		// A daemon whose sandbox confines its commands keeps the defaulted
+		// `yolo`, although this process found none: nothing is reported.
+		assert_eq!(
+			super::session_posture(
+				&probed(SandboxState::Off),
+				&executor_reporting(Reported::Active).await
+			),
+			None
+		);
+		// A daemon that could not construct its sandbox downgrades it, although
+		// this process constructed one: the daemon's state is reported.
+		let unavailable = SandboxState::Unavailable { cause: SandboxUnavailable::BackendUnavailable };
+		assert_eq!(
+			super::session_posture(
+				&probed(SandboxState::Active),
+				&executor_reporting(Reported::BackendUnavailable).await
+			),
+			Some(downgraded(unavailable))
+		);
+		// An environment that reported no state leaves the probe to decide.
+		assert_eq!(
+			super::session_posture(
+				&probed(SandboxState::Off),
+				&executor_reporting(Reported::Unspecified).await
+			),
+			Some(downgraded(SandboxState::Off))
+		);
 	}
 
 	#[tokio::test]

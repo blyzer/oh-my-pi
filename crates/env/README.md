@@ -37,7 +37,8 @@ provides the one client that routes between them.
   clients that need to find the owning daemon. The environment socket is keyed
   by executable generation and by `DaemonPolicy`, the digest of the sandbox
   and approval policy a daemon enforces, which every `ServerHello` also
-  reports (`policy_digest`). The name carries the policy only through a keyed
+  reports (`policy_digest`), beside the sandbox state its own probe found
+  (`sandbox_state`). The name carries the policy only through a keyed
   digest under a random key private to the project (`SOCKET_KEY_FILE` in the
   state directory), so other local users listing `/tmp` cannot confirm a
   guessed policy.

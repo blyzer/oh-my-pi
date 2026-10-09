@@ -4119,6 +4119,10 @@ impl EnvServer {
 					server_epoch:   self.identity.server_epoch.clone(),
 					server_build:   self.identity.server_build.to_string(),
 					policy_digest:  Bytes::copy_from_slice(self.identity.policy.digest().as_bytes()),
+					// What this host's own probe found, which every admission on
+					// the connection resolves against; equal policies do not
+					// imply equal probes.
+					sandbox_state:  self.exec.sandbox_state().to_wire().into(),
 					props:          Default::default(),
 				}),
 			))
@@ -12922,6 +12926,69 @@ mod tests {
 		);
 		assert!(approval_mode_from_wire(i32::MAX).is_err());
 	}
+
+	/// Every hello reports the sandbox state the host's own probe found, the
+	/// one each admission on the connection resolves against, so a client
+	/// reports that state and not its own probe for the calls this host admits.
+	/// A host whose sandbox is off reports `off`; one configured for the
+	/// workspace reports what its probe constructed (`active` where Seatbelt
+	/// runs).
+	#[tokio::test]
+	async fn the_hello_reports_the_sandbox_state_the_host_probed() {
+		let root = tempfile::tempdir().expect("workspace");
+		let state = tempfile::tempdir().expect("state");
+		let con = Arc::new(Ctx::new());
+		let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
+		let server = Arc::new(
+			EnvServer::open_local(
+				root.path(),
+				state.path(),
+				Registry::new(),
+				ExtHostConfig::new(
+					PathBuf::from("unused"),
+					Principal::new(sf!("test-principal"), sf!("Test Principal")),
+					sf!("test-session"),
+					1,
+				),
+				&con,
+				convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.expect("host"),
+		);
+		for mode in [ExecSandboxMode::Off, ExecSandboxMode::WorkspaceWrite] {
+			server.exec.configure_sandbox(
+				&SandboxSettings { mode, ..SandboxSettings::default() },
+				root.path(),
+			);
+			let (client, transport) = EnvClient::in_process(8);
+			let host = Arc::clone(&server);
+			let serving = tokio::spawn(async move { host.serve_in_process(transport).await });
+			let hello = client
+				.hello(pb::ClientHello {
+					client: "sandbox-state".to_owned(),
+					schema_rev: omp_proto::SCHEMA_REV,
+					..pb::ClientHello::default()
+				})
+				.await
+				.expect("hello");
+			let probed = server.exec.sandbox_state();
+			assert_eq!(hello.sandbox_state(), probed.to_wire(), "{mode:?}: {probed:?}");
+			if mode == ExecSandboxMode::Off {
+				assert_eq!(probed, crate::admission::SandboxState::Off);
+			}
+			#[cfg(target_os = "macos")]
+			if mode == ExecSandboxMode::WorkspaceWrite
+				&& omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available()
+			{
+				assert_eq!(probed, crate::admission::SandboxState::Active);
+			}
+			drop(client);
+			serving.abort();
+		}
+	}
+
 	#[test]
 	fn unknown_tool_errors_explain_daemon_settings_and_eval_restart() {
 		assert_eq!(

@@ -8,12 +8,11 @@
 //! daemon served in this process admits and runs the command and its sandbox
 //! amendment reaches the issuing session only through the approval relay; the
 //! journal decides whether a session is told again after a rewind, a retry, a
-//! switch or a new kernel. A
-//! network endpoint approved for the session holds, on either path, until the
-//! conversation leaves the journal that approved it, by a rewind or a session
-//! switch. A fetch is asked once per host the environment names for it, and a
-//! session grant for one host never covers another. A command the daemon runs
-//! reaches the model with its own output.
+//! switch or a new kernel. A network endpoint approved for the session holds,
+//! on either path, until the conversation leaves the journal that approved it,
+//! by a rewind or a session switch. A fetch is asked once per host the
+//! environment names for it, and a session grant for one host never covers
+//! another. A command the daemon runs reaches the model with its own output.
 
 mod support;
 
