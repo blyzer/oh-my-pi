@@ -21,8 +21,8 @@ use super::{
 	crypto::{CryptoError, EncryptedBlob, SecretContext, decrypt, encrypt},
 	key::{EncryptionKey, KeyError, KeyId, KeySource},
 	lease::{
-		AuthRejection, CredentialError, CredentialFuture, CredentialLease, CredentialNeed,
-		CredentialSource, LeaseMeta, credential_ready,
+		AuthRejection, CredentialError, CredentialFuture, CredentialKind, CredentialLease,
+		CredentialNeed, CredentialSource, LeaseMeta, credential_ready,
 	},
 	oauth,
 	oauth::OAuthError,
@@ -37,7 +37,7 @@ use crate::{
 
 const SCHEMA_VERSION: u32 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const OAUTH_RENEWABLE_KIND: &str = "oauth-renewable-v1";
+pub(crate) const OAUTH_RENEWABLE_KIND: &str = "oauth-renewable-v1";
 
 /// Origin of credential material presented to persistence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1322,6 +1322,9 @@ impl StoredCredentialSource {
 		}
 		let stored = self.store.get(&account).map_err(|error| match error {
 			StoreError::NotFound => CredentialError::Unavailable,
+			StoreError::Key(KeyError::Unavailable | KeyError::OsCredential) => {
+				CredentialError::StorageLocked
+			},
 			_ => CredentialError::SourceFailure,
 		})?;
 		if need
@@ -1349,11 +1352,13 @@ impl StoredCredentialSource {
 			expires_at,
 		};
 		let material = SecretString::from(material);
-		match stored.metadata.kind.as_str() {
-			"api-key" => Ok(CredentialLease::api_key(meta, material)),
-			"bearer" => Ok(CredentialLease::bearer(meta, material)),
-			"session-token" => Ok(CredentialLease::session_token(meta, material)),
-			_ => Err(CredentialError::InvalidSource),
+		match stored.metadata.kind.parse::<CredentialKind>() {
+			Ok(CredentialKind::ApiKey) => Ok(CredentialLease::api_key(meta, material)),
+			Ok(CredentialKind::Bearer) => Ok(CredentialLease::bearer(meta, material)),
+			Ok(CredentialKind::SessionToken) => Ok(CredentialLease::session_token(meta, material)),
+			Ok(CredentialKind::Basic | CredentialKind::AwsSigV4) | Err(_) => {
+				Err(CredentialError::InvalidSource)
+			},
 		}
 	}
 
@@ -1993,6 +1998,34 @@ mod tests {
 			.expect("opaque lease");
 		assert_eq!(lease.meta().generation, 1);
 		assert!(!format!("{lease:?} {source:?}").contains("lease-secret-marker"));
+	}
+
+	/// A stored account this process holds no key for is a typed locked store,
+	/// not an anonymous source failure.
+	#[tokio::test]
+	async fn stored_source_reports_a_locked_store() {
+		let directory = tempdir().expect("temporary directory");
+		let path = directory.path().join("credentials.sqlite");
+		let account = AccountId::new("locked-account");
+		put(
+			&CredentialStore::open(&path, source("key", KEY_ONE)).expect("open store"),
+			&account,
+			b"locked-secret-marker",
+			100,
+		);
+		let locked = Arc::new(
+			CredentialStore::open(&path, Arc::new(UnavailableKeySource)).expect("open locked"),
+		);
+		let error = StoredCredentialSource::new(locked)
+			.lease(CredentialNeed {
+				spec:        omp_catalog::AuthSpecId::new("auth"),
+				account:     Some(account),
+				principal:   Some(PrincipalId::new("principal")),
+				valid_after: UNIX_EPOCH + Duration::from_millis(101),
+			})
+			.await
+			.expect_err("no key decrypts the stored account");
+		assert_eq!(error, CredentialError::StorageLocked);
 	}
 
 	#[test]

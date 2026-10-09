@@ -23,13 +23,14 @@ use zeroize::Zeroizing;
 
 use super::{
 	AuditedCredentialReveal, AuthRejection, AuthSpec, CredentialBroker, CredentialError,
-	CredentialFuture, CredentialLease, CredentialMetadata, CredentialNeed, CredentialOrigin,
-	CredentialSource, CredentialStore, CredentialWrite, KeyError, LeaseMeta, LoginChannelError,
-	OAuthClientSpec, OAuthClock, OAuthCredentialImport, OAuthCredentialManagerError,
-	OAuthCustomDispatchError, OAuthCustomDispatcher, OAuthCustomSpec, OAuthEngine, OAuthError,
-	OAuthHttpClient, OAuthHttpRequest, OAuthHttpResponse, OAuthParameter, OAuthTransportError,
-	PROVIDER_NAME_PARAMETER, ScopedCredentialGrant, ScopedCredentialToken, StoreError,
-	credential_ready, default_login_channels,
+	CredentialFuture, CredentialKind, CredentialLease, CredentialMetadata, CredentialNeed,
+	CredentialOrigin, CredentialSource, CredentialStore, CredentialWrite, KeyError, LeaseMeta,
+	LoginChannelError, OAuthClientSpec, OAuthClock, OAuthCredentialImport,
+	OAuthCredentialManagerError, OAuthCustomDispatchError, OAuthCustomDispatcher, OAuthCustomSpec,
+	OAuthEngine, OAuthError, OAuthHttpClient, OAuthHttpRequest, OAuthHttpResponse, OAuthParameter,
+	OAuthTransportError, PROVIDER_NAME_PARAMETER, ScopedCredentialGrant, ScopedCredentialToken,
+	StoreError, api_key_kind, broker::stored_static_secret_kind, credential_ready,
+	default_login_channels, static_secret_kind, store::OAUTH_RENEWABLE_KIND,
 };
 use crate::{
 	account::{
@@ -42,7 +43,7 @@ use crate::{
 	},
 	call::{AccountRoutingContext, AuthInput, AuthMethod, AuthRequest, LoginRequest},
 	codec::{CredentialDisabledObservation, ProviderRefreshReason, ProviderResponseHooks},
-	error::{Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
+	error::{CredentialFailure, Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
 	id::{AccountId, LoginSessionId, PrincipalId, ProjectId, RegionId},
 	receipt::ExecutionReceipt,
 	session::CredentialAffinityDigest,
@@ -84,6 +85,20 @@ pub struct OAuthControlImport {
 	pub project:       Option<ProjectId>,
 	/// Optional authenticated audit evidence for extension CONTROL imports.
 	pub audit:         Option<super::AuditedCredentialImport>,
+}
+
+/// One stored secret [`AuthControlHandle::repair_static_secret_kinds`]
+/// re-stored under the kind its provider authenticates with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecretKindRepair {
+	/// Repaired account.
+	pub account:  AccountId,
+	/// Provider the account authenticates.
+	pub provider: ProviderId,
+	/// Kind the secret was stored under, as the row spelled it.
+	pub stored:   Str,
+	/// Kind it is stored under now.
+	pub repaired: CredentialKind,
 }
 
 /// Narrow control-plane handle over the live authentication manager.
@@ -152,6 +167,12 @@ impl AuthControlHandle {
 	}
 
 	/// Atomically persists one scalar credential and updates the shared pool.
+	///
+	/// A static secret is stored under the kind its provider leases
+	/// ([`stored_static_secret_kind`]): `write.kind` may use the store's
+	/// spelling or the extension SDK's (`api_key`, `session`), and an API key
+	/// for a provider that authenticates only with a bearer token is stored as
+	/// `bearer`. Any other kind is stored as written.
 	pub fn store(
 		&self,
 		write: CredentialControlWrite,
@@ -169,10 +190,15 @@ impl AuthControlHandle {
 		let secret = write
 			.secret
 			.expose(|bytes| SecretBox::new(Box::new(bytes.to_vec())));
+		let kind: &str =
+			match stored_static_secret_kind(&self.manager.catalog, &write.provider, &write.kind) {
+				Some(kind) => kind.into(),
+				None => write.kind.as_str(),
+			};
 		let metadata = self.manager.store.put(CredentialWrite {
 			account_id: &account,
 			principal_id: &write.principal,
-			kind: write.kind.as_str(),
+			kind,
 			secret: &secret,
 			expires_at_ms: write.expires_at_ms,
 			origin: CredentialOrigin::Persistent,
@@ -250,6 +276,119 @@ impl AuthControlHandle {
 	/// grants, which the environment host encodes).
 	pub const fn credential_store(&self) -> &Arc<CredentialStore> {
 		&self.manager.store
+	}
+
+	/// The kind an API key for `provider` is stored under in this handle's
+	/// catalog ([`api_key_kind`]), for control-plane writers that store keys
+	/// outside `/login`.
+	pub fn api_key_kind(&self, provider: &ProviderId<str>) -> Option<CredentialKind> {
+		api_key_kind(&self.manager.catalog, provider)
+	}
+
+	/// Re-stores every static secret whose stored kind is not the one
+	/// [`Self::store`] writes for it now ([`stored_static_secret_kind`]).
+	///
+	/// Earlier writers stored kinds a provider's routes reject: the v1
+	/// importers stored every API key as `api-key`, which a provider that
+	/// authenticates with a bearer token rejects
+	/// ([`CredentialError::KindMismatch`]), and extension logins and
+	/// `omp.creds` stores kept the SDK spellings (`api_key`, `session`) no
+	/// lease reads. The kind is authenticated with the ciphertext, so a repair
+	/// decrypts the secret and writes it again under a new generation; the
+	/// account keeps its principal and expiry, and only its pool generation
+	/// changes. Rows already stored under the right kind, rows of accounts the
+	/// pool does not hold, and kinds that are no static secret are left alone,
+	/// so a second call repairs nothing and decrypts nothing.
+	///
+	/// # Errors
+	///
+	/// Returns the first store failure, such as
+	/// [`KeyError::Unavailable`] when a mismatched row cannot be decrypted;
+	/// rows repaired before it stay repaired.
+	pub fn repair_static_secret_kinds(&self) -> Result<Vec<SecretKindRepair>, StoreError> {
+		let mut repairs = Vec::new();
+		for (metadata, record, repaired) in self.mismatched_static_secrets()? {
+			let secret = self.manager.store.get(&metadata.account_id)?.secret;
+			let now_ms = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.map_err(|_| StoreError::InvalidTime)?
+				.as_millis()
+				.try_into()
+				.map_err(|_| StoreError::InvalidTime)?;
+			let written = self.manager.store.put(CredentialWrite {
+				account_id: &metadata.account_id,
+				principal_id: &metadata.principal_id,
+				kind: repaired.into(),
+				secret: &secret,
+				expires_at_ms: metadata.expires_at_ms,
+				origin: CredentialOrigin::Persistent,
+				now_ms,
+				expected_generation: Some(metadata.generation),
+			})?;
+			// Only the generation moves: an enable, disable, or route change
+			// another process made since this handle loaded the pool stays.
+			if !self
+				.manager
+				.accounts
+				.update_credential_generation(
+					&metadata.account_id,
+					&record.principal,
+					written.generation,
+				)
+				.map_err(|_| StoreError::AccountState)?
+			{
+				return Err(StoreError::AccountState);
+			}
+			repairs.push(SecretKindRepair {
+				account: metadata.account_id,
+				provider: record.provider,
+				stored: metadata.kind,
+				repaired,
+			});
+		}
+		Ok(repairs)
+	}
+
+	/// The repairs [`Self::repair_static_secret_kinds`] would make now, read
+	/// from plaintext metadata and the account pool alone: nothing is
+	/// decrypted, so a store whose key source is unavailable answers too.
+	///
+	/// # Errors
+	///
+	/// Returns the store failure listing the metadata.
+	pub fn static_secret_kind_repairs(&self) -> Result<Vec<SecretKindRepair>, StoreError> {
+		Ok(self
+			.mismatched_static_secrets()?
+			.map(|(metadata, record, repaired)| SecretKindRepair {
+				account: metadata.account_id,
+				provider: record.provider,
+				stored: metadata.kind,
+				repaired,
+			})
+			.collect())
+	}
+
+	/// Every stored row of an account the pool holds whose kind differs from
+	/// the static-secret kind [`Self::store`] writes for it now, with that
+	/// account and kind.
+	fn mismatched_static_secrets(
+		&self,
+	) -> Result<
+		impl Iterator<Item = (CredentialMetadata, AccountRecord, CredentialKind)> + '_,
+		StoreError,
+	> {
+		let catalog = &self.manager.catalog;
+		Ok(self
+			.manager
+			.store
+			.list_metadata()?
+			.into_iter()
+			.filter_map(move |metadata| {
+				let record = self.manager.accounts.account(&metadata.account_id)?;
+				let repaired = stored_static_secret_kind(catalog, &record.provider, &metadata.kind)?;
+				(<&'static str>::from(repaired) != metadata.kind.as_str())
+					.then_some((metadata, record, repaired))
+			}))
 	}
 
 	/// Enables or disables an account in the one durable account pool.
@@ -598,10 +737,12 @@ impl AuthLoginEngine for SecretLoginEngine {
 		let method = self.method;
 		async move {
 			let auth = catalog.auth_spec(&spec).ok_or_else(auth_not_found)?;
-			let credential_kind = match (method, auth.kind) {
-				(AuthMethod::ApiKey, AuthSpecKind::ApiKey) => "api-key",
-				(AuthMethod::ApiKey, AuthSpecKind::Bearer | AuthSpecKind::OptionalBearer) => "bearer",
-				(AuthMethod::SessionToken, AuthSpecKind::OmpSession) => "session-token",
+			let credential_kind: &'static str = match (method, static_secret_kind(auth.kind)) {
+				(
+					AuthMethod::ApiKey,
+					Some(kind @ (CredentialKind::ApiKey | CredentialKind::Bearer)),
+				)
+				| (AuthMethod::SessionToken, Some(kind @ CredentialKind::SessionToken)) => kind.into(),
 				_ => return Err(auth_unavailable()),
 			};
 			let provider = catalog
@@ -1070,11 +1211,14 @@ impl fmt::Debug for RefreshingCredentialSource {
 
 impl RefreshingCredentialSource {
 	/// Refreshes `account` through the engine, then leases the new
-	/// generation once. This is the only path that performs I/O.
+	/// generation once. This is the only path that performs I/O. An account
+	/// the engine cannot renew fails as `unrenewable`
+	/// ([`refresh_failure`]).
 	fn refresh_then_lease(
 		&self,
 		account: AccountId,
 		need: CredentialNeed,
+		unrenewable: CredentialError,
 	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
 		let stored = Arc::clone(&self.stored);
 		let refresh = Arc::clone(&self.refresh);
@@ -1083,11 +1227,27 @@ impl RefreshingCredentialSource {
 				refresh
 					.refresh(account)
 					.await
-					.map_err(|_| CredentialError::SourceFailure)?;
+					.map_err(|error| refresh_failure(&error, unrenewable))?;
 				stored.lease(need).await
 			}
 			.boxed(),
 		)
+	}
+}
+
+/// The credential error a failed refresh of the engine reports:
+/// `unrenewable` when the engine says the account cannot be renewed (a
+/// refresh asked for answers [`CredentialError::Unavailable`], as every
+/// nonrenewable source does; an expired generation stays
+/// [`CredentialError::Expired`]), a cancellation as such, and any other
+/// failure as [`CredentialError::RefreshFailed`].
+fn refresh_failure(error: &Error, unrenewable: CredentialError) -> CredentialError {
+	match (error.kind, error.detail_ref()) {
+		(_, Some(ErrorDetail::Credential { reason: CredentialFailure::NotRenewable, .. })) => {
+			unrenewable
+		},
+		(ErrorKind::Cancelled, _) => CredentialError::Cancelled,
+		_ => CredentialError::RefreshFailed,
 	}
 }
 
@@ -1104,7 +1264,10 @@ impl CredentialSource for RefreshingCredentialSource {
 		};
 		match self.stored.lease(need.clone()) {
 			Either::Left(ready) => match ready.into_inner() {
-				Err(CredentialError::Expired) => self.refresh_then_lease(account, need),
+				// A generation the engine cannot renew stays expired.
+				Err(CredentialError::Expired) => {
+					self.refresh_then_lease(account, need, CredentialError::Expired)
+				},
 				result => credential_ready(result),
 			},
 			Either::Right(pending) => {
@@ -1117,7 +1280,7 @@ impl CredentialSource for RefreshingCredentialSource {
 								refresh
 									.refresh(account)
 									.await
-									.map_err(|_| CredentialError::SourceFailure)?;
+									.map_err(|error| refresh_failure(&error, CredentialError::Expired))?;
 								stored.lease(need).await
 							},
 							result => result,
@@ -1137,7 +1300,7 @@ impl CredentialSource for RefreshingCredentialSource {
 		let Some(account) = need.account.clone() else {
 			return credential_ready(Err(CredentialError::Unavailable));
 		};
-		self.refresh_then_lease(account, need)
+		self.refresh_then_lease(account, need, CredentialError::Unavailable)
 	}
 
 	fn reject<'a>(
@@ -1272,6 +1435,16 @@ where
 					state: AccountState::Active,
 				});
 			}
+			let metadata = store
+				.metadata(&account)
+				.map_err(|_| auth_store_failure())?
+				.ok_or_else(auth_not_found)?;
+			// Only an OAuth bundle renews: a static key, or an account of a
+			// provider with no OAuth authentication, is typed as not renewable
+			// so the caller can tell it from a refresh that failed.
+			if metadata.kind.as_str() != OAUTH_RENEWABLE_KIND {
+				return Err(not_renewable(record.provider));
+			}
 			let mut runtime = None;
 			for id in &provider.auth {
 				let auth = catalog.auth_spec(id).ok_or_else(auth_not_found)?;
@@ -1290,11 +1463,7 @@ where
 					break;
 				}
 			}
-			let runtime = runtime.ok_or_else(auth_unavailable)?;
-			let metadata = store
-				.metadata(&account)
-				.map_err(|_| auth_store_failure())?
-				.ok_or_else(auth_not_found)?;
+			let runtime = runtime.ok_or_else(|| not_renewable(record.provider.clone()))?;
 			if metadata.principal_id != record.principal {
 				return Err(auth_store_failure());
 			}
@@ -1991,6 +2160,16 @@ fn auth_unavailable() -> Error {
 	)
 }
 
+/// The refresh engine's answer for an account it cannot renew.
+fn not_renewable(provider: ProviderId) -> Error {
+	Error::credential(
+		provider,
+		CredentialFailure::NotRenewable,
+		RetryAction::Never,
+		ExecutionReceipt::default(),
+	)
+}
+
 fn auth_store_failure() -> Error {
 	Error::new(
 		ErrorKind::InternalInvariant,
@@ -2134,10 +2313,18 @@ fn credential_error(error: CredentialError) -> Error {
 			RetryAction::RefreshCredential,
 			ExecutionReceipt::default(),
 		),
+		CredentialError::StorageLocked => Error::new(
+			ErrorKind::CredentialStorageUnavailable,
+			ErrorPhase::Authentication,
+			RetryAction::Never,
+			ExecutionReceipt::default(),
+		),
 		CredentialError::Unavailable
 		| CredentialError::StaleGeneration
 		| CredentialError::InvalidSource
-		| CredentialError::SourceFailure => auth_unavailable(),
+		| CredentialError::SourceFailure
+		| CredentialError::RefreshFailed
+		| CredentialError::KindMismatch { .. } => auth_unavailable(),
 	}
 }
 #[cfg(test)]
@@ -2322,6 +2509,374 @@ mod tests {
 		control.delete(account.clone()).await.expect("logout");
 		assert_eq!(control.account_name(&account), None);
 		assert!(state.load_names().expect("names").is_empty(), "the stored name is released too");
+	}
+
+	/// Opens the encrypted store and account pool of `database` behind an
+	/// offline control handle over the embedded catalog.
+	fn kind_control(
+		database: &std::path::Path,
+	) -> (Arc<Catalog>, Arc<CredentialStore>, AccountPool, super::AuthControlHandle) {
+		let store = Arc::new(
+			CredentialStore::open(
+				database,
+				Arc::new(HeadlessKeySource::new(KeyId::new("kind-repair"), [4; 32])),
+			)
+			.expect("credential store"),
+		);
+		let state = Arc::new(crate::account::AccountStateStore::open(database).expect("state"));
+		let pool = AccountPool::with_store(state).expect("pool");
+		let catalog = Arc::new(Catalog::embedded().clone());
+		let control =
+			super::AuthControlHandle::offline(Arc::clone(&catalog), Arc::clone(&store), pool.clone())
+				.expect("control");
+		(catalog, store, pool, control)
+	}
+
+	/// Writes a row the way earlier writers did, under `kind` exactly as
+	/// given, and registers its account.
+	fn write_earlier_row(
+		store: &CredentialStore,
+		pool: &AccountPool,
+		provider: &str,
+		identity: &str,
+		kind: &str,
+		secret: &[u8],
+		expires_at_ms: Option<u64>,
+	) -> super::CredentialMetadata {
+		let account = AccountId::from(format!("{provider}:{identity}"));
+		let principal = PrincipalId::from(identity);
+		let metadata = store
+			.put(super::CredentialWrite {
+				account_id: &account,
+				principal_id: &principal,
+				kind,
+				secret: &omp_core::SecretBox::new(Box::new(secret.to_vec())),
+				expires_at_ms,
+				origin: super::CredentialOrigin::Persistent,
+				now_ms: 1,
+				expected_generation: None,
+			})
+			.expect("earlier row");
+		pool
+			.upsert(AccountRecord {
+				account,
+				principal,
+				provider: ProviderId::from(provider),
+				routes: BTreeSet::new(),
+				enabled: true,
+				credential_generation: metadata.generation,
+				routing: AccountRoutingContext::default(),
+			})
+			.expect("earlier account");
+		metadata
+	}
+
+	/// Every control-plane write stores a static secret under the kind its
+	/// provider leases: an API key for a bearer-only provider as `bearer`,
+	/// and the extension SDK spellings as the store's; OAuth material and
+	/// kinds the provider leases are stored as written.
+	#[test]
+	fn control_writes_store_static_secrets_under_the_leased_kind() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let (_, _, _, control) = kind_control(&directory.path().join("credentials.db"));
+		let write = |provider: &str, identity: &str, kind: &'static str| {
+			control
+				.store(super::CredentialControlWrite {
+					provider:      ProviderId::from(provider),
+					principal:     PrincipalId::from(identity),
+					identity:      Some(omp_core::Str::new(identity)),
+					kind:          omp_core::Str::new_static(kind),
+					secret:        omp_core::Secret::from(b"fake-written-secret".to_vec()),
+					expires_at_ms: None,
+				})
+				.expect("write")
+				.0
+				.kind
+		};
+		assert_eq!(write("huggingface", "import", "api-key").as_str(), "bearer");
+		assert_eq!(write("huggingface", "extension", "api_key").as_str(), "bearer");
+		assert_eq!(write("anthropic", "import", "api-key").as_str(), "api-key");
+		assert_eq!(write("anthropic", "extension", "api_key").as_str(), "api-key");
+		assert_eq!(write("anthropic", "bearer", "bearer").as_str(), "bearer");
+		assert_eq!(write("anthropic", "session", "session").as_str(), "session-token");
+		assert_eq!(write("anthropic", "oauth", "oauth").as_str(), "oauth");
+	}
+
+	/// Rows earlier writers stored under a kind their provider's routes do not
+	/// lease are re-stored once under the kind a write stores now,
+	/// re-encrypted with the same secret, principal, and expiry. Only the pool
+	/// generation moves, so a change another process made to the account
+	/// after this handle loaded it survives. Rows already right are kept.
+	#[tokio::test]
+	async fn repair_restores_mismatched_static_secrets_under_the_provider_kind() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let database = directory.path().join("credentials.db");
+		let (catalog, store, pool, control) = kind_control(&database);
+		// A Kilo-style static key imported with its v1 expiry.
+		let expires_at_ms = Some(4_102_444_800_000);
+		let hf = write_earlier_row(
+			&store,
+			&pool,
+			"huggingface",
+			"agent-db",
+			"api-key",
+			b"hf-fake-repair-token",
+			expires_at_ms,
+		);
+		let extension = write_earlier_row(
+			&store,
+			&pool,
+			"anthropic",
+			"extension",
+			"api_key",
+			b"sk-ant-fake-sdk",
+			None,
+		);
+		let session =
+			write_earlier_row(&store, &pool, "anthropic", "session", "session", b"fake-session", None);
+		let kept = [
+			write_earlier_row(&store, &pool, "anthropic", "api-key", "api-key", b"sk-ant-kept", None),
+			write_earlier_row(&store, &pool, "anthropic", "oauth", "oauth", b"fake-oauth", None),
+		];
+		// Another process disables the account after this handle loaded it.
+		AccountPool::with_store(Arc::new(
+			crate::account::AccountStateStore::open(&database).expect("state"),
+		))
+		.expect("other process")
+		.set_enabled(&hf.account_id, false)
+		.expect("disabled elsewhere");
+		// Read from metadata alone, the pending repairs are known even to a
+		// process whose key source is unavailable, which cannot make them.
+		let locked = super::AuthControlHandle::offline(
+			Arc::clone(&catalog),
+			Arc::new(
+				CredentialStore::open(&database, Arc::new(crate::auth::UnavailableKeySource))
+					.expect("locked store"),
+			),
+			pool.clone(),
+		)
+		.expect("locked control");
+		let pending = locked
+			.static_secret_kind_repairs()
+			.expect("pending repairs");
+		assert!(locked.repair_static_secret_kinds().is_err(), "a locked store repairs nothing");
+
+		let repairs = control.repair_static_secret_kinds().expect("repair");
+
+		assert_eq!(repairs, pending, "the repairs made are the ones reported pending");
+		assert!(
+			control
+				.static_secret_kind_repairs()
+				.expect("pending after the repair")
+				.is_empty()
+		);
+
+		let repaired = |account: &AccountId, stored: &'static str, kind| super::SecretKindRepair {
+			account:  account.clone(),
+			provider: pool.account(account).expect("account").provider,
+			stored:   omp_core::Str::new_static(stored),
+			repaired: kind,
+		};
+		assert_eq!(repairs, [
+			repaired(&extension.account_id, "api_key", crate::auth::CredentialKind::ApiKey),
+			repaired(&session.account_id, "session", crate::auth::CredentialKind::SessionToken),
+			repaired(&hf.account_id, "api-key", crate::auth::CredentialKind::Bearer),
+		]);
+		let metadata = |account: &AccountId| {
+			control
+				.metadata(account)
+				.expect("metadata")
+				.expect("stored")
+		};
+		let restored = metadata(&hf.account_id);
+		assert_eq!(restored.kind.as_str(), "bearer");
+		assert_eq!(restored.generation, hf.generation + 1);
+		assert_eq!(restored.principal_id, hf.principal_id);
+		assert_eq!(restored.expires_at_ms, expires_at_ms, "the repair keeps the expiry");
+		assert_eq!(metadata(&extension.account_id).kind.as_str(), "api-key");
+		assert_eq!(metadata(&session.account_id).kind.as_str(), "session-token");
+		for row in kept {
+			assert_eq!(metadata(&row.account_id), row);
+		}
+		assert_eq!(
+			pool
+				.account(&hf.account_id)
+				.expect("account")
+				.credential_generation,
+			restored.generation
+		);
+		let reloaded = AccountPool::with_store(Arc::new(
+			crate::account::AccountStateStore::open(&database).expect("state"),
+		))
+		.expect("reloaded pool")
+		.account(&hf.account_id)
+		.expect("account kept");
+		assert!(!reloaded.enabled, "the disable made after the handle opened survives");
+		assert_eq!(reloaded.credential_generation, restored.generation);
+		// The repaired row leases on the provider's bearer authentication with
+		// the secret it held before.
+		let spec = catalog
+			.provider(ProviderId::from_ref("huggingface"))
+			.expect("huggingface")
+			.auth[0]
+			.clone();
+		let broker = crate::auth::CredentialBroker::from_catalog(
+			&catalog,
+			Arc::new(NoEnvironment),
+			crate::auth::CredentialBrokerEngines {
+				stored: Some(Arc::new(crate::auth::StoredCredentialSource::new(store))),
+				..Default::default()
+			},
+		)
+		.expect("broker");
+		let lease = broker
+			.lease(CredentialNeed {
+				spec,
+				account: Some(hf.account_id.clone()),
+				principal: None,
+				valid_after: SystemTime::now(),
+			})
+			.await
+			.expect("bearer lease");
+		assert_eq!(lease.kind(), crate::auth::CredentialKind::Bearer);
+		assert_eq!(lease.scalar_secret().expect("scalar").expose_secret(), "hf-fake-repair-token");
+		assert!(
+			control
+				.repair_static_secret_kinds()
+				.expect("again")
+				.is_empty()
+		);
+	}
+
+	/// The stored refresh engine names a static key as not renewable instead
+	/// of failing like a refresh that ran; the refreshing source then answers
+	/// a refresh as unavailable (as every nonrenewable source does) and keeps
+	/// an expired static key expired.
+	#[tokio::test]
+	async fn static_keys_are_not_renewable() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let database = directory.path().join("credentials.db");
+		let (catalog, store, pool, _) = kind_control(&database);
+		// GitHub Copilot renews OAuth bundles, so only the row's kind makes
+		// this key unrenewable.
+		let key = write_earlier_row(
+			&store,
+			&pool,
+			"github-copilot",
+			"agent-db",
+			"bearer",
+			b"fake-static-token",
+			Some(2),
+		);
+		let http = Arc::new(super::super::SystemOAuthHttpClient::new());
+		let clock = Arc::new(super::super::SystemOAuthClock);
+		let engine = Arc::new(StoredOAuthRefreshEngine::new(
+			catalog,
+			Arc::clone(&store),
+			pool,
+			Arc::clone(&http),
+			Arc::clone(&clock),
+			Arc::new(OAuthCustomDispatcher::builtin(http, clock).expect("dispatcher")),
+			Arc::new(
+				RefreshCoordinator::new("static-refresh-test", RefreshPolicy::default())
+					.expect("coordinator"),
+			),
+		));
+		let error = engine
+			.refresh(key.account_id.clone())
+			.await
+			.expect_err("a static key does not renew");
+		assert_eq!(error.code.as_deref(), Some("not_renewable"));
+		assert!(matches!(
+			error.detail_ref(),
+			Some(crate::error::ErrorDetail::Credential {
+				reason: crate::error::CredentialFailure::NotRenewable,
+				..
+			})
+		));
+		let source = RefreshingCredentialSource::new(
+			Arc::new(crate::auth::StoredCredentialSource::new(store)),
+			engine,
+		);
+		let need = || CredentialNeed {
+			spec:        omp_catalog::AuthSpecId::new("github-copilot"),
+			account:     Some(key.account_id.clone()),
+			principal:   None,
+			valid_after: SystemTime::now(),
+		};
+		assert_eq!(
+			source.refresh_lease(need()).await.expect_err("no renewal"),
+			CredentialError::Unavailable
+		);
+		assert_eq!(source.lease(need()).await.expect_err("expired"), CredentialError::Expired);
+	}
+
+	/// A refresh engine failure other than an unrenewable account is a failed
+	/// refresh, whether a refresh was asked for or an expired generation was
+	/// being renewed, and a cancelled refresh stays a cancellation.
+	#[tokio::test]
+	async fn failed_refreshes_are_refresh_failures() {
+		struct Failing(ErrorKind);
+
+		impl AuthRefreshEngine for Failing {
+			fn refresh(&self, _: AccountId) -> BoxFuture<'_, Result<AccountSummary, Error>> {
+				let error = Error::new(
+					self.0,
+					crate::error::ErrorPhase::Authentication,
+					crate::error::RetryAction::Never,
+					crate::receipt::ExecutionReceipt::default(),
+				);
+				futures::future::ready(Err(error)).boxed()
+			}
+		}
+
+		let directory = tempfile::tempdir().expect("data dir");
+		let (_, store, pool, _) = kind_control(&directory.path().join("credentials.db"));
+		let key =
+			write_earlier_row(&store, &pool, "github-copilot", "oauth", "bearer", b"fake-token", None);
+		let expired = write_earlier_row(
+			&store,
+			&pool,
+			"github-copilot",
+			"expired",
+			"bearer",
+			b"fake-expired-token",
+			Some(2),
+		);
+		let need = |account: &AccountId| CredentialNeed {
+			spec:        omp_catalog::AuthSpecId::new("github-copilot"),
+			account:     Some(account.clone()),
+			principal:   None,
+			valid_after: SystemTime::now(),
+		};
+		for (kind, expected) in [
+			(ErrorKind::Connectivity, CredentialError::RefreshFailed),
+			(ErrorKind::Cancelled, CredentialError::Cancelled),
+		] {
+			let source = RefreshingCredentialSource::new(
+				Arc::new(crate::auth::StoredCredentialSource::new(Arc::clone(&store))),
+				Arc::new(Failing(kind)),
+			);
+			let error = source
+				.refresh_lease(need(&key.account_id))
+				.await
+				.expect_err("the refresh fails");
+			assert_eq!(error, expected, "{kind:?}");
+			let error = source
+				.lease(need(&expired.account_id))
+				.await
+				.expect_err("the renewal fails");
+			assert_eq!(error, expected, "renewing an expired generation, {kind:?}");
+		}
+	}
+
+	/// A process environment with no credential variable set.
+	struct NoEnvironment;
+
+	impl crate::auth::CredentialEnvironment for NoEnvironment {
+		fn read(&self, _: &str) -> Result<Option<SecretString>, CredentialError> {
+			Ok(None)
+		}
 	}
 
 	#[test]

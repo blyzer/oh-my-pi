@@ -46,7 +46,8 @@ pub use aws::{
 };
 pub use broker::{
 	CredentialBroker, CredentialBrokerEngines, CredentialBrokerError, CredentialEnvironment,
-	SystemCredentialEnvironment,
+	SystemCredentialEnvironment, api_key_kind, provider_accepts_kind, provider_auth_specs,
+	static_secret_kind,
 };
 pub use command::{
 	CommandCredentialError, CommandCredentialExecutor, CommandCredentialResolver,
@@ -77,7 +78,8 @@ pub use manager::{
 	CodexLiveCredential, CodexLiveCredentialError, CredentialAcquisitionLoginEngine,
 	CredentialAcquisitionLoginEngineError, CredentialAffinityError, CredentialAffinityResolver,
 	CredentialControlWrite, OAuthControlImport, OAuthLoginEngine, OAuthLoginEngineError,
-	RefreshingCredentialSource, SecretLoginEngine, SecretLoginEngineError, StoredOAuthRefreshEngine,
+	RefreshingCredentialSource, SecretKindRepair, SecretLoginEngine, SecretLoginEngineError,
+	StoredOAuthRefreshEngine,
 };
 pub use oauth::{
 	DevicePending, OAuthClock, OAuthCredentialManagerError, OAuthCustomDispatchError,

@@ -63,7 +63,12 @@ presentation adapter.
   resumed child at the recursion ceiling is not advertised `task`, exactly as
   a child spawned at that depth is not.
 - `v1_import` is the one-shot v1 (TypeScript `omp`) migrator behind
-  `omp config import-v1` and the automatic first run. Its `sessions` step and
+  `omp config import-v1` and the automatic first run. It stores an imported
+  API key under the kind its provider's routes lease (`bearer` for a
+  bearer-token provider), and its `credential-kinds` step re-stores static
+  secrets stored under a kind their provider does not lease (re-encrypted,
+  since the kind is authenticated with the ciphertext): once on the first
+  run, and on every explicit `omp config import-v1`. Its `sessions` step and
   the `/resume @v1` picker convert v1 transcripts into `.oms` journals. The
   imported journal is the only record of an import: its `<meta>` provenance
   (`import-format omp1`, `import-source-id`, `import-source`) is written before

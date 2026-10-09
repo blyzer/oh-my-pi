@@ -615,3 +615,52 @@ fn a_profile_without_keys_never_opens_a_credential_store() {
 	assert!(ImportStep::ModelsKeys.marker(&target.config_dir).is_set());
 	assert!(!target.data_dir.exists(), "no credential store is created without a key to store");
 }
+
+/// A `models.yml` key imports under the kind its configured route leases:
+/// `models.toml` gives a keyed provider the `apiKey` auth unless `models.yml`
+/// names another, so the built-in bearer provider's row is `api-key` and the
+/// proxy configured with `auth: bearer` stores `bearer`. Neither needs the
+/// `credential-kinds` step afterwards.
+#[test]
+fn a_models_yml_key_follows_its_configured_route_auth() {
+	let root = tempfile::tempdir().expect("scratch");
+	let home = root.path().join("home");
+	write(
+		&home.join(".omp/agent/models.yml"),
+		concat!(
+			"providers:\n",
+			"  huggingface:\n",
+			"    apiKey: hf-fake-models-literal\n",
+			"  bearerproxy:\n",
+			"    baseUrl: https://bearer.example/v1\n",
+			"    auth: bearer\n",
+			"    apiKey: sk-fake-bearer-literal\n",
+			"    models:\n",
+			"      - id: fake-model\n",
+		),
+	);
+	let v2 = roots(root.path(), None);
+	let pairs =
+		plan(&V1Source::new(inputs(&home)), &v2, &ProfileSelection::Named(None)).expect("plan");
+	let store = store(&v2.data_dir);
+
+	let report = run(&pairs, ImportMode::Apply, CredentialAccess::Live {
+		data_dir: &v2.data_dir,
+		store:    &store,
+	});
+
+	assert!(
+		report
+			.entries()
+			.filter(|entry| entry.step == ImportStep::CredentialKinds)
+			.all(|entry| entry.outcome.kind() == OutcomeKind::NothingToImport),
+		"the configured rows need no repair"
+	);
+	let rows = store.list_metadata().expect("metadata");
+	let mut kinds = rows
+		.iter()
+		.map(|row| (row.account_id.as_str(), row.kind.as_str()))
+		.collect::<Vec<_>>();
+	kinds.sort_unstable();
+	assert_eq!(kinds, [("bearerproxy:models-yml", "bearer"), ("huggingface:models-yml", "api-key")]);
+}
