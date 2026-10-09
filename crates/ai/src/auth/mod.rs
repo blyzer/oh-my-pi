@@ -77,8 +77,8 @@ pub use manager::{
 	CodexLiveCredential, CodexLiveCredentialError, CredentialAcquisitionLoginEngine,
 	CredentialAcquisitionLoginEngineError, CredentialAffinityError, CredentialAffinityResolver,
 	CredentialControlWrite, OAuthControlImport, OAuthLoginEngine, OAuthLoginEngineError,
-	RefreshingCredentialSource, SecretKindRepair, SecretLoginEngine, SecretLoginEngineError,
-	StoredOAuthRefreshEngine,
+	RefreshingCredentialSource, SecretKindRepair, SecretKindRepairFailure, SecretKindRepairs,
+	SecretLoginEngine, SecretLoginEngineError, StoredOAuthRefreshEngine,
 };
 pub use oauth::{
 	DevicePending, OAuthClock, OAuthCredentialManagerError, OAuthCustomDispatchError,

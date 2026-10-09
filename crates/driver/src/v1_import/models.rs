@@ -473,7 +473,7 @@ pub fn import_legacy_api_keys(
 			provider:      ProviderId::from(provider.as_str()),
 			principal:     omp_ai::PrincipalId::from("models-yml"),
 			identity:      Some(Str::new_static("models-yml")),
-			kind:          Str::new_static("api-key"),
+			kind:          Str::new_static(omp_ai::auth::CredentialKind::ApiKey.into()),
 			secret:        omp_core::Secret::from(key.as_bytes().to_vec()),
 			expires_at_ms: None,
 		})?;

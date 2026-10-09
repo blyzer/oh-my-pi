@@ -658,11 +658,16 @@ pub(crate) fn stored_static_secret_kind(
 /// The kind a static secret of `kind` for `provider` is stored under so its
 /// routes can lease it, or `None` when `kind` is no static secret.
 ///
-/// An API key or bearer token that no authentication of the provider's routes
-/// leases ([`provider_auth_specs`]) takes the provider's API-key kind
-/// instead, when it has one: a bearer provider's API key is stored as
-/// `bearer`, and a key-header provider's bearer token as `api-key`. Any other
-/// kind, and a kind some route leases, is kept.
+/// A kind some authentication of the provider's routes leases
+/// ([`provider_auth_specs`]) is kept, and so is a session token. An API key or
+/// bearer token no route leases moves to the other of the two only where that
+/// cannot change what reaches the provider, under this configuration or a
+/// later one ([`relabeled_static_secret_kind`]): for a provider whose bundled
+/// routes treat the two alike ([`bundled_routes_take_keys_as_tokens`]), an API
+/// key is stored as `bearer` where its routes take a bearer token, and a bearer
+/// token as `api-key` where every leased key authentication sends it as
+/// `Authorization: Bearer` (a `models.toml` `apiKey` auth). Otherwise it keeps
+/// its kind, and its routes reject it as [`CredentialError::KindMismatch`].
 pub(crate) fn leased_static_secret_kind(
 	catalog: &Catalog,
 	provider: &ProviderId<str>,
@@ -672,11 +677,113 @@ pub(crate) fn leased_static_secret_kind(
 		CredentialKind::ApiKey | CredentialKind::Bearer
 			if !provider_accepts_kind(catalog, provider, kind) =>
 		{
-			Some(api_key_kind(catalog, provider).unwrap_or(kind))
+			Some(relabeled_static_secret_kind(catalog, provider, kind).unwrap_or(kind))
 		},
 		CredentialKind::ApiKey | CredentialKind::Bearer | CredentialKind::SessionToken => Some(kind),
 		CredentialKind::Basic | CredentialKind::AwsSigV4 => None,
 	}
+}
+
+/// The kind an API key or bearer token of `kind`, which no route of
+/// `provider` leases, is stored under instead: the provider's API-key kind
+/// ([`api_key_kind`]), or `None` when it keeps `kind`.
+///
+/// The kind is authenticated with the ciphertext and nothing records the one a
+/// row was written under, and every launch re-stores rows under the catalog
+/// and `models.toml` it runs with. So a move must not change how the secret
+/// reaches the provider under any configuration a later launch may run with,
+/// and above all not once a `models.toml` auth is removed again. Two rules
+/// keep it so:
+///
+/// - Only a provider whose bundled routes ([`Catalog::embedded`]) treat an API
+///   key and a bearer token alike has a key or token moved
+///   ([`bundled_routes_take_keys_as_tokens`]): none of them takes an API key,
+///   and either one takes a static bearer token (they re-store a key as one
+///   themselves) or none takes a bearer credential at all. Every other provider
+///   keeps each row's kind whatever a `models.toml` auth says. Anthropic is
+///   why: a key moved to `bearer` under `auth = "bearer"` would, once the auth
+///   is removed, lease on its OAuth authentication and be sent as an OAuth
+///   token, and no rule could move it back.
+/// - A bearer token becomes an API key only when every leased API-key
+///   authentication sends it exactly as a bearer token is sent (`Authorization:
+///   Bearer`), as every `models.toml` auth does; never into a key header, a
+///   query parameter, a cookie, or a sealed body.
+///
+/// A row of such a provider thus follows the configuration: under a
+/// `models.toml` `auth = "apiKey"` it is an API key, without it a bearer
+/// token, and both are sent as `Authorization: Bearer`. Under one
+/// configuration a second pass moves nothing.
+fn relabeled_static_secret_kind(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+	kind: CredentialKind,
+) -> Option<CredentialKind> {
+	if !bundled_routes_take_keys_as_tokens(provider) {
+		return None;
+	}
+	match (kind, api_key_kind(catalog, provider)?) {
+		(CredentialKind::ApiKey, CredentialKind::Bearer) => Some(CredentialKind::Bearer),
+		(CredentialKind::Bearer, CredentialKind::ApiKey) => provider_auth_specs(catalog, provider)
+			.filter(|spec| spec.kind == AuthSpecKind::ApiKey)
+			.all(sends_as_bearer_token)
+			.then_some(CredentialKind::ApiKey),
+		_ => None,
+	}
+}
+
+/// Whether `provider`'s bundled routes ([`Catalog::embedded`]) lease an API
+/// key and a bearer token alike, so moving a row between the two kinds cannot
+/// change what they send.
+///
+/// That is when none of them takes an API key, and either the first static
+/// secret one of them takes is a bearer token (a key is re-stored as one under
+/// them) or none of them takes a bearer credential of any kind (OAuth,
+/// application-default, and the like included), as for a keyless provider or
+/// one the bundled catalog does not know. A provider whose routes take a key
+/// header, query parameter, cookie, or sealed body, or a bearer credential only
+/// from OAuth or another non-static source, is not one.
+fn bundled_routes_take_keys_as_tokens(provider: &ProviderId<str>) -> bool {
+	let bundled = Catalog::embedded();
+	!provider_accepts_kind(bundled, provider, CredentialKind::ApiKey)
+		&& (api_key_kind(bundled, provider) == Some(CredentialKind::Bearer)
+			|| !provider_accepts_kind(bundled, provider, CredentialKind::Bearer))
+}
+
+/// The kind of static secret the next launch's stored-kind repair re-stores,
+/// for `provider` under `catalog`, as a kind one of `specs` leases: a row
+/// stored as it is unusable on a route leasing `specs` until then, and usable
+/// after. `None` when the repair moves no row of `provider` to a kind one of
+/// `specs` leases.
+pub(crate) fn restored_static_secret_kind<'c>(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+	specs: impl Iterator<Item = &'c AuthSpec> + Clone,
+) -> Option<CredentialKind> {
+	[CredentialKind::ApiKey, CredentialKind::Bearer]
+		.into_iter()
+		.find(|&stored| {
+			leased_static_secret_kind(catalog, provider, stored).is_some_and(|restored| {
+				restored != stored
+					&& specs
+						.clone()
+						.any(|spec| credential_kind(spec.kind) == Some(restored))
+			})
+		})
+}
+
+/// Whether `spec` places its credential where a bearer token goes: the
+/// `Authorization` header behind a `Bearer ` prefix, and nowhere else.
+fn sends_as_bearer_token(spec: &AuthSpec) -> bool {
+	spec.query_parameter.is_none()
+		&& spec.sealed_body.is_none()
+		&& spec
+			.header_name
+			.as_deref()
+			.is_some_and(|header| header.eq_ignore_ascii_case("authorization"))
+		&& spec
+			.prefix
+			.as_deref()
+			.is_some_and(|prefix| prefix.trim_end().eq_ignore_ascii_case("bearer"))
 }
 
 /// Every catalog authentication a request for `provider` may lease under.
@@ -1221,23 +1328,161 @@ mod tests {
 			}
 			assert_eq!(leased, expected, "{}", provider.id);
 		}
-		// Every static-key provider can store an API key or bearer token
-		// under a kind one of its routes leases.
+		// A written key or token keeps a kind some route leases. One that
+		// moves lands on a kind a route leases, and only an API key of a
+		// provider whose routes take no key moves: in the bundled catalog a
+		// bearer token never moves, since no bundled key authentication sends a
+		// key as a bearer token.
 		for provider in catalog.providers() {
-			let Some(kind) = api_key_kind(catalog, &provider.id) else {
-				continue;
-			};
-			assert!(provider_accepts_kind(catalog, &provider.id, kind), "{}", provider.id);
+			if let Some(kind) = api_key_kind(catalog, &provider.id) {
+				assert!(provider_accepts_kind(catalog, &provider.id, kind), "{}", provider.id);
+			}
 			for written in [CredentialKind::ApiKey, CredentialKind::Bearer] {
 				let stored =
 					leased_static_secret_kind(catalog, &provider.id, written).expect("a static secret");
+				if stored == written {
+					continue;
+				}
+				assert_eq!(
+					(written, stored),
+					(CredentialKind::ApiKey, CredentialKind::Bearer),
+					"{}",
+					provider.id
+				);
+				assert!(provider_accepts_kind(catalog, &provider.id, stored), "{}", provider.id);
 				assert!(
-					provider_accepts_kind(catalog, &provider.id, stored),
-					"{}: {written} is stored as {stored}, which no route leases",
+					!provider_accepts_kind(catalog, &provider.id, CredentialKind::ApiKey),
+					"{}: a key moved although a route takes one",
+					provider.id
+				);
+				assert!(bundled_routes_take_keys_as_tokens(&provider.id), "{}", provider.id);
+				// The move is idempotent: the re-stored kind stays.
+				assert_eq!(
+					leased_static_secret_kind(catalog, &provider.id, stored),
+					Some(stored),
+					"{}",
 					provider.id
 				);
 			}
 		}
+	}
+
+	/// Only a provider whose bundled routes lease an API key and a bearer
+	/// token alike has a row moved between the two: one whose routes take a
+	/// key in a header, query parameter, or cookie, or a bearer credential only
+	/// from OAuth or application-default credentials, keeps every row's kind,
+	/// so no `models.toml` auth can change how its stored secrets are sent once
+	/// the auth is removed.
+	#[test]
+	fn only_providers_whose_bundled_routes_take_keys_as_tokens_move_rows() {
+		let moves = |provider| bundled_routes_take_keys_as_tokens(ProviderId::from_ref(provider));
+		// A key header (`x-api-key`, `api-key`, `X-Subscription-Token`), the
+		// `key` query parameter, a cookie.
+		for provider in ["anthropic", "azure", "brave", "google", "perplexity-cookie"] {
+			assert!(!moves(provider), "{provider}");
+		}
+		// A bearer credential only from OAuth or application-default
+		// credentials.
+		for provider in ["google-antigravity", "google-gemini-cli", "kimi-code", "google-vertex"] {
+			assert!(!moves(provider), "{provider}");
+		}
+		// A static bearer token, alone or beside OAuth; a keyless provider; one
+		// only a `models.toml` defines, whose every auth sends `Authorization:
+		// Bearer`.
+		for provider in ["huggingface", "zai", "github-copilot", "duckduckgo", "v1-only-provider"] {
+			assert!(moves(provider), "{provider}");
+		}
+	}
+
+	/// The kind a restart re-stores is the one a mismatched row of the
+	/// provider is stored as, and only for a route leasing the kind it moves
+	/// to.
+	#[test]
+	fn a_restart_restores_only_a_row_the_repair_moves_to_a_leased_kind() {
+		let catalog = Catalog::embedded();
+		let restored = |provider| {
+			let provider = ProviderId::from_ref(provider);
+			restored_static_secret_kind(catalog, provider, provider_auth_specs(catalog, provider))
+		};
+		assert_eq!(restored("huggingface"), Some(CredentialKind::ApiKey));
+		assert_eq!(restored("anthropic"), None);
+		assert_eq!(restored("google"), None);
+		let huggingface = ProviderId::from_ref("huggingface");
+		let no_specs = std::iter::empty::<&omp_catalog::provider::AuthSpec>();
+		assert_eq!(restored_static_secret_kind(catalog, huggingface, no_specs), None);
+	}
+
+	/// A bearer token becomes an API key only where the key authentication
+	/// sends it as `Authorization: Bearer`, never into a key header, a query
+	/// parameter, or a sealed body.
+	#[test]
+	fn only_an_authorization_bearer_key_takes_a_bearer_token() {
+		let catalog = Catalog::embedded();
+		let spec = |header: Option<&'static str>, prefix: Option<&'static str>| {
+			omp_catalog::provider::AuthSpec {
+				header_name: header.map(Str::new_static),
+				prefix: prefix.map(Str::new_static),
+				query_parameter: None,
+				..catalog
+					.provider(ProviderId::from_ref("google"))
+					.and_then(|google| catalog.auth_spec(&google.auth[0]))
+					.expect("google key auth")
+					.clone()
+			}
+		};
+		assert!(sends_as_bearer_token(&spec(Some("authorization"), Some("Bearer "))));
+		assert!(sends_as_bearer_token(&spec(Some("Authorization"), Some("bearer "))));
+		assert!(!sends_as_bearer_token(&spec(Some("x-api-key"), None)));
+		assert!(!sends_as_bearer_token(&spec(Some("authorization"), None)));
+		assert!(!sends_as_bearer_token(&spec(Some("authorization"), Some("Token "))));
+		// Google's own key goes in the `key` query parameter.
+		let google = catalog
+			.provider(ProviderId::from_ref("google"))
+			.and_then(|google| catalog.auth_spec(&google.auth[0]))
+			.expect("google key auth");
+		assert!(google.query_parameter.is_some(), "{google:?}");
+		assert!(!sends_as_bearer_token(google));
+
+		// The stored kind follows it. Hugging Face's bundled routes take keys as
+		// tokens; with its authentication replaced by a key authentication, a
+		// bearer token is stored as a key where that sends it as `Authorization:
+		// Bearer`, and keeps its kind where it would go in a header of its own.
+		let huggingface = ProviderId::from_ref("huggingface");
+		let token = provider_auth_specs(catalog, huggingface)
+			.next()
+			.expect("Hugging Face's authentication")
+			.clone();
+		let keyed = |header: &'static str, prefix: Option<&'static str>| {
+			let key = omp_catalog::provider::AuthSpec {
+				kind: AuthSpecKind::ApiKey,
+				header_name: Some(Str::new_static(header)),
+				prefix: prefix.map(Str::new_static),
+				..token.clone()
+			};
+			let overlay = omp_catalog::CatalogOverlayBuilder::new(omp_catalog::ProvenanceSource {
+				kind:           omp_catalog::ProvenanceKind::Configured,
+				origin:         "test".into(),
+				revision:       None,
+				confidence:     omp_catalog::EvidenceConfidence::Declared,
+				observed_at_ms: None,
+			})
+			.with_auth_spec(key)
+			.build();
+			catalog
+				.with_overlay_stack(
+					&omp_catalog::OverlayStack::from_layers([(
+						omp_catalog::OverlaySource::UserConfig,
+						overlay,
+					)]),
+					omp_catalog::UnsafeTrustScope::ALL,
+				)
+				.expect("overlaid catalog")
+		};
+		let stored = |catalog: &Catalog| {
+			leased_static_secret_kind(catalog, huggingface, CredentialKind::Bearer)
+		};
+		assert_eq!(stored(&keyed("authorization", Some("Bearer "))), Some(CredentialKind::ApiKey));
+		assert_eq!(stored(&keyed("x-api-key", None)), Some(CredentialKind::Bearer));
 	}
 
 	/// A written static secret is stored under the kind its provider leases:
@@ -1254,9 +1499,10 @@ mod tests {
 		assert_eq!(stored("huggingface", "bearer"), Some(CredentialKind::Bearer));
 		assert_eq!(stored("anthropic", "api-key"), Some(CredentialKind::ApiKey));
 		assert_eq!(stored("anthropic", "api_key"), Some(CredentialKind::ApiKey));
-		// A bearer token for a provider whose routes take only a key is stored
-		// as its key.
-		assert_eq!(stored("google", "bearer"), Some(CredentialKind::ApiKey));
+		// A bearer token for a provider whose routes take only a key keeps its
+		// kind: Google's key goes in a query parameter, where an OAuth access
+		// token must not, so its routes refuse the token.
+		assert_eq!(stored("google", "bearer"), Some(CredentialKind::Bearer));
 		assert_eq!(stored("google", "api_key"), Some(CredentialKind::ApiKey));
 		// A kind some authentication of the provider leases is kept.
 		assert_eq!(stored("anthropic", "bearer"), Some(CredentialKind::Bearer));

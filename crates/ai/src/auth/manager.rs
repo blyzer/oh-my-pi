@@ -90,7 +90,7 @@ pub struct OAuthControlImport {
 }
 
 /// One stored secret [`AuthControlHandle::repair_static_secret_kinds`]
-/// re-stored under the kind its provider authenticates with.
+/// re-stores under the kind its provider's routes lease.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecretKindRepair {
 	/// Repaired account.
@@ -101,6 +101,28 @@ pub struct SecretKindRepair {
 	pub stored:   Str,
 	/// Kind it is stored under now.
 	pub repaired: CredentialKind,
+}
+
+/// What one [`AuthControlHandle::repair_static_secret_kinds`] pass did.
+#[derive(Debug, Default)]
+pub struct SecretKindRepairs {
+	/// Rows re-stored under the kind their provider's routes lease.
+	pub repaired: Vec<SecretKindRepair>,
+	/// Rows that needed re-storing but could not be, each left as it was.
+	pub failed:   Vec<SecretKindRepairFailure>,
+}
+
+/// A row [`AuthControlHandle::repair_static_secret_kinds`] could not
+/// re-store.
+#[derive(Debug)]
+pub struct SecretKindRepairFailure {
+	/// The repair the row needed.
+	pub repair: SecretKindRepair,
+	/// Why it could not be made: the row cannot be decrypted (the key source
+	/// is unavailable, or the row was sealed under a key it does not hold),
+	/// another process wrote the row first, or the account pool refused the
+	/// new generation.
+	pub error:  StoreError,
 }
 
 /// Narrow control-plane handle over the live authentication manager.
@@ -170,13 +192,19 @@ impl AuthControlHandle {
 
 	/// Atomically persists one scalar credential and updates the shared pool.
 	///
-	/// A static secret is stored under the kind its provider's routes lease
-	/// ([`stored_static_secret_kind`]): `write.kind` may use the store's
-	/// spelling or the extension SDK's (`api_key`, `session`); an API key for a
-	/// provider whose routes take only a bearer token is stored as `bearer`,
-	/// and a bearer token for one whose routes take only a key header as
-	/// `api-key`. Any other kind is stored as written. The returned metadata
-	/// carries the kind stored.
+	/// A static secret is stored under a kind its provider's routes lease
+	/// ([`stored_static_secret_kind`]); `write.kind` may use the store's
+	/// spelling or the extension SDK's (`api_key`, `session`). An API key or
+	/// bearer token moves to the other kind only where both are sent alike: an
+	/// API key is stored as `bearer` for a provider whose routes take only a
+	/// bearer token, and a bearer token as `api-key` where the routes take a
+	/// key only as `Authorization: Bearer` (a `models.toml` `apiKey` auth), both
+	/// only for a provider whose bundled routes take no key of their own and no
+	/// bearer credential only through OAuth or application-default credentials.
+	/// Every other key or token keeps the written kind, so removing a
+	/// `models.toml` auth never changes how a stored secret is sent. Any other
+	/// kind is stored as written. The returned metadata carries the kind
+	/// stored.
 	pub fn store(
 		&self,
 		write: CredentialControlWrite,
@@ -291,61 +319,88 @@ impl AuthControlHandle {
 	/// kind the provider declares even where a `models.toml` auth replaced its
 	/// routes' own, extension logins and `omp.creds` stores kept the SDK
 	/// spellings `api_key` and `session` no lease reads), or when a catalog or
-	/// `models.toml` change replaced the authentication the routes lease. The
-	/// kind is authenticated with the ciphertext, so a repair decrypts the
-	/// secret and writes it again under a new generation; the account keeps
-	/// its principal and expiry, and only its pool generation changes. Rows
-	/// already stored under the right kind, rows of accounts the pool does not
-	/// hold, and kinds that are no static secret are left alone, so a second
+	/// `models.toml` change replaced the authentication the routes lease. A
+	/// key or token is only ever moved where [`Self::store`] would move it, so
+	/// a row of a provider whose bundled routes take a key, or a bearer
+	/// credential only through OAuth or application-default credentials, keeps
+	/// its kind whatever a `models.toml` auth says, and after a launch without
+	/// the auth every row leases as one written without it. The kind is
+	/// authenticated with the ciphertext, so a repair decrypts the secret and
+	/// writes it again under a new generation; the account keeps its principal
+	/// and expiry, and only its pool generation changes. Rows already stored
+	/// under the right kind, rows of accounts the pool does not hold, and kinds
+	/// that are no static secret are left alone, so under one catalog a second
 	/// call repairs nothing and decrypts nothing.
+	///
+	/// Each row is repaired on its own, and the rows after a failed one are
+	/// still repaired. A row that cannot be re-stored (it cannot be decrypted,
+	/// or another process wrote it first) is reported in
+	/// [`SecretKindRepairs::failed`] and left as it was; one re-stored whose
+	/// new generation the pool then refuses (another process removed the
+	/// account) is reported there too.
 	///
 	/// # Errors
 	///
-	/// Returns the first store failure, such as
-	/// [`KeyError::Unavailable`] when a mismatched row cannot be decrypted;
-	/// rows repaired before it stay repaired.
-	pub fn repair_static_secret_kinds(&self) -> Result<Vec<SecretKindRepair>, StoreError> {
-		let mut repairs = Vec::new();
+	/// Returns the store failure listing the stored rows' metadata; nothing is
+	/// repaired then.
+	pub fn repair_static_secret_kinds(&self) -> Result<SecretKindRepairs, StoreError> {
+		let mut outcome = SecretKindRepairs::default();
 		for (metadata, record, repaired) in self.mismatched_static_secrets()? {
-			let secret = self.manager.store.get(&metadata.account_id)?.secret;
-			let now_ms = SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.map_err(|_| StoreError::InvalidTime)?
-				.as_millis()
-				.try_into()
-				.map_err(|_| StoreError::InvalidTime)?;
-			let written = self.manager.store.put(CredentialWrite {
-				account_id: &metadata.account_id,
-				principal_id: &metadata.principal_id,
-				kind: repaired.into(),
-				secret: &secret,
-				expires_at_ms: metadata.expires_at_ms,
-				origin: CredentialOrigin::Persistent,
-				now_ms,
-				expected_generation: Some(metadata.generation),
-			})?;
-			// Only the generation moves: an enable, disable, or route change
-			// another process made since this handle loaded the pool stays.
-			if !self
-				.manager
-				.accounts
-				.update_credential_generation(
-					&metadata.account_id,
-					&record.principal,
-					written.generation,
-				)
-				.map_err(|_| StoreError::AccountState)?
-			{
-				return Err(StoreError::AccountState);
-			}
-			repairs.push(SecretKindRepair {
+			let restored = self.restore_static_secret(&metadata, &record, repaired);
+			let repair = SecretKindRepair {
 				account: metadata.account_id,
 				provider: record.provider,
 				stored: metadata.kind,
 				repaired,
-			});
+			};
+			match restored {
+				Ok(()) => outcome.repaired.push(repair),
+				Err(error) => outcome
+					.failed
+					.push(SecretKindRepairFailure { repair, error }),
+			}
 		}
-		Ok(repairs)
+		Ok(outcome)
+	}
+
+	/// Re-encrypts the secret of the row `metadata` describes under `kind`,
+	/// unless another writer changed the row since `metadata` was read, and
+	/// moves the account's pool generation to the new row's.
+	fn restore_static_secret(
+		&self,
+		metadata: &CredentialMetadata,
+		record: &AccountRecord,
+		kind: CredentialKind,
+	) -> Result<(), StoreError> {
+		let secret = self.manager.store.get(&metadata.account_id)?.secret;
+		let now_ms = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.map_err(|_| StoreError::InvalidTime)?
+			.as_millis()
+			.try_into()
+			.map_err(|_| StoreError::InvalidTime)?;
+		let written = self.manager.store.put(CredentialWrite {
+			account_id: &metadata.account_id,
+			principal_id: &metadata.principal_id,
+			kind: kind.into(),
+			secret: &secret,
+			expires_at_ms: metadata.expires_at_ms,
+			origin: CredentialOrigin::Persistent,
+			now_ms,
+			expected_generation: Some(metadata.generation),
+		})?;
+		// Only the generation moves: an enable, disable, or route change
+		// another process made since this handle loaded the pool stays.
+		if self
+			.manager
+			.accounts
+			.update_credential_generation(&metadata.account_id, &record.principal, written.generation)
+			.map_err(|_| StoreError::AccountState)?
+		{
+			Ok(())
+		} else {
+			Err(StoreError::AccountState)
+		}
 	}
 
 	/// Every stored row of an account the pool holds whose kind differs from
@@ -2299,7 +2354,7 @@ fn credential_error(error: CredentialError) -> Error {
 			RetryAction::RefreshCredential,
 			ExecutionReceipt::default(),
 		),
-		CredentialError::StorageLocked => Error::new(
+		CredentialError::StorageLocked { .. } => Error::new(
 			ErrorKind::CredentialStorageUnavailable,
 			ErrorPhase::Authentication,
 			RetryAction::Never,
@@ -2586,9 +2641,10 @@ mod tests {
 		assert_eq!(write("anthropic", "bearer", "bearer").as_str(), "bearer");
 		assert_eq!(write("anthropic", "session", "session").as_str(), "session-token");
 		assert_eq!(write("anthropic", "oauth", "oauth").as_str(), "oauth");
-		// A bearer token for a provider whose routes take only a key header
-		// is stored as that provider's key.
-		assert_eq!(write("google", "extension", "bearer").as_str(), "api-key");
+		// A bearer token for a provider whose routes take its key in a query
+		// parameter keeps its kind, which those routes refuse, instead of
+		// being sent as `?key=`.
+		assert_eq!(write("google", "extension", "bearer").as_str(), "bearer");
 	}
 
 	/// Rows earlier writers stored under a kind their provider's routes do not
@@ -2623,12 +2679,12 @@ mod tests {
 		);
 		let session =
 			write_earlier_row(&store, &pool, "anthropic", "session", "session", b"fake-session", None);
-		// A bearer token for a provider whose routes take only a key header.
-		let header =
-			write_earlier_row(&store, &pool, "google", "extension", "bearer", b"fake-google", None);
 		let kept = [
 			write_earlier_row(&store, &pool, "anthropic", "api-key", "api-key", b"sk-ant-kept", None),
 			write_earlier_row(&store, &pool, "anthropic", "oauth", "oauth", b"fake-oauth", None),
+			// A bearer token for a provider whose routes take its key in a query
+			// parameter: moving it would send it as `?key=`.
+			write_earlier_row(&store, &pool, "google", "extension", "bearer", b"fake-google", None),
 		];
 		// Another process disables the account after this handle loaded it.
 		AccountPool::with_store(Arc::new(
@@ -2648,14 +2704,32 @@ mod tests {
 			pool.clone(),
 		)
 		.expect("locked control");
-		assert!(locked.repair_static_secret_kinds().is_err(), "a locked store repairs nothing");
+		let locked = locked.repair_static_secret_kinds().expect("metadata lists");
+		assert!(locked.repaired.is_empty(), "a locked store repairs nothing");
+		assert_eq!(
+			locked
+				.failed
+				.iter()
+				.map(|failure| {
+					assert!(
+						matches!(failure.error, StoreError::Key(KeyError::Unavailable)),
+						"{failure:?}"
+					);
+					failure.repair.account.as_str()
+				})
+				.collect::<Vec<_>>(),
+			[extension.account_id.as_str(), session.account_id.as_str(), hf.account_id.as_str()],
+			"every row that needs re-storing is tried"
+		);
 		assert_eq!(
 			store.metadata(&hf.account_id).expect("metadata"),
 			Some(hf.clone()),
 			"a failed repair leaves the row"
 		);
 
-		let repairs = control.repair_static_secret_kinds().expect("repair");
+		let outcome = control.repair_static_secret_kinds().expect("repair");
+		assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+		let repairs = outcome.repaired;
 
 		let repaired = |account: &AccountId, stored: &'static str, kind| super::SecretKindRepair {
 			account:  account.clone(),
@@ -2666,7 +2740,6 @@ mod tests {
 		assert_eq!(repairs, [
 			repaired(&extension.account_id, "api_key", crate::auth::CredentialKind::ApiKey),
 			repaired(&session.account_id, "session", crate::auth::CredentialKind::SessionToken),
-			repaired(&header.account_id, "bearer", crate::auth::CredentialKind::ApiKey),
 			repaired(&hf.account_id, "api-key", crate::auth::CredentialKind::Bearer),
 		]);
 		let metadata = |account: &AccountId| {
@@ -2682,7 +2755,6 @@ mod tests {
 		assert_eq!(restored.expires_at_ms, expires_at_ms, "the repair keeps the expiry");
 		assert_eq!(metadata(&extension.account_id).kind.as_str(), "api-key");
 		assert_eq!(metadata(&session.account_id).kind.as_str(), "session-token");
-		assert_eq!(metadata(&header.account_id).kind.as_str(), "api-key");
 		for row in kept {
 			assert_eq!(metadata(&row.account_id), row);
 		}
@@ -2728,11 +2800,65 @@ mod tests {
 			.expect("bearer lease");
 		assert_eq!(lease.kind(), crate::auth::CredentialKind::Bearer);
 		assert_eq!(lease.scalar_secret().expect("scalar").expose_secret(), "hf-fake-repair-token");
-		assert!(
-			control
-				.repair_static_secret_kinds()
-				.expect("again")
-				.is_empty()
+		let again = control.repair_static_secret_kinds().expect("again");
+		assert!(again.repaired.is_empty() && again.failed.is_empty(), "{again:?}");
+	}
+
+	/// A row the repair cannot decrypt (sealed under a key the active key
+	/// source does not hold) is reported with its account and left as it was,
+	/// and a mismatched row listed after it is still re-stored.
+	#[test]
+	fn repair_continues_past_a_row_it_cannot_decrypt() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let database = directory.path().join("credentials.db");
+		let (_, store, pool, control) = kind_control(&database);
+		// Sealed under a key another key source held, and listed first
+		// (`anthropic:…` sorts before `huggingface:…`).
+		let foreign = CredentialStore::open(
+			&database,
+			Arc::new(HeadlessKeySource::new(KeyId::new("other-source"), [9; 32])),
+		)
+		.expect("other store");
+		let sealed =
+			write_earlier_row(&foreign, &pool, "anthropic", "sealed", "api_key", b"sk-ant-fake", None);
+		let hf = write_earlier_row(
+			&store,
+			&pool,
+			"huggingface",
+			"agent-db",
+			"api-key",
+			b"hf-fake-after",
+			None,
+		);
+
+		let outcome = control
+			.repair_static_secret_kinds()
+			.expect("metadata lists");
+
+		assert_eq!(
+			outcome
+				.repaired
+				.iter()
+				.map(|repair| (repair.account.as_str(), repair.repaired))
+				.collect::<Vec<_>>(),
+			[(hf.account_id.as_str(), crate::auth::CredentialKind::Bearer)]
+		);
+		let [failure] = outcome.failed.as_slice() else {
+			panic!("one row cannot be re-stored: {:?}", outcome.failed);
+		};
+		assert_eq!(failure.repair.account, sealed.account_id);
+		assert_eq!(failure.repair.stored.as_str(), "api_key");
+		assert_eq!(failure.repair.repaired, crate::auth::CredentialKind::ApiKey);
+		assert!(matches!(failure.error, StoreError::Key(KeyError::NotFound(_))), "{failure:?}");
+		assert_eq!(store.metadata(&sealed.account_id).expect("metadata"), Some(sealed));
+		assert_eq!(
+			store
+				.metadata(&hf.account_id)
+				.expect("metadata")
+				.expect("row")
+				.kind
+				.as_str(),
+			"bearer"
 		);
 	}
 

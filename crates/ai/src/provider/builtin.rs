@@ -96,7 +96,9 @@ use crate::{
 		search_tavily::TavilySearchCodec,
 		search_tinyfish::TinyfishSearchCodec,
 	},
-	error::{CredentialFailure, Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
+	error::{
+		CredentialFailure, Error, ErrorDetail, ErrorKind, ErrorPhase, KindMismatchRemedy, RetryAction,
+	},
 	gate::GateCondition,
 	layer::{
 		AttemptAction, ExecutionContext,
@@ -708,12 +710,20 @@ impl RouteComposer for ProductionRouteComposer {
 			route: route.id.clone(),
 			authenticated,
 		};
+		let restored_kind = crate::auth::broker::restored_static_secret_kind(
+			catalog,
+			&route.provider,
+			auth_specs
+				.iter()
+				.filter_map(|(id, _)| catalog.auth_spec(id)),
+		);
 		let leases = RouteLeaseProvider {
 			source: self.dependencies.credentials.clone(),
 			shapers: self.dependencies.credential_shapers.clone(),
 			provider: route.provider.clone(),
 			route_base_url: route.endpoint.base_url.clone(),
 			specs: auth_specs.iter().map(|(id, _)| id.clone()).collect(),
+			restored_kind,
 			authenticated,
 			required: credential_required,
 		};
@@ -2265,6 +2275,10 @@ struct RouteLeaseProvider {
 	provider:       omp_catalog::ProviderId,
 	route_base_url: Str,
 	specs:          Box<[AuthSpecId]>,
+	/// The kind of a stored static secret the next launch re-stores as one
+	/// `specs` lease ([`crate::auth::broker::restored_static_secret_kind`]),
+	/// which decides a kind mismatch's remedy.
+	restored_kind:  Option<CredentialKind>,
 	authenticated:  bool,
 	required:       bool,
 }
@@ -2331,13 +2345,19 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 						}
 					},
 					Err(CredentialError::KindMismatch { expected, actual }) => {
+						let remedy = if self.restored_kind == Some(actual) {
+							KindMismatchRemedy::Restart
+						} else {
+							KindMismatchRemedy::StoreRequiredKind
+						};
 						keep_significant(&mut failure, CredentialFailure::KindMismatch {
 							expected,
 							actual,
+							remedy,
 						});
 					},
-					Err(CredentialError::StorageLocked) => {
-						keep_significant(&mut failure, CredentialFailure::StorageLocked);
+					Err(CredentialError::StorageLocked { cause }) => {
+						keep_significant(&mut failure, CredentialFailure::StorageLocked { cause });
 					},
 					Err(CredentialError::Cancelled) => {
 						return Err(
@@ -2389,7 +2409,7 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 				// failure did; a wrong-kind credential there still falls back
 				// to an anonymous request.
 				let reason = match failure {
-					Some(CredentialFailure::StorageLocked) => CredentialFailure::StorageLocked,
+					Some(locked @ CredentialFailure::StorageLocked { .. }) => locked,
 					_ if !self.required && !refreshing => return Ok(None),
 					Some(reason) => reason,
 					None if refreshing => CredentialFailure::NotRenewable,
@@ -2429,7 +2449,7 @@ fn credential_failure(
 fn keep_significant(kept: &mut Option<CredentialFailure>, reason: CredentialFailure) {
 	const fn significance(reason: CredentialFailure) -> u8 {
 		match reason {
-			CredentialFailure::StorageLocked => 3,
+			CredentialFailure::StorageLocked { .. } => 3,
 			CredentialFailure::KindMismatch { .. } => 2,
 			CredentialFailure::UnusableStoredCredential => 1,
 			CredentialFailure::NoRotationCandidate
@@ -4510,6 +4530,7 @@ mod tests {
 			provider: route.provider.clone(),
 			route_base_url: route.endpoint.base_url.clone(),
 			specs: Box::new([route.auth.clone()]),
+			restored_kind: restored_kind(catalog, &route.provider, std::slice::from_ref(&route.auth)),
 			authenticated: true,
 			required: true,
 		};
@@ -4519,6 +4540,20 @@ mod tests {
 			.select(&call, &context)
 			.expect("stored account selected");
 		leases.acquire(&call, &selected, &context).await
+	}
+
+	/// The kind a route leasing `specs` for `provider` reports as re-stored by
+	/// a restart, computed as the production route builder does.
+	fn restored_kind(
+		catalog: &Catalog,
+		provider: &ProviderId<str>,
+		specs: &[AuthSpecId],
+	) -> Option<CredentialKind> {
+		crate::auth::broker::restored_static_secret_kind(
+			catalog,
+			provider,
+			specs.iter().filter_map(|id| catalog.auth_spec(id)),
+		)
 	}
 
 	/// The reason a stored-account lease failed with.
@@ -4537,7 +4572,9 @@ mod tests {
 
 	/// A stored row of the kind the route's bearer authentication leases
 	/// authenticates; an `api-key` row is a typed kind mismatch naming both
-	/// kinds, not a silently skipped source.
+	/// kinds, not a silently skipped source. Copilot's routes take a static
+	/// bearer token, so the next launch re-stores the key as one, and the
+	/// failure says a restart repairs it.
 	#[tokio::test]
 	async fn a_wrong_kind_stored_row_is_a_typed_kind_mismatch() {
 		assert!(
@@ -4558,16 +4595,79 @@ mod tests {
 				reason: CredentialFailure::KindMismatch {
 					expected: CredentialKind::Bearer,
 					actual:   CredentialKind::ApiKey,
+					remedy:   KindMismatchRemedy::Restart,
 				},
 				..
 			})
 		));
 		assert!(
-			mismatch
-				.to_string()
-				.contains("the stored credential is api-key but this route requires bearer"),
+			mismatch.to_string().contains(
+				"the stored credential is api-key but this route requires bearer; restarting omp \
+				 re-stores it"
+			),
 			"{mismatch}"
 		);
+	}
+
+	/// A kind mismatch names the remedy that applies to the row: a restart for
+	/// a key the next launch re-stores as the bearer token the route takes
+	/// (Hugging Face), and a credential of the route's own kind for a key omp
+	/// keeps (Anthropic, whose bundled routes take a key header, on a route
+	/// that takes only a bearer token, as under a `models.toml` `auth =
+	/// "bearer"`).
+	#[tokio::test]
+	async fn a_kind_mismatch_names_the_remedy_that_applies() {
+		let catalog = Catalog::try_embedded().expect("embedded catalog");
+		let (_, call, ..) = discovery_fixture();
+		let bearer_spec = |provider: &str| {
+			let provider = ProviderId::from_ref(provider);
+			crate::auth::provider_auth_specs(catalog, provider)
+				.find(|spec| spec.kind == omp_catalog::provider::AuthSpecKind::Bearer)
+				.map(|spec| spec.id.clone())
+				.expect("a bearer authentication")
+		};
+		for (provider, remedy) in [
+			("huggingface", KindMismatchRemedy::Restart),
+			("anthropic", KindMismatchRemedy::StoreRequiredKind),
+		] {
+			let id = ProviderId::from(provider);
+			let specs = [bearer_spec(provider)];
+			let leases = RouteLeaseProvider {
+				source:         CredentialBroker::from_catalog(
+					catalog,
+					Arc::new(NoEnvironment),
+					crate::auth::CredentialBrokerEngines {
+						stored: Some(Arc::new(PerSpecStore { locked: Box::new([]) })),
+						..crate::auth::CredentialBrokerEngines::default()
+					},
+				)
+				.expect("broker"),
+				shapers:        Arc::new(CredentialShaperRegistry::default()),
+				provider:       id.clone(),
+				route_base_url: Str::new_static("http://127.0.0.1:9"),
+				restored_kind:  restored_kind(catalog, &id, &specs),
+				specs:          Box::new(specs),
+				authenticated:  true,
+				required:       true,
+			};
+			let context = ExecutionContext::new(call.budget.clone());
+			let account = RouteAccount::Brokered {
+				_account: BrokeredAccount { _provider: id.clone(), _route: RouteId::new("route") },
+			};
+			let error = leases
+				.acquire(&call, &account, &context)
+				.await
+				.expect_err("an API key cannot lease on a bearer authentication");
+			assert_eq!(
+				credential_reason(&error),
+				Some(CredentialFailure::KindMismatch {
+					expected: CredentialKind::Bearer,
+					actual: CredentialKind::ApiKey,
+					remedy,
+				}),
+				"{provider}"
+			);
+		}
 	}
 
 	/// A stored row this process holds no key for is credential storage
@@ -4581,7 +4681,12 @@ mod tests {
 		assert_eq!(locked.code.as_deref(), Some("storage_locked"));
 		assert!(matches!(
 			locked.detail_ref(),
-			Some(ErrorDetail::Credential { reason: CredentialFailure::StorageLocked, .. })
+			Some(ErrorDetail::Credential {
+				reason: CredentialFailure::StorageLocked {
+					cause: crate::CredentialStorageLock::NoKeySource,
+				},
+				..
+			})
 		));
 	}
 
@@ -4663,7 +4768,9 @@ mod tests {
 			need: CredentialNeed,
 		) -> crate::auth::CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
 			if self.locked.contains(&need.spec) {
-				return crate::auth::credential_ready(Err(CredentialError::StorageLocked));
+				return crate::auth::credential_ready(Err(CredentialError::StorageLocked {
+					cause: crate::CredentialStorageLock::NoKeySource,
+				}));
 			}
 			let meta = LeaseMeta {
 				account:    need.account.unwrap_or_else(|| AccountId::new("account")),
@@ -4724,6 +4831,7 @@ mod tests {
 				shapers:        Arc::new(CredentialShaperRegistry::default()),
 				provider:       route.provider.clone(),
 				route_base_url: route.endpoint.base_url.clone(),
+				restored_kind:  restored_kind(catalog, &route.provider, &specs),
 				specs:          Box::new(specs),
 				authenticated:  true,
 				required:       true,
@@ -4744,10 +4852,13 @@ mod tests {
 				(error.kind, credential_reason(&error))
 			}
 		};
-		let locked = Some(CredentialFailure::StorageLocked);
+		let locked = Some(CredentialFailure::StorageLocked {
+			cause: crate::CredentialStorageLock::NoKeySource,
+		});
 		let mismatch = Some(CredentialFailure::KindMismatch {
 			expected: CredentialKind::Bearer,
 			actual:   CredentialKind::ApiKey,
+			remedy:   KindMismatchRemedy::Restart,
 		});
 		for specs in [[first.clone(), second.clone()], [second, first]] {
 			let [earlier, later] = specs.clone();

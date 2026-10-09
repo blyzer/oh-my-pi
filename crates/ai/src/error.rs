@@ -292,15 +292,53 @@ pub enum RetryAction {
 	SemanticRetry,
 }
 
-/// Why a process cannot decrypt credential storage, and what unlocks it.
+/// Why a process cannot decrypt credential storage; its text says what
+/// unlocks it.
 ///
-/// [`CredentialFailure::StorageLocked`] and the launch-time refusal of locked
-/// stored logins both show it.
-pub const CREDENTIAL_STORAGE_LOCKED_REMEDY: &str =
-	"no credential key source is available to this process (the default `sv_credential_key_source \
-	 auto` unlocks stored logins only when run interactively); set OMP_LLM_KEY_SOURCE=local-file \
-	 (or `sv_credential_key_source local-file` in config.cfg) to use the owner-only local key \
-	 file, or OMP_LLM_KEY_SOURCE=os-keychain for the OS keychain";
+/// [`CredentialFailure::StorageLocked`] shows it, and the launch-time refusal
+/// of locked stored logins shows [`Self::NoKeySource`]. The settings it names
+/// are the product's key-source settings, read where the process holding the
+/// store starts: for a gateway client that is the gateway, not the client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
+pub enum CredentialStorageLock {
+	/// The process resolved no key source: `sv_credential_key_source auto`,
+	/// the default, without a terminal, or `unavailable`.
+	#[strum(to_string = "no credential key source is available to the process holding the \
+	                     credential store (`sv_credential_key_source auto`, the default, resolves \
+	                     to none without a terminal, and `unavailable` never resolves one); where \
+	                     that process runs, set OMP_LLM_KEY_SOURCE=local-file (or \
+	                     `sv_credential_key_source local-file` in config.cfg) to use the \
+	                     owner-only local key file, or OMP_LLM_KEY_SOURCE=os-keychain for the OS \
+	                     keychain")]
+	NoKeySource,
+	/// The operating-system keychain refused the request for the store's key
+	/// or could not answer it. Another key source does not help: a row sealed
+	/// under the keychain's key decrypts only with it.
+	#[strum(to_string = "the OS keychain refused or could not answer the request for the \
+	                     credential key (a locked keychain, a session without keychain access, or \
+	                     access denied); unlock the keychain, or allow access to omp's key, where \
+	                     the process holding the credential store runs")]
+	KeychainRefused,
+}
+
+/// What makes a stored credential usable on a route that requires another
+/// kind ([`CredentialFailure::KindMismatch`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
+pub enum KindMismatchRemedy {
+	/// The stored-kind repair the next launch runs re-stores the row under a
+	/// kind the route leases. This process did not: another process wrote the
+	/// row first, or the catalog or `models.toml` changed while it ran.
+	#[strum(to_string = "restarting omp re-stores it under a kind this route takes")]
+	Restart,
+	/// omp keeps the row's kind: another route of its provider leases it, its
+	/// provider's bundled routes take a key (a `models.toml` auth does not move
+	/// it), or moving it would send it in a key header, query parameter,
+	/// cookie, or OAuth request. The route needs a credential of its own kind;
+	/// logging the row out would not give it one.
+	#[strum(to_string = "omp keeps it as stored, so this route needs a credential of the kind it \
+	                     requires, from its environment variable or a login method that stores one")]
+	StoreRequiredKind,
+}
 
 /// Why a route could not authenticate a request with a provider credential.
 ///
@@ -320,23 +358,23 @@ pub enum CredentialFailure {
 	/// The stored credential has another kind than the catalog authentication
 	/// requires.
 	///
-	/// Every control-plane write stores a static secret under the kind its
-	/// provider's routes lease, and the production composition re-stores a
-	/// row stored under another kind (by an earlier writer, or left behind
-	/// when a catalog or `models.toml` change replaced the routes'
-	/// authentication) each time it starts with a store it can decrypt. A row
-	/// still reported here cannot be re-stored for this route: its provider
-	/// takes no static key, or another of its routes leases the stored kind.
-	/// Logging out the account and logging in again replaces it.
-	#[error(
-		"the stored credential is {actual} but this route requires {expected}; `omp auth logout` \
-		 removes it and `omp auth login` stores a new one"
-	)]
+	/// Every control-plane write stores a static secret under a kind its
+	/// provider's routes lease where that cannot change what reaches the
+	/// provider, and the production composition re-stores, each time it starts
+	/// with a store it can decrypt, a row an earlier writer stored under
+	/// another kind or a catalog or `models.toml` change left behind. The
+	/// remedy says which applies to this row: a restart re-stores it, or omp
+	/// keeps its kind and the route needs another credential. Neither suggests
+	/// logging out, which deletes a row a restart may repair or another route
+	/// leases.
+	#[error("the stored credential is {actual} but this route requires {expected}; {remedy}")]
 	KindMismatch {
 		/// Kind the catalog authentication requires.
 		expected: CredentialKind,
 		/// Kind the stored credential has.
 		actual:   CredentialKind,
+		/// What makes the row, or another credential, usable on the route.
+		remedy:   KindMismatchRemedy,
 	},
 	/// Account selection chose a stored credential no authentication of the
 	/// route can lease: its stored kind is no static secret the store leases
@@ -346,11 +384,13 @@ pub enum CredentialFailure {
 	#[error("the selected stored credential cannot be used for this provider")]
 	UnusableStoredCredential,
 	/// The encrypted credential store cannot be decrypted by this process.
-	/// The message names the key-source settings that unlock it
-	/// ([`CREDENTIAL_STORAGE_LOCKED_REMEDY`]), so every frontend that renders
-	/// the failure shows them.
-	#[error("credential storage is locked: {}", CREDENTIAL_STORAGE_LOCKED_REMEDY)]
-	StorageLocked,
+	/// The message says why and what unlocks it ([`CredentialStorageLock`]),
+	/// so every frontend that renders the failure shows it.
+	#[error("credential storage is locked: {cause}")]
+	StorageLocked {
+		/// Why the process has no usable key.
+		cause: CredentialStorageLock,
+	},
 	/// The stored credential expired and its source cannot renew it.
 	#[error("the stored credential has expired")]
 	Expired,
@@ -375,7 +415,7 @@ impl CredentialFailure {
 	#[must_use]
 	pub const fn error_kind(self) -> ErrorKind {
 		match self {
-			Self::StorageLocked => ErrorKind::CredentialStorageUnavailable,
+			Self::StorageLocked { .. } => ErrorKind::CredentialStorageUnavailable,
 			Self::NoRotationCandidate
 			| Self::NoSource
 			| Self::KindMismatch { .. }
@@ -969,43 +1009,75 @@ mod tests {
 
 	#[test]
 	fn credential_detail_names_the_provider_and_the_reason() {
-		let error = Error::credential(
-			crate::catalog::ProviderId::from("huggingface"),
-			super::CredentialFailure::KindMismatch {
-				expected: crate::auth::CredentialKind::Bearer,
-				actual:   crate::auth::CredentialKind::ApiKey,
-			},
-			RetryAction::ReselectRoute,
-			ExecutionReceipt::default(),
-		);
+		let mismatch = |remedy| {
+			Error::credential(
+				crate::catalog::ProviderId::from("huggingface"),
+				super::CredentialFailure::KindMismatch {
+					expected: crate::auth::CredentialKind::Bearer,
+					actual: crate::auth::CredentialKind::ApiKey,
+					remedy,
+				},
+				RetryAction::ReselectRoute,
+				ExecutionReceipt::default(),
+			)
+		};
+		let error = mismatch(super::KindMismatchRemedy::Restart);
 		assert_eq!(
 			error.to_string(),
 			"inference Authentication error during Authentication (kind_mismatch): no usable \
 			 huggingface credential: the stored credential is api-key but this route requires \
-			 bearer; `omp auth logout` removes it and `omp auth login` stores a new one"
+			 bearer; restarting omp re-stores it under a kind this route takes"
 		);
 		assert_eq!(error.code.as_deref(), Some("kind_mismatch"));
 		assert_eq!(error.phase, ErrorPhase::Authentication);
 		assert!(format!("{error:?}").contains("detail_kind: Some(\"Credential\")"));
-		let locked = Error::credential(
-			crate::catalog::ProviderId::from("huggingface"),
-			super::CredentialFailure::StorageLocked,
-			RetryAction::Never,
-			ExecutionReceipt::default(),
+		// A row omp keeps is not offered a restart, nor a logout that would
+		// delete it.
+		let kept = mismatch(super::KindMismatchRemedy::StoreRequiredKind).to_string();
+		assert!(
+			kept.ends_with(
+				"the stored credential is api-key but this route requires bearer; omp keeps it as \
+				 stored, so this route needs a credential of the kind it requires, from its \
+				 environment variable or a login method that stores one"
+			),
+			"{kept}"
 		);
-		assert_eq!(locked.kind, ErrorKind::CredentialStorageUnavailable);
-		assert_eq!(locked.code.as_deref(), Some("storage_locked"));
+		assert!(!kept.contains("restart") && !kept.contains("logout"), "{kept}");
+		let locked = |cause| {
+			Error::credential(
+				crate::catalog::ProviderId::from("huggingface"),
+				super::CredentialFailure::StorageLocked { cause },
+				RetryAction::Never,
+				ExecutionReceipt::default(),
+			)
+		};
+		let unavailable = locked(super::CredentialStorageLock::NoKeySource);
+		assert_eq!(unavailable.kind, ErrorKind::CredentialStorageUnavailable);
+		assert_eq!(unavailable.code.as_deref(), Some("storage_locked"));
 		// Every frontend that renders a locked store shows what unlocks it.
-		let rendered = locked.to_string();
+		let rendered = unavailable.to_string();
 		assert!(
 			rendered.contains(
 				"no usable huggingface credential: credential storage is locked: no credential key \
-				 source is available"
+				 source is available to the process holding the credential store"
 			),
 			"{rendered}"
 		);
 		assert!(rendered.contains("OMP_LLM_KEY_SOURCE=local-file"), "{rendered}");
 		assert!(rendered.contains("sv_credential_key_source"), "{rendered}");
+		// A keychain that refuses is not answered with a switch to the keychain,
+		// or to a key file that cannot open rows the keychain's key sealed.
+		let keychain = locked(super::CredentialStorageLock::KeychainRefused);
+		assert_eq!(keychain.code.as_deref(), Some("storage_locked"));
+		let rendered = keychain.to_string();
+		assert!(
+			rendered.contains(
+				"credential storage is locked: the OS keychain refused or could not answer the \
+				 request for the credential key"
+			),
+			"{rendered}"
+		);
+		assert!(!rendered.contains("OMP_LLM_KEY_SOURCE"), "{rendered}");
 		assert_eq!(
 			<&'static str>::from(super::CredentialFailure::RefreshFailed),
 			"refresh_failed",

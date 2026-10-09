@@ -61,7 +61,10 @@ use std::{
 
 use omp_ai::{
 	PrincipalId, ProjectId,
-	auth::{CredentialControlWrite, OAuthControlImport, StoreError, normalize_enterprise_domain},
+	auth::{
+		CredentialControlWrite, CredentialKind, OAuthControlImport, StoreError,
+		normalize_enterprise_domain,
+	},
 };
 use omp_catalog::{
 	ProviderId,
@@ -387,7 +390,7 @@ fn apply(
 			provider: provider_id,
 			principal,
 			identity: Some(identity),
-			kind: Str::new_static(Kind::ApiKey.into()),
+			kind: Str::new_static(CredentialKind::ApiKey.into()),
 			secret,
 			expires_at_ms,
 		}),

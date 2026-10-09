@@ -767,10 +767,15 @@ pub enum CredentialError {
 		/// Kind of the credential the source produced.
 		actual:   CredentialKind,
 	},
-	/// The encrypted credential store cannot decrypt because its key source is
-	/// unavailable to this process.
+	/// The encrypted credential store cannot decrypt because this process has
+	/// no usable key: none is configured, or the OS keychain refused it. The
+	/// route failure it becomes ([`crate::CredentialFailure::StorageLocked`])
+	/// renders the cause and its remedy.
 	#[error("credential storage is locked")]
-	StorageLocked,
+	StorageLocked {
+		/// Why the process has no usable key.
+		cause: crate::CredentialStorageLock,
+	},
 }
 
 /// Future returned across the `dyn CredentialSource` boundary.

@@ -327,11 +327,12 @@ pub fn credential_key_mode(ctx: &omp_con::Ctx) -> CredentialKeyMode {
 	CredentialKeyMode::from_configuration(SV_CREDENTIAL_KEY_SOURCE.get(ctx))
 }
 
-/// A provider's stored logins cannot be decrypted by this process.
+/// A provider's stored logins cannot be decrypted by this process, which
+/// resolved no key source ([`omp_ai::CredentialStorageLock::NoKeySource`]).
 #[derive(Debug, thiserror::Error)]
 #[error(
 	"{provider} has stored logins. Credential storage is locked: {}.",
-	omp_ai::CREDENTIAL_STORAGE_LOCKED_REMEDY
+	omp_ai::CredentialStorageLock::NoKeySource
 )]
 pub struct StoredLoginsLocked {
 	/// Provider whose stored logins are locked.
@@ -1642,27 +1643,43 @@ async fn production_assembly_with_catalog(
 /// stored under another kind, or one a catalog or `models.toml` change left
 /// behind, is usable by the time the first request leases it.
 ///
-/// Composition never fails for it: a row this process cannot decrypt (a key
-/// source unavailable without a terminal) or a write another process won is
-/// logged and left for a later launch, and its requests report why it cannot
-/// be used. Nothing is decrypted unless some row needs re-storing.
+/// Composition never fails for it. Each row is repaired on its own: a row
+/// this process cannot decrypt (a key source unavailable without a terminal,
+/// or a row sealed under a key it does not hold) or a write another process
+/// won is logged with its account and left for a later launch, the rows after
+/// it are still repaired, and its requests report why it cannot be used.
+/// Nothing is decrypted unless some row needs re-storing.
 fn repair_stored_secret_kinds(control: &AuthControlHandle) {
-	match control.repair_static_secret_kinds() {
-		Ok(repairs) => {
-			for repair in repairs {
-				let repaired: &'static str = repair.repaired.into();
-				tracing::info!(
-					account = repair.account.as_str(),
-					stored = repair.stored.as_str(),
-					repaired,
-					"re-stored a credential under the kind its provider's routes lease"
-				);
-			}
+	let outcome = match control.repair_static_secret_kinds() {
+		Ok(outcome) => outcome,
+		Err(error) => {
+			tracing::warn!(
+				error = &error as &dyn std::error::Error,
+				"could not list stored credentials to re-store them under the kind their provider's \
+				 routes lease"
+			);
+			return;
 		},
-		Err(error) => tracing::warn!(
-			error = &error as &dyn std::error::Error,
-			"could not re-store credentials under the kind their provider's routes lease"
-		),
+	};
+	for repair in outcome.repaired {
+		let repaired: &'static str = repair.repaired.into();
+		tracing::info!(
+			account = repair.account.as_str(),
+			stored = repair.stored.as_str(),
+			repaired,
+			"re-stored a credential under the kind its provider's routes lease"
+		);
+	}
+	for failure in outcome.failed {
+		let repaired: &'static str = failure.repair.repaired.into();
+		tracing::warn!(
+			account = failure.repair.account.as_str(),
+			stored = failure.repair.stored.as_str(),
+			repaired,
+			error = &failure.error as &dyn std::error::Error,
+			"could not re-store a credential under the kind its provider's routes lease; a later \
+			 launch retries"
+		);
 	}
 }
 
