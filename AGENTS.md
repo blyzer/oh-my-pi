@@ -80,6 +80,10 @@ all recipes.
 - E2E separate + expensive: `just e2e` (or `e2e-build|e2e-core|e2e-p7|e2e-p8|e2e-p9|e2e-p10|e2e-p11|e2e-p12|e2e-baseline`;
   `just e2e` runs P1-P7, P9, P10, P11, P12, `tool_sources`, then the P8 recorder test).
 - `just ci` ≈ CI format+rust jobs locally.
+- Optional offload: `just remote-test-pkg <pkg>` / `just remote <recipe>` run a recipe on a
+  BuildBuddy Linux runner over the current checkout, uncommitted changes included (needs `bb` and
+  a revocable key; `scripts/remote-verify.sh`, `docs/audits/remote-verification-trial.md`). Linux
+  only: macOS-only proofs (P12, Seatbelt) stay local. Nothing else depends on it.
 
 CI (`.github/workflows/ci.yml`): authoritative Cargo-only gate. Format,
 licences, runtime-symbol contracts and a second workspace lint on Linux;
