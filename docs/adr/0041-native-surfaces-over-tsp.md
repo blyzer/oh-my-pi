@@ -1,6 +1,6 @@
 # 0041. The chat draws natively in Tern over TSP; cell rendering stays the fallback
 
-Status: proposed
+Status: accepted
 Date: 2026-10-09
 Area: interface
 
@@ -85,7 +85,7 @@ It is not an RPC or ACP problem: Tern talks to omp through the pty, not through 
 
 Its wire format, chunking rule and examples are useful as conformance vectors.
 
-## Decision (proposed)
+## Decision
 
 1. **TSP is a second presentation of the same projection.** The chat presents to Tern by
    describing semantic nodes, not by painting cells. Cell rendering stays the default and the
@@ -132,7 +132,7 @@ Its wire format, chunking rule and examples are useful as conformance vectors.
 | Phase | Scope | Exit criterion |
 | --- | --- | --- |
 | 0 | Wire module, probe arm, input routing, a port of v1's reference applier (`apply.ts`) as a test oracle, opt-out and recording | Unit tests: chunk cut rule (property), framing round-trip, probe demux; no user-visible change |
-| 1 | Handshake, with the optimistic start on `TERM_PROGRAM=tern` (revoked after 1 s without a reply); inline surface; transcript blocks as `card`/`md` (append)/`section`/generic `tool`/`rows`; `settle`; credits and ack; composer and status band as `rows` (or a minimal `editor` with a caret); overlays fall back to cell rendering; close/adopt across epochs | Real-PTY e2e against a scripted fake Tern (hello before DA1, acks, document assertions) plus the fallback paths (DA1 first, multiplexer, `OMP_TSP=0`) |
+| 1 | Handshake, with the optimistic start on `TERM_PROGRAM=tern` (revoked after 1 s without a reply); inline surface; transcript blocks as `card`/`md` (append)/`section`/generic `tool`/`rows`; `settle`; credits and ack; composer as a minimal `editor` (caret, no native editing) and status band as `rows`; overlays fall back to cell rendering; close/adopt across epochs | Real-PTY e2e against a scripted fake Tern (hello before DA1, acks, document assertions) plus the fallback paths (DA1 first, multiplexer, `OMP_TSP=0`) |
 | 2 | Per-card descriptions (bash `ansi`+`follow`, edit `diff`, read `code`, todo `checklist`, task `agent`), status as `status`/`seg`, toasts, images via blobs (no palette `t`: Tern's theme applies) | Each card's description checked against the applier; `rows` count per frame logged |
 | 3 | `editor` with `edit`/`undo`/`send`, autocomplete overlay at the caret, pickers and settings as `picker`/`prefs`, modal approvals in `layer`, `screen` surfaces for full-screen apps | Editor edits round-trip through UTF-16 offsets; picker selection drives the same commands as the cell UI |
 | 4 (optional) | `flow` surfaces for print-mode output, stylesheets and `el`, Windows ConPTY input, `TERN_BLOB_DIR` | Owner decision per item |
@@ -194,16 +194,26 @@ Its wire format, chunking rule and examples are useful as conformance vectors.
       how often credits ran out.
    4. If the coarse stream looks jumpy under `raw`, the default becomes `paced`.
 
-### Still open
+### Remaining decisions (2026-10-09)
 
-1. Where the presenter lives: `omp-chat` beside `Host` (recommended), or an app adapter. Whether
-   the wire module stays in `omp-tui` (recommended) or becomes an `omp-tsp` crate.
-2. Node source: the semantic projection first (recommended), or component-tree lowering first.
-3. Bash output as `ansi` (re-encoded SGR), or as `code`/`text` spans.
-4. Phase 1 composer: `rows` (no caret) or a minimal `editor` node.
-5. Phase 1 overlays: fall back to cell rendering while one is open, or `rows` inside `overlay`.
-6. Whether the GUI window host should later consume the same semantic description instead of
-   cells.
+The owner accepted the recommendations for the six decisions left open:
+
+6. **Where the code lives.** The TSP presenter lives in `omp-chat`, beside `Host`, sharing
+   `Presenter`. The wire module, probe arm and input routing stay in `omp-tui`
+   (`crates/tui/src/tsp/`); there is no `omp-tsp` crate. The terminal keeps one owner.
+7. **Node source: the semantic projection first.** Blocks come from `BlockKind` and cards from a
+   per-card describe hook over `CardView`. Lowering the component tree is the fallback, then
+   `rows`.
+8. **Bash output as `ansi`.** Process output goes out as an `ansi` node with `follow`, re-encoded
+   to SGR at the TSP output boundary (the second materialization point noted under 0030).
+9. **Phase 1 composer: a minimal `editor` node.** It has text, a cursor converted to UTF-16, a
+   placeholder and `focus`. Every key stays omp's: no `edit`, `undo` or `send` before phase 3.
+   The status band is `rows` in phase 1.
+10. **Phase 1 overlays fall back to cell rendering.** While an overlay is open, the surface is
+    suspended and the existing renderer draws it; the surface resumes when it closes. Native
+    overlays arrive in phase 3.
+11. **The GUI window host is not decided now.** Whether it later consumes the same semantic
+    description instead of cells is deferred; nothing in phases 0 to 4 depends on it.
 
 ## Status in omp
 

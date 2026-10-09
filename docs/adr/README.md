@@ -91,7 +91,7 @@ same change that moves the code.
 - [0033](0033-verification-is-part-of-the-interface.md) — A debug protocol defines what the UI is
 - [0034](0034-transcript-is-a-protocol.md) — Blocks, exactly-once history, append-only scrollback; TLA+-checked
 - [0037](0037-acp-editor-io.md) — ACP editors supply the document base; writes commit through the authority, then sync back
-- [0041](0041-native-surfaces-over-tsp.md) — The chat draws natively in Tern over TSP; cell rendering stays the fallback (proposed)
+- [0041](0041-native-surfaces-over-tsp.md) — The chat draws natively in Tern over TSP; cell rendering stays the fallback
 
 ### Stack
 - [0035](0035-rust-for-the-engine.md) — Language choice is architecture; Rust for the engine
