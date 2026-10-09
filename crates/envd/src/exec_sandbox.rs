@@ -833,8 +833,10 @@ impl SpawnWrapper for ExecSandboxAttempt {
 	/// reached the network, whether the shell fails to spawn it (exit 127 or
 	/// 126) or a launcher fails to exec it after its own spawn succeeded, so
 	/// only a program [`FilePolicy::launchable`] admits counts, and none counts
-	/// when the shell found no program for a bare name. The program is
-	/// resolved and judged only once a URL is found.
+	/// when the shell found no program for a bare name. The program is asked
+	/// for and judged only once a URL is found. The shell has already resolved
+	/// it for this attempt's read check, so asking costs nothing more, while
+	/// the judgment's own path walk is spent only then.
 	fn observe_launch<'p>(
 		&self,
 		program: &dyn Fn() -> Option<Cow<'p, Path>>,
@@ -860,10 +862,17 @@ impl FilePolicy {
 	/// Whether `program` can run in this policy's view: its read is admitted
 	/// (judged here, so a refusal records no denial), and only then, as the
 	/// shell's path search judges it, it is not a directory and is executable
-	/// by this user. A program the sandbox hides never counts, so a diag never
-	/// claims it ran and never tells what lies behind the sandbox: `exec`
-	/// reaches the launch without the shell's own read check, and the sandbox
-	/// refuses such a program only after the launcher's spawn succeeded.
+	/// by this user. A program this policy hides never counts, so a diag never
+	/// claims it ran and never tells what lies behind the sandbox. The shell
+	/// already refuses to launch such a program, a simple command and `exec`
+	/// alike: `compose_std_command` reads it through the attempt's
+	/// [`PathPolicy`] before it observes the launch, so the launch ends in a
+	/// read denial. Judging it here again keeps the fact true without relying
+	/// on that order. The backend is no substitute. Bubblewrap masks a
+	/// `read_deny` root, but Seatbelt's `read_deny` refuses only reads (its
+	/// profile allows `process-exec*`), so there an interpreter cannot read a
+	/// hidden script while a hidden native binary still runs when something
+	/// other than the shell launches it, such as `xargs` or `env`.
 	fn launchable(&self, program: &Path) -> bool {
 		self.check_read(program).is_ok() && !program.is_dir() && program.executable()
 	}
@@ -2023,10 +2032,10 @@ mod tests {
 	/// given a network URL, once, consumed with its other facts; a URL that is
 	/// only text never counts, and neither does one handed to a program that
 	/// cannot run (a bare name the shell found nowhere, a missing path, a
-	/// directory, a file without its exec bit) or one the sandbox's own view
-	/// hides (an executable under `read_deny`), which leaves later launches
-	/// free to count. Under `scoped` the broker records what clients ask for,
-	/// so arguments are not scanned at all.
+	/// directory, a file without its exec bit) or one the session's file
+	/// policy hides (an executable under `read_deny`), which leaves later
+	/// launches free to count. Under `scoped` the broker records what clients
+	/// ask for, so arguments are not scanned at all.
 	#[cfg(unix)]
 	#[test]
 	fn attempts_record_network_urls_only_without_a_network() {
@@ -2122,9 +2131,12 @@ mod tests {
 		!program.is_dir() && program.executable()
 	}
 
-	/// A launch's program is resolved only when it could count: never under
-	/// `scoped`, never for a launch with no network URL, and never once the
-	/// attempt has recorded one, so the default posture pays nothing for it.
+	/// A launch's program is asked for, and judged, only when it could count:
+	/// never under `scoped`, never for a launch with no network URL, and never
+	/// once the attempt has recorded one, so the default posture spends
+	/// nothing on the judgment. That the shell resolves a program only when
+	/// asked is pinned on its side by
+	/// `compose_std_command_resolves_programs_only_when_asked`.
 	#[test]
 	fn programs_are_resolved_only_for_a_url_without_a_network() {
 		let workspace = tempfile::tempdir().expect("workspace");

@@ -90,8 +90,13 @@ client and framing boundary; it does not contain an alternate host.
   generic text once per session. A disabled network has no broker to record
   anything, so there a failed command that launched a program with a network
   URL among its arguments (seen through `SpawnWrapper::observe_launch`; the
-  program must be one the sandbox's own view lets run) gets the mode's
-  locator text instead, from the same once-per-session slot. That text
+  program must be one the session's file policy lets the shell read, and
+  executable) gets the mode's locator text instead, from the same
+  once-per-session slot. The shell reads every program it launches through
+  that policy first, `exec` included, so one a `read_deny` root hides ends
+  in a read denial and is never launched; Seatbelt's `read_deny` refuses
+  only reads, so a hidden native binary that a utility builtin (`xargs`) or
+  another program (`env`) launches still runs there. That text
   reports that a program was given a network URL, rather than an output
   marker; it does not quote the URL or its host. It covers a quiet client
   such as `curl -s`, but not a command whose final status is 0 after a quiet

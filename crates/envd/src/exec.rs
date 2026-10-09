@@ -5312,8 +5312,8 @@ mod tests {
 	/// network URL among its arguments gets the mode's locator text, once per
 	/// session. A success (a pipeline whose last stage succeeds included), a
 	/// failure without a URL, a URL that is only text, a builtin given one, a
-	/// program that cannot run, one the sandbox's own view hides and a
-	/// `scoped` session report nothing.
+	/// program that cannot run, one the session's file policy hides (a read
+	/// denial, `exec` included) and a `scoped` session report nothing.
 	/// Runs on every unix host: the sandbox is an environment-only wrapper that
 	/// reports a disabled network, and `/usr/bin/false` stands in for a client
 	/// failing quietly on a host it cannot reach.
@@ -5381,16 +5381,22 @@ mod tests {
 			assert_eq!(exit, Some(code), "{script}");
 			assert!(network_diags(&diags).is_empty(), "{script}: {:?}", diag_texts(&diags));
 		}
-		// Nor does a program the sandbox's own view hides count: `exec` reaches
-		// the launch without the shell's read check, and a real backend refuses
-		// such a program only after the launcher's spawn. The environment-only
-		// wrapper enforces nothing, so here the client runs and fails, which
-		// shows the judgment follows the sandbox's view and not envd's.
-		let hidden_exec = format!("exec {} -q https://example.invalid", hidden_client.display());
-		let (outcome, exit, output, diags) = run(&hidden_exec).await;
-		assert_eq!(outcome, ExecOutcome::Failed as i32, "{}", String::from_utf8_lossy(&output));
-		assert_eq!(exit, Some(1));
-		assert!(network_diags(&diags).is_empty(), "{:?}", diag_texts(&diags));
+		// Nor does a program the session's file policy hides. The shell reads
+		// every program it launches through that policy first, `exec` included,
+		// so the launch ends in a read denial before anything runs. The
+		// environment-only wrapper enforces nothing, so only that check keeps
+		// the client from running here.
+		for script in [
+			format!("exec {} -q https://example.invalid", hidden_client.display()),
+			format!("{} -q https://example.invalid", hidden_client.display()),
+		] {
+			let (outcome, exit, output, diags) = run(&script).await;
+			let output = String::from_utf8_lossy(&output);
+			assert_eq!(outcome, ExecOutcome::Denied as i32, "{script}: {output}");
+			assert_ne!(exit, Some(0), "{script}");
+			assert!(output.contains("sandbox denied read"), "{script}: {output}");
+			assert!(network_diags(&diags).is_empty(), "{script}: {:?}", diag_texts(&diags));
+		}
 		// A pipeline whose last stage succeeds ends `Succeeded`, so a quiet
 		// client that failed before it reports nothing (ADR 0028, 2026-10-08
 		// amendment, point 4).
@@ -5512,6 +5518,71 @@ mod tests {
 		let (outcome, _, _, diags) = run_failure(&host, script_request(session, curl)).await;
 		assert_eq!(outcome, ExecOutcome::Failed as i32);
 		assert!(diags.is_empty(), "{:?}", diag_texts(&diags));
+		host.close_session(session).expect("session closes");
+	}
+
+	/// Live Seatbelt: `read_deny` refuses only reads there, and the profile
+	/// allows `process-exec*`, so the kernel would run a native binary behind a
+	/// `read_deny` root. The shell never launches one: a simple command and an
+	/// `exec` of it each end in a read denial before any spawn, and under a
+	/// disabled network the URL it was given earns no network diag. The same
+	/// binary outside the root runs. The binary is this test executable, hard
+	/// linked beside itself (one volume, no copy) and asked only to list tests.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn native_programs_behind_read_deny_never_run_under_seatbelt() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let test_binary = std::env::current_exe().expect("the test binary runs");
+		let root = tempfile::tempdir_in(
+			test_binary
+				.parent()
+				.expect("the test binary has a directory"),
+		)
+		.expect("workspace beside the test binary");
+		let workspace = root.path().canonicalize().unwrap();
+		let hidden = workspace.join("hidden");
+		std::fs::create_dir(&hidden).expect("hidden root");
+		let hidden_client = hidden.join("client");
+		let admitted_client = workspace.join("client");
+		for link in [&hidden_client, &admitted_client] {
+			std::fs::hard_link(&test_binary, link).expect("native client");
+		}
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				network_mode: crate::exec_settings::SandboxNetworkMode::Disabled,
+				read_deny: vec![Str::from(hidden.to_string_lossy().as_ref())],
+				..crate::exec_settings::SandboxSettings::default()
+			},
+			&workspace,
+		);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+
+		let admitted = format!("exec {} --list https://example.invalid", admitted_client.display());
+		let (outcome, exit, output, _) = run_failure(&host, script_request(session, &admitted)).await;
+		assert_eq!(outcome, ExecOutcome::Exited as i32, "{}", String::from_utf8_lossy(&output));
+		assert_eq!(exit, Some(0));
+		for script in [
+			format!("exec {} --list https://example.invalid", hidden_client.display()),
+			format!("{} --list https://example.invalid", hidden_client.display()),
+		] {
+			let (outcome, exit, output, diags) =
+				run_failure(&host, script_request(session, &script)).await;
+			let output = String::from_utf8_lossy(&output);
+			assert_eq!(outcome, ExecOutcome::Denied as i32, "{script}: {output}");
+			assert_ne!(exit, Some(0), "{script}");
+			assert!(output.contains("sandbox denied read"), "{script}: {output}");
+			assert!(network_diags(&diags).is_empty(), "{script}: {:?}", diag_texts(&diags));
+		}
 		host.close_session(session).expect("session closes");
 	}
 
