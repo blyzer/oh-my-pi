@@ -576,6 +576,7 @@ pub fn bind_environment_approvals<C>(
 pub struct EnvToolExecutor {
 	client:    omp_env::EnvClient,
 	approvals: omp_agent::ApprovalRoute,
+	posture:   PostureNotice,
 }
 
 impl EnvToolExecutor {
@@ -584,8 +585,37 @@ impl EnvToolExecutor {
 	/// policy) becomes one prompt on `approvals`.
 	#[must_use]
 	pub const fn new(client: omp_env::EnvClient, approvals: omp_agent::ApprovalRoute) -> Self {
-		Self { client, approvals }
+		Self { client, approvals, posture: PostureNotice(None) }
 	}
+}
+
+/// Installs the session's tool authority on `kernel`: `executor` runs the
+/// calls the environment admits, and `admission` admits the native calls the
+/// kernel runs itself.
+///
+/// Both report the session's approval posture
+/// ([`SettingsAdmission::with_notices`]) from one shared report, so the live
+/// session is told once, at whichever admission comes first: over an attached
+/// project daemon every environment tool is admitted there, never by the
+/// kernel. A switch to another session ([`Kernel::session_switched`]) re-arms
+/// the report for the next session. A rewind does not: the session stays the
+/// same (a tool-tail retry rewinds too), even when the rewind drops the turn
+/// that holds the notice.
+#[must_use]
+pub fn install_tool_authority<C>(
+	kernel: Kernel<C>,
+	executor: EnvToolExecutor,
+	admission: SettingsAdmission,
+) -> Kernel<C> {
+	let posture = admission.posture.clone();
+	if let Some(pending) = &posture.0 {
+		kernel
+			.jobs()
+			.observe_sessions(Arc::clone(pending) as Arc<dyn omp_agent::SessionObserver>);
+	}
+	kernel
+		.with_external_executor(Arc::new(EnvToolExecutor { posture, ..executor }))
+		.with_tool_admission(Arc::new(admission))
 }
 
 const OUTCOME_REPLICATION_ATTEMPTS: usize = 3;
@@ -846,24 +876,84 @@ fn admission_specs(
 pub struct SettingsAdmission {
 	settings:    omp_envd::tool_settings::ToolSettings,
 	sandbox:     omp_envd::admission::SandboxState,
-	notice:      Option<PostureNotice>,
+	posture:     PostureNotice,
 	/// Names the hosts the fetches of the native tools this kernel runs reach
 	/// ([`Self::with_fetch_hosts`]); without it every such fetch is asked as
 	/// the tool's own.
 	fetch_hosts: Option<FetchHostNamer>,
 }
 
-/// The one-per-session report that `yolo` runs without a confining sandbox.
-struct PostureNotice {
+/// The live session's one report that its `yolo` runs with no sandbox
+/// confining it.
+///
+/// The report ([`omp_envd::admission::ApprovalPosture`]) is a typed
+/// `approval-posture` notice on the kernel mailbox, posted when the first call
+/// of any tool is admitted. Calls are admitted in two places: by the kernel
+/// ([`SettingsAdmission`], for the native tools this process runs) and by the
+/// environment that runs them ([`EnvToolExecutor`], for every environment tool
+/// of a session attached to the project daemon and the worker tools of any
+/// composition). [`install_tool_authority`] gives both clones of one report,
+/// so the session is told once, at whichever admission comes first. The
+/// default reports nothing.
+#[derive(Clone, Default)]
+struct PostureNotice(Option<Arc<PendingPosture>>);
+
+/// A posture that still has to be reported, and where to.
+struct PendingPosture {
 	posture: omp_envd::admission::ApprovalPosture,
 	mailbox: flume::Sender<omp_agent::Up>,
 	posted:  std::sync::atomic::AtomicBool,
+}
+
+/// The kernel outlives the session it serves, so a switch to another session
+/// re-arms the report for that session's first admission.
+impl omp_agent::SessionObserver for PendingPosture {
+	/// A rewind keeps the session, and the report it was given.
+	fn rewound(&self) {}
+
+	fn switched(&self) {
+		self
+			.posted
+			.store(false, std::sync::atomic::Ordering::Release);
+	}
+}
+
+impl PostureNotice {
+	/// Posts the notice unless an earlier admission did.
+	fn post(&self) {
+		let Some(pending) = &self.0 else {
+			return;
+		};
+		if pending
+			.posted
+			.swap(true, std::sync::atomic::Ordering::AcqRel)
+		{
+			return;
+		}
+		let Ok(data) = serde_json::value::to_raw_value(&pending.posture) else {
+			return;
+		};
+		let _ = pending
+			.mailbox
+			.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
+				kind: Str::new_static("warn"),
+				name: Str::new_static(omp_envd::admission::APPROVAL_POSTURE_NOTICE),
+				data,
+				body: pending.posture.body(),
+			}));
+	}
 }
 
 impl SettingsAdmission {
 	/// Resolves the policy from the effective control plane plus the
 	/// invocation's `--approval-mode` override, against the sandbox the control
 	/// plane constructs for `workspace_root`.
+	///
+	/// That sandbox is also the one an attached project daemon enforces: a
+	/// session joins only a daemon whose sandbox and approval policy equals its
+	/// own (`omp_envd::daemon_policy`), so the environment admits the calls it
+	/// runs against the same settings. The daemon probes them on its own, and
+	/// nothing checks that both probes agree (ADR 0028, 2026-10-09 amendment).
 	#[must_use]
 	pub fn new(
 		ctx: &omp_con::Ctx,
@@ -874,7 +964,7 @@ impl SettingsAdmission {
 			settings:    omp_envd::tool_settings::ToolSettings::from_con(ctx)
 				.with_approval_mode_override(approval_mode),
 			sandbox:     omp_envd::admission::SandboxState::probe(ctx, workspace_root),
-			notice:      None,
+			posture:     PostureNotice::default(),
 			fetch_hosts: None,
 		}
 	}
@@ -890,44 +980,27 @@ impl SettingsAdmission {
 		self
 	}
 
-	/// Reports a `yolo` that no sandbox confines once, as a typed notice on
-	/// `mailbox`, when the first call is admitted: downgraded to `write` when
-	/// it is the default, respected but unconfined when the user asked for it.
+	/// Reports a `yolo` that no sandbox confines once per session, as a typed
+	/// notice on `mailbox`, when the first call is admitted: downgraded to
+	/// `write` when it is the default, respected but unconfined when the user
+	/// asked for it. The calls the environment admits report it too once
+	/// [`install_tool_authority`] installs this admission.
 	#[must_use]
 	pub fn with_notices(mut self, mailbox: flume::Sender<omp_agent::Up>) -> Self {
-		self.notice = omp_envd::admission::ApprovalPosture::resolve(
-			self.settings.configured_approval(),
-			self.sandbox,
-		)
-		.map(|posture| PostureNotice {
-			posture,
-			mailbox,
-			posted: std::sync::atomic::AtomicBool::new(false),
-		});
+		self.posture = PostureNotice(
+			omp_envd::admission::ApprovalPosture::resolve(
+				self.settings.configured_approval(),
+				self.sandbox,
+			)
+			.map(|posture| {
+				Arc::new(PendingPosture {
+					posture,
+					mailbox,
+					posted: std::sync::atomic::AtomicBool::new(false),
+				})
+			}),
+		);
 		self
-	}
-
-	fn report_posture(&self) {
-		let Some(notice) = &self.notice else {
-			return;
-		};
-		if notice
-			.posted
-			.swap(true, std::sync::atomic::Ordering::AcqRel)
-		{
-			return;
-		}
-		let Ok(data) = serde_json::value::to_raw_value(&notice.posture) else {
-			return;
-		};
-		let _ = notice
-			.mailbox
-			.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
-				kind: Str::new_static("warn"),
-				name: Str::new_static(omp_envd::admission::APPROVAL_POSTURE_NOTICE),
-				data,
-				body: notice.posture.body(),
-			}));
 	}
 }
 
@@ -951,7 +1024,7 @@ impl omp_agent::ToolAdmission for SettingsAdmission {
 		args: &serde_json::value::RawValue,
 		fetch_locators: &[Str],
 	) -> omp_agent::ToolAdmissionVerdict {
-		self.report_posture();
+		self.posture.post();
 		let resolved = self
 			.settings
 			.approval_for(name, name, effects, confinement, self.sandbox);
@@ -1070,6 +1143,7 @@ impl ExternalToolExecutor for EnvToolExecutor {
 	fn invoke(&self, request: ExternalDispatchRequest) -> ExternalDispatchStream {
 		let client = self.client.clone();
 		let approvals = self.approvals.clone();
+		let posture = self.posture.clone();
 		let outcome_store = request.blobs.clone();
 		Box::pin(async_stream::stream! {
 			let client = match client.with_principal(request.session_id.clone(), "kernel") {
@@ -1128,6 +1202,10 @@ impl ExternalToolExecutor for EnvToolExecutor {
 			let authorized_at_ms = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
 				.map_or(0, |duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+			// The environment admits the call on its committed arguments: the
+			// session hears its posture first, before any prompt that admission
+			// files.
+			posture.post();
 			if let Err(source) = invocation
 				.commit_args(Bytes::copy_from_slice(request.args.get().as_bytes()), token, authorized_at_ms, None)
 				.await
@@ -2683,13 +2761,14 @@ pub async fn compose_kernel(
 	// here, outside the environment's gate, so their fetches are keyed on the
 	// hosts that environment's resolvers name.
 	let fetch_hosts = kernel.inference().environment().fetch_hosts();
-	let mut kernel = kernel
-		.with_external_executor(Arc::new(EnvToolExecutor::new(tool_client, approvals)))
-		.with_tool_admission(Arc::new(
-			SettingsAdmission::new(&ctx, options.approval_mode, &project_root)
-				.with_notices(notice_mailbox)
-				.with_fetch_hosts(fetch_hosts),
-		));
+	let admission = SettingsAdmission::new(&ctx, options.approval_mode, &project_root)
+		.with_notices(notice_mailbox)
+		.with_fetch_hosts(fetch_hosts);
+	// The calls the environment admits (every environment tool of a session
+	// attached to the project daemon, worker tools everywhere) report the
+	// session's approval posture too, once whichever admission comes first.
+	let mut kernel =
+		install_tool_authority(kernel, EnvToolExecutor::new(tool_client, approvals), admission);
 	kernel.register_live_component(con_journal.live_component());
 	for component in live_python_components {
 		kernel.register_live_component(Box::new(component));
@@ -3965,7 +4044,7 @@ mod tests {
 			settings:    ToolSettings::default()
 				.with_approval_mode_override(Some(omp_envd::tool_settings::ApprovalMode::AlwaysAsk)),
 			sandbox:     SandboxState::Off,
-			notice:      None,
+			posture:     super::PostureNotice::default(),
 			fetch_hosts: None,
 		};
 		let locators = [sf!("https://docs.rs/serde")];
@@ -4026,7 +4105,7 @@ mod tests {
 		let admission = |settings| super::SettingsAdmission {
 			settings,
 			sandbox: SandboxState::Active,
-			notice: None,
+			posture: super::PostureNotice::default(),
 			fetch_hosts: None,
 		};
 
@@ -4063,6 +4142,71 @@ mod tests {
 			explicit.admit("bash", &Effects::empty(), Confinement::ExecSandbox, &args, &[]),
 			ToolAdmissionVerdict::Allow
 		);
+	}
+
+	/// The session's one posture report is shared by the kernel's admission
+	/// and the environment executor ([`super::install_tool_authority`]): the
+	/// first admission at either posts the typed notice, a later one at either
+	/// adds nothing, a rewind keeps the live session's report spent, and a
+	/// switch to another session re-arms it for that session.
+	#[test]
+	fn the_posture_report_posts_once_per_session_served() {
+		use omp_agent::{EnvEvent, SessionObserver as _, ToolAdmission as _, Up};
+		use omp_envd::{admission::SandboxState, tool_settings::ToolSettings};
+		use omp_tool::{Confinement, Effects};
+
+		let args = serde_json::value::RawValue::from_string(String::from("{}")).expect("raw args");
+		let (mailbox, notices) = flume::unbounded();
+		let admission = super::SettingsAdmission {
+			settings:    ToolSettings::default(),
+			sandbox:     SandboxState::Off,
+			posture:     super::PostureNotice::default(),
+			fetch_hosts: None,
+		}
+		.with_notices(mailbox);
+		// What `install_tool_authority` hands the executor and the session
+		// observers.
+		let executor = admission.posture.clone();
+		let Some(observer) = executor.0.clone() else {
+			panic!("a defaulted yolo without a sandbox is reported");
+		};
+		let admit = || {
+			let _ = admission.admit("bash", &Effects::empty(), Confinement::ExecSandbox, &args, &[]);
+		};
+
+		admit();
+		executor.post();
+		admit();
+		let posted = notices.drain().collect::<Vec<_>>();
+		let [Up::Env(EnvEvent::TypedNotice { kind, name, data, body })] = posted.as_slice() else {
+			panic!("one typed notice for the first session, {} posted", posted.len());
+		};
+		assert_eq!(kind.as_str(), "warn");
+		assert_eq!(name.as_str(), omp_envd::admission::APPROVAL_POSTURE_NOTICE);
+		assert_eq!(
+			serde_json::from_str::<serde_json::Value>(data.get()).expect("typed payload"),
+			serde_json::json!({
+				"configured": "yolo",
+				"provenance": "default",
+				"effective": "write",
+				"sandbox": { "state": "off" },
+			})
+		);
+		assert_eq!(
+			body.as_str(),
+			"Approval `yolo` is the default and needs an active sandbox; `write` is in force \
+			 (sandbox off)."
+		);
+
+		observer.rewound();
+		executor.post();
+		admit();
+		assert!(notices.is_empty(), "a rewind keeps the session, and its spent report");
+
+		observer.switched();
+		executor.post();
+		admit();
+		assert_eq!(notices.drain().count(), 1, "the next session is told once");
 	}
 
 	#[tokio::test]

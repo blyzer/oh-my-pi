@@ -40,8 +40,11 @@ client and framing boundary; it does not contain an alternate host.
   `Host` tool is admitted as if no sandbox existed (`write` for that call, so
   its exec tier prompts). With no active sandbox an `ExecSandbox` tool resolves
   to the `exec` tier, and one typed `approval-posture` notice reports the
-  downgrade or the unconfined `yolo`. The host that registers a tool asserts
-  its confinement; worker, extension and MCP declarations are always `Host`.
+  downgrade or the unconfined `yolo`: the driver posts it at the session's
+  first admission of any tool, whether the kernel or the environment (an
+  attached project daemon included) admits the call. The host that registers
+  a tool asserts its confinement; worker, extension and MCP declarations are
+  always `Host`.
   The sandbox's in-shell path check walks each path as the kernel does
   (links followed in place, `..` applied after them) and a redirection opens
   exactly the path it judged. Under the default `host` read mode reads follow
