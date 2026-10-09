@@ -2307,6 +2307,43 @@ pub async fn compose_kernel(
 			.into_iter()
 			.map(|extension| extension.spec),
 	);
+	let terminal = terminal_identity();
+	let journal_path = select_journal_path(
+		&sessions_dir,
+		options.session.as_deref(),
+		options.fork.as_deref(),
+		options.continue_session,
+		options.ephemeral,
+		terminal.as_deref(),
+	)?;
+	let cfg_files = crate::cfg::CfgFiles::new(Some(&project_root));
+	// A composition without an explicit class (the main chat, `--resume`)
+	// presents the class journaled on its live session, so a resumed child
+	// runs on its own class configuration; a spawned child arrives configured.
+	let class_scope = match (&options.agent, &cfg_files) {
+		(Some(_), _) => con_journal::ClassScope::Composed,
+		(None, Ok(files)) => con_journal::ClassScope::Journaled(Arc::new(files.clone())),
+		(None, Err(error)) => {
+			tracing::warn!(%error, "class cfgs unavailable; a resumed child keeps this console");
+			con_journal::ClassScope::Composed
+		},
+	};
+	// The environment fixes its sandbox and approval policy when it starts, so
+	// a resumed child's class is presented before it does.
+	con_journal::present_journaled_class(&ctx, &class_scope, &journal_path);
+	let environment_policy = omp_envd::daemon_policy::from_con(&ctx);
+	// Without the policy the configuration files resolve, a spawned daemon's
+	// hello is checked instead.
+	let spawn_policy = match &cfg_files {
+		Ok(files) => files
+			.daemon_policy()
+			.inspect_err(|error| tracing::debug!(%error, "configured daemon policy unavailable"))
+			.ok(),
+		Err(error) => {
+			tracing::debug!(%error, "configured daemon policy unavailable");
+			None
+		},
+	};
 	let environment =
 		omp_envd::ProjectEnvironment::attach(&project_root, &state_dir, omp_envd::AttachOptions {
 			py_eval: options.py_eval,
@@ -2316,6 +2353,7 @@ pub async fn compose_kernel(
 			con: Arc::clone(&ctx),
 			bridges,
 			spawn_idle_timeout: options.spawn_idle_timeout,
+			spawn_policy,
 		})
 		.await?;
 	let admission_gate = environment.admission_gate();
@@ -2471,15 +2509,6 @@ pub async fn compose_kernel(
 		bind_reflection(inference.environment(), inference.auxiliary_inference())?;
 	}
 
-	let terminal = terminal_identity();
-	let journal_path = select_journal_path(
-		&sessions_dir,
-		options.session.as_deref(),
-		options.fork.as_deref(),
-		options.continue_session,
-		options.ephemeral,
-		terminal.as_deref(),
-	)?;
 	let debug_session = journal_path
 		.file_stem()
 		.and_then(|name| name.to_str())
@@ -2507,22 +2536,17 @@ pub async fn compose_kernel(
 		}
 		Session::create(&journal_path, component_registry)?
 	};
-	// A composition without an explicit class (the main chat, `--resume`)
-	// presents the class journaled on its live session, so a resumed child
-	// runs on its own class configuration; a spawned child arrives configured.
-	let class_scope = if options.agent.is_some() {
-		con_journal::ClassScope::Composed
-	} else {
-		match crate::cfg::CfgFiles::new(Some(&project_root)) {
-			Ok(files) => con_journal::ClassScope::Journaled(Arc::new(files)),
-			Err(error) => {
-				tracing::warn!(%error, "class cfgs unavailable; a resumed child keeps this console");
-				con_journal::ClassScope::Composed
-			},
-		}
-	};
 	let con_journal =
 		Arc::new(con_journal::ConJournal::attach(Arc::clone(&ctx), session.dom(), class_scope));
+	// The session never presents a policy its environment does not enforce:
+	// a class the early presentation could not read refuses the composition.
+	let presented_policy = omp_envd::daemon_policy::from_con(&ctx);
+	if presented_policy != environment_policy {
+		return Err(HeadlessError::EnvironmentPolicyDrift {
+			composed:  environment_policy,
+			presented: presented_policy,
+		});
+	}
 	apply_model_override(&ctx, model.as_str(), options.model_override)?;
 	// A child journals the class and recursion depth it runs at, so resuming
 	// its session later (from the main chat or `--resume`) scopes rules to

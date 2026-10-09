@@ -8249,6 +8249,7 @@ dependencies = [
  "omp-core",
  "omp-proto",
  "parking_lot",
+ "rand 0.10.2",
  "serde",
  "tempfile",
  "thiserror 2.0.20",

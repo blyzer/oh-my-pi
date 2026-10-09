@@ -397,10 +397,11 @@ async fn project_daemon(
 	let deadline = Instant::now() + READY_TIMEOUT;
 	let mut problem;
 	let pid = loop {
-		// The owner socket's name is keyed by the daemon executable's build,
-		// which this test binary cannot compute; it shares the document
-		// socket's prefix. That prefix hashes the canonical state directory,
-		// so it is only final once the chat has created the directory.
+		// The owner socket's name is keyed by the daemon executable's build and
+		// by the sandbox and approval policy it enforces, which this test
+		// binary does not compute; it shares the document socket's prefix.
+		// That prefix hashes the canonical state directory, so it is only
+		// final once the chat has created the directory.
 		let documents = project_state::document_socket(&state);
 		let directory = documents.parent().expect("socket directory");
 		let prefix = documents
