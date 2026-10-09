@@ -3186,12 +3186,14 @@ fn terminal_marker(sessions_dir: &Path, terminal: &str) -> PathBuf {
 	sessions_dir.join(".continue").join(key.as_str())
 }
 
-/// The most recently modified `.oms` journal in `sessions_dir`, if any.
-fn newest_project_session(sessions_dir: &Path) -> Result<Option<PathBuf>, HeadlessError> {
+/// The most recently modified `.oms` journal directly in `sessions_dir`, if
+/// any: what `--continue` resumes in a project's session directory and RPC
+/// `open_session` resumes in a host-keyed one.
+pub fn newest_session(sessions_dir: &Path) -> std::io::Result<Option<PathBuf>> {
 	let entries = match fs::read_dir(sessions_dir) {
 		Ok(entries) => entries,
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-		Err(error) => return Err(error.into()),
+		Err(error) => return Err(error),
 	};
 	let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
 	for entry in entries {
@@ -3309,7 +3311,7 @@ fn select_journal_path(
 		}
 		// No breadcrumb exists for this terminal, so
 		// continue the project's newest journal before creating a fresh one.
-		if let Some(path) = newest_project_session(sessions_dir)? {
+		if let Some(path) = newest_session(sessions_dir)? {
 			return Ok(path);
 		}
 	}

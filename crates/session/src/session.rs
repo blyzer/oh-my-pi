@@ -1,5 +1,6 @@
 use std::{
 	fmt::Write as _,
+	iter::FusedIterator,
 	path::Path,
 	time::{SystemTime, SystemTimeError, UNIX_EPOCH},
 };
@@ -359,6 +360,13 @@ impl Session {
 			.entry_index
 			.get(&id)
 			.and_then(|index| self.entries.get(*index))
+	}
+
+	/// Every materialized journal entry in append order, across all branches.
+	pub fn entries(
+		&self,
+	) -> impl DoubleEndedIterator<Item = &Entry> + ExactSizeIterator + FusedIterator + Clone + '_ {
+		self.entries.iter()
 	}
 
 	/// Number of materialized journal entries (the durable event index).

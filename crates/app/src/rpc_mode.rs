@@ -1,5 +1,7 @@
 //! Stateful JSON-line RPC actor over the journal-first kernel and session DOM.
 
+mod history;
+
 use std::{
 	collections::{BTreeMap, HashMap, HashSet},
 	fs,
@@ -1703,6 +1705,7 @@ where
 	let mut replica = Dom::from_snapshot(&snapshot);
 	let mut projection = RpcEventProjection::default();
 	let _ = projection.observe(&replica);
+	let mut event_filter = history::EventFilter::default();
 	let kernel_events = kernel.subscribe();
 	let mailbox = kernel.mailbox();
 
@@ -2090,12 +2093,8 @@ where
 										if !exists {
 											RpcResponse::error(id, command.as_str(), format!("Model not found: {key}"), Some(RpcErrorCode::new("model_not_found")))
 										} else {
-											match set_con(&runtime, "ai_model", &key) {
-												Ok(()) => {
-													runtime.model = Str::new(&key);
-													outgoing_tx.send(Outgoing::Frame(json!({ "type": "model_changed" }))).into_diagnostic()?;
-													RpcResponse::success(id, command.as_str(), model_value(&runtime, &key)).into_diagnostic()?
-												},
+											match apply_model(&mut runtime, &outgoing_tx, &key) {
+												Ok(()) => RpcResponse::success(id, command.as_str(), model_value(&runtime, &key)).into_diagnostic()?,
 												Err(source) => RpcResponse::error(id, command.as_str(), source, Some(RpcErrorCode::new("config_error"))),
 											}
 										}
@@ -2158,6 +2157,11 @@ where
 									Ok(()) => RpcResponse::success(id, command.as_str(), json!({ "level": level })).into_diagnostic()?,
 									Err(source) => RpcResponse::error(id, command.as_str(), source, Some(RpcErrorCode::new("config_error"))),
 								};
+								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
+							},
+							"get_available_thinking_levels" => {
+								let levels = history::thinking_levels(runtime.catalog.as_deref(), runtime.model.as_str());
+								let response = RpcResponse::success(id, command.as_str(), json!({ "levels": levels })).into_diagnostic()?;
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
 							"set_steering_mode" | "set_follow_up_mode" | "set_interrupt_mode" => {
@@ -2399,6 +2403,30 @@ where
 							"get_branch_messages" => {
 								let messages = branch_messages(&replica);
 								let response = RpcResponse::success(id, command.as_str(), json!({ "messages": messages })).into_diagnostic()?;
+								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
+							},
+							"get_entries" | "get_tree" => {
+								let response = match current.as_ref() {
+									Some((_, session)) if !turn_running => {
+										if command == "get_tree" {
+											RpcResponse::success(id, command.as_str(), history::tree(session)).into_diagnostic()?
+										} else {
+											let since = request.params.get("since").and_then(Value::as_str);
+											match history::entries(session, since) {
+												Ok(data) => RpcResponse::success(id, command.as_str(), data).into_diagnostic()?,
+												Err(unknown) => RpcResponse::error(id, command.as_str(), unknown.to_string(), Some(RpcErrorCode::new("unknown_since"))),
+											}
+										}
+									},
+									_ => busy_response(id, command.as_str()),
+								};
+								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
+							},
+							"set_event_filter" => {
+								let response = match event_filter.replace(&request.params) {
+									Ok(data) => RpcResponse::success(id, command.as_str(), data).into_diagnostic()?,
+									Err(invalid) => RpcResponse::error(id, command.as_str(), invalid.to_string(), Some(RpcErrorCode::new("invalid_params"))),
+								};
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
 							"get_last_assistant_text" => {
@@ -2694,13 +2722,26 @@ where
 								).into_diagnostic()?;
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
-							"new_session" | "switch_session" | "branch" => {
+							"new_session" | "switch_session" | "branch" | "open_session" => {
+								let open = (command == "open_session").then(|| open_session_plan(&runtime, &request.params, &active_session_path));
 								let response = if turn_running {
 									busy_response(id, command.as_str())
+								} else if let Some(Err(refusal)) = &open {
+									refusal.response(id, command.as_str())
+								} else if let Some(Ok(OpenSessionPlan::AlreadyOpen { model })) = &open {
+									// Reopening the active journal switches nothing.
+									match model.as_deref().map(|key| apply_model(&mut runtime, &outgoing_tx, key)).transpose() {
+										Ok(_) => RpcResponse::success(id, command.as_str(), open_session_result(&active_session_path, true)).into_diagnostic()?,
+										Err(source) => RpcResponse::error(id, command.as_str(), source, Some(RpcErrorCode::new("config_error"))),
+									}
 								} else {
+									let params = match &open {
+										Some(Ok(OpenSessionPlan::Transition { params, .. })) => params,
+										_ => &request.params,
+									};
 									let (idle_kernel, mut old) = current.take().expect("idle RPC owns session");
 									let transition = match idle_kernel.flush_session_state(&mut old) {
-										Ok(()) => transition_session(&home, idle_kernel.lifecycle_hooks(), old, command.as_str(), &request.params).await,
+										Ok(()) => transition_session(&home, idle_kernel.lifecycle_hooks(), old, command.as_str(), params).await,
 										Err(source) => Err((source.to_string(), old)),
 									};
 									match transition {
@@ -2737,10 +2778,17 @@ where
 												"type": "available_commands_update",
 												"commands": available_commands(&runtime),
 											}))).into_diagnostic()?;
-											let data = if command == "branch" {
-												json!({ "text": last_assistant_text(&replica).unwrap_or_default(), "cancelled": false })
-											} else {
-												json!({ "cancelled": false })
+											let data = match &open {
+												Some(Ok(OpenSessionPlan::Transition { params, model })) => {
+													// The switch committed; a model the config refuses
+													// leaves the journal's own model in place.
+													if let Some(Err(error)) = model.as_deref().map(|key| apply_model(&mut runtime, &outgoing_tx, key)) {
+														tracing::warn!(%error, "open_session could not select the requested model");
+													}
+													open_session_result(&active_session_path, params.contains_key("sessionPath"))
+												},
+												_ if command == "branch" => json!({ "text": last_assistant_text(&replica).unwrap_or_default(), "cancelled": false }),
+												_ => json!({ "cancelled": false }),
 											};
 											RpcResponse::success(id, command.as_str(), data).into_diagnostic()?
 										},
@@ -2794,12 +2842,12 @@ where
 				}
 				while let Ok(event) = dom_events.try_recv() {
 					replica.apply_event(&event).into_diagnostic()?;
-					for frame in projection.observe(&replica) {
+					for frame in projection.observe(&replica).into_iter().filter_map(|frame| event_filter.apply(frame)) {
 						outgoing_tx.send(Outgoing::Frame(frame)).into_diagnostic()?;
 					}
 				}
 				while let Ok(event) = kernel_events.try_recv() {
-					if let Some(value) = kernel_event_value(event) {
+					if let Some(value) = kernel_event_value(event).and_then(|value| event_filter.apply(value)) {
 						outgoing_tx.send(Outgoing::Frame(value)).into_diagnostic()?;
 					}
 				}
@@ -2822,11 +2870,14 @@ where
 							.copied()
 							.map(|turn| rpc_tool_results(&replica, turn))
 							.unwrap_or_default();
-						outgoing_tx.send(Outgoing::Frame(json!({
+						let turn_end = json!({
 							"type": "turn_end",
 							"message": last,
 							"toolResults": tool_results,
-						}))).into_diagnostic()?;
+						});
+						if let Some(frame) = event_filter.apply(turn_end) {
+							outgoing_tx.send(Outgoing::Frame(frame)).into_diagnostic()?;
+						}
 					}
 					let terminal = match result {
 						Ok(outcome) => json!({
@@ -2851,7 +2902,9 @@ where
 							"error": source.to_string(),
 						}),
 					};
-					outgoing_tx.send(Outgoing::Frame(terminal)).into_diagnostic()?;
+					if let Some(frame) = event_filter.apply(terminal) {
+						outgoing_tx.send(Outgoing::Frame(frame)).into_diagnostic()?;
+					}
 				}
 				if shutting_down || !input_open {
 					current = Some((turn_kernel, turn_session));
@@ -2877,7 +2930,7 @@ where
 				match event {
 					Ok(event) => {
 						replica.apply_event(&event).into_diagnostic()?;
-						for frame in projection.observe(&replica) {
+						for frame in projection.observe(&replica).into_iter().filter_map(|frame| event_filter.apply(frame)) {
 							outgoing_tx.send(Outgoing::Frame(frame)).into_diagnostic()?;
 						}
 						for frame in observe_subagents(&jobs, subagent_subscription, &mut subagent_seen) {
@@ -2890,7 +2943,7 @@ where
 			event = kernel_events.recv_async(), if kernel_open => {
 				match event {
 					Ok(event) => {
-						if let Some(value) = kernel_event_value(event) {
+						if let Some(value) = kernel_event_value(event).and_then(|value| event_filter.apply(value)) {
 							outgoing_tx.send(Outgoing::Frame(value)).into_diagnostic()?;
 						}
 					},
@@ -2932,7 +2985,11 @@ where
 	}
 	while let Ok(event) = dom_events.try_recv() {
 		replica.apply_event(&event).into_diagnostic()?;
-		for frame in projection.observe(&replica) {
+		for frame in projection
+			.observe(&replica)
+			.into_iter()
+			.filter_map(|frame| event_filter.apply(frame))
+		{
 			outgoing_tx.send(Outgoing::Frame(frame)).into_diagnostic()?;
 		}
 	}
@@ -2949,6 +3006,135 @@ where
 	Ok(())
 }
 
+/// Selects `key` as the session model (`ai_model`) and tells the host.
+fn apply_model(
+	runtime: &mut RpcRuntime,
+	outgoing: &flume::Sender<Outgoing>,
+	key: &str,
+) -> Result<(), String> {
+	set_con(runtime, "ai_model", key)?;
+	runtime.model = Str::new(key);
+	// A closed writer means the host is gone; nothing is left to tell.
+	let _ = outgoing.send(Outgoing::Frame(json!({ "type": "model_changed" })));
+	Ok(())
+}
+
+/// What an `open_session` request resolves to before any session changes.
+enum OpenSessionPlan {
+	/// The newest journal in the directory is the active one: nothing switches.
+	AlreadyOpen {
+		/// Model to select, from `provider`/`modelId`.
+		model: Option<String>,
+	},
+	/// Switch through [`transition_session`] with these parameters: the
+	/// newest journal (`sessionPath`) or a fresh one in the directory
+	/// (`sessionDir`).
+	Transition {
+		/// Parameters for the `open_session` transition.
+		params: Map<String, Value>,
+		/// Model to select once the switch committed.
+		model:  Option<String>,
+	},
+}
+
+/// An `open_session` request refused before any session change.
+#[derive(Debug, thiserror::Error)]
+enum OpenSessionRefusal {
+	/// `sessionDir` is absent or empty.
+	#[error("open_session requires `sessionDir`")]
+	MissingDirectory,
+	/// Only one of `provider` and `modelId` was given.
+	#[error("open_session takes `provider` and `modelId` together")]
+	PartialModel,
+	/// The catalog has no such model.
+	#[error("Model not found: {key}")]
+	ModelNotFound {
+		/// The requested `provider/modelId`.
+		key: String,
+	},
+	/// The directory could not be listed.
+	#[error("cannot read session directory {}", directory.display())]
+	Directory {
+		/// The resolved directory.
+		directory: PathBuf,
+		/// Why listing it failed.
+		#[source]
+		source:    std::io::Error,
+	},
+}
+
+impl OpenSessionRefusal {
+	fn response(&self, id: Option<RequestId>, command: &str) -> RpcResponse {
+		let code = match self {
+			Self::MissingDirectory | Self::PartialModel => "invalid_params",
+			Self::ModelNotFound { .. } => "model_not_found",
+			Self::Directory { .. } => "session_error",
+		};
+		RpcResponse::error(id, command, self.to_string(), Some(RpcErrorCode::new(code)))
+	}
+}
+
+/// Resolves `open_session`: `sessionDir` (relative to the project), the
+/// newest journal in it, and the optional `provider`/`modelId` pair, which is
+/// checked before anything switches.
+fn open_session_plan(
+	runtime: &RpcRuntime,
+	params: &Map<String, Value>,
+	active: &Path,
+) -> Result<OpenSessionPlan, OpenSessionRefusal> {
+	let directory = params
+		.get("sessionDir")
+		.and_then(Value::as_str)
+		.filter(|directory| !directory.is_empty())
+		.ok_or(OpenSessionRefusal::MissingDirectory)?;
+	let model = match (
+		params.get("provider").and_then(Value::as_str),
+		params.get("modelId").and_then(Value::as_str),
+	) {
+		(None, None) => None,
+		(Some(provider), Some(model_id)) => {
+			let key = format!("{provider}/{model_id}");
+			let known = runtime.catalog.as_ref().is_none_or(|catalog| {
+				catalog
+					.models()
+					.iter()
+					.any(|model| model.key.as_str() == key)
+			});
+			if !known {
+				return Err(OpenSessionRefusal::ModelNotFound { key });
+			}
+			Some(key)
+		},
+		_ => return Err(OpenSessionRefusal::PartialModel),
+	};
+	let directory = runtime.project.join(directory);
+	let newest = omp_driver::headless::kernel::newest_session(&directory)
+		.map_err(|source| OpenSessionRefusal::Directory { directory: directory.clone(), source })?;
+	if newest.as_deref() == Some(active) {
+		return Ok(OpenSessionPlan::AlreadyOpen { model });
+	}
+	let mut params = Map::new();
+	match newest {
+		Some(path) => {
+			params.insert("sessionPath".into(), Value::String(path.to_string_lossy().into_owned()))
+		},
+		None => {
+			params.insert("sessionDir".into(), Value::String(directory.to_string_lossy().into_owned()))
+		},
+	};
+	Ok(OpenSessionPlan::Transition { params, model })
+}
+
+/// The `open_session` success payload for the session now active.
+fn open_session_result(active: &Path, resumed: bool) -> Value {
+	json!({
+		"cancelled": false,
+		"resumed": resumed,
+		"sessionId": active.file_stem().and_then(|name| name.to_str()),
+		"sessionFile": active,
+	})
+}
+
 /// Opens the session a transition command names; once it is open, `old`
 /// ends on the lifecycle surface and is switched away from. The caller
 /// starts the returned session once it resynced it.
@@ -2962,11 +3148,26 @@ async fn transition_session(
 	let reason = match command {
 		"new_session" => omp_agent::SwitchReason::New,
 		"switch_session" => omp_agent::SwitchReason::Resume,
+		"open_session" if params.contains_key("sessionPath") => omp_agent::SwitchReason::Resume,
+		"open_session" => omp_agent::SwitchReason::New,
 		_ => omp_agent::SwitchReason::Fork,
 	};
 	let result: Result<Session, String> = match command {
-		"new_session" => home.create(None).map_err(|source| source.to_string()),
-		"switch_session" => {
+		// `open_session` resolved its directory: a fresh journal in it
+		// (`sessionDir`) when it holds none, else the newest (`sessionPath`).
+		"new_session" | "open_session" if !params.contains_key("sessionPath") => {
+			let path = if command == "open_session" {
+				let Some(directory) = params.get("sessionDir").and_then(Value::as_str) else {
+					return Err(("open_session requires `sessionDir`".into(), old));
+				};
+				let fresh = home.fresh_path();
+				Some(Path::new(directory).join(fresh.file_name().unwrap_or(fresh.as_os_str())))
+			} else {
+				None
+			};
+			home.create(path).map_err(|source| source.to_string())
+		},
+		"switch_session" | "open_session" => {
 			let Some(path) = params.get("sessionPath").and_then(Value::as_str) else {
 				return Err(("switch_session requires `sessionPath`".into(), old));
 			};

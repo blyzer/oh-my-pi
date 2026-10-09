@@ -1091,3 +1091,222 @@ async fn rpc_reports_an_unavailable_account_pin_as_a_typed_notice() {
 	assert_eq!(ends.len(), 1);
 	assert!(ends[0]["error"].is_string(), "the turn still ends in error");
 }
+
+/// Sends `requests` to an idle server over a session at `session_path`,
+/// closes input and returns every frame.
+async fn idle_exchange(temp: &tempfile::TempDir, session: Session, requests: String) -> Vec<Value> {
+	let kernel = scripted_kernel(temp, VecDeque::new());
+	let home = session_home(temp, &kernel);
+	let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+	let (server_read, server_write) = tokio::io::split(server_io);
+	let server =
+		omp_app::rpc_mode::serve_rpc(kernel, session, home, None, server_read, server_write);
+	let client = async move {
+		let (client_read, mut client_write) = tokio::io::split(client_io);
+		client_write
+			.write_all(requests.as_bytes())
+			.await
+			.expect("requests");
+		client_write.shutdown().await.expect("shutdown");
+		let mut lines = BufReader::new(client_read).lines();
+		let mut frames = Vec::<Value>::new();
+		while let Some(line) = lines.next_line().await.expect("response") {
+			frames.push(serde_json::from_str(&line).expect("json response"));
+		}
+		frames
+	};
+	let (server, frames) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		tokio::join!(server, client)
+	})
+	.await
+	.expect("RPC exchange must settle");
+	server.expect("server");
+	frames
+}
+
+fn request_lines(requests: &[Value]) -> String {
+	requests.iter().fold(String::new(), |mut lines, request| {
+		lines.push_str(&request.to_string());
+		lines.push('\n');
+		lines
+	})
+}
+
+/// `open_session` starts a fresh journal in an empty directory, reopening it
+/// switches nothing, a directory holding journals resumes the newest, and
+/// malformed requests are refused before any switch.
+#[tokio::test]
+async fn rpc_open_session_resumes_the_newest_journal_or_starts_one() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let held = temp.path().join("held");
+	std::fs::create_dir_all(&held).expect("held directory");
+	let older = held.join("older.oms");
+	drop(Session::create(&older, ComponentRegistry::standard()).expect("older journal"));
+	let newer = held.join("newer.oms");
+	let mut later = Session::create(&newer, ComponentRegistry::standard()).expect("newer journal");
+	later.begin_turn().expect("turn");
+	later.user("resume me", Vec::new()).expect("user");
+	drop(later);
+	let launch = Session::create(temp.path().join("launch.oms"), ComponentRegistry::standard())
+		.expect("session");
+	let frames = idle_exchange(&temp, launch, request_lines(&[
+		json!({ "id": "fresh", "type": "open_session", "sessionDir": "threads/t1" }),
+		json!({ "id": "again", "type": "open_session", "sessionDir": "threads/t1" }),
+		json!({ "id": "held", "type": "open_session", "sessionDir": held }),
+		json!({ "id": "no-dir", "type": "open_session" }),
+		json!({ "id": "half-model", "type": "open_session", "sessionDir": "threads/t1", "provider": "scripted" }),
+		json!({ "id": "state", "type": "get_state" }),
+	]))
+	.await;
+
+	let fresh = &response(&frames, "fresh")["data"];
+	assert_eq!(fresh["cancelled"], false);
+	assert_eq!(fresh["resumed"], false, "an empty directory starts a fresh journal");
+	let fresh_file = std::path::PathBuf::from(fresh["sessionFile"].as_str().expect("session file"));
+	assert_eq!(fresh_file.parent(), Some(temp.path().join("threads/t1").as_path()));
+	assert!(fresh_file.is_file());
+
+	let again = &response(&frames, "again")["data"];
+	assert_eq!(again["resumed"], true);
+	assert_eq!(
+		again["sessionFile"], fresh["sessionFile"],
+		"the active journal is reopened in place"
+	);
+
+	let resumed = &response(&frames, "held")["data"];
+	assert_eq!(resumed["resumed"], true);
+	assert_eq!(resumed["sessionFile"], json!(newer), "the newest journal in the directory");
+	assert_eq!(resumed["sessionId"], "newer");
+
+	for (id, code) in [("no-dir", "invalid_params"), ("half-model", "invalid_params")] {
+		let refused = response(&frames, id);
+		assert_eq!(refused["success"], false, "{refused}");
+		assert_eq!(refused["code"], code, "{refused}");
+	}
+	assert_eq!(
+		response(&frames, "state")["data"]["sessionFile"],
+		json!(newer),
+		"refused requests left the resumed journal active",
+	);
+	assert_eq!(
+		frames
+			.iter()
+			.filter(|frame| frame["type"] == "session_start")
+			.count(),
+		2,
+		"only the fresh start and the resume switched sessions",
+	);
+}
+
+/// `get_entries`, `get_tree` and `get_available_thinking_levels` answer
+/// between turns from the active journal.
+#[tokio::test]
+async fn rpc_history_commands_read_the_active_journal() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let mut session =
+		Session::create(temp.path().join("history.oms"), ComponentRegistry::standard())
+			.expect("session");
+	session.begin_turn().expect("turn");
+	let first = session.user("first", Vec::new()).expect("first");
+	session.begin_turn().expect("turn");
+	let second = session.user("second", Vec::new()).expect("second");
+	let frames = idle_exchange(
+		&temp,
+		session,
+		request_lines(&[
+			json!({ "id": "all", "type": "get_entries" }),
+			json!({ "id": "since", "type": "get_entries", "since": first.to_string() }),
+			json!({ "id": "unknown", "type": "get_entries", "since": "nope" }),
+			json!({ "id": "tree", "type": "get_tree" }),
+			json!({ "id": "levels", "type": "get_available_thinking_levels" }),
+		]),
+	)
+	.await;
+
+	let all = &response(&frames, "all")["data"];
+	assert_eq!(all["leafId"], second.to_string());
+	assert!(all["entries"].as_array().expect("entries").len() >= 4);
+	let since = response(&frames, "since")["data"]["entries"]
+		.as_array()
+		.expect("entries")
+		.clone();
+	assert_eq!(since.last().expect("an entry")["id"], second.to_string());
+	assert!(since.iter().all(|entry| entry["id"] != first.to_string()), "strictly after `since`");
+	let unknown = response(&frames, "unknown");
+	assert_eq!(unknown["success"], false);
+	assert_eq!(unknown["code"], "unknown_since");
+
+	let tree = response(&frames, "tree")["data"]["tree"]
+		.as_array()
+		.expect("tree")
+		.clone();
+	assert_eq!(tree.len(), 2);
+	assert_eq!(tree[0]["children"], json!([second.to_string()]));
+	assert_eq!(tree[1]["entry"]["parentId"], first.to_string());
+
+	assert_eq!(
+		response(&frames, "levels")["data"],
+		json!({ "levels": ["off"] }),
+		"no catalog: the scripted model offers only `off`",
+	);
+}
+
+/// `set_event_filter` narrows the session events of a real turn to the named
+/// types and projects `message_update` to its increment; responses are never
+/// filtered.
+#[tokio::test]
+async fn rpc_event_filter_narrows_session_events() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let frames = converse(
+		&temp,
+		VecDeque::from([completed_script("filtered"), completed_script("delta")]),
+		concat!(
+			"{\"id\":\"filter\",\"type\":\"set_event_filter\",\"events\":[\"agent_end\"]}\n",
+			"{\"id\":\"bad\",\"type\":\"set_event_filter\",\"events\":[1]}\n",
+			"{\"id\":\"one\",\"type\":\"prompt\",\"message\":\"first\"}\n",
+		),
+		&[
+			concat!(
+				"{\"id\":\"delta\",\"type\":\"set_event_filter\",\"events\":null,\"messageUpdates\":\"\
+				 delta\"}\n",
+				"{\"id\":\"two\",\"type\":\"prompt\",\"message\":\"second\"}\n",
+			),
+			"",
+		],
+	)
+	.await;
+	assert_eq!(
+		response(&frames, "filter")["data"],
+		json!({ "events": ["agent_end"], "messageUpdates": "full" })
+	);
+	assert_eq!(response(&frames, "bad")["code"], "invalid_params");
+	assert_eq!(
+		response(&frames, "delta")["data"],
+		json!({ "events": null, "messageUpdates": "delta" })
+	);
+	let ends = frames
+		.iter()
+		.enumerate()
+		.filter(|(_, frame)| frame["type"] == "agent_end")
+		.map(|(index, _)| index)
+		.collect::<Vec<_>>();
+	assert_eq!(ends.len(), 2, "both turns end: {frames:#?}");
+	let first_turn = &frames[..ends[0]];
+	assert!(
+		first_turn.iter().all(|frame| !matches!(
+			frame["type"].as_str(),
+			Some("message_start" | "message_update" | "message_end" | "turn_end")
+		)),
+		"only agent_end passes the first filter: {first_turn:#?}",
+	);
+	let updates = frames[ends[0]..]
+		.iter()
+		.filter(|frame| frame["type"] == "message_update")
+		.collect::<Vec<_>>();
+	assert!(!updates.is_empty(), "the second turn streams updates");
+	for update in updates {
+		assert_eq!(update["message"], json!({ "role": "assistant" }), "{update}");
+		assert!(update["assistantMessageEvent"].get("partial").is_none(), "{update}");
+		assert!(update["assistantMessageEvent"]["delta"].is_string(), "{update}");
+	}
+}
