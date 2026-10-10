@@ -67,6 +67,7 @@ pub struct Surface {
 	status_mounted:   bool,
 	status_text:      Str,
 	approval_id:      Str,
+	form_id:          Str,
 	events:           VecDeque<Event>,
 }
 /// HTML-like element tags supported by Tern's `el` vocabulary.
@@ -187,6 +188,7 @@ impl Surface {
 			status_mounted: false,
 			status_text: Str::default(),
 			approval_id: Str::default(),
+			form_id: Str::default(),
 			events: VecDeque::new(),
 		}
 	}
@@ -246,6 +248,7 @@ impl Surface {
 		self.status_mounted = false;
 		self.status_text = Str::default();
 		self.approval_id = Str::default();
+		self.form_id = Str::default();
 		self.dirty = true;
 	}
 
@@ -334,6 +337,36 @@ impl Surface {
 		Ok(())
 	}
 
+	/// Presents or removes one surface-scoped settings form.
+	pub fn present_form(
+		&mut self,
+		writer: &mut impl io::Write,
+		node: Option<Node>,
+	) -> io::Result<()> {
+		let next = node
+			.as_ref()
+			.map_or_else(Str::default, |node| node.id.clone());
+		if self.form_id == next {
+			return Ok(());
+		}
+		if self.suspended || !self.credit_available() {
+			self.dirty = true;
+			return Ok(());
+		}
+		let mut ops = Vec::new();
+		if !self.form_id.is_empty() {
+			ops.push(Op::Del(self.form_id.clone()));
+		}
+		if let Some(node) = node {
+			ops.push(add_node(node, LAYER_ID));
+		}
+		if !ops.is_empty() {
+			self.send_frame(writer, ops)?;
+		}
+		self.form_id = next;
+		Ok(())
+	}
+
 	/// Handles a terminal reply or event.
 	pub fn incoming(&mut self, incoming: Incoming) {
 		self.record_incoming(&incoming);
@@ -356,6 +389,7 @@ impl Surface {
 				self.status_mounted = false;
 				self.status_text = Str::default();
 				self.approval_id = Str::default();
+				self.form_id = Str::default();
 				self.dirty = true;
 			},
 			Incoming::Event(event) => self.events.push_back(event),

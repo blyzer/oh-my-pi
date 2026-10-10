@@ -4603,23 +4603,34 @@ impl Host {
 		}
 	}
 
-	/// Applies a native surface action to the existing approval authority.
+	/// Applies native surface actions and form changes to existing authorities.
 	fn route_tsp_event(&mut self, event: TspEvent) {
-		let TspEvent::Action { act, .. } = event else {
-			return;
-		};
-		let Some(approval) = self.presenter.overlays.approval().cloned() else {
-			return;
-		};
-		let Some(choice) = act.chars().next().map(|value| value.to_ascii_lowercase()) else {
-			return;
-		};
-		if let Some(decision) = approval.decision(choice) {
-			let _ = self
-				.presenter
-				.commands
-				.send(HostCommand::Approve { id: approval.id, decision });
-			self.presenter.overlays.dismiss();
+		match event {
+			TspEvent::Action { act, .. } => {
+				let Some(approval) = self.presenter.overlays.approval().cloned() else {
+					return;
+				};
+				let Some(choice) = act.chars().next().map(|value| value.to_ascii_lowercase()) else {
+					return;
+				};
+				if let Some(decision) = approval.decision(choice) {
+					let _ = self
+						.presenter
+						.commands
+						.send(HostCommand::Approve { id: approval.id, decision });
+					self.presenter.overlays.dismiss();
+				}
+			},
+			TspEvent::Change { name: Some(name), value, .. } => {
+				let panel_event = match self.presenter.overlays.active_mut() {
+					Some(Overlay::Panel(panel)) => panel.tsp_change(name.as_str(), &value),
+					_ => PanelEvent::Ignored,
+				};
+				if panel_event != PanelEvent::Ignored {
+					let _ = self.presenter.apply_panel_event(panel_event);
+				}
+			},
+			_ => {},
 		}
 	}
 
@@ -4984,10 +4995,15 @@ impl Host {
 			.overlays
 			.approval()
 			.map(|approval| (approval.id.clone(), approval.reason.clone()));
+		let form = match self.presenter.overlays.active() {
+			Some(Overlay::Panel(panel)) => panel.tsp_node(),
+			_ => None,
+		};
+		let native_overlay = approval.is_some() || form.is_some();
 		let Some(surface) = self.tsp_surface.as_mut() else {
 			return Ok(false);
 		};
-		if overlay_open {
+		if overlay_open && !native_overlay {
 			surface.suspend(renderer.writer_mut())?;
 			return Ok(false);
 		}
@@ -4998,6 +5014,7 @@ impl Host {
 			approval.as_ref().map(|(id, _)| id.as_str()),
 			approval.as_ref().map(|(_, reason)| reason.as_str()),
 		)?;
+		surface.present_form(renderer.writer_mut(), form)?;
 		Ok(true)
 	}
 

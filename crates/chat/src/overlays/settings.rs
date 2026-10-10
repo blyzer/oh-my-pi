@@ -14,12 +14,13 @@ use omp_tui::{
 	components::{Input, Tabs},
 	dom,
 };
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::{
 	Panel, PanelAnchor, PanelCx, PanelEvent, PanelNote,
 	services::{SettingsChoice, SettingsInventory},
 };
-
+use crate::tsp::{ElementTag, element_node};
 const TEXT_FOOTER: &str = "Enter to save · Esc to cancel · Clear field to unset";
 const CHOICE_FOOTER: &str = "Enter to select · Esc to go back";
 const MULTI_FOOTER: &str = "Click/Enter/Space to toggle · Esc to go back";
@@ -2014,6 +2015,49 @@ impl SettingsPanel {
 			},
 		}
 	}
+
+	/// Native settings form for the TSP `prefs`/`el` presentation.
+	#[must_use]
+	pub fn tsp_form(&self) -> omp_tui::tsp::wire::Node {
+		let children = self
+			.rows
+			.iter()
+			.take(64)
+			.map(|row| {
+				let mut props = JsonMap::new();
+				props.insert("name".into(), JsonValue::String(row.convar.clone().into()));
+				props.insert("text".into(), JsonValue::String(row.label.clone().into()));
+				match &row.value {
+					RowValue::Boolean(value) => {
+						props.insert("type".into(), JsonValue::String("checkbox".into()));
+						props.insert("checked".into(), JsonValue::Bool(*value));
+					},
+					RowValue::Scalar(value) | RowValue::Text(value) => {
+						props.insert("type".into(), JsonValue::String("text".into()));
+						props.insert("value".into(), JsonValue::String(value.clone().into()));
+					},
+					RowValue::Multi(_) | RowValue::ProviderLimits(_) => {
+						props.insert("type".into(), JsonValue::String("select".into()));
+					},
+				}
+				element_node(row.convar.clone(), ElementTag::Input, props, Vec::new())
+			})
+			.collect();
+		element_node(Str::new_static("settings"), ElementTag::Form, JsonMap::new(), children)
+	}
+
+	fn tsp_change(&mut self, name: &str, value: &JsonValue) -> PanelEvent {
+		let Some(row) = self.rows.iter().find(|row| row.convar.as_str() == name) else {
+			return PanelEvent::Ignored;
+		};
+		let value = match value {
+			JsonValue::Bool(value) => value.to_string(),
+			JsonValue::String(value) => value.clone(),
+			JsonValue::Null => String::new(),
+			other => other.to_string(),
+		};
+		PanelEvent::PreviewSetting { convar: row.convar.clone(), value: Str::new(value) }
+	}
 }
 
 fn pad(label: &str, width: usize) -> Str {
@@ -2030,6 +2074,14 @@ fn pad(label: &str, width: usize) -> Str {
 impl Panel for SettingsPanel {
 	fn id(&self) -> &'static str {
 		"settings"
+	}
+
+	fn tsp_node(&self) -> Option<omp_tui::tsp::wire::Node> {
+		Some(self.tsp_form())
+	}
+
+	fn tsp_change(&mut self, name: &str, value: &serde_json::Value) -> PanelEvent {
+		self.tsp_change(name, value)
 	}
 
 	fn anchor(&self) -> PanelAnchor {
