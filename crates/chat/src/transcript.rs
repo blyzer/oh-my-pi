@@ -689,15 +689,16 @@ mod tests {
 
 	fn block(key: u64, kind: BlockKind, text: &'static str, finalized: bool) -> RenderedBlock {
 		RenderedBlock {
-			view:      BlockView {
+			view:        BlockView {
 				key,
 				kind,
 				text: Str::new_static(text),
 				mode: Mode::Mutable,
 				finalized,
 			},
-			component: text.into_component(),
-			stream:    None,
+			component:   text.into_component(),
+			description: None,
+			stream:      None,
 		}
 	}
 
@@ -913,15 +914,16 @@ mod tests {
 			let build = || {
 				let mut out = vec![block(1, BlockKind::User, "row", true)];
 				out.extend(blocks.iter().map(|(key, text, done)| RenderedBlock {
-					view:      BlockView {
+					view:        BlockView {
 						key:       *key,
 						kind:      BlockKind::Assistant,
 						text:      Str::new(text.as_str()),
 						mode:      Mode::Mutable,
 						finalized: *done,
 					},
-					component: Str::new(text.as_str()).into_component(),
-					stream:    None,
+					component:   Str::new(text.as_str()).into_component(),
+					description: None,
+					stream:      None,
 				}));
 				out
 			};
@@ -1058,20 +1060,21 @@ mod tests {
 				.iter()
 				.enumerate()
 				.map(|(index, &(kind, text, color))| RenderedBlock {
-					view:      BlockView {
+					view:        BlockView {
 						key: index as u64 + 1,
 						kind,
 						text: Str::new_static(text),
 						mode: Mode::Mutable,
 						finalized: true,
 					},
-					component: TextLeaf::new()
+					component:   TextLeaf::new()
 						.text(text)
 						.with(Prop::Fg, color)
 						.with(Prop::Bold, true)
 						.with(Prop::Href, "https://example.test/row")
 						.into_component(),
-					stream:    None,
+					description: None,
+					stream:      None,
 				})
 				.collect::<Vec<_>>()
 		};
@@ -1302,15 +1305,16 @@ mod tests {
 			omp_tui::dom! { <text id={STREAM_ID} reveal="264ms">{Str::new(text)}</text> }
 		};
 		RenderedBlock {
-			view:      BlockView {
+			view:        BlockView {
 				key,
 				kind: BlockKind::Assistant,
 				text: Str::new(text),
 				mode,
 				finalized,
 			},
-			component: component.into_component(),
-			stream:    Some(Str::new(text)),
+			component:   component.into_component(),
+			description: None,
+			stream:      Some(Str::new(text)),
 		}
 	}
 

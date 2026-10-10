@@ -5,7 +5,9 @@ use omp_core::{Str, StrMut, sf};
 use omp_dom::{Dom, Handle, KnownTag, Node, PropId, PropKey, Tag, Value};
 use omp_journal::data::Attachment;
 use omp_session::{ASSISTANT_CONTENT_TAG, PROVIDER_BLOCK_INDEX_PROP};
-use omp_tui::{Charset, Icon, IntoComponent, UiContext, dom, slots::Mode};
+use omp_tui::{
+	Charset, Icon, IntoComponent, UiContext, dom, slots::Mode, tsp::wire::Node as TspNode,
+};
 use smallvec::SmallVec;
 
 use crate::{
@@ -60,12 +62,14 @@ pub struct BlockView {
 
 /// One rendered block ready for admission to the slot engine.
 pub(crate) struct RenderedBlock {
-	pub view:      BlockView,
-	pub component: Component,
+	pub view:        BlockView,
+	pub component:   Component,
+	/// Optional semantic TSP description supplied by a typed card contract.
+	pub description: Option<TspNode>,
 	/// Streamed text owned by the component's [`omp_tui::slots::STREAM_ID`]
 	/// child. A later projection whose stream extends this one is applied in
 	/// place, keeping the reveal cursor and animation phase.
-	pub stream:    Option<Str>,
+	pub stream:      Option<Str>,
 }
 
 /// Observer-local switches the projection reads (never DOM state).
@@ -741,30 +745,32 @@ fn banner_block(banner: &Banner) -> RenderedBlock {
 		<row gap=1 pad-x=1 fg=accent><icon name="success"/><text>{banner.text.clone()}</text></row>
 	};
 	RenderedBlock {
-		view:      BlockView {
+		view:        BlockView {
 			key:       banner.key,
 			kind:      BlockKind::Notice,
 			text:      banner.text.clone(),
 			mode:      Mode::Mutable,
 			finalized: true,
 		},
-		component: component.into_component(),
-		stream:    None,
+		component:   component.into_component(),
+		description: None,
+		stream:      None,
 	}
 }
 
 /// Observer-local typed update-availability card.
 fn update_block(update: &UpdateBanner, expanded: bool) -> RenderedBlock {
 	RenderedBlock {
-		view:      BlockView {
+		view:        BlockView {
 			key:       update.key,
 			kind:      BlockKind::Notice,
 			text:      update.notice.text(),
 			mode:      Mode::Mutable,
 			finalized: true,
 		},
-		component: update::card(&update.notice, expanded),
-		stream:    None,
+		component:   update::card(&update.notice, expanded),
+		description: None,
+		stream:      None,
 	}
 }
 
@@ -901,7 +907,12 @@ fn group_reads(
 		if let Some(at) = usage {
 			blocks.remove(at);
 		}
-		blocks.splice(index..end, [RenderedBlock { view, component: group, stream: None }]);
+		blocks.splice(index..end, [RenderedBlock {
+			view,
+			component: group,
+			description: None,
+			stream: None,
+		}]);
 		index += 1;
 	}
 }
@@ -1171,9 +1182,10 @@ fn rendered(
 	component: impl IntoComponent,
 ) -> RenderedBlock {
 	RenderedBlock {
-		view:      BlockView { key: block_key(handle, kind), kind, text, mode, finalized },
-		component: component.into_component(),
-		stream:    None,
+		view:        BlockView { key: block_key(handle, kind), kind, text, mode, finalized },
+		component:   component.into_component(),
+		description: None,
+		stream:      None,
 	}
 }
 
@@ -1223,6 +1235,11 @@ fn tool_block(
 	options: &Options<'_>,
 ) -> Option<RenderedBlock> {
 	let view = card_view(dom, handle, node, options)?;
+	let description = cards.describe(
+		tool.as_str(),
+		Str::from(format!("b-{:x}", block_key(handle, BlockKind::Tool))),
+		&view,
+	);
 	let status = prop_text(node, PropId::Status).unwrap_or_else(|| Str::new_static("running"));
 	let component = cards.render(tool.as_str(), &view, options.expanded, ui);
 	let mut text = StrMut::new(tool.as_str());
@@ -1245,7 +1262,10 @@ fn tool_block(
 		text.push_str(diag.as_str());
 	}
 	let finalized = matches!(status.as_str(), "ok" | "error" | "cancelled" | "aborted");
-	Some(rendered(handle, BlockKind::Tool, text.freeze(), Mode::Mutable, finalized, component))
+	let mut block =
+		rendered(handle, BlockKind::Tool, text.freeze(), Mode::Mutable, finalized, component);
+	block.description = description;
+	Some(block)
 }
 
 fn child(dom: &Dom, parent: Handle, tag: KnownTag) -> Option<&Node> {

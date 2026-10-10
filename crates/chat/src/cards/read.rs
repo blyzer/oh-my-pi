@@ -3,12 +3,12 @@
 
 use omp_core::{Str, sf};
 use omp_dom::{Node, PropId};
-use omp_tui::{IntoComponent as _, UiContext, dom};
-use serde_json::Value;
+use omp_tui::{IntoComponent as _, UiContext, dom, tsp::wire::Kind};
+use serde_json::{Map, Value};
 
 use super::{
-	Card, CardStatus, CardView, Component, elapsed_badge, result_image, typed_fault, typed_input,
-	typed_result,
+	Card, CardStatus, CardView, Component, elapsed_badge, result_image, tsp_node, tsp_prop,
+	typed_fault, typed_input, typed_result,
 };
 
 /// Card for `read` calls.
@@ -50,6 +50,37 @@ impl Card for ReadCard {
 			CardStatus::Done => render_done(view, target, question, expanded, ui),
 			CardStatus::Failed => render_failed(view, target, question, ui),
 		}
+	}
+
+	fn describe(&self, id: Str, view: &CardView<'_>) -> Option<omp_tui::tsp::wire::Node> {
+		let mut props = Map::new();
+		tsp_prop(&mut props, "text", view.result_text().or(view.output).unwrap_or_default());
+		tsp_prop(&mut props, "lang", "text");
+		let mut node = tsp_node(id, Kind::Code, props);
+		let result = view.result_json();
+		if let Some(parts) = result.as_ref().and_then(|value| value.get("parts")) {
+			if let Some(parts) = parts.as_array() {
+				node.c = parts
+					.iter()
+					.enumerate()
+					.filter_map(|(index, part)| {
+						let blob = part.get("blob")?;
+						let hash = blob.get("hash")?.as_str()?;
+						let mime = blob
+							.get("media_type")
+							.and_then(Value::as_str)
+							.unwrap_or("image/*");
+						mime.starts_with("image/").then(|| {
+							let mut image = Map::new();
+							tsp_prop(&mut image, "src", format!("artifact://sha256/{hash}"));
+							tsp_prop(&mut image, "mime", mime);
+							tsp_node(Str::from(format!("{}-image-{index}", node.id)), Kind::Image, image)
+						})
+					})
+					.collect();
+			}
+		}
+		Some(node)
 	}
 }
 

@@ -432,14 +432,17 @@ impl Surface {
 	}
 
 	fn status(&mut self, status: &str, ops: &mut Vec<Op>) {
-		let rows = Str::new(status);
+		let text = Str::new(status);
 		if !self.status_mounted {
-			ops.push(add(STATUS_ID, DOCK_ID, Kind::Rows, rows_props(&rows)));
+			ops.push(add_node(status_node(text.as_str()), DOCK_ID));
 			self.status_mounted = true;
-			self.status_text = rows;
-		} else if self.status_text != rows {
-			ops.push(Op::Set { id: Str::new_static(STATUS_ID), props: rows_props(&rows) });
-			self.status_text = rows;
+			self.status_text = text;
+		} else if self.status_text != text {
+			ops.extend([
+				Op::Del(Str::new_static(STATUS_ID)),
+				add_node(status_node(text.as_str()), DOCK_ID),
+			]);
+			self.status_text = text;
 		}
 	}
 }
@@ -449,6 +452,25 @@ const fn is_stream(block: &RenderedBlock) -> bool {
 	matches!(block.view.kind, BlockKind::Assistant | BlockKind::Thinking)
 }
 
+fn status_node(text: &str) -> Node {
+	let children = text
+		.split('·')
+		.enumerate()
+		.map(|(index, segment)| Node {
+			id: Str::from(format!("{STATUS_ID}-{index}")),
+			k:  Kind::Seg,
+			p:  text_props(Str::new(segment.trim())),
+			c:  Vec::new(),
+		})
+		.collect();
+	Node {
+		id: Str::new_static(STATUS_ID),
+		k:  Kind::Status,
+		p:  text_props(Str::new(text)),
+		c:  children,
+	}
+}
+
 fn block_id(key: u64) -> Str {
 	Str::from(format!("b-{key:x}"))
 }
@@ -456,20 +478,6 @@ fn block_id(key: u64) -> Str {
 fn text_props(text: Str) -> Map<String, Value> {
 	let mut props = Map::new();
 	props.insert("text".into(), Value::String(text.into()));
-	props
-}
-
-fn rows_props(text: &Str) -> Map<String, Value> {
-	let mut props = text_props(text.clone());
-	props.insert(
-		"lines".into(),
-		Value::Array(
-			text
-				.lines()
-				.map(|line| Value::String(line.to_owned()))
-				.collect(),
-		),
-	);
 	props
 }
 
@@ -487,16 +495,24 @@ fn add_node(node: Node, parent: &str) -> Op {
 
 fn node_for(block: &RenderedBlock, hello: &Hello) -> (Node, Str) {
 	let id = block_id(block.view.key);
+	if let Some(node) = block
+		.description
+		.as_ref()
+		.filter(|node| hello.draws(node.k))
+	{
+		return (node.clone(), node.id.clone());
+	}
 	let kind = match block.view.kind {
 		BlockKind::User => Kind::Card,
 		BlockKind::Assistant if hello.draws(Kind::Md) => Kind::Md,
 		BlockKind::Thinking if hello.draws(Kind::Section) => Kind::Section,
+		BlockKind::Notice if hello.draws(Kind::Toast) => Kind::Toast,
 		BlockKind::Tool if hello.draws(Kind::Tool) => Kind::Tool,
 		BlockKind::Tool if hello.draws(Kind::Card) => Kind::Card,
 		_ => Kind::Rows,
 	};
 	match kind {
-		Kind::Md => (
+		Kind::Md | Kind::Toast => (
 			Node { id: id.clone(), k: kind, p: text_props(block.view.text.clone()), c: Vec::new() },
 			id,
 		),
@@ -554,15 +570,16 @@ mod tests {
 
 	fn make_block(key: u64, kind: BlockKind, text: &str, finalized: bool) -> RenderedBlock {
 		RenderedBlock {
-			view:      BlockView {
+			view:        BlockView {
 				key,
 				kind,
 				text: Str::new(text),
 				mode: Mode::AppendOnly,
 				finalized,
 			},
-			component: TextLeaf::new().text(text).into_component(),
-			stream:    Some(Str::new(text)),
+			component:   TextLeaf::new().text(text).into_component(),
+			description: None,
+			stream:      Some(Str::new(text)),
 		}
 	}
 
