@@ -1,0 +1,52 @@
+name: BuildBuddy remote heavy verification
+
+on:
+  push:
+    branches: [main, omp2]
+    paths:
+      - ".github/workflows/buildbuddy-remote.yml"
+      - "justfile"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "scripts/**"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buildbuddy-remote-${{ github.ref }}
+  cancel-in-progress: true
+
+# This is intentionally push-only: the job gives a BuildBuddy credential to a
+# remote runner command. Pull requests from untrusted code must not receive it.
+jobs:
+  remote_envd:
+    name: BuildBuddy remote omp-envd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY || secrets.BUILDBUDDY_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned BuildBuddy client
+        env:
+          BB_VERSION: 5.0.492
+          BB_SHA256: e9e996a1a01555e45433acf9432f9d40d5bda437812a830d6701fe9b09853df9
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --location --silent --show-error \
+            "https://github.com/buildbuddy-io/bazel/releases/download/${BB_VERSION}/bazel-${BB_VERSION}-linux-x86_64" \
+            --output "$RUNNER_TEMP/bin/bb"
+          printf '%s  %s\n' "$BB_SHA256" "$RUNNER_TEMP/bin/bb" | sha256sum --check --status
+          chmod 0755 "$RUNNER_TEMP/bin/bb"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Run heavy verification remotely
+        run: scripts/remote-verify.sh test-pkg omp-envd
