@@ -66,6 +66,8 @@ pub struct Surface {
 	composer_cursor:  u32,
 	status_mounted:   bool,
 	status_text:      Str,
+	approval_id:      Str,
+	events:           VecDeque<Event>,
 }
 /// HTML-like element tags supported by Tern's `el` vocabulary.
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
@@ -103,6 +105,26 @@ pub fn element_node(
 	Node { id, k: Kind::El, p: props, c: children }
 }
 
+fn approval_node(id: &str, reason: &str) -> Node {
+	let mut form = Map::new();
+	form.insert("class".into(), Value::String("omp-approval".into()));
+	let mut message = Map::new();
+	message.insert("text".into(), Value::String(reason.into()));
+	let button = |suffix: &str, label: &str, action: &str| {
+		let mut props = Map::new();
+		props.insert("text".into(), Value::String(label.into()));
+		props.insert(
+			"actions".into(),
+			Value::Object(Map::from_iter([(String::from("click"), Value::String(action.into()))])),
+		);
+		element_node(Str::from(format!("{id}-{suffix}")), ElementTag::Button, props, Vec::new())
+	};
+	element_node(Str::new_static("approval"), ElementTag::Form, form, vec![
+		element_node(Str::from(format!("{id}-reason")), ElementTag::Div, message, Vec::new()),
+		button("approve", "Approve", "approve"),
+		button("deny", "Deny", "deny"),
+	])
+}
 impl Surface {
 	/// Starts an inline surface for a terminal whose `hello` beat the DA1
 	/// fence.
@@ -164,6 +186,8 @@ impl Surface {
 			composer_cursor: u32::MAX,
 			status_mounted: false,
 			status_text: Str::default(),
+			approval_id: Str::default(),
+			events: VecDeque::new(),
 		}
 	}
 
@@ -221,6 +245,7 @@ impl Surface {
 		self.composer_cursor = u32::MAX;
 		self.status_mounted = false;
 		self.status_text = Str::default();
+		self.approval_id = Str::default();
 		self.dirty = true;
 	}
 
@@ -280,11 +305,41 @@ impl Surface {
 		Ok(())
 	}
 
+	/// Presents or removes the native approval form in the layer region.
+	pub fn present_approval(
+		&mut self,
+		writer: &mut impl io::Write,
+		id: Option<&str>,
+		reason: Option<&str>,
+	) -> io::Result<()> {
+		let next = id.map_or_else(Str::default, Str::new);
+		if self.approval_id == next {
+			return Ok(());
+		}
+		if self.suspended || !self.credit_available() {
+			self.dirty = true;
+			return Ok(());
+		}
+		let mut ops = Vec::new();
+		if !self.approval_id.is_empty() {
+			ops.push(Op::Del(Str::new_static("approval")));
+		}
+		if let (Some(id), Some(reason)) = (id, reason) {
+			ops.push(add_node(approval_node(id, reason), LAYER_ID));
+		}
+		if !ops.is_empty() {
+			self.send_frame(writer, ops)?;
+		}
+		self.approval_id = next;
+		Ok(())
+	}
+
 	/// Handles a terminal reply or event.
 	pub fn incoming(&mut self, incoming: Incoming) {
 		self.record_incoming(&incoming);
 		match incoming {
 			Incoming::Reply(Reply::Hello(hello)) => self.replace_hello(hello),
+			Incoming::Reply(Reply::Blobs { .. }) => {},
 			Incoming::Event(Event::Ack { sf, s }) if sf == self.id => {
 				self.acked = self.acked.max(s);
 			},
@@ -294,15 +349,22 @@ impl Surface {
 				self.opened = false;
 				self.adopting = false;
 				self.blocks.clear();
+				self.events.clear();
 				self.composer_mounted = false;
 				self.composer = Str::default();
 				self.composer_cursor = u32::MAX;
 				self.status_mounted = false;
 				self.status_text = Str::default();
+				self.approval_id = Str::default();
 				self.dirty = true;
 			},
-			_ => {},
+			Incoming::Event(event) => self.events.push_back(event),
 		}
+	}
+
+	/// Removes the next terminal interaction event for the host actor.
+	pub fn take_event(&mut self) -> Option<Event> {
+		self.events.pop_front()
 	}
 
 	/// Suspends native composition so the regular renderer can paint overlays.

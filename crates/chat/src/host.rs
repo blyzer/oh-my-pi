@@ -35,7 +35,11 @@ use omp_tui::{
 	},
 	respond_debug_query,
 	slots::{Mode, ResizePolicy},
-	tsp::{self, frame::Incoming, wire::Reply},
+	tsp::{
+		self,
+		frame::Incoming,
+		wire::{Event as TspEvent, Reply},
+	},
 };
 use parking_lot::Mutex;
 use strum::IntoEnumIterator as _;
@@ -4599,6 +4603,26 @@ impl Host {
 		}
 	}
 
+	/// Applies a native surface action to the existing approval authority.
+	fn route_tsp_event(&mut self, event: TspEvent) {
+		let TspEvent::Action { act, .. } = event else {
+			return;
+		};
+		let Some(approval) = self.presenter.overlays.approval().cloned() else {
+			return;
+		};
+		let Some(choice) = act.chars().next().map(|value| value.to_ascii_lowercase()) else {
+			return;
+		};
+		if let Some(decision) = approval.decision(choice) {
+			let _ = self
+				.presenter
+				.commands
+				.send(HostCommand::Approve { id: approval.id, decision });
+			self.presenter.overlays.dismiss();
+		}
+	}
+
 	/// Consumes decoded TSP replies and events queued by the terminal.
 	///
 	/// Returns `true` when the surface still owes a frame, so the caller
@@ -4607,12 +4631,20 @@ impl Host {
 	fn drain_tsp(&mut self, terminal: &mut Terminal) -> bool {
 		let mut repaint = false;
 		while let Some(incoming) = terminal.take_tsp() {
+			let mut events = Vec::new();
 			if let Some(surface) = self.tsp_surface.as_mut() {
 				if matches!(&incoming, Incoming::Reply(Reply::Hello(_))) {
 					self.tsp_deadline = None;
 				}
 				surface.incoming(incoming);
+				while let Some(event) = surface.take_event() {
+					events.push(event);
+				}
 				repaint |= surface.dirty();
+			}
+			for event in events {
+				self.route_tsp_event(event);
+				repaint = true;
 			}
 		}
 		repaint
@@ -4947,6 +4979,11 @@ impl Host {
 		let blocks = self.presenter.blocks();
 		let now = self.presenter.clock.elapsed();
 		let pacing = CL_TSP_STREAM_PACING.get(&self.presenter.con);
+		let approval = self
+			.presenter
+			.overlays
+			.approval()
+			.map(|approval| (approval.id.clone(), approval.reason.clone()));
 		let Some(surface) = self.tsp_surface.as_mut() else {
 			return Ok(false);
 		};
@@ -4956,6 +4993,11 @@ impl Host {
 		}
 		surface.resume(renderer.writer_mut())?;
 		surface.present(renderer.writer_mut(), &blocks, &composer, cursor, &status, now, pacing)?;
+		surface.present_approval(
+			renderer.writer_mut(),
+			approval.as_ref().map(|(id, _)| id.as_str()),
+			approval.as_ref().map(|(_, reason)| reason.as_str()),
+		)?;
 		Ok(true)
 	}
 
