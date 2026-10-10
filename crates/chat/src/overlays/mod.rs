@@ -305,9 +305,19 @@ pub trait Panel {
 	fn notify(&mut self, _note: PanelNote<'_>) -> PanelEvent {
 		PanelEvent::Ignored
 	}
+	/// Applies a native TSP form change, when this panel exposes one.
+	fn tsp_change(&mut self, _name: &str, _value: &serde_json::Value) -> PanelEvent {
+		PanelEvent::Ignored
+	}
+
+	/// Returns a native TSP form for overlays that expose structured fields.
+	fn tsp_node(&self) -> Option<omp_tui::tsp::wire::Node> {
+		None
+	}
+
 	/// Applies a new ambient presentation context to retained panel state.
 	fn set_context(&mut self, _ctx: &UiContext) {}
-	/// Reflows for a viewport and returns the frame to composite.
+
 	fn frame(&mut self, viewport: Size) -> &Frame;
 	/// Advances animations (countdowns); returns whether a repaint is due.
 	fn tick(&mut self, _now: Duration) -> bool {

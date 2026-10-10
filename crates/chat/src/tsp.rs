@@ -16,7 +16,7 @@ use omp_tui::tsp::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
-use strum::VariantArray as _;
+use strum::{IntoStaticStr, VariantArray as _};
 
 use crate::{
 	chrome::PLACEHOLDER,
@@ -40,6 +40,13 @@ struct BlockState {
 	finalized: bool,
 }
 
+#[derive(Serialize)]
+struct Stylesheet {
+	sf:   Str,
+	name: Str,
+	css:  Str,
+}
+
 /// One terminal-epoch TSP surface presenter.
 pub struct Surface {
 	id:               Str,
@@ -59,8 +66,66 @@ pub struct Surface {
 	composer_cursor:  u32,
 	status_mounted:   bool,
 	status_text:      Str,
+	approval_id:      Str,
+	form_id:          Str,
+	events:           VecDeque<Event>,
+}
+/// HTML-like element tags supported by Tern's `el` vocabulary.
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "lowercase")]
+pub enum ElementTag {
+	/// Form root.
+	Form,
+	/// Generic block.
+	Div,
+	/// Form label.
+	Label,
+	/// Generic input.
+	Input,
+	/// Action button.
+	Button,
+	/// Inline text.
+	Span,
+	/// Select control.
+	Select,
+	/// Select option.
+	Option,
 }
 
+/// Builds a typed TSP `el` node.
+#[must_use]
+pub fn element_node(
+	id: Str,
+	tag: ElementTag,
+	props: Map<String, Value>,
+	children: Vec<Node>,
+) -> Node {
+	let tag: &'static str = tag.into();
+	let mut props = props;
+	props.insert("tag".into(), Value::String(tag.into()));
+	Node { id, k: Kind::El, p: props, c: children }
+}
+
+fn approval_node(id: &str, reason: &str) -> Node {
+	let mut form = Map::new();
+	form.insert("class".into(), Value::String("omp-approval".into()));
+	let mut message = Map::new();
+	message.insert("text".into(), Value::String(reason.into()));
+	let button = |suffix: &str, label: &str, action: &str| {
+		let mut props = Map::new();
+		props.insert("text".into(), Value::String(label.into()));
+		props.insert(
+			"actions".into(),
+			Value::Object(Map::from_iter([(String::from("click"), Value::String(action.into()))])),
+		);
+		element_node(Str::from(format!("{id}-{suffix}")), ElementTag::Button, props, Vec::new())
+	};
+	element_node(Str::new_static("approval"), ElementTag::Form, form, vec![
+		element_node(Str::from(format!("{id}-reason")), ElementTag::Div, message, Vec::new()),
+		button("approve", "Approve", "approve"),
+		button("deny", "Deny", "deny"),
+	])
+}
 impl Surface {
 	/// Starts an inline surface for a terminal whose `hello` beat the DA1
 	/// fence.
@@ -122,6 +187,9 @@ impl Surface {
 			composer_cursor: u32::MAX,
 			status_mounted: false,
 			status_text: Str::default(),
+			approval_id: Str::default(),
+			form_id: Str::default(),
+			events: VecDeque::new(),
 		}
 	}
 
@@ -129,6 +197,42 @@ impl Surface {
 	pub fn replace_hello(&mut self, hello: Hello) {
 		self.encoder.set_limit(hello.apc_limit());
 		self.hello = hello;
+	}
+
+	/// Installs or replaces a stylesheet scoped to this surface.
+	///
+	/// Styles are sent only when Tern advertises `styles`; otherwise the
+	/// caller keeps the semantic `el` nodes and Tern's own theme/layout.
+	///
+	/// # Errors
+	///
+	/// Returns invalid input for an illegal sheet name or a CSS payload over
+	/// Tern's 256 KiB per-surface budget, or the writer error.
+	pub fn set_stylesheet(
+		&mut self,
+		writer: &mut impl io::Write,
+		name: &str,
+		css: &str,
+	) -> io::Result<()> {
+		if !self.hello.has_feature("styles") {
+			return Ok(());
+		}
+		if name.is_empty()
+			|| name.len() > 64
+			|| !name
+				.bytes()
+				.all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+		{
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid TSP stylesheet name"));
+		}
+		if css.len() > 256 * 1024 {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "TSP stylesheet exceeds 256 KiB"));
+		}
+		self.send(writer, Verb::Stylesheet, &Stylesheet {
+			sf:   self.id.clone(),
+			name: Str::new(name),
+			css:  Str::new(css),
+		})
 	}
 
 	/// Re-enters the surface for a new terminal epoch.
@@ -143,6 +247,8 @@ impl Surface {
 		self.composer_cursor = u32::MAX;
 		self.status_mounted = false;
 		self.status_text = Str::default();
+		self.approval_id = Str::default();
+		self.form_id = Str::default();
 		self.dirty = true;
 	}
 
@@ -202,11 +308,71 @@ impl Surface {
 		Ok(())
 	}
 
+	/// Presents or removes the native approval form in the layer region.
+	pub fn present_approval(
+		&mut self,
+		writer: &mut impl io::Write,
+		id: Option<&str>,
+		reason: Option<&str>,
+	) -> io::Result<()> {
+		let next = id.map_or_else(Str::default, Str::new);
+		if self.approval_id == next {
+			return Ok(());
+		}
+		if self.suspended || !self.credit_available() {
+			self.dirty = true;
+			return Ok(());
+		}
+		let mut ops = Vec::new();
+		if !self.approval_id.is_empty() {
+			ops.push(Op::Del(Str::new_static("approval")));
+		}
+		if let (Some(id), Some(reason)) = (id, reason) {
+			ops.push(add_node(approval_node(id, reason), LAYER_ID));
+		}
+		if !ops.is_empty() {
+			self.send_frame(writer, ops)?;
+		}
+		self.approval_id = next;
+		Ok(())
+	}
+
+	/// Presents or removes one surface-scoped settings form.
+	pub fn present_form(
+		&mut self,
+		writer: &mut impl io::Write,
+		node: Option<Node>,
+	) -> io::Result<()> {
+		let next = node
+			.as_ref()
+			.map_or_else(Str::default, |node| node.id.clone());
+		if self.form_id == next {
+			return Ok(());
+		}
+		if self.suspended || !self.credit_available() {
+			self.dirty = true;
+			return Ok(());
+		}
+		let mut ops = Vec::new();
+		if !self.form_id.is_empty() {
+			ops.push(Op::Del(self.form_id.clone()));
+		}
+		if let Some(node) = node {
+			ops.push(add_node(node, LAYER_ID));
+		}
+		if !ops.is_empty() {
+			self.send_frame(writer, ops)?;
+		}
+		self.form_id = next;
+		Ok(())
+	}
+
 	/// Handles a terminal reply or event.
 	pub fn incoming(&mut self, incoming: Incoming) {
 		self.record_incoming(&incoming);
 		match incoming {
 			Incoming::Reply(Reply::Hello(hello)) => self.replace_hello(hello),
+			Incoming::Reply(Reply::Blobs { .. }) => {},
 			Incoming::Event(Event::Ack { sf, s }) if sf == self.id => {
 				self.acked = self.acked.max(s);
 			},
@@ -216,15 +382,23 @@ impl Surface {
 				self.opened = false;
 				self.adopting = false;
 				self.blocks.clear();
+				self.events.clear();
 				self.composer_mounted = false;
 				self.composer = Str::default();
 				self.composer_cursor = u32::MAX;
 				self.status_mounted = false;
 				self.status_text = Str::default();
+				self.approval_id = Str::default();
+				self.form_id = Str::default();
 				self.dirty = true;
 			},
-			_ => {},
+			Incoming::Event(event) => self.events.push_back(event),
 		}
+	}
+
+	/// Removes the next terminal interaction event for the host actor.
+	pub fn take_event(&mut self) -> Option<Event> {
+		self.events.pop_front()
 	}
 
 	/// Suspends native composition so the regular renderer can paint overlays.
@@ -860,5 +1034,69 @@ mod tests {
 		};
 		doc.apply(&frame);
 		assert!(!doc.is_settled("b-1"), "omitted settle must leave block unsettled");
+	}
+	#[test]
+	fn element_builder_is_typed_and_surface_scoped() {
+		let mut props = Map::new();
+		props.insert("text".into(), Value::String(Str::new_static("Approve").into()));
+		let node = element_node(Str::new_static("approve"), ElementTag::Button, props, Vec::new());
+		assert_eq!(node.k, Kind::El);
+		assert_eq!(node.p.get("tag"), Some(&Value::String("button".into())));
+	}
+
+	#[test]
+	fn stylesheet_requires_feature_and_rejects_invalid_names() {
+		let hello = Hello {
+			v:             1,
+			term:          Str::new_static("tern"),
+			ver:           None,
+			kinds:         vec![Str::new_static("col")],
+			features:      vec![Str::new_static("styles")],
+			apc:           None,
+			credits:       None,
+			cols:          None,
+			cell:          None,
+			dark:          None,
+			reduce_motion: None,
+			hour12:        None,
+		};
+		let mut surface = Surface::new(hello, false);
+		let mut out = Vec::new();
+		surface
+			.set_stylesheet(&mut out, "forms", ".ask { display: flex }")
+			.unwrap();
+		assert!(out.windows(6).any(|window| window == b"tsp;s;"));
+		assert!(surface.set_stylesheet(&mut out, "bad/name", "").is_err());
+		assert!(
+			surface
+				.set_stylesheet(&mut out, "too-large", &"x".repeat(256 * 1024 + 1))
+				.is_err()
+		);
+		let mut no_styles = Surface::optimistic(false);
+		let mut untouched = Vec::new();
+		no_styles
+			.set_stylesheet(&mut untouched, "forms", "body {}")
+			.unwrap();
+		assert!(untouched.is_empty(), "optimistic hello does not assume styles");
+	}
+
+	#[test]
+	fn approval_form_and_native_actions_are_protocol_nodes() {
+		let form = approval_node("ticket-1", "Approve network access?");
+		assert_eq!(form.k, Kind::El);
+		assert_eq!(form.p.get("tag"), Some(&Value::String("form".into())));
+		assert_eq!(form.c.len(), 3);
+		assert_eq!(form.c[1].p.get("text"), Some(&Value::String("Approve".into())));
+
+		let mut surface = Surface::optimistic(false);
+		surface.incoming(Incoming::Event(Event::Action {
+			sf:     Str::new_static(SURFACE_ID),
+			id:     Str::new_static("approval"),
+			act:    Str::new_static("approve"),
+			value:  None,
+			mods:   Vec::new(),
+			values: None,
+		}));
+		assert!(matches!(surface.take_event(), Some(Event::Action { .. })));
 	}
 }

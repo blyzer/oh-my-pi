@@ -35,7 +35,11 @@ use omp_tui::{
 	},
 	respond_debug_query,
 	slots::{Mode, ResizePolicy},
-	tsp::{self, frame::Incoming, wire::Reply},
+	tsp::{
+		self,
+		frame::Incoming,
+		wire::{Event as TspEvent, Reply},
+	},
 };
 use parking_lot::Mutex;
 use strum::IntoEnumIterator as _;
@@ -4599,6 +4603,37 @@ impl Host {
 		}
 	}
 
+	/// Applies native surface actions and form changes to existing authorities.
+	fn route_tsp_event(&mut self, event: TspEvent) {
+		match event {
+			TspEvent::Action { act, .. } => {
+				let Some(approval) = self.presenter.overlays.approval().cloned() else {
+					return;
+				};
+				let Some(choice) = act.chars().next().map(|value| value.to_ascii_lowercase()) else {
+					return;
+				};
+				if let Some(decision) = approval.decision(choice) {
+					let _ = self
+						.presenter
+						.commands
+						.send(HostCommand::Approve { id: approval.id, decision });
+					self.presenter.overlays.dismiss();
+				}
+			},
+			TspEvent::Change { name: Some(name), value, .. } => {
+				let panel_event = match self.presenter.overlays.active_mut() {
+					Some(Overlay::Panel(panel)) => panel.tsp_change(name.as_str(), &value),
+					_ => PanelEvent::Ignored,
+				};
+				if panel_event != PanelEvent::Ignored {
+					let _ = self.presenter.apply_panel_event(panel_event);
+				}
+			},
+			_ => {},
+		}
+	}
+
 	/// Consumes decoded TSP replies and events queued by the terminal.
 	///
 	/// Returns `true` when the surface still owes a frame, so the caller
@@ -4607,12 +4642,20 @@ impl Host {
 	fn drain_tsp(&mut self, terminal: &mut Terminal) -> bool {
 		let mut repaint = false;
 		while let Some(incoming) = terminal.take_tsp() {
+			let mut events = Vec::new();
 			if let Some(surface) = self.tsp_surface.as_mut() {
 				if matches!(&incoming, Incoming::Reply(Reply::Hello(_))) {
 					self.tsp_deadline = None;
 				}
 				surface.incoming(incoming);
+				while let Some(event) = surface.take_event() {
+					events.push(event);
+				}
 				repaint |= surface.dirty();
+			}
+			for event in events {
+				self.route_tsp_event(event);
+				repaint = true;
 			}
 		}
 		repaint
@@ -4947,15 +4990,31 @@ impl Host {
 		let blocks = self.presenter.blocks();
 		let now = self.presenter.clock.elapsed();
 		let pacing = CL_TSP_STREAM_PACING.get(&self.presenter.con);
+		let approval = self
+			.presenter
+			.overlays
+			.approval()
+			.map(|approval| (approval.id.clone(), approval.reason.clone()));
+		let form = match self.presenter.overlays.active() {
+			Some(Overlay::Panel(panel)) => panel.tsp_node(),
+			_ => None,
+		};
+		let native_overlay = approval.is_some() || form.is_some();
 		let Some(surface) = self.tsp_surface.as_mut() else {
 			return Ok(false);
 		};
-		if overlay_open {
+		if overlay_open && !native_overlay {
 			surface.suspend(renderer.writer_mut())?;
 			return Ok(false);
 		}
 		surface.resume(renderer.writer_mut())?;
 		surface.present(renderer.writer_mut(), &blocks, &composer, cursor, &status, now, pacing)?;
+		surface.present_approval(
+			renderer.writer_mut(),
+			approval.as_ref().map(|(id, _)| id.as_str()),
+			approval.as_ref().map(|(_, reason)| reason.as_str()),
+		)?;
+		surface.present_form(renderer.writer_mut(), form)?;
 		Ok(true)
 	}
 
