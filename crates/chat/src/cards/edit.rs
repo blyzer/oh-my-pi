@@ -2,12 +2,12 @@
 
 use omp_core::{Str, sf};
 use omp_dom::{Node, PropId};
-use omp_tui::{IntoComponent as _, UiContext, dom};
-use serde_json::Value;
+use omp_tui::{IntoComponent as _, UiContext, dom, tsp::wire::Kind};
+use serde_json::{Map, Value};
 
 use super::{
-	Card, CardStatus, CardView, Component, elapsed_badge, file_link, path_language_icon,
-	typed_fault, typed_input, typed_result,
+	Card, CardStatus, CardView, Component, elapsed_badge, file_link, path_language_icon, tsp_node,
+	tsp_prop, typed_fault, typed_input, typed_result,
 };
 
 /// Card for `edit` calls.
@@ -20,6 +20,13 @@ impl Card for EditCard {
 
 	fn render(&self, view: &CardView<'_>, expanded: bool, ui: &UiContext) -> Component {
 		render_edit(view, expanded, false, ui)
+	}
+
+	fn describe(&self, id: Str, view: &CardView<'_>) -> Option<omp_tui::tsp::wire::Node> {
+		let mut props = Map::new();
+		tsp_prop(&mut props, "text", view.result_text().or(view.output).unwrap_or_default());
+		tsp_prop(&mut props, "status", view.status.as_str());
+		Some(tsp_node(id, Kind::Diff, props))
 	}
 }
 

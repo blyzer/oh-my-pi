@@ -57,6 +57,8 @@ mod test_support;
 pub mod thinking;
 /// Retained transcript ledger and observer-local transcript facts.
 pub mod transcript;
+/// Native Tern Surface Protocol presentation.
+pub(crate) mod tsp;
 /// Welcome banner.
 pub mod welcome;
 

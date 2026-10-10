@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
+	borrow::Cow,
 	collections::VecDeque,
 	ffi::{OsStr, OsString},
 	fs,
@@ -163,16 +164,27 @@ pub trait SpawnWrapper: Send + Sync {
 	}
 
 	/// Observes one external program the shell composes through this wrapper,
-	/// once per launch and before it starts: `program` is the file the launch
-	/// starts, a name with a path separator made absolute against the shell's
-	/// working directory and a bare name (`exec curl`) as found on the shell's
-	/// `PATH`, or `None` when no `PATH` directory holds it; `args` are its
-	/// arguments after expansion, without the program itself. Nothing has
-	/// checked that a path-qualified `program` exists or can run, and a
-	/// launcher only fails to start it after its own spawn has succeeded. A
-	/// wrapper can record what it launches, such as a network address handed
-	/// to a program its sandbox cuts off. The default ignores both.
-	fn observe_launch(&self, _program: Option<&Path>, _args: &mut dyn Iterator<Item = &OsStr>) {}
+	/// once per launch and before it starts: `args` are its arguments after
+	/// expansion, without the program itself, and `program` resolves the
+	/// absolute file the launch starts, a name with a path separator made
+	/// absolute against the shell's working directory and a bare name
+	/// (`exec curl`) as found on the shell's `PATH`, or `None` when no `PATH`
+	/// directory holds it. Resolving costs a join or a `PATH` search, so the
+	/// shell does it at most once per launch, for the installed
+	/// [`PathPolicy`]'s read check or else when the wrapper calls `program`,
+	/// and a wrapper should call it only for a launch it may record. A program
+	/// that policy refuses to read is never observed: the launch ends in a path
+	/// denial first. Nothing has checked that a path-qualified program exists
+	/// or can run, and a launcher only fails to start it after its own spawn
+	/// has succeeded. A wrapper can record what it launches, such as a network
+	/// address handed to a program its sandbox cuts off. The default ignores
+	/// both.
+	fn observe_launch<'p>(
+		&self,
+		_program: &dyn Fn() -> Option<Cow<'p, Path>>,
+		_args: &mut dyn Iterator<Item = &OsStr>,
+	) {
+	}
 }
 /// Scopes process-directed authority (signals, observation, and process
 /// metadata) for one execution.

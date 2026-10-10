@@ -225,12 +225,34 @@ Phase 0 done (`crates/tui/src/tsp/`):
 - `tsp;` replies and events (APC and OSC 877) consumed by `Terminal::handle_response` and queued for
   `Terminal::take_tsp`.
 
-No presenter exists yet, so nothing draws a surface: phases 1 to 4 are not started.
+Phase 1 done (`crates/chat/src/tsp.rs`, wired in `crates/chat/src/host.rs`):
+- one inline surface per terminal epoch, with `main`/`dock`/`layer` regions;
+- the optimistic start: inside Tern, outside a multiplexer, the surface opens and sends its first
+  frame on the assumed v1 `hello` (every kind, `apc` 65536, `credits` 2); a DA1 answer with no
+  `hello` in front of it, or one second of silence, closes it with `keep:false` and the epoch
+  finishes in cells;
+- close with `keep:true` before leaving the terminal and `adopt` on re-entry; a `gone` event
+  mounts a fresh surface;
+- transcript blocks as `card`/`md`/`section`/`tool`/`rows` with ids from `BlockView.key`,
+  `text append` for streaming and `finalized` → `settle`;
+- credits and `ack`: never more than `credits` frames unacknowledged;
+- the composer as a minimal `editor` node (text, UTF-16 cursor, placeholder, `focus`), the status
+  band as `rows`, and every key still omp's;
+- overlays suspend the surface and the existing renderer draws them;
+- the `tsp_stream_pacing raw|paced` convar, both modes implemented;
+- while a surface is live the slot ledger stays idle; it is admitted when an overlay hands the
+  screen back.
+
+Phases 2 to 4 are not started.
 
 ## Not verified
 
+- Appearance and fluidity in a real Tern: every proof here runs against a scripted fake Tern on a
+  real PTY, with `omp_tui::tsp::doc` as the oracle. The `.jsonl` recordings (both pacing modes) are
+  for the owner to replay with `surface-play`.
 - Whether `xutf` exposes UTF-8↔UTF-16 offset conversion. It has a `Utf16` codec type; an offset
-  API was not confirmed.
+  API was not confirmed, so the presenter transcodes the prefix with
+  `xutf::transcoded_len::<Utf8, Utf16Le>`.
 - That a bracketed paste can never surface as a TSP response in omp2's decoder.
 - How many v1 components still fall back to `rows` at runtime.
 - How Tern's `md` treats omp's Markdown extensions (mermaid, graphviz).
