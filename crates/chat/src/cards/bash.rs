@@ -1,10 +1,11 @@
 //! Typed card for `bash@1`.
 
-use omp_tui::{IntoComponent as _, UiContext, dom};
-use serde_json::Value;
+use omp_tui::{IntoComponent as _, UiContext, dom, tsp::wire::Kind};
+use serde_json::{Map, Value};
 
 use super::{
-	Card, CardStatus, CardView, Component, elapsed_badge, typed_fault, typed_input, typed_result,
+	Card, CardStatus, CardView, Component, elapsed_badge, tsp_node, tsp_prop, typed_fault,
+	typed_input, typed_result,
 };
 
 /// Collapsed output rows shown while a command runs: the tail of the live
@@ -146,6 +147,17 @@ impl Card for BashCard {
 			</box>
 		}
 		.into_component()
+	}
+
+	fn describe(&self, id: omp_core::Str, view: &CardView<'_>) -> Option<omp_tui::tsp::wire::Node> {
+		let text = view
+			.output
+			.or_else(|| view.result_text())
+			.unwrap_or_default();
+		let mut props = Map::new();
+		tsp_prop(&mut props, "text", text);
+		tsp_prop(&mut props, "follow", view.status == CardStatus::InProgress);
+		Some(tsp_node(id, Kind::Ansi, props))
 	}
 }
 

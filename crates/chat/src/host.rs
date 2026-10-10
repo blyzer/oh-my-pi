@@ -1590,15 +1590,16 @@ impl Presenter {
 			intro,
 		);
 		RenderedBlock {
-			view:      BlockView {
+			view:        BlockView {
 				key:       0,
 				kind:      BlockKind::Welcome,
 				text:      Str::new_static("welcome"),
 				mode:      Mode::Mutable,
 				finalized: intro.is_none(),
 			},
-			component: Box::new(welcome),
-			stream:    None,
+			component:   Box::new(welcome),
+			description: None,
+			stream:      None,
 		}
 	}
 
@@ -6077,21 +6078,22 @@ pub fn render_surface(
 	let _ = composer.set_plan_mode(plan);
 	let status = StatusLine::from_dom(&replica);
 	let welcome = || RenderedBlock {
-		view:      BlockView {
+		view:        BlockView {
 			key:       0,
 			kind:      BlockKind::Welcome,
 			text:      Str::new_static("welcome"),
 			mode:      Mode::Mutable,
 			finalized: true,
 		},
-		component: Box::new(Welcome::new(
+		component:   Box::new(Welcome::new(
 			Str::new_static(env!("CARGO_PKG_VERSION")),
 			model,
 			tip_seeded(welcome_seed(status.session.as_str()), ui.charset),
 			WelcomeFacts::default(),
 			None,
 		)),
-		stream:    None,
+		description: None,
+		stream:      None,
 	};
 	let cards = CardRegistry::standard();
 	let transcript = crate::transcript::Local::default();

@@ -39,6 +39,7 @@ use omp_dom::{Node, PropId};
 use omp_tool::{ArgPath, CallOutcome};
 use omp_tui::{Graphics, IntoComponent as _, UiContext, dom};
 use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
 use smallvec::SmallVec;
 
 /// A boxed retained TUI component.
@@ -627,6 +628,26 @@ pub trait Card: Send + Sync {
 
 	/// Builds retained semantic markup for the current element state.
 	fn render(&self, el: &CardView<'_>, expanded: bool, ui: &UiContext) -> Component;
+
+	/// Describes the current card as a native TSP node when supported.
+	fn describe(&self, id: Str, view: &CardView<'_>) -> Option<omp_tui::tsp::wire::Node> {
+		let _ = (id, view);
+		None
+	}
+}
+
+/// Builds a TSP node with an owned property map.
+pub(crate) fn tsp_node(
+	id: Str,
+	kind: omp_tui::tsp::wire::Kind,
+	props: Map<String, Value>,
+) -> omp_tui::tsp::wire::Node {
+	omp_tui::tsp::wire::Node { id, k: kind, p: props, c: Vec::new() }
+}
+
+/// Inserts a TSP property.
+pub(crate) fn tsp_prop(props: &mut Map<String, Value>, key: &str, value: impl Into<Value>) {
+	props.insert(key.to_owned(), value.into());
 }
 
 /// Tool-identity keyed card renderer registry with a generic fallback.
@@ -691,6 +712,20 @@ impl CardRegistry {
 	#[must_use]
 	pub fn contains(&self, tool: &str) -> bool {
 		self.cards.contains_key(tool)
+	}
+
+	/// Describes one tool as a native TSP node when its card has a contract.
+	#[must_use]
+	pub(crate) fn describe(
+		&self,
+		tool: &str,
+		id: Str,
+		view: &CardView<'_>,
+	) -> Option<omp_tui::tsp::wire::Node> {
+		self
+			.cards
+			.get(tool)
+			.and_then(|card| card.describe(id, view))
 	}
 
 	/// Renders one tool, falling back to the generic element-state card.

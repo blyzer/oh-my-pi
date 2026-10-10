@@ -3,10 +3,15 @@
 use omp_core::{Str, sf};
 use omp_dom::{Node, PropId};
 use omp_tools::todo::{CompletionTransition, Phase, Status, Task};
-use omp_tui::{IntoComponent as _, UiContext, components::STRIKE_TOTAL_FRAMES, dom};
-use serde_json::Value;
+use omp_tui::{
+	IntoComponent as _, UiContext, components::STRIKE_TOTAL_FRAMES, dom, tsp::wire::Kind,
+};
+use serde_json::{Map, Value};
 
-use super::{Card, CardStatus, CardView, Component, elapsed_badge, typed_fault, typed_input};
+use super::{
+	Card, CardStatus, CardView, Component, elapsed_badge, tsp_node, tsp_prop, typed_fault,
+	typed_input,
+};
 
 /// Session todo/checklist card.
 pub struct TodoCard;
@@ -22,6 +27,21 @@ impl Card for TodoCard {
 			CardStatus::Done => render_checklist(view, expanded),
 			CardStatus::Failed => render_failed(view),
 		}
+	}
+
+	fn describe(&self, id: Str, view: &CardView<'_>) -> Option<omp_tui::tsp::wire::Node> {
+		let mut props = Map::new();
+		let items = view
+			.result_json()
+			.and_then(|value| value.get("items").cloned())
+			.or_else(|| {
+				view
+					.args_json()
+					.and_then(|value| value.get("items").cloned())
+			})
+			.unwrap_or(Value::Array(Vec::new()));
+		tsp_prop(&mut props, "items", items);
+		Some(tsp_node(id, Kind::Checklist, props))
 	}
 }
 

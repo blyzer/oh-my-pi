@@ -688,7 +688,14 @@ fn tsp_surface_opens_optimistically_and_builds_the_chat_document() {
 		assert_eq!(kind_of(&tern.doc, region), Kind::Col, "{region} is a region column");
 	}
 	assert_eq!(kind_of(&tern.doc, "composer"), Kind::Editor, "the composer is a native editor");
-	assert_eq!(kind_of(&tern.doc, "status"), Kind::Rows, "the status band is rows");
+	assert_eq!(kind_of(&tern.doc, "status"), Kind::Status, "the status band is native status");
+	assert!(
+		tern
+			.doc
+			.get("status")
+			.is_some_and(|node| node.c.iter().all(|child| child.k == Kind::Seg)),
+		"status children are seg nodes"
+	);
 	assert_eq!(tern.doc.focus(), Some("composer"), "the composer owns focus");
 	assert!(
 		prop(&tern.doc, "composer", "placeholder").is_some(),

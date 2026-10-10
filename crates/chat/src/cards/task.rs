@@ -2,10 +2,13 @@
 
 use omp_core::{Str, sf};
 use omp_dom::{Node, PropId};
-use omp_tui::{IntoComponent as _, UiContext, dom};
-use serde_json::Value;
+use omp_tui::{IntoComponent as _, UiContext, dom, tsp::wire::Kind};
+use serde_json::{Map, Value};
 
-use super::{Card, CardStatus, CardView, Component, partial_string, typed_input, typed_result};
+use super::{
+	Card, CardStatus, CardView, Component, partial_string, tsp_node, tsp_prop, typed_input,
+	typed_result,
+};
 
 /// Agent rows a collapsed batch call shows; the rest fold into one
 /// `… N more agents` line.
@@ -101,6 +104,16 @@ impl Card for TaskCard {
 			CardStatus::StreamingArgs | CardStatus::InProgress => render_live(view, ui),
 			CardStatus::Done | CardStatus::Failed => render_settled(view, expanded, ui),
 		}
+	}
+
+	fn describe(&self, id: Str, view: &CardView<'_>) -> Option<omp_tui::tsp::wire::Node> {
+		let mut props = Map::new();
+		let results = view
+			.result_json()
+			.and_then(|value| value.get("results").cloned())
+			.unwrap_or(Value::Array(Vec::new()));
+		tsp_prop(&mut props, "results", results);
+		Some(tsp_node(id, Kind::Agent, props))
 	}
 }
 
