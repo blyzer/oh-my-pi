@@ -343,6 +343,26 @@ where
 		self.inner.prompt(view, caps)
 	}
 
+	fn projection(
+		&self,
+		view: Result<&Self::Payload, &Self::Fault>,
+		caps: &omp_tool::PromptCaps,
+	) -> omp_tool::PromptProjection {
+		self.inner.projection(view, caps)
+	}
+
+	fn authorize_visibility(
+		&self,
+		view: Result<&Self::Payload, &Self::Fault>,
+		receipt: &omp_tool::VisibilityReceipt,
+	) -> Result<(), omp_tool::ProjectionAuthorizationError> {
+		self.inner.authorize_visibility(view, receipt)
+	}
+
+	fn stream_match_text(&self, arguments: &JsonValue) -> Option<Vec<omp_tool::StreamMatchText>> {
+		self.inner.stream_match_text(arguments)
+	}
+
 	fn invoke_input(
 		&self,
 		update: &Self::Update,
