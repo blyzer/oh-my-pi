@@ -1464,6 +1464,26 @@ sources, and every finding that held was applied above. Two points were not appl
 The remaining finding (`docs/adr/README.md` listed 0039 but not 0040) was applied in the same
 change: 0040 is indexed under Runtime.
 
+## Amendment (2026-10-10): backend-neutral option D and recycling evidence
+
+The owner selected option D: `omp-exec` remains backend-neutral; BuildBuddy Run
+API is the first optimized backend; generic REAPI is the portable backend; both
+are optional and selected by capabilities/configuration. BuildBuddy-specific
+features must not enter the core contract. Slice 1 remains blocked until the
+probe evidence below is recorded; future BuildGrid, Buildfarm, Google RBE and
+GitHub-hosted backends must remain addable without changing the core.
+
+The follow-up recycling probe ran four sequential `bb execute` actions with
+`recycle-runner=true`, `preserve-workspace=true`, default isolation and the
+pinned Ubuntu 24.04 runner. Every action reported a different `boot_id`, a
+fresh uptime below 0.1 seconds and no persisted marker. Raw REAPI recycling
+therefore did not produce a warm workspace under these properties. The warm
+behavior remains specific to BuildBuddy Run API snapshots (`bb remote`).
+
+Evidence: `docs/audits/remote-verification-trial.md`, Slice 0c.
+Decision: keep REAPI portable/cold-capable; use BuildBuddy Run API snapshots
+for the optimized backend; do not make runner recycling a Slice 1 prerequisite.
+
 ## References
 
 - ADRs 0001, 0003, 0006, 0007, 0009, 0010, 0011, 0028, 0033, 0035, 0039.
