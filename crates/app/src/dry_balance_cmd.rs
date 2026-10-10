@@ -133,7 +133,13 @@ mod tests {
 		let accounts = ["short-a", "short-b", "same:first:last", "same:other:last"];
 		let labels = account_labels(accounts.iter().copied());
 		assert_eq!(labels, account_labels(accounts.iter().rev().copied()));
-		assert_eq!(labels.values().collect::<std::collections::BTreeSet<_>>().len(), accounts.len());
+		assert_eq!(
+			labels
+				.values()
+				.collect::<std::collections::BTreeSet<_>>()
+				.len(),
+			accounts.len()
+		);
 		let json = serde_json::to_string(&labels.values().collect::<Vec<_>>()).unwrap();
 		for account in accounts {
 			assert!(!json.contains(account));

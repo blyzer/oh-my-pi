@@ -39,7 +39,9 @@ pub(crate) async fn run(args: TokenArgs) -> miette::Result<()> {
 		.await
 		.into_diagnostic()?
 	{
-		AuthAnswer::Accounts(accounts) => stored_active_accounts(&store, accounts).into_diagnostic()?,
+		AuthAnswer::Accounts(accounts) => {
+			stored_active_accounts(&store, accounts).into_diagnostic()?
+		},
 		_ => return Err(miette!("provider account listing returned an unexpected response")),
 	};
 	if args.list {
@@ -102,7 +104,9 @@ fn select_account_index(count: usize, selected: Option<usize>) -> miette::Result
 	let selected = match selected {
 		Some(selected) => selected,
 		None if count == 1 => 1,
-		None => return Err(miette!("provider has {count} active accounts; use --list and --account")),
+		None => {
+			return Err(miette!("provider has {count} active accounts; use --list and --account"));
+		},
 	};
 	if selected == 0 || selected > count {
 		return Err(miette!("invalid --account {selected}; provider has {count} active account(s)"));
@@ -132,26 +136,38 @@ mod tests {
 		let store = CredentialStore::open(
 			directory.path().join("credentials.db"),
 			std::sync::Arc::new(omp_ai::auth::HeadlessKeySource::new(
-				omp_ai::auth::KeyId::new("token-test"), [8; 32],
+				omp_ai::auth::KeyId::new("token-test"),
+				[8; 32],
 			)),
-		).unwrap();
+		)
+		.unwrap();
 		let account = omp_ai::AccountId::from("provider:z-stored");
 		let principal = omp_ai::PrincipalId::from("stored");
-		store.put(omp_ai::auth::CredentialWrite {
-			account_id: &account, principal_id: &principal, kind: "api-key",
-			secret: &omp_core::SecretBox::new(Box::new(b"test-secret".to_vec())),
-			expires_at_ms: None, origin: omp_ai::auth::CredentialOrigin::Persistent,
-			now_ms: 1, expected_generation: None,
-		}).unwrap();
+		store
+			.put(omp_ai::auth::CredentialWrite {
+				account_id:          &account,
+				principal_id:        &principal,
+				kind:                "api-key",
+				secret:              &omp_core::SecretBox::new(Box::new(b"test-secret".to_vec())),
+				expires_at_ms:       None,
+				origin:              omp_ai::auth::CredentialOrigin::Persistent,
+				now_ms:              1,
+				expected_generation: None,
+			})
+			.unwrap();
 		let summary = |account: &str, state| AccountSummary {
-			account: omp_ai::AccountId::from(account), provider: ProviderId::from("provider"),
-			principal: None, label: None, state,
+			account: omp_ai::AccountId::from(account),
+			provider: ProviderId::from("provider"),
+			principal: None,
+			label: None,
+			state,
 		};
 		let stored = stored_active_accounts(&store, vec![
 			summary("provider:a-environment", AccountState::Active),
 			summary(account.as_str(), AccountState::Active),
 			summary(account.as_str(), AccountState::Disabled),
-		]).unwrap();
+		])
+		.unwrap();
 		assert_eq!(stored.len(), 1);
 		assert_eq!(stored[0].account, account);
 		assert_eq!(select_account_index(stored.len(), None).unwrap(), 0);

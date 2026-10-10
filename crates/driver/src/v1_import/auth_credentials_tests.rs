@@ -414,7 +414,11 @@ fn oauth_logins_import_access_refresh_and_expiry() {
 	let record = &control.accounts(Some(ProviderId::from_ref("anthropic")))[0];
 	assert!(record.enabled);
 	assert_eq!(record.routing.project, None);
-	assert_eq!(record.principal.as_str(), "Owner@Example.com", "principal matches the native token response");
+	assert_eq!(
+		record.principal.as_str(),
+		"Owner@Example.com",
+		"principal matches the native token response"
+	);
 	assert_eq!(metadata.principal_id, record.principal);
 }
 
@@ -530,36 +534,63 @@ fn a_codex_login_derives_its_residency_from_the_access_token() {
 #[test]
 fn imported_jwt_principal_deduplicates_native_accounts_and_v1_rows() {
 	let fixture = Fixture::new();
-	let payload = omp_core::encoding::base64_url::encode_raw(br#"{"user_id":"kimi-user-42","sub":"fallback"}"#).into_string();
-	let data = format!(r#"{{"access":"e30.{payload}.sig","refresh":"refresh","expires":1893456000000}}"#);
+	let payload =
+		omp_core::encoding::base64_url::encode_raw(br#"{"user_id":"kimi-user-42","sub":"fallback"}"#)
+			.into_string();
+	let data =
+		format!(r#"{{"access":"e30.{payload}.sig","refresh":"refresh","expires":1893456000000}}"#);
 	agent_db(&fixture.agent().join("agent.db"), &[
 		("kimi-code", "oauth", &data, None, Some("legacy-a")),
 		("kimi-code", "oauth", &data, None, Some("legacy-b")),
 	]);
 	let (_, store) = control(&fixture.data_dir());
 	let report = fixture.apply(&store);
-	let accounts = reopen(&fixture.data_dir(), &store).accounts(Some(ProviderId::from_ref("kimi-code")));
+	let accounts =
+		reopen(&fixture.data_dir(), &store).accounts(Some(ProviderId::from_ref("kimi-code")));
 	assert_eq!(accounts.len(), 1);
 	assert_eq!(accounts[0].principal.as_str(), "kimi-user-42");
-	assert!(matches!(outcome(&report, "kimi-code legacy-b (oauth)"), ImportOutcome::Skipped(SkipReason::AccountExists)));
+	assert!(matches!(
+		outcome(&report, "kimi-code legacy-b (oauth)"),
+		ImportOutcome::Skipped(SkipReason::AccountExists)
+	));
 }
 
 #[test]
 fn native_jwt_principal_is_kept_when_importing_an_older_identity() {
 	let fixture = Fixture::new();
-	let payload = omp_core::encoding::base64_url::encode_raw(br#"{"user_id":"kimi-user-42"}"#).into_string();
-	let data = format!(r#"{{"access":"e30.{payload}.sig","refresh":"refresh","expires":1893456000000}}"#);
-	agent_db(&fixture.agent().join("agent.db"), &[("kimi-code", "oauth", &data, None, Some("legacy"))]);
+	let payload =
+		omp_core::encoding::base64_url::encode_raw(br#"{"user_id":"kimi-user-42"}"#).into_string();
+	let data =
+		format!(r#"{{"access":"e30.{payload}.sig","refresh":"refresh","expires":1893456000000}}"#);
+	agent_db(&fixture.agent().join("agent.db"), &[(
+		"kimi-code",
+		"oauth",
+		&data,
+		None,
+		Some("legacy"),
+	)]);
 	let (control, store) = control(&fixture.data_dir());
-	control.import_oauth(omp_ai::auth::OAuthControlImport {
-		provider: ProviderId::from("kimi-code"), principal: omp_ai::PrincipalId::from("kimi-user-42"),
-		identity: None, access_token: Some(omp_core::SecretString::from("native-access")),
-		refresh_token: omp_core::SecretString::from("native-refresh"), expires_at_ms: None,
-		project: None, audit: None,
-	}).unwrap();
+	control
+		.import_oauth(omp_ai::auth::OAuthControlImport {
+			provider:      ProviderId::from("kimi-code"),
+			principal:     omp_ai::PrincipalId::from("kimi-user-42"),
+			identity:      None,
+			access_token:  Some(omp_core::SecretString::from("native-access")),
+			refresh_token: omp_core::SecretString::from("native-refresh"),
+			expires_at_ms: None,
+			project:       None,
+			audit:         None,
+		})
+		.unwrap();
 	let report = fixture.apply(&store);
-	assert!(matches!(outcome(&report, "kimi-code legacy (oauth)"), ImportOutcome::Skipped(SkipReason::AccountExists)));
-	assert_eq!(oauth_bundle(&reveal(&store, "kimi-code:kimi-user-42")), ("native-access".to_owned(), "native-refresh".to_owned()));
+	assert!(matches!(
+		outcome(&report, "kimi-code legacy (oauth)"),
+		ImportOutcome::Skipped(SkipReason::AccountExists)
+	));
+	assert_eq!(
+		oauth_bundle(&reveal(&store, "kimi-code:kimi-user-42")),
+		("native-access".to_owned(), "native-refresh".to_owned())
+	);
 }
 
 #[test]
@@ -897,12 +928,15 @@ async fn a_bearer_provider_key_imports_under_the_bearer_kind() {
 fn retained_email_identity_is_not_stored_as_a_prefixed_principal() {
 	let fixture = Fixture::new();
 	agent_db(&fixture.agent().join("agent.db"), &[(
-		"anthropic", "oauth",
+		"anthropic",
+		"oauth",
 		r#"{"access":"access","refresh":"refresh","expires":1893456000000}"#,
-		None, Some("email:owner@example.com|org:org-1"),
+		None,
+		Some("email:owner@example.com|org:org-1"),
 	)]);
 	let (_, store) = control(&fixture.data_dir());
 	fixture.apply(&store);
-	let accounts = reopen(&fixture.data_dir(), &store).accounts(Some(ProviderId::from_ref("anthropic")));
+	let accounts =
+		reopen(&fixture.data_dir(), &store).accounts(Some(ProviderId::from_ref("anthropic")));
 	assert_eq!(accounts[0].principal.as_str(), "owner@example.com");
 }

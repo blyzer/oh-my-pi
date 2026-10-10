@@ -470,8 +470,9 @@ impl AccountPool {
 		Ok(())
 	}
 
-	/// Durably purges account ownership, names, affinity, and runtime observations.
-	/// Storage failures leave the live pool unchanged and emit no deletion event.
+	/// Durably purges account ownership, names, affinity, and runtime
+	/// observations. Storage failures leave the live pool unchanged and emit no
+	/// deletion event.
 	pub fn remove(
 		&self,
 		account: &AccountId<str>,
@@ -487,7 +488,9 @@ impl AccountPool {
 		state.rejections.remove(account);
 		state.rate.remove(account);
 		state.quota.remove(account);
-		state.affinities.retain(|_, affinity| affinity.account.as_str() != account.as_str());
+		state
+			.affinities
+			.retain(|_, affinity| affinity.account.as_str() != account.as_str());
 		drop(state);
 		if removed.is_some() {
 			let _ = self
@@ -511,7 +514,11 @@ impl AccountPool {
 		provider: &ProviderId<str>,
 		principal: &PrincipalId<str>,
 	) -> Option<AccountId> {
-		self.state.read().accounts.values()
+		self
+			.state
+			.read()
+			.accounts
+			.values()
 			.find(|record| &record.provider == provider && &record.principal == principal)
 			.map(|record| record.account.clone())
 	}

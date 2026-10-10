@@ -20,8 +20,8 @@
 //! - An `oauth` row is imported through
 //!   [`omp_ai::auth::AuthControlHandle::import_oauth`] (access, refresh,
 //!   expiry) under its v1 account identity (`email:…|org:…`), with the raw
-//!   principal reconstructed from native catalog evidence when retained.
-//!   Per v1 extra, checked against how v2 logs in and builds requests:
+//!   principal reconstructed from native catalog evidence when retained. Per v1
+//!   extra, checked against how v2 logs in and builds requests:
 //!   - `projectId`: Cloud Code Assist (the `google-antigravity` and
 //!     `google-gemini-cli` logins, whose v2 exchange discovers it) refuses to
 //!     encode a request without the account's routing project, and v2 cannot
@@ -596,25 +596,49 @@ fn plan_row(row: Row, catalog: &Catalog, mcp: &McpConfig) -> Planned {
 }
 
 /// Reconstructs native login identity from the same catalog-selected evidence.
-fn imported_principal(catalog: &Catalog, provider: &str, oauth: &OAuthData, identity: &str) -> Option<PrincipalId> {
-	let resolution = catalog.provider(ProviderId::from_ref(provider))?.auth.iter()
+fn imported_principal(
+	catalog: &Catalog,
+	provider: &str,
+	oauth: &OAuthData,
+	identity: &str,
+) -> Option<PrincipalId> {
+	let resolution = catalog
+		.provider(ProviderId::from_ref(provider))?
+		.auth
+		.iter()
 		.filter_map(|auth| catalog.auth_spec(auth))
 		.find_map(|auth| catalog.oauth_spec(auth.oauth.as_ref()?))?
-		.principal_resolution.as_ref()?;
-	let identity_part = |prefix: &str| identity.split('|').find_map(|part| part.strip_prefix(prefix)).filter(|part| !part.is_empty());
+		.principal_resolution
+		.as_ref()?;
+	let identity_part = |prefix: &str| {
+		identity
+			.split('|')
+			.find_map(|part| part.strip_prefix(prefix))
+			.filter(|part| !part.is_empty())
+	};
 	let email = || nonempty(oauth.email.as_deref()).or_else(|| identity_part("email:"));
 	let value = match resolution {
 		PrincipalResolution::StaticLabel { label } => label.clone(),
-		PrincipalResolution::AccessTokenClaims { claims } =>
-			omp_ai::auth::oauth::jwt_claim(&oauth.access, claims).ok()?,
-		PrincipalResolution::IdTokenClaim { claim } =>
-			omp_ai::auth::oauth::jwt_claim(&oauth.access, std::slice::from_ref(claim)).ok()
-				.or_else(|| nonempty(oauth.account_id.as_deref()).or_else(|| identity_part("account:")).map(Str::new))?,
+		PrincipalResolution::AccessTokenClaims { claims } => {
+			omp_ai::auth::oauth::jwt_claim(&oauth.access, claims).ok()?
+		},
+		PrincipalResolution::IdTokenClaim { claim } => {
+			omp_ai::auth::oauth::jwt_claim(&oauth.access, std::slice::from_ref(claim))
+				.ok()
+				.or_else(|| {
+					nonempty(oauth.account_id.as_deref())
+						.or_else(|| identity_part("account:"))
+						.map(Str::new)
+				})?
+		},
 		PrincipalResolution::TokenResponseField { pointer }
 			if pointer.ends_with("/email") || pointer.ends_with("/email_address") =>
-			Str::new(email()?),
-		PrincipalResolution::UserinfoEndpoint { field, .. } if field.as_str() == "email" =>
-			Str::new(email()?),
+		{
+			Str::new(email()?)
+		},
+		PrincipalResolution::UserinfoEndpoint { field, .. } if field.as_str() == "email" => {
+			Str::new(email()?)
+		},
 		_ => return None,
 	};
 	Some(PrincipalId::from(value))
