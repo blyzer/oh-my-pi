@@ -1504,7 +1504,8 @@ fn json_object_string(document: &str, field: &str) -> Result<Str, OAuthError> {
 }
 
 /// Reads the first catalog-selected stable principal claim from a JWT.
-/// Importers use the same evidence ordering as native OAuth login, without network access.
+/// Importers use the same evidence ordering as native OAuth login, without
+/// network access.
 pub fn jwt_claim(token: &str, claims: &[Str]) -> Result<Str, OAuthError> {
 	let payload = token
 		.split('.')

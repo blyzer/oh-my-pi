@@ -1242,7 +1242,8 @@ where
 							.map_err(oauth_error)?;
 						let residency = tokens.codex_residency().map(RegionId::new);
 						let project = tokens.project().map(ToOwned::to_owned);
-						let account = accounts.account_for_principal(&provider_id, &principal)
+						let account = accounts
+							.account_for_principal(&provider_id, &principal)
 							.unwrap_or_else(|| AccountId::from(format!("{provider_id}:{principal}")));
 						let issued_at = clock.now();
 						let meta = LeaseMeta {
@@ -3589,16 +3590,23 @@ mod tests {
 		let clock = Arc::new(ImmediateClock(SystemTime::UNIX_EPOCH));
 		let imported_account = AccountId::from("kimi-code:account:legacy-kimi-user");
 		let control = super::AuthControlHandle::offline(
-			Arc::clone(&catalog), Arc::clone(&store), accounts.clone(),
-		).expect("control");
-		let (imported, _) = control.import_oauth(super::OAuthControlImport {
-			provider: provider.clone(),
-			principal: PrincipalId::from("kimi-user-42"),
-			identity: Some(Str::new_static("account:legacy-kimi-user")),
-			access_token: Some(SecretString::from("old-access")),
-			refresh_token: SecretString::from("old-refresh"),
-			expires_at_ms: Some(60_000), project: None, audit: None,
-		}).expect("imported account");
+			Arc::clone(&catalog),
+			Arc::clone(&store),
+			accounts.clone(),
+		)
+		.expect("control");
+		let (imported, _) = control
+			.import_oauth(super::OAuthControlImport {
+				provider:      provider.clone(),
+				principal:     PrincipalId::from("kimi-user-42"),
+				identity:      Some(Str::new_static("account:legacy-kimi-user")),
+				access_token:  Some(SecretString::from("old-access")),
+				refresh_token: SecretString::from("old-refresh"),
+				expires_at_ms: Some(60_000),
+				project:       None,
+				audit:         None,
+			})
+			.expect("imported account");
 		let engine = OAuthLoginEngine::new(
 			AuthMethod::OAuthDevice,
 			Arc::clone(&catalog),
@@ -3641,9 +3649,20 @@ mod tests {
 				AuthEvent::Prompt(_) => panic!("Kimi device flow must not request private input"),
 			}
 		};
-		assert_eq!(accounts.accounts().len(), 1, "native login does not duplicate the imported principal");
+		assert_eq!(
+			accounts.accounts().len(),
+			1,
+			"native login does not duplicate the imported principal"
+		);
 		assert_eq!(completed.account, imported_account);
-		assert!(store.metadata(&completed.account).unwrap().unwrap().generation > imported.generation);
+		assert!(
+			store
+				.metadata(&completed.account)
+				.unwrap()
+				.unwrap()
+				.generation
+				> imported.generation
+		);
 		let refreshed = StoredOAuthRefreshEngine::new(
 			catalog,
 			store,
@@ -3782,7 +3801,8 @@ mod tests {
 		let directory = tempfile::tempdir().unwrap();
 		let database = directory.path().join("credentials.db");
 		let (_, store, pool, control) = kind_control(&database);
-		let removed = write_earlier_row(&store, &pool, "anthropic", "removed", "api-key", b"secret", None);
+		let removed =
+			write_earlier_row(&store, &pool, "anthropic", "removed", "api-key", b"secret", None);
 		let kept = write_earlier_row(&store, &pool, "anthropic", "kept", "api-key", b"sibling", None);
 		control.delete(removed.account_id.clone()).await.unwrap();
 		assert!(store.metadata(&removed.account_id).unwrap().is_none());
