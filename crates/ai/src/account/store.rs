@@ -759,8 +759,7 @@ impl AccountStateStore {
 			.collect()
 	}
 
-	/// Explicitly purges secret-free account state; credential removal never
-	/// calls this.
+	/// Atomically purges account ownership and all associated secret-free state.
 	pub fn purge_account(&self, account: &AccountId<str>) -> Result<(), AccountStateStoreError> {
 		let _guard = self.writes.lock();
 		let mut connection = self.connection()?;

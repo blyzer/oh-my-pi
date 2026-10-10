@@ -19,8 +19,9 @@
 //!   writes), else `agent-db`.
 //! - An `oauth` row is imported through
 //!   [`omp_ai::auth::AuthControlHandle::import_oauth`] (access, refresh,
-//!   expiry) under its v1 identity (`email:…|org:…`). Per v1 extra, checked
-//!   against how v2 logs in and builds requests:
+//!   expiry) under its v1 account identity (`email:…|org:…`), with the raw
+//!   principal reconstructed from native catalog evidence when retained.
+//!   Per v1 extra, checked against how v2 logs in and builds requests:
 //!   - `projectId`: Cloud Code Assist (the `google-antigravity` and
 //!     `google-gemini-cli` logins, whose v2 exchange discovers it) refuses to
 //!     encode a request without the account's routing project, and v2 cannot
@@ -68,7 +69,7 @@ use omp_ai::{
 };
 use omp_catalog::{
 	ProviderId,
-	provider::{AuthSpecKind, OAuthExchangeKind, OAuthFlowSpec},
+	provider::{AuthSpecKind, OAuthExchangeKind, OAuthFlowSpec, PrincipalResolution},
 	snapshot::Catalog,
 };
 use omp_core::{Secret, SecretString, Str, sf};
@@ -253,6 +254,7 @@ struct Planned {
 	/// Store account identity (`<provider>:<identity>`); MCP rows use their
 	/// server URL's affinity instead.
 	identity:   Str,
+	principal:  PrincipalId,
 	/// v1 principals (email, account id) an existing v2 login of the same
 	/// person carries.
 	principals: [Option<String>; 2],
@@ -329,7 +331,7 @@ fn apply(
 	mcp: &mut Option<CombinedAuthAuthority>,
 	planned: Planned,
 ) -> Result<ImportOutcome, ImportError> {
-	let Planned { provider, identity, principals, subject, disabled, plan } = planned;
+	let Planned { provider, identity, principal, principals, subject, disabled, plan } = planned;
 	let store_error = |source| CredentialsImportError::Store { provider: provider.clone(), source };
 	let (control, write) = match plan {
 		Plan::Report(outcome) => return Ok(outcome),
@@ -361,6 +363,7 @@ fn apply(
 		.into_iter()
 		.any(|record| {
 			record.account.as_str() == account.as_str()
+				|| record.principal == principal
 				|| principals.iter().flatten().any(|principal| {
 					record
 						.principal
@@ -372,7 +375,6 @@ fn apply(
 		return Ok(ImportOutcome::Skipped(SkipReason::AccountExists));
 	}
 	let provider_id = ProviderId::from(provider.as_str());
-	let principal = PrincipalId::from(identity.as_str());
 	let written = match write {
 		AccountWrite::OAuth { access, refresh, expires_at_ms, project } => {
 			control.import_oauth(OAuthControlImport {
@@ -517,6 +519,7 @@ fn plan_row(row: Row, catalog: &Catalog, mcp: &McpConfig) -> Planned {
 		};
 		Planned {
 			provider: Str::new(&provider),
+			principal: PrincipalId::from(identity.as_str()),
 			identity,
 			principals,
 			subject,
@@ -551,6 +554,7 @@ fn plan_row(row: Row, catalog: &Catalog, mcp: &McpConfig) -> Planned {
 			let (subject, plan) = plan_mcp(&provider, disabled.is_some(), &data, mcp);
 			Planned {
 				provider: Str::new(&provider),
+				principal: PrincipalId::from(provider.as_str()),
 				identity: Str::new(&provider),
 				principals: [None, None],
 				subject: sf!("{subject} ({})", <&'static str>::from(Kind::McpOauth)),
@@ -572,11 +576,16 @@ fn plan_row(row: Row, catalog: &Catalog, mcp: &McpConfig) -> Planned {
 				nonempty(oauth.email.as_deref()).map(str::to_lowercase),
 				nonempty(oauth.account_id.as_deref()).map(str::to_owned),
 			];
+			let principal = imported_principal(catalog, &provider, &oauth, &identity)
+				.unwrap_or_else(|| PrincipalId::from(identity.as_str()));
 			let plan = plan_oauth(catalog, &provider, &mut oauth);
-			planned(Kind::OAuth, identity, principals, plan)
+			let mut row = planned(Kind::OAuth, identity, principals, plan);
+			row.principal = principal;
+			row
 		},
 		other => Planned {
 			provider:   Str::new(&provider),
+			principal:  PrincipalId::from(provider.as_str()),
 			identity:   Str::new(&provider),
 			principals: [None, None],
 			subject:    sf!("{provider} ({other})"),
@@ -584,6 +593,31 @@ fn plan_row(row: Row, catalog: &Catalog, mcp: &McpConfig) -> Planned {
 			plan:       Plan::Report(ImportOutcome::NotMigratable(NotMigratable::NoV2Equivalent)),
 		},
 	}
+}
+
+/// Reconstructs native login identity from the same catalog-selected evidence.
+fn imported_principal(catalog: &Catalog, provider: &str, oauth: &OAuthData, identity: &str) -> Option<PrincipalId> {
+	let resolution = catalog.provider(ProviderId::from_ref(provider))?.auth.iter()
+		.filter_map(|auth| catalog.auth_spec(auth))
+		.find_map(|auth| catalog.oauth_spec(auth.oauth.as_ref()?))?
+		.principal_resolution.as_ref()?;
+	let identity_part = |prefix: &str| identity.split('|').find_map(|part| part.strip_prefix(prefix)).filter(|part| !part.is_empty());
+	let email = || nonempty(oauth.email.as_deref()).or_else(|| identity_part("email:"));
+	let value = match resolution {
+		PrincipalResolution::StaticLabel { label } => label.clone(),
+		PrincipalResolution::AccessTokenClaims { claims } =>
+			omp_ai::auth::oauth::jwt_claim(&oauth.access, claims).ok()?,
+		PrincipalResolution::IdTokenClaim { claim } =>
+			omp_ai::auth::oauth::jwt_claim(&oauth.access, std::slice::from_ref(claim)).ok()
+				.or_else(|| nonempty(oauth.account_id.as_deref()).or_else(|| identity_part("account:")).map(Str::new))?,
+		PrincipalResolution::TokenResponseField { pointer }
+			if pointer.ends_with("/email") || pointer.ends_with("/email_address") =>
+			Str::new(email()?),
+		PrincipalResolution::UserinfoEndpoint { field, .. } if field.as_str() == "email" =>
+			Str::new(email()?),
+		_ => return None,
+	};
+	Some(PrincipalId::from(value))
 }
 
 /// v1's identity for an OAuth row without a stored `identity_key`: its

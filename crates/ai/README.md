@@ -4,6 +4,16 @@
 
 The crate keeps the public edge statically typed while the provider center is erased once at service construction. Calls are cheap to clone because operation payloads are shared, streams and sessions retain explicit ownership, errors are structured and secret-free, and receipts account for every attempt, recovery, usage dimension, and integer monetary unit. Provider identity and capability vocabulary come from `omp-catalog`; this crate does not infer policy from provider or model strings.
 
+## Account lifecycle
+
+Logout deletes encrypted credential material and durably purges account
+ownership, names, affinity, rejection, cooldown, rate, and quota state. A
+reloaded pool cannot reactivate a logged-out account. Pool removal propagates
+storage failures before changing its live projection or publishing deletion.
+Native OAuth login reuses an existing provider account with the resolved
+principal, including accounts written by the v1 importer.
+
+
 ## Local TTS (Kokoro)
 
 The optional local TTS backend runs Kokoro-82M text-to-speech inference on [candle](https://github.com/huggingface/candle), with Metal acceleration on macOS. Its model pipeline combines an ALBERT text encoder, duration and prosody predictors with bidirectional LSTMs, and an iSTFTNet vocoder. It performs pure inference without downloading models or accessing the network: callers provide checkpoint weights and voice embeddings as candle tensors. The implementation is derived from Kyle Kelley's MIT-licensed `voice-kokoro` crate and includes modifications by Stencil Labs; see [NOTICE](NOTICE) and the retained [license](src/local/tts/kokoro/LICENSE).

@@ -1393,10 +1393,10 @@ pub struct TokenArgs {
 	/// Refresh renewable credentials before reveal.
 	#[arg(long)]
 	pub force_refresh: bool,
-	/// One-based account selection.
+	/// One-based stored account selection; required when multiple accounts are active.
 	#[arg(long, short = 'a')]
 	pub account:       Option<usize>,
-	/// List active provider accounts without revealing secrets.
+	/// List active provider accounts backed by stored credentials without revealing secrets.
 	#[arg(long, short = 'l')]
 	pub list:          bool,
 }

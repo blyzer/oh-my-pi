@@ -470,19 +470,31 @@ impl AccountPool {
 		Ok(())
 	}
 
-	/// Removes account metadata while retaining independent cooldown, rate, and
-	/// quota observations.
-	pub fn remove(&self, account: &AccountId<str>) -> Option<AccountRecord> {
+	/// Durably purges account ownership, names, affinity, and runtime observations.
+	/// Storage failures leave the live pool unchanged and emit no deletion event.
+	pub fn remove(
+		&self,
+		account: &AccountId<str>,
+	) -> Result<Option<AccountRecord>, AccountStateStoreError> {
 		let mut state = self.state.write();
+		if let Some(store) = &self.store {
+			store.purge_account(account)?;
+		}
 		let removed = state.accounts.remove(account);
 		state.names.remove(account);
+		state.cooldowns.remove(account);
+		state.route_cooldowns.remove(account);
+		state.rejections.remove(account);
+		state.rate.remove(account);
+		state.quota.remove(account);
+		state.affinities.retain(|_, affinity| affinity.account.as_str() != account.as_str());
 		drop(state);
 		if removed.is_some() {
 			let _ = self
 				.changes
 				.send(AccountPoolEvent::Deleted(account.to_owned()));
 		}
-		removed
+		Ok(removed)
 	}
 
 	pub(crate) fn subscribe(&self) -> broadcast::Receiver<AccountPoolEvent> {
@@ -492,6 +504,16 @@ impl AccountPool {
 	/// Returns an account metadata snapshot.
 	pub fn account(&self, account: &AccountId<str>) -> Option<AccountRecord> {
 		self.state.read().accounts.get(account).cloned()
+	}
+
+	pub(crate) fn account_for_principal(
+		&self,
+		provider: &ProviderId<str>,
+		principal: &PrincipalId<str>,
+	) -> Option<AccountId> {
+		self.state.read().accounts.values()
+			.find(|record| &record.provider == provider && &record.principal == principal)
+			.map(|record| record.account.clone())
 	}
 
 	/// Returns every account metadata snapshot in stable account-ID order.

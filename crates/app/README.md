@@ -44,6 +44,12 @@ delegates to the broker, local generation uses the local inference facade,
 and serving delegates to the gateway assembly. Commands reject incomplete
 configurations rather than simulating success.
 
+`omp token` lists only active accounts backed by stored credentials, in stable
+account-ID order. With multiple accounts, reveal requires an explicit
+one-based `--account` selection; use `--list` to find its index. `dry-balance`
+uses stable, private `account-N` labels shared by counts and receipts, so
+different accounts cannot overwrite one another's JSON count keys.
+
 ## Development
 
 Run `just setup-python` once before commands that link embedded Python. Use

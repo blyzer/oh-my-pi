@@ -1242,7 +1242,8 @@ where
 							.map_err(oauth_error)?;
 						let residency = tokens.codex_residency().map(RegionId::new);
 						let project = tokens.project().map(ToOwned::to_owned);
-						let account = AccountId::from(format!("{provider_id}:{principal}"));
+						let account = accounts.account_for_principal(&provider_id, &principal)
+							.unwrap_or_else(|| AccountId::from(format!("{provider_id}:{principal}")));
 						let issued_at = clock.now();
 						let meta = LeaseMeta {
 							account:    account.clone(),
@@ -1961,11 +1962,11 @@ impl AuthManager {
 					.store
 					.delete(&account)
 					.map_err(|_| auth_store_failure())?;
-				let pooled = self.accounts.remove(&account).is_some();
-				self
+				let pooled = self
 					.accounts
-					.clear_name(&account)
-					.map_err(|_| auth_store_failure())?;
+					.remove(&account)
+					.map_err(|_| auth_store_failure())?
+					.is_some();
 				if !stored && !pooled {
 					return Err(auth_not_found());
 				}
@@ -2498,7 +2499,7 @@ mod tests {
 	use futures::future::{BoxFuture, FutureExt as _};
 	use http::HeaderMap;
 	use omp_catalog::{ProviderId, provider::AuthSpecKind, snapshot::Catalog};
-	use omp_core::{ExposeSecret as _, SecretString};
+	use omp_core::{ExposeSecret as _, SecretString, Str};
 	use parking_lot::Mutex;
 	use tokio::time;
 
@@ -2586,7 +2587,7 @@ mod tests {
 				.for_provider(&provider),
 			Some(&AccountPin::Unresolved)
 		);
-		pool.remove(&account.account);
+		pool.remove(&account.account).expect("remove account");
 		assert_eq!(
 			resolver
 				.session_pins(&pool, &recorded)
@@ -2665,6 +2666,10 @@ mod tests {
 		control.delete(account.clone()).await.expect("logout");
 		assert_eq!(control.account_name(&account), None);
 		assert!(state.load_names().expect("names").is_empty(), "the stored name is released too");
+		assert!(pool.account(&account).is_none());
+		assert!(state.load_accounts().expect("stored accounts").is_empty());
+		let reloaded = AccountPool::with_store(state).expect("reloaded pool");
+		assert!(reloaded.account(&account).is_none(), "logout survives reload");
 	}
 
 	/// Opens the encrypted store and account pool of `database` behind an
@@ -3582,6 +3587,18 @@ mod tests {
 		let accounts = AccountPool::new();
 		let custom = Arc::new(OAuthCustomDispatcher::new());
 		let clock = Arc::new(ImmediateClock(SystemTime::UNIX_EPOCH));
+		let imported_account = AccountId::from("kimi-code:account:legacy-kimi-user");
+		let control = super::AuthControlHandle::offline(
+			Arc::clone(&catalog), Arc::clone(&store), accounts.clone(),
+		).expect("control");
+		let (imported, _) = control.import_oauth(super::OAuthControlImport {
+			provider: provider.clone(),
+			principal: PrincipalId::from("kimi-user-42"),
+			identity: Some(Str::new_static("account:legacy-kimi-user")),
+			access_token: Some(SecretString::from("old-access")),
+			refresh_token: SecretString::from("old-refresh"),
+			expires_at_ms: Some(60_000), project: None, audit: None,
+		}).expect("imported account");
 		let engine = OAuthLoginEngine::new(
 			AuthMethod::OAuthDevice,
 			Arc::clone(&catalog),
@@ -3610,7 +3627,7 @@ mod tests {
 					saw_code = true;
 				},
 				AuthEvent::Complete(account) => {
-					assert_eq!(account.account.as_str(), "kimi-code:kimi-user-42");
+					assert_eq!(account.account, imported_account);
 					assert_eq!(
 						account
 							.principal
@@ -3624,6 +3641,9 @@ mod tests {
 				AuthEvent::Prompt(_) => panic!("Kimi device flow must not request private input"),
 			}
 		};
+		assert_eq!(accounts.accounts().len(), 1, "native login does not duplicate the imported principal");
+		assert_eq!(completed.account, imported_account);
+		assert!(store.metadata(&completed.account).unwrap().unwrap().generation > imported.generation);
 		let refreshed = StoredOAuthRefreshEngine::new(
 			catalog,
 			store,
@@ -3755,5 +3775,21 @@ mod tests {
 		drop(session);
 		drop(engine);
 		let _ = fs::remove_file(store_path);
+	}
+
+	#[tokio::test]
+	async fn logout_removes_encrypted_material_and_durable_pool_ownership() {
+		let directory = tempfile::tempdir().unwrap();
+		let database = directory.path().join("credentials.db");
+		let (_, store, pool, control) = kind_control(&database);
+		let removed = write_earlier_row(&store, &pool, "anthropic", "removed", "api-key", b"secret", None);
+		let kept = write_earlier_row(&store, &pool, "anthropic", "kept", "api-key", b"sibling", None);
+		control.delete(removed.account_id.clone()).await.unwrap();
+		assert!(store.metadata(&removed.account_id).unwrap().is_none());
+		assert!(pool.account(&removed.account_id).is_none());
+		let (_, reopened, reloaded, _) = kind_control(&database);
+		assert!(reopened.metadata(&removed.account_id).unwrap().is_none());
+		assert!(reloaded.account(&removed.account_id).is_none());
+		assert!(reloaded.account(&kept.account_id).is_some());
 	}
 }

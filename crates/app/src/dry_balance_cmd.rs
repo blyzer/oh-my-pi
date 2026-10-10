@@ -47,6 +47,7 @@ pub async fn run(args: DryBalanceArgs) -> miette::Result<()> {
 	if accounts.is_empty() {
 		return Err(miette!("provider `{}` has no eligible stored accounts", provider.as_str()));
 	}
+	let labels = account_labels(accounts.iter().map(|account| account.account.as_str()));
 	let mut counts = BTreeMap::<String, u32>::new();
 	let mut receipts = Vec::with_capacity(args.count as usize);
 	for sample in 0..args.count {
@@ -71,12 +72,12 @@ pub async fn run(args: DryBalanceArgs) -> miette::Result<()> {
 			})
 			.map_err(|error| miette!(error.to_string()))?;
 		*counts
-			.entry(selection.record.account.as_str().to_owned())
+			.entry(labels[selection.record.account.as_str()].clone())
 			.or_default() += 1;
 		receipts.push(json!({
 			"sample": sample,
 			"sessionId": session_id,
-			"account": mask(selection.record.account.as_str()),
+			"account": labels[selection.record.account.as_str()],
 			"candidateCount": selection.receipt.candidates.len(),
 		}));
 	}
@@ -87,14 +88,14 @@ pub async fn run(args: DryBalanceArgs) -> miette::Result<()> {
 				"model": model.key,
 				"provider": provider,
 				"route": route,
-				"counts": counts.into_iter().map(|(account, count)| (mask(&account), count)).collect::<BTreeMap<_, _>>(),
+				"counts": counts,
 				"receipts": receipts,
 			}))
 			.into_diagnostic()?
 		);
 	} else {
 		for (account, count) in counts {
-			println!("{} {count}", mask(&account));
+			println!("{account} {count}");
 		}
 	}
 	if args.bench {
@@ -114,14 +115,28 @@ pub async fn run(args: DryBalanceArgs) -> miette::Result<()> {
 	Ok(())
 }
 
-fn mask(value: &str) -> String {
-	let chars = value.chars().collect::<Vec<_>>();
-	if chars.len() <= 8 {
-		return "********".to_owned();
+fn account_labels<'a>(accounts: impl Iterator<Item = &'a str>) -> BTreeMap<&'a str, String> {
+	accounts
+		.collect::<std::collections::BTreeSet<_>>()
+		.into_iter()
+		.enumerate()
+		.map(|(index, account)| (account, format!("account-{}", index + 1)))
+		.collect()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn balance_labels_are_stable_private_and_collision_free() {
+		let accounts = ["short-a", "short-b", "same:first:last", "same:other:last"];
+		let labels = account_labels(accounts.iter().copied());
+		assert_eq!(labels, account_labels(accounts.iter().rev().copied()));
+		assert_eq!(labels.values().collect::<std::collections::BTreeSet<_>>().len(), accounts.len());
+		let json = serde_json::to_string(&labels.values().collect::<Vec<_>>()).unwrap();
+		for account in accounts {
+			assert!(!json.contains(account));
+		}
 	}
-	format!(
-		"{}…{}",
-		chars[..4].iter().collect::<String>(),
-		chars[chars.len() - 4..].iter().collect::<String>(),
-	)
 }
