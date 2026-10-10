@@ -26,7 +26,7 @@ use omp_journal::EntryId;
 use omp_tui::{
 	Appearance, CursorStyle, DebugOp, Dim, Frame, InputEvent, Key, KeyEvent, Layer, MouseReport,
 	OverlayAnchor, OverlayOptions, Progress, Renderer, Size, SpellingFeatures, Terminal,
-	TerminalEvent, TerminalOptions, TtyOut, Ui, UiContext,
+	TerminalEvent, TerminalOptions, TerminalResponse, TtyOut, Ui, UiContext,
 	anim::Intro,
 	components::{ComposerStyle, Countdown},
 	negotiate_async,
@@ -35,6 +35,7 @@ use omp_tui::{
 	},
 	respond_debug_query,
 	slots::{Mode, ResizePolicy},
+	tsp::{self, frame::Incoming, wire::Reply},
 };
 use parking_lot::Mutex;
 use strum::IntoEnumIterator as _;
@@ -84,6 +85,7 @@ use crate::{
 		CL_STATUS_LINE_RIGHT_SEGMENTS, CL_STATUS_LINE_SEGMENT_OPTIONS, CL_STATUS_LINE_SEPARATOR,
 		CL_STATUS_LINE_SHOW_HOOK_STATUS, CL_STATUS_LINE_TIME_FORMAT,
 		CL_STATUS_LINE_TIME_SHOW_SECONDS, CL_STATUS_LINE_TRANSPARENT, CL_THEME_DARK, CL_THEME_LIGHT,
+		CL_TSP_STREAM_PACING,
 	},
 	status_band::{
 		ActiveTime, CollabStatus, CollabStatusRole, ContextLine, GitStatus, ModeChip, PullRequest,
@@ -92,6 +94,7 @@ use crate::{
 	},
 	status_line::{StatusLine, advisor_badge, director_mode},
 	transcript::Projection,
+	tsp::Surface,
 	welcome::{WelcomeFacts, tip_seeded, welcome_seed},
 };
 
@@ -225,6 +228,9 @@ const LEFT_DOUBLE_TAP_MAX_GAP: Duration = Duration::from_millis(500);
 const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(8);
 /// `process.exit(130)`: a second Ctrl+C while teardown hangs.
 const HARD_ABORT_CODE: i32 = 130;
+/// How long an optimistically opened TSP surface waits for its `hello`
+/// before the epoch falls back to cell rendering (ADR 0041 phase 1).
+const OPTIMISTIC_WINDOW: Duration = Duration::from_secs(1);
 
 /// Which side-channel spawn a slash command asked for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4203,6 +4209,13 @@ pub struct Host {
 	resize_policy:   ResizePolicy,
 	projection:      Option<Projection>,
 	clipboard_write: Option<oneshot::Receiver<ClipboardWriteOutcome>>,
+	/// The live native surface, while this terminal draws one (ADR 0041).
+	tsp_surface:     Option<Surface>,
+	/// Whether the next entry should `adopt` the surface Tern kept.
+	tsp_adopt:       bool,
+	/// When an optimistically opened surface must be retired if no `hello`
+	/// has arrived.
+	tsp_deadline:    Option<Duration>,
 }
 
 impl Host {
@@ -4215,6 +4228,9 @@ impl Host {
 			resize_policy,
 			projection: None,
 			clipboard_write: None,
+			tsp_surface: None,
+			tsp_adopt: false,
+			tsp_deadline: None,
 		}
 	}
 
@@ -4227,6 +4243,50 @@ impl Host {
 			self.presenter.title.reset_delivery();
 			self.presenter.progress_shown = false;
 			let (caps, probe) = negotiate_async(Duration::from_millis(120)).await;
+			// Phase 1 handshake (ADR 0041). A `hello` that beat the DA1 fence
+			// negotiates exactly. Otherwise, inside Tern and outside a
+			// multiplexer, the surface opens optimistically on the v1
+			// assumption and the first frame goes out before any reply; a DA1
+			// answer that arrived without a `hello`, or one second of silence,
+			// retires it (`Self::fallback_tsp`).
+			let tsp_hello = probe.tsp.clone();
+			let da1_first = probe.da1_attributes.is_some() && tsp_hello.is_none();
+			let optimistic = tsp_hello.is_none()
+				&& !da1_first
+				&& !caps.inside_multiplexer
+				&& env::var("TERM_PROGRAM").is_ok_and(|program| program.eq_ignore_ascii_case("tern"))
+				&& tsp::allowed(|name| env::var(name).ok());
+			self.tsp_deadline = None;
+			if tsp_hello.is_none() && !optimistic {
+				self.tsp_surface = None;
+				self.tsp_adopt = false;
+			} else {
+				if optimistic {
+					self.tsp_deadline = Some(
+						self
+							.presenter
+							.clock
+							.elapsed()
+							.saturating_add(OPTIMISTIC_WINDOW),
+					);
+				}
+				// The surface outlives the epoch so a re-entry can `adopt` the
+				// ids Tern still holds in the kept `main` region.
+				match self.tsp_surface.as_mut() {
+					Some(surface) => {
+						if let Some(hello) = tsp_hello {
+							surface.replace_hello(hello);
+						}
+						surface.reenter(self.tsp_adopt);
+					},
+					None => {
+						self.tsp_surface = Some(match tsp_hello {
+							Some(hello) => Surface::new(hello, self.tsp_adopt),
+							None => Surface::optimistic(self.tsp_adopt),
+						});
+					},
+				}
+			}
 			let ui = self.presenter.ui.clone().with_terminal_caps(&caps);
 			self.presenter.set_ui_context(ui);
 			let mut terminal = Terminal::enter(
@@ -4240,14 +4300,22 @@ impl Host {
 			let size = terminal.size()?;
 			self.presenter.composer.restore_focus();
 			self.presenter.composer.resize(size.width, size.height);
-			// First entry creates the ledger; re-entry after a suspend, an
-			// external editor, or a display reset keeps it — rows already in
-			// native scrollback are never emitted again (ADR 0034).
 			if let Some(projection) = self.projection.as_mut() {
 				projection.resize(size);
 			}
+			// First entry creates the ledger; re-entry after a suspend, an
+			// external editor, or a display reset keeps it — rows already in
+			// native scrollback are never emitted again (ADR 0034).
 			self.reconcile_projection(size);
 			let result = self.event_loop(&mut terminal, &mut renderer, size).await;
+			// Closed before `Terminal::leave` drains input, so Tern's reply to
+			// the close never reaches the parent shell. `keep:true` leaves the
+			// inline `main` region in the scrollback whether the next owner is
+			// a shell, an editor, or this loop re-entering with `adopt`.
+			if let Some(surface) = self.tsp_surface.as_mut() {
+				surface.close(renderer.writer_mut(), true)?;
+			}
+			self.tsp_adopt = self.tsp_surface.is_some();
 			let pause = finish_terminal_epoch(result, terminal.leave())?;
 			// The terminal is fully restored here: the shell, a child editor,
 			// or a fresh probe owns it until the loop re-enters.
@@ -4345,14 +4413,23 @@ impl Host {
 				},
 				() = frame_deadline(&self.presenter.clock, deadline) => {
 					self.sync_terminal_state(terminal)?;
+					// The optimistic window is a deadline like any other: when
+					// it passes with no `hello`, the surface is retired here
+					// and the epoch finishes in cells.
+					let expired = self
+						.tsp_deadline
+						.is_some_and(|deadline| self.presenter.clock.elapsed() >= deadline);
 					let ticked = self.tick();
 					let settled = self
 						.presenter
 						.settle_intro(self.presenter.clock.elapsed());
-					if settled {
+					if expired {
+						self.fallback_tsp(renderer)?;
+					}
+					if expired || settled {
 						self.reconcile_projection(size);
 					}
-					if ticked || settled {
+					if expired || ticked || settled {
 						self.present(renderer, size)?;
 					}
 				},
@@ -4448,6 +4525,9 @@ impl Host {
 		submit_after_paste: bool,
 	) -> Result<Option<Pause>, HostError> {
 		if terminal.handle_input_event(&event, renderer)? {
+			if self.drain_tsp(terminal) {
+				self.present(renderer, size)?;
+			}
 			// A completed OSC 5522 offer carries an image or text paste out
 			// of band ( enhanced paste).
 			if let Some(pasted) = terminal.take_paste() {
@@ -4471,6 +4551,16 @@ impl Host {
 				}
 			}
 			self.sync_terminal_state(terminal)?;
+			return Ok(None);
+		}
+		// A DA1 answer with no `hello` ahead of it means this terminal does
+		// not speak TSP: the optimistic surface is abandoned here.
+		if self.tsp_deadline.is_some()
+			&& matches!(&event, InputEvent::Response(TerminalResponse::DeviceAttributes(_)))
+		{
+			self.fallback_tsp(renderer)?;
+			self.reconcile_projection(size);
+			self.present(renderer, size)?;
 			return Ok(None);
 		}
 		let routed = self.input(event, submit_after_paste, size)?;
@@ -4508,6 +4598,40 @@ impl Host {
 		}
 	}
 
+	/// Consumes decoded TSP replies and events queued by the terminal.
+	///
+	/// Returns `true` when the surface still owes a frame, so the caller
+	/// repaints: an `ack` can release a credit-blocked frame, and `gone`
+	/// forces a full remount.
+	fn drain_tsp(&mut self, terminal: &mut Terminal) -> bool {
+		let mut repaint = false;
+		while let Some(incoming) = terminal.take_tsp() {
+			if let Some(surface) = self.tsp_surface.as_mut() {
+				if matches!(&incoming, Incoming::Reply(Reply::Hello(_))) {
+					self.tsp_deadline = None;
+				}
+				surface.incoming(incoming);
+				repaint |= surface.dirty();
+			}
+		}
+		repaint
+	}
+
+	/// Abandons the optimistic surface and returns the epoch to cell drawing.
+	///
+	/// Reached when DA1 answers before a `hello` or the one-second optimistic
+	/// window expires: the surface is closed with `keep:false` so Tern drops
+	/// it and nothing is adopted on re-entry.
+	fn fallback_tsp(&mut self, renderer: &mut Renderer<TtyOut>) -> Result<(), HostError> {
+		if let Some(surface) = self.tsp_surface.as_mut() {
+			surface.close(renderer.writer_mut(), false)?;
+		}
+		self.tsp_surface = None;
+		self.tsp_deadline = None;
+		self.tsp_adopt = false;
+		Ok(())
+	}
+
 	/// Earliest animation wake across the composer, mounted blocks, the
 	/// overlay stack, and the gesture timers, in host-clock time.
 	fn next_deadline(&self) -> Option<Duration> {
@@ -4526,6 +4650,10 @@ impl Host {
 			.title
 			.next_wake(self.presenter.ui.charset, now);
 		let active_time = self.presenter.active_time.next_wake(now);
+		let tsp = self
+			.tsp_surface
+			.as_ref()
+			.and_then(|surface| surface.next_wake(CL_TSP_STREAM_PACING.get(&self.presenter.con)));
 		[
 			composer,
 			blocks,
@@ -4534,6 +4662,8 @@ impl Host {
 			title,
 			active_time,
 			self.presenter.wall_clock.next_wake(),
+			self.tsp_deadline,
+			tsp,
 		]
 		.into_iter()
 		.flatten()
@@ -4583,6 +4713,8 @@ impl Host {
 		let now = self.presenter.clock.elapsed();
 		let account_usage = self.presenter.poll_account_usage(now);
 		let wall_clock = self.presenter.refresh_wall_clock(now);
+		// The optimistic deadline is owned by the frame-deadline arm of the
+		// event loop, which retires the surface itself; `tick` only animates.
 		// ActiveTime schedules only visible label boundaries. Synchronizing
 		// the retained status here makes that deadline paint exactly once,
 		// even when no working spinner is mounted.
@@ -4777,7 +4909,14 @@ impl Host {
 	/// paint ([`Self::rebuild_projection`]) ever creates a ledger: after
 	/// that every change — new tails, reorders, projection toggles — is
 	/// reconciled so retired rows are emitted exactly once.
+	///
+	/// A live TSP surface owns the transcript, so the ledger stays idle until
+	/// an overlay suspends the surface and hands the screen back to the cell
+	/// renderer (ADR 0041 decision 6).
 	fn reconcile_projection(&mut self, size: Size) {
+		if self.tsp_surface.is_some() && self.presenter.overlays.active().is_none() {
+			return;
+		}
 		let now = self.presenter.clock.elapsed();
 		let blocks = self.presenter.blocks();
 		let mirror = self.presenter.blocks();
@@ -4788,6 +4927,35 @@ impl Host {
 			},
 			None => self.rebuild_projection(size),
 		}
+	}
+
+	/// Paints the transcript natively when a live surface owns the viewport.
+	///
+	/// Returns `false` when the caller must fall back to cell rendering: no
+	/// surface, or an overlay is open (the surface is suspended first so the
+	/// existing renderer owns the screen, ADR 0041 decision 6).
+	fn present_tsp(&mut self, renderer: &mut Renderer<TtyOut>) -> Result<bool, HostError> {
+		let overlay_open = self.presenter.overlays.active().is_some();
+		let composer = self.presenter.composer.text_displayed();
+		let cursor_byte = self.presenter.composer.cursor().min(composer.len());
+		let cursor = u32::try_from(xutf::transcoded_len::<xutf::Utf8, xutf::Utf16Le>(
+			&composer.as_bytes()[..cursor_byte],
+		))
+		.unwrap_or(u32::MAX);
+		let status = StatusLine::from_dom(&self.presenter.replica).text();
+		let blocks = self.presenter.blocks();
+		let now = self.presenter.clock.elapsed();
+		let pacing = CL_TSP_STREAM_PACING.get(&self.presenter.con);
+		let Some(surface) = self.tsp_surface.as_mut() else {
+			return Ok(false);
+		};
+		if overlay_open {
+			surface.suspend(renderer.writer_mut())?;
+			return Ok(false);
+		}
+		surface.resume(renderer.writer_mut())?;
+		surface.present(renderer.writer_mut(), &blocks, &composer, cursor, &status, now, pacing)?;
+		Ok(true)
 	}
 
 	/// A session reset (`/new`, `/drop`, rewind, resume): the live document is
@@ -4806,6 +4974,14 @@ impl Host {
 	fn present(&mut self, renderer: &mut Renderer<TtyOut>, size: Size) -> Result<(), HostError> {
 		self.presenter.sync_status();
 		self.presenter.viewport_height = size.height;
+		if self.present_tsp(renderer)? {
+			return Ok(());
+		}
+		// A suspended surface hands the screen back mid-epoch, so the ledger
+		// that stayed idle while the surface drew is admitted here.
+		if self.projection.is_none() {
+			self.rebuild_projection(size);
+		}
 		let approval = self.presenter.approval_frame(size.width);
 		let overlay = self.presenter.overlay_frame(size);
 		let notice = self.presenter.status_frame(size.width);

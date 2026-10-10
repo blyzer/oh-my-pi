@@ -20,6 +20,20 @@ pub enum ResizePolicy {
 
 omp_con::con_enum!(ResizePolicy);
 
+/// How the TSP presenter releases streamed text into a native surface.
+#[derive(
+	Clone, Copy, Debug, Eq, PartialEq, strum::EnumString, strum::IntoStaticStr, strum::VariantNames,
+)]
+#[strum(serialize_all = "lowercase")]
+pub enum TspStreamPacing {
+	/// Send every provider delta, subject only to surface credits.
+	Raw,
+	/// Coalesce provider deltas to the existing transcript reveal cadence.
+	Paced,
+}
+
+omp_con::con_enum!(TspStreamPacing);
+
 omp_con::var! {
 	/// Renderer theme override. `default` follows the terminal background.
 	pub static CL_THEME = cl_theme: Str {
@@ -77,6 +91,20 @@ omp_con::var! {
 			"ui.option.preserve": "Preserve",
 			"ui.option.preserve.desc": "Repaint only the viewport and keep history wrapped at its old width",
 			"legacy.path": "tui.resizeScrollback",
+		},
+	};
+	/// How native TSP surfaces release streamed text.
+	pub static CL_TSP_STREAM_PACING = tsp_stream_pacing: TspStreamPacing {
+		default: TspStreamPacing::Raw,
+		flags: archive | session,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Display",
+			"ui.label": "TSP Stream Pacing",
+			"ui.option.raw": "Raw",
+			"ui.option.raw.desc": "Send every streamed delta as it arrives",
+			"ui.option.paced": "Paced",
+			"ui.option.paced.desc": "Release streamed text at the reveal cadence",
 		},
 	};
 	/// Theme used when the terminal has a dark background.

@@ -208,10 +208,10 @@ e2e-core:
         --test p5_prefix_stability \
         --test p6_crash_resume
 
-# Run proof P7: real-PTY terminal UI lifecycle.
+# Run proof P7: real-PTY terminal UI lifecycle, and native Tern surfaces.
 [group('e2e')]
 e2e-p7:
-    TERM=xterm-256color cargo nextest run -p omp-e2e --test p7_tui --locked
+    TERM=xterm-256color cargo nextest run -p omp-e2e --test p7_tui --test p7_tsp --locked
 
 # Validate the P8 performance-baseline metric schema/contract (non-gating).
 [group('e2e')]
