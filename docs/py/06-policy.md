@@ -2219,10 +2219,10 @@ sharing optimization with no meaning on a wire.
 
 `OpenSessionRequest` gains `omp.policy.v1.SandboxProfile sandbox = 5` (tags 1-4 and 15 used,
 `env.proto:126-132`). `ExecRequest` gains `SandboxProfile sandbox_override = 3` (tags 1-2 and 15
-used, `:156-160`). `ServerHello` gains `SandboxCapabilities sandbox_capabilities = 10` (tags 1-9
-and 15 used, `:29-41`; 9 is the daemon `policy_digest`); its existing
-`repeated string capabilities = 3` also gains the `policy/v1` capability token, which is how a
-client learns admission is available at all.
+used, `:156-160`). `ServerHello` gains `SandboxCapabilities sandbox_capabilities = 10` (tags 1-9,
+11 and 15 used, `:29-41`; 9 is the daemon `policy_digest`, 11 its probed `sandbox_state`); its
+existing `repeated string capabilities = 3` also gains the `policy/v1` capability token, which is
+how a client learns admission is available at all.
 
 Two new admission messages, and one violation event:
 

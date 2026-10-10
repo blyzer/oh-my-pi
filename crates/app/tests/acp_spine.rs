@@ -432,11 +432,11 @@ async fn content_block_prompts_journal_text_and_image_attachments() {
 struct Transitions(Mutex<Vec<&'static str>>);
 
 impl omp_agent::SessionObserver for Transitions {
-	fn rewound(&self) {
+	fn rewound(&self, _session: &Session) {
 		self.0.lock().push("rewound");
 	}
 
-	fn switched(&self) {
+	fn switched(&self, _next: &Session) {
 		self.0.lock().push("switched");
 	}
 }

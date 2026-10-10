@@ -4,28 +4,32 @@
 //! with `Up::Approve` (deny → skipped, allow → the file lands). With no
 //! sandbox in force, the default `yolo` is downgraded to `write`, so a `bash`
 //! call prompts; an explicit `yolo` is respected and runs unconfined. Each
-//! says so in one typed notice. On the attached path a project daemon served
-//! in this process runs the command, and its sandbox amendment reaches the
-//! issuing session only through the approval relay. A network endpoint approved
-//! for the session holds, on either path, until the conversation leaves the
-//! journal that approved it, by a rewind or a session switch. A fetch is asked
-//! once per host the environment names for it, and a session grant for one
-//! host never covers another. A command the daemon runs reaches the model with
-//! its own output.
+//! says so in one typed notice, also on the attached path, where a project
+//! daemon served in this process admits and runs the command and its sandbox
+//! amendment reaches the issuing session only through the approval relay; the
+//! journal decides whether a session is told again after a rewind, a retry, a
+//! switch or a new kernel. A network endpoint approved for the session holds,
+//! on either path, until the conversation leaves the journal that approved it,
+//! by a rewind or a session switch. A fetch is asked once per host the
+//! environment names for it, and a session grant for one host never covers
+//! another. A command the daemon runs reaches the model with its own output.
 
 mod support;
 
 use std::{
 	future::ready,
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, AtomicUsize, Ordering},
+	},
 	time::Duration,
 };
 
 use futures::stream;
 use omp_agent::{
 	ApprovalDecision, ApprovalScope, ApprovalSource, DispatchPolicy, Inference, Kernel, KernelEvent,
-	RunControl, StaticPrompt, TicketState, TurnInput, Up,
+	RetryConfirmation, RetryOutcome, RunControl, StaticPrompt, TicketState, TurnInput, TurnStop, Up,
 };
 use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ContentPart, ExecutionReceipt,
@@ -34,7 +38,7 @@ use omp_ai::{
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
 use omp_driver::headless::kernel::{
-	EnvToolExecutor, SettingsAdmission, bind_environment_approvals,
+	EnvToolExecutor, SettingsAdmission, bind_environment_approvals, install_tool_authority,
 };
 use omp_envd::{
 	AttachOptions, ProjectEnvironment, RegistryBridges,
@@ -49,16 +53,24 @@ use omp_session::{ComponentRegistry, Session};
 /// effects, so its tier is `write` and always-ask prompts before it starts.
 /// `bash` declares no effects: its spawn/fs effects are confined by the
 /// sandbox, and without one it is process authority. Each request's tool
-/// results land in `shown`, replacing the previous request's.
+/// results land in `shown`, replacing the previous request's, and its text is
+/// added to `sent`. `requests` counts the requests every kernel sharing it was
+/// sent, so a kernel composed over a session another kernel served goes on
+/// with the next call id.
 struct ToolThenText {
 	tool:      &'static str,
 	arguments: serde_json::Value,
-	turns:     usize,
+	requests:  Arc<AtomicUsize>,
 	shown:     Shown,
+	sent:      Sent,
 }
 
 /// The tool results the scripted model was last shown.
 type Shown = Arc<parking_lot::Mutex<Vec<ShownResult>>>;
+
+/// The text of every request the scripted model was sent ([`sent_text`]), in
+/// order.
+type Sent = Arc<parking_lot::Mutex<Vec<String>>>;
 
 /// One tool result as a request presented it to the model.
 #[derive(Debug)]
@@ -91,14 +103,37 @@ fn shown_results(request: &ChatRequest) -> Vec<ShownResult> {
 		.collect()
 }
 
+/// Every text `request` presents to the model, whatever the role, a tool
+/// result's text included, one part per line.
+fn sent_text(request: &ChatRequest) -> String {
+	request
+		.messages
+		.iter()
+		.flat_map(|message| message.content.iter())
+		.flat_map(|part| match part {
+			ContentPart::Text { text, .. } => vec![text.as_str()],
+			ContentPart::ToolResult { content, .. } => content
+				.iter()
+				.filter_map(|content| match content {
+					ToolResultContent::Text(text) => Some(text.as_str()),
+					_ => None,
+				})
+				.collect(),
+			_ => Vec::new(),
+		})
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
 impl Inference for ToolThenText {
 	fn chat(
 		&mut self,
 		request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		*self.shown.lock() = shown_results(&request);
-		self.turns += 1;
-		ready(Ok(tool_then_text(self.turns, self.tool, &self.arguments)))
+		self.sent.lock().push(sent_text(&request));
+		let turn = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+		ready(Ok(tool_then_text(turn, self.tool, &self.arguments)))
 	}
 }
 
@@ -178,13 +213,44 @@ fn prompts(session: &Session) -> Vec<omp_agent::ApprovalTicket> {
 
 /// What one scripted turn left behind.
 struct Turn {
-	session: Session,
-	/// Journaled tool-result data.
-	result:  String,
+	session:  Session,
+	/// Every other session the kernel served, oldest first.
+	previous: Vec<Session>,
+	/// Journaled tool-result data of `session`.
+	result:   String,
 	/// Whether `target` exists afterwards.
-	landed:  bool,
+	landed:   bool,
 	/// The tool results the model was shown in the closing request.
-	shown:   Vec<ShownResult>,
+	shown:    Vec<ShownResult>,
+	/// The text of every request the model was sent, in every session.
+	sent:     Vec<String>,
+	/// How many posture notices the journal of `session` holds, abandoned
+	/// branches included.
+	postures: usize,
+}
+
+/// One thing the host does with the kernel [`Project::drive`] runs.
+#[derive(Clone, Copy, Debug)]
+enum Step {
+	/// Runs one turn on the live session; its call is answered as `approve`
+	/// says.
+	Turn,
+	/// Runs one turn whose call the host interrupts at its admission prompt,
+	/// then retries the aborted tool tail as a host's retry command does: the
+	/// rewind returns to the call's authorization and the call runs again, its
+	/// prompt answered as `approve` says.
+	InterruptThenRetry,
+	/// Rewinds the live session to where it stood before its `n`th turn
+	/// (0-based), as a host's rewind command does.
+	Rewind(usize),
+	/// Switches the kernel to a new session, as a chat does for `/new`.
+	New,
+	/// Switches the kernel back to the `n`th session it served (0-based), as a
+	/// chat does for `/resume`.
+	Resume(usize),
+	/// Replaces the kernel with one composed over the live session, as a later
+	/// process resuming it does.
+	Restart,
 }
 
 /// One scratch project: its workspace, its project state directory, and the
@@ -246,61 +312,215 @@ impl Project {
 		mode: Option<ApprovalMode>,
 		approve: bool,
 	) -> Turn {
-		let target = self.root.join(target);
-		let registry = environment.registry();
-		let spill =
-			omp_journal::blob::BlobStore::open(self.scratch.path().join("artifacts")).expect("spill");
-		let shown = Shown::default();
+		self
+			.drive(environment, tool, arguments, target, mode, approve, &[Step::Turn])
+			.await
+	}
+
+	/// Composes a kernel on `environment` like `compose_kernel` does, serving
+	/// `session` first, and runs the host that answers its prompts: as
+	/// `approve` says, or with an interrupt when `interrupt` is set, which
+	/// that answer clears. Every admission ticket carries one of `calls`.
+	#[expect(clippy::too_many_arguments, reason = "one composition's whole fixture")]
+	fn compose(
+		&self,
+		environment: &ProjectEnvironment,
+		session: &Session,
+		model: ToolThenText,
+		spill: &omp_journal::blob::BlobStore,
+		mode: Option<ApprovalMode>,
+		approve: bool,
+		interrupt: &Arc<AtomicBool>,
+		calls: &Arc<[String]>,
+	) -> (Kernel<ToolThenText>, tokio::task::JoinHandle<()>) {
 		let kernel = Kernel::new(
-			ToolThenText { tool, arguments: arguments(&target), turns: 0, shown: Arc::clone(&shown) },
-			registry,
+			model,
+			environment.registry(),
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
 		);
-		let approvals = bind_environment_approvals(&kernel, &environment);
-		let notices = kernel.mailbox();
-		let mut kernel = kernel
-			.with_external_executor(Arc::new(EnvToolExecutor::new(
-				environment.client().clone(),
-				approvals,
-			)))
-			.with_tool_admission(Arc::new(
-				SettingsAdmission::new(&self.con, mode, &self.root).with_notices(notices),
-			));
+		let approvals = bind_environment_approvals(&kernel, environment);
+		// Installed as `compose_kernel` installs it: the kernel's admission and
+		// the environment executor share the session's posture report.
+		let mut kernel = install_tool_authority(
+			kernel,
+			session,
+			EnvToolExecutor::new(environment.client().clone(), approvals),
+			SettingsAdmission::new(&self.con, mode, &self.root),
+		);
 		let events = kernel.subscribe();
 		let mailbox = kernel.mailbox();
+		let interrupt = Arc::clone(interrupt);
+		let calls = Arc::clone(calls);
 		let host = tokio::spawn(async move {
 			while let Ok(event) = events.recv_async().await {
 				if let KernelEvent::ApprovalRequested(ticket) = event {
 					// A sandbox amendment is raised by the executor after the call, so
-					// it carries no invocation id; every admission ticket carries this
-					// one.
-					if ticket.invocation_id.is_some() {
-						assert_eq!(ticket.invocation_id.as_deref(), Some("call-1"));
+					// it carries no invocation id; every admission ticket carries the
+					// id of a call this session made.
+					if let Some(invocation) = ticket.invocation_id.as_deref() {
+						assert!(
+							calls.iter().any(|call| call == invocation),
+							"unexpected invocation {invocation}"
+						);
 					}
-					let _ = mailbox
-						.send(Up::Approve { id: ticket.ticket_id, decision: decision(approve) });
+					let answer = if interrupt.swap(false, Ordering::SeqCst) {
+						Up::Interrupt
+					} else {
+						Up::Approve { id: ticket.ticket_id, decision: decision(approve) }
+					};
+					let _ = mailbox.send(answer);
 				}
 			}
 		});
-		let mut session = Session::create_with_blob_store(
-			self.scratch.path().join("approval.oms"),
-			ComponentRegistry::standard(),
-			spill,
-		)
-		.expect("session");
-		tokio::time::timeout(
-			Duration::from_secs(60),
-			kernel.run_turn(
-				&mut session,
-				TurnInput { text: Str::new_static("run it"), attachments: Vec::new() },
-				RunControl::default(),
-			),
-		)
-		.await
-		.expect("turn settles")
-		.expect("turn");
+		(kernel, host)
+	}
+
+	/// Runs one kernel through `steps`, each turn calling `tool` once (the
+	/// model's `n`th tool call is `call-n`), starting on a new session. A host
+	/// switching sessions does what a chat does once a switch commits: the next
+	/// session is live, the kernel is told, and its state is resynced from the
+	/// next journal.
+	#[expect(clippy::too_many_arguments, reason = "one scripted host's whole fixture")]
+	async fn drive(
+		&self,
+		environment: ProjectEnvironment,
+		tool: &'static str,
+		arguments: impl FnOnce(&Path) -> serde_json::Value,
+		target: &str,
+		mode: Option<ApprovalMode>,
+		approve: bool,
+		steps: &[Step],
+	) -> Turn {
+		let target = self.root.join(target);
+		let arguments = arguments(&target);
+		let spill =
+			omp_journal::blob::BlobStore::open(self.scratch.path().join("artifacts")).expect("spill");
+		let shown = Shown::default();
+		let sent = Sent::default();
+		let requests = Arc::new(AtomicUsize::new(0));
+		let model = || ToolThenText {
+			tool,
+			arguments: arguments.clone(),
+			requests: Arc::clone(&requests),
+			shown: Arc::clone(&shown),
+			sent: Arc::clone(&sent),
+		};
+		let interrupt = Arc::new(AtomicBool::new(false));
+		let called = steps
+			.iter()
+			.filter(|step| matches!(step, Step::Turn | Step::InterruptThenRetry))
+			.count();
+		let calls: Arc<[String]> = (1..=called).map(|call| format!("call-{call}")).collect();
+		let session_at = |index: usize| {
+			Session::create_with_blob_store(
+				self.scratch.path().join(format!("approval-{index}.oms")),
+				ComponentRegistry::standard(),
+				spill.clone(),
+			)
+			.expect("session")
+		};
+		let mut sessions = vec![session_at(0)];
+		// Where each session stood before each of its live turns.
+		let mut before: Vec<Vec<omp_journal::EntryId>> = vec![Vec::new()];
+		let mut live = 0;
+		let (mut kernel, mut host) = self.compose(
+			&environment,
+			&sessions[live],
+			model(),
+			&spill,
+			mode,
+			approve,
+			&interrupt,
+			&calls,
+		);
+		for &step in steps {
+			match step {
+				Step::Turn | Step::InterruptThenRetry => {
+					let session = &mut sessions[live];
+					before[live].push(session.head().expect("head"));
+					let interrupted = matches!(step, Step::InterruptThenRetry);
+					interrupt.store(interrupted, Ordering::SeqCst);
+					let outcome = tokio::time::timeout(
+						Duration::from_secs(60),
+						kernel.run_turn(
+							session,
+							TurnInput { text: Str::new_static("run it"), attachments: Vec::new() },
+							RunControl::default(),
+						),
+					)
+					.await
+					.expect("turn settles")
+					.expect("turn");
+					if interrupted {
+						assert_eq!(outcome.stop, TurnStop::Cancelled, "the host interrupted the call");
+						// A call stopped at its prompt never started and retries
+						// unconfirmed. On a loaded host the environment's verdict
+						// can outlast the dispatcher's interrupt grace, which
+						// settles the call as effects-unknown; the host then
+						// confirms, as a user retrying it does.
+						let mut confirmation = RetryConfirmation::Unconfirmed;
+						let retried = loop {
+							let retried = tokio::time::timeout(
+								Duration::from_secs(60),
+								kernel.retry_tool_tail(session, RunControl::default(), confirmation),
+							)
+							.await
+							.expect("retry settles")
+							.expect("retry");
+							match retried {
+								RetryOutcome::NeedsConfirmation { .. }
+									if confirmation == RetryConfirmation::Unconfirmed =>
+								{
+									confirmation = RetryConfirmation::EffectsUnknown;
+								},
+								retried => break retried,
+							}
+						};
+						assert!(
+							matches!(retried, RetryOutcome::Ran(_)),
+							"the tail ran again: {retried:?}"
+						);
+					}
+				},
+				Step::Rewind(turn) => {
+					let session = &mut sessions[live];
+					let work = session
+						.rewind(before[live][turn])
+						.expect("rewind before the turn");
+					before[live].truncate(turn);
+					kernel.apply_lifecycle(session, &work).await;
+					kernel.resync_session_state(session);
+				},
+				Step::New | Step::Resume(_) => {
+					live = if let Step::Resume(index) = step {
+						index
+					} else {
+						sessions.push(session_at(sessions.len()));
+						before.push(Vec::new());
+						sessions.len() - 1
+					};
+					kernel.session_switched(&sessions[live]);
+					kernel.resync_session_state(&sessions[live]);
+				},
+				Step::Restart => {
+					host.abort();
+					drop(kernel);
+					(kernel, host) = self.compose(
+						&environment,
+						&sessions[live],
+						model(),
+						&spill,
+						mode,
+						approve,
+						&interrupt,
+						&calls,
+					);
+				},
+			}
+		}
 		host.abort();
+		let session = sessions.remove(live);
 		let journal = std::fs::read_to_string(session.journal_path()).expect("journal");
 		assert!(journal.contains(&format!("event: {}", kind::TOOL_CALL)));
 		assert!(journal.contains(&format!("event: {}", kind::TOOL_RESULT)));
@@ -310,11 +530,16 @@ impl Project {
 			.filter(|line| line.contains("outcome") || line.contains("fault"))
 			.collect::<Vec<_>>()
 			.join("\n");
+		let postures = journal
+			.lines()
+			.filter(|line| line.starts_with("data: ") && line.contains("approval-posture"))
+			.count();
 		let landed = target.exists();
 		drop(kernel);
 		drop(environment);
 		let shown = std::mem::take(&mut *shown.lock());
-		Turn { session, result, landed, shown }
+		let sent = std::mem::take(&mut *sent.lock());
+		Turn { session, previous: sessions, result, landed, shown, sent, postures }
 	}
 }
 
@@ -440,27 +665,101 @@ async fn approval_always_ask_write_allow_runs_the_tool() {
 	assert!(result.contains("\"kind\":\"ok\""), "approved write settled ok: {result}");
 }
 
-/// The typed posture notice the session journaled, as JSON.
-fn posture_notice(session: &Session) -> serde_json::Value {
-	let notices = session
-		.dom()
-		.select("body turn notice")
+/// One journaled `approval-posture` notice, as every host projection reads a
+/// typed notice: its kind, its typed payload and its fallback prose.
+#[derive(Debug)]
+struct PostureShown {
+	kind: String,
+	data: serde_json::Value,
+	body: String,
+}
+
+/// Every typed posture notice the session journaled under its turns.
+fn posture_notices(session: &Session) -> Vec<PostureShown> {
+	let dom = session.dom();
+	dom.select("body turn notice")
 		.expect("selector")
-		.filter(|handle| {
-			session
-				.dom()
-				.get(*handle)
-				.and_then(|node| node.prop(&omp_dom::PropKey::Custom(Str::new_static("name"))))
+		.filter_map(|handle| dom.get(handle))
+		.filter(|node| {
+			node
+				.prop(&omp_dom::PropKey::Custom(Str::new_static("name")))
 				.and_then(omp_dom::Value::as_str)
 				== Some("approval-posture")
 		})
-		.collect::<Vec<_>>();
-	assert_eq!(notices.len(), 1, "exactly one posture notice per session");
-	let notice = session.dom().get(notices[0]).expect("notice node");
-	let Some(omp_dom::Value::Json(data)) = notice.prop(&omp_dom::PropId::Data.into()) else {
-		panic!("the notice carries its typed payload");
-	};
-	serde_json::from_str(data.get()).expect("payload")
+		.map(|node| {
+			let Some(omp_dom::Value::Json(data)) = node.prop(&omp_dom::PropId::Data.into()) else {
+				panic!("the notice carries its typed payload");
+			};
+			PostureShown {
+				kind: node
+					.prop(&omp_dom::PropId::Kind.into())
+					.and_then(omp_dom::Value::as_str)
+					.unwrap_or_default()
+					.to_owned(),
+				data: serde_json::from_str(data.get()).expect("payload"),
+				body: node.content.as_deref().unwrap_or_default().to_owned(),
+			}
+		})
+		.collect()
+}
+
+/// The one typed posture notice the live branch of `session` holds, a `warn`.
+///
+/// The check that no request in `sent` (sent to the model after the notice was
+/// journaled) names or quotes it pins current projection behavior, not a
+/// requirement of the posture report: like every `<notice>`, it is read by the
+/// host projections, and the model's projection of the journal
+/// (`omp_session::project_thread`) leaves notices out. Whether the model should
+/// be told is an open owner decision; if it is made, this check changes with
+/// the projection.
+fn the_posture(session: &Session, sent: &[String]) -> PostureShown {
+	let mut notices = posture_notices(session);
+	assert_eq!(notices.len(), 1, "exactly one posture notice per session: {notices:?}");
+	let posture = notices.remove(0);
+	assert_eq!(posture.kind, "warn");
+	assert!(sent.len() > 1, "the model was sent no request after the first call: {sent:?}");
+	assert!(
+		sent
+			.iter()
+			.all(|text| !text.contains("approval-posture") && !text.contains(posture.body.as_str())),
+		"the posture notice reached the model: {sent:?}"
+	);
+	posture
+}
+
+/// The payload and prose of a defaulted `yolo` that no sandbox keeps.
+fn downgraded_default_yolo(posture: &PostureShown) {
+	assert_eq!(
+		posture.data,
+		serde_json::json!({
+			"configured": "yolo",
+			"provenance": "default",
+			"effective": "write",
+			"sandbox": { "state": "off" },
+		})
+	);
+	assert_eq!(
+		posture.body,
+		"Approval `yolo` is the default and needs an active sandbox; `write` is in force (sandbox \
+		 off)."
+	);
+}
+
+/// The payload and prose of an explicit `yolo` that no sandbox confines.
+fn unconfined_explicit_yolo(posture: &PostureShown) {
+	assert_eq!(
+		posture.data,
+		serde_json::json!({
+			"configured": "yolo",
+			"provenance": "explicit",
+			"effective": "yolo",
+			"sandbox": { "state": "off" },
+		})
+	);
+	assert_eq!(
+		posture.body,
+		"Approval `yolo` was requested explicitly: commands run unconfined (sandbox off)."
+	);
 }
 
 /// The shipped default, end to end: `yolo` is the default posture, no sandbox
@@ -469,7 +768,7 @@ fn posture_notice(session: &Session) -> serde_json::Value {
 /// default asked for, what holds, and why.
 #[tokio::test]
 async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
-	let Turn { session, result, landed, .. } =
+	let Turn { session, result, landed, sent, .. } =
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, false).await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 1, "a defaulted yolo without a sandbox must prompt once: {tickets:?}");
@@ -483,15 +782,7 @@ async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
 	);
 	assert!(result.contains("denied by user: not today"), "denied bash must settle: {result}");
 	assert!(!landed, "a denied command never ran");
-	assert_eq!(
-		posture_notice(&session),
-		serde_json::json!({
-			"configured": "yolo",
-			"provenance": "default",
-			"effective": "write",
-			"sandbox": { "state": "off" },
-		})
-	);
+	downgraded_default_yolo(&the_posture(&session, &sent));
 }
 
 /// The same prompt, approved: the command runs.
@@ -508,20 +799,12 @@ async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
 /// session is told it is unconfined. This is the way out of headless denial.
 #[tokio::test]
 async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
-	let Turn { session, result, landed, .. } =
+	let Turn { session, result, landed, sent, .. } =
 		run("bash", bash_call, "landed.txt", Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false)
 			.await;
 	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
 	assert!(landed, "bash ran unprompted: {result}");
-	assert_eq!(
-		posture_notice(&session),
-		serde_json::json!({
-			"configured": "yolo",
-			"provenance": "explicit",
-			"effective": "yolo",
-			"sandbox": { "state": "off" },
-		})
-	);
+	unconfined_explicit_yolo(&the_posture(&session, &sent));
 }
 
 /// Runs one bash `command` under an explicit `yolo` in a session attached to a
@@ -568,6 +851,237 @@ async fn a_failed_environment_bash_result_reaches_the_model() {
 	assert!(result.text.contains("env-tool-stderr"), "stderr reaches the model: {result:?}");
 }
 
+/// Runs one kernel through `steps`, each turn calling `bash` once under
+/// `mode`, attached to a project daemon served in this process with the
+/// sandbox `sandbox` on both sides. The daemon admits every call; the kernel's
+/// own admission sees none. `approve` answers every prompt.
+async fn attached_bash(
+	mode: Option<ApprovalMode>,
+	sandbox: ExecSandboxMode,
+	approve: bool,
+	steps: &[Step],
+) -> Turn {
+	let project = Project::new(sandbox);
+	let _daemon =
+		support::InProcessDaemon::serve(&project.root, &project.state, context(sandbox)).await;
+	let environment = project.attach(mode).await;
+	assert!(
+		environment.fallback_notice.is_none(),
+		"the session fell back to an embedded environment: {:?}",
+		environment.fallback_notice
+	);
+	project
+		.drive(environment, "bash", bash_call, "landed.txt", mode, approve, steps)
+		.await
+}
+
+/// The shipped default on the attached path: the daemon admits `bash`, so the
+/// session is told by the executor, not the kernel's admission, that no
+/// sandbox is in force and `write` holds. Each command prompts and, refused,
+/// never runs; the session is told once, not once per call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_session_reports_its_downgraded_default_yolo_once() {
+	let Turn { session, result, landed, sent, .. } =
+		attached_bash(None, ExecSandboxMode::Off, false, &[Step::Turn, Step::Turn]).await;
+	let tickets = prompts(&session);
+	assert_eq!(tickets.len(), 2, "the daemon asked for each command: {tickets:?}");
+	assert!(
+		tickets
+			.iter()
+			.all(|ticket| ticket.reasons[0].kind.as_str() == "exec")
+	);
+	assert!(!landed, "a refused command never ran: {result}");
+	downgraded_default_yolo(&the_posture(&session, &sent));
+	let notice = first_entry_naming(&session, "approval-posture");
+	let filed = tickets
+		.iter()
+		.map(|ticket| first_entry_naming(&session, &ticket.ticket_id))
+		.min()
+		.expect("a ticket");
+	assert!(
+		notice < filed,
+		"the posture is journaled before the first prompt the daemon's admission filed: notice at \
+		 entry {notice}, first prompt at entry {filed}"
+	);
+}
+
+/// The append position of the first entry of `session`'s journal whose
+/// payload names `marker`.
+fn first_entry_naming(session: &Session, marker: &str) -> usize {
+	session
+		.entries()
+		.position(|entry| entry.data.contains(marker))
+		.unwrap_or_else(|| panic!("no journal entry names {marker}"))
+}
+
+/// An explicit `yolo` on the attached path runs every command unprompted on
+/// the daemon, and the session is told once that they run unconfined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_session_reports_its_unconfined_explicit_yolo_once() {
+	let Turn { session, result, landed, sent, .. } =
+		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
+			Step::Turn,
+			Step::Turn,
+		])
+		.await;
+	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
+	assert!(landed, "bash ran unprompted on the daemon: {result}");
+	unconfined_explicit_yolo(&the_posture(&session, &sent));
+}
+
+/// A kernel outlives the session it serves: once the host switches it to
+/// another session, the first call admitted there tells that session too,
+/// once, and the session it left keeps its own one notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_kernel_reports_its_posture_to_every_session_it_serves() {
+	let Turn { session, previous, sent, .. } =
+		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
+			Step::Turn,
+			Step::Turn,
+			Step::New,
+			Step::Turn,
+		])
+		.await;
+	let [left] = previous.as_slice() else {
+		panic!("the kernel served two sessions");
+	};
+	assert!(
+		prompts(left).is_empty() && prompts(&session).is_empty(),
+		"an explicit yolo never prompts"
+	);
+	unconfined_explicit_yolo(&the_posture(left, &sent));
+	unconfined_explicit_yolo(&the_posture(&session, &sent));
+}
+
+/// Switching back to a session the kernel already told tells it nothing
+/// again: its journal holds the notice. The session in between is told once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_kernel_tells_a_resumed_session_nothing_twice() {
+	let Turn { session, previous, sent, postures, .. } =
+		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
+			Step::Turn,
+			Step::New,
+			Step::Turn,
+			Step::Resume(0),
+			Step::Turn,
+		])
+		.await;
+	let [between] = previous.as_slice() else {
+		panic!("the kernel served two sessions");
+	};
+	unconfined_explicit_yolo(&the_posture(&session, &sent));
+	unconfined_explicit_yolo(&the_posture(between, &sent));
+	assert_eq!(postures, 1, "the resumed session was told once");
+}
+
+/// A kernel composed over a session another kernel already told, as a later
+/// process resuming it is, tells it nothing again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_session_resumed_by_another_kernel_is_not_told_twice() {
+	let Turn { session, sent, postures, .. } =
+		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
+			Step::Turn,
+			Step::Restart,
+			Step::Turn,
+		])
+		.await;
+	unconfined_explicit_yolo(&the_posture(&session, &sent));
+	assert_eq!(postures, 1, "the second kernel posted nothing");
+}
+
+/// The journal decides whether the posture is reported again after a rewind.
+/// A rewind that keeps the turn holding the notice adds nothing at the next
+/// call; one that drops it leaves the session untold, so its next call tells
+/// it again, once. The abandoned branch keeps the first notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_rewind_past_the_posture_notice_reports_it_again() {
+	let Turn { session, sent, postures, .. } =
+		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
+			Step::Turn,
+			Step::Turn,
+			Step::Rewind(1),
+			Step::Turn,
+			Step::Rewind(0),
+			Step::Turn,
+		])
+		.await;
+	unconfined_explicit_yolo(&the_posture(&session, &sent));
+	assert_eq!(
+		postures, 2,
+		"one notice before the rewind that dropped it, one after, none after the rewind that kept it"
+	);
+}
+
+/// A tool-tail retry rewinds to the call's authorization, before the notice
+/// its first admission journaled, so the retried call reports the posture
+/// again and the live branch holds it once. The host interrupts the call at
+/// its prompt; the retried call prompts again and is refused. With no project
+/// daemon served, the kernel admits the call itself.
+#[tokio::test]
+async fn a_retried_tool_tail_reports_the_posture_its_rewind_dropped() {
+	retried_tool_tail(false).await;
+}
+
+/// The same retry on the attached path, where the daemon admits the call and
+/// the executor posts the notice: the user interrupts the first `bash` prompt
+/// and retries, and the session is told again on the branch it now lives on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_retried_tool_tail_reports_the_posture_its_rewind_dropped() {
+	retried_tool_tail(true).await;
+}
+
+/// Runs one `bash` call under the defaulted `yolo` with the sandbox off,
+/// interrupted at its prompt and retried, attached to a project daemon served
+/// in this process when `attached` says so.
+async fn retried_tool_tail(attached: bool) {
+	let project = Project::new(ExecSandboxMode::Off);
+	let _daemon = if attached {
+		Some(
+			support::InProcessDaemon::serve(
+				&project.root,
+				&project.state,
+				context(ExecSandboxMode::Off),
+			)
+			.await,
+		)
+	} else {
+		None
+	};
+	let environment = project.attach(None).await;
+	if attached {
+		assert!(
+			environment.fallback_notice.is_none(),
+			"the session fell back to an embedded environment: {:?}",
+			environment.fallback_notice
+		);
+	}
+	let Turn { session, result, landed, sent, postures, .. } = project
+		.drive(environment, "bash", bash_call, "landed.txt", None, false, &[Step::InterruptThenRetry])
+		.await;
+	// The kernel's admission and the daemon's word the refusal differently;
+	// both carry the user's reason.
+	assert!(
+		result.contains("denied by user") && result.contains("not today"),
+		"the retried call was refused: {result}"
+	);
+	assert!(!landed, "a refused command never ran");
+	downgraded_default_yolo(&the_posture(&session, &sent));
+	assert_eq!(postures, 2, "the interrupted call's notice stays on the abandoned branch");
+}
+
+/// The daemon's Seatbelt sandbox keeps the default `yolo`: the commands run
+/// confined and unprompted, and the attached session posts no posture notice.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_session_inside_an_active_sandbox_posts_no_posture_notice() {
+	let Turn { session, result, landed, .. } =
+		attached_bash(None, ExecSandboxMode::WorkspaceWrite, false, &[Step::Turn, Step::Turn]).await;
+	assert!(prompts(&session).is_empty(), "a confined yolo never prompts");
+	assert!(landed, "bash ran inside the workspace: {result}");
+	let posture = posture_notices(&session);
+	assert!(posture.is_empty(), "an honoured yolo posts no posture notice: {posture:?}");
+}
+
 /// A real Seatbelt sandbox is active: the default `yolo` is honoured, so bash
 /// runs unprompted and no posture notice is needed.
 #[cfg(target_os = "macos")]
@@ -577,20 +1091,8 @@ async fn default_yolo_inside_an_active_sandbox_runs_bash_unprompted_and_silent()
 		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::WorkspaceWrite, false).await;
 	assert!(prompts(&session).is_empty(), "a confined yolo never prompts");
 	assert!(landed, "bash ran inside the workspace: {result}");
-	let posture = session
-		.dom()
-		.select("body turn notice")
-		.expect("selector")
-		.filter(|handle| {
-			session
-				.dom()
-				.get(*handle)
-				.and_then(|node| node.prop(&omp_dom::PropKey::Custom(Str::new_static("name"))))
-				.and_then(omp_dom::Value::as_str)
-				== Some("approval-posture")
-		})
-		.count();
-	assert_eq!(posture, 0, "an honoured yolo posts no posture notice");
+	let posture = posture_notices(&session);
+	assert!(posture.is_empty(), "an honoured yolo posts no posture notice: {posture:?}");
 }
 
 /// The same sandbox refuses a write outside its roots: the denial becomes a
@@ -811,24 +1313,35 @@ mod session_network_grants {
 				.lines()
 				.count()
 		};
+		let session_at = |name: &str| {
+			Session::create_with_blob_store(
+				project.scratch.path().join(name),
+				ComponentRegistry::standard(),
+				spill.clone(),
+			)
+			.expect("session")
+		};
+		let mut session = session_at("grants.oms");
+		let before = session.head().expect("head before the grant");
 		let kernel = Kernel::new(
 			ToolThenText {
 				tool:      "bash",
 				arguments: serde_json::json!({ "command": fetch, "i": "Fetching a package" }),
-				turns:     0,
+				requests:  Arc::default(),
 				shown:     Shown::default(),
+				sent:      Sent::default(),
 			},
 			environment.registry(),
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
 		);
 		let approvals = bind_environment_approvals(&kernel, &environment);
-		let mut kernel = kernel
-			.with_external_executor(Arc::new(EnvToolExecutor::new(
-				environment.client().clone(),
-				approvals,
-			)))
-			.with_tool_admission(Arc::new(SettingsAdmission::new(&project.con, None, &project.root)));
+		let mut kernel = install_tool_authority(
+			kernel,
+			&session,
+			EnvToolExecutor::new(environment.client().clone(), approvals),
+			SettingsAdmission::new(&project.con, None, &project.root),
+		);
 		let events = kernel.subscribe();
 		let mailbox = kernel.mailbox();
 		let (asked, humans) = flume::unbounded();
@@ -851,16 +1364,6 @@ mod session_network_grants {
 				}
 			}
 		});
-		let session_at = |name: &str| {
-			Session::create_with_blob_store(
-				project.scratch.path().join(name),
-				ComponentRegistry::standard(),
-				spill.clone(),
-			)
-			.expect("session")
-		};
-		let mut session = session_at("grants.oms");
-		let before = session.head().expect("head before the grant");
 
 		fetch_turn(&mut kernel, &mut session).await;
 		let subject = Str::from(format!("network localhost:{port}"));
@@ -886,7 +1389,7 @@ mod session_network_grants {
 				// live, the kernel is told, and its state is resynced from the
 				// next journal.
 				let previous = mem::replace(&mut session, session_at("next.oms"));
-				kernel.session_switched();
+				kernel.session_switched(&session);
 				kernel.resync_session_state(&session);
 				assert_eq!(amendments(&previous).len(), 1, "the previous journal keeps its grant");
 			},

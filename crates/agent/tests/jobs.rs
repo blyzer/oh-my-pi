@@ -527,32 +527,41 @@ async fn jobs_restart_adopts_terminal_artifact_and_settles_exactly_once() {
 	);
 }
 
-/// Counts the rewinds and the session switches it is told about.
+/// Counts the rewinds and the session switches it is told about, and keeps
+/// the head of the session each one handed it.
 #[derive(Default)]
 struct Transitions {
 	rewinds:  AtomicUsize,
 	switches: AtomicUsize,
+	heads:    parking_lot::Mutex<Vec<Option<omp_journal::EntryId>>>,
 }
 
 impl Transitions {
 	fn seen(&self) -> (usize, usize) {
 		(self.rewinds.load(Ordering::SeqCst), self.switches.load(Ordering::SeqCst))
 	}
+
+	fn heads(&self) -> Vec<Option<omp_journal::EntryId>> {
+		self.heads.lock().clone()
+	}
 }
 
 impl omp_agent::SessionObserver for Transitions {
-	fn rewound(&self) {
+	fn rewound(&self, session: &Session) {
 		self.rewinds.fetch_add(1, Ordering::SeqCst);
+		self.heads.lock().push(session.head());
 	}
 
-	fn switched(&self) {
+	fn switched(&self, next: &Session) {
 		self.switches.fetch_add(1, Ordering::SeqCst);
+		self.heads.lock().push(next.head());
 	}
 }
 
 /// Every rewind applied to the board tells each registered session observer
-/// once, whatever the rewind changed, and every session switch tells each one
-/// once as a switch.
+/// once, whatever the rewind changed, handing it the session already on the
+/// branch the rewind left live; every session switch tells each one once as a
+/// switch, handing it the next session.
 #[tokio::test]
 async fn every_rewind_and_switch_tells_the_session_observers() {
 	let temp = tempdir().expect("temporary session directory");
@@ -582,7 +591,12 @@ async fn every_rewind_and_switch_tells_the_session_observers() {
 	assert_eq!(first.seen(), (2, 0));
 	assert_eq!(second.seen(), (2, 0));
 
-	board.session_switched();
+	let next = Session::create(temp.path().join("next.oms"), ComponentRegistry::standard())
+		.expect("create the next session");
+	board.session_switched(&next);
 	assert_eq!(first.seen(), (2, 1), "a switch is told as a switch, never as a rewind");
 	assert_eq!(second.seen(), (2, 1));
+	let told = [Some(genesis), Some(genesis), next.head()];
+	assert_eq!(first.heads(), told, "each transition hands over the session now served");
+	assert_eq!(second.heads(), told);
 }

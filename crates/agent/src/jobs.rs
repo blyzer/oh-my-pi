@@ -175,15 +175,17 @@ pub const ORPHANED_SUBAGENT_JOB: &str =
 /// which calls [`Self::rewound`]. A host that replaces the live session with
 /// another one (new, resumed, forked or branched, handed off) tells the kernel
 /// through [`crate::Kernel::session_switched`], which calls
-/// [`Self::switched`]. An observer drops state that the journal it now serves
-/// may no longer justify; it must not block.
+/// [`Self::switched`]. Both hand the observer the session the kernel now
+/// serves, so it can drop state that journal no longer justifies or re-derive
+/// it from that journal; it must not block.
 pub trait SessionObserver: Send + Sync {
-	/// The live session was rewound.
-	fn rewound(&self);
+	/// The live session was rewound; `session` is that session, already on the
+	/// branch the rewind left live.
+	fn rewound(&self, session: &Session);
 
-	/// The host replaced the live session with another session, whose journal
-	/// never decided what this state was derived from.
-	fn switched(&self);
+	/// The host replaced the live session with `next`, whose journal never
+	/// decided what this state was derived from.
+	fn switched(&self, next: &Session);
 }
 
 /// A disposable runtime index over the authoritative jobs subtree.
@@ -249,10 +251,10 @@ impl JobBoard {
 	}
 
 	/// Tells every [`SessionObserver`] that the host replaced the live session
-	/// with another one.
-	pub fn session_switched(&self) {
+	/// with `next`.
+	pub fn session_switched(&self, next: &Session) {
 		for observer in self.observers.lock().iter() {
-			observer.switched();
+			observer.switched(next);
 		}
 	}
 
@@ -718,7 +720,7 @@ impl JobBoard {
 		work: &LifecycleWork,
 	) -> impl Future<Output = ()> + Send + 'static {
 		for observer in self.observers.lock().iter() {
-			observer.rewound();
+			observer.rewound(session);
 		}
 		let mut terminated = Vec::new();
 		{
