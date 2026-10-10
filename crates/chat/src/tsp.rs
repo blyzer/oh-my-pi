@@ -16,7 +16,7 @@ use omp_tui::tsp::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
-use strum::VariantArray as _;
+use strum::{IntoStaticStr, VariantArray as _};
 
 use crate::{
 	chrome::PLACEHOLDER,
@@ -40,6 +40,13 @@ struct BlockState {
 	finalized: bool,
 }
 
+#[derive(Serialize)]
+struct Stylesheet {
+	sf:   Str,
+	name: Str,
+	css:  Str,
+}
+
 /// One terminal-epoch TSP surface presenter.
 pub struct Surface {
 	id:               Str,
@@ -59,6 +66,41 @@ pub struct Surface {
 	composer_cursor:  u32,
 	status_mounted:   bool,
 	status_text:      Str,
+}
+/// HTML-like element tags supported by Tern's `el` vocabulary.
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "lowercase")]
+pub enum ElementTag {
+	/// Form root.
+	Form,
+	/// Generic block.
+	Div,
+	/// Form label.
+	Label,
+	/// Generic input.
+	Input,
+	/// Action button.
+	Button,
+	/// Inline text.
+	Span,
+	/// Select control.
+	Select,
+	/// Select option.
+	Option,
+}
+
+/// Builds a typed TSP `el` node.
+#[must_use]
+pub fn element_node(
+	id: Str,
+	tag: ElementTag,
+	props: Map<String, Value>,
+	children: Vec<Node>,
+) -> Node {
+	let tag: &'static str = tag.into();
+	let mut props = props;
+	props.insert("tag".into(), Value::String(tag.into()));
+	Node { id, k: Kind::El, p: props, c: children }
 }
 
 impl Surface {
@@ -129,6 +171,42 @@ impl Surface {
 	pub fn replace_hello(&mut self, hello: Hello) {
 		self.encoder.set_limit(hello.apc_limit());
 		self.hello = hello;
+	}
+
+	/// Installs or replaces a stylesheet scoped to this surface.
+	///
+	/// Styles are sent only when Tern advertises `styles`; otherwise the
+	/// caller keeps the semantic `el` nodes and Tern's own theme/layout.
+	///
+	/// # Errors
+	///
+	/// Returns invalid input for an illegal sheet name or a CSS payload over
+	/// Tern's 256 KiB per-surface budget, or the writer error.
+	pub fn set_stylesheet(
+		&mut self,
+		writer: &mut impl io::Write,
+		name: &str,
+		css: &str,
+	) -> io::Result<()> {
+		if !self.hello.has_feature("styles") {
+			return Ok(());
+		}
+		if name.is_empty()
+			|| name.len() > 64
+			|| !name
+				.bytes()
+				.all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+		{
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid TSP stylesheet name"));
+		}
+		if css.len() > 256 * 1024 {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "TSP stylesheet exceeds 256 KiB"));
+		}
+		self.send(writer, Verb::Stylesheet, &Stylesheet {
+			sf:   self.id.clone(),
+			name: Str::new(name),
+			css:  Str::new(css),
+		})
 	}
 
 	/// Re-enters the surface for a new terminal epoch.
@@ -860,5 +938,38 @@ mod tests {
 		};
 		doc.apply(&frame);
 		assert!(!doc.is_settled("b-1"), "omitted settle must leave block unsettled");
+	}
+	#[test]
+	fn element_builder_is_typed_and_surface_scoped() {
+		let mut props = Map::new();
+		props.insert("text".into(), Value::String(Str::new_static("Approve").into()));
+		let node = element_node(Str::new_static("approve"), ElementTag::Button, props, Vec::new());
+		assert_eq!(node.k, Kind::El);
+		assert_eq!(node.p.get("tag"), Some(&Value::String("button".into())));
+	}
+
+	#[test]
+	fn stylesheet_requires_feature_and_rejects_invalid_names() {
+		let hello = Hello {
+			v:             1,
+			term:          Str::new_static("tern"),
+			ver:           None,
+			kinds:         vec![Str::new_static("col")],
+			features:      vec![Str::new_static("styles")],
+			apc:           None,
+			credits:       None,
+			cols:          None,
+			cell:          None,
+			dark:          None,
+			reduce_motion: None,
+			hour12:        None,
+		};
+		let mut surface = Surface::new(hello, false);
+		let mut out = Vec::new();
+		surface
+			.set_stylesheet(&mut out, "forms", ".ask { display: flex }")
+			.unwrap();
+		assert!(out.windows(6).any(|window| window == b"tsp;s;"));
+		assert!(surface.set_stylesheet(&mut out, "bad/name", "").is_err());
 	}
 }
