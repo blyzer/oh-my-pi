@@ -413,7 +413,6 @@ fn durable_account_state_survives_reopen_and_account_removal() {
 				updated_at: at(103),
 			})
 			.unwrap();
-		assert!(pool.remove(&account).is_some());
 	}
 	let store = Arc::new(AccountStateStore::open(&path).unwrap());
 	let pool = AccountPool::with_store(store).unwrap();
@@ -1062,12 +1061,89 @@ fn names_survive_reopen_and_are_released_by_removal_and_purge() {
 	pool
 		.set_name(&AccountId::new("a:one"), name("work"))
 		.unwrap();
-	pool.remove(&AccountId::new("a:one"));
+	pool.remove(&AccountId::new("a:one")).unwrap();
 	assert_eq!(pool.name(&AccountId::new("a:one")), None);
-	assert_eq!(store.load_names().unwrap().len(), 1, "the store keeps it until purge or logout");
-	store.purge_account(&AccountId::new("a:one")).unwrap();
+	assert!(pool.account(&AccountId::new("a:one")).is_none());
 	assert!(store.load_names().unwrap().is_empty());
 	pool
 		.set_name(&AccountId::new("a:two"), name("work"))
 		.unwrap();
+}
+
+#[test]
+fn removing_an_account_purges_all_state_without_touching_its_sibling() {
+	let directory = tempfile::tempdir().unwrap();
+	let path = directory.path().join("app.sqlite");
+	let store = Arc::new(AccountStateStore::open(&path).unwrap());
+	let pool = AccountPool::with_store(Arc::clone(&store)).unwrap();
+	let route = RouteId::from("route");
+	let account = AccountId::new("removed");
+	pool.upsert(record("removed", "principal", &route)).unwrap();
+	pool.upsert(record("kept", "sibling", &route)).unwrap();
+	pool.set_name(&account, name("work")).unwrap();
+	pool
+		.cooldown(account.clone(), at(180), CooldownReason::Health)
+		.unwrap();
+	pool.cooldown_route(account.clone(), route.clone(), at(180), CooldownReason::Health);
+	pool
+		.observe_rate(account.clone(), RateObservation {
+			window:      RateWindowId::new("requests"),
+			limit:       Some(20),
+			remaining:   Some(0),
+			reset_at:    Some(at(180)),
+			retry_at:    None,
+			observed_at: at(100),
+		})
+		.unwrap();
+	pool
+		.record_quota_429(account.clone(), QuotaWindowId::new("monthly"), Some(at(180)), at(100))
+		.unwrap();
+	pool.reject_credential(account.clone(), 1, at(100)).unwrap();
+	let scope = AffinityScope::new("session");
+	pool
+		.save_affinity(AccountAffinity {
+			scope:      scope.clone(),
+			account:    account.clone(),
+			principal:  PrincipalId::new("principal"),
+			updated_at: at(100),
+		})
+		.unwrap();
+	assert!(pool.remove(&account).unwrap().is_some());
+	assert_eq!(
+		store.load_account(&account).unwrap(),
+		omp_ai::account::PersistedAccountState::default()
+	);
+	assert!(pool.affinity(&scope).unwrap().is_none());
+	let reloaded = AccountPool::with_store(store).unwrap();
+	assert!(reloaded.account(&account).is_none());
+	assert!(reloaded.name(&account).is_none());
+	assert_eq!(reloaded.accounts().len(), 1);
+	pool.upsert(record("removed", "principal", &route)).unwrap();
+	let mut request = selection_request(&route, at(101));
+	request.previous_account = Some(account.clone());
+	assert_eq!(pool.select(&request).unwrap().record.account, account);
+}
+
+#[test]
+fn failed_durable_removal_leaves_the_live_account_and_name_unchanged() {
+	let directory = tempfile::tempdir().unwrap();
+	let path = directory.path().join("app.sqlite");
+	let store = Arc::new(AccountStateStore::open(&path).unwrap());
+	let pool = AccountPool::with_store(Arc::clone(&store)).unwrap();
+	let account = AccountId::new("account");
+	pool
+		.upsert(record("account", "principal", &RouteId::from("route")))
+		.unwrap();
+	pool.set_name(&account, name("work")).unwrap();
+	rusqlite::Connection::open(&path)
+		.unwrap()
+		.execute_batch(
+			"CREATE TRIGGER reject_account_delete BEFORE DELETE ON account_state_accounts
+		 BEGIN SELECT RAISE(ABORT, 'test refusal'); END;",
+		)
+		.unwrap();
+	assert!(matches!(pool.remove(&account), Err(AccountStateStoreError::Database { .. })));
+	assert!(pool.account(&account).is_some());
+	assert_eq!(pool.name(&account), Some(name("work")));
+	assert_eq!(store.load_names().unwrap().len(), 1, "name deletion rolls back too");
 }

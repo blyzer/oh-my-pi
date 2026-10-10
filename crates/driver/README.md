@@ -87,6 +87,10 @@ presentation adapter.
   `<meta><foreign-artifact>`, and `omp-envd`'s `artifact://` resolver maps a
   numeric id through that mapping for the session reading it. A referenced id
   with no v1 file is reported, not fatal.
+  Imported OAuth accounts keep their v1 account identities but reconstruct
+  native principal identity from catalog-selected JWT evidence or retained
+  email metadata. An existing native principal is not imported again, and
+  later native login reuses the imported account rather than duplicating it.
 
 `omp-driver` may construct `omp_envd::ProjectEnvironment` and supply the
 higher-layer bridges it needs, but the filesystem/process/document/tool host
