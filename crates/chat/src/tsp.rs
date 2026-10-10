@@ -1033,5 +1033,16 @@ mod tests {
 			.unwrap();
 		assert!(out.windows(6).any(|window| window == b"tsp;s;"));
 		assert!(surface.set_stylesheet(&mut out, "bad/name", "").is_err());
+		assert!(
+			surface
+				.set_stylesheet(&mut out, "too-large", &"x".repeat(256 * 1024 + 1))
+				.is_err()
+		);
+		let mut no_styles = Surface::optimistic(false);
+		let mut untouched = Vec::new();
+		no_styles
+			.set_stylesheet(&mut untouched, "forms", "body {}")
+			.unwrap();
+		assert!(untouched.is_empty(), "optimistic hello does not assume styles");
 	}
 }
