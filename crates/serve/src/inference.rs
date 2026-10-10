@@ -4446,6 +4446,7 @@ mod tests {
 			omp_ai::CredentialFailure::KindMismatch {
 				expected: omp_ai::auth::CredentialKind::Bearer,
 				actual:   omp_ai::auth::CredentialKind::ApiKey,
+				remedy:   omp_ai::KindMismatchRemedy::Restart,
 			},
 			RetryAction::ReselectRoute,
 			ExecutionReceipt::default(),

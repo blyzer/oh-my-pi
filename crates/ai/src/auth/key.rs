@@ -98,7 +98,10 @@ pub enum KeyError {
 	/// Stored key material has an invalid length.
 	#[error("credential encryption key has an invalid length")]
 	InvalidLength,
-	/// The operating-system credential facility rejected the operation.
+	/// The operating-system credential facility rejected the operation or
+	/// could not answer it: a locked keychain, a session without keychain
+	/// access, or access denied. A key the facility does not hold is
+	/// [`Self::NotFound`] (or [`Self::Unavailable`] for the active key).
 	#[error("operating-system credential facility rejected the key operation")]
 	OsCredential,
 	/// Secure random generation failed.
@@ -467,14 +470,37 @@ impl fmt::Debug for OsCredentialKeySource {
 	}
 }
 
+/// The Security framework status `errSecItemNotFound`: no keychain item
+/// matches the query.
+#[cfg(any(target_os = "macos", test))]
+const KEYCHAIN_ITEM_NOT_FOUND: i32 = -25300;
+
+/// Whether a keychain read that failed with `status` was refused (or could not
+/// be answered) rather than finding no item: every status but
+/// `errSecItemNotFound`, such as `errSecInteractionNotAllowed` for a locked
+/// keychain over SSH, `errSecAuthFailed`, or a cancelled prompt.
+#[cfg(any(target_os = "macos", test))]
+const fn keychain_refused(status: i32) -> bool {
+	status != KEYCHAIN_ITEM_NOT_FOUND
+}
+
 impl KeySource for OsCredentialKeySource {
+	/// A keychain without the active-key item is [`KeyError::Unavailable`]; a
+	/// keychain that refuses or cannot answer the read is
+	/// [`KeyError::OsCredential`].
 	fn active_key(&self) -> Result<EncryptionKey, KeyError> {
 		#[cfg(target_os = "macos")]
 		{
 			use security_framework::passwords::get_generic_password;
 
-			let raw = get_generic_password(&self.service, &self.active_account())
-				.map_err(|_| KeyError::Unavailable)?;
+			let raw =
+				get_generic_password(&self.service, &self.active_account()).map_err(|error| {
+					if keychain_refused(error.code()) {
+						KeyError::OsCredential
+					} else {
+						KeyError::Unavailable
+					}
+				})?;
 			let id = str::from_utf8(&raw).map_err(|_| KeyError::InvalidLength)?;
 			self.key(&KeyId::new(id))
 		}
@@ -484,14 +510,22 @@ impl KeySource for OsCredentialKeySource {
 		}
 	}
 
+	/// A key the keychain does not hold is [`KeyError::NotFound`], so a
+	/// [`FallbackKeySource`] consults its fallback; a keychain that refuses or
+	/// cannot answer the read is [`KeyError::OsCredential`].
 	fn key(&self, id: &KeyId) -> Result<EncryptionKey, KeyError> {
 		#[cfg(target_os = "macos")]
 		{
 			use security_framework::passwords::get_generic_password;
 
 			let raw = Zeroizing::new(
-				get_generic_password(&self.service, &self.key_account(id))
-					.map_err(|_| KeyError::NotFound(id.clone()))?,
+				get_generic_password(&self.service, &self.key_account(id)).map_err(|error| {
+					if keychain_refused(error.code()) {
+						KeyError::OsCredential
+					} else {
+						KeyError::NotFound(id.clone())
+					}
+				})?,
 			);
 			let bytes: [u8; KEY_BYTES] = raw
 				.as_slice()
@@ -556,6 +590,26 @@ mod tests {
 				.as_str(),
 			"old"
 		);
+	}
+
+	/// Only a keychain that holds no matching item reports a missing key; a
+	/// locked keychain (`errSecInteractionNotAllowed`, as over SSH), a failed
+	/// or cancelled authorization, a missing keychain, and any other status
+	/// are refusals, which the stored source reports as a refusing keychain
+	/// with its own remedy.
+	#[test]
+	fn only_a_missing_keychain_item_is_not_a_refusal() {
+		assert!(!super::keychain_refused(-25_300), "errSecItemNotFound");
+		for status in [
+			-25_308, // errSecInteractionNotAllowed
+			-25_293, // errSecAuthFailed
+			-128,    // errSecUserCanceled
+			-25_294, // errSecNoSuchKeychain
+			-25_291, // errSecNotAvailable
+			-34_018, // errSecMissingEntitlement
+		] {
+			assert!(super::keychain_refused(status), "{status}");
+		}
 	}
 
 	#[test]

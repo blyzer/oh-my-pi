@@ -594,6 +594,7 @@ mod tests {
 			(RetryAction::RotateAccount, CredentialFailure::KindMismatch {
 				expected: crate::auth::CredentialKind::Bearer,
 				actual:   crate::auth::CredentialKind::ApiKey,
+				remedy:   crate::KindMismatchRemedy::Restart,
 			}),
 			(RetryAction::RefreshCredential, CredentialFailure::RefreshFailed),
 		] {

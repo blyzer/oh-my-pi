@@ -30,14 +30,18 @@ use super::{
 	OAuthEngine, OAuthError, OAuthHttpClient, OAuthHttpRequest, OAuthHttpResponse, OAuthParameter,
 	OAuthTransportError, PROVIDER_NAME_PARAMETER, ScopedCredentialGrant, ScopedCredentialToken,
 	StoreError,
-	broker::{leased_static_secret_kind, static_secret_kind, stored_static_secret_kind},
+	broker::{
+		leased_static_secret_kind, provider_accepts_kind, static_secret_kind,
+		stored_static_secret_kind, unleased_login_remedy,
+	},
 	credential_ready, default_login_channels,
 	store::OAUTH_RENEWABLE_KIND,
 };
 use crate::{
 	account::{
-		AccountName, AccountPin, AccountPool, AccountPoolEvent, AccountRecord, CredentialFreshness,
-		RateWindowId, RefreshCoordinator, RefreshRequest, SessionAccountPins,
+		AccountName, AccountPin, AccountPool, AccountPoolEvent, AccountRecord,
+		AccountStateStoreError, CredentialFreshness, RateWindowId, RefreshCoordinator,
+		RefreshRequest, SessionAccountPins,
 	},
 	answer::{
 		AccountState, AccountSummary, AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind,
@@ -90,7 +94,7 @@ pub struct OAuthControlImport {
 }
 
 /// One stored secret [`AuthControlHandle::repair_static_secret_kinds`]
-/// re-stored under the kind its provider authenticates with.
+/// re-stores under the kind its provider's routes lease.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecretKindRepair {
 	/// Repaired account.
@@ -101,6 +105,76 @@ pub struct SecretKindRepair {
 	pub stored:   Str,
 	/// Kind it is stored under now.
 	pub repaired: CredentialKind,
+}
+
+/// What one [`AuthControlHandle::repair_static_secret_kinds`] pass did.
+#[derive(Debug, Default)]
+pub struct SecretKindRepairs {
+	/// Rows this pass re-stored under the kind their provider's routes lease.
+	pub repaired:           Vec<SecretKindRepair>,
+	/// Rows another writer re-stored under that kind first: this pass's write
+	/// lost the generation check, and the row then already had the kind.
+	pub restored_elsewhere: Vec<SecretKindRepair>,
+	/// Rows whose repair failed; each error says what the row was left as.
+	pub failed:             Vec<SecretKindRepairFailure>,
+}
+
+/// A row [`AuthControlHandle::repair_static_secret_kinds`] could not finish
+/// repairing.
+#[derive(Debug)]
+pub struct SecretKindRepairFailure {
+	/// The repair the row needed.
+	pub repair: SecretKindRepair,
+	/// Why it failed, and what the row was left as.
+	pub error:  SecretKindRepairError,
+}
+
+/// Why a stored-kind repair of one row failed, and what it left behind.
+#[derive(Debug, thiserror::Error)]
+pub enum SecretKindRepairError {
+	/// The row was not re-stored and keeps its stored kind, so a later pass
+	/// tries it again: it cannot be decrypted (the key source is unavailable,
+	/// or the row was sealed under a key the source does not hold), or another
+	/// writer changed it first and left it under another kind.
+	#[error("the credential was not re-stored and keeps its stored kind")]
+	NotRestored(#[source] StoreError),
+	/// The row was re-stored under the new kind as `generation`, but the
+	/// account pool did not take that generation: another process removed the
+	/// account or recorded a newer generation. A later pass does not try the
+	/// row again, since its kind is right now.
+	#[error(
+		"the credential was re-stored as generation {generation}, but the account pool did not take \
+		 that generation"
+	)]
+	PoolRefused {
+		/// Generation of the re-stored row.
+		generation: u64,
+	},
+	/// The row was re-stored under the new kind as `generation`, but the
+	/// account state store failed to record that generation. A later pass does
+	/// not try the row again, since its kind is right now; until the pool
+	/// records a newer generation, a rejection recorded against the earlier one
+	/// stays in force.
+	#[error(
+		"the credential was re-stored as generation {generation}, but the account state could not \
+		 record that generation"
+	)]
+	PoolUnwritable {
+		/// Generation of the re-stored row.
+		generation: u64,
+		/// Why the account state store failed.
+		#[source]
+		source:     AccountStateStoreError,
+	},
+}
+
+/// Who re-stored a row [`AuthControlHandle::repair_static_secret_kinds`]
+/// needed to re-store.
+enum RestoredBy {
+	/// This pass.
+	ThisPass,
+	/// Another writer, whose write won the generation check.
+	AnotherWriter,
 }
 
 /// Narrow control-plane handle over the live authentication manager.
@@ -170,13 +244,22 @@ impl AuthControlHandle {
 
 	/// Atomically persists one scalar credential and updates the shared pool.
 	///
-	/// A static secret is stored under the kind its provider's routes lease
-	/// ([`stored_static_secret_kind`]): `write.kind` may use the store's
-	/// spelling or the extension SDK's (`api_key`, `session`); an API key for a
-	/// provider whose routes take only a bearer token is stored as `bearer`,
-	/// and a bearer token for one whose routes take only a key header as
-	/// `api-key`. Any other kind is stored as written. The returned metadata
-	/// carries the kind stored.
+	/// A static secret is stored under a kind its provider's routes lease
+	/// ([`stored_static_secret_kind`]); `write.kind` may use the store's
+	/// spelling or the extension SDK's (`api_key`, `session`). An API key or
+	/// bearer token moves to the other kind only where both are sent alike: an
+	/// API key is stored as `bearer` for a provider whose routes take only a
+	/// bearer token, and a bearer token as `api-key` where the routes take a
+	/// key only as `Authorization: Bearer` (a `models.toml` `apiKey` auth), both
+	/// only for a provider whose bundled routes take no key of their own and no
+	/// bearer credential only through OAuth or application-default credentials.
+	/// Every other key or token keeps the written kind, so removing a
+	/// `models.toml` auth never changes how a stored secret is sent; one whose
+	/// kind no route leases under this configuration is stored all the same
+	/// (an importer's key is the right one once the auth is removed) and logged
+	/// as a warning, and its requests report a kind mismatch. Native `/login`
+	/// refuses such a secret instead ([`SecretLoginEngine`]). Any other kind is
+	/// stored as written. The returned metadata carries the kind stored.
 	pub fn store(
 		&self,
 		write: CredentialControlWrite,
@@ -194,15 +277,12 @@ impl AuthControlHandle {
 		let secret = write
 			.secret
 			.expose(|bytes| SecretBox::new(Box::new(bytes.to_vec())));
-		let kind: &str =
-			match stored_static_secret_kind(&self.manager.catalog, &write.provider, &write.kind) {
-				Some(kind) => kind.into(),
-				None => write.kind.as_str(),
-			};
+		let catalog = &self.manager.catalog;
+		let stored = stored_static_secret_kind(catalog, &write.provider, &write.kind);
 		let metadata = self.manager.store.put(CredentialWrite {
 			account_id: &account,
 			principal_id: &write.principal,
-			kind,
+			kind: stored.map_or(write.kind.as_str(), |kind| kind.into()),
 			secret: &secret,
 			expires_at_ms: write.expires_at_ms,
 			origin: CredentialOrigin::Persistent,
@@ -213,6 +293,20 @@ impl AuthControlHandle {
 				.metadata(&account)?
 				.map(|row| row.generation),
 		})?;
+		// A key or token is kept under its kind so that removing a
+		// `models.toml` auth never changes how it is sent, even when no route
+		// leases that kind under this configuration.
+		if let Some(kind) = stored
+			&& !provider_accepts_kind(catalog, &write.provider, kind)
+		{
+			let kind: &'static str = kind.into();
+			tracing::warn!(
+				account = metadata.account_id.as_str(),
+				kind,
+				"stored a credential under a kind no route of its provider takes under the current \
+				 configuration; its requests report kind_mismatch until one does"
+			);
+		}
 		let record =
 			self.account_record(account, write.principal, write.provider, metadata.generation);
 		self
@@ -291,61 +385,111 @@ impl AuthControlHandle {
 	/// kind the provider declares even where a `models.toml` auth replaced its
 	/// routes' own, extension logins and `omp.creds` stores kept the SDK
 	/// spellings `api_key` and `session` no lease reads), or when a catalog or
-	/// `models.toml` change replaced the authentication the routes lease. The
-	/// kind is authenticated with the ciphertext, so a repair decrypts the
-	/// secret and writes it again under a new generation; the account keeps
-	/// its principal and expiry, and only its pool generation changes. Rows
-	/// already stored under the right kind, rows of accounts the pool does not
-	/// hold, and kinds that are no static secret are left alone, so a second
+	/// `models.toml` change replaced the authentication the routes lease. A
+	/// key or token is only ever moved where [`Self::store`] would move it, so
+	/// a row of a provider whose bundled routes take a key, or a bearer
+	/// credential only through OAuth or application-default credentials, keeps
+	/// its kind whatever a `models.toml` auth says, and after a launch without
+	/// the auth every row leases as one written without it. The kind is
+	/// authenticated with the ciphertext, so a repair decrypts the secret and
+	/// writes it again under a new generation; the account keeps its principal
+	/// and expiry, and only its pool generation changes. Rows already stored
+	/// under the right kind, rows of accounts the pool does not hold, and kinds
+	/// that are no static secret are left alone, so under one catalog a second
 	/// call repairs nothing and decrypts nothing.
+	///
+	/// Each row is repaired on its own, and the rows after a failed one are
+	/// still repaired. A row that cannot be re-stored (it cannot be decrypted,
+	/// or another writer changed it first and left it under another kind)
+	/// keeps its kind and is reported in [`SecretKindRepairs::failed`], and a
+	/// later pass tries it again. A row another writer re-stored under the
+	/// kind first is reported in [`SecretKindRepairs::restored_elsewhere`]. A
+	/// re-stored row whose new generation the account pool then does not take
+	/// is reported as failed too ([`SecretKindRepairError::PoolRefused`],
+	/// [`SecretKindRepairError::PoolUnwritable`]), although its kind is right
+	/// and no later pass tries it again.
 	///
 	/// # Errors
 	///
-	/// Returns the first store failure, such as
-	/// [`KeyError::Unavailable`] when a mismatched row cannot be decrypted;
-	/// rows repaired before it stay repaired.
-	pub fn repair_static_secret_kinds(&self) -> Result<Vec<SecretKindRepair>, StoreError> {
-		let mut repairs = Vec::new();
+	/// Returns the store failure listing the stored rows' metadata; nothing is
+	/// repaired then.
+	pub fn repair_static_secret_kinds(&self) -> Result<SecretKindRepairs, StoreError> {
+		let mut outcome = SecretKindRepairs::default();
 		for (metadata, record, repaired) in self.mismatched_static_secrets()? {
-			let secret = self.manager.store.get(&metadata.account_id)?.secret;
-			let now_ms = SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.map_err(|_| StoreError::InvalidTime)?
-				.as_millis()
-				.try_into()
-				.map_err(|_| StoreError::InvalidTime)?;
-			let written = self.manager.store.put(CredentialWrite {
-				account_id: &metadata.account_id,
-				principal_id: &metadata.principal_id,
-				kind: repaired.into(),
-				secret: &secret,
-				expires_at_ms: metadata.expires_at_ms,
-				origin: CredentialOrigin::Persistent,
-				now_ms,
-				expected_generation: Some(metadata.generation),
-			})?;
-			// Only the generation moves: an enable, disable, or route change
-			// another process made since this handle loaded the pool stays.
-			if !self
-				.manager
-				.accounts
-				.update_credential_generation(
-					&metadata.account_id,
-					&record.principal,
-					written.generation,
-				)
-				.map_err(|_| StoreError::AccountState)?
-			{
-				return Err(StoreError::AccountState);
-			}
-			repairs.push(SecretKindRepair {
+			let restored = self.restore_static_secret(&metadata, &record, repaired);
+			let repair = SecretKindRepair {
 				account: metadata.account_id,
 				provider: record.provider,
 				stored: metadata.kind,
 				repaired,
-			});
+			};
+			match restored {
+				Ok(RestoredBy::ThisPass) => outcome.repaired.push(repair),
+				Ok(RestoredBy::AnotherWriter) => outcome.restored_elsewhere.push(repair),
+				Err(error) => outcome
+					.failed
+					.push(SecretKindRepairFailure { repair, error }),
+			}
 		}
-		Ok(repairs)
+		Ok(outcome)
+	}
+
+	/// Re-encrypts the secret of the row `metadata` describes under `kind`,
+	/// unless another writer changed the row since `metadata` was read, and
+	/// moves the account's pool generation to the new row's.
+	///
+	/// When another writer changed the row and it now has `kind`, that writer
+	/// re-stored it ([`RestoredBy::AnotherWriter`]), as when two launches
+	/// start together.
+	fn restore_static_secret(
+		&self,
+		metadata: &CredentialMetadata,
+		record: &AccountRecord,
+		kind: CredentialKind,
+	) -> Result<RestoredBy, SecretKindRepairError> {
+		let store = &self.manager.store;
+		let secret = store
+			.get(&metadata.account_id)
+			.map_err(SecretKindRepairError::NotRestored)?
+			.secret;
+		let now_ms = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.ok()
+			.and_then(|now| now.as_millis().try_into().ok())
+			.ok_or(SecretKindRepairError::NotRestored(StoreError::InvalidTime))?;
+		let written = match store.put(CredentialWrite {
+			account_id: &metadata.account_id,
+			principal_id: &metadata.principal_id,
+			kind: kind.into(),
+			secret: &secret,
+			expires_at_ms: metadata.expires_at_ms,
+			origin: CredentialOrigin::Persistent,
+			now_ms,
+			expected_generation: Some(metadata.generation),
+		}) {
+			Ok(written) => written,
+			Err(StoreError::GenerationConflict)
+				if store.metadata(&metadata.account_id).is_ok_and(|row| {
+					row.is_some_and(|row| row.kind.as_str() == <&'static str>::from(kind))
+				}) =>
+			{
+				return Ok(RestoredBy::AnotherWriter);
+			},
+			Err(error) => return Err(SecretKindRepairError::NotRestored(error)),
+		};
+		// Only the generation moves: an enable, disable, or route change
+		// another process made since this handle loaded the pool stays.
+		match self.manager.accounts.update_credential_generation(
+			&metadata.account_id,
+			&record.principal,
+			written.generation,
+		) {
+			Ok(true) => Ok(RestoredBy::ThisPass),
+			Ok(false) => Err(SecretKindRepairError::PoolRefused { generation: written.generation }),
+			Err(source) => {
+				Err(SecretKindRepairError::PoolUnwritable { generation: written.generation, source })
+			},
+		}
 	}
 
 	/// Every stored row of an account the pool holds whose kind differs from
@@ -668,6 +812,13 @@ pub struct SecretLoginEngineError;
 
 /// Concrete bounded login engine for caller-labeled API keys and session
 /// tokens.
+///
+/// A secret is stored under the kind [`AuthControlHandle::store`] stores it
+/// under. When no route of the provider leases that kind under the current
+/// catalog and `models.toml` (Anthropic's key under `auth = "bearer"`), the
+/// login is refused before it prompts, with
+/// [`ErrorDetail::LoginKindNotLeased`] naming the environment variable the
+/// routes read, instead of storing a secret every request would fail on.
 #[derive(Clone)]
 pub struct SecretLoginEngine {
 	method:          AuthMethod,
@@ -725,12 +876,14 @@ impl AuthLoginEngine for SecretLoginEngine {
 			};
 			// `spec` is the provider's declared authentication; its routes may
 			// lease another (a `models.toml` auth replaces theirs), and the
-			// secret is stored under the kind they lease, as every control
-			// write stores it.
-			let credential_kind: &'static str =
-				leased_static_secret_kind(&catalog, &request.provider, kind)
-					.unwrap_or(kind)
-					.into();
+			// secret is stored under the kind every control write stores it
+			// under. A kind none of them leases is refused before the prompt:
+			// stored, every request would fail on it.
+			let kind = leased_static_secret_kind(&catalog, &request.provider, kind).unwrap_or(kind);
+			if let Some(remedy) = unleased_login_remedy(&catalog, &request.provider, kind) {
+				return Err(login_kind_not_leased(request.provider, kind, remedy));
+			}
+			let credential_kind: &'static str = kind.into();
 			let provider = catalog
 				.provider(&request.provider)
 				.ok_or_else(auth_not_found)?;
@@ -2137,6 +2290,23 @@ fn auth_not_found() -> Error {
 	)
 }
 
+/// The refusal of a login that would store a static secret of `kind` no
+/// route of `provider` leases ([`ErrorDetail::LoginKindNotLeased`]).
+fn login_kind_not_leased(
+	provider: ProviderId,
+	kind: CredentialKind,
+	remedy: crate::UnleasedLoginRemedy,
+) -> Error {
+	Error::new(
+		ErrorKind::Authentication,
+		ErrorPhase::Authentication,
+		RetryAction::Never,
+		ExecutionReceipt::default(),
+	)
+	.code(Str::new_static("login_kind_not_leased"))
+	.detail(ErrorDetail::LoginKindNotLeased { provider, kind, remedy })
+}
+
 fn auth_unavailable() -> Error {
 	Error::new(
 		ErrorKind::Authentication,
@@ -2299,7 +2469,7 @@ fn credential_error(error: CredentialError) -> Error {
 			RetryAction::RefreshCredential,
 			ExecutionReceipt::default(),
 		),
-		CredentialError::StorageLocked => Error::new(
+		CredentialError::StorageLocked { .. } => Error::new(
 			ErrorKind::CredentialStorageUnavailable,
 			ErrorPhase::Authentication,
 			RetryAction::Never,
@@ -2557,6 +2727,39 @@ mod tests {
 		metadata
 	}
 
+	/// Under the bundled catalog no API-key or session-token login is
+	/// refused: the kind each provider's login stores is one some route of the
+	/// provider leases. Only a `models.toml` auth can make a login's kind one
+	/// no route takes.
+	#[test]
+	fn bundled_logins_store_a_kind_some_route_leases() {
+		let catalog = Catalog::embedded();
+		let mut logins = 0_usize;
+		for provider in catalog.providers() {
+			for method in [AuthMethod::ApiKey, AuthMethod::SessionToken] {
+				let Ok(Some((spec, _))) = select_auth_spec(catalog, &provider.auth, Some(method))
+				else {
+					continue;
+				};
+				let Some(kind) =
+					super::static_secret_kind(catalog.auth_spec(&spec).expect("declared auth").kind)
+				else {
+					continue;
+				};
+				let stored = super::leased_static_secret_kind(catalog, &provider.id, kind)
+					.expect("a static secret");
+				assert_eq!(
+					super::unleased_login_remedy(catalog, &provider.id, stored),
+					None,
+					"{}: a {method:?} login stores {stored}",
+					provider.id
+				);
+				logins += 1;
+			}
+		}
+		assert!(logins > 0, "some bundled provider takes a key login");
+	}
+
 	/// Every control-plane write stores a static secret under the kind its
 	/// provider leases: an API key for a bearer-only provider as `bearer`,
 	/// and the extension SDK spellings as the store's; OAuth material and
@@ -2586,9 +2789,10 @@ mod tests {
 		assert_eq!(write("anthropic", "bearer", "bearer").as_str(), "bearer");
 		assert_eq!(write("anthropic", "session", "session").as_str(), "session-token");
 		assert_eq!(write("anthropic", "oauth", "oauth").as_str(), "oauth");
-		// A bearer token for a provider whose routes take only a key header
-		// is stored as that provider's key.
-		assert_eq!(write("google", "extension", "bearer").as_str(), "api-key");
+		// A bearer token for a provider whose routes take its key in a query
+		// parameter keeps its kind, which those routes refuse, instead of
+		// being sent as `?key=`.
+		assert_eq!(write("google", "extension", "bearer").as_str(), "bearer");
 	}
 
 	/// Rows earlier writers stored under a kind their provider's routes do not
@@ -2623,12 +2827,12 @@ mod tests {
 		);
 		let session =
 			write_earlier_row(&store, &pool, "anthropic", "session", "session", b"fake-session", None);
-		// A bearer token for a provider whose routes take only a key header.
-		let header =
-			write_earlier_row(&store, &pool, "google", "extension", "bearer", b"fake-google", None);
 		let kept = [
 			write_earlier_row(&store, &pool, "anthropic", "api-key", "api-key", b"sk-ant-kept", None),
 			write_earlier_row(&store, &pool, "anthropic", "oauth", "oauth", b"fake-oauth", None),
+			// A bearer token for a provider whose routes take its key in a query
+			// parameter: moving it would send it as `?key=`.
+			write_earlier_row(&store, &pool, "google", "extension", "bearer", b"fake-google", None),
 		];
 		// Another process disables the account after this handle loaded it.
 		AccountPool::with_store(Arc::new(
@@ -2648,14 +2852,37 @@ mod tests {
 			pool.clone(),
 		)
 		.expect("locked control");
-		assert!(locked.repair_static_secret_kinds().is_err(), "a locked store repairs nothing");
+		let locked = locked.repair_static_secret_kinds().expect("metadata lists");
+		assert!(locked.repaired.is_empty(), "a locked store repairs nothing");
+		assert_eq!(
+			locked
+				.failed
+				.iter()
+				.map(|failure| {
+					assert!(
+						matches!(
+							failure.error,
+							super::SecretKindRepairError::NotRestored(StoreError::Key(
+								KeyError::Unavailable
+							))
+						),
+						"{failure:?}"
+					);
+					failure.repair.account.as_str()
+				})
+				.collect::<Vec<_>>(),
+			[extension.account_id.as_str(), session.account_id.as_str(), hf.account_id.as_str()],
+			"every row that needs re-storing is tried"
+		);
 		assert_eq!(
 			store.metadata(&hf.account_id).expect("metadata"),
 			Some(hf.clone()),
 			"a failed repair leaves the row"
 		);
 
-		let repairs = control.repair_static_secret_kinds().expect("repair");
+		let outcome = control.repair_static_secret_kinds().expect("repair");
+		assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+		let repairs = outcome.repaired;
 
 		let repaired = |account: &AccountId, stored: &'static str, kind| super::SecretKindRepair {
 			account:  account.clone(),
@@ -2666,7 +2893,6 @@ mod tests {
 		assert_eq!(repairs, [
 			repaired(&extension.account_id, "api_key", crate::auth::CredentialKind::ApiKey),
 			repaired(&session.account_id, "session", crate::auth::CredentialKind::SessionToken),
-			repaired(&header.account_id, "bearer", crate::auth::CredentialKind::ApiKey),
 			repaired(&hf.account_id, "api-key", crate::auth::CredentialKind::Bearer),
 		]);
 		let metadata = |account: &AccountId| {
@@ -2682,7 +2908,6 @@ mod tests {
 		assert_eq!(restored.expires_at_ms, expires_at_ms, "the repair keeps the expiry");
 		assert_eq!(metadata(&extension.account_id).kind.as_str(), "api-key");
 		assert_eq!(metadata(&session.account_id).kind.as_str(), "session-token");
-		assert_eq!(metadata(&header.account_id).kind.as_str(), "api-key");
 		for row in kept {
 			assert_eq!(metadata(&row.account_id), row);
 		}
@@ -2728,11 +2953,225 @@ mod tests {
 			.expect("bearer lease");
 		assert_eq!(lease.kind(), crate::auth::CredentialKind::Bearer);
 		assert_eq!(lease.scalar_secret().expect("scalar").expose_secret(), "hf-fake-repair-token");
+		let again = control.repair_static_secret_kinds().expect("again");
+		assert!(again.repaired.is_empty() && again.failed.is_empty(), "{again:?}");
+	}
+
+	/// A row the repair cannot decrypt (sealed under a key the active key
+	/// source does not hold) is reported with its account and left as it was,
+	/// and a mismatched row listed after it is still re-stored.
+	#[test]
+	fn repair_continues_past_a_row_it_cannot_decrypt() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let database = directory.path().join("credentials.db");
+		let (_, store, pool, control) = kind_control(&database);
+		// Sealed under a key another key source held, and listed first
+		// (`anthropic:…` sorts before `huggingface:…`).
+		let foreign = CredentialStore::open(
+			&database,
+			Arc::new(HeadlessKeySource::new(KeyId::new("other-source"), [9; 32])),
+		)
+		.expect("other store");
+		let sealed =
+			write_earlier_row(&foreign, &pool, "anthropic", "sealed", "api_key", b"sk-ant-fake", None);
+		let hf = write_earlier_row(
+			&store,
+			&pool,
+			"huggingface",
+			"agent-db",
+			"api-key",
+			b"hf-fake-after",
+			None,
+		);
+
+		let outcome = control
+			.repair_static_secret_kinds()
+			.expect("metadata lists");
+
+		assert_eq!(
+			outcome
+				.repaired
+				.iter()
+				.map(|repair| (repair.account.as_str(), repair.repaired))
+				.collect::<Vec<_>>(),
+			[(hf.account_id.as_str(), crate::auth::CredentialKind::Bearer)]
+		);
+		let [failure] = outcome.failed.as_slice() else {
+			panic!("one row cannot be re-stored: {:?}", outcome.failed);
+		};
+		assert_eq!(failure.repair.account, sealed.account_id);
+		assert_eq!(failure.repair.stored.as_str(), "api_key");
+		assert_eq!(failure.repair.repaired, crate::auth::CredentialKind::ApiKey);
 		assert!(
-			control
-				.repair_static_secret_kinds()
-				.expect("again")
-				.is_empty()
+			matches!(
+				failure.error,
+				super::SecretKindRepairError::NotRestored(StoreError::Key(KeyError::NotFound(_)))
+			),
+			"{failure:?}"
+		);
+		assert!(outcome.restored_elsewhere.is_empty(), "{outcome:?}");
+		assert_eq!(store.metadata(&sealed.account_id).expect("metadata"), Some(sealed));
+		assert_eq!(
+			store
+				.metadata(&hf.account_id)
+				.expect("metadata")
+				.expect("row")
+				.kind
+				.as_str(),
+			"bearer"
+		);
+	}
+
+	/// Two launches that start together race to re-store a row: the one whose
+	/// write loses the generation check finds the row already under the kind
+	/// and reports it as re-stored elsewhere, not as a failure. A row another
+	/// writer left under a kind the routes still do not lease is a failure that
+	/// keeps its kind, and a later pass re-stores it.
+	#[test]
+	fn a_row_another_writer_restored_first_is_not_a_failure() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let database = directory.path().join("credentials.db");
+		let (catalog, store, pool, control) = kind_control(&database);
+		let raced = write_earlier_row(
+			&store,
+			&pool,
+			"huggingface",
+			"raced",
+			"api-key",
+			b"hf-fake-raced",
+			None,
+		);
+		let record = pool.account(&raced.account_id).expect("account");
+		// Another launch over the same stores re-stores the row first.
+		let other = super::AuthControlHandle::offline(
+			Arc::clone(&catalog),
+			Arc::clone(&store),
+			AccountPool::with_store(Arc::new(
+				crate::account::AccountStateStore::open(&database).expect("state"),
+			))
+			.expect("other pool"),
+		)
+		.expect("other launch");
+		let first = other
+			.repair_static_secret_kinds()
+			.expect("other launch repairs");
+		assert_eq!(first.repaired.len(), 1, "{first:?}");
+
+		assert!(matches!(
+			control.restore_static_secret(&raced, &record, crate::auth::CredentialKind::Bearer),
+			Ok(super::RestoredBy::AnotherWriter)
+		));
+		let restored = store
+			.metadata(&raced.account_id)
+			.expect("metadata")
+			.expect("row");
+		assert_eq!(
+			(restored.kind.as_str(), restored.generation),
+			("bearer", raced.generation + 1),
+			"the first writer's row stays"
+		);
+
+		// Another writer stores the key again under the kind the routes refuse.
+		let rewritten = write_earlier_row(
+			&store,
+			&pool,
+			"huggingface",
+			"rewritten",
+			"api-key",
+			b"hf-fake-rewritten",
+			None,
+		);
+		let record = pool.account(&rewritten.account_id).expect("account");
+		store
+			.put(super::CredentialWrite {
+				account_id:          &rewritten.account_id,
+				principal_id:        &rewritten.principal_id,
+				kind:                "api-key",
+				secret:              &omp_core::SecretBox::new(Box::new(b"hf-fake-again".to_vec())),
+				expires_at_ms:       None,
+				origin:              super::CredentialOrigin::Persistent,
+				now_ms:              2,
+				expected_generation: Some(rewritten.generation),
+			})
+			.expect("rewritten elsewhere");
+		let failure =
+			control.restore_static_secret(&rewritten, &record, crate::auth::CredentialKind::Bearer);
+		assert!(
+			matches!(
+				failure,
+				Err(super::SecretKindRepairError::NotRestored(StoreError::GenerationConflict))
+			),
+			"{:?}",
+			failure.err()
+		);
+		let later = control.repair_static_secret_kinds().expect("later pass");
+		assert!(later.failed.is_empty(), "{later:?}");
+		assert_eq!(
+			later
+				.repaired
+				.iter()
+				.map(|repair| repair.account.as_str())
+				.collect::<Vec<_>>(),
+			[rewritten.account_id.as_str()]
+		);
+	}
+
+	/// A row re-stored after another process removed its account from the
+	/// account state is reported with the generation the pool did not take,
+	/// not as a row left for a later pass: its kind is right now, and a later
+	/// pass finds nothing to re-store.
+	#[test]
+	fn a_restored_row_the_pool_refuses_is_reported_as_restored() {
+		let directory = tempfile::tempdir().expect("data dir");
+		let database = directory.path().join("credentials.db");
+		let (_, store, pool, control) = kind_control(&database);
+		let removed = write_earlier_row(
+			&store,
+			&pool,
+			"huggingface",
+			"removed",
+			"api-key",
+			b"hf-fake-removed",
+			None,
+		);
+		crate::account::AccountStateStore::open(&database)
+			.expect("state")
+			.purge_account(&removed.account_id)
+			.expect("removed elsewhere");
+
+		let outcome = control.repair_static_secret_kinds().expect("repair");
+
+		assert!(outcome.repaired.is_empty() && outcome.restored_elsewhere.is_empty(), "{outcome:?}");
+		let [failure] = outcome.failed.as_slice() else {
+			panic!("the pool refuses one row: {:?}", outcome.failed);
+		};
+		assert_eq!(failure.repair.account, removed.account_id);
+		let generation = removed.generation + 1;
+		assert!(
+			matches!(
+				failure.error,
+				super::SecretKindRepairError::PoolRefused { generation: refused } if refused == generation
+			),
+			"{failure:?}"
+		);
+		assert_eq!(
+			failure.error.to_string(),
+			format!(
+				"the credential was re-stored as generation {generation}, but the account pool did \
+				 not take that generation"
+			)
+		);
+		let row = store
+			.metadata(&removed.account_id)
+			.expect("metadata")
+			.expect("row");
+		assert_eq!((row.kind.as_str(), row.generation), ("bearer", generation));
+		let again = control.repair_static_secret_kinds().expect("again");
+		assert!(
+			again.repaired.is_empty()
+				&& again.failed.is_empty()
+				&& again.restored_elsewhere.is_empty(),
+			"{again:?}"
 		);
 	}
 
