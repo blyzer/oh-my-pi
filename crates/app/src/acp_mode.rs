@@ -1151,7 +1151,7 @@ async fn switch_session<C>(
 	drop(previous);
 	// The kernel outlives the session: state derived from the previous journal
 	// (the network endpoints it approved for the session) must not serve `next`.
-	kernel.session_switched();
+	kernel.session_switched(&next);
 	if let Some(previous_forwarder) = forwarder.take() {
 		previous_forwarder.finish().await?;
 	}

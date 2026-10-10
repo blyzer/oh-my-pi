@@ -550,11 +550,11 @@ impl omp_agent::NativeHookHost for StartRecorder {
 struct Transitions(Mutex<Vec<&'static str>>);
 
 impl omp_agent::SessionObserver for Transitions {
-	fn rewound(&self) {
+	fn rewound(&self, _session: &Session) {
 		self.0.lock().push("rewound");
 	}
 
-	fn switched(&self) {
+	fn switched(&self, _next: &Session) {
 		self.0.lock().push("switched");
 	}
 }

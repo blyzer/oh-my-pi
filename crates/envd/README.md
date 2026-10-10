@@ -40,8 +40,13 @@ client and framing boundary; it does not contain an alternate host.
   `Host` tool is admitted as if no sandbox existed (`write` for that call, so
   its exec tier prompts). With no active sandbox an `ExecSandbox` tool resolves
   to the `exec` tier, and one typed `approval-posture` notice reports the
-  downgrade or the unconfined `yolo`. The host that registers a tool asserts
-  its confinement; worker, extension and MCP declarations are always `Host`.
+  downgrade or the unconfined `yolo`: the driver posts it at the session's
+  first admission of any tool, whether the kernel or the environment (an
+  attached project daemon included) admits the call, carrying the sandbox
+  state the environment reports in `ServerHello.sandbox_state` (its own probe,
+  which a long-lived daemon made when it started). The host that registers
+  a tool asserts its confinement; worker, extension and MCP declarations are
+  always `Host`.
   The sandbox's in-shell path check walks each path as the kernel does
   (links followed in place, `..` applied after them) and a redirection opens
   exactly the path it judged. Under the default `host` read mode reads follow
@@ -182,7 +187,10 @@ the policy digest (`daemon_policy`: every `sv_sandbox_*` setting,
 `sv_shell_command_prefix` and `sv_fetch_enabled`) keys its socket, under a key
 private to the project so the name never reveals the policy, and rides every
 `ServerHello`; a client never joins a daemon that reports another policy and
-runs an embedded host under its own instead.
+runs an embedded host under its own instead. Equal policies are equal settings,
+not equal probes, so every `ServerHello` also reports the sandbox state the
+daemon's own probe found (`sandbox_state`), which its admissions resolve
+against.
 Environment-locus tools — including opt-in `py_eval` — and filesystem,
 process, document, browser, debugger, and memory effects execute there.
 Session-locus tools, client-layer extension hosts, MCP, presenters, and agent
