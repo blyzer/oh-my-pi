@@ -581,6 +581,16 @@ impl EvalChild {
 			command.arg(EVAL_CHILD_ARG);
 			(command, None)
 		} else {
+			let version = command_for(interpreter)
+				.arg("--version")
+				.output()
+				.await
+				.map_err(ProcessError::Io)?;
+			if !external_python_version_supported(&version.stdout, &version.stderr) {
+				return Err(ProcessError::Protocol(Str::new_static(
+					"external Python 3.10 or newer is required by the eval runner",
+				)));
+			}
 			let runner = stage_external_runner()?;
 			let mut command = command_for(interpreter);
 			command.arg("-u").arg(&runner);
@@ -1845,6 +1855,20 @@ fn resolve_configured_python(command: &OsStr) -> Option<PathBuf> {
 	})
 }
 
+fn external_python_version_supported(stdout: &[u8], stderr: &[u8]) -> bool {
+	let text = std::str::from_utf8(stdout)
+		.ok()
+		.or_else(|| std::str::from_utf8(stderr).ok())
+		.unwrap_or_default();
+	let Some(version) = text.strip_prefix("Python ") else {
+		return false;
+	};
+	let mut parts = version.split('.');
+	let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+	let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+	matches!((major, minor), (Some(major), Some(minor)) if major > 3 || (major == 3 && minor >= 10))
+}
+
 /// Discovers an external Python executable for a runtime working directory.
 ///
 /// Explicit configuration wins, followed by active environments, project
@@ -2107,6 +2131,13 @@ fn session_lost(error: ProcessError) -> Fault {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn external_python_requires_version_3_10() {
+		assert!(!external_python_version_supported(b"Python 3.8.10\n", b""));
+		assert!(external_python_version_supported(b"Python 3.10.0\n", b""));
+		assert!(external_python_version_supported(b"Python 3.14.1\n", b""));
+		assert!(!external_python_version_supported(b"", b"Python 3.9.18\n"));
+	}
 
 	#[tokio::test]
 	async fn run_channel_eof_before_completion_is_a_typed_session_loss() {
