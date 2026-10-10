@@ -65,7 +65,7 @@ pub use key::{
 pub use lease::{
 	AppliedCredentials, AuthRejection, AuthRejectionKind, AuthScheme, CredentialApplyError,
 	CredentialError, CredentialFuture, CredentialKind, CredentialLease, CredentialNeed,
-	CredentialSource, LeaseMeta, credential_ready,
+	CredentialSource, LeaseMeta, LeaseOrigin, credential_ready,
 };
 pub use login::{
 	DEFAULT_LOGIN_CHANNEL_CAPACITY, LoginCancellation, LoginChannelError, LoginDriver,
@@ -77,8 +77,8 @@ pub use manager::{
 	CodexLiveCredential, CodexLiveCredentialError, CredentialAcquisitionLoginEngine,
 	CredentialAcquisitionLoginEngineError, CredentialAffinityError, CredentialAffinityResolver,
 	CredentialControlWrite, OAuthControlImport, OAuthLoginEngine, OAuthLoginEngineError,
-	RefreshingCredentialSource, SecretKindRepair, SecretLoginEngine, SecretLoginEngineError,
-	StoredOAuthRefreshEngine,
+	RefreshingCredentialSource, SecretKindRepair, SecretKindRepairError, SecretKindRepairFailure,
+	SecretKindRepairs, SecretLoginEngine, SecretLoginEngineError, StoredOAuthRefreshEngine,
 };
 pub use oauth::{
 	DevicePending, OAuthClock, OAuthCredentialManagerError, OAuthCustomDispatchError,

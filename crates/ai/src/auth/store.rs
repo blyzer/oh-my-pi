@@ -28,6 +28,7 @@ use super::{
 	oauth::OAuthError,
 };
 use crate::{
+	CredentialStorageLock,
 	account::{
 		CredentialFreshness, PersistentRefreshLease, RefreshLeaseAcquire, RefreshLeaseRequest,
 		RefreshLeaseStore, RefreshLeaseWait, RefreshReceipt, RefreshResult, RefreshStoreError,
@@ -1322,8 +1323,11 @@ impl StoredCredentialSource {
 		}
 		let stored = self.store.get(&account).map_err(|error| match error {
 			StoreError::NotFound => CredentialError::Unavailable,
-			StoreError::Key(KeyError::Unavailable | KeyError::OsCredential) => {
-				CredentialError::StorageLocked
+			StoreError::Key(KeyError::Unavailable) => {
+				CredentialError::StorageLocked { cause: CredentialStorageLock::NoKeySource }
+			},
+			StoreError::Key(KeyError::OsCredential) => {
+				CredentialError::StorageLocked { cause: CredentialStorageLock::KeychainRefused }
 			},
 			_ => CredentialError::SourceFailure,
 		})?;
@@ -1352,14 +1356,15 @@ impl StoredCredentialSource {
 			expires_at,
 		};
 		let material = SecretString::from(material);
-		match stored.metadata.kind.parse::<CredentialKind>() {
-			Ok(CredentialKind::ApiKey) => Ok(CredentialLease::api_key(meta, material)),
-			Ok(CredentialKind::Bearer) => Ok(CredentialLease::bearer(meta, material)),
-			Ok(CredentialKind::SessionToken) => Ok(CredentialLease::session_token(meta, material)),
+		let lease = match stored.metadata.kind.parse::<CredentialKind>() {
+			Ok(CredentialKind::ApiKey) => CredentialLease::api_key(meta, material),
+			Ok(CredentialKind::Bearer) => CredentialLease::bearer(meta, material),
+			Ok(CredentialKind::SessionToken) => CredentialLease::session_token(meta, material),
 			Ok(CredentialKind::Basic | CredentialKind::AwsSigV4) | Err(_) => {
-				Err(CredentialError::InvalidSource)
+				return Err(CredentialError::InvalidSource);
 			},
-		}
+		};
+		Ok(lease.with_origin(crate::auth::LeaseOrigin::StoredSecret))
 	}
 
 	fn reject_now(&self, lease: &CredentialLease) -> Result<(), CredentialError> {
@@ -2000,8 +2005,22 @@ mod tests {
 		assert!(!format!("{lease:?} {source:?}").contains("lease-secret-marker"));
 	}
 
+	/// A key source that answers every request as a refusing OS keychain.
+	struct RefusingKeychain;
+
+	impl KeySource for RefusingKeychain {
+		fn active_key(&self) -> Result<EncryptionKey, KeyError> {
+			Err(KeyError::OsCredential)
+		}
+
+		fn key(&self, _id: &KeyId) -> Result<EncryptionKey, KeyError> {
+			Err(KeyError::OsCredential)
+		}
+	}
+
 	/// A stored account this process holds no key for is a typed locked store,
-	/// not an anonymous source failure.
+	/// not an anonymous source failure, and says why: no key source, or an OS
+	/// keychain that refused the key.
 	#[tokio::test]
 	async fn stored_source_reports_a_locked_store() {
 		let directory = tempdir().expect("temporary directory");
@@ -2013,19 +2032,22 @@ mod tests {
 			b"locked-secret-marker",
 			100,
 		);
-		let locked = Arc::new(
-			CredentialStore::open(&path, Arc::new(UnavailableKeySource)).expect("open locked"),
-		);
-		let error = StoredCredentialSource::new(locked)
-			.lease(CredentialNeed {
-				spec:        omp_catalog::AuthSpecId::new("auth"),
-				account:     Some(account),
-				principal:   Some(PrincipalId::new("principal")),
-				valid_after: UNIX_EPOCH + Duration::from_millis(101),
-			})
-			.await
-			.expect_err("no key decrypts the stored account");
-		assert_eq!(error, CredentialError::StorageLocked);
+		for (key_source, cause) in [
+			(Arc::new(UnavailableKeySource) as Arc<dyn KeySource>, CredentialStorageLock::NoKeySource),
+			(Arc::new(RefusingKeychain), CredentialStorageLock::KeychainRefused),
+		] {
+			let locked = Arc::new(CredentialStore::open(&path, key_source).expect("open locked"));
+			let error = StoredCredentialSource::new(locked)
+				.lease(CredentialNeed {
+					spec:        omp_catalog::AuthSpecId::new("auth"),
+					account:     Some(account.clone()),
+					principal:   Some(PrincipalId::new("principal")),
+					valid_after: UNIX_EPOCH + Duration::from_millis(101),
+				})
+				.await
+				.expect_err("no key decrypts the stored account");
+			assert_eq!(error, CredentialError::StorageLocked { cause });
+		}
 	}
 
 	#[test]

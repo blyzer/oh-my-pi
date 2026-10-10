@@ -67,9 +67,13 @@ presentation adapter.
   through the control-plane write, which stores them under the kind their
   provider's routes lease (`bearer` for a bearer-token provider). Every
   production composition re-stores, before any request, static secrets stored
-  under a kind their provider's routes do not lease (re-encrypted, since the
-  kind is authenticated with the ciphertext; a row it cannot decrypt waits for
-  a later launch). Its `sessions` step and
+  under a kind their provider's routes do not lease, where a write would move
+  them: only between `api-key` and `bearer`, only for a provider whose
+  bundled routes send both alike, so removing a `models.toml` auth never
+  changes how a stored secret is sent. Rows are re-encrypted, since the kind
+  is authenticated with the ciphertext, each on its own: a row it cannot
+  decrypt is logged with its account and waits for a later launch, and
+  composition never fails for it. Its `sessions` step and
   the `/resume @v1` picker convert v1 transcripts into `.oms` journals. The
   imported journal is the only record of an import: its `<meta>` provenance
   (`import-format omp1`, `import-source-id`, `import-source`) is written before
