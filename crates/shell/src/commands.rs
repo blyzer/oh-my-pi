@@ -194,6 +194,16 @@ impl<SE: extensions::ShellExtensions> ops::DerefMut for ShellForCommand<'_, SE> 
 /// * `empty_env` - If true, the command will be executed with an empty
 ///   environment; if false, the command will inherit environment variables
 ///   marked as exported in the provided `Shell`.
+///
+/// # Errors
+///
+/// Fails with [`ErrorKind::PathDenied`] when the installed path policy
+/// refuses to read the program, before any launch and before the spawn
+/// wrapper observes it. Every launch composed here meets that check, whether
+/// a simple command or `exec` names the program, so the shell itself never
+/// launches a program the policy hides, whatever the sandbox backend would
+/// let it exec. A program that a utility builtin (`xargs`) or another
+/// program starts is outside this check.
 #[allow(unused_variables, reason = "argv0 is only used on unix platforms")]
 pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 	context: &ExecutionContext<'_, SE>,
@@ -202,23 +212,24 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 	args: &[S],
 	empty_env: bool,
 ) -> Result<process::Command, error::Error> {
+	// The program is resolved at most once, and only when the read check or the
+	// wrapper asks for it. A simple command arrives already found on `PATH`, so
+	// only a relative path (`./tool`) pays for a join, and only `exec` hands
+	// over a bare name, which the launch finds on `PATH` as the shell would.
+	let resolved = std::cell::OnceCell::new();
+	let program = || {
+		resolved
+			.get_or_init(|| launch_program(context.shell, command_name))
+			.as_deref()
+	};
+	if let Some(policy) = context.params.path_policy()
+		&& let Some(program) = program()
+	{
+		policy.check_read(program)?;
+	}
 	let wrapper = context.params.spawn_wrapper();
 	if let Some(wrapper) = wrapper {
-		// A simple command arrives already found on `PATH`, so only a relative
-		// path (`./tool`) pays for a join, and only `exec` hands over a bare name,
-		// which the launch finds on `PATH` as the shell would.
-		let program = Path::new(command_name);
-		let program = if program.is_absolute() {
-			Some(Cow::Borrowed(program))
-		} else if sys::fs::contains_path_separator(command_name) {
-			Some(Cow::Owned(context.shell.absolute_path(program)))
-		} else {
-			context
-				.shell
-				.find_first_executable_in_path(command_name)
-				.map(Cow::Owned)
-		};
-		wrapper.observe_launch(program.as_deref(), &mut args.iter().map(AsRef::as_ref));
+		wrapper.observe_launch(&|| program().map(Cow::Borrowed), &mut args.iter().map(AsRef::as_ref));
 	}
 	let mut cmd = if let Some((launcher, prefix_args)) = wrapper.and_then(|w| w.launcher()) {
 		let mut cmd = process::Command::new(launcher);
@@ -673,10 +684,6 @@ pub(crate) fn execute_external_command(
 	argv0_override: Option<&str>,
 	args: &[CommandArg],
 ) -> Result<ExecutionSpawnResult, error::Error> {
-	if let Some(policy) = context.params.path_policy() {
-		policy.check_read(&context.shell.absolute_path(Path::new(executable_path)))?;
-	}
-
 	// Filter out the args; we only want strings.
 	let cmd_args = args
 		.iter()
@@ -1149,24 +1156,59 @@ pub const fn child_session_action(
 
 	ChildSessionAction::DetachSession
 }
+
+/// The absolute file a launch of `command_name` starts: an absolute path as
+/// given, a name with a path separator made absolute against the shell's
+/// working directory, and a bare name (`exec curl`) as found on the shell's
+/// `PATH`, or `None` when no `PATH` directory holds it.
+fn launch_program<'n, SE: extensions::ShellExtensions>(
+	shell: &Shell<SE>,
+	command_name: &'n str,
+) -> Option<Cow<'n, Path>> {
+	#[cfg(test)]
+	sandbox_tests::LAUNCH_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+	let program = Path::new(command_name);
+	if program.is_absolute() {
+		return Some(Cow::Borrowed(program));
+	}
+	if sys::fs::contains_path_separator(command_name) {
+		return Some(Cow::Owned(shell.absolute_path(program)));
+	}
+	// An empty `PATH` entry names the working directory, so what the search
+	// finds can still be relative.
+	let found = shell.find_first_executable_in_path(command_name)?;
+	Some(Cow::Owned(if found.is_absolute() {
+		found
+	} else {
+		shell.absolute_path(found)
+	}))
+}
+
 #[cfg(test)]
 mod sandbox_tests {
 	use std::{
 		ffi::{OsStr, OsString},
+		fs,
 		sync::Arc,
 	};
 
 	use super::*;
-	use crate::SpawnWrapper;
+	use crate::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
 
 	/// Each observed launch: its program, if the shell found one, and its
 	/// arguments.
 	type Launches = parking_lot::Mutex<Vec<(Option<PathBuf>, Vec<OsString>)>>;
 
-	fn record(launches: &Launches, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+	/// Records one launch, resolving its program as a wrapper that keeps it
+	/// would.
+	fn record<'p>(
+		launches: &Launches,
+		program: &dyn Fn() -> Option<Cow<'p, Path>>,
+		args: &mut dyn Iterator<Item = &OsStr>,
+	) {
 		launches
 			.lock()
-			.push((program.map(Path::to_path_buf), args.map(OsStr::to_os_string).collect()));
+			.push((program().map(Cow::into_owned), args.map(OsStr::to_os_string).collect()));
 	}
 
 	fn launch(program: &str, args: &[&str]) -> (Option<PathBuf>, Vec<OsString>) {
@@ -1188,7 +1230,11 @@ mod sandbox_tests {
 			key != "FILTERED"
 		}
 
-		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+		fn observe_launch<'p>(
+			&self,
+			program: &dyn Fn() -> Option<Cow<'p, Path>>,
+			args: &mut dyn Iterator<Item = &OsStr>,
+		) {
 			record(&self.observed, program, args);
 		}
 	}
@@ -1246,7 +1292,11 @@ mod sandbox_tests {
 			true
 		}
 
-		fn observe_launch(&self, program: Option<&Path>, args: &mut dyn Iterator<Item = &OsStr>) {
+		fn observe_launch<'p>(
+			&self,
+			program: &dyn Fn() -> Option<Cow<'p, Path>>,
+			args: &mut dyn Iterator<Item = &OsStr>,
+		) {
 			record(&self.0, program, args);
 		}
 	}
@@ -1294,6 +1344,217 @@ mod sandbox_tests {
 			launch("/bin/echo", &["-n", "https://example.com", "e"]),
 		]);
 
+		Ok(())
+	}
+
+	/// Refuses every path under one root, as a `read_deny` root does.
+	struct HiddenRoot(PathBuf);
+
+	impl HiddenRoot {
+		fn judge(&self, path: &Path, access: PathAccess) -> Result<(), PathDenied> {
+			if path.starts_with(&self.0) {
+				Err(PathDenied { path: path.to_path_buf(), access })
+			} else {
+				Ok(())
+			}
+		}
+	}
+
+	impl PathPolicy for HiddenRoot {
+		fn check_read(&self, path: &Path) -> Result<(), PathDenied> {
+			self.judge(path, PathAccess::Read)
+		}
+
+		fn check_write(&self, path: &Path) -> Result<(), PathDenied> {
+			self.judge(path, PathAccess::Write)
+		}
+
+		fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, PathDenied> {
+			let access = request.access;
+			self.judge(path, access)?;
+			let mut options = fs::File::options();
+			match access {
+				PathAccess::Read => options.read(true),
+				PathAccess::CreateNew => options.write(true).create_new(true),
+				PathAccess::Truncate => options.write(true).create(true).truncate(true),
+				PathAccess::Append => options.append(true).create(true),
+				PathAccess::ReadWrite => options.read(true).write(true).create(true),
+				PathAccess::Write => options.write(true).create(true),
+			};
+			options
+				.open(path)
+				.map_err(|_| PathDenied { path: path.to_path_buf(), access })
+		}
+	}
+
+	/// A workspace holding `hidden/tool`, an executable that leaves `ran` in
+	/// the workspace when it runs.
+	#[cfg(unix)]
+	fn hidden_tool() -> std::io::Result<(tempfile::TempDir, PathBuf, PathBuf)> {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let workspace = tempfile::tempdir()?;
+		// Canonical, so the policy judges the spelling the shell resolves.
+		let root = workspace.path().canonicalize()?;
+		let hidden = root.join("hidden");
+		fs::create_dir(&hidden)?;
+		let tool = hidden.join("tool");
+		fs::write(&tool, std::format!("#!/bin/sh\n: > '{}'\n", root.join("ran").display()))?;
+		fs::set_permissions(&tool, fs::Permissions::from_mode(0o755))?;
+		Ok((workspace, root, tool))
+	}
+
+	/// The shell reads every program it composes through the path policy before
+	/// the launch, so one the policy hides fails with a path denial and the
+	/// wrapper never observes it, however it is named: an absolute path, a
+	/// relative one, or a bare name (`exec tool`) found on `PATH`. A program
+	/// the policy admits is observed as before.
+	#[cfg(unix)]
+	#[test]
+	fn compose_std_command_refuses_programs_the_path_policy_hides() -> crate::TestResult<()> {
+		let (_workspace, root, tool) = hidden_tool()?;
+		let hidden = root.join("hidden");
+		let mut shell: Shell = Shell::default();
+		shell.set_working_dir(&root)?;
+		shell.set_env_global(
+			"PATH",
+			crate::ShellVariable::new(std::format!("{}:/bin", hidden.display())),
+		)?;
+		let mut params = ExecutionParameters::default();
+		let wrapper = Arc::new(ArgsRecorder(Launches::default()));
+		params.set_spawn_wrapper(wrapper.clone());
+		params.set_path_policy(Arc::new(HiddenRoot(hidden)));
+		let context = ExecutionContext { shell: &mut shell, command_name: "tool".into(), params };
+
+		let absolute = tool.to_str().expect("UTF-8 workspace");
+		for name in [absolute, "hidden/tool", "tool"] {
+			let denied =
+				compose_std_command(&context, name, "tool", &["https://example.com"], true).err();
+			assert!(
+				denied.as_ref().is_some_and(|error| matches!(
+					error.kind(),
+					ErrorKind::PathDenied(denied) if denied.path == tool
+				)),
+				"{name} must end in a read denial of the program"
+			);
+		}
+		compose_std_command(&context, "echo", "echo", &["-n"], true)?;
+		assert_eq!(*wrapper.0.lock(), [launch("/bin/echo", &["-n"])]);
+		Ok(())
+	}
+
+	/// `exec` launches only a program the path policy lets the shell read, as a
+	/// simple command does, so a sandbox whose backend would still exec a
+	/// hidden native binary (Seatbelt's `read_deny` refuses only reads) never
+	/// gets the chance: in the protected root shell, in a subshell with an
+	/// `exec` flag and in one without, by path or by a bare name on `PATH`, the
+	/// hidden program never runs. The same `exec` of an admitted copy runs it.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn exec_refuses_programs_the_path_policy_hides() -> crate::TestResult<()> {
+		let (_workspace, root, tool) = hidden_tool()?;
+		let hidden = root.join("hidden");
+		let ran = root.join("ran");
+		let mut shell: Shell = Shell::builder()
+			.builtins(builtins::default_builtins())
+			.working_dir(root.clone())
+			.build()
+			.await?;
+		let mut params = shell.default_exec_params();
+		params.set_path_policy(Arc::new(HiddenRoot(hidden.clone())));
+		params.set_protect_host_process(true);
+		let source = SourceInfo::from("(exec path policy test)");
+		let tool = tool.display();
+		for script in [
+			std::format!("{tool} 2>/dev/null"),
+			std::format!("exec {tool} 2>/dev/null"),
+			std::format!("(exec -a fetch {tool}) 2>/dev/null"),
+			std::format!("(exec {tool}) 2>/dev/null"),
+			std::format!("PATH={}:/bin; exec tool 2>/dev/null", hidden.display()),
+		] {
+			let result = shell.run_string(&script, &source, &params).await?;
+			assert!(!result.is_success(), "{script}");
+			assert!(!ran.exists(), "{script} ran a program the policy hides");
+		}
+
+		let admitted = root.join("tool");
+		fs::copy(hidden.join("tool"), &admitted)?;
+		let script = std::format!("exec {}", admitted.display());
+		let result = shell.run_string(&script, &source, &params).await?;
+		assert!(result.is_success(), "{script}");
+		assert!(ran.exists(), "{script} runs an admitted program");
+		Ok(())
+	}
+
+	std::thread_local! {
+		/// How many programs [`launch_program`] has resolved on this thread.
+		pub(super) static LAUNCH_RESOLUTIONS: std::cell::Cell<usize> =
+			const { std::cell::Cell::new(0) };
+	}
+
+	/// Counts the launches it observes and never asks for their program.
+	#[derive(Default)]
+	struct LaunchCounter(parking_lot::Mutex<usize>);
+
+	impl SpawnWrapper for LaunchCounter {
+		fn launcher(&self) -> Option<(&OsStr, &[OsString])> {
+			None
+		}
+
+		fn env_allowed(&self, _key: &str) -> bool {
+			true
+		}
+
+		fn observe_launch<'p>(
+			&self,
+			_program: &dyn Fn() -> Option<Cow<'p, Path>>,
+			_args: &mut dyn Iterator<Item = &OsStr>,
+		) {
+			*self.0.lock() += 1;
+		}
+	}
+
+	/// Composing a launch resolves its program only when something asks for
+	/// it. With no path policy and a wrapper that never calls `program`, a
+	/// relative path is not joined and a bare `exec` name is not searched on
+	/// `PATH`. A path policy's read check resolves each launch once, and a
+	/// wrapper that then asks shares that resolution.
+	#[test]
+	fn compose_std_command_resolves_programs_only_when_asked() -> crate::TestResult<()> {
+		let launches = ["./bin/echo", "echo", "/bin/echo"];
+		let mut shell: Shell = Shell::default();
+		shell.set_working_dir("/")?;
+		shell.set_env_global("PATH", crate::ShellVariable::new("/nonexistent:/bin"))?;
+
+		let counter = Arc::new(LaunchCounter::default());
+		let mut params = ExecutionParameters::default();
+		params.set_spawn_wrapper(counter.clone());
+		let context = ExecutionContext { shell: &mut shell, command_name: "echo".into(), params };
+		LAUNCH_RESOLUTIONS.set(0);
+		for name in launches {
+			compose_std_command(&context, name, name, &["https://example.com"], true)?;
+		}
+		assert_eq!(*counter.0.lock(), launches.len(), "each launch is observed");
+		assert_eq!(LAUNCH_RESOLUTIONS.get(), 0, "nothing asked, nothing resolved");
+
+		let recorder = Arc::new(ArgsRecorder(Launches::default()));
+		let mut params = ExecutionParameters::default();
+		params.set_spawn_wrapper(recorder.clone());
+		params.set_path_policy(Arc::new(HiddenRoot(PathBuf::from("/nonexistent"))));
+		let context = ExecutionContext { shell: &mut shell, command_name: "echo".into(), params };
+		for name in launches {
+			compose_std_command(&context, name, name, &["-n"], true)?;
+		}
+		assert_eq!(*recorder.0.lock(), [
+			launch("/bin/echo", &["-n"]),
+			launch("/bin/echo", &["-n"]),
+			launch("/bin/echo", &["-n"]),
+		]);
+		assert_eq!(
+			LAUNCH_RESOLUTIONS.get(),
+			launches.len(),
+			"the read check and the wrapper share one resolution per launch"
+		);
 		Ok(())
 	}
 }
