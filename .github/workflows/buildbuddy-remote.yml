@@ -29,7 +29,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY || secrets.BUILDBUDDY_API_KEY }}
+      # Nostro uses the same repository-level BB_API_KEY secret.
+      BUILDBUDDY_API_KEY: ${{ secrets.BB_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
