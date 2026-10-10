@@ -1079,4 +1079,24 @@ mod tests {
 			.unwrap();
 		assert!(untouched.is_empty(), "optimistic hello does not assume styles");
 	}
+
+	#[test]
+	fn approval_form_and_native_actions_are_protocol_nodes() {
+		let form = approval_node("ticket-1", "Approve network access?");
+		assert_eq!(form.k, Kind::El);
+		assert_eq!(form.p.get("tag"), Some(&Value::String("form".into())));
+		assert_eq!(form.c.len(), 3);
+		assert_eq!(form.c[1].p.get("text"), Some(&Value::String("Approve".into())));
+
+		let mut surface = Surface::optimistic(false);
+		surface.incoming(Incoming::Event(Event::Action {
+			sf:     Str::new_static(SURFACE_ID),
+			id:     Str::new_static("approval"),
+			act:    Str::new_static("approve"),
+			value:  None,
+			mods:   Vec::new(),
+			values: None,
+		}));
+		assert!(matches!(surface.take_event(), Some(Event::Action { .. })));
+	}
 }
