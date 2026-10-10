@@ -4,11 +4,7 @@
 //! nodes from the existing chat projection and leaves all input ownership with
 //! the ordinary terminal host.
 
-use std::{
-	collections::VecDeque,
-	io,
-	time::{Duration, Instant},
-};
+use std::{collections::VecDeque, io, time::Duration};
 
 use bytes::BytesMut;
 use omp_core::{FastHashMap, Str};
@@ -35,7 +31,6 @@ const DOCK_ID: &str = "dock";
 const LAYER_ID: &str = "layer";
 const COMPOSER_ID: &str = "composer";
 const STATUS_ID: &str = "status";
-const STALL_ESCAPE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 struct BlockState {
@@ -53,7 +48,6 @@ pub struct Surface {
 	recorder:         Option<Recorder>,
 	next_seq:         u64,
 	acked:            u64,
-	last_sent:        Option<Instant>,
 	blocks:           FastHashMap<u64, BlockState>,
 	opened:           bool,
 	adopting:         bool,
@@ -117,7 +111,6 @@ impl Surface {
 			recorder: Recorder::from_env(),
 			next_seq: 1,
 			acked: 0,
-			last_sent: None,
 			blocks: FastHashMap::default(),
 			opened: false,
 			adopting: adopt,
@@ -271,7 +264,6 @@ impl Surface {
 	fn credit_available(&self) -> bool {
 		let unacknowledged = (self.next_seq.saturating_sub(1)).saturating_sub(self.acked);
 		unacknowledged < u64::from(self.hello.credit_limit())
-			|| self.last_sent.is_some_and(|t| t.elapsed() >= STALL_ESCAPE)
 	}
 
 	fn send_open(&mut self, writer: &mut impl io::Write) -> io::Result<()> {
@@ -291,7 +283,6 @@ impl Surface {
 	fn send_frame(&mut self, writer: &mut impl io::Write, ops: Vec<Op>) -> io::Result<()> {
 		let frame = Frame { sf: self.id.clone(), s: self.next_seq, ops };
 		self.next_seq = self.next_seq.saturating_add(1);
-		self.last_sent = Some(Instant::now());
 		self.send(writer, Verb::Frame, &frame)
 	}
 
