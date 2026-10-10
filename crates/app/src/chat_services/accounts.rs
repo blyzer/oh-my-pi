@@ -238,6 +238,10 @@ struct Driver {
 	input:  Receiver<Str>,
 	cancel: Receiver<()>,
 }
+enum PromptOutcome {
+	Input(AuthInput),
+	Complete(AccountSummary),
+}
 
 impl Driver {
 	async fn run(&self, request: LoginRequest, name: &str, database: &Path) -> ServiceResult<Str> {
@@ -275,16 +279,20 @@ impl Driver {
 						verification_url,
 					});
 				},
-				AuthEvent::Prompt(prompt) => {
-					let input = self.answer(&prompt, &session).await?;
-					if session
-						.responses
-						.send_async(AuthResponse { session: session.id.clone(), input })
-						.await
-						.is_err()
-					{
-						return Err(ServiceError::Failed(sf!("Login to {name} ended without a result")));
-					}
+				AuthEvent::Prompt(prompt) => match self.answer(&prompt, &session).await? {
+					PromptOutcome::Complete(summary) => return Ok(success(name, &summary, database)),
+					PromptOutcome::Input(input) => {
+						if session
+							.responses
+							.send_async(AuthResponse { session: session.id.clone(), input })
+							.await
+							.is_err()
+						{
+							return Err(ServiceError::Failed(sf!(
+								"Login to {name} ended without a result"
+							)));
+						}
+					},
 				},
 				AuthEvent::Waiting => {
 					self.show(LoginEvent::Info(sf!("Waiting for {name} authorization…")))
@@ -300,23 +308,53 @@ impl Driver {
 
 	/// Shows the prompt and waits for the dialog's answer, re-prompting on
 	/// input the method rejects (an empty code) until one is accepted.
-	async fn answer(&self, prompt: &AuthPrompt, session: &AuthSession) -> ServiceResult<AuthInput> {
+	async fn answer(
+		&self,
+		prompt: &AuthPrompt,
+		session: &AuthSession,
+	) -> ServiceResult<PromptOutcome> {
+		let mut current = prompt.clone();
 		loop {
-			self.show(LoginEvent::Prompt { label: prompt.message.clone() });
-			let value = tokio::select! {
-				value = self.input.recv_async() => value,
+			self.show(LoginEvent::Prompt { label: current.message.clone() });
+			tokio::select! {
+				value = self.input.recv_async() => {
+					let Ok(value) = value else {
+						session.cancel();
+						return Err(ServiceError::Failed(sf!(LOGIN_CANCELLED)));
+					};
+					match auth_input(&current, value.as_str().trim()) {
+						Ok(input) => return Ok(PromptOutcome::Input(input)),
+						Err(message) => self.show(LoginEvent::Info(Str::new_static(message))),
+					}
+				},
+				event = session.events.recv_async() => {
+					let Ok(event) = event else {
+						return Err(ServiceError::Failed(sf!(
+							"Login session ended while waiting for callback"
+						)));
+					};
+					match event.map_err(ServiceError::failed)? {
+						AuthEvent::OpenUrl { url, launch } => {
+							omp_core::open::open_path(launch.as_deref().unwrap_or(url.as_str()));
+							self.show(LoginEvent::OpenUrl { url, launched: true });
+						},
+						AuthEvent::ShowDeviceCode { code, verification_url } => {
+							self.show(LoginEvent::DeviceCode {
+								code: Str::new(code.expose_secret()),
+								verification_url,
+							});
+						},
+						AuthEvent::Waiting => {
+							self.show(LoginEvent::Info(sf!("Waiting for authorization…")));
+						},
+						AuthEvent::Prompt(next) => current = next,
+						AuthEvent::Complete(summary) => return Ok(PromptOutcome::Complete(summary)),
+					}
+				},
 				_ = self.cancel.recv_async() => {
 					session.cancel();
 					return Err(ServiceError::Failed(sf!(LOGIN_CANCELLED)));
 				},
-			};
-			let Ok(value) = value else {
-				session.cancel();
-				return Err(ServiceError::Failed(sf!(LOGIN_CANCELLED)));
-			};
-			match auth_input(prompt, value.as_str().trim()) {
-				Ok(input) => return Ok(input),
-				Err(message) => self.show(LoginEvent::Info(Str::new_static(message))),
 			}
 		}
 	}
