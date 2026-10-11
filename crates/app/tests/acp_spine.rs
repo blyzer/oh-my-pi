@@ -2,7 +2,9 @@
 
 use std::{
 	collections::VecDeque,
+	fs,
 	future::{Future, ready},
+	path::Path,
 	sync::Arc,
 	time::SystemTime,
 };
@@ -22,11 +24,15 @@ use omp_app::{
 };
 use omp_core::Str;
 use omp_driver::{
-	headless::kernel::{KernelOptions, SessionHome},
+	headless::kernel::{
+		EnvToolExecutor, KernelOptions, SessionHome, SettingsAdmission, bind_environment_approvals,
+		install_tool_authority,
+	},
 	sessions::SessionRegistry,
 };
-use omp_envd::docs::{
-	AcpDocumentBackend, EditorCapabilities, EditorIoError, WriteBack, WriteBackOutcome,
+use omp_envd::{
+	docs::{AcpDocumentBackend, EditorCapabilities, EditorIoError, WriteBack, WriteBackOutcome},
+	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
 };
 use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
@@ -1816,12 +1822,15 @@ async fn queued_write_backs_drain_before_a_switch_or_close_and_drop_at_eof() {
 	.await;
 }
 
-/// Joined proof over a real project environment and document authority: in an
-/// eligible ACP session, the Read tool returns the editor's unsaved buffer
-/// (asked for through `fs/read_text_file` by the environment), the Write tool
-/// commits through the authority to disk, and only then is the committed
-/// content written back with `fs/write_text_file` (ADR 0037 §4.3): after the
-/// commit, before the write tool settles.
+/// Joined proof over a real project environment and document authority, the
+/// session's tool authority installed as production composes it
+/// (`install_tool_authority`): in an eligible ACP session, the Read tool
+/// returns the editor's unsaved buffer (asked for through `fs/read_text_file`
+/// by the environment), the Write tool commits through the authority to disk,
+/// and only then is the committed content written back with
+/// `fs/write_text_file` (ADR 0037 §4.3): after the commit, before the write
+/// tool settles. Under the shipped default (`yolo`, defaulted) with no
+/// sandbox, the session is told once that `write` is in force.
 #[tokio::test]
 async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit() {
 	let directory = tempfile::tempdir().expect("temporary directory");
@@ -1833,7 +1842,12 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 	}
 	let root = std::fs::canonicalize(&root).expect("canonical workspace");
 	std::fs::write(root.join("notes.txt"), "on disk\n").expect("fixture");
-	let con = Arc::new(omp_con::Ctx::new());
+	let con = omp_con::Ctx::new();
+	// A hermetic posture: no OS sandbox on any host.
+	SV_SANDBOX_MODE
+		.set(&con, ExecSandboxMode::Off)
+		.expect("sandbox off");
+	let con = Arc::new(con);
 	let environment = omp_envd::ProjectEnvironment::attach(&root, &state, omp_envd::AttachOptions {
 		py_eval:            false,
 		approval_mode:      None,
@@ -1847,6 +1861,12 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 	.await
 	.expect("environment");
 	let spill = BlobStore::open(directory.path().join("blobs")).expect("blob store");
+	let session = Session::create_with_blob_store(
+		sessions_dir.join("startup.oms"),
+		ComponentRegistry::standard(),
+		spill.clone(),
+	)
+	.expect("startup session");
 	let kernel = Kernel::new(
 		ScriptedInference {
 			scripts: Mutex::new(
@@ -1860,22 +1880,16 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 			),
 		},
 		environment.registry(),
-		DispatchPolicy::new(spill.clone()),
+		DispatchPolicy::new(spill),
 		StaticPrompt(Str::new_static("system")),
 	);
-	let approvals = kernel.approval_route();
-	environment.bind_approval_authority(
-		Some(Arc::new(omp_agent::ApprovalBook::new())),
-		Some(approvals.clone()),
+	let approvals = bind_environment_approvals(&kernel, &environment);
+	let kernel = install_tool_authority(
+		kernel,
+		&session,
+		EnvToolExecutor::new(environment.client().clone(), approvals),
+		SettingsAdmission::new(&con, None, &root).with_fetch_hosts(environment.fetch_hosts()),
 	);
-	let kernel = kernel
-		.with_external_executor(Arc::new(omp_driver::headless::kernel::EnvToolExecutor::new(
-			environment.client().clone(),
-			approvals,
-		)))
-		.with_tool_admission(Arc::new(omp_driver::headless::kernel::SettingsAdmission::new(
-			&con, None, &root,
-		)));
 	let home = SessionHome {
 		sessions_dir:  sessions_dir.clone(),
 		project_root:  root.clone(),
@@ -1887,12 +1901,6 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 		up:            kernel.mailbox(),
 		rules:         None,
 	};
-	let session = Session::create_with_blob_store(
-		sessions_dir.join("startup.oms"),
-		ComponentRegistry::standard(),
-		spill,
-	)
-	.expect("startup session");
 	let connection = AcpConnection::new(AcpSettings::default());
 	connection.bind_documents(Arc::new(environment.editor_documents()));
 	let disk = root.join("notes.txt");
@@ -1997,4 +2005,46 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 	})
 	.await;
 	drop(environment);
+	assert_eq!(
+		posture_notices(&sessions_dir),
+		[serde_json::json!({
+			"configured": "yolo",
+			"provenance": "default",
+			"effective": "write",
+			"sandbox": { "state": "off" },
+		})],
+		"one posture notice, in the session whose tools ran"
+	);
+}
+
+/// The payload of every typed `approval-posture` notice journaled under the
+/// turns of every session in `sessions_dir`.
+fn posture_notices(sessions_dir: &Path) -> Vec<Value> {
+	let mut notices = Vec::new();
+	for entry in fs::read_dir(sessions_dir).expect("sessions directory") {
+		let path = entry.expect("session entry").path();
+		if path.extension().is_none_or(|extension| extension != "oms") {
+			continue;
+		}
+		let session = Session::open(&path, ComponentRegistry::standard()).expect("journal reopens");
+		let dom = session.dom();
+		notices.extend(
+			dom.select("body turn notice")
+				.expect("selector")
+				.filter_map(|handle| dom.get(handle))
+				.filter(|node| {
+					node
+						.prop(&omp_dom::PropKey::Custom(Str::new_static("name")))
+						.and_then(omp_dom::Value::as_str)
+						== Some("approval-posture")
+				})
+				.map(|node| match node.prop(&omp_dom::PropId::Data.into()) {
+					Some(omp_dom::Value::Json(data)) => {
+						serde_json::from_str(data.get()).expect("payload")
+					},
+					_ => panic!("the notice carries its typed payload"),
+				}),
+		);
+	}
+	notices
 }

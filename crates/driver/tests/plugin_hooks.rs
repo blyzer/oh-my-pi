@@ -5,6 +5,8 @@
 //! annotate its result, add prompt context, time out, or never run — never
 //! without the operator's approval of the hook's command and trigger.
 
+mod support;
+
 use std::{
 	future::ready,
 	path::{Path, PathBuf},
@@ -25,15 +27,11 @@ use omp_ai::{
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
 use omp_driver::{
-	headless::kernel::{EnvToolExecutor, SettingsAdmission},
 	plugin_commands::{approve_launch, blocked_launches, plugin_launches},
 	plugin_hooks::{PluginHookHost, PluginHookSession},
 	subagent::AgentName,
 };
-use omp_envd::{
-	AttachOptions, ProjectEnvironment, RegistryBridges, mcp::McpConfigPaths,
-	tool_settings::ApprovalMode,
-};
+use omp_envd::{AttachOptions, ProjectEnvironment, RegistryBridges, mcp::McpConfigPaths};
 use omp_ext::{
 	claude_plugin::{
 		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry, REGISTRY_FILE,
@@ -46,8 +44,8 @@ use parking_lot::Mutex;
 
 /// The control plane of a hook proof. `bash` is the hooks' subject, so it must
 /// run the same on every host: with the sandbox off and `bash` allowed per
-/// tool, neither the host's OS sandbox support nor the approval mode decides
-/// whether the hooks fire.
+/// tool, neither the host's OS sandbox support nor the approval mode (the
+/// shipped default) decides whether the hooks fire.
 fn hermetic_con() -> Arc<omp_con::Ctx> {
 	let con = omp_con::Ctx::new();
 	omp_envd::exec_settings::SV_SANDBOX_MODE
@@ -217,7 +215,8 @@ impl Fixture {
 		harness.turn().await
 	}
 
-	/// A kernel and session in the workspace, the plugin host attached.
+	/// A kernel and session in the workspace, the session's tool authority
+	/// installed as `compose_kernel` installs it and the plugin host attached.
 	async fn harness(&self, command: &str, kind: Kind) -> Harness {
 		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
@@ -226,7 +225,7 @@ impl Fixture {
 		let con = hermetic_con();
 		let environment = ProjectEnvironment::attach(&self.root, &state, AttachOptions {
 			py_eval:            false,
-			approval_mode:      Some(ApprovalMode::Yolo),
+			approval_mode:      None,
 			trusted_extensions: Vec::new(),
 			contributed_values: Vec::new(),
 			con:                Arc::clone(&con),
@@ -238,6 +237,10 @@ impl Fixture {
 		.expect("environment");
 		let spill =
 			omp_journal::blob::BlobStore::open(self.scratch.path().join("artifacts")).expect("spill");
+		let journal = self.scratch.path().join("hooks.oms");
+		let session =
+			Session::create_with_blob_store(&journal, ComponentRegistry::standard(), spill.clone())
+				.expect("session");
 		let requests = Arc::new(Mutex::new(Vec::new()));
 		let gate = environment.admission_gate();
 		let kernel = Kernel::new(
@@ -248,27 +251,17 @@ impl Fixture {
 				fail:     kind.fail,
 			},
 			environment.registry(),
-			DispatchPolicy::new(spill.clone()),
+			DispatchPolicy::new(spill),
 			StaticPrompt(Str::new_static("test")),
 		)
 		.with_hook_gate(Arc::clone(&gate));
-		let approvals = kernel.approval_route();
-		let kernel = kernel
-			.with_external_executor(Arc::new(EnvToolExecutor::new(
-				environment.client().clone(),
-				approvals,
-			)))
-			.with_tool_admission(Arc::new(SettingsAdmission::new(
-				&con,
-				Some(ApprovalMode::Yolo),
-				&self.root,
-			)));
-		let journal = self.scratch.path().join("hooks.oms");
+		let kernel =
+			support::install_authority(kernel, &environment, &session, &con, None, &self.root);
 		let host = PluginHookHost::new(
 			environment.client().clone(),
 			PluginHookSession {
 				session_id:   Str::new_static("hooks"),
-				transcript:   journal.clone(),
+				transcript:   journal,
 				project_root: std::fs::canonicalize(&self.root).expect("root"),
 				data_dir:     self.data.clone(),
 				subagent:     kind.subagent.is_some(),
@@ -284,8 +277,6 @@ impl Fixture {
 			host.bind_mailbox(kernel.mailbox());
 			host.attach(&gate);
 		}
-		let session = Session::create_with_blob_store(&journal, ComponentRegistry::standard(), spill)
-			.expect("session");
 		Harness { environment, kernel, session, requests, installed }
 	}
 }
@@ -354,12 +345,13 @@ impl Harness {
 
 	fn finish(self, elapsed: Duration) -> Outcome {
 		let journal = std::fs::read_to_string(self.session.journal_path()).expect("journal");
+		let postures = support::posture_notices(&self.session);
 		let Self { environment, kernel, session, requests, installed } = self;
 		drop(kernel);
 		drop(session);
 		drop(environment);
 		let requests = requests.lock().clone();
-		Outcome { journal, requests, elapsed, installed }
+		Outcome { journal, requests, elapsed, installed, postures }
 	}
 }
 
@@ -386,6 +378,8 @@ struct Outcome {
 	requests:  Vec<String>,
 	elapsed:   Duration,
 	installed: bool,
+	/// Payload of every approval-posture notice the session journaled.
+	postures:  Vec<serde_json::Value>,
 }
 
 fn read(path: &Path) -> String {
@@ -457,6 +451,11 @@ async fn post_tool_use_receives_the_tool_response_and_annotates_the_result() {
 			.is_some_and(|request| request.contains("post-context-7")),
 		"the context annotates the result the model reads: {:?}",
 		outcome.requests
+	);
+	assert_eq!(
+		outcome.postures,
+		[support::downgraded_default_yolo()],
+		"the shipped default without a sandbox is reported once"
 	);
 }
 

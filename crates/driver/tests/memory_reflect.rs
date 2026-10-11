@@ -26,12 +26,10 @@ use omp_ai::{
 };
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
-use omp_driver::headless::{
-	kernel::{EnvToolExecutor, SettingsAdmission, bind_environment_approvals},
-	reflection::{REFLECTION_SELECTOR, bind_reflection},
-};
+use omp_driver::headless::reflection::{REFLECTION_SELECTOR, bind_reflection};
 use omp_envd::{
 	AttachOptions, ProjectEnvironment, RegistryBridges,
+	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
 	host_settings::{AI_MEMORY_BACKEND, MemoryBackendSetting},
 	tool_settings::ApprovalMode,
 };
@@ -155,11 +153,14 @@ struct Turn {
 	result:    String,
 	/// Selector of every synthesis request reflection made.
 	selectors: Vec<Option<Str>>,
+	/// Payload of every approval-posture notice the session journaled.
+	postures:  Vec<serde_json::Value>,
 }
 
 /// Runs one turn calling `reflect` under `mode` (`None`: the shipped default
 /// posture) against a Mnemopi bank holding one fact; `approve` answers every
-/// prompt the kernel journals.
+/// prompt the kernel journals. No OS sandbox runs on any host, so the
+/// session's approval posture is the same everywhere.
 async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 	let scratch = tempfile::tempdir().expect("scratch");
 	let root = scratch.path().join("workspace");
@@ -171,6 +172,9 @@ async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 	AI_MEMORY_BACKEND
 		.set(&con, MemoryBackendSetting::Mnemopi)
 		.expect("memory backend");
+	SV_SANDBOX_MODE
+		.set(&con, ExecSandboxMode::Off)
+		.expect("sandbox off");
 	// No project daemon can start from this test binary, so the application's
 	// own attach falls back to the embedded environment, the composition whose
 	// `reflect` the binding reaches.
@@ -201,7 +205,8 @@ async fn reflect_turn(mode: Option<ApprovalMode>, approve: bool) -> Turn {
 		.await
 }
 
-/// Runs one turn of `script` on `environment` under `mode`; `approve`
+/// Runs one turn of `script` on `environment` under `mode`, the session's
+/// tool authority installed as `compose_kernel` installs it; `approve`
 /// answers every prompt the kernel journals.
 #[expect(clippy::too_many_arguments, reason = "one scripted turn's whole fixture")]
 async fn drive(
@@ -215,19 +220,19 @@ async fn drive(
 	synthesis: &Synthesis,
 ) -> Turn {
 	let spill = BlobStore::open(scratch.join("artifacts")).expect("spill");
+	let mut session = Session::create_with_blob_store(
+		scratch.join("reflect.oms"),
+		ComponentRegistry::standard(),
+		spill.clone(),
+	)
+	.expect("session");
 	let kernel = Kernel::new(
 		script,
 		environment.registry(),
-		DispatchPolicy::new(spill.clone()),
+		DispatchPolicy::new(spill),
 		StaticPrompt(Str::new_static("test")),
 	);
-	let approvals = bind_environment_approvals(&kernel, environment);
-	let mut kernel = kernel
-		.with_external_executor(Arc::new(EnvToolExecutor::new(
-			environment.client().clone(),
-			approvals,
-		)))
-		.with_tool_admission(Arc::new(SettingsAdmission::new(con, mode, root)));
+	let mut kernel = support::install_authority(kernel, environment, &session, con, mode, root);
 	let events = kernel.subscribe();
 	let mailbox = kernel.mailbox();
 	let host = tokio::spawn(async move {
@@ -247,12 +252,6 @@ async fn drive(
 			}
 		}
 	});
-	let mut session = Session::create_with_blob_store(
-		scratch.join("reflect.oms"),
-		ComponentRegistry::standard(),
-		spill,
-	)
-	.expect("session");
 	timeout(
 		Duration::from_secs(60),
 		kernel.run_turn(
@@ -274,9 +273,10 @@ async fn drive(
 		.collect::<Vec<_>>()
 		.join("\n");
 	let tickets = prompts(&session);
+	let postures = support::posture_notices(&session);
 	drop(kernel);
 	let selectors = synthesis.selectors.lock().clone();
-	Turn { tickets, result, selectors }
+	Turn { tickets, result, selectors, postures }
 }
 
 fn prompts(session: &Session) -> Vec<omp_agent::ApprovalTicket> {
@@ -295,10 +295,11 @@ fn prompts(session: &Session) -> Vec<omp_agent::ApprovalTicket> {
 }
 
 /// The shipped default posture prompts for `reflect` as `exec` tier; once
-/// approved, it synthesizes with exactly one request on the memory role.
+/// approved, it synthesizes with exactly one request on the memory role. With
+/// no sandbox the session is told once that `write` is in force.
 #[tokio::test]
 async fn default_posture_prompts_for_reflect_and_an_approved_call_is_one_request() {
-	let Turn { tickets, result, selectors } = reflect_turn(None, true).await;
+	let Turn { tickets, result, selectors, postures } = reflect_turn(None, true).await;
 
 	assert_eq!(tickets.len(), 1, "one admission prompt: {tickets:?}");
 	let reason = &tickets[0].reasons[0];
@@ -311,12 +312,13 @@ async fn default_posture_prompts_for_reflect_and_an_approved_call_is_one_request
 	assert_eq!(tickets[0].state, TicketState::Decided);
 	assert_eq!(selectors, [Some(Str::new_static(REFLECTION_SELECTOR))]);
 	assert!(result.contains("Deploys go to fly.io."), "the synthesized answer settles: {result}");
+	assert_eq!(postures, [support::downgraded_default_yolo()]);
 }
 
 /// A refused `reflect` never reaches inference.
 #[tokio::test]
 async fn a_refused_reflect_makes_no_inference_request() {
-	let Turn { tickets, result, selectors } =
+	let Turn { tickets, result, selectors, .. } =
 		reflect_turn(Some(ApprovalMode::AlwaysAsk), false).await;
 
 	assert_eq!(tickets.len(), 1, "one admission prompt: {tickets:?}");
@@ -327,7 +329,7 @@ async fn a_refused_reflect_makes_no_inference_request() {
 /// An explicit `yolo` runs `reflect` unprompted, still with one request.
 #[tokio::test]
 async fn explicit_yolo_runs_reflect_unprompted_with_one_request() {
-	let Turn { tickets, result, selectors } = reflect_turn(Some(ApprovalMode::Yolo), true).await;
+	let Turn { tickets, result, selectors, .. } = reflect_turn(Some(ApprovalMode::Yolo), true).await;
 
 	assert!(tickets.is_empty(), "explicit yolo prompts for nothing: {tickets:?}");
 	assert_eq!(selectors, [Some(Str::new_static(REFLECTION_SELECTOR))]);
@@ -382,7 +384,7 @@ async fn an_attached_session_synthesizes_a_daemon_reflect_with_one_request() {
 		],
 		turns: 0,
 	};
-	let Turn { tickets, result, selectors } = drive(
+	let Turn { tickets, result, selectors, .. } = drive(
 		&environment,
 		&con,
 		&root,

@@ -37,9 +37,7 @@ use omp_ai::{
 };
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
-use omp_driver::headless::kernel::{
-	EnvToolExecutor, SettingsAdmission, bind_environment_approvals, install_tool_authority,
-};
+use omp_driver::headless::kernel::{EnvToolExecutor, SettingsAdmission};
 use omp_envd::{
 	AttachOptions, ProjectEnvironment, RegistryBridges,
 	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
@@ -339,15 +337,10 @@ impl Project {
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
 		);
-		let approvals = bind_environment_approvals(&kernel, environment);
 		// Installed as `compose_kernel` installs it: the kernel's admission and
 		// the environment executor share the session's posture report.
-		let mut kernel = install_tool_authority(
-			kernel,
-			session,
-			EnvToolExecutor::new(environment.client().clone(), approvals),
-			SettingsAdmission::new(&self.con, mode, &self.root),
-		);
+		let mut kernel =
+			support::install_authority(kernel, environment, session, &self.con, mode, &self.root);
 		let events = kernel.subscribe();
 		let mailbox = kernel.mailbox();
 		let interrupt = Arc::clone(interrupt);
@@ -1335,12 +1328,13 @@ mod session_network_grants {
 			DispatchPolicy::new(spill.clone()),
 			StaticPrompt(Str::new_static("test")),
 		);
-		let approvals = bind_environment_approvals(&kernel, &environment);
-		let mut kernel = install_tool_authority(
+		let mut kernel = support::install_authority(
 			kernel,
+			&environment,
 			&session,
-			EnvToolExecutor::new(environment.client().clone(), approvals),
-			SettingsAdmission::new(&project.con, None, &project.root),
+			&project.con,
+			None,
+			&project.root,
 		);
 		let events = kernel.subscribe();
 		let mailbox = kernel.mailbox();
