@@ -714,7 +714,17 @@ impl PtyChild {
 		});
 
 		let home = project.parent().expect("project has parent").join("home");
-		fs::create_dir_all(&home).expect("create isolated home");
+		let config = home.join(omp_core::dirs::CONFIG_DIR_NAME);
+		fs::create_dir_all(&config).expect("create isolated home");
+		// The startup update check makes a network request and, when a newer
+		// release exists, posts an "Update Available" notice into the
+		// transcript at a time no case controls. `config.cfg` is the only place
+		// that turns it off before it is scheduled. Written only when absent,
+		// so a case that seeded its own config keeps it.
+		let user_config = config.join("config.cfg");
+		if !user_config.exists() {
+			fs::write(&user_config, "cl_startup_check_update 0\n").expect("hermetic config");
+		}
 		// Every omp root is pinned under the isolated home, and `OMP_LOG` is
 		// cleared, so nothing in the developer's or runner's environment (an
 		// `OMP_CONFIG_DIR` turning the sandbox off, an `XDG_STATE_HOME` sharing

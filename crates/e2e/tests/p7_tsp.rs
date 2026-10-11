@@ -52,6 +52,12 @@ const OPTIMISTIC_WINDOW: Duration = Duration::from_secs(1);
 /// A reaction that happens this fast is the host handling an answer, not a
 /// one-second timer expiring.
 const PROMPT: Duration = Duration::from_millis(400);
+/// User `config.cfg` every sandbox starts with. The startup update check
+/// makes a network request and, when a newer release exists, posts an
+/// "Update Available" notice into the transcript at a time the proof does
+/// not control; that extra block changed frame counts and could delay quit.
+/// It must be `config.cfg`, which loads before the check is scheduled.
+const HERMETIC_CONFIG: &str = "cl_startup_check_update 0\n";
 
 /// One decoded program → terminal TSP message.
 #[derive(Clone, Debug)]
@@ -197,7 +203,8 @@ struct Sandbox {
 }
 
 impl Sandbox {
-	/// Creates an isolated project and omp root tree.
+	/// Creates an isolated project and omp root tree whose user config turns
+	/// off the startup update check ([`HERMETIC_CONFIG`]).
 	fn new() -> Self {
 		let scratch = tempfile::tempdir().expect("scratch root");
 		let project = scratch.path().join("project");
@@ -205,7 +212,16 @@ impl Sandbox {
 		let project = fs::canonicalize(&project).expect("canonical project root");
 		let home = scratch.path().join("home");
 		fs::create_dir(&home).expect("isolated home");
-		Self { _scratch: scratch, project, home }
+		let sandbox = Self { _scratch: scratch, project, home };
+		let config = sandbox.config_dir();
+		fs::create_dir_all(&config).expect("config directory");
+		fs::write(config.join("config.cfg"), HERMETIC_CONFIG).expect("hermetic config");
+		sandbox
+	}
+
+	/// `OMP_CONFIG_DIR` for the spawned chat.
+	fn config_dir(&self) -> PathBuf {
+		self.home.join(omp_core::dirs::CONFIG_DIR_NAME)
 	}
 }
 
@@ -228,7 +244,7 @@ impl FakeTern {
 			.env("TERM", "xterm-256color")
 			.env("NO_COLOR", "1")
 			.env("HOME", &sandbox.home)
-			.env("OMP_CONFIG_DIR", sandbox.home.join(omp_core::dirs::CONFIG_DIR_NAME))
+			.env("OMP_CONFIG_DIR", sandbox.config_dir())
 			.env("OMP_DATA_DIR", sandbox.home.join("data"))
 			.env("OMP_STATE_DIR", sandbox.home.join("state"))
 			.env("OMP_CACHE_DIR", sandbox.home.join("cache"))
@@ -963,10 +979,11 @@ fn tsp_recording_captures_both_directions() {
 			}
 		);
 		let sandbox = Sandbox::new();
-		let config = sandbox.home.join(omp_core::dirs::CONFIG_DIR_NAME);
-		fs::create_dir_all(&config).expect("config directory");
-		fs::write(config.join("config.cfg"), format!("tsp_stream_pacing {pacing}\n"))
-			.expect("write pacing convar");
+		fs::write(
+			sandbox.config_dir().join("config.cfg"),
+			format!("{HERMETIC_CONFIG}tsp_stream_pacing {pacing}\n"),
+		)
+		.expect("write pacing convar");
 		let recording = sandbox.home.join(format!("{pacing}-{negotiated}.jsonl"));
 		let script = script.with_env("OMP_TSP_RECORD", &recording.display().to_string());
 		let mut tern = FakeTern::spawn(&sandbox, &script);
@@ -1039,6 +1056,9 @@ fn tsp_normal_frames_are_single_messages() {
 		.any(|window| window == b";c=".as_slice());
 	assert!(!chunked, "a normal frame was chunked:\n{}", tern.report());
 	tern.quit();
+	// The config loads leniently, so prove the hermetic line took effect: a
+	// startup update check would have created its cache directory.
+	assert!(!sandbox.home.join("cache/updates").exists(), "a P7 chat ran the startup update check");
 }
 
 /// A live reader proves the chat consumed every APC string: none of them may
