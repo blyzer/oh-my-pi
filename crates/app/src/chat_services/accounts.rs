@@ -22,6 +22,7 @@ use omp_chat::overlays::services::{
 use omp_core::{ExposeSecret as _, SecretString, Str, sf};
 
 use super::{ServiceState, StackHandles};
+use crate::auth_cli::pasted_callback;
 
 const GATEWAY: &str = "provider accounts (remote gateway)";
 const LOGIN_CANCELLED: &str = "Login cancelled";
@@ -372,9 +373,9 @@ fn success(name: &str, summary: &AccountSummary, database: &Path) -> Str {
 }
 
 /// Typed answer for one prompt (the `omp auth login` mapping): a pasted
-/// `scheme://` value answers an authorization-code prompt as the callback
-/// URL, an empty required secret is rejected, and a confirmation accepts
-/// `y`/`yes`/empty.
+/// `scheme://` value answers an authorization-code or confirmation prompt as
+/// the callback URL, an empty required secret is rejected, and a confirmation
+/// otherwise accepts `y`/`yes`/empty.
 fn auth_input(prompt: &AuthPrompt, value: &str) -> Result<AuthInput, &'static str> {
 	if value.is_empty()
 		&& matches!(
@@ -384,19 +385,16 @@ fn auth_input(prompt: &AuthPrompt, value: &str) -> Result<AuthInput, &'static st
 		return Err("authentication input must not be empty");
 	}
 	Ok(match prompt.input {
-		AuthPromptKind::AuthorizationCode => {
-			if value.contains("://") {
-				AuthInput::CallbackUrl(SecretString::from(value))
-			} else {
-				AuthInput::AuthorizationCode(SecretString::from(value))
-			}
-		},
+		AuthPromptKind::AuthorizationCode => pasted_callback(value)
+			.unwrap_or_else(|| AuthInput::AuthorizationCode(SecretString::from(value))),
 		AuthPromptKind::ApiKey => AuthInput::ApiKey(SecretString::from(value)),
 		AuthPromptKind::SessionToken => AuthInput::SessionToken(SecretString::from(value)),
 		AuthPromptKind::PlainText => AuthInput::PlainText(Str::new(value)),
 		AuthPromptKind::OptionalSecret => AuthInput::OptionalSecret(SecretString::from(value)),
 		AuthPromptKind::Confirmation => {
-			if matches!(value.to_ascii_lowercase().as_str(), "" | "y" | "yes") {
+			if let Some(callback) = pasted_callback(value) {
+				callback
+			} else if matches!(value.to_ascii_lowercase().as_str(), "" | "y" | "yes") {
 				AuthInput::DeviceConfirmed
 			} else {
 				AuthInput::Cancel
@@ -431,6 +429,17 @@ mod tests {
 		assert!(matches!(
 			auth_input(&prompt(AuthPromptKind::Confirmation), "n"),
 			Ok(AuthInput::Cancel)
+		));
+		let Ok(AuthInput::CallbackUrl(callback)) = auth_input(
+			&prompt(AuthPromptKind::Confirmation),
+			"http://127.0.0.1:9/callback?code=c&state=s",
+		) else {
+			panic!("a pasted callback URL answers the browser prompt");
+		};
+		assert_eq!(callback.expose_secret(), "http://127.0.0.1:9/callback?code=c&state=s");
+		assert!(matches!(
+			auth_input(&prompt(AuthPromptKind::Confirmation), "y"),
+			Ok(AuthInput::DeviceConfirmed)
 		));
 		assert!(matches!(
 			auth_input(&prompt(AuthPromptKind::OptionalSecret), ""),

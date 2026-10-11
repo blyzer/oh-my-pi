@@ -579,13 +579,8 @@ fn prompt_answer(prompt: &AuthPrompt, value: &str) -> Result<AuthInput, &'static
 		{
 			return Err(EMPTY_INPUT);
 		},
-		InferenceAuthPromptKind::AuthorizationCode => {
-			if value.contains("://") {
-				AuthInput::CallbackUrl(SecretString::from(value))
-			} else {
-				AuthInput::AuthorizationCode(SecretString::from(value))
-			}
-		},
+		InferenceAuthPromptKind::AuthorizationCode => pasted_callback(value)
+			.unwrap_or_else(|| AuthInput::AuthorizationCode(SecretString::from(value))),
 		InferenceAuthPromptKind::ApiKey => AuthInput::ApiKey(SecretString::from(value)),
 		InferenceAuthPromptKind::SessionToken => AuthInput::SessionToken(SecretString::from(value)),
 		InferenceAuthPromptKind::PlainText => AuthInput::PlainText(Str::new(value)),
@@ -593,8 +588,8 @@ fn prompt_answer(prompt: &AuthPrompt, value: &str) -> Result<AuthInput, &'static
 			AuthInput::OptionalSecret(SecretString::from(value))
 		},
 		InferenceAuthPromptKind::Confirmation => {
-			if value.contains("://") {
-				AuthInput::CallbackUrl(SecretString::from(value))
+			if let Some(callback) = pasted_callback(value) {
+				callback
 			} else if value.eq_ignore_ascii_case("n") || value.eq_ignore_ascii_case("no") {
 				AuthInput::Cancel
 			} else if value.is_empty()
@@ -607,6 +602,15 @@ fn prompt_answer(prompt: &AuthPrompt, value: &str) -> Result<AuthInput, &'static
 			}
 		},
 	})
+}
+
+/// A pasted `scheme://` value is the address the browser was redirected to:
+/// it answers a code or browser prompt as the complete callback URL. Shared by
+/// the `omp auth login` loop and the chat login dialog.
+pub(crate) fn pasted_callback(value: &str) -> Option<AuthInput> {
+	value
+		.contains("://")
+		.then(|| AuthInput::CallbackUrl(SecretString::from(value)))
 }
 
 #[cfg(test)]
