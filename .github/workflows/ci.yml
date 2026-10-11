@@ -289,8 +289,11 @@ jobs:
     # a precondition either; waiting on it held this job back five minutes.
     # On a push, push_verified may show the tree already passed this job in
     # its pull request; a skipped or failed push_verified never skips it.
-    needs: [format, push_verified]
-    if: ${{ !cancelled() && needs.format.result == 'success' && needs.push_verified.outputs.verified != 'true' }}
+    # Nor is it gated on `Rust format`: waiting for `cargo fmt --check` held this
+    # job back ~106 s (median, n=10, docs/research/ci-test-acceleration.md). Rust
+    # format still reports, and fails, its own required check.
+    needs: [changes, push_verified]
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
     # GitHub's macos-15 unless the repository variable MACOS_RUNNER names
     # somewhere else. Set it to a JSON label array to send this job to a
     # self-hosted Apple silicon machine, which is the only way to give it more
@@ -362,9 +365,12 @@ jobs:
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
 
       - name: Cache Cargo
-        # A self-hosted runner keeps its target directory outside the checkout
-        # (see above). Uploading it would mean tarring tens of GB against a
-        # 10 GB repository cache limit on every job.
+        # Registry and git sources only. The hosted target/ entry was ~5.2 GB of
+        # the 10 GB repository budget and lost time even on a hit: ~230 s less
+        # clippy against a ~130 s restore and a ~100 s save on every run
+        # (docs/research/ci-test-acceleration.md §4). A self-hosted runner keeps
+        # its target directory outside the checkout (see above). The new key
+        # prefix keeps old entries, which contain target/, from being restored.
         if: runner.environment == 'github-hosted'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -372,16 +378,23 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
-            cargo-${{ runner.os }}-${{ runner.arch }}-
+            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
 
       # `--all-targets` (kept in sync with `just clippy`) so tests, examples
       # and benches are held to the same clippy.toml policy as library code.
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked
+
+      # One cargo invocation builds every test binary, the acceptance proofs
+      # included, so their codegen and links overlap the workspace tail instead
+      # of following it as a second invocation (265.5 s median, n=10, for one
+      # unit). Features are unified workspace-wide (.cargo/config.toml
+      # [resolver]), so the `--exclude omp-e2e` and `-p omp-e2e` runs below
+      # find these artifacts fresh.
+      - name: Build test binaries
+        run: cargo nextest run --profile ci --workspace --no-run --locked
 
       - name: Test workspace
         run: cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
@@ -392,9 +405,6 @@ jobs:
 
       - name: Gate frozen Python examples
         run: python3 scripts/check-python-examples.py
-
-      - name: Compile acceptance proofs
-        run: cargo nextest run -p omp-e2e --tests --no-run --locked
 
       - name: Run harness unit tests and acceptance proofs P1-P6
         run: |
@@ -422,6 +432,67 @@ jobs:
       # is recorded per omp2 commit by p8-baseline.yml, off the PR path.
       - name: Validate P8 baseline contract
         run: cargo nextest run --profile ci -p omp-e2e --test p8_baselines --locked
+
+  # The macOS clippy pass on its own runner, in parallel with `rust`. Not a
+  # required check yet. Once it has reported green on a pull request, it joins
+  # the ruleset and the `Lint workspace` step leaves `rust`, taking 553.5 s
+  # (median, n=10) off the critical path
+  # (docs/research/ci-test-acceleration.md, Phase 3). No target/ cache: a
+  # warm clippy (394-459 s) was no faster than a cold one (371-912 s).
+  lint_macos:
+    name: Lint workspace (macOS)
+    needs: [changes, push_verified]
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-15"') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Select pinned Rust toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          rustup show active-toolchain
+
+      # Same provisioning as `rust`: build scripts link through ld64.lld.
+      - name: Install native build tools
+        if: runner.environment == 'github-hosted'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install lld@22 uv zstd ninja
+          ln -sf "$(brew --prefix lld@22)/bin/ld64.lld" /opt/homebrew/bin/ld64.lld
+      - name: Check provisioned native build tools
+        if: runner.environment != 'github-hosted'
+        run: |
+          missing=()
+          [ -x /opt/homebrew/bin/ld64.lld ] || missing+=(lld)
+          for tool in uv zstd ninja; do
+            command -v "$tool" >/dev/null || missing+=("$tool")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing on this runner: ${missing[*]}. As the owner of the Homebrew prefix, run: brew install ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/macos-build-state
+        with:
+          min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
+
+      - name: Restore Cargo registry
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
+
+      # `--all-targets`, kept in sync with `just clippy` and the `rust` job.
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked
 
   # The workspace lint runs on macOS, so until this job existed no
   # `#[cfg(target_os = "linux")]` code had ever been linted by anything: the
@@ -469,8 +540,9 @@ jobs:
       - name: Verify embedded Python toolchain
         run: test -f vendor/python/pyo3-config.txt
 
-      - name: Cache Cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -482,19 +554,40 @@ jobs:
             cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
             cargo-lint-linux-${{ runner.os }}-${{ runner.arch }}-
 
+      # Ages the checkout so build scripts whose inputs did not change since
+      # the cached commit do not rerun (docs/research/ci-test-acceleration.md §3).
+      - uses: ./.github/actions/source-mtimes
+        with:
+          matched-key: ${{ steps.cargo-cache.outputs.cache-matched-key }}
+
       # `--keep-going` so one crate's violation does not mask the rest: the
       # queue this job exists to drain is only visible if cargo reports every
       # failing crate in a single run rather than stopping at the first.
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked --keep-going
 
+      # Only pushes write. A pull request's entry is readable by that pull
+      # request alone, and those entries evicted the branch entries every pull
+      # request restores from (docs/research/ci-test-acceleration.md §4).
+      - name: Save Cargo cache
+        if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # P9, P10, P11 and tool_sources were only ever run by `just e2e`. Nothing in them
   # needs macOS: they drive the production environment host, document
   # authority and embedded-Python extension host over unix sockets and
   # scratch roots, with no PTY and no Apple-only code path. They therefore
   # run here, on a hosted Linux runner, so the single self-hosted Mac (the
-  # `rust` job's queue) does not get longer. Same provisioning as p7_linux,
-  # and its Cargo cache is the fallback seed so a cold cache starts warm.
+  # `rust` job's queue) does not get longer. Same provisioning as p7_linux.
+  # Both jobs build the same omp-e2e test graph, so they share one Cargo
+  # cache entry; this job is its only writer.
   p9_p10_linux:
     name: Acceptance proofs P9, P10 and tool sources (Linux)
     needs: format
@@ -527,7 +620,9 @@ jobs:
 
       - name: Cache embedded Python
         id: python-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        # lint_linux is this key's only writer: three jobs saving it raced
+        # ("Unable to reserve cache" in 7 of 30 Linux logs).
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: vendor/python
           key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
@@ -541,8 +636,9 @@ jobs:
           test -f vendor/python/pyo3-config.txt
           test -x vendor/python/install/bin/python3.14td
 
-      - name: Cache Cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -553,8 +649,12 @@ jobs:
           restore-keys: |
             cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
             cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-
-            cargo-p7-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
-            cargo-p7-${{ runner.os }}-${{ runner.arch }}-
+
+      # Ages the checkout so build scripts whose inputs did not change since
+      # the cached commit do not rerun (docs/research/ci-test-acceleration.md §3).
+      - uses: ./.github/actions/source-mtimes
+        with:
+          matched-key: ${{ steps.cargo-cache.outputs.cache-matched-key }}
 
       # `--profile ci` gives e2e tests the whole machine one at a time
       # (`threads-required = "num-cpus"` in .config/nextest.toml), so these
@@ -569,6 +669,24 @@ jobs:
 
       - name: Run tool source routing check
         run: cargo nextest run --profile ci -p omp-e2e --test tool_sources --locked
+
+      # The saved entry also seeds p7_linux, so it carries P7's test binaries.
+      - name: Build P7 binaries for the shared cache
+        if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
+        run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --no-run --locked
+
+      # Only pushes write, and only this job writes the omp-e2e graph
+      # (docs/research/ci-test-acceleration.md §4).
+      - name: Save Cargo cache
+        if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
@@ -604,7 +722,9 @@ jobs:
 
       - name: Cache embedded Python
         id: python-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        # lint_linux is this key's only writer: three jobs saving it raced
+        # ("Unable to reserve cache" in 7 of 30 Linux logs).
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: vendor/python
           key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
@@ -618,18 +738,27 @@ jobs:
           test -f vendor/python/pyo3-config.txt
           test -x vendor/python/install/bin/python3.14td
 
-      - name: Cache Cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      # Restores the omp-e2e graph that p9_p10_linux saves on pushes; this job
+      # never writes, so the graph is stored once per ref.
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-p7-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
-            cargo-p7-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
-            cargo-p7-${{ runner.os }}-${{ runner.arch }}-
+            cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
+            cargo-e2e-linux-${{ runner.os }}-${{ runner.arch }}-
+
+      # Ages the checkout so build scripts whose inputs did not change since
+      # the cached commit do not rerun (docs/research/ci-test-acceleration.md §3).
+      - uses: ./.github/actions/source-mtimes
+        with:
+          matched-key: ${{ steps.cargo-cache.outputs.cache-matched-key }}
 
       - name: Run terminal proof P7 on Linux PTY
         env:
