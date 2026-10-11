@@ -107,7 +107,7 @@ pub use error::{BuiltinError, Error, ErrorKind};
 pub use extensions::ShellExtensions;
 pub use interp::{
 	ExecutionParameters, ExternalCommandInfo, ExternalCommandOutputMarker,
-	ExternalCommandOutputMarkers, OpenRequest, PathAccess, PathDenied, PathPolicy,
+	ExternalCommandOutputMarkers, OpenError, OpenRequest, PathAccess, PathDenied, PathPolicy,
 	ProcessGroupPolicy, ProcessScope, SpawnObserver, SpawnWrapper,
 };
 pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};

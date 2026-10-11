@@ -4,7 +4,6 @@
 
 use std::{
 	ffi::OsString,
-	fs::File,
 	io::{self, BufRead, BufReader, Read, Write},
 };
 
@@ -757,7 +756,8 @@ where
 
 	for (filename, path) in inputs {
 		let result = if let Some(path) = path {
-			File::open(path)
+			host
+				.open_read(path)
 				.map_err(|error| {
 					io::Error::new(error.kind(), format!("{}: {error}", filename.maybe_quote()))
 				})

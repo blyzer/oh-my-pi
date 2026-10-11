@@ -1391,7 +1391,7 @@ fn copy_dir_contents_recursive(
 			#[cfg(not(unix))]
 			{
 				// Symlinks are already handled above, so this is always a regular file
-				fs::copy(host.resolve(&from_path), host.resolve(&to_path))?;
+				copy_contents(host, &from_path, &host.resolve(&to_path))?;
 			}
 
 			print_verbose(host, &from_path, &to_path);
@@ -1433,7 +1433,7 @@ fn copy_file_with_hardlinks_helper(
 		make_fifo(&host.resolve(to))?;
 	} else {
 		// Copy a regular file.
-		fs::copy(host.resolve(from), host.resolve(to))?;
+		copy_contents(host, from, &host.resolve(to))?;
 		// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
 		#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
 		{
@@ -1442,6 +1442,18 @@ fn copy_file_with_hardlinks_helper(
 	}
 
 	Ok(())
+}
+
+/// Copies a regular file's contents and permission bits, as [`fs::copy`]
+/// does, reading the source through the path policy: a move across devices
+/// must not carry out bytes the policy hides.
+fn copy_contents(host: &Host, from: &Path, to: &Path) -> io::Result<u64> {
+	let mut source = host.open_read(from)?;
+	let permissions = source.metadata()?.permissions();
+	let mut target = fs::File::create(to)?;
+	let copied = io::copy(&mut source, &mut target)?;
+	target.set_permissions(permissions)?;
+	Ok(copied)
 }
 
 fn rename_file_fallback(
@@ -1486,7 +1498,7 @@ fn rename_file_fallback(
 	}
 
 	// Regular file copy
-	fs::copy(host.resolve(from), &to_fs)
+	copy_contents(host, from, &to_fs)
 		.map_err(|err| io::Error::new(err.kind(), "Permission denied"))?;
 
 	// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)

@@ -315,8 +315,9 @@ fn read_operand(
 			Ok((buf, None))
 		},
 		Operand::File(resolved) => {
-			let bytes =
-				fs::read(resolved).map_err(|err| format!("{}: {}", name.display(), io_msg(&err)))?;
+			let bytes = host
+				.read_file(resolved)
+				.map_err(|err| format!("{}: {}", name.display(), io_msg(&err)))?;
 			let mtime = fs::metadata(resolved)
 				.ok()
 				.and_then(|meta| meta.modified().ok());
@@ -825,9 +826,11 @@ fn diff_dirs(
 				differed = true;
 			},
 			(Some(ma), Some(mb)) => {
-				let bytes_a = fs::read(&child_res_a)
+				let bytes_a = host
+					.read_file(&child_res_a)
 					.map_err(|err| format!("{}: {}", child_name_a.display(), io_msg(&err)))?;
-				let bytes_b = fs::read(&child_res_b)
+				let bytes_b = host
+					.read_file(&child_res_b)
 					.map_err(|err| format!("{}: {}", child_name_b.display(), io_msg(&err)))?;
 				let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 				differed |= diff_pair(
@@ -850,7 +853,8 @@ fn diff_dirs(
 					} else {
 						(&child_name_b, &child_res_b)
 					};
-					let bytes = fs::read(present_res)
+					let bytes = host
+						.read_file(present_res)
 						.map_err(|err| format!("{}: {}", present_name.display(), io_msg(&err)))?;
 					let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 					let present_mtime = meta.modified().ok();

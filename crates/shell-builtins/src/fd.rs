@@ -22,7 +22,7 @@ use omp_walker::{
 };
 use regex::{Regex, RegexBuilder};
 
-use crate::host::{Host, Utility, util};
+use crate::host::{Host, ReadOpener, Utility, util};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -327,6 +327,8 @@ struct FdIgnoreMatcher {
 	root:    PathBuf,
 	global:  Vec<Gitignore>,
 	states:  HashMap<PathBuf, Arc<FdIgnoreState>>,
+	/// Reads every ignore file through the shell's path policy.
+	opener:  ReadOpener,
 }
 
 struct FdIgnoreState {
@@ -335,11 +337,11 @@ struct FdIgnoreState {
 }
 
 impl FdIgnoreMatcher {
-	fn new(base_dir: &Path, root: &Path, cli: &FdCli) -> io::Result<Self> {
+	fn new(base_dir: &Path, root: &Path, cli: &FdCli, opener: ReadOpener) -> io::Result<Self> {
 		let root = normalize_fdignore_path(root);
 		let enabled = !no_ignore(cli);
 		let mut matcher =
-			Self { enabled, root: root.clone(), global: Vec::new(), states: HashMap::new() };
+			Self { enabled, root: root.clone(), global: Vec::new(), states: HashMap::new(), opener };
 		if !enabled {
 			return Ok(matcher);
 		}
@@ -351,7 +353,7 @@ impl FdIgnoreMatcher {
 				base_dir.join(ignore_file)
 			};
 			let mut builder = gitignore::GitignoreBuilder::new(base_dir);
-			if let Some(err) = builder.add(&path) {
+			if let Some(err) = matcher.opener.add_ignore_file(&mut builder, &path) {
 				return Err(io::Error::other(err.to_string()));
 			}
 			let ignore = builder
@@ -365,9 +367,9 @@ impl FdIgnoreMatcher {
 		let parent = if cli.no_ignore_parent {
 			None
 		} else {
-			build_fdignore_parent_states(root.parent())
+			build_fdignore_parent_states(&matcher.opener, root.parent())
 		};
-		let root_state = load_fdignore_state(&root, parent);
+		let root_state = load_fdignore_state(&matcher.opener, &root, parent);
 		matcher.states.insert(root, root_state);
 		Ok(matcher)
 	}
@@ -407,13 +409,16 @@ impl FdIgnoreMatcher {
 		} else {
 			dir.parent().map(|parent| self.state_for_dir(parent))
 		};
-		let state = load_fdignore_state(dir, parent);
+		let state = load_fdignore_state(&self.opener, dir, parent);
 		self.states.insert(dir.to_path_buf(), Arc::clone(&state));
 		state
 	}
 }
 
-fn build_fdignore_parent_states(mut dir: Option<&Path>) -> Option<Arc<FdIgnoreState>> {
+fn build_fdignore_parent_states(
+	opener: &ReadOpener,
+	mut dir: Option<&Path>,
+) -> Option<Arc<FdIgnoreState>> {
 	let mut ancestors = Vec::new();
 	while let Some(path) = dir {
 		ancestors.push(path);
@@ -421,7 +426,7 @@ fn build_fdignore_parent_states(mut dir: Option<&Path>) -> Option<Arc<FdIgnoreSt
 	}
 	let mut parent = None;
 	for ancestor in ancestors.into_iter().rev() {
-		parent = Some(load_fdignore_state(ancestor, parent));
+		parent = Some(load_fdignore_state(opener, ancestor, parent));
 	}
 	parent
 }
@@ -430,11 +435,15 @@ fn normalize_fdignore_path(path: &Path) -> PathBuf {
 	path.components().collect()
 }
 
-fn load_fdignore_state(dir: &Path, parent: Option<Arc<FdIgnoreState>>) -> Arc<FdIgnoreState> {
+fn load_fdignore_state(
+	opener: &ReadOpener,
+	dir: &Path,
+	parent: Option<Arc<FdIgnoreState>>,
+) -> Arc<FdIgnoreState> {
 	let file = dir.join(".fdignore");
 	let matcher = if file.is_file() {
 		let mut builder = gitignore::GitignoreBuilder::new(dir);
-		let _ = builder.add(&file);
+		let _ = opener.add_ignore_file(&mut builder, &file);
 		builder.build().ok().filter(|ignore| !ignore.is_empty())
 	} else {
 		None
@@ -682,7 +691,8 @@ fn search(
 		if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| state.matches >= max) {
 			break;
 		}
-		let mut fd_ignores = FdIgnoreMatcher::new(&config.base_dir, &search_path.resolved, &cli)?;
+		let mut fd_ignores =
+			FdIgnoreMatcher::new(&config.base_dir, &search_path.resolved, &cli, host.read_opener())?;
 		let request =
 			fd_walk_request(&search_path.resolved, &cli, use_gitignore, cli.one_file_system);
 		let outcome = match request.collect_with_heartbeat(cancel_heartbeat(cancelled)) {

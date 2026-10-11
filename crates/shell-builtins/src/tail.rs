@@ -1307,18 +1307,21 @@ mod follow {
 		//! File handle management for `tail --follow`.
 		use std::{
 			collections::{HashMap, hash_map::Keys},
-			fs::{File, Metadata},
+			fs::Metadata,
 			io::{BufRead, BufReader, Write},
 			path::{Path, PathBuf},
 		};
 
-		use crate::tail::{
-			TailResult,
-			args::Settings,
-			chunks::BytesChunkBuffer,
-			map_output_error,
-			paths::{HeaderPrinter, PathExtTail},
-			text,
+		use crate::{
+			host::ReadOpener,
+			tail::{
+				TailResult,
+				args::Settings,
+				chunks::BytesChunkBuffer,
+				map_output_error,
+				paths::{HeaderPrinter, PathExtTail},
+				text,
+			},
 		};
 
 		/// Data structure to keep a handle on files to follow.
@@ -1330,15 +1333,22 @@ mod follow {
 			map:            HashMap<PathBuf, PathData>,
 			last:           Option<PathBuf>,
 			header_printer: HeaderPrinter,
+			opener:         ReadOpener,
 		}
 
 		impl FileHandling {
-			pub fn from(settings: &Settings) -> Self {
+			pub fn from(settings: &Settings, opener: ReadOpener) -> Self {
 				Self {
-					map:            HashMap::with_capacity(settings.inputs.len()),
-					last:           None,
+					map: HashMap::with_capacity(settings.inputs.len()),
+					last: None,
 					header_printer: HeaderPrinter::new(settings.verbose, false),
+					opener,
 				}
+			}
+
+			/// The path-policy read opener every reopen goes through.
+			pub const fn opener(&self) -> &ReadOpener {
+				&self.opener
 			}
 
 			/// Wrapper for [`HashMap::insert`] using [`Path::canonicalize`]
@@ -1427,10 +1437,11 @@ mod follow {
 				As a workaround, we always reopen the file even though this might not always
 				be necessary.
 				*/
+				let file = self.opener.open(path)?;
 				self
 					.get_mut(path)
 					.reader
-					.replace(Box::new(BufReader::new(File::open(path)?)));
+					.replace(Box::new(BufReader::new(file)));
 				Ok(())
 			}
 
@@ -1504,13 +1515,13 @@ mod follow {
 				Self { reader, metadata, display_name: display_name.to_owned() }
 			}
 
-			pub fn from_other_with_path(data: Self, path: &Path) -> Self {
+			pub fn from_other_with_path(data: Self, path: &Path, opener: &ReadOpener) -> Self {
 				// Remove old reader
 				let old_reader = data.reader;
 				let reader = if old_reader.is_some() {
 					// Use old reader with the same file descriptor if there is one
 					old_reader
-				} else if let Ok(file) = File::open(path) {
+				} else if let Ok(file) = opener.open(path) {
 					// Open new file tail from start
 					Some(Box::new(BufReader::new(file)) as Box<dyn BufRead>)
 				} else {
@@ -1545,7 +1556,7 @@ mod follow {
 		#[cfg(target_os = "linux")]
 		use crate::support::sys::signals::ensure_stdout_not_broken;
 		use crate::{
-			host::{Host, StreamWriter},
+			host::{Host, ReadOpener, StreamWriter},
 			support::quote::Quotable,
 			tail::{
 				TailError, TailResult,
@@ -1680,6 +1691,7 @@ mod follow {
 
 			pub fn from(
 				settings: &Settings,
+				opener: ReadOpener,
 				stdout: StreamWriter,
 				stderr: OpenFile,
 				cancel: Arc<AtomicBool>,
@@ -1688,7 +1700,7 @@ mod follow {
 					settings.retry,
 					settings.follow,
 					settings.use_polling,
-					FileHandling::from(settings),
+					FileHandling::from(settings, opener),
 					settings.pid,
 					stdout,
 					stderr,
@@ -2032,7 +2044,12 @@ mod follow {
 		                    let new_path = event.paths.last().unwrap();
 		                    paths.push(new_path.clone());
 
-		                    let new_data = PathData::from_other_with_path(self.files.remove(event_path), new_path);
+		                    let opener = self.files.opener().clone();
+		                    let new_data = PathData::from_other_with_path(
+		                    	self.files.remove(event_path),
+		                    	new_path,
+		                    	&opener,
+		                    );
 		                    self.files.insert(
 		                        new_path,
 		                        new_data,
@@ -2822,7 +2839,7 @@ use paths::{FileExtTail, HeaderPrinter, Input, InputKind};
 use thiserror::Error;
 
 use crate::{
-	host::{Host, Utility, matches_parser, util},
+	host::{Host, ReadOpener, Utility, matches_parser, util},
 	support::{fsutil::sane_blksize::sane_blksize_from_metadata, quote::Quotable},
 	tac::run_argv,
 };
@@ -3085,7 +3102,7 @@ fn reverse_main(settings: &Settings, all_lines: bool, host: &mut Host) -> TailRe
 				);
 				continue;
 			}
-			match File::open(path) {
+			match host.open_read(path) {
 				Ok(mut file) => {
 					printer.print_input(input, &mut stdout);
 					file.read_to_end(&mut data)?;
@@ -3172,8 +3189,13 @@ fn tail_main(settings: &Settings, host: &mut Host) -> TailResult<()> {
 
 fn uu_tail(settings: &Settings, host: &mut Host) -> TailResult<()> {
 	let mut printer = HeaderPrinter::new(settings.verbose, true);
-	let mut observer =
-		Observer::from(settings, host.stdout_writer(), host.stderr_clone(), host.cancel_flag());
+	let mut observer = Observer::from(
+		settings,
+		host.read_opener(),
+		host.stdout_writer(),
+		host.stderr_clone(),
+		host.cancel_flag(),
+	);
 
 	observer.start(settings, host)?;
 
@@ -3267,9 +3289,9 @@ fn tail_file(
 		observer.add_bad_path(path, input.display_name.as_str(), false)?;
 	} else {
 		#[cfg(unix)]
-		let open_result = open_file(&fs_path, settings.pid != 0);
+		let open_result = open_file(&host.read_opener(), fs_path, settings.pid != 0);
 		#[cfg(not(unix))]
-		let open_result = File::open(&fs_path);
+		let open_result = host.open_read(fs_path);
 
 		match open_result {
 			Ok(mut file) => {
@@ -3328,36 +3350,17 @@ fn tail_file(
 /// Without `--pid`, FIFOs block on open() until a writer connects (GNU
 /// behavior).
 #[cfg(unix)]
-fn open_file(path: &Path, use_nonblock_for_fifo: bool) -> io::Result<File> {
-	use std::{
-		fs::OpenOptions,
-		os::{
-			fd::AsFd,
-			unix::fs::{FileTypeExt, OpenOptionsExt},
-		},
-	};
-
-	use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+fn open_file(opener: &ReadOpener, path: &Path, use_nonblock_for_fifo: bool) -> io::Result<File> {
+	use std::os::unix::fs::FileTypeExt as _;
 
 	let is_fifo = path
 		.metadata()
 		.ok()
 		.is_some_and(|m| m.file_type().is_fifo());
-
 	if is_fifo && use_nonblock_for_fifo {
-		let file = OpenOptions::new()
-			.read(true)
-			.custom_flags(libc::O_NONBLOCK)
-			.open(path)?;
-
-		// Clear O_NONBLOCK so reads block normally
-		let flags = fcntl_getfl(file.as_fd())?;
-		let new_flags = flags & !OFlags::NONBLOCK;
-		fcntl_setfl(file.as_fd(), new_flags)?;
-
-		Ok(file)
+		opener.open_fifo_nonblocking(path)
 	} else {
-		File::open(path)
+		opener.open(path)
 	}
 }
 

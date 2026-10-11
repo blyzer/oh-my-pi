@@ -5586,6 +5586,105 @@ mod tests {
 		host.close_session(session).expect("session closes");
 	}
 
+	/// Runs in-process builtins on a file behind `read_deny` and on its
+	/// admitted twin: each read of the hidden file ends `Denied` with the
+	/// shell's read denial and none of its bytes, and the twin reads. The
+	/// builtins run inside this process, so no kernel backend stands between
+	/// them and the file; only the session's path policy refuses them.
+	#[cfg(unix)]
+	async fn builtin_reads_behind_read_deny_end_denied(host: &ExecHost, session: &Bytes) {
+		for script in
+			["cat secret/key", "head -n 1 secret/key", "grep omp secret/key", "wc -c secret/key"]
+		{
+			let (outcome, exit, output, _) = run_failure(host, script_request(session, script)).await;
+			let output = String::from_utf8_lossy(&output);
+			assert_eq!(outcome, ExecOutcome::Denied as i32, "{script}: {output}");
+			assert_ne!(exit, Some(0), "{script}");
+			assert!(output.contains("sandbox denied read"), "{script}: {output}");
+			assert!(!output.contains("omp-secret-marker"), "{script}: {output}");
+		}
+		assert_eq!(
+			run_output(host, script_request(session, "cat public/key")).await,
+			b"omp-secret-marker\n"
+		);
+	}
+
+	/// A workspace holding `secret/key` (the `read_deny` root) and an identical
+	/// admitted `public/key`.
+	#[cfg(unix)]
+	fn read_deny_workspace() -> (tempfile::TempDir, PathBuf) {
+		let root = tempfile::tempdir().expect("workspace");
+		let workspace = root.path().canonicalize().expect("canonical workspace");
+		for dir in ["secret", "public"] {
+			fs::create_dir(workspace.join(dir)).expect("directory");
+			fs::write(workspace.join(dir).join("key"), "omp-secret-marker\n").expect("key");
+		}
+		(root, workspace)
+	}
+
+	/// `cat <read_deny root>/file` in an exec session under the default
+	/// `workspace-write` sandbox ends `Denied`. Live Seatbelt.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn builtin_reads_behind_read_deny_end_denied_under_workspace_write() {
+		use crate::exec_settings::{ExecSandboxMode, SandboxSettings};
+
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let (_root, workspace) = read_deny_workspace();
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&SandboxSettings {
+				mode: ExecSandboxMode::WorkspaceWrite,
+				read_deny: vec![Str::from(workspace.join("secret").to_string_lossy().as_ref())],
+				..SandboxSettings::default()
+			},
+			&workspace,
+		);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		builtin_reads_behind_read_deny_end_denied(&host, &opened.session).await;
+		host.close_session(&opened.session).expect("session closes");
+	}
+
+	/// The same refusal with only the in-shell file policy installed (mode
+	/// `off` plus a `read_deny` root), so it runs on every unix host.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn builtin_reads_behind_read_deny_end_denied_without_a_kernel_backend() {
+		let (_root, workspace) = read_deny_workspace();
+		let host = ExecHost::new();
+		host.configure_sandbox(&environment_only_read_deny(&workspace.join("secret")), &workspace);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		assert!(
+			host.inner.sessions.lock()[&opened.session]
+				.sandbox
+				.is_some(),
+			"the in-shell file policy is installed"
+		);
+		builtin_reads_behind_read_deny_end_denied(&host, &opened.session).await;
+		// A missing file is no denial.
+		let (outcome, exit, output, _) =
+			run_failure(&host, script_request(&opened.session, "cat public/absent")).await;
+		let output = String::from_utf8_lossy(&output);
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{output}");
+		assert_eq!(exit, Some(1));
+		assert!(output.contains("No such file or directory"), "{output}");
+		host.close_session(&opened.session).expect("session closes");
+	}
+
 	/// ADR 0028: a detached script never reaches `/bin/sh`; it re-enters this
 	/// executable as the hidden in-process shell child.
 	#[test]

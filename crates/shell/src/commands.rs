@@ -1193,7 +1193,7 @@ mod sandbox_tests {
 	};
 
 	use super::*;
-	use crate::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
+	use crate::{OpenError, OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
 
 	/// Each observed launch: its program, if the shell found one, and its
 	/// arguments.
@@ -1369,7 +1369,7 @@ mod sandbox_tests {
 			self.judge(path, PathAccess::Write)
 		}
 
-		fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, PathDenied> {
+		fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, OpenError> {
 			let access = request.access;
 			self.judge(path, access)?;
 			let mut options = fs::File::options();
@@ -1381,9 +1381,7 @@ mod sandbox_tests {
 				PathAccess::ReadWrite => options.read(true).write(true).create(true),
 				PathAccess::Write => options.write(true).create(true),
 			};
-			options
-				.open(path)
-				.map_err(|_| PathDenied { path: path.to_path_buf(), access })
+			Ok(options.open(path)?)
 		}
 	}
 

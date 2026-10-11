@@ -5,7 +5,7 @@
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
-	fs::{self, File},
+	fs,
 	io::{self, BufRead, BufReader, Read, Write},
 	path::Path,
 };
@@ -14,7 +14,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, ReadOpener, Utility, format_usage, matches_parser, util},
 	support::{line_ending::LineEnding, quote::Quotable},
 };
 
@@ -93,14 +93,14 @@ impl<'a> LineReader<'a> {
 	}
 }
 
-fn files_identical(path1: &Path, path2: &Path) -> io::Result<bool> {
+fn files_identical(opener: &ReadOpener, path1: &Path, path2: &Path) -> io::Result<bool> {
 	let m1 = fs::metadata(path1)?;
 	let m2 = fs::metadata(path2)?;
 	if !m1.is_file() || !m2.is_file() || m1.len() != m2.len() {
 		return Ok(false);
 	}
-	let mut a = BufReader::new(File::open(path1)?);
-	let mut b = BufReader::new(File::open(path2)?);
+	let mut a = BufReader::new(opener.open(path1)?);
+	let mut b = BufReader::new(opener.open(path2)?);
 	let mut ba = [0; 8192];
 	let mut bb = [0; 8192];
 	loop {
@@ -233,6 +233,7 @@ fn compare(
 }
 
 fn open_file<'a>(
+	opener: &ReadOpener,
 	name: &OsStr,
 	resolved: &Path,
 	stdin: Option<&'a mut dyn Read>,
@@ -244,7 +245,7 @@ fn open_file<'a>(
 	if fs::metadata(resolved)?.is_dir() {
 		return Err(io::Error::other("is a directory"));
 	}
-	Ok(LineReader::new(Box::new(BufReader::new(File::open(resolved)?)), ending))
+	Ok(LineReader::new(Box::new(BufReader::new(opener.open(resolved)?)), ending))
 }
 
 /// Parsed `comm` invocation.
@@ -280,34 +281,35 @@ impl Utility for Comm {
 		} else {
 			delimiters[0]
 		};
+		let opener = host.read_opener();
 		let identical = if name1 == "-" || name2 == "-" {
 			false
 		} else {
-			files_identical(&path1, &path2).unwrap_or(false)
+			files_identical(&opener, &path1, &path2).unwrap_or(false)
 		};
 		let ending = LineEnding::from_zero_flag(self.matches.get_flag(options::ZERO_TERMINATED));
 		let mut stdout = host.stdout_writer();
 		let opened: Result<_, (&OsStr, io::Error)> = if name1 == "-" {
-			open_file(name2, &path2, None, ending)
+			open_file(&opener, name2, &path2, None, ending)
 				.map_err(|e| (name2.as_os_str(), e))
 				.and_then(|f2| {
-					open_file(name1, &path1, Some(&mut host.stdin), ending)
+					open_file(&opener, name1, &path1, Some(&mut host.stdin), ending)
 						.map(|f1| (f1, f2))
 						.map_err(|e| (name1.as_os_str(), e))
 				})
 		} else if name2 == "-" {
-			open_file(name1, &path1, None, ending)
+			open_file(&opener, name1, &path1, None, ending)
 				.map_err(|e| (name1.as_os_str(), e))
 				.and_then(|f1| {
-					open_file(name2, &path2, Some(&mut host.stdin), ending)
+					open_file(&opener, name2, &path2, Some(&mut host.stdin), ending)
 						.map(|f2| (f1, f2))
 						.map_err(|e| (name2.as_os_str(), e))
 				})
 		} else {
-			open_file(name1, &path1, None, ending)
+			open_file(&opener, name1, &path1, None, ending)
 				.map_err(|e| (name1.as_os_str(), e))
 				.and_then(|f1| {
-					open_file(name2, &path2, None, ending)
+					open_file(&opener, name2, &path2, None, ending)
 						.map(|f2| (f1, f2))
 						.map_err(|e| (name2.as_os_str(), e))
 				})

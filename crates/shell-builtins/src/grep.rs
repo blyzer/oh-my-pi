@@ -8,7 +8,6 @@ use std::{
 	cell,
 	ffi::{OsStr, OsString},
 	fs,
-	fs::File,
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
 	sync::atomic,
@@ -1020,7 +1019,7 @@ fn search_file_path<M: Matcher, W: Write>(
 	had_error: &mut bool,
 ) -> io::Result<bool> {
 	let display_path = display_path_for_operand(operand, resolved, path);
-	match File::open(path) {
+	match host.open_read(path) {
 		Ok(file) => {
 			let display = display_path.as_os_str().as_encoded_bytes();
 			match process_reader(matcher, searcher, file, display, opts, out) {
@@ -1174,7 +1173,9 @@ fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String>
 	let result = if path == OsStr::new("-") {
 		host.stdin.read_to_end(&mut bytes)
 	} else {
-		File::open(host.resolve(path)).and_then(|mut file| file.read_to_end(&mut bytes))
+		host
+			.open_read(path)
+			.and_then(|mut file| file.read_to_end(&mut bytes))
 	};
 	result
 		.map(|_| bytes)

@@ -7,7 +7,6 @@ use std::{
 	borrow::Borrow,
 	ffi::{OsStr, OsString},
 	fmt::{self, Display, Formatter},
-	fs::File,
 	io::{self, BufReader, Read, Write},
 	num,
 	path::Path,
@@ -825,7 +824,7 @@ where
 				stdin_buf = &mut host.stdin;
 				Box::new(stdin_buf) as Box<dyn Read>
 			} else {
-				file_buf = match File::open(&resolved_filepath) {
+				file_buf = match host.open_read(&resolved_filepath) {
 					Ok(file) => file,
 					Err(err) => {
 						host.error(format!("{}: {err}", filepath.to_string_lossy()), 1);
@@ -1448,7 +1447,7 @@ fn get_file_to_check<'a>(
 		return Ok(Box::new(&mut host.stdin));
 	}
 
-	match File::open(host.resolve(filename)) {
+	match host.open_read(filename) {
 		Ok(file) => {
 			if file
 				.metadata()
@@ -1488,7 +1487,7 @@ fn get_file_to_check<'a>(
 
 /// Returns a reader to the list of checksums.
 fn get_input_file(host: &Host, filename: &OsStr) -> ExecResult<Box<dyn Read>> {
-	match File::open(host.resolve(filename)) {
+	match host.open_read(filename) {
 		Ok(file) => {
 			if file.metadata()?.is_dir() {
 				Err(failure(format!("{}: Is a directory", filename.maybe_quote())))

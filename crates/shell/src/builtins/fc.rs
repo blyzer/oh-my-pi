@@ -446,6 +446,7 @@ fn effective_history_count(history: &history::History) -> usize {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::OpenError;
 
 	struct DenyWrites;
 
@@ -458,12 +459,8 @@ mod tests {
 			Err(crate::PathDenied { path: path.to_path_buf(), access: crate::PathAccess::Write })
 		}
 
-		fn open(
-			&self,
-			path: &Path,
-			request: crate::OpenRequest,
-		) -> Result<std::fs::File, crate::PathDenied> {
-			Err(crate::PathDenied { path: path.to_path_buf(), access: request.access })
+		fn open(&self, path: &Path, request: crate::OpenRequest) -> Result<fs::File, OpenError> {
+			Err(crate::PathDenied { path: path.to_path_buf(), access: request.access }.into())
 		}
 	}
 

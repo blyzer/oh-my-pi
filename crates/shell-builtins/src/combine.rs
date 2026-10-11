@@ -201,8 +201,9 @@ fn open_input(name: &OsStr, host: &Host) -> Result<Option<File>, Error> {
 	if name == OsStr::new("-") {
 		return Ok(None);
 	}
-	let path = host.resolve(name);
-	let file = File::open(path).map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
+	let file = host
+		.open_read(name)
+		.map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
 	Ok(Some(file))
 }
 

@@ -1436,7 +1436,7 @@ impl Utility for Head {
 					host.error(format!("error reading {}: Is a directory", file.quote()), 1);
 					continue;
 				}
-				let mut input = match File::open(&resolved) {
+				let mut input = match host.open_read(&resolved) {
 					Ok(input) => input,
 					Err(err) => {
 						host.error(format!("cannot open {} for reading: {err}", file.quote()), 1);

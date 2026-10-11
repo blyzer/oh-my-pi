@@ -539,7 +539,7 @@ use std::{
 	cmp::max,
 	ffi::{OsStr, OsString},
 	fmt::Display,
-	fs::{self, File},
+	fs,
 	io::{self, Write},
 	iter,
 	path::{Path, PathBuf},
@@ -1243,7 +1243,7 @@ enum CountResult {
 fn word_count_from_input(input: &Input, settings: &Settings, host: &mut Host) -> CountResult {
 	let (total, maybe_err) = match input {
 		Input::Stdin(_) => word_count_from_reader(&mut host.stdin, settings),
-		Input::Path(path) => match File::open(host.resolve(path)) {
+		Input::Path(path) => match host.open_read(path) {
 			Ok(file) => word_count_from_reader(file, settings),
 			Err(error) => return CountResult::Failure(error),
 		},
@@ -1328,7 +1328,7 @@ fn files0_iter_file(
 	path: &Path,
 	host: &Host,
 ) -> Result<impl Iterator<Item = InputIterItem> + iter::FusedIterator, WcError> {
-	let file = File::open(host.resolve(path)).map_err(|source| WcError::Io {
+	let file = host.open_read(path).map_err(|source| WcError::Io {
 		context: format!(
 			"cannot open {} for reading",
 			quoting_style::locale_aware_escape_name(

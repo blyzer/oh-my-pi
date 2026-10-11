@@ -27,7 +27,7 @@ use jaq_core::{
 use jaq_json::Val;
 use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 
-use crate::host::{Host, StreamWriter, Utility, util};
+use crate::host::{Host, ReadOpener, StreamWriter, Utility, util};
 
 mod cli {
 	//! Command-line argument parsing.
@@ -284,7 +284,7 @@ mod filter {
 		load::{lex, parse},
 	};
 
-	use super::{Cli, Error, Val, read, runtime_cancelled, runtime_env, with_runtime};
+	use super::{Cli, Error, ReadOpener, Val, read, runtime_cancelled, runtime_env, with_runtime};
 
 	pub type Filter = jaq_core::Filter<Native<Val>>;
 
@@ -414,6 +414,7 @@ mod filter {
 	}
 
 	pub fn parse_compile(
+		opener: &ReadOpener,
 		path: &PathBuf,
 		code: &str,
 		vars: &[String],
@@ -428,7 +429,13 @@ mod filter {
 		let vars: Vec<_> = vars.iter().map(|v| format!("${v}")).collect();
 		let arena = Arena::default();
 		let defs = jaq_std::defs().chain(jaq_json::defs());
-		let loader = Loader::new(defs).with_std_read(paths);
+		// Modules are read through the shell's path policy, like every other
+		// file a builtin reads.
+		let loader = Loader::new(defs).with_read(|import: load::Import<&str, PathBuf>| {
+			let path = import.find(paths, "jq")?;
+			let code = opener.read_to_string(&path).map_err(|e| e.to_string())?;
+			Ok(File { code, path })
+		});
 		let path = path.into();
 		let modules = loader
 			.load(&arena, File { path, code })
@@ -437,7 +444,7 @@ mod filter {
 		let mut vals = Vec::new();
 		import(&modules, |p| {
 			let path = p.find(paths, "json")?;
-			vals.push(read::json_array(path).map_err(|e| e.to_string())?);
+			vals.push(read::json_array(opener, path).map_err(|e| e.to_string())?);
 			Ok(())
 		})
 		.map_err(load_errors)?;
@@ -616,26 +623,30 @@ mod filter {
 
 mod read {
 	use std::{
-		error, fs,
-		io::{self, BufRead},
+		error,
+		io::{self, BufRead, Read},
 		iter,
 		path::Path,
 	};
 
-	use super::{Cli, Val};
+	use super::{Cli, ReadOpener, Val};
 
 	/// Try to load file by memory mapping and fall back to regular loading if it
 	/// fails.
 	pub fn load_file(
+		opener: &ReadOpener,
 		path: impl AsRef<Path>,
 	) -> io::Result<Box<dyn core::ops::Deref<Target = [u8]>>> {
-		let path = path.as_ref();
-		let file = fs::File::open(path)?;
+		let mut file = opener.open(path)?;
 		// SAFETY: `file` remains open until map construction completes; the mapping
 		// owns its file-backed pages afterward.
 		match unsafe { memmap2::Mmap::map(&file) } {
 			Ok(mmap) => Ok(Box::new(mmap)),
-			Err(_) => Ok(Box::new(fs::read(path)?)),
+			Err(_) => {
+				let mut bytes = Vec::new();
+				file.read_to_end(&mut bytes)?;
+				Ok(Box::new(bytes))
+			},
 		}
 	}
 
@@ -664,8 +675,8 @@ mod read {
 		.fuse()
 	}
 
-	pub fn json_array(path: impl AsRef<Path>) -> io::Result<Val> {
-		json_slice(&load_file(path.as_ref())?).collect()
+	pub fn json_array(opener: &ReadOpener, path: impl AsRef<Path>) -> io::Result<Val> {
+		json_slice(&load_file(opener, path.as_ref())?).collect()
 	}
 
 	enum InputValues<R, J> {
@@ -1094,12 +1105,18 @@ fn runtime_cancelled() -> bool {
 
 fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 	let mut stdout = host.stdout_writer();
+	let opener = host.read_opener();
 	if let Some(test_files) = &cli.run_tests {
 		return Ok(match test_files.last() {
-			Some(file) => {
-				run_tests(io::BufReader::new(fs::File::open(file)?), &mut stdout, &mut host.stderr)
+			Some(file) => run_tests(
+				&opener,
+				io::BufReader::new(opener.open(file)?),
+				&mut stdout,
+				&mut host.stderr,
+			),
+			None => {
+				run_tests(&opener, io::BufReader::new(&mut host.stdin), &mut stdout, &mut host.stderr)
 			},
-			None => run_tests(io::BufReader::new(&mut host.stdin), &mut stdout, &mut host.stderr),
 		});
 	}
 
@@ -1109,10 +1126,11 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 		None => (Vec::new(), Filter::default()),
 		Some(filter) => {
 			let (path, code) = match filter {
-				cli::Filter::FromFile(path) => (path.into(), fs::read_to_string(path)?),
+				cli::Filter::FromFile(path) => (path.into(), opener.read_to_string(path)?),
 				cli::Filter::Inline(filter) => ("<inline>".into(), filter.clone()),
 			};
-			filter::parse_compile(&path, &code, &vars, &cli.library_path).map_err(Error::Report)?
+			filter::parse_compile(&opener, &path, &code, &vars, &cli.library_path)
+				.map_err(Error::Report)?
 		},
 	};
 	ctx.extend(vals);
@@ -1129,8 +1147,8 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 			// operations (open, metadata, in-place temp+rename) use the
 			// resolved path so nothing touches the host process cwd.
 			let path = file.as_path();
-			let file =
-				read::load_file(path).map_err(|e| Error::Io(Some(path.display().to_string()), e))?;
+			let file = read::load_file(&opener, path)
+				.map_err(|e| Error::Io(Some(path.display().to_string()), e))?;
 			let inputs = read::slice(cli, &file);
 			if cli.in_place {
 				host.ensure_writable(path)?;
@@ -1168,6 +1186,7 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 }
 
 fn binds(cli: &Cli, host: &Host) -> Result<Vec<(String, Val)>, Error> {
+	let opener = host.read_opener();
 	let arg = cli.arg.iter().map(|(k, s)| {
 		let s = s.to_owned();
 		Ok((k.to_owned(), Val::Str(s.into())))
@@ -1179,11 +1198,13 @@ fn binds(cli: &Cli, host: &Host) -> Result<Vec<(String, Val)>, Error> {
 		Ok((k.to_owned(), lexer.exactly_one(Val::parse).map_err(err)?))
 	});
 	let rawfile = cli.rawfile.iter().map(|(k, path)| {
-		let s = fs::read_to_string(path).map_err(|e| Error::Io(Some(format!("{path:?}")), e));
+		let s = host
+			.read_file_to_string(path)
+			.map_err(|e| Error::Io(Some(format!("{path:?}")), e));
 		Ok((k.to_owned(), Val::Str(s?.into())))
 	});
 	let slurpfile = cli.slurpfile.iter().map(|(k, path)| {
-		let a = read::json_array(path).map_err(|e| Error::Io(Some(format!("{path:?}")), e));
+		let a = read::json_array(&opener, path).map_err(|e| Error::Io(Some(format!("{path:?}")), e));
 		Ok((k.to_owned(), a?))
 	});
 
@@ -1262,9 +1283,9 @@ impl From<io::Error> for Error {
 	}
 }
 
-fn run_test(test: load::test::Test<String>) -> Result<(Val, Val), Error> {
-	let (ctx, filter) =
-		filter::parse_compile(&PathBuf::new(), &test.filter, &[], &[]).map_err(Error::Report)?;
+fn run_test(opener: &ReadOpener, test: load::test::Test<String>) -> Result<(Val, Val), Error> {
+	let (ctx, filter) = filter::parse_compile(opener, &PathBuf::new(), &test.filter, &[], &[])
+		.map_err(Error::Report)?;
 
 	let inputs = RcIter::new(Box::new(core::iter::empty()));
 	let ctx = Ctx::new(ctx, &inputs);
@@ -1281,7 +1302,12 @@ fn run_test(test: load::test::Test<String>) -> Result<(Val, Val), Error> {
 	Ok((expect?, obtain.map_err(Error::Jaq)?))
 }
 
-fn run_tests(read: impl BufRead, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+fn run_tests(
+	opener: &ReadOpener,
+	read: impl BufRead,
+	stdout: &mut dyn Write,
+	stderr: &mut dyn Write,
+) -> i32 {
 	let lines = read.lines().map(Result::unwrap);
 	let tests = test::Parser::new(lines);
 
@@ -1291,7 +1317,7 @@ fn run_tests(read: impl BufRead, stdout: &mut dyn Write, stderr: &mut dyn Write)
 			break;
 		}
 		let _ = writeln!(stdout, "Testing {}", test.filter);
-		match run_test(test) {
+		match run_test(opener, test) {
 			Err(e) => {
 				let _ = writeln!(stderr, "{e:?}");
 			},

@@ -11,13 +11,12 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	fs::File,
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
-use grep_cli::DecompressionReaderBuilder;
+use grep_cli::{CommandReaderBuilder, DecompressionMatcher};
 use grep_matcher::{Captures, LineTerminator, Matcher};
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_printer::{JSONBuilder, Stats};
@@ -1011,7 +1010,8 @@ fn read_pattern_file(host: &mut Host, path: &OsStr) -> Result<Vec<String>, Strin
 			.map_err(|err| format!("rg: -: {err}"))?;
 	} else {
 		let resolved = host.resolve(path);
-		File::open(&resolved)
+		host
+			.open_read(&resolved)
 			.and_then(|mut file| file.read_to_string(&mut text))
 			.map_err(|err| format!("rg: {}: {err}", path.to_string_lossy()))?;
 	}
@@ -1219,9 +1219,10 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 		None
 	} else {
 		let mut builder = GitignoreBuilder::new(&cwd);
+		let opener = host.read_opener();
 		for path in &cli.ignore_files {
 			let resolved = host.resolve(path);
-			if let Some(error) = builder.add(&resolved) {
+			if let Some(error) = opener.add_ignore_file(&mut builder, &resolved) {
 				return Err(format!("rg: {}: {error}", path.to_string_lossy()));
 			}
 		}
@@ -1343,21 +1344,26 @@ fn process_file<M: Matcher, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<SearchOutcome> {
-	let result = if cli.search_zip && !cli.no_search_zip {
-		let builder = DecompressionReaderBuilder::new();
-		if builder.get_matcher().has_command(path) {
-			builder
-				.build(path)
-				.map_err(|error| io::Error::other(error.to_string()))
-				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
-		} else {
-			File::open(path)
-				.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
-		}
-	} else {
-		File::open(path)
-			.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
-	};
+	let decompressor = (cli.search_zip && !cli.no_search_zip)
+		.then(|| DecompressionMatcher::new().command(path))
+		.flatten();
+	// The file is opened through the path policy and fed to the decompressor
+	// on stdin, so the child never opens a path the policy would refuse. A
+	// decompressor that cannot start falls back to the raw bytes, as ripgrep
+	// does.
+	let result = host.open_read(path).and_then(|file| match decompressor {
+		Some(decompressor) => {
+			let mut command = host.command(decompressor.get_program());
+			command.args(decompressor.get_args()).stdin(file);
+			match CommandReaderBuilder::new().build(&mut command) {
+				Ok(reader) => process_reader(matcher, searcher, reader, display, opts, stats, out),
+				Err(_) => host
+					.open_read(path)
+					.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out)),
+			}
+		},
+		None => process_reader(matcher, searcher, file, display, opts, stats, out),
+	});
 	match result {
 		Ok(any_match) => Ok(SearchOutcome { any_match, had_error: false }),
 		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
