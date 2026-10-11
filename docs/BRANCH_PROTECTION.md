@@ -97,13 +97,16 @@ baseline recorder: they are conditional, informational, or run only after a
 merge.
 
 On the push that a merge makes to `omp2`, `Pushed tree already verified` checks
-whether the merge commit's tree is identical to the merged pull request's head
-and whether that head's `Rust workspace and acceptance proofs` run passed. If
-both are true, the macOS job is skipped rather than run a second time on the
-one runner. With "Require branches to be up to date" off, the trees match only
-when the pull request had the current base merged in before it was merged;
-otherwise the push runs the full job as before. It runs only on pushes, so do
-not require it either.
+whether the merge commit's tree is one that a successful `Rust workspace and
+acceptance proofs` run on the merged pull request's head already proved. A pull
+request run checks out `refs/pull/N/merge` (the head merged into the base of
+that moment), so the job's last step records that tree as a `proved-tree`
+notice, and the push compares against the notice, not the head's own tree. If
+they match, the macOS job is skipped rather than run a second time on the one
+runner. They match only when `omp2` did not move between the pull request's
+last `rust` run and its merge; otherwise the push runs the full job. Before
+this notice existed the job compared the head's own tree, which a merge commit
+never has, so it never skipped. It runs only on pushes, so do not require it.
 
 CI is one workflow, `ci.yml`, and it runs on every pull request. It has no
 `paths` filter on `pull_request`: a workflow that a path filter keeps out of a
