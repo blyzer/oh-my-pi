@@ -1,0 +1,74 @@
+name: Source mtimes for a restored target
+description: >
+  Ages the checkout to a fixed epoch and leaves new only the paths that differ
+  from the commit the restored Cargo cache was saved at. Cargo compares
+  build-script inputs (cargo::rerun-if-changed) by mtime even with
+  checksum-freshness on, and actions/checkout makes every file new, so every
+  build script, and every crate above omp-proto, reran on each warm cache.
+  Fails safe: anything unexpected leaves the checkout's mtimes alone, which
+  is a full build-script rerun. Linux runners only (GNU touch).
+
+inputs:
+  matched-key:
+    description: cache-matched-key of the Cargo cache restore; empty when nothing was restored.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Age sources that match the cached commit
+      shell: bash
+      env:
+        MATCHED_KEY: ${{ inputs.matched-key }}
+      run: |
+        set -euo pipefail
+        # Every Cargo key ends in the commit it was saved at.
+        base="${MATCHED_KEY##*-}"
+        if [ -z "$MATCHED_KEY" ] || ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "No commit-keyed Cargo cache was restored; checkout mtimes left as they are"
+          exit 0
+        fi
+        if ! git cat-file -e "$base^{commit}" 2>/dev/null \
+          && ! git fetch --no-tags --depth=1 origin "$base"; then
+          echo "::warning::Cannot fetch cache commit $base; checkout mtimes left as they are"
+          exit 0
+        fi
+        changed=$(mktemp)
+        if ! git diff -z --name-only --no-renames "$base" HEAD > "$changed"; then
+          echo "::warning::Cannot diff against cache commit $base; checkout mtimes left as they are"
+          exit 0
+        fi
+        # Older than any build-script run the cache recorded. target/ is the
+        # restored cache and vendor/ the Python cache; both keep their own times.
+        epoch=946684800
+        find . \( -path ./.git -o -path ./target -o -path ./vendor \) -prune -o -print0 \
+          | xargs -0 -r touch -h -d "@$epoch"
+        # omp-app's build script tracks the tag refs. With no tags fetched they
+        # embed the same fallback changelog as the cached run did.
+        if [ -z "$(git tag --list)" ]; then
+          for ref in .git/packed-refs .git/refs/tags; do
+            if [ -e "$ref" ]; then
+              find "$ref" -print0 | xargs -0 -r touch -h -d "@$epoch"
+            fi
+          done
+        fi
+        # Changed paths and every parent directory stay new; parents cover
+        # deletions under a tracked directory such as crates/proto/proto.
+        count=0
+        while IFS= read -r -d '' path; do
+          if [ -e "$path" ] || [ -L "$path" ]; then
+            touch -h "$path"
+          fi
+          dir=$(dirname "$path")
+          while :; do
+            if [ -d "$dir" ]; then
+              touch -h "$dir"
+            fi
+            if [ "$dir" = . ]; then
+              break
+            fi
+            dir=$(dirname "$dir")
+          done
+          count=$((count + 1))
+        done < "$changed"
+        echo "Aged the checkout; $count path(s) differ from $base and stay new"
