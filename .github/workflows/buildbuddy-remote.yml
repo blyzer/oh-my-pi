@@ -24,8 +24,8 @@ concurrency:
 # This is intentionally push-only: the job gives a BuildBuddy credential to a
 # remote runner command. Pull requests from untrusted code must not receive it.
 jobs:
-  remote_envd:
-    name: BuildBuddy remote omp-envd
+  remote_heavy:
+    name: BuildBuddy remote Linux Cargo verification
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -50,5 +50,5 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/bin/bb"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: Run heavy verification remotely
-        run: scripts/remote-verify.sh test-pkg omp-envd
+      - name: Run Linux-valid Cargo verification remotely
+        run: scripts/remote-verify.sh remote-heavy
