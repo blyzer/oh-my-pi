@@ -129,6 +129,17 @@ remote-test-pkg pkg:
 remote-seed:
     scripts/remote-verify.sh --seed test-pkg omp-envd
 
+
+# Run the Linux-valid Cargo verification set in one remote runner so the
+# runner-home Cargo target and Python cache are reused between phases. Protobuf
+# checks remain in the GitHub gate because they need the repository's `buf`.
+[group('remote')]
+remote-heavy:
+    cargo check --workspace --locked
+    cargo nextest run --workspace --exclude omp-e2e --locked
+    cargo test --doc --workspace --exclude omp-e2e --locked
+    CARGO_TARGET_DIR=target/clippy cargo clippy --workspace --all-targets --locked
+
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
 lint: fmt-check clippy proto-lint lint-locked-maps lintx-ratchet
