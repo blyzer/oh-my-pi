@@ -169,7 +169,7 @@ jobs:
       - name: Select pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Cache lintx build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -208,7 +208,7 @@ jobs:
       # ten-second check. The versions are pinned, so the binaries are too.
       - name: Cache pinned compliance tools
         id: compliance-tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/bin/just
@@ -225,14 +225,18 @@ jobs:
         run: just license-check
 
   # A push to omp2 or main is almost always a pull request's merge commit.
-  # When that pull request's head already contained the base, the merge
-  # commit has exactly the tree the pull request's own `rust` run just
-  # proved, and running it again only occupies the macOS runner for another
-  # 8-15 minutes per merge. This job finds the merged pull request, compares
-  # the pushed tree with its head's, and reads the head's latest `rust` check
-  # run. `rust` skips only on an identical tree whose run concluded success;
-  # anything else (a direct push, a head behind its base, an API error, a
-  # failure of this job) leaves `verified` unset and `rust` runs as before.
+  # A pull request run does not test its head: actions/checkout checks out
+  # refs/pull/N/merge, the head merged into the base of that moment. When the
+  # base has not moved since, the merge commit has exactly that tree, and
+  # running `rust` again only occupies the macOS runner for another 8-15
+  # minutes per merge. This job finds the merged pull request, reads the tree
+  # each successful `rust` run on its head recorded (the `proved-tree` notice,
+  # written by that job's last step), and compares it with the pushed tree.
+  # Comparing against the head's own tree never matches a merge commit, so
+  # an earlier version of this job never skipped anything.
+  # `rust` skips only on an exact match; anything else (a direct push, a base
+  # that moved, a run from before the notice existed, an API error, a failure
+  # of this job) leaves `verified` unset and `rust` runs as before.
   push_verified:
     name: Pushed tree already verified
     if: github.event_name == 'push'
@@ -261,20 +265,24 @@ jobs:
             exit 0
           fi
           pushed=$(gh api "repos/$REPO/commits/$SHA" --jq .commit.tree.sha)
-          tested=$(gh api "repos/$REPO/commits/$head" --jq .commit.tree.sha)
-          if [ "$pushed" != "$tested" ]; then
-            echo "Pushed tree $pushed differs from head $head's $tested; running the macOS job"
-            exit 0
-          fi
           encoded=$(jq -rn --arg name "$CHECK" '$name | @uri')
-          conclusion=$(gh api "repos/$REPO/commits/$head/check-runs?check_name=$encoded&filter=latest" \
-            --jq '[.check_runs[] | select(.app.slug == "github-actions")][0].conclusion // empty')
-          if [ "$conclusion" != "success" ]; then
-            echo "Head $head's '$CHECK' concluded '${conclusion:-none}'; running the macOS job"
+          runs=$(gh api --paginate "repos/$REPO/commits/$head/check-runs?check_name=$encoded&filter=all" \
+            --jq '.check_runs[] | select(.app.slug == "github-actions" and .conclusion == "success") | .id')
+          if [ -z "$runs" ]; then
+            echo "Head $head has no successful '$CHECK' run; running the macOS job"
             exit 0
           fi
-          echo "Tree $pushed already passed '$CHECK' on $head; skipping the macOS job"
-          echo "verified=true" >> "$GITHUB_OUTPUT"
+          for run in $runs; do
+            proved=$(gh api "repos/$REPO/check-runs/$run/annotations" \
+              --jq '[.[] | select(.title == "proved-tree") | .message][0] // empty')
+            if [ "$proved" = "$pushed" ]; then
+              echo "Tree $pushed already passed '$CHECK' (check run $run on $head); skipping the macOS job"
+              echo "verified=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Check run $run proved tree '${proved:-unrecorded}', not $pushed"
+          done
+          echo "No successful '$CHECK' run on $head proved tree $pushed; running the macOS job"
 
   rust:
     name: Rust workspace and acceptance proofs
@@ -372,7 +380,7 @@ jobs:
         # its target directory outside the checkout (see above). The new key
         # prefix keeps old entries, which contain target/, from being restored.
         if: runner.environment == 'github-hosted'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -433,6 +441,14 @@ jobs:
       - name: Validate P8 baseline contract
         run: cargo nextest run --profile ci -p omp-e2e --test p8_baselines --locked
 
+      # Last step, so it only runs when everything above passed. A pull
+      # request run checks out refs/pull/N/merge (its head merged into the base
+      # of that moment), not the head itself; this notice names the tree that
+      # was actually proved, and `push_verified` compares a merge commit's tree
+      # against it.
+      - name: Record the proved tree
+        run: echo "::notice title=proved-tree::$(git rev-parse 'HEAD^{tree}')"
+
   # The macOS clippy pass on its own runner, in parallel with `rust`. Not a
   # required check yet. Once it has reported green on a pull request, it joins
   # the ruleset and the `Lint workspace` step leaves `rust`, taking 553.5 s
@@ -480,7 +496,7 @@ jobs:
 
       - name: Restore Cargo registry
         if: runner.environment == 'github-hosted'
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -528,7 +544,7 @@ jobs:
 
       - name: Cache embedded Python
         id: python-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: vendor/python
           key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
@@ -542,7 +558,7 @@ jobs:
 
       - name: Restore Cargo cache
         id: cargo-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -571,7 +587,7 @@ jobs:
       # request restores from (docs/research/ci-test-acceleration.md §4).
       - name: Save Cargo cache
         if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -622,7 +638,7 @@ jobs:
         id: python-cache
         # lint_linux is this key's only writer: three jobs saving it raced
         # ("Unable to reserve cache" in 7 of 30 Linux logs).
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: vendor/python
           key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
@@ -638,7 +654,7 @@ jobs:
 
       - name: Restore Cargo cache
         id: cargo-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -679,7 +695,7 @@ jobs:
       # (docs/research/ci-test-acceleration.md §4).
       - name: Save Cargo cache
         if: github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -724,7 +740,7 @@ jobs:
         id: python-cache
         # lint_linux is this key's only writer: three jobs saving it raced
         # ("Unable to reserve cache" in 7 of 30 Linux logs).
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: vendor/python
           key: python-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
@@ -742,7 +758,7 @@ jobs:
       # never writes, so the graph is stored once per ref.
       - name: Restore Cargo cache
         id: cargo-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry/index
