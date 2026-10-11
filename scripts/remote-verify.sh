@@ -76,7 +76,7 @@ if [ -n "${BUILDBUDDY_API_KEY-}" ]; then
     # Match BuildBuddy's documented GitHub Actions pattern. The credential is
     # consumed by the local bb client request; the remote runner script unsets
     # BUILDBUDDY_API_KEY before running repository commands.
-    args+=("--remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY")
+	args+=("--remote_run_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY")
 fi
 if [ "$seed" = true ]; then
     args+=(
