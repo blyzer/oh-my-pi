@@ -38,7 +38,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::{FastHashSet, Str};
+use omp_core::{FastHashSet, Str, project_file::Containment};
 use omp_envd::{
 	docserver::{
 		dap_adapter::builtin_adapters,
@@ -246,6 +246,7 @@ pub(super) fn import(
 				source.locate(V1Item::Ssh),
 				config,
 				&config.join(HOSTS_FILE),
+				Containment::Unconfined,
 				source.home(),
 				&mut std::collections::BTreeSet::new(),
 			)?;

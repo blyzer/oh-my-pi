@@ -8,6 +8,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+use omp_core::project_file::Containment;
 use omp_envd::{
 	docserver::lsp_config::discover_native_lsp_sources,
 	mcp::{McpConfigPaths, config_store::McpConfigStore},
@@ -470,7 +471,7 @@ fn ssh_json_converts_to_hosts_toml() {
 
 	let report = apply(&fixture.pairs()[..1]);
 
-	let hosts = HostStore::load(&hosts_toml).expect("hosts.toml");
+	let hosts = HostStore::load(&hosts_toml, Containment::Unconfined).expect("hosts.toml");
 	let mut build = HostConfig::new(
 		"build.example".into(),
 		"ci".into(),
@@ -737,7 +738,8 @@ fn project_root_ssh_files_convert_in_v1_order() {
 			.all(|entry| matches!(entry.outcome, ImportOutcome::Skipped(SkipReason::ShadowedInV1)))
 	);
 
-	let hosts = HostStore::load(&omp.join("hosts.toml")).expect("project hosts.toml");
+	let hosts = HostStore::load(&omp.join("hosts.toml"), Containment::Unconfined)
+		.expect("project hosts.toml");
 	assert_eq!(
 		hosts
 			.aliases()
@@ -845,7 +847,7 @@ fn home_root_ssh_files_become_user_hosts() {
 	assert!(matches!(report[5].outcome, ImportOutcome::Skipped(SkipReason::ShadowedInV1)));
 	assert!(matches!(report[6].outcome, ImportOutcome::Skipped(SkipReason::InsideV1Root)));
 
-	let hosts = HostStore::load(&hosts_toml).expect("user hosts.toml");
+	let hosts = HostStore::load(&hosts_toml, Containment::Unconfined).expect("user hosts.toml");
 	assert_eq!(
 		hosts
 			.aliases()

@@ -25,7 +25,10 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::{Hash32, StrMut};
+use omp_core::{
+	Hash32, StrMut,
+	project_file::{Containment, containment_root},
+};
 use omp_ext::workspace_trust::inventory::{HOSTS_FILE, MCP_FILE};
 
 use super::{AssetError, Entries, mcp, ssh, write};
@@ -120,12 +123,14 @@ fn import_home_hosts(
 		.config_dir
 		.join(HOSTS_FILE);
 	let mut out = Entries { step: ImportStep::SshHosts, mode, list: Vec::new() };
-	let converted = convert_host_files(&mut out, project, &omp, &hosts, &layout).and_then(|()| {
-		if mode == ImportMode::Apply {
-			write_marker(marker, project)?;
-		}
-		Ok(())
-	});
+	let converted =
+		convert_host_files(&mut out, project, &omp, &hosts, Containment::Unconfined, &layout)
+			.and_then(|()| {
+				if mode == ImportMode::Apply {
+					write_marker(marker, project)?;
+				}
+				Ok(())
+			});
 	let mut entries = out.list;
 	for entry in &mut entries {
 		entry.subject = entry.subject.take().map(|subject| {
@@ -192,22 +197,25 @@ fn convert(
 /// Converts every project host file v1 read into `.omp/hosts.toml`, in v1's
 /// order. The v1 user `ssh.json` sits between `.omp/ssh.json` and the root
 /// files: its hosts go to the user `hosts.toml` (the `ssh-hosts` step), and a
-/// root-file host of the same name was never used by v1.
+/// root-file host of the same name was never used by v1. The project file is
+/// read and written inside the repository, like every other project writer.
 fn convert_hosts(
 	out: &mut Entries,
 	project: &Path,
 	omp: &Path,
 	layout: &V1Layout,
 ) -> Result<(), AssetError> {
-	convert_host_files(out, project, omp, &omp.join(HOSTS_FILE), layout)
+	let root = containment_root(project);
+	convert_host_files(out, project, omp, &omp.join(HOSTS_FILE), Containment::Within(root), layout)
 }
 
-/// [`convert_hosts`] into `hosts`.
+/// [`convert_hosts`] into `hosts`, read and written under `containment`.
 fn convert_host_files(
 	out: &mut Entries,
 	project: &Path,
 	omp: &Path,
 	hosts: &Path,
+	containment: Containment<'_>,
 	layout: &V1Layout,
 ) -> Result<(), AssetError> {
 	let home = layout.home();
@@ -219,6 +227,7 @@ fn convert_host_files(
 		present(omp.join("ssh.json")),
 		project,
 		hosts,
+		containment,
 		home,
 		&mut claimed,
 	)?;
@@ -227,7 +236,16 @@ fn convert_host_files(
 	}
 	for name in ROOT_SSH {
 		if let Some(source) = present(project.join(name)) {
-			ssh::convert(out, V1Item::Ssh, Some(source), project, hosts, home, &mut claimed)?;
+			ssh::convert(
+				out,
+				V1Item::Ssh,
+				Some(source),
+				project,
+				hosts,
+				containment,
+				home,
+				&mut claimed,
+			)?;
 		}
 	}
 	Ok(())

@@ -14,7 +14,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use omp_core::Str;
+use omp_core::{Str, project_file::Containment};
 use omp_envd::ssh::{
 	AuthPolicy, HostConfig, HostStore, known_host_fingerprint, validate_configured_host,
 };
@@ -155,18 +155,21 @@ pub(super) fn declared(source: &Path) -> BTreeSet<Str> {
 		.unwrap_or_default()
 }
 
-/// Converts the v1 hosts in `source` into `destination`.
+/// Converts the v1 hosts in `source` into `destination`, read and written
+/// under `containment` (the project scope stays inside the repository).
 ///
 /// `claimed` holds the names earlier v1 sources declared: v1 kept the first
 /// host of a name, so a claimed name is reported as
 /// [`SkipReason::ShadowedInV1`] and not converted. The names `source`
 /// declares join it.
+#[expect(clippy::too_many_arguments, reason = "one call per v1 host source")]
 pub(super) fn convert(
 	out: &mut Entries,
 	item: V1Item,
 	source: Option<PathBuf>,
 	root: &Path,
 	destination: &Path,
+	containment: Containment<'_>,
 	home: &Path,
 	claimed: &mut BTreeSet<Str>,
 ) -> Result<(), AssetError> {
@@ -194,7 +197,7 @@ pub(super) fn convert(
 		out.push(item, Some(source), None, ImportOutcome::NothingToImport);
 		return Ok(());
 	}
-	let store = HostStore::load(destination).map_err(AssetError::SshStore)?;
+	let store = HostStore::load(destination, containment).map_err(AssetError::SshStore)?;
 	let existing = store.aliases();
 	for (alias, v1) in file.hosts {
 		if !claimed.insert(alias.clone()) {

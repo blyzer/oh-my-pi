@@ -44,6 +44,10 @@ use parking_lot::Mutex;
 /// never a document.
 pub const PROJECT_CFG_LIMIT: u64 = 256 * 1024;
 
+/// Largest user-owned file a cfg transaction reads (a generated cfg, or a
+/// shell profile carrying the alias block).
+pub const USER_CFG_LIMIT: u64 = 4 * 1024 * 1024;
+
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Cfg script resolution for one process: user root plus optional project.
@@ -210,12 +214,10 @@ fn io_error(operation: ConfigOperation, path: &Path, source: io::Error) -> ConEr
 	ConfigIoError::new(operation, path.to_path_buf(), source).into()
 }
 
+/// A user-owned file: its owner may symlink it anywhere, but a FIFO, device,
+/// or runaway file is refused rather than read.
 fn read_optional(path: &Path) -> ConResult<Option<String>> {
-	match fs::read_to_string(path) {
-		Ok(text) => Ok(Some(text)),
-		Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
-		Err(source) => Err(io_error(ConfigOperation::Read, path, source)),
-	}
+	Ok(project_file::read_text(path, Containment::Unconfined, USER_CFG_LIMIT)?)
 }
 
 /// Reads one cfg with typed filesystem attribution and in-memory schema
@@ -234,6 +236,12 @@ fn project_root_of(cfg_path: &Path) -> &Path {
 		.and_then(Path::parent)
 		.filter(|root| !root.as_os_str().is_empty())
 		.unwrap_or_else(|| Path::new("."))
+}
+
+/// The stable sibling `<name>.cfg.lock` that serializes transactions on
+/// `cfg_path`.
+fn lock_path_of(cfg_path: &Path) -> PathBuf {
+	cfg_path.with_extension("cfg.lock")
 }
 
 /// Reads a project cfg overlay (`<project>/.omp/<name>.cfg`) through the
@@ -275,16 +283,18 @@ impl ConfigFileLock {
 	}
 
 	/// Locks a project cfg (`<project>/.omp/<name>.cfg`). Reads are contained
-	/// like [`read_project_config`], and the lock, and every later write,
-	/// refuses a symlink or non-regular `path` or a directory that resolves
-	/// outside the project, since the repository supplied it.
+	/// like [`read_project_config`], and the lock file, the lock, and every
+	/// later write refuse a symlink or non-regular `path` or a directory that
+	/// resolves outside the project, since the repository supplied it.
 	///
 	/// # Errors
 	///
-	/// [`ConError::ProjectFile`] when the target is refused, plus the errors
-	/// of [`ConfigFileLock::acquire`].
+	/// [`ConError::ProjectFile`] when the target or its lock file is refused,
+	/// plus the errors of [`ConfigFileLock::acquire`].
 	pub fn acquire_project(path: PathBuf) -> ConResult<Self> {
-		project_file::check_write_target(&path, project_root_of(&path))?;
+		let root = project_root_of(&path);
+		project_file::check_write_target(&path, root)?;
+		project_file::check_write_target(&lock_path_of(&path), root)?;
 		Self::lock(path, true)
 	}
 
@@ -292,11 +302,17 @@ impl ConfigFileLock {
 		let parent = path.parent().unwrap_or_else(|| Path::new("."));
 		fs::create_dir_all(parent)
 			.map_err(|source| io_error(ConfigOperation::Create, parent, source))?;
-		let lock_path = path.with_extension("cfg.lock");
-		let lock = OpenOptions::new()
-			.read(true)
-			.write(true)
-			.create(true)
+		let lock_path = lock_path_of(&path);
+		let mut options = OpenOptions::new();
+		options.read(true).write(true).create(true);
+		// A project lock never follows a link swapped in after the check, so
+		// `O_CREAT` cannot create a file outside the repository.
+		#[cfg(unix)]
+		if project {
+			use std::os::unix::fs::OpenOptionsExt as _;
+			options.custom_flags(libc::O_NOFOLLOW);
+		}
+		let lock = options
 			.open(&lock_path)
 			.map_err(|source| io_error(ConfigOperation::Lock, &lock_path, source))?;
 		lock_exclusive(&lock)
@@ -898,5 +914,82 @@ mod tests {
 		symlink(&victim, &target).unwrap();
 		assert!(matches!(lock.replace("ai_thinking high\n"), Err(ConError::ProjectFile(_))));
 		assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+	}
+
+	/// A repository may ship a dangling `.omp/<name>.cfg.lock` symlink: taking
+	/// the project lock refuses it instead of creating the link's target.
+	#[cfg(unix)]
+	#[test]
+	fn project_cfg_lock_refuses_a_dangling_symlink() {
+		use std::os::unix::fs::symlink;
+
+		use omp_core::project_file::Refusal;
+
+		let dir = tempfile::tempdir().unwrap();
+		let project = dir.path().join("proj");
+		fs::create_dir_all(project.join(".omp")).unwrap();
+		let victim = dir.path().join("outside-lock");
+		symlink(&victim, project.join(".omp/config.cfg.lock")).unwrap();
+
+		let refused = ConfigFileLock::acquire_project(project.join(".omp/config.cfg"))
+			.err()
+			.expect("a symlinked lock file is refused");
+		assert!(matches!(
+			&refused,
+			ConError::ProjectFile(error) if error.refusal() == Some(Refusal::Symlink)
+		));
+		assert!(fs::symlink_metadata(&victim).is_err(), "no file was created outside the repository");
+	}
+
+	/// The lock open itself does not follow a link swapped in after the check.
+	#[cfg(unix)]
+	#[test]
+	fn project_cfg_lock_open_does_not_follow_a_symlink() {
+		use std::os::unix::fs::symlink;
+
+		let dir = tempfile::tempdir().unwrap();
+		let project = dir.path().join("proj");
+		fs::create_dir_all(project.join(".omp")).unwrap();
+		let victim = dir.path().join("outside-lock");
+		symlink(&victim, project.join(".omp/config.cfg.lock")).unwrap();
+
+		assert!(matches!(
+			ConfigFileLock::lock(project.join(".omp/config.cfg"), true),
+			Err(ConError::ConfigIo(ConfigIoError { operation: ConfigOperation::Lock, .. }))
+		));
+		assert!(fs::symlink_metadata(&victim).is_err());
+	}
+
+	/// A user cfg is the user's own file and may be a symlink, but a FIFO there
+	/// is refused rather than blocking the load.
+	#[cfg(unix)]
+	#[test]
+	fn user_cfg_read_refuses_a_fifo_without_blocking() {
+		use std::{process::Command, sync::mpsc, thread, time::Duration};
+
+		use omp_core::project_file::{ProjectFileError, Refusal};
+
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().join(".o2");
+		fs::create_dir_all(&root).unwrap();
+		assert!(
+			Command::new("mkfifo")
+				.arg(root.join("config.cfg"))
+				.status()
+				.unwrap()
+				.success()
+		);
+		let files = CfgFiles::with_roots(root, None);
+		let (sender, receiver) = mpsc::channel();
+		thread::spawn(move || {
+			let _ = sender.send(files.load("config").err());
+		});
+		let error = receiver
+			.recv_timeout(Duration::from_secs(10))
+			.expect("a FIFO user cfg must be refused, not read");
+		assert!(matches!(
+			error,
+			Some(ConError::ProjectFile(ProjectFileError::Refused { reason: Refusal::NotRegular, .. }))
+		));
 	}
 }

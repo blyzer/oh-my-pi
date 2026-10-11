@@ -7,7 +7,7 @@ use std::{
 
 use clap::{Args, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
-use omp_core::Str;
+use omp_core::{Str, project_file::Containment};
 use omp_envd::ssh::{AuthPolicy, HostConfig, HostPaths, HostStore, SshService};
 
 /// Native SSH command options.
@@ -85,11 +85,15 @@ pub enum SshCommand {
 
 /// Runs scoped writer and bounded native transport operations.
 pub async fn run(args: SshArgs) -> miette::Result<()> {
-	let paths = host_paths()?;
+	run_in(args, &host_paths()?).await
+}
+
+/// [`run`] against an explicit `hosts.toml` pair.
+async fn run_in(args: SshArgs, paths: &HostPaths) -> miette::Result<()> {
 	match args.command {
 		SshCommand::List { scope } => {
-			for (label, path) in scoped_paths(scope, &paths) {
-				let store = HostStore::load(path).into_diagnostic()?;
+			for (label, path, containment) in scoped_paths(scope, paths) {
+				let store = HostStore::load(path, containment).into_diagnostic()?;
 				for alias in store.aliases() {
 					let host = store.get(alias.as_str()).into_diagnostic()?;
 					println!("{label}\t{}\t{}@{}:{}", alias, host.user, host.address, host.port);
@@ -98,8 +102,8 @@ pub async fn run(args: SshArgs) -> miette::Result<()> {
 			Ok(())
 		},
 		SshCommand::Add { alias, host, user: remote_user, port, host_key, key, scope } => {
-			let path = scope_path(scope, &paths);
-			let store = HostStore::load(path).into_diagnostic()?;
+			let (path, containment) = scope_path(scope, paths);
+			let store = HostStore::load(path, containment).into_diagnostic()?;
 			store
 				.upsert(path, alias.clone(), HostConfig {
 					address: host,
@@ -114,8 +118,8 @@ pub async fn run(args: SshArgs) -> miette::Result<()> {
 			Ok(())
 		},
 		SshCommand::Remove { alias, scope } => {
-			let path = scope_path(scope, &paths);
-			let removed = HostStore::load(path)
+			let (path, containment) = scope_path(scope, paths);
+			let removed = HostStore::load(path, containment)
 				.into_diagnostic()?
 				.remove(path, alias.as_str())
 				.into_diagnostic()?;
@@ -129,13 +133,13 @@ pub async fn run(args: SshArgs) -> miette::Result<()> {
 			Ok(())
 		},
 		SshCommand::Probe { alias } => {
-			let service = service(alias.as_str(), &paths)?;
+			let service = service(alias.as_str(), paths)?;
 			let caps = service.probe(alias.as_str()).await.into_diagnostic()?;
 			println!("{}: exec={} sftp={}", alias, caps.exec, caps.sftp);
 			Ok(())
 		},
 		SshCommand::Exec { alias, command } => {
-			let service = service(alias.as_str(), &paths)?;
+			let service = service(alias.as_str(), paths)?;
 			let command = command
 				.iter()
 				.map(Str::as_str)
@@ -174,17 +178,78 @@ pub(crate) fn service(alias: &str, paths: &HostPaths) -> miette::Result<SshServi
 	Ok(SshService::new(store))
 }
 
-fn scope_path(scope: SshScope, paths: &HostPaths) -> &Path {
+/// The file one scope writes and how it is read: the project file must
+/// resolve inside the repository, so a `.omp` linked outside is refused
+/// rather than written through.
+fn scope_path(scope: SshScope, paths: &HostPaths) -> (&Path, Containment<'_>) {
 	match scope {
-		SshScope::Project => &paths.project,
-		SshScope::User => &paths.user,
+		SshScope::Project => (&paths.project, Containment::Within(&paths.root)),
+		SshScope::User => (&paths.user, Containment::Unconfined),
 	}
 }
 
-fn scoped_paths(scope: Option<SshScope>, paths: &HostPaths) -> Vec<(&'static str, &Path)> {
+fn scoped_paths(
+	scope: Option<SshScope>,
+	paths: &HostPaths,
+) -> Vec<(&'static str, &Path, Containment<'_>)> {
+	let entry = |label, scope| {
+		let (path, containment) = scope_path(scope, paths);
+		(label, path, containment)
+	};
 	match scope {
-		Some(SshScope::Project) => vec![("project", paths.project.as_path())],
-		Some(SshScope::User) => vec![("user", paths.user.as_path())],
-		None => vec![("project", paths.project.as_path()), ("user", paths.user.as_path())],
+		Some(SshScope::Project) => vec![entry("project", SshScope::Project)],
+		Some(SshScope::User) => vec![entry("user", SshScope::User)],
+		None => vec![entry("project", SshScope::Project), entry("user", SshScope::User)],
+	}
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use std::{fs, os::unix::fs::symlink};
+
+	use clap::Parser as _;
+
+	use super::*;
+
+	#[derive(clap::Parser)]
+	struct Cli {
+		#[command(flatten)]
+		args: SshArgs,
+	}
+
+	/// `omp ssh add` defaults to the project scope: in a repository whose
+	/// `.omp` links outside it, the add is refused and writes nothing there.
+	#[tokio::test]
+	async fn ssh_add_refuses_a_project_omp_linked_outside() {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let project = temp.path().join("project");
+		let outside = temp.path().join("outside");
+		fs::create_dir_all(project.join(".git")).expect("repository marker");
+		fs::create_dir_all(&outside).expect("outside directory");
+		symlink(&outside, project.join(".omp")).expect("outside .omp link");
+		let paths = HostPaths::new(&temp.path().join("o2"), &project);
+		let add = Cli::parse_from([
+			"ssh",
+			"add",
+			"build",
+			"--host",
+			"build.example",
+			"--user",
+			"ci",
+			"--host-key",
+			"SHA256:test",
+		]);
+
+		let error = run_in(add.args, &paths)
+			.await
+			.expect_err("an outside .omp is refused");
+		assert!(error.to_string().contains("outside the project root"), "{error}");
+		assert!(
+			fs::read_dir(&outside)
+				.expect("outside listing")
+				.next()
+				.is_none(),
+			"nothing was written outside the repository"
+		);
 	}
 }
