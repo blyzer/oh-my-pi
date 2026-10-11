@@ -40,11 +40,12 @@ Everything that was in flight on 2026-10-09 has landed (see the next two section
    - an in-process builtin;
    - a URL inside a longer argument;
    - a raw address.
-6. **BuildBuddy CI job** (`.github/workflows/buildbuddy-remote.yml`, #240-#247).
+6. **BuildBuddy CI job** (#240-#247, fixed by #250).
    - It failed on every `omp2` push until #250. Under `pipefail`, `scripts/remote-verify.sh` exited
      silently when `origin/HEAD` was missing, which is always the case after `actions/checkout`.
-   - The first run after #250 (`506b7c143e`) was still running when this was written. Check that it
-     passes.
+   - The first run after #250 (`506b7c143e`, run 38127067863) passed in about 15 minutes cold.
+   - The job now lives in `ci.yml` as the required check `Remote Linux verification (BuildBuddy)`;
+     the push-only `buildbuddy-remote.yml` was removed.
 7. **Carried-over backlog.** The owner deferred it on 2026-10-11. The items under "Carried over"
    below are unchanged.
 
