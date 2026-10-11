@@ -1150,6 +1150,36 @@ fn owner_worktree_api_preserves_typed_merge_disposition() {
 }
 
 #[test]
+fn visibility_receipt_client_transports_populated_and_empty_lines() {
+	for lines in [Vec::new(), vec![frame::VisibleSourceLine { source_key: "source".to_owned(), line: 7 }]] {
+		let (client, transport) = EnvClient::in_process(0);
+		let (requests, responses) = transport.into_parts();
+		let expected = frame::VisibilityAuthorization { name: "grep".to_owned(), rev: "core@1".to_owned(), verdict: Bytes::from_static(br#"{"kind":"ok","value":null}"#), lines };
+		let request = expected.clone();
+		let server = thread::spawn(move || {
+			let incoming = receive(&requests);
+			assert!(incoming.scope.is_none());
+			assert!(matches!(incoming.body, Some(client_frame::Body::Data(frame::DataRequest { body: Some(data_request::Body::Visibility(actual)), .. })) if actual == expected));
+			respond(&responses, incoming.request_id, server_frame::Body::Data(frame::DataResponse { body: Some(data_response::Body::Visibility(frame::VisibilityAuthorized {})), ..Default::default() }));
+		});
+		block_on(client.authorize_visibility(request)).expect("authority acknowledged receipt");
+		server.join().expect("visibility server");
+	}
+}
+
+#[test]
+fn visibility_receipt_client_propagates_authority_rejection() {
+	let (client, transport) = EnvClient::in_process(0);
+	let (requests, responses) = transport.into_parts();
+	let server = thread::spawn(move || {
+		let request = receive(&requests);
+		respond(&responses, request.request_id, server_frame::Body::Error(frame::ProtocolError { code: frame::ProtocolErrorCode::PermissionDenied as i32, message: "rejected".to_owned(), ..Default::default() }));
+	});
+	assert!(block_on(client.authorize_visibility(frame::VisibilityAuthorization { name: "grep".to_owned(), rev: "core@1".to_owned(), ..Default::default() })).is_err());
+	server.join().expect("visibility server");
+}
+
+#[test]
 fn host_info_api_preserves_versioned_bounded_facts() {
 	let (client, transport) = EnvClient::in_process(0);
 	let (requests, responses) = transport.into_parts();
