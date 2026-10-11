@@ -9,7 +9,7 @@ code; apply them once in the GitHub UI.
 
 | Workflow | What it does | Gating |
 |---|---|---|
-| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests, P1-P8 and P12 on macOS, P7 on a Linux PTY, P9, P10, P11 and `tool_sources` on Linux | Required (see below) |
+| `CI` (`ci.yml`) | Format, licences, runtime-symbol contracts, Linux lint, workspace tests, P1-P8 and P12 on macOS, P7 on a Linux PTY, P9, P10, P11 and `tool_sources` on Linux, `just remote-heavy` on a BuildBuddy remote Linux runner | Required (see below) |
 | `Package macOS` (`package-macos.yml`) | Release build, package, install smoke; only when the workflow or its scripts change | Not required |
 | `PR labels` (`pr-labels.yml`) | `area/*`, `kind/*`, `risk/*` labels from `.github/labeler.yml`, then `size/xs` .. `size/xl` labels and one comment on `size/xl` | Informational |
 
@@ -31,7 +31,7 @@ The ruleset below is also kept as importable JSON in
 To apply it: **Settings > Rules > Rulesets > New ruleset > Import a ruleset**, choose that file, review
 it and save. The JSON targets `refs/heads/omp2` only, lets the repository **Admin** role bypass it
 (`bypass_mode: always`, so the owner can still push to `omp2` directly and merge with failing or
-pending checks when a runner is down), allows only merge commits, requires the eight status checks
+pending checks when a runner is down), allows only merge commits, requires the nine status checks
 listed below and resolved review threads, and leaves "up to date" and linear history off. Keep the file
 and the table below in sync.
 
@@ -66,6 +66,7 @@ Use the job names exactly as the checks list of a pull request shows them:
 - `Terminal proof P7 (Linux PTY)`
 - `Acceptance proofs P9, P10 and tool sources (Linux)`
 - `Error-formatting ratchet (lintx)`
+- `Remote Linux verification (BuildBuddy)`
 
 `Acceptance proofs P9, P10 and tool sources (Linux)` runs on a GitHub-hosted
 runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
@@ -76,6 +77,20 @@ existing required checks keep their names.
 well and is required (it reported green on a pull request before it was added).
 It is a job of `ci.yml` like the others, so it is skipped, and passes, on pull
 requests that change no CI path.
+
+`Remote Linux verification (BuildBuddy)` (ADR 0040) runs `just remote-heavy` on
+a BuildBuddy remote Linux runner, driven from a hosted runner. It needs the
+`BUILDBUDDY_ORG_API_KEY` repository secret, which `bb` hands to every process
+of the remote run, so only code from this repository ever gets it: pushes,
+`workflow_dispatch` and pull requests from branches of this repository run it
+for real. A pull request from a fork gets no secrets; the job skips its remote
+steps with a notice and passes, and the other required jobs still verify that
+code. It never runs on `pull_request_target`. A trusted run with the secret
+missing fails rather than pass. A cold run takes about 15 minutes (run
+38127067863). If BuildBuddy is down, the check fails or stays pending; the
+escape hatch is the ruleset's admin bypass, as for the macOS runner below. It
+replaces the push-only `buildbuddy-remote.yml` workflow, so each change runs it
+once.
 
 Do **not** require `Package macOS`, `PR labels`, or the P8
 baseline recorder: they are conditional, informational, or run only after a
@@ -96,7 +111,7 @@ pull request reports nothing, so its required checks would wait forever. A job
 named `changes` lists the pull request's files through the API and matches them
 against `.github/ci-paths.txt` (one glob per line, `**` crosses directories).
 When nothing matches, every other job is skipped, and GitHub counts a skipped
-required check as passing. A docs-only pull request therefore gets all eight
+required check as passing. A docs-only pull request therefore gets all nine
 checks without running them; one that touches a CI path runs them for real.
 
 Why one workflow and not a second one that reports the same names for skipped
