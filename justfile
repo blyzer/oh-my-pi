@@ -129,6 +129,10 @@ remote-test-pkg pkg:
 remote-seed:
     scripts/remote-verify.sh --seed test-pkg omp-envd
 
+## Fast connectivity/auth probe; no Cargo work.
+[group('remote')]
+remote-probe:
+    printf 'buildbuddy remote probe ok\\n'
 
 # Run the Linux-valid Cargo verification set in one remote runner so the
 # runner-home Cargo target and Python cache are reused between phases. Protobuf
