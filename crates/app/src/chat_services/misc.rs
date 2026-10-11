@@ -12,7 +12,7 @@ use omp_chat::overlays::services::{
 	ApprovalPostureRow, CleanseOutcome, CleanseRequest, CleanseRun, MemoryOp, Pending, ServiceError,
 	ServiceResult, SshHostRow, SshHostSpec,
 };
-use omp_core::{Str, sf};
+use omp_core::{Str, project_file::Containment, sf};
 use omp_driver::cleanse::{
 	CleanseArgs, CleanseStatus, TargetChoice,
 	production::{CleansePresentation, PresentationError, ProductionCleanseHost},
@@ -153,8 +153,11 @@ pub fn ssh_hosts(state: &ServiceState) -> ServiceResult<Vec<SshHostRow>> {
 	let paths = ssh_paths(state)?;
 	let mut rows = Vec::new();
 	let mut seen = std::collections::BTreeSet::new();
-	for (scope, path) in [("project", &paths.project), ("user", &paths.user)] {
-		let store = HostStore::load(path).map_err(failed)?;
+	for (scope, path, containment) in [
+		("project", &paths.project, Containment::Within(&paths.root)),
+		("user", &paths.user, Containment::Unconfined),
+	] {
+		let store = HostStore::load(path, containment).map_err(failed)?;
 		for alias in store.aliases() {
 			if !seen.insert(alias.clone()) {
 				continue;
@@ -177,15 +180,11 @@ pub fn ssh_hosts(state: &ServiceState) -> ServiceResult<Vec<SshHostRow>> {
 /// `/ssh add`.
 pub fn ssh_add(state: &ServiceState, spec: &SshHostSpec) -> ServiceResult<Str> {
 	let paths = ssh_paths(state)?;
-	let path = if spec.project {
-		&paths.project
-	} else {
-		&paths.user
-	};
+	let (path, containment) = ssh_scope(&paths, spec.project);
 	if let Some(parent) = path.parent() {
 		fs::create_dir_all(parent).map_err(failed)?;
 	}
-	HostStore::load(path)
+	HostStore::load(path, containment)
 		.map_err(failed)?
 		.upsert(path, spec.alias.clone(), HostConfig {
 			address:      spec.address.clone(),
@@ -205,8 +204,8 @@ pub fn ssh_add(state: &ServiceState, spec: &SshHostSpec) -> ServiceResult<Str> {
 /// `/ssh remove`.
 pub fn ssh_remove(state: &ServiceState, alias: &str, project: bool) -> ServiceResult<Str> {
 	let paths = ssh_paths(state)?;
-	let path = if project { &paths.project } else { &paths.user };
-	let removed = HostStore::load(path)
+	let (path, containment) = ssh_scope(&paths, project);
+	let removed = HostStore::load(path, containment)
 		.map_err(failed)?
 		.remove(path, alias)
 		.map_err(failed)?;
@@ -214,6 +213,16 @@ pub fn ssh_remove(state: &ServiceState, alias: &str, project: bool) -> ServiceRe
 		Ok(sf!("Removed SSH host `{alias}` from {}.", path.display()))
 	} else {
 		Err(ServiceError::Failed(sf!("SSH host `{alias}` is not configured in {}", path.display())))
+	}
+}
+
+/// One scope's file and how it is read and written: the project file must
+/// stay inside the repository.
+fn ssh_scope(paths: &HostPaths, project: bool) -> (&Path, Containment<'_>) {
+	if project {
+		(&paths.project, Containment::Within(&paths.root))
+	} else {
+		(&paths.user, Containment::Unconfined)
 	}
 }
 

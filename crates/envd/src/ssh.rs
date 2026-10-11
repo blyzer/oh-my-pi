@@ -136,8 +136,11 @@ impl HostPaths {
 /// Immutable configured-host store, reloadable by its owner.
 #[derive(Clone, Debug, Default)]
 pub struct HostStore {
-	hosts: Arc<RwLock<BTreeMap<Str, HostConfig>>>,
-	paths: Option<Arc<HostPaths>>,
+	hosts:    Arc<RwLock<BTreeMap<Str, HostConfig>>>,
+	paths:    Option<Arc<HostPaths>>,
+	/// The directory a scoped project writer's file must stay inside: writes
+	/// refuse a symlinked target or a parent that resolves outside it.
+	confined: Option<Arc<Path>>,
 }
 
 impl HostStore {
@@ -146,16 +149,28 @@ impl HostStore {
 	/// writers load one file with [`HostStore::load`].
 	pub fn load_layered(paths: &HostPaths) -> Result<Self, SshError> {
 		Ok(Self {
-			hosts: Arc::new(RwLock::new(load_effective_hosts(paths)?)),
-			paths: Some(Arc::new(paths.clone())),
+			hosts:    Arc::new(RwLock::new(load_effective_hosts(paths)?)),
+			paths:    Some(Arc::new(paths.clone())),
+			confined: None,
 		})
 	}
 
-	/// Loads `hosts.toml`. A missing file produces an empty store.
-	pub fn load(path: &Path) -> Result<Self, SshError> {
+	/// Loads one `hosts.toml` for a scoped writer. A missing file produces an
+	/// empty store.
+	///
+	/// [`Containment::Within`] is the project scope: the read refuses a file
+	/// that resolves outside the root, and [`HostStore::upsert`] and
+	/// [`HostStore::remove`] refuse to write through a symlinked target or
+	/// parent. [`Containment::Unconfined`] is the user scope, whose owner may
+	/// symlink the file anywhere.
+	pub fn load(path: &Path, containment: Containment<'_>) -> Result<Self, SshError> {
 		Ok(Self {
-			hosts: Arc::new(RwLock::new(parse_hosts(path, Containment::Unconfined)?)),
-			paths: None,
+			hosts:    Arc::new(RwLock::new(parse_hosts(path, containment)?)),
+			paths:    None,
+			confined: match containment {
+				Containment::Within(root) => Some(Arc::from(root)),
+				Containment::Unconfined => None,
+			},
 		})
 	}
 
@@ -198,7 +213,7 @@ impl HostStore {
 		validate_host(&host)?;
 		let mut hosts = self.hosts.write();
 		hosts.insert(alias, host);
-		persist_hosts(path, &hosts)
+		persist_hosts(path, &hosts, self.confined.as_deref())
 	}
 
 	/// Atomically removes one host from this scoped store.
@@ -207,7 +222,7 @@ impl HostStore {
 		let mut hosts = self.hosts.write();
 		let removed = hosts.remove(alias).is_some();
 		if removed {
-			persist_hosts(path, &hosts)?;
+			persist_hosts(path, &hosts, self.confined.as_deref())?;
 		}
 		Ok(removed)
 	}
@@ -253,7 +268,14 @@ fn parse_hosts(
 	Ok(parsed.hosts)
 }
 
-fn persist_hosts(path: &Path, hosts: &BTreeMap<Str, HostConfig>) -> Result<(), SshError> {
+fn persist_hosts(
+	path: &Path,
+	hosts: &BTreeMap<Str, HostConfig>,
+	confined: Option<&Path>,
+) -> Result<(), SshError> {
+	if let Some(root) = confined {
+		project_file::check_write_target(path, root)?;
+	}
 	let body = toml::to_string_pretty(&HostFile { hosts: hosts.clone() })
 		.map_err(|source| SshError::ConfigEncode { path: path.to_path_buf(), source })?;
 	crate::atomic_replace(path, &body)
@@ -1145,7 +1167,7 @@ pub enum SshError {
 }
 #[cfg(test)]
 mod tests {
-	use omp_core::sf;
+	use omp_core::{project_file::Refusal, sf};
 
 	use super::*;
 
@@ -1225,7 +1247,8 @@ mod tests {
 		HostStore::default()
 			.upsert(&paths.user, sf!("shared"), host("from-user"))
 			.expect("write user host");
-		let user_store = HostStore::load(&paths.user).expect("load user store");
+		let user_store =
+			HostStore::load(&paths.user, Containment::Unconfined).expect("load user store");
 		user_store
 			.upsert(&paths.user, sf!("user-only"), host("user-only"))
 			.expect("write second user host");
@@ -1250,7 +1273,8 @@ mod tests {
 		assert_eq!(layered.aliases(), vec![sf!("shared"), sf!("user-only")]);
 		assert!(matches!(layered.get("v1"), Err(SshError::UnknownHost { .. })));
 
-		let project_store = HostStore::load(&paths.project).expect("reload project writer");
+		let project_store = HostStore::load(&paths.project, Containment::Within(&paths.root))
+			.expect("reload project writer");
 		project_store
 			.upsert(&paths.project, sf!("refreshed"), host("new"))
 			.expect("write refreshed host");
@@ -1331,6 +1355,72 @@ mod tests {
 			.recv_timeout(Duration::from_secs(10))
 			.expect("a FIFO must be refused, not read");
 		assert_eq!(aliases, vec![sf!("user-host")]);
+	}
+
+	/// A project writer never writes through a `.omp` (or `hosts.toml`)
+	/// that links outside the repository, while the user scope may.
+	#[cfg(unix)]
+	#[test]
+	fn project_host_writer_refuses_symlinked_parent_or_target() {
+		use std::os::unix::fs::symlink;
+
+		let temp = tempfile::tempdir().expect("tempdir");
+		let project_root = temp.path().join("project");
+		let outside = temp.path().join("outside");
+		fs::create_dir_all(project_root.join(".git")).expect("repository marker");
+		fs::create_dir_all(&outside).expect("outside directory");
+		symlink(&outside, project_root.join(".omp")).expect("outside .omp link");
+		let paths = HostPaths::new(&temp.path().join("o2"), &project_root);
+		let host = HostConfig {
+			address:      sf!("localhost"),
+			port:         22,
+			user:         sf!("user"),
+			host_key:     sf!("SHA256:test"),
+			auth:         AuthPolicy::Agent,
+			timeout_secs: 30,
+		};
+		let refusal = |error: SshError| match error {
+			SshError::File(error) => error.refusal(),
+			other => panic!("expected a refused project file, got {other:?}"),
+		};
+
+		let store = HostStore::load(&paths.project, Containment::Within(&paths.root))
+			.expect("an absent file loads empty");
+		let error = store
+			.upsert(&paths.project, sf!("build"), host.clone())
+			.expect_err("a symlinked parent is refused");
+		assert_eq!(refusal(error), Some(Refusal::OutsideRoot));
+		assert!(
+			fs::read_dir(&outside)
+				.expect("outside listing")
+				.next()
+				.is_none(),
+			"nothing was written outside the repository"
+		);
+
+		// A target link that stays inside the repository still reads, but the
+		// writer replaces nothing through it.
+		fs::remove_file(project_root.join(".omp")).expect("remove .omp link");
+		fs::create_dir(project_root.join(".omp")).expect("real .omp");
+		let shared = project_root.join("shared.toml");
+		fs::write(&shared, "").expect("shared host file");
+		symlink("../shared.toml", &paths.project).expect("target link");
+		let store = HostStore::load(&paths.project, Containment::Within(&paths.root))
+			.expect("an inside link reads");
+		let error = store
+			.upsert(&paths.project, sf!("build"), host.clone())
+			.expect_err("a symlinked target is refused");
+		assert_eq!(refusal(error), Some(Refusal::Symlink));
+		assert_eq!(fs::read_to_string(&shared).expect("shared"), "");
+
+		// The user's own file may live behind a link.
+		let user_root = temp.path().join("o2");
+		symlink(&outside, &user_root).expect("user root link");
+		HostStore::load(&paths.user, Containment::Unconfined)
+			.expect("user store")
+			.upsert(&paths.user, sf!("build"), host)
+			.expect("a user file is written through its owner's link");
+		assert!(outside.join("hosts.toml").is_file());
 	}
 
 	#[tokio::test]

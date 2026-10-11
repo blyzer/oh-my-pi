@@ -15,7 +15,11 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::{CowBytes, Str, fs::replace_file_atomically};
+use omp_core::{
+	CowBytes, Str,
+	fs::replace_file_atomically,
+	project_file::{self, Containment, ProjectFileError, containment_root},
+};
 use omp_ext::workspace_trust::inventory::{PROJECT_DIR, VAULTS_FILE};
 use serde::Deserialize;
 use tokio::{
@@ -45,6 +49,9 @@ pub struct VaultPaths {
 	pub user:    PathBuf,
 	/// Project-owned `<project>/.omp/vaults.toml`.
 	pub project: PathBuf,
+	/// The repository root the project file must resolve inside: a symlink
+	/// out of it is refused rather than read.
+	pub root:    PathBuf,
 }
 
 impl VaultPaths {
@@ -55,6 +62,7 @@ impl VaultPaths {
 		Self {
 			user:    user_config_root.join(VAULTS_FILE),
 			project: project_root.join(PROJECT_DIR).join(VAULTS_FILE),
+			root:    containment_root(project_root).to_path_buf(),
 		}
 	}
 }
@@ -151,9 +159,23 @@ pub struct VaultService {
 impl VaultService {
 	/// Loads every user vault and overlays project declarations with the same
 	/// name. Relative roots are resolved from the declaring file's directory.
+	///
+	/// A project `vaults.toml` the contained reader refuses (outside the
+	/// repository, not a regular file, oversize) is skipped with a warning, so
+	/// a FIFO or an escaping link never blocks or fails the environment open.
 	pub fn load_layered(paths: &VaultPaths) -> Result<Self, VaultError> {
-		let mut roots = parse_vaults(&paths.user)?;
-		roots.extend(parse_vaults(&paths.project)?);
+		let mut roots = parse_vaults(&paths.user, Containment::Unconfined)?;
+		match parse_vaults(&paths.project, Containment::Within(&paths.root)) {
+			Ok(project) => roots.extend(project),
+			Err(VaultError::File(error @ ProjectFileError::Refused { .. })) => {
+				tracing::warn!(
+					path = %error.path().display(),
+					reason = error.refusal().map_or("unreadable", <&str>::from),
+					"project vault file skipped"
+				);
+			},
+			Err(error) => return Err(error),
+		}
 		Ok(Self {
 			roots:      Arc::new(roots),
 			revision:   Arc::new(AtomicU64::new(1)),
@@ -1098,17 +1120,15 @@ fn ensure_contained(root: &Path, target: &Path) -> Result<(), VaultError> {
 	}
 }
 
-fn parse_vaults(path: &Path) -> Result<BTreeMap<Str, PathBuf>, VaultError> {
-	let body = match fs::read_to_string(path) {
-		Ok(body) => body,
-		Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-		Err(source) => {
-			return Err(VaultError::Io {
-				operation: VaultOperation::ReadConfiguration,
-				path: path.to_path_buf(),
-				source,
-			});
-		},
+/// Largest `vaults.toml` read: a name-to-root table, never a document.
+const VAULTS_FILE_LIMIT: u64 = 256 * 1024;
+
+fn parse_vaults(
+	path: &Path,
+	containment: Containment<'_>,
+) -> Result<BTreeMap<Str, PathBuf>, VaultError> {
+	let Some(body) = project_file::read_text(path, containment, VAULTS_FILE_LIMIT)? else {
+		return Ok(BTreeMap::new());
 	};
 	let parsed: VaultFile = toml::from_str(&body)
 		.map_err(|source| VaultError::Parse { path: path.to_path_buf(), source })?;
@@ -1202,8 +1222,6 @@ impl Drop for AtomicTemp {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum VaultOperation {
-	/// Read layered configuration.
-	ReadConfiguration,
 	/// Resolve a path through the filesystem.
 	Resolve,
 	/// Read metadata.
@@ -1239,6 +1257,10 @@ pub enum ObsidianStream {
 /// Typed failure from the configured vault authority.
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
+	/// A `vaults.toml` was refused by the contained reader or could not be
+	/// read.
+	#[error(transparent)]
+	File(#[from] ProjectFileError),
 	/// Filesystem operation failed.
 	#[error("cannot {operation} vault path {path}")]
 	Io {
@@ -1509,6 +1531,63 @@ mod tests {
 		);
 	}
 
+	/// A repository's `vaults.toml` is untrusted input read at environment
+	/// open: a symlink out of the repository, a FIFO, or an oversize file is
+	/// skipped (user vaults still load) instead of being read, and a symlink
+	/// inside the repository loads.
+	#[cfg(unix)]
+	#[test]
+	fn project_vaults_file_must_be_contained_regular_and_bounded() {
+		use std::{os::unix::fs::symlink, process::Command, sync::mpsc, thread};
+
+		let temp = tempfile::tempdir().expect("tempdir");
+		let user_root = temp.path().join("o2");
+		let project_root = temp.path().join("project");
+		let notes = temp.path().join("notes");
+		for dir in [&user_root, &project_root.join(".omp"), &project_root.join(".git"), &notes] {
+			fs::create_dir_all(dir).expect("directory");
+		}
+		let paths = VaultPaths::new(&user_root, &project_root);
+		write_config(&paths.user, &[("user-vault", &notes)]);
+		let outside = temp.path().join("outside.toml");
+		write_config(&outside, &[("leaked", &notes)]);
+		let names = |paths: &VaultPaths| {
+			VaultService::load_layered(paths)
+				.expect("a refused project file never fails the load")
+				.names()
+		};
+
+		symlink(&outside, &paths.project).expect("outside link");
+		assert_eq!(names(&paths), vec![sf!("user-vault")], "an outside symlink is not read");
+		fs::remove_file(&paths.project).expect("remove link");
+
+		write_config(&project_root.join("shared.toml"), &[("inside", &notes)]);
+		symlink("../shared.toml", &paths.project).expect("inside link");
+		assert_eq!(names(&paths), vec![sf!("inside"), sf!("user-vault")]);
+		fs::remove_file(&paths.project).expect("remove link");
+
+		fs::write(&paths.project, vec![b'#'; usize::try_from(VAULTS_FILE_LIMIT).unwrap() + 1])
+			.expect("oversize file");
+		assert_eq!(names(&paths), vec![sf!("user-vault")], "an oversize file is not read");
+		fs::remove_file(&paths.project).expect("remove file");
+
+		assert!(
+			Command::new("mkfifo")
+				.arg(&paths.project)
+				.status()
+				.expect("mkfifo")
+				.success()
+		);
+		let (sender, receiver) = mpsc::channel();
+		thread::spawn(move || {
+			let _ = sender.send(names(&paths));
+		});
+		let names = receiver
+			.recv_timeout(Duration::from_secs(10))
+			.expect("a FIFO must be refused, not read");
+		assert_eq!(names, vec![sf!("user-vault")]);
+	}
+
 	#[tokio::test]
 	async fn writes_replace_atomically_and_bound_bytes() {
 		let temp = tempfile::tempdir().expect("tempdir");
@@ -1516,7 +1595,11 @@ mod tests {
 		let root = temp.path().join("notes");
 		fs::create_dir_all(&root).expect("vault root");
 		write_config(&config, &[("notes", &root)]);
-		let paths = VaultPaths { user: config, project: temp.path().join("missing.toml") };
+		let paths = VaultPaths {
+			user:    config,
+			project: temp.path().join("missing.toml"),
+			root:    temp.path().to_path_buf(),
+		};
 		let service = VaultService::load_layered(&paths).expect("vault service");
 		let file = root.join("nested/note.md");
 		let revision = service
@@ -1585,6 +1668,7 @@ mod tests {
 		let service = VaultService::load_layered(&VaultPaths {
 			user:    config,
 			project: temp.path().join("missing"),
+			root:    temp.path().to_path_buf(),
 		})
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
@@ -1631,6 +1715,7 @@ mod tests {
 		let service = VaultService::load_layered(&VaultPaths {
 			user:    config,
 			project: temp.path().join("missing"),
+			root:    temp.path().to_path_buf(),
 		})
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
@@ -1709,6 +1794,7 @@ mod tests {
 		let service = VaultService::load_layered(&VaultPaths {
 			user:    config,
 			project: temp.path().join("missing"),
+			root:    temp.path().to_path_buf(),
 		})
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
@@ -1753,6 +1839,7 @@ mod tests {
 		let mut service = VaultService::load_layered(&VaultPaths {
 			user:    config,
 			project: temp.path().join("missing"),
+			root:    temp.path().to_path_buf(),
 		})
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
@@ -1780,6 +1867,7 @@ mod tests {
 		let service = VaultService::load_layered(&VaultPaths {
 			user:    config,
 			project: temp.path().join("missing"),
+			root:    temp.path().to_path_buf(),
 		})
 		.expect("vault service");
 		assert!(matches!(

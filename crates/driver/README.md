@@ -42,7 +42,9 @@ presentation adapter.
   `omp_core::project_file`: regular files under a size cap that resolve inside
   the repository. A refused context file or rule is skipped with a
   `Warning`; the cfg overlay is skipped as a whole and its write path
-  (`ConfigFileLock::acquire_project`) refuses symlink targets.
+  (`ConfigFileLock::acquire_project`) refuses symlink targets, including a
+  symlinked `.cfg.lock`. User cfgs and user `SYSTEM.md` go through the same
+  reader `Unconfined`: they may be symlinks, but never FIFOs or devices.
 - A rule's `agents:` frontmatter scopes it to agent classes (`main` for the
   top-level session, the spawned class such as `task` or `scout` for a
   subagent): case-insensitive globs, a list or a comma-separated string. A

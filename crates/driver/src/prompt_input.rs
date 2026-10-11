@@ -33,6 +33,9 @@ pub enum PromptInputError {
 	/// The selected profile could not be resolved to a configuration root.
 	#[error("failed to resolve the user configuration root")]
 	Profile(#[from] ProfileNameError),
+	/// A user prompt file is not a regular file or exceeds the size limit.
+	#[error("refused prompt input")]
+	Refused(#[source] ProjectFileError),
 }
 
 /// Resolves a value as inline text or a readable file.
@@ -81,11 +84,17 @@ pub fn discover_prompt_file(
 			return Err(PromptInputError::Read { path, source });
 		},
 	}
-	let path = user_prompt_path(home, name)?;
-	match fs::read_to_string(&path) {
-		Ok(content) => Ok(Some(content.into())),
-		Err(source) if tolerant_literal_error(&source) => Ok(None),
-		Err(source) => Err(PromptInputError::Read { path, source }),
+	read_user_prompt(&user_prompt_path(home, name)?)
+}
+
+/// Reads a user prompt file. Its owner may symlink it anywhere, but a FIFO,
+/// device, or file over [`CONTEXT_FILE_LIMIT`] is refused rather than read.
+fn read_user_prompt(path: &Path) -> Result<Option<Str>, PromptInputError> {
+	match project_file::read_text(path, Containment::Unconfined, CONTEXT_FILE_LIMIT) {
+		Ok(content) => Ok(content.map(Str::from)),
+		Err(ProjectFileError::Io { source, .. }) if tolerant_literal_error(&source) => Ok(None),
+		Err(ProjectFileError::Io { path, source }) => Err(PromptInputError::Read { path, source }),
+		Err(error @ ProjectFileError::Refused { .. }) => Err(PromptInputError::Refused(error)),
 	}
 }
 
@@ -96,13 +105,8 @@ pub fn discover_user_prompt_file(
 	name: &str,
 ) -> Result<Option<Str>, PromptInputError> {
 	let _ = cwd;
-	let path = user_prompt_path(home, name)?;
-	match fs::read_to_string(&path) {
-		Ok(content) if !content.trim().is_empty() => Ok(Some(content.into())),
-		Ok(_) => Ok(None),
-		Err(source) if tolerant_literal_error(&source) => Ok(None),
-		Err(source) => Err(PromptInputError::Read { path, source }),
-	}
+	Ok(read_user_prompt(&user_prompt_path(home, name)?)?
+		.filter(|content| !content.trim().is_empty()))
 }
 
 /// Path of a user prompt file: `<profile config root>/agent/<name>`, i.e.
@@ -264,5 +268,47 @@ mod tests {
 		symlink("../prompt.md", &system).expect("inside link");
 		let found = discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery");
 		assert_eq!(found.as_deref(), Some("inside"));
+	}
+
+	/// The user `SYSTEM.md` may be the owner's symlink, but a FIFO there is
+	/// refused rather than blocking session startup.
+	#[cfg(unix)]
+	#[test]
+	fn user_system_prompt_follows_links_but_refuses_a_fifo() {
+		use std::{os::unix::fs::symlink, process::Command, sync::mpsc, thread, time::Duration};
+
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let home = scratch.path().join("home");
+		let project = scratch.path().join("repo");
+		fs::create_dir_all(&project).expect("project");
+		let user_system = user_prompt_path(&home, "SYSTEM.md").expect("user prompt path");
+		fs::create_dir_all(user_system.parent().expect("agent dir")).expect("user agent directory");
+		fs::write(scratch.path().join("dotfiles.md"), "linked").expect("dotfile");
+		symlink(scratch.path().join("dotfiles.md"), &user_system).expect("user link");
+		assert_eq!(
+			discover_prompt_file(&project, &home, "SYSTEM.md")
+				.expect("discovery")
+				.as_deref(),
+			Some("linked")
+		);
+		fs::remove_file(&user_system).expect("remove link");
+
+		assert!(
+			Command::new("mkfifo")
+				.arg(&user_system)
+				.status()
+				.expect("mkfifo")
+				.success()
+		);
+		let (sender, receiver) = mpsc::channel();
+		thread::spawn(move || {
+			let _ = sender.send(discover_prompt_file(&project, &home, "SYSTEM.md").is_err());
+		});
+		assert!(
+			receiver
+				.recv_timeout(Duration::from_secs(10))
+				.expect("a FIFO user prompt must be refused, not read"),
+			"a FIFO user prompt is an error"
+		);
 	}
 }

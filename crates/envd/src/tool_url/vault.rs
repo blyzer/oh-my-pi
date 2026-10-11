@@ -462,6 +462,9 @@ pub(crate) fn vault_fault(error: VaultError) -> Fault {
 		VaultError::AtomicReplace { path, .. } => Fault::Source {
 			message: sf!("Cannot atomically replace vault path '{}'.", path.display()),
 		},
+		VaultError::File(error) => Fault::Source {
+			message: sf!("Cannot read vault configuration '{}'.", error.path().display()),
+		},
 		VaultError::Io { operation, path, .. } => Fault::Source {
 			message: sf!("Cannot {operation} vault path '{}'.", path.display()),
 		},
@@ -523,6 +526,7 @@ mod tests {
 		let service = VaultService::load_layered(&VaultPaths {
 			user:    temp.path().join("vaults.toml"),
 			project: temp.path().join("missing"),
+			root:    temp.path().to_path_buf(),
 		})
 		.expect("vault service");
 		(temp, service)
