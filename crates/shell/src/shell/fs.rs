@@ -220,7 +220,7 @@ impl<SE: ShellExtensions> Shell<SE> {
 			return policy
 				.open(&path_to_open, OpenRequest { access, create_mode: 0o666 & !self.virtual_umask() })
 				.map(OpenFile::from)
-				.map_err(io::Error::other);
+				.map_err(io::Error::from);
 		}
 
 		// Give platform-specific code a chance to handle special files

@@ -9,7 +9,6 @@ use std::{
 	error::Error,
 	ffi::{OsStr, OsString},
 	fmt::{self, Display},
-	fs,
 	io::{self, Read, Write},
 };
 
@@ -1043,12 +1042,14 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 
 	let args: Box<dyn ArgumentReader> = match (&options.arg_file, delimiter) {
 		(Some(path), Some(delimiter)) => {
-			let file = fs::File::open(host.resolve(path))
+			let file = host
+				.open_read(path)
 				.map_err(|e| format!("Failed to open {path}: {e}"))?;
 			Box::new(ByteDelimitedArgumentReader::new(file, delimiter))
 		},
 		(Some(path), None) => {
-			let file = fs::File::open(host.resolve(path))
+			let file = host
+				.open_read(path)
 				.map_err(|e| format!("Failed to open {path}: {e}"))?;
 			Box::new(WhitespaceDelimitedArgumentReader::new(file))
 		},
@@ -1102,7 +1103,7 @@ pub(crate) fn xargs_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 #[cfg(test)]
 mod tests {
-	use std::cmp;
+	use std::{cmp, fs};
 
 	use super::*;
 	use crate::host::run_util;

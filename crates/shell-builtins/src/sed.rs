@@ -5298,7 +5298,10 @@ pub mod fast_io {
 	#[cfg(unix)]
 	use memmap2::Mmap;
 
-	use crate::{host::Host, sed::error_handling::SedError};
+	use crate::{
+		host::Host,
+		sed::{error_handling::SedError, named_writer::open_read},
+	};
 
 	// Define two cursors for iterating over lines:
 	// - MmapLineCursor based on mmap(2),
@@ -5624,7 +5627,7 @@ pub mod fast_io {
 
 			// input file operands resolve
 			// against the shell working directory.
-			let file = File::open(host.resolve(path))?;
+			let file = host.open_read(path)?;
 
 			#[cfg(unix)]
 			{
@@ -5798,7 +5801,7 @@ pub mod fast_io {
 				self.flush_mmap(WriteRange::Complete)?;
 			}
 
-			let Ok(file) = File::open(path) else {
+			let Ok(file) = open_read(path) else {
 				// Per POSIX, if the file can't be read treat it as empty.
 				return Ok(());
 			};
@@ -7797,8 +7800,8 @@ pub mod named_writer {
 	use std::{
 		cell::RefCell,
 		fs::{File, OpenOptions},
-		io::{BufWriter, Write},
-		path::PathBuf,
+		io::{self, BufWriter, Write},
+		path::{Path, PathBuf},
 		rc::Rc,
 		sync::Arc,
 	};
@@ -7806,6 +7809,7 @@ pub mod named_writer {
 	use omp_shell::PathPolicy;
 
 	use crate::{
+		host::open_resolved_read,
 		sed::error_handling::{ScriptLocation, SedResult, runtime_error},
 		support::quote::Quotable,
 	};
@@ -7813,24 +7817,31 @@ pub mod named_writer {
 	thread_local! {
 		 /// Global list of all writers that should be flushed at shutdown
 		 static FLUSH_LIST: RefCell<Vec<Rc<RefCell<NamedWriter>>>> = const { RefCell::new(Vec::new()) };
-		 /// Write policy scoped to the current sed invocation.
-		 static WRITE_POLICY: RefCell<Option<Arc<dyn PathPolicy>>> = const { RefCell::new(None) };
+		 /// Path policy scoped to the current sed invocation: it admits the
+		 /// script-named `w` output files and the `r` and `-f` files it reads.
+		 static PATH_POLICY: RefCell<Option<Arc<dyn PathPolicy>>> = const { RefCell::new(None) };
 	}
 
-	/// Restores the thread-local write policy when a sed invocation finishes.
+	/// Restores the thread-local path policy when a sed invocation finishes.
 	pub(crate) struct PathPolicyGuard(Option<Arc<dyn PathPolicy>>);
 
 	impl PathPolicyGuard {
-		/// Installs the invocation's write policy for script-named output files.
+		/// Installs the invocation's path policy for script-named files.
 		pub(crate) fn install(policy: Option<Arc<dyn PathPolicy>>) -> Self {
-			let previous = WRITE_POLICY.with(|slot| slot.replace(policy));
+			let previous = PATH_POLICY.with(|slot| slot.replace(policy));
 			Self(previous)
 		}
 	}
 
+	/// Opens an absolute, script-named `path` for reading through the
+	/// invocation's path policy.
+	pub(crate) fn open_read(path: &Path) -> io::Result<File> {
+		PATH_POLICY.with(|slot| open_resolved_read(slot.borrow().as_deref(), path))
+	}
+
 	impl Drop for PathPolicyGuard {
 		fn drop(&mut self) {
-			WRITE_POLICY.with(|slot| {
+			PATH_POLICY.with(|slot| {
 				let _ = slot.replace(self.0.take());
 			});
 		}
@@ -7847,7 +7858,7 @@ pub mod named_writer {
 	impl NamedWriter {
 		/// Create a new writer, truncate the file, and register it for flushing.
 		pub fn new(path: PathBuf, location: ScriptLocation) -> SedResult<Rc<RefCell<Self>>> {
-			WRITE_POLICY.with(|slot| {
+			PATH_POLICY.with(|slot| {
 				if let Some(policy) = slot.borrow().as_ref() {
 					policy
 						.check_write(&path)
@@ -8866,9 +8877,7 @@ pub mod script_line_provider {
 	// file that was distributed with this source code.
 
 	use std::{
-		fmt,
-		fs::File,
-		io,
+		fmt, io,
 		io::{BufRead, BufReader},
 		path::PathBuf,
 	};
@@ -8876,7 +8885,10 @@ pub mod script_line_provider {
 	use omp_shell::{openfiles::OpenFile, sys::fs};
 
 	use crate::{
-		sed::error_handling::{IoContext, SedResult},
+		sed::{
+			error_handling::{IoContext, SedResult},
+			named_writer::open_read,
+		},
 		support::quote::Quotable,
 	};
 
@@ -9004,7 +9016,7 @@ pub mod script_line_provider {
 						} else {
 							self.cwd.join(normalized)
 						};
-						let file = File::open(resolved)
+						let file = open_read(&resolved)
 							.map_err_context(|| format!("error opening script file {}", p.quote()))?;
 						self.state = State::Active {
 							index:       next_index,

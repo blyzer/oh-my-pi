@@ -830,7 +830,7 @@ fn run_uniq(matches: &ArgMatches, host: &mut Host) -> PortResult<()> {
 	let input_file = input_path
 		.as_ref()
 		.map(|path| {
-			File::open(path).map_err(|error| {
+			host.open_read(path).map_err(|error| {
 				io_error(
 					&format!(
 						"Could not open {}",

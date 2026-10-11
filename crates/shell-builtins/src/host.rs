@@ -25,6 +25,7 @@
 use std::{
 	cell::Cell,
 	ffi::OsString,
+	fs::File,
 	future::Future,
 	io::{self, BufWriter, LineWriter, Read, Write},
 	marker::PhantomData,
@@ -44,14 +45,14 @@ use bytes::Bytes;
 use im::HashMap;
 use omp_core::Str;
 use omp_shell::{
-	Error, ExecutionContext, ExecutionResult, PathPolicy, ProcessScope, ShellExtensions,
-	SpawnObserver, SpawnWrapper,
+	Error, ExecutionContext, ExecutionResult, OpenRequest, PathAccess, PathPolicy, ProcessScope,
+	ShellExtensions, SpawnObserver, SpawnWrapper,
 	builtins::{self, Registration},
 	openfiles::{self, OpenFile, OpenFiles},
 	sys::fs,
 };
 #[cfg(test)]
-use omp_shell::{OpenRequest, PathAccess, PathDenied};
+use omp_shell::{OpenError, PathDenied};
 use omp_tool::Diag;
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -215,6 +216,9 @@ pub(crate) struct Host {
 	cwd:                   PathBuf,
 	env:                   HashMap<String, String>,
 	path_policy:           Option<Arc<dyn PathPolicy>>,
+	/// Process-substitution pipes this invocation's `/dev/fd/<n>` arguments
+	/// name; kept open for the utility's lifetime.
+	substituted:           SubstitutedFds,
 	spawn_wrapper:         Option<Arc<dyn SpawnWrapper>>,
 	process_scope:         Option<Arc<dyn ProcessScope>>,
 	spawn_observer:        Option<Arc<dyn SpawnObserver>>,
@@ -252,12 +256,40 @@ impl Host {
 	/// filesystem: the host process's current directory is unrelated to the
 	/// shell's.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let normalized_path = fs::normalize_shell_path(path.as_ref());
-		let path = normalized_path.as_ref();
-		if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			self.cwd.join(path)
+		resolve_against(&self.cwd, path.as_ref())
+	}
+
+	/// Opens a file for reading through the installed path policy.
+	///
+	/// `path` resolves against [`Host::cwd`]. This is the only way a builtin
+	/// reads a file's contents: with a policy installed the open is
+	/// [`PathPolicy::open`] with [`PathAccess::Read`], so a `read_deny` root
+	/// refuses it atomically. A refusal is an
+	/// [`io::ErrorKind::PermissionDenied`] error carrying the typed
+	/// [`omp_shell::PathDenied`], which the builtin reports as its ordinary
+	/// permission failure.
+	pub fn open_read(&self, path: impl AsRef<Path>) -> io::Result<File> {
+		open_read_in(&self.cwd, self.path_policy.as_deref(), &self.substituted, path.as_ref())
+	}
+
+	/// Reads a whole file through [`Host::open_read`].
+	pub fn read_file(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+		read_all(self.open_read(path)?)
+	}
+
+	/// Reads a whole UTF-8 file through [`Host::open_read`].
+	pub fn read_file_to_string(&self, path: impl AsRef<Path>) -> io::Result<String> {
+		String::from_utf8(self.read_file(path)?)
+			.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+	}
+
+	/// An owned [`Host::open_read`] for helpers and worker threads that never
+	/// see the `Host` itself.
+	pub fn read_opener(&self) -> ReadOpener {
+		ReadOpener {
+			cwd:         Arc::from(self.cwd.as_path()),
+			policy:      self.path_policy.clone(),
+			substituted: self.substituted.clone(),
 		}
 	}
 
@@ -481,6 +513,185 @@ impl Host {
 		status
 	}
 }
+
+/// Owned, `Clone` form of [`Host::open_read`]: the shell working directory
+/// and the installed path policy, for helpers and worker threads.
+#[derive(Clone)]
+pub(crate) struct ReadOpener {
+	cwd:         Arc<Path>,
+	policy:      Option<Arc<dyn PathPolicy>>,
+	substituted: SubstitutedFds,
+}
+
+impl ReadOpener {
+	/// The read opener for a builtin that runs directly on an
+	/// [`ExecutionContext`] rather than through [`Utility`].
+	pub fn for_context<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
+		Self {
+			cwd:         Arc::from(context.shell.working_dir()),
+			policy:      context.params.path_policy().cloned(),
+			substituted: SubstitutedFds::default(),
+		}
+	}
+
+	/// An opener with no path policy, for tests.
+	#[cfg(test)]
+	pub fn unconfined(cwd: &Path) -> Self {
+		Self {
+			cwd:         Arc::from(cwd),
+			policy:      None,
+			substituted: SubstitutedFds::default(),
+		}
+	}
+
+	/// Resolves `path` exactly as [`Host::resolve`] does.
+	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
+		resolve_against(&self.cwd, path.as_ref())
+	}
+
+	/// Opens `path` for reading exactly as [`Host::open_read`] does.
+	pub fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
+		open_read_in(&self.cwd, self.policy.as_deref(), &self.substituted, path.as_ref())
+	}
+
+	/// Opens a FIFO for reading with `O_NONBLOCK` (then clears it), so the
+	/// open does not wait for a writer; `tail --pid` needs that to keep
+	/// watching its process. [`OpenRequest`] cannot carry the flag, so with a
+	/// policy installed the path is judged by [`PathPolicy::check_read`] and
+	/// opened with `O_NOFOLLOW`, which refuses a link swapped in after the
+	/// check.
+	#[cfg(unix)]
+	pub fn open_fifo_nonblocking(&self, path: impl AsRef<Path>) -> io::Result<File> {
+		use std::os::{fd::AsFd as _, unix::fs::OpenOptionsExt as _};
+
+		use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+
+		let path = self.resolve(path);
+		let mut flags = libc::O_NONBLOCK;
+		if let Some(policy) = &self.policy {
+			policy
+				.check_read(&path)
+				.map_err(|denied| io::Error::from(omp_shell::OpenError::Denied(denied)))?;
+			flags |= libc::O_NOFOLLOW;
+		}
+		let file = File::options().read(true).custom_flags(flags).open(&path)?;
+		let flags = fcntl_getfl(file.as_fd())?;
+		fcntl_setfl(file.as_fd(), flags & !OFlags::NONBLOCK)?;
+		Ok(file)
+	}
+
+	/// Reads a whole file exactly as [`Host::read_file`] does.
+	pub fn read(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+		read_all(self.open(path)?)
+	}
+
+	/// Reads a whole UTF-8 file exactly as [`Host::read_file_to_string`] does.
+	pub fn read_to_string(&self, path: impl AsRef<Path>) -> io::Result<String> {
+		String::from_utf8(self.read(path)?)
+			.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+	}
+
+	/// Adds a gitignore-format file to `builder`, reading it through the path
+	/// policy. [`ignore::gitignore::GitignoreBuilder::add`] opens the file
+	/// itself, so builtins call this instead. Returns the first open or glob
+	/// error, as `add` does.
+	pub fn add_ignore_file(
+		&self,
+		builder: &mut ignore::gitignore::GitignoreBuilder,
+		path: &Path,
+	) -> Option<ignore::Error> {
+		let text = match self.read(path) {
+			Ok(bytes) => bytes,
+			Err(error) => return Some(ignore::Error::Io(error)),
+		};
+		let text = String::from_utf8_lossy(&text);
+		let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+		text
+			.lines()
+			.find_map(|line| builder.add_line(Some(path.to_path_buf()), line).err())
+	}
+}
+
+/// Reads `file` to its end, sized from its metadata when known.
+fn read_all(mut file: File) -> io::Result<Vec<u8>> {
+	let size = file.metadata().map_or(0, |metadata| metadata.len());
+	let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+	file.read_to_end(&mut bytes)?;
+	Ok(bytes)
+}
+
+/// Resolves `path` against `cwd`; absolute paths pass through.
+fn resolve_against(cwd: &Path, path: &Path) -> PathBuf {
+	let normalized_path = fs::normalize_shell_path(path);
+	let path = normalized_path.as_ref();
+	if path.is_absolute() {
+		path.to_path_buf()
+	} else {
+		cwd.join(path)
+	}
+}
+
+/// The single builtin read open: through `policy` when one is installed.
+fn open_read_in(
+	cwd: &Path,
+	policy: Option<&dyn PathPolicy>,
+	substituted: &SubstitutedFds,
+	path: &Path,
+) -> io::Result<File> {
+	let path = resolve_against(cwd, path);
+	match substituted.get(&path) {
+		Some(file) => file,
+		None => open_resolved_read(policy, &path),
+	}
+}
+
+/// The process-substitution pipes one utility invocation was handed, named
+/// by its `/dev/fd/<n>` arguments.
+///
+/// Those descriptors are the shell's own pipes, not filesystem paths: a path
+/// policy cannot judge them (on Linux `/dev/fd/<n>` resolves to `pipe:[…]`),
+/// and the shell's redirections likewise map `/dev/fd/<n>` to its descriptor
+/// table instead of opening it. A read of one duplicates the owned pipe.
+#[derive(Clone, Default)]
+struct SubstitutedFds(#[cfg(unix)] Arc<[fd::OwnedFd]>);
+
+impl SubstitutedFds {
+	/// Duplicates the substituted pipe `path` names, or `None` when `path` is
+	/// not one of them.
+	#[cfg(unix)]
+	fn get(&self, path: &Path) -> Option<io::Result<File>> {
+		use std::os::fd::AsRawFd as _;
+
+		let number = path
+			.strip_prefix("/dev/fd")
+			.ok()?
+			.to_str()?
+			.parse::<i32>()
+			.ok()?;
+		let owned = self.0.iter().find(|fd| fd.as_raw_fd() == number)?;
+		Some(owned.try_clone().map(File::from))
+	}
+
+	#[cfg(not(unix))]
+	#[expect(clippy::unused_self, reason = "process substitution is unix-only")]
+	fn get(&self, _path: &Path) -> Option<io::Result<File>> {
+		None
+	}
+}
+
+/// Opens an already resolved, absolute `path` for reading through `policy`
+/// when one is installed. Every builtin read ends here; helpers that hold
+/// the invocation's policy but no [`Host`] (sed's script-named `r` files)
+/// call it directly.
+pub(crate) fn open_resolved_read(policy: Option<&dyn PathPolicy>, path: &Path) -> io::Result<File> {
+	match policy {
+		Some(policy) => policy
+			.open(path, OpenRequest { access: PathAccess::Read, create_mode: 0 })
+			.map_err(io::Error::from),
+		None => File::open(path),
+	}
+}
+
 /// A destination-aware buffered writer for utility output.
 ///
 /// The standard library writers own and recycle their buffers for the
@@ -582,7 +793,7 @@ impl Write for StreamWriter {
 
 /// Returns whether `file` is a regular file suitable for block buffering.
 ///
-/// A pipe wrapped in [`std::fs::File`] reports a FIFO file type, while an
+/// A pipe wrapped in [`File`] reports a FIFO file type, while an
 /// uninspectable destination safely falls back to line buffering.
 pub(crate) fn is_regular_file(file: &OpenFile) -> bool {
 	match file {
@@ -983,16 +1194,16 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	};
 
 	let mut host = build_host(&context, U::NAME)?;
+	#[cfg(unix)]
+	{
+		host.substituted = SubstitutedFds(Arc::from(process_substitution_fds));
+	}
 	let cancel = context.cancel_token();
 	let cancel_flag = host.cancel_flag();
 	let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
 	drop(context);
 
-	let mut handle = task::spawn_blocking(move || {
-		#[cfg(unix)]
-		let _process_substitution_fds = process_substitution_fds;
-		run_caught::<U>(parsed, &mut host)
-	});
+	let mut handle = task::spawn_blocking(move || run_caught::<U>(parsed, &mut host));
 
 	// Respect shell abort/`timeout`. On cancel we set the host's cancel flag,
 	// which makes a blocked stdin read return EOF; the utility unwinds cleanly
@@ -1124,6 +1335,7 @@ fn build_host<SE: ShellExtensions>(
 		cwd: context.shell.working_dir().to_path_buf(),
 		env,
 		path_policy: context.params.path_policy().cloned(),
+		substituted: SubstitutedFds::default(),
 		spawn_wrapper,
 		process_scope: context.params.process_scope().cloned(),
 		spawn_observer: context.params.spawn_observer().cloned(),
@@ -1233,9 +1445,10 @@ mod testing {
 	use tokio::time;
 
 	use super::{
-		Arc, AtomicBool, Error, HashMap, Host, OpenFile, OpenRequest, Ordering, OsString, PathAccess,
-		PathBuf, PathDenied, PathPolicy, Read, SpawnWrapper, Stdin, StreamWriter, Utility, Write, io,
-		openfiles, panic_scope_active, run_caught, task,
+		Arc, AtomicBool, Error, File, HashMap, Host, OpenError, OpenFile, OpenRequest, Ordering,
+		OsString, Path, PathAccess, PathBuf, PathDenied, PathPolicy, Read, SpawnWrapper, Stdin,
+		StreamWriter, SubstitutedFds, Utility, Write, io, openfiles, panic_scope_active, run_caught,
+		task,
 	};
 
 	/// Test policy admitting writes only beneath one root.
@@ -1245,13 +1458,13 @@ mod testing {
 
 	impl ScopedPathPolicy {
 		/// Creates a policy admitting `root` and its descendants.
-		pub(crate) fn new(root: impl AsRef<std::path::Path>) -> Self {
+		pub(crate) fn new(root: impl AsRef<Path>) -> Self {
 			Self { root: root.as_ref().to_path_buf() }
 		}
 	}
 
 	impl PathPolicy for ScopedPathPolicy {
-		fn check_read(&self, path: &std::path::Path) -> Result<(), PathDenied> {
+		fn check_read(&self, path: &Path) -> Result<(), PathDenied> {
 			if path.starts_with(&self.root) {
 				Ok(())
 			} else {
@@ -1259,7 +1472,7 @@ mod testing {
 			}
 		}
 
-		fn check_write(&self, path: &std::path::Path) -> Result<(), PathDenied> {
+		fn check_write(&self, path: &Path) -> Result<(), PathDenied> {
 			if path.starts_with(&self.root) {
 				Ok(())
 			} else {
@@ -1267,24 +1480,52 @@ mod testing {
 			}
 		}
 
-		fn open(
-			&self,
-			path: &std::path::Path,
-			request: OpenRequest,
-		) -> Result<std::fs::File, PathDenied> {
-			let access = request.access;
+		fn open(&self, path: &Path, request: OpenRequest) -> Result<File, OpenError> {
 			if !path.starts_with(&self.root) {
-				return Err(PathDenied { path: path.to_path_buf(), access });
+				return Err(PathDenied { path: path.to_path_buf(), access: request.access }.into());
 			}
-			std::fs::File::options()
-				.read(matches!(access, PathAccess::Read | PathAccess::ReadWrite))
-				.write(!matches!(access, PathAccess::Read))
-				.create(!matches!(access, PathAccess::Read))
-				.truncate(matches!(access, PathAccess::Truncate))
-				.append(matches!(access, PathAccess::Append))
-				.create_new(matches!(access, PathAccess::CreateNew))
-				.open(path)
-				.map_err(|_| PathDenied { path: path.to_path_buf(), access })
+			Ok(open_for(path, request.access)?)
+		}
+	}
+
+	/// Opens `path` with the options `access` names.
+	fn open_for(path: &Path, access: PathAccess) -> io::Result<File> {
+		File::options()
+			.read(matches!(access, PathAccess::Read | PathAccess::ReadWrite))
+			.write(!matches!(access, PathAccess::Read))
+			.create(!matches!(access, PathAccess::Read))
+			.truncate(matches!(access, PathAccess::Truncate))
+			.append(matches!(access, PathAccess::Append))
+			.create_new(matches!(access, PathAccess::CreateNew))
+			.open(path)
+	}
+
+	/// Test policy refusing every access beneath one root, as a `read_deny`
+	/// root does, and admitting everything else.
+	pub(crate) struct HiddenRoot(pub(crate) PathBuf);
+
+	impl HiddenRoot {
+		fn judge(&self, path: &Path, access: PathAccess) -> Result<(), PathDenied> {
+			if path.starts_with(&self.0) {
+				Err(PathDenied { path: path.to_path_buf(), access })
+			} else {
+				Ok(())
+			}
+		}
+	}
+
+	impl PathPolicy for HiddenRoot {
+		fn check_read(&self, path: &Path) -> Result<(), PathDenied> {
+			self.judge(path, PathAccess::Read)
+		}
+
+		fn check_write(&self, path: &Path) -> Result<(), PathDenied> {
+			self.judge(path, PathAccess::Write)
+		}
+
+		fn open(&self, path: &Path, request: OpenRequest) -> Result<File, OpenError> {
+			self.judge(path, request.access)?;
+			Ok(open_for(path, request.access)?)
 		}
 	}
 	struct TestSpawnWrapper {
@@ -1372,6 +1613,7 @@ mod testing {
 				cwd: cwd.into(),
 				env: HashMap::new(),
 				path_policy: None,
+				substituted: SubstitutedFds::default(),
 				spawn_wrapper: None,
 				process_scope: None,
 				spawn_observer: None,
@@ -1677,5 +1919,5 @@ use std::{borrow, ffi, fmt, fmt::Display, process, thread};
 
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
-pub(crate) use testing::{Capture, ScopedPathPolicy, run_util, run_util_with_policy};
+pub(crate) use testing::{Capture, HiddenRoot, ScopedPathPolicy, run_util, run_util_with_policy};
 use tokio::task;

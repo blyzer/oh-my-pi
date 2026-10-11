@@ -6,7 +6,7 @@
 use std::os::unix::fs::FileTypeExt;
 use std::{
 	ffi::OsString,
-	fs::{File, metadata},
+	fs::metadata,
 	io::{self, ErrorKind, Read, Write},
 	path::Path,
 };
@@ -351,7 +351,7 @@ fn cat_path(
 		#[cfg(unix)]
 		InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
 		_ => {
-			let file = File::open(resolved)?;
+			let file = host.open_read(&resolved)?;
 			let mut handle = InputHandle { reader: file, is_interactive: false };
 			cat_handle(&mut handle, options, state, stdout)
 		},

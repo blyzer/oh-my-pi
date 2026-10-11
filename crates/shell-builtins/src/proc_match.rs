@@ -31,7 +31,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::proc_snapshot;
+use crate::{host::ReadOpener, proc_snapshot};
 
 /// What a process-matching command does with the processes it selects.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,7 +89,7 @@ pub(crate) fn run<SE: omp_shell::ShellExtensions>(
 ) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 	{
 		let command_name = context.command_name.clone();
-		let cwd = context.shell.working_dir().to_path_buf();
+		let opener = ReadOpener::for_context(&context);
 		async move {
 			#[cfg(unix)]
 			let stdin_watcher = context.try_fd(OpenFiles::STDIN_FD).and_then(|stdin| {
@@ -97,7 +97,7 @@ pub(crate) fn run<SE: omp_shell::ShellExtensions>(
 				AsyncFd::new(fd).ok()
 			});
 			let mut stdin = io::BufReader::new(context.stdin());
-			let mut options = match parse_proc_match_args(mode, &argv, &cwd, &mut stdin) {
+			let mut options = match parse_proc_match_args(mode, &argv, &opener, &mut stdin) {
 				Ok(ParseProcResult::Options(options)) => *options,
 				Ok(ParseProcResult::Help) => {
 					write_proc_match_help(context.stdout(), &command_name, mode)?;
@@ -363,7 +363,7 @@ enum ParseProcResult {
 fn parse_proc_match_args(
 	mode: ProcMatchMode,
 	argv: &[String],
-	cwd: &Path,
+	opener: &ReadOpener,
 	stdin: &mut impl BufRead,
 ) -> result::Result<ParseProcResult, (u8, String)> {
 	let mut options =
@@ -611,8 +611,9 @@ fn parse_proc_match_args(
 				.map_err(|err| (3, format!("cannot read pidfile from standard input: {err}")))?;
 			contents
 		} else {
-			let path = resolve_shell_path(cwd, file);
-			let mut pidfile = fs::File::open(&path)
+			let path = opener.resolve(file);
+			let mut pidfile = opener
+				.open(&path)
 				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
 			if options.require_lock
 				&& !pidfile_is_locked(&pidfile)
@@ -932,17 +933,6 @@ fn parse_states(value: &str, target: &mut HashSet<char>) -> result::Result<(), (
 	Ok(())
 }
 
-fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
-	use omp_shell::sys::fs;
-
-	let normalized = fs::normalize_shell_path(Path::new(value));
-	if normalized.is_absolute() {
-		normalized.into_owned()
-	} else {
-		cwd.join(normalized)
-	}
-}
-
 #[cfg(unix)]
 fn pidfile_is_locked(file: &fs::File) -> io::Result<bool> {
 	use std::os::fd::AsRawFd;
@@ -1014,7 +1004,7 @@ mod tests {
 			let parsed = parse_proc_match_args(
 				ProcMatchMode::Grep,
 				&[quiet.to_string(), "needle".to_string()],
-				Path::new("/"),
+				&ReadOpener::unconfined(Path::new("/")),
 				&mut io::empty(),
 			)
 			.expect("pgrep quiet option must parse on every platform");
@@ -1037,7 +1027,7 @@ mod tests {
 	#[test]
 	fn resolves_msys_drive_alias_pidfiles() {
 		assert_eq!(
-			resolve_shell_path(Path::new(r"C:\workspace"), "/c/Users/Adam/app.pid"),
+			ReadOpener::unconfined(Path::new(r"C:\workspace")).resolve("/c/Users/Adam/app.pid"),
 			PathBuf::from(r"C:\Users\Adam\app.pid"),
 		);
 	}

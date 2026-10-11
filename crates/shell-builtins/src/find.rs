@@ -4607,7 +4607,8 @@ pub mod matchers {
 		if mode == "-" {
 			host.stdin.read_to_end(&mut buffer)?;
 		} else {
-			let mut file = File::open(host.resolve(mode))
+			let mut file = host
+				.open_read(mode)
 				.map_err(|e| format!("cannot open '{}' for reading: {}", mode, e))?;
 			file.read_to_end(&mut buffer)?;
 		}

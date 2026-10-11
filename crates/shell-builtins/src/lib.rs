@@ -48,6 +48,8 @@ mod mv;
 mod nproc;
 mod paste;
 mod printenv;
+#[cfg(test)]
+mod read_policy_tests;
 mod readlink;
 mod realpath;
 mod rg;

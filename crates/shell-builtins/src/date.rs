@@ -1637,7 +1637,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 					format!("expected file, got directory {}", path.quote()),
 				));
 			}
-			let file = File::open(&resolved).map_err(|error| {
+			let file = host.open_read(&resolved).map_err(|error| {
 				DateError::new(1, format!("{}: {error}", path.as_os_str().maybe_quote()))
 			})?;
 			Dates::File(parse_dates_from_reader(

@@ -103,7 +103,35 @@ pub trait PathPolicy: Send + Sync {
 	fn check_write(&self, path: &Path) -> Result<(), PathDenied>;
 
 	/// Opens `path` for the requested operation after atomically authorizing it.
-	fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, PathDenied>;
+	///
+	/// A refusal is [`OpenError::Denied`]; an admitted open the filesystem
+	/// fails (a missing file, a directory, `EACCES`) is [`OpenError::Io`], so
+	/// callers report it as the ordinary failure it is, not as a sandbox
+	/// denial.
+	fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, OpenError>;
+}
+
+/// Failure of one [`PathPolicy::open`].
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+	/// The policy refused the access.
+	#[error(transparent)]
+	Denied(#[from] PathDenied),
+	/// The policy admitted the access and the filesystem open failed.
+	#[error(transparent)]
+	Io(#[from] io::Error),
+}
+
+impl From<OpenError> for io::Error {
+	/// A denial becomes a [`io::ErrorKind::PermissionDenied`] error carrying the
+	/// typed [`PathDenied`], which the shell recovers by downcasting; a
+	/// filesystem failure passes through unchanged.
+	fn from(error: OpenError) -> Self {
+		match error {
+			OpenError::Denied(denied) => Self::new(io::ErrorKind::PermissionDenied, denied),
+			OpenError::Io(error) => error,
+		}
+	}
 }
 
 /// Complete authority request for one atomic shell file open.
@@ -2600,10 +2628,10 @@ mod sandbox_tests {
 			}
 		}
 
-		fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, PathDenied> {
+		fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, OpenError> {
 			let access = request.access;
 			if !path.starts_with(&self.0) {
-				return Err(PathDenied { path: path.to_path_buf(), access });
+				return Err(PathDenied { path: path.to_path_buf(), access }.into());
 			}
 			let mut options = fs::File::options();
 			match access {
@@ -2626,9 +2654,7 @@ mod sandbox_tests {
 					options.write(true).create(true);
 				},
 			}
-			options
-				.open(path)
-				.map_err(|_| PathDenied { path: path.to_path_buf(), access })
+			Ok(options.open(path)?)
 		}
 	}
 

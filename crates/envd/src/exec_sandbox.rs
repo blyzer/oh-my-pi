@@ -18,7 +18,7 @@ use omp_sandbox::{
 	RUNTIME_READ_ROOTS, ResourceLimits, Runner, SandboxError, SandboxSpec, WriteMode,
 };
 use omp_shell::{
-	OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper, sys::fs::PathExt as _,
+	OpenError, OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper, sys::fs::PathExt as _,
 };
 use parking_lot::Mutex;
 
@@ -725,14 +725,18 @@ impl ExecSandboxAttempt {
 
 	fn record_path_denial<T>(&self, result: Result<T, PathDenied>) -> Result<T, PathDenied> {
 		if let Err(denied) = &result {
-			let fact = if denied.access == PathAccess::Read {
-				SandboxDenialFact::ReadPath(denied.path.clone())
-			} else {
-				SandboxDenialFact::WritePath(denied.path.clone())
-			};
-			*self.denial.lock() = Some(fact);
+			self.record_denied(denied);
 		}
 		result
+	}
+
+	fn record_denied(&self, denied: &PathDenied) {
+		let fact = if denied.access == PathAccess::Read {
+			SandboxDenialFact::ReadPath(denied.path.clone())
+		} else {
+			SandboxDenialFact::WritePath(denied.path.clone())
+		};
+		*self.denial.lock() = Some(fact);
 	}
 
 	fn proxy_environment(&self, environment: &mut Vec<(OsString, OsString)>) {
@@ -761,8 +765,12 @@ impl PathPolicy for ExecSandboxAttempt {
 		self.record_path_denial(self.sandbox.file_policy.check_write(path))
 	}
 
-	fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, PathDenied> {
-		self.record_path_denial(self.sandbox.file_policy.open(path, request))
+	fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, OpenError> {
+		let result = self.sandbox.file_policy.open(path, request);
+		if let Err(OpenError::Denied(denied)) = &result {
+			self.record_denied(denied);
+		}
+		result
 	}
 }
 
@@ -988,7 +996,11 @@ impl FilePolicy {
 		}
 	}
 
-	fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, PathDenied> {
+	/// Opens `path` after admitting it. A refusal, and any failure of the
+	/// confined open other than a missing final file (a link swapped in after
+	/// admission fails `O_NOFOLLOW`), is a denial; a missing file is the
+	/// ordinary `NotFound` the caller reports as such.
+	fn open(&self, path: &Path, request: OpenRequest) -> Result<fs::File, OpenError> {
 		let access = request.access;
 		let is_read = matches!(access, PathAccess::Read | PathAccess::ReadWrite);
 		// Admission walks the path once and returns the physical path it judged;
@@ -1007,11 +1019,11 @@ impl FilePolicy {
 			let (written, followed_link) = self.admit_write(path)?;
 			if followed_link {
 				let lexical = policy_lexical_path(path).map_err(|_| Self::denied(path, access))?;
-				return Err(Self::denied(&lexical, access));
+				return Err(Self::denied(&lexical, access).into());
 			}
 			// Two walks of one link-free path agree unless it changed between them.
 			if read.is_some_and(|read| read != written) {
-				return Err(Self::denied(&written, access));
+				return Err(Self::denied(&written, access).into());
 			}
 			written
 		};
@@ -1049,13 +1061,18 @@ impl FilePolicy {
 					})
 			}
 			.ok_or_else(|| Self::denied(&opened_path, access))?;
-			open_beneath_root(root, &opened_path, request)
-				.map_err(|_| Self::denied(&opened_path, access))
+			open_beneath_root(root, &opened_path, request).map_err(|error| {
+				if error.kind() == io::ErrorKind::NotFound {
+					OpenError::Io(error)
+				} else {
+					OpenError::Denied(Self::denied(&opened_path, access))
+				}
+			})
 		}
 		#[cfg(not(unix))]
 		{
 			let _ = access;
-			Err(Self::denied(path, access))
+			Err(Self::denied(path, access).into())
 		}
 	}
 }

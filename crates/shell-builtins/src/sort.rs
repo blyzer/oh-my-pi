@@ -227,13 +227,14 @@ mod check {
 		chunks::{self, Chunk, RecycledChunk},
 		compare_by, open,
 	};
+	use crate::host::ReadOpener;
 
 	/// Check if the file at `path` is ordered.
 	///
 	/// # Returns
 	///
 	/// The code we should exit with.
-	pub fn check(path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
+	pub fn check(opener: &ReadOpener, path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
 		let max_allowed_cmp = if settings.unique {
 			// If `unique` is enabled, the previous line must compare _less_ to the next
 			// one.
@@ -243,7 +244,7 @@ mod check {
 			// one.
 			Ordering::Equal
 		};
-		let file = open(path)?;
+		let file = open(opener, path)?;
 		let (recycled_sender, recycled_receiver) = flume::bounded(2);
 		let (loaded_sender, loaded_receiver) = flume::bounded(2);
 		thread::spawn({
@@ -1407,11 +1408,13 @@ mod merge {
 		compare_by, current_open_fd_count, fd_soft_limit, open,
 		tmp_dir::TmpDirWrapper,
 	};
+	use crate::host::ReadOpener;
 
 	/// If the output file occurs in the input files as well, copy the contents
 	/// of the output file and replace its occurrences in the inputs with that
 	/// copy.
 	fn replace_output_file_in_input_files(
+		opener: &ReadOpener,
 		files: &mut [OsString],
 		output: Option<&OsStr>,
 		tmp_dir: &mut TmpDirWrapper,
@@ -1425,8 +1428,10 @@ mod merge {
 					if let Some(copy) = &copy {
 						*file = copy.clone().into_os_string();
 					} else {
-						let (_file, copy_path) = tmp_dir.next_file()?;
-						fs::copy(file_path, &copy_path)
+						let (mut copy_file, copy_path) = tmp_dir.next_file()?;
+						opener
+							.open(&file_path)
+							.and_then(|mut input| io::copy(&mut input, &mut copy_file))
 							.map_err(|error| SortError::OpenTmpFileFailed { error })?;
 						*file = copy_path.clone().into_os_string();
 						copy = Some(copy_path);
@@ -1471,15 +1476,16 @@ mod merge {
 	/// intermediate files will be used. If `settings.compress` is `Some`,
 	/// intermediate files will be compressed with it.
 	pub fn merge(
+		opener: &ReadOpener,
 		files: &mut [OsString],
 		settings: &GlobalSettings,
 		output: Output,
 		tmp_dir: &mut TmpDirWrapper,
 	) -> SortResult<()> {
-		replace_output_file_in_input_files(files, output.as_output_name(), tmp_dir)?;
+		replace_output_file_in_input_files(opener, files, output.as_output_name(), tmp_dir)?;
 		let files = files
 			.iter()
-			.map(|file| open(file).map(|file| PlainMergeInput { inner: file }));
+			.map(|file| open(opener, file).map(|file| PlainMergeInput { inner: file }));
 		if settings.compress.is_none() {
 			merge_with_file_limit::<_, _, WriteablePlainTmpFile>(files, settings, output, tmp_dir)
 		} else {
@@ -2500,7 +2506,7 @@ use rayon::slice::ParallelSliceMut;
 use thiserror::Error;
 
 use crate::{
-	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
+	host::{Host, ReadOpener, Utility, format_usage, rayon_global_pool_available, util},
 	sort::{buffer_hint::automatic_buffer_size, tmp_dir::TmpDirWrapper},
 	support::{
 		clap_ext::ShortcutValueParser,
@@ -4451,6 +4457,7 @@ fn uu_sort(
 	matches: &ArgMatches,
 	legacy_warnings: &[LegacyKeyWarning],
 ) -> SortResult<()> {
+	let opener = host.read_opener();
 	let mut settings = GlobalSettings {
 		numeric_locale: detect_numeric_locale(),
 		cancel: host.cancel_flag(),
@@ -4495,7 +4502,7 @@ fn uu_sort(
 				.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
 			Box::new(io::Cursor::new(bytes))
 		} else {
-			open_with_open_failed_error(&files0_from)?
+			open_with_open_failed_error(&opener, &files0_from)?
 		};
 		let buf_reader = BufReader::new(reader);
 		for (line_num, line_res) in buf_reader.split(b'\0').enumerate() {
@@ -4752,7 +4759,7 @@ fn uu_sort(
 			.any(|selector| selector.settings.mode == SortMode::Random);
 	if needs_random {
 		settings.salt = Some(match settings.random_source.as_deref() {
-			Some(path) => salt_from_random_source(path)?,
+			Some(path) => salt_from_random_source(&opener, path)?,
 			None => get_rand_string(),
 		});
 	}
@@ -4762,7 +4769,7 @@ fn uu_sort(
 	// Verify that we can open all input files. They are reopened later to avoid
 	// holding every descriptor while the output file is prepared.
 	for file in &files {
-		open(file)?;
+		open(&opener, file)?;
 	}
 
 	let output_path = match matches.get_one::<OsString>(options::OUTPUT) {
@@ -4788,7 +4795,7 @@ fn uu_sort(
 
 	settings.init_precomputed(needs_locale_collation);
 
-	exec(&mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
+	exec(&opener, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
 }
 
 fn uu_app() -> Command {
@@ -5038,6 +5045,7 @@ pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
 }
 
 fn exec(
+	opener: &ReadOpener,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
@@ -5045,15 +5053,15 @@ fn exec(
 	stderr: OpenFile,
 ) -> SortResult<()> {
 	if settings.merge {
-		merge::merge(files, settings, output, tmp_dir)
+		merge::merge(opener, files, settings, output, tmp_dir)
 	} else if settings.check {
 		if files.len() > 1 {
 			Err(SortError::message("only one file allowed with -c"))
 		} else {
-			check::check(files.first().unwrap(), settings)
+			check::check(opener, files.first().unwrap(), settings)
 		}
 	} else {
-		let mut lines = files.iter().map(open);
+		let mut lines = files.iter().map(|file| open(opener, file));
 		ext_sort(&mut lines, settings, output, tmp_dir, stderr)
 	}
 }
@@ -5407,8 +5415,8 @@ const U64_LEN: usize = 8;
 const RANDOM_SOURCE_TAG: &[u8] = b"uutils-sort-random-source"; // Domain separation tag
 
 /// Create a 128-bit salt by hashing up to 1 MiB from the given file.
-fn salt_from_random_source(path: &Path) -> SortResult<[u8; SALT_LEN]> {
-	let mut reader = open_with_open_failed_error(path)?;
+fn salt_from_random_source(opener: &ReadOpener, path: &Path) -> SortResult<[u8; SALT_LEN]> {
+	let mut reader = open_with_open_failed_error(opener, path)?;
 	let mut buf = [0u8; BUF_LEN];
 	let mut total = 0usize;
 	let mut hasher = FastState::default().build_hasher();
@@ -5557,18 +5565,21 @@ fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
 	Ok(())
 }
 
-fn open(path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
+fn open(opener: &ReadOpener, path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
 	let path = Path::new(path.as_ref());
-	match File::open(path) {
+	match opener.open(path) {
 		Ok(file) => Ok(Box::new(file)),
 		Err(error) => Err(SortError::ReadFailed { path: path.to_owned(), error }),
 	}
 }
 
-fn open_with_open_failed_error(path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
+fn open_with_open_failed_error(
+	opener: &ReadOpener,
+	path: impl AsRef<OsStr>,
+) -> SortResult<Box<dyn Read + Send>> {
 	// On error, returns an OpenFailed error instead of a ReadFailed error
 	let path = Path::new(path.as_ref());
-	match File::open(path) {
+	match opener.open(path) {
 		Ok(file) => Ok(Box::new(file)),
 		Err(error) => Err(SortError::OpenFailed { path: path.to_owned(), error }),
 	}
@@ -5594,7 +5605,7 @@ fn format_error_message(error: &ParseSizeError, s: &str, option: &str) -> String
 #[cfg(test)]
 mod tests {
 
-	use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy};
+	use omp_shell::{OpenError, OpenRequest, PathAccess, PathDenied, PathPolicy};
 
 	use super::*;
 	use crate::host::{run_util, run_util_with_policy};
@@ -5610,8 +5621,8 @@ mod tests {
 			Err(PathDenied { path: path.to_path_buf(), access: PathAccess::Write })
 		}
 
-		fn open(&self, path: &Path, request: OpenRequest) -> Result<std::fs::File, PathDenied> {
-			Err(PathDenied { path: path.to_path_buf(), access: request.access })
+		fn open(&self, path: &Path, request: OpenRequest) -> Result<File, OpenError> {
+			Err(PathDenied { path: path.to_path_buf(), access: request.access }.into())
 		}
 	}
 

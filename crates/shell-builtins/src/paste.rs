@@ -121,7 +121,8 @@ fn paste(
 		if filename == "-" {
 			prepared.push(PreparedSource::StandardInput);
 		} else {
-			let file = File::open(host.resolve(&filename))
+			let file = host
+				.open_read(&filename)
 				.map_err(|err| format!("{}: {}", filename.to_string_lossy(), strip_errno(&err)))?;
 			prepared.push(PreparedSource::File(BufReader::new(file)));
 		}

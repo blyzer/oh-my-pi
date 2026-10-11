@@ -36,9 +36,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	fmt::Write as _,
-	fs,
 	io::{self, Read, Write as _},
-	path::{Path, PathBuf},
 	sync::Arc,
 };
 
@@ -56,7 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	graphics::encode_image_passthrough,
-	host::{DynDevice, DynFault, DynHost, DynOutput, DynSchema},
+	host::{DynDevice, DynFault, DynHost, DynOutput, DynSchema, ReadOpener},
 };
 
 const HELP: &str = "dyn — discover and invoke live dynamic devices\n\nUsage:\n  dyn\n  dyn --q \
@@ -155,14 +153,8 @@ async fn run<SE: ShellExtensions>(
 		Err(fault) => return host_fault(&context, &fault),
 	};
 	let mut stdin = context.stdin();
-	let cwd = context.shell.working_dir();
-	let mut parsed = match parse_args(
-		&schema.schema,
-		&argv[1..],
-		cwd,
-		context.params.path_policy().map(AsRef::as_ref),
-		&mut stdin,
-	) {
+	let opener = ReadOpener::for_context(&context);
+	let mut parsed = match parse_args(&schema.schema, &argv[1..], &opener, &mut stdin) {
 		Ok(parsed) => parsed,
 		Err(parse_error) => {
 			write_error(&context, &parse_error)?;
@@ -835,8 +827,7 @@ enum ArgError {
 fn parse_args(
 	schema: &Value,
 	argv: &[Str],
-	cwd: &Path,
-	path_policy: Option<&dyn omp_shell::PathPolicy>,
+	opener: &ReadOpener,
 	stdin: &mut impl Read,
 ) -> Result<Map<String, Value>, ArgError> {
 	let normalized = normalize_schema(schema);
@@ -857,8 +848,8 @@ fn parse_args(
 			continue;
 		}
 		if argument == "-" || (argument.starts_with('@') && argument.len() > 1) {
-			let (origin, text) = read_argument_source(argument, cwd, path_policy, stdin)?
-				.expect("source spelling was checked");
+			let (origin, text) =
+				read_argument_source(argument, opener, stdin)?.expect("source spelling was checked");
 			bind_source(&leaves, &mut output, &overrides, &text, origin)?;
 			continue;
 		}
@@ -872,7 +863,7 @@ fn parse_args(
 				index += 1;
 				raw.as_str()
 			};
-			let source = read_argument_source(raw, cwd, path_policy, stdin)?;
+			let source = read_argument_source(raw, opener, stdin)?;
 			let raw = source.as_ref().map_or(raw, |(_, text)| text.as_str());
 			merge_json_object(&mut output, raw, Str::new_static("--json"))?;
 			continue;
@@ -916,7 +907,7 @@ fn parse_args(
 			index += 1;
 			raw
 		};
-		let source = read_argument_source(raw, cwd, path_policy, stdin)?;
+		let source = read_argument_source(raw, opener, stdin)?;
 		let raw = source
 			.as_ref()
 			.map_or(raw, |(_, text)| strip_one_newline(text));
@@ -930,8 +921,7 @@ fn parse_args(
 
 fn read_argument_source(
 	argument: &str,
-	cwd: &Path,
-	path_policy: Option<&dyn omp_shell::PathPolicy>,
+	opener: &ReadOpener,
 	stdin: &mut impl Read,
 ) -> Result<Option<(Str, String)>, ArgError> {
 	if argument == "-" {
@@ -944,14 +934,8 @@ fn read_argument_source(
 	let Some(raw_path) = argument.strip_prefix('@').filter(|path| !path.is_empty()) else {
 		return Ok(None);
 	};
-	let path = resolve(cwd, raw_path);
-	if let Some(policy) = path_policy {
-		policy.check_read(&path).map_err(|error| ArgError::Read {
-			origin: Str::new(raw_path),
-			error:  io::Error::other(error),
-		})?;
-	}
-	let text = fs::read_to_string(&path)
+	let text = opener
+		.read_to_string(raw_path)
 		.map_err(|error| ArgError::Read { origin: Str::new(raw_path), error })?;
 	Ok(Some((Str::new(raw_path), text)))
 }
@@ -1074,15 +1058,6 @@ fn value_at<'a>(root: &'a Map<String, Value>, path: &[&str]) -> Option<&'a Value
 		value = value.as_object()?.get(*part)?;
 	}
 	Some(value)
-}
-
-fn resolve(cwd: &Path, path: &str) -> PathBuf {
-	let path = PathBuf::from(path);
-	if path.is_absolute() {
-		path
-	} else {
-		cwd.join(path)
-	}
 }
 
 fn coerce(leaf: &SchemaLeaf<'_>, raw: &str, flag: &str) -> Result<Value, ArgError> {
@@ -1214,7 +1189,7 @@ mod tests {
 	use omp_core::Str;
 	use serde_json::{Map, Value, json};
 
-	use super::{ArgError, DynOutput, DynSchema, parse_args, render_help, write_output};
+	use super::{ArgError, DynOutput, DynSchema, ReadOpener, parse_args, render_help, write_output};
 	use crate::graphics::extract_image_passthrough;
 
 	/// `report_issue@1` as `dyn` sees it: three required strings and one
@@ -1282,11 +1257,11 @@ mod tests {
 
 	fn parse(schema: &Value, argv: &[&str], stdin: &str) -> Result<Map<String, Value>, ArgError> {
 		let mut stdin = io::Cursor::new(stdin.as_bytes().to_vec());
-		parse_args(schema, &args(argv), Path::new("/"), None, &mut stdin)
+		parse_args(schema, &args(argv), &ReadOpener::unconfined(Path::new("/")), &mut stdin)
 	}
 
 	fn parse_in(schema: &Value, argv: &[&str], cwd: &Path) -> Result<Map<String, Value>, ArgError> {
-		parse_args(schema, &args(argv), cwd, None, &mut io::empty())
+		parse_args(schema, &args(argv), &ReadOpener::unconfined(cwd), &mut io::empty())
 	}
 
 	#[test]

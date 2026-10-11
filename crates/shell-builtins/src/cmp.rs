@@ -11,7 +11,7 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use omp_shell::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, ReadOpener, Stdin, Utility, format_usage, matches_parser, util};
 
 const OPT_PRINT_BYTES: &str = "print-bytes";
 const OPT_IGNORE_INITIAL: &str = "ignore-initial";
@@ -216,10 +216,11 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 	let path1 = (name1 != OsStr::new("-")).then(|| host.resolve(name1));
 	let path2 = (name2 != OsStr::new("-")).then(|| host.resolve(name2));
 	let cancel = host.cancel_flag();
+	let opener = host.read_opener();
 
 	if name1 == OsStr::new("-") {
 		let input1 = stdin_input(&mut host.stdin);
-		let input2 = open_input(name2, path2.as_deref().unwrap(), options.no_follow)?;
+		let input2 = open_input(&opener, name2, path2.as_deref().unwrap(), options.no_follow)?;
 		compare_inputs(
 			input1,
 			input2,
@@ -231,7 +232,7 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 			&cancel,
 		)
 	} else if name2 == OsStr::new("-") {
-		let input1 = open_input(name1, path1.as_deref().unwrap(), options.no_follow)?;
+		let input1 = open_input(&opener, name1, path1.as_deref().unwrap(), options.no_follow)?;
 		let input2 = stdin_input(&mut host.stdin);
 		compare_inputs(
 			input1,
@@ -244,8 +245,8 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 			&cancel,
 		)
 	} else {
-		let input1 = open_input(name1, path1.as_deref().unwrap(), options.no_follow)?;
-		let input2 = open_input(name2, path2.as_deref().unwrap(), options.no_follow)?;
+		let input1 = open_input(&opener, name1, path1.as_deref().unwrap(), options.no_follow)?;
+		let input2 = open_input(&opener, name2, path2.as_deref().unwrap(), options.no_follow)?;
 		compare_inputs(
 			input1,
 			input2,
@@ -334,7 +335,12 @@ fn stdin_input(stdin: &mut Stdin) -> Input<'_> {
 	}
 }
 
-fn open_input<'a>(name: &OsStr, path: &Path, no_follow: bool) -> Result<Input<'a>, String> {
+fn open_input<'a>(
+	opener: &ReadOpener,
+	name: &OsStr,
+	path: &Path,
+	no_follow: bool,
+) -> Result<Input<'a>, String> {
 	let metadata = if no_follow {
 		fs::symlink_metadata(path)
 	} else {
@@ -355,7 +361,7 @@ fn open_input<'a>(name: &OsStr, path: &Path, no_follow: bool) -> Result<Input<'a
 		return Err(format!("{}: Is a directory", display_name(name)));
 	}
 	let regular_len = metadata.is_file().then_some(metadata.len());
-	let file = File::open(path).map_err(|err| input_error(name, &err))?;
+	let file = opener.open(path).map_err(|err| input_error(name, &err))?;
 	Ok(Input { reader: BufReader::with_capacity(BUFFER_SIZE, InputReader::File(file)), regular_len })
 }
 
