@@ -50,5 +50,8 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/bin/bb"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
+      - name: Probe BuildBuddy connectivity and auth
+        run: scripts/remote-verify.sh remote-probe
+
       - name: Run Linux-valid Cargo verification remotely
         run: scripts/remote-verify.sh remote-heavy
