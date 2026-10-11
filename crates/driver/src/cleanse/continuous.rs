@@ -257,7 +257,7 @@ mod tests {
 	}
 
 	impl BinaryResolver for TestHost {
-		fn resolve(&self, _: &Path, _: &Path, _: &[&str]) -> Option<PathBuf> {
+		fn resolve(&self, _: &[&str]) -> Option<PathBuf> {
 			None
 		}
 	}

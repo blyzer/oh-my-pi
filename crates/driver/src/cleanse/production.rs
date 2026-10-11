@@ -122,8 +122,8 @@ impl ProductionCleanseHost {
 }
 
 impl BinaryResolver for ProductionCleanseHost {
-	fn resolve(&self, project_root: &Path, manifest_root: &Path, names: &[&str]) -> Option<PathBuf> {
-		self.resolver.resolve(project_root, manifest_root, names)
+	fn resolve(&self, names: &[&str]) -> Option<PathBuf> {
+		self.resolver.resolve(names)
 	}
 }
 
