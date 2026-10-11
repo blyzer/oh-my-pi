@@ -9,3 +9,17 @@ lint:
     # other (see README.md) — a package-level cycle buf flags but protox/
     # protoc happily compile, since no two files import each other directly.
     - PACKAGE_NO_IMPORT_CYCLE
+breaking:
+  # WIRE, not FILE/WIRE_JSON: generated Rust is never committed and serde JSON is
+  # Rust-native, so only tag and type changes can misdecode across builds (ADR 0048).
+  use:
+    - WIRE
+  ignore:
+    # Same-binary toolhost envelope payloads: both ends always come from one build,
+    # and ADR 0039 plans owner-reviewed deletions here.
+    - proto/omp/control
+    - proto/omp/telemetry
+    - proto/omp/ui
+    # collab.v1 types are in-memory only; the relay wire is hand-mapped JSON
+    # versioned by collab PROTOCOL_REVISION (crates/collab/src/codec.rs).
+    - proto/omp/collab

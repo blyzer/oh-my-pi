@@ -58,6 +58,11 @@ proto-fmt-check:
 proto-lint:
     cd crates/proto && buf lint
 
+# Check `.proto` wire compatibility against omp2 (buf.yaml `breaking`).
+[group('format & lint')]
+proto-breaking:
+    buf breaking crates/proto --against '.git#branch=omp2,subdir=crates/proto'
+
 # Lint the Rust workspace with clippy (CI flags; own target dir so the
 # RUSTC_WORKSPACE_WRAPPER fingerprint never ping-pongs check/test artifacts).
 # `--all-targets` holds tests, examples and benches to the same policy as

@@ -136,6 +136,24 @@ jobs:
       - name: Lint Protobuf schemas
         working-directory: crates/proto
         run: buf lint
+      # Packages whose two ends can run different builds (envd Hello range, the
+      # build-stable docserver, gateway/auth/blob/inference daemons) must keep tags
+      # and types stable; prost drops unknown fields silently (ADR 0048 §11).
+      - name: Fetch PR base for the breaking check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      - name: Check Protobuf wire compatibility against the PR base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/proto-base"
+          mkdir -p "$base"
+          git archive "refs/remotes/origin/${BASE_REF}" crates/proto | tar -x -C "$base"
+          buf breaking crates/proto --against "$base/crates/proto"
 
   # ADR 0035: lintx counts bare-string error variants and formatted error
   # values per crate and fails a crate whose count rose above
