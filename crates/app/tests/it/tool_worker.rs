@@ -266,7 +266,9 @@ async fn control_progress_parallelism_availability_and_result_spill_are_preserve
 	)
 	.await;
 	assert!(large.details_json.is_none());
-	assert_eq!(large.details_blob.as_ref().map(|blob| blob.size), Some(70_002));
+	let expected = serde_json::to_vec(&json!({"kind": "ok", "value": "x".repeat(70_000)}))
+		.expect("canonical large outcome");
+	assert_eq!(large.details_blob.as_ref().map(|blob| blob.size), Some(expected.len() as u64));
 
 	supervisor.shutdown().await;
 }

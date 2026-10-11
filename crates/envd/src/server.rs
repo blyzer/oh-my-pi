@@ -143,7 +143,7 @@ use super::{
 		DEFAULT_MAX_FRAME_BYTES, DomainControlSlot, ExtHostCompletion, ExtHostConfig, ExtHostError,
 		ExtHostEvent, ExtHostInvocation, ExtHostOutcomeKind, ExtHostSpec, ExtHostSupervisor,
 		ExtHostToolCall, ExternalControlAuthorityBinding, ExternalDomainControlBinding,
-		ExternalDomainControlFactories, HostKey,
+		ExternalDomainControlFactories, HostKey, worker_verdict_json,
 	},
 	worker_pool::{
 		DEFAULT_MAX_CONCURRENT_SPAWNS, DEFAULT_WORKER_LAYER_CEILING, WorkerKey, WorkerRoute,
@@ -11563,6 +11563,9 @@ fn projected_worker_completion_json(
 				})?,
 		);
 	}
+	if json.len() > inline_limit {
+		json = Bytes::new();
+	}
 	Ok((json, details_blob, is_error))
 }
 
@@ -11620,24 +11623,6 @@ fn worker_completion_json(
 		},
 	};
 	Ok((json, None, is_error))
-}
-
-fn worker_verdict_json(details: Bytes, is_error: bool) -> Result<Bytes, serde_json::Error> {
-	let _: &RawValue = serde_json::from_slice(&details)?;
-	if serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(&details).is_ok()
-	{
-		return Ok(details);
-	}
-	let prefix: &[u8] = if is_error {
-		br#"{"kind":"faulted","value":"#
-	} else {
-		br#"{"kind":"ok","value":"#
-	};
-	let mut verdict = BytesMut::with_capacity(prefix.len() + details.len() + 1);
-	verdict.extend_from_slice(prefix);
-	verdict.extend_from_slice(&details);
-	verdict.extend_from_slice(b"}");
-	Ok(verdict.freeze())
 }
 
 async fn send_workspace_operation_error(
@@ -18059,5 +18044,76 @@ mod tests {
 			drop(client);
 			serving.abort();
 		}
+	}
+
+	#[test]
+	fn worker_projection_retains_canonical_spilled_outcome_and_parts() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let outcome = serde_json::json!({"kind": "faulted", "value": {
+			"reason": "x".repeat(DEFAULT_RESULT_PROJECTION_BYTES + 1),
+			"artifact": "artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		}});
+		let bytes = serde_json::to_vec(&outcome).expect("outcome JSON");
+		let blob = blobs.put_verdict_bytes(Some("session"), "call", &bytes)
+			.expect("store canonical outcome");
+		let text = "é".repeat(DEFAULT_RESULT_PROJECTION_BYTES);
+		let completion = ExtHostCompletion {
+			call_id: sf!("call"),
+			kind: ExtHostOutcomeKind::Faulted,
+			parts: vec![thread_pb::Part { kind: Some(thread_pb::part::Kind::Text(text.clone())) }],
+			details_json: None,
+			details_blob: Some(blob.clone()),
+			args_issue: None,
+			useless: false,
+			terminate: true,
+		};
+		let (json, artifact, is_error) = projected_worker_completion_json(&blobs, &completion,
+			omp_tool::OutputRequest::Bounded, Some("session"), "call").expect("bounded projection");
+		assert!(json.is_empty());
+		assert_eq!(artifact, Some(blob.clone()));
+		assert!(is_error);
+		assert_eq!(blob.hash.as_ref(), Hash32::sum(&bytes).as_bytes());
+		assert_eq!(blob.size, bytes.len() as u64);
+		assert_eq!(materialize_worker_outcome(&blobs, &completion).expect("read full outcome").as_ref(),
+			bytes.as_slice());
+		let mut parts = completion.parts.clone();
+		let (source_bytes, inline_bytes, omitted) = project_wire_parts(&mut parts, omp_tool::OutputRequest::Bounded);
+		assert!(omitted);
+		assert!(source_bytes > inline_bytes);
+		assert!(inline_bytes <= DEFAULT_RESULT_PROJECTION_BYTES as u64);
+		let Some(thread_pb::part::Kind::Text(projected)) = parts.first().and_then(|part| part.kind.as_ref()) else {
+			panic!("bounded text projection must survive the spill");
+		};
+		assert!(!projected.is_empty());
+		assert!(text.starts_with(projected));
+		let (json, artifact, _) = projected_worker_completion_json(&blobs, &completion,
+			omp_tool::OutputRequest::Complete, Some("session"), "call").expect("complete projection");
+		assert_eq!(json.as_ref(), bytes.as_slice());
+		assert_eq!(artifact, Some(blob));
+	}
+
+	#[test]
+	fn worker_projection_bounds_the_canonical_envelope_not_just_details() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let details = Bytes::from(serde_json::to_vec(&"x".repeat(DEFAULT_RESULT_PROJECTION_BYTES - 2))
+			.expect("details JSON"));
+		assert_eq!(details.len(), DEFAULT_RESULT_PROJECTION_BYTES);
+		let expected = worker_verdict_json(details.clone(), false).expect("outcome envelope");
+		let completion = ExtHostCompletion {
+			call_id: sf!("boundary"), kind: ExtHostOutcomeKind::Ok,
+			parts: Vec::new(), details_json: Some(details), details_blob: None,
+			args_issue: None, useless: false, terminate: false,
+		};
+		let (json, artifact, is_error) = projected_worker_completion_json(&blobs, &completion,
+			omp_tool::OutputRequest::Bounded, Some("session"), "boundary").expect("bounded envelope");
+		assert!(json.is_empty());
+		assert!(!is_error);
+		let artifact = artifact.expect("complete canonical artifact");
+		assert_eq!(artifact.hash.as_ref(), Hash32::sum(&expected).as_bytes());
+		assert_eq!(blobs.get(BlobId {
+			hash: artifact.hash.as_ref().try_into().expect("digest"), size: artifact.size,
+		}).expect("read canonical artifact"), expected);
 	}
 }

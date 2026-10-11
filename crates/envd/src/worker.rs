@@ -33,8 +33,9 @@ use omp_proto::{
 		Tml, UiDispatchResult, UiError, command_dispatch_result, ui_dispatch, ui_dispatch_result,
 	},
 };
-use omp_tool::AvailabilityDelta;
+use omp_tool::{AvailabilityDelta, CallOutcome};
 use parking_lot::{Mutex, RwLock};
+use serde_json::value::RawValue;
 use thiserror::Error;
 use tokio::{
 	task::JoinHandle,
@@ -591,12 +592,12 @@ pub struct ExtHostCompletion {
 	pub call_id:      Str,
 	/// Exact terminal branch.
 	pub kind:         ExtHostOutcomeKind,
-	/// Model-facing result parts, each with a present discriminator.
+	/// Complete model-facing parts; output bounds are applied at verdict delivery.
 	pub parts:        Vec<Part>,
 	/// Inline structured details for in-process CONTROL completions.
 	pub details_json: Option<Bytes>,
-	/// Complete structured result staged by the Environment CAS when it exceeds
-	/// the bounded inline CONTROL projection.
+	/// Canonical `CallOutcome` JSON staged by the Environment CAS when structured
+	/// details exceed the bounded inline CONTROL projection.
 	pub details_blob: Option<Blob>,
 	/// Structured argument issue, present only for
 	/// [`ExtHostOutcomeKind::ArgsRejected`].
@@ -3108,6 +3109,9 @@ pub enum ExtHostError {
 	/// Named-worker routing refused immediate placement.
 	#[error(transparent)]
 	WorkerUnavailable(#[from] WorkerUnavailable),
+	/// Canonical CONTROL result JSON could not be encoded.
+	#[error("Python extension result JSON could not be encoded")]
+	ResultEncoding(#[source] serde_json::Error),
 }
 
 enum ControlHostCommand {
@@ -3333,6 +3337,7 @@ fn control_result_storage(
 	store: Option<&BlobHost>,
 	session: &str,
 	call_id: &str,
+	is_error: bool,
 	details: Bytes,
 ) -> Result<(Option<Bytes>, Option<Blob>), ExtHostError> {
 	if details.len() <= CONTROL_RESULT_INLINE_BYTES {
@@ -3341,6 +3346,7 @@ fn control_result_storage(
 	let store = store.ok_or_else(|| {
 		ExtHostError::Protocol(sf!("oversized CONTROL result has no environment result store"))
 	})?;
+	let details = worker_verdict_json(details, is_error).map_err(ExtHostError::ResultEncoding)?;
 	let blob = store
 		.put_verdict_bytes(Some(session), call_id, &details)
 		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
@@ -3404,15 +3410,11 @@ fn control_completion(
 		let parts = match completion.remove("parts") {
 			Some(serde_json::Value::Array(parts)) => parts
 				.into_iter()
-				.map(|part| {
-					part
-						.as_str()
-						.map(|text| text_part(text.to_owned()))
-						.ok_or_else(|| {
-							ExtHostError::Protocol(sf!(
-								"CONTROL completion parts must contain only strings"
-							))
-						})
+				.map(|part| match part {
+					serde_json::Value::String(text) => Ok(text_part(text)),
+					_ => Err(ExtHostError::Protocol(sf!(
+						"CONTROL completion parts must contain only strings"
+					))),
 				})
 				.collect::<Result<Vec<_>, _>>()?,
 			Some(_) => {
@@ -3443,21 +3445,7 @@ fn control_completion(
 			serde_json::to_vec(&details).expect("serializing an existing JSON value cannot fail"),
 		);
 		let (details_json, details_blob) =
-			control_result_storage(store, session, call_id.as_str(), details)?;
-		let parts = if details_blob.is_some()
-			&& parts
-				.iter()
-				.map(|part| match part.kind.as_ref() {
-					Some(part::Kind::Text(text)) => text.len(),
-					_ => 0,
-				})
-				.sum::<usize>()
-				> CONTROL_RESULT_INLINE_BYTES
-		{
-			Vec::new()
-		} else {
-			parts
-		};
+			control_result_storage(store, session, call_id.as_str(), is_error, details)?;
 		return Ok(ExtHostCompletion {
 			call_id,
 			kind: if is_error {
@@ -3478,18 +3466,14 @@ fn control_completion(
 		serde_json::to_vec(&result).expect("serializing an existing JSON value cannot fail"),
 	);
 	let (details_json, details_blob) =
-		control_result_storage(store, session, call_id.as_str(), details)?;
-	let parts = if details_blob.is_some() {
-		Vec::new()
-	} else {
-		let text = match result {
-			serde_json::Value::String(text) => text,
-			value => {
-				serde_json::to_string(&value).expect("serializing an existing JSON value cannot fail")
-			},
-		};
-		vec![text_part(text)]
+		control_result_storage(store, session, call_id.as_str(), false, details)?;
+	let text = match result {
+		serde_json::Value::String(text) => text,
+		value => {
+			serde_json::to_string(&value).expect("serializing an existing JSON value cannot fail")
+		},
 	};
+	let parts = vec![text_part(text)];
 	Ok(ExtHostCompletion {
 		call_id,
 		kind: ExtHostOutcomeKind::Ok,
@@ -3500,6 +3484,28 @@ fn control_completion(
 		useless: false,
 		terminate: false,
 	})
+}
+
+/// Preserves an existing typed terminal envelope or wraps raw worker details.
+pub(crate) fn worker_verdict_json(
+	details: Bytes,
+	is_error: bool,
+) -> Result<Bytes, serde_json::Error> {
+	let _: &RawValue = serde_json::from_slice(&details)?;
+	if serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(&details).is_ok()
+	{
+		return Ok(details);
+	}
+	let prefix: &[u8] = if is_error {
+		br#"{"kind":"faulted","value":"#
+	} else {
+		br#"{"kind":"ok","value":"#
+	};
+	let mut verdict = BytesMut::with_capacity(prefix.len() + details.len() + 1);
+	verdict.extend_from_slice(prefix);
+	verdict.extend_from_slice(&details);
+	verdict.extend_from_slice(b"}");
+	Ok(verdict.freeze())
 }
 
 fn install_hook_evidence(
@@ -4255,6 +4261,10 @@ async fn dispatch_control_service(
 
 #[cfg(test)]
 mod tests {
+	use omp_core::Hash32;
+
+	use crate::blobs::BlobId;
+
 	use super::*;
 
 	/// The route ceiling a registered tool gets and the tier the CONTROL
@@ -4381,6 +4391,99 @@ mod tests {
 		assert!(completion.details_json.is_none());
 		let blob = completion.details_blob.expect("result blob");
 		assert!(blob.size > CONTROL_RESULT_INLINE_BYTES as u64);
+		let bytes = store
+			.get(BlobId {
+				hash: blob.hash.as_ref().try_into().expect("result digest"),
+				size: blob.size,
+			})
+			.expect("read result artifact");
+		let outcome: CallOutcome<serde_json::Value, serde_json::Value> =
+			serde_json::from_slice(&bytes).expect("canonical outcome artifact");
+		assert!(matches!(outcome, CallOutcome::Ok(value)
+			if value == serde_json::Value::String("x".repeat(CONTROL_RESULT_INLINE_BYTES + 1))));
+		assert_eq!(completion.kind, ExtHostOutcomeKind::Ok);
+		assert_eq!(completion.parts, vec![text_part("x".repeat(CONTROL_RESULT_INLINE_BYTES + 1))]);
+	}
+
+	#[test]
+	fn oversized_control_fault_preserves_parts_and_artifact_references() {
+		let scratch = tempfile::tempdir().expect("result store scratch");
+		let store = BlobHost::open(scratch.path()).expect("result store");
+		let details = serde_json::json!({
+			"diagnostic": "x".repeat(CONTROL_RESULT_INLINE_BYTES + 1),
+			"artifact": "artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		});
+		let parts = vec!["summary".to_owned(), "y".repeat(CONTROL_RESULT_INLINE_BYTES + 1)];
+		let completion = control_completion(sf!("fault"), serde_json::json!({
+			"details": details,
+			"parts": parts,
+			"is_error": true,
+			"terminate": true,
+		}), Some(&store), "session").expect("spill faulted result");
+		assert_eq!(completion.kind, ExtHostOutcomeKind::Faulted);
+		assert!(completion.terminate);
+		assert!(completion.details_json.is_none());
+		assert_eq!(completion.parts, parts.into_iter().map(text_part).collect::<Vec<_>>());
+		let blob = completion.details_blob.expect("fault artifact");
+		let bytes = store.get(BlobId {
+			hash: blob.hash.as_ref().try_into().expect("result digest"),
+			size: blob.size,
+		}).expect("read fault artifact");
+		assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).expect("fault JSON"),
+			serde_json::json!({"kind": "faulted", "value": details}));
+	}
+
+	#[test]
+	fn oversized_control_parts_survive_small_structured_details() {
+		let text = "x".repeat(CONTROL_RESULT_INLINE_BYTES + 1);
+		let completion = control_completion(sf!("parts"), serde_json::json!({
+			"parts": [text], "details": {"count": 1},
+		}), None, "session").expect("parts reach the central projection gate");
+		assert_eq!(completion.parts, vec![text_part(text)]);
+		assert!(completion.details_blob.is_none());
+		assert_eq!(completion.details_json.expect("inline details").as_ref(), br#"{"count":1}"#);
+	}
+
+	#[test]
+	fn typed_control_outcome_spills_without_a_second_envelope() {
+		let scratch = tempfile::tempdir().expect("result store scratch");
+		let store = BlobHost::open(scratch.path()).expect("result store");
+		let outcome = serde_json::json!({"kind": "faulted", "value": {
+			"reason": "x".repeat(CONTROL_RESULT_INLINE_BYTES + 1),
+		}});
+		let expected = serde_json::to_vec(&outcome).expect("serialize expected outcome");
+		let completion = control_completion(sf!("typed"), serde_json::json!({
+			"details": outcome, "is_error": true,
+		}), Some(&store), "session").expect("spill typed outcome");
+		let blob = completion.details_blob.expect("typed artifact");
+		assert_eq!(blob.hash.as_ref(), Hash32::sum(&expected).as_bytes());
+		assert_eq!(blob.size, expected.len() as u64);
+		assert_eq!(store.get(BlobId {
+			hash: blob.hash.as_ref().try_into().expect("result digest"),
+			size: blob.size,
+		}).expect("read typed artifact").as_ref(), expected.as_slice());
+	}
+
+	#[test]
+	fn inline_control_completion_keeps_details_parts_and_terminal_flags() {
+		let completion = control_completion(sf!("inline"), serde_json::json!({
+			"details": {"answer": 42}, "parts": ["answer"], "terminate": true,
+		}), None, "session").expect("inline completion without a result store");
+		assert_eq!(completion.kind, ExtHostOutcomeKind::Ok);
+		assert_eq!(completion.parts, vec![text_part("answer".to_owned())]);
+		assert_eq!(completion.details_json.expect("inline details").as_ref(), br#"{"answer":42}"#);
+		assert!(completion.details_blob.is_none());
+		assert!(completion.args_issue.is_none());
+		assert!(!completion.useless);
+		assert!(completion.terminate);
+	}
+
+	#[test]
+	fn oversized_control_result_without_a_store_fails_explicitly() {
+		let result = control_completion(sf!("missing-store"),
+			serde_json::Value::String("x".repeat(CONTROL_RESULT_INLINE_BYTES + 1)),
+			None, "session");
+		assert!(matches!(result, Err(ExtHostError::Protocol(_))));
 	}
 
 	#[test]

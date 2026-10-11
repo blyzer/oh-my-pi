@@ -20,6 +20,11 @@ client and framing boundary; it does not contain an alternate host.
 - `exthost` owns extension manifests, lifecycle, CONTROL routing, quotas,
   service routing, cancellation, and the sole Python extension child role,
   `__omp-ext-host`.
+  CONTROL tool completions spill oversized structured details as canonical
+  `CallOutcome` JSON into the environment verdict CAS, preserving success or
+  fault classification and artifact references. Result parts survive that
+  spill unchanged; the environment verdict delivery seam applies the existing
+  bounded/complete output projection, independently of details storage.
 - `eval` owns the lazy, killable `__omp-eval-child` machinery. The built-in
   `py_eval` is an Environment-routed tool backed by a fresh disposable eval
   namespace for each call.
