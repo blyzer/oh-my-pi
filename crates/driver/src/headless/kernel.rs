@@ -1199,6 +1199,33 @@ fn admission_denial(
 }
 
 impl ExternalToolExecutor for EnvToolExecutor {
+	fn authorize_visibility<'a>(
+		&'a self,
+		identity: &'a omp_tool::ToolIdentity,
+		verdict: Bytes,
+		receipt: omp_tool::VisibilityReceipt,
+	) -> omp_agent::VisibilityAuthorizationFuture<'a> {
+		Box::pin(async move {
+			self
+				.client
+				.authorize_visibility(omp_env::frame::VisibilityAuthorization {
+					name: identity.name.as_str().to_owned(),
+					rev: identity.rev.to_string(),
+					verdict,
+					lines: receipt
+						.lines
+						.into_iter()
+						.map(|line| omp_env::frame::VisibleSourceLine {
+							source_key: line.source_key.as_str().to_owned(),
+							line:       line.line as u64,
+						})
+						.collect(),
+				})
+				.await
+				.map_err(omp_tool::ProjectionAuthorizationError::new)
+		})
+	}
+
 	fn invoke(&self, request: ExternalDispatchRequest) -> ExternalDispatchStream {
 		let client = self.client.clone();
 		let approvals = self.approvals.clone();
@@ -1452,17 +1479,25 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							};
 							(source_artifact, inline_json)
 						};
-						let outcome = match serde_json::from_slice::<
-							CallOutcome<serde_json::Value, serde_json::Value>,
-						>(&bytes) {
-							Ok(outcome) => outcome,
+						let terminal = match decode_environment_terminal(&bytes) {
+							Ok(terminal) => terminal,
 							Err(source) => {
-								tracing::warn!(%source, call_id = %request.call_id, "environment outcome blob is not a CallOutcome");
+								tracing::warn!(%source, call_id = %request.call_id, "environment outcome blob is not a supported terminal");
 								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 								return;
 							},
 						};
-						let typed_is_error = !matches!(&outcome, CallOutcome::Ok(_));
+						let typed_is_error = match &terminal {
+							EnvironmentTerminal::Outcome(outcome) => !matches!(outcome, CallOutcome::Ok(_)),
+							EnvironmentTerminal::Detached(DetachedVerdict::Detached(job)) => {
+								if !valid_detached_job(job, request.session_id.as_str()) || verdict.useless {
+									tracing::warn!(call_id = %request.call_id, "environment detached job is invalid or stale");
+									yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+									return;
+								}
+								false
+							},
+						};
 						if typed_is_error != verdict.is_error {
 							tracing::warn!(
 								call_id = %request.call_id,
@@ -1473,6 +1508,14 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 							return;
 						}
+						let visibility = match tool_visibility_spans(verdict.visibility, &verdict.parts) {
+							Ok(visibility) => visibility,
+							Err(()) => {
+								tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
+								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+								return;
+							},
+						};
 						let mut parts = match replicate_verdict_parts(
 							&client,
 							&outcome_store,
@@ -1496,16 +1539,32 @@ impl ExternalToolExecutor for EnvToolExecutor {
 								return;
 							},
 						};
-						if parts.is_empty() {
-							parts = harness_parts(&outcome);
+						match terminal {
+							EnvironmentTerminal::Outcome(outcome) => {
+								if parts.is_empty() {
+									parts = harness_parts(&outcome);
+								}
+								yield ExternalDispatchEvent::DoneProjected {
+									outcome,
+									parts,
+									is_error: verdict.is_error,
+									source_artifact: Some(source_artifact),
+									projection: tool_output_projection(projection),
+									visibility,
+								};
+							},
+							EnvironmentTerminal::Detached(DetachedVerdict::Detached(job)) => {
+								if parts.is_empty() {
+									parts.push(ToolPart::Text { text: sf!("detached job {}", job.id) });
+								}
+								yield ExternalDispatchEvent::DetachedProjected {
+									job,
+									parts,
+									source_artifact,
+									projection: tool_output_projection(projection),
+								};
+							},
 						}
-						yield ExternalDispatchEvent::DoneProjected {
-							outcome,
-							parts,
-							is_error: verdict.is_error,
-							source_artifact: Some(source_artifact),
-							projection: tool_output_projection(projection),
-						};
 						return;
 					},
 					Ok(None) => {
@@ -1523,6 +1582,44 @@ impl ExternalToolExecutor for EnvToolExecutor {
 			}
 		})
 	}
+}
+
+// Detached descriptors are executor terminals, not one of CallOutcome's
+// settled branches. Keep their original artifact bytes through the boundary.
+enum EnvironmentTerminal {
+	Outcome(CallOutcome<serde_json::Value, serde_json::Value>),
+	Detached(DetachedVerdict),
+}
+
+fn decode_environment_terminal(bytes: &[u8]) -> Result<EnvironmentTerminal, serde_json::Error> {
+	// Ordinary outcomes retain their single-pass decoding path. Only detached
+	// executor terminals need the second, distinct tagged wire shape.
+	match serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(bytes) {
+		Ok(outcome) => Ok(EnvironmentTerminal::Outcome(outcome)),
+		Err(_) => serde_json::from_slice(bytes).map(EnvironmentTerminal::Detached),
+	}
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DetachedVerdict {
+	Detached(omp_tool::JobRef),
+}
+
+fn valid_detached_job(job: &omp_tool::JobRef, session_id: &str) -> bool {
+	!job.id.is_empty()
+		&& match &job.owner {
+			omp_tool::JobOwner::NamedProcess { name, generation } => {
+				!name.is_empty() && *generation != 0
+			},
+			omp_tool::JobOwner::AgentLoop { agent_id } => !agent_id.is_empty(),
+		} && matches!(job.metadata.status, omp_tool::JobStatus::Queued | omp_tool::JobStatus::Running)
+		&& job.metadata.settled_at_ms.is_none()
+		&& job
+			.metadata
+			.owner_session
+			.as_ref()
+			.is_none_or(|owner| owner == session_id)
 }
 
 fn raw_json(bytes: Bytes) -> Result<Box<serde_json::value::RawValue>, ()> {
@@ -1595,6 +1692,57 @@ const fn invalid_outcome_blob() -> Abort {
 	Abort::EffectsUnknown {
 		reason: Str::new_static("environment returned an invalid outcome artifact"),
 	}
+}
+
+fn tool_visibility_spans(
+	visibility: Vec<omp_env::frame::ProjectionSpan>,
+	parts: &[omp_proto::thread::v1::Part],
+) -> Result<Vec<omp_tool::ProjectionSpan>, ()> {
+	if visibility.is_empty() {
+		return Ok(Vec::new());
+	}
+	use omp_proto::thread::v1::part::Kind;
+	let mut next = 0;
+	let remapped = parts
+		.iter()
+		.map(|part| {
+			let retained =
+				matches!(part.kind.as_ref(), Some(Kind::Text(_) | Kind::Thinking(_) | Kind::Blob(_)));
+			let index = retained.then_some(next);
+			next += usize::from(retained);
+			index
+		})
+		.collect::<Vec<_>>();
+	visibility
+		.into_iter()
+		.map(|span| {
+			let part = usize::try_from(span.part).map_err(|_| ())?;
+			let start_byte = usize::try_from(span.start_byte).map_err(|_| ())?;
+			let end_byte = usize::try_from(span.end_byte).map_err(|_| ())?;
+			let line = usize::try_from(span.line).map_err(|_| ())?;
+			let text = match parts.get(part).and_then(|part| part.kind.as_ref()) {
+				Some(Kind::Text(text)) => text.as_str(),
+				Some(Kind::Thinking(thinking)) => thinking.text.as_str(),
+				_ => return Err(()),
+			};
+			if line == 0
+				|| span.source_key.is_empty()
+				|| start_byte >= end_byte
+				|| end_byte > text.len()
+				|| !text.is_char_boundary(start_byte)
+				|| !text.is_char_boundary(end_byte)
+			{
+				return Err(());
+			}
+			Ok(omp_tool::ProjectionSpan {
+				part: remapped[part].ok_or(())?,
+				start_byte,
+				end_byte,
+				source_key: Str::from(span.source_key),
+				line,
+			})
+		})
+		.collect()
 }
 
 fn tool_part(part: omp_proto::thread::v1::Part) -> Option<ToolPart> {
@@ -3813,6 +3961,72 @@ mod tests {
 	};
 
 	const GPT5: &str = "openai/gpt-5";
+
+	#[test]
+	fn visibility_transport_preserves_source_lines_and_remaps_filtered_parts() {
+		use omp_proto::thread::v1::{Part, part::Kind};
+		let parts = [Part::default(), Part { kind: Some(Kind::Text("alpha".to_owned())) }];
+		let spans = super::tool_visibility_spans(
+			vec![omp_env::frame::ProjectionSpan {
+				part:       1,
+				start_byte: 0,
+				end_byte:   5,
+				source_key: "source".to_owned(),
+				line:       7,
+			}],
+			&parts,
+		)
+		.expect("valid visibility");
+		assert_eq!(spans, [omp_tool::ProjectionSpan {
+			part:       0,
+			start_byte: 0,
+			end_byte:   5,
+			source_key: sf!("source"),
+			line:       7,
+		}]);
+	}
+
+	#[test]
+	fn legacy_verdict_defaults_to_empty_visibility() {
+		use omp_proto::prost::Message;
+		let verdict =
+			omp_env::frame::Verdict { invocation_id: "legacy".to_owned(), ..Default::default() };
+		let decoded = omp_env::frame::Verdict::decode(verdict.encode_to_vec().as_slice())
+			.expect("legacy verdict");
+		assert!(
+			super::tool_visibility_spans(decoded.visibility, &decoded.parts)
+				.expect("empty receipt")
+				.is_empty()
+		);
+	}
+
+	#[test]
+	fn visibility_transport_rejects_malformed_ranges() {
+		use omp_proto::thread::v1::{Part, part::Kind};
+		let parts = [Part { kind: Some(Kind::Text("écho".to_owned())) }];
+		for (part, start_byte, end_byte, source_key, line) in [
+			(1, 0, 2, "source", 1),
+			(0, 1, 2, "source", 1),
+			(0, 0, 6, "source", 1),
+			(0, 2, 2, "source", 1),
+			(0, 0, 2, "", 1),
+			(0, 0, 2, "source", 0),
+		] {
+			assert!(
+				super::tool_visibility_spans(
+					vec![omp_env::frame::ProjectionSpan {
+						part,
+						start_byte,
+						end_byte,
+						source_key: source_key.to_owned(),
+						line
+					}],
+					&parts
+				)
+				.is_err()
+			);
+		}
+	}
 
 	/// A fetch envelope, fetching with credentials when `credentials`.
 	fn fetching(credentials: bool) -> omp_tool::Effects {

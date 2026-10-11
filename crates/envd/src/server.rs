@@ -143,7 +143,7 @@ use super::{
 		DEFAULT_MAX_FRAME_BYTES, DomainControlSlot, ExtHostCompletion, ExtHostConfig, ExtHostError,
 		ExtHostEvent, ExtHostInvocation, ExtHostOutcomeKind, ExtHostSpec, ExtHostSupervisor,
 		ExtHostToolCall, ExternalControlAuthorityBinding, ExternalDomainControlBinding,
-		ExternalDomainControlFactories, HostKey,
+		ExternalDomainControlFactories, HostKey, worker_verdict_json,
 	},
 	worker_pool::{
 		DEFAULT_MAX_CONCURRENT_SPAWNS, DEFAULT_WORKER_LAYER_CEILING, WorkerKey, WorkerRoute,
@@ -5442,6 +5442,7 @@ impl EnvServer {
 					| Body::DapAttach(_)
 					| Body::DapAction(_)
 					| Body::DetachExec(_)
+					| Body::Visibility(_)
 			)
 		);
 		if environment_only && self.environment_authorities().is_none() {
@@ -5456,6 +5457,31 @@ impl EnvServer {
 		}
 
 		match request.body {
+			Some(Body::Visibility(request)) => {
+				if connection.host.is_some() || scope.is_some() || !connection.grants("env.fs.read") {
+					send_error(
+						responses,
+						request_id,
+						pb::ProtocolErrorCode::PermissionDenied,
+						"visibility receipts require an application document-read authority",
+					)
+					.await;
+					return;
+				}
+				match authorize_visibility_receipt(&self.registry, request) {
+					Ok(()) => {
+						send_data_response(
+							responses,
+							request_id,
+							data_response::Body::Visibility(pb::VisibilityAuthorized {}),
+						)
+						.await;
+					},
+					Err((code, message)) => {
+						send_error(responses, request_id, code, message).await;
+					},
+				}
+			},
 			Some(Body::Worker(request)) => {
 				if !authorize_data_operation(
 					connection,
@@ -9551,6 +9577,60 @@ async fn spawn_native_invocation(
 	let _ = start.recv_async().await;
 }
 
+fn authorize_visibility_receipt(
+	registry: &Registry,
+	request: pb::VisibilityAuthorization,
+) -> Result<(), (pb::ProtocolErrorCode, &'static str)> {
+	let (name, rev) = registry
+		.live_identity(&request.name)
+		.ok_or((pb::ProtocolErrorCode::NotFound, "visibility tool is not registered"))?;
+	if rev.to_string() != request.rev {
+		return Err((
+			pb::ProtocolErrorCode::PreconditionFailed,
+			"visibility tool revision is not live",
+		));
+	}
+	let identity = ToolIdentity { name: name.clone(), rev: rev.clone() };
+	let mut lines = request
+		.lines
+		.into_iter()
+		.map(|line| {
+			let number = usize::try_from(line.line)
+				.map_err(|_| (pb::ProtocolErrorCode::InvalidArgument, "visibility line is invalid"))?;
+			if number == 0 || line.source_key.is_empty() {
+				return Err((pb::ProtocolErrorCode::InvalidArgument, "visibility line is invalid"));
+			}
+			Ok(omp_tool::VisibleSourceLine {
+				source_key: Str::from(line.source_key),
+				line:       number,
+			})
+		})
+		.collect::<Result<Vec<_>, _>>()?;
+	lines.sort_unstable();
+	lines.dedup();
+	let receipt = omp_tool::VisibilityReceipt { lines };
+	let projected = registry
+		.project_verdict(&identity, &request.verdict, false, &native_prompt_caps(&identity.rev))
+		.map_err(|_| (pb::ProtocolErrorCode::InvalidArgument, "visibility verdict is invalid"))?;
+	if receipt.lines.iter().any(|line| {
+		!projected
+			.visibility
+			.iter()
+			.any(|span| span.source_key == line.source_key && span.line == line.line)
+	}) {
+		return Err((
+			pb::ProtocolErrorCode::PermissionDenied,
+			"visibility receipt contains an unprojected source line",
+		));
+	}
+	registry
+		.authorize_visibility(&identity, &request.verdict, &receipt)
+		.map_err(|source| {
+			tracing::warn!(%source, tool = %identity.name, "visibility authorization failed");
+			(pb::ProtocolErrorCode::PermissionDenied, "visibility authorization rejected")
+		})
+}
+
 const DEFAULT_RESULT_PROJECTION_BYTES: usize = 64 * 1024;
 const COMPLETE_RESULT_PROJECTION_BYTES: usize = 8 * 1024 * 1024;
 
@@ -9579,6 +9659,14 @@ fn project_wire_parts(
 	parts: &mut Vec<thread_pb::Part>,
 	request: omp_tool::OutputRequest,
 ) -> (u64, u64, bool) {
+	project_wire_parts_with_visibility(parts, &mut Vec::new(), request)
+}
+
+fn project_wire_parts_with_visibility(
+	parts: &mut Vec<thread_pb::Part>,
+	visibility: &mut Vec<pb::ProjectionSpan>,
+	request: omp_tool::OutputRequest,
+) -> (u64, u64, bool) {
 	let limit = match request {
 		omp_tool::OutputRequest::Bounded => DEFAULT_RESULT_PROJECTION_BYTES,
 		omp_tool::OutputRequest::Complete => COMPLETE_RESULT_PROJECTION_BYTES,
@@ -9587,12 +9675,18 @@ fn project_wire_parts(
 	let mut inline_bytes = 0_u64;
 	let mut remaining = limit;
 	let mut omitted = false;
+	let mut remapped = (!visibility.is_empty()).then(|| Vec::with_capacity(parts.len()));
+	let mut retained = 0_u64;
 	parts.retain_mut(|part| {
 		let original = part.encoded_len();
 		source_bytes = source_bytes.saturating_add(u64::try_from(original).unwrap_or(u64::MAX));
 		if original <= remaining {
 			remaining -= original;
 			inline_bytes = inline_bytes.saturating_add(u64::try_from(original).unwrap_or(u64::MAX));
+			if let Some(remapped) = &mut remapped {
+				remapped.push(Some(retained));
+			}
+			retained += 1;
 			return true;
 		}
 		let text = match part.kind.as_mut() {
@@ -9602,6 +9696,9 @@ fn project_wire_parts(
 		};
 		let Some(text) = text else {
 			omitted = true;
+			if let Some(remapped) = &mut remapped {
+				remapped.push(None);
+			}
 			return false;
 		};
 		let overhead = original.saturating_sub(text.len());
@@ -9610,12 +9707,46 @@ fn project_wire_parts(
 		let projected = part.encoded_len();
 		omitted = true;
 		if projected == 0 || projected > remaining {
+			if let Some(remapped) = &mut remapped {
+				remapped.push(None);
+			}
 			return false;
 		}
 		remaining -= projected;
 		inline_bytes = inline_bytes.saturating_add(u64::try_from(projected).unwrap_or(u64::MAX));
+		if let Some(remapped) = &mut remapped {
+			remapped.push(Some(retained));
+		}
+		retained += 1;
 		true
 	});
+	if let Some(remapped) = remapped {
+		visibility.retain_mut(|span| {
+			let Some(part) = usize::try_from(span.part)
+				.ok()
+				.and_then(|part| remapped.get(part))
+				.copied()
+				.flatten()
+			else {
+				return false;
+			};
+			span.part = part;
+			let Some(thread_pb::part::Kind::Text(text)) = parts[part as usize].kind.as_ref() else {
+				return false;
+			};
+			let (Ok(start), Ok(end)) =
+				(usize::try_from(span.start_byte), usize::try_from(span.end_byte))
+			else {
+				return false;
+			};
+			span.line != 0
+				&& !span.source_key.is_empty()
+				&& start < end
+				&& end <= text.len()
+				&& text.is_char_boundary(start)
+				&& text.is_char_boundary(end)
+		});
+	}
 	(source_bytes, inline_bytes, omitted)
 }
 
@@ -9930,6 +10061,7 @@ fn spawn_worker_invocation(
 							useless: complete.useless,
 							terminate: complete.terminate.then_some(true),
 							projection: Some(projection),
+							visibility: Vec::new(),
 							props: Default::default(),
 						}),
 					)
@@ -10060,10 +10192,15 @@ fn native_wire_parts(
 	parts: &[omp_tool::Part],
 	delivery: &VerdictDelivery,
 	invocation_id: &str,
-) -> Vec<thread_pb::Part> {
+	visibility: &[omp_tool::ProjectionSpan],
+) -> (Vec<thread_pb::Part>, Vec<pb::ProjectionSpan>) {
 	let mut wire = Vec::with_capacity(parts.len());
 	let mut retained = BTreeSet::new();
+	let mut remapped = (!visibility.is_empty()).then(|| Vec::with_capacity(parts.len()));
 	for part in parts {
+		if let Some(remapped) = &mut remapped {
+			remapped.push(wire.len());
+		}
 		match part {
 			omp_tool::Part::Text { text } => wire.push(wire_text(text.as_str().to_owned())),
 			omp_tool::Part::Json { json } => {
@@ -10086,7 +10223,26 @@ fn native_wire_parts(
 			},
 		}
 	}
-	wire
+	let visibility = remapped.map_or_else(Vec::new, |remapped| {
+		visibility
+			.iter()
+			.filter_map(|span| {
+				let part = *remapped.get(span.part)?;
+				matches!(
+					parts.get(span.part)?,
+					omp_tool::Part::Text { .. } | omp_tool::Part::Json { .. }
+				)
+				.then(|| pb::ProjectionSpan {
+					part:       part as u64,
+					start_byte: span.start_byte as u64,
+					end_byte:   span.end_byte as u64,
+					source_key: span.source_key.as_str().to_owned(),
+					line:       span.line as u64,
+				})
+			})
+			.collect()
+	});
+	(wire, visibility)
 }
 
 /// Model-facing text for a native verdict its tool could not project. The
@@ -10142,13 +10298,19 @@ async fn send_native_outcome(
 						vec![wire_text(UNPROJECTED_NATIVE_RESULT.to_owned())],
 						is_error,
 						false,
+						Vec::new(),
 					)
 					.await;
 					return;
 				},
 			};
-			let mut parts = native_wire_parts(&projected.parts, delivery, invocation_id);
-			let _ = project_wire_parts(&mut parts, delivery.output_request);
+			let (mut parts, mut visibility) =
+				native_wire_parts(&projected.parts, delivery, invocation_id, &projected.visibility);
+			let _ = project_wire_parts_with_visibility(
+				&mut parts,
+				&mut visibility,
+				delivery.output_request,
+			);
 			send_verdict_json(
 				responses,
 				request_id,
@@ -10158,6 +10320,7 @@ async fn send_native_outcome(
 				parts,
 				projected.is_error,
 				projected.useless,
+				visibility,
 			)
 			.await;
 		},
@@ -10177,6 +10340,7 @@ async fn send_native_outcome(
 				parts,
 				false,
 				false,
+				Vec::new(),
 			)
 			.await;
 		},
@@ -10198,6 +10362,7 @@ async fn send_verdict_json(
 	parts: Vec<thread_pb::Part>,
 	is_error: bool,
 	useless: bool,
+	visibility: Vec<pb::ProjectionSpan>,
 ) {
 	let details_blob = match delivery.blobs.put_verdict_bytes(
 		delivery.retention_session.as_deref(),
@@ -10248,6 +10413,7 @@ async fn send_verdict_json(
 			useless,
 			terminate: None,
 			projection: Some(projection),
+			visibility,
 			props: Default::default(),
 		}),
 	)
@@ -10281,6 +10447,7 @@ async fn send_abort_verdict(
 		Vec::new(),
 		true,
 		false,
+		Vec::new(),
 	)
 	.await;
 }
@@ -10335,6 +10502,7 @@ async fn send_policy_denied_verdict(
 		Vec::new(),
 		true,
 		false,
+		Vec::new(),
 	)
 	.await;
 }
@@ -11456,6 +11624,9 @@ fn projected_worker_completion_json(
 				})?,
 		);
 	}
+	if json.len() > inline_limit {
+		json = Bytes::new();
+	}
 	Ok((json, details_blob, is_error))
 }
 
@@ -11513,24 +11684,6 @@ fn worker_completion_json(
 		},
 	};
 	Ok((json, None, is_error))
-}
-
-fn worker_verdict_json(details: Bytes, is_error: bool) -> Result<Bytes, serde_json::Error> {
-	let _: &RawValue = serde_json::from_slice(&details)?;
-	if serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(&details).is_ok()
-	{
-		return Ok(details);
-	}
-	let prefix: &[u8] = if is_error {
-		br#"{"kind":"faulted","value":"#
-	} else {
-		br#"{"kind":"ok","value":"#
-	};
-	let mut verdict = BytesMut::with_capacity(prefix.len() + details.len() + 1);
-	verdict.extend_from_slice(prefix);
-	verdict.extend_from_slice(&details);
-	verdict.extend_from_slice(b"}");
-	Ok(verdict.freeze())
 }
 
 async fn send_workspace_operation_error(
@@ -13131,6 +13284,48 @@ mod tests {
 		) -> Vec<omp_tool::Part> {
 			vec![omp_tool::Part::Text { text: Str::new("x".repeat(self.bytes)) }]
 		}
+
+		fn projection(
+			&self,
+			view: Result<&serde_json::Value, &serde_json::Value>,
+			caps: &PromptCaps,
+		) -> omp_tool::PromptProjection {
+			let parts = self.prompt(view, caps);
+			let visibility = if self.bytes == 0 {
+				Vec::new()
+			} else {
+				vec![
+					omp_tool::ProjectionSpan {
+						part:       0,
+						start_byte: 0,
+						end_byte:   1,
+						source_key: sf!("source"),
+						line:       1,
+					},
+					omp_tool::ProjectionSpan {
+						part:       0,
+						start_byte: self.bytes - 1,
+						end_byte:   self.bytes,
+						source_key: sf!("source"),
+						line:       2,
+					},
+				]
+			};
+			omp_tool::PromptProjection { parts, visibility }
+		}
+
+		fn authorize_visibility(
+			&self,
+			view: Result<&serde_json::Value, &serde_json::Value>,
+			_receipt: &omp_tool::VisibilityReceipt,
+		) -> Result<(), omp_tool::ProjectionAuthorizationError> {
+			if view.is_ok_and(|value| value == &serde_json::Value::Bool(true)) {
+				return Err(omp_tool::ProjectionAuthorizationError::new(std::io::Error::from(
+					std::io::ErrorKind::PermissionDenied,
+				)));
+			}
+			Ok(())
+		}
 	}
 
 	/// A registry holding one [`SizedProjection`], and its identity.
@@ -13191,6 +13386,168 @@ mod tests {
 			panic!("expected a verdict frame");
 		};
 		verdict
+	}
+
+	#[tokio::test]
+	async fn native_verdict_transports_only_host_retained_visibility() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blobs");
+		let (registry, identity) = sized_projection(DEFAULT_RESULT_PROJECTION_BYTES + 10);
+		let verdict = publish_native_outcome(
+			&blobs,
+			&registry,
+			&identity,
+			omp_tool::OutputRequest::Bounded,
+			OK_VERDICT,
+		)
+		.await;
+		assert_eq!(verdict.visibility, [pb::ProjectionSpan {
+			part:       0,
+			start_byte: 0,
+			end_byte:   1,
+			source_key: "source".to_owned(),
+			line:       1,
+		}]);
+		let round_trip =
+			pb::Verdict::decode(verdict.encode_to_vec().as_slice()).expect("wire verdict");
+		assert_eq!(round_trip.visibility, verdict.visibility);
+	}
+
+	#[tokio::test]
+	async fn native_verdict_without_candidates_transports_empty_visibility() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blobs");
+		let (registry, identity) = sized_projection(0);
+		let verdict = publish_native_outcome(
+			&blobs,
+			&registry,
+			&identity,
+			omp_tool::OutputRequest::Bounded,
+			OK_VERDICT,
+		)
+		.await;
+		assert!(verdict.visibility.is_empty());
+	}
+
+	#[test]
+	fn host_visibility_remaps_candidates_after_a_dropped_part() {
+		let mut parts = vec![
+			thread_pb::Part {
+				kind: Some(thread_pb::part::Kind::Blob(thread_pb::Blob {
+					mime: "x".repeat(DEFAULT_RESULT_PROJECTION_BYTES + 1),
+					..Default::default()
+				})),
+			},
+			wire_text("alpha".to_owned()),
+		];
+		let mut spans = vec![pb::ProjectionSpan {
+			part:       1,
+			start_byte: 0,
+			end_byte:   5,
+			source_key: "source".to_owned(),
+			line:       1,
+		}];
+		project_wire_parts_with_visibility(&mut parts, &mut spans, omp_tool::OutputRequest::Bounded);
+		assert_eq!(spans[0].part, 0);
+		assert_eq!(parts.len(), 1);
+	}
+
+	fn visibility_request(
+		identity: &ToolIdentity,
+		verdict: &'static [u8],
+		lines: Vec<pb::VisibleSourceLine>,
+	) -> pb::VisibilityAuthorization {
+		pb::VisibilityAuthorization {
+			name: identity.name.as_str().to_owned(),
+			rev: identity.rev.to_string(),
+			verdict: Bytes::from_static(verdict),
+			lines,
+		}
+	}
+
+	#[test]
+	fn host_authorizes_populated_visibility_receipt() {
+		let (registry, identity) = sized_projection(5);
+		let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine {
+			source_key: "source".to_owned(),
+			line:       1,
+		}]);
+		assert!(authorize_visibility_receipt(&registry, request).is_ok());
+	}
+
+	#[test]
+	fn host_authorizes_empty_visibility_receipt() {
+		let (registry, identity) = sized_projection(5);
+		assert!(
+			authorize_visibility_receipt(
+				&registry,
+				visibility_request(&identity, OK_VERDICT, Vec::new())
+			)
+			.is_ok()
+		);
+	}
+
+	#[test]
+	fn host_rejects_malformed_and_legacy_visibility_verdicts() {
+		let (registry, identity) = sized_projection(5);
+		for verdict in [b"not json".as_slice(), br#"{"text":"legacy"}"#.as_slice()] {
+			assert!(matches!(
+				authorize_visibility_receipt(
+					&registry,
+					visibility_request(&identity, verdict, Vec::new())
+				),
+				Err((pb::ProtocolErrorCode::InvalidArgument, _))
+			));
+		}
+	}
+
+	#[test]
+	fn host_propagates_visibility_authority_rejection() {
+		let (registry, identity) = sized_projection(5);
+		let request = visibility_request(&identity, br#"{"kind":"ok","value":true}"#, Vec::new());
+		assert!(matches!(
+			authorize_visibility_receipt(&registry, request),
+			Err((pb::ProtocolErrorCode::PermissionDenied, _))
+		));
+	}
+
+	#[test]
+	fn host_rejects_visibility_for_an_unprojected_source_line() {
+		let (registry, identity) = sized_projection(5);
+		let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine {
+			source_key: "other".to_owned(),
+			line:       1,
+		}]);
+		assert!(matches!(
+			authorize_visibility_receipt(&registry, request),
+			Err((pb::ProtocolErrorCode::PermissionDenied, _))
+		));
+	}
+
+	#[test]
+	fn host_rejects_visibility_for_a_different_tool_revision() {
+		let (registry, identity) = sized_projection(5);
+		let mut request = visibility_request(&identity, OK_VERDICT, Vec::new());
+		request.rev = "other@9".to_owned();
+		assert!(matches!(
+			authorize_visibility_receipt(&registry, request),
+			Err((pb::ProtocolErrorCode::PreconditionFailed, _))
+		));
+	}
+
+	#[test]
+	fn host_rejects_visibility_with_invalid_line_identity() {
+		let (registry, identity) = sized_projection(5);
+		for (source_key, line) in [("source", 0), ("", 1)] {
+			let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine {
+				source_key: source_key.to_owned(),
+				line,
+			}]);
+			assert!(matches!(
+				authorize_visibility_receipt(&registry, request),
+				Err((pb::ProtocolErrorCode::InvalidArgument, _))
+			));
+		}
 	}
 
 	/// The registry's shared projection cache keeps at most 4 MiB and declines
@@ -17851,5 +18208,117 @@ mod tests {
 			drop(client);
 			serving.abort();
 		}
+	}
+
+	#[test]
+	fn worker_projection_retains_canonical_spilled_outcome_and_parts() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let outcome = serde_json::json!({"kind": "faulted", "value": {
+			"reason": "x".repeat(DEFAULT_RESULT_PROJECTION_BYTES + 1),
+			"artifact": "artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		}});
+		let bytes = serde_json::to_vec(&outcome).expect("outcome JSON");
+		let blob = blobs
+			.put_verdict_bytes(Some("session"), "call", &bytes)
+			.expect("store canonical outcome");
+		let text = "é".repeat(DEFAULT_RESULT_PROJECTION_BYTES);
+		let completion = ExtHostCompletion {
+			call_id:      sf!("call"),
+			kind:         ExtHostOutcomeKind::Faulted,
+			parts:        vec![thread_pb::Part {
+				kind: Some(thread_pb::part::Kind::Text(text.clone())),
+			}],
+			details_json: None,
+			details_blob: Some(blob.clone()),
+			args_issue:   None,
+			useless:      false,
+			terminate:    true,
+		};
+		let (json, artifact, is_error) = projected_worker_completion_json(
+			&blobs,
+			&completion,
+			omp_tool::OutputRequest::Bounded,
+			Some("session"),
+			"call",
+		)
+		.expect("bounded projection");
+		assert!(json.is_empty());
+		assert_eq!(artifact, Some(blob.clone()));
+		assert!(is_error);
+		assert_eq!(blob.hash.as_ref(), Hash32::sum(&bytes).as_bytes());
+		assert_eq!(blob.size, bytes.len() as u64);
+		assert_eq!(
+			materialize_worker_outcome(&blobs, &completion)
+				.expect("read full outcome")
+				.as_ref(),
+			bytes.as_slice()
+		);
+		let mut parts = completion.parts.clone();
+		let (source_bytes, inline_bytes, omitted) =
+			project_wire_parts(&mut parts, omp_tool::OutputRequest::Bounded);
+		assert!(omitted);
+		assert!(source_bytes > inline_bytes);
+		assert!(inline_bytes <= DEFAULT_RESULT_PROJECTION_BYTES as u64);
+		let Some(thread_pb::part::Kind::Text(projected)) =
+			parts.first().and_then(|part| part.kind.as_ref())
+		else {
+			panic!("bounded text projection must survive the spill");
+		};
+		assert!(!projected.is_empty());
+		assert!(text.starts_with(projected));
+		let (json, artifact, _) = projected_worker_completion_json(
+			&blobs,
+			&completion,
+			omp_tool::OutputRequest::Complete,
+			Some("session"),
+			"call",
+		)
+		.expect("complete projection");
+		assert_eq!(json.as_ref(), bytes.as_slice());
+		assert_eq!(artifact, Some(blob));
+	}
+
+	#[test]
+	fn worker_projection_bounds_the_canonical_envelope_not_just_details() {
+		let root = tempfile::tempdir().expect("blob root");
+		let blobs = BlobHost::open(root.path()).expect("blob host");
+		let details = Bytes::from(
+			serde_json::to_vec(&"x".repeat(DEFAULT_RESULT_PROJECTION_BYTES - 2))
+				.expect("details JSON"),
+		);
+		assert_eq!(details.len(), DEFAULT_RESULT_PROJECTION_BYTES);
+		let expected = worker_verdict_json(details.clone(), false).expect("outcome envelope");
+		let completion = ExtHostCompletion {
+			call_id:      sf!("boundary"),
+			kind:         ExtHostOutcomeKind::Ok,
+			parts:        Vec::new(),
+			details_json: Some(details),
+			details_blob: None,
+			args_issue:   None,
+			useless:      false,
+			terminate:    false,
+		};
+		let (json, artifact, is_error) = projected_worker_completion_json(
+			&blobs,
+			&completion,
+			omp_tool::OutputRequest::Bounded,
+			Some("session"),
+			"boundary",
+		)
+		.expect("bounded envelope");
+		assert!(json.is_empty());
+		assert!(!is_error);
+		let artifact = artifact.expect("complete canonical artifact");
+		assert_eq!(artifact.hash.as_ref(), Hash32::sum(&expected).as_bytes());
+		assert_eq!(
+			blobs
+				.get(BlobId {
+					hash: artifact.hash.as_ref().try_into().expect("digest"),
+					size: artifact.size,
+				})
+				.expect("read canonical artifact"),
+			expected
+		);
 	}
 }

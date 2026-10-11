@@ -3897,6 +3897,38 @@ mod convar_tests {
 	}
 
 	#[test]
+	fn dispatch_result_chunks_preserve_large_typed_completion_bytes() {
+		let invocation = sf!("large-result");
+		let value = json!({"result": {
+			"parts": ["visible summary", "é".repeat(64 * 1024)],
+			"details": {"kind": "faulted", "value": {
+				"artifact": "artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				"reason": "é".repeat(64 * 1024),
+			}},
+			"is_error": true,
+			"terminate": true,
+		}});
+		let encoded = serde_json::to_vec(&value).expect("encode completion");
+		let mut state = DispatchChunkState {
+			invocation: invocation.clone(),
+			next_index: 0,
+			body:       Vec::new(),
+		};
+		// Odd chunk lengths split UTF-8 sequences; decoding happens only after
+		// reassembly.
+		for (index, bytes) in encoded.chunks(1023).enumerate() {
+			append_dispatch_result_chunk(&mut state, &invocation, index as u64, bytes)
+				.expect("append completion chunk");
+		}
+		assert_eq!(state.body, encoded);
+		assert_eq!(
+			serde_json::from_slice::<serde_json::Value>(&state.body)
+				.expect("decode reassembled completion"),
+			value
+		);
+	}
+
+	#[test]
 	fn hard_quota_error_carries_the_current_receipt() {
 		let receipt = ResourceReceipt {
 			quotas:  BTreeMap::from([(sf!("ui.updates"), QuotaStatus {

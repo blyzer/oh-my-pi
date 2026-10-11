@@ -266,6 +266,20 @@ pub enum ExternalDispatchEvent {
 		source_artifact: Option<BlobRef>,
 		/// Facts for the projection already applied by the environment host.
 		projection:      OutputProjection,
+		/// Source-line candidates relative to the environment-bounded parts.
+		visibility:      Vec<ProjectionSpan>,
+	},
+	/// Work continues under the environment's resource authority.
+	DetachedProjected {
+		/// Exact job identity, owner generation, and expected settlement
+		/// artifact.
+		job:             JobRef,
+		/// Environment-bounded model-facing parts.
+		parts:           Vec<Part>,
+		/// Verified detached descriptor adopted into the session CAS.
+		source_artifact: BlobRef,
+		/// Facts for the projection applied by the environment host.
+		projection:      OutputProjection,
 	},
 	/// Execution stopped without a normal typed verdict.
 	Aborted(Abort),
@@ -275,12 +289,28 @@ pub enum ExternalDispatchEvent {
 pub type ExternalDispatchStream =
 	Pin<Box<dyn Stream<Item = ExternalDispatchEvent> + Send + 'static>>;
 
+/// One cold authority round trip after an externally routed projection settles.
+pub type VisibilityAuthorizationFuture<'a> =
+	Pin<Box<dyn Future<Output = Result<(), omp_tool::ProjectionAuthorizationError>> + Send + 'a>>;
+
 /// Host composition seam for worker- and remote-routed tool execution.
 pub trait ExternalToolExecutor: Send + Sync {
-	/// Opens one committed invocation. Every stream must end in `Done` or
-	/// `Aborted`; transport failures are mapped to an explicit abort by the
-	/// adapter while their typed source is logged at that boundary.
+	/// Opens one committed invocation. Every stream must end in `Done`,
+	/// `DoneProjected`, `DetachedProjected`, or `Aborted`; transport failures
+	/// are mapped to an explicit abort while their typed source is logged at
+	/// that boundary.
 	fn invoke(&self, request: ExternalDispatchRequest) -> ExternalDispatchStream;
+
+	/// Returns final visibility to an external authority. Older executors carry
+	/// no candidates and need no acknowledgement.
+	fn authorize_visibility<'a>(
+		&'a self,
+		_identity: &'a ToolIdentity,
+		_verdict: bytes::Bytes,
+		_receipt: VisibilityReceipt,
+	) -> VisibilityAuthorizationFuture<'a> {
+		Box::pin(std::future::ready(Ok(())))
+	}
 }
 
 /// One boxed cold-call future at the session-tool dynamic quarantine.
@@ -2553,9 +2583,33 @@ impl Committer {
 			Ok(Some(Settled::Report(report))) => Ok(Some(report)),
 			Ok(Some(Settled::Staged(staged))) => {
 				match self.gate_result(session, call, staged, &mut output).await {
-					Ok(staged) => self
-						.commit_staged(session, call, staged, &mut output)
-						.map(Some),
+					Ok(staged) => {
+						let authorization = match &call.unit {
+							Unit::External { executor, .. } => {
+								staged.visibility_verdict.as_ref().map(|verdict| {
+									(Arc::clone(executor), verdict.clone(), staged.visibility.clone())
+								})
+							},
+							_ => None,
+						};
+						match self.commit_staged(session, call, staged, &mut output) {
+							Ok(report) => match authorization {
+								Some((executor, verdict, receipt)) => executor
+									.authorize_visibility(&call.identity, verdict, receipt)
+									.await
+									.map(|()| Some(report))
+									.map_err(|source| {
+										RegistryError::ProjectionAuthorization {
+											name: call.identity.name.clone(),
+											source,
+										}
+										.into()
+									}),
+								None => Ok(Some(report)),
+							},
+							Err(error) => Err(error),
+						}
+					},
 					Err(error) => Err(error),
 				}
 			},
@@ -2712,6 +2766,7 @@ impl Committer {
 					call,
 					outcome,
 					parts,
+					&[],
 					is_error,
 					source_artifact,
 					None,
@@ -2724,6 +2779,7 @@ impl Committer {
 				is_error,
 				source_artifact,
 				projection,
+				visibility,
 			}) => {
 				let outcome = serde_json::value::to_raw_value(&outcome)?;
 				Ok(Some(Settled::Staged(self.stage_external_from_artifact(
@@ -2731,11 +2787,33 @@ impl Committer {
 					call,
 					outcome,
 					parts,
+					&visibility,
 					is_error,
 					source_artifact,
 					Some(projection),
 					output,
 				)?)))
+			},
+			DispatchEvent::External(ExternalDispatchEvent::DetachedProjected {
+				job,
+				parts,
+				source_artifact,
+				projection,
+			}) => {
+				let staged = self.stage_external_from_artifact(
+					session,
+					call,
+					detached_outcome(&job)?,
+					parts,
+					&[],
+					false,
+					Some(source_artifact),
+					Some(projection),
+					output,
+				)?;
+				let mut report = self.commit_staged(session, call, staged, output)?;
+				report.detached = Some(job);
+				Ok(Some(Settled::Report(report)))
 			},
 			DispatchEvent::External(ExternalDispatchEvent::Aborted(abort)) => {
 				// External cancellation tokens cannot carry a reason. Preserve
@@ -2870,6 +2948,7 @@ impl Committer {
 		call: &PreparedCall,
 		outcome: Box<RawValue>,
 		parts: Vec<Part>,
+		visibility: &[ProjectionSpan],
 		is_error: bool,
 		source_artifact: Option<BlobRef>,
 		transport_projection: Option<OutputProjection>,
@@ -2880,7 +2959,7 @@ impl Committer {
 			call,
 			outcome,
 			parts,
-			&[],
+			visibility,
 			is_error,
 			source_artifact,
 			transport_projection,

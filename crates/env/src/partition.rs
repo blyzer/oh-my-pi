@@ -441,7 +441,8 @@ const fn route_data(body: Option<&data_request::Body>) -> Backend {
 			| data_request::Body::DapAttach(_)
 			| data_request::Body::DapAction(_)
 			| data_request::Body::HostInfo(_)
-			| data_request::Body::WorkspaceRoots(_),
+			| data_request::Body::WorkspaceRoots(_)
+			| data_request::Body::Visibility(_),
 		)
 		| None => Backend::Remote,
 	}
@@ -519,6 +520,14 @@ mod tests {
 
 	use super::*;
 	use crate::{ApprovalQueryEvent, ReflectionQueryEvent};
+
+	#[test]
+	fn visibility_receipts_route_to_environment_authority() {
+		let body = data_request::Body::Visibility(omp_proto::env::v1::VisibilityAuthorization {
+			..Default::default()
+		});
+		assert_eq!(route_data(Some(&body)), Backend::Remote);
+	}
 
 	async fn receive(transport: &InProcessEnvTransport) -> ClientFrame {
 		tokio::time::timeout(Duration::from_secs(2), transport.recv())
