@@ -2144,6 +2144,48 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn a_confirmation_keeps_waiting_for_the_browser_callback() {
+		let (port, redirect_uri) = available_redirect_uri();
+		let http = token_http();
+		let clock = TestClock(SystemTime::UNIX_EPOCH);
+		let engine = OAuthEngine::with_entropy(&http, &clock, FixedEntropy);
+		let spec = callback_spec(redirect_uri, PkceCompletion::CallbackUrl);
+		let (session, driver, _) = default_login_channels(LoginSessionId::from("loopback-confirm"));
+		let mut pending = engine.begin_pkce(&spec, &driver).await.expect("begin");
+		let (authorization_url, prompt) = pkce_timeline(&session).await;
+		assert_eq!(prompt.input, AuthPromptKind::Confirmation);
+		let state = authorization_url
+			.query_pairs()
+			.find(|(name, _)| name == "state")
+			.expect("state")
+			.1
+			.into_owned();
+		session
+			.responses
+			.send_async(AuthResponse {
+				session: session.id.clone(),
+				input:   AuthInput::DeviceConfirmed,
+			})
+			.await
+			.expect("confirmation");
+		let target = format!("/callback?code=browser-code&state={state}");
+		let receive = engine.receive_pkce_input(&mut pending, &driver);
+		let browser = async {
+			// The confirmation is queued first; the callback arrives after it.
+			tokio::task::yield_now().await;
+			raw_callback(port, &target).await
+		};
+		let (input, response) = futures::join!(receive, browser);
+		assert!(response.starts_with("HTTP/1.1 200 OK"));
+		let input = input.expect("a confirmation does not end the wait for the callback");
+		assert!(matches!(input, AuthInput::CallbackUrl(_)));
+		engine
+			.complete_pkce(&spec, pending, input)
+			.await
+			.expect("token exchange");
+	}
+
+	#[tokio::test]
 	async fn manual_paste_wins_while_callback_server_is_waiting() {
 		let (_port, redirect_uri) = available_redirect_uri();
 		let http = token_http();

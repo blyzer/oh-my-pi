@@ -427,14 +427,22 @@ pub(super) async fn receive_callback(
 			() = &mut timeout => Err(OAuthError::Cancelled),
 		};
 	};
-	tokio::select! {
-		biased;
-		outcome = server.receive() => match outcome? {
-			CallbackOutcome::Callback(callback) => Ok(AuthInput::CallbackUrl(callback)),
-			CallbackOutcome::Denied => Err(OAuthError::AuthorizationDenied),
-		},
-		input = driver.receive() => input.map_err(Into::into),
-		() = &mut timeout => Err(OAuthError::Cancelled),
+	loop {
+		tokio::select! {
+			biased;
+			outcome = server.receive() => return match outcome? {
+				CallbackOutcome::Callback(callback) => Ok(AuthInput::CallbackUrl(callback)),
+				CallbackOutcome::Denied => Err(OAuthError::AuthorizationDenied),
+			},
+			input = driver.receive() => match input? {
+				// The browser's redirect finishes this login, so a caller confirming
+				// that the user completed it there (an Enter at the prompt) changes
+				// nothing: keep waiting for the redirect or a pasted callback URL.
+				AuthInput::DeviceConfirmed => {},
+				input => return Ok(input),
+			},
+			() = &mut timeout => return Err(OAuthError::Cancelled),
+		}
 	}
 }
 #[cfg(test)]
