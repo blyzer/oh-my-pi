@@ -1,6 +1,9 @@
 //! Terminal presentation adapter for the driver-owned workflow host.
 
-use std::{path::Path, sync::Arc};
+use std::{
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
@@ -8,7 +11,7 @@ use omp_driver::adw::{RunStatus, definition, production::ProductionAdwHost};
 use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::AdwCommand;
+use crate::{cli::AdwCommand, process_ctx_with};
 
 /// Runs one workflow verb.
 pub async fn run(command: AdwCommand) -> miette::Result<()> {
@@ -52,13 +55,24 @@ async fn execute(
 ) -> miette::Result<()> {
 	let definition = definition::load(project, workflow).into_diagnostic()?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let ctx = Arc::new(omp_con::Ctx::new());
-	let host =
-		ProductionAdwHost::open(project.to_path_buf(), data_dir, model, ctx).into_diagnostic()?;
+	let host = open_host(project, data_dir, model)?;
 	let cancel = CancellationToken::new();
-	let exit = omp_driver::adw::run(&definition, max_attempts, &host, &cancel)
-		.await
-		.into_diagnostic()?;
+	let exit = {
+		let run = omp_driver::adw::run(&definition, max_attempts, &host, &cancel);
+		tokio::pin!(run);
+		tokio::select! {
+			exit = &mut run => exit,
+			signal = tokio::signal::ctrl_c() => {
+				signal.into_diagnostic()?;
+				// The run settles as cancelled: the token stops the active
+				// phase (a code phase's process tree, a child turn) and the
+				// loop dispatches nothing further.
+				cancel.cancel();
+				run.await
+			},
+		}
+	}
+	.into_diagnostic()?;
 
 	for record in &exit.records {
 		println!(
@@ -90,4 +104,16 @@ async fn execute(
 	} else {
 		Err(miette::miette!("workflow exited with status {}", exit.code))
 	}
+}
+
+/// Opens the workflow host under the operator's configuration: user
+/// `config.cfg` and the project overlay decide the sandbox, network and
+/// approval posture its phases run under and report.
+pub fn open_host(
+	project: &Path,
+	data_dir: PathBuf,
+	model: Str,
+) -> miette::Result<ProductionAdwHost> {
+	let ctx = Arc::new(process_ctx_with(project, omp_con::Ctx::builder())?);
+	ProductionAdwHost::open(project.to_path_buf(), data_dir, model, ctx).into_diagnostic()
 }

@@ -4,6 +4,7 @@ use std::{
 	collections::{BTreeSet, HashSet},
 	env,
 	error::Error as StdError,
+	ffi::OsStr,
 	fs,
 	future::Future,
 	io,
@@ -21,42 +22,34 @@ use super::{
 
 /// Binary resolution authority used during discovery.
 pub trait BinaryResolver {
-	/// Resolves `names` from project-local package bins then the admitted system
-	/// executable set.
-	fn resolve(&self, project_root: &Path, manifest_root: &Path, names: &[&str]) -> Option<PathBuf>;
+	/// Resolves the first of `names` the admitted system executable set holds.
+	fn resolve(&self, names: &[&str]) -> Option<PathBuf>;
 }
-/// Filesystem/PATH resolver using project-local precedence.
+/// Resolver over the absolute directories of the process `$PATH`.
+///
+/// Project-local executables (`<root>/<name>`, `node_modules/.bin`,
+/// `.venv/bin`, ...) are never candidates: a cloned repository must not be able
+/// to shadow `cargo` or a checker by committing an executable of that name.
+/// Relative `$PATH` entries (`.`, the empty entry) are skipped for the same
+/// reason — they name whatever directory the command happens to run in.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FilesystemResolver;
 
 impl BinaryResolver for FilesystemResolver {
-	fn resolve(&self, project_root: &Path, manifest_root: &Path, names: &[&str]) -> Option<PathBuf> {
-		for name in names {
-			for root in [manifest_root, project_root] {
-				for relative in [
-					PathBuf::from(name),
-					PathBuf::from("node_modules/.bin").join(name),
-					PathBuf::from(".venv/bin").join(name),
-					PathBuf::from("venv/bin").join(name),
-					PathBuf::from("vendor/bin").join(name),
-				] {
-					let candidate = root.join(relative);
-					if runnable_file(&candidate) {
-						return Some(candidate);
-					}
-				}
-			}
-			if let Some(paths) = env::var_os("PATH") {
-				for directory in env::split_paths(&paths) {
-					let candidate = directory.join(name);
-					if runnable_file(&candidate) {
-						return Some(candidate);
-					}
-				}
-			}
-		}
-		None
+	fn resolve(&self, names: &[&str]) -> Option<PathBuf> {
+		resolve_on_path(env::var_os("PATH").as_deref(), names)
 	}
+}
+
+/// Resolves the first of `names` found in an absolute directory of `path`.
+fn resolve_on_path(path: Option<&OsStr>, names: &[&str]) -> Option<PathBuf> {
+	let path = path?;
+	names.iter().find_map(|name| {
+		env::split_paths(path)
+			.filter(|directory| directory.is_absolute())
+			.map(|directory| directory.join(name))
+			.find(|candidate| runnable_file(candidate))
+	})
 }
 
 fn runnable_file(path: &Path) -> bool {
@@ -645,7 +638,7 @@ pub fn discover(
 			if !ids.insert(id.clone()) {
 				continue;
 			}
-			let Some(binary) = resolver.resolve(project_root, &root, family.binaries) else {
+			let Some(binary) = resolver.resolve(family.binaries) else {
 				suite.skipped.push(SkippedCheck {
 					label:    family.label.into(),
 					language: family.language.into(),
@@ -797,7 +790,7 @@ pub fn custom_suite(
 			});
 			continue;
 		}
-		let Some(binary) = resolver.resolve(project_root, &cwd, &[spec.binary.as_str()]) else {
+		let Some(binary) = resolver.resolve(&[spec.binary.as_str()]) else {
 			suite.skipped.push(SkippedCheck {
 				label:    spec.label,
 				language: spec.language,
@@ -991,4 +984,38 @@ fn normalize_result(project_root: &Path, checker: &Checker, process: ProcessOutp
 		});
 	}
 	CheckResult { checker: checker.clone(), exit_code: process.exit_code, diagnostics }
+}
+
+#[cfg(test)]
+mod tests {
+	use std::os::unix::fs::PermissionsExt as _;
+
+	use super::*;
+
+	fn executable(path: &Path) {
+		fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+		fs::write(path, "#!/bin/sh\n").expect("executable");
+		fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("mode");
+	}
+
+	/// A cloned repository cannot shadow a `$PATH` executable: project-root
+	/// and package-manager bins are never candidates, and a relative `$PATH`
+	/// entry, which names the command's own directory, is skipped.
+	#[test]
+	fn only_absolute_path_directories_resolve() {
+		let project = tempfile::tempdir().expect("project");
+		let tools = tempfile::tempdir().expect("tools");
+		for local in ["cargo", "node_modules/.bin/cargo", ".venv/bin/cargo", "vendor/bin/cargo"] {
+			executable(&project.path().join(local));
+		}
+		executable(&tools.path().join("cargo"));
+		// The checker runs in the project, where `.` names its root `cargo`.
+		env::set_current_dir(project.path()).expect("project cwd");
+		let path =
+			env::join_paths([Path::new("."), Path::new(""), tools.path()]).expect("PATH value");
+		assert_eq!(resolve_on_path(Some(&path), &["cargo"]), Some(tools.path().join("cargo")),);
+		let relative_only = env::join_paths([Path::new(".")]).expect("PATH value");
+		assert_eq!(resolve_on_path(Some(&relative_only), &["cargo"]), None);
+		assert_eq!(resolve_on_path(None, &["cargo"]), None);
+	}
 }

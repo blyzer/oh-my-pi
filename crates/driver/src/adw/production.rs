@@ -1,29 +1,35 @@
 //! Production posture resolution and phase dispatch.
 //!
-//! Agent and review phases run as restricted child kernels; code phases run as
-//! processes whose exit status decides the outcome. Both report a
+//! Agent and review phases run as restricted child kernels; code phases run
+//! through the project Environment's exec authority, so the sandbox the
+//! reported posture describes is the one that confines them. Both report a
 //! [`PhaseResult`] the domain turns into a transition.
 
 use std::{
+	fs, io,
 	path::{Path, PathBuf},
-	process::Stdio,
 	sync::Arc,
 };
 
 use omp_adw::{ApprovalScope, NetworkScope, Phase, PhaseKind, Posture, SelectedInput, WriteScope};
-use omp_core::{Str, StrMut, sf};
+use omp_core::{EnvPath, Str, StrMut, sf};
+use omp_env::{EnvClient, ExecEvent};
 use omp_envd::{
 	admission::{SandboxState, effective_approval_mode},
 	exec_settings::{ExecSandboxMode, NetworkConfinement, network_confinement},
-	tool_settings::ApprovalMode,
+	tool_settings::{ApprovalMode, ToolSettings},
 };
-use tokio::process::Command;
+use omp_proto::env::v1::{
+	CloseSessionRequest, ExecOutcome, ExecRequest, OpenSessionRequest, OutputChannel, Script,
+};
+use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use super::{AdwHost, PhaseResult, PhaseSpec};
 use crate::{
+	cfg::CfgFiles,
 	cleanse::checkers::{BinaryResolver as _, FilesystemResolver},
-	headless::{HeadlessError, KernelOptions, compose_kernel},
+	headless::{HeadlessError, KernelOptions, compose_kernel, kernel::LaunchExtensionPolicy},
 };
 
 /// A phase that could not be executed.
@@ -31,28 +37,47 @@ use crate::{
 pub enum ProductionError {
 	/// The project root could not be canonicalized, or a process failed.
 	#[error("workflow host filesystem or process operation failed")]
-	Io(#[from] std::io::Error),
+	Io(#[from] io::Error),
+	/// The project Environment that runs code phases could not start.
+	#[error("workflow project environment could not start")]
+	Environment(#[from] omp_envd::EnvdError),
+	/// The Environment refused or lost a code phase's command.
+	#[error("workflow project environment rejected a command")]
+	Exec(#[from] omp_env::ClientError),
 	/// A child kernel could not be composed.
 	#[error("workflow child session composition failed")]
 	Session(#[from] HeadlessError),
 	/// A child turn failed.
 	#[error("workflow child turn failed")]
 	Turn(#[from] omp_agent::KernelError),
-	/// A code phase named an executable this project cannot resolve.
-	#[error("workflow phase executable `{binary}` was not found in the project or PATH")]
+	/// A code phase named an executable `$PATH` does not hold.
+	#[error("workflow phase executable `{binary}` was not found on PATH")]
 	UnresolvedBinary {
 		/// The unresolved executable name.
 		binary: Str,
 	},
+	/// A code phase's working directory resolves outside the project, through
+	/// a symbolic link the lexical definition check cannot see.
+	#[error("workflow phase working directory `{cwd}` resolves outside the project")]
+	CwdEscapes {
+		/// The declared working directory.
+		cwd: Str,
+	},
+	/// A path could not be expressed as an Environment location.
+	#[error("workflow phase path is not a valid environment location")]
+	Location(#[source] omp_core::LocationError),
 }
 
 /// Production owner for one workflow run.
 pub struct ProductionAdwHost {
-	root:     PathBuf,
-	data_dir: PathBuf,
-	model:    Str,
-	ctx:      Arc<omp_con::Ctx>,
-	resolver: FilesystemResolver,
+	root:        PathBuf,
+	data_dir:    PathBuf,
+	model:       Str,
+	ctx:         Arc<omp_con::Ctx>,
+	resolver:    FilesystemResolver,
+	/// The project Environment, started by the first code phase: a workflow
+	/// of model phases alone never needs one of its own.
+	environment: OnceCell<omp_envd::ProjectEnvironment>,
 }
 
 impl ProductionAdwHost {
@@ -68,12 +93,40 @@ impl ProductionAdwHost {
 		ctx: Arc<omp_con::Ctx>,
 	) -> Result<Self, ProductionError> {
 		Ok(Self {
-			root: std::fs::canonicalize(root)?,
+			root: fs::canonicalize(root)?,
 			data_dir,
 			model,
 			ctx,
 			resolver: FilesystemResolver,
+			environment: OnceCell::new(),
 		})
+	}
+
+	/// The Environment client code phases run through, attaching the project
+	/// Environment under this run's control context on first use.
+	async fn environment(&self) -> Result<&EnvClient, ProductionError> {
+		let environment = self
+			.environment
+			.get_or_try_init(|| async {
+				let state_dir = omp_env::project_state::directory(&self.data_dir, &self.root)?;
+				fs::create_dir_all(&state_dir)?;
+				omp_envd::ProjectEnvironment::attach(&self.root, &state_dir, omp_envd::AttachOptions {
+					py_eval:            false,
+					approval_mode:      None,
+					trusted_extensions: Vec::new(),
+					contributed_values: Vec::new(),
+					con:                Arc::clone(&self.ctx),
+					bridges:            omp_envd::RegistryBridges::default(),
+					spawn_idle_timeout: None,
+					spawn_policy:       CfgFiles::new(Some(&self.root))
+						.ok()
+						.and_then(|files| files.daemon_policy().ok()),
+				})
+				.await
+				.map_err(ProductionError::from)
+			})
+			.await?;
+		Ok(environment.client())
 	}
 
 	async fn run_child(
@@ -86,7 +139,7 @@ impl ProductionAdwHost {
 			&self.root,
 			self.model.as_str(),
 			Arc::clone(&self.ctx),
-			KernelOptions { ephemeral: true, ..KernelOptions::default() },
+			child_kernel_options(),
 		)
 		.await?;
 		let outcome = kernel
@@ -106,39 +159,141 @@ impl ProductionAdwHost {
 		cwd: Option<&str>,
 		cancel: &CancellationToken,
 	) -> Result<PhaseResult, ProductionError> {
-		let directory = cwd.map_or_else(|| self.root.clone(), |cwd| self.root.join(cwd));
+		let directory = match cwd {
+			Some(cwd) => {
+				let directory = fs::canonicalize(self.root.join(cwd))?;
+				if !directory.starts_with(&self.root) {
+					return Err(ProductionError::CwdEscapes { cwd: Str::new(cwd) });
+				}
+				directory
+			},
+			None => self.root.clone(),
+		};
 		let resolved = self
 			.resolver
-			.resolve(&self.root, &directory, &[binary])
+			.resolve(&[binary])
 			.ok_or_else(|| ProductionError::UnresolvedBinary { binary: Str::new(binary) })?;
-		let mut child = Command::new(resolved);
-		child
-			.args(args.iter().map(Str::as_str))
-			.current_dir(&directory)
-			.kill_on_drop(true)
-			.stdout(Stdio::piped())
-			.stderr(Stdio::piped());
-		let output = tokio::select! {
-			result = child.output() => result?,
-			() = cancel.cancelled() => {
-				return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
-			},
+		let client = self.environment().await?;
+		let cwd =
+			EnvPath::new(Str::new(directory.to_string_lossy())).map_err(ProductionError::Location)?;
+		let opened = client
+			.open_session(&cwd, OpenSessionRequest::default())
+			.await?;
+		let session = opened.session.clone();
+		let finished =
+			run_script(client, opened.session, command_script(&resolved, args), cancel).await;
+		let _ = client
+			.close_session(CloseSessionRequest { session, ..CloseSessionRequest::default() })
+			.await;
+		let Some(finished) = finished? else {
+			return Ok(PhaseResult { accepted: false, feedback: sf!("cancelled") });
 		};
-		if output.status.success() {
+		if finished.outcome == ExecOutcome::Exited && finished.code == Some(0) {
 			return Ok(PhaseResult { accepted: true, feedback: Str::empty() });
 		}
 		// The rejection feedback is the next attempt's only record of what was
-		// wrong, so it carries the diagnostics rather than just the status.
-		let mut feedback = StrMut::new(format!(
-			"`{binary}` exited with status {}\n",
-			output
-				.status
-				.code()
-				.map_or_else(|| sf!("signal"), |code| Str::from(code.to_string()))
-		));
-		feedback.push_str(&String::from_utf8_lossy(&output.stdout));
-		feedback.push_str(&String::from_utf8_lossy(&output.stderr));
+		// wrong, so it carries the diagnostics rather than just the status. A
+		// sandbox denial has no exit code; its outcome says why.
+		let mut feedback = StrMut::new(match finished.code {
+			Some(code) => format!("`{binary}` exited with status {code}\n"),
+			None => format!("`{binary}` ended {}\n", finished.outcome.as_str_name()),
+		});
+		feedback.push_str(&String::from_utf8_lossy(&finished.stdout));
+		feedback.push_str(&String::from_utf8_lossy(&finished.stderr));
 		Ok(PhaseResult { accepted: false, feedback: feedback.freeze() })
+	}
+}
+
+/// Options for one model phase's child kernel.
+///
+/// Workspace-owned native extensions (`.omp/extensions`) are excluded: the
+/// workflow is project input already, and a project must not also choose
+/// the code its phases' kernels load.
+fn child_kernel_options() -> KernelOptions {
+	KernelOptions {
+		ephemeral: true,
+		extensions: LaunchExtensionPolicy {
+			include_workspace: false,
+			..LaunchExtensionPolicy::default()
+		},
+		..KernelOptions::default()
+	}
+}
+
+/// The in-process shell script that runs `binary` with `args`, each word
+/// single-quoted so no argument is reinterpreted.
+fn command_script(binary: &Path, args: &[Str]) -> String {
+	let mut script = String::new();
+	push_quoted(&mut script, &binary.to_string_lossy());
+	for argument in args {
+		script.push(' ');
+		push_quoted(&mut script, argument.as_str());
+	}
+	script
+}
+
+fn push_quoted(script: &mut String, word: &str) {
+	script.push('\'');
+	for (index, part) in word.split('\'').enumerate() {
+		if index > 0 {
+			script.push_str("'\\''");
+		}
+		script.push_str(part);
+	}
+	script.push('\'');
+}
+
+/// What one code phase's command produced.
+struct Finished {
+	outcome: ExecOutcome,
+	code:    Option<i32>,
+	stdout:  Vec<u8>,
+	stderr:  Vec<u8>,
+}
+
+/// Runs `script` in `session` to its exit; `None` when `cancel` fired first.
+///
+/// Dropping the run on cancellation tears its process groups down
+/// TERM-then-KILL in the Environment.
+async fn run_script(
+	client: &EnvClient,
+	session: bytes::Bytes,
+	script: String,
+	cancel: &CancellationToken,
+) -> Result<Option<Finished>, ProductionError> {
+	let mut run = client
+		.exec(ExecRequest {
+			session,
+			source: Some(Script { text: script, ..Script::default() }),
+			..ExecRequest::default()
+		})
+		.await?;
+	let mut stdout = Vec::new();
+	let mut stderr = Vec::new();
+	loop {
+		let event = tokio::select! {
+			event = run.next_event() => event?,
+			() = cancel.cancelled() => return Ok(None),
+		};
+		match event {
+			Some(ExecEvent::Output(frame)) => {
+				if frame.channel == OutputChannel::Stderr as i32 {
+					stderr.extend_from_slice(&frame.data);
+				} else {
+					stdout.extend_from_slice(&frame.data);
+				}
+			},
+			Some(ExecEvent::Started(_)) => {},
+			Some(ExecEvent::Exit(exit)) => {
+				let status = exit.status.unwrap_or_default();
+				let outcome = ExecOutcome::try_from(status.outcome).unwrap_or(ExecOutcome::Unspecified);
+				let code = matches!(outcome, ExecOutcome::Exited | ExecOutcome::Failed)
+					.then_some(status.exit_code)
+					.flatten();
+				return Ok(Some(Finished { outcome, code, stdout, stderr }));
+			},
+			None => return Ok(None),
+		}
 	}
 }
 
@@ -176,7 +331,7 @@ impl AdwHost for ProductionAdwHost {
 			// confines (`bash`, `hub`); every other tool follows `write` per call
 			// (`omp_envd::admission::resolve_approval`).
 			approval: match effective_approval_mode(
-				omp_envd::tool_settings::ToolSettings::from_con(&self.ctx).configured_approval(),
+				ToolSettings::from_con(&self.ctx).configured_approval(),
 				sandbox,
 			) {
 				ApprovalMode::AlwaysAsk => ApprovalScope::AlwaysAsk,
@@ -274,10 +429,12 @@ fn judge(kind: PhaseKind, answer: Str) -> PhaseResult {
 
 #[cfg(test)]
 mod tests {
+	use std::{env, iter, os::unix::fs::PermissionsExt as _};
+
 	use omp_adw::{PhaseName, PostureError};
 	use omp_envd::exec_settings::{SV_SANDBOX_MODE, SV_SANDBOX_NETWORK_MODE, SandboxNetworkMode};
 
-	use super::*;
+	use super::{super::definition, *};
 
 	fn host(project: &Path, ctx: omp_con::Ctx) -> ProductionAdwHost {
 		ProductionAdwHost::open(
@@ -292,8 +449,8 @@ mod tests {
 	/// A user workflow phase that declares `requires.network = "disabled"`.
 	fn offline_phase(project: &Path) -> Arc<Phase> {
 		let directory = project.join(".omp/workflows");
-		std::fs::create_dir_all(&directory).expect("workflow directory");
-		std::fs::write(
+		fs::create_dir_all(&directory).expect("workflow directory");
+		fs::write(
 			directory.join("offline.toml"),
 			r#"
 [[phase]]
@@ -304,7 +461,7 @@ requires = { network = "disabled" }
 "#,
 		)
 		.expect("workflow file");
-		let definition = super::super::definition::load(project, "offline").expect("definition");
+		let definition = definition::load(project, "offline").expect("definition");
 		let phase = Arc::clone(&definition.workflow().phases()[0]);
 		assert_eq!(phase.requires.network, Some(NetworkScope::Disabled));
 		phase
@@ -419,5 +576,137 @@ requires = { network = "disabled" }
 		let first = phase_prompt(&phase, &sf!("Judge it."), 1, None, &[]);
 		assert!(!first.as_str().contains("attempt"));
 		assert!(!first.as_str().contains("Consuming"));
+	}
+
+	/// Loads the single code phase of a workflow declaring `command`.
+	fn code_phase(project: &Path, command: &[&str]) -> (Arc<Phase>, PhaseSpec) {
+		let directory = project.join(".omp/workflows");
+		fs::create_dir_all(&directory).expect("workflow directory");
+		let argv = command
+			.iter()
+			.map(|word| format!("{word:?}"))
+			.collect::<Vec<_>>()
+			.join(", ");
+		fs::write(
+			directory.join("code.toml"),
+			format!("[[phase]]\nname = \"code\"\nkind = \"code\"\ncommand = [{argv}]\n"),
+		)
+		.expect("workflow file");
+		let definition = definition::load(project, "code").expect("definition");
+		let phase = Arc::clone(&definition.workflow().phases()[0]);
+		let spec = definition.spec(&phase.name).expect("spec").clone();
+		(phase, spec)
+	}
+
+	fn script(path: &Path, body: &str) {
+		fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("script");
+		fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("mode");
+	}
+
+	async fn dispatch(host: &ProductionAdwHost, phase: &Phase, spec: &PhaseSpec) -> PhaseResult {
+		host
+			.dispatch(phase, spec, 1, None, &[], &CancellationToken::new())
+			.await
+			.expect("dispatch")
+	}
+
+	/// A repository that commits an executable named `cargo` at its root (or
+	/// in a package-manager bin) cannot shadow the operator's `cargo`.
+	#[tokio::test]
+	async fn a_repo_root_executable_does_not_shadow_path() {
+		let project = tempfile::tempdir().expect("project");
+		let project_root = project.path().canonicalize().expect("canonical project");
+		let tools = tempfile::tempdir().expect("tools");
+		script(&project_root.join("cargo"), "echo repo > shadowed");
+		fs::create_dir_all(project_root.join("node_modules/.bin")).expect("bin");
+		script(&project_root.join("node_modules/.bin/cargo"), "echo repo > shadowed");
+		script(&tools.path().join("cargo"), "echo \"$1\" > path-cargo");
+		let path = env::join_paths(
+			iter::once(tools.path().to_path_buf())
+				.chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+		)
+		.expect("PATH");
+		// SAFETY: nextest runs each test in its own process; nothing else reads
+		// the variable concurrently.
+		unsafe { env::set_var("PATH", path) };
+		let off = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&off, ExecSandboxMode::Off)
+			.expect("sandbox off");
+		let host = host(&project_root, off);
+		let (phase, spec) = code_phase(&project_root, &["cargo", "it's"]);
+
+		let result = dispatch(&host, &phase, &spec).await;
+		assert!(result.accepted, "{}", result.feedback);
+		assert!(!project_root.join("shadowed").exists(), "the repository's cargo ran");
+		assert_eq!(
+			fs::read_to_string(project_root.join("path-cargo")).expect("PATH cargo ran"),
+			"it's\n",
+			"arguments reach the program verbatim"
+		);
+	}
+
+	/// A phase that declares `write = "workspace-write"` runs under the
+	/// sandbox that posture reports: a write outside the workspace is
+	/// refused, one inside it lands.
+	#[tokio::test]
+	async fn a_workspace_write_phase_cannot_write_outside_the_workspace() {
+		let project = tempfile::tempdir().expect("project");
+		let project_root = project.path().canonicalize().expect("canonical project");
+		let outside = tempfile::tempdir().expect("outside");
+		let escaped = outside
+			.path()
+			.canonicalize()
+			.expect("outside")
+			.join("escaped");
+		let ctx = omp_con::Ctx::new();
+		SV_SANDBOX_MODE
+			.set(&ctx, ExecSandboxMode::WorkspaceWrite)
+			.expect("workspace-write");
+		// The scratch directory lives under the temporary directories the
+		// default grant makes writable.
+		ctx.exec(
+			"sv_sandbox_exclude_tmpdir 1\nsv_sandbox_exclude_slash_tmp 1\n",
+			omp_con::Source::Config(sf!("test")),
+		)
+		.expect("temporary directories excluded");
+		if !SandboxState::probe(&ctx, &project_root).confines() {
+			// No native sandbox on this host: posture reports `unconfined`, and
+			// the domain refuses the phase before dispatch.
+			return;
+		}
+		let host = host(&project_root, ctx);
+		assert_eq!(host.posture().expect("posture").write, WriteScope::WorkspaceWrite);
+
+		let directory = project_root.join(".omp/workflows");
+		fs::create_dir_all(&directory).expect("workflow directory");
+		fs::write(
+			directory.join("contained.toml"),
+			format!(
+				"[[phase]]\nname = \"outside\"\nkind = \"code\"\ncommand = [\"touch\", \
+				 {:?}]\nrequires = {{ write = \"workspace-write\" }}\n",
+				escaped.to_string_lossy()
+			),
+		)
+		.expect("workflow file");
+		let definition = definition::load(&project_root, "contained").expect("definition");
+		let phase = Arc::clone(&definition.workflow().phases()[0]);
+		assert_eq!(phase.requires.write, Some(WriteScope::WorkspaceWrite));
+		let spec = definition.spec(&phase.name).expect("spec");
+		let refused = dispatch(&host, &phase, spec).await;
+		assert!(!refused.accepted, "the write outside the workspace was accepted");
+		assert!(!escaped.exists(), "the phase wrote outside the workspace");
+
+		let (inside, spec) = code_phase(&project_root, &["touch", "inside"]);
+		let landed = dispatch(&host, &inside, &spec).await;
+		assert!(landed.accepted, "{}", landed.feedback);
+		assert!(project_root.join("inside").exists());
+	}
+
+	#[test]
+	fn model_phase_kernels_exclude_workspace_extensions() {
+		let options = child_kernel_options();
+		assert!(!options.extensions.include_workspace);
+		assert!(options.ephemeral);
 	}
 }

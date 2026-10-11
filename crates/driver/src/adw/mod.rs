@@ -161,6 +161,12 @@ pub async fn run<H: AdwHost>(
 					.dispatch(&phase, spec, attempt, correction.as_ref(), &inputs, cancel)
 					.await
 					.map_err(Error::Host)?;
+				// A phase stopped by cancellation did not fail on its merits:
+				// feeding it back as a rejection would schedule (and report) a
+				// retry the run will never dispatch.
+				if cancel.is_cancelled() {
+					return Ok(cancelled(records));
+				}
 				let outcome = if result.accepted {
 					run.accept(&phase.name)?
 				} else {
@@ -240,4 +246,76 @@ fn join<'a>(names: impl Iterator<Item = &'a str>) -> String {
 		text.push_str(name);
 	}
 	text
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{convert::Infallible, fs, future::ready, path::PathBuf};
+
+	use omp_adw::{ApprovalScope, NetworkScope, WriteScope};
+	use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
+
+	use super::*;
+
+	/// Cancels the run from inside its first dispatch and reports the phase
+	/// rejected, as a code phase whose process tree was killed does.
+	struct CancelledMidPhase {
+		root: PathBuf,
+	}
+
+	impl AdwHost for CancelledMidPhase {
+		type Error = Infallible;
+
+		fn project_root(&self) -> &Path {
+			&self.root
+		}
+
+		fn posture(&self) -> Result<Posture, Infallible> {
+			Ok(Posture {
+				write:    WriteScope::Unconfined,
+				network:  NetworkScope::Unrestricted,
+				approval: ApprovalScope::Write,
+			})
+		}
+
+		fn dispatch<'a>(
+			&'a self,
+			_phase: &'a Phase,
+			_spec: &'a PhaseSpec,
+			_attempt: u32,
+			_correction: Option<&'a Str>,
+			_inputs: &'a [SelectedInput],
+			cancel: &'a CancellationToken,
+		) -> impl Future<Output = Result<PhaseResult, Infallible>> + Send + 'a {
+			cancel.cancel();
+			ready(Ok(PhaseResult { accepted: false, feedback: Str::new_static("killed") }))
+		}
+	}
+
+	#[tokio::test]
+	async fn a_phase_cut_short_by_cancellation_settles_the_run_without_a_retry() {
+		let project = tempfile::tempdir().expect("project");
+		let directory = project.path().join(WORKFLOWS_DIR);
+		fs::create_dir_all(&directory).expect("workflow directory");
+		fs::write(
+			directory.join("slow.toml"),
+			"name = \"slow\"\n\n[[phase]]\nname = \"wait\"\nkind = \"code\"\ncommand = [\"sleep\", \
+			 \"60\"]\n",
+		)
+		.expect("workflow file");
+		let definition = definition::load(project.path(), "slow").expect("definition");
+		let host = CancelledMidPhase { root: project.path().to_path_buf() };
+
+		let exit = run(&definition, 3, &host, &CancellationToken::new())
+			.await
+			.expect("run");
+
+		assert_eq!(exit.status, RunStatus::Cancelled);
+		assert_eq!(exit.code, 130);
+		assert!(
+			exit.records.is_empty(),
+			"a cancelled attempt is not a rejection: {:?}",
+			exit.records
+		);
+	}
 }
