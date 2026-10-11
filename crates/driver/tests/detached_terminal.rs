@@ -103,11 +103,13 @@ async fn detached_terminal_preserves_job_artifact_and_disarms_invocation_cleanup
 	let id = start(&mut stream, &transport).await;
 	let expected = job();
 	let bytes = Bytes::from(serde_json::to_vec(&ToolTerminal::<(), ()>::Detached(expected.clone())).expect("terminal"));
-	send(&transport, id, server_frame::Body::Verdict(verdict(bytes.clone()))).await;
+	let mut response = verdict(bytes.clone());
+	response.parts = vec![omp_proto::thread::v1::Part { kind: Some(omp_proto::thread::v1::part::Kind::Text("background result arrives automatically".to_owned())) }];
+	send(&transport, id, server_frame::Body::Verdict(response)).await;
 	let ExternalDispatchEvent::DetachedProjected { job, parts, source_artifact, projection } = next(&mut stream).await else { panic!("expected detached terminal") };
 	assert_eq!(job, expected);
 	assert_eq!(store.get(&source_artifact).expect("original descriptor"), bytes);
-	assert_eq!(parts, vec![omp_tool::Part::Text { text: Str::new_static("detached job job-a") }]);
+	assert_eq!(parts, vec![omp_tool::Part::Text { text: Str::new_static("background result arrives automatically") }]);
 	assert!(!projection.omitted);
 	assert!(stream.next().await.is_none());
 	drop(stream);
@@ -137,9 +139,10 @@ async fn detached_terminal_replicates_omitted_descriptor_under_original_invocati
 	let hash = Bytes::copy_from_slice(Hash32::sum(&bytes).as_bytes());
 	send(&transport, request.request_id, server_frame::Body::BlobChunk(omp_env::blob_frame::Chunk { data: bytes.clone(), hash: hash.clone(), size: Some(bytes.len() as u64) })).await;
 	send(&transport, request.request_id, server_frame::Body::BlobGetComplete(frame::BlobGetComplete { hash, bytes_sent: bytes.len() as u64, ..Default::default() })).await;
-	let ExternalDispatchEvent::DetachedProjected { source_artifact, projection, .. } = next(&mut stream).await else { panic!("expected detached terminal") };
+	let ExternalDispatchEvent::DetachedProjected { parts, source_artifact, projection, .. } = next(&mut stream).await else { panic!("expected detached terminal") };
 	assert_eq!(store.get(&source_artifact).expect("replica"), bytes);
 	assert!(projection.omitted);
+	assert_eq!(parts, vec![omp_tool::Part::Text { text: Str::new_static("detached job job-a") }]);
 }
 
 #[tokio::test]

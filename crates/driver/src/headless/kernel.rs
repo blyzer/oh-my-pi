@@ -1461,7 +1461,7 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							};
 							(source_artifact, inline_json)
 						};
-						let terminal = match serde_json::from_slice::<EnvironmentTerminal>(&bytes) {
+						let terminal = match decode_environment_terminal(&bytes) {
 							Ok(terminal) => terminal,
 							Err(source) => {
 								tracing::warn!(%source, call_id = %request.call_id, "environment outcome blob is not a supported terminal");
@@ -1567,11 +1567,18 @@ impl ExternalToolExecutor for EnvToolExecutor {
 
 // Detached descriptors are executor terminals, not one of CallOutcome's
 // settled branches. Keep their original artifact bytes through the boundary.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
 enum EnvironmentTerminal {
 	Outcome(CallOutcome<serde_json::Value, serde_json::Value>),
 	Detached(DetachedVerdict),
+}
+
+fn decode_environment_terminal(bytes: &[u8]) -> Result<EnvironmentTerminal, serde_json::Error> {
+	// Ordinary outcomes retain their single-pass decoding path. Only detached
+	// executor terminals need the second, distinct tagged wire shape.
+	match serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(bytes) {
+		Ok(outcome) => Ok(EnvironmentTerminal::Outcome(outcome)),
+		Err(_) => serde_json::from_slice(bytes).map(EnvironmentTerminal::Detached),
+	}
 }
 
 #[derive(serde::Deserialize)]
