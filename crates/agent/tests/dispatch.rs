@@ -715,80 +715,178 @@ fn worker_registry() -> Arc<omp_tool::Registry> {
 
 struct VisibilityAuthority {
 	receipts: Arc<Mutex<Vec<omp_tool::VisibilityReceipt>>>,
-	reject: bool,
-	spec: ToolSpec,
+	reject:   bool,
+	spec:     ToolSpec,
 }
 
 impl omp_tool::Tool for VisibilityAuthority {
-	type Params = serde_json::Value;
-	type Update = Str;
-	type Payload = Payload;
 	type Fault = Fault;
-	fn spec(&self) -> &ToolSpec { &self.spec }
-	fn call<'c>(&'c self, _: omp_tool::IncomingParams<'c>) -> impl futures::Stream<Item = omp_tool::Ev<Str, Payload, Fault>> + Send + 'c {
+	type Params = serde_json::Value;
+	type Payload = Payload;
+	type Update = Str;
+
+	fn spec(&self) -> &ToolSpec {
+		&self.spec
+	}
+
+	fn call<'c>(
+		&'c self,
+		_: omp_tool::IncomingParams<'c>,
+	) -> impl futures::Stream<Item = omp_tool::Ev<Str, Payload, Fault>> + Send + 'c {
 		futures::stream::empty()
 	}
-	fn prompt(&self, _: Result<&Payload, &Fault>, _: &PromptCaps) -> Vec<Part> { Vec::new() }
-	fn authorize_visibility(&self, _: Result<&Payload, &Fault>, receipt: &omp_tool::VisibilityReceipt) -> Result<(), omp_tool::ProjectionAuthorizationError> {
+
+	fn prompt(&self, _: Result<&Payload, &Fault>, _: &PromptCaps) -> Vec<Part> {
+		Vec::new()
+	}
+
+	fn authorize_visibility(
+		&self,
+		_: Result<&Payload, &Fault>,
+		receipt: &omp_tool::VisibilityReceipt,
+	) -> Result<(), omp_tool::ProjectionAuthorizationError> {
 		if self.reject {
-			return Err(omp_tool::ProjectionAuthorizationError::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+			return Err(omp_tool::ProjectionAuthorizationError::new(std::io::Error::from(
+				std::io::ErrorKind::PermissionDenied,
+			)));
 		}
 		self.receipts.lock().push(receipt.clone());
 		Ok(())
 	}
 }
 
-struct ProjectedExternal { visibility: bool, malformed: bool, legacy: bool }
+struct ProjectedExternal {
+	visibility: bool,
+	malformed:  bool,
+	legacy:     bool,
+}
 
 impl ExternalToolExecutor for ProjectedExternal {
 	fn invoke(&self, _: ExternalDispatchRequest) -> ExternalDispatchStream {
-		let outcome = CallOutcome::Ok(if self.malformed { serde_json::Value::Null } else { serde_json::json!({"text":"alpha\nbravo"}) });
+		let outcome = CallOutcome::Ok(if self.malformed {
+			serde_json::Value::Null
+		} else {
+			serde_json::json!({"text":"alpha\nbravo"})
+		});
 		let parts = vec![Part::Text { text: Str::new_static("alpha\nbravo") }];
 		let event = if self.legacy {
 			ExternalDispatchEvent::Done { outcome, parts, is_error: false, source_artifact: None }
 		} else {
 			ExternalDispatchEvent::DoneProjected {
-				outcome, parts, is_error: false, source_artifact: None,
-				projection: omp_tool::OutputProjection { request: omp_tool::OutputRequest::Bounded, source_bytes: 11, inline_bytes: 11, omitted: false, artifact: None },
-				visibility: if self.visibility { vec![
-					omp_tool::ProjectionSpan { part: 0, start_byte: 0, end_byte: 5, source_key: Str::new_static("source"), line: 1 },
-					omp_tool::ProjectionSpan { part: 0, start_byte: 6, end_byte: 11, source_key: Str::new_static("source"), line: 2 },
-				] } else { Vec::new() },
+				outcome,
+				parts,
+				is_error: false,
+				source_artifact: None,
+				projection: omp_tool::OutputProjection {
+					request:      omp_tool::OutputRequest::Bounded,
+					source_bytes: 11,
+					inline_bytes: 11,
+					omitted:      false,
+					artifact:     None,
+				},
+				visibility: if self.visibility {
+					vec![
+						omp_tool::ProjectionSpan {
+							part:       0,
+							start_byte: 0,
+							end_byte:   5,
+							source_key: Str::new_static("source"),
+							line:       1,
+						},
+						omp_tool::ProjectionSpan {
+							part:       0,
+							start_byte: 6,
+							end_byte:   11,
+							source_key: Str::new_static("source"),
+							line:       2,
+						},
+					]
+				} else {
+					Vec::new()
+				},
 			}
 		};
 		Box::pin(futures::stream::iter([event]))
 	}
 }
 
-async fn projected_receipts(limit: usize, reject: bool, executor: ProjectedExternal) -> (Result<(), omp_agent::DispatchError>, Vec<omp_tool::VisibilityReceipt>) {
+async fn projected_receipts(
+	limit: usize,
+	reject: bool,
+	executor: ProjectedExternal,
+) -> (Result<(), omp_agent::DispatchError>, Vec<omp_tool::VisibilityReceipt>) {
 	let directory = tempfile::tempdir().expect("temporary directory");
 	let tools = worker_registry();
 	let identity = tools.resolved_identity("worker").expect("identity");
 	let receipts = Arc::new(Mutex::new(Vec::new()));
-	let mut dispatcher = Dispatcher::new(tools, DispatchPolicy::new(BlobStore::open(directory.path()).expect("blobs")).with_limits(limit, usize::MAX, Duration::from_secs(5)))
-		.with_external_executor(Arc::new(executor));
+	let mut dispatcher = Dispatcher::new(
+		tools,
+		DispatchPolicy::new(BlobStore::open(directory.path()).expect("blobs")).with_limits(
+			limit,
+			usize::MAX,
+			Duration::from_secs(5),
+		),
+	)
+	.with_external_executor(Arc::new(executor));
 	let mut active = session(&directory.path().join("projected.oms"));
 	let (entry, args) = call(&mut active, &identity, "projected");
-	let mut prepared = dispatcher.prepare(identity, Str::new_static("projected"), entry, ToolCancellation::ReadOnly(CancelTree::new().begin_turn().read_only_tool())).expect("external prepared");
+	let mut prepared = dispatcher
+		.prepare(
+			identity,
+			Str::new_static("projected"),
+			entry,
+			ToolCancellation::ReadOnly(CancelTree::new().begin_turn().read_only_tool()),
+		)
+		.expect("external prepared");
 	prepared.commit(args);
 	let mut authorities = omp_tool::Registry::new();
-	authorities.register(VisibilityAuthority { receipts: Arc::clone(&receipts), reject, spec: tool_spec("worker", 1) }, Presentation::Slot, Claims { precedence: Precedence::CORE, claimant: Str::new_static("omp-agent/tests"), replaces: None }).expect("authority");
+	authorities
+		.register(
+			VisibilityAuthority {
+				receipts: Arc::clone(&receipts),
+				reject,
+				spec: tool_spec("worker", 1),
+			},
+			Presentation::Slot,
+			Claims {
+				precedence: Precedence::CORE,
+				claimant:   Str::new_static("omp-agent/tests"),
+				replaces:   None,
+			},
+		)
+		.expect("authority");
 	dispatcher.replace_registry(Arc::new(authorities));
-	let result = dispatcher.drive(&mut active, vec![prepared], None).await.map(|_| ());
+	let result = dispatcher
+		.drive(&mut active, vec![prepared], None)
+		.await
+		.map(|_| ());
 	let observed = receipts.lock().clone();
 	(result, observed)
 }
 
-struct ReceiptExternal { receipts: Arc<Mutex<Vec<omp_tool::VisibilityReceipt>>>, reject: bool }
+struct ReceiptExternal {
+	receipts: Arc<Mutex<Vec<omp_tool::VisibilityReceipt>>>,
+	reject:   bool,
+}
 
 impl ExternalToolExecutor for ReceiptExternal {
 	fn invoke(&self, request: ExternalDispatchRequest) -> ExternalDispatchStream {
 		ProjectedExternal { visibility: true, malformed: false, legacy: false }.invoke(request)
 	}
-	fn authorize_visibility<'a>(&'a self, _: &'a ToolIdentity, verdict: bytes::Bytes, receipt: omp_tool::VisibilityReceipt) -> omp_agent::VisibilityAuthorizationFuture<'a> {
+
+	fn authorize_visibility<'a>(
+		&'a self,
+		_: &'a ToolIdentity,
+		verdict: bytes::Bytes,
+		receipt: omp_tool::VisibilityReceipt,
+	) -> omp_agent::VisibilityAuthorizationFuture<'a> {
 		Box::pin(async move {
 			assert!(serde_json::from_slice::<CallOutcome<Payload, Fault>>(&verdict).is_ok());
-			if self.reject { return Err(omp_tool::ProjectionAuthorizationError::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))); }
+			if self.reject {
+				return Err(omp_tool::ProjectionAuthorizationError::new(std::io::Error::from(
+					std::io::ErrorKind::PermissionDenied,
+				)));
+			}
 			self.receipts.lock().push(receipt);
 			Ok(())
 		})
@@ -802,60 +900,134 @@ async fn done_projected_acknowledges_receipt_with_external_authority() {
 		let tools = worker_registry();
 		let identity = tools.resolved_identity("worker").expect("identity");
 		let receipts = Arc::new(Mutex::new(Vec::new()));
-		let dispatcher = Dispatcher::new(tools, DispatchPolicy::new(BlobStore::open(directory.path()).expect("blobs")).with_limits(10, usize::MAX, Duration::from_secs(5)))
-			.with_external_executor(Arc::new(ReceiptExternal { receipts: Arc::clone(&receipts), reject }));
+		let dispatcher = Dispatcher::new(
+			tools,
+			DispatchPolicy::new(BlobStore::open(directory.path()).expect("blobs")).with_limits(
+				10,
+				usize::MAX,
+				Duration::from_secs(5),
+			),
+		)
+		.with_external_executor(Arc::new(ReceiptExternal {
+			receipts: Arc::clone(&receipts),
+			reject,
+		}));
 		let mut active = session(&directory.path().join("external-receipt.oms"));
 		let (entry, args) = call(&mut active, &identity, "external-receipt");
-		let result = dispatcher.dispatch(&mut active, request(entry, identity, args, ToolCancellation::ReadOnly(CancelTree::new().begin_turn().read_only_tool()), false)).await;
+		let result = dispatcher
+			.dispatch(
+				&mut active,
+				request(
+					entry,
+					identity,
+					args,
+					ToolCancellation::ReadOnly(CancelTree::new().begin_turn().read_only_tool()),
+					false,
+				),
+			)
+			.await;
 		if reject {
-			assert!(matches!(result, Err(omp_agent::DispatchError::Registry(omp_tool::RegistryError::ProjectionAuthorization { .. }))));
+			assert!(matches!(
+				result,
+				Err(omp_agent::DispatchError::Registry(
+					omp_tool::RegistryError::ProjectionAuthorization { .. }
+				))
+			));
 			assert!(receipts.lock().is_empty());
 		} else {
 			result.expect("external receipt acknowledged");
-			assert_eq!(*receipts.lock(), [omp_tool::VisibilityReceipt { lines: vec![omp_tool::VisibleSourceLine { source_key: Str::new_static("source"), line: 1 }] }]);
+			assert_eq!(*receipts.lock(), [omp_tool::VisibilityReceipt {
+				lines: vec![omp_tool::VisibleSourceLine {
+					source_key: Str::new_static("source"),
+					line:       1,
+				}],
+			}]);
 		}
 	}
 }
 
 #[tokio::test]
 async fn done_projected_authorizes_only_fully_retained_rows() {
-	let (result, receipts) = projected_receipts(10, false, ProjectedExternal { visibility: true, malformed: false, legacy: false }).await;
+	let (result, receipts) = projected_receipts(10, false, ProjectedExternal {
+		visibility: true,
+		malformed:  false,
+		legacy:     false,
+	})
+	.await;
 	result.expect("authorized dispatch");
-	assert_eq!(receipts, [omp_tool::VisibilityReceipt { lines: vec![omp_tool::VisibleSourceLine { source_key: Str::new_static("source"), line: 1 }] }]);
+	assert_eq!(receipts, [omp_tool::VisibilityReceipt {
+		lines: vec![omp_tool::VisibleSourceLine {
+			source_key: Str::new_static("source"),
+			line:       1,
+		}],
+	}]);
 }
 
 #[tokio::test]
 async fn done_projected_returns_empty_receipt_when_no_candidate_survives() {
-	let (result, receipts) = projected_receipts(3, false, ProjectedExternal { visibility: true, malformed: false, legacy: false }).await;
+	let (result, receipts) = projected_receipts(3, false, ProjectedExternal {
+		visibility: true,
+		malformed:  false,
+		legacy:     false,
+	})
+	.await;
 	result.expect("empty receipt authorized");
 	assert_eq!(receipts, [omp_tool::VisibilityReceipt::default()]);
 }
 
 #[tokio::test]
 async fn done_projected_without_visibility_preserves_old_producers() {
-	let (result, receipts) = projected_receipts(64, true, ProjectedExternal { visibility: false, malformed: false, legacy: false }).await;
+	let (result, receipts) = projected_receipts(64, true, ProjectedExternal {
+		visibility: false,
+		malformed:  false,
+		legacy:     false,
+	})
+	.await;
 	result.expect("no authorization required");
 	assert!(receipts.is_empty());
 }
 
 #[tokio::test]
 async fn legacy_done_without_visibility_preserves_old_producers() {
-	let (result, receipts) = projected_receipts(64, true, ProjectedExternal { visibility: false, malformed: false, legacy: true }).await;
+	let (result, receipts) = projected_receipts(64, true, ProjectedExternal {
+		visibility: false,
+		malformed:  false,
+		legacy:     true,
+	})
+	.await;
 	result.expect("legacy dispatch");
 	assert!(receipts.is_empty());
 }
 
 #[tokio::test]
 async fn done_projected_rejects_a_verdict_incompatible_with_its_authority() {
-	let (result, receipts) = projected_receipts(64, false, ProjectedExternal { visibility: true, malformed: true, legacy: false }).await;
-	assert!(matches!(result, Err(omp_agent::DispatchError::Registry(omp_tool::RegistryError::VerdictShape(_)))));
+	let (result, receipts) = projected_receipts(64, false, ProjectedExternal {
+		visibility: true,
+		malformed:  true,
+		legacy:     false,
+	})
+	.await;
+	assert!(matches!(
+		result,
+		Err(omp_agent::DispatchError::Registry(omp_tool::RegistryError::VerdictShape(_)))
+	));
 	assert!(receipts.is_empty());
 }
 
 #[tokio::test]
 async fn done_projected_propagates_authorization_rejection() {
-	let (result, receipts) = projected_receipts(64, true, ProjectedExternal { visibility: true, malformed: false, legacy: false }).await;
-	assert!(matches!(result, Err(omp_agent::DispatchError::Registry(omp_tool::RegistryError::ProjectionAuthorization { .. }))));
+	let (result, receipts) = projected_receipts(64, true, ProjectedExternal {
+		visibility: true,
+		malformed:  false,
+		legacy:     false,
+	})
+	.await;
+	assert!(matches!(
+		result,
+		Err(omp_agent::DispatchError::Registry(
+			omp_tool::RegistryError::ProjectionAuthorization { .. }
+		))
+	));
 	assert!(receipts.is_empty());
 }
 

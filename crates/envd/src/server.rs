@@ -5459,12 +5459,27 @@ impl EnvServer {
 		match request.body {
 			Some(Body::Visibility(request)) => {
 				if connection.host.is_some() || scope.is_some() || !connection.grants("env.fs.read") {
-					send_error(responses, request_id, pb::ProtocolErrorCode::PermissionDenied, "visibility receipts require an application document-read authority").await;
+					send_error(
+						responses,
+						request_id,
+						pb::ProtocolErrorCode::PermissionDenied,
+						"visibility receipts require an application document-read authority",
+					)
+					.await;
 					return;
 				}
 				match authorize_visibility_receipt(&self.registry, request) {
-					Ok(()) => { send_data_response(responses, request_id, data_response::Body::Visibility(pb::VisibilityAuthorized {})).await; },
-					Err((code, message)) => { send_error(responses, request_id, code, message).await; },
+					Ok(()) => {
+						send_data_response(
+							responses,
+							request_id,
+							data_response::Body::Visibility(pb::VisibilityAuthorized {}),
+						)
+						.await;
+					},
+					Err((code, message)) => {
+						send_error(responses, request_id, code, message).await;
+					},
 				}
 			},
 			Some(Body::Worker(request)) => {
@@ -9562,30 +9577,58 @@ async fn spawn_native_invocation(
 	let _ = start.recv_async().await;
 }
 
-fn authorize_visibility_receipt(registry: &Registry, request: pb::VisibilityAuthorization) -> Result<(), (pb::ProtocolErrorCode, &'static str)> {
-	let (name, rev) = registry.live_identity(&request.name).ok_or((pb::ProtocolErrorCode::NotFound, "visibility tool is not registered"))?;
+fn authorize_visibility_receipt(
+	registry: &Registry,
+	request: pb::VisibilityAuthorization,
+) -> Result<(), (pb::ProtocolErrorCode, &'static str)> {
+	let (name, rev) = registry
+		.live_identity(&request.name)
+		.ok_or((pb::ProtocolErrorCode::NotFound, "visibility tool is not registered"))?;
 	if rev.to_string() != request.rev {
-		return Err((pb::ProtocolErrorCode::PreconditionFailed, "visibility tool revision is not live"));
+		return Err((
+			pb::ProtocolErrorCode::PreconditionFailed,
+			"visibility tool revision is not live",
+		));
 	}
 	let identity = ToolIdentity { name: name.clone(), rev: rev.clone() };
-	let mut lines = request.lines.into_iter().map(|line| {
-		let number = usize::try_from(line.line).map_err(|_| (pb::ProtocolErrorCode::InvalidArgument, "visibility line is invalid"))?;
-		if number == 0 || line.source_key.is_empty() {
-			return Err((pb::ProtocolErrorCode::InvalidArgument, "visibility line is invalid"));
-		}
-		Ok(omp_tool::VisibleSourceLine { source_key: Str::from(line.source_key), line: number })
-	}).collect::<Result<Vec<_>, _>>()?;
+	let mut lines = request
+		.lines
+		.into_iter()
+		.map(|line| {
+			let number = usize::try_from(line.line)
+				.map_err(|_| (pb::ProtocolErrorCode::InvalidArgument, "visibility line is invalid"))?;
+			if number == 0 || line.source_key.is_empty() {
+				return Err((pb::ProtocolErrorCode::InvalidArgument, "visibility line is invalid"));
+			}
+			Ok(omp_tool::VisibleSourceLine {
+				source_key: Str::from(line.source_key),
+				line:       number,
+			})
+		})
+		.collect::<Result<Vec<_>, _>>()?;
 	lines.sort_unstable();
 	lines.dedup();
 	let receipt = omp_tool::VisibilityReceipt { lines };
-	let projected = registry.project_verdict(&identity, &request.verdict, false, &native_prompt_caps(&identity.rev)).map_err(|_| (pb::ProtocolErrorCode::InvalidArgument, "visibility verdict is invalid"))?;
-	if receipt.lines.iter().any(|line| !projected.visibility.iter().any(|span| span.source_key == line.source_key && span.line == line.line)) {
-		return Err((pb::ProtocolErrorCode::PermissionDenied, "visibility receipt contains an unprojected source line"));
+	let projected = registry
+		.project_verdict(&identity, &request.verdict, false, &native_prompt_caps(&identity.rev))
+		.map_err(|_| (pb::ProtocolErrorCode::InvalidArgument, "visibility verdict is invalid"))?;
+	if receipt.lines.iter().any(|line| {
+		!projected
+			.visibility
+			.iter()
+			.any(|span| span.source_key == line.source_key && span.line == line.line)
+	}) {
+		return Err((
+			pb::ProtocolErrorCode::PermissionDenied,
+			"visibility receipt contains an unprojected source line",
+		));
 	}
-	registry.authorize_visibility(&identity, &request.verdict, &receipt).map_err(|source| {
-		tracing::warn!(%source, tool = %identity.name, "visibility authorization failed");
-		(pb::ProtocolErrorCode::PermissionDenied, "visibility authorization rejected")
-	})
+	registry
+		.authorize_visibility(&identity, &request.verdict, &receipt)
+		.map_err(|source| {
+			tracing::warn!(%source, tool = %identity.name, "visibility authorization failed");
+			(pb::ProtocolErrorCode::PermissionDenied, "visibility authorization rejected")
+		})
 }
 
 const DEFAULT_RESULT_PROJECTION_BYTES: usize = 64 * 1024;
@@ -9691,11 +9734,17 @@ fn project_wire_parts_with_visibility(
 			let Some(thread_pb::part::Kind::Text(text)) = parts[part as usize].kind.as_ref() else {
 				return false;
 			};
-			let (Ok(start), Ok(end)) = (usize::try_from(span.start_byte), usize::try_from(span.end_byte)) else {
+			let (Ok(start), Ok(end)) =
+				(usize::try_from(span.start_byte), usize::try_from(span.end_byte))
+			else {
 				return false;
 			};
-			span.line != 0 && !span.source_key.is_empty() && start < end
-				&& end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
+			span.line != 0
+				&& !span.source_key.is_empty()
+				&& start < end
+				&& end <= text.len()
+				&& text.is_char_boundary(start)
+				&& text.is_char_boundary(end)
 		});
 	}
 	(source_bytes, inline_bytes, omitted)
@@ -10175,16 +10224,23 @@ fn native_wire_parts(
 		}
 	}
 	let visibility = remapped.map_or_else(Vec::new, |remapped| {
-		visibility.iter().filter_map(|span| {
-			let part = *remapped.get(span.part)?;
-			matches!(parts.get(span.part)?, omp_tool::Part::Text { .. } | omp_tool::Part::Json { .. }).then(|| pb::ProjectionSpan {
-				part: part as u64,
-				start_byte: span.start_byte as u64,
-				end_byte: span.end_byte as u64,
-				source_key: span.source_key.as_str().to_owned(),
-				line: span.line as u64,
+		visibility
+			.iter()
+			.filter_map(|span| {
+				let part = *remapped.get(span.part)?;
+				matches!(
+					parts.get(span.part)?,
+					omp_tool::Part::Text { .. } | omp_tool::Part::Json { .. }
+				)
+				.then(|| pb::ProjectionSpan {
+					part:       part as u64,
+					start_byte: span.start_byte as u64,
+					end_byte:   span.end_byte as u64,
+					source_key: span.source_key.as_str().to_owned(),
+					line:       span.line as u64,
+				})
 			})
-		}).collect()
+			.collect()
 	});
 	(wire, visibility)
 }
@@ -10248,8 +10304,13 @@ async fn send_native_outcome(
 					return;
 				},
 			};
-			let (mut parts, mut visibility) = native_wire_parts(&projected.parts, delivery, invocation_id, &projected.visibility);
-			let _ = project_wire_parts_with_visibility(&mut parts, &mut visibility, delivery.output_request);
+			let (mut parts, mut visibility) =
+				native_wire_parts(&projected.parts, delivery, invocation_id, &projected.visibility);
+			let _ = project_wire_parts_with_visibility(
+				&mut parts,
+				&mut visibility,
+				delivery.output_request,
+			);
 			send_verdict_json(
 				responses,
 				request_id,
@@ -13224,18 +13285,44 @@ mod tests {
 			vec![omp_tool::Part::Text { text: Str::new("x".repeat(self.bytes)) }]
 		}
 
-		fn projection(&self, view: Result<&serde_json::Value, &serde_json::Value>, caps: &PromptCaps) -> omp_tool::PromptProjection {
+		fn projection(
+			&self,
+			view: Result<&serde_json::Value, &serde_json::Value>,
+			caps: &PromptCaps,
+		) -> omp_tool::PromptProjection {
 			let parts = self.prompt(view, caps);
-			let visibility = if self.bytes == 0 { Vec::new() } else { vec![
-				omp_tool::ProjectionSpan { part: 0, start_byte: 0, end_byte: 1, source_key: sf!("source"), line: 1 },
-				omp_tool::ProjectionSpan { part: 0, start_byte: self.bytes - 1, end_byte: self.bytes, source_key: sf!("source"), line: 2 },
-			] };
+			let visibility = if self.bytes == 0 {
+				Vec::new()
+			} else {
+				vec![
+					omp_tool::ProjectionSpan {
+						part:       0,
+						start_byte: 0,
+						end_byte:   1,
+						source_key: sf!("source"),
+						line:       1,
+					},
+					omp_tool::ProjectionSpan {
+						part:       0,
+						start_byte: self.bytes - 1,
+						end_byte:   self.bytes,
+						source_key: sf!("source"),
+						line:       2,
+					},
+				]
+			};
 			omp_tool::PromptProjection { parts, visibility }
 		}
 
-		fn authorize_visibility(&self, view: Result<&serde_json::Value, &serde_json::Value>, _receipt: &omp_tool::VisibilityReceipt) -> Result<(), omp_tool::ProjectionAuthorizationError> {
+		fn authorize_visibility(
+			&self,
+			view: Result<&serde_json::Value, &serde_json::Value>,
+			_receipt: &omp_tool::VisibilityReceipt,
+		) -> Result<(), omp_tool::ProjectionAuthorizationError> {
 			if view.is_ok_and(|value| value == &serde_json::Value::Bool(true)) {
-				return Err(omp_tool::ProjectionAuthorizationError::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+				return Err(omp_tool::ProjectionAuthorizationError::new(std::io::Error::from(
+					std::io::ErrorKind::PermissionDenied,
+				)));
 			}
 			Ok(())
 		}
@@ -13306,9 +13393,23 @@ mod tests {
 		let root = tempfile::tempdir().expect("blob root");
 		let blobs = BlobHost::open(root.path()).expect("blobs");
 		let (registry, identity) = sized_projection(DEFAULT_RESULT_PROJECTION_BYTES + 10);
-		let verdict = publish_native_outcome(&blobs, &registry, &identity, omp_tool::OutputRequest::Bounded, OK_VERDICT).await;
-		assert_eq!(verdict.visibility, [pb::ProjectionSpan { part: 0, start_byte: 0, end_byte: 1, source_key: "source".to_owned(), line: 1 }]);
-		let round_trip = pb::Verdict::decode(verdict.encode_to_vec().as_slice()).expect("wire verdict");
+		let verdict = publish_native_outcome(
+			&blobs,
+			&registry,
+			&identity,
+			omp_tool::OutputRequest::Bounded,
+			OK_VERDICT,
+		)
+		.await;
+		assert_eq!(verdict.visibility, [pb::ProjectionSpan {
+			part:       0,
+			start_byte: 0,
+			end_byte:   1,
+			source_key: "source".to_owned(),
+			line:       1,
+		}]);
+		let round_trip =
+			pb::Verdict::decode(verdict.encode_to_vec().as_slice()).expect("wire verdict");
 		assert_eq!(round_trip.visibility, verdict.visibility);
 	}
 
@@ -13317,41 +13418,86 @@ mod tests {
 		let root = tempfile::tempdir().expect("blob root");
 		let blobs = BlobHost::open(root.path()).expect("blobs");
 		let (registry, identity) = sized_projection(0);
-		let verdict = publish_native_outcome(&blobs, &registry, &identity, omp_tool::OutputRequest::Bounded, OK_VERDICT).await;
+		let verdict = publish_native_outcome(
+			&blobs,
+			&registry,
+			&identity,
+			omp_tool::OutputRequest::Bounded,
+			OK_VERDICT,
+		)
+		.await;
 		assert!(verdict.visibility.is_empty());
 	}
 
 	#[test]
 	fn host_visibility_remaps_candidates_after_a_dropped_part() {
-		let mut parts = vec![thread_pb::Part { kind: Some(thread_pb::part::Kind::Blob(thread_pb::Blob { mime: "x".repeat(DEFAULT_RESULT_PROJECTION_BYTES + 1), ..Default::default() })) }, wire_text("alpha".to_owned())];
-		let mut spans = vec![pb::ProjectionSpan { part: 1, start_byte: 0, end_byte: 5, source_key: "source".to_owned(), line: 1 }];
+		let mut parts = vec![
+			thread_pb::Part {
+				kind: Some(thread_pb::part::Kind::Blob(thread_pb::Blob {
+					mime: "x".repeat(DEFAULT_RESULT_PROJECTION_BYTES + 1),
+					..Default::default()
+				})),
+			},
+			wire_text("alpha".to_owned()),
+		];
+		let mut spans = vec![pb::ProjectionSpan {
+			part:       1,
+			start_byte: 0,
+			end_byte:   5,
+			source_key: "source".to_owned(),
+			line:       1,
+		}];
 		project_wire_parts_with_visibility(&mut parts, &mut spans, omp_tool::OutputRequest::Bounded);
 		assert_eq!(spans[0].part, 0);
 		assert_eq!(parts.len(), 1);
 	}
 
-	fn visibility_request(identity: &ToolIdentity, verdict: &'static [u8], lines: Vec<pb::VisibleSourceLine>) -> pb::VisibilityAuthorization {
-		pb::VisibilityAuthorization { name: identity.name.as_str().to_owned(), rev: identity.rev.to_string(), verdict: Bytes::from_static(verdict), lines }
+	fn visibility_request(
+		identity: &ToolIdentity,
+		verdict: &'static [u8],
+		lines: Vec<pb::VisibleSourceLine>,
+	) -> pb::VisibilityAuthorization {
+		pb::VisibilityAuthorization {
+			name: identity.name.as_str().to_owned(),
+			rev: identity.rev.to_string(),
+			verdict: Bytes::from_static(verdict),
+			lines,
+		}
 	}
 
 	#[test]
 	fn host_authorizes_populated_visibility_receipt() {
 		let (registry, identity) = sized_projection(5);
-		let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine { source_key: "source".to_owned(), line: 1 }]);
+		let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine {
+			source_key: "source".to_owned(),
+			line:       1,
+		}]);
 		assert!(authorize_visibility_receipt(&registry, request).is_ok());
 	}
 
 	#[test]
 	fn host_authorizes_empty_visibility_receipt() {
 		let (registry, identity) = sized_projection(5);
-		assert!(authorize_visibility_receipt(&registry, visibility_request(&identity, OK_VERDICT, Vec::new())).is_ok());
+		assert!(
+			authorize_visibility_receipt(
+				&registry,
+				visibility_request(&identity, OK_VERDICT, Vec::new())
+			)
+			.is_ok()
+		);
 	}
 
 	#[test]
 	fn host_rejects_malformed_and_legacy_visibility_verdicts() {
 		let (registry, identity) = sized_projection(5);
 		for verdict in [b"not json".as_slice(), br#"{"text":"legacy"}"#.as_slice()] {
-			assert!(matches!(authorize_visibility_receipt(&registry, visibility_request(&identity, verdict, Vec::new())), Err((pb::ProtocolErrorCode::InvalidArgument, _))));
+			assert!(matches!(
+				authorize_visibility_receipt(
+					&registry,
+					visibility_request(&identity, verdict, Vec::new())
+				),
+				Err((pb::ProtocolErrorCode::InvalidArgument, _))
+			));
 		}
 	}
 
@@ -13359,14 +13505,23 @@ mod tests {
 	fn host_propagates_visibility_authority_rejection() {
 		let (registry, identity) = sized_projection(5);
 		let request = visibility_request(&identity, br#"{"kind":"ok","value":true}"#, Vec::new());
-		assert!(matches!(authorize_visibility_receipt(&registry, request), Err((pb::ProtocolErrorCode::PermissionDenied, _))));
+		assert!(matches!(
+			authorize_visibility_receipt(&registry, request),
+			Err((pb::ProtocolErrorCode::PermissionDenied, _))
+		));
 	}
 
 	#[test]
 	fn host_rejects_visibility_for_an_unprojected_source_line() {
 		let (registry, identity) = sized_projection(5);
-		let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine { source_key: "other".to_owned(), line: 1 }]);
-		assert!(matches!(authorize_visibility_receipt(&registry, request), Err((pb::ProtocolErrorCode::PermissionDenied, _))));
+		let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine {
+			source_key: "other".to_owned(),
+			line:       1,
+		}]);
+		assert!(matches!(
+			authorize_visibility_receipt(&registry, request),
+			Err((pb::ProtocolErrorCode::PermissionDenied, _))
+		));
 	}
 
 	#[test]
@@ -13374,15 +13529,24 @@ mod tests {
 		let (registry, identity) = sized_projection(5);
 		let mut request = visibility_request(&identity, OK_VERDICT, Vec::new());
 		request.rev = "other@9".to_owned();
-		assert!(matches!(authorize_visibility_receipt(&registry, request), Err((pb::ProtocolErrorCode::PreconditionFailed, _))));
+		assert!(matches!(
+			authorize_visibility_receipt(&registry, request),
+			Err((pb::ProtocolErrorCode::PreconditionFailed, _))
+		));
 	}
 
 	#[test]
 	fn host_rejects_visibility_with_invalid_line_identity() {
 		let (registry, identity) = sized_projection(5);
 		for (source_key, line) in [("source", 0), ("", 1)] {
-			let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine { source_key: source_key.to_owned(), line }]);
-			assert!(matches!(authorize_visibility_receipt(&registry, request), Err((pb::ProtocolErrorCode::InvalidArgument, _))));
+			let request = visibility_request(&identity, OK_VERDICT, vec![pb::VisibleSourceLine {
+				source_key: source_key.to_owned(),
+				line,
+			}]);
+			assert!(matches!(
+				authorize_visibility_receipt(&registry, request),
+				Err((pb::ProtocolErrorCode::InvalidArgument, _))
+			));
 		}
 	}
 
@@ -18055,40 +18219,62 @@ mod tests {
 			"artifact": "artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		}});
 		let bytes = serde_json::to_vec(&outcome).expect("outcome JSON");
-		let blob = blobs.put_verdict_bytes(Some("session"), "call", &bytes)
+		let blob = blobs
+			.put_verdict_bytes(Some("session"), "call", &bytes)
 			.expect("store canonical outcome");
 		let text = "é".repeat(DEFAULT_RESULT_PROJECTION_BYTES);
 		let completion = ExtHostCompletion {
-			call_id: sf!("call"),
-			kind: ExtHostOutcomeKind::Faulted,
-			parts: vec![thread_pb::Part { kind: Some(thread_pb::part::Kind::Text(text.clone())) }],
+			call_id:      sf!("call"),
+			kind:         ExtHostOutcomeKind::Faulted,
+			parts:        vec![thread_pb::Part {
+				kind: Some(thread_pb::part::Kind::Text(text.clone())),
+			}],
 			details_json: None,
 			details_blob: Some(blob.clone()),
-			args_issue: None,
-			useless: false,
-			terminate: true,
+			args_issue:   None,
+			useless:      false,
+			terminate:    true,
 		};
-		let (json, artifact, is_error) = projected_worker_completion_json(&blobs, &completion,
-			omp_tool::OutputRequest::Bounded, Some("session"), "call").expect("bounded projection");
+		let (json, artifact, is_error) = projected_worker_completion_json(
+			&blobs,
+			&completion,
+			omp_tool::OutputRequest::Bounded,
+			Some("session"),
+			"call",
+		)
+		.expect("bounded projection");
 		assert!(json.is_empty());
 		assert_eq!(artifact, Some(blob.clone()));
 		assert!(is_error);
 		assert_eq!(blob.hash.as_ref(), Hash32::sum(&bytes).as_bytes());
 		assert_eq!(blob.size, bytes.len() as u64);
-		assert_eq!(materialize_worker_outcome(&blobs, &completion).expect("read full outcome").as_ref(),
-			bytes.as_slice());
+		assert_eq!(
+			materialize_worker_outcome(&blobs, &completion)
+				.expect("read full outcome")
+				.as_ref(),
+			bytes.as_slice()
+		);
 		let mut parts = completion.parts.clone();
-		let (source_bytes, inline_bytes, omitted) = project_wire_parts(&mut parts, omp_tool::OutputRequest::Bounded);
+		let (source_bytes, inline_bytes, omitted) =
+			project_wire_parts(&mut parts, omp_tool::OutputRequest::Bounded);
 		assert!(omitted);
 		assert!(source_bytes > inline_bytes);
 		assert!(inline_bytes <= DEFAULT_RESULT_PROJECTION_BYTES as u64);
-		let Some(thread_pb::part::Kind::Text(projected)) = parts.first().and_then(|part| part.kind.as_ref()) else {
+		let Some(thread_pb::part::Kind::Text(projected)) =
+			parts.first().and_then(|part| part.kind.as_ref())
+		else {
 			panic!("bounded text projection must survive the spill");
 		};
 		assert!(!projected.is_empty());
 		assert!(text.starts_with(projected));
-		let (json, artifact, _) = projected_worker_completion_json(&blobs, &completion,
-			omp_tool::OutputRequest::Complete, Some("session"), "call").expect("complete projection");
+		let (json, artifact, _) = projected_worker_completion_json(
+			&blobs,
+			&completion,
+			omp_tool::OutputRequest::Complete,
+			Some("session"),
+			"call",
+		)
+		.expect("complete projection");
 		assert_eq!(json.as_ref(), bytes.as_slice());
 		assert_eq!(artifact, Some(blob));
 	}
@@ -18097,23 +18283,42 @@ mod tests {
 	fn worker_projection_bounds_the_canonical_envelope_not_just_details() {
 		let root = tempfile::tempdir().expect("blob root");
 		let blobs = BlobHost::open(root.path()).expect("blob host");
-		let details = Bytes::from(serde_json::to_vec(&"x".repeat(DEFAULT_RESULT_PROJECTION_BYTES - 2))
-			.expect("details JSON"));
+		let details = Bytes::from(
+			serde_json::to_vec(&"x".repeat(DEFAULT_RESULT_PROJECTION_BYTES - 2))
+				.expect("details JSON"),
+		);
 		assert_eq!(details.len(), DEFAULT_RESULT_PROJECTION_BYTES);
 		let expected = worker_verdict_json(details.clone(), false).expect("outcome envelope");
 		let completion = ExtHostCompletion {
-			call_id: sf!("boundary"), kind: ExtHostOutcomeKind::Ok,
-			parts: Vec::new(), details_json: Some(details), details_blob: None,
-			args_issue: None, useless: false, terminate: false,
+			call_id:      sf!("boundary"),
+			kind:         ExtHostOutcomeKind::Ok,
+			parts:        Vec::new(),
+			details_json: Some(details),
+			details_blob: None,
+			args_issue:   None,
+			useless:      false,
+			terminate:    false,
 		};
-		let (json, artifact, is_error) = projected_worker_completion_json(&blobs, &completion,
-			omp_tool::OutputRequest::Bounded, Some("session"), "boundary").expect("bounded envelope");
+		let (json, artifact, is_error) = projected_worker_completion_json(
+			&blobs,
+			&completion,
+			omp_tool::OutputRequest::Bounded,
+			Some("session"),
+			"boundary",
+		)
+		.expect("bounded envelope");
 		assert!(json.is_empty());
 		assert!(!is_error);
 		let artifact = artifact.expect("complete canonical artifact");
 		assert_eq!(artifact.hash.as_ref(), Hash32::sum(&expected).as_bytes());
-		assert_eq!(blobs.get(BlobId {
-			hash: artifact.hash.as_ref().try_into().expect("digest"), size: artifact.size,
-		}).expect("read canonical artifact"), expected);
+		assert_eq!(
+			blobs
+				.get(BlobId {
+					hash: artifact.hash.as_ref().try_into().expect("digest"),
+					size: artifact.size,
+				})
+				.expect("read canonical artifact"),
+			expected
+		);
 	}
 }

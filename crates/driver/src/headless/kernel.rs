@@ -1199,12 +1199,30 @@ fn admission_denial(
 }
 
 impl ExternalToolExecutor for EnvToolExecutor {
-	fn authorize_visibility<'a>(&'a self, identity: &'a omp_tool::ToolIdentity, verdict: Bytes, receipt: omp_tool::VisibilityReceipt) -> omp_agent::VisibilityAuthorizationFuture<'a> {
+	fn authorize_visibility<'a>(
+		&'a self,
+		identity: &'a omp_tool::ToolIdentity,
+		verdict: Bytes,
+		receipt: omp_tool::VisibilityReceipt,
+	) -> omp_agent::VisibilityAuthorizationFuture<'a> {
 		Box::pin(async move {
-			self.client.authorize_visibility(omp_env::frame::VisibilityAuthorization {
-				name: identity.name.as_str().to_owned(), rev: identity.rev.to_string(), verdict,
-				lines: receipt.lines.into_iter().map(|line| omp_env::frame::VisibleSourceLine { source_key: line.source_key.as_str().to_owned(), line: line.line as u64 }).collect(),
-			}).await.map_err(omp_tool::ProjectionAuthorizationError::new)
+			self
+				.client
+				.authorize_visibility(omp_env::frame::VisibilityAuthorization {
+					name: identity.name.as_str().to_owned(),
+					rev: identity.rev.to_string(),
+					verdict,
+					lines: receipt
+						.lines
+						.into_iter()
+						.map(|line| omp_env::frame::VisibleSourceLine {
+							source_key: line.source_key.as_str().to_owned(),
+							line:       line.line as u64,
+						})
+						.collect(),
+				})
+				.await
+				.map_err(omp_tool::ProjectionAuthorizationError::new)
 		})
 	}
 
@@ -1532,6 +1550,7 @@ impl ExternalToolExecutor for EnvToolExecutor {
 									is_error: verdict.is_error,
 									source_artifact: Some(source_artifact),
 									projection: tool_output_projection(projection),
+									visibility,
 								};
 							},
 							EnvironmentTerminal::Detached(DetachedVerdict::Detached(job)) => {
@@ -1594,10 +1613,13 @@ fn valid_detached_job(job: &omp_tool::JobRef, session_id: &str) -> bool {
 				!name.is_empty() && *generation != 0
 			},
 			omp_tool::JobOwner::AgentLoop { agent_id } => !agent_id.is_empty(),
-		}
-		&& matches!(job.metadata.status, omp_tool::JobStatus::Queued | omp_tool::JobStatus::Running)
+		} && matches!(job.metadata.status, omp_tool::JobStatus::Queued | omp_tool::JobStatus::Running)
 		&& job.metadata.settled_at_ms.is_none()
-		&& job.metadata.owner_session.as_ref().is_none_or(|owner| owner == session_id)
+		&& job
+			.metadata
+			.owner_session
+			.as_ref()
+			.is_none_or(|owner| owner == session_id)
 }
 
 fn raw_json(bytes: Bytes) -> Result<Box<serde_json::value::RawValue>, ()> {
@@ -1681,31 +1703,46 @@ fn tool_visibility_spans(
 	}
 	use omp_proto::thread::v1::part::Kind;
 	let mut next = 0;
-	let remapped = parts.iter().map(|part| {
-		let retained = matches!(part.kind.as_ref(), Some(Kind::Text(_) | Kind::Thinking(_) | Kind::Blob(_)));
-		let index = retained.then_some(next);
-		next += usize::from(retained);
-		index
-	}).collect::<Vec<_>>();
-	visibility.into_iter().map(|span| {
-		let part = usize::try_from(span.part).map_err(|_| ())?;
-		let start_byte = usize::try_from(span.start_byte).map_err(|_| ())?;
-		let end_byte = usize::try_from(span.end_byte).map_err(|_| ())?;
-		let line = usize::try_from(span.line).map_err(|_| ())?;
-		let text = match parts.get(part).and_then(|part| part.kind.as_ref()) {
-			Some(Kind::Text(text)) => text.as_str(),
-			Some(Kind::Thinking(thinking)) => thinking.text.as_str(),
-			_ => return Err(()),
-		};
-		if line == 0 || span.source_key.is_empty() || start_byte >= end_byte
-			|| end_byte > text.len() || !text.is_char_boundary(start_byte) || !text.is_char_boundary(end_byte) {
-			return Err(());
-		}
-		Ok(omp_tool::ProjectionSpan {
-			part: remapped[part].ok_or(())?, start_byte, end_byte,
-			source_key: Str::from(span.source_key), line,
+	let remapped = parts
+		.iter()
+		.map(|part| {
+			let retained =
+				matches!(part.kind.as_ref(), Some(Kind::Text(_) | Kind::Thinking(_) | Kind::Blob(_)));
+			let index = retained.then_some(next);
+			next += usize::from(retained);
+			index
 		})
-	}).collect()
+		.collect::<Vec<_>>();
+	visibility
+		.into_iter()
+		.map(|span| {
+			let part = usize::try_from(span.part).map_err(|_| ())?;
+			let start_byte = usize::try_from(span.start_byte).map_err(|_| ())?;
+			let end_byte = usize::try_from(span.end_byte).map_err(|_| ())?;
+			let line = usize::try_from(span.line).map_err(|_| ())?;
+			let text = match parts.get(part).and_then(|part| part.kind.as_ref()) {
+				Some(Kind::Text(text)) => text.as_str(),
+				Some(Kind::Thinking(thinking)) => thinking.text.as_str(),
+				_ => return Err(()),
+			};
+			if line == 0
+				|| span.source_key.is_empty()
+				|| start_byte >= end_byte
+				|| end_byte > text.len()
+				|| !text.is_char_boundary(start_byte)
+				|| !text.is_char_boundary(end_byte)
+			{
+				return Err(());
+			}
+			Ok(omp_tool::ProjectionSpan {
+				part: remapped[part].ok_or(())?,
+				start_byte,
+				end_byte,
+				source_key: Str::from(span.source_key),
+				line,
+			})
+		})
+		.collect()
 }
 
 fn tool_part(part: omp_proto::thread::v1::Part) -> Option<ToolPart> {
@@ -3929,16 +3966,38 @@ mod tests {
 	fn visibility_transport_preserves_source_lines_and_remaps_filtered_parts() {
 		use omp_proto::thread::v1::{Part, part::Kind};
 		let parts = [Part::default(), Part { kind: Some(Kind::Text("alpha".to_owned())) }];
-		let spans = super::tool_visibility_spans(vec![omp_env::frame::ProjectionSpan { part: 1, start_byte: 0, end_byte: 5, source_key: "source".to_owned(), line: 7 }], &parts).expect("valid visibility");
-		assert_eq!(spans, [omp_tool::ProjectionSpan { part: 0, start_byte: 0, end_byte: 5, source_key: sf!("source"), line: 7 }]);
+		let spans = super::tool_visibility_spans(
+			vec![omp_env::frame::ProjectionSpan {
+				part:       1,
+				start_byte: 0,
+				end_byte:   5,
+				source_key: "source".to_owned(),
+				line:       7,
+			}],
+			&parts,
+		)
+		.expect("valid visibility");
+		assert_eq!(spans, [omp_tool::ProjectionSpan {
+			part:       0,
+			start_byte: 0,
+			end_byte:   5,
+			source_key: sf!("source"),
+			line:       7,
+		}]);
 	}
 
 	#[test]
 	fn legacy_verdict_defaults_to_empty_visibility() {
 		use omp_proto::prost::Message;
-		let verdict = omp_env::frame::Verdict { invocation_id: "legacy".to_owned(), ..Default::default() };
-		let decoded = omp_env::frame::Verdict::decode(verdict.encode_to_vec().as_slice()).expect("legacy verdict");
-		assert!(super::tool_visibility_spans(decoded.visibility, &decoded.parts).expect("empty receipt").is_empty());
+		let verdict =
+			omp_env::frame::Verdict { invocation_id: "legacy".to_owned(), ..Default::default() };
+		let decoded = omp_env::frame::Verdict::decode(verdict.encode_to_vec().as_slice())
+			.expect("legacy verdict");
+		assert!(
+			super::tool_visibility_spans(decoded.visibility, &decoded.parts)
+				.expect("empty receipt")
+				.is_empty()
+		);
 	}
 
 	#[test]
@@ -3946,11 +4005,26 @@ mod tests {
 		use omp_proto::thread::v1::{Part, part::Kind};
 		let parts = [Part { kind: Some(Kind::Text("écho".to_owned())) }];
 		for (part, start_byte, end_byte, source_key, line) in [
-			(1, 0, 2, "source", 1), (0, 1, 2, "source", 1),
-			(0, 0, 6, "source", 1), (0, 2, 2, "source", 1),
-			(0, 0, 2, "", 1), (0, 0, 2, "source", 0),
+			(1, 0, 2, "source", 1),
+			(0, 1, 2, "source", 1),
+			(0, 0, 6, "source", 1),
+			(0, 2, 2, "source", 1),
+			(0, 0, 2, "", 1),
+			(0, 0, 2, "source", 0),
 		] {
-			assert!(super::tool_visibility_spans(vec![omp_env::frame::ProjectionSpan { part, start_byte, end_byte, source_key: source_key.to_owned(), line }], &parts).is_err());
+			assert!(
+				super::tool_visibility_spans(
+					vec![omp_env::frame::ProjectionSpan {
+						part,
+						start_byte,
+						end_byte,
+						source_key: source_key.to_owned(),
+						line
+					}],
+					&parts
+				)
+				.is_err()
+			);
 		}
 	}
 

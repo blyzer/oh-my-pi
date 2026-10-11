@@ -523,7 +523,9 @@ mod tests {
 
 	#[test]
 	fn visibility_receipts_route_to_environment_authority() {
-		let body = data_request::Body::Visibility(omp_proto::env::v1::VisibilityAuthorization { ..Default::default() });
+		let body = data_request::Body::Visibility(omp_proto::env::v1::VisibilityAuthorization {
+			..Default::default()
+		});
 		assert_eq!(route_data(Some(&body)), Backend::Remote);
 	}
 

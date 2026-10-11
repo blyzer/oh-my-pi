@@ -1462,9 +1462,18 @@ impl EnvClient {
 		}
 	}
 
-	/// Returns the final model-visible source lines to their exact tool authority.
-	pub async fn authorize_visibility(&self, request: env_wire::VisibilityAuthorization) -> Result<(), ClientError> {
-		let response = self.data_request_owned(DataRequest { body: Some(data_request::Body::Visibility(request)), ..DataRequest::default() }).await?;
+	/// Returns the final model-visible source lines to their exact tool
+	/// authority.
+	pub async fn authorize_visibility(
+		&self,
+		request: env_wire::VisibilityAuthorization,
+	) -> Result<(), ClientError> {
+		let response = self
+			.data_request_owned(DataRequest {
+				body: Some(data_request::Body::Visibility(request)),
+				..DataRequest::default()
+			})
+			.await?;
 		match response.body {
 			Some(data_response::Body::Visibility(_)) => Ok(()),
 			_ => Err(ClientError::UnexpectedResponse { expected: "VisibilityAuthorized" }),

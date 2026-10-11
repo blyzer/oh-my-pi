@@ -3910,16 +3910,22 @@ mod convar_tests {
 		}});
 		let encoded = serde_json::to_vec(&value).expect("encode completion");
 		let mut state = DispatchChunkState {
-			invocation: invocation.clone(), next_index: 0, body: Vec::new(),
+			invocation: invocation.clone(),
+			next_index: 0,
+			body:       Vec::new(),
 		};
-		// Odd chunk lengths split UTF-8 sequences; decoding happens only after reassembly.
+		// Odd chunk lengths split UTF-8 sequences; decoding happens only after
+		// reassembly.
 		for (index, bytes) in encoded.chunks(1023).enumerate() {
 			append_dispatch_result_chunk(&mut state, &invocation, index as u64, bytes)
 				.expect("append completion chunk");
 		}
 		assert_eq!(state.body, encoded);
-		assert_eq!(serde_json::from_slice::<serde_json::Value>(&state.body)
-			.expect("decode reassembled completion"), value);
+		assert_eq!(
+			serde_json::from_slice::<serde_json::Value>(&state.body)
+				.expect("decode reassembled completion"),
+			value
+		);
 	}
 
 	#[test]

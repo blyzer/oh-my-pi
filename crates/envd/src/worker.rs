@@ -592,12 +592,13 @@ pub struct ExtHostCompletion {
 	pub call_id:      Str,
 	/// Exact terminal branch.
 	pub kind:         ExtHostOutcomeKind,
-	/// Complete model-facing parts; output bounds are applied at verdict delivery.
+	/// Complete model-facing parts; output bounds are applied at verdict
+	/// delivery.
 	pub parts:        Vec<Part>,
 	/// Inline structured details for in-process CONTROL completions.
 	pub details_json: Option<Bytes>,
-	/// Canonical `CallOutcome` JSON staged by the Environment CAS when structured
-	/// details exceed the bounded inline CONTROL projection.
+	/// Canonical `CallOutcome` JSON staged by the Environment CAS when
+	/// structured details exceed the bounded inline CONTROL projection.
 	pub details_blob: Option<Blob>,
 	/// Structured argument issue, present only for
 	/// [`ExtHostOutcomeKind::ArgsRejected`].
@@ -4263,9 +4264,8 @@ async fn dispatch_control_service(
 mod tests {
 	use omp_core::Hash32;
 
-	use crate::blobs::BlobId;
-
 	use super::*;
+	use crate::blobs::BlobId;
 
 	/// The route ceiling a registered tool gets and the tier the CONTROL
 	/// snapshot reports agree with admission for every declaration shape: an
@@ -4414,31 +4414,47 @@ mod tests {
 			"artifact": "artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		});
 		let parts = vec!["summary".to_owned(), "y".repeat(CONTROL_RESULT_INLINE_BYTES + 1)];
-		let completion = control_completion(sf!("fault"), serde_json::json!({
-			"details": details,
-			"parts": parts,
-			"is_error": true,
-			"terminate": true,
-		}), Some(&store), "session").expect("spill faulted result");
+		let completion = control_completion(
+			sf!("fault"),
+			serde_json::json!({
+				"details": details,
+				"parts": parts,
+				"is_error": true,
+				"terminate": true,
+			}),
+			Some(&store),
+			"session",
+		)
+		.expect("spill faulted result");
 		assert_eq!(completion.kind, ExtHostOutcomeKind::Faulted);
 		assert!(completion.terminate);
 		assert!(completion.details_json.is_none());
 		assert_eq!(completion.parts, parts.into_iter().map(text_part).collect::<Vec<_>>());
 		let blob = completion.details_blob.expect("fault artifact");
-		let bytes = store.get(BlobId {
-			hash: blob.hash.as_ref().try_into().expect("result digest"),
-			size: blob.size,
-		}).expect("read fault artifact");
-		assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).expect("fault JSON"),
-			serde_json::json!({"kind": "faulted", "value": details}));
+		let bytes = store
+			.get(BlobId {
+				hash: blob.hash.as_ref().try_into().expect("result digest"),
+				size: blob.size,
+			})
+			.expect("read fault artifact");
+		assert_eq!(
+			serde_json::from_slice::<serde_json::Value>(&bytes).expect("fault JSON"),
+			serde_json::json!({"kind": "faulted", "value": details})
+		);
 	}
 
 	#[test]
 	fn oversized_control_parts_survive_small_structured_details() {
 		let text = "x".repeat(CONTROL_RESULT_INLINE_BYTES + 1);
-		let completion = control_completion(sf!("parts"), serde_json::json!({
-			"parts": [text], "details": {"count": 1},
-		}), None, "session").expect("parts reach the central projection gate");
+		let completion = control_completion(
+			sf!("parts"),
+			serde_json::json!({
+				"parts": [text], "details": {"count": 1},
+			}),
+			None,
+			"session",
+		)
+		.expect("parts reach the central projection gate");
 		assert_eq!(completion.parts, vec![text_part(text)]);
 		assert!(completion.details_blob.is_none());
 		assert_eq!(completion.details_json.expect("inline details").as_ref(), br#"{"count":1}"#);
@@ -4452,23 +4468,41 @@ mod tests {
 			"reason": "x".repeat(CONTROL_RESULT_INLINE_BYTES + 1),
 		}});
 		let expected = serde_json::to_vec(&outcome).expect("serialize expected outcome");
-		let completion = control_completion(sf!("typed"), serde_json::json!({
-			"details": outcome, "is_error": true,
-		}), Some(&store), "session").expect("spill typed outcome");
+		let completion = control_completion(
+			sf!("typed"),
+			serde_json::json!({
+				"details": outcome, "is_error": true,
+			}),
+			Some(&store),
+			"session",
+		)
+		.expect("spill typed outcome");
 		let blob = completion.details_blob.expect("typed artifact");
 		assert_eq!(blob.hash.as_ref(), Hash32::sum(&expected).as_bytes());
 		assert_eq!(blob.size, expected.len() as u64);
-		assert_eq!(store.get(BlobId {
-			hash: blob.hash.as_ref().try_into().expect("result digest"),
-			size: blob.size,
-		}).expect("read typed artifact").as_ref(), expected.as_slice());
+		assert_eq!(
+			store
+				.get(BlobId {
+					hash: blob.hash.as_ref().try_into().expect("result digest"),
+					size: blob.size,
+				})
+				.expect("read typed artifact")
+				.as_ref(),
+			expected.as_slice()
+		);
 	}
 
 	#[test]
 	fn inline_control_completion_keeps_details_parts_and_terminal_flags() {
-		let completion = control_completion(sf!("inline"), serde_json::json!({
-			"details": {"answer": 42}, "parts": ["answer"], "terminate": true,
-		}), None, "session").expect("inline completion without a result store");
+		let completion = control_completion(
+			sf!("inline"),
+			serde_json::json!({
+				"details": {"answer": 42}, "parts": ["answer"], "terminate": true,
+			}),
+			None,
+			"session",
+		)
+		.expect("inline completion without a result store");
 		assert_eq!(completion.kind, ExtHostOutcomeKind::Ok);
 		assert_eq!(completion.parts, vec![text_part("answer".to_owned())]);
 		assert_eq!(completion.details_json.expect("inline details").as_ref(), br#"{"answer":42}"#);
@@ -4480,9 +4514,12 @@ mod tests {
 
 	#[test]
 	fn oversized_control_result_without_a_store_fails_explicitly() {
-		let result = control_completion(sf!("missing-store"),
+		let result = control_completion(
+			sf!("missing-store"),
 			serde_json::Value::String("x".repeat(CONTROL_RESULT_INLINE_BYTES + 1)),
-			None, "session");
+			None,
+			"session",
+		);
 		assert!(matches!(result, Err(ExtHostError::Protocol(_))));
 	}
 

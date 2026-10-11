@@ -271,7 +271,8 @@ pub enum ExternalDispatchEvent {
 	},
 	/// Work continues under the environment's resource authority.
 	DetachedProjected {
-		/// Exact job identity, owner generation, and expected settlement artifact.
+		/// Exact job identity, owner generation, and expected settlement
+		/// artifact.
 		job:             JobRef,
 		/// Environment-bounded model-facing parts.
 		parts:           Vec<Part>,
@@ -289,18 +290,25 @@ pub type ExternalDispatchStream =
 	Pin<Box<dyn Stream<Item = ExternalDispatchEvent> + Send + 'static>>;
 
 /// One cold authority round trip after an externally routed projection settles.
-pub type VisibilityAuthorizationFuture<'a> = Pin<Box<dyn Future<Output = Result<(), omp_tool::ProjectionAuthorizationError>> + Send + 'a>>;
+pub type VisibilityAuthorizationFuture<'a> =
+	Pin<Box<dyn Future<Output = Result<(), omp_tool::ProjectionAuthorizationError>> + Send + 'a>>;
 
 /// Host composition seam for worker- and remote-routed tool execution.
 pub trait ExternalToolExecutor: Send + Sync {
 	/// Opens one committed invocation. Every stream must end in `Done`,
-	/// `DoneProjected`, `DetachedProjected`, or `Aborted`; transport failures are
-	/// mapped to an explicit abort while their typed source is logged at that boundary.
+	/// `DoneProjected`, `DetachedProjected`, or `Aborted`; transport failures
+	/// are mapped to an explicit abort while their typed source is logged at
+	/// that boundary.
 	fn invoke(&self, request: ExternalDispatchRequest) -> ExternalDispatchStream;
 
 	/// Returns final visibility to an external authority. Older executors carry
 	/// no candidates and need no acknowledgement.
-	fn authorize_visibility<'a>(&'a self, _identity: &'a ToolIdentity, _verdict: bytes::Bytes, _receipt: VisibilityReceipt) -> VisibilityAuthorizationFuture<'a> {
+	fn authorize_visibility<'a>(
+		&'a self,
+		_identity: &'a ToolIdentity,
+		_verdict: bytes::Bytes,
+		_receipt: VisibilityReceipt,
+	) -> VisibilityAuthorizationFuture<'a> {
 		Box::pin(std::future::ready(Ok(())))
 	}
 }
@@ -2577,14 +2585,26 @@ impl Committer {
 				match self.gate_result(session, call, staged, &mut output).await {
 					Ok(staged) => {
 						let authorization = match &call.unit {
-							Unit::External { executor, .. } => staged.visibility_verdict.as_ref().map(|verdict| (Arc::clone(executor), verdict.clone(), staged.visibility.clone())),
+							Unit::External { executor, .. } => {
+								staged.visibility_verdict.as_ref().map(|verdict| {
+									(Arc::clone(executor), verdict.clone(), staged.visibility.clone())
+								})
+							},
 							_ => None,
 						};
 						match self.commit_staged(session, call, staged, &mut output) {
 							Ok(report) => match authorization {
-								Some((executor, verdict, receipt)) => executor.authorize_visibility(&call.identity, verdict, receipt).await
+								Some((executor, verdict, receipt)) => executor
+									.authorize_visibility(&call.identity, verdict, receipt)
+									.await
 									.map(|()| Some(report))
-									.map_err(|source| RegistryError::ProjectionAuthorization { name: call.identity.name.clone(), source }.into()),
+									.map_err(|source| {
+										RegistryError::ProjectionAuthorization {
+											name: call.identity.name.clone(),
+											source,
+										}
+										.into()
+									}),
 								None => Ok(Some(report)),
 							},
 							Err(error) => Err(error),
@@ -2785,6 +2805,7 @@ impl Committer {
 					call,
 					detached_outcome(&job)?,
 					parts,
+					&[],
 					false,
 					Some(source_artifact),
 					Some(projection),
