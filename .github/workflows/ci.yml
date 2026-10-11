@@ -390,10 +390,9 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-${{ runner.arch }}-
 
-      # `--all-targets` (kept in sync with `just clippy`) so tests, examples
-      # and benches are held to the same clippy.toml policy as library code.
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --locked
+      # No clippy here: `Lint workspace (macOS)` (lint_macos) runs the same
+      # `cargo clippy --workspace --all-targets` on its own runner in parallel
+      # and is a required check, which took ~12 min off this job.
 
       # One cargo invocation builds every test binary, the acceptance proofs
       # included, so their codegen and links overlap the workspace tail instead
@@ -449,12 +448,11 @@ jobs:
       - name: Record the proved tree
         run: echo "::notice title=proved-tree::$(git rev-parse 'HEAD^{tree}')"
 
-  # The macOS clippy pass on its own runner, in parallel with `rust`. Not a
-  # required check yet. Once it has reported green on a pull request, it joins
-  # the ruleset and the `Lint workspace` step leaves `rust`, taking 553.5 s
-  # (median, n=10) off the critical path
-  # (docs/research/ci-test-acceleration.md, Phase 3). No target/ cache: a
-  # warm clippy (394-459 s) was no faster than a cold one (371-912 s).
+  # The only macOS clippy pass, on its own runner in parallel with `rust`, and
+  # a required check (docs/research/ci-test-acceleration.md, Phase 3): moving
+  # it out of `rust` took ~12 min (553.5 s median, n=10) off the critical
+  # path. No target/ cache: a warm clippy (394-459 s) was no faster than a
+  # cold one (371-912 s).
   lint_macos:
     name: Lint workspace (macOS)
     needs: [changes, push_verified]

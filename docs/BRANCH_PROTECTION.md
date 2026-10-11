@@ -31,7 +31,7 @@ The ruleset below is also kept as importable JSON in
 To apply it: **Settings > Rules > Rulesets > New ruleset > Import a ruleset**, choose that file, review
 it and save. The JSON targets `refs/heads/omp2` only, lets the repository **Admin** role bypass it
 (`bypass_mode: always`, so the owner can still push to `omp2` directly and merge with failing or
-pending checks when a runner is down), allows only merge commits, requires the nine status checks
+pending checks when a runner is down), allows only merge commits, requires the ten status checks
 listed below and resolved review threads, and leaves "up to date" and linear history off. Keep the file
 and the table below in sync.
 
@@ -62,6 +62,7 @@ Use the job names exactly as the checks list of a pull request shows them:
 - `License policy and release notices`
 - `Runtime symbol and dependency contracts`
 - `Lint workspace (Linux)`
+- `Lint workspace (macOS)`
 - `Rust workspace and acceptance proofs`
 - `Terminal proof P7 (Linux PTY)`
 - `Acceptance proofs P9, P10 and tool sources (Linux)`
@@ -72,6 +73,11 @@ Use the job names exactly as the checks list of a pull request shows them:
 runner, not the self-hosted Mac, so requiring it does not lengthen the macOS
 queue. Add it to the ruleset once it has reported green on a pull request;
 existing required checks keep their names.
+
+`Lint workspace (macOS)` is the only macOS clippy pass. It runs on its own
+runner in parallel with `Rust workspace and acceptance proofs`, which no longer
+runs clippy (about 12 minutes off that job). Until the ruleset that lists it is
+imported, a macOS-only clippy failure reports red but does not block a merge.
 
 `Error-formatting ratchet (lintx)` (ADR 0035) runs on a GitHub-hosted runner as
 well and is required (it reported green on a pull request before it was added).
@@ -114,7 +120,7 @@ pull request reports nothing, so its required checks would wait forever. A job
 named `changes` lists the pull request's files through the API and matches them
 against `.github/ci-paths.txt` (one glob per line, `**` crosses directories).
 When nothing matches, every other job is skipped, and GitHub counts a skipped
-required check as passing. A docs-only pull request therefore gets all nine
+required check as passing. A docs-only pull request therefore gets all ten
 checks without running them; one that touches a CI path runs them for real.
 
 Why one workflow and not a second one that reports the same names for skipped
