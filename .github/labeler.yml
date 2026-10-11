@@ -65,6 +65,7 @@ area/env:
       - any-glob-to-any-file:
           - 'crates/env/**'
           - 'crates/envd/**'
+          - 'crates/exec/**'
           - 'crates/sandbox/**'
 
 area/shell:

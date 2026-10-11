@@ -8353,6 +8353,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-exec"
+version = "2.0.0"
+dependencies = [
+ "omp-adw",
+ "omp-core",
+ "serde",
+ "strum",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "omp-ext"
 version = "2.0.0"
 dependencies = [

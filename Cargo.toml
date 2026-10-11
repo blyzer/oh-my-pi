@@ -135,6 +135,7 @@ omp-desktop = { path = "crates/desktop", version = "2.0.0" }
 omp-driver = { path = "crates/driver", version = "2.0.0", default-features = false }
 omp-env = { path = "crates/env", version = "2.0.0" }
 omp-envd = { path = "crates/envd", version = "2.0.0" }
+omp-exec = { path = "crates/exec", version = "2.0.0" }
 omp-ext = { path = "crates/ext", version = "2.0.0" }
 omp-gui = { path = "crates/gui", version = "2.0.0" }
 omp-edit = { path = "crates/edit", version = "2.0.0" }
