@@ -145,3 +145,32 @@ just remote clippy                     # any recipe
 environment wins over both. `bb` hands the key to every process of the remote run (ADR 0040,
 Part H.2), so use a key you can revoke and a BuildBuddy organization whose cache no release depends
 on.
+## Slice 0c: recycling probe with preserve-workspace
+
+An additional probe ran four sequential `bb execute` actions on 2026-10-10
+using:
+
+- `recycle-runner=true`;
+- `preserve-workspace=true`;
+- default isolation;
+- the pinned Ubuntu 24.04/BuildBuddy runner defaults;
+- a 15-second pause between actions.
+
+Each action printed the VM `boot_id`, uptime and attempted to read/write a
+marker under `/workspace`.
+
+| Action | `boot_id` | Marker before action | Uptime |
+|---|---|---|---|
+| 1 | `7e321f10-c0e0-4823-bf47-37ab61f77b0d` | absent | 0.03s |
+| 2 | `e9ffc09a-c6d2-4c95-9f3d-15009021bb08` | absent | 0.05s |
+| 3 | `20d946ef-d69a-4279-b876-d2435656caad` | absent | 0.06s |
+| 4 | `26dc0a71-9e0a-44c6-b1b9-b1a38ef23641` | absent | 0.04s |
+
+The boot IDs differ and the marker is absent on every action. The marker
+write also reported that `/workspace` was not present in this direct
+`bb execute` command. This is additional evidence that raw REAPI recycling
+does not provide a warm persistent workspace under these properties.
+
+**Decision evidence:** keep the generic REAPI backend cold/portable and use
+BuildBuddy Run API snapshots for warm execution behind the backend-neutral
+`omp-exec` contract. Do not make runner recycling a Slice 1 prerequisite.
