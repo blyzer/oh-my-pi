@@ -41,12 +41,16 @@ pub struct ResolvedLspBinary {
 	pub args:       Vec<Str>,
 }
 
-/// Resolves project-local bins before the supplied PATH. This function probes
-/// paths only; the caller remains the owner of process creation.
+/// Resolves `command` to an executable. A bare name is looked up in the
+/// project-local bins under `project_root` (`node_modules/.bin`, `.venv/bin`,
+/// `bin`, ..., each behind its marker file) and then in the supplied `PATH`;
+/// `None` searches `PATH` only. Callers pass a project root only when the user
+/// enabled `sv_lsp_project_binaries`. This function probes paths only; the
+/// caller remains the owner of process creation.
 pub fn resolve_lsp_binary(
 	command: &str,
 	args: &[Str],
-	local_roots: &[PathBuf],
+	project_root: Option<&Path>,
 	path: Option<&OsStr>,
 	pid: u32,
 	platform: BinaryPlatform,
@@ -54,20 +58,8 @@ pub fn resolve_lsp_binary(
 	if command.is_empty() {
 		return Err(LspBinaryError::EmptyCommand);
 	}
-	let executable = if Path::new(command).components().count() > 1 {
-		resolve_candidate(Path::new(command), platform)
-	} else {
-		local_roots
-			.iter()
-			.find_map(|root| resolve_local(root, command, platform))
-			.or_else(|| {
-				path.and_then(|path| {
-					env::split_paths(path)
-						.find_map(|directory| resolve_candidate(&directory.join(command), platform))
-				})
-			})
-	}
-	.ok_or_else(|| LspBinaryError::Unavailable { command: Str::new(command) })?;
+	let executable = resolve_executable(command, project_root, path, platform)
+		.ok_or_else(|| LspBinaryError::Unavailable { command: Str::new(command) })?;
 	let pid_text = pid.to_string();
 	let args = args
 		.iter()
@@ -80,6 +72,28 @@ pub fn resolve_lsp_binary(
 		})
 		.collect();
 	Ok(ResolvedLspBinary { executable, args })
+}
+
+/// Resolves a language- or debug-server `command` to an executable path: a
+/// path-like command as given, a bare name from the project-local bins under
+/// `project_root` (when supplied), then from `path`.
+pub(crate) fn resolve_executable(
+	command: &str,
+	project_root: Option<&Path>,
+	path: Option<&OsStr>,
+	platform: BinaryPlatform,
+) -> Option<PathBuf> {
+	if Path::new(command).components().count() > 1 {
+		return resolve_candidate(Path::new(command), platform);
+	}
+	project_root
+		.and_then(|root| resolve_local(root, command, platform))
+		.or_else(|| {
+			path.and_then(|path| {
+				env::split_paths(path)
+					.find_map(|directory| resolve_candidate(&directory.join(command), platform))
+			})
+		})
 }
 
 fn resolve_local(root: &Path, command: &str, platform: BinaryPlatform) -> Option<PathBuf> {
@@ -137,18 +151,50 @@ mod tests {
 
 	use super::*;
 
-	#[test]
-	fn local_node_binary_precedes_path_and_pid_is_substituted() {
+	/// A `PATH` directory holding `command`, and a project root whose
+	/// `node_modules/.bin` (behind `package.json`) holds it too.
+	fn path_and_local(command: &str) -> (tempfile::TempDir, PathBuf, tempfile::TempDir, PathBuf) {
 		let root = tempfile::tempdir().unwrap();
 		fs::write(root.path().join("package.json"), b"{}").unwrap();
 		fs::create_dir_all(root.path().join("node_modules/.bin")).unwrap();
-		let local = root.path().join("node_modules/.bin/omnisharp");
+		let local = root.path().join("node_modules/.bin").join(command);
 		fs::write(&local, b"").unwrap();
+		let bin = tempfile::tempdir().unwrap();
+		let on_path = bin.path().join(command);
+		fs::write(&on_path, b"").unwrap();
+		(root, local, bin, on_path)
+	}
+
+	#[test]
+	fn without_a_project_root_the_path_binary_wins() {
+		let (root, local, bin, on_path) = path_and_local("omnisharp");
+		let resolved = resolve_lsp_binary(
+			"omnisharp",
+			&[],
+			None,
+			Some(bin.path().as_os_str()),
+			42,
+			BinaryPlatform::Posix,
+		)
+		.unwrap();
+		assert_eq!(resolved.executable, on_path);
+		assert_ne!(resolved.executable, local);
+		// The project bin alone is never found without the opt-in.
+		assert_eq!(
+			resolve_lsp_binary("omnisharp", &[], None, None, 42, BinaryPlatform::Posix),
+			Err(LspBinaryError::Unavailable { command: Str::new_static("omnisharp") })
+		);
+		drop(root);
+	}
+
+	#[test]
+	fn opted_in_local_node_binary_precedes_path_and_pid_is_substituted() {
+		let (root, local, bin, _) = path_and_local("omnisharp");
 		let resolved = resolve_lsp_binary(
 			"omnisharp",
 			&[Str::new_static("--hostPID"), Str::new_static("$PID")],
-			&[root.path().to_owned()],
-			None,
+			Some(root.path()),
+			Some(bin.path().as_os_str()),
 			42,
 			BinaryPlatform::Posix,
 		)
@@ -169,7 +215,7 @@ mod tests {
 		let resolved = resolve_lsp_binary(
 			"typescript-language-server",
 			&[],
-			&[root.path().to_owned()],
+			Some(root.path()),
 			None,
 			1,
 			BinaryPlatform::Windows,

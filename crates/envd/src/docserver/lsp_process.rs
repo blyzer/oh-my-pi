@@ -353,6 +353,9 @@ pub struct LspProcess {
 
 impl LspProcess {
 	/// Starts, initializes, installs, and activates one process binding.
+	///
+	/// The executable resolves from `$PATH` only, unless the environment
+	/// admits its project-local bins ([`Environment::project_binary_root`]).
 	#[tracing::instrument(
 		name = "lsp_server_spawn",
 		level = "debug",
@@ -365,12 +368,6 @@ impl LspProcess {
 		cancel: CancellationToken,
 	) -> Result<Self, LspProcessError> {
 		let spec = config.binding_spec()?;
-		let local_roots = environment
-			.root_uri()
-			.to_file_path()
-			.ok()
-			.into_iter()
-			.collect::<Vec<_>>();
 		let platform = if cfg!(windows) {
 			BinaryPlatform::Windows
 		} else {
@@ -379,7 +376,7 @@ impl LspProcess {
 		let resolved = resolve_lsp_binary(
 			config.executable.to_string_lossy().as_ref(),
 			&config.args,
-			&local_roots,
+			environment.project_binary_root(),
 			env::var_os("PATH").as_deref(),
 			process::id(),
 			platform,

@@ -2454,7 +2454,8 @@ mod tests {
 					lsp_config_paths: Vec::new(),
 					lsp:              crate::docserver::NativeLspOptions {
 						enabled: false,
-						lazy:    true,
+						lazy: true,
+						..Default::default()
 					},
 					user_config_root: None,
 					claude_plugins:   std::sync::Arc::default(),

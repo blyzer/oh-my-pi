@@ -244,7 +244,9 @@ pub async fn serve(root: PathBuf, transport: Transport, options: ServeOptions) -
 
 async fn run_with_shutdown(root: PathBuf, transport: Transport, options: ServeOptions) -> Result {
 	let process_configs = load_lsp_process_configs(&options.lsp_config_paths)?;
-	let config = ServerConfig::new(root)?.with_server_build(options.server_build);
+	let config = ServerConfig::new(root)?
+		.with_server_build(options.server_build)
+		.with_project_binaries(options.lsp.project_binaries);
 	let authority_lock = config.try_lock_authority()?;
 	let environment = Environment::new(config)?;
 	if options.lsp.enabled {

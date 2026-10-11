@@ -30,7 +30,7 @@ use tokio::{
 };
 
 use crate::docserver::{
-	dap_adapter::SKIP_ATTACH_REQUEST,
+	dap_adapter::{SKIP_ATTACH_REQUEST, resolve_adapter_command},
 	dap_protocol::{DapInbound, DapProtocol, DapProtocolError, SpawnedDap},
 };
 
@@ -1355,9 +1355,15 @@ impl DapSession {
 
 	/// Runs an adapter-requested terminal process inside the workspace, captures
 	/// output, and binds its lifetime to this session tree.
+	///
+	/// A bare `program` name resolves from `$PATH` only, unless
+	/// `project_bin_root` (the user-level `sv_lsp_project_binaries` opt-in)
+	/// admits the project-local bins ahead of it; a path-like program runs as
+	/// named.
 	pub async fn run_in_terminal(
 		self: &Arc<Self>,
 		workspace: &Path,
+		project_bin_root: Option<&Path>,
 		arguments: &Value,
 	) -> Result<Value, DapSessionError> {
 		let argv = arguments
@@ -1380,6 +1386,9 @@ impl DapSession {
 		if !cwd.starts_with(&workspace) {
 			return Err(DapSessionError::InvalidReverseRequest);
 		}
+		// An unresolved name stays bare: the OS search then sees `$PATH` only.
+		let program = resolve_adapter_command(program, project_bin_root)
+			.unwrap_or_else(|| PathBuf::from(program));
 		let mut command = process::Command::new(program);
 		command
 			.args(rest.iter().map(|value| value.as_str().unwrap_or_default()))

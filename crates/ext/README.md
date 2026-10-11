@@ -119,7 +119,8 @@ Excluded, with the reason:
   would refuse every such workspace; the registry and in-repository install
   roots are what bind project plugins.
 - Repo-local binary roots (`node_modules/.bin`, `.venv/bin`, `bin`, ...) that
-  the LSP resolver searches: they are gated by the trust decision, not by the
+  the LSP and DAP resolvers search: they are off unless the user sets
+  `sv_lsp_project_binaries`, and are gated by the trust decision, not by the
   digest, so a trusted digest never vouches for them.
 - Inside a tree, a regular file named `.DS_Store` or `Thumbs.db`
   (`OS_METADATA_FILES`), and, inside a package, a nested repository's `.git`

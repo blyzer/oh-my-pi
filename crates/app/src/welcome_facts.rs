@@ -82,9 +82,14 @@ pub fn lsp_from_status(status: &LspStatusResponse) -> Vec<LspServer> {
 /// language servers declared for `project` (bundled, user, project layers —
 /// the same sources the Environment's supervisor discovers), filtered to
 /// enabled primary servers whose root markers match the checkout. A server
-/// whose binary resolves is `Available`; one
-/// whose binary is missing is `Error`.
-pub fn lsp_servers(project: &Path, user_root: Option<&Path>) -> Vec<LspServer> {
+/// whose binary resolves (from `$PATH`, or first from the project-local bins
+/// when `project_binaries` — the user-level `sv_lsp_project_binaries` — is
+/// set) is `Available`; one whose binary is missing is `Error`.
+pub fn lsp_servers(
+	project: &Path,
+	user_root: Option<&Path>,
+	project_binaries: bool,
+) -> Vec<LspServer> {
 	let config =
 		discover_native_lsp_sources(user_root, project).and_then(|sources| load_lsp_config(&sources));
 	let config = match config {
@@ -99,13 +104,13 @@ pub fn lsp_servers(project: &Path, user_root: Option<&Path>) -> Vec<LspServer> {
 	} else {
 		BinaryPlatform::Posix
 	};
-	let local_roots = [project.to_path_buf()];
+	let local_root = project_binaries.then_some(project);
 	let path = env::var_os("PATH");
 	project_lsp(&config, project, |server| {
 		resolve_lsp_binary(
 			server.command.value.as_str(),
 			&server.args.value,
-			&local_roots,
+			local_root,
 			path.as_deref(),
 			process::id(),
 			platform,

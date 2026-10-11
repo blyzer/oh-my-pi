@@ -3,6 +3,7 @@
 use std::{
 	collections::BTreeMap,
 	env,
+	ffi::OsStr,
 	path::{Path, PathBuf},
 };
 
@@ -11,7 +12,10 @@ use parking_lot::RwLock;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::docserver::lsp_registry;
+use crate::docserver::{
+	lsp_binary::{BinaryPlatform, resolve_executable},
+	lsp_registry,
+};
 
 pub(crate) const SKIP_ATTACH_REQUEST: &str = "skipAttachRequest";
 
@@ -254,7 +258,7 @@ impl DapAdapterRegistry {
 		configured: Option<&Path>,
 	) -> Option<DapAdapterId> {
 		let script = discover_js_debug_server(project_root, home, xdg_data_home, configured)?;
-		let node = resolve_path_command("node")?;
+		let node = resolve_adapter_command("node", None)?;
 		let mut spec = self
 			.state
 			.read()
@@ -281,8 +285,14 @@ impl DapAdapterRegistry {
 	}
 
 	/// Selects a launch adapter by extension, root marker, preference, then
-	/// name.
-	pub fn select_launch(&self, program: &Path, project_root: &Path) -> LaunchAdapterSelection {
+	/// name. The adapter command resolves from `$PATH`, or first from the
+	/// project-local bins under `project_bin_root` when supplied.
+	pub fn select_launch(
+		&self,
+		program: &Path,
+		project_root: &Path,
+		project_bin_root: Option<&Path>,
+	) -> LaunchAdapterSelection {
 		let is_directory = program.is_dir();
 		let extension = program
 			.extension()
@@ -332,7 +342,7 @@ impl DapAdapterRegistry {
 		let Some((_, _, _, _, adapter)) = candidates.into_iter().next() else {
 			return LaunchAdapterSelection::NoMatch;
 		};
-		if command_available(adapter.spec.command.as_str()) {
+		if command_available(adapter.spec.command.as_str(), project_bin_root) {
 			LaunchAdapterSelection::Available(adapter)
 		} else {
 			let guidance = unavailable_guidance(adapter.spec.name.as_str());
@@ -345,11 +355,13 @@ impl DapAdapterRegistry {
 	}
 
 	/// Selects attach by explicit name, a port hint (debugpy first), or
-	/// preference.
+	/// preference. Without a name only adapters whose command resolves (from
+	/// `$PATH`, or first from `project_bin_root` when supplied) are candidates.
 	pub fn select_attach(
 		&self,
 		preferred: Option<&str>,
 		port: Option<u16>,
+		project_bin_root: Option<&Path>,
 	) -> Option<DapAdapterInfo> {
 		let mut adapters = self.list();
 		if let Some(preferred) = preferred {
@@ -357,7 +369,7 @@ impl DapAdapterRegistry {
 				.into_iter()
 				.find(|adapter| adapter.spec.name.as_str() == preferred);
 		}
-		adapters.retain(|adapter| command_available(adapter.spec.command.as_str()));
+		adapters.retain(|adapter| command_available(adapter.spec.command.as_str(), project_bin_root));
 		adapters.sort_by_key(|adapter| {
 			let port_rank = if port.is_some() {
 				match adapter.spec.name.as_str() {
@@ -374,22 +386,31 @@ impl DapAdapterRegistry {
 	}
 }
 
-fn command_available(command: &str) -> bool {
-	resolve_path_command(command).is_some()
+fn command_available(command: &str, project_bin_root: Option<&Path>) -> bool {
+	resolve_adapter_command(command, project_bin_root).is_some()
 }
 
-fn resolve_path_command(command: &str) -> Option<PathBuf> {
-	let path = Path::new(command);
-	if path.components().count() > 1 {
-		return path.is_file().then(|| path.to_owned());
-	}
-	env::var_os("PATH").and_then(|paths| {
-		env::split_paths(&paths).find_map(|directory| {
-			executable_candidates(&directory, command)
-				.into_iter()
-				.find(|path| path.is_file())
-		})
-	})
+/// Resolves a debug-adapter `command` to an executable path.
+///
+/// A path-like command resolves as given; a bare name resolves from `$PATH`,
+/// or first from the project-local bins under `project_bin_root` when the user
+/// opted in
+/// ([`Environment::project_binary_root`](crate::docserver::Environment::project_binary_root)).
+pub fn resolve_adapter_command(command: &str, project_bin_root: Option<&Path>) -> Option<PathBuf> {
+	resolve_adapter_command_in(command, project_bin_root, env::var_os("PATH").as_deref())
+}
+
+fn resolve_adapter_command_in(
+	command: &str,
+	project_bin_root: Option<&Path>,
+	path: Option<&OsStr>,
+) -> Option<PathBuf> {
+	let platform = if cfg!(windows) {
+		BinaryPlatform::Windows
+	} else {
+		BinaryPlatform::Posix
+	};
+	resolve_executable(command, project_bin_root, path, platform)
 }
 
 /// Locates the js-debug server script in priority order.
@@ -443,26 +464,6 @@ fn unavailable_guidance(adapter: &str) -> Option<Str> {
 		)),
 		_ => None,
 	}
-}
-
-#[cfg(windows)]
-fn executable_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
-	let mut candidates = vec![directory.join(command)];
-	if Path::new(command).extension().is_none() {
-		for extension in env::var_os("PATHEXT")
-			.unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
-			.to_string_lossy()
-			.split(';')
-		{
-			candidates.push(directory.join(format!("{command}{extension}")));
-		}
-	}
-	candidates
-}
-
-#[cfg(not(windows))]
-fn executable_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
-	vec![directory.join(command)]
 }
 
 /// The built-in adapter catalog user and project DAP declarations patch.
@@ -695,7 +696,7 @@ mod tests {
 	fn extensionless_order_is_gdb_then_lldb() {
 		let registry = DapAdapterRegistry::with_builtins();
 		let root = tempfile::tempdir().unwrap();
-		let selection = registry.select_launch(&root.path().join("program"), root.path());
+		let selection = registry.select_launch(&root.path().join("program"), root.path(), None);
 		match selection {
 			LaunchAdapterSelection::Available(adapter)
 			| LaunchAdapterSelection::Unavailable { adapter, .. } => assert_eq!(adapter.spec.name, "gdb"),
@@ -748,11 +749,62 @@ mod tests {
 		let registry = DapAdapterRegistry::with_builtins();
 		let root = tempfile::tempdir().unwrap();
 		fs::write(root.path().join("go.mod"), b"module example").unwrap();
-		let selection = registry.select_launch(root.path(), root.path());
+		let selection = registry.select_launch(root.path(), root.path(), None);
 		match selection {
 			LaunchAdapterSelection::Available(adapter)
 			| LaunchAdapterSelection::Unavailable { adapter, .. } => assert_eq!(adapter.spec.name, "dlv"),
 			LaunchAdapterSelection::NoMatch => panic!("directory debugger"),
 		}
+	}
+
+	/// A project whose `node_modules/.bin` (behind `package.json`) holds
+	/// `command`, and a `PATH` directory that holds it too.
+	fn local_and_path(command: &str) -> (tempfile::TempDir, PathBuf, tempfile::TempDir, PathBuf) {
+		let root = tempfile::tempdir().unwrap();
+		fs::write(root.path().join("package.json"), b"{}").unwrap();
+		fs::create_dir_all(root.path().join("node_modules/.bin")).unwrap();
+		let local = root.path().join("node_modules/.bin").join(command);
+		fs::write(&local, b"").unwrap();
+		let bin = tempfile::tempdir().unwrap();
+		let on_path = bin.path().join(command);
+		fs::write(&on_path, b"").unwrap();
+		(root, local, bin, on_path)
+	}
+
+	#[test]
+	fn adapter_commands_resolve_from_path_unless_project_bins_are_admitted() {
+		let (root, local, bin, on_path) = local_and_path("node");
+		let path = Some(bin.path().as_os_str());
+		assert_eq!(resolve_adapter_command_in("node", None, path), Some(on_path));
+		assert_eq!(resolve_adapter_command_in("node", Some(root.path()), path), Some(local.clone()));
+		// Only the project provides it: unavailable unless admitted.
+		let empty = tempfile::tempdir().unwrap();
+		let path = Some(empty.path().as_os_str());
+		assert_eq!(resolve_adapter_command_in("node", None, path), None);
+		assert_eq!(resolve_adapter_command_in("node", Some(root.path()), path), Some(local));
+	}
+
+	#[test]
+	fn a_launch_adapter_only_a_project_bin_provides_is_unavailable_by_default() {
+		let registry = DapAdapterRegistry::default();
+		let mut spec = DapAdapterSpec::new("acme-dbg", "omp-project-only-dbg").unwrap();
+		spec.extensions = vec![Str::new_static("acme")];
+		registry.install(spec).unwrap();
+		let (root, _local, _bin, _) = local_and_path("omp-project-only-dbg");
+		let program = root.path().join("main.acme");
+		assert!(matches!(
+			registry.select_launch(&program, root.path(), None),
+			LaunchAdapterSelection::Unavailable { .. }
+		));
+		assert!(matches!(
+			registry.select_launch(&program, root.path(), Some(root.path())),
+			LaunchAdapterSelection::Available(_)
+		));
+		assert!(registry.select_attach(None, None, None).is_none());
+		assert!(
+			registry
+				.select_attach(None, None, Some(root.path()))
+				.is_some()
+		);
 	}
 }

@@ -566,6 +566,7 @@ pub struct ServerConfig {
 	authority_held:     Arc<AtomicBool>,
 	revision_capacity:  NonZeroUsize,
 	max_document_bytes: NonZeroU64,
+	project_binaries:   bool,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -576,6 +577,7 @@ impl fmt::Debug for ServerConfig {
 			.field("server_build", &self.server_build)
 			.field("revision_capacity", &self.revision_capacity)
 			.field("max_document_bytes", &self.max_document_bytes)
+			.field("project_binaries", &self.project_binaries)
 			.finish()
 	}
 }
@@ -586,6 +588,7 @@ impl PartialEq for ServerConfig {
 			&& self.server_build == other.server_build
 			&& self.revision_capacity == other.revision_capacity
 			&& self.max_document_bytes == other.max_document_bytes
+			&& self.project_binaries == other.project_binaries
 	}
 }
 
@@ -695,6 +698,7 @@ impl ServerConfig {
 				.expect("default revision capacity is nonzero"),
 			max_document_bytes: NonZeroU64::new(DEFAULT_MAX_DOCUMENT_BYTES)
 				.expect("default document limit is nonzero"),
+			project_binaries:   false,
 		})
 	}
 
@@ -702,6 +706,20 @@ impl ServerConfig {
 	pub fn with_server_build(mut self, build: impl Into<Str>) -> Self {
 		self.server_build = build.into();
 		self
+	}
+
+	/// Lets language- and debug-server executables resolve from the
+	/// project-local bins (`node_modules/.bin`, `.venv/bin`, `bin`, ...) ahead
+	/// of `$PATH`. Off by default: the user-level `sv_lsp_project_binaries`
+	/// opts in, and a project cfg can never set it.
+	pub const fn with_project_binaries(mut self, enabled: bool) -> Self {
+		self.project_binaries = enabled;
+		self
+	}
+
+	/// Whether server executables may resolve from project-local bins.
+	pub const fn project_binaries(&self) -> bool {
+		self.project_binaries
 	}
 
 	/// Returns the executable-generation identity advertised to document
