@@ -57,7 +57,9 @@ if [ "$(git remote | wc -l)" -gt 1 ] && [ -z "$(git config --get buildbuddy.remo
     git config --local buildbuddy.remote-bazel-remote-name "${OMP_REMOTE_GIT_REMOTE:-origin}"
 fi
 
-default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')
+# CI checkouts (actions/checkout) never create refs/remotes/origin/HEAD; under pipefail a failed
+# lookup would end the script silently before bb runs, so a miss falls back to the default.
+default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
 default_branch=${default_branch:-omp2}
 
 args=(
