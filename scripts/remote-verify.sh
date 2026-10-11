@@ -62,6 +62,13 @@ fi
 default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
 default_branch=${default_branch:-omp2}
 
+# bb resolves the default branch as a local branch (`git rev-parse <branch>`). A pull-request
+# checkout is a detached merge commit with no local branches, so fetch it shallowly when missing.
+if ! git rev-parse --verify --quiet "refs/heads/$default_branch" >/dev/null; then
+    git fetch --quiet --no-tags --depth=1 "${OMP_REMOTE_GIT_REMOTE:-origin}" \
+        "+refs/heads/$default_branch:refs/heads/$default_branch"
+fi
+
 args=(
     --os=linux
     --arch=amd64
