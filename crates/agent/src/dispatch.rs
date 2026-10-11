@@ -269,6 +269,17 @@ pub enum ExternalDispatchEvent {
 		/// Source-line candidates relative to the environment-bounded parts.
 		visibility:      Vec<ProjectionSpan>,
 	},
+	/// Work continues under the environment's resource authority.
+	DetachedProjected {
+		/// Exact job identity, owner generation, and expected settlement artifact.
+		job:             JobRef,
+		/// Environment-bounded model-facing parts.
+		parts:           Vec<Part>,
+		/// Verified detached descriptor adopted into the session CAS.
+		source_artifact: BlobRef,
+		/// Facts for the projection applied by the environment host.
+		projection:      OutputProjection,
+	},
 	/// Execution stopped without a normal typed verdict.
 	Aborted(Abort),
 }
@@ -282,9 +293,9 @@ pub type VisibilityAuthorizationFuture<'a> = Pin<Box<dyn Future<Output = Result<
 
 /// Host composition seam for worker- and remote-routed tool execution.
 pub trait ExternalToolExecutor: Send + Sync {
-	/// Opens one committed invocation. Every stream must end in `Done` or
-	/// `Aborted`; transport failures are mapped to an explicit abort by the
-	/// adapter while their typed source is logged at that boundary.
+	/// Opens one committed invocation. Every stream must end in `Done`,
+	/// `DoneProjected`, `DetachedProjected`, or `Aborted`; transport failures are
+	/// mapped to an explicit abort while their typed source is logged at that boundary.
 	fn invoke(&self, request: ExternalDispatchRequest) -> ExternalDispatchStream;
 
 	/// Returns final visibility to an external authority. Older executors carry
@@ -2762,6 +2773,26 @@ impl Committer {
 					Some(projection),
 					output,
 				)?)))
+			},
+			DispatchEvent::External(ExternalDispatchEvent::DetachedProjected {
+				job,
+				parts,
+				source_artifact,
+				projection,
+			}) => {
+				let staged = self.stage_external_from_artifact(
+					session,
+					call,
+					detached_outcome(&job)?,
+					parts,
+					false,
+					Some(source_artifact),
+					Some(projection),
+					output,
+				)?;
+				let mut report = self.commit_staged(session, call, staged, output)?;
+				report.detached = Some(job);
+				Ok(Some(Settled::Report(report)))
 			},
 			DispatchEvent::External(ExternalDispatchEvent::Aborted(abort)) => {
 				// External cancellation tokens cannot carry a reason. Preserve

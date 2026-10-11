@@ -98,6 +98,16 @@ and Python extension-host/worker implementation remain in `omp-envd`.
 Environment requests use `omp-env` clients. Neither boundary is reimplemented
 in the driver.
 
+`EnvToolExecutor` accepts both settled `CallOutcome` verdicts and detached
+`ToolTerminal` descriptors. It verifies and adopts the original descriptor
+artifact into the active session CAS, preserving the job identifier, owner
+generation, metadata, and expected settlement artifact. The dispatcher records
+the same detached journal shape as native execution, rather than reporting a
+normal success or fabricating a second job. Malformed descriptors, stale
+invocation/session identities, and already-settled job snapshots are rejected.
+An unfinished invocation is cancelled on stream drop; a terminal verdict
+disarms that guard, leaving detached resource cleanup with its environment owner.
+
 ## Philosophy
 
 There is one headless production composition that every presentation reuses.

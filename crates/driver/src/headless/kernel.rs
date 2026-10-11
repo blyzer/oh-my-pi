@@ -1461,17 +1461,25 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							};
 							(source_artifact, inline_json)
 						};
-						let outcome = match serde_json::from_slice::<
-							CallOutcome<serde_json::Value, serde_json::Value>,
-						>(&bytes) {
-							Ok(outcome) => outcome,
+						let terminal = match serde_json::from_slice::<EnvironmentTerminal>(&bytes) {
+							Ok(terminal) => terminal,
 							Err(source) => {
-								tracing::warn!(%source, call_id = %request.call_id, "environment outcome blob is not a CallOutcome");
+								tracing::warn!(%source, call_id = %request.call_id, "environment outcome blob is not a supported terminal");
 								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 								return;
 							},
 						};
-						let typed_is_error = !matches!(&outcome, CallOutcome::Ok(_));
+						let typed_is_error = match &terminal {
+							EnvironmentTerminal::Outcome(outcome) => !matches!(outcome, CallOutcome::Ok(_)),
+							EnvironmentTerminal::Detached(DetachedVerdict::Detached(job)) => {
+								if !valid_detached_job(job, request.session_id.as_str()) || verdict.useless {
+									tracing::warn!(call_id = %request.call_id, "environment detached job is invalid or stale");
+									yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+									return;
+								}
+								false
+							},
+						};
 						if typed_is_error != verdict.is_error {
 							tracing::warn!(
 								call_id = %request.call_id,
@@ -1513,17 +1521,31 @@ impl ExternalToolExecutor for EnvToolExecutor {
 								return;
 							},
 						};
-						if parts.is_empty() {
-							parts = harness_parts(&outcome);
+						match terminal {
+							EnvironmentTerminal::Outcome(outcome) => {
+								if parts.is_empty() {
+									parts = harness_parts(&outcome);
+								}
+								yield ExternalDispatchEvent::DoneProjected {
+									outcome,
+									parts,
+									is_error: verdict.is_error,
+									source_artifact: Some(source_artifact),
+									projection: tool_output_projection(projection),
+								};
+							},
+							EnvironmentTerminal::Detached(DetachedVerdict::Detached(job)) => {
+								if parts.is_empty() {
+									parts.push(ToolPart::Text { text: sf!("detached job {}", job.id) });
+								}
+								yield ExternalDispatchEvent::DetachedProjected {
+									job,
+									parts,
+									source_artifact,
+									projection: tool_output_projection(projection),
+								};
+							},
 						}
-						yield ExternalDispatchEvent::DoneProjected {
-							outcome,
-							parts,
-							is_error: verdict.is_error,
-							source_artifact: Some(source_artifact),
-							projection: tool_output_projection(projection),
-							visibility,
-						};
 						return;
 					},
 					Ok(None) => {
@@ -1541,6 +1563,34 @@ impl ExternalToolExecutor for EnvToolExecutor {
 			}
 		})
 	}
+}
+
+// Detached descriptors are executor terminals, not one of CallOutcome's
+// settled branches. Keep their original artifact bytes through the boundary.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum EnvironmentTerminal {
+	Outcome(CallOutcome<serde_json::Value, serde_json::Value>),
+	Detached(DetachedVerdict),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DetachedVerdict {
+	Detached(omp_tool::JobRef),
+}
+
+fn valid_detached_job(job: &omp_tool::JobRef, session_id: &str) -> bool {
+	!job.id.is_empty()
+		&& match &job.owner {
+			omp_tool::JobOwner::NamedProcess { name, generation } => {
+				!name.is_empty() && *generation != 0
+			},
+			omp_tool::JobOwner::AgentLoop { agent_id } => !agent_id.is_empty(),
+		}
+		&& matches!(job.metadata.status, omp_tool::JobStatus::Queued | omp_tool::JobStatus::Running)
+		&& job.metadata.settled_at_ms.is_none()
+		&& job.metadata.owner_session.as_ref().is_none_or(|owner| owner == session_id)
 }
 
 fn raw_json(bytes: Bytes) -> Result<Box<serde_json::value::RawValue>, ()> {
