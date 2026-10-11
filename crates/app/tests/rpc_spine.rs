@@ -1,6 +1,12 @@
 //! RPC transport proof over a scripted journal-first kernel.
 
-use std::{collections::VecDeque, future::ready, sync::Arc, time::SystemTime};
+use std::{
+	collections::VecDeque,
+	future::ready,
+	path::{Path, PathBuf},
+	sync::Arc,
+	time::SystemTime,
+};
 
 use omp_agent::{DispatchPolicy, Inference, Kernel, StaticPrompt};
 use omp_ai::{
@@ -9,7 +15,14 @@ use omp_ai::{
 };
 use omp_app::rpc_mode::RpcUiBridge;
 use omp_core::Str;
-use omp_driver::{headless::kernel::SessionHome, sessions::SessionRegistry};
+use omp_driver::{
+	headless::kernel::{
+		EnvToolExecutor, SessionHome, SettingsAdmission, bind_environment_approvals,
+		install_tool_authority,
+	},
+	sessions::SessionRegistry,
+};
+use omp_envd::tool_settings::ApprovalMode;
 use omp_journal::blob::BlobStore;
 use omp_rpc::framing::{MAX_FRAME_BYTES, RpcFrameDecoder, encode_json_v2};
 use omp_session::{ComponentRegistry, Session};
@@ -716,34 +729,39 @@ async fn rpc_ui_routes_retained_select_dialogs_and_responses() {
 
 /// One RPC server over a kernel whose registry is a real project
 /// environment's: `bash` resolves the environment's in-process shell, its
-/// admission policy, and the dispatcher's central output bound, exactly as
-/// production composes them (`EnvToolExecutor` + `SettingsAdmission`).
+/// admission policy, and the dispatcher's central output bound, with the
+/// session's tool authority installed exactly as production composes it
+/// (`install_tool_authority`).
 struct EnvironmentRpc {
 	environment: omp_envd::ProjectEnvironment,
 	kernel:      Kernel<ScriptedInference>,
 	session:     Session,
 	home:        SessionHome,
-	root:        std::path::PathBuf,
+	root:        PathBuf,
+	journal:     PathBuf,
 }
 
-async fn environment_rpc(temp: &tempfile::TempDir, con: omp_con::Ctx) -> EnvironmentRpc {
+/// Composes [`EnvironmentRpc`] under `con` with the sandbox off, a hermetic
+/// posture: the shell runs the same on a host with or without an OS sandbox.
+/// `mode` is the invocation's `--approval-mode` (`None`: the shipped default);
+/// an explicit `yolo` is respected unconfined, so only a per-tool policy
+/// (`bash=deny`) can refuse a command.
+async fn environment_rpc(
+	temp: &tempfile::TempDir,
+	con: omp_con::Ctx,
+	mode: Option<ApprovalMode>,
+) -> EnvironmentRpc {
 	let root = temp.path().join("workspace");
 	let state = temp.path().join("state");
 	std::fs::create_dir_all(&root).expect("workspace");
 	std::fs::create_dir_all(&state).expect("state");
-	// A hermetic posture: the shell runs the same on a host with or without an
-	// OS sandbox. The user's explicit `yolo` is respected unconfined, so only a
-	// per-tool policy (`bash=deny`) can refuse a command.
 	omp_envd::exec_settings::SV_SANDBOX_MODE
 		.set(&con, omp_envd::exec_settings::ExecSandboxMode::Off)
 		.expect("sandbox off");
-	omp_envd::tool_settings::SV_TOOLS_APPROVAL_MODE
-		.set(&con, omp_envd::tool_settings::ApprovalMode::Yolo)
-		.expect("explicit yolo");
 	let con = Arc::new(con);
 	let environment = omp_envd::ProjectEnvironment::attach(&root, &state, omp_envd::AttachOptions {
 		py_eval:            false,
-		approval_mode:      None,
+		approval_mode:      mode,
 		trusted_extensions: Vec::new(),
 		contributed_values: Vec::new(),
 		con:                Arc::clone(&con),
@@ -754,34 +772,47 @@ async fn environment_rpc(temp: &tempfile::TempDir, con: omp_con::Ctx) -> Environ
 	.await
 	.expect("environment");
 	let spill = BlobStore::open(temp.path().join("artifacts")).expect("spill");
+	let journal = temp.path().join("rpc.oms");
+	let session =
+		Session::create_with_blob_store(&journal, ComponentRegistry::standard(), spill.clone())
+			.expect("session");
 	let kernel = Kernel::new(
 		ScriptedInference { scripts: Mutex::new(VecDeque::new()) },
 		environment.registry(),
-		DispatchPolicy::new(spill.clone()),
+		DispatchPolicy::new(spill),
 		StaticPrompt(Str::new_static("system")),
 	);
-	let approvals = kernel.approval_route();
-	environment.bind_approval_authority(
-		Some(Arc::new(omp_agent::ApprovalBook::new())),
-		Some(approvals.clone()),
+	let approvals = bind_environment_approvals(&kernel, &environment);
+	let kernel = install_tool_authority(
+		kernel,
+		&session,
+		EnvToolExecutor::new(environment.client().clone(), approvals),
+		SettingsAdmission::new(&con, mode, &root).with_fetch_hosts(environment.fetch_hosts()),
 	);
-	let kernel = kernel
-		.with_external_executor(Arc::new(omp_driver::headless::kernel::EnvToolExecutor::new(
-			environment.client().clone(),
-			approvals,
-		)))
-		.with_tool_admission(Arc::new(omp_driver::headless::kernel::SettingsAdmission::new(
-			&con, None, &root,
-		)));
 	let mut home = session_home(temp, &kernel);
 	home.project_root.clone_from(&root);
-	let session = Session::create_with_blob_store(
-		temp.path().join("rpc.oms"),
-		ComponentRegistry::standard(),
-		spill,
-	)
-	.expect("session");
-	EnvironmentRpc { environment, kernel, session, home, root }
+	EnvironmentRpc { environment, kernel, session, home, root, journal }
+}
+
+/// The payload of every typed `approval-posture` notice journaled under the
+/// turns of the session at `journal`.
+fn posture_notices(journal: &Path) -> Vec<Value> {
+	let session = Session::open(journal, ComponentRegistry::standard()).expect("journal reopens");
+	let dom = session.dom();
+	dom.select("body turn notice")
+		.expect("selector")
+		.filter_map(|handle| dom.get(handle))
+		.filter(|node| {
+			node
+				.prop(&omp_dom::PropKey::Custom(Str::new_static("name")))
+				.and_then(omp_dom::Value::as_str)
+				== Some("approval-posture")
+		})
+		.map(|node| match node.prop(&omp_dom::PropId::Data.into()) {
+			Some(omp_dom::Value::Json(data)) => serde_json::from_str(data.get()).expect("payload"),
+			_ => panic!("the notice carries its typed payload"),
+		})
+		.collect()
 }
 
 /// Serves `rpc`, writing each request line in turn. A step naming a response
@@ -842,7 +873,7 @@ async fn exchange(
 #[tokio::test]
 async fn rpc_bash_runs_in_the_environment_session_shell() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let rpc = environment_rpc(&temp, omp_con::Ctx::new()).await;
+	let rpc = environment_rpc(&temp, omp_con::Ctx::new(), Some(ApprovalMode::Yolo)).await;
 	let root = rpc.root.clone();
 	let frames = exchange(rpc, &[
 		(
@@ -894,7 +925,7 @@ async fn rpc_bash_is_refused_by_environment_policy() {
 			omp_con::Kv(vec![(Str::new_static("bash"), omp_con::Value::Str(Str::new_static("deny")))]),
 		)
 		.expect("deny bash");
-	let rpc = environment_rpc(&temp, con).await;
+	let rpc = environment_rpc(&temp, con, Some(ApprovalMode::Yolo)).await;
 	let marker = rpc.root.join("ran");
 	let frames = exchange(rpc, &[
 		("{\"id\":\"denied\",\"type\":\"bash\",\"command\":\"touch ran\"}\n", Some("denied"), 0),
@@ -912,7 +943,7 @@ async fn rpc_bash_is_refused_by_environment_policy() {
 #[tokio::test]
 async fn rpc_bash_output_over_the_bound_is_truncated_with_an_artifact() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let rpc = environment_rpc(&temp, omp_con::Ctx::new()).await;
+	let rpc = environment_rpc(&temp, omp_con::Ctx::new(), Some(ApprovalMode::Yolo)).await;
 	let frames = exchange(rpc, &[
 		("{\"id\":\"large\",\"type\":\"bash\",\"command\":\"seq 1 40000\"}\n", Some("large"), 0),
 		("{\"id\":\"quit\",\"type\":\"quit\"}\n", None, 0),
@@ -942,7 +973,7 @@ async fn rpc_bash_output_over_the_bound_is_truncated_with_an_artifact() {
 #[tokio::test]
 async fn rpc_abort_bash_cancels_the_running_command() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let rpc = environment_rpc(&temp, omp_con::Ctx::new()).await;
+	let rpc = environment_rpc(&temp, omp_con::Ctx::new(), Some(ApprovalMode::Yolo)).await;
 	let started = std::time::Instant::now();
 	let frames = exchange(rpc, &[
 		("{\"id\":\"slow\",\"type\":\"bash\",\"command\":\"sleep 20\"}\n", None, 0),
@@ -957,6 +988,42 @@ async fn rpc_abort_bash_cancels_the_running_command() {
 	let slow = response(&frames, "slow");
 	assert_eq!(slow["success"], true, "{slow}");
 	assert_eq!(slow["data"]["cancelled"], true, "{slow}");
+}
+
+/// Composed as production composes it, a session under the shipped default
+/// (`yolo`, defaulted) with no sandbox is told once, by a typed
+/// `approval-posture` notice, that `write` is in force, however many commands
+/// it runs. `bash=allow` keeps the commands unprompted.
+#[tokio::test]
+async fn rpc_reports_a_downgraded_default_yolo_once() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let con = omp_con::Ctx::new();
+	omp_envd::tool_settings::SV_TOOLS_APPROVAL
+		.set(
+			&con,
+			omp_con::Kv(vec![(
+				Str::new_static("bash"),
+				omp_con::Value::Str(Str::new_static("allow")),
+			)]),
+		)
+		.expect("allow bash");
+	let rpc = environment_rpc(&temp, con, None).await;
+	let journal = rpc.journal.clone();
+	let frames = exchange(rpc, &[
+		("{\"id\":\"one\",\"type\":\"bash\",\"command\":\"echo one\"}\n", Some("one"), 0),
+		("{\"id\":\"two\",\"type\":\"bash\",\"command\":\"echo two\"}\n", Some("two"), 0),
+		("{\"id\":\"quit\",\"type\":\"quit\"}\n", None, 0),
+	])
+	.await;
+	for id in ["one", "two"] {
+		assert_eq!(response(&frames, id)["success"], true, "{frames:#?}");
+	}
+	assert_eq!(posture_notices(&journal), [json!({
+		"configured": "yolo",
+		"provenance": "default",
+		"effective": "write",
+		"sandbox": { "state": "off" },
+	})]);
 }
 
 /// `handoff` is chat's `/handoff`: an in-place compaction under the handoff
