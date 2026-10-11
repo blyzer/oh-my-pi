@@ -106,6 +106,37 @@ jobs:
       - name: Check the CI gate
         run: python3 scripts/check-ci-paths.py
 
+  # crates/proto/proto holds the wire contracts other processes speak. `just lint`
+  # and `just fmt-check` already run buf locally; this is the CI half. The binary is
+  # the pinned release asset, verified against the checksum in buf's sha256.txt.
+  protobuf:
+    name: Protobuf format and lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Install pinned buf
+        env:
+          BUF_VERSION: 1.73.0
+          BUF_SHA256: 8f2986298ad08f0cc1bf999b9797b7c383adf32d7edf0f73d6f1e1a701baeac1
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --location --silent --show-error \
+            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" \
+            --output "$RUNNER_TEMP/bin/buf"
+          printf '%s  %s\n' "$BUF_SHA256" "$RUNNER_TEMP/bin/buf" | sha256sum --check --status
+          chmod 0755 "$RUNNER_TEMP/bin/buf"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Check Protobuf formatting
+        working-directory: crates/proto
+        run: buf format -d --exit-code
+      - name: Lint Protobuf schemas
+        working-directory: crates/proto
+        run: buf lint
+
   # ADR 0035: lintx counts bare-string error variants and formatted error
   # values per crate and fails a crate whose count rose above
   # tools/lintx/baselines/error-formatting.toml. lintx is its own Cargo
