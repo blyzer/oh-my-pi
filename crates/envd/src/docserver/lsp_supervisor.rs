@@ -41,14 +41,19 @@ const WAIT_IDLE_BOUND: Duration = Duration::from_secs(120);
 #[derive(Clone, Debug)]
 pub struct NativeLspOptions {
 	/// Whether native language servers are managed at all.
-	pub enabled: bool,
+	pub enabled:          bool,
 	/// Defers server startup until the first matching document open.
-	pub lazy:    bool,
+	pub lazy:             bool,
+	/// Whether server executables may resolve from project-local bins
+	/// (`node_modules/.bin`, `.venv/bin`, `bin`, ...) ahead of `$PATH`. Off by
+	/// default: the user-level `sv_lsp_project_binaries` opts in. Applies to
+	/// language and debug servers alike.
+	pub project_binaries: bool,
 }
 
 impl Default for NativeLspOptions {
 	fn default() -> Self {
-		Self { enabled: true, lazy: true }
+		Self { enabled: true, lazy: true, project_binaries: false }
 	}
 }
 
@@ -91,14 +96,15 @@ struct ServerSlot {
 }
 
 struct SupervisorInner {
-	environment: WeakEnvironment,
-	root:        PathBuf,
-	user_root:   Option<PathBuf>,
-	plugins:     Arc<[ClaudePlugin]>,
-	roster:      Mutex<BTreeMap<Str, ServerSlot>>,
-	pool:        LspPool<LspProcess, LspProcessError>,
-	pending:     watch::Sender<usize>,
-	cancel:      CancellationToken,
+	environment:      WeakEnvironment,
+	root:             PathBuf,
+	user_root:        Option<PathBuf>,
+	plugins:          Arc<[ClaudePlugin]>,
+	project_binaries: bool,
+	roster:           Mutex<BTreeMap<Str, ServerSlot>>,
+	pool:             LspPool<LspProcess, LspProcessError>,
+	pending:          watch::Sender<usize>,
+	cancel:           CancellationToken,
 }
 
 /// Discovers, starts, and tracks native language servers for one project
@@ -112,6 +118,10 @@ impl NativeLspSupervisor {
 	/// Discovers the workspace roster: bundled, installed-plugin, user, and
 	/// project declarations filtered to enabled non-linter servers whose root
 	/// markers match the project root and whose binary resolves.
+	///
+	/// A binary resolves from `$PATH` only, unless the environment admits its
+	/// project-local bins ([`Environment::project_binary_root`]); a server only
+	/// a project-local bin provides is left out of the roster.
 	///
 	/// `plugins` are the installed, enabled marketplace plugins the
 	/// composition resolved; a plugin declaration that fails validation is
@@ -129,7 +139,14 @@ impl NativeLspSupervisor {
 			.root_uri()
 			.to_file_path()
 			.unwrap_or_else(|()| PathBuf::from("/"));
-		let roster = discover_roster(&root, user_config_root, &plugins)?;
+		let project_binaries = environment.project_binary_root().is_some();
+		let roster = discover_roster(
+			&root,
+			user_config_root,
+			&plugins,
+			project_binaries,
+			env::var_os("PATH").as_deref(),
+		)?;
 		tracing::info!(server_count = roster.len(), "LSP roster discovered");
 		let (pending, _) = watch::channel(0_usize);
 		Ok(Self {
@@ -138,6 +155,7 @@ impl NativeLspSupervisor {
 				root,
 				user_root: user_config_root.map(Path::to_path_buf),
 				plugins,
+				project_binaries,
 				roster: Mutex::new(roster),
 				pool: LspPool::default(),
 				pending,
@@ -174,8 +192,13 @@ impl NativeLspSupervisor {
 	/// Returns configuration read, parse, or validation failures.
 	#[tracing::instrument(name = "lsp_roster_reload", level = "debug", skip_all)]
 	pub fn reload(&self) -> Result<(), LspConfigError> {
-		let fresh =
-			discover_roster(&self.inner.root, self.inner.user_root.as_deref(), &self.inner.plugins)?;
+		let fresh = discover_roster(
+			&self.inner.root,
+			self.inner.user_root.as_deref(),
+			&self.inner.plugins,
+			self.inner.project_binaries,
+			env::var_os("PATH").as_deref(),
+		)?;
 		let mut roster = self.inner.roster.lock();
 		let mut previous = std::mem::take(&mut *roster);
 		let mut next = BTreeMap::new();
@@ -440,6 +463,8 @@ fn discover_roster(
 	root: &Path,
 	user_config_root: Option<&Path>,
 	plugins: &[ClaudePlugin],
+	project_binaries: bool,
+	path: Option<&OsStr>,
 ) -> Result<BTreeMap<Str, ServerSlot>, LspConfigError> {
 	let discovered = discover_lsp_sources(user_config_root, root, Vec::new(), plugins)?;
 	for diagnostic in &discovered.diagnostics {
@@ -454,8 +479,18 @@ fn discover_roster(
 	} else {
 		BinaryPlatform::Posix
 	};
-	let local_roots = [root.to_path_buf()];
-	let path = env::var_os("PATH");
+	let local_root = project_binaries.then_some(root);
+	let resolves = |server: &ResolvedLspServer, local_root: Option<&Path>| {
+		resolve_lsp_binary(
+			server.command.value.as_str(),
+			&server.args.value,
+			local_root,
+			path,
+			process::id(),
+			platform,
+		)
+		.is_ok()
+	};
 	let mut roster = BTreeMap::new();
 	for (name, server) in &config.servers {
 		if server.disabled.value || server.is_linter.value {
@@ -464,16 +499,15 @@ fn discover_roster(
 		if root_marker_ancestor(root, &server.root_markers.value).is_none() {
 			continue;
 		}
-		if resolve_lsp_binary(
-			server.command.value.as_str(),
-			&server.args.value,
-			&local_roots,
-			path.as_deref(),
-			process::id(),
-			platform,
-		)
-		.is_err()
-		{
+		if !resolves(server, local_root) {
+			if !project_binaries && resolves(server, Some(root)) {
+				tracing::debug!(
+					server = %name,
+					command = %server.command.value,
+					"language server only resolves from a project-local bin; left out because \
+					 sv_lsp_project_binaries is off"
+				);
+			}
 			continue;
 		}
 		roster.insert(name.clone(), ServerSlot {
@@ -510,6 +544,8 @@ fn matches_path(file_types: &[Str], path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+	use std::fs;
+
 	use super::*;
 
 	#[test]
@@ -529,22 +565,55 @@ mod tests {
 	fn roster_requires_marker_match_and_resolvable_binary() {
 		let scratch = tempfile::tempdir().unwrap();
 		let root = scratch.path();
+		let path = env::var_os("PATH");
 		// No markers at all: bundled catalog yields an empty roster.
-		let roster = discover_roster(root, None, &[]).unwrap();
+		let roster = discover_roster(root, None, &[], false, path.as_deref()).unwrap();
 		assert!(roster.is_empty(), "unexpected servers: {:?}", roster.keys().collect::<Vec<_>>());
 
 		// A Cargo marker admits rust-analyzer only when the binary resolves.
-		std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
-		let roster = discover_roster(root, None, &[]).unwrap();
+		fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+		let roster = discover_roster(root, None, &[], false, path.as_deref()).unwrap();
 		let expected = which_available("rust-analyzer");
 		assert_eq!(roster.contains_key("rust-analyzer"), expected);
+	}
+
+	/// A project whose `.lsp.json` declares `local-ls` and whose
+	/// `node_modules/.bin` (behind `package.json`) is the only place it exists.
+	fn project_with_local_only_server() -> tempfile::TempDir {
+		let scratch = tempfile::tempdir().unwrap();
+		let root = scratch.path();
+		fs::write(root.join("package.json"), "{}").unwrap();
+		fs::write(root.join("local.marker"), "").unwrap();
+		fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+		fs::write(root.join("node_modules/.bin/omp-local-only-ls"), "").unwrap();
+		fs::write(
+			root.join(".lsp.json"),
+			r#"{"servers":{"local-ls":{
+				"command":"omp-local-only-ls",
+				"fileTypes":[".local"],
+				"rootMarkers":["local.marker"]
+			}}}"#,
+		)
+		.unwrap();
+		scratch
+	}
+
+	#[test]
+	fn a_server_only_a_project_bin_provides_is_left_out_by_default() {
+		let scratch = project_with_local_only_server();
+		let empty_path = tempfile::tempdir().unwrap();
+		let path = Some(empty_path.path().as_os_str());
+		let roster = discover_roster(scratch.path(), None, &[], false, path).unwrap();
+		assert!(!roster.contains_key("local-ls"), "{:?}", roster.keys().collect::<Vec<_>>());
+		let roster = discover_roster(scratch.path(), None, &[], true, path).unwrap();
+		assert!(roster.contains_key("local-ls"), "the opt-in admits the project bin");
 	}
 
 	fn which_available(binary: &str) -> bool {
 		resolve_lsp_binary(
 			binary,
 			&[],
-			&[],
+			None,
 			env::var_os("PATH").as_deref(),
 			process::id(),
 			BinaryPlatform::Posix,

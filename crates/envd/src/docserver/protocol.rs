@@ -35,6 +35,7 @@ use crate::docserver::{
 	FileKind, FollowSymlinks, LanguageId, LaunchAdapterSelection, LeaseId, LineRange, PathMetadata,
 	PortablePermissions, ReadBody, ReadSelection, Result as CoreResult, Revision, SymlinkTarget,
 	SymlinkTargetForm, SymlinkTargetKind, TransactionId,
+	dap_adapter::resolve_adapter_command,
 	diagnostics::parse_push,
 	environment::{WorkspaceLeaseId, WorkspaceMutationGuard},
 	lsp::{LspError, LspResponseOutcome, LspTransportError, TextDocumentSyncKind},
@@ -76,7 +77,7 @@ impl DapReverseRequestHandler for EnvironmentDapReverseHandler {
 	) -> Result<serde_json::Value, Str> {
 		match command {
 			"runInTerminal" => parent
-				.run_in_terminal(&self.workspace, &arguments)
+				.run_in_terminal(&self.workspace, self.environment.project_binary_root(), &arguments)
 				.await
 				.map_err(|_| Str::new_static("runInTerminal was rejected")),
 			"startDebugging" => self.start_child(parent, arguments).await,
@@ -105,15 +106,16 @@ impl EnvironmentDapReverseHandler {
 			.get("type")
 			.and_then(serde_json::Value::as_str)
 			.unwrap_or_else(|| parent.adapter());
+		let bins = self.environment.project_binary_root();
 		let adapter = self
 			.environment
 			.dap_adapters()
-			.select_attach(Some(adapter_name), None)
+			.select_attach(Some(adapter_name), None, bins)
 			.or_else(|| {
 				self
 					.environment
 					.dap_adapters()
-					.select_attach(Some(parent.adapter()), None)
+					.select_attach(Some(parent.adapter()), None, bins)
 			})
 			.ok_or_else(|| Str::new_static("child DAP adapter was not found"))?;
 		let protocol = if attach {
@@ -152,8 +154,10 @@ impl EnvironmentDapReverseHandler {
 			)
 			.await
 		} else {
+			let command = resolve_adapter_command(adapter.spec.command.as_str(), bins)
+				.ok_or_else(|| Str::new_static("child DAP adapter executable is unavailable"))?;
 			let spawned = DapProtocol::spawn_adapter(
-				adapter.spec.command.as_str(),
+				&command.to_string_lossy(),
 				&adapter.spec.args,
 				&adapter.spec.transport,
 				&self.workspace,
@@ -706,17 +710,18 @@ async fn dap_start(
 	{
 		return Err(Failure::invalid("DAP attach requires pid or port when adapter is omitted"));
 	}
+	let bins = connection.environment().project_binary_root();
 	let adapter = if !adapter_name.is_empty() {
 		connection
 			.environment()
 			.dap_adapters()
-			.select_attach(Some(&adapter_name), port)
+			.select_attach(Some(&adapter_name), port, bins)
 			.ok_or_else(|| Failure::not_found("configured DAP adapter was not found"))?
 	} else if attach {
 		connection
 			.environment()
 			.dap_adapters()
-			.select_attach(None, port)
+			.select_attach(None, port, bins)
 			.ok_or_else(|| Failure::not_found("no available DAP adapter accepts this attachment"))?
 	} else {
 		let program = launch_program
@@ -725,7 +730,7 @@ async fn dap_start(
 		match connection
 			.environment()
 			.dap_adapters()
-			.select_launch(program, &root)
+			.select_launch(program, &root, bins)
 		{
 			LaunchAdapterSelection::Available(adapter) => adapter,
 			LaunchAdapterSelection::Unavailable { .. } => {
@@ -749,6 +754,8 @@ async fn dap_start(
 	{
 		return Err(Failure::invalid("selected DAP adapter does not accept a directory program"));
 	}
+	let adapter_command = resolve_adapter_command(adapter.spec.command.as_str(), bins)
+		.ok_or_else(|| Failure::not_found("selected DAP adapter executable is unavailable"))?;
 	let arguments = if attach {
 		adapter.spec.merged_arguments(true, &supplied)
 	} else {
@@ -774,7 +781,7 @@ async fn dap_start(
 		() = cancellation.cancelled() => return Err(Failure::cancelled("DAP launch cancelled")),
 		result = async {
 			let spawned = DapProtocol::spawn_adapter(
-				adapter.spec.command.as_str(),
+				&adapter_command.to_string_lossy(),
 				&adapter.spec.args,
 				&adapter.spec.transport,
 				&root,

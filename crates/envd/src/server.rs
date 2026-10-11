@@ -2501,7 +2501,8 @@ impl EnvServer {
 		let lsp_settings = LspSettings::from_con(con);
 		let doc_config = crate::docserver::ServerConfig::new(root)
 			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
-			.with_server_build(omp_env::build_id::current());
+			.with_server_build(omp_env::build_id::current())
+			.with_project_binaries(lsp_settings.project_binaries);
 		let environment = crate::docserver::Environment::new(doc_config)
 			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
 		let (document_client, document_server) = duplex(64 * 1024);
@@ -2744,10 +2745,7 @@ impl EnvServer {
 				.with_command_approvals(bridges.content.command_approvals.clone()),
 		);
 		let lsp_settings = LspSettings::from_con(con);
-		let document_lsp = crate::docserver::NativeLspOptions {
-			enabled: lsp_settings.enabled,
-			lazy:    lsp_settings.lazy,
-		};
+		let document_lsp = lsp_settings.native_options();
 		let document_config = DocumentConfigInputs {
 			user_config_root: Some(document_user_config_root()?),
 			claude_plugins:   Arc::clone(&bridges.content.claude_plugins),
@@ -12872,7 +12870,8 @@ async fn connect_or_start_docserver(
 	let listener = OwnerPipeListener::bind(socket)?;
 	let config = crate::docserver::ServerConfig::new(root)
 		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
-		.with_server_build(server_build);
+		.with_server_build(server_build)
+		.with_project_binaries(lsp.project_binaries);
 	let environment = crate::docserver::Environment::new(config)
 		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
 	if lsp.enabled {
@@ -15195,7 +15194,7 @@ mod tests {
 			&socket,
 			None,
 			true,
-			crate::docserver::NativeLspOptions { enabled: true, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: true, lazy: true, ..Default::default() },
 			DocumentConfigInputs::default(),
 			sf!("test-build"),
 		)
@@ -15263,7 +15262,7 @@ mod tests {
 			&socket,
 			None,
 			true,
-			crate::docserver::NativeLspOptions { enabled: true, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: true, lazy: true, ..Default::default() },
 			DocumentConfigInputs { user_config_root: None, claude_plugins: plugins.plugins.into() },
 			sf!("test-build"),
 		)
@@ -15314,7 +15313,8 @@ mod tests {
 					lsp_config_paths: Vec::new(),
 					lsp:              crate::docserver::NativeLspOptions {
 						enabled: false,
-						lazy:    true,
+						lazy: true,
+						..Default::default()
 					},
 					user_config_root: None,
 					claude_plugins:   Arc::default(),
@@ -15351,7 +15351,7 @@ mod tests {
 			&socket,
 			None,
 			false,
-			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: false, lazy: true, ..Default::default() },
 			DocumentConfigInputs::default(),
 			sf!("new-build"),
 		)
@@ -15388,7 +15388,7 @@ mod tests {
 			&socket,
 			None,
 			false,
-			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: false, lazy: true, ..Default::default() },
 			DocumentConfigInputs::default(),
 			sf!("new-build"),
 		)
@@ -15417,7 +15417,7 @@ mod tests {
 			state.path(),
 			&socket,
 			None,
-			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: false, lazy: true, ..Default::default() },
 			DocumentConfigInputs::default(),
 			old_config.server_build().clone(),
 		)

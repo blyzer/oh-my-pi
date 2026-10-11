@@ -1227,6 +1227,7 @@ pub(crate) async fn run(
 		// daemon degrades to the configuration projection rather than
 		// delaying the first frame.
 		let lsp = if omp_envd::lsp_settings::SV_LSP_ENABLED.get(&ctx) {
+			let project_binaries = omp_envd::lsp_settings::SV_LSP_PROJECT_BINARIES.get(&ctx);
 			let live = tokio::time::timeout(
 				crate::welcome_facts::LSP_STATUS_BUDGET,
 				kernel.inference().environment_client().lsp_status(false),
@@ -1236,11 +1237,11 @@ pub(crate) async fn run(
 				Ok(Ok(status)) => crate::welcome_facts::lsp_from_status(&status),
 				Ok(Err(error)) => {
 					tracing::debug!(%error, "lsp roster unavailable; projecting configuration");
-					crate::welcome_facts::lsp_servers(project, Some(data_dir))
+					crate::welcome_facts::lsp_servers(project, Some(data_dir), project_binaries)
 				},
 				Err(_) => {
 					tracing::debug!("lsp roster timed out; projecting configuration");
-					crate::welcome_facts::lsp_servers(project, Some(data_dir))
+					crate::welcome_facts::lsp_servers(project, Some(data_dir), project_binaries)
 				},
 			}
 		} else {

@@ -3,7 +3,7 @@
 use std::{
 	collections::{HashMap, HashSet},
 	fmt,
-	path::PathBuf,
+	path::{Path, PathBuf},
 	sync::{Arc, OnceLock, Weak},
 };
 
@@ -276,6 +276,7 @@ struct EnvironmentInner {
 	summaries:        SummaryService,
 	workspace_leases: WorkspaceLeaseTable,
 	root_uri:         Url,
+	project_bin_root: Option<PathBuf>,
 	workspace_id:     [u8; 16],
 	server_epoch:     [u8; 16],
 	server_build:     Str,
@@ -295,6 +296,9 @@ impl Environment {
 	pub fn new(config: ServerConfig) -> Result<Self> {
 		let server_build = config.server_build().clone();
 		let root_uri = config.file_uri(config.environment_root())?;
+		let project_bin_root = config
+			.project_binaries()
+			.then(|| config.environment_root().to_path_buf());
 		let workspace_leases = WorkspaceLeaseTable::default();
 		let store = DocumentStore::new_with_workspace_leases(config, workspace_leases.clone())?;
 		let lsp = LspRegistry::new(store.clone());
@@ -315,6 +319,7 @@ impl Environment {
 				summaries: SummaryService::new(),
 				workspace_leases,
 				root_uri,
+				project_bin_root,
 				workspace_id,
 				server_epoch,
 				server_build,
@@ -362,6 +367,14 @@ impl Environment {
 	/// Returns the project-scoped DAP adapter registry.
 	pub fn dap_adapters(&self) -> &DapAdapterRegistry {
 		&self.inner.dap_adapters
+	}
+
+	/// The project root whose local bins (`node_modules/.bin`, `.venv/bin`,
+	/// `bin`, ...) language- and debug-server executables may resolve from
+	/// ahead of `$PATH`; `None` (the default) resolves from `$PATH` only.
+	/// Set only by the user-level `sv_lsp_project_binaries`.
+	pub fn project_binary_root(&self) -> Option<&Path> {
+		self.inner.project_bin_root.as_deref()
 	}
 
 	/// Returns the project-scoped live DAP session registry.
