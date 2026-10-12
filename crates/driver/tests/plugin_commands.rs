@@ -21,10 +21,11 @@ use omp_envd::{
 use omp_ext::{
 	claude_plugin::{
 		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
-		PluginDiagnostic, REGISTRY_FILE,
+		PluginDiagnostic, PluginScope, REGISTRY_FILE, project_plugins_dir,
 	},
 	plugin_command::{PluginId, PluginLaunchKind},
 	trust::{GrantsFile, grants_path},
+	workspace_trust::WorkspaceTrust,
 };
 
 fn write(path: &Path, body: &str) {
@@ -65,6 +66,9 @@ struct Fixture {
 	data:     std::path::PathBuf,
 	project:  std::path::PathBuf,
 	plugin:   std::path::PathBuf,
+	/// The trust the project workspace resolves under: untrusted unless a
+	/// test relies on the project's own plugin registry.
+	trust:    WorkspaceTrust,
 }
 
 impl Fixture {
@@ -89,11 +93,39 @@ impl Fixture {
 			r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/bin/on-stop"}]}]}}"#,
 		);
 		install(&data, &plugin, "1.0.0");
-		Self { home: root.join("home/.o2"), _scratch: scratch, data, project, plugin }
+		Self {
+			home: root.join("home/.o2"),
+			_scratch: scratch,
+			data,
+			project,
+			plugin,
+			trust: WorkspaceTrust::Untrusted,
+		}
+	}
+
+	/// Moves the installed plugin from the user registry to the project's.
+	fn install_for_project(&self) {
+		let mut registry = InstalledPluginsRegistry::default();
+		registry
+			.plugins
+			.insert(Str::new_static("tools@market"), vec![InstalledPluginEntry {
+				scope:          InstallScope::Project,
+				install_path:   self.plugin.clone(),
+				version:        Str::new_static("1.0.0"),
+				installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
+				last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
+				git_commit_sha: None,
+				enabled:        true,
+			}]);
+		fs::remove_file(self.data.join("plugins").join(REGISTRY_FILE)).expect("user registry");
+		write(
+			&project_plugins_dir(&self.project).join(REGISTRY_FILE),
+			&serde_json::to_string(&registry).expect("registry"),
+		);
 	}
 
 	fn resolve(&self) -> ClaudePlugins {
-		let plugins = ClaudePlugins::resolve(&self.data, &self.project, None);
+		let plugins = ClaudePlugins::resolve(&self.data, &self.project, None, self.trust);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		plugins
 	}
@@ -327,25 +359,9 @@ fn an_installed_agent_plugins_package_is_approved_under_its_marketplace_identity
 /// servers, debug adapters, and hooks, are still named.
 #[test]
 fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
-	let fixture = Fixture::new();
-	// Move the installed plugin from the user registry to the project's.
-	let mut registry = InstalledPluginsRegistry::default();
-	registry
-		.plugins
-		.insert(Str::new_static("tools@market"), vec![InstalledPluginEntry {
-			scope:          InstallScope::Project,
-			install_path:   fixture.plugin.clone(),
-			version:        Str::new_static("1.0.0"),
-			installed_at:   Str::new_static("2026-01-01T00:00:00Z"),
-			last_updated:   Str::new_static("2026-01-01T00:00:00Z"),
-			git_commit_sha: None,
-			enabled:        true,
-		}]);
-	fs::remove_file(fixture.data.join("plugins").join(REGISTRY_FILE)).expect("user registry");
-	write(
-		&omp_ext::claude_plugin::project_plugins_dir(&fixture.project).join(REGISTRY_FILE),
-		&serde_json::to_string(&registry).expect("registry"),
-	);
+	let mut fixture = Fixture::new();
+	fixture.trust = WorkspaceTrust::Trusted;
+	fixture.install_for_project();
 	let package = |root: &Path, name: &str| {
 		write(
 			&root.join("plugin.json"),
@@ -363,7 +379,7 @@ fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
 	package(&fixture.home.join("agent/plugins/personal"), "personal");
 
 	let plugins = fixture.resolve();
-	assert_eq!(plugins.plugins[0].scope, omp_ext::claude_plugin::PluginScope::Project);
+	assert_eq!(plugins.plugins[0].scope, PluginScope::Project);
 	let reported = |enable_project_config: bool| {
 		blocked_launches(&plugins, &fixture.agent_plugins(&plugins), &omp_envd::mcp::McpSettings {
 			enable_project_config,
@@ -401,6 +417,42 @@ fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
 	);
 }
 
+/// An untrusted workspace's own plugin registry is never read: the plugin it
+/// installs for the project neither loads nor is reported, and no command
+/// set offers it for approval. Trusting the workspace loads it.
+#[test]
+fn an_untrusted_workspace_loads_no_project_installed_plugin() {
+	use omp_driver::plugin_commands::resolve_command_sets;
+
+	let mut fixture = Fixture::new();
+	fixture.install_for_project();
+	let id = PluginId::from_ref("tools@market");
+	let sets = |fixture: &Fixture| {
+		resolve_command_sets(&fixture.data, &fixture.project, &[], id, fixture.trust)
+			.expect("resolve")
+			.0
+	};
+
+	assert!(fixture.resolve().plugins.is_empty(), "the project plugin loaded untrusted");
+	assert!(fixture.blocked_servers().is_empty(), "an unloaded plugin is not reported");
+	assert!(sets(&fixture).is_empty(), "an unloaded plugin offers nothing to approve");
+
+	fixture.trust = WorkspaceTrust::Trusted;
+	let plugins = fixture.resolve();
+	let [plugin] = &plugins.plugins[..] else {
+		panic!("one trusted project plugin: {:?}", plugins.plugins);
+	};
+	assert_eq!((plugin.id.as_str(), plugin.scope), ("tools@market", PluginScope::Project));
+	// Its language server, debug adapter, and hook; its MCP server follows
+	// the (default off) project MCP policy.
+	assert_eq!(fixture.blocked_servers(), [
+		(PluginLaunchKind::LanguageServer, Str::new_static("acme")),
+		(PluginLaunchKind::DebugAdapter, Str::new_static("acme-dbg")),
+		(PluginLaunchKind::Hook, Str::new_static("Stop")),
+	]);
+	assert_eq!(sets(&fixture).len(), 1);
+}
+
 /// An approval binds the contents of the plugin files a launch names: a
 /// server binary or hook script the plugin edits in place, without a new
 /// version, asks again; a plugin file no launch names does not.
@@ -432,7 +484,8 @@ fn editing_a_plugin_file_a_launch_names_requires_approval_again() {
 /// and are still reported; a project install is neither.
 #[test]
 fn user_installed_and_explicit_agent_plugins_ignore_the_project_mcp_policy() {
-	let fixture = Fixture::new();
+	let mut fixture = Fixture::new();
+	fixture.trust = WorkspaceTrust::Trusted;
 	let package = |root: &Path, name: &str| {
 		write(
 			&root.join("plugin.json"),
@@ -478,7 +531,7 @@ fn user_installed_and_explicit_agent_plugins_ignore_the_project_mcp_policy() {
 			&project_package,
 		)]);
 	write(
-		&omp_ext::claude_plugin::project_plugins_dir(&fixture.project).join(REGISTRY_FILE),
+		&project_plugins_dir(&fixture.project).join(REGISTRY_FILE),
 		&serde_json::to_string(&project).expect("registry"),
 	);
 
@@ -516,7 +569,8 @@ fn approve_commands_admits_by_digest_or_all_and_refuses_unknowns() {
 	let fixture = Fixture::new();
 	let id = PluginId::from_ref("tools@market");
 	let (sets, approvals) =
-		resolve_command_sets(&fixture.data, &fixture.project, &[], id).expect("resolve");
+		resolve_command_sets(&fixture.data, &fixture.project, &[], id, fixture.trust)
+			.expect("resolve");
 	assert!(approvals.of(id).next().is_none());
 	let [set] = &sets[..] else {
 		panic!("one plugin: {sets:?}");
@@ -525,7 +579,8 @@ fn approve_commands_admits_by_digest_or_all_and_refuses_unknowns() {
 
 	let unknown = PluginId::from_ref("nothing@market");
 	let (none, _) =
-		resolve_command_sets(&fixture.data, &fixture.project, &[], unknown).expect("resolve");
+		resolve_command_sets(&fixture.data, &fixture.project, &[], unknown, fixture.trust)
+			.expect("resolve");
 	assert!(matches!(
 		approve_commands(&fixture.data, &none, unknown, CommandSelection::All, grant()),
 		Err(ApproveCommandsError::UnknownPlugin { .. })
@@ -586,7 +641,8 @@ fn approve_commands_never_approves_an_unreadable_plugin_file() {
 		return;
 	}
 	let id = PluginId::from_ref("tools@market");
-	let (sets, _) = resolve_command_sets(&fixture.data, &fixture.project, &[], id).expect("resolve");
+	let (sets, _) = resolve_command_sets(&fixture.data, &fixture.project, &[], id, fixture.trust)
+		.expect("resolve");
 	let outcome = approve_commands(
 		&fixture.data,
 		&sets,

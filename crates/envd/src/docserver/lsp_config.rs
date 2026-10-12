@@ -886,7 +886,7 @@ pub(crate) mod tests {
 		claude_plugin::{
 			ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry,
 		},
-		workspace_trust::inventory::lsp_config_files,
+		workspace_trust::{WorkspaceTrust, inventory::lsp_config_files},
 	};
 
 	use super::*;
@@ -1006,7 +1006,7 @@ pub(crate) mod tests {
 			&data.join("plugins/installed_plugins.json"),
 			&serde_json::to_string(&registry).unwrap(),
 		);
-		let mut plugins = ClaudePlugins::resolve(data, data, None);
+		let mut plugins = ClaudePlugins::resolve(data, data, None, WorkspaceTrust::Untrusted);
 		crate::plugin_commands::approve_all(&mut plugins.plugins);
 		plugins
 	}

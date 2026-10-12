@@ -53,7 +53,9 @@ use omp_dom::{Event, Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, 
 use omp_driver::{
 	collab::admission::{GuestAction, GuestAgentCommand},
 	headless::kernel::{ComposedInference, KernelOptions, SessionHome},
+	workspace_trust::WorkspaceTrustSource,
 };
+use omp_ext::workspace_trust::TrustDecision;
 use omp_journal::{EntryId, blob::BlobStore, data::Attachment, gc::copy_journal_blobs};
 use omp_proto::{
 	collab::v1::{ContextUsage, ModelMetadata, SessionStateUpdate},
@@ -2054,6 +2056,13 @@ impl<C: omp_agent::Inference> Controller<C> {
 				model: self.home.model.as_str(),
 				id,
 				prompt,
+				// A home over a workspace whose trust nobody decided
+				// (`/move`) fails closed.
+				workspace_trust: self
+					.home
+					.workspace_trust
+					.as_ref()
+					.unwrap_or(&TrustDecision::Untrusted),
 			},
 		)
 		.map_err(ServiceError::failed)?;
@@ -2492,6 +2501,9 @@ impl<C: omp_agent::Inference> Controller<C> {
 			tools_enabled: self.home.tools_enabled,
 			up: self.home.up.clone(),
 			rules: self.home.rules.clone(),
+			// The kernel's decision is about the workspace it was composed
+			// in, never the one the session moves to.
+			workspace_trust: None,
 		};
 		let next = match home.open(&destination) {
 			Ok(next) => next,
@@ -3001,12 +3013,20 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let live = Arc::clone(&self.home.live);
 		let done = self.tan_tx.clone();
 		let prompt = Str::new(format!("{TAN_CONTEXT}\n\n{work}"));
+		let workspace_trust = WorkspaceTrustSource::Fixed(
+			self
+				.home
+				.workspace_trust
+				.clone()
+				.unwrap_or(TrustDecision::Untrusted),
+		);
 		tokio::spawn(async move {
 			let options = KernelOptions {
 				session: Some(sessions_dir.join(format!("{id}.oms"))),
 				sessions_dir: Some(sessions_dir),
 				sessions: Some(live),
 				session_name: Some(id.clone()),
+				workspace_trust,
 				..KernelOptions::default()
 			};
 			let composed = omp_driver::headless::kernel::compose_kernel(
@@ -3843,15 +3863,16 @@ mod tests {
 			let events = kernel.subscribe();
 			let live = Arc::new(omp_driver::sessions::SessionRegistry::new());
 			let home = SessionHome {
-				sessions_dir:  dir.path().join("sessions"),
-				project_root:  dir.path().to_path_buf(),
-				model:         Str::new_static("test/model"),
-				prompt:        omp_driver::headless::kernel::PromptOverrides::default(),
-				facts:         Default::default(),
-				live:          Arc::clone(&live),
-				tools_enabled: true,
-				up:            kernel.mailbox(),
-				rules:         None,
+				sessions_dir:    dir.path().join("sessions"),
+				project_root:    dir.path().to_path_buf(),
+				model:           Str::new_static("test/model"),
+				prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
+				facts:           Default::default(),
+				live:            Arc::clone(&live),
+				tools_enabled:   true,
+				up:              kernel.mailbox(),
+				rules:           None,
+				workspace_trust: None,
 			};
 			fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 			let mut session = home.create(None).expect("session");
@@ -4201,15 +4222,16 @@ mod tests {
 		.with_session_state_bridge(Arc::new(OrderBridge { order: order_tx.clone() }))
 		.with_session_observer(Arc::new(OrderBridge { order: order_tx.clone() }));
 		let home = SessionHome {
-			sessions_dir:  dir.path().join("sessions"),
-			project_root:  dir.path().to_path_buf(),
-			model:         Str::new_static("test/model"),
-			prompt:        omp_driver::headless::kernel::PromptOverrides::default(),
-			facts:         Default::default(),
-			live:          Arc::new(omp_driver::sessions::SessionRegistry::new()),
-			tools_enabled: true,
-			up:            kernel.mailbox(),
-			rules:         None,
+			sessions_dir:    dir.path().join("sessions"),
+			project_root:    dir.path().to_path_buf(),
+			model:           Str::new_static("test/model"),
+			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
+			facts:           Default::default(),
+			live:            Arc::new(omp_driver::sessions::SessionRegistry::new()),
+			tools_enabled:   true,
+			up:              kernel.mailbox(),
+			rules:           None,
+			workspace_trust: None,
 		};
 		fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 		let session = home.create(None).expect("session");
@@ -4357,15 +4379,16 @@ mod tests {
 			StaticPrompt(Str::new_static("test system")),
 		);
 		let home = SessionHome {
-			sessions_dir:  dir.path().join("sessions"),
-			project_root:  dir.path().to_path_buf(),
-			model:         Str::new_static("test/model"),
-			prompt:        omp_driver::headless::kernel::PromptOverrides::default(),
-			facts:         Default::default(),
-			live:          Arc::new(omp_driver::sessions::SessionRegistry::new()),
-			tools_enabled: true,
-			up:            kernel.mailbox(),
-			rules:         None,
+			sessions_dir:    dir.path().join("sessions"),
+			project_root:    dir.path().to_path_buf(),
+			model:           Str::new_static("test/model"),
+			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
+			facts:           Default::default(),
+			live:            Arc::new(omp_driver::sessions::SessionRegistry::new()),
+			tools_enabled:   true,
+			up:              kernel.mailbox(),
+			rules:           None,
+			workspace_trust: None,
 		};
 		fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 		let session = home.create(None).expect("session");

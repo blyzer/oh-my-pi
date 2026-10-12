@@ -39,6 +39,7 @@ use omp_ext::{
 		CommandApprovals, PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest,
 	},
 	trust::{GrantPersistenceError, GrantsFile, PluginCommandGrant, grants_path},
+	workspace_trust::WorkspaceTrust,
 };
 
 /// Every command `plugin` declares, as the launching seams resolve and gate
@@ -198,8 +199,8 @@ pub fn command_sets(
 
 /// Every command the plugin identity `id` launches as a session in
 /// `project`, with the Agent Plugins roots `plugin_dirs` the invocation
-/// names, resolves it ([`command_sets`]), with the operator's current
-/// approvals.
+/// names, resolves it ([`command_sets`]) under the workspace's `trust`, with
+/// the operator's current approvals.
 ///
 /// This is the one resolution `omp ext trust` and the in-chat
 /// `/plugins approve` approve from.
@@ -212,17 +213,19 @@ pub fn resolve_command_sets(
 	project: &Path,
 	plugin_dirs: &[PathBuf],
 	id: &PluginId<str>,
+	trust: WorkspaceTrust,
 ) -> Result<(Vec<PluginCommandSet>, CommandApprovals), DataDirError> {
-	let plugins = ClaudePlugins::resolve(data_dir, project, ClaudeCodeHome::detect().as_ref());
+	let plugins =
+		ClaudePlugins::resolve(data_dir, project, ClaudeCodeHome::detect().as_ref(), trust);
 	let agent_plugins = agent_plugin_paths(project, plugin_dirs, &plugins)?;
 	let sets = command_sets(id, &plugins, &agent_plugins);
 	Ok((sets, plugins.command_approvals))
 }
 
 /// Every launch a session in `project`, with the Agent Plugins roots
-/// `plugin_dirs`, under the MCP policy `mcp`, would not start
-/// ([`blocked_launches`]), resolved fresh from the registries and the grant
-/// file.
+/// `plugin_dirs`, under the MCP policy `mcp` and the workspace's `trust`,
+/// would not start ([`blocked_launches`]), resolved fresh from the
+/// registries and the grant file.
 ///
 /// # Errors
 ///
@@ -232,8 +235,10 @@ pub fn session_blocked_launches(
 	project: &Path,
 	plugin_dirs: &[PathBuf],
 	mcp: &McpSettings,
+	trust: WorkspaceTrust,
 ) -> Result<Vec<PluginCommandBlocked>, DataDirError> {
-	let plugins = ClaudePlugins::resolve(data_dir, project, ClaudeCodeHome::detect().as_ref());
+	let plugins =
+		ClaudePlugins::resolve(data_dir, project, ClaudeCodeHome::detect().as_ref(), trust);
 	let agent_plugins = agent_plugin_paths(project, plugin_dirs, &plugins)?;
 	Ok(blocked_launches(&plugins, &agent_plugins, mcp))
 }

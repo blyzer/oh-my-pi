@@ -13,7 +13,9 @@ use omp_core::Str;
 use omp_driver::{
 	discovery::{prompts::PromptTemplates, roles},
 	headless::kernel::KernelOptions,
+	workspace_trust::WorkspaceTrustSource,
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 
 use crate::cli::{ChatArgs, InvocationExtensionMode, LaunchExtensions, PromptArgs};
 
@@ -119,17 +121,20 @@ pub(crate) fn driver_extension_policy(
 	}
 }
 
-/// Resolves the prompt flags once at the command boundary.
+/// Resolves the prompt flags once at the command boundary; the workspace's
+/// own prompt files count only under `trust` `Trusted`.
 pub(crate) fn prompt_overrides(
 	project: &std::path::Path,
 	home: &std::path::Path,
 	args: &PromptArgs,
+	trust: WorkspaceTrust,
 ) -> miette::Result<omp_driver::headless::kernel::PromptOverrides> {
 	let slots = crate::spec::resolve_prompt_slots(
 		project,
 		home,
 		args.custom_prompt.as_deref(),
 		args.append_prompt.as_deref(),
+		trust,
 	)?;
 	Ok(omp_driver::headless::kernel::PromptOverrides {
 		custom_prompt:          slots.system,
@@ -390,12 +395,16 @@ impl Launch {
 		})
 		.into_diagnostic()?;
 		let config_root = omp_core::dirs::profile_config_dir(&home).into_diagnostic()?;
+		// The workspace's trust decision, evaluated once for the launch and
+		// handed to composition, which never evaluates it again.
+		let workspace_trust = omp_driver::workspace_trust::evaluate_workspace(&data_dir, &project);
 		// Installed marketplace plugins: resolved once per launch and shared
 		// with the kernel; this is the one place their diagnostics surface.
 		let claude_plugins = Arc::new(omp_ext::claude_plugin::ClaudePlugins::resolve(
 			&data_dir,
 			&project,
 			omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+			workspace_trust.trust(),
 		));
 		for diagnostic in &claude_plugins.diagnostics {
 			tracing::warn!(
@@ -543,7 +552,8 @@ impl Launch {
 			None => None,
 		};
 		let live_sessions = Arc::new(omp_driver::sessions::SessionRegistry::new());
-		let mut prompt_policy = prompt_overrides(&project, &home, &prompt_settings)?;
+		let mut prompt_policy =
+			prompt_overrides(&project, &home, &prompt_settings, workspace_trust.trust())?;
 		prompt_policy.include_context_files = !no_context_files;
 		prompt_policy.include_rules = !no_rules;
 		prompt_policy.additional_roots = add_dir;
@@ -586,6 +596,7 @@ impl Launch {
 			schema_mode: None,
 			prompt_cache_key,
 			provider_session,
+			workspace_trust: WorkspaceTrustSource::Fixed(workspace_trust),
 		};
 		Ok(Self {
 			data_dir,
@@ -1277,6 +1288,7 @@ pub(crate) async fn run(
 				project: project.clone(),
 				approval_override: launch.options.approval_mode,
 				plugin_dirs: launch.options.extensions.native_roots.clone(),
+				workspace_trust: composed.workspace_trust().trust(),
 				sessions_dir: sessions_dir
 					.clone()
 					.unwrap_or_else(|| state_dir.join("sessions")),
@@ -1327,7 +1339,8 @@ pub(crate) async fn run(
 	)
 	.into_diagnostic()?
 	.with_facts_of(&session)
-	.with_rules(Arc::clone(kernel.inference().rule_scope()));
+	.with_rules(Arc::clone(kernel.inference().rule_scope()))
+	.with_workspace_trust(kernel.inference().workspace_trust().clone());
 	let env = kernel.inference().environment_client().clone();
 	// Extension `omp.ui.*` requests (dialogs, presentation facts) and dynamic
 	// `ask` invocations are owned by this chat for its lifetime. Direct ask

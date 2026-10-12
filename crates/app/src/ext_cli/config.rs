@@ -313,6 +313,7 @@ fn load_items(project: &Path) -> miette::Result<Vec<SelectorItem>> {
 		&data_dir,
 		project,
 		omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+		omp_driver::workspace_trust::evaluate_workspace(&data_dir, project).trust(),
 	);
 	let mut skills = ActiveSkills::discover(&ctx, project, &plugins).into_diagnostic()?;
 	// Disabled skills are absent from discovery; list them from the cfg so

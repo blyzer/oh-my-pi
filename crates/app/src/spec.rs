@@ -7,7 +7,7 @@ use std::path::Path;
 
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
-use omp_ext::workspace_trust::inventory::APPEND_SYSTEM_PROMPT_FILE;
+use omp_ext::workspace_trust::{WorkspaceTrust, inventory::APPEND_SYSTEM_PROMPT_FILE};
 pub use omp_tool::{
 	CallbackAbi, OperationSpec, PhaseLegalityRow, RuntimeDurationMetadata, RuntimeSymbolSpec,
 	operation_spec, phase_legality_matrix, runtime_duration_metadata, runtime_symbols,
@@ -36,20 +36,22 @@ impl PromptSlots {
 
 /// Resolves explicit file-or-literal overrides, then native `SYSTEM.md` and
 /// `APPEND_SYSTEM.md` discovery. Native `.omp` content precedes user and
-/// foreign-compatible content roots.
+/// foreign-compatible content roots, and counts only under `trust`
+/// [`WorkspaceTrust::Trusted`]; an untrusted workspace's are withheld.
 pub fn resolve_prompt_slots(
 	cwd: &Path,
 	home: &Path,
 	system: Option<&str>,
 	append: Option<&str>,
+	trust: WorkspaceTrust,
 ) -> miette::Result<PromptSlots> {
 	let (system, explicit_append) =
-		omp_driver::prompt_input::resolve_system_inputs(cwd, home, system, append)
+		omp_driver::prompt_input::resolve_system_inputs(cwd, home, system, append, trust)
 			.map_err(|error| miette::miette!(error))?;
 	let append = if explicit_append.is_some() {
 		explicit_append
 	} else {
-		omp_driver::prompt_input::discover_prompt_file(cwd, home, APPEND_SYSTEM_PROMPT_FILE)
+		omp_driver::prompt_input::discover_prompt_file(cwd, home, APPEND_SYSTEM_PROMPT_FILE, trust)
 			.into_diagnostic()?
 	};
 	Ok(PromptSlots { system, append })

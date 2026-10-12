@@ -1891,15 +1891,16 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 		SettingsAdmission::new(&con, None, &root).with_fetch_hosts(environment.fetch_hosts()),
 	);
 	let home = SessionHome {
-		sessions_dir:  sessions_dir.clone(),
-		project_root:  root.clone(),
-		model:         Str::new_static("scripted/test"),
-		prompt:        Default::default(),
-		facts:         Default::default(),
-		live:          Arc::new(SessionRegistry::new()),
-		tools_enabled: true,
-		up:            kernel.mailbox(),
-		rules:         None,
+		sessions_dir:    sessions_dir.clone(),
+		project_root:    root.clone(),
+		model:           Str::new_static("scripted/test"),
+		prompt:          Default::default(),
+		facts:           Default::default(),
+		live:            Arc::new(SessionRegistry::new()),
+		tools_enabled:   true,
+		up:              kernel.mailbox(),
+		rules:           None,
+		workspace_trust: None,
 	};
 	let connection = AcpConnection::new(AcpSettings::default());
 	connection.bind_documents(Arc::new(environment.editor_documents()));

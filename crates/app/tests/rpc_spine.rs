@@ -90,15 +90,16 @@ fn scripted_kernel(
 
 fn session_home(temp: &tempfile::TempDir, kernel: &Kernel<ScriptedInference>) -> SessionHome {
 	SessionHome {
-		sessions_dir:  temp.path().join("sessions"),
-		project_root:  temp.path().to_path_buf(),
-		model:         Str::new_static("scripted/test"),
-		prompt:        Default::default(),
-		facts:         Default::default(),
-		live:          Arc::new(SessionRegistry::new()),
-		tools_enabled: true,
-		up:            kernel.mailbox(),
-		rules:         None,
+		sessions_dir:    temp.path().join("sessions"),
+		project_root:    temp.path().to_path_buf(),
+		model:           Str::new_static("scripted/test"),
+		prompt:          Default::default(),
+		facts:           Default::default(),
+		live:            Arc::new(SessionRegistry::new()),
+		tools_enabled:   true,
+		up:              kernel.mailbox(),
+		rules:           None,
+		workspace_trust: None,
 	}
 }
 

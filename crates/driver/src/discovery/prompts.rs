@@ -511,6 +511,8 @@ fn match_placeholder(tail: &str, args: &[Str]) -> (Option<String>, usize) {
 
 #[cfg(test)]
 mod tests {
+	use omp_ext::workspace_trust::WorkspaceTrust;
+
 	use super::*;
 
 	fn words(list: &[&str]) -> Vec<Str> {
@@ -667,7 +669,7 @@ mod tests {
 		);
 		fs::create_dir_all(&project).unwrap();
 
-		let plugins = ClaudePlugins::resolve(&data, &project, None);
+		let plugins = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 		let templates = PromptTemplates::discover(&project, &root.join(".o2"), &plugins, &[], true);
 		let rows = templates
 			.templates

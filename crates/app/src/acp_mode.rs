@@ -76,7 +76,8 @@ async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 	)
 	.into_diagnostic()?
 	.with_facts_of(&session)
-	.with_rules(Arc::clone(kernel.inference().rule_scope()));
+	.with_rules(Arc::clone(kernel.inference().rule_scope()))
+	.with_workspace_trust(kernel.inference().workspace_trust().clone());
 	serve_acp_state(kernel, session, home, input, output, connection, true).await
 }
 
@@ -1387,14 +1388,13 @@ fn prompt_response(session: &Session, outcome: &omp_agent::TurnOutcome) -> Value
 			.find(|node| node.tag == omp_dom::Tag::Known(omp_dom::KnownTag::Assistant))
 			.and_then(|node| node.prop(&omp_dom::PropId::StopReason.into()))
 			.and_then(omp_dom::Value::as_str)
-			.map(|reason| match reason {
+			.map_or("end_turn", |reason| match reason {
 				"length" => "max_tokens",
 				"max_requests" | "max_turn_requests" => "max_turn_requests",
 				"aborted" | "cancelled" => "cancelled",
 				"refusal" | "content_filter" => "refusal",
 				_ => "end_turn",
 			})
-			.unwrap_or("end_turn")
 	};
 	let mut response = json!({"stopReason": stop_reason});
 	let total = outcome.tokens_in.saturating_add(outcome.tokens_out);

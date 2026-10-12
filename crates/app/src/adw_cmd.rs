@@ -7,7 +7,10 @@ use std::{
 
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
-use omp_driver::adw::{RunStatus, definition, production::ProductionAdwHost};
+use omp_driver::{
+	adw::{RunStatus, definition, production::ProductionAdwHost},
+	workspace_trust::evaluate_workspace,
+};
 use omp_ext::workspace_trust::inventory::WORKFLOWS_DIR;
 use tokio_util::sync::CancellationToken;
 
@@ -108,12 +111,16 @@ async fn execute(
 
 /// Opens the workflow host under the operator's configuration: user
 /// `config.cfg` and the project overlay decide the sandbox, network and
-/// approval posture its phases run under and report.
+/// approval posture its phases run under and report, and the workspace's
+/// trust decision, evaluated here once for the run (failing closed), decides
+/// whether its code phases run at all.
 pub fn open_host(
 	project: &Path,
 	data_dir: PathBuf,
 	model: Str,
 ) -> miette::Result<ProductionAdwHost> {
 	let ctx = Arc::new(process_ctx_with(project, omp_con::Ctx::builder())?);
-	ProductionAdwHost::open(project.to_path_buf(), data_dir, model, ctx).into_diagnostic()
+	let workspace_trust = evaluate_workspace(&data_dir, project);
+	ProductionAdwHost::open(project.to_path_buf(), data_dir, model, ctx, workspace_trust)
+		.into_diagnostic()
 }

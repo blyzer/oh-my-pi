@@ -8,6 +8,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+use omp_ext::{claude_plugin::ClaudePlugins, workspace_trust::WorkspaceTrust};
 use omp_memory::{
 	BankId, BankScope, BankScopeInput, MemoryBackend, MnemopiSettings, bank::database_path,
 	config::BankScoping, recall::RecallBounds, store::BankStore,
@@ -888,7 +889,7 @@ fn the_marketplace_registry_and_cache_merge_into_v2() {
 	// Runtime discovery loads the imported enabled plugin from v2's cache; the
 	// one v1 had disabled stays disabled.
 	let workspace = project(root.path(), "workspace");
-	let resolved = omp_ext::claude_plugin::ClaudePlugins::resolve(&v2.data_dir, &workspace, None);
+	let resolved = ClaudePlugins::resolve(&v2.data_dir, &workspace, None, WorkspaceTrust::Untrusted);
 	let lint_root = fs::canonicalize(v2_plugins.join("cache/plugins/acme___lint___1.0.0"))
 		.expect("imported lint cache");
 	assert_eq!(

@@ -54,6 +54,11 @@
 //! project- or local-scope Claude entry loads only in its `projectPath`
 //! unless `enabledPlugins` opts it in. Those plugins carry
 //! [`PluginSource::ClaudeCode`].
+//!
+//! The project's own inputs (the project registry and the `enabledPlugins` of
+//! `.claude/settings*.json`) are read only for a
+//! [`WorkspaceTrust::Trusted`] workspace; an untrusted one resolves from the
+//! operator's registries and settings alone.
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -73,8 +78,9 @@ use crate::{
 		CommandApprovals, PluginCommandBlocked, PluginId, PluginLaunch, plugin_command_digest,
 	},
 	trust::{GrantsFile, GrantsFileError, grants_path},
-	workspace_trust::inventory::{
-		CLAUDE_SETTINGS_FILES, DAP_CONFIG_NAMES, LSP_CONFIG_NAMES, PROJECT_PLUGINS_DIR,
+	workspace_trust::{
+		WorkspaceTrust,
+		inventory::{CLAUDE_SETTINGS_FILES, DAP_CONFIG_NAMES, LSP_CONFIG_NAMES, PROJECT_PLUGINS_DIR},
 	},
 };
 
@@ -746,17 +752,29 @@ impl ClaudePlugins {
 	/// Order and precedence follow OMP v1: enabled project installs first,
 	/// then Claude Code installs whose id no omp registry records, then user
 	/// installs; an enabled project install shadows every other install of
-	/// its id.
+	/// its id. Unless `trust` is [`WorkspaceTrust::Trusted`], the project
+	/// registry and the project's `enabledPlugins` are not read: nothing the
+	/// workspace declares shadows, enables, or disables an install.
 	#[must_use]
-	pub fn resolve(data_dir: &Path, project_root: &Path, claude: Option<&ClaudeCodeHome>) -> Self {
+	pub fn resolve(
+		data_dir: &Path,
+		project_root: &Path,
+		claude: Option<&ClaudeCodeHome>,
+		trust: WorkspaceTrust,
+	) -> Self {
 		let project_root =
 			fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+		let trusted = trust == WorkspaceTrust::Trusted;
 		let mut out = Self::default();
 		let project_path = project_plugins_dir(&project_root).join(REGISTRY_FILE);
 		let user_path = user_plugins_dir(data_dir).join(REGISTRY_FILE);
-		let project = out.read_registry(&project_path);
+		let project = if trusted {
+			out.read_registry(&project_path)
+		} else {
+			InstalledPluginsRegistry::default()
+		};
 		let user = out.read_registry(&user_path);
-		let claude = claude.and_then(|home| out.read_claude_code(home, &project_root));
+		let claude = claude.and_then(|home| out.read_claude_code(home, &project_root, trusted));
 		let approvals = GrantsFile::read(&grants_path(data_dir)).map_or_else(
 			|source| {
 				out.diagnostics
@@ -841,6 +859,7 @@ impl ClaudePlugins {
 		&mut self,
 		home: &ClaudeCodeHome,
 		project_root: &Path,
+		trusted: bool,
 	) -> Option<(PathBuf, BTreeMap<Str, Vec<Candidate>>)> {
 		let registry_path = home.registry();
 		let bytes = match fs::read(&registry_path) {
@@ -862,7 +881,7 @@ impl ClaudePlugins {
 				return None;
 			},
 		};
-		let overrides = self.claude_enabled_overrides(home, project_root);
+		let overrides = self.claude_enabled_overrides(home, project_root, trusted);
 		let mut installs = BTreeMap::new();
 		for (id, entries) in registry.plugins {
 			let override_enabled = overrides.get(&id).copied();
@@ -909,16 +928,19 @@ impl ClaudePlugins {
 	}
 
 	/// Claude Code's `enabledPlugins`, merged in its own layer order: the
-	/// user `settings.json`, then the project's `.claude/settings.json` and
-	/// `.claude/settings.local.json`; later layers win.
+	/// user `settings.json`, then, for a `trusted` workspace, the project's
+	/// `.claude/settings.json` and `.claude/settings.local.json`; later layers
+	/// win.
 	fn claude_enabled_overrides(
 		&mut self,
 		home: &ClaudeCodeHome,
 		project_root: &Path,
+		trusted: bool,
 	) -> BTreeMap<Str, bool> {
 		let mut overrides = BTreeMap::new();
 		let project = CLAUDE_SETTINGS_FILES
 			.iter()
+			.filter(|_| trusted)
 			.map(|settings| project_root.join(settings));
 		for path in iter::once(home.config_dir().join("settings.json")).chain(project) {
 			let Ok(bytes) = fs::read(&path) else {
@@ -1464,7 +1486,7 @@ mod tests {
 			&registry(&[("on@m", &on, true), ("off@m", &off, false)]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		let resolved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 		assert_eq!(resolved.plugins.len(), 1);
@@ -1521,7 +1543,7 @@ mod tests {
 		})
 		.unwrap();
 
-		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		let resolved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 		let [first, second] = &resolved.plugins[..] else {
 			panic!("two plugins: {:?}", resolved.plugins);
@@ -1552,7 +1574,7 @@ mod tests {
 		write(&data.join("plugins/installed_plugins.json"), &registry(&[("one@m", &one, true)]));
 		write(&grants_path(&data), "plugin_command = 3");
 
-		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		let resolved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 		assert!(
 			matches!(&resolved.diagnostics[..], [PluginDiagnostic::CommandApprovals(_)]),
 			"{:?}",
@@ -1579,7 +1601,7 @@ mod tests {
 			]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		let resolved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 
 		assert!(resolved.plugins.is_empty(), "{:?}", resolved.plugins);
 		let kinds = resolved
@@ -1602,7 +1624,7 @@ mod tests {
 		);
 
 		write(&data.join("plugins/installed_plugins.json"), "{ nope");
-		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		let resolved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 		assert!(matches!(resolved.diagnostics.as_slice(), [PluginDiagnostic::Registry(
 			RegistryError::Parse { .. }
 		)]));
@@ -1635,7 +1657,7 @@ mod tests {
 			&registry(&[("p@m", &project_copy, true)]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		let resolved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Trusted);
 
 		assert_eq!(resolved.plugins.len(), 1);
 		let plugin = &resolved.plugins[0];
@@ -1662,9 +1684,72 @@ mod tests {
 			&project.join(".omp/plugins/installed_plugins.json"),
 			&registry(&[("p@m", &project_copy, false)]),
 		);
-		let resolved = ClaudePlugins::resolve(&data, &project, None);
+		let resolved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Trusted);
 		assert_eq!(resolved.plugins.len(), 1);
 		assert_eq!(resolved.plugins[0].scope, PluginScope::User);
+	}
+
+	/// An untrusted workspace's own plugin inputs are never read: its
+	/// registry neither loads nor shadows an install, and its
+	/// `.claude/settings*.json` neither enables nor disables one. Trusting
+	/// the same workspace reads both.
+	#[test]
+	fn an_untrusted_workspace_reads_neither_its_registry_nor_its_claude_settings() {
+		let fixture = ClaudeFixture::new();
+		let user_copy = fixture.temp.path().join("user-copy");
+		let project_copy = fixture.temp.path().join("project-copy");
+		let project_only = fixture.temp.path().join("project-only");
+		write(&user_copy.join("skills/a/SKILL.md"), "x");
+		write(&project_copy.join("skills/b/SKILL.md"), "x");
+		write(&project_only.join("skills/c/SKILL.md"), "x");
+		write(
+			&fixture.data.join("plugins/installed_plugins.json"),
+			&registry(&[("p@m", &user_copy, true)]),
+		);
+		write(
+			&fixture.project.join(".omp/plugins/installed_plugins.json"),
+			&registry(&[("p@m", &project_copy, true), ("only@m", &project_only, true)]),
+		);
+		let off = fixture.plugin("off");
+		let away = fixture.plugin("away");
+		let elsewhere = fixture.temp.path().join("elsewhere");
+		fs::create_dir_all(&elsewhere).unwrap();
+		fixture.claude_registry(&format!(
+			r#"{{"version":2,"plugins":{{"off@m":[{}],"away@m":[{}]}}}}"#,
+			claude_entry("user", &off, None),
+			claude_entry("local", &away, Some(&elsewhere)),
+		));
+		write(
+			&fixture.project.join(".claude/settings.json"),
+			r#"{"enabledPlugins":{"off@m":false,"away@m":true}}"#,
+		);
+		let loaded = |trust| {
+			let resolved = fixture.resolve(trust);
+			assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
+			resolved
+				.plugins
+				.iter()
+				.map(|plugin| (plugin.id.to_string(), plugin.scope))
+				.collect::<BTreeSet<_>>()
+		};
+
+		assert_eq!(
+			loaded(WorkspaceTrust::Untrusted),
+			BTreeSet::from([
+				("off@m".to_owned(), PluginScope::User),
+				("p@m".to_owned(), PluginScope::User),
+			]),
+			"only the operator's registries and settings decide"
+		);
+		assert_eq!(
+			loaded(WorkspaceTrust::Trusted),
+			BTreeSet::from([
+				("away@m".to_owned(), PluginScope::Project),
+				("only@m".to_owned(), PluginScope::Project),
+				("p@m".to_owned(), PluginScope::Project),
+			]),
+			"a trusted workspace's registry and settings apply"
+		);
 	}
 
 	#[test]
@@ -1691,7 +1776,7 @@ mod tests {
 			&registry(&[("inline@m", &inline, true), ("by-path@m", &by_path, true)]),
 		);
 
-		let resolved = ClaudePlugins::resolve(&data, temp.path(), None);
+		let resolved = ClaudePlugins::resolve(&data, temp.path(), None, WorkspaceTrust::Untrusted);
 
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 		let components = |id: &str| {
@@ -1746,7 +1831,7 @@ mod tests {
 		std::os::unix::fs::symlink(temp.path().join("outside"), plugin.join("skills")).unwrap();
 		write(&data.join("plugins/installed_plugins.json"), &registry(&[("p@m", &plugin, true)]));
 
-		let resolved = ClaudePlugins::resolve(&data, temp.path(), None);
+		let resolved = ClaudePlugins::resolve(&data, temp.path(), None, WorkspaceTrust::Untrusted);
 
 		let components = resolved.plugins[0].claude_components().unwrap();
 		assert!(components.skills.is_empty(), "{:?}", components.skills);
@@ -1774,7 +1859,7 @@ mod tests {
 		);
 		write(&data.join("plugins/installed_plugins.json"), &registry(&[("p@m", &plugin, true)]));
 
-		let resolved = ClaudePlugins::resolve(&data, temp.path(), None);
+		let resolved = ClaudePlugins::resolve(&data, temp.path(), None, WorkspaceTrust::Untrusted);
 
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 		let hooks = &resolved.plugins[0].claude_components().unwrap().hooks;
@@ -1823,8 +1908,8 @@ mod tests {
 			write(&self.home.registry(), body);
 		}
 
-		fn resolve(&self) -> ClaudePlugins {
-			ClaudePlugins::resolve(&self.data, &self.project, Some(&self.home))
+		fn resolve(&self, trust: WorkspaceTrust) -> ClaudePlugins {
+			ClaudePlugins::resolve(&self.data, &self.project, Some(&self.home), trust)
 		}
 	}
 
@@ -1863,7 +1948,7 @@ mod tests {
 		};
 		let before = snapshot(fixture.home.config_dir());
 
-		let resolved = fixture.resolve();
+		let resolved = fixture.resolve(WorkspaceTrust::Untrusted);
 
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 		assert_eq!(resolved.plugins.len(), 1);
@@ -1875,7 +1960,7 @@ mod tests {
 		assert_eq!(snapshot(fixture.home.config_dir()), before, "~/.claude stays byte-identical");
 		// Without a Claude Code home nothing of Claude's loads.
 		assert!(
-			ClaudePlugins::resolve(&fixture.data, &fixture.project, None)
+			ClaudePlugins::resolve(&fixture.data, &fixture.project, None, WorkspaceTrust::Untrusted)
 				.plugins
 				.is_empty()
 		);
@@ -1896,7 +1981,7 @@ mod tests {
 			&registry(&[("dup@m", &omp_root, true)]),
 		);
 
-		let resolved = fixture.resolve();
+		let resolved = fixture.resolve(WorkspaceTrust::Untrusted);
 
 		assert_eq!(resolved.plugins.len(), 1, "{:?}", resolved.plugins);
 		assert_eq!(resolved.plugins[0].source, PluginSource::Omp);
@@ -1915,16 +2000,17 @@ mod tests {
 			&fixture.home.config_dir().join("settings.json"),
 			r#"{"theme":"dark","enabledPlugins":{"off@m":false,"other@m":"yes"}}"#,
 		);
-		let resolved = fixture.resolve();
+		let resolved = fixture.resolve(WorkspaceTrust::Untrusted);
 		assert!(resolved.plugins.is_empty(), "{:?}", resolved.plugins);
 		assert!(resolved.diagnostics.is_empty(), "{:?}", resolved.diagnostics);
 
-		// The project's local settings are a later layer and win.
+		// The project's local settings are a later layer and win for a
+		// trusted workspace.
 		write(
 			&fixture.project.join(".claude/settings.local.json"),
 			r#"{"enabledPlugins":{"off@m":true}}"#,
 		);
-		assert_eq!(fixture.resolve().plugins.len(), 1);
+		assert_eq!(fixture.resolve(WorkspaceTrust::Trusted).plugins.len(), 1);
 	}
 
 	#[test]
@@ -1940,7 +2026,7 @@ mod tests {
 			claude_entry("local", &there, Some(&elsewhere)),
 		));
 
-		let resolved = fixture.resolve();
+		let resolved = fixture.resolve(WorkspaceTrust::Untrusted);
 
 		let ids = resolved
 			.plugins
@@ -1954,6 +2040,6 @@ mod tests {
 			&fixture.project.join(".claude/settings.json"),
 			r#"{"enabledPlugins":{"there@m":true}}"#,
 		);
-		assert_eq!(fixture.resolve().plugins.len(), 2);
+		assert_eq!(fixture.resolve(WorkspaceTrust::Trusted).plugins.len(), 2);
 	}
 }

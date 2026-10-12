@@ -784,6 +784,7 @@ mod tests {
 		ctx: &Arc<Ctx>,
 		cfg: &Arc<dyn omp_con::CfgLoader>,
 	) -> crate::subagent::spawn::TaskSessionTool {
+		use omp_ext::workspace_trust::TrustDecision;
 		let scratch = std::env::temp_dir();
 		let (env, _transport) = omp_env::EnvClient::in_process(0);
 		crate::subagent::spawn::TaskSessionTool::new(
@@ -796,6 +797,7 @@ mod tests {
 			env,
 			omp_core::Str::new_static("main"),
 			omp_core::Str::new_static("provider/model"),
+			TrustDecision::Untrusted,
 		)
 	}
 

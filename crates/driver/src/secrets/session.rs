@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc};
 
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_secrets::{
 	builtins::{credential_rules, placeholder_key_rule},
 	obfuscator::SecretObfuscator,
@@ -26,15 +27,18 @@ pub struct SecretSessionSnapshot {
 
 impl SecretSessionSnapshot {
 	/// Builds a snapshot at an explicit configuration or extension-activation
-	/// boundary.
+	/// boundary. The project file applies only under a
+	/// [`WorkspaceTrust::Trusted`] `trust`
+	/// ([`load_secret_rules`]).
 	pub fn build(
 		generation: u64,
 		global_config: &Path,
 		project_config: &Path,
 		project_root: &Path,
+		trust: WorkspaceTrust,
 		sealed_extension_rules: impl IntoIterator<Item = SecretRule>,
 	) -> Result<Self, SecretSessionError> {
-		let mut configured = load_secret_rules(global_config, project_config, project_root)?;
+		let mut configured = load_secret_rules(global_config, project_config, project_root, trust)?;
 		configured.extend(sealed_extension_rules);
 		configured.extend(collect_env_secret_rules());
 		let needs_key = rules_need_placeholder_key(&configured);

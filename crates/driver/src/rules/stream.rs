@@ -34,7 +34,10 @@ use omp_agent::{
 	},
 };
 use omp_core::Str;
-use omp_ext::claude_plugin::{ClaudeCodeHome, ClaudePlugins};
+use omp_ext::{
+	claude_plugin::{ClaudeCodeHome, ClaudePlugins},
+	workspace_trust::WorkspaceTrust,
+};
 
 use crate::{
 	discovery::rules::{ActiveRules, Rule, Warning},
@@ -190,8 +193,9 @@ pub struct StreamRuleInspector {
 
 impl StreamRuleInspector {
 	/// Discovers rules for `project_root` the way kernel composition does
-	/// (installed plugins resolved under `data_dir`) and compiles the stream
-	/// conditions `agent` admits under the policy convars of `con`.
+	/// (installed plugins resolved under `data_dir` and the workspace's
+	/// `trust`) and compiles the stream conditions `agent` admits under the
+	/// policy convars of `con`.
 	///
 	/// # Errors
 	///
@@ -202,11 +206,12 @@ impl StreamRuleInspector {
 		project_root: &Path,
 		agent: Option<AgentName>,
 		con: &omp_con::Ctx,
+		trust: WorkspaceTrust,
 	) -> Result<Self, InspectError> {
 		let home = omp_core::dirs::home_dir().ok_or(omp_core::dirs::DataDirError::HomeUnset)?;
 		let config_root = omp_core::dirs::user_config_root()?;
 		let plugins =
-			ClaudePlugins::resolve(data_dir, project_root, ClaudeCodeHome::detect().as_ref());
+			ClaudePlugins::resolve(data_dir, project_root, ClaudeCodeHome::detect().as_ref(), trust);
 		let rules = ActiveRules::discover(project_root, &home, &config_root, &plugins);
 		Ok(Self::new(Arc::new(rules), agent.unwrap_or_else(|| MAIN_AGENT.to_owned()), con))
 	}

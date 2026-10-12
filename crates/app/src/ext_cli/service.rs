@@ -1269,7 +1269,7 @@ mod tests {
 		use omp_driver::discovery::skills::{
 			CLAUDE_PLUGINS_PROVIDER, SkillPolicy, discover, installed_plugin_skill_sources,
 		};
-		use omp_ext::claude_plugin::ClaudePlugins;
+		use omp_ext::{claude_plugin::ClaudePlugins, workspace_trust::WorkspaceTrust};
 
 		let temp = tempfile::tempdir().unwrap();
 		let data_dir = temp.path().join("data");
@@ -1302,7 +1302,7 @@ mod tests {
 			.unwrap();
 		transactions.install("helper@market", false).await.unwrap();
 
-		let plugins = ClaudePlugins::resolve(&data_dir, &project, None);
+		let plugins = ClaudePlugins::resolve(&data_dir, &project, None, WorkspaceTrust::Untrusted);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		let [installed] = plugins.plugins.as_slice() else {
 			panic!("expected one installed plugin: {:?}", plugins.plugins);
@@ -1321,7 +1321,7 @@ mod tests {
 		assert_eq!(triage.provider, CLAUDE_PLUGINS_PROVIDER);
 
 		transactions.set_enabled("helper", false).unwrap();
-		let plugins = ClaudePlugins::resolve(&data_dir, &project, None);
+		let plugins = ClaudePlugins::resolve(&data_dir, &project, None, WorkspaceTrust::Untrusted);
 		assert!(plugins.plugins.is_empty(), "a disabled install never loads");
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 	}

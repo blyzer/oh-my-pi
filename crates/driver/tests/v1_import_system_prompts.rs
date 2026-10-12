@@ -13,6 +13,7 @@ use omp_driver::{
 		plan, run,
 	},
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 
 const PROMPTS: [&str; 3] = ["SYSTEM.md", "APPEND_SYSTEM.md", "TITLE_SYSTEM.md"];
 
@@ -71,7 +72,7 @@ fn v1_system_prompts_land_where_user_prompt_path_reads_them() {
 			assert!(path.starts_with(root.path().join("o2")), "{}", path.display());
 			assert_eq!(fs::read_to_string(&path).expect("imported"), format!("{name} from {tag}\n"));
 			assert_eq!(
-				discover_prompt_file(&project, &home, name)
+				discover_prompt_file(&project, &home, name, WorkspaceTrust::Untrusted)
 					.expect("discover")
 					.as_deref(),
 				Some(format!("{name} from {tag}\n").as_str())
