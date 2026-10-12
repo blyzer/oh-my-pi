@@ -37,6 +37,7 @@ use omp_ext::{
 		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry, REGISTRY_FILE,
 	},
 	plugin_command::{PluginCommandBlocked, PluginLaunchKind},
+	workspace_trust::WorkspaceTrust,
 };
 use omp_proto::toolhost::v1::HookEventId;
 use omp_session::{ComponentRegistry, Session};
@@ -180,7 +181,7 @@ impl Fixture {
 	/// Approves every hook command the plugin currently declares, as
 	/// `omp ext trust hooky@m --approve-commands` does.
 	fn approved(self) -> Self {
-		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
+		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None, WorkspaceTrust::Untrusted);
 		for plugin in &plugins.plugins {
 			for launch in plugin_launches(plugin) {
 				approve_launch(
@@ -198,7 +199,7 @@ impl Fixture {
 
 	/// Every hook launch of the plugin the operator has not approved.
 	fn blocked(&self) -> Vec<PluginCommandBlocked> {
-		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
+		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None, WorkspaceTrust::Untrusted);
 		let agent_plugins = McpConfigPaths::new(&self.scratch.path().join("home/.o2"), &self.root)
 			.with_command_approvals(plugins.command_approvals.clone());
 		blocked_launches(&plugins, &agent_plugins, &omp_envd::mcp::McpSettings::default())
@@ -218,7 +219,7 @@ impl Fixture {
 	/// A kernel and session in the workspace, the session's tool authority
 	/// installed as `compose_kernel` installs it and the plugin host attached.
 	async fn harness(&self, command: &str, kind: Kind) -> Harness {
-		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None);
+		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None, WorkspaceTrust::Untrusted);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		let state = self.scratch.path().join("state");
 		std::fs::create_dir_all(&state).expect("state");
@@ -876,7 +877,8 @@ async fn an_unsupported_event_is_named_once_per_plugin() {
 		r#"{"name":"hooky","hooks":{"CwdChanged":[{"hooks":[{"type":"command","command":"c"}]}]}}"#,
 	)
 	.expect("manifest");
-	let plugins = ClaudePlugins::resolve(&fixture.data, &fixture.root, None);
+	let plugins =
+		ClaudePlugins::resolve(&fixture.data, &fixture.root, None, WorkspaceTrust::Untrusted);
 	let unsupported = plugins
 		.unsupported_hook_events()
 		.map(ToString::to_string)

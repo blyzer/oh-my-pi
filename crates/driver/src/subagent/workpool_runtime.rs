@@ -28,6 +28,7 @@ use super::{
 	},
 	yield_assembly,
 };
+use crate::workspace_trust::WorkspaceTrustSource;
 
 /// Driver-owned launcher that keeps one composed child kernel and isolated
 /// workspace alive across every batch assigned to that worker.
@@ -403,9 +404,7 @@ async fn run_kernel_worker_inner(
 		model_override: true,
 		tool_registry: run.forwarded_registry.clone(),
 		agent: Some(AgentName::new(run.request.agent.clone())),
-		workspace_trust: crate::workspace_trust::WorkspaceTrustSource::Fixed(
-			run.workspace_trust.clone(),
-		),
+		workspace_trust: WorkspaceTrustSource::Fixed(run.workspace_trust.clone()),
 		..crate::headless::kernel::KernelOptions::default()
 	};
 	let composed = crate::headless::kernel::compose_kernel(

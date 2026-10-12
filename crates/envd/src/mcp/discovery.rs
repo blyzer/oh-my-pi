@@ -918,6 +918,8 @@ fn strip_json_comments(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+	use omp_ext::{claude_plugin::ClaudePlugins, workspace_trust::WorkspaceTrust};
+
 	use super::*;
 	use crate::mcp::{AgentPluginOrigin, AgentPluginRoot, McpSettings};
 
@@ -1347,7 +1349,7 @@ mod tests {
 			&plugin,
 			true,
 		)]);
-		let mut plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
+		let mut plugins = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 		let launches = crate::plugin_commands::plugin_launches(&plugins.plugins[0]);
 		assert_eq!(
 			launches
@@ -1402,7 +1404,7 @@ mod tests {
 			("inline@market", &inline, true),
 			("quiet@market", &quiet, false),
 		]);
-		let mut plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
+		let mut plugins = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		crate::plugin_commands::approve_all(&mut plugins.plugins);
 

@@ -53,7 +53,9 @@ use omp_dom::{Event, Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, 
 use omp_driver::{
 	collab::admission::{GuestAction, GuestAgentCommand},
 	headless::kernel::{ComposedInference, KernelOptions, SessionHome},
+	workspace_trust::WorkspaceTrustSource,
 };
+use omp_ext::workspace_trust::TrustDecision;
 use omp_journal::{EntryId, blob::BlobStore, data::Attachment, gc::copy_journal_blobs};
 use omp_proto::{
 	collab::v1::{ContextUsage, ModelMetadata, SessionStateUpdate},
@@ -343,8 +345,8 @@ fn model_metadata(ctx: &Ctx, fallback: &str, catalog: Option<&Catalog>) -> Model
 			.model(&omp_catalog::ModelKey::from(identifier))
 			.or_else(|| catalog.resolve_alias(identifier))
 	});
-	if let Some(spec) = spec {
-		ModelMetadata {
+	match spec {
+		Some(spec) => ModelMetadata {
 			id:             spec.key.to_string(),
 			name:           spec.display_name.to_string(),
 			provider:       spec
@@ -356,15 +358,16 @@ fn model_metadata(ctx: &Ctx, fallback: &str, catalog: Option<&Catalog>) -> Model
 				.limits
 				.context_window
 				.map_or(0, |window| u32::try_from(window).unwrap_or(u32::MAX)),
-		}
-	} else {
-		let (provider, _) = identifier.split_once('/').unwrap_or(("", identifier));
-		ModelMetadata {
-			id:             identifier.to_owned(),
-			name:           identifier.to_owned(),
-			provider:       provider.to_owned(),
-			context_window: 0,
-		}
+		},
+		None => {
+			let (provider, _) = identifier.split_once('/').unwrap_or(("", identifier));
+			ModelMetadata {
+				id:             identifier.to_owned(),
+				name:           identifier.to_owned(),
+				provider:       provider.to_owned(),
+				context_window: 0,
+			}
+		},
 	}
 }
 
@@ -580,7 +583,7 @@ struct TanDone {
 }
 
 /// The chat controller: session owner, kernel driver, command applier.
-pub struct Controller<C = ComposedInference> {
+pub(crate) struct Controller<C = ComposedInference> {
 	kernel:         Kernel<C>,
 	lifecycle:      Option<LifecycleHooks>,
 	session:        Session,
@@ -1179,7 +1182,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 
 	async fn forward_guest(&mut self, command: omp_driver::collab::session::CollabOwnerCommand) {
 		if let Err(error) = self.collab.request(command).await {
-			self.reply(Severity::Error, format!("Collaboration request failed: {error}"));
+			self.reply(Severity::Error, &format!("Collaboration request failed: {error}"));
 		}
 	}
 
@@ -2059,7 +2062,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					.home
 					.workspace_trust
 					.as_ref()
-					.unwrap_or(&omp_ext::workspace_trust::TrustDecision::Untrusted),
+					.unwrap_or(&TrustDecision::Untrusted),
 			},
 		)
 		.map_err(ServiceError::failed)?;
@@ -2421,7 +2424,8 @@ impl<C: omp_agent::Inference> Controller<C> {
 			.session
 			.journal_path()
 			.parent()
-			.map_or_else(|| PathBuf::from("."), PathBuf::from);
+			.map(PathBuf::from)
+			.unwrap_or_else(|| PathBuf::from("."));
 		let summary = omp_journal::blob::BlobStore::open(root)
 			.into_diagnostic()?
 			.put(b"")
@@ -2648,50 +2652,53 @@ impl<C: omp_agent::Inference> Controller<C> {
 			"vibe" => Box::new(Vibe::new()),
 			"goal" => {
 				let verb = args.first().map(Str::as_str).unwrap_or_default();
-				if verb == "budget" {
-					let (handle, _) = omp_agent::find_director(self.session.dom(), "goal")
-						.ok_or(DirectorFailure::NotActive)?;
-					let budget = match args.get(1) {
-						None => Value::Null,
-						Some(value) => {
-							let parsed = value
-								.parse::<i64>()
-								.ok()
-								.filter(|budget| *budget > 0)
-								.ok_or_else(|| DirectorFailure::InvalidArgument {
-									name:  "token budget",
-									value: value.clone(),
-								})?;
-							Value::Int(parsed)
-						},
-					};
-					let cause = self.session.head().ok_or(DirectorFailure::NoHead)?;
-					self.session.patch(Txn {
-						cause,
-						label: Some(Str::new_static("goal.budget")),
-						ops: vec![
-							Op::Set {
-								h:     handle,
-								prop:  PropKey::Custom(Str::new_static("state/token_budget")),
-								value: budget,
+				match verb {
+					"budget" => {
+						let (handle, _) = omp_agent::find_director(self.session.dom(), "goal")
+							.ok_or(DirectorFailure::NotActive)?;
+						let budget = match args.get(1) {
+							None => Value::Null,
+							Some(value) => {
+								let parsed = value
+									.parse::<i64>()
+									.ok()
+									.filter(|budget| *budget > 0)
+									.ok_or_else(|| DirectorFailure::InvalidArgument {
+										name:  "token budget",
+										value: value.clone(),
+									})?;
+								Value::Int(parsed)
 							},
-							Op::Set {
-								h:     handle,
-								prop:  PropKey::Custom(Str::new_static("state/continuation_armed")),
-								value: Value::Bool(true),
-							},
-						],
-					})?;
-					return Ok(());
-				} else {
-					let objective = args.get(1).cloned().unwrap_or_default();
-					if active {
-						// Replacement is a new accountable objective: identity,
-						// usage, budget, and completion evidence reset together.
-						stack.exit(&mut self.session, id)?;
-						stack = omp_agent::DirectorStack::from_dom(self.session.dom(), &registry);
-					}
-					Box::new(Goal::new(objective, None))
+						};
+						let cause = self.session.head().ok_or(DirectorFailure::NoHead)?;
+						self.session.patch(Txn {
+							cause,
+							label: Some(Str::new_static("goal.budget")),
+							ops: vec![
+								Op::Set {
+									h:     handle,
+									prop:  PropKey::Custom(Str::new_static("state/token_budget")),
+									value: budget,
+								},
+								Op::Set {
+									h:     handle,
+									prop:  PropKey::Custom(Str::new_static("state/continuation_armed")),
+									value: Value::Bool(true),
+								},
+							],
+						})?;
+						return Ok(());
+					},
+					_ => {
+						let objective = args.get(1).cloned().unwrap_or_default();
+						if active {
+							// Replacement is a new accountable objective: identity,
+							// usage, budget, and completion evidence reset together.
+							stack.exit(&mut self.session, id)?;
+							stack = omp_agent::DirectorStack::from_dom(self.session.dom(), &registry);
+						}
+						Box::new(Goal::new(objective, None))
+					},
 				}
 			},
 			"loop_mode" => {
@@ -3006,12 +3013,12 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let live = Arc::clone(&self.home.live);
 		let done = self.tan_tx.clone();
 		let prompt = Str::new(format!("{TAN_CONTEXT}\n\n{work}"));
-		let workspace_trust = omp_driver::workspace_trust::WorkspaceTrustSource::Fixed(
+		let workspace_trust = WorkspaceTrustSource::Fixed(
 			self
 				.home
 				.workspace_trust
 				.clone()
-				.unwrap_or(omp_ext::workspace_trust::TrustDecision::Untrusted),
+				.unwrap_or(TrustDecision::Untrusted),
 		);
 		tokio::spawn(async move {
 			let options = KernelOptions {
@@ -3139,7 +3146,8 @@ impl<C: omp_agent::Inference> Controller<C> {
 					_ => (
 						items
 							.last()
-							.map_or_else(|| Str::new_static("Tasks"), |(_, _, phase)| phase.clone()),
+							.map(|(_, _, phase)| phase.clone())
+							.unwrap_or_else(|| Str::new_static("Tasks")),
 						text,
 					),
 				};

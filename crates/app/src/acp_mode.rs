@@ -462,13 +462,13 @@ where
 		let result = match method {
 			"initialize" => {
 				let version = params.get("protocolVersion").and_then(Value::as_u64);
-				if version == Some(1) {
+				if version != Some(1) {
+					Err((-32602, "unsupported ACP protocol version"))
+				} else {
 					initialized = true;
 					let capabilities = ClientCapabilities::from_initialize(&params);
 					client.initialize(capabilities);
 					Ok(initialize_response(capabilities.auth.terminal))
-				} else {
-					Err((-32602, "unsupported ACP protocol version"))
 				}
 			},
 			"authenticate" => {
@@ -628,7 +628,9 @@ where
 				Err((-32000, "unsupported ACP session"))
 			},
 			"session/set_mode" => {
-				if params.get("modeId").and_then(Value::as_str) == Some("default") {
+				if params.get("modeId").and_then(Value::as_str) != Some("default") {
+					Err((-32602, "unsupported ACP session mode"))
+				} else {
 					output_tx
 						.send(session_update(
 							session_id.as_str(),
@@ -639,8 +641,6 @@ where
 						))
 						.into_diagnostic()?;
 					Ok(json!({}))
-				} else {
-					Err((-32602, "unsupported ACP session mode"))
 				}
 			},
 			"session/set_config_option" if !targets_session(&params, session_id.as_str()) => {
@@ -649,7 +649,9 @@ where
 			"session/set_config_option" => {
 				let valid = params.get("configId").and_then(Value::as_str) == Some("model")
 					&& params.get("value").and_then(Value::as_str) == Some(home.model.as_str());
-				if valid {
+				if !valid {
+					Err((-32602, "unsupported ACP session config option"))
+				} else {
 					let state = session_state(home.model.as_str());
 					output_tx
 						.send(session_update(
@@ -661,8 +663,6 @@ where
 						))
 						.into_diagnostic()?;
 					Ok(json!({"configOptions": state["configOptions"].clone()}))
-				} else {
-					Err((-32602, "unsupported ACP session config option"))
 				}
 			},
 			"session/prompt" if closed => Err((-32000, "ACP session is closed")),
@@ -698,7 +698,8 @@ where
 								let text = source.to_string();
 								let message_id = session
 									.head()
-									.map_or_else(|| "error".to_owned(), |entry| entry.to_string());
+									.map(|entry| entry.to_string())
+									.unwrap_or_else(|| "error".to_owned());
 								let _ = turn_output.send(session_update(
 									turn_session.as_str(),
 									json!({
@@ -1269,7 +1270,7 @@ fn list_sessions(home: &SessionHome, params: &Map<String, Value>) -> Result<Valu
 		.skip(offset)
 		.take(SESSION_PAGE_SIZE)
 		.map(|row| {
-			let size = fs::metadata(&row.path).map_or(0, |meta| meta.len());
+			let size = fs::metadata(&row.path).map(|meta| meta.len()).unwrap_or(0);
 			json!({
 				"sessionId": row.id,
 				"cwd": row.cwd,

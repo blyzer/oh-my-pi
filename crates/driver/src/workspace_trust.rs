@@ -13,6 +13,10 @@
 //! The decision is journaled once per session on `<meta>`
 //! ([`journal_decision`]): a session that already records the same decision
 //! records nothing again.
+//!
+//! A composition that is not trusted tells the operator once what it withheld
+//! ([`WithheldInputs`]), a typed [`WITHHELD_NOTICE`] notice: nothing when
+//! the workspace holds no gated input.
 
 use std::{fs, path::Path};
 
@@ -21,14 +25,22 @@ use omp_dom::{Op, PropKey, Txn, Value};
 use omp_ext::{
 	trust::{GrantsFile, grants_path},
 	workspace_trust::{
-		CanonicalHome, TrustDecision, evaluate,
+		CanonicalHome, TrustDecision, TrustDecisionKind, WorkspaceTrust, evaluate,
 		inventory::{InventoryBudget, inventory},
 	},
 };
 use omp_session::{Session, SessionError};
+use serde::{Deserialize, Serialize};
 
 /// `<meta>` property holding the session's journaled [`TrustDecision`].
 pub const WORKSPACE_TRUST_PROP: &str = "workspace-trust";
+
+/// Name of the typed notice reporting the inputs an untrusted workspace
+/// withholds ([`WithheldInputs`]).
+pub const WITHHELD_NOTICE: &str = "workspace-trust-withheld";
+
+/// How many withheld inputs a [`WithheldInputs`] names; the rest are counted.
+const NAMED_INPUTS: usize = 8;
 
 /// Where a composition's [`TrustDecision`] comes from.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -137,6 +149,84 @@ pub fn journal_decision(
 		}],
 	})?;
 	Ok(true)
+}
+
+/// The gated inputs a workspace that is not trusted withholds, reported once
+/// to the operator as a typed [`WITHHELD_NOTICE`] notice.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WithheldInputs {
+	/// The decision that withholds them.
+	pub decision: TrustDecisionKind,
+	/// How many gated inputs are present.
+	pub count:    usize,
+	/// The first of them, as paths relative to the workspace root.
+	pub named:    Vec<Str>,
+}
+
+impl WithheldInputs {
+	/// What `decision` withholds of the workspace at `project_root`; `None`
+	/// when it trusts the workspace or the workspace holds no gated input.
+	/// A workspace whose inputs cannot be inventoried reports nothing here:
+	/// [`evaluate_workspace`] already logged why it failed closed.
+	#[must_use]
+	pub fn of(decision: &TrustDecision, data_dir: &Path, project_root: &Path) -> Option<Self> {
+		if decision.trust() == WorkspaceTrust::Trusted {
+			return None;
+		}
+		let inputs = inventory(project_root, data_dir, &InventoryBudget::default())
+			.inspect_err(|error| {
+				tracing::debug!(
+					error = error as &(dyn std::error::Error + 'static),
+					"withheld workspace inputs could not be listed"
+				);
+			})
+			.ok()?;
+		let mut count = 0;
+		let mut named = Vec::new();
+		for entry in inputs.present() {
+			count += 1;
+			if named.len() < NAMED_INPUTS {
+				named.push(Str::new(String::from_utf8_lossy(entry.path())));
+			}
+		}
+		(count > 0).then(|| Self { decision: decision.kind(), count, named })
+	}
+
+	/// The one-line notice body.
+	#[must_use]
+	pub fn body(&self) -> Str {
+		let mut listed = self.named.join(", ");
+		if let Some(more) = self
+			.count
+			.checked_sub(self.named.len())
+			.filter(|more| *more > 0)
+		{
+			listed.push_str(", and ");
+			listed.push_str(&more.to_string());
+			listed.push_str(" more");
+		}
+		let noun = if self.count == 1 { "input" } else { "inputs" };
+		Str::new(format!(
+			"Workspace {}: {} project {noun} withheld ({listed}) until this workspace is trusted.",
+			self.decision, self.count
+		))
+	}
+
+	/// Whether the live branch of `session` already holds this report.
+	#[must_use]
+	pub fn told(&self, session: &Session) -> bool {
+		let dom = session.dom();
+		let name = PropKey::Custom(Str::new_static("name"));
+		let data = PropKey::from(omp_dom::PropId::Data);
+		dom.handles()
+			.filter_map(|handle| dom.get(handle))
+			.any(|node| {
+				node.tag == omp_dom::Tag::Known(omp_dom::KnownTag::Notice)
+					&& node.prop(&name).and_then(Value::as_str) == Some(WITHHELD_NOTICE)
+					&& matches!(node.prop(&data), Some(Value::Json(payload))
+					if serde_json::from_str::<Self>(payload.get()).is_ok_and(|told| told == *self))
+			})
+	}
 }
 
 #[cfg(test)]

@@ -8158,6 +8158,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tonic",
+ "tower",
  "tracing",
  "url",
  "windows-sys 0.61.2",

@@ -21,6 +21,7 @@ use omp_ai::{
 use omp_core::{FastHashMap, Hash32, SecretString, Str, StrMut, Ulid, sf};
 use omp_dom::{Op, PropKey, Txn, Value};
 use omp_envd::fetch_host::{FetchHostNamer, NETWORK_APPROVAL_KIND, NamedFetches};
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::{
 	Abort, BlobRef as ToolBlobRef, CallOutcome, Claims, Part as ToolPart, Precedence, Presentation,
@@ -33,9 +34,12 @@ use parking_lot::{Mutex, RwLock};
 mod con_journal;
 
 use super::{HeadlessError, gateway::GatewayInference, reflection::bind_reflection};
-use crate::registry::{
-	InferenceSessionOverrides, PinnedRoutes, ProductionInference as ProductionStack,
-	production_inference_for_session,
+use crate::{
+	registry::{
+		InferenceSessionOverrides, PinnedRoutes, ProductionInference as ProductionStack,
+		production_inference_for_session,
+	},
+	workspace_trust::{WITHHELD_NOTICE, WithheldInputs, WorkspaceTrustSource, journal_decision},
 };
 
 /// Stable prompt projection overrides supplied by one invocation.
@@ -198,7 +202,7 @@ pub struct KernelOptions {
 	/// Where the workspace trust decision comes from (host-supplied, never a
 	/// convar): evaluated against the operator's grant file by default, or a
 	/// decision the host or parent session already holds.
-	pub workspace_trust:    crate::workspace_trust::WorkspaceTrustSource,
+	pub workspace_trust:    WorkspaceTrustSource,
 }
 
 /// How composition settles the launch model once runtime discovery has
@@ -500,11 +504,12 @@ fn convar_reasoning(
 	else {
 		return omp_ai::Setting::Unset;
 	};
-	let requested = if let Ok(effort) = thinking.parse::<omp_catalog::ReasoningEffort>() {
-		omp_catalog::ThinkingEffort::from(effort)
-	} else {
-		tracing::warn!(value = thinking, "ai_thinking is not a reasoning effort; ignored");
-		return omp_ai::Setting::Unset;
+	let requested = match thinking.parse::<omp_catalog::ReasoningEffort>() {
+		Ok(effort) => omp_catalog::ThinkingEffort::from(effort),
+		Err(_) => {
+			tracing::warn!(value = thinking, "ai_thinking is not a reasoning effort; ignored");
+			return omp_ai::Setting::Unset;
+		},
 	};
 	let wire_model = omp_catalog::WireModelId::from_ref(model.as_str());
 	let effort = match spec
@@ -695,7 +700,7 @@ enum OutcomeReplicationError {
 	},
 }
 
-const fn resumable_blob_error(error: &omp_env::ClientError) -> bool {
+fn resumable_blob_error(error: &omp_env::ClientError) -> bool {
 	matches!(
 		error,
 		omp_env::ClientError::TransportClosed
@@ -1028,6 +1033,25 @@ impl PostureNotice {
 				body: pending.posture.body(),
 			}));
 	}
+}
+
+/// Posts `withheld` as one typed [`WITHHELD_NOTICE`] notice on `mailbox`; the
+/// kernel journals it under the session's next turn, as it journals the
+/// approval-posture report.
+fn post_withheld_notice(mailbox: &flume::Sender<omp_agent::Up>, withheld: &WithheldInputs) {
+	let data = match serde_json::value::to_raw_value(withheld) {
+		Ok(data) => data,
+		Err(error) => {
+			tracing::warn!(%error, "the withheld workspace inputs could not be encoded");
+			return;
+		},
+	};
+	let _ = mailbox.send(omp_agent::Up::Env(omp_agent::EnvEvent::TypedNotice {
+		kind: Str::new_static("warn"),
+		name: Str::new_static(WITHHELD_NOTICE),
+		data,
+		body: withheld.body(),
+	}));
 }
 
 impl SettingsAdmission {
@@ -1403,11 +1427,14 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 							return;
 						}
-						let hash: [u8; 32] = if let Ok(hash) = details.hash.as_ref().try_into() { hash } else {
-										tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
-										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-										return;
-									};
+						let hash: [u8; 32] = match details.hash.as_ref().try_into() {
+							Ok(hash) => hash,
+							Err(_) => {
+								tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
+								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+								return;
+							},
+						};
 						let expected_hash = Hash32::new(hash);
 						let max_bytes = u64::try_from(omp_proto::bounds::FRAME_MAX_BYTES)
 							.expect("protocol frame limit fits u64");
@@ -1509,11 +1536,14 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 							return;
 						}
-						let visibility = if let Ok(visibility) = tool_visibility_spans(verdict.visibility, &verdict.parts) { visibility } else {
-										tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
-										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-										return;
-									};
+						let visibility = match tool_visibility_spans(verdict.visibility, &verdict.parts) {
+							Ok(visibility) => visibility,
+							Err(()) => {
+								tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
+								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+								return;
+							},
+						};
 						let mut parts = match replicate_verdict_parts(
 							&client,
 							&outcome_store,
@@ -2124,7 +2154,7 @@ impl ComposedInference {
 
 	/// Borrows the project environment client retained by this composition.
 	#[must_use]
-	pub const fn environment_client(&self) -> &omp_env::EnvClient {
+	pub fn environment_client(&self) -> &omp_env::EnvClient {
 		match self {
 			Self::Production(inference) => inference._environment.client(),
 			Self::Gateway { _environment, .. } => _environment.client(),
@@ -2188,7 +2218,7 @@ impl ComposedInference {
 				.ok()?;
 				Some(SpeechRewriteClient::Production {
 					registry: inference.stack.registry.clone(),
-					model:    selected.model,
+					model:    selected.model.clone(),
 				})
 			},
 			Self::Gateway { inference, .. } => {
@@ -2463,7 +2493,10 @@ pub async fn compose_kernel(
 		crate::discovery::native::NativeAdmissionOptions {
 			explicit_roots:    &options.extensions.native_roots,
 			mode:              native_mode,
-			include_workspace: options.extensions.include_workspace,
+			// The workspace's own extensions load only while it is trusted;
+			// the operator's user-level ones are never gated.
+			include_workspace: options.extensions.include_workspace
+				&& workspace_trust.trust() == WorkspaceTrust::Trusted,
 			setting_overrides: &options.extensions.setting_overrides,
 			disabled:          &disabled_extensions,
 		},
@@ -2503,6 +2536,7 @@ pub async fn compose_kernel(
 			data_dir,
 			&project_root,
 			omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+			workspace_trust.trust(),
 		);
 		// The launching host surfaces these once; a host-less composition
 		// (child, maintenance, or tool kernel) only records them.
@@ -2861,7 +2895,7 @@ pub async fn compose_kernel(
 	}
 	// The session records the trust decision it runs under once; a resumed
 	// session already holding it records nothing again.
-	crate::workspace_trust::journal_decision(&mut session, &workspace_trust)?;
+	journal_decision(&mut session, &workspace_trust)?;
 	let agent = kernel_agent(options.agent.as_deref(), session.dom());
 	rule_scope.select(agent.clone());
 	let compiled = omp_agent::directors::stream_rules::StreamRuleSet::compile(
@@ -3006,6 +3040,15 @@ pub async fn compose_kernel(
 	kernel = kernel
 		.with_session_authority(Arc::clone(&live_sessions) as Arc<dyn omp_agent::SessionAuthority>);
 	kernel.reconcile_jobs(&mut session)?;
+	// A top-level session that is not trusted is told once what the
+	// workspace withholds; a child inherits its parent's decision and
+	// report, and a session already holding this report is not told again.
+	if options.parent_session.is_none()
+		&& let Some(withheld) = WithheldInputs::of(&workspace_trust, data_dir, &project_root)
+		&& !withheld.told(&session)
+	{
+		post_withheld_notice(&kernel.mailbox(), &withheld);
+	}
 	let id = journal_path
 		.file_stem()
 		.and_then(|name| name.to_str())
@@ -3061,7 +3104,7 @@ pub async fn compose_kernel(
 	live_sessions.register(name.clone(), crate::sessions::KernelHandle {
 		id: crate::sessions::SessionId::new(id.clone()),
 		name: name.clone(),
-		up,
+		up: up.clone(),
 		snapshot: Arc::new(RwLock::new(session.dom().snapshot())),
 		topology,
 		relay,
@@ -3249,7 +3292,7 @@ impl SessionHome {
 	/// Journals [`Self::workspace_trust`] on `session` unless it records it.
 	fn journal_trust(&self, session: &mut Session) -> Result<(), omp_session::SessionError> {
 		if let Some(decision) = &self.workspace_trust {
-			crate::workspace_trust::journal_decision(session, decision)?;
+			journal_decision(session, decision)?;
 		}
 		Ok(())
 	}
@@ -3410,7 +3453,7 @@ fn apply_model_override(
 	if explicit {
 		omp_agent::AI_MODEL
 			.set(ctx, Str::new(model))
-			.map_err(std::io::Error::other)?;
+			.map_err(|error| std::io::Error::other(error))?;
 	}
 	Ok(())
 }

@@ -79,6 +79,7 @@ pub(super) fn report(state: &ServiceState) -> ServiceResult<PluginsReport> {
 		&state.data_dir,
 		&state.project,
 		omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+		state.workspace_trust,
 	);
 	for plugin in claude_code
 		.plugins
@@ -241,6 +242,7 @@ pub(super) fn blocked_commands(state: &ServiceState) -> ServiceResult<Vec<Blocke
 		&state.project,
 		&state.plugin_dirs,
 		&omp_envd::mcp::McpSettings::from_con(&state.con),
+		state.workspace_trust,
 	)
 	.map_err(ServiceError::failed)?;
 	Ok(blocked
@@ -274,9 +276,14 @@ pub(super) fn approve_commands(
 	use omp_ext::plugin_command::PluginId;
 
 	let plugin = PluginId::from_ref(plugin);
-	let (sets, _) =
-		resolve_command_sets(&state.data_dir, &state.project, &state.plugin_dirs, plugin)
-			.map_err(ServiceError::failed)?;
+	let (sets, _) = resolve_command_sets(
+		&state.data_dir,
+		&state.project,
+		&state.plugin_dirs,
+		plugin,
+		state.workspace_trust,
+	)
+	.map_err(ServiceError::failed)?;
 	let selection = match &digest {
 		Some(digest) => CommandSelection::Digests(std::slice::from_ref(digest)),
 		None => CommandSelection::All,

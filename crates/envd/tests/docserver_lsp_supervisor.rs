@@ -12,6 +12,7 @@ use omp_envd::docserver::{
 use omp_ext::{
 	claude_plugin::ClaudePlugins,
 	trust::{GrantsFile, PluginCommandGrant, grants_path},
+	workspace_trust::WorkspaceTrust,
 };
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -266,7 +267,7 @@ async fn installed_plugin_server_joins_the_roster_and_starts_with_its_root_expan
 	plugin_fixture(&disabled, "ghost");
 	let data = scratch.join("data");
 	install_plugins(&data, &[("enabled@m", &enabled, true), ("disabled@m", &disabled, false)]);
-	let unapproved = ClaudePlugins::resolve(&data, &project, None);
+	let unapproved = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 	assert!(unapproved.diagnostics.is_empty(), "{:?}", unapproved.diagnostics);
 	assert_eq!(
 		omp_envd::plugin_commands::blocked_launches(
@@ -278,7 +279,7 @@ async fn installed_plugin_server_joins_the_roster_and_starts_with_its_root_expan
 		"the enabled plugin's server awaits approval"
 	);
 	approve_all(&data, &unapproved);
-	let plugins = ClaudePlugins::resolve(&data, &project, None);
+	let plugins = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 	assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 	assert!(
 		omp_envd::plugin_commands::blocked_launches(

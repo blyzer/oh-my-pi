@@ -40,6 +40,7 @@ use super::{
 use crate::{
 	headless::kernel::{KernelOptions, compose_kernel},
 	sessions::{KernelHandle, SessionId, SessionRegistry},
+	workspace_trust::WorkspaceTrustSource,
 };
 
 /// Why a settled agent could not be brought back.
@@ -293,9 +294,7 @@ async fn drive(
 		parent_session: Some(child.parent.clone()),
 		model_override: true,
 		agent: Some(AgentName::new(child.agent.clone())),
-		workspace_trust: crate::workspace_trust::WorkspaceTrustSource::Fixed(
-			child.workspace_trust.clone(),
-		),
+		workspace_trust: WorkspaceTrustSource::Fixed(child.workspace_trust.clone()),
 		..KernelOptions::default()
 	};
 	let (mut kernel, mut session, _) =

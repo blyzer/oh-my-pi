@@ -333,18 +333,18 @@ fn hydrate(ctx: &Ctx, dom: &Dom) {
 
 impl omp_agent::SessionStateBridge for ConJournal {
 	fn flush(&self, session: &mut Session) -> Result<(), SessionError> {
-		Self::flush(self, session)
+		ConJournal::flush(self, session)
 	}
 
 	fn resync(&self, dom: &Dom) {
-		Self::resync(self, dom);
+		ConJournal::resync(self, dom);
 	}
 }
 
 struct TurnBoundary(Arc<ConJournal>);
 
 impl LiveComponent for TurnBoundary {
-	fn id(&self) -> &'static str {
+	fn id(&self) -> &str {
 		"con"
 	}
 
@@ -784,6 +784,7 @@ mod tests {
 		ctx: &Arc<Ctx>,
 		cfg: &Arc<dyn omp_con::CfgLoader>,
 	) -> crate::subagent::spawn::TaskSessionTool {
+		use omp_ext::workspace_trust::TrustDecision;
 		let scratch = std::env::temp_dir();
 		let (env, _transport) = omp_env::EnvClient::in_process(0);
 		crate::subagent::spawn::TaskSessionTool::new(
@@ -796,7 +797,7 @@ mod tests {
 			env,
 			omp_core::Str::new_static("main"),
 			omp_core::Str::new_static("provider/model"),
-			omp_ext::workspace_trust::TrustDecision::Untrusted,
+			TrustDecision::Untrusted,
 		)
 	}
 

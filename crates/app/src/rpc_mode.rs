@@ -1177,19 +1177,7 @@ fn observe_subagents(
 					},
 				})),
 				Some(previous) if previous != snapshot => {
-					if matches!(status, "running" | "starting") {
-						events.push(json!({
-							"type": "subagent_progress",
-							"payload": {
-								"id": id,
-								"index": snapshot["index"],
-								"agent": snapshot["agent"],
-								"agentSource": snapshot["agentSource"],
-								"description": snapshot["description"],
-								"progress": snapshot,
-							},
-						}));
-					} else {
+					if !matches!(status, "running" | "starting") {
 						events.push(json!({
 							"type": "subagent_lifecycle",
 							"payload": {
@@ -1199,6 +1187,18 @@ fn observe_subagents(
 								"agentSource": snapshot["agentSource"],
 								"description": snapshot["description"],
 								"status": status,
+							},
+						}));
+					} else {
+						events.push(json!({
+							"type": "subagent_progress",
+							"payload": {
+								"id": id,
+								"index": snapshot["index"],
+								"agent": snapshot["agent"],
+								"agentSource": snapshot["agentSource"],
+								"description": snapshot["description"],
+								"progress": snapshot,
 							},
 						}));
 					}
@@ -2003,10 +2003,12 @@ where
 									.or_else(|| request.params.get("sessionFile").and_then(Value::as_str));
 								let response = match selector {
 									Some(selector) => {
-										let path = request.params.get("sessionFile").and_then(Value::as_str).map_or_else(|| home.sessions_dir.join(format!("{}.oms", safe_session_name(selector))), PathBuf::from);
+										let path = request.params.get("sessionFile").and_then(Value::as_str)
+											.map(PathBuf::from)
+											.unwrap_or_else(|| home.sessions_dir.join(format!("{}.oms", safe_session_name(selector))));
 										match Session::open(&path, omp_session::ComponentRegistry::standard()) {
 											Ok(child_session) => {
-												let next_byte = fs::metadata(&path).map_or(0, |meta| meta.len());
+												let next_byte = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
 												RpcResponse::success(id, command.as_str(), json!({
 													"sessionFile": path,
 													"fromByte": request.params.get("fromByte").and_then(Value::as_u64).unwrap_or(0),
@@ -2090,14 +2092,14 @@ where
 										let exists = runtime.catalog.as_ref().is_none_or(|catalog| {
 											catalog.models().iter().any(|model| model.key.as_str() == key)
 										});
-										if exists {
-														 match apply_model(&mut runtime, &outgoing_tx, &key) {
-															 Ok(()) => RpcResponse::success(id, command.as_str(), model_value(&runtime, &key)).into_diagnostic()?,
-															 Err(source) => RpcResponse::error(id, command.as_str(), source, Some(RpcErrorCode::new("config_error"))),
-														 }
-													 } else {
-														 RpcResponse::error(id, command.as_str(), format!("Model not found: {key}"), Some(RpcErrorCode::new("model_not_found")))
-													 }
+										if !exists {
+											RpcResponse::error(id, command.as_str(), format!("Model not found: {key}"), Some(RpcErrorCode::new("model_not_found")))
+										} else {
+											match apply_model(&mut runtime, &outgoing_tx, &key) {
+												Ok(()) => RpcResponse::success(id, command.as_str(), model_value(&runtime, &key)).into_diagnostic()?,
+												Err(source) => RpcResponse::error(id, command.as_str(), source, Some(RpcErrorCode::new("config_error"))),
+											}
+										}
 									},
 									_ => RpcResponse::error(id, command.as_str(), "set_model requires `provider` and `modelId`", Some(RpcErrorCode::new("invalid_params"))),
 								};

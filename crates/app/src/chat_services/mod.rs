@@ -18,6 +18,7 @@ use omp_chat::{
 };
 use omp_core::{Str, sf};
 use omp_driver::registry::ProductionInference as ProductionStack;
+use omp_ext::workspace_trust::WorkspaceTrust;
 
 mod accounts;
 pub(crate) mod agents;
@@ -53,6 +54,10 @@ pub struct ServiceState {
 	/// `--extension`): `/plugins approve` resolves their commands like the
 	/// session did.
 	pub plugin_dirs:       Vec<PathBuf>,
+	/// The trust the session's workspace runs under: the project's plugin
+	/// registry, `enabledPlugins`, and `secrets.yml` are read only when
+	/// [`WorkspaceTrust::Trusted`].
+	pub workspace_trust:   WorkspaceTrust,
 	/// Project state directory (`sessions/`).
 	pub state_dir:         PathBuf,
 	/// Durable session directory.

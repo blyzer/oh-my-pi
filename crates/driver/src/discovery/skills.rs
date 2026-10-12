@@ -1172,6 +1172,7 @@ mod tests {
 	use std::fs;
 
 	use omp_con::Value;
+	use omp_ext::workspace_trust::WorkspaceTrust;
 
 	use super::*;
 
@@ -1228,7 +1229,7 @@ mod tests {
 			true,
 		)]);
 
-		let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(&data, &project, None);
+		let plugins = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Trusted);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 		let policy = SkillPolicy::default();
 		let all =

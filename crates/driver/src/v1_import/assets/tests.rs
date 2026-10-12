@@ -14,6 +14,7 @@ use omp_envd::{
 	mcp::{McpConfigPaths, config_store::McpConfigStore},
 	ssh::{AuthPolicy, HostConfig, HostPaths, HostStore},
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 
 use crate::{
 	discovery::{
@@ -305,6 +306,7 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 			&config.join("secrets.yml"),
 			&fixture.project.join("x"),
 			&fixture.project,
+			WorkspaceTrust::Untrusted,
 		)
 		.expect("secrets");
 		assert_eq!(secrets.len(), 1);

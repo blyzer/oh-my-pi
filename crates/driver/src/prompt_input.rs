@@ -10,8 +10,9 @@ use omp_core::{
 	dirs::ProfileNameError,
 	project_file::{self, Containment, ProjectFileError, containment_root},
 };
-use omp_ext::workspace_trust::inventory::{
-	PROJECT_DIR, SYSTEM_PROMPT_FILE, TITLE_SYSTEM_PROMPT_FILE,
+use omp_ext::workspace_trust::{
+	WorkspaceTrust,
+	inventory::{PROJECT_DIR, SYSTEM_PROMPT_FILE, TITLE_SYSTEM_PROMPT_FILE},
 };
 use thiserror::Error;
 
@@ -58,31 +59,37 @@ pub fn resolve_prompt_input(input: Option<&str>) -> Result<Option<Str>, PromptIn
 
 /// Discovers one native Markdown prompt with project-over-user precedence.
 ///
-/// The project candidate is `<cwd>/.omp/<name>`, read through the contained
+/// The project candidate is `<cwd>/.omp/<name>`, read only while the
+/// workspace is [`WorkspaceTrust::Trusted`] and then through the contained
 /// project-file reader ([`omp_core::project_file`]): a symlink out of the
 /// repository, a special file, or one over [`CONTEXT_FILE_LIMIT`] is skipped
 /// with a warning and discovery falls through to the user candidate, which
 /// lives in the selected profile's agent asset tree ([`user_prompt_path`]).
+/// An untrusted workspace's candidate is withheld; the user candidate is never
+/// gated.
 pub fn discover_prompt_file(
 	cwd: &Path,
 	home: &Path,
 	name: &str,
+	trust: WorkspaceTrust,
 ) -> Result<Option<Str>, PromptInputError> {
-	let project = cwd.join(PROJECT_DIR).join(name);
-	match project_file::read_text(
-		&project,
-		Containment::Within(containment_root(cwd)),
-		CONTEXT_FILE_LIMIT,
-	) {
-		Ok(Some(content)) => return Ok(Some(content.into())),
-		Ok(None) => {},
-		Err(ProjectFileError::Refused { path, reason }) => {
-			tracing::warn!(path = %path.display(), reason = <&str>::from(reason), "project prompt file skipped");
-		},
-		Err(ProjectFileError::Io { source, .. }) if tolerant_literal_error(&source) => {},
-		Err(ProjectFileError::Io { path, source }) => {
-			return Err(PromptInputError::Read { path, source });
-		},
+	if trust == WorkspaceTrust::Trusted {
+		let project = cwd.join(PROJECT_DIR).join(name);
+		match project_file::read_text(
+			&project,
+			Containment::Within(containment_root(cwd)),
+			CONTEXT_FILE_LIMIT,
+		) {
+			Ok(Some(content)) => return Ok(Some(content.into())),
+			Ok(None) => {},
+			Err(ProjectFileError::Refused { path, reason }) => {
+				tracing::warn!(path = %path.display(), reason = <&str>::from(reason), "project prompt file skipped");
+			},
+			Err(ProjectFileError::Io { source, .. }) if tolerant_literal_error(&source) => {},
+			Err(ProjectFileError::Io { path, source }) => {
+				return Err(PromptInputError::Read { path, source });
+			},
+		}
 	}
 	read_user_prompt(&user_prompt_path(home, name)?)
 }
@@ -123,24 +130,31 @@ pub fn user_prompt_path(home: &Path, name: &str) -> Result<PathBuf, PromptInputE
 }
 
 /// Resolves CLI customization ahead of project/user `SYSTEM.md` discovery and
-/// resolves append guidance independently.
+/// resolves append guidance independently. The project `SYSTEM.md` counts
+/// only under `trust` [`WorkspaceTrust::Trusted`].
 pub fn resolve_system_inputs(
 	cwd: &Path,
 	home: &Path,
 	custom: Option<&str>,
 	append: Option<&str>,
+	trust: WorkspaceTrust,
 ) -> Result<(Option<Str>, Option<Str>), PromptInputError> {
 	let custom = match resolve_prompt_input(custom)? {
 		Some(custom) => Some(custom),
-		None => discover_prompt_file(cwd, home, SYSTEM_PROMPT_FILE)?,
+		None => discover_prompt_file(cwd, home, SYSTEM_PROMPT_FILE, trust)?,
 	};
 	let append = resolve_prompt_input(append)?;
 	Ok((custom, append))
 }
 /// Resolves the title-generation system prompt with project-over-user
-/// `TITLE_SYSTEM.md` precedence and the embedded native prompt as fallback.
-pub fn resolve_title_system_prompt(cwd: &Path, home: &Path) -> Result<Str, PromptInputError> {
-	Ok(discover_prompt_file(cwd, home, TITLE_SYSTEM_PROMPT_FILE)?
+/// `TITLE_SYSTEM.md` precedence (the project's only under `trust`
+/// [`WorkspaceTrust::Trusted`]) and the embedded native prompt as fallback.
+pub fn resolve_title_system_prompt(
+	cwd: &Path,
+	home: &Path,
+	trust: WorkspaceTrust,
+) -> Result<Str, PromptInputError> {
+	Ok(discover_prompt_file(cwd, home, TITLE_SYSTEM_PROMPT_FILE, trust)?
 		.unwrap_or_else(|| Str::new_static("Generate a concise title for this coding session.")))
 }
 
@@ -153,6 +167,8 @@ mod tests {
 	use std::fs;
 
 	use super::*;
+
+	const TRUSTED: WorkspaceTrust = WorkspaceTrust::Trusted;
 
 	#[test]
 	fn missing_path_is_literal_and_project_system_wins() {
@@ -172,13 +188,13 @@ mod tests {
 			Some("not-a-real-prompt-file")
 		);
 		assert_eq!(
-			discover_prompt_file(&project, &home, "SYSTEM.md")
+			discover_prompt_file(&project, &home, "SYSTEM.md", TRUSTED)
 				.expect("system discovery")
 				.as_deref(),
 			Some("project")
 		);
 		assert_eq!(
-			resolve_title_system_prompt(&project, &home)
+			resolve_title_system_prompt(&project, &home, TRUSTED)
 				.expect("embedded title prompt fallback")
 				.as_str(),
 			"Generate a concise title for this coding session."
@@ -187,10 +203,57 @@ mod tests {
 		fs::write(project.join(".omp/TITLE_SYSTEM.md"), "project title")
 			.expect("project title system prompt");
 		assert_eq!(
-			resolve_title_system_prompt(&project, &home)
+			resolve_title_system_prompt(&project, &home, TRUSTED)
 				.expect("project title prompt")
 				.as_str(),
 			"project title"
+		);
+	}
+
+	/// An untrusted workspace's `.omp/SYSTEM.md`, `APPEND_SYSTEM.md` and
+	/// `TITLE_SYSTEM.md` are withheld; the user's own prompts still apply.
+	#[test]
+	fn an_untrusted_workspace_prompt_is_withheld_and_the_user_prompt_applies() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let home = scratch.path().join("home");
+		let project = scratch.path().join("repo");
+		fs::create_dir_all(project.join(".omp")).expect("project config directory");
+		for name in [SYSTEM_PROMPT_FILE, "APPEND_SYSTEM.md", TITLE_SYSTEM_PROMPT_FILE] {
+			fs::write(project.join(".omp").join(name), "project").expect("project prompt");
+		}
+		let untrusted = WorkspaceTrust::Untrusted;
+		for name in [SYSTEM_PROMPT_FILE, "APPEND_SYSTEM.md", TITLE_SYSTEM_PROMPT_FILE] {
+			assert_eq!(
+				discover_prompt_file(&project, &home, name, untrusted).expect("discovery"),
+				None,
+				"{name}"
+			);
+		}
+		assert_eq!(
+			resolve_system_inputs(&project, &home, None, None, untrusted).expect("inputs"),
+			(None, None)
+		);
+		assert_eq!(
+			resolve_title_system_prompt(&project, &home, untrusted)
+				.expect("title")
+				.as_str(),
+			"Generate a concise title for this coding session."
+		);
+
+		let user_system = user_prompt_path(&home, SYSTEM_PROMPT_FILE).expect("user prompt path");
+		fs::create_dir_all(user_system.parent().expect("agent dir")).expect("user agent directory");
+		fs::write(&user_system, "user").expect("user system prompt");
+		assert_eq!(
+			discover_prompt_file(&project, &home, SYSTEM_PROMPT_FILE, untrusted)
+				.expect("discovery")
+				.as_deref(),
+			Some("user")
+		);
+		assert_eq!(
+			discover_prompt_file(&project, &home, SYSTEM_PROMPT_FILE, TRUSTED)
+				.expect("discovery")
+				.as_deref(),
+			Some("project")
 		);
 	}
 
@@ -206,9 +269,12 @@ mod tests {
 		fs::create_dir_all(home.join(".omp/agent")).expect("v1 agent directory");
 		fs::write(home.join(".omp/SYSTEM.md"), "stale").expect("stray prompt");
 		fs::write(home.join(".omp/agent/APPEND_SYSTEM.md"), "v1").expect("v1 prompt");
-		assert_eq!(discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery"), None);
 		assert_eq!(
-			discover_prompt_file(&project, &home, "APPEND_SYSTEM.md").expect("discovery"),
+			discover_prompt_file(&project, &home, "SYSTEM.md", TRUSTED).expect("discovery"),
+			None
+		);
+		assert_eq!(
+			discover_prompt_file(&project, &home, "APPEND_SYSTEM.md", TRUSTED).expect("discovery"),
 			None
 		);
 
@@ -217,7 +283,7 @@ mod tests {
 		fs::create_dir_all(user_append.parent().expect("agent dir")).expect("user agent dir");
 		fs::write(&user_append, "user append").expect("user append prompt");
 		assert_eq!(
-			discover_prompt_file(&project, &home, "APPEND_SYSTEM.md")
+			discover_prompt_file(&project, &home, "APPEND_SYSTEM.md", TRUSTED)
 				.expect("discovery")
 				.as_deref(),
 			Some("user append")
@@ -250,7 +316,7 @@ mod tests {
 		let system = project.join(".omp/SYSTEM.md");
 
 		symlink(scratch.path().join("secret"), &system).expect("outside link");
-		let found = discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery");
+		let found = discover_prompt_file(&project, &home, "SYSTEM.md", TRUSTED).expect("discovery");
 		assert_eq!(
 			found.as_deref(),
 			Some("user"),
@@ -260,13 +326,13 @@ mod tests {
 
 		fs::write(&system, vec![b'x'; usize::try_from(CONTEXT_FILE_LIMIT).unwrap() + 1])
 			.expect("oversize prompt");
-		let found = discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery");
+		let found = discover_prompt_file(&project, &home, "SYSTEM.md", TRUSTED).expect("discovery");
 		assert_eq!(found.as_deref(), Some("user"), "an oversize prompt is skipped");
 		fs::remove_file(&system).expect("remove prompt");
 
 		fs::write(project.join("prompt.md"), "inside").expect("inside file");
 		symlink("../prompt.md", &system).expect("inside link");
-		let found = discover_prompt_file(&project, &home, "SYSTEM.md").expect("discovery");
+		let found = discover_prompt_file(&project, &home, "SYSTEM.md", TRUSTED).expect("discovery");
 		assert_eq!(found.as_deref(), Some("inside"));
 	}
 
@@ -286,7 +352,7 @@ mod tests {
 		fs::write(scratch.path().join("dotfiles.md"), "linked").expect("dotfile");
 		symlink(scratch.path().join("dotfiles.md"), &user_system).expect("user link");
 		assert_eq!(
-			discover_prompt_file(&project, &home, "SYSTEM.md")
+			discover_prompt_file(&project, &home, "SYSTEM.md", TRUSTED)
 				.expect("discovery")
 				.as_deref(),
 			Some("linked")
@@ -302,7 +368,7 @@ mod tests {
 		);
 		let (sender, receiver) = mpsc::channel();
 		thread::spawn(move || {
-			let _ = sender.send(discover_prompt_file(&project, &home, "SYSTEM.md").is_err());
+			let _ = sender.send(discover_prompt_file(&project, &home, "SYSTEM.md", TRUSTED).is_err());
 		});
 		assert!(
 			receiver

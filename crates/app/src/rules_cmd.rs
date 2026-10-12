@@ -15,6 +15,7 @@ use omp_core::Str;
 use omp_driver::{
 	rules::stream::{Finding, ProbeTarget, ScanOptions, ScanReport, StreamRuleInspector},
 	subagent::AgentName,
+	workspace_trust::evaluate_workspace,
 };
 use serde_json::json;
 
@@ -29,9 +30,14 @@ pub fn run(args: RulesArgs) -> Result<()> {
 	let project = args.project.canonicalize().into_diagnostic()?;
 	let con = crate::process_ctx(&project)?;
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let inspector =
-		StreamRuleInspector::discover(&data_dir, &project, args.agent.map(AgentName::from), &con)
-			.into_diagnostic()?;
+	let inspector = StreamRuleInspector::discover(
+		&data_dir,
+		&project,
+		args.agent.map(AgentName::from),
+		&con,
+		evaluate_workspace(&data_dir, &project).trust(),
+	)
+	.into_diagnostic()?;
 	let mut out = io::stdout().lock();
 	match args.command.unwrap_or(RulesCommand::List { json: false }) {
 		RulesCommand::List { json } => list(&inspector, json, &mut out),

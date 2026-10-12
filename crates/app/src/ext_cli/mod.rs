@@ -12,10 +12,11 @@ use clap::{Args, Subcommand, ValueEnum};
 use futures::StreamExt as _;
 use miette::{Diagnostic, IntoDiagnostic as _, miette};
 use omp_core::{Hash32, Str, base64, encoding::hex, sf};
-use omp_driver::plugin_commands::PluginCommandSet;
+use omp_driver::{plugin_commands::PluginCommandSet, workspace_trust::evaluate_workspace};
 use omp_env::{BundleFile, pack_bundle, unpack_bundle};
 use omp_ext::{
 	Layer as BackendLayer,
+	claude_plugin::ClaudePlugins,
 	config::{
 		DeploymentManifest, ExtensionEnvironment, FeatureSelection, MissingSourceOutcome,
 		MissingSourcePolicy, OfflineMode, SourceSpec, effective_missing_source,
@@ -39,6 +40,7 @@ use omp_ext::{
 		Generation, PinsFile, apply_uninstall, concrete_features, gc_generations, plan_uninstall,
 		set_enabled,
 	},
+	workspace_trust::WorkspaceTrust,
 };
 use omp_journal::blob::BlobStore;
 use omp_proto::env::v1::{MaterializeSite, SiteFile};
@@ -858,12 +860,13 @@ struct MarketplacePluginRow {
 /// Every installed marketplace plugin: each install omp's registries record
 /// (Claude-layout and Agent Plugins packages alike), enabled or not, then
 /// every enabled Claude Code install sessions load read-only
-/// ([`omp_ext::claude_plugin::ClaudePlugins::resolve`]) whose id omp does not
-/// record.
+/// ([`omp_ext::claude_plugin::ClaudePlugins::resolve`], under the
+/// workspace's `trust`) whose id omp does not record.
 fn marketplace_plugins(
 	state: &StatePaths,
 	data_dir: &Path,
 	claude: Option<&omp_ext::claude_plugin::ClaudeCodeHome>,
+	trust: WorkspaceTrust,
 ) -> miette::Result<Vec<MarketplacePluginRow>> {
 	let omp: &'static str = omp_ext::claude_plugin::PluginSource::Omp.into();
 	let mut rows = service::plugin_views(state)?
@@ -880,7 +883,7 @@ fn marketplace_plugins(
 			source:   omp,
 		})
 		.collect::<Vec<_>>();
-	let resolved = omp_ext::claude_plugin::ClaudePlugins::resolve(data_dir, &state.project, claude);
+	let resolved = ClaudePlugins::resolve(data_dir, &state.project, claude, trust);
 	for plugin in resolved
 		.plugins
 		.into_iter()
@@ -952,6 +955,7 @@ fn list(state: &StatePaths, data_dir: &Path, args: ExtListArgs, json: bool) -> m
 			state,
 			data_dir,
 			omp_ext::claude_plugin::ClaudeCodeHome::detect().as_ref(),
+			evaluate_workspace(data_dir, &state.project).trust(),
 		)?
 		.into_iter()
 		.filter(|plugin| !args.enabled || plugin.enabled)
@@ -1992,8 +1996,7 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 			.keys
 			.iter()
 			.find(|pin| pin.id == args.id)
-			.map(|pin| pin.key.as_str())
-			.unwrap_or("-");
+			.map_or("-", |pin| pin.key.as_str());
 		let matching = grants
 			.grants
 			.iter()
@@ -2139,7 +2142,8 @@ fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Res
 /// Every command the plugin identity `id` launches as a session in the
 /// project resolves it (the installed plugin `id`, and each Agent Plugins
 /// package with that identity in the plugin directories, `plugin_dirs`, or
-/// installed as `id`), with the operator's current approvals.
+/// installed as `id`) under the workspace's evaluated trust, with the
+/// operator's current approvals.
 fn plugin_command_sets(
 	state: &StatePaths,
 	data_dir: &Path,
@@ -2155,6 +2159,7 @@ fn plugin_command_sets(
 		&state.project,
 		&plugin_dirs,
 		omp_ext::plugin_command::PluginId::from_ref(id),
+		evaluate_workspace(data_dir, &state.project).trust(),
 	)
 	.into_diagnostic()
 }
@@ -3742,7 +3747,8 @@ mod tests {
 		.expect("claude registry");
 
 		let state = StatePaths::new(&data, &project);
-		let rows = marketplace_plugins(&state, &data, Some(&claude)).expect("plugins");
+		let rows = marketplace_plugins(&state, &data, Some(&claude), WorkspaceTrust::Untrusted)
+			.expect("plugins");
 		let lines = rows.iter().map(marketplace_plugin_line).collect::<Vec<_>>();
 		assert_eq!(
 			lines,
@@ -3812,7 +3818,7 @@ mod tests {
 		let state = StatePaths::new(&data, &project);
 		let home = tree.path().join("home/.o2");
 		let blocked = || {
-			let plugins = ClaudePlugins::resolve(&data, &project, None);
+			let plugins = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 			let agent_plugins = omp_envd::mcp::McpConfigPaths::new(&home, &project)
 				.with_command_approvals(plugins.command_approvals.clone());
 			omp_driver::plugin_commands::blocked_launches(
@@ -3942,7 +3948,7 @@ mod tests {
 		// What a session in the project reports, as `omp ext trust` resolves
 		// it (the user plugin directories may hold unrelated packages).
 		let blocked = |roots: Vec<PathBuf>| {
-			let plugins = ClaudePlugins::resolve(&data, &project, None);
+			let plugins = ClaudePlugins::resolve(&data, &project, None, WorkspaceTrust::Untrusted);
 			let agent_plugins =
 				omp_driver::plugin_commands::agent_plugin_paths(&project, &roots, &plugins)
 					.expect("agent plugin discovery");

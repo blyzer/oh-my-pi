@@ -4,6 +4,11 @@
 //! through the project Environment's exec authority, so the sandbox the
 //! reported posture describes is the one that confines them. Both report a
 //! [`PhaseResult`] the domain turns into a transition.
+//!
+//! A code phase runs a command the workspace's workflow declares, so it runs
+//! only in a [`WorkspaceTrust::Trusted`] workspace: an untrusted one refuses
+//! it ([`ProductionError::UntrustedWorkspace`]). Model phases' child kernels
+//! run under the run's own decision.
 
 use std::{
 	fs, io,
@@ -19,6 +24,7 @@ use omp_envd::{
 	exec_settings::{ExecSandboxMode, NetworkConfinement, network_confinement},
 	tool_settings::{ApprovalMode, ToolSettings},
 };
+use omp_ext::workspace_trust::{TrustDecision, WorkspaceTrust};
 use omp_proto::env::v1::{
 	CloseSessionRequest, ExecOutcome, ExecRequest, OpenSessionRequest, OutputChannel, Script,
 };
@@ -30,6 +36,7 @@ use crate::{
 	cfg::CfgFiles,
 	cleanse::checkers::{BinaryResolver as _, FilesystemResolver},
 	headless::{HeadlessError, KernelOptions, compose_kernel, kernel::LaunchExtensionPolicy},
+	workspace_trust::WorkspaceTrustSource,
 };
 
 /// A phase that could not be executed.
@@ -66,22 +73,29 @@ pub enum ProductionError {
 	/// A path could not be expressed as an Environment location.
 	#[error("workflow phase path is not a valid environment location")]
 	Location(#[source] omp_core::LocationError),
+	/// A code phase was dispatched in a workspace that is not trusted.
+	#[error("workspace is not trusted; adw code phases are withheld")]
+	UntrustedWorkspace,
 }
 
 /// Production owner for one workflow run.
 pub struct ProductionAdwHost {
-	root:        PathBuf,
-	data_dir:    PathBuf,
-	model:       Str,
-	ctx:         Arc<omp_con::Ctx>,
-	resolver:    FilesystemResolver,
+	root:            PathBuf,
+	data_dir:        PathBuf,
+	model:           Str,
+	ctx:             Arc<omp_con::Ctx>,
+	resolver:        FilesystemResolver,
+	/// The workspace trust decision the run executes under: code phases run
+	/// only when it trusts, and model phases' child kernels inherit it.
+	workspace_trust: TrustDecision,
 	/// The project Environment, started by the first code phase: a workflow
 	/// of model phases alone never needs one of its own.
-	environment: OnceCell<omp_envd::ProjectEnvironment>,
+	environment:     OnceCell<omp_envd::ProjectEnvironment>,
 }
 
 impl ProductionAdwHost {
-	/// Opens a host rooted at a canonical project directory.
+	/// Opens a host rooted at a canonical project directory, running under
+	/// `workspace_trust`, the workspace's trust decision.
 	///
 	/// # Errors
 	///
@@ -91,6 +105,7 @@ impl ProductionAdwHost {
 		data_dir: PathBuf,
 		model: Str,
 		ctx: Arc<omp_con::Ctx>,
+		workspace_trust: TrustDecision,
 	) -> Result<Self, ProductionError> {
 		Ok(Self {
 			root: fs::canonicalize(root)?,
@@ -98,6 +113,7 @@ impl ProductionAdwHost {
 			model,
 			ctx,
 			resolver: FilesystemResolver,
+			workspace_trust,
 			environment: OnceCell::new(),
 		})
 	}
@@ -139,7 +155,7 @@ impl ProductionAdwHost {
 			&self.root,
 			self.model.as_str(),
 			Arc::clone(&self.ctx),
-			child_kernel_options(),
+			child_kernel_options(&self.workspace_trust),
 		)
 		.await?;
 		let outcome = kernel
@@ -204,18 +220,20 @@ impl ProductionAdwHost {
 	}
 }
 
-/// Options for one model phase's child kernel.
+/// Options for one model phase's child kernel, which inherits the run's
+/// workspace trust decision.
 ///
 /// Workspace-owned native extensions (`.omp/extensions`) are excluded: the
 /// workflow is project input already, and a project must not also choose
 /// the code its phases' kernels load.
-fn child_kernel_options() -> KernelOptions {
+fn child_kernel_options(workspace_trust: &TrustDecision) -> KernelOptions {
 	KernelOptions {
 		ephemeral: true,
 		extensions: LaunchExtensionPolicy {
 			include_workspace: false,
 			..LaunchExtensionPolicy::default()
 		},
+		workspace_trust: WorkspaceTrustSource::Fixed(workspace_trust.clone()),
 		..KernelOptions::default()
 	}
 }
@@ -352,6 +370,9 @@ impl AdwHost for ProductionAdwHost {
 	) -> Result<PhaseResult, Self::Error> {
 		match spec {
 			PhaseSpec::Command { binary, args, cwd } => {
+				if self.workspace_trust.trust() != WorkspaceTrust::Trusted {
+					return Err(ProductionError::UntrustedWorkspace);
+				}
 				self
 					.run_command(binary.as_str(), args, cwd.as_deref(), cancel)
 					.await
@@ -433,15 +454,23 @@ mod tests {
 
 	use omp_adw::{PhaseName, PostureError};
 	use omp_envd::exec_settings::{SV_SANDBOX_MODE, SV_SANDBOX_NETWORK_MODE, SandboxNetworkMode};
+	use omp_ext::trust::GrantDuration;
 
 	use super::{super::definition, *};
 
+	const TRUSTED: TrustDecision = TrustDecision::Trusted { duration: GrantDuration::Persistent };
+
 	fn host(project: &Path, ctx: omp_con::Ctx) -> ProductionAdwHost {
+		host_under(project, ctx, TRUSTED)
+	}
+
+	fn host_under(project: &Path, ctx: omp_con::Ctx, trust: TrustDecision) -> ProductionAdwHost {
 		ProductionAdwHost::open(
 			project.to_path_buf(),
 			project.join("data"),
 			sf!("unused-model"),
 			Arc::new(ctx),
+			trust,
 		)
 		.expect("workflow host")
 	}
@@ -703,10 +732,42 @@ requires = { network = "disabled" }
 		assert!(project_root.join("inside").exists());
 	}
 
+	/// A code phase runs a command the workspace declares: an untrusted
+	/// workspace (any decision but `Trusted`) refuses it before resolving or
+	/// running anything, and a trusted one runs the same phase.
+	#[tokio::test]
+	async fn an_untrusted_workspace_refuses_code_phases() {
+		let project = tempfile::tempdir().expect("project");
+		let project_root = project.path().canonicalize().expect("canonical project");
+		let (phase, spec) = code_phase(&project_root, &["touch", "ran"]);
+		let off = || {
+			let ctx = omp_con::Ctx::new();
+			SV_SANDBOX_MODE
+				.set(&ctx, ExecSandboxMode::Off)
+				.expect("sandbox off");
+			ctx
+		};
+
+		for decision in [TrustDecision::Untrusted, TrustDecision::Denied] {
+			let host = host_under(&project_root, off(), decision);
+			let refused =
+				Box::pin(host.dispatch(&phase, &spec, 1, None, &[], &CancellationToken::new()))
+					.await
+					.expect_err("an untrusted workspace ran a code phase");
+			assert!(matches!(refused, ProductionError::UntrustedWorkspace), "{refused:?}");
+			assert!(!project_root.join("ran").exists(), "the refused command ran");
+		}
+
+		let ran = Box::pin(dispatch(&host(&project_root, off()), &phase, &spec)).await;
+		assert!(ran.accepted, "{}", ran.feedback);
+		assert!(project_root.join("ran").exists());
+	}
+
 	#[test]
-	fn model_phase_kernels_exclude_workspace_extensions() {
-		let options = child_kernel_options();
+	fn model_phase_kernels_exclude_workspace_extensions_and_inherit_trust() {
+		let options = child_kernel_options(&TrustDecision::Denied);
 		assert!(!options.extensions.include_workspace);
 		assert!(options.ephemeral);
+		assert_eq!(options.workspace_trust, WorkspaceTrustSource::Fixed(TrustDecision::Denied));
 	}
 }

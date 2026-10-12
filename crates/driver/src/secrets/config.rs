@@ -7,7 +7,10 @@ use omp_core::{
 	Str,
 	project_file::{self, Containment, ProjectFileError, containment_root},
 };
-use omp_ext::workspace_trust::inventory::{PROJECT_DIR, SECRETS_FILE};
+use omp_ext::workspace_trust::{
+	WorkspaceTrust,
+	inventory::{PROJECT_DIR, SECRETS_FILE},
+};
 use omp_secrets::rule::{SecretKind, SecretMode, SecretRule, SecretRuleError};
 use serde::Deserialize;
 use thiserror::Error;
@@ -80,32 +83,41 @@ pub enum SecretConfigError {
 /// Largest `secrets.yml` the loader reads: a rule list, never a document.
 pub const SECRETS_FILE_LIMIT: u64 = 256 * 1024;
 
-/// Loads global rules first and project rules second, with project declarations
-/// overriding global declarations that have identical content.
-/// Loads the native global and project-local `secrets.yml` files.
+/// Loads the native global and project-local `secrets.yml` files, the
+/// project's only for a [`WorkspaceTrust::Trusted`] workspace
+/// ([`load_secret_rules`]).
 pub fn load_for_project(
 	project_root: &Path,
 	agent_dir: &Path,
+	trust: WorkspaceTrust,
 ) -> Result<Vec<SecretRule>, SecretConfigError> {
 	load_secret_rules(
 		&agent_dir.join(SECRETS_FILE),
 		&project_root.join(PROJECT_DIR).join(SECRETS_FILE),
 		project_root,
+		trust,
 	)
 }
 
 /// Loads explicit global and project files, with project declarations
 /// overriding global declarations that have identical content.
 ///
-/// The project file is read through the contained project-file reader against
-/// `project_root`; a refused one is an error rather than a skipped file,
-/// because dropping a project's masking rules would let its secrets through.
+/// The project file is read only when `trust` is
+/// [`WorkspaceTrust::Trusted`]: an untrusted workspace's rules can neither
+/// add nor override the operator's. A trusted one is read through the
+/// contained project-file reader against `project_root`; a refused one is an
+/// error rather than a skipped file, because dropping a project's masking
+/// rules would let its secrets through.
 pub fn load_secret_rules(
 	global: &Path,
 	project: &Path,
 	project_root: &Path,
+	trust: WorkspaceTrust,
 ) -> Result<Vec<SecretRule>, SecretConfigError> {
 	let mut global_rules = load_secret_file(global)?;
+	if trust != WorkspaceTrust::Trusted {
+		return Ok(global_rules);
+	}
 	let project_rules = load_file(project, Containment::Within(containment_root(project_root)))?;
 	if project_rules.is_empty() {
 		return Ok(global_rules);
@@ -181,12 +193,43 @@ mod tests {
 		.expect("global");
 		fs::write(&project, "- type: plain\n  content: shared-secret\n  friendlyName: project\n")
 			.expect("project");
-		let rules = load_secret_rules(&global, &project, root.path()).expect("rules");
+		let rules =
+			load_secret_rules(&global, &project, root.path(), WorkspaceTrust::Trusted).expect("rules");
 		assert_eq!(rules.iter().map(SecretRule::content).collect::<Vec<_>>(), [
 			"global-secret",
 			"shared-secret"
 		]);
 		assert_eq!(rules[1].friendly_name(), Some("project"));
+	}
+
+	/// An untrusted workspace's `secrets.yml` neither adds a rule nor
+	/// overrides the operator's; the user file still loads. Trusting the
+	/// workspace applies both.
+	#[test]
+	fn an_untrusted_workspace_secrets_file_is_ignored() {
+		let root = tempfile::tempdir().expect("tempdir");
+		let global = root.path().join("global.yml");
+		let project = root.path().join("project.yml");
+		fs::write(&global, "- type: plain\n  content: shared-secret\n").expect("global");
+		fs::write(
+			&project,
+			"- type: plain\n  content: shared-secret\n  friendlyName: project\n- type: plain\n  \
+			 content: project-secret\n",
+		)
+		.expect("project");
+		let load = |trust| {
+			load_secret_rules(&global, &project, root.path(), trust)
+				.expect("rules")
+				.iter()
+				.map(|rule| (rule.content().to_owned(), rule.friendly_name().map(str::to_owned)))
+				.collect::<Vec<_>>()
+		};
+
+		assert_eq!(load(WorkspaceTrust::Untrusted), [("shared-secret".to_owned(), None)]);
+		assert_eq!(load(WorkspaceTrust::Trusted), [
+			("shared-secret".to_owned(), Some("project".to_owned())),
+			("project-secret".to_owned(), None),
+		]);
 	}
 
 	#[cfg(unix)]
@@ -201,7 +244,7 @@ mod tests {
 		let project = repo.join(".omp/secrets.yml");
 		let body = "- type: plain\n  content: from-project\n";
 		fs::write(&global, "").expect("global");
-		let load = || load_secret_rules(&global, &project, &repo);
+		let load = || load_secret_rules(&global, &project, &repo, WorkspaceTrust::Trusted);
 		fs::write(scratch.path().join("elsewhere.yml"), body).expect("outside file");
 		symlink(scratch.path().join("elsewhere.yml"), &project).expect("outside link");
 		let refused = load().expect_err("an outside symlink must be refused");

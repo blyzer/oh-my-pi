@@ -228,7 +228,8 @@ fn ssh_scope(paths: &HostPaths, project: bool) -> (&Path, Containment<'_>) {
 
 /// The `secrets.yml` files `/share` redacts with, low to high precedence:
 /// the user file under the configuration root (`~/.o2`, profile-aware —
-/// never the data directory), then `<project>/.omp/secrets.yml`.
+/// never the data directory), then `<project>/.omp/secrets.yml`, which
+/// applies only to a trusted workspace.
 ///
 /// # Errors
 ///
@@ -254,6 +255,7 @@ pub fn share(state: &ServiceState, snapshot: serde_json::Value) -> ServiceResult
 		&user_secrets,
 		&project_secrets,
 		&state.project,
+		state.workspace_trust,
 		[],
 	)
 	.map_err(failed)?;
