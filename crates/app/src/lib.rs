@@ -87,6 +87,7 @@ pub mod theme_watcher;
 pub mod tiny_models_cmd;
 pub mod token_cmd;
 pub mod tool_installer;
+pub mod trust_cmd;
 pub mod update_cmd;
 pub mod usage_cmd;
 pub mod usage_error;
