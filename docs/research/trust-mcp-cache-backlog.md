@@ -139,6 +139,16 @@ Each slice is one PR of about 500 lines or fewer. "Seam" is the crate whose publ
 | 15 | **`cl_disabled_extensions` loses PROJECT** (F12) | `driver/src/discovery/mod.rs:42` | con/driver: `.omp/config.cfg` setting it is `ProjectVarDenied` | owner | S | **Yes** (Q8) |
 | 16 | **Posture-notice harness fidelity** | Route test kernels in `app/tests/{rpc,acp}_spine.rs` and `driver/tests/*` through `install_tool_authority` or a shared test builder | Those tests observe one `approval-posture` notice under a defaulted `yolo` with no sandbox | — | S | — |
 
+Slice 8's terminal startup selector runs before launch discovery and kernel
+composition. Untrusted workspaces, changed input digests, and unpinned workspaces
+under a subtree ask only when the inventory contains gated inputs. Enter defaults
+to **Do not trust**; Esc and Ctrl-C also continue without trust. Session approval
+does not write grants; workspace approval persists an exact inventory-bound row;
+the subtree choice pins only this workspace under the existing subtree. Changed
+inputs or grants while the prompt is open refuse approval. The selected decision
+flows through `KernelOptions.workspace_trust` into the existing session journal.
+Already trusted workspaces and explicit revocations do not prompt.
+
 Order rationale:
 
 - 1 and 2 are the cheapest cuts of exposure from an untrusted repo, and need no trust machinery.
