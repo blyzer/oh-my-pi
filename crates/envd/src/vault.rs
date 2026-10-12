@@ -20,7 +20,10 @@ use omp_core::{
 	fs::replace_file_atomically,
 	project_file::{self, Containment, ProjectFileError, containment_root},
 };
-use omp_ext::workspace_trust::inventory::{PROJECT_DIR, VAULTS_FILE};
+use omp_ext::workspace_trust::{
+	WorkspaceTrust,
+	inventory::{PROJECT_DIR, VAULTS_FILE},
+};
 use serde::Deserialize;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
@@ -42,7 +45,8 @@ struct VaultFile {
 /// User configuration lives under `~/.o2`
 /// ([`omp_core::dirs::user_config_root`], profile-aware) and never under the
 /// data or state directory; project declarations live in
-/// `<project>/.omp/vaults.toml` and shadow user vaults with the same name.
+/// `<project>/.omp/vaults.toml` and, in a trusted workspace only, add vault
+/// names the user has not declared ([`VaultService::load_layered`]).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultPaths {
 	/// User-owned `<config root>/vaults.toml`.
@@ -143,8 +147,8 @@ impl Default for ObsidianCli {
 ///
 /// Configured roots are canonicalized once when the layered configuration is
 /// loaded. Obsidian discovery is lazy and only supplies names absent from the
-/// configured layers, so project configuration overrides user configuration,
-/// which overrides the desktop application's registry. Each operation
+/// configured layers, so user configuration (plus the names a trusted
+/// project adds) overrides the desktop application's registry. Each operation
 /// revalidates the addressed target or its nearest existing ancestor, so a
 /// symlink can never move an operation outside its root.
 #[derive(Clone, Debug, Default)]
@@ -157,16 +161,36 @@ pub struct VaultService {
 }
 
 impl VaultService {
-	/// Loads every user vault and overlays project declarations with the same
-	/// name. Relative roots are resolved from the declaring file's directory.
+	/// Loads every user vault and, in a workspace of `trust`
+	/// [`WorkspaceTrust::Trusted`], every project vault whose name the user has
+	/// not declared; a project name the user also declares is ignored (the
+	/// user's wins) with a warning, and an untrusted workspace's `vaults.toml`
+	/// is not read. Relative roots are resolved from the declaring file's
+	/// directory.
 	///
 	/// A project `vaults.toml` the contained reader refuses (outside the
 	/// repository, not a regular file, oversize) is skipped with a warning, so
 	/// a FIFO or an escaping link never blocks or fails the environment open.
-	pub fn load_layered(paths: &VaultPaths) -> Result<Self, VaultError> {
+	pub fn load_layered(paths: &VaultPaths, trust: WorkspaceTrust) -> Result<Self, VaultError> {
 		let mut roots = parse_vaults(&paths.user, Containment::Unconfined)?;
-		match parse_vaults(&paths.project, Containment::Within(&paths.root)) {
-			Ok(project) => roots.extend(project),
+		let project = match trust {
+			WorkspaceTrust::Trusted => parse_vaults(&paths.project, Containment::Within(&paths.root)),
+			WorkspaceTrust::Untrusted => Ok(BTreeMap::new()),
+		};
+		match project {
+			Ok(project) => {
+				for (name, root) in project {
+					if roots.contains_key(&name) {
+						tracing::warn!(
+							%name,
+							path = %paths.project.display(),
+							"project vault ignored: a user vault has the same name"
+						);
+					} else {
+						roots.insert(name, root);
+					}
+				}
+			},
 			Err(VaultError::File(error @ ProjectFileError::Refused { .. })) => {
 				tracing::warn!(
 					path = %error.path().display(),
@@ -1483,7 +1507,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn layered_roots_shadow_and_relative_roots_follow_their_declaring_file() {
+	async fn trusted_project_vaults_only_add_names_and_untrusted_ones_are_not_read() {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let user_root = temp.path().join("o2");
 		let project_root = temp.path().join("project");
@@ -1500,17 +1524,34 @@ mod tests {
 		assert_eq!(paths.user, user_root.join("vaults.toml"));
 		assert_eq!(paths.project, project_root.join(".omp/vaults.toml"));
 		write_config(&paths.user, &[("notes", Path::new("user-notes")), ("extra", &user_only)]);
-		write_config(&paths.project, &[("notes", Path::new("../project-notes"))]);
+		write_config(&paths.project, &[
+			("notes", Path::new("../project-notes")),
+			("added", Path::new("../project-notes")),
+		]);
 
-		let service = VaultService::load_layered(&paths).expect("layered load");
-		assert_eq!(service.names(), vec![sf!("extra"), sf!("notes")]);
+		let untrusted =
+			VaultService::load_layered(&paths, WorkspaceTrust::Untrusted).expect("untrusted load");
+		assert_eq!(untrusted.names(), vec![sf!("extra"), sf!("notes")]);
+
+		let service = VaultService::load_layered(&paths, WorkspaceTrust::Trusted).expect("layered");
+		assert_eq!(service.names(), vec![sf!("added"), sf!("extra"), sf!("notes")]);
 		assert_eq!(
 			service
 				.read("notes", "a.md", 64)
 				.await
-				.expect("shadowed read")
+				.expect("user read")
 				.as_ref(),
-			b"project"
+			b"user",
+			"a project vault never shadows a user vault name"
+		);
+		assert_eq!(
+			service
+				.read("added", "a.md", 64)
+				.await
+				.expect("added read")
+				.as_ref(),
+			b"project",
+			"relative roots follow their declaring file"
 		);
 		assert!(
 			service
@@ -1524,17 +1565,17 @@ mod tests {
 
 		let missing = VaultPaths::new(&temp.path().join("nope"), &temp.path().join("nope"));
 		assert!(
-			VaultService::load_layered(&missing)
+			VaultService::load_layered(&missing, WorkspaceTrust::Trusted)
 				.expect("missing files are empty")
 				.names()
 				.is_empty()
 		);
 	}
 
-	/// A repository's `vaults.toml` is untrusted input read at environment
-	/// open: a symlink out of the repository, a FIFO, or an oversize file is
-	/// skipped (user vaults still load) instead of being read, and a symlink
-	/// inside the repository loads.
+	/// A trusted repository's `vaults.toml` is still untrusted input read at
+	/// environment open: a symlink out of the repository, a FIFO, or an
+	/// oversize file is skipped (user vaults still load) instead of being
+	/// read, and a symlink inside the repository loads.
 	#[cfg(unix)]
 	#[test]
 	fn project_vaults_file_must_be_contained_regular_and_bounded() {
@@ -1552,7 +1593,7 @@ mod tests {
 		let outside = temp.path().join("outside.toml");
 		write_config(&outside, &[("leaked", &notes)]);
 		let names = |paths: &VaultPaths| {
-			VaultService::load_layered(paths)
+			VaultService::load_layered(paths, WorkspaceTrust::Trusted)
 				.expect("a refused project file never fails the load")
 				.names()
 		};
@@ -1600,7 +1641,8 @@ mod tests {
 			project: temp.path().join("missing.toml"),
 			root:    temp.path().to_path_buf(),
 		};
-		let service = VaultService::load_layered(&paths).expect("vault service");
+		let service =
+			VaultService::load_layered(&paths, WorkspaceTrust::Untrusted).expect("vault service");
 		let file = root.join("nested/note.md");
 		let revision = service
 			.write("notes", "nested/note.md", b"first", 64)
@@ -1665,11 +1707,14 @@ mod tests {
 				cli_only.display(),
 			),
 		);
-		let service = VaultService::load_layered(&VaultPaths {
-			user:    config,
-			project: temp.path().join("missing"),
-			root:    temp.path().to_path_buf(),
-		})
+		let service = VaultService::load_layered(
+			&VaultPaths {
+				user:    config,
+				project: temp.path().join("missing"),
+				root:    temp.path().to_path_buf(),
+			},
+			WorkspaceTrust::Untrusted,
+		)
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
 		assert_eq!(
@@ -1712,11 +1757,14 @@ mod tests {
 			&script,
 			&format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'ok'\n", log.display(),),
 		);
-		let service = VaultService::load_layered(&VaultPaths {
-			user:    config,
-			project: temp.path().join("missing"),
-			root:    temp.path().to_path_buf(),
-		})
+		let service = VaultService::load_layered(
+			&VaultPaths {
+				user:    config,
+				project: temp.path().join("missing"),
+				root:    temp.path().to_path_buf(),
+			},
+			WorkspaceTrust::Untrusted,
+		)
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
 
@@ -1791,11 +1839,14 @@ mod tests {
 				pid_file.display(),
 			),
 		);
-		let service = VaultService::load_layered(&VaultPaths {
-			user:    config,
-			project: temp.path().join("missing"),
-			root:    temp.path().to_path_buf(),
-		})
+		let service = VaultService::load_layered(
+			&VaultPaths {
+				user:    config,
+				project: temp.path().join("missing"),
+				root:    temp.path().to_path_buf(),
+			},
+			WorkspaceTrust::Untrusted,
+		)
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
 		let task = tokio::spawn(async move { service.obsidian_read("notes", "note.md").await });
@@ -1836,11 +1887,14 @@ mod tests {
 		write_config(&config, &[("notes", &root)]);
 		let script = temp.path().join("obsidian");
 		write_executable(&script, "#!/bin/sh\nsleep 30\n");
-		let mut service = VaultService::load_layered(&VaultPaths {
-			user:    config,
-			project: temp.path().join("missing"),
-			root:    temp.path().to_path_buf(),
-		})
+		let mut service = VaultService::load_layered(
+			&VaultPaths {
+				user:    config,
+				project: temp.path().join("missing"),
+				root:    temp.path().to_path_buf(),
+			},
+			WorkspaceTrust::Untrusted,
+		)
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
 		service.obsidian.timeout = Duration::from_millis(25);
@@ -1864,11 +1918,14 @@ mod tests {
 		symlink(&outside, root.join("escape")).expect("escape link");
 		let config = temp.path().join("vaults.toml");
 		write_config(&config, &[("notes", &root)]);
-		let service = VaultService::load_layered(&VaultPaths {
-			user:    config,
-			project: temp.path().join("missing"),
-			root:    temp.path().to_path_buf(),
-		})
+		let service = VaultService::load_layered(
+			&VaultPaths {
+				user:    config,
+				project: temp.path().join("missing"),
+				root:    temp.path().to_path_buf(),
+			},
+			WorkspaceTrust::Untrusted,
+		)
 		.expect("vault service");
 		assert!(matches!(
 			service.read("notes", "escape/secret", 64).await,

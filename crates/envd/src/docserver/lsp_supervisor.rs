@@ -18,7 +18,7 @@ use std::{
 };
 
 use omp_core::{Hash32, Str};
-use omp_ext::claude_plugin::ClaudePlugin;
+use omp_ext::{claude_plugin::ClaudePlugin, workspace_trust::WorkspaceTrust};
 use parking_lot::Mutex;
 use tokio::{sync::watch, time::timeout};
 use tokio_util::sync::CancellationToken;
@@ -101,6 +101,9 @@ struct SupervisorInner {
 	user_root:        Option<PathBuf>,
 	plugins:          Arc<[ClaudePlugin]>,
 	project_binaries: bool,
+	/// The authority's own workspace trust, fixed at start; every
+	/// [`NativeLspSupervisor::reload`] rediscovers under it.
+	workspace_trust:  WorkspaceTrust,
 	roster:           Mutex<BTreeMap<Str, ServerSlot>>,
 	pool:             LspPool<LspProcess, LspProcessError>,
 	pending:          watch::Sender<usize>,
@@ -119,7 +122,9 @@ impl NativeLspSupervisor {
 	/// project declarations filtered to enabled non-linter servers whose root
 	/// markers match the project root and whose binary resolves.
 	///
-	/// A binary resolves from `$PATH` only, unless the environment admits its
+	/// The project's own configuration files load only when the authority's
+	/// workspace is trusted ([`Environment::workspace_trust`]). A binary
+	/// resolves from `$PATH` only, unless the environment admits its
 	/// project-local bins ([`Environment::project_binary_root`]); a server only
 	/// a project-local bin provides is left out of the roster.
 	///
@@ -140,10 +145,12 @@ impl NativeLspSupervisor {
 			.to_file_path()
 			.unwrap_or_else(|()| PathBuf::from("/"));
 		let project_binaries = environment.project_binary_root().is_some();
+		let workspace_trust = environment.workspace_trust();
 		let roster = discover_roster(
 			&root,
 			user_config_root,
 			&plugins,
+			workspace_trust,
 			project_binaries,
 			env::var_os("PATH").as_deref(),
 		)?;
@@ -156,6 +163,7 @@ impl NativeLspSupervisor {
 				user_root: user_config_root.map(Path::to_path_buf),
 				plugins,
 				project_binaries,
+				workspace_trust,
 				roster: Mutex::new(roster),
 				pool: LspPool::default(),
 				pending,
@@ -181,7 +189,8 @@ impl NativeLspSupervisor {
 			.collect()
 	}
 
-	/// Re-runs configuration discovery, admitting new or changed declarations.
+	/// Re-runs configuration discovery, admitting new or changed declarations,
+	/// under the authority's own workspace trust and binary policy.
 	///
 	/// Every prior declaration is evicted and shut down, including unchanged
 	/// ones: `reload` is an explicit restart boundary, not only a config-cache
@@ -196,6 +205,7 @@ impl NativeLspSupervisor {
 			&self.inner.root,
 			self.inner.user_root.as_deref(),
 			&self.inner.plugins,
+			self.inner.workspace_trust,
 			self.inner.project_binaries,
 			env::var_os("PATH").as_deref(),
 		)?;
@@ -463,10 +473,11 @@ fn discover_roster(
 	root: &Path,
 	user_config_root: Option<&Path>,
 	plugins: &[ClaudePlugin],
+	trust: WorkspaceTrust,
 	project_binaries: bool,
 	path: Option<&OsStr>,
 ) -> Result<BTreeMap<Str, ServerSlot>, LspConfigError> {
-	let discovered = discover_lsp_sources(user_config_root, root, Vec::new(), plugins)?;
+	let discovered = discover_lsp_sources(user_config_root, root, trust, Vec::new(), plugins)?;
 	for diagnostic in &discovered.diagnostics {
 		tracing::warn!(
 			error = diagnostic as &(dyn std::error::Error + 'static),
@@ -505,7 +516,7 @@ fn discover_roster(
 					server = %name,
 					command = %server.command.value,
 					"language server only resolves from a project-local bin; left out because \
-					 sv_lsp_project_binaries is off"
+					 the workspace is not trusted or sv_lsp_project_binaries is off"
 				);
 			}
 			continue;
@@ -547,6 +558,7 @@ mod tests {
 	use std::fs;
 
 	use super::*;
+	use crate::docserver::ServerConfig;
 
 	#[test]
 	fn file_type_matching_covers_extensions_compounds_and_exact_names() {
@@ -567,12 +579,14 @@ mod tests {
 		let root = scratch.path();
 		let path = env::var_os("PATH");
 		// No markers at all: bundled catalog yields an empty roster.
-		let roster = discover_roster(root, None, &[], false, path.as_deref()).unwrap();
+		let roster =
+			discover_roster(root, None, &[], WorkspaceTrust::Trusted, false, path.as_deref()).unwrap();
 		assert!(roster.is_empty(), "unexpected servers: {:?}", roster.keys().collect::<Vec<_>>());
 
 		// A Cargo marker admits rust-analyzer only when the binary resolves.
 		fs::write(root.join("Cargo.toml"), "[package]").unwrap();
-		let roster = discover_roster(root, None, &[], false, path.as_deref()).unwrap();
+		let roster =
+			discover_roster(root, None, &[], WorkspaceTrust::Trusted, false, path.as_deref()).unwrap();
 		let expected = which_available("rust-analyzer");
 		assert_eq!(roster.contains_key("rust-analyzer"), expected);
 	}
@@ -603,10 +617,73 @@ mod tests {
 		let scratch = project_with_local_only_server();
 		let empty_path = tempfile::tempdir().unwrap();
 		let path = Some(empty_path.path().as_os_str());
-		let roster = discover_roster(scratch.path(), None, &[], false, path).unwrap();
+		let trusted = WorkspaceTrust::Trusted;
+		let roster = discover_roster(scratch.path(), None, &[], trusted, false, path).unwrap();
 		assert!(!roster.contains_key("local-ls"), "{:?}", roster.keys().collect::<Vec<_>>());
-		let roster = discover_roster(scratch.path(), None, &[], true, path).unwrap();
+		let roster = discover_roster(scratch.path(), None, &[], trusted, true, path).unwrap();
 		assert!(roster.contains_key("local-ls"), "the opt-in admits the project bin");
+	}
+
+	/// An untrusted workspace's roster has no project configuration source:
+	/// a server only its `.lsp.json` declares is absent even when its binary
+	/// is on `$PATH`, and a trusted one's roster lists it, sourced from the
+	/// project file.
+	#[test]
+	fn an_untrusted_roster_has_no_project_config_source() {
+		let scratch = tempfile::tempdir().unwrap();
+		let root = scratch.path();
+		fs::write(root.join("proj.marker"), "").unwrap();
+		fs::write(
+			root.join(".lsp.json"),
+			r#"{"servers":{"proj-ls":{
+				"command":"omp-proj-ls",
+				"fileTypes":[".proj"],
+				"rootMarkers":["proj.marker"]
+			}}}"#,
+		)
+		.unwrap();
+		let bin = tempfile::tempdir().unwrap();
+		let executable = bin.path().join("omp-proj-ls");
+		fs::write(&executable, "#!/bin/sh\n").unwrap();
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt as _;
+			fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+		}
+		let path = Some(bin.path().as_os_str());
+
+		let untrusted =
+			discover_roster(root, None, &[], WorkspaceTrust::Untrusted, false, path).unwrap();
+		assert!(
+			!untrusted.contains_key("proj-ls"),
+			"an untrusted project's config loaded: {:?}",
+			untrusted.keys().collect::<Vec<_>>()
+		);
+		let trusted = discover_roster(root, None, &[], WorkspaceTrust::Trusted, false, path).unwrap();
+		assert_eq!(trusted["proj-ls"].source, "dotfile");
+	}
+
+	/// An untrusted authority admits no project-local bin even with the user
+	/// opt-in; a trusted one admits them only with it.
+	#[test]
+	fn an_untrusted_authority_has_no_local_root() {
+		let scratch = project_with_local_only_server();
+		let environment = |trust, opt_in| {
+			Environment::new(
+				ServerConfig::new(scratch.path())
+					.unwrap()
+					.with_workspace_trust(trust)
+					.with_project_binaries(opt_in),
+			)
+			.unwrap()
+		};
+		assert_eq!(environment(WorkspaceTrust::Untrusted, true).project_binary_root(), None);
+		assert_eq!(environment(WorkspaceTrust::Trusted, false).project_binary_root(), None);
+		assert!(
+			environment(WorkspaceTrust::Trusted, true)
+				.project_binary_root()
+				.is_some()
+		);
 	}
 
 	fn which_available(binary: &str) -> bool {

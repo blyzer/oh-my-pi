@@ -3366,6 +3366,10 @@ pub struct ActiveContentInputs {
 	/// declarations join automatic project discovery and whose LSP and DAP
 	/// declarations reach the document authority's rosters.
 	pub claude_plugins:      Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
+	/// The workspace trust decision this environment loads project inputs
+	/// under: project MCP servers, LSP/DAP configuration, hosts and vaults.
+	/// Untrusted (fail closed) unless the composition decided otherwise.
+	pub workspace_trust:     omp_ext::workspace_trust::WorkspaceTrust,
 }
 
 /// Object-safe composition boundary for one active internal-URL resolver.
@@ -4538,12 +4542,18 @@ pub(crate) fn production_registry<
 	}
 	let user_config_root = omp_core::dirs::user_config_root()?;
 	let ssh = SshService::new(
-		HostStore::load_layered(&HostPaths::new(&user_config_root, workspace.root()))
-			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
+		HostStore::load_layered(
+			&HostPaths::new(&user_config_root, workspace.root()),
+			content.workspace_trust,
+		)
+		.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
 	);
-	let vault = VaultService::load_layered(&VaultPaths::new(&user_config_root, workspace.root()))
-		.map_err(|error| EnvdError::State(Str::new(error.to_string())))?
-		.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
+	let vault = VaultService::load_layered(
+		&VaultPaths::new(&user_config_root, workspace.root()),
+		content.workspace_trust,
+	)
+	.map_err(|error| EnvdError::State(Str::new(error.to_string())))?
+	.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
 	documents.set_resource_mutations(ResourceMutationServices {
 		ssh:            ssh.clone(),
 		vault:          vault.clone(),

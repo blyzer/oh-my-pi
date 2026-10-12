@@ -17,6 +17,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use omp_core::{FastHashMap, FastHashSet, Str, StrMut, sf};
 use omp_edit::store::EditStore;
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_proto::{
 	document::v1::{
 		self as pb, client_frame, commit_transaction_response, document_target, server_frame,
@@ -257,18 +258,55 @@ impl WriteBackOutcome {
 #[derive(Clone, Debug)]
 pub struct DocumentHello {
 	/// Negotiated protocol major version.
-	pub protocol_major: u32,
+	pub protocol_major:  u32,
 	/// Negotiated protocol minor version.
-	pub protocol_minor: u32,
+	pub protocol_minor:  u32,
 	/// Stable identity of the connected document workspace.
-	pub workspace_id:   Bytes,
+	pub workspace_id:    Bytes,
 	/// Canonical file URI of the connected workspace root.
-	pub root_uri:       Str,
+	pub root_uri:        Str,
 	/// Epoch scoping transaction idempotency keys.
-	pub server_epoch:   Bytes,
+	pub server_epoch:    Bytes,
 	/// Executable-generation identity of the serving document authority.
-	pub server_build:   Str,
+	pub server_build:    Str,
+	/// Workspace trust under which the authority loads project configuration.
+	pub workspace_trust: ServedWorkspaceTrust,
 }
+
+/// The workspace trust a running document authority reported in its hello.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum ServedWorkspaceTrust {
+	/// The authority loads no project LSP/DAP configuration or local bin.
+	Untrusted,
+	/// The authority loads the project's LSP/DAP configuration.
+	Trusted,
+	/// The authority reported no decision (it predates the field), so what it
+	/// loads is unknown.
+	Unreported,
+}
+
+impl ServedWorkspaceTrust {
+	/// Reads the decision a document `ServerHello` carries.
+	#[must_use]
+	pub fn from_wire(value: i32) -> Self {
+		match pb::WorkspaceTrust::try_from(value) {
+			Ok(pb::WorkspaceTrust::Trusted) => Self::Trusted,
+			Ok(pb::WorkspaceTrust::Untrusted) => Self::Untrusted,
+			Ok(pb::WorkspaceTrust::Unspecified) | Err(_) => Self::Unreported,
+		}
+	}
+
+	/// Whether this is exactly `trust`.
+	#[must_use]
+	pub const fn is(self, trust: WorkspaceTrust) -> bool {
+		matches!(
+			(self, trust),
+			(Self::Trusted, WorkspaceTrust::Trusted) | (Self::Untrusted, WorkspaceTrust::Untrusted)
+		)
+	}
+}
+
 /// A terminal loss of continuity in a document-server event stream.
 #[derive(Clone, Debug, Error)]
 #[error("document event stream ended ({failure:?}); skipped {skipped_events} events: {message}")]
@@ -1827,12 +1865,13 @@ where
 	}
 	Ok((
 		DocumentHello {
-			protocol_major: hello.protocol_major,
-			protocol_minor: hello.protocol_minor,
-			workspace_id:   hello.workspace_id,
-			root_uri:       Str::from(hello.root_uri),
-			server_epoch:   hello.server_epoch,
-			server_build:   Str::from(hello.server_build),
+			protocol_major:  hello.protocol_major,
+			protocol_minor:  hello.protocol_minor,
+			workspace_id:    hello.workspace_id,
+			root_uri:        Str::from(hello.root_uri),
+			server_epoch:    hello.server_epoch,
+			server_build:    Str::from(hello.server_build),
+			workspace_trust: ServedWorkspaceTrust::from_wire(hello.workspace_trust),
 		},
 		reader,
 		writer,
@@ -2459,6 +2498,7 @@ mod tests {
 					},
 					user_config_root: None,
 					claude_plugins:   std::sync::Arc::default(),
+					workspace_trust:  WorkspaceTrust::Untrusted,
 					shutdown:         Some(serve_shutdown),
 					server_build:     Str::from(omp_env::build_id::current()),
 					connections:      None,

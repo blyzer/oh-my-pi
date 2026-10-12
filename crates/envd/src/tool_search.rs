@@ -1580,6 +1580,7 @@ mod tests {
 	use std::future;
 
 	use omp_core::sf;
+	use omp_ext::workspace_trust::WorkspaceTrust;
 	use omp_tools::read::{resolver::SchemeEntry, web::types::WebError};
 	use tokio::{
 		io::{AsyncReadExt as _, AsyncWriteExt as _, duplex},
@@ -1794,8 +1795,11 @@ mod tests {
 		fs::create_dir_all(&user_config).expect("config directory");
 		fs::write(user_config.join("vaults.toml"), format!("[vaults]\nreports = {:?}\n", vault_root))
 			.expect("vault config");
-		let service = VaultService::load_layered(&VaultPaths::new(&user_config, fixture.path()))
-			.expect("vault service");
+		let service = VaultService::load_layered(
+			&VaultPaths::new(&user_config, fixture.path()),
+			WorkspaceTrust::Untrusted,
+		)
+		.expect("vault service");
 		let mut builder = ResolverTable::builder();
 		builder
 			.register(

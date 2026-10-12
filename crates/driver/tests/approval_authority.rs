@@ -43,6 +43,7 @@ use omp_envd::{
 	exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE},
 	tool_settings::ApprovalMode,
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::kind;
 use omp_session::{ComponentRegistry, Session};
 
@@ -251,13 +252,14 @@ enum Step {
 	Restart,
 }
 
-/// One scratch project: its workspace, its project state directory, and the
-/// session's control context.
+/// One scratch project: its workspace, its project state directory, the
+/// session's control context and the workspace trust it decided.
 struct Project {
 	scratch: tempfile::TempDir,
 	root:    PathBuf,
 	state:   PathBuf,
 	con:     Arc<omp_con::Ctx>,
+	trust:   WorkspaceTrust,
 }
 
 impl Project {
@@ -268,7 +270,7 @@ impl Project {
 		std::fs::create_dir_all(&root).expect("workspace");
 		std::fs::create_dir_all(&state).expect("state");
 		let root = std::fs::canonicalize(&root).expect("canonical workspace");
-		Self { scratch, root, state, con: context(sandbox) }
+		Self { scratch, root, state, con: context(sandbox), trust: WorkspaceTrust::Untrusted }
 	}
 
 	/// Attaches one session composition the way the application does.
@@ -289,7 +291,7 @@ impl Project {
 			trusted_extensions: Vec::new(),
 			contributed_values: Vec::new(),
 			con: Arc::clone(&self.con),
-			bridges: RegistryBridges::default(),
+			bridges: support::trusting(self.trust),
 			spawn_idle_timeout: Some(2),
 			spawn_policy,
 		})
@@ -806,9 +808,13 @@ async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
 /// Returns the tool result the model's closing request showed.
 async fn attached_bash_result(command: &str) -> ShownResult {
 	let project = Project::new(ExecSandboxMode::Off);
-	let _daemon =
-		support::InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off))
-			.await;
+	let _daemon = support::InProcessDaemon::serve(
+		&project.root,
+		&project.state,
+		context(ExecSandboxMode::Off),
+		project.trust,
+	)
+	.await;
 	let environment = project.attach(Some(ApprovalMode::Yolo)).await;
 	assert!(
 		environment.fallback_notice.is_none(),
@@ -855,8 +861,13 @@ async fn attached_bash(
 	steps: &[Step],
 ) -> Turn {
 	let project = Project::new(sandbox);
-	let _daemon =
-		support::InProcessDaemon::serve(&project.root, &project.state, context(sandbox)).await;
+	let _daemon = support::InProcessDaemon::serve(
+		&project.root,
+		&project.state,
+		context(sandbox),
+		project.trust,
+	)
+	.await;
 	let environment = project.attach(mode).await;
 	assert!(
 		environment.fallback_notice.is_none(),
@@ -1034,6 +1045,7 @@ async fn retried_tool_tail(attached: bool) {
 				&project.root,
 				&project.state,
 				context(ExecSandboxMode::Off),
+				project.trust,
 			)
 			.await,
 		)
@@ -1131,7 +1143,7 @@ mod attached_daemon {
 
 	impl InProcessDaemon {
 		async fn for_project(project: &Project, sandbox: ExecSandboxMode) -> Self {
-			Self::serve(&project.root, &project.state, context(sandbox)).await
+			Self::serve(&project.root, &project.state, context(sandbox), project.trust).await
 		}
 	}
 
@@ -1408,7 +1420,9 @@ mod session_network_grants {
 		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
 		project.con = loopback_context();
 		let port = loopback_upstream();
-		let _daemon = InProcessDaemon::serve(&project.root, &project.state, loopback_context()).await;
+		let _daemon =
+			InProcessDaemon::serve(&project.root, &project.state, loopback_context(), project.trust)
+				.await;
 		let environment = attached(&project).await;
 		grants_follow_the_journal(&project, environment, port, leave).await;
 	}
@@ -2055,7 +2069,7 @@ mod policy_keyed_daemons {
 	use omp_envd::daemon_policy;
 
 	use super::*;
-	use crate::support::InProcessDaemon;
+	use crate::support::{InProcessDaemon, released_document_authority};
 
 	/// The policy the daemon an attached session joined reported in its hello.
 	fn joined_policy(environment: &ProjectEnvironment) -> Option<DaemonPolicy> {
@@ -2075,10 +2089,16 @@ mod policy_keyed_daemons {
 			&project.root,
 			&project.state,
 			context(ExecSandboxMode::WorkspaceWrite),
+			project.trust,
 		)
 		.await;
-		let _unconfined =
-			InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off)).await;
+		let _unconfined = InProcessDaemon::serve(
+			&project.root,
+			&project.state,
+			context(ExecSandboxMode::Off),
+			project.trust,
+		)
+		.await;
 
 		for sandbox in [ExecSandboxMode::WorkspaceWrite, ExecSandboxMode::Off] {
 			project.con = context(sandbox);
@@ -2090,9 +2110,55 @@ mod policy_keyed_daemons {
 			);
 			assert_eq!(
 				joined_policy(&environment),
-				Some(daemon_policy::from_con(&project.con)),
+				Some(daemon_policy::from_con(&project.con, project.trust)),
 				"the {sandbox} session joined a daemon enforcing another policy"
 			);
+		}
+	}
+
+	/// The workspace trust a session decided keys its daemon like its
+	/// sandbox does: a trusted and an untrusted session of one configuration
+	/// reach different sockets and policy digests, each joins only the daemon
+	/// of its own trust, and two sessions of one trust share one daemon.
+	///
+	/// The project's one document authority admits a single trust at a time
+	/// (`DocumentAuthorityTrustMismatch`), so the daemons of the two trusts
+	/// serve the project one after the other.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn each_workspace_trust_joins_its_own_daemon_of_one_project() {
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let untrusted = daemon_policy::from_con(&project.con, WorkspaceTrust::Untrusted);
+		let trusted = daemon_policy::from_con(&project.con, WorkspaceTrust::Trusted);
+		assert_ne!(untrusted, trusted, "the trust decision is part of the policy digest");
+		let socket = |policy: &DaemonPolicy| {
+			omp_env::project_state::environment_socket(&project.state, policy)
+				.expect("environment socket")
+		};
+		assert_ne!(socket(&untrusted), socket(&trusted), "one socket serves both trusts");
+
+		for (trust, policy) in
+			[(WorkspaceTrust::Untrusted, untrusted), (WorkspaceTrust::Trusted, trusted)]
+		{
+			let daemon =
+				InProcessDaemon::serve(&project.root, &project.state, Arc::clone(&project.con), trust)
+					.await;
+			project.trust = trust;
+			let first = project.attach(None).await;
+			let second = project.attach(None).await;
+			for environment in [&first, &second] {
+				assert!(
+					environment.fallback_notice.is_none(),
+					"the {trust:?} session did not join its daemon: {:?}",
+					environment.fallback_notice
+				);
+				assert_eq!(
+					joined_policy(environment),
+					Some(policy),
+					"the {trust:?} session joined a daemon of another trust"
+				);
+			}
+			drop((first, second, daemon));
+			released_document_authority(&project.state).await;
 		}
 	}
 
@@ -2102,14 +2168,15 @@ mod policy_keyed_daemons {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_daemon_reporting_another_policy_is_never_joined() {
 		let project = Project::new(ExecSandboxMode::Off);
-		let session = daemon_policy::from_con(&project.con);
+		let session = daemon_policy::from_con(&project.con, project.trust);
 		let daemon = context(ExecSandboxMode::WorkspaceWrite);
-		let served = daemon_policy::from_con(&daemon);
+		let served = daemon_policy::from_con(&daemon, project.trust);
 		assert_ne!(session, served);
 		let _misplaced = InProcessDaemon::serve_at(
 			&project.root,
 			&project.state,
 			daemon,
+			project.trust,
 			omp_env::project_state::environment_socket(&project.state, &session)
 				.expect("environment socket"),
 		)
@@ -2134,8 +2201,9 @@ mod policy_keyed_daemons {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_session_spawns_no_daemon_it_could_never_join() {
 		let project = Project::new(ExecSandboxMode::Off);
-		let session = daemon_policy::from_con(&project.con);
-		let configured = daemon_policy::from_con(&context(ExecSandboxMode::WorkspaceWrite));
+		let session = daemon_policy::from_con(&project.con, project.trust);
+		let configured =
+			daemon_policy::from_con(&context(ExecSandboxMode::WorkspaceWrite), project.trust);
 		assert_ne!(session, configured);
 		let spawn_log = project.state.join("envd.log");
 
@@ -2172,6 +2240,7 @@ mod policy_keyed_daemons {
 			&project.root,
 			&project.state,
 			context(ExecSandboxMode::WorkspaceWrite),
+			project.trust,
 		)
 		.await;
 		let environment = project.attach(None).await;
@@ -2194,8 +2263,13 @@ mod policy_keyed_daemons {
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_sandboxed_session_never_runs_on_an_unconfined_daemon() {
 		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
-		let _daemon =
-			InProcessDaemon::serve(&project.root, &project.state, context(ExecSandboxMode::Off)).await;
+		let _daemon = InProcessDaemon::serve(
+			&project.root,
+			&project.state,
+			context(ExecSandboxMode::Off),
+			project.trust,
+		)
+		.await;
 		let environment = project.attach(None).await;
 		let joined = environment.fallback_notice.is_none();
 		let Turn { session, result, landed, .. } = project

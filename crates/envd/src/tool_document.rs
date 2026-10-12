@@ -2718,6 +2718,7 @@ mod tests {
 							root_uri,
 							server_epoch: Bytes::from_static(b"rollback-epoch"),
 							server_build: String::new(),
+							workspace_trust: pb::WorkspaceTrust::Untrusted.into(),
 						})),
 					},
 					config,

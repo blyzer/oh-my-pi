@@ -58,7 +58,7 @@ pub fn plugin_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
 /// ([`AgentPluginOrigin::Explicit`]), then every installed plugin in that
 /// layout at its registry scope ([`AgentPluginOrigin::Installed`]). Only a
 /// project install is project-scoped; an explicit root or a user install
-/// loads whatever `sv_mcp_enable_project_config`.
+/// loads whatever the workspace trust or `sv_mcp_enable_project_config`.
 #[must_use]
 pub fn agent_plugin_roots(
 	native_roots: &[PathBuf],

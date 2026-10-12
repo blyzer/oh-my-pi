@@ -14,6 +14,7 @@ use omp_chat::overlays::services::{
 };
 use omp_core::{Str, sf};
 use omp_envd::mcp::{
+	ProjectMcpPolicy,
 	config::{ConfigSource, ConfigSourceKind, resolve_sources},
 	config_store::set_server_enabled,
 	manager::{McpInspectorHealth, McpInspectorSnapshot},
@@ -99,7 +100,9 @@ fn mcp_rows(state: &ServiceState) -> ServiceResult<Vec<ExtensionRow>> {
 			.map_err(ServiceError::failed)
 	})
 	.collect::<ServiceResult<Vec<_>>>()?;
-	let resolved = resolve_sources(&sources, true);
+	// Every declaration is listed, the project's included, so its enabled
+	// state comes from resolving them all; what mounts is the snapshots'.
+	let resolved = resolve_sources(&sources, ProjectMcpPolicy::Trusted);
 	let mut declared: BTreeMap<Str, (bool, Str)> = BTreeMap::new();
 	for source in &sources {
 		for (name, config) in &source.file.mcp_servers {
@@ -142,15 +145,15 @@ fn mcp_rows(state: &ServiceState) -> ServiceResult<Vec<ExtensionRow>> {
 }
 
 fn mcp_row(snapshot: &McpInspectorSnapshot, enabled: bool) -> ExtensionRow {
-	let status = if !enabled {
-		ExtensionStatus::Disabled
-	} else {
+	let status = if enabled {
 		match snapshot.health {
 			McpInspectorHealth::Connecting => ExtensionStatus::Connecting,
 			McpInspectorHealth::Connected => ExtensionStatus::Ready,
 			McpInspectorHealth::Disconnected => ExtensionStatus::Disconnected,
 			McpInspectorHealth::Failed => ExtensionStatus::Failed,
 		}
+	} else {
+		ExtensionStatus::Disabled
 	};
 	let version = snapshot.implementation.as_ref().map(|implementation| {
 		snapshot

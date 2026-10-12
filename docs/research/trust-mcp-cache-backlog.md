@@ -172,7 +172,7 @@ Answers to the questions above. Slices 1 and 2 have landed (#265, #267).
 | 1 | Repo-local LSP/DAP binaries off by default; user-only `sv_lsp_project_binaries` opts in. | 1 (done) |
 | 2 | Fix F11 inside `omp adw run` now. | 2 (done) |
 | 3 | Untrusted workspaces still load `AGENTS.md`, rules and skills, contained to the repo. | 3 |
-| 4 | Re-ask on a digest change: trust is bound to the inventory digest, and a change after `git pull` gives `DigestChanged`. **Still open:** whether `Subtree` trust should exist. | 3 |
+| 4 | Re-ask on a digest change: trust is bound to the inventory digest, and a change after `git pull` gives `DigestChanged`. `Subtree` trust exists (2026-10-12): the domain already models it, and slice 7 exposes it (`omp trust --subtree`) after checking that no existing command creates subtree grants. | 3, 7 |
 | 5 | Native `.omp/extensions` load automatically once the workspace is trusted. No per-extension link is required. | 3 |
 | 6 | Project MCP values stay literal: `!cmd` and env-name substitution are forbidden even when trusted. | 4 |
 | 7 | An untrusted workspace clamps an explicit user `yolo` to `write`. | 9 |
@@ -180,7 +180,7 @@ Answers to the questions above. Slices 1 and 2 have landed (#265, #267).
 | 9 | A typed trust request on `proto`/`rpc` is accepted, and the decision enters `DaemonPolicy` and `ServerHello`. | 4, 7 |
 | 10 | `ai_cache_retention auto` places markers, and the Volatile band moves into messages. Goldens and the ADR 0024 prefix contract are updated with it. | 12, 13 |
 | 11 | Invocation-key usage is recorded under a synthetic `invocation` account. | 14 |
-| 12 | The model sees the `approval-posture` notice. **Still open:** whether unknown-scheme reads count as non-fetch. | posture notice |
+| 12 | The model sees the `approval-posture` notice. Reads of an unknown scheme count as possible network access, not as non-fetch (2026-10-12), unless the code shows the scheme stays local. | posture notice |
 | 13 | A project `vaults.toml`/`hosts.toml` may only add new names, never shadow a user name. | 4 |
 
 ## Commands that took more than one minute

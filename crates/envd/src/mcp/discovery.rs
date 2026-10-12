@@ -921,7 +921,7 @@ mod tests {
 	use omp_ext::{claude_plugin::ClaudePlugins, workspace_trust::WorkspaceTrust};
 
 	use super::*;
-	use crate::mcp::{AgentPluginOrigin, AgentPluginRoot, McpSettings};
+	use crate::mcp::{AgentPluginOrigin, AgentPluginRoot, McpSettings, ProjectMcpPolicy};
 
 	fn write(path: &Path, body: &str) {
 		fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -946,7 +946,7 @@ mod tests {
 		);
 		let paths = McpConfigPaths::new(&user_root, &project);
 		let sources = sources(&paths);
-		let resolved = super::super::config::resolve_sources(&sources, true);
+		let resolved = super::super::config::resolve_sources(&sources, ProjectMcpPolicy::Trusted);
 		assert_eq!(resolved.servers["same"].config.command.as_deref(), Some("claude"));
 		assert!(resolved.servers.contains_key("gemini"));
 		assert!(resolved.servers.contains_key("vscode"));
@@ -986,7 +986,7 @@ mod tests {
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
 		let discovered = sources(&paths);
-		let resolved = super::super::config::resolve_sources(&discovered, true);
+		let resolved = super::super::config::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
 		let expected = fs::canonicalize(&plugin).unwrap().join("server");
 		assert_eq!(
 			resolved.servers["portable"].config.command.as_deref(),
@@ -1102,7 +1102,7 @@ mod tests {
 		);
 
 		let blocked = crate::plugin_commands::blocked_agent_plugin_launches(&paths, &McpSettings {
-			enable_project_config: true,
+			project_config: ProjectMcpPolicy::Trusted,
 		});
 		assert_eq!(
 			blocked
@@ -1118,10 +1118,10 @@ mod tests {
 			"{}",
 			blocked[0]
 		);
-		// With project configuration disabled, discovery drops the project's
+		// With project configuration withheld, discovery drops the project's
 		// package and the report no longer names it; the root the invocation
 		// named is the user's own choice and still loads and is reported.
-		let project_disabled = McpSettings { enable_project_config: false };
+		let project_disabled = McpSettings { project_config: ProjectMcpPolicy::Withheld };
 		assert_eq!(
 			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &project_disabled)
 				.iter()
@@ -1133,7 +1133,7 @@ mod tests {
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
 		assert_eq!(
-			super::super::config::resolve_sources(&sources(&all_approved), false)
+			super::super::config::resolve_sources(&sources(&all_approved), ProjectMcpPolicy::Withheld)
 				.servers
 				.keys()
 				.map(Str::as_str)
@@ -1141,7 +1141,8 @@ mod tests {
 			["tool"],
 			"the loader agrees with the report"
 		);
-		let resolved = super::super::config::resolve_sources(&sources(&paths), true);
+		let resolved =
+			super::super::config::resolve_sources(&sources(&paths), ProjectMcpPolicy::Trusted);
 		assert!(!resolved.servers.contains_key("local"), "an unapproved server loaded");
 		assert!(!resolved.servers.contains_key("tool"), "an unapproved server loaded");
 		assert!(resolved.servers.contains_key("remote"), "a remote server needs no approval");
@@ -1152,7 +1153,8 @@ mod tests {
 			(PluginId::new_static("portable"), portable.command_digest(local)),
 			(PluginId::new_static("explicit"), portable.command_digest(&portable.launches[1])),
 		]));
-		let resolved = super::super::config::resolve_sources(&sources(&approved), true);
+		let resolved =
+			super::super::config::resolve_sources(&sources(&approved), ProjectMcpPolicy::Trusted);
 		assert!(resolved.servers.contains_key("local"));
 		assert!(!resolved.servers.contains_key("other"));
 		assert!(!resolved.servers.contains_key("tool"));
@@ -1163,7 +1165,8 @@ mod tests {
 			crate::plugin_commands::blocked_agent_plugin_launches(&all, &McpSettings::default())
 				.is_empty()
 		);
-		let resolved = super::super::config::resolve_sources(&sources(&all), true);
+		let resolved =
+			super::super::config::resolve_sources(&sources(&all), ProjectMcpPolicy::Trusted);
 		assert!(
 			["local", "other", "tool", "remote"]
 				.iter()
@@ -1179,7 +1182,7 @@ mod tests {
 	}
 
 	/// Only a package that comes from the project is project-scoped: with
-	/// project MCP configuration disabled, a user install and a package in the
+	/// project MCP configuration withheld, a user install and a package in the
 	/// user plugin directories still load and are still reported, while a
 	/// project install and a package in the project's plugin directory do
 	/// neither.
@@ -1220,28 +1223,46 @@ mod tests {
 				("project-install@m", ConfigSourceKind::AgentPluginProject),
 			]
 		);
-		let reported = |enable_project_config: bool| {
+		let reported = |project_config: ProjectMcpPolicy| {
 			crate::plugin_commands::blocked_agent_plugin_launches(&paths, &McpSettings {
-				enable_project_config,
+				project_config,
 			})
 			.into_iter()
 			.map(|blocked| blocked.server)
 			.collect::<Vec<_>>()
 		};
-		assert_eq!(reported(true), ["c", "d", "user-install@m:a", "project-install@m:b"]);
-		assert_eq!(reported(false), ["d", "user-install@m:a"], "only project packages drop out");
+		assert_eq!(reported(ProjectMcpPolicy::Trusted), [
+			"c",
+			"d",
+			"user-install@m:a",
+			"project-install@m:b"
+		]);
+		assert_eq!(
+			reported(ProjectMcpPolicy::Withheld),
+			["d", "user-install@m:a"],
+			"only project packages drop out"
+		);
 		let approved = paths
 			.clone()
 			.with_command_approvals(approve_agent_plugins(&paths));
-		let loaded = |enable_project_config: bool| {
-			super::super::config::resolve_sources(&sources(&approved), enable_project_config)
+		let loaded = |project_config: ProjectMcpPolicy| {
+			super::super::config::resolve_sources(&sources(&approved), project_config)
 				.servers
 				.keys()
 				.cloned()
 				.collect::<Vec<_>>()
 		};
-		assert_eq!(loaded(true), ["c", "d", "project-install@m:b", "user-install@m:a"]);
-		assert_eq!(loaded(false), ["d", "user-install@m:a"], "the loader agrees with the report");
+		assert_eq!(loaded(ProjectMcpPolicy::Trusted), [
+			"c",
+			"d",
+			"project-install@m:b",
+			"user-install@m:a"
+		]);
+		assert_eq!(
+			loaded(ProjectMcpPolicy::Withheld),
+			["d", "user-install@m:a"],
+			"the loader agrees with the report"
+		);
 	}
 
 	/// A package installed from a marketplace is identified as
@@ -1287,7 +1308,8 @@ mod tests {
 			packages[0].plugin.clone(),
 			packages[0].command_digest(&packages[0].launches[0]),
 		)]));
-		let resolved = super::super::config::resolve_sources(&sources(&approved), true);
+		let resolved =
+			super::super::config::resolve_sources(&sources(&approved), ProjectMcpPolicy::Trusted);
 		assert_eq!(resolved.servers.keys().map(Str::as_str).collect::<Vec<_>>(), [
 			"docs@official:search"
 		]);
@@ -1370,7 +1392,7 @@ mod tests {
 			&McpConfigPaths::new(&home.join(".o2"), &project)
 				.with_claude_plugins(plugins.plugins.into()),
 		);
-		let resolved = super::super::config::resolve_sources(&discovered, true);
+		let resolved = super::super::config::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
 		assert!(!resolved.servers.contains_key("tools@market:db"), "an unapproved server loaded");
 		assert!(resolved.servers.contains_key("tools@market:ok"));
 		assert!(
@@ -1412,7 +1434,7 @@ mod tests {
 			&McpConfigPaths::new(&home.join(".o2"), &project)
 				.with_claude_plugins(plugins.plugins.into()),
 		);
-		let resolved = super::super::config::resolve_sources(&discovered, true);
+		let resolved = super::super::config::resolve_sources(&discovered, ProjectMcpPolicy::Trusted);
 
 		let files = fs::canonicalize(&files).unwrap();
 		let inline = fs::canonicalize(&inline).unwrap();
@@ -1453,7 +1475,7 @@ mod tests {
 			"[mcp_servers.codex]\ncommand = \"runner\"\nargs = [\"serve\"]\ntool_timeout_sec = 3\n",
 		);
 		let sources = sources(&McpConfigPaths::new(&home.join(".o2"), &project));
-		let resolved = super::super::config::resolve_sources(&sources, true);
+		let resolved = super::super::config::resolve_sources(&sources, ProjectMcpPolicy::Trusted);
 		assert_eq!(resolved.servers["open"].config.args, [Str::new("serve")]);
 		assert_eq!(resolved.servers["codex"].config.timeout, Some(3_000));
 	}

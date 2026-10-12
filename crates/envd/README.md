@@ -158,17 +158,30 @@ and language-server sessions. Connection-specific behavior remains isolated in
 sessions, while bounded protocol framing and adapters keep LSP and edit formats
 from becoming independent sources of state.
 
-Language-server and debug-adapter executables (and a bare `runInTerminal`
-program a debug adapter asks for) resolve from `$PATH` only by default. A
-repository's own bins (`node_modules/.bin`, `.venv/bin`, `venv/bin`,
+Project language- and debug-server configuration (`.omp/lsp.json`, `.lsp.json`,
+`.omp/dap.json` and the other gated project files) loads only for a trusted
+workspace. Language-server and debug-adapter executables (and a bare
+`runInTerminal` program a debug adapter asks for) resolve from `$PATH` only by
+default. A repository's own bins (`node_modules/.bin`, `.venv/bin`, `venv/bin`,
 `.env/bin`, `vendor/bundle/bin`, `bin`, each behind its marker file) are
-searched first only when the user-level archive convar
+searched first only in a trusted workspace when the user-level archive convar
 `sv_lsp_project_binaries` is on. Like `sv_mcp_enable_project_config` it is not
 a project convar, so a repository's cfg overlay can never enable it. A server
 that only a project bin provides is left out of the roster (logged at debug),
 and a debug adapter in the same position reports its executable as unavailable.
 Users who depend on a project-pinned server such as `typescript-language-server`
 either put it on `$PATH` or set `sv_lsp_project_binaries 1` in their user cfg.
+
+The document authority reports the workspace trust it loads under in its
+`ServerHello` (`workspace_trust`). A session joins a running authority only
+when its own trust matches; otherwise it is refused with
+`DocumentAuthorityTrustMismatch` (an authority that reports no trust is never
+joined), so a trusted and an untrusted session never share one roster. Close
+the other session or wait for its authority to idle out.
+
+Project SSH hosts (`.omp/hosts.toml`) and vaults (`.omp/vaults.toml`) are read
+only for a trusted workspace, and then only add names: a host or vault the user
+already declares keeps the user's definition.
 
 The `omp` executable recognizes the hidden `__omp-eval-child` and
 `__omp-ext-host` arguments because those children re-enter the same binary.
@@ -181,9 +194,11 @@ preflight-boot CPython: each Python child initializes its own interpreter.
 MCP server definitions that a repository supplies (`.omp/mcp.json`, `.mcp.json`,
 and the foreign editor files such as `.cursor/mcp.json`, `.vscode/mcp.json`,
 `.codex/config.toml`, `opencode.json`) can start processes with the user's
-authority, so they are **off by default**. The user-level archive convar
-`sv_mcp_enable_project_config` opts in; it is deliberately not a project convar,
-so a repository's own cfg overlay can never enable it. User-level files and
+authority, so they load only for a trusted workspace
+(`ProjectMcpPolicy::Trusted`). The user-level archive convar
+`sv_mcp_enable_project_config` opts every project in, trusted or not
+(`ProjectMcpPolicy::UserOptIn`); it is deliberately not a project convar, so a
+repository's own cfg overlay can never enable it. User-level files and
 explicitly named or user-installed plugins always load.
 
 Even after opting in, a project-scoped declaration
@@ -201,10 +216,12 @@ environment daemon. A daemon compiles its command sandbox, egress broker and
 approval posture from the control context it starts under and keeps them, so
 the policy digest (`daemon_policy`: every `sv_sandbox_*` setting,
 `sv_tools_approval_mode` with its provenance, `sv_tools_approval`,
-`sv_shell_command_prefix` and `sv_fetch_enabled`) keys its socket, under a key
-private to the project so the name never reveals the policy, and rides every
-`ServerHello`; a client never joins a daemon that reports another policy and
-runs an embedded host under its own instead. Equal policies are equal settings,
+`sv_shell_command_prefix`, `sv_fetch_enabled` and the workspace trust decision
+the daemon was started under, `omp envd --workspace-trust`) keys its socket,
+under a key private to the project so the name never reveals the policy, and
+rides every `ServerHello`; a client never joins a daemon that reports another
+policy and runs an embedded host under its own instead. Equal policies are equal
+settings,
 not equal probes, so every `ServerHello` also reports the sandbox state the
 daemon's own probe found (`sandbox_state`), which its admissions resolve
 against.

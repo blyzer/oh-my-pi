@@ -11,6 +11,7 @@ use omp_envd::{
 	docs::DocumentHost,
 	docserver::daemon::{self, ServeOptions, Transport},
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use tokio::{net::UnixStream, task::JoinHandle, time};
 
 use super::{DEFAULT_TIMEOUT, within};
@@ -75,6 +76,7 @@ impl DocServerTask {
 				},
 				user_config_root: None,
 				claude_plugins: std::sync::Arc::default(),
+				workspace_trust: WorkspaceTrust::Untrusted,
 				shutdown: None,
 				server_build,
 				connections: None,

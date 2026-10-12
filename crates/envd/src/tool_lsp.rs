@@ -1812,6 +1812,7 @@ mod tests {
 	mod by_symbol {
 		use std::os::unix::fs::PermissionsExt as _;
 
+		use omp_ext::workspace_trust::WorkspaceTrust;
 		use tokio::io::duplex;
 
 		use super::*;
@@ -1911,8 +1912,13 @@ while True:
 					.expect("config"),
 				)
 				.expect("write config");
-				let environment =
-					Environment::new(ServerConfig::new(project.clone()).expect("config")).expect("env");
+				// A trusted workspace loads the project `.lsp.json`.
+				let environment = Environment::new(
+					ServerConfig::new(project.clone())
+						.expect("config")
+						.with_workspace_trust(WorkspaceTrust::Trusted),
+				)
+				.expect("env");
 				let supervisor = NativeLspSupervisor::discover(&environment, None, Default::default())
 					.expect("discover");
 				environment.install_lsp_supervisor(supervisor.clone());

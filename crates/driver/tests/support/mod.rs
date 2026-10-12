@@ -8,12 +8,17 @@ use omp_driver::headless::kernel::{
 	EnvToolExecutor, SettingsAdmission, bind_environment_approvals, install_tool_authority,
 };
 use omp_envd::{
-	EnvServer, ProjectEnvironment, RegistryBridges, exthost::ConvarControlFactory,
-	tool_settings::ApprovalMode, worker::ExtHostConfig,
+	ActiveContentInputs, EnvServer, ProjectEnvironment, RegistryBridges,
+	exthost::ConvarControlFactory, tool_settings::ApprovalMode, worker::ExtHostConfig,
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_session::Session;
 use omp_tool::Registry;
-use tokio::{net::UnixStream, task::JoinHandle};
+use tokio::{
+	net::UnixStream,
+	task::JoinHandle,
+	time::{sleep, timeout},
+};
 use tokio_util::sync::CancellationToken;
 
 /// Installs the session's tool authority on `kernel`, which serves `session`
@@ -83,8 +88,9 @@ const LISTEN_WAIT: Duration = Duration::from_secs(30);
 /// `ProjectEnvironment::attach` finds it there and, because it runs the same
 /// executable and so has the same build id, joins it as a peer instead of
 /// spawning a daemon or falling back to an embedded environment, provided the
-/// session's control context resolves the daemon's sandbox and approval policy:
-/// the socket is keyed by that policy. Dropping it stops serving.
+/// session's control context and workspace trust resolve the daemon's
+/// sandbox, approval and trust policy: the socket is keyed by that policy.
+/// Dropping it stops serving.
 pub struct InProcessDaemon {
 	shutdown: CancellationToken,
 	serving:  JoinHandle<Result<(), omp_envd::EnvdError>>,
@@ -92,16 +98,21 @@ pub struct InProcessDaemon {
 
 impl InProcessDaemon {
 	/// Serves the daemon for the project at `root` with state under `state`,
-	/// under the daemon's own control context `con`, on the socket its policy
-	/// keys.
+	/// under the daemon's own control context `con` and workspace `trust`, on
+	/// the socket its policy keys.
 	#[allow(dead_code, reason = "only some test crates sharing this module serve a daemon")]
-	pub async fn serve(root: &Path, state: &Path, con: Arc<omp_con::Ctx>) -> Self {
+	pub async fn serve(
+		root: &Path,
+		state: &Path,
+		con: Arc<omp_con::Ctx>,
+		trust: WorkspaceTrust,
+	) -> Self {
 		let socket = omp_env::project_state::environment_socket(
 			state,
-			&omp_envd::daemon_policy::from_con(&con),
+			&omp_envd::daemon_policy::from_con(&con, trust),
 		)
 		.expect("environment socket");
-		Self::serve_at(root, state, con, socket).await
+		Self::serve_at(root, state, con, trust, socket).await
 	}
 
 	/// Serves the daemon like [`Self::serve`], but on `socket` whatever policy
@@ -111,6 +122,7 @@ impl InProcessDaemon {
 		root: &Path,
 		state: &Path,
 		con: Arc<omp_con::Ctx>,
+		trust: WorkspaceTrust,
 		socket: std::path::PathBuf,
 	) -> Self {
 		let convars = Arc::new(ConvarControlFactory::new(Arc::clone(&con)));
@@ -130,7 +142,7 @@ impl InProcessDaemon {
 			None,
 			&con,
 			convars,
-			RegistryBridges::default(),
+			trusting(trust),
 		)
 		.await
 		.expect("project daemon");
@@ -141,9 +153,9 @@ impl InProcessDaemon {
 			let shutdown = shutdown.clone();
 			async move { server.serve_uds(&socket, shutdown, None).await }
 		});
-		tokio::time::timeout(LISTEN_WAIT, async {
+		timeout(LISTEN_WAIT, async {
 			while UnixStream::connect(&socket).await.is_err() {
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -157,4 +169,29 @@ impl Drop for InProcessDaemon {
 		self.shutdown.cancel();
 		self.serving.abort();
 	}
+}
+
+/// The registry bridges of a composition whose workspace `trust` was decided,
+/// and nothing else.
+#[allow(dead_code, reason = "only some test crates sharing this module decide trust")]
+pub fn trusting(trust: WorkspaceTrust) -> RegistryBridges {
+	RegistryBridges {
+		content: ActiveContentInputs { workspace_trust: trust, ..ActiveContentInputs::default() },
+		..RegistryBridges::default()
+	}
+}
+
+/// Waits until the project document authority under `state` stops
+/// answering, so a daemon of another workspace trust may own it: a running
+/// authority admits sessions of its own trust alone.
+#[allow(dead_code, reason = "only some test crates sharing this module change trust")]
+pub async fn released_document_authority(state: &Path) {
+	let socket = omp_env::project_state::document_socket(state);
+	timeout(LISTEN_WAIT, async {
+		while UnixStream::connect(&socket).await.is_ok() {
+			sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the document authority outlived its daemon");
 }

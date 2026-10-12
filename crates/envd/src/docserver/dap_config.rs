@@ -17,7 +17,10 @@ use omp_ext::{
 		resolve_plugin_command,
 	},
 	plugin_command::{PluginLaunch, PluginLaunchKind},
-	workspace_trust::inventory::{DAP_CONFIG_NAMES, PROJECT_DIR},
+	workspace_trust::{
+		WorkspaceTrust,
+		inventory::{DAP_CONFIG_NAMES, PROJECT_DIR},
+	},
 };
 use serde::Deserialize;
 use serde_json::Map;
@@ -276,12 +279,14 @@ impl ResolvedDapAdapter {
 }
 
 /// Discovers only native user/project DAP files, low to high precedence.
-/// Foreign roots are never considered.
+/// Foreign roots are never considered; the project's files are read only for
+/// a workspace of `trust` [`WorkspaceTrust::Trusted`].
 pub fn discover_native_dap_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
+	trust: WorkspaceTrust,
 ) -> Result<Vec<DapConfigSource>, DapConfigError> {
-	discover_dap_sources(user_root, project_root, Vec::new(), &[]).map(|found| found.sources)
+	discover_dap_sources(user_root, project_root, trust, Vec::new(), &[]).map(|found| found.sources)
 }
 
 /// Ordered sources plus the plugin declarations that did not load.
@@ -297,6 +302,10 @@ pub struct DiscoveredDapSources {
 /// sources in increasing precedence; built-ins are merged before this
 /// returned list.
 ///
+/// The project's own files are read only for a workspace of `trust`
+/// [`WorkspaceTrust::Trusted`]: an untrusted repository's configuration can
+/// name any command, so none of it loads.
+///
 /// The only non-native roots ever read are the `plugins` handed in: the
 /// installed, enabled marketplace plugins the composition resolved, each
 /// contributing only the declarations its
@@ -310,6 +319,7 @@ pub struct DiscoveredDapSources {
 pub fn discover_dap_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
+	trust: WorkspaceTrust,
 	mut manifests: Vec<DapConfigSource>,
 	plugins: &[ClaudePlugin],
 ) -> Result<DiscoveredDapSources, DapConfigError> {
@@ -323,14 +333,16 @@ pub fn discover_dap_sources(
 		append_existing(&mut sources, user_root, DapConfigSourceKind::User, user)?;
 		append_existing(&mut sources, &user_root.join("agent"), DapConfigSourceKind::User, user)?;
 	}
-	let project = Containment::Within(containment_root(project_root));
-	append_existing(
-		&mut sources,
-		&project_root.join(PROJECT_DIR),
-		DapConfigSourceKind::Project,
-		project,
-	)?;
-	append_existing(&mut sources, project_root, DapConfigSourceKind::Dotfile, project)?;
+	if trust == WorkspaceTrust::Trusted {
+		let project = Containment::Within(containment_root(project_root));
+		append_existing(
+			&mut sources,
+			&project_root.join(PROJECT_DIR),
+			DapConfigSourceKind::Project,
+			project,
+		)?;
+		append_existing(&mut sources, project_root, DapConfigSourceKind::Dotfile, project)?;
+	}
 	Ok(DiscoveredDapSources { sources, diagnostics })
 }
 
@@ -772,7 +784,7 @@ mod tests {
 		{
 			write(&project.join(near_miss), "{}");
 		}
-		let read = discover_dap_sources(None, &project, Vec::new(), &[])
+		let read = discover_dap_sources(None, &project, WorkspaceTrust::Trusted, Vec::new(), &[])
 			.unwrap()
 			.sources
 			.iter()
@@ -806,7 +818,8 @@ mod tests {
 		let oversize = vec![b' '; usize::try_from(MAX_CONFIG_BYTES).unwrap() + 1];
 		fs::write(project.join(".dap.json"), oversize).unwrap();
 
-		let found = discover_dap_sources(None, &project, Vec::new(), &[]).unwrap();
+		let found =
+			discover_dap_sources(None, &project, WorkspaceTrust::Trusted, Vec::new(), &[]).unwrap();
 		let sources = found
 			.sources
 			.iter()
@@ -892,8 +905,14 @@ mod tests {
 			("broken@m", &broken, true),
 		]);
 
-		let found =
-			discover_dap_sources(Some(&user), &project, Vec::new(), &plugins.plugins).unwrap();
+		let found = discover_dap_sources(
+			Some(&user),
+			&project,
+			WorkspaceTrust::Trusted,
+			Vec::new(),
+			&plugins.plugins,
+		)
+		.unwrap();
 		let adapters = load_dap_config(builtin_adapters(), &found.sources).unwrap();
 
 		let root = fs::canonicalize(&on).unwrap();
@@ -946,7 +965,14 @@ mod tests {
 			.unwrap();
 		entry.approved_commands = [entry.command_digest(&trusted)].into();
 
-		let found = discover_dap_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		let found = discover_dap_sources(
+			None,
+			&project,
+			WorkspaceTrust::Trusted,
+			Vec::new(),
+			&plugins.plugins,
+		)
+		.unwrap();
 		let adapters = load_dap_config(builtin_adapters(), &found.sources).unwrap();
 
 		assert!(adapters.contains_key("trusted-dbg"));

@@ -3546,6 +3546,8 @@ fn write_toml(path: &Path, value: &impl serde::Serialize) -> miette::Result<()> 
 }
 #[cfg(test)]
 mod tests {
+	use omp_envd::mcp::{McpSettings, ProjectMcpPolicy};
+
 	use super::*;
 	#[test]
 	fn missing_local_source_policy_can_skip_or_error() {
@@ -3955,8 +3957,9 @@ mod tests {
 			omp_driver::plugin_commands::blocked_launches(
 				&plugins,
 				&agent_plugins,
-				// The project's `.agents/plugins` package loads only on opt-in.
-				&omp_envd::mcp::McpSettings { enable_project_config: true },
+				// The project's `.agents/plugins` package loads only in a trusted
+				// workspace or on the user-level opt-in.
+				&McpSettings { project_config: ProjectMcpPolicy::UserOptIn },
 			)
 			.into_iter()
 			.filter(|blocked| matches!(blocked.plugin.as_str(), "portable" | "outside"))

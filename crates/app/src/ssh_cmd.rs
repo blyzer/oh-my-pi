@@ -8,7 +8,9 @@ use std::{
 use clap::{Args, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
 use omp_core::{Str, project_file::Containment};
+use omp_driver::workspace_trust::evaluate_workspace;
 use omp_envd::ssh::{AuthPolicy, HostConfig, HostPaths, HostStore, SshService};
+use omp_ext::workspace_trust::WorkspaceTrust;
 
 /// Native SSH command options.
 #[derive(Clone, Debug, Args)]
@@ -85,11 +87,13 @@ pub enum SshCommand {
 
 /// Runs scoped writer and bounded native transport operations.
 pub async fn run(args: SshArgs) -> miette::Result<()> {
-	run_in(args, &host_paths()?).await
+	let paths = host_paths()?;
+	run_in(args, &paths, workspace_trust(&paths)?).await
 }
 
-/// [`run`] against an explicit `hosts.toml` pair.
-async fn run_in(args: SshArgs, paths: &HostPaths) -> miette::Result<()> {
+/// [`run`] against an explicit `hosts.toml` pair, reading the project's
+/// hosts only when the workspace `trust` admits them.
+async fn run_in(args: SshArgs, paths: &HostPaths, trust: WorkspaceTrust) -> miette::Result<()> {
 	match args.command {
 		SshCommand::List { scope } => {
 			for (label, path, containment) in scoped_paths(scope, paths) {
@@ -133,13 +137,13 @@ async fn run_in(args: SshArgs, paths: &HostPaths) -> miette::Result<()> {
 			Ok(())
 		},
 		SshCommand::Probe { alias } => {
-			let service = service(alias.as_str(), paths)?;
+			let service = service(alias.as_str(), paths, trust)?;
 			let caps = service.probe(alias.as_str()).await.into_diagnostic()?;
 			println!("{}: exec={} sftp={}", alias, caps.exec, caps.sftp);
 			Ok(())
 		},
 		SshCommand::Exec { alias, command } => {
-			let service = service(alias.as_str(), paths)?;
+			let service = service(alias.as_str(), paths, trust)?;
 			let command = command
 				.iter()
 				.map(Str::as_str)
@@ -170,10 +174,22 @@ pub(crate) fn host_paths() -> miette::Result<HostPaths> {
 	Ok(HostPaths::new(&user_root, &project_root))
 }
 
-/// Opens the effective host authority (project aliases shadow user ones) and
-/// verifies `alias` is configured.
-pub(crate) fn service(alias: &str, paths: &HostPaths) -> miette::Result<SshService> {
-	let store = HostStore::load_layered(paths).into_diagnostic()?;
+/// The stored workspace trust decision for the project `paths` names, failing
+/// closed when none was made: no kernel is composed to decide it.
+pub(crate) fn workspace_trust(paths: &HostPaths) -> miette::Result<WorkspaceTrust> {
+	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+	Ok(evaluate_workspace(&data_dir, &paths.root).trust())
+}
+
+/// Opens the effective host authority (user aliases, plus project aliases
+/// that add new names when the workspace `trust` admits them) and verifies
+/// `alias` is configured.
+pub(crate) fn service(
+	alias: &str,
+	paths: &HostPaths,
+	trust: WorkspaceTrust,
+) -> miette::Result<SshService> {
+	let store = HostStore::load_layered(paths, trust).into_diagnostic()?;
 	store.get(alias).into_diagnostic()?;
 	Ok(SshService::new(store))
 }
@@ -240,7 +256,7 @@ mod tests {
 			"SHA256:test",
 		]);
 
-		let error = run_in(add.args, &paths)
+		let error = run_in(add.args, &paths, WorkspaceTrust::Untrusted)
 			.await
 			.expect_err("an outside .omp is refused");
 		assert!(error.to_string().contains("outside the project root"), "{error}");

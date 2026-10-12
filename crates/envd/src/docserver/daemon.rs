@@ -18,7 +18,7 @@ use std::{io, mem, path::PathBuf, result, sync::Arc, time::Duration};
 #[cfg(unix)]
 use omp_core::Hash32;
 use omp_core::Str;
-use omp_ext::claude_plugin::ClaudePlugin;
+use omp_ext::{claude_plugin::ClaudePlugin, workspace_trust::WorkspaceTrust};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
@@ -76,6 +76,9 @@ pub struct ServeOptions {
 	/// Installed, enabled Claude-format marketplace plugins whose LSP and DAP
 	/// declarations join discovery beneath the user and project layers.
 	pub claude_plugins:   Arc<[ClaudePlugin]>,
+	/// The workspace trust decision the authority loads the project's LSP and
+	/// DAP configuration and local bins under, and reports in its hello.
+	pub workspace_trust:  WorkspaceTrust,
 	/// External shutdown; `None` installs signal handling.
 	pub shutdown:         Option<CancellationToken>,
 	/// Executable-generation identity advertised in `ServerHello`.
@@ -246,7 +249,8 @@ async fn run_with_shutdown(root: PathBuf, transport: Transport, options: ServeOp
 	let process_configs = load_lsp_process_configs(&options.lsp_config_paths)?;
 	let config = ServerConfig::new(root)?
 		.with_server_build(options.server_build)
-		.with_project_binaries(options.lsp.project_binaries);
+		.with_project_binaries(options.lsp.project_binaries)
+		.with_workspace_trust(options.workspace_trust);
 	let authority_lock = config.try_lock_authority()?;
 	let environment = Environment::new(config)?;
 	if options.lsp.enabled {
@@ -310,8 +314,10 @@ async fn run_with_shutdown(root: PathBuf, transport: Transport, options: ServeOp
 }
 
 /// Overlays discovered plugin/user/project DAP adapter declarations onto
-/// the builtin registry; discovery failures never block the authority, and a
-/// rejected plugin declaration is logged as its plugin diagnostic.
+/// the builtin registry; the project's own files load only when the
+/// authority's workspace is trusted. Discovery failures never block the
+/// authority, and a rejected plugin declaration is logged as its plugin
+/// diagnostic.
 fn install_dap_overrides(
 	environment: &Environment,
 	user_config_root: Option<&std::path::Path>,
@@ -320,7 +326,13 @@ fn install_dap_overrides(
 	let Ok(root) = environment.root_uri().to_file_path() else {
 		return;
 	};
-	let sources = match discover_dap_sources(user_config_root, &root, Vec::new(), plugins) {
+	let sources = match discover_dap_sources(
+		user_config_root,
+		&root,
+		environment.workspace_trust(),
+		Vec::new(),
+		plugins,
+	) {
 		Ok(discovered) => {
 			for diagnostic in &discovered.diagnostics {
 				tracing::warn!(
@@ -846,6 +858,7 @@ mod tests {
 				lsp:              NativeLspOptions { enabled: false, ..NativeLspOptions::default() },
 				user_config_root: None,
 				claude_plugins:   Arc::default(),
+				workspace_trust:  WorkspaceTrust::Untrusted,
 				shutdown:         Some(task_shutdown),
 				server_build:     Str::default(),
 				connections:      None,
@@ -885,6 +898,7 @@ mod tests {
 			lsp:              NativeLspOptions { enabled: false, ..NativeLspOptions::default() },
 			user_config_root: None,
 			claude_plugins:   Arc::default(),
+			workspace_trust:  WorkspaceTrust::Untrusted,
 			shutdown:         Some(shutdown.clone()),
 			server_build:     sf!("test-build"),
 			connections:      Some(connection_tx),
@@ -943,6 +957,7 @@ mod tests {
 			lsp:              NativeLspOptions { enabled: false, ..NativeLspOptions::default() },
 			user_config_root: None,
 			claude_plugins:   Arc::default(),
+			workspace_trust:  WorkspaceTrust::Untrusted,
 			shutdown:         Some(shutdown.clone()),
 			server_build:     Str::default(),
 			connections:      Some(connection_tx),

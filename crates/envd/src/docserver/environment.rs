@@ -8,6 +8,7 @@ use std::{
 };
 
 use omp_core::{Str, sf};
+use omp_ext::workspace_trust::WorkspaceTrust;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -277,6 +278,7 @@ struct EnvironmentInner {
 	workspace_leases: WorkspaceLeaseTable,
 	root_uri:         Url,
 	project_bin_root: Option<PathBuf>,
+	workspace_trust:  WorkspaceTrust,
 	workspace_id:     [u8; 16],
 	server_epoch:     [u8; 16],
 	server_build:     Str,
@@ -299,6 +301,7 @@ impl Environment {
 		let project_bin_root = config
 			.project_binaries()
 			.then(|| config.environment_root().to_path_buf());
+		let workspace_trust = config.workspace_trust();
 		let workspace_leases = WorkspaceLeaseTable::default();
 		let store = DocumentStore::new_with_workspace_leases(config, workspace_leases.clone())?;
 		let lsp = LspRegistry::new(store.clone());
@@ -320,6 +323,7 @@ impl Environment {
 				workspace_leases,
 				root_uri,
 				project_bin_root,
+				workspace_trust,
 				workspace_id,
 				server_epoch,
 				server_build,
@@ -372,9 +376,16 @@ impl Environment {
 	/// The project root whose local bins (`node_modules/.bin`, `.venv/bin`,
 	/// `bin`, ...) language- and debug-server executables may resolve from
 	/// ahead of `$PATH`; `None` (the default) resolves from `$PATH` only.
-	/// Set only by the user-level `sv_lsp_project_binaries`.
+	/// Set only for a trusted workspace whose user enabled
+	/// `sv_lsp_project_binaries`.
 	pub fn project_binary_root(&self) -> Option<&Path> {
 		self.inner.project_bin_root.as_deref()
+	}
+
+	/// The workspace trust decision this authority loads the project's LSP and
+	/// DAP configuration under.
+	pub fn workspace_trust(&self) -> WorkspaceTrust {
+		self.inner.workspace_trust
 	}
 
 	/// Returns the project-scoped live DAP session registry.

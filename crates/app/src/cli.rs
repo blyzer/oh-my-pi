@@ -22,7 +22,7 @@ use omp_catalog::settings::TierSetting;
 use omp_core::{FastHashSet, SecretString, Str, encoding::hex};
 use omp_driver::{cleanse::CleanseArgs, compress::CompressArgs};
 use omp_envd::{site::TrustedModule, worker::ExtHostSpec};
-use omp_ext::config::ContributedCliValue;
+use omp_ext::{config::ContributedCliValue, workspace_trust::WorkspaceTrust};
 const ROOT_LICENSE: &str = include_str!("../../../LICENSE");
 const THIRD_PARTY_NOTICES: &str = include_str!("../../../THIRD-PARTY-NOTICES.txt");
 /// What `omp --version` prints. The `omp/X.Y.Z` shape is a release contract:
@@ -1651,6 +1651,12 @@ pub struct EnvdArgs {
 	/// Seconds without connected apps before the daemon exits (0 disables).
 	#[arg(long, value_name = "SECONDS", default_value_t = 900)]
 	pub idle_timeout:     u64,
+	/// The workspace trust decision the spawning session evaluated
+	/// (`trusted` or `untrusted`); the daemon loads project MCP servers,
+	/// LSP/DAP configuration, hosts and vaults only when trusted. A session
+	/// joins only a daemon of its own decision.
+	#[arg(long, value_name = "TRUST", default_value_t = WorkspaceTrust::Untrusted)]
+	pub workspace_trust:  WorkspaceTrust,
 }
 impl EnvdArgs {
 	fn into_config(self) -> omp_envd::EnvdConfig {
@@ -1661,6 +1667,7 @@ impl EnvdArgs {
 			state_dir:        self.state_dir,
 			py_eval:          self.py_eval,
 			idle_timeout:     self.idle_timeout,
+			workspace_trust:  self.workspace_trust,
 		}
 	}
 }
@@ -2753,7 +2760,7 @@ async fn install_shorthand(args: InstallArgs) -> miette::Result<()> {
 				if args.json {
 					println!("{}", serde_json::json!({"action":"link","target":target,"applied":false}));
 				} else {
-					println!("would link {}", target);
+					println!("would link {target}");
 				}
 				continue;
 			}
@@ -3063,13 +3070,15 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 	let launch_command = matches!(
 		cli.command.as_ref(),
 		None
-			| Some(Command::Chat(_))
-			| Some(Command::Print(_))
-			| Some(Command::Share(_))
-			| Some(Command::Rpc(_))
-			| Some(Command::RpcUi(_))
-			| Some(Command::Acp(_))
-			| Some(Command::Models(_))
+			| Some(
+				Command::Chat(_)
+					| Command::Print(_)
+					| Command::Share(_)
+					| Command::Rpc(_)
+					| Command::RpcUi(_)
+					| Command::Acp(_)
+					| Command::Models(_)
+			)
 	);
 	if !launch_command
 		&& (!cli.ext.is_empty()
@@ -3105,7 +3114,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 			let bridges = omp_driver::bridges::builtin(
 				&args.root,
 				Arc::new(InferenceBridge::default()),
-				AgentGoalControl::default(),
+				AgentGoalControl,
 				None,
 			);
 			omp_envd::run(args.into_config(), ctx, bridges).await
@@ -3511,7 +3520,7 @@ fn mistyped_command(arguments: &[OsString], index: usize) -> Option<&str> {
 fn accepted_flag_names() -> &'static FastHashSet<Str> {
 	static NAMES: OnceLock<FastHashSet<Str>> = OnceLock::new();
 	NAMES.get_or_init(|| {
-		let mut command = OmpCli::command();
+		let command = OmpCli::command();
 		let chat = command
 			.find_subcommand("chat")
 			.into_iter()
@@ -3756,7 +3765,7 @@ fn is_home_dir() -> miette::Result<bool> {
 	let Some(home) = env::var_os("HOME") else {
 		return Ok(false);
 	};
-	Ok(env::current_dir().into_diagnostic()? == PathBuf::from(home))
+	Ok(env::current_dir().into_diagnostic()? == home)
 }
 
 fn switch_from_home() -> miette::Result<()> {

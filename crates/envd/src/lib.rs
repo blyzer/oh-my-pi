@@ -133,7 +133,7 @@ use omp_core::{Str, Ulid, sf};
 use omp_env::{
 	AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames, project_state::DaemonPolicy,
 };
-use omp_ext::config::ContributedCliValue;
+use omp_ext::{config::ContributedCliValue, workspace_trust::WorkspaceTrust};
 use omp_proto::{
 	env::v1::{
 		AcpBind, AcpDocumentAnswer, ApprovalMode as ProtoApprovalMode, ClientHello, EditRepairAnswer,
@@ -413,6 +413,11 @@ pub struct EnvdConfig {
 	pub py_eval:          bool,
 	/// Seconds without connected applications before the daemon exits.
 	pub idle_timeout:     u64,
+	/// The workspace trust decision the daemon loads project inputs under
+	/// (project MCP servers, LSP/DAP configuration, hosts and vaults); part of
+	/// its policy, so it keys the default environment socket. The spawning
+	/// session hands its own decision down.
+	pub workspace_trust:  WorkspaceTrust,
 }
 
 /// One startup client's daemon-owned project presence.
@@ -444,7 +449,8 @@ impl Drop for ClientPresenceLease {
 }
 
 /// Registers one launch-shaped application process with the project daemon
-/// that enforces the sandbox and approval policy `con` resolves.
+/// that enforces the sandbox and approval policy `con` resolves under the
+/// workspace `trust`.
 #[cfg(any(unix, windows))]
 #[tracing::instrument(
 	name = "project_presence_register",
@@ -457,11 +463,12 @@ pub async fn register_project_presence(
 	data_dir: &Path,
 	kind: &'static str,
 	con: &Ctx,
+	trust: WorkspaceTrust,
 ) -> Result<ClientPresenceLease, EnvdError> {
 	let root = fs::canonicalize(project_root)?;
 	let state_dir = omp_env::project_state::directory(data_dir, &root)?;
 	publish_launcher_build(&state_dir)?;
-	let policy = daemon_policy::from_con(con);
+	let policy = daemon_policy::from_con(con, trust);
 	let socket = omp_env::project_state::environment_socket(&state_dir, &policy)?;
 	let (client, bridge) = match connect_presence_owner(&socket).await {
 		Ok(connection) => connection,
@@ -475,6 +482,7 @@ pub async fn register_project_presence(
 				&omp_env::project_state::document_socket(&state_dir),
 				false,
 				None,
+				trust,
 				&policy,
 			)
 			.await?;
@@ -517,6 +525,7 @@ pub async fn register_project_presence(
 	_data_dir: &Path,
 	_kind: &'static str,
 	_con: &Ctx,
+	_trust: WorkspaceTrust,
 ) -> Result<ClientPresenceLease, EnvdError> {
 	Err(
 		io::Error::new(
@@ -596,16 +605,19 @@ pub struct AttachOptions {
 	/// Process control context used to compose the session host or an embedded
 	/// fallback.
 	pub con:                Arc<Ctx>,
-	/// Composition-supplied capabilities the environment host cannot own.
+	/// Composition-supplied capabilities the environment host cannot own. Its
+	/// [`ActiveContentInputs::workspace_trust`] is part of the daemon policy:
+	/// a session joins only a daemon started under its own decision.
 	pub bridges:            RegistryBridges,
 	/// Optional idle timeout forwarded only when this attach spawns the daemon.
 	pub spawn_idle_timeout: Option<u64>,
-	/// The sandbox and approval policy a project daemon spawned now would
-	/// enforce: the one `omp envd` resolves from the configuration files
-	/// alone. When it differs from the policy `con` resolves (in-process
-	/// settings such as `--add-dir` roots, a cfg profile or an agent class),
-	/// no daemon is spawned, because none could be joined, and the session
-	/// runs embedded at once. `None` spawns one and checks its hello.
+	/// The sandbox, approval and workspace trust policy a project daemon
+	/// spawned now would enforce: the one `omp envd` resolves from the
+	/// configuration files alone under the session's workspace trust. When it
+	/// differs from the policy `con` resolves (in-process settings such as
+	/// `--add-dir` roots, a cfg profile or an agent class), no daemon is
+	/// spawned, because none could be joined, and the session runs embedded at
+	/// once. `None` spawns one and checks its hello.
 	pub spawn_policy:       Option<DaemonPolicy>,
 }
 
@@ -779,7 +791,8 @@ impl ProjectEnvironment {
 		options: AttachOptions,
 	) -> Result<Self, EnvdError> {
 		publish_launcher_build(state_dir)?;
-		let policy = daemon_policy::from_con(&options.con);
+		let trust = options.bridges.content.workspace_trust;
+		let policy = daemon_policy::from_con(&options.con, trust);
 		let socket = omp_env::project_state::environment_socket(state_dir, &policy)?;
 		let docserver_socket = omp_env::project_state::document_socket(state_dir);
 		let interrupt_grace = host_settings::SV_INTERRUPT_GRACE.get(&options.con);
@@ -790,6 +803,7 @@ impl ProjectEnvironment {
 			&docserver_socket,
 			options.py_eval,
 			options.spawn_idle_timeout,
+			trust,
 			&policy,
 			options.spawn_policy.as_ref(),
 		)
@@ -1959,6 +1973,7 @@ async fn attach_owner(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	trust: WorkspaceTrust,
 	policy: &DaemonPolicy,
 	spawnable: Option<&DaemonPolicy>,
 ) -> Result<(EnvClient, JoinHandle<()>), EnvdError> {
@@ -2023,6 +2038,7 @@ async fn attach_owner(
 		docserver_socket,
 		py_eval,
 		spawn_idle_timeout,
+		trust,
 		policy,
 	)
 	.await?;
@@ -2048,6 +2064,7 @@ async fn attach_owner(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	trust: WorkspaceTrust,
 	policy: &DaemonPolicy,
 	spawnable: Option<&DaemonPolicy>,
 ) -> Result<(EnvClient, JoinHandle<()>), EnvdError> {
@@ -2105,6 +2122,7 @@ async fn attach_owner(
 		docserver_socket,
 		py_eval,
 		spawn_idle_timeout,
+		trust,
 		policy,
 	)
 	.await?;
@@ -2139,8 +2157,9 @@ fn refuse_unjoinable_spawn(
 	}
 }
 
-/// Launches a detached `omp envd` for this project and waits until its
-/// environment socket answers a hello reporting `policy`.
+/// Launches a detached `omp envd` for this project under the workspace
+/// `trust` and waits until its environment socket answers a hello reporting
+/// `policy`.
 async fn spawn_project_daemon(
 	root: &Path,
 	state_dir: &Path,
@@ -2148,6 +2167,7 @@ async fn spawn_project_daemon(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	trust: WorkspaceTrust,
 	policy: &DaemonPolicy,
 ) -> Result<(), EnvdError> {
 	let executable = env::current_exe()?;
@@ -2159,6 +2179,7 @@ async fn spawn_project_daemon(
 		docserver_socket,
 		py_eval,
 		spawn_idle_timeout,
+		trust,
 		policy,
 		Duration::from_secs(10),
 	)
@@ -2183,6 +2204,7 @@ async fn spawn_project_daemon_with(
 	docserver_socket: &Path,
 	py_eval: bool,
 	spawn_idle_timeout: Option<u64>,
+	trust: WorkspaceTrust,
 	policy: &DaemonPolicy,
 	deadline: Duration,
 ) -> Result<(), EnvdError> {
@@ -2202,7 +2224,9 @@ async fn spawn_project_daemon_with(
 		.arg("--socket")
 		.arg(socket)
 		.arg("--docserver-socket")
-		.arg(docserver_socket);
+		.arg(docserver_socket)
+		.arg("--workspace-trust")
+		.arg(<&'static str>::from(trust));
 	if py_eval {
 		command.arg("--py-eval");
 	}
@@ -2470,7 +2494,8 @@ mod tests {
 			&scratch.path().join("doc.sock"),
 			false,
 			None,
-			&daemon_policy::from_con(&Ctx::new()),
+			WorkspaceTrust::Untrusted,
+			&daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted),
 			Duration::from_millis(deadline_ms),
 		)
 		.await
@@ -2565,7 +2590,7 @@ mod tests {
 		use crate::exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE};
 
 		let socket = Path::new("/tmp/omp-test-env.sock");
-		let expected = daemon_policy::from_con(&Ctx::new());
+		let expected = daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted);
 		let reporting = |policy: &DaemonPolicy| ServerHello {
 			policy_digest: Bytes::copy_from_slice(policy.digest().as_bytes()),
 			..ServerHello::default()
@@ -2583,7 +2608,7 @@ mod tests {
 		SV_SANDBOX_MODE
 			.set(&unconfined, ExecSandboxMode::Off)
 			.expect("sandbox mode");
-		let served = daemon_policy::from_con(&unconfined);
+		let served = daemon_policy::from_con(&unconfined, WorkspaceTrust::Untrusted);
 		let error = verify_daemon_policy(&reporting(&served), socket, &expected)
 			.expect_err("a daemon reporting another policy is refused");
 		assert!(
@@ -2622,8 +2647,8 @@ mod tests {
 		SV_SANDBOX_MODE
 			.set(&unconfined, ExecSandboxMode::Off)
 			.expect("sandbox mode");
-		let served = daemon_policy::from_con(&unconfined);
-		let expected = daemon_policy::from_con(&Ctx::new());
+		let served = daemon_policy::from_con(&unconfined, WorkspaceTrust::Untrusted);
+		let expected = daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted);
 		assert_ne!(served, expected);
 		let server = EnvServer::open_project(
 			&root,
@@ -2681,6 +2706,7 @@ mod tests {
 			&docserver_socket,
 			false,
 			None,
+			WorkspaceTrust::Untrusted,
 			&expected,
 			Duration::from_secs(30),
 		)
@@ -2715,5 +2741,68 @@ mod tests {
 		assert!(reaped.is_ok(), "the refused daemon kept running");
 		shutdown.cancel();
 		serving.abort();
+	}
+
+	/// An environment opened for a trusted workspace mounts the project's MCP
+	/// servers; one opened for an untrusted workspace mounts none, unless the
+	/// user opted every project in (`sv_mcp_enable_project_config`).
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn environment_open_mounts_project_mcp_only_when_trusted_or_opted_in() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let config = scratch.path().join("o2");
+		fs::create_dir_all(&config).expect("user config root");
+		// SAFETY: nextest runs each test in its own process; nothing else reads
+		// the variable concurrently.
+		unsafe { env::set_var("OMP_CONFIG_DIR", &config) };
+
+		// Each opening gets its own workspace, so no document authority of
+		// an earlier one is joined.
+		let mounted = async |trust: WorkspaceTrust, opt_in: bool| {
+			let workspace = tempfile::tempdir_in(scratch.path()).expect("workspace");
+			let root = fs::canonicalize(workspace.path()).expect("canonical workspace");
+			fs::create_dir_all(root.join(".omp")).expect("project .omp");
+			fs::write(
+				root.join(".omp/mcp.json"),
+				br#"{"mcpServers":{"project-server":{"type":"stdio","command":"/nonexistent/project-mcp"}}}"#,
+			)
+			.expect("project MCP config");
+			let state = tempfile::tempdir_in(scratch.path()).expect("state");
+			let con = Arc::new(Ctx::new());
+			mcp::settings::SV_MCP_ENABLE_PROJECT_CONFIG
+				.set(&con, opt_in)
+				.expect("user-level opt-in");
+			let environment = ProjectEnvironment::start_embedded(
+				&root,
+				state.path(),
+				&omp_env::project_state::document_socket(state.path()),
+				false,
+				&[],
+				&[],
+				con,
+				RegistryBridges {
+					content: ActiveContentInputs {
+						workspace_trust: trust,
+						..ActiveContentInputs::default()
+					},
+					..RegistryBridges::default()
+				},
+			)
+			.await
+			.expect("environment");
+			environment
+				.mcp_inspector()
+				.snapshots()
+				.into_iter()
+				.map(|snapshot| snapshot.server)
+				.collect::<Vec<_>>()
+		};
+
+		assert_eq!(mounted(WorkspaceTrust::Trusted, false).await, ["project-server"]);
+		assert_eq!(
+			mounted(WorkspaceTrust::Untrusted, false).await,
+			Vec::<Str>::new(),
+			"an untrusted workspace's project MCP server mounted"
+		);
+		assert_eq!(mounted(WorkspaceTrust::Untrusted, true).await, ["project-server"]);
 	}
 }

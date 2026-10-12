@@ -159,9 +159,11 @@ pub(crate) async fn run(
 		Some(socket) => socket,
 		None => omp_env::project_state::environment_socket(
 			&state_dir,
-			&crate::daemon_policy::from_con(&con),
+			&crate::daemon_policy::from_con(&con, args.workspace_trust),
 		)?,
 	};
+	let mut bridges = bridges;
+	bridges.content.workspace_trust = args.workspace_trust;
 	let require_document_ownership = args.docserver_socket.is_none();
 	let docserver_socket = args
 		.docserver_socket

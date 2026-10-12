@@ -1,4 +1,5 @@
-//! The sandbox and approval policy a project environment daemon enforces.
+//! The sandbox, approval and workspace trust policy a project environment
+//! daemon enforces.
 //!
 //! A daemon compiles its command sandbox, its egress broker and its approval
 //! posture from the control context it starts under and keeps them for its
@@ -8,12 +9,18 @@
 //! a daemon started under the shipped `workspace-write`, and a client expecting
 //! the sandbox would run unconfined under a daemon started without one.
 //!
+//! The same holds for the workspace trust decision the daemon was started
+//! under: it decides whether the project's MCP servers mount and whether its
+//! language- and debug-server configuration loads, so a trusted and an
+//! untrusted client never share a daemon.
+//!
 //! [`from_con`] digests everything a daemon fixes at start that decides how a
-//! command is confined, wrapped or admitted, and whether the daemon's `read`
-//! may reach the network. The digest keys the environment socket
-//! (`omp_env::project_state::environment_socket`), so differing clients reach
-//! daemons of their own, and the daemon reports it in every `ServerHello`, so a
-//! client verifies the daemon it reached before attaching.
+//! command is confined, wrapped or admitted, whether the daemon's `read`
+//! may reach the network, and which project inputs it loads. The digest keys
+//! the environment socket (`omp_env::project_state::environment_socket`), so
+//! differing clients reach daemons of their own, and the daemon reports it in
+//! every `ServerHello`, so a client verifies the daemon it reached before
+//! attaching.
 //!
 //! The rest of what a daemon fixes at start is deliberately left out, so it
 //! never splits clients across daemons: edit, read and grep limits, timeouts,
@@ -28,6 +35,7 @@ use std::collections::BTreeMap;
 use omp_con::Ctx;
 use omp_core::{Hash32, Str};
 use omp_env::project_state::DaemonPolicy;
+use omp_ext::workspace_trust::WorkspaceTrust;
 use serde::Serialize;
 
 use crate::{
@@ -38,7 +46,7 @@ use crate::{
 
 /// Separates the policy digest from every other SHA-256 use; bump it when the
 /// digested facts change meaning.
-const DOMAIN: &[u8] = b"omp/envd-daemon-policy/v1\0";
+const DOMAIN: &[u8] = b"omp/envd-daemon-policy/v2\0";
 
 /// The facts digested, in a fixed order.
 #[derive(Serialize)]
@@ -46,35 +54,46 @@ struct PolicyFacts<'a> {
 	/// Every `sv_sandbox_*` setting, with who set the network mode and whether
 	/// the user set any of them: the posture, the broker and the failure mode
 	/// of a sandbox that cannot be constructed.
-	sandbox:        &'a SandboxSettings,
+	sandbox:         &'a SandboxSettings,
 	/// `sv_tools_approval_mode` and who set it.
-	approval:       ConfiguredApproval,
+	approval:        ConfiguredApproval,
 	/// `sv_tools_approval`: the per-tool overrides honoured in every mode.
-	tool_approvals: &'a BTreeMap<Str, ApprovalPolicy>,
+	tool_approvals:  &'a BTreeMap<Str, ApprovalPolicy>,
 	/// `sv_shell_command_prefix`: the wrapper the daemon's shell places before
 	/// every admitted command, which a user may make a confinement layer of
 	/// its own (`sandbox-exec`, `bwrap`, `timeout`).
-	command_prefix: Option<&'a str>,
+	command_prefix:  Option<&'a str>,
 	/// `sv_fetch_enabled`: whether the daemon's `read` fetches URLs.
-	fetch_enabled:  bool,
+	fetch_enabled:   bool,
+	/// The workspace trust decision the daemon loads project inputs under:
+	/// project MCP servers, LSP/DAP configuration, hosts and vaults.
+	workspace_trust: WorkspaceTrust,
 }
 
-/// Resolves the policy a daemon composed from `ctx` enforces.
+/// Resolves the policy a daemon composed from `ctx` for a workspace of
+/// `trust` enforces.
 ///
 /// A per-connection approval-mode flag is not part of it: each connection
 /// sends its own in `ClientHello.approval_mode`.
 #[must_use]
-pub fn from_con(ctx: &Ctx) -> DaemonPolicy {
-	of(&SandboxSettings::from_con(ctx), &ToolSettings::from_con(ctx), &ShellSettings::from_con(ctx))
+pub fn from_con(ctx: &Ctx, trust: WorkspaceTrust) -> DaemonPolicy {
+	of(
+		&SandboxSettings::from_con(ctx),
+		&ToolSettings::from_con(ctx),
+		&ShellSettings::from_con(ctx),
+		trust,
+	)
 }
 
 /// Digests the policy of resolved `sandbox`, `tools` and `shell` settings,
-/// before any composition-level approval-mode override.
+/// before any composition-level approval-mode override, under the workspace
+/// `trust`.
 #[must_use]
 pub(crate) fn of(
 	sandbox: &SandboxSettings,
 	tools: &ToolSettings,
 	shell: &ShellSettings,
+	trust: WorkspaceTrust,
 ) -> DaemonPolicy {
 	let facts = PolicyFacts {
 		sandbox,
@@ -82,6 +101,7 @@ pub(crate) fn of(
 		tool_approvals: &tools.approval,
 		command_prefix: shell.command_prefix.as_deref(),
 		fetch_enabled: tools.fetch_enabled,
+		workspace_trust: trust,
 	};
 	let mut digest = Hash32::hasher();
 	digest.update(DOMAIN);
@@ -105,7 +125,7 @@ mod tests {
 	fn policy(configure: impl FnOnce(&Ctx)) -> DaemonPolicy {
 		let ctx = Ctx::new();
 		configure(&ctx);
-		from_con(&ctx)
+		from_con(&ctx, WorkspaceTrust::Untrusted)
 	}
 
 	/// Equal configurations resolve one policy, and every setting a daemon
@@ -163,6 +183,18 @@ mod tests {
 				assert_ne!(variant, other, "two variants share a policy");
 			}
 		}
+	}
+
+	/// The workspace trust decision keys the daemon: a trusted and an
+	/// untrusted client of one configuration never share a daemon, and two
+	/// clients of one trust do.
+	#[test]
+	fn workspace_trust_changes_the_policy() {
+		let ctx = Ctx::new();
+		let untrusted = from_con(&ctx, WorkspaceTrust::Untrusted);
+		let trusted = from_con(&ctx, WorkspaceTrust::Trusted);
+		assert_ne!(trusted, untrusted);
+		assert_eq!(trusted, from_con(&Ctx::new(), WorkspaceTrust::Trusted));
 	}
 
 	/// Settings outside the sandbox and approval policy leave the daemon key
