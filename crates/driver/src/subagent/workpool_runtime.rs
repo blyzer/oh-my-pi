@@ -32,17 +32,19 @@ use super::{
 /// Driver-owned launcher that keeps one composed child kernel and isolated
 /// workspace alive across every batch assigned to that worker.
 pub struct KernelWorkpoolLauncher {
-	data_dir:     PathBuf,
-	sessions_dir: PathBuf,
-	sessions:     Arc<crate::sessions::SessionRegistry>,
-	parent:       SessionMutator,
-	jobs:         Arc<JobBoard>,
-	env:          omp_env::EnvClient,
-	ctx:          Arc<omp_con::Ctx>,
-	cfg:          Arc<dyn omp_con::CfgLoader>,
-	model:        Str,
-	eval:         EvalSessionControl,
-	registry:     Arc<Registry>,
+	data_dir:        PathBuf,
+	sessions_dir:    PathBuf,
+	sessions:        Arc<crate::sessions::SessionRegistry>,
+	parent:          SessionMutator,
+	jobs:            Arc<JobBoard>,
+	env:             omp_env::EnvClient,
+	ctx:             Arc<omp_con::Ctx>,
+	cfg:             Arc<dyn omp_con::CfgLoader>,
+	model:           Str,
+	eval:            EvalSessionControl,
+	registry:        Arc<Registry>,
+	/// The parent's workspace trust decision; every worker inherits it.
+	workspace_trust: omp_ext::workspace_trust::TrustDecision,
 }
 
 impl KernelWorkpoolLauncher {
@@ -60,8 +62,22 @@ impl KernelWorkpoolLauncher {
 		model: Str,
 		registry: Arc<Registry>,
 		eval: EvalSessionControl,
+		workspace_trust: omp_ext::workspace_trust::TrustDecision,
 	) -> Self {
-		Self { data_dir, sessions_dir, sessions, parent, jobs, env, ctx, cfg, model, eval, registry }
+		Self {
+			data_dir,
+			sessions_dir,
+			sessions,
+			parent,
+			jobs,
+			env,
+			ctx,
+			cfg,
+			model,
+			eval,
+			registry,
+			workspace_trust,
+		}
 	}
 
 	fn forwarded_registry(
@@ -215,6 +231,7 @@ impl WorkpoolLauncher for KernelWorkpoolLauncher {
 			cfg: Arc::clone(&self.cfg),
 			model: self.model.clone(),
 			forwarded_registry,
+			workspace_trust: self.workspace_trust.clone(),
 			request: request.clone(),
 			batches: batch_rx,
 			events,
@@ -306,6 +323,7 @@ struct KernelWorkerRun {
 	cfg:                Arc<dyn omp_con::CfgLoader>,
 	model:              Str,
 	forwarded_registry: Option<Arc<Registry>>,
+	workspace_trust:    omp_ext::workspace_trust::TrustDecision,
 	request:            WorkerSpawn,
 	batches:            flume::Receiver<WorkerBatch>,
 	events:             flume::Sender<WorkerEvent>,
@@ -385,6 +403,9 @@ async fn run_kernel_worker_inner(
 		model_override: true,
 		tool_registry: run.forwarded_registry.clone(),
 		agent: Some(AgentName::new(run.request.agent.clone())),
+		workspace_trust: crate::workspace_trust::WorkspaceTrustSource::Fixed(
+			run.workspace_trust.clone(),
+		),
 		..crate::headless::kernel::KernelOptions::default()
 	};
 	let composed = crate::headless::kernel::compose_kernel(

@@ -343,8 +343,8 @@ fn model_metadata(ctx: &Ctx, fallback: &str, catalog: Option<&Catalog>) -> Model
 			.model(&omp_catalog::ModelKey::from(identifier))
 			.or_else(|| catalog.resolve_alias(identifier))
 	});
-	match spec {
-		Some(spec) => ModelMetadata {
+	if let Some(spec) = spec {
+		ModelMetadata {
 			id:             spec.key.to_string(),
 			name:           spec.display_name.to_string(),
 			provider:       spec
@@ -356,16 +356,15 @@ fn model_metadata(ctx: &Ctx, fallback: &str, catalog: Option<&Catalog>) -> Model
 				.limits
 				.context_window
 				.map_or(0, |window| u32::try_from(window).unwrap_or(u32::MAX)),
-		},
-		None => {
-			let (provider, _) = identifier.split_once('/').unwrap_or(("", identifier));
-			ModelMetadata {
-				id:             identifier.to_owned(),
-				name:           identifier.to_owned(),
-				provider:       provider.to_owned(),
-				context_window: 0,
-			}
-		},
+		}
+	} else {
+		let (provider, _) = identifier.split_once('/').unwrap_or(("", identifier));
+		ModelMetadata {
+			id:             identifier.to_owned(),
+			name:           identifier.to_owned(),
+			provider:       provider.to_owned(),
+			context_window: 0,
+		}
 	}
 }
 
@@ -581,7 +580,7 @@ struct TanDone {
 }
 
 /// The chat controller: session owner, kernel driver, command applier.
-pub(crate) struct Controller<C = ComposedInference> {
+pub struct Controller<C = ComposedInference> {
 	kernel:         Kernel<C>,
 	lifecycle:      Option<LifecycleHooks>,
 	session:        Session,
@@ -1180,7 +1179,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 
 	async fn forward_guest(&mut self, command: omp_driver::collab::session::CollabOwnerCommand) {
 		if let Err(error) = self.collab.request(command).await {
-			self.reply(Severity::Error, &format!("Collaboration request failed: {error}"));
+			self.reply(Severity::Error, format!("Collaboration request failed: {error}"));
 		}
 	}
 
@@ -2054,6 +2053,13 @@ impl<C: omp_agent::Inference> Controller<C> {
 				model: self.home.model.as_str(),
 				id,
 				prompt,
+				// A home over a workspace whose trust nobody decided
+				// (`/move`) fails closed.
+				workspace_trust: self
+					.home
+					.workspace_trust
+					.as_ref()
+					.unwrap_or(&omp_ext::workspace_trust::TrustDecision::Untrusted),
 			},
 		)
 		.map_err(ServiceError::failed)?;
@@ -2415,8 +2421,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 			.session
 			.journal_path()
 			.parent()
-			.map(PathBuf::from)
-			.unwrap_or_else(|| PathBuf::from("."));
+			.map_or_else(|| PathBuf::from("."), PathBuf::from);
 		let summary = omp_journal::blob::BlobStore::open(root)
 			.into_diagnostic()?
 			.put(b"")
@@ -2492,6 +2497,9 @@ impl<C: omp_agent::Inference> Controller<C> {
 			tools_enabled: self.home.tools_enabled,
 			up: self.home.up.clone(),
 			rules: self.home.rules.clone(),
+			// The kernel's decision is about the workspace it was composed
+			// in, never the one the session moves to.
+			workspace_trust: None,
 		};
 		let next = match home.open(&destination) {
 			Ok(next) => next,
@@ -2640,53 +2648,50 @@ impl<C: omp_agent::Inference> Controller<C> {
 			"vibe" => Box::new(Vibe::new()),
 			"goal" => {
 				let verb = args.first().map(Str::as_str).unwrap_or_default();
-				match verb {
-					"budget" => {
-						let (handle, _) = omp_agent::find_director(self.session.dom(), "goal")
-							.ok_or(DirectorFailure::NotActive)?;
-						let budget = match args.get(1) {
-							None => Value::Null,
-							Some(value) => {
-								let parsed = value
-									.parse::<i64>()
-									.ok()
-									.filter(|budget| *budget > 0)
-									.ok_or_else(|| DirectorFailure::InvalidArgument {
-										name:  "token budget",
-										value: value.clone(),
-									})?;
-								Value::Int(parsed)
+				if verb == "budget" {
+					let (handle, _) = omp_agent::find_director(self.session.dom(), "goal")
+						.ok_or(DirectorFailure::NotActive)?;
+					let budget = match args.get(1) {
+						None => Value::Null,
+						Some(value) => {
+							let parsed = value
+								.parse::<i64>()
+								.ok()
+								.filter(|budget| *budget > 0)
+								.ok_or_else(|| DirectorFailure::InvalidArgument {
+									name:  "token budget",
+									value: value.clone(),
+								})?;
+							Value::Int(parsed)
+						},
+					};
+					let cause = self.session.head().ok_or(DirectorFailure::NoHead)?;
+					self.session.patch(Txn {
+						cause,
+						label: Some(Str::new_static("goal.budget")),
+						ops: vec![
+							Op::Set {
+								h:     handle,
+								prop:  PropKey::Custom(Str::new_static("state/token_budget")),
+								value: budget,
 							},
-						};
-						let cause = self.session.head().ok_or(DirectorFailure::NoHead)?;
-						self.session.patch(Txn {
-							cause,
-							label: Some(Str::new_static("goal.budget")),
-							ops: vec![
-								Op::Set {
-									h:     handle,
-									prop:  PropKey::Custom(Str::new_static("state/token_budget")),
-									value: budget,
-								},
-								Op::Set {
-									h:     handle,
-									prop:  PropKey::Custom(Str::new_static("state/continuation_armed")),
-									value: Value::Bool(true),
-								},
-							],
-						})?;
-						return Ok(());
-					},
-					_ => {
-						let objective = args.get(1).cloned().unwrap_or_default();
-						if active {
-							// Replacement is a new accountable objective: identity,
-							// usage, budget, and completion evidence reset together.
-							stack.exit(&mut self.session, id)?;
-							stack = omp_agent::DirectorStack::from_dom(self.session.dom(), &registry);
-						}
-						Box::new(Goal::new(objective, None))
-					},
+							Op::Set {
+								h:     handle,
+								prop:  PropKey::Custom(Str::new_static("state/continuation_armed")),
+								value: Value::Bool(true),
+							},
+						],
+					})?;
+					return Ok(());
+				} else {
+					let objective = args.get(1).cloned().unwrap_or_default();
+					if active {
+						// Replacement is a new accountable objective: identity,
+						// usage, budget, and completion evidence reset together.
+						stack.exit(&mut self.session, id)?;
+						stack = omp_agent::DirectorStack::from_dom(self.session.dom(), &registry);
+					}
+					Box::new(Goal::new(objective, None))
 				}
 			},
 			"loop_mode" => {
@@ -3001,12 +3006,20 @@ impl<C: omp_agent::Inference> Controller<C> {
 		let live = Arc::clone(&self.home.live);
 		let done = self.tan_tx.clone();
 		let prompt = Str::new(format!("{TAN_CONTEXT}\n\n{work}"));
+		let workspace_trust = omp_driver::workspace_trust::WorkspaceTrustSource::Fixed(
+			self
+				.home
+				.workspace_trust
+				.clone()
+				.unwrap_or(omp_ext::workspace_trust::TrustDecision::Untrusted),
+		);
 		tokio::spawn(async move {
 			let options = KernelOptions {
 				session: Some(sessions_dir.join(format!("{id}.oms"))),
 				sessions_dir: Some(sessions_dir),
 				sessions: Some(live),
 				session_name: Some(id.clone()),
+				workspace_trust,
 				..KernelOptions::default()
 			};
 			let composed = omp_driver::headless::kernel::compose_kernel(
@@ -3126,8 +3139,7 @@ impl<C: omp_agent::Inference> Controller<C> {
 					_ => (
 						items
 							.last()
-							.map(|(_, _, phase)| phase.clone())
-							.unwrap_or_else(|| Str::new_static("Tasks")),
+							.map_or_else(|| Str::new_static("Tasks"), |(_, _, phase)| phase.clone()),
 						text,
 					),
 				};
@@ -3843,15 +3855,16 @@ mod tests {
 			let events = kernel.subscribe();
 			let live = Arc::new(omp_driver::sessions::SessionRegistry::new());
 			let home = SessionHome {
-				sessions_dir:  dir.path().join("sessions"),
-				project_root:  dir.path().to_path_buf(),
-				model:         Str::new_static("test/model"),
-				prompt:        omp_driver::headless::kernel::PromptOverrides::default(),
-				facts:         Default::default(),
-				live:          Arc::clone(&live),
-				tools_enabled: true,
-				up:            kernel.mailbox(),
-				rules:         None,
+				sessions_dir:    dir.path().join("sessions"),
+				project_root:    dir.path().to_path_buf(),
+				model:           Str::new_static("test/model"),
+				prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
+				facts:           Default::default(),
+				live:            Arc::clone(&live),
+				tools_enabled:   true,
+				up:              kernel.mailbox(),
+				rules:           None,
+				workspace_trust: None,
 			};
 			fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 			let mut session = home.create(None).expect("session");
@@ -4201,15 +4214,16 @@ mod tests {
 		.with_session_state_bridge(Arc::new(OrderBridge { order: order_tx.clone() }))
 		.with_session_observer(Arc::new(OrderBridge { order: order_tx.clone() }));
 		let home = SessionHome {
-			sessions_dir:  dir.path().join("sessions"),
-			project_root:  dir.path().to_path_buf(),
-			model:         Str::new_static("test/model"),
-			prompt:        omp_driver::headless::kernel::PromptOverrides::default(),
-			facts:         Default::default(),
-			live:          Arc::new(omp_driver::sessions::SessionRegistry::new()),
-			tools_enabled: true,
-			up:            kernel.mailbox(),
-			rules:         None,
+			sessions_dir:    dir.path().join("sessions"),
+			project_root:    dir.path().to_path_buf(),
+			model:           Str::new_static("test/model"),
+			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
+			facts:           Default::default(),
+			live:            Arc::new(omp_driver::sessions::SessionRegistry::new()),
+			tools_enabled:   true,
+			up:              kernel.mailbox(),
+			rules:           None,
+			workspace_trust: None,
 		};
 		fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 		let session = home.create(None).expect("session");
@@ -4357,15 +4371,16 @@ mod tests {
 			StaticPrompt(Str::new_static("test system")),
 		);
 		let home = SessionHome {
-			sessions_dir:  dir.path().join("sessions"),
-			project_root:  dir.path().to_path_buf(),
-			model:         Str::new_static("test/model"),
-			prompt:        omp_driver::headless::kernel::PromptOverrides::default(),
-			facts:         Default::default(),
-			live:          Arc::new(omp_driver::sessions::SessionRegistry::new()),
-			tools_enabled: true,
-			up:            kernel.mailbox(),
-			rules:         None,
+			sessions_dir:    dir.path().join("sessions"),
+			project_root:    dir.path().to_path_buf(),
+			model:           Str::new_static("test/model"),
+			prompt:          omp_driver::headless::kernel::PromptOverrides::default(),
+			facts:           Default::default(),
+			live:            Arc::new(omp_driver::sessions::SessionRegistry::new()),
+			tools_enabled:   true,
+			up:              kernel.mailbox(),
+			rules:           None,
+			workspace_trust: None,
 		};
 		fs::create_dir_all(&home.sessions_dir).expect("sessions dir");
 		let session = home.create(None).expect("session");

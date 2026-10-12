@@ -390,6 +390,9 @@ impl Launch {
 		})
 		.into_diagnostic()?;
 		let config_root = omp_core::dirs::profile_config_dir(&home).into_diagnostic()?;
+		// The workspace's trust decision, evaluated once for the launch and
+		// handed to composition, which never evaluates it again.
+		let workspace_trust = omp_driver::workspace_trust::evaluate_workspace(&data_dir, &project);
 		// Installed marketplace plugins: resolved once per launch and shared
 		// with the kernel; this is the one place their diagnostics surface.
 		let claude_plugins = Arc::new(omp_ext::claude_plugin::ClaudePlugins::resolve(
@@ -586,6 +589,7 @@ impl Launch {
 			schema_mode: None,
 			prompt_cache_key,
 			provider_session,
+			workspace_trust: omp_driver::workspace_trust::WorkspaceTrustSource::Fixed(workspace_trust),
 		};
 		Ok(Self {
 			data_dir,
@@ -812,14 +816,13 @@ fn resolve_named_theme(
 	name: &str,
 	stock_name: &str,
 ) -> Option<Arc<omp_tui::JsonTheme>> {
-	match catalog.get(name) {
-		Some(theme) => Some(theme),
-		None => {
-			if !name.is_empty() && name != STOCK_THEME && name != stock_name {
-				tracing::warn!(theme = name, "theme not found; using the stock palette");
-			}
-			None
-		},
+	if let Some(theme) = catalog.get(name) {
+		Some(theme)
+	} else {
+		if !name.is_empty() && name != STOCK_THEME && name != stock_name {
+			tracing::warn!(theme = name, "theme not found; using the stock palette");
+		}
+		None
 	}
 }
 
@@ -1183,7 +1186,7 @@ pub(crate) async fn run(
 	);
 	let up = kernel.mailbox();
 	let (commands, command_rx) = flume::unbounded();
-	let resize_policy = match omp_chat::settings::CL_RESIZE_POLICY.get(&ctx) {
+	let resize_policy = match omp_chat::settings::CL_RESIZE_POLICY.get(ctx) {
 		omp_chat::settings::ResizePolicy::Preserve => omp_tui::slots::ResizePolicy::Preserve,
 		omp_chat::settings::ResizePolicy::Append => omp_tui::slots::ResizePolicy::Append,
 		omp_chat::settings::ResizePolicy::Rebuild => omp_tui::slots::ResizePolicy::Rebuild,
@@ -1191,7 +1194,7 @@ pub(crate) async fn run(
 	let model_badge = {
 		// A resumed session restores its journaled `ai_model` route; the
 		// badge follows it rather than the launch default.
-		let route = Some(omp_agent::AI_MODEL.get(&ctx))
+		let route = Some(omp_agent::AI_MODEL.get(ctx))
 			.filter(|route| !route.is_empty())
 			.unwrap_or_else(|| model.clone());
 		let spec = catalog
@@ -1226,8 +1229,8 @@ pub(crate) async fn run(
 		// The Environment's supervisor owns the live roster; a slow or absent
 		// daemon degrades to the configuration projection rather than
 		// delaying the first frame.
-		let lsp = if omp_envd::lsp_settings::SV_LSP_ENABLED.get(&ctx) {
-			let project_binaries = omp_envd::lsp_settings::SV_LSP_PROJECT_BINARIES.get(&ctx);
+		let lsp = if omp_envd::lsp_settings::SV_LSP_ENABLED.get(ctx) {
+			let project_binaries = omp_envd::lsp_settings::SV_LSP_PROJECT_BINARIES.get(ctx);
 			let live = tokio::time::timeout(
 				crate::welcome_facts::LSP_STATUS_BUDGET,
 				kernel.inference().environment_client().lsp_status(false),
@@ -1327,7 +1330,8 @@ pub(crate) async fn run(
 	)
 	.into_diagnostic()?
 	.with_facts_of(&session)
-	.with_rules(Arc::clone(kernel.inference().rule_scope()));
+	.with_rules(Arc::clone(kernel.inference().rule_scope()))
+	.with_workspace_trust(kernel.inference().workspace_trust().clone());
 	let env = kernel.inference().environment_client().clone();
 	// Extension `omp.ui.*` requests (dialogs, presentation facts) and dynamic
 	// `ask` invocations are owned by this chat for its lifetime. Direct ask

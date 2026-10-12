@@ -15,6 +15,7 @@ use omp_con::{CfgLoader, ConError, Ctx, Origin};
 use omp_core::{Str, Ulid};
 use omp_dom::{PropId, PropKey, Value};
 use omp_env::EnvClient;
+use omp_ext::workspace_trust::TrustDecision;
 use omp_proto::{
 	env::v1::{CreateWorktree, DestroyWorktree, MergeMode, MergeWorktree},
 	toolhost::v1::HookEventId,
@@ -43,9 +44,12 @@ use super::{
 	},
 	yield_assembly,
 };
-use crate::headless::{
-	HeadlessError,
-	kernel::{KernelOptions, compose_kernel},
+use crate::{
+	headless::{
+		HeadlessError,
+		kernel::{KernelOptions, compose_kernel},
+	},
+	workspace_trust::WorkspaceTrustSource,
 };
 
 /// Standard prefix when a run ends without a yield.
@@ -84,27 +88,29 @@ impl SubagentSpawner for TaskDeclarationSpawner {
 /// lifecycle truth is committed to its journal and DOM by [`spawn_child`].
 pub struct DriverSubagentSpawner {
 	/// Parent journal controller.
-	pub parent:       Arc<tokio::sync::Mutex<Session>>,
+	pub parent:          Arc<tokio::sync::Mutex<Session>>,
 	/// Production data root.
-	pub data_dir:     PathBuf,
+	pub data_dir:        PathBuf,
 	/// Parent or isolated project root.
-	pub project_root: PathBuf,
+	pub project_root:    PathBuf,
 	/// Parent sessions directory.
-	pub sessions_dir: PathBuf,
+	pub sessions_dir:    PathBuf,
 	/// Shared live-session routing authority.
-	pub sessions:     Arc<crate::sessions::SessionRegistry>,
+	pub sessions:        Arc<crate::sessions::SessionRegistry>,
 	/// Parent effective console context.
-	pub parent_ctx:   Arc<Ctx>,
+	pub parent_ctx:      Arc<Ctx>,
 	/// Runtime job index paired with the parent DOM.
-	pub jobs:         Arc<JobBoard>,
+	pub jobs:            Arc<JobBoard>,
 	/// Environment authority for isolated whole-workspace views.
-	pub env:          EnvClient,
+	pub env:             EnvClient,
 	/// Configuration script loader.
-	pub cfg:          Arc<dyn CfgLoader>,
+	pub cfg:             Arc<dyn CfgLoader>,
 	/// Model selector used unless a driver policy resolves another route.
-	pub model:        Str,
+	pub model:           Str,
 	/// Extension lifecycle gate (`subagent_spawn`); `None` runs ungated.
-	pub hooks:        Option<LifecycleHooks>,
+	pub hooks:           Option<LifecycleHooks>,
+	/// The parent's workspace trust decision; every child inherits it.
+	pub workspace_trust: TrustDecision,
 }
 
 impl SubagentSpawner for DriverSubagentSpawner {
@@ -146,6 +152,7 @@ impl SubagentSpawner for DriverSubagentSpawner {
 				context: request.context.as_str(),
 				model: self.model.as_str(),
 				child,
+				workspace_trust: &self.workspace_trust,
 			})
 			.map_err(|source| TaskFault { message: Str::new(source.to_string()) })?;
 			let handle = prepared.handle;
@@ -215,16 +222,17 @@ impl SubagentSpawner for DriverSubagentSpawner {
 
 /// Session-owned `task@1` implementation composed by the driver.
 pub struct TaskSessionTool {
-	data_dir:     PathBuf,
-	project_root: PathBuf,
-	sessions_dir: PathBuf,
-	sessions:     Arc<crate::sessions::SessionRegistry>,
-	parent_ctx:   Arc<Ctx>,
-	cfg:          Arc<dyn CfgLoader>,
-	env:          EnvClient,
-	owner:        Str,
-	model:        Str,
-	spec:         ToolSpec,
+	data_dir:        PathBuf,
+	project_root:    PathBuf,
+	sessions_dir:    PathBuf,
+	sessions:        Arc<crate::sessions::SessionRegistry>,
+	parent_ctx:      Arc<Ctx>,
+	cfg:             Arc<dyn CfgLoader>,
+	env:             EnvClient,
+	owner:           Str,
+	model:           Str,
+	workspace_trust: TrustDecision,
+	spec:            ToolSpec,
 }
 
 impl TaskSessionTool {
@@ -240,6 +248,7 @@ impl TaskSessionTool {
 		env: EnvClient,
 		owner: Str,
 		model: Str,
+		workspace_trust: TrustDecision,
 	) -> Self {
 		Self {
 			data_dir,
@@ -251,6 +260,7 @@ impl TaskSessionTool {
 			env,
 			owner,
 			model,
+			workspace_trust,
 			spec: omp_tools::task::spec(),
 		}
 	}
@@ -314,6 +324,7 @@ impl SessionTool for TaskSessionTool {
 					context: request.context.as_str(),
 					model: self.model.as_str(),
 					child,
+					workspace_trust: &self.workspace_trust,
 				}) {
 					Ok(prepared) => prepared,
 					Err(source) => {
@@ -602,31 +613,34 @@ fn child_from_spec(
 /// Host-owned inputs for one child run.
 pub struct SpawnRequest<'a> {
 	/// Data root used by production composition and artifact storage.
-	pub data_dir:     &'a Path,
+	pub data_dir:        &'a Path,
 	/// Parent project root (or its isolated whole-workspace view).
-	pub project_root: &'a Path,
+	pub project_root:    &'a Path,
 	/// Directory in which the child's `.oms` is created.
-	pub sessions_dir: &'a Path,
+	pub sessions_dir:    &'a Path,
 	/// Shared live-session routing authority.
-	pub sessions:     &'a Arc<crate::sessions::SessionRegistry>,
+	pub sessions:        &'a Arc<crate::sessions::SessionRegistry>,
 	/// Parent's effective convar context at spawn time.
-	pub parent_ctx:   &'a Ctx,
+	pub parent_ctx:      &'a Ctx,
 	/// User/project cfg loader.
-	pub cfg:          &'a dyn CfgLoader,
+	pub cfg:             &'a dyn CfgLoader,
 	/// Runtime index paired with the parent DOM.
-	pub jobs:         &'a JobBoard,
+	pub jobs:            &'a JobBoard,
 	/// Environment authority used for isolated workspace views.
-	pub env:          &'a EnvClient,
+	pub env:             &'a EnvClient,
 	/// Kill boundary for this child.
-	pub cancel:       BackgroundToolCancellation,
+	pub cancel:          BackgroundToolCancellation,
 	/// Parent job owner identity.
-	pub owner:        &'a str,
+	pub owner:           &'a str,
 	/// Shared batch context prepended to the child assignment.
-	pub context:      &'a str,
+	pub context:         &'a str,
 	/// Requested model selector.
-	pub model:        &'a str,
+	pub model:           &'a str,
+	/// The parent's workspace trust decision, which the child inherits
+	/// instead of evaluating its isolated view.
+	pub workspace_trust: &'a TrustDecision,
 	/// Typed child request.
-	pub child:        ChildRequest,
+	pub child:           ChildRequest,
 }
 
 /// Journals a `<subagent>`, runs one independently configured child kernel,
@@ -668,23 +682,25 @@ pub async fn spawn_child(
 
 #[derive(Clone)]
 struct PreparedChild {
-	data_dir:     PathBuf,
-	project_root: PathBuf,
-	sessions_dir: PathBuf,
-	sessions:     Arc<crate::sessions::SessionRegistry>,
-	env:          EnvClient,
-	ctx:          Arc<Ctx>,
-	settings:     TaskSettings,
-	cancel:       BackgroundToolCancellation,
-	context:      Str,
-	child:        ChildRequest,
-	parent:       Str,
-	id:           Str,
-	agent:        Str,
-	session_path: PathBuf,
-	handle:       omp_dom::Handle,
+	data_dir:        PathBuf,
+	project_root:    PathBuf,
+	sessions_dir:    PathBuf,
+	sessions:        Arc<crate::sessions::SessionRegistry>,
+	env:             EnvClient,
+	ctx:             Arc<Ctx>,
+	settings:        TaskSettings,
+	cancel:          BackgroundToolCancellation,
+	context:         Str,
+	child:           ChildRequest,
+	parent:          Str,
+	id:              Str,
+	agent:           Str,
+	session_path:    PathBuf,
+	handle:          omp_dom::Handle,
 	/// Parent-derived initial runtime gate; the child journals its own copy.
-	paused:       bool,
+	paused:          bool,
+	/// The parent's workspace trust decision, inherited by the child.
+	workspace_trust: TrustDecision,
 }
 
 impl PreparedChild {
@@ -701,6 +717,7 @@ impl PreparedChild {
 			output_schema: self.child.output_schema.clone(),
 			schema_mode: self.child.schema_mode,
 			agent: Some(AgentName::new(self.agent.clone())),
+			workspace_trust: WorkspaceTrustSource::Fixed(self.workspace_trust.clone()),
 			..KernelOptions::default()
 		}
 	}
@@ -839,6 +856,7 @@ fn prepare_child(
 		session_path,
 		handle,
 		paused,
+		workspace_trust: request.workspace_trust.clone(),
 	})
 }
 
@@ -1922,22 +1940,23 @@ mod tests {
 		let (outgoing, _) = flume::unbounded();
 		let (_, incoming) = flume::unbounded();
 		PreparedChild {
-			data_dir:     root.join("data"),
-			project_root: root.join("proj"),
-			sessions_dir: root.join("sessions"),
-			sessions:     Arc::new(crate::sessions::SessionRegistry::new()),
-			env:          EnvClient::from_channels(outgoing, incoming),
-			ctx:          Arc::new(Ctx::new()),
-			settings:     TaskSettings::default(),
-			cancel:       BackgroundToolCancellation::from_token_for_host(CancellationToken::new()),
-			context:      Str::default(),
-			child:        ChildRequest { agent: Some(Str::new_static(agent)), ..plain_child() },
-			parent:       Str::new_static("main"),
-			id:           Str::new_static(agent),
-			agent:        Str::new_static(agent),
-			session_path: root.join("sessions").join(format!("{agent}.oms")),
-			handle:       session.dom().meta(),
-			paused:       false,
+			data_dir:        root.join("data"),
+			project_root:    root.join("proj"),
+			sessions_dir:    root.join("sessions"),
+			sessions:        Arc::new(crate::sessions::SessionRegistry::new()),
+			env:             EnvClient::from_channels(outgoing, incoming),
+			ctx:             Arc::new(Ctx::new()),
+			settings:        TaskSettings::default(),
+			cancel:          BackgroundToolCancellation::from_token_for_host(CancellationToken::new()),
+			context:         Str::default(),
+			child:           ChildRequest { agent: Some(Str::new_static(agent)), ..plain_child() },
+			parent:          Str::new_static("main"),
+			id:              Str::new_static(agent),
+			agent:           Str::new_static(agent),
+			session_path:    root.join("sessions").join(format!("{agent}.oms")),
+			handle:          session.dom().meta(),
+			paused:          false,
+			workspace_trust: TrustDecision::Untrusted,
 		}
 	}
 

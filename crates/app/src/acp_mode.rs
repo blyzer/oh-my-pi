@@ -76,7 +76,8 @@ async fn run_inner(args: ChatArgs) -> miette::Result<()> {
 	)
 	.into_diagnostic()?
 	.with_facts_of(&session)
-	.with_rules(Arc::clone(kernel.inference().rule_scope()));
+	.with_rules(Arc::clone(kernel.inference().rule_scope()))
+	.with_workspace_trust(kernel.inference().workspace_trust().clone());
 	serve_acp_state(kernel, session, home, input, output, connection, true).await
 }
 
@@ -461,13 +462,13 @@ where
 		let result = match method {
 			"initialize" => {
 				let version = params.get("protocolVersion").and_then(Value::as_u64);
-				if version != Some(1) {
-					Err((-32602, "unsupported ACP protocol version"))
-				} else {
+				if version == Some(1) {
 					initialized = true;
 					let capabilities = ClientCapabilities::from_initialize(&params);
 					client.initialize(capabilities);
 					Ok(initialize_response(capabilities.auth.terminal))
+				} else {
+					Err((-32602, "unsupported ACP protocol version"))
 				}
 			},
 			"authenticate" => {
@@ -627,9 +628,7 @@ where
 				Err((-32000, "unsupported ACP session"))
 			},
 			"session/set_mode" => {
-				if params.get("modeId").and_then(Value::as_str) != Some("default") {
-					Err((-32602, "unsupported ACP session mode"))
-				} else {
+				if params.get("modeId").and_then(Value::as_str) == Some("default") {
 					output_tx
 						.send(session_update(
 							session_id.as_str(),
@@ -640,6 +639,8 @@ where
 						))
 						.into_diagnostic()?;
 					Ok(json!({}))
+				} else {
+					Err((-32602, "unsupported ACP session mode"))
 				}
 			},
 			"session/set_config_option" if !targets_session(&params, session_id.as_str()) => {
@@ -648,9 +649,7 @@ where
 			"session/set_config_option" => {
 				let valid = params.get("configId").and_then(Value::as_str) == Some("model")
 					&& params.get("value").and_then(Value::as_str) == Some(home.model.as_str());
-				if !valid {
-					Err((-32602, "unsupported ACP session config option"))
-				} else {
+				if valid {
 					let state = session_state(home.model.as_str());
 					output_tx
 						.send(session_update(
@@ -662,6 +661,8 @@ where
 						))
 						.into_diagnostic()?;
 					Ok(json!({"configOptions": state["configOptions"].clone()}))
+				} else {
+					Err((-32602, "unsupported ACP session config option"))
 				}
 			},
 			"session/prompt" if closed => Err((-32000, "ACP session is closed")),
@@ -697,8 +698,7 @@ where
 								let text = source.to_string();
 								let message_id = session
 									.head()
-									.map(|entry| entry.to_string())
-									.unwrap_or_else(|| "error".to_owned());
+									.map_or_else(|| "error".to_owned(), |entry| entry.to_string());
 								let _ = turn_output.send(session_update(
 									turn_session.as_str(),
 									json!({
@@ -1269,7 +1269,7 @@ fn list_sessions(home: &SessionHome, params: &Map<String, Value>) -> Result<Valu
 		.skip(offset)
 		.take(SESSION_PAGE_SIZE)
 		.map(|row| {
-			let size = fs::metadata(&row.path).map(|meta| meta.len()).unwrap_or(0);
+			let size = fs::metadata(&row.path).map_or(0, |meta| meta.len());
 			json!({
 				"sessionId": row.id,
 				"cwd": row.cwd,
@@ -1387,14 +1387,13 @@ fn prompt_response(session: &Session, outcome: &omp_agent::TurnOutcome) -> Value
 			.find(|node| node.tag == omp_dom::Tag::Known(omp_dom::KnownTag::Assistant))
 			.and_then(|node| node.prop(&omp_dom::PropId::StopReason.into()))
 			.and_then(omp_dom::Value::as_str)
-			.map(|reason| match reason {
+			.map_or("end_turn", |reason| match reason {
 				"length" => "max_tokens",
 				"max_requests" | "max_turn_requests" => "max_turn_requests",
 				"aborted" | "cancelled" => "cancelled",
 				"refusal" | "content_filter" => "refusal",
 				_ => "end_turn",
 			})
-			.unwrap_or("end_turn")
 	};
 	let mut response = json!({"stopReason": stop_reason});
 	let total = outcome.tokens_in.saturating_add(outcome.tokens_out);

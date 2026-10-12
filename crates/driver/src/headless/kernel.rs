@@ -195,6 +195,10 @@ pub struct KernelOptions {
 	pub prompt_cache_key:   Option<Str>,
 	/// Invocation-scoped provider session identity (`--provider-session-id`).
 	pub provider_session:   Option<Str>,
+	/// Where the workspace trust decision comes from (host-supplied, never a
+	/// convar): evaluated against the operator's grant file by default, or a
+	/// decision the host or parent session already holds.
+	pub workspace_trust:    crate::workspace_trust::WorkspaceTrustSource,
 }
 
 /// How composition settles the launch model once runtime discovery has
@@ -273,6 +277,7 @@ pub struct ProductionInference {
 	_eval_parent:       Option<omp_envd::eval::ParentBindingLease>,
 	_ephemeral_journal: Option<EphemeralJournal>,
 	rules:              Arc<crate::discovery::rules::RuleScope>,
+	workspace_trust:    omp_ext::workspace_trust::TrustDecision,
 }
 
 impl ProductionInference {
@@ -495,12 +500,11 @@ fn convar_reasoning(
 	else {
 		return omp_ai::Setting::Unset;
 	};
-	let requested = match thinking.parse::<omp_catalog::ReasoningEffort>() {
-		Ok(effort) => omp_catalog::ThinkingEffort::from(effort),
-		Err(_) => {
-			tracing::warn!(value = thinking, "ai_thinking is not a reasoning effort; ignored");
-			return omp_ai::Setting::Unset;
-		},
+	let requested = if let Ok(effort) = thinking.parse::<omp_catalog::ReasoningEffort>() {
+		omp_catalog::ThinkingEffort::from(effort)
+	} else {
+		tracing::warn!(value = thinking, "ai_thinking is not a reasoning effort; ignored");
+		return omp_ai::Setting::Unset;
 	};
 	let wire_model = omp_catalog::WireModelId::from_ref(model.as_str());
 	let effort = match spec
@@ -691,7 +695,7 @@ enum OutcomeReplicationError {
 	},
 }
 
-fn resumable_blob_error(error: &omp_env::ClientError) -> bool {
+const fn resumable_blob_error(error: &omp_env::ClientError) -> bool {
 	matches!(
 		error,
 		omp_env::ClientError::TransportClosed
@@ -1399,14 +1403,11 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 							return;
 						}
-						let hash: [u8; 32] = match details.hash.as_ref().try_into() {
-							Ok(hash) => hash,
-							Err(_) => {
-								tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
-								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-								return;
-							},
-						};
+						let hash: [u8; 32] = if let Ok(hash) = details.hash.as_ref().try_into() { hash } else {
+										tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
+										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+										return;
+									};
 						let expected_hash = Hash32::new(hash);
 						let max_bytes = u64::try_from(omp_proto::bounds::FRAME_MAX_BYTES)
 							.expect("protocol frame limit fits u64");
@@ -1508,14 +1509,11 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 							return;
 						}
-						let visibility = match tool_visibility_spans(verdict.visibility, &verdict.parts) {
-							Ok(visibility) => visibility,
-							Err(()) => {
-								tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
-								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-								return;
-							},
-						};
+						let visibility = if let Ok(visibility) = tool_visibility_spans(verdict.visibility, &verdict.parts) { visibility } else {
+										tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
+										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+										return;
+									};
 						let mut parts = match replicate_verdict_parts(
 							&client,
 							&outcome_store,
@@ -2086,6 +2084,8 @@ pub enum ComposedInference {
 		_ephemeral_journal: Option<EphemeralJournal>,
 		/// Discovered rules and the agent class the live session runs as.
 		rules:              Arc<crate::discovery::rules::RuleScope>,
+		/// The workspace trust decision this composition runs under.
+		workspace_trust:    omp_ext::workspace_trust::TrustDecision,
 	},
 }
 
@@ -2124,7 +2124,7 @@ impl ComposedInference {
 
 	/// Borrows the project environment client retained by this composition.
 	#[must_use]
-	pub fn environment_client(&self) -> &omp_env::EnvClient {
+	pub const fn environment_client(&self) -> &omp_env::EnvClient {
 		match self {
 			Self::Production(inference) => inference._environment.client(),
 			Self::Gateway { _environment, .. } => _environment.client(),
@@ -2139,6 +2139,17 @@ impl ComposedInference {
 		match self {
 			Self::Production(inference) => &inference.rules,
 			Self::Gateway { rules, .. } => rules,
+		}
+	}
+
+	/// The workspace trust decision this composition runs under; a host
+	/// composing a child or side kernel over the same workspace hands it on
+	/// ([`crate::workspace_trust::WorkspaceTrustSource::Fixed`]).
+	#[must_use]
+	pub const fn workspace_trust(&self) -> &omp_ext::workspace_trust::TrustDecision {
+		match self {
+			Self::Production(inference) => &inference.workspace_trust,
+			Self::Gateway { workspace_trust, .. } => workspace_trust,
 		}
 	}
 
@@ -2177,7 +2188,7 @@ impl ComposedInference {
 				.ok()?;
 				Some(SpeechRewriteClient::Production {
 					registry: inference.stack.registry.clone(),
-					model:    selected.model.clone(),
+					model:    selected.model,
 				})
 			},
 			Self::Gateway { inference, .. } => {
@@ -2432,6 +2443,9 @@ pub async fn compose_kernel(
 		.sessions
 		.clone()
 		.unwrap_or_else(|| Arc::new(crate::sessions::SessionRegistry::new()));
+	// The workspace's trust decision gates every project-sourced input this
+	// composition loads; a child composition inherits its parent's.
+	let workspace_trust = options.workspace_trust.decide(data_dir, &project_root);
 	let disabled_extensions = crate::discovery::CL_DISABLED_EXTENSIONS.get(&ctx);
 	let native_mode = match options.extensions.native_mode {
 		NativeExtensionMode::Merge => crate::discovery::native::NativeLoadMode::Merge,
@@ -2746,6 +2760,7 @@ pub async fn compose_kernel(
 				_eval_parent: None,
 				_ephemeral_journal: None,
 				rules: Arc::clone(&rule_scope),
+				workspace_trust: workspace_trust.clone(),
 			}
 		},
 		Ok(stack) => {
@@ -2784,6 +2799,7 @@ pub async fn compose_kernel(
 				_eval_parent: None,
 				_ephemeral_journal: None,
 				rules: Arc::clone(&rule_scope),
+				workspace_trust: workspace_trust.clone(),
 			})
 		},
 	};
@@ -2843,6 +2859,9 @@ pub async fn compose_kernel(
 			crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&ctx),
 		)?;
 	}
+	// The session records the trust decision it runs under once; a resumed
+	// session already holding it records nothing again.
+	crate::workspace_trust::journal_decision(&mut session, &workspace_trust)?;
 	let agent = kernel_agent(options.agent.as_deref(), session.dom());
 	rule_scope.select(agent.clone());
 	let compiled = omp_agent::directors::stream_rules::StreamRuleSet::compile(
@@ -3042,7 +3061,7 @@ pub async fn compose_kernel(
 	live_sessions.register(name.clone(), crate::sessions::KernelHandle {
 		id: crate::sessions::SessionId::new(id.clone()),
 		name: name.clone(),
-		up: up.clone(),
+		up,
 		snapshot: Arc::new(RwLock::new(session.dom().snapshot())),
 		topology,
 		relay,
@@ -3067,6 +3086,7 @@ pub async fn compose_kernel(
 			model.clone(),
 			Arc::clone(kernel.tool_registry()),
 			eval.clone(),
+			workspace_trust.clone(),
 		));
 		let scheduler = Arc::new(crate::subagent::workpool_scheduler::SchedulerRegistry::new(
 			id.clone(),
@@ -3110,6 +3130,7 @@ pub async fn compose_kernel(
 			hub_environment.clone(),
 			name.clone(),
 			model,
+			workspace_trust.clone(),
 		)));
 		kernel = kernel.with_session_tool(Arc::new(crate::subagent::hub::HubSessionTool::new(
 			hub_environment,
@@ -3128,26 +3149,30 @@ pub async fn compose_kernel(
 #[derive(Clone)]
 pub struct SessionHome {
 	/// Directory holding this project's `.oms` journals.
-	pub sessions_dir:  PathBuf,
+	pub sessions_dir:    PathBuf,
 	/// Canonical project root recorded in prompt facts.
-	pub project_root:  PathBuf,
+	pub project_root:    PathBuf,
 	/// Resolved model key recorded in prompt facts.
-	pub model:         Str,
+	pub model:           Str,
 	/// Invocation prompt projection overrides.
-	pub prompt:        PromptOverrides,
+	pub prompt:          PromptOverrides,
 	/// Discovered prompt material (skills, context files, rules) projected
 	/// into every session's prompt facts.
-	pub facts:         crate::discovery::PromptFacts,
+	pub facts:           crate::discovery::PromptFacts,
 	/// Process-local live-session routing authority.
-	pub live:          Arc<crate::sessions::SessionRegistry>,
+	pub live:            Arc<crate::sessions::SessionRegistry>,
 	/// Whether the session's production composition exposes the tool surface.
-	pub tools_enabled: bool,
+	pub tools_enabled:   bool,
 	/// The kernel's upward mailbox, shared by every session it drives.
-	pub up:            flume::Sender<omp_agent::Up>,
+	pub up:              flume::Sender<omp_agent::Up>,
 	/// The kernel's discovered rules. When present, each session's rule facts
 	/// are scoped to the agent class journaled on it (a resumed child keeps
 	/// its own rules) instead of copying [`Self::facts`]' rule rows.
-	pub rules:         Option<Arc<crate::discovery::rules::RuleScope>>,
+	pub rules:           Option<Arc<crate::discovery::rules::RuleScope>>,
+	/// The workspace trust decision the kernel was composed under; every
+	/// session this home creates or opens journals it once. `None` journals
+	/// nothing (a home over another workspace, whose trust nobody decided).
+	pub workspace_trust: Option<omp_ext::workspace_trust::TrustDecision>,
 }
 
 impl SessionHome {
@@ -3180,6 +3205,7 @@ impl SessionHome {
 			tools_enabled: !options.no_tools,
 			up,
 			rules: None,
+			workspace_trust: None,
 		})
 	}
 
@@ -3206,6 +3232,26 @@ impl SessionHome {
 	pub fn with_rules(mut self, rules: Arc<crate::discovery::rules::RuleScope>) -> Self {
 		self.rules = Some(rules);
 		self
+	}
+
+	/// Journals `decision`, the kernel's workspace trust decision
+	/// ([`ComposedInference::workspace_trust`]), on every session this home
+	/// creates or opens.
+	#[must_use]
+	pub fn with_workspace_trust(
+		mut self,
+		decision: omp_ext::workspace_trust::TrustDecision,
+	) -> Self {
+		self.workspace_trust = Some(decision);
+		self
+	}
+
+	/// Journals [`Self::workspace_trust`] on `session` unless it records it.
+	fn journal_trust(&self, session: &mut Session) -> Result<(), omp_session::SessionError> {
+		if let Some(decision) = &self.workspace_trust {
+			crate::workspace_trust::journal_decision(session, decision)?;
+		}
+		Ok(())
 	}
 
 	/// The prompt facts journaled on `session`: [`Self::facts`], with the rule
@@ -3247,6 +3293,7 @@ impl SessionHome {
 			&facts,
 			self.tools_enabled,
 		)?;
+		self.journal_trust(&mut session)?;
 		self.register(&session);
 		Ok(session)
 	}
@@ -3265,6 +3312,7 @@ impl SessionHome {
 			&facts,
 			self.tools_enabled,
 		)?;
+		self.journal_trust(&mut session)?;
 		self.register(&session);
 		Ok(session)
 	}
@@ -3362,7 +3410,7 @@ fn apply_model_override(
 	if explicit {
 		omp_agent::AI_MODEL
 			.set(ctx, Str::new(model))
-			.map_err(|error| std::io::Error::other(error))?;
+			.map_err(std::io::Error::other)?;
 	}
 	Ok(())
 }
@@ -5146,15 +5194,16 @@ mod tests {
 			..crate::discovery::PromptFacts::default()
 		};
 		let home = SessionHome {
-			sessions_dir:  sessions_dir.clone(),
-			project_root:  scratch.path().to_path_buf(),
-			model:         Str::new_static("provider/model"),
-			prompt:        PromptOverrides::default(),
-			facts:         main_facts,
-			live:          Arc::new(crate::sessions::SessionRegistry::new()),
-			tools_enabled: false,
-			up:            flume::unbounded().0,
-			rules:         None,
+			sessions_dir:    sessions_dir.clone(),
+			project_root:    scratch.path().to_path_buf(),
+			model:           Str::new_static("provider/model"),
+			prompt:          PromptOverrides::default(),
+			facts:           main_facts,
+			live:            Arc::new(crate::sessions::SessionRegistry::new()),
+			tools_enabled:   false,
+			up:              flume::unbounded().0,
+			rules:           None,
+			workspace_trust: None,
 		}
 		.with_rules(Arc::clone(&scope));
 

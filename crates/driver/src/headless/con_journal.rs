@@ -333,18 +333,18 @@ fn hydrate(ctx: &Ctx, dom: &Dom) {
 
 impl omp_agent::SessionStateBridge for ConJournal {
 	fn flush(&self, session: &mut Session) -> Result<(), SessionError> {
-		ConJournal::flush(self, session)
+		Self::flush(self, session)
 	}
 
 	fn resync(&self, dom: &Dom) {
-		ConJournal::resync(self, dom);
+		Self::resync(self, dom);
 	}
 }
 
 struct TurnBoundary(Arc<ConJournal>);
 
 impl LiveComponent for TurnBoundary {
-	fn id(&self) -> &str {
+	fn id(&self) -> &'static str {
 		"con"
 	}
 
@@ -796,6 +796,7 @@ mod tests {
 			env,
 			omp_core::Str::new_static("main"),
 			omp_core::Str::new_static("provider/model"),
+			omp_ext::workspace_trust::TrustDecision::Untrusted,
 		)
 	}
 

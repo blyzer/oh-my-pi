@@ -84,27 +84,29 @@ pub enum ReviveError {
 /// Host-owned inputs for reviving one child.
 pub struct ReviveRequest<'a> {
 	/// Data root used by production composition.
-	pub data_dir:     &'a Path,
+	pub data_dir:        &'a Path,
 	/// Parent project root; the child runs in an isolated view of it.
-	pub project_root: &'a Path,
+	pub project_root:    &'a Path,
 	/// Directory holding the child's `.oms`.
-	pub sessions_dir: &'a Path,
+	pub sessions_dir:    &'a Path,
 	/// Shared live-session routing authority.
-	pub sessions:     &'a Arc<SessionRegistry>,
+	pub sessions:        &'a Arc<SessionRegistry>,
 	/// Parent's effective convar context.
-	pub parent_ctx:   &'a Ctx,
+	pub parent_ctx:      &'a Ctx,
 	/// User/project cfg loader.
-	pub cfg:          &'a dyn CfgLoader,
+	pub cfg:             &'a dyn CfgLoader,
 	/// Runtime index paired with the parent DOM.
-	pub jobs:         &'a JobBoard,
+	pub jobs:            &'a JobBoard,
 	/// Environment authority for isolated workspace views.
-	pub env:          &'a EnvClient,
+	pub env:             &'a EnvClient,
 	/// Model selector used unless the child cfg resolves another route.
-	pub model:        &'a str,
+	pub model:           &'a str,
 	/// The `<subagent id>` to revive.
-	pub id:           &'a str,
+	pub id:              &'a str,
 	/// First prompt to run, or `None` to wait idle for one.
-	pub prompt:       Option<Str>,
+	pub prompt:          Option<Str>,
+	/// The parent's workspace trust decision; the revived child inherits it.
+	pub workspace_trust: &'a omp_ext::workspace_trust::TrustDecision,
 }
 
 /// Journals `<subagent status=running>` and attaches a live loop over the
@@ -148,6 +150,7 @@ pub fn revive_child(parent: &mut Session, request: ReviveRequest<'_>) -> Result<
 		id,
 		agent,
 		session_path,
+		workspace_trust: request.workspace_trust.clone(),
 	};
 	let cancel = CancellationToken::new();
 	let task = tokio::spawn(live_loop(child, request.prompt, cancel.clone()));
@@ -185,16 +188,17 @@ fn subagent(parent: &Session, id: &str) -> Option<(Handle, Str, Str)> {
 
 #[derive(Clone)]
 struct Revived {
-	data_dir:     PathBuf,
-	sessions_dir: PathBuf,
-	sessions:     Arc<SessionRegistry>,
-	env:          EnvClient,
-	ctx:          Arc<Ctx>,
-	settings:     TaskSettings,
-	parent:       Str,
-	id:           Str,
-	agent:        Str,
-	session_path: PathBuf,
+	data_dir:        PathBuf,
+	sessions_dir:    PathBuf,
+	sessions:        Arc<SessionRegistry>,
+	env:             EnvClient,
+	ctx:             Arc<Ctx>,
+	settings:        TaskSettings,
+	parent:          Str,
+	id:              Str,
+	agent:           Str,
+	session_path:    PathBuf,
+	workspace_trust: omp_ext::workspace_trust::TrustDecision,
 }
 
 struct LiveRun {
@@ -289,6 +293,9 @@ async fn drive(
 		parent_session: Some(child.parent.clone()),
 		model_override: true,
 		agent: Some(AgentName::new(child.agent.clone())),
+		workspace_trust: crate::workspace_trust::WorkspaceTrustSource::Fixed(
+			child.workspace_trust.clone(),
+		),
 		..KernelOptions::default()
 	};
 	let (mut kernel, mut session, _) =
