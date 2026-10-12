@@ -10,7 +10,11 @@ use std::{
 use bytes::BytesMut;
 use flume::Receiver;
 use omp_env::{Admitter, BlobDownloadEvent, EnvClient};
-use omp_envd::{EnvServer, RegistryBridges, exthost::ConvarControlFactory, worker::ExtHostConfig};
+use omp_envd::{
+	ActiveContentInputs, EnvServer, RegistryBridges, exthost::ConvarControlFactory,
+	worker::ExtHostConfig,
+};
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_proto::{
 	SCHEMA_REV,
 	blob::v1::GetRequest,
@@ -95,10 +99,11 @@ impl EnvHarness {
 		Self::serve(scratch, server).await
 	}
 
-	/// Opens the project-mode environment authority the production `envd` runs:
-	/// it starts the real document daemon on a private socket with native
-	/// language-server discovery enabled, so `.lsp.json` servers in the project
-	/// are started on first use and serve the `lsp` tool.
+	/// Opens the project-mode environment authority the production `envd` runs
+	/// for a trusted workspace: it starts the real document daemon on a private
+	/// socket with native language-server discovery enabled, so `.lsp.json`
+	/// servers in the project are started on first use and serve the `lsp`
+	/// tool. An untrusted workspace never loads them (trust slice 4).
 	pub async fn spawn_project(scratch: &Scratch) -> Result<Self> {
 		let (ext_host_config, con, convars) = open_inputs()?;
 		let server = EnvServer::open_project(
@@ -112,7 +117,13 @@ impl EnvHarness {
 			None,
 			&con,
 			convars,
-			RegistryBridges::default(),
+			RegistryBridges {
+				content: ActiveContentInputs {
+					workspace_trust: WorkspaceTrust::Trusted,
+					..ActiveContentInputs::default()
+				},
+				..RegistryBridges::default()
+			},
 		)
 		.await
 		.context("opening project environment authority")?;
@@ -481,7 +492,7 @@ pub async fn read_blob(
 			match download.next_event().await? {
 				Some(BlobDownloadEvent::Chunk(chunk)) => bytes.extend_from_slice(&chunk.data),
 				Some(BlobDownloadEvent::Complete(_)) => return Ok(bytes),
-				None => return Err(error(format!("blob stream closed before completion"))),
+				None => return Err(error("blob stream closed before completion".to_string())),
 			}
 		}
 	})
