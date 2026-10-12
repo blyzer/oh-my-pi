@@ -163,6 +163,26 @@ Order rationale:
 12. **Carried over (10-09, item 3):** should the model see `approval-posture`? Are unknown-scheme reads non-fetch?
 13. **Vaults:** should a project `.omp/vaults.toml` be able to shadow a user vault name, or only add new names? The same question applies to `hosts.toml` (F7).
 
+## Owner decisions (2026-10-11)
+
+Answers to the questions above. Slices 1 and 2 have landed (#265, #267).
+
+| # | Decision | Applies to slice |
+|---|---|---|
+| 1 | Repo-local LSP/DAP binaries off by default; user-only `sv_lsp_project_binaries` opts in. | 1 (done) |
+| 2 | Fix F11 inside `omp adw run` now. | 2 (done) |
+| 3 | Untrusted workspaces still load `AGENTS.md`, rules and skills, contained to the repo. | 3 |
+| 4 | Re-ask on a digest change: trust is bound to the inventory digest, and a change after `git pull` gives `DigestChanged`. **Still open:** whether `Subtree` trust should exist. | 3 |
+| 5 | Native `.omp/extensions` load automatically once the workspace is trusted. No per-extension link is required. | 3 |
+| 6 | Project MCP values stay literal: `!cmd` and env-name substitution are forbidden even when trusted. | 4 |
+| 7 | An untrusted workspace clamps an explicit user `yolo` to `write`. | 9 |
+| 8 | `cl_disabled_extensions` loses the PROJECT flag; only the user config (`~/.o2/config.cfg`) may set it. | 15 |
+| 9 | A typed trust request on `proto`/`rpc` is accepted, and the decision enters `DaemonPolicy` and `ServerHello`. | 4, 7 |
+| 10 | `ai_cache_retention auto` places markers, and the Volatile band moves into messages. Goldens and the ADR 0024 prefix contract are updated with it. | 12, 13 |
+| 11 | Invocation-key usage is recorded under a synthetic `invocation` account. | 14 |
+| 12 | The model sees the `approval-posture` notice. **Still open:** whether unknown-scheme reads count as non-fetch. | posture notice |
+| 13 | A project `vaults.toml`/`hosts.toml` may only add new names, never shadow a user name. | 4 |
+
 ## Commands that took more than one minute
 
 None. The longest command was a 5.5 s `git fetch`; the FIFO probe ran for 2.3 s by design.
