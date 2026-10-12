@@ -77,10 +77,7 @@ impl GitRepo {
 	/// Stage worktree files, or every change when `files` is empty.
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
-		let mut index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git add", err))?
-			.into_owned();
+		let mut index = load_index(&repo)?;
 		let mut selected = collect_stage_paths(self.root(), files)?;
 		let all = files.is_empty();
 		let requested: BTreeSet<&str> = files.iter().map(String::as_str).collect();
@@ -111,10 +108,7 @@ impl GitRepo {
 		let repo = self.gix()?;
 		let head = head_tree(&repo)?;
 		let head_index = index_for_tree(&repo, head.as_ref())?;
-		let mut current = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git reset", err))?
-			.into_owned();
+		let mut current = load_index(&repo)?;
 		copy_index_paths(&mut current, &head_index, files);
 		current
 			.write(INDEX_WRITE)
@@ -132,10 +126,7 @@ impl GitRepo {
 			.try_peel_to_id()
 			.map_err(|err| Error::backend("git commit", err))?
 			.map(|id| id.detach());
-		let index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git commit", err))?
-			.into_owned();
+		let index = load_index(&repo)?;
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
 		} else {
@@ -334,10 +325,7 @@ impl GitRepo {
 	pub fn restore(&self, options: &RestoreOptions) -> Result<()> {
 		let repo = self.gix()?;
 		let restore_worktree = options.worktree || !options.staged;
-		let mut index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|e| Error::backend("git restore", e))?
-			.into_owned();
+		let mut index = load_index(&repo)?;
 		if options.staged {
 			let source = resolve_tree(&repo, options.source.as_deref().unwrap_or("HEAD"))?;
 			let source_index = index_for_tree(&repo, Some(&source))?;
@@ -373,9 +361,7 @@ impl GitRepo {
 	/// Remove untracked files and directories according to ignore mode.
 	pub fn clean(&self, options: &CleanOptions) -> Result<()> {
 		let repo = self.gix()?;
-		let index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|e| Error::backend("git clean", e))?;
+		let index = load_index(&repo)?;
 		let tracked: BTreeSet<String> = index
 			.entries()
 			.iter()
@@ -804,6 +790,46 @@ fn index_for_tree(
 	}
 }
 
+/// The worktree index as it is on disk right now, or the one `HEAD` implies
+/// when no index file exists yet.
+///
+/// Never `Repository::index_or_load_from_head_or_empty`: that returns the
+/// snapshot the shared handle cached at first use and reloads it only when
+/// the file's mtime has grown. Linux stamps mtimes from a coarse clock, so an
+/// index written within the same tick as the one the snapshot was taken from
+/// — `git commit` followed by `stage_files` in a fixture, a staged hunk
+/// followed by a commit in the workbench — is invisible to it, and the next
+/// operation on the same `GitRepo` works on stale entries. Reading the file
+/// costs the same as the snapshot's own cache miss, and the index is small.
+pub fn load_index(repo: &gix::Repository) -> Result<gix::index::File> {
+	match open_index(repo)? {
+		Some(index) => Ok(index),
+		None => index_for_tree(repo, head_tree(repo)?.as_ref()),
+	}
+}
+
+/// [`load_index`] with git's read-side fallback: no index file means an empty
+/// index, so every `HEAD` path reads as a staged deletion, exactly as
+/// `git status` and `git ls-files` report it.
+pub fn load_index_or_empty(repo: &gix::Repository) -> Result<gix::index::File> {
+	match open_index(repo)? {
+		Some(index) => Ok(index),
+		None => index_for_tree(repo, None),
+	}
+}
+
+fn open_index(repo: &gix::Repository) -> Result<Option<gix::index::File>> {
+	match repo.open_index() {
+		Ok(index) => Ok(Some(index)),
+		Err(gix::worktree::open_index::Error::IndexFile(gix::index::file::init::Error::Io(err)))
+			if err.kind() == std::io::ErrorKind::NotFound =>
+		{
+			Ok(None)
+		},
+		Err(err) => Err(Error::backend("git read index", err)),
+	}
+}
+
 fn collect_stage_paths(root: &Path, files: &[String]) -> Result<BTreeSet<String>> {
 	let ignores = load_ignore_patterns(root);
 	let mut candidates = Vec::new();
@@ -971,10 +997,7 @@ fn checkout_tree(
 	let mut target = repo
 		.index_from_tree(&tree)
 		.map_err(|e| Error::backend("git checkout", e))?;
-	let current = repo
-		.index_or_load_from_head_or_empty()
-		.map_err(|e| Error::backend("git checkout", e))?
-		.into_owned();
+	let current = load_index(repo)?;
 	let conflicts = checkout_conflicts(owner.root(), repo, &current, &target)?;
 	if !overwrite && !conflicts.is_empty() {
 		return Err(Error::Conflict { paths: conflicts });
@@ -1278,10 +1301,7 @@ fn branch_is_checked_out(common: &Path, full_ref: &str) -> bool {
 
 fn tracked_worktree_dirty(repo: &GitRepo) -> Result<bool> {
 	let gix = repo.gix()?;
-	let index = gix
-		.index_or_load_from_head_or_empty()
-		.map_err(|e| Error::backend("git worktree remove", e))?
-		.into_owned();
+	let index = load_index(&gix)?;
 	for entry in index.entries() {
 		if worktree_id(
 			&gix,
@@ -1359,7 +1379,10 @@ mod tests {
 	use tempfile::TempDir;
 
 	use super::*;
-	use crate::{testing::run_trimmed as git, types::CommitAuthor};
+	use crate::{
+		testing::run_trimmed as git,
+		types::{CommitAuthor, StatusOptions},
+	};
 
 	fn fixture() -> (TempDir, GitRepo) {
 		let temp = tempfile::tempdir().unwrap();
@@ -1412,6 +1435,45 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  new");
 		repo.unstage(&[]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
+	}
+
+	/// Freeze the index file's mtime at `stamp` after every write so each
+	/// write looks, to an mtime-keyed cache, like no write at all. This is what
+	/// a coarse filesystem clock does on its own when two writes land in one
+	/// tick: `git commit` in `fixture()` and the first `stage_files` here.
+	fn with_frozen_index_mtime(temp: &TempDir, stamp: std::time::SystemTime) -> impl Fn() {
+		let index = temp.path().join(".git/index");
+		move || fs::File::open(&index).unwrap().set_modified(stamp).unwrap()
+	}
+
+	#[test]
+	fn index_reads_see_same_tick_writes() {
+		let (temp, repo) = fixture();
+		let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+		let freeze = with_frozen_index_mtime(&temp, stamp);
+		freeze();
+		// Populate the shared handle's snapshot from the frozen index.
+		assert!(!repo.is_dirty().unwrap());
+
+		fs::write(temp.path().join("a"), "changed\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		freeze();
+		assert!(repo.is_dirty().unwrap());
+		assert_eq!(repo.status_porcelain(&StatusOptions::default()).unwrap(), "M  a\n");
+		let committed = repo
+			.commit_create("same tick", &CommitOptions::default())
+			.unwrap();
+		freeze();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), committed);
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
+
+		fs::write(temp.path().join("c"), "three\n").unwrap();
+		repo.stage_files(&["c".into()]).unwrap();
+		freeze();
+		assert_eq!(repo.ls_files(false, true).unwrap(), ["a", "b", "c"]);
+		repo.unstage(&["c".into()]).unwrap();
+		freeze();
+		assert_eq!(repo.status_porcelain(&StatusOptions::default()).unwrap(), "?? c\n");
 	}
 
 	#[cfg(unix)]

@@ -29,7 +29,10 @@ use gix::{
 use omp_core::{FastHashMap, FastHashSet};
 use parking_lot::Mutex;
 
-use super::{GitRepo, mutate::update_reference};
+use super::{
+	GitRepo,
+	mutate::{load_index, update_reference},
+};
 use crate::{
 	error::{Error, Result},
 	types::{ApplyOptions, DiffOptions, HunkSelection, HunkSelectionError, HunkSpec},
@@ -1310,9 +1313,7 @@ fn blob_bytes(repo: &gix::Repository, id: gix::ObjectId) -> Result<Vec<u8>> {
 }
 
 fn index_map(repo: &gix::Repository) -> Result<BTreeMap<String, FileEntry>> {
-	let index = repo
-		.index_or_load_from_head_or_empty()
-		.map_err(|err| Error::backend("git read index", err))?;
+	let index = load_index(repo)?;
 	Ok(index_state_map(&index))
 }
 
@@ -1428,10 +1429,7 @@ fn untracked_worktree_map(
 	gix_repo: &gix::Repository,
 	index: &BTreeMap<String, FileEntry>,
 ) -> Result<BTreeMap<String, FileEntry>> {
-	let mut walk_index = gix_repo
-		.index_or_load_from_head_or_empty()
-		.map_err(|err| Error::backend("git read index for untracked files", err))?
-		.into_owned();
+	let mut walk_index = load_index(gix_repo)?;
 	for entry in walk_index.entries_mut() {
 		entry.flags.insert(Flags::UPTODATE);
 	}
