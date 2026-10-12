@@ -3,9 +3,10 @@
 //! `write` call whose admission prompt is journaled and answered by the host
 //! with `Up::Approve` (deny → skipped, allow → the file lands). With no
 //! sandbox in force, the default `yolo` is downgraded to `write`, so a `bash`
-//! call prompts; an explicit `yolo` is respected and runs unconfined. Each
-//! says so in one typed notice, also on the attached path, where a project
-//! daemon served in this process admits and runs the command and its sandbox
+//! call prompts; an explicit `yolo` is respected and runs unconfined in a
+//! trusted workspace, and clamped to `write` in an untrusted one. Each says so
+//! in one typed notice, also on the attached path, where a project daemon
+//! served in this process admits and runs the command and its sandbox
 //! amendment reaches the issuing session only through the approval relay; the
 //! journal decides whether a session is told again after a rewind, a retry, a
 //! switch or a new kernel. A network endpoint approved for the session holds,
@@ -263,14 +264,15 @@ struct Project {
 }
 
 impl Project {
-	fn new(sandbox: ExecSandboxMode) -> Self {
+	/// A project whose workspace the host decided `trust` for, under `sandbox`.
+	fn new(sandbox: ExecSandboxMode, trust: WorkspaceTrust) -> Self {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let root = scratch.path().join("workspace");
 		let state = scratch.path().join("state");
 		std::fs::create_dir_all(&root).expect("workspace");
 		std::fs::create_dir_all(&state).expect("state");
 		let root = std::fs::canonicalize(&root).expect("canonical workspace");
-		Self { scratch, root, state, con: context(sandbox), trust: WorkspaceTrust::Untrusted }
+		Self { scratch, root, state, con: context(sandbox), trust }
 	}
 
 	/// Attaches one session composition the way the application does.
@@ -340,9 +342,17 @@ impl Project {
 			StaticPrompt(Str::new_static("test")),
 		);
 		// Installed as `compose_kernel` installs it: the kernel's admission and
-		// the environment executor share the session's posture report.
-		let mut kernel =
-			support::install_authority(kernel, environment, session, &self.con, mode, &self.root);
+		// the environment executor share the session's posture report, under
+		// the workspace trust the host decided.
+		let mut kernel = support::install_authority(
+			kernel,
+			environment,
+			session,
+			&self.con,
+			mode,
+			self.trust,
+			&self.root,
+		);
 		let events = kernel.subscribe();
 		let mailbox = kernel.mailbox();
 		let interrupt = Arc::clone(interrupt);
@@ -539,19 +549,21 @@ impl Project {
 }
 
 /// Runs one turn calling `tool` under `mode` (`None`: the shipped default
-/// posture, no flag), with the sandbox `sandbox`, on the composition
-/// `ProjectEnvironment::attach` builds from this test binary; `approve`
-/// answers the prompt the kernel journals. `target` is the file the call
-/// creates, relative to the workspace.
+/// posture, no flag), with the sandbox `sandbox` and the workspace `trust`
+/// the host decided, on the composition `ProjectEnvironment::attach` builds
+/// from this test binary; `approve` answers the prompt the kernel journals.
+/// `target` is the file the call creates, relative to the workspace.
+#[expect(clippy::too_many_arguments, reason = "one embedded turn's whole fixture")]
 async fn run(
 	tool: &'static str,
 	arguments: impl FnOnce(&Path) -> serde_json::Value,
 	target: &str,
 	mode: Option<ApprovalMode>,
 	sandbox: ExecSandboxMode,
+	trust: WorkspaceTrust,
 	approve: bool,
 ) -> Turn {
-	let project = Project::new(sandbox);
+	let project = Project::new(sandbox, trust);
 	let environment = project.attach(mode).await;
 	project
 		.turn(environment, tool, arguments, target, mode, approve)
@@ -618,6 +630,7 @@ async fn approval_always_ask_write_deny_journals_a_denied_result() {
 		"approved.txt",
 		Some(ApprovalMode::AlwaysAsk),
 		ExecSandboxMode::Off,
+		WorkspaceTrust::Untrusted,
 		false,
 	)
 	.await;
@@ -644,6 +657,7 @@ async fn approval_always_ask_write_allow_runs_the_tool() {
 		"approved.txt",
 		Some(ApprovalMode::AlwaysAsk),
 		ExecSandboxMode::Off,
+		WorkspaceTrust::Untrusted,
 		true,
 	)
 	.await;
@@ -722,7 +736,8 @@ fn the_posture(session: &Session, sent: &[String]) -> PostureShown {
 	posture
 }
 
-/// The payload and prose of a defaulted `yolo` that no sandbox keeps.
+/// The payload and prose of a defaulted `yolo` that no sandbox keeps, in an
+/// untrusted workspace.
 fn downgraded_default_yolo(posture: &PostureShown) {
 	assert_eq!(
 		posture.data,
@@ -731,6 +746,8 @@ fn downgraded_default_yolo(posture: &PostureShown) {
 			"provenance": "default",
 			"effective": "write",
 			"sandbox": { "state": "off" },
+			"workspace_trust": "untrusted",
+			"reason": "default_without_sandbox",
 		})
 	);
 	assert_eq!(
@@ -740,7 +757,8 @@ fn downgraded_default_yolo(posture: &PostureShown) {
 	);
 }
 
-/// The payload and prose of an explicit `yolo` that no sandbox confines.
+/// The payload and prose of an explicit `yolo` that no sandbox confines, in
+/// a trusted workspace.
 fn unconfined_explicit_yolo(posture: &PostureShown) {
 	assert_eq!(
 		posture.data,
@@ -749,11 +767,34 @@ fn unconfined_explicit_yolo(posture: &PostureShown) {
 			"provenance": "explicit",
 			"effective": "yolo",
 			"sandbox": { "state": "off" },
+			"workspace_trust": "trusted",
+			"reason": "explicit_without_sandbox",
 		})
 	);
 	assert_eq!(
 		posture.body,
 		"Approval `yolo` was requested explicitly: commands run unconfined (sandbox off)."
+	);
+}
+
+/// The payload and prose of an explicit `yolo` an untrusted workspace clamps
+/// to `write`, whatever the sandbox.
+fn clamped_explicit_yolo(posture: &PostureShown) {
+	assert_eq!(
+		posture.data,
+		serde_json::json!({
+			"configured": "yolo",
+			"provenance": "explicit",
+			"effective": "write",
+			"sandbox": { "state": "off" },
+			"workspace_trust": "untrusted",
+			"reason": "untrusted_workspace",
+		})
+	);
+	assert_eq!(
+		posture.body,
+		"Approval `yolo` was requested explicitly but the workspace is untrusted; `write` is in \
+		 force."
 	);
 }
 
@@ -763,8 +804,16 @@ fn unconfined_explicit_yolo(posture: &PostureShown) {
 /// default asked for, what holds, and why.
 #[tokio::test]
 async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
-	let Turn { session, result, landed, sent, .. } =
-		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, false).await;
+	let Turn { session, result, landed, sent, .. } = run(
+		"bash",
+		bash_call,
+		"landed.txt",
+		None,
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Untrusted,
+		false,
+	)
+	.await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 1, "a defaulted yolo without a sandbox must prompt once: {tickets:?}");
 	assert_eq!(tickets[0].reasons[0].kind.as_str(), "exec");
@@ -783,23 +832,64 @@ async fn default_yolo_without_a_sandbox_prompts_for_bash_and_says_why() {
 /// The same prompt, approved: the command runs.
 #[tokio::test]
 async fn default_yolo_without_a_sandbox_runs_bash_once_approved() {
-	let Turn { session, result, landed, .. } =
-		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::Off, true).await;
+	let Turn { session, result, landed, .. } = run(
+		"bash",
+		bash_call,
+		"landed.txt",
+		None,
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Untrusted,
+		true,
+	)
+	.await;
 	assert_eq!(prompts(&session).len(), 1);
 	assert!(landed, "approved bash ran: {result}");
 }
 
 /// An explicit `yolo` (`--approval-mode yolo`, `--yolo`, the user's config)
-/// is respected without a sandbox: the command runs with no prompt, and the
-/// session is told it is unconfined. This is the way out of headless denial.
+/// in a trusted workspace is respected without a sandbox: the command runs
+/// with no prompt, and the session is told it is unconfined. This is the way
+/// out of headless denial.
 #[tokio::test]
 async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
-	let Turn { session, result, landed, sent, .. } =
-		run("bash", bash_call, "landed.txt", Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false)
-			.await;
+	// Explicit `yolo` is respected only in a trusted workspace.
+	let Turn { session, result, landed, sent, .. } = run(
+		"bash",
+		bash_call,
+		"landed.txt",
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Trusted,
+		false,
+	)
+	.await;
 	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
 	assert!(landed, "bash ran unprompted: {result}");
 	unconfined_explicit_yolo(&the_posture(&session, &sent));
+}
+
+/// The same explicit `yolo` in an untrusted workspace is clamped to `write`:
+/// the unconfined shell is process authority that prompts, denial stops the
+/// command, and one typed notice names the clamp and its reason.
+#[tokio::test]
+async fn explicit_yolo_in_an_untrusted_workspace_is_clamped_to_write_and_says_why() {
+	let Turn { session, result, landed, sent, .. } = run(
+		"bash",
+		bash_call,
+		"landed.txt",
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Untrusted,
+		false,
+	)
+	.await;
+	let tickets = prompts(&session);
+	assert_eq!(tickets.len(), 1, "a clamped yolo prompts once for bash: {tickets:?}");
+	assert_eq!(tickets[0].reasons[0].kind.as_str(), "exec");
+	assert_eq!(tickets[0].reasons[0].subject.as_str(), "touch landed.txt");
+	assert!(result.contains("denied by user: not today"), "denied bash must settle: {result}");
+	assert!(!landed, "a denied command never ran");
+	clamped_explicit_yolo(&the_posture(&session, &sent));
 }
 
 /// Runs one bash `command` under an explicit `yolo` in a session attached to a
@@ -807,7 +897,8 @@ async fn explicit_yolo_without_a_sandbox_runs_bash_unprompted_and_says_so() {
 /// daemon runs the command and the session's registry only declares bash.
 /// Returns the tool result the model's closing request showed.
 async fn attached_bash_result(command: &str) -> ShownResult {
-	let project = Project::new(ExecSandboxMode::Off);
+	// Explicit `yolo` is respected only in a trusted workspace.
+	let project = Project::new(ExecSandboxMode::Off, WorkspaceTrust::Trusted);
 	let _daemon = support::InProcessDaemon::serve(
 		&project.root,
 		&project.state,
@@ -852,15 +943,17 @@ async fn a_failed_environment_bash_result_reaches_the_model() {
 
 /// Runs one kernel through `steps`, each turn calling `bash` once under
 /// `mode`, attached to a project daemon served in this process with the
-/// sandbox `sandbox` on both sides. The daemon admits every call; the kernel's
-/// own admission sees none. `approve` answers every prompt.
+/// sandbox `sandbox` and the workspace `trust` on both sides. The daemon
+/// admits every call; the kernel's own admission sees none. `approve` answers
+/// every prompt.
 async fn attached_bash(
 	mode: Option<ApprovalMode>,
 	sandbox: ExecSandboxMode,
+	trust: WorkspaceTrust,
 	approve: bool,
 	steps: &[Step],
 ) -> Turn {
-	let project = Project::new(sandbox);
+	let project = Project::new(sandbox, trust);
 	let _daemon = support::InProcessDaemon::serve(
 		&project.root,
 		&project.state,
@@ -886,7 +979,11 @@ async fn attached_bash(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attached_session_reports_its_downgraded_default_yolo_once() {
 	let Turn { session, result, landed, sent, .. } =
-		attached_bash(None, ExecSandboxMode::Off, false, &[Step::Turn, Step::Turn]).await;
+		attached_bash(None, ExecSandboxMode::Off, WorkspaceTrust::Untrusted, false, &[
+			Step::Turn,
+			Step::Turn,
+		])
+		.await;
 	let tickets = prompts(&session);
 	assert_eq!(tickets.len(), 2, "the daemon asked for each command: {tickets:?}");
 	assert!(
@@ -918,19 +1015,47 @@ fn first_entry_naming(session: &Session, marker: &str) -> usize {
 		.unwrap_or_else(|| panic!("no journal entry names {marker}"))
 }
 
-/// An explicit `yolo` on the attached path runs every command unprompted on
-/// the daemon, and the session is told once that they run unconfined.
+/// An explicit `yolo` on the attached path of a trusted workspace runs every
+/// command unprompted on the daemon, and the session is told once that they
+/// run unconfined.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attached_session_reports_its_unconfined_explicit_yolo_once() {
-	let Turn { session, result, landed, sent, .. } =
-		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
-			Step::Turn,
-			Step::Turn,
-		])
-		.await;
+	// Explicit `yolo` is respected only in a trusted workspace.
+	let Turn { session, result, landed, sent, .. } = attached_bash(
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Trusted,
+		false,
+		&[Step::Turn, Step::Turn],
+	)
+	.await;
 	assert!(prompts(&session).is_empty(), "an explicit yolo never prompts");
 	assert!(landed, "bash ran unprompted on the daemon: {result}");
 	unconfined_explicit_yolo(&the_posture(&session, &sent));
+}
+
+/// An explicit `yolo` on the attached path of an untrusted workspace is
+/// clamped to `write` on the daemon too: each command prompts and, refused,
+/// never runs, and the session is told once why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_session_reports_its_clamped_explicit_yolo_once() {
+	let Turn { session, result, landed, sent, .. } = attached_bash(
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Untrusted,
+		false,
+		&[Step::Turn, Step::Turn],
+	)
+	.await;
+	let tickets = prompts(&session);
+	assert_eq!(tickets.len(), 2, "the daemon asked for each clamped command: {tickets:?}");
+	assert!(
+		tickets
+			.iter()
+			.all(|ticket| ticket.reasons[0].kind.as_str() == "exec")
+	);
+	assert!(!landed, "a refused command never ran: {result}");
+	clamped_explicit_yolo(&the_posture(&session, &sent));
 }
 
 /// A kernel outlives the session it serves: once the host switches it to
@@ -938,14 +1063,15 @@ async fn an_attached_session_reports_its_unconfined_explicit_yolo_once() {
 /// once, and the session it left keeps its own one notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attached_kernel_reports_its_posture_to_every_session_it_serves() {
-	let Turn { session, previous, sent, .. } =
-		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
-			Step::Turn,
-			Step::Turn,
-			Step::New,
-			Step::Turn,
-		])
-		.await;
+	// Explicit `yolo` is respected only in a trusted workspace.
+	let Turn { session, previous, sent, .. } = attached_bash(
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Trusted,
+		false,
+		&[Step::Turn, Step::Turn, Step::New, Step::Turn],
+	)
+	.await;
 	let [left] = previous.as_slice() else {
 		panic!("the kernel served two sessions");
 	};
@@ -961,15 +1087,15 @@ async fn an_attached_kernel_reports_its_posture_to_every_session_it_serves() {
 /// again: its journal holds the notice. The session in between is told once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attached_kernel_tells_a_resumed_session_nothing_twice() {
-	let Turn { session, previous, sent, postures, .. } =
-		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
-			Step::Turn,
-			Step::New,
-			Step::Turn,
-			Step::Resume(0),
-			Step::Turn,
-		])
-		.await;
+	// Explicit `yolo` is respected only in a trusted workspace.
+	let Turn { session, previous, sent, postures, .. } = attached_bash(
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Trusted,
+		false,
+		&[Step::Turn, Step::New, Step::Turn, Step::Resume(0), Step::Turn],
+	)
+	.await;
 	let [between] = previous.as_slice() else {
 		panic!("the kernel served two sessions");
 	};
@@ -982,13 +1108,15 @@ async fn an_attached_kernel_tells_a_resumed_session_nothing_twice() {
 /// process resuming it is, tells it nothing again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attached_session_resumed_by_another_kernel_is_not_told_twice() {
-	let Turn { session, sent, postures, .. } =
-		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
-			Step::Turn,
-			Step::Restart,
-			Step::Turn,
-		])
-		.await;
+	// Explicit `yolo` is respected only in a trusted workspace.
+	let Turn { session, sent, postures, .. } = attached_bash(
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Trusted,
+		false,
+		&[Step::Turn, Step::Restart, Step::Turn],
+	)
+	.await;
 	unconfined_explicit_yolo(&the_posture(&session, &sent));
 	assert_eq!(postures, 1, "the second kernel posted nothing");
 }
@@ -999,16 +1127,15 @@ async fn an_attached_session_resumed_by_another_kernel_is_not_told_twice() {
 /// it again, once. The abandoned branch keeps the first notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attached_rewind_past_the_posture_notice_reports_it_again() {
-	let Turn { session, sent, postures, .. } =
-		attached_bash(Some(ApprovalMode::Yolo), ExecSandboxMode::Off, false, &[
-			Step::Turn,
-			Step::Turn,
-			Step::Rewind(1),
-			Step::Turn,
-			Step::Rewind(0),
-			Step::Turn,
-		])
-		.await;
+	// Explicit `yolo` is respected only in a trusted workspace.
+	let Turn { session, sent, postures, .. } = attached_bash(
+		Some(ApprovalMode::Yolo),
+		ExecSandboxMode::Off,
+		WorkspaceTrust::Trusted,
+		false,
+		&[Step::Turn, Step::Turn, Step::Rewind(1), Step::Turn, Step::Rewind(0), Step::Turn],
+	)
+	.await;
 	unconfined_explicit_yolo(&the_posture(&session, &sent));
 	assert_eq!(
 		postures, 2,
@@ -1038,7 +1165,7 @@ async fn an_attached_retried_tool_tail_reports_the_posture_its_rewind_dropped() 
 /// interrupted at its prompt and retried, attached to a project daemon served
 /// in this process when `attached` says so.
 async fn retried_tool_tail(attached: bool) {
-	let project = Project::new(ExecSandboxMode::Off);
+	let project = Project::new(ExecSandboxMode::Off, WorkspaceTrust::Untrusted);
 	let _daemon = if attached {
 		Some(
 			support::InProcessDaemon::serve(
@@ -1080,7 +1207,11 @@ async fn retried_tool_tail(attached: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attached_session_inside_an_active_sandbox_posts_no_posture_notice() {
 	let Turn { session, result, landed, .. } =
-		attached_bash(None, ExecSandboxMode::WorkspaceWrite, false, &[Step::Turn, Step::Turn]).await;
+		attached_bash(None, ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted, false, &[
+			Step::Turn,
+			Step::Turn,
+		])
+		.await;
 	assert!(prompts(&session).is_empty(), "a confined yolo never prompts");
 	assert!(landed, "bash ran inside the workspace: {result}");
 	let posture = posture_notices(&session);
@@ -1092,8 +1223,16 @@ async fn an_attached_session_inside_an_active_sandbox_posts_no_posture_notice() 
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn default_yolo_inside_an_active_sandbox_runs_bash_unprompted_and_silent() {
-	let Turn { session, result, landed, .. } =
-		run("bash", bash_call, "landed.txt", None, ExecSandboxMode::WorkspaceWrite, false).await;
+	let Turn { session, result, landed, .. } = run(
+		"bash",
+		bash_call,
+		"landed.txt",
+		None,
+		ExecSandboxMode::WorkspaceWrite,
+		WorkspaceTrust::Untrusted,
+		false,
+	)
+	.await;
 	assert!(prompts(&session).is_empty(), "a confined yolo never prompts");
 	assert!(landed, "bash ran inside the workspace: {result}");
 	let posture = posture_notices(&session);
@@ -1119,6 +1258,7 @@ async fn active_sandbox_denied_write_prompts_an_amendment_and_refusal_writes_not
 		"landed.txt",
 		None,
 		ExecSandboxMode::WorkspaceWrite,
+		WorkspaceTrust::Untrusted,
 		false,
 	)
 	.await;
@@ -1193,7 +1333,7 @@ mod attached_daemon {
 	/// attached to the same daemon never is.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn an_approved_daemon_amendment_reruns_the_command() {
-		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let project = Project::new(ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted);
 		std::fs::create_dir(project.root.join(".git")).expect("protected carve-out");
 		let _daemon = InProcessDaemon::for_project(&project, ExecSandboxMode::WorkspaceWrite).await;
 		let bystander = attached(&project).await;
@@ -1219,7 +1359,7 @@ mod attached_daemon {
 	/// Refused: the command ends `Denied` and nothing is written.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_refused_daemon_amendment_denies_the_command() {
-		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let project = Project::new(ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted);
 		std::fs::create_dir(project.root.join(".git")).expect("protected carve-out");
 		let _daemon = InProcessDaemon::for_project(&project, ExecSandboxMode::WorkspaceWrite).await;
 		let environment = attached(&project).await;
@@ -1346,6 +1486,7 @@ mod session_network_grants {
 			&session,
 			&project.con,
 			None,
+			project.trust,
 			&project.root,
 		);
 		let events = kernel.subscribe();
@@ -1417,7 +1558,7 @@ mod session_network_grants {
 	/// A session attached to a daemon whose broker may reach loopback; the
 	/// session resolves the same policy, or it would not join that daemon.
 	async fn attached_grants(leave: Leave) {
-		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted);
 		project.con = loopback_context();
 		let port = loopback_upstream();
 		let _daemon =
@@ -1432,7 +1573,7 @@ mod session_network_grants {
 	/// the session falls back to an in-process environment, whose route keeps
 	/// the grants.
 	async fn embedded_grants(leave: Leave) {
-		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted);
 		project.con = loopback_context();
 		let port = loopback_upstream();
 		let environment = project.attach(None).await;
@@ -2084,7 +2225,7 @@ mod policy_keyed_daemons {
 	/// of each policy joins the one that enforces it.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn each_policy_joins_its_own_daemon_of_one_project() {
-		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted);
 		let _sandboxed = InProcessDaemon::serve(
 			&project.root,
 			&project.state,
@@ -2126,7 +2267,7 @@ mod policy_keyed_daemons {
 	/// serve the project one after the other.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn each_workspace_trust_joins_its_own_daemon_of_one_project() {
-		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let mut project = Project::new(ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted);
 		let untrusted = daemon_policy::from_con(&project.con, WorkspaceTrust::Untrusted);
 		let trusted = daemon_policy::from_con(&project.con, WorkspaceTrust::Trusted);
 		assert_ne!(untrusted, trusted, "the trust decision is part of the policy digest");
@@ -2167,7 +2308,7 @@ mod policy_keyed_daemons {
 	/// policies.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_daemon_reporting_another_policy_is_never_joined() {
-		let project = Project::new(ExecSandboxMode::Off);
+		let project = Project::new(ExecSandboxMode::Off, WorkspaceTrust::Untrusted);
 		let session = daemon_policy::from_con(&project.con, project.trust);
 		let daemon = context(ExecSandboxMode::WorkspaceWrite);
 		let served = daemon_policy::from_con(&daemon, project.trust);
@@ -2200,7 +2341,7 @@ mod policy_keyed_daemons {
 	/// embedded at once with a notice naming both policies.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_session_spawns_no_daemon_it_could_never_join() {
-		let project = Project::new(ExecSandboxMode::Off);
+		let project = Project::new(ExecSandboxMode::Off, WorkspaceTrust::Untrusted);
 		let session = daemon_policy::from_con(&project.con, project.trust);
 		let configured =
 			daemon_policy::from_con(&context(ExecSandboxMode::WorkspaceWrite), project.trust);
@@ -2235,7 +2376,7 @@ mod policy_keyed_daemons {
 	#[cfg(target_os = "macos")]
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_sandbox_off_session_never_runs_on_a_sandboxed_daemon() {
-		let project = Project::new(ExecSandboxMode::Off);
+		let project = Project::new(ExecSandboxMode::Off, WorkspaceTrust::Untrusted);
 		let _daemon = InProcessDaemon::serve(
 			&project.root,
 			&project.state,
@@ -2262,7 +2403,7 @@ mod policy_keyed_daemons {
 	#[cfg(target_os = "macos")]
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn a_sandboxed_session_never_runs_on_an_unconfined_daemon() {
-		let project = Project::new(ExecSandboxMode::WorkspaceWrite);
+		let project = Project::new(ExecSandboxMode::WorkspaceWrite, WorkspaceTrust::Untrusted);
 		let _daemon = InProcessDaemon::serve(
 			&project.root,
 			&project.state,

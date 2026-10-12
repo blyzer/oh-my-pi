@@ -967,8 +967,9 @@ mod tests {
 		let calls = Arc::new(AtomicUsize::new(0));
 		let admission = DynamicAdmission::new(
 			crate::admission::ConfiguredApproval {
-				mode:       ApprovalMode::AlwaysAsk,
-				provenance: crate::admission::Provenance::Explicit,
+				mode:            ApprovalMode::AlwaysAsk,
+				provenance:      crate::admission::Provenance::Explicit,
+				workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Trusted,
 			},
 			crate::admission::SandboxState::Off,
 			std::collections::BTreeMap::new(),
@@ -1005,8 +1006,9 @@ mod tests {
 		let sandboxed = Arc::new(AtomicUsize::new(0));
 		let admission = DynamicAdmission::new(
 			crate::admission::ConfiguredApproval {
-				mode:       ApprovalMode::Yolo,
-				provenance: crate::admission::Provenance::Default,
+				mode:            ApprovalMode::Yolo,
+				provenance:      crate::admission::Provenance::Default,
+				workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Trusted,
 			},
 			crate::admission::SandboxState::Active,
 			std::collections::BTreeMap::new(),
@@ -1055,6 +1057,7 @@ mod tests {
 			crate::admission::ConfiguredApproval {
 				mode,
 				provenance: crate::admission::Provenance::Explicit,
+				workspace_trust: omp_ext::workspace_trust::WorkspaceTrust::Trusted,
 			},
 			crate::admission::SandboxState::Off,
 			std::collections::BTreeMap::new(),
