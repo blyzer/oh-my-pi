@@ -10,6 +10,7 @@ pub mod capabilities;
 pub mod digest;
 pub mod endpoint;
 pub mod profile;
+pub mod tree;
 
 /// Generated bindings for the vendored protos.
 ///
