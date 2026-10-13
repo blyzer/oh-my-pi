@@ -9,7 +9,8 @@ Context: `docs/adr/0043-native-cli-integration.md` (proposed, not edited by this
 ## Summary
 
 Installed and probed on this Mac: `codex` 0.160.0, `gemini` 0.59.0, `agy` 1.1.10 (Antigravity CLI),
-`grok` 1.0.46, `claude` 2.1.296. `devin` and `antigravity` are NOT installed.
+`grok` 1.0.46, `claude` 2.1.296, and (added later the same day, after the owner installed it) `devin` 3000.11.3.
+`antigravity` (the desktop/other binary) is NOT installed; `agy` is the Antigravity CLI.
 
 | CLI | Version | Verdict | Reason (one sentence) | ADR 0043 non-goal |
 |---|---|---|---|---|
@@ -18,10 +19,10 @@ Installed and probed on this Mac: `codex` 0.160.0, `gemini` 0.59.0, `agy` 1.1.10
 | Gemini CLI | 0.59.0 | `capability-gated` | `--acp` (JSON-RPC) and `-o stream-json` exist with a documented exit-code table, but nothing beyond `--help` was verified on the binary, headless interrupt is undocumented, and there is no auth-status command (U13-U16). | Implementing now would contradict "No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts." |
 | Antigravity | `agy` 1.1.10 | `capability-gated` | A documented `json`/`stream-json` print mode exists, but there is no in-protocol cancel or approval channel (`control_request` is rejected), `--input-format` is absent from `--help`, and soft-denied tools are reported on stderr, not in the stream (U17-U21). | Implementing now would contradict "No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts."; the Boundary "No generic human-output parser when a structured interface is unavailable." holds only if `--output-format` is never `text`. |
 | Grok | 1.0.46 | `capability-gated` | `-p --output-format streaming-json` (ACP updates as NDJSON) and `grok agent stdio` (ACP) exist with `--cwd` and `dontAsk`, but exit codes, cancel semantics and auth status are undocumented (U22-U27). | Implementing now would contradict "No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts." |
-| Devin | not installed | `blocked` | No binary to observe, so no machine interface is verified locally; the docs claim `devin acp`, `-p` and `devin auth status` (U28). | Implementing now would contradict "No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts." |
+| Devin | 3000.11.3 | `capability-gated` | `devin acp` ("Run as an ACP (Agent Client Protocol) server over stdio") speaks a public JSON-RPC spec with MUST-level `session/cancel`, `session/request_permission` and absolute `cwd`, so it is the strongest non-Codex candidate; but nothing beyond `--help` ran (no handshake), exit codes, auth behaviour under ACP and permission-mode handling are undocumented or unverified (U28, U30-U39). | Implementing now would contradict "No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts."; the ACP spec is an official contract, but its use by the installed binary is verified from `--help` only. |
 
-Adapter-ready: **Codex only.** The other four installed CLIs have real headless/structured modes, but
-none passed the bar below, so they stay disabled by the gate, not by absence of an interface.
+Adapter-ready: **Codex only.** The other five installed CLIs have real headless/structured modes (three of them speak
+ACP, see section 6.1), but none passed the bar below, so they stay disabled by the gate, not by absence of an interface.
 
 Verdict bar used in this note (mine, derived from the brief's definitions): `adapter-ready` needs
 (a) a vendor-documented structured protocol that the installed binary's own help confirms,
@@ -39,8 +40,9 @@ Refinements to earlier notes (the earlier text is left as written):
   and aren't supported for production workloads".
 - Antigravity has a documented headless/JSON surface (the earlier note found none); Grok has a documented
   ACP-over-stdio mode. Both are documented, not locally exercised, so ADR 0043's "remain disabled" still holds.
-- Three installed or documented CLIs speak ACP (Gemini `--acp`, Grok `agent stdio`, Devin `devin acp` per docs).
-  One ACP client could serve all of them; that needs a handshake probe in an isolated `HOME` first (not done here).
+- Three CLIs expose an ACP server mode in `--help` or documentation (Gemini `--acp`, Devin `devin acp`, Grok `agent stdio`);
+  one ACP client adapter could serve all three, which changes the plan from one adapter per CLI (section 6.1). Codex,
+  Claude and Antigravity do not expose ACP (confirmed with `--help` and `<cli> acp --help`).
 
 ## Method and evidence rules
 
@@ -50,7 +52,7 @@ Refinements to earlier notes (the earlier text is left as written):
 - UNVERIFIED (Un): neither observed nor documented in the text read, or doc and binary disagree.
 - INFERENCE: my reading, not observed.
 
-Commands run: `--help`, `--version` and subcommand `--help` for all five CLIs, plus
+Commands run: `--help`, `--version` and subcommand `--help` for all six CLIs, plus
 `codex app-server generate-json-schema` / `generate-ts` into `/tmp` with `CODEX_HOME=/tmp/cliFeas-codex-home`
 (the directory was empty afterwards, `find` printed nothing). Nothing logged in, refreshed a token, started an
 agent, or made a model request. No credential, config, token or Keychain file was read. `codex login status`,
@@ -412,24 +414,115 @@ $ grok login --help     "--oauth", "--device-auth"        (login/logout are the 
 without verified official contracts." To reach `adapter-ready`: handshake probe of `grok agent stdio` in an isolated `HOME`
 (not done), exit-code and cancel documentation or observation (U22, U23), and terms (U26).
 
-## 6. Devin (no CLI installed)
+## 6. Devin 3000.11.3 (installed after the first pass)
 
-`command -v devin antigravity` printed nothing and exited 1. No Devin interface was observed. Everything below is
-vendor documentation read 2026-10-13 and is UNVERIFIED locally (U28).
+`command -v devin` → `/Users/enverfrancisco/.local/bin/devin`; `devin --version` → `devin 3000.11.3 (9c803229faa4)`.
+The first pass of this note recorded Devin as "not installed" (verdict `blocked`); that no longer holds and is replaced
+here. Only `--help` and subcommand `--help` ran. Not run: `devin auth login|logout|status`, `devin acp`, `devin -p`, any
+interactive session, `devin doctor`, `devin models list`, `devin mcp *`, `devin cloud`, and no file under
+`~/.config/devin` or `~/.local/share/devin` was read.
 
-DOC (`docs.devin.ai/cli/reference/commands.md`, partial read):
+### Observed
 
-- Headless: `devin -p/--print [PROMPT]` "Print response and exit (non-interactive mode)"; `--respect-workspace-trust false` is needed "in an untrusted directory".
-- Structured output: no JSON or NDJSON mode for `-p` found. JSON exists for `devin models list --format json`, `devin list --format json`, `devin doctor --json`, and `--export` ("ATIF format"). ACP: `devin acp` "Run Devin as an Agent Client Protocol (ACP) server over stdio … speaks JSON-RPC over stdin/stdout".
-- Sessions: `-c`, `-r <SESSION_ID>`, `--cloud` ("Drive Devin Cloud sessions instead of the local agent").
-- Permissions: `--permission-mode normal, accept-edits, smart, dangerous, autonomous`; `--sandbox`; rules `allow/ask/deny` with "A deny rule always wins".
-- Auth status: `devin auth status` ("Check authentication status"); `devin auth login/logout`.
-- Exit codes: only "`devin doctor` … exits with a non-zero status if any check fails".
-- Cancel: interactive `Esc` / `Ctrl+C` only (keyboard-shortcuts page).
-- Cloud: Devin API v3 REST (`POST /v3/organizations/{org}/sessions`), service-user keys prefixed `cog_`. This supports the earlier note's reading that Devin Cloud is an asynchronous session service, not a token stream (the pages read do not describe any streaming endpoint).
+```text
+$ devin --help
+A fast and minimal agent that lives both in your terminal and in the cloud.
+Usage: devin [OPTIONS] [PATH]... [-- <PROMPT>...] [COMMAND]
+Commands: auth, mcp, models, doctor, rules, skills, plugins, cloud, desktop, list [aliases: ls], rm, ssh, forward, update, version, migrate, sandbox, setup, uninstall, acp
+  acp        Run as an ACP (Agent Client Protocol) server over stdio
+  auth       Authentication related commands
+  doctor     Diagnose the local Devin configuration
+  sandbox    [Research Preview] Process sandboxing for the exec tool
+  [PATH]...  Open Devin Desktop on the given path(s)
+      --permission-mode <PERMISSION_MODE>   Modes: "auto" auto-approves read-only tools, "accept-edits" also auto-approves workspace edits, "smart" additionally auto-runs actions a fast model judges safe, "dangerous" auto-approves all tools.  [env: DEVIN_PERMISSION_MODE=] [default: auto]
+      --sandbox   [Research Preview] Sandbox exec-tool processes (macOS seatbelt / Linux bwrap+seccomp)  [env: DEVIN_SANDBOX=]
+      --cloud     Drive Devin cloud sessions instead of the local agent. The REPL talks to `devin acp --cloud`, which relays ACP to the Devin cloud ACP WebSocket. Requires a Devin account (sign in with `auth login`).
+      --model <MODEL>   ... With -c/--continue or -r/--resume, switches the resumed conversation to this model  [env: DEVIN_MODEL=]
+  -p, --print [<PROMPT>]   Print response and exit. Runs in non-interactive mode: processes the prompt and exits.
+      --export [<PATH>]   Export conversation to a file. Exports after each turn.
+  -c, --continue   Continue the most recent conversation
+  -r, --resume [<SESSION_ID>]   Resume a conversation. Provide a session ID to resume a specific session, or omit to select interactively.
+      --respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>]   Defaults to true in every mode. Non-interactive (print) mode cannot show the trust prompt and fails in an untrusted directory; pass --respect-workspace-trust false to skip the check.
+      --prompt-file <FILE> | --config <PATH> (Override the default user config file (~/.config/devin/config.json).)
+ (no --cwd, no --output-format, no --input-format flag)
+$ devin acp --help
+Run as an ACP (Agent Client Protocol) server over stdio
+Usage: devin acp [OPTIONS]
+      --agent-type <AGENT_TYPE>   Possible values: summarizer (no tools; persists to ~/.local/share/devin/summaries/<session_id>.md) | review (read-only + shell tools)
+      --model <MODEL>   Default model for every new ACP session  [env: DEVIN_MODEL=]
+      --refusal-fallback <MODEL>   Models to switch to, in order, when the provider refuses a request under its usage policy  [env: DEVIN_REFUSAL_FALLBACK=]
+      --cloud   Relay to Devin cloud instead of running the local agent. ... so the connected host drives cloud Devin sessions. Requires a Devin account (sign in with `auth login`).
+  (no --permission-mode, no --sandbox, no --cwd on `devin acp`)
+$ devin auth --help          login  Log in to Devin | logout  Log out and remove stored credentials | status  Check authentication status
+$ devin auth status --help   Check authentication status      Usage: devin auth status      Options: -h, --help
+$ devin doctor --help        Diagnose the local Devin configuration      --json  Emit machine-readable JSON instead of the text table
+$ devin list --help          --format <FORMAT>  interactive (default) | json | csv
+$ devin sandbox --help       [Research Preview] ...   setup  [Research Preview] Print the sandbox prerequisites for the current platform
+$ devin mcp --help           add, list, get, remove, login, logout, enable, disable
+$ devin models --help        list  List available models, organized by model family
+```
 
-Verdict: `blocked` (nothing verified; this reflects the missing binary, not a product judgement).
-ADR 0043 non-goal: "No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts."
+### The 8 questions
+
+| # | Question | Finding | Status |
+|---|---|---|---|
+| 1 | Headless / non-TTY | `devin -p/--print [<PROMPT>]` ("Runs in non-interactive mode: processes the prompt and exits"); prompt via `--prompt-file`. In an untrusted directory it fails unless `--respect-workspace-trust false`. | OBS |
+| 2 | Structured stream | `devin acp` ("Run as an ACP (Agent Client Protocol) server over stdio"; ACP is JSON-RPC 2.0, S26). `-p` has no `--output-format` in help (U38). JSON exists only for `devin list --format json`, `devin doctor --json`, and `--export` (DOC: ATIF). | OBS + S26 |
+| 3 | Session create/resume | CLI: `-c/--continue`, `-r/--resume [<SESSION_ID>]`, `devin list --format json`, `devin rm`. ACP: `session/new`, `session/load` (needs `loadSession`), `session/prompt`, `session/update`; whether `devin acp` advertises load/resume is unverified (U40). | OBS + S26 |
+| 4 | Interrupt / cancel | No flag in help. ACP spec: `session/cancel` is a baseline notification every agent "MUST" support; the client "MUST" answer pending `session/request_permission` with outcome `cancelled`; the agent "MUST" return stop reason `cancelled`. Devin's implementation, and whether shell children die, is unverified (U32). | S26 (spec); U32 |
+| 5 | Permissions | Flags: `--permission-mode` {`auto` (default; read-only tools auto), `accept-edits`, `smart`, `dangerous`}, `--sandbox`; these are on the top-level command, not on `devin acp --help` (U33). Under ACP the spec routes approval through `session/request_permission` with option kinds `allow_once, allow_always, reject_once, reject_always`; OMP, as the client, would answer `reject_once`/`cancelled` unless its own policy allows. Fail-closed mapping: never pass `dangerous`; do not advertise `fs`/`terminal` capabilities unless OMP wants to mediate them; answer only `allow_once`/`reject_once`, never `*_always`. Unknown option kinds → reject. This is more promising than every non-Codex CLI because the approval decision is made in-protocol by OMP, not by a settings file. Whether Devin actually asks via ACP for each tool is unverified (U33, U34). | OBS (flags) + S26 (spec); U33, U34 |
+| 6 | Working directory | No `--cwd` flag (the `[PATH]...` positional means "Open Devin Desktop on the given path(s)", not a working directory). ACP `session/new` takes `cwd`: it "MUST be an absolute path" and "MUST be used for the session regardless of where the Agent subprocess was spawned" (S26). | OBS + S26 |
+| 7 | Auth status | `devin auth status` ("Check authentication status", no options). Named as the candidate non-destructive probe; NOT run; side effects and exit semantics unverified (U39). ACP offers `authMethods` and `authenticate` (S26), but calling `authenticate` could start a login (U31). `devin doctor --json` is config diagnostics, not documented as auth. | OBS (help) + S26; U31, U39 |
+| 8 | Exit codes | None in any help. DOC only (before install): `devin doctor` "exits with a non-zero status if any check fails". | U37 |
+
+### Verdict
+
+`capability-gated` (not `blocked`, and not yet `adapter-ready`). Why: the installed binary exposes `devin acp`, an ACP server
+over stdio, and ACP is a public, versioned JSON-RPC contract with MUST-level `session/cancel`, `session/request_permission`
+(four option kinds, `cancelled` outcome) and absolute `cwd`, so the interface and its permission/cancel channels are
+specified, unlike Claude's `-p` flags or Gemini's/Antigravity's headless modes. It stays gated because nothing beyond
+`--help` was exercised: no `initialize` handshake, so login need, advertised capabilities, cancel behaviour, and whether
+`--permission-mode` or sandboxing reach the ACP child are unverified (U30–U34, U37–U42), and the delegation terms are unread
+for this use (U28).
+
+ADR 0043 non-goal engaged: "No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts."
+The official contract (ACP) exists; what is not verified is Devin's conformance. The ADR also says Devin "remain[s]
+disabled until official machine-readable interfaces are verified", and a `--help` line is not a handshake.
+Boundary "No token/key extraction from Keychain, credential files or private caches" is respected as long as OMP never
+reads `~/.config/devin`/`~/.local/share/devin`, never sets `WINDSURF_API_KEY`, and never calls `authenticate`.
+Hard exclusions: `--cloud` (sends work to Devin cloud; U35), `--agent-type summarizer` (writes to `~/.local/share/devin/summaries`; U36),
+`--permission-mode dangerous`, and `devin auth login|logout`.
+
+To reach `adapter-ready` (needs owner approval, since it runs the binary): one `initialize` plus `session/new` plus a
+`session/cancel` against `devin acp` in a throwaway `HOME` and an empty git repo, with no `authenticate` call and the network
+observed; plus U30–U34.
+
+Cloud API (DOC from the first pass, unchanged): Devin API v3 REST (`POST /v3/organizations/{org}/sessions`, service-user
+keys prefixed `cog_`) is an asynchronous session service, a separate executor model from the local ACP agent; not part of
+this verdict.
+
+### 6.1 One ACP client could serve several CLIs
+
+Checked with `<cli> --help` and `<cli> acp --help` only:
+
+| CLI | ACP server mode from `--help` | Evidence |
+|---|---|---|
+| Gemini 0.59.0 | Yes | `--acp   Starts the agent in ACP mode` and `--experimental-acp ... (deprecated, use --acp instead)`. |
+| Grok 1.0.46 | Yes | `grok agent --help` lists `stdio     Run the agent over stdio`; `grok --help` says `streaming-json: NDJSON: one ACP session update per line, the agent's native format`. `grok acp` is not a subcommand (prints the top-level help). |
+| Devin 3000.11.3 | Yes | `devin acp --help`: "Run as an ACP (Agent Client Protocol) server over stdio". |
+| Claude 2.1.296 | No | `claude --help` has no `acp` match; `claude acp --help` prints the top-level help (no such subcommand). `claude mcp serve` is an MCP server, not ACP. |
+| Codex 0.160.0 | No | No `acp` match; `codex acp --help` prints the top-level help. `codex app-server` is a different JSON-RPC protocol. |
+| Antigravity `agy` 1.1.10 | No | No `acp` match; `agy acp --help` prints flag usage. Its machine mode is `--output-format stream-json`. |
+
+Consequence: three of the five non-Codex targets speak the same public protocol. A single ACP client adapter
+(`initialize`, optional `authenticate`, `session/new|load`, `session/prompt`, `session/update`, `session/cancel`, answering
+`session/request_permission`, optionally serving `fs/*` and `terminal/*`) could serve Gemini, Grok and Devin through
+per-CLI launch profiles (argv, env, `authMethods` handling, permission mapping, exit-code table), instead of three
+protocol-specific adapters. Codex remains its own adapter (app-server), Claude and Antigravity need CLI-specific ones or stay
+disabled. This changes the plan in `docs/parked/2026-10-10-native-cli-integration-next-steps.md` from one adapter per CLI to
+one ACP client plus profiles; the parked doc is annotated accordingly. It does not by itself change any verdict, because
+the shared protocol is unverified against each binary (U29) and the per-vendor differences that matter for ADR 0043 (login
+behaviour, permission flags honoured, cancel semantics, terms) are exactly the unverified ones.
 
 ## 7. Terms and auth ownership
 
@@ -443,7 +536,7 @@ Only quoted official text counts; everything else is UNVERIFIED. This is evidenc
 | Gemini CLI | Cached credential, or `GEMINI_API_KEY`, or Vertex credentials (authentication page). | **UNVERIFIED (U16).** ToS page: "Directly accessing the services powering Gemini CLI … using third-party software, tools, or services (for example, using OpenClaw with Gemini CLI OAuth) is a violation of applicable terms and policies." The text targets direct access with the CLI's OAuth; it does not say whether launching the official binary from another product is allowed. Supported methods listed: Google account (Gemini Code Assist), Gemini API key, Vertex AI. |
 | Antigravity | Keyring token profile, or `GEMINI_API_KEY` with `modelProvider: gemini` in settings (install page). Headless "uses your cached credentials. Authenticate once with an interactive `agy` session first." | **UNVERIFIED (U21).** Antigravity Terms item 6: "Using third party software, tools, or services to access the Service (e.g. using OpenClaw with Antigravity OAuth) is a breach of this Agreement." The vendor documents scripting and CI use of `agy -p`, but a third-party product driving it is not addressed. |
 | Grok | `grok login` (browser OIDC or device code), API key `XAI_API_KEY`, external `auth_provider_command` (enterprise page). | **UNVERIFIED (U26).** Consumer ToS: "You may not share your account credentials or make your account available to anyone else." Enterprise ToS permits integrations through the API under an Order Form. Nothing read addresses a third-party product launching `grok`. |
-| Devin | `devin auth login` stores an API token in `credentials.toml`; "treat it as sensitive". `devin acp` reads `WINDSURF_API_KEY` or the stored credentials. | **UNVERIFIED (U28).** Cognition Platform ToS (June 30, 2026) bars making the Services "available to anyone other than Authorized Users"; nothing read addresses delegation. No CLI installed. |
+| Devin | Credentials are held by the CLI (`devin auth login`; DOC: stored in `credentials.toml`, "treat it as sensitive"). `devin acp --cloud` help: "Requires a Devin account (sign in with `auth login`)". ACP spec: an agent advertises `authMethods` and the client calls `authenticate` only for protocol-driven methods. | **UNVERIFIED (U28, U30, U31).** Technically, OMP spawning `devin acp` without touching credentials is possible in principle. Cognition Platform ToS (June 30, 2026) bars making the Services "available to anyone other than Authorized Users"; nothing read addresses delegation. |
 
 Common rule across all rows, from ADR 0043 and `docs/research/native-cli-integration.md`: OMP never reads another
 application's Keychain item, auth file or token cache, and never sets `CLAUDE_CODE_OAUTH_TOKEN`-style long-lived
@@ -480,8 +573,21 @@ tokens on the user's behalf.
 | U25 | Grok: any non-destructive auth-status command (none found). |
 | U26 | Grok: whether a third-party product launching `grok` is allowed. |
 | U27 | Grok: `-s/--session-id` doc vs help disagreement. |
-| U28 | Devin: everything (not installed): `-p` output format, exit codes, cancel, ACP details, `auth status` behaviour, delegation terms. |
-| U29 | Cross-CLI: no ACP handshake probe was run for Gemini, Grok or Devin (out of the allowed command set). |
+| U28 | Devin: whether a third-party product launching the local `devin` binary (or `devin acp`) is allowed; the Cognition Platform ToS read bars making the Services "available to anyone other than Authorized Users" and says nothing about delegation. |
+| U29 | Cross-CLI: no ACP handshake probe was run for Gemini, Grok or Devin (only `--help` was allowed). Conformance of each agent to the public ACP spec is therefore unverified. |
+| U30 | Devin: whether `devin acp` needs a prior login to answer `initialize`, and whether `initialize` or `session/new` reads credentials or touches the network. |
+| U31 | Devin: which `authMethods` `devin acp` advertises and what `authenticate` does (it could start a browser login). OMP would never call `authenticate` for it. |
+| U32 | Devin: whether `session/cancel` is implemented, returns `stopReason: "cancelled"`, and kills shell children the agent started. |
+| U33 | Devin: whether `--permission-mode` is honored under `devin acp`, and which tools raise `session/request_permission` in the default mode `auto`; whether `smart` makes extra model calls. |
+| U34 | Devin: whether `devin acp` runs shell commands itself or through client `terminal/*` (decides whether OMP can withhold the `terminal` capability to fail closed). |
+| U35 | Devin: `--cloud` (on both `devin` and `devin acp`) relays to the Devin cloud ACP WebSocket, so work leaves the machine; out of scope and must never be passed. Whether any default or config can turn it on implicitly was not checked. |
+| U36 | Devin: `devin acp --agent-type summarizer` persists to `~/.local/share/devin/summaries/<session_id>.md` (OBS in help); never used. Whether the default agent also writes outside the workspace was not checked. |
+| U37 | Devin: exit codes for `-p`, `acp`, `auth status` (none in help; docs only for `devin doctor`). |
+| U38 | Devin: `-p` has no `--output-format` in help, so its stdout is not a documented machine format; ACP is the only structured route found. |
+| U39 | Devin: `devin auth status` is the candidate non-destructive auth probe; side effects (token refresh, network call, keychain prompt) and exit-code semantics are unverified; not run. |
+| U40 | Devin: whether `devin acp` advertises `loadSession` / `sessionCapabilities.resume`, and how a session id from `devin list --format json` relates to ACP `sessionId`. |
+| U41 | Devin: workspace trust under ACP (print mode "fails in an untrusted directory"); whether `--respect-workspace-trust` applies to `acp`, and whether the trust store is read or written. |
+| U42 | Devin: doc vs help drift: docs list `--permission-mode normal, accept-edits, smart, dangerous, autonomous`; help lists `auto, accept-edits, smart, dangerous` (default `auto`). Docs say `devin acp` reads `WINDSURF_API_KEY`; help does not mention it, and OMP would never set it. |
 
 Pages read only in part: Claude `authentication.md` (300 of 314 lines),
 `agent-sdk/typescript.md` (searched, not read through), Gemini `policy-engine` (first 300 of 635 lines),
@@ -515,6 +621,7 @@ Antigravity `permissions.md` (first 300 of 378), Devin `commands.md` (403 of 625
 | S20 | `https://antigravity.google/docs/cli/headless.md`, `…/install.md`, `…/reference.md`, `…/gcli-migration` (redirects to `/docs/cli/gcli-migration`), `https://antigravity.google/docs/permissions.md`, `https://antigravity.google/terms`, `https://antigravity.google/llms.txt` | `https://antigravity.google/docs/cli/permissions.md` returned HTTP 404, so the CLI permission rules were read from `/docs/permissions.md` (CLI section). No page dates shown. |
 | S21 | `https://docs.x.ai/build/overview.md`, `…/build/cli/headless-scripting.md`, `…/build/cli/reference.md`, `…/build/features/permissions.md`, `…/build/features/sessions.md`, `…/build/features/sandbox.md`, `…/build/enterprise.md`, `https://docs.x.ai/llms.txt` | No page dates shown. |
 | S22 | `https://x.ai/legal/terms-of-service` ("Last Updated: October 12, 2026"), `https://x.ai/legal/terms-of-service-enterprise` ("Last Updated: August 14, 2026") | Nearly full reads. |
-| S23 | `https://docs.devin.ai/get-started/devin-intro` (resolved from `https://docs.devin.ai/`), `https://docs.devin.ai/cli`, `…/cli/reference/commands.md`, `…/cli/reference/permissions.md`, `…/cli/reference/keyboard-shortcuts.md`, `…/cli/enterprise/devin-auth.md`, `…/api-reference/overview.md`, `https://docs.devin.ai/llms.txt` | Partial reads noted above. |
+| S23 | `https://docs.devin.ai/get-started/devin-intro` (resolved from `https://docs.devin.ai/`), `https://docs.devin.ai/cli`, `…/cli/reference/commands.md`, `…/cli/reference/permissions.md`, `…/cli/reference/keyboard-shortcuts.md`, `…/cli/enterprise/devin-auth.md`, `…/api-reference/overview.md`, `https://docs.devin.ai/llms.txt` | Partial reads noted above. Read before the binary was installed; where they disagree with `devin --help` 3000.11.3 the help wins (U42). |
 | S24 | `https://cognition.com/legal/platform-terms-of-service` | Requested `cognition.ai/pages/terms-of-service`; "Last updated: June 30, 2026". |
 | S25 | `https://agentclientprotocol.com/protocol/v1/prompt-turn.md`, `…/session-setup.md` | Public ACP spec: `session/cancel`, `session/request_permission`, `session/new` with `cwd`, `session/load`. |
+| S26 | `https://agentclientprotocol.com/protocol/v1/overview.md`, `…/initialization.md`, `…/authentication.md`, `…/tool-calls.md` | Public ACP spec (read 2026-10-13 for the Devin update): method list, MUST-level cancel and permission outcomes, `authMethods`, absolute paths. Local `<cli> --help` for `devin` 3000.11.3 is OBS, not a source. |
