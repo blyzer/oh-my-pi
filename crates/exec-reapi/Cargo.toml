@@ -19,6 +19,7 @@ buildbuddy-cancel = []
 bytes.workspace = true
 omp-core.workspace = true
 omp-exec.workspace = true
+strum.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 thiserror.workspace = true
