@@ -52,7 +52,7 @@ pub enum TreeError {
 }
 
 /// The result of building a tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tree {
 	/// Digest of the root `Directory`.
 	pub root:        Digest,
