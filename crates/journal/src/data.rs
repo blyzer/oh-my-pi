@@ -7,10 +7,18 @@ use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{EntryId, blob::BlobRef};
 
+/// Newest [`Genesis::version`] this build writes and reads.
+///
+/// [`crate::Journal::open`] and [`crate::Journal::scan`] refuse a journal
+/// whose genesis declares a larger version, so a file written by a newer omp
+/// fails with a typed error instead of replaying wrongly.
+pub const GENESIS_VERSION: u32 = 1;
+
 /// `journal@1` genesis payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Genesis {
-	/// Journal format version.
+	/// Journal format version; at most [`GENESIS_VERSION`] in a readable
+	/// journal.
 	pub version: u32,
 	/// Session working directory.
 	pub cwd:     Str,

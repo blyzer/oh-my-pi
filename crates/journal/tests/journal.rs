@@ -234,3 +234,61 @@ fn scan_prefix_returns_the_committed_entries_inside_the_limit() {
 	assert_eq!(fs::metadata(&path).expect("metadata").len(), complete_len, "never rewrites");
 	drop(journal);
 }
+
+const NEWER_GENESIS: &str = "event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {\"version\":1,\"cwd\":\"/tmp\",\"created\":\"now\"}\n\n";
+
+/// A kind this build does not know is a journal from a newer omp, not a
+/// corrupt file: both read paths report the typed fail-closed error naming the
+/// kind, and neither truncates it.
+#[test]
+fn unknown_kind_or_revision_is_a_typed_newer_revision_error() {
+	let directory = tempdir().expect("tempdir");
+	for event in ["patch@2", "x.future@1"] {
+		let path = directory.path().join("newer.oms");
+		let text = format!(
+			"{NEWER_GENESIS}event: {event}\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {{}}\n\n"
+		);
+		fs::write(&path, &text).expect("write newer journal");
+
+		let scanned = Journal::scan(&path).expect_err("scan refuses a newer journal");
+		let JournalError::NewerRevision { kind } = scanned else {
+			panic!("scan must report NewerRevision for {event}, got {scanned:?}");
+		};
+		assert_eq!(kind.to_string(), event);
+		assert!(matches!(
+			Journal::open(&path).expect_err("open refuses a newer journal"),
+			JournalError::NewerRevision { .. }
+		));
+		assert_eq!(fs::read_to_string(&path).expect("read"), text, "a refused journal is untouched");
+		fs::remove_file(&path).expect("remove");
+	}
+}
+
+/// `Genesis.version` is validated on open: a version above the supported one
+/// is a typed error, the supported one opens.
+#[test]
+fn genesis_version_newer_than_supported_is_a_typed_error() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("genesis.oms");
+	let newer = omp_journal::data::GENESIS_VERSION + 1;
+	fs::write(
+		&path,
+		format!(
+			"event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {{\"version\":{newer},\"cwd\":\"/\",\"created\":\"1\"}}\n\n"
+		),
+	)
+	.expect("write");
+	for error in [
+		Journal::scan(&path).expect_err("scan"),
+		Journal::open(&path).map(|_| ()).expect_err("open"),
+	] {
+		let JournalError::NewerGenesisVersion { found, supported } = error else {
+			panic!("expected NewerGenesisVersion, got {error:?}");
+		};
+		assert_eq!(found, newer);
+		assert_eq!(supported, omp_journal::data::GENESIS_VERSION);
+	}
+
+	fs::write(&path, NEWER_GENESIS).expect("write supported");
+	assert_eq!(Journal::scan(&path).expect("supported version opens").len(), 1);
+}

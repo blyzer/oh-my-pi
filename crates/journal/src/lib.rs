@@ -238,11 +238,35 @@ pub enum JournalError {
 		#[source]
 		source: SseError,
 	},
-	/// A kind is outside the closed revision-1 vocabulary.
+	/// A draft or entry names a kind outside the closed revision-1 vocabulary
+	/// this build can write.
 	#[error("journal kind {kind} is not in the closed revision-1 vocabulary")]
 	UnknownKind {
 		/// Unsupported versioned kind.
 		kind: Kind,
+	},
+	/// A journal on disk was written by a newer revision of omp than this
+	/// build understands: it holds an entry whose kind name or revision lies
+	/// outside the closed vocabulary.
+	///
+	/// Fail-closed by design: replaying a history this build only partly
+	/// understands would fold it into a wrong session, so the whole journal
+	/// is refused and the user is told to upgrade.
+	#[error("journal entry {kind} was written by a newer revision of omp; upgrade omp to open it")]
+	NewerRevision {
+		/// The first versioned kind this build cannot read.
+		kind: Kind,
+	},
+	/// A journal's genesis declares a format version newer than this build
+	/// supports ([`data::GENESIS_VERSION`]).
+	///
+	/// Fail-closed like [`Self::NewerRevision`].
+	#[error("journal format version {found} is newer than the supported version {supported}; upgrade omp to open it")]
+	NewerGenesisVersion {
+		/// Version the genesis declares.
+		found:     u32,
+		/// Newest version this build reads and writes.
+		supported: u32,
 	},
 	/// A non-genesis entry has no causal `by` link.
 	#[error("non-genesis entry {kind} requires a `by` cause")]
@@ -309,19 +333,51 @@ pub enum JournalError {
 
 /// Decodes every complete frame, returning the entries and the byte offset of
 /// the last commit point.
+///
+/// A frame whose kind is outside the closed vocabulary is reported as
+/// [`JournalError::NewerRevision`] rather than a generic frame failure, so a
+/// journal written by a newer omp is diagnosed instead of looking corrupt.
 fn decode_committed(bytes: &[u8]) -> Result<(Vec<Entry>, usize), JournalError> {
 	let mut scanner = Scanner::new(bytes);
 	let mut entries = Vec::new();
 	while let Some(frame) = scanner.next() {
 		entries.push(
 			frame
-				.map_err(|source| JournalError::Frame { source })?
+				.map_err(|source| match source {
+					SseError::UnknownKind { kind } => JournalError::NewerRevision { kind },
+					source => JournalError::Frame { source },
+				})?
 				.entry,
 		);
 	}
 	let clean_len = scanner.offset();
 	validate_history(&entries)?;
+	validate_genesis_version(&entries)?;
 	Ok((entries, clean_len))
+}
+
+/// Refuses a journal whose genesis declares a format version newer than
+/// [`data::GENESIS_VERSION`].
+///
+/// Only the `version` field is read, and a genesis without a readable one is
+/// accepted here: this check detects "written by a newer omp", it does not
+/// validate the payload (the session index and fold own that).
+fn validate_genesis_version(entries: &[Entry]) -> Result<(), JournalError> {
+	#[derive(serde::Deserialize)]
+	struct Header {
+		version: Option<u32>,
+	}
+
+	let Some(genesis) = entries.first() else {
+		return Ok(());
+	};
+	let Ok(Header { version: Some(found) }) = serde_json::from_str(genesis.data.as_str()) else {
+		return Ok(());
+	};
+	if found > data::GENESIS_VERSION {
+		return Err(JournalError::NewerGenesisVersion { found, supported: data::GENESIS_VERSION });
+	}
+	Ok(())
 }
 
 /// Stable sidecar lock shared by journal writers and atomic replacement.
