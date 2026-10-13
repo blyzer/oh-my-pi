@@ -6,6 +6,7 @@
 //! the only vendor wire code is the invocation-cancel call behind the
 //! `buildbuddy-cancel` feature.
 
+pub mod capabilities;
 pub mod digest;
 pub mod endpoint;
 pub mod profile;
