@@ -1528,6 +1528,21 @@ impl EnvClient {
 		}
 	}
 
+	/// Captures the git-defined working tree as a content-addressed input
+	/// manifest without publishing a workspace generation.
+	pub async fn capture_inputs(
+		&self,
+		request: env_wire::CaptureInputsRequest,
+	) -> Result<env_wire::CaptureInputsReply, ClientError> {
+		let result = self
+			.workspace_request(workspace_op::Op::CaptureInputs(request))
+			.await?;
+		match result.result {
+			Some(workspace_result::Result::InputsCaptured(reply)) => Ok(reply),
+			_ => Err(ClientError::UnexpectedResponse { expected: "CaptureInputsReply" }),
+		}
+	}
+
 	/// Lists retained workspace snapshots.
 	pub async fn list_workspace_snapshots(
 		&self,
