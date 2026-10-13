@@ -5120,11 +5120,15 @@ impl EnvServer {
 					send_policy_error(responses, frame.request_id, error).await;
 					return;
 				}
+				let principal = scope
+					.as_ref()
+					.filter(|scope| !scope.session_id.is_empty() && !scope.agent_id.is_empty());
+				let owner = Some(connection.invocation_owner(principal));
 				let approvals = connection.owned_approvals(frame.request_id);
 				let reflection = connection.owned_reflection(frame.request_id);
 				match self
 					.exec
-					.exec_relayed(request, None, approvals, reflection)
+					.exec_relayed(request, None, owner, approvals, reflection)
 					.await
 				{
 					Ok((started, run)) => {
@@ -7660,12 +7664,7 @@ impl EnvServer {
 			output_request,
 		};
 		if route == ToolRoute::Native {
-			let owner = if let Some(principal) = principal {
-				Str::from(
-					serde_json::to_string(&(&principal.session_id, &principal.agent_id))
-						.expect("invocation principal tuple is always serializable"),
-				)
-			} else if request.name == "eval" {
+			if principal.is_none() && request.name == "eval" {
 				send_error(
 					responses,
 					request_id,
@@ -7674,9 +7673,8 @@ impl EnvServer {
 				)
 				.await;
 				return;
-			} else {
-				connection.owner.clone()
-			};
+			}
+			let owner = connection.invocation_owner(principal);
 			let (feed, params) = IncomingParams::channel_for(Some(owner), Some(invocation_id.clone()));
 			let params = params.with_restrictions(restrictions);
 			let lifecycle = Arc::new(NativeLifecycle::default());
@@ -8714,6 +8712,21 @@ impl ConnectionState {
 		{
 			self.reflection = Some(ConnectionReflection::new(responses.clone()));
 		}
+	}
+
+	/// The owner a native call or a command issued under `principal` runs
+	/// as: the durable session and agent principals when the scope
+	/// authenticates them, else this connection's own identity.
+	fn invocation_owner(&self, principal: Option<&pb::InvocationScope>) -> Str {
+		principal.map_or_else(
+			|| self.owner.clone(),
+			|principal| {
+				Str::from(
+					serde_json::to_string(&(&principal.session_id, &principal.agent_id))
+						.expect("invocation principal tuple is always serializable"),
+				)
+			},
+		)
 	}
 
 	/// This connection's relay bound to the request that issues a command.

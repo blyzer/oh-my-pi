@@ -501,6 +501,9 @@ struct SessionCommand {
 	/// The amended reruns this command may still take.
 	reruns: AmendmentReruns,
 	sandbox_environment_update: bool,
+	/// The authenticated session owner of the connection that issued the
+	/// command.
+	owner: Option<Str>,
 	/// The relay of the connection that issued the command, which answers
 	/// its sandbox amendment and its `dyn` admissions; an approved rerun
 	/// keeps it.
@@ -1068,19 +1071,20 @@ impl ExecHost {
 			.await
 	}
 
-	/// Starts a script for the connection whose relays are `approvals` and
-	/// `reflection`: a sandbox amendment or a `dyn` admission the command needs
-	/// prompts that connection, and fails closed once it closed, and a
-	/// `dyn reflect` synthesizes on that connection's session.
+	/// Starts a script for the connection whose owner and relays are carried
+	/// through nested `dyn` calls: a sandbox amendment or admission prompts
+	/// that connection, `dyn reflect` synthesizes on its session, and eval
+	/// state remains scoped to that session.
 	pub(crate) async fn exec_relayed(
 		&self,
 		request: ExecRequest,
 		timeout: Option<Duration>,
+		owner: Option<Str>,
 		approvals: Option<OwnedApprovals>,
 		reflection: Option<OwnedReflection>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
 		self
-			.exec_controlled(request, timeout, CommandIssuer { approvals, reflection })
+			.exec_controlled(request, timeout, CommandIssuer { owner, approvals, reflection })
 			.await
 	}
 
@@ -1162,6 +1166,7 @@ impl ExecHost {
 			sequence: Arc::new(AtomicU64::new(1)),
 			reruns: AmendmentReruns::Fresh,
 			sandbox_environment_update: false,
+			owner: issuer.owner,
 			approvals: issuer.approvals,
 			reflection: issuer.reflection,
 		};
@@ -2587,6 +2592,7 @@ async fn run_session_command(
 		tokio::pin!(timeout);
 		// Every `dyn` call of this attempt answers to the command's issuer.
 		let _issued = issuer.enter(CommandIssuer {
+			owner:      command.owner.clone(),
 			approvals:  command.approvals.clone(),
 			reflection: command.reflection.clone(),
 		});
