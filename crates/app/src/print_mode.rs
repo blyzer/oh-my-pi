@@ -2806,9 +2806,10 @@ mod tests {
 		args.prompt = vec![Str::new_static("hello")];
 		let prepare = |args| {
 			Launch::prepare(args, Arc::new(omp_con::Ctx::new()), crate::chat_cmd::LaunchEnv {
-				data_dir: data_dir.clone(),
-				home:     dir.path().join("home"),
-				catalog:  Arc::new(Catalog::embedded().clone()),
+				data_dir:        data_dir.clone(),
+				home:            dir.path().join("home"),
+				catalog:         Arc::new(Catalog::embedded().clone()),
+				workspace_trust: None,
 			})
 		};
 		let launch = prepare(args.clone()).await.expect("launch lowers");
