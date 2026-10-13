@@ -35,13 +35,65 @@ omp_con::var! {
 	/// Extension and resource ids the runtime never
 	/// loads. Native extension manifest ids disable the whole extension;
 	/// `skill:<name>` drops one skill (`omp ext config` edits this list).
-	/// Project-scoped: a workspace's `.omp/config.cfg` may replace the user
-	/// list for that workspace (the workspace scope of `omp ext config`).
+	/// User-only: a workspace's `.omp/config.cfg` cannot set it
+	/// (`ConError::ProjectVarDenied`), so a repository can never switch off a
+	/// guard extension the user installed.
 	pub static CL_DISABLED_EXTENSIONS = cl_disabled_extensions: Vec<Str> {
 		default: Vec::new(),
-		flags: archive | project,
+		flags: archive,
 		meta: {
 			"legacy.path": "disabledExtensions",
 		},
 	};
+}
+
+#[cfg(test)]
+mod tests {
+	use std::fs;
+
+	use omp_con::{ConError, Ctx, Source};
+	use omp_core::Str;
+
+	use super::*;
+	use crate::cfg::CfgFiles;
+
+	/// A project overlay setting `cl_disabled_extensions` is refused with the
+	/// typed project denial and leaves the effective set alone.
+	#[test]
+	fn a_project_overlay_cannot_disable_extensions() {
+		let ctx = Ctx::new();
+		let denied = ctx
+			.exec(
+				"cl_disabled_extensions [acme.guard]",
+				Source::Project(Str::new_static("config.cfg")),
+			)
+			.expect_err("project overlay is denied");
+		assert!(matches!(denied, ConError::ProjectVarDenied { .. }), "{denied:?}");
+		assert!(CL_DISABLED_EXTENSIONS.get(&ctx).is_empty());
+	}
+
+	/// Through the production cfg loader: `<project>/.omp/config.cfg` is
+	/// counted as denied and changes nothing, while `~/.o2/config.cfg` still
+	/// disables what it names.
+	#[test]
+	fn only_the_user_cfg_disables_extensions() {
+		let dir = tempfile::tempdir().unwrap();
+		let user = dir.path().join("o2");
+		let project = dir.path().join("proj/.omp");
+		fs::create_dir_all(&user).unwrap();
+		fs::create_dir_all(&project).unwrap();
+		fs::write(project.join("config.cfg"), "cl_disabled_extensions [acme.guard]\n").unwrap();
+		let files = CfgFiles::with_roots(user.clone(), Some(project));
+
+		let ctx = Ctx::new();
+		let outcome = ctx.exec_configs(&files, None).unwrap();
+		assert_eq!(outcome.denied, 1, "{outcome:?}");
+		assert!(CL_DISABLED_EXTENSIONS.get(&ctx).is_empty());
+
+		fs::write(user.join("config.cfg"), "cl_disabled_extensions [skill:review]\n").unwrap();
+		let ctx = Ctx::new();
+		let outcome = ctx.exec_configs(&files, None).unwrap();
+		assert_eq!(outcome.denied, 1, "{outcome:?}");
+		assert_eq!(CL_DISABLED_EXTENSIONS.get(&ctx), [Str::new_static("skill:review")]);
+	}
 }
