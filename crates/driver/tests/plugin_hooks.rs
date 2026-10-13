@@ -1001,7 +1001,11 @@ async fn post_model_switch_runs_on_a_model_change_and_never_on_a_thinking_one() 
 		loop {
 			let text = read(&path);
 			let terminated = text.rfind('\n').map_or("", |end| &text[..end]);
-			if terminated.lines().filter(|line| !line.trim().is_empty()).count() >= expected {
+			if terminated
+				.lines()
+				.filter(|line| !line.trim().is_empty())
+				.count() >= expected
+			{
 				break;
 			}
 			assert!(Instant::now() < deadline, "switch {expected} reaches the hook");
