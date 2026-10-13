@@ -568,8 +568,10 @@ impl<'de> Deserialize<'de> for ToolResult {
 	where
 		D: Deserializer<'de>,
 	{
+		// Lenient on purpose: `tool.result@1` is read by the fold path, so a field added by a
+		// newer writer must not make an old reader reject the whole journal. The
+		// exactly-one-of outcome/fault invariant below is what keeps the payload fail-closed.
 		#[derive(Deserialize)]
-		#[serde(deny_unknown_fields)]
 		struct Wire {
 			#[serde(default, deserialize_with = "deserialize_present_raw")]
 			outcome:      Option<Box<RawValue>>,
