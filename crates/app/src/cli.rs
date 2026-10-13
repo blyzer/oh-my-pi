@@ -785,6 +785,29 @@ pub struct RulesArgs {
 	pub command: Option<RulesCommand>,
 }
 
+/// Workspace trust: the operator's durable decision about a workspace's
+/// project-sourced inputs (`[[workspace_trust]]` rows of the local grant file).
+/// The default records trust bound to the workspace's current inputs digest.
+#[derive(Clone, Debug, Args)]
+pub struct TrustArgs {
+	/// Workspace root; the current directory when omitted.
+	#[arg(value_name = "PATH", default_value = ".")]
+	pub path:    PathBuf,
+	/// Grant trust over every workspace below `PATH`; each one still asks
+	/// once. The home directory, `/`, and their ancestors are refused.
+	#[arg(long, conflicts_with_all = ["revoke", "deny", "show"])]
+	pub subtree: bool,
+	/// Remove the workspace's own trust rows (and its subtree grant).
+	#[arg(long, conflicts_with_all = ["subtree", "deny", "show"])]
+	pub revoke:  bool,
+	/// Record that the workspace is never trusted, whatever subtree covers it.
+	#[arg(long, conflicts_with_all = ["subtree", "revoke", "show"])]
+	pub deny:    bool,
+	/// Print the current decision without changing anything.
+	#[arg(long, conflicts_with_all = ["subtree", "revoke", "deny"])]
+	pub show:    bool,
+}
+
 /// Stream-rule operations.
 #[derive(Clone, Debug, Subcommand)]
 pub enum RulesCommand {
@@ -1161,6 +1184,9 @@ pub enum Command {
 	Grievances(GrievancesArgs),
 	/// Inspect stream rules: list them, test text, or scan a file tree.
 	Rules(RulesArgs),
+	/// Record, revoke, or show the operator's trust in a workspace's project
+	/// inputs.
+	Trust(TrustArgs),
 	/// Manage scoped native SSH hosts and run bounded client operations.
 	Ssh(SshArgs),
 	/// Detect, repair, and verify native project diagnostics.
@@ -1503,6 +1529,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "say", aliases: &[] },
 	CommandSpec { name: "grievances", aliases: &[] },
 	CommandSpec { name: "rules", aliases: &[] },
+	CommandSpec { name: "trust", aliases: &[] },
 	CommandSpec { name: "ssh", aliases: &[] },
 	CommandSpec { name: "cleanse", aliases: &[] },
 	CommandSpec { name: "completions", aliases: &[] },
@@ -1607,6 +1634,7 @@ fn launch_option(argument: &OsString) -> Option<bool> {
 			| "--no-prompt-templates"
 			| "--no-context-files"
 			| "--no-rules"
+			| "--trust-workspace"
 			| "--no-title"
 	)
 	.then_some(false)
@@ -1923,6 +1951,10 @@ pub struct ChatArgs {
 	/// Disable rule discovery.
 	#[arg(long)]
 	pub no_rules:            bool,
+	/// Trust this workspace's project inputs for this invocation only; nothing
+	/// is recorded (`omp trust` records a durable grant).
+	#[arg(long = "trust-workspace")]
+	pub trust_workspace:     bool,
 	/// Disable generated terminal titles.
 	#[arg(long)]
 	pub no_title:            bool,
@@ -2008,6 +2040,7 @@ impl ChatArgs {
 			use_theme:           None,
 			no_context_files:    false,
 			no_rules:            false,
+			trust_workspace:     false,
 			no_title:            false,
 			advisor:             false,
 			api_key:             None,
@@ -2598,6 +2631,7 @@ enum DispatchTarget {
 	Say,
 	Grievances,
 	Rules,
+	Trust,
 	Ssh,
 	Cleanse,
 	Adw,
@@ -2654,6 +2688,7 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Say(_)) => DispatchTarget::Say,
 		Some(Command::Grievances(_)) => DispatchTarget::Grievances,
 		Some(Command::Rules(_)) => DispatchTarget::Rules,
+		Some(Command::Trust(_)) => DispatchTarget::Trust,
 		Some(Command::Ssh(_)) => DispatchTarget::Ssh,
 		Some(Command::Cleanse(_)) => DispatchTarget::Cleanse,
 		Some(Command::Adw(_)) => DispatchTarget::Adw,
@@ -3202,6 +3237,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		Command::Say(args) => say_cmd::run(args).await,
 		Command::Grievances(args) => grievances_cmd::run(args).await,
 		Command::Rules(args) => crate::rules_cmd::run(args),
+		Command::Trust(args) => crate::trust_cmd::run(&args),
 		Command::Ssh(args) => ssh_cmd::run(args).await,
 		Command::Cleanse(args) => {
 			cleanse_cmd::run(CleanseArgs {
@@ -3972,6 +4008,52 @@ mod tests {
 
 	fn parse(arguments: &[&str]) -> OmpCli {
 		OmpCli::try_parse_from(arguments).expect("valid command")
+	}
+
+	#[test]
+	fn workspace_trust_commands_and_session_flag_parse() {
+		let Some(Command::Trust(args)) = parse(&["omp", "trust"]).command else {
+			panic!("trust command");
+		};
+		assert_eq!(args.path, PathBuf::from("."));
+		assert_eq!(dispatch_target(Some(&Command::Trust(args))), DispatchTarget::Trust);
+		for option in ["--subtree", "--revoke", "--deny", "--show"] {
+			let Some(Command::Trust(args)) = parse(&["omp", "trust", "/workspace", option]).command
+			else {
+				panic!("trust command");
+			};
+			assert_eq!(args.path, PathBuf::from("/workspace"));
+			assert_eq!(
+				[args.subtree, args.revoke, args.deny, args.show]
+					.into_iter()
+					.filter(|v| *v)
+					.count(),
+				1
+			);
+			for other in ["--subtree", "--revoke", "--deny", "--show"] {
+				if option != other {
+					assert_eq!(
+						OmpCli::try_parse_from(["omp", "trust", option, other])
+							.unwrap_err()
+							.kind(),
+						ErrorKind::ArgumentConflict
+					);
+				}
+			}
+		}
+		for argv in [
+			vec!["omp", "--trust-workspace"],
+			vec!["omp", "chat", "--trust-workspace"],
+			vec!["omp", "--trust-workspace", "-p", "hello"],
+		] {
+			let cli = parse_arguments(argv.into_iter().map(OsString::from)).unwrap();
+			match cli.command {
+				Some(Command::Chat(args)) => assert!(args.trust_workspace),
+				Some(Command::Print(args)) => assert!(args.launch.trust_workspace),
+				other => panic!("expected chat or print, got {other:?}"),
+			}
+		}
+		assert!(!ChatArgs::default_interactive().trust_workspace);
 	}
 
 	#[test]

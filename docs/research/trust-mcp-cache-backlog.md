@@ -31,7 +31,7 @@ No Rust was built or tested. The only commands run were reads, `rg`, `git`, `gh`
   - F1 stopgap (#178): project MCP is off by default, and its values are literal.
   - F4 posture (#181, #197): sandbox on by default; a defaulted `yolo` holds only for sandbox-confined tools.
   - F5 and F9 (#180): contained project-file reader.
-- **Still waiting on owner decisions:** the cache defaults (`ai_cache_retention auto` places no markers, and the Volatile band sits in the system prefix).
+- **Still waiting on owner decisions:** the Volatile band sits in the system prefix; cache-marker placement for `auto` is done in slice 12.
 - **`--api-key` precedence over stored accounts already exists** in the broker since `fb0a7c0b06` (2026-08-22), so the handoff's "not started" is obsolete. What remains is the account the lease is attributed to.
 
 ## Fixed blockers (auth/envd), confirmed
@@ -101,7 +101,7 @@ Status words: **open**, **fixed**, **partly fixed** (a residual is named), **obs
 
 | Item | Status | Evidence | Severity | Owner |
 |---|---|---|---|---|
-| Slice 2: `--api-key` precedence over stored accounts | **obsolete as stated; residual decision** | `ai/src/auth/broker.rs:228-255` (`with_api_key_override`, provider-scoped, scalar kinds only). `:520-522`: the invocation lease is answered before any plan source, stored store included. The test at `:996-1078` asserts that neither the environment nor the store is read. Wired from `driver/src/registry.rs:1204-1214` and `:1481-1492`. Added in `fb0a7c0b06` (2026-08-22), before the handoff. **Residual:** the lease keeps the pool-selected stored account and principal (`broker.rs:332-340`; asserted at `:1052-1053`), so usage, quota, rotation and pins are attributed to a stored account the key does not belong to. [INFERENCE] With no stored account, the pool's behaviour was not traced (UNVERIFIED). Chat refuses `--api-key` without `--model`/`--models` (`app/src/chat_cmd.rs:496-498`) | Low | ai (+owner) |
+| Slice 2: `--api-key` precedence over stored accounts | **fixed** | `ai/src/auth/broker.rs`: invocation leases always use the synthetic `invocation` account/principal, bypass stored refresh and rejection accounting. `ai/src/provider/builtin.rs`: the lease identity replaces the pool-selected account in request, usage, quota, and error attribution while preserving routing metadata. Broker and provider tests cover synthetic identity and a 429 rejection without stored-source mutation. | Medium | ai |
 | Slice 3: model-pool preference | **obsolete** | No model-pool concept; the account pool is per provider (`docs/py/13-inference.md:453-454`) | — | — |
 | Slice 4: project-level pins | **blocked on §1.1** | Proposal only | — | — |
 | Chat prompt cancels on a pasted callback URL | **open** | `app/src/chat_services/accounts.rs:398-403`: a `Confirmation` answer other than empty, `y` or `yes` becomes `Cancel`. The CLI accepts the URL since #251 (`app/src/auth_cli.rs:595-596`) | Low (UX) | app |
@@ -110,7 +110,7 @@ Status words: **open**, **fixed**, **partly fixed** (a residual is named), **obs
 
 | Item | Status | Evidence | Severity | Owner |
 |---|---|---|---|---|
-| `ai_cache_retention auto` places no cache markers | **decision** | `catalog/src/settings.rs:1297` (default `Auto`); `ai/src/settings.rs:560-566` (`Auto` → `Setting::Unset`); `ai/src/codec/anthropic.rs:1687-1698` (`automatic_cache_ttl` returns `None`), `:1767-1768` (`ttl == None` places no markers) | Cost, not security | ai |
+| `ai_cache_retention auto` places cache markers | **fixed (slice 12)** | `catalog/src/settings.rs:1297` (default `Auto`); `ai/src/settings.rs:560-572` (`Auto` → `Setting::Prefer(CacheRetention::Short)` for Anthropic and Bedrock); `ai/src/codec/anthropic.rs:1679-1697` (short TTL and explicit none); `:1748-1838` (automatic placement capped at four); Anthropic behavior test `auto_retention_places_short_breakpoints_only_on_supported_codecs` | Cost, not security | ai |
 | Volatile band (turn, cwd, date, mounts, todos) in the system prefix | **fixed** (slice 13) | `agent/src/prompt/mod.rs`: `CanonicalPromptSource::system_items` projects Frozen, Stable and Dynamic only; `volatile_items` projects the Volatile band (recall, `status.md`) as synthetic user messages. `agent/src/loop.rs` `project_request`: system items, the mode prompt, the thread, then the volatile items. `e2e/tests/p5_prefix_stability.rs` holds the system-prefix bytes constant across a todo update and a new turn | Cost | agent |
 | Measure cache hits under the default config | **not done** | Needs an Anthropic key | — | — |
 | Dedicated TUI message for `account-pin` | **open** | `rg account-pin` finds no hit in `crates/chat` (OBSERVED) | Low | chat |
@@ -133,10 +133,10 @@ Each slice is one PR of about 500 lines or fewer. "Seam" is the crate whose publ
 | 9 | **Approval floor for untrusted workspaces** (audit PR7) | `envd/src/admission.rs`: an `Untrusted` decision clamps an explicit `yolo` to `write` | envd: `resolve_approval` with explicit `yolo` plus `Untrusted` prompts for an exec-tier call | 3, 4 | S | Q7 |
 | 10 | **MCP UX** (F1-UX) | app `mcp add --scope project` and `/mcp add` print "inactive until trusted / `sv_mcp_enable_project_config`"; envd projects `LiteralValueNotice` as a typed notice the TUI renders | app: the add output contains the hint; envd: a notice reaches the session for a literal project value | 3 (wording), else none | S | — |
 | 11 | **Chat callback paste** | `app/src/chat_services/accounts.rs:398-403`: a `://` answer at the confirmation prompt becomes `AuthInput::CallbackUrl`, as in `auth_cli.rs:595` | app unit test next to `accounts.rs:408` | — | S | — |
-| 12 | **Cache: `auto` places markers** | `ai/src/settings.rs:560-566` maps `Auto` to `Prefer(Short)` for codecs with breakpoint support, or the codec decides | ai: Anthropic codec golden, `auto` emits at most 4 `cache_control` markers | owner | S | **Yes** (Q10) |
+| 12 | **Cache: `auto` places markers (done)** | `ai/src/settings.rs:560-572` maps `Auto` to `Prefer(Short)` for codecs with automatic breakpoint support; unsupported codecs remain marker-free. Anthropic placement is capped at four markers | ai: Anthropic behavior test proves `auto` emits 1–4 `cache_control` markers on a long multi-turn request, explicit `none` emits 0, and unsupported codec `auto` emits 0 | owner | S | **Yes** (Q10) |
 | 13 | **Cache: Volatile band out of the system prefix** (done) | `agent/src/prompt/mod.rs`, `status.md`, `loop.rs`: deliver turn, cwd, date, mounts, todos, directors, and recall as trailing message-stream notices; `date` stays journaled once in `prompt-facts` | agent/e2e: `p5_prefix_stability` holds system-prefix bytes constant across a todo update and a new turn while the latest message carries the volatile facts; prompt goldens updated | — | M | **Yes** (Q10) |
-| 14 | **`--api-key` attribution** | `ai/src/auth/broker.rs:326-352`: lease under a synthetic `invocation` account, or skip pool selection when an invocation key covers the spec | ai: usage and quota observations for an invocation-key call do not land on the stored account | owner | S | **Yes** (Q11) |
-| 15 | **`cl_disabled_extensions` loses PROJECT** (F12) | `driver/src/discovery/mod.rs:42` | con/driver: `.omp/config.cfg` setting it is `ProjectVarDenied` | owner | S | **Yes** (Q8) |
+| 14 | **`--api-key` attribution** | `ai/src/auth/broker.rs:326-352`: invocation-key leases use the synthetic `invocation` account and do not refresh or reject a stored source; `ai/src/provider/builtin.rs` propagates that identity into request, usage, quota, and error attribution | ai: usage and quota observations for an invocation-key call do not land on the stored account (done; broker/provider tests cover a 429 rejection) | owner | S | **Yes** (Q11) |
+| 15 | **`cl_disabled_extensions` loses PROJECT (done)** (F12) | `driver/src/discovery/mod.rs:42`; user-only extension configuration UI | driver: `.omp/config.cfg` setting it is `ProjectVarDenied`, changes nothing; user config remains effective | owner | S | **Yes** (Q8) |
 | 16 | **Posture-notice harness fidelity** | Route test kernels in `app/tests/{rpc,acp}_spine.rs` and `driver/tests/*` through `install_tool_authority` or a shared test builder | Those tests observe one `approval-posture` notice under a defaulted `yolo` with no sandbox | — | S | — |
 
 Order rationale:
@@ -179,7 +179,7 @@ Answers to the questions above. Slices 1 and 2 have landed (#265, #267).
 | 8 | `cl_disabled_extensions` loses the PROJECT flag; only the user config (`~/.o2/config.cfg`) may set it. | 15 |
 | 9 | A typed trust request on `proto`/`rpc` is accepted, and the decision enters `DaemonPolicy` and `ServerHello`. | 4, 7 |
 | 10 | `ai_cache_retention auto` places markers, and the Volatile band moves into messages. Goldens and the ADR 0024 prefix contract are updated with it. | 12, 13 |
-| 11 | Invocation-key usage is recorded under a synthetic `invocation` account. | 14 |
+| 11 | Invocation-key usage is recorded under a synthetic `invocation` account. | 14 (done) |
 | 12 | The model sees the `approval-posture` notice. Reads of an unknown scheme count as possible network access, not as non-fetch (2026-10-12), unless the code shows the scheme stays local. | posture notice |
 | 13 | A project `vaults.toml`/`hosts.toml` may only add new names, never shadow a user name. | 4 |
 
