@@ -16,7 +16,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-	EntryId, Journal, JournalError, JournalNamespaceLock, WriterLock,
+	Decoded, EntryId, Journal, JournalError, JournalNamespaceLock, READ_BUFFER, WriterLock,
 	blob::{BlobRef, BlobStore, GcPolicy, GcSweep},
 	decode_committed, live_chain, sse,
 };
@@ -263,8 +263,8 @@ pub fn collect_blobs_with(
 			return Err(GcError::Cancelled);
 		}
 		let lock = WriterLock::acquire(path)?;
-		let bytes = fs::read(path)?;
-		let (entries, clean_len) = decode_committed(&bytes)?;
+		let Decoded { entries, clean_len, .. } =
+			decode_committed(io::BufReader::with_capacity(READ_BUFFER, File::open(path)?))?;
 		entries_scanned = entries_scanned.saturating_add(entries.len());
 		if entries_scanned > options.max_entries {
 			return Err(GcError::Limit {
@@ -283,7 +283,7 @@ pub fn collect_blobs_with(
 			}
 			let retained_bytes =
 				u64::try_from(encoded.len()).map_err(|_| io::Error::other("journal is too large"))?;
-			let current_bytes = u64::try_from(clean_len).unwrap_or(u64::MAX);
+			let current_bytes = clean_len;
 			journal_bytes_eligible =
 				journal_bytes_eligible.saturating_add(current_bytes.saturating_sub(retained_bytes));
 		}

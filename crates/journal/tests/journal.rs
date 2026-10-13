@@ -292,3 +292,75 @@ fn genesis_version_newer_than_supported_is_a_typed_error() {
 	fs::write(&path, NEWER_GENESIS).expect("write supported");
 	assert_eq!(Journal::scan(&path).expect("supported version opens").len(), 1);
 }
+
+/// A frame that reaches the cap without its committing blank line is rejected
+/// by every read path, and `open` leaves the file as it found it.
+#[test]
+fn oversized_unterminated_frame_is_rejected_without_truncation() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("hostile.oms");
+	let mut bytes = Vec::new();
+	omp_journal::sse::encode(
+		&Entry {
+			id:    "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("id"),
+			kind:  kind(JOURNAL),
+			by:    None,
+			prior: None,
+			label: None,
+			data:  Str::new_static(r#"{"version":1,"cwd":"/","created":"1"}"#),
+		},
+		&mut bytes,
+	)
+	.expect("genesis");
+	bytes.extend_from_slice(b"event: patch@1\ndata: ");
+	// One byte past the frame cap, never terminated: nothing here may be
+	// buffered whole.
+	bytes.resize(bytes.len() + omp_journal::sse::FRAME_HARD_CAP, b'a');
+	fs::write(&path, &bytes).expect("write hostile journal");
+
+	for error in [
+		Journal::scan(&path).expect_err("scan"),
+		Journal::scan_prefix(&path, u64::MAX).expect_err("scan_prefix"),
+		Journal::open(&path).map(|_| ()).expect_err("open"),
+	] {
+		assert!(
+			matches!(error, JournalError::FrameTooLarge { limit } if limit == omp_journal::sse::FRAME_HARD_CAP),
+			"unexpected error {error:?}"
+		);
+	}
+	assert_eq!(fs::read(&path).expect("read"), bytes, "a rejected journal is never truncated");
+}
+
+/// The cap does not touch frames this build can write: a maximal payload
+/// round-trips through `append` and `open`, and a torn tail still recovers.
+#[test]
+fn maximal_payload_round_trips_and_a_short_torn_tail_still_recovers() {
+	let directory = tempdir().expect("tempdir");
+	let path = directory.path().join("max.oms");
+	let mut journal = Journal::create(&path).expect("create");
+	let genesis = journal.append(genesis()).expect("genesis");
+	let mut big = draft(PATCH, genesis.id);
+	big.data = Str::new(format!("\"{}\"", "x".repeat(omp_journal::sse::DATA_HARD_CAP - 2)));
+	assert_eq!(big.data.len(), omp_journal::sse::DATA_HARD_CAP);
+	journal.append(big).expect("a maximal payload is accepted");
+	drop(journal);
+	let mut torn = fs::read(&path).expect("read");
+	torn.extend_from_slice(b"event: stream@1\nid: 01Torn");
+	fs::write(&path, &torn).expect("torn");
+	let (opened, entries) = Journal::open(&path).expect("open recovers");
+	assert_eq!(entries.len(), 2);
+	assert_eq!(opened.recovered_tail_bytes(), b"event: stream@1\nid: 01Torn".len() as u64);
+}
+
+/// A label large enough to push a frame past the cap is refused on write, so
+/// the writer cannot produce a frame the reader would reject.
+#[test]
+fn append_refuses_a_frame_the_reader_would_reject() {
+	let directory = tempdir().expect("tempdir");
+	let mut journal = Journal::create(directory.path().join("label.oms")).expect("create");
+	let genesis = journal.append(genesis()).expect("genesis");
+	let mut huge = draft(PATCH, genesis.id);
+	huge.data = Str::new(format!("\"{}\"", "x".repeat(omp_journal::sse::DATA_HARD_CAP - 2)));
+	huge.label = Some(Str::new("l".repeat(omp_journal::sse::FRAME_OVERHEAD_CAP)));
+	assert!(matches!(journal.append(huge), Err(JournalError::FrameTooLarge { .. })));
+}

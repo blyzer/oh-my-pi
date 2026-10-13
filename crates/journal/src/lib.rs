@@ -15,7 +15,7 @@ pub mod ulid;
 
 use std::{
 	fs::{self, File, OpenOptions},
-	io::{self, Write as _},
+	io::{self, BufRead, BufReader, Write as _},
 	path::{Path, PathBuf},
 };
 
@@ -27,9 +27,13 @@ use thiserror::Error;
 
 use crate::{
 	kind::JOURNAL,
-	sse::{Scanner, SseError},
+	sse::{Block, FRAME_HARD_CAP, SseError, parse_frame, read_block},
 	ulid::{MonotonicUlid, UlidGenerationError},
 };
+
+/// Read buffer for streaming journal decode. The decoder never holds more than
+/// one frame ([`sse::FRAME_HARD_CAP`]) beyond this.
+const READ_BUFFER: usize = 64 << 10;
 
 /// Conventional journal file extension.
 pub const FILE_EXTENSION: &str = "oms";
@@ -110,11 +114,10 @@ impl Journal {
 		let namespace = JournalNamespaceLock::acquire_shared(&path)?;
 		let lock = WriterLock::acquire(&path)?;
 		let file = OpenOptions::new().append(true).read(true).open(&path)?;
-		let bytes = fs::read(&path)?;
-		let (entries, clean_len) = decode_committed(&bytes)?;
-		let truncated = bytes.len().saturating_sub(clean_len);
-		if truncated != 0 {
-			file.set_len(u64::try_from(clean_len).map_err(|_| JournalError::FileTooLarge)?)?;
+		let decoded = decode_committed(BufReader::with_capacity(READ_BUFFER, File::open(&path)?))?;
+		let Decoded { entries, clean_len, torn_len } = decoded;
+		if torn_len != 0 {
+			file.set_len(clean_len)?;
 			file.sync_data()?;
 		}
 		let mut ids = FastHashSet::default();
@@ -133,7 +136,7 @@ impl Journal {
 				generator: MonotonicUlid::seeded(floor),
 				ids,
 				entry_count: entries.len(),
-				recovered_tail_bytes: truncated as u64,
+				recovered_tail_bytes: torn_len,
 			},
 			entries,
 		))
@@ -151,8 +154,8 @@ impl Journal {
 	/// Returns a typed error for I/O, malformed complete frames, invalid
 	/// journal structure, or invalid branch links.
 	pub fn scan(path: impl AsRef<Path>) -> Result<Vec<Entry>, JournalError> {
-		let bytes = fs::read(path)?;
-		decode_committed(&bytes).map(|(entries, _)| entries)
+		let file = File::open(path)?;
+		decode_committed(BufReader::with_capacity(READ_BUFFER, file)).map(|decoded| decoded.entries)
 	}
 
 	/// Reads the committed entries within the first `limit` bytes of a
@@ -169,13 +172,8 @@ impl Journal {
 	/// Returns a typed error for I/O, malformed complete frames, invalid
 	/// journal structure, or invalid branch links within the prefix.
 	pub fn scan_prefix(path: impl AsRef<Path>, limit: u64) -> Result<Vec<Entry>, JournalError> {
-		let file = File::open(path)?;
-		let capacity = file
-			.metadata()
-			.map_or(limit, |metadata| metadata.len().min(limit));
-		let mut bytes = Vec::with_capacity(usize::try_from(capacity).unwrap_or_default());
-		io::Read::read_to_end(&mut io::Read::take(file, limit), &mut bytes)?;
-		decode_committed(&bytes).map(|(entries, _)| entries)
+		let file = io::Read::take(File::open(path)?, limit);
+		decode_committed(BufReader::with_capacity(READ_BUFFER, file)).map(|decoded| decoded.entries)
 	}
 
 	/// Appends and durably commits one entry.
@@ -311,9 +309,13 @@ pub enum JournalError {
 		#[source]
 		source: serde_json::Error,
 	},
-	/// The platform cannot represent the journal file length.
-	#[error("journal file length cannot be represented")]
-	FileTooLarge,
+	/// A frame's block grew past [`sse::FRAME_HARD_CAP`] before its committing
+	/// blank line, so it was rejected without buffering the rest.
+	#[error("journal frame is larger than the {limit}-byte frame limit")]
+	FrameTooLarge {
+		/// The frame byte limit that was exceeded.
+		limit: usize,
+	},
 	/// Another writer holds the journal's exclusive lock.
 	#[error("journal {} is locked by another writer", path.display())]
 	Locked {
@@ -331,29 +333,54 @@ pub enum JournalError {
 	Ulid(#[from] UlidGenerationError),
 }
 
-/// Decodes every complete frame, returning the entries and the byte offset of
-/// the last commit point.
+/// The committed content of a journal file.
+struct Decoded {
+	/// Every complete frame, in file order.
+	entries:   Vec<Entry>,
+	/// Byte offset of the last commit point.
+	clean_len: u64,
+	/// Bytes after the last commit point (a torn tail).
+	torn_len:  u64,
+}
+
+/// Streams every complete frame from `reader` without holding more than one
+/// frame ([`sse::FRAME_HARD_CAP`]) in memory beyond its read buffer.
 ///
-/// A frame whose kind is outside the closed vocabulary is reported as
-/// [`JournalError::NewerRevision`] rather than a generic frame failure, so a
-/// journal written by a newer omp is diagnosed instead of looking corrupt.
-fn decode_committed(bytes: &[u8]) -> Result<(Vec<Entry>, usize), JournalError> {
-	let mut scanner = Scanner::new(bytes);
+/// A block that reaches the cap without its committing blank line fails
+/// before any more of it is buffered. A frame whose kind is outside the closed
+/// vocabulary is reported as [`JournalError::NewerRevision`] rather than a
+/// generic frame failure, so a journal written by a newer omp is diagnosed
+/// instead of looking corrupt.
+fn decode_committed<R: BufRead>(mut reader: R) -> Result<Decoded, JournalError> {
 	let mut entries = Vec::new();
-	while let Some(frame) = scanner.next() {
-		entries.push(
-			frame
-				.map_err(|source| match source {
+	let mut block = Vec::new();
+	let mut clean_len = 0_u64;
+	let mut torn_len = 0_u64;
+	loop {
+		match read_block(&mut reader, &mut block)? {
+			Block::End => break,
+			Block::Torn => {
+				torn_len = block.len() as u64;
+				break;
+			},
+			Block::TooLarge => {
+				return Err(JournalError::FrameTooLarge { limit: FRAME_HARD_CAP });
+			},
+			Block::Complete => {
+				clean_len += block.len() as u64;
+				if block == b"\n" || block == b"\r\n" {
+					continue;
+				}
+				entries.push(parse_frame(&block).map_err(|source| match source {
 					SseError::UnknownKind { kind } => JournalError::NewerRevision { kind },
 					source => JournalError::Frame { source },
-				})?
-				.entry,
-		);
+				})?);
+			},
+		}
 	}
-	let clean_len = scanner.offset();
 	validate_history(&entries)?;
 	validate_genesis_version(&entries)?;
-	Ok((entries, clean_len))
+	Ok(Decoded { entries, clean_len, torn_len })
 }
 
 /// Refuses a journal whose genesis declares a format version newer than
@@ -537,6 +564,7 @@ fn map_sse_write_error(source: SseError) -> JournalError {
 		SseError::MultilineData => JournalError::MultilineData,
 		SseError::MultilineLabel => JournalError::MultilineLabel,
 		SseError::InvalidData { source } => JournalError::InvalidData { source },
+		SseError::FrameTooLarge { limit } => JournalError::FrameTooLarge { limit },
 		other => JournalError::Frame { source: other },
 	}
 }
