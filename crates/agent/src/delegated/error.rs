@@ -271,11 +271,14 @@ pub enum ExecutorError {
 const _: () = assert!(size_of::<ExecutorError>() <= 128, "ExecutorError must stay compact");
 
 impl ExecutorError {
-	/// Whether the session is still usable after this error.
+	/// Whether the failure belongs to the turn rather than to the process or
+	/// the contract.
 	///
-	/// Only failures of the turn itself leave the process alive and healthy.
-	/// Everything else, a crash, a malformed stream, a contract violation,
-	/// ends the session.
+	/// This is a classification, not a promise that the session survives: a
+	/// timed-out or hung process is turn-local but is still torn down. Use
+	/// [`ActiveSession::is_open`](super::ActiveSession::is_open) to learn
+	/// whether another turn can run. A crash, a malformed stream or a contract
+	/// violation is never turn-local.
 	#[must_use]
 	pub const fn is_turn_local(&self) -> bool {
 		matches!(

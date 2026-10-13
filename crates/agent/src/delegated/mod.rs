@@ -17,6 +17,8 @@
 //!   written once over the traits so every backend gets the same fail-closed
 //!   negotiation, timeout, hang, crash and cancellation behavior.
 //!
+//! [`mock`] is a deterministic in-memory backend that exercises all of it.
+//!
 //! Hard rules baked into the types:
 //!
 //! - Execution mode is explicit ([`ExecutionMode`]); a request for
@@ -44,6 +46,7 @@ mod error;
 mod event;
 mod executor;
 mod id;
+pub mod mock;
 mod permission;
 mod policy;
 mod prompt;
