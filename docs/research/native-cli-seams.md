@@ -77,7 +77,7 @@ Approvals (same crate):
 | `crates/agent/src/approvals.rs:ApprovalDecision{approved, scope, source, decided_by, reason, audited}` [R] | there is **no** approve/deny/abort enum: a decision is `approved: bool` + scope + source | **REUSE**; contract maps it onto the CLI's own options |
 | `approvals.rs:ApprovalScope` = `Once | Call | Turn | Session | Persist | Custom(Str)` [R] | `Custom` is a forward-compatible host scope | unmappable to a CLI → fail closed |
 | `approvals.rs:ApprovalSource` = `User | External | Forwarded | Config | Extension | Timeout | Unavailable` [R] | `Forwarded` has no production producer [S] | a delegated answer is `External`/`User` |
-| `approvals.rs:ApprovalRoute::request_cancellable` [C], `ApprovalDesk`, `ApprovalBook` [R signatures] | journals the prompt, remembers session grants, publishes `KernelEvent::ApprovalRequested` | **REUSE**: the production `ApprovalResolver` should wrap a kernel-bound `ApprovalRoute` [S] |
+| `approvals.rs:ApprovalRoute::request_cancellable` [C], `ApprovalDesk`, `ApprovalBook` [R signatures] | journals the prompt, remembers session grants, publishes `KernelEvent::ApprovalRequested` | **REUSE**: the production `PermissionResolver` should wrap a kernel-bound `ApprovalRoute` [S] |
 | `crates/agent/src/dispatch.rs:ToolAdmission`, `ToolAdmissionVerdict` [R declarations] | policy decides before any prompt | stays authoritative; delegated approvals do not bypass it |
 | `crates/envd/src/admission.rs:ApprovalMode` = `AlwaysAsk | Write | Yolo` [R], `ApprovalTier` = `Read < Fetch < Write < Exec` [R] | OMP's approval posture | contract mirrors the three postures (see §8 for why it cannot import them) |
 | `crates/envd/src/exec_settings/sandbox.rs:ExecSandboxMode` = `Off | ReadOnly | WorkspaceWrite` [R], `SandboxNetworkMode` = `Disabled | Open | Scoped` [R] | OMP's sandbox posture | same |
@@ -163,7 +163,7 @@ ADR 0043 and the research note leave open "driver or a new `omp-agent-exec` libr
 3. Token chain from `Kernel::session_cancellation()` into the job token; a job kind for external agents; a process-aware terminate.
 4. Journal/receipt shape for observed foreign tool activity and CLI session ids.
 5. First production wiring for observability spans.
-6. A wrapper that implements the contract's `ApprovalResolver` over `ApprovalRoute::request_cancellable`.
+6. A wrapper that implements the contract's `PermissionResolver` over `ApprovalRoute::request_cancellable`.
 
 ## UNVERIFIED
 
