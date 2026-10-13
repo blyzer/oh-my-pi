@@ -221,7 +221,7 @@ mod roster {
 	use omp_agent::{
 		DirectorRegistry, DirectorStack, DispatchPolicy, GateDecision, HookGate, HookPatch,
 		HookPhase, Inference, Kernel, OnFailure, RouteFacts, RunControl, RuntimeFlags, SessionTool,
-		SessionToolCx, SessionToolFuture, SourceRef, StaticPrompt, TurnInput, When,
+		SessionToolCx, SessionToolFuture, SourceRef, TurnInput, When, prompt::CanonicalPromptSource,
 	};
 	pub use omp_agent::{
 		SV_TOOLS,
@@ -229,11 +229,12 @@ mod roster {
 	};
 	pub use omp_ai::settings::AI_EXTERNAL_THINKING as THINK;
 	use omp_ai::{
-		BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
-		ToolCall, Usage, call::OpaqueJson,
+		BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ContentPart, ExecutionReceipt,
+		FinishReason, Role, ToolCall, Usage, call::OpaqueJson,
 	};
 	use omp_con::Ctx;
 	use omp_core::{Hash32, Str};
+	use omp_dom::{KnownTag, NodeSpec, Op, PropId, Txn, Value as DomValue};
 	use omp_e2e::support::{CapturedRequests, create_session, scripted_stream};
 	use omp_journal::blob::BlobStore;
 	use omp_proto::toolhost::v1::HookEventId;
@@ -556,7 +557,7 @@ mod roster {
 				inference,
 				Arc::new(registry),
 				DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blob store")),
-				StaticPrompt(Str::new_static("roster")),
+				CanonicalPromptSource,
 			)
 			.with_director_registry(DirectorRegistry::standard())
 			.with_con_context(Arc::clone(&con))
@@ -711,6 +712,71 @@ mod roster {
 		pub fn messages_after(&self, index: usize) -> String {
 			format!("{:?}", self.requests.lock()[index].messages)
 		}
+
+		/// Adds one open todo between requests.
+		pub fn add_todo(&mut self, text: &'static str) {
+			let todo = self
+				.session
+				.dom()
+				.select("meta todo")
+				.expect("selector")
+				.next()
+				.expect("todo component");
+			self
+				.session
+				.patch(Txn {
+					cause: self.session.head().expect("head"),
+					label: Some(Str::new_static("p5.todo")),
+					ops:   vec![Op::Ins {
+						parent: todo,
+						after:  self.session.dom().children(todo).last().copied(),
+						node:   NodeSpec::new(KnownTag::Item)
+							.with_prop(PropId::Status, DomValue::Str(Str::new_static("in_progress")))
+							.with_content(text),
+					}],
+				})
+				.expect("todo update");
+		}
+
+		/// Encodes the leading system messages with explicit framing so equality
+		/// is an equality of the provider-visible prefix bytes.
+		pub fn system_prefix_bytes(&self, index: usize) -> Vec<u8> {
+			let requests = self.requests.lock();
+			let mut bytes = Vec::new();
+			for message in requests[index]
+				.messages
+				.iter()
+				.take_while(|message| message.role == Role::System)
+			{
+				bytes.extend_from_slice(&(message.content.len() as u64).to_le_bytes());
+				for part in message.content.iter() {
+					let ContentPart::Text { text, .. } = part else {
+						panic!("system prefix contains only text")
+					};
+					bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
+					bytes.extend_from_slice(text.as_bytes());
+				}
+			}
+			bytes
+		}
+
+		/// Returns the final message text, where volatile facts must land.
+		pub fn latest_message(&self, index: usize) -> String {
+			let requests = self.requests.lock();
+			let message = requests[index]
+				.messages
+				.last()
+				.expect("request has messages");
+			assert_eq!(message.role, Role::User, "volatile facts trail as a user message");
+			message
+				.content
+				.iter()
+				.map(|part| match part {
+					ContentPart::Text { text, .. } => text.as_str(),
+					_ => panic!("volatile message contains only text"),
+				})
+				.collect()
+		}
 	}
 
 	pub fn plan_turn() -> Vec<Vec<ChatEvent>> {
@@ -730,6 +796,44 @@ mod roster {
 	pub fn sv_tools(names: &[&'static str]) -> Vec<Str> {
 		names.iter().copied().map(Str::new_static).collect()
 	}
+}
+
+/// Volatile session state (turn, cwd, mounts, todos) follows the durable
+/// thread as a trailing `<system-notice>` user message, so a todo update and a
+/// new turn leave the system-prefix bytes identical and cacheable while the
+/// latest message still carries the live facts.
+#[tokio::test]
+async fn p5_volatile_facts_preserve_system_prefix_and_reach_latest_message() {
+	use roster::*;
+
+	let mut rig = Rig::new(Setup::default());
+	rig.turn("initial", vec![text("first")]).await;
+	rig.add_todo("Move volatile facts to the message stream");
+	rig.turn("todo-update", vec![text("second")]).await;
+	rig.turn("new-turn", vec![text("third")]).await;
+
+	let initial_prefix = rig.system_prefix_bytes(rig.first_request("initial"));
+	assert!(!initial_prefix.is_empty(), "the canonical prompt renders a system prefix");
+	assert!(
+		!String::from_utf8_lossy(&initial_prefix).contains("<system-notice>"),
+		"the volatile notice never enters the system prefix"
+	);
+	for label in ["todo-update", "new-turn"] {
+		assert_eq!(
+			rig.system_prefix_bytes(rig.first_request(label)),
+			initial_prefix,
+			"the {label} request rewrote the system prefix",
+		);
+	}
+
+	let initial = rig.latest_message(rig.first_request("initial"));
+	assert!(initial.contains("<system-notice>\nturn: 1\n"));
+	let updated = rig.latest_message(rig.first_request("todo-update"));
+	assert!(updated.contains("<system-notice>\nturn: 2\n"));
+	assert!(updated.contains("todo:\n- Move volatile facts to the message stream [in_progress]"));
+	let next_turn = rig.latest_message(rig.first_request("new-turn"));
+	assert!(next_turn.contains("<system-notice>\nturn: 3\n"));
+	assert!(next_turn.contains("todo:\n- Move volatile facts to the message stream [in_progress]"));
 }
 
 /// Every transition ADR 0024 lists leaves the `tools` array byte-identical:

@@ -1,7 +1,7 @@
 {% set open_todos = select("todo item[status!=completed]") %}
 {% set active_directors = select("directors director") %}
 {% if turn_number or cwd or date or mounts or open_todos or active_directors %}
-<session-status>
+<system-notice>
 {% if turn_number %}
 turn: {{ turn_number }}
 {% endif %}
@@ -26,5 +26,5 @@ todo:
 {% if active_directors %}
 active directors: {{ count(active_directors) }}
 {% endif %}
-</session-status>
+</system-notice>
 {% endif %}
