@@ -17675,14 +17675,15 @@ mod tests {
 
 	/// The production `read@3` declares the most its resolvers can fetch, a
 	/// credentialed fetch, and judges each call by the resolver that reads
-	/// each target: a local path, an internal URI that reads local state, a
-	/// vault read that asks the Obsidian CLI and a scheme only the RPC host
-	/// serves are document reads; an http(s) URL is an anonymous fetch; an
-	/// `ssh://` host, `issue://`, `pr://` and an `mcp://` resource no mounted
-	/// server advertises yet are credentialed fetches. A local read is `read`
-	/// tier and runs unasked in every mode and sandbox state; a fetch asks
-	/// only under `always-ask`. With URL reads disabled the maximum keeps the
-	/// credentialed fetch and a URL read fetches nothing.
+	/// each target: a local path, an internal URI that reads local state, and a
+	/// vault read that asks the Obsidian CLI are document reads; an http(s) URL
+	/// and an unknown foreign scheme the RPC host resolves (no locality
+	/// guarantee, owner decision Q12) are anonymous fetches; an `ssh://` host,
+	/// `issue://`, `pr://` and an `mcp://` resource no mounted server advertises
+	/// yet are credentialed fetches. A local read is `read` tier and runs
+	/// unasked in every mode and sandbox state; a fetch asks only under
+	/// `always-ask`. With URL reads disabled the maximum keeps the credentialed
+	/// fetch and a URL read fetches nothing.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn production_read_declares_its_fetches_and_local_reads_stay_read() {
 		use crate::{
@@ -17709,7 +17710,7 @@ mod tests {
 			("vault://notes/a.md", None),
 			("vault://_/a.md?op=read", None),
 			("vault://notes?op=search&q=todo", None),
-			("custom://thing", None),
+			("custom://thing", anonymous),
 			("ssh://", None),
 			("https://docs.rs/serde", anonymous),
 			("docs.rs:443/", anonymous),
