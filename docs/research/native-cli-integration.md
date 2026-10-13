@@ -131,8 +131,8 @@ The first slice should be read-only or approval-constrained and must not duplica
 
 ## Feasibility (2026-10-13)
 
-Status: feasibility research closed for the five CLIs installed on the research Mac (`codex` 0.160.0, `gemini` 0.59.0,
-`agy` 1.1.10, `grok` 1.0.46, `claude` 2.1.296); `devin` and `antigravity` were not installed. Observed `--help` output,
+Status: feasibility research closed for the six CLIs installed on the research Mac (`codex` 0.160.0, `gemini` 0.59.0,
+`agy` 1.1.10, `grok` 1.0.46, `claude` 2.1.296, and `devin` 3000.11.3 added after the first pass); `antigravity` was not installed. Observed `--help` output,
 vendor documentation read on 2026-10-13, and the UNVERIFIED register are in
 [`native-cli-feasibility.md`](native-cli-feasibility.md).
 
@@ -143,12 +143,15 @@ vendor documentation read on 2026-10-13, and the UNVERIFIED register are in
 | Gemini CLI | `capability-gated` |
 | Antigravity (`agy`) | `capability-gated` |
 | Grok | `capability-gated` |
-| Devin | `blocked` (not installed; docs only) |
+| Devin | `capability-gated` (`devin acp` is an ACP server over stdio per `--help`; no handshake run) |
 
 This corrects two statements above: Antigravity and Grok each have a vendor-documented headless/structured mode
 (`agy -p --output-format stream-json`; `grok -p --output-format streaming-json` and `grok agent stdio`), documented but not
 exercised here, so ADR 0043 still keeps them disabled; and Codex's Unix-socket transport carries WebSocket framing, not
 raw JSONL (only `stdio://` is newline-delimited JSON). The Claude and Gemini terms questions in "Blockers and open
 questions" remain open (U10, U16).
+
+Three of the CLIs (Gemini `--acp`, Grok `agent stdio`, Devin `devin acp`) expose ACP, so one ACP client adapter plus
+per-CLI profiles could replace three protocol-specific adapters; see `native-cli-feasibility.md` section 6.1.
 
 Native CLI implementation started: **NO** (feasibility only; no adapter code exists on this branch).
