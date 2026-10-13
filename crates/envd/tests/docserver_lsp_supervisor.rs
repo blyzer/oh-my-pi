@@ -84,6 +84,17 @@ fn stage_of(supervisor: &NativeLspSupervisor, name: &str) -> LspServerState {
 		.state
 }
 
+/// A document authority for a trusted workspace, so the project `.lsp.json`
+/// the fixtures write is loaded.
+fn trusted_environment(project: &Path) -> Environment {
+	Environment::new(
+		ServerConfig::new(project.to_path_buf())
+			.expect("config")
+			.with_workspace_trust(WorkspaceTrust::Trusted),
+	)
+	.expect("environment")
+}
+
 #[tokio::test]
 async fn lazy_open_starts_matching_server_and_publishes_startup_stages() {
 	let scratch = TempDir::new().expect("scratch");
@@ -93,8 +104,7 @@ async fn lazy_open_starts_matching_server_and_publishes_startup_stages() {
 		.expect("canonical project root");
 	fixture(&project);
 
-	let environment =
-		Environment::new(ServerConfig::new(project.clone()).expect("config")).expect("environment");
+	let environment = trusted_environment(&project);
 	let supervisor = NativeLspSupervisor::discover(&environment, None, Default::default())
 		.expect("discover supervisor");
 	environment.install_lsp_supervisor(supervisor.clone());
@@ -162,8 +172,7 @@ async fn failed_start_records_detail_and_keeps_roster_entry() {
 	)
 	.expect("write config");
 
-	let environment =
-		Environment::new(ServerConfig::new(project.clone()).expect("config")).expect("environment");
+	let environment = trusted_environment(&project);
 	let supervisor = NativeLspSupervisor::discover(&environment, None, Default::default())
 		.expect("discover supervisor");
 	environment.install_lsp_supervisor(supervisor.clone());

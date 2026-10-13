@@ -9,9 +9,9 @@
 //! and approve a plugin's launches, with digests that match what the seams
 //! check.
 //!
-//! A report of what a session refuses covers only what the session would
-//! load: under [`McpSettings::enable_project_config`] off, MCP discovery
-//! drops every project-scoped source ([`ConfigSourceKind::loads`]), so the
+//! load: under a withheld [`McpSettings::project_config`] (an untrusted
+//! workspace without the user opt-in), MCP discovery drops every
+//! project-scoped source ([`ConfigSourceKind::loads`]), so the
 //! project's Agent Plugins packages (its plugin directories and project
 //! installs) and the MCP servers of plugins installed for the project are
 //! neither loaded nor reported. A package the invocation names
@@ -50,7 +50,8 @@ pub struct AgentPluginLaunches {
 	/// resolves it.
 	pub launches: Vec<PluginLaunch>,
 	/// The discovery source it joins as; a project-scoped package loads only
-	/// while project MCP configuration is enabled ([`ConfigSourceKind::loads`]).
+	/// while project MCP configuration is admitted
+	/// ([`ConfigSourceKind::loads`]).
 	pub kind:     ConfigSourceKind,
 }
 
@@ -75,7 +76,7 @@ pub fn agent_plugin_launches(paths: &McpConfigPaths) -> Vec<AgentPluginLaunches>
 /// Those are the launches a session under `settings` loads for `paths` that
 /// the approvals `paths` carries do not admit, so they do not start. A
 /// package MCP discovery skips under `settings` (a project
-/// package while project configuration is disabled) launches nothing and is
+/// package while project configuration is withheld) launches nothing and is
 /// not reported.
 #[must_use]
 pub fn blocked_agent_plugin_launches(
@@ -84,7 +85,7 @@ pub fn blocked_agent_plugin_launches(
 ) -> Vec<PluginCommandBlocked> {
 	agent_plugin_launches(paths)
 		.into_iter()
-		.filter(|package| package.kind.loads(settings.enable_project_config))
+		.filter(|package| package.kind.loads(settings.project_config))
 		.flat_map(|package| {
 			let AgentPluginLaunches { plugin, version, launches, .. } = package;
 			launches.into_iter().filter_map(move |launch| {
@@ -111,10 +112,10 @@ pub fn plugin_launches(plugin: &ClaudePlugin) -> Vec<PluginLaunch> {
 ///
 /// That is [`plugin_launches`] without the MCP servers of a plugin whose MCP
 /// declarations discovery skips (one installed for the project while project
-/// configuration is disabled).
+/// configuration is withheld).
 #[must_use]
 pub fn loaded_plugin_launches(plugin: &ClaudePlugin, settings: &McpSettings) -> Vec<PluginLaunch> {
-	let mut launches = if claude_plugin_kind(plugin).loads(settings.enable_project_config) {
+	let mut launches = if claude_plugin_kind(plugin).loads(settings.project_config) {
 		plugin_mcp_launches(plugin).collect::<Vec<_>>()
 	} else {
 		Vec::new()

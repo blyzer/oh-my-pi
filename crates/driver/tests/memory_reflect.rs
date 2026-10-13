@@ -33,6 +33,7 @@ use omp_envd::{
 	host_settings::{AI_MEMORY_BACKEND, MemoryBackendSetting},
 	tool_settings::ApprovalMode,
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::{blob::BlobStore, kind};
 use omp_memory::runtime::SaveRequest;
 use omp_session::{ComponentRegistry, Session, components::prompts::prompts_handle};
@@ -351,7 +352,9 @@ async fn an_attached_session_synthesizes_a_daemon_reflect_with_one_request() {
 	AI_MEMORY_BACKEND
 		.set(&con, MemoryBackendSetting::Mnemopi)
 		.expect("memory backend");
-	let _daemon = support::InProcessDaemon::serve(&root, &state, Arc::clone(&con)).await;
+	let _daemon =
+		support::InProcessDaemon::serve(&root, &state, Arc::clone(&con), WorkspaceTrust::Untrusted)
+			.await;
 	let environment = ProjectEnvironment::attach(&root, &state, AttachOptions {
 		py_eval:            false,
 		approval_mode:      Some(ApprovalMode::Yolo),

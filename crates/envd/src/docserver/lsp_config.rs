@@ -18,7 +18,10 @@ use omp_ext::{
 		resolve_plugin_command,
 	},
 	plugin_command::{PluginLaunch, PluginLaunchKind},
-	workspace_trust::inventory::{LSP_CONFIG_NAMES, PROJECT_DIR},
+	workspace_trust::{
+		WorkspaceTrust,
+		inventory::{LSP_CONFIG_NAMES, PROJECT_DIR},
+	},
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -346,12 +349,15 @@ pub fn bundled_lsp_defaults() -> Result<LspConfigSource, LspConfigError> {
 }
 
 /// Enumerates only native user/project paths. Foreign roots are never
-/// considered. Existing paths are returned from low to high precedence.
+/// considered; the project's files are read only for a workspace of `trust`
+/// [`WorkspaceTrust::Trusted`]. Existing paths are returned from low to high
+/// precedence.
 pub fn discover_native_lsp_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
+	trust: WorkspaceTrust,
 ) -> Result<Vec<LspConfigSource>, LspConfigError> {
-	discover_lsp_sources(user_root, project_root, Vec::new(), &[]).map(|found| found.sources)
+	discover_lsp_sources(user_root, project_root, trust, Vec::new(), &[]).map(|found| found.sources)
 }
 
 /// Ordered sources plus the plugin declarations that did not load.
@@ -366,6 +372,10 @@ pub struct DiscoveredLspSources {
 /// Enumerates built-in, extension-manifest, installed-plugin, user, and
 /// project sources in increasing precedence.
 ///
+/// The project's own files ([`lsp_config_files`]) are read only for a
+/// workspace of `trust` [`WorkspaceTrust::Trusted`]: an untrusted
+/// repository's configuration can name any command, so none of it loads.
+///
 /// The only non-native roots ever read are the `plugins` handed in: the
 /// installed, enabled marketplace plugins the composition resolved
 /// ([`omp_ext::claude_plugin::ClaudePlugins`]), each contributing only the
@@ -379,9 +389,11 @@ pub struct DiscoveredLspSources {
 /// failing the roster.
 ///
 /// [`ClaudeComponents::lsp`]: omp_ext::claude_plugin::ClaudeComponents::lsp
+/// [`lsp_config_files`]: omp_ext::workspace_trust::inventory::lsp_config_files
 pub fn discover_lsp_sources(
 	user_root: Option<&Path>,
 	project_root: &Path,
+	trust: WorkspaceTrust,
 	mut manifests: Vec<LspConfigSource>,
 	plugins: &[ClaudePlugin],
 ) -> Result<DiscoveredLspSources, LspConfigError> {
@@ -395,14 +407,16 @@ pub fn discover_lsp_sources(
 		append_existing(&mut sources, user_root, LspConfigSourceKind::User, user)?;
 		append_existing(&mut sources, &user_root.join("agent"), LspConfigSourceKind::User, user)?;
 	}
-	let project = Containment::Within(containment_root(project_root));
-	append_existing(
-		&mut sources,
-		&project_root.join(PROJECT_DIR),
-		LspConfigSourceKind::Project,
-		project,
-	)?;
-	append_existing(&mut sources, project_root, LspConfigSourceKind::Dotfile, project)?;
+	if trust == WorkspaceTrust::Trusted {
+		let project = Containment::Within(containment_root(project_root));
+		append_existing(
+			&mut sources,
+			&project_root.join(PROJECT_DIR),
+			LspConfigSourceKind::Project,
+			project,
+		)?;
+		append_existing(&mut sources, project_root, LspConfigSourceKind::Dotfile, project)?;
+	}
 	Ok(DiscoveredLspSources { sources, diagnostics })
 }
 
@@ -919,7 +933,9 @@ pub(crate) mod tests {
 		let (sender, receiver) = mpsc::channel();
 		let root = project.clone();
 		thread::spawn(move || {
-			let _ = sender.send(discover_lsp_sources(None, &root, Vec::new(), &[]));
+			let _ =
+				sender
+					.send(discover_lsp_sources(None, &root, WorkspaceTrust::Trusted, Vec::new(), &[]));
 		});
 		let found = receiver
 			.recv_timeout(Duration::from_secs(10))
@@ -964,7 +980,7 @@ pub(crate) mod tests {
 		{
 			write(&project.join(near_miss), "{}");
 		}
-		let read = discover_lsp_sources(None, &project, Vec::new(), &[])
+		let read = discover_lsp_sources(None, &project, WorkspaceTrust::Trusted, Vec::new(), &[])
 			.unwrap()
 			.sources
 			.iter()
@@ -1043,7 +1059,14 @@ pub(crate) mod tests {
 		]);
 		assert!(plugins.diagnostics.is_empty(), "{:?}", plugins.diagnostics);
 
-		let found = discover_lsp_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		let found = discover_lsp_sources(
+			None,
+			&project,
+			WorkspaceTrust::Trusted,
+			Vec::new(),
+			&plugins.plugins,
+		)
+		.unwrap();
 		assert!(found.diagnostics.is_empty(), "{:?}", found.diagnostics);
 		let config = load_lsp_config(&found.sources).unwrap();
 
@@ -1086,7 +1109,14 @@ pub(crate) mod tests {
 			.unwrap();
 		plugin_entry.approved_commands = [plugin_entry.command_digest(&trusted)].into();
 
-		let found = discover_lsp_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		let found = discover_lsp_sources(
+			None,
+			&project,
+			WorkspaceTrust::Trusted,
+			Vec::new(),
+			&plugins.plugins,
+		)
+		.unwrap();
 		let config = load_lsp_config(&found.sources).unwrap();
 
 		assert!(config.servers.contains_key("trusted"));
@@ -1120,8 +1150,14 @@ pub(crate) mod tests {
 		write(&project.join(".omp/lsp.json"), r#"{"rust-analyzer":{"args":["--from-project"]}}"#);
 		let plugins = installed_plugins(&temp.path().join("data"), &[("p@m", &plugin, true)]);
 
-		let found =
-			discover_lsp_sources(Some(&user), &project, Vec::new(), &plugins.plugins).unwrap();
+		let found = discover_lsp_sources(
+			Some(&user),
+			&project,
+			WorkspaceTrust::Trusted,
+			Vec::new(),
+			&plugins.plugins,
+		)
+		.unwrap();
 		let config = load_lsp_config(&found.sources).unwrap();
 
 		let acme = &config.servers["acme"];
@@ -1157,7 +1193,14 @@ pub(crate) mod tests {
 			("good@m", &good, true),
 		]);
 
-		let found = discover_lsp_sources(None, &project, Vec::new(), &plugins.plugins).unwrap();
+		let found = discover_lsp_sources(
+			None,
+			&project,
+			WorkspaceTrust::Trusted,
+			Vec::new(),
+			&plugins.plugins,
+		)
+		.unwrap();
 		let config = load_lsp_config(&found.sources).unwrap();
 
 		assert!(config.servers.contains_key("good"));

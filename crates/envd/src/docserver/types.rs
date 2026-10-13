@@ -15,6 +15,7 @@ use std::{
 use bytes::Bytes;
 use cap_std::{ambient_authority, fs::Dir};
 use omp_core::{Hash32, Str, sf};
+use omp_ext::workspace_trust::WorkspaceTrust;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -567,6 +568,7 @@ pub struct ServerConfig {
 	revision_capacity:  NonZeroUsize,
 	max_document_bytes: NonZeroU64,
 	project_binaries:   bool,
+	workspace_trust:    WorkspaceTrust,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -578,6 +580,7 @@ impl fmt::Debug for ServerConfig {
 			.field("revision_capacity", &self.revision_capacity)
 			.field("max_document_bytes", &self.max_document_bytes)
 			.field("project_binaries", &self.project_binaries)
+			.field("workspace_trust", &self.workspace_trust)
 			.finish()
 	}
 }
@@ -589,6 +592,7 @@ impl PartialEq for ServerConfig {
 			&& self.revision_capacity == other.revision_capacity
 			&& self.max_document_bytes == other.max_document_bytes
 			&& self.project_binaries == other.project_binaries
+			&& self.workspace_trust == other.workspace_trust
 	}
 }
 
@@ -699,6 +703,7 @@ impl ServerConfig {
 			max_document_bytes: NonZeroU64::new(DEFAULT_MAX_DOCUMENT_BYTES)
 				.expect("default document limit is nonzero"),
 			project_binaries:   false,
+			workspace_trust:    WorkspaceTrust::Untrusted,
 		})
 	}
 
@@ -708,18 +713,33 @@ impl ServerConfig {
 		self
 	}
 
-	/// Lets language- and debug-server executables resolve from the
-	/// project-local bins (`node_modules/.bin`, `.venv/bin`, `bin`, ...) ahead
-	/// of `$PATH`. Off by default: the user-level `sv_lsp_project_binaries`
-	/// opts in, and a project cfg can never set it.
+	/// Lets language- and debug-server executables of a trusted workspace
+	/// resolve from the project-local bins (`node_modules/.bin`, `.venv/bin`,
+	/// `bin`, ...) ahead of `$PATH`. Off by default: the user-level
+	/// `sv_lsp_project_binaries` opts in, and a project cfg can never set it.
 	pub const fn with_project_binaries(mut self, enabled: bool) -> Self {
 		self.project_binaries = enabled;
 		self
 	}
 
-	/// Whether server executables may resolve from project-local bins.
+	/// Sets the workspace trust decision this authority loads project inputs
+	/// under: a trusted workspace's LSP/DAP configuration files load and its
+	/// project-local bins resolve; an untrusted one's do neither. Untrusted
+	/// (fail closed) by default.
+	pub const fn with_workspace_trust(mut self, trust: WorkspaceTrust) -> Self {
+		self.workspace_trust = trust;
+		self
+	}
+
+	/// Whether server executables may resolve from project-local bins: only
+	/// for a trusted workspace whose user opted in.
 	pub const fn project_binaries(&self) -> bool {
-		self.project_binaries
+		self.project_binaries && matches!(self.workspace_trust, WorkspaceTrust::Trusted)
+	}
+
+	/// The workspace trust decision this authority loads project inputs under.
+	pub const fn workspace_trust(&self) -> WorkspaceTrust {
+		self.workspace_trust
 	}
 
 	/// Returns the executable-generation identity advertised to document

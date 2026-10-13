@@ -24,7 +24,11 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{Action, CompressHost, IsolationPolicy, Loss, Status};
-use crate::headless::kernel::{ComposedInference, KernelOptions, compose_kernel};
+use crate::{
+	cfg::CfgFiles,
+	headless::kernel::{ComposedInference, KernelOptions, compose_kernel},
+	workspace_trust::evaluate_workspace,
+};
 
 const SYSTEM_PROMPT: &str = include_str!("system_prompt.txt");
 
@@ -116,6 +120,9 @@ impl ProductionCompressHost {
 			omp_catalog::settings::ModelSettings::from_con(&ctx).resolve_path_scopes(&root, &home);
 		let state_dir = omp_env::project_state::directory(&data_dir, &root)?;
 		std::fs::create_dir_all(&state_dir)?;
+		// No kernel is composed here, so the workspace's own stored decision
+		// applies, failing closed when none was made.
+		let workspace_trust = evaluate_workspace(&data_dir, &root).trust();
 		let environment =
 			omp_envd::ProjectEnvironment::attach(&root, &state_dir, omp_envd::AttachOptions {
 				py_eval:            false,
@@ -123,14 +130,20 @@ impl ProductionCompressHost {
 				trusted_extensions: Vec::new(),
 				contributed_values: Vec::new(),
 				con:                Arc::clone(&ctx),
-				bridges:            omp_envd::RegistryBridges::default(),
+				bridges:            omp_envd::RegistryBridges {
+					content: omp_envd::ActiveContentInputs {
+						workspace_trust,
+						..omp_envd::ActiveContentInputs::default()
+					},
+					..omp_envd::RegistryBridges::default()
+				},
 				spawn_idle_timeout: None,
 				// This host's own context loads no configuration, so under a
 				// configured policy it runs embedded rather than spawn a daemon
 				// it could never join.
-				spawn_policy:       crate::cfg::CfgFiles::new(Some(&root))
+				spawn_policy:       CfgFiles::new(Some(&root))
 					.ok()
-					.and_then(|files| files.daemon_policy().ok()),
+					.and_then(|files| files.daemon_policy(workspace_trust).ok()),
 			})
 			.await?;
 		let documents = environment.client().clone();

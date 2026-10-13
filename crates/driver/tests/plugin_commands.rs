@@ -16,7 +16,7 @@ use omp_envd::{
 		dap_config::{discover_dap_sources, load_dap_config},
 		lsp_config::{discover_lsp_sources, load_lsp_config},
 	},
-	mcp::McpConfigPaths,
+	mcp::{McpConfigPaths, McpSettings, ProjectMcpPolicy},
 };
 use omp_ext::{
 	claude_plugin::{
@@ -150,17 +150,13 @@ impl Fixture {
 
 	fn blocked_servers(&self) -> Vec<(PluginLaunchKind, Str)> {
 		let plugins = self.resolve();
-		blocked_launches(
-			&plugins,
-			&self.agent_plugins(&plugins),
-			&omp_envd::mcp::McpSettings::default(),
-		)
-		.into_iter()
-		.map(|blocked| {
-			assert_eq!(blocked.plugin, "tools@market");
-			(blocked.kind, blocked.server)
-		})
-		.collect()
+		blocked_launches(&plugins, &self.agent_plugins(&plugins), &McpSettings::default())
+			.into_iter()
+			.map(|blocked| {
+				assert_eq!(blocked.plugin, "tools@market");
+				(blocked.kind, blocked.server)
+			})
+			.collect()
 	}
 }
 
@@ -168,11 +164,8 @@ impl Fixture {
 fn unapproved_plugin_launches_are_blocked_and_named() {
 	let fixture = Fixture::new();
 	let plugins = fixture.resolve();
-	let blocked = blocked_launches(
-		&plugins,
-		&fixture.agent_plugins(&plugins),
-		&omp_envd::mcp::McpSettings::default(),
-	);
+	let blocked =
+		blocked_launches(&plugins, &fixture.agent_plugins(&plugins), &McpSettings::default());
 	assert_eq!(
 		blocked
 			.iter()
@@ -212,13 +205,15 @@ fn unapproved_plugin_launches_are_blocked_and_named() {
 	);
 
 	// The seams the environment host loads from leave them out.
-	let lsp = discover_lsp_sources(None, &fixture.project, Vec::new(), &plugins.plugins)
-		.expect("lsp discovery");
+	let lsp =
+		discover_lsp_sources(None, &fixture.project, fixture.trust, Vec::new(), &plugins.plugins)
+			.expect("lsp discovery");
 	assert!(matches!(&lsp.diagnostics[..], [PluginDiagnostic::CommandNotApproved(_)]));
 	let config = load_lsp_config(&lsp.sources).expect("lsp config");
 	assert!(!config.servers.contains_key("acme"), "an unapproved language server loaded");
-	let dap = discover_dap_sources(None, &fixture.project, Vec::new(), &plugins.plugins)
-		.expect("dap discovery");
+	let dap =
+		discover_dap_sources(None, &fixture.project, fixture.trust, Vec::new(), &plugins.plugins)
+			.expect("dap discovery");
 	assert!(matches!(&dap.diagnostics[..], [PluginDiagnostic::CommandNotApproved(_)]));
 	let adapters = load_dap_config(builtin_adapters(), &dap.sources).expect("dap config");
 	assert!(!adapters.contains_key("acme-dbg"), "an unapproved debug adapter loaded");
@@ -237,8 +232,9 @@ fn approved_launches_persist_and_load() {
 
 	assert!(fixture.blocked_servers().is_empty());
 	let plugins = fixture.resolve();
-	let lsp = discover_lsp_sources(None, &fixture.project, Vec::new(), &plugins.plugins)
-		.expect("lsp discovery");
+	let lsp =
+		discover_lsp_sources(None, &fixture.project, fixture.trust, Vec::new(), &plugins.plugins)
+			.expect("lsp discovery");
 	assert!(lsp.diagnostics.is_empty(), "{:?}", lsp.diagnostics);
 	assert!(
 		load_lsp_config(&lsp.sources)
@@ -246,8 +242,9 @@ fn approved_launches_persist_and_load() {
 			.servers
 			.contains_key("acme")
 	);
-	let dap = discover_dap_sources(None, &fixture.project, Vec::new(), &plugins.plugins)
-		.expect("dap discovery");
+	let dap =
+		discover_dap_sources(None, &fixture.project, fixture.trust, Vec::new(), &plugins.plugins)
+			.expect("dap discovery");
 	assert!(dap.diagnostics.is_empty(), "{:?}", dap.diagnostics);
 	assert!(
 		load_dap_config(builtin_adapters(), &dap.sources)
@@ -319,8 +316,7 @@ fn an_installed_agent_plugins_package_is_approved_under_its_marketplace_identity
 	};
 
 	let plugins = fixture.resolve();
-	let blocked =
-		blocked_launches(&plugins, &agent_plugins(&plugins), &omp_envd::mcp::McpSettings::default());
+	let blocked = blocked_launches(&plugins, &agent_plugins(&plugins), &McpSettings::default());
 	let [local] = &blocked[..] else {
 		panic!("the package's stdio server alone awaits approval: {blocked:?}");
 	};
@@ -347,12 +343,12 @@ fn an_installed_agent_plugins_package_is_approved_under_its_marketplace_identity
 	}
 	let plugins = fixture.resolve();
 	assert!(
-		blocked_launches(&plugins, &agent_plugins(&plugins), &omp_envd::mcp::McpSettings::default())
-			.is_empty()
+		blocked_launches(&plugins, &agent_plugins(&plugins), &McpSettings::default()).is_empty()
 	);
 }
 
-/// With `sv_mcp_enable_project_config` off, MCP discovery loads no
+/// With project MCP configuration withheld (an untrusted workspace without
+/// `sv_mcp_enable_project_config`), MCP discovery loads no
 /// project-scoped source: neither the project's Agent Plugins packages nor
 /// the MCP servers of a plugin installed for the project. The report leaves
 /// them out as well; user-scope packages, and the project plugin's language
@@ -380,13 +376,11 @@ fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
 
 	let plugins = fixture.resolve();
 	assert_eq!(plugins.plugins[0].scope, PluginScope::Project);
-	let reported = |enable_project_config: bool| {
-		blocked_launches(&plugins, &fixture.agent_plugins(&plugins), &omp_envd::mcp::McpSettings {
-			enable_project_config,
-		})
-		.into_iter()
-		.map(|blocked| (blocked.plugin, blocked.server))
-		.collect::<Vec<_>>()
+	let reported = |project_config: ProjectMcpPolicy| {
+		blocked_launches(&plugins, &fixture.agent_plugins(&plugins), &McpSettings { project_config })
+			.into_iter()
+			.map(|blocked| (blocked.plugin, blocked.server))
+			.collect::<Vec<_>>()
 	};
 	let named = |pairs: &[(&'static str, &'static str)]| {
 		pairs
@@ -395,7 +389,7 @@ fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
 			.collect::<Vec<_>>()
 	};
 	assert_eq!(
-		reported(true),
+		reported(ProjectMcpPolicy::Trusted),
 		named(&[
 			("tools@market", "tools@market:db"),
 			("tools@market", "acme"),
@@ -406,7 +400,7 @@ fn disabled_project_mcp_config_reports_no_project_mcp_servers() {
 		])
 	);
 	assert_eq!(
-		reported(false),
+		reported(ProjectMcpPolicy::Withheld),
 		named(&[
 			("tools@market", "acme"),
 			("tools@market", "acme-dbg"),
@@ -479,7 +473,7 @@ fn editing_a_plugin_file_a_launch_names_requires_approval_again() {
 }
 
 /// Only an Agent Plugins package that comes from the project is
-/// project-scoped. With `sv_mcp_enable_project_config` off, a package the
+/// project-scoped. With project MCP configuration withheld, a package the
 /// user installed and one the invocation names (`--plugin-dir`) still load
 /// and are still reported; a project install is neither.
 #[test]
@@ -540,15 +534,24 @@ fn user_installed_and_explicit_agent_plugins_ignore_the_project_mcp_policy() {
 	let paths = fixture
 		.agent_plugins(&plugins)
 		.with_agent_plugin_roots(agent_plugin_roots(&[explicit], &plugins));
-	let reported = |enable_project_config: bool| {
-		blocked_launches(&plugins, &paths, &omp_envd::mcp::McpSettings { enable_project_config })
+	let reported = |project_config: ProjectMcpPolicy| {
+		blocked_launches(&plugins, &paths, &McpSettings { project_config })
 			.into_iter()
 			.map(|blocked| blocked.plugin)
 			.collect::<Vec<_>>()
 	};
-	assert_eq!(reported(true), ["explicit", "shared@market", "personal@market"]);
+	assert_eq!(reported(ProjectMcpPolicy::Trusted), [
+		"explicit",
+		"shared@market",
+		"personal@market"
+	]);
+	assert_eq!(reported(ProjectMcpPolicy::UserOptIn), [
+		"explicit",
+		"shared@market",
+		"personal@market"
+	]);
 	assert_eq!(
-		reported(false),
+		reported(ProjectMcpPolicy::Withheld),
 		["explicit", "personal@market"],
 		"the project install alone follows the project MCP policy"
 	);

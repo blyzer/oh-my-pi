@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 use url::Url;
 
-use super::{header_policy, header_policy::HeaderPolicyError};
+use super::{header_policy, header_policy::HeaderPolicyError, settings::ProjectMcpPolicy};
 
 /// Schema URL written into native OMP MCP configuration files.
 pub const MCP_CONFIG_SCHEMA_URL: &str =
@@ -111,12 +111,12 @@ impl ConfigSourceKind {
 		matches!(self, Self::Project | Self::User | Self::Root)
 	}
 
-	/// Whether sources of this kind load under the MCP discovery policy
-	/// `enable_project_config` (`sv_mcp_enable_project_config`): project-scoped
-	/// sources load only while it is set, every other source always.
+	/// Whether sources of this kind load under the project MCP `policy`:
+	/// project-scoped sources load only when it admits them, every other
+	/// source always.
 	#[must_use]
-	pub const fn loads(self, enable_project_config: bool) -> bool {
-		enable_project_config || !self.project_scoped()
+	pub const fn loads(self, policy: ProjectMcpPolicy) -> bool {
+		policy.loads_project() || !self.project_scoped()
 	}
 
 	/// Whether the declarations of this source kind are authored by the project
@@ -453,8 +453,8 @@ pub struct ResolvedConfig {
 }
 
 /// Loads and resolves already parsed sources. Project sources are excluded
-/// before name ownership when `enable_project_config` is false.
-pub fn resolve_sources(sources: &[ConfigSource], enable_project_config: bool) -> ResolvedConfig {
+/// before name ownership when `policy` withholds them.
+pub fn resolve_sources(sources: &[ConfigSource], policy: ProjectMcpPolicy) -> ResolvedConfig {
 	let user = sources
 		.iter()
 		.find(|source| source.kind == ConfigSourceKind::User);
@@ -462,7 +462,7 @@ pub fn resolve_sources(sources: &[ConfigSource], enable_project_config: bool) ->
 	let forced = user.map_or_else(BTreeSet::new, |source| source.file.enabled_servers.clone());
 	let mut ordered: Vec<&ConfigSource> = sources
 		.iter()
-		.filter(|source| source.kind.loads(enable_project_config))
+		.filter(|source| source.kind.loads(policy))
 		.collect();
 	ordered.sort_by(|left, right| right.kind.precedence().cmp(&left.kind.precedence()));
 
@@ -749,11 +749,11 @@ mod tests {
 				file: project,
 			},
 		];
-		let enabled = resolve_sources(&sources, true);
+		let enabled = resolve_sources(&sources, ProjectMcpPolicy::Trusted);
 		assert!(!enabled.servers.contains_key("shared"));
 		assert!(enabled.servers.contains_key("project-only"));
 		assert!(enabled.disabled_names.contains("disabled-only"));
-		let project_off = resolve_sources(&sources, false);
+		let project_off = resolve_sources(&sources, ProjectMcpPolicy::Withheld);
 		assert!(project_off.servers.contains_key("user-only"));
 		assert!(!project_off.servers.contains_key("project-only"));
 	}
@@ -772,10 +772,10 @@ mod tests {
 			ConfigSource { path: PathBuf::from("root"), kind: ConfigSourceKind::Root, file: root },
 			ConfigSource { path: PathBuf::from("user"), kind: ConfigSourceKind::User, file: user },
 		];
-		let enabled = resolve_sources(&sources, true);
+		let enabled = resolve_sources(&sources, ProjectMcpPolicy::Trusted);
 		assert!(enabled.servers.contains_key("user-alias"));
 		assert!(!enabled.servers.contains_key("root-alias"));
-		let project_off = resolve_sources(&sources, false);
+		let project_off = resolve_sources(&sources, ProjectMcpPolicy::Withheld);
 		assert!(project_off.servers.contains_key("user-alias"));
 		assert!(!project_off.servers.contains_key("root-alias"));
 	}
@@ -808,7 +808,7 @@ mod tests {
 				},
 				ConfigSource { path: PathBuf::from("user"), kind: ConfigSourceKind::User, file: user },
 			],
-			true,
+			ProjectMcpPolicy::Trusted,
 		);
 		assert_eq!(resolved.servers.len(), 2);
 	}
@@ -831,7 +831,7 @@ mod tests {
 					file: manifest,
 				},
 			],
-			true,
+			ProjectMcpPolicy::Trusted,
 		);
 		assert!(resolved.servers.is_empty());
 	}

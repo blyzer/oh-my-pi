@@ -38,6 +38,7 @@ use omp_core::{
 	dirs::DataDirError,
 	project_file::{self, Containment},
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use parking_lot::Mutex;
 
 /// Largest project cfg overlay the reader accepts: a handful of `set` lines,
@@ -156,21 +157,25 @@ impl CfgFiles {
 }
 
 impl CfgFiles {
-	/// The sandbox and approval policy a project daemon spawned under these
-	/// files enforces: the one `omp envd` resolves from `config.cfg` and its
-	/// project overlay alone, with nothing set in-process (no flag, cfg
-	/// profile script or agent class). A session whose own policy differs
-	/// can never join such a daemon, so it does not spawn one
+	/// The sandbox, approval and workspace trust policy a project daemon
+	/// spawned under these files for a workspace of `trust` enforces: the one
+	/// `omp envd --workspace-trust` resolves from `config.cfg` and its project
+	/// overlay alone, with nothing set in-process (no flag, cfg profile script
+	/// or agent class). A session whose own policy differs can never join such
+	/// a daemon, so it does not spawn one
 	/// (`omp_envd::AttachOptions::spawn_policy`).
 	///
 	/// # Errors
 	///
 	/// Fails when a cfg file cannot be read.
-	pub fn daemon_policy(&self) -> ConResult<omp_env::project_state::DaemonPolicy> {
+	pub fn daemon_policy(
+		&self,
+		trust: WorkspaceTrust,
+	) -> ConResult<omp_env::project_state::DaemonPolicy> {
 		let files = Self::with_roots(self.user.clone(), self.project.clone());
 		let ctx = omp_con::Ctx::builder().loader(files.clone()).build();
 		ctx.exec_configs(&files, None)?;
-		Ok(omp_envd::daemon_policy::from_con(&ctx))
+		Ok(omp_envd::daemon_policy::from_con(&ctx, trust))
 	}
 }
 
@@ -642,16 +647,20 @@ mod tests {
 		fs::create_dir_all(&user).unwrap();
 		fs::create_dir_all(&project).unwrap();
 		let files = CfgFiles::with_roots(user.clone(), Some(project));
-		let shipped = daemon_policy::from_con(&omp_con::Ctx::new());
-		assert_eq!(files.daemon_policy().unwrap(), shipped);
+		let shipped = daemon_policy::from_con(&omp_con::Ctx::new(), WorkspaceTrust::Untrusted);
+		assert_eq!(files.daemon_policy(WorkspaceTrust::Untrusted).unwrap(), shipped);
+		assert_eq!(
+			files.daemon_policy(WorkspaceTrust::Trusted).unwrap(),
+			daemon_policy::from_con(&omp_con::Ctx::new(), WorkspaceTrust::Trusted)
+		);
 
 		fs::write(user.join("config.cfg"), "sv_sandbox_mode off\n").unwrap();
-		let configured = files.daemon_policy().unwrap();
+		let configured = files.daemon_policy(WorkspaceTrust::Untrusted).unwrap();
 		let unconfined = omp_con::Ctx::new();
 		SV_SANDBOX_MODE
 			.set(&unconfined, ExecSandboxMode::Off)
 			.unwrap();
-		assert_eq!(configured, daemon_policy::from_con(&unconfined));
+		assert_eq!(configured, daemon_policy::from_con(&unconfined, WorkspaceTrust::Untrusted));
 		assert!(
 			files.observed.lock().is_empty(),
 			"resolving the policy records no observation a later save checks"

@@ -504,12 +504,11 @@ fn convar_reasoning(
 	else {
 		return omp_ai::Setting::Unset;
 	};
-	let requested = match thinking.parse::<omp_catalog::ReasoningEffort>() {
-		Ok(effort) => omp_catalog::ThinkingEffort::from(effort),
-		Err(_) => {
-			tracing::warn!(value = thinking, "ai_thinking is not a reasoning effort; ignored");
-			return omp_ai::Setting::Unset;
-		},
+	let requested = if let Ok(effort) = thinking.parse::<omp_catalog::ReasoningEffort>() {
+		omp_catalog::ThinkingEffort::from(effort)
+	} else {
+		tracing::warn!(value = thinking, "ai_thinking is not a reasoning effort; ignored");
+		return omp_ai::Setting::Unset;
 	};
 	let wire_model = omp_catalog::WireModelId::from_ref(model.as_str());
 	let effort = match spec
@@ -700,7 +699,7 @@ enum OutcomeReplicationError {
 	},
 }
 
-fn resumable_blob_error(error: &omp_env::ClientError) -> bool {
+const fn resumable_blob_error(error: &omp_env::ClientError) -> bool {
 	matches!(
 		error,
 		omp_env::ClientError::TransportClosed
@@ -1427,14 +1426,11 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 							return;
 						}
-						let hash: [u8; 32] = match details.hash.as_ref().try_into() {
-							Ok(hash) => hash,
-							Err(_) => {
-								tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
-								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-								return;
-							},
-						};
+						let hash: [u8; 32] = if let Ok(hash) = details.hash.as_ref().try_into() { hash } else {
+										tracing::warn!(call_id = %request.call_id, hash_bytes = details.hash.len(), "environment verdict blob digest is invalid");
+										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+										return;
+									};
 						let expected_hash = Hash32::new(hash);
 						let max_bytes = u64::try_from(omp_proto::bounds::FRAME_MAX_BYTES)
 							.expect("protocol frame limit fits u64");
@@ -1536,14 +1532,11 @@ impl ExternalToolExecutor for EnvToolExecutor {
 							yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
 							return;
 						}
-						let visibility = match tool_visibility_spans(verdict.visibility, &verdict.parts) {
-							Ok(visibility) => visibility,
-							Err(()) => {
-								tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
-								yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
-								return;
-							},
-						};
+						let visibility = if let Ok(visibility) = tool_visibility_spans(verdict.visibility, &verdict.parts) { visibility } else {
+										tracing::warn!(call_id = %request.call_id, "environment visibility spans are invalid");
+										yield ExternalDispatchEvent::Aborted(invalid_outcome_blob());
+										return;
+									};
 						let mut parts = match replicate_verdict_parts(
 							&client,
 							&outcome_store,
@@ -2154,7 +2147,7 @@ impl ComposedInference {
 
 	/// Borrows the project environment client retained by this composition.
 	#[must_use]
-	pub fn environment_client(&self) -> &omp_env::EnvClient {
+	pub const fn environment_client(&self) -> &omp_env::EnvClient {
 		match self {
 			Self::Production(inference) => inference._environment.client(),
 			Self::Gateway { _environment, .. } => _environment.client(),
@@ -2218,7 +2211,7 @@ impl ComposedInference {
 				.ok()?;
 				Some(SpeechRewriteClient::Production {
 					registry: inference.stack.registry.clone(),
-					model:    selected.model.clone(),
+					model:    selected.model,
 				})
 			},
 			Self::Gateway { inference, .. } => {
@@ -2598,6 +2591,7 @@ pub async fn compose_kernel(
 					.filter(|plugin| plugin.claude_components().is_some())
 					.cloned()
 					.collect(),
+				workspace_trust:     workspace_trust.trust(),
 			},
 			dynamic_tools: vec![
 				omp_envd::DynamicTool::new(
@@ -2622,7 +2616,13 @@ pub async fn compose_kernel(
 			..omp_envd::RegistryBridges::default()
 		}
 	} else {
-		omp_envd::RegistryBridges::default()
+		omp_envd::RegistryBridges {
+			content: omp_envd::ActiveContentInputs {
+				workspace_trust: workspace_trust.trust(),
+				..omp_envd::ActiveContentInputs::default()
+			},
+			..omp_envd::RegistryBridges::default()
+		}
 	};
 
 	let mut trusted_extensions = options.extensions.trusted.clone();
@@ -2661,15 +2661,15 @@ pub async fn compose_kernel(
 			con_journal::ClassScope::Composed
 		},
 	};
-	// The environment fixes its sandbox and approval policy when it starts, so
-	// a resumed child's class is presented before it does.
+	// The environment fixes its sandbox, approval and workspace trust policy
+	// when it starts, so a resumed child's class is presented before it does.
 	con_journal::present_journaled_class(&ctx, &class_scope, &journal_path);
-	let environment_policy = omp_envd::daemon_policy::from_con(&ctx);
+	let environment_policy = omp_envd::daemon_policy::from_con(&ctx, workspace_trust.trust());
 	// Without the policy the configuration files resolve, a spawned daemon's
 	// hello is checked instead.
 	let spawn_policy = match &cfg_files {
 		Ok(files) => files
-			.daemon_policy()
+			.daemon_policy(workspace_trust.trust())
 			.inspect_err(|error| tracing::debug!(%error, "configured daemon policy unavailable"))
 			.ok(),
 		Err(error) => {
@@ -2871,11 +2871,15 @@ pub async fn compose_kernel(
 		}
 		Session::create(&journal_path, component_registry)?
 	};
-	let con_journal =
-		Arc::new(con_journal::ConJournal::attach(Arc::clone(&ctx), session.dom(), class_scope));
+	let con_journal = Arc::new(con_journal::ConJournal::attach(
+		Arc::clone(&ctx),
+		session.dom(),
+		class_scope,
+		workspace_trust.trust(),
+	));
 	// The session never presents a policy its environment does not enforce:
 	// a class the early presentation could not read refuses the composition.
-	let presented_policy = omp_envd::daemon_policy::from_con(&ctx);
+	let presented_policy = omp_envd::daemon_policy::from_con(&ctx, workspace_trust.trust());
 	if presented_policy != environment_policy {
 		return Err(HeadlessError::EnvironmentPolicyDrift {
 			composed:  environment_policy,
@@ -3104,7 +3108,7 @@ pub async fn compose_kernel(
 	live_sessions.register(name.clone(), crate::sessions::KernelHandle {
 		id: crate::sessions::SessionId::new(id.clone()),
 		name: name.clone(),
-		up: up.clone(),
+		up,
 		snapshot: Arc::new(RwLock::new(session.dom().snapshot())),
 		topology,
 		relay,
@@ -3453,7 +3457,7 @@ fn apply_model_override(
 	if explicit {
 		omp_agent::AI_MODEL
 			.set(ctx, Str::new(model))
-			.map_err(|error| std::io::Error::other(error))?;
+			.map_err(std::io::Error::other)?;
 	}
 	Ok(())
 }

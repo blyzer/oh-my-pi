@@ -44,7 +44,8 @@ use omp_envd::exec_settings::{ExecSandboxMode, SV_SANDBOX_MODE};
 use omp_ext::{
 	trust::{GrantDuration, GrantsFile, grants_path},
 	workspace_trust::{
-		CanonicalHome, TrustChannel, TrustDecision, TrustDecisionKind, WorkspaceTrustGrant,
+		CanonicalHome, TrustChannel, TrustDecision, TrustDecisionKind, WorkspaceTrust,
+		WorkspaceTrustGrant,
 		inventory::{InventoryBudget, inventory},
 	},
 };
@@ -176,11 +177,18 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		(kernel, session)
 	}
 
-	/// The project daemon of this workspace, served in this process.
-	async fn daemon(&self) -> support::InProcessDaemon {
+	/// The project daemon of this workspace for a session of `trust`, served
+	/// in this process.
+	async fn daemon(&self, trust: WorkspaceTrust) -> support::InProcessDaemon {
 		let state = omp_env::project_state::directory(&self.data, &self.project).expect("state");
 		fs::create_dir_all(&state).expect("state directory");
-		support::InProcessDaemon::serve(&self.project, &state, Arc::clone(&self.con)).await
+		support::InProcessDaemon::serve(&self.project, &state, Arc::clone(&self.con), trust).await
+	}
+
+	/// Waits until this workspace's document authority stops answering.
+	async fn released_document_authority(&self) {
+		let state = omp_env::project_state::directory(&self.data, &self.project).expect("state");
+		support::released_document_authority(&state).await;
 	}
 }
 
@@ -362,7 +370,7 @@ fn agents_loaded(session: &Session) -> bool {
 async fn an_untrusted_workspace_withholds_its_inputs_and_says_so_once() {
 	let workspace = Workspace::new();
 	let gateway = Gateway::start(workspace.home.parent().expect("scratch")).await;
-	let _daemon = workspace.daemon().await;
+	let _daemon = workspace.daemon(WorkspaceTrust::Untrusted).await;
 
 	let (mut kernel, mut session) = workspace.compose(&gateway).await;
 	assert_eq!(journaled_decision(&session), Some(TrustDecision::Untrusted));
@@ -403,7 +411,7 @@ async fn an_untrusted_workspace_withholds_its_inputs_and_says_so_once() {
 async fn a_digest_bound_grant_admits_the_inputs_until_one_changes() {
 	let workspace = Workspace::new();
 	let gateway = Gateway::start(workspace.home.parent().expect("scratch")).await;
-	let _daemon = workspace.daemon().await;
+	let daemon = workspace.daemon(WorkspaceTrust::Trusted).await;
 	workspace.grant();
 
 	let (mut kernel, mut session) = workspace.compose(&gateway).await;
@@ -415,10 +423,15 @@ async fn a_digest_bound_grant_admits_the_inputs_until_one_changes() {
 	assert_eq!(withheld_notices(&session), [], "nothing is withheld");
 	drop(kernel);
 	drop(session);
+	// The trusted daemon holds the project's one document authority, which
+	// an untrusted session may not join, so it is stopped first.
+	drop(daemon);
+	workspace.released_document_authority().await;
 
 	// An edit to a gated input after the grant: the grant no longer matches.
 	write(&workspace.project.join(".omp/mcp.json"), r#"{"mcpServers":{}}"#);
 	fs::remove_file(&workspace.session).expect("fresh session");
+	let _daemon = workspace.daemon(WorkspaceTrust::Untrusted).await;
 	let (mut kernel, mut session) = workspace.compose(&gateway).await;
 	assert!(
 		matches!(journaled_decision(&session), Some(TrustDecision::DigestChanged { .. })),

@@ -7,7 +7,7 @@ use std::{
 
 use gix::bstr::ByteSlice;
 
-use super::GitRepo;
+use super::{GitRepo, mutate::load_index_or_empty};
 use crate::{
 	error::{Error, Result},
 	types::{
@@ -188,6 +188,7 @@ impl GitRepo {
 		let platform = repo
 			.status(gix::progress::Discard)
 			.map_err(|err| Error::backend("git status", err))?
+			.index(load_index_or_empty(&repo)?.into())
 			.untracked_files(gix::status::UntrackedFiles::Collapsed);
 		let iter = platform
 			.into_iter(options.pathspecs.iter().map(|path| path.as_bytes().into()))
@@ -249,6 +250,7 @@ impl GitRepo {
 		let platform = repo
 			.status(gix::progress::Discard)
 			.map_err(|err| Error::backend("git status", err))?
+			.index(load_index_or_empty(&repo)?.into())
 			.untracked_files(untracked);
 		let iter = platform
 			.into_iter(options.pathspecs.iter().map(|path| path.as_bytes().into()))
@@ -669,9 +671,7 @@ impl GitRepo {
 		}
 		if !others {
 			let repo = self.gix()?;
-			let index = repo
-				.index_or_empty()
-				.map_err(|err| Error::backend("git ls-files", err))?;
+			let index = load_index_or_empty(&repo)?;
 			let mut out: Vec<_> = index
 				.entries()
 				.iter()
@@ -686,6 +686,7 @@ impl GitRepo {
 		let mut platform = repo
 			.status(gix::progress::Discard)
 			.map_err(|e| Error::backend("git ls-files", e))?
+			.index(load_index_or_empty(&repo)?.into())
 			.untracked_files(gix::status::UntrackedFiles::Files);
 		if !exclude_standard {
 			platform = platform.dirwalk_options(|opts| {

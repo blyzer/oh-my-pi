@@ -420,7 +420,7 @@ impl Launch {
 				&claude_plugins,
 			)
 			.into_diagnostic()?,
-			&omp_envd::mcp::McpSettings::from_con(&ctx),
+			&omp_envd::mcp::McpSettings::from_con(&ctx, workspace_trust.trust()),
 		);
 		for blocked in &blocked_plugin_commands {
 			tracing::warn!(
@@ -1194,7 +1194,7 @@ pub(crate) async fn run(
 	);
 	let up = kernel.mailbox();
 	let (commands, command_rx) = flume::unbounded();
-	let resize_policy = match omp_chat::settings::CL_RESIZE_POLICY.get(&ctx) {
+	let resize_policy = match omp_chat::settings::CL_RESIZE_POLICY.get(ctx) {
 		omp_chat::settings::ResizePolicy::Preserve => omp_tui::slots::ResizePolicy::Preserve,
 		omp_chat::settings::ResizePolicy::Append => omp_tui::slots::ResizePolicy::Append,
 		omp_chat::settings::ResizePolicy::Rebuild => omp_tui::slots::ResizePolicy::Rebuild,
@@ -1237,8 +1237,9 @@ pub(crate) async fn run(
 		// The Environment's supervisor owns the live roster; a slow or absent
 		// daemon degrades to the configuration projection rather than
 		// delaying the first frame.
-		let lsp = if omp_envd::lsp_settings::SV_LSP_ENABLED.get(&ctx) {
-			let project_binaries = omp_envd::lsp_settings::SV_LSP_PROJECT_BINARIES.get(&ctx);
+		let lsp = if omp_envd::lsp_settings::SV_LSP_ENABLED.get(ctx) {
+			let project_binaries = omp_envd::lsp_settings::SV_LSP_PROJECT_BINARIES.get(ctx);
+			let trust = kernel.inference().workspace_trust().trust();
 			let live = tokio::time::timeout(
 				crate::welcome_facts::LSP_STATUS_BUDGET,
 				kernel.inference().environment_client().lsp_status(false),
@@ -1248,11 +1249,11 @@ pub(crate) async fn run(
 				Ok(Ok(status)) => crate::welcome_facts::lsp_from_status(&status),
 				Ok(Err(error)) => {
 					tracing::debug!(%error, "lsp roster unavailable; projecting configuration");
-					crate::welcome_facts::lsp_servers(project, Some(data_dir), project_binaries)
+					crate::welcome_facts::lsp_servers(project, Some(data_dir), project_binaries, trust)
 				},
 				Err(_) => {
 					tracing::debug!("lsp roster timed out; projecting configuration");
-					crate::welcome_facts::lsp_servers(project, Some(data_dir), project_binaries)
+					crate::welcome_facts::lsp_servers(project, Some(data_dir), project_binaries, trust)
 				},
 			}
 		} else {

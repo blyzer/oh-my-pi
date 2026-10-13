@@ -510,6 +510,8 @@ pub(crate) fn vault_fault(error: VaultError) -> Fault {
 mod tests {
 	use std::fs;
 
+	use omp_ext::workspace_trust::WorkspaceTrust;
+
 	use super::*;
 	use crate::vault::VaultPaths;
 
@@ -523,11 +525,14 @@ mod tests {
 			format!("[vaults]\n'My Notes' = {:?}\n", root.display().to_string()),
 		)
 		.expect("vault config");
-		let service = VaultService::load_layered(&VaultPaths {
-			user:    temp.path().join("vaults.toml"),
-			project: temp.path().join("missing"),
-			root:    temp.path().to_path_buf(),
-		})
+		let service = VaultService::load_layered(
+			&VaultPaths {
+				user:    temp.path().join("vaults.toml"),
+				project: temp.path().join("missing"),
+				root:    temp.path().to_path_buf(),
+			},
+			WorkspaceTrust::Untrusted,
+		)
 		.expect("vault service");
 		(temp, service)
 	}

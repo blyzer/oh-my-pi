@@ -241,7 +241,7 @@ pub(super) fn blocked_commands(state: &ServiceState) -> ServiceResult<Vec<Blocke
 		&state.data_dir,
 		&state.project,
 		&state.plugin_dirs,
-		&omp_envd::mcp::McpSettings::from_con(&state.con),
+		&omp_envd::mcp::McpSettings::from_con(&state.con, state.workspace_trust),
 		state.workspace_trust,
 	)
 	.map_err(ServiceError::failed)?;

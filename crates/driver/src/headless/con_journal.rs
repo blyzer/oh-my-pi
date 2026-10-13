@@ -29,6 +29,7 @@ use omp_con::{CfgLoader, Ctx, Severity, Value};
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Op, Txn};
 use omp_env::project_state::DaemonPolicy;
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::{Entry, Kind, KindName};
 use omp_session::{
 	ComponentRegistry, Session, SessionError,
@@ -65,10 +66,14 @@ pub struct ConJournal {
 	/// Writes observed but not yet journaled, last value per name; `None`
 	/// drops the journaled value.
 	pending:  Mutex<FastHashMap<Str, Option<Value>>>,
-	/// The sandbox and approval policy the console presented when the session
-	/// was attached, which the composition's environment enforces for its
-	/// whole life (`compose_kernel` refuses a session that presents another).
+	/// The sandbox, approval and workspace trust policy the console presented
+	/// when the session was attached, which the composition's environment
+	/// enforces for its whole life (`compose_kernel` refuses a session that
+	/// presents another).
 	composed: DaemonPolicy,
+	/// The workspace trust decision the composition runs under; a class never
+	/// moves it, so every presented policy is resolved with it.
+	trust:    WorkspaceTrust,
 }
 
 impl ConJournal {
@@ -79,12 +84,12 @@ impl ConJournal {
 	/// A journaled name this build no longer registers is skipped with a
 	/// warning rather than aborting composition: cfg and journal data from
 	/// older builds is user data (ADR 0013).
-	pub fn attach(ctx: Arc<Ctx>, dom: &Dom, scope: ClassScope) -> Self {
+	pub fn attach(ctx: Arc<Ctx>, dom: &Dom, scope: ClassScope, trust: WorkspaceTrust) -> Self {
 		apply_class(&ctx, &scope, dom, Report::Console);
 		hydrate(&ctx, dom);
 		let writes = ctx.subscribe_session_writes();
-		let composed = omp_envd::daemon_policy::from_con(&ctx);
-		Self { ctx, scope, writes, pending: Mutex::new(FastHashMap::default()), composed }
+		let composed = omp_envd::daemon_policy::from_con(&ctx, trust);
+		Self { ctx, scope, writes, pending: Mutex::new(FastHashMap::default()), composed, trust }
 	}
 
 	/// Re-derives the session layer after the tree changed underneath the
@@ -100,7 +105,7 @@ impl ConJournal {
 		// Only a journaled class moves the policy: no sandbox or approval
 		// convar is `SESSION`-flagged, so hydration never does.
 		let before = matches!(self.scope, ClassScope::Journaled(_))
-			.then(|| omp_envd::daemon_policy::from_con(&self.ctx));
+			.then(|| omp_envd::daemon_policy::from_con(&self.ctx, self.trust));
 		// The class goes first: returning to a main session restores its
 		// parked session layer, which the stale sweep then aligns with the
 		// journal of the session actually presented.
@@ -130,7 +135,7 @@ impl ConJournal {
 	/// A presentation that keeps the policy, such as the resync at every
 	/// command boundary, or that returns to the composed one says nothing.
 	fn report_policy_drift(&self, before: DaemonPolicy) {
-		let presented = omp_envd::daemon_policy::from_con(&self.ctx);
+		let presented = omp_envd::daemon_policy::from_con(&self.ctx, self.trust);
 		if presented == before || presented == self.composed {
 			return;
 		}
@@ -333,18 +338,18 @@ fn hydrate(ctx: &Ctx, dom: &Dom) {
 
 impl omp_agent::SessionStateBridge for ConJournal {
 	fn flush(&self, session: &mut Session) -> Result<(), SessionError> {
-		ConJournal::flush(self, session)
+		Self::flush(self, session)
 	}
 
 	fn resync(&self, dom: &Dom) {
-		ConJournal::resync(self, dom);
+		Self::resync(self, dom);
 	}
 }
 
 struct TurnBoundary(Arc<ConJournal>);
 
 impl LiveComponent for TurnBoundary {
-	fn id(&self) -> &str {
+	fn id(&self) -> &'static str {
 		"con"
 	}
 
@@ -364,7 +369,9 @@ mod tests {
 	use omp_con::Ctx;
 	use omp_session::{ComponentRegistry, Session, components::con::con_writes};
 
-	use super::{ClassScope, ConJournal};
+	use super::{ClassScope, ConJournal, WorkspaceTrust};
+
+	const TRUST: WorkspaceTrust = WorkspaceTrust::Untrusted;
 
 	fn open(path: &std::path::Path) -> Session {
 		if path.exists() {
@@ -383,7 +390,7 @@ mod tests {
 		let ctx = Arc::new(Ctx::new());
 		let mut session = open(&path);
 		let journal =
-			Arc::new(ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed));
+			Arc::new(ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed, TRUST));
 		ctx.run("ai_fastmode 1").expect("session write");
 		ctx.run("ai_thinking low").expect("session write");
 		assert!(con_writes(session.dom()).is_empty(), "nothing journaled before a flush");
@@ -403,7 +410,7 @@ mod tests {
 		let restored = Arc::new(Ctx::new());
 		let reopened = open(&path);
 		let rejournal =
-			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed);
+			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed, TRUST);
 		assert!(omp_agent::AI_FASTMODE.get(&restored));
 		assert_eq!(omp_agent::AI_THINKING.get(&restored), "low");
 		assert!(
@@ -425,7 +432,8 @@ mod tests {
 		let path = directory.path().join("rewind.oms");
 		let ctx = Arc::new(Ctx::new());
 		let mut session = open(&path);
-		let journal = ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed);
+		let journal =
+			ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed, TRUST);
 		let before = session.head().expect("genesis head");
 		ctx.run("ai_fastmode 1").expect("session write");
 		journal.flush(&mut session).expect("flush");
@@ -444,7 +452,7 @@ mod tests {
 		let ctx = Arc::new(Ctx::new());
 		let mut session = open(&path);
 		let journal =
-			Arc::new(ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed));
+			Arc::new(ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed, TRUST));
 		let component = journal.live_component();
 		ctx.run("ai_fastmode 1").expect("session write");
 		let turn = session.begin_turn().expect("turn");
@@ -471,7 +479,8 @@ mod tests {
 		let path = directory.path().join("reset.oms");
 		let ctx = Arc::new(Ctx::new());
 		let mut session = open(&path);
-		let journal = ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed);
+		let journal =
+			ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed, TRUST);
 		ctx.run("ai_thinking low").expect("session write");
 		journal.flush(&mut session).expect("flush");
 		assert!(
@@ -491,7 +500,7 @@ mod tests {
 		let restored = Arc::new(Ctx::new());
 		let reopened = open(&path);
 		let _journal =
-			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed);
+			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed, TRUST);
 		assert_eq!(omp_agent::AI_THINKING.get(&restored), omp_agent::AI_THINKING.get(&Ctx::new()));
 	}
 
@@ -528,7 +537,8 @@ mod tests {
 		let path = directory.path().join("pin.oms");
 		let ctx = Arc::new(Ctx::new());
 		let mut session = open(&path);
-		let journal = ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed);
+		let journal =
+			ConJournal::attach(Arc::clone(&ctx), session.dom(), ClassScope::Composed, TRUST);
 		let pinned = with_pin(&omp_con::Kv::new(), &provider, &resolver.digest(&record));
 		AI_ACCOUNT_PINS
 			.set(&ctx, pinned.clone())
@@ -546,7 +556,7 @@ mod tests {
 		let restored = Arc::new(Ctx::new());
 		let mut reopened = open(&path);
 		let rejournal =
-			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed);
+			ConJournal::attach(Arc::clone(&restored), reopened.dom(), ClassScope::Composed, TRUST);
 		let recorded = AI_ACCOUNT_PINS.get(&restored);
 		assert_eq!(
 			resolver
@@ -620,8 +630,12 @@ mod tests {
 		// `--resume child.oms`: the composition follows the journaled class.
 		let child_path = directory.path().join("child.oms");
 		let mut child = child_session(&child_path, "scout", 1);
-		let journal =
-			ConJournal::attach(Arc::clone(&ctx), child.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
+		let journal = ConJournal::attach(
+			Arc::clone(&ctx),
+			child.dom(),
+			ClassScope::Journaled(Arc::clone(&cfg)),
+			TRUST,
+		);
 		assert_eq!(omp_agent::AI_MODEL.get(&ctx), "scout/model");
 		assert_eq!(omp_agent::AI_THINKING.get(&ctx), "low");
 		assert!(omp_agent::AI_FASTMODE.get(&ctx));
@@ -659,7 +673,8 @@ mod tests {
 
 		// A spawned child's composition configured itself: nothing is applied.
 		let (composed, _) = console();
-		let _spawned = ConJournal::attach(Arc::clone(&composed), child.dom(), ClassScope::Composed);
+		let _spawned =
+			ConJournal::attach(Arc::clone(&composed), child.dom(), ClassScope::Composed, TRUST);
 		assert_eq!(omp_agent::AI_THINKING.get(&composed), omp_agent::AI_THINKING.get(&Ctx::new()));
 	}
 
@@ -671,7 +686,8 @@ mod tests {
 		let cfg = class_files(directory.path(), &[("subagent.cfg", "ai_fastmode 1\n")]);
 		let (ctx, replies) = console();
 		let child = child_session(&directory.path().join("gone.oms"), "retired", 1);
-		let _journal = ConJournal::attach(Arc::clone(&ctx), child.dom(), ClassScope::Journaled(cfg));
+		let _journal =
+			ConJournal::attach(Arc::clone(&ctx), child.dom(), ClassScope::Journaled(cfg), TRUST);
 		assert!(omp_agent::AI_FASTMODE.get(&ctx), "the default subagent configuration applies");
 		assert_eq!(crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&ctx), 1);
 		let replies = replies.lock().join("\n");
@@ -685,6 +701,7 @@ mod tests {
 			Arc::clone(&task_ctx),
 			task.dom(),
 			ClassScope::Journaled(class_files(empty.path(), &[])),
+			TRUST,
 		);
 		assert!(task_replies.lock().is_empty(), "{:?}", task_replies.lock());
 		assert_eq!(crate::subagent::settings::SV_TASK_RECURSION_DEPTH.get(&task_ctx), 1);
@@ -717,8 +734,12 @@ mod tests {
 		// The main chat, on a main session: one journaled write, two the
 		// journal does not keep (variables without `SESSION`).
 		let mut main = open(&directory.path().join("main.oms"));
-		let journal =
-			ConJournal::attach(Arc::clone(&ctx), main.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
+		let journal = ConJournal::attach(
+			Arc::clone(&ctx),
+			main.dom(),
+			ClassScope::Journaled(Arc::clone(&cfg)),
+			TRUST,
+		);
 		ctx.run("ai_thinking xhigh").expect("journaled write");
 		ctx.run("sv_lsp_enabled 0").expect("unjournaled write");
 		ctx.run("ai_external_thinking 1")
@@ -822,8 +843,12 @@ mod tests {
 		.expect("user cfg");
 		let tool = task_tool(&ctx, &cfg);
 		let main = open(&directory.path().join("main.oms"));
-		let journal =
-			ConJournal::attach(Arc::clone(&ctx), main.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
+		let journal = ConJournal::attach(
+			Arc::clone(&ctx),
+			main.dom(),
+			ClassScope::Journaled(Arc::clone(&cfg)),
+			TRUST,
+		);
 		assert!(tool.advertised(), "the main session may delegate");
 
 		// Children spawned from here: `scout` at depth 1, its own `scout` at 2.
@@ -872,29 +897,33 @@ mod tests {
 		let child_path = directory.path().join("child.oms");
 		drop(child_session(&child_path, "reviewer", 1));
 		let (ctx, replies) = console();
-		let main = daemon_policy::from_con(&ctx);
+		let main = daemon_policy::from_con(&ctx, TRUST);
 		let scope = ClassScope::Journaled(Arc::clone(&cfg));
 
 		super::present_journaled_class(&ctx, &scope, &child_path);
 		assert_eq!(SV_SANDBOX_MODE.get(&ctx), ExecSandboxMode::ReadOnly);
-		let early = daemon_policy::from_con(&ctx);
+		let early = daemon_policy::from_con(&ctx, TRUST);
 		assert_ne!(early, main, "the class policy is in force before the environment starts");
 		let child = open(&child_path);
-		let _journal = ConJournal::attach(Arc::clone(&ctx), child.dom(), scope);
-		assert_eq!(daemon_policy::from_con(&ctx), early, "the session presents the same policy");
+		let _journal = ConJournal::attach(Arc::clone(&ctx), child.dom(), scope, TRUST);
+		assert_eq!(
+			daemon_policy::from_con(&ctx, TRUST),
+			early,
+			"the session presents the same policy"
+		);
 		assert!(replies.lock().is_empty(), "{:?}", replies.lock());
 
 		// A new session, a main session and a composed child keep the console.
 		let (fresh, _) = console();
 		let journaled = ClassScope::Journaled(Arc::clone(&cfg));
 		super::present_journaled_class(&fresh, &journaled, &directory.path().join("new.oms"));
-		assert_eq!(daemon_policy::from_con(&fresh), main);
+		assert_eq!(daemon_policy::from_con(&fresh, TRUST), main);
 		let main_path = directory.path().join("main.oms");
 		drop(open(&main_path));
 		super::present_journaled_class(&fresh, &journaled, &main_path);
-		assert_eq!(daemon_policy::from_con(&fresh), main);
+		assert_eq!(daemon_policy::from_con(&fresh, TRUST), main);
 		super::present_journaled_class(&fresh, &ClassScope::Composed, &child_path);
-		assert_eq!(daemon_policy::from_con(&fresh), main);
+		assert_eq!(daemon_policy::from_con(&fresh, TRUST), main);
 
 		// A class gone from its definitions is reported once, by the attach.
 		let retired_path = directory.path().join("retired.oms");
@@ -903,7 +932,7 @@ mod tests {
 		super::present_journaled_class(&retired, &journaled, &retired_path);
 		assert!(replies.lock().is_empty(), "the early presentation is quiet");
 		let session = open(&retired_path);
-		let _journal = ConJournal::attach(Arc::clone(&retired), session.dom(), journaled);
+		let _journal = ConJournal::attach(Arc::clone(&retired), session.dom(), journaled, TRUST);
 		let reported = replies.lock().join("\n");
 		assert_eq!(
 			reported
@@ -929,9 +958,13 @@ mod tests {
 		]);
 		let (ctx, replies) = console();
 		let main = open(&directory.path().join("main.oms"));
-		let journal =
-			ConJournal::attach(Arc::clone(&ctx), main.dom(), ClassScope::Journaled(Arc::clone(&cfg)));
-		let composed = daemon_policy::from_con(&ctx);
+		let journal = ConJournal::attach(
+			Arc::clone(&ctx),
+			main.dom(),
+			ClassScope::Journaled(Arc::clone(&cfg)),
+			TRUST,
+		);
+		let composed = daemon_policy::from_con(&ctx, TRUST);
 
 		// A class that keeps the policy says nothing.
 		let scout = child_session(&directory.path().join("scout.oms"), "scout", 1);
@@ -940,11 +973,11 @@ mod tests {
 
 		let reviewer = child_session(&directory.path().join("reviewer.oms"), "reviewer", 1);
 		journal.resync(reviewer.dom());
-		let presented = daemon_policy::from_con(&ctx);
+		let presented = daemon_policy::from_con(&ctx, TRUST);
 		assert_ne!(presented, composed);
 		journal.resync(reviewer.dom());
 		journal.resync(main.dom());
-		assert_eq!(daemon_policy::from_con(&ctx), composed);
+		assert_eq!(daemon_policy::from_con(&ctx, TRUST), composed);
 		let reported = replies.lock().join("\n");
 		assert_eq!(
 			reported
@@ -993,7 +1026,7 @@ mod tests {
 
 		// A daemon started under the main configuration serves the project.
 		let main = Arc::new(Ctx::new());
-		let main_policy = daemon_policy::from_con(&main);
+		let main_policy = daemon_policy::from_con(&main, TRUST);
 		let socket = environment_socket(&state, &main_policy).expect("environment socket");
 		let server = EnvServer::open_project(
 			&root,
@@ -1054,7 +1087,7 @@ mod tests {
 			.fallback_notice
 			.clone()
 			.expect("the resumed child joined the main configuration's daemon");
-		let class_policy = daemon_policy::from_con(&session);
+		let class_policy = daemon_policy::from_con(&session, TRUST);
 		assert_ne!(class_policy, main_policy);
 		assert!(
 			notice.contains(&format!(

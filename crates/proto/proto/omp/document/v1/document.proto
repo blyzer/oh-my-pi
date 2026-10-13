@@ -1107,6 +1107,21 @@ message ServerHello {
   // Local executable-generation fingerprint; empty when the server could not
   // read its executable metadata.
   string server_build = 6;
+  // The workspace trust decision the authority loads the project's LSP and
+  // DAP configuration and local bins under. A client attaches to a running
+  // authority only when it equals its own decision, so trusted and untrusted
+  // sessions never share one roster.
+  WorkspaceTrust workspace_trust = 7;
+}
+
+// Whether a workspace's project-sourced inputs load with the operator's
+// authority (`omp_ext::workspace_trust::WorkspaceTrust`).
+enum WorkspaceTrust {
+  // Unreported: an authority that predates the field. Never equal to a
+  // client's decision, so it is never joined.
+  WORKSPACE_TRUST_UNSPECIFIED = 0;
+  WORKSPACE_TRUST_UNTRUSTED = 1;
+  WORKSPACE_TRUST_TRUSTED = 2;
 }
 
 message CancelRequest {

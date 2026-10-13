@@ -115,7 +115,8 @@ async fn remote_login(provider: &str, alias: &str, dry_run: bool) -> miette::Res
 		}
 		return Ok(());
 	}
-	let service = ssh_cmd::service(alias, &ssh_cmd::host_paths()?)?;
+	let paths = ssh_cmd::host_paths()?;
+	let service = ssh_cmd::service(alias, &paths, ssh_cmd::workspace_trust(&paths)?)?;
 	let forward = match callback_port {
 		Some(port) => Some(
 			service

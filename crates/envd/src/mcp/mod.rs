@@ -34,7 +34,7 @@ use std::{
 	path::{Path, PathBuf},
 	sync::{
 		Arc, Weak,
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicU64, Ordering},
 	},
 };
 
@@ -54,7 +54,7 @@ use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 use self::config::ConfigSourceKind;
-pub use self::settings::McpSettings;
+pub use self::settings::{McpSettings, ProjectMcpPolicy};
 use super::exthost::control::ControlConnectionIdentity;
 
 const NOTIFICATION_HISTORY: usize = 256;
@@ -181,14 +181,14 @@ pub struct McpLeafDefinition {
 
 /// One environment's MCP service and monotone definition authority.
 pub struct McpService {
-	state:                 RwLock<State>,
-	config_paths:          RwLock<Option<McpConfigPaths>>,
-	manager:               RwLock<Option<Weak<manager::McpManager>>>,
-	enable_project_config: AtomicBool,
-	leaves:                LeafReplacementRegistry<McpLeaf>,
-	cache:                 Arc<McpDefinitionCache>,
-	definition_epoch:      AtomicU64,
-	next_subscriber:       AtomicU64,
+	state:            RwLock<State>,
+	config_paths:     RwLock<Option<McpConfigPaths>>,
+	manager:          RwLock<Option<Weak<manager::McpManager>>>,
+	project_config:   RwLock<ProjectMcpPolicy>,
+	leaves:           LeafReplacementRegistry<McpLeaf>,
+	cache:            Arc<McpDefinitionCache>,
+	definition_epoch: AtomicU64,
+	next_subscriber:  AtomicU64,
 }
 
 impl McpService {
@@ -196,18 +196,18 @@ impl McpService {
 	/// storage-authority definition cache.
 	pub fn open(cache_path: impl AsRef<Path>) -> Result<Arc<Self>, McpCacheError> {
 		Ok(Arc::new(Self {
-			state:                 RwLock::new(State {
+			state:            RwLock::new(State {
 				servers:     BTreeMap::new(),
 				history:     VecDeque::with_capacity(NOTIFICATION_HISTORY),
 				subscribers: BTreeMap::new(),
 			}),
-			config_paths:          RwLock::new(None),
-			manager:               RwLock::new(None),
-			enable_project_config: AtomicBool::new(false),
-			leaves:                LeafReplacementRegistry::new(),
-			cache:                 Arc::new(McpDefinitionCache::open(cache_path)?),
-			definition_epoch:      AtomicU64::new(0),
-			next_subscriber:       AtomicU64::new(1),
+			config_paths:     RwLock::new(None),
+			manager:          RwLock::new(None),
+			project_config:   RwLock::new(ProjectMcpPolicy::Withheld),
+			leaves:           LeafReplacementRegistry::new(),
+			cache:            Arc::new(McpDefinitionCache::open(cache_path)?),
+			definition_epoch: AtomicU64::new(0),
+			next_subscriber:  AtomicU64::new(1),
 		}))
 	}
 
@@ -228,11 +228,9 @@ impl McpService {
 	/// policy.
 	pub async fn start_native_configs(
 		&self,
-		enable_project_config: bool,
+		project_config: ProjectMcpPolicy,
 	) -> Result<manager::StartupSnapshot, McpServiceError> {
-		self
-			.enable_project_config
-			.store(enable_project_config, Ordering::Release);
+		*self.project_config.write() = project_config;
 		self.reload_native_configs().await
 	}
 
@@ -245,11 +243,10 @@ impl McpService {
 			.read()
 			.clone()
 			.ok_or(McpServiceError::InvalidRequest)?;
-		let enable_project_config = self.enable_project_config.load(Ordering::Acquire);
-		let resolved =
-			task::spawn_blocking(move || load_resolved_config(paths, enable_project_config))
-				.await
-				.map_err(|_| McpServiceError::InvalidRequest)??;
+		let project_config = *self.project_config.read();
+		let resolved = task::spawn_blocking(move || load_resolved_config(paths, project_config))
+			.await
+			.map_err(|_| McpServiceError::InvalidRequest)??;
 		let manager = self
 			.manager
 			.read()
@@ -847,7 +844,7 @@ impl McpConfigPaths {
 
 fn load_resolved_config(
 	paths: McpConfigPaths,
-	enable_project_config: bool,
+	project_config: ProjectMcpPolicy,
 ) -> Result<config::ResolvedConfig, McpServiceError> {
 	use config::ConfigSource;
 
@@ -863,7 +860,7 @@ fn load_resolved_config(
 	})
 	.collect::<Result<Vec<_>, McpServiceError>>()?;
 	sources.extend(discovery::sources(&paths));
-	Ok(config::resolve_sources(&sources, enable_project_config))
+	Ok(config::resolve_sources(&sources, project_config))
 }
 
 fn config_request(
@@ -1079,7 +1076,7 @@ mod config_tests {
 		service.bind_manager(&manager);
 
 		let snapshot = service
-			.start_native_configs(false)
+			.start_native_configs(ProjectMcpPolicy::Withheld)
 			.await
 			.expect("startup config");
 		assert_eq!(snapshot.status.servers.len(), 1);
@@ -1108,8 +1105,11 @@ mod config_tests {
 			project.clone(),
 		);
 		service.bind_manager(&manager);
-		// The test writes a project-scoped server, which loads only on opt-in.
-		service.start_native_configs(true).await.expect("startup");
+		// The test writes a project-scoped server, which loads only when trusted.
+		service
+			.start_native_configs(ProjectMcpPolicy::Trusted)
+			.await
+			.expect("startup");
 		service
 			.config(pb::McpConfigRequest {
 				action:        pb::McpConfigAction::Add as i32,
@@ -1153,7 +1153,7 @@ mod config_tests {
 		service.bind_manager(&manager);
 
 		let error = service
-			.start_native_configs(true)
+			.start_native_configs(ProjectMcpPolicy::Trusted)
 			.await
 			.expect_err("invalid scoped config");
 		assert!(matches!(
@@ -1206,8 +1206,10 @@ mod config_tests {
 		}
 	}
 
+	/// Project-scoped files load only for a trusted workspace or after the
+	/// user-level opt-in; an untrusted workspace without it loads none.
 	#[test]
-	fn project_scoped_files_load_only_after_a_user_level_opt_in() {
+	fn project_scoped_files_load_only_when_trusted_or_after_a_user_level_opt_in() {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let user_root = scratch.path().join(".o2");
 		let project = scratch.path().join("project");
@@ -1215,7 +1217,7 @@ mod config_tests {
 		write_all(&project, &fixtures);
 		let paths = McpConfigPaths::new(&user_root, &project);
 
-		let default = McpSettings::default().enable_project_config;
+		let default = McpSettings::default().project_config;
 		let off = load_resolved_config(paths.clone(), default).expect("default load");
 		assert!(
 			off.servers.is_empty(),
@@ -1223,9 +1225,11 @@ mod config_tests {
 			off.servers.keys().collect::<Vec<_>>()
 		);
 
-		let on = load_resolved_config(paths, true).expect("opted-in load");
-		for (path, name, _) in &fixtures {
-			assert!(on.servers.contains_key(*name), "{path} loads once the user opts in");
+		for policy in [ProjectMcpPolicy::Trusted, ProjectMcpPolicy::UserOptIn] {
+			let on = load_resolved_config(paths.clone(), policy).expect("admitted load");
+			for (path, name, _) in &fixtures {
+				assert!(on.servers.contains_key(*name), "{path} loads under {policy:?}");
+			}
 		}
 	}
 
@@ -1381,7 +1385,11 @@ mod config_tests {
 		let executor = Arc::new(CountingExecutor(parking_lot::Mutex::new(Vec::new())));
 		manager.bind_command_executor(executor.clone());
 		service.bind_manager(&manager);
-		service.start_native_configs(true).await.expect("startup");
+		// Trusted: project values stay literal even so (owner decision Q6).
+		service
+			.start_native_configs(ProjectMcpPolicy::Trusted)
+			.await
+			.expect("startup");
 		for _ in 0..500 {
 			if connector.seen.lock().len() == 4 {
 				break;

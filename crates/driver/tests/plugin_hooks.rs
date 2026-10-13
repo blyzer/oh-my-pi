@@ -31,7 +31,10 @@ use omp_driver::{
 	plugin_hooks::{PluginHookHost, PluginHookSession},
 	subagent::AgentName,
 };
-use omp_envd::{AttachOptions, ProjectEnvironment, RegistryBridges, mcp::McpConfigPaths};
+use omp_envd::{
+	AttachOptions, ProjectEnvironment, RegistryBridges,
+	mcp::{McpConfigPaths, McpSettings},
+};
 use omp_ext::{
 	claude_plugin::{
 		ClaudePlugins, InstallScope, InstalledPluginEntry, InstalledPluginsRegistry, REGISTRY_FILE,
@@ -202,7 +205,7 @@ impl Fixture {
 		let plugins = ClaudePlugins::resolve(&self.data, &self.root, None, WorkspaceTrust::Untrusted);
 		let agent_plugins = McpConfigPaths::new(&self.scratch.path().join("home/.o2"), &self.root)
 			.with_command_approvals(plugins.command_approvals.clone());
-		blocked_launches(&plugins, &agent_plugins, &omp_envd::mcp::McpSettings::default())
+		blocked_launches(&plugins, &agent_plugins, &McpSettings::default())
 	}
 
 	/// The plugin's `${CLAUDE_PLUGIN_DATA}`.

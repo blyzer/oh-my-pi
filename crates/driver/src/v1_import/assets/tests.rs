@@ -294,7 +294,9 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 			assert!(read(&agent.join(name)).contains(tag), "{name}");
 		}
 		// LSP and DAP under `agent/`, where the v2 hosts read them.
-		let lsp = discover_native_lsp_sources(Some(config), &fixture.project).expect("lsp");
+		let lsp =
+			discover_native_lsp_sources(Some(config), &fixture.project, WorkspaceTrust::Untrusted)
+				.expect("lsp");
 		assert!(
 			lsp.iter()
 				.any(|source| source.provenance.source.ends_with("agent/lsp.json"))
@@ -318,8 +320,11 @@ fn assets_land_where_v2_reads_them_once_per_profile() {
 				.expect("mcp")
 				.is_some()
 		);
-		let hosts =
-			HostStore::load_layered(&HostPaths::new(config, &fixture.project)).expect("hosts");
+		let hosts = HostStore::load_layered(
+			&HostPaths::new(config, &fixture.project),
+			WorkspaceTrust::Untrusted,
+		)
+		.expect("hosts");
 		assert_eq!(hosts.get("build").expect("build").host_key.as_str(), HOST_KEY_SHA256);
 		for step in ASSET_STEPS {
 			assert!(step.marker(config).is_set(), "{step} marker for {profile:?}");
@@ -585,7 +590,8 @@ fn lsp_dap_and_secrets_copy_only_what_v2_can_load() {
 	assert!(!config.join("agent/.lsp.yaml").exists());
 	assert!(!config.join("agent/dap.json").exists(), "a new adapter needs a command");
 	assert!(!config.join("secrets.yml").exists());
-	let lsp = discover_native_lsp_sources(Some(config), &fixture.project).expect("lsp");
+	let lsp = discover_native_lsp_sources(Some(config), &fixture.project, WorkspaceTrust::Untrusted)
+		.expect("lsp");
 	omp_envd::docserver::lsp_config::load_lsp_config(&lsp).expect("the copied LSP file loads");
 	assert_eq!(kinds(&report, ImportStep::LspDap), [
 		(V1Item::Lsp, Some("agent/lsp.json"), OutcomeKind::Imported),
@@ -619,7 +625,11 @@ fn a_project_omp_converts_in_place_once() {
 	let report = fixture.project(&fixture.project);
 
 	let config = fixture.config();
-	let hosts = HostStore::load_layered(&HostPaths::new(config, &fixture.project)).expect("hosts");
+	// The converted hosts live in the project, so only a trusted workspace
+	// reads them.
+	let hosts =
+		HostStore::load_layered(&HostPaths::new(config, &fixture.project), WorkspaceTrust::Trusted)
+			.expect("hosts");
 	assert_eq!(hosts.get("stage").expect("stage").address.as_str(), "stage.example");
 	assert!(omp.join("hosts.toml").is_file());
 	assert!(!config.join("hosts.toml").exists(), "project hosts stay in the project");

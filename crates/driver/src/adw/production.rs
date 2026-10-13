@@ -132,11 +132,17 @@ impl ProductionAdwHost {
 					trusted_extensions: Vec::new(),
 					contributed_values: Vec::new(),
 					con:                Arc::clone(&self.ctx),
-					bridges:            omp_envd::RegistryBridges::default(),
+					bridges:            omp_envd::RegistryBridges {
+						content: omp_envd::ActiveContentInputs {
+							workspace_trust: self.workspace_trust.trust(),
+							..omp_envd::ActiveContentInputs::default()
+						},
+						..omp_envd::RegistryBridges::default()
+					},
 					spawn_idle_timeout: None,
 					spawn_policy:       CfgFiles::new(Some(&self.root))
 						.ok()
-						.and_then(|files| files.daemon_policy().ok()),
+						.and_then(|files| files.daemon_policy(self.workspace_trust.trust()).ok()),
 				})
 				.await
 				.map_err(ProductionError::from)

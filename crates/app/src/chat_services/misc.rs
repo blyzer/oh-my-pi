@@ -21,7 +21,10 @@ use omp_envd::{
 	admission::{Provenance, SandboxState, call_approval_mode},
 	ssh::{AuthPolicy, HostConfig, HostPaths, HostStore},
 };
-use omp_ext::workspace_trust::inventory::{PROJECT_DIR, SECRETS_FILE};
+use omp_ext::workspace_trust::{
+	WorkspaceTrust,
+	inventory::{PROJECT_DIR, SECRETS_FILE},
+};
 use omp_tool::Confinement;
 use tokio_util::sync::CancellationToken;
 
@@ -148,15 +151,18 @@ fn ssh_paths(state: &ServiceState) -> ServiceResult<HostPaths> {
 	Ok(HostPaths::new(&user_root, &state.project))
 }
 
-/// `/ssh list`: project declarations shadow user ones with the same alias.
+/// `/ssh list`: the hosts a session reaches, as the environment layers them:
+/// every user host, then, in a trusted workspace, the project hosts whose
+/// names the user does not already declare.
 pub fn ssh_hosts(state: &ServiceState) -> ServiceResult<Vec<SshHostRow>> {
 	let paths = ssh_paths(state)?;
 	let mut rows = Vec::new();
 	let mut seen = std::collections::BTreeSet::new();
-	for (scope, path, containment) in [
-		("project", &paths.project, Containment::Within(&paths.root)),
-		("user", &paths.user, Containment::Unconfined),
-	] {
+	let mut scopes = vec![("user", &paths.user, Containment::Unconfined)];
+	if state.workspace_trust == WorkspaceTrust::Trusted {
+		scopes.push(("project", &paths.project, Containment::Within(&paths.root)));
+	}
+	for (scope, path, containment) in scopes {
 		let store = HostStore::load(path, containment).map_err(failed)?;
 		for alias in store.aliases() {
 			if !seen.insert(alias.clone()) {

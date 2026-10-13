@@ -17,6 +17,7 @@ use omp_envd::docserver::{
 	},
 	lsp_registry::root_marker_ancestor,
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_proto::document::v1::{LspServerStage, LspStatusResponse};
 
 /// Rows reserved by the welcome box.
@@ -79,19 +80,22 @@ pub fn lsp_from_status(status: &LspStatusResponse) -> Vec<LspServer> {
 }
 
 /// Configuration-only fallback when the Environment roster is unreachable:
-/// language servers declared for `project` (bundled, user, project layers —
-/// the same sources the Environment's supervisor discovers), filtered to
-/// enabled primary servers whose root markers match the checkout. A server
-/// whose binary resolves (from `$PATH`, or first from the project-local bins
-/// when `project_binaries` — the user-level `sv_lsp_project_binaries` — is
-/// set) is `Available`; one whose binary is missing is `Error`.
+/// language servers declared for `project` (bundled, user, and — when the
+/// workspace `trust` admits them — project layers: the same sources the
+/// Environment's supervisor discovers), filtered to enabled primary servers
+/// whose root markers match the checkout. A server whose binary resolves
+/// (from `$PATH`, or first from the project-local bins when
+/// `project_binaries` — the user-level `sv_lsp_project_binaries` — is set in
+/// a trusted workspace) is `Available`; one whose binary is missing is
+/// `Error`.
 pub fn lsp_servers(
 	project: &Path,
 	user_root: Option<&Path>,
 	project_binaries: bool,
+	trust: WorkspaceTrust,
 ) -> Vec<LspServer> {
-	let config =
-		discover_native_lsp_sources(user_root, project).and_then(|sources| load_lsp_config(&sources));
+	let config = discover_native_lsp_sources(user_root, project, trust)
+		.and_then(|sources| load_lsp_config(&sources));
 	let config = match config {
 		Ok(config) => config,
 		Err(error) => {
@@ -104,7 +108,7 @@ pub fn lsp_servers(
 	} else {
 		BinaryPlatform::Posix
 	};
-	let local_root = project_binaries.then_some(project);
+	let local_root = (project_binaries && trust == WorkspaceTrust::Trusted).then_some(project);
 	let path = env::var_os("PATH");
 	project_lsp(&config, project, |server| {
 		resolve_lsp_binary(

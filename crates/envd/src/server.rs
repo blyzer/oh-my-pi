@@ -25,6 +25,7 @@ use omp_core::{Hash32, Str, Ulid, sf};
 use omp_env::{
 	EnvClient, InProcessEnvTransport, partition::FramePipe, project_state::DaemonPolicy,
 };
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::blob;
 use omp_proto::{
 	blob::v1 as blob_pb,
@@ -91,9 +92,9 @@ use super::{
 	blobs::{BlobError, BlobHost, BlobId, BlobRead},
 	browser_daemon::BrowserSettings,
 	docs::{
-		AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHost,
-		DocumentLease, EditorCapabilities, EditorIoError, LspEvents, LspRegistryEvent, WriteBack,
-		WriteBackOutcome,
+		AcpDocumentBackend, DapRegistryEvent, DocumentError, DocumentEvents, DocumentHello,
+		DocumentHost, DocumentLease, EditorCapabilities, EditorIoError, LspEvents, LspRegistryEvent,
+		ServedWorkspaceTrust, WriteBack, WriteBackOutcome,
 	},
 	editor_base::{EditorRoute, EditorSession},
 	eval::{
@@ -400,6 +401,22 @@ pub enum EnvdError {
 	DocumentAuthorityHeldBy {
 		/// Canonical project path whose authority is held.
 		path: PathBuf,
+	},
+	/// The project's document authority, which another live session started,
+	/// loads the project's LSP and DAP configuration under a different
+	/// workspace trust decision than this session's, so this session must not
+	/// share its language- and debug-server roster.
+	#[error(
+		"another omp session holds the document authority for {path:?} under workspace trust \
+		 `{served}`, not this session's `{expected}`; close that session or wait for it to idle out"
+	)]
+	DocumentAuthorityTrustMismatch {
+		/// Canonical project path whose authority is held.
+		path:     PathBuf,
+		/// The workspace trust this session decided.
+		expected: WorkspaceTrust,
+		/// The workspace trust the running authority reported.
+		served:   ServedWorkspaceTrust,
 	},
 	/// The project daemon on the environment socket enforces a different
 	/// sandbox and approval policy than the client resolved, so the client
@@ -2499,10 +2516,12 @@ impl EnvServer {
 				.with_command_approvals(bridges.content.command_approvals.clone()),
 		);
 		let lsp_settings = LspSettings::from_con(con);
+		let workspace_trust = bridges.content.workspace_trust;
 		let doc_config = crate::docserver::ServerConfig::new(root)
 			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
 			.with_server_build(omp_env::build_id::current())
-			.with_project_binaries(lsp_settings.project_binaries);
+			.with_project_binaries(lsp_settings.project_binaries)
+			.with_workspace_trust(workspace_trust);
 		let environment = crate::docserver::Environment::new(doc_config)
 			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
 		let (document_client, document_server) = duplex(64 * 1024);
@@ -2589,11 +2608,15 @@ impl EnvServer {
 		)?;
 		let (host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
-		let enforced =
-			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
+		let enforced = crate::daemon_policy::of(
+			&sandbox_settings,
+			&host_settings.tools,
+			&shell_settings,
+			workspace_trust,
+		);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
-		let mcp_settings = McpSettings::from_con(con);
-		mcp.start_native_configs(mcp_settings.enable_project_config)
+		let mcp_settings = McpSettings::from_con(con, workspace_trust);
+		mcp.start_native_configs(mcp_settings.project_config)
 			.await
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
 		let workspace_ops = WorkspaceOperations::open(
@@ -2746,9 +2769,11 @@ impl EnvServer {
 		);
 		let lsp_settings = LspSettings::from_con(con);
 		let document_lsp = lsp_settings.native_options();
+		let workspace_trust = bridges.content.workspace_trust;
 		let document_config = DocumentConfigInputs {
 			user_config_root: Some(document_user_config_root()?),
-			claude_plugins:   Arc::clone(&bridges.content.claude_plugins),
+			claude_plugins: Arc::clone(&bridges.content.claude_plugins),
+			workspace_trust,
 		};
 		let server_build = Str::from(omp_env::build_id::current());
 		let (documents, mut document_authority) = connect_or_start_docserver(
@@ -2877,14 +2902,18 @@ impl EnvServer {
 		)?;
 		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
-		let enforced =
-			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
+		let enforced = crate::daemon_policy::of(
+			&sandbox_settings,
+			&host_settings.tools,
+			&shell_settings,
+			workspace_trust,
+		);
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		host_settings.tools = host_settings
 			.tools
 			.with_approval_mode_override(approval_mode);
-		let mcp_settings = McpSettings::from_con(con);
-		mcp.start_native_configs(mcp_settings.enable_project_config)
+		let mcp_settings = McpSettings::from_con(con, workspace_trust);
+		mcp.start_native_configs(mcp_settings.project_config)
 			.await
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
 		let workspace_ops = WorkspaceOperations::open(
@@ -3064,10 +3093,11 @@ impl EnvServer {
 		);
 		mcp.bind_manager(&mcp_manager);
 		mcp_manager.bind_runtime_settings(con);
-		let mcp_settings = McpSettings::from_con(con);
+		let workspace_trust = bridges.content.workspace_trust;
+		let mcp_settings = McpSettings::from_con(con, workspace_trust);
 		// Native config mounting requires the bound manager: reload resolves
 		// through the live transport supervisor.
-		mcp.start_native_configs(mcp_settings.enable_project_config)
+		mcp.start_native_configs(mcp_settings.project_config)
 			.await
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
 
@@ -3104,8 +3134,12 @@ impl EnvServer {
 		)?;
 		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
-		let enforced =
-			crate::daemon_policy::of(&sandbox_settings, &host_settings.tools, &shell_settings);
+		let enforced = crate::daemon_policy::of(
+			&sandbox_settings,
+			&host_settings.tools,
+			&shell_settings,
+			workspace_trust,
+		);
 		host_settings.tools = host_settings
 			.tools
 			.with_approval_mode_override(approval_mode);
@@ -12456,9 +12490,11 @@ pub async fn run_with_registry(
 		Some(socket) => socket,
 		None => omp_env::project_state::environment_socket(
 			&state_dir,
-			&crate::daemon_policy::from_con(&con),
+			&crate::daemon_policy::from_con(&con, args.workspace_trust),
 		)?,
 	};
+	let mut bridges = bridges;
+	bridges.content.workspace_trust = args.workspace_trust;
 	let require_document_ownership = args.docserver_socket.is_none();
 	let docserver_socket = if let Some(socket) = args.docserver_socket {
 		socket
@@ -12658,6 +12694,10 @@ struct DocumentConfigInputs {
 	/// Installed, enabled Claude-format marketplace plugins whose LSP and DAP
 	/// declarations join discovery.
 	claude_plugins:   Arc<[omp_ext::claude_plugin::ClaudePlugin]>,
+	/// The workspace trust a started authority loads the project's LSP/DAP
+	/// configuration and local bins under, and that a running one must report
+	/// to be joined.
+	workspace_trust:  WorkspaceTrust,
 }
 
 /// The user configuration root the document authority probes for `lsp.json`
@@ -12731,7 +12771,7 @@ async fn connect_or_start_docserver(
 			}
 			match DocumentHost::connect_uds_stream(socket, stream).await {
 				Ok(documents) => {
-					validate_document_root(root, documents.hello().root_uri.as_str())?;
+					validate_document_authority(root, documents.hello(), config.workspace_trust)?;
 					if !omp_env::build_id::is_stale(
 						server_build.as_str(),
 						documents.hello().server_build.as_str(),
@@ -12776,6 +12816,7 @@ async fn connect_or_start_docserver(
 					lsp:              task_lsp,
 					user_config_root: task_config.user_config_root,
 					claude_plugins:   task_config.claude_plugins,
+					workspace_trust:  task_config.workspace_trust,
 					shutdown:         Some(task_shutdown),
 					server_build:     task_server_build,
 					connections:      task_connections,
@@ -12802,7 +12843,7 @@ async fn connect_or_start_docserver(
 			if let Ok(stream) = UnixStream::connect(socket).await {
 				match DocumentHost::connect_uds_stream(socket, stream).await {
 					Ok(documents) => {
-						validate_document_root(root, documents.hello().root_uri.as_str())?;
+						validate_document_authority(root, documents.hello(), config.workspace_trust)?;
 						if omp_env::build_id::is_stale(
 							server_build.as_str(),
 							documents.hello().server_build.as_str(),
@@ -12860,7 +12901,7 @@ async fn connect_or_start_docserver(
 			return Err(document_authority_held(root));
 		}
 		let documents = DocumentHost::connect_pipe_stream(socket, stream).await?;
-		validate_document_root(root, documents.hello().root_uri.as_str())?;
+		validate_document_authority(root, documents.hello(), config.workspace_trust)?;
 		if omp_env::build_id::is_stale(server_build.as_str(), documents.hello().server_build.as_str())
 		{
 			return Err(document_authority_held(root));
@@ -12868,11 +12909,13 @@ async fn connect_or_start_docserver(
 		return Ok((documents, None));
 	}
 	let listener = OwnerPipeListener::bind(socket)?;
-	let config = crate::docserver::ServerConfig::new(root)
+	let workspace_trust = config.workspace_trust;
+	let server_config = crate::docserver::ServerConfig::new(root)
 		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
 		.with_server_build(server_build)
-		.with_project_binaries(lsp.project_binaries);
-	let environment = crate::docserver::Environment::new(config)
+		.with_project_binaries(lsp.project_binaries)
+		.with_workspace_trust(workspace_trust);
+	let environment = crate::docserver::Environment::new(server_config)
 		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
 	if lsp.enabled {
 		match crate::docserver::NativeLspSupervisor::discover(
@@ -12906,20 +12949,38 @@ async fn connect_or_start_docserver(
 	let authority = DocumentAuthority { shutdown, task: Some(task) };
 	let stream = crate::docserver::windows::connect_owner_pipe(socket)?;
 	let documents = DocumentHost::connect_pipe_stream(socket, stream).await?;
-	validate_document_root(root, documents.hello().root_uri.as_str())?;
+	validate_document_authority(root, documents.hello(), workspace_trust)?;
 	Ok((documents, Some(authority)))
 }
 
-fn validate_document_root(root: &Path, authority_root_uri: &str) -> Result<(), EnvdError> {
-	let authority_root = Url::parse(authority_root_uri)
+/// Admits the document authority that answered `hello` only when it serves
+/// `root` and loads the project's LSP/DAP configuration under the session's
+/// own workspace `trust`, so a trusted and an untrusted session never share
+/// one language- and debug-server roster.
+fn validate_document_authority(
+	root: &Path,
+	hello: &DocumentHello,
+	trust: WorkspaceTrust,
+) -> Result<(), EnvdError> {
+	let authority_root = Url::parse(&hello.root_uri)
 		.ok()
 		.and_then(|uri| uri.to_file_path().ok())
 		.and_then(|path| fs::canonicalize(path).ok());
 	let expected_root = fs::canonicalize(root)?;
-	if authority_root.as_deref() == Some(expected_root.as_path()) {
+	if authority_root.as_deref() != Some(expected_root.as_path()) {
+		return Err(EnvdError::Document(sf!(
+			"document authority root does not match environment root"
+		)));
+	}
+	let served = hello.workspace_trust;
+	if served.is(trust) {
 		Ok(())
 	} else {
-		Err(EnvdError::Document(sf!("document authority root does not match environment root")))
+		Err(EnvdError::DocumentAuthorityTrustMismatch {
+			path: expected_root,
+			expected: trust,
+			served,
+		})
 	}
 }
 
@@ -13010,8 +13071,8 @@ mod tests {
 	use crate::loopback_upstream::{BODY, LoopbackUpstream};
 	use crate::{
 		docserver::{
-			Environment, ServerConfig,
-			connection::{ConnectionConfig, serve_connection},
+			Environment, NativeLspOptions, ServerConfig,
+			connection::{ConnectionConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, serve_connection},
 		},
 		exec_settings::ExecSandboxMode,
 		exthost::ConvarControlFactory,
@@ -14028,7 +14089,7 @@ mod tests {
 				server_epoch:   hello.server_epoch,
 				server_version: sf!("test"),
 				server_build:   sf!("envd-test"),
-				policy:         crate::daemon_policy::from_con(&Ctx::new()),
+				policy:         crate::daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted),
 			},
 			Some(EnvironmentAuthorities {
 				documents,
@@ -15044,6 +15105,18 @@ mod tests {
 		.expect("stale socket file did not become free");
 	}
 
+	fn hello_for(root_uri: &str, workspace_trust: ServedWorkspaceTrust) -> DocumentHello {
+		DocumentHello {
+			protocol_major: PROTOCOL_MAJOR,
+			protocol_minor: PROTOCOL_MINOR,
+			workspace_id: Bytes::new(),
+			root_uri: Str::from(root_uri),
+			server_epoch: Bytes::new(),
+			server_build: Str::default(),
+			workspace_trust,
+		}
+	}
+
 	#[test]
 	fn document_authority_must_match_the_canonical_environment_root() {
 		let environment = tempfile::tempdir().expect("environment root");
@@ -15054,10 +15127,101 @@ mod tests {
 		let mismatched = Url::from_directory_path(foreign.path())
 			.expect("foreign file URI")
 			.to_string();
+		let validate = |uri: &str| {
+			validate_document_authority(
+				environment.path(),
+				&hello_for(uri, ServedWorkspaceTrust::Untrusted),
+				WorkspaceTrust::Untrusted,
+			)
+		};
 
-		assert!(validate_document_root(environment.path(), &matching).is_ok());
-		assert!(validate_document_root(environment.path(), &mismatched).is_err());
-		assert!(validate_document_root(environment.path(), "memory://foreign").is_err());
+		assert!(validate(&matching).is_ok());
+		assert!(validate(&mismatched).is_err());
+		assert!(validate("memory://foreign").is_err());
+	}
+
+	#[test]
+	fn document_authority_must_report_the_sessions_own_workspace_trust() {
+		let environment = tempfile::tempdir().expect("environment root");
+		let uri = Url::from_directory_path(environment.path())
+			.expect("environment file URI")
+			.to_string();
+		let validate = |served, trust| {
+			validate_document_authority(environment.path(), &hello_for(&uri, served), trust)
+		};
+
+		assert!(validate(ServedWorkspaceTrust::Trusted, WorkspaceTrust::Trusted).is_ok());
+		assert!(validate(ServedWorkspaceTrust::Untrusted, WorkspaceTrust::Untrusted).is_ok());
+		for (served, trust) in [
+			(ServedWorkspaceTrust::Trusted, WorkspaceTrust::Untrusted),
+			(ServedWorkspaceTrust::Untrusted, WorkspaceTrust::Trusted),
+			(ServedWorkspaceTrust::Unreported, WorkspaceTrust::Untrusted),
+			(ServedWorkspaceTrust::Unreported, WorkspaceTrust::Trusted),
+		] {
+			assert!(
+				matches!(
+					validate(served, trust),
+					Err(EnvdError::DocumentAuthorityTrustMismatch { expected, served: reported, .. })
+						if expected == trust && reported == served
+				),
+				"{served} authority admitted a {trust:?} session"
+			);
+		}
+	}
+
+	/// A running authority refuses a session whose workspace trust differs, in
+	/// both directions, and admits one whose trust matches.
+	#[tokio::test]
+	async fn a_running_document_authority_admits_only_sessions_of_its_own_trust() {
+		for (owner, other) in [
+			(WorkspaceTrust::Trusted, WorkspaceTrust::Untrusted),
+			(WorkspaceTrust::Untrusted, WorkspaceTrust::Trusted),
+		] {
+			let project = tempfile::tempdir().expect("document workspace");
+			let state = tempfile::tempdir().expect("document socket directory");
+			let socket = state.path().join("document.sock");
+			let start = |trust| {
+				connect_or_start_docserver(
+					project.path(),
+					&socket,
+					None,
+					false,
+					NativeLspOptions { enabled: false, ..Default::default() },
+					DocumentConfigInputs {
+						user_config_root: None,
+						claude_plugins:   Arc::default(),
+						workspace_trust:  trust,
+					},
+					sf!("test-build"),
+				)
+			};
+			let (documents, authority) = start(owner).await.expect("owner session");
+			assert!(authority.is_some(), "the first session must own the authority");
+			let served = match owner {
+				WorkspaceTrust::Trusted => ServedWorkspaceTrust::Trusted,
+				WorkspaceTrust::Untrusted => ServedWorkspaceTrust::Untrusted,
+			};
+			assert_eq!(documents.hello().workspace_trust, served);
+
+			let refused = start(other)
+				.await
+				.err()
+				.expect("a session of the other trust joined");
+			assert!(
+				matches!(
+					&refused,
+					EnvdError::DocumentAuthorityTrustMismatch { expected, served: reported, .. }
+						if *expected == other && *reported == served
+				),
+				"unexpected refusal: {refused}"
+			);
+
+			let (joined, joined_authority) = start(owner).await.expect("same-trust session");
+			assert!(joined_authority.is_none(), "a matching session must join, not own");
+			drop(joined);
+			drop(documents);
+			drop(authority);
+		}
 	}
 
 	/// Runs on tokio's paused clock: `wait_idle` reads only tokio time, so every
@@ -15195,7 +15359,11 @@ mod tests {
 			None,
 			true,
 			crate::docserver::NativeLspOptions { enabled: true, lazy: true, ..Default::default() },
-			DocumentConfigInputs::default(),
+			// A trusted workspace loads the project `.lsp.json`.
+			DocumentConfigInputs {
+				workspace_trust: WorkspaceTrust::Trusted,
+				..DocumentConfigInputs::default()
+			},
 			sf!("test-build"),
 		)
 		.await
@@ -15263,7 +15431,11 @@ mod tests {
 			None,
 			true,
 			crate::docserver::NativeLspOptions { enabled: true, lazy: true, ..Default::default() },
-			DocumentConfigInputs { user_config_root: None, claude_plugins: plugins.plugins.into() },
+			DocumentConfigInputs {
+				user_config_root: None,
+				claude_plugins:   plugins.plugins.into(),
+				workspace_trust:  WorkspaceTrust::Untrusted,
+			},
 			sf!("test-build"),
 		)
 		.await
@@ -15318,6 +15490,7 @@ mod tests {
 					},
 					user_config_root: None,
 					claude_plugins:   Arc::default(),
+					workspace_trust:  WorkspaceTrust::Untrusted,
 					shutdown:         Some(serve_shutdown),
 					server_build:     old_config.server_build().clone(),
 					connections:      None,

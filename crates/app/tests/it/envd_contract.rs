@@ -16,7 +16,8 @@ use omp_env::{
 	Admitter, BlobDownloadEvent, EnvClient, ExecEvent, InvocationEvent, ProcessAttachmentEvent,
 };
 use omp_envd::{
-	AttachOptions, EnvServer, ExtensionDataBinding, ProjectEnvironment, RegistryBridges,
+	ActiveContentInputs, AttachOptions, EnvServer, ExtensionDataBinding, ProjectEnvironment,
+	RegistryBridges,
 	eval::{
 		BridgeHostError, BridgeProgressSink, EvalSessionConfig, ParentBindingLease, ParentSessionHost,
 	},
@@ -28,7 +29,10 @@ use omp_envd::{
 	worker::{ExtHostConfig, ExtHostSpec, HostKey},
 	workspace::{WorkspaceError, WorkspaceHost, WorkspaceSearchOptions},
 };
-use omp_ext::config::{StaticDeclaration, StaticDeclarations};
+use omp_ext::{
+	config::{StaticDeclaration, StaticDeclarations},
+	workspace_trust::WorkspaceTrust,
+};
 use omp_proto::{
 	SCHEMA_REV,
 	blob::v1::{Chunk, GetRequest},
@@ -3480,7 +3484,14 @@ async fn owner_client_lsp_status_reports_discovered_workspace_roster() {
 		trusted_extensions: Vec::new(),
 		contributed_values: Vec::new(),
 		con:                Arc::new(omp_con::Ctx::new()),
-		bridges:            RegistryBridges::default(),
+		// A trusted workspace loads the project `.lsp.json`.
+		bridges:            RegistryBridges {
+			content: ActiveContentInputs {
+				workspace_trust: WorkspaceTrust::Trusted,
+				..ActiveContentInputs::default()
+			},
+			..RegistryBridges::default()
+		},
 		spawn_idle_timeout: Some(2),
 		spawn_policy:       None,
 	})

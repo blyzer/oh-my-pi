@@ -4,6 +4,7 @@
 use std::fs;
 
 use omp_envd::docserver::lsp_config::{LspConfigSourceKind, discover_native_lsp_sources};
+use omp_ext::workspace_trust::WorkspaceTrust;
 
 #[test]
 fn document_authority_probes_the_user_config_root_for_lsp_overrides() {
@@ -26,7 +27,9 @@ fn document_authority_probes_the_user_config_root_for_lsp_overrides() {
 	let root = omp_envd::document_user_config_root().expect("user configuration root");
 	assert_eq!(root, config.path());
 
-	let sources = discover_native_lsp_sources(Some(&root), project.path()).expect("sources");
+	let sources =
+		discover_native_lsp_sources(Some(&root), project.path(), WorkspaceTrust::Untrusted)
+			.expect("sources");
 	let user: Vec<&str> = sources
 		.iter()
 		.filter(|source| source.provenance.kind == LspConfigSourceKind::User)

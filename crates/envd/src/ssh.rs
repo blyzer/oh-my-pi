@@ -16,7 +16,10 @@ use omp_core::{
 	CowBytes, Str,
 	project_file::{self, Containment, ProjectFileError, containment_root},
 };
-use omp_ext::workspace_trust::inventory::{HOSTS_FILE, PROJECT_DIR};
+use omp_ext::workspace_trust::{
+	WorkspaceTrust,
+	inventory::{HOSTS_FILE, PROJECT_DIR},
+};
 use parking_lot::RwLock;
 use russh::{
 	client, keys,
@@ -108,7 +111,8 @@ struct HostFile {
 /// User configuration lives under `~/.o2`
 /// ([`omp_core::dirs::user_config_root`], profile-aware) and never under the
 /// data or state directory; project declarations live in
-/// `<project>/.omp/hosts.toml` and shadow user aliases.
+/// `<project>/.omp/hosts.toml` and, in a trusted workspace only, add aliases
+/// the user has not declared ([`HostStore::load_layered`]).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostPaths {
 	/// User-owned `<config root>/hosts.toml`.
@@ -138,19 +142,25 @@ impl HostPaths {
 pub struct HostStore {
 	hosts:    Arc<RwLock<BTreeMap<Str, HostConfig>>>,
 	paths:    Option<Arc<HostPaths>>,
+	/// The workspace trust a layered store reads the project file under.
+	trust:    WorkspaceTrust,
 	/// The directory a scoped project writer's file must stay inside: writes
 	/// refuse a symlinked target or a parent that resolves outside it.
 	confined: Option<Arc<Path>>,
 }
 
 impl HostStore {
-	/// Loads the effective host authority: every user host, shadowed by any
-	/// project host with the same alias. The result is read-only; scoped
-	/// writers load one file with [`HostStore::load`].
-	pub fn load_layered(paths: &HostPaths) -> Result<Self, SshError> {
+	/// Loads the effective host authority: every user host, plus, in a
+	/// workspace of `trust` [`WorkspaceTrust::Trusted`], every project host
+	/// whose alias the user has not declared. An untrusted workspace's
+	/// `hosts.toml` is not read, and a project alias never shadows a user
+	/// one. The result is read-only; scoped writers load one file with
+	/// [`HostStore::load`].
+	pub fn load_layered(paths: &HostPaths, trust: WorkspaceTrust) -> Result<Self, SshError> {
 		Ok(Self {
-			hosts:    Arc::new(RwLock::new(load_effective_hosts(paths)?)),
-			paths:    Some(Arc::new(paths.clone())),
+			hosts: Arc::new(RwLock::new(load_effective_hosts(paths, trust)?)),
+			paths: Some(Arc::new(paths.clone())),
+			trust,
 			confined: None,
 		})
 	}
@@ -167,6 +177,7 @@ impl HostStore {
 		Ok(Self {
 			hosts:    Arc::new(RwLock::new(parse_hosts(path, containment)?)),
 			paths:    None,
+			trust:    WorkspaceTrust::Untrusted,
 			confined: match containment {
 				Containment::Within(root) => Some(Arc::from(root)),
 				Containment::Unconfined => None,
@@ -182,7 +193,7 @@ impl HostStore {
 		let Some(paths) = &self.paths else {
 			return Ok(());
 		};
-		let hosts = load_effective_hosts(paths)?;
+		let hosts = load_effective_hosts(paths, self.trust)?;
 		*self.hosts.write() = hosts;
 		Ok(())
 	}
@@ -231,13 +242,35 @@ impl HostStore {
 /// Largest `hosts.toml` read: an alias table, never a document.
 const HOSTS_FILE_LIMIT: u64 = 256 * 1024;
 
-/// A project `hosts.toml` the contained reader refuses (outside the
-/// repository, not a regular file, oversize) is skipped with a warning: it
-/// can only add hosts, so dropping it fails closed.
-fn load_effective_hosts(paths: &HostPaths) -> Result<BTreeMap<Str, HostConfig>, SshError> {
+/// The user hosts, plus the project hosts of a trusted workspace whose
+/// aliases the user has not declared.
+///
+/// A project alias the user also declares is ignored (the user's wins) with
+/// a warning. A project `hosts.toml` the contained reader refuses (outside
+/// the repository, not a regular file, oversize) is skipped with a warning:
+/// it can only add hosts, so dropping it fails closed.
+fn load_effective_hosts(
+	paths: &HostPaths,
+	trust: WorkspaceTrust,
+) -> Result<BTreeMap<Str, HostConfig>, SshError> {
 	let mut hosts = parse_hosts(&paths.user, Containment::Unconfined)?;
+	if trust == WorkspaceTrust::Untrusted {
+		return Ok(hosts);
+	}
 	match parse_hosts(&paths.project, Containment::Within(&paths.root)) {
-		Ok(project) => hosts.extend(project),
+		Ok(project) => {
+			for (alias, host) in project {
+				if hosts.contains_key(&alias) {
+					tracing::warn!(
+						%alias,
+						path = %paths.project.display(),
+						"project SSH host ignored: a user host has the same alias"
+					);
+				} else {
+					hosts.insert(alias, host);
+				}
+			}
+		},
 		Err(SshError::File(error @ ProjectFileError::Refused { .. })) => {
 			tracing::warn!(
 				path = %error.path().display(),
@@ -1226,7 +1259,7 @@ mod tests {
 	}
 
 	#[test]
-	fn layered_store_reads_user_config_root_and_project_shadows_it() {
+	fn layered_store_reads_user_config_root_and_trusted_project_hosts_only_add() {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let user_root = temp.path().join("o2");
 		let project_root = temp.path().join("project");
@@ -1255,10 +1288,24 @@ mod tests {
 		HostStore::default()
 			.upsert(&paths.project, sf!("shared"), host("from-project"))
 			.expect("write project host");
+		HostStore::load(&paths.project, Containment::Within(&paths.root))
+			.expect("project writer")
+			.upsert(&paths.project, sf!("project-only"), host("project-only"))
+			.expect("write project-only host");
 
-		let layered = HostStore::load_layered(&paths).expect("layered load");
-		assert_eq!(layered.aliases(), vec![sf!("shared"), sf!("user-only")]);
-		assert_eq!(layered.get("shared").expect("shared").user, "from-project");
+		// An untrusted workspace's hosts.toml is not read: its alias does not
+		// resolve.
+		let untrusted =
+			HostStore::load_layered(&paths, WorkspaceTrust::Untrusted).expect("untrusted load");
+		assert_eq!(untrusted.aliases(), vec![sf!("shared"), sf!("user-only")]);
+		assert!(matches!(untrusted.get("project-only"), Err(SshError::UnknownHost { .. })));
+		assert_eq!(untrusted.get("shared").expect("shared").user, "from-user");
+
+		// A trusted one adds new aliases but never shadows a user alias.
+		let layered = HostStore::load_layered(&paths, WorkspaceTrust::Trusted).expect("layered load");
+		assert_eq!(layered.aliases(), vec![sf!("project-only"), sf!("shared"), sf!("user-only")]);
+		assert_eq!(layered.get("shared").expect("shared").user, "from-user");
+		assert_eq!(layered.get("project-only").expect("project-only").user, "project-only");
 		assert_eq!(layered.get("user-only").expect("user-only").user, "user-only");
 		assert!(matches!(layered.get("absent"), Err(SshError::UnknownHost { .. })));
 
@@ -1270,7 +1317,7 @@ mod tests {
 		{
 			fs::write(source, v1).expect("write v1 host file");
 		}
-		assert_eq!(layered.aliases(), vec![sf!("shared"), sf!("user-only")]);
+		assert_eq!(layered.aliases(), vec![sf!("project-only"), sf!("shared"), sf!("user-only")]);
 		assert!(matches!(layered.get("v1"), Err(SshError::UnknownHost { .. })));
 
 		let project_store = HostStore::load(&paths.project, Containment::Within(&paths.root))
@@ -1282,16 +1329,17 @@ mod tests {
 
 		let missing = HostPaths::new(&temp.path().join("nope"), &temp.path().join("nope"));
 		assert!(
-			HostStore::load_layered(&missing)
+			HostStore::load_layered(&missing, WorkspaceTrust::Trusted)
 				.expect("missing files are empty")
 				.aliases()
 				.is_empty()
 		);
 	}
 
-	/// A repository's `hosts.toml` is untrusted input: a symlink out of the
-	/// repository, a FIFO, or an oversize file is skipped (user hosts still
-	/// load) instead of being read, and a symlink inside the repository loads.
+	/// A trusted repository's `hosts.toml` is still untrusted input: a symlink
+	/// out of the repository, a FIFO, or an oversize file is skipped (user
+	/// hosts still load) instead of being read, and a symlink inside the
+	/// repository loads.
 	#[cfg(unix)]
 	#[test]
 	fn project_hosts_file_must_be_contained_regular_and_bounded() {
@@ -1321,7 +1369,7 @@ mod tests {
 		let outside = temp.path().join("outside.toml");
 		write(&outside, "leaked");
 		let layered = |paths: &HostPaths| {
-			HostStore::load_layered(paths)
+			HostStore::load_layered(paths, WorkspaceTrust::Trusted)
 				.expect("a refused project file never fails the load")
 				.aliases()
 		};

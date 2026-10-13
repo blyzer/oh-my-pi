@@ -12,6 +12,7 @@ use std::{
 };
 
 use bytes::BytesMut;
+use omp_ext::workspace_trust::WorkspaceTrust;
 #[cfg(test)]
 use omp_proto::document::v1::{document_target, read_selection};
 use omp_proto::{
@@ -46,6 +47,16 @@ use crate::docserver::{
 pub const PROTOCOL_MAJOR: u32 = 2;
 /// Current document protocol minor version.
 pub const PROTOCOL_MINOR: u32 = 2;
+
+/// The wire form of a workspace trust decision a document hello reports.
+#[must_use]
+pub const fn workspace_trust_to_wire(trust: WorkspaceTrust) -> v1::WorkspaceTrust {
+	match trust {
+		WorkspaceTrust::Trusted => v1::WorkspaceTrust::Trusted,
+		WorkspaceTrust::Untrusted => v1::WorkspaceTrust::Untrusted,
+	}
+}
+
 /// Default number of completed responses and events buffered per connection.
 pub const DEFAULT_OUTBOUND_FRAMES: usize = 64;
 /// Default number of concurrently executing requests accepted per connection.
@@ -496,6 +507,7 @@ async fn accept_handshake(
 			root_uri: environment.root_uri().as_str().to_owned(),
 			server_epoch: bytes::Bytes::copy_from_slice(environment.server_epoch()),
 			server_build: environment.server_build().to_owned(),
+			workspace_trust: workspace_trust_to_wire(environment.workspace_trust()).into(),
 		})),
 	};
 	output
