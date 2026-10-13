@@ -1078,6 +1078,13 @@ impl SettingsAdmission {
 		}
 	}
 
+	/// Binds the host's trust decision to native-tool admission and posture.
+	#[must_use]
+	pub fn with_workspace_trust(mut self, trust: WorkspaceTrust) -> Self {
+		self.settings = self.settings.with_workspace_trust(trust);
+		self
+	}
+
 	/// Keys each fetch of a native tool this kernel runs on the hosts `namer`
 	/// names for the URLs the call fetches, as the environment's admission
 	/// gate keys the fetches of the tools it runs. `namer` must name with the
@@ -3025,6 +3032,7 @@ pub async fn compose_kernel(
 	// hosts that environment's resolvers name.
 	let fetch_hosts = kernel.inference().environment().fetch_hosts();
 	let admission = SettingsAdmission::new(&ctx, options.approval_mode, &project_root)
+		.with_workspace_trust(kernel.inference().workspace_trust().trust())
 		.with_fetch_hosts(fetch_hosts);
 	// The kernel's admission and the calls the environment admits (every
 	// environment tool of a session attached to the project daemon, worker
@@ -4050,6 +4058,7 @@ mod tests {
 		ModelKey, ReasoningEffort, ThinkingEffort, ThinkingPolicy, WireTarget, snapshot::Catalog,
 	};
 	use omp_core::sf;
+	use omp_ext::workspace_trust::WorkspaceTrust;
 
 	use super::{
 		EphemeralJournal, HeadlessError, KernelOptions, PromptOverrides, apply_model_override,
@@ -4510,6 +4519,11 @@ mod tests {
 			ToolSettings::default()
 				.with_approval_mode_override(Some(omp_envd::tool_settings::ApprovalMode::Yolo)),
 		);
+		assert!(matches!(
+			explicit.admit("web_search", &web_search, Confinement::Host, &args, &[]),
+			ToolAdmissionVerdict::Prompt(_)
+		));
+		let explicit = explicit.with_workspace_trust(WorkspaceTrust::Trusted);
 		assert_eq!(
 			explicit.admit("web_search", &web_search, Confinement::Host, &args, &[]),
 			ToolAdmissionVerdict::Allow
@@ -4586,6 +4600,8 @@ mod tests {
 				"provenance": "default",
 				"effective": "write",
 				"sandbox": { "state": "off" },
+				"workspace_trust": "untrusted",
+				"reason": "default_without_sandbox",
 			})
 		);
 		assert_eq!(
@@ -4657,6 +4673,8 @@ mod tests {
 			provenance: Provenance::Default,
 			effective: ApprovalMode::Write,
 			sandbox,
+			workspace_trust: WorkspaceTrust::Untrusted,
+			reason: omp_envd::admission::ApprovalPostureReason::DefaultWithoutSandbox,
 		};
 
 		// A daemon whose sandbox confines its commands keeps the defaulted

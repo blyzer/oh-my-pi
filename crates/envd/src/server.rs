@@ -2608,8 +2608,9 @@ impl EnvServer {
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 		)?;
-		let (host_settings, browser_settings, shell_settings, sandbox_settings) =
+		let (mut host_settings, browser_settings, shell_settings, sandbox_settings) =
 			execution_settings(con);
+		host_settings.tools = host_settings.tools.with_workspace_trust(workspace_trust);
 		let enforced = crate::daemon_policy::of(
 			&sandbox_settings,
 			&host_settings.tools,
@@ -2914,6 +2915,7 @@ impl EnvServer {
 		exec.configure_sandbox(&sandbox_settings, workspace.root());
 		host_settings.tools = host_settings
 			.tools
+			.with_workspace_trust(workspace_trust)
 			.with_approval_mode_override(approval_mode);
 		let mcp_settings = McpSettings::from_con(con, workspace_trust);
 		mcp.start_native_configs(mcp_settings.project_config)
@@ -3146,6 +3148,7 @@ impl EnvServer {
 		);
 		host_settings.tools = host_settings
 			.tools
+			.with_workspace_trust(workspace_trust)
 			.with_approval_mode_override(approval_mode);
 		let memory_runtime =
 			start_memory_runtime(&host_settings, state_dir, &root, &session_id).await?;
@@ -15032,7 +15035,12 @@ mod tests {
 		let grants = Grants::all();
 		let authority = Arc::new(AuthorityTable::default());
 		let policy = ConnectionPolicy::in_process();
-		let base = ToolSettings { approval_mode: ApprovalMode::AlwaysAsk, ..ToolSettings::default() };
+		// Explicit `yolo` is respected only in a trusted workspace.
+		let base = ToolSettings {
+			approval_mode: ApprovalMode::AlwaysAsk,
+			workspace_trust: WorkspaceTrust::Trusted,
+			..ToolSettings::default()
+		};
 		let yolo = ConnectionState::new(
 			ExecHost::new(),
 			accepted_hello(grants.clone(), Some(ApprovalMode::Yolo)),
@@ -15942,7 +15950,7 @@ mod tests {
 	async fn relay_daemon_with(
 		sandbox: SandboxSettings,
 	) -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
-		relay_daemon_in(sandbox, Registry::new()).await
+		relay_daemon_in(sandbox, Registry::new(), WorkspaceTrust::Untrusted).await
 	}
 
 	/// [`relay_daemon_with`], composing the production tools over `registry`.
@@ -15950,6 +15958,7 @@ mod tests {
 	async fn relay_daemon_in(
 		sandbox: SandboxSettings,
 		registry: Registry,
+		workspace_trust: WorkspaceTrust,
 	) -> Option<(Arc<EnvServer>, tempfile::TempDir, tempfile::TempDir)> {
 		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
 			return None;
@@ -15972,7 +15981,11 @@ mod tests {
 				),
 				&con,
 				convars,
-				RegistryBridges::default(),
+				{
+					let mut bridges = RegistryBridges::default();
+					bridges.content.workspace_trust = workspace_trust;
+					bridges
+				},
 			)
 			.await
 			.expect("daemon-shaped server"),
@@ -16677,6 +16690,8 @@ mod tests {
 		let Some((server, _root, _state)) = relay_daemon_in(
 			SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
 			registry,
+			// An explicit `yolo` is respected only in a trusted workspace.
+			WorkspaceTrust::Trusted,
 		)
 		.await
 		else {
@@ -17671,14 +17686,15 @@ mod tests {
 
 	/// The production `read@3` declares the most its resolvers can fetch, a
 	/// credentialed fetch, and judges each call by the resolver that reads
-	/// each target: a local path, an internal URI that reads local state, a
-	/// vault read that asks the Obsidian CLI and a scheme only the RPC host
-	/// serves are document reads; an http(s) URL is an anonymous fetch; an
-	/// `ssh://` host, `issue://`, `pr://` and an `mcp://` resource no mounted
-	/// server advertises yet are credentialed fetches. A local read is `read`
-	/// tier and runs unasked in every mode and sandbox state; a fetch asks
-	/// only under `always-ask`. With URL reads disabled the maximum keeps the
-	/// credentialed fetch and a URL read fetches nothing.
+	/// each target: a local path, an internal URI that reads local state, and a
+	/// vault read that asks the Obsidian CLI are document reads; an http(s) URL
+	/// and an unknown foreign scheme the RPC host resolves (no locality
+	/// guarantee, owner decision Q12) are anonymous fetches; an `ssh://` host,
+	/// `issue://`, `pr://` and an `mcp://` resource no mounted server advertises
+	/// yet are credentialed fetches. A local read is `read` tier and runs
+	/// unasked in every mode and sandbox state; a fetch asks only under
+	/// `always-ask`. With URL reads disabled the maximum keeps the credentialed
+	/// fetch and a URL read fetches nothing.
 	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 	async fn production_read_declares_its_fetches_and_local_reads_stay_read() {
 		use crate::{
@@ -17705,7 +17721,7 @@ mod tests {
 			("vault://notes/a.md", None),
 			("vault://_/a.md?op=read", None),
 			("vault://notes?op=search&q=todo", None),
-			("custom://thing", None),
+			("custom://thing", anonymous),
 			("ssh://", None),
 			("https://docs.rs/serde", anonymous),
 			("docs.rs:443/", anonymous),
