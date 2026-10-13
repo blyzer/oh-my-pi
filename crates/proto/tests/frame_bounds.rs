@@ -370,3 +370,27 @@ fn accepts_an_exact_maximum_frame_without_decoding_it() {
 		}) if actual == FRAME_MAX_BYTES + 1
 	));
 }
+
+/// The `Ping`/`Pong` readiness exchange (`HostFrame.ping`, `WorkerFrame.pong`)
+/// is decoded by `omp-envd`'s process-readiness probe after exactly this
+/// preflight; its frames must pass, and a truncated one must be named before
+/// `prost` sees it.
+#[test]
+fn accepts_the_readiness_ping_pong_exchange_and_names_a_truncated_reply() {
+	let mut ping = Vec::new();
+	push_uint(1, 7, &mut ping);
+	validate_host_frame(&host_frame(4, &ping)).unwrap();
+
+	let mut pong = Vec::new();
+	push_uint(1, 7, &mut pong);
+	validate_worker_frame(&worker_frame(7, &pong)).unwrap();
+
+	let mut truncated = Vec::new();
+	push_key(7, 2, &mut truncated);
+	push_varint(127, &mut truncated);
+	truncated.extend_from_slice(&[0, 0, 0]);
+	assert!(matches!(
+		validate_worker_frame(&truncated),
+		Err(FrameBoundsError::Truncated { needed: 127, remaining: 3, .. })
+	));
+}

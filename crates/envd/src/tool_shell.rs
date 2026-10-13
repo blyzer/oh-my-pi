@@ -435,14 +435,17 @@ impl ShellExec for ShellExecHost {
 			..Default::default()
 		};
 		super::exec::set_run_environment(&mut exec_request, environment);
-		// A command bash runs for a connection's invocation prompts that
-		// connection, and its `dyn reflect` synthesizes on that connection's
-		// session; an in-process call has no relay and uses the host's own.
+		// A command bash runs for a connection's invocation answers to that
+		// invocation: a nested `dyn` call carries its owner, its prompts reach
+		// that connection, and its `dyn reflect` synthesizes on that
+		// connection's session; an in-process call has no relay and uses the
+		// host's own.
 		let (_, run) = self
 			.host
 			.exec_relayed(
 				exec_request,
 				request.timeout_ms.map(Duration::from_millis),
+				request.owner,
 				tools::invocation_approvals(),
 				tools::invocation_reflection(),
 			)
@@ -695,6 +698,7 @@ mod tests {
 				command:     sf!("echo approved > .git/approved.txt"),
 				environment: BTreeMap::new(),
 				timeout_ms:  Some(5_000),
+				owner:       None,
 			})
 			.await
 			.expect("sandboxed command starts");
@@ -882,6 +886,7 @@ mod tests {
 				command:     sf!("echo approved > .git/approved.txt"),
 				environment: BTreeMap::new(),
 				timeout_ms:  Some(5_000),
+				owner:       None,
 			})
 			.await
 			.expect("sandboxed command starts");
@@ -918,6 +923,7 @@ mod tests {
 				command:     sf!("echo blocked > .git/blocked-again.txt"),
 				environment: BTreeMap::new(),
 				timeout_ms:  Some(5_000),
+				owner:       None,
 			})
 			.await
 			.expect("restored sandboxed command starts");
@@ -948,6 +954,7 @@ mod tests {
 				command:     Str::from(command),
 				environment: BTreeMap::new(),
 				timeout_ms:  Some(30_000),
+				owner:       None,
 			})
 			.await
 			.expect("sandboxed command starts");
@@ -1246,6 +1253,7 @@ mod tests {
 					command:     sf!("printf acp-shell-ok"),
 					environment: BTreeMap::new(),
 					timeout_ms:  Some(5_000),
+					owner:       None,
 				})
 				.await
 				.expect("command starts in the in-process shell");
@@ -1309,6 +1317,7 @@ mod tests {
 				command:     sf!("printf scope-ok"),
 				environment: BTreeMap::new(),
 				timeout_ms:  Some(5_000),
+				owner:       None,
 			})
 			.await
 			.expect("plain execution starts");
