@@ -80,6 +80,28 @@ fn tool_result_uses_outcome_or_fault_key_without_wrapper_tags() {
 }
 
 #[test]
+fn tool_result_tolerates_unknown_fields_but_stays_exactly_one_of_outcome_or_fault() {
+	let outcome = serde_json::from_str::<data::ToolResult>(
+		r#"{"outcome":{"text":"ok"},"added_by_newer_writer":{"nested":[1,2]}}"#,
+	)
+	.expect("an extra field must not reject the payload");
+	assert!(matches!(outcome, data::ToolResult::Outcome { .. }));
+	let fault = serde_json::from_str::<data::ToolResult>(
+		r#"{"added_by_newer_writer":7,"fault":{"code":"denied"},"prompt_parts":[]}"#,
+	)
+	.expect("an extra field must not reject a fault");
+	assert!(matches!(fault, data::ToolResult::Fault { .. }));
+	assert!(
+		serde_json::from_str::<data::ToolResult>(r#"{"outcome":{},"fault":{},"extra":1}"#).is_err(),
+		"both outcome and fault still fails"
+	);
+	assert!(
+		serde_json::from_str::<data::ToolResult>(r#"{"extra":1}"#).is_err(),
+		"neither outcome nor fault still fails"
+	);
+}
+
+#[test]
 fn stream_payload_omits_fields_not_used_by_the_operation() {
 	let payload = data::Stream {
 		sid:  7,

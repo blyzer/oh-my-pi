@@ -1,0 +1,91 @@
+event: journal@1
+id: 01M4V365NQ0EJ7WT5RD9BQRR8H
+data: {"version":1,"cwd":"/home/buildbuddy/workspace/repo-root/crates/session","created":"1791910680247"}
+
+event: turn.start@1
+id: 01M4V365NQ0EJ7WT5RD9BQRR8J
+by: 01M4V365NQ0EJ7WT5RD9BQRR8H
+data: {}
+
+event: msg.user@1
+id: 01M4V365NRTWPMHFEJ1JGGV2RW
+by: 01M4V365NQ0EJ7WT5RD9BQRR8J
+data: {"text":"list the files"}
+
+event: msg.assistant.start@1
+id: 01M4V365NRTWPMHFEJ1JGGV2RX
+by: 01M4V365NQ0EJ7WT5RD9BQRR8J
+data: {"model":"model-b","provider":"provider-b","route":"route-b"}
+
+event: msg.assistant.end@1
+id: 01M4V365NSGPSSPBX7DMB01TA0
+by: 01M4V365NQ0EJ7WT5RD9BQRR8J
+data: {"stop_reason":"tool_use"}
+
+event: tool.call@1
+id: 01M4V365NSGPSSPBX7DMB01TA1
+by: 01M4V365NQ0EJ7WT5RD9BQRR8J
+data: {"name":"read","rev":1,"call_id":"call-1","i":"inspect the tree","args":{"path":"src/lib.rs"}}
+
+event: tool.update@1
+id: 01M4V365NTX0HZVBZFQ9XFEKR0
+by: 01M4V365NSGPSSPBX7DMB01TA1
+data: {"kernel":"started"}
+
+event: tool.update@1
+id: 01M4V365NTX0HZVBZFQ9XFEKR1
+by: 01M4V365NSGPSSPBX7DMB01TA1
+data: {"kernel":"receipt","source_bytes":4096,"inline_bytes":512,"elapsed_ms":17,"outcome":"ok"}
+
+event: tool.result@1
+id: 01M4V365NTX0HZVBZFQ9XFEKR2
+by: 01M4V365NSGPSSPBX7DMB01TA1
+data: {"outcome":{"text":"fn main() {}"}}
+
+event: tool.call@1
+id: 01M4V365NV1E33YD2R7WZ394BE
+by: 01M4V365NQ0EJ7WT5RD9BQRR8J
+data: {"name":"bash","rev":1,"call_id":"call-2","args":{"command":"ls"}}
+
+event: tool.update@1
+id: 01M4V365NV1E33YD2R7WZ394BF
+by: 01M4V365NV1E33YD2R7WZ394BE
+data: {"kernel":"started"}
+
+event: tool.result@1
+id: 01M4V365NW022ERP0V1V1P24QF
+by: 01M4V365NV1E33YD2R7WZ394BE
+data: {"fault":{"code":"denied"}}
+
+event: turn.receipt@1
+id: 01M4V365NW022ERP0V1V1P24QG
+by: 01M4V365NQ0EJ7WT5RD9BQRR8J
+data: {"tokens_in":40,"tokens_out":11,"cost_nano_usd":9100}
+
+event: turn.start@1
+id: 01M4V365NX9SXTGX07MHB3KSDF
+by: 01M4V365NRTWPMHFEJ1JGGV2RW
+prior: 01M4V365NRTWPMHFEJ1JGGV2RW
+data: {}
+
+event: msg.user@1
+id: 01M4V365NX9SXTGX07MHB3KSDG
+by: 01M4V365NX9SXTGX07MHB3KSDF
+data: {"text":"never mind, rename the session"}
+
+event: msg.assistant.start@1
+id: 01M4V365NX9SXTGX07MHB3KSDH
+by: 01M4V365NX9SXTGX07MHB3KSDF
+data: {"model":"model-b","provider":"provider-b","route":"route-b"}
+
+event: msg.assistant.end@1
+id: 01M4V365NYPQ9RE4JXTZTEEG7X
+by: 01M4V365NX9SXTGX07MHB3KSDF
+data: {"stop_reason":"end_turn"}
+
+: rename
+event: patch@1
+id: 01M4V365NYPQ9RE4JXTZTEEG7Y
+by: 01M4V365NYPQ9RE4JXTZTEEG7X
+data: {"ops":[["set",2,"name","Second branch"]]}
+
