@@ -113,7 +113,7 @@ fn input() -> TurnInput {
 	TurnInput { prompt: prompt() }
 }
 
-fn limits() -> TurnLimits {
+const fn limits() -> TurnLimits {
 	TurnLimits {
 		timeout:         Duration::from_secs(10),
 		idle:            Duration::from_secs(2),
@@ -151,7 +151,7 @@ fn permission_request(kind: PermissionKind, session_grant: bool) -> PermissionRe
 	}
 }
 
-fn decision(
+const fn decision(
 	approved: bool,
 	scope: ApprovalScope,
 	source: ApprovalSource,
@@ -647,11 +647,7 @@ fn message(role: thread::Role, parts: Vec<thread::Part>) -> Item {
 	Item {
 		seq:           0,
 		created_at_ms: 0,
-		kind:          Some(item::Kind::Message(thread::Message {
-			role: role as i32,
-			parts,
-			..Default::default()
-		})),
+		kind:          Some(item::Kind::Message(thread::Message { role: role as i32, parts })),
 		props:         None,
 	}
 }

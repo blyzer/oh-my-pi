@@ -21,7 +21,7 @@ use super::{
 use crate::approvals::{ApprovalDecision, ApprovalScope, ApprovalSource};
 
 /// An upper bound used when a requested limit would overflow the clock.
-const FAR_FUTURE: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 30);
+const FAR_FUTURE: Duration = Duration::from_hours(24 * 365 * 30);
 
 /// Answers the permission prompts a delegated agent raises.
 ///

@@ -191,6 +191,14 @@ impl MockExecutor {
 	}
 }
 
+#[allow(
+	unknown_lints,
+	reason = "unused_async_trait_impl is not available on every supported nightly"
+)]
+#[allow(
+	clippy::unused_async_trait_impl,
+	reason = "the mock executor scripts its answers; DelegatedExecutor requires async methods"
+)]
 impl DelegatedExecutor for MockExecutor {
 	type Session = MockSession;
 
@@ -279,6 +287,14 @@ impl MockSession {
 	}
 }
 
+#[allow(
+	unknown_lints,
+	reason = "unused_async_trait_impl is not available on every supported nightly"
+)]
+#[allow(
+	clippy::unused_async_trait_impl,
+	reason = "the mock session scripts its answers; DelegatedSession requires async methods"
+)]
 impl DelegatedSession for MockSession {
 	async fn start_turn<'a>(
 		&'a mut self,

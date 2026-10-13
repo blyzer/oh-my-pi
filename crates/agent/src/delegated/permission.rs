@@ -117,7 +117,7 @@ pub const fn admit_request(
 ///
 /// Returns the reason the approval cannot be forwarded; the caller answers
 /// [`PermissionAnswer::Deny`].
-pub fn map_decision(
+pub const fn map_decision(
 	request: &PermissionRequest,
 	decision: &ApprovalDecision,
 ) -> Result<PermissionAnswer, DenyReason> {
