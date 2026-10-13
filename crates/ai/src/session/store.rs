@@ -305,14 +305,17 @@ impl<I: PartialEq + Send + Sync + 'static> ConversationStore<I> for InMemoryConv
 	}
 }
 
-/// Schema version of the postcard-encoded SQLite conversation database,
-/// stored in `PRAGMA user_version`.
+/// Schema version of the postcard-encoded SQLite conversation tables, recorded
+/// in the singleton row of the `conversation_meta` table.
 ///
-/// Databases created before versioning carry `user_version` 0 and are adopted
-/// as version 1 (the layout is identical). Bump it whenever the tables or the
-/// postcard encoding of a stored value changes incompatibly;
-/// [`SqliteConversationStore::open`] refuses a database whose version is
-/// above this one instead of misdecoding it.
+/// `PRAGMA user_version` is deliberately not used: the conversation tables
+/// share one database file with the credential store, which owns that single
+/// per-file integer. A database with no `conversation_meta` table predates
+/// versioning (or is new) and is adopted as version 1; the layout is
+/// identical. Bump this whenever the tables or the postcard encoding of a
+/// stored value changes incompatibly; [`SqliteConversationStore::open`]
+/// refuses a database whose version is above this one instead of misdecoding
+/// it.
 pub const SQLITE_SCHEMA_VERSION: u32 = 1;
 
 /// SQLite-backed append-only conversation store suitable for process restarts.
@@ -335,21 +338,42 @@ impl<I> SqliteConversationStore<I> {
 	}
 
 	fn from_connection(connection: Connection) -> Result<Self, ConversationError> {
-		// Read the version before any statement that writes (`journal_mode=WAL`,
-		// `CREATE TABLE`), so a database from a newer omp is refused untouched.
-		let found: i64 = connection
-			.pragma_query_value(None, "user_version", |row| row.get(0))
-			.map_err(|_| ConversationError::Persistence)?;
-		let found = u32::try_from(found).map_err(|_| ConversationError::CorruptStore)?;
-		if found > SQLITE_SCHEMA_VERSION {
-			return Err(ConversationError::UnsupportedSchema {
-				found,
-				supported: SQLITE_SCHEMA_VERSION,
-			});
+		// Read the recorded version before any statement that writes
+		// (`journal_mode=WAL`, `CREATE TABLE`), so a database from a newer omp
+		// is refused byte-identical. No `conversation_meta` table means the
+		// database is new or predates versioning.
+		let has_meta = connection
+			.query_row(
+				"SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_meta'",
+				[],
+				|_| Ok(()),
+			)
+			.optional()
+			.map_err(|_| ConversationError::Persistence)?
+			.is_some();
+		if has_meta {
+			let found: i64 = connection
+				.query_row(
+					"SELECT schema_version FROM conversation_meta WHERE singleton = 1",
+					[],
+					|row| row.get(0),
+				)
+				.map_err(|_| ConversationError::CorruptStore)?;
+			let found = u32::try_from(found).map_err(|_| ConversationError::CorruptStore)?;
+			if found > SQLITE_SCHEMA_VERSION {
+				return Err(ConversationError::UnsupportedSchema {
+					found,
+					supported: SQLITE_SCHEMA_VERSION,
+				});
+			}
 		}
 		connection
 			.execute_batch(
 				"PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
+			CREATE TABLE IF NOT EXISTS conversation_meta (
+				singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+				schema_version INTEGER NOT NULL
+			);
 			CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, head TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS revisions (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, parent \
 				 TEXT, turn TEXT, items BLOB NOT NULL);
@@ -363,11 +387,12 @@ impl<I> SqliteConversationStore<I> {
 			);",
 			)
 			.map_err(|_| ConversationError::Persistence)?;
-		if found != SQLITE_SCHEMA_VERSION {
-			connection
-				.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
-				.map_err(|_| ConversationError::Persistence)?;
-		}
+		connection
+			.execute(
+				"INSERT OR IGNORE INTO conversation_meta(singleton, schema_version) VALUES (1, ?1)",
+				[SQLITE_SCHEMA_VERSION],
+			)
+			.map_err(|_| ConversationError::Persistence)?;
 		Ok(Self { connection: Arc::new(Mutex::new(connection)), marker: marker::PhantomData })
 	}
 
