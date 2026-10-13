@@ -695,12 +695,38 @@ fn add_server(state: &ServiceState, add: &McpAdd) -> ServiceResult<Str> {
 		.add(&add.name, config)
 		.map_err(|error| ServiceError::Failed(sf!("Failed to add server: {error}")))?;
 	schedule_reload(state);
-	Ok(sf!(
-		"Added MCP server \"{}\" to {} config ({}).",
-		add.name,
-		add.scope,
-		shorten(store.path(), &state.project)
-	))
+	Ok(added_server_report(&add.name, add.scope, store.path(), &state.project))
+}
+
+/// Reports a completed MCP config addition, including project trust state.
+fn added_server_report(name: &str, scope: McpScope, path: &Path, project: &Path) -> Str {
+	let message = sf!("Added MCP server \"{name}\" to {scope} config ({}).", shorten(path, project));
+	if scope == McpScope::Project {
+		sf!("{message}\n\n{}", crate::config_cmd::project_mcp_inactive_hint())
+	} else {
+		message
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use omp_chat::overlays::services::McpScope;
+
+	use super::added_server_report;
+
+	#[test]
+	fn project_add_output_includes_the_trust_activation_hint() {
+		let output = added_server_report(
+			"fixture",
+			McpScope::Project,
+			Path::new("/workspace/.omp/mcp.json"),
+			Path::new("/workspace"),
+		);
+		assert!(output.contains("omp trust"));
+		assert!(output.contains("sv_mcp_enable_project_config"));
+	}
 }
 
 /// Removes a configured server and schedules a reload.
