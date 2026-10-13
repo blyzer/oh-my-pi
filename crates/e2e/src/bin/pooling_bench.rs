@@ -145,9 +145,9 @@ fn arguments() -> Result<(PathBuf, PathBuf, Option<usize>)> {
 					.parse::<usize>()
 					.context("--limit must be a positive integer no greater than 648")?;
 				if !(1..=648).contains(&parsed) {
-					return Err(error(format!(
-						"--limit must be a positive integer no greater than 648"
-					)));
+					return Err(error(
+						"--limit must be a positive integer no greater than 648".to_string(),
+					));
 				}
 				limit = Some(parsed);
 			},
