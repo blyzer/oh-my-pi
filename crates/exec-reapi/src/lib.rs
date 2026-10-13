@@ -11,6 +11,7 @@ pub mod cas;
 pub mod digest;
 pub mod endpoint;
 pub mod profile;
+pub mod status;
 pub mod tree;
 
 /// Generated bindings for the vendored protos.
