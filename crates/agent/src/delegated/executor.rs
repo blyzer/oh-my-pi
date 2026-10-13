@@ -9,8 +9,8 @@ use std::{path::PathBuf, time::Duration};
 use omp_core::Hash32;
 
 use super::{
-	Capabilities, CliSessionId, CliVersion, DelegatedEvent, DelegatedPolicy, ExecutionMode,
-	DelegatedPrompt, ExecutorError, PermissionAnswer, PromptId, TurnId,
+	Capabilities, CliSessionId, CliVersion, DelegatedEvent, DelegatedPolicy, DelegatedPrompt,
+	ExecutionMode, ExecutorError, PermissionAnswer, PromptId, TurnId,
 };
 
 /// What the CLI says about its own login.
@@ -39,7 +39,15 @@ pub struct ProbeReport {
 
 /// Whether a session may open when the CLI cannot report its login state.
 #[derive(
-	Clone, Copy, Debug, Default, Eq, Hash, PartialEq, strum::Display, strum::EnumString,
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Eq,
+	Hash,
+	PartialEq,
+	strum::Display,
+	strum::EnumString,
 	strum::IntoStaticStr,
 )]
 #[strum(serialize_all = "snake_case")]

@@ -31,18 +31,18 @@ pub enum ExecutionMode {
 #[repr(u8)]
 pub enum Feature {
 	/// A session can be resumed by its CLI-assigned identity.
-	Resume = 0,
+	Resume         = 0,
 	/// A running turn can be interrupted cooperatively.
-	Interrupt = 1,
+	Interrupt      = 1,
 	/// The CLI asks for permission before privileged actions and accepts an
 	/// answer.
-	Permissions = 2,
+	Permissions    = 2,
 	/// Agent text arrives incrementally ([`DelegatedEvent::AgentTextDelta`]).
 	///
 	/// [`DelegatedEvent::AgentTextDelta`]: super::DelegatedEvent::AgentTextDelta
-	StreamingText = 3,
+	StreamingText  = 3,
 	/// Command and tool activity is reported as events.
-	ToolEvents = 4,
+	ToolEvents     = 4,
 	/// Token usage is reported by the CLI.
 	UsageReporting = 5,
 	/// The agent runs rooted at the working directory OMP passes in.
@@ -67,7 +67,6 @@ pub struct FeatureSet(u8);
 impl FeatureSet {
 	/// The set that advertises nothing.
 	pub const EMPTY: Self = Self(0);
-
 	/// Every defined feature.
 	pub const FULL: Self = Self::EMPTY
 		.with(Feature::Resume)
@@ -145,7 +144,7 @@ pub struct Capabilities {
 	/// Identity of the executor.
 	pub executor: ExecutorId,
 	/// The execution mode this executor offers.
-	pub mode: ExecutionMode,
+	pub mode:     ExecutionMode,
 	/// CLI versions this executor supports.
 	pub versions: VersionRange,
 	/// Optional behaviors this executor provides.

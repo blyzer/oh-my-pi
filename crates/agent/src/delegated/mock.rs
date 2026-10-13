@@ -93,8 +93,8 @@ impl Default for MockConfig {
 	fn default() -> Self {
 		Self {
 			probe:            ProbeScript::Report(ProbeReport {
-				version:  super::CliVersion::new(1, 0, 0),
-				auth:     AuthStatus::Authenticated,
+				version: super::CliVersion::new(1, 0, 0),
+				auth:    AuthStatus::Authenticated,
 			}),
 			applied_policy:   None,
 			reported_workdir: None,
@@ -280,7 +280,10 @@ impl MockSession {
 }
 
 impl DelegatedSession for MockSession {
-	async fn start_turn<'a>(&'a mut self, input: &'a TurnInput) -> Result<TurnAccepted, ExecutorError> {
+	async fn start_turn<'a>(
+		&'a mut self,
+		input: &'a TurnInput,
+	) -> Result<TurnAccepted, ExecutorError> {
 		self.turns_started += 1;
 		let turn = TurnId::new(sf!("turn-{}", self.turns_started));
 		let mut delivered = input.prompt.sections().to_vec();
@@ -332,7 +335,7 @@ impl DelegatedSession for MockSession {
 				Some(Step::Malformed(fault)) => {
 					return Err(ExecutorError::MalformedStream {
 						executor: self.executor.clone(),
-						frame:    self.frame,
+						frame: self.frame,
 						fault,
 					});
 				},

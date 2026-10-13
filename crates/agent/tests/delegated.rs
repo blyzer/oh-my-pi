@@ -23,10 +23,11 @@ use omp_agent::{
 		PermissionTally, ProbeReport, PromptConversionError, PromptId, PromptRole, PromptSection,
 		ProtocolViolation, RemoteFailure, SandboxPosture, SessionRequest, ToolEvent, ToolKind,
 		ToolOutcome, TurnEnd, TurnId, TurnInput, TurnLimits, TurnReport, UnknownAuth, VersionRange,
-		admit_request, map_decision, start_session,
+		admit_request, map_decision,
 		mock::{
 			InterruptScript, MockConfig, MockExecutor, MockSession, ProbeScript, ResumeScript, Step,
 		},
+		start_session,
 	},
 };
 use omp_ai::Usage;
@@ -36,8 +37,11 @@ use tokio_util::sync::CancellationToken;
 
 type Session = ActiveSession<MockSession>;
 
-const WORKSPACE_WRITE: DelegatedPolicy =
-	DelegatedPolicy::new(SandboxPosture::WorkspaceWrite, NetworkPosture::Scoped, ApprovalPosture::Write);
+const WORKSPACE_WRITE: DelegatedPolicy = DelegatedPolicy::new(
+	SandboxPosture::WorkspaceWrite,
+	NetworkPosture::Scoped,
+	ApprovalPosture::Write,
+);
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -60,7 +64,11 @@ fn executor() -> MockExecutor {
 }
 
 fn workdir() -> PathBuf {
-	PathBuf::from(if cfg!(windows) { r"C:\work\project" } else { "/work/project" })
+	PathBuf::from(if cfg!(windows) {
+		r"C:\work\project"
+	} else {
+		"/work/project"
+	})
 }
 
 fn request_with(policy: DelegatedPolicy) -> SessionRequest {
@@ -90,7 +98,10 @@ fn prompt() -> DelegatedPrompt {
 				role: PromptRole::System,
 				text: Str::new("Eres el agente de OMP — sistema ✓\n\n  indentado  \n"),
 			},
-			PromptSection { role: PromptRole::System, text: Str::new("<rules>\n\tuse tabs\n</rules>") },
+			PromptSection {
+				role: PromptRole::System,
+				text: Str::new("<rules>\n\tuse tabs\n</rules>"),
+			},
 			PromptSection { role: PromptRole::User, text: Str::new("status: dirty\r\n") },
 			PromptSection { role: PromptRole::User, text: Str::new("fix the bug in `src/lib.rs`") },
 		],
@@ -104,8 +115,8 @@ fn input() -> TurnInput {
 
 fn limits() -> TurnLimits {
 	TurnLimits {
-		timeout: Duration::from_secs(10),
-		idle: Duration::from_secs(2),
+		timeout:         Duration::from_secs(10),
+		idle:            Duration::from_secs(2),
 		interrupt_grace: Duration::from_millis(500),
 	}
 }
@@ -120,7 +131,7 @@ fn started(n: u32) -> Step {
 
 fn completed(n: u32) -> Step {
 	Step::Event(DelegatedEvent::Lifecycle(LifecycleEvent::TurnCompleted {
-		turn: turn(n),
+		turn:    turn(n),
 		outcome: TurnEnd::Completed,
 	}))
 }
@@ -161,7 +172,9 @@ fn fail<T>(result: Result<T, ExecutorError>) -> ExecutorError {
 }
 
 async fn open(exec: &MockExecutor) -> Session {
-	start_session(exec, &request()).await.expect("session opens")
+	start_session(exec, &request())
+		.await
+		.expect("session opens")
 }
 
 async fn run_with<R: PermissionResolver>(
@@ -171,7 +184,9 @@ async fn run_with<R: PermissionResolver>(
 	resolver: &mut R,
 ) -> (Result<TurnReport, ExecutorError>, Vec<DelegatedEvent>) {
 	let (tx, rx) = flume::unbounded();
-	let result = session.run_turn(&input(), limits, cancel, resolver, &tx).await;
+	let result = session
+		.run_turn(&input(), limits, cancel, resolver, &tx)
+		.await;
 	drop(tx);
 	(result, rx.drain().collect())
 }
@@ -183,8 +198,8 @@ async fn run(session: &mut Session) -> (Result<TurnReport, ExecutorError>, Vec<D
 /// Resolver with a fixed answer and a configurable thinking time.
 struct Scripted {
 	decision: ApprovalDecision,
-	delay: Duration,
-	calls: Arc<AtomicU32>,
+	delay:    Duration,
+	calls:    Arc<AtomicU32>,
 }
 
 impl Scripted {
@@ -224,7 +239,9 @@ async fn ask(
 		Step::Event(DelegatedEvent::Permission(permission_request(kind, session_grant))),
 		completed(1),
 	]);
-	let mut session = start_session(&exec, &request_with(policy)).await.expect("session opens");
+	let mut session = start_session(&exec, &request_with(policy))
+		.await
+		.expect("session opens");
 	let (mut resolver, calls) = Scripted::new(decision);
 	let (result, _) =
 		run_with(&mut session, limits(), &CancellationToken::new(), &mut resolver).await;
@@ -240,7 +257,8 @@ async fn ask(
 
 #[tokio::test(start_paused = true)]
 async fn missing_executable_is_reported_and_nothing_is_opened() {
-	let exec = executor().with_config(MockConfig { probe: ProbeScript::Missing, ..Default::default() });
+	let exec =
+		executor().with_config(MockConfig { probe: ProbeScript::Missing, ..Default::default() });
 	let handle = exec.handle();
 	let error = fail(start_session(&exec, &request()).await);
 	assert!(
@@ -282,7 +300,7 @@ async fn unknown_auth_is_refused_unless_the_request_opts_in() {
 	let config = MockConfig {
 		probe: ProbeScript::Report(ProbeReport {
 			version: CliVersion::new(1, 2, 3),
-			auth: AuthStatus::Unknown,
+			auth:    AuthStatus::Unknown,
 		}),
 		..Default::default()
 	};
@@ -303,7 +321,7 @@ async fn auth_required_is_refused_even_with_unknown_auth_consent() {
 	let exec = executor().with_config(MockConfig {
 		probe: ProbeScript::Report(ProbeReport {
 			version: CliVersion::new(1, 2, 3),
-			auth: AuthStatus::Required,
+			auth:    AuthStatus::Required,
 		}),
 		..Default::default()
 	});
@@ -321,7 +339,10 @@ async fn auth_required_mid_turn_is_a_typed_failure_that_keeps_the_session() {
 	let handle = exec.handle();
 	exec.push_turn([
 		started(1),
-		Step::Event(DelegatedEvent::Failure { turn: turn(1), failure: RemoteFailure::AuthRequired }),
+		Step::Event(DelegatedEvent::Failure {
+			turn:    turn(1),
+			failure: RemoteFailure::AuthRequired,
+		}),
 	]);
 	let mut session = open(&exec).await;
 	let (result, _) = run(&mut session).await;
@@ -337,14 +358,11 @@ async fn direct_api_mode_is_rejected_and_never_rerouted() {
 	let mut direct = request();
 	direct.mode = ExecutionMode::DirectApi;
 	let error = fail(start_session(&exec, &direct).await);
-	assert!(matches!(
-		error,
-		ExecutorError::ModeUnsupported {
-			requested: ExecutionMode::DirectApi,
-			offered: ExecutionMode::CliManaged,
-			..
-		}
-	));
+	assert!(matches!(error, ExecutorError::ModeUnsupported {
+		requested: ExecutionMode::DirectApi,
+		offered: ExecutionMode::CliManaged,
+		..
+	}));
 	let record = handle.snapshot();
 	assert_eq!(record.probes, 0, "a rejected mode must not touch the CLI at all");
 	assert!(record.opens.is_empty());
@@ -354,7 +372,11 @@ async fn direct_api_mode_is_rejected_and_never_rerouted() {
 async fn unlisted_policy_is_refused_with_no_closest_match_fallback() {
 	for requested in [
 		// looser than anything listed
-		DelegatedPolicy::new(SandboxPosture::Unrestricted, NetworkPosture::Open, ApprovalPosture::Yolo),
+		DelegatedPolicy::new(
+			SandboxPosture::Unrestricted,
+			NetworkPosture::Open,
+			ApprovalPosture::Yolo,
+		),
 		// stricter than a listed policy on one axis, but not itself listed
 		DelegatedPolicy::new(
 			SandboxPosture::WorkspaceWrite,
@@ -377,9 +399,13 @@ async fn unlisted_policy_is_refused_with_no_closest_match_fallback() {
 
 #[tokio::test(start_paused = true)]
 async fn policy_drift_after_open_tears_the_session_down() {
-	let loose =
-		DelegatedPolicy::new(SandboxPosture::Unrestricted, NetworkPosture::Open, ApprovalPosture::Yolo);
-	let exec = executor().with_config(MockConfig { applied_policy: Some(loose), ..Default::default() });
+	let loose = DelegatedPolicy::new(
+		SandboxPosture::Unrestricted,
+		NetworkPosture::Open,
+		ApprovalPosture::Yolo,
+	);
+	let exec =
+		executor().with_config(MockConfig { applied_policy: Some(loose), ..Default::default() });
 	let handle = exec.handle();
 	let error = fail(start_session(&exec, &request()).await);
 	assert!(matches!(
@@ -410,17 +436,21 @@ async fn relative_working_directory_is_refused_before_anything_starts() {
 	let mut relative = request();
 	relative.workdir = PathBuf::from("project/../..");
 	let error = fail(start_session(&exec, &relative).await);
-	assert!(matches!(error, ExecutorError::WorkdirNotAbsolute { ref path } if *path == relative.workdir));
+	assert!(
+		matches!(error, ExecutorError::WorkdirNotAbsolute { ref path } if *path == relative.workdir)
+	);
 	assert_eq!(handle.snapshot().probes, 0);
 }
 
 #[tokio::test(start_paused = true)]
 async fn reported_working_directory_mismatch_tears_the_session_down() {
-	let elsewhere = if cfg!(windows) { PathBuf::from(r"C:\elsewhere") } else { PathBuf::from("/elsewhere") };
-	let exec = executor().with_config(MockConfig {
-		reported_workdir: Some(elsewhere.clone()),
-		..Default::default()
-	});
+	let elsewhere = if cfg!(windows) {
+		PathBuf::from(r"C:\elsewhere")
+	} else {
+		PathBuf::from("/elsewhere")
+	};
+	let exec = executor()
+		.with_config(MockConfig { reported_workdir: Some(elsewhere.clone()), ..Default::default() });
 	let handle = exec.handle();
 	let error = fail(start_session(&exec, &request()).await);
 	assert!(matches!(
@@ -433,12 +463,13 @@ async fn reported_working_directory_mismatch_tears_the_session_down() {
 
 #[tokio::test(start_paused = true)]
 async fn executor_without_working_directory_inheritance_is_refused() {
-	let exec = MockExecutor::new(caps(FeatureSet::FULL.without(Feature::WorkingDirectoryInheritance)));
+	let exec =
+		MockExecutor::new(caps(FeatureSet::FULL.without(Feature::WorkingDirectoryInheritance)));
 	let error = fail(start_session(&exec, &request()).await);
-	assert!(matches!(
-		error,
-		ExecutorError::FeatureUnavailable { feature: Feature::WorkingDirectoryInheritance, .. }
-	));
+	assert!(matches!(error, ExecutorError::FeatureUnavailable {
+		feature: Feature::WorkingDirectoryInheritance,
+		..
+	}));
 }
 
 // ---------------------------------------------------------------------------
@@ -486,13 +517,16 @@ async fn resume_of_an_unknown_session_fails_instead_of_starting_fresh() {
 	let mut resume = request();
 	resume.resume = Some(CliSessionId::new_static("ghost"));
 	let error = fail(start_session(&exec, &resume).await);
-	assert!(matches!(error, ExecutorError::ResumeFailed { ref requested, .. } if requested.as_str() == "ghost"));
+	assert!(
+		matches!(error, ExecutorError::ResumeFailed { ref requested, .. } if requested.as_str() == "ghost")
+	);
 	assert_eq!(handle.snapshot().terminations, 1);
 }
 
 #[tokio::test(start_paused = true)]
 async fn resume_answered_with_a_fresh_session_fails() {
-	let exec = executor().with_config(MockConfig { resume: ResumeScript::Fresh, ..Default::default() });
+	let exec =
+		executor().with_config(MockConfig { resume: ResumeScript::Fresh, ..Default::default() });
 	let first = open(&exec).await;
 	let mut resume = request();
 	resume.resume = Some(first.info().session.clone());
@@ -502,15 +536,13 @@ async fn resume_answered_with_a_fresh_session_fails() {
 
 #[tokio::test(start_paused = true)]
 async fn resume_claimed_without_a_request_is_a_protocol_violation() {
-	let exec = executor().with_config(MockConfig {
-		resume: ResumeScript::ClaimResumed,
-		..Default::default()
-	});
+	let exec = executor()
+		.with_config(MockConfig { resume: ResumeScript::ClaimResumed, ..Default::default() });
 	let error = fail(start_session(&exec, &request()).await);
-	assert!(matches!(
-		error,
-		ExecutorError::Protocol { violation: ProtocolViolation::UnrequestedResume, .. }
-	));
+	assert!(matches!(error, ExecutorError::Protocol {
+		violation: ProtocolViolation::UnrequestedResume,
+		..
+	}));
 }
 
 #[tokio::test(start_paused = true)]
@@ -553,7 +585,11 @@ async fn prompt_reaches_the_executor_byte_for_byte() {
 	assert_eq!(
 		[PromptRole::System, PromptRole::System, PromptRole::User, PromptRole::User]
 			.map(|role| role.to_string()),
-		delivered[0].iter().map(|s| s.role.to_string()).collect::<Vec<_>>().as_slice(),
+		delivered[0]
+			.iter()
+			.map(|s| s.role.to_string())
+			.collect::<Vec<_>>()
+			.as_slice(),
 	);
 }
 
@@ -581,7 +617,8 @@ fn digest_covers_bytes_roles_boundaries_and_bands() {
 	assert_eq!(base.digest(), prompt().digest(), "digest is deterministic");
 
 	let section = |role, text: &str| PromptSection { role, text: Str::new(text) };
-	let build = |sections: Vec<PromptSection>, bands| DelegatedPrompt::from_sections(sections, bands);
+	let build =
+		|sections: Vec<PromptSection>, bands| DelegatedPrompt::from_sections(sections, bands);
 
 	let ab_c = build(vec![section(PromptRole::User, "ab"), section(PromptRole::User, "c")], bands());
 	let a_bc = build(vec![section(PromptRole::User, "a"), section(PromptRole::User, "bc")], bands());
@@ -608,14 +645,14 @@ fn digest_covers_bytes_roles_boundaries_and_bands() {
 
 fn message(role: thread::Role, parts: Vec<thread::Part>) -> Item {
 	Item {
-		seq: 0,
+		seq:           0,
 		created_at_ms: 0,
-		kind: Some(item::Kind::Message(thread::Message {
+		kind:          Some(item::Kind::Message(thread::Message {
 			role: role as i32,
 			parts,
 			..Default::default()
 		})),
-		props: None,
+		props:         None,
 	}
 }
 
@@ -630,8 +667,8 @@ fn rendered_items_become_sections_in_order_with_the_user_turn_last() {
 		message(thread::Role::System, vec![text_part("dynamic")]),
 	];
 	let volatile = [message(thread::Role::User, vec![text_part("status: clean")])];
-	let built =
-		DelegatedPrompt::from_items(&system, &volatile, Str::new("do the thing"), bands()).expect("text only");
+	let built = DelegatedPrompt::from_items(&system, &volatile, Str::new("do the thing"), bands())
+		.expect("text only");
 	let sections = built.sections();
 	assert_eq!(sections.len(), 4);
 	assert_eq!(sections[0].text.as_str(), "frozen and stable");
@@ -661,7 +698,8 @@ fn items_that_cannot_be_carried_verbatim_are_refused_not_dropped() {
 		PromptConversionError::NonTextPart { index: 1 }
 	);
 
-	let not_a_message = [Item { seq: 0, created_at_ms: 0, kind: None, props: None }];
+	let not_a_message =
+		[Item { seq: 0, created_at_ms: 0, kind: None, props: None }];
 	assert_eq!(
 		DelegatedPrompt::from_items(&not_a_message, &[], Str::new("go"), bands()).unwrap_err(),
 		PromptConversionError::NotAMessage { index: 0 }
@@ -682,14 +720,14 @@ fn items_that_cannot_be_carried_verbatim_are_refused_not_dropped() {
 async fn a_full_agent_turn_keeps_text_tools_permissions_and_usage_distinct() {
 	let exec = executor();
 	let tool_started = DelegatedEvent::Tool(ToolEvent::Started {
-		turn: turn(1),
-		call: CallId::new_static("call-1"),
-		kind: ToolKind::Command,
+		turn:  turn(1),
+		call:  CallId::new_static("call-1"),
+		kind:  ToolKind::Command,
 		label: Str::new_static("cargo test"),
 	});
 	let tool_finished = DelegatedEvent::Tool(ToolEvent::Finished {
-		turn: turn(1),
-		call: CallId::new_static("call-1"),
+		turn:    turn(1),
+		call:    CallId::new_static("call-1"),
 		outcome: ToolOutcome::Succeeded,
 	});
 	let ask_event = DelegatedEvent::Permission(permission_request(PermissionKind::Exec, true));
@@ -742,10 +780,10 @@ async fn a_final_text_only_executor_is_representable_but_cannot_fake_streaming()
 
 	exec.push_turn([started(2), delta(2, "streamed anyway")]);
 	let (result, _) = run(&mut session).await;
-	assert!(matches!(
-		fail(result),
-		ExecutorError::UndeclaredEvent { feature: Feature::StreamingText, .. }
-	));
+	assert!(matches!(fail(result), ExecutorError::UndeclaredEvent {
+		feature: Feature::StreamingText,
+		..
+	}));
 	assert!(!session.is_open());
 }
 
@@ -755,8 +793,8 @@ async fn every_gated_event_needs_its_feature() {
 		(
 			Feature::ToolEvents,
 			DelegatedEvent::Tool(ToolEvent::Finished {
-				turn: turn(1),
-				call: CallId::new_static("c"),
+				turn:    turn(1),
+				call:    CallId::new_static("c"),
 				outcome: ToolOutcome::Failed,
 			}),
 		),
@@ -764,10 +802,7 @@ async fn every_gated_event_needs_its_feature() {
 			Feature::Permissions,
 			DelegatedEvent::Permission(permission_request(PermissionKind::Exec, false)),
 		),
-		(
-			Feature::UsageReporting,
-			DelegatedEvent::Usage { turn: turn(1), usage: Usage::default() },
-		),
+		(Feature::UsageReporting, DelegatedEvent::Usage { turn: turn(1), usage: Usage::default() }),
 	];
 	for (feature, event) in cases {
 		let exec = MockExecutor::new(caps(FeatureSet::FULL.without(feature)));
@@ -808,10 +843,10 @@ async fn session_closing_mid_turn_is_a_protocol_violation() {
 	]);
 	let mut session = open(&exec).await;
 	let error = fail(run(&mut session).await.0);
-	assert!(matches!(
-		error,
-		ExecutorError::Protocol { violation: ProtocolViolation::SessionClosedMidTurn, .. }
-	));
+	assert!(matches!(error, ExecutorError::Protocol {
+		violation: ProtocolViolation::SessionClosedMidTurn,
+		..
+	}));
 }
 
 #[tokio::test(start_paused = true)]
@@ -820,7 +855,10 @@ async fn remote_failure_is_typed_and_leaves_the_session_usable() {
 	let handle = exec.handle();
 	exec.push_turn([
 		started(1),
-		Step::Event(DelegatedEvent::Failure { turn: turn(1), failure: RemoteFailure::RateLimited }),
+		Step::Event(DelegatedEvent::Failure {
+			turn:    turn(1),
+			failure: RemoteFailure::RateLimited,
+		}),
 	]);
 	exec.push_turn([started(2), completed(2)]);
 	let mut session = open(&exec).await;
@@ -856,10 +894,11 @@ async fn malformed_event_stream_ends_the_session_with_a_typed_cause() {
 	exec.push_turn([started(1), Step::Malformed(FrameFault::NotJson)]);
 	let mut session = open(&exec).await;
 	let error = fail(run(&mut session).await.0);
-	assert!(matches!(
-		error,
-		ExecutorError::MalformedStream { frame: 1, fault: FrameFault::NotJson, .. }
-	));
+	assert!(matches!(error, ExecutorError::MalformedStream {
+		frame: 1,
+		fault: FrameFault::NotJson,
+		..
+	}));
 	assert!(error.source().is_some(), "the decode fault rides #[source]");
 	assert!(!error.is_turn_local());
 	assert!(!session.is_open());
@@ -902,8 +941,11 @@ async fn teardown_failure_supersedes_the_crash_that_caused_it() {
 
 #[tokio::test(start_paused = true)]
 async fn teardown_failure_supersedes_a_policy_rejection_at_open() {
-	let loose =
-		DelegatedPolicy::new(SandboxPosture::Unrestricted, NetworkPosture::Open, ApprovalPosture::Yolo);
+	let loose = DelegatedPolicy::new(
+		SandboxPosture::Unrestricted,
+		NetworkPosture::Open,
+		ApprovalPosture::Yolo,
+	);
 	let exec = executor().with_config(MockConfig {
 		applied_policy: Some(loose),
 		teardown_fails: true,
@@ -945,8 +987,8 @@ async fn total_timeout_fires_even_when_events_keep_arriving_within_the_idle_limi
 	]);
 	let mut session = open(&exec).await;
 	let tight = TurnLimits {
-		timeout: Duration::from_millis(150),
-		idle: Duration::from_millis(100),
+		timeout:         Duration::from_millis(150),
+		idle:            Duration::from_millis(100),
 		interrupt_grace: Duration::from_millis(50),
 	};
 	let before = tokio::time::Instant::now();
@@ -974,8 +1016,8 @@ async fn time_spent_waiting_for_a_human_does_not_count_against_the_turn() {
 	let (mut resolver, _) = Scripted::new(user_yes(ApprovalScope::Once));
 	resolver.delay = Duration::from_secs(3600);
 	let tight = TurnLimits {
-		timeout: Duration::from_millis(100),
-		idle: Duration::from_millis(100),
+		timeout:         Duration::from_millis(100),
+		idle:            Duration::from_millis(100),
 		interrupt_grace: Duration::from_millis(50),
 	};
 	let (result, _) = run_with(&mut session, tight, &CancellationToken::new(), &mut resolver).await;
@@ -1027,10 +1069,8 @@ async fn cancellation_interrupts_cooperatively_and_keeps_the_session() {
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_kills_a_cli_that_ignores_the_interrupt() {
-	let exec = executor().with_config(MockConfig {
-		interrupt: InterruptScript::Ignore,
-		..Default::default()
-	});
+	let exec = executor()
+		.with_config(MockConfig { interrupt: InterruptScript::Ignore, ..Default::default() });
 	let handle = exec.handle();
 	exec.push_turn([started(1), Step::Hang]);
 	let mut session = open(&exec).await;
@@ -1096,7 +1136,10 @@ async fn dropping_a_live_session_kills_it_and_terminate_is_idempotent() {
 	let handle = exec.handle();
 	let mut session = open(&exec).await;
 	session.terminate().await.expect("first terminate");
-	session.terminate().await.expect("second terminate is a no-op");
+	session
+		.terminate()
+		.await
+		.expect("second terminate is a no-op");
 	drop(session);
 	let record = handle.snapshot();
 	assert_eq!((record.terminations, record.dropped_live), (1, 0));
@@ -1126,7 +1169,8 @@ async fn policy_forbidden_requests_are_denied_without_asking_anyone() {
 #[tokio::test(start_paused = true)]
 async fn unclassified_requests_are_denied_without_asking_anyone() {
 	let (answer, calls, tally) =
-		ask(WORKSPACE_WRITE, PermissionKind::Unclassified, true, user_yes(ApprovalScope::Session)).await;
+		ask(WORKSPACE_WRITE, PermissionKind::Unclassified, true, user_yes(ApprovalScope::Session))
+			.await;
 	assert_eq!(answer, PermissionAnswer::Deny);
 	assert_eq!(calls, 0);
 	assert_eq!(tally.refused_by_policy, 1);
@@ -1155,7 +1199,7 @@ async fn unaudited_fail_open_approvals_are_denied() {
 		assert_eq!(tally.refused_by_policy, 1);
 	}
 	let audited = decision(true, ApprovalScope::Once, ApprovalSource::Timeout, true);
-	let (answer, _, _) = ask(WORKSPACE_WRITE, PermissionKind::Exec, false, audited).await;
+	let (answer, ..) = ask(WORKSPACE_WRITE, PermissionKind::Exec, false, audited).await;
 	assert_eq!(answer, PermissionAnswer::AllowOnce, "an audited fail-open result is forwarded");
 }
 
@@ -1204,7 +1248,11 @@ fn admission_and_mapping_tables_are_exact() {
 	let every_policy = [
 		DelegatedPolicy::STRICTEST,
 		WORKSPACE_WRITE,
-		DelegatedPolicy::new(SandboxPosture::Unrestricted, NetworkPosture::Open, ApprovalPosture::Yolo),
+		DelegatedPolicy::new(
+			SandboxPosture::Unrestricted,
+			NetworkPosture::Open,
+			ApprovalPosture::Yolo,
+		),
 	];
 	for policy in every_policy {
 		assert_eq!(

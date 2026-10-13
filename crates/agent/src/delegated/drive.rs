@@ -62,14 +62,14 @@ impl PermissionResolver for DenyAll {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PermissionTally {
 	/// Prompts put to the resolver.
-	pub asked:              u32,
+	pub asked:             u32,
 	/// Prompts the resolver approved and the CLI was told to allow.
-	pub allowed:            u32,
+	pub allowed:           u32,
 	/// Prompts the resolver denied.
-	pub denied:             u32,
+	pub denied:            u32,
 	/// Prompts the host denied itself, without a usable approval: forbidden by
 	/// the session policy, unclassified, or an approval that cannot be mapped.
-	pub refused_by_policy:  u32,
+	pub refused_by_policy: u32,
 }
 
 /// The settled result of one turn.
@@ -126,7 +126,8 @@ enum Wake {
 ///
 /// In order, and stopping at the first failure:
 ///
-/// 1. the request's [`ExecutionMode`](super::ExecutionMode) matches the executor's (no direct-API reroute);
+/// 1. the request's [`ExecutionMode`](super::ExecutionMode) matches the
+///    executor's (no direct-API reroute);
 /// 2. the working directory is absolute and the executor inherits it;
 /// 3. a resume is only requested of an executor that can resume;
 /// 4. the policy is one the executor lists verbatim;
@@ -529,7 +530,11 @@ async fn interrupt_turn<S: DelegatedSession>(
 	let cancelled = ExecutorError::Cancelled { executor: ctx.executor.clone() };
 	let settled = ctx.features.contains(Feature::Interrupt)
 		&& matches!(timeout(limits.interrupt_grace, settle(session, events)).await, Ok(Ok(())));
-	if settled { Stop::Keep(cancelled) } else { Stop::End(cancelled) }
+	if settled {
+		Stop::Keep(cancelled)
+	} else {
+		Stop::End(cancelled)
+	}
 }
 
 async fn settle<S: DelegatedSession>(

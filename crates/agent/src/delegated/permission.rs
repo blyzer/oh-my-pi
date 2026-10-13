@@ -5,10 +5,10 @@
 //! - [`admit_request`] refuses, *without asking anyone*, a request that the
 //!   negotiated [`DelegatedPolicy`] already forbids or that cannot be
 //!   classified.
-//! - [`map_decision`] turns an OMP [`ApprovalDecision`] into the answer the
-//!   CLI understands. It only ever **narrows** a grant (a wider OMP scope than
-//!   the CLI can express becomes a single-use grant) and refuses what it
-//!   cannot represent faithfully.
+//! - [`map_decision`] turns an OMP [`ApprovalDecision`] into the answer the CLI
+//!   understands. It only ever **narrows** a grant (a wider OMP scope than the
+//!   CLI can express becomes a single-use grant) and refuses what it cannot
+//!   represent faithfully.
 //!
 //! Neither function can produce an answer broader than the one OMP gave.
 //! Path-level confinement is the CLI sandbox's job; the host judges only the
@@ -20,9 +20,7 @@ use super::{CallId, DelegatedPolicy, NetworkPosture, PromptId, SandboxPosture, T
 use crate::approvals::{ApprovalDecision, ApprovalScope, ApprovalSource};
 
 /// The class of effect a permission prompt asks for.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum PermissionKind {
 	/// Read outside what the agent already may read.
@@ -55,9 +53,7 @@ pub struct PermissionRequest {
 }
 
 /// The answer sent back to the CLI.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum PermissionAnswer {
 	/// Do not perform the action.
@@ -69,9 +65,7 @@ pub enum PermissionAnswer {
 }
 
 /// Why the host refused a prompt on its own, without a user-facing answer.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum DenyReason {
 	/// The session sandbox is read-only and the prompt asks to write.
