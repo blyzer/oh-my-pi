@@ -1687,10 +1687,10 @@ const fn ephemeral(ttl: CacheTtl) -> CacheControl {
 /// The marker TTL the codec places on its own, or `None` when the request
 /// asks for no cross-request caching.
 ///
-/// `ai_cache_retention auto` leaves the setting unset and `none` lowers to
-/// [`CacheRetention::Request`] (retain for this request only); neither
-/// produces automatic breakpoints. Explicit [`CanonicalPart::CachePoint`]
-/// parts are honoured regardless.
+/// `ai_cache_retention auto` is resolved by [`InferenceSettings`] to
+/// [`Setting::Prefer`] [`CacheRetention::Short`] for this codec. `none` lowers
+/// to [`CacheRetention::Request`] and produces no automatic breakpoints.
+/// Explicit [`CanonicalPart::CachePoint`] parts are honoured regardless.
 fn automatic_cache_ttl(setting: &Setting<CacheRetention>) -> Option<CacheTtl> {
 	setting_value(setting)
 		.filter(|retention| !matches!(retention, CacheRetention::Request))
@@ -3380,7 +3380,10 @@ mod tests {
 	use std::{sync::Arc, time::UNIX_EPOCH};
 
 	use http::{HeaderName, HeaderValue, Request};
-	use omp_catalog::{Catalog, ThinkingPolicy, ThinkingRouting, WireModelId, WireTarget};
+	use omp_catalog::{
+		Catalog, ProviderFamily, ThinkingPolicy, ThinkingRouting, WireModelId, WireTarget,
+		settings::CacheRetentionSetting,
+	};
 	use omp_core::SecretString;
 
 	use super::*;
@@ -3394,6 +3397,7 @@ mod tests {
 			NegotiationPolicy, OpaqueJson, Sampling, ToolDefinition, ToolInputConstraint,
 		},
 		id::{AccountId, PrincipalId, RequestId},
+		settings::InferenceSettings,
 		transport::{EventStreamDecoder, SseEvent},
 	};
 
@@ -3875,6 +3879,31 @@ mod tests {
 			.expect("body serializes")
 			.matches("\"cache_control\"")
 			.count()
+	}
+
+	#[test]
+	fn auto_retention_places_short_breakpoints_only_on_supported_codecs() {
+		let mut settings = InferenceSettings::default();
+		settings.model.cache_retention = CacheRetentionSetting::Auto;
+		let mut auto = agent_chat(40, 60, Setting::Unset);
+		settings.apply_chat_request(&mut auto, ProviderFamily::Other, Some("anthropic"));
+		assert!(matches!(auto.cache_retention, Setting::Prefer(CacheRetention::Short)));
+		let auto_body = lower_with_policy(&auto, &WirePolicy::baseline(), None, None);
+		assert!((1..=MAX_CACHE_BREAKPOINTS).contains(&wire_marker_count(&auto_body)));
+
+		settings.model.cache_retention = CacheRetentionSetting::None;
+		let mut none = agent_chat(40, 60, Setting::Unset);
+		settings.apply_chat_request(&mut none, ProviderFamily::Other, Some("anthropic"));
+		assert!(matches!(none.cache_retention, Setting::Require(CacheRetention::Request)));
+		let none_body = lower_with_policy(&none, &WirePolicy::baseline(), None, None);
+		assert_eq!(wire_marker_count(&none_body), 0);
+
+		settings.model.cache_retention = CacheRetentionSetting::Auto;
+		let mut unsupported = agent_chat(40, 60, Setting::Unset);
+		settings.apply_chat_request(&mut unsupported, ProviderFamily::Other, Some("gemini"));
+		assert!(matches!(unsupported.cache_retention, Setting::Unset));
+		let unsupported_body = lower_with_policy(&unsupported, &WirePolicy::baseline(), None, None);
+		assert_eq!(wire_marker_count(&unsupported_body), 0);
 	}
 
 	#[test]

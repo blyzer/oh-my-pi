@@ -31,7 +31,7 @@ No Rust was built or tested. The only commands run were reads, `rg`, `git`, `gh`
   - F1 stopgap (#178): project MCP is off by default, and its values are literal.
   - F4 posture (#181, #197): sandbox on by default; a defaulted `yolo` holds only for sandbox-confined tools.
   - F5 and F9 (#180): contained project-file reader.
-- **Still waiting on owner decisions:** the cache defaults (`ai_cache_retention auto` places no markers, and the Volatile band sits in the system prefix).
+- **Still waiting on owner decisions:** the Volatile band sits in the system prefix; cache-marker placement for `auto` is done in slice 12.
 - **`--api-key` precedence over stored accounts already exists** in the broker since `fb0a7c0b06` (2026-08-22), so the handoff's "not started" is obsolete. What remains is the account the lease is attributed to.
 
 ## Fixed blockers (auth/envd), confirmed
@@ -110,7 +110,7 @@ Status words: **open**, **fixed**, **partly fixed** (a residual is named), **obs
 
 | Item | Status | Evidence | Severity | Owner |
 |---|---|---|---|---|
-| `ai_cache_retention auto` places no cache markers | **decision** | `catalog/src/settings.rs:1297` (default `Auto`); `ai/src/settings.rs:560-566` (`Auto` → `Setting::Unset`); `ai/src/codec/anthropic.rs:1687-1698` (`automatic_cache_ttl` returns `None`), `:1767-1768` (`ttl == None` places no markers) | Cost, not security | ai |
+| `ai_cache_retention auto` places cache markers | **fixed (slice 12)** | `catalog/src/settings.rs:1297` (default `Auto`); `ai/src/settings.rs:560-572` (`Auto` → `Setting::Prefer(CacheRetention::Short)` for Anthropic and Bedrock); `ai/src/codec/anthropic.rs:1679-1697` (short TTL and explicit none); `:1748-1838` (automatic placement capped at four); Anthropic behavior test `auto_retention_places_short_breakpoints_only_on_supported_codecs` | Cost, not security | ai |
 | Volatile band (turn, cwd, date, mounts, todos) in the system prefix | **open** | `agent/src/prompt/mod.rs:108-114` puts `status()` in `SlotClass::Volatile` as a system item. `agent/prompts/system/status.md` renders turn, cwd, date, mounts and todos. `agent/src/loop.rs:2486-2509`: system items, then the mode prompt, then the thread, so every turn rewrites the prefix after the Stable band | Cost | agent |
 | Measure cache hits under the default config | **not done** | Needs an Anthropic key | — | — |
 | Dedicated TUI message for `account-pin` | **open** | `rg account-pin` finds no hit in `crates/chat` (OBSERVED) | Low | chat |
@@ -133,7 +133,7 @@ Each slice is one PR of about 500 lines or fewer. "Seam" is the crate whose publ
 | 9 | **Approval floor for untrusted workspaces** (audit PR7) | `envd/src/admission.rs`: an `Untrusted` decision clamps an explicit `yolo` to `write` | envd: `resolve_approval` with explicit `yolo` plus `Untrusted` prompts for an exec-tier call | 3, 4 | S | Q7 |
 | 10 | **MCP UX** (F1-UX) | app `mcp add --scope project` and `/mcp add` print "inactive until trusted / `sv_mcp_enable_project_config`"; envd projects `LiteralValueNotice` as a typed notice the TUI renders | app: the add output contains the hint; envd: a notice reaches the session for a literal project value | 3 (wording), else none | S | — |
 | 11 | **Chat callback paste** | `app/src/chat_services/accounts.rs:398-403`: a `://` answer at the confirmation prompt becomes `AuthInput::CallbackUrl`, as in `auth_cli.rs:595` | app unit test next to `accounts.rs:408` | — | S | — |
-| 12 | **Cache: `auto` places markers** | `ai/src/settings.rs:560-566` maps `Auto` to `Prefer(Short)` for codecs with breakpoint support, or the codec decides | ai: Anthropic codec golden, `auto` emits at most 4 `cache_control` markers | owner | S | **Yes** (Q10) |
+| 12 | **Cache: `auto` places markers (done)** | `ai/src/settings.rs:560-572` maps `Auto` to `Prefer(Short)` for codecs with automatic breakpoint support; unsupported codecs remain marker-free. Anthropic placement is capped at four markers | ai: Anthropic behavior test proves `auto` emits 1–4 `cache_control` markers on a long multi-turn request, explicit `none` emits 0, and unsupported codec `auto` emits 0 | owner | S | **Yes** (Q10) |
 | 13 | **Cache: Volatile band out of the system prefix** | `agent/src/prompt/mod.rs:108-114`, `status.md`, `loop.rs:2486-2509`: deliver turn, todos and mounts in the message stream; keep `date` stable | agent: extend `p5_prefix_stability` to message-prefix stability across a todo update and a new turn; update goldens | — | M | **Yes** (Q10) |
 | 14 | **`--api-key` attribution** | `ai/src/auth/broker.rs:326-352`: lease under a synthetic `invocation` account, or skip pool selection when an invocation key covers the spec | ai: usage and quota observations for an invocation-key call do not land on the stored account | owner | S | **Yes** (Q11) |
 | 15 | **`cl_disabled_extensions` loses PROJECT** (F12) | `driver/src/discovery/mod.rs:42` | con/driver: `.omp/config.cfg` setting it is `ProjectVarDenied` | owner | S | **Yes** (Q8) |
