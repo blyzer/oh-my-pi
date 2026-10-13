@@ -7,6 +7,7 @@
 //! `buildbuddy-cancel` feature.
 
 pub mod digest;
+pub mod endpoint;
 pub mod profile;
 
 /// Generated bindings for the vendored protos.
