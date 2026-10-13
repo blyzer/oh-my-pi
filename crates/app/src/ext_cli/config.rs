@@ -1,18 +1,13 @@
 //! Interactive extension and skill enablement.
 //!
 //! The selector edits one convar, `cl_disabled_extensions` (declared in
-//! `omp_driver::discovery`): native
-//! extension manifest ids disable a whole extension, `skill:<name>` drops one
-//! skill. The user scope persists to `~/.o2/config.cfg`, the workspace scope
-//! to `<project>/.omp/config.cfg`, through the same lenient load and dump
+//! `omp_driver::discovery`): native extension manifest ids disable a whole
+//! extension, `skill:<name>` drops one skill. The list is user-only: it
+//! persists to `~/.o2/config.cfg` through the same lenient load and dump
 //! `omp config set` uses (ADR 0012: one currency; ADR 0014: no second
-//! customization schema). The workspace file is a project overlay:
-//! `cl_disabled_extensions` is project-scoped, so it is read and rewritten
-//! under project authority. A workspace list replaces the user list when the
-//! project cfg runs after the user cfg, so the first workspace edit starts
-//! from the effective user list; `Delete` drops the override again. A cfg
-//! dump only carries values diverging from the default, so an empty
-//! workspace list cannot be persisted and always means "inherit".
+//! customization schema). A project `.omp/config.cfg` cannot set it (owner
+//! decision Q8: a repository must not be able to switch off a guard
+//! extension), so there is no workspace scope to edit.
 
 use std::{collections::BTreeSet, path::Path};
 
@@ -30,9 +25,6 @@ use omp_tui::{
 	components::{Boxed, Button, Col, Row, Select, SelectOption, Shader, TextLeaf},
 	shader::Eclipse,
 };
-use strum::Display;
-
-use super::Layer;
 
 const RESOURCE_LIST: &str = "extension-config-resources";
 const ACCEPT: &str = "extension-config-accept";
@@ -41,26 +33,6 @@ const CANCEL: &str = "extension-config-cancel";
 /// Options for the interactive extension selector.
 #[derive(Clone, Debug, Default, Args)]
 pub struct ExtConfigArgs {}
-
-/// Which cfg file a toggle edits.
-#[derive(Clone, Copy, Debug, Default, Display, Eq, PartialEq)]
-#[strum(serialize_all = "lowercase")]
-enum WriteScope {
-	/// `~/.o2/config.cfg`.
-	#[default]
-	User,
-	/// `<project>/.omp/config.cfg`.
-	Workspace,
-}
-
-impl WriteScope {
-	const fn switched(self) -> Self {
-		match self {
-			Self::User => Self::Workspace,
-			Self::Workspace => Self::User,
-		}
-	}
-}
 
 /// One toggleable row: an extension manifest id or a `skill:<name>` id.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,48 +45,23 @@ struct SelectorItem {
 	origin: Str,
 }
 
-/// The two persisted lists plus the cursor; pure so tests drive it directly.
+/// The persisted list plus the cursor; pure so tests drive it directly.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SelectorModel {
-	scope:           WriteScope,
-	items:           Vec<SelectorItem>,
-	selected:        usize,
+	items:    Vec<SelectorItem>,
+	selected: usize,
 	/// `cl_disabled_extensions` in the user cfg.
-	user:            BTreeSet<Str>,
-	/// `cl_disabled_extensions` in the workspace cfg; `None` inherits the
-	/// user list.
-	workspace:       Option<BTreeSet<Str>>,
-	dirty_user:      bool,
-	dirty_workspace: bool,
+	disabled: BTreeSet<Str>,
+	dirty:    bool,
 }
 
 impl SelectorModel {
-	fn new(items: Vec<SelectorItem>, user: BTreeSet<Str>, workspace: Option<BTreeSet<Str>>) -> Self {
-		Self {
-			scope: WriteScope::User,
-			items,
-			selected: 0,
-			user,
-			workspace,
-			dirty_user: false,
-			dirty_workspace: false,
-		}
-	}
-
-	/// The list the selected scope applies at runtime.
-	fn effective(&self) -> &BTreeSet<Str> {
-		match self.scope {
-			WriteScope::User => &self.user,
-			WriteScope::Workspace => self.workspace.as_ref().unwrap_or(&self.user),
-		}
+	fn new(items: Vec<SelectorItem>, disabled: BTreeSet<Str>) -> Self {
+		Self { items, selected: 0, disabled, dirty: false }
 	}
 
 	fn enabled(&self, item: &SelectorItem) -> bool {
-		!self.effective().contains(&item.id)
-	}
-
-	fn switch_scope(&mut self) {
-		self.scope = self.scope.switched();
+		!self.disabled.contains(&item.id)
 	}
 
 	fn select(&mut self, index: usize) {
@@ -123,36 +70,14 @@ impl SelectorModel {
 		}
 	}
 
-	/// Flips the selected row in the selected scope. The first workspace
-	/// toggle materializes the override from the effective user list so the
-	/// project keeps every user decision it did not change.
+	/// Flips the selected row.
 	fn toggle_selected(&mut self) {
 		let Some(id) = self.items.get(self.selected).map(|item| item.id.clone()) else {
 			return;
 		};
-		let list = match self.scope {
-			WriteScope::User => {
-				self.dirty_user = true;
-				&mut self.user
-			},
-			WriteScope::Workspace => {
-				self.dirty_workspace = true;
-				let user = &self.user;
-				self.workspace.get_or_insert_with(|| user.clone())
-			},
-		};
-		if !list.remove(&id) {
-			list.insert(id);
-		}
-		if self.workspace.as_ref().is_some_and(BTreeSet::is_empty) {
-			self.workspace = None;
-		}
-	}
-
-	/// Drops the workspace override so the project inherits the user list.
-	fn inherit_workspace(&mut self) {
-		if self.scope == WriteScope::Workspace && self.workspace.take().is_some() {
-			self.dirty_workspace = true;
+		self.dirty = true;
+		if !self.disabled.remove(&id) {
+			self.disabled.insert(id);
 		}
 	}
 
@@ -162,37 +87,23 @@ impl SelectorModel {
 		} else {
 			"disabled"
 		};
-		match self.scope {
-			WriteScope::Workspace if self.workspace.is_none() => {
-				sf!("{state} (inherited from user scope) · {}", item.origin)
-			},
-			_ => sf!("{state} · {}", item.origin),
-		}
+		sf!("{state} · {}", item.origin)
 	}
 }
 
 /// Opens the alternate-buffer selector and persists staged changes only after
 /// acceptance.
 #[expect(clippy::future_not_send, reason = "the selector owns a thread-confined omp_tui::App")]
-pub async fn run(project: &Path, layer: Option<Layer>, _args: ExtConfigArgs) -> miette::Result<()> {
+pub async fn run(project: &Path, _args: ExtConfigArgs) -> miette::Result<()> {
 	let user_path = crate::config_path().into_diagnostic()?;
-	let workspace_path = crate::config_cmd::path(project, crate::cli::ConfigScope::Project)?;
 	let user_cfg = crate::config_cmd::load_cfg(&user_path)?;
-	let workspace_cfg = crate::config_cmd::load_project_cfg(&workspace_path)?;
-	let mut model = SelectorModel::new(
-		load_items(project)?,
-		disabled_list(&user_cfg),
-		Some(disabled_list(&workspace_cfg)).filter(|list| !list.is_empty()),
-	);
-	if layer == Some(Layer::Workspace) {
-		model.switch_scope();
-	}
+	let mut model = SelectorModel::new(load_items(project)?, disabled_list(&user_cfg));
 
 	let mut app = AppOptions::new()
 		.hold_alt()
 		.keep_on_cancel()
 		.mouse()
-		.hotkeys([Key::Tab, Key::Space, Key::Delete])
+		.hotkeys([Key::Space])
 		.start(|env: omp_tui::AppEnv| {
 			Ui::from_root(
 				Shader::new(Eclipse::default()).size(env.viewport.width, env.viewport.height),
@@ -221,14 +132,6 @@ pub async fn run(project: &Path, layer: Option<Layer>, _args: ExtConfigArgs) -> 
 				model.toggle_selected();
 				show_selector(app.ui_mut(), &model, true);
 			},
-			Some(AppEvent::Key(Key::Tab)) => {
-				model.switch_scope();
-				show_selector(app.ui_mut(), &model, true);
-			},
-			Some(AppEvent::Key(Key::Delete)) => {
-				model.inherit_workspace();
-				show_selector(app.ui_mut(), &model, true);
-			},
 			Some(AppEvent::Submitted) => break true,
 			Some(AppEvent::Pressed(id)) if id.as_str() == ACCEPT => break true,
 			Some(AppEvent::Pressed(id)) if id.as_str() == CANCEL => break false,
@@ -236,45 +139,27 @@ pub async fn run(project: &Path, layer: Option<Layer>, _args: ExtConfigArgs) -> 
 			_ => {},
 		}
 	};
-	if accepted {
-		if model.dirty_user {
-			persist(&user_path, WriteScope::User, Some(&model.user))?;
-		}
-		if model.dirty_workspace {
-			persist(&workspace_path, WriteScope::Workspace, model.workspace.as_ref())?;
-		}
+	if accepted && model.dirty {
+		persist(&user_path, &model.disabled)?;
 	}
 	Ok(())
 }
 
-/// Writes `list` into the latest on-disk cfg's `cl_disabled_extensions` (or
-/// resets it to the default when `None`). The fresh read and replacement share
-/// the config transaction, so changes made while the selector was open survive.
-fn persist(path: &Path, scope: WriteScope, list: Option<&BTreeSet<Str>>) -> miette::Result<()> {
-	let write = |cfg: &Ctx| {
-		let value = list.map_or_else(
-			|| (CL_DISABLED_EXTENSIONS.spec().default)(),
-			|list| Value::List(list.iter().cloned().map(Value::Str).collect()),
-		);
-		// The workspace file is a project overlay: its value lives in the
-		// project layer, which only a `PROJECT` convar may occupy.
-		let origin = match (scope, list.is_some()) {
-			(WriteScope::User, true) => Origin::Archive,
-			(WriteScope::User, false) => Origin::Default,
-			(WriteScope::Workspace, _) => Origin::Project,
+/// Writes `list` into the latest on-disk user cfg's `cl_disabled_extensions`
+/// (an empty list resets it to the default). The fresh read and replacement
+/// share the config transaction, so changes made while the selector was open
+/// survive.
+fn persist(path: &Path, list: &BTreeSet<Str>) -> miette::Result<()> {
+	crate::config_cmd::update_cfg(path, |cfg: &Ctx| {
+		let (value, origin) = if list.is_empty() {
+			((CL_DISABLED_EXTENSIONS.spec().default)(), Origin::Default)
+		} else {
+			(Value::List(list.iter().cloned().map(Value::Str).collect()), Origin::Archive)
 		};
-		match (scope, list) {
-			(WriteScope::Workspace, None) => cfg.unset(CL_DISABLED_EXTENSIONS.name(), &origin),
-			_ => cfg
-				.set(CL_DISABLED_EXTENSIONS.name(), value, origin)
-				.map(drop),
-		}
-		.into_diagnostic()
-	};
-	match scope {
-		WriteScope::User => crate::config_cmd::update_cfg(path, write),
-		WriteScope::Workspace => crate::config_cmd::update_project_cfg(path, write),
-	}
+		cfg.set(CL_DISABLED_EXTENSIONS.name(), value, origin)
+			.map(drop)
+			.into_diagnostic()
+	})
 }
 
 fn disabled_list(cfg: &Ctx) -> BTreeSet<Str> {
@@ -363,13 +248,14 @@ fn show_selector(ui: &mut Ui, model: &SelectorModel, replace: bool) {
 		.child(Button::new().with(Prop::Id, CANCEL).child("Cancel"));
 	let content = Col::new()
 		.with(Prop::Gap, 1_u16)
-		.child(TextLeaf::new().text(sf!("{} scope · cl_disabled_extensions", model.scope)))
+		.child(TextLeaf::new().text("user scope · cl_disabled_extensions"))
 		.child(select)
 		.child(actions)
-		.child(TextLeaf::new().with(Prop::Dim, true).text(
-			"Tab switches scope | Space toggles | Delete makes the workspace inherit | Enter applies \
-			 | Esc cancels",
-		));
+		.child(
+			TextLeaf::new()
+				.with(Prop::Dim, true)
+				.text("Space toggles | Enter applies | Esc cancels"),
+		);
 	ui.show_overlay(
 		Boxed::new().child(
 			Col::new()
@@ -405,74 +291,48 @@ mod tests {
 	}
 
 	#[test]
-	fn user_toggle_edits_the_user_list_only() {
+	fn toggle_flips_the_selected_row_and_marks_the_list_dirty() {
 		let mut model =
-			SelectorModel::new(vec![item("acme.reviewer"), item("skill:review")], set(&[]), None);
+			SelectorModel::new(vec![item("acme.reviewer"), item("skill:review")], set(&[]));
 		assert!(model.enabled(&model.items[0]));
+		assert!(!model.dirty);
 		model.select(1);
 		model.toggle_selected();
-		assert_eq!(model.user, set(&["skill:review"]));
-		assert!(model.workspace.is_none());
-		assert!(model.dirty_user && !model.dirty_workspace);
+		assert_eq!(model.disabled, set(&["skill:review"]));
+		assert!(model.dirty);
+		assert!(model.detail(&model.items[1]).starts_with("disabled"));
 		model.toggle_selected();
-		assert!(model.user.is_empty());
-	}
-
-	#[test]
-	fn workspace_toggle_materializes_from_the_user_list_and_delete_inherits_again() {
-		let mut model = SelectorModel::new(
-			vec![item("acme.reviewer"), item("skill:review")],
-			set(&["acme.reviewer"]),
-			None,
-		);
-		model.switch_scope();
-		assert_eq!(model.scope, WriteScope::Workspace);
-		// Inherited picture before any workspace edit.
-		assert!(!model.enabled(&model.items[0]));
-		assert!(model.detail(&model.items[0]).contains("inherited"));
-		model.select(1);
-		model.toggle_selected();
-		assert_eq!(model.workspace, Some(set(&["acme.reviewer", "skill:review"])));
-		assert_eq!(model.user, set(&["acme.reviewer"]), "user list untouched");
-		assert!(model.dirty_workspace && !model.dirty_user);
-		model.inherit_workspace();
-		assert!(model.workspace.is_none());
-		assert!(model.enabled(&model.items[1]));
+		assert!(model.disabled.is_empty());
 	}
 
 	/// The selector writes the convar the runtime reads: after persisting,
-	/// re-loading the cfg through the production loader yields the list.
+	/// re-loading the cfg through the production loader yields the list, and
+	/// an empty list drops the line again.
 	#[test]
 	fn persisted_list_round_trips_through_the_cfg_loader() {
 		let tree = tempfile::tempdir().unwrap();
 		let path = tree.path().join("config.cfg");
-		persist(&path, WriteScope::User, Some(&set(&["skill:review", "acme.reviewer"]))).unwrap();
+		persist(&path, &set(&["skill:review", "acme.reviewer"])).unwrap();
 		let script = std::fs::read_to_string(&path).unwrap();
 		assert!(script.contains("cl_disabled_extensions"), "{script}");
 		let reloaded = crate::config_cmd::load_cfg(&path).unwrap();
 		assert_eq!(disabled_list(&reloaded), set(&["acme.reviewer", "skill:review"]));
 		let policy = omp_driver::discovery::skills::SkillPolicy::from_con(&reloaded);
 		assert_eq!(policy.disabled, set(&["review"]));
-		persist(&path, WriteScope::User, None).unwrap();
+		persist(&path, &set(&[])).unwrap();
 		let cleared = crate::config_cmd::load_cfg(&path).unwrap();
 		assert!(disabled_list(&cleared).is_empty());
 	}
 
-	/// The workspace scope writes a project overlay: `cl_disabled_extensions`
-	/// is project-scoped, so the same list round-trips through the project
-	/// loader, and `Delete` (inherit) removes it again.
+	/// A project overlay naming the convar is refused by the project loader,
+	/// so a repository's `.omp/config.cfg` never feeds the selector or the
+	/// runtime a disabled set.
 	#[test]
-	fn workspace_list_round_trips_through_the_project_overlay() {
+	fn a_project_overlay_cannot_carry_the_list() {
 		let tree = tempfile::tempdir().unwrap();
 		let path = tree.path().join("config.cfg");
-		persist(&path, WriteScope::Workspace, Some(&set(&["acme.reviewer"]))).unwrap();
-		let script = std::fs::read_to_string(&path).unwrap();
-		assert!(script.contains("cl_disabled_extensions"), "{script}");
-		assert!(!script.contains("alias"), "a project overlay carries no alias table:\n{script}");
+		std::fs::write(&path, "cl_disabled_extensions [acme.reviewer]\n").unwrap();
 		let reloaded = crate::config_cmd::load_project_cfg(&path).unwrap();
-		assert_eq!(disabled_list(&reloaded), set(&["acme.reviewer"]));
-		persist(&path, WriteScope::Workspace, None).unwrap();
-		let cleared = crate::config_cmd::load_project_cfg(&path).unwrap();
-		assert!(disabled_list(&cleared).is_empty());
+		assert!(disabled_list(&reloaded).is_empty());
 	}
 }

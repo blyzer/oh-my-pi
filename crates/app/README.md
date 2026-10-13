@@ -50,6 +50,21 @@ one-based `--account` selection; use `--list` to find its index. `dry-balance`
 uses stable, private `account-N` labels shared by counts and receipts, so
 different accounts cannot overwrite one another's JSON count keys.
 
+`omp trust [PATH]` records persistent workspace trust bound to the current
+project-input digest (the path defaults to the current directory).
+`--subtree` grants a parent directory but still requires one digest-bound
+confirmation per workspace; filesystem roots, home, and home ancestors are
+refused. `--revoke` removes that workspace's grants and its rooted subtree
+grant; beneath another granted subtree it records a deny rather than falling
+back to inherited trust. `--deny` explicitly blocks a workspace until another
+exact trust decision replaces it. `--show` reports the current decision and
+digest match without modifying grants.
+
+Chat and print accept `--trust-workspace` as an explicit session-only override.
+It never persists a grant: subsequent invocations reevaluate trust normally.
+Without a grant or this override, print mode withholds project-sourced inputs
+and reports the withheld inputs on stderr.
+
 ## Development
 
 Run `just setup-python` once before commands that link embedded Python. Use
