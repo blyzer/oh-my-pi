@@ -1835,12 +1835,14 @@ mod tests {
 			let connection = rusqlite::Connection::open(&database).unwrap();
 			connection
 				.execute_batch(
-					"CREATE TABLE conversation_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
-					 schema_version INTEGER NOT NULL);",
+					"CREATE TABLE conversation_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = \
+					 1), schema_version INTEGER NOT NULL);",
 				)
 				.unwrap();
 			connection
-				.execute("INSERT INTO conversation_meta(singleton, schema_version) VALUES (1, ?1)", [newer])
+				.execute("INSERT INTO conversation_meta(singleton, schema_version) VALUES (1, ?1)", [
+					newer,
+				])
 				.unwrap();
 		}
 		let before = std::fs::read(&database).unwrap();

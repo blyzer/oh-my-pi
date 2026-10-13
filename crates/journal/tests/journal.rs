@@ -235,7 +235,8 @@ fn scan_prefix_returns_the_committed_entries_inside_the_limit() {
 	drop(journal);
 }
 
-const NEWER_GENESIS: &str = "event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {\"version\":1,\"cwd\":\"/tmp\",\"created\":\"now\"}\n\n";
+const NEWER_GENESIS: &str = "event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \
+                             {\"version\":1,\"cwd\":\"/tmp\",\"created\":\"now\"}\n\n";
 
 /// A kind this build does not know is a journal from a newer omp, not a
 /// corrupt file: both read paths report the typed fail-closed error naming the
@@ -246,7 +247,8 @@ fn unknown_kind_or_revision_is_a_typed_newer_revision_error() {
 	for event in ["patch@2", "x.future@1"] {
 		let path = directory.path().join("newer.oms");
 		let text = format!(
-			"{NEWER_GENESIS}event: {event}\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {{}}\n\n"
+			"{NEWER_GENESIS}event: {event}\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: \
+			 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {{}}\n\n"
 		);
 		fs::write(&path, &text).expect("write newer journal");
 
@@ -274,14 +276,14 @@ fn genesis_version_newer_than_supported_is_a_typed_error() {
 	fs::write(
 		&path,
 		format!(
-			"event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {{\"version\":{newer},\"cwd\":\"/\",\"created\":\"1\"}}\n\n"
+			"event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \
+			 {{\"version\":{newer},\"cwd\":\"/\",\"created\":\"1\"}}\n\n"
 		),
 	)
 	.expect("write");
-	for error in [
-		Journal::scan(&path).expect_err("scan"),
-		Journal::open(&path).map(|_| ()).expect_err("open"),
-	] {
+	for error in
+		[Journal::scan(&path).expect_err("scan"), Journal::open(&path).map(|_| ()).expect_err("open")]
+	{
 		let JournalError::NewerGenesisVersion { found, supported } = error else {
 			panic!("expected NewerGenesisVersion, got {error:?}");
 		};

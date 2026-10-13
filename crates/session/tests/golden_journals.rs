@@ -141,14 +141,7 @@ fn tool_calls_and_rewind(session: &mut Session) {
 		.expect("read settles");
 
 	let bash = session
-		.call(
-			"bash",
-			1,
-			"call-2",
-			None,
-			Some(raw(serde_json::json!({ "command": "ls" }))),
-			None,
-		)
+		.call("bash", 1, "call-2", None, Some(raw(serde_json::json!({ "command": "ls" }))), None)
 		.expect("bash call");
 	session.call_started(bash).expect("bash started");
 	session

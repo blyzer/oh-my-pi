@@ -272,7 +272,11 @@ pub(crate) fn read_block<R: BufRead>(reader: &mut R, block: &mut Vec<u8>) -> io:
 	loop {
 		let available = reader.fill_buf()?;
 		if available.is_empty() {
-			return Ok(if block.is_empty() { Block::End } else { Block::Torn });
+			return Ok(if block.is_empty() {
+				Block::End
+			} else {
+				Block::Torn
+			});
 		}
 		let (take, line_done) = match memchr(b'\n', available) {
 			Some(index) => (index + 1, true),
@@ -397,7 +401,8 @@ mod tests {
 	#[test]
 	fn a_maximal_legal_frame_is_complete_and_a_torn_one_is_torn() {
 		let payload = "x".repeat(DATA_HARD_CAP - 2);
-		let frame = format!("event: patch@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \"{payload}\"\n\n");
+		let frame =
+			format!("event: patch@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \"{payload}\"\n\n");
 		let mut block = Vec::new();
 		let mut reader = BufReader::new(frame.as_bytes());
 		assert_eq!(read_block(&mut reader, &mut block).expect("read"), Block::Complete);

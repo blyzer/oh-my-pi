@@ -623,7 +623,9 @@ mod tests {
 		let newer = root.join("newer.oms");
 		fs::write(
 			&newer,
-			"event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {\"version\":1,\"cwd\":\"/w\",\"created\":\"1\"}\n\nevent: msg.user@2\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {}\n\n",
+			"event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \
+			 {\"version\":1,\"cwd\":\"/w\",\"created\":\"1\"}\n\nevent: msg.user@2\nid: \
+			 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {}\n\n",
 		)
 		.expect("write newer journal");
 

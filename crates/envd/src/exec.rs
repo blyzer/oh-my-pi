@@ -6581,7 +6581,7 @@ mod tests {
 		assert!(matches!(
 			take_worker_frame(&mut oversized),
 			Err(ExecError::ProbeFrame {
-				source: FrameBoundsError::FrameTooLarge { limit: FRAME_MAX_BYTES, .. }
+				source: FrameBoundsError::FrameTooLarge { limit: FRAME_MAX_BYTES, .. },
 			})
 		));
 	}

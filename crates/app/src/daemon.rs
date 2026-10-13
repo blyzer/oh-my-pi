@@ -37,7 +37,9 @@ use tokio::{
 	time,
 };
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Request, Status, service::interceptor::InterceptedService, transport, transport::Server};
+use tonic::{
+	Request, Status, service::interceptor::InterceptedService, transport, transport::Server,
+};
 use zeroize::Zeroizing;
 
 use crate::{endpoint::LocalEndpoint, gateway_rpc::GatewayRpc};
@@ -380,7 +382,8 @@ impl DaemonHandle {
 					RPC_MESSAGE_MAX_BYTES
 				);
 				let auth = limited!(AuthServer::new(auth_rpc.clone()), RPC_MESSAGE_MAX_BYTES);
-				let blobs = limited!(BlobServer::new(BlobRpc::new(blobs.clone())), RPC_MESSAGE_MAX_BYTES);
+				let blobs =
+					limited!(BlobServer::new(BlobRpc::new(blobs.clone())), RPC_MESSAGE_MAX_BYTES);
 				let task = tokio::spawn(async move {
 					Server::builder()
 						.add_service(gateway)

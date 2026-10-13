@@ -259,7 +259,10 @@ pub enum JournalError {
 	/// supports ([`data::GENESIS_VERSION`]).
 	///
 	/// Fail-closed like [`Self::NewerRevision`].
-	#[error("journal format version {found} is newer than the supported version {supported}; upgrade omp to open it")]
+	#[error(
+		"journal format version {found} is newer than the supported version {supported}; upgrade \
+		 omp to open it"
+	)]
 	NewerGenesisVersion {
 		/// Version the genesis declares.
 		found:     u32,

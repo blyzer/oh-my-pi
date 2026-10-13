@@ -5,14 +5,16 @@ use std::fs;
 use omp_journal::JournalError;
 use omp_session::{ComponentRegistry, Session, SessionError};
 
-const GENESIS: &str = "event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {\"version\":VERSION,\"cwd\":\"/\",\"created\":\"1\"}\n\n";
+const GENESIS: &str = "event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \
+                       {\"version\":VERSION,\"cwd\":\"/\",\"created\":\"1\"}\n\n";
 
 #[test]
 fn open_reports_a_newer_kind_revision_instead_of_a_generic_frame_error() {
 	let directory = tempfile::tempdir().expect("tempdir");
 	let path = directory.path().join("newer.oms");
 	let text = format!(
-		"{}event: msg.user@2\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {{}}\n\n",
+		"{}event: msg.user@2\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \
+		 {{}}\n\n",
 		GENESIS.replace("VERSION", "1")
 	);
 	fs::write(&path, &text).expect("write");
