@@ -8,8 +8,8 @@
 //! The contract enforces that instead of trusting it:
 //!
 //! - [`DelegatedPrompt`] is built only from the already rendered
-//!   `omp_proto::thread::v1::Item`s (and band digests) the kernel would send
-//!   to a model. Non-text parts are refused, never dropped.
+//!   `omp_proto::thread::v1::Item`s (and band digests) the kernel would send to
+//!   a model. Non-text parts are refused, never dropped.
 //! - It carries a [`Hash32`] [`digest`](DelegatedPrompt::digest) over role,
 //!   length and bytes of every section plus the band digests.
 //! - The backend echoes the digest of the bytes it actually forwarded in
@@ -27,9 +27,7 @@ use thiserror::Error;
 use crate::prompt::RenderedPrompt;
 
 /// Who a prompt section speaks as.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum PromptRole {
 	/// System, developer or instruction text.

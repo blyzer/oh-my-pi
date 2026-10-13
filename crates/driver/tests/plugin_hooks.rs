@@ -995,18 +995,26 @@ async fn post_model_switch_runs_on_a_model_change_and_never_on_a_thinking_one() 
 	};
 	let path = fixture.plugin_data().join("switches.jsonl");
 	// One observation at a time: each hook appends its line before the next
-	// change is published.
+	// change is published. A hook appends its payload and then, in a second
+	// command, the newline that ends the line, so only terminated lines count
+	// as observed: counting the unterminated one would publish the next change
+	// while this hook's newline is still pending, and the two payloads would
+	// share a line.
 	let publish = async |payload: serde_json::Value, expected: usize| {
 		lifecycle
 			.notify(HookEventId::HookEventModelChanged, payload)
 			.expect("notify");
 		let deadline = Instant::now() + Duration::from_secs(30);
-		while read(&path)
-			.lines()
-			.filter(|line| !line.trim().is_empty())
-			.count()
-			< expected
-		{
+		loop {
+			let text = read(&path);
+			let terminated = text.rfind('\n').map_or("", |end| &text[..end]);
+			if terminated
+				.lines()
+				.filter(|line| !line.trim().is_empty())
+				.count() >= expected
+			{
+				break;
+			}
 			assert!(Instant::now() < deadline, "switch {expected} reaches the hook");
 			tokio::time::sleep(Duration::from_millis(50)).await;
 		}

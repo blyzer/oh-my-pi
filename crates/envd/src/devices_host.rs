@@ -61,6 +61,9 @@ fn capture_exec_diags(diags: &[Diag]) {
 /// own bindings answer.
 #[derive(Clone, Default)]
 pub(crate) struct CommandIssuer {
+	/// The authenticated session owner of the connection that issued the
+	/// command.
+	pub(crate) owner:      Option<Str>,
 	/// The approval relay of the connection that issued the command.
 	pub(crate) approvals:  Option<OwnedApprovals>,
 	/// The reflection relay of the connection that issued the command.
@@ -437,7 +440,7 @@ impl DynHost {
 	) -> DynFuture<'_, DynCallOutput> {
 		let name = Str::new(name);
 		Box::pin(async move {
-			let CommandIssuer { approvals, reflection } = issuer;
+			let CommandIssuer { owner, approvals, reflection } = issuer;
 			let result = async {
 				if matches!(name.as_str(), "resolve" | "reject") {
 					if cancellation.is_cancelled() {
@@ -521,8 +524,13 @@ impl DynHost {
 				let mut feed = None;
 				let mut stream = match target.route.clone() {
 					ToolRoute::Native => {
+						if path.root() == "eval" && owner.is_none() {
+							return Err(DynFault::new(
+								"eval requires an authenticated issuing session owner",
+							));
+						}
 						let (committed, params) =
-							IncomingParams::channel_for(None, Some(invocation_id.clone()));
+							IncomingParams::channel_for(owner.clone(), Some(invocation_id.clone()));
 						committed.args_committed(raw).map_err(|_| {
 							DynFault::new("device argument channel closed before dispatch")
 						})?;
@@ -809,6 +817,39 @@ mod tests {
 		}
 	}
 
+	struct OwnerDevice {
+		spec:   ToolSpec,
+		owners: Arc<Mutex<Vec<Str>>>,
+	}
+
+	impl Tool for OwnerDevice {
+		type Fault = Value;
+		type Params = Value;
+		type Payload = Value;
+		type Update = Value;
+
+		fn spec(&self) -> &ToolSpec {
+			&self.spec
+		}
+
+		fn call<'c>(
+			&'c self,
+			incoming: IncomingParams<'c>,
+		) -> impl Stream<Item = Ev<Value, Value, Value>> + Send + 'c {
+			self
+				.owners
+				.lock()
+				.push(incoming.owner().cloned().expect("eval calls have an owner"));
+			futures::stream::once(async {
+				Ev::Done(ToolTerminal::Done { result: Ok(json!({"ok": true})), useless: false })
+			})
+		}
+
+		fn prompt(&self, _view: Result<&Value, &Value>, _caps: &PromptCaps) -> Vec<Part> {
+			Vec::new()
+		}
+	}
+
 	#[derive(Clone)]
 	struct NoWorker;
 
@@ -954,6 +995,129 @@ mod tests {
 		(host, registry)
 	}
 
+	/// Every `dyn eval` runs as the session that issued its command: two
+	/// sessions' commands reach the device under their own owners, and a
+	/// command no session issued never reaches it.
+	#[tokio::test]
+	async fn dyn_eval_runs_as_each_issuing_session_owner() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let owners = Arc::new(Mutex::new(Vec::new()));
+		let mut registry = Registry::new();
+		register_device(&mut registry, OwnerDevice {
+			spec:   ToolSpec {
+				name:            sf!("eval"),
+				rev:             Rev { family: sf!("test"), n: 1 },
+				description:     sf!("test eval device"),
+				schema:          Bytes::from_static(br#"{"type":"object","properties":{}}"#),
+				constraint:      Constraint::None,
+				effects:         Effects::empty(),
+				confinement:     Confinement::Host,
+				projection_code: [1; 32],
+			},
+			owners: Arc::clone(&owners),
+		});
+		let (host, _registry) =
+			dyn_host_over(scratch.path(), registry, admission(ApprovalMode::Yolo));
+		let host = Arc::new(host);
+		for owner in [sf!("session-a"), sf!("session-b")] {
+			let issuer = IssuerCell::default();
+			let _command =
+				issuer.enter(CommandIssuer { owner: Some(owner), ..CommandIssuer::default() });
+			CommandDevices::new(Arc::clone(&host), issuer.clone())
+				.call("eval", json!({}), CancellationToken::new())
+				.await
+				.expect("eval call");
+		}
+		let ownerless = host
+			.call_issued("eval", json!({}), CancellationToken::new(), CommandIssuer::default())
+			.await
+			.expect_err("eval must reject an ownerless issuing command");
+		assert_eq!(ownerless.message, "eval requires an authenticated issuing session owner");
+		assert_eq!(owners.lock().as_slice(), &[sf!("session-a"), sf!("session-b")]);
+	}
+
+	/// A `dyn eval` inside a session script runs as the session that issued
+	/// the script: the owner `exec_relayed` carries reaches the device, and a
+	/// script issued by no session fails the call instead of running it
+	/// ownerless.
+	#[tokio::test]
+	async fn a_scripted_dyn_eval_runs_as_the_issuing_session_owner() {
+		use omp_proto::env::v1::{ExecOutcome, ExecRequest, OpenSessionRequest, Script};
+
+		use crate::exec::{ExecEvent, ExecHost};
+
+		let scratch = tempfile::tempdir().expect("scratch");
+		let owners = Arc::new(Mutex::new(Vec::new()));
+		let mut registry = Registry::new();
+		register_device(&mut registry, OwnerDevice {
+			spec:   ToolSpec {
+				name:            sf!("eval"),
+				rev:             Rev { family: sf!("test"), n: 1 },
+				description:     sf!("test eval device"),
+				schema:          Bytes::from_static(br#"{"type":"object","properties":{}}"#),
+				constraint:      Constraint::None,
+				effects:         Effects::empty(),
+				confinement:     Confinement::Host,
+				projection_code: [1; 32],
+			},
+			owners: Arc::clone(&owners),
+		});
+		let (devices, _registry) =
+			dyn_host_over(scratch.path(), registry, admission(ApprovalMode::Yolo));
+		let exec = ExecHost::new();
+		exec.install_devices(Arc::new(devices));
+		let script = |session: &Bytes| ExecRequest {
+			session: session.clone(),
+			source: Some(Script { text: String::from("dyn eval"), ..Script::default() }),
+			..ExecRequest::default()
+		};
+		let settle = |run: crate::exec::ExecRun| async move {
+			let mut output = Vec::new();
+			loop {
+				match run.next_event().await {
+					Some(ExecEvent::Exit(event)) => {
+						let status = event.status.expect("exit status");
+						return (
+							status.outcome,
+							status.exit_code,
+							String::from_utf8_lossy(&output).into_owned(),
+						);
+					},
+					Some(ExecEvent::Output(frame)) => output.extend_from_slice(&frame.data),
+					Some(ExecEvent::Started { .. }) => {},
+					None => panic!("exec event stream closed before exit"),
+				}
+			}
+		};
+		for owner in [sf!("session-a"), sf!("session-b")] {
+			let opened = exec
+				.open_session(OpenSessionRequest::default())
+				.await
+				.expect("session opens");
+			let (_, run) = exec
+				.exec_relayed(script(&opened.session), None, Some(owner), None, None)
+				.await
+				.expect("owned script starts");
+			let (outcome, exit_code, output) = settle(run).await;
+			assert_eq!((outcome, exit_code), (ExecOutcome::Exited as i32, Some(0)), "{output}");
+			exec.close_session(&opened.session).expect("session closes");
+		}
+		let opened = exec
+			.open_session(OpenSessionRequest::default())
+			.await
+			.expect("session opens");
+		let (_, run) = exec
+			.exec(script(&opened.session), None)
+			.await
+			.expect("ownerless script starts");
+		let (outcome, exit_code, output) = settle(run).await;
+		assert_eq!(outcome, ExecOutcome::Failed as i32, "{output}");
+		assert_ne!(exit_code, Some(0), "an ownerless `dyn eval` must fail: {output}");
+		assert!(output.contains("eval requires an authenticated issuing session owner"), "{output}");
+		exec.close_session(&opened.session).expect("session closes");
+		assert_eq!(owners.lock().as_slice(), &[sf!("session-a"), sf!("session-b")]);
+	}
+
 	fn commands_and_network() -> Effects {
 		Effects {
 			exec: Some(ExecEffects { commands: Arc::from([sf!("*")]), network: true }),
@@ -1081,7 +1245,8 @@ mod tests {
 		);
 		let (responses, frames) = flume::bounded(4);
 		let approvals = ConnectionApprovals::new(responses);
-		let issuer = CommandIssuer { approvals: Some(approvals.owned(9)), reflection: None };
+		let issuer =
+			CommandIssuer { approvals: Some(approvals.owned(9)), ..CommandIssuer::default() };
 		for (approved, expected_calls) in [(true, 1), (false, 1)] {
 			let call = host.call_issued("danger", json!({}), CancellationToken::new(), issuer.clone());
 			tokio::pin!(call);
@@ -1175,7 +1340,8 @@ mod tests {
 
 		let (responses, frames) = flume::bounded(4);
 		let reflection = ConnectionReflection::new(responses);
-		let issuer = CommandIssuer { approvals: None, reflection: Some(reflection.owned(9)) };
+		let issuer =
+			CommandIssuer { reflection: Some(reflection.owned(9)), ..CommandIssuer::default() };
 		let call = host.call_issued("reflect", args(), CancellationToken::new(), issuer);
 		tokio::pin!(call);
 		let frame = tokio::select! {
@@ -1261,7 +1427,8 @@ mod tests {
 			dyn_host_over(scratch.path(), registry, admission(ApprovalMode::AlwaysAsk));
 		let (responses, frames) = flume::bounded(4);
 		let approvals = ConnectionApprovals::new(responses);
-		let issuer = CommandIssuer { approvals: Some(approvals.owned(9)), reflection: None };
+		let issuer =
+			CommandIssuer { approvals: Some(approvals.owned(9)), ..CommandIssuer::default() };
 
 		let local = host
 			.call_issued(
@@ -1373,7 +1540,8 @@ mod tests {
 			dyn_host_over(scratch.path(), registry, admission(ApprovalMode::AlwaysAsk));
 		let (responses, frames) = flume::bounded(4);
 		let approvals = ConnectionApprovals::new(responses);
-		let issuer = CommandIssuer { approvals: Some(approvals.owned(9)), reflection: None };
+		let issuer =
+			CommandIssuer { approvals: Some(approvals.owned(9)), ..CommandIssuer::default() };
 
 		let call = host.call_issued("pinning", json!({}), CancellationToken::new(), issuer.clone());
 		tokio::pin!(call);

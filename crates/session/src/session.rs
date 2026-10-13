@@ -259,7 +259,7 @@ impl Session {
 			.to_string();
 		let mut session = Self::empty(journal, components, blobs);
 		let genesis = Genesis {
-			version: 1,
+			version: omp_journal::data::GENESIS_VERSION,
 			cwd:     Str::new(cwd.to_string_lossy()),
 			created: Str::new(created),
 		};

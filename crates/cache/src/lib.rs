@@ -4,7 +4,6 @@
 //! contains only rebuildable or non-session cache data.
 
 pub mod atomic;
-pub mod backend;
 /// User-wide document-conversion cache and daemon-owned collection policy.
 pub mod document_cache;
 /// Rebuildable direct-GitHub response cache.

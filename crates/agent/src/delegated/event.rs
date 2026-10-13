@@ -14,9 +14,7 @@ use omp_core::Str;
 use super::{CallId, CliSessionId, Feature, PermissionRequest, TurnId};
 
 /// How a turn ended when the CLI ended it normally.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum TurnEnd {
 	/// The agent finished its work.
@@ -29,9 +27,7 @@ pub enum TurnEnd {
 ///
 /// Typed on purpose: the host and the UI need to distinguish "log in again"
 /// from "retry later" without parsing prose.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum RemoteFailure {
 	/// The CLI's own login is missing or expired.
@@ -47,9 +43,7 @@ pub enum RemoteFailure {
 }
 
 /// What kind of activity a tool event describes.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum ToolKind {
 	/// A shell or process command.
@@ -63,9 +57,7 @@ pub enum ToolKind {
 }
 
 /// How one tool call ended.
-#[derive(
-	Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::Display, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum ToolOutcome {
 	/// The call ran and succeeded.

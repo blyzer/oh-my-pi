@@ -16,7 +16,8 @@
 pub enum SandboxPosture {
 	/// The agent may not write anywhere (`ExecSandboxMode::ReadOnly`).
 	ReadOnly,
-	/// The agent may write inside the workspace (`ExecSandboxMode::WorkspaceWrite`).
+	/// The agent may write inside the workspace
+	/// (`ExecSandboxMode::WorkspaceWrite`).
 	WorkspaceWrite,
 	/// No filesystem confinement (`ExecSandboxMode::Off`).
 	Unrestricted,
@@ -30,7 +31,8 @@ pub enum SandboxPosture {
 pub enum NetworkPosture {
 	/// No IP networking (`SandboxNetworkMode::Disabled`).
 	Disabled,
-	/// Egress only through OMP's policy-enforcing broker (`SandboxNetworkMode::Scoped`).
+	/// Egress only through OMP's policy-enforcing broker
+	/// (`SandboxNetworkMode::Scoped`).
 	Scoped,
 	/// Unfiltered egress (`SandboxNetworkMode::Open`).
 	Open,

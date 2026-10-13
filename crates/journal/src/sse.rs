@@ -3,7 +3,11 @@
 //! The committing boundary is the blank line after a frame. Canonical output
 //! orders fields as comment, `event`, `id`, `by`, `prior`, then `data`.
 
-use std::{io::Write as _, ops::Range, str::FromStr as _};
+use std::{
+	io::{self, BufRead, Write as _},
+	ops::Range,
+	str::FromStr as _,
+};
 
 use memchr::memchr;
 use omp_core::{Str, UlidParseError};
@@ -13,6 +17,20 @@ use crate::{Entry, Kind, KindError};
 
 /// Maximum inline JSON payload size: one mebibyte.
 pub const DATA_HARD_CAP: usize = 1 << 20;
+
+/// Bytes a frame may spend on everything except its payload: the `event`,
+/// `id`, `by`, `prior` and `data:` field lines, the committing blank line, and
+/// the optional label comment.
+pub const FRAME_OVERHEAD_CAP: usize = 64 << 10;
+
+/// Largest legal frame, from its first byte through its committing blank
+/// line: a maximal payload plus [`FRAME_OVERHEAD_CAP`].
+///
+/// Readers fail a block that grows past this without a terminator before
+/// buffering any more of it, so a hostile or damaged `.oms` cannot make a
+/// reader allocate without bound. [`encode`] refuses to write a larger frame,
+/// so a journal this build wrote never trips the reader.
+pub const FRAME_HARD_CAP: usize = DATA_HARD_CAP + FRAME_OVERHEAD_CAP;
 
 /// One decoded complete frame and its byte span.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +113,14 @@ pub enum SseError {
 		/// Payload byte length.
 		len: usize,
 	},
+	/// A frame exceeds [`FRAME_HARD_CAP`] bytes: either a block that reached
+	/// the cap without its committing blank line, or a frame too large to
+	/// write.
+	#[error("journal frame is larger than the {limit}-byte frame limit")]
+	FrameTooLarge {
+		/// The frame byte limit that was exceeded.
+		limit: usize,
+	},
 }
 
 /// Encodes one entry in canonical field order.
@@ -102,13 +128,15 @@ pub enum SseError {
 /// # Errors
 ///
 /// Returns [`SseError`] when the label or payload cannot be represented in a
-/// single frame, the payload is invalid JSON, or it exceeds the hard cap.
+/// single frame, the payload is invalid JSON, it exceeds the hard cap, or the
+/// whole frame would exceed [`FRAME_HARD_CAP`].
 pub fn encode(entry: &Entry, output: &mut Vec<u8>) -> Result<(), SseError> {
 	validate_label(entry.label.as_deref())?;
 	validate_data(entry.data.as_str())?;
 	if !entry.kind.is_known() {
 		return Err(SseError::UnknownKind { kind: entry.kind.clone() });
 	}
+	let start = output.len();
 	if let Some(label) = &entry.label {
 		let _ = writeln!(output, ": {label}");
 	}
@@ -121,6 +149,10 @@ pub fn encode(entry: &Entry, output: &mut Vec<u8>) -> Result<(), SseError> {
 		let _ = writeln!(output, "prior: {prior}");
 	}
 	let _ = write!(output, "data: {}\n\n", entry.data);
+	if output.len() - start > FRAME_HARD_CAP {
+		output.truncate(start);
+		return Err(SseError::FrameTooLarge { limit: FRAME_HARD_CAP });
+	}
 	Ok(())
 }
 
@@ -178,12 +210,19 @@ impl<'a> Scanner<'a> {
 	///
 	/// # Errors
 	///
-	/// Returns [`SseError`] when a complete frame is malformed.
+	/// Returns [`SseError`] when a complete frame is malformed, or when a
+	/// block is larger than [`FRAME_HARD_CAP`] (terminated or not).
 	#[allow(clippy::should_implement_trait, reason = "scanner reports typed frame errors")]
 	pub fn next(&mut self) -> Option<Result<Frame, SseError>> {
 		loop {
 			let start = self.offset;
-			let end = complete_block_end(self.bytes, start)?;
+			let Some(end) = complete_block_end(self.bytes, start) else {
+				return (self.bytes.len() - start > FRAME_HARD_CAP)
+					.then_some(Err(SseError::FrameTooLarge { limit: FRAME_HARD_CAP }));
+			};
+			if end - start > FRAME_HARD_CAP {
+				return Some(Err(SseError::FrameTooLarge { limit: FRAME_HARD_CAP }));
+			}
 			self.offset = end;
 			let raw = &self.bytes[start..end];
 			if raw == b"\n" || raw == b"\r\n" {
@@ -207,7 +246,58 @@ fn complete_block_end(bytes: &[u8], start: usize) -> Option<usize> {
 	}
 }
 
-fn parse_frame(raw: &[u8]) -> Result<Entry, SseError> {
+/// How reading one block from a stream ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Block {
+	/// The buffer holds one complete block, committing blank line included.
+	Complete,
+	/// The stream ended inside a block: a torn tail. The buffer holds it.
+	Torn,
+	/// The stream ended exactly on a block boundary.
+	End,
+	/// The block would grow past [`FRAME_HARD_CAP`] before its committing
+	/// blank line. Nothing beyond the cap was buffered.
+	TooLarge,
+}
+
+/// Reads the next blank-line-terminated block into `block`, replacing its
+/// contents, buffering at most [`FRAME_HARD_CAP`] bytes.
+///
+/// The cap is checked before each line is copied, so an endless line or a
+/// stream of lines that never reaches a blank one stops at the cap instead of
+/// growing the buffer.
+pub(crate) fn read_block<R: BufRead>(reader: &mut R, block: &mut Vec<u8>) -> io::Result<Block> {
+	block.clear();
+	let mut line_start = 0;
+	loop {
+		let available = reader.fill_buf()?;
+		if available.is_empty() {
+			return Ok(if block.is_empty() {
+				Block::End
+			} else {
+				Block::Torn
+			});
+		}
+		let (take, line_done) = match memchr(b'\n', available) {
+			Some(index) => (index + 1, true),
+			None => (available.len(), false),
+		};
+		if take > FRAME_HARD_CAP - block.len() {
+			return Ok(Block::TooLarge);
+		}
+		block.extend_from_slice(&available[..take]);
+		reader.consume(take);
+		if line_done {
+			let line = &block[line_start..];
+			if line == b"\n" || line == b"\r\n" {
+				return Ok(Block::Complete);
+			}
+			line_start = block.len();
+		}
+	}
+}
+
+pub(crate) fn parse_frame(raw: &[u8]) -> Result<Entry, SseError> {
 	let text = std::str::from_utf8(raw).map_err(|source| SseError::InvalidUtf8 { source })?;
 	let mut id = None;
 	let mut kind = None;
@@ -278,4 +368,72 @@ fn parse_frame(raw: &[u8]) -> Result<Entry, SseError> {
 		return Err(SseError::UnknownKind { kind });
 	}
 	Ok(Entry { id: id.ok_or(SseError::MissingId)?, kind, by, prior, label, data: Str::new(data) })
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::{self, BufReader};
+
+	use super::*;
+
+	/// An endless stream that never contains a newline must stop at the frame
+	/// cap, with the buffer bounded by it: the reader never asks for more bytes
+	/// than the cap plus one read-buffer.
+	#[test]
+	fn endless_unterminated_line_stops_at_the_frame_cap() {
+		let mut reader = BufReader::with_capacity(4096, io::repeat(b'a'));
+		let mut block = Vec::new();
+		assert_eq!(read_block(&mut reader, &mut block).expect("read"), Block::TooLarge);
+		assert!(block.len() <= FRAME_HARD_CAP, "buffered {} bytes", block.len());
+	}
+
+	/// The same bound holds for a block of many short lines that never reaches
+	/// the committing blank line.
+	#[test]
+	fn endless_lines_without_a_blank_line_stop_at_the_frame_cap() {
+		let lines = LineEvery { inner: io::repeat(b'x'), every: 8, since: 0 };
+		let mut reader = BufReader::with_capacity(4096, lines);
+		let mut block = Vec::new();
+		assert_eq!(read_block(&mut reader, &mut block).expect("read"), Block::TooLarge);
+		assert!(block.len() <= FRAME_HARD_CAP);
+	}
+
+	#[test]
+	fn a_maximal_legal_frame_is_complete_and_a_torn_one_is_torn() {
+		let payload = "x".repeat(DATA_HARD_CAP - 2);
+		let frame =
+			format!("event: patch@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \"{payload}\"\n\n");
+		let mut block = Vec::new();
+		let mut reader = BufReader::new(frame.as_bytes());
+		assert_eq!(read_block(&mut reader, &mut block).expect("read"), Block::Complete);
+		assert_eq!(block.len(), frame.len());
+		assert_eq!(read_block(&mut reader, &mut block).expect("read"), Block::End);
+
+		let mut reader = BufReader::new(&frame.as_bytes()[..frame.len() - 1]);
+		assert_eq!(read_block(&mut reader, &mut block).expect("read"), Block::Torn);
+	}
+
+	/// Inserts a newline after every `every` bytes of the inner stream.
+	struct LineEvery<R> {
+		inner: R,
+		every: usize,
+		since: usize,
+	}
+
+	impl<R: io::Read> io::Read for LineEvery<R> {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			if buf.is_empty() {
+				return Ok(0);
+			}
+			if self.since == self.every {
+				self.since = 0;
+				buf[0] = b'\n';
+				return Ok(1);
+			}
+			let want = buf.len().min(self.every - self.since);
+			let read = self.inner.read(&mut buf[..want])?;
+			self.since += read;
+			Ok(read)
+		}
+	}
 }
