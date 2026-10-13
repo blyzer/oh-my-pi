@@ -6,6 +6,8 @@
 //! the only vendor wire code is the invocation-cancel call behind the
 //! `buildbuddy-cancel` feature.
 
+pub mod digest;
+
 /// Generated bindings for the vendored protos.
 ///
 /// The module tree mirrors the protobuf package tree on purpose: prost emits
