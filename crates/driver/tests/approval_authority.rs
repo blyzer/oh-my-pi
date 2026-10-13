@@ -714,13 +714,9 @@ fn posture_notices(session: &Session) -> Vec<PostureShown> {
 
 /// The one typed posture notice the live branch of `session` holds, a `warn`.
 ///
-/// The check that no request in `sent` (sent to the model after the notice was
-/// journaled) names or quotes it pins current projection behavior, not a
-/// requirement of the posture report: like every `<notice>`, it is read by the
-/// host projections, and the model's projection of the journal
-/// (`omp_session::project_thread`) leaves notices out. Whether the model should
-/// be told is an open owner decision; if it is made, this check changes with
-/// the projection.
+/// Projection exposes exactly one model-visible structured notice. Its typed
+/// payload is serialized into the turn-local system message, rather than being
+/// inferred from fallback prose.
 fn the_posture(session: &Session, sent: &[String]) -> PostureShown {
 	let mut notices = posture_notices(session);
 	assert_eq!(notices.len(), 1, "exactly one posture notice per session: {notices:?}");
@@ -730,8 +726,8 @@ fn the_posture(session: &Session, sent: &[String]) -> PostureShown {
 	assert!(
 		sent
 			.iter()
-			.all(|text| !text.contains("approval-posture") && !text.contains(posture.body.as_str())),
-		"the posture notice reached the model: {sent:?}"
+			.any(|text| text.contains("workspace_trust") && text.contains("effective")),
+		"the structured posture notice did not reach the model: {sent:?}"
 	);
 	posture
 }

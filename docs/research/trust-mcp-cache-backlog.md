@@ -95,7 +95,7 @@ Status words: **open**, **fixed**, **partly fixed** (a residual is named), **obs
 | §2 Memory `reflect`: `MnemopiSettings.llm_mode` not consulted | **UNVERIFIED** | `memory/src/session.rs:151`, `:227` read `llm_mode`; whether the daemon relay path (`envd/src/reflection_relay.rs`) honours it was not traced | Low | envd/memory |
 | 10-09 #4 Harnesses without `install_tool_authority` | **open (tests only)** | Only `driver/src/headless/kernel.rs:2977` and `driver/tests/approval_authority.rs` install it. `Kernel::new` without it: `app/src/chat_control.rs:3835`, `:4192`, `:4351` (all in its `mod tests`, which starts at `:3546`), `app/tests/{rpc_spine,acp_spine}.rs`, `driver/tests/{memory_reflect,plugin_hooks,hub_sessions}.rs`. No production bypass was found | Low (test fidelity) | driver/app tests |
 | 10-09 #5 Disabled-network diag gaps | **accepted, documented** | ADR 0028 (not re-read this session) | Low | — |
-| 10-09 #3 Model sees `approval-posture`? / unknown-scheme reads non-fetch? | **decision** | `tools/src/read.rs:655-683` (classes) | — | owner |
+| 10-09 #3 Model sees `approval-posture` / unknown-scheme reads possible network access | **implemented (Q12)** | `session/src/projection.rs` projects the typed posture once per journaled notice; `envd/src/tool_url.rs` classifies the host fallback as anonymous fetch | — | — |
 
 ### Accounts (handoff §3) and the 2026-10-11 login item
 
@@ -180,7 +180,7 @@ Answers to the questions above. Slices 1 and 2 have landed (#265, #267).
 | 9 | A typed trust request on `proto`/`rpc` is accepted, and the decision enters `DaemonPolicy` and `ServerHello`. | 4, 7 |
 | 10 | `ai_cache_retention auto` places markers, and the Volatile band moves into messages. Goldens and the ADR 0024 prefix contract are updated with it. | 12, 13 |
 | 11 | Invocation-key usage is recorded under a synthetic `invocation` account. | 14 |
-| 12 | The model sees the `approval-posture` notice. Reads of an unknown scheme count as possible network access, not as non-fetch (2026-10-12), unless the code shows the scheme stays local. | posture notice |
+| 12 | The model sees the `approval-posture` notice. Reads of an unknown scheme count as possible network access, not as non-fetch (2026-10-12), unless the code shows the scheme stays local. | posture notice (implemented) |
 | 13 | A project `vaults.toml`/`hosts.toml` may only add new names, never shadow a user name. | 4 |
 
 ## Commands that took more than one minute
