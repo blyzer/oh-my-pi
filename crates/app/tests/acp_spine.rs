@@ -2013,6 +2013,8 @@ async fn an_acp_session_reads_the_editor_buffer_and_writes_back_after_the_commit
 			"provenance": "default",
 			"effective": "write",
 			"sandbox": { "state": "off" },
+			"workspace_trust": "untrusted",
+			"reason": "default_without_sandbox",
 		})],
 		"one posture notice, in the session whose tools ran"
 	);
