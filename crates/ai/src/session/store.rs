@@ -305,6 +305,16 @@ impl<I: PartialEq + Send + Sync + 'static> ConversationStore<I> for InMemoryConv
 	}
 }
 
+/// Schema version of the postcard-encoded SQLite conversation database,
+/// stored in `PRAGMA user_version`.
+///
+/// Databases created before versioning carry `user_version` 0 and are adopted
+/// as version 1 (the layout is identical). Bump it whenever the tables or the
+/// postcard encoding of a stored value changes incompatibly;
+/// [`SqliteConversationStore::open`] refuses a database whose version is
+/// above this one instead of misdecoding it.
+pub const SQLITE_SCHEMA_VERSION: u32 = 1;
+
 /// SQLite-backed append-only conversation store suitable for process restarts.
 pub struct SqliteConversationStore<I> {
 	connection: Arc<Mutex<Connection>>,
@@ -325,6 +335,18 @@ impl<I> SqliteConversationStore<I> {
 	}
 
 	fn from_connection(connection: Connection) -> Result<Self, ConversationError> {
+		// Read the version before any statement that writes (`journal_mode=WAL`,
+		// `CREATE TABLE`), so a database from a newer omp is refused untouched.
+		let found: i64 = connection
+			.pragma_query_value(None, "user_version", |row| row.get(0))
+			.map_err(|_| ConversationError::Persistence)?;
+		let found = u32::try_from(found).map_err(|_| ConversationError::CorruptStore)?;
+		if found > SQLITE_SCHEMA_VERSION {
+			return Err(ConversationError::UnsupportedSchema {
+				found,
+				supported: SQLITE_SCHEMA_VERSION,
+			});
+		}
 		connection
 			.execute_batch(
 				"PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
@@ -341,6 +363,11 @@ impl<I> SqliteConversationStore<I> {
 			);",
 			)
 			.map_err(|_| ConversationError::Persistence)?;
+		if found != SQLITE_SCHEMA_VERSION {
+			connection
+				.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+				.map_err(|_| ConversationError::Persistence)?;
+		}
 		Ok(Self { connection: Arc::new(Mutex::new(connection)), marker: marker::PhantomData })
 	}
 

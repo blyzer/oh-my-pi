@@ -1792,6 +1792,49 @@ mod tests {
 		);
 	}
 
+	fn user_version(database: &std::path::Path) -> i64 {
+		rusqlite::Connection::open(database)
+			.unwrap()
+			.pragma_query_value(None, "user_version", |row| row.get(0))
+			.unwrap()
+	}
+
+	#[test]
+	fn sqlite_store_stamps_its_schema_version_and_adopts_unversioned_databases() {
+		let state = tempfile::tempdir().unwrap();
+		let database = state.path().join("versioned.db");
+		drop(SqliteConversationStore::<i32>::open(&database).unwrap());
+		assert_eq!(user_version(&database), i64::from(super::store::SQLITE_SCHEMA_VERSION));
+
+		// A database written before versioning has user_version 0 and is adopted.
+		rusqlite::Connection::open(&database)
+			.unwrap()
+			.pragma_update(None, "user_version", 0)
+			.unwrap();
+		drop(SqliteConversationStore::<i32>::open(&database).unwrap());
+		assert_eq!(user_version(&database), i64::from(super::store::SQLITE_SCHEMA_VERSION));
+	}
+
+	#[test]
+	fn sqlite_store_refuses_a_newer_schema_without_modifying_it() {
+		let state = tempfile::tempdir().unwrap();
+		let database = state.path().join("newer.db");
+		let newer = super::store::SQLITE_SCHEMA_VERSION + 1;
+		{
+			let connection = rusqlite::Connection::open(&database).unwrap();
+			connection.pragma_update(None, "user_version", newer).unwrap();
+		}
+		let before = std::fs::read(&database).unwrap();
+		assert!(matches!(
+			SqliteConversationStore::<i32>::open(&database),
+			Err(super::ConversationError::UnsupportedSchema { found, supported })
+				if found == newer && supported == super::store::SQLITE_SCHEMA_VERSION
+		));
+		assert_eq!(user_version(&database), i64::from(newer));
+		assert_eq!(std::fs::read(&database).unwrap(), before, "a refused database is untouched");
+		assert!(!state.path().join("newer.db-wal").exists(), "no WAL was started");
+	}
+
 	#[test]
 	fn sqlite_turn_replay_survives_reopen_and_rejects_payload_reuse() {
 		let state = tempfile::tempdir().unwrap();
