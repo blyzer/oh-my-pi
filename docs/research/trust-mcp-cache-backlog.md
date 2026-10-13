@@ -136,7 +136,7 @@ Each slice is one PR of about 500 lines or fewer. "Seam" is the crate whose publ
 | 12 | **Cache: `auto` places markers** | `ai/src/settings.rs:560-566` maps `Auto` to `Prefer(Short)` for codecs with breakpoint support, or the codec decides | ai: Anthropic codec golden, `auto` emits at most 4 `cache_control` markers | owner | S | **Yes** (Q10) |
 | 13 | **Cache: Volatile band out of the system prefix** | `agent/src/prompt/mod.rs:108-114`, `status.md`, `loop.rs:2486-2509`: deliver turn, todos and mounts in the message stream; keep `date` stable | agent: extend `p5_prefix_stability` to message-prefix stability across a todo update and a new turn; update goldens | — | M | **Yes** (Q10) |
 | 14 | **`--api-key` attribution** | `ai/src/auth/broker.rs:326-352`: lease under a synthetic `invocation` account, or skip pool selection when an invocation key covers the spec | ai: usage and quota observations for an invocation-key call do not land on the stored account | owner | S | **Yes** (Q11) |
-| 15 | **`cl_disabled_extensions` loses PROJECT** (F12) | `driver/src/discovery/mod.rs:42` | con/driver: `.omp/config.cfg` setting it is `ProjectVarDenied` | owner | S | **Yes** (Q8) |
+| 15 | **`cl_disabled_extensions` loses PROJECT (done)** (F12) | `driver/src/discovery/mod.rs:42`; user-only extension configuration UI | driver: `.omp/config.cfg` setting it is `ProjectVarDenied`, changes nothing; user config remains effective | owner | S | **Yes** (Q8) |
 | 16 | **Posture-notice harness fidelity** | Route test kernels in `app/tests/{rpc,acp}_spine.rs` and `driver/tests/*` through `install_tool_authority` or a shared test builder | Those tests observe one `approval-posture` notice under a defaulted `yolo` with no sandbox | — | S | — |
 
 Order rationale:
