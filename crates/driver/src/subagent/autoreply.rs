@@ -326,11 +326,18 @@ fn build_request(
 	request: &AutoreplyRequest,
 ) -> Result<ChatRequest, AutoreplyError> {
 	let dom = Dom::from_snapshot(&snapshot);
+	// Same request shape as `Kernel::project_request`: prefix, thread, then
+	// the volatile notice, so the side-channel reply shares the kernel's
+	// cached prefix bytes.
 	let mut items = omp_agent::PromptSource::system_items(&omp_agent::CanonicalPromptSource, &dom)
 		.map_err(|source| AutoreplyError::Prompt { source })?;
 	items.extend(
 		omp_agent::project_thread_with_attachments(&dom, blobs)
 			.map_err(|source| AutoreplyError::Blob { source })?,
+	);
+	items.extend(
+		omp_agent::PromptSource::volatile_items(&omp_agent::CanonicalPromptSource, &dom)
+			.map_err(|source| AutoreplyError::Prompt { source })?,
 	);
 	let mut messages =
 		Message::from_thread_items(&items).map_err(|source| AutoreplyError::Projection { source })?;

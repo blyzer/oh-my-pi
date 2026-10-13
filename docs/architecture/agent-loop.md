@@ -74,10 +74,11 @@ publishes `KernelEvent::TurnEnded`, re-derives host state from the tree, and emi
    markers are a single journal entry, so a crash cannot deliver twice). Steering already queued is
    consumed into the turn so the model never answers a stale request.
 3. **Projection.** `project_request` builds the working copy of the request from the tree: system
-   items from the `PromptSource`, the mode prompt, the projected thread, vision lowering, and the
-   advertised tool roster (allowlist, goal, `think`, and recursion-ceiling filters). The
-   `thread_projection` hook may patch that copy; the journal and DOM are untouched. The
-   `turn_start` hook may narrow the enabled tools.
+   items from the `PromptSource` (Frozen, Stable, Dynamic bands only), the mode prompt, the
+   projected thread, the `PromptSource`'s volatile items (turn, cwd, mounts, todos, recall) as
+   trailing synthetic user messages, vision lowering, and the advertised tool roster (allowlist,
+   goal, `think`, and recursion-ceiling filters). The `thread_projection` hook may patch that copy;
+   the journal and DOM are untouched. The `turn_start` hook may narrow the enabled tools.
 4. **Preflight Directors.** `before_inference` runs cold auxiliary work (for example compaction
    speculation), raced against cancellation and the mailbox. `prepare_inference` then refines the
    request synchronously, outermost Director first, and `watch_stream` opens request-scoped
