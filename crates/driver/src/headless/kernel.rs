@@ -3045,6 +3045,10 @@ pub async fn compose_kernel(
 		EnvToolExecutor::new(tool_client, approvals),
 		admission,
 	);
+	kernel
+		.inference()
+		.environment()
+		.bind_mcp_literal_notices(kernel.mailbox());
 	kernel.register_live_component(con_journal.live_component());
 	for component in live_python_components {
 		kernel.register_live_component(Box::new(component));

@@ -38,8 +38,13 @@ impl ValueResolution {
 	}
 }
 
+/// Name of the typed notice reporting a literal project MCP value.
+pub const LITERAL_VALUE_NOTICE: &str = "mcp-literal-value";
+
 /// Declaration section a literal-value notice names.
-#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[derive(
+	Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq, serde::Deserialize, serde::Serialize,
+)]
 #[strum(serialize_all = "lowercase")]
 pub enum ValueSection {
 	/// Stdio `env`.
@@ -51,7 +56,7 @@ pub enum ValueSection {
 /// Non-blocking note that a project-scoped declaration used a dynamic value
 /// form which was taken literally instead. Carries only the identifying facts,
 /// never the value.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, thiserror::Error)]
 pub enum LiteralValueNotice {
 	/// A `!command` value was not executed.
 	#[error("project-scoped MCP value is a `!command`; it is taken literally and not executed")]

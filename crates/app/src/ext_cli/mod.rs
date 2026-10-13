@@ -706,7 +706,6 @@ pub async fn run(args: ExtArgs) -> miette::Result<()> {
 		data_dir,
 		project,
 		scope,
-		layer,
 		uv,
 		store,
 		cache,
@@ -797,7 +796,7 @@ pub async fn run(args: ExtArgs) -> miette::Result<()> {
 		ExtCommand::Enable { id } => enable(&scoped_state, &id, true),
 		ExtCommand::Disable { id } => enable(&scoped_state, &id, false),
 		ExtCommand::Features(args) => features(&state, args),
-		ExtCommand::Config(args) => config::run(&project, layer, args).await,
+		ExtCommand::Config(args) => config::run(&project, args).await,
 		ExtCommand::Lock(args) => lock(&state, args),
 		ExtCommand::Resolve(args) => {
 			resolve(

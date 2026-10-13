@@ -484,17 +484,19 @@ impl From<WorkspaceOperationError> for EnvdError {
 #[derive(Clone, Debug)]
 pub struct ServerIdentity {
 	/// Canonical document workspace identity.
-	pub workspace_id:   Bytes,
+	pub workspace_id:    Bytes,
 	/// Canonical workspace root URI.
-	pub root_uri:       Str,
+	pub root_uri:        Str,
 	/// Epoch of the connected document authority.
-	pub server_epoch:   Bytes,
+	pub server_epoch:    Bytes,
 	/// Human-readable server build version.
-	pub server_version: Str,
+	pub server_version:  Str,
 	/// Executable-generation identity of the serving environment.
-	pub server_build:   Str,
+	pub server_build:    Str,
 	/// Sandbox and approval policy the serving environment enforces.
-	pub policy:         DaemonPolicy,
+	pub policy:          DaemonPolicy,
+	/// Workspace active-content policy fixed at composition.
+	pub workspace_trust: WorkspaceTrust,
 }
 
 /// Per-connection transport and exact DATA grant bounds.
@@ -2678,12 +2680,13 @@ impl EnvServer {
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
-			workspace_id:   hello.workspace_id,
-			root_uri:       hello.root_uri,
-			server_epoch:   hello.server_epoch,
+			workspace_id: hello.workspace_id,
+			root_uri: hello.root_uri,
+			server_epoch: hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
-			server_build:   Str::from(omp_env::build_id::current()),
-			policy:         enforced,
+			server_build: Str::from(omp_env::build_id::current()),
+			policy: enforced,
+			workspace_trust,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -2976,12 +2979,13 @@ impl EnvServer {
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
-			workspace_id:   hello.workspace_id,
-			root_uri:       hello.root_uri,
-			server_epoch:   hello.server_epoch,
+			workspace_id: hello.workspace_id,
+			root_uri: hello.root_uri,
+			server_epoch: hello.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
-			server_build:   Str::from(omp_env::build_id::current()),
-			policy:         enforced,
+			server_build: Str::from(omp_env::build_id::current()),
+			policy: enforced,
+			workspace_trust,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -3210,12 +3214,13 @@ impl EnvServer {
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
-			workspace_id:   owner_info.workspace_id,
-			root_uri:       Str::from(owner_info.root_uri),
-			server_epoch:   owner_info.server_epoch,
+			workspace_id: owner_info.workspace_id,
+			root_uri: Str::from(owner_info.root_uri),
+			server_epoch: owner_info.server_epoch,
 			server_version: Str::from(env!("CARGO_PKG_VERSION")),
-			server_build:   Str::from(owner_info.server_build),
-			policy:         enforced,
+			server_build: Str::from(owner_info.server_build),
+			policy: enforced,
+			workspace_trust,
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
@@ -4145,20 +4150,25 @@ impl EnvServer {
 			.send_async(server_frame(
 				0,
 				server_frame::Body::Hello(pb::ServerHello {
-					schema_rev:     omp_proto::SCHEMA_REV,
-					min_schema_rev: MIN_SCHEMA_REV,
-					capabilities:   grants.iter().map(str::to_owned).collect(),
-					server_version: self.identity.server_version.to_string(),
-					workspace_id:   self.identity.workspace_id.clone(),
-					root_uri:       self.identity.root_uri.to_string(),
-					server_epoch:   self.identity.server_epoch.clone(),
-					server_build:   self.identity.server_build.to_string(),
-					policy_digest:  Bytes::copy_from_slice(self.identity.policy.digest().as_bytes()),
+					schema_rev:      omp_proto::SCHEMA_REV,
+					min_schema_rev:  MIN_SCHEMA_REV,
+					capabilities:    grants.iter().map(str::to_owned).collect(),
+					server_version:  self.identity.server_version.to_string(),
+					workspace_id:    self.identity.workspace_id.clone(),
+					root_uri:        self.identity.root_uri.to_string(),
+					server_epoch:    self.identity.server_epoch.clone(),
+					server_build:    self.identity.server_build.to_string(),
+					policy_digest:   Bytes::copy_from_slice(self.identity.policy.digest().as_bytes()),
 					// What this host's own probe found, which every admission on
 					// the connection resolves against; equal policies do not
 					// imply equal probes.
-					sandbox_state:  self.exec.sandbox_state().to_wire().into(),
-					props:          Default::default(),
+					sandbox_state:   self.exec.sandbox_state().to_wire().into(),
+					workspace_trust: match self.identity.workspace_trust {
+						WorkspaceTrust::Untrusted => pb::WorkspaceTrust::Untrusted,
+						WorkspaceTrust::Trusted => pb::WorkspaceTrust::Trusted,
+					}
+					.into(),
+					props:           Default::default(),
 				}),
 			))
 			.await
@@ -14087,12 +14097,13 @@ mod tests {
 		mcp.bind_manager(&mcp_manager);
 		let server = Arc::new(EnvServer::new(
 			ServerIdentity {
-				workspace_id:   hello.workspace_id,
-				root_uri:       hello.root_uri,
-				server_epoch:   hello.server_epoch,
-				server_version: sf!("test"),
-				server_build:   sf!("envd-test"),
-				policy:         crate::daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted),
+				workspace_id:    hello.workspace_id,
+				root_uri:        hello.root_uri,
+				server_epoch:    hello.server_epoch,
+				server_version:  sf!("test"),
+				server_build:    sf!("envd-test"),
+				policy:          crate::daemon_policy::from_con(&Ctx::new(), WorkspaceTrust::Untrusted),
+				workspace_trust: WorkspaceTrust::Untrusted,
 			},
 			Some(EnvironmentAuthorities {
 				documents,

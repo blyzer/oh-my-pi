@@ -559,6 +559,11 @@ impl InferenceSettings {
 			.apply(chat, top_k, penalties, openai_chat, openai_responses);
 		if matches!(chat.cache_retention, Setting::Unset) {
 			chat.cache_retention = match self.model.cache_retention {
+				CacheRetentionSetting::Auto
+					if matches!(codec, Some("anthropic" | "bedrock-converse")) =>
+				{
+					Setting::Prefer(CacheRetention::Short)
+				},
 				CacheRetentionSetting::Auto => Setting::Unset,
 				CacheRetentionSetting::None => Setting::Require(CacheRetention::Request),
 				CacheRetentionSetting::Short => Setting::Prefer(CacheRetention::Short),
