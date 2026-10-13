@@ -32,3 +32,45 @@ Initial candidate: OpenAI Codex app-server over local stdio or Unix socket. Code
 - No automatic direct-API/CLI fallback.
 - No Claude/Gemini/Antigravity/Grok/Devin implementation without verified official contracts.
 - No credential migration or extraction.
+
+## Status in omp
+
+Date: 2026-10-13. Branch `feat/native-cli-delegated-executor`.
+
+Policy: delegating a whole agent loop to an official CLI is permitted (owner
+decision, 2026-10-13). The delegated executor receives the exact prompt OMP
+would have used for its own agent run — the same rendered system prompt,
+instructions and user turn, with the same banded slots — and adds no paraphrase
+or rewrite. Permissions fail closed, credentials are never extracted, and the
+execution mode is explicit.
+
+Landed:
+
+- CLI-1, `docs/research/native-cli-seams.md`: the seam inventory and reuse
+  boundary, with every claim tagged by evidence level.
+- Common contract part of CLI-3, `omp_agent::delegated` (decided there rather
+  than in a new crate or `omp-driver`; see the inventory §8): capability
+  discovery, the normalized event model, the approval mapping, explicit
+  execution mode, the exact-prompt type with a verified digest, and typed
+  errors.
+- `delegated::mock` and `crates/agent/tests/delegated.rs`: contract tests for
+  missing executable, unsupported version, unknown and required auth, malformed
+  stream, hung process, crash, cancellation, timeout, session resume,
+  permission mismatch (fails closed), working-directory inheritance, and
+  byte-for-byte prompt delivery.
+
+Not landed:
+
+- CLI-2, the Codex app-server adapter; no JSON-RPC client, no real subprocess.
+- Claude, Gemini, Antigravity, Grok and Devin adapters (CLI-4 to CLI-6).
+- A production `PermissionResolver` over `ApprovalRoute::request_cancellable`.
+- The driver conversion from `ApprovalMode`, `ExecSandboxMode`,
+  `SandboxNetworkMode` and `WorkspaceTrust` to `DelegatedPolicy`.
+- Wiring a rendered prompt from `CanonicalPromptSource` into a turn.
+- A protocol-neutral stdio-child supervisor, a job kind for external agents, a
+  session-to-job token chain, and a receipt shape for CLI session ids.
+- Opt-in real-CLI tests (CLI-7) and user-facing documentation and
+  configuration (CLI-8).
+
+Verification: nothing in this change has been compiled or run; see the report
+that accompanied the branch for the exact checks still owed.

@@ -1,0 +1,55 @@
+event: journal@1
+id: 01M4V365NGPNPGXQFKJZMD4H4Q
+data: {"version":1,"cwd":"/home/buildbuddy/workspace/repo-root/crates/session","created":"1791910680240"}
+
+event: turn.start@1
+id: 01M4V365NHQHSN8BEXWMVNCPP7
+by: 01M4V365NGPNPGXQFKJZMD4H4Q
+data: {}
+
+event: msg.user@1
+id: 01M4V365NHQHSN8BEXWMVNCPP8
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"text":"hello there"}
+
+event: msg.assistant.start@1
+id: 01M4V365NJC9KSG6VCPJFVQBXJ
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"model":"model-a","provider":"provider-a","route":"route-a"}
+
+event: stream@1
+id: 01M4V365NJC9KSG6VCPJFVQBXK
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"sid":1,"op":"open","node":19,"prop":"custom:note"}
+
+event: stream@1
+id: 01M4V365NK80CB649T9HKY4PSQ
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"sid":1,"op":"append","text":"Hello"}
+
+event: stream@1
+id: 01M4V365NK80CB649T9HKY4PSR
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"sid":1,"op":"append","text":", world"}
+
+event: stream@1
+id: 01M4V365NK80CB649T9HKY4PSS
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"sid":1,"op":"close"}
+
+event: msg.assistant.end@1
+id: 01M4V365NM947A7H7VV6F593MR
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"stop_reason":"end_turn"}
+
+event: turn.receipt@1
+id: 01M4V365NM947A7H7VV6F593MS
+by: 01M4V365NHQHSN8BEXWMVNCPP7
+data: {"tokens_in":12,"tokens_out":5,"cost_nano_usd":3400}
+
+: rename
+event: patch@1
+id: 01M4V365NM947A7H7VV6F593MT
+by: 01M4V365NM947A7H7VV6F593MS
+data: {"ops":[["set",2,"name","Greeting"]]}
+

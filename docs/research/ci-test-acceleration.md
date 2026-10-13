@@ -1,6 +1,8 @@
 # OMP² CI Test Acceleration: Critical Path, Cache Policy, Artifact Reuse and Plan
 
-Status: research. Nothing here is implemented. Section 10 ("Implement now") gives the Phase 1–2 workflow
+Status: research; Phases 1–2 are merged (PR #259). Acceptance check on post-merge runs:
+`docs/audits/ci-acceleration-phase-1-2-acceptance.md` (cache hits met, no reserve errors met,
+`rust` created ≤ 20 s not met). Section 10 ("Implement now") gives the Phase 1–2 workflow
 changes that the evidence supports, ready to apply. Every later phase needs its own measurement and
 the owner's approval.
 Date: 2026-10-11
