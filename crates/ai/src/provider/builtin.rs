@@ -34,7 +34,7 @@ use crate::{
 		AuthManager, AuthScheme, AwsCredentialError, AwsRegistryAvailability, CredentialApplyError,
 		CredentialBroker, CredentialError, CredentialKind, CredentialLease, CredentialNeed,
 		CredentialShaperRegistry, CredentialSource, LeaseOrigin, OAuthHttpClient, OAuthHttpRequest,
-		ProviderShaper, sigv4::endpoint_scope, spec::AuthSpec,
+		ProviderShaper, broker::INVOCATION_TAG, sigv4::endpoint_scope, spec::AuthSpec,
 	},
 	body::BodySource,
 	call::{
@@ -1811,7 +1811,12 @@ impl AttemptEncoder<Call, Option<CredentialLease>> for RouteEncoder {
 				api: Str::new(plan.codec.as_str()),
 				route: plan.route.clone(),
 				account: account.as_ref().and_then(|routing| routing.account.clone()),
-				principal: Some(call.attribution.principal.clone()),
+				principal: Some(
+					account
+						.as_ref()
+						.and_then(|routing| routing.principal.clone())
+						.unwrap_or_else(|| call.attribution.principal.clone()),
+				),
 				index: attempt,
 				provisional,
 				capture_limit: call.budget.max_staging_bytes,
@@ -2284,6 +2289,18 @@ struct RouteLeaseProvider {
 	required:       bool,
 }
 
+fn attribute_invocation_lease(context: &ExecutionContext, lease: &CredentialLease) {
+	if lease.source_tag() != Some(INVOCATION_TAG) {
+		return;
+	}
+	context.set_session_state(None);
+	let mut routing = context.account_routing().unwrap_or_default();
+	routing.account = Some(lease.meta().account.clone());
+	routing.principal = Some(lease.meta().principal.clone());
+	routing.credential_generation = Some(lease.meta().generation);
+	context.set_account_routing(routing);
+}
+
 impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 	type Lease = Option<CredentialLease>;
 
@@ -2422,6 +2439,7 @@ impl LeaseProvider<Call, RouteAccount> for RouteLeaseProvider {
 				};
 				return Err(credential_failure(context, &self.provider, reason));
 			};
+			attribute_invocation_lease(context, &lease);
 			let Some(shaper) = self.shapers.get(&self.provider) else {
 				return Ok(Some(lease));
 			};
@@ -4289,6 +4307,98 @@ mod tests {
 		assert_eq!(encoded.method, crate::codec::RequestMethod::Get);
 		assert_eq!(encoded.framing, crate::transport::FramingProtocol::WebSocket);
 		assert!(encoded.uri.as_str().contains("/v1/realtime?model="));
+	}
+
+	#[test]
+	fn invocation_lease_replaces_selected_account_for_attribution() {
+		let (encoder, call, ..) = discovery_fixture();
+		let context = ExecutionContext::new(ExecutionBudget::default());
+		context.set_session_state(Some(
+			PendingServerStateBinding {
+				conversation:          ConversationId::new("conversation"),
+				route:                 encoder.route.id.clone(),
+				model:                 ModelKey::new("model"),
+				principal:             PrincipalId::new("stored-principal"),
+				trust_domain:          encoder.route.trust_domain.clone(),
+				credential_generation: 7,
+				credential_policy:     CredentialGenerationPolicy::PrincipalBound,
+				created_at:            SystemTime::now(),
+				expires_at:            None,
+				handle:                Bytes::from_static(b"stored-state"),
+			}
+			.commit(Revision::new("revision")),
+		));
+		context.set_account_routing(AccountRoutingContext {
+			account: Some(AccountId::new("stored-account")),
+			principal: Some(PrincipalId::new("stored-principal")),
+			credential_generation: Some(7),
+			project: Some(ProjectId::new("project")),
+			..AccountRoutingContext::default()
+		});
+		let lease = CredentialLease::api_key(
+			LeaseMeta {
+				account:    AccountId::new("invocation"),
+				principal:  PrincipalId::new("invocation"),
+				generation: 0,
+				expires_at: None,
+			},
+			SecretString::from("invocation-key"),
+		)
+		.with_source_tag(sf!("invocation"));
+
+		attribute_invocation_lease(&context, &lease);
+		assert!(context.session_state().is_none(), "stored provider state is not reused");
+
+		assert_eq!(
+			context.account_routing(),
+			Some(AccountRoutingContext {
+				account: Some(AccountId::new("invocation")),
+				principal: Some(PrincipalId::new("invocation")),
+				credential_generation: Some(0),
+				project: Some(ProjectId::new("project")),
+				..AccountRoutingContext::default()
+			})
+		);
+		let transport = encoder
+			.encode(
+				&call,
+				&Some(lease),
+				&BeforeRequestMutation::default(),
+				&context,
+				0,
+				false,
+				Cancellation::default(),
+			)
+			.expect("invocation request encodes");
+		assert_eq!(transport.attempt.account.as_ref().map(AccountId::as_str), Some("invocation"),);
+		assert_eq!(
+			transport
+				.attempt
+				.principal
+				.as_ref()
+				.map(PrincipalId::as_str),
+			Some("invocation"),
+		);
+		let evidence = BodySource::bytes(Bytes::new())
+			.begin_attempt()
+			.evidence_handle();
+		let error = crate::transport::http::record_failure(
+			Error::new(
+				ErrorKind::RateLimited,
+				ErrorPhase::Connecting,
+				RetryAction::SameRoute { after: Duration::ZERO },
+				ExecutionReceipt::default(),
+			),
+			&transport.attempt,
+			&evidence,
+			Some(429),
+			None,
+			Instant::now().into(),
+			false,
+		);
+		let attempt = &error.receipt().attempts[0];
+		assert_eq!(attempt.account.as_ref().map(AccountId::as_str), Some("invocation"));
+		assert_eq!(attempt.principal.as_ref().map(PrincipalId::as_str), Some("invocation"));
 	}
 
 	fn pinned_selector(
