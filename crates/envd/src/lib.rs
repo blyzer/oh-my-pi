@@ -9,6 +9,7 @@ pub mod blobs;
 pub mod browser_daemon;
 pub mod browser_fetch;
 pub mod browser_relay;
+mod child_tree;
 mod computer;
 pub mod daemon_policy;
 mod devices_host;
