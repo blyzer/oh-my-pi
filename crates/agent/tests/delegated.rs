@@ -160,7 +160,7 @@ const fn decision(
 	ApprovalDecision { approved, scope, source, decided_by: None, reason: None, audited }
 }
 
-fn user_yes(scope: ApprovalScope) -> ApprovalDecision {
+const fn user_yes(scope: ApprovalScope) -> ApprovalDecision {
 	decision(true, scope, ApprovalSource::User, false)
 }
 
@@ -685,8 +685,7 @@ fn items_that_cannot_be_carried_verbatim_are_refused_not_dropped() {
 	let blob_free_but_not_text = thread::Part {
 		kind: Some(part::Kind::Fallback(thread::ModelFallback {
 			from_model: "a".into(),
-			to_model: "b".into(),
-			..Default::default()
+			to_model:   "b".into(),
 		})),
 	};
 	let non_text = [
