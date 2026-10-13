@@ -94,6 +94,22 @@ impl ReadyFrame {
 	}
 }
 
+/// The optional, session-only workspace trust choice supplied before a server
+/// composes its first session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStartupParams {
+	/// Whether this session trusts the workspace without persisting a grant.
+	///
+	/// Omission preserves normal grant-file evaluation. `true` is session-only;
+	/// `false` is equivalent to omission.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub trust_workspace: Option<bool>,
+}
+
+/// RPC command that supplies [`SessionStartupParams`] before composition.
+pub const SESSION_STARTUP_COMMAND: &str = "session_startup";
+
 /// Generic request envelope and escape hatch for commands added after this SDK.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RpcRequest {
@@ -1030,6 +1046,28 @@ mod tests {
 	use serde_json::json;
 
 	use super::*;
+
+	#[test]
+	fn session_startup_preserves_omission_and_requires_a_boolean() {
+		for (json, expected) in [
+			(r#"{"type":"session_startup"}"#, None),
+			(r#"{"type":"session_startup","trustWorkspace":false}"#, Some(false)),
+			(r#"{"type":"session_startup","trustWorkspace":true}"#, Some(true)),
+		] {
+			let request: RpcRequest = serde_json::from_str(json).expect("request");
+			let params: SessionStartupParams = request.parse_params().expect("typed startup");
+			assert_eq!(params.trust_workspace, expected);
+			assert_eq!(
+				RpcRequest::from_params(request.id.clone(), SESSION_STARTUP_COMMAND, params)
+					.expect("encode"),
+				request,
+			);
+		}
+		let request: RpcRequest =
+			serde_json::from_str(r#"{"type":"session_startup","trustWorkspace":"true"}"#)
+				.expect("envelope");
+		assert!(request.parse_params::<SessionStartupParams>().is_err());
+	}
 
 	/// An omitted envelope stays distinguishable from a declared empty one,
 	/// and a misspelled effect field is refused rather than dropped.

@@ -15,7 +15,10 @@ use omp_driver::{
 	headless::kernel::KernelOptions,
 	workspace_trust::WorkspaceTrustSource,
 };
-use omp_ext::workspace_trust::WorkspaceTrust;
+use omp_ext::{
+	trust::GrantDuration,
+	workspace_trust::{TrustDecision, WorkspaceTrust},
+};
 
 use crate::cli::{ChatArgs, InvocationExtensionMode, LaunchExtensions, PromptArgs};
 
@@ -337,6 +340,7 @@ impl Launch {
 			no_context_files,
 			no_rules,
 			no_title,
+			trust_workspace,
 			advisor,
 			api_key,
 			prompt_cache_key,
@@ -401,8 +405,15 @@ impl Launch {
 		let config_root = omp_core::dirs::profile_config_dir(&home).into_diagnostic()?;
 		// The workspace's trust decision, evaluated once for the launch and
 		// handed to composition, which never evaluates it again.
-		let workspace_trust = workspace_trust
-			.unwrap_or_else(|| omp_driver::workspace_trust::evaluate_workspace(&data_dir, &project));
+		// `--trust-workspace` fixes it for this invocation only; nothing is
+		// recorded, so the next launch evaluates the grant file as usual. A
+		// first-run overlay answer arrives already decided.
+		let workspace_trust = if trust_workspace {
+			TrustDecision::Trusted { duration: GrantDuration::Session }
+		} else {
+			workspace_trust
+				.unwrap_or_else(|| omp_driver::workspace_trust::evaluate_workspace(&data_dir, &project))
+		};
 		// Installed marketplace plugins: resolved once per launch and shared
 		// with the kernel; this is the one place their diagnostics surface.
 		let claude_plugins = Arc::new(omp_ext::claude_plugin::ClaudePlugins::resolve(
@@ -1521,6 +1532,40 @@ mod tests {
 			catalog:         embedded(),
 			workspace_trust: None,
 		}
+	}
+
+	#[tokio::test]
+	async fn trust_workspace_is_session_only_and_next_launch_rechecks() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::create_dir_all(dir.path().join(".omp")).unwrap();
+		fs::write(dir.path().join(".omp/mcp.json"), "{}").unwrap();
+		let mut args = ChatArgs::default_interactive();
+		args.project = dir.path().to_path_buf();
+		args.trust_workspace = true;
+		let launch =
+			Launch::prepare(args.clone(), Arc::new(omp_con::Ctx::new()), test_env(dir.path()))
+				.await
+				.unwrap();
+		assert_eq!(
+			launch
+				.options
+				.workspace_trust
+				.decide(&launch.data_dir, &launch.project),
+			TrustDecision::Trusted { duration: GrantDuration::Session }
+		);
+		assert!(!omp_ext::trust::grants_path(&launch.data_dir).exists());
+		args.trust_workspace = false;
+		let next = Launch::prepare(args, Arc::new(omp_con::Ctx::new()), test_env(dir.path()))
+			.await
+			.unwrap();
+		assert_eq!(
+			next
+				.options
+				.workspace_trust
+				.decide(&next.data_dir, &next.project),
+			TrustDecision::Untrusted
+		);
+		assert!(!omp_ext::trust::grants_path(&next.data_dir).exists());
 	}
 
 	/// Every parsed `ChatArgs` field is consumed: the lowering destructures
