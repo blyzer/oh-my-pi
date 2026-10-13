@@ -41,15 +41,24 @@ Verify official headless JSON/stream/session interface and commercial/auth terms
 claude.ai login or rate limits; do not extract credentials. Implement only if the official
 execution contract and policy permit it.
 
+Feasibility result (2026-10-13): `capability-gated`; see
+[`docs/research/native-cli-feasibility.md`](../research/native-cli-feasibility.md) (unresolved: U9-U12).
+
 ### CLI-5 — Gemini/Antigravity feasibility
 
 Verify Gemini JSON/JSONL headless behavior and the current Antigravity replacement/interface.
 Keep unsupported modes disabled and documented.
 
+Feasibility result (2026-10-13): Gemini CLI and Antigravity `agy` are both `capability-gated`; see
+[`docs/research/native-cli-feasibility.md`](../research/native-cli-feasibility.md) (unresolved: U13-U21).
+
 ### CLI-6 — Optional provider adapters
 
 Investigate xAI and Devin official CLI/agent interfaces. Represent Devin as an asynchronous
 agent executor if that is its actual semantic model; do not force token-streaming semantics.
+
+Feasibility result (2026-10-13): Grok `capability-gated`, Devin `blocked` (not installed); see
+[`docs/research/native-cli-feasibility.md`](../research/native-cli-feasibility.md) (unresolved: U22-U28).
 
 ### CLI-7 — Security and lifecycle tests
 
