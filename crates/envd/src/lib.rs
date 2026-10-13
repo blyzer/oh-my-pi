@@ -1409,6 +1409,15 @@ impl ProjectEnvironment {
 		McpInspectorHandle { manager: Arc::clone(self.lifecycle.server.mcp_manager()) }
 	}
 
+	/// Binds literal project-MCP configuration notices to the active Agent turn.
+	pub fn bind_mcp_literal_notices(&self, mailbox: KernelSender) {
+		self
+			.lifecycle
+			.server
+			.mcp_manager()
+			.bind_literal_notice_sink(mailbox);
+	}
+
 	/// Constructs extension-scoped MCP CONTROL over this active Environment.
 	pub fn mcp_control(
 		&self,
