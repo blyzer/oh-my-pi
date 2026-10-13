@@ -13,27 +13,24 @@
 /// `build` and `google` must be siblings under this module for those paths to
 /// resolve.
 pub mod proto {
-	/// Pulls in the generated file for one protobuf package.
-	macro_rules! generated {
-		($file:literal) => {
-			#![allow(
+	/// Declares the module holding the generated file for one protobuf
+	/// package, with the lint relaxations machine-generated code needs.
+	macro_rules! package {
+		($(#[$meta:meta])* $name:ident, $file:literal) => {
+			$(#[$meta])*
+			#[allow(
 				missing_docs,
 				clippy::pedantic,
 				clippy::nursery,
-				reason = "prost/tonic output is machine-generated and cannot follow handwritten \
-				          documentation and style conventions"
-			)]
-			#![allow(
 				clippy::allow_attributes_without_reason,
-				reason = "prost/tonic emits compatibility allow attributes without Rust reason \
-				          metadata"
-			)]
-			#![allow(
 				clippy::large_enum_variant,
-				reason = "prost maps protobuf oneofs directly to enums; boxing would change the \
-				          generated Rust API"
+				reason = "prost/tonic output is machine-generated and cannot follow handwritten \
+				          documentation and style conventions; boxing oneofs would change the \
+				          generated API"
 			)]
-			include!(concat!(env!("OUT_DIR"), "/proto/", $file));
+			pub mod $name {
+				include!(concat!(env!("OUT_DIR"), "/proto/", $file));
+			}
 		};
 	}
 
@@ -41,18 +38,18 @@ pub mod proto {
 	pub mod build {
 		/// Packages under `build.bazel`.
 		pub mod bazel {
-			/// `build.bazel.semver`.
-			pub mod semver {
-				generated!("build.bazel.semver.rs");
+			package! {
+				/// `build.bazel.semver`.
+				semver, "build.bazel.semver.rs"
 			}
 			/// Packages under `build.bazel.remote`.
 			pub mod remote {
 				/// Packages under `build.bazel.remote.execution`.
 				pub mod execution {
-					/// `build.bazel.remote.execution.v2`: CAS, action cache,
-					/// execution and capabilities.
-					pub mod v2 {
-						generated!("build.bazel.remote.execution.v2.rs");
+					package! {
+						/// `build.bazel.remote.execution.v2`: CAS, action cache,
+						/// execution and capabilities.
+						v2, "build.bazel.remote.execution.v2.rs"
 					}
 				}
 			}
@@ -61,21 +58,21 @@ pub mod proto {
 
 	/// Packages under `google`.
 	pub mod google {
-		/// `google.api`.
-		pub mod api {
-			generated!("google.api.rs");
+		package! {
+			/// `google.api`.
+			api, "google.api.rs"
 		}
-		/// `google.bytestream`.
-		pub mod bytestream {
-			generated!("google.bytestream.rs");
+		package! {
+			/// `google.bytestream`.
+			bytestream, "google.bytestream.rs"
 		}
-		/// `google.longrunning`.
-		pub mod longrunning {
-			generated!("google.longrunning.rs");
+		package! {
+			/// `google.longrunning`.
+			longrunning, "google.longrunning.rs"
 		}
-		/// `google.rpc`.
-		pub mod rpc {
-			generated!("google.rpc.rs");
+		package! {
+			/// `google.rpc`.
+			rpc, "google.rpc.rs"
 		}
 	}
 }
