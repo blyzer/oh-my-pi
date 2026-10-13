@@ -7,6 +7,7 @@
 //! `buildbuddy-cancel` feature.
 
 pub mod capabilities;
+pub mod cas;
 pub mod digest;
 pub mod endpoint;
 pub mod profile;
