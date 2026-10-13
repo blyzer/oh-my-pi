@@ -647,7 +647,11 @@ fn message(role: thread::Role, parts: Vec<thread::Part>) -> Item {
 	Item {
 		seq:           0,
 		created_at_ms: 0,
-		kind:          Some(item::Kind::Message(thread::Message { role: role as i32, parts })),
+		kind:          Some(item::Kind::Message(thread::Message {
+			role: role as i32,
+			parts,
+			..Default::default()
+		})),
 		props:         None,
 	}
 }
