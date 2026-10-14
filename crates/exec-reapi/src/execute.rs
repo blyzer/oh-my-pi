@@ -1,4 +1,46 @@
+		(
+			Source {
+				files: Arc::new(vec![file.clone()]),
+				blobs: Arc::new(BTreeMap::from([(file.digest, Bytes::from_static(b"file"))])),
+			},
+			file,
+		)
+			file,
+		)
+			inputs:      Some(InputSet {
+				manifest: blob_digest(b"manifest"),
+				files:    1,
+				bytes:    file.digest.size,
+				excluded: ExclusionCounts::default(),
+			}),
+impl BlobSource for Source {
+	async fn read(&self, digest: omp_exec::Digest) -> std::io::Result<Bytes> {
+		self
+			.blobs
+			.get(&digest)
+			.cloned()
+			.ok_or_else(|| std::io::Error::other("missing test blob"))
+	}
+}
+use crate::ExecuteConfig;
 //! REAPI action construction, CAS upload, execution streaming and cancellation.
+impl wire::execution_server::Execution for Fake {
+	async fn execute(
+		&self,
+		_request: Request<wire::ExecuteRequest>,
+	) -> Result<Response<BoxStream<Result<Operation, Status>>>, Status> {
+		let operation = operation(self.reconnect.then_some(false), self.nonzero);
+		Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
+	}
+
+	async fn wait_execution(
+		&self,
+		_request: Request<wire::WaitExecutionRequest>,
+	) -> Result<Response<BoxStream<Result<Operation, Status>>>, Status> {
+		let operation = operation(Some(true), self.nonzero);
+		Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
+	}
+}
 //!
 //! The backend is generic over the caller-owned blob authority. It never opens
 //! a path or keeps a second blob store: capture and reads are delegated to
