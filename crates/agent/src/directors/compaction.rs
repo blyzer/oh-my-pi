@@ -248,12 +248,13 @@ impl CompactionDirector {
 			// Nothing to summarize is a no-op.
 			return Ok(Prepared::Unchanged);
 		}
-		// Thread items map one-to-one onto request messages, so whatever the
-		// request holds before the projected thread is the live system prompt;
-		// the projected items past the previous summary and the hidden run are
-		// the tail kept verbatim.
+		// The request is the live system prompt, the projected thread, then the
+		// volatile notices that trail it; only the leading system run is the
+		// prefix the summariser must repeat verbatim to hit the provider cache.
+		// The kept tail is read from the thread itself (one item per message),
+		// never by subtracting lengths, so the trailing notices cannot shift it.
 		let thread = project_thread(dom);
-		let system_prefix = request.messages.len().saturating_sub(thread.len());
+		let system_prefix = crate::context::prompt_head_len(&request.messages);
 		let kept_from = usize::from(previous.is_some())
 			.saturating_add(hidden.len())
 			.min(thread.len());

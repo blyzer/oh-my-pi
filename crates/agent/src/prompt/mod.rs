@@ -5,7 +5,7 @@ mod projection;
 mod slots;
 
 use omp_dom::Dom;
-use omp_proto::thread::v1::Item;
+use omp_proto::thread::v1::{Item, Role, item};
 use omp_scribe::{Props, Value};
 pub use projection::{project_thread_with_attachments, template_props};
 pub use slots::{
@@ -44,19 +44,34 @@ impl crate::PromptSource for CanonicalPromptSource {
 	fn system_items(&self, dom: &Dom) -> Result<Vec<Item>, PromptError> {
 		Self::system_items(self, dom)
 	}
+
+	fn volatile_items(&self, dom: &Dom) -> Result<Vec<Item>, PromptError> {
+		Self::volatile_items(self, dom)
+	}
 }
 
 impl CanonicalPromptSource {
-	/// Projects system items and their Frozen, Stable, Dynamic, and Volatile
-	/// hashes directly from `dom`.
+	/// Projects system-prefix items (Frozen, Stable, Dynamic) and all four band
+	/// hashes directly from `dom`. The Volatile band's hash is reported so a
+	/// caller can observe it change, but its items ride the message stream
+	/// ([`Self::volatile_items`]), never the prefix.
 	pub fn banded_render(&self, dom: &Dom) -> Result<(Vec<Item>, [BandHash; 4]), PromptError> {
-		let props = template_props(dom);
-		let bands = Self::candidate(dom, &props)?;
-		let hashes = bands.hashes;
-		Ok((bands.into_items(), hashes))
+		let bands = Self::candidate(dom, &template_props(dom))?;
+		let [frozen, stable, dynamic, _] = bands.items;
+		let items = [frozen, stable, dynamic].into_iter().flatten().collect();
+		Ok((items, bands.hashes))
 	}
 
-	/// Projects canonical system items directly from `dom`.
+	/// Projects the Volatile band (recall, status) as synthetic user messages
+	/// trailing the durable conversation window, so a turn, cwd, mount, or todo
+	/// change never rewrites the system prefix.
+	pub fn volatile_items(&self, dom: &Dom) -> Result<Vec<Item>, PromptError> {
+		let bands = Self::candidate(dom, &template_props(dom))?;
+		let [_, _, _, volatile] = bands.items;
+		Ok(volatile.into_iter().map(volatile_message).collect())
+	}
+
+	/// Projects canonical system-prefix items directly from `dom`.
 	pub fn system_items(&self, dom: &Dom) -> Result<Vec<Item>, PromptError> {
 		self.banded_render(dom).map(|(items, _)| items)
 	}
@@ -129,6 +144,15 @@ impl CanonicalPromptSource {
 		});
 		Ok(PromptBands { items, hashes })
 	}
+}
+
+fn volatile_message(mut item: Item) -> Item {
+	let Some(item::Kind::Message(message)) = item.kind.as_mut() else {
+		unreachable!("prompt bands contain only messages")
+	};
+	message.role = Role::User as i32;
+	message.synthetic = Some(true);
+	item
 }
 
 fn memory_entries(props: &Props) -> [Option<&str>; 3] {

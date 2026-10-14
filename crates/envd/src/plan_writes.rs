@@ -89,7 +89,12 @@ impl Fixture {
 			&[],
 			&[],
 			hermetic_con(),
-			RegistryBridges::default(),
+			{
+				// An explicit `yolo` is respected only in a trusted workspace.
+				let mut bridges = RegistryBridges::default();
+				bridges.content.workspace_trust = omp_ext::workspace_trust::WorkspaceTrust::Trusted;
+				bridges
+			},
 		)
 		.await
 		.expect("environment");

@@ -22,7 +22,8 @@ use omp_driver::{
 	},
 	sessions::SessionRegistry,
 };
-use omp_envd::tool_settings::ApprovalMode;
+use omp_envd::{ActiveContentInputs, tool_settings::ApprovalMode};
+use omp_ext::workspace_trust::WorkspaceTrust;
 use omp_journal::blob::BlobStore;
 use omp_rpc::framing::{MAX_FRAME_BYTES, RpcFrameDecoder, encode_json_v2};
 use omp_session::{ComponentRegistry, Session};
@@ -744,13 +745,16 @@ struct EnvironmentRpc {
 
 /// Composes [`EnvironmentRpc`] under `con` with the sandbox off, a hermetic
 /// posture: the shell runs the same on a host with or without an OS sandbox.
-/// `mode` is the invocation's `--approval-mode` (`None`: the shipped default);
-/// an explicit `yolo` is respected unconfined, so only a per-tool policy
-/// (`bash=deny`) can refuse a command.
+/// `mode` is the invocation's `--approval-mode` (`None`: the shipped default)
+/// and `workspace_trust` the workspace's decision: an explicit `yolo` is
+/// respected unconfined only in a trusted workspace (it is clamped to `write`
+/// in an untrusted one), so there only a per-tool policy (`bash=deny`) can
+/// refuse a command.
 async fn environment_rpc(
 	temp: &tempfile::TempDir,
 	con: omp_con::Ctx,
 	mode: Option<ApprovalMode>,
+	workspace_trust: WorkspaceTrust,
 ) -> EnvironmentRpc {
 	let root = temp.path().join("workspace");
 	let state = temp.path().join("state");
@@ -766,7 +770,10 @@ async fn environment_rpc(
 		trusted_extensions: Vec::new(),
 		contributed_values: Vec::new(),
 		con:                Arc::clone(&con),
-		bridges:            omp_envd::RegistryBridges::default(),
+		bridges:            omp_envd::RegistryBridges {
+			content: ActiveContentInputs { workspace_trust, ..ActiveContentInputs::default() },
+			..omp_envd::RegistryBridges::default()
+		},
 		spawn_idle_timeout: Some(2),
 		spawn_policy:       None,
 	})
@@ -788,7 +795,9 @@ async fn environment_rpc(
 		kernel,
 		&session,
 		EnvToolExecutor::new(environment.client().clone(), approvals),
-		SettingsAdmission::new(&con, mode, &root).with_fetch_hosts(environment.fetch_hosts()),
+		SettingsAdmission::new(&con, mode, &root)
+			.with_workspace_trust(workspace_trust)
+			.with_fetch_hosts(environment.fetch_hosts()),
 	);
 	let mut home = session_home(temp, &kernel);
 	home.project_root.clone_from(&root);
@@ -874,7 +883,15 @@ async fn exchange(
 #[tokio::test]
 async fn rpc_bash_runs_in_the_environment_session_shell() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let rpc = environment_rpc(&temp, omp_con::Ctx::new(), Some(ApprovalMode::Yolo)).await;
+	// The explicit-yolo clamp requires trusted workspace provenance for this
+	// execution proof.
+	let rpc = environment_rpc(
+		&temp,
+		omp_con::Ctx::new(),
+		Some(ApprovalMode::Yolo),
+		WorkspaceTrust::Trusted,
+	)
+	.await;
 	let root = rpc.root.clone();
 	let frames = exchange(rpc, &[
 		(
@@ -926,7 +943,8 @@ async fn rpc_bash_is_refused_by_environment_policy() {
 			omp_con::Kv(vec![(Str::new_static("bash"), omp_con::Value::Str(Str::new_static("deny")))]),
 		)
 		.expect("deny bash");
-	let rpc = environment_rpc(&temp, con, Some(ApprovalMode::Yolo)).await;
+	// Trusted, so the explicit-yolo clamp cannot pre-empt the policy denial.
+	let rpc = environment_rpc(&temp, con, Some(ApprovalMode::Yolo), WorkspaceTrust::Trusted).await;
 	let marker = rpc.root.join("ran");
 	let frames = exchange(rpc, &[
 		("{\"id\":\"denied\",\"type\":\"bash\",\"command\":\"touch ran\"}\n", Some("denied"), 0),
@@ -944,7 +962,15 @@ async fn rpc_bash_is_refused_by_environment_policy() {
 #[tokio::test]
 async fn rpc_bash_output_over_the_bound_is_truncated_with_an_artifact() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let rpc = environment_rpc(&temp, omp_con::Ctx::new(), Some(ApprovalMode::Yolo)).await;
+	// The explicit-yolo clamp requires trusted workspace provenance for this
+	// execution proof.
+	let rpc = environment_rpc(
+		&temp,
+		omp_con::Ctx::new(),
+		Some(ApprovalMode::Yolo),
+		WorkspaceTrust::Trusted,
+	)
+	.await;
 	let frames = exchange(rpc, &[
 		("{\"id\":\"large\",\"type\":\"bash\",\"command\":\"seq 1 40000\"}\n", Some("large"), 0),
 		("{\"id\":\"quit\",\"type\":\"quit\"}\n", None, 0),
@@ -974,7 +1000,15 @@ async fn rpc_bash_output_over_the_bound_is_truncated_with_an_artifact() {
 #[tokio::test]
 async fn rpc_abort_bash_cancels_the_running_command() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let rpc = environment_rpc(&temp, omp_con::Ctx::new(), Some(ApprovalMode::Yolo)).await;
+	// The explicit-yolo clamp requires trusted workspace provenance for this
+	// execution proof.
+	let rpc = environment_rpc(
+		&temp,
+		omp_con::Ctx::new(),
+		Some(ApprovalMode::Yolo),
+		WorkspaceTrust::Trusted,
+	)
+	.await;
 	let started = std::time::Instant::now();
 	let frames = exchange(rpc, &[
 		("{\"id\":\"slow\",\"type\":\"bash\",\"command\":\"sleep 20\"}\n", None, 0),
@@ -1008,7 +1042,7 @@ async fn rpc_reports_a_downgraded_default_yolo_once() {
 			)]),
 		)
 		.expect("allow bash");
-	let rpc = environment_rpc(&temp, con, None).await;
+	let rpc = environment_rpc(&temp, con, None, WorkspaceTrust::Untrusted).await;
 	let journal = rpc.journal.clone();
 	let frames = exchange(rpc, &[
 		("{\"id\":\"one\",\"type\":\"bash\",\"command\":\"echo one\"}\n", Some("one"), 0),
@@ -1024,6 +1058,8 @@ async fn rpc_reports_a_downgraded_default_yolo_once() {
 		"provenance": "default",
 		"effective": "write",
 		"sandbox": { "state": "off" },
+		"workspace_trust": "untrusted",
+		"reason": "default_without_sandbox",
 	})]);
 }
 

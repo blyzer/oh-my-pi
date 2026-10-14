@@ -24,9 +24,10 @@ use tokio_util::sync::CancellationToken;
 /// Installs the session's tool authority on `kernel`, which serves `session`
 /// first and runs `environment`'s tools, as `compose_kernel` installs it: the
 /// environment's approvals bound to the kernel, the environment executor, and
-/// the kernel's admission under `con` and the invocation's `mode` (`None`: the
-/// shipped default), keying fetches on the environment's hosts. Both share the
-/// session's one approval-posture report.
+/// the kernel's admission under `con`, the invocation's `mode` (`None`: the
+/// shipped default) and the workspace `trust` the host decided, keying fetches
+/// on the environment's hosts. Both share the session's one approval-posture
+/// report.
 #[allow(dead_code, reason = "only some test crates sharing this module compose a kernel")]
 pub fn install_authority<C>(
 	kernel: Kernel<C>,
@@ -34,6 +35,7 @@ pub fn install_authority<C>(
 	session: &Session,
 	con: &omp_con::Ctx,
 	mode: Option<ApprovalMode>,
+	trust: WorkspaceTrust,
 	root: &Path,
 ) -> Kernel<C> {
 	let approvals = bind_environment_approvals(&kernel, environment);
@@ -41,7 +43,9 @@ pub fn install_authority<C>(
 		kernel,
 		session,
 		EnvToolExecutor::new(environment.client().clone(), approvals),
-		SettingsAdmission::new(con, mode, root).with_fetch_hosts(environment.fetch_hosts()),
+		SettingsAdmission::new(con, mode, root)
+			.with_workspace_trust(trust)
+			.with_fetch_hosts(environment.fetch_hosts()),
 	)
 }
 
@@ -66,8 +70,8 @@ pub fn posture_notices(session: &Session) -> Vec<serde_json::Value> {
 		.collect()
 }
 
-/// The posture payload of a defaulted `yolo` that no sandbox keeps: `write`
-/// is in force.
+/// The posture payload of a defaulted `yolo` that no sandbox keeps in an
+/// untrusted workspace: `write` is in force.
 #[allow(dead_code, reason = "only some test crates sharing this module read the posture")]
 pub fn downgraded_default_yolo() -> serde_json::Value {
 	serde_json::json!({
@@ -75,6 +79,8 @@ pub fn downgraded_default_yolo() -> serde_json::Value {
 		"provenance": "default",
 		"effective": "write",
 		"sandbox": { "state": "off" },
+		"workspace_trust": "untrusted",
+		"reason": "default_without_sandbox",
 	})
 }
 

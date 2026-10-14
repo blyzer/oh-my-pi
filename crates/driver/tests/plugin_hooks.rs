@@ -259,8 +259,15 @@ impl Fixture {
 			StaticPrompt(Str::new_static("test")),
 		)
 		.with_hook_gate(Arc::clone(&gate));
-		let kernel =
-			support::install_authority(kernel, &environment, &session, &con, None, &self.root);
+		let kernel = support::install_authority(
+			kernel,
+			&environment,
+			&session,
+			&con,
+			None,
+			WorkspaceTrust::Untrusted,
+			&self.root,
+		);
 		let host = PluginHookHost::new(
 			environment.client().clone(),
 			PluginHookSession {
