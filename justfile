@@ -129,6 +129,11 @@ remote +recipe:
 remote-test-pkg pkg:
     scripts/remote-verify.sh test-pkg {{ pkg }}
 
+
+# Print every nextest result so remote test evidence includes its Summary line.
+[group('remote')]
+remote-plain-test pkg:
+    NEXTEST_HIDE_PROGRESS_BAR=1 cargo nextest run -p {{ pkg }} --locked --no-fail-fast --status-level all --final-status-level all 2>&1 | cat
 # Save the BuildBuddy runner snapshot every branch resumes from, built from the default branch's head (one snapshot upload, ~56 GB; see scripts/remote-verify.sh).
 [group('remote')]
 remote-seed:
