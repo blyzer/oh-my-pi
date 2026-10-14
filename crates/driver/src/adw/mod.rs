@@ -31,6 +31,18 @@ pub struct PhaseResult {
 	pub feedback: Str,
 }
 
+/// The disposition of one settled phase attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+pub enum PhaseStatus {
+	/// The phase met its acceptance condition.
+	Accepted,
+	/// The phase completed but did not meet its acceptance condition.
+	Rejected,
+	/// The phase's host stopped before it produced a result.
+	Failed,
+}
+
 /// One settled phase, recorded in dispatch order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhaseRecord {
@@ -38,15 +50,15 @@ pub struct PhaseRecord {
 	pub phase:    Str,
 	/// The attempt ordinal this record describes.
 	pub attempt:  u32,
-	/// Whether the attempt was accepted.
-	pub accepted: bool,
+	/// The disposition of this attempt.
+	pub status:   PhaseStatus,
 	/// What the run decided in response, rendered for the operator.
 	pub decision: Str,
 }
 
 /// The typed failure of one phase dispatch.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
-#[error("workflow phase `{phase}` attempt {attempt} failed: {source}")]
+#[error("workflow phase `{phase}` attempt {attempt} failed")]
 pub struct PhaseFailure<E: StdError + 'static> {
 	/// The phase whose host dispatch failed.
 	pub phase:   Str,
@@ -177,11 +189,12 @@ pub async fn run<H: AdwHost>(
 					.await
 				{
 					Ok(result) => result,
+					Err(_) if cancel.is_cancelled() => return Ok(cancelled(records)),
 					Err(source) => {
 						records.push(PhaseRecord {
 							phase: Str::new(phase.name.as_str()),
 							attempt,
-							accepted: false,
+							status: PhaseStatus::Failed,
 							decision: Str::new_static("failed"),
 						});
 						return Ok(failed(records, phase.name.as_str(), attempt, source));
@@ -217,7 +230,11 @@ pub async fn run<H: AdwHost>(
 				records.push(PhaseRecord {
 					phase: Str::new(phase.name.as_str()),
 					attempt,
-					accepted: result.accepted,
+					status: if result.accepted {
+						PhaseStatus::Accepted
+					} else {
+						PhaseStatus::Rejected
+					},
 					decision: describe(&outcome),
 				});
 			},
@@ -416,7 +433,7 @@ mod tests {
 		assert_eq!(exit.records, vec![PhaseRecord {
 			phase:    Str::new_static("plan"),
 			attempt:  1,
-			accepted: false,
+			status:   PhaseStatus::Failed,
 			decision: Str::new_static("failed"),
 		}]);
 		assert!(matches!(
