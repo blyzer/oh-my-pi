@@ -9,7 +9,7 @@ Area: runtime
 OMP² agents must build and test arbitrary projects (Rust, Go, JVM, JS, Python, .NET, Bazel), locally and eventually remotely. Today:
 
 - **Builds work only as raw text.** Every build runs through `bash@2` → `EnvToolExecutor` → envd `ShellExecHost` → `ExecHost`, sandboxed, cancellable, bounded and auto-detached into `JobBoard` (`crates/tools/src/shell.rs`, `crates/envd/src/exec.rs`, `crates/agent/src/jobs.rs`). Results are raw text, and placement is always local.
-- **ADW and cleanse bypass envd (audit F11).** `crates/driver/src/adw/production.rs:run_command` and `crates/driver/src/cleanse/production.rs:run_checker` spawn bare unconfined children. `omp adw run` uses `Ctx::new()` and never fires its cancel token.
+- **ADW and cleanse bypassed envd (audit F11); the ADW half was fixed in `9dd09d888f`.** `crates/driver/src/adw/production.rs` now dispatches code phases through the project Environment's exec authority, and `omp adw run` applies the operator cfg (`process_ctx_with`) and fires its cancel token on Ctrl-C (`crates/app/src/adw_cmd.rs:62-73,122`). That commit also changed `crates/driver/src/cleanse/production.rs`; whether `run_checker` is fully routed through envd now was not re-checked here (UNVERIFIED).
 - **No remote execution product code exists.** ADR 0040 (proposed) defines the contract `BuildSystemAdapter → ExecutionRequest → place() → ExecutionBackend`. Its 2026-10-10 amendment selected Option D: a neutral core, capability-selected backends, and vendor features behind the backend.
 - **One remote path is measured, one is refuted.**
   - Measured: BuildBuddy Run API warm snapshots (3 min 12 s against 4 min 10 s locally, with about 1 s Mac CPU; `docs/audits/remote-verification-trial.md`).

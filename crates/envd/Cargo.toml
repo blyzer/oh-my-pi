@@ -40,6 +40,7 @@ omp-con.workspace = true
 omp-core.workspace = true
 omp-desktop.workspace = true
 omp-env.workspace = true
+omp-exec.workspace = true
 omp-ext.workspace = true
 bytecount.workspace = true
 grep-matcher.workspace = true
