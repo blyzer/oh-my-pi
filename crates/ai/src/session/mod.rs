@@ -1792,6 +1792,87 @@ mod tests {
 		);
 	}
 
+	fn meta_version(database: &std::path::Path) -> Option<i64> {
+		rusqlite::Connection::open(database)
+			.unwrap()
+			.query_row("SELECT schema_version FROM conversation_meta WHERE singleton = 1", [], |row| {
+				row.get(0)
+			})
+			.ok()
+	}
+
+	fn auth_user_version(database: &std::path::Path) -> i64 {
+		rusqlite::Connection::open(database)
+			.unwrap()
+			.pragma_query_value(None, "user_version", |row| row.get(0))
+			.unwrap()
+	}
+
+	#[test]
+	fn sqlite_store_records_its_schema_version_and_adopts_unversioned_databases() {
+		let state = tempfile::tempdir().unwrap();
+		let database = state.path().join("versioned.db");
+		drop(SqliteConversationStore::<i32>::open(&database).unwrap());
+		assert_eq!(meta_version(&database), Some(i64::from(super::store::SQLITE_SCHEMA_VERSION)));
+
+		// A database written before versioning has no `conversation_meta` table
+		// and is adopted as the current version.
+		rusqlite::Connection::open(&database)
+			.unwrap()
+			.execute_batch("DROP TABLE conversation_meta")
+			.unwrap();
+		assert_eq!(meta_version(&database), None);
+		drop(SqliteConversationStore::<i32>::open(&database).unwrap());
+		assert_eq!(meta_version(&database), Some(i64::from(super::store::SQLITE_SCHEMA_VERSION)));
+	}
+
+	#[test]
+	fn sqlite_store_refuses_a_newer_schema_without_modifying_it() {
+		let state = tempfile::tempdir().unwrap();
+		let database = state.path().join("newer.db");
+		let newer = super::store::SQLITE_SCHEMA_VERSION + 1;
+		{
+			let connection = rusqlite::Connection::open(&database).unwrap();
+			connection
+				.execute_batch(
+					"CREATE TABLE conversation_meta (singleton INTEGER PRIMARY KEY CHECK (singleton = \
+					 1), schema_version INTEGER NOT NULL);",
+				)
+				.unwrap();
+			connection
+				.execute("INSERT INTO conversation_meta(singleton, schema_version) VALUES (1, ?1)", [
+					newer,
+				])
+				.unwrap();
+		}
+		let before = std::fs::read(&database).unwrap();
+		assert!(matches!(
+			SqliteConversationStore::<i32>::open(&database),
+			Err(super::ConversationError::UnsupportedSchema { found, supported })
+				if found == newer && supported == super::store::SQLITE_SCHEMA_VERSION
+		));
+		assert_eq!(std::fs::read(&database).unwrap(), before, "a refused database is untouched");
+		assert!(!state.path().join("newer.db-wal").exists(), "no WAL was started");
+	}
+
+	/// The conversation tables share `credentials.db` with the credential
+	/// store, which owns `PRAGMA user_version`. Opening must neither reject the
+	/// auth store's version nor overwrite it.
+	#[test]
+	fn sqlite_store_leaves_the_auth_stores_user_version_alone() {
+		let state = tempfile::tempdir().unwrap();
+		let database = state.path().join("credentials.db");
+		rusqlite::Connection::open(&database)
+			.unwrap()
+			.pragma_update(None, "user_version", 4)
+			.unwrap();
+		drop(SqliteConversationStore::<i32>::open(&database).unwrap());
+		assert_eq!(auth_user_version(&database), 4);
+		drop(SqliteConversationStore::<i32>::open(&database).unwrap());
+		assert_eq!(auth_user_version(&database), 4);
+		assert_eq!(meta_version(&database), Some(i64::from(super::store::SQLITE_SCHEMA_VERSION)));
+	}
+
 	#[test]
 	fn sqlite_turn_replay_survives_reopen_and_rejects_payload_reuse() {
 		let state = tempfile::tempdir().unwrap();

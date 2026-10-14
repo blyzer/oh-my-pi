@@ -37,12 +37,41 @@ use tokio::{
 	time,
 };
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Request, Status, transport, transport::Server};
+use tonic::{
+	Request, Status, service::interceptor::InterceptedService, transport, transport::Server,
+};
 use zeroize::Zeroizing;
 
 use crate::{endpoint::LocalEndpoint, gateway_rpc::GatewayRpc};
 
 const DATA_DIR_ENV: &str = "OMP_DATA_DIR";
+
+/// Largest gRPC message the daemon will decode from a client or encode to one,
+/// in bytes.
+///
+/// tonic's implicit decode limit is 4 MiB, which rejects ordinary traffic:
+/// inference requests carry inline media and tool output up to the
+/// providers' request bounds (16 MiB by default, more for media), and the blob
+/// service accepts uploads of up to 64 MiB in total. The repository already
+/// fixes 64 MiB as its protocol frame ceiling ([`FRAME_MAX_BYTES`], also the
+/// blob upload bound in `omp-serve` and the reassembled-frame bound in
+/// `omp-rpc`), so the daemon uses that figure for both directions instead of an
+/// unstated default. Streaming RPCs (`Inference` turns, blob `Get`, forward
+/// proxy) bound each message, not the stream.
+///
+/// [`FRAME_MAX_BYTES`]: omp_proto::bounds::FRAME_MAX_BYTES
+const RPC_MESSAGE_MAX_BYTES: usize = omp_proto::bounds::FRAME_MAX_BYTES;
+
+/// Applies an explicit decode and encode message-size limit to a generated
+/// tonic server, before any interceptor wraps it.
+macro_rules! limited {
+	($server:expr, $limit:expr) => {
+		$server
+			.max_decoding_message_size($limit)
+			.max_encoding_message_size($limit)
+	};
+}
+
 /// Production daemon construction options.
 pub struct DaemonConfig {
 	data_dir:          Option<PathBuf>,
@@ -345,11 +374,16 @@ impl DaemonHandle {
 				let incoming = omp_rpc::uds::listen(path)
 					.await
 					.map_err(DaemonError::RpcListen)?;
-				let inference_service = InferenceServer::new(inference.clone());
-				let gateway = GatewayServer::new(hello());
-				let forward = ForwardProxyServer::new(GatewayRpc::new(inference.clone()));
-				let auth = AuthServer::new(auth_rpc.clone());
-				let blobs = BlobServer::new(BlobRpc::new(blobs.clone()));
+				let inference_service =
+					limited!(InferenceServer::new(inference.clone()), RPC_MESSAGE_MAX_BYTES);
+				let gateway = limited!(GatewayServer::new(hello()), RPC_MESSAGE_MAX_BYTES);
+				let forward = limited!(
+					ForwardProxyServer::new(GatewayRpc::new(inference.clone())),
+					RPC_MESSAGE_MAX_BYTES
+				);
+				let auth = limited!(AuthServer::new(auth_rpc.clone()), RPC_MESSAGE_MAX_BYTES);
+				let blobs =
+					limited!(BlobServer::new(BlobRpc::new(blobs.clone())), RPC_MESSAGE_MAX_BYTES);
 				let task = tokio::spawn(async move {
 					Server::builder()
 						.add_service(gateway)
@@ -376,22 +410,27 @@ impl DaemonHandle {
 					let token_shutdown = rpc_shutdown.clone();
 					let token_task =
 						tokio::spawn(watch_gateway_token(path, auth_state.token.clone(), token_shutdown));
-					let inference_service = InferenceServer::with_interceptor(
-						inference.clone(),
+					let inference_service = InterceptedService::new(
+						limited!(InferenceServer::new(inference.clone()), RPC_MESSAGE_MAX_BYTES),
 						bearer_interceptor(auth_state.clone()),
 					);
-					let gateway =
-						GatewayServer::with_interceptor(hello(), bearer_interceptor(auth_state.clone()));
-					let forward = ForwardProxyServer::with_interceptor(
-						GatewayRpc::new(inference.clone()),
+					let gateway = InterceptedService::new(
+						limited!(GatewayServer::new(hello()), RPC_MESSAGE_MAX_BYTES),
 						bearer_interceptor(auth_state.clone()),
 					);
-					let auth = AuthServer::with_interceptor(
-						auth_rpc.clone(),
+					let forward = InterceptedService::new(
+						limited!(
+							ForwardProxyServer::new(GatewayRpc::new(inference.clone())),
+							RPC_MESSAGE_MAX_BYTES
+						),
 						bearer_interceptor(auth_state.clone()),
 					);
-					let blobs = BlobServer::with_interceptor(
-						BlobRpc::new(blobs.clone()),
+					let auth = InterceptedService::new(
+						limited!(AuthServer::new(auth_rpc.clone()), RPC_MESSAGE_MAX_BYTES),
+						bearer_interceptor(auth_state.clone()),
+					);
+					let blobs = InterceptedService::new(
+						limited!(BlobServer::new(BlobRpc::new(blobs.clone())), RPC_MESSAGE_MAX_BYTES),
 						bearer_interceptor(auth_state),
 					);
 					let task = tokio::spawn(async move {
@@ -476,6 +515,56 @@ impl DaemonHandle {
 		Ok(())
 	}
 }
+#[cfg(test)]
+mod message_limit_tests {
+	use omp_proto::gateway::v1::{
+		HelloRequest, gateway_client::GatewayClient, gateway_server::GatewayServer,
+	};
+	use tonic::Code;
+
+	use super::{RPC_MESSAGE_MAX_BYTES, Server};
+
+	#[test]
+	fn rpc_message_limit_is_the_protocol_frame_ceiling() {
+		assert_eq!(RPC_MESSAGE_MAX_BYTES, omp_proto::bounds::FRAME_MAX_BYTES);
+	}
+
+	/// `limited!` is what every daemon service goes through: a message above the
+	/// limit it was given is refused by the server, one below it is served.
+	#[tokio::test]
+	async fn limited_servers_refuse_messages_above_their_limit() {
+		let directory = tempfile::tempdir().expect("temporary directory");
+		let socket = directory.path().join("limit.sock");
+		let incoming = omp_rpc::uds::listen(&socket).await.expect("bind");
+		let hello = omp_rpc::HelloService::new("test", Vec::new());
+		tokio::spawn(async move {
+			Server::builder()
+				.add_service(limited!(GatewayServer::new(hello), 1024))
+				.serve_with_incoming(incoming)
+				.await
+				.expect("test server runs");
+		});
+		let mut client = GatewayClient::new(omp_rpc::uds::connect(&socket).await.expect("connect"));
+		let hello = |client_name: String| HelloRequest {
+			client:       client_name,
+			schema_rev:   omp_proto::SCHEMA_REV,
+			capabilities: Vec::new(),
+		};
+		client
+			.hello(hello("small".to_owned()))
+			.await
+			.expect("a message under the limit is served");
+		let refused = client
+			.hello(hello("x".repeat(4096)))
+			.await
+			.expect_err("a message above the limit is refused");
+		assert!(
+			matches!(refused.code(), Code::OutOfRange | Code::ResourceExhausted),
+			"unexpected status {refused:?}"
+		);
+	}
+}
+
 #[cfg(test)]
 mod gateway_bearer_tests {
 	use std::sync::Arc;

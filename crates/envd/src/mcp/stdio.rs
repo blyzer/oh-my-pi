@@ -1,7 +1,5 @@
 //! Environment-owned NDJSON child-process MCP transport.
 
-#[cfg(all(unix, not(target_os = "macos")))]
-use std::io;
 use std::{
 	collections::{BTreeMap, HashMap},
 	env,
@@ -17,8 +15,6 @@ use std::{
 };
 
 use flume::Receiver;
-#[cfg(unix)]
-use nix::{sys::signal, unistd::Pid};
 use omp_core::Str;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -30,8 +26,6 @@ use tokio::{
 	time,
 };
 use tokio_util::sync::CancellationToken;
-#[cfg(windows)]
-use windows_sys::Win32::System::Threading;
 
 use super::{
 	json_rpc::{RequestId, RequestIdAllocator, RequestIdFormat},
@@ -40,10 +34,9 @@ use super::{
 		TransportFailure, TransportFuture, TransportResponse,
 	},
 };
+use crate::child_tree;
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const TERM_GRACE: Duration = Duration::from_secs(1);
-const KILL_GRACE: Duration = Duration::from_millis(500);
 
 /// Platform family used for deterministic spawn-policy selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -388,7 +381,6 @@ struct Inner {
 	id_format:   RequestIdFormat,
 	timeout:     Option<Duration>,
 	pid:         Option<u32>,
-	detached:    bool,
 	owners:      AtomicUsize,
 	closed:      AtomicBool,
 	teardown:    AtomicBool,
@@ -429,7 +421,7 @@ impl Drop for StdioTransport {
 		}
 		// Drop has no async grace window. Terminate the complete execution unit
 		// synchronously, then reap it opportunistically on the live runtime.
-		signal_child(self.inner.pid, self.inner.detached, true);
+		child_tree::signal_tree(self.inner.pid, true);
 		if let Ok(runtime) = tokio::runtime::Handle::try_current() {
 			let inner = Arc::clone(&self.inner);
 			runtime.spawn(async move {
@@ -469,32 +461,7 @@ impl StdioTransport {
 		for (name, value) in &config.env {
 			command.env(name.as_str(), value);
 		}
-		#[cfg(all(unix, not(target_os = "macos")))]
-		if plan.detached_session {
-			use std::os::unix::process::CommandExt as _;
-			// SAFETY: `setsid` has no memory-safety preconditions and this callback
-			// performs no allocation between fork and exec.
-			unsafe {
-				command.as_std_mut().pre_exec(|| {
-					if libc::setsid() == -1 {
-						Err(io::Error::last_os_error())
-					} else {
-						Ok(())
-					}
-				});
-			}
-		}
-		#[cfg(target_os = "macos")]
-		{
-			use std::os::unix::process::CommandExt as _;
-			// A separate process group preserves the inherited macOS session/TCC
-			// attachment while still giving teardown authority over descendants.
-			command.as_std_mut().process_group(0);
-		}
-		#[cfg(windows)]
-		{
-			command.creation_flags(Threading::CREATE_NEW_PROCESS_GROUP);
-		}
+		child_tree::isolate(&mut command, plan.detached_session);
 		let mut child = command
 			.spawn()
 			.map_err(|source| TransportError::pre_dispatch(TransportFailure::Spawn(source)))?;
@@ -522,10 +489,6 @@ impl StdioTransport {
 			id_format: config.request_id_format,
 			timeout: config.timeout,
 			pid,
-			// Every host spawn path creates a targetable process group: a session
-			// on POSIX, a process group on macOS, and CREATE_NEW_PROCESS_GROUP on
-			// Windows. Always sweep it after the leader settles.
-			detached: true,
 			owners: AtomicUsize::new(1),
 			closed: AtomicBool::new(false),
 			teardown: AtomicBool::new(false),
@@ -812,126 +775,15 @@ async fn reap_inner(inner: &Inner) {
 	let Some(mut child) = inner.child.lock().await.take() else {
 		return;
 	};
-	let pid = child.id().or(inner.pid);
-	signal_child(pid, inner.detached, false);
-	let exited = time::timeout(TERM_GRACE, child.wait()).await.is_ok();
-	if !exited || inner.detached {
-		signal_child(pid, inner.detached, true);
-		if !exited {
-			let _ = time::timeout(KILL_GRACE, child.wait()).await;
-		}
-	}
-}
-
-fn signal_child(pid: Option<u32>, detached: bool, hard: bool) {
-	#[cfg(unix)]
-	if let Some(pid) = pid {
-		let signal = if hard {
-			signal::Signal::SIGKILL
-		} else {
-			signal::Signal::SIGTERM
-		};
-		let raw = Pid::from_raw(pid.cast_signed());
-		if detached {
-			match signal::kill(Pid::from_raw(-raw.as_raw()), signal) {
-				Ok(()) | Err(nix::errno::Errno::ESRCH) => {},
-				Err(_) => {
-					let _ = signal::kill(raw, signal);
-				},
-			}
-		} else {
-			let _ = signal::kill(raw, signal);
-		}
-	}
-	#[cfg(windows)]
-	if let Some(pid) = pid {
-		let _ = detached;
-		if hard {
-			terminate_windows_process_tree(pid);
-		} else {
-			// CREATE_NEW_PROCESS_GROUP makes `pid` a valid CTRL_BREAK group.
-			// Failure is harmless: the bounded hard-kill sweep follows.
-			// SAFETY: the event code and process-group identifier are plain values;
-			// Windows validates whether the target group still exists.
-			unsafe {
-				windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent(
-					windows_sys::Win32::System::Console::CTRL_BREAK_EVENT,
-					pid,
-				);
-			}
-		}
-	}
-}
-
-#[cfg(windows)]
-fn terminate_windows_process_tree(root: u32) {
-	use std::mem::size_of;
-
-	use windows_sys::Win32::{
-		Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
-		System::{
-			Diagnostics::ToolHelp::{
-				CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-				TH32CS_SNAPPROCESS,
-			},
-			Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
-		},
-	};
-
-	// SAFETY: the flags request a system-owned snapshot and require no caller
-	// pointers.
-	let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-	if snapshot == INVALID_HANDLE_VALUE {
-		return;
-	}
-	let mut entry =
-		PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..PROCESSENTRY32W::default() };
-	let mut relationships = Vec::new();
-	// SAFETY: `snapshot` is live and `entry` has the required size initialized.
-	if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
-		loop {
-			relationships.push((entry.th32ProcessID, entry.th32ParentProcessID));
-			// SAFETY: the same live snapshot and initialized writable entry remain
-			// valid for the duration of enumeration.
-			if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
-				break;
-			}
-		}
-	}
-	// SAFETY: `snapshot` is a live owned handle and is closed exactly once here.
-	unsafe {
-		CloseHandle(snapshot);
-	}
-
-	let mut tree = vec![root];
-	loop {
-		let before = tree.len();
-		for &(pid, parent) in &relationships {
-			if !tree.contains(&pid) && tree.contains(&parent) {
-				tree.push(pid);
-			}
-		}
-		if tree.len() == before {
-			break;
-		}
-	}
-	for pid in tree.into_iter().rev() {
-		// SAFETY: Windows validates the process identifier and requested access.
-		let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
-		if !process.is_null() {
-			// SAFETY: `process` is a live owned handle, terminated and then closed
-			// exactly once in this branch.
-			unsafe {
-				TerminateProcess(process, 1);
-				CloseHandle(process);
-			}
-		}
-	}
+	child_tree::reap(&mut child, inner.pid).await;
 }
 
 #[cfg(test)]
 mod tests {
 	use std::env;
+
+	#[cfg(unix)]
+	use nix::unistd::Pid;
 
 	use super::*;
 

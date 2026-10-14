@@ -27,6 +27,7 @@ use omp_cache::github_cache::GithubCache;
 use omp_core::{Hash32, Str, sf};
 use omp_journal::blob::{BlobStage, BlobStore};
 use omp_proto::{
+	bounds::{FRAME_MAX_BYTES, FrameBoundsError, validate_worker_frame},
 	env::{
 		v1,
 		v1::{
@@ -169,6 +170,22 @@ pub enum ExecError {
 	/// A named-process readiness probe was invalid or did not pass.
 	#[error("process readiness failed: {0}")]
 	Readiness(Str),
+	/// A readiness-probe reply frame failed the protobuf preflight, so it was
+	/// not decoded.
+	#[error("readiness probe reply frame rejected before decoding")]
+	ProbeFrame {
+		/// Preflight failure.
+		#[source]
+		source: FrameBoundsError,
+	},
+	/// A readiness-probe reply frame passed the preflight but is not a valid
+	/// `WorkerFrame`.
+	#[error("readiness probe reply frame is not a valid worker frame")]
+	ProbeDecode {
+		/// Protobuf decode failure.
+		#[source]
+		source: prost::DecodeError,
+	},
 	/// An operating-system process primitive failed.
 	#[error("process I/O failed: {0}")]
 	Io(#[from] io::Error),
@@ -501,6 +518,9 @@ struct SessionCommand {
 	/// The amended reruns this command may still take.
 	reruns: AmendmentReruns,
 	sandbox_environment_update: bool,
+	/// The authenticated session owner of the connection that issued the
+	/// command.
+	owner: Option<Str>,
 	/// The relay of the connection that issued the command, which answers
 	/// its sandbox amendment and its `dyn` admissions; an approved rerun
 	/// keeps it.
@@ -1068,19 +1088,20 @@ impl ExecHost {
 			.await
 	}
 
-	/// Starts a script for the connection whose relays are `approvals` and
-	/// `reflection`: a sandbox amendment or a `dyn` admission the command needs
-	/// prompts that connection, and fails closed once it closed, and a
-	/// `dyn reflect` synthesizes on that connection's session.
+	/// Starts a script for the connection whose owner and relays are carried
+	/// through nested `dyn` calls: a sandbox amendment or admission prompts
+	/// that connection, `dyn reflect` synthesizes on its session, and eval
+	/// state remains scoped to that session.
 	pub(crate) async fn exec_relayed(
 		&self,
 		request: ExecRequest,
 		timeout: Option<Duration>,
+		owner: Option<Str>,
 		approvals: Option<OwnedApprovals>,
 		reflection: Option<OwnedReflection>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
 		self
-			.exec_controlled(request, timeout, CommandIssuer { approvals, reflection })
+			.exec_controlled(request, timeout, CommandIssuer { owner, approvals, reflection })
 			.await
 	}
 
@@ -1162,6 +1183,7 @@ impl ExecHost {
 			sequence: Arc::new(AtomicU64::new(1)),
 			reruns: AmendmentReruns::Fresh,
 			sandbox_environment_update: false,
+			owner: issuer.owner,
 			approvals: issuer.approvals,
 			reflection: issuer.reflection,
 		};
@@ -2587,6 +2609,7 @@ async fn run_session_command(
 		tokio::pin!(timeout);
 		// Every `dyn` call of this attempt answers to the command's issuer.
 		let _issued = issuer.enter(CommandIssuer {
+			owner:      command.owner.clone(),
 			approvals:  command.approvals.clone(),
 			reflection: command.reflection.clone(),
 		});
@@ -3937,6 +3960,14 @@ fn take_worker_frame(buffer: &mut BytesMut) -> Result<Option<WorkerFrame>, ExecE
 	};
 	let length = usize::try_from(length)
 		.map_err(|_| ExecError::Readiness(sf!("Ping probe frame is too large")))?;
+	// Reject an oversized declaration before waiting for it: otherwise a
+	// process declaring a huge length makes the caller buffer its output
+	// without bound while this returns `None`.
+	if length > FRAME_MAX_BYTES {
+		return Err(ExecError::ProbeFrame {
+			source: FrameBoundsError::FrameTooLarge { actual: length, limit: FRAME_MAX_BYTES },
+		});
+	}
 	let total = prefix
 		.checked_add(length)
 		.ok_or_else(|| ExecError::Readiness(sf!("Ping probe frame length overflow")))?;
@@ -3945,9 +3976,10 @@ fn take_worker_frame(buffer: &mut BytesMut) -> Result<Option<WorkerFrame>, ExecE
 	}
 	let mut framed = buffer.split_to(total);
 	framed.advance(prefix);
+	validate_worker_frame(&framed).map_err(|source| ExecError::ProbeFrame { source })?;
 	WorkerFrame::decode(framed)
 		.map(Some)
-		.map_err(|error| ExecError::Readiness(Str::from(error.to_string())))
+		.map_err(|source| ExecError::ProbeDecode { source })
 }
 
 async fn forward_named_process(process: Arc<NamedProcess>, run: ExecRun, _exec: Bytes) {
@@ -6497,5 +6529,66 @@ mod tests {
 		let mut output = [0_u8; 16];
 		let read = read_chunk(&mut reader, &mut output).expect("interrupted reads should retry");
 		assert_eq!(&output[..read], b"complete");
+	}
+
+	/// Prefixes an encoded frame with its varint length, the way a worker
+	/// writes it to stdout.
+	fn length_delimited(frame: &[u8]) -> BytesMut {
+		let mut out = BytesMut::new();
+		let mut length = frame.len() as u64;
+		loop {
+			let byte = (length & 0x7f) as u8;
+			length >>= 7;
+			if length == 0 {
+				out.extend_from_slice(&[byte]);
+				break;
+			}
+			out.extend_from_slice(&[byte | 0x80]);
+		}
+		out.extend_from_slice(frame);
+		out
+	}
+
+	#[test]
+	fn probe_reply_frame_is_preflighted_before_decode() {
+		use omp_proto::toolhost::v1::Pong;
+
+		// A well-formed Pong decodes.
+		let pong = WorkerFrame {
+			request_id: 0,
+			body:       Some(worker_frame::Body::Pong(Pong { nonce: 7, props: None })),
+			props:      None,
+		}
+		.encode_to_vec();
+		let mut buffer = length_delimited(&pong);
+		let frame = take_worker_frame(&mut buffer)
+			.expect("a valid reply is accepted")
+			.expect("complete frame");
+		assert!(matches!(frame.body, Some(worker_frame::Body::Pong(Pong { nonce: 7, .. }))));
+
+		// Field 7 declares 127 bytes but only 3 follow: the preflight names the
+		// truncation before `prost` sees the bytes.
+		let mut malformed = BytesMut::new();
+		malformed.extend_from_slice(&[0x05, 0x3a, 0x7f, 0x00, 0x00, 0x00]);
+		assert!(matches!(
+			take_worker_frame(&mut malformed),
+			Err(ExecError::ProbeFrame { source: FrameBoundsError::Truncated { .. } })
+		));
+
+		// A varint length above the protocol frame limit is refused as soon as
+		// the prefix is read, without waiting for (and buffering) the body.
+		let mut oversized = BytesMut::new();
+		let mut length = (FRAME_MAX_BYTES as u64) + 1;
+		while length >= 0x80 {
+			oversized.extend_from_slice(&[(length & 0x7f) as u8 | 0x80]);
+			length >>= 7;
+		}
+		oversized.extend_from_slice(&[length as u8]);
+		assert!(matches!(
+			take_worker_frame(&mut oversized),
+			Err(ExecError::ProbeFrame {
+				source: FrameBoundsError::FrameTooLarge { limit: FRAME_MAX_BYTES, .. },
+			})
+		));
 	}
 }

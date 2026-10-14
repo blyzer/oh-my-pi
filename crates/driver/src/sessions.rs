@@ -328,6 +328,11 @@ impl SessionIndex {
 	}
 
 	/// Replaces every cached row from the current journal directory contents.
+	///
+	/// A journal written by a newer omp has no row, and is reported with its
+	/// own diagnostic apart from a corrupt file: opening or resuming it
+	/// surfaces [`omp_journal::JournalError::NewerRevision`] or
+	/// [`omp_journal::JournalError::NewerGenesisVersion`] to the user.
 	pub fn refresh(&self, root: impl AsRef<Path>) -> Result<(), io::Error> {
 		let mut paths = Vec::new();
 		collect_journals(root.as_ref(), &mut paths)?;
@@ -335,6 +340,13 @@ impl SessionIndex {
 		for path in paths {
 			let entries = match omp_journal::Journal::scan(&path) {
 				Ok(opened) => opened,
+				Err(
+					error @ (omp_journal::JournalError::NewerRevision { .. }
+					| omp_journal::JournalError::NewerGenesisVersion { .. }),
+				) => {
+					tracing::warn!(journal = %path.display(), %error, "session journal was written by a newer omp; not listed");
+					continue;
+				},
 				Err(error) => {
 					tracing::warn!(journal = %path.display(), %error, "skipping invalid session journal");
 					continue;
@@ -601,5 +613,30 @@ mod tests {
 		let stored = index.get("branched").expect("stored session");
 		assert_eq!(stored.title.as_deref(), Some("Live title"));
 		assert_eq!(stored.messages, 1, "abandoned messages do not count");
+	}
+
+	#[test]
+	fn newer_journal_is_not_indexed_and_resume_reports_the_typed_error() {
+		let scratch = tempfile::tempdir().expect("tempdir");
+		let root = scratch.path();
+		write_journal(root, "ok", Some("kept"), Duration::from_secs(0));
+		let newer = root.join("newer.oms");
+		fs::write(
+			&newer,
+			"event: journal@1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: \
+			 {\"version\":1,\"cwd\":\"/w\",\"created\":\"1\"}\n\nevent: msg.user@2\nid: \
+			 01ARZ3NDEKTSV4RRFFQ69G5FAW\nby: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ndata: {}\n\n",
+		)
+		.expect("write newer journal");
+
+		let index = SessionIndex::open(root).expect("index");
+		assert!(index.get("ok").is_some());
+		assert!(index.get("newer").is_none(), "a newer journal has no row");
+
+		let resumed = omp_session::Session::open(&newer, omp_session::ComponentRegistry::standard());
+		assert!(matches!(
+			resumed,
+			Err(omp_session::SessionError::Journal(omp_journal::JournalError::NewerRevision { .. }))
+		));
 	}
 }

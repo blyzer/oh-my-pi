@@ -293,6 +293,9 @@ pub struct RunRequest {
 	pub environment: BTreeMap<Str, Option<Str>>,
 	/// Optional server-enforced timeout in milliseconds.
 	pub timeout_ms:  Option<u64>,
+	/// Authenticated owner of the invocation issuing the command, which a
+	/// nested device call the command makes answers to.
+	pub owner:       Option<Str>,
 }
 
 /// Request to create one persistent named process.
@@ -767,6 +770,7 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 				command: command.clone(),
 				environment,
 				timeout_ms,
+				owner: params.owner().cloned(),
 			}).instrument(span.clone()).await {
 				Ok(run) => run,
 				Err(fault) => {

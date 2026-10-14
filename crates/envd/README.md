@@ -213,6 +213,66 @@ a typed `LiteralValueNotice` (section and key, never the value) through the
 `tracing` warning channel the other discovery diagnostics use. Move a
 declaration that needs dynamic values into the user-level `~/.o2/mcp.json`.
 
+## Codex app-server adapter (codex_app_server module)
+
+`codex_app_server` implements the delegated-executor contract of
+`omp_agent::delegated` (ADR 0043) for the official Codex CLI. It lives here,
+not in `omp-agent`, because it owns a resident child process and reuses
+`child_tree` for process-group isolation and TERM → grace → KILL teardown, the
+same code the MCP stdio transport uses; `omp-envd` depends on `omp-agent`, so
+the contract cannot hold the implementation.
+
+- Transport: a private `codex app-server --listen stdio://` per session,
+  newline-delimited JSON-RPC, explicit arguments and working directory. OMP
+  never attaches to the user's shared daemon or a socket. The executor never
+  reads, copies or names a Codex home or credential file and no contract type
+  can carry one; login stays with the CLI and is reported `Unknown` because
+  Codex offers no probe that does not read credential state.
+- Wire: `wire.rs` holds typed serde structs for only the messages the first
+  slice needs (`initialize`, `thread/start|resume`, `thread/inject_items`,
+  `turn/start|interrupt`, the lifecycle, text-delta, item, token-usage and
+  error notifications, and the three approval requests). Inbound lines are
+  classified from borrowed fields and decoded per method; there is no `json!`
+  and no untyped traversal. A method outside the pinned version's vocabulary
+  is reported as `UndeclaredEvent`, never dropped. The supported CLI range is
+  `CODEX_VERSIONS` (`0.160.x`); the schema comes from
+  `codex app-server generate-json-schema` for that version.
+- Framing: `frame.rs` is a cancel-safe, size-capped line reader
+  (`MAX_FRAME_BYTES`, 8 MiB). A longer line fails the session. Output goes
+  through a writer task and an unbounded queue, so a slow child never blocks
+  the reader.
+- Policy: `policy.rs` is the only place a `DelegatedPolicy` becomes Codex
+  settings, and the advertised policy list is derived from it. Exactly six
+  policies map: `read-only` / `workspace-write` sandbox, network `disabled`
+  (or `open` under workspace-write), approval `always-ask` (`untrusted`) or
+  `yolo` (`never`). `unrestricted`, `scoped` network and approval `write` are
+  refused up front; the adapter never sends `danger-full-access`,
+  `externalSandbox`, a granular approval policy or `auto_review`. The policy
+  Codex reports in the `thread/start|resume` response is compared with the
+  request by the host, so a downgrade is `PolicyDrift`.
+- Prompt: system sections go through `thread/inject_items` as developer
+  messages and user sections through `turn/start`, byte for byte. The digest
+  returned in `TurnAccepted` is computed from the encoded lines read back, so
+  it describes what was written. Because system text is delivered first, a
+  prompt whose sections are not system-then-user cannot be delivered in order
+  and ends the session as `PromptRewritten`.
+- Approvals: command, file-change and permission-profile requests become
+  `PermissionRequest`s. Allows are narrowed to a single `accept` (or a
+  turn-scoped grant of exactly the requested profile); `acceptForSession`,
+  execpolicy and network-policy amendments, and `cancel` are not representable.
+  Terminal input, mixed or structured profiles are `Unclassified`. Dynamic
+  tool calls, elicitations, user-input requests, legacy approvals and
+  credential refresh/attestation requests are refused with the most
+  restrictive response and never with a token.
+- Teardown: `terminate` interrupts the turn, waits a bounded grace, then
+  kills the whole process tree; it is idempotent and `Drop` kills the group.
+  A dead child is `Crashed` with its exit fact.
+
+Tests (`codex_app_server/tests.rs`) run the adapter against a deterministic
+in-process JSON-RPC peer over in-memory pipes, plus throwaway `sh` children
+for process-tree behavior. No `codex` binary is started, nothing is logged in,
+no model is called and no Codex home is read.
+
 ## Philosophy
 
 Each project, executable generation and daemon policy has one detached

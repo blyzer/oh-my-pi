@@ -153,8 +153,6 @@ struct PhaseState {
 	status:     Status,
 	/// Completed attempts. An interrupted dispatch reuses its ordinal.
 	attempts:   u32,
-	/// Extra attempts granted by a rewind, above `max_attempts`.
-	granted:    u32,
 	correction: Option<Str>,
 	/// Acceptance ordinal currently standing, and the total ever accepted.
 	///
@@ -245,6 +243,11 @@ impl Run {
 				Step::Done { accepted: self.states.iter().all(|s| s.status == Status::Passed) }
 			};
 		};
+		if self.states[index].attempts >= self.max_attempts {
+			self.halted = true;
+			return Step::Done { accepted: false };
+		}
+
 		let phase = self.workflow.phases()[index].clone();
 		if !phase.requires.is_empty() {
 			let blocked = match self.posture {
@@ -339,8 +342,7 @@ impl Run {
 				Ok(Outcome::Halted { phase: name })
 			},
 			OnReject::Retry => {
-				let budget = self.max_attempts + self.states[index].granted;
-				if self.states[index].attempts >= budget {
+				if self.states[index].attempts >= self.max_attempts {
 					self.halted = true;
 					return Ok(Outcome::Halted { phase: name });
 				}
@@ -354,13 +356,14 @@ impl Run {
 					return Ok(Outcome::Halted { phase: name });
 				};
 				let target_name = self.workflow.phases()[target].name.clone();
+				if self.states[target].attempts >= self.max_attempts {
+					self.halted = true;
+					return Ok(Outcome::Halted { phase: target_name });
+				}
+
 				let state = &mut self.states[target];
 				state.status = Status::Pending;
 				state.correction = Some(correction);
-				// The rewind is the reviewer's decision, not the producer's
-				// failure: granting an attempt keeps a correction route from
-				// silently consuming the producer's own retry budget.
-				state.granted += 1;
 				state.published = None;
 
 				let mut invalidated = self.invalidate_dependents(&target_name);
@@ -868,28 +871,51 @@ mod tests {
 			);
 		}
 
+		fn always_rejecting_correction_gate(run: &mut Run) -> Outcome {
+			let (build, _) = dispatch(run);
+			assert_eq!(build.as_str(), "build");
+			run.accept(&build).expect("build must be running");
+
+			let (review, _) = dispatch(run);
+			assert_eq!(review.as_str(), "review");
+			run.reject(&review, "again")
+				.expect("review must be running")
+		}
+
 		#[test]
-		fn rewind_does_not_consume_the_producer_attempt_budget() {
-			let mut run = run_of(vec![
-				agent("build").depending_on([]),
-				Phase::new(PhaseName::new("review"), PhaseKind::Review)
-					.depending_on([])
-					.consuming([PhaseName::new("build")])
-					.on_reject(OnReject::Correct),
-			])
-			.with_max_attempts(1);
+		fn correct_route_stops_at_the_producer_attempt_ceiling() {
+			for max_attempts in [1, 2, 3, 7] {
+				let mut run = run_of(vec![
+					agent("build").depending_on([]),
+					Phase::new(PhaseName::new("review"), PhaseKind::Review)
+						.depending_on([])
+						.consuming([PhaseName::new("build")])
+						.on_reject(OnReject::Correct),
+				])
+				.with_max_attempts(max_attempts);
 
-			dispatch(&mut run);
-			run.accept(PhaseName::from_ref("build"))
-				.expect("running phase");
-			dispatch(&mut run);
-			run.reject(PhaseName::from_ref("review"), "again")
-				.expect("running phase");
+				for attempt in 1..=max_attempts {
+					let outcome = always_rejecting_correction_gate(&mut run);
+					if attempt < max_attempts {
+						assert!(
+							matches!(outcome, Outcome::Rewound { ref phase, .. } if phase.as_str() == "build"),
+							"attempt {attempt} must rewind the producer"
+						);
+					} else {
+						assert_eq!(
+							outcome,
+							Outcome::Halted { phase: PhaseName::new("build") },
+							"the producer's final permitted attempt must exhaust the run"
+						);
+					}
+				}
 
-			assert!(
-				matches!(run.next_step(), Step::Run { ref phase, .. } if phase.name.as_str() == "build"),
-				"a reviewer-driven rewind must not be charged to the producer's own budget"
-			);
+				assert_eq!(
+					run.states[0].attempts, max_attempts,
+					"a correction gate must not dispatch the producer beyond its ceiling"
+				);
+				assert_eq!(run.next_step(), Step::Done { accepted: false });
+			}
 		}
 
 		#[test]

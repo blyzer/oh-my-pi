@@ -7,10 +7,18 @@ use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::{EntryId, blob::BlobRef};
 
+/// Newest [`Genesis::version`] this build writes and reads.
+///
+/// [`crate::Journal::open`] and [`crate::Journal::scan`] refuse a journal
+/// whose genesis declares a larger version, so a file written by a newer omp
+/// fails with a typed error instead of replaying wrongly.
+pub const GENESIS_VERSION: u32 = 1;
+
 /// `journal@1` genesis payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Genesis {
-	/// Journal format version.
+	/// Journal format version; at most [`GENESIS_VERSION`] in a readable
+	/// journal.
 	pub version: u32,
 	/// Session working directory.
 	pub cwd:     Str,
@@ -568,8 +576,11 @@ impl<'de> Deserialize<'de> for ToolResult {
 	where
 		D: Deserializer<'de>,
 	{
+		// Lenient on purpose: `tool.result@1` is read by the fold path, so a field
+		// added by a newer writer must not make an old reader reject the whole
+		// journal. The exactly-one-of outcome/fault invariant below is what keeps the
+		// payload fail-closed.
 		#[derive(Deserialize)]
-		#[serde(deny_unknown_fields)]
 		struct Wire {
 			#[serde(default, deserialize_with = "deserialize_present_raw")]
 			outcome:      Option<Box<RawValue>>,

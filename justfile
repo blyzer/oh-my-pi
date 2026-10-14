@@ -142,12 +142,14 @@ remote-probe:
 # Run the Linux-valid Cargo verification set in one remote runner so the
 # runner-home Cargo target and Python cache are reused between phases. Protobuf
 # checks remain in the GitHub gate because they need the repository's `buf`.
+# Clippy keeps its own target under $HOME: a checkout-relative target/ is wiped by every
+# `bb remote` run, which made clippy cold each time. No separate `cargo check`: clippy
+# type-checks the whole workspace.
 [group('remote')]
 remote-heavy:
-    cargo check --workspace --locked
     cargo nextest run --workspace --exclude omp-e2e --locked
     cargo test --doc --workspace --exclude omp-e2e --locked
-    CARGO_TARGET_DIR=target/clippy cargo clippy --workspace --all-targets --locked
+    CARGO_TARGET_DIR="$HOME/.cache/omp-target-clippy" cargo clippy --workspace --all-targets --locked
 
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
