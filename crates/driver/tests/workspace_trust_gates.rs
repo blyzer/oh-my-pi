@@ -391,7 +391,7 @@ async fn eval_turn(
 	gateway: &Gateway,
 	kernel: &mut Kernel<ComposedInference>,
 	session: &mut Session,
-) {
+) -> Result<(), omp_agent::KernelError> {
 	gateway.eval();
 	kernel
 		.run_turn(
@@ -400,7 +400,7 @@ async fn eval_turn(
 			RunControl::new(CancellationToken::new(), None),
 		)
 		.await
-		.expect("eval turn");
+		.map(drop)
 }
 
 /// The typed payload of every withheld-inputs notice the session journaled.
@@ -469,17 +469,18 @@ async fn composed_kernel_binds_eval_to_the_external_dispatch_session() {
 	let _daemon = workspace.daemon(WorkspaceTrust::Trusted).await;
 	let (mut kernel, mut session) = workspace.compose_with_tools(&gateway).await;
 
-	eval_turn(&gateway, &mut kernel, &mut session).await;
+	let turn = eval_turn(&gateway, &mut kernel, &mut session).await;
 
 	let journal = fs::read_to_string(&workspace.session).expect("read composed session journal");
 	assert!(
 		!journal.contains("not bound for this owner"),
-		"production eval was refused by the bridge: {journal}"
+		"production eval was refused by the bridge (turn: {turn:?}): {journal}"
 	);
 	assert!(
 		journal.contains("eval-owner-ok"),
-		"production eval did not return its cell result: {journal}"
+		"production eval did not return its cell result (turn: {turn:?}): {journal}"
 	);
+	turn.expect("eval turn");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
