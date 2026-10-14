@@ -243,7 +243,34 @@ Phase 1 done (`crates/chat/src/tsp.rs`, wired in `crates/chat/src/host.rs`):
 - while a surface is live the slot ledger stays idle; it is admitted when an overlay hands the
   screen back.
 
-Phases 2 to 4 are not started.
+Phase 2 done (`crates/chat/src/cards/`, `crates/chat/src/tsp.rs`; `5790db5f4e`):
+- per-card descriptions through `Card::describe` over `CardView`: bash as `ansi` with `follow`
+  while the call is in progress, edit as `diff`, read as `code` plus `image` nodes for blob parts,
+  todo as `checklist`, task as `agent`; a card without a description keeps the generic `tool`
+  node, then `rows`;
+- the status band as `status`/`seg`, and notices as `toast`, each falling back per kind through
+  `hello.kinds`;
+- no palette is sent; nodes carry roles and tones only.
+
+Phase 3 partly done, through phase 4 forms (`fe1b29c476`, `dc9b310a76`):
+- the approval prompt is a surface-scoped `el` form in the `layer` region; Tern `action` events
+  are queued by the surface and routed to the same approval decision authority as the cell UI;
+- settings panels expose a surface-scoped `el` form; Tern `change` events lower through the
+  panel's existing `PreviewSetting` path, so validation and commit semantics are unchanged;
+- both fall back to the retained cell overlay when TSP is unavailable.
+
+Phase 4 partly done (`f44c83c249`, `ee8b23083f`):
+- surface-scoped stylesheets, sent only when `hello` advertises the `styles` feature, with
+  validated names and Tern's 256 KiB per-surface budget;
+- a typed `ElementTag` builder that keeps Tern's tag vocabulary closed;
+- OSC 877 input is decoded in `crates/tui/src/tsp/frame.rs`.
+
+Not started, checked against the code on `omp2`:
+- phase 3: native `editor` editing (`edit`, `undo`, `send` events), the autocomplete overlay at the
+  caret, `picker`, `prefs` and `effort` nodes (the model hub and the other overlays still use the
+  cell UI), and `screen` surfaces;
+- phase 4: `flow` surfaces for print mode, `TERN_BLOB_DIR`, and Windows ConPTY input. The amendment
+  of 0034 that the Consequences section asks for is also not written.
 
 ## Not verified
 
