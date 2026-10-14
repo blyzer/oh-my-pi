@@ -61,13 +61,16 @@ pub(crate) struct Transport {
 #[derive(Clone, Copy)]
 pub(crate) struct SessionConfig {
 	/// Longest accepted inbound line.
-	pub(crate) max_frame_bytes: usize,
+	pub(crate) max_frame_bytes:   usize,
 	/// How long [`DelegatedSession::terminate`] waits for an interrupted turn
 	/// to settle before it kills the tree.
-	pub(crate) terminate_grace: Duration,
+	pub(crate) terminate_grace:   Duration,
+	/// How long the `initialize` and `thread/*` exchange may take before the
+	/// CLI is treated as hung.
+	pub(crate) handshake_timeout: Duration,
 	/// CLI versions the executor supports; checked against the server's
 	/// user agent as a second line after the host's `--version` probe.
-	pub(crate) versions:        VersionRange,
+	pub(crate) versions:          VersionRange,
 }
 
 /// What the server asked and how to answer it.
@@ -198,11 +201,16 @@ impl CodexSession {
 		Ok(())
 	}
 
-	/// Allocates an id and encodes a request line.
-	fn request_line<P: Serialize>(&mut self, method: &'static str, params: &P) -> (i64, Bytes) {
+	/// Allocates the next request id.
+	const fn alloc_id(&mut self) -> i64 {
 		let id = self.next_id;
 		self.next_id += 1;
-		(id, Self::encode(&wire::OutRequest { id, method, params }))
+		id
+	}
+
+	/// Encodes a request line.
+	fn request_line<P: Serialize>(id: i64, method: &'static str, params: &P) -> Bytes {
+		Self::encode(&wire::OutRequest { id, method, params })
 	}
 
 	async fn respond<R: Serialize>(
@@ -234,7 +242,8 @@ impl CodexSession {
 		method: &'static str,
 		params: &P,
 	) -> Result<Result<T, i64>, ExecutorError> {
-		let (id, line) = self.request_line(method, params);
+		let id = self.alloc_id();
+		let line = Self::request_line(id, method, params);
 		self.send_bytes(line).await?;
 		self.await_response::<T>(id).await
 	}
@@ -713,9 +722,10 @@ impl CodexSession {
 	}
 
 	async fn send_interrupt(&mut self, turn: &Str) -> Result<(), ExecutorError> {
+		let id = self.alloc_id();
 		let params =
 			wire::TurnInterruptParams { thread_id: self.thread.as_str(), turn_id: turn.as_str() };
-		let (_, line) = self.request_line(wire::TURN_INTERRUPT, &params);
+		let line = Self::request_line(id, wire::TURN_INTERRUPT, &params);
 		self.send_bytes(line).await
 	}
 }
@@ -742,6 +752,7 @@ impl DelegatedSession for CodexSession {
 		let mut delivered: Vec<PromptSection> = Vec::with_capacity(sections.len());
 
 		if !system.is_empty() {
+			let id = self.alloc_id();
 			let params = wire::InjectItemsParams {
 				thread_id: self.thread.as_str(),
 				items:     system
@@ -756,7 +767,7 @@ impl DelegatedSession for CodexSession {
 					})
 					.collect(),
 			};
-			let (id, line) = self.request_line(wire::THREAD_INJECT_ITEMS, &params);
+			let line = Self::request_line(id, wire::THREAD_INJECT_ITEMS, &params);
 			let sent: wire::Sent<wire::SentInject> =
 				serde_json::from_slice(&line).map_err(|_| self.malformed(FrameFault::NotJson))?;
 			for message in sent.params.items {
@@ -770,6 +781,7 @@ impl DelegatedSession for CodexSession {
 			}
 		}
 
+		let id = self.alloc_id();
 		let params = wire::TurnStartParams {
 			thread_id:       self.thread.as_str(),
 			input:           user
@@ -783,7 +795,7 @@ impl DelegatedSession for CodexSession {
 			approval_policy: wire_policy.approval,
 			sandbox_policy:  wire_policy.turn_sandbox(),
 		};
-		let (id, line) = self.request_line(wire::TURN_START, &params);
+		let line = Self::request_line(id, wire::TURN_START, &params);
 		let sent: wire::Sent<wire::SentTurn> =
 			serde_json::from_slice(&line).map_err(|_| self.malformed(FrameFault::NotJson))?;
 		for input in sent.params.input {
@@ -876,12 +888,17 @@ impl DelegatedSession for CodexSession {
 		for task in &self.tasks {
 			task.abort();
 		}
-		match self.tree.as_mut() {
-			Some(tree) if !tree.terminate_tree().await => Err(ExecutorError::TeardownFailed {
+		let reaped = match self.tree.as_mut() {
+			Some(tree) => tree.terminate_tree().await,
+			None => true,
+		};
+		if reaped {
+			Ok(())
+		} else {
+			Err(ExecutorError::TeardownFailed {
 				executor: self.executor.clone(),
 				fault:    TeardownFault::Unreaped,
-			}),
-			_ => Ok(()),
+			})
 		}
 	}
 }

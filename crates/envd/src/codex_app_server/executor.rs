@@ -30,6 +30,8 @@ use crate::child_tree::ChildTree;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long `--version` may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the opening exchange may take before the CLI counts as hung.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `terminate` waits for an interrupted turn before killing the tree.
 const TERMINATE_GRACE: Duration = Duration::from_secs(2);
 
@@ -54,11 +56,19 @@ impl CodexExecutor {
 			caps:    capabilities(),
 			program: program.into(),
 			cfg:     SessionConfig {
-				max_frame_bytes: MAX_FRAME_BYTES,
-				terminate_grace: TERMINATE_GRACE,
-				versions:        CODEX_VERSIONS,
+				max_frame_bytes:   MAX_FRAME_BYTES,
+				terminate_grace:   TERMINATE_GRACE,
+				handshake_timeout: HANDSHAKE_TIMEOUT,
+				versions:          CODEX_VERSIONS,
 			},
 		}
+	}
+
+	/// Overrides how long the opening exchange may take.
+	#[must_use]
+	pub const fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+		self.cfg.handshake_timeout = timeout;
+		self
 	}
 
 	/// Identity of this executor.
@@ -138,7 +148,14 @@ impl DelegatedExecutor for CodexExecutor {
 			tree:   Some(spawned.tree),
 		};
 		let mut session = CodexSession::new(Self::executor_id(), transport, self.cfg);
-		match session.handshake(request).await {
+		let opened = match timeout(self.cfg.handshake_timeout, session.handshake(request)).await {
+			Ok(result) => result,
+			Err(_) => Err(ExecutorError::Hung {
+				executor: Self::executor_id(),
+				idle:     self.cfg.handshake_timeout,
+			}),
+		};
+		match opened {
 			Ok(info) => Ok((session, info)),
 			Err(error) => {
 				// A failed handshake never leaks the child.
