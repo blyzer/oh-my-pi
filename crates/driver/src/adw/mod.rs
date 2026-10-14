@@ -425,4 +425,63 @@ mod tests {
 				if phase == Str::new_static("plan")
 		));
 	}
+
+	#[derive(Debug, thiserror::Error)]
+	#[error("child turn was interrupted")]
+	struct CancelledHostError;
+
+	/// Host whose child reports cancellation as a typed dispatch error.
+	struct CancelledWithHostError {
+		root: PathBuf,
+	}
+
+	impl AdwHost for CancelledWithHostError {
+		type Error = CancelledHostError;
+
+		fn project_root(&self) -> &Path {
+			&self.root
+		}
+
+		fn posture(&self) -> Result<Posture, CancelledHostError> {
+			Ok(Posture {
+				write:    WriteScope::Unconfined,
+				network:  NetworkScope::Unrestricted,
+				approval: ApprovalScope::Write,
+			})
+		}
+
+		fn dispatch<'a>(
+			&'a self,
+			_phase: &'a Phase,
+			_spec: &'a PhaseSpec,
+			_attempt: u32,
+			_correction: Option<&'a Str>,
+			_inputs: &'a [SelectedInput],
+			cancel: &'a CancellationToken,
+		) -> impl Future<Output = Result<PhaseResult, CancelledHostError>> + Send + 'a {
+			cancel.cancel();
+			ready(Err(CancelledHostError))
+		}
+	}
+
+	#[tokio::test]
+	async fn a_host_error_after_cancellation_settles_as_cancelled() {
+		let project = tempfile::tempdir().expect("project");
+		let directory = project.path().join(WORKFLOWS_DIR);
+		fs::create_dir_all(&directory).expect("workflow directory");
+		fs::write(
+			directory.join("plan.toml"),
+			"name = \"plan\"\n\n[[phase]]\nname = \"plan\"\nkind = \"agent\"\nprompt = \"Plan it.\"\n",
+		)
+		.expect("workflow file");
+		let definition = definition::load(project.path(), "plan").expect("definition");
+		let host = CancelledWithHostError { root: project.path().to_path_buf() };
+
+		let exit = run(&definition, 3, &host, &CancellationToken::new())
+			.await
+			.expect("cancelled run");
+
+		assert_eq!(exit.status, RunStatus::Cancelled);
+		assert!(exit.records.is_empty());
+	}
 }
