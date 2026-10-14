@@ -1,6 +1,7 @@
 //! Terminal presentation adapter for the driver-owned workflow host.
 
 use std::{
+	error::Error as StdError,
 	path::{Path, PathBuf},
 	sync::Arc,
 };
@@ -80,32 +81,48 @@ async fn execute(
 	for record in &exit.records {
 		println!(
 			"{} attempt {}: {} — {}",
-			record.phase,
-			record.attempt,
-			if record.accepted {
-				"accepted"
-			} else {
-				"rejected"
-			},
-			record.decision
+			record.phase, record.attempt, record.status, record.decision
 		);
 	}
 	match exit.status {
 		RunStatus::Accepted => println!("Workflow `{workflow}` accepted every phase."),
-		RunStatus::Halted | RunStatus::Blocked => println!(
-			"Workflow `{workflow}` {}{}.",
-			exit.status,
+		RunStatus::Halted => println!(
+			"Workflow `{workflow}` halted{}.",
 			exit
 				.reason
 				.as_deref()
 				.map_or_else(String::new, |reason| format!(": {reason}"))
 		),
+		RunStatus::Blocked => println!(
+			"Workflow `{workflow}` blocked{}.",
+			exit
+				.reason
+				.as_deref()
+				.map_or_else(String::new, |reason| format!(": {reason}"))
+		),
+		RunStatus::Failed(failure) => {
+			println!(
+				"Workflow `{workflow}` failed in phase `{}` attempt {}.",
+				failure.phase, failure.attempt
+			);
+			print_error_chain(&failure.source);
+		},
 		RunStatus::Cancelled => println!("Workflow `{workflow}` cancelled."),
 	}
 	if exit.code == 0 {
 		Ok(())
 	} else {
 		Err(miette::miette!("workflow exited with status {}", exit.code))
+	}
+}
+
+/// Renders a typed host failure's cause chain at the terminal boundary.
+fn print_error_chain(error: &(dyn StdError + 'static)) {
+	println!("  caused by: {error}");
+	let mut source = error.source();
+	while let Some(error) = source {
+		println!("  caused by: {error}");
+		source = error.source();
 	}
 }
 
