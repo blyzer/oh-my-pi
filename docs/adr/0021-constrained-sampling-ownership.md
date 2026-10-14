@@ -66,11 +66,20 @@ the wire.
 
 ## Status in omp
 
-**Status: Partially implemented.** Intents, budgets and typed `Dropped` adjustments exist; end-to-end proof across all grammar dialects is missing. (Verified 2026-10-04 against `omp2` at `083b38fe7d`.)
+**Status: Partially implemented.** The registry now has joined, deterministic strict-budget
+arbitration and typed fallback/error lowering proofs; provider-specific codec and host declaration
+coverage remains incomplete. (Verified 2026-10-14 against `omp2` at `50d03d0409`.)
 
-- Budgeting and lowering: `ConstraintBudgetCaps { maximum_tools, maximum_strict }` and unit tests in `crates/ai/src/plan.rs`; `ConstraintDisposition` in `crates/tool/src/registry.rs`.
-- Typed degradation reasons such as `catalog.strict-schema-unsupported` appear in `crates/ai/src/codec/openai_chat.rs` and `openai_responses.rs`.
-- Not found or unproved: a joined test spending the strict budget in priority order across registrations, every grammar dialect fallback, and the declaration-time error for `on_unsupported=ERROR`.
+- Budgeting and lowering: `ConstraintBudgetCaps { maximum_tools, maximum_strict }` and unit tests in
+  `crates/ai/src/plan.rs`; `ConstraintDisposition` in `crates/tool/src/registry.rs`.
+- `crates/tool/tests/contracts.rs` now proves strict capacity is spent across four registrations in
+  priority order, with deterministic output, `Required`/`Prefer` dispositions, and typed
+  `catalog.strict-schema-budget-exhausted` receipts.
+- The registry seam now has one fallback proof for each catalog grammar dialect (`Lark`, `Regex`,
+  and `Ebnf`) and typed `UnsupportedConstraint` proofs for strict-schema and grammar
+  `on_unsupported=ERROR` lowering.
+- Still unproved: joined end-to-end propagation of those registry receipts through every provider
+  codec, and the host-language declaration boundary before registry lowering.
 
 ## References
 

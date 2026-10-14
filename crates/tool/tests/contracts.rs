@@ -696,6 +696,121 @@ fn advertisement_spends_capacity_by_priority_and_receipts_strict_exhaustion() {
 	));
 }
 #[test]
+fn advertisement_spends_strict_budget_across_registrations_in_priority_order() {
+	let calls = Arc::new(AtomicUsize::new(0));
+	let mut registry = Registry::new();
+	for (name, priority) in [("low", 7), ("high", 99), ("middle", 42), ("next", 98)] {
+		registry
+			.register(
+				FakeTool::new(
+					1,
+					name,
+					br#"{"type":"object"}"#,
+					Constraint::Schema { priority, on_unsupported: Fallback::Unspecified },
+					Arc::clone(&calls),
+				)
+				.named(name),
+				Presentation::Slot,
+				claims("omp/tests", Precedence::DEFAULT),
+			)
+			.unwrap();
+	}
+
+	let lower = || {
+		registry
+			.advertise(LoweringCaps {
+				strict_schema:  true,
+				grammar:        GrammarBits::empty(),
+				maximum_tools:  None,
+				maximum_strict: Some(2),
+			})
+			.unwrap()
+	};
+	let advertised = lower();
+	let repeated = lower();
+	assert_eq!(
+		advertised
+			.iter()
+			.map(|tool| tool.identity.name.as_str())
+			.collect::<Vec<_>>(),
+		["high", "next", "middle", "low"],
+	);
+	assert_eq!(
+		repeated
+			.iter()
+			.map(|tool| tool.identity.name.as_str())
+			.collect::<Vec<_>>(),
+		["high", "next", "middle", "low"],
+	);
+	for (tool, strict) in advertised.iter().zip([true, true, false, false]) {
+		assert_eq!(
+			tool.definition.input.json_schema().expect("schema").1,
+			strict,
+			"{} strict disposition",
+			tool.identity.name
+		);
+		if strict {
+			assert_eq!(tool.disposition, Some(ConstraintDisposition::Required));
+			assert!(tool.adjustments.is_empty());
+		} else {
+			assert_eq!(tool.disposition, Some(ConstraintDisposition::Prefer));
+			assert!(matches!(
+				tool.adjustments.as_slice(),
+				[Adjustment::Dropped { reason, .. }]
+					if reason.0 == "catalog.strict-schema-budget-exhausted"
+			));
+		}
+	}
+}
+
+#[test]
+fn unsupported_on_unsupported_constraint_is_a_typed_lowering_error() {
+	for (name, constraint, feature) in [
+		(
+			"strict_error",
+			Constraint::Schema { priority: 1, on_unsupported: Fallback::Error },
+			"schema",
+		),
+		(
+			"grammar_error",
+			Constraint::Grammar {
+				syntax:         GrammarSyntax::Lark,
+				definition:     sf!("start: WORD"),
+				priority:       1,
+				on_unsupported: Fallback::Error,
+			},
+			"lark",
+		),
+	] {
+		let mut registry = Registry::new();
+		registry
+			.register(
+				FakeTool::new(
+					1,
+					name,
+					br#"{"type":"object","properties":{"input":{"type":"string"}}}"#,
+					constraint,
+					Arc::new(AtomicUsize::new(0)),
+				)
+				.named(name),
+				Presentation::Slot,
+				claims("omp/tests", Precedence::DEFAULT),
+			)
+			.unwrap();
+		assert!(matches!(
+			registry.advertise(LoweringCaps {
+				strict_schema:  false,
+				grammar:        GrammarBits::empty(),
+				maximum_tools:  None,
+				maximum_strict: None,
+			}),
+			Err(RegistryError::UnsupportedConstraint { name: error_name, feature: error_feature, .. })
+				if error_name.as_str() == name && *error_feature == *feature
+		));
+	}
+}
+
+#[test]
 fn out_of_subset_schema_never_lowers_strict() {
 	let calls = Arc::new(AtomicUsize::new(0));
 	let mut registry = Registry::new();
@@ -1361,6 +1476,65 @@ fn unsupported_grammar_degrades_to_live_lenient_schema_with_a_receipt() {
 		Adjustment::Dropped { feature, reason }
 			if feature.0 == "tool.typed_fake.ebnf" && reason.0 == "catalog.grammar-unsupported"
 	));
+}
+
+fn assert_unsupported_grammar_fallback(
+	syntax: GrammarSyntax,
+	definition: &'static str,
+	feature: &'static str,
+) {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			FakeTool::new(
+				1,
+				"grammar",
+				br#"{"type":"object","properties":{"input":{"type":"string"}}}"#,
+				Constraint::Grammar {
+					syntax,
+					definition: sf!(definition),
+					priority: 11,
+					on_unsupported: Fallback::Unspecified,
+				},
+				Arc::new(AtomicUsize::new(0)),
+			)
+			.named("grammar"),
+			Presentation::Slot,
+			claims("omp/tests", Precedence::DEFAULT),
+		)
+		.unwrap();
+	let [tool] = registry
+		.advertise(LoweringCaps {
+			strict_schema:  true,
+			grammar:        GrammarBits::empty(),
+			maximum_tools:  None,
+			maximum_strict: None,
+		})
+		.unwrap()
+		.try_into()
+		.expect("one live tool");
+	let (_, strict) = tool
+		.definition
+		.input
+		.json_schema()
+		.expect("unsupported grammar falls back to JSON Schema");
+	assert!(!strict);
+	assert_eq!(tool.disposition, Some(ConstraintDisposition::Prefer));
+	assert!(matches!(
+		tool.adjustments.as_slice(),
+		[Adjustment::Dropped { feature: actual_feature, reason }]
+			if actual_feature.0 == feature && reason.0 == "catalog.grammar-unsupported"
+	));
+}
+
+#[test]
+fn unsupported_lark_grammar_degrades_to_lenient_schema_with_a_receipt() {
+	assert_unsupported_grammar_fallback(GrammarSyntax::Lark, "start: WORD", "tool.grammar.lark");
+}
+
+#[test]
+fn unsupported_regex_grammar_degrades_to_lenient_schema_with_a_receipt() {
+	assert_unsupported_grammar_fallback(GrammarSyntax::Regex, "[a-z]+", "tool.grammar.regex");
 }
 
 #[test]
