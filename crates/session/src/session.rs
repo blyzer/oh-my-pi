@@ -27,6 +27,19 @@ use crate::{
 	rewind::{LifecycleWork, diff},
 };
 
+/// The durable principal of the session journaled at `journal`: the SHA-256 of
+/// the path as spelled. Environment approvals, blob leases, `local://` roots
+/// and the eval bridge's parent binding all key on it, so every one of them
+/// derives it here.
+#[must_use]
+pub fn journal_principal(journal: &Path) -> Str {
+	Str::new(
+		omp_core::Hash32::sum(journal.as_os_str().as_encoded_bytes())
+			.to_hex()
+			.as_str(),
+	)
+}
+
 /// Model-facing reason for a call that was authorized but never crossed
 /// [`Session::call_started`] before its owner disappeared: nothing ran.
 const NOT_STARTED_REASON: &str = "process disappeared before execution began; the call did not run";
@@ -379,6 +392,14 @@ impl Session {
 	#[must_use]
 	pub fn journal_path(&self) -> &Path {
 		self.journal.path()
+	}
+
+	/// The durable principal the kernel names this session by on every
+	/// external tool call; see [`journal_principal`]. The file stem names the
+	/// session in the live registry only.
+	#[must_use]
+	pub fn principal(&self) -> Str {
+		journal_principal(self.journal_path())
 	}
 
 	/// Returns the content-addressed store this session's blob references

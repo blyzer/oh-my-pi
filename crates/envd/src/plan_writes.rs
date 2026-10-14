@@ -285,7 +285,7 @@ async fn a_journaled_session_writes_its_plan_beside_its_journal() {
 	fs::create_dir_all(&sessions).expect("sessions directory");
 	let journal = sessions.join("01JPLANSESSION.oms");
 	fs::write(&journal, b"").expect("journal");
-	let principal = omp_core::Hash32::sum(journal.as_os_str().as_encoded_bytes()).to_hex();
+	let principal = omp_session::journal_principal(&journal);
 	let principal = principal.as_str();
 
 	let written = fixture

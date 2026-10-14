@@ -3164,7 +3164,7 @@ pub async fn compose_kernel(
 		let lease = kernel
 			.inference()
 			.environment()
-			.bind_eval_sdk_parent(id, parent)?;
+			.bind_eval_sdk_parent(session.principal(), parent)?;
 		kernel.inference_mut().retain_eval_parent(lease);
 
 		kernel = kernel.with_session_tool(Arc::new(super::goal::GoalSessionTool::new()));
