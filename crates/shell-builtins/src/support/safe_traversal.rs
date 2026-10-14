@@ -55,6 +55,19 @@ impl DirFd {
 		Ok(Self { fd })
 	}
 
+	/// Stats this directory through its open descriptor.
+	pub(crate) fn stat(&self) -> io::Result<libc::stat> {
+		let mut stat = MaybeUninit::<libc::stat>::uninit();
+		// SAFETY: the descriptor is valid and `stat` points to writable storage.
+		let result = unsafe { libc::fstat(self.fd.as_raw_fd(), stat.as_mut_ptr()) };
+		if result == 0 {
+			// SAFETY: successful `fstat` initialized the entire stat structure.
+			Ok(unsafe { stat.assume_init() })
+		} else {
+			Err(io::Error::last_os_error())
+		}
+	}
+
 	/// Stats a child relative to this descriptor.
 	pub(crate) fn stat_at(
 		&self,

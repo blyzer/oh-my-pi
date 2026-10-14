@@ -365,7 +365,6 @@ mod platform {
 		path: &Path,
 		options: &Options,
 		progress_bar: Option<&ProgressBar>,
-		root_device: Option<u64>,
 	) -> bool {
 		if host.is_cancelled() {
 			return true;
@@ -405,6 +404,15 @@ mod platform {
 				}
 				return show_removal_error(host, e, path);
 			},
+		};
+
+		let root_device = if options.one_fs {
+			match dir_fd.stat() {
+				Ok(stat) => Some(stat.st_dev as u64),
+				Err(error) => return show_removal_error(host, error, path),
+			}
+		} else {
+			None
 		};
 
 		let error = safe_remove_dir_recursive_impl(host, path, &dir_fd, options, root_device);
@@ -490,23 +498,8 @@ mod platform {
 			let is_dir = ((entry_stat.st_mode as libc::mode_t) & libc::S_IFMT) == libc::S_IFDIR;
 
 			if is_dir {
-				if !super::should_descend_into_directory(
-					options,
-					root_device,
-					Some(entry_stat.st_dev as u64),
-				) {
-					continue;
-				}
-
-				// Ask user if they want to descend into this directory
-				if options.interactive == InteractiveMode::Always
-					&& !is_dir_empty(host, &entry_path)
-					&& !prompt_descend(host, &entry_path)
-				{
-					continue;
-				}
-
-				// Recursively remove subdirectory using safe traversal
+				// Open and stat the descriptor before deciding whether this
+				// directory is on the command-line argument's filesystem.
 				let child_dir_fd = match dir_fd.open_subdir(&entry_name, SymlinkBehavior::Follow) {
 					Ok(fd) => fd,
 					Err(e) => {
@@ -526,6 +519,24 @@ mod platform {
 						continue;
 					},
 				};
+				let child_device = match child_dir_fd.stat() {
+					Ok(stat) => Some(stat.st_dev as u64),
+					Err(error) => {
+						error |= handle_error_with_force(host, error, &entry_path, options);
+						continue;
+					},
+				};
+				if !super::should_descend_into_directory(options, root_device, child_device) {
+					continue;
+				}
+
+				// Ask user if they want to descend into this directory.
+				if options.interactive == InteractiveMode::Always
+					&& !is_dir_empty(host, &entry_path)
+					&& !prompt_descend(host, &entry_path)
+				{
+					continue;
+				}
 
 				let child_error = safe_remove_dir_recursive_impl(
 					host,
@@ -759,7 +770,11 @@ fn should_descend_into_directory(
 	root_device: Option<u64>,
 	child_device: Option<u64>,
 ) -> bool {
-	!options.one_fs || root_device == child_device
+	!options.one_fs
+		|| matches!(
+			(root_device, child_device),
+			(Some(root_device), Some(child_device)) if root_device == child_device
+		)
 }
 
 static OPT_DIR: &str = "dir";
@@ -1301,12 +1316,21 @@ fn remove_dir_recursive(
 	options: &Options,
 	progress_bar: Option<&ProgressBar>,
 ) -> bool {
-	let root_device = if options.one_fs {
-		fs::symlink_metadata(host.resolve(path))
-			.ok()
-			.and_then(|metadata| filesystem_device(&metadata))
-	} else {
-		None
+	let root_device = {
+		#[cfg(all(unix, not(target_os = "redox")))]
+		{
+			None
+		}
+		#[cfg(any(not(unix), target_os = "redox"))]
+		{
+			if options.one_fs {
+				fs::symlink_metadata(host.resolve(path))
+					.ok()
+					.and_then(|metadata| filesystem_device(&metadata))
+			} else {
+				None
+			}
+		}
 	};
 	remove_dir_recursive_with_root_device(host, path, options, progress_bar, root_device)
 }
@@ -1346,7 +1370,8 @@ fn remove_dir_recursive_with_root_device(
 	// removals.
 	#[cfg(all(unix, not(target_os = "redox")))]
 	{
-		safe_remove_dir_recursive(host, path, options, progress_bar, root_device)
+		let _ = root_device;
+		safe_remove_dir_recursive(host, path, options, progress_bar)
 	}
 
 	// Fallback for non-Unix, Redox, or use fs::remove_dir_all for very long paths.
@@ -1864,6 +1889,7 @@ mod tests {
 		assert!(super::should_descend_into_directory(&options, Some(1), Some(1)));
 		assert!(!super::should_descend_into_directory(&options, Some(1), Some(2)));
 		assert!(!super::should_descend_into_directory(&options, Some(1), None));
+		assert!(!super::should_descend_into_directory(&options, None, None));
 
 		options.one_fs = false;
 		assert!(super::should_descend_into_directory(&options, Some(1), Some(2)));
