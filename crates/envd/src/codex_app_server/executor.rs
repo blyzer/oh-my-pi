@@ -90,7 +90,7 @@ impl CodexExecutor {
 
 /// What Codex `app-server` can do. Every feature is backed by a protocol
 /// message this adapter implements and the mock-peer tests exercise.
-fn capabilities() -> Capabilities {
+pub(super) fn capabilities() -> Capabilities {
 	let features = FeatureSet::EMPTY
 		.with(Feature::Resume)
 		.with(Feature::Interrupt)
