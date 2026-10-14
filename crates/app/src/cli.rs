@@ -1072,9 +1072,9 @@ pub enum AdwCommand {
 		/// Project root whose workflow declarations are read.
 		#[arg(long, value_name = "PATH", default_value = ".")]
 		project:      PathBuf,
-		/// Model selector for agent and review phases.
-		#[arg(long, short = 'm', default_value = "@smol")]
-		model:        Str,
+		/// Explicit model selector for agent and review phases.
+		#[arg(long, short = 'm')]
+		model:        Option<Str>,
 		/// Attempts one phase may consume before the run halts.
 		#[arg(long, default_value_t = omp_adw::DEFAULT_MAX_ATTEMPTS)]
 		max_attempts: u32,

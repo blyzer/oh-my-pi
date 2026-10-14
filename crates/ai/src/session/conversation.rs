@@ -53,6 +53,15 @@ pub enum ConversationError {
 	/// SQLite persistence failed without exposing statement or credential text.
 	#[error("conversation persistence failed")]
 	Persistence,
+	/// The database was written by a newer omp: its `conversation_meta` schema
+	/// version is above the one this build reads. The file is left untouched.
+	#[error("conversation database schema version {found} is newer than the supported {supported}")]
+	UnsupportedSchema {
+		/// Version recorded in the database.
+		found:     u32,
+		/// Newest version this build reads and writes.
+		supported: u32,
+	},
 }
 
 /// Why a canonical message cannot be durably committed without implicit

@@ -1,0 +1,59 @@
+# The task of adw_on_eval.py as an `omp adw` workflow. Copy to <project>/.omp/workflows/ and run
+#   omp adw run greet-files --project <project> -m <model>
+# Each gate is the same check as `gate()` in adw_on_eval.py: the first line must be
+# '# <file>: <purpose>' with a non-empty purpose.
+name = "greet-files"
+
+[[phase]]
+name = "plan"
+kind = "agent"
+prompt = """Create the file PLAN.md in the project root. It must list exactly two modules to write, one per line: greet.py and farewell.py. Reply DONE when the file exists."""
+
+[[phase]]
+name = "write_greet"
+kind = "agent"
+inputs = ["plan"]
+prompt = """Create greet.py in the project root. Its first line is a one-line header comment of the form '# greet.py: <purpose>'. It then defines greet(name) returning "Hello, " + name. Touch no other file. Reply DONE when the file exists."""
+
+[[phase]]
+name = "gate_greet"
+kind = "code"
+depends_on = ["write_greet"]
+inputs = ["write_greet"]
+on_reject = "correct"
+command = ["python3", "-c", '''
+import pathlib, re, sys
+name = sys.argv[1]
+path = pathlib.Path(name)
+if not path.is_file():
+    print(f"{name} does not exist"); sys.exit(1)
+lines = path.read_text().splitlines()
+first = lines[0] if lines else ""
+if not re.match(r"^# " + re.escape(name) + r": \S", first):
+    print(f"first line of {name} must look like '# {name}: <purpose>' but is {first!r}"); sys.exit(1)
+''', "greet.py"]
+
+[[phase]]
+name = "write_farewell"
+kind = "agent"
+depends_on = ["gate_greet"]
+inputs = ["plan"]
+prompt = """Create farewell.py in the project root. Its first line is a one-line header comment of the form '# farewell.py: <purpose>'. It then defines farewell(name) returning "Goodbye, " + name. Touch no other file. Reply DONE when the file exists."""
+
+[[phase]]
+name = "gate_farewell"
+kind = "code"
+depends_on = ["write_farewell"]
+inputs = ["write_farewell"]
+on_reject = "correct"
+command = ["python3", "-c", '''
+import pathlib, re, sys
+name = sys.argv[1]
+path = pathlib.Path(name)
+if not path.is_file():
+    print(f"{name} does not exist"); sys.exit(1)
+lines = path.read_text().splitlines()
+first = lines[0] if lines else ""
+if not re.match(r"^# " + re.escape(name) + r": \S", first):
+    print(f"first line of {name} must look like '# {name}: <purpose>' but is {first!r}"); sys.exit(1)
+''', "farewell.py"]

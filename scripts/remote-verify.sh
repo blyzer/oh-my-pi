@@ -69,6 +69,8 @@ if ! git rev-parse --verify --quiet "refs/heads/$default_branch" >/dev/null; the
         "+refs/heads/$default_branch:refs/heads/$default_branch"
 fi
 
+# The key stays out of argv (visible in `ps`): bb reads BUILDBUDDY_API_KEY, exported above, from
+# its environment (ADR 0040, Findings 4).
 args=(
     --os=linux
     --arch=amd64
@@ -81,12 +83,6 @@ args=(
     --timeout=60m
     "--env=OMP_REMOTE_JUST_ARGS=$*"
 )
-if [ -n "${BUILDBUDDY_API_KEY-}" ]; then
-    # Match BuildBuddy's documented GitHub Actions pattern. The credential is
-    # consumed by the local bb client request; the remote runner script unsets
-    # BUILDBUDDY_API_KEY before running repository commands.
-	args+=("--remote_run_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY")
-fi
 if [ "$seed" = true ]; then
     args+=(
         "--run_from_branch=$default_branch"
