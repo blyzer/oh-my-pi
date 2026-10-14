@@ -176,6 +176,9 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 			session: Some(self.session.clone()),
 			sessions_dir: self.session.parent().map(Path::to_path_buf),
 			no_tools: !tools_enabled,
+			// The scripted gateway knows only the `eval` declaration, and it
+			// refuses a request advertising any tool it cannot resolve.
+			tools: tools_enabled.then(|| vec![sf!("eval")]),
 			gateway: Some(gateway.channel.clone()),
 			prompt: PromptOverrides { custom_prompt, append_prompt, ..PromptOverrides::default() },
 			workspace_trust: WorkspaceTrustSource::Fixed(decision),
