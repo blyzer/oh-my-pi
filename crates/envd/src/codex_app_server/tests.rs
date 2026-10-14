@@ -883,6 +883,7 @@ async fn a_silent_peer_is_hung_and_the_session_is_interrupted_then_ended() {
 
 #[tokio::test(start_paused = true)]
 async fn a_cooperative_interrupt_settles_the_turn_and_keeps_the_session() {
+	let prompt_input = input();
 	let (mut session, mut peer) = open_workspace().await;
 	let cancel = CancellationToken::new();
 	let script = async {
@@ -897,7 +898,7 @@ async fn a_cooperative_interrupt_settles_the_turn_and_keeps_the_session() {
 		peer.send(&turn_completed("t1", "interrupted")).await;
 	};
 	let ((result, events), ()) =
-		tokio::join!(run_cancellable(&mut session, &input(), &cancel), script);
+		tokio::join!(run_cancellable(&mut session, &prompt_input, &cancel), script);
 	assert!(matches!(fail(result), ExecutorError::Cancelled { .. }));
 	assert!(session.is_open(), "the CLI settled inside the grace period");
 	assert!(events.iter().any(|event| matches!(
@@ -911,6 +912,7 @@ async fn a_cooperative_interrupt_settles_the_turn_and_keeps_the_session() {
 
 #[tokio::test(start_paused = true)]
 async fn an_ignored_interrupt_ends_the_session() {
+	let prompt_input = input();
 	let (mut session, mut peer) = open_workspace().await;
 	let cancel = CancellationToken::new();
 	let script = async {
@@ -921,7 +923,8 @@ async fn an_ignored_interrupt_ends_the_session() {
 		peer.expect("turn/interrupt").await;
 		// ... and never settle.
 	};
-	let ((result, _), ()) = tokio::join!(run_cancellable(&mut session, &input(), &cancel), script);
+	let ((result, _), ()) =
+		tokio::join!(run_cancellable(&mut session, &prompt_input, &cancel), script);
 	assert!(matches!(fail(result), ExecutorError::Cancelled { .. }));
 	assert!(!session.is_open(), "an unsettled interrupt means the tree is killed");
 }
