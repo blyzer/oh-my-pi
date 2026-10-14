@@ -436,13 +436,7 @@ async fn answer_query_inner(
 		});
 	}
 	let (progress_tx, progress_rx) = flume::unbounded();
-	let progress = RelayProgressSink {
-		client: client.clone(),
-		request_id,
-		query_id: query.query_id,
-		next: AtomicU64::new(0),
-		tx: progress_tx,
-	};
+	let progress = RelayProgressSink { next: AtomicU64::new(0), tx: progress_tx };
 	let method = query.method.as_str();
 	let call = async {
 		match method {
@@ -469,11 +463,8 @@ async fn answer_query_inner(
 }
 
 struct RelayProgressSink {
-	client:     EnvClient,
-	request_id: u64,
-	query_id:   u64,
-	next:       AtomicU64,
-	tx:         flume::Sender<(u64, Value)>,
+	next: AtomicU64,
+	tx:   flume::Sender<(u64, Value)>,
 }
 impl BridgeProgressSink for RelayProgressSink {
 	fn progress(&self, event: Value) -> Result<(), BridgeHostError> {
