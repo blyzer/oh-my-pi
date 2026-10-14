@@ -1,3 +1,9 @@
+<<<<<<< HEAD
+=======
+	fn source() -> (Source, InputFile) {
+		let digest = blob_digest(b"file");
+		let file = InputFile { path: "file.txt".to_owned(), digest, executable: false };
+>>>>>>> 105bee33e7 (test(exec-reapi): fix fake server trait bounds and Digest serialization)
 		(
 			Source {
 				files: Arc::new(vec![file.clone()]),
@@ -5,6 +11,7 @@
 			},
 			file,
 		)
+<<<<<<< HEAD
 			file,
 		)
 			inputs:      Some(InputSet {
@@ -23,6 +30,9 @@ impl BlobSource for Source {
 	}
 }
 use crate::ExecuteConfig;
+=======
+	}
+>>>>>>> 105bee33e7 (test(exec-reapi): fix fake server trait bounds and Digest serialization)
 //! REAPI action construction, CAS upload, execution streaming and cancellation.
 impl wire::execution_server::Execution for Fake {
 	async fn execute(
