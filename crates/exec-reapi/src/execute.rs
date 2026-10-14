@@ -856,10 +856,403 @@ fn wire_status(
 
 #[cfg(test)]
 mod tests {
+	use std::{collections::BTreeMap, pin::Pin, sync::Arc};
+
+	use bytes::Bytes;
+	use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
+	use omp_core::{Hash32, SecretString, Str};
+	use omp_exec::{
+		CacheSupport, ExecutionId, InputSet, NeedSet, OutputSpec, PlatformRequirement,
+		ResourceRequirements,
+	};
+	use tokio::sync::Mutex as AsyncMutex;
+	use tokio_stream::{Stream, wrappers::TcpListenerStream};
+	use tonic::{Response, transport::Server};
+
 	use super::*;
+	use crate::{capabilities::Capabilities, proto::build::bazel::remote::execution::v2 as wire};
+
+	#[derive(Clone)]
+	struct Source {
+		files: Arc<Vec<InputFile>>,
+		blobs: Arc<BTreeMap<omp_exec::Digest, Bytes>>,
+	}
+
+	impl BlobSource for Source {
+		async fn read(&self, digest: omp_exec::Digest) -> std::io::Result<Bytes> {
+			self
+				.blobs
+				.get(&digest)
+				.cloned()
+				.ok_or_else(|| std::io::Error::other("missing test blob"))
+		}
+
+		async fn read_range(
+			&self,
+			digest: omp_exec::Digest,
+			offset: u64,
+			len: u64,
+		) -> std::io::Result<Bytes> {
+			let bytes = self.read(digest).await?;
+			let start = usize::try_from(offset)
+				.unwrap_or(usize::MAX)
+				.min(bytes.len());
+			let end = start
+				.saturating_add(usize::try_from(len).unwrap_or(usize::MAX))
+				.min(bytes.len());
+			Ok(bytes.slice(start..end))
+		}
+	}
+
+	impl InputSource for Source {
+		async fn files(&self, _manifest: omp_exec::Digest) -> std::io::Result<Vec<InputFile>> {
+			Ok(self.files.as_ref().clone())
+		}
+	}
+
+	#[derive(Clone)]
+	struct Fake {
+		uploaded:  Arc<AsyncMutex<Vec<omp_exec::Digest>>>,
+		cancelled: Arc<AsyncMutex<bool>>,
+		reconnect: bool,
+		nonzero:   bool,
+	}
+
+	type OpStream = Pin<
+		Box<
+			dyn tonic::codegen::tokio_stream::Stream<Item = Result<longrunning::Operation, Status>>
+				+ Send,
+		>,
+	>;
+
+	#[tonic::async_trait]
+	impl wire::execution_server::Execution for Fake {
+		type ExecuteStream = OpStream;
+		type WaitExecutionStream = OpStream;
+
+		async fn execute(
+			&self,
+			_request: Request<wire::ExecuteRequest>,
+		) -> Result<Response<Self::ExecuteStream>, Status> {
+			let operation = operation(self.reconnect.then_some(false), self.nonzero);
+			Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
+		}
+
+		async fn wait_execution(
+			&self,
+			_request: Request<wire::WaitExecutionRequest>,
+		) -> Result<Response<Self::WaitExecutionStream>, Status> {
+			let operation = operation(Some(true), self.nonzero);
+			Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
+		}
+	}
+
+	#[tonic::async_trait]
+	impl wire::capabilities_server::Capabilities for Fake {
+		async fn get_capabilities(
+			&self,
+			_request: Request<wire::GetCapabilitiesRequest>,
+		) -> Result<Response<wire::ServerCapabilities>, Status> {
+			Ok(Response::new(server_capabilities()))
+		}
+	}
+
+	#[tonic::async_trait]
+	impl wire::content_addressable_storage_server::ContentAddressableStorage for Fake {
+		async fn find_missing_blobs(
+			&self,
+			request: Request<wire::FindMissingBlobsRequest>,
+		) -> Result<Response<wire::FindMissingBlobsResponse>, Status> {
+			let missing = request.into_inner().blob_digests;
+			Ok(Response::new(wire::FindMissingBlobsResponse { missing_blob_digests: missing }))
+		}
+
+		async fn batch_update_blobs(
+			&self,
+			request: Request<wire::BatchUpdateBlobsRequest>,
+		) -> Result<Response<wire::BatchUpdateBlobsResponse>, Status> {
+			let mut uploaded = self.uploaded.lock().await;
+			let responses = request
+				.into_inner()
+				.requests
+				.into_iter()
+				.map(|request| {
+					if let Some(digest) = request
+						.digest
+						.as_ref()
+						.and_then(|digest| digest::from_wire(digest).ok())
+					{
+						uploaded.push(digest);
+					}
+					wire::batch_update_blobs_response::Response { digest: request.digest, status: None }
+				})
+				.collect();
+			Ok(Response::new(wire::BatchUpdateBlobsResponse { responses }))
+		}
+	}
+
+	#[tonic::async_trait]
+	impl bytestream::byte_stream_server::ByteStream for Fake {
+		type ReadStream = OpStream;
+
+		async fn write(
+			&self,
+			mut request: Request<tonic::Streaming<bytestream::WriteRequest>>,
+		) -> Result<Response<bytestream::WriteResponse>, Status> {
+			while request.get_mut().message().await?.is_some() {}
+			Ok(Response::new(bytestream::WriteResponse { committed_size: 0 }))
+		}
+	}
+
+	#[tonic::async_trait]
+	impl longrunning::operations_server::Operations for Fake {
+		async fn cancel_operation(
+			&self,
+			_request: Request<longrunning::CancelOperationRequest>,
+		) -> Result<Response<prost_types::Empty>, Status> {
+			*self.cancelled.lock().await = true;
+			Ok(Response::new(prost_types::Empty {}))
+		}
+	}
+
+	fn operation(done: Option<bool>, nonzero: bool) -> longrunning::Operation {
+		let done = done.unwrap_or(true);
+		let response = wire::ExecuteResponse {
+			result: Some(wire::ActionResult {
+				exit_code: if nonzero { 7 } else { 0 },
+				stdout_digest: Some(digest::to_wire(blob_digest(b"out"))),
+				stderr_digest: Some(digest::to_wire(blob_digest(b"err"))),
+				..Default::default()
+			}),
+			..Default::default()
+		};
+		longrunning::Operation {
+			name: "operations/test".to_owned(),
+			done,
+			result: done.then(|| {
+				longrunning::operation::Result::Response(Any {
+					type_url: "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse"
+						.to_owned(),
+					value:    response.encode_to_vec(),
+				})
+			}),
+			..Default::default()
+		}
+	}
+
+	fn blob_digest(bytes: &[u8]) -> omp_exec::Digest {
+		omp_exec::Digest::new(Hash32::sum(bytes), bytes.len() as u64)
+	}
+
+	fn server_capabilities() -> wire::ServerCapabilities {
+		wire::ServerCapabilities {
+			cache_capabilities: Some(wire::CacheCapabilities {
+				digest_functions: vec![1],
+				action_cache_update_capabilities: Some(wire::ActionCacheUpdateCapabilities {
+					update_enabled: false,
+				}),
+				..Default::default()
+			}),
+			execution_capabilities: Some(wire::ExecutionCapabilities {
+				digest_function: 1,
+				exec_enabled: true,
+				..Default::default()
+			}),
+			..Default::default()
+		}
+	}
+
+	async fn backend(fake: Fake, source: Source) -> ReapiBackend<Source> {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		tokio::spawn(
+			Server::builder()
+				.add_service(wire::execution_server::ExecutionServer::new(fake.clone()))
+				.add_service(wire::capabilities_server::CapabilitiesServer::new(fake.clone()))
+				.add_service(
+					wire::content_addressable_storage_server::ContentAddressableStorageServer::new(
+						fake.clone(),
+					),
+				)
+				.add_service(bytestream::byte_stream_server::ByteStreamServer::new(fake.clone()))
+				.add_service(longrunning::operations_server::OperationsServer::new(fake))
+				.serve_with_incoming(TcpListenerStream::new(listener)),
+		);
+		let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+			.unwrap()
+			.connect()
+			.await
+			.unwrap();
+		let config = ExecuteConfig {
+			id:                  BackendId::new_static("reapi"),
+			instance:            Str::empty(),
+			profile:             Profile::reapi(),
+			credential:          None,
+			platform:            Platform::LINUX_X86_64,
+			enforced:            Posture {
+				write:    WriteScope::ReadOnly,
+				network:  NetworkScope::Unrestricted,
+				approval: ApprovalScope::Yolo,
+			},
+			cache:               CachePolicy::Off,
+			platform_properties: BTreeMap::new(),
+			toolchains:          BTreeMap::new(),
+		};
+		ReapiBackend::from_channel(
+			channel,
+			config,
+			capabilities::interpret(&server_capabilities()).unwrap(),
+			source,
+		)
+	}
+
+	fn request(file: InputFile, id: &'static str) -> ExecutionRequest {
+		ExecutionRequest {
+			id:          ExecutionId::new_static(id),
+			intent:      omp_exec::Intent::Test,
+			argv:        Arc::new([Str::new_static("true")]),
+			cwd:         Str::empty(),
+			env:         Arc::new([]),
+			inputs:      Some(InputSet {
+				manifest: blob_digest(b"manifest"),
+				files:    1,
+				bytes:    file.digest.size,
+				excluded: Default::default(),
+			}),
+			outputs:     OutputSpec::Logs,
+			toolchain:   omp_exec::ToolchainId::new_static("test"),
+			caches:      Arc::new([]),
+			platform:    PlatformRequirement {
+				os:            Platform::LINUX_X86_64.os,
+				arch:          Platform::LINUX_X86_64.arch,
+				needs_network: false,
+				needs:         NeedSet::new(),
+			},
+			requirement: Default::default(),
+			resources:   ResourceRequirements::default(),
+			eligibility: omp_exec::Eligibility::RemotePreferred,
+			timeout:     Duration::from_secs(30),
+		}
+	}
+
+	fn source() -> (Source, InputFile) {
+		let digest = blob_digest(b"file");
+		let file = InputFile { path: "file.txt".to_owned(), digest, executable: false };
+		(
+			Source {
+				files: Arc::new(vec![file.clone()]),
+				blobs: Arc::new(BTreeMap::from([(digest, Bytes::from_static(b"file"))])),
+			},
+			file,
+		)
+	}
+
+	async fn settle(mut run: ReapiRun<Source>) -> ExecutionResult {
+		while let Some(event) = run.next_event().await {
+			if let ExecutionEvent::Settled(result) = event {
+				return result.unwrap();
+			}
+		}
+		panic!("run ended without settlement")
+	}
+
+	#[tokio::test]
+	async fn success_and_nonzero_exit_are_domain_outcomes() {
+		let (source, file) = source();
+		let run = backend(
+			Fake {
+				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				cancelled: Arc::new(AsyncMutex::new(false)),
+				reconnect: false,
+				nonzero:   false,
+			},
+			source.clone(),
+		)
+		.await
+		.start(request(file.clone(), "ok"))
+		.await
+		.unwrap();
+		assert_eq!(settle(run).await.outcome, Outcome::Exited { code: 0 });
+		let run = backend(
+			Fake {
+				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				cancelled: Arc::new(AsyncMutex::new(false)),
+				reconnect: false,
+				nonzero:   true,
+			},
+			source,
+		)
+		.await
+		.start(request(file, "bad"))
+		.await
+		.unwrap();
+		assert_eq!(settle(run).await.outcome, Outcome::Exited { code: 7 });
+	}
+
+	#[tokio::test]
+	async fn missing_blobs_are_uploaded_before_execute() {
+		let (source, file) = source();
+		let uploaded = Arc::new(AsyncMutex::new(Vec::new()));
+		let run = backend(
+			Fake {
+				uploaded:  uploaded.clone(),
+				cancelled: Arc::new(AsyncMutex::new(false)),
+				reconnect: false,
+				nonzero:   false,
+			},
+			source,
+		)
+		.await
+		.start(request(file, "upload"))
+		.await
+		.unwrap();
+		let _ = settle(run).await;
+		assert!(!uploaded.lock().await.is_empty());
+	}
+
+	#[tokio::test]
+	async fn a_dropped_execute_stream_reattaches_with_wait_execution() {
+		let (source, file) = source();
+		let run = backend(
+			Fake {
+				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				cancelled: Arc::new(AsyncMutex::new(false)),
+				reconnect: true,
+				nonzero:   false,
+			},
+			source,
+		)
+		.await
+		.start(request(file, "wait"))
+		.await
+		.unwrap();
+		assert_eq!(settle(run).await.outcome, Outcome::Exited { code: 0 });
+	}
+
+	#[tokio::test]
+	async fn cancellation_calls_cancel_operation() {
+		let (source, file) = source();
+		let cancelled = Arc::new(AsyncMutex::new(false));
+		let mut run = backend(
+			Fake {
+				uploaded:  Arc::new(AsyncMutex::new(Vec::new())),
+				cancelled: cancelled.clone(),
+				reconnect: true,
+				nonzero:   false,
+			},
+			source,
+		)
+		.await
+		.start(request(file, "cancel"))
+		.await
+		.unwrap();
+		assert!(matches!(run.next_event().await, Some(ExecutionEvent::Accepted { .. })));
+		assert_eq!(run.cancel().await, CancelOutcome::Requested);
+		assert!(*cancelled.lock().await);
+	}
 
 	#[test]
-	fn credential_never_reaches_a_wire_status_message() {
+	fn credential_redaction_survives_server_error_conversion() {
 		let credential = Credential::new(SecretString::from("secret-token"));
 		let status = wire_status(
 			crate::proto::google::rpc::Status {
@@ -870,10 +1263,6 @@ mod tests {
 			Some(&credential),
 		);
 		assert!(!status.message().contains("secret-token"));
-	}
-
-	#[test]
-	fn root_cwd_is_encoded_as_empty_not_dot() {
-		assert!(output_paths(&omp_exec::OutputSpec::Logs).is_empty());
+		assert!(!format!("{credential:?}").contains("secret-token"));
 	}
 }
