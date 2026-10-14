@@ -4638,6 +4638,9 @@ impl EnvServer {
 		}
 
 		match body {
+			client_frame::Body::EvalParentProgress(_) | client_frame::Body::EvalParentResult(_) => {
+				unreachable!("eval parent relay frames are handled before ordinary dispatch");
+			},
 			client_frame::Body::Hello(_) => {
 				send_error(
 					responses,
