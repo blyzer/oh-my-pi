@@ -31,9 +31,8 @@ pub enum PhaseSpec {
 		text:  Str,
 		/// Optional workflow-declared model selector for this phase.
 		///
-		/// A phase selector wins over an explicit `omp adw run --model`, which
-		/// wins over inherited `ai_model`; with none of those, the run falls
-		/// back to its default selector.
+		/// Resolution order: phase `model`, explicit `omp adw run --model`,
+		/// inherited `ai_model`, then the `@smol` fallback selector.
 		model: Option<Str>,
 	},
 	/// A process whose exit status decides the outcome.
