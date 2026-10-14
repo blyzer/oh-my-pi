@@ -244,7 +244,9 @@ async fn a_composed_kernel_runs_an_eval_cell_for_its_own_session() {
 		)
 		.await;
 
+	let fallback = kernel.inference().environment().fallback_notice.clone();
 	let journal = fs::read_to_string(&journal).expect("read composed session journal");
+	assert!(fallback.is_none(), "composition fell back to an embedded environment: {fallback:?}");
 	assert!(
 		!journal.contains("not bound for this owner"),
 		"the eval bridge refused the kernel's own session (turn: {turn:?}): {journal}"
