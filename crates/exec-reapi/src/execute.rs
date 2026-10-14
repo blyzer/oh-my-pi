@@ -726,17 +726,20 @@ where
 	}
 
 	async fn settle(&self, operation: longrunning::Operation) -> ExecutionEvent {
-		if let Some(error) = operation.error {
-			return ExecutionEvent::Settled(Err(status::classify(
-				wire_status(error, self.backend.inner.credential.as_ref()),
-				Phase::Execute,
-				&self.backend.inner.id,
-				Duration::from_secs(30),
-				None,
-			)));
-		}
-		let Some(response) = operation.response else {
+		let Some(result_wire) = operation.result else {
 			return ExecutionEvent::Settled(Err(config_error(DecodeError::MissingResult)));
+		};
+		let response = match result_wire {
+			longrunning::operation::Result::Error(error) => {
+				return ExecutionEvent::Settled(Err(status::classify(
+					wire_status(error, self.backend.inner.credential.as_ref()),
+					Phase::Execute,
+					&self.backend.inner.id,
+					Duration::from_secs(30),
+					None,
+				)));
+			},
+			longrunning::operation::Result::Response(response) => response,
 		};
 		let result = match wire::ExecuteResponse::decode(response.value.as_ref()) {
 			Ok(result) => result,
