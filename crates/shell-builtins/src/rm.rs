@@ -720,6 +720,14 @@ impl Default for Options {
 		}
 	}
 }
+#[cfg(unix)]
+fn should_descend_into_directory(
+	_options: &Options,
+	_root_device: u64,
+	_child_device: u64,
+) -> bool {
+	true
+}
 
 static OPT_DIR: &str = "dir";
 static OPT_INTERACTIVE: &str = "interactive";
@@ -1758,6 +1766,18 @@ mod tests {
 
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(!cwd.path().join("tree").exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn one_file_system_only_descends_on_the_root_device() {
+		let mut options = super::Options { one_fs: true, ..Default::default() };
+
+		assert!(super::should_descend_into_directory(&options, 1, 1));
+		assert!(!super::should_descend_into_directory(&options, 1, 2));
+
+		options.one_fs = false;
+		assert!(super::should_descend_into_directory(&options, 1, 2));
 	}
 
 	#[test]
