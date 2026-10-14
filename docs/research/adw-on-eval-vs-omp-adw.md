@@ -3,7 +3,7 @@
 Status: research note with one real `omp adw` run and **no successful eval-script run**.
 Date: 2026-10-13
 Base: `origin/omp2` at `734625e5b7`. Binary used: `target/debug/omp` (`omp/2.0.0`, built 2026-10-12 10:50, not rebuilt).
-Artifacts: `examples/adw-on-eval/{adw_on_eval.py,greet-files.toml,README.md}`.
+Artifacts: `docs/research/adw-on-eval/{adw_on_eval.py,greet-files.toml,README.md}`. They live under `docs/research/`, not `examples/`: `examples/README.md` admits only examples that run against the frozen surface, and `scripts/check-python-examples.py` imports every `examples/*/*.py` outside an eval cell, where the prelude names (`phase`, `workpool`) do not exist.
 
 Every claim cites `file:line` in this worktree, or says what was observed. **UNVERIFIED** marks anything I did not run.
 

@@ -27,7 +27,7 @@ design sketch checked against the source, not as a working example.
 In a session with the eval tool, run the file as a cell:
 
 ```python
-%run examples/adw-on-eval/adw_on_eval.py
+%run docs/research/adw-on-eval/adw_on_eval.py
 ```
 
 It needs:

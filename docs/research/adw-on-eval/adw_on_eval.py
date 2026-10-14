@@ -1,6 +1,6 @@
 """plan -> workpool fan-out -> gates -> retry, as one omp2 eval cell.
 
-Run it inside the omp2 `eval` tool (Python kernel): `%run examples/adw-on-eval/adw_on_eval.py`.
+Run it inside the omp2 `eval` tool (Python kernel): `%run docs/research/adw-on-eval/adw_on_eval.py`.
 It uses only prelude helpers that a production session binds: `phase`, `log`, `workpool`, `read`, `output`.
 `agent()`, `completion()` and `judge` are deliberately NOT used: the production parent host binds
 only `__workpool__` (`WorkpoolSessionHost` reports the others unavailable), so even the plan step
