@@ -76,7 +76,8 @@ pub fn principal_journal(
 		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
 		Err(error) => return Err(error),
 	};
-	let principal_of = omp_session::journal_principal;
+	let principal_of =
+		|path: &Path| omp_core::Hash32::sum(path.as_os_str().as_encoded_bytes()).to_hex();
 	for entry in entries {
 		let path = entry?.path();
 		if path.extension().and_then(ffi::OsStr::to_str) != Some(omp_journal::FILE_EXTENSION) {

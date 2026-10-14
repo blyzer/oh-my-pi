@@ -1365,7 +1365,11 @@ async fn worker_routed_tools_use_the_injected_external_executor() {
 	assert!(!report.is_error);
 	assert_eq!(result_text(&session, "worker-1"), ["external result"]);
 	assert_eq!(observed.lock().as_slice(), [ExternalObserved {
-		session_id: omp_session::journal_principal(&active.join("worker.oms")),
+		session_id: {
+			let path = active.join("worker.oms");
+			let digest = omp_core::Hash32::sum(path.as_os_str().as_encoded_bytes()).to_hex();
+			Str::new(digest.as_str())
+		},
 		blobs:      session.blobs().root().to_path_buf(),
 		call_id:    Str::new_static("worker-1"),
 		args:       Str::new_static("{}"),

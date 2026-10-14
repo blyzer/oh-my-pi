@@ -2203,7 +2203,11 @@ impl Dispatcher {
 					let executor = Arc::clone(executor);
 					let request = ExternalDispatchRequest {
 						identity: call.identity.clone(),
-						session_id: session.principal(),
+						session_id: {
+							let digest =
+								Hash32::sum(session.journal_path().as_os_str().as_encoded_bytes()).to_hex();
+							Str::new(digest.as_str())
+						},
 						blobs: session.blobs().clone(),
 						call_id: call.call_id.clone(),
 						args,
