@@ -521,8 +521,8 @@ mod platform {
 				};
 				let child_device = match child_dir_fd.stat() {
 					Ok(stat) => Some(stat.st_dev as u64),
-					Err(error) => {
-						error |= handle_error_with_force(host, error, &entry_path, options);
+					Err(stat_error) => {
+						error |= handle_error_with_force(host, stat_error, &entry_path, options);
 						continue;
 					},
 				};
