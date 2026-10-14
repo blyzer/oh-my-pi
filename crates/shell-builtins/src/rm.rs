@@ -527,6 +527,10 @@ mod platform {
 					},
 				};
 				if !super::should_descend_into_directory(options, root_device, child_device) {
+					// --one-file-system takes precedence over -i: if the directory
+					// is on a different filesystem, we skip it without prompting.
+					// This matches GNU rm behavior where filesystem boundaries are
+					// enforced regardless of interactive confirmation.
 					continue;
 				}
 
@@ -1129,12 +1133,17 @@ fn count_files(host: &mut Host, paths: &[&OsStr], options: &Options) -> u64 {
 		if let Ok(metadata) = fs::symlink_metadata(host.resolve(path)) {
 			if metadata.is_dir() && !is_symlink_dir(&metadata) {
 				if options.recursive {
-					let root_device = if options.one_fs {
-						filesystem_device(&metadata)
+					// Progress counting uses fs::read_dir which has a symlink race
+					// between entry.file_type() and entry.metadata(). The actual
+					// removal uses DirFd which is race-free. When --one-file-system
+					// is set, skip progress counting to avoid counting files on
+					// a different filesystem that the actual removal would skip.
+					if options.one_fs || !options.progress {
+						total += 1; // Conservative estimate: count the directory itself
 					} else {
-						None
-					};
-					total += count_files_in_directory(host, path, options, root_device);
+						let root_device = filesystem_device(&metadata);
+						total += count_files_in_directory(host, path, options, root_device);
+					}
 				}
 			} else {
 				total += 1;
