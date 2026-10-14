@@ -856,7 +856,7 @@ fn wire_status(
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::{BTreeMap, HashMap}, pin::Pin, sync::Arc};
+	use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
 	use bytes::Bytes;
 	use omp_adw::{ApprovalScope, NetworkScope, Posture, WriteScope};
@@ -866,7 +866,7 @@ mod tests {
 		PlatformRequirement, ResourceRequirements,
 	};
 	use tokio::sync::Mutex as AsyncMutex;
-	use tokio_stream::{Stream, wrappers::TcpListenerStream};
+	use tokio_stream::wrappers::TcpListenerStream;
 	use tonic::{Response, transport::Server};
 
 	use super::*;
@@ -923,18 +923,14 @@ mod tests {
 	}
 
 	/// The wire stream the fake `Execution` service yields.
-	type ExecStream =
-		Pin<Box<dyn Stream<Item = Result<longrunning::Operation, Status>> + Send + 'static>>;
+	type ExecStream = tonic::codegen::BoxStream<longrunning::Operation>;
 
 	#[tonic::async_trait]
 	impl wire::execution_server::Execution for Fake {
-		type ExecuteStream = ExecStream;
-		type WaitExecutionStream = ExecStream;
-
 		async fn execute(
 			&self,
 			_request: Request<wire::ExecuteRequest>,
-		) -> Result<Response<Self::ExecuteStream>, Status> {
+		) -> Result<Response<ExecStream>, Status> {
 			if let Some(code) = self.fault {
 				return Err(Status::new(code, "injected REAPI fault"));
 			}
@@ -945,7 +941,7 @@ mod tests {
 		async fn wait_execution(
 			&self,
 			_request: Request<wire::WaitExecutionRequest>,
-		) -> Result<Response<Self::WaitExecutionStream>, Status> {
+		) -> Result<Response<ExecStream>, Status> {
 			let operation = operation(Some(true), self.nonzero);
 			Ok(Response::new(Box::pin(tokio_stream::iter([Ok(operation)]))))
 		}
