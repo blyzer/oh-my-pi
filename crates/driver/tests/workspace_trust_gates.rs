@@ -318,7 +318,6 @@ impl Gateway {
 			arguments: OpaqueJson::new(serde_json::json!({"language":"py","code":"40 + 2"})),
 		};
 		self.fake.push(FakeScript::chat(vec![
-			Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::ToolCall }),
 			Ok(ChatEvent::ToolCallStarted {
 				index: 0,
 				id:    call.id.clone(),
