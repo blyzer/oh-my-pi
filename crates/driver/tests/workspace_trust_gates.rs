@@ -426,6 +426,7 @@ fn agents_loaded(session: &Session) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn composed_kernel_binds_eval_to_the_external_dispatch_session() {
 	let workspace = Workspace::new();
+	workspace.grant();
 	let gateway = Gateway::start(workspace.home.parent().expect("scratch")).await;
 	let _daemon = workspace.daemon(WorkspaceTrust::Trusted).await;
 	let (mut kernel, mut session) = workspace.compose_with_tools(&gateway).await;
