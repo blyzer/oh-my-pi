@@ -868,28 +868,51 @@ mod tests {
 			);
 		}
 
+		fn always_rejecting_correction_gate(run: &mut Run) -> Outcome {
+			let (build, _) = dispatch(run);
+			assert_eq!(build.as_str(), "build");
+			run.accept(&build).expect("build must be running");
+
+			let (review, _) = dispatch(run);
+			assert_eq!(review.as_str(), "review");
+			run.reject(&review, "again")
+				.expect("review must be running")
+		}
+
 		#[test]
-		fn rewind_does_not_consume_the_producer_attempt_budget() {
-			let mut run = run_of(vec![
-				agent("build").depending_on([]),
-				Phase::new(PhaseName::new("review"), PhaseKind::Review)
-					.depending_on([])
-					.consuming([PhaseName::new("build")])
-					.on_reject(OnReject::Correct),
-			])
-			.with_max_attempts(1);
+		fn correct_route_stops_at_the_producer_attempt_ceiling() {
+			for max_attempts in [1, 2, 3, 7] {
+				let mut run = run_of(vec![
+					agent("build").depending_on([]),
+					Phase::new(PhaseName::new("review"), PhaseKind::Review)
+						.depending_on([])
+						.consuming([PhaseName::new("build")])
+						.on_reject(OnReject::Correct),
+				])
+				.with_max_attempts(max_attempts);
 
-			dispatch(&mut run);
-			run.accept(PhaseName::from_ref("build"))
-				.expect("running phase");
-			dispatch(&mut run);
-			run.reject(PhaseName::from_ref("review"), "again")
-				.expect("running phase");
+				for attempt in 1..=max_attempts {
+					let outcome = always_rejecting_correction_gate(&mut run);
+					if attempt < max_attempts {
+						assert!(
+							matches!(outcome, Outcome::Rewound { ref phase, .. } if phase.as_str() == "build"),
+							"attempt {attempt} must rewind the producer"
+						);
+					} else {
+						assert_eq!(
+							outcome,
+							Outcome::Halted { phase: PhaseName::new("build") },
+							"the producer's final permitted attempt must exhaust the run"
+						);
+					}
+				}
 
-			assert!(
-				matches!(run.next_step(), Step::Run { ref phase, .. } if phase.name.as_str() == "build"),
-				"a reviewer-driven rewind must not be charged to the producer's own budget"
-			);
+				assert_eq!(
+					run.states[0].attempts, max_attempts,
+					"a correction gate must not dispatch the producer beyond its ceiling"
+				);
+				assert_eq!(run.next_step(), Step::Done { accepted: false });
+			}
 		}
 
 		#[test]
