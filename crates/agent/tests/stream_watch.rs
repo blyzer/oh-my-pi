@@ -16,9 +16,10 @@ use omp_agent::{
 };
 use omp_ai::{ChatEvent, ChatRequest, ContentPart, OpaqueJson, Role, ToolCall, ToolCallId};
 use omp_core::{Str, sf};
-use omp_dom::{PropKey, Value};
+use omp_dom::{KnownTag, PropId, PropKey, Tag, Value};
 use omp_journal::blob::BlobStore;
 use omp_proto::toolhost::v1::HookEventId;
+use omp_tool::Part;
 
 mod support;
 
@@ -219,6 +220,47 @@ fn two_tool_calls() -> Vec<ChatEvent> {
 		ChatEvent::ToolArgumentsDelta { index: 1, bytes: Bytes::from_static(b"{}") },
 		ChatEvent::ToolCallReady { index: 1, call: edit },
 	]
+}
+
+/// An aborted call's model-visible label lives on its terminal error `<diag>`.
+/// A `Discard` redirect excludes the call from the resample projection.
+fn settled_result_text(dom: &omp_dom::Dom, call_id: &str) -> String {
+	let call = dom
+		.select(&format!("body turn [id={call_id}]"))
+		.expect("selector")
+		.into_iter()
+		.next()
+		.expect("the settled call element journals");
+	let diag = dom
+		.children(call)
+		.iter()
+		.filter_map(|&handle| dom.get(handle))
+		.find(|node| {
+			node.tag == Tag::Known(KnownTag::Diag)
+				&& node
+					.prop(&PropKey::from(PropId::Severity))
+					.and_then(Value::as_str)
+					== Some("error")
+		})
+		.expect("the aborted call's error diagnostic journals");
+	if let Some(Value::Json(data)) = diag.prop(&PropKey::from(PropId::Data)) {
+		if let Ok(parts) = serde_json::from_str::<Vec<Part>>(data.get()) {
+			return parts
+				.iter()
+				.map(|part| match part {
+					Part::Text { text } => text.as_str().to_owned(),
+					Part::Json { json } => String::from_utf8_lossy(&json[..]).into_owned(),
+					Part::Blob { .. } => String::new(),
+				})
+				.collect::<Vec<_>>()
+				.join("\n");
+		}
+	}
+	diag
+		.prop(&PropKey::from(PropId::Text))
+		.and_then(Value::as_str)
+		.unwrap_or_default()
+		.to_owned()
 }
 
 #[tokio::test]
@@ -456,7 +498,7 @@ async fn keep_projects_the_partial_assistant_and_the_redirect_placeholders() {
 	);
 	let interrupted = session
 		.dom()
-		.select("body turn assistant[interrupt]")
+		.select(&format!("body turn assistant[interrupt={FAMILY}]"))
 		.expect("selector")
 		.next()
 		.expect("interrupted assistant");
@@ -498,11 +540,11 @@ async fn tool_culprit_and_siblings_are_settled_then_discarded_before_resampling(
 	assert_eq!(outcome.stop, TurnStop::Completed);
 	assert_eq!(requests.lock().len(), 2, "a redirect resamples before tool execution");
 	assert!(
-		support::result_text(&session, "culprit-edit")[0].contains("stream rule no-unwrap"),
+		settled_result_text(session.dom(), "culprit-edit").contains("stream rule no-unwrap"),
 		"the culprit receives its matching label"
 	);
 	assert!(
-		support::result_text(&session, "innocent-read")[0]
+		settled_result_text(session.dom(), "innocent-read")
 			.contains("interrupted by a stream rule on another tool call"),
 		"siblings receive the neutral label"
 	);
@@ -550,7 +592,7 @@ async fn interrupt_accepted_with_a_redirect_prevents_the_resample() {
 	assert_eq!(
 		session
 			.dom()
-			.select("body turn assistant[interrupt]")
+			.select(&format!("body turn assistant[interrupt={FAMILY}]"))
 			.expect("selector")
 			.count(),
 		1,
@@ -593,7 +635,7 @@ async fn redirect_consumes_the_request_budget_before_its_resample() {
 	assert_eq!(
 		session
 			.dom()
-			.select("body turn notice[name=request-budget]")
+			.select("body turn notice[custom:name=request-budget]")
 			.expect("selector")
 			.count(),
 		1
