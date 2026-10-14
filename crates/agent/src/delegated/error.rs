@@ -67,6 +67,16 @@ pub enum ProtocolViolation {
 	/// The CLI claims a resumed session although none was requested.
 	#[error("session reported as resumed although no resume was requested")]
 	UnrequestedResume,
+	/// The CLI rejected a request the host had every reason to expect to
+	/// succeed.
+	#[error("request rejected by the CLI (code {code})")]
+	RequestRejected {
+		/// The CLI's error code.
+		code: i64,
+	},
+	/// An answer named a prompt that is not pending.
+	#[error("answer names a prompt that is not pending")]
+	UnknownPrompt,
 }
 
 /// Why a process could not be torn down.
@@ -159,6 +169,12 @@ pub enum ExecutorError {
 	/// The working directory is not an absolute path.
 	#[error("working directory {path:?} is not absolute")]
 	WorkdirNotAbsolute {
+		/// The rejected path.
+		path: PathBuf,
+	},
+	/// The working directory cannot be handed to the CLI as text.
+	#[error("working directory {path:?} is not valid UTF-8")]
+	WorkdirNotUtf8 {
 		/// The rejected path.
 		path: PathBuf,
 	},
