@@ -40,7 +40,8 @@ enum Script {
 }
 
 struct ScriptedInference {
-	scripts: Mutex<VecDeque<Script>>,
+	scripts:       Mutex<VecDeque<Script>>,
+	first_started: Option<flume::Sender<()>>,
 }
 
 impl Inference for ScriptedInference {
@@ -48,12 +49,15 @@ impl Inference for ScriptedInference {
 		&mut self,
 		_request: ChatRequest,
 	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
-		let stream = match self
+		let script = self
 			.scripts
 			.get_mut()
 			.pop_front()
-			.expect("one scripted turn")
-		{
+			.expect("one scripted turn");
+		if let Some(started) = self.first_started.take() {
+			started.send(()).expect("first inference observer");
+		}
+		let stream = match script {
 			Script::Events(events) => streaming(events),
 			Script::Pending => ChatStream::ordinary(Box::pin(futures::stream::pending())),
 			Script::Fail(error) => return ready(Err(error)),
@@ -80,9 +84,17 @@ fn scripted_kernel(
 	temp: &tempfile::TempDir,
 	scripts: VecDeque<Script>,
 ) -> Kernel<ScriptedInference> {
+	scripted_kernel_with_start_signal(temp, scripts, None)
+}
+
+fn scripted_kernel_with_start_signal(
+	temp: &tempfile::TempDir,
+	scripts: VecDeque<Script>,
+	first_started: Option<flume::Sender<()>>,
+) -> Kernel<ScriptedInference> {
 	let spill = BlobStore::open(temp.path().join("blobs")).expect("blob store");
 	Kernel::new(
-		ScriptedInference { scripts: Mutex::new(scripts) },
+		ScriptedInference { scripts: Mutex::new(scripts), first_started },
 		Arc::new(Registry::new()),
 		DispatchPolicy::new(spill),
 		StaticPrompt(Str::new_static("system")),
@@ -234,7 +246,35 @@ async fn converse(
 	initial: &'static str,
 	after_turns: &'static [&'static str],
 ) -> Vec<Value> {
-	let kernel = scripted_kernel(temp, scripts);
+	converse_with_started_request(temp, scripts, initial, None, after_turns).await
+}
+
+/// Sends a running-turn request only after the scripted provider has entered
+/// its first request, so cancelling cannot skip the pending script.
+async fn converse_after_first_inference(
+	temp: &tempfile::TempDir,
+	scripts: VecDeque<Script>,
+	initial: &'static str,
+	while_running: &'static str,
+	after_turns: &'static [&'static str],
+) -> Vec<Value> {
+	converse_with_started_request(temp, scripts, initial, Some(while_running), after_turns).await
+}
+
+async fn converse_with_started_request(
+	temp: &tempfile::TempDir,
+	scripts: VecDeque<Script>,
+	initial: &'static str,
+	while_running: Option<&'static str>,
+	after_turns: &'static [&'static str],
+) -> Vec<Value> {
+	let (started_tx, started_rx) = if while_running.is_some() {
+		let (tx, rx) = flume::bounded(1);
+		(Some(tx), Some(rx))
+	} else {
+		(None, None)
+	};
+	let kernel = scripted_kernel_with_start_signal(temp, scripts, started_tx);
 	let home = session_home(temp, &kernel);
 	let session =
 		Session::create(temp.path().join("rpc.oms"), ComponentRegistry::standard()).expect("session");
@@ -248,6 +288,17 @@ async fn converse(
 			.write_all(initial.as_bytes())
 			.await
 			.expect("initial requests");
+		if let Some(request) = while_running {
+			started_rx
+				.expect("first inference receiver")
+				.recv_async()
+				.await
+				.expect("first inference");
+			client_write
+				.write_all(request.as_bytes())
+				.await
+				.expect("request during first inference");
+		}
 		let mut lines = BufReader::new(client_read).lines();
 		let mut frames = Vec::<Value>::new();
 		let mut pending = after_turns.iter();
@@ -362,11 +413,12 @@ async fn rpc_set_host_tools_validates_declared_effects() {
 #[tokio::test]
 async fn rpc_follow_up_runs_after_the_turn_yields_and_immediately_when_idle() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let frames = converse(
+	let frames = converse_after_first_inference(
 		&temp,
 		VecDeque::from([Script::Pending, completed_script("second"), completed_script("third")]),
-		"{\"id\":\"prompt\",\"type\":\"prompt\",\"message\":\"wait\"}\n{\"id\":\"queue\",\"type\":\"\
-		 follow_up\",\"message\":\"later\"}\n{\"id\":\"abort\",\"type\":\"abort\"}\n",
+		"{\"id\":\"prompt\",\"type\":\"prompt\",\"message\":\"wait\"}\n",
+		"{\"id\":\"queue\",\"type\":\"follow_up\",\"message\":\"later\"}\n{\"id\":\"abort\",\"type\"\
+		 :\"abort\"}\n",
 		&[
 			"",
 			"{\"id\":\"idle\",\"type\":\"follow_up\",\"message\":\"now\"}\n",
@@ -418,11 +470,11 @@ async fn rpc_follow_up_runs_after_the_turn_yields_and_immediately_when_idle() {
 #[tokio::test]
 async fn rpc_abort_and_prompt_interrupts_then_starts_the_new_turn() {
 	let temp = tempfile::tempdir().expect("tempdir");
-	let frames = converse(
+	let frames = converse_after_first_inference(
 		&temp,
 		VecDeque::from([Script::Pending, completed_script("replacement")]),
-		"{\"id\":\"prompt\",\"type\":\"prompt\",\"message\":\"wait\"}\n{\"id\":\"swap\",\"type\":\"\
-		 abort_and_prompt\",\"message\":\"instead\"}\n",
+		"{\"id\":\"prompt\",\"type\":\"prompt\",\"message\":\"wait\"}\n",
+		"{\"id\":\"swap\",\"type\":\"abort_and_prompt\",\"message\":\"instead\"}\n",
 		&["", "{\"id\":\"quit\",\"type\":\"quit\"}\n"],
 	)
 	.await;
@@ -785,7 +837,7 @@ async fn environment_rpc(
 		Session::create_with_blob_store(&journal, ComponentRegistry::standard(), spill.clone())
 			.expect("session");
 	let kernel = Kernel::new(
-		ScriptedInference { scripts: Mutex::new(VecDeque::new()) },
+		ScriptedInference { scripts: Mutex::new(VecDeque::new()), first_started: None },
 		environment.registry(),
 		DispatchPolicy::new(spill),
 		StaticPrompt(Str::new_static("system")),
