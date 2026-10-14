@@ -377,3 +377,6 @@ clean:
 # Reproduce the CI "format" + "rust" jobs locally before pushing (skips macOS/Linux-only Python-toolchain verification steps).
 [group('housekeeping')]
 ci: fmt-check-rust clippy test e2e
+
+remote-plain-test pkg:
+    NEXTEST_HIDE_PROGRESS_BAR=1 cargo nextest run -p {{ pkg }} --locked --no-fail-fast --status-level all --final-status-level all 2>&1 | cat
